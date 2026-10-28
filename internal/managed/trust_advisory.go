@@ -50,6 +50,16 @@ const TrustAdvisoryMarker = "managed_trust_ancestor_advisory"
 // a check in flight. When nil the advisory goes to the standard logger.
 var ReportTrustAdvisory func(path, label, reason string)
 
+// TrustDriftAdvisoryMarker prefixes every drift-tolerant trust advisory: a
+// permission verdict on a path the caller asked about (not just an ancestor)
+// that a *Tolerant validator accepted and continued past.
+const TrustDriftAdvisoryMarker = "managed_trust_drift_advisory"
+
+// ReportTrustDrift is the ReportTrustAdvisory counterpart for drift advisories.
+// Same contract: nil by default, set once during process startup before any
+// managed trust check runs. When nil the advisory goes to the standard logger.
+var ReportTrustDrift func(path, label, reason string)
+
 // PlatformInstallerOwnedRoots returns the directories whose permissions belong
 // to the Cisco Secure Client installer (AVC) rather than to DefenseClaw. AVC
 // creates them, shares them with other Cisco software, and re-ACLs them on its
@@ -210,6 +220,30 @@ func reportTrustAdvisory(path, label, reason string) {
 	log.Printf(
 		"%s: %s ancestor %s is not provably trusted, continuing (permissions are owned by the platform installer): %s",
 		TrustAdvisoryMarker, label, path, reason,
+	)
+}
+
+// EmitTrustDriftAdvisory reports a permission drift that a caller outside this
+// package found and accepted, through the same hook and default-log dedupe the
+// *Tolerant validators use. The gateway's CMID broker client calls it for
+// auth key owner and DACL drift it accepts without repairing.
+func EmitTrustDriftAdvisory(path, label, reason string) {
+	reportTrustDrift(path, label, reason)
+}
+
+func reportTrustDrift(path, label, reason string) {
+	if hook := ReportTrustDrift; hook != nil {
+		hook(path, label, reason)
+		return
+	}
+	// The dedupe key carries the marker so a drift advisory and an ancestor
+	// advisory about the same tuple are both emitted once.
+	if !advisoryLogDedupe.shouldEmit(path, label, TrustDriftAdvisoryMarker+"\x00"+reason) {
+		return
+	}
+	log.Printf(
+		"%s: %s %s does not match its expected permissions, continuing: %s",
+		TrustDriftAdvisoryMarker, label, path, reason,
 	)
 }
 

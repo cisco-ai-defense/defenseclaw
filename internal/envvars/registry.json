@@ -1402,8 +1402,8 @@
     {
       "name": "DEFENSECLAW_MANAGED_TRUST_STRICT_ANCESTORS",
       "category": "security_opt_out",
-      "purpose": "Restore fatal owner/DACL/permission verdicts for the directories ABOVE the managed roots. Unset (the default since AIFW-34262) those ancestor verdicts are advisory: an untrusted principal on a shared parent such as C:\\ProgramData\\Cisco\\Cisco Secure Client or /opt/cisco/secureclient logs a managed_trust_ancestor_advisory warning and the load, install, or rollback continues, because those directories are ACLed by the Cisco Secure Client installer (AVC), not by DefenseClaw. The advisory applies only inside those Cisco-owned roots: an ancestor anywhere else keeps its verdicts fatal. The managed paths themselves keep every verdict fatal either way.",
-      "default": "unset (ancestor verdicts are advisory; managed paths themselves stay strict)",
+      "purpose": "Restore fatal owner/DACL/permission verdicts for the directories ABOVE the managed roots. Unset (the default since AIFW-34262) those ancestor verdicts are advisory: an untrusted principal on a shared parent such as C:\\ProgramData\\Cisco\\Cisco Secure Client or /opt/cisco/secureclient logs a managed_trust_ancestor_advisory warning and the load, install, or rollback continues, because those directories are ACLed by the Cisco Secure Client installer (AVC), not by DefenseClaw. The advisory applies only inside those Cisco-owned roots: an ancestor anywhere else keeps its verdicts fatal, except on the CMID broker object paths below. The managed paths themselves keep every verdict fatal either way, except the Windows CMID broker's own objects (its executable, its log directory, its auth key and the CMID library): unset, permission drift on those is repaired (the auth key) or accepted and logged as stage=acl-drift in cmid-broker.log and managed_trust_drift_advisory in the gateway log, and the broker keeps starting. Set, that drift is fatal again and the broker does not repair the key.",
+      "default": "unset (ancestor verdicts are advisory; CMID broker object drift is repaired or accepted; other managed paths stay strict)",
       "accepted_values": [
         "1",
         "true",
@@ -1433,6 +1433,14 @@
         {
           "location": "internal/gateway/connector/hook_api_token_windows.go",
           "description": "the same hook API token chain walk on Windows, scoped to ancestors under the Cisco tree in ProgramData/Program Files"
+        },
+        {
+          "location": "internal/managed/trust_windows.go",
+          "description": "ValidateTrustedFilePathTolerant, ValidateTrustedFileStructureTolerant and ValidateTrustedRuntimeDirTolerant downgrade every permission verdict, the named path included, to a managed_trust_drift_advisory when unset; set, they fail exactly like the strict validators. Structural failures stay fatal either way"
+        },
+        {
+          "location": "internal/managed/cmidbroker/key_windows.go",
+          "description": "LoadAuthKey repairs (broker) or accepts (gateway) owner/DACL drift on the broker auth key when unset; set, any drift is fatal, no repair is attempted, and the key path walk uses the strict validator"
         }
       ],
       "since": "0.8.6",

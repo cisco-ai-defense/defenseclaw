@@ -19,9 +19,57 @@ import (
 	"golang.org/x/sys/windows"
 )
 
-func LoadAuthKey(path, gatewayServiceName string) ([AuthKeyBytes]byte, error) {
+const authKeyObject = "broker authentication key"
+
+// Key drift actions reported through KeyDriftPolicy.Report.
+const (
+	KeyDriftRepaired = "repaired"
+	KeyDriftAccepted = "accepted"
+)
+
+// KeyDriftReport describes one permission drift LoadAuthKey found on the key
+// and what it did about it. RepairError is set when a repair was attempted and
+// failed; the load continued anyway.
+type KeyDriftReport struct {
+	Action      string
+	Object      string
+	Path        string
+	Reason      string
+	RepairError string
+}
+
+// KeyDriftPolicy decides what LoadAuthKey does when the key's owner or DACL no
+// longer matches the descriptor the installer stamped. Only the broker sets
+// Repair: it runs as LocalSystem and starts before the gateway, which runs
+// with a write-restricted token and must never re-ACL the key. Report is
+// required.
+type KeyDriftPolicy struct {
+	Repair bool
+	Report func(KeyDriftReport)
+}
+
+// canonicalAuthKeySDDL is the descriptor the installer stamps on the key
+// (Set-DefenseClawCMIDBrokerAuthKey in DefenseClawEnterprise.psm1). Keep the
+// two in step.
+const canonicalAuthKeySDDL = "O:BAG:BAD:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;FR;;;%s)"
+
+// LoadAuthKey reads the 32-byte broker authentication key.
+//
+// Structural checks are fatal: path shape, reparse points and symlinks
+// anywhere in the chain, file type, hard links, sparse files, length, and any
+// failure to open, read or inspect the key. Permission drift on the key or its
+// parent folders is not: the broker repairs the key's descriptor when policy
+// allows it, and otherwise the drift is reported and the key is still
+// returned. The pipe server's caller check (the gateway service SID in the
+// client token) stays the trust boundary, so a key readable by an extra
+// principal does not let that principal get a token. Pin
+// managed.TrustStrictAncestorsEnv to make every permission drift fatal again.
+func LoadAuthKey(path, gatewayServiceName string, policy KeyDriftPolicy) ([AuthKeyBytes]byte, error) {
 	var key [AuthKeyBytes]byte
-	if err := validateLocalAbsolutePath(path, "broker authentication key"); err != nil {
+	if policy.Report == nil {
+		return key, errors.New("broker authentication key drift reporter is required")
+	}
+	if err := validateLocalAbsolutePath(path, authKeyObject); err != nil {
 		return key, err
 	}
 	if err := ValidateIdentityBinding(
@@ -31,6 +79,7 @@ func LoadAuthKey(path, gatewayServiceName string) ([AuthKeyBytes]byte, error) {
 	); err != nil {
 		return key, err
 	}
+	strict := managed.TrustStrictAncestors()
 
 	directories, err := pinDirectoryChain(filepath.Dir(path))
 	if err != nil {
@@ -39,10 +88,24 @@ func LoadAuthKey(path, gatewayServiceName string) ([AuthKeyBytes]byte, error) {
 	defer closeHandles(directories)
 
 	// Validate the path while every ancestor is held without delete sharing.
-	// Read-only access for the exact gateway SID is permitted; write-like access
-	// remains limited to SYSTEM/Administrators by the managed trust validator.
-	if err := managed.ValidateTrustedFilePath(path, "broker authentication key"); err != nil {
+	// The key itself gets structural checks only here; its owner and DACL are
+	// judged below, on the open handle, by the stricter key rule.
+	if strict {
+		if err := managed.ValidateTrustedFilePath(path, authKeyObject); err != nil {
+			return key, fmt.Errorf("broker authentication key trust validation failed: %w", err)
+		}
+	} else if err := managed.ValidateTrustedFileStructureTolerant(path, authKeyObject); err != nil {
 		return key, fmt.Errorf("broker authentication key trust validation failed: %w", err)
+	}
+
+	gatewaySID, err := managed.WindowsServiceAccountSID(`NT SERVICE\` + gatewayServiceName)
+	if err != nil || gatewaySID == nil {
+		if strict {
+			return key, fmt.Errorf("gateway service identity is unavailable")
+		}
+		// Carried into the key's single drift report below; repair is
+		// skipped because the canonical descriptor names this SID.
+		gatewaySID = nil
 	}
 
 	extended, err := winpath.Extended(path)
@@ -72,13 +135,20 @@ func LoadAuthKey(path, gatewayServiceName string) ([AuthKeyBytes]byte, error) {
 	}
 	defer func() { _ = file.Close() }()
 
-	gatewaySID, err := managed.WindowsServiceAccountSID(`NT SERVICE\` + gatewayServiceName)
-	if err != nil {
-		return key, fmt.Errorf("gateway service identity is unavailable")
-	}
-	if err := validateKeyHandle(handle, gatewaySID); err != nil {
+	if err := validateKeyStructure(handle); err != nil {
 		return key, err
 	}
+	drift, err := keyDriftWithIdentity(handle, gatewaySID)
+	if err != nil {
+		return key, err
+	}
+	if len(drift) > 0 {
+		if strict {
+			return key, fmt.Errorf("broker authentication key %s", drift[0])
+		}
+		drift = settleKeyDrift(handle, pathPtr, path, gatewaySID, drift, policy)
+	}
+
 	if _, err := io.ReadFull(file, key[:]); err != nil {
 		zeroKey(&key)
 		return key, fmt.Errorf("broker authentication key has an invalid length")
@@ -88,11 +158,168 @@ func LoadAuthKey(path, gatewayServiceName string) ([AuthKeyBytes]byte, error) {
 		zeroKey(&key)
 		return key, fmt.Errorf("broker authentication key has an invalid length")
 	}
-	if err := validateKeyHandle(handle, gatewaySID); err != nil {
+	if err := validateKeyStructure(handle); err != nil {
 		zeroKey(&key)
 		return key, err
 	}
+	// Re-check after the read. Drift that appeared meanwhile is reported, not
+	// repaired a second time.
+	after, err := keyDriftWithIdentity(handle, gatewaySID)
+	if err != nil {
+		zeroKey(&key)
+		return key, err
+	}
+	if len(after) > 0 {
+		if strict {
+			zeroKey(&key)
+			return key, fmt.Errorf("broker authentication key %s", after[0])
+		}
+		if joined := strings.Join(after, "; "); joined != strings.Join(drift, "; ") {
+			policy.Report(KeyDriftReport{Action: KeyDriftAccepted, Object: authKeyObject, Path: path, Reason: joined})
+		}
+	}
 	return key, nil
+}
+
+// keyDriftWithIdentity is keyPermissionDrift plus a leading note when the
+// gateway SID could not be resolved, so the key gets one report per load.
+func keyDriftWithIdentity(handle windows.Handle, gatewaySID *windows.SID) ([]string, error) {
+	drift, err := keyPermissionDrift(handle, gatewaySID)
+	if err != nil || gatewaySID != nil {
+		return drift, err
+	}
+	return append([]string{"gateway service SID unavailable"}, drift...), nil
+}
+
+// settleKeyDrift repairs or accepts the drift found on the open key and
+// returns whatever drift remains. It never fails the load: every error here
+// becomes an accepted report.
+func settleKeyDrift(
+	handle windows.Handle,
+	pathPtr *uint16,
+	path string,
+	gatewaySID *windows.SID,
+	drift []string,
+	policy KeyDriftPolicy,
+) []string {
+	reason := strings.Join(drift, "; ")
+	if !policy.Repair || gatewaySID == nil {
+		policy.Report(KeyDriftReport{Action: KeyDriftAccepted, Object: authKeyObject, Path: path, Reason: reason})
+		return drift
+	}
+	if err := repairKeyDescriptor(handle, pathPtr, gatewaySID); err != nil {
+		policy.Report(KeyDriftReport{
+			Action:      KeyDriftAccepted,
+			Object:      authKeyObject,
+			Path:        path,
+			Reason:      reason,
+			RepairError: err.Error(),
+		})
+		return drift
+	}
+	remaining, err := keyPermissionDrift(handle, gatewaySID)
+	if err != nil {
+		policy.Report(KeyDriftReport{
+			Action:      KeyDriftAccepted,
+			Object:      authKeyObject,
+			Path:        path,
+			Reason:      reason,
+			RepairError: "re-inspect repaired key: " + err.Error(),
+		})
+		return drift
+	}
+	if len(remaining) > 0 {
+		policy.Report(KeyDriftReport{
+			Action:      KeyDriftAccepted,
+			Object:      authKeyObject,
+			Path:        path,
+			Reason:      strings.Join(remaining, "; "),
+			RepairError: "descriptor still drifted after repair",
+		})
+		return remaining
+	}
+	policy.Report(KeyDriftReport{Action: KeyDriftRepaired, Object: authKeyObject, Path: path, Reason: reason})
+	return nil
+}
+
+// openKeyForRepair opens the key a second time with the rights needed to
+// re-stamp its descriptor. A variable so tests can simulate a denied open.
+// No data access is requested, so the read handle's share mode does not
+// conflict, and FILE_FLAG_OPEN_REPARSE_POINT keeps a swapped-in reparse point
+// from being followed.
+var openKeyForRepair = func(pathPtr *uint16) (windows.Handle, error) {
+	return windows.CreateFile(
+		pathPtr,
+		windows.READ_CONTROL|windows.WRITE_DAC|windows.WRITE_OWNER|windows.FILE_READ_ATTRIBUTES,
+		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE,
+		nil,
+		windows.OPEN_EXISTING,
+		windows.FILE_ATTRIBUTE_NORMAL|windows.FILE_FLAG_OPEN_REPARSE_POINT,
+		0,
+	)
+}
+
+// repairKeyDescriptor stamps the installer's canonical descriptor on the key
+// through a second handle that is proven to be the same file as the one being
+// read, so a path swapped between the two opens is never stamped.
+func repairKeyDescriptor(readHandle windows.Handle, pathPtr *uint16, gatewaySID *windows.SID) error {
+	handle, err := openKeyForRepair(pathPtr)
+	if err != nil {
+		return fmt.Errorf("open key for repair: %w", err)
+	}
+	defer func() { _ = windows.CloseHandle(handle) }()
+	if err := validateKeyStructure(handle); err != nil {
+		return err
+	}
+	same, err := sameFile(readHandle, handle)
+	if err != nil {
+		return fmt.Errorf("compare key handles: %w", err)
+	}
+	if !same {
+		return errors.New("key path changed between open and repair")
+	}
+	descriptor, err := windows.SecurityDescriptorFromString(fmt.Sprintf(canonicalAuthKeySDDL, gatewaySID.String()))
+	if err != nil {
+		return fmt.Errorf("build canonical key descriptor: %w", err)
+	}
+	owner, _, err := descriptor.Owner()
+	if err != nil {
+		return fmt.Errorf("read canonical key owner: %w", err)
+	}
+	group, _, err := descriptor.Group()
+	if err != nil {
+		return fmt.Errorf("read canonical key group: %w", err)
+	}
+	dacl, _, err := descriptor.DACL()
+	if err != nil {
+		return fmt.Errorf("read canonical key DACL: %w", err)
+	}
+	if err := windows.SetSecurityInfo(
+		handle,
+		windows.SE_FILE_OBJECT,
+		windows.OWNER_SECURITY_INFORMATION|windows.GROUP_SECURITY_INFORMATION|
+			windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION,
+		owner,
+		group,
+		dacl,
+		nil,
+	); err != nil {
+		return fmt.Errorf("apply canonical key descriptor: %w", err)
+	}
+	return nil
+}
+
+func sameFile(left, right windows.Handle) (bool, error) {
+	var a, b windows.ByHandleFileInformation
+	if err := windows.GetFileInformationByHandle(left, &a); err != nil {
+		return false, err
+	}
+	if err := windows.GetFileInformationByHandle(right, &b); err != nil {
+		return false, err
+	}
+	return a.VolumeSerialNumber == b.VolumeSerialNumber &&
+		a.FileIndexHigh == b.FileIndexHigh &&
+		a.FileIndexLow == b.FileIndexLow, nil
 }
 
 func validateLocalAbsolutePath(path, label string) error {
@@ -165,7 +392,9 @@ func closeHandles(handles []windows.Handle) {
 	}
 }
 
-func validateKeyHandle(handle windows.Handle, gatewaySID *windows.SID) error {
+// validateKeyStructure holds the key checks that guard against redirection
+// and substitution rather than permissions. Every failure is fatal.
+func validateKeyStructure(handle windows.Handle) error {
 	var details windows.ByHandleFileInformation
 	if err := windows.GetFileInformationByHandle(handle, &details); err != nil {
 		return fmt.Errorf("broker authentication key metadata is unavailable")
@@ -179,85 +408,139 @@ func validateKeyHandle(handle windows.Handle, gatewaySID *windows.SID) error {
 	if size != AuthKeyBytes {
 		return fmt.Errorf("broker authentication key has an invalid length")
 	}
+	return nil
+}
 
+// keyPermissionDrift compares the key's owner and DACL with the installer's
+// canonical descriptor and returns every mismatch, not just the first. err is
+// reserved for a descriptor that cannot be read at all, which is fatal: drift
+// cannot be told apart from failure then. A nil gatewaySID skips the gateway
+// ACE rule; a read-only NT SERVICE ACE is then presumed to be the gateway's
+// and not reported.
+func keyPermissionDrift(handle windows.Handle, gatewaySID *windows.SID) ([]string, error) {
 	descriptor, err := windows.GetSecurityInfo(
 		handle,
 		windows.SE_FILE_OBJECT,
 		windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION,
 	)
 	if err != nil || descriptor == nil {
-		return fmt.Errorf("broker authentication key security is unavailable")
+		return nil, fmt.Errorf("broker authentication key security is unavailable")
 	}
-	owner, _, err := descriptor.Owner()
-	if err != nil || owner == nil ||
-		!owner.IsWellKnown(windows.WinLocalSystemSid) && !owner.IsWellKnown(windows.WinBuiltinAdministratorsSid) {
-		return fmt.Errorf("broker authentication key owner is not trusted")
-	}
-	control, _, err := descriptor.Control()
-	if err != nil || control&windows.SE_DACL_PROTECTED == 0 {
-		return fmt.Errorf("broker authentication key DACL is not protected")
-	}
-	dacl, _, err := descriptor.DACL()
-	if err != nil || dacl == nil {
-		return fmt.Errorf("broker authentication key DACL is unavailable")
-	}
-	if err := validateKeyACL(dacl, gatewaySID); err != nil {
-		return err
-	}
-	return nil
+	return keyDescriptorDrift(descriptor, gatewaySID)
 }
 
-func validateKeyACL(dacl *windows.ACL, gatewaySID *windows.SID) error {
-	if dacl == nil || dacl.AceCount != 3 {
-		return fmt.Errorf("broker authentication key DACL must contain exactly three ACEs")
+func keyDescriptorDrift(descriptor *windows.SECURITY_DESCRIPTOR, gatewaySID *windows.SID) ([]string, error) {
+	var drift []string
+	owner, _, err := descriptor.Owner()
+	if err != nil {
+		return nil, fmt.Errorf("broker authentication key owner is unavailable")
 	}
+	if owner == nil ||
+		!owner.IsWellKnown(windows.WinLocalSystemSid) && !owner.IsWellKnown(windows.WinBuiltinAdministratorsSid) {
+		drift = append(drift, fmt.Sprintf("owner %s is not trusted", sidText(owner)))
+	}
+	control, _, err := descriptor.Control()
+	if err != nil {
+		return nil, fmt.Errorf("broker authentication key security control is unavailable")
+	}
+	if control&windows.SE_DACL_PROTECTED == 0 {
+		drift = append(drift, "DACL is not protected")
+	}
+	dacl, _, err := descriptor.DACL()
+	if err != nil {
+		return nil, fmt.Errorf("broker authentication key DACL is unavailable")
+	}
+	if dacl == nil {
+		return append(drift, "DACL is null"), nil
+	}
+	aclDrift, err := keyACLDrift(dacl, gatewaySID)
+	if err != nil {
+		return nil, err
+	}
+	return append(drift, aclDrift...), nil
+}
+
+func keyACLDrift(dacl *windows.ACL, gatewaySID *windows.SID) ([]string, error) {
+	var drift []string
 	seenSystem, seenAdmins, seenGateway := false, false, false
 	for index := uint16(0); index < dacl.AceCount; index++ {
 		var ace *windows.ACCESS_ALLOWED_ACE
 		if err := windows.GetAce(dacl, uint32(index), &ace); err != nil || ace == nil {
-			return fmt.Errorf("broker authentication key DACL is malformed")
+			return nil, fmt.Errorf("broker authentication key DACL is malformed")
 		}
 		if ace.Header.AceType != windows.ACCESS_ALLOWED_ACE_TYPE ||
 			ace.Header.AceFlags&windows.INHERIT_ONLY_ACE != 0 {
-			return fmt.Errorf("broker authentication key DACL contains an unsupported ACE")
+			drift = append(drift, fmt.Sprintf("ACE %d has unsupported type 0x%x or flags 0x%x",
+				index, ace.Header.AceType, ace.Header.AceFlags))
+			continue
 		}
 		sid := (*windows.SID)(unsafe.Pointer(&ace.SidStart))
 		switch {
 		case sid.IsWellKnown(windows.WinLocalSystemSid):
 			if seenSystem {
-				return fmt.Errorf("broker authentication key DACL contains a duplicate SYSTEM ACE")
+				drift = append(drift, "duplicate SYSTEM ACE")
 			}
 			seenSystem = true
 			if !fullControlMask(ace.Mask) {
-				return fmt.Errorf("broker authentication key SYSTEM access is incomplete")
+				drift = append(drift, "SYSTEM access is incomplete")
 			}
 		case sid.IsWellKnown(windows.WinBuiltinAdministratorsSid):
 			if seenAdmins {
-				return fmt.Errorf("broker authentication key DACL contains a duplicate Administrators ACE")
+				drift = append(drift, "duplicate Administrators ACE")
 			}
 			seenAdmins = true
 			if !fullControlMask(ace.Mask) {
-				return fmt.Errorf("broker authentication key Administrators access is incomplete")
+				drift = append(drift, "Administrators access is incomplete")
 			}
-		case gatewaySID != nil && sid.Equals(gatewaySID):
+		case gatewaySID != nil && sid.Equals(gatewaySID),
+			gatewaySID == nil && ntServiceSID(sid) && readOnlyMask(ace.Mask) && !seenGateway:
 			if seenGateway {
-				return fmt.Errorf("broker authentication key DACL contains a duplicate gateway ACE")
+				drift = append(drift, "duplicate gateway ACE")
 			}
 			seenGateway = true
-			const fileGenericRead windows.ACCESS_MASK = 0x00120089
-			if ace.Mask&(windows.GENERIC_WRITE|windows.GENERIC_ALL|windows.DELETE|windows.WRITE_DAC|windows.WRITE_OWNER|
-				windows.FILE_WRITE_DATA|windows.FILE_APPEND_DATA|windows.FILE_WRITE_EA|windows.FILE_WRITE_ATTRIBUTES) != 0 ||
-				ace.Mask&windows.GENERIC_READ == 0 && ace.Mask&fileGenericRead != fileGenericRead {
-				return fmt.Errorf("broker authentication key gateway access is not read-only")
+			if !readOnlyMask(ace.Mask) {
+				drift = append(drift, fmt.Sprintf("gateway access mask 0x%x is not read-only", uint32(ace.Mask)))
 			}
 		default:
-			return fmt.Errorf("broker authentication key DACL grants an unexpected principal")
+			drift = append(drift, fmt.Sprintf("unexpected principal %s with access mask 0x%x",
+				sidText(sid), uint32(ace.Mask)))
 		}
 	}
-	if !seenSystem || !seenAdmins || !seenGateway {
-		return fmt.Errorf("broker authentication key DACL is incomplete")
+	if !seenSystem {
+		drift = append(drift, "SYSTEM ACE is missing")
 	}
-	return nil
+	if !seenAdmins {
+		drift = append(drift, "Administrators ACE is missing")
+	}
+	if !seenGateway && gatewaySID != nil {
+		drift = append(drift, "gateway ACE is missing")
+	}
+	return drift, nil
+}
+
+// readOnlyMask reports whether mask grants read and nothing write-like.
+func readOnlyMask(mask windows.ACCESS_MASK) bool {
+	const fileGenericRead windows.ACCESS_MASK = 0x00120089
+	if mask&(windows.GENERIC_WRITE|windows.GENERIC_ALL|windows.DELETE|windows.WRITE_DAC|windows.WRITE_OWNER|
+		windows.FILE_WRITE_DATA|windows.FILE_APPEND_DATA|windows.FILE_WRITE_EA|windows.FILE_WRITE_ATTRIBUTES) != 0 {
+		return false
+	}
+	return mask&windows.GENERIC_READ != 0 || mask&fileGenericRead == fileGenericRead
+}
+
+// ntServiceSID reports whether sid is under NT SERVICE (S-1-5-80-...).
+func ntServiceSID(sid *windows.SID) bool {
+	if sid == nil || !sid.IsValid() || sid.SubAuthorityCount() < 1 {
+		return false
+	}
+	return sid.IdentifierAuthority().Value == [6]byte{0, 0, 0, 0, 0, 5} && sid.SubAuthority(0) == 80
+}
+
+func sidText(sid *windows.SID) string {
+	if sid == nil {
+		return "<nil>"
+	}
+	return sid.String()
 }
 
 func fullControlMask(mask windows.ACCESS_MASK) bool {
