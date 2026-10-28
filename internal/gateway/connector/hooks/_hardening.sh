@@ -161,6 +161,36 @@ _DC_TRANSPORT_STATUS=""
 _DC_CONFIG_OUTAGE_MODE=""
 _DC_OUTAGE_WARNING_THIS_CALL=""
 
+# defenseclaw_stat_into GNU_FORMAT BSD_FORMAT PATH...: one stat for every
+# PATH, output in _DC_STAT_OUT. GNU stat takes -c, BSD stat (macOS) -f. The
+# old "stat -c ... || stat -f ..." spent a failed launch on every check on
+# macOS, so one call there ran twice the programs Linux runs (GAP-1755). The
+# first try follows OSTYPE and the spelling that answered is kept for this
+# process (GNU coreutils on macOS keeps working, at one extra launch once).
+# A failed try leaves no output behind. The install check each hook carries
+# before it sources this file keeps its own spelling (it runs only while a
+# lock exists, and it must stay the same text in every hook).
+defenseclaw_stat_into() {
+  local gnu="$1" bsd="$2"
+  shift 2
+  _DC_STAT_OUT=""
+  if [ -z "${_DC_STAT_DIALECT:-}" ]; then
+    case "${OSTYPE:-}" in
+      darwin*|*bsd*) _DC_STAT_DIALECT=bsd ;;
+      *) _DC_STAT_DIALECT=gnu ;;
+    esac
+  fi
+  if [ "$_DC_STAT_DIALECT" = bsd ]; then
+    _DC_STAT_OUT="$(stat -f "$bsd" "$@" 2>/dev/null)" && return 0
+    _DC_STAT_OUT="$(stat -c "$gnu" "$@" 2>/dev/null)" || { _DC_STAT_OUT=""; return 1; }
+    _DC_STAT_DIALECT=gnu
+  else
+    _DC_STAT_OUT="$(stat -c "$gnu" "$@" 2>/dev/null)" && return 0
+    _DC_STAT_OUT="$(stat -f "$bsd" "$@" 2>/dev/null)" || { _DC_STAT_OUT=""; return 1; }
+    _DC_STAT_DIALECT=bsd
+  fi
+}
+
 # Resource limits — bound the hook so a stuck regex / hostile input
 # can't wedge the agent. Plan F16 ask: CPU 5s, virt mem 512MiB, fds 32.
 # Use ulimit -S (soft) so the hook doesn't try to exceed kernel maxima
@@ -189,6 +219,8 @@ defenseclaw_harden_env() {
   # same name, which would copy the value into the environment of every child
   # process (curl, jq, the cold-started gateway), so drop inherited ones first.
   unset -v API_TOKEN PAYLOAD CONTENT TOOL_INPUT TOOL_OUTPUT INSPECT_BODY RESPONSE RESULT OUTPUT
+  # The stat spelling is learned per process, never taken from the caller.
+  unset -v _DC_STAT_OUT _DC_STAT_DIALECT
 
   # Only a rendered managed hook may select the managed socket transport.
   # Per-user scripts clear the managed marker before sourcing this helper;
@@ -1370,12 +1402,14 @@ _defenseclaw_prepare_oversized_stdin_impl() {
   bin="$root/.local/bin/defenseclaw-hook-post"
   for path in "$root" "$root/.local" "$root/.local/bin"; do
     [ -d "$path" ] && [ -O "$path" ] && [ ! -L "$path" ] || return 1
-    mode="$(stat -c %a "$path" 2>/dev/null || stat -f %Lp "$path" 2>/dev/null)" || return 1
+    defenseclaw_stat_into %a %Lp "$path" || return 1
+    mode="$_DC_STAT_OUT"
     case "$mode" in ''|*[!0-7]*) return 1 ;; esac
     [ $((8#$mode & 8#022)) -eq 0 ] || return 1
   done
   [ -f "$bin" ] && [ -x "$bin" ] && [ -O "$bin" ] && [ ! -L "$bin" ] || return 1
-  mode="$(stat -c %a "$bin" 2>/dev/null || stat -f %Lp "$bin" 2>/dev/null)" || return 1
+  defenseclaw_stat_into %a %Lp "$bin" || return 1
+  mode="$_DC_STAT_OUT"
   case "$mode" in ''|*[!0-7]*) return 1 ;; esac
   [ $((8#$mode & 8#022)) -eq 0 ] || return 1
   PAYLOAD="$(printf '%s' "$PAYLOAD" | (
@@ -1774,8 +1808,8 @@ defenseclaw_gateway_binary() {
       post=""
     fi
   fi
-  modes="$(stat -c %a "${checked[@]}" 2>/dev/null)" ||
-    modes="$(stat -f %Lp "${checked[@]}" 2>/dev/null)" || return 1
+  defenseclaw_stat_into %a %Lp "${checked[@]}" || return 1
+  modes="$_DC_STAT_OUT"
   while IFS= read -r mode; do
     case "$mode" in ""|*[!0-7]*) return 1 ;; esac
     [ $((8#${mode} & 8#022)) -eq 0 ] || return 1
@@ -3491,7 +3525,8 @@ _dc_gateway_post_once() {
       [ -f "$_dc_post_bin" ] && [ -x "$_dc_post_bin" ] && [ -O "$_dc_post_bin" ] && [ ! -L "$_dc_post_bin" ] || return 1
       # The folder check already proved this helper's mode in its stat.
       if [ "${_DC_HOOK_POST_MODE_OK:-}" != "$_dc_post_bin" ]; then
-        _dc_secure_mode="$(stat -c %a "$_dc_post_bin" 2>/dev/null || stat -f %Lp "$_dc_post_bin" 2>/dev/null)" || return 1
+        defenseclaw_stat_into %a %Lp "$_dc_post_bin" || return 1
+        _dc_secure_mode="$_DC_STAT_OUT"
         case "$_dc_secure_mode" in ""|*[!0-7]*) return 1 ;; esac
         [ $((8#${_dc_secure_mode} & 8#022)) -eq 0 ] || return 1
       fi
@@ -3512,7 +3547,8 @@ _dc_gateway_post_once() {
             _dc_secure_path="${_dc_recovery_home%/}/installer"
             while [ "$_dc_secure_path" != / ]; do
               [ -d "$_dc_secure_path" ] && [ ! -L "$_dc_secure_path" ] || return 1
-              _dc_secure_meta="$(stat -c '%a:%u' "$_dc_secure_path" 2>/dev/null || stat -f '%Lp:%u' "$_dc_secure_path" 2>/dev/null)" || return 1
+              defenseclaw_stat_into '%a:%u' '%Lp:%u' "$_dc_secure_path" || return 1
+              _dc_secure_meta="$_DC_STAT_OUT"
               _dc_secure_mode="${_dc_secure_meta%%:*}"
               _dc_secure_uid="${_dc_secure_meta#*:}"
               case "$_dc_secure_mode" in ""|*[!0-7]*) return 1 ;; esac
@@ -3529,7 +3565,8 @@ _dc_gateway_post_once() {
               [ -n "$_dc_secure_path" ] || _dc_secure_path=/
             done
             [ -f "$_dc_post_bin" ] && [ -x "$_dc_post_bin" ] && [ -O "$_dc_post_bin" ] && [ ! -L "$_dc_post_bin" ] || return 1
-            _dc_secure_mode="$(stat -c %a "$_dc_post_bin" 2>/dev/null || stat -f %Lp "$_dc_post_bin" 2>/dev/null)" || return 1
+            defenseclaw_stat_into %a %Lp "$_dc_post_bin" || return 1
+            _dc_secure_mode="$_DC_STAT_OUT"
             [ $((8#${_dc_secure_mode} & 8#022)) -eq 0 ] || return 1
           fi
           ;;
