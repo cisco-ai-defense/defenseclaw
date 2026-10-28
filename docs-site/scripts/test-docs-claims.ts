@@ -1423,6 +1423,11 @@ describe('Known limits by lead decision (rel-1-0-4 P1 reconcile)', () => {
 // heading of the page; the row reads only that section and its subsections.
 type DocRow = { gap: string; page: string; section?: string; has?: string[]; lacks?: string[] };
 const r105Rows: DocRow[] = [
+  { gap: "GAP-0515", page: "connectors/hermes.mdx", has: ["On Windows, where Hermes has no guard, an administrator's `open` lets the call run during an outage: the user's `hook-failures.jsonl` gets a line with `fail_mode` `open` and `outcome` `fail_open`.", "through the [foreign-hook guard](/docs/enterprise/foreign-hook-guard) while `foreign_hooks` is `remove`"], lacks: ["(service not running, unusable answer, call too large to inspect)", "The administrator-owned hook is stricter"] },
+  { gap: "GAP-2350", page: "enterprise/troubleshooting.mdx", has: ["| `security_incomplete` | Linux, macOS, Windows |", "security_complete is false because of:"], lacks: ["| `security_incomplete` | Windows |"] },
+  { gap: "GAP-1696", page: "enterprise/troubleshooting.mdx", section: "`security_complete` is `false` on Windows", has: ["`security_incomplete` lists the reasons and names the actionable causes even next to `hook_process_fail_open`"], lacks: ["on 1.0.3 or a host without Claude Code or Codex"] },
+  { gap: "GAP-2351", page: "reference/configuration.mdx", section: "Per-connector files", has: ["warns `a generated script is not the one setup rendered`", "fails the `Hook runtime files` row (`changed since setup`)"], lacks: ["warns `stale generated script` when one no longer matches"] },
+  { gap: "GAP-2351", page: "reference/cli.mdx", has: ["warns `a generated script is not the one setup rendered (...)` instead, next to the `Hook runtime files` FAIL"] },
   { gap: "GAP-2347", page: "connectors/hermes.mdx", has: ["on a per-user install it is reported as a `guardrail-degraded` alert when the gateway starts again. A managed gateway raises no such alert"], lacks: ["`~/.defenseclaw/logs/hook-failures.jsonl` and reported as a `guardrail-degraded` alert"] },
   { gap: "GAP-0515", page: "enterprise/foreign-hook-guard.mdx", section: "Which connectors it covers", has: ["| Hermes | On Linux and macOS, unless `foreign_hooks: allow` |", "The Windows Hermes registration does not run the guard."] },
   { gap: "GAP-0515", page: "reference/fail-modes.mdx", has: ["the guard checks the session of Copilot calls on every OS and of Hermes calls on Linux and macOS with the gateway", "and to Hermes on Linux and macOS"], lacks: ["Amp and Hermes need the gateway's session record"] },
@@ -1810,6 +1815,37 @@ describe('capability matrix contributor sources exist (GAP-2333)', () => {
     }
     assert.ok(symbols >= 6, `only ${symbols} code names checked`);
     assert.deepEqual(missing, []);
+  });
+});
+
+// GAP-2350 / GAP-1696 class: the security_incomplete scope on every page
+// follows enterprisestatus Finish (named on Linux and macOS) and the Windows
+// reasons (named next to the agent residuals, GAP-1900).
+describe('security_incomplete scope matches the status code (GAP-2350, GAP-1696)', () => {
+  it('lists every OS and scopes no sentence to 1.0.3 or hosts without Claude Code or Codex', () => {
+    const result = source('internal/enterprisestatus/result.go');
+    assert.match(result, /if goos != "windows" \{\s*r\.nameIncompleteFields\(\)/, 'Finish no longer names incomplete fields on Linux and macOS: re-check the OS column');
+    assert.ok(result.includes('"security_complete is false because of: "'), 'the Linux/macOS message changed: re-check the sample');
+    const walk = (dir: string): string[] => readdirSync(dir, { withFileTypes: true }).flatMap((e) => (e.isDirectory() ? walk(join(dir, e.name)) : e.name.endsWith('.mdx') ? [join(dir, e.name)] : []));
+    const root = join(site, 'content/docs');
+    const stale: string[] = [];
+    for (const file of walk(root)) {
+      for (const line of readFileSync(file, 'utf8').split('\n')) {
+        if (!line.includes('security_incomplete')) continue;
+        if (/1\.0\.3 or a host without/.test(line) || /^\| `security_incomplete` \| Windows \|/.test(line)) stale.push(`${relative(root, file)}: ${line.slice(0, 160)}`);
+      }
+    }
+    assert.deepEqual(stale, []);
+  });
+});
+
+// GAP-2351 class: the doctor freshness wording on the pages is the wording
+// cmd_doctor.py prints, for both the older-build case and the hand edit.
+describe('doctor hook freshness wording matches cmd_doctor.py (GAP-2351)', () => {
+  it('names both doctor messages and the doctor still prints them', () => {
+    const doctor = source('cli/defenseclaw/commands/cmd_doctor.py');
+    for (const s of ['stale generated script (', 'a generated script is not the one setup rendered', "run 'defenseclaw doctor --fix' to render the scripts again"]) assert.ok(doctor.includes(s), `cmd_doctor.py no longer prints: ${s}`);
+    for (const name of ['reference/configuration.mdx', 'reference/cli.mdx', 'guardrail/index.mdx']) assert.ok(page(name).includes('a generated script is not the one setup rendered'), `${name} lacks the hand-edit wording`);
   });
 });
 

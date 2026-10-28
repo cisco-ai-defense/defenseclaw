@@ -678,7 +678,7 @@ Fixes for hooks that do not load and for blocking that is too little or too much
 
 **Cause.** A hook script was rendered by an older build, or bakes a different fail mode than `config.yaml`.
 
-**Fix.** Run the command the row names, for example `defenseclaw setup codex --yes --restart` or `defenseclaw-gateway restart`.
+**Fix.** Run the command the row names, for example `defenseclaw setup codex --yes --restart` or `defenseclaw-gateway restart`. A script edited by hand shows `a generated script is not the one setup rendered` and a `Hook runtime files` FAIL instead: run `defenseclaw doctor --fix`.
 
 **Check.** The freshness row clears.
 

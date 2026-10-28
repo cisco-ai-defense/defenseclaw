@@ -200,7 +200,7 @@ Config generation: 42
 | Hook runtime files | FAIL | A generated hook script was edited or replaced. `defenseclaw doctor --fix` re-renders it. |
 | Orphaned hook entries `[<connector>]` | FAIL or WARN | Entries remain for a connector that is no longer configured. A missing script or credential fails the check; an existing target warns. Run `defenseclaw setup remove CONNECTOR`. |
 | Native OTLP credentials | WARN | An agent can keep an old credential after an upgrade, rollback or token rotation. Restart that agent and its background server, then run doctor again. |
-| Claude Code hooks freshness, Codex hooks freshness | WARN | `stale generated script (...)`: a hook script is from an older build, or bakes a different fail mode. The line names the command that regenerates it. |
+| Claude Code hooks freshness, Codex hooks freshness | WARN | `stale generated script (...)`: a hook script is from an older build, or bakes a different fail mode. The line names the command that regenerates it. A script edited by hand or copied from another build warns `a generated script is not the one setup rendered (...)` instead, next to the `Hook runtime files` FAIL; `defenseclaw doctor --fix` renders it again. |
 
 Real lines (paths shortened). A healthy gateway:
 
