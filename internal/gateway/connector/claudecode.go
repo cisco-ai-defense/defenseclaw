@@ -2078,6 +2078,15 @@ func (c *ClaudeCodeConnector) patchClaudeCodeOtelEnv(opts SetupOpts) error {
 					currentString, isString := current.(string)
 					remove = present && isString && currentString == previousValue
 				}
+				// A per-user setup took these keys away; an earlier release run
+				// since (a rollback to 1.0.3 and its gateway start) wrote them
+				// back, and a roll forward kept them as the user's (GAP-2388).
+				// A value equal to the earlier release's render is that
+				// release's, not the user's; a different value stays.
+				if wasAbsent && present && !opts.ManagedEnterprise && !opts.SecureClientHookDelivery &&
+					claudeCodeEnvIsEarlierReleaseRender(key, current, opts) {
+					remove = true
+				}
 				if !remove {
 					continue
 				}
@@ -2233,6 +2242,41 @@ func claudeCodeOtelValueLooksManaged(key string, value interface{}, managed stri
 	default:
 		return false
 	}
+}
+
+// claudeCodeEnvIsEarlierReleaseRender reports whether value is exactly what a
+// 1.0.3 or older per-user setup wrote for key: the fail-mode carrier with the
+// saved mode, and the protocol, service name and resource attributes of its
+// native telemetry block. Endpoints and headers are not listed: a credential
+// on them is removed by the product-credential pass, and without one they are
+// the user's.
+func claudeCodeEnvIsEarlierReleaseRender(key string, value interface{}, opts SetupOpts) bool {
+	got, _ := value.(string)
+	if got == "" {
+		return false
+	}
+	if key == "DEFENSECLAW_FAIL_MODE" {
+		return got == claudeCodeEarlierReleaseFailMode(opts)
+	}
+	switch {
+	case key == "OTEL_SERVICE_NAME",
+		key == "OTEL_RESOURCE_ATTRIBUTES",
+		strings.HasPrefix(key, "OTEL_EXPORTER_OTLP_") && strings.HasSuffix(key, "_PROTOCOL"):
+		reference := claudeCodeNativeOtelReferenceEnv(opts)[key]
+		return (reference != "" && got == reference) || claudeCodeOtelValueLooksManaged(key, got, reference)
+	default:
+		return false
+	}
+}
+
+// claudeCodeEarlierReleaseFailMode is the DEFENSECLAW_FAIL_MODE value a
+// 1.0.3 or older per-user setup wrote into the Claude env for opts: the saved
+// hook fail mode, open when none is saved.
+func claudeCodeEarlierReleaseFailMode(opts SetupOpts) string {
+	if strings.TrimSpace(opts.HookFailMode) == "" {
+		return "open"
+	}
+	return normalizeHookFailMode(opts.HookFailMode)
 }
 
 // claudeCodeEarlierReleaseEnv lists Claude env values that earlier releases

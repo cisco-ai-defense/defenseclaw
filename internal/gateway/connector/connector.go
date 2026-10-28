@@ -103,6 +103,10 @@ type SetupOpts struct {
 	// sandboxNativeOTLP selects the isolated OpenShell artifact renderer. It
 	// cannot be set by a host setup caller or a configuration file.
 	sandboxNativeOTLP bool
+	// knownCredentials are further product credentials the native OTLP
+	// residue check knows (UserNativeOTLPWithout recovers them from the
+	// configuration it judges by their digests). Never set by a caller.
+	knownCredentials []string
 	// ManagedHookSocket is the standalone gateway's peer-authorized unix
 	// hook socket (from the root-owned runtime descriptor). When set on a
 	// unix host, in-agent plugins (OpenCode, Amp) and connector shell hooks

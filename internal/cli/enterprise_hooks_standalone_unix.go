@@ -26,6 +26,7 @@ import (
 	"os/user"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"syscall"
@@ -614,6 +615,17 @@ func dispatchEnterpriseHookStandaloneJobs(
 	return outcomes
 }
 
+// watchEnterpriseHookManagedCodexConfig makes a change of the account's Codex
+// user config start a pass, so a conflicting features.hooks key is removed
+// soon after the user writes it.
+func watchEnterpriseHookManagedCodexConfig(home string, watchDirs, sharedFiles map[string]struct{}) {
+	configDir := filepath.Join(home, ".codex")
+	watchDirs[home] = struct{}{}
+	watchDirs[configDir] = struct{}{}
+	sharedFiles[configDir] = struct{}{} // Creation after enrollment is a repair signal.
+	sharedFiles[filepath.Join(configDir, "config.toml")] = struct{}{}
+}
+
 // enterpriseHookStandaloneSlot tracks one dispatched manifest row.
 type enterpriseHookStandaloneSlot struct {
 	key     string
@@ -626,6 +638,20 @@ type enterpriseHookStandaloneSlot struct {
 	// credentialID fingerprints the hook credential rendered for the
 	// target (connector.UserScopedCredentialKeyID).
 	credentialID string
+}
+
+// enterpriseHookStandaloneProductCredentialDigests are the digests of the
+// product credentials an exporter in an account's own agent configuration
+// may carry: the gateway token (replaceable in tests). The foreign cleanup
+// hands them to its as-the-user worker (GAP-2376).
+var enterpriseHookStandaloneProductCredentialDigests = func() []connector.NativeOTLPCredentialDigest {
+	if cfg == nil {
+		return nil
+	}
+	if digest, ok := connector.NativeOTLPCredentialDigestOf(cfg.Gateway.ResolvedToken()); ok {
+		return []connector.NativeOTLPCredentialDigest{digest}
+	}
+	return nil
 }
 
 // runEnterpriseHookReconcileOnceStandaloneUnix is the standalone Unix
@@ -683,6 +709,9 @@ func runEnterpriseHookReconcileOnceStandaloneUnix(ctx context.Context) (enterpri
 	jobs := map[int]*enterpriseHookWorkerJob{}
 	slots := map[int]enterpriseHookStandaloneSlot{}
 	var machineWorkerRows []int
+	// codexFeatureRepair: accounts whose job already removes a conflicting
+	// user features.hooks key (a machine-policy Codex row queued it).
+	codexFeatureRepair := map[int]bool{}
 	watchDirs := map[string]struct{}{}
 	exclusiveFiles := map[string]struct{}{}
 	sharedFiles := map[string]struct{}{}
@@ -802,11 +831,8 @@ func runEnterpriseHookReconcileOnceStandaloneUnix(ctx context.Context) (enterpri
 					mode := enterpriseHookWorkerModeBlockPersonalClaude
 					if strings.EqualFold(row.Connector, "codex") {
 						mode = enterpriseHookWorkerModeRepairManagedCodexFeature
-						configDir := filepath.Join(account.Home, ".codex")
-						watchDirs[account.Home] = struct{}{}
-						watchDirs[configDir] = struct{}{}
-						sharedFiles[configDir] = struct{}{} // Creation after enrollment is a repair signal.
-						sharedFiles[filepath.Join(configDir, "config.toml")] = struct{}{}
+						watchEnterpriseHookManagedCodexConfig(account.Home, watchDirs, sharedFiles)
+						codexFeatureRepair[account.UID] = true
 					}
 					job.Request.Targets = append(job.Request.Targets, enterpriseHookWorkerTarget{Index: index,
 						Mode: mode,
@@ -924,6 +950,40 @@ func runEnterpriseHookReconcileOnceStandaloneUnix(ctx context.Context) (enterpri
 		})
 	}
 
+	// Machine policy pins Codex hooks on for every user, so the enumerator
+	// need not list a Codex row for an account it enrolls for another
+	// connector (a managed macOS account enrolled only for Hermes). Its own
+	// `codex features disable hooks` still writes features.hooks=false, and
+	// Codex then refuses every project trust write. Remove that key, as the
+	// user, for every account this pass dispatches, as the Codex row does
+	// (GAP-0791). Its outcome changes no row: hooks stay pinned on either way.
+	var codexFeatureOnly []int
+	if _, published := machinePolicy["codex"]; published {
+		if covered, err := enterpriseHookStandaloneMachinePolicyCovered("codex"); err == nil && covered {
+			uids := make([]int, 0, len(jobs))
+			for uid := range jobs {
+				uids = append(uids, uid)
+			}
+			slices.Sort(uids)
+			for _, uid := range uids {
+				job := jobs[uid]
+				account := job.Account
+				if codexFeatureRepair[account.UID] {
+					continue
+				}
+				codexFeatureRepair[account.UID] = true
+				index := len(manifest.Targets) + len(codexFeatureOnly)
+				codexFeatureOnly = append(codexFeatureOnly, index)
+				watchEnterpriseHookManagedCodexConfig(account.Home, watchDirs, sharedFiles)
+				job.Request.Targets = append(job.Request.Targets, enterpriseHookWorkerTarget{Index: index,
+					Mode: enterpriseHookWorkerModeRepairManagedCodexFeature,
+					Options: enterpriseHookWorkerOptionsFrom(enterprisehooks.InstallOptions{
+						ConnectorName: "codex", UserHome: account.Home, OwnerUID: account.UID, OwnerGID: account.GID,
+					})})
+			}
+		}
+	}
+
 	// Every job of an account the events named gets the window, whichever
 	// target created it: a job a machine-policy Claude Code or Codex row
 	// created first had none, so the account's Hermes was checked once
@@ -936,6 +996,12 @@ func runEnterpriseHookReconcileOnceStandaloneUnix(ctx context.Context) (enterpri
 		}
 	}
 	outcomes := dispatchEnterpriseHookStandaloneJobs(ctx, jobs)
+	for _, index := range codexFeatureOnly {
+		if outcome := outcomes[index]; !outcome.ok && !outcome.pending {
+			fmt.Fprintf(enterpriseHookWorkerLog, "[hook-guardian] warn: codex: the user features.hooks preference was not removed: %s\n",
+				firstNonEmpty(outcome.err, errEnterpriseHookWorkerNoResult.Error()))
+		}
+	}
 	for _, index := range machineWorkerRows {
 		row := rows[index]
 		outcome, ok := outcomes[index]

@@ -85,27 +85,65 @@ func RevokeUserNativeOTLPCredential(connectorName string, opts SetupOpts) ([]str
 // backup (UserNativeOTLPBackupName; nil when there is none). A config over
 // UserNativeOTLPReadLimit is refused unread.
 func UserNativeOTLPResidueIn(connectorName string, config, backup []byte, opts SetupOpts) ([]string, error) {
+	_, removed, err := userNativeOTLPWithoutIn(connectorName, config, backup, opts)
+	return removed, err
+}
+
+// NativeOTLPCredentialDigest names a product credential by its length and
+// SHA-256, so a process that must not hold the credential itself (the
+// managed Unix guardian's worker, which runs as the account) still knows an
+// exporter that carries it (GAP-2376).
+type NativeOTLPCredentialDigest struct {
+	Length int    `json:"length"`
+	SHA256 string `json:"sha256"`
+}
+
+// NativeOTLPCredentialDigestOf is the digest of credential; ok is false for
+// a credential too short to prove ownership.
+func NativeOTLPCredentialDigestOf(credential string) (NativeOTLPCredentialDigest, bool) {
+	credential = strings.TrimSpace(credential)
+	if len(credential) < otlpMinKnownTokenLen {
+		return NativeOTLPCredentialDigest{}, false
+	}
+	sum := sha256.Sum256([]byte(credential))
+	return NativeOTLPCredentialDigest{Length: len(credential), SHA256: hex.EncodeToString(sum[:])}, true
+}
+
+// UserNativeOTLPWithout returns config (the bytes of a Codex config.toml or
+// Claude Code settings.json the caller read itself) without the DefenseClaw
+// exporter entries UserNativeOTLPResidueIn names, and those entries; out is
+// nil when there are none. A credential in config whose digest is one of
+// credentials is known as the product's as well; any other entry, an
+// exporter with a foreign bearer included, is kept as it is.
+func UserNativeOTLPWithout(connectorName string, config, backup []byte, opts SetupOpts, credentials []NativeOTLPCredentialDigest) ([]byte, []string, error) {
+	for _, digest := range credentials {
+		if credential, ok := nativeOTLPCredentialIn(config, digest.Length, digest.SHA256); ok {
+			opts.knownCredentials = append(slices.Clone(opts.knownCredentials), credential)
+		}
+	}
+	return userNativeOTLPWithoutIn(connectorName, config, backup, opts)
+}
+
+func userNativeOTLPWithoutIn(connectorName string, config, backup []byte, opts SetupOpts) ([]byte, []string, error) {
 	switch connectorName {
 	case "codex":
 		var original codexConfigBackup
 		if len(backup) > 0 {
 			if err := json.Unmarshal(backup, &original); err != nil {
-				return nil, fmt.Errorf("load original Codex OTel config: %w", err)
+				return nil, nil, fmt.Errorf("load original Codex OTel config: %w", err)
 			}
 		}
-		_, removed, err := codexWithoutUserNativeOTLP(config, original, opts)
-		return removed, err
+		return codexWithoutUserNativeOTLP(config, original, opts)
 	case "claudecode":
 		var original claudeCodeBackup
 		if len(backup) > 0 {
 			if err := json.Unmarshal(backup, &original); err != nil {
-				return nil, fmt.Errorf("load Claude Code settings backup: %w", err)
+				return nil, nil, fmt.Errorf("load Claude Code settings backup: %w", err)
 			}
 		}
-		_, removed, err := claudeCodeWithoutUserNativeOTLP(config, original, opts)
-		return removed, err
+		return claudeCodeWithoutUserNativeOTLP(config, original, opts)
 	}
-	return nil, nil
+	return nil, nil, nil
 }
 
 // UserNativeOTLPTakeBackResidueIn is UserNativeOTLPResidueIn for a
@@ -932,27 +970,42 @@ func withNativeOTLPTakeBackCredential(opts SetupOpts, connectorName string, raw 
 		return opts
 	}
 	record, ok := readNativeOTLPTakeBackPending(path)
-	if !ok || record.CredentialLength < otlpMinKnownTokenLen || len(record.CredentialSHA256) != hex.EncodedLen(sha256.Size) {
+	if !ok {
 		return opts
 	}
-	isHex := func(c byte) bool { return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F') }
+	if credential, found := nativeOTLPCredentialIn(raw, record.CredentialLength, record.CredentialSHA256); found {
+		opts.OTLPPathToken = credential
+	}
+	return opts
+}
+
+// nativeOTLPCredentialIn finds the credential of length bytes whose SHA-256
+// is sha256Hex in raw. A credential is a run of token characters (letters,
+// digits and -._~+/=), so only windows inside such runs are hashed.
+func nativeOTLPCredentialIn(raw []byte, length int, sha256Hex string) (string, bool) {
+	if length < otlpMinKnownTokenLen || len(sha256Hex) != hex.EncodedLen(sha256.Size) {
+		return "", false
+	}
+	want := strings.ToLower(sha256Hex)
+	tokenByte := func(c byte) bool {
+		return c >= '0' && c <= '9' || c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || strings.IndexByte("-._~+/=", c) >= 0
+	}
 	for start := 0; start < len(raw); {
-		if !isHex(raw[start]) {
+		if !tokenByte(raw[start]) {
 			start++
 			continue
 		}
 		end := start
-		for end < len(raw) && isHex(raw[end]) {
+		for end < len(raw) && tokenByte(raw[end]) {
 			end++
 		}
-		for i := start; i+record.CredentialLength <= end; i++ {
-			sum := sha256.Sum256(raw[i : i+record.CredentialLength])
-			if hex.EncodeToString(sum[:]) == record.CredentialSHA256 {
-				opts.OTLPPathToken = string(raw[i : i+record.CredentialLength])
-				return opts
+		for i := start; i+length <= end; i++ {
+			sum := sha256.Sum256(raw[i : i+length])
+			if hex.EncodeToString(sum[:]) == want {
+				return string(raw[i : i+length]), true
 			}
 		}
 		start = end
 	}
-	return opts
+	return "", false
 }

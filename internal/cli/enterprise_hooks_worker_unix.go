@@ -86,6 +86,10 @@ const (
 	// account; enterprisehooks.RemovePersonalClaudeHookBlocker).
 	enterpriseHookWorkerModeUnblockPersonalClaude     = "unblock_personal_claude"
 	enterpriseHookWorkerModeRepairManagedCodexFeature = "repair_managed_codex_feature"
+	// enterpriseHookWorkerModeRemoveUserNativeOTLP removes, as the user, a
+	// native OTLP exporter in the user's own Codex or Claude Code
+	// configuration that carries a DefenseClaw credential (GAP-2376).
+	enterpriseHookWorkerModeRemoveUserNativeOTLP = "remove_user_native_otlp"
 	// enterpriseHookWorkerModePurge removes the user's DefenseClaw per-user
 	// state (standalone uninstall --purge). It runs after the request's
 	// removals and only when every one of them succeeded: the state holds
@@ -102,6 +106,7 @@ var enterpriseHookWorkerForeignCleanupModes = map[string]bool{
 	enterpriseHookWorkerModeRemoveLeftover:        true,
 	enterpriseHookWorkerModeBlockPersonalClaude:   true,
 	enterpriseHookWorkerModeUnblockPersonalClaude: true,
+	enterpriseHookWorkerModeRemoveUserNativeOTLP:  true,
 }
 
 // enterpriseHookWorkerTimeout bounds one worker process.
@@ -140,6 +145,10 @@ type enterpriseHookWorkerOptions struct {
 	HookCredentialIdentity             string `json:"hook_credential_identity,omitempty"`
 	ForeignHookGuardBinary             string `json:"foreign_hook_guard_binary,omitempty"`
 	ManagedHookBinary                  string `json:"managed_hook_binary,omitempty"`
+	// ProductCredentials are the digests of the product credentials a
+	// remove_user_native_otlp target knows an exporter by; the credentials
+	// themselves never reach a process that runs as the user.
+	ProductCredentials []connector.NativeOTLPCredentialDigest `json:"product_credentials,omitempty"`
 	// PreviousHome is the recorded home of a re-homed account whose current
 	// home a Remove cleans. Receipts copied from it act on this home's copy
 	// of the file, never on the other home (rel-1-0-3 GAP-0200).
@@ -691,6 +700,13 @@ func runEnterpriseHookWorkerApply(ctx context.Context, request enterpriseHookWor
 				err = repairManagedCodexUserFeature(opts)
 			}
 			result = enterprisehooks.InstallResult{Connector: opts.ConnectorName, UserHome: opts.UserHome}
+		case enterpriseHookWorkerModeRemoveUserNativeOTLP:
+			if !request.Standalone {
+				err = errors.New("native OTLP exporter removal requires the standalone guardian")
+			} else {
+				err = removeManagedUserNativeOTLP(opts, target.Options.ProductCredentials)
+			}
+			result = enterprisehooks.InstallResult{Connector: opts.ConnectorName, UserHome: opts.UserHome}
 		case enterpriseHookWorkerModePurge:
 			if purgeBlocked != "" {
 				err = errors.New("kept the per-user state for its backups: " + purgeBlocked)
@@ -771,40 +787,9 @@ func repairManagedCodexUserFeature(opts enterprisehooks.InstallOptions) error {
 		return errors.New("managed Codex feature repair requires the Codex connector")
 	}
 	path := filepath.Join(opts.UserHome, ".codex", "config.toml")
-	if _, err := os.Lstat(path); errors.Is(err, os.ErrNotExist) {
-		return nil
-	} else if err != nil {
-		return fmt.Errorf("inspect Codex user config %s: %w", path, err)
-	}
-	resolved, err := filepath.EvalSymlinks(path)
-	if err != nil {
-		return fmt.Errorf("resolve Codex user config %s: %w", path, err)
-	}
-	resolvedHome, err := filepath.EvalSymlinks(opts.UserHome)
-	if err != nil {
-		return fmt.Errorf("resolve enrolled home %s for Codex user config: %w", opts.UserHome, err)
-	}
-	if !enterpriseHookWorkerPathWithin(resolvedHome, resolved) {
-		return fmt.Errorf("codex user config %s resolves outside the enrolled home; move it into the home before managed feature repair", path)
-	}
-	file, err := os.OpenFile(resolved, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
-	if err != nil {
-		return fmt.Errorf("open Codex user config %s: %w", path, err)
-	}
-	defer file.Close()
-	info, err := file.Stat()
-	if err != nil {
-		return fmt.Errorf("stat Codex user config %s: %w", path, err)
-	}
-	if !info.Mode().IsRegular() || info.Size() > 4<<20 {
-		return fmt.Errorf("codex user config %s is not a regular file of at most 4 MiB", path)
-	}
-	raw, err := io.ReadAll(io.LimitReader(file, 4<<20+1))
-	if err != nil {
-		return fmt.Errorf("read bounded Codex user config %s: %w", path, err)
-	}
-	if len(raw) > 4<<20 {
-		return fmt.Errorf("codex user config %s exceeded the 4 MiB read limit", path)
+	resolved, raw, perm, found, err := readEnterpriseHookWorkerHomeFile(opts.UserHome, path, "Codex user config", "before managed feature repair")
+	if err != nil || !found {
+		return err
 	}
 	repaired, err := connector.RemoveCodexManagedHookFeature(raw)
 	if err != nil {
@@ -813,9 +798,98 @@ func repairManagedCodexUserFeature(opts enterprisehooks.InstallOptions) error {
 	if bytes.Equal(raw, repaired) {
 		return nil
 	}
-	if err := configwrite.WriteFileDurable(resolved, repaired, info.Mode().Perm()); err != nil {
+	if err := configwrite.WriteFileDurable(resolved, repaired, perm); err != nil {
 		return fmt.Errorf("publish repaired Codex user config %s: %w", path, err)
 	}
+	return nil
+}
+
+// readEnterpriseHookWorkerHomeFile reads path, a file of the enrolled home,
+// as the user: a regular file of at most 4 MiB that resolves inside the home.
+// found is false when it does not exist. remedy ends the refusal of a file
+// that resolves outside the home.
+func readEnterpriseHookWorkerHomeFile(home, path, label, remedy string) (resolved string, raw []byte, perm os.FileMode, found bool, err error) {
+	if _, err := os.Lstat(path); errors.Is(err, os.ErrNotExist) {
+		return "", nil, 0, false, nil
+	} else if err != nil {
+		return "", nil, 0, false, fmt.Errorf("inspect %s %s: %w", label, path, err)
+	}
+	resolved, err = filepath.EvalSymlinks(path)
+	if err != nil {
+		return "", nil, 0, false, fmt.Errorf("resolve %s %s: %w", label, path, err)
+	}
+	resolvedHome, err := filepath.EvalSymlinks(home)
+	if err != nil {
+		return "", nil, 0, false, fmt.Errorf("resolve enrolled home %s for %s: %w", home, label, err)
+	}
+	if !enterpriseHookWorkerPathWithin(resolvedHome, resolved) {
+		return "", nil, 0, false, fmt.Errorf("the %s %s resolves outside the enrolled home; move it into the home %s", label, path, remedy)
+	}
+	file, err := os.OpenFile(resolved, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
+	if err != nil {
+		return "", nil, 0, false, fmt.Errorf("open %s %s: %w", label, path, err)
+	}
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil {
+		return "", nil, 0, false, fmt.Errorf("stat %s %s: %w", label, path, err)
+	}
+	if !info.Mode().IsRegular() || info.Size() > 4<<20 {
+		return "", nil, 0, false, fmt.Errorf("the %s %s is not a regular file of at most 4 MiB", label, path)
+	}
+	raw, err = io.ReadAll(io.LimitReader(file, 4<<20+1))
+	if err != nil {
+		return "", nil, 0, false, fmt.Errorf("read bounded %s %s: %w", label, path, err)
+	}
+	if len(raw) > 4<<20 {
+		return "", nil, 0, false, fmt.Errorf("the %s %s exceeded the 4 MiB read limit", label, path)
+	}
+	return resolved, raw, info.Mode().Perm(), true, nil
+}
+
+// removeManagedUserNativeOTLP runs with the target user's uid. Under the
+// managed Unix profile DefenseClaw writes no native OTLP exporter into an
+// account's own Codex or Claude Code configuration (Setup removes one; only
+// an OpenShell sandbox image carries its own). An exporter an earlier
+// install or a copied configuration left there that carries a DefenseClaw
+// credential sends it, with the agent's prompt telemetry, to whoever holds
+// its port (GAP-2376, as GAP-0836 on Windows). This removes exactly those
+// entries, known by the scoped credential in the account's data dir, the
+// values the setup backup recorded, or the digest of a product credential
+// in credentials; every other entry, an exporter with its own bearer
+// included, stays as the user wrote it.
+func removeManagedUserNativeOTLP(opts enterprisehooks.InstallOptions, credentials []connector.NativeOTLPCredentialDigest) error {
+	name := strings.ToLower(strings.TrimSpace(opts.ConnectorName))
+	backupName := connector.UserNativeOTLPBackupName(name)
+	if backupName == "" {
+		return fmt.Errorf("connector %q has no native OTLP exporter", opts.ConnectorName)
+	}
+	dataDir := strings.TrimSpace(opts.DataDir)
+	if dataDir == "" {
+		dataDir = filepath.Join(opts.UserHome, ".defenseclaw")
+	}
+	path := connector.UserNativeOTLPConfigPathFor(name, opts.UserHome)
+	label := name + " user config"
+	resolved, raw, perm, found, err := readEnterpriseHookWorkerHomeFile(opts.UserHome, path, label, "and the next repair checks it")
+	if err != nil || !found {
+		return err
+	}
+	_, backup, _, _, err := readEnterpriseHookWorkerHomeFile(opts.UserHome, filepath.Join(dataDir, backupName), name+" setup backup", "and the next repair checks it")
+	if err != nil {
+		return err
+	}
+	out, removed, err := connector.UserNativeOTLPWithout(name, raw, backup, connector.SetupOpts{DataDir: dataDir, ManagedEnterprise: true}, credentials)
+	if err != nil {
+		return fmt.Errorf("inspect %s %s for a native OTLP exporter: %w", label, path, err)
+	}
+	if len(removed) == 0 {
+		return nil
+	}
+	if err := configwrite.WriteFileDurable(resolved, out, perm); err != nil {
+		return fmt.Errorf("remove the native OTLP exporter from %s %s: %w", label, path, err)
+	}
+	fmt.Fprintf(os.Stderr, "[enterprise-hooks] %s: removed a native OTLP exporter that carried a DefenseClaw credential to a port the managed gateway does not serve (%s)\n",
+		name, strings.Join(removed, ", "))
 	return nil
 }
 

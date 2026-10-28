@@ -192,4 +192,6 @@ defenseclaw guardrail disable --yes
 
 With the default gateway restart, disabling removes DefenseClaw's hook registrations from Antigravity's global file and preserves your other Antigravity settings. `defenseclaw guardrail enable` restores DefenseClaw's hooks. To remove the connector, run `defenseclaw setup remove antigravity --yes` (add `--force` if it is the last one).
 
+On Linux and macOS, `~/.defenseclaw/hooks/antigravity-hook.sh` stays after `guardrail disable` and `setup remove antigravity` as an inert stub that exits successfully and sends nothing, because a running Antigravity may call the cached path until it restarts.
+
 On a multi-connector install, add `--connector antigravity` to `guardrail disable` and `guardrail enable` to change only this agent.
