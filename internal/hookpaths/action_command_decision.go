@@ -205,6 +205,10 @@ func ActionPrivateKeyRead(command, cwd, home string) bool {
 			// GAP-1823). The previous directories stay candidates: cmd's cd
 			// without /d does not switch the drive.
 			words, start, dirs := scan.words, 0, []string{cwd}
+			// The first statement of the current pipeline: a stage after |
+			// reads what it lists (Get-ChildItem $HOME\.ssh | Select-String
+			// ., RV22-1).
+			var pipeHead []string
 			for i := 0; i <= len(words); i++ {
 				if i < len(words) {
 					switch words[i] {
@@ -214,8 +218,13 @@ func ActionPrivateKeyRead(command, cwd, home string) bool {
 					}
 				}
 				statement := words[start:i]
+				piped := start > 0 && words[start-1] == "|"
+				if !piped {
+					pipeHead = statement
+				}
 				for _, dir := range dirs {
-					if actionPrivateKeyReadWords(statement, dir, home, keyReadWindows, 0) {
+					if actionPrivateKeyReadWords(statement, dir, home, keyReadWindows, 0) ||
+						piped && actionWindowsPipedKeyDirectoryRead(pipeHead, statement, dir, home) {
 						return true
 					}
 				}
@@ -249,10 +258,38 @@ func ActionPrivateKeyRead(command, cwd, home string) bool {
 	// A literal for loop binds its variable to each item, patterns
 	// included (for f in ~/.ssh/id_*; do cat "$f"; done, GAP-1780).
 	loops := make(map[string][]string)
+	// A reader fed by a static stdin redirect (xxd < ~/.ssh/id_ed25519)
+	// reads the file as if it were an operand (GAP-0281).
+	stdin := make(map[*syntax.CallExpr][]string)
+	// A reader after a directory change reads relative to it (cd ~/.ssh &&
+	// grep -r . ., RV22-1). The previous directories stay candidates, as on
+	// a Windows home: the change may fail or sit in a subshell.
+	dirs := []string{cwd}
+	readAt := func(words []string) bool {
+		for _, dir := range dirs {
+			if actionPrivateKeyReadWords(words, dir, home, mode, 0) {
+				return true
+			}
+		}
+		return false
+	}
 	found := false
 	syntax.Walk(file, func(node syntax.Node) bool {
 		if found {
 			return false
+		}
+		if stmt, ok := node.(*syntax.Stmt); ok {
+			if call, ok := stmt.Cmd.(*syntax.CallExpr); ok {
+				for _, redirect := range stmt.Redirs {
+					if redirect.Word == nil || redirect.Op != syntax.RdrIn && redirect.Op != syntax.RdrInOut {
+						continue
+					}
+					if value, known := wordValue(redirect.Word); known {
+						stdin[call] = append(stdin[call], value)
+					}
+				}
+			}
+			return true
 		}
 		if loop, ok := node.(*syntax.ForClause); ok {
 			if iter, ok := loop.Loop.(*syntax.WordIter); ok && iter.Name != nil {
@@ -279,14 +316,27 @@ func ActionPrivateKeyRead(command, cwd, home string) bool {
 				bound = i
 			}
 		}
+		if sources := stdin[call]; len(sources) != 0 {
+			if base := programBase(words[0]); base != "cp" && base != "gcp" {
+				words = append(words, sources...)
+			}
+		}
 		if bound < 0 {
-			found = actionPrivateKeyReadWords(words, cwd, home, mode, 0)
+			found = readAt(words)
+			if base := programBase(words[0]); (base == "cd" || base == "pushd") && len(dirs) < 8 {
+				switch {
+				case len(words) == 1:
+					dirs = append(dirs, home)
+				case len(words) == 2 && words[1] != "" && words[1] != "-":
+					dirs = append(dirs, OperandPath(words[1], dirs[len(dirs)-1]))
+				}
+			}
 			return !found
 		}
 		name := actionSoleParameter(call.Args[bound])
 		for _, item := range loops[name] {
 			words[bound] = item
-			if actionPrivateKeyReadWords(words, cwd, home, mode, 0) {
+			if readAt(words) {
 				found = true
 				break
 			}
@@ -460,8 +510,21 @@ func actionPrivateKeyReadWords(words []string, cwd, home string, mode keyReadMod
 		}
 		return false
 	}
+	if kind := actionInterpreterKind(words[0]); kind != "" {
+		code, ok := actionInterpreterInlineCode(words, 0)
+		return ok && actionInterpreterReadsPrivateKey(code, kind)
+	}
+	if actionRecursiveKeyDirectoryRead(words, cwd, home, windows) {
+		return true
+	}
 	switch program {
-	case "cat", "head", "tail", "type", "get-content", "gc", "base64":
+	case "cat", "head", "tail", "type", "get-content", "gc", "base64",
+		// Every program that prints its operand's content reads the key as
+		// cat does (GAP-0281).
+		"less", "more", "most", "view", "grep", "egrep", "fgrep", "zgrep", "rg",
+		"xxd", "od", "hexdump", "hd", "strings", "cut", "nl", "tac", "rev",
+		"sort", "uniq", "fold", "fmt", "pr", "paste", "diff", "comm",
+		"awk", "gawk", "mawk", "nawk", "findstr", "select-string", "sls", "format-hex", "fhx":
 		for _, arg := range words[1:] {
 			if readPath(arg) {
 				return true

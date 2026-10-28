@@ -11,11 +11,13 @@ import (
 	"io/fs"
 	"maps"
 	"os"
+	osuser "os/user"
 	"path/filepath"
 	"regexp"
 	"runtime"
 	"slices"
 	"strings"
+	"sync"
 	"unicode"
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
@@ -621,6 +623,20 @@ func Resolve(payload []byte) string {
 	return ResolveConnector("", "", "", payload)
 }
 
+// clientLogin is the login name of the user this hook runs as (a Windows
+// DOMAIN\user gives user), looked up once.
+var clientLogin = sync.OnceValue(func() string {
+	account, err := osuser.Current()
+	if err != nil {
+		return ""
+	}
+	name := account.Username
+	if index := strings.LastIndexByte(name, '\\'); index >= 0 {
+		name = name[index+1:]
+	}
+	return name
+})
+
 // ResolveConnector is Resolve for a hook body of connector, read as the
 // gateway's profile for that connector reads it. surface and event are the
 // hook command's --hook-surface value and bound event, the values the hook
@@ -847,6 +863,14 @@ func ResolveConnector(connector, surface, event string, payload []byte) string {
 		for _, key := range []string{"command", "cmd"} {
 			var command string
 			if json.Unmarshal(toolArgs[key], &command) == nil && command != "" {
+				// A ~<login> tilde-prefix names this user's home from the
+				// password database. The gateway judges that spelling as the
+				// home (actionfacts.ActiveUserTildeTwin) and, behind
+				// ProtectHome, reads its targets from this map, so the map
+				// describes the command with the home spelled out (GAP-2378).
+				if twin, _, isTwin := actionfacts.ActiveUserTildeTwin(command, home, clientLogin()); isTwin {
+					command = twin
+				}
 				if !isApplyPatchToolName(tool) && unprovenReason == "" {
 					unprovenReason = ActionCommandAuditReason(command, cwd, home)
 				}

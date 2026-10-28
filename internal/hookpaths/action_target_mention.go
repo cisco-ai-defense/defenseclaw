@@ -1901,6 +1901,7 @@ func actionWordHasUnquotedGlob(word *syntax.Word, command string) bool {
 
 func actionKnownReadOnlyShell(file *syntax.File, home string) bool {
 	seen, safe := false, true
+	status := map[string]bool{"?": true}
 	syntax.Walk(file, func(node syntax.Node) bool {
 		if !safe {
 			return false
@@ -1914,6 +1915,13 @@ func actionKnownReadOnlyShell(file *syntax.File, home string) bool {
 		if !ok {
 			return true
 		}
+		if len(call.Args) == 0 && actionExitStatusAssignment(call) {
+			// status=$? of an agent's exit-status wrapper (GAP-2168).
+			for _, assign := range call.Assigns {
+				status[assign.Name.Value] = true
+			}
+			return true
+		}
 		if len(call.Args) == 0 || len(call.Assigns) != 0 {
 			safe = false
 			return false
@@ -1923,6 +1931,17 @@ func actionKnownReadOnlyShell(file *syntax.File, home string) bool {
 			safe = false
 			return false
 		}
+		switch programBase(program) {
+		case "echo", "printf", "exit":
+			// An agent's exit-status report (Codex: cmd; status=$?; printf
+			// '\n[exit status] %s\n' "$status"; exit "$status") prints the
+			// status to the terminal only: no redirect (checked above), a $?
+			// or status word and no protected name in its text. Any other
+			// echo stays outside the read-only list.
+			if actionStatusReport(call.Args[1:], status) {
+				return true
+			}
+		}
 		seen = true
 		for _, arg := range call.Args[1:] {
 			if option, known := StaticWord(arg, home); known && actionReadOptionMayWrite(option) {
@@ -1931,7 +1950,14 @@ func actionKnownReadOnlyShell(file *syntax.File, home string) bool {
 			}
 		}
 		switch programBase(program) {
-		case "cat", "head", "tail", "ls", "dir", "stat":
+		case "cat", "head", "tail", "ls", "dir", "stat",
+			// Search and count programs only read their operands (owner
+			// decision 2, TGT-0194; GAP-2168).
+			"grep", "egrep", "fgrep", "wc":
+		case "ssh-keygen":
+			if !actionSSHKeygenListsOnly(call.Args[1:], home) {
+				safe = false
+			}
 		case "cd", "pushd", "popd":
 			if len(call.Args) > 3 {
 				safe = false
@@ -1950,6 +1976,137 @@ func actionKnownReadOnlyShell(file *syntax.File, home string) bool {
 		return safe
 	})
 	return seen && safe
+}
+
+// actionExitStatusAssignment reports a bare NAME=$? assignment: it keeps the
+// previous command's exit status and changes no file or program lookup.
+func actionExitStatusAssignment(call *syntax.CallExpr) bool {
+	if len(call.Assigns) == 0 {
+		return false
+	}
+	for _, assign := range call.Assigns {
+		if assign.Name == nil || assign.Append || assign.Naked || assign.Index != nil || assign.Array != nil ||
+			assign.Value == nil || len(assign.Value.Parts) != 1 {
+			return false
+		}
+		switch strings.ToUpper(assign.Name.Value) {
+		case "PATH", "IFS", "HOME", "ENV", "BASH_ENV", "CDPATH", "SHELLOPTS", "BASHOPTS", "PS4", "PROMPT_COMMAND":
+			return false
+		}
+		param, ok := assign.Value.Parts[0].(*syntax.ParamExp)
+		if !ok || param.Param == nil || param.Param.Value != "?" || param.Excl || param.Length || param.Index != nil ||
+			param.Slice != nil || param.Repl != nil || param.Exp != nil || len(param.Modifiers) != 0 {
+			return false
+		}
+	}
+	return true
+}
+
+// actionStatusReport reports echo, printf or exit words that report an exit
+// status: at least one word expands $? or a NAME=$? variable, every
+// expansion is such a plain parameter (no command substitution), and the
+// literal text names no protected place (.ssh, authorized_keys,
+// .defenseclaw) and no home spelling, so printing it is not a mention.
+func actionStatusReport(args []*syntax.Word, status map[string]bool) bool {
+	if len(args) == 0 || len(args) > 4 {
+		return false
+	}
+	reports, clean := false, true
+	for _, arg := range args {
+		var text strings.Builder
+		syntax.Walk(arg, func(node syntax.Node) bool {
+			switch node := node.(type) {
+			case nil, *syntax.Word, *syntax.DblQuoted:
+				// syntax.Walk calls f(nil) after a node's children.
+			case *syntax.Lit:
+				text.WriteString(node.Value)
+			case *syntax.SglQuoted:
+				text.WriteString(node.Value)
+			case *syntax.ParamExp:
+				if node.Param == nil || !status[node.Param.Value] || node.Exp != nil || node.Repl != nil ||
+					node.Slice != nil || node.Index != nil || node.Excl || node.Length {
+					clean = false
+					return false
+				}
+				reports = true
+				return false
+			default:
+				clean = false
+				return false
+			}
+			return true
+		})
+		lower := strings.ToLower(text.String())
+		if strings.Contains(lower, ".ssh") || strings.Contains(lower, "authorized_keys") ||
+			strings.Contains(lower, ".defenseclaw") || strings.Contains(lower, "~") {
+			clean = false
+		}
+	}
+	return reports && clean
+}
+
+// actionSSHKeygenListsOnly reports an ssh-keygen call that only lists key
+// fingerprints (-l, with -f FILE, -E HASH, -v, -q): it reads the file and
+// writes nothing. Any other mode (-R, -t, -p, -y, -s, ...) is not a plain
+// read (GAP-2168).
+func actionSSHKeygenListsOnly(args []*syntax.Word, home string) bool {
+	list := false
+	for index := 0; index < len(args); index++ {
+		word, known := StaticWord(args[index], home)
+		if !known || len(word) < 2 || word[0] != '-' || word[1] == '-' {
+			return false
+		}
+		flags := word[1:]
+		for at := 0; at < len(flags); at++ {
+			switch flags[at] {
+			case 'l':
+				list = true
+			case 'v', 'q':
+			case 'f', 'E':
+				if at == len(flags)-1 {
+					index++
+					if index >= len(args) {
+						return false
+					}
+				}
+				at = len(flags)
+			default:
+				return false
+			}
+		}
+	}
+	return list
+}
+
+// actionSSHKeygenListsOnlyWords is actionSSHKeygenListsOnly for the words of
+// a Windows reading: -l with only -v, -q, -f FILE and -E HASH lists keys.
+func actionSSHKeygenListsOnlyWords(args []string) bool {
+	list := false
+	for index := 0; index < len(args); index++ {
+		word := args[index]
+		if len(word) < 2 || word[0] != '-' || word[1] == '-' {
+			return false
+		}
+		flags := word[1:]
+		for at := 0; at < len(flags); at++ {
+			switch flags[at] {
+			case 'l':
+				list = true
+			case 'v', 'q':
+			case 'f', 'E':
+				if at == len(flags)-1 {
+					index++
+					if index >= len(args) {
+						return false
+					}
+				}
+				at = len(flags)
+			default:
+				return false
+			}
+		}
+	}
+	return list
 }
 
 func actionLessWritesFile(option string) bool {
@@ -2686,8 +2843,15 @@ func actionKnownReadOnlyWindowsStatement(words []string) bool {
 		}
 	}
 	switch program {
-	case "cat", "get-content", "get-childitem", "resolve-path", "test-path", "head", "tail", "dir", "ls", "stat", "cd", "pushd", "popd", "set-location", "push-location", "pop-location":
+	case "cat", "get-content", "get-childitem", "resolve-path", "test-path", "head", "tail", "dir", "ls", "stat", "cd", "pushd", "popd", "set-location", "push-location", "pop-location",
+		// cmd type, and the search and select filters, only read (GAP-2168).
+		"type", "findstr", "select-string", "sls", "select-object", "select",
+		// Git Bash search and count programs read their operands as on a
+		// POSIX home (actionKnownReadOnlyShell, GAP-2168 Windows leg).
+		"grep", "egrep", "fgrep", "wc":
 		return true
+	case "ssh-keygen":
+		return actionSSHKeygenListsOnlyWords(words[1:])
 	case "less":
 		for _, option := range words[1:] {
 			if actionLessWritesFile(option) {

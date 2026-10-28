@@ -249,7 +249,11 @@ func analyze(input Input, twinCommand string, capture *redirectTargetCapture) Fa
 			// ActiveHome (GAP-0912).
 			home, _ := normalizeActiveHome(input.ActiveHome)
 			if rewrite, ok := rewriteTrustedWindowsShellHome(command, home, dialect); ok {
-				if resolved := parse(rewrite); resolved.status == StatusComplete {
+				// As for a POSIX home, a rewrite that only narrows the issues
+				// is kept: a redirect to a home path in a command list the
+				// classifier reads only in part (type a.txt & type nul >
+				// %USERPROFILE%\f) keeps its exact target (GAP-2408).
+				if resolved := parse(rewrite); resolved.status == StatusComplete || issuesNarrowed(resolved, parsed) {
 					parsed = resolved
 				}
 			}
