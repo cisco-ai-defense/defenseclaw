@@ -39487,20 +39487,33 @@ function Invoke-DefenseClawEnterpriseLifecycle {
             $script:DefenseClawRemoveLifecycleLockOnExit = $false
             Remove-DefenseClawStandaloneLifecycleLockLeftover -Layout $layout
         }
+        $script:DefenseClawMdmRotationJournalKept = ''
         if ($leftNothing) {
             # LEAD STEER (GAP-1913): a purge removes the kit's journal; a
-            # plain uninstall keeps it and says so.
+            # plain uninstall keeps it and says so. The note also goes into
+            # the result (mdm_rotation_journal_kept, read by
+            # install-enterprise.ps1), so the Setup and CLI JSON name a kept
+            # or left journal, not only the warning stream.
             if ($Purge) {
                 Remove-DefenseClawMdmRotationJournal -Purge
             }
             elseif ([IO.Directory]::Exists([IO.Path]::Combine($script:ProgramData, 'Cisco\DefenseClaw-MDM\rotation'))) {
-                Microsoft.PowerShell.Utility\Write-Warning -Message (
+                $script:DefenseClawMdmRotationJournalKept = (
                     'kept the MDM kit credential rotation journal ' +
                     [IO.Path]::Combine($script:ProgramData, 'Cisco\DefenseClaw-MDM\rotation') +
                     ' (it can hold a copy of an earlier credential); run the uninstall with PURGE=1 to remove it')
+                Microsoft.PowerShell.Utility\Write-Warning -Message $script:DefenseClawMdmRotationJournalKept
             }
         }
     }
+}
+
+# The last uninstall's note on an MDM kit rotation journal it kept or left
+# (GAP-1913); install-enterprise.ps1 copies it into the result.
+$script:DefenseClawMdmRotationJournalKept = ''
+
+function Get-DefenseClawMdmRotationJournalKept {
+    return [string]$script:DefenseClawMdmRotationJournalKept
 }
 
 function Remove-DefenseClawMdmRotationJournal {
@@ -39519,6 +39532,7 @@ function Remove-DefenseClawMdmRotationJournal {
         [switch]$Purge,
         [string]$StateDirectory = ''
     )
+    $script:DefenseClawMdmRotationJournalKept = ''
     try {
         $state = $StateDirectory
         if ([string]::IsNullOrWhiteSpace($state)) {
@@ -39528,14 +39542,16 @@ function Remove-DefenseClawMdmRotationJournal {
         $item = Microsoft.PowerShell.Management\Get-Item -LiteralPath $journal -Force -ErrorAction SilentlyContinue
         if ($null -ne $item) {
             if (-not $item.PSIsContainer -or ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
-                Microsoft.PowerShell.Utility\Write-Warning -Message "left $journal as it is: it is not an administrator-only folder"
+                $script:DefenseClawMdmRotationJournalKept = "left the MDM kit credential rotation journal $journal as it is: it is not an administrator-only folder; check it and remove it by hand"
+                Microsoft.PowerShell.Utility\Write-Warning -Message $script:DefenseClawMdmRotationJournalKept
                 return
             }
             Assert-DefenseClawPathAcl -Path $journal -AllowedWriterSIDs @($script:SystemSID, $script:AdministratorsSID)
             $entries = @(Microsoft.PowerShell.Management\Get-ChildItem -LiteralPath $journal -Force)
             foreach ($entry in $entries) {
                 if ($entry.PSIsContainer -or ($entry.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
-                    Microsoft.PowerShell.Utility\Write-Warning -Message "left $journal as it is: it holds $($entry.Name), which the MDM kit does not write"
+                    $script:DefenseClawMdmRotationJournalKept = "left the MDM kit credential rotation journal $journal as it is: it holds $($entry.Name), which the MDM kit does not write; check it and remove it by hand"
+                    Microsoft.PowerShell.Utility\Write-Warning -Message $script:DefenseClawMdmRotationJournalKept
                     return
                 }
             }
@@ -39557,7 +39573,8 @@ function Remove-DefenseClawMdmRotationJournal {
         }
     }
     catch {
-        Microsoft.PowerShell.Utility\Write-Warning -Message "could not remove the MDM credential rotation journal: $($_.Exception.Message)"
+        $script:DefenseClawMdmRotationJournalKept = "could not remove the MDM kit credential rotation journal: $($_.Exception.Message)"
+        Microsoft.PowerShell.Utility\Write-Warning -Message $script:DefenseClawMdmRotationJournalKept
     }
 }
 
@@ -39586,4 +39603,4 @@ function Test-DefenseClawStandaloneUninstallLeftNothing {
     return $true
 }
 
-Microsoft.PowerShell.Core\Export-ModuleMember -Function Invoke-DefenseClawEnterpriseLifecycle
+Microsoft.PowerShell.Core\Export-ModuleMember -Function Invoke-DefenseClawEnterpriseLifecycle, Get-DefenseClawMdmRotationJournalKept

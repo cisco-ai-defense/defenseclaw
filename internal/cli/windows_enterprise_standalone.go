@@ -177,6 +177,11 @@ type windowsEnterpriseInstallerReport struct {
 	CanonicalInstallRootAbsent    *bool  `json:"canonical_install_root_absent"`
 	InstallRootRetirementDeferred string `json:"install_root_retirement_deferred"`
 	RetiredInstallRoot            string `json:"retired_install_root"`
+	// MdmRotationJournalKept names the MDM kit's credential rotation
+	// journal an uninstall that removed the deployment kept (a plain
+	// uninstall) or left (a purge that found a journal it must not remove),
+	// with the next step (GAP-1913).
+	MdmRotationJournalKept string `json:"mdm_rotation_journal_kept"`
 
 	// probeFailed marks a failure document that reports no deployment
 	// state at all (no installed field and no pending transaction): the
@@ -1580,6 +1585,7 @@ func applyWindowsEnterpriseInstallerReport(
 		result.AddError(code, message)
 	}
 	addWindowsEnterpriseSelfUninstallCleanup(result, report)
+	addWindowsEnterpriseMdmRotationJournalKept(result, report)
 	if !report.OK && len(result.Errors) == 0 {
 		code := "not_ready"
 		if !report.Installed {
@@ -1685,6 +1691,20 @@ func addWindowsEnterpriseSelfUninstallCleanup(result *enterprisestatus.Result, r
 	if report.OK && report.SelfUninstallCleanupPending && strings.TrimSpace(report.RetiredInstallRoot) != "" {
 		result.AddWarning("self_uninstall_cleanup_pending", "the retired install folder "+
 			strings.TrimSpace(report.RetiredInstallRoot)+" is removed by a cleanup that runs once this command exits")
+	}
+}
+
+// addWindowsEnterpriseMdmRotationJournalKept names, as a warning, the MDM
+// kit's credential rotation journal an uninstall kept or left: an entry can
+// hold a copy of an earlier credential, so the administrator who reads only
+// the JSON result (an MDM, a script) learns it is still there and what
+// removes it (GAP-1913).
+func addWindowsEnterpriseMdmRotationJournalKept(result *enterprisestatus.Result, report *windowsEnterpriseInstallerReport) {
+	if report == nil || result.Action != "uninstall" {
+		return
+	}
+	if note := strings.TrimSpace(report.MdmRotationJournalKept); note != "" {
+		result.AddWarning("mdm_rotation_journal_kept", windowsEnterpriseBoundedDiagnostic(note))
 	}
 }
 
