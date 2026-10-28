@@ -148,6 +148,19 @@ func rewriteTrustedPOSIXHomeTilde(source, activeHome string) (trustedPOSIXHomeRe
 			last = end
 			continue
 		}
+		if suffix, ok := bareHomeWord(word); ok {
+			// `find $HOME -type f -delete`, `"$HOME"/`: the home itself, as
+			// a lone ~ is (GAP-2267).
+			start, end := int(word.Pos().Offset()), int(word.End().Offset())
+			if start < last || end > len(source) {
+				return trustedPOSIXHomeRewrite{}, false
+			}
+			out.WriteString(source[last:start])
+			out.WriteString(activeHome + suffix)
+			last = end
+			rewrite.tildeOperands[activeHome+suffix] = source[start:end]
+			continue
+		}
 		literal, ok := firstLiteral(word)
 		if !ok || (literal.Value != "~" && !strings.HasPrefix(literal.Value, "~/")) {
 			if suffix, anchored := homeAnchoredLiteralWord(word); anchored &&
@@ -300,6 +313,9 @@ func staticHomeRewriteWord(word *syntax.Word) bool {
 	if plainHomeRewriteWord(word) {
 		return true
 	}
+	if _, ok := bareHomeWord(word); ok {
+		return true
+	}
 	if _, ok := findOptionHomeWord(word); ok {
 		return true
 	}
@@ -333,6 +349,49 @@ func findOptionHomeWord(word *syntax.Word) (string, bool) {
 }
 
 var findAttachedPathOption = regexp.MustCompile(`^-[EHLPXdsx]*f$`)
+
+// bareHomeWord reports a word that is the home directory itself through a
+// plain HOME parameter: $HOME, ${HOME}, "$HOME", "${HOME}", each optionally
+// followed by one "/" inside or outside the quotes. It returns that "/" or
+// "". homeAnchoredLiteralWord needs a path below the home, so these words
+// were never rewritten and a find from $HOME was not judged as one from ~
+// (GAP-2267).
+func bareHomeWord(word *syntax.Word) (string, bool) {
+	if word == nil || len(word.Parts) == 0 || len(word.Parts) > 2 {
+		return "", false
+	}
+	slash := func(part syntax.WordPart) bool {
+		literal, ok := part.(*syntax.Lit)
+		return ok && literal.Value == "/"
+	}
+	suffix := ""
+	if len(word.Parts) == 2 {
+		if !slash(word.Parts[1]) {
+			return "", false
+		}
+		suffix = "/"
+	}
+	switch first := word.Parts[0].(type) {
+	case *syntax.ParamExp:
+		if !plainHomeParameter(first) {
+			return "", false
+		}
+	case *syntax.DblQuoted:
+		if first.Dollar || len(first.Parts) == 0 || len(first.Parts) > 2 ||
+			!plainHomeParameter(first.Parts[0]) {
+			return "", false
+		}
+		if len(first.Parts) == 2 {
+			if suffix != "" || !slash(first.Parts[1]) {
+				return "", false
+			}
+			suffix = "/"
+		}
+	default:
+		return "", false
+	}
+	return suffix, true
+}
 
 func plainHomeRewriteWord(word *syntax.Word) bool {
 	if _, ok := homeAnchoredLiteralWord(word); !ok {
