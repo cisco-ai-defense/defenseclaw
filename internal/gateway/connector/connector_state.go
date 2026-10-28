@@ -1691,6 +1691,12 @@ func HookContractChangedByDefenseClawRelease(previous, current HookContractLockE
 // instead of refusing. A contract change without an agent version change is
 // not an update, and Secure Client (strict resolution) refuses every agent
 // change as before.
+//
+// A connector whose hooks are not version-gated (Kiro, HookCompatibilityNotGated)
+// has no contract for an update to leave, so its update to a readable version is
+// admitted too: a vendor self-update (kiro-cli 2.26.1 -> 2.35.1) must not stop
+// the gateway and roll an upgrade back (GAP-2427). An update to a kiro-cli below
+// KiroCLIHookFloor, or to a version that could not be read, still drifts.
 func HookContractAgentUpdateAdmitted(previous, current HookContractLockEntry) bool {
 	if strings.TrimSpace(previous.Connector) == "" || StrictHookContractResolution() {
 		return false
@@ -1699,7 +1705,30 @@ func HookContractAgentUpdateAdmitted(previous, current HookContractLockEntry) bo
 		previous.NormalizedAgentVersion == current.NormalizedAgentVersion {
 		return false
 	}
+	if current.CompatibilityStatus == HookCompatibilityNotGated {
+		return notGatedAgentUpdateAdmitted(previous, current)
+	}
 	return current.CompatibilityStatus == HookCompatibilityKnown && strings.TrimSpace(current.ContractID) != ""
+}
+
+// notGatedAgentUpdateAdmitted is HookContractAgentUpdateAdmitted for a
+// connector without a version-gated contract: neither side names a contract,
+// the new version was read, and a kiro-cli is at or above KiroCLIHookFloor.
+func notGatedAgentUpdateAdmitted(previous, current HookContractLockEntry) bool {
+	name := normalizeConnectorName(current.Connector)
+	if !catalogedOnlyConnectorsWithoutHookGate[name] || name != normalizeConnectorName(previous.Connector) ||
+		strings.TrimSpace(previous.ContractID) != "" || strings.TrimSpace(current.ContractID) != "" {
+		return false
+	}
+	normalized := strings.TrimSpace(current.NormalizedAgentVersion)
+	if normalized == "" {
+		return false
+	}
+	if name == "kiro" && !strings.HasSuffix(strings.TrimSpace(current.RawAgentVersion), KiroIDEVersionSuffix) &&
+		compareVersion(normalized, KiroCLIHookFloor) < 0 {
+		return false
+	}
+	return true
 }
 
 // AgentUnchangedSinceLock reports whether rawAgentVersion is the agent version

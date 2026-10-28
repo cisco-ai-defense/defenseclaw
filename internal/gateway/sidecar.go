@@ -8041,6 +8041,11 @@ func hookContractDriftAdmission(name string, previous, current connector.HookCon
 			name, previous.ContractID, writer, current.ContractID, current.DefenseClawVersion, current.RawAgentVersion)
 		return nil
 	}
+	if connector.HookContractAgentUpdateAdmitted(previous, current) && current.CompatibilityStatus == connector.HookCompatibilityNotGated {
+		fmt.Fprintf(os.Stderr, "[guardrail] WARNING: connector %s agent version changed from %q to %q; its hooks are not version-gated, refreshing the lock\n",
+			name, previous.RawAgentVersion, current.RawAgentVersion)
+		return nil
+	}
 	if connector.HookContractAgentUpdateAdmitted(previous, current) {
 		fmt.Fprintf(os.Stderr, "[guardrail] connector %s agent version changed from %q to %q; hook contract %s is compatible (%s), refreshing the lock\n",
 			name, previous.RawAgentVersion, current.RawAgentVersion, current.ContractID, current.CompatibilityReason)
