@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"sync/atomic"
 
 	"github.com/defenseclaw/defenseclaw/internal/observability"
 	observabilityredaction "github.com/defenseclaw/defenseclaw/internal/observability/redaction"
@@ -55,8 +56,66 @@ type deferredCallWrite struct {
 	// transaction did not commit it.
 	alone   func(ctx context.Context) error
 	outcome *CallWriteOutcome
-	ran     bool
-	done    bool
+	// report hears the final outcome of the producer's write
+	// (WithCallWriteReport).
+	report *CallWriteReport
+	ran    bool
+	done   bool
+}
+
+// CallWriteReport hands a producer the final outcome of the one
+// event-history write it made with its context while that write waited in a
+// hook call's open batch. The append returned nil at once, so the producer
+// (the local-sqlite accounting of the observability runtime) counts the
+// write delivered or lost only when settle runs: nil once the shared
+// transaction or the retry on its own committed it, the retry's error when
+// neither did (disk full, read-only store). Without it a deferred write that
+// failed was counted delivered and never reached the local write loss
+// journal (RV-ha1-1791, GAP-1129).
+type CallWriteReport struct {
+	settle   func(err error)
+	deferred atomic.Bool
+}
+
+// Deferred reports whether a write made with the report's context waits in
+// a batch; settle runs for it later, exactly once.
+func (report *CallWriteReport) Deferred() bool {
+	return report != nil && report.deferred.Load()
+}
+
+// claim takes the report for one deferred write; a second write with the
+// same context does not take it.
+func (report *CallWriteReport) claim() bool {
+	return report != nil && report.settle != nil && report.deferred.CompareAndSwap(false, true)
+}
+
+func (report *CallWriteReport) unclaim() {
+	if report != nil {
+		report.deferred.Store(false)
+	}
+}
+
+func (report *CallWriteReport) done(err error) {
+	if report != nil && report.settle != nil {
+		report.settle(err)
+	}
+}
+
+type callWriteReportKey struct{}
+
+// WithCallWriteReport returns a context whose next event-history write, if
+// it joins ctx's open batch, reports its final outcome to settle. With no
+// open batch for store it returns ctx and a nil report.
+func WithCallWriteReport(
+	ctx context.Context,
+	store *Store,
+	settle func(err error),
+) (context.Context, *CallWriteReport) {
+	if settle == nil || !CallWritesOpen(ctx, store) {
+		return ctx, nil
+	}
+	report := &CallWriteReport{settle: settle}
+	return context.WithValue(ctx, callWriteReportKey{}, report), report
 }
 
 // CallWriteOutcome is the final outcome of the event-history writes made
@@ -278,9 +337,12 @@ func (s *Store) writeCallBatch(ctx context.Context, writes []*deferredCallWrite)
 			if write.committed != nil {
 				write.committed()
 			}
+			write.report.done(nil)
 			continue
 		}
-		write.outcome.record(write.alone(groupedWriteCtx{Context: context.WithoutCancel(ctx), values: write.ctx}))
+		err := write.alone(groupedWriteCtx{Context: context.WithoutCancel(ctx), values: write.ctx})
+		write.outcome.record(err)
+		write.report.done(err)
 	}
 }
 
@@ -296,8 +358,12 @@ func (writer *EventHistoryWriter) deferAppend(
 	}
 	outcomes := make([]eventHistoryAppendOutcome, len(records))
 	outcome, _ := ctx.Value(callWriteOutcomeKey{}).(*CallWriteOutcome)
-	return batch.add(&deferredCallWrite{
-		ctx: ctx, outcome: outcome,
+	report, _ := ctx.Value(callWriteReportKey{}).(*CallWriteReport)
+	if !report.claim() {
+		report = nil
+	}
+	added := batch.add(&deferredCallWrite{
+		ctx: ctx, outcome: outcome, report: report,
 		run: func(ctx context.Context, tx *sql.Tx) error {
 			for index := range records {
 				appended, err := writer.appendContextTx(ctx, tx, records[index], projections[index])
@@ -323,6 +389,10 @@ func (writer *EventHistoryWriter) deferAppend(
 			return writer.appendBatchDirect(ctx, records, projections)
 		},
 	})
+	if !added {
+		report.unclaim()
+	}
+	return added
 }
 
 // deferObservations queues correlation observations on ctx's open batch.
