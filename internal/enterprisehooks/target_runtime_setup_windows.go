@@ -17,6 +17,8 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
+	"time"
 	"unsafe"
 
 	"github.com/defenseclaw/defenseclaw/internal/winpath"
@@ -486,7 +488,7 @@ func resolveWindowsManagedRuntimeTarget(userHome, rawSID, rawDataDir string) (wi
 }
 
 func planWindowsManagedRuntimeRoot(target windowsManagedRuntimeTarget) (WindowsManagedRuntimeRootPlan, error) {
-	parent, err := openWindowsManagedRuntimeProfile(target)
+	parent, err := openWindowsManagedRuntimeProfile(target, windowsManagedRuntimeProfileRead)
 	if err != nil {
 		return WindowsManagedRuntimeRootPlan{}, err
 	}
@@ -532,7 +534,7 @@ func stageWindowsManagedRuntimeRoot(rootPlan WindowsManagedRuntimeRootPlan, jour
 	if err != nil {
 		return claim, err
 	}
-	parent, err := openWindowsManagedRuntimeProfile(target)
+	parent, err := openWindowsManagedRuntimeProfile(target, windowsManagedRuntimeProfileMutate)
 	if err != nil {
 		return claim, err
 	}
@@ -602,7 +604,7 @@ func finalizeWindowsManagedRuntimeRoot(rootPlan WindowsManagedRuntimeRootPlan, e
 	if err != nil {
 		return claim, err
 	}
-	parent, err := openWindowsManagedRuntimeProfile(target)
+	parent, err := openWindowsManagedRuntimeProfile(target, windowsManagedRuntimeProfileMutate)
 	if err != nil {
 		return claim, err
 	}
@@ -720,7 +722,7 @@ func cleanupWindowsManagedRuntimeRoot(
 	if err != nil {
 		return claim, err
 	}
-	parent, err := openWindowsManagedRuntimeProfile(target)
+	parent, err := openWindowsManagedRuntimeProfile(target, windowsManagedRuntimeProfileMutate)
 	if err != nil {
 		return claim, err
 	}
@@ -870,34 +872,127 @@ func refreshWindowsManagedRuntimeFailedCleanupClaim(
 	return claim
 }
 
-func openWindowsManagedRuntimeProfile(target windowsManagedRuntimeTarget) (windows.Handle, error) {
-	if err := validateWindowsEnterpriseHomeAnchor(target.home, target.sid); err != nil {
-		return 0, err
+// windowsManagedRuntimeProfileAccess says what a phase will do through the
+// profile folder handle. Planning only reads; stage, finalize and cleanup
+// create, rename and delete children.
+type windowsManagedRuntimeProfileAccess int
+
+const (
+	windowsManagedRuntimeProfileRead windowsManagedRuntimeProfileAccess = iota
+	windowsManagedRuntimeProfileMutate
+)
+
+// The profile open is retried only on ERROR_SHARING_VIOLATION: EDR, DLP,
+// backup, sync and profile-manager agents, and IDE or AI-agent file watchers,
+// hold home folders open for short spells. The schedule is about 24 s per
+// open; the process-wide budget keeps many busy profiles well under the
+// installer's 300 s limit on a lifecycle helper. No line is logged per retry:
+// the installer parses the helper's merged output as one JSON report, so the
+// final error carries the attempt count and wait instead. All are variables
+// so tests can shorten them.
+var (
+	windowsManagedRuntimeProfileRetrySchedule = []time.Duration{
+		0, 250 * time.Millisecond, 500 * time.Millisecond, time.Second, 2 * time.Second,
+		4 * time.Second, 4 * time.Second, 4 * time.Second, 4 * time.Second, 4 * time.Second,
 	}
+	windowsManagedRuntimeProfileRetryBudget = 120 * time.Second
+	windowsManagedRuntimeProfileSleep       = time.Sleep
+	windowsManagedRuntimeProfileCreateFile  = windows.CreateFile
+	windowsManagedRuntimeProfileValidate    = validateWindowsEnterpriseHomeAnchor
+
+	windowsManagedRuntimeProfileRetrySpent struct {
+		sync.Mutex
+		total time.Duration
+	}
+)
+
+// windowsManagedRuntimeProfileOpenParameters returns the CreateFile access,
+// share mode and flags for a phase. Neither mode shares delete: the handle pins
+// the folder against rename or delete while it is inspected or used. Read mode
+// drops FILE_APPEND_DATA (and WRITE_THROUGH, which only matters for writes), so
+// a holder that allows reading but not writing no longer collides with
+// planning.
+func windowsManagedRuntimeProfileOpenParameters(access windowsManagedRuntimeProfileAccess) (desired, share, flags uint32) {
+	desired = windows.READ_CONTROL | windows.FILE_READ_ATTRIBUTES | windows.FILE_LIST_DIRECTORY |
+		windows.FILE_TRAVERSE | windows.SYNCHRONIZE
+	share = windows.FILE_SHARE_READ | windows.FILE_SHARE_WRITE
+	flags = windows.FILE_FLAG_BACKUP_SEMANTICS | windows.FILE_FLAG_OPEN_REPARSE_POINT
+	if access == windowsManagedRuntimeProfileMutate {
+		desired |= windows.FILE_APPEND_DATA
+		flags |= windows.FILE_FLAG_WRITE_THROUGH
+	}
+	return desired, share, flags
+}
+
+// reserveWindowsManagedRuntimeProfileRetry takes delay from the process-wide
+// retry budget and reports whether it was available.
+func reserveWindowsManagedRuntimeProfileRetry(delay time.Duration) bool {
+	spent := &windowsManagedRuntimeProfileRetrySpent
+	spent.Lock()
+	defer spent.Unlock()
+	if spent.total+delay > windowsManagedRuntimeProfileRetryBudget {
+		return false
+	}
+	spent.total += delay
+	return true
+}
+
+func openWindowsManagedRuntimeProfile(
+	target windowsManagedRuntimeTarget,
+	access windowsManagedRuntimeProfileAccess,
+) (windows.Handle, error) {
+	sid := "<unknown SID>"
+	if target.sid != nil {
+		sid = target.sid.String()
+	}
+	where := fmt.Sprintf("for %s at %s", sid, target.home)
 	extended, err := winpath.Extended(target.home)
 	if err != nil {
-		return 0, err
+		return 0, fmt.Errorf("enterprise hooks: open managed runtime profile anchor %s: %w", where, err)
 	}
 	ptr, err := windows.UTF16PtrFromString(extended)
 	if err != nil {
-		return 0, err
+		return 0, fmt.Errorf("enterprise hooks: open managed runtime profile anchor %s: %w", where, err)
 	}
-	handle, err := windows.CreateFile(
-		ptr,
-		windows.READ_CONTROL|windows.FILE_READ_ATTRIBUTES|windows.FILE_LIST_DIRECTORY|
-			windows.FILE_APPEND_DATA|windows.FILE_TRAVERSE|windows.SYNCHRONIZE,
-		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE,
-		nil,
-		windows.OPEN_EXISTING,
-		windows.FILE_FLAG_BACKUP_SEMANTICS|windows.FILE_FLAG_OPEN_REPARSE_POINT|windows.FILE_FLAG_WRITE_THROUGH,
-		0,
+	desired, share, flags := windowsManagedRuntimeProfileOpenParameters(access)
+
+	var (
+		handle   windows.Handle
+		openErr  error
+		attempts int
+		waited   time.Duration
 	)
-	if err != nil {
-		return 0, fmt.Errorf("enterprise hooks: open managed runtime profile anchor: %w", err)
+	for index, delay := range windowsManagedRuntimeProfileRetrySchedule {
+		if index > 0 {
+			if !reserveWindowsManagedRuntimeProfileRetry(delay) {
+				break
+			}
+			windowsManagedRuntimeProfileSleep(delay)
+			waited += delay
+		}
+		// Validate before every attempt: the anchor checks and the open stay in
+		// check-then-open order even across retries.
+		if err := windowsManagedRuntimeProfileValidate(target.home, target.sid); err != nil {
+			return 0, err
+		}
+		attempts++
+		handle, openErr = windowsManagedRuntimeProfileCreateFile(ptr, desired, share, nil, windows.OPEN_EXISTING, flags, 0)
+		if openErr == nil || !errors.Is(openErr, windows.ERROR_SHARING_VIOLATION) {
+			break
+		}
+	}
+	if openErr != nil {
+		if errors.Is(openErr, windows.ERROR_SHARING_VIOLATION) {
+			return 0, fmt.Errorf(
+				"enterprise hooks: open managed runtime profile anchor %s: another process has the folder open (sharing violation after %d attempts over %.1fs): %w",
+				where, attempts, waited.Seconds(), openErr,
+			)
+		}
+		return 0, fmt.Errorf("enterprise hooks: open managed runtime profile anchor %s: %w", where, openErr)
 	}
 	if err := validateWindowsGuardianACLHandle(handle, target.sid, true, false, true); err != nil {
 		_ = windows.CloseHandle(handle)
-		return 0, fmt.Errorf("enterprise hooks: reject managed runtime profile anchor: %w", err)
+		return 0, fmt.Errorf("enterprise hooks: reject managed runtime profile anchor %s: %w", where, err)
 	}
 	return handle, nil
 }
