@@ -656,9 +656,14 @@ func runWindowsEnterpriseStandaloneAction(
 			result.Noop = true
 			result.NoopReason = "not_installed"
 			result.Inspection.Local = "disabled"
+			if opts != nil && opts.purge {
+				addWindowsEnterpriseLeftoverUserStateWarning(result, false)
+			}
 			return finishWindowsEnterpriseStandalone(cmd, opts, result, 0)
 		}
 	}
+	// Read before the recovery removes the tombstone with StateRoot.
+	recoverUserStatePurge := action == "recover" && windowsEnterpriseTombstoneUserStatePurge()
 	// Repair without CONFIG= on a bundle-mode device keeps the confirmed
 	// bundle config, not an edit made outside the lifecycle (GAP-0114). The
 	// restore comes before anything else this run changes: when it fails,
@@ -739,6 +744,11 @@ func runWindowsEnterpriseStandaloneAction(
 		report = windowsEnterpriseFailureWithDeploymentState(ctx, cmd, opts, script, report)
 	}
 	applyWindowsEnterpriseInstallerReport(result, opts, report, run)
+	if recoverUserStatePurge && report.OK && !report.Installed && !report.TransactionPending && windowsEnterpriseStandaloneStateRootGone() {
+		// The killed PURGE=1 that ran the per-user purge took its result
+		// with it; the recovery that finishes it names what stays.
+		addWindowsEnterpriseLeftoverUserStateWarning(result, true)
+	}
 	applyWindowsEnterprisePolicy(ctx, result)
 	if action == "status" && report.Installed && len(unsettledBundles) > 0 {
 		// A receipt no live apply owns: a plain ensure settles it (GAP-0028,
