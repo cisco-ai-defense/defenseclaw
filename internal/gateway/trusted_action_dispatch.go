@@ -800,7 +800,7 @@ func withActiveStateTargetMention(
 		return findings
 	}
 	if !provenStateMutationPath(facts, request) && !provenBashAggregateStateWrite(request) &&
-		!provenHomeRedirectStateWrite(request) {
+		!provenShellRedirectStateWrite(request) {
 		return findings
 	}
 	const ruleID = "tamper.detector_state_write"
@@ -814,15 +814,18 @@ func withActiveStateTargetMention(
 		Confidence: rule.Confidence, Tags: append([]string(nil), rule.Tags...),
 		Evidence: trustedActionInputText(request.Input, ""), LineNumber: 1,
 	}
-	if index >= 0 {
-		finding = findings[index]
+	if index >= 0 && findings[index].contributesToEnforcement() && findings[index].proof.authorizes(ruleID) &&
+		(findings[index].proof.kind == findingProofActionFactsSemantic ||
+			findings[index].proof.kind == findingProofActionFactsSubgraph) {
 		// Keep the stronger ActionFacts proof of an actual state mutation.
-		if finding.contributesToEnforcement() && finding.proof.authorizes(ruleID) &&
-			(finding.proof.kind == findingProofActionFactsSemantic ||
-				finding.proof.kind == findingProofActionFactsSubgraph) {
-			return findings
-		}
+		return findings
+	}
+	if index >= 0 && findings[index].disposition == findingDispositionUnspecified &&
+		!slices.Contains(findings[index].Tags, trustedParserUncertaintyTag) {
+		finding = findings[index]
 	} else {
+		// A parser-uncertainty or audit-only finding of the rule is replaced
+		// by the rule itself: the mutation is proven ($CMD > ~/f, GAP-2225).
 		finding = adjustConfidence(request.Input.Tool, finding)
 	}
 	finding.enforcement = findingEnforcementDetectionOnly
@@ -862,15 +865,15 @@ func provenBashAggregateStateWrite(request trustedActionRequest) bool {
 	return provenStateMutationPath(actionfacts.Analyze(input), twin)
 }
 
-// provenHomeRedirectStateWrite judges the command with the home spelling of
-// each output redirect target written as the active home (~/f, $HOME/f,
-// "$HOME"/f, /home/$USER/f): the shell expands the target from HOME and
-// opens it before it runs the program, whatever the program is, whatever
-// its other words expand to, and on either side of a plain && or || list,
-// so a home-spelled target is the write its absolute spelling is
-// (GAP-2225, GAP-2268, GAP-2298). The Bash reading of an all-output
-// redirect is judged the same way.
-func provenHomeRedirectStateWrite(request trustedActionRequest) bool {
+// provenShellRedirectStateWrite judges each output redirect target the
+// shell opens (actionfacts.ShellRedirectTargets: a literal absolute path or
+// a home spelling written as the active home) as the command-less redirect
+// ": > target": the shell opens the target before it runs the command,
+// whatever the program word is, whatever its other words expand to, for
+// every operator that opens the file for writing and in Bash-only syntax,
+// so the target is the write its absolute spelling is (GAP-2225, GAP-2268,
+// GAP-2298).
+func provenShellRedirectStateWrite(request trustedActionRequest) bool {
 	if request.Input.DialectHint != actionfacts.DialectPOSIX && request.Input.DialectHint != "" {
 		return false
 	}
@@ -878,19 +881,36 @@ func provenHomeRedirectStateWrite(request trustedActionRequest) bool {
 	if !known {
 		return false
 	}
-	spellings := []string{command}
-	if aggregate, ok := actionfacts.BashAggregateRedirectsAsPOSIX(command); ok {
-		spellings = append(spellings, aggregate)
+	targets, ok := actionfacts.ShellRedirectTargets(command, request.Input.ActiveHome)
+	if !ok {
+		return false
 	}
-	for _, spelling := range spellings {
-		absolute, ok := actionfacts.HomeRedirectTargetsAsAbsolute(spelling, request.Input.ActiveHome)
-		if !ok {
+	for _, target := range targets {
+		if strings.ContainsAny(target, "'\n") {
 			continue
 		}
 		input := request.Input
-		input.Command, input.Args, input.Argv = absolute, nil, nil
+		input.Command, input.Args, input.Argv = ": > '"+target+"'", nil, nil
+		input.DialectHint = actionfacts.DialectPOSIX
 		twin := request
 		twin.Input = input
+		if !strings.HasPrefix(target, "/") {
+			// A drive path below a Windows home (Git Bash): the POSIX reading
+			// places it as a relative word, so the twin carries the physical
+			// target the gateway resolves for it, as a hook target map does.
+			if request.SkipLocalFilesystemResolution || request.ProtectedHomeHook {
+				continue
+			}
+			physical, ok := hookpaths.ResolveWriteTarget(target)
+			if !ok {
+				continue
+			}
+			twin.ResolvedWriteTargets = make(map[string]string, len(request.ResolvedWriteTargets)+1)
+			for spelling, value := range request.ResolvedWriteTargets {
+				twin.ResolvedWriteTargets[spelling] = value
+			}
+			twin.ResolvedWriteTargets[target] = physical
+		}
 		if provenStateMutationPath(actionfacts.Analyze(input), twin) {
 			return true
 		}
