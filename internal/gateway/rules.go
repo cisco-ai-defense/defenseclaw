@@ -1052,7 +1052,9 @@ func scanRuleCategoriesWithOptions(
 		seen[findings[i].RuleID] = true
 	}
 
-	// Scan raw text first
+	// Scan raw text first. Rules whose required literals are absent are
+	// skipped without running their regex (rule_prefilter.go).
+	rawScan := newRulePrefilterText(text)
 	for categoryIndex := range generation.categories {
 		cat := &generation.categories[categoryIndex]
 		categoryAllowed := options.allowsCategory(cat.Name)
@@ -1073,7 +1075,7 @@ func scanRuleCategoriesWithOptions(
 			if seen[rule.ID] {
 				continue
 			}
-			loc := firstAcceptedRuleMatch(*rule, text)
+			loc := firstAcceptedRuleMatchIn(*rule, rawScan)
 			if loc == nil {
 				continue
 			}
@@ -1100,6 +1102,7 @@ func scanRuleCategoriesWithOptions(
 	// Scan normalized text to catch shell obfuscation
 	normalized := normalizeShell(text)
 	if normalized != text {
+		normalizedScan := newRulePrefilterText(normalized)
 		for categoryIndex := range generation.categories {
 			cat := &generation.categories[categoryIndex]
 			categoryAllowed := options.allowsCategory(cat.Name)
@@ -1117,7 +1120,7 @@ func scanRuleCategoriesWithOptions(
 				if seen[rule.ID] {
 					continue // already found on raw pass
 				}
-				loc := firstAcceptedRuleMatch(*rule, normalized)
+				loc := firstAcceptedRuleMatchIn(*rule, normalizedScan)
 				if loc == nil {
 					continue
 				}
