@@ -2244,19 +2244,19 @@ func claudeCodeOtelValueLooksManaged(key string, value interface{}, managed stri
 	}
 }
 
-// claudeCodeEnvIsEarlierReleaseRender reports whether value is exactly what a
-// 1.0.3 or older per-user setup wrote for key: the fail-mode carrier with the
-// saved mode, and the protocol, service name and resource attributes of its
-// native telemetry block. Endpoints and headers are not listed: a credential
-// on them is removed by the product-credential pass, and without one they are
-// the user's.
+// claudeCodeEnvIsEarlierReleaseRender reports whether value is exactly what an
+// earlier per-user setup wrote for key: the fail-mode carrier (open or closed,
+// see claudeCodeEarlierReleaseFailModes), and the protocol, service name and
+// resource attributes of its native telemetry block. Endpoints and headers
+// are not listed: a credential on them is removed by the product-credential
+// pass, and without one they are the user's.
 func claudeCodeEnvIsEarlierReleaseRender(key string, value interface{}, opts SetupOpts) bool {
 	got, _ := value.(string)
 	if got == "" {
 		return false
 	}
 	if key == "DEFENSECLAW_FAIL_MODE" {
-		return got == claudeCodeEarlierReleaseFailMode(opts)
+		return claudeCodeEarlierReleaseFailModes[got]
 	}
 	switch {
 	case key == "OTEL_SERVICE_NAME",
@@ -2269,15 +2269,14 @@ func claudeCodeEnvIsEarlierReleaseRender(key string, value interface{}, opts Set
 	}
 }
 
-// claudeCodeEarlierReleaseFailMode is the DEFENSECLAW_FAIL_MODE value a
-// 1.0.3 or older per-user setup wrote into the Claude env for opts: the saved
-// hook fail mode, open when none is saved.
-func claudeCodeEarlierReleaseFailMode(opts SetupOpts) string {
-	if strings.TrimSpace(opts.HookFailMode) == "" {
-		return "open"
-	}
-	return normalizeHookFailMode(opts.HookFailMode)
-}
+// claudeCodeEarlierReleaseFailModes are the DEFENSECLAW_FAIL_MODE values an
+// earlier per-user setup wrote into the Claude env: 1.0.2 and 1.0.3 the saved
+// hook fail mode (open when none was saved), 1.0.4 always closed. So after a
+// rollback pair either value can be back under any saved mode (GAP-2388: open
+// on macOS; GAP-2460: closed on Linux under a saved open). Both are exactly
+// what normalizeHookFailMode returns; any other spelling is the user's and
+// stays.
+var claudeCodeEarlierReleaseFailModes = map[string]bool{"open": true, "closed": true}
 
 // claudeCodeEarlierReleaseEnv lists Claude env values that earlier releases
 // wrote and the current profile renders differently. 0.8.x turned prompt
