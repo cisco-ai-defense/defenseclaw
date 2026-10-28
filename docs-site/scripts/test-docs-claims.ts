@@ -1669,6 +1669,8 @@ const r105Rows: DocRow[] = [
   { gap: "GAP-2099", page: "support-matrix.mdx", has: ["the guardian rewrites, within seconds, the records that no longer match the live registration", "Records that still match stay byte for byte as restored."], lacks: ["the guardian and gateway rewrite them at the next check", "the running guardian rewrites them within minutes"] },
   // pod docs it2 (2026-10-28)
   { gap: "GAP-2257", page: "connectors/codex.mdx", section: "Setup", has: ["On a terminal it still asks: `Select mode (1, 2) [2]:` with the current mode as the default (Enter keeps it)", "`Codex is already configured; re-apply its hooks (mode=action)? [Y/n]:`", "`Add LLM judge on top of rule scanning? [y/N]:`", "`--yes` skips the questions and keeps the current mode"] },
+  // pod docs it3 (2026-10-28)
+  { gap: "GAP-2334", page: "enterprise/mdm/linux-config-management.mdx", section: "Check health", has: ["| Kit detection script | `packaging/mdm/linux/detect.sh --require-healthy` (exit `1`, or `unhealthy` with `--format value`, when `verify` reports a problem or `security_complete` is `false`: a host whose `verify` passes with incomplete security still fails it, and the message says which) |"], lacks: ["| Kit detection script | `packaging/mdm/linux/detect.sh --require-healthy` |"] },
 ];
 
 function pageSection(name: string, heading?: string): string {
@@ -2052,6 +2054,15 @@ describe('edge-connector setup prompts and sudo refusal match the CLI (GAP-2221)
     assert.ok(py.includes('subprocess.run(["sudo", "install", "-d", "-m", "700", str(svc_env_path.parent)], check=True)'), 'service env is no longer written through sudo: re-check edge-connector/install.mdx');
     assert.ok(py.includes('f"Could not provision {name} in {svc_env_path}; Edge setup is incomplete"'), 'sudo refusal text changed: re-check edge-connector/install.mdx');
     assert.ok(py.indexOf('Edge setup is incomplete') < py.indexOf('_enable_fleet_config(ctx.obj.cfg.data_dir)'), 'Fleet is enabled before the service env is written: re-check "Fleet stays off" in edge-connector/install.mdx');
+  });
+});
+
+// GAP-2334: detect.sh --require-healthy fails on security_complete false as
+// well as on a verify problem; the Linux config-management page says so.
+describe('kit detect.sh health gate matches the Linux Check health row (GAP-2334)', () => {
+  it('fails on a verify problem and on incomplete security', () => {
+    const detect = source('packaging/mdm/linux/detect.sh');
+    assert.ok(detect.includes('dc_json_true "$verify" ok || dc_report 0 unhealthy') && detect.includes('dc_json_true "$verify" security_complete || dc_report 0 unhealthy "verify reported incomplete security'), 'detect.sh --require-healthy gate changed: re-check enterprise/mdm/linux-config-management.mdx Check health');
   });
 });
 
