@@ -358,7 +358,7 @@ func newWindowsManagedHooksTeardownCommand() *cobra.Command {
 		Short:  "Transactionally revoke managed hook machine wiring",
 		Hidden: true,
 	}
-	for _, action := range []string{"prepare", "verify", "rollback", "finalize"} {
+	for _, action := range []string{"prepare", "verify", "rollback", "finalize", "check"} {
 		action := action
 		var jsonOutput bool
 		var purgeContractLocks bool
@@ -576,6 +576,10 @@ type windowsManagedHooksTeardownCapabilities struct {
 	Action                     string `json:"action"`
 	OK                         bool   `json:"ok"`
 	CommittedStandalonePrepare bool   `json:"committed_standalone_prepare"`
+	// PrecommitCheck says the helper accepts the read-only "check" action:
+	// a standalone uninstall asks it before its tombstone commits whether
+	// the post-commit prepare would accept this deployment (GAP-0571).
+	PrecommitCheck bool `json:"precommit_check"`
 }
 
 func newWindowsManagedHooksTeardownCapabilitiesCommand() *cobra.Command {
@@ -592,6 +596,7 @@ func newWindowsManagedHooksTeardownCapabilitiesCommand() *cobra.Command {
 				Action:                     "capabilities",
 				OK:                         true,
 				CommittedStandalonePrepare: true,
+				PrecommitCheck:             true,
 			}
 			if jsonOutput {
 				return json.NewEncoder(cmd.OutOrStdout()).Encode(report)
@@ -631,7 +636,7 @@ func runWindowsManagedHooksTeardown(
 		return report, err
 	}
 	if action != "prepare" && action != "verify" && action != "rollback" &&
-		action != "finalize" {
+		action != "finalize" && action != "check" {
 		return fail(fmt.Errorf("unsupported managed-hook teardown action %q", action))
 	}
 	// Authorization intentionally precedes protected layout discovery.
@@ -844,6 +849,17 @@ func runWindowsManagedHooksTeardown(
 			report.VerifiedCleanCount = report.TargetCount
 			report.SucceededCount = report.TargetCount
 		}
+	case "check":
+		// Read-only (GAP-0571): the guardian evidence above, the installed
+		// enrollment and the runtime selectors are what the post-commit
+		// prepare authenticates. A standalone uninstall asks this before its
+		// tombstone commits, so a deployment that prepare would refuse stays
+		// fully installed instead of being left half-uninstalled.
+		err = windowsManagedHooksTeardownCheckReady(opts, identity)
+		if err == nil {
+			report.VerifiedInstalledCount = report.TargetCount
+			report.SucceededCount = report.TargetCount
+		}
 	case "verify":
 		var journal windowsManagedHooksTeardownJournal
 		journal, err = readWindowsManagedHooksTeardownJournal(report.JournalPath)
@@ -1034,6 +1050,30 @@ func windowsManagedHooksTeardownValidationAction(
 		return "", false, fmt.Errorf("inspect pending managed-hook transaction: %w", err)
 	}
 	return "finalize", true, nil
+}
+
+// windowsManagedHooksTeardownCheckReady runs, without any write, the
+// installed-state checks prepareWindowsManagedHooksTeardown makes before its
+// first mutation (GAP-0571). Tests replace it.
+var windowsManagedHooksTeardownCheckReady = checkWindowsManagedHooksTeardownReady
+
+func checkWindowsManagedHooksTeardownReady(
+	opts connector.WindowsCodexMachineRequirementsOptions,
+	identity windowsManagedHooksTeardownJournal,
+) error {
+	if err := verifyWindowsManagedHooksTeardownInstalled(opts, identity, nil); err != nil {
+		return err
+	}
+	selectorTargets, err := captureWindowsManagedHooksRuntimeSelectors(
+		identity.Targets,
+		identity.PendingTargets,
+		identity.HookBinary,
+		identity.ActivationState,
+	)
+	if err != nil {
+		return err
+	}
+	return verifyWindowsManagedHooksTeardownInstalled(opts, identity, selectorTargets)
 }
 
 func prepareWindowsManagedHooksTeardown(
@@ -2014,7 +2054,7 @@ func validateWindowsManagedHooksTeardownDeployment(
 	targetCount int,
 ) (windowsManagedHooksActivationRecord, error) {
 	switch action {
-	case "prepare", "verify", "rollback":
+	case "prepare", "verify", "rollback", "check":
 		// A rollback runs only after the transaction restore has put the exact
 		// installed metadata preimage back in place. Accept the legacy omitted
 		// installed flag as active, but never let an inactive tombstone authorize

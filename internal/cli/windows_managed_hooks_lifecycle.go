@@ -1337,7 +1337,21 @@ func validateWindowsManagedHooksGuardianActivation(
 		_, untrustedFolder := enterpriseHookSignedOutUntrustedFolder(row, target.DataDir)
 		waiting := target.Deferred && (enterpriseHookAwaitingSignInError(row) || untrustedFolder)
 		if row.OK == row.Pending && !waiting {
-			return nil, errors.New("protected Guardian state contains an ambiguous target disposition")
+			// Name the row and the guardian's own error so the refusal says
+			// what to repair (GAP-0571).
+			detail := strings.TrimSpace(row.Error)
+			if len(detail) > 300 {
+				detail = detail[:300] + "..."
+			}
+			if detail == "" {
+				detail = "no error recorded"
+			}
+			return nil, fmt.Errorf(
+				"protected Guardian state contains an ambiguous target disposition: %s target %s is neither protected nor pending (%s)",
+				target.Connector,
+				target.SID,
+				detail,
+			)
 		}
 		if home := strings.TrimSpace(row.UserHome); home != "" &&
 			!sameWindowsEnterprisePathCLI(home, filepath.Dir(target.DataDir)) {

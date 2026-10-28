@@ -21723,10 +21723,14 @@ function Test-DefenseClawManagedHooksCommittedTeardownSupported {
         those releases did: a newer Setup's /uninstall of an older deployment
         never commits a tombstone that no helper can finish. Anything but one
         well-formed report that says so counts as an older helper.
+        -Capability precommit_check asks instead whether the helper accepts
+        the read-only "check" action (GAP-0571).
     #>
     param(
         [Parameter(Mandatory)][hashtable]$Layout,
-        [Parameter(Mandatory)][string]$GatewayServiceName
+        [Parameter(Mandatory)][string]$GatewayServiceName,
+        [ValidateSet('committed_standalone_prepare', 'precommit_check')]
+        [string]$Capability = 'committed_standalone_prepare'
     )
     $probe = Invoke-DefenseClawGatewayCommand `
         -Layout $Layout `
@@ -21755,16 +21759,16 @@ function Test-DefenseClawManagedHooksCommittedTeardownSupported {
         return $false
     }
     $report = $reports[0]
-    foreach ($name in @('schema_version', 'action', 'ok', 'committed_standalone_prepare')) {
+    foreach ($name in @('schema_version', 'action', 'ok', $Capability)) {
         if ($null -eq $report.PSObject.Properties[$name]) {
             return $false
         }
     }
+    $flag = $report.PSObject.Properties[$Capability].Value
     return (
         [string]$report.action -ceq 'capabilities' -and
         $report.ok -is [bool] -and $report.ok -and
-        $report.committed_standalone_prepare -is [bool] -and
-        $report.committed_standalone_prepare
+        $flag -is [bool] -and $flag
     )
 }
 
@@ -21861,7 +21865,7 @@ function Invoke-DefenseClawManagedHooksTeardownCommand {
         [Parameter(Mandatory)][string]$GatewayServiceName,
         [Parameter(Mandatory)][string]$GuardianServiceName,
         [Parameter(Mandatory)]
-        [ValidateSet('prepare', 'verify', 'rollback', 'finalize')]
+        [ValidateSet('prepare', 'verify', 'rollback', 'finalize', 'check')]
         [string]$Action,
         [switch]$PurgeContractLocks
     )
@@ -37487,6 +37491,31 @@ function Invoke-DefenseClawUninstallLifecycle {
             -Layout $Layout `
             -GatewayServiceName $GatewayServiceName)
     )
+    # GAP-0571: the post-commit prepare authenticates the guardian evidence,
+    # the enrollment and the runtime selectors and refuses anything it cannot
+    # bind (a failed guardian row, a selector it cannot read). Ask the same
+    # helper the same questions, read-only, while nothing has changed: a
+    # refusal then leaves the deployment fully installed and says what to
+    # repair, instead of a committed tombstone that every retry refuses.
+    if ($postCommitHookTeardown -and
+        (Test-DefenseClawManagedHooksCommittedTeardownSupported `
+            -Layout $Layout `
+            -GatewayServiceName $GatewayServiceName `
+            -Capability precommit_check)) {
+        try {
+            [void](Invoke-DefenseClawManagedHooksTeardownCommand `
+                -Layout $Layout `
+                -GatewayServiceName $GatewayServiceName `
+                -GuardianServiceName $GuardianServiceName `
+                -Action check)
+        }
+        catch {
+            throw ("The uninstall stopped before it removed anything; DefenseClaw is still installed. " +
+                "The hook removal it runs after the commit would refuse this deployment: " +
+                "$($_.Exception.Message). Repair that (run Setup /repair, or undo the change to the file it names), " +
+                "then run the uninstall again.")
+        }
+    }
     # The native InstallRoot seal/delete (#1068) admits only the Secure Client
     # tree and its single gateway socket. Standalone keeps the PowerShell
     # removal that knows its sensor-helper sockets and plugin folders.

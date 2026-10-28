@@ -1432,6 +1432,13 @@ func TestWindowsManagedHooksTeardownReportsCommittedStandalonePrepare(t *testing
 		report["ok"] != true || report["committed_standalone_prepare"] != true {
 		t.Fatalf("capabilities report = %v", report)
 	}
+	// GAP-0571: the read-only check an uninstall asks before its commit.
+	if report["precommit_check"] != true {
+		t.Fatalf("capabilities report does not offer the precommit check: %v", report)
+	}
+	if child, _, err := command.Find([]string{"check"}); err != nil || child == nil || child.Name() != "check" {
+		t.Fatalf("teardown-managed-hooks has no check action: %v", err)
+	}
 	// The committed preparation it reports is the one the validation admits.
 	installed := false
 	metadata := windowsCodexDeploymentMetadata{Installed: &installed}
