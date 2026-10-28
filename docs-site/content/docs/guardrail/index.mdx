@@ -168,7 +168,7 @@ Telemetry redaction is configured per destination with `defenseclaw setup redact
 
 You choose how strict it is per agent with a mode:
 
-- **Observe** records policy findings without enforcing them. Start here.
+- **Observe** records policy findings without enforcing them. Start here. One exception: an agent that changes DefenseClaw's own files, such as a copy into `~/.defenseclaw`, is blocked in every mode (rule `tamper.detector_state_write`; the permissive pack only reports it).
 - **Action** applies the block and alert levels below.
 - **Human approval (HITL)** is an option in action mode. A risky call below the block level pauses and asks you first, on agents that can ask.
 

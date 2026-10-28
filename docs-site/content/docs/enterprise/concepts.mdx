@@ -338,7 +338,8 @@ See [Health fields](/docs/enterprise/operations#health-fields).
 ### Observe and action modes
 
 `guardrail.mode`. In `observe` mode policy verdicts never block and DefenseClaw
-records what it would have blocked. In `action` mode it enforces. The
+records what it would have blocked. The one exception is an agent that changes
+DefenseClaw's own files: that is blocked in every mode. In `action` mode it enforces. The
 deployment's own checks apply in both modes. You can also set the mode per agent
 under `guardrail.connectors`.
 
