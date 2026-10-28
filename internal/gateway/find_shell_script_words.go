@@ -26,6 +26,65 @@ var findScriptRefusedPrograms = map[string]struct{}{
 	"env": {}, "nice": {}, "nohup": {}, "sudo": {}, "doas": {}, "su": {}, "runuser": {},
 	"timeout": {}, "stdbuf": {}, "ionice": {}, "time": {}, "chroot": {}, "xargs": {}, "parallel": {},
 	"flock": {}, "script": {}, "watch": {}, "setsid": {}, "unshare": {}, "systemd-run": {}, "sg": {},
+	"taskset": {}, "chrt": {}, "prlimit": {}, "numactl": {}, "setpriv": {}, "nsenter": {}, "strace": {},
+	"ltrace": {}, "cgexec": {}, "firejail": {}, "bwrap": {}, "sandbox-exec": {}, "caffeinate": {}, "arch": {},
+}
+
+// findProgramRunners start their other words as a program: a wrapper with
+// its options and their values (`nice -n 5`, `timeout -s KILL 60`,
+// `taskset 1`) may stand before the program it runs (pod check14 30(c)).
+var findProgramRunners = map[string]struct{}{
+	"env": {}, "nice": {}, "nohup": {}, "sudo": {}, "doas": {}, "su": {}, "runuser": {},
+	"timeout": {}, "stdbuf": {}, "ionice": {}, "time": {}, "chroot": {}, "xargs": {}, "parallel": {},
+	"exec": {}, "command": {}, "builtin": {},
+	"flock": {}, "script": {}, "watch": {}, "setsid": {}, "unshare": {}, "systemd-run": {}, "sg": {},
+	"taskset": {}, "chrt": {}, "prlimit": {}, "numactl": {}, "setpriv": {}, "nsenter": {}, "strace": {},
+	"ltrace": {}, "cgexec": {}, "firejail": {}, "bwrap": {}, "sandbox-exec": {}, "caffeinate": {}, "arch": {},
+}
+
+// findWordMayRunAsProgram reports a word of an -exec command that the
+// command may run as a program: the first word, a word after an
+// environment assignment, or any word after a program runner, whatever
+// options and values stand between them (`-execdir nice -n 5 flock L -c
+// SCRIPT`, pod check14 30(c)). A word of a program that only reads its
+// words (`grep -l su {}`) is not one.
+func findWordMayRunAsProgram(words []string, index int) bool {
+	if index == 0 || strings.Contains(words[index-1], "=") {
+		return true
+	}
+	for _, word := range words[:index] {
+		if _, runner := findProgramRunners[findProgramName(word)]; runner {
+			return true
+		}
+	}
+	return false
+}
+
+// findStripMark follows the "$1" a %/%% suffix strip renders as, until
+// findSuffixStripsStayInName checks the text after it.
+const findStripMark = "\x00"
+
+// findSuffixStripsStayInName reports that every %/%% suffix strip of a
+// rendered word is followed by literal text that keeps it a sibling name
+// in the entry's directory (`${1%.wav}.mp3`). A strip at the end of the
+// word may remove the whole name (`find ~ -name h.txt` with `${1%h.txt}`
+// is the home directory, a dotfile named `.wav` makes `${1%.wav}` its
+// directory), and text with '/', a glob, an expansion or only dots after
+// it leaves the entry's name (`${1%a.log}../hooks`), so those are not
+// read here (pod check14 row 29).
+func findSuffixStripsStayInName(text string) bool {
+	for {
+		index := strings.Index(text, findStripMark)
+		if index < 0 {
+			return true
+		}
+		rest := text[index+len(findStripMark):]
+		if rest == "" || strings.Trim(rest, ".") == "" || strings.ContainsAny(rest, "/*?[$`\\") ||
+			strings.Contains(rest, findStripMark) {
+			return false
+		}
+		text = rest
+	}
 }
 
 // findCommandStringPrograms run a command line given as one of their own
@@ -299,7 +358,11 @@ func findRenderScriptWord(word *syntax.Word, bound map[string]bool) (text string
 			out.WriteString(value)
 		}
 	}
-	return out.String(), glob, true
+	text = out.String()
+	if !findSuffixStripsStayInName(text) {
+		return "", false, false
+	}
+	return strings.ReplaceAll(text, findStripMark, ""), glob, true
 }
 
 // findRenderEntryExpansion renders a parameter or command substitution
@@ -334,6 +397,9 @@ func findRenderEntryExpansion(part syntax.WordPart, bound map[string]bool) (stri
 			if glob || strings.ContainsAny(pattern, "/$") {
 				return "", false
 			}
+			// A literal strip may still remove the whole name, so the
+			// text after it is checked (findSuffixStripsStayInName).
+			return "$1" + findStripMark, true
 		case syntax.RemSmallPrefix, syntax.RemLargePrefix:
 		default:
 			return "", false

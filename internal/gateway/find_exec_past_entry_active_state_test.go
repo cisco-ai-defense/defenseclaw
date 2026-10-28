@@ -126,6 +126,29 @@ func TestFindCleanupNamesHoldOnlyForACommandOnTheEntry(t *testing.T) {
 		{"B7 home sh assign entry", `find ~ -name '*.wav' -exec sh -c 'f="$1"; cp "$f" "${f%.wav}.mp3"' _ {} \;`, false, ""},
 		{"home grep word su", `find ~ -name '*.txt' -exec grep -l su {} +`, false, ""},
 		{"home sh assign other", `find ~ -name '*.zzz' -exec sh -c 'f="$1"; f="${f%/*}"; rm -rf "$f"' _ {} \;`, true, ""},
+		// pod check14 30(c): a runner with option and value words before a
+		// command-string program or a shell.
+		{"R9c logs execdir nice opts flock", `find ~/.defenseclaw/logs -name '*.log' -execdir nice -n 5 flock /tmp/zzl -c 'cd .\.; rm -rf hooks' \;`, true, ""},
+		{"R9d logs execdir timeout flock", `find ~/.defenseclaw/logs -name '*.log' -execdir timeout 60 flock /tmp/zzl -c 'cd .\.; rm -rf hooks' \;`, true, ""},
+		{"R9e logs execdir stdbuf flock", `find ~/.defenseclaw/logs -name '*.log' -execdir stdbuf -oL flock /tmp/zzl -c 'cd .\.; rm -rf hooks' \;`, true, ""},
+		{"R9f logs execdir ionice flock", `find ~/.defenseclaw/logs -name '*.log' -execdir ionice -c 3 flock /tmp/zzl -c 'cd .\.; rm -rf hooks' \;`, true, ""},
+		{"R9g logs execdir taskset flock", `find ~/.defenseclaw/logs -name '*.log' -execdir taskset 1 flock /tmp/zzl -c 'cd .\.; rm -rf hooks' \;`, true, ""},
+		{"R9h logs execdir chrt flock", `find ~/.defenseclaw/logs -name '*.log' -execdir chrt -i 0 flock /tmp/zzl -c 'cd .\.; rm -rf hooks' \;`, true, ""},
+		{"R9i logs execdir env -i flock", `find ~/.defenseclaw/logs -name '*.log' -execdir env -i flock /tmp/zzl -c 'cd .\.; rm -rf hooks' \;`, true, ""},
+		{"R9j logs execdir nice -n5 flock", `find ~/.defenseclaw/logs -name '*.log' -execdir nice -n5 flock /tmp/zzl -c 'cd .\.; rm -rf hooks' \;`, true, ""},
+		{"R9k logs execdir timeout script", `find ~/.defenseclaw/logs -name '*.log' -execdir timeout -s KILL 60 script -qc 'cd .\.; rm -rf hooks' /dev/null \;`, true, ""},
+		{"R9l logs execdir nice opts bash file", `find ~/.defenseclaw/logs -name '*.log' -execdir nice -n 5 bash ./zz.sh \;`, true, ""},
+		{"logs execdir nice opts gzip", `find ~/.defenseclaw/logs -name '*.log' -execdir nice -n 5 gzip {} \;`, false, ""},
+		{"proj execdir flock cat", `find ~/proj -name '*.txt' -execdir flock /tmp/l cat {} \;`, false, ""},
+		// pod check14 row 29: a literal suffix strip that can remove the
+		// whole name leaves the entry's directory.
+		{"R21h home sh strip whole name", `find ~ -maxdepth 1 -name h.txt -exec sh -c 'rm -rf "${1%h.txt}"' _ {} \;`, true, ""},
+		{"R21k home sh strip ext bare", `find ~ -name '*.zzz' -exec sh -c 'rm -rf "${1%.zzz}"' _ {} \;`, true, ""},
+		{"R21l logs sh strip then dotdot", `find ~/.defenseclaw/logs -name a.log -exec sh -c 'rm -rf "${1%a.log}../hooks"' _ {} \;`, true, ""},
+		{"R21m home sh strip then dot", `find ~ -maxdepth 1 -name h.txt -exec sh -c 'rm -rf "${1%h.txt}".' _ {} \;`, true, ""},
+		{"R21n home sh strip then glob", `find ~ -maxdepth 1 -name h.txt -exec sh -c 'rm -rf "${1%h.txt}".d*' _ {} \;`, true, ""},
+		{"R21o root sh strip sibling hooks", `find ~/.defenseclaw -maxdepth 1 -name x.log -exec sh -c 'rm -rf "${1%x.log}hooks"' _ {} \;`, true, ""},
+		{"home sh strip txt bak", `find ~ -name '*.txt' -exec sh -c 'cp "$1" "${1%.txt}.bak"' _ {} \;`, false, ""},
 	}
 	for index := range rows {
 		rows[index].command = strings.ReplaceAll(rows[index].command, "<HOME>", home)
