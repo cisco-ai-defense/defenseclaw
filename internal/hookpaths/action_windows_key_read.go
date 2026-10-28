@@ -387,8 +387,8 @@ func actionWindowsExpressionBodies(text string, plain, hereBody bool, bodies []s
 			f := frame{open: i + 1}
 			if plain {
 				prev := strings.TrimRight(text[:i], " \t")
-				f.notSubexp = !(i > 0 && text[i-1] == '$' || prev == "" ||
-					strings.IndexByte(";|&(\r\n", prev[len(prev)-1]) >= 0)
+				f.notSubexp = (i == 0 || text[i-1] != '$') && prev != "" &&
+					strings.IndexByte(";|&(\r\n", prev[len(prev)-1]) < 0
 				f.arith = !f.notSubexp && i+1 < len(text) && text[i+1] == '('
 				if f.arith {
 					arith++
