@@ -1423,6 +1423,11 @@ describe('Known limits by lead decision (rel-1-0-4 P1 reconcile)', () => {
 // heading of the page; the row reads only that section and its subsections.
 type DocRow = { gap: string; page: string; section?: string; has?: string[]; lacks?: string[] };
 const r105Rows: DocRow[] = [
+  { gap: "GAP-2347", page: "connectors/hermes.mdx", has: ["on a per-user install it is reported as a `guardrail-degraded` alert when the gateway starts again. A managed gateway raises no such alert"], lacks: ["`~/.defenseclaw/logs/hook-failures.jsonl` and reported as a `guardrail-degraded` alert"] },
+  { gap: "GAP-0515", page: "enterprise/foreign-hook-guard.mdx", section: "Which connectors it covers", has: ["| Hermes | On Linux and macOS, unless `foreign_hooks: allow` |", "The Windows Hermes registration does not run the guard."] },
+  { gap: "GAP-0515", page: "reference/fail-modes.mdx", has: ["the guard checks the session of Copilot calls on every OS and of Hermes calls on Linux and macOS with the gateway", "and to Hermes on Linux and macOS"], lacks: ["Amp and Hermes need the gateway's session record"] },
+  { gap: "GAP-2330", page: "reference/index.mdx", has: ["Map each `fail` and `warn` check by its label or message. The table below has the common ones; for any other row, run the `Next step:` line doctor prints under it"], lacks: ["to an entry on [Troubleshooting](/docs/get-started/upgrade) by its label"] },
+  { gap: "GAP-2333", page: "connectors/capability-matrix.mdx", has: ["| Family | `proxyConnectors` and `IsProxyConnector()` in `internal/gateway/connector/platform_support.go`"], lacks: ["RoutingConnector"] },
   { gap: "GAP-2240", page: "policies/defaults.mdx", has: ["Available policies: * default [built-in] [active] Balanced security policy", "Activate a policy: defenseclaw policy activate <name> Show details: defenseclaw policy show <name>", "`*` and `[active]` mark the active preset."], lacks: ["Available policies: default [built-in]"] },
   { gap: "GAP-2247", page: "scanning/mcp-scanner.mdx", has: ["| `analyzers` | unset, read back as `auto` | The analyzers to run. Unset (`config get` prints `auto`) and `[]` both mean YARA, plus the LLM judge when it is ready. |"], lacks: ["| `analyzers` | `[]` (auto) |"] },
   { gap: "GAP-2293", page: "reference/cli.mdx", section: "Managed devices and exit code 3", has: ["`config set` prints `This device is managed: change config.yaml in the admin config (MDM or management plane); config set did not change it`", "no `version` command (run `defenseclaw.exe --version`) and no `policy activate`", "`connector list-backups`, exit `1` with `this computer's DefenseClaw is managed by your organization`", "(the Windows package has no `policy activate`; see below)"], lacks: ["`rollback` with a note that the computer is managed, refuses `config set`,"] },
@@ -1721,6 +1726,90 @@ describe('identity-entra-id callouts appear once (GAP-2193)', () => {
   it('has each callout title once', () => {
     const titles = [...page('enterprise/identity-entra-id.mdx').matchAll(/<Callout[^>]*title="([^"]+)"/g)].map((m) => m[1]);
     assert.deepEqual(titles.filter((t, i) => titles.indexOf(t) !== i), []);
+  });
+});
+
+// GAP-2347 class: only a per-user gateway turns hook-failures.jsonl lines
+// into a guardrail-degraded alert (reportHookFailOpenCalls returns on a
+// managed host), so every sentence that promises that alert from the file
+// says per-user.
+describe('fail-open alert promises are scoped to per-user installs (GAP-2347)', () => {
+  it('scopes every hook-failures.jsonl guardrail-degraded sentence and matches the gateway', () => {
+    const report = source('internal/gateway/hook_failopen_report.go');
+    assert.match(report, /func \(s \*Sidecar\) reportHookFailOpenCalls\(\) \{\s*if s == nil \|\| s\.logger == nil \|\| ManagedEnterpriseActive\(\) \{\s*return/, 'the managed early return moved: re-check the docs scope');
+    const walk = (dir: string): string[] => readdirSync(dir, { withFileTypes: true }).flatMap((e) => (e.isDirectory() ? walk(join(dir, e.name)) : e.name.endsWith('.mdx') ? [join(dir, e.name)] : []));
+    const root = join(site, 'content/docs');
+    const unscoped: string[] = [];
+    for (const file of walk(root)) {
+      const paragraphs = readFileSync(file, 'utf8').split(/\n\s*\n/).map((p) => p.split(/\s+/).join(' '));
+      for (const sentence of paragraphs.flatMap((p) => p.split(/(?<=[.;])\s+(?=[A-Z`*\[-])/))) {
+        if (!sentence.includes('hook-failures.jsonl') || !/guardrail-degraded/.test(sentence)) continue;
+        if (!/per-user/i.test(sentence)) unscoped.push(`${relative(root, file)}: ${sentence.slice(0, 160)}`);
+      }
+    }
+    assert.deepEqual(unscoped, []);
+    for (const name of ['connectors/hermes.mdx', 'connectors/copilot.mdx']) assert.ok(page(name).includes('A managed gateway raises no such alert'), `${name} lost the managed sentence`);
+  });
+});
+
+// GAP-2330 class: doctor rows and checks are explained under the CLI
+// reference's Read the rows; the upgrade page's Troubleshooting lists only
+// installer and upgrade failures, so no sentence about a doctor row or check
+// sends the reader there.
+describe('doctor rows are not sent to the upgrade troubleshooting (GAP-2330)', () => {
+  it('has no sentence that maps a doctor row or check to get-started/upgrade', () => {
+    const offenders: string[] = [];
+    const walk = (dir: string): string[] => readdirSync(dir, { withFileTypes: true }).flatMap((e) => (e.isDirectory() ? walk(join(dir, e.name)) : e.name.endsWith('.mdx') ? [join(dir, e.name)] : []));
+    const root = join(site, 'content/docs');
+    for (const file of walk(root)) {
+      const paragraphs = readFileSync(file, 'utf8').split(/\n\s*\n/).map((p) => p.split(/\s+/).join(' '));
+      for (const sentence of paragraphs.flatMap((p) => p.split(/(?<=[.:;])\s+(?=[A-Z0-9`*\[-])/))) {
+        if (!sentence.includes('](/docs/get-started/upgrade')) continue;
+        if (/\b(doctor|fail|warn)\b[^.]*\b(rows?|checks?)\b/i.test(sentence)) offenders.push(`${relative(root, file)}: ${sentence.slice(0, 160)}`);
+      }
+    }
+    assert.deepEqual(offenders, []);
+    assert.ok(page('reference/index.mdx').includes('([Read the rows](/docs/reference/cli#read-the-rows))'), 'runbook step 4 lost its doctor rows link');
+    assert.ok(page('reference/cli.mdx').includes('### Read the rows'), 'the Read the rows anchor is gone');
+  });
+});
+
+// GAP-2333 class: every code name in the capability matrix's contributor
+// table exists in the source files that row names, so a renamed or removed
+// interface or function cannot stay on the page.
+describe('capability matrix contributor sources exist (GAP-2333)', () => {
+  it('names only symbols found in the files of its row', () => {
+    const raw = readFileSync(join(site, 'content/docs/connectors/capability-matrix.mdx'), 'utf8');
+    const table = raw.split('<Accordion title="Where the data comes from (for contributors)">')[1]?.split('</Accordion>')[0] ?? '';
+    const rows = table.split('\n').filter((l) => l.startsWith('| ') && !l.startsWith('| Field') && !l.startsWith('| ---'));
+    assert.ok(rows.length >= 6, 'contributor table not found');
+    const defaultDirs = ['internal/gateway/connector', 'cli/defenseclaw/commands'];
+    const missing: string[] = [];
+    let symbols = 0;
+    for (const row of rows) {
+      const tokens = [...row.matchAll(/`([^`]+)`/g)].map((m) => m[1]);
+      const isPath = (t: string) => t.includes('/') || /\.(go|py|json|ts|js)$/.test(t);
+      const files: string[] = [];
+      for (const tok of tokens.filter(isPath)) {
+        if (tok.endsWith('/')) { readdirSync(join(repo, tok)); continue; }
+        const dirs = tok.includes('/') ? [dirname(tok)] : defaultDirs;
+        const base = tok.includes('/') ? tok.slice(tok.lastIndexOf('/') + 1) : tok;
+        const pattern = new RegExp('^' + base.replace(/[.]/g, '\\.').replace(/\*/g, '.*').replace(/<[^>]+>/g, '.+') + '$');
+        const hits = dirs.flatMap((d) => readdirSync(join(repo, d)).filter((f) => pattern.test(f)).map((f) => join(d, f)));
+        assert.ok(hits.length > 0, `contributor table names a file that does not exist: ${tok}`);
+        files.push(...hits);
+      }
+      if (files.length === 0) files.push(...defaultDirs.flatMap((d) => readdirSync(join(repo, d)).filter((f) => /\.(go|py)$/.test(f)).map((f) => join(d, f))));
+      const corpus = files.map((f) => readFileSync(join(repo, f), 'utf8')).join('\n');
+      for (const tok of tokens.filter((t) => !isPath(t))) {
+        const name = tok.match(/^[A-Za-z_][A-Za-z0-9_]*/)?.[0];
+        if (!name) continue;
+        symbols += 1;
+        if (!new RegExp(`\\b${name}\\b`).test(corpus)) missing.push(`${name} (row: ${row.split('|')[1].trim()})`);
+      }
+    }
+    assert.ok(symbols >= 6, `only ${symbols} code names checked`);
+    assert.deepEqual(missing, []);
   });
 });
 
