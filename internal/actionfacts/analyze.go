@@ -2233,6 +2233,11 @@ func findRewriteKeepsOnlyEmbeddedPartial(resolved parseOutput) bool {
 	}
 	finds := 0
 	for _, command := range resolved.commands {
+		if IsEmbeddedProgramCommand(command) {
+			// The program of a find or xargs, read on its own words and
+			// complete (GAP-2304).
+			continue
+		}
 		switch command.Program {
 		case "find":
 			finds++

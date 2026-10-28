@@ -55,6 +55,12 @@ func FilesystemFormatterProgram(program string) bool {
 }
 
 func classifyOutput(out *parseOutput) {
+	classifyOutputAt(out, 0)
+}
+
+// classifyOutputAt classifies out; wrapperDepth bounds the programs of a
+// find or xargs that classifyEmbeddedPrograms reads on their own.
+func classifyOutputAt(out *parseOutput, wrapperDepth int) {
 	if out == nil {
 		return
 	}
@@ -80,6 +86,7 @@ func classifyOutput(out *parseOutput) {
 			return
 		}
 	}
+	classifyEmbeddedPrograms(out, wrapperDepth)
 
 	allowPreview := out.status == StatusComplete
 	requiredPreviewPaths := 0

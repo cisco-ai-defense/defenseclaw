@@ -3270,7 +3270,10 @@ func provenPartialFindHandOff(
 	handsOff := candidate.Access == actionfacts.PathAccessWrite &&
 		(findHandsEntriesToWriter(projected) || findCopiesOutTo(projected, candidate)) ||
 		candidate.Access == actionfacts.PathAccessRead && findPipedToWriter(facts, projected) ||
-		candidate.Access == actionfacts.PathAccessDelete && findDeletesBesideItsExec(projected)
+		candidate.Access == actionfacts.PathAccessDelete && findDeletesBesideItsExec(projected) ||
+		// The program of a find -exec or an xargs, read on its own words,
+		// changes a path it names itself (GAP-2304).
+		actionfacts.IsEmbeddedProgramCommand(projected) && stateCommandMutatesPath(projected, candidate)
 	if !handsOff {
 		return false
 	}
@@ -3391,66 +3394,14 @@ func findHasExecAction(argv []string) bool {
 // names it is handed. With no program xargs runs echo; an option it does
 // not know may hide the program, so it counts as a change.
 func xargsHandedEntries(argv []string) actionfacts.HandedEntries {
-	mayChange := actionfacts.HandedEntries{MayChange: true}
-	replace := ""
-	for index := 1; index < len(argv); index++ {
-		argument := argv[index]
-		switch {
-		case argument == "--":
-			return actionfacts.XargsHandedEntries(argv[index+1:], replace)
-		case !strings.HasPrefix(argument, "-") || argument == "-":
-			return actionfacts.XargsHandedEntries(argv[index:], replace)
-		case strings.HasPrefix(argument, "--"):
-			name, value, attached := strings.Cut(argument, "=")
-			switch name {
-			case "--null", "--no-run-if-empty", "--verbose", "--interactive", "--exit", "--open-tty",
-				"--eof", "--max-lines":
-			case "--replace":
-				replace = "{}"
-				if attached {
-					replace = value
-				}
-			case "--arg-file", "--delimiter", "--max-args", "--max-procs", "--max-chars", "--process-slot-var":
-				if !attached {
-					index++
-				}
-			default:
-				return mayChange
-			}
-		default:
-			letters := argument[1:]
-			for at := 0; at < len(letters); at++ {
-				switch letters[at] {
-				case '0', 'r', 't', 'p', 'x', 'o':
-				case 'i':
-					// The value is optional and only attached.
-					replace = "{}"
-					if letters[at+1:] != "" {
-						replace = letters[at+1:]
-					}
-					at = len(letters)
-				case 'e', 'l':
-					at = len(letters)
-				case 'I':
-					if letters[at+1:] != "" {
-						replace = letters[at+1:]
-					} else if index+1 < len(argv) {
-						index++
-						replace = argv[index]
-					}
-					at = len(letters)
-				case 'a', 'd', 'E', 'L', 'n', 'P', 's':
-					if at == len(letters)-1 {
-						index++
-					}
-					at = len(letters)
-				default:
-					return mayChange
-				}
-			}
-		}
+	start, replace, known := actionfacts.XargsProgram(argv)
+	if !known {
+		return actionfacts.HandedEntries{MayChange: true}
 	}
-	return actionfacts.HandedEntries{}
+	if start >= len(argv) {
+		return actionfacts.HandedEntries{}
+	}
+	return actionfacts.XargsHandedEntries(argv[start:], replace)
 }
 
 // factsHaveFindHandOff reports a find that hands what it finds to a
@@ -3460,6 +3411,7 @@ func xargsHandedEntries(argv []string) actionfacts.HandedEntries {
 func factsHaveFindHandOff(facts actionfacts.Facts) bool {
 	for _, command := range facts.Commands {
 		if findHandsEntriesToWriter(command) || findPipedToWriter(facts, command) || findDeletesBesideItsExec(command) ||
+			actionfacts.IsEmbeddedProgramCommand(command) ||
 			strings.EqualFold(command.Program, "find") && len(actionfacts.FindHandedEntries(command.Argv).Outputs) != 0 {
 			return true
 		}
