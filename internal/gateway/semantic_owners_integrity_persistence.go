@@ -3171,7 +3171,7 @@ func findAncestorStartChangesState(facts actionfacts.Facts, candidate actionfact
 	start := path.Clean(exactSemanticPathValue(candidate))
 	root := path.Join(path.Clean(facts.ActiveHome), ".defenseclaw")
 	prefix := strings.TrimRight(start, "/") + "/"
-	if !path.IsAbs(start) || !strings.HasPrefix(root, prefix) {
+	if !path.IsAbs(start) && !actionfacts.DriveSlashPath(start) || !strings.HasPrefix(root, prefix) {
 		return false
 	}
 	// Above the root a find also reaches every other file of the

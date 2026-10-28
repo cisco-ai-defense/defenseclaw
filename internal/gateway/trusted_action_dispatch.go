@@ -908,6 +908,9 @@ func provenStateMutationPath(facts actionfacts.Facts, request trustedActionReque
 		if active, same := hookpaths.ResolveActiveStateHardlinkTarget(physical, projected.ActiveHome); same {
 			physical = active
 		}
+		if candidate.Flavor == actionfacts.PathFlavorPOSIX {
+			physical = filepath.ToSlash(physical)
+		}
 		candidate.Resolved = physical
 		if matchesActiveDefenseClawStateInLine(projected, candidate, lineStaysOff, request.ResolvedWriteTargets) {
 			return true
@@ -1096,6 +1099,11 @@ func stateDirectoryEntryTarget(
 	entry := filepath.Join(parent, filepath.Base(value))
 	if info, err := os.Stat(entry); err == nil && info.IsDir() && (moveDestination || windows) {
 		return "", false
+	}
+	if candidate.Flavor == actionfacts.PathFlavorPOSIX {
+		// A Git Bash operand on Windows keeps its slash spelling, so the
+		// state checks read the entry the way they read the operand.
+		entry = filepath.ToSlash(entry)
 	}
 	return entry, true
 }

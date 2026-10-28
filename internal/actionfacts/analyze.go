@@ -279,6 +279,7 @@ func analyze(input Input, twinCommand string, capture *redirectTargetCapture) Fa
 		activeHome,
 	)
 	respellTrustedPOSIXHomeTilde(&facts, homeRewrittenCommands, homeTildeOperands)
+	resolveTrustedDriveHomePaths(&facts)
 	facts.ActiveAgentFiles = cloneSlice(activeAgentFiles)
 	facts.ActiveAgentFilesCaseInsensitive = cloneSlice(
 		activeAgentFilesCaseInsensitive,
