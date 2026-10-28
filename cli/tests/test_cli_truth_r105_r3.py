@@ -149,6 +149,18 @@ def test_setup_splunk_help_says_the_probe_runs_before_saving() -> None:
     assert "without the live HEC probe that otherwise runs first" in result.output
 
 
+def test_splunk_docs_skip_test_row_says_the_probe_runs_before_saving() -> None:
+    # GAP-2327: the docs option row kept the old "after setup" wording that
+    # GAP-1747 removed from the CLI help.
+    page = Path(__file__).resolve().parents[2] / "docs-site/content/docs/observability/splunk.mdx"
+    rows = [line for line in page.read_text(encoding="utf-8").splitlines() if line.startswith("| `--skip-test`")]
+    assert len(rows) == 1, rows
+    assert "after setup" not in rows[0]
+    assert "before it saves anything" in rows[0]
+    assert "saves nothing" in rows[0]
+    assert "while it is stopped, setup saves the destination untested" in rows[0]
+
+
 def _probe(monkeypatch, tmp_path: Path, error: Exception):
     from defenseclaw.commands import cmd_setup_observability as obs
 

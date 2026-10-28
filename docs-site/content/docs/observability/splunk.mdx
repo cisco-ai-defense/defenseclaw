@@ -49,7 +49,7 @@ The local Splunk bridge works only with an x86_64 Docker engine. On an ARM64 Doc
 | `--enterprise` | Remote HEC | Send logs to your own Splunk through HEC. No Docker. |
 | `--hec-endpoint TEXT` | Remote HEC | The full HEC URL, used exactly as given |
 | `--hec-token TEXT` | Remote HEC | The HEC token. A value on the command line is visible to other local users in `ps`, so prefer `DEFENSECLAW_SETUP_SPLUNK_HEC_TOKEN`. |
-| `--skip-test` | Remote HEC | Skip the live HEC probe after setup |
+| `--skip-test` | Remote HEC | Save without the live HEC probe. Without it, setup sends one probe before it saves anything; a failed probe saves nothing (exit 1). The probe runs through your gateway: while it is stopped, setup saves the destination untested and prints a warning. |
 | `--index TEXT` | Local, remote HEC | HEC index. Default `defenseclaw_local` for local, `defenseclaw` for remote. Create a remote index ahead of time. |
 | `--source TEXT` | Local, remote HEC | HEC source. Default `defenseclaw`. |
 | `--sourcetype TEXT` | Local, remote HEC | HEC sourcetype. Default `defenseclaw:json` for local, `_json` for remote. |
