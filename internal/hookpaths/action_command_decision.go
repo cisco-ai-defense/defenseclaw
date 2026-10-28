@@ -249,10 +249,26 @@ func ActionPrivateKeyRead(command, cwd, home string) bool {
 	// A literal for loop binds its variable to each item, patterns
 	// included (for f in ~/.ssh/id_*; do cat "$f"; done, GAP-1780).
 	loops := make(map[string][]string)
+	// A reader fed by a static stdin redirect (xxd < ~/.ssh/id_ed25519)
+	// reads the file as if it were an operand (GAP-0281).
+	stdin := make(map[*syntax.CallExpr][]string)
 	found := false
 	syntax.Walk(file, func(node syntax.Node) bool {
 		if found {
 			return false
+		}
+		if stmt, ok := node.(*syntax.Stmt); ok {
+			if call, ok := stmt.Cmd.(*syntax.CallExpr); ok {
+				for _, redirect := range stmt.Redirs {
+					if redirect.Word == nil || redirect.Op != syntax.RdrIn && redirect.Op != syntax.RdrInOut {
+						continue
+					}
+					if value, known := wordValue(redirect.Word); known {
+						stdin[call] = append(stdin[call], value)
+					}
+				}
+			}
+			return true
 		}
 		if loop, ok := node.(*syntax.ForClause); ok {
 			if iter, ok := loop.Loop.(*syntax.WordIter); ok && iter.Name != nil {
@@ -277,6 +293,11 @@ func ActionPrivateKeyRead(command, cwd, home string) bool {
 				words[i] = value
 			} else if name := actionSoleParameter(arg); name != "" && len(loops[name]) != 0 && bound < 0 {
 				bound = i
+			}
+		}
+		if sources := stdin[call]; len(sources) != 0 {
+			if base := programBase(words[0]); base != "cp" && base != "gcp" {
+				words = append(words, sources...)
 			}
 		}
 		if bound < 0 {
@@ -459,6 +480,10 @@ func actionPrivateKeyReadWords(words []string, cwd, home string, mode keyReadMod
 			}
 		}
 		return false
+	}
+	if kind := actionInterpreterKind(words[0]); kind != "" {
+		code, ok := actionInterpreterInlineCode(words, 0)
+		return ok && actionInterpreterReadsPrivateKey(code, kind)
 	}
 	switch program {
 	case "cat", "head", "tail", "type", "get-content", "gc", "base64",
