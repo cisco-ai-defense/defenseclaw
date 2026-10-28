@@ -13207,6 +13207,8 @@ def _agent_settings_refusal(
     fail_modes map its flat records rebuild (GAP-1815). *rerun* names the
     command to run again after the fix, *changed* what the caller did.
     """
+    if link_refusal := _connector_home_link_refusal(connector, changed=changed, rerun=rerun):
+        return link_refusal
     executable = _gateway_lifecycle_executable()
     if not executable:
         return ""
@@ -13247,6 +13249,53 @@ def _agent_settings_refusal(
         f"{label}: {_GATEWAY_RESTART_STEP_RE.sub('', reason)}. {changed} and the gateway keeps "
         f"running as it was; after the fix, run the same {rerun} again."
     )
+
+
+# The variable each connector's agent reads to move its configuration folder.
+_CONNECTOR_HOME_VARIABLES = {
+    "claudecode": "CLAUDE_CONFIG_DIR",
+    "codex": "CODEX_HOME",
+    "copilot": "COPILOT_HOME",
+    "hermes": "HERMES_HOME",
+    "opencode": "OPENCODE_CONFIG_DIR",
+}
+
+
+def _host_is_windows() -> bool:
+    return os.name == "nt"
+
+
+def _connector_home_link_refusal(connector: str, *, changed: str, rerun: str) -> str:
+    """Why a moved agent config folder on Windows cannot be set up, or "".
+
+    get-started/windows/paths-troubleshooting says setup refuses a
+    CLAUDE_CONFIG_DIR, CODEX_HOME, COPILOT_HOME, HERMES_HOME or
+    OPENCODE_CONFIG_DIR that goes through a symbolic link or junction. Setup
+    exited 0 for a CODEX_HOME junction and set up the default folder instead,
+    with no word about the variable (GAP-1664). On Windows a junction anywhere
+    on the path is transparent to ordinary path operations, so every
+    component is checked. POSIX keeps its symlinked system folders (macOS
+    /tmp); the gateway's writes there refuse a linked leaf on their own.
+    """
+    if not _host_is_windows():
+        return ""
+    variable = _CONNECTOR_HOME_VARIABLES.get(connector)
+    configured = (os.environ.get(variable) or "").strip() if variable else ""
+    if not configured:
+        return ""
+    path = os.path.abspath(os.path.expanduser(configured))
+    try:
+        reject_reparse_path(path)
+    except UnsafePathError:
+        label = _CONNECTOR_META.get(connector, {}).get("label", connector)
+        return (
+            f"{label}: {variable}={path} goes through a symbolic link or junction, which setup refuses. "
+            f"Set {variable} to the real folder (or unset it to use the default). {changed} and the gateway "
+            f"keeps running as it was; then run the same {rerun} again."
+        )
+    except OSError:
+        return ""
+    return ""
 
 
 def _selected_codex_setup_root() -> str:
