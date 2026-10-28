@@ -281,6 +281,15 @@ func dispatchTrustedAction(
 	if parent == nil {
 		parent = context.Background()
 	}
+	// A ~<active user> tilde-prefix names the active home from the password
+	// database (GAP-2378), and under a Windows home an MSYS drive mount
+	// (/c/...) names the drive path (GAP-2375): the twin with that spelling
+	// is judged too, and a block proven there counts, as for the plain one.
+	if twin, ok := homeSpellingTwinRequest(request); ok {
+		defer func() {
+			findings = withTwinProvenBlocks(findings, dispatchTrustedAction(parent, twin))
+		}()
+	}
 
 	facts = actionfacts.Analyze(request.Input)
 	analyzed = true
@@ -796,10 +805,18 @@ func withActiveStateTargetMention(
 	findings []RuleFinding,
 ) []RuleFinding {
 	command, known := trustedBashCommandInput(request.Input)
-	if !known || !hookpaths.ActionStateTargetMention(command, request.Input.CWD, request.Input.ActiveHome) {
+	if !known {
 		return findings
 	}
-	if !provenStateMutationPath(facts, request) && !provenBashAggregateStateWrite(request) &&
+	if !hookpaths.ActionStateTargetMention(command, request.Input.CWD, request.Input.ActiveHome) {
+		// Behind ProtectHome the gateway cannot open the user's home, so the
+		// mention scan cannot place a home target. A redirect target the
+		// shell opens is still proven against the hook client's resolved
+		// target map (GAP-2328: $CMD; echo $X > ~/.defenseclaw/config.yaml).
+		if !request.ProtectedHomeHook || !provenShellRedirectStateWrite(request) {
+			return findings
+		}
+	} else if !provenStateMutationPath(facts, request) && !provenBashAggregateStateWrite(request) &&
 		!provenShellRedirectStateWrite(request) {
 		return findings
 	}
@@ -5258,6 +5275,61 @@ func trustedShellHeredocAt(
 	}
 	heredoc.delimiter = line[start:index]
 	return heredoc, true
+}
+
+// homeSpellingTwinRequest returns request with its Bash command's
+// ~<active user> tilde-prefixes spelled as the active home
+// (actionfacts.ActiveUserTildeTwin) or, under a Windows home, its MSYS
+// drive mounts spelled as drive paths (actionfacts.MSYSDrivePathTwin). A
+// hook client's resolved target for the original spelling is kept for the
+// new one. The twin records no audit or telemetry of its own.
+func homeSpellingTwinRequest(request trustedActionRequest) (trustedActionRequest, bool) {
+	if request.Input.DialectHint != actionfacts.DialectPOSIX && request.Input.DialectHint != "" {
+		return trustedActionRequest{}, false
+	}
+	command, known := trustedBashCommandInput(request.Input)
+	if !known {
+		return trustedActionRequest{}, false
+	}
+	respell := func(spelling string) string { return spelling }
+	rewritten, user, ok := actionfacts.ActiveUserTildeTwin(command, request.Input.ActiveHome)
+	if ok {
+		home := strings.TrimRight(filepath.ToSlash(request.Input.ActiveHome), "/")
+		prefix := "~" + user
+		respell = func(spelling string) string {
+			if spelling == prefix || strings.HasPrefix(spelling, prefix+"/") {
+				return home + spelling[len(prefix):]
+			}
+			return spelling
+		}
+	} else if rewritten, ok = actionfacts.MSYSDrivePathTwin(command, request.Input.ActiveHome); ok {
+		respell = actionfacts.MSYSDrivePath
+	} else {
+		return trustedActionRequest{}, false
+	}
+	twin := request
+	twin.record, twin.recordTelemetry = nil, nil
+	twin.Input.Command, twin.Input.Args, twin.Input.Argv = rewritten, nil, nil
+	twin.conflictSource = nil
+	if strings.Contains(request.LegacyText, command) {
+		twin.LegacyText = strings.ReplaceAll(request.LegacyText, command, rewritten)
+	} else {
+		twin.LegacyText = rewritten
+	}
+	if request.ResolvedWriteTargets != nil {
+		twin.ResolvedWriteTargets = make(map[string]string, len(request.ResolvedWriteTargets))
+		for spelling, value := range request.ResolvedWriteTargets {
+			twin.ResolvedWriteTargets[spelling] = value
+		}
+		for spelling, value := range request.ResolvedWriteTargets {
+			if respelled := respell(spelling); respelled != spelling {
+				if _, taken := twin.ResolvedWriteTargets[respelled]; !taken {
+					twin.ResolvedWriteTargets[respelled] = value
+				}
+			}
+		}
+	}
+	return twin, true
 }
 
 func trustedBashCommandInput(input actionfacts.Input) (string, bool) {
