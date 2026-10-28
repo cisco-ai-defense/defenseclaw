@@ -188,6 +188,61 @@ func windowsEnterpriseHotConfigUnavailable(status *windowsEnterpriseInstallerRep
 	return windowsEnterpriseInstallOptionsChanged
 }
 
+// windowsBundleTakeOverPendingCommit installs a signed bundle whose rendered
+// config is byte-identical to the installed config a lower delivery
+// committed and the gateway has not confirmed (a version bump that changes no
+// setting, delivered during a gateway outage). The hot path needs a healthy
+// deployment because it changes what the gateway enforces; this changes
+// nothing the gateway reads but the generation record, so it runs without
+// one: the run records its own generation for the same bytes under the
+// lifecycle lock, its receipt stays applied until the gateway reports it,
+// and the lower receipt then settles superseded (GAP-1187). It reports
+// whether the run was that case and the record was written; otherwise the
+// caller refuses as before.
+func windowsBundleTakeOverPendingCommit(ctx context.Context, opts *windowsEnterpriseLifecycleOptions, result *enterprisestatus.Result) bool {
+	run := opts.bundle
+	if run == nil || run.prepared == nil || run.prepared.Receipt == nil || run.prepared.AlreadyApplied || run.driver == nil || !windowsEnterpriseIsElevated() {
+		return false
+	}
+	layout, err := windowsEnterpriseHotConfigLayout()
+	if err != nil {
+		return false
+	}
+	roots, err := winpath.TrustedEnterpriseRoots(managed.ProfileStandalone)
+	if err != nil {
+		return false
+	}
+	release, err := windowsEnterpriseHotConfigLock(filepath.Join(roots.LifecycleDir, "lifecycle.lock"))
+	if err != nil {
+		return false
+	}
+	defer release()
+	installed, err := readWindowsEnterpriseBoundedFile(layout.ConfigPath, windowsEnterpriseHotConfigMaxBytes)
+	if err != nil {
+		return false
+	}
+	owner, err := run.driver.PendingCommitTakenOver(run.prepared.Receipt, installed)
+	if err != nil || owner == nil {
+		return false
+	}
+	writeOptions, _, err := windowsHotConfigWriteOptions(opts, configwrite.SHA256Hex(installed))
+	if err != nil {
+		return false
+	}
+	restoreEnvironment := setTemporaryEnvironment(windowsEnterpriseServicePins(layout))
+	defer restoreEnvironment()
+	if err := windowsEnterpriseHotConfigWrite(ctx, layout.ConfigPath, installed, writeOptions); err != nil {
+		return false
+	}
+	result.Readiness.Gateway = false
+	result.SecurityComplete = false
+	result.Policy = nil
+	result.Changes = append(result.Changes, fmt.Sprintf(
+		"recorded policy bundle %s version %d for the installed config, which version %d had committed with the same settings and the gateway had not confirmed; no setting changed, and gateway adoption is unconfirmed",
+		run.prepared.Receipt.BundleID, run.prepared.Receipt.Version, owner.Version))
+	return true
+}
+
 // windowsEnterpriseHotConfigApply applies the supplied config to the running
 // gateway and fills result from a verify of the host. For a signed bundle,
 // start-only keys restart only the gateway. It returns false after attempting
@@ -227,6 +282,9 @@ func windowsEnterpriseHotConfigApply(
 		if reason == windowsEnterpriseInstallOptionsChanged {
 			failBundle("bundle_install_options_changed", "the policy bundle could not be applied to the running deployment: "+reason+"; deliver the bundle without the install option change")
 			return false, nil
+		}
+		if bundleChange && windowsBundleTakeOverPendingCommit(ctx, opts, result) {
+			return true, nil
 		}
 		return unavailable(reason)
 	}
