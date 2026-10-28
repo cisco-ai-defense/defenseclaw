@@ -461,7 +461,13 @@ func actionPrivateKeyReadWords(words []string, cwd, home string, mode keyReadMod
 		return false
 	}
 	switch program {
-	case "cat", "head", "tail", "type", "get-content", "gc", "base64":
+	case "cat", "head", "tail", "type", "get-content", "gc", "base64",
+		// Every program that prints its operand's content reads the key as
+		// cat does (GAP-0281).
+		"less", "more", "most", "view", "grep", "egrep", "fgrep", "zgrep", "rg",
+		"xxd", "od", "hexdump", "hd", "strings", "cut", "nl", "tac", "rev",
+		"sort", "uniq", "fold", "fmt", "pr", "paste", "diff", "comm",
+		"awk", "gawk", "mawk", "nawk", "findstr", "select-string", "sls", "format-hex", "fhx":
 		for _, arg := range words[1:] {
 			if readPath(arg) {
 				return true
