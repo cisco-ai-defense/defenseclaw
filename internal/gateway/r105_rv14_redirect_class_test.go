@@ -236,6 +236,22 @@ func TestR105CodeBeforeAHomeRedirectTargetStillJudgesIt(t *testing.T) {
 		"read -p HOME v < in.txt; ",
 		"trap ': HOME' EXIT; ",
 		"builtin source ./env.sh HOME; ",
+		// RV17-1: unset, a value the shell reads, with or without builtin
+		// or command; a prefix assignment (the shell opens the target
+		// first); a statement in another process or a branch that may not
+		// run; a name ~ does not expand.
+		"command unset HOME; ",
+		"builtin unset HOME; ",
+		"unset HOME; ",
+		"command read HOME < in.txt; ",
+		"builtin read HOME < in.txt; ",
+		"HOME=/tmp/h ",
+		"env HOME=/tmp/h ",
+		"(HOME=/tmp/h); ",
+		"false && HOME=/tmp/h; ",
+		"trap 'HOME=/tmp/h' EXIT; ",
+		"eval 'export USER=x'; ",
+		"export HOME; ",
 	}
 	programs := []string{"make", "./build.sh", `python3 -c "print('mode: observe')"`, "npm test",
 		"echo $X", "node x.js"}
@@ -269,6 +285,8 @@ func TestR105CodeBeforeAHomeRedirectTargetStillJudgesIt(t *testing.T) {
 			". ./env.sh; make > ~/build.log",
 			`eval "$(direnv export bash)"; npm test > $HOME/npm.log`,
 			"source .venv/bin/activate && grep x ~/.defenseclaw/config.yaml > ~/out.txt",
+			"command unset FOO; make > ~/build.log",
+			"command read x < in.txt; make > out.log",
 		} {
 			judge(command, false)
 		}
