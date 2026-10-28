@@ -659,3 +659,7 @@
 {"id":"gap2045-rmdir-hooks","rule_id":"tamper.detector_state_write","command":"rmdir /home/alice/.defenseclaw/hooks","is_attack":true,"expect_route":"semantic","no_other_finding":true}
 {"id":"gap2045-mv-hooks-away","rule_id":"tamper.detector_state_write","command":"mv /home/alice/.defenseclaw/hooks /tmp/h","is_attack":true,"expect_route":"semantic","no_other_finding":true}
 {"id":"gap2045-cp-config-into-root","rule_id":"tamper.detector_state_write","command":"cp /tmp/config.yaml /home/alice/.defenseclaw/","is_attack":true,"expect_route":"semantic","no_other_finding":true}
+{"id":"gap2445-tar-overwrite-then-report","rule_id":"persistence.ssh_authorized_keys_command","command":"tar -xzf pkg.tgz --overwrite -C build; echo hi > report.txt","is_attack":false,"expect_route":"none","no_other_finding":true}
+{"id":"gap2445-tar-no-same-owner-then-report","rule_id":"persistence.ssh_authorized_keys_command","command":"tar -xzf pkg.tgz --no-same-owner -C build; echo hi > report.txt","is_attack":false,"expect_route":"none","no_other_finding":true}
+{"id":"gap2445-tar-short-o-then-report","rule_id":"persistence.ssh_authorized_keys_command","command":"tar -xof pkg.tar -C build; echo hi > report.txt","is_attack":false,"expect_route":"none","no_other_finding":true}
+{"id":"gap2445-tar-member-list-then-report","rule_id":"persistence.ssh_authorized_keys_command","command":"tar -xzf pkg.tgz -C build -T list.txt --wildcards; echo hi > report.txt","is_attack":false,"expect_route":"none","no_other_finding":true}
