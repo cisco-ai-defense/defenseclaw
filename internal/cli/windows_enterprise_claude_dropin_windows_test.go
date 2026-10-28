@@ -74,3 +74,32 @@ func TestWindowsEnterpriseClaudeDropInDriftFailsVerifyAndRepairPutsItBack(t *tes
 		t.Fatalf("restore that failed: change=%q, want none (the lifecycle names the refusal)", change)
 	}
 }
+
+// GAP-2336: a status with the guardian stopped and the drop-in drifted names
+// both, not_ready first: the drift error must not hide the stopped service.
+func TestWindowsEnterpriseClaudeDropInDriftKeepsNotReady(t *testing.T) {
+	const dropIn = `C:\Program Files\ClaudeCode\managed-settings.d\90-defenseclaw.json`
+	previous := windowsEnterpriseClaudeDropInDrift
+	t.Cleanup(func() { windowsEnterpriseClaudeDropInDrift = previous })
+	windowsEnterpriseClaudeDropInDrift = func() (string, bool) { return dropIn, false }
+	for _, action := range []string{"status", "verify"} {
+		report, err := parseWindowsEnterpriseInstallerReport([]byte(
+			`{"schema_version":1,"ok":false,"action":"` + action + `","installed":true,"transaction_pending":false,"errors":[]}`))
+		if err != nil {
+			t.Fatal(err)
+		}
+		result := enterprisestatus.New(action, "standalone", "windows", "test")
+		applyWindowsEnterpriseInstallerReport(result, nil, report, windowsEnterpriseStandaloneRun{})
+		codes := []string{}
+		for _, item := range result.Errors {
+			codes = append(codes, item.Code)
+		}
+		// Verify adds its own checks of this host before the fallback (a
+		// CI runner holds no machine folder), so only status, whose report
+		// carries no error, is pinned to not_ready first.
+		if len(codes) == 0 || codes[len(codes)-1] != "machine_policy_incomplete" ||
+			(action == "status" && codes[0] != "not_ready") {
+			t.Fatalf("%s: error codes = %v, want machine_policy_incomplete last (status: not_ready first)", action, codes)
+		}
+	}
+}

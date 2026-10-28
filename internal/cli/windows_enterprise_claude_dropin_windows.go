@@ -37,7 +37,7 @@ func windowsEnterpriseClaudeDropInDriftMessage(path string, removed bool) string
 		what = "was removed outside DefenseClaw"
 	}
 	return "DefenseClaw's Claude Code machine policy drop-in " + path + " " + what +
-		", so Claude Code may run without some DefenseClaw hooks. The hook guardian puts it back at its next pass." +
+		", so Claude Code may run without some DefenseClaw hooks. A running hook guardian puts it back at its next pass." +
 		" Fix: run " + windowsEnterpriseAdminCommand("repair") + " (or reconcile); keep your own settings in another managed-settings.d file"
 }
 

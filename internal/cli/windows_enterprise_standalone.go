@@ -1523,7 +1523,6 @@ func applyWindowsEnterpriseInstallerReport(
 		applyWindowsEnterpriseAccountFolders(result)
 		if result.Action == "status" || result.Action == "verify" {
 			applyWindowsEnterpriseHookRuntimeAccess(result)
-			applyWindowsEnterpriseClaudeDropInDrift(result)
 			applyWindowsEnterpriseGuardianTargets(result)
 		}
 		applyWindowsEnterpriseDiscoveryHomeDirs(result)
@@ -1586,6 +1585,11 @@ func applyWindowsEnterpriseInstallerReport(
 			code = "not_installed"
 		}
 		result.AddError(code, windowsEnterpriseNotHealthyMessage(result.Services, run.ExitCode))
+	}
+	if report.Installed && (result.Action == "status" || result.Action == "verify") {
+		// After the not_ready fallback, so a stopped guardian is still
+		// named next to the drop-in drift it leaves unrepaired.
+		applyWindowsEnterpriseClaudeDropInDrift(result)
 	}
 	if lifecycle && !report.OK && len(result.Errors) > firstError {
 		configPath := ""
