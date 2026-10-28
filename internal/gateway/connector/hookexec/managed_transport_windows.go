@@ -46,6 +46,18 @@ type mibTCPRowOwnerPID struct {
 	OwningPID  uint32
 }
 
+// mibTCP6RowOwnerPID is MIB_TCP6ROW_OWNER_PID.
+type mibTCP6RowOwnerPID struct {
+	LocalAddr     [16]byte
+	LocalScopeID  uint32
+	LocalPort     uint32
+	RemoteAddr    [16]byte
+	RemoteScopeID uint32
+	RemotePort    uint32
+	State         uint32
+	OwningPID     uint32
+}
+
 type managedIPv4Endpoint struct {
 	addr [4]byte
 	port uint16
@@ -303,8 +315,10 @@ func connectedManagedGatewayPIDForEndpoints(client, server managedIPv4Endpoint) 
 }
 
 // managedGatewayPortListening reports whether any process listens on the
-// IPv4 address of address (or on every address) and its port; known is
-// false when the table cannot be read, and the hook then dials as before.
+// IPv4 address of address (or on every address) and its port, or on that
+// port over IPv6: a dual-stack listener on [::] also keeps the gateway from
+// binding. known is false when either table cannot be read, and the hook
+// then dials as before.
 func managedGatewayPortListening(address string) (listening, known bool) {
 	host, rawPort, err := net.SplitHostPort(address)
 	if err != nil {
@@ -322,7 +336,21 @@ func managedGatewayPortListening(address string) (listening, known bool) {
 	if err != nil {
 		return false, false
 	}
-	return tcpTableListensOn(rows, [4]byte(ip), uint16(port)), true
+	rows6, err := readTCP6OwnerPIDTable()
+	if err != nil {
+		return false, false
+	}
+	return tcpTableListensOn(rows, [4]byte(ip), uint16(port)) || tcp6TableListensOn(rows6, uint16(port)), true
+}
+
+// tcp6TableListensOn reports an IPv6 LISTEN row on port at any address.
+func tcp6TableListensOn(rows []mibTCP6RowOwnerPID, port uint16) bool {
+	for _, row := range rows {
+		if row.State == mibTCPStateListen && bits.ReverseBytes16(uint16(row.LocalPort)) == port {
+			return true
+		}
+	}
+	return false
 }
 
 // tcpTableListensOn reports a LISTEN row for addr (or 0.0.0.0) and port.
@@ -363,43 +391,52 @@ func ipv4FromMIB(value uint32) [4]byte {
 }
 
 func readTCP4OwnerPIDTable() ([]mibTCPRowOwnerPID, error) {
+	return readOwnerPIDTable[mibTCPRowOwnerPID](windows.AF_INET, "IPv4")
+}
+
+func readTCP6OwnerPIDTable() ([]mibTCP6RowOwnerPID, error) {
+	return readOwnerPIDTable[mibTCP6RowOwnerPID](windows.AF_INET6, "IPv6")
+}
+
+func readOwnerPIDTable[Row mibTCPRowOwnerPID | mibTCP6RowOwnerPID](family uint32, label string) ([]Row, error) {
 	var size uint32
-	err := callGetExtendedTCPTable(nil, &size)
+	err := callGetExtendedTCPTable(nil, &size, family)
 	if err != nil && !errors.Is(err, windows.ERROR_INSUFFICIENT_BUFFER) {
-		return nil, fmt.Errorf("size IPv4 owner-PID table: %w", err)
+		return nil, fmt.Errorf("size %s owner-PID table: %w", label, err)
 	}
 	for attempts := 0; attempts < 3; attempts++ {
 		if size < 4 || size > maxTCPTableBytes {
-			return nil, fmt.Errorf("IPv4 owner-PID table size %d is invalid", size)
+			return nil, fmt.Errorf("%s owner-PID table size %d is invalid", label, size)
 		}
 		buffer := make([]byte, size)
-		err = callGetExtendedTCPTable(buffer, &size)
+		err = callGetExtendedTCPTable(buffer, &size, family)
 		if errors.Is(err, windows.ERROR_INSUFFICIENT_BUFFER) {
 			continue
 		}
 		if err != nil {
-			return nil, fmt.Errorf("read IPv4 owner-PID table: %w", err)
+			return nil, fmt.Errorf("read %s owner-PID table: %w", label, err)
 		}
 		count := *(*uint32)(unsafe.Pointer(&buffer[0]))
-		rowSize := uint64(unsafe.Sizeof(mibTCPRowOwnerPID{}))
+		var zero Row
+		rowSize := uint64(unsafe.Sizeof(zero))
 		required := uint64(4) + uint64(count)*rowSize
 		if required > uint64(len(buffer)) {
-			return nil, errors.New("IPv4 owner-PID table is truncated")
+			return nil, fmt.Errorf("%s owner-PID table is truncated", label)
 		}
-		rows := make([]mibTCPRowOwnerPID, int(count))
+		rows := make([]Row, int(count))
 		if count > 0 {
 			source := unsafe.Slice(
-				(*mibTCPRowOwnerPID)(unsafe.Pointer(&buffer[4])),
+				(*Row)(unsafe.Pointer(&buffer[4])),
 				int(count),
 			)
 			copy(rows, source)
 		}
 		return rows, nil
 	}
-	return nil, errors.New("IPv4 owner-PID table changed during bounded read")
+	return nil, fmt.Errorf("%s owner-PID table changed during bounded read", label)
 }
 
-func callGetExtendedTCPTable(buffer []byte, size *uint32) error {
+func callGetExtendedTCPTable(buffer []byte, size *uint32, family uint32) error {
 	// LazyProc.Call panics if the DLL or the exported symbol cannot be
 	// resolved. Surface that as a normal error so the managed transport
 	// path degrades gracefully instead of taking the whole process down.
@@ -414,7 +451,7 @@ func callGetExtendedTCPTable(buffer []byte, size *uint32) error {
 		pointer,
 		uintptr(unsafe.Pointer(size)),
 		0,
-		uintptr(windows.AF_INET),
+		uintptr(family),
 		uintptr(tcpTableOwnerPIDAll),
 		0,
 	)

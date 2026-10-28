@@ -13,6 +13,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -303,6 +304,36 @@ func TestTCPTableListensOn(t *testing.T) {
 	}
 	if !tcpTableListensOn([]mibTCPRowOwnerPID{{State: mibTCPStateListen, LocalAddr: loopback, LocalPort: wirePort}}, [4]byte{127, 0, 0, 1}, port) {
 		t.Fatal("a loopback listener was not found")
+	}
+}
+
+func TestTCP6TableListensOnPortAtAnyAddress(t *testing.T) {
+	port := uint32(bits.ReverseBytes16(18970))
+	rows := []mibTCP6RowOwnerPID{{State: mibTCPStateEstab, LocalPort: port}}
+	if tcp6TableListensOn(rows, 18970) {
+		t.Fatal("established IPv6 row counted as a listener")
+	}
+	rows = append(rows, mibTCP6RowOwnerPID{State: mibTCPStateListen, LocalPort: port})
+	if !tcp6TableListensOn(rows, 18970) {
+		t.Fatal("IPv6 listener on the gateway port was missed")
+	}
+	if tcp6TableListensOn(rows, 18971) {
+		t.Fatal("IPv6 listener matched another port")
+	}
+}
+
+// A dual-stack listener on [::] keeps the gateway from binding 127.0.0.1, so
+// the IPv6 table counts for a stopped service's IPv4 gateway address.
+func TestManagedGatewayPortListeningSeesIPv6Listener(t *testing.T) {
+	listener, err := net.Listen("tcp6", "[::1]:0")
+	if err != nil {
+		t.Skipf("IPv6 loopback unavailable: %v", err)
+	}
+	defer listener.Close()
+	port := listener.Addr().(*net.TCPAddr).Port
+	listening, known := managedGatewayPortListening(net.JoinHostPort("127.0.0.1", strconv.Itoa(port)))
+	if !known || !listening {
+		t.Fatalf("IPv6 listener on port %d: listening=%t known=%t", port, listening, known)
 	}
 }
 
