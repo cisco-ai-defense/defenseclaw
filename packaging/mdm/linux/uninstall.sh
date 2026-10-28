@@ -16,8 +16,11 @@
 # ~/.defenseclaw and per-user binaries (the lifecycle purge runs before the
 # package goes, so it can act as each user; an account's own personal install
 # from before the enrollment is moved to a ~/.defenseclaw-backup-<UTC time>
-# folder first) and the wrapper's empty state folder (/var/lib/defenseclaw-mdm,
-# also its staging folder, on Linux; /var/db/defenseclaw-mdm on macOS).
+# folder first), the staging folders that killed wrapper runs left (in the
+# wrapper's state folder on Linux, in /var/tmp on macOS, and in the folder
+# --staging-dir names when the wrapper runs used one) and the wrapper's empty
+# state folder (/var/lib/defenseclaw-mdm, also its staging folder, on Linux;
+# /var/db/defenseclaw-mdm on macOS).
 # Without it each account keeps ~/.defenseclaw and its sandboxes. Every
 # completed uninstall removes the wrapper's credential rotation journal
 # (overwriting each earlier value it holds first), since the credentials go.
@@ -26,7 +29,7 @@
 # exits 0. Exit codes: 0 removed or nothing to do, 1 failure, 2 invalid
 # arguments, 75 busy (retry later).
 #
-# Usage: uninstall.sh [--purge] [--keep-package] [--log FILE]
+# Usage: uninstall.sh [--purge] [--keep-package] [--staging-dir DIR] [--log FILE]
 
 set -eu
 
@@ -36,6 +39,7 @@ DC_LOG_NAME=uninstall.sh
 # ---- MDM settings (flags override) -------------------------------------------
 DC_PURGE=0          # 1: also remove each account's ~/.defenseclaw and per-user binaries
 DC_KEEP_PACKAGE=0   # 1: leave the deb/rpm installed (Linux)
+DC_STAGING_DIR=""   # the --staging-dir folder the wrapper runs used, if any (--purge sweeps it)
 DC_LOG=""
 # ---- end of settings ---------------------------------------------------------
 
@@ -223,18 +227,11 @@ dc_remove_rotation_journal() {
     fi
 }
 
-# dc_remove_stage_parent: a purge removes the wrapper's root-only state
-# folder once it is empty (#1298). A folder that is not root's own
-# directory, or that a wrapper run still stages in, stays.
-dc_remove_stage_parent() {
-    [ "$DC_PURGE" = 1 ] || return 0
-    [ -d "$DC_KIT_STATE" ] && [ ! -L "$DC_KIT_STATE" ] || return 0
-    [ "$(dc_stat_uid "$DC_KIT_STATE")" = 0 ] || return 0
-    # The staging folders of wrapper runs that were killed before their
-    # cleanup ran (root-owned, their recorded run gone, or a day old without
-    # one) kept the folder (GAP-1733), as the wrapper's dc_sweep_stages
-    # removes them.
-    for stale in "$DC_KIT_STATE"/defenseclaw-mdm.*; do
+# dc_sweep_stages <parent>: remove the staging folders of earlier runs that
+# were killed before their cleanup ran: root-owned, and either their run is
+# gone (the pid it recorded no longer runs) or, without a pid, a day old.
+dc_sweep_stages() {
+    for stale in "$1"/defenseclaw-mdm.*; do
         if [ ! -d "$stale" ] || [ -L "$stale" ]; then continue; fi
         [ "$(dc_stat_uid "$stale")" = 0 ] || continue
         owner=$(head -c 32 "$stale/pid" 2>/dev/null || true)
@@ -246,8 +243,28 @@ dc_remove_stage_parent() {
                 ! kill -0 "$owner" 2>/dev/null || continue
                 ;;
         esac
-        rm -rf "${stale:?}"
+        rm -rf "$stale"
     done
+}
+
+# dc_remove_stage_parent: a purge removes the staging folders that wrapper
+# runs killed before their cleanup left, with the wrapper's own rule
+# (dc_sweep_stages, GAP-1733), and then the wrapper's root-only state folder
+# once it is empty (#1298). On macOS the wrapper stages in /var/tmp, not in
+# its state folder; a --staging-dir folder is the administrator's, so only
+# its stale stages go. A folder that is not root's own directory, or that a
+# wrapper run still stages in, stays.
+dc_remove_stage_parent() {
+    [ "$DC_PURGE" = 1 ] || return 0
+    if [ "${DC_SCRIPT_OS:-}" = darwin ]; then
+        dc_sweep_stages /var/tmp
+    fi
+    if [ -n "${DC_STAGING_DIR:-}" ]; then
+        dc_sweep_stages "$DC_STAGING_DIR"
+    fi
+    [ -d "$DC_KIT_STATE" ] && [ ! -L "$DC_KIT_STATE" ] || return 0
+    [ "$(dc_stat_uid "$DC_KIT_STATE")" = 0 ] || return 0
+    dc_sweep_stages "$DC_KIT_STATE"
     if rmdir "$DC_KIT_STATE" 2>/dev/null; then
         dc_log "removed the empty folder $DC_KIT_STATE"
     fi
@@ -269,8 +286,9 @@ while [ "$#" -gt 0 ]; do
     case "$1" in
         --purge) DC_PURGE=1; shift ;;
         --keep-package) DC_KEEP_PACKAGE=1; shift ;;
+        --staging-dir) DC_STAGING_DIR=${2:-}; shift 2 ;;
         --log) DC_LOG=${2:-}; shift 2 ;;
-        -h | --help) sed -n '2,27p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        -h | --help) sed -n '2,32p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
         *) dc_fail_result "$DC_EXIT_INVALID" mdm_invalid_arguments "unknown argument: $1" ;;
     esac
 done
@@ -286,6 +304,15 @@ else
 fi
 [ -d "$(dirname "$DC_LOG")" ] || DC_LOG=""
 [ "$(id -u)" = 0 ] || dc_fail_result "$DC_EXIT_FAILURE" mdm_not_root "run as root (the MDM agent's system context)"
+if [ -n "$DC_STAGING_DIR" ]; then
+    case "$DC_STAGING_DIR" in
+        /*) ;;
+        *) dc_fail_result "$DC_EXIT_INVALID" mdm_invalid_arguments "--staging-dir must be an absolute path" ;;
+    esac
+    if [ ! -d "$DC_STAGING_DIR" ] || ! dc_trusted_path "$DC_STAGING_DIR"; then
+        dc_fail_result "$DC_EXIT_FAILURE" mdm_staging_untrusted "the staging folder $DC_STAGING_DIR is not a root-owned directory that only root can write$DC_TRUST_ACL"
+    fi
+fi
 
 DC_STAGE=$(mktemp -d /var/tmp/defenseclaw-mdm.XXXXXX)
 trap dc_cleanup EXIT
