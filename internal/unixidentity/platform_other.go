@@ -19,6 +19,9 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/useridentity"
 )
 
+// ProcessLookupsOutliveDeletion: no such cache is known here.
+const ProcessLookupsOutliveDeletion = false
+
 // DefaultUIDRange is a conservative default for other Unix systems.
 func DefaultUIDRange() (int, int) { return 1000, 60000 }
 
@@ -57,6 +60,9 @@ func platformLocalAccountRecord(context.Context, string) (LocalAccountRecord, bo
 // fresh process (getent) or read the files backend, so a found account is
 // current.
 func platformAccountRecordGone(context.Context, string) bool { return false }
+
+// platformAccountUIDGone is false for the same reason.
+func platformAccountUIDGone(context.Context, string, int) bool { return false }
 
 func platformLocalGroups(context.Context) (map[string]int, error) {
 	return nil, errors.New("unixidentity: no local group reader on this platform")
