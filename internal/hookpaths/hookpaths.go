@@ -375,6 +375,7 @@ func homeParam(param *syntax.ParamExp, haveHome bool) bool {
 // until each has been checked, so a linked directory before ".." is not
 // removed lexically.
 func resolveWritePath(path string, linkDepth int) (string, bool) {
+	writeTargetWalks.Add(1)
 	resolved, _, _, ok := walkWritePath("", path, linkDepth, false, false)
 	return resolved, ok
 }

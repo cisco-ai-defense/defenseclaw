@@ -2838,7 +2838,9 @@ sys.stdout.buffer.write(data+b"x")')"
       3) _dc_stdin_refused "$cap" overflow "$overflow_outcome"; printf '%s' "$_dc_body"; return 3 ;;
       4) _dc_stdin_refused "$cap" nul "$overflow_outcome"; return 4 ;;
     esac
-    printf '%s' "${_dc_body%x}"
+    _dc_body="${_dc_body%x}"
+    _dc_stdin_over_transport "$_dc_body" "$overflow_outcome" && return 3
+    printf '%s' "$_dc_body"
     return 0
   fi
   # Tier 2 — head(1), the usual reader (see above).
@@ -2869,7 +2871,31 @@ _dc_read_stdin_exact() {
     printf '%s' "${body:0:cap}"
     return 3
   fi
+  _dc_stdin_over_transport "$body" "$outcome" && return 3
   printf '%s' "$body"
+}
+
+# The per-user transport (defenseclaw-hook-post, hookexec perUserHookMaxBody)
+# sends at most 900 KiB, under the gateway's 1 MiB request cap. A body
+# between that and the read cap passed the read, reached the helper whole and
+# was refused there after the read, so a benign 0.9-1 MiB call (a long Bash
+# heredoc, a large Write) failed closed as "the gateway is running but did
+# not answer" with no gateway row, even in the balanced default (GAP-2279,
+# GAP-2284). In the tier that reviews an oversized call from its prefix, the
+# shell hook now treats such a body as oversized at the transport's cap, as
+# the OpenCode and Amp plugins already do (900 KiB): it prints the body's
+# first 900 KiB and returns 0 for the caller's overflow branch (rc 3), which
+# sends the bounded prefix review for the gateway's usual verdict. Every
+# other tier keeps its read cap and path unchanged.
+_dc_stdin_over_transport() {
+  local body="$1" outcome="$2" LC_ALL=C transport_cap=921600
+  [ "${#body}" -gt "$transport_cap" ] || return 1
+  [ -n "${DEFENSECLAW_AGENT_HOME:-}" ] &&
+    [ -x "${DEFENSECLAW_AGENT_HOME}/.local/bin/defenseclaw-hook-post" ] || return 1
+  defenseclaw_per_user_oversize_open || return 1
+  _dc_stdin_refused "$transport_cap" overflow "$outcome"
+  printf '%s' "${body:0:transport_cap}"
+  return 0
 }
 
 # _dc_stdin_refused logs and reports a body defenseclaw_read_stdin_capped

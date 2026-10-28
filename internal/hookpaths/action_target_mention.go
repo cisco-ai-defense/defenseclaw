@@ -90,6 +90,7 @@ func actionPosixTargetMention(command, cwd, home string, depth int, stateOnly bo
 	}
 	protected := newProtectedFiles(home)
 	ssh := filepath.Join(home, ".ssh")
+	stateHome := &actionStateHome{home: home}
 	// base places a relative value: the effective cwd for a parsed word,
 	// the request cwd for the text scan.
 	// Git Bash spells a Windows drive /c/... (GAP-0781 RV8-1).
@@ -128,14 +129,28 @@ func actionPosixTargetMention(command, cwd, home string, depth int, stateOnly bo
 		}
 		operand := OperandPath(value, base)
 		if stateOnly {
-			return actionProtectedStatePath(operand, home)
+			return actionProtectedStatePath(operand, stateHome)
 		}
 		return protectedReachPath(operand, protected, ssh)
 	}
 	// The hook client records an answer for every pattern the scan checks,
-	// so while recording it never stops at a match.
+	// so while recording it never stops at a match. A long command repeats
+	// its words (a heredoc body, a generated script): each distinct value is
+	// resolved once per scan, because its answer depends only on the value,
+	// its tilde form and its base (GAP-2279, answer budget).
+	type mention struct {
+		value, base string
+		tilde       bool
+	}
+	answers := map[mention]bool{}
 	check := func(value string, tilde bool, base string) bool {
-		return checkValue(value, tilde, base) && !globs.recording()
+		key := mention{value: value, base: base, tilde: tilde}
+		found, seen := answers[key]
+		if !seen {
+			found = checkValue(value, tilde, base)
+			answers[key] = found
+		}
+		return found && !globs.recording()
 	}
 	if parsed {
 		// $USER and $LOGNAME name the home's own directory, as
@@ -1594,12 +1609,32 @@ var (
 	activeStateTrees = []string{"hooks", "policies", "installer", "previous/installer", "registries", "receipts", "quarantine", "cache"}
 )
 
-func actionProtectedStatePath(value, home string) bool {
+// writeTargetWalks counts write-target resolutions, so a test can prove a
+// long command resolves each distinct word once (GAP-2279).
+var writeTargetWalks atomic.Int64
+
+// actionStateHome resolves the home of one target scan once: every word of
+// a long command is placed against the same home (GAP-2279, answer budget).
+type actionStateHome struct {
+	home     string
+	resolved string
+	ok, done bool
+}
+
+func (h *actionStateHome) active() (string, bool) {
+	if !h.done {
+		h.resolved, h.ok = ResolveWriteTarget(h.home)
+		h.done = true
+	}
+	return h.resolved, h.ok
+}
+
+func actionProtectedStatePath(value string, home *actionStateHome) bool {
 	resolved, ok := ResolveWriteTarget(value)
 	if !ok {
 		return false
 	}
-	activeHome, ok := ResolveWriteTarget(home)
+	activeHome, ok := home.active()
 	if !ok {
 		return false
 	}
@@ -1607,7 +1642,13 @@ func actionProtectedStatePath(value, home string) bool {
 	if err == nil && actionProtectedStateRelative(filepath.ToSlash(relative)) {
 		return true
 	}
-	_, same := ResolveActiveStateHardlinkTarget(resolved, home)
+	// Only an existing regular file with a second link can alias the state.
+	// A missing or ordinary target costs one stat here, not a second walk.
+	info, err := os.Stat(resolved)
+	if err != nil || !info.Mode().IsRegular() || linkCount(resolved, info) < 2 {
+		return false
+	}
+	_, same := ResolveActiveStateHardlinkTarget(resolved, home.home)
 	return same
 }
 
