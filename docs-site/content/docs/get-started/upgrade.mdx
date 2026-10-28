@@ -68,6 +68,8 @@ If a step fails, the installer puts the previous version back, restarts it and k
 
 To go back to an earlier release, use `defenseclaw rollback` or `defenseclaw upgrade --version X.Y.Z`. Running an older release's installer (`install.sh` or `install.ps1` of that release) directly over a newer install is not a supported downgrade: the older installer does not know the hook entries the newer release wrote. On Windows it adds its own Claude Code hook beside them: until the repair below, Claude Code tool calls fail in the older release's hook (`unknown flag: --connector`), and `defenseclaw doctor` reports two DefenseClaw PreToolUse handlers. If that happened, run the newer release's install command again, then go back with one of the two commands above.
 
+Going from 1.0.4 straight to 1.0.2 on macOS or Linux, with either command or with the 1.0.2 installer, leaves a hook helper that 1.0.2 cannot use, so every agent hook call prints an error. See [`defenseclaw_api_listener_foreign: command not found` after going back to 1.0.2](#defenseclaw_api_listener_foreign-command-not-found-after-going-back-to-102-macos-and-linux). From 1.0.5 on, going back to 1.0.2 is clean.
+
 If the `defenseclaw` command does not start, run the install command again. It repairs any install and keeps your data:
 
 <include>../../snippets/install-commands.mdx</include>
@@ -318,6 +320,21 @@ Fixes for installer messages and failed upgrades on macOS, Linux and Windows.
 **Fix.** `defenseclaw rollback`, or install the newer release again.
 
 **Check.** `defenseclaw migrate --check` exits 0.
+
+### `defenseclaw_api_listener_foreign: command not found` after going back to 1.0.2 (macOS and Linux)
+
+**Cause.** You went from 1.0.4 straight to 1.0.2. 1.0.2 keeps the newer hook helper `~/.defenseclaw/hooks/_hardening.sh` that 1.0.4 wrote, and that helper lacks a function the 1.0.2 hooks call. Each agent hook call then prints `~/.defenseclaw/hooks/<agent>-hook.sh: line <n>: defenseclaw_api_listener_foreign: command not found`. The gateway still checks the call.
+
+**Fix.** On 1.0.2, remove the helper and restart the gateway, which writes 1.0.2's own:
+
+```bash
+rm ~/.defenseclaw/hooks/_hardening.sh
+defenseclaw-gateway restart
+```
+
+Or go from 1.0.4 to 1.0.5 first, then back to 1.0.2: the 1.0.5 helper keeps that function.
+
+**Check.** The next agent tool call prints no `command not found` line.
 
 ### `The running gateway did not stop`
 
