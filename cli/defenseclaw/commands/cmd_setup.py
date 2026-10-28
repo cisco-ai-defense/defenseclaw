@@ -11224,6 +11224,8 @@ def _apply_hook_connector_setup(
             if connector == "copilot":
                 _warn_leftover_copilot_managed_plugin_key()
     elif _batch_summary is None:
+        if connector == "codex":
+            _warn_codex_home_not_applied_without_restart(cfg)
         _echo_saved_without_restart()
 
     if not defer_audit:
@@ -11257,6 +11259,11 @@ def _echo_batch_setup_summary(applied: list[str], summary: dict[str, Any], *, re
             "with a warning (default policy). To block them: defenseclaw guardrail use-pack strict"
         )
     if not restart:
+        if "codex" in applied:
+            ctx = click.get_current_context(silent=True)
+            app = ctx.find_object(AppContext) if ctx is not None else None
+            if app is not None and app.cfg is not None:
+                _warn_codex_home_not_applied_without_restart(app.cfg)
         _echo_saved_without_restart(plural=True)
 
 
@@ -13207,8 +13214,6 @@ def _agent_settings_refusal(
     fail_modes map its flat records rebuild (GAP-1815). *rerun* names the
     command to run again after the fix, *changed* what the caller did.
     """
-    if link_refusal := _connector_home_link_refusal(connector, changed=changed, rerun=rerun):
-        return link_refusal
     executable = _gateway_lifecycle_executable()
     if not executable:
         return ""
@@ -13251,55 +13256,64 @@ def _agent_settings_refusal(
     )
 
 
-# The variable each connector's agent reads to move its configuration folder.
-_CONNECTOR_HOME_VARIABLES = {
-    "claudecode": "CLAUDE_CONFIG_DIR",
-    "codex": "CODEX_HOME",
-    "copilot": "COPILOT_HOME",
-    "hermes": "HERMES_HOME",
-    "opencode": "OPENCODE_CONFIG_DIR",
-}
-
-
-def _host_is_windows() -> bool:
-    return os.name == "nt"
-
-
-def _connector_home_link_refusal(connector: str, *, changed: str, rerun: str) -> str:
-    """Why a moved agent config folder on Windows cannot be set up, or "".
-
-    get-started/windows/paths-troubleshooting says setup refuses a
-    CLAUDE_CONFIG_DIR, CODEX_HOME, COPILOT_HOME, HERMES_HOME or
-    OPENCODE_CONFIG_DIR that goes through a symbolic link or junction. Setup
-    exited 0 for a CODEX_HOME junction and set up the default folder instead,
-    with no word about the variable (GAP-1664). On Windows a junction anywhere
-    on the path is transparent to ordinary path operations, so every
-    component is checked. POSIX keeps its symlinked system folders (macOS
-    /tmp); the gateway's writes there refuse a linked leaf on their own.
-    """
-    if not _host_is_windows():
-        return ""
-    variable = _CONNECTOR_HOME_VARIABLES.get(connector)
-    configured = (os.environ.get(variable) or "").strip() if variable else ""
-    if not configured:
-        return ""
-    path = os.path.abspath(os.path.expanduser(configured))
-    try:
-        reject_reparse_path(path)
-    except UnsafePathError:
-        label = _CONNECTOR_META.get(connector, {}).get("label", connector)
-        return (
-            f"{label}: {variable}={path} goes through a symbolic link or junction, which setup refuses. "
-            f"Set {variable} to the real folder (or unset it to use the default). {changed} and the gateway "
-            f"keeps running as it was; then run the same {rerun} again."
-        )
-    except OSError:
-        return ""
-    return ""
-
-
 def _selected_codex_setup_root() -> str:
     return os.path.abspath(connector_paths.codex_home())
+
+
+def _recorded_codex_root(data_dir: str) -> str | None:
+    """The Codex folder this data dir's gateway registered or backed up, or None."""
+    data_dir = os.path.abspath(os.fspath(data_dir))
+    try:
+        existed, body, _generation = _capture_protected_setup_file(
+            os.path.join(data_dir, _HOOK_CONTRACT_LOCK_FILENAME),
+            _HOOK_CONTRACT_LOCK_MAX_BYTES,
+            "hook_contract_lock.json",
+        )
+        registered = _codex_registration_path(body) if existed else None
+        if registered:
+            return os.path.dirname(registered)
+        existed, body, _generation = _capture_protected_setup_file(
+            _codex_backup_path(data_dir),
+            _SETUP_CODEX_BACKUP_MAX_BYTES,
+            "Codex managed backup",
+            trust_windows_administrators=True,
+        )
+        if existed:
+            return os.path.dirname(_codex_backup_identity(body)["path"])
+    except Exception:  # noqa: BLE001 - an unreadable record proves no folder.
+        return None
+    return None
+
+
+def _warn_codex_home_not_applied_without_restart(cfg) -> None:
+    """Say when --no-restart leaves this shell's CODEX_HOME unused (GAP-1664).
+
+    Only a setup that restarts the gateway hands it this shell's CODEX_HOME
+    (and DEFENSECLAW_EXPLICIT_CODEX_SETUP); with --no-restart the running
+    gateway, or the next plain start, keeps the Codex folder it has. Setup
+    said "Saved. The running gateway applies it" and the variable was
+    silently ignored, for a plain folder as well as a junction. Nothing is
+    printed when CODEX_HOME is unset, or when it is the folder already
+    registered, or when the gateway is stopped and has no Codex folder yet
+    (its next start from this shell uses the variable).
+    """
+    if not (os.environ.get("CODEX_HOME") or "").strip():
+        return
+    selected = _selected_codex_setup_root()
+    data_dir = str(cfg.data_dir)
+    recorded = _recorded_codex_root(data_dir)
+    if recorded is not None and (
+        os.path.normcase(os.path.normpath(recorded)) == os.path.normcase(os.path.normpath(selected))
+    ):
+        return
+    if recorded is None and not _is_pid_alive(os.path.join(data_dir, "gateway.pid")):
+        return
+    kept = f" ({recorded})" if recorded else ""
+    ux.warn(
+        f"CODEX_HOME={selected} is set in this shell, but with --no-restart the gateway keeps the "
+        f"Codex folder it already uses{kept}. To set up Codex in {selected}, run "
+        "defenseclaw setup codex --yes again without --no-restart."
+    )
 
 
 @contextmanager
