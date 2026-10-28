@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"errors"
 	"reflect"
+	"regexp"
 	"strings"
 	"testing"
 	"testing/fstest"
@@ -530,6 +531,37 @@ func TestStandaloneSetupUsageAndErrorsSpeakTheDocumentedSyntax(t *testing.T) {
 	runEnterpriseSetup([]string{"/ensure", "BOGUS=1", "JSON=0"}, &stdout, &stderr)
 	if got := stderr.String(); !strings.HasPrefix(got, standaloneSetupArtifactName+": unknown property BOGUS; run ") || !strings.Contains(got, " /? ") {
 		t.Fatalf("unknown property error = %q", got)
+	}
+}
+
+// GAP-2398: the unknown-property hint named 11 of the 12 properties /? lists
+// (REFUSECAPABILITYLOSS=1 was missing). It now names every one.
+func TestStandaloneSetupUnknownPropertyHintNamesEveryUsageProperty(t *testing.T) {
+	previous := enterpriseSetupStandaloneFlavor
+	t.Cleanup(func() { enterpriseSetupStandaloneFlavor = previous })
+	enterpriseSetupStandaloneFlavor = func() bool { return true }
+	var usage, stdout, stderr bytes.Buffer
+	if code := runEnterpriseSetup([]string{"/?"}, &usage, &stderr); code != 0 {
+		t.Fatalf("help exit=%d", code)
+	}
+	stderr.Reset()
+	if code := runEnterpriseSetup([]string{"/status", "BOGUS=1"}, &stdout, &stderr); code == 0 {
+		t.Fatalf("unknown property exit=%d, want a failure", code)
+	}
+	hint := stderr.String()
+	rows := regexp.MustCompile(`(?m)^  ([A-Z]+)=`).FindAllStringSubmatch(usage.String(), -1)
+	if len(rows) < 12 {
+		t.Fatalf("usage lists %d properties:\n%s", len(rows), usage.String())
+	}
+	for _, row := range rows {
+		if !regexp.MustCompile(`[(, ]` + row[1] + `=`).MatchString(hint) {
+			t.Errorf("unknown property hint lacks %s= that /? lists: %q", row[1], hint)
+		}
+	}
+	for _, want := range []string{"CONFIG=,", "REFUSECAPABILITYLOSS=1,", "TIMEOUTSECONDS=,", "ATTESTCLAUDEEFFECTIVEPOLICY=1)"} {
+		if !strings.Contains(hint, want) {
+			t.Errorf("unknown property hint lacks %q: %q", want, hint)
+		}
 	}
 }
 
