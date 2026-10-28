@@ -587,6 +587,16 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 		// Other callers keep the ordinary response contract.
 		ctx, cancelCompletion := agentHookCompletionContext(r.Context())
 		defer cancelCompletion()
+		// The call's event-history rows and correlation observations commit
+		// together, with its audit row (audit.CallWriteBatch): one commit
+		// instead of one per row (GAP-1303, GAP-1791, GAP-0614). What the call
+		// writes after its verdict commits when the handler returns.
+		ctx = audit.WithCallWriteBatch(ctx, a.store)
+		defer func() {
+			closeCtx, cancelClose := agentHookPersistenceContext(ctx)
+			defer cancelClose()
+			audit.CloseCallWrites(closeCtx)
+		}()
 		ctx, correlatedReq, correlationErr := a.correlateHookOccurrence(ctx, profile, req, b)
 		if correlationErr != nil {
 			// Correlation persistence is fail-closed for the cross-call join IDs,
@@ -1179,7 +1189,14 @@ func (a *APIServer) finalizeAgentHook(
 					return
 				}
 			}
-			auditErr = a.logConnectorHookAuditEnvelope(ctx, env)
+			// The rows the call queued commit with its audit row, and the
+			// verdict waits for that commit, as it waited for its row alone.
+			auditCtx, auditOutcome := audit.WithCallWriteOutcome(ctx)
+			auditErr = a.logConnectorHookAuditEnvelope(auditCtx, env)
+			audit.FlushCallWrites(ctx)
+			if auditErr == nil {
+				auditErr = auditOutcome.Err()
+			}
 			result.AuditPersisted = auditErr == nil
 		})
 		// A call backed by a pending occurrence (w3-g3-obs; only a
@@ -1269,8 +1286,11 @@ func (a *APIServer) finalizeAgentHook(
 			}
 		}
 		if !result.DecisionSettled {
-			decision := a.emitHookDecisionObservabilityV8(ctx, req, resp, env, panicked)
-			result.DecisionSettled = decision.settled()
+			decisionCtx, decisionOutcome := audit.WithCallWriteOutcome(ctx)
+			decision := a.emitHookDecisionObservabilityV8(decisionCtx, req, resp, env, panicked)
+			// The hook_decision record is committed before the answer.
+			audit.FlushCallWrites(ctx)
+			result.DecisionSettled = decision.settled() && decisionOutcome.Err() == nil
 			if decision == hookDecisionLogUnbuildable && req.pendingOccurrenceID != "" {
 				fmt.Fprintf(os.Stderr, "[gateway] hook_decision record cannot be built connector=%s event=%s; the connector audit row keeps the decision\n",
 					connectorName, req.HookEventName)

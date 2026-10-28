@@ -268,6 +268,9 @@ type Store struct {
 	// observationGroup groups concurrent correlation observation writes
 	// into one transaction (CorrelationRepository.RecordObservations).
 	observationGroup writeGroup
+	// callGroup groups the flushes of concurrent hook calls' write batches
+	// into one transaction (CallWriteBatch).
+	callGroup writeGroup
 
 	sqliteBusyMu       sync.RWMutex
 	sqliteBusyObserver SQLiteBusyObservabilityV8

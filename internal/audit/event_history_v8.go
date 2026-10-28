@@ -405,6 +405,10 @@ func (writer *EventHistoryWriter) AppendContext(
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+	// A hook call commits its appends together (CallWriteBatch).
+	if writer.deferAppend(ctx, []observability.Record{record}, []observabilityredaction.Projection{projection}) {
+		return nil
+	}
 	return writer.appendGrouped(ctx, record, projection)
 }
 
@@ -412,7 +416,8 @@ func (writer *EventHistoryWriter) AppendContext(
 // the validation AppendContext applies to each. A producer that writes a
 // group of related rows per occurrence (the correlation relationship rows of
 // one hook) pays one commit and one write-ahead-log sync instead of one per
-// row (GAP-0246). Every record is persisted when it returns nil.
+// row (GAP-0246). Every record is persisted when it returns nil, or, inside
+// a hook call's open CallWriteBatch, when the call flushes it.
 func (writer *EventHistoryWriter) AppendBatchContext(
 	ctx context.Context,
 	records []observability.Record,
@@ -433,6 +438,19 @@ func (writer *EventHistoryWriter) AppendBatchContext(
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+	if writer.deferAppend(ctx, append([]observability.Record(nil), records...),
+		append([]observabilityredaction.Projection(nil), projections...)) {
+		return nil
+	}
+	return writer.appendBatchDirect(ctx, records, projections)
+}
+
+// appendBatchDirect is AppendBatchContext's own transaction.
+func (writer *EventHistoryWriter) appendBatchDirect(
+	ctx context.Context,
+	records []observability.Record,
+	projections []observabilityredaction.Projection,
+) error {
 	release, err := writer.store.acquireReady()
 	if err != nil {
 		writer.reportHealthFailure(EventHistoryHealthWriteFailed, err, EventHistorySQLiteUnavailable)
