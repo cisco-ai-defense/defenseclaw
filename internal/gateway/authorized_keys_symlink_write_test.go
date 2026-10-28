@@ -1403,6 +1403,11 @@ func TestR103B07FalsePositiveRows(t *testing.T) {
 		"tar -xf pkg.tar -g snap -C build; echo hi > report.txt",
 		"tar -xf pkg.tar --foo -C build; echo hi > report.txt",
 		"tar -C build --overwrite -xf keys.tar && echo k >> build/n1.txt",
+		// bsdtar reads -W NAME=VALUE as --NAME=VALUE: -W directory=DIR
+		// moves the extraction destination on macOS and Windows.
+		"tar -x -W directory=../elsewhere -f keys.tar && echo k >> ../elsewhere/n1.txt",
+		"tar -xW directory=../elsewhere -f keys.tar && echo k >> ../elsewhere/n1.txt",
+		"tar xWf directory=../elsewhere keys.tar && echo k >> ../elsewhere/n1.txt",
 	} {
 		input := actionfacts.Input{Tool: "Bash", Command: command, CWD: cwd,
 			ActiveHome: home, DialectHint: actionfacts.DialectPOSIX}

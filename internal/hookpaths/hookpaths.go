@@ -2783,9 +2783,6 @@ func archiveDestination(program string, args []string, static []bool, cwd string
 	return filepath.Clean(destination)
 }
 
-// tarDestination reads destination-bearing tar options in short clusters,
-// old-style option words, and unique long-option abbreviations. Ambiguity
-// leaves the archive scope global.
 // tarLongOptions are the tar long options tarDestination scopes. An
 // abbreviation must name exactly one of them; any other option, such as one
 // that runs a program (--to-command, --use-compress-program,
@@ -2819,6 +2816,9 @@ var tarLongFlags = []string{
 	"no-acls", "selinux", "no-selinux",
 }
 
+// tarDestination reads destination-bearing tar options in short clusters,
+// old-style option words, and unique long-option abbreviations. Ambiguity
+// leaves the archive scope global.
 func tarDestination(args []string, static []bool, cwd string) (string, bool) {
 	destination := cwd
 	changed := false
@@ -2922,9 +2922,12 @@ func tarDestination(args []string, static []bool, cwd string) (string, bool) {
 					j = len(cluster)
 				}
 			case 'a', 'x', 'z', 'j', 'J', 'v', 'O', 't', 'c', 'P', 'p', 'h', 'k', 'm', 'w', 'U',
-				'o', 'S', 'W', 'B', 'l', 'r', 'u', 'i', 'n':
+				'o', 'S', 'B', 'l', 'r', 'u', 'i', 'n':
 			default:
-				// Unknown short options may consume a path.
+				// Unknown short options may consume a path. -W is GNU --verify,
+				// but bsdtar (macOS /usr/bin/tar, Windows tar.exe) reads
+				// -W NAME=VALUE as --NAME=VALUE, so -W directory=DIR moves the
+				// destination (GAP-2445).
 				return "", false
 			}
 		}
