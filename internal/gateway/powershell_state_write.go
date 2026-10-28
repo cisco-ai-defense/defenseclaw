@@ -35,14 +35,15 @@ func provenPowerShellStateWrite(request trustedActionRequest) bool {
 	if !known || !strings.Contains(strings.ToLower(command), "defenseclaw") {
 		return false
 	}
-	forms, ok := powerShellStateWriteForms(command)
+	forms, bounded, ok := powerShellStateWriteForms(command)
 	if !ok {
 		return false
 	}
-	// Bound the twins a crafted command can ask for; past the bound the
-	// state-naming command counts as the write (over-block, RV10-3).
+	// Bound the twins a crafted command can ask for and the text the
+	// reading copies; past a bound the state-naming command counts as the
+	// write (over-block, RV10-3, RV14-2).
 	const maxForms = 128
-	if len(forms) > maxForms {
+	if bounded || len(forms) > maxForms {
 		return true
 	}
 	for _, form := range forms {
@@ -58,34 +59,211 @@ func provenPowerShellStateWrite(request trustedActionRequest) bool {
 	return false
 }
 
+// psStateScanMaxRunes bounds the text the PowerShell reading copies into
+// pieces and argument lists; psNestedShellDepth bounds powershell -Command
+// bodies read inside each other. Ordinary commands stay far below both; a
+// crafted command past one is judged the write (RV14-2).
+const (
+	psStateScanMaxRunes = 1 << 20
+	psNestedShellDepth  = 3
+)
+
 // powerShellStateWriteForms returns the PowerShell twins of command that
-// name DefenseClaw (see provenPowerShellStateWrite), deduplicated. ok is
-// false when PowerShell cannot parse the command: a < that starts a token
-// is a parse error there (a Git Bash here-document or input redirect), so
-// nothing runs in that reading.
-func powerShellStateWriteForms(command string) ([]string, bool) {
+// name DefenseClaw (see provenPowerShellStateWrite), deduplicated. A
+// powershell or pwsh -Command body is read as PowerShell too. bounded
+// reports a command past the reading bounds. ok is false when PowerShell
+// cannot parse the command: a < that starts a token is a parse error there
+// (a Git Bash here-document or input redirect), so nothing runs in that
+// reading.
+func powerShellStateWriteForms(command string) (forms []string, bounded, ok bool) {
+	seen := map[string]bool{}
+	bounded, ok = psCollectStateWriteForms(command, 0, seen, &forms)
+	return forms, bounded, ok
+}
+
+func psCollectStateWriteForms(command string, depth int, seen map[string]bool, forms *[]string) (bool, bool) {
 	scan := psStateScan{runes: []rune(command)}
 	scan.code(0, false)
-	if scan.parseError {
-		return nil, false
+	if scan.overBound {
+		return true, true
 	}
-	seen := map[string]bool{}
-	var forms []string
+	if scan.parseError {
+		return false, false
+	}
 	add := func(form string) {
 		form = strings.TrimSpace(form)
-		if form == "" || seen[form] || !strings.Contains(strings.ToLower(form), "defenseclaw") {
+		if form == "" || seen[form] || !strings.Contains(strings.ToLower(form), "defenseclaw") ||
+			psOutputOnly(form) {
 			return
 		}
 		seen[form] = true
-		forms = append(forms, form)
+		*forms = append(*forms, form)
 	}
 	for _, piece := range scan.pieces {
 		add(piece)
+		body, nested := psNestedShellBody(piece)
+		if !nested || !strings.Contains(strings.ToLower(body), "defenseclaw") {
+			continue
+		}
+		if depth >= psNestedShellDepth {
+			return true, true
+		}
+		// A body PowerShell cannot parse runs nothing; only its bound counts.
+		if bounded, _ := psCollectStateWriteForms(body, depth+1, seen, forms); bounded {
+			return true, true
+		}
 	}
 	for _, target := range scan.targets {
 		add("Set-Content -LiteralPath " + target + " -Value x")
 	}
-	return forms, true
+	return false, true
+}
+
+// psOutputOnly reports a statement whose command only writes to the output
+// streams (Write-Host "defenseclaw step 3"); its own reading cannot mutate
+// state, and a redirect of it is judged as its own target, so it is not a
+// twin and does not count toward the bound (checker it14 B40).
+func psOutputOnly(form string) bool {
+	word := form
+	if index := strings.IndexAny(form, " \t\r\n"); index >= 0 {
+		word = form[:index]
+	}
+	switch strings.ToLower(word) {
+	case "write-host", "write-output", "echo", "write", "write-verbose",
+		"write-debug", "write-warning", "write-information", "write-error":
+		return true
+	}
+	return false
+}
+
+// psWord is one whitespace-separated word of a PowerShell statement.
+type psWord struct {
+	start  int // rune index in the statement
+	text   string
+	quoted bool
+}
+
+// psWords splits a statement into words at blanks outside quotes.
+func psWords(statement string) []psWord {
+	r := []rune(statement)
+	scan := psStateScan{runes: r}
+	var words []psWord
+	for i := 0; i < len(r); {
+		if r[i] == ' ' || r[i] == '\t' || r[i] == '\r' || r[i] == '\n' {
+			i++
+			continue
+		}
+		start := i
+		for i < len(r) && r[i] != ' ' && r[i] != '\t' && r[i] != '\r' && r[i] != '\n' {
+			switch {
+			case r[i] == '`':
+				i += 2
+			case psSingleQuote(r[i]):
+				i = scan.singleQuoted(i)
+			case psDoubleQuote(r[i]):
+				i = scan.doubleQuoted(i)
+			default:
+				i++
+			}
+		}
+		if i > len(r) {
+			i = len(r)
+		}
+		words = append(words, psWord{start: start, text: string(r[start:i]),
+			quoted: psSingleQuote(r[start]) || psDoubleQuote(r[start])})
+	}
+	return words
+}
+
+// psUnquote removes the outer quotes of one quoted word as PowerShell does
+// when it passes it to a program: a doubled quote and a backtick escape
+// become the character.
+func psUnquote(word string) string {
+	r := []rune(word)
+	if len(r) < 2 || !psQuotedWord(word) {
+		return word
+	}
+	single := psSingleQuote(r[0])
+	var out []rune
+	for i := 1; i < len(r)-1; i++ {
+		switch {
+		case single && psSingleQuote(r[i]) && i+1 < len(r)-1 && psSingleQuote(r[i+1]):
+			out = append(out, r[i])
+			i++
+		case !single && r[i] == '`' && i+1 < len(r)-1:
+			out = append(out, r[i+1])
+			i++
+		case !single && psDoubleQuote(r[i]) && i+1 < len(r)-1 && psDoubleQuote(r[i+1]):
+			out = append(out, r[i])
+			i++
+		default:
+			out = append(out, r[i])
+		}
+	}
+	return string(out)
+}
+
+// psNestedShellBody returns the script a powershell or pwsh call in
+// statement runs with -Command (or as its first positional argument), after
+// the outer shell's quote removal: powershell -Command "Set-Content STATE x"
+// writes state as the inner Set-Content does (checker it14, GAP-2414).
+func psNestedShellBody(statement string) (string, bool) {
+	words := psWords(statement)
+	if len(words) == 0 {
+		return "", false
+	}
+	program := strings.ToLower(psUnquote(words[0].text))
+	if index := strings.LastIndexAny(program, `\/`); index >= 0 {
+		program = program[index+1:]
+	}
+	program = strings.TrimSuffix(program, ".exe")
+	if program != "powershell" && program != "pwsh" {
+		return "", false
+	}
+	body := func(rest []psWord) string {
+		if len(rest) == 1 {
+			return psUnquote(rest[0].text)
+		}
+		parts := make([]string, 0, len(rest))
+		for _, word := range rest {
+			parts = append(parts, psUnquote(word.text))
+		}
+		return strings.Join(parts, " ")
+	}
+	for k := 1; k < len(words); k++ {
+		lower := strings.ToLower(words[k].text)
+		if words[k].quoted || !strings.HasPrefix(lower, "-") {
+			return body(words[k:]), true
+		}
+		name, _, _ := strings.Cut(lower, ":")
+		switch {
+		case name == "-c" || len(name) >= 4 && strings.HasPrefix("-command", name):
+			if k+1 >= len(words) {
+				return "", false
+			}
+			return body(words[k+1:]), true
+		case name == "-f" || len(name) >= 3 && strings.HasPrefix("-file", name),
+			name == "-e" || name == "-ec" || len(name) >= 3 && strings.HasPrefix("-encodedcommand", name):
+			return "", false
+		case psShellValueOption(name):
+			k++
+		}
+	}
+	return "", false
+}
+
+// psShellValueOption reports a powershell/pwsh option that takes the next
+// word as its value.
+func psShellValueOption(name string) bool {
+	switch name {
+	case "-ep", "-ex", "-exec", "-if", "-inp", "-of", "-o", "-w", "-win",
+		"-config", "-wd", "-settings", "-v", "-version", "-psconsolefile",
+		"-custompipename", "-configurationname", "-settingsfile",
+		"-workingdirectory", "-inputformat", "-outputformat":
+		return true
+	}
+	return len(name) >= 5 && (strings.HasPrefix("-executionpolicy", name) ||
+		strings.HasPrefix("-windowstyle", name))
 }
 
 // psStateScan reads a command in the PowerShell grammar: strings (also the
@@ -97,6 +275,17 @@ type psStateScan struct {
 	pieces     []string
 	targets    []string
 	parseError bool
+	overBound  bool
+	copied     int
+}
+
+// account adds n copied runes and reports the reading still within bound.
+func (s *psStateScan) account(n int) bool {
+	s.copied += n
+	if s.copied > psStateScanMaxRunes {
+		s.overBound = true
+	}
+	return !s.overBound
 }
 
 func psSingleQuote(r rune) bool {
@@ -122,20 +311,20 @@ func (s *psStateScan) tokenStart(i int) bool {
 // body is a piece of its own.
 func (s *psStateScan) code(i int, nested bool) int {
 	r := s.runes
-	var cur strings.Builder
+	var cur []rune
 	flush := func() {
-		if strings.TrimSpace(cur.String()) != "" {
-			s.pieces = append(s.pieces, cur.String())
+		if strings.TrimSpace(string(cur)) != "" && s.account(len(cur)) {
+			s.pieces = append(s.pieces, string(cur))
 		}
-		cur.Reset()
+		cur = cur[:0]
 	}
-	for i < len(r) && !s.parseError {
+	for i < len(r) && !s.parseError && !s.overBound {
 		c := r[i]
 		switch {
 		case c == '`':
-			cur.WriteRune(c)
+			cur = append(cur, c)
 			if i+1 < len(r) {
-				cur.WriteRune(r[i+1])
+				cur = append(cur, r[i+1])
 			}
 			i += 2
 		case c == '\n' || c == ';' || c == '|' || c == '&' || c == '{' || c == '}':
@@ -148,10 +337,17 @@ func (s *psStateScan) code(i int, nested bool) int {
 			}
 			i++
 		case c == '(':
-			method := strings.ToLower(strings.TrimRight(cur.String(), " \t"))
+			tail := cur
+			if len(tail) > 32 {
+				tail = tail[len(tail)-32:]
+			}
+			method := strings.ToLower(strings.TrimRight(string(tail), " \t"))
 			flush()
 			end := s.code(i+1, true)
-			if write := psFileWriteMethod(method); write != nil && end-1 > i+1 {
+			if s.overBound {
+				return len(r)
+			}
+			if write := psFileWriteMethod(method); write != nil && end-1 > i+1 && s.account(end-1-i) {
 				args := psSplitArguments(string(r[i+1 : end-1]))
 				for _, index := range write {
 					if index < len(args) && args[index] != "" {
@@ -165,30 +361,41 @@ func (s *psStateScan) code(i int, nested bool) int {
 				i++
 			}
 		case c == '<' && i+1 < len(r) && r[i+1] == '#':
-			end := strings.Index(string(r[i+2:]), "#>")
-			if end < 0 {
-				return len(r)
+			// A block comment ends at the first #>; one pass over the
+			// runes (RV14-2). An unterminated one runs to the end.
+			j := i + 2
+			for j+1 < len(r) && (r[j] != '#' || r[j+1] != '>') {
+				j++
 			}
-			i += 2 + len([]rune(string(r[i+2:])[:end])) + 2
+			i = j + 2
+			if i > len(r) {
+				i = len(r)
+			}
 		case c == '<' && s.tokenStart(i):
 			s.parseError = true
 			return len(r)
 		case c == '-' && s.tokenStart(i) && i+2 < len(r) && r[i+1] == '-' && r[i+2] == '%':
 			for i < len(r) && r[i] != '\n' {
-				cur.WriteRune(r[i])
+				cur = append(cur, r[i])
 				i++
 			}
 		case c == '@' && i+1 < len(r) && (psSingleQuote(r[i+1]) || psDoubleQuote(r[i+1])) && s.hereStringOpen(i+2):
 			end := s.hereString(i)
-			cur.WriteString(string(r[i:end]))
+			if s.overBound {
+				return len(r)
+			}
+			cur = append(cur, r[i:end]...)
 			i = end
 		case psSingleQuote(c):
 			end := s.singleQuoted(i)
-			cur.WriteString(string(r[i:end]))
+			cur = append(cur, r[i:end]...)
 			i = end
 		case psDoubleQuote(c):
 			end := s.doubleQuoted(i)
-			cur.WriteString(string(r[i:end]))
+			if s.overBound {
+				return len(r)
+			}
+			cur = append(cur, r[i:end]...)
 			i = end
 		case c == '$' && i+1 < len(r) && r[i+1] == '{':
 			end := i + 2
@@ -199,28 +406,36 @@ func (s *psStateScan) code(i int, nested bool) int {
 				end++
 			}
 			if end >= len(r) {
-				cur.WriteString(string(r[i:]))
+				cur = append(cur, r[i:]...)
 				i = len(r)
 				continue
 			}
 			name := string(r[i+2 : end])
-			cur.WriteString(string(r[i : end+1]))
+			cur = append(cur, r[i:end+1]...)
 			i = end + 1
 			if target, ok := psProviderPathLiteral(name); ok && s.assignmentAt(i) {
 				s.targets = append(s.targets, target)
 			}
 		case c == '>':
-			cur.WriteRune(c)
+			// The redirect target is judged as its own write (below); the
+			// piece keeps only the command, so a stream redirect such as
+			// 2>$null or 2>&1 does not leave the cmdlet's own reading
+			// partial (checker it14 class rows).
+			if len(cur) > 0 && i > 0 && strings.ContainsRune("123456*", r[i-1]) && s.tokenStart(i-1) {
+				cur = cur[:len(cur)-1]
+			}
 			i++
 			if i < len(r) && r[i] == '>' {
-				cur.WriteRune(r[i])
 				i++
 			}
 			if i < len(r) && r[i] == '&' {
+				i++
+				for i < len(r) && r[i] >= '0' && r[i] <= '9' {
+					i++
+				}
 				continue
 			}
 			for i < len(r) && (r[i] == ' ' || r[i] == '\t') {
-				cur.WriteRune(r[i])
 				i++
 			}
 			start := i
@@ -229,6 +444,9 @@ func (s *psStateScan) code(i int, nested bool) int {
 				i = s.singleQuoted(i)
 			case i < len(r) && psDoubleQuote(r[i]):
 				i = s.doubleQuoted(i)
+				if s.overBound {
+					return len(r)
+				}
 			default:
 				for i < len(r) && !psTokenBreak(r[i]) && r[i] != '<' && r[i] != '>' {
 					if r[i] == '`' {
@@ -241,12 +459,12 @@ func (s *psStateScan) code(i int, nested bool) int {
 				}
 			}
 			if i > start {
-				target := string(r[start:i])
-				cur.WriteString(target)
-				s.targets = append(s.targets, target)
+				if target := string(r[start:i]); !strings.EqualFold(target, "$null") {
+					s.targets = append(s.targets, target)
+				}
 			}
 		default:
-			cur.WriteRune(c)
+			cur = append(cur, c)
 			i++
 		}
 	}
@@ -261,13 +479,24 @@ func (s *psStateScan) assignmentAt(i int) bool {
 	for i < len(r) && (r[i] == ' ' || r[i] == '\t') {
 		i++
 	}
-	rest := string(r[i:])
+	// Compare runes in place: converting the rest of the command for every
+	// braced variable made the reading quadratic (RV14-2).
+	at := func(op string) bool {
+		k := i
+		for _, c := range op {
+			if k >= len(r) || r[k] != c {
+				return false
+			}
+			k++
+		}
+		return true
+	}
 	for _, op := range []string{"+=", "-=", "*=", "/=", "%=", "??=", "++", "--"} {
-		if strings.HasPrefix(rest, op) {
+		if at(op) {
 			return true
 		}
 	}
-	return strings.HasPrefix(rest, "=") && !strings.HasPrefix(rest, "==")
+	return at("=") && !at("==")
 }
 
 // hereStringOpen reports that only blanks follow @' or @" to the end of the
@@ -308,6 +537,9 @@ func (s *psStateScan) hereString(i int) int {
 		}
 		if expandable && r[j] == '$' && j+1 < len(r) && r[j+1] == '(' {
 			j = s.code(j+2, true)
+			if s.overBound {
+				return len(r)
+			}
 			lineStart = false
 			continue
 		}
@@ -342,6 +574,9 @@ func (s *psStateScan) doubleQuoted(i int) int {
 			j++
 		case r[j] == '$' && j+1 < len(r) && r[j+1] == '(':
 			j = s.code(j+2, true) - 1
+			if s.overBound {
+				return len(r)
+			}
 		case psDoubleQuote(r[j]):
 			if j+1 < len(r) && psDoubleQuote(r[j+1]) {
 				j++

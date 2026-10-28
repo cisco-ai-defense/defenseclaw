@@ -573,7 +573,13 @@ func actionPlainBacktickClosed(text string, from int) bool {
 // file's content ([System.IO.File]::ReadAllText( and its kin) just before an
 // opening parenthesis.
 func actionWindowsFileReadMethod(prefix string) bool {
-	lower := strings.ToLower(strings.TrimRight(prefix, " \t"))
+	// Lower only the tail the method names can match: lowering the whole
+	// prefix for every ( made a long command quadratic (RV14-2 class).
+	trimmed := strings.TrimRight(prefix, " \t")
+	if len(trimmed) > 32 {
+		trimmed = trimmed[len(trimmed)-32:]
+	}
+	lower := strings.ToLower(trimmed)
 	for _, method := range []string{"::readalltext", "::readallbytes", "::readalllines", "::readlines", "::openread", "::opentext"} {
 		if strings.HasSuffix(lower, method) {
 			return true

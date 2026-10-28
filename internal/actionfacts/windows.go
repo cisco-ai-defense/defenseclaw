@@ -3796,6 +3796,9 @@ func windowsAddPowerShellPaths(
 			strings.HasPrefix(lower, "-whatif:")) {
 			continue
 		}
+		if unquoted && windowsSkipPowerShellCommonParameter(args, &i, lower, builder) {
+			continue
+		}
 		if unquoted && strings.HasPrefix(lower, "-") {
 			builder.out.markPartial(IssueUnknownOperandGrammar)
 			continue
@@ -3806,6 +3809,48 @@ func windowsAddPowerShellPaths(
 		builder.out.markPartial(IssueUnknownOperandGrammar)
 	}
 	return filesystemFound, environmentFound
+}
+
+// windowsPowerShellCommonParameter reports whether lower (an unquoted
+// parameter word in lower case, optionally -Name:value) is a PowerShell
+// common parameter or one of its aliases, and whether it takes the next word
+// as its value. Every cmdlet accepts them and none of them moves the target,
+// so they must not leave a path parse partial and drop the state-write proof
+// (checker it14 RV14-1, GAP-2414).
+func windowsPowerShellCommonParameter(lower string) (takesValue, known bool) {
+	name, _, joined := strings.Cut(lower, ":")
+	switch name {
+	case "-erroraction", "-ea", "-warningaction", "-wa",
+		"-informationaction", "-infa", "-errorvariable", "-ev",
+		"-warningvariable", "-wv", "-informationvariable", "-iv",
+		"-outvariable", "-ov", "-outbuffer", "-ob",
+		"-pipelinevariable", "-pv", "-progressaction", "-proga":
+		return !joined, true
+	case "-verbose", "-vb", "-debug", "-db":
+		return false, true
+	}
+	return false, false
+}
+
+// windowsSkipPowerShellCommonParameter consumes a common parameter at
+// args[*i] (and its value) and reports whether it did.
+func windowsSkipPowerShellCommonParameter(
+	args []windowsWord,
+	i *int,
+	lower string,
+	builder *windowsFactBuilder,
+) bool {
+	takesValue, known := windowsPowerShellCommonParameter(lower)
+	if !known {
+		return false
+	}
+	if takesValue {
+		*i++
+		if *i >= len(args) {
+			builder.out.markPartial(IssueUnknownOperandGrammar)
+		}
+	}
+	return true
 }
 
 func windowsKnownRecursiveForceSwitch(program, value string) (string, bool) {
@@ -4233,6 +4278,9 @@ func windowsAddPowerShellPrimaryPath(
 			strings.HasPrefix(lower, "-whatif:")) {
 			continue
 		}
+		if unquoted && windowsSkipPowerShellCommonParameter(args, &i, lower, builder) {
+			continue
+		}
 		if unquoted && strings.HasPrefix(lower, "-") {
 			builder.out.markPartial(IssueUnknownOperandGrammar)
 			continue
@@ -4428,6 +4476,7 @@ func windowsAddPowerShellSourceDestination(
 			case unquoted && (switchParams[lower] ||
 				strings.HasPrefix(lower, "-confirm:") ||
 				strings.HasPrefix(lower, "-whatif:")):
+			case unquoted && windowsSkipPowerShellCommonParameter(args, &i, lower, builder):
 			case unquoted && strings.HasPrefix(lower, "-"):
 				builder.out.markPartial(IssueUnknownOperandGrammar)
 			default:
@@ -4498,6 +4547,7 @@ func windowsAddPowerShellRename(commandID int64, args []windowsWord, builder *wi
 			lower == "-confirm" || lower == "-whatif" ||
 			strings.HasPrefix(lower, "-confirm:") ||
 			strings.HasPrefix(lower, "-whatif:")):
+		case unquoted && windowsSkipPowerShellCommonParameter(args, &i, lower, builder):
 		case unquoted && strings.HasPrefix(lower, "-"):
 			builder.out.markPartial(IssueUnknownOperandGrammar)
 		default:
