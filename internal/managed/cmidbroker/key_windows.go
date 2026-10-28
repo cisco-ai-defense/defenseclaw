@@ -242,15 +242,15 @@ func settleKeyDrift(
 	return nil
 }
 
-// openKeyForRepair opens the key a second time with the rights needed to
-// re-stamp its descriptor. A variable so tests can simulate a denied open.
-// No data access is requested, so the read handle's share mode does not
-// conflict, and FILE_FLAG_OPEN_REPARSE_POINT keeps a swapped-in reparse point
-// from being followed.
-var openKeyForRepair = func(pathPtr *uint16) (windows.Handle, error) {
+// openKeyForRepair opens the key a second time with the given rights so its
+// descriptor can be re-stamped. A variable so tests can observe the requested
+// rights and simulate a denied open. No data access is requested, so the read
+// handle's share mode does not conflict, and FILE_FLAG_OPEN_REPARSE_POINT keeps
+// a swapped-in reparse point from being followed.
+var openKeyForRepair = func(pathPtr *uint16, access uint32) (windows.Handle, error) {
 	return windows.CreateFile(
 		pathPtr,
-		windows.READ_CONTROL|windows.WRITE_DAC|windows.WRITE_OWNER|windows.FILE_READ_ATTRIBUTES,
+		access,
 		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE,
 		nil,
 		windows.OPEN_EXISTING,
@@ -262,8 +262,23 @@ var openKeyForRepair = func(pathPtr *uint16) (windows.Handle, error) {
 // repairKeyDescriptor stamps the installer's canonical descriptor on the key
 // through a second handle that is proven to be the same file as the one being
 // read, so a path swapped between the two opens is never stamped.
+//
+// A trusted owner (SYSTEM or Administrators) is left as it is: only the
+// protected DACL is re-stamped, and the repair handle asks for WRITE_DAC alone.
+// The owner and group are rewritten, which needs WRITE_OWNER, only when the
+// owner itself is not trusted.
 func repairKeyDescriptor(readHandle windows.Handle, pathPtr *uint16, gatewaySID *windows.SID) error {
-	handle, err := openKeyForRepair(pathPtr)
+	ownerTrusted, err := keyOwnerTrusted(readHandle)
+	if err != nil {
+		return err
+	}
+	access := uint32(windows.READ_CONTROL | windows.WRITE_DAC | windows.FILE_READ_ATTRIBUTES)
+	info := windows.SECURITY_INFORMATION(windows.DACL_SECURITY_INFORMATION | windows.PROTECTED_DACL_SECURITY_INFORMATION)
+	if !ownerTrusted {
+		access |= windows.WRITE_OWNER
+		info |= windows.OWNER_SECURITY_INFORMATION | windows.GROUP_SECURITY_INFORMATION
+	}
+	handle, err := openKeyForRepair(pathPtr, access)
 	if err != nil {
 		return fmt.Errorf("open key for repair: %w", err)
 	}
@@ -282,31 +297,42 @@ func repairKeyDescriptor(readHandle windows.Handle, pathPtr *uint16, gatewaySID 
 	if err != nil {
 		return fmt.Errorf("build canonical key descriptor: %w", err)
 	}
-	owner, _, err := descriptor.Owner()
-	if err != nil {
-		return fmt.Errorf("read canonical key owner: %w", err)
-	}
-	group, _, err := descriptor.Group()
-	if err != nil {
-		return fmt.Errorf("read canonical key group: %w", err)
-	}
 	dacl, _, err := descriptor.DACL()
 	if err != nil {
 		return fmt.Errorf("read canonical key DACL: %w", err)
 	}
-	if err := windows.SetSecurityInfo(
-		handle,
-		windows.SE_FILE_OBJECT,
-		windows.OWNER_SECURITY_INFORMATION|windows.GROUP_SECURITY_INFORMATION|
-			windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION,
-		owner,
-		group,
-		dacl,
-		nil,
-	); err != nil {
+	var owner, group *windows.SID
+	if !ownerTrusted {
+		if owner, _, err = descriptor.Owner(); err != nil {
+			return fmt.Errorf("read canonical key owner: %w", err)
+		}
+		if group, _, err = descriptor.Group(); err != nil {
+			return fmt.Errorf("read canonical key group: %w", err)
+		}
+	}
+	if err := windows.SetSecurityInfo(handle, windows.SE_FILE_OBJECT, info, owner, group, dacl, nil); err != nil {
 		return fmt.Errorf("apply canonical key descriptor: %w", err)
 	}
 	return nil
+}
+
+// keyOwnerTrusted reports whether the open key is owned by SYSTEM or
+// Administrators, the two owners keyDescriptorDrift accepts.
+func keyOwnerTrusted(handle windows.Handle) (bool, error) {
+	descriptor, err := windows.GetSecurityInfo(handle, windows.SE_FILE_OBJECT, windows.OWNER_SECURITY_INFORMATION)
+	if err != nil || descriptor == nil {
+		return false, fmt.Errorf("read key owner: %w", err)
+	}
+	owner, _, err := descriptor.Owner()
+	if err != nil {
+		return false, fmt.Errorf("read key owner: %w", err)
+	}
+	return trustedKeyOwner(owner), nil
+}
+
+func trustedKeyOwner(owner *windows.SID) bool {
+	return owner != nil &&
+		(owner.IsWellKnown(windows.WinLocalSystemSid) || owner.IsWellKnown(windows.WinBuiltinAdministratorsSid))
 }
 
 func sameFile(left, right windows.Handle) (bool, error) {
@@ -435,8 +461,7 @@ func keyDescriptorDrift(descriptor *windows.SECURITY_DESCRIPTOR, gatewaySID *win
 	if err != nil {
 		return nil, fmt.Errorf("broker authentication key owner is unavailable")
 	}
-	if owner == nil ||
-		!owner.IsWellKnown(windows.WinLocalSystemSid) && !owner.IsWellKnown(windows.WinBuiltinAdministratorsSid) {
+	if !trustedKeyOwner(owner) {
 		drift = append(drift, fmt.Sprintf("owner %s is not trusted", sidText(owner)))
 	}
 	control, _, err := descriptor.Control()

@@ -1436,11 +1436,11 @@
         },
         {
           "location": "internal/managed/trust_windows.go",
-          "description": "ValidateTrustedFilePathTolerant, ValidateTrustedFileStructureTolerant and ValidateTrustedRuntimeDirTolerant downgrade every permission verdict, the named path included, to a managed_trust_drift_advisory when unset; set, they fail exactly like the strict validators. Structural failures stay fatal either way"
+          "description": "ValidateTrustedFilePathTolerant and ValidateTrustedRuntimeDirTolerant downgrade every permission verdict, the named path included, to a managed_trust_drift_advisory when unset; set, they fail exactly like the strict validators. ValidateTrustedFileStructureTolerant never checks the named file's owner or DACL, set or unset (its caller must, as LoadAuthKey does on its handle and by switching to the strict validator when set); only its ancestors follow the rule above. Structural failures stay fatal either way"
         },
         {
           "location": "internal/managed/cmidbroker/key_windows.go",
-          "description": "LoadAuthKey repairs (broker) or accepts (gateway) owner/DACL drift on the broker auth key when unset; set, any drift is fatal, no repair is attempted, and the key path walk uses the strict validator"
+          "description": "LoadAuthKey repairs (broker) or accepts (gateway) owner/DACL drift on the broker auth key when unset — the repair re-stamps the protected DACL and changes the owner only when it is not SYSTEM or Administrators; set, any drift is fatal, no repair is attempted, and the key path walk uses the strict validator"
         }
       ],
       "since": "0.8.6",

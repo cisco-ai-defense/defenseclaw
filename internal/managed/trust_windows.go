@@ -119,6 +119,11 @@ func ValidateTrustedFilePathTolerant(path, label string) error {
 // auth key). The named file gets the structural checks only — symlink,
 // reparse point, regular file — so its permission drift is reported once, by
 // the caller; every ancestor is walked drift-tolerantly as usual.
+//
+// The named file's owner and DACL are never checked here, even with
+// TrustStrictAncestorsEnv pinned; the pin only affects the ancestors. A caller
+// that needs strict leaf checks under the pin must switch to
+// ValidateTrustedFilePath itself, as the CMID broker key loader does.
 func ValidateTrustedFileStructureTolerant(path, label string) error {
 	return validateTrustedFilePathTolerant(path, label, windowsTrustScope{structureOnly: true})
 }

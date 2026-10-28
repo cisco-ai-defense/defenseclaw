@@ -218,8 +218,11 @@ func TestLoadAuthKeyRepairsDriftedDescriptor(t *testing.T) {
 	if drift, err := keyDescriptorDrift(descriptor, gatewaySID); err != nil || len(drift) != 0 {
 		t.Fatalf("repaired descriptor %s still drifts: %v (err %v)", descriptor, drift, err)
 	}
-	if owner, _, err := descriptor.Owner(); err != nil || !owner.IsWellKnown(windows.WinBuiltinAdministratorsSid) {
-		t.Fatalf("repaired owner = %v (err %v), want BUILTIN\\Administrators", owner, err)
+	// An elevated test process usually creates files owned by Administrators,
+	// which the repair keeps; a user-owned file is moved to Administrators.
+	// Either way the repaired owner is trusted.
+	if owner, _, err := descriptor.Owner(); err != nil || !trustedKeyOwner(owner) {
+		t.Fatalf("repaired owner = %v (err %v), want SYSTEM or Administrators", owner, err)
 	}
 
 	// A second load sees a clean key and reports nothing.
@@ -257,13 +260,22 @@ func TestLoadAuthKeyWithoutRepairAcceptsDrift(t *testing.T) {
 
 func TestLoadAuthKeyFailedRepairIsAccepted(t *testing.T) {
 	quietTrustWalk(t)
+	var requested uint32
 	previous := openKeyForRepair
-	openKeyForRepair = func(*uint16) (windows.Handle, error) {
+	openKeyForRepair = func(_ *uint16, access uint32) (windows.Handle, error) {
+		requested = access
 		return windows.InvalidHandle, windows.ERROR_ACCESS_DENIED
 	}
 	t.Cleanup(func() { openKeyForRepair = previous })
 
 	path, want := writeTestKey(t, driftedKeySDDL, false)
+	// The repair asks for WRITE_OWNER only when the current owner is not
+	// trusted; a SYSTEM- or Administrators-owned key keeps its owner.
+	owned, _, err := mustOwner(t, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantOwnerRight := !trustedKeyOwner(owned)
 	var reports recordedReports
 	key, err := LoadAuthKey(path, defaultGatewayService, reports.policy(true))
 	if err != nil {
@@ -275,6 +287,38 @@ func TestLoadAuthKeyFailedRepairIsAccepted(t *testing.T) {
 	if len(reports) != 1 || reports[0].Action != KeyDriftAccepted ||
 		!strings.Contains(reports[0].RepairError, windows.ERROR_ACCESS_DENIED.Error()) {
 		t.Fatalf("reports = %+v, want one accepted report carrying the repair error", reports)
+	}
+	if requested&windows.WRITE_DAC == 0 {
+		t.Fatalf("repair access 0x%x lacks WRITE_DAC", requested)
+	}
+	if gotOwnerRight := requested&windows.WRITE_OWNER != 0; gotOwnerRight != wantOwnerRight {
+		t.Fatalf("repair requested WRITE_OWNER=%t for owner %s, want %t", gotOwnerRight, owned, wantOwnerRight)
+	}
+}
+
+func mustOwner(t *testing.T, path string) (*windows.SID, *windows.SECURITY_DESCRIPTOR, error) {
+	t.Helper()
+	descriptor, err := windows.GetNamedSecurityInfo(path, windows.SE_FILE_OBJECT, windows.OWNER_SECURITY_INFORMATION)
+	if err != nil {
+		return nil, nil, err
+	}
+	owner, _, err := descriptor.Owner()
+	return owner, descriptor, err
+}
+
+func TestTrustedKeyOwner(t *testing.T) {
+	for raw, want := range map[string]bool{
+		"S-1-5-18":            true,  // SYSTEM
+		"S-1-5-32-544":        true,  // Administrators
+		"S-1-5-21-1-2-3-1001": false, // a user
+		testGatewaySID:        false, // the gateway reads the key; it never owns it
+	} {
+		if got := trustedKeyOwner(mustSID(t, raw)); got != want {
+			t.Errorf("trustedKeyOwner(%s) = %t, want %t", raw, got, want)
+		}
+	}
+	if trustedKeyOwner(nil) {
+		t.Error("nil owner reported as trusted")
 	}
 }
 
