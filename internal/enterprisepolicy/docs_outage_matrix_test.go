@@ -310,3 +310,28 @@ func TestOutageBehaviourIsStatedOnlyInTheCapabilityMatrix(t *testing.T) {
 		}
 	}
 }
+
+// The OpenCode and Amp plugins render closed on a managed standalone host
+// (only Secure Client renders the administrator mode), so a page that says
+// an administrator may pick open for an outage must scope it to Secure
+// Client (GAP-2309).
+func TestPluginPagesScopeAdministratorOutageOpenToSecureClient(t *testing.T) {
+	docs := filepath.Join(repoRoot(), "docs-site", "content", "docs")
+	for _, rel := range []string{
+		"connectors/opencode.mdx", "connectors/amp.mdx",
+		"reference/connectors/opencode.mdx", "reference/connectors/amp.mdx",
+	} {
+		data, err := os.ReadFile(filepath.Join(docs, filepath.FromSlash(rel)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, sentence := range sentenceBreak.Split(string(data), -1) {
+			low := strings.ToLower(strings.Join(strings.Fields(sentence), " "))
+			if strings.Contains(low, "administrator") && strings.Contains(low, "outage") &&
+				regexp.MustCompile(`\b(?:select|choose|pick)s?\b[^.]*\bopen\b`).MatchString(low) &&
+				!strings.Contains(low, "secure client") {
+				t.Errorf("%s offers administrator outage open without scoping it to Secure Client: %.240q", rel, sentence)
+			}
+		}
+	}
+}
