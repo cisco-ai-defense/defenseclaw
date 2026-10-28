@@ -94,6 +94,104 @@ func ValidateTrustedRuntimeDir(path, label string) error {
 	return validateTrustedWindowsRuntimeDir(path, label, nil)
 }
 
+// ValidateTrustedFilePathTolerant walks exactly like ValidateTrustedFilePath,
+// with the same per-element masks, but downgrades every permission verdict —
+// on the named file as well as on each ancestor — to a
+// TrustDriftAdvisoryMarker warning and continues. Structural failures
+// (missing element, symlink, reparse point, wrong type, non-NTFS mount,
+// security-descriptor API errors) stay fatal.
+//
+// It exists for the CMID broker's own objects (its executable, the CMID
+// library; the auth key uses ValidateTrustedFileStructureTolerant), whose ACLs the platform installer and Cloud Management
+// re-stamp on their own schedule. A permission drift there must not stop the
+// broker, and with it the gateway that depends on it. Pin
+// TrustStrictAncestorsEnv to make every verdict fatal again.
+//
+// Do not use this for paths whose permissions DefenseClaw alone owns; keep
+// ValidateTrustedFilePath for those.
+func ValidateTrustedFilePathTolerant(path, label string) error {
+	return validateTrustedFilePathTolerant(path, label, windowsTrustLeaf.tolerant())
+}
+
+// ValidateTrustedFileStructureTolerant is ValidateTrustedFilePathTolerant for
+// a caller that validates the named file's owner and DACL itself, on its own
+// open handle, with a stricter rule than this walk applies (the CMID broker
+// auth key). The named file gets the structural checks only — symlink,
+// reparse point, regular file — so its permission drift is reported once, by
+// the caller; every ancestor is walked drift-tolerantly as usual.
+//
+// The named file's owner and DACL are never checked here, even with
+// TrustStrictAncestorsEnv pinned; the pin only affects the ancestors. A caller
+// that needs strict leaf checks under the pin must switch to
+// ValidateTrustedFilePath itself, as the CMID broker key loader does.
+func ValidateTrustedFileStructureTolerant(path, label string) error {
+	return validateTrustedFilePathTolerant(path, label, windowsTrustScope{structureOnly: true})
+}
+
+func validateTrustedFilePathTolerant(path, label string, leaf windowsTrustScope) error {
+	if label == "" {
+		label = "managed file"
+	}
+	if path == "" {
+		return fmt.Errorf("%s path is empty", label)
+	}
+	clean, err := filepath.Abs(path)
+	if err != nil {
+		return fmt.Errorf("resolve %s path: %w", label, err)
+	}
+	if _, err := winpath.ValidateFixedNTFSMountedPath(clean); err != nil {
+		return fmt.Errorf("%s is not on a trusted mount-manager NTFS drive: %w", label, err)
+	}
+	if err := validateTrustedWindowsPathElementWithWriter(clean, false, label, nil, leaf); err != nil {
+		return err
+	}
+	for dir := filepath.Dir(clean); dir != filepath.Dir(dir); dir = filepath.Dir(dir) {
+		if err := validateTrustedWindowsPathElementWithWriter(dir, true, label, nil, windowsAncestorScope(dir).tolerant()); err != nil {
+			return err
+		}
+	}
+	root := filepath.VolumeName(clean) + string(filepath.Separator)
+	return validateTrustedWindowsPathElementWithWriter(
+		root,
+		true,
+		label,
+		nil,
+		windowsAncestorScope(root).tolerant(),
+	)
+}
+
+// ValidateTrustedRuntimeDirTolerant is ValidateTrustedRuntimeDir with every
+// permission verdict downgraded to a drift advisory, for the same reason as
+// ValidateTrustedFilePathTolerant. Structural failures stay fatal.
+func ValidateTrustedRuntimeDirTolerant(path, label string) error {
+	if label == "" {
+		label = "managed runtime dir"
+	}
+	if path == "" {
+		return fmt.Errorf("%s path is empty", label)
+	}
+	clean, err := filepath.Abs(path)
+	if err != nil {
+		return fmt.Errorf("resolve %s path: %w", label, err)
+	}
+	if _, err := winpath.ValidateFixedNTFSMountedPath(clean); err != nil {
+		return fmt.Errorf("%s is not on a trusted mount-manager NTFS drive: %w", label, err)
+	}
+	for cur := clean; ; cur = filepath.Dir(cur) {
+		scope := windowsAncestorScope(cur)
+		if cur == clean {
+			scope = windowsTrustLeaf
+		}
+		if err := validateTrustedWindowsPathElementWithWriter(cur, true, label, nil, scope.tolerant()); err != nil {
+			return err
+		}
+		if cur == filepath.Dir(cur) {
+			break
+		}
+	}
+	return nil
+}
+
 // ValidateTrustedDirectoryAncestor validates an existing directory that will
 // contain a new protected child. Unlike ValidateTrustedRuntimeDir, the named
 // directory is evaluated with the narrow ancestor-replacement mask as well as
@@ -228,9 +326,39 @@ func validateTrustedWindowsRuntimeDir(path, label string, allowedWriter *windows
 //   - advisory downgrades owner/DACL *verdicts* to a TrustAdvisoryMarker warning
 //     and continues the walk (AIFW-34262). Structural and API failures are never
 //     downgraded, and TrustStrictAncestorsEnv restores fatality.
+//   - drift downgrades every permission verdict on the element, the named leaf
+//     included, to a TrustDriftAdvisoryMarker warning. Unlike advisory it also
+//     downgrades an allow ACE whose type the walk cannot evaluate. Only the
+//     *Tolerant entry points set it. Structural and API failures are never
+//     downgraded, and TrustStrictAncestorsEnv restores fatality.
+//   - structureOnly skips the owner and DACL checks on the element entirely,
+//     for a named file whose caller checks its permissions on its own handle.
+//     Never set on an ancestor.
 type windowsTrustScope struct {
-	narrowMask bool
-	advisory   bool
+	narrowMask    bool
+	advisory      bool
+	drift         bool
+	structureOnly bool
+}
+
+// tolerant returns the scope with the same mask and drift tolerance set.
+func (scope windowsTrustScope) tolerant() windowsTrustScope {
+	scope.drift = true
+	return scope
+}
+
+// relaxVerdict is the single exit for a permission verdict on one element.
+// Drift wins over advisory so a tolerant walk tags its warnings with the drift
+// marker; strict mode makes both fall through to the verdict.
+func (scope windowsTrustScope) relaxVerdict(path, label string, verdict error) error {
+	if verdict == nil {
+		return nil
+	}
+	if scope.drift && !trustStrictAncestors() {
+		reportTrustDrift(path, label, verdict.Error())
+		return nil
+	}
+	return relaxAncestorTrustVerdict(scope.advisory, path, label, verdict)
 }
 
 var (
@@ -294,6 +422,9 @@ func validateTrustedWindowsPathElementWithWriter(
 	if !wantDir && !info.Mode().IsRegular() {
 		return fmt.Errorf("%s: expected regular %s file", path, label)
 	}
+	if scope.structureOnly {
+		return nil
+	}
 	extendedPath, err := winpath.Extended(path)
 	if err != nil {
 		return fmt.Errorf("%s: encode extended Windows path: %w", path, err)
@@ -318,7 +449,7 @@ func validateTrustedWindowsPathElementWithWriter(
 		if allowedWriter != nil {
 			expected = fmt.Sprintf("%s, or the pinned service SID %s", expected, sidString(allowedWriter))
 		}
-		if err := relaxAncestorTrustVerdict(scope.advisory, path, label, fmt.Errorf(
+		if err := scope.relaxVerdict(path, label, fmt.Errorf(
 			"%s: owner %s is not trusted for %s; expected %s", path, sidString(owner), label, expected,
 		)); err != nil {
 			return err
@@ -329,7 +460,7 @@ func validateTrustedWindowsPathElementWithWriter(
 		return fmt.Errorf("%s: inspect Windows DACL: %w", path, err)
 	}
 	if dacl == nil {
-		return relaxAncestorTrustVerdict(scope.advisory, path, label, fmt.Errorf(
+		return scope.relaxVerdict(path, label, fmt.Errorf(
 			"%s: null Windows DACL is not trusted", path,
 		))
 	}
@@ -368,9 +499,19 @@ func rejectUntrustedWindowsWriteACEsWithWriter(
 			// must not turn "cannot evaluate" into "trusted" — stock NTFS never
 			// carries these types, and AIFW-34262's grant was a plain
 			// ACCESS_ALLOWED_ACE, so keeping them fatal costs no install.
-			return fmt.Errorf(
+			// Only a drift scope (the broker's own objects) accepts them,
+			// because there the product decision is to never stop on
+			// permissions alone.
+			verdict := fmt.Errorf(
 				"%s: unsupported allow ACE type 0x%x; refusing managed trust", path, ace.Header.AceType,
 			)
+			if !scope.drift {
+				return verdict
+			}
+			if err := scope.relaxVerdict(path, label, verdict); err != nil {
+				return err
+			}
+			continue
 		case windows.ACCESS_ALLOWED_ACE_TYPE:
 		default:
 			continue
@@ -384,7 +525,7 @@ func rejectUntrustedWindowsWriteACEsWithWriter(
 			continue
 		}
 		if !windowsTrustedOwner(sid) && !sameWindowsSID(sid, allowedWriter) {
-			if err := relaxAncestorTrustVerdict(scope.advisory, path, label, fmt.Errorf(
+			if err := scope.relaxVerdict(path, label, fmt.Errorf(
 				"%s: untrusted Windows principal %s has write-like access mask 0x%x",
 				path, sidString(sid), uint32(ace.Mask),
 			)); err != nil {

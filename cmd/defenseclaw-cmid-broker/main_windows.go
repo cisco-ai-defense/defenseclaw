@@ -12,6 +12,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -21,6 +22,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/winpath"
 	"golang.org/x/sys/windows"
 	"golang.org/x/sys/windows/svc"
+	"golang.org/x/sys/windows/svc/eventlog"
 )
 
 var (
@@ -140,36 +142,69 @@ func (service *brokerWindowsService) waitForStop(
 	}
 }
 
+// runBroker opens the broker log before it loads the auth key, so every
+// startup check that follows leaves a trace. Permission drift on the broker's
+// own objects is repaired (the key) or accepted (everything else) and logged
+// as stage=acl-drift; it never stops the broker. A failure before the log is
+// open goes to the Application event log instead.
 func runBroker(ctx context.Context, options brokerOptions, ready chan<- struct{}) error {
+	drift := newDriftSink()
+	// Both hooks are process-global; set them once, before any trust check.
+	managed.ReportTrustDrift = drift.trust
+	managed.ReportTrustAdvisory = drift.trust
+
 	serverConfig := cmidbroker.ServerConfig{
 		PipeName:           options.pipeName,
 		BrokerServiceName:  options.serviceName,
 		GatewayServiceName: options.gatewayServiceName,
 	}
 	if err := cmidbroker.ValidateBrokerServiceIdentity(serverConfig); err != nil {
-		return err
+		return reportStartupFailureEvent(options.serviceName, err, drift.pendingSummary())
 	}
 	if err := validateBrokerPath(options.logPath, "broker log", true); err != nil {
-		return err
+		return reportStartupFailureEvent(options.serviceName, err, drift.pendingSummary())
 	}
-	key, err := cmidbroker.LoadAuthKey(options.authKeyPath, options.gatewayServiceName)
-	if err != nil {
-		return err
-	}
-	defer zeroBytes(key[:])
-
 	logFile, err := openBrokerLog(options.logPath)
 	if err != nil {
-		return err
+		return reportStartupFailureEvent(options.serviceName, err, drift.pendingSummary())
 	}
 	defer logFile.Close()
 	logger := log.New(logFile, "", log.LstdFlags|log.LUTC)
 	logger.Printf("stage=startup version=%s commit=%s protocol=%d", version, commit, cmidbroker.ProtocolVersion)
 	defer logger.Print("stage=shutdown")
+	drift.attach(logger)
+
+	stage, err := serveBroker(ctx, options, serverConfig, logger, drift, ready)
+	if err != nil {
+		logger.Printf("stage=%s error=%q", stage, err.Error())
+	}
+	return err
+}
+
+// serveBroker runs everything after the log is open. It returns the stage to
+// log a failure under: startup-failed until the pipe server is ready, then
+// serve-failed.
+func serveBroker(
+	ctx context.Context,
+	options brokerOptions,
+	serverConfig cmidbroker.ServerConfig,
+	logger *log.Logger,
+	drift *driftSink,
+	ready chan<- struct{},
+) (string, error) {
+	const startupFailed = "startup-failed"
+	key, err := cmidbroker.LoadAuthKey(options.authKeyPath, options.gatewayServiceName, cmidbroker.KeyDriftPolicy{
+		Repair: true,
+		Report: drift.key,
+	})
+	if err != nil {
+		return startupFailed, err
+	}
+	defer zeroBytes(key[:])
 
 	if !cloudreg.Registered() {
 		logger.Print("stage=provider-registration success=false")
-		return errors.New("managed CMID provider is not registered")
+		return startupFailed, errors.New("managed CMID provider is not registered")
 	}
 	// A full XDR deployment installs Cloud Management last, so cmidapi.dll
 	// is frequently absent when this service first starts. Resolve the
@@ -183,6 +218,8 @@ func runBroker(ctx context.Context, options brokerOptions, ready chan<- struct{}
 		Discover:          managed.DiscoverCMIDLibrary,
 		// A discovered library is dlopened into this service's account, so
 		// it faces the same path trust an installer-pinned one does.
+		// Permission drift on the library is accepted and logged: Cloud
+		// Management owns its ACL.
 		Validate: func(path string) error {
 			return validateBrokerPath(path, "CMID library", false)
 		},
@@ -202,7 +239,7 @@ func runBroker(ctx context.Context, options brokerOptions, ready chan<- struct{}
 	})
 	if err != nil {
 		logger.Print("stage=provider-construction success=false")
-		return errors.New("managed CMID provider construction failed")
+		return startupFailed, errors.New("managed CMID provider construction failed")
 	}
 	refreshCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
 	err = provider.Refresh(refreshCtx)
@@ -228,19 +265,127 @@ func runBroker(ctx context.Context, options brokerOptions, ready chan<- struct{}
 		)
 	})
 	if err != nil {
-		return err
+		return startupFailed, err
 	}
-	return server.ServeWithReady(ctx, ready)
+	// Forward readiness to SCM through a channel this function owns, so a
+	// serve error can be told apart from a failure before the pipe was ready.
+	serverReady := make(chan struct{})
+	go func() {
+		select {
+		case <-serverReady:
+			close(ready)
+		case <-ctx.Done():
+		}
+	}()
+	if err := server.ServeWithReady(ctx, serverReady); err != nil {
+		select {
+		case <-serverReady:
+			return "serve-failed", err
+		default:
+			return startupFailed, err
+		}
+	}
+	return "", nil
 }
 
+// validateBrokerPath checks the broker's own paths. Path shape and reparse
+// points stay fatal; permission verdicts are accepted and reported as drift,
+// because the installer and Cloud Management own those ACLs.
 func validateBrokerPath(path, label string, parentOnly bool) error {
 	if err := validateLocalWindowsPath(path, label); err != nil {
 		return err
 	}
 	if parentOnly {
-		return managed.ValidateTrustedRuntimeDir(filepath.Dir(path), label+" directory")
+		return managed.ValidateTrustedRuntimeDirTolerant(filepath.Dir(path), label+" directory")
 	}
-	return managed.ValidateTrustedFilePath(path, label)
+	return managed.ValidateTrustedFilePathTolerant(path, label)
+}
+
+// driftSink collects stage=acl-drift lines. Lines raised before the log is
+// open are buffered and flushed, in order, right after the stage=startup line;
+// after that they go straight to the log. Each distinct line is written once
+// per process.
+type driftSink struct {
+	mu      sync.Mutex
+	out     *log.Logger
+	pending []string
+	seen    map[string]struct{}
+}
+
+func newDriftSink() *driftSink {
+	return &driftSink{seen: make(map[string]struct{})}
+}
+
+// trust receives managed trust-walk advisories, which are always accepted.
+func (sink *driftSink) trust(path, label, reason string) {
+	sink.record(fmt.Sprintf("stage=acl-drift action=%s object=%q path=%q reason=%q",
+		cmidbroker.KeyDriftAccepted, label, path, reason))
+}
+
+// key receives auth key drift reports.
+func (sink *driftSink) key(report cmidbroker.KeyDriftReport) {
+	line := fmt.Sprintf("stage=acl-drift action=%s object=%q path=%q reason=%q",
+		report.Action, report.Object, report.Path, report.Reason)
+	if report.RepairError != "" {
+		line += fmt.Sprintf(" repair_error=%q", report.RepairError)
+	}
+	sink.record(line)
+}
+
+func (sink *driftSink) record(line string) {
+	sink.mu.Lock()
+	defer sink.mu.Unlock()
+	if _, ok := sink.seen[line]; ok {
+		return
+	}
+	sink.seen[line] = struct{}{}
+	if sink.out == nil {
+		sink.pending = append(sink.pending, line)
+		return
+	}
+	sink.out.Print(line)
+}
+
+// pendingSummary returns the drift lines still buffered because the log never
+// opened, capped so the event-log entry stays readable. They often explain the
+// failure, for example drift on the log folder itself.
+func (sink *driftSink) pendingSummary() string {
+	const limit = 4096
+	sink.mu.Lock()
+	defer sink.mu.Unlock()
+	summary := strings.Join(sink.pending, "\n")
+	if len(summary) > limit {
+		summary = summary[:limit] + "\n..."
+	}
+	return summary
+}
+
+func (sink *driftSink) attach(out *log.Logger) {
+	sink.mu.Lock()
+	defer sink.mu.Unlock()
+	for _, line := range sink.pending {
+		out.Print(line)
+	}
+	sink.pending = nil
+	sink.out = out
+}
+
+// reportStartupFailureEvent records a failure that happened before the broker
+// log could be opened in the Application event log, under the broker's service
+// name as the source, with any drift lines buffered so far, and returns err
+// unchanged. RegisterEventSource accepts an
+// unregistered source name, so no installer change is needed. A failure to
+// write the event is ignored: there is nowhere left to report it.
+var reportStartupFailureEvent = func(serviceName string, err error, drift string) error {
+	message := "CMID broker startup failed: " + err.Error()
+	if drift != "" {
+		message += "\n" + drift
+	}
+	if events, openErr := eventlog.Open(serviceName); openErr == nil {
+		_ = events.Error(1, message)
+		_ = events.Close()
+	}
+	return err
 }
 
 func validateLocalWindowsPath(path, label string) error {

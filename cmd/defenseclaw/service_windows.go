@@ -15,6 +15,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -121,6 +122,10 @@ func redirectWindowsServiceOutput() (func(), error) {
 	}
 	os.Stdout = file
 	os.Stderr = file
+	// The standard logger captured the original stderr handle at init, which
+	// SCM discards; point it at the service log so managed trust advisories
+	// (managed_trust_ancestor_advisory, managed_trust_drift_advisory) are kept.
+	log.SetOutput(file)
 	return func() { _ = file.Close() }, nil
 }
 
