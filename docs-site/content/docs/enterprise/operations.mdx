@@ -57,6 +57,8 @@ shell.
 | A check failed | `1` | `1603` |
 | Invalid arguments | `2` | `1639` |
 
+On Windows, an option `defenseclaw.exe` does not know (a misspelled flag such as `--bogus`) stops before the lifecycle runs: it prints `unknown flag` and exits `1`, not `1639`. Arguments the lifecycle reads and rejects, such as `--profile bogus`, exit `1639`.
+
 On Linux and macOS, `verify` skips its checks and exits `75` with `lifecycle_busy` while another lifecycle run is in progress; run it again. On Windows it fails (`1603`) while another run's transaction is pending. `verify` also runs on a schedule: daily on Linux (`defenseclaw-enterprise-verify.timer`) and macOS (`com.cisco.defenseclaw.verify`), and from your MDM on Windows (for example `detect.ps1 -RequireHealthy`).
 
 A pending agent install scan is a warning, not a failure: when the enumerator's record of unprotected agents is missing or more than 16 minutes old (for example right after a fresh install or an upgrade), `status` and `verify` show one `agent_install_scan_incomplete` warning that starts `NOT COVERED (scan pending)` and gives the record's age, and set `coverage_complete` and `security_complete` to `false`. The warning alone does not fail `verify`; every other failure, including an agent the old record lists that fails `verify`, still does. `defenseclaw doctor` run as root shows the same warning. The scan runs every five minutes; to run one now, restart the enumerator (`sudo systemctl restart defenseclaw-hook-enumerator.service`, `sudo launchctl kickstart -k system/com.cisco.defenseclaw.hook-enumerator`, or `Restart-Service DefenseClawHookEnumerator`).

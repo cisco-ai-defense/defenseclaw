@@ -267,6 +267,9 @@ Setup properties use `NAME=value`; names are case-insensitive and ignore dashes.
 | --- | --- |
 | `CONFIG=<path>` | The administrator config. Required for the first install; later runs reuse the installed config |
 | `MANIFEST=<path>` | A target manifest you publish. Required for `/install` and for `enterprise.enrollment.mode: manifest` |
+| `BUNDLE=<path>` | With `/ensure` on an installed computer: apply this signed policy bundle. Not with `CONFIG=` |
+| `TRUSTANCHORS=<path>` | With `/ensure`: install this administrator-only bundle trust anchor file first. Not with `CONFIG=` |
+| `REFUSECAPABILITYLOSS=1` | With `/ensure` and `BUNDLE=`: refuse a bundle that turns off an enforced capability |
 | `ATTESTCLAUDEEFFECTIVEPOLICY=1` | With `/repair`: record the Claude Code attestation ([Verify the install](#verify-the-install)) |
 | `ALLOWEDSIGNERS=<sha256>,<sha256>` | Accept only these Authenticode signer thumbprints |
 | `JSON=1` | Print the result document on standard output |

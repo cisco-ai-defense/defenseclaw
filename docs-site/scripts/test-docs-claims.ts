@@ -1428,6 +1428,8 @@ const r105Rows: DocRow[] = [
   { gap: "GAP-2249", page: "stories/observe-claude-code.mdx", has: ["through its [native hooks](/docs/connectors/claudecode).", "Host setup turns Claude Code's native OpenTelemetry export off", "`CLAUDE_CODE_ENABLE_TELEMETRY=0`", "DefenseClaw sees Claude Code through its hooks only. Only an isolated OpenShell sandbox keeps native logs and metrics."], lacks: ["receives its native OpenTelemetry logs and metrics", "native hooks and OpenTelemetry]"] },
   { gap: "GAP-2366", page: "reference/env-vars.mdx", has: ["`DEFENSECLAW_ENTERPRISE_PROFILE` exported in a shell is dropped when the", "command starts. The writers keep writing as usual, and `defenseclaw doctor`", "lists the variable under `Ignored environment overrides`."], lacks: ["process's writers refuse changes (exit code `3`"] },
   { gap: "GAP-2365", page: "guardrail/switching-connectors.mdx", has: ["`Codex is already configured; re-apply its hooks (mode=action)? [Y/n]:`", "A re-run never asks Add, Replace or Cancel.", "`Configure DefenseClaw for Codex enforcement now? [Y/n]:`", "the agent's current mode when it is already set up, observe for a new one"] },
+  { gap: "GAP-2171", page: "enterprise/operations.mdx", has: ["it prints `unknown flag` and exits `1`, not `1639`"] },
+  { gap: "GAP-2171", page: "enterprise/troubleshooting.mdx", has: ["exits `1` with `unknown flag` before the lifecycle runs"] },
   { gap: "GAP-2367", page: "reference/setup-commands.mdx", has: ["writes it to `ai_discovery.trusted_binary_prefixes` in `~/.defenseclaw/config.yaml`"], lacks: ["and persists to `~/.defenseclaw/.env`"] },
   { gap: "GAP-2367", page: "reference/cli.mdx", has: ["writes it to `ai_discovery.trusted_binary_prefixes` in `~/.defenseclaw/config.yaml`"], lacks: ["and persists to `~/.defenseclaw/.env`"] },
   { gap: "GAP-2368", page: "get-started/windows/paths-troubleshooting.mdx", has: ["The watchdog is on by default (`gateway.watchdog.enabled` is `true`)", "set `gateway.watchdog.enabled` to `false` to turn it off"], lacks: ["The watchdog runs only when `gateway.watchdog.enabled` is set"] },
@@ -1981,6 +1983,26 @@ describe('setup re-run question, trusted-paths store and watchdog default match 
   it('turns the watchdog on by default and starts it with the gateway', () => {
     assert.ok(source('internal/config/config.go').includes('viper.SetDefault("gateway.watchdog.enabled", true)'), 'watchdog default changed: re-check get-started/windows/paths-troubleshooting.mdx');
     assert.ok(source('internal/cli/daemon.go').includes('func startConfiguredWatchdog('), 'gateway start no longer starts the watchdog: re-check get-started/windows/paths-troubleshooting.mdx');
+  });
+});
+
+// GAP-2179: every NAME=value property standalone Setup /? prints is in both
+// Setup property tables. GAP-2171: an unknown defenseclaw.exe flag under
+// `enterprise` keeps cobra's error (exit 1); only lifecycle refusals are 1639.
+describe('Setup properties and the Windows unknown-flag exit match the code (GAP-2179, GAP-2171)', () => {
+  it('lists every property standalone Setup /? prints', () => {
+    const main = source('cmd/defenseclaw-enterprise-setup/main.go');
+    const usage = main.slice(main.indexOf('func writeStandaloneSetupUsage('), main.indexOf('Exit codes: 0 success, 1603 failure'));
+    const props = [...usage.matchAll(/"  ([A-Z]+)=/g)].map((m) => m[1]);
+    assert.ok(props.length >= 12, `Setup usage parse found ${props.length} properties`);
+    for (const page of ['enterprise/windows.mdx', 'reference/cli.mdx']) {
+      const text = pageSection(page);
+      for (const p of props) assert.ok(text.includes('`' + p + '='), `${page} Setup property table lacks ${p}=`);
+    }
+  });
+  it('keeps the enterprise tree out of the root usage-error mapping', () => {
+    const exit = source('internal/cli/exit_code.go');
+    assert.ok(exit.includes('var usageFlagErrorExempt = []string{"enterprise", "hook", "notify", "watchdog"}') && exit.includes('\treturn 1\n}'), 'unknown-flag exit for enterprise windows changed: re-check enterprise/operations.mdx and enterprise/troubleshooting.mdx (GAP-2171)');
   });
 });
 
