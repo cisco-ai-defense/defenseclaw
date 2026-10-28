@@ -116,3 +116,32 @@ func TestLongWindowsHeredocChecksEachDistinctCandidateOnce(t *testing.T) {
 		t.Fatal("repeated authorized_keys target was not found")
 	}
 }
+
+// GAP-2279 on Windows: the private-key read scan of a Windows command the
+// word splitter cannot structure (a Bash heredoc read through cat) checked
+// every word of the body as a read operand, each a chain of file-system
+// calls on Windows. Each distinct operand is now checked once per
+// statement; a protected key read still decides it.
+func TestLongWindowsCatOperandsCheckEachDistinctOperandOnce(t *testing.T) {
+	const home = `C:\Users\alice`
+	const cwd = home + `\project`
+	const lines = 2000
+	var body strings.Builder
+	body.WriteString("cat /tmp/notes.sh <<EOF2\n")
+	for range lines {
+		body.WriteString("echo line benign filler for heredoc payload size\n")
+	}
+	body.WriteString("EOF2\n")
+	benign := body.String()
+	before := actionPrivateReadChecks.Load()
+	if ActionPrivateKeyRead(benign, cwd, home) {
+		t.Fatal("benign heredoc read a private key")
+	}
+	if checks := actionPrivateReadChecks.Load() - before; checks > 100 {
+		t.Fatalf("%d operand checks for %d repeated lines; want each distinct operand checked once", checks, lines)
+	}
+	keyRead := strings.Replace(benign, "echo line benign filler for heredoc payload size\n", `%USERPROFILE%\.ssh\id_ed25519`+"\n", 3)
+	if !ActionPrivateKeyRead(keyRead, cwd, home) {
+		t.Fatal("repeated private key operand was not found")
+	}
+}

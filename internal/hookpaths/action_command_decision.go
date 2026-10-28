@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync/atomic"
 
 	"mvdan.cc/sh/v3/syntax"
 )
@@ -287,12 +288,25 @@ func actionPrivateKeyReadWords(words []string, cwd, home string, windows bool, d
 		}
 		return false
 	}
+	// A Windows statement the word splitter cannot structure (a Bash heredoc
+	// read through cat) carries every word of its body as an operand. Each
+	// distinct operand is checked once: its answer depends only on the value,
+	// cwd and home, and on Windows a check is a chain of file-system calls
+	// (GAP-2279).
+	answers := map[string]bool{}
 	readPath := func(value string) bool {
-		if windows {
-			protected, _ := actionWindowsProtected(value, cwd, home, true)
-			return protected
+		found, seen := answers[value]
+		if seen {
+			return found
 		}
-		return actionPrivateReadPath(value, cwd, home)
+		if windows {
+			found, _ = actionWindowsProtected(value, cwd, home, true)
+		} else {
+			found = actionPrivateReadPath(value, cwd, home)
+		}
+		actionPrivateReadChecks.Add(1)
+		answers[value] = found
+		return found
 	}
 	if program == "cp" || program == "gcp" {
 		copy := cpOperands(words[1:], makeStatic(len(words)-1))
@@ -1266,3 +1280,8 @@ func actionWrappedDecision(program string, words []string, cwd, home string, dep
 	}
 	return actionWordsDecision(words[index:], cwd, home, depth+1)
 }
+
+// actionPrivateReadChecks counts the operand checks of the private-key read
+// scan, so a test can prove a long command checks each distinct operand
+// once (GAP-2279).
+var actionPrivateReadChecks atomic.Int64
