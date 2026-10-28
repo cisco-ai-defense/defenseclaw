@@ -1653,6 +1653,8 @@ const r105Rows: DocRow[] = [
   { gap: "GAP-2392", page: "tui.mdx", section: "Panels", has: ["The quick-action row at the end of Overview lists both as `[G] Gateway` and `[z] AI Discovery`", "The hint line above the status line is not a key list on Overview"], lacks: ["The key row shows both actions at 80 columns."] },
   { gap: "GAP-2239", page: "policies/defaults.mdx", section: "What `setup guardrail` actually writes", has: ["If `config.yaml` already has an entry for the connector under `guardrail.connectors` (`defenseclaw setup claude-code` or an `init` that picked several agents writes one), the command saves `mode` and `rule_pack` in that entry instead of at the top level. The setup summary and `defenseclaw guardrail status` show the values the connector runs with; `defenseclaw config show --section guardrail` shows where they are saved."] },
   { gap: "GAP-2224", page: "stories/cursor-secret-exfil.mdx", has: ["✓ cursor gateway outage=open (failClosed=true)", "This is the output in a terminal. Piped to another command or saved to a file, the same lines start with `OK` and `i` instead of the check mark and the info sign."] },
+  { gap: "GAP-2349", page: "tui.mdx", section: "Panels", has: ["The one exception is Sandboxes: there `P`, `R` and `A` are the", "On Sandboxes, press `p` for"] },
+  { gap: "GAP-2228", page: "tui.mdx", has: ["generation and policy digest as its own segment, right after the gateway:", "The active policy and mode are a separate segment further along the line"], lacks: ["example `policy strict · action · gen 10 · 8b19ede82344`", "ends with the policy the running"] },
   { gap: "GAP-2342", page: "get-started/first-run.mdx", has: ["You do not need `init` before `quickstart`.", "If `init` chose no agent and started the gateway, `quickstart --connector <name>` restarts the gateway so it loads the agent and writes its hooks."] },
 ];
 
@@ -2076,6 +2078,20 @@ describe('Overview G and z keys are where tui.mdx says (GAP-2392)', () => {
     const ov = hint.slice(hint.indexOf('def _overview_hint'), hint.indexOf('def _alerts_hint'));
     assert.ok(ov.length > 0 && !ov.includes('KEYS'), 'Overview hint line now has a KEYS row: re-check tui.mdx Panels');
     assert.ok(ov.includes('"Press 2 for Alerts."') && ov.includes('return self.next_tip()'), 'Overview hint notices changed: re-check tui.mdx Panels');
+  });
+});
+
+// GAP-2349, GAP-2228: the Sandboxes panel keeps P, R and A for its own actions
+// (p still opens Policies), and the status strip renders gen/digest and the
+// policy posture as separate segments.
+describe('Sandboxes panel keys and status strip segments match tui.mdx (GAP-2349, GAP-2228)', () => {
+  it('Sandboxes binds P, R and A; p falls back to Policies; gen/digest is its own segment', () => {
+    const sb = source('cli/defenseclaw/tui/sandbox_panel.py');
+    assert.ok(sb.includes('"sandboxes-pull": "P",') && sb.includes('"sandboxes-review": "R",') && sb.includes('"sandboxes-always": "A",'), 'Sandboxes P/R/A changed: re-check tui.mdx Panels');
+    const app = source('cli/defenseclaw/tui/app.py');
+    assert.ok(/LOWERCASE_PANEL_FALLBACK[^\n]*"sandboxes": frozenset\(\{"p"/.test(app), 'Sandboxes p no longer opens Policies: re-check tui.mdx Panels');
+    const strip = source('cli/defenseclaw/tui/widgets/status_strip.py');
+    assert.ok(strip.includes('segments.append(StatusSegment(model.applied_policy, "active"))') && strip.includes('segments.append(StatusSegment(model.policy_posture, "active"))'), 'status strip segments changed: re-check tui.mdx Config generation and policy digest');
   });
 });
 
