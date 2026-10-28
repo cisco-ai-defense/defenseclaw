@@ -90,10 +90,12 @@ func TestR105PowerShellToolRouteMatchesBash(t *testing.T) {
 		{"ctl single-quoted literal", "Write-Output '$HOME\\.ssh\\authorized_keys is the file'", false},
 		{"ctl cmd redirect project", `cmd.exe /c "echo marker>>%USERPROFILE%\project\report.txt"`, false},
 		{"ctl .NET append project", `[System.IO.File]::AppendAllText('C:/Users/Alice/project/report.txt','marker')`, false},
+		{"GAP-1473 Write-Output quoted tilde path", `Write-Output '~/.ssh/authorized_keys'`, false},
+		{"GAP-1473 git commit message tilde path", `git commit -m 'Document ~/.ssh/authorized_keys'`, false},
 		{"ctl git status", `git status`, false},
 		{"ctl Get-ChildItem src", `Get-ChildItem .\src -Recurse -Filter *.go`, false},
 	}
-	for _, tool := range []string{"Bash", "PowerShell", "shell", "shell_command"} {
+	for _, tool := range []string{"Bash", "PowerShell", "shell", "shell_command", "exec_command"} {
 		for _, tc := range rows {
 			t.Run(tool+"/"+tc.name, func(t *testing.T) {
 				args, err := json.Marshal(map[string]string{"command": tc.command})
