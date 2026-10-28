@@ -370,6 +370,7 @@ func windowsEnterpriseHotConfigApply(
 		return unavailable("cannot classify the config change: " + err.Error())
 	}
 	startOnly, refreshTargets := windowsBundleStartOnlyPaths(restart)
+	startOnly = append(startOnly, windowsPrimaryConnectorChange(previous, next)...)
 	// A bundle rollback by the installed CLI has no payload for the upgrade
 	// transaction: it restarts only the gateway, as the bundle it undoes did.
 	gatewayOnlyRestart := bundleChange || payloadlessRollback
