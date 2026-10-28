@@ -39,10 +39,10 @@ MCP_SCANNER_DIST = "cisco-ai-mcp-scanner"
 # TODO(mcp-scanner 4.8.x): 4.8.x pins litellm==1.93.0 (CVE-2026-84377);
 # move when upstream relaxes that pin (see pyproject.toml).
 MCP_SCANNER_VERSION = "4.3.0"
-# The LiteLLM both scanners call (pyproject.toml: >=1.91.5,<1.92.0). 1.91.5 is
-# the first release with the CVE-2026-84377 fix.
+# The LiteLLM both scanners call (pyproject.toml: >=1.103.10,<1.104.0). 1.103.10
+# carries the CVE-2026-84377, GHSA-g5ff-637f-6q2m and CVE-2026-114612 fixes.
 LITELLM_DIST = "litellm"
-LITELLM_MIN_VERSION = (1, 91, 5)
+LITELLM_MIN_VERSION = (1, 103, 10)
 
 # The recommended setup (the skill scanner's "Lowest FPR" settings): the
 # quiet policy with the LLM judge, block at HIGH, review MEDIUM and above.

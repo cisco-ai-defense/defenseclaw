@@ -42,7 +42,7 @@ RUNTIME_CONTRACT = {
     "rich": (">=14.2,<15", None),
     "textual": (">=8.2.8,<9", None),
     "pygments": (">=2.20,<3", None),
-    "litellm": (">=1.91.5,<1.92.0", None),
+    "litellm": (">=1.103.10,<1.104.0", None),
     "importlib-metadata": (">=8.7.1,<8.8", None),
 }
 
@@ -74,6 +74,13 @@ SKILL_SCANNER_WHEELS = {
     "win_amd64": "d1bf7bb295f314627c7f6a58d9debba05dce72e9251d65aaad48ca77736e8655",
 }
 MCP_SCANNER_VERSION = "4.3.0"
+LITELLM_PLATFORM_WHEELS = (
+    "macosx_11_0_arm64",
+    "macosx_10_12_x86_64",
+    "manylinux_2_28_aarch64",
+    "manylinux_2_28_x86_64",
+    "win_amd64",
+)
 MCP_SCANNER_SHA256 = "ea1a30d6bc282f2b4081bc4eced4287a20326891588624d5b2e07b388710b812"
 TEXTUAL_LOCKED_VERSION = "8.2.8"
 MAGIKA_MINIMUM_VERSION = Version("1.0.2")
@@ -141,8 +148,13 @@ def test_dependency_repair_cannot_lower_security_floors() -> None:
         requirements = _requirements(requirement_set)
         assert Version("1.83.7") not in requirements["litellm"].specifier
         assert Version("1.91.4") not in requirements["litellm"].specifier
-        assert Version("1.91.5") in requirements["litellm"].specifier
-        assert Version("1.92.0") not in requirements["litellm"].specifier
+        # GHSA-g5ff-637f-6q2m (fixed 1.95.0) and CVE-2026-114612 (affected
+        # on the 1.100-1.104 lines before their fixes): GAP-2306.
+        assert Version("1.91.5") not in requirements["litellm"].specifier
+        assert Version("1.94.3") not in requirements["litellm"].specifier
+        assert Version("1.104.0") not in requirements["litellm"].specifier
+        assert Version("1.103.0") not in requirements["litellm"].specifier
+        assert Version("1.103.10") in requirements["litellm"].specifier
         assert Version("8.5.0") not in requirements["importlib-metadata"].specifier
         assert Version("8.7.1") in requirements["importlib-metadata"].specifier
         assert Version("8.8.0") not in requirements["importlib-metadata"].specifier
@@ -218,15 +230,19 @@ def test_lock_records_the_same_runtime_and_security_contracts() -> None:
     assert locked["cisco-ai-skill-scanner"] == SKILL_SCANNER_VERSION
     assert locked["cisco-ai-mcp-scanner"] == MCP_SCANNER_VERSION
     assert locked["textual"] == TEXTUAL_LOCKED_VERSION
-    assert Version(locked["litellm"]) >= Version("1.91.5")
+    assert Version(locked["litellm"]) >= Version("1.103.10")
     assert Version(locked["importlib-metadata"]) >= Version("8.7.1")
     assert Version(locked["rich"]) in Requirement("rich>=14.2,<15").specifier
 
+    # LiteLLM ships abi3 platform wheels since 1.95: every platform the
+    # installers support must have a locked binary wheel (no sdist build).
     litellm = next(package for package in lock["package"] if package["name"] == "litellm")
-    assert any(
-        wheel["url"].endswith(f"litellm-{litellm['version']}-py3-none-any.whl")
-        for wheel in litellm["wheels"]
-    )
+    for platform_tag in LITELLM_PLATFORM_WHEELS:
+        assert any(
+            wheel["url"].endswith(f"litellm-{litellm['version']}-cp310-abi3-{platform_tag}.whl")
+            and wheel.get("hash", "").startswith("sha256:")
+            for wheel in litellm["wheels"]
+        ), platform_tag
 
 
 def test_windows_python_313_dependency_lock_has_supported_onnxruntime_wheel() -> None:
@@ -280,7 +296,7 @@ def test_scanner_metadata_intersection_is_satisfiable() -> None:
     # Authoritative Requires-Dist fields from the shipped scanner wheels:
     # skill scanner 2.2.1: rich>=14.0,<15, textual>=7.0,<9, litellm>=1.89.7,<2;
     # Textual 8.2.8: rich>=14.2; MCP scanner 4.3.0: litellm>=1.77.0;
-    # project policy: Textual>=8.2.8,<9, Rich>=14.2,<15, LiteLLM>=1.91.5,<1.92.
+    # project policy: Textual>=8.2.8,<9, Rich>=14.2,<15, LiteLLM>=1.103.10,<1.104.
     # MCP scanner 4.8.x pins litellm==1.93.0 (CVE-2026-84377), so 4.3.0 stays.
     intersections = {
         "rich": [Requirement("rich<15,>=14.0"), Requirement("rich>=14.2"), Requirement("rich>=14.2,<15")],
@@ -288,7 +304,7 @@ def test_scanner_metadata_intersection_is_satisfiable() -> None:
         "litellm": [
             Requirement("litellm<2,>=1.89.7"),
             Requirement("litellm>=1.77.0"),
-            Requirement("litellm>=1.91.5,<1.92.0"),
+            Requirement("litellm>=1.103.10,<1.104.0"),
         ],
         "importlib-metadata": [
             Requirement("importlib-metadata>=8.7.1,<8.8"),
@@ -297,7 +313,7 @@ def test_scanner_metadata_intersection_is_satisfiable() -> None:
     witnesses = {
         "rich": Version("14.3.4"),
         "textual": Version(TEXTUAL_LOCKED_VERSION),
-        "litellm": Version("1.91.5"),
+        "litellm": Version("1.103.10"),
         "importlib-metadata": Version("8.7.1"),
     }
     for name, requirements in intersections.items():
