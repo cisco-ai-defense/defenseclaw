@@ -180,7 +180,7 @@ Fixes for the gateway, the keys it needs and the destinations it exports to.
 
 ### `gateway did not answer`
 
-**Cause.** The gateway runs but is frozen. Neither a hook nor the watchdog restarts it.
+**Cause.** The gateway runs but is frozen. Neither a hook nor the watchdog restarts it. A per-user hook blocks the call in every fail mode, a saved `open` included, and its line says `(not a gateway outage, so it is blocked in every fail mode)`.
 
 **Fix.** `defenseclaw-gateway restart`.
 

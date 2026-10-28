@@ -13,6 +13,8 @@ keywords:
 
 The current schema is `config_version: 9`. `defenseclaw config reference --format json-schema` prints the schema of every section with allowed values, and `defenseclaw config validate` checks a file. A version 8 file (written by 0.8.5 to 0.8.10) is migrated in memory when the gateway loads it; see [Migrate to config version 9](/docs/reference/migrate-v9).
 
+A refusal of an enumerated key lists only the values you can type: `guardrail.hook_fail_mode` lists `open` and `closed`, not an empty entry. `guardrail.connector` and `claw.mode` take the spellings `claude-code` and `claude_code`, in any letter case, and are read as `claudecode`. Words in the OpenShell settings (for example `enterprise.openshell.install`) mean the same in any letter case. On a managed standalone Linux or macOS host, `defenseclaw-gateway config validate` refuses a required sandbox pack that `ensure` refuses.
+
 <Callout title="Windows layouts depend on the installer">
 The Windows Setup package uses an embedded runtime and `defenseclaw-hook.exe`, without a `.venv`. The supported per-user `install.ps1` route manages a private `.venv` and generates hook scripts under the data home. See [Windows paths](/docs/get-started/windows/paths-troubleshooting) before locating or editing Windows state.
 </Callout>
@@ -441,7 +443,7 @@ Defaults from the loader. Omitted keys take these values.
 
 | Key | Default | What it does |
 | --- | --- | --- |
-| `data_dir` | `~/.defenseclaw` | The data directory. `DEFENSECLAW_HOME` relocates it. Restart required. |
+| `data_dir` | `~/.defenseclaw` | The data directory. `DEFENSECLAW_HOME` relocates it. Restart required. `defenseclaw config set data_dir` seeds the rule packs and Rego policies under the new directory (packs already there are kept), and the CLI resolves the omitted paths below under it as the gateway does. |
 | `audit_db`, `judge_bodies_db` | `<data_dir>/audit.db`, `<data_dir>/judge_bodies.db` | The audit store and the retained judge bodies. |
 | `quarantine_dir`, `plugin_dir`, `policy_dir` | `<data_dir>/quarantine`, `plugins`, `policies` | Quarantined files, connector plugins, policy assets. |
 | `environment` | detected (`macos`, `windows`, `linux`, ...) | Stamped on every record. Restart required. |
