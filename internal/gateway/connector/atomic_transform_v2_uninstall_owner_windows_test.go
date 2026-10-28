@@ -6,8 +6,11 @@
 package connector
 
 import (
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -258,33 +261,25 @@ func TestAtomicTransformV2UninstallAcceptsEnrolledUsersLegacyNamespace(t *testin
 		// inherit it instead of setting a protected DACL on it.
 		inherited bool
 		ok        bool
-		// knownIssue skips a row that fails under an elevated administrator
-		// token without SeBackupPrivilege (the GitHub runner, the preflight
-		// clones); LocalSystem passes it.
-		knownIssue string
 	}{
-		{"enrolled user's private namespace", target, "D:P(A;;FA;;;SY)(A;;FA;;;" + target.String() + ")", false, true,
-			"GAP-1738: known 1.0.4 issue, fixed in 1.0.5"},
-		{"enrolled user's namespace with Administrators", target, "D:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;FA;;;" + target.String() + ")", false, true, ""},
-		{"another account's namespace", foreign, "D:P(A;;FA;;;SY)(A;;FA;;;" + foreign.String() + ")", false, false, ""},
-		{"enrolled user's namespace shared with everyone", target, "D:P(A;;FA;;;SY)(A;;FA;;;WD)(A;;FA;;;" + target.String() + ")", false, false, ""},
+		{"enrolled user's private namespace", target, "D:P(A;;FA;;;SY)(A;;FA;;;" + target.String() + ")", false, true},
+		{"enrolled user's namespace with Administrators", target, "D:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;FA;;;" + target.String() + ")", false, true},
+		{"another account's namespace", foreign, "D:P(A;;FA;;;SY)(A;;FA;;;" + foreign.String() + ")", false, false},
+		{"enrolled user's namespace shared with everyone", target, "D:P(A;;FA;;;SY)(A;;FA;;;WD)(A;;FA;;;" + target.String() + ")", false, false},
 		{"enrolled user's namespace inheriting the profile's entries", target,
-			"D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;FA;;;" + target.String() + ")", true, true, ""},
+			"D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;FA;;;" + target.String() + ")", true, true},
 		{"enrolled user's namespace inheriting an entry for everyone", target,
-			"D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;FA;;;WD)(A;OICI;FA;;;" + target.String() + ")", true, false, ""},
+			"D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;FA;;;WD)(A;OICI;FA;;;" + target.String() + ")", true, false},
 		{"enrolled user's namespace inheriting the managed gateway's read entry", target,
 			"D:P(A;;0x1200a9;;;" + gateway.String() + ")(A;OICIIO;GXGR;;;" + gateway.String() + ")" +
-				"(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;FA;;;" + target.String() + ")", true, true, ""},
+				"(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;FA;;;" + target.String() + ")", true, true},
 		{"enrolled user's namespace inheriting a managed gateway write entry", target,
 			"D:P(A;OICI;0x1301bf;;;" + gateway.String() + ")" +
-				"(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;FA;;;" + target.String() + ")", true, false, ""},
+				"(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;FA;;;" + target.String() + ")", true, false},
 		{"another account's namespace inheriting the profile's entries", foreign,
-			"D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;FA;;;" + foreign.String() + ")", true, false, ""},
+			"D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;FA;;;" + foreign.String() + ")", true, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if tc.knownIssue != "" && !current.IsWellKnown(windows.WinLocalSystemSid) {
-				t.Skip(tc.knownIssue)
-			}
 			root := t.TempDir()
 			path := filepath.Join(root, "profile", ".claude", "settings.json")
 			stateDir := filepath.Join(root, "state")
@@ -302,11 +297,20 @@ func TestAtomicTransformV2UninstallAcceptsEnrolledUsersLegacyNamespace(t *testin
 			} else {
 				setDACL(t, legacy, tc.dacl)
 			}
-			err := atomicTransformFileV2(path, stateDir, 0o600,
-				atomicTransformV2Options{preserveExistingProtection: true, expectedOwner: target},
-				func([]byte, bool) (atomicTransformResult, error) {
-					return atomicTransformResult{Data: []byte(`{"hook":"other"}`)}, nil
-				})
+			// Production runs this transform only as the LocalSystem guardian
+			// or as the enrolled user: the uninstall reports another user's
+			// settings pending when it is not LocalSystem, and reconcile
+			// requires LocalSystem. Every fixture DACL grants SYSTEM, so an
+			// elevated test token opens the namespace the way SYSTEM does
+			// (GAP-1738). Without that the open is refused, and a refusal row
+			// passes for that reason instead of for the ownership check.
+			err := runAsTheUninstallGuardian(current, func() error {
+				return atomicTransformFileV2(path, stateDir, 0o600,
+					atomicTransformV2Options{preserveExistingProtection: true, expectedOwner: target},
+					func([]byte, bool) (atomicTransformResult, error) {
+						return atomicTransformResult{Data: []byte(`{"hook":"other"}`)}, nil
+					})
+			})
 			after, readErr := os.ReadFile(path)
 			if tc.ok {
 				if err != nil || readErr != nil || string(after) != `{"hook":"other"}` {
@@ -314,7 +318,7 @@ func TestAtomicTransformV2UninstallAcceptsEnrolledUsersLegacyNamespace(t *testin
 				}
 				return
 			}
-			if err == nil || !strings.Contains(err.Error(), "legacy compare-and-swap state directory") {
+			if err == nil || !strings.Contains(err.Error(), "validate legacy compare-and-swap state directory") {
 				t.Fatalf("unsafe legacy namespace error = %v", err)
 			}
 			if readErr != nil || string(after) != `{"hook":"managed"}` {
@@ -322,4 +326,60 @@ func TestAtomicTransformV2UninstallAcceptsEnrolledUsersLegacyNamespace(t *testin
 			}
 		})
 	}
+}
+
+// runAsTheUninstallGuardian runs fn with the access the LocalSystem guardian
+// has to a fixture whose DACL grants SYSTEM. LocalSystem runs fn unchanged.
+// An elevated administrator runs it on a locked thread that impersonates its
+// own token with SeBackupPrivilege and SeRestorePrivilege enabled: an
+// elevated runner (GitHub, the preflight clones) holds both but does not
+// enable them.
+func runAsTheUninstallGuardian(current *windows.SID, fn func() error) error {
+	if current.IsWellKnown(windows.WinLocalSystemSid) {
+		return fn()
+	}
+	result := make(chan error, 1)
+	go func() {
+		runtime.LockOSThread()
+		if err := windows.ImpersonateSelf(windows.SecurityImpersonation); err != nil {
+			runtime.UnlockOSThread()
+			result <- fmt.Errorf("impersonate the test token: %w", err)
+			return
+		}
+		var token windows.Token
+		err := windows.OpenThreadToken(windows.CurrentThread(),
+			windows.TOKEN_ADJUST_PRIVILEGES|windows.TOKEN_QUERY, false, &token)
+		for _, name := range []string{"SeBackupPrivilege", "SeRestorePrivilege"} {
+			if err != nil {
+				break
+			}
+			var namePtr *uint16
+			var luid windows.LUID
+			if namePtr, err = windows.UTF16PtrFromString(name); err == nil {
+				err = windows.LookupPrivilegeValue(nil, namePtr, &luid)
+			}
+			if err == nil {
+				state := windows.Tokenprivileges{PrivilegeCount: 1,
+					Privileges: [1]windows.LUIDAndAttributes{{Luid: luid, Attributes: windows.SE_PRIVILEGE_ENABLED}}}
+				err = windows.AdjustTokenPrivileges(token, false, &state, 0, nil, nil)
+				if err == nil && errors.Is(windows.GetLastError(), windows.ERROR_NOT_ALL_ASSIGNED) {
+					err = fmt.Errorf("the elevated test token does not hold %s", name)
+				}
+			}
+		}
+		if token != 0 {
+			token.Close()
+		}
+		if err == nil {
+			err = fn()
+		}
+		if revertErr := windows.RevertToSelf(); revertErr != nil {
+			// Leave the thread locked so Go retires it with the token.
+			result <- fmt.Errorf("revert the test thread: %v (after %v)", revertErr, err)
+			return
+		}
+		runtime.UnlockOSThread()
+		result <- err
+	}()
+	return <-result
 }
