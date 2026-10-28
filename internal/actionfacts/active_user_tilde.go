@@ -140,6 +140,10 @@ func ActiveUserTildeTwin(command, activeHome string, logins ...string) (twin str
 
 var msysDrivePrefix = regexp.MustCompile(`^/(?:cygdrive/)?([A-Za-z])(?:/|$)`)
 
+// msysOptionKeyPrefix is a literal option or operand key ending at "="
+// (of=, --output=) before an MSYS drive mount path in the same word.
+var msysOptionKeyPrefix = regexp.MustCompile(`^-{0,2}[A-Za-z_][A-Za-z0-9_-]*=`)
+
 // MSYSDrivePath returns the drive spelling (C:/x) of an MSYS or Cygwin
 // drive mount path (/c/x, /cygdrive/c/x), and value unchanged otherwise.
 func MSYSDrivePath(value string) string {
@@ -160,8 +164,8 @@ func MSYSDrivePath(value string) string {
 // path (C:/...), when activeHome is a Windows drive home: Git Bash, the
 // shell Claude Code and other agents run there, maps those mounts to the
 // drive for every program, so the twin names the same files (GAP-2375).
-// Only an unquoted or single-quoted literal at the start of a word is
-// respelled. ok is false when there is no such word, the home is not a
+// Only an unquoted or single-quoted literal at the start of a word, or
+// right after a literal key ending at "=" (of=/c/...), is respelled. ok is false when there is no such word, the home is not a
 // drive home or the command does not parse.
 func MSYSDrivePathTwin(command, activeHome string) (string, bool) {
 	home, valid := normalizeActiveHome(activeHome)
@@ -200,6 +204,12 @@ func MSYSDrivePathTwin(command, activeHome string) (string, bool) {
 				value, start = part.Value, int(part.Pos().Offset())+1
 			default:
 				return true
+			}
+			// A key ending at "=" may precede the mount in the same word
+			// (dd of=/c/..., --output=/c/...): Git Bash maps that value to
+			// the drive too (GAP-2399).
+			if key := msysOptionKeyPrefix.FindStringIndex(value); key != nil && msysDrivePrefix.MatchString(value[key[1]:]) {
+				value, start = value[key[1]:], start+key[1]
 			}
 			match := msysDrivePrefix.FindStringIndex(value)
 			if match == nil {
