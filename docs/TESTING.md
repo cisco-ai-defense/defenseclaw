@@ -88,14 +88,23 @@ Run E2E tests only when the required local services, credentials, and platform a
 
 The OpenCode bridge also has an opt-in test against an already downloaded
 vendor CLI. It uses a temporary home, a local fake model and a local fake
-gateway to verify that a blocked command never executes and that an allowed
-command returns the matching tool result, through both automatic discovery and
-a configured directory entrypoint. It installs nothing and needs no
+gateway to verify allow and block for native `shell`, `read`, `write`, `edit`
+and `patch` calls, including their exact arguments and correlated results,
+through both automatic discovery and a configured directory entrypoint.
+The patch fixture uses a GPT-family model ID because V2 selects that tool by
+model family; all model responses still come from the local fake API.
+The fake HTTP transport substitutes for native connected-peer verification;
+the connector transport suites test that boundary separately.
+It installs nothing and needs no
 model credentials. On a POSIX host, run it with an OpenCode V2 binary:
 
 ```bash
 python3 scripts/test_opencode_plugin_live.py --binary /path/to/opencode-v2 --major 2
 ```
+
+Use `--tool shell|read|write|edit|patch` to run one tool, or
+`--registration auto|configured` to select one registration path. The default
+runs all 20 combinations (five tools, two registration paths, allow and block).
 
 ## Install and Upgrade Tests
 

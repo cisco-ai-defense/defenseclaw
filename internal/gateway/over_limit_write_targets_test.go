@@ -48,9 +48,9 @@ func overLimitNativeWriteCalls() []nativeWriteCall {
 		{"claudecode", "MultiEdit", func(p string) map[string]any {
 			return map[string]any{"file_path": p, "edits": []any{map[string]any{"old_string": "# base", "new_string": overLimitWriteText}}}
 		}},
-		{"opencode", "write", func(p string) map[string]any { return map[string]any{"filePath": p, "content": overLimitWriteText} }},
+		{"opencode", "write", func(p string) map[string]any { return map[string]any{"path": p, "content": overLimitWriteText} }},
 		{"opencode", "edit", func(p string) map[string]any {
-			return map[string]any{"filePath": p, "oldString": "# base", "newString": overLimitWriteText}
+			return map[string]any{"path": p, "oldString": "# base", "newString": overLimitWriteText}
 		}},
 		{"codex", "apply_patch", func(p string) map[string]any {
 			return map[string]any{"command": "*** Begin Patch\n*** Update File: " + p + "\n@@\n # base\n" +

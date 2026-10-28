@@ -168,9 +168,8 @@ func (m *mockLLM) models(w http.ResponseWriter, r *http.Request, id string) {
 // --- Anthropic Messages ---
 
 // anthropicShellTools are the shell tools Messages clients advertise: Claude
-// Code's Bash, and bash for OpenCode and the Copilot CLI (both take
-// {"command", "description"}).
-var anthropicShellTools = []string{"Bash", "bash"}
+// Code's Bash, Copilot CLI's bash and OpenCode V2's shell.
+var anthropicShellTools = []string{"Bash", "bash", "shell"}
 
 type anthropicRequest struct {
 	Model    string             `json:"model"`
@@ -265,9 +264,13 @@ func (m *mockLLM) messages(w http.ResponseWriter, r *http.Request) {
 		case turn == 0 && shell != "":
 			// A request that cannot call the tool (title generation, quota
 			// probes, classifiers) never burns the scripted tool turn.
+			input := map[string]interface{}{"command": sc.command}
+			if shell != "shell" {
+				input["description"] = "DefenseClaw hook-fire probe"
+			}
 			blocks = []anthropicBlock{{
 				Type: "tool_use", ID: fmt.Sprintf("toolu_dcprobe_%d", seq), Name: shell,
-				Input: map[string]interface{}{"command": sc.command, "description": "DefenseClaw hook-fire probe"},
+				Input: input,
 			}}
 			stop = "tool_use"
 			m.served(sc.match)
@@ -396,8 +399,9 @@ func responsesPosition(raw json.RawMessage) (string, int) {
 }
 
 // responsesShellCall renders command against the shell tool the request
-// advertises (the tool names change between Codex releases).
-func responsesShellCall(command string, tools map[string]string, seq int) map[string]interface{} {
+// advertises. OpenCode V2's shell takes a command string; Codex's shell takes
+// argv. Use the advertised schema to distinguish those shared tool names.
+func responsesShellCall(command string, tools map[string]string, schemas map[string]json.RawMessage, seq int) map[string]interface{} {
 	callID := fmt.Sprintf("call_dcprobe_%d", seq)
 	args := func(v interface{}) string {
 		raw, _ := json.Marshal(v)
@@ -411,6 +415,12 @@ func responsesShellCall(command string, tools map[string]string, seq int) map[st
 		return map[string]interface{}{"type": "function_call", "name": "exec_command", "call_id": callID,
 			"arguments": args(map[string]interface{}{"cmd": command, "yield_time_ms": 10000})}
 	case tools["shell"] == "function":
+		var schema mockToolSchema
+		_ = json.Unmarshal(schemas["shell"], &schema)
+		if schema.Properties["command"].Type == "string" {
+			return map[string]interface{}{"type": "function_call", "name": "shell", "call_id": callID,
+				"arguments": args(shellToolArgs(schemas["shell"], command))}
+		}
 		return map[string]interface{}{"type": "function_call", "name": "shell", "call_id": callID,
 			"arguments": args(map[string]interface{}{"command": []string{"bash", "-lc", command}, "timeout_ms": 30000})}
 	case tools["local_shell"] != "":
@@ -452,7 +462,7 @@ func (m *mockLLM) responses(w http.ResponseWriter, r *http.Request) {
 	if sc := m.pick(prompt); sc != nil {
 		switch turn {
 		case 0:
-			call := responsesShellCall(sc.command, tools, seq)
+			call := responsesShellCall(sc.command, tools, schemas, seq)
 			if name, ok := pickShellTool(schemas); call == nil && ok {
 				// from its schema.
 				args, _ := json.Marshal(shellToolArgs(schemas[name], sc.command))

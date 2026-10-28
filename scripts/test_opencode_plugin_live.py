@@ -26,12 +26,26 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 
-def check(binary: str, blocked: bool, registration: str) -> None:
+def check(binary: str, blocked: bool, registration: str, tool: str) -> None:
     with tempfile.TemporaryDirectory(prefix="defenseclaw-opencode-live-") as temporary:
         root = Path(temporary).resolve()
         project = root / "project"
         project.mkdir()
         marker = project / "sentinel"
+        if tool in ("read", "edit"):
+            marker.write_text("before\n")
+        tool_args = {
+            "shell": {
+                "command": "/usr/bin/touch " + shlex.quote(str(marker)),
+                "workdir": str(project),
+                "timeout": 10000,
+                "background": False,
+            },
+            "write": {"path": str(marker), "content": "after\n"},
+            "read": {"path": str(marker), "offset": 1, "limit": 1},
+            "edit": {"path": str(marker), "oldString": "before", "newString": "after", "replaceAll": False},
+            "patch": {"patchText": f"*** Begin Patch\n*** Add File: {marker}\n+after\n*** End Patch"},
+        }[tool]
         payloads = []
         model_calls = 0
 
@@ -64,10 +78,9 @@ def check(binary: str, blocked: bool, registration: str) -> None:
                     return
                 model_calls += 1
                 done = any(m.get("role") == "tool" for m in data.get("messages", [])) or model_calls > 2
-                tool = "shell"
                 names = [item.get("function", {}).get("name") for item in data.get("tools", [])]
                 if not done and tool not in names:
-                    self.send_error(422, "Expected native shell tool is unavailable")
+                    self.send_error(422, f"Expected native {tool} tool is unavailable: {names}")
                     return
                 delta = (
                     {"content": "Fixture complete."}
@@ -80,7 +93,7 @@ def check(binary: str, blocked: bool, registration: str) -> None:
                                 "type": "function",
                                 "function": {
                                     "name": tool,
-                                    "arguments": json.dumps({"command": "/usr/bin/touch " + shlex.quote(str(marker))}),
+                                    "arguments": json.dumps(tool_args),
                                 },
                             }
                         ]
@@ -136,7 +149,10 @@ def check(binary: str, blocked: bool, registration: str) -> None:
             )
             (plugin / ("defenseclaw.js" if autoload else "index.js")).write_text(rendered)
             settings = {"baseURL": f"http://127.0.0.1:{port}/v1", "apiKey": "fixture"}
-            models = {"fixture": {"name": "Fixture", "limit": {"context": 32768, "output": 1024}}}
+            # The pinned vendor exposes patch for GPT-family models and
+            # edit/write for other models. Both use this same local fake API.
+            model_id = "gpt-5" if tool == "patch" else "fixture"
+            models = {model_id: {"name": "Fixture", "limit": {"context": 32768, "output": 1024}}}
             config = {
                 "share": "disabled",
                 "plugins": [] if autoload else [str(plugin)],
@@ -170,7 +186,7 @@ def check(binary: str, blocked: bool, registration: str) -> None:
                 "--format",
                 "json",
                 "--model",
-                "fixture/fixture",
+                f"fixture/{model_id}",
                 "--title",
                 "DefenseClaw fixture",
                 "Run the fixture tool once.",
@@ -201,7 +217,16 @@ def check(binary: str, blocked: bool, registration: str) -> None:
             before = [p for p in payloads if p.get("hook_event_name") == "tool.execute.before"]
             assert len(before) == 1, f"expected one before hook, got {len(before)}"
             assert before[0]["arguments_authoritative"] is True
-            assert marker.exists() is not blocked, f"blocked={blocked}, command executed={marker.exists()}"
+            assert before[0]["tool_name"] == tool
+            assert before[0]["tool_input"] == tool_args
+            if tool == "read":
+                assert marker.read_text() == "before\n"
+            elif tool == "edit":
+                assert marker.read_text() == ("before\n" if blocked else "after\n")
+            else:
+                assert marker.exists() is not blocked, f"blocked={blocked}, tool executed={marker.exists()}"
+                if not blocked and tool != "shell":
+                    assert marker.read_text() == "after\n"
             if blocked:
                 assert "DefenseClaw smoke-test denial" in stdout + stderr
             else:
@@ -209,9 +234,13 @@ def check(binary: str, blocked: bool, registration: str) -> None:
                 assert len(after) == 1
                 assert after[0]["tool_call_id"] == before[0]["tool_call_id"]
                 result = after[0]["tool_response"]
-                assert result["output"]["exit"] == 0
+                assert result["opencode_v2_status"] == "completed"
+                if tool == "shell":
+                    assert result["output"]["exit"] == 0
+                elif tool == "read":
+                    assert "before" in json.dumps(result)
             print(
-                f"OpenCode V2 {registration} {'block' if blocked else 'allow'}: "
+                f"OpenCode V2 {tool} {registration} {'block' if blocked else 'allow'}: "
                 "PASS (native before hook, execution, result)"
             )
         finally:
@@ -225,9 +254,11 @@ if __name__ == "__main__":
     parser.add_argument("--binary", required=True, type=lambda value: str(Path(value).resolve(strict=True)))
     parser.add_argument("--major", default=2, type=int, choices=(2,))
     parser.add_argument("--registration", choices=("auto", "configured", "both"), default="both")
+    parser.add_argument("--tool", choices=("shell", "read", "write", "edit", "patch", "all"), default="all")
     args = parser.parse_args()
     if os.name != "posix":
         parser.error("this smoke test requires a POSIX host")
     for registration in ("auto", "configured") if args.registration == "both" else (args.registration,):
-        check(args.binary, blocked=True, registration=registration)
-        check(args.binary, blocked=False, registration=registration)
+        for tool in ("shell", "read", "write", "edit", "patch") if args.tool == "all" else (args.tool,):
+            check(args.binary, blocked=True, registration=registration, tool=tool)
+            check(args.binary, blocked=False, registration=registration, tool=tool)

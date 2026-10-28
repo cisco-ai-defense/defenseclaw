@@ -94,6 +94,8 @@ func TestExtractClosedCodingAgentArgs(t *testing.T) {
 		wantPath   string
 		wantURL    string
 	}{
+		{name: "opencode v2 paginated read", tool: "read", raw: `{"path":"/repo/a","offset":2,"limit":20}`, wantStatus: StatusComplete, wantPath: "/repo/a"},
+		{name: "opencode v2 mixed paths", tool: "read", raw: `{"path":"/repo/a","file_path":"/other","offset":2}`, wantStatus: StatusPartial},
 		{name: "paginated read", tool: "Read", raw: `{"file_path":"/repo/a","offset":2,"limit":20}`, wantStatus: StatusComplete, wantPath: "/repo/a"},
 		{name: "literal edit", tool: "Edit", raw: `{"file_path":"/repo/a","old_string":"before","new_string":"after","replace_all":false}`, wantStatus: StatusComplete, wantPath: "/repo/a"},
 		{name: "bounded grep", tool: "Grep", raw: `{"pattern":"needle","path":"/repo","output_mode":"content","head_limit":10,"-n":true}`, wantStatus: StatusComplete, wantPath: "/repo"},

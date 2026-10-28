@@ -34,7 +34,7 @@ func TestRelativeWriteTargetsInASandboxResolveInTheGuest(t *testing.T) {
 		copilotCreate.connector != "copilot" || copilotCreate.tool != "create" {
 		t.Fatal("nativeWriteCalls order changed")
 	}
-	opencodeBash := nativeWriteCall{"opencode", "bash", func(p string) map[string]any {
+	opencodeBash := nativeWriteCall{"opencode", "shell", func(p string) map[string]any {
 		return map[string]any{"command": "echo '# k' >> " + p}
 	}}
 	extraKeyEdit := nativeWriteExtraKeyCalls()[0]

@@ -81,6 +81,8 @@ On native Windows, the npm image is `%APPDATA%\npm\node_modules\@opencode\cli\bi
 
 Before awaiting a verdict, the V2 adapter detaches and deeply freezes the inspected input and freezes the event. A later hook cannot substitute an uninspected tool or argument. Session location and MCP identity come from bounded local V2 API calls; invalid context is refused and action mode rejects ambiguous MCP identity.
 
+Native V2 tools use `shell` with `command`, optional `workdir`, `timeout` and `background`; `read` and `write` use `path`; `edit` uses `path`, `oldString`, `newString` and optional `replaceAll`; `patch` uses `patchText`. The gateway analyzes these V2 fields for command and protected-path rules. OpenCode's `patch` is mapped to the reviewed patch parser only for this connector, preserving other connectors' patch formats.
+
 A blocked call returns its reason through the rejected tool Promise. V2 server plugins have no V1 TUI toast API; advisory notices use host logs. There is no native hook-side approval dialog. A confirm verdict is advisory rather than a native ask.
 
 The after hook preserves V2 `status`, structured `output`, `content` and metadata. Errors are failures. A shell result proves success only when completed with exit zero; a running background command is not completed success. After-hook findings cannot undo an already executed side effect.
