@@ -1428,6 +1428,7 @@ const r105Rows: DocRow[] = [
   { gap: "GAP-2249", page: "stories/observe-claude-code.mdx", has: ["through its [native hooks](/docs/connectors/claudecode).", "Host setup turns Claude Code's native OpenTelemetry export off", "`CLAUDE_CODE_ENABLE_TELEMETRY=0`", "DefenseClaw sees Claude Code through its hooks only. Only an isolated OpenShell sandbox keeps native logs and metrics."], lacks: ["receives its native OpenTelemetry logs and metrics", "native hooks and OpenTelemetry]"] },
   { gap: "GAP-2366", page: "reference/env-vars.mdx", has: ["`DEFENSECLAW_ENTERPRISE_PROFILE` exported in a shell is dropped when the", "command starts. The writers keep writing as usual, and `defenseclaw doctor`", "lists the variable under `Ignored environment overrides`."], lacks: ["process's writers refuse changes (exit code `3`"] },
   { gap: "GAP-2365", page: "guardrail/switching-connectors.mdx", has: ["`Codex is already configured; re-apply its hooks (mode=action)? [Y/n]:`", "A re-run never asks Add, Replace or Cancel.", "`Configure DefenseClaw for Codex enforcement now? [Y/n]:`", "the agent's current mode when it is already set up, observe for a new one"] },
+  { gap: "GAP-2221", page: "edge-connector/install.mdx", has: ["when no Fleet API token is saved yet, setup first asks `Generate a new fleet API bearer token? [Y/n]`", "so `sudo` can ask for your password", "Edge setup is incomplete`, and Fleet stays off"] },
   { gap: "GAP-2171", page: "enterprise/operations.mdx", has: ["it prints `unknown flag` and exits `1`, not `1639`"] },
   { gap: "GAP-2171", page: "enterprise/troubleshooting.mdx", has: ["exits `1` with `unknown flag` before the lifecycle runs"] },
   { gap: "GAP-2367", page: "reference/setup-commands.mdx", has: ["writes it to `ai_discovery.trusted_binary_prefixes` in `~/.defenseclaw/config.yaml`"], lacks: ["and persists to `~/.defenseclaw/.env`"] },
@@ -2003,6 +2004,17 @@ describe('Setup properties and the Windows unknown-flag exit match the code (GAP
   it('keeps the enterprise tree out of the root usage-error mapping', () => {
     const exit = source('internal/cli/exit_code.go');
     assert.ok(exit.includes('var usageFlagErrorExempt = []string{"enterprise", "hook", "notify", "watchdog"}') && exit.includes('\treturn 1\n}'), 'unknown-flag exit for enterprise windows changed: re-check enterprise/operations.mdx and enterprise/troubleshooting.mdx (GAP-2171)');
+  });
+});
+
+// GAP-2221: the Fleet setup questions, the sudo write and the refusal the page quotes.
+describe('edge-connector setup prompts and sudo refusal match the CLI (GAP-2221)', () => {
+  it('asks for the token, writes the service env through sudo and stops when it cannot', () => {
+    const py = source('cli/defenseclaw/commands/cmd_setup_edge_connector.py');
+    assert.ok(py.includes('"Generate a new fleet API bearer token?", default=True'), 'token question changed: re-check edge-connector/install.mdx');
+    assert.ok(py.includes('subprocess.run(["sudo", "install", "-d", "-m", "700", str(svc_env_path.parent)], check=True)'), 'service env is no longer written through sudo: re-check edge-connector/install.mdx');
+    assert.ok(py.includes('f"Could not provision {name} in {svc_env_path}; Edge setup is incomplete"'), 'sudo refusal text changed: re-check edge-connector/install.mdx');
+    assert.ok(py.indexOf('Edge setup is incomplete') < py.indexOf('_enable_fleet_config(ctx.obj.cfg.data_dir)'), 'Fleet is enabled before the service env is written: re-check "Fleet stays off" in edge-connector/install.mdx');
   });
 });
 
