@@ -615,7 +615,12 @@ jobs:
           # never imports it, and huggingface-hub uses the flock-based
           # FileLock (SoftFileLock only where flock is unsupported) and never
           # ReadWriteLock. The advisories are local multi-user races on a
-          # shared lock directory.
+          # shared lock directory. The later batch (CVE-2026-112908/112909/
+          # 112910/112911/112912/112915/112934/112935/112938/112939/112941),
+          # also fixed only in 4.2.1, is the same class: claim directories,
+          # symlink or hard-link swaps and stale-lock breaks on a lock path
+          # another local user can write, a lock file inheriting its
+          # directory's ACL, and a crafted ReadWriteLock database.
           # TODO: Remove the LiteLLM proxy ignores once the litellm pin moves
           # to a fixed release (>= 1.100.4 for CVE-2026-114612, >= 1.95.0 for
           # GHSA-g5ff-637f-6q2m). Both are in the LiteLLM proxy server: forged
@@ -626,7 +631,11 @@ jobs:
           audit_ignores=(--ignore-vuln CVE-2026-114612 --ignore-vuln GHSA-g5ff-637f-6q2m)
           if [ "${{ matrix.python-version }}" = "3.10" ]; then
             for id in CVE-2026-112906 CVE-2026-112907 CVE-2026-112913 \
-                      CVE-2026-112914 CVE-2026-112937 CVE-2026-112940; do
+                      CVE-2026-112914 CVE-2026-112937 CVE-2026-112940 \
+                      CVE-2026-112908 CVE-2026-112909 CVE-2026-112910 \
+                      CVE-2026-112911 CVE-2026-112912 CVE-2026-112915 \
+                      CVE-2026-112934 CVE-2026-112935 CVE-2026-112938 \
+                      CVE-2026-112939 CVE-2026-112941; do
               audit_ignores+=(--ignore-vuln "$id")
             done
           fi
