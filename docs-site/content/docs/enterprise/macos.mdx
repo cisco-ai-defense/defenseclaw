@@ -143,7 +143,10 @@ on the unsigned pkg; the checks above are what protect it.
 
 ### 2. Stage the config
 
-The lifecycle requires `config_version: 9`, `deployment_mode: managed_enterprise`,
+Write the config as `config_version: 9`. `ensure` also takes a `config_version: 8`
+file: it migrates it to 9, keeps `config.yaml.v8.bak` and `migration-v9.json`, and
+warns `config_version_8`. It refuses any other version with `config_invalid`.
+The lifecycle requires `deployment_mode: managed_enterprise`,
 `enterprise.profile: standalone` and `data_dir: /opt/cisco/defenseclaw/runtime`. If
 you set `gateway.api_bind` or `gateway.api_port`, they must be `127.0.0.1` and
 `18970`.
