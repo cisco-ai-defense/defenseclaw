@@ -6,7 +6,9 @@ package gateway
 import (
 	"encoding/json"
 	"slices"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
 )
@@ -146,6 +148,33 @@ func TestR105WindowsCMDSlashCStateWrite(t *testing.T) {
 		{`Write-Output "Start-Process cmd -ArgumentList '/c type nul > ` + state + `'"`, false},
 		{"# cmd /c type nul > " + state + "\nGet-ChildItem", false},
 		{`cmd /c echo see cmd /c type nul docs`, false},
+		// Every reading of the outer shell is judged; an unterminated quote
+		// is no text span; a runner is a shell word, not any -c (checker
+		// it10 RV10-1, RV10-2).
+		{`echo don\'t; cmd //c "type nul > ` + state + `"`, true},
+		{`echo $'it\'s'; cmd //c "type nul > ` + state + `"`, true},
+		{"cat > n.txt <<EOF\ndon't\nEOF\ncmd //c \"type nul > " + state + "\"", true},
+		{`<# don't #> cmd /c "type nul > ` + state + `"`, true},
+		{`Write-Output "C:\temp\"; cmd /c "type nul > ` + state + `"`, true},
+		{`bash -lc "cmd //c 'type nul > ` + state + `'"`, true},
+		{`iex("cmd /c 'type nul > ` + state + `'")`, true},
+		{`powershell "cmd /c 'type nul > ` + state + `'"`, true},
+		{`& 'C:\Windows\System32\cmd.exe' /c 'type nul > ` + state + `'`, true},
+		{`echo \"; cmd //c "type nul > ` + state + `"`, true},
+		{`x='a'\''b'; cmd //c "type nul > ` + state + `"`, true},
+		{`echo {# ; cmd //c "type nul > ` + state + `"`, true},
+		{"echo \"`cmd //c 'type nul > " + state + "'`\"", true},
+		{`Write-Output ‘a'b’; cmd /c "type nul > ` + state + `"`, true},
+		{`Start-Process powershell -ArgumentList '-c "cmd /c type nul > ` + state + `"'`, true},
+		{`Start-Process cmd -ArgumentList @('/c','type nul > ` + state + `')`, true},
+		{strings.Repeat("cmd /c echo 0; ", 70) + `cmd /c "type nul > ` + state + `"`, true},
+		{`grep -c "cmd /c type nul > ` + state + `" notes.md`, false},
+		{`rg -c 'cmd /c del ` + state + `' docs`, false},
+		{`git log --grep "cmd /c type nul > ` + state + `"`, false},
+		{`bash -lc "grep -c 'cmd /c type nul > ` + state + `' notes.md"`, false},
+		{`iex "Write-Output 'cmd /c type nul > ` + state + `'"`, false},
+		{`Write-Output x; cmd /c dir`, false},
+		{`Start-Process cmd -ArgumentList '/c','type nul > notes.txt' -Wait`, false},
 	} {
 		for _, tool := range []string{"Bash", "shell_command", "PowerShell"} {
 			args, _ := json.Marshal(map[string]string{"command": tc.command})
@@ -161,5 +190,29 @@ func TestR105WindowsCMDSlashCStateWrite(t *testing.T) {
 					tool, tc.command, input.DialectHint, verdict.Action, tc.block, findings)
 			}
 		}
+	}
+}
+
+// TestR105WindowsCMDBodyReaderIsLinear: the cmd body reader stays far inside
+// the hook budget on large crafted commands (checker it10 RV10-3: 32 KB took
+// 8.8 s at 60f41d7b57), and a command it cannot read within its bounds
+// counts as the state write it may hide.
+func TestR105WindowsCMDBodyReaderIsLinear(t *testing.T) {
+	const size = 64 << 10
+	for _, unit := range []string{"'a' ", "cmd x 'a' ", "cmd /c x ", "\"$(", "cmd -args 'a' ", "a; "} {
+		command := "cmd x " + strings.Repeat(unit, size/len(unit))
+		start := time.Now()
+		cmdInvocationReadings(command, true)
+		if took := time.Since(start); took > 2*time.Second {
+			t.Errorf("unit %q: %d bytes read in %s", unit, len(command), took)
+		}
+	}
+	const state = `%USERPROFILE%\.defenseclaw\config.yaml`
+	request := trustedActionRequest{Input: actionfacts.Input{
+		Tool: "PowerShell", Command: strings.Repeat("cmd /c x ", 1000) + "type nul > " + state,
+		CWD: `C:\Users\Alice\project`, ActiveHome: `C:\Users\Alice`, DialectHint: actionfacts.DialectPowerShell,
+	}}
+	if !provenCMDSlashCStateWrite(request) {
+		t.Errorf("a command beyond the reader bounds is not judged a state write")
 	}
 }
