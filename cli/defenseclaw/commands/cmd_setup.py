@@ -20593,6 +20593,12 @@ def setup_routing(app: AppContext, enable: bool, disable: bool, status: bool, ye
         _print_routing_status(app)
         return
 
+    if enable and _routing_unsupported_on_host():
+        # Routing only applies to OpenClaw and ZeptoClaw proxy traffic, and
+        # DefenseClaw runs no guardrail proxy on native Windows (rel-1-0-4
+        # GAP-2260). --disable still works, to turn off a copied config.
+        raise click.ClickException(_ROUTING_UNSUPPORTED_ON_WINDOWS)
+
     if enable:
         app.cfg.routing.enabled = True
         if not app.cfg.routing.version:
@@ -20692,10 +20698,29 @@ def setup_routing(app: AppContext, enable: bool, disable: bool, status: bool, ye
         )
 
 
+_ROUTING_UNSUPPORTED_ON_WINDOWS = (
+    "Semantic routing is not supported on native Windows: it routes OpenClaw and "
+    "ZeptoClaw proxy traffic, and DefenseClaw runs no guardrail proxy on Windows."
+)
+
+
+def _routing_unsupported_on_host() -> bool:
+    """Native Windows runs hook connectors only, so routing has no traffic."""
+    return os.name == "nt"
+
+
 def _print_routing_status(app: AppContext) -> None:
     click.echo()
     click.echo("  Semantic Router Status")
     ux.echo("  ══════════════════════")
+    if _routing_unsupported_on_host():
+        configured = "enabled" if app.cfg.routing.enabled else "disabled"
+        click.echo(f"    Configured: {configured}")
+        click.echo(f"    {_ROUTING_UNSUPPORTED_ON_WINDOWS}")
+        if app.cfg.routing.enabled:
+            click.echo("    Turn it off with: defenseclaw setup routing --disable")
+        click.echo()
+        return
     if not app.cfg.routing.enabled:
         click.echo("    Configured: disabled")
         click.echo()

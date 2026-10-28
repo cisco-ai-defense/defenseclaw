@@ -1672,6 +1672,7 @@ const r105Rows: DocRow[] = [
   // pod docs it3 (2026-10-28)
   { gap: "GAP-2264", page: "hitl.mdx", has: ["Outside Manual mode Claude Code cannot ask, so the call is blocked and its row shows `decision=blocked` in the list and `blocked` on the `Decision` line of `--show`."], lacks: ["Outside Manual mode, the decision is `block`."] },
   { gap: "GAP-2264", page: "stories/hitl-approvals.mdx", has: ["Outside Manual mode Claude Code cannot ask, so the call is blocked and its row shows `decision=blocked` in the list and `blocked` on the `Decision` line of `--show`."], lacks: ["Outside Manual mode, the decision is `block`."] },
+  { gap: "GAP-2260", page: "guardrail/semantic-routing.mdx", has: ["Native Windows is not supported: there `defenseclaw setup routing` says so and refuses `--enable`, and `--disable` still turns off a routing block copied from another machine."] },
   { gap: "GAP-2334", page: "enterprise/mdm/linux-config-management.mdx", section: "Check health", has: ["| Kit detection script | `packaging/mdm/linux/detect.sh --require-healthy` (exit `1`, or `unhealthy` with `--format value`, when `verify` reports a problem or `security_complete` is `false`: a host whose `verify` passes with incomplete security still fails it, and the message says which) |"], lacks: ["| Kit detection script | `packaging/mdm/linux/detect.sh --require-healthy` |"] },
 ];
 
@@ -2073,6 +2074,14 @@ describe('alerts decision label for a hook block matches the HITL pages (GAP-226
   it('labels a hook block "blocked"', () => {
     const py = source('cli/defenseclaw/commands/cmd_alerts.py');
     assert.ok(py.includes('if action == "block":') && py.includes('else "blocked"'), 'alerts no longer labels a hook block "blocked": re-check hitl.mdx and stories/hitl-approvals.mdx Check it worked');
+  });
+});
+
+// GAP-2260: setup routing refuses --enable on native Windows; semantic-routing.mdx says so.
+describe('setup routing on native Windows matches semantic-routing.mdx (GAP-2260)', () => {
+  it('refuses --enable and names the reason on native Windows', () => {
+    const py = source('cli/defenseclaw/commands/cmd_setup.py');
+    assert.ok(py.includes('if enable and _routing_unsupported_on_host():') && py.includes('"Semantic routing is not supported on native Windows: it routes OpenClaw and "'), 'setup routing no longer refuses --enable on native Windows: re-check semantic-routing.mdx Prerequisites');
   });
 });
 
