@@ -871,18 +871,161 @@ func provenBashAggregateStateWrite(request trustedActionRequest) bool {
 // of a statement, after the PowerShell call operator & or a pipe.
 var cmdProgramWord = regexp.MustCompile(`(?i)(?:^|[\s;|&(){}])(?:"[^"\r\n]*?[\\/]|"|[^\s"';|&(){}]*[\\/])?(?:cmd(?:\.exe)?|\$\{?env:comspec\}?|%comspec%)"?`)
 
-// cmdRunSwitch finds the /c or /k switch that hands the rest of the line to
-// cmd: /c, /k and the Git Bash spelling //c, //k (MSYS turns //c into /c),
-// after any other switch (/d /q /s /u /v:on /e:on) or inside a PowerShell
-// Start-Process -ArgumentList string.
-var cmdRunSwitch = regexp.MustCompile(`(?i)(?:^|[\s'"])/{1,2}[ck](?:[\s'"]|$)`)
+// cmdTextSpan is a part of a shell command the outer shell reads as text,
+// not as a statement: a quoted word, a # comment or a PowerShell here-string.
+// runs marks a quoted word that is itself run as a command line (the string
+// after -Command, -c or Invoke-Expression); args marks a Start-Process
+// -ArgumentList string, which is the command line of the program it starts.
+type cmdTextSpan struct {
+	start, end int
+	inner      string
+	runs, args bool
+}
+
+var (
+	cmdRunsBefore = regexp.MustCompile(`(?i)(?:^|[\s;|&(){}])(?:-command|-c|invoke-expression|iex)\s*$`)
+	cmdArgsBefore = regexp.MustCompile(`(?i)(?:^|\s)-(?:argumentlist|args)\s*$`)
+)
+
+// cmdTextSpans scans command for the parts the outer shell reads as text.
+func cmdTextSpans(command string) []cmdTextSpan {
+	var spans []cmdTextSpan
+	tokenStart := func(i int) bool {
+		return i == 0 || strings.ContainsRune(" \t\r\n;|&(){}", rune(command[i-1]))
+	}
+	for i := 0; i < len(command); {
+		c := command[i]
+		switch {
+		case c == '`' && i+1 < len(command):
+			i += 2
+			continue
+		case c == '@' && i+2 < len(command) && (command[i+1] == '\'' || command[i+1] == '"') &&
+			(command[i+2] == '\n' || command[i+2] == '\r'):
+			closing := "\n" + string(command[i+1]) + "@"
+			end := strings.Index(command[i+2:], closing)
+			if end < 0 {
+				spans = append(spans, cmdTextSpan{start: i, end: len(command), inner: command[i+2:]})
+				return spans
+			}
+			spans = append(spans, cmdTextSpan{start: i, end: i + 2 + end + len(closing), inner: command[i+2 : i+2+end]})
+			i = i + 2 + end + len(closing)
+			continue
+		case c == '#' && tokenStart(i):
+			end := strings.IndexAny(command[i:], "\r\n")
+			if end < 0 {
+				end = len(command) - i
+			}
+			spans = append(spans, cmdTextSpan{start: i, end: i + end, inner: command[i : i+end]})
+			i += end
+			continue
+		case c == '\'' || c == '"':
+			j := i + 1
+			for j < len(command) {
+				if c == '"' && (command[j] == '`' || command[j] == '\\') && j+1 < len(command) {
+					j += 2
+					continue
+				}
+				if command[j] == c {
+					if c == '\'' && j+1 < len(command) && command[j+1] == '\'' {
+						j += 2 // PowerShell '' inside a single-quoted word.
+						continue
+					}
+					break
+				}
+				j++
+			}
+			end := min(j+1, len(command))
+			inner := command[i+1 : min(j, len(command))]
+			if c == '\'' {
+				inner = strings.ReplaceAll(inner, "''", "'")
+			}
+			span := cmdTextSpan{start: i, end: end, inner: inner}
+			before := strings.TrimRight(command[:i], " \t")
+			if strings.HasSuffix(before, ",") && len(spans) > 0 && spans[len(spans)-1].args {
+				span.args = true // An -ArgumentList array element.
+			}
+			span.runs = cmdRunsBefore.MatchString(command[:i])
+			span.args = span.args || cmdArgsBefore.MatchString(command[:i])
+			spans = append(spans, span)
+			i = end
+			continue
+		}
+		i++
+	}
+	return spans
+}
+
+func cmdSpanAt(spans []cmdTextSpan, pos int) (cmdTextSpan, bool) {
+	for _, span := range spans {
+		if pos >= span.start && pos < span.end {
+			return span, true
+		}
+	}
+	return cmdTextSpan{}, false
+}
+
+var (
+	cmdSwitchWord = regexp.MustCompile(`(?i)^/{1,2}[a-z](?::\S*)?$`)
+	cmdRunWord    = regexp.MustCompile(`(?i)^/{1,2}[ck]`)
+	cmdSubexpr    = regexp.MustCompile(`\$\(`)
+	// cmdStartProcessWord: Start-Process (or its aliases) earlier in the
+	// statement that names cmd as the program.
+	cmdStartProcessWord = regexp.MustCompile(`(?i)(?:^|[\s;|&(){}])(?:start-process|saps|start)\s+(?:-filepath\s+)?"?$`)
+)
+
+// cmdSwitchRunBody reads the switch run of a cmd.exe command line (after the
+// program word, or the start of a Start-Process argument string) and returns
+// the text after its /c or /k (also //c, //k from Git Bash), or false when
+// another word comes first: then cmd runs no body.
+func cmdSwitchRunBody(rest string) (string, bool) {
+	for {
+		trimmed := strings.TrimLeft(rest, " \t")
+		if trimmed == "" {
+			return "", false
+		}
+		end := strings.IndexAny(trimmed, " \t\r\n")
+		if end < 0 {
+			end = len(trimmed)
+		}
+		word := trimmed[:end]
+		if loc := cmdRunWord.FindStringIndex(word); loc != nil {
+			after := word[loc[1]:]
+			if after == "" || after[0] == '"' || after[0] == '\'' {
+				return trimmed[loc[1]:], true
+			}
+		}
+		if !cmdSwitchWord.MatchString(word) {
+			return "", false
+		}
+		rest = trimmed[end:]
+	}
+}
+
+// cmdStatementEnd returns where the statement that starts at pos ends: the
+// first ; | newline (or cmd &) outside a text span.
+func cmdStatementEnd(command string, spans []cmdTextSpan, pos int) int {
+	for i := pos; i < len(command); i++ {
+		if span, in := cmdSpanAt(spans, i); in {
+			i = span.end - 1
+			continue
+		}
+		if strings.ContainsRune(";|\r\n", rune(command[i])) {
+			return i
+		}
+	}
+	return len(command)
+}
 
 // cmdInvocationBodies returns the command lines a shell command hands to
 // cmd.exe through cmd /c or cmd /k, read after the outer shell's own quote
 // removal: a single-quoted (PowerShell, Git Bash) body is its text, a
-// double-quoted one loses its first and last quote as cmd /c does, and a body
-// inside a Start-Process argument string ends at its closing quote. Each
-// reading is returned; the state-write proof judges every one of them.
+// double-quoted one loses its first and last quote as cmd /c does, and a
+// Start-Process -ArgumentList string (an array is joined with spaces, as
+// PowerShell does) is the cmd command line. The program word counts only
+// where the outer shell runs it: in command position, not inside a quoted
+// word, a comment or a here-string, except a string that is itself run (after
+// -Command, -c, Invoke-Expression, inside $(...)), which is read again (RV9-1).
+// Each reading is returned; the state-write proof judges every one of them.
 func cmdInvocationBodies(command string) []string {
 	var bodies []string
 	add := func(body string) {
@@ -891,29 +1034,84 @@ func cmdInvocationBodies(command string) []string {
 			bodies = append(bodies, body)
 		}
 	}
+	spans := cmdTextSpans(command)
+	for _, span := range spans {
+		var nested []string
+		if span.runs {
+			nested = append(nested, span.inner)
+		}
+		if span.end-span.start >= 2 && command[span.start] == '"' {
+			for _, loc := range cmdSubexpr.FindAllStringIndex(span.inner, -1) {
+				sub, depth := span.inner[loc[1]:], 1
+				for i := 0; i < len(sub); i++ {
+					if sub[i] == '(' {
+						depth++
+					} else if sub[i] == ')' {
+						if depth--; depth == 0 {
+							sub = sub[:i]
+							break
+						}
+					}
+				}
+				nested = append(nested, sub)
+			}
+		}
+		for _, text := range nested {
+			for _, body := range cmdInvocationBodies(text) {
+				add(body)
+			}
+		}
+	}
 	for _, loc := range cmdProgramWord.FindAllStringIndex(command, -1) {
+		start := loc[0]
+		if strings.ContainsRune(" \t\r\n;|&(){}", rune(command[start])) {
+			start++
+		}
+		if span, in := cmdSpanAt(spans, start); in && (span.start != start || span.end != loc[1]) {
+			continue // Text the outer shell does not run (a quoted program path is run).
+		}
 		rest := command[loc[1]:]
 		if rest != "" && !strings.ContainsRune(" \t\r\n/'\"", rune(rest[0])) {
 			continue // cmdlet, cmdkey, ...: another program.
 		}
-		run := cmdRunSwitch.FindStringIndex(rest)
-		if run == nil {
-			continue
-		}
-		opening := byte(0)
-		if c := rest[run[0]]; c == '\'' || c == '"' {
-			opening = c
-		}
-		body := rest[run[1]:]
-		if c := rest[run[1]-1]; c == '\'' || c == '"' {
-			body = rest[run[1]-1:]
-		}
-		if opening != 0 {
-			// '/c BODY' inside an argument string (Start-Process).
-			if end := strings.IndexByte(body, opening); end >= 0 {
-				add(body[:end])
+		body, ok := cmdSwitchRunBody(rest)
+		if !ok {
+			// Start-Process cmd -ArgumentList '/c ...': the argument string
+			// of the same statement is the cmd command line.
+			statementEnd := cmdStatementEnd(command, spans, loc[1])
+			var args []string
+			for _, span := range spans {
+				if span.args && span.start >= loc[1] && span.start < statementEnd {
+					args = append(args, span.inner)
+				}
 			}
-			add(body)
+			if len(args) == 0 {
+				// -ArgumentList before the program word (-FilePath last).
+				head := command[:start]
+				if statementStart := strings.LastIndexAny(head, ";|\r\n"); statementStart >= 0 {
+					head = head[statementStart+1:]
+				}
+				offset := start - len(head)
+				for _, span := range spans {
+					if span.args && span.start >= offset && span.end <= start {
+						args = append(args, span.inner)
+					}
+				}
+			}
+			if len(args) == 0 && cmdStartProcessWord.MatchString(command[:start]) {
+				// Start-Process cmd '/c ...': the positional argument list.
+				after := loc[1] + len(rest) - len(strings.TrimLeft(rest, " \t"))
+				if span, in := cmdSpanAt(spans, after); in && span.start == after {
+					args = append(args, span.inner)
+				}
+			}
+			if len(args) == 0 {
+				continue
+			}
+			argBody, argOK := cmdSwitchRunBody(strings.Join(args, " "))
+			if argOK {
+				add(argBody)
+			}
 			continue
 		}
 		add(body)

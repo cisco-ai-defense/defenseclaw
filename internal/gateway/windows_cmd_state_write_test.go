@@ -116,6 +116,11 @@ func TestR105WindowsCMDSlashCStateWrite(t *testing.T) {
 		{`Start-Process -FilePath cmd.exe -ArgumentList "/c copy /y nul ` + state + `" -Wait`, true},
 		{`"C:\Windows\System32\cmd.exe" /c "type nul > ` + state + `"`, true},
 		{`Write-Output a; & cmd /c 'type nul > ` + state + `'`, true},
+		// An -ArgumentList array is joined with spaces (checker it9 RV9-2 X11).
+		{`Start-Process -FilePath cmd.exe -ArgumentList '/c','type nul > ` + state + `' -Wait`, true},
+		{`Start-Process cmd '/c type nul > ` + state + `'`, true},
+		{`powershell -Command "cmd /c 'type nul > ` + state + `'"`, true},
+		{`Write-Output "$(cmd /c type nul > ` + state + `)"`, true},
 		// Ordinary work stays allowed.
 		{`cmd /c "type nul > notes8.txt"`, false},
 		{`cmd /c copy /y nul empty8.txt`, false},
@@ -132,6 +137,15 @@ func TestR105WindowsCMDSlashCStateWrite(t *testing.T) {
 		{`cmd /c 'type nul > %USERPROFILE%\.defenseclawx\a.txt'`, false},
 		{`cmdkey /list`, false},
 		{`Write-Output 'cmd /c dir'`, false},
+		// A text that only mentions the cmd state write (checker it9 RV9-1).
+		{`Write-Output 'Tip: cmd /c type nul > ` + state + ` empties the config'`, false},
+		{`git commit -m 'block cmd //c "type nul > ` + state + `"'`, false},
+		{`git commit -m "fix: block cmd /c type nul > ` + state + `"`, false},
+		{"@'\nnotes: cmd /c type nul > " + state + "\n'@ | Set-Content notes.md", false},
+		{`gh issue comment 1 --body "repro: & cmd /c 'type nul > ` + state + `'"`, false},
+		{`Write-Output "Start-Process cmd -ArgumentList '/c type nul > ` + state + `'"`, false},
+		{"# cmd /c type nul > " + state + "\nGet-ChildItem", false},
+		{`cmd /c echo see cmd /c type nul docs`, false},
 	} {
 		for _, tool := range []string{"Bash", "shell_command", "PowerShell"} {
 			args, _ := json.Marshal(map[string]string{"command": tc.command})
