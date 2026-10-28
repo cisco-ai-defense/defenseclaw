@@ -153,6 +153,8 @@ if [ "${BASH_VERSINFO[0]:-0}" -ge 5 ]; then
 fi
 _DC_HOOK_STARTED_S="${SECONDS:-0}"
 _DC_GATEWAY_RESTART_WAITED=""
+# Set once a look of this call finds this account being installed (GAP-2443).
+_DC_INSTALL_WINDOW_SEEN=0
 # Set only by defenseclaw_await_gateway for this call; an inherited value can
 # never open a per-user outage (defenseclaw_per_user_outage_open).
 _DC_TRANSPORT_STATUS=""
@@ -1567,7 +1569,11 @@ defenseclaw_install_in_progress() {
       return
       ;;
   esac
-  defenseclaw_install_held
+  defenseclaw_install_held || return 1
+  # Remembered for the rest of this call: its answer names the install even
+  # when the installer has let go of its lock by the time the request
+  # timed out (GAP-2443).
+  _DC_INSTALL_WINDOW_SEEN=1
 }
 
 # While this account is being installed or upgraded, no failure may approve
@@ -1578,7 +1584,7 @@ defenseclaw_install_in_progress() {
 # install that starts while the call waits for the gateway closes that call
 # too (GAP-0894).
 defenseclaw_close_during_install() {
-  [ "${FAIL_MODE:-}" != "closed" ] || return 0
+  # Looked at in closed mode too, so the answer can name the install.
   if defenseclaw_install_in_progress; then
     FAIL_MODE=closed
   fi
@@ -2521,7 +2527,7 @@ defenseclaw_unreachable_next_step() {
   esac
   [ -z "${DEFENSECLAW_HOOK_SOCKET:-}" ] || return 0
   local data="${DEFENSECLAW_HOME:-${HOME}/.defenseclaw}"
-  if defenseclaw_install_lock_held "$data"; then
+  if [ "${_DC_INSTALL_WINDOW_SEEN:-0}" = 1 ] || defenseclaw_install_lock_held "$data"; then
     printf '%s' 'DefenseClaw is being installed or upgraded for this account and its gateway starts again when that is done; try again in a moment, or run the installer again if it has stopped (`defenseclaw-gateway status` shows its state)'
   elif [ -e "${data}/gateway.stopped" ]; then
     printf '%s' 'the gateway was stopped with `defenseclaw-gateway stop`; run `defenseclaw-gateway start` to resume protection (`defenseclaw-gateway status` shows its state)'
