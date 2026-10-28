@@ -14749,8 +14749,17 @@ function Invoke-DefenseClawTargetRuntimePreparation {
         [Parameter(Mandatory)][hashtable]$Layout,
         [Parameter(Mandatory)][string]$GatewayServiceName,
         [Parameter(Mandatory)][string]$GuardianServiceName,
-        [switch]$ValidationOnly
+        [switch]$ValidationOnly,
+        # Fresh Install only (no installed deployment): leave out a user whose
+        # profile folder stays busy instead of failing every user. On an
+        # Install over a live deployment, or a deferred Repair, that user may
+        # already be enrolled, and dropping them from targets.yaml would revoke
+        # protection they have.
+        [switch]$AllowSkipBusyProfiles
     )
+    if ($ValidationOnly -and $AllowSkipBusyProfiles) {
+        throw 'target runtime validation cannot skip busy profiles'
+    }
     $transactionDirectory = [IO.Path]::GetDirectoryName($SnapshotPath)
     $planPath = New-DefenseClawTargetRuntimeExchangeFile `
         -Path (Microsoft.PowerShell.Management\Join-Path `
@@ -14764,11 +14773,7 @@ function Invoke-DefenseClawTargetRuntimePreparation {
             'enterprise', 'windows', 'target-runtime', 'plan',
             '--manifest', [string]$Layout.ManifestPath,
             '--output', $planPath
-        ) + $(if ($ValidationOnly) { @() } else {
-                # Only a fresh Install creates roots, so only it may leave a
-                # busy profile out instead of failing every user.
-                @('--skip-busy-profiles')
-            })) `
+        ) + $(if ($AllowSkipBusyProfiles) { @('--skip-busy-profiles') } else { @() })) `
         -Capture `
         -AllowFailure
     if ([int]$planProbe.exit_code -ne 0) {
@@ -14781,8 +14786,8 @@ function Invoke-DefenseClawTargetRuntimePreparation {
             -Path $planPath `
             -TransactionDirectory $transactionDirectory) `
         -Layout $Layout
-    if ($ValidationOnly -and @(Get-DefenseClawTargetRuntimeSkippedProfiles -Plan $plan).Count -ne 0) {
-        throw 'Upgrade/Repair target runtime plan unexpectedly skipped a profile'
+    if (-not $AllowSkipBusyProfiles -and @(Get-DefenseClawTargetRuntimeSkippedProfiles -Plan $plan).Count -ne 0) {
+        throw 'target runtime plan skipped a profile outside a fresh Install'
     }
     Write-DefenseClawTargetRuntimeSkippedProfiles -Plan $plan -Layout $Layout
     if ($ValidationOnly) {
@@ -23800,7 +23805,11 @@ function Invoke-DefenseClawInstallLikeLifecycle {
             -Layout $Layout `
             -GatewayServiceName $GatewayServiceName `
             -GuardianServiceName $GuardianServiceName `
-            -ValidationOnly:($targetRuntimePreparationMode -ceq 'validate')
+            -ValidationOnly:($targetRuntimePreparationMode -ceq 'validate') `
+            -AllowSkipBusyProfiles:(
+                $Action -eq 'Install' -and -not $reconcileInstall -and
+                $targetRuntimePreparationMode -ceq 'prepare'
+            )
         $expectedGuardianManifestSHA256 = [string]$targetRuntimePlan.manifest_sha256
         if ($expectedGuardianManifestSHA256 -cnotmatch '^[0-9a-f]{64}$') {
             throw 'target runtime plan did not bind an exact manifest SHA-256'
