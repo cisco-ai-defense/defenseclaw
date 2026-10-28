@@ -52,6 +52,10 @@ func TestR105GAP2404HomeFindSinksAndNameDeletesOnManaged(t *testing.T) {
 		`find ~ -name "*.zip" -exec sh -c 'unzip -q -d "${1%.zip}" "$1"' _ {} + | tee ~/out.txt`,
 		`find ~ -name "*.zip" -exec sh -c 'unzip -q -d "${1%.zip}" "$1"' _ {} + | sort -o ~/.defenseclaw.zip`,
 		`find ~ -name "*.zip" -exec sh -c 'unzip -q -d "${1%.zip}" "$1"' _ {} + | sh`,
+		// Same-line staging through an abbreviated sort --output (pod check22).
+		`cd ~ && printf 'PK' | sort --o=.defenseclaw.zip && yes | find ~ -maxdepth 1 -name "*.zip" -exec sh -c 'unzip -q -d "${1%.zip}" "$1"' _ {} \;`,
+		`cd ~ && printf 'PK' | sort -u --ou=.defenseclaw.zip && yes | find ~ -maxdepth 1 -name "*.zip" -exec sh -c 'unzip -q -d "${1%.zip}" "$1"' _ {} + 2>&1 | head`,
+		`cd ~ && printf 'PK' | sort --outp=.DefenseClaw.ZIP && yes | find ~ -maxdepth 1 -iname "*.zip" -exec sh -c 'unzip -q -d "${1%.zip}" "$1"' _ {} \;`,
 	}
 	stagedAttack := []string{
 		`find ~ -name "*.zip" -exec sh -c 'unzip -q -d "${1%.zip}" "$1"' _ {} + 2>&1 | head`,
@@ -122,6 +126,12 @@ func TestR105GAP2404FindStripStdinFilterStaysOff(t *testing.T) {
 		"sort --output=out": false, "sort -T dir": false, "grep -f pats": false, "grep x file": false,
 		"uniq in out": false, "cat file": false, "tee out": false, "xargs rm": false, "sh": false,
 		"wc --files0-from=list": false, "env head": false,
+		"sort --o=out": false, "sort --outp=out": false, "sort -u --ou=out": false,
+		"sort --compress=sh": false, "sort --temporary=d": false, "sort --files0=list": false,
+		"grep --fil=pats x": false, "grep --regexp x file": false, "wc --files0=list": false,
+		"sort --numeric-sort --reverse": true, "sort --key=2 --unique": true, "sort --key 2": true,
+		"head --lines=5": true, "tail --lines 1": true, "wc --lines": true, "uniq --count": true,
+		"grep --regexp=x --ignore-case": true, "grep --regexp x": true, "cat --number": true,
 	} {
 		facts := r105AnalyzeBash(t, command)
 		got := len(facts.Commands) != 0

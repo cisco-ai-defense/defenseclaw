@@ -812,8 +812,9 @@ var findStripStdinFilters = map[string]struct{}{
 // a complete argv, no wrapper, no path fact and no word that names a file
 // it would read or write: only options (and, for grep, one pattern), so it
 // creates no file the find could hand on and answers no prompt from a file.
-// sort -o/-T/--compress-program and a uniq output operand write; a word
-// with a path separator, a leading ~ or $, or a file option is refused.
+// sort -o/-T and a uniq output operand write; a long option is accepted
+// only when spelled in full from findStripFilterLongOptions; a word with a
+// path separator, a leading ~ or $, or a file option is refused.
 func findStripStdinFilterStaysOff(facts actionfacts.Facts, command actionfacts.CommandFact) bool {
 	program := strings.ToLower(command.Program)
 	if _, filter := findStripStdinFilters[program]; !filter || len(command.Wrappers) != 0 ||
@@ -837,10 +838,22 @@ func findStripStdinFilterStaysOff(facts actionfacts.Facts, command actionfacts.C
 		case options && word == "--":
 			options = false
 		case options && strings.HasPrefix(word, "--"):
-			name, _, _ := strings.Cut(strings.TrimPrefix(word, "--"), "=")
-			switch name {
-			case "output", "temporary-directory", "compress-program", "files0-from", "file", "random-source", "exclude-from":
+			// getopt_long takes any unambiguous prefix of a long option
+			// (`sort --o=NAME` is --output, pod check22), so only the
+			// exact read-only names below stay off.
+			name, _, attached := strings.Cut(strings.TrimPrefix(word, "--"), "=")
+			takesValue, readOnly := findStripFilterLongOptions[program][name]
+			if !readOnly {
 				return false
+			}
+			if takesValue && !attached {
+				if index+1 >= len(command.Argv) || strings.ContainsAny(command.Argv[index+1], "/\\$`~") {
+					return false
+				}
+				index++
+			}
+			if program == "grep" && name == "regexp" {
+				patternSeen = true
 			}
 		case options && len(word) > 1 && word[0] == '-':
 			letters := word[1:]
@@ -864,6 +877,43 @@ func findStripStdinFilterStaysOff(facts actionfacts.Facts, command actionfacts.C
 		}
 	}
 	return true
+}
+
+// findStripFilterLongOptions are the long options of each
+// findStripStdinFilters program that read standard input and write only
+// standard output, spelled in full; true marks one that takes a value
+// (`--key 2`, `--lines=5`). Every other long option, an abbreviation
+// included, names or may name a file (--output, --temporary-directory,
+// --compress-program, --files0-from, --file, --random-source).
+var findStripFilterLongOptions = map[string]map[string]bool{
+	"head": {"lines": true, "bytes": true, "quiet": false, "silent": false, "verbose": false,
+		"zero-terminated": false, "help": false, "version": false},
+	"tail": {"lines": true, "bytes": true, "quiet": false, "silent": false, "verbose": false,
+		"zero-terminated": false, "follow": false, "retry": false, "sleep-interval": true,
+		"max-unchanged-stats": true, "help": false, "version": false},
+	"wc": {"lines": false, "words": false, "bytes": false, "chars": false, "max-line-length": false,
+		"total": true, "help": false, "version": false},
+	"sort": {"numeric-sort": false, "general-numeric-sort": false, "human-numeric-sort": false,
+		"month-sort": false, "version-sort": false, "random-sort": false, "reverse": false,
+		"unique": false, "stable": false, "ignore-case": false, "ignore-leading-blanks": false,
+		"dictionary-order": false, "ignore-nonprinting": false, "zero-terminated": false,
+		"merge": false, "check": false, "debug": false, "key": true, "field-separator": true,
+		"sort": true, "buffer-size": true, "parallel": true, "batch-size": true,
+		"help": false, "version": false},
+	"uniq": {"count": false, "repeated": false, "all-repeated": false, "group": false,
+		"unique": false, "ignore-case": false, "skip-fields": true, "skip-chars": true,
+		"check-chars": true, "zero-terminated": false, "help": false, "version": false},
+	"grep": {"count": false, "ignore-case": false, "no-ignore-case": false, "invert-match": false,
+		"line-number": false, "quiet": false, "silent": false, "extended-regexp": false,
+		"fixed-strings": false, "basic-regexp": false, "perl-regexp": false, "word-regexp": false,
+		"line-regexp": false, "max-count": true, "only-matching": false, "no-messages": false,
+		"color": false, "colour": false, "regexp": true, "after-context": true,
+		"before-context": true, "context": true, "text": false, "null-data": false,
+		"byte-offset": false, "initial-tab": false, "label": true, "line-buffered": false,
+		"no-filename": false, "with-filename": false, "help": false, "version": false},
+	"cat": {"number": false, "number-nonblank": false, "show-all": false, "show-ends": false,
+		"show-tabs": false, "show-nonprinting": false, "squeeze-blank": false,
+		"help": false, "version": false},
 }
 
 // findStripFilterOptionTakesValue reports a short option cluster of a
