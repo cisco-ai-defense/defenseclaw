@@ -7,6 +7,7 @@ package connector
 
 import (
 	"bytes"
+	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -254,8 +255,8 @@ func runInstallInFlightShellHook(t *testing.T, tc installInFlightShellCase, data
 func TestPerUserShellBodyOverTheTransportCapGetsTheGatewayAnswer(t *testing.T) {
 	content := strings.Repeat("echo line benign output for the heredoc test padding\n", 19000)
 	for _, item := range []struct{ name, payload string }{
-		{"write", `{"hook_event_name":"PreToolUse","tool_name":"Write","tool_input":{"file_path":"/tmp/big.js","content":` + strconvQuote(content) + `}}`},
-		{"bash", `{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":` + strconvQuote("cat > /tmp/big.sh <<'EOF'\n"+content+"EOF\n") + `}}`},
+		{"write", `{"hook_event_name":"PreToolUse","tool_name":"Write","tool_input":{"file_path":"/tmp/big.js","content":` + jsonStringLiteral(content) + `}}`},
+		{"bash", `{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":` + jsonStringLiteral("cat > /tmp/big.sh <<'EOF'\n"+content+"EOF\n") + `}}`},
 	} {
 		t.Run(item.name, func(t *testing.T) {
 			if n := len(item.payload); n <= 900<<10 || n >= 1<<20 {
@@ -280,4 +281,10 @@ func TestPerUserShellBodyOverTheTransportCapGetsTheGatewayAnswer(t *testing.T) {
 			}
 		})
 	}
+}
+
+// jsonStringLiteral is s as a quoted JSON string.
+func jsonStringLiteral(s string) string {
+	data, _ := json.Marshal(s)
+	return string(data)
 }
