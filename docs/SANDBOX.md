@@ -1779,16 +1779,14 @@ modes and owners are set in the tar headers) and streams it to
    integrity, and its native executable must match a pinned sha256 per
    architecture. Binaries move to root-owned
    `/opt/defenseclaw-harness/<harness>`, so a native installer's copy under
-   `$HOME` never becomes the pinned binary. The OpenCode image also records
-   `@opencode-ai/plugin` at the pinned version as installed in
-   `/sandbox/.config/opencode` (`package.json`, a `package-lock.json` whose
-   root package lists it, and an empty `node_modules`): OpenCode 1.18.31
-   installs that package, about 29 packages and 20 MiB from
-   registry.npmjs.org, into each writable config directory at every start
-   unless the lock lists it (it compares names only), and nothing in the
-   sandbox imports it, since the launcher refuses every other plugin and
-   custom tool. Measured with the pinned binary: the record stops the
-   registry request.
+   `$HOME` never becomes the pinned binary. OpenCode uses `@opencode/cli@2.1.4`;
+   its launcher points to the exact platform binary whose digest was checked
+   (the Linux x64 baseline build avoids requiring AVX2). The V1 package is
+   removed, and the old fabricated `@opencode-ai/plugin` startup record is
+   no longer installed. Both interactive and headless V2 sessions use
+   `--standalone` so their server and plugin registrations belong to that run.
+   The launcher refuses `--server` because an external server does not use
+   this sandbox's managed plugin.
 3. Copies DefenseClaw's files root-owned and read-only under
    `/usr/local/lib/defenseclaw` (hooks in `hooks/`, launchers in `bin/`),
    the harness's managed configuration, and the user-owned first-run files
@@ -2355,7 +2353,7 @@ images stay unverified, so they are never selected for a sandbox.
 | Hermes Agent | 0.19.0 (PyPI, root-owned uv tool on a private CPython) | Managed layer `/etc/hermes/config.yaml` and `/etc/hermes/.env`; the launcher refuses a `.env`, plugin or `secrets` section in the Hermes home that would switch the hooks off, move the managed layer or load code beside them | user | `--yolo` | OpenAI API key, Anthropic API key, Bedrock Mantle (default model `openai.gpt-oss-20b`; the curated profiles carried no real model in a sandbox) | verified (mock model) |
 | Antigravity CLI (agy) | 1.2.12 (release tarball, SHA-512 pinned) | User-owned `~/.gemini/config/hooks.json`, restored from a root-owned copy on every start; a non-file hooks path is refused | user | `--dangerously-skip-permissions` | Gemini API key (unverified with a real key) | verified (mock model) |
 
-OpenCode and Copilot CLI ran end to end in OpenShell 0.1.1 sandboxes
+Historical OpenCode V1 (now unsupported) and Copilot CLI ran end to end in OpenShell 0.1.1 sandboxes
 (`TestLiveSandboxHookOnlyHarness` in `internal/gateway`, on branch
 `test/openshell-live`), with the project
 bind-mounted, the DefenseClaw hook ingress holding a real binding, and the
@@ -2373,13 +2371,12 @@ call, a read of `~/.ssh/id_rsa`. A tool call's plain `curl` (no `--proxy`)
 reached example.org through the DefenseClaw proxy the launcher exported, the
 proxy blocked webhook.site, and a connection that bypassed the proxy was
 refused by OpenShell. Besides the model endpoint, OpenCode contacted
-`models.opencode.ai` (its model catalog). The OpenCode image now records
-OpenCode's plugin package as installed in `~/.config/opencode` (see
-[overlay images](#overlay-images)), so a new sandbox no longer downloads it
-from `registry.npmjs.org` at start; a writable config directory the image
-does not record, such as a project's own `.opencode`, still gets OpenCode's
-background install, through the DefenseClaw proxy. Copilot CLI in offline
-bring-your-own-provider mode contacted nothing else.
+`models.opencode.ai` (its model catalog). That V1 image used a fabricated
+plugin-package installation record to suppress a startup download; the V2
+image removes that workaround. These V1 results do not certify V2. The V2
+OpenShell image remains unverified until its own ingress, block and egress
+run succeeds. Copilot CLI in offline bring-your-own-provider mode contacted
+nothing else.
 
 Kiro CLI ran the same checks end to end in an OpenShell 0.1.1 sandbox
 through its scripted-response mode, which replays the E2E scenarios in place
@@ -2427,10 +2424,12 @@ turned off in the image.
 
 ### Harness facts
 
-These were measured on the pinned releases inside the community base image
-(Linux arm64) in September 2026.
+The V1 OpenCode observations below are historical evidence from the community
+base image (Linux arm64) in September 2026. V1 is no longer supported; its
+plugin API, flags and certification do not define the V2 contract. Other
+harness observations name the release that was measured.
 
-- **OpenCode 1.18.31.** The managed config directory is `/etc/opencode` on
+- **Historical OpenCode V1 (1.18.31).** The managed config directory is `/etc/opencode` on
   Linux. OpenCode reads it after every user, project and
   `OPENCODE_CONFIG_CONTENT` layer and merges plugin lists across layers, so a
   plugin registered there with a `file://` URL loads last, and
@@ -2443,7 +2442,7 @@ These were measured on the pinned releases inside the community base image
   but not the nested session's tools. `opencode run --auto` is the headless
   skip-permissions mode. The base image ships OpenCode 1.2.18, which is
   outside every hook contract. The image removes it.
-- **OpenCode 1.18.31 can lose a shell command's output.** Its bash tool
+- **Historical V1 output-loss observation (1.18.31).** Its bash tool
   reads the command's output in a fiber forked into a scope that closes as
   soon as the exit code arrives, which interrupts the reader: output it had
   not read yet is dropped, and the tool reports "(no output)" to the TUI and
@@ -2453,8 +2452,11 @@ These were measured on the pinned releases inside the community base image
   same first call in an earlier round, returned the output. It is OpenCode's
   race, not the supervisor's or the plugin's (which only reads the result in
   `tool.execute.after`).
-- **OpenCode plugins share the process, so the tier is user.** OpenCode
-  imports every plugin into the process the DefenseClaw plugin runs in: the
+- **OpenCode plugins share the process, so the tier is user.** The exploit
+  observations in this paragraph were measured against V1. The V2 launcher
+  conservatively retains these refusals and checks native `plugins` and
+  provider `package` fields too; a live V2 sandbox run remains unverified.
+  OpenCode imports every plugin into the process the DefenseClaw plugin runs in: the
   `{plugin,plugins}/*.{js,ts}` files and `{tool,tools}` custom tools of every
   config directory (`~/.config/opencode`, each `.opencode` from the working
   directory up to the worktree root, `~/.opencode`, `OPENCODE_CONFIG_DIR`),

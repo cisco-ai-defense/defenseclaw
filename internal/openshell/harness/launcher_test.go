@@ -303,6 +303,8 @@ func TestLaunchersRefuseUnsafeArguments(t *testing.T) {
 		{OpenCode, []argCase{
 			{[]string{"--pure"}, "DefenseClaw policy plugin"}, {[]string{"run", "--pure", "hi"}, "DefenseClaw policy plugin"},
 			{[]string{"--pure=true"}, "DefenseClaw policy plugin"},
+			{[]string{"--server", "http://127.0.0.1:4096"}, "outside this sandbox"},
+			{[]string{"run", "--server=http://127.0.0.1:4096", "hi"}, "outside this sandbox"},
 		}},
 		{Amp, []argCase{
 			{[]string{"--settings-file", "/tmp/s.json"}, "--settings-file is not supported"},

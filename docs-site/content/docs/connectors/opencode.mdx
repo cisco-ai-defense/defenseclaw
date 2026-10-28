@@ -107,7 +107,7 @@ Per-user setup and guardrail commands refuse on a standalone enterprise Linux or
 
 ## In an OpenShell sandbox
 
-The image pin is OpenCode V2.1.4 from the official `@opencode/cli` package. Package integrity and the native binary digest are checked; Linux x64 uses the baseline binary rather than adding an AVX2 requirement. The V1 base-image package and its startup SDK-record workaround are removed. Headless runs use `run --standalone`.
+The image pin is OpenCode V2.1.4 from the official `@opencode/cli` package. Package integrity and the native binary digest are checked; Linux x64 uses the baseline binary rather than adding an AVX2 requirement. The V1 base-image package and its startup SDK-record workaround are removed. Interactive runs use `--standalone`; headless runs use `run --standalone`. The launcher refuses `--server` because an external server does not use this sandbox's managed plugin.
 
 The previous V1 live sandbox certification does not certify V2. The V2 image remains unverified and unselectable until a fresh OpenShell ingress, block and egress verification succeeds. Existing V1 image records no longer resolve to a supported OpenCode contract.
 

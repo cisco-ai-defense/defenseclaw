@@ -98,8 +98,11 @@ var OpenCode = register(&Spec{
 	launchArgv: func(opts LaunchOptions, cp CredentialProfile) ([]string, error) {
 		argv := []string{OpenCodeLauncherPath}
 		if opts.Mode == Headless {
-			argv = append(argv, "run", "--standalone")
+			argv = append(argv, "run")
 		}
+		// V2 otherwise connects to a persistent background server. Every
+		// sandbox session must own its server and its plugin registrations.
+		argv = append(argv, "--standalone")
 		if opts.Yolo {
 			// Auto-approve every permission not explicitly denied; the
 			// DefenseClaw plugin still gates every tool call.
@@ -223,6 +226,10 @@ set -u
   case "$arg" in
     --pure|--pure=*)
       echo "defenseclaw: opencode --pure runs without the DefenseClaw policy plugin; refusing" >&2
+      exit ` + strconv.Itoa(LauncherRefusedExitCode) + `
+      ;;
+    --server|--server=*)
+      echo "defenseclaw: opencode --server would run tools on a server outside this sandbox's managed plugin; refusing" >&2
       exit ` + strconv.Itoa(LauncherRefusedExitCode) + `
       ;;
   esac

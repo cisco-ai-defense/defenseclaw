@@ -26,7 +26,7 @@ func TestEvaluateDeterministicToolResultUsesClosedConnectorProofs(t *testing.T) 
 	}{
 		{"claude-acquisition", "claudecode", "PreToolUse", "PostToolUse", "shell", json.RawMessage(`{"command":"impacket-GetUserSPNs -request EXAMPLE.TEST/user:secret"}`)},
 		{"claude-file-read", "claudecode", "PreToolUse", "PostToolUse", "shell", json.RawMessage(`{"command":"cat /tmp/kerberoast.txt"}`)},
-		{"opencode", "opencode", "tool.execute.before", "tool.execute.after", "bash", json.RawMessage(`{"command":"impacket-GetUserSPNs -request EXAMPLE.TEST/user:secret"}`)},
+		{"opencode", "opencode", "tool.execute.before", "tool.execute.after", "shell", json.RawMessage(`{"command":"impacket-GetUserSPNs -request EXAMPLE.TEST/user:secret"}`)},
 		{"amp", "amp", "tool.call", "tool.result", "Bash", json.RawMessage(`{"command":"impacket-GetUserSPNs -request EXAMPLE.TEST/user:secret"}`)},
 		{"codex", "codex", "PreToolUse", "PostToolUse", "mcp__directory__kerberoast", json.RawMessage(`{"domain":"example.test","target_user":"svc"}`)},
 	} {

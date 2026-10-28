@@ -14,6 +14,7 @@ import (
 	"os/user"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -168,8 +169,12 @@ func TestInAgentPluginsProveTheGatewayListener(t *testing.T) {
 			}
 			mu.Lock()
 			defer mu.Unlock()
-			want := tc.hookPath + " user=" + uid + " connector=" + tc.connectorName + " marker=true"
-			if verdict := strings.TrimSpace(string(out)); verdict != "allow" || len(served) != 1 || served[0] != want {
+			base := tc.hookPath + " user=" + uid + " connector=" + tc.connectorName
+			want := []string{base + " marker=true"}
+			if tc.connectorName == "opencode" {
+				want = append([]string{base + " marker=false"}, want...) // V2 setup heartbeat.
+			}
+			if verdict := strings.TrimSpace(string(out)); verdict != "allow" || !slices.Equal(served, want) {
 				t.Fatalf("verdict %q, served %q; want allow and %q", verdict, served, want)
 			}
 		})
