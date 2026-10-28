@@ -2,6 +2,7 @@ package gateway
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -9,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
+	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
 )
 
 // GAP-2378 (checker p18 RV18-1): bash reads ~<login> from the password
@@ -139,5 +141,65 @@ func TestTrustedActiveLoginsFollowTheTrustedIdentity(t *testing.T) {
 	}
 	if got := trustedActiveLogins(context.Background(), home); len(got) != 1 || got[0] != "dcw-std1" {
 		t.Errorf("same-host logins = %q", got)
+	}
+}
+
+// GAP-2378 managed ProtectHome leg: the gateway cannot open the home, so
+// the ~<login> twin's targets come from the hook client's map. A state
+// write in that spelling blocks and a project copy stays allowed (the twin
+// had no client target and read as persistence.ssh_authorized_keys_command
+// for Codex on managed RHEL).
+func TestActiveUserLoginTildeBehindProtectHomeUsesClientTargets(t *testing.T) {
+	if runtime.GOOS == "windows" || os.Geteuid() == 0 {
+		t.Skip("unprivileged POSIX gateway walk")
+	}
+	homes := filepath.Join(t.TempDir(), "homes")
+	home := filepath.Join(homes, "eng1@dclab.test")
+	cwd := filepath.Join(home, "project")
+	for _, dir := range []string{filepath.Join(home, ".defenseclaw", "hooks"), cwd} {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, name := range []string{filepath.Join(home, ".defenseclaw", "config.yaml"), filepath.Join(cwd, "a.txt")} {
+		if err := os.WriteFile(name, []byte("x\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Setenv("HOME", home)
+	t.Cleanup(func() { _ = os.Chmod(homes, 0o700) })
+	for _, connectorName := range []string{"claudecode", "codex"} {
+		installDefaultProfileConnector(t, connectorName)
+		for command, want := range map[string]bool{
+			"echo x > ~eng1@dclab.test/.defenseclaw/hooks/f":           true,
+			"dd if=a.txt of=~ENG1@DCLAB.TEST/.defenseclaw/config.yaml": true,
+			"cp a.txt ~eng1@dclab.test/project/b.txt":                  false,
+			"echo notes > ~eng1@dclab.test/project/notes.txt":          false,
+		} {
+			payload, err := json.Marshal(map[string]any{"tool_name": "Bash", "cwd": cwd,
+				"tool_input": map[string]string{"command": command}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			targets, ok := hookpaths.Decode(hookpaths.Resolve(payload))
+			if !ok {
+				t.Fatal("client proof did not decode")
+			}
+			if err := os.Chmod(homes, 0); err != nil {
+				t.Fatal(err)
+			}
+			findings := dispatchTrustedAction(t.Context(), trustedActionRequest{
+				Input: actionfacts.Input{Tool: "Bash", Command: command, CWD: cwd, ActiveHome: home,
+					DialectHint: actionfacts.DialectPOSIX},
+				Connector: connectorName, EnforcementCapable: true,
+				ProtectedHomeHook: true, ResolvedWriteTargets: targets,
+			})
+			if err := os.Chmod(homes, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if blocked := buildVerdict(findings, "tool_call").Action == "block"; blocked != want {
+				t.Errorf("%s %q: blocked=%v, want %v (%v)", connectorName, command, blocked, want, FindingStrings(findings))
+			}
+		}
 	}
 }
