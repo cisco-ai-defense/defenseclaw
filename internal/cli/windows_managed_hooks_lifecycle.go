@@ -1078,7 +1078,7 @@ func validateLegacyWindowsManagedHooksGuardianActivation(
 	ctx windowsManagedHooksLifecycleContext,
 	manifestSHA256 string,
 ) error {
-	_, err := validateWindowsManagedHooksGuardianActivation(
+	_, _, err := validateWindowsManagedHooksGuardianActivation(
 		activation,
 		authorization,
 		state,
@@ -1094,16 +1094,18 @@ func validateWindowsManagedHooksGuardianActivation(
 	state enterpriseHookGuardianState,
 	ctx windowsManagedHooksLifecycleContext,
 	manifestSHA256 string,
-) ([]windowsManagedHooksTeardownTarget, error) {
+) (pending, failed []windowsManagedHooksTeardownTarget, err error) {
 	_, activationTimeErr := time.Parse(time.RFC3339Nano, activation.UpdatedAt)
 	targetsByKey := make(map[string]windowsManagedHooksTeardownTarget, len(ctx.targets))
 	expected := make([]enterpriseHookReconcileRow, 0, len(ctx.targets))
 	active := make([]enterpriseHookReconcileRow, 0, len(ctx.targets))
 	pendingTargets := make([]windowsManagedHooksTeardownTarget, 0, len(ctx.targets))
+	failedTargets := make([]windowsManagedHooksTeardownTarget, 0, len(ctx.targets))
+	failedRows := make([]enterpriseHookReconcileRow, 0, len(ctx.targets))
 	for _, target := range ctx.targets {
 		key := strings.ToLower(target.Connector) + "\x00" + strings.ToUpper(target.SID)
 		if _, exists := targetsByKey[key]; exists {
-			return nil, errors.New("protected teardown manifest contains a duplicate target")
+			return nil, nil, errors.New("protected teardown manifest contains a duplicate target")
 		}
 		targetsByKey[key] = target
 		expected = append(expected, enterpriseHookReconcileRow{
@@ -1117,27 +1119,42 @@ func validateWindowsManagedHooksGuardianActivation(
 			strings.ToUpper(strings.TrimSpace(row.SID))
 		target, ok := targetsByKey[key]
 		if !ok {
-			return nil, errors.New("protected Guardian state contains a target outside the deployment manifest")
+			return nil, nil, errors.New("protected Guardian state contains a target outside the deployment manifest")
 		}
 		if _, duplicate := seen[key]; duplicate {
-			return nil, errors.New("protected Guardian state contains a duplicate target")
+			return nil, nil, errors.New("protected Guardian state contains a duplicate target")
 		}
 		seen[key] = struct{}{}
-		if row.OK == row.Pending {
-			return nil, errors.New("protected Guardian state contains an ambiguous target disposition")
+		// Three dispositions are valid: active (OK), pending (deferred, no
+		// evidence) and failed (neither, with the reconcile error recorded).
+		// A row marked both, or a non-OK row with no error, is ambiguous.
+		failedRow := !row.OK && !row.Pending
+		if row.OK && row.Pending || failedRow && strings.TrimSpace(row.Error) == "" {
+			return nil, nil, errors.New("protected Guardian state contains an ambiguous target disposition")
 		}
 		if home := strings.TrimSpace(row.UserHome); home != "" &&
 			!sameWindowsEnterprisePathCLI(home, filepath.Dir(target.DataDir)) {
-			return nil, errors.New("protected Guardian state target home does not match the deployment manifest")
+			return nil, nil, errors.New("protected Guardian state target home does not match the deployment manifest")
 		}
 		if row.Pending {
 			if !target.Deferred {
-				return nil, errors.New("protected Guardian state defers a target not authorized for deferred enrollment")
+				return nil, nil, errors.New("protected Guardian state defers a target not authorized for deferred enrollment")
 			}
 			if row.Result != nil || strings.TrimSpace(row.Error) != "" {
-				return nil, errors.New("protected Guardian pending target contains contradictory runtime evidence")
+				return nil, nil, errors.New("protected Guardian pending target contains contradictory runtime evidence")
 			}
 			pendingTargets = append(pendingTargets, target)
+			continue
+		}
+		if failedRow {
+			// A failed target may still have hooks wired from an earlier
+			// successful reconcile, so teardown treats it as possibly wired.
+			failedTargets = append(failedTargets, target)
+			failedRows = append(failedRows, enterpriseHookReconcileRow{
+				SID:       target.SID,
+				Connector: target.Connector,
+				OK:        true,
+			})
 			continue
 		}
 		active = append(active, enterpriseHookReconcileRow{
@@ -1151,40 +1168,51 @@ func validateWindowsManagedHooksGuardianActivation(
 		targetsByKey,
 		"activation",
 	); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if err := validateWindowsManagedHooksGuardianProtectedRows(
 		authorization.ProtectedTargets,
 		targetsByKey,
 		"authorization",
 	); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	activationIssues := compareEnterpriseHookProtectedTargetSets(
+	// writeEnterpriseHookGuardianState rewrites all three records on every
+	// reconcile, failures included, with the same counts and timestamp, and
+	// OK=false whenever a target failed. Its ProtectedTargets is every active
+	// target plus each failed target that was protected before (the prior
+	// successful row is kept, see mergeProtectedEnterpriseHookTargets). So
+	// the protected set must cover the active set, may also hold failed
+	// targets, and nothing else.
+	activationIssues := compareEnterpriseHookProtectedTargetCoverage(
 		active,
+		failedRows,
 		activation.ProtectedTargets,
 		"activation",
 	)
-	authorizationIssues := compareEnterpriseHookProtectedTargetSets(
+	authorizationIssues := compareEnterpriseHookProtectedTargetCoverage(
 		active,
+		failedRows,
 		authorization.ProtectedTargets,
 		"authorization",
 	)
 	stateIssues := compareEnterpriseHookProtectedTargetSets(expected, state.Results, "guardian state")
+	healthy := len(failedTargets) == 0
+	maxProtected := len(active) + len(failedTargets)
 	if activation.Version != enterpriseHookGuardianActivationVersion ||
 		!validEnterpriseHookHex(activation.ReconcileID, 16) ||
 		authorization.Version != 1 || state.Version != 1 || activationTimeErr != nil ||
-		!activation.OK || activation.FailureCount != 0 ||
+		activation.OK != healthy || activation.FailureCount != len(failedTargets) ||
 		activation.SuccessCount != len(active) ||
 		activation.PendingCount != len(pendingTargets) ||
 		activation.TargetCount != len(ctx.targets) ||
-		len(activation.ProtectedTargets) != len(active) ||
-		!authorization.OK || authorization.FailureCount != 0 ||
+		len(activation.ProtectedTargets) < len(active) || len(activation.ProtectedTargets) > maxProtected ||
+		authorization.OK != healthy || authorization.FailureCount != len(failedTargets) ||
 		authorization.SuccessCount != len(active) ||
 		authorization.PendingCount != len(pendingTargets) ||
 		authorization.TargetCount != len(ctx.targets) ||
-		len(authorization.ProtectedTargets) != len(active) ||
-		!state.OK || state.FailureCount != 0 ||
+		len(authorization.ProtectedTargets) < len(active) || len(authorization.ProtectedTargets) > maxProtected ||
+		state.OK != healthy || state.FailureCount != len(failedTargets) ||
 		state.SuccessCount != len(active) || state.PendingCount != len(pendingTargets) ||
 		state.TargetCount != len(ctx.targets) ||
 		len(state.Results) != len(ctx.targets) ||
@@ -1195,17 +1223,46 @@ func validateWindowsManagedHooksGuardianActivation(
 		activation.ManifestSHA256 != manifestSHA256 ||
 		len(activationIssues) != 0 || len(authorizationIssues) != 0 ||
 		len(stateIssues) != 0 {
-		return nil, errors.New(
+		return nil, nil, errors.New(
 			"protected Guardian activation does not exactly bind the legacy deployment manifest and authorization",
 		)
 	}
-	sort.Slice(pendingTargets, func(i, j int) bool {
-		if pendingTargets[i].Connector == pendingTargets[j].Connector {
-			return pendingTargets[i].SID < pendingTargets[j].SID
+	sortWindowsManagedHooksTeardownTargets(pendingTargets)
+	sortWindowsManagedHooksTeardownTargets(failedTargets)
+	return pendingTargets, failedTargets, nil
+}
+
+func sortWindowsManagedHooksTeardownTargets(targets []windowsManagedHooksTeardownTarget) {
+	sort.Slice(targets, func(i, j int) bool {
+		if targets[i].Connector == targets[j].Connector {
+			return targets[i].SID < targets[j].SID
 		}
-		return pendingTargets[i].Connector < pendingTargets[j].Connector
+		return targets[i].Connector < targets[j].Connector
 	})
-	return pendingTargets, nil
+}
+
+// compareEnterpriseHookProtectedTargetCoverage checks a protected target set
+// that must contain every row in required and may contain rows in optional,
+// and nothing else.
+func compareEnterpriseHookProtectedTargetCoverage(
+	required, optional, actual []enterpriseHookReconcileRow,
+	record string,
+) []string {
+	if len(optional) == 0 {
+		return compareEnterpriseHookProtectedTargetSets(required, actual, record)
+	}
+	optionalKeys := make(map[string]struct{}, len(optional))
+	for _, row := range optional {
+		optionalKeys[enterpriseHookProtectedTargetKey(row)] = struct{}{}
+	}
+	present := make([]enterpriseHookReconcileRow, 0, len(required)+len(optional))
+	present = append(present, required...)
+	for _, row := range actual {
+		if _, ok := optionalKeys[enterpriseHookProtectedTargetKey(row)]; ok {
+			present = append(present, row)
+		}
+	}
+	return compareEnterpriseHookProtectedTargetSets(present, actual, record)
 }
 
 func validateWindowsManagedHooksGuardianProtectedRows(
@@ -1236,26 +1293,29 @@ func validateWindowsManagedHooksGuardianProtectedRows(
 	return nil
 }
 
-func windowsManagedHooksPendingTargetsFromGuardian(
+// windowsManagedHooksTargetsFromGuardian returns the deferred (pending) and
+// failed targets of the last authenticated Guardian reconcile. Teardown treats
+// a pending target as never wired and a failed one as possibly wired.
+func windowsManagedHooksTargetsFromGuardian(
 	runtimePath string,
 	manifestPath string,
 	manifestSHA256 string,
 	targets []windowsManagedHooksTeardownTarget,
-) ([]windowsManagedHooksTeardownTarget, error) {
+) (pending, failed []windowsManagedHooksTeardownTarget, err error) {
 	activation, activationExists, err := loadEnterpriseHookGuardianActivation(runtimePath)
 	if err != nil {
-		return nil, fmt.Errorf("load protected Guardian activation for teardown: %w", err)
+		return nil, nil, fmt.Errorf("load protected Guardian activation for teardown: %w", err)
 	}
 	authorization, authorizationExists, err := loadEnterpriseHookGuardianAuthorization(runtimePath)
 	if err != nil {
-		return nil, fmt.Errorf("load protected Guardian authorization for teardown: %w", err)
+		return nil, nil, fmt.Errorf("load protected Guardian authorization for teardown: %w", err)
 	}
 	state, stateExists, err := loadEnterpriseHookGuardianState(runtimePath)
 	if err != nil {
-		return nil, fmt.Errorf("load protected Guardian state for teardown: %w", err)
+		return nil, nil, fmt.Errorf("load protected Guardian state for teardown: %w", err)
 	}
 	if !activationExists || !authorizationExists || !stateExists {
-		return nil, errors.New("activated deployment is missing its protected Guardian activation evidence")
+		return nil, nil, errors.New("activated deployment is missing its protected Guardian activation evidence")
 	}
 	return validateWindowsManagedHooksGuardianActivation(
 		activation,

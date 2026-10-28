@@ -10990,7 +10990,8 @@ function Start-DefenseClawTransactionServices {
         [void](Wait-DefenseClawFreshGuardianReconcile `
             -Layout $Layout `
             -GatewayServiceName $GatewayServiceName `
-            -GuardianServiceName $GuardianServiceName)
+            -GuardianServiceName $GuardianServiceName `
+            -AllowFailedTargets)
     }
     if ([bool]$gateway.running) {
         Set-DefenseClawServiceStartMode `
@@ -12867,6 +12868,7 @@ function Assert-DefenseClawManagedHooksTeardownSchema6Journal {
         'gateway_service_name',
         'targets',
         'pending_targets',
+        'failed_targets',
         'claude_target_sids',
         'claude',
         'codex_policy_active',
@@ -13033,6 +13035,13 @@ function Assert-DefenseClawManagedHooksTeardownSchema6Journal {
         -PropertyName 'pending_targets' `
         -Label 'schema-6 managed-hook teardown journal' `
         -Optional
+    # Targets a degraded Guardian reported as failed. Teardown treats them as
+    # possibly wired, so they still get the full cleanup.
+    $failedArray = Get-DefenseClawManagedHooksTeardownJsonArray `
+        -Object $Journal `
+        -PropertyName 'failed_targets' `
+        -Label 'schema-6 managed-hook teardown journal' `
+        -Optional
     if ($targetArray.count -ne [Convert]::ToInt64(
             $activation.target_count
         )) {
@@ -13118,6 +13127,50 @@ function Assert-DefenseClawManagedHooksTeardownSchema6Journal {
     if ([string]$Journal.activation_state -cne 'activated' -and
         $pendingArray.count -ne 0) {
         throw 'schema-6 never-activated journal contains pending target evidence'
+    }
+
+    $failedTargetsByKey = @{}
+    $previousFailed = $null
+    foreach ($failed in @($failedArray.values)) {
+        $validated = Assert-DefenseClawManagedHooksTeardownSchema6Target `
+            -Target $failed
+        if ($null -ne $previousFailed) {
+            $connectorOrder = [string]::CompareOrdinal(
+                [string]$previousFailed.connector,
+                [string]$validated.connector
+            )
+            $sidOrder = [string]::CompareOrdinal(
+                [string]$previousFailed.sid,
+                [string]$validated.sid
+            )
+            if ($connectorOrder -gt 0 -or
+                ($connectorOrder -eq 0 -and $sidOrder -ge 0)) {
+                throw 'schema-6 failed teardown targets are not in canonical order'
+            }
+        }
+        $key = (
+            $validated.connector + [char]0 +
+            $validated.sid.ToUpperInvariant()
+        )
+        if (-not $targetsByKey.ContainsKey($key) -or
+            $pendingTargetsByKey.ContainsKey($key) -or
+            $failedTargetsByKey.ContainsKey($key)) {
+            throw 'schema-6 managed-hook teardown journal has an invalid failed target binding'
+        }
+        $manifestTarget = $targetsByKey[$key]
+        if ($manifestTarget.connector -cne $validated.connector -or
+            $manifestTarget.sid -cne $validated.sid -or
+            $manifestTarget.data_dir -cne $validated.data_dir -or
+            $manifestTarget.agent_version -cne $validated.agent_version -or
+            $manifestTarget.deferred -ne $validated.deferred) {
+            throw 'schema-6 managed-hook teardown failed target changed from the manifest target'
+        }
+        $failedTargetsByKey[$key] = $true
+        $previousFailed = $validated
+    }
+    if ([string]$Journal.activation_state -cne 'activated' -and
+        $failedArray.count -ne 0) {
+        throw 'schema-6 never-activated journal contains failed target evidence'
     }
 
     return $phase
@@ -18246,7 +18299,8 @@ function Test-DefenseClawGuardianCoverageReport {
         [AllowEmptyString()][string]$PriorStateIdentity,
         [AllowEmptyString()][string]$CurrentStateIdentity,
         [AllowEmptyString()][string]$ExpectedManifestSHA256,
-        [Parameter(Mandatory)][DateTime]$StartedAfter
+        [Parameter(Mandatory)][DateTime]$StartedAfter,
+        [switch]$AllowFailedTargets
     )
     $reject = {
         param([string]$Reason)
@@ -18257,9 +18311,13 @@ function Test-DefenseClawGuardianCoverageReport {
             reason = $Reason
         }
     }
-    if ($null -eq $Report -or
+    $degradedAccepted = $AllowFailedTargets -and
+        [string]::IsNullOrWhiteSpace($ExpectedManifestSHA256) -and
+        (Test-DefenseClawGuardianReportCompletedWithFailedTargets -Report $Report)
+    if (-not $degradedAccepted -and
+        ($null -eq $Report -or
         $null -eq $Report.PSObject.Properties['ok'] -or
-        -not [bool]$Report.ok) {
+        -not [bool]$Report.ok)) {
         $issues = [Collections.Generic.List[string]]::new()
         if ($null -ne $Report -and
             $null -ne $Report.PSObject.Properties['errors']) {
@@ -18366,13 +18424,52 @@ function Test-DefenseClawGuardianCoverageReport {
     }
 }
 
+# True when the report's state is a complete reconcile in which some targets
+# failed: every enrolled target has exactly one row and the counts add up. A
+# rollback restores the deployment that was there before, so a guardian that
+# was degraded before the transaction may be degraded after it. Anything else
+# that makes the report not ok (no state, an incomplete or inconsistent
+# reconcile) is still rejected.
+function Test-DefenseClawGuardianReportCompletedWithFailedTargets {
+    param($Report)
+    if ($null -eq $Report -or $null -eq $Report.PSObject.Properties['state'] -or
+        $null -eq $Report.state) {
+        return $false
+    }
+    $state = $Report.state
+    foreach ($name in @('target_count', 'success_count', 'failure_count', 'results')) {
+        if ($null -eq $state.PSObject.Properties[$name]) {
+            return $false
+        }
+    }
+    try {
+        $pending = 0
+        if ($null -ne $state.PSObject.Properties['pending_count'] -and $null -ne $state.pending_count) {
+            $pending = [Convert]::ToInt64($state.pending_count)
+        }
+        $targets = [Convert]::ToInt64($state.target_count)
+        $successes = [Convert]::ToInt64($state.success_count)
+        $failures = [Convert]::ToInt64($state.failure_count)
+    }
+    catch {
+        return $false
+    }
+    return ($failures -gt 0 -and
+        $successes -ge 0 -and $pending -ge 0 -and
+        $successes + $failures + $pending -eq $targets -and
+        @($state.results).Count -eq $targets)
+}
+
 function Wait-DefenseClawFreshGuardianReconcile {
     param(
         [Parameter(Mandatory)][hashtable]$Layout,
         [Parameter(Mandatory)][string]$GatewayServiceName,
         [Parameter(Mandatory)][string]$GuardianServiceName,
         [string]$ExpectedManifestSHA256,
-        [int]$TimeoutSeconds = 90
+        [int]$TimeoutSeconds = 90,
+        # Rollback and recovery only: a fresh, complete reconcile with failed
+        # targets is the deployment being restored, not a new failure.
+        [switch]$AllowFailedTargets
     )
     if (-not [string]::IsNullOrWhiteSpace($ExpectedManifestSHA256) -and
         $ExpectedManifestSHA256 -cnotmatch '^[0-9a-f]{64}$') {
@@ -18407,7 +18504,8 @@ function Wait-DefenseClawFreshGuardianReconcile {
             -PriorStateIdentity $priorStateIdentity `
             -CurrentStateIdentity $currentStateIdentity `
             -ExpectedManifestSHA256 $ExpectedManifestSHA256 `
-            -StartedAfter $startedAfter
+            -StartedAfter $startedAfter `
+            -AllowFailedTargets:$AllowFailedTargets
         if ([bool]$coverage.ok) {
             return [string]$coverage.generation
         }
