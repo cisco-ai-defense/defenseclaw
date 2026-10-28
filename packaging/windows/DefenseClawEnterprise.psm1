@@ -4871,9 +4871,147 @@ function Start-DefenseClawService {
     param([Parameter(Mandatory)][string]$Name)
     $service = Microsoft.PowerShell.Management\Get-Service -Name $Name -ErrorAction Stop
     if ($service.Status -ne [ServiceProcess.ServiceControllerStatus]::Running) {
-        Microsoft.PowerShell.Management\Start-Service -Name $Name -ErrorAction Stop
-        $service.WaitForStatus([ServiceProcess.ServiceControllerStatus]::Running, [TimeSpan]::FromSeconds(60))
+        try {
+            Microsoft.PowerShell.Management\Start-Service -Name $Name -ErrorAction Stop
+            $service.WaitForStatus([ServiceProcess.ServiceControllerStatus]::Running, [TimeSpan]::FromSeconds(60))
+        }
+        catch {
+            # Start-Service only says "Cannot start service X". Name SCM's exit
+            # codes, and each dependency's, so a failed rollback or install says
+            # why (for example the gateway's 1068 because the broker exited 1066).
+            $original = $_
+            $message = $null
+            try {
+                $message = Get-DefenseClawServiceStartFailureMessage `
+                    -Name $Name `
+                    -Service $service `
+                    -Cause $original.Exception.Message `
+                    -StartError (Get-DefenseClawWin32ErrorCode -Exception $original.Exception)
+            }
+            catch {
+                $message = $null
+            }
+            if ([string]::IsNullOrWhiteSpace($message)) {
+                throw $original
+            }
+            throw $message
+        }
     }
+}
+
+# The Win32 error StartService returned (for example 1068 when a dependency
+# failed), from the first Win32Exception in the exception chain. sc.exe queryex
+# can still show the service's previous exit code then, because it never ran.
+function Get-DefenseClawWin32ErrorCode {
+    param($Exception)
+    $current = $Exception
+    for ($depth = 0; $null -ne $current -and $depth -lt 8; $depth++) {
+        if ($current -is [ComponentModel.Win32Exception]) {
+            return [int64]$current.NativeErrorCode
+        }
+        $current = $current.InnerException
+    }
+    return $null
+}
+
+function Get-DefenseClawServiceStartFailureMessage {
+    param(
+        [Parameter(Mandatory)][string]$Name,
+        $Service,
+        [AllowEmptyString()][string]$Cause = '',
+        $StartError = $null
+    )
+    $message = "service $Name failed to start: "
+    if ($null -ne $StartError) {
+        $description = ''
+        try {
+            $description = ([ComponentModel.Win32Exception]::new([int]$StartError)).Message
+        }
+        catch {
+            $description = ''
+        }
+        $message += "START_ERROR=$StartError"
+        if (-not [string]::IsNullOrWhiteSpace($description)) {
+            $message += " ($description)"
+        }
+        $message += ' '
+    }
+    $message += (Get-DefenseClawServiceExitCodes -Name $Name -IncludeState)
+    $dependencies = @()
+    try {
+        if ($null -ne $Service) {
+            $dependencies = @($Service.ServicesDependedOn | Microsoft.PowerShell.Core\ForEach-Object {
+                    [string]$_.ServiceName
+                })
+        }
+    }
+    catch {
+        $dependencies = @()
+    }
+    foreach ($dependency in $dependencies) {
+        if ([string]::IsNullOrWhiteSpace($dependency)) {
+            continue
+        }
+        $message += " [dependency ${dependency}: " +
+            (Get-DefenseClawServiceExitCodes -Name $dependency -IncludeState) + ']'
+    }
+    if (-not [string]::IsNullOrWhiteSpace($Cause)) {
+        $message += " ($Cause)"
+    }
+    return $message
+}
+
+# Reads STATE, WIN32_EXIT_CODE and SERVICE_EXIT_CODE from sc.exe queryex. Only
+# used to explain a failure, so it never throws.
+function Get-DefenseClawServiceExitCodes {
+    param(
+        [Parameter(Mandatory)][string]$Name,
+        [switch]$IncludeState
+    )
+    try {
+        $output = Invoke-DefenseClawNative `
+            -File $script:ScExe `
+            -Arguments @('queryex', $Name) `
+            -Capture
+        $text = ($output | Microsoft.PowerShell.Utility\Out-String)
+    }
+    catch {
+        return "exit codes unavailable (sc.exe queryex failed: $($_.Exception.Message))"
+    }
+    $state = 'unknown'
+    if ($text -match 'STATE\s*:\s*\d+\s+(\S+)') {
+        $state = $Matches[1]
+    }
+    $parts = @()
+    if ($IncludeState) {
+        $parts += "STATE=$state"
+    }
+    if ($text -match 'WIN32_EXIT_CODE\s*:\s*(\d+)') {
+        $code = [int64]$Matches[1]
+        $description = ''
+        try {
+            $description = ([ComponentModel.Win32Exception]::new([int]$code)).Message
+        }
+        catch {
+            $description = ''
+        }
+        if ([string]::IsNullOrWhiteSpace($description)) {
+            $parts += "WIN32_EXIT_CODE=$code"
+        }
+        else {
+            $parts += "WIN32_EXIT_CODE=$code ($description)"
+        }
+    }
+    else {
+        $parts += 'WIN32_EXIT_CODE=unknown'
+    }
+    if ($text -match 'SERVICE_EXIT_CODE\s*:\s*(\d+)') {
+        $parts += "SERVICE_EXIT_CODE=$($Matches[1])"
+    }
+    else {
+        $parts += 'SERVICE_EXIT_CODE=unknown'
+    }
+    return ($parts -join ' ')
 }
 
 function Remove-DefenseClawService {
