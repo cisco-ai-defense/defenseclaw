@@ -1637,6 +1637,12 @@ const r105Rows: DocRow[] = [
   { gap: "GAP-0465", page: "support-matrix.mdx", has: ["With 1.0.5 and later those two read `closed` with an open mode, because they block an outage anyway"] },
   { gap: "GAP-0048", page: "support-matrix.mdx", has: ["On 1.0.4 that includes the Amp and OpenCode plugins on the per-user route. With 1.0.5 and later those two read `closed`"], lacks: ["The Amp and OpenCode plugins on the per-user route read `closed` with an open mode too"] },
   // r105-rows-end
+  { gap: "GAP-2391", page: "guardrail/unified-llm-key.mdx", has: ["`audit export` shows it as `action=config.change.applied` with `actor=cli:<your user name>`", "`defenseclaw.admin.target_ref=config:dotenv:<ENV>`"], lacks: ["action=config-update target=config:dotenv:<ENV>"] },
+  { gap: "GAP-2391", page: "reference/keys.mdx", has: ["(`audit export` action `config.change.applied`, `structured` `defenseclaw.admin.operation=config-update` and `defenseclaw.admin.target_ref=config:dotenv:<ENV>`)"], lacks: ["record a `config-update` audit event with target `dotenv:<ENV>`"] },
+  { gap: "GAP-2391", page: "reference/cli.mdx", has: ["Configuration changes are audit rows with action `config.change.applied`;"], lacks: ["Configuration changes are audit rows (action `config-update`)."] },
+  { gap: "GAP-0730", page: "observability/sandbox-telemetry.mdx", has: ["A changed root-owned `gateway.toml` render on its own (field `gateway configuration`) is reported the same way but does not pause"] },
+  { gap: "GAP-0730", page: "enterprise/sandboxes.mdx", has: ["A hand edit of the rendered `gateway.toml` itself (only root can make it) is reported with the same record, and status and doctor show the drift, but it does not pause", "| Settings drift (not for a changed rendered `gateway.toml` alone, which is reported without a pause) |"] },
+  { gap: "GAP-1883", page: "get-started/upgrade.mdx", section: "Upgrade", has: ["To go back to an earlier release, use `defenseclaw rollback` or `defenseclaw upgrade --version X.Y.Z`.", "Running an older release's installer (`install.sh` or `install.ps1` of that release) directly over a newer install is not a supported downgrade", "`defenseclaw doctor` then reports two DefenseClaw PreToolUse handlers"] },
 ];
 
 function pageSection(name: string, heading?: string): string {
@@ -1979,6 +1985,28 @@ describe('1.0.5 docs rows', () => {
       for (const phrase of row.lacks ?? []) assert.ok(!text.includes(phrase), `${row.page} still says: ${phrase}`);
     });
   }
+});
+
+// GAP-2391: keys set stores config-update with target config:dotenv:<ENV>, and
+// audit export writes a v8 config.change.applied row with that target in structured.
+describe('keys set audit row matches the pages (GAP-2391)', () => {
+  it('export maps config-update to config.change.applied and keys set names config:dotenv', () => {
+    assert.ok(source('internal/cli/audit_export.go').includes('} else if eventName == "config.change.applied" && actionOut == string(audit.ActionConfigUpdate) {'), 'audit export no longer writes config.change.applied for config-update: re-check unified-llm-key.mdx, keys.mdx, cli.mdx');
+    const keys = source('cli/defenseclaw/commands/cmd_keys.py');
+    assert.ok(keys.includes('action=ACTION_CONFIG_UPDATE,') && keys.includes('target_type="config",') && keys.includes('target_id=f"dotenv:{env_name}",'), 'keys set audit target changed: re-check the GAP-2391 pages');
+    assert.ok(source('cli/defenseclaw/commands/cmd_audit.py').includes('config changes included (action config.change.applied):'), 'audit --help names the old export action');
+  });
+});
+
+// GAP-0730: the drift the pages call report-only is the one the daemon exempts
+// from the pause (blockingOpenShellDrift): a changed render, nothing else.
+describe('rendered gateway.toml drift is reported without a pause (GAP-0730)', () => {
+  it('only a changed rendered gateway configuration is non-blocking', () => {
+    const go = source('internal/gateway/sandbox_daemon_openshell.go');
+    assert.ok(go.includes('renderedGatewayDriftField     = "gateway configuration"'), 'rendered drift field renamed: re-check observability/sandbox-telemetry.mdx and enterprise/sandboxes.mdx');
+    assert.ok(go.includes('if item.Field != renderedGatewayDriftField || item.Have != "changed" {'), 'blockingOpenShellDrift changed: a changed render may pause again, re-check the GAP-0730 pages');
+    assert.ok(go.includes('drift = blockingOpenShellDrift(drift)'), 'readyOpenShell no longer filters drift: re-check the GAP-0730 pages');
+  });
 });
 
 // GAP-1922: the saved-installer protection the detection page promises is the
