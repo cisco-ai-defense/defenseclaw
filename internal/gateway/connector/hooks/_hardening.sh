@@ -2628,7 +2628,7 @@ defenseclaw_emit_unreachable_stderr() {
       echo "defenseclaw: blocking ${subject}: the gateway answered with an error (${answer})" >&2
       return 0
     fi
-    echo "defenseclaw: gateway unreachable, blocking ${subject} (fail mode closed): ${reason}" >&2
+    echo "defenseclaw: gateway unreachable, blocking ${subject} ($(defenseclaw_unreachable_mode_note)): ${reason}" >&2
   elif defenseclaw_per_user_outage_open; then
     # The Claude Code and Codex hooks show their systemMessage instead; the
     # generic inspect hooks rendered for them print none, so they keep this
@@ -2647,6 +2647,35 @@ defenseclaw_emit_unreachable_stderr() {
   else
     echo "defenseclaw: gateway unreachable, allowing ${subject}: ${reason}" >&2
   fi
+}
+
+# defenseclaw_unreachable_mode_note names why a call the gateway did not
+# decide was blocked, as the native hook line does (unreachableModeNote,
+# GAP-1735): "fail mode closed" for a gateway outage the mode closed (no
+# gateway took the connection, curl 7), strict availability, the install
+# window, and managed, socket and Secure Client hooks; for a per-user call the
+# gateway took and did not answer (a timeout, a dropped or cut-off answer),
+# that it is not an outage and is blocked in every fail mode, so a saved open
+# mode does not read as ignored (GAP-2279).
+defenseclaw_unreachable_mode_note() {
+  local closed='fail mode closed'
+  case "${DEFENSECLAW_MANAGED_HOOK:-0}" in
+    1|true|TRUE|yes|YES) printf '%s' "$closed"; return 0 ;;
+  esac
+  case "${DEFENSECLAW_STRICT_AVAILABILITY:-0}" in
+    1|true|TRUE|yes|YES) printf '%s' "$closed"; return 0 ;;
+  esac
+  # A refused connection (7) is an outage. Any other failure while this
+  # account's own gateway process is alive (a timeout, a dropped answer) is
+  # a call the gateway took and did not answer; with no live gateway it
+  # stays an outage the mode closed.
+  if [ "${_DC_TRANSPORT_STATUS:-}" = 7 ] || [ -n "${DEFENSECLAW_HOOK_SOCKET:-}" ] ||
+    [ "${_DC_SECURE_CLIENT_HOOK:-0}" = 1 ] || defenseclaw_install_held ||
+    ! defenseclaw_own_gateway_alive; then
+    printf '%s' "$closed"
+    return 0
+  fi
+  printf '%s' 'not a gateway outage, so it is blocked in every fail mode'
 }
 
 # defenseclaw_unreachable_notice_json prints a one-line hook result whose
@@ -3529,6 +3558,19 @@ _dc_gateway_post_once() {
     if [ "$_dc_post_max_time" -le 4 ] && [ "$_dc_post_remaining" -gt 2 ]; then
       _dc_post_remaining=$((_dc_post_remaining - 1))
     fi
+    # The same bound in milliseconds, for the helper (GAP-2279): the whole
+    # seconds above round the shell's own time up, so a call that spent
+    # 0.4 s reading a large body gave the helper 2 s of the 2.6 s left after
+    # the startup reserve, and was closed at 2.4 s. The helper gets the time
+    # left after that reserve, never less than the whole seconds above and
+    # never a whole second more; an older helper reads only --max-time.
+    local _dc_post_remaining_ms=$(( _dc_post_max_time * 1000 - _DC_ELAPSED_MS ))
+    if [ "$_dc_post_max_time" -le 4 ]; then
+      _dc_post_remaining_ms=$(( _dc_post_remaining_ms - 1000 ))
+    fi
+    if [ "$_dc_post_remaining_ms" -lt $(( _dc_post_remaining * 1000 )) ]; then
+      _dc_post_remaining_ms=$(( _dc_post_remaining * 1000 ))
+    fi
     # The executable that receives the bearer is the gateway setup recorded
     # beside this hook (.gateway-helper, defenseclaw_gateway_binary, which
     # proves the record and every folder on its path are this account's and
@@ -3649,7 +3691,7 @@ _dc_gateway_post_once() {
             # 126, as for a helper that cannot run: nothing was sent.
             ulimit -S -v "$_DC_HOOK_NATIVE_VMEM_LIMIT" 2>/dev/null || exit 126
           fi
-          exec "$_dc_post_bin" hook-post --api-addr "$API_ADDR" --max-time "$_dc_post_remaining" --curl-output
+          _DC_HOOK_POST_DEADLINE_MS="$_dc_post_remaining_ms" exec "$_dc_post_bin" hook-post --api-addr "$API_ADDR" --max-time "$_dc_post_remaining" --curl-output
         ) 2>/dev/null |
         defenseclaw_keep_nul_visible
       exit "${PIPESTATUS[1]}"

@@ -32,8 +32,10 @@ const maxInstructionLoadRecordBytes = 1 << 20
 // (maxActiveAgentContextSessions), so a session the cache evicts restores
 // its first sighting from its record until it ends: churn through newer
 // sessions never turns a file it created into one that was there before it.
-// Only when the saved sessions that never ended pass these bounds does the
-// oldest one lose its record. Its first sighting is lost then, and the
+// Only when the saved sessions that never ended pass these bounds do the
+// oldest ones lose their records, until the store is back at seven eighths
+// of the bounds (instructionLoadStoreKeep). Their first sightings are lost
+// then, and the
 // pruned index (instructionLoadPrunedName) says so: its next call takes no
 // new first sighting, which would make a file it created look like one that
 // was there before it. The index keeps the identities of the files the
@@ -45,6 +47,32 @@ const (
 	maxInstructionLoadRecords    = 16 * maxActiveAgentContextSessions
 	maxInstructionLoadStoreBytes = 64 << 20
 )
+
+// The store is not scanned on every save. Every hook call of a session the
+// gateway has not seen saves its first sighting, and a scan reads every
+// record's metadata (and pruning rewrites the pruned index) under storeMu,
+// which every hook call takes: with the store at its bound, a scan, a prune
+// of one record and a rewrite of the whole index on every call held the
+// hook path for so long that 10 calls a second queued past the answer
+// budget when an agent started beside them, and every later call was
+// blocked as a gateway no-answer until the load stopped (GAP-1298). The
+// saves keep a count (storeRecords, storeBytes); the store is scanned when
+// the count passes a bound, once the process saves its first record, and
+// every instructionLoadRescanSaves saves (records others wrote or removed).
+// A prune goes down to instructionLoadStoreKeep, so the next one is many
+// saves away and the index is rewritten once for all the records it drops.
+const instructionLoadRescanSaves = 64
+
+// instructionLoadStoreKeep is what a prune of the store keeps: seven eighths
+// of each bound.
+func instructionLoadStoreKeep() (records int, bytes int64) {
+	return maxInstructionLoadRecords - maxInstructionLoadRecords/8,
+		maxInstructionLoadStoreBytes - maxInstructionLoadStoreBytes/8
+}
+
+// instructionLoadStoreScanned is a test seam: it sees every scan of the
+// store.
+var instructionLoadStoreScanned func()
 
 // The pruned index lists the record names of sessions whose first sighting
 // the bounds pruned, least recently used first, one per line with the
@@ -123,9 +151,13 @@ func (a *APIServer) saveInstructionLoads(key activeAgentContextKey) {
 	a.activeAgentContext.storeMu.Lock()
 	defer a.activeAgentContext.storeMu.Unlock()
 	record := instructionLoadRecordPath(dir, key)
+	previous, hadRecord := instructionLoadRecordSize(record)
 	session, ok := a.activeAgentContext.sessionKey(key)
 	if !ok || len(session.files) == 0 && !session.startupKnown {
-		_ = os.Remove(record)
+		if os.Remove(record) == nil && hadRecord {
+			a.activeAgentContext.storeRecords--
+			a.activeAgentContext.storeBytes -= previous
+		}
 		return
 	}
 	data, err := json.Marshal(instructionLoadRecord{
@@ -138,8 +170,31 @@ func (a *APIServer) saveInstructionLoads(key activeAgentContextKey) {
 	saved := err == nil && len(data) <= maxInstructionLoadRecordBytes && writeInstructionLoadFile(dir, record, data)
 	a.activeAgentContext.markSavedKey(key, saved)
 	if saved {
-		a.activeAgentContext.pruneInstructionLoadsLocked(dir)
+		a.activeAgentContext.recordSavedLocked(dir, hadRecord, previous, int64(len(data)))
 	}
+}
+
+// instructionLoadRecordSize is the size of the record name, and whether it
+// is one.
+func instructionLoadRecordSize(name string) (int64, bool) {
+	info, err := os.Lstat(name)
+	if err != nil || !info.Mode().IsRegular() {
+		return 0, false
+	}
+	return info.Size(), true
+}
+
+// recordSavedLocked counts a record saved in place of one of previous bytes
+// (when replaced) and prunes the store when it is due. The caller holds
+// storeMu.
+func (cache *activeAgentContextCache) recordSavedLocked(dir string, replaced bool, previous, size int64) {
+	if !replaced {
+		cache.storeRecords++
+		previous = 0
+	}
+	cache.storeBytes += size - previous
+	cache.storeSaves++
+	cache.pruneInstructionLoadsLocked(dir)
 }
 
 // writeInstructionLoadFile replaces name, a file of dir, with data.
@@ -162,11 +217,21 @@ func writeInstructionLoadFile(dir, name string, data []byte) bool {
 
 // pruneInstructionLoadsLocked keeps the newest records within
 // maxInstructionLoadRecords and maxInstructionLoadStoreBytes; a session that
-// never sent SessionEnd ages out. A pruned record that held a first sighting
-// goes into the pruned index. The caller holds storeMu.
+// never sent SessionEnd ages out. A store past a bound is pruned down to
+// instructionLoadStoreKeep. A pruned record that held a first sighting goes
+// into the pruned index. The store is scanned only when it is due
+// (instructionLoadRescanSaves). The caller holds storeMu.
 func (cache *activeAgentContextCache) pruneInstructionLoadsLocked(dir string) {
+	if cache.storeCounted && cache.storeSaves%instructionLoadRescanSaves != 0 &&
+		cache.storeRecords <= maxInstructionLoadRecords && cache.storeBytes <= maxInstructionLoadStoreBytes {
+		return
+	}
+	if instructionLoadStoreScanned != nil {
+		instructionLoadStoreScanned()
+	}
 	entries, err := os.ReadDir(dir)
 	if err != nil {
+		cache.storeCounted = false
 		return
 	}
 	type record struct {
@@ -182,6 +247,7 @@ func (cache *activeAgentContextCache) pruneInstructionLoadsLocked(dir string) {
 			total += info.Size()
 		}
 	}
+	cache.storeRecords, cache.storeBytes, cache.storeCounted = len(records), total, true
 	if len(records) <= maxInstructionLoadRecords && total <= maxInstructionLoadStoreBytes {
 		return
 	}
@@ -196,7 +262,8 @@ func (cache *activeAgentContextCache) pruneInstructionLoadsLocked(dir string) {
 	})
 	cache.loadPrunedLocked(dir)
 	changed := false
-	for len(records) > 0 && (len(records) > maxInstructionLoadRecords || total > maxInstructionLoadStoreBytes) {
+	keepRecords, keepBytes := instructionLoadStoreKeep()
+	for len(records) > 0 && (len(records) > keepRecords || total > keepBytes) {
 		name := filepath.Join(dir, records[0].name)
 		identities, sighted := instructionLoadRecordSighted(name)
 		if os.Remove(name) == nil && sighted {
@@ -206,6 +273,7 @@ func (cache *activeAgentContextCache) pruneInstructionLoadsLocked(dir string) {
 		total -= records[0].size
 		records = records[1:]
 	}
+	cache.storeRecords, cache.storeBytes = len(records), total
 	if changed {
 		cache.writePrunedLocked(dir)
 	}

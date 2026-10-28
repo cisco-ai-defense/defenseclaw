@@ -121,7 +121,9 @@ non-local browser origin.
 
 All ordinary mutations also reject a non-local `Origin`; cross-site requests
 are rejected when `Sec-Fetch-Site` identifies them. A shared middleware caps
-ordinary POST, PUT, and PATCH bodies at 1 MiB. Exact authenticated OTLP-HTTP
+ordinary POST, PUT, and PATCH bodies at 1 MiB; a per-user hook sends at most
+900 KiB (921,600 bytes) of a hook call, and treats a larger call as oversized
+input (see Fail modes). Exact authenticated OTLP-HTTP
 ingest routes use a separate 64 MiB receiver limit so exporter batches can
 follow the protocol's recommended bound without increasing the limit for the
 rest of the API.
