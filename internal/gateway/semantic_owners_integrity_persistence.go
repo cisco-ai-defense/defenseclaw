@@ -2630,18 +2630,28 @@ func stateTreeEntryChanged(
 			// A copy-out onto a tree name lands in it.
 			return true
 		}
-		if !hasAnyOperation(command, actionfacts.OperationCopy, actionfacts.OperationMove) {
+		// A link named after a tree replaces it, or lands in it when it is
+		// a directory (GAP-1774: `ln -sfn X ~/.defenseclaw/hooks`).
+		link := strings.EqualFold(command.Program, "ln")
+		if !link && !hasAnyOperation(command, actionfacts.OperationCopy, actionfacts.OperationMove) {
 			return false
 		}
 		if state != "" {
 			return true
 		}
 		destination := strings.TrimRight(strings.ReplaceAll(exactSemanticPathValue(candidate), `\`, "/"), "/")
+		var sources []string
+		if link {
+			// A link into the root is named after what it points at.
+			sources = actionfacts.LinkTargets(command.Argv)
+		}
 		for _, source := range facts.Paths {
-			if source.CommandID != candidate.CommandID || source.Access == actionfacts.PathAccessWrite {
-				continue
+			if !link && source.CommandID == candidate.CommandID && source.Access != actionfacts.PathAccessWrite {
+				sources = append(sources, exactSemanticPathValue(source))
 			}
-			base := path.Base(strings.TrimRight(strings.ReplaceAll(exactSemanticPathValue(source), `\`, "/"), "/"))
+		}
+		for _, source := range sources {
+			base := path.Base(strings.TrimRight(strings.ReplaceAll(source, `\`, "/"), "/"))
 			if base == "." || base == ".." || base == "/" || destination == "" {
 				continue
 			}

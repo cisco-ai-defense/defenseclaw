@@ -580,6 +580,8 @@ func classifyCommand(out *parseOutput, command *CommandFact) {
 		}
 	case "chmod", "chown", "chgrp":
 		classifyPOSIXPermissionChange(out, command, program)
+	case "ln":
+		classifyPOSIXLink(out, command)
 	case "install":
 		classifyPOSIXInstall(out, command)
 	case "setfacl":
@@ -3633,16 +3635,16 @@ func classifyPOSIXPermissionChange(
 		"-c", "--changes", "-f", "--silent", "--quiet", "-v", "--verbose",
 		"--no-preserve-root", "--preserve-root", "-R", "--recursive",
 	)
-	switch program {
-	case "chown":
+	// -H -L -P -h choose how symlinks are followed; chmod has them on
+	// BSD/macOS (and GNU coreutils 9.x), chown and chgrp everywhere
+	// (GAP-2077: `chmod -h 777 ~/.defenseclaw/hooks` lost its target).
+	if program == "chown" {
 		values["--from"] = struct{}{}
-		fallthrough
-	case "chgrp":
-		for option := range exactOptionSet(
-			"-H", "-L", "-P", "-h", "--dereference", "--no-dereference",
-		) {
-			flags[option] = struct{}{}
-		}
+	}
+	for option := range exactOptionSet(
+		"-H", "-L", "-P", "-h", "--dereference", "--no-dereference",
+	) {
+		flags[option] = struct{}{}
 	}
 
 	parsed := parseOwnedPOSIXOptions(
