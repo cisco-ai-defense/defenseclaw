@@ -45,6 +45,12 @@ func TestOptionKeyHomeSpellingOfActiveStateIsTheHomePath(t *testing.T) {
 		`dd if=a.txt of="$HOME/.defenseclaw/config.yaml"`,
 		`dd if=a.txt of="${HOME}"/.defenseclaw/config.yaml`,
 		"dd if=a.txt of=$HOME/.defenseclaw/config.yaml status=none",
+		// RV20-1: a quoted key or a whole double-quoted word expands HOME too.
+		`dd if=a.txt "of=$HOME/.defenseclaw/config.yaml"`,
+		`dd if=a.txt "of=${HOME}/.defenseclaw/hooks/f.sh"`,
+		`dd if=a.txt 'of='$HOME/.defenseclaw/config.yaml`,
+		`dd if=a.txt "of="$HOME/.defenseclaw/config.yaml`,
+		`dd if=a.txt 'of='"${HOME}"/.defenseclaw/hooks/f.sh`,
 	}
 	allow := []string{
 		"dd if=a.txt of=$HOME/project/b.img",
@@ -53,6 +59,9 @@ func TestOptionKeyHomeSpellingOfActiveStateIsTheHomePath(t *testing.T) {
 		"dd if=a.txt of=b.img",
 		"make PREFIX=$HOME/.local",
 		"echo of=$HOME/.defenseclaw/config.yaml",
+		`dd if=a.txt "of=$HOME/project/b.img"`,
+		`dd if=a.txt 'of=$HOME/.defenseclaw/config.yaml'`,
+		`echo "of=$HOME/.defenseclaw/config.yaml"`,
 		"git status --short",
 	}
 	for _, connectorName := range []string{"claudecode", "codex"} {

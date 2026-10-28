@@ -119,18 +119,17 @@ func homeResolvedSource(source, home string) (string, bool) {
 		case *syntax.Word:
 			target := typed
 			suffix, anchored := homeAnchoredLiteralWord(typed)
+			key := ""
 			if !anchored {
-				// dd of=$HOME/f: the home word after a literal option key.
-				if _, rest, ok := optionHomeAnchoredWord(typed); ok {
-					target = rest
-					suffix, anchored = homeAnchoredLiteralWord(rest)
-				}
+				// dd of=$HOME/f, "of=$HOME/f", 'of='$HOME/f: the home word
+				// after an option key; the whole word is respelled.
+				key, suffix, anchored = optionHomeAnchoredPath(typed)
 			}
 			if !anchored {
 				return true
 			}
 			start, end := int(target.Pos().Offset()), int(target.End().Offset())
-			path := home + suffix
+			path := key + home + suffix
 			if start < 0 || end <= start || end > len(source) ||
 				strings.ContainsAny(path, "\x00\r\n") {
 				declined = true
@@ -257,6 +256,87 @@ func optionHomeAnchoredWord(word *syntax.Word) (*syntax.Lit, *syntax.Word, bool)
 		return nil, nil, false
 	}
 	return key, rest, true
+}
+
+// optionHomeAnchoredPath reads a word that is an option key ending at "="
+// and then a plain $HOME or ${HOME} followed by "/" and literal text, where
+// the key may be literal, single-quoted or double-quoted and the home word
+// may sit inside double quotes ("of=$HOME/f", 'of='$HOME/f, of="${HOME}/f").
+// The shell expands HOME inside double quotes, so each of these writes the
+// file of=$HOME/f names (GAP-2399). It returns the key and the path below
+// the home.
+func optionHomeAnchoredPath(word *syntax.Word) (string, string, bool) {
+	if word == nil {
+		return "", "", false
+	}
+	type piece struct {
+		lit    string
+		home   bool
+		quoted bool
+	}
+	var pieces []piece
+	for _, part := range word.Parts {
+		switch typed := part.(type) {
+		case *syntax.Lit:
+			pieces = append(pieces, piece{lit: typed.Value})
+		case *syntax.SglQuoted:
+			if typed.Dollar {
+				return "", "", false
+			}
+			pieces = append(pieces, piece{lit: typed.Value, quoted: true})
+		case *syntax.ParamExp:
+			if !plainHomeParameter(typed) {
+				return "", "", false
+			}
+			pieces = append(pieces, piece{home: true})
+		case *syntax.DblQuoted:
+			if typed.Dollar {
+				return "", "", false
+			}
+			for _, inner := range typed.Parts {
+				switch value := inner.(type) {
+				case *syntax.Lit:
+					pieces = append(pieces, piece{lit: value.Value, quoted: true})
+				case *syntax.ParamExp:
+					if !plainHomeParameter(value) {
+						return "", "", false
+					}
+					pieces = append(pieces, piece{home: true})
+				default:
+					return "", "", false
+				}
+			}
+		default:
+			return "", "", false
+		}
+	}
+	var key, suffix strings.Builder
+	homeAt := -1
+	for index, item := range pieces {
+		if item.home {
+			homeAt = index
+			break
+		}
+		if strings.ContainsAny(item.lit, "\\\x00") || (!item.quoted && strings.ContainsAny(item.lit, "*?[~$`")) {
+			return "", "", false
+		}
+		key.WriteString(item.lit)
+	}
+	if homeAt < 1 || !homeOptionKey.MatchString(key.String()) {
+		return "", "", false
+	}
+	for _, item := range pieces[homeAt+1:] {
+		if item.home || strings.ContainsAny(item.lit, "\\\x00") ||
+			(!item.quoted && strings.ContainsAny(item.lit, "*?[~")) {
+			return "", "", false
+		}
+		suffix.WriteString(item.lit)
+	}
+	path := suffix.String()
+	if !strings.HasPrefix(path, "/") || path == "/" {
+		return "", "", false
+	}
+	return key.String(), path, true
 }
 
 // optionHomeRewriteWord is optionHomeAnchoredWord for a home word the

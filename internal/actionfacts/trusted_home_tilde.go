@@ -112,7 +112,9 @@ func rewriteTrustedPOSIXHomeTilde(source, activeHome string) (trustedPOSIXHomeRe
 			for _, word := range cmd.Args {
 				if _, user := userHomeRewriteWord(word, activeHome); !user && !staticHomeRewriteWord(word) {
 					if _, option := optionHomeRewriteWord(word); !option {
-						return false
+						if _, ok := quotedOptionHomeRewrite(word, activeHome); !ok {
+							return false
+						}
 					}
 				}
 			}
@@ -166,6 +168,18 @@ func rewriteTrustedPOSIXHomeTilde(source, activeHome string) (trustedPOSIXHomeRe
 			out.WriteString(activeHome + suffix)
 			last = end
 			rewrite.tildeOperands[activeHome+suffix] = source[start:end]
+			continue
+		}
+		if respelled, ok := quotedOptionHomeRewrite(word, activeHome); ok {
+			// "of=$HOME/f", 'of='$HOME/f: the whole word is respelled.
+			start, end := int(word.Pos().Offset()), int(word.End().Offset())
+			if start < last || end > len(source) {
+				return trustedPOSIXHomeRewrite{}, false
+			}
+			out.WriteString(source[last:start])
+			out.WriteString(respelled.key + respelled.path)
+			last = end
+			rewrite.tildeOperands[respelled.path] = "$HOME" + respelled.suffix
 			continue
 		}
 		literal, ok := firstLiteral(word)
@@ -414,10 +428,6 @@ func staticRedirectPath(word *syntax.Word, windows bool) (string, bool) {
 		return "", false
 	}
 	return value, strings.HasPrefix(value, "/")
-}
-
-func homeVariableName(name string) bool {
-	return name == "HOME" || name == "USER" || name == "LOGNAME"
 }
 
 // currentShellStmts returns the statements of list that the shell runs in
@@ -1008,4 +1018,30 @@ func respellTrustedPOSIXHomeTilde(facts *Facts, commandIDs map[int64]struct{}, t
 		path.Normalized = spelling
 		path.Absolute = false
 	}
+}
+
+// quotedOptionHome is an option word the trusted-home rewrite respells
+// whole: the key, the active home and the path below it.
+type quotedOptionHome struct {
+	key, path, suffix string
+}
+
+// quotedOptionHomeRewrite reads an option word whose key or home word is
+// quoted ("of=$HOME/f", 'of='$HOME/f, "of="${HOME}/f), which
+// optionHomeRewriteWord does not split, as the key and the path under
+// activeHome it writes (GAP-2399). The respelled word must stay a plain
+// literal path.
+func quotedOptionHomeRewrite(word *syntax.Word, activeHome string) (quotedOptionHome, bool) {
+	if _, plain := optionHomeRewriteWord(word); plain {
+		return quotedOptionHome{}, false
+	}
+	key, suffix, ok := optionHomeAnchoredPath(word)
+	if !ok {
+		return quotedOptionHome{}, false
+	}
+	path := strings.TrimRight(activeHome, "/") + suffix
+	if !trustedPOSIXHomeLiteral.MatchString(path) {
+		return quotedOptionHome{}, false
+	}
+	return quotedOptionHome{key: key, path: path, suffix: suffix}, true
 }
