@@ -66,6 +66,24 @@ test('guardrail scenarios keep their authored action-mode expectations', async (
   }
 });
 
+test('every guardrail scenario matches its expectation under each preset in action mode (GAP-1920)', async () => {
+  const engine = await loadPolicy(readFileSync(new URL('../public/opa/guardrail.wasm', import.meta.url)));
+  for (const preset of ['default', 'strict', 'permissive'] as const) {
+    const policy = policyFromPreset(preset);
+    policy.guardrail.mode = 'action';
+    const data = projectPolicyToData(policy);
+    engine.setData(data);
+    for (const scenario of scenarios.scenarios.filter((s) => s.domain === 'guardrail')) {
+      const result = engine.evaluate(withPolicyInput('guardrail', scenario.input, data), pickVerdictEntrypoint('guardrail'));
+      assert.equal(result[0]?.result, expectedVerdictFor(scenario as Scenario, preset), `${scenario.id} under ${preset}`);
+    }
+  }
+  const medium = scenarios.scenarios.find((s) => s.id === 'guardrail-medium-completion') as Scenario | undefined;
+  assert.equal(medium && expectedVerdictFor(medium, 'default'), 'alert');
+  assert.equal(medium && expectedVerdictFor(medium, 'strict'), 'block');
+  assert.equal(medium && expectedVerdictFor(medium, 'permissive'), 'allow');
+});
+
 test('Quick Start observe mode alerts at HIGH+ and allows MEDIUM', async () => {
   const data = projectPolicyToData(applyAnswers(defaultAnswers()));
   assert.equal(data.guardrail.mode, 'observe');
