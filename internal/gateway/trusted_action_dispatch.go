@@ -5342,7 +5342,7 @@ func homeSpellingTwinRequest(request trustedActionRequest) (trustedActionRequest
 }
 
 func trustedBashCommandInput(input actionfacts.Input) (string, bool) {
-	if !trustedBashExecutionTool(input.Tool) {
+	if !trustedBashExecutionTool(input.Tool) && !trustedPowerShellExecutionTool(input.Tool) {
 		return "", false
 	}
 	command := input.Command
@@ -5369,6 +5369,20 @@ func trustedBashExecutionTool(tool string) bool {
 		"run_command", "run_shell", "run_shell_command", "runshellcommand",
 		"run_terminal_cmd", "execute", "execute_command", "exec",
 		"exec_command", "command", "subprocess", "system.run":
+		return true
+	default:
+		return false
+	}
+}
+
+// trustedPowerShellExecutionTool names the PowerShell shell tools (Claude
+// Code PowerShell, a Codex or Copilot call that names the executable). Their
+// command is read by the same whole-command proofs as a Bash call, so the
+// same text gets the same decision whichever shell tool carries it
+// (GAP-1779, GAP-2389). The dialect hint still chooses the grammar.
+func trustedPowerShellExecutionTool(tool string) bool {
+	switch strings.ToLower(strings.TrimSpace(tool)) {
+	case "powershell", "powershell.exe", "pwsh", "pwsh.exe":
 		return true
 	default:
 		return false

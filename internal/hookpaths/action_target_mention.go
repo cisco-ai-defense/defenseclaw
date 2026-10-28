@@ -837,6 +837,10 @@ func actionLiteralArgumentProgramsOnly(file *syntax.File, home string) bool {
 		switch programBase(program) {
 		case "echo", "printf", "grep", "egrep", "fgrep", "rg", "cat", "head", "tail", "less", "more",
 			"wc", "ls", "dir", "stat", "file", "sort", "uniq", "cut", "tr", "diff", "cmp", "cd",
+			// Codex names its Windows PowerShell tool Bash: there these
+			// print their arguments as written, and no POSIX shell has
+			// them (GAP-1473).
+			"write-output", "write-host",
 			"pushd", "popd", "pwd", "true", "false", "test", "[", "basename", "dirname",
 			// File writers take their operands as written: a quoted "~/" is
 			// a directory named "~" below the cwd, not the home (round l).
