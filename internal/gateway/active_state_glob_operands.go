@@ -118,19 +118,17 @@ func globbedStateCommandMutates(command actionfacts.CommandFact, words []string,
 			}
 		}
 	case "rsync":
-		if len(operands) < 2 {
+		// An option value spelled as its own word (`--exclude cache/`) is
+		// not a source.
+		rsyncOperands, rsyncOptions := rsyncStateOperands(words)
+		if len(rsyncOperands) < 2 {
 			return false
 		}
-		destination := operands[len(operands)-1]
+		destination := rsyncOperands[len(rsyncOperands)-1]
 		if strings.Contains(destination, ":") {
 			return false
 		}
-		deletes := false
-		for _, option := range options {
-			if strings.HasPrefix(option, "--del") || strings.HasPrefix(option, "--remove-source-files") {
-				deletes = true
-			}
-		}
+		deletes := slices.ContainsFunc(rsyncOptions, rsyncDeletes)
 		tree, root := stateDirectoryOf(destination, home, cwd)
 		if tree || root && deletes {
 			return true
@@ -141,7 +139,7 @@ func globbedStateCommandMutates(command actionfacts.CommandFact, words []string,
 		// Into the root itself, each source lands by its name, and the
 		// entries of a `dir/` or `dir/.` source by theirs, which can be
 		// config.yaml or hooks/ (`rsync -a /tmp/x/ ~/.defenseclaw/`).
-		for _, source := range operands[:len(operands)-1] {
+		for _, source := range rsyncOperands[:len(rsyncOperands)-1] {
 			if strings.HasSuffix(source, "/") || sourceNamesItsEntries(source) ||
 				stateLandingReached(destination, path.Base(source), home, cwd) {
 				return true
@@ -171,6 +169,61 @@ func globbedStateCommandMutates(command actionfacts.CommandFact, words []string,
 		}
 	}
 	return false
+}
+
+// rsyncValueOptions are the rsync long options whose value can be the
+// next word.
+var rsyncValueOptions = map[string]bool{
+	"--exclude": true, "--include": true, "--filter": true, "--exclude-from": true,
+	"--include-from": true, "--files-from": true, "--link-dest": true, "--compare-dest": true,
+	"--copy-dest": true, "--backup-dir": true, "--partial-dir": true, "--temp-dir": true,
+	"--suffix": true, "--rsh": true, "--rsync-path": true, "--chmod": true, "--chown": true,
+	"--usermap": true, "--groupmap": true, "--max-size": true, "--min-size": true,
+	"--max-delete": true, "--max-alloc": true, "--timeout": true, "--contimeout": true,
+	"--bwlimit": true, "--log-file": true, "--log-file-format": true, "--out-format": true,
+	"--password-file": true, "--port": true, "--sockopts": true, "--modify-window": true,
+	"--block-size": true, "--checksum-choice": true, "--compress-choice": true,
+	"--compress-level": true, "--skip-compress": true, "--iconv": true, "--info": true,
+	"--debug": true, "--stop-after": true, "--stop-at": true, "--remote-option": true,
+	"--checksum-seed": true, "--address": true, "--write-batch": true,
+	"--only-write-batch": true, "--read-batch": true, "--early-input": true,
+}
+
+// rsyncStateOperands splits rsync words like splitStateOperands and skips
+// the separately spelled value of an option that takes one (`--exclude
+// cache/`, `-e ssh`, `-f "- x/"`, `-T /tmp`, `-B 1024`, `-M --x`).
+func rsyncStateOperands(words []string) (operands, options []string) {
+	optionsDone := false
+	for index := 0; index < len(words); index++ {
+		word := words[index]
+		switch {
+		case optionsDone:
+			operands = append(operands, word)
+		case word == "--":
+			optionsDone = true
+		case strings.HasPrefix(word, "--"):
+			options = append(options, word)
+			if !strings.Contains(word, "=") && rsyncValueOptions[word] {
+				index++
+			}
+		case strings.HasPrefix(word, "-") && word != "-":
+			options = append(options, word)
+			if strings.ContainsAny(word[len(word)-1:], "efTBM") {
+				index++
+			}
+		default:
+			operands = append(operands, word)
+		}
+	}
+	return operands, options
+}
+
+// rsyncDeletes reports an rsync option that removes files: --del, --delete,
+// --delete-* and --remove-source-files (not --delay-updates).
+func rsyncDeletes(option string) bool {
+	option, _, _ = strings.Cut(option, "=")
+	return option == "--del" || option == "--delete" || strings.HasPrefix(option, "--delete-") ||
+		option == "--remove-source-files"
 }
 
 // sourceNamesItsEntries reports a copy source spelled `dir/.`: its entries

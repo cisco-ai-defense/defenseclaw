@@ -75,3 +75,32 @@ func TestR105GAP2047ResidualStateOperands(t *testing.T) {
 		r105RunStateRowsChecked(t, mode, cwd, rows, true)
 	}
 }
+
+// pod check17 P3 (regression of c5089e423b): the value word of an rsync
+// option that takes one (`--exclude cache/`) is not a source that lands in
+// the root, and --delay-updates is not a delete option. The rows that
+// really write the state keep blocking.
+func TestR105Check17RsyncOptionValuesAreNotSources(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX shell forms")
+	}
+	_, cwd := r105StateFixture(t)
+	if err := os.MkdirAll(filepath.Join(cwd, "out"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	rows := []r105StateRow{
+		{"rsync exclude value into root", "rsync -a --exclude cache/ ~/proj/out ~/.defenseclaw/", false, ""},
+		{"rsync quoted exclude value into root", "rsync -a --exclude 'cache/' out ~/.defenseclaw/", false, ""},
+		{"rsync include filter values into root", "rsync -a --include logs/ --filter '- tmp/' out ~/.defenseclaw/", false, ""},
+		{"rsync link-dest value into root", "rsync -a --link-dest /tmp/prev/ out ~/.defenseclaw/", false, ""},
+		{"rsync -e value into root", "rsync -a -e ssh out ~/.defenseclaw/", false, ""},
+		{"rsync delay-updates into root", "rsync -a --delay-updates out ~/.defenseclaw/", false, ""},
+		{"rsync exclude then contents into root", "rsync -a --exclude cache/ /tmp/x/ ~/.defenseclaw/", true, ""},
+		{"rsync exclude then config into root", "rsync -a --exclude cache/ /tmp/x/config.yaml ~/.defenseclaw/", true, ""},
+		{"rsync delete-after into root", "rsync -a --delete-after out ~/.defenseclaw/", true, ""},
+		{"rsync exclude= then contents into root", "rsync -a --exclude=cache/ /tmp/x/ ~/.defenseclaw/", true, ""},
+	}
+	for _, mode := range []string{"observe", "action"} {
+		r105RunStateRowsChecked(t, mode, cwd, rows, true)
+	}
+}
