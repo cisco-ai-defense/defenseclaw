@@ -17,6 +17,7 @@
 package gateway
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -24,6 +25,7 @@ import (
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
+	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
 )
 
 // GAP-2298, GAP-2225 and GAP-2268 (checker it12 RV14-1..4): the shell opens
@@ -258,6 +260,71 @@ func TestR105CodeBeforeAHomeRedirectTargetStillJudgesIt(t *testing.T) {
 			"source .venv/bin/activate && grep x ~/.defenseclaw/config.yaml > ~/out.txt",
 		} {
 			judge(command, false)
+		}
+	}
+}
+
+// GAP-2328, managed ProtectHome leg: the gateway cannot open the user's
+// home, so its mention scan cannot place a home-spelled target; the
+// redirect target the shell opens is still proven against the hook
+// client's resolved target map, so the state write is blocked and the
+// ~/build.log twin stays allowed.
+func TestR105ProtectedHomeRedirectTargetUsesClientTargets(t *testing.T) {
+	if runtime.GOOS == "windows" || os.Geteuid() == 0 {
+		t.Skip("unprivileged POSIX gateway walk")
+	}
+	homes := filepath.Join(t.TempDir(), "homes")
+	home := filepath.Join(homes, "eng1@dclab.test")
+	cwd := filepath.Join(home, "project")
+	for _, dir := range []string{filepath.Join(home, ".defenseclaw", "hooks"), cwd} {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(home, ".defenseclaw", "config.yaml"), []byte("x\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", home)
+	t.Cleanup(func() { _ = os.Chmod(homes, 0o700) })
+	programs := []string{"$CMD; echo $X", "echo $X", "source env.sh && echo $X", "$CMD; make",
+		". ./env.sh; ./build.sh", `eval "$(direnv export bash)"; npm test`}
+	for _, connectorName := range []string{"claudecode", "codex"} {
+		installDefaultProfileConnector(t, connectorName)
+		for _, program := range programs {
+			for _, row := range []struct {
+				target string
+				block  bool
+			}{
+				{"~/.defenseclaw/config.yaml", true},
+				{"$HOME/.defenseclaw/config.yaml", true},
+				{"~/build.log", false},
+			} {
+				command := program + " > " + row.target
+				payload, err := json.Marshal(map[string]any{"tool_name": "Bash", "cwd": cwd,
+					"tool_input": map[string]string{"command": command}})
+				if err != nil {
+					t.Fatal(err)
+				}
+				targets, ok := hookpaths.Decode(hookpaths.Resolve(payload))
+				if !ok {
+					t.Fatal("client proof did not decode")
+				}
+				if err := os.Chmod(homes, 0); err != nil {
+					t.Fatal(err)
+				}
+				findings := dispatchTrustedAction(t.Context(), trustedActionRequest{
+					Input:     actionfacts.Input{Tool: "Bash", Command: command, CWD: cwd, ActiveHome: home},
+					Connector: connectorName, EnforcementCapable: true,
+					ProtectedHomeHook: true, ResolvedWriteTargets: targets,
+				})
+				if err := os.Chmod(homes, 0o700); err != nil {
+					t.Fatal(err)
+				}
+				if blocked := buildVerdict(findings, "tool_call").Action == "block"; blocked != row.block {
+					t.Errorf("%s %q: blocked=%v, want %v (%v)",
+						connectorName, command, blocked, row.block, FindingStrings(findings))
+				}
+			}
 		}
 	}
 }

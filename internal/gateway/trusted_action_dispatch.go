@@ -796,10 +796,18 @@ func withActiveStateTargetMention(
 	findings []RuleFinding,
 ) []RuleFinding {
 	command, known := trustedBashCommandInput(request.Input)
-	if !known || !hookpaths.ActionStateTargetMention(command, request.Input.CWD, request.Input.ActiveHome) {
+	if !known {
 		return findings
 	}
-	if !provenStateMutationPath(facts, request) && !provenBashAggregateStateWrite(request) &&
+	if !hookpaths.ActionStateTargetMention(command, request.Input.CWD, request.Input.ActiveHome) {
+		// Behind ProtectHome the gateway cannot open the user's home, so the
+		// mention scan cannot place a home target. A redirect target the
+		// shell opens is still proven against the hook client's resolved
+		// target map (GAP-2328: $CMD; echo $X > ~/.defenseclaw/config.yaml).
+		if !request.ProtectedHomeHook || !provenShellRedirectStateWrite(request) {
+			return findings
+		}
+	} else if !provenStateMutationPath(facts, request) && !provenBashAggregateStateWrite(request) &&
 		!provenShellRedirectStateWrite(request) {
 		return findings
 	}
