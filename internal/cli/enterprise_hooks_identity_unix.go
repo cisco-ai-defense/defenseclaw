@@ -360,7 +360,7 @@ func enterpriseHookIdentitySpoolAccounts(ctx context.Context, stderr io.Writer, 
 			}
 		}
 		for _, uid := range enterpriseHookRecordedCallerUIDs(dir) {
-			if !seen[uid] && !enterpriseHookLocalRecordLeft(dir, uid) {
+			if !seen[uid] && !enterpriseHookLocalRecordLeft(ctx, dir, uid) {
 				list(uid, canonicalUser(uid), 0)
 			}
 		}
@@ -676,16 +676,42 @@ func enterpriseHookIdentityDataDir() string {
 // signal). Such a record is not refreshed as a recorded caller's: the pass
 // does not list it, so the cleanup removes it as any unlisted local record.
 // Refreshing it kept a deleted local account's record for good, and status
-// and verify warned identity_records_stale for it (GAP-1864). Tests replace
-// it.
-var enterpriseHookLocalRecordLeft = func(dir string, uid int) bool {
+// and verify warned identity_records_stale for it (GAP-1864).
+//
+// Where the process's own account lookups keep answering for an account
+// deleted after the process first asked (macOS: the guardian's getpwuid
+// kept naming a local account sysadminctl had deleted, while a new process
+// and dscl found none), a found answer is checked against a fresh listing
+// of the local account database (enterpriseHookLocalAccounts, which runs
+// dscl): the uid has left when that listing answers and holds no account
+// with it. A listing that fails or lists nothing shows nothing.
+func enterpriseHookLocalRecordLeft(ctx context.Context, dir string, uid int) bool {
 	record, err := enterprisehooks.ReadIdentitySpoolRecord(dir, strconv.Itoa(uid), nil)
 	if err != nil || record.Facts.Directory != useridentity.DirectoryLocal {
 		return false
 	}
 	_, err = enterprisehooks.StandaloneResolver().LookupUID(uid)
-	return errors.Is(err, unixidentity.ErrNotFound)
+	if errors.Is(err, unixidentity.ErrNotFound) {
+		return true
+	}
+	if err != nil || !enterpriseHookLookupsOutliveDeletion {
+		return false
+	}
+	local, err := enterpriseHookLocalAccounts(ctx)
+	if err != nil || len(local) == 0 {
+		return false
+	}
+	for _, listed := range local {
+		if listed == uid {
+			return false
+		}
+	}
+	return true
 }
+
+// enterpriseHookLookupsOutliveDeletion is
+// unixidentity.ProcessLookupsOutliveDeletion; tests set it.
+var enterpriseHookLookupsOutliveDeletion = unixidentity.ProcessLookupsOutliveDeletion
 
 func enterpriseHookRecordedCallerUIDs(dir string) []int {
 	entries, err := os.ReadDir(dir)

@@ -19,6 +19,9 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/useridentity"
 )
 
+// ProcessLookupsOutliveDeletion: no such cache is known here.
+const ProcessLookupsOutliveDeletion = false
+
 // DefaultUIDRange is a conservative default for other Unix systems.
 func DefaultUIDRange() (int, int) { return 1000, 60000 }
 

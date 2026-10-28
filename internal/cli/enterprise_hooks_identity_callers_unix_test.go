@@ -7,10 +7,12 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"testing"
 	"time"
 
@@ -273,5 +275,75 @@ func TestExemptSpellingTheDirectoryCannotResolveKeepsItsRecord(t *testing.T) {
 				t.Fatalf("exempt_users %q, record %q, holder %q: listed %v; want listed=%v", tc.entry, record.User, holder, listed, tc.want)
 			}
 		})
+	}
+}
+
+// GAP-1864 (macOS leg): the guardian's own uid lookup kept naming a local
+// account deleted after the guardian first asked for it (getpwuid in a
+// long-running process on macOS), so the gate that skips a deleted local
+// account's record never fired there and its record was refreshed at every
+// pass. Where lookups outlive a deletion, a found answer is checked against
+// a fresh listing of the local accounts: a uid it does not hold has left,
+// and a uid it holds, or a listing that fails or lists nothing, keeps the
+// record.
+func TestDeletedLocalAccountRecordGoesWhenTheProcessLookupStillNamesIt(t *testing.T) {
+	identityCallerTestConfig(t)
+	cfg.Enterprise.Enrollment.UnenrolledUsers = config.EnterpriseUnenrolledInspect
+	previousMachine, previousPeers := enterpriseHookLoadMachinePolicyConnectors, enterpriseHookGatewayPeerAccounts
+	previousLocal, previousOutlive := enterpriseHookLocalAccounts, enterpriseHookLookupsOutliveDeletion
+	t.Cleanup(func() {
+		enterpriseHookLoadMachinePolicyConnectors, enterpriseHookGatewayPeerAccounts = previousMachine, previousPeers
+		enterpriseHookLocalAccounts, enterpriseHookLookupsOutliveDeletion = previousLocal, previousOutlive
+	})
+	enterpriseHookLoadMachinePolicyConnectors = func() ([]string, error) { return []string{"claudecode"}, nil }
+	enterpriseHookGatewayPeerAccounts = func(string) []enterpriseHookPeerAccount { return nil }
+	enterpriseHookLookupsOutliveDeletion = true
+	const deleted, kept = 52507, 52502
+	// The stale process lookup still names both accounts.
+	enterprisehooks.SetStandaloneResolver(standaloneTestResolver{accounts: map[string]unixidentity.Account{
+		"fcmx1": {Name: "fcmx1", UID: deleted}, "fcmx2": {Name: "fcmx2", UID: kept},
+	}})
+	dir := t.TempDir()
+	for _, record := range []enterprisehooks.IdentitySpoolRecord{
+		{Key: strconv.Itoa(deleted), User: "fcmx1"},
+		{Key: strconv.Itoa(kept), User: "fcmx2"},
+	} {
+		record.Version, record.UpdatedAt = enterprisehooks.IdentitySpoolRecordVersion, time.Now().UTC()
+		record.Facts = useridentity.DirectoryFacts{Directory: useridentity.DirectoryLocal}
+		data, err := enterprisehooks.MarshalIdentitySpoolRecord(record)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, record.Key+".json"), data, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, tc := range []struct {
+		name        string
+		local       map[string]int
+		err         error
+		wantDeleted bool
+	}{
+		{name: "the listing no longer holds the uid", local: map[string]int{"root": 0, "fcmx2": kept}},
+		{name: "the listing still holds the uid", local: map[string]int{"root": 0, "fcmx1": deleted, "fcmx2": kept}, wantDeleted: true},
+		{name: "the listing fails", err: errors.New("dscl exited 1"), wantDeleted: true},
+		{name: "the listing is empty", local: map[string]int{}, wantDeleted: true},
+	} {
+		enterpriseHookLocalAccounts = func(context.Context) (map[string]int, error) { return tc.local, tc.err }
+		accounts, _, _ := enterpriseHookIdentitySpoolAccounts(context.Background(), io.Discard, dir, enterpriseHookReconcileRun{})
+		listed, _ := listedUIDs(accounts)
+		if got := slices.Contains(listed, deleted); got != tc.wantDeleted {
+			t.Fatalf("%s: accounts %+v; deleted account listed = %v, want %v", tc.name, accounts, got, tc.wantDeleted)
+		}
+		if !slices.Contains(listed, kept) {
+			t.Fatalf("%s: accounts %+v; want the existing local account's record refreshed", tc.name, accounts)
+		}
+	}
+	// Without the cache (Linux) a found answer is taken at its word.
+	enterpriseHookLookupsOutliveDeletion = false
+	enterpriseHookLocalAccounts = func(context.Context) (map[string]int, error) { return map[string]int{"root": 0}, nil }
+	accounts, _, _ := enterpriseHookIdentitySpoolAccounts(context.Background(), io.Discard, dir, enterpriseHookReconcileRun{})
+	if listed, _ := listedUIDs(accounts); !slices.Contains(listed, deleted) {
+		t.Fatalf("accounts %+v; a found lookup without the cache must keep the record", accounts)
 	}
 }

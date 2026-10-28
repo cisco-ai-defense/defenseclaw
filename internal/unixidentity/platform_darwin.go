@@ -72,6 +72,13 @@ func platformOpenDirectoryNodeStates(ctx context.Context) (string, error) {
 	return string(result.stdout), nil
 }
 
+// ProcessLookupsOutliveDeletion is true on macOS: a long-running process's
+// getpwuid (os/user) keeps answering with a local account that was deleted
+// after the process first looked it up, while a new process and dscl find
+// none (GAP-1864). A found answer there is no proof that the account still
+// exists.
+const ProcessLookupsOutliveDeletion = true
+
 // DefaultUIDRange is the interactive-account uid range. macOS local
 // accounts start at 501; directory accounts often use large uids.
 func DefaultUIDRange() (int, int) { return 501, 2147483646 }

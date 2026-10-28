@@ -172,6 +172,11 @@ func readSmallFile(path string, limit int64) ([]byte, error) {
 	return data, nil
 }
 
+// ProcessLookupsOutliveDeletion is false on Linux: NSS answers each lookup
+// from the account databases (nscd and SSSD caches are invalidated on a
+// change), so a found answer means the account exists.
+const ProcessLookupsOutliveDeletion = false
+
 // DefaultUIDRange reads UID_MIN/UID_MAX from /etc/login.defs, falling back
 // to the shadow-utils defaults.
 func DefaultUIDRange() (int, int) {
