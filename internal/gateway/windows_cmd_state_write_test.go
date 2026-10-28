@@ -193,6 +193,51 @@ func TestR105WindowsCMDSlashCStateWrite(t *testing.T) {
 	}
 }
 
+// TestR105WindowsCMDStateDirectoryRemove: a cmd /c body that removes or
+// moves the DefenseClaw state directory itself is a state mutation, as the
+// same command typed into cmd is (checker it9 RV9-2 X02, X07). The hook
+// supplies the resolved directory, as it does on the Windows host.
+func TestR105WindowsCMDStateDirectoryRemove(t *testing.T) {
+	const connectorName = "r105-cmd-state-dir"
+	installToolCallCorpusProfileConnector(t, connectorName, "default")
+	const home = `C:\Users\Alice`
+	resolved := map[string]string{}
+	for _, value := range []string{"C:/Users/Alice/.defenseclaw", "C:/Users/Alice/.defenseclaw/config.yaml",
+		"C:/Users/Alice/.defenseclawx", "C:/Users/Alice/project/build"} {
+		resolved[value] = value
+	}
+	for _, tc := range []struct {
+		command string
+		block   bool
+	}{
+		{`cmd //c "rmdir /s /q %USERPROFILE%\.defenseclaw"`, true},
+		{`cmd /d /c rd /s /q %USERPROFILE%\.defenseclaw`, true},
+		{`cmd /c rd /s /q C:\Users\Alice\.defenseclaw`, true},
+		{`& cmd /c 'rmdir /s /q %USERPROFILE%\.defenseclaw'`, true},
+		{`cmd /c move %USERPROFILE%\.defenseclaw %USERPROFILE%\dc-old`, true},
+		// Ordinary work stays allowed.
+		{`cmd /c dir %USERPROFILE%\.defenseclaw`, false},
+		{`cmd /c rd /s /q %USERPROFILE%\.defenseclawx`, false},
+		{`cmd /c rd /s /q build`, false},
+		{`Write-Output 'cmd /c rd /s /q %USERPROFILE%\.defenseclaw'`, false},
+	} {
+		for _, tool := range []string{"Bash", "shell_command", "PowerShell"} {
+			args, _ := json.Marshal(map[string]string{"command": tc.command})
+			input := actionfacts.Input{Tool: tool, Args: args, CWD: home + `\project`, ActiveHome: home}
+			input.DialectHint = agentHookWindowsShellDialect(input)
+			findings := dispatchTrustedAction(t.Context(), trustedActionRequest{
+				Input: input, LegacyText: string(args), Connector: connectorName,
+				EnforcementCapable: true, ResolvedWriteTargets: resolved,
+			})
+			verdict := buildVerdict(findings, "tool_call")
+			if got := verdict.Action == "block"; got != tc.block {
+				t.Errorf("%s %s (dialect %q): action %q, want block=%t (findings %v)",
+					tool, tc.command, input.DialectHint, verdict.Action, tc.block, findings)
+			}
+		}
+	}
+}
+
 // TestR105WindowsCMDBodyReaderIsLinear: the cmd body reader stays far inside
 // the hook budget on large crafted commands (checker it10 RV10-3: 32 KB took
 // 8.8 s at 60f41d7b57), and a command it cannot read within its bounds

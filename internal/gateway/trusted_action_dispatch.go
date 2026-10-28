@@ -797,11 +797,21 @@ func withActiveStateTargetMention(
 	findings []RuleFinding,
 ) []RuleFinding {
 	command, known := trustedBashCommandInput(request.Input)
-	if !known || !hookpaths.ActionStateTargetMention(command, request.Input.CWD, request.Input.ActiveHome) {
+	if !known {
 		return findings
 	}
-	if !provenStateMutationPath(facts, request) && !provenBashAggregateStateWrite(request) &&
-		!provenShellRedirectStateWrite(request) && !provenCMDSlashCStateWrite(request) {
+	proven := false
+	if hookpaths.ActionStateTargetMention(command, request.Input.CWD, request.Input.ActiveHome) {
+		proven = provenStateMutationPath(facts, request) || provenBashAggregateStateWrite(request) ||
+			provenShellRedirectStateWrite(request) || provenCMDSlashCStateWrite(request)
+	} else if strings.Contains(strings.ToLower(command), ".defenseclaw") {
+		// The mention scan places files below the state directory; a cmd /c
+		// body that removes or moves the directory itself (cmd /c rd /s /q
+		// %USERPROFILE%\.defenseclaw) names none, while the cmd twin proves
+		// the mutation of the state root (checker it9 RV9-2 X02, X07).
+		proven = provenCMDSlashCStateWrite(request)
+	}
+	if !proven {
 		return findings
 	}
 	const ruleID = "tamper.detector_state_write"
