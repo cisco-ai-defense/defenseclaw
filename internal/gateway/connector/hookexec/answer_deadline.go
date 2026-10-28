@@ -32,7 +32,7 @@ import (
 // and a gateway service start gave their block 1.1 to 1.75 s after it
 // (5.1-5.75 s; GAP-0155, GAP-0167, GAP-0171). The budget keeps 1.5 s of the
 // 5 s for that slip; the hook also runs above normal priority there
-// (cmd/defenseclaw-hook/internal/hookpriority).
+// (cmd/internal/hookpriority).
 //
 // A gateway that waits on a remote scanner for the call (Cisco AI Defense,
 // the LLM judge) says so with an informational 102 response
