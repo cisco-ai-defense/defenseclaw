@@ -5768,7 +5768,7 @@ def _restore_case_functions() -> str:
         "Restore-Slot", "Invoke-Quietly", "Convert-HooksForRestore", "Test-Version", "Get-NativeOutput",
         "Read-Text", "Restore-ExternalConfig", "Undo-HookFirst", "Undo-Snapshot",
         "Install-HookFirst", "Save-HookCloser", "Clear-StagedRelease", "Resume-InterruptedRun", "Publish-PreviousSlot",
-        "Remove-Hold", "Restore-Live", "Restore-LiveTree", "Move-LiveTo", "Set-RecoveryPending",
+        "Remove-Hold", "Restore-Live", "Restore-LiveTree", "Move-LiveTo", "Remove-HooksBridge", "Set-RecoveryPending",
     )
     return "\n".join(_ps1_function(name) for name in names)
 
@@ -8389,3 +8389,59 @@ Write-Output "HASHES=$($script:hashes)"
     assert hashes <= 8, out
     restore = _ps1_function("Restore-Slot")
     assert "$plan.Schema -notin @(1, 2)" in restore and "$planSchema = [int]$plan.Schema" in restore
+
+
+@pytest.mark.skipif(POWERSHELL is None, reason="PowerShell is not installed")
+@pytest.mark.allow_subprocess
+@pytest.mark.parametrize("back", ["restore-live-tree", "move-live-to"])
+def test_a_rollback_swap_keeps_the_hook_credentials_readable_until_the_other_install_moves_in(
+    tmp_path: Path, back: str
+) -> None:
+    # GAP-2420: Save-Live moved hooks\ aside with the rest of the data, so for
+    # the seconds until Restore-LiveTree brought the other install's hooks\
+    # in, every hook call of either release answered "missing gateway token"
+    # instead of naming the install. The bridge is hard links to the set-aside
+    # files, never data: neither direction of the swap takes it along.
+    data, hold, other = tmp_path / "data", tmp_path / "data" / ".rollback-hold", tmp_path / "data" / "previous"
+    (data / "hooks").mkdir(parents=True)
+    (data / "hooks" / ".hook-claudecode.token").write_text("new-token", encoding="ascii")
+    (data / "hooks" / ".hookcfg").write_text("closed", encoding="ascii")
+    (data / "config.yaml").write_text("new", encoding="ascii")
+    (other / "data" / "hooks").mkdir(parents=True)
+    (other / "data" / "hooks" / ".hook-claudecode.token").write_text("old-token", encoding="ascii")
+    (other / "data" / "config.yaml").write_text("old", encoding="ascii")
+    names = ("Save-Live", "New-HooksBridge", "Remove-HooksBridge", "Restore-LiveTree", "Move-LiveTo", "Get-DataEntries",
+             "Move-Path", "Remove-Tree", "Invoke-Quietly")
+    script = f"""
+$ErrorActionPreference = 'Stop'
+$DataDir = '{data}'
+$Venv = Join-Path $DataDir '.venv'
+$InstallerDir = Join-Path $DataDir 'installer'
+$NotData = @('.venv', 'previous', 'installer', 'logs', '.install.lock', 'backups', '.rollback-hold')
+function Copy-BinDir([string]$To) {{ }}
+function Save-ExternalConfig([string]$Slot) {{ }}
+if (-not $IsWindows -and $PSVersionTable.PSEdition -eq 'Core') {{ function Get-Acl {{ return $null }}; function Set-DirectoryAcl {{ }} }}
+else {{ {_ps1_function("Set-DirectoryAcl")} }}
+{chr(10).join(_ps1_function(name) for name in names)}
+Save-Live '{hold}'
+$bridge = Join-Path $DataDir 'hooks'
+Write-Output ("BRIDGE_TOKEN=" + [IO.File]::ReadAllText((Join-Path $bridge '.hook-claudecode.token')))
+Write-Output ("BRIDGE_CFG=" + [IO.File]::ReadAllText((Join-Path $bridge '.hookcfg')))
+Write-Output ("CONFIG_LIVE=" + (Test-Path -LiteralPath (Join-Path $DataDir 'config.yaml')))
+if ('{back}' -eq 'restore-live-tree') {{ Restore-LiveTree '{other}' }} else {{ Move-LiveTo '{other}' }}
+Write-Output ("MARKER_LEFT=" + (Test-Path -LiteralPath (Join-Path $bridge '.rollback-hooks-bridge')))
+Write-Output ("HOLD_TOKEN=" + [IO.File]::ReadAllText('{hold / "data" / "hooks" / ".hook-claudecode.token"}'))
+"""
+    completed = _run_powershell(script)
+    out = completed.stdout + completed.stderr
+    assert completed.returncode == 0, out
+    assert "BRIDGE_TOKEN=new-token" in out and "BRIDGE_CFG=closed" in out, out
+    assert "CONFIG_LIVE=False" in out and "MARKER_LEFT=False" in out and "HOLD_TOKEN=new-token" in out, out
+    if back == "restore-live-tree":
+        # The other install's hooks\ is live, whole; the bridge went first.
+        assert (data / "hooks" / ".hook-claudecode.token").read_text(encoding="ascii") == "old-token"
+        assert (data / "config.yaml").read_text(encoding="ascii") == "old"
+    else:
+        # An undo moves only real data back into the slot, never the bridge.
+        assert not (data / "hooks").exists()
+        assert (other / "data" / "hooks" / ".hook-claudecode.token").read_text(encoding="ascii") == "old-token"

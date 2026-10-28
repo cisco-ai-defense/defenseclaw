@@ -3965,9 +3965,40 @@ function Save-Live([string]$Slot) {
     Copy-BinDir (Join-Path $Slot "bin")
     New-Item -ItemType Directory -Path (Join-Path $Slot "data") -Force | Out-Null
     foreach ($entry in Get-DataEntries) { Move-Path $entry.FullName (Join-Path $Slot "data\$($entry.Name)") }
+    New-HooksBridge (Join-Path $Slot "data\hooks")
     if (Test-Path -LiteralPath $Venv) { Move-Path $Venv (Join-Path $Slot "venv") 60 }
     if (Test-Path -LiteralPath $InstallerDir) { Move-Path $InstallerDir (Join-Path $Slot "installer") }
     Save-ExternalConfig $Slot
+}
+
+# While a rollback swaps the data folders (Save-Live, then the programs, then
+# Restore-LiveTree, several seconds on Windows), hooks\ is gone, and every agent
+# hook call, of either release, answered "missing gateway token ... not found"
+# instead of naming the install (GAP-2420). A bridge hooks\ of hard links to the
+# set-aside files keeps the state those calls saw a moment before (gateway
+# stopped, install lock held) until the other install's hooks\ moves in. It is
+# never data: Restore-LiveTree and Move-LiveTo remove it before they move.
+function New-HooksBridge([string]$From) {
+    $bridge = Join-Path $DataDir "hooks"
+    if ((Test-Path -LiteralPath $bridge) -or -not (Test-Path -LiteralPath $From -PathType Container)) { return }
+    try {
+        New-Item -ItemType Directory -Path $bridge -ErrorAction Stop | Out-Null
+        # The same permissions as the hooks\ it stands in for.
+        Set-DirectoryAcl $bridge (Get-Acl -LiteralPath $From)
+        Set-Content -LiteralPath (Join-Path $bridge ".rollback-hooks-bridge") -Value "" -Encoding Ascii -ErrorAction Stop
+        foreach ($file in @(Get-ChildItem -LiteralPath $From -Force -File -ErrorAction Stop)) {
+            if ($file.Attributes -band [IO.FileAttributes]::ReparsePoint) { continue }
+            New-Item -ItemType HardLink -Path (Join-Path $bridge $file.Name) -Value $file.FullName -ErrorAction Stop | Out-Null
+        }
+    } catch {
+        # Best effort: without it the calls are refused with the older text.
+        Invoke-Quietly { Remove-HooksBridge }
+    }
+}
+
+function Remove-HooksBridge {
+    $bridge = Join-Path $DataDir "hooks"
+    if (Test-Path -LiteralPath (Join-Path $bridge ".rollback-hooks-bridge")) { Remove-Tree $bridge }
 }
 
 function Restore-Live([string]$Slot) {
@@ -3980,7 +4011,9 @@ function Restore-Live([string]$Slot) {
 function Restore-LiveTree([string]$Slot) {
     # Move $Slot's data, venv and installer back into place. Alone it undoes a
     # Save-Live that failed part-way: that one only copied the binaries.
-    foreach ($entry in @(Get-ChildItem -LiteralPath (Join-Path $Slot "data") -Force -ErrorAction SilentlyContinue)) {
+    # hooks\ first, right after its bridge goes (GAP-2420).
+    Remove-HooksBridge
+    foreach ($entry in @(Get-ChildItem -LiteralPath (Join-Path $Slot "data") -Force -ErrorAction SilentlyContinue | Sort-Object { $_.Name -ne "hooks" })) {
         Move-Path $entry.FullName (Join-Path $DataDir $entry.Name)
     }
     if ((Test-Path -LiteralPath (Join-Path $Slot "venv")) -and -not (Test-Path -LiteralPath $Venv)) { Move-Path (Join-Path $Slot "venv") $Venv 60 }
@@ -3992,6 +4025,7 @@ function Restore-LiveTree([string]$Slot) {
 function Move-LiveTo([string]$Slot) {
     # Move what Restore-Live brought in from $Slot back into it. Only valid
     # while the install it replaced is set aside in full elsewhere.
+    Remove-HooksBridge
     New-Item -ItemType Directory -Path (Join-Path $Slot "data") -Force | Out-Null
     foreach ($entry in Get-DataEntries) { Move-Path $entry.FullName (Join-Path $Slot "data\$($entry.Name)") }
     if (Test-Path -LiteralPath $Venv) { Move-Path $Venv (Join-Path $Slot "venv") 60 }
