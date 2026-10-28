@@ -280,6 +280,11 @@ func pinnedOutageSentence(rel, sentence string) bool {
 			strings.HasPrefix(sentence, "On a managed host the administrator's fail mode decides an outage: `closed`, the default, denies it")
 	case "connectors/cursor.mdx":
 		return strings.HasPrefix(sentence, "The administrator's resolved fail mode decides what the running hook does on a gateway outage")
+	case "connectors/hermes.mdx":
+		// The managed-standalone Windows row of the Hermes outage table
+		// (docs e9847430bd, GAP-0515, verified on dc-fc-r104-sa-ewin1) is
+		// pinned by test-docs-claims.ts (train T7).
+		return strings.HasPrefix(sentence, "On Windows, where Hermes has no guard, an administrator's `open` lets the call run during an outage")
 	}
 	return false
 }
