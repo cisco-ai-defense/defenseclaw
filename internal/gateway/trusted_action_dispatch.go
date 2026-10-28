@@ -887,8 +887,16 @@ func provenStateMutationPath(facts actionfacts.Facts, request trustedActionReque
 		if physical == "" && !request.SkipLocalFilesystemResolution {
 			if request.ProtectedHomeHook {
 				// Only an OS-proved alias is safe to resolve here when the
-				// authenticated hook supplied no target-map entry.
+				// authenticated hook supplied no target-map entry. The home
+				// itself is the peer's home from the account database: a
+				// find that starts there (`yes | find ~ ...`, which the
+				// client lists no target for) is judged from it (GAP-2404
+				// pod ip21, managed RHEL).
 				physical, _ = hookpaths.ResolveActiveStateHardlinkTarget(candidate.Resolved, projected.ActiveHome)
+				if physical == "" && path.IsAbs(candidate.Resolved) &&
+					path.Clean(candidate.Resolved) == path.Clean(projected.ActiveHome) {
+					physical = path.Clean(candidate.Resolved)
+				}
 			} else {
 				physical, _ = hookpaths.ResolveWriteTarget(candidate.Resolved)
 			}

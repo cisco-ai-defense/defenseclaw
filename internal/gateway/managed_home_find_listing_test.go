@@ -127,12 +127,6 @@ func TestR105GAP2404ManagedHomeFindUsesTheClientListing(t *testing.T) {
 					want := archive != ""
 					piped := strings.HasPrefix(row, "yes |")
 					blocked, findings := r105ManagedHook(t, connector, mode, row, cwd, home, clientMaps[connector+row])
-					if piped && want {
-						// The managed pipeline with a state archive is not
-						// this row's class (a separate managed finding); only
-						// its benign allow is checked here.
-						continue
-					}
 					if blocked != want {
 						t.Errorf("%s %s archive %q: %q blocked=%v, want %v: %v", mode, connector, archive, row, blocked, want, findings)
 					}
