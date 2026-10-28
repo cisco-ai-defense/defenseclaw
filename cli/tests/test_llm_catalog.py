@@ -102,6 +102,20 @@ _FAKE_COST = {
 }
 
 
+def test_gap2306_a_runtime_resolved_provider_is_checked_while_the_registry_tracks_it() -> None:
+    catalog = {"providers": [{"name": "openrouter", "models": ["z-ai/glm-5", "x/missing"]}]}
+    assert mod.check_catalog(catalog, _FAKE_COST, _TODAY) == [
+        ("openrouter", "x/missing", "not found in litellm registry")
+    ]
+    without_openrouter = {k: v for k, v in _FAKE_COST.items() if not k.startswith("openrouter/")}
+    assert mod.check_catalog(catalog, without_openrouter, _TODAY) == []
+    # Every other mapped provider still fails on an id the registry lacks.
+    anthropic = {"providers": [{"name": "anthropic", "models": ["claude-gone-1"]}]}
+    assert mod.check_catalog(anthropic, without_openrouter, _TODAY) == [
+        ("anthropic", "claude-gone-1", "not found in litellm registry")
+    ]
+
+
 def test_resolve_prefers_provider_prefixed_entry() -> None:
     assert mod.resolve(_FAKE_COST, "openrouter", "z-ai/glm-5") == "openrouter/z-ai/glm-5"
 
