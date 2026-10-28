@@ -2857,12 +2857,20 @@ func hermesResolvedConfigPath(SetupOpts) (string, error) {
 // selects instead of the default one DefenseClaw set up (GAP-0499). A check
 // that passed on the default home or profile proved nothing about another
 // one Hermes runs from.
+//
+// A managed check reads that evidence even when it runs as the account
+// itself: the Linux and macOS guardian verifies each account in a worker
+// with the account's uid and HOME, so the account home is the process home
+// there, and the worker's clean environment says nothing about the
+// environment.d, startup-file or recorded HERMES_HOME the account's Hermes
+// starts with (GAP-2374). Only a per-user check, whose own environment is
+// the account's, resolves the home from that environment instead.
 func hermesVerifiedConfigPath(opts SetupOpts) (string, error) {
 	configPath, err := hermesResolvedConfigPath(opts)
 	if err != nil {
 		return "", fmt.Errorf("hermes hooks not verified: %w", err)
 	}
-	if home := activeUserHomeOverride(); HermesConfigPathOverride == "" && home != "" && (runtime.GOOS == "windows" || !isProcessUserHome(home)) {
+	if home := activeUserHomeOverride(); HermesConfigPathOverride == "" && home != "" && (runtime.GOOS == "windows" || opts.ManagedEnterprise || !isProcessUserHome(home)) {
 		hermesHome := filepath.Dir(configPath)
 		if err := hermespath.VerifyAccountHome(home, hermesHome, hermesHomeSetUpAt(opts.DataDir, hermesHome)); err != nil {
 			return "", fmt.Errorf("hermes hooks not verified: %w", err)
