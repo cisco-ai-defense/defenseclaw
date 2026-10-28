@@ -19,11 +19,11 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--check", action="store_true")
     args = parser.parse_args()
-    adapter = (ROOT / "internal/opencodebridge/adapter.js").read_text()
+    adapter = (ROOT / "internal/opencodebridge/adapter.js").read_text(encoding="utf-8")
     stale = False
     for target in TARGETS:
         path = ROOT / target
-        current = path.read_text()
+        current = path.read_text(encoding="utf-8")
         before, rest = current.split(BEGIN)
         _, after = rest.split(END)
         expected = before + BEGIN + adapter.rstrip() + "\n" + END + after
@@ -33,7 +33,7 @@ def main() -> int:
             print(f"Stale OpenCode v2 adapter: {target}")
             stale = True
         else:
-            path.write_text(expected)
+            path.write_text(expected, encoding="utf-8", newline="\n")
     return int(stale)
 
 

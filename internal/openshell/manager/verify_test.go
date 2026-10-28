@@ -321,7 +321,7 @@ func TestCreateChecksTheWorkload(t *testing.T) {
 		}
 		paths = append(paths, f.Path)
 	}
-	if !slices.Contains(paths, "/usr/local/lib/defenseclaw/opencode/defenseclaw.js") || !slices.Contains(paths, "/etc/opencode/opencode.json") ||
+	if !slices.Contains(paths, "/usr/local/lib/defenseclaw/opencode/index.js") || !slices.Contains(paths, "/etc/opencode/opencode.json") ||
 		!slices.Contains(paths, "/usr/local/lib/defenseclaw/bin/opencode-launch") || !slices.Equal(calls[0].Command[8:], paths) {
 		t.Fatalf("checked %q, recorded %q", calls[0].Command[8:], paths)
 	}

@@ -27,6 +27,8 @@ import pytest
 from packaging.markers import Marker
 from packaging.requirements import Requirement
 from packaging.specifiers import SpecifierSet
+from packaging.tags import cpython_tags
+from packaging.utils import parse_wheel_filename
 from packaging.version import Version
 
 try:
@@ -42,7 +44,7 @@ RUNTIME_CONTRACT = {
     "rich": (">=14.2,<15", None),
     "textual": (">=8.2.8,<9", None),
     "pygments": (">=2.20,<3", None),
-    "litellm": (">=1.91.5,<1.92.0", None),
+    "litellm": (">=1.100.4,<1.101.0", None),
     "importlib-metadata": (">=8.7.1,<8.8", None),
 }
 
@@ -62,6 +64,14 @@ WHEEL_SECURITY_FLOOR_CONTRACT = {
 }
 
 TOMLI_COMPATIBILITY_CONTRACT = (">=2.0.1", 'python_version < "3.11"')
+
+# CVE-2026-112906/112907/112913/112914/112937/112940 are fixed in filelock
+# 4.2.1, and every fixed release requires Python >=3.11. Python 3.10 stays
+# below 4.1, which added three of them (see the wheel contract in ci.yml).
+FILELOCK_SECURITY_CONTRACT = {
+    'python_version >= "3.11"': ">=4.2.1",
+    'python_version < "3.11"': "<4.1",
+}
 
 SKILL_SCANNER_VERSION = "2.2.1"
 # 2.2.1 ships only platform wheels (each bundles a CEL helper): no
@@ -141,8 +151,9 @@ def test_dependency_repair_cannot_lower_security_floors() -> None:
         requirements = _requirements(requirement_set)
         assert Version("1.83.7") not in requirements["litellm"].specifier
         assert Version("1.91.4") not in requirements["litellm"].specifier
-        assert Version("1.91.5") in requirements["litellm"].specifier
-        assert Version("1.92.0") not in requirements["litellm"].specifier
+        assert Version("1.100.3") not in requirements["litellm"].specifier
+        assert Version("1.100.4") in requirements["litellm"].specifier
+        assert Version("1.101.0") not in requirements["litellm"].specifier
         assert Version("8.5.0") not in requirements["importlib-metadata"].specifier
         assert Version("8.7.1") in requirements["importlib-metadata"].specifier
         assert Version("8.8.0") not in requirements["importlib-metadata"].specifier
@@ -183,6 +194,30 @@ def test_python_310_toml_parser_dependency_is_source_and_lock_metadata() -> None
     )
 
 
+def test_filelock_floor_is_marked_per_python_line_in_source_and_lock() -> None:
+    document = tomllib.loads(PYPROJECT.read_text(encoding="utf-8"))
+    direct = {
+        str(requirement.marker): str(requirement.specifier)
+        for requirement in map(Requirement, document["project"]["dependencies"])
+        if requirement.name == "filelock"
+    }
+    assert direct == FILELOCK_SECURITY_CONTRACT
+
+    lock = tomllib.loads(UV_LOCK.read_text(encoding="utf-8"))
+    project = next(package for package in lock["package"] if package["name"] == "defenseclaw")
+    python_310 = {"python_version": "3.10", "python_full_version": "3.10.14"}
+    python_311 = {"python_version": "3.11", "python_full_version": "3.11.0"}
+    locked = {}
+    for dependency in project["dependencies"]:
+        if dependency["name"] == "filelock":
+            marker = Marker(dependency["marker"])
+            line = "3.10" if marker.evaluate(python_310) else "3.11+"
+            assert marker.evaluate(python_311) == (line == "3.11+")
+            locked[line] = Version(dependency["version"])
+    assert locked["3.10"] < Version("4.1")
+    assert locked["3.11+"] >= Version("4.2.1")
+
+
 def test_dev_graph_does_not_force_incompatible_snapshot_metadata() -> None:
     """The unused snapshot plugin cannot coexist with the project's pytest 9 pin."""
     document = tomllib.loads(PYPROJECT.read_text(encoding="utf-8"))
@@ -218,15 +253,25 @@ def test_lock_records_the_same_runtime_and_security_contracts() -> None:
     assert locked["cisco-ai-skill-scanner"] == SKILL_SCANNER_VERSION
     assert locked["cisco-ai-mcp-scanner"] == MCP_SCANNER_VERSION
     assert locked["textual"] == TEXTUAL_LOCKED_VERSION
-    assert Version(locked["litellm"]) >= Version("1.91.5")
+    assert Version(locked["litellm"]) >= Version("1.100.4")
     assert Version(locked["importlib-metadata"]) >= Version("8.7.1")
     assert Version(locked["rich"]) in Requirement("rich>=14.2,<15").specifier
 
     litellm = next(package for package in lock["package"] if package["name"] == "litellm")
-    assert any(
-        wheel["url"].endswith(f"litellm-{litellm['version']}-py3-none-any.whl")
+    wheel_tags = {
+        tag
         for wheel in litellm["wheels"]
-    )
+        for tag in parse_wheel_filename(wheel["url"].rpartition("/")[2])[3]
+    }
+    # The patched line ships native abi3 wheels. Prove every supported
+    # Python/OS pair can install without adding a compiler requirement.
+    for minor in (10, 11, 12, 13):
+        for platform in (
+            "macosx_10_12_x86_64", "macosx_11_0_arm64",
+            "manylinux_2_28_x86_64", "manylinux_2_28_aarch64", "win_amd64",
+        ):
+            compatible = set(cpython_tags((3, minor), abis=[f"cp3{minor}"], platforms=[platform]))
+            assert wheel_tags & compatible, (minor, platform)
 
 
 def test_windows_python_313_dependency_lock_has_supported_onnxruntime_wheel() -> None:
@@ -280,7 +325,7 @@ def test_scanner_metadata_intersection_is_satisfiable() -> None:
     # Authoritative Requires-Dist fields from the shipped scanner wheels:
     # skill scanner 2.2.1: rich>=14.0,<15, textual>=7.0,<9, litellm>=1.89.7,<2;
     # Textual 8.2.8: rich>=14.2; MCP scanner 4.3.0: litellm>=1.77.0;
-    # project policy: Textual>=8.2.8,<9, Rich>=14.2,<15, LiteLLM>=1.91.5,<1.92.
+    # project policy: Textual>=8.2.8,<9, Rich>=14.2,<15, LiteLLM>=1.100.4,<1.101.
     # MCP scanner 4.8.x pins litellm==1.93.0 (CVE-2026-84377), so 4.3.0 stays.
     intersections = {
         "rich": [Requirement("rich<15,>=14.0"), Requirement("rich>=14.2"), Requirement("rich>=14.2,<15")],
@@ -288,7 +333,7 @@ def test_scanner_metadata_intersection_is_satisfiable() -> None:
         "litellm": [
             Requirement("litellm<2,>=1.89.7"),
             Requirement("litellm>=1.77.0"),
-            Requirement("litellm>=1.91.5,<1.92.0"),
+            Requirement("litellm>=1.100.4,<1.101.0"),
         ],
         "importlib-metadata": [
             Requirement("importlib-metadata>=8.7.1,<8.8"),
@@ -297,7 +342,7 @@ def test_scanner_metadata_intersection_is_satisfiable() -> None:
     witnesses = {
         "rich": Version("14.3.4"),
         "textual": Version(TEXTUAL_LOCKED_VERSION),
-        "litellm": Version("1.91.5"),
+        "litellm": Version("1.100.4"),
         "importlib-metadata": Version("8.7.1"),
     }
     for name, requirements in intersections.items():

@@ -42,7 +42,7 @@ $INSTALLER "cisco-ai-skill-scanner==${SKILL_SCANNER_VERSION}"
 
 echo ""
 echo "Installing mcp-scanner (cisco-ai-mcp-scanner ${MCP_SCANNER_VERSION})..."
-$INSTALLER "cisco-ai-mcp-scanner==${MCP_SCANNER_VERSION}" "litellm>=1.91.5,<1.92.0"
+$INSTALLER "cisco-ai-mcp-scanner==${MCP_SCANNER_VERSION}" "litellm>=1.100.4,<1.101.0"
 
 echo ""
 echo "Installing aibom (cisco-aibom)..."
