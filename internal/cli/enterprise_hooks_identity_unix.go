@@ -684,13 +684,19 @@ func enterpriseHookIdentityDataDir() string {
 // and dscl found none), a found answer is checked against a fresh listing
 // of the local account database (enterpriseHookLocalAccounts, which runs
 // dscl): the uid has left when that listing answers and holds no account
-// with it. A listing that fails or lists nothing shows nothing.
+// with it. A listing that fails or lists nothing shows nothing. That
+// listing holds only the local node, so an account of another directory
+// node that the record's facts read as local (a network account of an
+// LDAPv3 or Open Directory bind with no Active Directory or mobile marker)
+// is not in it either: the uid has left only when a fresh read across the
+// search policy (enterpriseHookRecordedAccountGone) also has no record of
+// the account's name.
 func enterpriseHookLocalRecordLeft(ctx context.Context, dir string, uid int) bool {
 	record, err := enterprisehooks.ReadIdentitySpoolRecord(dir, strconv.Itoa(uid), nil)
 	if err != nil || record.Facts.Directory != useridentity.DirectoryLocal {
 		return false
 	}
-	_, err = enterprisehooks.StandaloneResolver().LookupUID(uid)
+	account, err := enterprisehooks.StandaloneResolver().LookupUID(uid)
 	if errors.Is(err, unixidentity.ErrNotFound) {
 		return true
 	}
@@ -706,8 +712,17 @@ func enterpriseHookLocalRecordLeft(ctx context.Context, dir string, uid int) boo
 			return false
 		}
 	}
-	return true
+	name := strings.TrimSpace(account.Name)
+	if name == "" {
+		name = strings.TrimSpace(record.User)
+	}
+	return enterpriseHookRecordedAccountGone(ctx, name)
 }
+
+// enterpriseHookRecordedAccountGone is unixidentity.AccountRecordGone: a
+// fresh dscl /Search read of the name finds no record while no bound
+// directory node is offline. Tests replace it.
+var enterpriseHookRecordedAccountGone = unixidentity.AccountRecordGone
 
 // enterpriseHookLookupsOutliveDeletion is
 // unixidentity.ProcessLookupsOutliveDeletion; tests set it.

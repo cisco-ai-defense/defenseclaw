@@ -291,9 +291,11 @@ func TestDeletedLocalAccountRecordGoesWhenTheProcessLookupStillNamesIt(t *testin
 	cfg.Enterprise.Enrollment.UnenrolledUsers = config.EnterpriseUnenrolledInspect
 	previousMachine, previousPeers := enterpriseHookLoadMachinePolicyConnectors, enterpriseHookGatewayPeerAccounts
 	previousLocal, previousOutlive := enterpriseHookLocalAccounts, enterpriseHookLookupsOutliveDeletion
+	previousGone := enterpriseHookRecordedAccountGone
 	t.Cleanup(func() {
 		enterpriseHookLoadMachinePolicyConnectors, enterpriseHookGatewayPeerAccounts = previousMachine, previousPeers
 		enterpriseHookLocalAccounts, enterpriseHookLookupsOutliveDeletion = previousLocal, previousOutlive
+		enterpriseHookRecordedAccountGone = previousGone
 	})
 	enterpriseHookLoadMachinePolicyConnectors = func() ([]string, error) { return []string{"claudecode"}, nil }
 	enterpriseHookGatewayPeerAccounts = func(string) []enterpriseHookPeerAccount { return nil }
@@ -322,14 +324,24 @@ func TestDeletedLocalAccountRecordGoesWhenTheProcessLookupStillNamesIt(t *testin
 		name        string
 		local       map[string]int
 		err         error
+		searchGone  bool
 		wantDeleted bool
 	}{
-		{name: "the listing no longer holds the uid", local: map[string]int{"root": 0, "fcmx2": kept}},
-		{name: "the listing still holds the uid", local: map[string]int{"root": 0, "fcmx1": deleted, "fcmx2": kept}, wantDeleted: true},
-		{name: "the listing fails", err: errors.New("dscl exited 1"), wantDeleted: true},
-		{name: "the listing is empty", local: map[string]int{}, wantDeleted: true},
+		{name: "the listing no longer holds the uid and the directory search has no record", local: map[string]int{"root": 0, "fcmx2": kept}, searchGone: true},
+		// A network account of an LDAPv3 or Open Directory bind whose facts
+		// read as local is in no local listing; the search policy still
+		// finds it, so its record stays (GAP-1864 hardening, LEAD 06:44).
+		{name: "the listing no longer holds the uid but the directory search finds it", local: map[string]int{"root": 0, "fcmx2": kept}, wantDeleted: true},
+		{name: "the listing still holds the uid", local: map[string]int{"root": 0, "fcmx1": deleted, "fcmx2": kept}, searchGone: true, wantDeleted: true},
+		{name: "the listing fails", err: errors.New("dscl exited 1"), searchGone: true, wantDeleted: true},
+		{name: "the listing is empty", local: map[string]int{}, searchGone: true, wantDeleted: true},
 	} {
 		enterpriseHookLocalAccounts = func(context.Context) (map[string]int, error) { return tc.local, tc.err }
+		var searched []string
+		enterpriseHookRecordedAccountGone = func(_ context.Context, name string) bool {
+			searched = append(searched, name)
+			return tc.searchGone
+		}
 		accounts, _, _ := enterpriseHookIdentitySpoolAccounts(context.Background(), io.Discard, dir, enterpriseHookReconcileRun{})
 		listed, _ := listedUIDs(accounts)
 		if got := slices.Contains(listed, deleted); got != tc.wantDeleted {
@@ -337,6 +349,9 @@ func TestDeletedLocalAccountRecordGoesWhenTheProcessLookupStillNamesIt(t *testin
 		}
 		if !slices.Contains(listed, kept) {
 			t.Fatalf("%s: accounts %+v; want the existing local account's record refreshed", tc.name, accounts)
+		}
+		if slices.ContainsFunc(searched, func(name string) bool { return name != "fcmx1" }) {
+			t.Fatalf("%s: directory search asked for %v; want only the account the lookup named", tc.name, searched)
 		}
 	}
 	// Without the cache (Linux) a found answer is taken at its word.
