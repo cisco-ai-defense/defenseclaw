@@ -8420,11 +8420,13 @@ $InstallerDir = Join-Path $DataDir 'installer'
 $NotData = @('.venv', 'previous', 'installer', 'logs', '.install.lock', 'backups', '.rollback-hold')
 function Copy-BinDir([string]$To) {{ }}
 function Save-ExternalConfig([string]$Slot) {{ }}
-if (-not $IsWindows -and $PSVersionTable.PSEdition -eq 'Core') {{ function Get-Acl {{ return $null }}; function Set-DirectoryAcl {{ }} }}
-else {{ {_ps1_function("Set-DirectoryAcl")} }}
 {chr(10).join(_ps1_function(name) for name in names)}
 Save-Live '{hold}'
 $bridge = Join-Path $DataDir 'hooks'
+if ($IsWindows -or $PSVersionTable.PSEdition -ne 'Core') {{
+    $want = (Get-Acl -LiteralPath '{hold / "data" / "hooks"}').GetSecurityDescriptorSddlForm('Access')
+    Write-Output ("ACL_SAME=" + ((Get-Acl -LiteralPath $bridge).GetSecurityDescriptorSddlForm('Access') -eq $want))
+}}
 Write-Output ("BRIDGE_TOKEN=" + [IO.File]::ReadAllText((Join-Path $bridge '.hook-claudecode.token')))
 Write-Output ("BRIDGE_CFG=" + [IO.File]::ReadAllText((Join-Path $bridge '.hookcfg')))
 Write-Output ("CONFIG_LIVE=" + (Test-Path -LiteralPath (Join-Path $DataDir 'config.yaml')))
@@ -8437,6 +8439,13 @@ Write-Output ("HOLD_TOKEN=" + [IO.File]::ReadAllText('{hold / "data" / "hooks" /
     assert completed.returncode == 0, out
     assert "BRIDGE_TOKEN=new-token" in out and "BRIDGE_CFG=closed" in out, out
     assert "CONFIG_LIVE=False" in out and "MARKER_LEFT=False" in out and "HOLD_TOKEN=new-token" in out, out
+    if os.name == "nt":
+        # The bridge has the access rules of the hooks\\ it stands in for:
+        # both inherit the data folder's.
+        assert "ACL_SAME=True" in out, out
+    # GAP-2426: no ACL call that writes nothing (an unchanged Get-Acl object).
+    bridge = _ps1_function("New-HooksBridge")
+    assert "Set-DirectoryAcl" not in bridge and "Get-Acl" not in bridge, bridge
     if back == "restore-live-tree":
         # The other install's hooks\ is live, whole; the bridge went first.
         assert (data / "hooks" / ".hook-claudecode.token").read_text(encoding="ascii") == "old-token"

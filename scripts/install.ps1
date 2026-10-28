@@ -3982,9 +3982,9 @@ function New-HooksBridge([string]$From) {
     $bridge = Join-Path $DataDir "hooks"
     if ((Test-Path -LiteralPath $bridge) -or -not (Test-Path -LiteralPath $From -PathType Container)) { return }
     try {
+        # It inherits the data folder's permissions, as the hooks\ it stands in
+        # for does; the linked files keep their own (GAP-2426).
         New-Item -ItemType Directory -Path $bridge -ErrorAction Stop | Out-Null
-        # The same permissions as the hooks\ it stands in for.
-        Set-DirectoryAcl $bridge (Get-Acl -LiteralPath $From)
         Set-Content -LiteralPath (Join-Path $bridge ".rollback-hooks-bridge") -Value "" -Encoding Ascii -ErrorAction Stop
         foreach ($file in @(Get-ChildItem -LiteralPath $From -Force -File -ErrorAction Stop)) {
             if ($file.Attributes -band [IO.FileAttributes]::ReparsePoint) { continue }
