@@ -1423,6 +1423,9 @@ describe('Known limits by lead decision (rel-1-0-4 P1 reconcile)', () => {
 // heading of the page; the row reads only that section and its subsections.
 type DocRow = { gap: string; page: string; section?: string; has?: string[]; lacks?: string[] };
 const r105Rows: DocRow[] = [
+  { gap: "GAP-2360", page: "guardrail/index.mdx", has: ["| **Select hook fail mode** *(asked only when this run turns the guardrail on or switches between observe and action;", "`defenseclaw init` already turns the guardrail on, so a later run that keeps the mode does not ask it."], lacks: ["asked on first setup or when the mode changes", "there is no hook fail mode question"] },
+  { gap: "GAP-2366", page: "reference/env-vars.mdx", has: ["`DEFENSECLAW_ENTERPRISE_PROFILE` exported in a shell is dropped when the", "command starts. The writers keep writing as usual, and `defenseclaw doctor`", "lists the variable under `Ignored environment overrides`."], lacks: ["process's writers refuse changes (exit code `3`"] },
+  { gap: "GAP-2363", page: "guardrail/multi-connector.mdx", has: ["Setup first asks the new agent's enforcement mode, prints what it will change, and then", "ask `Proceed? [Y/n]`; Enter applies it, and `--yes` skips the question in scripts."] },
   { gap: "GAP-2354", page: "support-matrix.mdx", has: ["On a per-user install with the `default` or `permissive` rule pack the call runs", "With the `strict` rule pack, on a managed install and inside a sandbox, the call is denied."], lacks: ["(disk full, database busy), the call is denied."] },
   { gap: "GAP-2356", page: "guardrail/user-and-group-policies.mdx", section: "Before you start", has: ["Steps 1 to 3 are for a per-user install. A managed host (Linux, macOS or Windows) has no `defenseclaw guardrail` commands", "`defenseclaw.exe config validate FILE` and `defenseclaw.exe enterprise windows profile-explain --user CORP\\alice`"] },
   { gap: "GAP-2357", page: "guardrail/user-and-group-policies.mdx", section: "Steps", has: ["With no `--user`, `guardrail profile explain` explains the account that runs the command. The managed `enterprise linux|macos|windows profile-explain` commands need `--user`."], lacks: ["3. Ask which profile a person gets. With no `--user`, it explains the account that runs the command."] },
@@ -1565,7 +1568,7 @@ const r105Rows: DocRow[] = [
   { gap: "GAP-1635", page: "policies/admission.mdx", has: ["`tool list` prints one table per connector", "`UPDATED` shows `-` for an entry until it is changed"] },
   { gap: "GAP-1659", page: "guardrail/user-and-group-policies.mdx", section: "A complete example", has: ["hilt: {enabled: true, min_severity: LOW}"], lacks: ["hilt: {enabled: true, min_severity: HIGH}"] },
   { gap: "GAP-0595", page: "ai-discovery.mdx", has: ["asks `Proceed? [Y/n]`; press Enter to continue. In a script or scheduled task, use `defenseclaw agent", "It asks `Proceed? [Y/n]`; `--yes` skips the question."] },
-  { gap: "GAP-0633", page: "reference/env-vars.mdx", has: ["where the profile is standalone, the Linux default; on Windows and macOS", "the writers keep writing"] },
+  { gap: "GAP-0633", page: "reference/env-vars.mdx", has: ["exported in a shell is dropped when the", "The writers keep writing as usual"], lacks: ["where the profile is standalone, the Linux default"] },
   { gap: "GAP-0669", page: "stories/cursor-secret-exfil.mdx", has: ["defenseclaw setup cursor --yes --mode action --rule-pack default --no-human-approval --restart", "`--yes` re-applies hooks when Cursor is already configured and skips the optional LLM judge prompt", "✓ cursor mode=action"] },
   { gap: "GAP-0520", page: "guardrail/index.mdx", has: ["**Select action connector(s) for LLM judge.**"] },
   { gap: "GAP-0388", page: "observability/local-observability.mdx", has: ["18 DefenseClaw dashboards (19 with the Fleet assets)"] },
@@ -1919,6 +1922,24 @@ describe('managed profile commands match the Go CLI (GAP-2356, GAP-2357)', () =>
       if ((err as { status?: number }).status !== 1) throw err;
     }
     assert.equal(withGuardrail, '', 'the Go CLI gained a guardrail command: re-check user-and-group-policies.mdx Before you start');
+  });
+});
+
+// GAP-2360 / GAP-2363: the wizard asks the hook fail mode only on a run that
+// turns the guardrail on or changes the mode, and the per-connector writers
+// the multi-connector page lists confirm unless --yes.
+describe('wizard fail-mode question and per-connector confirmations match the CLI (GAP-2360, GAP-2363)', () => {
+  it('asks the fail mode only when the guardrail was off or the mode changed', () => {
+    const setup = source('cli/defenseclaw/commands/cmd_setup.py');
+    assert.ok(setup.includes('was_initial_setup = not bool(gc.enabled)'), 'initial-setup test changed: re-check guardrail/index.mdx fail-mode row');
+    assert.ok(setup.includes('if was_initial_setup or mode_changed:\n        _prompt_hook_fail_mode(gc)'), 'fail-mode question condition changed: re-check guardrail/index.mdx');
+  });
+  it('gives hilt, fail-mode, block-message, enable and disable a --yes confirmation', () => {
+    const cli = source('cli/defenseclaw/commands/cmd_guardrail.py');
+    for (const name of ['hilt', 'fail-mode', 'block-message', 'enable', 'disable']) {
+      const head = cli.split(`@guardrail.command("${name}"`)[1]?.split('\ndef ')[0] ?? '';
+      assert.ok(head.includes('@click.option("--yes", is_flag=True, help="Skip the confirmation prompt.")'), `guardrail ${name} lost its --yes confirmation: re-check guardrail/multi-connector.mdx`);
+    }
   });
 });
 

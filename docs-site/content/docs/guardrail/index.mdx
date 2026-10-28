@@ -22,7 +22,7 @@ The guardrail checks what your agent is about to do (a prompt, a shell command, 
   cwd="~/code/your-agent-repo"
   height={620}
   ariaLabel="Animated terminal replay of defenseclaw setup and defenseclaw setup guardrail on DefenseClaw 1.0.4: Claude Code is picked in the connector picker, observe mode is kept, the guardrail wizard asks for the enforcement mode and the scanner engine, skips the judge in observe mode, and prints the configuration summary."
-  caption="Recorded on DefenseClaw 1.0.4 with --no-restart, so it ends by asking you to restart the gateway; without that flag, setup restarts it for you. Defaults are in [brackets]; Enter accepts them. The orange characters are the operator's replies. In 1.0.4 the connector is chosen in `defenseclaw setup` (a checkbox picker), and there is no hook fail mode question: an OSS per-user install fails open and the policy tier decides."
+  caption="Recorded on DefenseClaw 1.0.4 with --no-restart, so it ends by asking you to restart the gateway; without that flag, setup restarts it for you. Defaults are in [brackets]; Enter accepts them. The orange characters are the operator's replies. In 1.0.4 the connector is chosen in `defenseclaw setup` (a checkbox picker), and it asks no hook fail mode question because the guardrail was already on and the mode did not change: an OSS per-user install with no saved choice fails open and the policy tier decides."
   frames={[
     { type: "cmd", text: "defenseclaw setup --no-restart", pauseMs: 700 },
     { type: "spacer" },
@@ -133,7 +133,7 @@ Each row is one wizard prompt, with the default that Enter selects and the flag 
 | **Which agent framework are you using?** *(first setup only; suggests an agent it finds)* | `--connector` / `--agent`: `claudecode`, `codex`, `cursor`, `devin`, `copilot`, `hermes`, `antigravity`, `opencode`, `amp`, `kiro`; on Linux and macOS also `openclaw` and `zeptoclaw`. Native Windows refuses those two (they need the guardrail proxy, which Windows does not run) and names the reason. |
 | **Enable guardrail?** *(Y)* | Implied by running setup. `--disable` turns the guardrail off. |
 | **Select mode** *(observe on first setup, then the current mode)* | `--mode observe\|action`. `observe` records; `action` enforces. |
-| **Select hook fail mode** *(current setting; asked on first setup or when the mode changes)* | No flag on `setup guardrail`. Use `defenseclaw setup <connector> --fail-mode open\|closed`, `defenseclaw init --fail-mode`, or `defenseclaw guardrail fail-mode open\|closed` afterwards. |
+| **Select hook fail mode** *(asked only when this run turns the guardrail on or switches between observe and action; Enter keeps the saved choice, or none so the policy tier decides)* | No flag on `setup guardrail`. Use `defenseclaw setup <connector> --fail-mode open\|closed`, `defenseclaw init --fail-mode`, or `defenseclaw guardrail fail-mode open\|closed` afterwards. |
 | **Human approval for risky actions?** *(action mode only; current setting)* | `--human-approval` / `--no-human-approval`. |
 | **Approval minimum severity** *(if HITL is on; HIGH)* | `--hilt-min-severity high\|medium\|low\|critical`, matched case-insensitively. |
 | **Select engine** *(local)* | `--scanner-mode local\|remote\|both`. The wizard offers only local and remote; pass `both` to run the two together. |
@@ -157,7 +157,7 @@ it as broad operator intent: it updates the shared block message and reconciles
 the active connector overrides, so no connector keeps stale block text.
 
 <Callout type="warn">
-Two wizard choices have no `setup guardrail` flag. The hook fail mode is set with `defenseclaw setup <connector> --fail-mode` or `defenseclaw guardrail fail-mode`. Judge fallback models live in `guardrail.judge.fallbacks` in `config.yaml`.
+Two wizard choices have no `setup guardrail` flag. The hook fail mode question appears only when the run turns the guardrail on or changes the mode; `defenseclaw init` already turns the guardrail on, so a later run that keeps the mode does not ask it. Set the fail mode with `defenseclaw setup <connector> --fail-mode` or `defenseclaw guardrail fail-mode`. Judge fallback models live in `guardrail.judge.fallbacks` in `config.yaml`.
 </Callout>
 
 <Callout title="Redaction has its own workflow">
