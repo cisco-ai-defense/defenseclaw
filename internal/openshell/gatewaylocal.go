@@ -123,21 +123,27 @@ func (r *doctorRun) addCommandLine() string {
 
 // registerLocal registers the package gateway once it has written its
 // client certificates (canRegisterLocal), after its service started. A
-// personal Homebrew writes them under its prefix, not the registration's
-// config directory (GAP-0319).
+// Homebrew install keeps them under its prefix, not the registration
+// config directory, and writes them when OpenShell is installed (the
+// post-install step of the formula), not when the service starts: there
+// is nothing to wait for (GAP-0319).
 func (r *doctorRun) registerLocal(ctx context.Context) error {
 	dir, err := r.configDir()
 	if err != nil {
 		return err
 	}
 	mtls := filepath.Join(dir, gatewaysSubdir, DefaultGatewayName, mtlsSubdir)
-	if brewTLS := r.localRegistrationTLSDir(); brewTLS != "" {
+	brewTLS := r.localRegistrationTLSDir()
+	if brewTLS != "" {
 		mtls = brewTLS
 	}
 	wait := r.Gateway.RestartWait
 	waitCtx, cancel := context.WithTimeout(ctx, wait)
 	defer cancel()
 	for !clientBundle(mtls) {
+		if brewTLS != "" {
+			return r.noHomebrewPKI(mtls)
+		}
 		if sleepContext(waitCtx, time.Second) != nil {
 			return fmt.Errorf("the gateway started, but wrote no client certificates to %s within %s, so it cannot be registered; %s",
 				mtls, wait, r.gatewayLogHint())
@@ -150,15 +156,41 @@ func (r *doctorRun) registerLocal(ctx context.Context) error {
 	return nil
 }
 
+// noHomebrewPKI is the refusal of a registration under a Homebrew install
+// without the client certificates: the post-install step of the
+// GatewayFormula formula writes them. With that formula installed, its
+// post-install step is run again; without it (an OpenShell from another
+// formula, which writes none), the formula is installed.
+func (r *doctorRun) noHomebrewPKI(dir string) error {
+	next := "install OpenShell from the " + GatewayFormula + " formula, whose post-install step writes them: `" + installOpenShellCommand + "`"
+	if r.service != nil && r.service.Installed {
+		next = "run the post-install step of the " + GatewayFormula + " formula again as the owner of the Homebrew prefix (`" +
+			r.Gateway.BrewCommand() + " postinstall " + GatewayFormula + "`), then `" + r.addCommandLine() + "`"
+	}
+	return fmt.Errorf("the Homebrew install of OpenShell has no client certificates in %s, so the gateway cannot be registered; %s", dir, next)
+}
+
 // clientBundle reports that dir holds the client certificates a local
-// registration takes.
+// registration takes: ca.crt with the client pair beside it (the mtls
+// folder of a registration) or in client/ (the PKI that
+// `openshell-gateway generate-certs` writes, which the Homebrew formula
+// keeps in var/openshell/tls, GAP-0319).
 func clientBundle(dir string) bool {
-	for _, name := range []string{"ca.crt", "tls.crt", "tls.key"} {
-		if info, err := os.Stat(filepath.Join(dir, name)); err != nil || !info.Mode().IsRegular() {
-			return false
+	if !regularFileAt(filepath.Join(dir, "ca.crt")) {
+		return false
+	}
+	for _, pair := range []string{dir, filepath.Join(dir, "client")} {
+		if regularFileAt(filepath.Join(pair, "tls.crt")) && regularFileAt(filepath.Join(pair, "tls.key")) {
+			return true
 		}
 	}
-	return true
+	return false
+}
+
+// regularFileAt reports that path names a regular file (symlinks followed).
+func regularFileAt(path string) bool {
+	info, err := os.Stat(path)
+	return err == nil && info.Mode().IsRegular()
 }
 
 func (r *doctorRun) gatewayLogHint() string {
