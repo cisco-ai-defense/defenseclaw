@@ -31093,6 +31093,22 @@ function Remove-DefenseClawEmptyStandaloneInstallParent {
     }
 }
 
+# Whether a self-uninstall finalizer drops the lifecycle lock as it exits:
+# only once its receipt is gone, and when it ran a standalone purge itself
+# (a deferred retirement) or no deployment is left. A CLI uninstall runs
+# its purge in the CLI's own run, which keeps the lock because the CLI's
+# running image still holds InstallRoot; the finalizer removes that last
+# root, so the lock goes then, as after every standalone uninstall that
+# leaves no deployment (GAP-1897).
+function Test-DefenseClawSelfUninstallFinalizerDropsLifecycleLock {
+    param([Parameter(Mandatory)][hashtable]$Layout)
+    if (Microsoft.PowerShell.Management\Test-Path -LiteralPath ([string]$Layout.SelfUninstallReceiptPath)) {
+        return $false
+    }
+    return ([bool]$script:DefenseClawRemoveLifecycleLockOnExit -or
+        (Test-DefenseClawStandaloneUninstallLeftNothing -Action 'Uninstall' -Layout $Layout))
+}
+
 function Complete-DefenseClawSelfUninstallRetirement {
     param(
         [Parameter(Mandatory)][string]$ReceiptPath,
@@ -31331,11 +31347,7 @@ function Complete-DefenseClawSelfUninstallRetirement {
         }
         finally {
             Exit-DefenseClawLifecycleLock -Lock $lock
-            if ($script:DefenseClawRemoveLifecycleLockOnExit -and
-                -not (Microsoft.PowerShell.Management\Test-Path `
-                    -LiteralPath $layout.SelfUninstallReceiptPath)) {
-                # A deferred retirement ran a standalone purge in this
-                # finalizer; its lifecycle lock goes as the purge's own does.
+            if (Test-DefenseClawSelfUninstallFinalizerDropsLifecycleLock -Layout $layout) {
                 $script:DefenseClawRemoveLifecycleLockOnExit = $false
                 Remove-DefenseClawStandaloneLifecycleLockLeftover -Layout $layout
             }
