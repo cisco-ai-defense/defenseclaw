@@ -112,6 +112,8 @@ DefenseClaw's hook contract covers `agy` `>=1.1.8`. Google's [changelog](https:/
 
 All handlers are synchronous with a 30-second timeout. The event name is not in Antigravity's stdin, so DefenseClaw binds each registration to a trusted event argument (on Linux and macOS a positional argument, `antigravity-hook.sh PreToolUse`; on Windows the native hook's `--event`) and forwards it to the gateway in a local header, without rewriting the stdin captured for audit.
 
+A registration that lost its event argument (an older or hand-edited `hooks.json`) cannot be sent to the gateway, which requires the event. On a per-user install in the default or permissive policy the call runs with a warning and a `hook-failures.jsonl` row; the strict policy, the install window and a managed install deny it. Either way the fix is `defenseclaw setup antigravity`, and a running gateway rewrites the registration on its own.
+
 | Event | Registration shape | Stdin beyond common metadata | DefenseClaw stdout |
 | --- | --- | --- | --- |
 | `PreInvocation` | direct handler list, matcher ignored | `invocationNum`, `initialNumSteps` | `{}` or `injectSteps` with `ephemeralMessage` |

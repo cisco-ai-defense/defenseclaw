@@ -2982,7 +2982,8 @@ const unboundAntigravityBindingReason = "missing or unsupported Antigravity hook
 // hooks and hooks in fail mode open are not handled here.
 func refuseClosedUnboundHook(opts *Options, sp spec, failMode string) (int, bool) {
 	// A registration that lost its event is a broken install, never a
-	// gateway outage: outside Secure Client it is refused in every fail mode.
+	// gateway outage: outside Secure Client it is refused, except a per-user
+	// Antigravity call in a tier that opens it (perUserUnboundAntigravityOpen).
 	if opts.SecureClient {
 		return 0, false
 	}
@@ -3003,6 +3004,19 @@ func refuseClosedUnboundHook(opts *Options, sp spec, failMode string) (int, bool
 		if err == nil && antigravityNonToolInput(data, int64(len(data)) > opts.MaxBody) {
 			return 0, false
 		}
+		if perUserUnboundAntigravityOpen(*opts) {
+			// Balanced defaults (GAP-1321): in the default and permissive
+			// tiers, where this account's config opens an outage, the call
+			// runs with a warning and an audit entry, as antigravity-hook.sh
+			// does. The gateway requires the event, so it is not asked.
+			opts.FailMode = "open"
+			logHookFailure(*opts, sp, unboundAntigravityBindingReason, "response", "open", false)
+			fmt.Fprintln(opts.Stderr, "defenseclaw: DefenseClaw is not checking this Antigravity tool call: its hook is "+
+				"registered without an Antigravity event DefenseClaw reviewed, so the call runs unchecked (fail mode open). "+
+				"Run `defenseclaw setup antigravity` to register it again.")
+			fmt.Fprintln(opts.Stdout, `{"decision":"allow","reason":`+mustJSONString(unboundAntigravityOpenText)+`}`)
+			return 0, true
+		}
 		text := "DefenseClaw blocked this tool call: its DefenseClaw hook is registered without an Antigravity event DefenseClaw reviewed. " +
 			"Run `defenseclaw setup antigravity` to register it again."
 		if opts.ManagedEnterprise {
@@ -3017,6 +3031,26 @@ func refuseClosedUnboundHook(opts *Options, sp spec, failMode string) (int, bool
 		return 0, true
 	}
 	return 0, false
+}
+
+// unboundAntigravityOpenText is the reason of the allow a per-user
+// Antigravity hook gives a registration that lost its event when this
+// account's tier opens it (perUserUnboundAntigravityOpen).
+const unboundAntigravityOpenText = "DefenseClaw did not check this tool call: its DefenseClaw hook is registered without " +
+	"an Antigravity event DefenseClaw reviewed. Run `defenseclaw setup antigravity` to register it again."
+
+// perUserUnboundAntigravityOpen reports a per-user Antigravity hook (not
+// managed, not Secure Client) whose registration lost its event, outside
+// strict availability and this account's install window, whose config on
+// disk gives Antigravity the open outage mode now (the default and
+// permissive tiers). Such a call is allowed with a warning; strict,
+// a closed tier and managed hooks deny it (refuseClosedUnboundHook).
+func perUserUnboundAntigravityOpen(opts Options) bool {
+	if opts.ManagedEnterprise || opts.ManagedUnixSocket != "" || opts.SecureClient || opts.StrictAvailability ||
+		opts.OutageFailModeNow == nil || perUserInstallWindow(opts) {
+		return false
+	}
+	return normalizeFailMode(opts.OutageFailModeNow()) == "open"
 }
 
 // antigravityNonToolInput reports an Antigravity hook input that is clearly
