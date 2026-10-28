@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import http.client
 import json
 import os
 import platform
@@ -58,12 +59,15 @@ GRAFANA_PASSWORD_ENV_NAME = "GRAFANA_ADMIN_PASSWORD"
 GRAFANA_ACCESS_MODE_FILE_NAME = ".grafana-access-mode"
 GRAFANA_ACCESS_PASSWORD = "password"
 GRAFANA_ACCESS_NO_PASSWORD = "no-password"
+# The only Grafana role an anonymous visitor ever gets: read-only.
+GRAFANA_ANONYMOUS_ROLE = "Viewer"
 GRAFANA_ACCESS_MODES = frozenset({GRAFANA_ACCESS_PASSWORD, GRAFANA_ACCESS_NO_PASSWORD})
 MAX_GRAFANA_ACCESS_MODE_BYTES = 64
 MAX_GRAFANA_PASSWORD_BYTES = 512
 GRAFANA_PASSWORD_RESET_MARKER = "Admin password changed successfully"
 GRAFANA_PASSWORD_CONTAINER_PATH = "/run/secrets/grafana_admin_password"
 GRAFANA_SECRET_NAME = "grafana_admin_password"
+GRAFANA_SEARCH_PATH = "/api/search?type=dash-db"
 
 CONTRACT: dict[str, str] = {
     "otlp_endpoint": "127.0.0.1:4317",
@@ -104,6 +108,84 @@ class LocalStackError(RuntimeError):
 
 class GrafanaAccessPolicyError(LocalStackError):
     """Grafana is reachable in the opposite access mode."""
+
+
+def _grafana_verified_get(
+    path: str,
+    authorization: str,
+    *,
+    timeout: float = 3,
+    max_response_bytes: int | None = None,
+) -> tuple[int, bytes]:
+    """Send Grafana auth only over the accepted socket of this account or the OS.
+
+    A container-status or listener check before dialing cannot prove the
+    socket that receives the password: the port can change hands between
+    those steps. The installed gateway's local-peer verifier checks the
+    connected tuple before http.client writes the first request byte.
+    """
+
+    if not path.startswith("/") or path.startswith("//") or "\r" in path or "\n" in path:
+        raise ValueError("Grafana request path is invalid")
+
+    from defenseclaw.gateway import (
+        _connected_verifier_timeout,
+        _managed_connected_verifier_spec,
+        _per_user_connected_verifier,
+        _trusted_connected_verifier_binary,
+    )
+
+    connection = http.client.HTTPConnection("127.0.0.1", 3000, timeout=timeout)
+    sock: socket.socket | None = None
+    try:
+        sock = socket.create_connection(("127.0.0.1", 3000), timeout=timeout)
+        local, remote = sock.getsockname(), sock.getpeername()
+        if remote[:2] != ("127.0.0.1", 3000):
+            raise OSError("the connected Grafana endpoint changed; the admin credential was not sent")
+        managed = _managed_connected_verifier_spec()
+        binary = (
+            _trusted_connected_verifier_binary(managed[0], managed=True)
+            if managed
+            else _per_user_connected_verifier()
+        )
+        check = CommandRunner(output_limit=0).run(
+            [
+                binary,
+                "local-peer-verify-connected",
+                "--local",
+                f"{local[0]}:{local[1]}",
+                "--remote",
+                f"{remote[0]}:{remote[1]}",
+            ],
+            timeout=_connected_verifier_timeout(timeout),
+            env=native_command_environment(),
+        )
+        if check.returncode != 0:
+            raise OSError("the connected Grafana peer could not be verified; the admin credential was not sent")
+        connection.sock, sock = sock, None
+        connection.request(
+            "GET",
+            path,
+            headers={"Authorization": authorization},
+        )
+        response = connection.getresponse()
+        body = response.read(max_response_bytes + 1 if max_response_bytes is not None else None)
+        if max_response_bytes is not None and len(body) > max_response_bytes:
+            raise ValueError("Grafana response is too large")
+        return response.status, body
+    except LocalStackError as exc:
+        raise OSError("the connected Grafana peer could not be verified; the admin credential was not sent") from exc
+    finally:
+        connection.close()
+        if sock is not None:
+            sock.close()
+
+
+def _grafana_basic_get(password: str, *, timeout: float = 3) -> tuple[int, bytes]:
+    token = base64.b64encode(f"{GRAFANA_ADMIN_USER}:{password}".encode("ascii")).decode("ascii")
+    return _grafana_verified_get(
+        GRAFANA_SEARCH_PATH, f"Basic {token}", timeout=timeout, max_response_bytes=2 * 1024 * 1024,
+    )
 
 
 @dataclass(frozen=True)
@@ -636,7 +718,7 @@ def _validate_windows_docker_certification(
         )
 
 
-def _docker_daemon_unreachable_message(detail: str, os_name: str) -> str:
+def docker_daemon_unreachable_message(detail: str, os_name: str) -> str:
     """Say why ``docker info`` failed and what to do on this OS (GAP-1335)."""
 
     if os_name.startswith("win") or os_name == "darwin":
@@ -673,7 +755,7 @@ def validate_native_docker_preflight(
     if info_result.returncode != 0:
         detail = (info_result.stderr or info_result.stdout).strip()
         suffix = f" ({detail.splitlines()[0]})" if detail else ""
-        raise LocalStackError(_docker_daemon_unreachable_message(detail, os_name) + suffix)
+        raise LocalStackError(docker_daemon_unreachable_message(detail, os_name) + suffix)
     info = _parse_json_object(info_result.stdout.strip(), description="info")
     if str(info.get("OSType", "")).lower() != "linux":
         raise LocalStackError("Docker is using Windows containers. Switch Docker Desktop to Linux containers.")
@@ -958,9 +1040,10 @@ class LocalStackController:
         if persisted is not None:
             return persisted
 
-        # Releases before the access-mode marker always ran Grafana as an
-        # anonymous Admin. Preserve that behavior when an owned container or
-        # named data volume proves the stack has run before. A genuinely new
+        # Releases before the access-mode marker always ran Grafana with
+        # anonymous access. Keep anonymous access (now read-only Viewer, never
+        # Admin) when an owned container or named data volume proves the
+        # stack has run before. A genuinely new
         # managed stack has neither and receives the secure password default.
         if "defenseclaw-grafana" in owned_containers or f"{COMPOSE_PROJECT}_grafana-data" in existing_volumes:
             return GRAFANA_ACCESS_NO_PASSWORD
@@ -1051,7 +1134,9 @@ class LocalStackController:
         else:
             required_environment = {
                 "GF_AUTH_ANONYMOUS_ENABLED": "true",
-                "GF_AUTH_ANONYMOUS_ORG_ROLE": "Admin",
+                # Read-only: an effective anonymous Admin or Editor (a stack
+                # file from an earlier release, a local override) is refused.
+                "GF_AUTH_ANONYMOUS_ORG_ROLE": GRAFANA_ANONYMOUS_ROLE,
                 "GF_AUTH_DISABLE_LOGIN_FORM": "true",
             }
         for key, expected in required_environment.items():
@@ -1126,23 +1211,15 @@ class LocalStackController:
         except (OSError, urllib.error.URLError) as exc:
             raise LocalStackError("Grafana anonymous access check failed") from exc
 
-        token = base64.b64encode(f"{GRAFANA_ADMIN_USER}:{password}".encode("ascii")).decode("ascii")
-        authenticated = urllib.request.Request(
-            url,
-            headers={"Authorization": f"Basic {token}"},
-            method="GET",
-        )
         try:
-            with urllib.request.urlopen(authenticated, timeout=3) as response:
-                if not 200 <= response.status < 300:
-                    raise GrafanaAccessPolicyError("Grafana rejected the managed admin credential")
-        except urllib.error.HTTPError as exc:
-            raise GrafanaAccessPolicyError(f"Grafana rejected the managed admin credential (HTTP {exc.code})") from exc
-        except (OSError, urllib.error.URLError) as exc:
+            status, _ = _grafana_basic_get(password)
+            if not 200 <= status < 300:
+                raise GrafanaAccessPolicyError(f"Grafana rejected the managed admin credential (HTTP {status})")
+        except (OSError, ValueError, urllib.error.URLError) as exc:
             raise LocalStackError("Grafana authenticated access check failed") from exc
 
     def _verify_grafana_no_password(self) -> None:
-        """Prove the explicitly selected anonymous Admin path is reachable."""
+        """Prove the explicitly selected anonymous read-only path is reachable."""
 
         url = "http://127.0.0.1:3000/api/search?type=dash-db"
         request = urllib.request.Request(url, method="GET")
@@ -1420,7 +1497,7 @@ def _text_urls(
 ) -> str:
     grafana = "Grafana:    http://localhost:3000"
     if grafana_access_mode == GRAFANA_ACCESS_NO_PASSWORD:
-        grafana += "  (anonymous Admin; no password)"
+        grafana += f"  (anonymous {GRAFANA_ANONYMOUS_ROLE}, read-only; no password)"
     elif grafana_password_file is not None:
         grafana += f"  (user: {GRAFANA_ADMIN_USER}; password file: {grafana_password_file})"
     return "\n".join(
@@ -1461,7 +1538,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         dest="grafana_access_mode",
         action="store_const",
         const=GRAFANA_ACCESS_NO_PASSWORD,
-        help="Allow anonymous Grafana Admin access on managed loopback only.",
+        help="Allow anonymous read-only (Viewer) Grafana access on managed loopback only.",
     )
     parser.add_argument("--service", choices=sorted(SERVICES))
     parser.add_argument("--follow", action="store_true")
@@ -1477,7 +1554,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
             if result.grafana_access_mode == GRAFANA_ACCESS_NO_PASSWORD:
                 print(
-                    "warning: Grafana is running as anonymous Admin; every local "
+                    "warning: Grafana allows anonymous read-only Viewer access; every local "
                     "process can access it without a password",
                     file=sys.stderr,
                 )

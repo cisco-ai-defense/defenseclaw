@@ -6,6 +6,7 @@ package connector
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"os"
 	"os/exec"
@@ -17,6 +18,68 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/testenv"
 )
+
+func TestPerUserDedicatedConnectorTeardownRevokesScopedCredential(t *testing.T) {
+	for _, name := range []string{"codex", "claudecode", "kiro", "openclaw", "zeptoclaw"} {
+		t.Run(name, func(t *testing.T) {
+			root := testenv.PrivateTempDir(t)
+			dataDir := filepath.Join(root, "data")
+			opts := SetupOpts{
+				DataDir:      dataDir,
+				APIAddr:      "127.0.0.1:18970",
+				ProxyAddr:    "127.0.0.1:4000",
+				APIToken:     "fixture gateway credential",
+				HookFailMode: "closed",
+				WorkspaceDir: filepath.Join(root, "workspace"),
+			}
+			var conn Connector
+			switch name {
+			case "codex":
+				before := CodexConfigPathOverride
+				CodexConfigPathOverride = filepath.Join(root, "codex", "config.toml")
+				t.Cleanup(func() { CodexConfigPathOverride = before })
+				conn = NewCodexConnector()
+			case "claudecode":
+				before := ClaudeCodeSettingsPathOverride
+				ClaudeCodeSettingsPathOverride = filepath.Join(root, "claude", "settings.json")
+				t.Cleanup(func() { ClaudeCodeSettingsPathOverride = before })
+				conn = NewClaudeCodeConnector()
+			case "kiro":
+				before := KiroHomeOverride
+				KiroHomeOverride = filepath.Join(root, "kiro")
+				t.Cleanup(func() { KiroHomeOverride = before })
+				conn = NewKiroConnector()
+			case "openclaw":
+				before := OpenClawHomeOverride
+				OpenClawHomeOverride = filepath.Join(root, "openclaw")
+				t.Cleanup(func() { OpenClawHomeOverride = before })
+				conn = NewOpenClawConnector()
+			case "zeptoclaw":
+				before := ZeptoClawConfigPathOverride
+				ZeptoClawConfigPathOverride = filepath.Join(root, "zeptoclaw", "config.json")
+				t.Cleanup(func() { ZeptoClawConfigPathOverride = before })
+				conn = NewZeptoClawConnector()
+			}
+			if name != "openclaw" && name != "zeptoclaw" {
+				if err := conn.Setup(context.Background(), opts); err != nil {
+					t.Fatalf("setup %s: %v", name, err)
+				}
+			}
+			if err := os.MkdirAll(dataDir, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := EnsureHookAPIToken(dataDir, name); err != nil {
+				t.Fatalf("issue scoped credential: %v", err)
+			}
+			if err := conn.Teardown(context.Background(), opts); err != nil {
+				t.Fatalf("teardown %s: %v", name, err)
+			}
+			if token, err := LoadHookAPIToken(dataDir, name); err != nil || token != "" {
+				t.Fatalf("removed %s still authenticates with scoped token: %q, %v", name, token, err)
+			}
+		})
+	}
+}
 
 func assertHookAPITokenRejectedByEnsureAndLoad(t *testing.T, want string, fixture func(*testing.T) string) {
 	t.Helper()
@@ -170,30 +233,6 @@ func TestConnectorHookWriterPreservesScopedAPITokenFormat(t *testing.T) {
 	}
 	if got, want := string(raw), token+"\n"; got != want {
 		t.Fatalf("scoped token file contents = %q, want exact raw content %q", got, want)
-	}
-}
-
-func TestRemoveHookAPITokenRevokesAndRotatesOmnigentCredential(t *testing.T) {
-	dataDir := testenv.PrivateTempDir(t)
-	first, err := EnsureHookAPIToken(dataDir, "omnigent")
-	if err != nil {
-		t.Fatalf("EnsureHookAPIToken first: %v", err)
-	}
-	if err := RemoveHookAPIToken(dataDir, "omnigent"); err != nil {
-		t.Fatalf("RemoveHookAPIToken: %v", err)
-	}
-	if got, err := LoadHookAPIToken(dataDir, "omnigent"); err != nil || got != "" {
-		t.Fatalf("LoadHookAPIToken after removal = %q, %v; want absent", got, err)
-	}
-	if err := RemoveHookAPIToken(dataDir, "omnigent"); err != nil {
-		t.Fatalf("idempotent RemoveHookAPIToken: %v", err)
-	}
-	second, err := EnsureHookAPIToken(dataDir, "omnigent")
-	if err != nil {
-		t.Fatalf("EnsureHookAPIToken second: %v", err)
-	}
-	if second == first {
-		t.Fatal("OmniGent hook API token was reused after revocation")
 	}
 }
 
@@ -522,5 +561,29 @@ func TestEnsureHookAPITokenReissuesAMalformedCredential(t *testing.T) {
 	}
 	if loaded, err := LoadHookAPIToken(dataDir, "claudecode"); err != nil || loaded != reissued {
 		t.Fatalf("LoadHookAPIToken after re-issue = %q, %v", loaded, err)
+	}
+}
+
+func TestRemoveHookAPITokenRevokesAndRotatesTheCredential(t *testing.T) {
+	dataDir := testenv.PrivateTempDir(t)
+	first, err := EnsureHookAPIToken(dataDir, "cursor")
+	if err != nil {
+		t.Fatalf("EnsureHookAPIToken first: %v", err)
+	}
+	if err := RemoveHookAPIToken(dataDir, "cursor"); err != nil {
+		t.Fatalf("RemoveHookAPIToken: %v", err)
+	}
+	if got, err := LoadHookAPIToken(dataDir, "cursor"); err != nil || got != "" {
+		t.Fatalf("LoadHookAPIToken after removal = %q, %v; want absent", got, err)
+	}
+	if err := RemoveHookAPIToken(dataDir, "cursor"); err != nil {
+		t.Fatalf("idempotent RemoveHookAPIToken: %v", err)
+	}
+	second, err := EnsureHookAPIToken(dataDir, "cursor")
+	if err != nil {
+		t.Fatalf("EnsureHookAPIToken second: %v", err)
+	}
+	if second == first {
+		t.Fatal("Cursor hook API token was reused after revocation")
 	}
 }

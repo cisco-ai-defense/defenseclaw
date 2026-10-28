@@ -12,32 +12,22 @@ keywords:
 
 ## System overview
 
-```
-┌─────────────────────────────────────────────────────────┐
-│  AI Agent (PicoClaw, Claude Code, LangChain, etc.)      │
-└────────────────────────┬────────────────────────────────┘
-                         │ tool call + content
-                         ▼
-┌─────────────────────────────────────────────────────────┐
-│  Integration Layer (hook / middleware / FFI)             │
-│  • Maps tool_name → capability flag                     │
-│  • Extracts destination and content                     │
-│  • Sets direction (request / response)                  │
-│  • Calls dclaw_evaluate()                               │
-└────────────────────────┬────────────────────────────────┘
-                         ▼
-┌─────────────────────────────────────────────────────────┐
-│  Edge Connector Engine (libdclaw_core.so)               │
-│                                                         │
-│  7-Stage Evaluation Path:                               │
-│  1. Input validation    5. Sequence correlation         │
-│  2. Rate limiting       6. Verdict cache                │
-│  3. Content scanning    7. Fleet hash verdict request   │
-│  4. Dest filtering + SSRF                                │
-│                                                         │
-│  → ALLOW / BLOCK / WARN / PENDING                       │
-└─────────────────────────────────────────────────────────┘
-```
+<Flow
+  direction="TB"
+  caption="A tool call goes from the agent through an integration layer to the engine. The engine decides locally, or asks the Fleet gateway through the MQTT broker."
+>
+  <Node id="agent" kind="agent">{`AI agent\nPicoClaw, LangChain, MCP client`}</Node>
+  <Node id="integ" kind="connector">{`Integration layer\nhook, middleware or FFI`}</Node>
+  <Node id="engine" kind="policy" emphasis>{`Edge Connector engine\nlibdclaw_core.so, 6 local checks`}</Node>
+  <Node id="broker" kind="generic">{`MQTT broker\nTLS, per-device ACLs`}</Node>
+  <Node id="fleet" kind="gateway">{`Fleet gateway\nverdict cache, policy push`}</Node>
+  <Edge from="agent" to="integ" label="tool call + content" />
+  <Edge from="integ" to="engine" label="dclaw_evaluate()" />
+  <Edge from="engine" to="broker" label="escalation request" variant="dashed" />
+  <Edge from="broker" to="fleet" variant="bidirectional" />
+</Flow>
+
+The integration layer maps `tool_name` to a capability, extracts the destination and content, sets the direction (request or response) and calls the engine over the Unix socket or the shared library. The engine returns `ALLOW`, `BLOCK`, `WARN` or `PENDING`.
 
 ## Evaluation pipeline
 
@@ -70,13 +60,13 @@ When the `content` field is present in the evaluation request, the scanner runs 
 | `injection` | Prompt injection, jailbreak attempts, system prompt overrides |
 | `commands` | Shell commands, SQL statements, code execution patterns |
 
-The pipeline immediately blocks findings that reach the built-in severity threshold. A scanner result of `WARN` does not currently change the final verdict; the request continues through local policy and cache checks. The `direction` field selects an inferred content scope and severity threshold; the structural exfiltration check applies to request/user-input scope. The DFA keyword patterns are fixed in this build and run for both directions. OTA policy cannot configure these patterns.
+The pipeline immediately blocks findings that reach the built-in severity threshold. A scanner result of `WARN` does not change the final verdict; the request continues through local policy and cache checks. The `direction` field selects an inferred content scope and severity threshold; the structural exfiltration check applies to request/user-input scope. The DFA keyword patterns are fixed in this build and run for both directions. OTA policy cannot configure these patterns.
 
 The C evaluation path has no local tool-hash deny-list lookup or policy YAML hash feed. The Fleet gateway separately checks tool hashes received over MQTT; unknown hashes default to BLOCK.
 
 ### Stage 4 — Destination filtering + SSRF validation
 
-For network capabilities, the engine requires a destination, checks SSRF rules first, then matches the destination against the compiled allowlist. Hostname destinations are blocked across build profiles until an enforced egress resolver/proxy exists. Only canonical public IPv4 or bracketed globally scoped IPv6 literals can pass to the allowlist; this parsing does not prove that an address is actually routable. Private and link-local addresses, numeric aliases such as octal/hex/decimal forms, and malformed ports are blocked. An unlisted destination is blocked with reason `DEST_DENY`; the current policy compiler does not implement `destination_denylist`.
+For network capabilities, the engine requires a destination, checks SSRF rules first, then matches the destination against the compiled allowlist. Hostname destinations are blocked across build profiles until an enforced egress resolver/proxy exists. Only canonical public IPv4 or bracketed globally scoped IPv6 literals can pass to the allowlist; this parsing does not prove that an address is actually routable. Private and link-local addresses, numeric aliases such as octal/hex/decimal forms, and malformed ports are blocked. An unlisted destination is blocked with reason `DEST_DENY`; the policy compiler does not implement `destination_denylist`.
 
 **Built-in SSRF validation** blocks requests targeting:
 - Private ranges (`10.x`, `172.16–31.x`, `192.168.x`, `127.x`)
@@ -99,7 +89,7 @@ When local policy cannot decide, the Edge Connector sends a verdict request to t
 - Truncated content snippet (up to `DCLAW_ESCALATION_PAYLOAD_MAX`)
 - Session risk/capability metadata and request nonces
 
-The current gateway evaluates the request by tool hash through its verdict cache; it does not pass the content snippet or destination into a separate model pipeline. Unknown hashes default to BLOCK. The `findings` wire field is currently a zero placeholder. In `sync_block` mode the device blocks pending a gateway verdict and stays blocked on timeout. In `speculative` mode it can allow immediately, even if the MQTT publish fails; a later gateway BLOCK cannot undo that action. Select the mode to match the consequence of the tool call.
+The gateway evaluates the request by tool hash through its verdict cache; it does not pass the content snippet or destination into a separate model pipeline. Unknown hashes default to BLOCK. The `findings` wire field is a zero placeholder. In `sync_block` mode the device blocks pending a gateway verdict and stays blocked on timeout. In `speculative` mode it can allow immediately, even if the MQTT publish fails; a later gateway BLOCK cannot undo that action. Select the mode to match the consequence of the tool call.
 
 ## Audit trail
 
@@ -155,7 +145,7 @@ The fleet management and verdict cache run as Go services alongside the main Def
 
 ## OTA policy updates
 
-Policy updates are distributed over MQTT with:
+Policy updates are distributed over MQTT. Production builds reject HMAC-signed updates unless they are built with `DCLAW_ALLOW_HMAC_OTA=ON` and the device is provisioned with a separate HMAC key (`DCLAW_OTA_HMAC_KEY`). Updates carry:
 - **HMAC-SHA256 signatures** — every update is cryptographically signed
 - **Anti-rollback** — monotonic version counter prevents downgrade attacks
 - **Local canary window** — each receiving device monitors its block rate for ten minutes and can restore its previous policy partition after a sustained spike

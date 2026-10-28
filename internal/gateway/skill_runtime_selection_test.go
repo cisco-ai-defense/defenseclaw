@@ -55,15 +55,9 @@ func newNativeSkillRuntimeTestStore(
 	t *testing.T,
 ) (*audit.Store, *audit.Logger) {
 	t.Helper()
-	store, err := audit.NewStore(":memory:")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = store.Close() })
-	if err := store.Init(); err != nil {
-		t.Fatal(err)
-	}
-	return store, audit.NewLogger(store)
+	// A hook verdict needs its audit row (a failed write fails closed), so
+	// the logger has the v8 runtime the sidecar binds.
+	return testStoreAndV8Logger(t)
 }
 
 func invokeNativeSkillHook(

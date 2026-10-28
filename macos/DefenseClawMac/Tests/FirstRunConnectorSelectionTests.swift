@@ -32,7 +32,7 @@ struct FirstRunConnectorSelectionTests {
         let choices = ConnectorDiscoverySelection.onboardingConnectors
         expect(!choices.contains("openclaw"), "OpenClaw is absent from first-run choices")
         expect(!choices.contains("zeptoclaw"), "ZeptoClaw is absent from first-run choices")
-        expect(choices.contains("codex") && choices.contains("omnigent"),
+        expect(choices.contains("codex"),
                "hook connector choices remain available")
 
         let selection = reconcile(

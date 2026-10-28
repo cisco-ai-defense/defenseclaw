@@ -341,18 +341,19 @@ func (f *fakeImporter) counts() (imported, updated int) {
 // builds the generated family record: one the audit schema refuses is not
 // kept and fails the test at cleanup (production drops the error).
 type memTelemetry struct {
-	mu        sync.Mutex
-	check     *audit.SandboxRecorder
-	refused   []string
-	lifecycle []audit.SandboxLifecycleEvent
-	egress    []audit.SandboxEgressEvent
-	approvals []audit.SandboxApprovalEvent
-	policy    []audit.SandboxPolicyEvent
-	health    []audit.SandboxHealthEvent
-	findings  []audit.SandboxFindingEvent
-	workspace []audit.SandboxWorkspaceEvent
-	activity  []audit.SandboxActivityEvent
-	processes []audit.SandboxProcessEvent
+	mu           sync.Mutex
+	check        *audit.SandboxRecorder
+	refused      []string
+	lifecycle    []audit.SandboxLifecycleEvent
+	egress       []audit.SandboxEgressEvent
+	approvals    []audit.SandboxApprovalEvent
+	askDecisions []audit.SandboxAskDecidedEvent
+	policy       []audit.SandboxPolicyEvent
+	health       []audit.SandboxHealthEvent
+	findings     []audit.SandboxFindingEvent
+	workspace    []audit.SandboxWorkspaceEvent
+	activity     []audit.SandboxActivityEvent
+	processes    []audit.SandboxProcessEvent
 }
 
 func newMemTelemetry() *memTelemetry {
@@ -384,6 +385,13 @@ func (t *memTelemetry) RecordSandboxEgress(ctx context.Context, e audit.SandboxE
 
 func (t *memTelemetry) RecordSandboxApproval(ctx context.Context, e audit.SandboxApprovalEvent) error {
 	return keep(t, "approval", &t.approvals, e, func() error { return t.check.RecordSandboxApproval(ctx, e) })
+}
+
+func (t *memTelemetry) RecordManagedAskDecision(_ context.Context, e audit.SandboxAskDecidedEvent) error {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.askDecisions = append(t.askDecisions, e)
+	return nil
 }
 
 func (t *memTelemetry) RecordSandboxPolicy(ctx context.Context, e audit.SandboxPolicyEvent) error {
@@ -762,6 +770,8 @@ func newDaemonEnv(t *testing.T, d daemonOptions, edit func(*config.Config)) *har
 	}
 	if d.fake == nil {
 		d.fake = openshelltest.New(openshelltest.WithDriver(d.driver))
+		// A gateway DefenseClaw runs sandboxes on.
+		d.fake.SetRelease(openshell.SupportedMin)
 	}
 	e := &harnessEnv{t: t, fake: d.fake, dataDir: t.TempDir(), owner: orDefault(d.owner, testOwner),
 		ingressPort: orDefault(d.ingressPort, testIngressPort), egressPort: orDefault(d.egressPort, testEgressPort), apiPort: orDefault(d.apiPort, 18970)}
@@ -808,7 +818,7 @@ func newDaemonEnv(t *testing.T, d daemonOptions, edit func(*config.Config)) *har
 	// without one fails closed and mounts nothing.
 	driver, err := connectedDriver(t.Context(), e.client)
 	must(t, err)
-	e.gw = &Gateway{Client: e.client, Name: "openshell", Endpoint: "https://127.0.0.1:17670", Port: 17670, Version: "0.1.1", Driver: driver}
+	e.gw = &Gateway{Client: e.client, Name: "openshell", Endpoint: "https://127.0.0.1:17670", Port: 17670, Version: openshell.SupportedMin, Driver: driver}
 	e.m = e.newManager()
 	// Its sandboxes answer the workload check, which runs on every driver,
 	// as their records expect.

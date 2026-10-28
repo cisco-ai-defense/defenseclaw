@@ -22,7 +22,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/google/uuid"
 	"gopkg.in/yaml.v3"
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
@@ -143,10 +142,17 @@ func (s *Sidecar) BootstrapObservabilityRuntime(
 	if alreadyBound {
 		return false, newSidecarObservabilityV8BootstrapError(sidecarObservabilityV8BootstrapBinding, nil)
 	}
-	s.bootConfigSourceName, s.bootConfigSource = sourceName, raw
+	// Keep the exact on-disk bytes for startup reconciliation. The CLI may
+	// boot from an unmigrated v8 file; the config watcher reads that same
+	// file, while the runtime must compile its in-memory v9 normalization.
+	normalized, _, err := normalizeRuntimeConfigSource(sourceName, raw)
+	if err != nil {
+		return false, err
+	}
+	s.bootConfigSourceName, s.bootConfigSource = sourceName, append([]byte(nil), raw...)
 	compiled, err := config.ParseCompileObservabilityV8(
 		sourceName,
-		raw,
+		normalized,
 		config.ObservabilityV8CompileOptions{DefaultDataDir: cfg.DataDir},
 	)
 	if err != nil || compiled == nil || compiled.Plan == nil {
@@ -291,7 +297,7 @@ func (s *Sidecar) prepareObservabilityV8Runtime(
 	})
 	failureBuilder, err := observability.NewRecordBuilder(
 		observability.ClockFunc(func() time.Time { return time.Now().UTC() }),
-		observability.OccurrenceIDGeneratorFunc(func() (string, error) { return uuid.NewString(), nil }),
+		observability.TimeOrderedOccurrenceIDs,
 	)
 	if err != nil {
 		return nil, newSidecarObservabilityV8BootstrapError(sidecarObservabilityV8BootstrapRuntime, err)
@@ -1092,7 +1098,7 @@ func (s *Sidecar) persistObservabilityV8DeliveryTransition(
 		}
 		builder, buildErr := observability.NewFamilyBuilder(
 			observability.ClockFunc(func() time.Time { return transition.OccurredAt.UTC() }),
-			observability.OccurrenceIDGeneratorFunc(func() (string, error) { return uuid.NewString(), nil }),
+			observability.TimeOrderedOccurrenceIDs,
 		)
 		if buildErr != nil {
 			return observability.Record{}, &sidecarObservabilityError{code: sidecarObservabilityBuildFailed}

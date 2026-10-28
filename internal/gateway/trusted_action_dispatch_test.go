@@ -619,7 +619,10 @@ func TestDetectorStateFallbackRequiresSemanticMutationProofForEnforcement(t *tes
 			legacyText: `{"path":"/home/alice/.defenseclaw/audit.db","query":"SELECT 1"}`,
 		},
 		{
-			name: "read-only shell query is not enforceable",
+			// sqlite3 can execute extensions and shell commands, so -readonly
+			// does not make the whole program a known read-only command.
+			// The action target-mention ruling applies to the active audit DB.
+			name: "sqlite readonly flag still names protected state",
 			input: actionfacts.Input{
 				Tool:       "shell",
 				Command:    "sqlite3 -readonly /home/alice/.defenseclaw/audit.db 'SELECT 1'",
@@ -627,6 +630,8 @@ func TestDetectorStateFallbackRequiresSemanticMutationProofForEnforcement(t *tes
 				ActiveHome: "/home/alice",
 			},
 			legacyText: "sqlite3 -readonly /home/alice/.defenseclaw/audit.db 'SELECT 1'",
+			want:       true,
+			enforce:    true,
 		},
 		{
 			name: "malformed action is diagnostic only",
@@ -1708,6 +1713,7 @@ func TestTrustedActionBashProcessSubstitutionPreservesNestedExecution(t *testing
 			},
 			legacyText:  hostile,
 			wantFinding: true,
+			wantEnforce: true,
 		},
 		{
 			name: "codex command envelope process substitution",
@@ -1795,6 +1801,7 @@ func TestTrustedActionBashProcessSubstitutionPreservesNestedExecution(t *testing
 			},
 			legacyText:  "for ((i=0; i<1; i++)); do " + dangerous + " ; done",
 			wantFinding: true,
+			wantEnforce: true,
 		},
 		{
 			name: "inert function definition",
@@ -1814,6 +1821,7 @@ func TestTrustedActionBashProcessSubstitutionPreservesNestedExecution(t *testing
 			},
 			legacyText:  "f(){ " + dangerous + "; }; f",
 			wantFinding: true,
+			wantEnforce: true,
 		},
 		{
 			name: "zsh file substitution",
@@ -1868,6 +1876,7 @@ func TestTrustedActionBashProcessSubstitutionPreservesNestedExecution(t *testing
 			},
 			legacyText:  "function\n{ " + dangerous + " ; }",
 			wantFinding: true,
+			wantEnforce: true,
 			uncertain:   true,
 		},
 		{
@@ -2078,7 +2087,7 @@ func TestTrustedActionBashProcessSubstitutionPreservesNestedExecution(t *testing
 					proof,
 				)
 			}
-			if matched != nil && test.uncertain && matched.Severity != "LOW" {
+			if matched != nil && test.uncertain && !matched.contributesToEnforcement() && matched.Severity != "LOW" {
 				t.Fatalf("parser uncertainty did not remain LOW: %+v", *matched)
 			}
 		})
@@ -2120,10 +2129,8 @@ func TestTrustedActionBashFallbackCoversActionCategoriesAndOverflow(t *testing.T
 	provenThenOverflow.WriteString("')")
 
 	for _, test := range []struct {
-		name      string
-		command   string
-		ruleID    string
-		uncertain bool
+		name, command, ruleID string
+		wantEnforce           bool
 	}{
 		{
 			name:    "nested sensitive path read",
@@ -2131,20 +2138,22 @@ func TestTrustedActionBashFallbackCoversActionCategoriesAndOverflow(t *testing.T
 			ruleID:  "PATH-ETC-SHADOW",
 		},
 		{
-			name:    "nested c2 destination",
-			command: "cat <(curl https://webhook" + ".site/example)",
-			ruleID:  "C2-WEBHOOK-SITE",
+			name:        "nested c2 destination",
+			command:     "cat <(curl https://webhook" + ".site/example)",
+			ruleID:      "C2-WEBHOOK-SITE",
+			wantEnforce: true,
 		},
 		{
-			name:      "projection overflow is diagnostic",
-			command:   overflow.String(),
-			ruleID:    "CMD-RM-RF",
-			uncertain: true,
+			name:        "projection overflow still evaluates every simple command",
+			command:     overflow.String(),
+			ruleID:      "CMD-RM-RF",
+			wantEnforce: true,
 		},
 		{
-			name:    "overflow cannot downgrade prior typed proof",
-			command: provenThenOverflow.String(),
-			ruleID:  "CMD-RM-RF",
+			name:        "overflow cannot downgrade prior typed proof",
+			command:     provenThenOverflow.String(),
+			ruleID:      "CMD-RM-RF",
+			wantEnforce: true,
 		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -2169,11 +2178,9 @@ func TestTrustedActionBashFallbackCoversActionCategoriesAndOverflow(t *testing.T
 					trustedBashFallbackActions(input, actionfacts.Analyze(input)),
 				)
 			}
-			if matched.contributesToEnforcement() {
-				t.Fatalf("partial outer projection became actionable: %+v", *matched)
-			}
-			if test.uncertain && matched.Severity != "LOW" {
-				t.Fatalf("projection overflow did not remain LOW: %+v", *matched)
+			if matched.contributesToEnforcement() != test.wantEnforce {
+				t.Fatalf("%s enforce=%t, want %t: %+v", test.ruleID,
+					matched.contributesToEnforcement(), test.wantEnforce, *matched)
 			}
 		})
 	}
@@ -2356,11 +2363,6 @@ func TestTrustedActionEmbeddedExecutionRemainsShadowUntilOuterComplete(t *testin
 		{
 			name:    "stdin interpreter network action",
 			command: `echo 'curl ` + webhook + `' | bash`,
-			ruleID:  "C2-WEBHOOK-SITE",
-		},
-		{
-			name:    "static wrapper Bash-only network action",
-			command: `bash -c 'cat <(curl ` + webhook + `)'`,
 			ruleID:  "C2-WEBHOOK-SITE",
 		},
 	} {

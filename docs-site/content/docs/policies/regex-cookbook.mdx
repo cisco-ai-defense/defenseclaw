@@ -63,11 +63,27 @@ What makes this work:
 
 | ID | Pattern | Catches |
 | --- | --- | --- |
-| `SEC-AWS-KEY` | `\b(?:AKIA\|ASIA)[0-9A-Z]{16}\b` | AWS access key IDs |
+| `SEC-AWS-KEY` | `\b(?:AKIA\|ASIA)[0-9A-Z]{16}\b` | AWS access key IDs, except the AWS documentation example `AKIAIOSFODNN7EXAMPLE` |
 | `SEC-GITHUB-TOKEN` | `(?:ghp_\|gho_\|ghu_\|ghs_\|ghr_)[a-zA-Z0-9]{36,}` | GitHub personal, OAuth, user, server and refresh tokens |
-| `SEC-PRIVKEY` | `-----BEGIN (?:RSA \|EC \|OPENSSH \|PGP \|DSA )?PRIVATE KEY-----` | PEM and OpenSSH private keys; public keys and certificates don't match |
+| `SEC-PRIVKEY` | `-----BEGIN (?:RSA \|EC \|OPENSSH \|PGP \|DSA )?PRIVATE KEY-----` | Complete PEM and OpenSSH private keys: the header, a key body that parses and the footer. A header line alone, public keys and certificates don't match |
 | `SEC-OPENAI` | `sk-proj-[a-zA-Z0-9]{20,}` | OpenAI project keys |
 | `SEC-SLACK-WEBHOOK` | `https://hooks\.slack\.com/services/T[A-Z0-9]+/B[A-Z0-9]+/[a-zA-Z0-9]+` | Slack incoming-webhook URLs, which carry their own secret |
+
+A match is a finding only when the matched text can be a real secret. The gateway drops
+documented public examples, such as the AWS sample key, and filler such as `placeholder` or
+`changeme`. `SEC-PRIVKEY` matches only a whole key block. So a quick test with the AWS sample
+key or a bare `-----BEGIN RSA PRIVATE KEY-----` line gets no finding. These are Claude Code
+Bash tool calls against the shipped default pack. A regex match in a tool call is reported as
+an alert and does not block the call:
+
+{/* Run by TestRegexCookbookSamplesMatchTheShippedRules (internal/gateway). */}
+
+| Bash tool call | Finding |
+| --- | --- |
+| `echo AKIA3FKJ2M5NQ7XZ8BWV` | `SEC-AWS-KEY` |
+| `echo AKIAIOSFODNN7EXAMPLE` | none: the AWS documentation example key |
+| `echo -----BEGIN RSA PRIVATE KEY-----` | none: a header line with no key |
+| `cat` of a key that `ssh-keygen -t ed25519` wrote, in the tool output | `SEC-PRIVKEY` |
 
 ### Prompt injection
 
@@ -84,7 +100,7 @@ sentence that merely mentions the phrase from matching:
   tags: [prompt-injection]
 ```
 
-For ambiguous wording, enable the [LLM judge](/docs/policies) (Layer 3) as a second
+For ambiguous wording, enable the [LLM judge](/docs/policies/deterministic-detection#optional-llm-judge) as a second
 opinion rather than widening the regex.
 
 ### Unicode zero-width obfuscation
@@ -144,7 +160,7 @@ See [Authoring CEL rules](/docs/policies/cel/authoring) for the expression side.
 ### Enterprise data shape
 
 Numeric-only patterns are the easiest to false-positive, so the shipped rules encode the
-structure of the number instead of just its length. The SSN rule rejects area numbers that are
+structure of the number instead of only its length. The SSN rule rejects area numbers that are
 never issued (`000`, `666`, `9xx`) and all-zero groups:
 
 ```yaml title="policies/guardrail/strict/rules/enterprise-data.yaml (excerpt)"
@@ -180,11 +196,4 @@ your environment, narrow its pattern or disable it in your own pack.
 
 ## Workflow
 
-In the [Policy creator](/docs/policies/creator) Rule pack section:
-
-1. Pick a recipe from the catalog or click "+ Rule" on the appropriate file.
-2. Paste your pattern in. The creator runs every keystroke through V8, the RE2 lint, and the
-   nested-quantifier check, plus your `should match` and `should NOT match` examples.
-3. When the pills line up (green for pass, amber for mismatch, red for compile error),
-   export the pack and run `defenseclaw guardrail validate-pack` on it. The Live Test pane
-   evaluates only the OPA/Rego policy, not regex rules.
+In the [policy creator](/docs/policies/creator) Rule pack section, paste the pattern. The creator runs it through V8, the RE2 lint and the nested-quantifier check, plus your `should match` and `should NOT match` examples. Then export the pack and run `defenseclaw guardrail validate-pack` on it. Live Test evaluates only the OPA/Rego policy, not regex rules.

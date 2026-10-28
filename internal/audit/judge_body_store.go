@@ -28,7 +28,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/google/uuid"
+	"github.com/defenseclaw/defenseclaw/internal/observability"
 )
 
 // JudgeBodyStore is a dedicated SQLite database for LLM-judge bodies
@@ -378,7 +378,7 @@ func (s *JudgeBodyStore) InsertJudgeResponseCtx(ctx context.Context, e JudgeResp
 		return nil
 	}
 	if e.ID == "" {
-		e.ID = uuid.New().String()
+		e.ID = observability.NewTimeOrderedID()
 	}
 	if e.Timestamp.IsZero() {
 		e.Timestamp = time.Now().UTC()

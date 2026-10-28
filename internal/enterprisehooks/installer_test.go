@@ -615,13 +615,8 @@ func TestInstallCodexTargetsExplicitUserHome(t *testing.T) {
 	if !strings.Contains(string(data), filepath.Join(home, ".defenseclaw", "hooks", "codex-hook.sh")) {
 		t.Fatalf("codex config does not reference per-user hook script:\n%s", string(data))
 	}
-	if strings.Contains(string(data), "/otlp/codex/"+otlpToken) {
-		t.Fatalf("codex config leaked the supplied service OTLP token in an endpoint:\n%s", string(data))
-	}
-	doubleQuotedBearer := `authorization = "Bearer ` + otlpToken + `"`
-	singleQuotedBearer := `authorization = 'Bearer ` + otlpToken + `'`
-	if !strings.Contains(string(data), doubleQuotedBearer) && !strings.Contains(string(data), singleQuotedBearer) {
-		t.Fatalf("codex config does not carry the supplied service OTLP token as an Authorization bearer:\n%s", string(data))
+	if strings.Contains(string(data), "[otel]") || strings.Contains(string(data), otlpToken) {
+		t.Fatalf("managed codex config still exports OTLP to an unverified listener:\n%s", string(data))
 	}
 	userOTLPToken, err := connector.OTLPPathTokenFilePath(filepath.Join(home, ".defenseclaw"), connector.OTLPScopeCodex)
 	if err != nil {
@@ -641,6 +636,7 @@ func TestInstallCodexTargetsExplicitUserHome(t *testing.T) {
 // guardian's verify-or-repair pass reinstalls them, and must pass again only
 // after an Install renders the socket transport.
 func TestVerifyFailsWhenHooksPredateTheConfiguredHookSocket(t *testing.T) {
+	useSecureClientHookDelivery(t)
 	requireEnterpriseHookInstaller(t)
 	skipIfRoot(t)
 	home := newTestHome(t)
@@ -688,6 +684,30 @@ func TestVerifyFailsWhenHooksPredateTheConfiguredHookSocket(t *testing.T) {
 	if _, err := Verify(context.Background(), tcpOpts); err != nil {
 		t.Fatalf("Verify (TCP install, TCP configured): %v", err)
 	}
+	// The TCP install has the Secure Client shape (no hook socket), so it
+	// registered DefenseClaw's Codex notifier. With the socket configured
+	// Setup registers none, so Verify refuses that notifier as a left-over
+	// first (svis.GAP-0045).
+	if _, err := Verify(context.Background(), socketOpts); err == nil || !strings.Contains(err.Error(), "owned hook command not present") {
+		t.Fatalf("Verify (TCP install with its notifier, socket configured) = %v, want the left-over notifier refused", err)
+	}
+	// Without the notifier, the hooks themselves still name the TCP transport.
+	cfgData, err := os.ReadFile(codexConfig)
+	if err != nil {
+		t.Fatalf("read codex config: %v", err)
+	}
+	var kept []string
+	for _, line := range strings.Split(string(cfgData), "\n") {
+		if !strings.HasPrefix(line, "notify = ") {
+			kept = append(kept, line)
+		}
+	}
+	if len(kept) == len(strings.Split(string(cfgData), "\n")) {
+		t.Fatal("TCP install wrote no Codex notifier")
+	}
+	if err := os.WriteFile(codexConfig, []byte(strings.Join(kept, "\n")), 0o600); err != nil {
+		t.Fatalf("write codex config: %v", err)
+	}
 	if _, err := Verify(context.Background(), socketOpts); err == nil || !strings.Contains(err.Error(), transportDrift) {
 		t.Fatalf("Verify (TCP install, socket configured) = %v, want transport drift", err)
 	}
@@ -707,13 +727,19 @@ func TestVerifyFailsWhenHooksPredateTheConfiguredHookSocket(t *testing.T) {
 	otherUID.ManagedServiceUID = 462
 	otherPath := socketOpts
 	otherPath.ManagedHookSocket = "/run/defenseclaw/hook.sock"
-	for name, opts := range map[string]InstallOptions{
-		"TCP configured":         tcpOpts,
-		"other service uid":      otherUID,
-		"other hook socket path": otherPath,
+	// TCP with no hook socket is the Secure Client shape, whose Codex
+	// notifier a socket install does not write, so Verify fails on the
+	// missing notifier before it compares the transport (svis.GAP-0045).
+	for name, c := range map[string]struct {
+		opts InstallOptions
+		want string
+	}{
+		"TCP configured":         {tcpOpts, "owned hook command not present"},
+		"other service uid":      {otherUID, transportDrift},
+		"other hook socket path": {otherPath, transportDrift},
 	} {
-		if _, err := Verify(context.Background(), opts); err == nil || !strings.Contains(err.Error(), transportDrift) {
-			t.Fatalf("Verify (socket install, %s) = %v, want transport drift", name, err)
+		if _, err := Verify(context.Background(), c.opts); err == nil || !strings.Contains(err.Error(), c.want) {
+			t.Fatalf("Verify (socket install, %s) = %v, want %q", name, err, c.want)
 		}
 	}
 }
@@ -772,8 +798,8 @@ func TestVerifyFailsWhenHooksCarryCredentialsNotBoundToTheUser(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(data), "Bearer "+perUser.OTLPPathToken) || strings.Contains(string(data), shared.OTLPPathToken) {
-		t.Fatalf("codex config does not carry only the per-user OTLP credential:\n%s", data)
+	if strings.Contains(string(data), "[otel]") || strings.Contains(string(data), perUser.OTLPPathToken) || strings.Contains(string(data), shared.OTLPPathToken) {
+		t.Fatalf("codex config still exports a managed OTLP credential:\n%s", data)
 	}
 	lock, err := os.ReadFile(filepath.Join(home, ".defenseclaw", "hook_contract_lock.json"))
 	if err != nil {
@@ -798,83 +824,6 @@ func TestVerifyFailsWhenHooksCarryCredentialsNotBoundToTheUser(t *testing.T) {
 		if _, err := Verify(context.Background(), opts); err == nil || !strings.Contains(err.Error(), credentialDrift) {
 			t.Fatalf("Verify (per-user install, %s) = %v, want credential drift", name, err)
 		}
-	}
-}
-
-func TestInstallOmnigentPolicyModuleThroughGuardian(t *testing.T) {
-	requireEnterpriseHookInstaller(t)
-	skipIfRoot(t)
-	home := newTestHome(t)
-	configPath := filepath.Join(home, ".omnigent", "config.yaml")
-	sitePackages := filepath.Join(home, ".local", "lib", "python", "site-packages")
-	if err := os.MkdirAll(filepath.Dir(configPath), 0o700); err != nil {
-		t.Fatalf("mkdir OmniGent config dir: %v", err)
-	}
-	if err := os.WriteFile(configPath, []byte("server: https://example.test\npolicy_modules: []\n"), 0o600); err != nil {
-		t.Fatalf("write OmniGent config: %v", err)
-	}
-
-	previousConfig := connector.OmnigentConfigPathOverride
-	previousSite := connector.OmnigentSitePackagesPathOverride
-	connector.OmnigentConfigPathOverride = configPath
-	connector.OmnigentSitePackagesPathOverride = sitePackages
-	t.Cleanup(func() {
-		connector.OmnigentConfigPathOverride = previousConfig
-		connector.OmnigentSitePackagesPathOverride = previousSite
-	})
-
-	scopedToken := strings.Repeat("c", 64)
-	result, err := Install(context.Background(), InstallOptions{
-		ConnectorName: "omnigent",
-		UserHome:      home,
-		OwnerUID:      os.Getuid(),
-		OwnerGID:      os.Getgid(),
-		APIAddr:       "127.0.0.1:18970",
-		ProxyAddr:     "127.0.0.1:4000",
-		APIToken:      scopedToken,
-		GuardrailMode: "action",
-		HookFailMode:  "closed",
-		AgentVersion:  "omnigent 0.7.0",
-		Registry:      connector.NewDefaultRegistry(),
-	})
-	if err != nil {
-		t.Fatalf("Install OmniGent: %v", err)
-	}
-	if result.Connector != "omnigent" {
-		t.Fatalf("connector = %q, want omnigent", result.Connector)
-	}
-	if len(result.HookConfigPaths) != 1 || result.HookConfigPaths[0] != configPath {
-		t.Fatalf("hook config paths = %v, want %s", result.HookConfigPaths, configPath)
-	}
-	configData, err := os.ReadFile(configPath)
-	if err != nil {
-		t.Fatalf("read OmniGent config: %v", err)
-	}
-	if !strings.Contains(string(configData), "defenseclaw_omnigent_policy.defenseclaw_policy") {
-		t.Fatalf("OmniGent config does not reference DefenseClaw policy module:\n%s", configData)
-	}
-	tokenPath := filepath.Join(home, ".defenseclaw", "hooks", ".hook-omnigent.token")
-	tokenData, err := os.ReadFile(tokenPath)
-	if err != nil {
-		t.Fatalf("read OmniGent scoped token sidecar: %v", err)
-	}
-	if got, want := string(tokenData), scopedToken+"\n"; got != want {
-		t.Fatalf("OmniGent scoped token sidecar = %q, want exact token plus newline", got)
-	}
-	if info, err := os.Stat(tokenPath); err != nil || info.Mode().Perm() != 0o600 {
-		t.Fatalf("OmniGent scoped token sidecar mode/info = %v, %v", info, err)
-	}
-	modulePath := filepath.Join(home, ".defenseclaw", "hooks", "defenseclaw_omnigent_policy.py")
-	moduleData, err := os.ReadFile(modulePath)
-	if err != nil {
-		t.Fatalf("read OmniGent policy module: %v", err)
-	}
-	if encodedPath := base64.StdEncoding.EncodeToString([]byte(tokenPath)); !strings.Contains(string(moduleData), encodedPath) {
-		t.Fatalf("OmniGent policy module does not reference the stable scoped token sidecar")
-	}
-	if strings.Contains(string(moduleData), scopedToken) ||
-		strings.Contains(string(moduleData), base64.StdEncoding.EncodeToString([]byte(scopedToken))) {
-		t.Fatal("OmniGent policy module embedded the connector-scoped token")
 	}
 }
 
@@ -2214,22 +2163,16 @@ func sliceContains(values []string, want string) bool {
 	return false
 }
 
-// Antigravity and OpenHands load a hooks file that they create only when the
-// user writes hooks; a first install creates it as the user and registers
-// the DefenseClaw hooks there.
+// Antigravity loads a hooks file that it creates only when the user writes
+// hooks; a first install creates it as the user and registers the
+// DefenseClaw hooks there.
 func TestInstallBootstrapsAMissingHooksFile(t *testing.T) {
 	requireEnterpriseHookInstaller(t)
 	skipIfRoot(t)
 	setStandaloneProfileForTest(t, true)
 	for _, tc := range []struct{ connector, version, config string }{
 		{"antigravity", "1.2.11", filepath.Join(".gemini", "config", "hooks.json")},
-		{"openhands", "1.16.0", filepath.Join(".openhands", "hooks.json")},
 	} {
-		if tc.connector == "openhands" && runtime.GOOS == "darwin" {
-			// macOS OpenHands setup also needs the user's executable; covered
-			// by TestInstallOpenHandsRecordsTheUsersExecutableOnDarwin.
-			continue
-		}
 		home := newTestHome(t)
 		if _, err := Install(context.Background(), InstallOptions{
 			ConnectorName: tc.connector,
@@ -2254,38 +2197,15 @@ func TestInstallBootstrapsAMissingHooksFile(t *testing.T) {
 	}
 }
 
-// Only the user-global OpenHands hooks file is bootstrapped; a pinned
-// workspace keeps the strict must-exist check.
-func TestOpenHandsHookStubOnlyForUserGlobalHooks(t *testing.T) {
-	setStandaloneProfileForTest(t, true)
-	home := t.TempDir()
-	conn := connector.NewOpenHandsConnector()
-	stub := defaultHookConfigStubForConnector(conn, connector.SetupOpts{}, home)
-	if want := filepath.Join(home, ".openhands", "hooks.json"); stub.ContentPath != want || stub.Mode != 0o600 {
-		t.Fatalf("user-global OpenHands stub = %q mode %o, want %q mode 600", stub.ContentPath, stub.Mode, want)
-	}
-	pinned := connector.SetupOpts{WorkspaceDir: filepath.Join(home, "project")}
-	if stub := defaultHookConfigStubForConnector(conn, pinned, home); stub.ContentPath != "" {
-		t.Fatalf("pinned-workspace OpenHands stub = %q, want none", stub.ContentPath)
-	}
-	// A user who installed OmniGent but never ran it gets an empty config.
-	omni := defaultHookConfigStubForConnector(connector.NewOmnigentConnector(), connector.SetupOpts{}, home)
-	if want := filepath.Join(home, ".omnigent", "config.yaml"); omni.ContentPath != want || string(omni.Contents) != "{}\n" {
-		t.Fatalf("OmniGent stub = %q %q, want %q", omni.ContentPath, omni.Contents, want)
-	}
-}
-
-// The OpenHands and Antigravity hook-config stubs are a standalone-profile
-// behavior. The Secure Client macOS guardian never created those files, so
-// outside the standalone profile a first install still stops on the
-// missing file, and nothing is written.
-func TestHookConfigStubsForOpenHandsAndAntigravityAreStandaloneOnly(t *testing.T) {
+// The Antigravity hook-config stub is a standalone-profile behavior. The
+// Secure Client macOS guardian never created that file, so outside the
+// standalone profile a first install still stops on the missing file, and
+// nothing is written.
+func TestHookConfigStubForAntigravityIsStandaloneOnly(t *testing.T) {
 	setStandaloneProfileForTest(t, false)
 	home := t.TempDir()
-	for _, conn := range []connector.Connector{connector.NewOpenHandsConnector(), connector.NewAntigravityConnector(), connector.NewOmnigentConnector()} {
-		if stub := defaultHookConfigStubForConnector(conn, connector.SetupOpts{}, home); stub.ContentPath != "" {
-			t.Fatalf("%s stub outside the standalone profile = %q, want none", conn.Name(), stub.ContentPath)
-		}
+	if stub := defaultHookConfigStubForConnector(connector.NewAntigravityConnector(), connector.SetupOpts{}, home); stub.ContentPath != "" {
+		t.Fatalf("antigravity stub outside the standalone profile = %q, want none", stub.ContentPath)
 	}
 	if runtime.GOOS == "windows" {
 		return

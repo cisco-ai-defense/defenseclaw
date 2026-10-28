@@ -6,17 +6,23 @@ package enterprisehooks
 import (
 	"runtime"
 	"testing"
+
+	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 )
 
 // useSecureClientHookDelivery lets a test of the Secure Client delivery
-// contract (#1163) run on Linux CI. Linux has no Secure Client profile, so
-// secureClientHookDelivery is false there whatever the process flags say
-// (GAP-0002); the standalone process mode still decides on every OS.
+// contract (#1163) run on Linux CI with a simulated trusted install marker.
+// Linux has no Secure Client profile in production (GAP-0002).
 func useSecureClientHookDelivery(t *testing.T) {
 	t.Helper()
 	previous := secureClientHookDeliveryHost
+	verified := connector.SecureClientDeploymentVerified
 	secureClientHookDeliveryHost = true
-	t.Cleanup(func() { secureClientHookDeliveryHost = previous })
+	connector.SecureClientDeploymentVerified = func() bool { return true }
+	t.Cleanup(func() {
+		secureClientHookDeliveryHost = previous
+		connector.SecureClientDeploymentVerified = verified
+	})
 }
 
 // GAP-0002: a Linux process that never set the standalone process mode does
@@ -34,5 +40,21 @@ func TestSecureClientHookDeliveryNeedsAHostWithSecureClient(t *testing.T) {
 	useSecureClientHookDelivery(t)
 	if got := canonicalHookFailMode(""); got != "open" {
 		t.Fatalf("the Secure Client contract (#1163) renders unset as %q, want open", got)
+	}
+}
+
+func TestSecureClientEnvironmentNeedsTrustedInstallMarker(t *testing.T) {
+	useSecureClientHookDelivery(t)
+	t.Setenv("DEFENSECLAW_DEPLOYMENT_MODE", "managed_enterprise")
+	t.Setenv("DEFENSECLAW_ENTERPRISE_PROFILE", "secure_client")
+	previous := connector.SecureClientDeploymentVerified
+	t.Cleanup(func() { connector.SecureClientDeploymentVerified = previous })
+	connector.SecureClientDeploymentVerified = func() bool { return false }
+	if secureClientHookDelivery() || canonicalHookFailMode("") != "closed" {
+		t.Fatal("process environment enabled Secure Client delivery without its trusted install marker")
+	}
+	connector.SecureClientDeploymentVerified = func() bool { return true }
+	if !secureClientHookDelivery() || canonicalHookFailMode("") != "open" {
+		t.Fatal("a verified Secure Client install did not keep its configured delivery")
 	}
 }

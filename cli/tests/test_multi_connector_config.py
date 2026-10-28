@@ -128,12 +128,12 @@ class TestActiveConnectors(unittest.TestCase):
             guardrail=GuardrailConfig(
                 connector="codex",
                 connectors={
-                    "open-hands": PerConnectorGuardrailConfig(),
-                    "openhands": PerConnectorGuardrailConfig(),
+                    "codex": PerConnectorGuardrailConfig(),
+                    "CoDeX": PerConnectorGuardrailConfig(),
                 },
             )
         )
-        self.assertEqual(cfg.active_connectors(), ["openhands"])
+        self.assertEqual(cfg.active_connectors(), ["codex"])
 
 
 class TestEffectiveResolvers(unittest.TestCase):
@@ -159,26 +159,29 @@ class TestEffectiveResolvers(unittest.TestCase):
     def test_per_connector_override_wins(self):
         g = self._cfg()
         self.assertEqual(g.effective_mode("codex"), "action")
-        self.assertEqual(g.effective_hook_fail_mode("codex"), "closed")
+        # Its permissive pack is the outage-open tier (oss-outage-open).
+        self.assertEqual(g.effective_hook_fail_mode("codex"), "open")
         self.assertEqual(g.effective_block_message("codex"), "codex-msg")
         self.assertEqual(g.effective_rule_pack("codex"), "permissive")
         self.assertTrue(g.effective_hilt("codex").enabled)
         self.assertEqual(g.effective_hilt("codex").min_severity, "LOW")
 
-    def test_cursor_fail_mode_tracks_mode_despite_stored_open(self):
+    def test_cursor_outage_mode_follows_the_tier_in_every_guardrail_mode(self):
         g = GuardrailConfig(
             mode="observe",
-            hook_fail_mode="open",
-            connectors={"cursor": PerConnectorGuardrailConfig(hook_fail_mode="open")},
+            hook_fail_mode="closed",
+            connectors={"cursor": PerConnectorGuardrailConfig(hook_fail_mode="closed")},
         )
         self.assertEqual(g.effective_hook_fail_mode("cursor"), "open")
         g.connectors["cursor"].mode = "action"
+        self.assertEqual(g.effective_hook_fail_mode("cursor"), "open")
+        g.connectors["cursor"].rule_pack = "strict"
         self.assertEqual(g.effective_hook_fail_mode("cursor"), "closed")
 
     def test_empty_block_inherits_global(self):
         g = self._cfg()
         self.assertEqual(g.effective_mode("empty"), "observe")
-        self.assertEqual(g.effective_hook_fail_mode("empty"), "open")
+        self.assertEqual(g.effective_hook_fail_mode("empty"), "closed")
         self.assertEqual(g.effective_block_message("empty"), "global-msg")
         self.assertEqual(g.effective_rule_pack("empty"), "strict")
         self.assertFalse(g.effective_hilt("empty").enabled)
@@ -187,7 +190,7 @@ class TestEffectiveResolvers(unittest.TestCase):
     def test_unknown_and_empty_connector_use_global(self):
         g = self._cfg()
         self.assertEqual(g.effective_mode("nope"), "observe")
-        self.assertEqual(g.effective_hook_fail_mode(""), "open")
+        self.assertEqual(g.effective_hook_fail_mode(""), "closed")
 
     def test_config_version_9_rule_pack_resolves_and_a_global_selection_clears_it(self):
         from defenseclaw.commands.cmd_setup import _apply_rule_pack_selection
@@ -217,9 +220,9 @@ class TestEffectiveResolvers(unittest.TestCase):
     def test_safe_fallbacks_when_unset(self):
         g = GuardrailConfig(mode="", hook_fail_mode="")
         self.assertEqual(g.effective_mode(""), "observe")
-        # Outside Secure Client a fail mode that is not set is closed, in
-        # observe mode too (mirrors Go EffectiveHookFailModeForConnector).
-        self.assertEqual(g.effective_hook_fail_mode(""), "closed")
+        # A per-user outage mode follows the policy tier: the default tier is
+        # open (mirrors Go EffectiveHookOutageFailModeForConnector).
+        self.assertEqual(g.effective_hook_fail_mode(""), "open")
         # Under Secure Client an unset fail mode is open (#1163).
         g._secure_client = True
         self.assertEqual(g.effective_hook_fail_mode(""), "open")
@@ -236,12 +239,12 @@ class TestEffectiveResolvers(unittest.TestCase):
                 "claudecode": PerConnectorGuardrailConfig(),
             },
         )
-        self.assertEqual(g.effective_hook_fail_mode("codex"), "closed")
-        # The global value applies in observe mode outside Secure Client.
-        self.assertEqual(g.effective_hook_fail_mode("claudecode"), "closed")
+        # A per-user outage mode follows the default tier, whatever is saved.
+        self.assertEqual(g.effective_hook_fail_mode("codex"), "open")
+        self.assertEqual(g.effective_hook_fail_mode("claudecode"), "open")
         g.hook_fail_mode = "open"
         self.assertEqual(g.effective_hook_fail_mode("claudecode"), "open")
-        self.assertEqual(g.effective_hook_fail_mode("codex"), "closed")
+        self.assertEqual(g.effective_hook_fail_mode("codex"), "open")
         # Under Secure Client an explicit value wins too: the global closed
         # closes a connector without its own value, and an unset global is
         # open (#1163).
@@ -328,10 +331,11 @@ class TestEffectiveResolvers(unittest.TestCase):
                 )
 
     def test_non_secure_client_keeps_fail_closed_default(self):
-        # OSS and the standalone enterprise profile keep main's fail-closed
-        # default: unset resolves closed in action mode. On the standalone
-        # profile the administrator's explicit automatic-protection open wins
-        # (owner decision 2026-10-20).
+        # The standalone enterprise profile keeps its fail-closed default and
+        # the administrator's explicit automatic-protection open wins (owner
+        # decision 2026-10-20). OSS follows its policy tier: the default tier
+        # is open for an outage and an overlay does not change it (owner
+        # decision 2026-10-23).
         oss = "guardrail: {mode: action}\n"
         standalone = (
             "config_version: 8\ndeployment_mode: managed_enterprise\n"
@@ -339,8 +343,8 @@ class TestEffectiveResolvers(unittest.TestCase):
         )
         overlay = "application_protection: {enabled: true, guardrail: {hook_fail_mode: open}}\n"
         for doc, extra, expected in (
-            (oss, "", "closed"),
-            (oss, overlay, "closed"),
+            (oss, "", "open"),
+            (oss, overlay, "open"),
             (standalone, "", "closed"),
             (standalone, overlay, "open"),
         ):
@@ -355,32 +359,6 @@ class TestEffectiveResolvers(unittest.TestCase):
         )
         self.assertEqual(with_empty.effective_mode("codex"), "action")
 
-    def test_connector_override_name_insensitive(self):
-        # Mirrors Go TestConnectorOverride_NameInsensitive: a per-connector
-        # override is honored even when the configured key differs from the
-        # requested (registry-canonical) name only by case or a hyphen/
-        # underscore alias. Otherwise an operator who hand-writes "OpenHands"
-        # or "open-hands" would silently get the global policy.
-        g = GuardrailConfig(
-            mode="observe",
-            block_message="global-msg",
-            connectors={
-                "Codex": PerConnectorGuardrailConfig(
-                    mode="action", block_message="codex-msg"
-                ),
-                "open-hands": PerConnectorGuardrailConfig(
-                    mode="action", enabled=False
-                ),
-            },
-        )
-        # Case-insensitive key.
-        self.assertEqual(g.effective_mode("codex"), "action")
-        self.assertEqual(g.effective_block_message("codex"), "codex-msg")
-        # Alias key: canonical "openhands" resolves "open-hands".
-        self.assertEqual(g.effective_mode("openhands"), "action")
-        self.assertFalse(g.effective_enabled("openhands"))
-        # Genuinely-absent connector still falls through to the global.
-        self.assertEqual(g.effective_mode("retired-example"), "observe")
 
     def test_effective_enabled(self):
         # Mirrors Go EffectiveEnabled: default True; False only on an
@@ -466,8 +444,8 @@ class TestGuardrailValidate(unittest.TestCase):
         with self.assertRaises(ValueError) as ctx:
             GuardrailConfig(
                 connectors={
-                    "openhands": PerConnectorGuardrailConfig(mode="action"),
-                    "open-hands": PerConnectorGuardrailConfig(mode="observe"),
+                    "claude-code": PerConnectorGuardrailConfig(mode="observe"),
+                    "claude_code": PerConnectorGuardrailConfig(mode="observe"),
                 }
             ).validate()
         self.assertIn("refer to the same connector", str(ctx.exception))
@@ -740,14 +718,6 @@ class TestResolveListConnector(unittest.TestCase):
         app = self._app(connector="claudecode", connectors=["codex", "cursor"])
         self.assertEqual(resolve_list_connector(app, "CURSOR"), "cursor")
 
-    def test_valid_override_accepts_alias(self):
-        from defenseclaw.commands import resolve_list_connector
-
-        # "open-hands" is a documented alias of the registry-canonical
-        # "openhands"; passing the alias must resolve the configured peer
-        # rather than raising "not configured".
-        app = self._app(connector="claudecode", connectors=["openhands", "codex"])
-        self.assertEqual(resolve_list_connector(app, "open-hands"), "openhands")
 
     def test_unknown_connector_raises(self):
         import click

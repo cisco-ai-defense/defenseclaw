@@ -23,6 +23,40 @@ DOCS = Path(__file__).resolve().parents[1] / "content/docs/reference"
 
 
 class ReferencePolicyDocsTest(unittest.TestCase):
+    def test_fail_modes_distinguish_managed_refusals_from_user_outages(self):
+        text = (DOCS / "fail-modes.mdx").read_text()
+        behavior = text.split("## Effective behavior", 1)[1].split("### Stop", 1)[0]
+        self.assertIn("Managed standalone `open`", behavior)
+        rows = [line for line in behavior.splitlines() if line.startswith("| ")]
+        for label in ("Gateway 5xx", "Connector authentication missing",
+                      "Gateway returns 4xx", "Hook input over"):
+            row = next(line for line in rows if line.startswith("| " + label))
+            self.assertIn("Block", row.split("|")[3])
+        # A cut-off error answer and a 429 the gateway cannot answer in time
+        # are error statuses, not outages (W6 review loop 1).
+        for label in ("Gateway 5xx", "Gateway returns 4xx"):
+            row = next(line for line in rows if line.startswith("| " + label))
+            self.assertIn("cut off", row.split("|")[1])
+        row = next(line for line in rows if line.startswith("| Gateway returns 4xx"))
+        self.assertIn("429", row.split("|")[1])
+
+
+    def test_foreign_hook_outage_scope_names_the_shared_remove_setting(self):
+        text = (DOCS / "fail-modes.mdx").read_text()
+        guard = next(line for line in text.splitlines()
+                     if "foreign-hook guard" in line and "requires a current gateway answer" in line)
+        self.assertIn("On a managed standalone host with `foreign_hooks: remove`", guard)
+        self.assertIn("GitHub Copilot CLI, Cursor, Devin, OpenCode and Amp", guard)
+        self.assertIn("Hermes on Linux and macOS", guard)
+
+    def test_amp_per_user_outage_is_persisted_but_managed_and_sandbox_are_not(self):
+        text = (DOCS / "fail-modes.mdx").read_text()
+        reporting = text.split("## Reporting and diagnosis", 1)[1]
+        self.assertIn("Amp plugin writes a record only for a call an outage let run", reporting)
+        self.assertIn("managed and sandbox Amp plugins write no record", reporting)
+        self.assertIn("guardrail-degraded", reporting)
+
+
     def test_zero_consensus_uses_sdk_default_without_disabling_llm(self):
         text = (DOCS / "configuration.mdx").read_text()
         row = next(line for line in text.splitlines()
@@ -38,11 +72,12 @@ class ReferencePolicyDocsTest(unittest.TestCase):
         digest = next(line for line in text.splitlines()
                       if line.startswith("| `defenseclaw-gateway policy digest"))
         self.assertIn("Secure Client", status)
-        self.assertIn("neither the Policy line nor the JSON `policy` object", status)
+        self.assertIn("neither the Policy line", status)
+        self.assertIn("nor the `policy` object", status)
         self.assertIn("Secure Client", digest)
         self.assertIn("unknown-command error", digest)
         section = text.split("### Policy generation and digest", 1)[1].split("## ", 1)[0]
-        self.assertIn("does not apply to Secure Client", section)
+        self.assertIn("Not available on Secure Client", section)
 
 
     def test_remote_skill_scan_uses_gateway_timeout(self):

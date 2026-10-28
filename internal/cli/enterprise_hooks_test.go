@@ -1720,6 +1720,7 @@ func TestEnterpriseHookReconcileRowsHash(t *testing.T) {
 }
 
 func TestEnterpriseHooksReconcileManagedRejectsUntrustedManifest(t *testing.T) {
+	skipIfLocalSystem(t, "LocalSystem owns its t.TempDir() tree, so the fixture cannot stand in for a file a standard account owns")
 	dir := t.TempDir()
 	manifest := filepath.Join(dir, "targets.yaml")
 	if err := os.WriteFile(manifest, []byte("version: 1\ntargets: []\n"), 0o666); err != nil {
@@ -1764,6 +1765,7 @@ func TestEnterpriseHooksReconcileManagedRejectsUntrustedManifest(t *testing.T) {
 }
 
 func TestEnterpriseHookManagedRuntimeRejectsUserOwnedDataDir(t *testing.T) {
+	skipIfLocalSystem(t, "LocalSystem owns its t.TempDir() tree, so the fixture cannot stand in for a file a standard account owns")
 	if os.Geteuid() == 0 {
 		t.Skip("root-owned temp dirs are valid managed runtime dirs")
 	}

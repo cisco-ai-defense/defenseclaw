@@ -44,6 +44,10 @@ func platformLocalAccountRecords(context.Context) (map[string]LocalAccountRecord
 	return nil, errors.New("unixidentity: local account records are listed only on macOS")
 }
 
+func platformLocalAccountRecord(context.Context, string) (LocalAccountRecord, bool, error) {
+	return LocalAccountRecord{}, false, errors.New("unixidentity: local account records are listed only on macOS")
+}
+
 func platformLocalGroups(context.Context) (map[string]int, error) {
 	return nil, errors.New("unixidentity: no local group reader on this platform")
 }

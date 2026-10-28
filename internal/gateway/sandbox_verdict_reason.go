@@ -120,7 +120,7 @@ func (a *APIServer) sandboxMatchUndecided(ctx context.Context, connectorName str
 		return false
 	}
 	probe := []RuleFinding{{Severity: strings.ToUpper(strings.TrimSpace(resp.Severity)), Confidence: 1}}
-	switch guardrailActionForConnectorFindings(a.decisionConfig(ctx), connectorName, probe, true) {
+	switch profileMeetActionForFindings(ctx, a.decisionConfig(ctx), connectorName, probe, true, false) {
 	case guardrailActionBlock, guardrailActionConfirm:
 		return true
 	}
@@ -133,7 +133,7 @@ func (a *APIServer) sandboxMatchUndecided(ctx context.Context, connectorName str
 // threshold is audited only (GAP-0634, GAP-0640).
 func (a *APIServer) sandboxMatchAlerts(ctx context.Context, connectorName string, resp agentHookResponse) bool {
 	probe := []RuleFinding{{Severity: strings.ToUpper(strings.TrimSpace(resp.Severity)), Confidence: 1}}
-	return guardrailActionForConnectorFindings(a.decisionConfig(ctx), connectorName, probe, true) != guardrailActionAllow
+	return profileMeetActionForFindings(ctx, a.decisionConfig(ctx), connectorName, probe, true, false) != guardrailActionAllow
 }
 
 // sandboxRulesSubject names the deciding rules the way agentMatchedRules
@@ -422,6 +422,9 @@ func (a *APIServer) renderSandboxVerdict(
 	switch profile.Name {
 	case "claudecode":
 		decoded := decodeClaudeCodeRequestForContext(ctx, rawBody, payload)
+		// A caller without the request body (a recovered synthetic hook)
+		// still renders the native output of the event it answers.
+		decoded.HookEventName = firstNonEmpty(decoded.HookEventName, req.HookEventName)
 		cc = &decoded
 		resp.AdditionalContext = claudeCodeAdditionalContext(
 			resp.RawAction, resp.Severity, plain, resp.WouldBlock && claudeCodeCanEnforce(decoded),

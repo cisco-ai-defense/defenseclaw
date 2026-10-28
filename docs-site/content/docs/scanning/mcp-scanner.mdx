@@ -13,17 +13,15 @@ keywords:
   - LLM judge
 ---
 
-The Model Context Protocol (MCP) is becoming the default way for agents to acquire new tools. Each MCP server exposes a set of tools; the agent picks them up at startup and calls them as needed.
+Scan an MCP server before an agent calls it.
 
-That tool list is also a perfect place to hide a "shadow capability" — a tool whose description claims to read calendar events but whose implementation actually exfiltrates files, or a `safe_lookup` tool that quietly modifies a database. Static metadata isn't enough; you need to *look at what the server will say it can do, and what its implementations imply*.
-
-DefenseClaw integrates Cisco's open-source [`cisco-ai-mcp-scanner`](https://github.com/cisco-ai-defense/mcp-scanner) for exactly that. Verdicts feed the `admission` policy in `config.yaml` by severity, the same way as skills. The scanner's settings live in `config.yaml` under `scanners.mcp_scanner`, and DefenseClaw builds each scan from them and nothing else.
+Every scanner setting lives in `config.yaml` under `scanners.mcp_scanner`. DefenseClaw builds each scan from those keys and nothing else. What a severity does is set under `admission:` (see [Admission](/docs/policies/admission)). The skill scanner has its own page: [Skill scanner](/docs/scanning/skill-scanner).
 
 <DefenseClawDemo scenario="mcp-shadow-capability" />
 
 ## What you just saw
 
-A locally configured stdio server advertised a read-only-looking tool whose description and schema implied filesystem and outbound-network side effects. DefenseClaw held admission, started the server in a short-lived scan subprocess to read its tool list, resolved the admission action for HIGH, disabled the runtime, and blocked installation. Remote URL scans use a different path and do not add the server to a connector.
+Guided example with synthetic data. The balanced default adds a server with a HIGH finding with a warning; this example uses a stricter `admission.mcp.actions.high` mapping that disables the runtime and blocks the install. In the demo, a local stdio server started with `npx` advertises a read-only-looking tool whose description and schema imply file and network side effects. DefenseClaw holds admission, starts the server in a short-lived scan process to read its tool list, applies that HIGH action and blocks the install. A remote URL scan does not add the server to a connector.
 
 ## What it scans
 
@@ -61,59 +59,69 @@ Each server is scanned independently and findings are tagged with the connector 
 
 ## One-shot scans
 
-<Tabs items={['All connectors', 'Specific server', 'Remote URL', 'With prompts/resources']}>
-  <Tab value="All connectors">
-```bash
-defenseclaw mcp scan --all --json | jq -s '[.[].findings[]]'
-```
+### Before you start
 
-CI-friendly. Walks every scan-eligible server discovered across **all configured connectors'** config files — not just `openclaw.json`, but every connector's MCP source (`claude_desktop_config.json`, `~/.cursor/mcp.json`, Codex, Copilot, …) — and emits **one JSON object per scanned server** as a stream of top-level values (NDJSON-shaped, not wrapped in an array). Codex's exact vendor-bundled, URL-only `openaiDeveloperDocs` user entry is inventory-only and skipped; same-named project or modified entries and Amp skill MCP manifests are scanned normally. `jq -s` slurps the stream into an array so a single pipeline can iterate findings across servers; for line-oriented tools use `--json | jq -c '.findings[]'` instead.
-  </Tab>
-  <Tab value="Specific server">
-```bash
-defenseclaw mcp scan filesystem
-```
+These `defenseclaw mcp` steps are for a per-user installation. On managed Linux and macOS, the standard user's `defenseclaw` launcher offers only `sandbox` commands. Add the server through the connector's MCP configuration so the gateway's install watcher scans it; an administrator can inspect a remote URL first with `defenseclaw-gateway scan mcp https://mcp.example.com/mcp` from a privileged prompt. Local stdio servers are scanned after their connector configuration is installed. On managed Windows, use the administrator's `defenseclaw.exe scan mcp` command for a remote URL.
 
-Scans just the named server entry from the discovered configs. The name is the **positional target**, not a `--server` flag.
-  </Tab>
-  <Tab value="Remote URL">
-```bash
-defenseclaw mcp scan https://mcp.example.com/sse
-```
+- A judge: `defenseclaw setup llm` and `defenseclaw keys set DEFENSECLAW_LLM_KEY`. Without one the scan runs YARA signatures only and prints `LLM analyzer skipped`.
+- A configured connector (`defenseclaw setup <connector>`). DefenseClaw reads each connector's MCP config.
 
-Pass the URL as the positional target — the scanner detects it's an HTTP target and uses `scan_remote_server_tools`. No subprocess spawn. The remote server is *not* added to any connector — this is purely a pre-flight check.
-  </Tab>
-  <Tab value="With prompts/resources">
-```bash
-defenseclaw mcp scan filesystem --scan-prompts --scan-resources --scan-instructions
-```
+### Steps
 
-Extends the scan beyond the tool list to also evaluate the server's prompts, resources, and instructions surfaces. Use when you suspect a server is hiding intent in its prompt templates.
-  </Tab>
-</Tabs>
+1. List the servers DefenseClaw can see.
 
-Other real flags: `--analyzers <list>` to run a different set of analyzers for this one scan, `--json` for machine output, and `--allow-private` to scan a remote server on a private, loopback, link-local or CGNAT address (refused by default). Without `--analyzers` a scan uses `scanners.mcp_scanner.analyzers` from `config.yaml`; the three `--scan-*` flags add to what the config already turns on.
+   ```bash
+   defenseclaw mcp list
+   ```
 
-## Recommended setup
+2. Scan one by name, scan all, or scan a URL.
 
-The defaults are the recommended setup: let the scanner choose the analyzers (`[]`, which means YARA always, plus the LLM judge whenever a model and its key resolve), with the judge taken from DefenseClaw's top-level `llm:` block. Your one job is to give it a judge.
+   ```bash
+   defenseclaw mcp scan filesystem
+   defenseclaw mcp scan --all
+   defenseclaw mcp scan https://mcp.example.com/sse
+   ```
 
-| Setting | Recommended | Key |
-| --- | --- | --- |
-| Analyzers | auto: YARA, plus the judge when it is ready | `analyzers: []` |
-| Judge | DefenseClaw's `llm:` block, model `anthropic/claude-sonnet-5-5` | `judge_source: inherit` |
-| Prompts, resources, instructions | scanned for servers you do not trust | `scan_prompts`, `scan_resources`, `scan_instructions` (off by default) |
-| Cisco AI Defense `api` analyzer | optional, off | add `api` to `analyzers` |
+   A URL scan is a pre-flight check. It does not add the server to any connector. Add `--scan-prompts --scan-resources --scan-instructions` to look beyond the tool list.
+
+3. Add a server through the scanner. `mcp set` scans first and follows the configured MCP admission action. Balanced admission adds a server with HIGH findings with a warning and an audit entry; `admission.mcp.actions.high: quarantine` refuses it under a stricter policy.
+
+   ```bash
+   defenseclaw mcp set context7 --command npx --args '["-y", "@upstash/context7-mcp"]'
+   ```
+
+   A first `npx -y` download can take longer than the scan waits, and a remote hostname may temporarily fail to resolve. When the scan does not finish, `mcp set` adds the server with a warning and records the failed scan in the audit log; scan it later with `defenseclaw mcp scan context7`. To refuse such servers instead, run `defenseclaw config set scanners.mcp_scanner.unverified_server block`.
+
+   `mcp set` also takes `--url` and `--transport` for an SSE or HTTP server, `--env KEY=VAL` (repeatable) for the server's environment, `--allow-private` to let the pre-add scan reach a private URL, and `--skip-scan`. For OpenCode only, `--force-untrusted-command` writes a command outside the trusted install prefixes when `unverified_server` is `block`.
+
+### Use it in CI
+
+`--all --json` prints one JSON array with a result object per server. A failed scan is an error object in the same array, with an `error` field and no findings, and the command then exits 1. Save the output, then check it before you count, so a failed or empty scan fails the job:
 
 ```bash
-defenseclaw setup llm --provider anthropic --model claude-sonnet-5-5 --non-interactive
-defenseclaw keys set DEFENSECLAW_LLM_KEY
-defenseclaw doctor
+defenseclaw mcp scan --all --json > mcp-scan.json
+jq -e 'length > 0 and all(.[]; has("error") | not)' mcp-scan.json > /dev/null
+jq '[.[] | (.findings // [])[]] | length' mcp-scan.json
 ```
 
-```text
-  [PASS] Scanner: mcp-scanner  —  cisco-ai-mcp-scanner 4.3.0
+Run the three lines as separate steps, or in a shell that stops on the first error. The first fails when a scan failed, the second when nothing was scanned or a row is an error, and the third prints the finding count.
+
+To scan one server, name its connector. Without `--connector`, a name configured on several connectors prints one JSON object per connector, one after the other:
+
+```bash
+defenseclaw mcp scan filesystem --connector claudecode --json > mcp-scan.json
+jq '.findings | length' mcp-scan.json
 ```
+
+A server on the block list prints nothing and exits 2.
+
+### Check it worked
+
+```bash
+defenseclaw mcp list
+```
+
+The Verdict column reads `clean`, `warning`, `rejected` or `scan failed`. A server whose last scan failed shows `scan failed` and a next step under the table.
 
 ## Configure the scanner
 
@@ -152,6 +160,7 @@ scanners:
 | `judge_source` | `inherit` | `inherit` uses the top-level `llm:` block. `override` uses `scanners.mcp_scanner.llm`. |
 | `llm` | empty | The scanner's own judge settings. It must be empty with `inherit` and needs a `model` with `override`. |
 | `scan_prompts`, `scan_resources`, `scan_instructions` | `false` | Also scan the server's prompts, resources and instructions on every scan. |
+| `unverified_server` | `warn` | What `mcp set` and the gateway's install admission do when the scan did not finish (a timeout, an unresolved hostname, a launcher that exited, an unreachable URL) or an OpenCode command is outside the trusted install prefixes. `warn` adds or keeps the server with a warning and an audit record, including on managed standalone hosts; `block` refuses it, and the gateway blocks and disables it (strict). Secure Client uses separate closed admission. |
 
 The Cisco AI Defense endpoint and key are not scanner keys. They stay in `cisco_ai_defense` (`endpoint`, `api_key_env`, `timeout_ms`), shared with the guardrail.
 
@@ -215,7 +224,7 @@ defenseclaw setup mcp-scanner \
 | `--scan-prompts`, `--scan-resources`, `--scan-instructions` (each with a `--no-` form) | Also scan the server's prompts, resources and instructions on every scan. |
 | `--verify` / `--no-verify` | Run the doctor scanner checks after saving (default on). |
 
-With `--non-interactive`, a flag changes only what it names. The LLM flags write the **top-level** `llm:` block, which the guardrail judge and the skill and plugin scanners share. The wizard has no base URL flag: set a local server's URL with `defenseclaw setup llm --base-url <url>` or `defenseclaw setup skill-scanner --llm-base-url <url>`.
+With `--non-interactive`, a flag changes only what it names. The LLM flags write the **top-level** `llm:` block, which the guardrail judge and the skill and plugin scanners share. For a local server, pass `--llm-base-url <url>` (for `vllm` and `openai-compatible`), which saves `llm.base_url`, or use `defenseclaw setup llm --base-url <url>`. Neither needs a gateway restart.
 
 ## The judge
 
@@ -231,7 +240,7 @@ defenseclaw config set scanners.mcp_scanner.llm.api_key_env ACME_MCP_JUDGE_KEY
 defenseclaw config set scanners.mcp_scanner.judge_source override
 ```
 
-Fields you leave empty in the scanner's `llm` block fall back to the top-level block. To go back to the shared judge, unset `judge_source` and then `llm`, in that order. The validator refuses `inherit` with a filled `llm` block, and `override` without `llm.model`; when it does, `config set` reports a generic `configuration could not be compiled safely` and leaves the file as it was.
+Fields you leave empty in the scanner's `llm` block fall back to the top-level block. To go back to the shared judge, unset `judge_source` and then `llm`, in that order. The validator refuses `inherit` with a filled `llm` block, and `override` without `llm.model`; when it does, `config set` names the rule, for example `config.yaml was not changed: scanners.mcp_scanner.llm.model: judge_source: override needs a model. Correct the value, then run again.`, and leaves the file as it was.
 
 ## No LLM configured
 
@@ -255,13 +264,13 @@ Until a judge works, automatic selection runs YARA alone, so the server is still
 
 ## Removed keys
 
-`scanners.mcp_scanner.api` and `scanners.mcp_scanner.timeouts` are not configuration keys: no scan read them, so they were removed. The `api` analyzer uses `cisco_ai_defense.endpoint` and `cisco_ai_defense.api_key_env`, and a local stdio scan on native Windows stops the server's process tree after 60 seconds (see the warning below). A `config.yaml` written by a pre-release build that still holds them loads with them ignored, the next write leaves them out, and `defenseclaw config set` refuses them.
+`scanners.mcp_scanner.api` and `scanners.mcp_scanner.timeouts` are not configuration keys, and `defenseclaw config set` refuses them. The `api` analyzer uses `cisco_ai_defense.endpoint` and `cisco_ai_defense.api_key_env`. A local stdio scan on native Windows stops the server's process tree after 60 seconds.
 
 ## Pinned version
 
-This release pins `cisco-ai-mcp-scanner` **4.3.0**, which needs Python 3.11 or newer (`defenseclaw doctor` shows `Scanner: mcp-scanner` with the installed version and warns when it differs from the pin). The package is the PyPI wheel, pinned by URL and hash in `pyproject.toml`.
+DefenseClaw pins `cisco-ai-mcp-scanner` **4.3.0**, which needs Python 3.11 or newer (`defenseclaw doctor` shows `Scanner: mcp-scanner` with the installed version and warns when it differs from the pin). The package is the PyPI wheel, pinned by URL and hash in `pyproject.toml`.
 
-It stays on 4.3.0 on purpose. Later mcp-scanner releases pin LiteLLM to one exact version with a known vulnerability, CVE-2026-84377: every 4.8.x release (4.8.5 included) pins `litellm==1.93.0`, which is fixed only in 1.93.2. DefenseClaw requires LiteLLM 1.100.4 or newer on the reviewed 1.100 line, which also fixes GHSA-g5ff-637f-6q2m and CVE-2026-114612. This line provides binary wheels for the supported Windows, macOS and Linux platforms. Version 4.3.0 is the newest mcp-scanner whose metadata allows that dependency set. DefenseClaw moves to 4.8.x when upstream publishes a release that relaxes the LiteLLM pin. Do not upgrade the scanner or LiteLLM by hand; the [supported repair path](/docs/get-started/install) restores the pinned set. The skill scanner has its own pin; see [Versions, platforms and availability](/docs/scanning/skill-scanner#versions-platforms-and-availability).
+It stays on 4.3.0 on purpose. Later mcp-scanner releases pin LiteLLM to one exact version with a known vulnerability, CVE-2026-84377: every 4.8.x release (4.8.5 included) pins `litellm==1.93.0`, which is fixed only in 1.93.2. DefenseClaw requires LiteLLM 1.100.4 or newer on the reviewed 1.100 line, which also fixes GHSA-g5ff-637f-6q2m and CVE-2026-114612. This line provides binary wheels for supported Windows, macOS and Linux platforms. Version 4.3.0 is the newest mcp-scanner whose metadata allows that dependency set. DefenseClaw moves to 4.8.x when upstream publishes a release that relaxes the LiteLLM pin. Do not upgrade the scanner or LiteLLM by hand; the [supported repair path](/docs/get-started/download) restores the pinned set. The skill scanner has its own pin, above.
 
 ## Continuous protection
 
@@ -323,7 +332,7 @@ observability destination.
 
 ## Configure the action mapping
 
-The scanner produces a *severity*. What that severity *does* is set in `config.yaml` under `admission:`: `admission.mcp.actions` first, then `admission.defaults.actions`, which every asset type inherits. Unlike the skill scanner, the MCP scanner has no gate keys (`fail_on_severity` and `review_queue_min` belong to the skill scanner), so the action map is the only control. The built-in defaults quarantine CRITICAL, HIGH and MEDIUM servers, disable LOW ones at runtime, and admit INFO findings with a warning:
+The scanner produces a *severity*. What that severity *does* is set in `config.yaml` under `admission:`: `admission.mcp.actions` first, then `admission.defaults.actions`, which every asset type inherits. Unlike the skill scanner, the MCP scanner has no gate keys (`fail_on_severity` and `review_queue_min` belong to the skill scanner), so the action map is the control. Balanced admission quarantines CRITICAL servers and warns on HIGH, MEDIUM, LOW and INFO findings. The scan finding and warning are audited:
 
 ```yaml title="~/.defenseclaw/config.yaml (the built-in defaults, written out)"
 admission:
@@ -331,117 +340,67 @@ admission:
     actions: {critical: quarantine, high: quarantine, medium: warn, low: warn, info: warn}
   mcp:
     actions:
-      medium: quarantine
-      low: {install: none, file: none, runtime: disable}
+      high: warn
+      medium: warn
+      low: warn
 ```
 
-An action is `block`, `quarantine`, `warn` or `allow`, or the exact `{install, file, runtime}` triple (see [Skill scanner](/docs/scanning/skill-scanner#configure-the-action-mapping)). Change one severity with `config set`, and read the map in force with `config get`:
+An action is `block`, `quarantine`, `warn` or `allow`, or the exact `{install, file, runtime}` triple (see [Skill scanner](/docs/scanning/skill-scanner)). Change one severity with `config set`, and read the map in force with `config get`:
 
 ```bash
 defenseclaw config set admission.mcp.actions.medium warn
 defenseclaw config get admission.mcp --effective
 ```
 
-`defenseclaw policy edit scanner --type mcp -s <severity> ...` edits the same `admission.mcp.actions`. `defenseclaw policy activate <name>` writes a named policy's actions for every asset type as explicit maps, replacing your edits. [Admission](/docs/policies/admission) documents the whole block, and [Defaults](/docs/policies/defaults) shows what each shipped policy sets.
+`defenseclaw policy edit scanner --type mcp -s <severity> ...` edits the same `admission.mcp.actions`. `defenseclaw policy activate <name>` writes a named policy's actions for every asset type as explicit maps, replacing your edits. [Admission](/docs/policies/admission) documents the whole block.
+
+For strict MCP admission, set `admission.mcp.actions.high: quarantine` (and any other severities your organization chooses to refuse). Secure Client keeps its separate closed admission.
 
 ## Block / allow individual servers
 
-The scan verdict is the default. Operators always have manual override (block / allow act on the **whole server**, not on individual tools — the CLI doesn't take a `--tool` flag):
-
-```bash
-defenseclaw mcp list                                         # what is configured + state across configured connectors
-defenseclaw mcp list --connector opencode                    # one connector's MCP source
-defenseclaw mcp list --connector amp                         # Amp settings + skill-bundled mcp.json
-defenseclaw mcp set context7 --command npx --args '["-y", "@upstash/context7-mcp"]'
-defenseclaw mcp set time --command uvx --args mcp-server-time --connector opencode
-defenseclaw mcp unset context7 --connector opencode
-defenseclaw mcp block untrusted-fs --reason "exfil tool found"
-defenseclaw mcp allow cisco-internal --reason "first-party"
-defenseclaw mcp unblock cisco-internal                       # remove the block or allow entry
-```
-
-`mcp block`, `mcp allow` and `mcp unblock` write the server's entry in `asset_policy.mcp` (`denied` or `allowed`) in `config.yaml`, and the gateway applies it at once; on a managed device they are refused, and the entry goes in the administrator's config. [Admission](/docs/policies/admission) covers `asset_policy`.
+The scanner refuses loopback, private, link-local and multicast URLs, and starts only `npx` or `uvx` stdio servers. The rules, the error text and the ways to admit a server are in the next two sections.
 
 ### Servers on local and internal addresses
 
-The scanner does not connect to loopback, private, link-local or multicast addresses: `localhost`, `127.0.0.1`, `10.x`, `172.16-31.x`, `192.168.x`, `169.254.x`, or a host name that resolves to one. `defenseclaw mcp scan --allow-private` scans such a server from your shell. The scan the gateway runs when a server is added has no such option, so a server there is not scanned: the scan fails and admission blocks the server (scanner failure, fail-closed). Its `install-scan-error` audit row says `the MCP scanner does not connect to loopback, private, link-local or multicast addresses ... so the server was not scanned` and names the two ways to admit a server you trust:
+The scanner does not connect to loopback (`localhost`, `127.0.0.1`), private (`10.x`, `172.16-31.x`, `192.168.x`), link-local (`169.254.x`), carrier-grade NAT (`100.64.x` to `100.127.x`) or multicast addresses, or to a host name that resolves to one:
 
-- an `allowed` entry with its `name` and `url` (`defenseclaw mcp allow <name>`, or on a managed device `asset_policy.mcp.allowed` in the admin config); an allowed server is not scanned;
-- `admission.mcp.scan_on_install: false`, which admits new MCP servers without a scan.
-
-Stdio servers (a `command`) are scanned on the computer and are not affected.
-
-A block follows the name. An allow is pinned to the server you reviewed: `mcp allow` copies the server's `url`, or its `command` and `args_prefix`, from the connector's MCP config into the rule, so a different server added later under the same name is scanned again. For a server that is not configured yet, pass the definition with `--url`, or `--command` and `--args`; otherwise the rule matches the name only and the command prints a note saying so.
-
-`mcp unblock` removes a server's block or allow entry, so its scan verdict
-decides again. It says which one it removed and prints the
-`defenseclaw mcp scan <name>` command to scan the server now.
-
-When a server's latest scan failed, `mcp list` shows Verdict `scan failed` and
-Severity `-`; an older result is kept only as `last_good_severity` in `--json`,
-next to `last_scan_error`. The footer gives one next step per failed server: add
-`--allow-private` for a private or loopback URL, use an npx or uvx launcher for
-a stdio command the scanner refuses, or fix reachability and scan again.
-
-This is a real run against a server on a private address:
-
-```text title="defenseclaw mcp scan internal-docs"
-  Scanning 1 MCP server on claudecode for:
-    - untrusted command paths
-    - outbound URL allow-listing
-    - tool-name spoofing
-    - auth-token handling
-
-  Source: http://10.20.30.40:8080/mcp
-
-error: scan failed: refusing to scan remote MCP target 'http://10.20.30.40:8080/mcp': host '10.20.30.40' resolves to private address 10.20.30.40 (use --allow-private to opt in)
+```text
+error: scan failed: refusing to scan MCP URL 'https://10.20.30.40:8080/mcp': host '10.20.30.40' resolves to private address 10.20.30.40 (use --allow-private to opt in)
 ```
 
-```text title="defenseclaw mcp list --connector claudecode"
-                                 MCP Servers (connector=claudecode)
-┏━━━━━━━━━━━━━━━┳━━━━━━━━━━━┳━━━━━━━━━┳━━━━━━━━━━━━━━━━━━━━━━━━━┳━━━━━━━━━━┳━━━━━━━━━━━━━┳━━━━━━━━━┓
-┃ Name          ┃ Transport ┃ Command ┃ URL                     ┃ Severity ┃ Verdict     ┃ Actions ┃
-┡━━━━━━━━━━━━━━━╇━━━━━━━━━━━╇━━━━━━━━━╇━━━━━━━━━━━━━━━━━━━━━━━━━╇━━━━━━━━━━╇━━━━━━━━━━━━━╇━━━━━━━━━┩
-│ internal-docs │ sse       │         │ http://10.20.30.40:808… │ -        │ scan failed │ -       │
-└───────────────┴───────────┴─────────┴─────────────────────────┴──────────┴─────────────┴─────────┘
+From your shell, add `--allow-private` to scan such a server. The scan the gateway runs when a server is added has no such option, so the server is not scanned and admission blocks it. Its `install-scan-error` audit row says `the MCP scanner does not connect to loopback, private, link-local or multicast addresses ... so the server was not scanned` and names two ways to admit a server you trust:
+
+- Allow it by name and URL with `defenseclaw mcp allow <name>`, or `asset_policy.mcp.allowed` in the admin config on a managed device. An allowed server is not scanned.
+- Set `admission.mcp.scan_on_install` to `false`, which admits new MCP servers without a scan.
+
+Servers started by a `command` (stdio) are scanned on your computer and are not affected.
+
+A block follows the name. An allow is pinned to the server you reviewed: `mcp allow` copies its `url`, or its `command` and arguments, from the connector's MCP config into the rule, so a different server added later under the same name is scanned again. For a server that is not configured yet, pass `--url`, or `--command` and `--args`; otherwise the rule matches the name only and the command prints a note saying so.
+
+`defenseclaw mcp unblock <name>` removes the server's block or allow entry, and its quarantine and disable state, so its scan verdict decides again. It says which entry it removed. Run `defenseclaw mcp scan <name>` afterwards to scan it now. With `--connector`, it clears only that connector's state.
+
+When a server's latest scan failed, `mcp list` shows `scan failed` and a Severity of `-`, then a footer with one next step per server:
+
+```text
   ! 1 MCP server(s) could not be scanned (last scan failed): internal-docs (claudecode)
   internal-docs (claudecode): refused, the URL is a private or loopback address; to scan it anyway: defenseclaw mcp scan internal-docs --connector claudecode --allow-private
 ```
 
-`mcp set` also takes `--url` and `--transport` for SSE or HTTP servers and `--env KEY=VAL` (repeatable) for server environment variables. For OpenCode only, `--force-untrusted-command` writes a command outside the trusted install prefixes.
-
-Amp MCP discovery is intentionally read-only. Use `amp mcp add` (or edit Amp's
-settings through Amp tooling) for schema-preserving writes and workspace
-approval, then re-run `defenseclaw mcp scan --connector amp`.
-
-Every action is audited (`block-mcp`, etc.) so the trail is intact even when the manual override contradicts a scan verdict.
+An older result is kept only as `last_good_severity` in `mcp list --json`, next to `last_scan_error`.
 
 ### Local servers: npx and uvx only
 
-`mcp set` and `mcp scan` start a local (stdio) server only when its command is
-`npx` or `uvx` with a package argument (on Windows, `npx.cmd` and `uvx.exe` are
-the same launchers). The scan never runs another program, so a server started
-with `node`, `python3`, `docker` or a binary is refused with "not an
-allowlisted stdio launcher (allowed: npx, uvx)". For such a server:
+A local (stdio) scan starts the server as you. DefenseClaw starts only `npx` or `uvx` with a package argument (`npx.cmd` and `uvx.exe` on Windows). A server started with `node`, `python3`, `docker` or a binary is refused:
+
+```text
+not an allowlisted stdio launcher (allowed: npx, uvx)
+```
+
+Pick one:
 
 - publish it as an npm or PyPI package and start it with `npx` or `uvx`;
-- or serve it over HTTP and add it with `--url`;
-- or review it yourself, allow that exact definition with
-  `defenseclaw mcp allow <name> --command <cmd> --args '<json array>'`, then run
-  the same `mcp set` again: the pinned allow skips the scan for that
-  definition only.
-
-On Windows the launcher must sit in a trusted folder (the Node.js installer folder and
-uv's default `%USERPROFILE%\.local\bin` are trusted by default). A launcher installed for all users under Program Files is trusted when
-only administrators can change it and its folders. The error names the file it found;
-`defenseclaw setup trusted-paths add "<folder>"` trusts an admin-owned folder on a per-user install.
-On a managed Windows computer there is no per-user trusted-paths list and `setup` is refused:
-the scanner runs in the gateway service and trusts launchers under Program Files only (for example
-Node.js in `C:\Program Files\nodejs`), so an administrator installs Node.js or uv there for all users.
-A `uvx.exe` in a user profile is never trusted there for a server the gateway starts itself, because
-the user can replace it. An enrolled user's own server starts as that user under the same rule: its
-launcher must be the one under Program Files, and a same-name file earlier on `PATH` is refused.
-When the server exits before it answers, its last stderr lines are printed.
+- serve it over HTTP and add it with `--url`;
+- review it yourself, then `defenseclaw mcp allow <name> --command <cmd> --args '<json array>'` and run `mcp set` again. The pinned allow skips the scan for that definition only.
 
 ## How the settings reach the scanner
 
@@ -465,6 +424,8 @@ scan relies on the MCP scanner SDK's own timeouts. Scan only servers you would
 be willing to run.
 </Callout>
 
+Scanner processes run under the gateway's process-tree supervisor. How it ends them and its known limits: [Scanner processes are supervised](/docs/scanning/skill-scanner#scanner-processes-are-supervised).
+
 ## Availability and recovery
 
 `cisco-ai-mcp-scanner` is declared only when the runtime interpreter is Python
@@ -476,7 +437,7 @@ feature is required.
 
 On Python 3.11 or newer, an absent SDK means the environment is incomplete. Do
 not patch a managed virtual environment with `pip`; use the
-[supported install or repair path](/docs/get-started/install). Source
+[supported install or repair path](/docs/get-started/download). Source
 contributors should synchronize the checkout's locked environment with
 `uv sync`.
 
@@ -485,7 +446,7 @@ isn't present; it never crashes the gateway.
 
 ## Upgrading from v8
 
-`defenseclaw config migrate` (and the upgrade, which runs it) moves the v8 MCP scanner keys to the ones on this page; the gateway reads a v8 file in memory until then. In a v9 file the old forms are rejected. See [Migrating to v9](/docs/reference/migrate-v9) for the full record.
+`defenseclaw config migrate` (and `defenseclaw upgrade`, which runs it) moves the v8 scanner keys to the ones above. The gateway reads a v8 file in memory until you migrate it; a v9 file rejects the old keys. Full record: [Migrating to v9](/docs/reference/migrate-v9).
 
 | v8 | v9 |
 | --- | --- |
@@ -497,10 +458,9 @@ isn't present; it never crashes the gateway.
 
 ## See also
 
-- [Skill scanner](/docs/scanning/skill-scanner) — sibling scanner for skill bundles, same admission pattern via `admission.skill`, plus the gate and review queue
-- [Unified LLM key](/docs/guardrail/unified-llm-key) — the `llm:` block the judge inherits and how its key resolves
-- [Admission](/docs/policies/admission) — the `admission:` block and `asset_policy`, the only block and allow list
-- [Defaults](/docs/policies/defaults) — the admission actions of each shipped policy
-- [Policies](/docs/policies) — the layered architecture
-- [Migrating to v9](/docs/reference/migrate-v9) — the v8 to v9 key moves
-- [Reference → CLI](/docs/reference/cli) — full `defenseclaw mcp` subcommand reference
+- [Skill scanner](/docs/scanning/skill-scanner): the sibling scanner for skills, with the same admission pattern
+- [Unified LLM key](/docs/guardrail/unified-llm-key): the `llm:` block the judge inherits and how its key resolves
+- [Block or allow an asset](/docs/policies/admission): the `asset_policy` lists and which rule wins
+- [Admission](/docs/policies/admission): the `admission:` block and the actions per severity
+- [Migrating to v9](/docs/reference/migrate-v9): the v8 to v9 key moves
+- [CLI reference](/docs/reference/cli): every `defenseclaw mcp` subcommand

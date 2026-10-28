@@ -161,7 +161,17 @@ func (p *GuardrailProxy) emitGuardrailScanVerdictFindings(
 	if len(normalized) == 0 {
 		return hookEvaluationContext{}
 	}
+	for i := range normalized {
+		if i < len(verdict.findingSeverities) && verdict.findingSeverities[i] != "" {
+			normalized[i].Severity = normalizeSeverity(verdict.findingSeverities[i])
+		}
+	}
 	inspectFindings := normalizedFindingsToInspect(normalized, verdict.Severity)
+	for i := range inspectFindings {
+		if i < len(verdict.findingProfiles) && verdict.findingProfiles[i] != "" {
+			inspectFindings[i].Tags = append(inspectFindings[i].Tags, "profile:"+verdict.findingProfiles[i])
+		}
+	}
 	src := scanner.InspectFindingSource{
 		ScanID:       verdict.ScanID,
 		Scanner:      scannerEnum,
@@ -539,6 +549,9 @@ func ruleFindingsToInspect(in []RuleFinding, location string) []scanner.InspectF
 	out := make([]scanner.InspectFinding, 0, len(in))
 	for _, f := range in {
 		tags := append([]string(nil), f.Tags...)
+		if f.profile != "" {
+			tags = append(tags, "profile:"+f.profile)
+		}
 		if f.enforcement == findingEnforcementDetectionOnly && !hasStableFindingTag(tags, scanner.FindingTagDetectionOnly) {
 			tags = append(tags, scanner.FindingTagDetectionOnly)
 		}

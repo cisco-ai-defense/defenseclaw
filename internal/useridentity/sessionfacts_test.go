@@ -6,6 +6,7 @@ package useridentity
 import (
 	"bytes"
 	"encoding/binary"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -13,6 +14,25 @@ import (
 	"testing"
 	"time"
 )
+
+func TestLegacySessionFactsCacheRefreshesForShellExpiry(t *testing.T) {
+	path := filepath.Join(t.TempDir(), SessionFactsCacheFileName)
+	now := time.Now()
+	legacy := fmt.Sprintf(`{"key":"key","env_key":"env","written_at":%q,"header":"v1;k=local"}`,
+		now.UTC().Format(time.RFC3339Nano))
+	if err := os.WriteFile(path, []byte(legacy), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := cachedSessionFactsHeader(path, "key", "env", now); ok {
+		t.Fatal("legacy cache without shell-readable expiry was reused")
+	}
+	if err := writeSessionFactsCache(path, "key", "env", "v1;k=local", now); err != nil {
+		t.Fatal(err)
+	}
+	if got, ok := cachedSessionFactsHeader(path, "key", "env", now); !ok || got != "v1;k=local" {
+		t.Fatalf("current cache = %q, %t", got, ok)
+	}
+}
 
 func ccachePrincipalBytes(realm string, components ...string) []byte {
 	var buf bytes.Buffer
@@ -183,9 +203,20 @@ func TestShellHookSendsTheCachedKerberosPrincipal(t *testing.T) {
 	t.Setenv("SSH_CONNECTION", "192.0.2.10 50000 192.0.2.1 22")
 	t.Setenv("SSH_TTY", "/dev/pts/3")
 	t.Setenv("XDG_SESSION_ID", "12")
+	// GAP-0654: an account without ~/.defenseclaw (a purge removed it) gets
+	// its header, and the cache does not create the folder again.
 	want := currentSessionFactsHeader(time.Now())
 	if want != "v1;k=ssh;tty=pts/3;ls=12;ca=192.0.2.10;krb=alice@CORP.EXAMPLE;cc=FILE" {
 		t.Fatalf("header = %q", want)
+	}
+	if _, err := os.Lstat(filepath.Join(home, ".defenseclaw")); !os.IsNotExist(err) {
+		t.Fatalf("the session facts cache created ~/.defenseclaw (%v)", err)
+	}
+	if err := os.Mkdir(filepath.Join(home, ".defenseclaw"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if got := currentSessionFactsHeader(time.Now()); got != want {
+		t.Fatalf("header = %q, want %q", got, want)
 	}
 	helper := filepath.Join("..", "gateway", "connector", "hooks", "_hardening.sh")
 	command := exec.Command("/bin/bash", "-c", `source "$0"; defenseclaw_session_facts_value`, helper)

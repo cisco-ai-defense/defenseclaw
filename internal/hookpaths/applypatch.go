@@ -58,8 +58,18 @@ func ApplyPatchWriteTargets(tool string, args json.RawMessage, command, cwd, hom
 		if text == "" {
 			continue
 		}
+		if !patchTool {
+			known, calls := patchShellInvocationsKnown(text)
+			if !known {
+				return nil, false
+			}
+			if calls == 0 {
+				// An envelope stored as command data is not an edit.
+				continue
+			}
+		}
 		paths, envelopes, parsed := patchEnvelopePaths(text)
-		if !parsed || !patchTool && !patchShellInvocationsKnown(text) {
+		if !parsed {
 			return nil, false
 		}
 		found = found || envelopes > 0
@@ -192,7 +202,8 @@ var (
 )
 
 // patchShellInvocationsKnown reports whether every apply_patch that a shell
-// text may run reads an envelope in that text. Lines of an envelope body are
+// text may run reads an envelope in that text, and how many calls are bound.
+// Lines of an envelope body are
 // patch data, not shell, while the quote or here-document that feeds the
 // envelope is still open. That state is tracked from the top of the text: it
 // is known only while every line before the envelope's opener is plain shell
@@ -201,7 +212,7 @@ var (
 // is not a patch line, or any doubt about the state makes the rest of the
 // text shell, so an apply_patch in it counts as a call of its own, and the
 // envelope binds no call.
-func patchShellInvocationsKnown(text string) bool {
+func patchShellInvocationsKnown(text string) (bool, int) {
 	lines := strings.Split(text, "\n")
 	bound := make([]int, len(lines))
 	body := make([]bool, len(lines))
@@ -281,11 +292,10 @@ func patchShellInvocationsKnown(text string) bool {
 		count := len(patchProgramWord.FindAllString(line, -1))
 		calls += count
 		if count > bound[i] {
-			return false
+			return false, calls
 		}
 	}
-	// The whole-text parser also sees scripts that a line scan might miss.
-	return calls > 0 || !invokesApplyPatch(text)
+	return true, calls
 }
 
 // patchFeed is the quote, here-document or PowerShell here-string that carries
@@ -294,7 +304,7 @@ type patchFeed struct {
 	quote      byte   // ' or " of a quoted argument or here-string
 	delim      string // here-document delimiter, or '@ / "@
 	powershell bool
-	expand     bool // $, ` and \ may run commands or join lines inside the feed
+	expand     bool // the feed can expand variables or command substitutions
 }
 
 // patchOpenerFeed reads the feed that an envelope's opener leaves open: the
@@ -350,7 +360,26 @@ func (f patchFeed) ends(line string) bool {
 
 // expands reports a body line that the shell may expand or join with the next.
 func (f patchFeed) expands(line string) bool {
-	return f.expand && strings.ContainsAny(line, "$`\\")
+	if !f.expand {
+		return false
+	}
+	if strings.ContainsAny(line, "$`") {
+		return true
+	}
+	if f.powershell {
+		return false // Backslash is literal in a PowerShell here-string.
+	}
+	for i := 0; i < len(line); i++ {
+		if line[i] != '\\' {
+			continue
+		}
+		// Bash removes these escapes, or joins a line ending in backslash
+		// with the next one. A backslash before an ordinary letter stays.
+		if i+1 == len(line) || strings.ContainsRune("$`\\", rune(line[i+1])) {
+			return true
+		}
+	}
+	return false
 }
 
 // closeAfter checks that the feed closes right after the envelope, on its End
@@ -471,7 +500,13 @@ func patchTargetPaths(path, cwd, home string) ([]string, bool) {
 			literal = filepath.Join(cwd, literal)
 		}
 	}
-	return append(paths, filepath.Clean(literal)), true
+	paths = append(paths, filepath.Clean(literal))
+	for _, candidate := range paths {
+		if _, known := ResolvePatchWriteTarget(candidate); !known {
+			return nil, false
+		}
+	}
+	return paths, true
 }
 
 // trimHomePrefix strips a leading home form: ~, $HOME, ${HOME}, $env:HOME,

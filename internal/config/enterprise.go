@@ -92,8 +92,9 @@ type EnterpriseOpenShellConfig struct {
 	// contact. A profile's sandbox.driver_fallback: none tightens it per
 	// user; nothing loosens none.
 	DriverFallback string `mapstructure:"driver_fallback" yaml:"driver_fallback,omitempty"`
-	// Version is an exact version ("0.1.3") or a range inside
-	// ">=0.1.1 <0.2.0"; setup needs an exact pin.
+	// Version is an exact version ("0.1.5") or a range inside
+	// ">=0.1.1 <0.2.0"; setup needs an exact pin, and raises one older than
+	// the release sandboxes need (openshell.ManagedSetupPin).
 	Version string `mapstructure:"version" yaml:"version,omitempty"`
 	// GatewayPort is the OpenShell gateway's bind port (0 =
 	// DefaultEnterpriseOpenShellGatewayPort).
@@ -901,6 +902,11 @@ func resolveEnterpriseConfig(cfg *Config, goos, pinnedProfile string) error {
 		standalonePolicyDirDefault(cfg, cfg.DataDir, goos)
 		standaloneRulePackDefault(cfg, cfg.DataDir, goos)
 		if !cfg.openShellPackDirDeclared {
+			// The loader's default was set before the file's data_dir was
+			// read (a staged candidate's own folder); re-base it on that
+			// data_dir, as the installed config gets it, so validate and
+			// ensure find the same packs folder (GAP-0049).
+			cfg.OpenShell.PackDir = joinPathForPlatform(goos, cfg.DataDir, "policies", DefaultOpenShellPackDirName)
 			standaloneOpenShellPackDirDefault(cfg, cfg.DataDir, goos)
 		}
 	}
@@ -941,11 +947,11 @@ func validateEnterpriseOpenShell(cfg *Config, goos string) error {
 		bounds := enterpriseOpenShellVersionRange.FindStringSubmatch(v)
 		switch {
 		case !exact && bounds == nil:
-			return fmt.Errorf("config: enterprise.openshell.version %q must be an exact version such as 0.1.3 or a range such as \">=0.1.1 <0.2.0\"", o.Version)
+			return fmt.Errorf("config: enterprise.openshell.version %q must be an exact version such as 0.1.5 or a range such as \">=0.1.5 <0.2.0\"", o.Version)
 		case bounds != nil && bounds[2] != "" && compareDottedVersions(bounds[1], bounds[2]) >= 0:
 			return fmt.Errorf("config: enterprise.openshell.version %q is an empty range", o.Version)
 		case bounds != nil && o.Install == EnterpriseOpenShellInstallSetup:
-			return fmt.Errorf("config: enterprise.openshell.version %q is a range; install: setup needs an exact version such as 0.1.3", o.Version)
+			return fmt.Errorf("config: enterprise.openshell.version %q is a range; install: setup needs an exact version such as 0.1.5", o.Version)
 		}
 	}
 	if dir := o.E2fsprogsDir; dir != "" {
@@ -1622,7 +1628,14 @@ func validateEnterpriseConfig(cfg *Config) error {
 	}
 	if strings.TrimSpace(e.Network.HTTPSProxy) != "" {
 		if _, err := netguard.ParseEgressProxyURL(e.Network.HTTPSProxy); err != nil {
-			return fmt.Errorf("config: enterprise.network.https_proxy: %w", err)
+			// Typed, so validation states the rule: the text names the
+			// scheme at most, never the configured URL (r103.GAP-0088).
+			return &V8SemanticError{
+				Path:    "$.enterprise.network.https_proxy",
+				Summary: err.Error(),
+				Action:  netguard.ProxyURLAdvice,
+				cause:   err,
+			}
 		}
 	}
 	return validateEnterpriseTetragon(e.Tetragon)

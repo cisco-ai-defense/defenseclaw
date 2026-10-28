@@ -193,13 +193,14 @@ func managedHookBinarySHA256Hex(path string, memoize bool, maxBytes int64, maxAg
 // the next change then gets a new number. Another process's full read ends
 // the epoch the same way; when only the journal number moved during a read,
 // the read is confirmed by a second pass and not memoized. While a writer
-// holds the file the usual open is used and nothing is memoized.
+// holds the file a shared read-only open is used and nothing is memoized;
+// it, like the guarded one, lets an installer replace the file (GAP-0200).
 func openManagedArtifactForDigest(path string, memoize bool) (*os.File, bool, error) {
 	if memoize {
 		if file, err := openManagedArtifactExclusive(path); err == nil {
 			return file, true, nil
 		}
 	}
-	file, err := os.Open(path)
+	file, err := openNativeReadOnly(path)
 	return file, false, err
 }

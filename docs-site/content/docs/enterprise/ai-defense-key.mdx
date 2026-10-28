@@ -170,11 +170,6 @@ On macOS use `sudo /opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise sec
 & 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw.exe' enterprise secret status --json
 ```
 
-To confirm a key matches the one you hold, compare the digest prefix with
-the first 12 characters of the key's SHA-256, for example from
-`printf '%s' "$AID_KEY" | sha256sum` on Linux or
-`printf '%s' "$AID_KEY" | shasum -a 256` on macOS.
-
 The lifecycle status (`enterprise linux status`, `enterprise macos status`
 or `enterprise windows status`, with `--json`) has an
 `inspection.ai_defense` field:
@@ -199,7 +194,47 @@ Run `enterprise secret set` again with the same name and the new value.
 The file is replaced atomically and the gateway restarts, as above. Revoke
 the old key in AI Defense after `secret status` shows the new digest.
 
+A device that applies signed policy bundles keeps the key the confirmed
+bundle signs: from 1.0.4 each bundle binds the value of every credential it
+names (`bundle sign --secret-file ai-defense-api-key=<file>`), and
+`secret set` refuses another value with `secret_ref_mismatch`. To rotate the
+key there, sign a new bundle version with the new key, store the key with
+that bundle, then apply it:
+
+```bash
+sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise secret set --name ai-defense-api-key --from-file <key file> --bundle <new>.dcbundle
+sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise bundle apply --bundle <new>.dcbundle
+```
+
+On macOS the gateway is `/opt/cisco/defenseclaw/bin/defenseclaw-gateway`; on Windows run
+`defenseclaw.exe enterprise secret set` with `--bundle` from an elevated prompt, then
+`defenseclaw.exe enterprise windows ensure --profile standalone --bundle <new>.dcbundle`.
+
+A bundle signed before 1.0.4 names the key without its value, so `secret set`
+and the apply refuse it with `secret_ref_unbound`: sign the bundle again with
+`--secret-file` for the key stored now. While such a bundle is confirmed,
+`secret set --bundle` also refuses to replace a stored key, because a failed
+apply could not put the old key back: apply the re-signed bundle first, then
+rotate the key with a newer one. After an upgrade from 1.0.2 or 1.0.3 the confirmed bundle keeps
+enforcing, but every delivery of it is refused until the re-signed bundle is
+applied, and 1.0.2 and 1.0.3 refuse the re-signed bundle. Sign it with
+`--min-product-version 1.0.4` and deliver it together with the 1.0.4 package.
+
+The new bundle must verify with the trust anchors installed on the device. If
+the signing key changes too, first install the new anchors and apply a bundle
+the new signing key signs for the current API key, then rotate the API key
+with a newer bundle.
+
 ## Remove the key
+
+Removal refuses a key that enabled AI Defense inspection still references
+(`enterprise.inspection.ai_defense.credential`). A reference under disabled inspection does not prevent removal.
+Disable inspection and remove its reference before deleting the stored key:
+
+1. In the config you deploy, set `enabled: false` under
+   `enterprise.inspection.ai_defense` and delete its `credential` line.
+2. Apply the config with `ensure`.
+3. Remove the key:
 
 ```bash
 sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise secret remove --name ai-defense-api-key
@@ -210,16 +245,14 @@ On macOS use `sudo /opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise sec
 & 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw.exe' enterprise secret remove --name ai-defense-api-key
 ```
 
-On Linux and macOS the output names the credential:
+If enabled AI Defense inspection still names the key, the command exits `1` (`1603` on Windows)
+with `the installed config still references credential ai-defense-api-key`, and
+nothing is removed. On Linux and macOS a successful removal prints
 `- removed credential ai-defense-api-key`, or
 `- credential ai-defense-api-key was not stored; nothing to remove`.
-On Windows, removal first reads the installed config to check for references.
+On Windows, removal reads the installed config to check for references.
 If it cannot read that config, it refuses and leaves the credential in place;
 restore config access, then run the command again.
-
-Set `enabled: false` in the config as well. Otherwise the gateway keeps
-logging that the credential is missing, while the local engine decides
-alone.
 
 ## Deliver the key with an MDM
 
@@ -244,9 +277,8 @@ for recipes.
 | Result | Linux and macOS | Windows |
 | --- | --- | --- |
 | Stored, listed or removed | `0` | `0` |
-| Invalid input: both or neither of `--from-stdin` and `--from-file`, or an empty, multi-line or oversized value | `2` | `1639` |
-| Invalid credential name | `1` | `1639` |
-| Not elevated or not root, not installed (Windows only), or the write failed | `1` | `1603` |
+| Invalid input: an invalid credential name, both or neither of `--from-stdin` and `--from-file`, or an empty, multi-line or oversized value | `2` | `1639` |
+| Not elevated or not root, not installed (Windows only), the config still references the credential on removal, or the write failed | `1` | `1603` |
 | The follow-up `ensure` failed and rolled back | `1` | Not applicable |
 | Another lifecycle run holds the lock | `75` | Not applicable |
 | The gateway restart failed after the key was stored | Not applicable | `1603` |

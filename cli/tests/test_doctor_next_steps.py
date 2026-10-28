@@ -18,7 +18,6 @@
 
 from __future__ import annotations
 
-import dataclasses
 import io
 import json
 import os
@@ -79,7 +78,10 @@ def test_claude_code_without_hooks_names_setup(tmp_path) -> None:
     assert "defenseclaw setup claude-code --yes" in r.checks[-1]["remediation"]
 
 
-def test_passive_doctor_does_not_fail_an_idle_hermes(tmp_path) -> None:
+def test_passive_doctor_fails_an_unproven_idle_hermes(tmp_path, monkeypatch) -> None:
+    # The lock binds the current effective config, so the check reaches the
+    # missing sealed hook script on any host, whatever its ~/.hermes holds.
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
     hook = tmp_path / "config.yaml"
     hook.write_text("hooks:\n  - command: /x/hooks/hermes-hook.sh\n", encoding="utf-8")
     cfg = mock.MagicMock()
@@ -88,17 +90,15 @@ def test_passive_doctor_does_not_fail_an_idle_hermes(tmp_path) -> None:
         passive = _DoctorResult(passive=True)
         cmd_doctor._check_hook_health(cfg, "hermes", passive)
     row = passive.checks[-1]
-    assert row["status"] == "warn"
-    # Setup readiness still reads it as pending reload.
-    assert "running hermes" in row["detail"].casefold() and "live=false" in row["detail"]
-    assert "without --passive" in row["remediation"]
-    # GAP-0100: --fix --dry-run is passive but still lists processes, so it
-    # reports an idle Hermes as the plain doctor does.
+    assert row["status"] == "fail"
+    assert "no exact sealed hook script" in row["detail"] and "live=false" in row["detail"]
+    assert "defenseclaw setup hermes" in row["remediation"]
+    # Even an idle host cannot prove a registration that has no sealed hook.
     with mock.patch.object(cmd_doctor, "_hook_health_paths_from_lock", return_value=[str(hook)]), \
             mock.patch.object(cmd_doctor, "_hermes_host_running", return_value=False):
         dry_run = _DoctorResult(mode="plan", passive=True, list_processes=True)
         cmd_doctor._check_hook_health(cfg, "hermes", dry_run)
-    assert dry_run.checks[-1]["status"] == "pass"
+    assert dry_run.checks[-1]["status"] == "fail"
 
 
 def test_codex_plugin_cache_missing_is_not_a_warning() -> None:
@@ -174,6 +174,33 @@ def test_partial_drop_only_names_signals_and_next_step() -> None:
     assert "defenseclaw setup claude-code" in check["remediation"]
 
 
+def test_per_user_upgrade_does_not_recommend_restoring_removed_native_exporter() -> None:
+    report = ConnectorCustodyReport(
+        state="available",
+        reason="",
+        observation_window_hours=24,
+        instances=(
+            ConnectorCustodyStatus(
+                connector_instance_id="019b0000-0000-7000-8000-000000000001",
+                connector="codex",
+                custody="defenseclaw",
+                profile_version="codex-v1",
+                default=True,
+                managed_config_state="drifted",
+                normalized_batches=1,
+            ),
+        ),
+    )
+    result = _DoctorResult()
+    cmd_doctor._check_connector_export_custody(
+        report, result, configured={"codex"}, native_export_expected=False,
+    )
+    (row,) = result.checks
+    assert row["status"] == "pass"
+    assert "no DefenseClaw native exporter is expected" in row["detail"]
+    assert "defenseclaw setup" not in row["remediation"]
+
+
 def _custody_report(**overrides) -> ConnectorCustodyReport:
     fields = dict(
         connector_instance_id="019b0000-0000-7000-8000-000000000001",
@@ -194,6 +221,21 @@ def _custody_report(**overrides) -> ConnectorCustodyReport:
         observation_window_hours=24,
         instances=(ConnectorCustodyStatus(**fields),),
     )
+
+
+def test_per_user_current_hook_only_is_not_called_historical() -> None:
+    report = _custody_report(
+        connector="codex", custody="hook_only", normalized_batches=0,
+        drop_only_batches=0, drop_only_signals=(), managed_config_files=0,
+    )
+    result = _DoctorResult()
+    cmd_doctor._check_connector_export_custody(
+        report, result, configured={"codex"}, native_export_expected=False,
+    )
+    (row,) = result.checks
+    assert row["status"] == "pass"
+    assert row["detail"].startswith("custody=hook_only;")
+    assert "historical" not in row["detail"]
 
 
 def test_unmapped_only_drops_are_healthy_delivery() -> None:
@@ -237,32 +279,6 @@ def test_real_drop_reasons_still_warn_with_the_reason() -> None:
     assert "defenseclaw setup claude-code" in r.checks[-1]["remediation"]
 
 
-def test_removed_connectors_get_no_otlp_rows_or_setup_advice() -> None:
-    # GAP-1931: OpenClaw-only after removing the hook connectors.
-    def status(connector: str, **overrides) -> ConnectorCustodyStatus:
-        base = _custody_report().instances[0]
-        return dataclasses.replace(base, connector=connector, profile_version=f"{connector}-v1", **overrides)
-
-    report = ConnectorCustodyReport(
-        state="available",
-        reason="",
-        observation_window_hours=24,
-        instances=(
-            status("claudecode", drop_only_reasons=("invalid_record",)),
-            status("openclaw", drop_only_batches=0),
-            status("openhands", custody="external"),
-        ),
-    )
-    r = _DoctorResult()
-    cfg = mock.Mock(spec=["policy_connectors"])
-    cfg.policy_connectors.return_value = ["openclaw"]
-    cmd_doctor._check_connector_export_custody(report, r, configured=cmd_doctor._otlp_configured_connectors(cfg))
-    rows = {c["label"]: c for c in r.checks}
-    assert set(rows) == {"Connector OTLP: openclaw", "Connector OTLP: not configured"}
-    assert rows["Connector OTLP: openclaw"]["status"] == "pass"
-    removed = rows["Connector OTLP: not configured"]
-    assert removed["status"] == "skip" and "claudecode, openhands" in removed["detail"]
-    assert not any("setup" in c.get("remediation", "") for c in r.checks)
 
 
 def test_untracked_exporter_and_unattributed_credentials_read_plainly() -> None:
@@ -281,7 +297,9 @@ def test_untracked_exporter_and_unattributed_credentials_read_plainly() -> None:
     assert "managed-exporter=untracked" not in rows["Connector OTLP: claudecode"]["detail"]
     credentials = rows["Native OTLP credentials"]
     assert credentials["status"] == "warn"
-    assert "defenseclaw setup <connector>" in credentials["remediation"]
+    assert "defenseclaw setup <connector>" not in credentials["remediation"]
+    assert "does not prove an installed exporter is broken" in credentials["remediation"]
+    assert "defenseclaw setup <connector>" not in credentials["remediation"]
 
 
 def test_drop_reason_class_is_read_from_the_drop_record() -> None:
@@ -485,7 +503,8 @@ def test_windows_hermes_idle_is_healthy_not_pending_reload() -> None:
     pending = WindowsHookCheck(
         "pending-reload",
         "on-disk Windows-native executable registration is valid; hook_entries=23; running Hermes "
-        "CLI/TUI/gateway/desktop/service hosts are unverified and must be reloaded or restarted; live=false",
+        "CLI/TUI/gateway/desktop/service hosts are unverified: doctor cannot verify which hooks "
+        "an already running host loaded; live=false",
     )
     with mock.patch.object(cmd_doctor, "_hermes_host_running", return_value=False):
         idle = cmd_doctor._hermes_idle_native_check(pending, _DoctorResult())
@@ -594,11 +613,6 @@ def test_disk_full_audit_writes_read_plainly(tmp_path) -> None:
     assert "free space" in row["remediation"]
 
 
-def test_omnigent_without_a_server_record_reads_plainly(tmp_path, monkeypatch) -> None:
-    # GAP-1067: no internal path hash as the main text.
-    monkeypatch.setenv("OMNIGENT_DATA_DIR", str(tmp_path))
-    pid, detail = cmd_doctor._omnigent_local_server_pid()
-    assert pid == 0 and detail == "OmniGent server has not started yet (no server record)"
 
 
 def test_windows_hermes_check_reads_python_command_lines() -> None:
@@ -749,8 +763,11 @@ def test_agent_installed_after_discovery_names_the_refresh() -> None:
     ):
         cmd_doctor._check_component_connector_compatibility(SimpleNamespace(data_dir=""), ["claudecode"], r)
     row = next(c for c in r.checks if c["label"] == "Connector compatibility: claudecode")
-    assert row["status"] == "warn"
-    assert "is installed now, after the last agent discovery" in row["detail"]
+    # The shell's PATH is no proof that the agent runs (1.0.4 review, loop
+    # round 4): still a failure, but the next step is the refresh.
+    assert row["status"] == "fail"
+    # The PATH hit is named as an absolute path (a drive letter on Windows).
+    assert f"{os.path.abspath('/opt/bin/claude')} is on this shell's PATH, unverified" in row["detail"]
     assert row["remediation"].startswith("defenseclaw agent discover --refresh")
 
 
@@ -945,7 +962,7 @@ def test_pre_first_start_token_and_codex_hook_rows_are_pending(tmp_path) -> None
 
 def test_unattributed_otlp_credentials_name_window_and_age() -> None:
     # GAP-2294: the count covers a rolling window; old attempts clear on
-    # their own, so setup is only suggested while attempts are recent.
+    # their own. A recent rejected route still does not identify its sender.
     from datetime import datetime, timezone
 
     now = datetime(2026, 10, 3, 6, 22, tzinfo=timezone.utc)
@@ -971,9 +988,12 @@ def test_unattributed_otlp_credentials_name_window_and_age() -> None:
 
     recent = row("2026-10-03T06:10:00Z")
     assert "last 12 min ago" in recent["detail"]
-    assert "defenseclaw setup <connector>" in recent["remediation"]
-    # GAP-0313: setup cannot change a running agent, such as Codex's
-    # background app-server that still sends the token it started with.
+    # A rejected route can be a peer's probe; it cannot identify a broken
+    # exporter or justify rewriting verified agent configuration (GAP-0803).
+    assert "defenseclaw setup <connector>" not in recent["remediation"]
+    assert "does not prove" in recent["remediation"]
+    # A genuinely stale agent still needs a restart, including Codex's
+    # background app-server that outlives its sessions (GAP-0313).
     assert "keeps sending the old token until it restarts" in recent["remediation"]
     assert "codex app-server daemon restart" in recent["remediation"]
 

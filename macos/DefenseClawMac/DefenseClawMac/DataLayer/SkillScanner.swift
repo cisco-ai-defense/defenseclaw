@@ -47,10 +47,6 @@ enum SkillScanner {
                     p(".claude", "skills"), p(".codex", "skills")]
         case "devin": return [p(".config", "devin", "skills"), p(".agents", "skills")]
         case "copilot": return [p(".copilot", "skills")]
-        case "openhands":
-            return [p(".agents", "skills"), p(".openhands", "skills"),
-                    p(".openhands", "microagents"),
-                    p(".openhands", "skills", "installed")]
         case "openclaw": return [p(".openclaw", "workspace", "skills")]
         case "antigravity":
             return [p(".gemini", "config", "skills"),
@@ -220,8 +216,6 @@ enum MCPScanner {
             ]
         case "copilot":
             return [(p(".copilot", "mcp-config.json"), .dotMCPJSON)]
-        case "openhands":
-            return [(p(".openhands", "mcp.json"), .dotMCPJSON)]
         case "openclaw":
             return [(p(".openclaw", "openclaw.json"), .settingsJSON([["mcp", "servers"], ["mcpServers"]]))]
         case "antigravity":
@@ -428,7 +422,7 @@ enum PluginScanner {
         case "zeptoclaw": return [p(".zeptoclaw", "plugins"), p(".zeptoclaw", "plugins", "cache")]
         case "hermes": return [p(".hermes", "plugins")]
         case "openclaw": return [p(".openclaw", "extensions")]
-        default: return [] // cursor, devin (closed beta), copilot, openhands, antigravity
+        default: return [] // cursor, devin (closed beta), copilot, antigravity
         }
     }
 

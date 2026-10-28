@@ -498,14 +498,18 @@ func TestStandaloneCleanupCopiedCodexReceiptUsesCurrentConfig(t *testing.T) {
 		homes = append(homes, account.Home)
 		return runEnterpriseHookWorker(ctx, account, request)
 	}
-	// The copy the account edited keeps the old home's absolute hook
-	// references, which the surgical removal does not own: the row stays
-	// with the current config named, and both homes keep their receipts.
+	// The copy the account edited keeps one changed hook command with the
+	// old home's absolute path. Surgical removal must leave that command
+	// and name the current config; both homes keep their receipts.
 	copied, err := os.ReadFile(currentConfig)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(currentConfig, append(copied, []byte("# edited after the move\n")...), 0o600); err != nil {
+	edited := bytes.Replace(copied, []byte("codex-hook.sh --event PreToolUse"), []byte("codex-hook.sh --user-edited --event PreToolUse"), 1)
+	if bytes.Equal(edited, copied) {
+		t.Fatal("the copied config has no PreToolUse hook command to edit")
+	}
+	if err := os.WriteFile(currentConfig, edited, 0o600); err != nil {
 		t.Fatal(err)
 	}
 	outcome, err := attemptEnterpriseHookStandaloneUnixCleanup(context.Background(), &bytes.Buffer{}, entry, resolver)

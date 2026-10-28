@@ -186,11 +186,11 @@ func TestWindowsStandaloneAdministratorReportsOnlyRemainingClaudeHook(t *testing
 	enterpriseHookWindowsUserCleanupIdentity = func() error { return errors.New("not LocalSystem") }
 	windowsManagedClaudeCurrentUserSID = func() (string, error) { return "S-1-5-21-1-2-3-1000", nil }
 	present := false
-	windowsManagedClaudeRegistrationProbe = func(home, sid string) (bool, error) {
+	windowsManagedClaudeRegistrationProbe = func(home, sid string) (bool, []string, error) {
 		if home != manifest.Targets[0].UserHome || sid != manifest.Targets[0].SID {
 			t.Fatalf("probed %s %s", home, sid)
 		}
-		return present, nil
+		return present, nil, nil
 	}
 	windowsManagedClaudeSettingsRemover = func(string, string, string) (int, []string, error) {
 		t.Fatal("another user's settings were edited")
@@ -213,143 +213,38 @@ func TestWindowsStandaloneAdministratorReportsOnlyRemainingClaudeHook(t *testing
 	}
 }
 
-// Uninstall cleans every per-user registration the guardian made or still
-// owes, as each user; when an interactive administrator cannot act as another
-// user, every registration still present is reported.
-func TestRemoveWindowsManagedHooksStandalonePerUserRegistrationsCoversEveryRecordedUser(t *testing.T) {
-	dataDir := useUserCleanupStateDir(t)
-	homeA, homeB := filepath.Join(t.TempDir(), "a"), filepath.Join(t.TempDir(), "b")
-	writeUserCleanupAuthorization(t, dataDir,
-		userCleanupRow("devin", userCleanupSIDA, homeA),
-		userCleanupRow("codex", userCleanupSIDA, homeA),
-	)
-	if err := saveEnterpriseHookUserCleanups(dataDir, []enterpriseHookUserCleanup{{
-		Connector: "amp", SID: userCleanupSIDB, UserHome: homeB, RecordedAt: "r",
-		Attempts: 3, LastAttemptAt: time.Now().UTC().Format(time.RFC3339Nano), LastError: "earlier",
-	}}, time.Now()); err != nil {
-		t.Fatal(err)
-	}
-	manifest := enterprisehooks.Manifest{Version: 1, Targets: []enterprisehooks.ManifestTarget{
-		{Connector: "opencode", SID: userCleanupSIDB, UserHome: homeB},
-		{Connector: "hermes", SID: userCleanupSIDB, UserHome: homeB, Deferred: true},
-	}}
-	originalIdentity, originalAttempt := enterpriseHookWindowsUserCleanupIdentity, enterpriseHookWindowsUserCleanupAttempt
+// An uninstall that cannot edit another user's settings still reports the
+// DefenseClaw hooks the remover would keep there; the real probe finds them
+// in a file with nothing removable.
+func TestWindowsStandaloneUninstallReportsAnotherUsersUnremovableClaudeHooks(t *testing.T) {
+	t.Setenv(managed.EnterpriseProfileEnv, managed.ProfileStandalone)
+	t.Setenv("SystemRoot", `C:\Windows`)
+	runtimeDir := useUserCleanupStateDir(t)
+	manifest := perUserTeardownManifest("claudecode")
+	target := manifest.Targets[0]
+	originalIdentity, originalSID := enterpriseHookWindowsUserCleanupIdentity, windowsManagedClaudeCurrentUserSID
+	originalReader, originalRemover := windowsManagedClaudeUserSettingsReader, windowsManagedClaudeSettingsRemover
 	t.Cleanup(func() {
-		enterpriseHookWindowsUserCleanupIdentity, enterpriseHookWindowsUserCleanupAttempt = originalIdentity, originalAttempt
+		enterpriseHookWindowsUserCleanupIdentity, windowsManagedClaudeCurrentUserSID = originalIdentity, originalSID
+		windowsManagedClaudeUserSettingsReader, windowsManagedClaudeSettingsRemover = originalReader, originalRemover
 	})
-	var attempted []string
-	enterpriseHookWindowsUserCleanupAttempt = func(_ context.Context, entry enterpriseHookUserCleanup) (enterpriseHookUserCleanupOutcome, error) {
-		attempted = append(attempted, enterpriseHookUserCleanupLabel(entry))
-		if entry.SID == userCleanupSIDB && entry.Connector == "opencode" {
-			return enterpriseHookUserCleanupPending, nil
-		}
-		return enterpriseHookUserCleanupDone, nil
-	}
-	enterpriseHookWindowsUserCleanupIdentity = func() error { return nil }
-	originalPresent := windowsManagedHooksStandaloneRegistrationPresent
-	t.Cleanup(func() { windowsManagedHooksStandaloneRegistrationPresent = originalPresent })
-	registrationsPresent := func(enterprisehooks.ManifestTarget) (bool, error) { return true, nil }
-	windowsManagedHooksStandaloneRegistrationPresent = registrationsPresent
-
-	result := removeWindowsManagedHooksStandalonePerUserRegistrations(context.Background(), dataDir, manifest)
-	want := "amp/" + userCleanupSIDB + ",devin/" + userCleanupSIDA + ",opencode/" + userCleanupSIDB
-	if strings.Join(attempted, ",") != want {
-		t.Fatalf("attempted %v, want %s (no codex, no never-protected deferred row, backoff ignored)", attempted, want)
-	}
-	if len(result.Removed) != 2 || strings.Join(result.Pending, ",") != "opencode/"+userCleanupSIDB || len(result.Failed) != 0 {
-		t.Fatalf("result = %+v", result)
-	}
-
-	// GAP-1795: a deferred row of a user an earlier install enrolled (its
-	// DefenseClaw data folder is still there) may still hold that install's
-	// registrations, so it is attempted and reported, not skipped.
-	if err := os.MkdirAll(filepath.Join(homeB, ".defenseclaw"), 0o700); err != nil {
+	enterpriseHookWindowsUserCleanupIdentity = func() error { return errors.New("not LocalSystem") }
+	windowsManagedClaudeCurrentUserSID = func() (string, error) { return "S-1-5-21-1-2-3-1000", nil }
+	edited := windowsClaudeGuardFixture(filepath.Join(target.UserHome, ".local", "bin", "defenseclaw-hook.exe"), "claudecode", "0")
+	raw, err := json.Marshal(map[string]any{"hooks": map[string]any{"Stop": []any{map[string]any{"hooks": []any{edited}}}}})
+	if err != nil {
 		t.Fatal(err)
 	}
-	for _, probe := range []struct {
-		present bool
-		err     error
-	}{{true, nil}, {false, errors.New("unreadable")}} {
-		windowsManagedHooksStandaloneRegistrationPresent = func(enterprisehooks.ManifestTarget) (bool, error) {
-			return probe.present, probe.err
-		}
-		attempted = nil
-		result = removeWindowsManagedHooksStandalonePerUserRegistrations(context.Background(), dataDir, manifest)
-		if want := "amp/" + userCleanupSIDB + ",devin/" + userCleanupSIDA + ",hermes/" + userCleanupSIDB + ",opencode/" + userCleanupSIDB; strings.Join(attempted, ",") != want {
-			t.Fatalf("probe %+v: attempted %v, want %s", probe, attempted, want)
-		}
+	windowsManagedClaudeUserSettingsReader = func(string, string) ([]byte, error) { return raw, nil }
+	windowsManagedClaudeSettingsRemover = func(string, string, string) (int, []string, error) {
+		t.Fatal("another user's settings were edited")
+		return 0, nil, nil
 	}
-	// GAP-2023: an earlier uninstall already removed that user's
-	// registration (the data folder stays), so there is nothing to report.
-	// GAP-2098: the enrolled OpenCode row of the signed-out user holds no
-	// plugin either, so it is attempted but not reported as pending.
-	windowsManagedHooksStandaloneRegistrationPresent = func(enterprisehooks.ManifestTarget) (bool, error) { return false, nil }
-	attempted = nil
-	result = removeWindowsManagedHooksStandalonePerUserRegistrations(context.Background(), dataDir, manifest)
-	if want := "amp/" + userCleanupSIDB + ",devin/" + userCleanupSIDA + ",opencode/" + userCleanupSIDB; strings.Join(attempted, ",") != want {
-		t.Fatalf("no registration left: attempted %v, want %s", attempted, want)
+	result := removeWindowsManagedHooksStandalonePerUserRegistrations(context.Background(), runtimeDir, manifest)
+	want := filepath.Join(target.UserHome, ".claude", "settings.json") + ": Stop: a hook command naming defenseclaw-hook (arguments not shown)"
+	if len(result.Pending) != 0 || len(result.Failed) != 0 || len(result.SettingsLeft) != 1 || result.SettingsLeft[0] != want {
+		t.Fatalf("unremovable leftover = %+v", result)
 	}
-	if len(result.Pending) != 0 {
-		t.Fatalf("no registration left: pending %v", result.Pending)
-	}
-	windowsManagedHooksStandaloneRegistrationPresent = registrationsPresent
-	if err := os.RemoveAll(filepath.Join(homeB, ".defenseclaw")); err != nil {
-		t.Fatal(err)
-	}
-
-	attempted = nil
-	enterpriseHookWindowsUserCleanupIdentity = func() error {
-		return errors.New("per-user Windows hook mutation requires the LocalSystem guardian service")
-	}
-	result = removeWindowsManagedHooksStandalonePerUserRegistrations(context.Background(), dataDir, manifest)
-	if len(attempted) != 0 || len(result.Pending) != 3 || len(result.Failed) != 1 ||
-		!strings.Contains(result.Failed[0], "LocalSystem") {
-		t.Fatalf("non-LocalSystem uninstall: attempted=%v result=%+v", attempted, result)
-	}
-	windowsManagedHooksStandaloneRegistrationPresent = func(enterprisehooks.ManifestTarget) (bool, error) { return false, nil }
-	result = removeWindowsManagedHooksStandalonePerUserRegistrations(context.Background(), dataDir, manifest)
-	if len(result.Pending) != 0 || len(result.Failed) != 0 {
-		t.Fatalf("non-LocalSystem uninstall with no registrations = %+v", result)
-	}
-	windowsManagedHooksStandaloneRegistrationPresent = registrationsPresent
-
-	// The standalone profile's teardown accepts every per-user connector,
-	// Secure Client's only GitHub Copilot.
-	t.Run("teardown targets", func(t *testing.T) {
-		t.Setenv(managed.EnterpriseProfileEnv, "")
-		if _, _, _, _, err := windowsManagedHooksTeardownTargets(perUserTeardownManifest("devin")); err == nil ||
-			!strings.Contains(err.Error(), "does not support connector") {
-			t.Fatalf("Secure Client teardown accepted devin: %v", err)
-		}
-		if targets, _, _, _, err := windowsManagedHooksTeardownTargets(perUserTeardownManifest("copilot")); err != nil || len(targets) != 1 {
-			t.Fatalf("Secure Client teardown refused copilot: targets=%v err=%v", targets, err)
-		}
-		t.Setenv(managed.EnterpriseProfileEnv, managed.ProfileStandalone)
-		for _, name := range []string{"copilot", "devin", "amp"} {
-			targets, claude, codex, cursor, err := windowsManagedHooksTeardownTargets(perUserTeardownManifest(name))
-			if err != nil || len(targets) != 1 || len(claude)+len(codex)+len(cursor) != 0 {
-				t.Fatalf("%s: targets=%v err=%v", name, targets, err)
-			}
-		}
-		if _, _, _, _, err := windowsManagedHooksTeardownTargets(perUserTeardownManifest("openhands")); err == nil {
-			t.Fatal("standalone teardown accepted openhands")
-		}
-	})
-
-	// The kept per-user enrollment follows the manifest's enabled rows.
-	t.Run("enrollment keep", func(t *testing.T) {
-		manifest := enterprisehooks.Manifest{Version: 1, Targets: []enterprisehooks.ManifestTarget{
-			{Connector: "devin", SID: "S-1-5-21-1-2-3-1017"},
-			{Connector: "hermes", SID: "S-1-5-21-1-2-3-1018", Enabled: boolPointerForTest(false)},
-		}}
-		keep := windowsStandalonePerUserEnrollmentKeep(manifest)
-		if !keep("devin", "s-1-5-21-1-2-3-1017") {
-			t.Fatal("enabled row not kept")
-		}
-		if keep("hermes", "S-1-5-21-1-2-3-1018") || keep("devin", "S-1-5-21-1-2-3-1018") || keep("copilot", "S-1-5-21-1-2-3-1017") {
-			t.Fatal("unauthorized SID kept")
-		}
-	})
 }
 
 // Finalize removes users' registrations and reports the outcome only for
@@ -665,4 +560,143 @@ func TestWindowsManagedHooksTeardownPurgeRemovesEveryAccountsACPCopies(t *testin
 	if len(report.UserStateRemaining) != 1 || !strings.HasPrefix(report.UserStateRemaining[0], acpOnly+`: C:\Users\odd\.defenseclaw\acp: access denied`) {
 		t.Fatalf("remaining = %v", report.UserStateRemaining)
 	}
+}
+
+// Uninstall cleans every per-user registration the guardian made or still
+// owes, as each user; when an interactive administrator cannot act as another
+// user, every registration still present is reported.
+func TestRemoveWindowsManagedHooksStandalonePerUserRegistrationsCoversEveryRecordedUser(t *testing.T) {
+	dataDir := useUserCleanupStateDir(t)
+	homeA, homeB := filepath.Join(t.TempDir(), "a"), filepath.Join(t.TempDir(), "b")
+	writeUserCleanupAuthorization(t, dataDir,
+		userCleanupRow("devin", userCleanupSIDA, homeA),
+		userCleanupRow("codex", userCleanupSIDA, homeA),
+	)
+	if err := saveEnterpriseHookUserCleanups(dataDir, []enterpriseHookUserCleanup{{
+		Connector: "amp", SID: userCleanupSIDB, UserHome: homeB, RecordedAt: "r",
+		Attempts: 3, LastAttemptAt: time.Now().UTC().Format(time.RFC3339Nano), LastError: "earlier",
+	}}, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	manifest := enterprisehooks.Manifest{Version: 1, Targets: []enterprisehooks.ManifestTarget{
+		{Connector: "opencode", SID: userCleanupSIDB, UserHome: homeB},
+		{Connector: "hermes", SID: userCleanupSIDB, UserHome: homeB, Deferred: true},
+	}}
+	originalIdentity, originalAttempt := enterpriseHookWindowsUserCleanupIdentity, enterpriseHookWindowsUserCleanupAttempt
+	t.Cleanup(func() {
+		enterpriseHookWindowsUserCleanupIdentity, enterpriseHookWindowsUserCleanupAttempt = originalIdentity, originalAttempt
+	})
+	var attempted []string
+	enterpriseHookWindowsUserCleanupAttempt = func(_ context.Context, entry enterpriseHookUserCleanup) (enterpriseHookUserCleanupOutcome, error) {
+		attempted = append(attempted, enterpriseHookUserCleanupLabel(entry))
+		if entry.SID == userCleanupSIDB && entry.Connector == "opencode" {
+			return enterpriseHookUserCleanupPending, nil
+		}
+		return enterpriseHookUserCleanupDone, nil
+	}
+	enterpriseHookWindowsUserCleanupIdentity = func() error { return nil }
+	originalPresent := windowsManagedHooksStandaloneRegistrationPresent
+	t.Cleanup(func() { windowsManagedHooksStandaloneRegistrationPresent = originalPresent })
+	registrationsPresent := func(enterprisehooks.ManifestTarget) (bool, error) { return true, nil }
+	windowsManagedHooksStandaloneRegistrationPresent = registrationsPresent
+
+	result := removeWindowsManagedHooksStandalonePerUserRegistrations(context.Background(), dataDir, manifest)
+	want := "amp/" + userCleanupSIDB + ",devin/" + userCleanupSIDA + ",opencode/" + userCleanupSIDB
+	if strings.Join(attempted, ",") != want {
+		t.Fatalf("attempted %v, want %s (no codex, no never-protected deferred row, backoff ignored)", attempted, want)
+	}
+	if len(result.Removed) != 2 || strings.Join(result.Pending, ",") != "opencode/"+userCleanupSIDB || len(result.Failed) != 0 {
+		t.Fatalf("result = %+v", result)
+	}
+
+	// GAP-1795: a deferred row of a user an earlier install enrolled (its
+	// DefenseClaw data folder is still there) may still hold that install's
+	// registrations, so it is attempted and reported, not skipped.
+	if err := os.MkdirAll(filepath.Join(homeB, ".defenseclaw"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for _, probe := range []struct {
+		present bool
+		err     error
+	}{{true, nil}, {false, errors.New("unreadable")}} {
+		windowsManagedHooksStandaloneRegistrationPresent = func(enterprisehooks.ManifestTarget) (bool, error) {
+			return probe.present, probe.err
+		}
+		attempted = nil
+		result = removeWindowsManagedHooksStandalonePerUserRegistrations(context.Background(), dataDir, manifest)
+		if want := "amp/" + userCleanupSIDB + ",devin/" + userCleanupSIDA + ",hermes/" + userCleanupSIDB + ",opencode/" + userCleanupSIDB; strings.Join(attempted, ",") != want {
+			t.Fatalf("probe %+v: attempted %v, want %s", probe, attempted, want)
+		}
+	}
+	// GAP-2023: an earlier uninstall already removed that user's
+	// registration (the data folder stays), so there is nothing to report.
+	// GAP-2098: the enrolled OpenCode row of the signed-out user holds no
+	// plugin either, so it is attempted but not reported as pending.
+	windowsManagedHooksStandaloneRegistrationPresent = func(enterprisehooks.ManifestTarget) (bool, error) { return false, nil }
+	attempted = nil
+	result = removeWindowsManagedHooksStandalonePerUserRegistrations(context.Background(), dataDir, manifest)
+	if want := "amp/" + userCleanupSIDB + ",devin/" + userCleanupSIDA + ",opencode/" + userCleanupSIDB; strings.Join(attempted, ",") != want {
+		t.Fatalf("no registration left: attempted %v, want %s", attempted, want)
+	}
+	if len(result.Pending) != 0 {
+		t.Fatalf("no registration left: pending %v", result.Pending)
+	}
+	windowsManagedHooksStandaloneRegistrationPresent = registrationsPresent
+	if err := os.RemoveAll(filepath.Join(homeB, ".defenseclaw")); err != nil {
+		t.Fatal(err)
+	}
+
+	attempted = nil
+	enterpriseHookWindowsUserCleanupIdentity = func() error {
+		return errors.New("per-user Windows hook mutation requires the LocalSystem guardian service")
+	}
+	result = removeWindowsManagedHooksStandalonePerUserRegistrations(context.Background(), dataDir, manifest)
+	if len(attempted) != 0 || len(result.Pending) != 3 || len(result.Failed) != 1 ||
+		!strings.Contains(result.Failed[0], "LocalSystem") {
+		t.Fatalf("non-LocalSystem uninstall: attempted=%v result=%+v", attempted, result)
+	}
+	windowsManagedHooksStandaloneRegistrationPresent = func(enterprisehooks.ManifestTarget) (bool, error) { return false, nil }
+	result = removeWindowsManagedHooksStandalonePerUserRegistrations(context.Background(), dataDir, manifest)
+	if len(result.Pending) != 0 || len(result.Failed) != 0 {
+		t.Fatalf("non-LocalSystem uninstall with no registrations = %+v", result)
+	}
+	windowsManagedHooksStandaloneRegistrationPresent = registrationsPresent
+
+	// The standalone profile's teardown accepts every per-user connector,
+	// Secure Client's only GitHub Copilot.
+	t.Run("teardown targets", func(t *testing.T) {
+		t.Setenv(managed.EnterpriseProfileEnv, "")
+		if _, _, _, _, err := windowsManagedHooksTeardownTargets(perUserTeardownManifest("devin")); err == nil ||
+			!strings.Contains(err.Error(), "does not support connector") {
+			t.Fatalf("Secure Client teardown accepted devin: %v", err)
+		}
+		if targets, _, _, _, err := windowsManagedHooksTeardownTargets(perUserTeardownManifest("copilot")); err != nil || len(targets) != 1 {
+			t.Fatalf("Secure Client teardown refused copilot: targets=%v err=%v", targets, err)
+		}
+		t.Setenv(managed.EnterpriseProfileEnv, managed.ProfileStandalone)
+		for _, name := range []string{"copilot", "devin", "amp"} {
+			targets, claude, codex, cursor, err := windowsManagedHooksTeardownTargets(perUserTeardownManifest(name))
+			if err != nil || len(targets) != 1 || len(claude)+len(codex)+len(cursor) != 0 {
+				t.Fatalf("%s: targets=%v err=%v", name, targets, err)
+			}
+		}
+		if _, _, _, _, err := windowsManagedHooksTeardownTargets(perUserTeardownManifest("openclaw")); err == nil {
+			t.Fatal("standalone teardown accepted openclaw")
+		}
+	})
+
+	// The kept per-user enrollment follows the manifest's enabled rows.
+	t.Run("enrollment keep", func(t *testing.T) {
+		manifest := enterprisehooks.Manifest{Version: 1, Targets: []enterprisehooks.ManifestTarget{
+			{Connector: "devin", SID: "S-1-5-21-1-2-3-1017"},
+			{Connector: "hermes", SID: "S-1-5-21-1-2-3-1018", Enabled: boolPointerForTest(false)},
+		}}
+		keep := windowsStandalonePerUserEnrollmentKeep(manifest)
+		if !keep("devin", "s-1-5-21-1-2-3-1017") {
+			t.Fatal("enabled row not kept")
+		}
+		if keep("hermes", "S-1-5-21-1-2-3-1018") || keep("devin", "S-1-5-21-1-2-3-1018") || keep("copilot", "S-1-5-21-1-2-3-1017") {
+			t.Fatal("unauthorized SID kept")
+		}
+	})
 }

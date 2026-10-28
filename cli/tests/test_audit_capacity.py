@@ -31,3 +31,24 @@ def test_low_space_audit_open_error_names_disk_cause(tmp_path, monkeypatch) -> N
     )
     assert "too little usable space" in detail
     assert "119 MiB" in detail
+
+
+def test_permission_cause_wins_over_low_space(tmp_path, monkeypatch) -> None:
+    # GAP-1172: low free space must not hide an access-denied open.
+    import os
+    from types import SimpleNamespace
+
+    from defenseclaw import audit_capacity
+
+    monkeypatch.setattr(
+        audit_capacity.shutil, "disk_usage",
+        lambda _path: SimpleNamespace(free=100 * 1024 * 1024),
+    )
+    db_path = str(tmp_path / "audit.db")
+    detail = audit_capacity.audit_open_failure_notice(db_path, PermissionError(13, "Permission denied"))
+    assert "permission denied" in detail and "too little usable space" not in detail
+    if os.name != "nt":
+        # SQLite's generic open error in a folder this account cannot write.
+        monkeypatch.setattr(audit_capacity.os, "access", lambda *_args, **_kwargs: False)
+        detail = audit_capacity.audit_open_failure_notice(db_path, RuntimeError("unable to open database file"))
+        assert "permission denied" in detail and "too little usable space" not in detail

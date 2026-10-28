@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 
@@ -528,6 +529,23 @@ func copilotVSCodeStatus(opts Options, state *State) {
 	for _, install := range DiscoverVSCode(opts) {
 		state.detail("vscode: found VS Code %s at %s", install.Version, install.Path)
 	}
+	for _, home := range opts.CopilotOutOfScopeHomes {
+		file, plugin := CopilotVSCodeUserState(home, opts.goos(), opts.HookBinary)
+		if file {
+			state.conflict("DefenseClaw's Copilot Local hook remains for an account outside enrollment: %s; run the guardian to remove it", CopilotVSCodeLocalHookFilePath(home))
+		}
+		if plugin {
+			state.conflict("DefenseClaw's Copilot plugin remains for an account outside enrollment: %s; run the guardian to remove it", CopilotPluginHooksPath(home))
+		}
+		if !file && !plugin {
+			left, err := CopilotVSCodeUserFilesLeft(home, opts.goos(), opts.HookBinary)
+			if err != nil {
+				state.conflict("cannot inspect Copilot Local files outside enrollment in %s: %v", home, err)
+			} else if left {
+				state.conflict("an older DefenseClaw Copilot Local hook or plugin remains outside enrollment in %s; run the guardian to remove it", home)
+			}
+		}
+	}
 	if len(opts.CopilotUserHomes) == 0 {
 		return
 	}
@@ -535,22 +553,28 @@ func copilotVSCodeStatus(opts Options, state *State) {
 	files, plugins := 0, 0
 	for _, home := range opts.CopilotUserHomes {
 		file, plugin := CopilotVSCodeUserState(home, opts.goos(), opts.HookBinary)
+		var kept []string
+		if (wantFile && !file) || (wantPlugin && !plugin) {
+			kept = copilotVSCodeUserKept(home, opts.goos(), opts.HookBinary)
+		}
 		if file {
 			files++
 		} else if wantFile {
-			state.UserFileDrift = append(state.UserFileDrift, CopilotVSCodeLocalHookFilePath(home))
+			path := CopilotVSCodeLocalHookFilePath(home)
+			if slices.Contains(kept, path) {
+				state.UserFileForeign = append(state.UserFileForeign, path)
+			} else {
+				state.UserFileDrift = append(state.UserFileDrift, path)
+			}
 		}
 		if plugin {
 			plugins++
 		} else if wantPlugin {
-			// The plugin is DefenseClaw's as well: a missing or earlier copy
-			// is rewritten on the guardian's next pass, while one holding
-			// hooks DefenseClaw did not write stays, and the foreign-hook
-			// guard denies that user's calls (GAP-1232).
-			if kept := copilotVSCodeUserKept(home, opts.goos(), opts.HookBinary); len(kept) > 0 {
-				state.UserFileForeign = append(state.UserFileForeign, kept...)
+			path := CopilotPluginHooksPath(home)
+			if slices.Contains(kept, path) {
+				state.UserFileForeign = append(state.UserFileForeign, path)
 			} else {
-				state.UserFileDrift = append(state.UserFileDrift, CopilotPluginHooksPath(home))
+				state.UserFileDrift = append(state.UserFileDrift, path)
 			}
 		}
 	}

@@ -11,15 +11,7 @@ keywords:
   - sandbox process tree records
 ---
 
-Every [OpenShell sandbox](/docs/sandboxes) writes canonical v8 records, the same
-kind as the rest of DefenseClaw's [observability](/docs/observability). They
-go to the local SQLite history and to each destination whose routes select
-them, redacted by that destination's profile. This page lists what is recorded,
-how a record names its sandbox, and which records tell you something is wrong.
-The [Sandboxes board](/docs/observability/grafana-dashboards#sandboxes-board)
-and the [Splunk Observability dashboard](/docs/observability/splunk) are built
-from these records; the full attribute registry is
-[`docs/OPENSHELL_SANDBOX_EVENTS.md`](https://github.com/cisco-ai-defense/defenseclaw/blob/main/docs/OPENSHELL_SANDBOX_EVENTS.md).
+Every [OpenShell sandbox](/docs/sandboxes) writes records into the standard [observability buckets](/docs/observability#buckets). They go to local SQLite and to each destination whose routes select them, redacted by that destination's profile. The [Sandboxes board](/docs/observability/grafana-dashboards#sandboxes-board) and the Splunk Observability sandbox dashboard are built from them. The full attribute registry is [`docs/OPENSHELL_SANDBOX_EVENTS.md`](https://github.com/cisco-ai-defense/defenseclaw/blob/main/docs/OPENSHELL_SANDBOX_EVENTS.md).
 
 ## What is recorded
 
@@ -33,7 +25,7 @@ from these records; the full attribute registry is
 | A policy change: applied, a rule added or removed, an unblock or block | `log.policy.updated` | `compliance.activity` | Always written to local SQLite. Carries the OpenShell policy revision and the policy hash. |
 | A finding (`sandbox.<kind>`, see below) | `log.finding.observed` | `security.finding` | |
 | A process OpenShell launched or ended, an SSH session, a model call | `log.sandbox.process`, `log.sandbox.ssh`, `log.sandbox.inference` | `tool.activity`, `compliance.activity`, `model.io` | From OpenShell's own reports. Process and SSH records are paced per sandbox (a burst of 200, then 20 a second). An inference record names the provider, model, status and latency, never the content. |
-| A process joined or left the [process tree](/docs/sandboxes/guide#see-what-the-sandbox-runs) | `log.sandbox.process_tree` | `agent.lifecycle` | Only for a sandbox whose tree is on (`observe.process_tree`, or `sandbox run --process-tree`). Carries the parent and the ancestry. |
+| A process joined or left the [process tree](/docs/sandboxes/first-session) | `log.sandbox.process_tree` | `agent.lifecycle` | Only for a sandbox whose tree is on (`observe.process_tree`, or `sandbox run --process-tree`). Carries the parent and the ancestry. |
 | The integration's health | `log.subsystem.lifecycle`, `.ready`, `.degraded`, `.restored` | `platform.health` | Subsystem `openshell`. A transition is always written to local SQLite. |
 | An AI component found inside a sandbox | `ai_component.*` | `ai.discovery` | Carries `defenseclaw.sandbox.id` and `defenseclaw.sandbox.name`. See [AI discovery](/docs/ai-discovery#inside-openshell-sandboxes). |
 | A hook decision | `log.compat.hook_decision` | | Carries the sandbox id and name of the binding that authenticated the hook, so a verdict joins to its sandbox. |
@@ -87,7 +79,7 @@ metric label.
 | `defenseclaw.guardrail.profile.name`, `.digest`, `.match`, `.matched_group` | The guardrail profile that governs the sandbox, the digest of its configuration, and why it matched. The same attributes the hook decisions carry. |
 | `defenseclaw.sandbox.policy.digest` | The digest of the effective sandbox policy: the organization floor combined with the profile's `sandbox` section. |
 | `defenseclaw.sandbox.policy.generation` | The managed gateway's configuration generation at the last resolve or re-match. |
-| `defenseclaw.sandbox.policy.provisional` | `true` while the sandbox runs under `default_profile` because the directory lookup had not resolved. |
+| `defenseclaw.sandbox.policy.provisional` | `true` while the sandbox runs under `default_profile` because a directory lookup has not resolved and no assignment needs the missing fact. A request needing that fact is refused and names it. |
 | `defenseclaw.openshell.version`, `defenseclaw.openshell.install_mode` | The OpenShell release the daemon verified, and how it was provided: `prerequisite` or `setup`. |
 | `defenseclaw.subject.key` | An `hmac-sha256:` pseudonym of the account, so one person can be followed across records without the principal. The principal itself is recorded only when `ai_discovery.include_user_principal` is on. |
 
@@ -105,14 +97,12 @@ The records the managed computer adds:
 | The managed policy refused a destination | `log.sandbox.access_refused` | Names the rule and `server.address`; the rule is the caller's own match only. Always written. |
 | A sandbox or an agent container DefenseClaw did not create | `log.sandbox.foreign_sandbox`, `log.sandbox.foreign_container` | A sandbox is stopped, deleted when it cannot stop, or reported; a container is only reported, with its image in `defenseclaw.sandbox.container.image`. Both carry the account's own profile match and the detected agent connector, including when the account has no registered sandbox. |
 | An OpenShell setting differs from `enterprise.openshell` | `log.sandbox.settings_drift` | `defenseclaw.openshell.settings.field` names the key, never the value. Pauses the user's sandboxes. Always written. |
-| A watched registration is used or reported running without an accepted guest record since bind after five minutes | `log.sandbox.registration_without_guest` | The reason is `relay_without_guest` or `running_without_guest`; action `alert`, severity `MEDIUM`, bucket `compliance.activity`, and no outcome. It names the account, connector, registration, sandbox id and name, and the gateway's running state (`ready` or `stopped` phase). The Sandboxes dashboard stat **Sandbox registrations without a guest** counts these records. It changes no decision and is a tripwire for the simple case: the same account can post lifecycle records, and a dropped first record can cause one alert. Only registrations bound by a build with this signal are watched. The first accepted record ends the watch, so a guest that disappears later is not reported by this signal. Registrations bound before the upgrade to 1.0.2 (for example by 1.0.1) are not watched; re-create those sandboxes after the upgrade to bring them under the signal. Root-owned attestation in a later release replaces this signal. See [the managed limit](/docs/enterprise/sandboxes#require-sandboxes). |
+| A watched registration is used or reported running without an accepted guest record since bind after five minutes | `log.sandbox.registration_without_guest` | The reason is `relay_without_guest` or `running_without_guest`; action `alert`, severity `MEDIUM`, bucket `compliance.activity`, and no outcome. It names the account, connector, registration, sandbox id and name, and the gateway's running state (`ready` or `stopped` phase). The Sandboxes dashboard stat **Sandbox registrations without a guest** counts these records. It changes no decision and is a tripwire for the simple case: the same account can post lifecycle records, and a dropped first record can cause one alert. See [the managed limit](/docs/enterprise/sandboxes#require-sandboxes). |
 
 A refusal, a removal or stop, a re-match and an ask decision are mandatory:
 they reach the audit floor whatever a route's collection settings say. The
 Grafana Sandboxes board has a managed fleet section built from these records,
-including the registration alert stat. Splunk saved searches, Splunk
-Observability charts and a sandbox errors detector cover the earlier managed
-families.
+including the registration alert stat.
 
 ## Egress records
 
@@ -149,6 +139,8 @@ A finding's category is `sandbox.<kind>`:
 | `large_upload` | A large upload to a host the sandbox had not contacted before. | MEDIUM when only reported, HIGH when the large-upload block cut it |
 | `nested_repo` | A repository or a gitlink appeared inside a live-mounted project during a session. | HIGH, CRITICAL when the quarantine failed |
 | `ocsf_finding` | A finding OpenShell raised. Its repeats within 10 minutes of a session are one record. | as OpenShell reports |
+
+![Grafana Sandboxes board, Findings and shadow AI row: Findings by kind counts 2 sandbox.shadow_ai findings, the Shadow-AI destinations table lists api.openai.com and api.mistral.ai as LOW with one finding each, and Recent sandbox findings names the sandbox and the host](/images/grafana/sandboxes-findings.png)
 
 ## Health
 
@@ -212,6 +204,22 @@ The labels below are the ones the local Prometheus shows. In OTLP they are
 | `defenseclaw.sandbox.transitions` (counter) | `connector`, phase from and to | One per phase change. |
 | `defenseclaw.egress.events` (counter) | `connector`, `source` (`openshell`, `dc-egress-proxy`), `decision` | One per decision; none for the end of a connection. A refusal that is audited only does not count. |
 
+## What to trust
+
+DefenseClaw reports a sandbox from several sources. Some it measures itself. Some are what OpenShell or the sandboxed program says about itself.
+
+| You want to know | Look at | Read it as |
+| --- | --- | --- |
+| Which sites the agent reached or tried | `sandbox activity`, `sandbox destinations NAME`, the TUI details, the Grafana Sandboxes board | Measured by DefenseClaw for what goes through the proxy. It never sees an HTTPS path or body, and the model provider's traffic is opened around the proxy. |
+| Whether the agent talked to another AI service | The `shadow AI` and `shadow AI?` kinds, a `shadow_ai` finding, `⚠` in the feed | A provider in the catalog is named. `shadow AI?` is a guess from the host's shape. |
+| Which program made a connection | The BINARY column of `destinations` | What the program calls itself. Parents appear only with the process tree on, for a process the 5-second sample saw. |
+| What the agent ran | `sandbox ps NAME --tree` (opt-in) | Names and arguments are the agent's own words, with secrets replaced. A view of what ran, not a control. |
+| What the agent installed in the sandbox | `sandbox discover NAME`, `agent usage --sandbox NAME` | Files as the agent left them, scanned on your machine. |
+| Whether the hooks still guard the agent | The banner's `Hooks` line, the `hook_silence` and `hook_tamper` findings | Claude Code and Codex keep their hooks in root-owned files. For the others, silence stops the sandbox under `balanced` and `strict`. A harness that works in bursts shorter than `silence_after` is not flagged. |
+| What the project asked for | The banner's `Policy` row, `policy explain` (source `repo`) | Untrusted input: it can only tighten the policy. |
+
+None of these sees what a program does in memory, or the contents of the files the agent writes. The end-of-session review flags the ones that can run code. Every signal is also a v8 record that reaches your telemetry destinations.
+
 ## What leaves the host
 
 - The command line of a process is content class: each destination's
@@ -228,8 +236,8 @@ The labels below are the ones the local Prometheus shows. In OTLP they are
 
 ## See also
 
-- [Sandbox guide: see where the sandbox connected](/docs/sandboxes/guide#see-where-the-sandbox-connected)
+- [Sandbox guide: see where the sandbox connected](/docs/sandboxes/first-session)
 - [Network and egress: destinations and shadow AI](/docs/sandboxes/network#destinations-and-shadow-ai)
 - [Grafana Sandboxes board](/docs/observability/grafana-dashboards#sandboxes-board)
-- [Splunk Observability dashboards and detector](/docs/observability/splunk)
+- [Splunk Observability dashboards and detector](/docs/observability/splunk#splunk-observability-dashboards-and-detectors)
 - [Gateway API: sandbox status and destinations](/docs/reference/gateway-api)

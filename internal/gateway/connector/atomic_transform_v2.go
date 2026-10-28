@@ -163,7 +163,7 @@ func atomicTransformFileV2(
 		return fmt.Errorf("revalidate Windows transaction locator: %w", err)
 	}
 	return withAtomicTransformV2ProtocolLock(path, stateDir, func() error {
-		return recoverAtomicTransformV2Locked(path, stateDir)
+		return recoverAtomicTransformV2Locked(path, stateDir, options.expectedOwner)
 	}, func(target string) error {
 		// Pin the canonical physical target spelling for the complete locked
 		// operation. In particular, an existing 8.3 leaf alias can stop resolving
@@ -181,7 +181,7 @@ func atomicTransformFileV2Locked(
 	transform func(current []byte, exists bool) (atomicTransformResult, error),
 ) error {
 	for attempt := 0; attempt < atomicTransformMaxAttempts; attempt++ {
-		if err := recoverAtomicTransformV2Locked(inputPath, stateDir); err != nil {
+		if err := recoverAtomicTransformV2Locked(inputPath, stateDir, options.expectedOwner); err != nil {
 			return fmt.Errorf("recover interrupted config transform for %s: %w", path, err)
 		}
 		if err := prepareAtomicTransformV2TargetParent(path); err != nil {
@@ -222,9 +222,9 @@ func atomicTransformFileV2Locked(
 		if !result.Remove && len(result.Data) > atomicTransformMaxConfigBytes {
 			return fmt.Errorf("transformed config exceeds %d-byte compare-and-swap limit", atomicTransformMaxConfigBytes)
 		}
-		semanticNoop := (!snapshot.exists && result.Remove) ||
+		semanticNoop := result.Keep || !result.Force && ((!snapshot.exists && result.Remove) ||
 			(snapshot.exists && !result.Remove && bytes.Equal(snapshot.data, result.Data) &&
-				(options.preserveExistingProtection || atomicTransformSnapshotSatisfiesPermissions(snapshot, writePerm)))
+				(options.preserveExistingProtection || atomicTransformSnapshotSatisfiesPermissions(snapshot, writePerm))))
 		runAtomicTransformBeforeCompareHook(path, attempt)
 		matches, err := atomicFileSnapshotStillMatches(path, snapshot)
 		if err != nil {
@@ -266,7 +266,7 @@ func atomicTransformFileV2Locked(
 		txn, err := beginAtomicTransformV2(inputPath, path, stateDir, snapshot, result, writePerm, options)
 		if err != nil {
 			_ = txn.close()
-			if recoverErr := recoverAtomicTransformV2Locked(inputPath, stateDir); recoverErr != nil {
+			if recoverErr := recoverAtomicTransformV2Locked(inputPath, stateDir, options.expectedOwner); recoverErr != nil {
 				return errors.Join(err, recoverErr)
 			}
 			if errors.Is(err, errAtomicTransformConflict) {
@@ -278,7 +278,7 @@ func atomicTransformFileV2Locked(
 		matches, err = atomicFileSnapshotStillMatches(path, snapshot)
 		if err != nil || !matches {
 			_ = txn.close()
-			recoverErr := recoverAtomicTransformV2Locked(inputPath, stateDir)
+			recoverErr := recoverAtomicTransformV2Locked(inputPath, stateDir, options.expectedOwner)
 			if recoverErr != nil {
 				if err != nil {
 					return errors.Join(err, recoverErr)
@@ -294,7 +294,7 @@ func atomicTransformFileV2Locked(
 		if options.beforeCommit != nil {
 			if err := options.beforeCommit(txn.receipt); err != nil {
 				_ = txn.close()
-				return errors.Join(err, recoverAtomicTransformV2Locked(inputPath, stateDir))
+				return errors.Join(err, recoverAtomicTransformV2Locked(inputPath, stateDir, options.expectedOwner))
 			}
 		}
 		err = commitAtomicTransformV2(path, snapshot, txn)
@@ -302,7 +302,7 @@ func atomicTransformFileV2Locked(
 			err = closeErr
 		}
 		if err != nil {
-			recoverErr := recoverAtomicTransformV2Locked(inputPath, stateDir)
+			recoverErr := recoverAtomicTransformV2Locked(inputPath, stateDir, options.expectedOwner)
 			if recoverErr != nil {
 				return errors.Join(err, recoverErr)
 			}
@@ -311,7 +311,7 @@ func atomicTransformFileV2Locked(
 			}
 			return err
 		}
-		if err := recoverAtomicTransformV2Locked(inputPath, stateDir); err != nil {
+		if err := recoverAtomicTransformV2Locked(inputPath, stateDir, options.expectedOwner); err != nil {
 			return err
 		}
 		return nil
@@ -1814,11 +1814,13 @@ func recoverAtomicTransformV2(path, stateDir string) error {
 		return err
 	}
 	return withAtomicTransformV2ProtocolLock(path, stateDir, func() error {
-		return recoverAtomicTransformV2Locked(path, stateDir)
+		return recoverAtomicTransformV2Locked(path, stateDir, nil)
 	}, nil)
 }
 
-func recoverAtomicTransformV2Locked(path, stateDir string) error {
+// legacyOwner is the enrolled user a privileged uninstall transforms for
+// (atomicTransformV2Options.expectedOwner), nil for the user's own process.
+func recoverAtomicTransformV2Locked(path, stateDir string, legacyOwner *windows.SID) error {
 	// V2 terminal and complete receipts are authoritative: once either exists,
 	// no legacy recovery is allowed to mutate the live target. Inspect both
 	// namespaces before every transition and fail closed if independently valid
@@ -1839,7 +1841,7 @@ func recoverAtomicTransformV2Locked(path, stateDir string) error {
 			trustedTargetParent = filepath.Dir(loaded.receipt.TargetPath)
 		}
 		legacyDir, legacyExists, err := loadAtomicTransformV1ForV2Migration(
-			path, stateDir, trustedTargetParent,
+			path, stateDir, trustedTargetParent, legacyOwner,
 		)
 		if err != nil {
 			return err
@@ -1922,8 +1924,13 @@ func recoverAtomicTransformV2Locked(path, stateDir string) error {
 // the target-local directory used by previously shipped code. It never creates
 // the target-local directory. A valid transaction in more than one namespace
 // is ambiguous and therefore fails closed.
+//
+// A privileged uninstall for an enrolled user (legacyOwner) also accepts the
+// target-local directory as that user's private directory: the user's own
+// connector setup created it, so its owner is the user, not the caller
+// (GAP-1437). The stable directory always belongs to the caller.
 func loadAtomicTransformV1ForV2Migration(
-	path, stableStateDir, trustedTargetParent string,
+	path, stableStateDir, trustedTargetParent string, legacyOwner *windows.SID,
 ) (string, bool, error) {
 	stableStateDir, err := canonicalAtomicTransformPath(stableStateDir)
 	if err != nil {
@@ -1983,7 +1990,11 @@ func loadAtomicTransformV1ForV2Migration(
 		if bindErr != nil {
 			return "", false, fmt.Errorf("bind legacy compare-and-swap state directory %s: %w", directory, bindErr)
 		}
-		if privateErr := bound.validatePrivate(); privateErr != nil {
+		privateErr := bound.validatePrivate()
+		if privateErr != nil && legacyOwner != nil && directory != stableStateDir {
+			privateErr = bound.validatePrivateOwnedBy(legacyOwner)
+		}
+		if privateErr != nil {
 			_ = bound.Close()
 			return "", false, fmt.Errorf("validate legacy compare-and-swap state directory %s: %w", directory, privateErr)
 		}

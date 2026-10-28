@@ -17,6 +17,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"sort"
 	"strings"
@@ -138,7 +139,7 @@ func deleteRecord(opts Options, connector string) error {
 
 // reservedDropIn reports whether the record names a drop-in whose file
 // name DefenseClaw reserves for itself: 90-defenseclaw.json for the Claude
-// Code hooks and the Copilot policy. Once the record says DefenseClaw
+// Code hooks. Once the record says DefenseClaw
 // published it, the file is DefenseClaw's whatever bytes it holds. A copy
 // someone edited (hook paths pointed at another folder or binary name) is
 // tamper that the next publish repairs, never the administrator's preimage,
@@ -146,9 +147,10 @@ func deleteRecord(opts Options, connector string) error {
 // commands inside, which an edit can change: an edited copy recorded as
 // administrator content was restored by uninstall --purge, so every Claude
 // Code call ran a missing hook (GAP-1099). Administrator settings belong in
-// another drop-in, which DefenseClaw never touches.
+// another drop-in, which DefenseClaw never touches. Copilot can share its
+// drop-in with independent handlers, which its surgical strip preserves.
 func reservedDropIn(connector string) bool {
-	return connector == ConnectorClaudeCode || connector == ConnectorCopilot
+	return connector == ConnectorClaudeCode
 }
 
 // publishedByRecord reports whether record says DefenseClaw published path.
@@ -205,6 +207,48 @@ func (r *ownershipRecord) capturePreimage(current []byte, exists bool, strip str
 	return nil
 }
 
+// keepCopilotPreimageThroughMalformed retains the last parseable hooks when
+// a published drop-in is damaged. Independent root values added alongside
+// the damage can still be recovered without restoring the broken hooks.
+func (r *ownershipRecord) keepCopilotPreimageThroughMalformed(current []byte) error {
+	doc, err := decodeOrderedObject(current)
+	if err != nil {
+		return nil
+	}
+	admin := newObject()
+	if r.PreimageExisted {
+		admin, err = decodeOrderedObject(r.Preimage)
+		if err != nil {
+			return nil // preserve an original malformed preimage byte for byte
+		}
+	} else {
+		admin.set("version", json.Number("1"))
+	}
+	changed := false
+	for _, key := range doc.keys {
+		if key == "version" || key == "hooks" {
+			continue
+		}
+		value, _ := doc.get(key)
+		old, present := admin.get(key)
+		if !present || !reflect.DeepEqual(old, value) {
+			admin.set(key, value)
+			changed = true
+		}
+	}
+	if !changed {
+		return nil
+	}
+	data, err := encodeOrdered(admin)
+	if err != nil {
+		return err
+	}
+	r.PreimageExisted = true
+	r.Preimage = data
+	r.PreimageSHA256 = sha256Hex(data)
+	return nil
+}
+
 // noteRewrite records that the owned entries were found missing from a
 // file DefenseClaw had written; it returns how many rewrites happened in
 // the flap window.
@@ -232,6 +276,11 @@ func flapConflict(state *State, connector, path string, count int) {
 		state.conflict("another writer replaced %s %d times in 24h and removed DefenseClaw's hooks each time; if an MDM or configuration tool owns this file, set enterprise.machine_policy.connectors.%s.ownership: verify_only and deploy the output of `defenseclaw-gateway enterprise policy export --connector %s` through that tool", path, count, connector, connector)
 	}
 }
+
+// errPublishedDirExposes is the error of a directory above a published file
+// that restorePublishedDirs (Unix) leaves as it is: the access users need to reach
+// DefenseClaw's file would also reach an administrator's other files there.
+var errPublishedDirExposes = errors.New("cannot restore user access to machine policy")
 
 // publishWithRecord writes rendered when it differs from current and keeps
 // the ownership record in sync. It returns whether the file changed.
@@ -263,7 +312,14 @@ func publishWithRecord(opts Options, connector, path string, current []byte, exi
 			flapConflict(state, connector, path, record.noteRewrite(opts.now()))
 		}
 		// A reserved drop-in keeps the preimage of its first publish.
-		if !reservedDropIn(connector) || !publishedByRecord(record, path) {
+		// Copilot's shared drop-in follows parseable administrator edits,
+		// but broken hooks in a previously published file are damage to
+		// repair, not a new administrator preimage for removal.
+		if connector == copilotConnector && publishedByRecord(record, path) && exists && copilotPostPublicationMalformed(current) {
+			if err := record.keepCopilotPreimageThroughMalformed(current); err != nil {
+				return false, err
+			}
+		} else if !reservedDropIn(connector) || !publishedByRecord(record, path) {
 			if err := record.capturePreimage(current, exists, strip); err != nil {
 				return false, err
 			}
@@ -281,7 +337,7 @@ func publishWithRecord(opts Options, connector, path string, current []byte, exi
 		}
 	}
 	if changed {
-		created, err := writePolicyFile(opts, path, rendered)
+		created, err := writePolicyFileOver(opts, path, state.policyFileBase(opts, path, exists, current), rendered)
 		record.CreatedDirs = appendUnique(record.CreatedDirs, created...)
 		if err != nil {
 			return false, err
@@ -295,6 +351,12 @@ func publishWithRecord(opts Options, connector, path string, current []byte, exi
 	dirsRestored := false
 	if problem := publishedDirProblem(opts, path); problem != "" {
 		restored, err := restorePublishedDirs(opts, path)
+		if errors.Is(err, errPublishedDirExposes) {
+			// The administrator restricts or moves those files; the
+			// connector is not covered until then.
+			state.conflict("%v", err)
+			err = nil
+		}
 		if err != nil {
 			return changed, err
 		}
@@ -366,8 +428,8 @@ func verifyPublishedFiles(opts Options, connector string, state *State) {
 }
 
 // RestorePublishedPolicyDirs gives the directories above every policy file
-// DefenseClaw publishes (ownership: merge) back the mode 0755 users need to
-// read it. The hook guardian runs it on each pass, so an administrator's
+// DefenseClaw publishes (ownership: merge) back the access users need to
+// read it (restorePublishedDirs). The hook guardian runs it on each pass, so an administrator's
 // chmod 0700 of /etc/claude-code/managed-settings.d does not leave Claude
 // Code without managed settings until the next repair (GAP-0913). It returns
 // the directories it changed.
@@ -416,6 +478,9 @@ func restoreOrStrip(opts Options, connector, path string, strip stripFunc, whole
 	if err != nil {
 		return err
 	}
+	// Every write and removal below is of this read: a save another writer
+	// makes meanwhile is kept, and the caller renders again (GAP-0896).
+	base := policyFileBase{exists: exists, data: current}
 	switch {
 	case !exists:
 	case record == nil && wholeFile:
@@ -431,7 +496,7 @@ func restoreOrStrip(opts Options, connector, path string, strip stripFunc, whole
 			}
 		}
 		if blank(admin) {
-			if err := removePolicyFile(opts, path); err != nil {
+			if err := removePolicyFileOver(opts, path, base); err != nil {
 				return err
 			}
 			if sha256Hex(current) != record.PostimageSHA256 {
@@ -440,7 +505,7 @@ func restoreOrStrip(opts Options, connector, path string, strip stripFunc, whole
 				state.detail("removed %s (it held no administrator content besides DefenseClaw's)", path)
 			}
 		} else {
-			if _, err := writePolicyFile(opts, path, admin); err != nil {
+			if _, err := writePolicyFileOver(opts, path, base, admin); err != nil {
 				return err
 			}
 			state.detail("restored the administrator content of %s", path)
@@ -463,13 +528,13 @@ func restoreOrStrip(opts Options, connector, path string, strip stripFunc, whole
 				state.detail("%s no longer holds DefenseClaw entries; left it unchanged", path)
 			}
 		case blank(admin):
-			if err := removePolicyFile(opts, path); err != nil {
+			if err := removePolicyFileOver(opts, path, base); err != nil {
 				return err
 			}
 			state.Changed = true
 			state.detail("removed %s (only DefenseClaw content remained)", path)
 		default:
-			if _, err := writePolicyFile(opts, path, admin); err != nil {
+			if _, err := writePolicyFileOver(opts, path, base, admin); err != nil {
 				return err
 			}
 			state.Changed = true

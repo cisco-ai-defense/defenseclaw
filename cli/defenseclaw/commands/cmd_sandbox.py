@@ -178,8 +178,7 @@ SANDBOX_COMMANDS: tuple[_Cmd, ...] = (
             "version and compute driver (on a Mac, the MicroVM driver: e2fsprogs, its signature, "
             "the sandbox identity and resources), bind mounts, telemetry, ports, the DefenseClaw "
             "daemon, harness images, shell wrappers and the organization policy. Exits 1 when a "
-            "check fails (with --output json the result is printed and the exit status is 0; read "
-            '"ok").'
+            "check fails, with --output json too and with --json (both print ok=false)."
         ),
         flags=(
             _OUTPUT,
@@ -195,7 +194,7 @@ SANDBOX_COMMANDS: tuple[_Cmd, ...] = (
             "Runs the harness in a new sandbox on the current folder: on Linux (the Docker driver) "
             "live-mounted by default with a pre-session snapshot, or a copy with --copy; on macOS "
             "(the MicroVM driver) every run works on a copy. The harness is claude, codex, "
-            "copilot, opencode, kiro, hermes, openhands, omnigent or antigravity (its command, agy, "
+            "copilot, opencode, kiro, hermes or antigravity (its command, agy, "
             "works too; amp, cursor-agent and devin are not verified yet, so they do not run). "
             "Skip-permissions mode is on by default; "
             "--safe keeps the harness's own prompts. The harness gets your terminal; when it exits "
@@ -394,6 +393,12 @@ SANDBOX_COMMANDS: tuple[_Cmd, ...] = (
                 "bool",
                 "take a new snapshot even if the folder still has an earlier session's changes "
                 "(undo no longer reverts them)",
+            ),
+            _Flag(
+                "end-vm",
+                "bool",
+                "start a MicroVM whose workload completed or failed though its VM still runs: OpenShell ends "
+                "that VM with no flush first, so what it has not written to its disk is lost",
             ),
         ),
     ),
@@ -705,7 +710,8 @@ SANDBOX_COMMANDS: tuple[_Cmd, ...] = (
             "/usr/local/libexec/defenseclaw/defenseclaw-sensor-helper, checks that this host's Tetragon serves "
             "a root-owned unix socket (never a TCP address) and that Docker answers, then writes and starts "
             "defenseclaw-sandbox-feed.service. Run it again after an upgrade to update the feed. Refused on a "
-            "managed host, where sandboxes are not supported."
+            "managed host: its sandboxes are the managed deployment's, and this per-user feed installer is not "
+            "part of it."
         ),
     ),
     _Cmd(("kernel-feed", "uninstall"), "Stop and remove the sandbox kernel feed service (as root)"),

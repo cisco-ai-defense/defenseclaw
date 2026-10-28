@@ -16,6 +16,8 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/google/uuid"
+
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	observabilityredaction "github.com/defenseclaw/defenseclaw/internal/observability/redaction"
@@ -133,5 +135,28 @@ func TestClaudeCodePreToolUseAuditCommitBudget(t *testing.T) {
 	}
 	if got := (rows("correlation_observations") - observationRows) / measured; got != 21 {
 		t.Fatalf("correlation observations per call = %d, want 21", got)
+	}
+	// rel-1-0-3 GAP-0320: the unique keys a hook call writes are time
+	// ordered, so each lands at the end of its index instead of on a random
+	// page that a Windows checkpoint has to write on its own.
+	for _, key := range []struct{ table, column string }{
+		{"audit_events", "id"}, {"correlation_observations", "record_id"}, {"scan_results", "id"},
+	} {
+		keys, err := reader.Query("SELECT " + key.column + " FROM " + key.table + " ORDER BY rowid DESC LIMIT 50")
+		if err != nil {
+			t.Fatal(err)
+		}
+		for keys.Next() {
+			var value string
+			if err := keys.Scan(&value); err != nil {
+				t.Fatal(err)
+			}
+			if parsed, err := uuid.Parse(value); err != nil || parsed.Version() != 7 {
+				t.Fatalf("%s.%s %q is not a UUIDv7", key.table, key.column, value)
+			}
+		}
+		if err := keys.Close(); err != nil {
+			t.Fatal(err)
+		}
 	}
 }

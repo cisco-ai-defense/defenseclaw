@@ -129,6 +129,13 @@ func (l *lifecycle) describeHookContracts(ctx context.Context) {
 						result.Connector, result.User)
 				}
 				removed = append(removed, message)
+			} else if !directoryLookupsFailing(r.Warnings) {
+				// A miss the enumerator has not confirmed, with no directory
+				// outage to explain it, is a target the guardian could not
+				// protect: it stays and is reported (GAP-1133).
+				failed = append(failed, fmt.Sprintf("%s for user %s is not protected: the guardian's last reconcile could not "+
+					"resolve the account, and the enumerator has not confirmed that it is gone; the guardian protects it again "+
+					"once the account resolves", result.Connector, result.User))
 			}
 			continue
 		}
@@ -185,6 +192,51 @@ func (l *lifecycle) describeHookContracts(ctx context.Context) {
 		// all, so the deployment does not cover it (GAP-0151).
 		r.CoverageComplete = false
 	}
+}
+
+// requireProtectedTargets fails an install, upgrade, repair or ensure that
+// leaves an enrolled target unprotected: each guardian_target_failed warning
+// describe reported becomes an error with the same cause, as verify and
+// reconcile already fail on it. The change itself stays committed. An
+// ensure on a managed host whose enrolled Hermes the guardian could not
+// verify returned ok and exit 0 next to security_complete false (GAP-0846).
+// A target refused for a path in its own account's home, the target of an
+// account that is gone and an agent version with no verified hook contract
+// stay warnings here, as in verify. It returns code.
+func (l *lifecycle) requireProtectedTargets(code int) int {
+	r := l.result
+	failed := map[string]bool{}
+	for _, message := range r.Errors {
+		if message.Code == codeGuardianTargetFailed {
+			failed[message.Message] = true
+		}
+	}
+	for _, warning := range r.Warnings {
+		if warning.Code != codeGuardianTargetFailed || failed[warning.Message] {
+			continue
+		}
+		failed[warning.Message] = true
+		r.AddError(codeGuardianTargetFailed, warning.Message+"; the change was applied, but DefenseClaw does not protect that agent: fix the cause, then run `"+
+			l.env.lifecycleCommand(ActionReconcile)+"` (the guardian also retries every minute) and `"+l.env.lifecycleCommand(ActionVerify)+"`")
+	}
+	if len(failed) > 0 {
+		r.SecurityComplete = false
+	}
+	return code
+}
+
+// requireProtectedTargetsOnChange is requireProtectedTargets for a run that
+// ends before its action does anything: an empty bundle inbox, a bundle
+// mode refusal, or a queued apply run that stands down. Such an ensure
+// (or install, upgrade, repair) exited 0 while describe reported an
+// enrolled target unprotected (GAP-0985). Other actions return code as it
+// is.
+func (l *lifecycle) requireProtectedTargetsOnChange(code int) int {
+	switch l.opts.Action {
+	case ActionInstall, ActionUpgrade, ActionRepair, ActionEnsure:
+		return l.requireProtectedTargets(code)
+	}
+	return code
 }
 
 // codeAgentSettingsNotRestored names an account whose agent config the
@@ -342,8 +394,21 @@ func (l *lifecycle) guardianTargetFailedSince(since time.Time) bool {
 // eligible user but could not enroll; it runs without DefenseClaw hooks.
 const codeAgentUnprotected = enterprisehooks.UnprotectedCodeAgentUnprotected
 
+// reportInstallScanPending reports a missing or stale unprotected-agents
+// record as one NOT COVERED warning, verify included (GAP-1430). Only that
+// condition is a warning: every other check, and every agent a stale record
+// names, keeps its own verdict.
+func (l *lifecycle) reportInstallScanPending(age string) {
+	remedy := "sudo systemctl restart " + unitEnumerator
+	if l.env.GOOS == "darwin" {
+		remedy = "sudo launchctl kickstart -k system/" + labelEnumerator
+	}
+	l.result.AddWarning(enterprisehooks.UnprotectedCodeInstallScanIncomplete, enterprisehooks.UnprotectedAgentsScanPending(age, remedy))
+	l.result.CoverageComplete, l.result.SecurityComplete = false, false
+}
+
 // describeUnprotectedAgents reports the agents the enumerator found
-// installed but could not enroll (its unprotected-agents record next to the
+// uncovered (its unprotected-agents record next to the
 // manifest) and marks the deployment security-incomplete. Each is one
 // account's agent, so it is a warning for that account, verify included; an
 // unreadable record hides which agents they are, so verify fails on it, as
@@ -352,31 +417,72 @@ const codeAgentUnprotected = enterprisehooks.UnprotectedCodeAgentUnprotected
 func (l *lifecycle) describeUnprotectedAgents() {
 	env, r := l.env, l.result
 	data, err := readBounded(env.P(enterprisehooks.UnprotectedAgentsPath(env.Layout.ManifestPath)), enterprisehooks.UnprotectedAgentsMaxBytes)
+	if errors.Is(err, os.ErrNotExist) {
+		l.reportInstallScanPending(enterprisehooks.UnprotectedAgentsRecordMissing)
+		return
+	}
 	if err != nil {
+		message := "the enumerator's unprotected-agents record is missing or unreadable: " + err.Error()
+		if l.opts.Action == ActionVerify {
+			r.AddError(enterprisehooks.UnprotectedCodeInstallScanIncomplete, message)
+		} else {
+			r.AddWarning(enterprisehooks.UnprotectedCodeInstallScanIncomplete, message)
+		}
+		r.CoverageComplete, r.SecurityComplete = false, false
 		return
 	}
 	agents, err := enterprisehooks.ParseUnprotectedAgents(data)
 	if err != nil {
 		message := "the enumerator's unprotected-agents record is unreadable: " + err.Error()
 		if l.opts.Action == ActionVerify {
-			r.AddError(codeVerify, message)
+			r.AddError(enterprisehooks.UnprotectedCodeInstallScanIncomplete, message)
 		} else {
-			r.AddWarning(codeAgentUnprotected, message)
+			r.AddWarning(enterprisehooks.UnprotectedCodeInstallScanIncomplete, message)
 		}
-		r.SecurityComplete = false
+		r.CoverageComplete, r.SecurityComplete = false, false
 		return
 	}
+	info, err := os.Stat(env.P(enterprisehooks.UnprotectedAgentsPath(env.Layout.ManifestPath)))
+	if err != nil {
+		message := "the enumerator's unprotected-agents record's scan time cannot be read: " + err.Error()
+		if l.opts.Action == ActionVerify {
+			r.AddError(enterprisehooks.UnprotectedCodeInstallScanIncomplete, message)
+		} else {
+			r.AddWarning(enterprisehooks.UnprotectedCodeInstallScanIncomplete, message)
+		}
+		r.CoverageComplete, r.SecurityComplete = false, false
+	} else if now := time.Now(); enterprisehooks.UnprotectedAgentsRecordStale(info.ModTime(), now) {
+		l.reportInstallScanPending(enterprisehooks.UnprotectedAgentsRecordAge(info.ModTime(), now))
+	}
 	for _, agent := range agents {
-		if agent.Code == enterprisehooks.UnprotectedCodeHookContractUnverified {
-			// No hook contract: the agent runs with no DefenseClaw hook, so
-			// the deployment does not cover it (GAP-0151).
+		if agent.Code == enterprisehooks.UnprotectedCodeHookContractUnverified ||
+			agent.Code == enterprisehooks.UnprotectedCodeInstallScanIncomplete ||
+			agent.Code == enterprisehooks.UnprotectedCodeKiroCLIBelowHookFloor ||
+			agent.Code == enterprisehooks.UnprotectedCodeKiroIDEBelowGlobalHooksFloor {
+			// No contract, an incomplete install scan, a headless CLI path
+			// without hooks, or an IDE that cannot read global hooks: the
+			// deployment does not cover it (GAP-0151).
 			r.CoverageComplete = false
 		}
-		if agent.Refusal == enterprisehooks.RefusalMissing && l.opts.Action == ActionVerify {
+		if l.opts.Action == ActionVerify && (agent.Refusal == enterprisehooks.RefusalMissing ||
+			agent.Code == enterprisehooks.UnprotectedCodeKiroCLIBelowHookFloor ||
+			agent.Code == enterprisehooks.UnprotectedCodeKiroIDEBelowGlobalHooksFloor) {
 			r.AddError(agent.Code, agent.Message())
 			continue
 		}
 		r.AddWarning(agent.Code, agent.Message())
+		if agent.InstallPath != "" && (l.opts.Action == ActionStatus || l.opts.Action == ActionVerify) && env.ReportLaunchCoverage != nil && agent.UID != nil {
+			reason := "unsupported_installed_version"
+			if agent.Version == "" {
+				reason = "installed_version_unverified"
+			}
+			if err := env.ReportLaunchCoverage(context.Background(), managed.LaunchCoverageReport{
+				Connector: agent.Connector, Reason: reason, UID: *agent.UID,
+				InstallPath: agent.InstallPath, Version: agent.Version,
+			}); err != nil {
+				r.AddWarning(codeManagedLaunchAuditUnavailable, "could not audit the unprotected "+agent.Connector+" install: "+err.Error())
+			}
+		}
 	}
 	if len(agents) > 0 {
 		r.SecurityComplete = false

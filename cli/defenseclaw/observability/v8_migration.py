@@ -1069,7 +1069,7 @@ def _validate_supported_v7(document: Mapping[str, Any], ctx: _Context) -> None:
                 ctx,
                 "duplicate_connector_alias",
                 "$.observability.connectors",
-                "keep only one case-insensitive open-hands/open_hands alias for each connector",
+                "keep only one case-insensitive alias for each connector",
             )
         if not _NAME_RE.fullmatch(normalized):
             raise _error(
@@ -1551,6 +1551,10 @@ def _legacy_connectors(
     sink_configs: dict[str, list[Mapping[str, Any]]] = {}
     for name, raw in raw_connectors.items():
         normalized_name = _normalize_legacy_connector_name(name)
+        # until 1.1: v7 upgrades discard removed connector telemetry blocks.
+        if normalized_name in {"openhands", "omnigent"}:
+            ctx.warning(f"retired_connector_dropped:{normalized_name}")
+            continue
         if normalized_name != name:
             ctx.warning(f"connector_name_normalized:{normalized_name}")
         source = _mapping(raw, f"$.observability.connectors.{name}", ctx)
@@ -3409,6 +3413,7 @@ def _environment_true(value: str, accepted: frozenset[str]) -> bool:
 
 def _normalize_legacy_connector_name(value: str) -> str:
     normalized = value.strip().lower()
+    # until 1.1: parse aliases in older v7 files before dropping retired rows.
     if normalized in {"open-hands", "open_hands"}:
         return "openhands"
     return normalized

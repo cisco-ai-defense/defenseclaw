@@ -53,6 +53,9 @@ type windowsLexeme struct {
 	kind     windowsLexemeKind
 	word     windowsWord
 	operator string
+	// Operator positions are rune offsets in the original source. They let
+	// the per-command pass retain each child's exact quoting and redirects.
+	start, end int
 }
 
 type windowsRedirect struct {
@@ -502,11 +505,12 @@ func windowsLex(source string, dialect windowsDialect, out *parseOutput) ([]wind
 		tokenBytes = 0
 		return ok
 	}
-	appendOperator := func(kind windowsLexemeKind, operator string) bool {
+	appendOperator := func(kind windowsLexemeKind, operator string, end int) bool {
 		if !flush() {
 			return false
 		}
-		return appendLexeme(windowsLexeme{kind: kind, operator: operator})
+		return appendLexeme(windowsLexeme{kind: kind, operator: operator,
+			start: end - len([]rune(operator)), end: end})
 	}
 
 	runes := []rune(source)
@@ -688,7 +692,7 @@ func windowsLex(source string, dialect windowsDialect, out *parseOutput) ([]wind
 				// statement boundary in the conservative PowerShell/cmd subset.
 				// Continuations were already consumed above and retain a dynamic
 				// parse issue, while control-flow tokens remain unsupported.
-				if !appendLexeme(windowsLexeme{kind: windowsSeparatorLexeme, operator: "newline"}) {
+				if !appendLexeme(windowsLexeme{kind: windowsSeparatorLexeme, operator: "newline", start: i, end: i + 1}) {
 					return lexemes, false
 				}
 			}
@@ -774,7 +778,7 @@ func windowsLex(source string, dialect windowsDialect, out *parseOutput) ([]wind
 				wordNativeArgvUncertain = false
 				tokenBytes = 0
 			}
-			if !appendOperator(windowsRedirectLexeme, operator) {
+			if !appendOperator(windowsRedirectLexeme, operator, i+1) {
 				return lexemes, false
 			}
 			continue
@@ -787,11 +791,11 @@ func windowsLex(source string, dialect windowsDialect, out *parseOutput) ([]wind
 				if i+1 < len(runes) && runes[i+1] == '|' {
 					i++
 					out.markPartial(IssueUnsupportedConstruct)
-					if !appendOperator(windowsSeparatorLexeme, "||") {
+					if !appendOperator(windowsSeparatorLexeme, "||", i+1) {
 						return lexemes, false
 					}
 				} else {
-					if !appendOperator(windowsPipeLexeme, "|") {
+					if !appendOperator(windowsPipeLexeme, "|", i+1) {
 						return lexemes, false
 					}
 				}
@@ -817,7 +821,7 @@ func windowsLex(source string, dialect windowsDialect, out *parseOutput) ([]wind
 						i = len(runes)
 						continue
 					}
-					if !appendOperator(windowsCallLexeme, "&") {
+					if !appendOperator(windowsCallLexeme, "&", i+1) {
 						return lexemes, false
 					}
 					continue
@@ -828,7 +832,7 @@ func windowsLex(source string, dialect windowsDialect, out *parseOutput) ([]wind
 					i++
 				}
 				out.markPartial(IssueUnsupportedConstruct)
-				if !appendOperator(windowsSeparatorLexeme, operator) {
+				if !appendOperator(windowsSeparatorLexeme, operator, i+1) {
 					return lexemes, false
 				}
 				continue
@@ -857,7 +861,7 @@ func windowsLex(source string, dialect windowsDialect, out *parseOutput) ([]wind
 				if kind != windowsPipeLexeme {
 					out.markPartial(IssueUnsupportedConstruct)
 				}
-				if !appendOperator(kind, operator) {
+				if !appendOperator(kind, operator, i+1) {
 					return lexemes, false
 				}
 				continue
@@ -4175,7 +4179,7 @@ func windowsAddPowerShellPrimaryPath(
 			builder.out.markPartial(IssueDynamicWord)
 			continue
 		}
-		lower := strings.ToLower(arg.value)
+		lower := canonicalPowerShellContentParameter(program, strings.ToLower(arg.value))
 		unquoted := arg.quote == QuoteNone
 		if unquoted && pathParams[lower] {
 			if i+1 >= len(args) || args[i+1].expands {

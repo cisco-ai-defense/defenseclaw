@@ -36,6 +36,7 @@ except ModuleNotFoundError:  # Imported as scripts.check_grafana_dashboards in t
     from local_observability_v1 import compatibility_errors
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "cli"))
 SOURCE_DIR = ROOT / "bundles/local_observability_stack/grafana/dashboards"
 PACKAGED_DIR = ROOT / "cli/defenseclaw/_data/local_observability_stack/grafana/dashboards"
 SOURCE_DATASOURCES = ROOT / "bundles/local_observability_stack/grafana/provisioning/datasources/datasources.yml"
@@ -59,6 +60,23 @@ COMMON_PROMETHEUS_RESOURCE_LABELS = {
     "service_name",
     "service_namespace",
     "service_version",
+}
+# The managed sandbox counters keep only these resource labels: the bundled
+# collector drops the host, account and device attributes from them
+# (transform/managed-sandbox-resource), so a host_name filter matches nothing.
+MANAGED_SANDBOX_RESOURCE_LABELS = {
+    "deployment_environment_name",
+    "instance",
+    "job",
+    "os_type",
+    "otel_scope_name",
+    "service_name",
+    "service_namespace",
+    "service_version",
+}
+PROMETHEUS_RESOURCE_LABELS_BY_METRIC = {
+    f"defenseclaw_sandbox_managed_{name}_total": MANAGED_SANDBOX_RESOURCE_LABELS
+    for name in ("refusals", "asks", "foreign_items", "provisional", "drift")
 }
 PROMETHEUS_METRIC_LABELS = {
     "defenseclaw_approval_count_total": {"result", "auto", "dangerous"},
@@ -84,6 +102,11 @@ PROMETHEUS_METRIC_LABELS = {
         "guardrail_scanner",
     },
     "defenseclaw_schema_violations_total": {"code", "event_type"},
+    "defenseclaw_sandbox_managed_refusals_total": {"reason", "profile", "driver", "connector"},
+    "defenseclaw_sandbox_managed_asks_total": {"result", "reason", "profile", "driver", "connector"},
+    "defenseclaw_sandbox_managed_foreign_items_total": {"kind", "action", "profile", "driver", "connector"},
+    "defenseclaw_sandbox_managed_provisional_total": {"result", "profile", "driver", "connector"},
+    "defenseclaw_sandbox_managed_drift_total": {"field", "profile", "driver", "connector"},
     "defenseclaw_stream_bytes_sent_bucket": {"le", "outcome"},
     "defenseclaw_stream_duration_ms_milliseconds_bucket": {"le", "outcome"},
     "defenseclaw_stream_lifecycle_total": {"outcome", "transition"},
@@ -698,7 +721,11 @@ def static_audit(
                             selector,
                         )
                         if metric_name in PROMETHEUS_METRIC_LABELS:
-                            allowed_labels = PROMETHEUS_METRIC_LABELS[metric_name] | COMMON_PROMETHEUS_RESOURCE_LABELS
+                            resource_labels = PROMETHEUS_RESOURCE_LABELS_BY_METRIC.get(
+                                metric_name,
+                                COMMON_PROMETHEUS_RESOURCE_LABELS,
+                            )
+                            allowed_labels = PROMETHEUS_METRIC_LABELS[metric_name] | resource_labels
                             unknown_labels = {label for label, _operator, _value in selector_pairs} - allowed_labels
                             if unknown_labels:
                                 errors.append(
@@ -878,15 +905,29 @@ def request_json(
 ) -> dict[str, Any]:
     if params:
         url = f"{url}?{urllib.parse.urlencode(params)}"
-    request: str | urllib.request.Request = url
     if _GRAFANA_AUTHORIZATION is not None and url.startswith("http://127.0.0.1:3000/"):
-        request = urllib.request.Request(
-            url,
-            headers={"Authorization": _GRAFANA_AUTHORIZATION},
-            method="GET",
-        )
+        # This live audit shares the held-socket verifier used by Grafana
+        # startup. A container check cannot prove who accepted this request.
+        try:
+            from defenseclaw.observability.local_stack import _grafana_verified_get
+        except ImportError as exc:
+            raise AuditError("trusted Grafana connected-peer verifier is unavailable") from exc
+        parsed = urllib.parse.urlsplit(url)
+        path = parsed.path + ("?" + parsed.query if parsed.query else "")
+        try:
+            status, body = _grafana_verified_get(
+                path, _GRAFANA_AUTHORIZATION, timeout=timeout_seconds,
+                max_response_bytes=16 * 1024 * 1024,
+            )
+            if 300 <= status < 400:
+                raise AuditError(f"{url}: Grafana redirect refused (HTTP {status})")
+            if not 200 <= status < 300:
+                raise AuditError(f"{url}: HTTP {status}: {body[:400].decode('utf-8', 'replace')}")
+            return json.loads(body)
+        except (OSError, ValueError) as exc:
+            raise AuditError(f"{url}: {exc}") from exc
     try:
-        with urllib.request.urlopen(request, timeout=timeout_seconds) as response:
+        with urllib.request.urlopen(url, timeout=timeout_seconds) as response:
             return json.load(response)
     except urllib.error.HTTPError as exc:
         body = exc.read().decode("utf-8", "replace")

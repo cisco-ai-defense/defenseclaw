@@ -142,7 +142,42 @@ func TestVMProbe(t *testing.T) {
 			t.Errorf("%s: %+v, want %+v", tc.name, got, tc.want)
 		}
 	}
-	if dirs := UserVMDriverDirs("/home/u", "/opt/d"); dirs[0] != "/opt/d" || dirs[1] != "/home/u/.local/libexec/openshell" {
-		t.Errorf("UserVMDriverDirs = %v", dirs)
+}
+
+func TestUserVMDriverDirsRespectsExplicitDriverDir(t *testing.T) {
+	home := t.TempDir()
+	defaultDriver := filepath.Join(home, ".local", "libexec", "openshell", vmDriverBinary)
+	if err := os.MkdirAll(filepath.Dir(defaultDriver), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(defaultDriver, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	configured := filepath.Join(home, "configured")
+	dirs := UserVMDriverDirs(home, configured, "")
+	if len(dirs) != 1 || dirs[0] != configured || FindVMDriverIn(dirs) != "" {
+		t.Fatalf("explicit driver_dir lacks a driver but probe searches %v", dirs)
+	}
+}
+
+func TestUserVMDriverDirsUsesPlannedGatewayBeforeFirstStart(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("MicroVMs do not run on Windows")
+	}
+	home := t.TempDir()
+	bin := filepath.Join(home, "custom", "bin")
+	gw := filepath.Join(bin, GatewayBinary)
+	driver := filepath.Join(bin, vmDriverBinary)
+	if err := os.MkdirAll(bin, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{gw, driver} {
+		if err := os.WriteFile(path, []byte("#!/bin/sh\n"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	dirs := UserVMDriverDirs(home, filepath.Join(home, "empty-driver-dir"), gw)
+	if got := FindVMDriverIn(dirs); got != driver {
+		t.Fatalf("gateway launcher before first start: dirs %v select %q, want %q", dirs, got, driver)
 	}
 }

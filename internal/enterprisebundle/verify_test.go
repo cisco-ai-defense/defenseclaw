@@ -29,6 +29,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisebundle"
+	"github.com/defenseclaw/defenseclaw/internal/guardrail"
 )
 
 var (
@@ -150,6 +151,38 @@ func TestBundleVerifyRejectsSignedUnknownConfigSetting(t *testing.T) {
 	_, err = enterprisebundle.Verify(context.Background(), f.input(t, b, a))
 	if enterprisebundle.CodeOf(err) != enterprisebundle.CodeConfigInvalid || !strings.Contains(err.Error(), "guardrail.rules.definitions") {
 		t.Fatalf("verify accepted a signed unknown setting: %v", err)
+	}
+}
+
+func TestVerifyNamesUnreadableRulePackAsAccountLimit(t *testing.T) {
+	f := newFixture(t, bundleConfig(t), nil)
+	a := anchors(t, "acme", nil, 0, activeKey("k1", f.key.Public()))
+	for _, tc := range []struct {
+		name, code, reason string
+		want               enterprisebundle.Code
+	}{
+		{name: "directory access denied", code: "directory_unreadable", reason: "rule-pack directory cannot be inspected (access denied)", want: enterprisebundle.CodeNotAdmin},
+		{name: "inventory access denied", code: "inventory_unreadable", reason: "rule-pack inventory cannot be read by this account (permission denied)", want: enterprisebundle.CodeNotAdmin},
+		{name: "file access denied", code: "file_unreadable", reason: "component cannot be read by this account (access denied)", want: enterprisebundle.CodeNotAdmin},
+		{name: "other unreadable", code: "directory_unreadable", reason: "rule-pack directory cannot be inspected (I/O error)", want: enterprisebundle.CodeConfigInvalid},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			in := f.input(t, f.bundle, a)
+			in.Digester = func(context.Context, *config.Config, []byte, string, string) (string, error) {
+				return "", fmt.Errorf("global rule pack: %w", &guardrail.RulePackError{Code: tc.code, Path: ".", Reason: tc.reason})
+			}
+			_, err := enterprisebundle.Verify(context.Background(), in)
+			if enterprisebundle.CodeOf(err) != tc.want {
+				t.Fatalf("got %v, want %s", err, tc.want)
+			}
+			if tc.want == enterprisebundle.CodeNotAdmin {
+				for _, part := range []string{"this account", "rule pack", "enterprise bundle verify", "root"} {
+					if !strings.Contains(err.Error(), part) {
+						t.Fatalf("refusal %q lacks %q", err, part)
+					}
+				}
+			}
+		})
 	}
 }
 
@@ -598,18 +631,19 @@ func TestBundleManagedConfigRefusals(t *testing.T) {
 // (secret_ref_missing); an unreadable store only warns.
 func TestVerifySecretPresence(t *testing.T) {
 	cfg := strings.Replace(bundleConfig(t), "  profile: standalone\n", "  profile: standalone\n  inspection:\n    ai_defense:\n      credential: ai-defense-api-key\n", 1)
-	f := newFixture(t, cfg, nil)
+	f := newFixture(t, cfg, bindValues("ai-defense-api-key"))
 	m, _ := enterprisebundle.DecodeManifest(f.raw)
-	if len(m.SecretRefs) != 1 || m.SecretRefs[0].Ref != "secret://ai-defense-api-key" || !m.SecretRefs[0].Required {
-		t.Fatalf("sign did not record the reference: %+v", m.SecretRefs)
+	if len(m.SecretRefs) != 1 || m.SecretRefs[0].Ref != "secret://ai-defense-api-key" || !m.SecretRefs[0].Required ||
+		m.SecretRefs[0].ValueSHA256 != enterprisebundle.CredentialValueSHA256("acme", "ai-defense-api-key", testSecretValue("ai-defense-api-key")) {
+		t.Fatalf("sign did not record the bound reference: %+v", m.SecretRefs)
 	}
 	a := anchors(t, "acme", nil, 0, activeKey("k1", f.key.Public()))
 	in := f.input(t, f.bundle, a)
-	in.SecretPresent = func(string) (bool, error) { return false, nil }
+	in.SecretValue = func(string) ([]byte, error) { return nil, nil }
 	if _, err := enterprisebundle.Verify(context.Background(), in); enterprisebundle.CodeOf(err) != enterprisebundle.CodeSecretRefMissing {
 		t.Fatalf("missing credential: %v", err)
 	}
-	in.SecretPresent = func(string) (bool, error) { return false, os.ErrPermission }
+	in.SecretValue = func(string) ([]byte, error) { return nil, os.ErrPermission }
 	res, err := enterprisebundle.Verify(context.Background(), in)
 	if err != nil || res.Warnings[0].Code != enterprisebundle.WarnSecretPresenceUnchecked {
 		t.Fatalf("unreadable store: %+v %v", res, err)

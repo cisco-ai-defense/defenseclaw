@@ -2,7 +2,9 @@
 #
 # Pipelines:
 #   traces  -> tempo  (OTLP gRPC on tempo:4317)
-#   metrics -> prometheus (remote-write on prometheus:9090)
+#   metrics -> prometheus (remote-write on prometheus:9090); the managed
+#              sandbox counters take metrics/managed-sandbox, which drops
+#              the host and account resource attributes
 #   logs    -> loki   (OTLP HTTP on loki:3100/otlp)
 #
 # Every signal is also fanned out to the built-in "debug" exporter so
@@ -78,6 +80,29 @@ processors:
   groupbyattrs/sandbox-identity:
     keys:
       - defenseclaw.sandbox.name
+
+  # The managed sandbox counters (defenseclaw.sandbox.managed.*) carry no
+  # host, account or device label. Remote write turns every resource
+  # attribute into a label, so these counters take their own metrics branch
+  # whose resource keeps only the service, the environment and the OS
+  # (os_type). service.instance.id stays: it is a random id per gateway
+  # process (Prometheus `instance`), and each process keeps its own running
+  # total. host.name, host.arch, tenant.id, workspace.id, the device key
+  # fingerprint and every custom resource attribute are dropped.
+  filter/managed-sandbox-out:
+    error_mode: ignore
+    metric_conditions:
+      - 'IsMatch(metric.name, "^defenseclaw[.]sandbox[.]managed[.]")'
+  filter/managed-sandbox-only:
+    error_mode: ignore
+    metric_conditions:
+      - 'not IsMatch(metric.name, "^defenseclaw[.]sandbox[.]managed[.]")'
+  transform/managed-sandbox-resource:
+    error_mode: ignore
+    metric_statements:
+      - context: resource
+        statements:
+          - 'keep_keys(resource.attributes, ["service.name", "service.namespace", "service.version", "service.instance.id", "deployment.environment.name", "os.type"])'
 
   # Defense-in-depth resource enrichment so every signal carries the
   # service.namespace=defenseclaw label even if the sidecar forgets to
@@ -192,10 +217,15 @@ service:
       exporters: [spanmetrics/agent360]
     metrics:
       receivers: [otlp, spanmetrics/agent360]
-      processors: [resource, deltatocumulative, batch]
+      processors: [resource, filter/managed-sandbox-out, deltatocumulative, batch]
       # One application-metric path only. Prometheus still scrapes the
       # collector's own operational metrics on 8888, while OTLP and derived
       # span metrics reach Prometheus exclusively through remote write.
+      exporters: [prometheusremotewrite/prometheus, debug]
+    metrics/managed-sandbox:
+      receivers: [otlp]
+      # The managed sandbox counters only, without host or account labels.
+      processors: [resource, filter/managed-sandbox-only, transform/managed-sandbox-resource, deltatocumulative, batch]
       exporters: [prometheusremotewrite/prometheus, debug]
     logs:
       receivers: [otlp]

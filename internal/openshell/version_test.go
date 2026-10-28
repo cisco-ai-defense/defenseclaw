@@ -29,35 +29,172 @@ func TestParseVersionAcceptsReportedShapes(t *testing.T) {
 		"v0.1.1":                "0.1.1",
 		"openshell 0.1.1":       "0.1.1",
 		"0.1.1-1":               "0.1.1",
-		"openshell 0.1.2-pre.3": "0.1.2",
+		"openshell 0.1.2-pre.3": "0.1.2-pre.3",
+		// The prerelease as rpm (%{VERSION}) and Debian spell it, a dev
+		// build, and its docker tag.
+		"0.1.5~pre.3":                 "0.1.5-pre.3",
+		"0.1.5~pre.3-1":               "0.1.5-pre.3",
+		"0.1.6-dev.108+g152d05940":    "0.1.6-dev.108",
+		"0.0.38~dev.108+g152d05940-1": "0.0.38-dev.108",
+		"0.0.38-dev.108-g152d05940":   "0.0.38-dev.108-g152d05940",
+		"openshell 0.1.5+g152d05940":  "0.1.5",
+		"0.1.5-1ubuntu1":              "0.1.5",
 	} {
 		if v, err := ParseVersion(in); err != nil || v.String() != want {
 			t.Fatalf("ParseVersion(%q) = %s, %v; want %s", in, v, err, want)
 		}
 	}
-	for _, bad := range []string{"", "openshell", "0.1", "a.b.c", "0.1.-1"} {
+	for _, bad := range []string{"", "openshell", "0.1", "a.b.c", "0.1.-1", "0.1.5~", "0.1.5-pre..1", "0.1.5-pre_1"} {
 		if _, err := ParseVersion(bad); err == nil {
 			t.Fatalf("ParseVersion(%q) succeeded", bad)
 		}
 	}
 	// `openshell --version` output.
-	for in, want := range map[string]string{"openshell 0.1.2 (4ce767fc)": "0.1.2", "openshell v0.0.16": "0.0.16", "openshell dev": ""} {
+	for in, want := range map[string]string{"openshell 0.1.2 (4ce767fc)": "0.1.2", "openshell v0.0.16": "0.0.16", "openshell dev": "",
+		"openshell 0.1.5-pre.3 (01087a45)": "0.1.5-pre.3"} {
 		if v, err := VersionFromOutput(in); (want == "") != (err != nil) || (err == nil && v.String() != want) {
 			t.Errorf("VersionFromOutput(%q) = %v, %v; want %q", in, v, err, want)
 		}
 	}
 }
 
+// TestSandboxRelease: DefenseClaw runs sandboxes only from SupportedMin, the
+// release of NVIDIA/OpenShell#4494 (and #4231), and installs no older one;
+// the older supported releases stay driven for everything else.
+func TestSandboxRelease(t *testing.T) {
+	if SupportedMin != "0.1.5" || mustParse(SupportedMin).Compare(mustParse(InstallerVersion)) > 0 || CheckSupported(mustParse(SupportedMin)) != nil {
+		t.Fatalf("SupportedMin %s, InstallerVersion %s", SupportedMin, InstallerVersion)
+	}
+	for _, v := range []string{"0.1.1", "0.1.3", "0.1.4"} {
+		var e *ErrSandboxRelease
+		if err := CheckSandboxRelease(mustParse(v)); !errors.As(err, &e) || CheckConnects(mustParse(v)) != nil || !Legacy(mustParse(v)) || RunsSandboxes(v) ||
+			err.Error() != "OpenShell "+v+" runs no DefenseClaw sandbox: before 0.1.5 its network broker let a sandbox's connections bypass the sandbox policy "+
+				"when it could not inspect them (NVIDIA/OpenShell#4494); upgrade OpenShell to "+InstallerVersion+" in place" {
+			t.Errorf("%s: %v", v, err)
+		}
+	}
+	for _, v := range []string{"0.1.5", "0.1.6", "openshell 0.1.5"} {
+		if !RunsSandboxes(v) {
+			t.Errorf("%s runs no sandbox", v)
+		}
+	}
+	if RunsSandboxes("") || RunsSandboxes("dev") {
+		t.Error("an unreadable release runs sandboxes")
+	}
+	for release := range TarballPins {
+		if CheckSandboxRelease(mustParse(release)) != nil {
+			t.Errorf("TarballPins lists %s, which runs no sandbox", release)
+		}
+	}
+}
+
+// TestAPrereleaseComesBeforeItsRelease: NVIDIA's prereleases of a release
+// precede it, and the broker fix SupportedMin stands for landed in
+// 0.1.5-pre.4 (NVIDIA/OpenShell#4494), so no prerelease of 0.1.5 runs a
+// sandbox, whichever way the release was read (gateway health, `openshell
+// --version`, rpm, dpkg). A prerelease of a later release (0.1.6-pre.1,
+// cut after 0.1.5) runs them. The ceiling of the window holds its own
+// prereleases out, and an older prerelease is offered the upgrade.
+func TestAPrereleaseComesBeforeItsRelease(t *testing.T) {
+	for _, tc := range []struct{ a, b string }{
+		{"0.1.5-pre.3", "0.1.5"},
+		{"0.1.5-pre.3", "0.1.5-pre.4"},
+		{"0.1.5-pre.9", "0.1.5-pre.10"},
+		{"0.1.5-dev.3", "0.1.5-pre.1"},
+		{"0.1.5-pre", "0.1.5-pre.1"},
+		{"0.1.4", "0.1.5-pre.1"},
+		{"0.1.5", "0.1.6-pre.1"},
+	} {
+		a, b := mustParse(tc.a), mustParse(tc.b)
+		if a.Compare(b) != -1 || b.Compare(a) != 1 || a.Compare(a) != 0 {
+			t.Errorf("%s vs %s: %d, %d", tc.a, tc.b, a.Compare(b), b.Compare(a))
+		}
+	}
+	if mustParse("0.1.5-1").Compare(mustParse("0.1.5")) != 0 {
+		t.Error("a package revision is not the release")
+	}
+	for _, v := range []string{"0.1.5-pre.1", "0.1.5-pre.3", "0.1.5-pre.7", "openshell 0.1.5-pre.2", "0.1.5~pre.3", "0.1.5~pre.3-1", "0.1.5-dev.4+gabc"} {
+		var e *ErrSandboxRelease
+		err := CheckSandboxRelease(mustParse(v))
+		if !errors.As(err, &e) || RunsSandboxes(v) || CheckConnects(mustParse(v)) != nil || !Legacy(mustParse(v)) ||
+			!strings.Contains(err.Error(), "is a prerelease, which runs no DefenseClaw sandbox") || !strings.Contains(err.Error(), "NVIDIA/OpenShell#4494") {
+			t.Errorf("%s: %v", v, err)
+		}
+	}
+	for _, v := range []string{"0.1.5", "0.1.5-1", "0.1.6-pre.1", "0.1.6-dev.1+gabc"} {
+		if !RunsSandboxes(v) {
+			t.Errorf("%s runs no sandbox", v)
+		}
+	}
+	if err := CheckSupported(mustParse("0.2.0-pre.1")); err == nil {
+		t.Error("a prerelease of SupportedBelow is supported")
+	}
+	if err := CheckSupported(mustParse("0.1.9-pre.1")); err != nil {
+		t.Errorf("0.1.9-pre.1: %v", err)
+	}
+	// The doctor's CLI check offers the upgrade to a prerelease of the
+	// release it installs.
+	r := &DoctorReport{CLIVersion: "0.1.5-pre.3", Checks: []Check{{ID: CheckIDCLI, Status: StatusWarn}}}
+	if r.OpenShellInstallNeeded() || !r.OpenShellUpgradeAvailable() {
+		t.Errorf("prerelease CLI: install needed %v, upgrade available %v", r.OpenShellInstallNeeded(), r.OpenShellUpgradeAvailable())
+	}
+}
+
+// TestManagedSetupPinMigratesTheOldPin: the hosts DefenseClaw 1.0.3 set up
+// with enterprise.openshell.version "0.1.3" in setup mode move to
+// InstallerVersion in place; every other pin is judged as it is.
+func TestManagedSetupPinMigratesTheOldPin(t *testing.T) {
+	for _, tc := range []struct {
+		setup  bool
+		pin    string
+		want   string
+		raised bool
+	}{
+		{true, "0.1.3", InstallerVersion, true},
+		{true, "0.1.1", InstallerVersion, true},
+		{true, "0.1.5", "0.1.5", false},
+		// A prerelease of SupportedMin runs no sandbox either.
+		{true, "0.1.5-pre.3", InstallerVersion, true},
+		{true, "0.1.6-pre.1", "0.1.6-pre.1", false},
+		{true, "0.1.6", "0.1.6", false},
+		{true, "", "", false},
+		{true, ">=0.1.1 <0.2.0", ">=0.1.1 <0.2.0", false},
+		{false, "0.1.3", "0.1.3", false},
+	} {
+		if got, raised := ManagedSetupPin(tc.setup, tc.pin); got != tc.want || raised != tc.raised {
+			t.Errorf("ManagedSetupPin(%v, %q) = %q, %v; want %q, %v", tc.setup, tc.pin, got, raised, tc.want, tc.raised)
+		}
+	}
+}
+
+// TestProvisioningTimedOut recognizes what OpenShell 0.1.5 says of a
+// sandbox whose provisioning deadline passed (NVIDIA/OpenShell#4231).
+func TestProvisioningTimedOut(t *testing.T) {
+	for _, said := range []string{
+		"ProvisioningTimedOut: Provisioning repair window expired after 300 seconds",
+		"ImagePreparationTimedOut: Image preparation or initial supervisor startup exceeded its absolute deadline",
+		"FailedPrecondition: sandbox provisioning timed out; retry start after timeout cleanup completes",
+		"FailedPrecondition: provisioning timeout cleanup is still pending; retry start after compute is reclaimed",
+	} {
+		if !ProvisioningTimedOut(said) {
+			t.Errorf("%q", said)
+		}
+	}
+	if ProvisioningTimedOut("Conflict: sandbox must be Stopped, Completed, or a failed main-process Error to start (current phase: Error)") {
+		t.Error("an error-phase refusal is no timeout")
+	}
+}
+
 // TestInstallerPin: setup installs InstallerVersion with the script of its
 // tag, whose digest is pinned, from inside the supported window; the advice names it.
 func TestInstallerPin(t *testing.T) {
-	if InstallerVersion != "0.1.3" || InstallerTag != "v"+InstallerVersion ||
-		InstallerURL != "https://raw.githubusercontent.com/NVIDIA/OpenShell/v0.1.3/install.sh" ||
-		InstallerSHA256 != "b8daa915e766564f0473b76ed4e012fff9723c1ac98007b3f85ba20f59442d28" {
+	if InstallerVersion != "0.1.5" || InstallerTag != "v"+InstallerVersion ||
+		InstallerURL != "https://raw.githubusercontent.com/NVIDIA/OpenShell/v0.1.5/install.sh" ||
+		InstallerSHA256 != "7bf6706741b8b59c1b61e0c47030f0a34fefba6cee3c74cd52638cbf7cdc3655" {
 		t.Fatalf("installer pin = %s %s %s", InstallerTag, InstallerURL, InstallerSHA256)
 	}
-	if v := mustParse(InstallerVersion); CheckSupported(v) != nil || v.Compare(mustParse(SupportedMin)) < 0 {
-		t.Fatalf("InstallerVersion %s is outside >=%s <%s", InstallerVersion, SupportedMin, SupportedBelow)
+	if v := mustParse(InstallerVersion); CheckSupported(v) != nil || v.Compare(mustParse(LegacyMin)) < 0 {
+		t.Fatalf("InstallerVersion %s is outside >=%s <%s", InstallerVersion, LegacyMin, SupportedBelow)
 	}
 	for v, want := range map[string]string{"0.0.40": "upgrade it in place to " + InstallerVersion, "0.0.16": "then install " + InstallerVersion} {
 		if err := CheckSupported(mustParse(v)); err == nil || !strings.Contains(err.Error(), want) {
@@ -71,8 +208,8 @@ func TestInstallerPin(t *testing.T) {
 // checks it against that digest, without fetching a checksum file.
 func TestVMDriverDigestsArePinnedForTheInstallerRelease(t *testing.T) {
 	want := map[string]string{
-		"amd64": "22593640c6179eb87413ab099832fbd133d3a6a4979904d27679e7da6d80a0cb",
-		"arm64": "4426ee0992989060eb5987ad7072feb3eb6aecf5a628ad0284c3d7ad5f39974b",
+		"amd64": "6465e39666276215a9fa05d27991e67c9c88267284b59aca95cb7dbb9d69cd41",
+		"arm64": "fc49a0bebfda3075a996123c0fd252200e2987856da63fbd8e7f021f327e1e68",
 	}
 	for goarch, digest := range want {
 		archive := vmDriverArchive(goarch)
@@ -87,19 +224,70 @@ func TestVMDriverDigestsArePinnedForTheInstallerRelease(t *testing.T) {
 	}
 }
 
+// TestTheFloorIsSupportedMin: the owner's floor (2026-10-21) is 0.1.5.
+// Older releases are outside the supported window (CheckSupported), and the
+// ones DefenseClaw 1.0.0 to 1.0.3 left hosts on (0.1.1 to 0.1.4, and the
+// 0.1.5 prereleases) are legacy: DefenseClaw still connects to them
+// (CheckConnects), only to move the host off them, and runs no sandbox
+// there. 0.1.0 and older are not even connected to.
+func TestTheFloorIsSupportedMin(t *testing.T) {
+	if SupportedMin != "0.1.5" || LegacyMin != "0.1.1" {
+		t.Fatalf("SupportedMin %s, LegacyMin %s", SupportedMin, LegacyMin)
+	}
+	for _, s := range []string{"0.1.1", "0.1.2", "0.1.3", "0.1.4", "0.1.1-1", "0.1.5-pre.1", "0.1.5-pre.3", "0.1.5-pre.4", "0.1.5~pre.4-1", "0.1.5-dev.9+gabc"} {
+		v := mustParse(s)
+		if CheckSupported(v) == nil || CheckConnects(v) != nil || !Legacy(v) || CheckSandboxRelease(v) == nil || RunsSandboxes(s) {
+			t.Errorf("%s: supported %v, connects %v, legacy %v", s, CheckSupported(v), CheckConnects(v), Legacy(v))
+		}
+	}
+	for _, s := range []string{"0.1.5", "0.1.5-1", "0.1.6-pre.1", "0.1.9"} {
+		v := mustParse(s)
+		if CheckSupported(v) != nil || CheckConnects(v) != nil || Legacy(v) || !RunsSandboxes(s) {
+			t.Errorf("%s: supported %v, connects %v, legacy %v", s, CheckSupported(v), CheckConnects(v), Legacy(v))
+		}
+	}
+	for _, s := range []string{"0.1.0", "0.0.40", "0.2.0", "0.2.0-pre.1"} {
+		v := mustParse(s)
+		if CheckConnects(v) == nil || Legacy(v) {
+			t.Errorf("%s: connects %v, legacy %v", s, CheckConnects(v), Legacy(v))
+		}
+	}
+	// A legacy gateway answers DefenseClaw's health check (for the move
+	// off it); 0.1.0 does not.
+	if err := (&GatewayHealth{Healthy: true, Version: mustParse("0.1.3"), RawVersion: "0.1.3"}).CheckVersion(); err != nil {
+		t.Errorf("0.1.3 gateway: %v", err)
+	}
+	if err := (&GatewayHealth{Healthy: true, Version: mustParse("0.1.0"), RawVersion: "0.1.0"}).CheckVersion(); err == nil {
+		t.Error("0.1.0 gateway connects")
+	}
+	// A legacy CLI is offered the upgrade, which setup takes by default.
+	r := &DoctorReport{CLIVersion: "0.1.3", Checks: []Check{{ID: CheckIDCLI, Status: StatusWarn}}}
+	if !r.OpenShellUpgradeAvailable() || !r.OpenShellLegacy() || r.OpenShellInstallNeeded() {
+		t.Errorf("0.1.3 CLI: upgrade available %v, legacy %v, install needed %v", r.OpenShellUpgradeAvailable(), r.OpenShellLegacy(), r.OpenShellInstallNeeded())
+	}
+	r = &DoctorReport{CLIVersion: "0.1.5", Checks: []Check{{ID: CheckIDCLI, Status: StatusPass}}}
+	if r.OpenShellUpgradeAvailable() || r.OpenShellLegacy() {
+		t.Error("0.1.5 CLI is offered the upgrade")
+	}
+}
+
 func TestCheckSupportedWindow(t *testing.T) {
 	// The advice matches what Installer does: clean up before 0.0.37,
 	// upgrade in place from 0.0.37 on.
 	for v, want := range map[string]string{
-		"0.1.1":  "",
-		"0.1.9":  "",
-		"0.0.16": "predates 0.0.37",
-		"0.0.36": "openshell sandbox delete --all && openshell gateway destroy",
-		"0.0.37": "upgrade it in place",
-		"0.0.40": "upgrade it in place",
-		"0.1.0":  "upgrade it in place",
-		"0.2.0":  "not supported",
-		"1.0.0":  "not supported",
+		"0.1.1":       "older than 0.1.5, the oldest release DefenseClaw supports; upgrade it in place to " + InstallerVersion,
+		"0.1.4":       "older than 0.1.5",
+		"0.1.5-pre.4": "older than 0.1.5",
+		"0.1.5":       "",
+		"0.1.6-pre.1": "",
+		"0.1.9":       "",
+		"0.0.16":      "predates 0.0.37",
+		"0.0.36":      "openshell sandbox delete --all && openshell gateway destroy",
+		"0.0.37":      "upgrade it in place",
+		"0.0.40":      "upgrade it in place",
+		"0.1.0":       "upgrade it in place",
+		"0.2.0":       "not supported",
+		"1.0.0":       "not supported",
 	} {
 		err := CheckSupported(mustParse(v))
 		var unsupported *ErrUnsupportedVersion

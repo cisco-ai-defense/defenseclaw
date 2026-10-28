@@ -65,31 +65,35 @@ type windowsStandaloneRowContext struct {
 // unprotected reports an installed agent that has no row: it is not
 // enrolled.
 func (c windowsStandaloneRowContext) unprotected(row *ManifestTarget, version, reason string) {
-	consequence := "it runs without DefenseClaw hooks"
-	if windowsStandaloneMachinePolicyConnector(row.Connector) {
-		consequence = "its machine-policy hooks refuse this user's tool calls until it is enrolled"
-		switch strings.ToLower(strings.TrimSpace(row.Connector)) {
-		case "cursor":
-			if !windowsCursorMachinePolicyPublished() {
-				consequence = windowsCursorUnpublishedConsequence
-			}
-		case "codex":
-			if !windowsCodexMachinePolicyPublished() {
-				consequence = windowsCodexUnpublishedConsequence
-			}
+	c.reportAgent(row, version, reason, windowsUnenrolledConsequence(row.Connector))
+}
+
+// windowsUnenrolledConsequence says what happens to the tool calls of a user
+// no row enrolls for connector.
+func windowsUnenrolledConsequence(connector string) string {
+	if !windowsStandaloneMachinePolicyConnector(connector) {
+		return "it runs without DefenseClaw hooks"
+	}
+	switch strings.ToLower(strings.TrimSpace(connector)) {
+	case "cursor":
+		if !windowsCursorMachinePolicyPublished() {
+			return windowsCursorUnpublishedConsequence
+		}
+	case "codex":
+		if !windowsCodexMachinePolicyPublished() {
+			return windowsCodexUnpublishedConsequence
 		}
 	}
-	c.reportAgent(row, version, reason, consequence)
+	return "its machine-policy hooks refuse this user's tool calls until it is enrolled"
 }
 
 // windowsCursorUnpublishedConsequence is the unprotected-agent consequence for
 // Cursor while its machine hooks file is not published.
-const windowsCursorUnpublishedConsequence = "no user is enrolled for Cursor, so the guardian has not published Cursor's machine hooks file and it runs without DefenseClaw hooks"
+const windowsCursorUnpublishedConsequence = "Cursor's configured machine hook is missing; the guardian must restore it, and Cursor runs without DefenseClaw hooks until then"
 
 // windowsCursorMachinePolicyPublished reports whether Cursor's machine hooks
-// file is in force. The guardian publishes it only while at least one user is
-// enrolled for Cursor (an empty target set deactivates it), so with no
-// enrolled Cursor user there is no machine hook to refuse anyone. A policy
+// file is in force. The guardian keeps it published for a configured Cursor
+// connector even when no user is enrolled. A policy
 // that cannot be read or validated counts as published: its adapter refuses
 // unregistered users. Replaced in tests.
 var windowsCursorMachinePolicyPublished = func() bool {
@@ -156,7 +160,10 @@ func applyStandaloneRowState(row *ManifestTarget, previous map[string]ManifestTa
 // (hook_contract_unverified for an unverified version). So does a Claude
 // Code change to an older hook contract: the one machine-wide Claude policy
 // is rendered from the oldest enrolled contract, so following it would let
-// one user weaken the policy every user shares. A signed-out user's
+// one user weaken the policy every user shares. A kiro-cli row an earlier
+// release enrolled below connector.KiroCLIHookFloor is kept and repaired at
+// its version, as on Unix, and follows only a version at or above the floor;
+// a new row below it is not written. A signed-out user's
 // version is left alone: the guardian could not repair their hooks until
 // they sign in, and the failure would withhold enrollment publication for
 // every other user.
@@ -174,7 +181,8 @@ func applyStandaloneRowStateFor(row *ManifestTarget, previous map[string]Manifes
 		return false
 	}
 	if prev, known := previous[previousManifestKey(row.SID, row.Connector)]; !known || prev.IsEnabled() {
-		rowContext.reportKiroIDEBelowFloor(row)
+		rowContext.reportKiroIDENotProtected(row)
+		rowContext.reportKiroCLIBesideIDE(row)
 	}
 	if prev, known := previous[previousManifestKey(row.SID, row.Connector)]; known {
 		// A disabled row is an administrator decision the guardian never
@@ -198,7 +206,7 @@ func applyStandaloneRowStateFor(row *ManifestTarget, previous map[string]Manifes
 			// rejected surface next to the CLI is reported.
 			discovered := windowsStandaloneSurfaceVersion(row, logf, rowContext, cliVersion)
 			if discovered != "" && discovered != prev.AgentVersion {
-				ok, reason := windowsStandaloneRowAdmission(row.UserHome, row.Connector, discovered)
+				ok, reason := windowsStandaloneEnrollmentAdmission(row.UserHome, row.Connector, discovered)
 				if ok {
 					if lowered := claudeMachineContractLowered(row.Connector, prev.AgentVersion, discovered); lowered != "" {
 						ok, reason = false, lowered
@@ -232,6 +240,14 @@ func applyStandaloneRowStateFor(row *ManifestTarget, previous map[string]Manifes
 		}
 		emit := applyPreviousRowState(row, previous, logf)
 		row.AgentVersion = version
+		// A pre-floor row, or one enrolled at a version its CLI never
+		// confirmed, stays installed for upgrade compatibility but does not
+		// cover the CLI. Report it even when the CLI version is unchanged or
+		// the user is signed out. A refused version change already supplies
+		// this coverage warning.
+		if emit && row.IsEnabled() && row.Connector == "kiro" && notFollowed == "" {
+			rowContext.reportKeptKiroCLIRow(row, version)
+		}
 		return emit
 	}
 	version, reason := standaloneWindowsAgentVersionExplainFor(row.SID, row.UserHome, row.Connector)
@@ -244,6 +260,19 @@ func applyStandaloneRowStateFor(row *ManifestTarget, previous map[string]Manifes
 		path, _ := windowsStandalonePerUserManagedExecutable(row.UserHome, row.Connector)
 		if path == "" && strings.EqualFold(row.Connector, "kiro") {
 			path = windowsKiroInstalled(row.UserHome)
+		}
+		if strings.EqualFold(row.Connector, "kiro") {
+			// A kiro-cli no run copy names: its version is not assumed
+			// (GAP-0829).
+			if launcher := windowsKiroCLIVersionUnknown(row.UserHome); launcher != "" {
+				rowContext.unprotected(row, "", windowsKiroCLIVersionUnknownReason(launcher))
+				return false
+			}
+			// An IDE install that is not protected was reported by
+			// reportKiroIDENotProtected above.
+			if filepath.IsAbs(row.UserHome) && len(windowsKiroIDEForms(filepath.Clean(row.UserHome))) != 0 {
+				return false
+			}
 		}
 		if path == "" && strings.EqualFold(row.Connector, "claudecode") {
 			// A native claude.exe whose build is not recorded yet: say what
@@ -284,7 +313,7 @@ func applyStandaloneRowStateFor(row *ManifestTarget, previous map[string]Manifes
 			return false
 		}
 	}
-	if ok, reason := windowsStandaloneRowAdmission(row.UserHome, row.Connector, version); !ok {
+	if ok, reason := windowsStandaloneEnrollmentAdmission(row.UserHome, row.Connector, version); !ok {
 		logfSafely(logf, row.SID, fmt.Sprintf("newly-discovered (SID, %s) row skipped: %s", row.Connector, reason))
 		rowContext.unprotected(row, version, reason)
 		return false

@@ -74,11 +74,21 @@ const (
 	// per-receipt public spool the enterprise lifecycle writes; it reports,
 	// never enforces.
 	ActionConfigBundleReceipt Action = "config.bundle.receipt"
-	ActionPolicyUpdate        Action = "policy-update"
-	ActionPolicyReload        Action = "policy-reload"
-	ActionAction              Action = "action" // generic action mutation (block/allow list update)
-	ActionAckAlerts           Action = "acknowledge-alerts"
-	ActionDismissAlerts       Action = "dismiss-alerts"
+	// ActionConfigTrustAnchorsChanged, ActionConfigSecretChanged and
+	// ActionConfigSecretChangeFailed are a trust anchor install and a
+	// protected credential set or removal on a standalone managed device
+	// (log.config.trust_anchors.changed, log.config.secret.changed and
+	// log.config.secret.change_failed). The root command writes a change
+	// record into the change spool and the gateway reports it; the records
+	// carry hashes, key ids and credential names, never a value.
+	ActionConfigTrustAnchorsChanged Action = "config.trust_anchors.changed"
+	ActionConfigSecretChanged       Action = "config.secret.changed"
+	ActionConfigSecretChangeFailed  Action = "config.secret.change_failed"
+	ActionPolicyUpdate              Action = "policy-update"
+	ActionPolicyReload              Action = "policy-reload"
+	ActionAction                    Action = "action" // generic action mutation (block/allow list update)
+	ActionAckAlerts                 Action = "acknowledge-alerts"
+	ActionDismissAlerts             Action = "dismiss-alerts"
 
 	// Webhook / notifier
 	ActionWebhookDelivered Action = "webhook-delivered"
@@ -409,6 +419,9 @@ func AllActions() []Action {
 		ActionToolResult,
 		ActionConfigUpdate,
 		ActionConfigBundleReceipt,
+		ActionConfigTrustAnchorsChanged,
+		ActionConfigSecretChanged,
+		ActionConfigSecretChangeFailed,
 		ActionPolicyUpdate,
 		ActionPolicyReload,
 		ActionAction,

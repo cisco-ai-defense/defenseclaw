@@ -36,8 +36,10 @@ import os
 import posixpath
 import queue
 import re
+import select
 import shlex
 import shutil
+import signal
 import socket
 import ssl
 import stat
@@ -81,8 +83,8 @@ from defenseclaw.connector_paths import (
     devin_user_config_path,
     hermes_config_path,
     hermes_profile_unsupported_reason,
+    managed_plugin_path,
     normalize,
-    omnigent_config_path,
     opencode_writable_plugin_folder,
     rule_paths,
 )
@@ -103,7 +105,6 @@ from defenseclaw.doctor_gateway import (
     ListenerEvidence,
     PIDRecord,
     ProcessEvidence,
-    _pid_record_integrity_error,
     canonical_path,
     gateway_executable_name,
     parse_pid_record_bytes,
@@ -124,9 +125,6 @@ from defenseclaw.envvars import active_security_overrides
 from defenseclaw.file_lock import FileLockTimeoutError, locked_file_update
 from defenseclaw.file_permissions import (
     MAX_DOTENV_BYTES,
-    UNSAFE_PATH_CHANGED,
-    UNSAFE_PATH_EXCEEDS_LIMIT,
-    UnsafePathError,
     atomic_write_private_bytes,
     darwin_acl_confidentiality_error,
     darwin_acl_write_error,
@@ -136,7 +134,6 @@ from defenseclaw.file_permissions import (
     root_owned_private_regular_file,
     sudo_runtime_leftover_relpaths,
     trusted_system_subprocess_env,
-    windows_acl_confidentiality_error,
 )
 from defenseclaw.gateway import gateway_api_client_host
 from defenseclaw.inventory.plugin_identity import is_link_or_reparse
@@ -277,6 +274,7 @@ class _DoctorResult:
         "quiet",
         "gateway_down",
         "sidecar_unverified",
+        "gateway_start_waited",
     )
 
     def __init__(
@@ -311,6 +309,9 @@ class _DoctorResult:
         # True once the Sidecar API row found a listener on the API port that
         # is not this account's verified gateway (its /health still answers).
         self.sidecar_unverified = False
+        # True once a gateway row waited for the gateway start lock, so a
+        # start, restart or stop that outlasts the wait is waited for once.
+        self.gateway_start_waited = False
 
     @property
     def passive_reason(self) -> str:
@@ -851,9 +852,9 @@ def _http_probe(
     on Linux, macOS, and Windows.  A timed-out worker owns no mutable Doctor
     state and cannot delay process exit.
 
-    Pass ``bound_peer`` (a trusted gateway listener) for any request that
-    carries the gateway token: the request is then written only on a
-    connection whose accepting process is that verified gateway.
+    Pass ``bound_peer`` for requests that carry a gateway token or consume a
+    local gateway health decision: the request is written only on a connection
+    whose accepting process is the verified gateway.
     """
 
     if timeout <= 0:
@@ -1016,7 +1017,7 @@ def _gateway_peer_bound_request(
     allow_truncation: bool = True,
     evidence: GatewayEvidence | None = None,
 ) -> tuple[int, str]:
-    """Send one token-bearing request only over a connection the gateway accepted.
+    """Send one local request only over a connection the gateway accepted.
 
     Listener inspection says which process owned the endpoint a moment ago,
     but the request needs its own connection, and the endpoint can change
@@ -1488,6 +1489,45 @@ def _check_config(cfg, r: _DoctorResult) -> None:
     )
 
 
+# The managed enumerator's unprotected-agents record and the command that runs
+# a scan now, per OS; status and verify call a record older than 16 minutes (or
+# none) a pending scan (GAP-1430).
+_MANAGED_INSTALL_SCAN = {
+    "linux": (
+        "/etc/defenseclaw/hook-guardian/unprotected-agents.json",
+        "sudo systemctl restart defenseclaw-hook-enumerator.service",
+    ),
+    "darwin": (
+        "/opt/cisco/defenseclaw/etc/hook-guardian/unprotected-agents.json",
+        "sudo launchctl kickstart -k system/com.cisco.defenseclaw.hook-enumerator",
+    ),
+}
+
+
+def _managed_install_scan_pending() -> tuple[str, str]:
+    """The managed status/verify scan-pending warning and its remedy, or
+    ("", "") when the record is current or this account cannot see it."""
+    record, remedy = _MANAGED_INSTALL_SCAN.get("linux" if sys.platform.startswith("linux") else sys.platform, ("", ""))
+    if not record:
+        return "", ""
+    try:
+        age = time.time() - os.stat(record).st_mtime
+    except FileNotFoundError:
+        state = "missing (no scan has published it yet)"
+    except OSError:
+        return "", ""
+    else:
+        if -300 <= age <= 16 * 60:
+            return "", ""
+        state = f"dated {int(-age)}s in the future" if age < 0 else f"{int(age) // 60} min old"
+    return (
+        f"NOT COVERED (scan pending): the enumerator's unprotected-agents record is {state} (limit 16 min), "
+        "so agents installed since its last scan are not proven protected; enforcement is unchanged; "
+        "the record refreshes on the next scheduled scan (every five minutes)",
+        remedy,
+    )
+
+
 def _report_uninitialized_install(
     cfg, r: _DoctorResult, *, json_out: bool, write_cache: bool, leftover: str = ""
 ) -> int:
@@ -1528,6 +1568,17 @@ def _report_uninitialized_install(
             reason_code="managed-device",
             remediation="defenseclaw uninstall --all --binaries --yes" if leftover else "",
         )
+        pending, remedy = _managed_install_scan_pending()
+        if pending:
+            _emit(
+                "warn",
+                "Agent install scan",
+                pending,
+                r=r,
+                check_id="doctor.managed.install-scan",
+                reason_code="scan-pending",
+                remediation=remedy,
+            )
     else:
         _emit(
             "fail",
@@ -1919,6 +1970,21 @@ def _daemon_effective_gateway_token(cfg) -> tuple[str, str, str]:
     return resolved, "", "gateway config"
 
 
+def _unreadable_gateway_dotenv(cfg) -> str:
+    """Return the gateway ``.env`` path when it exists but this account cannot read it."""
+    data_dir = _configured_gateway_data_dir(cfg)
+    if not data_dir:
+        return ""
+    path = os.path.join(data_dir, ".env")
+    try:
+        read_regular_file_no_follow(path, max_bytes=MAX_DOTENV_BYTES)
+    except PermissionError:
+        return path
+    except OSError:
+        return ""
+    return ""
+
+
 def _missing_gateway_token_detail(cfg) -> str:
     """Return an actionable missing-token message without false fix promises."""
     custom_env = _custom_gateway_token_env(cfg)
@@ -1926,6 +1992,14 @@ def _missing_gateway_token_detail(cfg) -> str:
         return (
             f"custom token provider {custom_env!r} is empty — populate it or "
             "explicitly change gateway.token_env; auto-fix preserves custom providers"
+        )
+    # The token is in a .env this account cannot read: a new token would
+    # replace the file and its other secrets (GAP-0662).
+    unreadable = _unreadable_gateway_dotenv(cfg)
+    if unreadable:
+        return (
+            f"this account cannot read {unreadable}, which holds the gateway token — "
+            "restore this account's read access to it; doctor --fix does not replace it"
         )
     return "no gateway token is configured — run `defenseclaw doctor --fix` to generate and persist one"
 
@@ -1979,32 +2053,78 @@ def _gateway_rotated_provider_converged(cfg) -> bool:
     return not configured or _env_names_equal(configured, _CANONICAL_GATEWAY_TOKEN_ENV)
 
 
-def _emit_hilt_observe_summary(observe_only: list[tuple[str, str]], r: _DoctorResult, *, tagged: bool) -> None:
-    """One Human approval row for every connector whose approvals observe mode mutes."""
+def _hilt_observe_remediation(profiles: list[str], connector: str = "<name>") -> str:
+    """How to get approval prompts, from the setting that decides the mode.
+
+    ``guardrail mode`` edits guardrail.mode or a connector's mode, which a
+    guardrail profile that sets its own mode overrides (GAP-1269).
+    """
+    if profiles:
+        name = profiles[0] if len(profiles) == 1 else "<profile>"
+        return (
+            f"the guardrail profile {', '.join(profiles)} sets observe mode for this account, and "
+            "'guardrail mode' does not change it: set guardrail.profiles."
+            f"{name}.mode (or its connectors.<name>.mode) to action with defenseclaw config set, "
+            f"or set guardrail.profiles.{name}.hilt.enabled to false; check with "
+            f"defenseclaw guardrail profile explain --connector {connector}"
+        )
+    return (
+        "switch a connector to action mode to get approval prompts "
+        f"(defenseclaw guardrail mode action --connector {connector}), "
+        "or turn approvals off: defenseclaw guardrail hilt off"
+    )
+
+
+def _profile_sets_mode(cfg, profile: str, connector: str) -> bool:
+    """Whether guardrail profile *profile* sets the mode of *connector* itself."""
+    from defenseclaw.connector_paths import normalize
+
+    item = (getattr(getattr(cfg, "guardrail", None), "profiles", None) or {}).get(profile)
+    if item is None:
+        # Not in this config.yaml: the gateway's profile decides.
+        return True
+    if str(getattr(item, "mode", "") or "").strip():
+        return True
+    for name, override in (getattr(item, "connectors", None) or {}).items():
+        if normalize(name) == normalize(connector) and str(getattr(override, "mode", "") or "").strip():
+            return True
+    return False
+
+
+def _emit_hilt_observe_summary(observe_only: list[tuple[str, ...]], r: _DoctorResult, *, tagged: bool) -> None:
+    """One Human approval row for every connector whose approvals observe mode mutes.
+
+    Each entry is ``(connector, min_severity[, profile])``; *profile* names
+    the guardrail profile that sets the observe mode, if one does.
+    """
     if not observe_only:
         return
-    if len(observe_only) == 1:
-        connector, min_sev = observe_only[0]
+    entries = [(item[0], item[1], item[2] if len(item) > 2 else "") for item in observe_only]
+    profiles = sorted({profile for _, _, profile in entries if profile})
+    if len(entries) == 1:
+        connector, min_sev, _profile = entries[0]
         with _doctor_label_suffix(f"[{connector}]" if tagged else ""):
-            _emit("warn", "Human approval", f"enabled at {min_sev}, but {connector} mode is observe", r=r)
+            _emit(
+                "warn",
+                "Human approval",
+                f"enabled at {min_sev}, but {connector} mode is observe",
+                r=r,
+                remediation=_hilt_observe_remediation(profiles, connector),
+            )
         return
-    levels = sorted({min_sev for _, min_sev in observe_only})
+    levels = sorted({min_sev for _, min_sev, _ in entries})
     if len(levels) == 1:
-        names = ", ".join(connector for connector, _ in observe_only)
+        names = ", ".join(connector for connector, _, _ in entries)
         enabled = f"enabled at {levels[0]}"
     else:
-        names = ", ".join(f"{connector} ({min_sev})" for connector, min_sev in observe_only)
+        names = ", ".join(f"{connector} ({min_sev})" for connector, min_sev, _ in entries)
         enabled = "enabled"
     _emit(
         "warn",
         "Human approval",
         f"{enabled}, but these connectors are in observe mode, so they never ask: {names}",
         r=r,
-        remediation=(
-            "switch a connector to action mode to get approval prompts "
-            "(defenseclaw guardrail mode action --connector <name>), "
-            "or turn approvals off: defenseclaw guardrail hilt off"
-        ),
+        remediation=_hilt_observe_remediation(profiles),
     )
 
 
@@ -2038,6 +2158,7 @@ def _check_hilt_support(
     from defenseclaw import policy_catalog
 
     block_at = policy_catalog.scope_levels(cfg, connector).block_at
+    mode_profile = ""
     if getattr(guardrail, "profiles", None):
         from defenseclaw.gateway import current_user_guardrail_profile
 
@@ -2063,15 +2184,24 @@ def _check_hilt_support(
         min_sev = str(profile_hilt.get("min_severity") or "HIGH").upper()
         mode = str(effective["mode"]).lower()
         block_at = str(effective.get("resolved_block_at") or effective.get("block_at") or block_at)
+        profile_name = str(resolved.get("profile") or "")
+        if profile_name and _profile_sets_mode(cfg, profile_name, connector):
+            mode_profile = profile_name
     if not hilt_enabled:
         _emit("pass", "Human approval", "disabled (default)", r=r)
         return
     if mode != "action":
         if observe_only is not None:
             # The caller prints one row for every connector in this state.
-            observe_only.append((connector, min_sev))
+            observe_only.append((connector, min_sev, mode_profile))
             return
-        _emit("warn", "Human approval", f"enabled at {min_sev}, but {connector} mode is observe", r=r)
+        _emit(
+            "warn",
+            "Human approval",
+            f"enabled at {min_sev}, but {connector} mode is observe",
+            r=r,
+            remediation=_hilt_observe_remediation([mode_profile] if mode_profile else [], connector),
+        )
         return
 
     if note := policy_catalog.inert_hilt_warning(min_sev, block_at):
@@ -2083,7 +2213,17 @@ def _check_hilt_support(
     elif connector == "claudecode":
         _emit("pass", "Human approval", f"Claude Code PreToolUse ask supported at {min_sev}+", r=r)
     elif connector == "copilot":
-        _emit("pass", "Human approval", f"Copilot CLI preToolUse ask supported at {min_sev}+", r=r)
+        if _doctor_secure_client(cfg):
+            _emit("pass", "Human approval", f"Copilot Secure Client preToolUse ask supported at {min_sev}+", r=r)
+        else:
+            _emit(
+                "warn",
+                "Human approval",
+                "Copilot CLI cannot prove an approval prompt is available at preToolUse; "
+                "action-mode confirmations block and audit as block (raw_action=confirm). "
+                "VS Code Local has a separate native ask.",
+                r=r,
+            )
     elif connector == "cursor":
         _emit(
             "warn",
@@ -2114,7 +2254,7 @@ def _check_hilt_support(
             "intentionally does not implement or claim that surface",
             r=r,
         )
-    elif connector in {"hermes", "devin", "openhands"}:
+    elif connector in {"hermes", "devin"}:
         _emit(
             "warn",
             "Human approval",
@@ -2134,14 +2274,6 @@ def _check_hilt_support(
             "Human approval",
             "Amp supports native foreground confirmation on synchronous tool.call and "
             "model-bound tool.result; unavailable headless UI rejects or withholds safely",
-            r=r,
-        )
-    elif connector == "omnigent":
-        _emit(
-            "pass",
-            "Human approval",
-            "OmniGent native-degraded support includes ASK on request, tool_call, and llm_request; "
-            "post-action confirms use fallback",
             r=r,
         )
     else:
@@ -2442,9 +2574,17 @@ def _check_live_audit_store(health: dict | None, r: _DoctorResult) -> None:
         )
 
 
+def _gateway_health_probe(cfg, **kwargs) -> tuple[int, str]:
+    """Read gateway health only from a verified accepting process."""
+    trust = _trusted_gateway_listener(cfg)
+    if not trust.trusted:
+        return 0, f"gateway listener identity is unverified: {trust.detail}"
+    return _http_probe(_gateway_api_url(cfg, "/health"), bound_peer=trust, **kwargs)
+
+
 def _live_gateway_health(cfg) -> dict | None:
-    code, body = _http_probe(
-        _gateway_api_url(cfg, "/health"),
+    code, body = _gateway_health_probe(
+        cfg,
         timeout=5.0,
         response_limit=_HEALTH_DOCUMENT_MAX_BYTES,
         allow_truncation=False,
@@ -2493,6 +2633,20 @@ def _audit_db_exposing_modes(db_path: str) -> list[tuple[str, int]]:
     return found
 
 
+def _data_dir_writer_problem(path: str) -> str | None:
+    """Why another account may write the data directory by ACL, else None.
+
+    Windows: the write custody check of ``doctor_recovery`` (current-user
+    owner, only trusted writers). macOS: an extended ACL write grant. Other
+    platforms have no ACL beyond the mode bits the caller checks.
+    """
+    from defenseclaw.file_permissions import darwin_acl_write_error, windows_acl_custody_write_error
+
+    if os.name == "nt":
+        return windows_acl_custody_write_error(path, allow_current_user=True, require_current_user_owner=True)
+    return darwin_acl_write_error(path)
+
+
 def _check_private_file_exposure(cfg, r: _DoctorResult) -> None:
     """FAIL when other local accounts can read DefenseClaw secrets or state.
 
@@ -2518,6 +2672,9 @@ def _check_private_file_exposure(cfg, r: _DoctorResult) -> None:
     unverified: list[str] = []
     files: list[str] = []
     dotenv_requires_review = False
+    # Another account that can write the data directory can replace the
+    # private files in it, so this fails like an exposed file (GAP-1329).
+    directory_writable = directory_acl_writable = False
     for path, is_dir in targets:
         try:
             info = os.lstat(path)
@@ -2536,6 +2693,16 @@ def _check_private_file_exposure(cfg, r: _DoctorResult) -> None:
             except OSError:
                 # A size or file-type refusal does not erase the mode finding.
                 unverified.append(f"{path} (cannot safely read)")
+        if is_dir:
+            # The same write custody the recovery planner requires of the
+            # data directory: a Windows ACL or a macOS extended ACL can let
+            # another account replace private state behind private mode bits.
+            writer = _data_dir_writer_problem(path)
+            if writer and _acl_inspection_unavailable(writer):
+                unverified.append(f"{path} ({writer})")
+            elif writer:
+                exposed.append(f"{path} (unsafe {'Windows' if os.name == 'nt' else 'extended'} ACL: {writer})")
+                directory_writable = directory_acl_writable = True
         if os.name == "nt":
             problem = None if is_dir else windows_acl_confidentiality_error(path)
             if problem:
@@ -2548,6 +2715,8 @@ def _check_private_file_exposure(cfg, r: _DoctorResult) -> None:
                         dotenv_requires_review = True
             continue
         mode = stat.S_IMODE(info.st_mode)
+        if is_dir and mode & 0o022:
+            directory_writable = True
         if mode & 0o077:
             exposed.append(f"{path} (mode {mode:04o})")
             if not is_dir:
@@ -2585,10 +2754,15 @@ def _check_private_file_exposure(cfg, r: _DoctorResult) -> None:
         steps.append("defenseclaw doctor --fix --yes (makes " + ", ".join(fixable) + " private)")
     if review:
         steps.append("review ownership and remove untrusted permissions on " + ", ".join(review))
-    if os.name != "nt" and any(item.startswith(f"{data_dir} (") for item in exposed):
+    if os.name != "nt" and any(item.startswith(f"{data_dir} (mode ") for item in exposed):
         steps.append(f"chmod 700 {data_dir}")
+    if directory_acl_writable:
+        steps.append(
+            f"remove other accounts' write access to {data_dir}"
+            + (" (chmod -N removes a macOS extended ACL)" if os.name != "nt" else " (review its ACL and owner)")
+        )
     _emit(
-        "fail" if files else "warn",
+        "fail" if files or directory_writable else "warn",
         "Private files",
         "; ".join(
             part for part in (
@@ -2736,7 +2910,7 @@ def _check_audit_db_store(cfg, r: _DoctorResult) -> None:
         elif not _doctor_managed(cfg) and (modes := _audit_db_exposing_modes(db_path)):
             # A permission slip, not damage: tighten, do not restore (GAP-0337).
             detail = "; ".join(f"{path} has mode {mode:04o}" for path, mode in modes) + (
-                ", so other accounts can read the audit history; the content is intact"
+                ", so other accounts can read the audit history; its content is checked once the mode is fixed"
             )
             remediation = " && ".join(
                 f"chmod {700 if os.path.isdir(path) else 600} {path}" for path, _mode in modes
@@ -2925,8 +3099,8 @@ def _check_guardrail_profile(cfg, r: _DoctorResult) -> None:
         )
     else:
         _emit("pass", "Guardrail profile", profile_status_text(cfg, result), r=r, check_id="doctor.guardrail.profile")
-    # A directory that does not answer leaves only default_lookup_failed on
-    # each record otherwise (GAP-0145).
+    # A directory that does not answer can leave refused requests whose
+    # assignments need missing facts; each refusal names its fact (GAP-0145).
     directory = (result.get("directory") or {}).get("message")
     if directory:
         _emit(
@@ -3101,13 +3275,33 @@ def _check_component_connector_compatibility(
     from defenseclaw.doctor_health import (
         HealthStatus,
         build_health_report,
+        hook_call_after_scan,
         read_cached_discovery,
         supported_range_text,
     )
 
     enabled = tuple(connector for connector in connectors if _connector_enabled(cfg, connector))
+    data_dir = str(getattr(cfg, "data_dir", "") or "")
+    live_activity: dict[str, object] | None = None
+
+    def last_hook_call(connector: str) -> object:
+        # Read once, and only for a connector the scan found missing.
+        nonlocal live_activity
+        if live_activity is None:
+            live_activity = {}
+            try:
+                health, _reason, _checked = _authenticated_gateway_health(cfg)
+                if health is not None:
+                    from defenseclaw.commands.cmd_status import _fetch_health_connectors
+
+                    rows = _fetch_health_connectors(health=health)
+                    live_activity = {name: row.get("last_activity_at") for name, row in rows.items()}
+            except Exception:  # noqa: BLE001 - live evidence is optional here.
+                live_activity = {}
+        return live_activity.get(connector)
+
     try:
-        discovery = read_cached_discovery(str(getattr(cfg, "data_dir", "") or ""))
+        discovery = read_cached_discovery(data_dir)
         report = build_health_report(
             enabled,
             discovery,
@@ -3178,14 +3372,52 @@ def _check_component_connector_compatibility(
         if finding.reason_code == "connector-agent-unavailable":
             from defenseclaw.inventory import agent_discovery
 
-            on_path = agent_discovery.binary_on_path(finding.connector)
+            seen = hook_call_after_scan(data_dir, last_hook_call(finding.connector))
+            harness = None
+            if not seen:
+                from defenseclaw.sandbox_images import verified_harness_contract
+
+                harness = verified_harness_contract(data_dir, finding.connector)
+            on_path = "" if seen or harness is not None else agent_discovery.binary_on_path(finding.connector)
             if on_path:
-                # Installed after the last agent discovery: refresh the
-                # evidence rather than install it again (GAP-0052).
-                tag = "warn"
-                detail += f"; {on_path} is installed now, after the last agent discovery"
+                # Maybe installed after the last agent discovery: refresh the
+                # evidence rather than install it again (GAP-0052). This
+                # shell's PATH is not the agent's, so it stays a failure,
+                # as status keeps the row off (1.0.4 review, loop round 4).
+                detail += (
+                    f"; {on_path} is on this shell's PATH, unverified until agent discovery is refreshed"
+                )
                 remediation = _health_remediation_text(finding.remediations[1:])
-        if finding.reason_code in {"connector-version-not-observed", "connector-version-unparseable"}:
+            elif seen:
+                # The agent runs from a path or an IDE the scan did not see:
+                # status counts it live on the same evidence (1.0.4 review).
+                tag = "warn"
+                detail += (
+                    f"; the gateway took an authenticated hook call from it at {seen}, "
+                    "after the last agent discovery (started by absolute path or from an IDE)"
+                )
+                remediation = _health_remediation_text(finding.remediations[1:])
+            elif harness is not None:
+                # The sandbox-only layout: the agent runs inside a verified
+                # harness image, which setup, the gateway and status admit.
+                tag = "pass"
+                image = str(getattr(harness, "tag", "") or "").strip()
+                detail = (
+                    f"{finding.connector} runs inside the verified sandbox harness image"
+                    + (f" {image}" if image else "")
+                    + "; the host has no installation to check"
+                )
+                remediation = ""
+        if finding.reason_code == "connector-version-unparseable":
+            # Setup refuses a version it cannot read in both modes (GAP-0554),
+            # so `setup --mode action|observe` exits 1 here.
+            refresh, install = (_health_remediation_text((choice,)) for choice in finding.remediations[:2])
+            slug = "claude-code" if finding.connector == "claudecode" else finding.connector
+            remediation = (
+                f"run '{refresh}'; if the version still cannot be read, {install[:1].lower()}{install[1:]}, "
+                f"then run 'defenseclaw setup {slug}'"
+            )
+        if finding.reason_code == "connector-version-not-observed":
             # A slow or failed version probe leaves the connector in observe.
             # Refreshing discovery and rerunning setup restores the mode.
             steps = [_health_remediation_text((choice,)) for choice in finding.remediations[:2]]
@@ -3576,10 +3808,12 @@ def _linux_foreign_listener_accounts(port: int, proc_root: str = "/proc") -> str
     """Name the other accounts whose sockets listen on ``port`` (Linux only)."""
     if not sys.platform.startswith("linux"):
         return ""
+    from defenseclaw.doctor_gateway import linux_proc_net_table
+
     uids: set[int] = set()
     for table_name in ("tcp", "tcp6"):
         try:
-            with open(os.path.join(proc_root, "net", table_name), encoding="ascii") as table:
+            with open(linux_proc_net_table(table_name, proc_root), encoding="ascii") as table:
                 rows = table.readlines()[1:]
         except (OSError, UnicodeError):
             continue
@@ -3684,6 +3918,13 @@ def _foreign_gateway_port_holder(cfg) -> str:
     """Name the API port holder when it is not this account's verified gateway."""
     holder = _gateway_port_holder(cfg)
     if not holder:
+        # macOS lsof sees only this account's sockets. A peer listener can
+        # answer on the port while lsof gives us no PID; use the same
+        # loopback holder check that protects token-bearing CLI calls.
+        from defenseclaw.gateway import foreign_loopback_listener
+
+        if foreign_loopback_listener(_gateway_api_host(cfg), cfg.gateway.api_port):
+            return "a process of another account"
         return ""
     try:
         if _trusted_gateway_listener(cfg).trusted:
@@ -3754,7 +3995,7 @@ def _guardrail_health_mode(details: dict) -> str:
     if isinstance(connector_modes, dict) and connector_modes:
         return "mode=" + ", ".join(f"{name}:{connector_modes[name]}" for name in sorted(connector_modes))
     mode = details.get("policy_mode") or details.get("mode") or "?"
-    surface = {"agent_lifecycle_hooks": "hook-enforced", "omnigent_policy_api": "policy-API-enforced"}.get(
+    surface = {"agent_lifecycle_hooks": "hook-enforced"}.get(
         details.get("enforcement_surface"), ""
     )
     if mode == "action" and surface and details.get("enforcement_enabled") is True:
@@ -3854,18 +4095,40 @@ def _check_sidecar(cfg, r: _DoctorResult) -> dict | None:
         )
         return None
     bind = _gateway_api_host(cfg)
-    url = _gateway_api_url(cfg, "/health")
-    code, body = _http_probe(
-        url,
-        timeout=5.0,
-        response_limit=_HEALTH_DOCUMENT_MAX_BYTES,
-        allow_truncation=False,
-        bypass_proxy=True,
-    )
-    if code == 200:
+    while True:
+        lock_holder = None
         trust = _trusted_gateway_listener(cfg)
-        holder = "" if trust.trusted else _gateway_port_holder(cfg)
-        if trust.trusted and _replaced_gateway_executable(trust.record, trust.process, platform_name=sys.platform):
+        if not trust.trusted:
+            # The listener can be mid-handover (GAP-0535): wait for a start,
+            # restart or stop that holds the start lock before reading it.
+            locked, lock_holder = _gateway_start_in_progress(cfg, r)
+            if locked and lock_holder is None:
+                # The start lock was released, so the listener may have
+                # changed hands: read it again. The run waits for the lock
+                # only once, so this ends.
+                continue
+        code, body = _gateway_health_probe(
+            cfg,
+            timeout=5.0,
+            response_limit=_HEALTH_DOCUMENT_MAX_BYTES,
+            allow_truncation=False,
+            bypass_proxy=True,
+        )
+        break
+    if code == 200:
+        holder = "" if trust.trusted or lock_holder is not None else _gateway_port_holder(cfg)
+        if lock_holder is not None:
+            # The listener can be mid-handover (GAP-0535): it is neither this
+            # account's verified gateway nor shown to be another process's.
+            _emit(
+                "warn",
+                "Sidecar API",
+                f"{bind}:{cfg.gateway.api_port} answers, but {_gateway_start_in_progress_detail(lock_holder)}",
+                r=r,
+                remediation=_GATEWAY_START_IN_PROGRESS_REMEDIATION,
+            )
+            r.sidecar_unverified = True
+        elif trust.trusted and _replaced_gateway_executable(trust.record, trust.process, platform_name=sys.platform):
             _emit(
                 "warn",
                 "Sidecar API",
@@ -4064,6 +4327,52 @@ def _check_sidecar(cfg, r: _DoctorResult) -> dict | None:
         except (json.JSONDecodeError, TypeError):
             detail = body if body.startswith("response exceeds") else "could not parse /health response"
             _emit("warn", "Sidecar health JSON", detail, r=r)
+    elif code == 0 and lock_holder is not None:
+        # Neither this account's verified gateway nor shown to be another
+        # process's while a start, restart or stop still runs.
+        _emit(
+            "warn",
+            "Sidecar API",
+            f"{bind}:{cfg.gateway.api_port}: {_gateway_start_in_progress_detail(lock_holder)}",
+            r=r,
+            remediation=_GATEWAY_START_IN_PROGRESS_REMEDIATION,
+        )
+        r.sidecar_unverified = True
+    elif code == 0 and body.startswith("gateway listener identity is unverified:"):
+        trust = _trusted_gateway_listener(cfg)
+        if holder := _foreign_gateway_port_holder(cfg):
+            _emit(
+                "fail",
+                "Sidecar API",
+                f"{_foreign_gateway_port_detail(cfg, holder)} ({trust.detail})",
+                r=r,
+                remediation=_foreign_gateway_port_remediation(cfg, holder=holder),
+            )
+            r.gateway_down = "foreign"
+        elif trust.code == "missing":
+            start = "start it: 'defenseclaw-gateway start' or 'defenseclaw doctor --fix'"
+            _emit(
+                "fail",
+                "Sidecar API",
+                f"the gateway is not running (no verified listener on {bind}:{cfg.gateway.api_port}); {start}",
+                r=r,
+                remediation=start,
+            )
+            r.gateway_down = "stopped"
+        else:
+            _emit("fail", "Sidecar API", body, r=r)
+            r.sidecar_unverified = True
+    elif holder := _foreign_gateway_port_holder(cfg):
+        # A refused health probe does not prove the port is free. A holder
+        # found independently is the cause the operator needs to act on.
+        _emit(
+            "fail",
+            "Sidecar API",
+            _foreign_gateway_port_detail(cfg, holder),
+            r=r,
+            remediation=_foreign_gateway_port_remediation(cfg, holder=holder),
+        )
+        r.gateway_down = "foreign"
     elif code == 0 and "refused" in body.lower():
         start = "start it: 'defenseclaw-gateway start' or 'defenseclaw doctor --fix'"
         _emit(
@@ -4074,16 +4383,6 @@ def _check_sidecar(cfg, r: _DoctorResult) -> dict | None:
             remediation=start,
         )
         r.gateway_down = "stopped"
-    elif holder := _foreign_gateway_port_holder(cfg):
-        # Something else answers on the port without a gateway /health.
-        _emit(
-            "fail",
-            "Sidecar API",
-            _foreign_gateway_port_detail(cfg, holder),
-            r=r,
-            remediation=_foreign_gateway_port_remediation(cfg, holder=holder),
-        )
-        r.gateway_down = "foreign"
     else:
         _emit(
             "fail",
@@ -4131,6 +4430,19 @@ def _check_gateway_auth(cfg, r: _DoctorResult) -> bool:
         return True
 
     trust = _trusted_gateway_listener(cfg)
+    if not trust.trusted:
+        locked, holder = _gateway_start_in_progress(cfg, r)
+        if holder is not None:
+            _emit(
+                "warn",
+                "Gateway authentication",
+                f"{_gateway_start_in_progress_detail(holder)}; the gateway token was not sent",
+                r=r,
+                remediation=_GATEWAY_START_IN_PROGRESS_REMEDIATION,
+            )
+            return True
+        if locked:
+            trust = _trusted_gateway_listener(cfg)
     if not trust.trusted:
         _emit(
             "fail",
@@ -5390,6 +5702,9 @@ def _connector_hook_credential_problems(cfg, trust: _GatewayTrust | None) -> lis
             continue
         path = os.path.join(hooks_dir, f".hook-{scope}.token")
         if os.path.islink(path):
+            # The gateway refuses a redirected credential path. Do not read
+            # its target, but report the connector whose hooks will get 401.
+            problems.append(scope)
             continue
         if not os.path.isfile(path):
             # A gateway restart mints a missing credential as it replaces a
@@ -5537,7 +5852,7 @@ def _lsof_gateway_listener_evidence(port: int, *, host: str = "") -> ListenerEvi
                 "-a",
                 selector,
                 "-sTCP:LISTEN",
-                "-Fpn",
+                "-FpRcn",
             ],
             capture_output=True,
             text=True,
@@ -5554,6 +5869,7 @@ def _lsof_gateway_listener_evidence(port: int, *, host: str = "") -> ListenerEvi
             return ListenerEvidence("missing", reason="no TCP listener on the configured API endpoint")
         return ListenerEvidence("unavailable", reason="lsof listener inspection failed")
     listener_pids: set[int] = set()
+    images: dict[int, tuple[int, str]] = {}
     current_pid = 0
     for raw_line in proc.stdout.splitlines():
         if raw_line.startswith("p"):
@@ -5561,19 +5877,47 @@ def _lsof_gateway_listener_evidence(port: int, *, host: str = "") -> ListenerEvi
                 current_pid = int(raw_line[1:])
             except ValueError:
                 current_pid = 0
+            images[current_pid] = (0, "")
+        elif raw_line.startswith("R") and current_pid:
+            with contextlib.suppress(ValueError):
+                images[current_pid] = (int(raw_line[1:]), images[current_pid][1])
+        elif raw_line.startswith("c") and current_pid:
+            images[current_pid] = (images[current_pid][0], raw_line[1:])
         elif raw_line.startswith("n") and current_pid and _lsof_listener_address_matches(raw_line[1:], host, port):
             listener_pids.add(current_pid)
+    listener_pids = _without_unexeced_forks(listener_pids, images)
     if len(listener_pids) == 1:
         return ListenerEvidence("ok", pid=next(iter(listener_pids)))
     if len(listener_pids) > 1:
         # Multiple owners can occur with SO_REUSEPORT. Returning an arbitrary
         # first PID could authorize a bearer request to an attacker-controlled
         # listener selected by the kernel, so ambiguity fails closed.
-        return ListenerEvidence(
-            "ambiguous",
-            reason="multiple processes own listeners for the configured API endpoint",
-        )
+        return ListenerEvidence("ambiguous", reason=_multiple_listener_owners_reason(listener_pids))
     return ListenerEvidence("missing", reason="no TCP listener on the configured API endpoint")
+
+
+def _without_unexeced_forks(owners: set[int], images: dict[int, tuple[int, object]]) -> set[int]:
+    """Drop the owners that are another owner's fork that has not exec'd yet.
+
+    Between fork and exec a child holds a copy of every descriptor of its
+    parent, the listening socket included, and runs the parent's image. The
+    gateway forks for its scanners and helpers, so a listener scan can see
+    such a child as a second owner (GAP-0535). ``images`` maps a PID to its
+    parent PID and image; a child whose parent is an owner with the same
+    image is that owner. A child that exec'd another program is not dropped.
+    """
+    forks = set()
+    for pid in owners:
+        parent, image = images.get(pid, (0, None))
+        if image and parent != pid and parent in owners and images.get(parent, (0, None))[1] == image:
+            forks.add(pid)
+    return owners - forks
+
+
+def _multiple_listener_owners_reason(owners: set[int]) -> str:
+    return "multiple processes own listeners for the configured API endpoint: PIDs " + ", ".join(
+        str(pid) for pid in sorted(owners)
+    )
 
 
 def _gateway_listener_pid(port: int, *, host: str = "") -> int:
@@ -5620,11 +5964,13 @@ def _linux_gateway_listener_evidence(
 ) -> ListenerEvidence:
     """Resolve one Linux TCP listener owner without optional userland tools.
 
-    Linux exposes listening socket inodes in ``/proc/net/tcp*`` and each
+    Linux exposes listening socket inodes in ``/proc/self/net/tcp*`` and each
     process's descriptors as ``socket:[inode]`` links.  Require every socket
     inode for the port to resolve to the same PID; partial visibility and
     ``SO_REUSEPORT`` ambiguity fail closed.
     """
+    from defenseclaw.doctor_gateway import linux_proc_net_table
+
     if not 1 <= port <= 65_535:
         return ListenerEvidence("unavailable", reason="configured API port is invalid")
 
@@ -5643,7 +5989,7 @@ def _linux_gateway_listener_evidence(
     socket_inodes: set[str] = set()
     table_found = False
     for table_name in ("tcp", "tcp6"):
-        table_path = os.path.join(proc_root, "net", table_name)
+        table_path = linux_proc_net_table(table_name, proc_root)
         try:
             with open(table_path, encoding="ascii") as table:
                 rows = table.readlines()[1:]
@@ -5698,35 +6044,60 @@ def _linux_gateway_listener_evidence(
         pid = int(process_entry.name)
         if not 0 < pid <= 2_147_483_647:
             continue
-        try:
-            descriptors = os.scandir(os.path.join(process_entry.path, "fd"))
-        except OSError:
-            continue
-        with descriptors:
-            for descriptor in descriptors:
-                try:
-                    target = os.readlink(descriptor.path)
-                except OSError:
-                    continue
-                if target.startswith("socket:[") and target.endswith("]"):
-                    inode = target[8:-1]
-                    if inode in owners_by_inode:
-                        owners_by_inode[inode].add(pid)
+        for inode in _linux_process_socket_inodes(process_entry.path):
+            if inode in owners_by_inode:
+                owners_by_inode[inode].add(pid)
 
+    if any(len(owners) > 1 for owners in owners_by_inode.values()):
+        holders = set().union(*owners_by_inode.values())
+        images = {pid: image for pid in holders if (image := _linux_process_image(proc_root, pid)) is not None}
+        for inode, owners in owners_by_inode.items():
+            owners = _without_unexeced_forks(owners, images)
+            if len(owners) > 1:
+                # A holder seen mid-scan that has since exited or exec'd
+                # (which closes the gateway's descriptors) no longer owns it.
+                owners = {
+                    pid for pid in owners if inode in _linux_process_socket_inodes(os.path.join(proc_root, str(pid)))
+                }
+            owners_by_inode[inode] = owners
     if any(not owners for owners in owners_by_inode.values()):
         return ListenerEvidence("unavailable", reason="listener owner could not be resolved from Linux descriptors")
-    if any(len(owners) > 1 for owners in owners_by_inode.values()):
-        return ListenerEvidence(
-            "ambiguous",
-            reason="multiple processes own listeners for the configured API endpoint",
-        )
-    owners = {next(iter(inode_owners)) for inode_owners in owners_by_inode.values()}
+    owners = set().union(*owners_by_inode.values())
     if len(owners) != 1:
-        return ListenerEvidence(
-            "ambiguous",
-            reason="multiple processes own listeners for the configured API endpoint",
-        )
+        return ListenerEvidence("ambiguous", reason=_multiple_listener_owners_reason(owners))
     return ListenerEvidence("ok", pid=next(iter(owners)))
+
+
+def _linux_process_socket_inodes(process_path: str) -> set[str]:
+    """Return the socket inodes one ``/proc/<pid>`` entry holds descriptors to."""
+    inodes: set[str] = set()
+    try:
+        descriptors = os.scandir(os.path.join(process_path, "fd"))
+    except OSError:
+        return inodes
+    with descriptors:
+        for descriptor in descriptors:
+            try:
+                target = os.readlink(descriptor.path)
+            except OSError:
+                continue
+            if target.startswith("socket:[") and target.endswith("]"):
+                inodes.add(target[8:-1])
+    return inodes
+
+
+def _linux_process_image(proc_root: str, pid: int) -> tuple[int, tuple[int, int, bytes]] | None:
+    """Return a process's parent PID and image: its executable and argv."""
+    process_path = os.path.join(proc_root, str(pid))
+    try:
+        with open(os.path.join(process_path, "stat"), encoding="utf-8", errors="replace") as process_stat:
+            parent = int(process_stat.read().rsplit(")", 1)[1].split()[1])
+        executable = os.stat(os.path.join(process_path, "exe"))
+        with open(os.path.join(process_path, "cmdline"), "rb") as process_cmdline:
+            argv = process_cmdline.read()
+    except (OSError, ValueError, IndexError):
+        return None
+    return parent, (executable.st_dev, executable.st_ino, argv)
 
 
 def _linux_gateway_listener_pid(
@@ -5756,43 +6127,147 @@ def _managed_gateway_listener_evidence(
         listener = _linux_gateway_listener_evidence(port, host=host)
         if listener.status != "unavailable":
             return listener
+        fallback = _lsof_gateway_listener_evidence(port, host=host)
+        # lsof can omit another account's sockets. If /proc was unreadable,
+        # its absence is not proof that the port is free.
+        return listener if fallback.status == "missing" else fallback
     return _lsof_gateway_listener_evidence(port, host=host)
+
+
+#: How long doctor waits for a gateway start, restart or stop in progress to
+#: finish before it reports it instead of listener ownership.
+_GATEWAY_RESTART_WAIT_SECONDS = 20.0
+
+#: The lock ``defenseclaw-gateway start`` and ``restart`` hold until the
+#: gateway is ready, and ``stop`` holds while it stops the gateway
+#: (internal/cli/gateway_cold_start.go gatewayStartLockName).
+_GATEWAY_START_LOCK_NAME = "gateway.start.lock"
+
+_GATEWAY_START_IN_PROGRESS_REMEDIATION = "rerun `defenseclaw doctor` when the gateway start, restart or stop finishes"
+
+
+def _gateway_start_lock_holder(data_dir: str, *, proc_locks: str = "/proc/locks") -> int | None:
+    """Return the PID holding the gateway start lock, 0 if unknown, None if free.
+
+    On Linux ``/proc/locks`` names the holder without touching the lock, so
+    doctor never makes a hook's cold start give way to it. Elsewhere on POSIX
+    a shared non-blocking ``flock`` is taken and dropped at once. Windows is
+    not inspected (None).
+    """
+    path = os.path.join(data_dir, _GATEWAY_START_LOCK_NAME)
+    try:
+        fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    except OSError:
+        return None
+    try:
+        if sys.platform.startswith("linux"):
+            info = os.fstat(fd)
+            device = f"{os.major(info.st_dev):02x}:{os.minor(info.st_dev):02x}:{info.st_ino}"
+            try:
+                with open(proc_locks, encoding="ascii", errors="replace") as locks:
+                    rows = locks.read().splitlines()
+            except OSError:
+                rows = None
+            if rows is not None:
+                for row in rows:
+                    # "N: FLOCK ADVISORY WRITE pid maj:min:inode 0 EOF"; a
+                    # "N: -> ..." row is a waiter, not a holder.
+                    fields = row.split()
+                    if len(fields) >= 6 and fields[1] == "FLOCK" and fields[5] == device:
+                        return int(fields[4]) if fields[4].isdigit() else 0
+                return None
+        try:
+            import fcntl
+        except ImportError:
+            return None
+        try:
+            fcntl.flock(fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return 0
+        except OSError:
+            return None
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        return None
+    finally:
+        os.close(fd)
+
+
+def _wait_for_gateway_start_lock(data_dir: str, timeout: float) -> bool:
+    """Wait until no start, restart or stop holds the gateway start lock."""
+    deadline = time.monotonic() + timeout
+    while _gateway_start_lock_holder(data_dir) is not None:
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(0.2)
+    return True
+
+
+def _gateway_start_in_progress(cfg, r: _DoctorResult) -> tuple[bool, int | None]:
+    """Return whether the start lock was held, and its holder if it still is.
+
+    A start, restart or stop holds the gateway start lock while the listener
+    can be mid-handover (GAP-0535), so listener ownership is read once it has
+    finished. One doctor run waits for it once; a later row reports the same
+    one still running without waiting again. The holder is 0 when unknown.
+    """
+    data_dir = _configured_gateway_data_dir(cfg)
+    if not data_dir:
+        return False, None
+    holder = _gateway_start_lock_holder(data_dir)
+    if holder is None:
+        return False, None
+    if r.gateway_start_waited:
+        return True, holder
+    r.gateway_start_waited = True
+    if _wait_for_gateway_start_lock(data_dir, _GATEWAY_RESTART_WAIT_SECONDS):
+        return True, None
+    return True, holder
+
+
+def _gateway_start_in_progress_detail(holder: int) -> str:
+    by = f" (PID {holder})" if holder else ""
+    return (
+        f"a gateway start, restart or stop{by} was still in progress after "
+        f"{_GATEWAY_RESTART_WAIT_SECONDS:g} s; listener ownership was not checked"
+    )
 
 
 def _check_gateway_home_mismatch(cfg, r: _DoctorResult) -> None:
     """Report home ownership only from the same strong trust chain as auth."""
-    code, _ = _http_probe(
-        _gateway_api_url(cfg, "/health"),
+    trust = _trusted_gateway_listener(cfg)
+    if not trust.trusted:
+        locked, holder = _gateway_start_in_progress(cfg, r)
+        if holder is not None:
+            _emit(
+                "warn",
+                "Gateway home",
+                _gateway_start_in_progress_detail(holder),
+                r=r,
+                remediation=_GATEWAY_START_IN_PROGRESS_REMEDIATION,
+            )
+            return
+        if locked:
+            trust = _trusted_gateway_listener(cfg)
+    if not trust.trusted:
+        if trust.code == "foreign_home":
+            _emit("fail", "Gateway home", "managed PID record is bound to a different canonical data home", r=r)
+        elif trust.code in {"foreign_listener", "ambiguous_listener"}:
+            _emit("fail", "Gateway home", trust.detail, r=r)
+        else:
+            _emit("skip", "Gateway home", f"{trust.detail}; canonical runtime-home ownership was not inferred", r=r)
+        return
+    code, _ = _gateway_health_probe(
+        cfg,
         timeout=5.0,
         bypass_proxy=True,
     )
     if code != 200:
         return
 
-    trust = _trusted_gateway_listener(cfg)
-    if trust.trusted:
-        _emit(
-            "pass",
-            "Gateway home",
-            "managed listener is bound to this canonical data home",
-            r=r,
-        )
-        return
-    if trust.code == "foreign_home":
-        _emit(
-            "fail",
-            "Gateway home",
-            "managed PID record is bound to a different canonical data home",
-            r=r,
-        )
-        return
-    if trust.code in {"foreign_listener", "ambiguous_listener"}:
-        _emit("fail", "Gateway home", trust.detail, r=r)
-        return
     _emit(
-        "skip",
+        "pass",
         "Gateway home",
-        f"{trust.detail}; canonical runtime-home ownership was not inferred",
+        "managed listener is bound to this canonical data home",
         r=r,
     )
 
@@ -5819,14 +6294,491 @@ def _check_windows_native_hooks(
     )
     if connector == "hermes":
         check = _hermes_idle_native_check(check, r)
+        if os.name == "nt":
+            check = _hermes_windows_execution_probe(check)
     if check.state == CODEX_PROBE_TIMEOUT_STATE:
         _emit("warn", label, f"{check.state}: {check.detail}", r=r, remediation=_CODEX_PROBE_TIMEOUT_STEP)
+        return
+    if _hermes_passive_unverified(check, r):
+        _emit("warn", label, f"{check.state}: {check.detail}", r=r, remediation=_HERMES_PASSIVE_STEP)
         return
     status = "pass" if check.healthy else "fail"
     _emit(status, label, f"{check.state}: {check.detail}", r=r, remediation=check.repair)
 
 
+_HERMES_EXECUTION_PROBE_RESPONSE = b"defenseclaw-execution-probe-ok\n"
+# One probe run, and the wait for stdout to close once the probe has exited or
+# been killed (a descendant can inherit it). Tests shorten both. The first run
+# of a launcher an upgrade just replaced waits for its antivirus scan (2.8 s
+# for the Windows defenseclaw-hook.exe on an idle host); Verify uses the same
+# bound (GAP-0837).
+_HERMES_EXECUTION_PROBE_TIMEOUT = 10.0
+_HERMES_EXECUTION_PROBE_PIPE_WAIT = 1.0
+# The wait for a terminated Windows probe job to empty, or for the Linux
+# supervisor to end the probe's tree.
+_HERMES_EXECUTION_PROBE_TREE_REAP = 2.0
+# The Linux supervisor's budget to kill and reap what the probe left; tests
+# set it to zero to reach the fail-closed result.
+_HERMES_EXECUTION_PROBE_SWEEP = 2.0
+# How Doctor ends what a Unix probe started. A hook could start a child in a
+# session of its own (setsid) or another process group, out of the session
+# Doctor killed, and Doctor passed while the child kept running (r104 W5b).
+# "pidns" (Linux): the probe runs below PID 1 of a PID namespace of its own,
+# owned by a user namespace unless Doctor holds CAP_SYS_ADMIN. The hook cannot
+# address the supervisor outside it, and the kernel kills everything in the
+# namespace when its init ends: a hook that SIGKILLed the subreaper custodian
+# used before left its setsid child running (r104 W5b review). "forkless"
+# (macOS): the probe drops any inherited real root UID and fixes RLIMIT_NPROC
+# at zero before it executes the registered command.
+_HERMES_PROBE_UNIX_CONTAINMENT = (
+    "pidns" if sys.platform.startswith("linux") else "forkless" if sys.platform == "darwin" else "unsupported"
+)
+# The supervisor's exit code when it cannot establish that nothing is left;
+# any other code is the probe's own (124 when Doctor ended it).
+_HERMES_PROBE_NOT_CONTAINED = 125
+_HERMES_PROBE_SUPERVISOR = r"""
+import ctypes, os, select, signal, subprocess, sys, time
+
+CLONE_NEWUSER, CLONE_NEWPID = 0x10000000, 0x20000000
+CAP_SETGID, CAP_SETUID, CAP_SYS_ADMIN = 6, 7, 21
+PR_SET_PDEATHSIG, PR_SET_CHILD_SUBREAPER = 1, 36
+
+
+def children(me):
+    found = []
+    for name in os.listdir("/proc"):
+        if not name.isdigit():
+            continue
+        try:
+            with open("/proc/" + name + "/stat", "rb") as stat:
+                fields = stat.read().rsplit(b")", 1)[1].split()
+            if int(fields[1]) == me:
+                found.append(int(name))
+        except (OSError, IndexError, ValueError):
+            pass
+    return found
+
+
+def reap_all(budget):
+    # A subreaper is the parent of every orphaned descendant: no child left
+    # means nothing the probe started is left.
+    deadline = time.monotonic() + budget
+    me = os.getpid()
+    while True:
+        try:
+            while os.waitpid(-1, os.WNOHANG)[0]:
+                pass
+        except ChildProcessError:
+            return True
+        if time.monotonic() >= deadline:
+            return False
+        for pid in children(me):
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except OSError:
+                pass
+        time.sleep(0.005)
+
+
+def effective_caps():
+    with open("/proc/self/status") as status:
+        for line in status:
+            if line.startswith("CapEff:"):
+                return int(line.split()[1], 16)
+    return 0
+
+
+def release_stdout():
+    null = os.open(os.devnull, os.O_RDWR)
+    os.dup2(null, 1)
+    os.close(null)
+
+
+def status(code):
+    if os.WIFEXITED(code):
+        return os.WEXITSTATUS(code)
+    return 128 + os.WTERMSIG(code) if os.WIFSIGNALED(code) else 125
+
+
+def init(libc, lifeline, argv):
+    # PID 1 of the namespace: when it ends, the kernel kills the rest. It
+    # ends with the process that created the namespace, also one that died
+    # before the parent-death signal was armed (the lifeline then reads EOF).
+    if libc.prctl(PR_SET_PDEATHSIG, signal.SIGKILL, 0, 0, 0) != 0 or os.getpid() != 1:
+        return 125
+    if select.select([lifeline], [], [], 0)[0]:
+        return 125
+    try:
+        proc = subprocess.Popen(argv, start_new_session=True)
+    except (OSError, ValueError):
+        return 127
+    release_stdout()
+    code = proc.wait()
+    return code if code >= 0 else 128 - code
+
+
+def namespace(libc, flags, ready, mapped, argv):
+    # Below the supervisor: unshare, wait for the supervisor to write the ID
+    # maps from outside, then start the namespace's init.
+    if libc.prctl(PR_SET_PDEATHSIG, signal.SIGKILL, 0, 0, 0) != 0:
+        return 125
+    if libc.unshare(flags) != 0:
+        return 125
+    os.write(ready, b"u")
+    if os.read(mapped, 1) != b"m":
+        return 125
+    lifeline, keep = os.pipe()
+    pid = os.fork()
+    if pid == 0:
+        os.close(keep)
+        os._exit(init(libc, lifeline, argv))
+    os.close(lifeline)
+    release_stdout()
+    return status(os.waitpid(pid, 0)[1])
+
+
+def write_maps(pid, caps):
+    uid, gid = os.geteuid(), os.getegid()
+    if caps & (1 << CAP_SETUID) and caps & (1 << CAP_SETGID):
+        # The identity map of every ID, so every file keeps its owner.
+        maps = (("uid_map", "0 0 2147483647\n"), ("gid_map", "0 0 2147483647\n"))
+    else:
+        maps = (("setgroups", "deny"), ("uid_map", f"{uid} {uid} 1\n"), ("gid_map", f"{gid} {gid} 1\n"))
+    for name, value in maps:
+        with open(f"/proc/{pid}/{name}", "w") as handle:
+            handle.write(value)
+
+
+def main():
+    budget = float(sys.argv[1])
+    argv = sys.argv[3:]
+    parent = os.getppid()
+    libc = ctypes.CDLL(None, use_errno=True)
+    # PR_SET_CHILD_SUBREAPER, then PR_SET_PDEATHSIG: the supervisor reaps the
+    # namespace's init however the process between them ends.
+    if libc.prctl(PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0) != 0:
+        return 125
+    if libc.prctl(PR_SET_PDEATHSIG, signal.SIGTERM, 0, 0, 0) != 0:
+        return 125
+    if parent == 1 or os.getppid() != parent:
+        return 124
+    ruid, euid, suid = os.getresuid()
+    rgid, egid, sgid = os.getresgid()
+    if len({ruid, euid, suid}) != 1 or len({rgid, egid, sgid}) != 1:
+        return 125
+    caps = effective_caps()
+    flags = CLONE_NEWPID if caps & (1 << CAP_SYS_ADMIN) else CLONE_NEWUSER | CLONE_NEWPID
+    state = {"pid": None, "ended": False}
+
+    def end(_signum, _frame):
+        state["ended"] = True
+        if state["pid"] is not None:
+            try:
+                os.kill(state["pid"], signal.SIGKILL)
+            except OSError:
+                pass
+
+    signal.signal(signal.SIGTERM, end)
+    ready_r, ready_w = os.pipe()
+    mapped_r, mapped_w = os.pipe()
+    pid = os.fork()
+    if pid == 0:
+        signal.signal(signal.SIGTERM, signal.SIG_DFL)
+        os.close(ready_r)
+        os.close(mapped_w)
+        os._exit(namespace(libc, flags, ready_w, mapped_r, argv))
+    state["pid"] = pid
+    os.close(ready_w)
+    os.close(mapped_r)
+    if state["ended"]:
+        end(None, None)
+    release_stdout()
+    contained = os.read(ready_r, 1) == b"u"
+    if contained and flags & CLONE_NEWUSER:
+        try:
+            write_maps(pid, caps)
+        except OSError:
+            contained = False
+    if contained:
+        os.write(mapped_w, b"m")
+    else:
+        end(None, None)
+    os.close(mapped_w)
+    try:
+        code = status(os.waitpid(pid, 0)[1])
+    except ChildProcessError:
+        code = 125
+    if not reap_all(budget) or not contained:
+        return 125
+    if state["ended"]:
+        return 124
+    return code
+
+
+sys.exit(main())
+"""
+
+_HERMES_PROBE_FORKLESS = r"""
+import errno, os, resource, signal, sys
+
+
+def main():
+    uid, euid, egid = os.getuid(), os.geteuid(), os.getegid()
+    if euid <= 0:
+        return 125
+    if uid == 0:
+        try:
+            os.seteuid(0)
+            os.setgid(egid)
+            os.setuid(euid)
+        except OSError:
+            return 125
+    elif uid != euid:
+        return 125
+    if os.getuid() != euid or os.geteuid() != euid:
+        return 125
+    try:
+        resource.setrlimit(resource.RLIMIT_NPROC, (0, 0))
+    except (OSError, ValueError):
+        return 125
+    # The XNU limit checks the real UID. A kernel or host where it is not
+    # enforced must fail before running the registered hook.
+    try:
+        pid = os.fork()
+    except OSError as exc:
+        if exc.errno != errno.EAGAIN:
+            return 125
+    else:
+        if pid == 0:
+            os._exit(125)
+        os.kill(pid, signal.SIGKILL)
+        os.waitpid(pid, 0)
+        return 125
+    # Noninteractive bash reads BASH_ENV and imports exported functions
+    # before the registered script starts.
+    for name in tuple(os.environ):
+        if name in {"BASH_ENV", "ENV"} or name.startswith("BASH_FUNC_"):
+            os.environ.pop(name, None)
+    try:
+        os.execv(sys.argv[1], sys.argv[1:])
+    except OSError:
+        return 125
+
+
+sys.exit(main())
+"""
+
+
+def _run_hermes_execution_probe(argv: list[str]) -> tuple[int | None, bytes]:
+    """Run a registered Hermes command with bounded output and time.
+
+    Returns the exit code and stdout, or ``None`` for the exit code when the
+    command could not start, timed out, wrote more than the proof, left
+    stdout open past the pipe wait, or left descendants that could not be
+    ended. One byte more than the proof closes the pipe, so the hook's output
+    never accumulates in Doctor. Whatever the command started ends with it on
+    exit, overflow and timeout: on Linux the kernel ends every descendant
+    with the probe's PID namespace, also one in a session of its own; on macOS the probe's
+    session is killed after a forkless launcher has refused descendant
+    creation; on Windows its
+    kill-on-close job is terminated. A launcher that started a long-lived
+    child left it running, one more for each Doctor run (r104 W5b).
+    """
+    limit = len(_HERMES_EXECUTION_PROBE_RESPONSE)
+    windows = os.name == "nt"
+    creationflags = 0
+    command = list(argv)
+    supervised = False
+    lifeline: tuple[int, int] | None = None
+    if windows:
+        creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000) | getattr(
+            subprocess, "CREATE_SUSPENDED", 0x00000004
+        )
+    elif _HERMES_PROBE_UNIX_CONTAINMENT == "pidns":
+        if not sys.executable:
+            return None, b""
+        command = [
+            sys.executable, "-I", "-S", "-c", _HERMES_PROBE_SUPERVISOR,
+            str(_HERMES_EXECUTION_PROBE_SWEEP), "--", *argv,
+        ]
+        supervised = True
+    elif _HERMES_PROBE_UNIX_CONTAINMENT == "forkless":
+        if not sys.executable:
+            return None, b""
+        command = [sys.executable, "-I", "-S", "-c", _HERMES_PROBE_FORKLESS, *argv]
+        lifeline = os.pipe()
+    else:
+        return None, b""
+    try:
+        proc = subprocess.Popen(
+            command, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+            start_new_session=not windows, creationflags=creationflags,
+            pass_fds=(lifeline[1],) if lifeline is not None else (),
+        )
+    except (OSError, ValueError):
+        if lifeline is not None:
+            os.close(lifeline[0])
+            os.close(lifeline[1])
+        return None, b""
+    if lifeline is not None:
+        os.close(lifeline[1])
+    job = None
+    if windows:
+        from defenseclaw.tui.windows_process import WindowsJob
+
+        try:
+            # The kill-on-close job owns the suspended launcher before its
+            # first instruction runs, so nothing it starts escapes the job's
+            # termination; breakaway is refused. Then it resumes the launcher.
+            job = WindowsJob(proc.pid, allow_breakaway=False)
+        except (OSError, ValueError):
+            # A probe Doctor cannot contain never runs: it is still suspended.
+            with contextlib.suppress(OSError):
+                proc.kill()
+            with contextlib.suppress(OSError, subprocess.TimeoutExpired):
+                proc.wait(timeout=_HERMES_EXECUTION_PROBE_TREE_REAP)
+            proc.stdout.close()
+            return None, b""
+    try:
+        return _collect_hermes_execution_probe(
+            proc, job, limit, supervised=supervised, lifeline=lifeline[0] if lifeline is not None else None,
+        )
+    finally:
+        if job is not None:
+            job.close()
+        if lifeline is not None:
+            os.close(lifeline[0])
+
+
+def _hermes_probe_lifeline_closed(fd: int, wait: float) -> bool:
+    """Whether every inherited write end of the lifeline closed within ``wait``."""
+    deadline = time.monotonic() + wait
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return False
+        try:
+            ready, _, _ = select.select([fd], [], [], remaining)
+            if ready and not os.read(fd, 4096):
+                return True
+        except (OSError, ValueError):
+            return False
+
+
+def _collect_hermes_execution_probe(
+    proc: subprocess.Popen, job, limit: int, *, supervised: bool = False, lifeline: int | None = None,
+) -> tuple[int | None, bytes]:
+    captured = bytearray()
+    overflow = threading.Event()
+
+    def drain() -> None:
+        fd = proc.stdout.fileno()
+        try:
+            while True:
+                chunk = os.read(fd, limit + 1 - len(captured))
+                if not chunk:
+                    return
+                captured.extend(chunk)
+                if len(captured) > limit:
+                    overflow.set()
+                    return
+        except OSError:
+            return
+        finally:
+            proc.stdout.close()
+
+    reader = threading.Thread(target=drain, name="hermes-execution-probe", daemon=True)
+    reader.start()
+
+    def kill_tree() -> bool:
+        """End the probe and everything it started; False when that is unproven."""
+        if job is not None:
+            try:
+                return job.terminate_sync(timeout=_HERMES_EXECUTION_PROBE_TREE_REAP)
+            except OSError:
+                with contextlib.suppress(OSError):
+                    proc.kill()
+                return False
+        if supervised:
+            # The supervisor ends the probe's namespace and reaps its init, so
+            # its exit means nothing is left.
+            if proc.poll() is None:
+                with contextlib.suppress(OSError):
+                    proc.send_signal(signal.SIGTERM)
+                try:
+                    proc.wait(timeout=_HERMES_EXECUTION_PROBE_TREE_REAP)
+                except subprocess.TimeoutExpired:
+                    with contextlib.suppress(OSError):
+                        os.killpg(proc.pid, signal.SIGKILL)
+                    return False
+            # Killed by a signal (by the probe, say): what it supervised is unknown.
+            return proc.returncode >= 0 and proc.returncode != _HERMES_PROBE_NOT_CONTAINED
+        with contextlib.suppress(OSError):
+            os.killpg(proc.pid, signal.SIGKILL)
+        return True
+
+    deadline = time.monotonic() + _HERMES_EXECUTION_PROBE_TIMEOUT
+    returncode: int | None
+    while True:
+        try:
+            returncode = proc.wait(timeout=0.05)
+            break
+        except subprocess.TimeoutExpired:
+            if overflow.is_set() or time.monotonic() >= deadline:
+                kill_tree()
+                try:
+                    proc.wait(timeout=_HERMES_EXECUTION_PROBE_TREE_REAP)
+                except subprocess.TimeoutExpired:
+                    # A failed Job Object termination must never turn the
+                    # hard probe deadline into an unbounded leader wait.
+                    with contextlib.suppress(OSError):
+                        proc.kill()
+                    with contextlib.suppress(subprocess.TimeoutExpired):
+                        proc.wait(timeout=_HERMES_EXECUTION_PROBE_TREE_REAP)
+                returncode = None
+                break
+    # The probe exited or was killed: end whatever it left running.
+    if not kill_tree():
+        returncode = None
+    reader.join(_HERMES_EXECUTION_PROBE_PIPE_WAIT)
+    if reader.is_alive() or overflow.is_set():
+        return None, bytes(captured[:limit])
+    if lifeline is not None and not _hermes_probe_lifeline_closed(lifeline, _HERMES_EXECUTION_PROBE_PIPE_WAIT):
+        # The forkless launcher or registered command still holds a stream.
+        return None, bytes(captured)
+    return returncode, bytes(captured)
+
+
+def _hermes_windows_execution_probe(check: WindowsHookCheck) -> WindowsHookCheck:
+    """Execute the exact active Windows target after the registration validator read it."""
+    if not check.healthy:
+        return check
+    returncode, stdout = _run_hermes_execution_probe(
+        [check.target, "hook", "--connector", "hermes", "--defenseclaw-execution-probe"],
+    )
+    if returncode == 0 and stdout == _HERMES_EXECUTION_PROBE_RESPONSE:
+        return check
+    return WindowsHookCheck(
+        "unexecutable", "registered Hermes command did not complete its active runtime execution probe",
+        check.command, check.target, check.raw_target,
+        "run 'defenseclaw setup hermes --yes --restart', then rerun 'defenseclaw doctor'",
+    )
+
+
 _CODEX_PROBE_TIMEOUT_STEP = "rerun defenseclaw doctor in a minute; Codex answers faster once the host is less busy"
+_HERMES_PASSIVE_STEP = (
+    "run 'defenseclaw doctor' without --passive to check for running Hermes hosts; "
+    "restart any running Hermes host so it loads the hooks"
+)
+
+
+def _hermes_passive_unverified(check: WindowsHookCheck | None, r: _DoctorResult) -> bool:
+    """A valid Hermes registration --passive could not check for running hosts.
+
+    --passive does not list processes, so an idle Hermes is unknown there,
+    not a failure; the full doctor checks it, as on Unix (GAP-0660).
+    """
+    return check is not None and check.state == "pending-reload" and not r.list_processes
 
 
 def _windows_native_hook_check(
@@ -6008,10 +6960,11 @@ def _check_claudecode_hooks(
                     dc_hooks += 1
     switched_off = _agent_hook_switch_problem(cfg, "claudecode") if dc_hooks > 0 else ""
     edited = _edited_hook_problem(cfg, "claudecode") if dc_hooks > 0 else ""
-    uninspected = _missing_tool_inspection_hook(cfg, "claudecode", settings, settings_path) if dc_hooks > 0 else ""
+    uninspected = _unguarded_tool_call_problem(cfg, "claudecode", settings_path, settings) if dc_hooks > 0 else ""
     if uninspected:
-        # Counting hooks kept a settings file without PreToolUse passing
-        # while no tool call was inspected (GAP-0645).
+        # Counting hooks kept a settings file without PreToolUse, or with an
+        # edited PreToolUse entry, passing while no tool call was inspected
+        # (GAP-0645, rel-1-0-4 GAP-0538).
         _emit(
             "fail",
             "Claude Code hooks",
@@ -6126,7 +7079,10 @@ def _check_codex_hooks(
                 remediation="run defenseclaw setup codex --yes for this CODEX_HOME",
             )
             return
-        _emit("pass", "Codex hooks", f"hook script at {hook_script}; registered in {config_path}", r=r)
+        if unguarded := _unguarded_tool_call_problem(cfg, "codex", config_path, document):
+            _emit("fail", "Codex hooks", unguarded, r=r, remediation=unguarded.repair)
+        else:
+            _emit("pass", "Codex hooks", f"hook script at {hook_script}; registered in {config_path}", r=r)
         _check_codex_notify(cfg, config_path, r, windows=False)
         config_toml = config_path
         live, broken = _foreign_defenseclaw_codex_hook_scripts(config_toml, hook_script)
@@ -6183,6 +7139,16 @@ def _codex_notify_problem(cfg, config_path: str, *, windows: bool) -> str:
     except (OSError, UnicodeError, ValueError):
         return ""
     argv = document.get("notify")
+    if not _doctor_secure_client(cfg):
+        # Only Secure Client registers a DefenseClaw notifier. Codex hands a
+        # notify program the turn record on its command line, so one left by
+        # an older setup is removed; the hooks deliver the turn instead.
+        if _codex_notify_is_defenseclaw(cfg, argv):
+            return (
+                f"notify in {user_config} still runs the DefenseClaw notifier, which gets each "
+                "Codex turn on its command line; the Codex hooks already report the turn"
+            )
+        return ""
     if not isinstance(argv, list) or not argv:
         return f"{user_config} has no notify entry, so Codex sends no turn-complete events to DefenseClaw"
     if len(argv) != 2 or not all(isinstance(part, str) for part in argv):
@@ -6201,6 +7167,23 @@ def _codex_notify_problem(cfg, config_path: str, *, windows: bool) -> str:
     return ""
 
 
+def _codex_notify_is_defenseclaw(cfg, argv) -> bool:
+    """Whether a Codex notify value is the notifier an older DefenseClaw setup wrote."""
+    if not isinstance(argv, list) or len(argv) != 2 or not all(isinstance(part, str) for part in argv):
+        return False
+    program, arg = argv
+    if arg == "notify":
+        return os.path.basename(program.replace("\\", "/")).lower() in ("defenseclaw-hook.exe", "defenseclaw-hook")
+    if program != "bash":
+        return False
+    data_dir = getattr(cfg, "data_dir", "") or ""
+    if paths_same(arg, os.path.join(data_dir, "notify-bridge.sh")):
+        return True
+    return bool(data_dir) and os.path.basename(arg).lower().startswith("notify-bridge") and paths_same(
+        os.path.dirname(arg), data_dir
+    )
+
+
 def _check_codex_notify(cfg, config_path: str, r: _DoctorResult, *, windows: bool) -> None:
     problem = _codex_notify_problem(cfg, config_path, windows=windows)
     if problem:
@@ -6209,7 +7192,11 @@ def _check_codex_notify(cfg, config_path: str, r: _DoctorResult, *, windows: boo
             "Codex notify",
             problem,
             r=r,
-            remediation="restore it: defenseclaw setup codex --yes",
+            remediation=(
+                "restore it: defenseclaw setup codex --yes"
+                if _doctor_secure_client(cfg)
+                else "remove it: defenseclaw setup codex --yes"
+            ),
         )
 
 
@@ -6390,6 +7377,194 @@ def _check_codex_telemetry_proxy(cfg, r: _DoctorResult) -> None:
     _emit(tag, "Codex telemetry proxy", detail, r=r, remediation=remediation)
 
 
+def _codex_otel_exports_to_defenseclaw(otel, product_token: str = "") -> bool:
+    """Whether a Codex [otel] table holds an exporter DefenseClaw wrote.
+
+    Ownership mirrors the gateway's codexExporterLooksManaged: an exporter that
+    carries a DefenseClaw credential. Stale x-defenseclaw-* markers alone are
+    the operator's collector and need no DefenseClaw environment.
+    """
+    if not isinstance(otel, dict):
+        return False
+    known = [product_token] if product_token else []
+    return any(
+        isinstance(otel.get(key), dict) and _otel_carries_product_credential(otel.get(key), known)
+        for key in ("exporter", "trace_exporter", "metrics_exporter")
+    )
+
+
+# The base64 user:password of an HTTP Basic Authorization value (RFC 7617).
+_OTEL_BASIC_CREDENTIAL_RE = re.compile(r"(?:^|[^0-9A-Za-z])basic[ \t]+([0-9A-Za-z+/_-]{4,}=*)", re.IGNORECASE)
+# The decode budget for one string (gateway otlpMaxPercentLayers,
+# otlpMaxBasicCredentials and otlpMaxDecodeBytes).
+_OTEL_MAX_PERCENT_LAYERS = 2
+_OTEL_MAX_BASIC_CREDENTIALS = 4
+_OTEL_MAX_DECODE_BYTES = 64 << 10
+
+
+def _otel_base64_decode(text: str):
+    """Standard or URL-safe base64, padded or not (gateway otlpBase64Decode)."""
+    raw = text.rstrip("=")
+    padded = (raw + "=" * (-len(raw) % 4)).encode("ascii")
+    for alphabet in (None, b"-_"):
+        try:
+            return base64.b64decode(padded, altchars=alphabet, validate=True).decode("latin-1")
+        except ValueError:  # binascii.Error included
+            continue
+    return None
+
+
+def _otel_percent_decode(text: str) -> str:
+    """Lenient %XX decode, as the gateway's otlpPercentDecode."""
+    return urllib.parse.unquote(text, encoding="latin-1")
+
+
+def _otel_value_forms(text: str) -> tuple[list[str], bool]:
+    """Mirror of the gateway's otlpValueForms.
+
+    The value, up to _OTEL_MAX_PERCENT_LAYERS percent-decode layers, and the
+    base64-decoded user:password of each Basic credential in those. The flag
+    reports a value the budget did not finish: larger than
+    _OTEL_MAX_DECODE_BYTES, a further percent layer, more Basic credentials, or
+    a Basic credential encoded again. The work is linear in the value.
+    """
+    forms = [text]
+    if len(text.encode("utf-8", "surrogatepass")) > _OTEL_MAX_DECODE_BYTES:
+        return forms, "%" in text or bool(_OTEL_BASIC_CREDENTIAL_RE.search(text))
+    layer, limited = text, False
+    for _ in range(_OTEL_MAX_PERCENT_LAYERS):
+        decoded = _otel_percent_decode(layer)
+        if decoded == layer:
+            break
+        forms.append(decoded)
+        layer = decoded
+    if _otel_percent_decode(layer) != layer:
+        limited = True
+    for form in list(forms):
+        matches = []
+        for match in _OTEL_BASIC_CREDENTIAL_RE.finditer(form):
+            if len(matches) == _OTEL_MAX_BASIC_CREDENTIALS:
+                limited = True
+                break
+            matches.append(match.group(1))
+        for credential in matches:
+            decoded = _otel_base64_decode(credential)
+            if decoded is None:
+                continue
+            forms.append(decoded)
+            if _otel_percent_decode(decoded) != decoded or _OTEL_BASIC_CREDENTIAL_RE.search(decoded):
+                limited = True
+    return forms, limited
+
+
+def _otel_strings(value):
+    """Every string in a value, TOML table keys included, without recursion."""
+    stack = [value]
+    while stack:
+        item = stack.pop()
+        if isinstance(item, str):
+            yield item
+        elif isinstance(item, dict):
+            for key, child in item.items():
+                stack.extend((key, child))
+        elif isinstance(item, list):
+            stack.extend(item)
+
+
+def _otel_carries_product_credential(value, known) -> bool:
+    """Mirror of the gateway's otlpCarriesProductCredential.
+
+    Ownership is decided by the secret: a value that contains a credential
+    this install can name (percent-encoded or inside a Basic credential
+    included, within the decode budget) is DefenseClaw's, whatever its host,
+    port, header-name or scheme spelling. A value that only looks like a
+    DefenseClaw token, with or without x-defenseclaw-* markers, is the
+    operator's.
+    """
+    known = [token for token in known if len(token) >= 8]
+    if not known:
+        return False
+    for text in _otel_strings(value):
+        forms, _ = _otel_value_forms(text)
+        if any(token in form for form in forms for token in known):
+            return True
+    return False
+
+
+def _codex_otel_unchecked_value(otel, product_token: str = "") -> str:
+    """Name a Codex [otel] value encoded past the decode budget.
+
+    Cleanup cannot tell whether such a value holds a DefenseClaw credential,
+    so it keeps it; Doctor reports it so the operator can decide.
+    """
+    if not isinstance(otel, dict):
+        return ""
+    known = [product_token] if product_token else []
+    for key in sorted(otel, key=str):
+        if _otel_carries_product_credential(otel[key], known):
+            continue
+        if any(_otel_value_forms(text)[1] for text in _otel_strings(otel[key])):
+            return f"otel.{key}"
+    return ""
+
+
+def _codex_scoped_otlp_token(cfg) -> str:
+    """The scoped Codex OTLP credential this install issued, or ""."""
+    data_dir = str(getattr(cfg, "data_dir", "") or "")
+    if not data_dir:
+        return ""
+    try:
+        with open(os.path.join(data_dir, "hooks", ".otlp-codex.token"), "rb") as fh:
+            raw = fh.read(4097)
+    except OSError:
+        return ""
+    if len(raw) > 4096:
+        return ""
+    try:
+        return raw.decode("ascii").strip()
+    except UnicodeError:
+        return ""
+
+
+def _codex_credential_off_gateway(otel, api_port: int, product_token: str = "") -> str:
+    """Name a Codex exporter that sends a DefenseClaw credential off this gateway.
+
+    An exporter carrying a DefenseClaw credential this install can name is the
+    product's; only the current loopback gateway port may receive it. Exporters
+    without one are the operator's and pass here, on any host or port.
+    """
+    if not isinstance(otel, dict):
+        return ""
+    known = [product_token] if product_token else []
+    for key in ("exporter", "trace_exporter", "metrics_exporter"):
+        exporter = otel.get(key)
+        if not isinstance(exporter, dict) or not _otel_carries_product_credential(exporter, known):
+            continue
+        http = exporter.get("otlp-http")
+        endpoint = http.get("endpoint") if isinstance(http, dict) else None
+        try:
+            parsed = urllib.parse.urlsplit(endpoint) if isinstance(endpoint, str) else None
+            port = parsed.port if parsed is not None else None
+        except ValueError:
+            parsed, port = None, None
+        on_gateway = (
+            parsed is not None
+            and parsed.scheme == "http"
+            and (parsed.hostname or "") in ("127.0.0.1", "localhost", "::1")
+            and port == api_port
+        )
+        if not on_gateway:
+            return f"otel.{key}.otlp-http.endpoint"
+    # Any other [otel] value that carries one (otel.environment, a resource
+    # table, a string exporter) is DefenseClaw residue wherever Codex sends it.
+    for key, value in otel.items():
+        if key in ("exporter", "trace_exporter", "metrics_exporter") and isinstance(value, dict):
+            continue
+        if _otel_carries_product_credential(value, known):
+            return f"otel.{key}"
+    return ""
+
+
 def _check_codex_otel_alignment(cfg, r: _DoctorResult) -> None:
     """Bind Codex's configured OTel tag to trusted live runtime status.
 
@@ -6400,6 +7575,7 @@ def _check_codex_otel_alignment(cfg, r: _DoctorResult) -> None:
     """
     expected = str(getattr(cfg, "environment", "") or "").strip()
     config_path = _codex_effective_config_path(cfg)
+    otel = {}
     try:
         with open(config_path, "rb") as fh:
             raw = fh.read(1024 * 1024 + 1)
@@ -6422,6 +7598,26 @@ def _check_codex_otel_alignment(cfg, r: _DoctorResult) -> None:
 
     if config_error:
         _emit("fail", "Codex OTel environment", config_error, r=r)
+    elif stale := _codex_credential_off_gateway(otel, _gateway_api_port(cfg), _codex_scoped_otlp_token(cfg)):
+        detail = (
+            f"config.toml {stale} sends a DefenseClaw credential to a port DefenseClaw does not own; "
+            "remove this exporter, then rerun Codex setup"
+            if stale.endswith(".endpoint")
+            else f"config.toml {stale} carries a DefenseClaw credential that Codex sends with its telemetry; "
+            "remove it, then rerun Codex setup"
+        )
+        _emit("fail", "Codex OTel environment", detail, r=r)
+    elif not _codex_otel_exports_to_defenseclaw(otel, _codex_scoped_otlp_token(cfg)):
+        # Host Codex sends no native OTLP to DefenseClaw since 1.0.4: setup
+        # writes [otel] only inside an OpenShell sandbox and puts the user's
+        # own [otel] back on upgrade (GAP-1101). Hook telemetry carries
+        # DefenseClaw's environment, so there is nothing to align here.
+        _emit(
+            "pass",
+            "Codex OTel environment",
+            "Codex sends no native OTLP to DefenseClaw on this host; hook telemetry carries its environment",
+            r=r,
+        )
     elif not expected:
         _emit("fail", "Codex OTel environment", "DefenseClaw environment is empty", r=r)
     elif not actual:
@@ -6440,6 +7636,18 @@ def _check_codex_otel_alignment(cfg, r: _DoctorResult) -> None:
         )
     else:
         _emit("pass", "Codex OTel environment", f"config.toml and DefenseClaw use {expected!r}", r=r)
+
+    if not config_error:
+        unchecked = _codex_otel_unchecked_value(otel, _codex_scoped_otlp_token(cfg))
+        if unchecked:
+            _emit(
+                "warn",
+                "Codex OTel ownership",
+                f"config.toml {unchecked} is encoded too deeply for Doctor to check for a DefenseClaw credential, "
+                "so DefenseClaw kept it",
+                r=r,
+                remediation="if it is a DefenseClaw token, remove it; otherwise no action is needed",
+            )
 
     try:
         api_port = int(getattr(cfg.gateway, "api_port", 0) or 0)
@@ -6615,7 +7823,23 @@ def _check_hermes_hooks(
     search_path: str | None = None,
     pathext: str | None = None,
 ) -> None:
-    selected_config = config_path or hermes_config_path()
+    try:
+        current_config = hermes_config_path()
+    except ValueError as exc:
+        _emit(
+            "fail", _HERMES_HOOKS_LABEL,
+            f"Hermes active config path cannot be resolved: {exc}; live=false", r=r,
+            remediation="set HERMES_HOME to the home in use, then run 'defenseclaw setup hermes --yes --restart'",
+        )
+        return
+    selected_config = config_path or current_config
+    if selected_config != current_config:
+        _emit(
+            "fail", _HERMES_HOOKS_LABEL,
+            f"Hermes requested config {selected_config} differs from current config {current_config}; live=false",
+            r=r, remediation="run 'defenseclaw setup hermes --yes --restart' for the current HERMES_HOME",
+        )
+        return
     unsupported = hermes_profile_unsupported_reason(selected_config)
     if unsupported:
         _emit(
@@ -6626,6 +7850,11 @@ def _check_hermes_hooks(
         )
         return
     if (platform_name or os.name) == "nt":
+        if _hook_health_paths_from_lock(cfg, "hermes") != [current_config]:
+            _emit("fail", _HERMES_HOOKS_LABEL,
+                  f"Hermes lock does not bind its current effective config {current_config}; live=false", r=r,
+                  remediation="run 'defenseclaw setup hermes --yes --restart' for the current HERMES_HOME")
+            return
         _check_windows_native_hooks(
             cfg,
             "hermes",
@@ -6675,10 +7904,9 @@ def _check_devin_hooks(
 # substrings). The fallback paths mirror the Go source of truth in
 # ``internal/gateway/connector/hook_only.go`` (hermesConfigPath / cursorHooksPath
 # / devinHooksPath / opencodePluginPath); the gateway's
-# hook_contract_lock.json is consulted first and these are only the offline
-# fallback. Markers are matched as raw substrings (see _file_references_marker)
-# so the check stays format-agnostic: hermes is YAML, cursor/devin
-# are JSON, opencode is a flat ``.js`` plugin (existence + substring).
+# hook_contract_lock.json is consulted first. Hermes requires a lock for the
+# current HERMES_HOME and parses its YAML matrix and approvals. Other entries
+# retain offline fallbacks and marker checks.
 _HOOK_HEALTH_FALLBACK: dict[str, tuple[tuple[str, ...], tuple[str, ...]]] = {
     "hermes": (
         (os.path.join(".hermes", "config.yaml"),),
@@ -6700,10 +7928,6 @@ _HOOK_HEALTH_FALLBACK: dict[str, tuple[tuple[str, ...], tuple[str, ...]]] = {
         (os.path.join(".config", "amp", "plugins", "defenseclaw.ts"),),
         ("DefenseClaw Amp policy bridge", "/api/v1/amp/hook"),
     ),
-    "omnigent": (
-        (os.path.join(".omnigent", "config.yaml"),),
-        ("defenseclaw_omnigent_policy", "defenseclaw_guardrail"),
-    ),
     "kiro": (
         (os.path.join(".kiro", "hooks", "defenseclaw.json"),),
         ("defenseclaw-", "kiro-hook.sh", "hook --connector kiro"),
@@ -6720,15 +7944,13 @@ _HOOK_HEALTH_LABELS = {
     "devin": "Devin hooks",
     "opencode": "OpenCode hooks",
     "amp": "Amp policy plugin",
-    "omnigent": "OmniGent policy",
     "kiro": "Kiro hooks",
 }
 
 
 # Kiro IDE 1.0.182 is the first build that reads the global ~/.kiro/hooks
-# (kiro.dev/changelog/ide/1-0-182, "adds user-level global hooks"). Keep in
-# parity with KiroIDEGlobalHooksFloor in internal/enterprisehooks.
-_KIRO_IDE_GLOBAL_HOOKS_FLOOR = (1, 0, 182)
+# (kiro.dev/changelog/ide/1-0-182, "adds user-level global hooks"); the floor
+# is judged by connector_contracts.judge_kiro_form, like setup and Go.
 _KIRO_IDE_PRODUCT_MAX_BYTES = 256 << 10
 
 
@@ -6754,24 +7976,32 @@ def _kiro_ide_product_candidates() -> list[str]:
     return [os.path.join(home, "Kiro", app), os.path.join("/usr/share/kiro", app), os.path.join("/opt/Kiro", app)]
 
 
-def _installed_kiro_ide_version() -> tuple[str, tuple[int, int, int]] | None:
-    """Return the installed Kiro IDE version, read from product.json, never run."""
+def _installed_kiro_ide_forms() -> list:
+    """Judge every installed Kiro IDE, read from product.json, never run.
+
+    A product.json that exists but cannot be read, or that does not name the
+    Kiro IDE and a version, is an install whose version is unknown, and
+    unknown is not protected (judge_kiro_form).
+    """
+    from defenseclaw.connector_contracts import KIRO_FORM_IDE, judge_kiro_form
+
+    forms = []
     for path in _kiro_ide_product_candidates():
+        if not os.path.lexists(path):
+            continue
+        version = ""
         try:
             with open(path, "rb") as fh:
                 data = fh.read(_KIRO_IDE_PRODUCT_MAX_BYTES + 1)
             product = json.loads(data) if len(data) <= _KIRO_IDE_PRODUCT_MAX_BYTES else None
         except (OSError, ValueError):
-            continue
-        if not isinstance(product, dict):
-            continue
-        if product.get("nameShort") != "Kiro" or product.get("applicationName") != "kiro":
-            continue
-        version = str(product.get("version") or "").strip()
-        match = re.match(r"^(\d+)\.(\d+)(?:\.(\d+))?", version)
-        if match:
-            return version, (int(match.group(1)), int(match.group(2)), int(match.group(3) or 0))
-    return None
+            product = None
+        named = isinstance(product, dict) and product.get("nameShort") == "Kiro"
+        if named and product.get("applicationName") == "kiro":
+            version = str(product.get("version") or "").strip()
+        unread = f"Kiro IDE at {path} is installed, but its version could not be read"
+        forms.append(judge_kiro_form(KIRO_FORM_IDE, version, unread=unread, path=path))
+    return forms
 
 
 def _check_kiro_global_scope(r: _DoctorResult) -> None:
@@ -6789,28 +8019,38 @@ def _check_kiro_global_scope(r: _DoctorResult) -> None:
     """
     global_hooks = os.path.join(connector_home("kiro"), "hooks", "defenseclaw.json")
     if _file_references_marker(global_hooks, _HOOK_HEALTH_FALLBACK["kiro"][1]):
-        ide = _installed_kiro_ide_version()
-        if ide is not None and ide[1] < _KIRO_IDE_GLOBAL_HOOKS_FLOOR:
-            _emit(
-                "warn",
-                "Connector scope",
-                f"Kiro IDE {ide[0]} reads only the project's .kiro/hooks, so its agent sessions run "
-                f"without DefenseClaw hooks; {global_hooks} covers kiro-cli --v3",
-                r=r,
-                reason_code="kiro_ide_below_global_hooks_floor",
-                remediation=(
-                    "Update Kiro IDE to 1.0.182 or later, or set claw.workspace_dir to the "
-                    "project root and run `defenseclaw setup kiro`"
-                ),
-            )
+        ides = _installed_kiro_ide_forms()
+        unprotected = [form for form in ides if not form.protected]
+        for form in unprotected:
+            if form.below_floor:
+                _emit(
+                    "warn",
+                    "Connector scope",
+                    f"Kiro IDE {form.version} reads only the project's .kiro/hooks, so its agent sessions run "
+                    f"without DefenseClaw hooks; {global_hooks} covers kiro-cli --v3",
+                    r=r,
+                    reason_code="kiro_ide_below_global_hooks_floor",
+                    remediation="Update Kiro IDE to 1.0.182 or later, then run `defenseclaw setup kiro`",
+                )
+            else:
+                _emit(
+                    "warn",
+                    "Connector scope",
+                    f"Kiro IDE at {form.path} is installed, but its version could not be read, so it is not "
+                    "counted as protected; Kiro IDE reads the global hooks file from 1.0.182",
+                    r=r,
+                    reason_code="kiro_ide_version_unknown",
+                    remediation="Reinstall or update Kiro IDE so its product.json names its version",
+                )
+        if unprotected:
             return
-        if ide is not None:
-            detail = f"global user config ({global_hooks}); Kiro IDE {ide[0]} and kiro-cli --v3 load it"
+        if ides:
+            detail = f"global user config ({global_hooks}); Kiro IDE {ides[0].version} and kiro-cli --v3 load it"
         else:
             detail = (
                 f"global user config ({global_hooks}); Kiro IDE 1.0.182+ and kiro-cli --v3 "
                 "load it. Kiro IDE builds before 1.0.182 read only the project's "
-                ".kiro/hooks: set claw.workspace_dir for them"
+                ".kiro/hooks, so they are not covered"
             )
         _emit("pass", "Connector scope", detail, r=r)
         return
@@ -6823,8 +8063,7 @@ def _check_kiro_global_scope(r: _DoctorResult) -> None:
         reason_code="kiro_hooks_not_workspace_scoped",
         remediation=(
             "Run `defenseclaw setup kiro`, which writes ~/.kiro/hooks/defenseclaw.json "
-            "(read by Kiro IDE 1.0.182+ and kiro-cli --v3); for older Kiro IDE builds also "
-            "set claw.workspace_dir to the project root"
+            "(read by Kiro IDE 1.0.182+ and kiro-cli --v3); update an older Kiro IDE first"
         ),
     )
 
@@ -6885,9 +8124,8 @@ def _check_kiro_custom_default_agent(r: _DoctorResult) -> None:
 def _file_references_marker(path: str, markers: tuple[str, ...]) -> bool:
     """Report whether the file at ``path`` contains any ``markers`` substring.
 
-    Deliberately format-agnostic — no JSON/YAML parse — because these
-    connectors this serves store hook entries in different shapes: Hermes uses
-    YAML, Cursor and Devin use JSON, and OpenCode uses a flat ``.js`` plugin.
+    Deliberately format-agnostic for Cursor/Devin JSON and the OpenCode
+    ``.js`` plugin. Hermes has a structured read-back in _check_hook_health.
     Mirrors the Go self-heal guard's ``configFileReferencesHook`` (raw-bytes
     substring match) so doctor and the guard agree on what "the hook is
     installed" means. A missing/unreadable file reports ``False``.
@@ -6900,19 +8138,87 @@ def _file_references_marker(path: str, markers: tuple[str, ...]) -> bool:
     return any(m and m in data for m in markers)
 
 
-def _opencode_managed_plugin_drift(cfg, path: str) -> str:
-    """Return an integrity failure for OpenCode's user-scoped bridge, if any."""
+def _managed_path_within(path: str, root: str) -> bool:
+    try:
+        rel = os.path.relpath(path, root)
+    except ValueError:  # another Windows drive
+        return False
+    if os.name == "nt":
+        rel = rel.lower()
+    return rel == "." or (rel != ".." and not rel.startswith(".." + os.sep))
+
+
+def _managed_backup_target_under(home: str, old_root: str, captured: str) -> str:
+    if _managed_path_within(home, old_root) or _managed_path_within(old_root, home):
+        return ""
+    rel = os.path.relpath(captured, old_root)
+    if rel == "." or rel.startswith(".."):
+        return ""
+    candidate = os.path.join(home, rel)
+    return candidate if os.path.lexists(candidate) else ""
+
+
+def _shallowest_missing_ancestor(path: str) -> str:
+    chain = [path]
+    while os.path.dirname(chain[-1]) != chain[-1]:
+        chain.append(os.path.dirname(chain[-1]))
+    for ancestor in reversed(chain[1:]):
+        try:
+            os.lstat(ancestor)
+        except FileNotFoundError:
+            return ancestor
+        except OSError:
+            return ""
+    return ""
+
+
+def managed_backup_target_after_home_move(record_path: str, captured: str) -> str:
+    """The current-home file a receipt captured before the account home moved, or "".
+
+    The same proof as the gateway's managedBackupTargetAfterHomeMove
+    (GAP-0543, GAP-0633): the receipt lives under the current home, the
+    captured target is outside it, the old root of that target no longer
+    exists (or is the empty folder an rsync-then-empty move leaves), and the
+    same relative file exists under the current home. It only re-targets the
+    receipt; the caller still compares the current file with the recorded
+    digest, so an edited plugin is never accepted.
+    """
+    home = os.path.expanduser("~")
+    if not home or home == "~" or not captured.strip() or not os.path.isabs(captured):
+        return ""
+    home, captured = os.path.normpath(home), os.path.normpath(captured)
+    if not _managed_path_within(os.path.abspath(record_path), home) or _managed_path_within(captured, home):
+        return ""
+    missing = _shallowest_missing_ancestor(captured)
+    if not missing:
+        return ""
+    if candidate := _managed_backup_target_under(home, missing, captured):
+        return candidate
+    parent = os.path.dirname(missing)
+    if parent != os.path.dirname(parent) and os.path.isdir(parent) and not os.path.islink(parent):
+        try:
+            if not os.listdir(parent):
+                return _managed_backup_target_under(home, parent, captured)
+        except OSError:
+            return ""
+    return ""
+
+
+def _managed_plugin_drift(cfg, path: str, connector: str = "opencode") -> str:
+    """Return an integrity failure for a user-scoped plugin bridge, if any."""
 
     data_dir = str(getattr(cfg, "data_dir", "") or "")
-    backup_path = os.path.join(data_dir, "connector_backups", "opencode", "config.json")
+    backup_path = os.path.join(data_dir, "connector_backups", connector, "config.json")
     try:
         with open(backup_path, encoding="utf-8") as fh:
             record = json.load(fh)
     except (OSError, UnicodeError, json.JSONDecodeError):
         return f"managed backup evidence is missing or unreadable: {backup_path}"
-    if record.get("connector") != "opencode" or record.get("logical_name") != "config":
+    if not isinstance(record, dict) or record.get("connector") != connector or record.get("logical_name") != "config":
         return f"managed backup identity is invalid: {backup_path}"
     recorded_path = str(record.get("path") or "")
+    # A supported home move leaves the receipt naming the old home.
+    recorded_path = managed_backup_target_after_home_move(backup_path, recorded_path) or recorded_path
     if not recorded_path or os.path.normcase(os.path.abspath(recorded_path)) != os.path.normcase(os.path.abspath(path)):
         return f"managed backup target does not match the active plugin: {backup_path}"
     expected = str(record.get("post_sha256") or "")
@@ -6930,7 +8236,7 @@ def _opencode_managed_plugin_drift(cfg, path: str) -> str:
     if hashlib.sha256(body).hexdigest() != expected:
         return (
             "managed plugin drift detected; run "
-            "`defenseclaw setup opencode --yes --restart` to reconcile"
+            f"`defenseclaw setup {connector} --yes --restart` to reconcile"
         )
     return ""
 
@@ -7029,15 +8335,14 @@ def _check_opencode_later_plugins(cfg, path: str, r: _DoctorResult) -> None:
     )
 
 
-def _opencode_load_heartbeat_status(cfg) -> tuple[str, str]:
-    """Report whether the managed OpenCode bridge actually loaded.
+def _authenticated_gateway_health(cfg) -> tuple[dict | None, str, bool]:
+    """The gateway's health from its authenticated ``/status`` document.
 
-    A current file digest cannot distinguish a normal OpenCode process from
-    ``--pure`` or another external-plugin-disabled launch. The bridge emits a
-    scoped, secret-free heartbeat from its v1.18.10-v1.18.19 config hook.
-    Consume it only through the authenticated, process/profile-bound status
-    document; missing or old evidence stays unverified and never guesses why
-    the client did not load the plugin.
+    The document counts only when the listener is this profile's gateway
+    process and the runtime it reports binds back to it, the same trust as
+    ``cmd_status._fetch_runtime_bound_health``. Returns
+    ``(health, "", True)``, or ``(None, reason, checked)``: ``checked`` is
+    False when no gateway runs.
     """
     gateway = getattr(cfg, "gateway", None)
     try:
@@ -7045,16 +8350,16 @@ def _opencode_load_heartbeat_status(cfg) -> tuple[str, str]:
     except (TypeError, ValueError):
         api_port = 0
     if not 1 <= api_port <= 65_535:
-        return "warn", "runtime load unverified: sidecar API port is unavailable"
+        return None, "sidecar API port is unavailable", True
 
     token, _token_env, _token_source = _daemon_effective_gateway_token(cfg)
     if not token:
-        return "warn", "runtime load unverified: authenticated gateway token is unavailable"
+        return None, "authenticated gateway token is unavailable", True
     trust = _trusted_gateway_listener(cfg)
     if not trust.trusted and trust.code == "missing":
-        return "warn", "runtime load not checked: the gateway is not running"
+        return None, "the gateway is not running", False
     if not trust.trusted:
-        return "warn", f"runtime load unverified: {trust.detail}"
+        return None, trust.detail, True
 
     code, body = _http_probe(
         _gateway_api_url(cfg, "/status"),
@@ -7066,18 +8371,33 @@ def _opencode_load_heartbeat_status(cfg) -> tuple[str, str]:
         bound_peer=trust,
     )
     if code != 200:
-        detail = "gateway is unreachable" if code == 0 else f"authenticated status returned HTTP {code}"
-        return "warn", f"runtime load unverified: {detail}"
+        return None, ("gateway is unreachable" if code == 0 else f"authenticated status returned HTTP {code}"), True
     runtime_ok, runtime_detail = _authenticated_runtime_matches(cfg, trust.pid, body)
     if not runtime_ok:
-        return "warn", f"runtime load unverified: {runtime_detail}"
+        return None, runtime_detail, True
     try:
         document = json.loads(body)
         health = document.get("health") if isinstance(document, dict) else None
     except (json.JSONDecodeError, TypeError):
         health = None
     if not isinstance(health, dict):
-        return "warn", "runtime load unverified: authenticated status health is malformed"
+        return None, "authenticated status health is malformed", True
+    return health, "", True
+
+
+def _opencode_load_heartbeat_status(cfg) -> tuple[str, str]:
+    """Report whether the managed OpenCode bridge actually loaded.
+
+    A current file digest cannot distinguish a normal OpenCode process from
+    ``--pure`` or another external-plugin-disabled launch. The bridge emits a
+    scoped, secret-free heartbeat from its v1.18.10-v1.18.19 config hook.
+    Consume it only through the authenticated, process/profile-bound status
+    document; missing or old evidence stays unverified and never guesses why
+    the client did not load the plugin.
+    """
+    health, problem, checked = _authenticated_gateway_health(cfg)
+    if health is None:
+        return "warn", f"runtime load {'unverified' if checked else 'not checked'}: {problem}"
 
     from defenseclaw.commands.cmd_status import (
         _RUNTIME_HEALTHY_STATES,
@@ -7314,7 +8634,6 @@ def _probe_cursor_windows_runtime(cfg, adapter_path: str) -> tuple[bool, str]:
     if api_port <= 0 or api_port > 65535:
         return False, "cannot resolve the sidecar API port for a Cursor runtime probe"
 
-    health_url = _gateway_api_url(cfg, "/health")
     payload = json.dumps(
         {
             "hook_event_name": "sessionStart",
@@ -7386,8 +8705,8 @@ def _probe_cursor_windows_runtime(cfg, adapter_path: str) -> tuple[bool, str]:
         # process tree is fully reaped and live sidecar state is read again
         # before a second native event is allowed to start.
         for attempt in range(_CURSOR_WINDOWS_RUNTIME_PROBE_ATTEMPTS):
-            before_code, before_body = _http_probe(
-                health_url,
+            before_code, before_body = _gateway_health_probe(
+                cfg,
                 timeout=3.0,
                 response_limit=_HEALTH_DOCUMENT_MAX_BYTES,
                 allow_truncation=False,
@@ -7441,8 +8760,8 @@ def _probe_cursor_windows_runtime(cfg, adapter_path: str) -> tuple[bool, str]:
     if "additional_context" in response and not isinstance(response["additional_context"], str):
         return False, "configured Cursor adapter returned invalid sessionStart additional_context"
 
-    after_code, after_body = _http_probe(
-        health_url,
+    after_code, after_body = _gateway_health_probe(
+        cfg,
         timeout=3.0,
         response_limit=_HEALTH_DOCUMENT_MAX_BYTES,
         allow_truncation=False,
@@ -7482,15 +8801,23 @@ def _check_cursor_configured_runtime(
     mode = str(mode_resolver("cursor") if callable(mode_resolver) else "observe").strip().lower()
     fail_mode = str(fail_resolver("cursor") if callable(fail_resolver) else "open").strip().lower()
     mode = "action" if mode == "action" else "observe"
-    # Cursor observe hooks fail open, except on a managed deployment outside
-    # Secure Client, where the Cursor registration carries the
-    # administrator's fail mode (unset closed) in either guardrail mode.
+    # On a managed deployment outside Secure Client the Cursor registration
+    # carries the administrator's fail mode (unset closed) in either
+    # guardrail mode. A per-user registration has failClosed: true in both
+    # modes, and its hook's outage mode follows the policy tier
+    # (oss-outage-open), so no guardrail mode makes it inconsistent. Secure
+    # Client keeps its observe-open, action-closed registration.
     standalone = getattr(cfg, "managed_outside_secure_client", None)
+    per_user = str(getattr(cfg, "deployment_mode", "") or "").strip().lower() != "managed_enterprise"
     if callable(standalone) and standalone() is True:
         expected_fail_mode = "open" if fail_mode == "open" else "closed"
+        expected_fail_closed = expected_fail_mode == "closed"
+    elif per_user:
+        expected_fail_mode = fail_mode
+        expected_fail_closed = True
     else:
         expected_fail_mode = "closed" if mode == "action" else "open"
-    expected_fail_closed = expected_fail_mode == "closed"
+        expected_fail_closed = expected_fail_mode == "closed"
     hilt = None
     hilt_resolver = getattr(guardrail, "effective_hilt", None)
     if callable(hilt_resolver):
@@ -7576,25 +8903,30 @@ def _hook_health_paths_from_lock(cfg, connector: str) -> list[str]:
     """Return the hook config path(s) the gateway actually wrote for
     ``connector``, read from ``hook_contract_lock.json``.
 
-    This is the authoritative source — exactly what Setup patched, captured
-    from ``HookConfigPathsForConnector`` / ``ResolvedConnectorLocations`` on
-    the Go side — so doctor watches the real files rather than guessing.
-    Returns ``[]`` when the lock file is absent/unreadable or carries no path
-    for the connector; the caller then falls back to the static map.
+    These paths are captured from Go's ``HookConfigPathsForConnector`` /
+    ``ResolvedConnectorLocations``. Hermes compares the receipt with the
+    current effective config path; other callers may use a static fallback.
     """
+    from defenseclaw.doctor_hooks import _InspectionError, _read_config
+
     data_dir = getattr(cfg, "data_dir", "") or ""
     if not data_dir:
         return []
     try:
-        with open(os.path.join(data_dir, "hook_contract_lock.json"), encoding="utf-8") as fh:
-            lock = json.load(fh)
-    except (OSError, UnicodeError, json.JSONDecodeError):
+        lock = _read_config(os.path.join(data_dir, "hook_contract_lock.json"), "hook-lock")
+    except _InspectionError:
         return []
-    entry = (lock.get("connectors") or {}).get(connector) or {}
-    locations = entry.get("locations") or {}
+    connectors = lock.get("connectors")
+    entry = connectors.get(connector) if isinstance(connectors, dict) else None
+    if not isinstance(entry, dict):
+        return []
+    locations = entry.get("locations")
     if not isinstance(locations, dict):
         return []
-    return [str(p) for p in (locations.get("hook_config_paths") or []) if p]
+    paths = locations.get("hook_config_paths")
+    if not isinstance(paths, list) or not all(isinstance(path, str) and path for path in paths):
+        return []
+    return paths
 
 
 def _hook_runtime_paths_from_lock(cfg, connector: str) -> list[str]:
@@ -7614,11 +8946,6 @@ def _hook_runtime_paths_from_lock(cfg, connector: str) -> list[str]:
     return [str(p) for p in (locations.get("hook_script_paths") or []) if p]
 
 
-_OMNIGENT_METADATA_LIMIT = 64 * 1024
-_OMNIGENT_ARTIFACT_LIMIT = 2 * 1024 * 1024
-_OMNIGENT_PID_LIMIT = 256
-
-
 def _acl_inspection_unavailable(problem: str) -> bool:
     """Distinguish unprovable ACL inspection from a proven unsafe grant."""
     return any(
@@ -7632,363 +8959,30 @@ def _acl_inspection_unavailable(problem: str) -> bool:
     )
 
 
-def _omnigent_path_ref(role: str, path: str) -> str:
-    """Render a bounded role plus path hash, never attacker-controlled path text."""
-    try:
-        normalized = canonical_path(path) or os.path.abspath(path)
-    except (OSError, ValueError):
-        normalized = "<invalid>"
-    digest = hashlib.sha256(os.fsencode(os.path.normcase(normalized))).hexdigest()[:16]
-    return f"{role}[path-sha256={digest}]"
 
 
-def _omnigent_path_is_contained(path: str, root: str) -> bool:
-    """Require lexical and canonical containment beneath a configured root."""
-    if not path or not root or not os.path.isabs(path) or not os.path.isabs(root):
-        return False
-    candidate = os.path.abspath(path)
-    boundary = os.path.abspath(root)
-    try:
-        lexical = os.path.normcase(os.path.commonpath((candidate, boundary)))
-        resolved = os.path.realpath(candidate)
-        resolved_boundary = os.path.realpath(boundary)
-        canonical = os.path.normcase(os.path.commonpath((resolved, resolved_boundary)))
-    except (OSError, ValueError):
-        return False
-    return lexical == os.path.normcase(boundary) and canonical == os.path.normcase(resolved_boundary)
 
 
-def _omnigent_custody_read(
-    path: str,
-    *,
-    role: str,
-    max_bytes: int,
-    root: str | None = None,
-    confidential: bool = False,
-) -> tuple[str, bytes | None, str]:
-    """Use the PID reader's full custody chain for bounded OmniGent evidence."""
-    reference = _omnigent_path_ref(role, path)
-    if not path or not os.path.isabs(path):
-        return "unsafe", None, f"{reference} path is not absolute"
-    if root is not None and not _omnigent_path_is_contained(path, root):
-        return "unsafe", None, f"{reference} escapes its trusted root"
-    try:
-        info = os.lstat(path)
-        if is_link_or_reparse(path) or not stat.S_ISREG(info.st_mode):
-            return "unsafe", None, f"{reference} is not a regular non-reparse file"
-        custody_status, custody_problem = _pid_record_integrity_error(path, info)
-        if custody_status == "denied":
-            if _acl_inspection_unavailable(custody_problem):
-                return "unavailable", None, f"{reference} custody is unavailable"
-            return "unsafe", None, f"{reference} custody is unsafe"
-        if custody_status != "ok":
-            return "unavailable", None, f"{reference} custody is unavailable"
-        if confidential:
-            private_problem = ""
-            if os.name == "nt":
-                private_problem = windows_acl_confidentiality_error(path) or ""
-                if _acl_inspection_unavailable(private_problem):
-                    return "unavailable", None, f"{reference} private custody is unavailable"
-            else:
-                if stat.S_IMODE(info.st_mode) & 0o077:
-                    return "unsafe", None, f"{reference} private custody is unsafe"
-                if sys.platform == "darwin":
-                    private_problem = darwin_acl_confidentiality_error(path) or ""
-                    if _acl_inspection_unavailable(private_problem):
-                        return "unavailable", None, f"{reference} private custody is unavailable"
-            if private_problem:
-                return "unsafe", None, f"{reference} private custody is unsafe"
-        body = read_regular_file_no_follow(path, max_bytes=max_bytes, expected_stat=info)
-        if not os.path.samestat(info, os.lstat(path)):
-            return "unavailable", None, f"{reference} changed while inspected"
-    except FileNotFoundError:
-        return "missing", None, f"{reference} is missing"
-    except PermissionError:
-        return "unavailable", None, f"{reference} custody is unavailable"
-    except UnsafePathError as exc:
-        if exc.code == UNSAFE_PATH_EXCEEDS_LIMIT:
-            return "invalid", None, f"{reference} exceeds the {max_bytes}-byte limit"
-        if exc.code == UNSAFE_PATH_CHANGED:
-            return "unavailable", None, f"{reference} changed while inspected"
-        return "unsafe", None, f"{reference} is not a stable regular file under trusted custody"
-    except OSError:
-        return "unavailable", None, f"{reference} custody is unavailable"
-    return "ok", body, ""
 
 
-def _omnigent_custody_json(
-    path: str,
-    *,
-    role: str,
-    root: str,
-    confidential: bool = False,
-) -> tuple[str, dict | None, str]:
-    status, body, detail = _omnigent_custody_read(
-        path,
-        role=role,
-        max_bytes=_OMNIGENT_METADATA_LIMIT,
-        root=root,
-        confidential=confidential,
-    )
-    if status != "ok" or body is None:
-        return status, None, detail
-    try:
-        decoded = json.loads(body.decode("utf-8"))
-    except (UnicodeError, json.JSONDecodeError):
-        return "invalid", None, f"{_omnigent_path_ref(role, path)} is not valid UTF-8 JSON"
-    if not isinstance(decoded, dict):
-        return "invalid", None, f"{_omnigent_path_ref(role, path)} identity is invalid"
-    return "ok", decoded, ""
 
 
-def _omnigent_custody_text(path: str, *, role: str, root: str | None = None) -> tuple[str | None, str]:
-    status, body, detail = _omnigent_custody_read(
-        path,
-        role=role,
-        max_bytes=_OMNIGENT_ARTIFACT_LIMIT,
-        root=root,
-    )
-    if status != "ok" or body is None:
-        return None, detail
-    try:
-        return body.decode("utf-8"), ""
-    except UnicodeError:
-        return None, f"{_omnigent_path_ref(role, path)} is not valid UTF-8"
 
 
-def _omnigent_backup_record(cfg, logical: str) -> tuple[dict | None, str]:
-    data_dir = str(getattr(cfg, "data_dir", "") or "")
-    if not os.path.isabs(data_dir):
-        return None, f"managed-{logical}-backup custody is unavailable"
-    backup_path = os.path.join(data_dir, "connector_backups", "omnigent", f"{logical}.json")
-    status, record, detail = _omnigent_custody_json(
-        backup_path,
-        role=f"managed-{logical}-backup",
-        root=data_dir,
-        confidential=True,
-    )
-    if status != "ok" or record is None:
-        return None, detail
-    if record.get("version") != 1 or record.get("connector") != "omnigent" or record.get("logical_name") != logical:
-        return None, f"{_omnigent_path_ref(f'managed-{logical}-backup', backup_path)} identity is invalid"
-    target = record.get("path")
-    if (
-        not isinstance(target, str)
-        or not target
-        or "\x00" in target
-        or not os.path.isabs(target)
-        or os.pardir in Path(target).parts
-    ):
-        return None, f"managed-{logical}-artifact target identity is invalid"
-    if logical == "module" and not _omnigent_path_is_contained(target, data_dir):
-        return None, f"{_omnigent_path_ref('managed-module-artifact', target)} escapes DefenseClaw data custody"
-    expected_name = {"module": "defenseclaw_omnigent_policy.py", "pth": "defenseclaw_omnigent.pth"}.get(logical)
-    if expected_name and os.path.normcase(os.path.basename(target)) != os.path.normcase(expected_name):
-        return None, f"{_omnigent_path_ref(f'managed-{logical}-artifact', target)} identity is invalid"
-    digest = record.get("post_sha256")
-    if not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest):
-        return None, f"managed-{logical}-backup digest is missing or invalid"
-    return record, ""
 
 
-def _omnigent_lock_locations(cfg) -> tuple[dict | None, str]:
-    data_dir = str(getattr(cfg, "data_dir", "") or "")
-    if not os.path.isabs(data_dir):
-        return None, "omnigent-lock custody is unavailable"
-    lock_path = os.path.join(data_dir, "hook_contract_lock.json")
-    status, lock, detail = _omnigent_custody_json(
-        lock_path,
-        role="omnigent-lock",
-        root=data_dir,
-    )
-    if status == "missing":
-        return None, ""
-    if status != "ok" or lock is None:
-        return None, detail
-    connectors = lock.get("connectors")
-    entry = connectors.get("omnigent") if isinstance(connectors, dict) else None
-    locations = entry.get("locations") if isinstance(entry, dict) else None
-    if not isinstance(locations, dict):
-        return None, f"{_omnigent_path_ref('omnigent-lock', lock_path)} identity is invalid"
-    return locations, ""
 
 
-def _omnigent_location_paths(locations: dict, key: str) -> list[str]:
-    raw = locations.get(key)
-    if not isinstance(raw, list):
-        return []
-    return [path for path in raw if isinstance(path, str) and path and "\x00" not in path]
 
 
-def _omnigent_runtime_paths_from_backups(cfg) -> tuple[list[str], str]:
-    """Recover custody-checked runtime targets when the lock is absent."""
-    paths: list[str] = []
-    for logical in ("module", "pth"):
-        record, detail = _omnigent_backup_record(cfg, logical)
-        if record is None:
-            return [], detail
-        target = str(record["path"])
-        if target not in paths:
-            paths.append(target)
-    return paths, ""
 
 
-def _omnigent_setup_repair_command(cfg) -> str:
-    """Render a posture-preserving public repair command for OmniGent.
-
-    The public setup alias intentionally defaults a new invocation to observe
-    mode.  Doctor is repairing an existing managed policy, however, so omitting
-    the connector's effective mode would silently weaken an action install.
-    Render every enforcement input that can change the native policy response
-    explicitly; ordinary setup still preserves all other connector settings.
-    """
-
-    guardrail = getattr(cfg, "guardrail", None)
-    mode = "action"
-    fail_mode = "closed"
-    hilt = getattr(guardrail, "hilt", None)
-
-    if guardrail is not None:
-        mode_resolver = getattr(guardrail, "effective_mode", None)
-        try:
-            raw_mode = mode_resolver("omnigent") if callable(mode_resolver) else getattr(guardrail, "mode", "")
-        except Exception:  # noqa: BLE001 - malformed config must not weaken the repair command.
-            raw_mode = "action"
-        mode_text = str(raw_mode or "").strip().lower()
-        mode = mode_text if mode_text in {"observe", "action"} else "action"
-
-        fail_resolver = getattr(guardrail, "effective_hook_fail_mode", None)
-        try:
-            raw_fail_mode = (
-                fail_resolver("omnigent")
-                if callable(fail_resolver)
-                else getattr(guardrail, "hook_fail_mode", "closed")
-            )
-        except Exception:  # noqa: BLE001 - fail closed when effective policy cannot be resolved.
-            raw_fail_mode = "closed"
-        fail_mode = "open" if str(raw_fail_mode or "").strip().lower() == "open" else "closed"
-
-        hilt_resolver = getattr(guardrail, "effective_hilt", None)
-        if callable(hilt_resolver):
-            try:
-                hilt = hilt_resolver("omnigent")
-            except Exception:  # noqa: BLE001 - omission preserves the existing HILT block.
-                hilt = None
-
-    args = [
-        "defenseclaw setup omnigent",
-        f"--mode {mode}",
-        f"--fail-mode {fail_mode}",
-    ]
-    if hilt is not None:
-        if bool(getattr(hilt, "enabled", False)):
-            args.append("--human-approval")
-            severity = str(getattr(hilt, "min_severity", "") or "HIGH").strip().upper()
-            if severity not in {"CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO"}:
-                severity = "HIGH"
-            args.append(f"--hilt-min-severity {severity}")
-        else:
-            args.append("--no-human-approval")
-    args.extend(("--yes", "--restart"))
-    return " ".join(args)
 
 
-def _omnigent_config_entries_intact(body: bytes) -> bool:
-    """Return True when OmniGent's config still holds the DefenseClaw entries.
-
-    OmniGent rewrites its own config.yaml during normal use (hosts,
-    providers), so a changed file digest alone is not drift. The entries
-    setup manages are the policy module registration and the
-    ``policies.defenseclaw_guardrail`` function handler.
-    """
-    import yaml
-
-    try:
-        data = yaml.safe_load(body.decode("utf-8"))
-    except (UnicodeError, yaml.YAMLError):
-        return False
-    if not isinstance(data, dict):
-        return False
-    modules = data.get("policy_modules")
-    policies = data.get("policies")
-    if not isinstance(modules, list) or "defenseclaw_omnigent_policy" not in modules:
-        return False
-    entry = policies.get("defenseclaw_guardrail") if isinstance(policies, dict) else None
-    return (
-        isinstance(entry, dict)
-        and entry.get("type") == "function"
-        and entry.get("handler") == "defenseclaw_omnigent_policy.defenseclaw_policy"
-    )
 
 
-def _omnigent_managed_artifact_drift(cfg, logical: str, path: str) -> str:
-    """Return an integrity/custody failure for one OmniGent-managed artifact."""
-    record, detail = _omnigent_backup_record(cfg, logical)
-    if record is None:
-        return detail
-    recorded_path = str(record["path"])
-    lexical_match = os.path.normcase(os.path.abspath(recorded_path)) == os.path.normcase(os.path.abspath(path))
-    canonical_match = os.path.normcase(os.path.realpath(recorded_path)) == os.path.normcase(os.path.realpath(path))
-    if not lexical_match or not canonical_match:
-        return f"managed-{logical}-backup target does not match managed-{logical}-artifact"
-    root = str(getattr(cfg, "data_dir", "") or "") if logical == "module" else None
-    status, body, detail = _omnigent_custody_read(
-        path,
-        role=f"managed-{logical}-artifact",
-        max_bytes=_OMNIGENT_ARTIFACT_LIMIT,
-        root=root,
-    )
-    if status != "ok" or body is None:
-        return detail
-    expected = str(record["post_sha256"])
-    if hashlib.sha256(body).hexdigest() != expected and not (
-        logical == "config" and _omnigent_config_entries_intact(body)
-    ):
-        repair = _omnigent_setup_repair_command(cfg)
-        return (
-            f"managed OmniGent {logical} drift detected; run "
-            f"`{repair}` to reconcile without changing enforcement posture"
-        )
-    return ""
 
 
-def _omnigent_local_server_pid() -> tuple[int, str]:
-    """Return OmniGent's live canonical server PID plus diagnostic detail."""
-    data_dir = (os.environ.get("OMNIGENT_DATA_DIR") or "").strip()
-    if data_dir:
-        data_dir = os.path.abspath(os.path.expanduser(data_dir))
-    else:
-        data_dir = os.path.join(os.path.abspath(str(Path.home())), ".omnigent")
-    pid_path = os.path.join(data_dir, "local_server.pid")
-    status, body, detail = _omnigent_custody_read(
-        pid_path,
-        role="omnigent-server-record",
-        max_bytes=_OMNIGENT_PID_LIMIT,
-        root=data_dir,
-    )
-    if status == "missing":
-        # Plain words, no path hash, as for a stale record (GAP-1067).
-        return 0, "OmniGent server has not started yet (no server record)"
-    if status != "ok" or body is None:
-        return 0, detail
-    try:
-        raw = body.decode("utf-8")
-    except UnicodeError:
-        return 0, f"{_omnigent_path_ref('omnigent-server-record', pid_path)} is not valid UTF-8"
-    lines = raw.strip().splitlines()
-    try:
-        pid = int(lines[0]) if len(lines) >= 2 else 0
-        port = int(lines[1]) if len(lines) >= 2 else 0
-    except ValueError:
-        pid = 0
-        port = 0
-    if pid <= 0 or port < 1 or port > 65535:
-        return 0, f"{_omnigent_path_ref('omnigent-server-record', pid_path)} is malformed"
-    from defenseclaw.process_liveness import pid_alive
-
-    if not pid_alive(pid):
-        return 0, "OmniGent server is not running (its server record is stale)"
-    return pid, f"recorded live OmniGent server pid={pid} port={port}"
 
 
 def _windows_command_line_argv(command_line: str) -> tuple[str, ...] | None:
@@ -8434,287 +9428,18 @@ def _hermes_idle_native_check(check: WindowsHookCheck, r: _DoctorResult) -> Wind
     )
 
 
-def _omnigent_process_argv(pid: int) -> tuple[str, ...] | None:
-    """Read bounded argv evidence for a recorded OmniGent server process."""
-    if pid <= 0:
-        return None
-    if sys.platform == "win32":  # pragma: no cover - exercised via mocks
-        script = (
-            "$targetPid = [int]$args[0]; "
-            "$process = Get-CimInstance -ClassName Win32_Process "
-            "-Filter ('ProcessId = ' + $targetPid); "
-            "if ($null -eq $process) { exit 3 }; "
-            "[Console]::Out.Write([string]$process.CommandLine)"
-        )
-        try:
-            proc = subprocess.run(
-                ["powershell.exe", "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", script, str(pid)],
-                capture_output=True,
-                text=True,
-                timeout=3.0,
-                check=False,
-                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-            )
-        except (FileNotFoundError, subprocess.SubprocessError, OSError):
-            return None
-        if proc.returncode != 0:
-            return None
-        return _windows_command_line_argv(proc.stdout)
-
-    proc_path = f"/proc/{pid}/cmdline"
-    try:
-        with open(proc_path, "rb") as fh:
-            raw = fh.read(64 * 1024 + 1)
-        if len(raw) > 64 * 1024:
-            return None
-        argv = tuple(part.decode("utf-8", "replace") for part in raw.split(b"\x00") if part)
-        return argv or None
-    except FileNotFoundError:
-        pass
-    except OSError:
-        return None
-    try:
-        proc = subprocess.run(
-            ["ps", "-p", str(pid), "-o", "command="],
-            capture_output=True,
-            text=True,
-            timeout=3.0,
-            check=False,
-        )
-    except (FileNotFoundError, subprocess.SubprocessError, OSError):
-        return None
-    if proc.returncode != 0 or len(proc.stdout) > 64 * 1024:
-        return None
-    try:
-        return tuple(shlex.split(proc.stdout.strip())) or None
-    except ValueError:
-        return None
 
 
-def _omnigent_server_command(argv: tuple[str, ...]) -> bool:
-    """Recognize the official CLI and ``python -m omnigent[.cli] server``.
-
-    ``omnigent run`` starts its local server as ``python -P -m omnigent.cli
-    server ...``.
-    """
-    if len(argv) < 2:
-        return False
-    executable = os.path.basename(argv[0]).lower()
-    if executable in {"omnigent", "omnigent.exe", "omni", "omni.exe"}:
-        return argv[1] == "server"
-    return any(
-        argv[index] == "-m" and argv[index + 1] in {"omnigent", "omnigent.cli"} and argv[index + 2] == "server"
-        for index in range(len(argv) - 2)
-    )
 
 
-def _omnigent_config_argument(argv: tuple[str, ...]) -> str:
-    for index, argument in enumerate(argv):
-        if argument in {"--config", "-c"}:
-            return argv[index + 1] if index + 1 < len(argv) else ""
-        if argument.startswith("--config="):
-            return argument.split("=", 1)[1]
-    return ""
 
 
-def _omnigent_live_config_evidence(config_path: str) -> tuple[str, str]:
-    """Check live config selection without claiming a loaded policy identity.
-
-    OmniGent 0.7.0's PID, command line, signature, and health response do not
-    bind the loaded policy generation or module contents. A matching config
-    path is therefore useful negative/mismatch evidence, but never sufficient
-    evidence that an on-disk policy update is active in the recorded process.
-    """
-    pid, record_detail = _omnigent_local_server_pid()
-    if pid <= 0:
-        return "warn", record_detail + "; effective policy config is unverified"
-    argv = _omnigent_process_argv(pid)
-    if not argv:
-        return "warn", record_detail + "; process command line is unreadable, so effective policy config is unverified"
-    if not _omnigent_server_command(argv):
-        return "warn", record_detail + "; recorded process is not a recognized OmniGent server command"
-
-    configured = _omnigent_config_argument(argv)
-    source = "--config"
-    if not configured and sys.platform != "win32":
-        configured = _read_process_env_var(pid, "OMNIGENT_CONFIG") or ""
-        source = "OMNIGENT_CONFIG"
-    if not configured:
-        return (
-            "warn",
-            record_detail
-            + "; server exposes neither a readable --config argument nor OMNIGENT_CONFIG evidence; "
-            "the official server may therefore be using its empty/default configuration",
-        )
-    configured_path = os.path.abspath(os.path.expanduser(configured))
-    if not os.path.isabs(os.path.expanduser(configured)):
-        return (
-            "warn",
-            f"{record_detail}; live {source} is relative, so Doctor cannot bind it "
-            "without the server's working directory",
-        )
-    if canonical_path(configured_path) != canonical_path(config_path):
-        return (
-            "fail",
-            f"{record_detail}; live {source} selects {_omnigent_path_ref('live-config', configured_path)}, "
-            f"not {_omnigent_path_ref('managed-config-artifact', config_path)}",
-        )
-    # "bound": the live server runs the managed config. That is the most
-    # OmniGent exposes, so Status keeps it running and Doctor warns.
-    return (
-        "bound",
-        f"{record_detail}; live {source} selects {_omnigent_path_ref('managed-config-artifact', config_path)}, "
-        "but OmniGent "
-        "does not expose a loaded policy generation/module/config identity; policy registration "
-        "is configured but live action/fail-closed enforcement is unverified pending reload/restart",
-    )
 
 
-def _omnigent_runtime_readiness(cfg, *, config_path: str | None = None) -> tuple[str, str]:
-    """Report whether live OmniGent policy readiness can be verified.
-
-    This is deliberately narrower than the full Doctor artifact inspection so
-    informational callers such as ``status`` can avoid mistaking a healthy
-    gateway adapter or a matching config pathname for an active in-process
-    OmniGent policy generation.
-    """
-    if config_path is None:
-        locations, lock_detail = _omnigent_lock_locations(cfg)
-        if lock_detail:
-            return "warn", f"{lock_detail}; effective policy config is unverified"
-        config_paths = (
-            _omnigent_location_paths(locations, "hook_config_paths")
-            if locations is not None
-            else [omnigent_config_path()]
-        )
-        config_path = next((path for path in config_paths if os.path.lexists(path)), "")
-    if not config_path:
-        return "fail", "managed OmniGent policy config is unavailable"
-    _, custody_detail = _omnigent_custody_text(config_path, role="managed-config-artifact")
-    if custody_detail:
-        return "warn", f"{custody_detail}; effective policy config is unverified"
-    return _omnigent_live_config_evidence(config_path)
 
 
-def _omnigent_tmux_requirement() -> str:
-    """Report the managed terminal prerequisite without inspecting user sessions."""
-    if os.name == "nt":
-        return ""
-    binary = shutil.which("tmux")
-    if not binary:
-        return "; managed terminals require tmux 3.3 or newer (tmux is missing)"
-    try:
-        result = subprocess.run([binary, "-V"], capture_output=True, text=True, timeout=2, check=False)
-    except (OSError, subprocess.TimeoutExpired):
-        return "; managed terminals require tmux 3.3 or newer (version unavailable)"
-    match = re.search(r"tmux (\d+)\.(\d+)", result.stdout)
-    if not match or tuple(map(int, match.groups())) < (3, 3):
-        return "; managed terminals require tmux 3.3 or newer (RHEL 9 ships 3.2a)"
-    return ""
 
 
-def _check_omnigent_policy_health(cfg, r: _DoctorResult) -> None:
-    """Verify managed artifacts and bind them to the live server config."""
-    locations, lock_detail = _omnigent_lock_locations(cfg)
-    if lock_detail:
-        _emit(
-            "fail",
-            "OmniGent policy",
-            f"hook contract lock cannot supply the policy module and .pth import shim ({lock_detail})",
-            r=r,
-        )
-        return
-    config_paths = (
-        _omnigent_location_paths(locations, "hook_config_paths") if locations is not None else [omnigent_config_path()]
-    )
-    config_path = next((path for path in config_paths if os.path.lexists(path)), "")
-    if not config_path:
-        _emit("fail", "OmniGent policy", "config is missing the DefenseClaw policy registration", r=r)
-        return
-    config_text, config_detail = _omnigent_custody_text(config_path, role="managed-config-artifact")
-    if config_text is None:
-        _emit("fail", "OmniGent policy", f"managed config is unavailable ({config_detail})", r=r)
-        return
-    if not all(marker in config_text for marker in ("defenseclaw_omnigent_policy", "defenseclaw_guardrail")):
-        _emit("fail", "OmniGent policy", "config is missing the DefenseClaw policy registration", r=r)
-        return
-
-    if locations is not None:
-        runtime_paths = _omnigent_location_paths(locations, "hook_script_paths")
-        backup_detail = ""
-    else:
-        runtime_paths, backup_detail = _omnigent_runtime_paths_from_backups(cfg)
-    if backup_detail:
-        _emit("fail", "OmniGent policy", backup_detail, r=r)
-        return
-    module_path = next((p for p in runtime_paths if p.endswith(".py")), "")
-    pth_path = next((p for p in runtime_paths if p.endswith(".pth")), "")
-    if not module_path or not pth_path:
-        _emit(
-            "fail",
-            "OmniGent policy",
-            "hook contract lock does not record both the policy module and .pth import shim",
-            r=r,
-        )
-        return
-    data_dir = str(getattr(cfg, "data_dir", "") or "")
-    if (
-        os.path.normcase(os.path.basename(module_path)) != "defenseclaw_omnigent_policy.py"
-        or not _omnigent_path_is_contained(module_path, data_dir)
-        or os.path.normcase(os.path.basename(pth_path)) != "defenseclaw_omnigent.pth"
-    ):
-        _emit("fail", "OmniGent policy", "managed module or .pth target identity is invalid", r=r)
-        return
-    module_text, module_detail = _omnigent_custody_text(
-        module_path,
-        role="managed-module-artifact",
-        root=data_dir,
-    )
-    if module_text is None:
-        _emit("fail", "OmniGent policy", f"policy module is unavailable ({module_detail})", r=r)
-        return
-    if not all(marker in module_text for marker in ("POLICY_REGISTRY", "defenseclaw_policy")):
-        _emit("fail", "OmniGent policy", "policy module is missing or invalid", r=r)
-        return
-    pth_text, pth_detail = _omnigent_custody_text(pth_path, role="managed-pth-artifact")
-    if pth_text is None:
-        _emit("fail", "OmniGent policy", f".pth import shim is unavailable ({pth_detail})", r=r)
-        return
-    import_path = pth_text.strip()
-    module_dir = os.path.dirname(module_path)
-    lexical_import_match = (
-        bool(import_path)
-        and os.path.isabs(import_path)
-        and os.pardir not in Path(import_path).parts
-        and os.path.normcase(os.path.abspath(import_path)) == os.path.normcase(os.path.abspath(module_dir))
-    )
-    try:
-        canonical_import_match = "\x00" not in import_path and os.path.normcase(
-            os.path.realpath(import_path)
-        ) == os.path.normcase(os.path.realpath(module_dir))
-    except (OSError, ValueError):
-        canonical_import_match = False
-    if not lexical_import_match or not canonical_import_match:
-        _emit("fail", "OmniGent policy", ".pth import shim is missing or points outside the managed module", r=r)
-        return
-    for logical, path in (("config", config_path), ("module", module_path), ("pth", pth_path)):
-        if drift := _omnigent_managed_artifact_drift(cfg, logical, path):
-            _emit("fail", "OmniGent policy", drift, r=r)
-            return
-    live_status, live_detail = _omnigent_runtime_readiness(cfg, config_path=config_path)
-    tmux_requirement = _omnigent_tmux_requirement()
-    # The module and .pth shim were verified above, so the row names only the
-    # live-server state and what to do about it.
-    _emit(
-        "warn" if live_status == "bound" else live_status,
-        "OmniGent policy",
-        f"native-degraded; {live_detail}{tmux_requirement}",
-        r=r,
-        remediation=(
-            "start or restart the OmniGent server so it loads the DefenseClaw policy, then rerun "
-            "'defenseclaw doctor'; if it still warns, run 'defenseclaw setup omnigent'"
-        ),
-    )
 
 
 def _check_hook_health(cfg, connector: str, r: _DoctorResult) -> None:
@@ -8723,13 +9448,9 @@ def _check_hook_health(cfg, connector: str, r: _DoctorResult) -> None:
     Covers active generic-hook connectors that previously got no Services hook
     row at all, so an operator
     could not tell from doctor whether their hooks were installed (D4).
-    Resolves the hook file from ``hook_contract_lock.json`` first (what the
-    gateway actually wrote), then the static fallback map, and
-    checks it for a DefenseClaw registration. Cursor and Kiro use the parsed
-    registration check when the lock records their paths, because Windows
-    encodes the native hook command in PowerShell. (The Connectors section's
-    ``_check_hook_contract_lock`` validates contract/version drift — a
-    different concern from "does the hook file exist and reference us".)
+    Hermes binds the current config path to the lock, then checks its matrix,
+    approvals and sealed execution proof. Other hooks use their lock path or
+    static fallback. The Connectors section checks contract/version drift.
     """
     fallback = _HOOK_HEALTH_FALLBACK.get(connector)
     if fallback is None:
@@ -8737,13 +9458,29 @@ def _check_hook_health(cfg, connector: str, r: _DoctorResult) -> None:
     rel_candidates, markers = fallback
     label = _HOOK_HEALTH_LABELS.get(connector, f"{connector} hooks")
     home = os.path.expanduser("~")
-    # Prefer the lock-file's recorded paths; fall back to the static map.
+    # Hermes must read the path the agent resolves now. A lock for a former
+    # HERMES_HOME cannot prove the active registration, even if it still runs.
     locked_paths = _hook_health_paths_from_lock(cfg, connector)
-    candidates = locked_paths
+    if connector == "hermes":
+        try:
+            current_config = hermes_config_path()
+        except ValueError as exc:
+            _emit(
+                "fail", label, f"Hermes active config path cannot be resolved: {exc}; live=false", r=r,
+                remediation="set HERMES_HOME to the home in use, then run 'defenseclaw setup hermes --yes --restart'",
+            )
+            return
+        if locked_paths != [current_config]:
+            _emit("fail", label,
+                  f"Hermes lock does not bind its current effective config {current_config}; live=false", r=r,
+                  remediation="run 'defenseclaw setup hermes --yes --restart' for the current HERMES_HOME")
+            return
+        candidates = [current_config]
+    else:
+        # Other connectors retain their existing lock-path and fallback rules.
+        candidates = locked_paths
     if not candidates:
-        if connector == "hermes":
-            candidates = [hermes_config_path()]
-        elif connector == "opencode":
+        if connector == "opencode":
             # The official custom config directory is also a plugin search
             # root. Match Setup/discovery instead of silently inspecting the
             # unrelated default home when the lock is unavailable.
@@ -8754,6 +9491,12 @@ def _check_hook_health(cfg, connector: str, r: _DoctorResult) -> None:
             candidates = [os.path.join(home, rel) for rel in rel_candidates]
     present = [p for p in candidates if os.path.isfile(p)]
     if not present:
+        if connector == "hermes":
+            _emit(
+                "fail", label, f"Hermes active hook registration is missing at {candidates[0]}; live=false", r=r,
+                remediation="run 'defenseclaw setup hermes --yes --restart' for the current HERMES_HOME",
+            )
+            return
         if connector == "opencode" and (loose := opencode_writable_plugin_folder(candidates)):
             # The gateway refuses to publish the plugin into a folder other
             # accounts can write, and stops; the other rows only showed the
@@ -8773,11 +9516,15 @@ def _check_hook_health(cfg, connector: str, r: _DoctorResult) -> None:
         _emit("fail", label, edited, r=r, remediation=edited.repair)
         return
     for path in present:
-        registered = _file_references_marker(path, markers)
+        # The Hermes branch below parses the bounded YAML matrix directly.
+        registered = connector == "hermes" or _file_references_marker(path, markers)
         if not registered and connector in ("cursor", "kiro") and locked_paths:
             from defenseclaw.hook_integrity import _registers_defenseclaw_hooks
 
             registered = _registers_defenseclaw_hooks(cfg, connector, Path(path), strict=False)
+        if registered and (unguarded := _unguarded_tool_call_problem(cfg, connector, path)):
+            _emit("fail", label, unguarded, r=r, remediation=unguarded.repair)
+            return
         if registered:
             if connector == "cursor":
                 _check_cursor_configured_runtime(
@@ -8788,7 +9535,7 @@ def _check_hook_health(cfg, connector: str, r: _DoctorResult) -> None:
                     probe_runtime=not r.passive,
                 )
             elif connector == "opencode":
-                if drift := _opencode_managed_plugin_drift(cfg, path):
+                if drift := _managed_plugin_drift(cfg, path):
                     _emit("fail", label, drift, r=r)
                 else:
                     status, runtime_detail = _opencode_load_heartbeat_status(cfg)
@@ -8813,6 +9560,11 @@ def _check_hook_health(cfg, connector: str, r: _DoctorResult) -> None:
                         )
                 _check_opencode_later_plugins(cfg, path, r)
             elif connector == "hermes":
+                problem = _hermes_registered_execution_problem(cfg, path)
+                if problem:
+                    _emit("fail", label, problem, r=r,
+                          remediation="run 'defenseclaw setup hermes --yes --restart', then rerun 'defenseclaw doctor'")
+                    return
                 if r.list_processes and _hermes_host_running() is False:
                     _emit(
                         "pass",
@@ -8831,19 +9583,20 @@ def _check_hook_health(cfg, connector: str, r: _DoctorResult) -> None:
                         f"on-disk registration is present at {path}; running Hermes hosts are unverified "
                         "because --passive does not check processes; live=false",
                         r=r,
-                        remediation=(
-                            "run 'defenseclaw doctor' without --passive to check for running Hermes hosts; "
-                            "restart any running Hermes host so it loads the hooks"
-                        ),
+                        remediation=_HERMES_PASSIVE_STEP,
                     )
                     return
                 _emit(
                     "fail",
                     label,
                     f"on-disk registration is present at {path}, but running Hermes hosts "
-                    "are unverified; reload or restart every Hermes CLI/TUI/gateway/desktop/service host; live=false",
+                    "are unverified: doctor cannot verify which hooks an already running host loaded, "
+                    "even after a restart or successful hook traffic; live=false",
                     r=r,
-                    remediation="restart every running Hermes host, then rerun 'defenseclaw doctor'",
+                remediation=(
+                    "close every Hermes CLI/TUI/gateway/desktop/service host, then run 'defenseclaw doctor'; "
+                    "start Hermes again after the on-disk checks pass. Running-host load verification is unavailable"
+                ),
                 )
             elif connector == "amp":
                 _emit(
@@ -8863,6 +9616,116 @@ def _check_hook_health(cfg, connector: str, r: _DoctorResult) -> None:
         "hook file exists but does not reference DefenseClaw: " + ", ".join(present),
         r=r,
     )
+
+
+def _hermes_registered_execution_problem(cfg, config_path: str) -> str:
+    """Read Hermes' active matrix and execute its sealed command as a bounded probe."""
+    from defenseclaw.doctor_hooks import _HERMES_REQUIRED_HOOKS, _InspectionError, _read_config
+    from defenseclaw.hook_integrity import _locked_hook_scripts
+
+    try:
+        current_config = hermes_config_path()
+    except ValueError:
+        return "Hermes current effective config path cannot be resolved"
+    if config_path != current_config:
+        return f"Hermes config {config_path} differs from current effective config {current_config}"
+
+    data_dir = str(getattr(cfg, "data_dir", "") or "")
+    expected = os.path.normpath(os.path.join(data_dir, "hooks", "hermes-hook.sh"))
+    scripts, digests = _locked_hook_scripts(cfg, "hermes")
+    # The gateway seals Hermes' script beside the shared inspect-*.sh runtime
+    # and _hardening.sh it sources (connector.hookRuntimeArtifactPaths), so the
+    # lock lists all of them. The probe runs only the one Hermes script, which
+    # must be sealed once, at this install's path (GAP-0833).
+    sealed = [os.fspath(script) for script in scripts if script.name == "hermes-hook.sh"]
+    if not data_dir or sealed != [expected]:
+        return f"Hermes execution probe for {config_path} has no exact sealed hook script; live=false; run setup"
+    digest = digests.get("hermes-hook.sh", "")
+    try:
+        config_stat = os.lstat(config_path)
+        script_stat = os.lstat(expected)
+        if not stat.S_ISREG(config_stat.st_mode) or config_stat.st_size > 2 * 1024 * 1024:
+            return "Hermes active registration is not a bounded regular file"
+        if not stat.S_ISREG(script_stat.st_mode) or not script_stat.st_mode & 0o111:
+            return "Hermes registered hook is not a regular executable file"
+        if script_stat.st_size > 4 * 1024 * 1024:
+            return "Hermes registered hook exceeds the bounded script size"
+        flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+        with os.fdopen(os.open(expected, flags), "rb") as script_file:
+            opened = os.fstat(script_file.fileno())
+            if not os.path.samestat(script_stat, opened):
+                return "Hermes registered hook changed during inspection"
+            script_body = script_file.read(4 * 1024 * 1024 + 1)
+            after = os.fstat(script_file.fileno())
+        if len(script_body) > 4 * 1024 * 1024 or not os.path.samestat(opened, after) or opened.st_size != after.st_size:
+            return "Hermes registered hook changed or exceeded the bounded script size"
+        actual_digest = "sha256:" + hashlib.sha256(script_body).hexdigest()
+        if not hmac.compare_digest(digest, actual_digest):
+            return "Hermes registered hook has no matching sealed digest"
+        document = _read_config(config_path, "hermes")
+    except (OSError, UnicodeError, _InspectionError) as exc:
+        return f"Hermes active registration or hook cannot be read: {type(exc).__name__}"
+    hooks = document.get("hooks") if isinstance(document, dict) else None
+    if not isinstance(hooks, dict):
+        return "Hermes active registration has no hooks table"
+    registered_commands: set[str] = set()
+    for event, matcher in _HERMES_REQUIRED_HOOKS.items():
+        entries = hooks.get(event)
+        if not isinstance(entries, list):
+            return f"Hermes active registration is missing {event}"
+        owned = []
+        for entry in entries:
+            command = entry.get("command") if isinstance(entry, dict) else None
+            if not isinstance(command, str) or "hermes-hook.sh" not in command:
+                continue
+            try:
+                argv = shlex.split(command)
+            except ValueError:
+                argv = []
+            if argv != [expected]:
+                return f"Hermes {event} does not run the sealed hook command"
+            owned.append(entry)
+            registered_commands.add(command)
+        if len(owned) != 1:
+            return f"Hermes {event} has {len(owned)} registered DefenseClaw commands; expected one"
+        entry = owned[0]
+        if type(entry.get("timeout")) is not int or entry["timeout"] != 30:
+            return f"Hermes {event} timeout differs from the registered contract"
+        if entry.get("matcher") != matcher:
+            return f"Hermes {event} matcher differs from the registered contract"
+    for event, entries in hooks.items():
+        if event not in _HERMES_REQUIRED_HOOKS and isinstance(entries, list) and any(
+            isinstance(entry, dict) and "hermes-hook.sh" in str(entry.get("command", ""))
+            for entry in entries
+        ):
+            return f"unexpected Hermes event {event} registers a DefenseClaw hook"
+    if len(registered_commands) != 1:
+        return "Hermes events do not use one exact approved hook command"
+    command = registered_commands.pop()
+    allowlist_path = os.path.join(os.path.dirname(config_path), "shell-hooks-allowlist.json")
+    try:
+        allowlist = _read_config(allowlist_path, "hermes-allowlist")
+    except _InspectionError as exc:
+        return f"Hermes hook approvals cannot be read at {allowlist_path}: {exc.detail}"
+    approvals = allowlist.get("approvals")
+    if not isinstance(approvals, list):
+        return f"Hermes hook approvals are missing at {allowlist_path}"
+    approved = {
+        entry["event"] for entry in approvals
+        if isinstance(entry, dict) and isinstance(entry.get("event"), str) and entry.get("command") == command
+    }
+    for event in _HERMES_REQUIRED_HOOKS:
+        if event not in approved:
+            return f"Hermes hook approval for {event} is missing at {allowlist_path}"
+    probe_argv = [expected, "--defenseclaw-execution-probe"]
+    if sys.platform == "darwin":
+        probe_argv.append("--forkless")
+    returncode, stdout = _run_hermes_execution_probe(probe_argv)
+    if returncode is None:
+        return "Hermes registered hook execution probe could not run"
+    if returncode != 0 or stdout != _HERMES_EXECUTION_PROBE_RESPONSE:
+        return f"Hermes registered hook execution probe failed (exit {returncode})"
+    return ""
 
 
 def _check_amp_native_policy_surfaces(cfg, r: _DoctorResult) -> None:
@@ -8954,9 +9817,8 @@ def _amp_non_defenseclaw_direct_plugins(cfg) -> list[str]:
 def _check_connector_skipped_at_start(connector: str, live_health: dict | None, r: _DoctorResult) -> None:
     """Warn when the running gateway skipped *connector* at start.
 
-    The gateway skips a connector whose setup it refused, for example an
-    OpenHands that 0.8.10 enrolled without a recorded executable (GAP-2621).
-    Its old hook file can still pass the hook row, so name the fix here.
+    The gateway can skip a connector whose setup it refused while its
+    old hook file still passes the hook row, so name the fix here.
     """
     from defenseclaw.commands.cmd_status import _connectors_not_started
 
@@ -8993,12 +9855,8 @@ def _check_connector_hooks(cfg, connector: str, r: _DoctorResult) -> None:
         _check_zeptoclaw_config(cfg, r)
     elif connector == "copilot":
         _check_copilot_hooks(cfg, r)
-    elif connector == "openhands":
-        _check_openhands_hooks(cfg, r)
     elif connector == "antigravity":
         _check_antigravity_hooks(cfg, r)
-    elif connector == "omnigent":
-        _check_omnigent_policy_health(cfg, r)
     elif connector == "kiro":
         _check_hook_health(cfg, connector, r)
     elif connector in _HOOK_HEALTH_FALLBACK:
@@ -9030,8 +9888,6 @@ _SETUP_READINESS_PRIMARY_LABELS = {
     "opencode": "OpenCode hooks",
     "amp": "Amp policy plugin",
     "hermes": _HERMES_HOOKS_LABEL,
-    "omnigent": "OmniGent policy",
-    "openhands": "OpenHands hooks",
     "kiro": "Kiro hooks",
 }
 
@@ -9100,6 +9956,19 @@ def connector_setup_readiness(cfg, connector: str) -> ConnectorSetupReadiness:
             "fail-mode",
             f"lock={lock_mode or 'missing'} configured={configured_mode or 'missing'} effective={effective}",
         )
+    # The lock records what Setup asked for; the hook runs what was rendered
+    # (the hook script, Windows .hookcfg or the plugin). A Windows .hookcfg
+    # left open next to a closed lock lets calls run with the gateway down.
+    from defenseclaw.fail_mode import rendered_fail_mode, report_renders_fail_mode
+
+    rendered = rendered_fail_mode(fail_mode)
+    if report_renders_fail_mode(fail_mode) and rendered != lock_mode_target:
+        return ConnectorSetupReadiness(
+            False,
+            name,
+            "fail-mode",
+            f"rendered={rendered or 'missing'} lock={lock_mode} configured={configured_mode or 'missing'}",
+        )
 
     result = _DoctorResult(passive=True, quiet=True)
     try:
@@ -9122,10 +9991,7 @@ def connector_setup_readiness(cfg, connector: str) -> ConnectorSetupReadiness:
         for row in rows:
             status = str(row.get("status") or "")
             detail = str(row.get("detail") or "")
-            native_degraded = name == "omnigent" and label == primary_label and status == "warn"
-            if native_degraded and not detail.startswith("native-degraded;"):
-                native_degraded = False
-            if status != "pass" and not native_degraded:
+            if status != "pass":
                 return ConnectorSetupReadiness(
                     False,
                     name,
@@ -9203,7 +10069,10 @@ def _check_antigravity_hooks(cfg, r: _DoctorResult, platform_name: str | None = 
             r=r,
         )
     elif _hook_json_references(canonical, "antigravity-hook.sh"):
-        _emit("pass", "Antigravity hooks", f"reachable at {canonical}", r=r)
+        if unguarded := _unguarded_tool_call_problem(cfg, "antigravity", canonical):
+            _emit("fail", "Antigravity hooks", unguarded, r=r, remediation=unguarded.repair)
+        else:
+            _emit_unix_event_binding(cfg, "antigravity", "Antigravity hooks", canonical, f"reachable at {canonical}", r)
     else:
         _emit(
             "fail",
@@ -9233,31 +10102,6 @@ def _check_antigravity_workspace_duplicates(cfg, r: _DoctorResult) -> None:
         )
 
 
-def _check_openhands_hooks(cfg, r: _DoctorResult) -> None:
-    workspace = _workspace_dir(cfg)
-    home = os.path.expanduser("~")
-    candidates = [os.path.join(home, ".openhands", "hooks.json")]
-    if workspace:
-        candidates.insert(0, os.path.join(workspace, ".openhands", "hooks.json"))
-    present = [path for path in candidates if os.path.isfile(path)]
-    if not present:
-        _emit(
-            "fail",
-            "OpenHands hooks",
-            "not found in OpenHands SDK search paths: " + ", ".join(candidates),
-            r=r,
-        )
-        return
-    for path in present:
-        if _hook_json_references(path, "openhands-hook.sh"):
-            _emit("pass", "OpenHands hooks", f"reachable at {path}", r=r)
-            return
-    _emit(
-        "fail",
-        "OpenHands hooks",
-        "hooks.json exists but does not reference DefenseClaw hook script: " + ", ".join(present),
-        r=r,
-    )
 
 
 def _check_copilot_hooks(
@@ -9270,6 +10114,8 @@ def _check_copilot_hooks(
     search_path: str | None = None,
     pathext: str | None = None,
 ) -> None:
+    from defenseclaw.hook_integrity import copilot_registration_switch_problem
+
     workspace = _workspace_dir(cfg)
     data_dir = getattr(cfg, "data_dir", "") or ""
     if workspace and _path_is_inside(workspace, data_dir):
@@ -9313,34 +10159,46 @@ def _check_copilot_hooks(
     if edited := _edited_hook_problem(cfg, "copilot"):
         _emit("fail", "Copilot hooks", edited, r=r, remediation=edited.repair)
         return
-    if not workspace:
+    if workspace:
+        path = os.path.join(workspace, ".github", "hooks", "defenseclaw.json")
+    else:
         path = os.path.join(copilot_home(), "hooks", "defenseclaw.json")
-        if not os.path.isfile(path):
-            _emit("fail", "Copilot hooks", f"{path} not found", r=r)
-            return
-        if _hook_json_references(path, "copilot-hook.sh"):
-            _emit(
-                "pass",
-                "Copilot hooks",
-                f"reachable at {path}; local settings verified; managed policy unverified",
-                r=r,
-            )
-            return
-        _emit("fail", "Copilot hooks", f"{path} does not reference DefenseClaw hook script", r=r)
-        return
-    path = os.path.join(workspace, ".github", "hooks", "defenseclaw.json")
     if not os.path.isfile(path):
         _emit("fail", "Copilot hooks", f"{path} not found", r=r)
-        return
-    if _hook_json_references(path, "copilot-hook.sh"):
-        _emit(
-            "pass",
-            "Copilot hooks",
-            f"reachable at {path}; local settings verified; managed policy unverified",
-            r=r,
-        )
-    else:
+    elif not _hook_json_references(path, "copilot-hook.sh"):
         _emit("fail", "Copilot hooks", f"{path} does not reference DefenseClaw hook script", r=r)
+    elif switched_off := copilot_registration_switch_problem(path):
+        _emit("fail", "Copilot hooks", switched_off, r=r, remediation=switched_off.repair)
+    elif unguarded := _unguarded_tool_call_problem(cfg, "copilot", path):
+        _emit("fail", "Copilot hooks", unguarded, r=r, remediation=unguarded.repair)
+    else:
+        _emit_unix_event_binding(
+            cfg, "copilot", "Copilot hooks", path,
+            f"reachable at {path}; local settings verified; managed policy unverified", r,
+        )
+
+
+def _emit_unix_event_binding(cfg, connector: str, label: str, path: str, healthy: str, r: _DoctorResult) -> None:
+    """Pass the Linux or macOS registration only when each event runs this install's hook exactly.
+
+    Copilot CLI and Antigravity name no event in their hook input: an entry
+    bound to another event, or to none, lets a tool call run unchecked.
+    """
+    from defenseclaw.doctor_hooks import unix_hook_event_binding_problem
+    from defenseclaw.hook_integrity import setup_command
+
+    script = os.path.join(getattr(cfg, "data_dir", "") or "", "hooks", f"{connector}-hook.sh")
+    state, problem = unix_hook_event_binding_problem(connector, path, script)
+    if state:
+        _emit(
+            "fail",
+            label,
+            f"{problem}; a tool call can run unchecked",
+            r=r,
+            remediation=f"re-register the hooks: {setup_command(connector)} --yes",
+        )
+        return
+    _emit("pass", label, healthy, r=r)
 
 
 def _check_zeptoclaw_config(cfg, r: _DoctorResult) -> None:
@@ -9394,12 +10252,21 @@ def _check_guardrail_proxy(cfg, r: _DoctorResult) -> None:
     # a /c/<connector> base URL, never through an advertised model name.
 
     host = getattr(cfg.guardrail, "host", None) or "127.0.0.1"
+    trust = _trusted_gateway_listener(cfg)
+    if not trust.trusted:
+        _emit("fail", "Guardrail proxy", f"gateway listener identity is unverified: {trust.detail}", r=r)
+        return
     url = f"http://{host}:{cfg.guardrail.port}/health"
-    code, _ = _http_probe(url, timeout=5.0)
+    code, detail = _http_probe(url, timeout=5.0, bypass_proxy=True, bound_peer=trust)
     if code == 200:
         _emit("pass", "Guardrail proxy", f"healthy on port {cfg.guardrail.port}", r=r)
     else:
-        _emit("fail", "Guardrail proxy", f"not responding on port {cfg.guardrail.port}", r=r)
+        reason = (
+            "connected proxy listener is not the verified DefenseClaw gateway process"
+            if "connected gateway endpoint is not served" in detail
+            else f"not responding on port {cfg.guardrail.port}"
+        )
+        _emit("fail", "Guardrail proxy", reason, r=r)
 
 
 # ZeptoClaw rewrites api_base natively and does not run the fetch
@@ -9659,7 +10526,7 @@ def _check_semantic_routing(cfg, r: _DoctorResult, *, live_health: dict | None =
 
 
 # Connectors that enforce in-process via an agent-native lifecycle surface
-# (hook bus or OmniGent's custom policy API) and talk directly to their
+# (hook bus or a native policy API) and talk directly to their
 # upstream provider. They do NOT bind the guardrail proxy listener on port
 # 4000. Proxy connectors (openclaw, zeptoclaw) are deliberately absent.
 _HOOK_ENFORCED_CONNECTORS = frozenset(
@@ -9670,11 +10537,9 @@ _HOOK_ENFORCED_CONNECTORS = frozenset(
         "cursor",
         "devin",
         "copilot",
-        "openhands",
         "antigravity",
         "opencode",
         "amp",
-        "omnigent",
         "kiro",
     }
 )
@@ -9712,18 +10577,6 @@ def _guardrail_proxy_intentionally_closed(cfg) -> str:
     label = connectors[0] if len(connectors) == 1 else ", ".join(sorted(connectors))
     if len(connectors) == 1:
         mode = modes.get(connectors[0], "observe")
-        if connectors[0] == "omnigent":
-            if mode == "action":
-                return (
-                    "policy path configured for omnigent (native-degraded; mode=action via "
-                    "ALLOW/ASK/DENY; live policy generation unverified) "
-                    "— proxy port intentionally closed"
-                )
-            return (
-                "policy path configured for omnigent (native-degraded; mode=observe; "
-                "live policy generation unverified) "
-                "— proxy port intentionally closed"
-            )
         if connectors[0] == "amp":
             if mode == "action":
                 return (
@@ -9734,9 +10587,9 @@ def _guardrail_proxy_intentionally_closed(cfg) -> str:
         if mode == "action":
             return f"hook-enforced for {label} (mode=action via PreToolUse deny) — proxy port intentionally closed"
         return f"hook-driven for {label} (mode=observe) — proxy port intentionally closed"
-    if not ({"omnigent", "amp"} & modes.keys()) and all(mode == "action" for mode in modes.values()):
+    if "amp" not in modes and all(mode == "action" for mode in modes.values()):
         return f"hook-enforced for {label} (mode=action via PreToolUse deny) — proxy port intentionally closed"
-    if not ({"omnigent", "amp"} & modes.keys()) and all(mode != "action" for mode in modes.values()):
+    if "amp" not in modes and all(mode != "action" for mode in modes.values()):
         return f"hook-driven for {label} (mode=observe) — proxy port intentionally closed"
     parts = []
     for connector, mode in modes.items():
@@ -9746,14 +10599,6 @@ def _guardrail_proxy_intentionally_closed(cfg) -> str:
                 if mode == "action"
                 else "cursor (mode=observe)"
             )
-        elif connector == "omnigent" and mode == "action":
-            parts.append(
-                "omnigent (native-degraded; mode=action via ALLOW/ASK/DENY; live policy generation unverified)"
-            )
-        elif connector == "omnigent":
-            parts.append(
-                "omnigent (native-degraded; mode=observe via custom policy API; live policy generation unverified)"
-            )
         elif connector == "amp" and mode == "action":
             parts.append("amp (mode=action via synchronous tool.call/tool.result)")
         elif connector == "amp":
@@ -9762,11 +10607,7 @@ def _guardrail_proxy_intentionally_closed(cfg) -> str:
             parts.append(f"{connector} (mode=action via PreToolUse deny)")
         else:
             parts.append(f"{connector} (mode=observe)")
-    prefix = (
-        "configured"
-        if "omnigent" in modes
-        else ("enforced" if all(mode == "action" for mode in modes.values()) else "native-driven")
-    )
+    prefix = "enforced" if all(mode == "action" for mode in modes.values()) else "native-driven"
     return f"{prefix} for {', '.join(parts)} — proxy port intentionally closed"
 
 
@@ -10186,8 +11027,13 @@ def _check_judge_calls(cfg, r: _DoctorResult) -> None:
     try:
         uri = Path(os.path.abspath(db_path)).as_uri() + "?mode=ro"
         with contextlib.closing(sqlite3.connect(uri, uri=True, timeout=0.5)) as db:
+            # A v8 judge row keeps its fields only in payload_json (GAP-0614).
+            columns = {str(row[1]) for row in db.execute("PRAGMA table_info(audit_events)").fetchall()}
+            structured = "structured_json"
+            if "payload_json" in columns:
+                structured = "COALESCE(NULLIF(structured_json, ''), payload_json)"
             rows = db.execute(
-                "SELECT structured_json FROM audit_events WHERE action = ? AND timestamp >= ? "
+                f"SELECT {structured} FROM audit_events WHERE action = ? AND timestamp >= ? "
                 f"ORDER BY {audit_time_order(db)} LIMIT 20",
                 ("llm-judge-response", since),
             ).fetchall()
@@ -10360,6 +11206,9 @@ def _check_policy_state(cfg, r: _DoctorResult, *, live_health: dict | None) -> N
     if _doctor_secure_client(cfg):
         return
     label = "Policy"
+    if r.sidecar_unverified or r.gateway_down == "foreign":
+        _emit_policy_without_gateway(cfg, r, label, "the API port is not served by this account's verified gateway")
+        return
     if not isinstance(live_health, dict):
         reason = (
             "live state was not checked while config.yaml is invalid; see the Config validation row"
@@ -10368,18 +11217,17 @@ def _check_policy_state(cfg, r: _DoctorResult, *, live_health: dict | None) -> N
         )
         _emit_policy_without_gateway(cfg, r, label, reason)
         return
-    if r.sidecar_unverified:
-        _emit_policy_without_gateway(cfg, r, label, "the API port is not served by this account's verified gateway")
-        return
     policy = live_health.get("policy")
     if not isinstance(policy, dict) or not policy.get("effective_digest"):
         _emit_policy_without_gateway(cfg, r, label, "the gateway does not report an effective policy")
         return
+    from defenseclaw.gateway import applied_config_generation, policy_reload_rejection
+
     digest = str(policy.get("effective_digest") or "")
-    generation = policy.get("generation")
-    config_generation = int(policy.get("config_generation") or 0)
-    applied = f"generation {generation}, digest {_short_policy_digest(digest)}"
-    from defenseclaw.gateway import policy_reload_rejection
+    config_generation = applied_config_generation(policy)
+    applied = f"digest {_short_policy_digest(digest)}"
+    if config_generation:
+        applied = f"config generation {config_generation}, {applied}"
 
     reload_error = policy_reload_rejection(policy)
     if reload_error:
@@ -10462,8 +11310,8 @@ def _check_policy_state(cfg, r: _DoctorResult, *, live_health: dict | None) -> N
         saved = _saved_config_generation(cfg)
         if saved > config_generation > 0:
             cause = (
-                f": it has not applied the change saved as config generation {saved} (it enforces generation "
-                f"{config_generation})"
+                f": it has not applied the change saved as config generation {saved} (it enforces config "
+                f"generation {config_generation})"
             )
         elif saved > config_generation:
             cause = f": it has not applied the change saved as config generation {saved}"
@@ -11323,6 +12171,7 @@ def _check_observability(cfg, r: _DoctorResult, *, live_health: dict | None = No
         r,
         configured=_otlp_configured_connectors(cfg),
         gateway_addr=gateway_api_addr(cfg),
+        native_export_expected=_enterprise_profile(cfg) in {"standalone", "secure_client"},
     )
     _check_galileo_trace_canaries(
         status,
@@ -11381,7 +12230,8 @@ def _claude_exporter_reaches_gateway(gateway_addr: str) -> bool:
 
 
 def _check_connector_export_custody(
-    report, r: _DoctorResult, *, configured: set[str] | None = None, gateway_addr: str = ""
+    report, r: _DoctorResult, *, configured: set[str] | None = None, gateway_addr: str = "",
+    native_export_expected: bool = True,
 ) -> None:
     """Render per-instance custody and bounded native-ingest evidence.
 
@@ -11432,6 +12282,29 @@ def _check_connector_export_custody(
             # fold it into one line per connector, as status does (GAP-2097).
             # Hook-only ones fold too: they are the same past runs (GAP-2104).
             idle[item.connector] = idle.get(item.connector, 0) + 1
+            continue
+        if (
+            not native_export_expected
+            and item.default
+            and item.connector in {"codex", "claudecode"}
+            and item.custody in {"defenseclaw", "external"}
+        ):
+            # Upgrades retain native-exporter receipts already in the audit
+            # ledger. Per-user setup removes that unsafe TCP exporter, so a
+            # historical row cannot justify reinstalling it (GAP-0775).
+            credential_problem = item.credential_state == "invalid"
+            _emit(
+                "warn" if credential_problem else "pass",
+                label,
+                f"historical custody={item.custody}; no DefenseClaw native exporter is expected "
+                "in this per-user profile; hook telemetry remains active",
+                r=r,
+                remediation=(
+                    "restart agents and background servers launched before the upgrade to discard their "
+                    "in-memory exporter"
+                    if credential_problem else ""
+                ),
+            )
             continue
         if item.custody == "external":
             if item.connector == "claudecode" and _claude_exporter_reaches_gateway(gateway_addr):
@@ -11596,8 +12469,8 @@ def _emit_unattributed_otlp_credentials(report, r: _DoctorResult, *, now=None) -
     """Rejected OTLP attempts no trusted connector owns (GAP-2294).
 
     The count covers a rolling window, so the row names the window and the
-    age of the last attempt. Re-running setup cannot clear old attempts; it
-    is only suggested while attempts are still arriving.
+    age of the last attempt. A rejected request has no trusted sender identity,
+    so it cannot show that a configured exporter needs to be rewritten.
     """
     from defenseclaw.observability.custody_status import _format_time, _parse_time
 
@@ -11624,17 +12497,17 @@ def _emit_unattributed_otlp_credentials(report, r: _DoctorResult, *, now=None) -
             "OTEL_EXPORTER_OTLP_* setting in a shell profile or agent config"
         )
     else:
-        # A running agent keeps the token it started with, so setup alone
-        # cannot stop a background server's attempts (GAP-0313).
+        # A running agent keeps the token it started with, but a rejected
+        # route might also be a peer probe (GAP-0803). Neither proves that
+        # the installed exporter is wrong.
         remediation = (
-            "attempts are recent. An agent that was already running when its DefenseClaw token "
+            "attempts are recent, but a rejected route does not prove an installed exporter is broken. "
+            "An agent that was already running when its DefenseClaw token "
             "changed (an upgrade, a rollback, 'defenseclaw setup' or 'setup rotate-token') keeps sending the old "
             "token until it restarts: restart your agents and their background servers (Codex's "
             "app-server outlives its sessions: run 'codex app-server daemon restart'). "
-            "Otherwise a stale OTEL_EXPORTER_OTLP_* setting in a shell profile or agent config "
-            "usually causes this: re-run 'defenseclaw setup <connector>' for each agent that "
-            "exports telemetry, then restart it; if the count keeps growing, look for other OTLP "
-            "senders pointed at the gateway port"
+            "If the count keeps growing, inspect which process sends OTLP to the gateway port and "
+            "check any stale OTEL_EXPORTER_OTLP_* setting before changing agent configuration"
         )
     _emit("warn", "Native OTLP credentials", detail, r=r, remediation=remediation)
 
@@ -12523,6 +13396,7 @@ def doctor(
     # config patches are still on disk. This is a global filesystem sweep
     # (not per-active-connector), so it runs once against the install.
     _check_connector_residue(cfg, active_connector, r)
+    _check_removed_connector_cleanup(cfg, r)
     _check_orphaned_hook_entries(cfg, active_connector, r)
     # Surface a dead-end asset_policy.plugin.registry_required flag, which can
     # only ever deny (no plugin-registry pipeline exists in v1) and silently
@@ -13190,10 +14064,16 @@ def _plan_connector_compatibility_gate(cfg) -> RepairDecision:
             f"{type(exc).__name__}: connector compatibility evidence is unavailable; "
             "no unsupported version decision was inferred",
         )
+    # A Kiro form beside the protected one setup covers (assess_kiro) is
+    # reported, but it does not block repairing that form.
+    auxiliary_kiro = tuple(
+        finding for finding in problems
+        if finding.connector == "kiro" and finding.reason_code.endswith("-auxiliary")
+    )
     unsupported = tuple(
         finding
         for finding in problems
-        if finding.status is HealthStatus.UNSUPPORTED
+        if finding.status is HealthStatus.UNSUPPORTED and finding not in auxiliary_kiro
     )
     if unsupported:
         summary = ", ".join(
@@ -13205,6 +14085,12 @@ def _plan_connector_compatibility_gate(cfg) -> RepairDecision:
             "gateway lifecycle repair is blocked by positively unsupported "
             f"connector compatibility evidence ({summary})",
             blockers=("unsupported connector compatibility",),
+        )
+    if auxiliary_kiro and len(auxiliary_kiro) == len(problems):
+        return RepairDecision(
+            "noop",
+            "the selected Kiro surface can be repaired; each Kiro form that is not protected "
+            "(an older or unreadable kiro-cli or Kiro IDE) is reported separately",
         )
     if problems:
         return RepairDecision(
@@ -14345,15 +15231,15 @@ def _active_connector(cfg) -> str:
     Prefer the unified ``Config.active_connector()`` from S4.1 — it
     handles the legacy ``guardrail.connector`` field plus the
     ``claw.mode`` fallback the same way the rest of the CLI does.
-    Falls back to ``"openclaw"`` for older configs that predate the
-    method.
+    Older config objects without the method use their explicit connector
+    fields. An unconfigured install has no active connector.
     """
     if hasattr(cfg, "active_connector"):
         try:
-            return (cfg.active_connector() or "openclaw").lower()
+            return (cfg.active_connector() or "").lower()
         except Exception:
             pass
-    return (getattr(getattr(cfg, "guardrail", None), "connector", "") or "openclaw").lower()
+    return (getattr(getattr(cfg, "guardrail", None), "connector", "") or "").lower()
 
 
 def _doctor_active_connectors(cfg) -> list[str]:
@@ -14364,9 +15250,8 @@ def _doctor_active_connectors(cfg) -> list[str]:
     genuinely unconfigured install (every connector marker cleared, e.g. after
     ``setup remove`` drops the last one); doctor must honor that empty signal
     and render an explicit "no connector configured" state rather than
-    flooring to the singular :func:`_active_connector`, whose ``"openclaw"``
-    path-resolution default would fabricate a phantom OpenClaw connector on an
-    install that never used OpenClaw (D3).
+    flooring to a fabricated OpenClaw connector on an install that never used
+    OpenClaw (D3).
 
     Only legacy configs that predate ``active_connectors()`` fall back to the
     singular primary, preserving their single-connector behavior. Names are
@@ -14431,11 +15316,9 @@ _CONNECTOR_LABELS = {
     "cursor": "Cursor",
     "devin": "Devin",
     "copilot": "GitHub Copilot CLI",
-    "openhands": "OpenHands",
     "antigravity": "Antigravity",
     "opencode": "OpenCode",
     "amp": "Amp",
-    "omnigent": "OmniGent",
     "kiro": "Kiro",
 }
 
@@ -14762,11 +15645,19 @@ def _check_connector_inventory(
             mode = ""
         if mode:
             try:
-                from defenseclaw.fail_mode import connector_fail_mode_report
+                from defenseclaw.fail_mode import (
+                    connector_fail_mode_report,
+                    rendered_fail_mode,
+                    report_renders_fail_mode,
+                )
 
                 fail_mode = connector_fail_mode_report(cfg, connector)
+                rendered = rendered_fail_mode(fail_mode)
+                renders = report_renders_fail_mode(fail_mode)
             except Exception:  # noqa: BLE001 - doctor must still report partial state.
                 fail_mode = {"effective": "unknown", "provenance": "unavailable"}
+                rendered = None
+                renders = False
             if mode in {"observe", "action"}:
                 fail_mode_note = f" ({fail_mode['note']})" if fail_mode.get("note") else ""
                 detail = (
@@ -14774,12 +15665,63 @@ def _check_connector_inventory(
                     f"provenance={fail_mode['provenance']}"
                 )
                 desired = fail_mode.get("desired")
-                if fail_mode.get("runtime") is not None and desired in {"open", "closed"} and (
-                    fail_mode.get("effective") != desired
-                ):
+                # A DEFENSECLAW_FAIL_MODE=closed in doctor's own environment
+                # makes the effective mode closed, but the agent that runs an
+                # open-rendered hook may not have it, so the rendered mode is
+                # checked on its own.
+                rendered_open = desired == "closed" and rendered == "open"
+                # A hook or plugin that records its mode but has none that
+                # can be read (missing, or a value no installer writes) does
+                # not run the configured mode for certain.
+                rendered_missing = renders and rendered is None
+                runtime_mismatch = fail_mode.get("runtime") is not None and fail_mode.get("effective") != desired
+                managed_windows_runtime = any(
+                    isinstance(source, dict) and source.get("name") == "windows-managed-runtime"
+                    for source in fail_mode.get("sources") or ()
+                )
+                if fail_mode.get("runtime_verified") is False and managed_windows_runtime:
+                    # A managed native Windows hook runs the mode of the
+                    # guardian's authenticated runtime generation, which doctor
+                    # cannot read: never a pass. A warning, not a failure,
+                    # because doctor can never verify it; the guardian's
+                    # elevated verify does.
+                    _emit(
+                        "warn",
+                        "Mode",
+                        f"{detail}; runtime fail mode unverified: the guardian's runtime generation sets it",
+                        r=r,
+                        remediation="run `defenseclaw enterprise windows verify` from an elevated prompt",
+                    )
+                elif fail_mode.get("runtime_verified") is False:
+                    # The installed hook takes its mode from the agent's
+                    # environment, which doctor cannot see, so it can run
+                    # open whatever its default says: never a pass. Outside
+                    # Secure Client (#1163) that render is a stale one a
+                    # closed policy must not keep.
+                    from defenseclaw.hook_integrity import setup_command
+
+                    secure_client_check = getattr(gc, "secure_client_hook_fail_modes", None)
+                    secure_client = callable(secure_client_check) and bool(secure_client_check())
+                    _emit(
+                        "fail" if desired == "closed" and not secure_client else "warn",
+                        "Mode",
+                        f"{detail}; runtime fail mode unverified",
+                        r=r,
+                        remediation=(
+                            "check DEFENSECLAW_FAIL_MODE in the environment the agent starts in"
+                            if secure_client
+                            else "re-render the hooks: defenseclaw-gateway start (or restart), or "
+                            f"`{setup_command(connector)}`"
+                        ),
+                    )
+                elif desired in {"open", "closed"} and (runtime_mismatch or rendered_open or rendered_missing):
                     # The hooks run another fail mode than config.yaml asks
                     # for (GAP-0009): an open hook while config says closed
                     # lets calls through with the gateway down.
+                    if rendered_missing:
+                        detail += "; the installed hook has no readable fail mode"
+                    elif rendered_open and fail_mode.get("effective") == desired:
+                        detail += "; the installed hook is rendered fail-mode=open"
                     _emit(
                         "fail" if desired == "closed" else "warn",
                         "Mode",
@@ -15077,7 +16019,7 @@ def _check_hook_contract_lock(
     # to select the hook contract.  Automatic discovery can legitimately find a
     # different installation (for example an npm .CMD wrapper ahead of the
     # desktop app on PATH); it must not override that protected setup evidence.
-    protected_setup_connector = connector in {"codex", "hermes", "omnigent", "amp"} or (
+    protected_setup_connector = connector in {"codex", "hermes",  "amp"} or (
         connector == "opencode" and (platform_name or os.name) == "nt"
     )
     protected_setup_agent = protected_setup_connector and all(
@@ -15117,6 +16059,8 @@ def _check_hook_contract_lock(
         )
         if connector == "hermes":
             native_runtime = _hermes_idle_native_check(native_runtime, r)
+            if os.name == "nt":
+                native_runtime = _hermes_windows_execution_probe(native_runtime)
     if isinstance(locations, dict):
         workspace_dir = str(locations.get("workspace_dir") or "").strip()
         hook_paths = [str(v) for v in locations.get("hook_config_paths", []) if v]
@@ -15124,7 +16068,7 @@ def _check_hook_contract_lock(
         if (platform_name or os.name) == "nt":
             # The lock also records portable generated assets for digest and
             # freshness checks.  They are not Windows runtimes.  Retain real
-            # native artifacts such as Cursor's .ps1 adapter and OmniGent's
+            # native artifacts such as Cursor's .ps1 adapter and other
             # .py/.pth files, but never label a generated shell script as the
             # configured Windows runtime.
             runtime_paths = [path for path in runtime_paths if not path.lower().endswith(".sh")]
@@ -15231,6 +16175,8 @@ def _check_hook_contract_lock(
         _emit("fail", "Hook contract", detail, r=r)
     elif native_runtime is not None and native_runtime.state == CODEX_PROBE_TIMEOUT_STATE:
         _emit("warn", "Hook contract", detail, r=r, remediation=_CODEX_PROBE_TIMEOUT_STEP)
+    elif _hermes_passive_unverified(native_runtime, r) and status in {"known", "unversioned"}:
+        _emit("warn", "Hook contract", detail, r=r, remediation=_HERMES_PASSIVE_STEP)
     elif native_runtime is not None and not native_runtime.healthy:
         _emit("fail", "Hook contract", detail, r=r, remediation=native_runtime.repair)
     elif status == "unknown":
@@ -15264,10 +16210,13 @@ def _check_hook_runtime_integrity(cfg, connector: str, r: _DoctorResult) -> None
     # with the repair doctor --fix applies (GAP-1436).
     problems = [problem for problem in hook_runtime_problems(cfg, connector) if not problem.startswith("hook token ")]
     if problems:
+        # A hook file another account can change carries its own repair
+        # (rel-1-0-4 GAP-0600); doctor --fix re-renders the others.
+        own_repair = next(filter(None, (getattr(problem, "repair", "") for problem in problems)), "")
         _emit(
             "fail",
             "Hook runtime files",
-            f"{'; '.join(problems)}; run `defenseclaw doctor --fix`",
+            f"{'; '.join(problems)}; {own_repair or 'run `defenseclaw doctor --fix`'}",
             r=r,
         )
     from defenseclaw.hook_integrity import hook_command_problems, setup_command
@@ -15343,16 +16292,8 @@ _CONNECTOR_RESIDUE_ARTIFACTS: dict[str, tuple[str, ...]] = {
         # Pre-canonicalization builds used the generic logical name.
         os.path.join("connector_backups", "hermes", "config.json"),
     ),
-    "omnigent": (
-        os.path.join("connector_backups", "omnigent", "config.json"),
-        os.path.join("connector_backups", "omnigent", "module.json"),
-        os.path.join("connector_backups", "omnigent", "pth.json"),
-    ),
     "opencode": (
         os.path.join("connector_backups", "opencode", "config.json"),
-    ),
-    "openhands": (
-        os.path.join("connector_backups", "openhands", "config.json"),
     ),
     "devin": (
         os.path.join("connector_backups", "devin", "config.json"),
@@ -15433,7 +16374,8 @@ def _check_acp_bindings(cfg, r: _DoctorResult) -> None:
     try:
         from defenseclaw.commands import cmd_acp
 
-        pairs = set(cmd_acp._managed_pairs())
+        data_dir = str(Path(str(getattr(cfg, "data_dir", "") or "")).expanduser().resolve())
+        pairs = set(cmd_acp._managed_pairs(data_dir))
         for key in list(getattr(acp, "bindings", {}) or {}):
             client, _, agent = str(key).partition("/")
             if client in cmd_acp._CLIENTS and agent in cmd_acp._AGENTS:
@@ -15450,11 +16392,10 @@ def _check_acp_bindings(cfg, r: _DoctorResult) -> None:
     if not pairs:
         return
     managed = str(getattr(cfg, "deployment_mode", "") or "") == "managed_enterprise"
-    data_dir = str(Path(str(getattr(cfg, "data_dir", "") or "")).expanduser().resolve())
     for client, agent in sorted(pairs):
         label = f"ACP binding [{client}/{agent}]"
         try:
-            problems = cmd_acp._verify_binding(data_dir, client, agent, acp)
+            problems = cmd_acp._verify_binding(data_dir, client, agent, acp, cmd_acp._expected_gateway(cfg))
             profile = acp.profile_for_pair(client, agent)
             resolved = acp.profiles.get(profile)
             mode = (resolved.mode if resolved else "") or acp.mode
@@ -15468,7 +16409,7 @@ def _check_acp_bindings(cfg, r: _DoctorResult) -> None:
         else:
             # Setup re-pins the agent and the guard; refresh never re-pins
             # a changed agent binary.
-            fix = f"defenseclaw acp setup --client {client} --agent {agent}"
+            fix = cmd_acp.setup_repair_command(cfg, client, agent, data_dir)
         if managed:
             # A managed enrollment keeps its locks in a per-user runtime dir
             # that doctor does not know, so only acp verify can be sure.
@@ -15616,6 +16557,43 @@ def _check_connector_residue(cfg, active: str, r: _DoctorResult) -> None:
     _emit("warn", "Connector residue", detail, r=r)
 
 
+def _check_removed_connector_cleanup(cfg, r: _DoctorResult) -> None:
+    """until 1.1: what the removed OpenHands or OmniGent teardown left for the user.
+
+    The teardown only replaces DefenseClaw's hook script with a stub that
+    blocks every call and revokes the tokens (``defenseclaw.removed_connectors``).
+    Each thing left is listed with the step to remove it; a host with none
+    prints no row.
+    """
+    from defenseclaw.removed_connectors import SCRIPT_GONE_WHAT, STUB_UNUSABLE_WHAT, leftovers
+
+    workspace = cfg.connector_workspace_dir() if hasattr(cfg, "connector_workspace_dir") else ""
+    for left in leftovers(str(getattr(cfg, "data_dir", "") or ""), workspace=workspace):
+        steps = "; ".join(f"{item.path}: {item.what} (to remove: {item.step})" for item in left.items)
+        pending_publication = any("interrupted publication" in item.what for item in left.items)
+        remediation = f"do each step above; until then {left.label} is blocked by DefenseClaw's stub"
+        if pending_publication:
+            remediation = (
+                "rerun connector teardown to recover the interrupted publication; "
+                "preserve its receipt and saved copies if recovery fails"
+            )
+        # A registration whose script is gone, or a stub the agent may not
+        # run or load, does not block: an upgrade that left one is not
+        # finished (GAP-0833 class).
+        unblocked = any(item.what in (SCRIPT_GONE_WHAT, STUB_UNUSABLE_WHAT) for item in left.items)
+        if not pending_publication and unblocked:
+            remediation = (
+                f"run defenseclaw-gateway connector teardown --connector {left.connector}, then do each step above"
+            )
+        _emit(
+            "fail" if unblocked else "warn",
+            f"Removed connector [{left.label}]",
+            f"removed in DefenseClaw 1.0.4; left for you to remove by hand: {steps}",
+            r=r,
+            remediation=remediation,
+        )
+
+
 def _check_orphaned_hook_entries(cfg, active: str, r: _DoctorResult) -> None:
     """Flag DefenseClaw hook entries of a connector that is not configured (GAP-0009).
 
@@ -15671,10 +16649,7 @@ def _check_orphaned_hook_entries(cfg, active: str, r: _DoctorResult) -> None:
                 r=r,
                 remediation=f"defenseclaw setup remove {name}",
             )
-    plugins = {
-        "amp": os.path.join(amp_config_home(), "plugins", "defenseclaw.ts"),
-        "opencode": os.path.join(connector_home("opencode"), "plugins", "defenseclaw.js"),
-    }
+    plugins = {name: managed_plugin_path(name) for name in ("amp", "opencode")}
     for name, path in sorted(plugins.items()):
         token = "" if name in active_set else _managed_plugin_credential(path, hooks_dir)
         if not token:
@@ -16061,6 +17036,8 @@ def _fix_gateway_token(
     current, _current_env, _current_source = _daemon_effective_gateway_token(cfg)
     if current and not rotate_required:
         return ("skip", f"{env_var} already set")
+    if _unreadable_gateway_dotenv(cfg):
+        return ("fail", _missing_gateway_token_detail(cfg))
 
     configured_env = (getattr(cfg.gateway, "token_env", "") or "").strip()
     if configured_env and not any(
@@ -16897,13 +17874,21 @@ def _fix_gateway_service(
         plan_only and "doctor.gateway.pid.remove-stale" in projected_repairs
     )
 
-    code, body = _http_probe(
-        _gateway_api_url(cfg, "/health"),
+    code, body = _gateway_health_probe(
+        cfg,
         timeout=3.0,
         response_limit=_HEALTH_DOCUMENT_MAX_BYTES,
         allow_truncation=False,
         bypass_proxy=True,
     )
+    if (
+        code == 0
+        and body.startswith("gateway listener identity is unverified:")
+        and not stale_pid_projected
+    ):
+        endpoint_trust = _trusted_gateway_listener_for_lifecycle(cfg)
+        if endpoint_trust.code != "missing":
+            return ("fail", f"{endpoint_trust.detail}; refusing lifecycle mutation")
 
     reason = ""
     process_trust: _GatewayTrust | None = None
@@ -17014,8 +17999,8 @@ def _fix_gateway_service(
             f"could not {action} gateway service ({lifecycle_detail}); run `defenseclaw-gateway status`",
         )
 
-    verified_code, verified_body = _http_probe(
-        _gateway_api_url(cfg, "/health"),
+    verified_code, verified_body = _gateway_health_probe(
+        cfg,
         timeout=3.0,
         response_limit=_HEALTH_DOCUMENT_MAX_BYTES,
         allow_truncation=False,
@@ -17451,12 +18436,18 @@ def _fix_hook_script_modes(
     return ("pass", f"verified sealed digests and restored mode 0700 on {names}")
 
 
-def _missing_tool_inspection_hook(cfg, connector: str, document, where: str):
-    """The tool-inspection event *document* registers no DefenseClaw hook for, as a problem, or "" (GAP-0645)."""
-    from defenseclaw.hook_integrity import missing_tool_inspection_events, tool_inspection_hook_problem
+def _unguarded_tool_call_problem(cfg, connector: str, path: str, document=None):
+    """Why the hook file at *path* leaves *connector* tool calls unguarded, or "" (GAP-0645, rel-1-0-4 GAP-0538).
 
-    missing = missing_tool_inspection_events(cfg, connector, document)
-    return tool_inspection_hook_problem(connector, missing[0], where) if missing else ""
+    Reads the shared table of tool-guard hook fields
+    (hook_guard_matrix.TOOL_GUARD_HOOKS) that status, quickstart and
+    ``guardrail fail-mode`` read too.
+    """
+    from defenseclaw.hook_integrity import _read_agent_config, unguarded_tool_call_problem
+
+    if document is None:
+        document = _read_agent_config(Path(path))
+    return unguarded_tool_call_problem(cfg, connector, document, path)
 
 
 def _edited_hook_problem(cfg, connector: str):
@@ -17468,17 +18459,23 @@ def _edited_hook_problem(cfg, connector: str):
 
 
 def _drifted_hook_connectors(cfg) -> list[str]:
-    from defenseclaw.hook_integrity import agent_hook_switch_problems, edited_hook_problems, hook_runtime_problems
+    from defenseclaw.hook_integrity import (
+        agent_hook_switch_problems,
+        edited_hook_problems,
+        hook_runtime_problems,
+        unguarded_tool_call_hooks,
+    )
 
-    # Codex hook entries left without a command keep Codex from starting, and
+    # Codex hook entries left without a command may leave Codex running unguarded, and
     # an edited hook entry fails or runs unguarded; the restart re-runs the
     # gateway's setup of the connector, which removes or replaces them
-    # (GAP-1102, GAP-0906, GAP-0907).
+    # (GAP-1102, GAP-0906, GAP-0907, rel-1-0-4 GAP-0538).
     return [
         connector
         for connector in _doctor_active_connectors(cfg)
         if any("changed since setup" in problem for problem in hook_runtime_problems(cfg, connector))
         or edited_hook_problems(cfg, connector)
+        or unguarded_tool_call_hooks(cfg, connector)
         or (
             connector == "codex"
             and any("without a command" in problem for problem in agent_hook_switch_problems(cfg, connector))
@@ -17631,7 +18628,9 @@ def _fix_acp_guard_pins(
 
     data_dir = str(Path(str(getattr(cfg, "data_dir", "") or "")).expanduser().resolve())
     try:
-        pairs = sorted(cmd_acp._managed_pairs())
+        # Locks too: refresh re-pins this runtime's own locks, also one behind an
+        # entry 1.0.0-1.0.3 wrote without a record.
+        pairs = sorted(cmd_acp._managed_pairs(data_dir) | cmd_acp._lock_pairs(data_dir))
         if not pairs:
             return ("skip", "no ACP binding is configured")
         pending = cmd_acp.refresh_guard_pins(data_dir, apply=False)
@@ -17645,7 +18644,7 @@ def _fix_acp_guard_pins(
     agent_note = ""
     if agent_drift:
         commands = ", ".join(
-            "'defenseclaw acp setup --client {} --agent {}'".format(*pair.split("/")) for pair in agent_drift
+            f"`{cmd_acp.setup_repair_command(cfg, *pair.split('/'), data_dir)}`" for pair in agent_drift
         )
         agent_note = (
             f"{', '.join(agent_drift)}: the agent executable changed since setup (for example, it updated); "

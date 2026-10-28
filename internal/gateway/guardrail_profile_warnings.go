@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/useridentity"
 	"golang.org/x/text/unicode/norm"
@@ -28,13 +29,20 @@ func profileExplainWarnings(set *guardrailProfileSet, decision profileDecision, 
 	if note := shortNameUserNote(set, decision, subject); note != "" {
 		warnings = append(warnings, note)
 	}
+	if note := ambiguousShortNameUserNote(set, decision, subject); note != "" {
+		warnings = append(warnings, note)
+	}
 	if note := shortNameGroupNote(decision); note != "" {
 		warnings = append(warnings, note)
 	}
 	if note := entraShortNameNote(set, subject, runtime.GOOS); note != "" {
 		warnings = append(warnings, note)
 	}
-	if note := unnamedGroupsNote(subject); note != "" {
+	var sids *profileGroupSIDs
+	if set != nil {
+		sids = set.groupSIDs
+	}
+	if note := unnamedGroupsNote(subject, sids); note != "" {
 		warnings = append(warnings, note)
 	}
 	if subject != nil && subject.cachedFactsAge > 0 {
@@ -77,7 +85,56 @@ func (set *guardrailProfileSet) assignmentWarningsWithWait(checkGroups bool, wai
 // restart listed no unknown group while profile-explain named it (GAP-0830).
 func (set *guardrailProfileSet) healthProfileWarnings() []string {
 	warnings := set.assignmentWarningsWithWait(true, profileGroupCheckWait)
+	if runtime.GOOS == "linux" {
+		warnings = append(warnings, shortNameAssignmentWarnings(set.assignments, profileShortNameRecords())...)
+	}
 	return append(warnings, set.inertHILTWarnings()...)
+}
+
+// profileShortNameRecords supplies verified guardian facts for the exact
+// qualified-name remedy in status, verify and doctor. Tests replace it.
+var profileShortNameRecords = func() []enterprisehooks.IdentitySpoolRecord {
+	if dir := currentIdentitySpoolDir(); dir != "" {
+		return enterprisehooks.ReadIdentitySpoolRecords(dir, validateManagedGuardianAuthorization, identityDirectoryMax)
+	}
+	return nil
+}
+
+func shortNameAssignmentWarnings(assignments []config.ProfileAssignment, records []enterprisehooks.IdentitySpoolRecord) []string {
+	var warnings []string
+	for i, assignment := range assignments {
+		for _, entry := range assignment.Match.Users {
+			entry = strings.TrimSpace(entry)
+			if entry == "" || strings.ContainsAny(entry, `@\`) || useridentity.KindForID(entry) != "" {
+				continue
+			}
+			for _, record := range records {
+				facts := record.Facts
+				if facts.Directory != useridentity.DirectoryActiveDirectory ||
+					(facts.Source != useridentity.SourceSSSD && facts.Source != useridentity.SourceSSSDInfoPipe) ||
+					!useridentity.EqualFold(useridentity.BareAccountName(record.User), entry) {
+					continue
+				}
+				qualified := firstNonEmpty(facts.UPN, facts.Principal)
+				if qualified != "" {
+					warnings = append(warnings, fmt.Sprintf("assignment %d uses the bare user %q for %s; write %s (or uid %s) to select exactly this SSSD AD account",
+						i+1, entry, record.User, qualified, record.Key))
+				}
+			}
+		}
+	}
+	return warnings
+}
+
+// standaloneProfileWarnings is what status and verify list on a standalone
+// deployment: the profile set's warnings, or, with no profiles, the inert
+// human-approval warnings of the config itself, which config validate and
+// profile-explain already gave (id.GAP-1264).
+func standaloneProfileWarnings(set *guardrailProfileSet, cfg *config.Config) []string {
+	if set != nil {
+		return set.healthProfileWarnings()
+	}
+	return ConfigHILTWarnings(cfg)
 }
 
 // inertHILTWarning uses the same resolved threshold as enforcement. Keep
@@ -286,8 +343,11 @@ func validSIDString(s string) bool {
 // only numbers. The Unix resolver keeps a group id as its number when no
 // group answers for it, which is what a directory that does not answer
 // leaves behind: the account then has too few groups for its assignments to
-// match, and nothing else in the answer shows it (GAP-0212).
-func unnamedGroupsNote(subject *profileSubject) string {
+// match, and nothing else in the answer shows it (GAP-0212). On standalone
+// Windows (sids, the SIDs of the assignment group names) an assignment
+// matches the SID of the group it names, so a group shown only by its SID
+// still matches it, and the note does not say otherwise (GAP-1141).
+func unnamedGroupsNote(subject *profileSubject, sids *profileGroupSIDs) string {
 	if subject == nil || subject.LookupFailed {
 		return ""
 	}
@@ -320,6 +380,10 @@ func unnamedGroupsNote(subject *profileSubject) string {
 	if unnamed == 0 {
 		return ""
 	}
+	if sidForm && sids != nil {
+		return fmt.Sprintf("%d of this account's %d group(s) have no name, only a SID (the guardian names at most 128 groups per account within 2 s, "+
+			"or the SID does not resolve); assignments match groups by SID, so this changes only how they are shown", unnamed, total)
+	}
 	if sidForm {
 		return fmt.Sprintf("%d of this account's %d group(s) have no name, only a SID (the guardian names at most 128 groups per account within 2 s, "+
 			"or the SID does not resolve); an assignment that names such a group as DOMAIN\\name cannot match, so name it by its SID", unnamed, total)
@@ -338,7 +402,9 @@ func unnamedGroupsNote(subject *profileSubject) string {
 // operating system's account database, and each one it answers "no such
 // group" for is a warning in explain, status, doctor and `profile list`, and
 // a line in the gateway log at start and at each reload (GAP-0135). A lookup
-// that fails or runs out of time says nothing: only a definite absence warns.
+// that fails or runs out of time proves no absence: only a definite absence
+// warns. Requests whose assignments need an unresolved group are refused and
+// name the missing fact.
 //
 // An SSSD that is offline with a cold cache does not fail: it answers "no such
 // group" for groups that exist. So nothing is warned while the directory
@@ -845,6 +911,25 @@ func shortNameUserNote(set *guardrailProfileSet, decision profileDecision, subje
 	return ""
 }
 
+func ambiguousShortNameUserNote(set *guardrailProfileSet, decision profileDecision, subject *profileSubject) string {
+	if set == nil || subject == nil || !slices.Contains(decision.Unproven, "account:ambiguous_short_name") {
+		return ""
+	}
+	qualified := firstNonEmpty(subject.UPN, subject.Principal)
+	if qualified == "" {
+		qualified = subject.UserID
+	}
+	for i, assignment := range set.assignments {
+		for _, entry := range assignment.Match.Users {
+			if ambiguousBareUserEntry(subject, entry) {
+				return fmt.Sprintf("assignment %d uses the ambiguous short name %q for %s; write %s (or uid %s) to select only this account",
+					i+1, strings.TrimSpace(entry), subject.UserName, qualified, subject.UserID)
+			}
+		}
+	}
+	return ""
+}
+
 func shortNameGroupNote(decision profileDecision) string {
 	group := strings.TrimSpace(decision.MatchedGroup)
 	if decision.Match != profileMatchGroup || group == "" || strings.ContainsAny(group, `@\`) ||
@@ -915,6 +1000,15 @@ var cachedDirectoryRefreshFailure = func(id string) (time.Time, string, bool) {
 	return peerDirectoryCache().refreshFailing(id)
 }
 
+// explainCacheOutcome is what live gives the account's requests, for an
+// explain warning: a refusal and its reason, or a profile and its match.
+func explainCacheOutcome(live profileDecision) string {
+	if live.Refused != "" {
+		return "are refused (" + live.Refused + ")"
+	}
+	return fmt.Sprintf("get profile %s (match %s)", firstNonEmpty(live.Name, "none"), live.Match)
+}
+
 // explainCacheView describes the cached facts of the explained account: how
 // old they are, and the profile requests currently get from them. warning is
 // non-empty when that profile differs from the explained one.
@@ -925,26 +1019,30 @@ func explainCacheView(set *guardrailProfileSet, explained *profileSubject, decis
 	facts, fetchedAt, ok := cachedDirectoryFacts(explained.UserID)
 	if !ok {
 		// No facts are cached. When the gateway's own lookups for the account
-		// fail, directory-dependent assignments get default_lookup_failed
-		// whatever this fresh lookup found (GAP-0212).
+		// fail, requests whose assignments need the missing facts are refused
+		// and name them, regardless of this fresh lookup (GAP-0212).
 		since, reason, failing := cachedDirectoryFailure(explained.UserID)
 		if !failing {
 			return nil, ""
 		}
 		failed := profileSubject{UserID: explained.UserID, IDKind: explained.IDKind, UserName: explained.UserName, LookupFailed: identityLookupBlocking.Load()}
 		live := set.match(&failed, profileSubjectLookup, connectorName, agent)
-		differs := live.Name != decision.Name || live.Match != decision.Match
+		differs := live.Name != decision.Name || live.Match != decision.Match || live.Refused != decision.Refused
 		view = map[string]any{
 			"failing_since": since.UTC().Format(time.RFC3339),
 			"last_error":    reason,
 			"profile":       live.Name,
 			"match":         live.Match,
+			"refused":       live.Refused != "",
 			"differs":       differs,
 		}
+		if live.Refused != "" {
+			view["refused_reason"] = live.Refused
+		}
 		if differs {
-			warning = fmt.Sprintf("requests of this account currently get profile %s (match %s): the gateway's directory lookup for it has failed since %s (%s) "+
-				"and is retried every %s; the profile above applies once a lookup succeeds",
-				firstNonEmpty(live.Name, "none"), live.Match, since.UTC().Format("15:04:05Z"), reason, identityDirectoryRetry)
+			warning = fmt.Sprintf("requests of this account currently %s: the gateway's directory lookup for it has failed since %s (%s) "+
+				"and is retried every %s; rerun explain after a successful lookup to see the proven profile",
+				explainCacheOutcome(live), since.UTC().Format("15:04:05Z"), reason, identityDirectoryRetry)
 		}
 		return view, warning
 	}
@@ -957,18 +1055,23 @@ func explainCacheView(set *guardrailProfileSet, explained *profileSubject, decis
 		UserID: explained.UserID, IDKind: explained.IDKind, UserName: explained.UserName, Directory: facts,
 	}, identityLookupBlocking.Load())
 	live := set.match(&cached, profileSubjectLookup, connectorName, agent)
-	differs := live.Name != decision.Name || live.Match != decision.Match || live.MatchedGroup != decision.MatchedGroup
+	differs := live.Name != decision.Name || live.Match != decision.Match || live.MatchedGroup != decision.MatchedGroup ||
+		live.Refused != decision.Refused
 	view = map[string]any{
 		"age_seconds":           int(age.Seconds()),
 		"refresh_after_seconds": int(refresh.Seconds()),
 		"profile":               live.Name,
 		"match":                 live.Match,
+		"refused":               live.Refused != "",
 		"differs":               differs,
 	}
+	if live.Refused != "" {
+		view["refused_reason"] = live.Refused
+	}
 	if differs {
-		warning = fmt.Sprintf("requests of this account still use the directory facts the gateway fetched %s ago (profile %s, match %s); "+
-			"the profile above applies from the next refresh, within %s. Restart the gateway to refresh now",
-			age, firstNonEmpty(live.Name, "none"), live.Match, refresh)
+		warning = fmt.Sprintf("requests of this account still use the directory facts the gateway fetched %s ago, so they %s; "+
+			"rerun explain after the next successful refresh to see the proven profile. The gateway refreshes within %s; restart it to refresh now",
+			age, explainCacheOutcome(live), refresh)
 	}
 	// The lookup explain started failed: the answer above, like the
 	// account's requests, comes from the facts cached before (GAP-0361). An
@@ -996,8 +1099,8 @@ func explainCacheView(set *guardrailProfileSet, explained *profileSubject, decis
 //
 // A directory that does not answer (a domain controller down, SSSD offline)
 // leaves no trace on the tools an administrator uses: the accounts without
-// cached facts get default_lookup_failed for directory-dependent assignments,
-// and the only sign was that match on each record. directoryHealthView reports the
+// cached facts refuse requests whose assignments need the missing facts and
+// name them; the only sign was that refusal on each record. directoryHealthView reports the
 // accounts whose lookups failed in the last cache lifetime, with the reason
 // and the age of the facts still served, to explain, status and doctor
 // (GAP-0145).
@@ -1030,8 +1133,8 @@ func directoryHealthView(h identityCacheHealth, now time.Time) (view map[string]
 	if h.Failing == 0 {
 		return nil, ""
 	}
-	message = fmt.Sprintf("directory lookups are failing for %d account(s) since %s (last error: %s); accounts without cached facts "+
-		"use the default profile for directory-dependent assignments (default_lookup_failed)", h.Failing, h.Since.UTC().Format("15:04:05Z"), h.LastError)
+	message = fmt.Sprintf("directory lookups are failing for %d account(s) since %s (last error: %s); requests whose assignments need missing facts "+
+		"are refused (default_lookup_failed), and each refusal names the missing fact", h.Failing, h.Since.UTC().Format("15:04:05Z"), h.LastError)
 	if h.Stale > 0 {
 		message += fmt.Sprintf(", and %d account(s) are served facts up to %s old, which are dropped at %s",
 			h.Stale, h.OldestAge.Round(time.Minute), identityDirectoryMaxAge)

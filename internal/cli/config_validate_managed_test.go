@@ -4,15 +4,65 @@
 package cli
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
 const managedLiteralSentinel = "example-sensitive-value"
+
+// GAP-0645: an offline managed candidate must receive the same proxy bind
+// refusal as the gateway when it starts, on every supported OS.
+func TestConfigValidateRefusesManagedNonLoopbackGuardrailProxy(t *testing.T) {
+	t.Cleanup(func() { configValidateCmd.SetOut(nil); configValidateJSON, configValidateDataDir = false, "" })
+	dir := t.TempDir()
+	t.Setenv(managed.ConfigPathEnv, filepath.Join(dir, "installed", "config.yaml"))
+	configValidateDataDir = dir
+	path := filepath.Join(dir, "candidate.yaml")
+	for _, tc := range []struct {
+		name, mode, host string
+		enabled          bool
+		refuse           bool
+	}{
+		{"wildcard", "managed_enterprise", "0.0.0.0", true, true},
+		{"remote IPv4", "managed_enterprise", "192.0.2.10", true, true},
+		{"IPv6 wildcard", "managed_enterprise", "[::]", true, true},
+		{"loopback", "managed_enterprise", "127.0.0.1", true, false},
+		{"disabled proxy", "managed_enterprise", "0.0.0.0", false, false},
+		{"explicit unmanaged bind", "", "192.0.2.10", true, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			body := "config_version: 9\n"
+			if tc.mode != "" {
+				body += "deployment_mode: " + tc.mode + "\nenterprise:\n  profile: standalone\n"
+			}
+			body += "guardrail:\n  enabled: " + map[bool]string{true: "true", false: "false"}[tc.enabled] + "\n  host: '" + tc.host + "'\n"
+			if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			configValidateJSON = true
+			out := &strings.Builder{}
+			configValidateCmd.SetOut(out)
+			err := configValidateCmd.RunE(configValidateCmd, []string{path})
+			if tc.refuse {
+				var failure configV8WireFailure
+				if err == nil || json.Unmarshal([]byte(out.String()), &failure) != nil || failure.Path != "$.guardrail.host" ||
+					!strings.Contains(failure.Reason, "loopback") {
+					t.Fatalf("non-loopback proxy accepted or unclear: error=%v output=%q", err, out)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("valid proxy config refused: %v; output=%q", err, out)
+			}
+		})
+	}
+}
 
 // GAP-0138: `config validate` applies the managed candidate rule that
 // `enterprise linux ensure --config` applies, so a file it calls valid is
@@ -73,5 +123,44 @@ func TestConfigValidateRefusesManagedLiteralCandidates(t *testing.T) {
 	configValidateCmd.SetOut(&strings.Builder{})
 	if err := configValidateCmd.RunE(configValidateCmd, []string{path}); err != nil {
 		t.Fatalf("benign managed candidate refused: %v", err)
+	}
+}
+
+// GAP-0049: a staged managed candidate that omits openshell.pack_dir got the
+// loader's default under its own folder, so `config validate` refused a
+// custom pack in <policy_dir>/sandbox that ensure, with the installed
+// config, accepts. The default follows the file's data_dir and policy_dir.
+func TestConfigValidateFindsStagedCustomPacksInThePolicyDir(t *testing.T) {
+	t.Cleanup(func() { configValidateCmd.SetOut(nil); configValidateJSON, configValidateDataDir = false, "" })
+	// The pack's own checks (an administrator-owned file, as strict as the
+	// base) are not this test's: a test's files are the test user's.
+	old := config.SandboxProfilePackCheck
+	t.Cleanup(func() { config.SandboxProfilePackCheck = old })
+	config.SandboxProfilePackCheck = nil
+	dir := t.TempDir()
+	t.Setenv(managed.ConfigPathEnv, filepath.Join(dir, "installed", "config.yaml"))
+	policies := filepath.Join(dir, "policies")
+	pack := filepath.Join(policies, "sandbox", "site-strict")
+	if err := os.MkdirAll(pack, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(pack, "pack.yaml"), []byte("version: 1\nname: site-strict\nextends: strict\nworkspace:\n  mode: copy\n"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	stage := filepath.Join(dir, "stage")
+	if err := os.MkdirAll(stage, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(stage, "candidate.yaml")
+	body := "config_version: 9\ndeployment_mode: managed_enterprise\ndata_dir: " + filepath.Join(dir, "data") + "\npolicy_dir: " + policies +
+		"\nenterprise:\n  profile: standalone\nguardrail:\n  enabled: true\n  connectors:\n    claudecode: {}\n  default_profile: default\n" +
+		"  profiles:\n    default:\n      sandbox:\n        required_pack: site-strict\nopenshell:\n  enabled: true\n"
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	out := &strings.Builder{}
+	configValidateCmd.SetOut(out)
+	if err := configValidateCmd.RunE(configValidateCmd, []string{path}); err != nil {
+		t.Fatalf("config validate refused a pack in the policy folder: %v", err)
 	}
 }

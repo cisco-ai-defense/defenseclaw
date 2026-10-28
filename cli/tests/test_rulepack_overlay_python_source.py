@@ -20,8 +20,11 @@ from __future__ import annotations
 
 import json
 import os
+import random
+import re
 import shutil
 import tempfile
+import time
 import unittest
 from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
@@ -197,17 +200,137 @@ class TestWindowedSearch(unittest.TestCase):
                 self.assertEqual(want and want.span(), got and got.span(), rule.rule_id)
 
 
+    def test_multiline_rule_matches_words_far_apart(self):
+        """GAP-1316: a match across many lines is not lost to the windows.
+
+        Whatever lets a match cross lines gives the plain search's result: a
+        global or scoped DOTALL flag, a class or negated literal that holds a
+        newline, a repeated group with a newline, a lookaround, a run of
+        whitespace over blank lines, bounded newlines between long lines.
+        """
+        filler = "".join(f"line {i} of filler text\n" for i in range(800))
+        long_line = "x" * 700 + "\n"
+        far = "start\n" + filler + "finish\n"
+        cases = [
+            (r"(?s)start.*finish", far),
+            (r"(?s:start.*finish)", far),
+            (r"(?is:START.*FINISH)", far),
+            (r"start(?s:.)*finish", far),
+            (r"start(?s:.*)finish", far),
+            (r"start[\s\S]*finish", far),
+            (r"start[^#]*finish", far),
+            (r"start[^\t]*?finish", far),
+            (r"start(?:.*\n)*finish", far),
+            (r"start(?:.|\n)*finish", far),
+            (r"start(?=[\s\S]*finish)", far),
+            (r"start\s+finish", filler + "start" + "\n" * 900 + "finish\n"),
+            (r"start\n.*\n.*\nfinish", filler + "start\n" + long_line * 2 + "finish\n" + filler),
+            (r"start\n(?:.*\n){0,5}finish", filler + "start\n" + long_line * 5 + "finish\n" + filler),
+        ]
+        for source, text in cases:
+            self.assertGreater(len(text), rulepack._WINDOW_MIN_TEXT)
+            rule = _span_rule(source)
+            want = rule.pattern.search(text)
+            self.assertIsNotNone(want, source)
+            got = rulepack._search(rule, text, rulepack._fold(text))
+            self.assertEqual(want.span(), got and got.span(), source)
+            pack = rulepack.RulePack(source_dir="test", rules=[rule])
+            self.assertEqual([f.rule_id for f in pack.scan_text(text, location="notes.txt")], ["T-SPAN"], source)
+        # A lookahead that must not see the far word is not satisfied by a
+        # window's end either.
+        rule = _span_rule(r"start(?![\s\S]*finish)")
+        self.assertIsNone(rulepack._search(rule, far, rulepack._fold(far)))
+
+    def test_reach_keeps_line_bounded_rules_windowed(self):
+        for source, reach in [
+            (r"ignore\s+previous\s+instructions", 2),
+            (r"(?i)api[_-]?key\s*[:=]\s*\S{16,}", 2),
+            (r"rm\s+-rf\s+/[^\n]*", 2),
+            (r"start\n.*\n.*\nfinish", 3),
+        ]:
+            rule = _span_rule(source)
+            self.assertIsNotNone(rule.anchors, source)
+            self.assertEqual(rule.reach, reach, source)
+        for source in (r"(?s:a.*b)", r"abc[^#]*def", r"(abc)\1", r"abc(?=[\s\S]*def)"):
+            self.assertIsNone(_span_rule(source).anchors, source)
+
+
+    def test_window_growth_cost_does_not_grow_with_blank_runs(self):
+        """Many anchor hits beside a long run of blank lines stay cheap.
+
+        Growing each window line by line rescanned the blank run for every
+        hit: 200 hits before 100,000 blank lines took 3.5 s for one rule.
+        This text has 1,000 hits and 200,000 blank lines.
+        """
+        hits = "".join(f"anchor_word {i}\n" for i in range(1000))
+        blank = "\n" * 200_000
+        rule = _span_rule(r"anchor_word\s+missing")
+        self.assertIsNotNone(rule.anchors)
+        for text in (hits + blank, blank + hits, blank + hits + blank):
+            folded = rulepack._fold(text)
+            started = time.perf_counter()
+            self.assertIsNone(rulepack._search(rule, text, folded))
+            self.assertLess(time.perf_counter() - started, 1.0)
+        found = _span_rule(r"anchor_word\s+999")
+        text = hits + blank
+        self.assertEqual(rulepack._search(found, text, rulepack._fold(text)).span(), re.search(r"anchor_word\s+999", text).span())
+
+    def test_too_many_anchor_hits_give_a_plain_search(self):
+        text = "abc x\n" * (rulepack._WINDOW_MAX_HITS + 1) + "abc  \n\n def"
+        rule = _span_rule(r"abc\s+def")
+        self.assertEqual(rulepack._search(rule, text, rulepack._fold(text)).span(), re.search(r"abc\s+def", text).span())
+
+    def test_line_index_matches_a_line_walk(self):
+        rng = random.Random(2070)
+        for _ in range(300):
+            text = "".join(rng.choice(["\n", "\n", " ", "\t", "a", "\r"]) for _ in range(rng.randint(0, 40)))
+            index = rulepack._LineIndex(text)
+            for pos in range(len(text) + 1):
+                for lines in range(4):
+                    self.assertEqual(index.back(pos, lines), _walk_back(text, pos, lines), (text, pos, lines))
+                    self.assertEqual(index.forward(pos, lines), _walk_forward(text, pos, lines), (text, pos, lines))
+
+
+def _walk_back(text, pos, lines):
+    start = text.rfind("\n", 0, pos) + 1
+    while lines > 0 and start > 0:
+        prev = text.rfind("\n", 0, start - 1) + 1
+        if re.search(r"\S", text[prev : start - 1]):
+            lines -= 1
+        start = prev
+    return start
+
+
+def _walk_forward(text, pos, lines):
+    end = text.find("\n", pos)
+    while end >= 0 and lines > 0:
+        nxt = text.find("\n", end + 1)
+        stop = len(text) if nxt < 0 else nxt
+        if re.search(r"\S", text[end + 1 : stop]):
+            lines -= 1
+        end = nxt
+    return len(text) if end < 0 else end
+
+
+def _span_rule(source):
+    pattern = rulepack.re.compile(source)
+    required, anchors, reach = rulepack._prefilter(pattern)
+    return rulepack._CompiledRule(
+        rule_id="T-SPAN", pattern=pattern, title="Span", severity="HIGH", confidence=1,
+        tags=[], category="test", required=required, anchors=anchors, reach=reach,
+    )
+
+
 class TestRequiredLiterals(unittest.TestCase):
     def test_sequence_branch_and_repeat(self):
         self.assertEqual(
-            rulepack._required_literals(r"(?i)ab(?:cd|ef)\s+g+"),
+            rulepack._prefilter(rulepack.re.compile(r"(?i)ab(?:cd|ef)\s+g+"))[0],
             ("and", ["ab", ("or", ["cd", "ef"]), "g"]),
         )
 
     def test_optional_or_unknown_parts_give_no_requirement(self):
-        self.assertIsNone(rulepack._required_literals(r"(?:abc)?\d+"))
-        self.assertIsNone(rulepack._required_literals(r"abc|\d+"))
-        self.assertIsNone(rulepack._required_literals("([unclosed"))
+        self.assertIsNone(rulepack._prefilter(rulepack.re.compile(r"(?:abc)?\d+"))[0])
+        self.assertIsNone(rulepack._prefilter(rulepack.re.compile(r"abc|\d+"))[0])
 
     def test_default_pack_rules_get_a_prefilter(self):
         root = os.path.join(os.path.dirname(__file__), "..", "..", "policies", "guardrail", "default")

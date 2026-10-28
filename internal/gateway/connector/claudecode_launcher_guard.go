@@ -30,6 +30,23 @@ import (
 // missing, as the Unix hook command does. Managed installs keep the exec form
 // their guardian restores.
 //
+// PreToolUse is the exception. Cursor imports the hooks in
+// ~/.claude/settings.json and runs a handler's command without its args, and
+// an argument-free cmd.exe made Cursor block every tool call (GAP-1011). The
+// PreToolUse handler of a packaged per-user install therefore starts the
+// installed full hook, a separate file from the stable launcher:
+//
+//	<install>\bin\defenseclaw-hook.exe launcher-guard <launcher> hook --connector claudecode
+//
+// It runs the launcher as cmd.exe does and blocks with exit 2 and the same
+// sentence when the launcher is missing or cannot start, so a tool call of a
+// turn that began before the launcher went missing is not let through. Started
+// by Cursor without arguments it gives no answer. The launcher delegates every
+// call to that same installed hook, so its absence already leaves no hook to
+// run; the guard adds no file a call depends on. A launcher with no separate
+// installed hook (a repository build) keeps the cmd.exe guard on PreToolUse
+// too, so a missing launcher blocks there as well.
+//
 // Hook-shape compatibility rule (GAP-1284): a hook entry that release N
 // writes must keep a shape that every earlier 1.x teardown recognises, or
 // release N's rollback must convert it before the older release starts. The
@@ -48,6 +65,14 @@ var claudeCodeLauncherGuardWords = strings.Fields(
 	"DefenseClaw blocked this: its Claude Code hook launcher is missing. " +
 		"Run the DefenseClaw installer again to repair it.",
 )
+
+// ClaudeCodeLauncherMissingMessage is the guard sentence on one line, which
+// the PreToolUse guard (defenseclaw-hook launcher-guard) prints.
+var ClaudeCodeLauncherMissingMessage = strings.Join(claudeCodeLauncherGuardWords, " ")
+
+// ClaudeCodeLauncherGuardSubcommand is the first argument of the PreToolUse
+// guard handler.
+const ClaudeCodeLauncherGuardSubcommand = "launcher-guard"
 
 // claudeCodeWindowsCommandProcessor is the system cmd.exe the guard runs.
 func claudeCodeWindowsCommandProcessor() string {
@@ -77,8 +102,18 @@ func claudeCodeLauncherGuardArgs(launcher string, hookArgs []string) []string {
 }
 
 // claudeCodeLauncherGuardParts returns the launcher and hook argv of an exact
-// generated guard; any other handler, including an edited guard, is not one.
+// generated guard, the cmd.exe guard or the PreToolUse guard; any other
+// handler, including an edited guard, is not one.
 func claudeCodeLauncherGuardParts(hook map[string]interface{}) (string, []string, bool) {
+	if launcher, hookArgs, ok := claudeCodeCmdGuardParts(hook); ok {
+		return launcher, hookArgs, true
+	}
+	return claudeCodePreToolGuardParts(hook)
+}
+
+// claudeCodeCmdGuardParts returns the launcher and hook argv of an exact
+// generated cmd.exe guard.
+func claudeCodeCmdGuardParts(hook map[string]interface{}) (string, []string, bool) {
 	command, _ := hook["command"].(string)
 	if command == "" || normalizeWindowsHookExecutable(command) !=
 		normalizeWindowsHookExecutable(claudeCodeWindowsCommandProcessor()) {
@@ -110,6 +145,86 @@ func claudeCodeLauncherGuardParts(hook map[string]interface{}) (string, []string
 		}
 	}
 	return launcher, hookArgs, true
+}
+
+// claudeCodePreToolGuardArgs is the argv of the PreToolUse guard handler.
+func claudeCodePreToolGuardArgs(launcher string, hookArgs []string) []string {
+	return append([]string{ClaudeCodeLauncherGuardSubcommand, launcher}, hookArgs...)
+}
+
+// ClaudeCodeLauncherGuardArgv returns the launcher and hook argv that the
+// PreToolUse guard runs for args, its arguments after the program name. Only
+// an absolute defenseclaw-hook.exe launcher with the per-user Claude Code hook
+// argv is accepted, so the guard starts nothing but DefenseClaw's launcher.
+func ClaudeCodeLauncherGuardArgv(args []string) (launcher string, hookArgs []string, ok bool) {
+	want := []string{"hook", "--connector", "claudecode"}
+	if len(args) != 2+len(want) || args[0] != ClaudeCodeLauncherGuardSubcommand ||
+		!claudeCodeLauncherGuardable(args[1]) || !claudeCodeAbsoluteHookExecutable(args[1]) {
+		return "", nil, false
+	}
+	for i, arg := range want {
+		if args[2+i] != arg {
+			return "", nil, false
+		}
+	}
+	return args[1], append([]string(nil), want...), true
+}
+
+// claudeCodeAbsoluteHookExecutable reports an absolute path whose file name is
+// defenseclaw-hook.exe.
+func claudeCodeAbsoluteHookExecutable(path string) bool {
+	if !isWindowsAbsolutePath(path) && !filepath.IsAbs(path) {
+		return false
+	}
+	return strings.EqualFold(path[strings.LastIndexAny(path, `\/`)+1:], windowsHookBinaryName)
+}
+
+// claudeCodePreToolGuardParts returns the launcher and hook argv of an exact
+// generated PreToolUse guard handler.
+func claudeCodePreToolGuardParts(hook map[string]interface{}) (string, []string, bool) {
+	command, _ := hook["command"].(string)
+	if !claudeCodeLauncherGuardable(command) || !claudeCodeAbsoluteHookExecutable(command) {
+		return "", nil, false
+	}
+	args, ok := claudeCodeNativeExecArguments(hook)
+	if !ok {
+		return "", nil, false
+	}
+	launcher, hookArgs, ok := ClaudeCodeLauncherGuardArgv(args)
+	if !ok || normalizeWindowsHookExecutable(launcher) == normalizeWindowsHookExecutable(command) {
+		return "", nil, false
+	}
+	return launcher, hookArgs, true
+}
+
+// claudeCodePreToolGuardExecutable returns the program the PreToolUse
+// handler starts for launcher, or "" to keep the cmd.exe guard. Tests
+// replace it.
+var claudeCodePreToolGuardExecutable = func(launcher string) string {
+	return claudeCodePreToolGuardFor(launcher, canonicalNativeWindowsHookBinary(), canonicalNativeWindowsInstalledHookBinary())
+}
+
+// claudeCodePreToolGuardFor returns installed, the installed full hook, when
+// launcher is the stable launcher of a packaged install and installed is a
+// separate regular file; otherwise "".
+func claudeCodePreToolGuardFor(launcher, stable, installed string) string {
+	if strings.TrimSpace(stable) == "" || strings.TrimSpace(installed) == "" ||
+		!pathidentity.Same(launcher, stable) || pathidentity.Same(installed, stable) ||
+		!claudeCodeAbsoluteHookExecutable(installed) || !claudeCodeLauncherGuardable(installed) {
+		return ""
+	}
+	info, err := os.Lstat(installed)
+	if err != nil || !info.Mode().IsRegular() {
+		return ""
+	}
+	return installed
+}
+
+// ClaudeCodeLauncherGuardTarget returns the launcher and hook argv of a
+// handler in the exact launcher-guard form per-user Setup has written since
+// 1.0.0; ok is false for any other handler, an edited guard included.
+func ClaudeCodeLauncherGuardTarget(hook map[string]interface{}) (launcher string, hookArgs []string, ok bool) {
+	return claudeCodeLauncherGuardParts(hook)
 }
 
 // claudeCodeExecView returns a guarded handler as the exec-form handler it
@@ -155,6 +270,39 @@ func claudeCodeWindowsHookInvocation(opts SetupOpts, executable string) (string,
 		return claudeCodeWindowsCommandProcessor(), claudeCodeLauncherGuardArgs(executable, args)
 	}
 	return executable, args
+}
+
+// claudeCodeHandlerInvocation is the argv of the handler Setup writes for
+// eventType. Cursor imports the hooks in ~/.claude/settings.json (its
+// third-party hooks, on by default) and runs only a handler's command,
+// without its args. For the cmd.exe guard that started an interactive
+// cmd.exe, which printed its banner instead of JSON, and Cursor blocks a
+// tool call whose pre-tool hook answers with something other than JSON: every
+// Cursor tool call was blocked, also with no Cursor hooks set up (GAP-1011).
+// PreToolUse is the only Claude Code event Cursor runs as a pre-tool check,
+// so that handler runs the PreToolUse guard instead (see the top of this
+// file): started by Cursor with no arguments it gives no answer, and started
+// by Claude Code it blocks when the launcher is missing, also in a turn that
+// began before the launcher went missing. Every other event keeps the cmd.exe
+// guard (GAP-1091), and so does PreToolUse when there is no separate installed
+// hook to run as its guard: a missing launcher must block, never let a tool
+// call through.
+func claudeCodeHandlerInvocation(eventType, command string, args []string) (string, []string) {
+	if eventType != "PreToolUse" {
+		return command, args
+	}
+	hook := map[string]interface{}{"command": command, "args": args}
+	launcher, hookArgs, ok := claudeCodeCmdGuardParts(hook)
+	if !ok {
+		return command, args
+	}
+	guardArgs := claudeCodePreToolGuardArgs(launcher, hookArgs)
+	if guard := claudeCodePreToolGuardExecutable(launcher); guard != "" {
+		if _, _, valid := ClaudeCodeLauncherGuardArgv(guardArgs); valid {
+			return guard, guardArgs
+		}
+	}
+	return command, args
 }
 
 // claudeCodeRollbackBackupName is the copy of settings.json taken before

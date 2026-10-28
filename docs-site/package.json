@@ -2,15 +2,16 @@
   "name": "defenseclaw-docs-site",
   "version": "0.1.0",
   "private": true,
-  "description": "Cisco · DefenseClaw documentation site. Next.js + Fumadocs, statically exported for GitHub Pages.",
+  "description": "Cisco \u00b7 DefenseClaw documentation site. Next.js + Fumadocs, statically exported for GitHub Pages.",
   "type": "module",
   "scripts": {
     "dev": "next dev --turbopack",
     "build": "next build",
-    "postbuild": "tsx ./scripts/check-search-index-size.ts && tsx ./scripts/build-page-markdown.ts && tsx ./scripts/check-diagram-widths.ts && npm run validate-seo",
+    "postbuild": "tsx ./scripts/check-search-index-size.ts && tsx ./scripts/build-page-markdown.ts && tsx ./scripts/check-diagram-widths.ts && npm run validate-seo && npm run test:support-matrix",
     "start": "next start",
     "lint": "eslint .",
     "validate-links": "tsx ./scripts/validate-links.ts",
+    "validate-media": "tsx ./scripts/validate-media.ts",
     "validate-seo": "tsx ./scripts/validate-seo-output.ts",
     "validate-snippets": "tsx ./scripts/validate-shell-snippets.ts",
     "check-diagram-widths": "tsx ./scripts/check-diagram-widths.ts",
@@ -19,9 +20,12 @@
     "test:policy-creator": "tsx --test ./scripts/test-policy-creator.ts",
     "test:feature-demos": "tsx --test ./scripts/test-feature-demos.ts",
     "test:diagram-zones": "tsx --test ./scripts/test-diagram-zones.tsx",
-    "postinstall": "fumadocs-mdx && tsx ./scripts/build-policy-assets.ts && tsx ./scripts/sync-connector-icons.ts",
+    "test:support-matrix": "tsx --test ./scripts/test-support-matrix.ts",
+    "test:docs-claims": "tsx --test ./scripts/test-docs-claims.ts",
     "test:search": "tsx --test ./scripts/test-search.tsx",
-    "check-search-index-size": "tsx ./scripts/check-search-index-size.ts"
+    "check-search-index-size": "tsx ./scripts/check-search-index-size.ts",
+    "test:docs-w4": "tsx --test ./scripts/test-docs-w4.ts",
+    "postinstall": "fumadocs-mdx && tsx ./scripts/build-policy-assets.ts && tsx ./scripts/sync-connector-icons.ts"
   },
   "dependencies": {
     "@dagrejs/dagre": "^3.0.0",
@@ -37,7 +41,7 @@
     "js-yaml": "^4.1.1",
     "lucide-react": "^1.23.0",
     "motion": "^12.42.2",
-    "next": "^16.2.0",
+    "next": "^16.4.2",
     "react": "^19.2.0",
     "react-dom": "^19.2.0",
     "shiki": "^4.3.0",
@@ -62,5 +66,8 @@
     "tar": "^7.5.15",
     "tsx": "^4.19.0",
     "typescript": "^5.7.0"
+  },
+  "overrides": {
+    "zod": "^4.6.6"
   }
 }

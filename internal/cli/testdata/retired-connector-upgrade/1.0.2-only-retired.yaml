@@ -1,0 +1,13 @@
+# A 1.0.2 host that set up only OpenHands.
+claw:
+  mode: openhands
+guardrail:
+  connector: openhands
+  enabled: true
+  mode: action
+  connectors:
+    openhands:
+      mode: action
+data_dir: '@HOME@'
+config_version: 9
+observability: {}

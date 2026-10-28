@@ -8,10 +8,9 @@ keywords:
   - DefenseClaw native ask
 ---
 
-HITL is for actions that are risky enough to need context but not categorical
-enough to block. With the bundled default guardrail policy, CRITICAL findings
-block, while eligible HIGH findings can become approval requests when HITL is
-enabled. Only ask-capable connector events can pause.
+Human approval (HITL) pauses a risky call and asks you instead of silently allowing or hard-blocking it. It works in action mode, on agents that can ask: Claude Code, Antigravity, Amp and OpenClaw ([the list](/docs/guardrail#which-agents-can-ask)). CRITICAL findings still block without asking, and alert-only rules never ask.
+
+This story retells the walkthrough briefly. The full page, with the per-connector table and every detail, is [HITL](/docs/hitl).
 
 ## Try it
 
@@ -21,7 +20,8 @@ enabled. Only ask-capable connector events can pause.
 
 ### Pick a connector with native ask
 
-This walkthrough uses [Claude Code](/docs/connectors/claudecode), whose `PreToolUse` hook can return a native approval decision. [OpenClaw](/docs/connectors/openclaw), [GitHub Copilot CLI](/docs/connectors/copilot), [Antigravity](/docs/connectors/antigravity), [Amp](/docs/connectors/amp), and [OmniGent](/docs/connectors/omnigent) also expose native ask on the specific events listed on the [HITL reference](/docs/hitl).
+- The agent is in action mode ([Turn on blocking](/docs/get-started/first-guardrail)).
+- This story uses Claude Code. Other agents differ only in where the prompt appears.
 
 </Step>
 
@@ -29,19 +29,25 @@ This walkthrough uses [Claude Code](/docs/connectors/claudecode), whose `PreTool
 
 ### Enable HITL at HIGH
 
+Turn on approval at HIGH. The command shows the change and asks `Proceed?`; press Enter or type `y`.
+
 ```bash
-defenseclaw setup claude-code \
-  --yes \
-  --mode action \
-  --human-approval \
-  --hilt-min-severity high \
-  --restart
+defenseclaw guardrail hilt on --min-severity HIGH
 ```
 
-The direct connector alias accepts the approval flags. With the default
-thresholds, a HIGH finding is eligible for confirmation and a CRITICAL finding
-blocks before the HITL branch. The configured minimum of `high` therefore
-includes HIGH findings in the confirmation flow.
+```text
+  Updating HILT for active connectors:
+      - Claude Code (claudecode): enabled=false → true, min_severity=HIGH → HIGH
+      - Codex (codex): enabled=false → true, min_severity=HIGH → HIGH
+
+  Proceed? [Y/n]: y
+  ✓ Config saved (2 connector HILT overrides updated)
+  ✓ The running gateway applies it now.
+```
+
+The list names every agent you have set up, so yours will differ. Scripts can supply confirmation on standard input: a newline accepts the default yes, and `y` confirms explicitly. If standard input ends without an answer, the command aborts. Use `--yes` to skip the prompt. If input is still a terminal but both output streams are piped, the command refuses because the prompt would be hidden; remove the pipe or add `--yes`.
+
+`--min-severity` takes `low`, `medium`, `high` or `critical`. On a multi-connector install, add `--connector claudecode` to change one agent only. With a single connector, omit `--connector`. Add `--yes` to skip the prompt in a script. The running gateway applies the change without a restart.
 
 </Step>
 
@@ -49,21 +55,19 @@ includes HIGH findings in the confirmation flow.
 
 ### Trigger a HIGH-severity finding
 
-Ask Claude Code to run a command that matches a bundled HIGH rule but sends no
-data:
+Ask Claude Code to run a command that matches a HIGH rule and sends no data:
 
 > Run `curl --max-time 2 https://webhook.site/defenseclaw-demo`.
 
-`webhook.site` is a public request-capture service, so the default pack's
-`C2-WEBHOOK-SITE` rule (HIGH) matches the URL. With HITL on at `high`, the
-gateway returns `confirm`, and Claude Code's `PreToolUse` hook turns it into
-its native approval prompt with the reason *DefenseClaw policy needs your
-confirmation for this action (rule C2-WEBHOOK-SITE)*. The command sends no
-data, so approving it only makes one empty request to an unused URL.
+The rule `C2-WEBHOOK-SITE` (HIGH) matches the URL. Claude Code shows its own approval prompt with the reason below. Approve to run the command (it makes one empty request), or deny to stop it.
 
-Not every HIGH finding asks. Lower-confidence HIGH path rules, such as
-`PATH-AWS-CONFIG`, are recorded without a prompt, and CRITICAL findings block
-before HITL is considered.
+```text
+DefenseClaw policy needs your confirmation for this action (rule C2-WEBHOOK-SITE: webhook.site (known exfil)).
+```
+
+DefenseClaw asks only in Claude Code's Manual mode, its default. In any other permission mode (accept edits, plan, auto, bypass permissions, don't ask) Claude Code may run or deny the call without showing the prompt, so DefenseClaw blocks it and the reason ends with the next step: switch Claude Code to Manual mode (Shift+Tab) and ask again.
+
+Not every HIGH finding asks. Only a finding that can block can pause. Alert-only HIGH rules (such as `PATH-AWS-CONFIG`) never ask: the agent shows a notice and the audit log records `alert`.
 
 </Step>
 
@@ -71,19 +75,32 @@ before HITL is considered.
 
 ### Approve or deny in Claude Code
 
-Deny the prompt to stop the call, or approve it to let `curl` run. Then read the
-hook decisions from the audit history:
+List Claude Code's latest alerts, newest first:
 
 ```bash
-defenseclaw-gateway audit export --connector claudecode --since 30m \
-  | jq 'select(.action == "connector-hook" and .structured.raw_action == "confirm")
-        | {timestamp, severity, action: .structured.action, rule_ids: .structured.rule_ids}'
+defenseclaw alerts --connector claudecode --limit 3
 ```
 
-Each hook call writes one `connector-hook` row; `structured.rule_ids` lists
-`C2-WEBHOOK-SITE`. Your approve or deny answer is handled inside Claude Code,
-so DefenseClaw records the policy finding and the action it returned, not an
-approver name or a free-form reason.
+Each time Claude Code asked, the list has a `claudecode:PreToolUse` row with `decision=confirm`. Find the newest such row and note its number. The confirm row is not always #1. When Claude Code's reply after you approve quotes the URL, that reply is a newer `claudecode:MessageDisplay` row with `decision=alert`. Show the confirm row by its number, with the same `--connector`, so the number refers to the list above. In this example you approved, the reply quoted the URL, and the confirm row is #2. After a deny it is usually #1.
+
+```bash
+defenseclaw alerts --connector claudecode --show 2
+```
+
+```text
+Alert #2
+  ID:        01a16527-4f2e-7a7d-9c1b-5d0e8c2f6a31
+  Severity:  HIGH
+  Timestamp: 2026-10-22 19:47:02
+  Action:    scan-finding
+  Target:    claudecode:PreToolUse
+  Decision:  confirm
+  Connector: claudecode
+  Rule:      C2-WEBHOOK-SITE: webhook.site (known exfil)
+  …
+```
+
+`Decision: confirm` means the gateway asked. Your approve or deny answer is handled inside Claude Code, so DefenseClaw records the finding and the verdict, not who approved. Outside Manual mode, the decision is `block`. Copilot CLI blocks an action-mode confirmation because its hook does not prove that an approval prompt is available; the audit records `block` with raw action `confirm`. Antigravity can deny a confirm without asking in a non-interactive run (`-p`); its audit still shows `confirm`.
 
 </Step>
 
@@ -92,7 +109,7 @@ approver name or a free-form reason.
 ### Turn HITL off again (optional)
 
 ```bash
-defenseclaw setup claude-code --yes --mode action --no-human-approval --restart
+defenseclaw guardrail hilt off
 ```
 
 </Step>
@@ -101,26 +118,18 @@ defenseclaw setup claude-code --yes --mode action --no-human-approval --restart
 
 ## Connectors without native ask
 
-[Cursor](/docs/connectors/cursor), [ZeptoClaw](/docs/connectors/zeptoclaw), [Codex](/docs/connectors/codex), [Hermes](/docs/connectors/hermes), [Devin](/docs/connectors/devin), and [OpenHands](/docs/connectors/openhands) cannot pause for a DefenseClaw approval on their documented hook surfaces. These integrations apply explicit connector-specific alert, allow, or injected-context behavior and keep `raw_action: "confirm"` available for audit. Cursor exposes ask-capable event schemas, but DefenseClaw deliberately does not enable their native ask response; its confirm verdicts remain attributed alerts and cannot resume the original call.
-
-[OpenCode](/docs/connectors/opencode) also cannot pause, but for a narrower reason: OpenCode publishes `permission.ask` and chat/context hooks, but DefenseClaw does not implement those surfaces. See the [OpenCode connector](/docs/connectors/opencode) for the supported versions. The connector makes no native-ask, context-injection, or TUI-resume claim.
-
-```bash
-defenseclaw tui
-```
-
-The TUI is useful for reviewing audit events, alerts, logs, and inventory. It does **not** expose a pending-approval queue that can resume those connector calls. If a workflow requires approval before execution, use a native-ask connector/event or make the policy action an unconditional block.
+Only an event with a native ask can pause a call. Any other event takes its connector's fallback at once, and nothing in DefenseClaw can resume the call later. The audit log keeps `raw_action: "confirm"` either way.
 
 <Flow
   direction="TB"
-  caption="What happens to a confirm verdict, such as the webhook.site request above. Only an event with native ask can pause the call; every other event takes its connector's fallback at once, and nothing in DefenseClaw can resume it later."
+  caption="What happens to a confirm verdict, such as the webhook.site request above. Only an event with native ask can pause the call. Every other event takes its connector's fallback, and nothing in DefenseClaw can resume it later."
 >
   <Node id="verdict" kind="gateway">{`Verdict is confirm\nHIGH finding, HITL on`}</Node>
-  <Node id="native" kind="decision">{`Can this event ask?\nsee the HITL table`}</Node>
+  <Node id="native" kind="decision">{`Can this event ask?\nsee the table below`}</Node>
   <Node id="ask" kind="agent">{`Agent pauses and asks\nits own permission prompt`}</Node>
   <Node id="decide" kind="operator">{`You approve or deny\nthe call runs or stops`}</Node>
-  <Node id="fallback" kind="connector">{`No pause\nalert, note or block\ndepends on connector`}</Node>
-  <Node id="review" kind="operator">{`Review it afterwards\naudit log or TUI\ncannot resume the call`}</Node>
+  <Node id="fallback" kind="connector">{`No pause\nalert or block, by connector`}</Node>
+  <Node id="review" kind="operator">{`Review it afterwards\naudit log or TUI`}</Node>
   <Edge from="verdict" to="native" />
   <Edge from="native" to="ask" label="yes" />
   <Edge from="ask" to="decide" label="waits for" />
@@ -130,13 +139,11 @@ The TUI is useful for reviewing audit events, alerts, logs, and inventory. It do
 
 ## When HITL is not the right answer
 
-<Callout type="warning">
-If nearly every tool call asks for approval, tune the policy instead of training operators to click through. If required actions never pause, first confirm that the finding reaches `--hilt-min-severity` and that the exact connector event supports native ask.
-</Callout>
+The TUI shows alerts and audit events but has no pending-approval queue, so it cannot resume a call. If a call must never run on an agent that cannot ask, make the rule block instead.
 
 ## Next
 
 <Cards>
   <Card title="HITL reference" href="/docs/hitl" description="The per-connector event matrix, thresholds, and decision flow." />
-  <Card title="Changing connectors" href="/docs/guardrail/switching-connectors" description="Add or reconfigure connector wiring without losing audit history." />
+  <Card title="Allow a blocked call" href="/docs/guardrail#allow-a-blocked-call" description="The safe ways to let through something a guardrail rule blocks or alerts on, from a one-off approval to a scoped rule change." />
 </Cards>

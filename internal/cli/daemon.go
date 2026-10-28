@@ -220,6 +220,8 @@ func init() {
 	_ = startCmd.Flags().MarkHidden(rotationConnectorStateFlag)
 	startCmd.Flags().Bool(hookColdStartFlag, false, "start requested by a connector hook after a refused connection")
 	_ = startCmd.Flags().MarkHidden(hookColdStartFlag)
+	startCmd.Flags().Bool(requireEveryConnectorFlag, false, "exit 3 unless every configured connector is guarded")
+	_ = startCmd.Flags().MarkHidden(requireEveryConnectorFlag)
 	_ = stopCmd.Flags().MarkHidden(rotationTransactionFlag)
 	_ = stopCmd.Flags().MarkHidden(rotationCleanupFlag)
 
@@ -331,7 +333,10 @@ func runStartLocked(cmd *cobra.Command, _ []string, coldStart bool) error {
 		}
 	}
 	var cfgErr error
-	client := &http.Client{Timeout: defaultReadinessHTTPTimeout}
+	client, err := gatewayPeerClientForURL(cfg, sidecarStatusURL(cfg), defaultReadinessHTTPTimeout)
+	if err != nil {
+		return fmt.Errorf("gateway start listener: %w", err)
+	}
 
 	alreadyRunning, pid, err := inspectConfiguredListener(d, cfg, client)
 	if err != nil {
@@ -352,12 +357,21 @@ func runStartLocked(cmd *cobra.Command, _ []string, coldStart bool) error {
 		if note := movedCLILauncherNote(); note != "" {
 			Warn(note)
 		}
-		if _, healthErr := fetchSidecarHealth(client, sidecarHealthURL(cfg)); healthErr != nil {
+		running, healthErr := fetchSidecarHealth(client, sidecarHealthURL(cfg))
+		if healthErr != nil {
 			// GAP-1342: a hung gateway; status and start pointed at each other.
 			fmt.Println("It does not answer /health. If it stays that way, restart it with: defenseclaw-gateway restart")
+			if requireEveryConnectorRequested(cmd) {
+				return withExitCode(errors.New("gateway does not answer /health, so no connector is proven guarded"),
+					gatewayStartAdmissionRefusedExitCode)
+			}
 			return nil
 		}
 		fmt.Println("Use 'defenseclaw-gateway status' to check health")
+		if requireEveryConnectorRequested(cmd) {
+			// The installers' wait for a slow first start ends here.
+			return everyConnectorGuardedError(cfg, running)
+		}
 		return nil
 	}
 	if err := gatewayDiskFullError("start", config.DefaultDataPath()); err != nil {
@@ -421,7 +435,6 @@ func runStartLocked(cmd *cobra.Command, _ []string, coldStart bool) error {
 		// must fail closed during readiness.
 		requirements.verifyConnectorHookTokens = expectedConnectorState.HookTokenFingerprints != nil ||
 			expectedConnectorState.OrphanHookTokenFingerprints != nil
-		requirements.verifyConnectorOTLP = true
 	} else {
 		// Upstream agent drift refused at admission is not a start failure the
 		// previous release would avoid: leave the gateway running and report it.
@@ -459,7 +472,11 @@ func runStartLocked(cmd *cobra.Command, _ []string, coldStart bool) error {
 	removeRunningGatewayToken(config.DefaultDataPath())
 
 	refused, admissionRefused := guardrailHookContractAdmissionRefusal(snap.Guardrail)
-	if admissionRefused {
+	var unguarded error
+	if !admissionRefused && requireEveryConnectorRequested(cmd) {
+		unguarded = everyConnectorGuardedError(cfg, snap)
+	}
+	if admissionRefused || unguarded != nil {
 		fmt.Printf("%s (PID %d)\n", Style("DEGRADED", "fg=yellow", "bold"), pid)
 		fmt.Printf("  Health: %s\n", summarizeHealthSnapshot(snap))
 		printConnectorsNotStarted(snap)
@@ -485,14 +502,16 @@ func runStartLocked(cmd *cobra.Command, _ []string, coldStart bool) error {
 	if admissionRefused {
 		return hookContractAdmissionStartError(refused, snap.Guardrail.LastError)
 	}
-	return nil
+	return unguarded
 }
 
 // gatewayStartAdmissionRefusedExitCode reports a gateway that is running but
 // refused one or more connectors at the hook-contract admission gate because
 // their agent changed underneath the recorded contract. The previous release
 // would refuse them the same way, so an installer keeps this version and
-// relays the fix instead of rolling back.
+// relays the fix instead of rolling back. With --require-every-connector it
+// also reports a running gateway that does not guard every configured
+// connector (GAP-0878).
 const gatewayStartAdmissionRefusedExitCode = 3
 
 func hookContractAdmissionStartError(connectors []string, detail string) error {
@@ -573,7 +592,10 @@ func runStop(cmd *cobra.Command, _ []string) error {
 		if cfgErr != nil {
 			return fmt.Errorf("rotation stop requires valid configuration: %w", cfgErr)
 		}
-		client := &http.Client{Timeout: defaultReadinessHTTPTimeout}
+		client, clientErr := gatewayPeerClientForURL(cfg, sidecarStatusURL(cfg), defaultReadinessHTTPTimeout)
+		if clientErr != nil {
+			return fmt.Errorf("rotation stop listener: %w", clientErr)
+		}
 		running, pid, err = inspectRotationStopTarget(
 			d,
 			cfg,
@@ -798,7 +820,10 @@ func runRestart(cmd *cobra.Command, _ []string) error {
 		return err
 	}
 	var cfgErr error
-	client := &http.Client{Timeout: defaultReadinessHTTPTimeout}
+	client, err := gatewayPeerClientForURL(cfg, sidecarStatusURL(cfg), defaultReadinessHTTPTimeout)
+	if err != nil {
+		return fmt.Errorf("gateway restart listener: %w", err)
+	}
 
 	running, pid, err := inspectRestartTarget(d, cfg, client)
 	if err != nil {
@@ -886,18 +911,25 @@ type gracefulGatewayStopper interface {
 }
 
 func stopGatewayGracefully(d gracefulGatewayStopper, cfg *config.Config, timeout time.Duration) error {
-	client := &http.Client{Timeout: gracefulShutdownHTTPTimeout}
+	client, err := gatewayPeerClientForURL(cfg, sidecarStatusURL(cfg), gracefulShutdownHTTPTimeout)
+	if err != nil {
+		return fmt.Errorf("gateway shutdown listener: %w", err)
+	}
 	return d.StopGracefully(timeout, func(pid int) error {
 		return requestGatewayShutdown(client, cfg, daemonGatewayToken(cfg), pid)
 	})
 }
 
 func requestGatewayShutdown(client *http.Client, cfg *config.Config, token string, pid int) error {
-	if client == nil {
-		client = &http.Client{Timeout: gracefulShutdownHTTPTimeout}
-	}
 	if cfg == nil {
 		return errors.New("gateway shutdown configuration is unavailable")
+	}
+	if client == nil {
+		var err error
+		client, err = gatewayPeerClientForURL(cfg, sidecarStatusURL(cfg), gracefulShutdownHTTPTimeout)
+		if err != nil {
+			return fmt.Errorf("gateway shutdown listener: %w", err)
+		}
 	}
 	if strings.TrimSpace(token) == "" {
 		return errors.New("gateway shutdown token is unavailable")
@@ -992,7 +1024,7 @@ type daemonReadinessRequirements struct {
 	watcherEnabled   bool
 	telemetryEnabled bool
 	routingEnabled   bool
-	// requiredConnectors, verifyConnectorHookTokens, and verifyConnectorOTLP
+	// requiredConnectors and verifyConnectorHookTokens
 	// are transaction-only gates.
 	// Ordinary starts retain multi-connector failure isolation; token rotation
 	// must prove that every enabled configured connector converged and that the
@@ -1002,7 +1034,6 @@ type daemonReadinessRequirements struct {
 	verifyConnectorState        bool
 	requireExactConnectorRoster bool
 	verifyConnectorHookTokens   bool
-	verifyConnectorOTLP         bool
 	startedNotBefore            time.Time
 	expectedPID                 int
 	expectedDataDir             string
@@ -1564,13 +1595,19 @@ const (
 // before start or restart act on it. It allows a loaded host's gateway
 // longer than a readiness poll and retries only timeouts.
 func fetchListenerIdentityStatus(client *http.Client, addr, token string) (gatewayStatusEnvelope, error) {
-	probe := &http.Client{Timeout: listenerIdentityHTTPTimeout}
+	var probe *http.Client
 	if client != nil {
 		copied := *client
 		if copied.Timeout > 0 && copied.Timeout < listenerIdentityHTTPTimeout {
 			copied.Timeout = listenerIdentityHTTPTimeout
 		}
 		probe = &copied
+	} else {
+		var err error
+		probe, err = gatewayPeerClientForURL(cfg, addr, listenerIdentityHTTPTimeout)
+		if err != nil {
+			return gatewayStatusEnvelope{}, err
+		}
 	}
 	var status gatewayStatusEnvelope
 	var err error
@@ -1681,7 +1718,10 @@ func fetchSidecarStatus(client *http.Client, addr, token string) (gatewayStatusE
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("X-DefenseClaw-Token", token)
 	if client == nil {
-		client = &http.Client{Timeout: defaultReadinessHTTPTimeout}
+		client, err = gatewayPeerClientForURL(cfg, addr, defaultReadinessHTTPTimeout)
+		if err != nil {
+			return status, err
+		}
 	}
 	requestClient := *client
 	requestClient.CheckRedirect = func(_ *http.Request, _ []*http.Request) error {
@@ -1764,25 +1804,20 @@ func waitForStartedDaemon(d daemonReadinessProcess, pid int, client *http.Client
 				)
 				if expectationErr != nil {
 					err = expectationErr
-				} else {
+				} else if presented, revokedAll, presentedErr := rotationHookTokensStillPresented(
+					requirements.expectedDataDir,
+					expectedHookTokens,
+					requirements.expectedConnectorState.OrphanHookTokenFingerprints,
+				); presentedErr != nil {
+					err = presentedErr
+				} else if !revokedAll {
 					err = verifyRotationConnectorHookAuthentication(
 						client,
 						statusURL,
 						requirements.expectedDataDir,
-						expectedHookTokens,
+						presented,
 					)
 				}
-				if err != nil {
-					err = fmt.Errorf("rotation connector convergence: %w", err)
-				}
-			}
-			if err == nil && requirements.verifyConnectorOTLP {
-				err = verifyRotationConnectorOTLPAuthentication(
-					client,
-					statusURL,
-					requirements.expectedDataDir,
-					requirements.requiredConnectors,
-				)
 				if err != nil {
 					err = fmt.Errorf("rotation connector convergence: %w", err)
 				}
@@ -1849,7 +1884,9 @@ func configuredGuardrailExpectedRunning(cfg *config.Config) bool {
 	return false
 }
 
-func rotationRequiredConnectorNames(cfg *config.Config) []string {
+// guardedConnectorNames lists, sorted, the connectors cfg guards: the
+// configured roster with the guardrail on and each connector not turned off.
+func guardedConnectorNames(cfg *config.Config) []string {
 	if cfg == nil || !cfg.Guardrail.Enabled {
 		return nil
 	}
@@ -1995,7 +2032,7 @@ func rotationConnectorStateFromConfig(cfg *config.Config) (rotationConnectorStat
 		state.Connectors = append(state.Connectors, rotationConnectorPolicy{
 			Name:         name,
 			Mode:         strings.ToLower(strings.TrimSpace(cfg.EffectiveGuardrailModeForConnector(name))),
-			HookFailMode: strings.ToLower(strings.TrimSpace(cfg.EffectiveHookFailModeForConnector(name))),
+			HookFailMode: strings.ToLower(strings.TrimSpace(cfg.EffectiveHookOutageFailModeForConnector(name))),
 			Enabled:      cfg.Guardrail.EffectiveEnabled(name),
 		})
 	}
@@ -2088,13 +2125,45 @@ func rotationRequiredConnectorNamesFromState(state rotationConnectorState, guard
 	return names
 }
 
-var loadRotationOTLPPathToken = connector.LoadOTLPPathToken
-var loadRotationClaudeNativeOTLPProbes = connector.LoadClaudeCodeNativeOTLPProbes
 var loadRotationHookAPIToken = connector.LoadHookAPIToken
 
 func rotationHookTokenFingerprint(token string) string {
 	digest := sha256.Sum256([]byte(token))
 	return hex.EncodeToString(digest[:])
+}
+
+// rotationHookTokensStillPresented drops the rotated credentials of
+// unconfigured connectors (orphans) that this gateway's own start revoked:
+// its teardown of such a connector removes the credential only after
+// VerifyClean proves no agent registers its hooks (revokePerUserHookAPIToken),
+// so nothing presents it any more. Every other expectation stays, and a
+// present orphan credential must still match and authenticate. revokedAll
+// reports that every expectation was such a revoked orphan. The rotation
+// controller checks again that each vanished orphan's hook is gone.
+func rotationHookTokensStillPresented(
+	dataDir string,
+	expected rotationHookTokenFingerprints,
+	orphans rotationHookTokenFingerprints,
+) (rotationHookTokenFingerprints, bool, error) {
+	if len(orphans) == 0 {
+		return expected, false, nil
+	}
+	presented := make(rotationHookTokenFingerprints, len(expected))
+	revoked := 0
+	for name, fingerprint := range expected {
+		if _, orphan := orphans[name]; orphan {
+			path, err := connector.HookAPITokenFilePath(dataDir, name)
+			if err != nil {
+				return nil, false, fmt.Errorf("connector %s hook credential path is invalid", name)
+			}
+			if _, statErr := os.Lstat(path); errors.Is(statErr, os.ErrNotExist) {
+				revoked++
+				continue
+			}
+		}
+		presented[name] = fingerprint
+	}
+	return presented, len(expected) > 0 && revoked == len(expected), nil
 }
 
 func verifyRotationConnectorHookAuthentication(
@@ -2154,6 +2223,26 @@ func verifyRotationConnectorHookAuthentication(
 	}
 	registry := connector.NewDefaultRegistry()
 	for _, name := range names {
+		if connector.IsRemovedConnector(name) {
+			// until 1.1: an upgraded host keeps the hook token of a connector
+			// 1.0.4 removed (OpenHands; connector/removed.go keepHookToken),
+			// and rotation replaces it like every persisted sidecar. Its file
+			// was checked against the fingerprint above. Nothing in 1.0.4
+			// accepts it, so the inspect route must refuse it: a 405 would mean
+			// the retained token authenticates again. The connector has no
+			// hook or notify route to probe; the retired route blocks every
+			// call whatever the token.
+			status, probeErr := rotationConnectorHookProbeStatus(
+				&requestClient, base, name, "inspect route", "/api/v1/inspect/tool", tokens[name],
+			)
+			if probeErr != nil {
+				return probeErr
+			}
+			if status != http.StatusUnauthorized && status != http.StatusForbidden {
+				return fmt.Errorf("connector %s was removed in 1.0.4, but the inspect route answered its retained hook credential with HTTP %d instead of refusing it", name, status)
+			}
+			continue
+		}
 		// Every setup-owned scoped token authenticates the generic connector
 		// inspection bridge, including proxy and managed-runtime connectors that
 		// do not expose a native HookEndpoint. The running gateway's result is
@@ -2198,6 +2287,29 @@ func probeRotationConnectorHookAuthentication(
 	path string,
 	token string,
 ) error {
+	status, err := rotationConnectorHookProbeStatus(client, base, connectorName, probeName, path, token)
+	if err != nil {
+		return err
+	}
+	// Authentication runs before the hook handler's POST-only method check. A
+	// valid connector-scoped bearer therefore returns 405 without submitting a
+	// synthetic hook or notify event.
+	if status != http.StatusMethodNotAllowed {
+		return fmt.Errorf("connector %s scoped hook authentication probe for %s returned HTTP %d", connectorName, probeName, status)
+	}
+	return nil
+}
+
+// rotationConnectorHookProbeStatus sends one no-op GET with the scoped
+// credential and returns the gateway's status code.
+func rotationConnectorHookProbeStatus(
+	client *http.Client,
+	base *url.URL,
+	connectorName string,
+	probeName string,
+	path string,
+	token string,
+) (int, error) {
 	probeURL := *base
 	probeURL.Path = path
 	probeURL.RawPath = ""
@@ -2205,7 +2317,7 @@ func probeRotationConnectorHookAuthentication(
 	probeURL.Fragment = ""
 	req, err := http.NewRequest(http.MethodGet, probeURL.String(), nil)
 	if err != nil {
-		return fmt.Errorf("connector %s scoped hook authentication probe for %s could not be created", connectorName, probeName)
+		return 0, fmt.Errorf("connector %s scoped hook authentication probe for %s could not be created", connectorName, probeName)
 	}
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("X-DefenseClaw-Client", "daemon-rotation-convergence")
@@ -2214,160 +2326,11 @@ func probeRotationConnectorHookAuthentication(
 	if err != nil {
 		// Do not wrap the transport error. A custom transport could include the
 		// authorization header in its error text.
-		return fmt.Errorf("connector %s scoped hook authentication probe for %s failed", connectorName, probeName)
+		return 0, fmt.Errorf("connector %s scoped hook authentication probe for %s failed", connectorName, probeName)
 	}
 	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, gracefulShutdownResponseMax))
 	_ = resp.Body.Close()
-	// Authentication runs before the hook handler's POST-only method check. A
-	// valid connector-scoped bearer therefore returns 405 without submitting a
-	// synthetic hook or notify event.
-	if resp.StatusCode != http.StatusMethodNotAllowed {
-		return fmt.Errorf("connector %s scoped hook authentication probe for %s returned HTTP %d", connectorName, probeName, resp.StatusCode)
-	}
-	return nil
-}
-
-func verifyRotationConnectorOTLPAuthentication(
-	client *http.Client,
-	statusURL string,
-	dataDir string,
-	requiredConnectors []string,
-) error {
-	if len(requiredConnectors) == 0 {
-		return nil
-	}
-	if client == nil {
-		return errors.New("scoped OTLP authentication client is unavailable")
-	}
-	base, err := url.Parse(statusURL)
-	if err != nil || base.Scheme != "http" || base.Host == "" || base.Opaque != "" ||
-		base.User != nil || base.RawQuery != "" || base.Fragment != "" {
-		return errors.New("scoped OTLP authentication endpoint is invalid")
-	}
-	host := strings.TrimSpace(base.Hostname())
-	hostIP := net.ParseIP(host)
-	if !strings.EqualFold(host, "localhost") && (hostIP == nil || !hostIP.IsLoopback()) {
-		return fmt.Errorf("refusing scoped OTLP authentication probe to non-loopback host %q", host)
-	}
-
-	requestClient := *client
-	requestClient.CheckRedirect = func(_ *http.Request, _ []*http.Request) error {
-		return http.ErrUseLastResponse
-	}
-	for _, name := range requiredConnectors {
-		scope, ok := connector.OTLPPathTokenScopeForConnector(name)
-		if !ok {
-			continue
-		}
-		if scope == connector.OTLPScopeClaude {
-			probes, loadErr := loadRotationClaudeNativeOTLPProbes()
-			if loadErr != nil {
-				return fmt.Errorf("connector %s native OTLP settings are unavailable: %w", name, loadErr)
-			}
-			if len(probes) != 2 {
-				return fmt.Errorf("connector %s native OTLP settings do not configure logs and metrics", name)
-			}
-			for _, probe := range probes {
-				if probe.Signal != connector.NativeOTLPSignalLogs && probe.Signal != connector.NativeOTLPSignalMetrics {
-					return fmt.Errorf("connector %s native OTLP settings contain an unsupported signal", name)
-				}
-				if probeErr := probeRotationConnectorOTLPAuthentication(
-					&requestClient,
-					base,
-					name,
-					probe.Endpoint,
-					"/v1/"+string(probe.Signal),
-					probe.Headers,
-				); probeErr != nil {
-					return probeErr
-				}
-			}
-			continue
-		}
-		token, loadErr := loadRotationOTLPPathToken(dataDir, scope)
-		if loadErr != nil {
-			return fmt.Errorf("connector %s scoped OTLP credential is unavailable: %w", name, loadErr)
-		}
-		token = strings.TrimSpace(token)
-		if token == "" && scope == connector.OTLPScopeOpenHands {
-			// GAP-1513: OpenHands exports native OTLP only on macOS. Elsewhere
-			// setup mints no scoped OTLP credential, so there is nothing for
-			// the rotated gateway to converge on.
-			continue
-		}
-		if token == "" {
-			return fmt.Errorf("connector %s scoped OTLP credential is unavailable", name)
-		}
-
-		probeURL := *base
-		probeURL.RawPath = ""
-		probeURL.RawQuery = ""
-		probeURL.Fragment = ""
-		switch scope {
-		case connector.OTLPScopeCodex, connector.OTLPScopeClaude, connector.OTLPScopeOpenHands:
-			probeURL.Path = "/v1/logs"
-		default:
-			return fmt.Errorf("connector %s has no rotation OTLP authentication contract", name)
-		}
-
-		req, requestErr := http.NewRequest(http.MethodGet, probeURL.String(), nil)
-		if requestErr != nil {
-			return fmt.Errorf("connector %s scoped OTLP authentication probe could not be created", name)
-		}
-		req.Header.Set("X-DefenseClaw-Client", "daemon-rotation-convergence")
-		if scope == connector.OTLPScopeCodex || scope == connector.OTLPScopeClaude ||
-			scope == connector.OTLPScopeOpenHands {
-			req.Header.Set("Authorization", "Bearer "+token)
-			req.Header.Set("X-DefenseClaw-Source", name)
-		}
-		resp, requestErr := requestClient.Do(req)
-		if requestErr != nil {
-			// Do not wrap the transport error: for path-token connectors it may
-			// include the credential-bearing URL.
-			return fmt.Errorf("connector %s scoped OTLP authentication probe failed", name)
-		}
-		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, gracefulShutdownResponseMax))
-		_ = resp.Body.Close()
-		// Authentication happens before the OTLP handler's POST-only method
-		// check. A valid credential therefore reaches the handler and returns
-		// 405 without ingesting a synthetic telemetry record; 401/403 proves
-		// the persisted credential and gateway runtime did not converge.
-		if resp.StatusCode != http.StatusMethodNotAllowed {
-			return fmt.Errorf("connector %s scoped OTLP authentication probe returned %s", name, resp.Status)
-		}
-	}
-	return nil
-}
-
-func probeRotationConnectorOTLPAuthentication(
-	client *http.Client,
-	base *url.URL,
-	connectorName string,
-	endpoint string,
-	expectedPath string,
-	headers http.Header,
-) error {
-	probeURL, err := url.Parse(strings.TrimSpace(endpoint))
-	if err != nil || probeURL.Scheme != "http" || probeURL.User != nil || probeURL.RawQuery != "" ||
-		probeURL.Fragment != "" || probeURL.RawPath != "" || !strings.EqualFold(probeURL.Host, base.Host) ||
-		probeURL.Path != expectedPath {
-		return fmt.Errorf("connector %s native OTLP endpoint does not match the gateway", connectorName)
-	}
-	req, err := http.NewRequest(http.MethodGet, probeURL.String(), nil)
-	if err != nil {
-		return fmt.Errorf("connector %s native OTLP authentication probe could not be created", connectorName)
-	}
-	req.Header = headers.Clone()
-	resp, err := client.Do(req)
-	if err != nil {
-		return fmt.Errorf("connector %s native OTLP authentication probe failed", connectorName)
-	}
-	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, gracefulShutdownResponseMax))
-	_ = resp.Body.Close()
-	if resp.StatusCode != http.StatusMethodNotAllowed {
-		return fmt.Errorf("connector %s native OTLP authentication probe returned %s", connectorName, resp.Status)
-	}
-	return nil
+	return resp.StatusCode, nil
 }
 
 // waitForGatewayReadiness waits for every required local startup subsystem to
@@ -2924,7 +2887,15 @@ func printDaemonStartResult(pid int, snap gateway.HealthSnapshot) {
 // failed during this start. The gateway runs without it, so "OK" alone hid
 // that the connector is not enforced (GAP-1860).
 func printConnectorsNotStarted(snap gateway.HealthSnapshot) {
+	refusedByAgentSettings := guardrailAgentSettingsRefusals(snap.Guardrail.Details)
 	for _, name := range guardrailConnectorsNotStarted(snap.Guardrail.Details) {
+		if reason := refusedByAgentSettings[name]; reason != "" {
+			// Its agent's own settings refused the hooks; the reason names
+			// their fix (GAP-0578).
+			fmt.Printf("  %s %s (%s) was skipped, so it is not enforced: %s\n",
+				Style("!", "fg=yellow", "bold"), friendlyConnectorName(name), name, reason)
+			continue
+		}
 		fmt.Printf("  %s %s (%s) was skipped: its setup failed, so it is not enforced. "+
 			"See gateway.log for the reason, then run: defenseclaw setup %s\n",
 			Style("!", "fg=yellow", "bold"), friendlyConnectorName(name), name, name)

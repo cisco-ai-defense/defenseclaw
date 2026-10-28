@@ -10,11 +10,15 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+
+	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 )
 
 // removeWindowsManagedClaudeCommands removes only handlers whose executable
-// is the exact per-user DefenseClaw launcher. It preserves other handlers in
-// a shared matcher group and leaves all unrelated settings intact.
+// is the exact per-user DefenseClaw launcher, run directly (0.8.x, managed)
+// or through the cmd.exe launcher guard 1.0.0-1.0.3 per-user Setup wrote
+// (GAP-0587). It preserves other handlers in a shared matcher group and
+// leaves all unrelated settings intact.
 func removeWindowsManagedClaudeCommands(raw []byte, executable string) ([]byte, int, error) {
 	var settings map[string]json.RawMessage
 	if err := json.Unmarshal(raw, &settings); err != nil || settings == nil {
@@ -52,7 +56,7 @@ func removeWindowsManagedClaudeCommands(raw []byte, executable string) ([]byte, 
 				if err := json.Unmarshal(handler, &hook); err != nil {
 					return nil, 0, fmt.Errorf("the Claude hooks.%s contains an invalid handler: %w", event, err)
 				}
-				if windowsManagedHookCommandIs(hook.Command, executable) {
+				if windowsManagedHookCommandIs(hook.Command, executable) || windowsManagedClaudeLauncherGuardIs(handler, executable) {
 					removed++
 					eventRemoved++
 				} else {
@@ -138,7 +142,16 @@ func windowsClaudeHookLaunchers(value any, found []string) []string {
 		}
 	case map[string]any:
 		if command, ok := typed["command"].(string); ok {
-			if launcher := windowsDefenseClawLauncherNamed(command); launcher != "" {
+			launcher := windowsDefenseClawLauncherNamed(command)
+			if args, ok := typed["args"].([]any); ok && launcher == "" {
+				// A launcher guard names the launcher in its arguments.
+				for _, arg := range args {
+					if arg, ok := arg.(string); ok && launcher == "" {
+						launcher = windowsDefenseClawLauncherNamed(arg)
+					}
+				}
+			}
+			if launcher != "" {
 				found = append(found, launcher)
 			}
 		}
@@ -166,6 +179,18 @@ func windowsDefenseClawLauncherNamed(command string) string {
 		}
 	}
 	return ""
+}
+
+// windowsManagedClaudeLauncherGuardIs reports whether handler is the exact
+// generated launcher guard running executable's Claude Code hook.
+func windowsManagedClaudeLauncherGuardIs(handler json.RawMessage, executable string) bool {
+	var hook map[string]interface{}
+	if err := json.Unmarshal(handler, &hook); err != nil {
+		return false
+	}
+	launcher, hookArgs, ok := connector.ClaudeCodeLauncherGuardTarget(hook)
+	return ok && strings.Join(hookArgs, " ") == "hook --connector claudecode" &&
+		strings.EqualFold(strings.ReplaceAll(launcher, "/", `\`), strings.ReplaceAll(executable, "/", `\`))
 }
 
 func windowsManagedHookCommandIs(command, executable string) bool {

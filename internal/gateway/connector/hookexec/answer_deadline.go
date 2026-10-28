@@ -6,6 +6,8 @@ package hookexec
 import (
 	"context"
 	"errors"
+	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptrace"
 	"net/textproto"
@@ -19,10 +21,9 @@ import (
 // counts against it: a restart (gatewayRestartBudget), a dial, a gateway that
 // accepted the call but does not answer (it is stopping, it is starting, or
 // it is so busy that the call waits for its turn), and the resends after a
-// 429 or a 401. When the budget ends the call fails: closed for a managed
-// hook whatever its fail mode, the account's fail mode for a per-user hook
-// (closed unless the account chose open). It is never allowed because the
-// gateway was slow (GAP-0155, GAP-0167, GAP-0139, GAP-0160).
+// 429 or a 401. When the budget ends, every hook outside Secure Client fails
+// closed. A slow gateway cannot allow a call without a decision (GAP-0155,
+// GAP-0167, GAP-0139, GAP-0160).
 //
 // The agent may wait at most 5 s for DefenseClaw, and the deadline itself
 // runs late on a loaded host: the answer is written by a process that the
@@ -79,6 +80,25 @@ func gatewayAnswerWindowShort(opts Options, deadline time.Time) bool {
 // informational response.
 const HookProgressHeader = "X-DefenseClaw-Hook-Progress"
 
+// HookDeliveryReceiptHeader selects the full-duplex managed hook protocol.
+// The hook sends the receipt only after committing the answer to the agent.
+const HookDeliveryReceiptHeader = "X-DefenseClaw-Hook-Delivery-Receipt"
+
+const HookDeliveryPayloadBytesHeader = "X-DefenseClaw-Hook-Payload-Bytes"
+
+const HookDeliveryRequiredHeader = "X-DefenseClaw-Hook-Delivery-Required"
+
+const HookDeliveryReceiptAck = "ack\n"
+
+const HookDeliveryReceiptBlock = "block\n"
+
+// HookDeliveryReleased ends the request body of a hook whose capability wait
+// passed without a 103: the hook takes the ordinary answer and sends no
+// receipt. It is JSON whitespace, so an older gateway's decoder ignores it.
+const HookDeliveryReleased = "\n"
+
+const HookDeliveryConfirmed = "received\n"
+
 // HookProgressStatus is the informational status of that report.
 const HookProgressStatus = http.StatusProcessing
 
@@ -108,14 +128,18 @@ func ManagedGatewayNoAnswer(err error) bool {
 // whose gateway gave no decision within hookAnswerBudget.
 const perUserGatewayNoAnswerReason = "gateway did not answer in time"
 
-// answerDeadline is when the hook of a tool call that started at startedAt
-// stops waiting for its gateway; zero (the hook's whole budget, as before)
-// for a Secure Client hook and for every event that does not gate a tool
-// call. Prompts, session events and stop events keep their budgets: their
-// local work (component scans at a stop, for example) can take longer, and
-// they do not hold a tool call.
+// answerDeadline bounds hooks that hold an agent call waiting for a verdict.
+// Managed Codex also gates prompt submission and delivery of tool results;
+// both need the same bounded answer and canonical no-answer reason as a
+// pre-tool hook. Secure Client, per-user non-tool events, session and stop
+// events keep their whole budget (including longer local component scans).
 func answerDeadline(opts Options, startedAt time.Time) time.Time {
-	if opts.SecureClient || startedAt.IsZero() || !toolGateEvent(opts.Connector, opts.Event) {
+	bounded := toolGateEvent(opts.Connector, opts.Event)
+	if managedNativeDecision(opts) && strings.EqualFold(strings.TrimSpace(opts.Connector), "codex") {
+		event := strings.TrimSpace(opts.Event)
+		bounded = bounded || event == "UserPromptSubmit" || event == "PostToolUse"
+	}
+	if opts.SecureClient || startedAt.IsZero() || !bounded {
 		return time.Time{}
 	}
 	return startedAt.Add(hookAnswerBudget)
@@ -136,7 +160,7 @@ func progressCeiling(opts Options, startedAt time.Time) time.Time {
 func toolGateEvent(connector, event string) bool {
 	event = strings.TrimSpace(event)
 	switch strings.ToLower(strings.TrimSpace(connector)) {
-	case "claudecode", "codex", "devin", "kiro", "omnigent", "antigravity":
+	case "claudecode", "codex", "devin", "kiro", "antigravity":
 		return event == "PreToolUse" || event == "PermissionRequest"
 	case "copilot":
 		return event == "preToolUse" || event == "permissionRequest"
@@ -156,16 +180,20 @@ func toolGateEvent(connector, event string) bool {
 }
 
 // awaitAnswerBy returns ctx for the hook request of a tool call, ended with
-// errGatewayNoAnswer at deadline unless the gateway answered (stop) by then.
+// errGatewayNoAnswer at deadline unless the gateway answered (stopResponse)
+// by then.
 // A report that the gateway waits on a remote scanner (a 102 response) moves
-// the deadline to ceiling, never further (GAP-0255). Call stop once the final
-// response headers are in, before reading the body, and release when the
-// request is done. watch, when set, follows both: it stands down at the
-// first stop and takes the ceiling at the 102. A zero deadline returns ctx
-// unchanged.
-func awaitAnswerBy(ctx context.Context, deadline, ceiling time.Time, watch *answerWatchdog) (watched context.Context, stop, release func()) {
+// the deadline to ceiling, never further (GAP-0255). Call stop after an
+// ordinary answer is read. For an answer that needs a receipt, call
+// stopResponse after reading it and stop after writing it to the agent; the
+// watchdog stays armed until then. Release when the request is done. This
+// lets the hook send its receipt after the answer deadline without the
+// deadline canceling the HTTP request. watch, when set, takes the ceiling
+// at the 102. A zero deadline returns ctx unchanged.
+func awaitAnswerBy(ctx context.Context, deadline, ceiling time.Time, watch *answerWatchdog) (watched context.Context, stop, stopResponse, release func()) {
 	if deadline.IsZero() {
-		return ctx, func() {}, func() {}
+		noop := func() {}
+		return ctx, noop, noop, noop
 	}
 	if ceiling.Before(deadline) {
 		ceiling = deadline
@@ -173,11 +201,14 @@ func awaitAnswerBy(ctx context.Context, deadline, ceiling time.Time, watch *answ
 	answered := make(chan struct{})
 	progressed := make(chan struct{})
 	var answerOnce, progressOnce sync.Once
-	stop = func() {
+	stopResponse = func() {
 		answerOnce.Do(func() {
 			close(answered)
-			watch.answered()
 		})
+	}
+	stop = func() {
+		stopResponse()
+		watch.answered()
 	}
 	trace := &httptrace.ClientTrace{Got1xxResponse: func(code int, _ textproto.MIMEHeader) error {
 		if code == HookProgressStatus {
@@ -213,7 +244,7 @@ func awaitAnswerBy(ctx context.Context, deadline, ceiling time.Time, watch *answ
 			}
 		}
 	}()
-	return watched, stop, func() { stop(); cancel(nil) }
+	return watched, stop, stopResponse, func() { stop(); cancel(nil) }
 }
 
 // gatewayNoAnswer reports a request ctx that awaitAnswerBy ended.
@@ -221,21 +252,55 @@ func gatewayNoAnswer(ctx context.Context) bool {
 	return errors.Is(context.Cause(ctx), errGatewayNoAnswer)
 }
 
-// failNoAnswer fails a tool call whose gateway gave no decision in time:
-// closed for a Secure Client hook, the fail mode for a standalone hook (the
-// administrator's, owner decision 2026-10-20) and for a per-user hook. A
-// standalone hook whose own work left its gateway less than
-// hookGatewayAnswerFloor (Options.answerSpentLocally) is closed.
-func failNoAnswer(opts Options, sp spec, failMode string) int {
-	if opts.ManagedEnterprise {
-		mode := "closed"
-		if managedNativeDecision(opts) && !opts.answerSpentLocally {
-			mode = failMode
-			opts = withManagedOutage(opts, errGatewayNoAnswer)
-		}
-		return failUnreachable(opts, sp, mode, managedGatewayNoAnswerReason)
+// noAnswerFailMode keeps managed non-tool events, locally spent budgets and a
+// call the gateway answered with an HTTP error first (Options.answeredErrorStatus,
+// ManagedOutageFailsOpen) closed. No answer proves no gateway decision, so
+// every hook outside Secure Client closes. A stopped or late hook has no
+// confirmed outage and cannot turn a tool call into an unaudited allow.
+// failNoAnswer and renderNoAnswer both use it, so the decision and failure
+// row agree.
+func noAnswerFailMode(opts Options, failMode string) string {
+	if opts.answerSpentLocally || opts.answeredErrorStatus != 0 || opts.ManagedEnterprise || !opts.SecureClient {
+		return "closed"
 	}
-	return failUnreachable(opts, sp, failMode, perUserGatewayNoAnswerReason)
+	return failMode
+}
+
+func failNoAnswer(opts Options, sp spec, failMode string) int {
+	if managedNativeDecision(opts) && opts.answeredErrorStatus != 0 {
+		return failAfterErrorStatus(opts, sp, "closed", opts.answeredErrorStatus)
+	}
+	failMode = noAnswerFailMode(opts, failMode)
+	if opts.ManagedEnterprise {
+		return failUnreachable(opts, sp, failMode, managedGatewayNoAnswerReason)
+	}
+	return failUnreachable(opts, sp, failMode, noAnswerReason(opts))
+}
+
+// noAnswerReason is the hook-failure reason of a call whose gateway gave no
+// decision in time.
+func noAnswerReason(opts Options) string {
+	if opts.ManagedEnterprise {
+		return managedGatewayNoAnswerReason
+	}
+	return perUserGatewayNoAnswerReason
+}
+
+// errGatewayTookCallNoAnswer wraps the error of a hook request whose
+// connection to the gateway was made and whose own timeout then ran out
+// while it waited for the answer: the gateway was reached and stalled, it
+// was not unreachable. A stop or session event has no answer budget, so
+// this is how its stall ends (GAP-0527).
+var errGatewayTookCallNoAnswer = errors.New("the gateway took the call and did not answer before the request timed out")
+
+// markConnectedTimeout wraps err with errGatewayTookCallNoAnswer when the
+// request had its connection and then timed out.
+func markConnectedTimeout(err error, connected bool) error {
+	var netErr net.Error
+	if err == nil || !connected || !errors.As(err, &netErr) || !netErr.Timeout() {
+		return err
+	}
+	return fmt.Errorf("%w: %w", errGatewayTookCallNoAnswer, err)
 }
 
 // retryFitsAnswer reports whether a resend that starts after delay still

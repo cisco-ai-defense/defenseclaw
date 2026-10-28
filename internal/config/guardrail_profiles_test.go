@@ -40,6 +40,13 @@ func TestValidateGuardrailProfiles(t *testing.T) {
 		{name: "hook_fail_mode in profile connector", mutate: func(c *Config) {
 			c.Guardrail.Profiles["contractors"].Connectors["codex"] = PerConnectorGuardrailConfig{HookFailMode: "open"}
 		}, want: `connectors["codex"]: hook_fail_mode is not allowed`},
+		// GAP-1052: a selector that is only white space selects nobody.
+		{name: "blank group selector", mutate: func(c *Config) {
+			c.Guardrail.ProfileAssignments[0].Match.Groups = []string{" "}
+		}, want: "profile_assignments[0].match.groups: an entry is empty"},
+		{name: "blank user selector", mutate: func(c *Config) {
+			c.Guardrail.ProfileAssignments[0].Match.Users = []string{"\t"}
+		}, want: "profile_assignments[0].match.users: an entry is empty"},
 		{name: "secure client", mutate: func(c *Config) {
 			c.DeploymentMode = "managed_enterprise"
 			c.Enterprise.Profile = "secure_client"

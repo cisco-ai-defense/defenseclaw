@@ -50,7 +50,7 @@ function enterpriseSummary(id: string) {
 }
 
 // One-line support strip for the top of a connector page's "Platform
-// support" section. Reads the same data as /docs/support-matrix.
+// support" section. Reads the same data as /docs/get-started/support-matrix.
 export function ConnectorSupport({ id }: { id: string }) {
   const row = connectorById(id);
   if (!row) throw new Error(`ConnectorSupport: unknown connector ${id}`);
@@ -87,7 +87,7 @@ export function ConnectorSupport({ id }: { id: string }) {
           <dd>{enterpriseSummary(id)}</dd>
         </div>
       </dl>
-      <Link href="/docs/support-matrix" className={styles.stripLink}>
+      <Link href="/docs/support-matrix/" className={styles.stripLink}>
         Support matrix <span aria-hidden>→</span>
       </Link>
     </div>

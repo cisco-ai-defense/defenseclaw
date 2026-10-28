@@ -118,6 +118,21 @@ for (const [stdout, exit, pattern] of [
   await assert.rejects(before(hooks), pattern);
 }
 
+// A successful process exit is not evidence that the gateway inspected the
+// call. An incomplete or contradictory decision must fail closed on every
+// managed OpenCode route (Linux, macOS and Windows load this same plugin).
+for (const response of [
+  {},
+  { action: "unexpected" },
+  { action: "block" },
+  { action: "confirm" },
+]) {
+  const hooks = await load();
+  answer("event.json", JSON.stringify(response));
+  await assert.rejects(before(hooks), /failed closed/,
+    `incomplete gateway verdict ${JSON.stringify(response)} must block`);
+}
+
 // No output and exit 0 while the plugin still exists must block; once
 // uninstall removed this plugin file, the same empty answer allows.
 {

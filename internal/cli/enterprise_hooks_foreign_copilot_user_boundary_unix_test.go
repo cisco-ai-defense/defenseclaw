@@ -33,7 +33,7 @@ func TestGuardianWorkerLeavesCopilotClaudeUserHookUntouched(t *testing.T) {
 				Route: enterprisepolicy.RouteMachinePolicy, ForeignHooks: config.ForeignHooksRemove, Guard: true,
 			},
 		}},
-	}, time.Date(2026, 10, 13, 20, 0, 0, 0, time.UTC))
+	}, time.Date(2026, 10, 13, 20, 0, 0, 0, time.UTC), nil)
 	report := reports["copilot"]
 	if report.Error != "" || len(report.Removed) != 0 || report.BackupDir != "" {
 		t.Fatalf("worker changed Claude Code settings: %+v", report)

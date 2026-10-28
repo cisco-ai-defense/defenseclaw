@@ -8,7 +8,7 @@ keywords:
   - DefenseClaw configuration
 ---
 
-The narrative docs live elsewhere — these pages are the lookup tables you reach for after you understand the system.
+Lookup pages for after you know what you are doing. `defenseclaw <command> --help` is the authority for any flag.
 
 <Cards>
   <Card title="CLI commands" href="/docs/reference/cli" description="The defenseclaw and defenseclaw-gateway commands, grouped by what you're trying to do." />
@@ -19,12 +19,134 @@ The narrative docs live elsewhere — these pages are the lookup tables you reac
   <Card title="Configuration" href="/docs/reference/configuration" description="config.yaml schema, the on-disk layout, and per-connector source-of-truth files." />
   <Card title="Keys" href="/docs/reference/keys" description="The credentials registry, where keys live, and the order DefenseClaw resolves them in." />
   <Card title="Fail modes" href="/docs/reference/fail-modes" description="What a connector does when the gateway is unreachable or answers badly, and how to set it." />
+  <Card title="Migrate config.yaml to version 9" href="/docs/reference/migrate-v9" description="What the config_version 8 to 9 migration moves, the commands that run it and how to go back to 0.8.x." />
   <Card title="Environment variables" href="/docs/reference/env-vars" description="Every environment variable DefenseClaw reads, with defaults and accepted values." />
 </Cards>
 
 To build a non-interactive `defenseclaw setup guardrail` command, use the
 [command generator](/docs/command-generator).
 
-<Callout>
-Authoritative source for any CLI flag is always `defenseclaw <command> --help`. The reference pages here are curated for browsing; `--help` is curated for the operator running the command.
+## For coding agents
+
+These pages are runbooks written to an AI agent. Pick the task, copy its prompt into your agent, and the agent reads the runbook page and does the work. Every runbook tells the agent to look first, change nothing without your yes, and report back in a fixed format.
+
+### Pick a task
+
+| Task | Prompt to paste | Runbook |
+| --- | --- | --- |
+| Install and set up in observe mode | `Read https://cisco-ai-defense.github.io/defenseclaw/docs/get-started/quickstart/llms.md and follow it.` | [Set up DefenseClaw](/docs/get-started/quickstart) |
+| Find out why something is broken | `Read https://cisco-ai-defense.github.io/defenseclaw/docs/reference/llms.md, open the "Troubleshoot DefenseClaw" runbook and follow it.` | [Troubleshoot](#troubleshoot-defenseclaw) |
+| Run an agent in a sandbox | `Read https://cisco-ai-defense.github.io/defenseclaw/docs/sandboxes/guide/llms.md and follow it.` | [Sandbox an agent](/docs/sandboxes/guide) |
+| Turn a sentence into a rule | `Read https://cisco-ai-defense.github.io/defenseclaw/docs/policies/recipes/llms.md and follow it.` | [Write a rule](/docs/policies/recipes) |
+| Deploy to a fleet as an administrator | `Read https://cisco-ai-defense.github.io/defenseclaw/docs/enterprise/operations/llms.md and follow it.` | [Enterprise admin](/docs/enterprise/operations) |
+
+### Machine-readable docs
+
+- `https://cisco-ai-defense.github.io/defenseclaw/llms.txt` lists every page with its Markdown URL.
+- `https://cisco-ai-defense.github.io/defenseclaw/llms-full.txt` is the whole documentation in one file.
+- Add `llms.md` to any page URL for that page as Markdown, for example `.../docs/get-started/install/llms.md`.
+
+### Rules every runbook enforces
+
+1. Observe first. The agent does not switch to action mode, change a fail mode, disable a connector, unblock a site or edit `config.yaml` by hand without your yes to that exact change.
+2. The agent never prints a key or token.
+3. On a managed computer the agent stops. A command that prints `This computer is managed` or `This device is managed` (exit `2` or `3`), or `"deployment_mode": "managed_enterprise"` in `defenseclaw status --json`, means your administrator owns DefenseClaw there.
+4. The agent reports in a fixed format: what it ran, what it saw, what it changed, what is left for you.
+
+<Callout title="Hand this page to your agent">
+Paste this into your agent:
+
+```text
+Read https://cisco-ai-defense.github.io/defenseclaw/docs/reference/llms.md, then ask me which task I want and open that runbook.
+```
 </Callout>
+
+### Troubleshoot DefenseClaw
+
+<Callout title="Hand this page to your agent">
+Paste this into your agent:
+
+```text
+Read https://cisco-ai-defense.github.io/defenseclaw/docs/reference/llms.md, open the "Troubleshoot DefenseClaw" runbook and follow it. Collect first, ask me before any fix that changes something.
+```
+</Callout>
+
+You are an AI agent. Find out why DefenseClaw is not working, map each failure to a known fix, apply only the safe ones the user approves, and report.
+
+#### Hard rules
+
+1. Observe first. Do not switch to action mode, change a fail mode, disable a connector, unblock a site or edit `config.yaml` by hand without the user's yes to that exact change.
+2. Never print a key, token, `.env`, `hooks/` or `device.key`. Redact them from anything you quote.
+3. Stop on a managed computer: a command that prints `This computer is managed` or `This device is managed` (exit `2` or `3`), or `"deployment_mode": "managed_enterprise"` in `defenseclaw status --json`, means the administrator owns DefenseClaw. Tell the user to contact them.
+4. Do not open `audit.db` or attach it to a report.
+
+#### Steps
+
+1. Collect health. Read-only.
+
+   ```bash
+   defenseclaw doctor --json
+   ```
+
+   Expected: JSON with `"outcome"`, `"exit_code"`, `"passed"`, `"failed"`, `"warned"`, `"skipped"` and a `checks` list. Each check has `check_id`, `status` (`pass`, `warn`, `fail`, `skip`), `label`, `detail` and `remediation`.
+   If the command is not found, DefenseClaw is not installed or `~/.local/bin` is not on `PATH`; see [Set up DefenseClaw](/docs/get-started/quickstart).
+
+2. Collect state. Read-only.
+
+   ```bash
+   defenseclaw status --json
+   defenseclaw-gateway status
+   ```
+
+   Expected: `sidecar.running` is `true`; each connector shows its `mode` and `fail_mode.effective`.
+   If `config_errors` is present, run `defenseclaw config validate` and quote the field it names.
+
+3. Read the last gateway log lines, locally, and quote only the error lines.
+
+   ```bash
+   tail -n 40 ~/.defenseclaw/gateway.log
+   ```
+
+   Expected: start lines and no repeated errors.
+   If it differs: redact secrets before quoting. Never paste the whole file.
+
+4. Map each `fail` and `warn` check to an entry on [Troubleshooting](/docs/get-started/upgrade) by its label or message. Common ones:
+
+   | Check says | Safe fix (ask first) | Needs the user's decision |
+   | --- | --- | --- |
+   | gateway not running | `defenseclaw-gateway start` | None |
+   | stale generated script, hooks not found | `defenseclaw setup <connector> --yes` and restart the agent | None |
+   | no gateway token configured | `defenseclaw doctor --fix --dry-run`, then `--fix --yes` | Rotating tokens |
+   | `config.yaml` invalid | none: show the field it names | The edit itself |
+   | nothing is blocked | `defenseclaw guardrail status` | Switching to action mode |
+   | tools blocked while gateway down | start the gateway | Changing the fail mode |
+   | "DefenseClaw is not checking this session" | start the gateway (`defenseclaw-gateway start`), then `defenseclaw doctor` if it does not start | Switching the policy |
+
+5. Preview repairs. Never skip this.
+
+   ```bash
+   defenseclaw doctor --fix --dry-run
+   ```
+
+   Expected: a list of the repairs that would run, with their risk. Nothing changes.
+   If a repair is `disruptive` (it restarts the gateway), say so before asking.
+
+6. Apply only what the user approved, one repair at a time, then re-check.
+
+   ```bash
+   defenseclaw doctor --fix --yes --fix-id <REPAIR_ID>
+   defenseclaw doctor --json
+   ```
+
+   Expected: the repair is `applied` and the check now has `"status": "pass"`.
+   If it differs: stop, do not try another repair, and report both outputs.
+
+#### Report
+
+Reply with:
+
+- Symptom the user gave, and the OS.
+- Failing checks: label, detail and the Troubleshooting entry you matched.
+- Fixes applied (command, result) and fixes you proposed but did not apply.
+- Decisions that belong to the user.
+- Whether `doctor --json` now exits `0`.

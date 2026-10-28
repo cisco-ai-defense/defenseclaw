@@ -19,16 +19,24 @@
 // reason}; decision "deny"/"block" aborts the tool.
 
 import { execFile, execFileSync } from "node:child_process";
+import { lstatSync } from "node:fs";
+
 import { createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import { lstat, mkdir, open } from "node:fs/promises";
 import { homedir, userInfo } from "node:os";
+import { stat } from "node:fs/promises";
 import { dirname, join } from "node:path";
 
 // DC_-prefixed constants are non-secret values baked in at setup time, not
 // env-var reads — the envvars registry gate scans for DEFENSECLAW_* tokens.
 const DC_API_ADDR = "{{.APIAddr}}";
 const DC_TOKEN_FILE = "{{.TokenFileJS}}";
-const DC_FAIL_MODE = "{{.FailMode}}"; // "open" or "closed"
+const DC_FAIL_MODE = "{{.FailMode}}"; // per-user and standalone hooks stay closed
+// The installed mode is the fail mode: DEFENSECLAW_FAIL_MODE in the process
+// environment is not read (GAP-0315). As in the shell hooks,
+// DEFENSECLAW_STRICT_AVAILABILITY closes a gateway outage (GAP-0035); it can
+// never open a closed plugin.
+const DC_TRANSPORT_FAIL_MODE = ["1", "true", "TRUE", "yes", "YES"].includes(String(process.env.DEFENSECLAW_STRICT_AVAILABILITY || "")) ? "closed" : DC_FAIL_MODE;
 // Standalone managed installs talk to the gateway's peer-authorized unix
 // hook socket instead of the TCP API: the gateway identifies the caller by
 // kernel-verified uid, so no bearer token leaves this process, and a user
@@ -48,6 +56,9 @@ const DC_FOREIGN_GUARD = "{{.ForeignHookGuardJS}}";
 // the deployment was uninstalled and this plugin stops failing closed. A
 // standard user cannot remove the marker. Empty keeps the fail mode.
 const DC_INSTALL_MARKER = "{{.InstallMarkerJS}}";
+// The standalone Unix lifecycle publishes this public, root-owned marker
+// before it can stop the gateway and removes it after readiness or recovery.
+const DC_LIFECYCLE_MARKER = "{{.LifecycleMarkerJS}}";
 // Windows standalone installs reach the gateway over loopback TCP, where a
 // local user can hold the port while the gateway restarts, and this plugin
 // cannot compare the listener with the gateway service the way the hook
@@ -58,6 +69,14 @@ const DC_INSTALL_MARKER = "{{.InstallMarkerJS}}";
 // verdict. Empty skips the proof (per-user installs, Secure Client, and the
 // hook socket, whose owner is verified instead).
 const DC_LISTENER_PROOF = "{{.ListenerProofJS}}";
+// Per-user plugins ask the native gateway binary to verify the connected
+// listener's account before each request. The proof above serves managed TCP.
+const DC_PER_USER_NATIVE_POST = "";
+// The gateway binary of the install that rendered this plugin, which a
+// per-user plugin runs for hook-post and session facts: native Windows Setup
+// renders the one in its install root's bin folder (GAP-1847). Empty keeps the
+// ~/.local/bin gateway that install.sh and install.ps1 put there.
+const DC_GATEWAY_BINARY = "{{.GatewayBinaryJS}}";
 const DC_LISTENER_PROOF_DOMAIN = "defenseclaw.listener-proof.v1";
 const DC_TIMEOUT_MS = 10000;
 const DC_PLUGIN_URL = import.meta.url;
@@ -80,7 +99,7 @@ let DC_MCP_IDENTITY_STATUS = "unverified";
 // see whose session a request belongs to; the plugin is in-session and can.
 // A value that is not a safe header field is dropped rather than sanitized, so
 // a hostile account name cannot smuggle a second header into every hook call.
-function defenseclawIdentityHeaders() {
+async function defenseclawIdentityHeaders() {
   const headers = {};
   let info;
   try {
@@ -98,7 +117,7 @@ function defenseclawIdentityHeaders() {
   if (defenseclawSafeIdentityValue(info.username)) {
     headers["X-DefenseClaw-User-Name"] = info.username;
   }
-  const facts = defenseclawSessionFactsHeader();
+  const facts = await defenseclawSessionFactsHeader();
   if (facts !== "") {
     headers["X-DefenseClaw-Session-Facts"] = facts;
   }
@@ -110,25 +129,78 @@ function defenseclawIdentityHeaders() {
 // it: `hook session-facts` prints the whole X-DefenseClaw-Session-Facts value,
 // the principal included, and keeps its own five-minute cache in
 // ~/.defenseclaw. A managed install runs its administrator-owned hook binary
-// (DC_FOREIGN_GUARD); a per-user install runs the gateway binary the installer
-// puts in ~/.local/bin. No answer is a supported outcome: the SSH and logind
+// (DC_FOREIGN_GUARD); a per-user install runs its install's gateway binary
+// (DC_GATEWAY_BINARY, or ~/.local/bin). No answer is a supported outcome: the SSH and logind
 // variables alone follow.
 const DC_SESSION_FACTS_TTL_MS = 300000;
 const DC_SESSION_FACTS_RETRY_MS = 30000;
+const DC_SESSION_FACTS_READ_MS = 250;
 let DC_SESSION_FACTS = { key: "", value: "", until: 0 };
 
-function defenseclawFullSessionFacts() {
+// The modification time of this login's FILE or DIR Kerberos credential
+// cache is part of the session facts key: a new kinit into the same cache
+// changes the principal while every session variable stays the same
+// (GAP-1139). KCM, KEYRING and API caches have no file; the variables alone
+// key them. The stat runs off the event loop and gets
+// DC_CREDENTIAL_CACHE_STAT_MS; calls share one stat, and one still
+// unanswered after that (a stalled network or FUSE mount) reads as null: the
+// call sends the session variables alone.
+const DC_CREDENTIAL_CACHE_STAT_MS = 250;
+let DC_CREDENTIAL_CACHE_STAT = { pending: null, since: 0 };
+
+async function defenseclawCredentialCacheStamp() {
+  const name = String(process.env.KRB5CCNAME || "");
+  let path = name;
+  if (name === "") path = typeof process.getuid === "function" ? "/tmp/krb5cc_" + process.getuid() : "";
+  else if (name.startsWith("FILE:")) path = name.slice(5);
+  else if (name.startsWith("DIR::")) path = name.slice(5);
+  else if (name.startsWith("DIR:")) path = name.slice(4);
+  if (!path.startsWith("/")) return "";
+  const now = Date.now();
+  if (DC_CREDENTIAL_CACHE_STAT.pending === null) {
+    const pending = stat(path).then((info) => String(info.mtimeMs), () => "");
+    DC_CREDENTIAL_CACHE_STAT = { pending, since: now };
+    pending.then(() => {
+      if (DC_CREDENTIAL_CACHE_STAT.pending === pending) DC_CREDENTIAL_CACHE_STAT = { pending: null, since: 0 };
+    });
+  }
+  const left = DC_CREDENTIAL_CACHE_STAT.since + DC_CREDENTIAL_CACHE_STAT_MS - now;
+  if (left <= 0) return null;
+  let timer;
+  const overdue = new Promise((resolve) => { timer = setTimeout(resolve, left, null); });
+  try {
+    return await Promise.race([DC_CREDENTIAL_CACHE_STAT.pending, overdue]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function defenseclawFullSessionFacts() {
   const env = process.env;
-  const key = [env.KRB5CCNAME, env.XDG_SESSION_ID, env.SSH_CONNECTION, env.SSH_TTY].map((v) => String(v || "")).join("|");
+  const stamp = await defenseclawCredentialCacheStamp();
+  // The binary would wait on a stalled credential cache too.
+  if (stamp === null) return "";
+  const key = [env.KRB5CCNAME, env.XDG_SESSION_ID, env.SSH_CONNECTION, env.SSH_TTY, stamp]
+    .map((v) => String(v || "")).join("|");
   const now = Date.now();
   if (DC_SESSION_FACTS.key === key && now < DC_SESSION_FACTS.until) return DC_SESSION_FACTS.value;
   let value = "";
   try {
-    const binary = DC_FOREIGN_GUARD ||
-      join(homedir(), ".local", "bin", process.platform === "win32" ? "defenseclaw-gateway.exe" : "defenseclaw-gateway");
-    const out = String(execFileSync(binary, ["hook", "session-facts"], {
-      timeout: 3000, maxBuffer: 4096, windowsHide: true, stdio: ["ignore", "pipe", "ignore"],
-    })).trim();
+    const binary = DC_FOREIGN_GUARD || (DC_PER_USER_NATIVE_POST
+      ? defenseclawPerUserNativePostBinary()
+      : join(homedir(), ".local", "bin", process.platform === "win32" ? "defenseclaw-gateway.exe" : "defenseclaw-gateway"));
+    let child;
+    let timer;
+    const read = new Promise((resolve) => {
+      child = execFile(binary, ["hook", "session-facts"], {
+        timeout: DC_SESSION_FACTS_READ_MS, maxBuffer: 4096, windowsHide: true,
+      }, (err, stdout) => resolve(err ? "" : String(stdout).trim()));
+    });
+    const deadline = new Promise((resolve) => {
+      timer = setTimeout(() => { if (child) child.kill(); resolve(""); }, DC_SESSION_FACTS_READ_MS);
+    });
+    const out = await Promise.race([read, deadline]);
+    clearTimeout(timer);
     if (out.startsWith("v1;") && out.length <= 1024 && /^[A-Za-z0-9._@\/:;=-]+$/.test(out)) value = out;
   } catch (_) {
     // No binary or no answer: the caller falls back to the SSH variables.
@@ -140,8 +212,8 @@ function defenseclawFullSessionFacts() {
 // defenseclawSessionFactsHeader renders the claimed SSH and logind session
 // facts as the X-DefenseClaw-Session-Facts value the hook runner also sends.
 // Each value is dropped unless it matches the header's allowlisted charset.
-function defenseclawSessionFactsHeader() {
-  const full = defenseclawFullSessionFacts();
+async function defenseclawSessionFactsHeader() {
+  const full = await defenseclawFullSessionFacts();
   if (full !== "") return full;
   const env = process.env;
   const address = String(env.SSH_CONNECTION || "").trim().split(/\s+/)[0] || "";
@@ -243,6 +315,54 @@ async function defenseclawDeploymentRemoved() {
   }
 }
 
+async function defenseclawManagedLifecycleHeld() {
+  if (!DC_LIFECYCLE_MARKER) return false;
+  try {
+    await lstat(DC_LIFECYCLE_MARKER);
+    return true;
+  } catch (err) {
+    // Only a definite absence ends the install window.
+    return !err || err.code !== "ENOENT";
+  }
+}
+
+const DC_MANAGED_LIFECYCLE_TEXT = "DefenseClaw is being installed or upgraded on this computer; try again in a moment.";
+
+// defenseclawGatewayJSON parses a gateway answer and refuses one that
+// repeats a key in any object. JSON.parse keeps the last copy, so
+// {"action":"block","action":"allow"} would read as allow; the native and
+// shell hooks refuse such an answer too (GAP-1007). The caller's catch closes
+// the call.
+function defenseclawGatewayJSON(text) {
+  const value = JSON.parse(text);
+  const objects = [];
+  let keyNext = false;
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (c === '"') {
+      let end = i + 1;
+      while (text[end] !== '"') end += text[end] === "\\" ? 2 : 1;
+      const keys = objects[objects.length - 1];
+      if (keyNext && keys) {
+        const key = JSON.parse(text.slice(i, end + 1));
+        if (keys.has(key)) throw new Error("ambiguous gateway answer (repeated key)");
+        keys.add(key);
+      }
+      keyNext = false;
+      i = end;
+    } else if (c === "{" || c === "[") {
+      objects.push(c === "{" ? new Set() : null);
+      keyNext = c === "{";
+    } else if (c === "}" || c === "]") {
+      objects.pop();
+      keyNext = false;
+    } else if (c === ",") {
+      keyNext = objects[objects.length - 1] instanceof Set;
+    }
+  }
+  return value;
+}
+
 async function defenseclawToken() {
   const file = await open(DC_TOKEN_FILE, "r");
   try {
@@ -306,7 +426,7 @@ async function defenseclawSocketRequest(path, init) {
           ok: res.statusCode >= 200 && res.statusCode < 300,
           status: res.statusCode,
           headers: { get: (name) => res.headers[String(name).toLowerCase()] ?? null },
-          json: async () => JSON.parse(text),
+          text: async () => text,
         });
       });
       res.on("error", reject);
@@ -317,44 +437,145 @@ async function defenseclawSocketRequest(path, init) {
   });
 }
 
-// defenseclawProveListener resolves once the TCP listener has proven it can
-// derive token (the gateway's listener proof); anything else rejects, and
-// the caller then sends the listener nothing else.
-async function defenseclawProveListener(token, signal) {
+function defenseclawPeerError(reason) {
+  const error = new Error(reason);
+  error.code = "DC_PEER_UNVERIFIED";
+  return error;
+}
+
+// A proof for a listener authorizes only the TCP connection that answered
+// it. Keep that socket in one HTTP agent and refuse a later socket before
+// writing a bearer or payload; the gateway may stop between the two calls.
+async function defenseclawProvenTCPRequest(path, init, token) {
   if (!DC_TOKEN_PATTERN.test(token || "")) throw new Error("invalid scoped hook credential");
+  const { Agent, request } = await import("node:http");
+  const endpoint = new URL("http://" + DC_API_ADDR);
+  const agent = new Agent({ keepAlive: true, maxSockets: 1, maxFreeSockets: 1 });
+  let provenSocket;
+  const send = (requestPath, method, headers, body, requiredSocket) => new Promise((resolve, reject) => {
+    const req = request({
+      hostname: endpoint.hostname.replace(/^\[|\]$/g, ""), port: endpoint.port,
+      path: requestPath, method, headers, agent, signal: init.signal,
+    }, (res) => {
+      const chunks = [];
+      let length = 0;
+      res.on("data", (chunk) => {
+        length += chunk.length;
+        if (length > 1048576) {
+          req.destroy(new Error("oversized DefenseClaw gateway response"));
+          return;
+        }
+        chunks.push(chunk);
+      });
+      res.on("end", () => resolve({ status: res.statusCode, headers: res.headers,
+        body: Buffer.concat(chunks).toString("utf8") }));
+      res.on("error", reject);
+    });
+    req.on("error", reject);
+    req.on("socket", (socket) => {
+      if (requiredSocket && socket !== requiredSocket) {
+        req.destroy(defenseclawPeerError("the DefenseClaw gateway listener changed after proving its identity"));
+        return;
+      }
+      if (!requiredSocket) provenSocket = socket;
+      req.end(body);
+    });
+  });
   const nonce = randomBytes(32).toString("hex");
-  const res = await fetch("http://" + DC_API_ADDR + "/api/v1/hook-listener-proof", {
-    method: "GET",
-    headers: {
+  try {
+    const challenge = await send("/api/v1/hook-listener-proof", "GET", {
       "X-DefenseClaw-Connector": "opencode",
       "X-DefenseClaw-Listener-Key-Id": createHash("sha256").update(token).digest("hex"),
       "X-DefenseClaw-Listener-Nonce": nonce,
-    },
-    signal,
-  });
-  const proof = String(res.headers.get("x-defenseclaw-listener-proof") || "");
-  if (res.body) {
-    try {
-      await res.body.cancel();
-    } catch (_) {
-      // Nothing is read from the proof response body.
+    }, undefined, undefined);
+    const proof = String(challenge.headers["x-defenseclaw-listener-proof"] || "");
+    const want = createHmac("sha256", token)
+      .update(DC_LISTENER_PROOF_DOMAIN + "\u0000opencode\u0000" + nonce)
+      .digest("hex");
+    if (challenge.status !== 204 || !/^[0-9a-f]{64}$/.test(proof) ||
+        !timingSafeEqual(Buffer.from(proof, "hex"), Buffer.from(want, "hex"))) {
+      throw defenseclawPeerError("the DefenseClaw gateway listener did not prove its identity");
     }
-  }
-  const want = createHmac("sha256", token)
-    .update(DC_LISTENER_PROOF_DOMAIN + "\u0000opencode\u0000" + nonce)
-    .digest("hex");
-  if (res.status !== 204 || proof.length !== want.length || !timingSafeEqual(Buffer.from(proof), Buffer.from(want))) {
-    throw new Error("the DefenseClaw gateway listener did not prove its identity");
+    const response = await send(path, init.method || "POST", init.headers, init.body, provenSocket);
+    if (response.status >= 300 && response.status < 400) {
+      throw defenseclawPeerError("the DefenseClaw gateway redirected a proven hook request");
+    }
+    return { ok: response.status >= 200 && response.status < 300, status: response.status,
+      headers: { get: (name) => response.headers[String(name).toLowerCase()] ?? null },
+      text: async () => response.body,
+      json: async () => JSON.parse(response.body) };
+  } finally {
+    agent.destroy();
   }
 }
 
+function defenseclawPerUserNativePostBinary() {
+  const home = homedir();
+  const binary = DC_GATEWAY_BINARY || join(home, ".local", "bin", process.platform === "win32" ? "defenseclaw-gateway.exe" : "defenseclaw-gateway");
+  const directory = dirname(binary);
+  const paths = DC_GATEWAY_BINARY ? [dirname(directory), directory, binary] : [home, join(home, ".local"), directory, binary];
+  const uid = userInfo().uid;
+  for (let index = 0; index < paths.length; index++) {
+    const info = lstatSync(paths[index]);
+    if (info.isSymbolicLink() || (index === paths.length - 1 ? !info.isFile() : !info.isDirectory())) {
+      throw new Error("per-user gateway helper path is untrusted");
+    }
+    if (process.platform !== "win32" && (info.uid !== uid || (info.mode & 0o022) !== 0)) {
+      throw new Error("per-user gateway helper path is writable by another account");
+    }
+  }
+  return binary;
+}
+
+// defenseclawPerUserHookPostBinary picks the small hook-post helper the POSIX
+// installer puts beside the gateway (in the same folder), so a hook event does not start the full
+// gateway CLI; both read the same JSON request and run the same
+// connected-peer check. An install without it (Windows, or an older
+// installer's roll-forward) keeps the verified gateway CLI. A present but
+// untrusted helper is refused, never bypassed.
+function defenseclawPerUserHookPostBinary() {
+  const gateway = defenseclawPerUserNativePostBinary();
+  const helper = join(dirname(gateway), process.platform === "win32" ? "defenseclaw-hook-post.exe" : "defenseclaw-hook-post");
+  let info;
+  try {
+    info = lstatSync(helper);
+  } catch (error) {
+    if (error && error.code === "ENOENT") return gateway;
+    throw error;
+  }
+  if (info.isSymbolicLink() || !info.isFile()) {
+    throw new Error("per-user hook helper path is untrusted");
+  }
+  if (process.platform !== "win32" && (info.uid !== userInfo().uid || (info.mode & 0o022) !== 0)) {
+    throw new Error("per-user hook helper path is writable by another account");
+  }
+  return helper;
+}
+
 // defenseclawFetch posts to the gateway over the managed hook socket when one
-// is configured (after verifying it), and over TCP otherwise; a TCP request
-// that carries a per-user credential first requires the listener proof.
+// is configured. A per-user post goes through the native helper, which
+// verifies the same connected socket it sends on.
 async function defenseclawFetch(path, init, token) {
   if (!DC_HOOK_SOCKET) {
-    if (DC_LISTENER_PROOF) await defenseclawProveListener(token, init.signal);
-    return fetch("http://" + DC_API_ADDR + path, init);
+    if (DC_PER_USER_NATIVE_POST) {
+      const binary = defenseclawPerUserHookPostBinary();
+      const output = execFileSync(binary, ["hook-post", "--api-addr", DC_API_ADDR], {
+        input: JSON.stringify({ path, headers: init.headers || {}, body: String(init.body || "") }),
+        timeout: DC_TIMEOUT_MS, maxBuffer: 2 * 1024 * 1024, windowsHide: true, encoding: "utf8",
+      });
+      const reply = JSON.parse(output);
+      if (!Number.isInteger(reply.status) || reply.status < 100 || reply.status > 599 || typeof reply.body !== "string") {
+        throw new Error("invalid native gateway response");
+      }
+      return {
+        ok: reply.status >= 200 && reply.status < 300,
+        status: reply.status,
+        headers: { get: (name) => name.toLowerCase() === "retry-after" ? reply.retry_after || null : null },
+        text: async () => reply.body,
+      };
+    }
+    if (DC_LISTENER_PROOF) return defenseclawProvenTCPRequest(path, init, token);
+    throw defenseclawPeerError("the DefenseClaw gateway listener has no account proof");
   }
   await defenseclawVerifyHookSocket();
   if (globalThis.Bun) return fetch("http://localhost" + path, { ...init, unix: DC_HOOK_SOCKET });
@@ -523,7 +744,22 @@ async function defenseclawLogFailOpen(reason, category) {
   }
 }
 
+async function defenseclawPerUserInstallInProgress() {
+  return false;
+}
+
+// defenseclawFailModeNow is the fail mode a failed tool check answers with,
+// read when it answers: closed while this account's installer holds its
+// data directory (.install.lock). A call that was waiting for the gateway
+// when an install or upgrade began answers closed too; a mode read when the
+// call started let it run (GAP-0893).
+async function defenseclawFailModeNow(mode, actionable) {
+  if (mode !== "open" || !actionable) return mode;
+  return await defenseclawPerUserInstallInProgress() ? "closed" : mode;
+}
+
 async function defenseclawPost(event, toolName, toolInput, cwd, context, toolResult, mcpIdentity, actionable) {
+  if (actionable && await defenseclawManagedLifecycleHeld()) return { reason: DC_MANAGED_LIFECYCLE_TEXT };
   let token;
   try {
     token = DC_HOOK_SOCKET ? "" : await defenseclawToken();
@@ -533,12 +769,11 @@ async function defenseclawPost(event, toolName, toolInput, cwd, context, toolRes
     // unless the managed deployment itself was uninstalled.
     if (await defenseclawDeploymentRemoved()) return null;
     if (actionable) return { reason: "DefenseClaw hook credential is unavailable." };
-    await defenseclawLogFailOpen("hook credential unavailable", "transport");
     return null;
   }
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), DC_TIMEOUT_MS);
-  const headers = { "Content-Type": "application/json", "X-DefenseClaw-Client": "opencode-plugin/1.0", ...defenseclawIdentityHeaders() };
+  const headers = { "Content-Type": "application/json", "X-DefenseClaw-Client": "opencode-plugin/1.0", ...(await defenseclawIdentityHeaders()) };
   if (token) headers["Authorization"] = "Bearer " + token;
   try {
     const payload = {
@@ -568,16 +803,18 @@ async function defenseclawPost(event, toolName, toolInput, cwd, context, toolRes
       signal: controller.signal,
     }, token), controller.signal);
     if (!res.ok) {
-      // Gateway answered with a bad status (auth/5xx). Honor fail mode.
-      if (DC_FAIL_MODE === "closed") {
+      // Gateway answered with a bad status (auth/5xx). Honor fail mode. A 5xx
+      // is an outage, as in the shell hooks, so strict availability closes it.
+      if (await defenseclawFailModeNow(res.status >= 500 ? DC_TRANSPORT_FAIL_MODE : DC_FAIL_MODE, actionable) === "closed") {
         return { reason: "DefenseClaw hook failed closed (HTTP " + res.status + ")" };
       }
-      await defenseclawLogFailOpen("gateway returned HTTP " + res.status, res.status >= 500 ? "transport" : "response");
+      if (actionable) await defenseclawLogFailOpen("gateway returned HTTP " + res.status, res.status >= 500 ? "transport" : "response");
       return null;
     }
-    const data = await res.json();
-    if (!data || !["allow", "block", "confirm", "alert"].includes(data.action)) {
+    const data = defenseclawGatewayJSON(await res.text());
+    if (actionable && await defenseclawManagedLifecycleHeld()) return { reason: DC_MANAGED_LIFECYCLE_TEXT };
 
+    if (!data || !["allow", "block", "confirm", "alert"].includes(data.action)) {
       return { reason: "DefenseClaw hook failed closed (invalid gateway verdict)" };
     }
     const out = data && data.hook_output;
@@ -589,14 +826,18 @@ async function defenseclawPost(event, toolName, toolInput, cwd, context, toolRes
     }
     return { reason: "", mode: data && data.mode || "", notice: defenseclawConfirmNotice(data) };
   } catch (err) {
+    if (err && err.code === "DC_PEER_UNVERIFIED") {
+      return { reason: "DefenseClaw hook failed closed (" + err.message + ")" };
+    }
+    if (DC_PER_USER_NATIVE_POST) return { reason: "DefenseClaw hook failed closed (per-user gateway peer unverified)" };
     // Transport failure (gateway unreachable / timeout). Honor fail mode:
     // closed → block, open → allow. An uninstalled deployment allows.
     if (await defenseclawDeploymentRemoved()) return null;
-    if (DC_FAIL_MODE === "closed") {
+    if (await defenseclawFailModeNow(DC_TRANSPORT_FAIL_MODE, actionable) === "closed") {
       if ((DC_HOOK_SOCKET || DC_FOREIGN_GUARD) && defenseclawGatewayStopped(err)) return { reason: DC_GATEWAY_STOPPED_TEXT };
       return { reason: "DefenseClaw hook failed closed (" + (err && err.message ? err.message : String(err)) + ")" };
     }
-    await defenseclawLogFailOpen(err && err.message ? err.message : String(err), "transport");
+    if (actionable) await defenseclawLogFailOpen(err && err.message ? err.message : String(err), "transport");
     return null;
   } finally {
     clearTimeout(timer);
@@ -627,7 +868,7 @@ async function defenseclawPostLoadHeartbeat(cwd) {
   }
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), DC_TIMEOUT_MS);
-  const headers = { "Content-Type": "application/json", "X-DefenseClaw-Client": "opencode-plugin/1.0", ...defenseclawIdentityHeaders() };
+  const headers = { "Content-Type": "application/json", "X-DefenseClaw-Client": "opencode-plugin/1.0", ...(await defenseclawIdentityHeaders()) };
   if (token) headers["Authorization"] = "Bearer " + token;
   try {
     await defenseclawFetch("/api/v1/opencode/hook", {
@@ -664,7 +905,7 @@ async function defenseclawPostLifecycle(event, cwd) {
   const info = properties.info || {};
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), DC_TIMEOUT_MS);
-  const headers = { "Content-Type": "application/json", "X-DefenseClaw-Client": "opencode-plugin/1.0", ...defenseclawIdentityHeaders() };
+  const headers = { "Content-Type": "application/json", "X-DefenseClaw-Client": "opencode-plugin/1.0", ...(await defenseclawIdentityHeaders()) };
   if (token) headers["Authorization"] = "Bearer " + token;
   try {
     await defenseclawFetch("/api/v1/opencode/hook", {
@@ -701,6 +942,7 @@ async function defenseclawHooks({ client, directory, worktree }, v2 = false) {
   return {
     config: async (config) => {
       defenseclawConfigure(config);
+      if (await defenseclawManagedLifecycleHeld()) return;
       await defenseclawPostLoadHeartbeat(cwd);
     },
     // OpenCode publishes its session lifecycle through the generic event
@@ -721,6 +963,7 @@ async function defenseclawHooks({ client, directory, worktree }, v2 = false) {
     // error never turns into an accidental block.
     "tool.execute.before": async (input, output) => {
       const toolCwd = v2 ? input.cwd : cwd;
+      if (await defenseclawManagedLifecycleHeld()) throw defenseclawBlock(client, DC_MANAGED_LIFECYCLE_TEXT);
       // Every call runs the check, also after a block at load (which holds
       // for the process), so the gateway records each denied call.
       const startupBlock = await defenseclawStartupGuard;

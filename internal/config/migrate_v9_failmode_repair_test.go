@@ -17,6 +17,7 @@
 package config
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 
@@ -30,6 +31,7 @@ func migratedByOldRelease(t *testing.T, body, path string) ([]byte, MigrationRec
 	raw := []byte(body)
 	return raw, MigrationRecord{
 		SchemaVersion: MigrationRecordSchemaVersion, FromVersion: 8, ToVersion: 9, Actor: "lifecycle",
+		MigratedAt:   "2026-09-01T00:00:00Z",
 		SourceSHA256: strings.Repeat("a", 64), ResultSHA256: cfgtxn.SHA256Hex(raw),
 		Moved: []MigrationMove{{Source: "config", From: path, To: path, Value: "open"}},
 	}
@@ -126,5 +128,114 @@ func TestRepairMigratedCursorFailModeNeedsTheRecord(t *testing.T) {
 				t.Fatal("repaired without proof of a migration rewrite")
 			}
 		})
+	}
+}
+
+// G-small loop round 2: a migration-v9.json that decodes without the fields
+// every release writes is not a record. {} and null decoded to a zero record,
+// which the repair read as nothing to repair, so ensure reported compliance
+// while the Cursor fail mode stayed open. Each required field, a value that
+// is not a JSON object and a repaired entry the repair never writes are
+// refused; every record a release writes decodes, with a BOM, pending,
+// repaired, or with a field a later release adds.
+func TestDecodeMigrationRecordRefusesAnInvalidRecord(t *testing.T) {
+	t.Setenv("DEFENSECLAW_DEPLOYMENT_MODE", "")
+	t.Setenv("DEFENSECLAW_ENTERPRISE_PROFILE", "")
+	raw, record := migratedByOldRelease(t, managedCursorConnectorOpen, migratedCursorConnectorFailMode)
+	encode := func(edit func(map[string]any)) []byte {
+		t.Helper()
+		encoded, err := json.Marshal(record)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var fields map[string]any
+		if err := json.Unmarshal(encoded, &fields); err != nil {
+			t.Fatal(err)
+		}
+		edit(fields)
+		encoded, err = json.Marshal(fields)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return encoded
+	}
+	set := func(key string, value any) []byte { return encode(func(m map[string]any) { m[key] = value }) }
+	drop := func(key string) []byte { return encode(func(m map[string]any) { delete(m, key) }) }
+	repairedEntry := func(entry map[string]any) []byte { return set("repaired", []any{entry}) }
+	for name, body := range map[string][]byte{
+		"empty":                    nil,
+		"null":                     []byte("null"),
+		"empty object":             []byte("{}"),
+		"unknown fields only":      []byte(`{"note":"x"}`),
+		"an array":                 []byte(`[]`),
+		"a string":                 []byte(`"migration"`),
+		"trailing data":            append(set("actor", "lifecycle"), []byte(" {}")...),
+		"no schema_version":        drop("schema_version"),
+		"schema_version 0":         set("schema_version", 0),
+		"no to_version":            drop("to_version"),
+		"to_version 8":             set("to_version", 8),
+		"no from_version":          drop("from_version"),
+		"from_version 10":          set("from_version", 10),
+		"no migrated_at":           drop("migrated_at"),
+		"migrated_at not a time":   set("migrated_at", "yesterday"),
+		"no actor":                 drop("actor"),
+		"another actor":            set("actor", "admin"),
+		"no source_sha256":         drop("source_sha256"),
+		"short source_sha256":      set("source_sha256", "abc"),
+		"no result_sha256":         drop("result_sha256"),
+		"result_sha256 not hex":    set("result_sha256", strings.Repeat("z", 64)),
+		"empty repaired entry":     repairedEntry(map[string]any{}),
+		"repaired to open":         repairedEntry(map[string]any{"source": "repair", "from": migratedCursorConnectorFailMode, "to": migratedCursorConnectorFailMode, "value": "open"}),
+		"repaired another key":     repairedEntry(map[string]any{"source": "repair", "from": "guardrail.mode", "to": "guardrail.mode", "value": "closed"}),
+		"repaired by another step": repairedEntry(map[string]any{"source": "config", "from": migratedGlobalFailMode, "to": migratedGlobalFailMode, "value": "closed"}),
+	} {
+		t.Run(name, func(t *testing.T) {
+			if got, err := DecodeMigrationRecord(body); err == nil {
+				t.Fatalf("decoded %q as %+v; want an error", body, got)
+			}
+		})
+	}
+
+	_, repairedRecord, ok := RepairMigratedCursorFailMode(raw, record)
+	if !ok {
+		t.Fatal("the recorded rewrite was not repaired")
+	}
+	repaired, err := json.Marshal(repairedRecord)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pending := record
+	pending.Pending = true
+	pendingRaw, err := json.Marshal(pending)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, body := range map[string][]byte{
+		"as migrated":       encode(func(map[string]any) {}),
+		"with a BOM":        append([]byte("\xef\xbb\xbf"), encode(func(map[string]any) {})...),
+		"pending":           pendingRaw,
+		"repaired":          repaired,
+		"a later field":     set("later_release_field", true),
+		"a later schema":    set("schema_version", MigrationRecordSchemaVersion+1),
+		"already on 9":      set("from_version", 9),
+		"upper-case digest": set("source_sha256", strings.Repeat("A", 64)),
+	} {
+		t.Run(name, func(t *testing.T) {
+			got, err := DecodeMigrationRecord(body)
+			if err != nil {
+				t.Fatalf("decode %s: %v", body, err)
+			}
+			if got.ResultSHA256 == "" || got.ToVersion != ConfigVersionV9 {
+				t.Fatalf("decoded %+v", got)
+			}
+		})
+	}
+	// The record decoded as written still proves the rewrite.
+	decoded, err := DecodeMigrationRecord(encode(func(map[string]any) {}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, ok := RepairMigratedCursorFailMode(raw, decoded); !ok {
+		t.Fatal("the decoded record no longer proves the rewrite")
 	}
 }

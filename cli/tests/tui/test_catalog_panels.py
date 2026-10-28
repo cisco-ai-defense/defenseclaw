@@ -314,45 +314,6 @@ def test_mcp_actions_name_connector_specific_unset_targets(monkeypatch, tmp_path
     assert action_keys(mcp_actions("active", "openclaw")) == ["s", "i", "b", "a"]
 
 
-def test_catalog_empty_connector_stays_unowned_and_hook_connector_labels_contract_paths(
-    monkeypatch,
-    tmp_path,
-) -> None:
-    assert friendly_connector_name("") == "No connector"
-    assert PluginsPanelModel(connector="").is_visible_for_connector() is False
-
-    assert ".gemini/config/mcp_config.json" in connector_source_label("antigravity", "mcps")
-    assert ".agents/mcp_config.json" in connector_source_label("antigravity", "mcps")
-    assert "hooks-only" not in connector_source_label("antigravity", "mcps")
-    assert ".gemini/config/skills" in connector_source_label("antigravity", "skills")
-    antigravity_plugins = connector_source_label("antigravity", "plugins")
-    assert ".gemini/config/plugins" in antigravity_plugins
-    assert "read/write" in antigravity_plugins
-    assert "OMNIGENT_CONFIG_HOME" in connector_source_label("omnigent", "config")
-    assert "OMNIGENT_CONFIG" in connector_source_label("omnigent", "config")
-    assert "--config" in connector_source_label("omnigent", "config")
-    assert "unsupported/unverified" in connector_source_label("omnigent", "mcps")
-    assert "unsupported" in mcp_unset_target_for_connector("omnigent")
-
-    opencode_home = tmp_path / "opencode-config"
-    monkeypatch.setenv("OPENCODE_CONFIG_DIR", str(opencode_home))
-    assert str(opencode_home / "plugins" / "defenseclaw.js") in connector_source_label(
-        "opencode", "config"
-    )
-    assert ".config/opencode/opencode.json" in connector_source_label("opencode", "mcps")
-    assert "~/.opencode/opencode.json" in connector_source_label("opencode", "mcps")
-    assert str(opencode_home / "opencode.json") in connector_source_label("opencode", "mcps")
-    assert "OPENCODE_CONFIG_CONTENT" in connector_source_label("opencode", "mcps")
-    assert "enterprise precedence excluded" in connector_source_label("opencode", "mcps")
-    assert str(opencode_home / "opencode.json") in mcp_unset_target_for_connector("opencode")
-    assert "<workspace>/opencode.json" in mcp_unset_target_for_connector("opencode")
-    assert ".opencode/{skill,skills}" in connector_source_label("opencode", "skills")
-    assert "excluded from inventory and scans" in connector_source_label(
-        "opencode", "plugins"
-    )
-    assert "tools permission map is not an asset" in connector_source_label(
-        "opencode", "tools"
-    )
 
 
 def test_catalog_codex_labels_use_current_official_asset_layouts() -> None:

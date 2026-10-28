@@ -33,6 +33,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/ipc"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
+	"github.com/defenseclaw/defenseclaw/internal/scanner"
 	"github.com/defenseclaw/defenseclaw/internal/version"
 )
 
@@ -64,11 +65,21 @@ func init() {
 	rootCmd.Flags().IntVar(&sidecarPort, "port", 0, "Gateway port (default: from config)")
 }
 
+// sidecarScannerRuntimeStartProblem is the scanner runtime trust check made
+// before the gateway starts; a seam for tests.
+var sidecarScannerRuntimeStartProblem = scanner.StandaloneRuntimeStartProblem
+
 func runSidecar(cmd *cobra.Command, _ []string) error {
 	// A detached gateway's gateway.log lines carry a time (GAP-1319). The
 	// root pre-run usually started the stamper already (GAP-2109).
 	startDaemonLogStamp()
 	defer stopDaemonLogStamp()
+	// Before anything starts: a standalone Windows gateway runs the scanner
+	// Python tree as its service account on every scan, so it fails closed
+	// on a tree that fails the trust check (GAP-0490).
+	if err := sidecarScannerRuntimeStartProblem(); err != nil {
+		return fmt.Errorf("sidecar: %w", err)
+	}
 	// Before any outbound client exists: a standalone gateway routes its
 	// outbound clients through enterprise.network.
 	if err := applyStandaloneEgress(cfg); err != nil {

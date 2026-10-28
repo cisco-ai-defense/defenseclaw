@@ -41,7 +41,7 @@ func managedStandaloneFleetConfig(host string, port int, fleetMode string) *conf
 			Enabled: true,
 			Connectors: map[string]config.PerConnectorGuardrailConfig{
 				"claudecode": {}, "codex": {}, "copilot": {},
-				"opencode": {}, "hermes": {}, "openhands": {},
+				"opencode": {}, "hermes": {},
 			},
 		},
 		Gateway: config.GatewayConfig{Host: host, Port: port, FleetMode: fleetMode},
@@ -90,17 +90,27 @@ func TestGatewayShouldConnect_ManagedStandaloneNeedsExplicitRemoteFleet(t *testi
 		})
 	}
 
-	// The same connectors-map shape outside a managed deployment keeps the
-	// historical claw.mode derivation, so unmanaged OpenClaw installs still
-	// dial their local daemon. OpenClaw is configured here (openclaw.json
-	// exists): without it the claw.mode default no longer dials (#958).
-	t.Run("unmanaged_control_keeps_claw_mode_derivation", func(t *testing.T) {
+	// A roster without OpenClaw must not infer it from claw.mode, even when
+	// OpenClaw happens to be installed on the same unmanaged host.
+	t.Run("unmanaged_roster_does_not_infer_openclaw", func(t *testing.T) {
 		cfg := managedStandaloneFleetConfig("127.0.0.1", 18789, "")
 		cfg.DeploymentMode = ""
 		cfg.Enterprise = config.EnterpriseConfig{}
 		withConfiguredOpenClaw(t, cfg)
+		if gatewayShouldConnectForConfiguredConnector(cfg) {
+			t.Error("unmanaged roster without OpenClaw dialed the OpenClaw fleet")
+		}
+	})
+
+	// An unmanaged host with an explicit OpenClaw connector still dials.
+	t.Run("unmanaged_control_explicit_openclaw", func(t *testing.T) {
+		cfg := managedStandaloneFleetConfig("127.0.0.1", 18789, "")
+		cfg.DeploymentMode = ""
+		cfg.Enterprise = config.EnterpriseConfig{}
+		cfg.Guardrail.Connector = "openclaw"
+		withConfiguredOpenClaw(t, cfg)
 		if !gatewayShouldConnectForConfiguredConnector(cfg) {
-			t.Errorf("unmanaged connectors map with claw.mode=openclaw: predicate = false, want true")
+			t.Error("explicit unmanaged OpenClaw connector did not dial the fleet")
 		}
 	})
 }
@@ -136,6 +146,7 @@ func TestRunGatewayLoop_ManagedStandaloneSendsNothingToLoopbackListener(t *testi
 		if !managedDeployment {
 			cfg.DeploymentMode = ""
 			cfg.Enterprise = config.EnterpriseConfig{}
+			cfg.Guardrail.Connector = "openclaw"
 			withConfiguredOpenClaw(t, cfg)
 		}
 		dataDir := testenv.PrivateTempDir(t)

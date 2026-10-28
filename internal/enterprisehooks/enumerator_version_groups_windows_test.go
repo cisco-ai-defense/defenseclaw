@@ -27,14 +27,46 @@ const (
 	testLocalUserTwo     = testMachineDomainSID + "-1002"
 )
 
+// stubActiveSessions stubs the active sessions; the users signed in are
+// those same users (stubSignedInSessions adds a disconnected one).
 func stubActiveSessions(t *testing.T, sessions map[string][]string) {
 	t.Helper()
+	stubWindowsSurfaceReadAs(t)
 	previous := windowsActiveSessionGroups
 	t.Cleanup(func() { windowsActiveSessionGroups = previous })
 	windowsActiveSessionGroups = func() (map[string][]string, error) {
 		out := map[string][]string{}
 		for sid, groups := range sessions {
 			out[sid] = append([]string{}, groups...)
+		}
+		return out, nil
+	}
+	sids := make([]string, 0, len(sessions))
+	for sid := range sessions {
+		sids = append(sids, sid)
+	}
+	stubSignedInSessions(t, sids...)
+}
+
+// Synthetic signed-in sessions must also be able to read their own profile.
+// Tests that exercise failed impersonation replace this stub explicitly.
+func stubWindowsSurfaceReadAs(t *testing.T) {
+	t.Helper()
+	previous := windowsSurfaceReadAs
+	windowsSurfaceReadAs = func(_, _ string, fn func() error) error { return fn() }
+	t.Cleanup(func() { windowsSurfaceReadAs = previous })
+}
+
+// stubSignedInSessions stubs the users who have a session, active or
+// disconnected.
+func stubSignedInSessions(t *testing.T, sids ...string) {
+	t.Helper()
+	previous := windowsSignedInSessionUsers
+	t.Cleanup(func() { windowsSignedInSessionUsers = previous })
+	windowsSignedInSessionUsers = func() (map[string]bool, error) {
+		out := map[string]bool{}
+		for _, sid := range sids {
+			out[canonicalManifestTargetSID(sid)] = true
 		}
 		return out, nil
 	}
@@ -117,6 +149,35 @@ func TestStandaloneKnownRowReportsAnUnverifiedUpgrade(t *testing.T) {
 	}
 }
 
+func TestEnumerateWindowsInspectsStandaloneMachinePolicyExtension(t *testing.T) {
+	stubMachineWinGet(t, nil)
+	home := t.TempDir()
+	extension := filepath.Join(home, ".vscode", "extensions", "anthropic.claude-code-2.1.100-win32-x64")
+	if err := os.MkdirAll(extension, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	injectWindowsProfileList(t, map[string]string{testLocalUserSID: home})
+	stubActiveSessions(t, map[string][]string{testLocalUserSID: {}})
+	previousProcess, previousReadAs := windowsEnterpriseStandaloneProcess, windowsSurfaceReadAs
+	windowsEnterpriseStandaloneProcess = func() bool { return true }
+	windowsSurfaceReadAs = func(_, _ string, fn func() error) error { return fn() }
+	t.Cleanup(func() { windowsEnterpriseStandaloneProcess, windowsSurfaceReadAs = previousProcess, previousReadAs })
+	var reported []UnprotectedAgent
+	_, err := EnumerateWindows(context.Background(), standaloneEnumeratorConfig("claudecode"), EnumerateOptions{
+		ReportUnprotected: func(agent UnprotectedAgent) { reported = append(reported, agent) },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, agent := range reported {
+		if agent.Connector == "claudecode" && agent.Surface == "extension" &&
+			agent.Version == "2.1.100" && agent.Code == UnprotectedCodeSurfaceUnverified {
+			return
+		}
+	}
+	t.Fatalf("old machine-policy extension was not inspected: %+v", reported)
+}
+
 // A CLI found at a version the guardian cannot admit used to be only
 // logged; it is now reported, so status and verify show the gap.
 func TestEnumerateWindowsReportsAgentsItCannotAdmit(t *testing.T) {
@@ -128,6 +189,7 @@ func TestEnumerateWindowsReportsAgentsItCannotAdmit(t *testing.T) {
 	stubCodexMachinePolicyPublished(t, true)
 	cursorHome := cursorProfile(t, "4.1.0")
 	codexHome := codexProfile(t, "0.125.0")
+	writeRunnableWindowsCodexCopy(t, filepath.Join(codexHome, "AppData", "Roaming", "npm", "node_modules", "@openai", "codex"), "0.125.0")
 	injectWindowsProfileList(t, map[string]string{
 		testLocalUserSID: cursorHome,
 		testLocalUserTwo: codexHome,
@@ -145,15 +207,26 @@ func TestEnumerateWindowsReportsAgentsItCannotAdmit(t *testing.T) {
 	if len(manifest.Targets) != 0 {
 		t.Fatalf("targets = %+v, want none", manifest.Targets)
 	}
+	// The row decisions name each user's selected install; the
+	// separate-copy scan also lists the old codex copy by its path.
 	codes := map[string]string{}
+	var rows, copies []UnprotectedAgent
 	for _, agent := range reported {
+		if agent.InstallPath != "" {
+			copies = append(copies, agent)
+			continue
+		}
+		rows = append(rows, agent)
 		codes[agent.Connector+"/"+agent.SID] = agent.Code
 	}
 	if codes["cursor/"+testLocalUserSID] != UnprotectedCodeHookContractUnverified ||
-		codes["codex/"+testLocalUserTwo] != UnprotectedCodeAgentUnprotected || len(reported) != 2 {
+		codes["codex/"+testLocalUserTwo] != UnprotectedCodeAgentUnprotected || len(rows) != 2 {
 		t.Fatalf("reported = %+v", reported)
 	}
-	for _, agent := range reported {
+	if len(copies) != 1 || copies[0].Connector != "codex" || copies[0].SID != testLocalUserTwo || copies[0].Version != "0.125.0" {
+		t.Fatalf("separate copies = %+v", copies)
+	}
+	for _, agent := range rows {
 		if agent.User != filepath.Base(cursorHome) && agent.User != filepath.Base(codexHome) {
 			t.Fatalf("reported user %q is not the profile directory name", agent.User)
 		}
@@ -232,7 +305,9 @@ func TestWindowsEnrollmentGroupPrimitivesAgainstThisHost(t *testing.T) {
 	if _, err := readWindowsLocalGroupDirectMembers(machine + "-500"); err == nil {
 		t.Fatal("a user SID must not read as a local group")
 	}
-	if _, err := readWindowsActiveSessionGroups(); err != nil {
+	// A test runner without the privilege to read session tokens leaves
+	// every session's user unidentified.
+	if _, err := readWindowsActiveSessionGroups(); err != nil && !errors.Is(err, errWindowsSessionsUnidentified) {
 		t.Fatalf("active sessions: %v", err)
 	}
 }

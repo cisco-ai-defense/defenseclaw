@@ -47,6 +47,9 @@ const linuxClockTicks = 100
 
 // currentClock reads the boot-based clock that /proc/<pid>/stat start times
 // count, in the same ticks.
+// clockUnitsPerSecond is the unit of currentClock.
+const clockUnitsPerSecond = linuxClockTicks
+
 func currentClock() (string, int64, bool) {
 	boot := currentBootID()
 	var now unix.Timespec

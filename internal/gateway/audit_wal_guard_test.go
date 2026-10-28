@@ -41,11 +41,35 @@ func TestAuditWALGuardPassGivesTheCopyMoreThanTheWriterBudget(t *testing.T) {
 	if fake.deadline < auditWALCopyTimeout-time.Second {
 		t.Fatalf("copy deadline = %s, want about %s", fake.deadline, auditWALCopyTimeout)
 	}
-	if fake.budget != auditWALWriterBudget || fake.limit != auditWALLimitBytes {
-		t.Fatalf("writer budget %s, limit %d; want %s, %d", fake.budget, fake.limit, auditWALWriterBudget, int64(auditWALLimitBytes))
+	if fake.budget != auditWALWriterBudget || fake.limit != auditWALGuardTriggerBytes {
+		t.Fatalf("writer budget %s, trigger %d; want %s, %d", fake.budget, fake.limit, auditWALWriterBudget, int64(auditWALGuardTriggerBytes))
 	}
 	if log.Len() != 0 {
 		t.Fatalf("a clean pass logged %q", log.String())
+	}
+}
+
+// GAP-0952: the T9 10 Hz registered hook flood added up to about 2 MB per call.
+// Waiting until the WAL reaches the published 256 MiB ceiling to request a
+// bounded catch-up lets the next few ticks push the on-disk file past it.
+func TestAuditWALGuardKeepsFloodHeadroomBelowThePublishedCeiling(t *testing.T) {
+	const floodBytesPerCall = 2_000_000
+	const floodCallsPerSecond = 10
+	const missedTicks = 2
+	neededHeadroom := int64(floodBytesPerCall * floodCallsPerSecond * missedTicks * int(auditWALGuardInterval/time.Second))
+	fake := &fakeWALCheckpointer{}
+	auditWALGuardPass(t.Context(), fake, &auditWALAlarm{}, time.Now(), &bytes.Buffer{})
+	if headroom := int64(auditWALLimitBytes) - fake.limit; headroom < neededHeadroom {
+		t.Fatalf("WAL guard starts bounded catch-up at %d bytes: %d bytes of headroom, want at least %d for two 10 Hz flood ticks before the %d-byte ceiling", fake.limit, headroom, neededHeadroom, int64(auditWALLimitBytes))
+	}
+	if fake.limit != 176<<20 || fake.limit >= audit.WALEmergencyArmBytes || audit.WALEmergencyArmBytes >= audit.WALHardLimitBytes {
+		t.Fatalf("WAL trigger %d, emergency arm %d, ceiling %d; want 176 MiB < arm < 256 MiB", fake.limit, audit.WALEmergencyArmBytes, audit.WALHardLimitBytes)
+	}
+	fake.result = audit.WALCheckpoint{Bounded: true, Restarted: true, LogBytes: 224 << 20, WriterHeld: 100 * time.Millisecond, HoldCap: 2 * time.Second}
+	var log bytes.Buffer
+	auditWALGuardPass(t.Context(), fake, &auditWALAlarm{}, time.Now(), &log)
+	if !strings.Contains(log.String(), "audit WAL nearing its 256 MiB ceiling (224 MiB)") {
+		t.Fatalf("preemptive catch-up log misstates the published ceiling: %q", log.String())
 	}
 }
 
@@ -69,6 +93,18 @@ func TestAuditWALGuardPassReportsAWriterHoldOverTheBudget(t *testing.T) {
 	auditWALGuardPass(t.Context(), fake, &auditWALAlarm{}, time.Now(), &log)
 	if !strings.Contains(log.String(), "audit WAL checkpoint held the audit writer for 600ms (budget 200ms)") {
 		t.Fatalf("log = %q", log.String())
+	}
+}
+
+// A bounded catch-up (a log over the limit) says why the hooks waited.
+func TestAuditWALGuardPassReportsABoundedCatchUp(t *testing.T) {
+	fake := &fakeWALCheckpointer{result: audit.WALCheckpoint{
+		Bounded: true, Restarted: true, LogBytes: 300 << 20, WriterHeld: 480 * time.Millisecond, HoldCap: 4 * time.Second,
+	}}
+	var log bytes.Buffer
+	auditWALGuardPass(t.Context(), fake, &auditWALAlarm{}, time.Now(), &log)
+	if want := "audit WAL over its 256 MiB limit (300 MiB): held the audit writer for 480ms of up to 4s to bring it back (restarted true)"; !strings.Contains(log.String(), want) {
+		t.Fatalf("log = %q, want %q", log.String(), want)
 	}
 }
 
@@ -107,7 +143,7 @@ func TestAuditWALAlarmRaisesRepeatsAndClears(t *testing.T) {
 		t.Fatalf("under the bound: %q", line)
 	}
 	over := int64(auditWALAlarmBytes) + 1<<20
-	if line := alarm.observe(start, over); !strings.Contains(line, "WARNING: the audit WAL file is 1025 MiB, over its 1024 MiB bound") {
+	if line := alarm.observe(start, over); !strings.Contains(line, "WARNING: the audit WAL file is 257 MiB, over its 256 MiB bound") {
 		t.Fatalf("over the bound: %q", line)
 	}
 	if line := alarm.observe(start.Add(time.Minute), over); line != "" {
@@ -116,10 +152,20 @@ func TestAuditWALAlarmRaisesRepeatsAndClears(t *testing.T) {
 	if line := alarm.observe(start.Add(auditWALAlarmRepeat), over); !strings.Contains(line, "WARNING") {
 		t.Fatalf("not repeated after %s: %q", auditWALAlarmRepeat, line)
 	}
-	if line := alarm.observe(start.Add(auditWALAlarmRepeat+time.Second), 0); !strings.Contains(line, "back under its 1024 MiB bound") {
+	if line := alarm.observe(start.Add(auditWALAlarmRepeat+time.Second), 0); !strings.Contains(line, "back under its 256 MiB bound") {
 		t.Fatalf("cleared: %q", line)
 	}
 	if line := alarm.observe(start.Add(auditWALAlarmRepeat+2*time.Second), 0); line != "" {
 		t.Fatalf("cleared twice: %q", line)
+	}
+}
+
+// The flood ceiling is 256 MiB; a warning at four times that size arrives
+// only after the published bound has already failed for many guard ticks.
+func TestAuditWALAlarmStartsAtPublishedCeiling(t *testing.T) {
+	var alarm auditWALAlarm
+	line := alarm.observe(time.Now(), auditWALLimitBytes+(1<<20))
+	if !strings.Contains(line, "WARNING: the audit WAL file is 257 MiB, over its 256 MiB bound") {
+		t.Fatalf("first over-ceiling alarm = %q", line)
 	}
 }

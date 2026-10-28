@@ -171,7 +171,7 @@ func relaxWindowsKeptUserState(home string, sid *windows.SID, dataDir string) er
 		case entry.IsDir():
 			_, err = relaxWindowsStandalonePerUserDirectory(target, path)
 		case entry.Type().IsRegular():
-			_, err = relaxWindowsStandalonePerUserTokenFile(target, path)
+			_, err = relaxWindowsStandalonePerUserFile(target, path)
 		}
 		if err != nil {
 			failures = append(failures, err)

@@ -225,15 +225,19 @@ type RulesFileYAML struct {
 
 // RuleDefYAML is a single detection rule definition in YAML.
 type RuleDefYAML struct {
-	ID           string   `yaml:"id"`
-	Enabled      *bool    `yaml:"enabled,omitempty"`
-	Pattern      string   `yaml:"pattern"`
-	Expression   string   `yaml:"expression,omitempty"`
-	ToolCallOnly bool     `yaml:"tool_call_only,omitempty"`
-	Title        string   `yaml:"title"`
-	Severity     string   `yaml:"severity"`
-	Confidence   float64  `yaml:"confidence"`
-	Tags         []string `yaml:"tags"`
+	ID           string `yaml:"id"`
+	Enabled      *bool  `yaml:"enabled,omitempty"`
+	Pattern      string `yaml:"pattern"`
+	Expression   string `yaml:"expression,omitempty"`
+	ToolCallOnly bool   `yaml:"tool_call_only,omitempty"`
+	// MigratedLiteral marks a rule the 0.8.x upgrade gave an expression
+	// from its literal pattern (MigratedLiteralRule). Only a marked rule
+	// also blocks when its literal is anywhere in a tool call's text.
+	MigratedLiteral bool     `yaml:"migrated_literal,omitempty"`
+	Title           string   `yaml:"title"`
+	Severity        string   `yaml:"severity"`
+	Confidence      float64  `yaml:"confidence"`
+	Tags            []string `yaml:"tags"`
 
 	decoded       bool `yaml:"-"`
 	confidenceSet bool `yaml:"-"`
@@ -587,7 +591,7 @@ func inspectRulePackDirectory(dir string) (*rulePackInventory, error) {
 
 		fileInfo, infoErr := entry.Info()
 		if infoErr != nil {
-			return rulePackErr(rel, "file_unreadable", "component cannot be inspected")
+			return rulePackFileUnreadable(rel, "inspected", infoErr)
 		}
 		if entry.Type()&os.ModeSymlink != 0 || !fileInfo.Mode().IsRegular() {
 			return rulePackErr(rel, "file_type", "component must be a regular file")
@@ -654,12 +658,15 @@ func readRulePackFile(file diskRulePackFile) ([]byte, error) {
 		if errors.Is(err, errRulePackFileType) {
 			return nil, rulePackErr(file.relPath, "file_type", "component must be a regular file")
 		}
-		return nil, rulePackErr(file.relPath, "file_unreadable", "component cannot be read")
+		return nil, rulePackFileUnreadable(file.relPath, "read", err)
 	}
 	defer handle.Close()
 
 	info, err := handle.Stat()
-	if err != nil || !info.Mode().IsRegular() {
+	if err != nil {
+		return nil, rulePackFileUnreadable(file.relPath, "inspected", err)
+	}
+	if !info.Mode().IsRegular() {
 		return nil, rulePackErr(file.relPath, "file_type", "component must be a regular file")
 	}
 	if info.Size() > maxRulePackFileBytes {
@@ -667,12 +674,20 @@ func readRulePackFile(file diskRulePackFile) ([]byte, error) {
 	}
 	data, err := io.ReadAll(io.LimitReader(handle, maxRulePackFileBytes+1))
 	if err != nil {
-		return nil, rulePackErr(file.relPath, "file_unreadable", "component cannot be read")
+		return nil, rulePackFileUnreadable(file.relPath, "read", err)
 	}
 	if len(data) > maxRulePackFileBytes {
 		return nil, rulePackErr(file.relPath, "file_size_limit", "component exceeds the per-file byte limit")
 	}
 	return data, nil
+}
+
+func rulePackFileUnreadable(rel, action string, err error) *RulePackError {
+	reason := "component cannot be " + action
+	if errors.Is(err, fs.ErrPermission) {
+		reason += " by this account (access denied)"
+	}
+	return rulePackErr(rel, "file_unreadable", reason)
 }
 
 func decodeStrictYAML(data []byte, rel string, out any) error {
@@ -981,6 +996,37 @@ func (rp *RulePack) validate(allowEmptyCategories bool) error {
 	return rp.validateSensitiveTools()
 }
 
+// countSemanticRules counts the rules with an expression, as
+// validateRuleFiles does.
+func countSemanticRules(files []*RulesFileYAML) int {
+	count := 0
+	for _, ruleFile := range files {
+		if ruleFile == nil {
+			continue
+		}
+		for _, rule := range ruleFile.Rules {
+			if rule.Expression != "" || (rule.decoded && rule.expressionSet) {
+				count++
+			}
+		}
+	}
+	return count
+}
+
+// CandidateRemedy is the action a config writer names when a candidate
+// config selects a pack that fails with e (config.CheckCandidateAssets):
+// a catalog over a limit needs fewer rules, not another reference.
+func (e *RulePackError) CandidateRemedy() string {
+	if e == nil {
+		return ""
+	}
+	switch e.Code {
+	case "semantic_rule_count_limit", "semantic_catalog_cost_limit", "rule_count_limit":
+		return "select fewer rules (disable rules, or remove guardrail.rules protections), then retry"
+	}
+	return ""
+}
+
 func (rp *RulePack) validateRuleFiles(allowEmptyCategories bool) error {
 	seenCategories := make(map[string]string, len(rp.RuleFiles))
 	seenIDs := make(map[string]struct{})
@@ -1038,7 +1084,13 @@ func (rp *RulePack) validateRuleFiles(allowEmptyCategories bool) error {
 			if hasExpression {
 				semanticRules++
 				if semanticRules > maxSemanticRules {
-					return rulePackErr(rel, "semantic_rule_count_limit", "rule pack contains too many semantic rules")
+					// The limit is on the whole catalog, protections composed
+					// in included, so name no file of it (GAP-0965).
+					return rulePackErr(".", "semantic_rule_count_limit", fmt.Sprintf(
+						"the rule catalog has %d rules with an expression, more than the limit of %d "+
+							"(rules that guardrail.rules protections add count too); disable or remove rules or "+
+							"protections, or split the rules across packs",
+						countSemanticRules(rp.RuleFiles), maxSemanticRules))
 				}
 				if compiler == nil {
 					var err error

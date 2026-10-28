@@ -7,6 +7,7 @@ package cli
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"runtime"
 	"strings"
 	"testing"
@@ -122,5 +123,111 @@ func TestEnterpriseProfileExplainRequiresUserForAgent(t *testing.T) {
 	cmd.SetArgs([]string{"--agent", "agt-0123456789abcdef"})
 	if err := cmd.Execute(); err == nil {
 		t.Fatal("an agent alone was silently ignored")
+	}
+}
+
+// An account the directory does not resolve: the gateway's answer, with its
+// lookup_error, is printed and the command fails (exit 1), in text and with
+// --json. A resolved account with no matching profile still succeeds.
+func TestEnterpriseProfileExplainFailsForUnresolvedAccount(t *testing.T) {
+	previous := enterpriseIdentityViewGet
+	t.Cleanup(func() { enterpriseIdentityViewGet = previous })
+	enterpriseIdentityViewGet = func(path string, out any) (string, error) {
+		if strings.Contains(path, "user=misspelled-name") {
+			return "", json.Unmarshal([]byte(`{"lookup_error":"no account named \"misspelled-name\" on this host","profile":"","subject":{"user_id":"","user_name":"misspelled-name"}}`), out)
+		}
+		if strings.Contains(path, "user=59999") {
+			return "", json.Unmarshal([]byte(`{"lookup_error":"the account database names no account for this uid now","account_unresolved":true,"profile":"default","subject":{"user_id":"59999","user_name":""}}`), out)
+		}
+		return "", json.Unmarshal([]byte(`{"lookup_error":"","profile":"","match":"","subject":{"user_id":"1001","user_name":"alice"}}`), out)
+	}
+	platform := runtime.GOOS
+	if platform == "darwin" {
+		platform = "macos"
+	}
+	for _, asJSON := range []bool{false, true} {
+		args := []string{"--user", "59999"}
+		if asJSON {
+			args = append(args, "--json")
+		}
+		cmd := newEnterpriseIdentityViewCommand(platform, enterpriseIdentityViews[0])
+		cmd.SetOut(&bytes.Buffer{})
+		cmd.SetErr(&bytes.Buffer{})
+		cmd.SetArgs(args)
+		if err := cmd.Execute(); err == nil || commandExitCode(err) != enterprisestatus.UnixExitFailure ||
+			!strings.Contains(err.Error(), "no account for this uid") {
+			t.Fatalf("json=%v: unknown uid must fail: %v", asJSON, err)
+		}
+	}
+	for _, asJSON := range []bool{false, true} {
+		args := []string{"--user", "misspelled-name"}
+		if asJSON {
+			args = append(args, "--json")
+		}
+		cmd := newEnterpriseIdentityViewCommand(platform, enterpriseIdentityViews[0])
+		var out bytes.Buffer
+		cmd.SetOut(&out)
+		cmd.SetErr(&bytes.Buffer{})
+		cmd.SetArgs(args)
+		err := cmd.Execute()
+		if err == nil || commandExitCode(err) != enterprisestatus.UnixExitFailure || !strings.Contains(err.Error(), "no account named") {
+			t.Fatalf("json=%v: unresolved account error = %v", asJSON, err)
+		}
+		var printed map[string]any
+		if json.Unmarshal(out.Bytes(), &printed) != nil || !strings.Contains(fmt.Sprint(printed["lookup_error"]), "no account named") {
+			t.Fatalf("json=%v: printed %q", asJSON, out.String())
+		}
+		if cmd.SilenceErrors != asJSON {
+			t.Fatalf("json=%v: SilenceErrors = %v", asJSON, cmd.SilenceErrors)
+		}
+	}
+	cmd := newEnterpriseIdentityViewCommand(platform, enterpriseIdentityViews[0])
+	var out bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetArgs([]string{"--user", "alice", "--json"})
+	if err := cmd.Execute(); err != nil || !strings.Contains(out.String(), `"user_id": "1001"`) {
+		t.Fatalf("resolved account with no profile = %v:\n%s", err, out.String())
+	}
+}
+
+// GAP-0422 (T8r): the agent identity view sends root's proof of the named
+// account's home (holder_proof), so the gateway tells an account deleted and
+// created again under the same name and uid from the one before it in the
+// first view. A listing without --user asks for none.
+func TestEnterpriseAgentIdentitiesSendsTheRootHomeProof(t *testing.T) {
+	previous, previousProof := enterpriseIdentityViewGet, enterpriseIdentityViewHolderProof
+	t.Cleanup(func() { enterpriseIdentityViewGet, enterpriseIdentityViewHolderProof = previous, previousProof })
+	var asked []string
+	enterpriseIdentityViewGet = func(path string, out any) (string, error) {
+		asked = append(asked, path)
+		return "", json.Unmarshal([]byte(`{"identities":[{"agent_id":"agt-0123456789abcdef","user_name":"alice"}],"total":1}`), out)
+	}
+	proved := 0
+	enterpriseIdentityViewHolderProof = func(user string) string {
+		proved++
+		if user == "alice" {
+			return "41450:home:2049:2000:222"
+		}
+		return ""
+	}
+	platform := runtime.GOOS
+	if platform == "darwin" {
+		platform = "macos"
+	}
+	for _, args := range [][]string{{"--user", "alice", "--connector", "codex"}, {"--user", "bob"}, {}} {
+		cmd := newEnterpriseIdentityViewCommand(platform, enterpriseIdentityViews[1])
+		cmd.SetOut(&bytes.Buffer{})
+		cmd.SetArgs(args)
+		if err := cmd.Execute(); err != nil {
+			t.Fatalf("agent identities %v: %v", args, err)
+		}
+	}
+	want := []string{
+		"/api/v1/agents/identities?connector=codex&holder_proof=41450%3Ahome%3A2049%3A2000%3A222&user=alice",
+		"/api/v1/agents/identities?user=bob",
+		"/api/v1/agents/identities",
+	}
+	if fmt.Sprint(asked) != fmt.Sprint(want) || proved != 2 {
+		t.Fatalf("asked %q (proofs %d); want %q", asked, proved, want)
 	}
 }

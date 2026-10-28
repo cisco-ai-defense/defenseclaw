@@ -23,6 +23,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/testenv"
+	"github.com/defenseclaw/defenseclaw/internal/winpath"
 )
 
 // GAP-0132: an upgrade replaces the scanner runtime while a scan still runs
@@ -74,12 +75,12 @@ func TestWindowsScannerRuntimeMissingIsReported(t *testing.T) {
 	t.Cleanup(func() { windowsScannerRuntimeDir = seam })
 	root := t.TempDir()
 	windowsScannerRuntimeDir = func() (string, error) { return root, nil }
-	for _, action := range []string{"verify", "status", "repair"} {
+	for _, action := range []string{"verify", "status", "repair", "recover"} {
 		result := enterprisestatus.New(action, managed.ProfileStandalone, "windows", "1.0.0")
 		result.Installed = true
 		applyWindowsStandaloneScannerRuntime(result, &windowsEnterpriseLifecycleOptions{})
 		messages := result.Warnings
-		if action == "verify" {
+		if action == "verify" || action == "recover" {
 			messages = result.Errors
 		}
 		reported := false
@@ -103,7 +104,7 @@ func TestWindowsScannerRuntimeMissingIsReported(t *testing.T) {
 	windowsScannerRuntimeServiceCheck = func() error {
 		return errors.New("the gateway service account cannot list or read the permissions of the parent folder C:\\ProgramData")
 	}
-	for _, action := range []string{"verify", "ensure"} {
+	for _, action := range []string{"verify", "ensure", "recover"} {
 		result := enterprisestatus.New(action, managed.ProfileStandalone, "windows", "1.0.0")
 		result.Installed = true
 		applyWindowsStandaloneScannerRuntime(result, &windowsEnterpriseLifecycleOptions{})
@@ -224,9 +225,12 @@ func TestWindowsScannerRuntimeIsAdmittedByThePayloadTrustPolicy(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	setWindowsScannerRuntimeDeploymentTest(t, func() winpath.EnterpriseDeployment {
+		return winpath.EnterpriseDeployment{State: winpath.EnterpriseDeploymentInstalled, ProductVersion: "1.0.0"}
+	})
 	for _, opts := range []*windowsEnterpriseLifecycleOptions{
-		{resolvedInstaller: installer, trustMode: windowsEnterpriseTrustAuthenticode},
-		{resolvedInstaller: installer, trustMode: windowsEnterpriseTrustHashPinned,
+		{resolvedInstaller: installer, trustMode: windowsEnterpriseTrustAuthenticode, productVersion: "1.0.0"},
+		{resolvedInstaller: installer, trustMode: windowsEnterpriseTrustHashPinned, productVersion: "1.0.0",
 			payloadPins: map[string]string{managed.StandaloneWindowsScannerRuntimeName: strings.Repeat("0", 64)}},
 	} {
 		result := enterprisestatus.New("ensure", managed.ProfileStandalone, "windows", "1.0.0")
@@ -242,7 +246,7 @@ func TestWindowsScannerRuntimeIsAdmittedByThePayloadTrustPolicy(t *testing.T) {
 	}
 	pinned := &windowsEnterpriseLifecycleOptions{trustMode: windowsEnterpriseTrustHashPinned,
 		payloadPins: map[string]string{managed.StandaloneWindowsScannerRuntimeName: digest}}
-	if err := admitWindowsScannerRuntimePayload(source, digest, pinned); err != nil {
+	if _, err := admitWindowsScannerRuntimePayload(source, digest, pinned); err != nil {
 		t.Fatalf("a pinned digest was refused: %v", err)
 	}
 }
@@ -351,7 +355,7 @@ func TestWindowsScannerRuntimeChangedInPlaceIsNotRun(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := managed.WriteScannerRuntimeAdmission(root, admitted); err != nil {
+	if err := managed.WriteScannerRuntimeAdmission(root, admitted, managed.ScannerRuntimeTrustAuthenticode); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(target, []byte("another program"), 0o755); err != nil {
@@ -373,5 +377,261 @@ func TestWindowsScannerRuntimeChangedInPlaceIsNotRun(t *testing.T) {
 	}
 	if got := readWindowsScannerRuntime(); got.State != "not_prepared" {
 		t.Fatalf("the admitted runtime state = %q, want it run (not_prepared: this one cannot report versions)", got.State)
+	}
+}
+
+// newWindowsScannerRuntimeRemovalTest points the scanner step at a runtime
+// root with a file in it; removal needs no elevation.
+func newWindowsScannerRuntimeRemovalTest(t *testing.T) (root, runtimeFile string) {
+	t.Helper()
+	seam := windowsScannerRuntimeDir
+	t.Cleanup(func() { windowsScannerRuntimeDir = seam })
+	root = filepath.Join(t.TempDir(), "DefenseClaw-ScannerRuntime")
+	windowsScannerRuntimeDir = func() (string, error) { return root, nil }
+	runtimeFile = filepath.Join(root, managed.StandaloneWindowsScannerRuntimeName)
+	if err := os.MkdirAll(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(runtimeFile, []byte("runtime"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return root, runtimeFile
+}
+
+// GAP-1166 review: an uninstall whose scanner step runs after a later
+// install keeps that install's runtime, and one that cannot read the
+// deployment record keeps it too; the runtime goes only while no deployment
+// is installed, its lock with it. Before, the step removed the folder
+// whatever was installed.
+func TestWindowsScannerRuntimeUninstallKeepsALaterInstallsRuntime(t *testing.T) {
+	root, runtimeFile := newWindowsScannerRuntimeRemovalTest(t)
+	seam := windowsScannerRuntimeDeployment
+	t.Cleanup(func() { windowsScannerRuntimeDeployment = seam })
+	for _, tc := range []struct {
+		name   string
+		record winpath.EnterpriseDeployment
+		err    error
+		kept   string
+	}{
+		{name: "a later install", record: winpath.EnterpriseDeployment{State: winpath.EnterpriseDeploymentInstalled, ProductVersion: "1.0.4"}, kept: "was kept: a later lifecycle run installed DefenseClaw 1.0.4"},
+		{name: "an unreadable record", record: winpath.EnterpriseDeployment{State: winpath.EnterpriseDeploymentUnknown}, kept: "could not be removed"},
+		{name: "a record that cannot be inspected", err: errors.New("access denied"), kept: "could not be removed"},
+	} {
+		record, recordErr := tc.record, tc.err
+		windowsScannerRuntimeDeployment = func(*windowsEnterpriseLifecycleOptions) (winpath.EnterpriseDeployment, error) {
+			return record, recordErr
+		}
+		result := enterprisestatus.New("uninstall", managed.ProfileStandalone, "windows", "1.0.4")
+		applyWindowsStandaloneScannerRuntime(result, &windowsEnterpriseLifecycleOptions{productVersion: "1.0.4"})
+		if _, err := os.Stat(runtimeFile); err != nil {
+			t.Fatalf("%s: the uninstall removed the runtime: %v", tc.name, err)
+		}
+		if !windowsEnterpriseResultHasWarning(result, "scanner_runtime_left") || !strings.Contains(fmt.Sprint(result.Warnings), tc.kept) {
+			t.Fatalf("%s: warnings %+v, want scanner_runtime_left saying %q", tc.name, result.Warnings, tc.kept)
+		}
+	}
+	for _, state := range []winpath.EnterpriseDeploymentState{winpath.EnterpriseDeploymentTombstone, winpath.EnterpriseDeploymentAbsent} {
+		if err := os.MkdirAll(root, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(runtimeFile, []byte("runtime"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		record := winpath.EnterpriseDeployment{State: state}
+		windowsScannerRuntimeDeployment = func(*windowsEnterpriseLifecycleOptions) (winpath.EnterpriseDeployment, error) {
+			return record, nil
+		}
+		result := enterprisestatus.New("uninstall", managed.ProfileStandalone, "windows", "1.0.4")
+		applyWindowsStandaloneScannerRuntime(result, &windowsEnterpriseLifecycleOptions{productVersion: "1.0.4"})
+		if _, err := os.Lstat(root); !errors.Is(err, os.ErrNotExist) || len(result.Warnings) != 0 {
+			t.Fatalf("%s: the runtime folder stays (%v) or warned %+v", state, err, result.Warnings)
+		}
+	}
+}
+
+// GAP-1166 review: the uninstall step waits for a scanner step that holds
+// the scanner runtime lock, and removes the runtime only after it.
+func TestWindowsScannerRuntimeRemovalWaitsForAScannerStep(t *testing.T) {
+	root, runtimeFile := newWindowsScannerRuntimeRemovalTest(t)
+	seam := windowsScannerRuntimeDeployment
+	t.Cleanup(func() { windowsScannerRuntimeDeployment = seam })
+	windowsScannerRuntimeDeployment = func(*windowsEnterpriseLifecycleOptions) (winpath.EnterpriseDeployment, error) {
+		return winpath.EnterpriseDeployment{State: winpath.EnterpriseDeploymentTombstone}, nil
+	}
+	release, err := lockWindowsScannerRuntime(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() {
+		_, err := retireWindowsScannerRuntime(&windowsEnterpriseLifecycleOptions{})
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		release()
+		t.Fatalf("the removal did not wait for the scanner step that holds the lock: %v", err)
+	case <-time.After(750 * time.Millisecond):
+	}
+	if _, err := os.Stat(runtimeFile); err != nil {
+		release()
+		t.Fatalf("the removal changed the runtime while a scanner step held the lock: %v", err)
+	}
+	release()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(30 * time.Second):
+		t.Fatal("the removal did not finish after the lock was released")
+	}
+	if _, err := os.Lstat(root); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("the runtime folder stays after the removal: %v", err)
+	}
+}
+
+// GAP-1166 review: a repair from the installed CLI (no payload) does not
+// prepare a runtime whose deployment a later run uninstalled.
+func TestWindowsScannerRuntimeRepreparesOnlyItsOwnDeployment(t *testing.T) {
+	root, _ := newWindowsScannerRuntimeRemovalTest(t)
+	readerSeam, deploymentSeam := windowsScannerRuntimeReader, windowsScannerRuntimeDeployment
+	t.Cleanup(func() { windowsScannerRuntimeReader, windowsScannerRuntimeDeployment = readerSeam, deploymentSeam })
+	windowsScannerRuntimeReader = func() *enterprisestatus.ScannerRuntime {
+		return &enterprisestatus.ScannerRuntime{State: "not_prepared"}
+	}
+	windowsScannerRuntimeDeployment = func(*windowsEnterpriseLifecycleOptions) (winpath.EnterpriseDeployment, error) {
+		return winpath.EnterpriseDeployment{State: winpath.EnterpriseDeploymentTombstone}, nil
+	}
+	result := enterprisestatus.New("repair", managed.ProfileStandalone, "windows", "1.0.4")
+	result.Installed = true
+	applyWindowsStandaloneScannerRuntime(result, &windowsEnterpriseLifecycleOptions{productVersion: "1.0.4"})
+	if len(result.Errors) != 0 || !windowsEnterpriseResultHasWarning(result, "scanner_runtime_superseded") {
+		t.Fatalf("errors %+v warnings %+v, want only scanner_runtime_superseded", result.Errors, result.Warnings)
+	}
+	if _, err := os.Stat(root); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// Review loop round 3: a certification-scope run leaves the scanner runtime
+// alone. The folder, its admission record and its gateway ACL are the
+// production deployment's, while the run reads and writes its own
+// deployment record. No scope option, action or record state lets it
+// install, admit, prepare, prune or remove anything there, or report that
+// runtime as its own. Before, a certification install over a production one
+// published its (possibly unsigned) scanner and admission record, and a
+// certification uninstall removed the folder while production stayed
+// installed. The production control at the end shows the fixture is
+// removable.
+func TestWindowsScannerRuntimeCertificationScopeLeavesTheProductionRuntime(t *testing.T) {
+	root, _ := newWindowsScannerRuntimeRemovalTest(t)
+	if err := os.WriteFile(filepath.Join(root, "admitted-scanner.json"), []byte(`{"sha256":"production"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	snapshot := func() map[string]string {
+		files := map[string]string{}
+		_ = filepath.WalkDir(root, func(path string, entry os.DirEntry, err error) error {
+			if err != nil || entry.IsDir() {
+				return err
+			}
+			raw, readErr := os.ReadFile(path)
+			if readErr != nil {
+				return readErr
+			}
+			files[path] = string(raw)
+			return nil
+		})
+		return files
+	}
+	want := snapshot()
+	payload := t.TempDir()
+	installer := filepath.Join(payload, "install-enterprise.ps1")
+	source := filepath.Join(payload, managed.StandaloneWindowsScannerRuntimeName)
+	for _, path := range []string{installer, source} {
+		if err := os.WriteFile(path, []byte("unsigned "+filepath.Base(path)), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	readerSeam, deploymentSeam, sourceSeam := windowsScannerRuntimeReader, windowsScannerRuntimeDeployment, windowsScannerSourceCheck
+	t.Cleanup(func() {
+		windowsScannerRuntimeReader, windowsScannerRuntimeDeployment, windowsScannerSourceCheck = readerSeam, deploymentSeam, sourceSeam
+	})
+	reads := 0
+	windowsScannerRuntimeReader = func() *enterprisestatus.ScannerRuntime {
+		reads++
+		return &enterprisestatus.ScannerRuntime{State: "not_prepared"}
+	}
+	windowsScannerSourceCheck = func(string, string) error { return nil }
+	// Each scope's own record: installed for the mutations (the old step
+	// then published into the shared folder), gone after its uninstall (the
+	// old step then removed the shared folder).
+	recordReads := 0
+	recordState := winpath.EnterpriseDeploymentInstalled
+	windowsScannerRuntimeDeployment = func(*windowsEnterpriseLifecycleOptions) (winpath.EnterpriseDeployment, error) {
+		recordReads++
+		return winpath.EnterpriseDeployment{State: recordState, ProductVersion: "1.0.4"}, nil
+	}
+	scopes := map[string]func(*windowsEnterpriseLifecycleOptions){
+		"state root": func(o *windowsEnterpriseLifecycleOptions) {
+			o.stateRoot = `C:\ProgramData\Cisco\DefenseClaw-Cert\run1\state`
+		},
+		"install root": func(o *windowsEnterpriseLifecycleOptions) {
+			o.installRoot = `C:\Program Files\Cisco\DefenseClaw-Cert\run1\install`
+		},
+		"gateway service name": func(o *windowsEnterpriseLifecycleOptions) { o.gatewayServiceName = "DefenseClawGatewayCert1" },
+		"guardian service":     func(o *windowsEnterpriseLifecycleOptions) { o.guardianServiceName = "DefenseClawGuardianCert1" },
+		"unsigned certification": func(o *windowsEnterpriseLifecycleOptions) {
+			o.allowUnsigned, o.certificationCodexHome = true, `C:\dc-cert\codex-home`
+		},
+	}
+	for name, scope := range scopes {
+		for _, tc := range []struct {
+			action    string
+			installer string
+			record    winpath.EnterpriseDeploymentState
+		}{
+			{"install", installer, winpath.EnterpriseDeploymentInstalled},
+			{"upgrade", installer, winpath.EnterpriseDeploymentInstalled},
+			{"repair", installer, winpath.EnterpriseDeploymentInstalled},
+			{"ensure", installer, winpath.EnterpriseDeploymentInstalled},
+			// From the installed CLI: no payload, so the old step prepared
+			// the shared runtime again.
+			{"repair", "", winpath.EnterpriseDeploymentInstalled},
+			{"ensure", "", winpath.EnterpriseDeploymentInstalled},
+			{"uninstall", installer, winpath.EnterpriseDeploymentTombstone},
+			{"uninstall", "", winpath.EnterpriseDeploymentAbsent},
+			{"status", "", winpath.EnterpriseDeploymentInstalled},
+			{"verify", "", winpath.EnterpriseDeploymentInstalled},
+		} {
+			label := name + " " + tc.action
+			if tc.installer == "" {
+				label += " (installed CLI)"
+			}
+			recordState, recordReads, reads = tc.record, 0, 0
+			opts := &windowsEnterpriseLifecycleOptions{resolvedInstaller: tc.installer, productVersion: "1.0.4",
+				trustMode:   windowsEnterpriseTrustHashPinned,
+				payloadPins: map[string]string{managed.StandaloneWindowsScannerRuntimeName: strings.Repeat("0", 64)}}
+			scope(opts)
+			result := enterprisestatus.New(tc.action, managed.ProfileStandalone, "windows", "1.0.4")
+			result.Installed = tc.action != "uninstall"
+			applyWindowsStandaloneScannerRuntime(result, opts)
+			if got := snapshot(); fmt.Sprint(got) != fmt.Sprint(want) {
+				t.Fatalf("%s changed the production scanner runtime: %v, want %v", label, got, want)
+			}
+			if recordReads != 0 || reads != 0 || result.Scanners != nil {
+				t.Fatalf("%s read the shared runtime as its own: %d record reads, %d runtime reads, scanners %+v", label, recordReads, reads, result.Scanners)
+			}
+			if len(result.Errors) != 0 || !windowsEnterpriseResultHasWarning(result, "scanner_runtime_not_scoped") {
+				t.Fatalf("%s: errors %+v warnings %+v, want only scanner_runtime_not_scoped", label, result.Errors, result.Warnings)
+			}
+		}
+	}
+	// Control: the production uninstall of the same fixture removes it.
+	recordState = winpath.EnterpriseDeploymentTombstone
+	result := enterprisestatus.New("uninstall", managed.ProfileStandalone, "windows", "1.0.4")
+	applyWindowsStandaloneScannerRuntime(result, &windowsEnterpriseLifecycleOptions{productVersion: "1.0.4"})
+	if _, err := os.Lstat(root); !errors.Is(err, os.ErrNotExist) || len(result.Warnings) != 0 {
+		t.Fatalf("the production uninstall kept the runtime folder (%v) or warned %+v", err, result.Warnings)
 	}
 }

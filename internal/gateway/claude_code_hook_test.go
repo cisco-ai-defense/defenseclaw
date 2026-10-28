@@ -171,8 +171,9 @@ func TestEvaluateClaudeCodeHook_HILTPreToolUseAsks(t *testing.T) {
 
 	api := &APIServer{scannerCfg: cfg}
 	resp := api.evaluateClaudeCodeHook(context.Background(), claudeCodeHookRequest{
-		HookEventName: "PreToolUse",
-		ToolName:      "Bash",
+		HookEventName:  "PreToolUse",
+		PermissionMode: "default",
+		ToolName:       "Bash",
 		ToolInput: map[string]interface{}{
 			"command": "dd if=/dev/zero of=/dev/sda bs=1M",
 		},
@@ -1062,7 +1063,7 @@ func TestClaudeCodeOutput_SubagentStopUsesAdditionalContext(t *testing.T) {
 }
 
 func TestClaudeCodeOutput_TaskAndTeamBlocksUseExitTwoFeedback(t *testing.T) {
-	for _, event := range []string{"TaskCreated", "TaskCompleted", "TeammateIdle"} {
+	for _, event := range []string{"SessionStart", "TaskCreated", "TaskCompleted", "TeammateIdle"} {
 		t.Run(event, func(t *testing.T) {
 			output := claudeCodeOutput(
 				claudeCodeHookRequest{HookEventName: event},

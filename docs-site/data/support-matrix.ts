@@ -1,15 +1,15 @@
 // Support matrix: what works on which OS, in the open-source (per-user) and
 // enterprise (managed, standalone profile) editions.
 //
-// One source for /docs/support-matrix, the "Platform support" table on
+// One source for /docs/get-started/support-matrix, the "Platform support" table on
 // /docs/connectors and the <ConnectorSupport> strip on each connector page.
 //
 // Where each fact comes from:
 // - OS allowed at all: internal/gateway/connector/platform_support.go
 //   (windowsConnectorSupport; every connector is supported on Linux and macOS).
 // - Minimum agent version: cli/defenseclaw/inventory/hook_contracts.json
-//   (lowest min_inclusive, or the exact builds); Kiro's standalone floors are in
-//   internal/enterprisehooks/agent_floor_standalone.go.
+//   (lowest min_inclusive, or the exact builds); Kiro's CLI floor also lives in
+//   internal/gateway/connector/kiro.go and is enforced by every setup path.
 // - Block, native ask and fail closed: data/capability-matrix.json (imported,
 //   never copied, so the two pages can't drift).
 // - Enterprise route: internal/enterprisepolicy/types.go RouteFor.
@@ -60,8 +60,6 @@ export const generated: GeneratedStatus = {
     opencode: 'SS SS SS',
     amp: 'SS SS SS',
     hermes: 'SS SS SS',
-    openhands: 'SS SS UU',
-    omnigent: 'SS SS PP',
   },
   enterprise: {
     claudecode: 'SSS',
@@ -74,8 +72,6 @@ export const generated: GeneratedStatus = {
     opencode: 'SSS',
     amp: 'SSS',
     hermes: 'SSS',
-    openhands: 'SSU',
-    omnigent: 'PPU',
   },
   features: {
     guardrails: { oss: 'SSS', enterprise: 'SSS' },
@@ -115,6 +111,22 @@ export const generated: GeneratedStatus = {
   },
 };
 // END GENERATED
+
+// Routes the code allows that the ledger above does not list yet. They show as
+// preview where the generated block says N (not offered); a live S or P in the
+// block wins. This sits outside the generated block so a regeneration keeps it.
+// Remove an entry once the ledger carries the route.
+const unlistedPreview: Record<string, Partial<Record<Edition, true>>> = {
+  // Managed ACP through `defenseclaw-gateway enterprise acp enroll`.
+  acp: { enterprise: true },
+};
+
+export function withUnlistedPreview(statuses: Record<OsId, Status>, unlisted: boolean | undefined): Record<OsId, Status> {
+  if (!unlisted) return statuses;
+  const out = { ...statuses };
+  for (const os of OS_IDS) if (out[os] === 'not-offered') out[os] = 'preview';
+  return out;
+}
 
 const CODE: Record<string, Status> = {
   S: 'supported',
@@ -224,7 +236,7 @@ const connectorSources: ConnectorSource[] = [
     id: 'cursor',
     integration: 'Native hooks',
     minVersion: '2.4.0',
-    versionNote: 'Cursor Agent 2.4.0 up to 4.0.0, and Agent build 2026.07.23-e383d2b.',
+    versionNote: 'Cursor Desktop 2.4.0 up to 4.0.0. The Cursor Agent CLI is covered only at the reviewed build 2026.07.23-e383d2b.',
     notes: { windows: 'Managed PowerShell adapter.' },
     route: MACHINE,
   },
@@ -246,10 +258,10 @@ const connectorSources: ConnectorSource[] = [
   {
     id: 'kiro',
     integration: 'Native hooks',
-    minVersion: 'Not gated',
-    versionNote: 'Per-user installs are not version-gated. The enterprise standalone profile requires kiro-cli 2.24.1 or Kiro IDE 1.0.182.',
+    minVersion: 'kiro-cli 2.27.1; Kiro IDE 1.0.182',
+    versionNote: 'Below 2.27.1, kiro-cli has non-interactive --v3 runs that load no hooks, and an IDE before 1.0.182 cannot read global hooks. Per-user and managed setup refuse an older kiro-cli or an older IDE, in every guardrail mode, when no supported Kiro form is installed beside it. A Kiro form whose version could not be read is unknown and not protected: action setup refuses it unless a supported form is installed, and doctor and managed status report it. Managed status reports a below-floor product as uncovered and verify fails. Earlier managed CLI enrollments keep their interactive hooks across upgrade until updated. A supported Kiro IDE can be enrolled beside an older CLI.',
     route: PER_USER,
-    routeNote: 'ACP (Agent Client Protocol) editors are not supported in enterprise managed mode in DefenseClaw 1.0.',
+    routeNote: 'Editors that start Kiro over ACP are enrolled with `defenseclaw-gateway enterprise acp enroll` (preview).',
   },
   {
     id: 'opencode',
@@ -270,28 +282,9 @@ const connectorSources: ConnectorSource[] = [
     id: 'hermes',
     integration: 'Native hooks',
     minVersion: '0.19.0',
-    versionNote: 'Contract covers 0.19.0 up to 0.22.0.',
+    versionNote: 'Contract covers 0.19.0 up to 0.22.0. Before 0.21.1 the TUI (hermes --tui) and dashboard chat run tools without the hooks; setup and doctor warn.',
     notes: { windows: "Hermes' own terminal tool needs its bundled Git Bash." },
     route: PER_USER,
-  },
-  {
-    id: 'openhands',
-    integration: 'Native hooks',
-    minVersion: '1.12.0',
-    notes: { windows: 'OpenHands CLI needs WSL, and DefenseClaw has no WSL connector path.' },
-    route: PER_USER_NO_WINDOWS,
-  },
-  {
-    id: 'omnigent',
-    integration: 'Policy API',
-    minVersion: '0.7.0',
-    versionNote: 'Contract covers 0.7.0 up to 0.14.0.',
-    notes: {
-      linux: 'Managed terminal harnesses require tmux 3.3 or newer; RHEL 9 ships 3.2a.',
-      macos: 'Managed terminal harnesses require tmux 3.3 or newer.',
-      windows: 'Degraded mode: server and SDK policy path only, without terminal wrappers or sandbox parity.',
-    },
-    route: PER_USER_NO_WINDOWS,
   },
 ];
 
@@ -382,7 +375,7 @@ const featureSources: FeatureSource[] = [
   {
     id: 'codeguard',
     label: 'CodeGuard',
-    href: '/docs/reference/cli#scanning',
+    href: '/docs/reference/cli/#scanning',
     group: 'Protect',
     note: 'Enterprise: part of the local policy engine in the standalone profile.',
   },
@@ -391,7 +384,7 @@ const featureSources: FeatureSource[] = [
   {
     id: 'judge',
     label: 'LLM judge',
-    href: '/docs/reference/cli#guardrail',
+    href: '/docs/reference/cli/#guardrail',
     group: 'Protect',
   },
   { id: 'redaction', label: 'Redaction profiles', href: '/docs/observability/redaction', group: 'Protect' },
@@ -407,7 +400,7 @@ const featureSources: FeatureSource[] = [
     label: 'ACP guard (Kiro, Zed)',
     href: '/docs/acp-guard',
     group: 'Protect',
-    note: 'Per-user installs only. Not supported in enterprise managed mode in DefenseClaw 1.0.',
+    note: 'Per-user install, or enterprise managed mode through `enterprise acp enroll` (preview, not yet verified live).',
   },
   { id: 'ai-discovery', label: 'AI discovery', href: '/docs/ai-discovery', group: 'Discover' },
   {
@@ -416,8 +409,8 @@ const featureSources: FeatureSource[] = [
     href: '/docs/ai-discovery#operator-cli',
     group: 'Discover',
   },
-  { id: 'tools', label: 'Tool inventory', href: '/docs/reference/cli#asset-policy-commands', group: 'Discover' },
-  { id: 'plugins', label: 'Plugin inventory and scan', href: '/docs/reference/cli#scanning', group: 'Discover' },
+  { id: 'tools', label: 'Tool inventory', href: '/docs/reference/cli/#asset-policy-commands', group: 'Discover' },
+  { id: 'plugins', label: 'Plugin inventory and scan', href: '/docs/reference/cli/#scanning', group: 'Discover' },
   { id: 'registries', label: 'Registries', href: '/docs/scanning/registries', group: 'Discover' },
   { id: 'aibom', label: 'AIBOM', href: '/docs/ai-discovery#aibom-ai-bill-of-materials', group: 'Discover' },
   {
@@ -441,14 +434,14 @@ const featureSources: FeatureSource[] = [
     group: 'Observe',
     note: 'Needs Docker.',
   },
-  { id: 'alerts', label: 'Alerts', href: '/docs/reference/cli#audit--alerts', group: 'Observe' },
+  { id: 'alerts', label: 'Alerts', href: '/docs/reference/cli/#audit--alerts', group: 'Observe' },
   {
     id: 'webhooks',
     label: 'Webhooks',
     href: '/docs/observability/webhooks',
     group: 'Observe',
   },
-  { id: 'audit', label: 'Audit log and export', href: '/docs/reference/cli#audit--alerts', group: 'Observe' },
+  { id: 'audit', label: 'Audit log and export', href: '/docs/reference/cli/#audit--alerts', group: 'Observe' },
   {
     id: 'install',
     label: 'Install',
@@ -457,18 +450,18 @@ const featureSources: FeatureSource[] = [
     note: 'Open source: the one-line installer. Enterprise: the .rpm, .pkg or Setup.exe package.',
   },
   { id: 'upgrade', label: 'Upgrade', href: '/docs/get-started/upgrade', group: 'Operate' },
-  { id: 'uninstall', label: 'Uninstall', href: '/docs/reference/cli#uninstall--disable', group: 'Operate' },
+  { id: 'uninstall', label: 'Uninstall', href: '/docs/reference/cli/#uninstall--disable', group: 'Operate' },
   {
     id: 'health',
     label: 'Health check and repair',
-    href: '/docs/reference/cli#doctor',
+    href: '/docs/reference/cli/#doctor',
     group: 'Operate',
     note: 'Open source: doctor. Enterprise: verify and repair.',
   },
   {
     id: 'keys',
     label: 'Keys and secrets',
-    href: '/docs/reference/keys',
+    href: '/docs/reference/keys/',
     group: 'Operate',
     note: 'Enterprise: the Cisco AI Defense key is a protected credential only the gateway service can read.',
   },
@@ -477,26 +470,26 @@ const featureSources: FeatureSource[] = [
   {
     id: 'machine-policy',
     label: 'Machine policy for agent hooks',
-    href: '/docs/enterprise/machine-policy',
+    href: '/docs/enterprise/machine-policy/',
     group: 'Enterprise controls',
   },
   {
     id: 'tamper',
     label: 'Tamper resistance',
-    href: '/docs/enterprise/threat-model',
+    href: '/docs/enterprise/threat-model/',
     group: 'Enterprise controls',
     note: 'Standard users can’t turn DefenseClaw or its hooks off.',
   },
   {
     id: 'enrollment',
     label: 'Multi-user enroll and revoke',
-    href: '/docs/enterprise/enrollment',
+    href: '/docs/enterprise/enrollment/',
     group: 'Enterprise controls',
   },
   {
     id: 'foreign-hook-guard',
     label: 'Foreign-hook guard',
-    href: '/docs/enterprise/foreign-hook-guard',
+    href: '/docs/enterprise/foreign-hook-guard/',
     group: 'Enterprise controls',
   },
   {
@@ -514,8 +507,11 @@ function buildFeature(source: FeatureSource): FeatureRow {
   if (!codes) throw new Error(`support-matrix: missing feature status for ${source.id}`);
   return {
     ...source,
-    oss: perOs(codes.oss, `${source.id} oss`),
-    enterprise: perOs(codes.enterprise, `${source.id} enterprise`),
+    oss: withUnlistedPreview(perOs(codes.oss, `${source.id} oss`), unlistedPreview[source.id]?.oss),
+    enterprise: withUnlistedPreview(
+      perOs(codes.enterprise, `${source.id} enterprise`),
+      unlistedPreview[source.id]?.enterprise,
+    ),
   };
 }
 

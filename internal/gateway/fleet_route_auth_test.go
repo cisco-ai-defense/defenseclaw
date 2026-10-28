@@ -7,6 +7,9 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/fleet"
@@ -70,5 +73,32 @@ func TestFleetAPIAuthConfigured(t *testing.T) {
 	}
 	if !fleetRouteAuthTestAPI(t, "fleet-token").AuthConfigured() {
 		t.Fatal("a Fleet API with a token reports no auth")
+	}
+}
+
+// GAP-0569: a body-less fleet POST without Content-Type gets 415 from the
+// gateway, as the fleet API page says.
+func TestFleetPostWithoutContentTypeIsDocumented415(t *testing.T) {
+	api, _ := tokenAuthTestServer(t, "gateway-token")
+	api.SetFleetAPI(fleetRouteAuthTestAPI(t, "fleet-token"))
+	handler := api.tokenAuth(api.apiCSRFProtect(http.StripPrefix("/api/v1/fleet", api.fleetAPI.Handler())))
+	const want = `{"error":"Content-Type must be application/json"}`
+	for _, path := range []string{"/api/v1/fleet/token/rotate", "/api/v1/fleet/devices/1/rotate-key"} {
+		req := httptest.NewRequest(http.MethodPost, path, nil)
+		req.Header.Set("Authorization", "Bearer fleet-token")
+		req.Header.Set("X-DefenseClaw-Client", "true")
+		rr := httptest.NewRecorder()
+		handler.ServeHTTP(rr, req)
+		if rr.Code != http.StatusUnsupportedMediaType || strings.TrimSpace(rr.Body.String()) != want {
+			t.Fatalf("POST %s: status=%d body=%q", path, rr.Code, rr.Body.String())
+		}
+	}
+	raw, err := os.ReadFile(filepath.Join("..", "..", "docs-site", "content", "docs", "edge-connector", "api-reference.mdx"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, table, _ := strings.Cut(string(raw), "## Common status codes")
+	if !strings.Contains(table, "| `415` |") || !strings.Contains(string(raw), "`415` with `"+want+"`") {
+		t.Fatal("api-reference.mdx does not document the 415 the gateway returns")
 	}
 }

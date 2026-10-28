@@ -68,7 +68,7 @@ Each item: rule, why (the failure it prevents), then the check and the evidence 
 
 - [ ] **M-ID-1** Only verified identity selects a profile (kernel or credential verified uid or SID plus OS directory facts). Never headers, payloads, env or claimed session facts. Why: a client-supplied identity would pick a looser profile.
   Check: `go test ./internal/gateway -run GuardrailProfile`. Evidence: `internal/gateway/guardrail_profile.go`, `internal/useridentity/directory.go`.
-- [ ] **M-ID-2** No lenient fallback in matching: a failed directory lookup selects the lookup-failed or default profile, a stale name matches nobody, names compare through the shared normalizers. Why: a failed lookup that lands in a looser profile is a bypass.
+- [ ] **M-ID-2** No lenient fallback in matching: refuse when an assignment needs an identity fact the OS has not confirmed, naming that fact; otherwise use only proven matches or the default. A stale name matches nobody, and names compare through the shared normalizers. Why: a failed lookup that lands in a looser profile is a bypass.
   Check: `go test ./internal/gateway ./internal/useridentity`. Evidence: `internal/useridentity/principal.go`.
 - [ ] **M-ID-3** Policy visibility is own-only for users and admin-only otherwise, enforced server side (loopback plus token, or privileged peer). Any new endpoint, status field or telemetry attribute naming a policy, profile, digest, group or account is gated and tested per caller class. Why: a field that names another account's policy, group or digest discloses it to every local user.
   Check: `go test ./internal/gateway -run 'PolicyBlockOnlyToAnAdministrator|PolicyPrivacy|ProfileExplain'`. Evidence: `internal/gateway/health_policy_privacy_test.go`.
@@ -76,7 +76,7 @@ Each item: rule, why (the failure it prevents), then the check and the evidence 
   Check: `go test ./internal/config -run GuardrailProfile` and `pytest cli/tests/test_guardrail_profiles.py`. Evidence: `internal/config/guardrail_profiles.go`.
 - [ ] **M-ID-5** The policy digest is canonical, deterministic and secret-free; test stability and change detection. Why: it is stamped on decisions and telemetry.
   Check: `go test ./internal/config -run Digest`. Evidence: `internal/config/guardrail_profiles_test.go`.
-- [ ] **M-ID-6** Sandbox and OpenShell profile settings may only tighten the admin floor. Why: a profile that loosens it, or a looser default profile, is a gap during a directory outage.
+- [ ] **M-ID-6** Sandbox and OpenShell profile settings may only tighten the admin floor. Why: a profile that loosens it is a gap. An outage refuses requests whose assignments need an unconfirmed fact, naming it; the default profile applies only when no assignment needs that fact, so keep it strict for those accounts too.
   Check: `go test ./internal/config -run 'Tighten|Sandbox'`. Evidence: `internal/config/openshell_tighten.go`.
 - [ ] **M-ID-7** A new identity source reads OS facts only (never an IdP API or identity credentials), marks each fact verified or claimed, and states per-OS limits. Why: the product promise is no IdP calls.
   Check: `go test ./internal/useridentity ./internal/unixidentity`. Evidence: `docs-site/content/docs/enterprise/identity-and-authentication.mdx`.

@@ -108,7 +108,7 @@ const (
 	KiroID = "defenseclaw-kiro"
 	// BedrockMantleOpenAIID binds BEDROCK_MANTLE_API_KEY (bearer) to the
 	// Mantle OpenAI-compatible routes for harnesses that speak Chat
-	// Completions (Hermes, OpenHands), imported as
+	// Completions (Hermes), imported as
 	// BedrockProfileID(BedrockMantleOpenAIID, region).
 	BedrockMantleOpenAIID = "defenseclaw-bedrock-mantle-openai"
 	// GeminiID binds GEMINI_API_KEY (x-goog-api-key) to the Gemini API.

@@ -143,71 +143,6 @@ func TestDetectPlugins_EnumeratesChildBasenames(t *testing.T) {
 	}
 }
 
-// TestDetectMCPPaths_EnumeratesServerNames_MCPJSON pins the MCP half
-// of the fix. Before this change `basenames` for an OpenHands-style
-// `~/.openhands/mcp.json` was just `["mcp.json"]` — no way to tell
-// which MCP servers were declared inside. Post-fix each declared
-// server name shows up in Basenames too, alongside the config-file
-// basename that the file-identity evidence row keeps.
-func TestDetectMCPPaths_EnumeratesServerNames_MCPJSON(t *testing.T) {
-	tmp := t.TempDir()
-	mcpPath := filepath.Join(tmp, ".openhands", "mcp.json")
-	body := `{
-  "mcpServers": {
-    "filesystem": {"command": "npx", "args": ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]},
-    "github":     {"command": "npx", "args": ["-y", "@modelcontextprotocol/server-github"]}
-  }
-}`
-	if err := os.MkdirAll(filepath.Dir(mcpPath), 0o700); err != nil {
-		t.Fatalf("mkdir: %v", err)
-	}
-	if err := os.WriteFile(mcpPath, []byte(body), 0o600); err != nil {
-		t.Fatalf("write mcp.json: %v", err)
-	}
-
-	sig := AISignature{
-		ID:                 "openhands",
-		Name:               "OpenHands",
-		Vendor:             "All Hands AI",
-		Category:           SignalSupportedConnector,
-		SupportedConnector: "openhands",
-		MCPPaths:           []string{"~/.openhands/mcp.json"},
-	}
-	svc := NewContinuousDiscoveryServiceWithOptions(AIDiscoveryOptions{
-		Enabled: true,
-		Mode:    "enhanced",
-		DataDir: filepath.Join(tmp, "data"),
-		HomeDir: tmp,
-	}, []AISignature{sig})
-	cleanupPreparedDiscoveryService(t, svc)
-
-	signals := svc.detectMCPPaths()
-	if len(signals) != 1 {
-		t.Fatalf("detectMCPPaths: got %d signals, want 1", len(signals))
-	}
-	got := signals[0]
-	if got.Category != SignalMCPServer {
-		t.Fatalf("category = %q, want %q", got.Category, SignalMCPServer)
-	}
-	for _, want := range []string{"mcp.json", "filesystem", "github"} {
-		if !slices.Contains(got.Basenames, want) {
-			t.Fatalf("basenames missing %q: %v", want, got.Basenames)
-		}
-	}
-	// One evidence row per declared server should exist, tagged
-	// with the mcp_server evidence type so downstream policy can
-	// distinguish "config file exists" from "servers declared".
-	var serverRows int
-	for _, ev := range got.Evidence {
-		if ev.Type == "mcp_server" {
-			serverRows++
-		}
-	}
-	if serverRows != 2 {
-		t.Fatalf("mcp_server evidence rows = %d, want 2: %+v", serverRows, got.Evidence)
-	}
-}
-
 func TestDetectMCPPathsClaudeStateScopesAreBoundedAndPrivate(t *testing.T) {
 	home := t.TempDir()
 	state := filepath.Join(home, ".claude.json")
@@ -259,45 +194,6 @@ func TestClaudeStateOverOneMiBRetainsMCPAndProjectSkills(t *testing.T) {
 	skills, err := svc.detectClaudeProjectSkills()
 	if err != nil || len(skills) != 1 || !slices.Contains(skills[0].Basenames, "project-skill") {
 		t.Fatalf("project skills from multi-megabyte Claude state = %+v, err = %v", skills, err)
-	}
-}
-
-// TestDetectMCPPaths_MalformedFileStillEmitsFileSignal ensures a
-// malformed MCP config never *suppresses* the discovery signal —
-// the endpoint has an MCP surface even if the parser can't crack
-// its contents. Parse failure just means Basenames doesn't gain
-// server names.
-func TestDetectMCPPaths_MalformedFileStillEmitsFileSignal(t *testing.T) {
-	tmp := t.TempDir()
-	mcpPath := filepath.Join(tmp, ".openhands", "mcp.json")
-	if err := os.MkdirAll(filepath.Dir(mcpPath), 0o700); err != nil {
-		t.Fatalf("mkdir: %v", err)
-	}
-	if err := os.WriteFile(mcpPath, []byte(`{ this is not json`), 0o600); err != nil {
-		t.Fatalf("write malformed mcp.json: %v", err)
-	}
-	sig := AISignature{
-		ID:                 "openhands",
-		Name:               "OpenHands",
-		Vendor:             "All Hands AI",
-		Category:           SignalSupportedConnector,
-		SupportedConnector: "openhands",
-		MCPPaths:           []string{"~/.openhands/mcp.json"},
-	}
-	svc := NewContinuousDiscoveryServiceWithOptions(AIDiscoveryOptions{
-		Enabled: true,
-		Mode:    "enhanced",
-		DataDir: filepath.Join(tmp, "data"),
-		HomeDir: tmp,
-	}, []AISignature{sig})
-	cleanupPreparedDiscoveryService(t, svc)
-
-	signals := svc.detectMCPPaths()
-	if len(signals) != 1 {
-		t.Fatalf("detectMCPPaths: got %d signals, want 1", len(signals))
-	}
-	if !slices.Contains(signals[0].Basenames, "mcp.json") {
-		t.Fatalf("expected file basename in basenames despite parse failure: %v", signals[0].Basenames)
 	}
 }
 
@@ -402,5 +298,109 @@ func TestSharedSkillPathNeedsOwnEvidence(t *testing.T) {
 	}
 	if got["cursor"] != 0 || got["codex"] != 3 {
 		t.Fatalf("signals per product = %v, want codex=3 cursor=0", got)
+	}
+}
+
+// TestDetectMCPPaths_EnumeratesServerNames_MCPJSON pins the MCP half
+// of the fix. Before this change `basenames` for an OpenHands-style
+// `~/.openhands/mcp.json` was just `["mcp.json"]` — no way to tell
+// which MCP servers were declared inside. Post-fix each declared
+// server name shows up in Basenames too, alongside the config-file
+// basename that the file-identity evidence row keeps.
+func TestDetectMCPPaths_EnumeratesServerNames_MCPJSON(t *testing.T) {
+	tmp := t.TempDir()
+	mcpPath := filepath.Join(tmp, ".cursor", "mcp.json")
+	body := `{
+  "mcpServers": {
+    "filesystem": {"command": "npx", "args": ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]},
+    "github":     {"command": "npx", "args": ["-y", "@modelcontextprotocol/server-github"]}
+  }
+}`
+	if err := os.MkdirAll(filepath.Dir(mcpPath), 0o700); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(mcpPath, []byte(body), 0o600); err != nil {
+		t.Fatalf("write mcp.json: %v", err)
+	}
+
+	sig := AISignature{
+		ID:                 "cursor",
+		Name:               "Cursor",
+		Vendor:             "Anysphere",
+		Category:           SignalSupportedConnector,
+		SupportedConnector: "cursor",
+		MCPPaths:           []string{"~/.cursor/mcp.json"},
+	}
+	svc := NewContinuousDiscoveryServiceWithOptions(AIDiscoveryOptions{
+		Enabled: true,
+		Mode:    "enhanced",
+		DataDir: filepath.Join(tmp, "data"),
+		HomeDir: tmp,
+	}, []AISignature{sig})
+	cleanupPreparedDiscoveryService(t, svc)
+
+	signals := svc.detectMCPPaths()
+	if len(signals) != 1 {
+		t.Fatalf("detectMCPPaths: got %d signals, want 1", len(signals))
+	}
+	got := signals[0]
+	if got.Category != SignalMCPServer {
+		t.Fatalf("category = %q, want %q", got.Category, SignalMCPServer)
+	}
+	for _, want := range []string{"mcp.json", "filesystem", "github"} {
+		if !slices.Contains(got.Basenames, want) {
+			t.Fatalf("basenames missing %q: %v", want, got.Basenames)
+		}
+	}
+	// One evidence row per declared server should exist, tagged
+	// with the mcp_server evidence type so downstream policy can
+	// distinguish "config file exists" from "servers declared".
+	var serverRows int
+	for _, ev := range got.Evidence {
+		if ev.Type == "mcp_server" {
+			serverRows++
+		}
+	}
+	if serverRows != 2 {
+		t.Fatalf("mcp_server evidence rows = %d, want 2: %+v", serverRows, got.Evidence)
+	}
+}
+
+// TestDetectMCPPaths_MalformedFileStillEmitsFileSignal ensures a
+// malformed MCP config never *suppresses* the discovery signal —
+// the endpoint has an MCP surface even if the parser can't crack
+// its contents. Parse failure just means Basenames doesn't gain
+// server names.
+func TestDetectMCPPaths_MalformedFileStillEmitsFileSignal(t *testing.T) {
+	tmp := t.TempDir()
+	mcpPath := filepath.Join(tmp, ".cursor", "mcp.json")
+	if err := os.MkdirAll(filepath.Dir(mcpPath), 0o700); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(mcpPath, []byte(`{ this is not json`), 0o600); err != nil {
+		t.Fatalf("write malformed mcp.json: %v", err)
+	}
+	sig := AISignature{
+		ID:                 "cursor",
+		Name:               "Cursor",
+		Vendor:             "Anysphere",
+		Category:           SignalSupportedConnector,
+		SupportedConnector: "cursor",
+		MCPPaths:           []string{"~/.cursor/mcp.json"},
+	}
+	svc := NewContinuousDiscoveryServiceWithOptions(AIDiscoveryOptions{
+		Enabled: true,
+		Mode:    "enhanced",
+		DataDir: filepath.Join(tmp, "data"),
+		HomeDir: tmp,
+	}, []AISignature{sig})
+	cleanupPreparedDiscoveryService(t, svc)
+
+	signals := svc.detectMCPPaths()
+	if len(signals) != 1 {
+		t.Fatalf("detectMCPPaths: got %d signals, want 1", len(signals))
+	}
+	if !slices.Contains(signals[0].Basenames, "mcp.json") {
+		t.Fatalf("expected file basename in basenames despite parse failure: %v", signals[0].Basenames)
 	}
 }

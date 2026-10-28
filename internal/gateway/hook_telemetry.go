@@ -18,6 +18,7 @@ package gateway
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -72,9 +73,14 @@ func (a *APIServer) recordConnectorHookRejection(ctx context.Context, connectorN
 // per codeguard-0-logging: a hostile prompt that smuggles CR/LF/ANSI
 // escapes cannot forge fake audit rows or corrupt the operator's
 // terminal.
+// errHookAuditNotConfigured is the audit write of a gateway built without an
+// audit logger. The sidecar always has one; such a gateway (a unit test, a
+// tool) has no audit store whose row a verdict could require.
+var errHookAuditNotConfigured = errors.New("gateway: audit logger is unavailable")
+
 func (a *APIServer) logConnectorHookAuditEnvelope(ctx context.Context, env HookAuditEnvelope) error {
 	if a.logger == nil {
-		return fmt.Errorf("gateway: audit logger is unavailable")
+		return errHookAuditNotConfigured
 	}
 	env.Connector = normalizeHookTelemetryLabel(env.Connector, "unknown")
 	env.Event = normalizeHookTelemetryLabel(env.Event, "unknown")
@@ -97,12 +103,15 @@ func (a *APIServer) logConnectorHookAuditEnvelope(ctx context.Context, env HookA
 	combined := fmt.Sprintf("connector=%s %s details_json=%s",
 		env.Connector, legacy, strconv.Quote(jsonDetails))
 	return a.logger.LogEventCtx(ctx, audit.Event{
-		Action:     auditAction,
-		Target:     env.Event,
-		Actor:      "defenseclaw",
-		Details:    combined,
-		Severity:   "INFO",
-		Structured: structured,
+		ID:          env.occurrenceID,
+		Generation:  env.configGeneration,
+		ContentHash: env.configHash,
+		Action:      auditAction,
+		Target:      env.Event,
+		Actor:       "defenseclaw",
+		Details:     combined,
+		Severity:    "INFO",
+		Structured:  structured,
 		// Mirror the structured-envelope identity fields onto the
 		// dedicated SQLite columns (migration 16) so the column data
 		// and structured_json agree. env.Connector is already

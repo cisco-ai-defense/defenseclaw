@@ -73,7 +73,8 @@ to another account's sandbox tree. Without it the tree is the 5 s sample, as bef
 		Long: `Copies the defenseclaw-sensor-helper of this install to ` + sandboxfeed.InstalledBinary + `,
 checks that this host's Tetragon serves a root-owned unix socket (never a TCP address) and that Docker
 answers, then writes and starts ` + sandboxfeed.UnitName + `. Run it again after an upgrade to update
-the feed. Refused on a managed host, where sandboxes are not supported.`,
+the feed. Refused on a managed host: its sandboxes are the managed deployment's, and this
+per-user feed installer is not part of it.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			return runSandboxKernelFeedInstall(cmd)
@@ -112,10 +113,10 @@ func sandboxKernelFeedPreRun(*cobra.Command, []string) error {
 
 func runSandboxKernelFeedInstall(cmd *cobra.Command) error {
 	if managed.IsManagedEnterprise(os.Getenv(managed.DeploymentModeEnv)) {
-		return withExitCode(errors.New("sandboxes, and so the sandbox kernel feed, are not supported in managed_enterprise deployments"), 3)
+		return withExitCode(errors.New("the sandbox kernel feed installer is not available in managed_enterprise deployments: managed sandboxes are part of the managed deployment, and this per-user feed installer is not"), 3)
 	}
 	if record, present := managedHostUnixRecord(nil); present {
-		return withExitCode(fmt.Errorf("this computer's DefenseClaw is managed by your organization (%s); sandboxes, and so the sandbox kernel feed, are not supported there", record), 3)
+		return withExitCode(fmt.Errorf("this computer's DefenseClaw is managed by your organization (%s); its sandboxes are part of the managed deployment, and this per-user sandbox kernel feed installer is not available there", record), 3)
 	}
 	gateway := sandboxGatewayPath()
 	helper := filepath.Join(filepath.Dir(gateway), sandboxfeed.HelperName)

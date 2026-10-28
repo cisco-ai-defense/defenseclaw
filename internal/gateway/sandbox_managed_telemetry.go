@@ -27,6 +27,7 @@ import (
 	"net/http"
 	"os"
 	"regexp"
+	"runtime"
 	"slices"
 	"strconv"
 	"strings"
@@ -265,7 +266,7 @@ func emitRequireSandboxRecord(ctx context.Context, a *APIServer, rec requireSand
 	if rec.Unavailable {
 		what = "host run unavailable"
 	}
-	if err := record(a.requireSandboxIdentity(rec)); err != nil {
+	if err := record(a.requireSandboxIdentity(ctx, rec)); err != nil {
 		sandboxRecordFailed(what+" (stamped)", err)
 		sandboxRecordFailed(what, record(audit.SandboxIdentity{Connector: rec.Connector}))
 	}
@@ -276,11 +277,20 @@ func emitRequireSandboxRecord(ctx context.Context, a *APIServer, rec requireSand
 // matched group, provisional) and subject key, as a registration's records
 // carry them, so a fleet groups host-run refusals by profile and person on
 // every platform (GAP-0184, GAP-0229, GAP-0243, GAP-0410).
-func (a *APIServer) requireSandboxIdentity(rec requireSandboxRecord) audit.SandboxIdentity {
-	return audit.SandboxIdentity{Connector: rec.Connector, Managed: sandboxManagedStamp(sandboxreg.Registration{
+func (a *APIServer) requireSandboxIdentity(ctx context.Context, rec requireSandboxRecord) audit.SandboxIdentity {
+	identity := audit.SandboxIdentity{Connector: rec.Connector, Managed: sandboxManagedStamp(sandboxreg.Registration{
 		Profile: rec.Profile, ProfileDigest: rec.ProfileDigest, ProfileMatch: rec.ProfileMatch,
 		MatchedGroup: rec.MatchedGroup, Provisional: rec.Provisional, SubjectKey: a.requireSandboxSubjectKey(rec),
 	})}
+	// A host-run gate has no sandbox registration. Stamp the configured
+	// compute driver when it names one, so the log and its companion counter
+	// carry the same bounded driver label. Linux auto is left unstamped until
+	// a per-user KVM probe chooses the actual driver.
+	switch driver := sandboxDriverFor(a.requireSandboxFallbackConfig(ctx), runtime.GOOS); driver {
+	case audit.SandboxDriverDocker, audit.SandboxDriverVM:
+		identity.Driver = driver
+	}
+	return identity
 }
 
 // requireSandboxSubjectKey is the subject key of the gate record's caller,
@@ -315,7 +325,7 @@ func (a *APIServer) requireSandboxSubjectKey(rec requireSandboxRecord) string {
 // match, matched group, provisional) with the subject key, as the
 // require-sandbox gate records carry them, so a fleet groups foreign items
 // by profile whether or not the person has a registration (GAP-0444).
-func (a *APIServer) sandboxForeignIdentity(ctx context.Context, reg sandboxreg.Registration, id, name, harnessName, runtime string) audit.SandboxIdentity {
+func (a *APIServer) sandboxForeignIdentity(ctx context.Context, reg sandboxreg.Registration, id, name, harnessName, sandboxRuntime string) audit.SandboxIdentity {
 	connectorName := ""
 	if _, ok := harness.Get(harnessName); ok {
 		connectorName = sandboxConnectorClaim(harnessName)
@@ -325,11 +335,25 @@ func (a *APIServer) sandboxForeignIdentity(ctx context.Context, reg sandboxreg.R
 	if !profileTelemetryGroupFits(d.MatchedGroup) {
 		d.MatchedGroup = ""
 	}
-	return audit.SandboxIdentity{ID: id, Name: name, Connector: connectorName, Runtime: runtime,
+	if d.Refused != "" {
+		// A candidate profile, possibly another account's, is not the
+		// caller's policy (guardrailProfileTelemetryFromDecision).
+		d.Name, d.Digest, d.MatchedGroup = "", "", ""
+	}
+	identity := audit.SandboxIdentity{ID: id, Name: name, Connector: connectorName, Runtime: sandboxRuntime,
 		Managed: sandboxManagedStamp(sandboxreg.Registration{
 			Profile: d.Name, ProfileDigest: d.Digest, ProfileMatch: d.Match, MatchedGroup: d.MatchedGroup,
 			Provisional: match.provisional, SubjectKey: reg.SubjectKey,
 		})}
+	if sandboxRuntime == audit.SandboxRuntimeOpenShell {
+		// The foreign sandbox has no registration to supply its driver. The
+		// configured driver is still known, unless Linux auto needs a probe.
+		switch driver := sandboxDriverFor(a.requireSandboxFallbackConfig(ctx), runtime.GOOS); driver {
+		case audit.SandboxDriverDocker, audit.SandboxDriverVM:
+			identity.Driver = driver
+		}
+	}
+	return identity
 }
 
 // sandboxRelayProfileExtra adds to a relayed sandbox hook call's audit row
@@ -368,6 +392,8 @@ type sandboxEventPayload struct {
 	Port        int      `json:"port"`
 	Rule        string   `json:"rule"`
 	Reason      string   `json:"reason"`
+	ApprovalID  string   `json:"approval_id"`
+	Outcome     string   `json:"outcome"`
 	// Harness is the agent harness the daemon found running in a foreign
 	// container, or the harness label of a foreign sandbox.
 	Harness string `json:"harness"`
@@ -465,6 +491,23 @@ func emitSandboxDaemonEvent(ctx context.Context, a *APIServer, reg sandboxreg.Re
 	case sandboxrelay.EventSettingsDrift:
 		sandboxRecordFailed(ev.Kind, r.RecordSandboxSettingsDrift(ctx, audit.SandboxSettingsDriftEvent{
 			Sandbox: identity, Subject: subject, Field: p.Field, Timestamp: at}))
+	case sandboxrelay.EventSandboxAskDecision:
+		if p.Sandbox != reg.SandboxName || (p.SandboxID != "" && p.SandboxID != reg.SandboxID) {
+			sandboxRecordFailed(ev.Kind, fmt.Errorf("ask decision names another sandbox"))
+			return
+		}
+		req := sandboxrelay.DecisionRequest{Registration: reg.ID, Host: p.Host, Port: p.Port, ApprovalID: p.ApprovalID}
+		var out sandboxAskOutcome
+		switch p.Outcome {
+		case "rejected":
+			req.Kind = sandboxrelay.DecisionEgressBlock
+		case sandboxAskReasonFloorDenied:
+			req.Kind, out.Refused = sandboxrelay.DecisionEgressAllow, true
+		default:
+			sandboxRecordFailed(ev.Kind, fmt.Errorf("ask decision has invalid outcome"))
+			return
+		}
+		sandboxRecordAskDecided(ctx, a, reg, req, out)
 	case sandboxrelay.EventAccessRefused:
 		sandboxRecordFailed(ev.Kind, r.RecordSandboxAccessRefused(ctx, audit.SandboxAccessRefusedEvent{
 			Sandbox: identity, Subject: subject, Host: p.Host, Port: p.Port, Rule: p.Rule, Reason: p.Reason, Timestamp: at}))

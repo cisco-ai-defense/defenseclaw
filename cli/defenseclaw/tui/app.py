@@ -42,6 +42,7 @@ from defenseclaw import __version__
 from defenseclaw import config as config_module
 from defenseclaw.file_permissions import atomic_write_private_bytes
 from defenseclaw.hook_metrics import connector_hook_decision
+from defenseclaw.scanner_binary import resolve_scanner_binary
 from defenseclaw.tui.command_line import (
     CommandLineError,
     ParsedCommand,
@@ -197,7 +198,7 @@ from defenseclaw.tui.widgets.panel_split import (
     split_layout,
     step_nav,
 )
-from defenseclaw.tui.widgets.status_strip import render_status_strip
+from defenseclaw.tui.widgets.status_strip import render_status_strip, render_status_with_hint
 from defenseclaw.tui.widgets.tab_fit import (
     BADGE_RESERVE,
     fit_tab_labels,
@@ -348,6 +349,27 @@ def _load_config_generation(path: Path, expected: ConfigGeneration) -> object:
     return loaded
 
 
+# How long the read-back after an editor save waits for config.yaml.lock.
+_SAVE_READ_BACK_LOCK_TIMEOUT_S = 5.0
+
+
+def _read_back_config_generation(path: Path, timeout_s: float) -> tuple[ConfigGeneration, object]:
+    """Load config.yaml and its generation while writers are excluded.
+
+    Waits at most ``timeout_s`` for the writer lock (ConfigLockBusyError
+    after that), so a stalled writer cannot hold the caller forever.
+    """
+
+    from defenseclaw import config_writer
+
+    with config_writer.hold_lock(str(path), timeout_s=timeout_s):
+        generation = probe_config_generation(path)
+        if generation is None:
+            raise _ConfigGenerationChangedError("config.yaml could not be read")
+        loaded = config_module.load()
+    return generation, loaded
+
+
 # Wizard rows whose value changes must re-derive the conditional field groups
 # (e.g. picking ``bedrock`` reveals the Bedrock region/auth rows). Keyed by the
 # CLI flag for flagged rows, and by the visible label for flag-less rows such as
@@ -426,13 +448,18 @@ _on_path_cache: dict[str, tuple[float, bool]] = {}
 
 
 def _on_path(name: str, *, now: float | None = None) -> bool:
-    """``shutil.which(name)`` with a short cache for render paths."""
+    """Whether scanner ``name`` is installed, with a short cache for render paths.
+
+    The scanners DefenseClaw installs live in its own environment's scripts
+    directory, which need not be on ``PATH`` (``defenseclaw status`` and
+    ``doctor`` look there first, then on ``PATH``): resolve_scanner_binary.
+    """
 
     now = monotonic() if now is None else now
     cached = _on_path_cache.get(name)
     if cached is not None and now - cached[0] < _ON_PATH_TTL_SECONDS:
         return cached[1]
-    found = shutil.which(name) is not None
+    found = resolve_scanner_binary(name) is not None
     _on_path_cache[name] = (now, found)
     return found
 
@@ -787,6 +814,11 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         border: round TOKEN_BORDER_MUTED;
         border-subtitle-color: TOKEN_ACCENT_CYAN;
         background: TOKEN_SURFACE_RAISED;
+    }
+
+    .panel-controls > .control-row {
+        height: 1;
+        width: auto;
     }
 
     .panel-controls Button {
@@ -1317,6 +1349,8 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         # from accidentally watching the operator's real home config.
         self._config_watcher = ConfigChangeWatcher(config_path) if config_path is not None else None
         self._config_poll_running = False
+        # True while the read-back after an editor save runs (GAP-1049).
+        self._config_read_back_running = False
         self._config_reload_count = 0
         self._config_error = ""
         # Set on each config-editor save: saved sections the CLI already applies.
@@ -1653,19 +1687,27 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
                         compact=True,
                         tooltip="Run `defenseclaw keys fill-missing`",
                     )
-                with Horizontal(id="alerts-controls", classes="panel-controls hidden"):
-                    yield Button("Actionable", id="alerts-filter-actionable", compact=True)
-                    # h/l step through these chips; the digits stay panel
-                    # keys (GAP-1708).
-                    yield Button("All", id="alerts-filter-all", compact=True)
-                    yield Button("Critical", id="alerts-filter-critical", compact=True, classes="severity-critical")
-                    yield Button("High", id="alerts-filter-high", compact=True, classes="severity-high")
-                    yield Button("Medium", id="alerts-filter-medium", compact=True, classes="severity-medium")
-                    yield Button("Low", id="alerts-filter-low", compact=True, classes="severity-low")
-                    yield Button("Select all", id="alerts-select-all", compact=True)
-                    yield Button("Ack selected", id="alerts-ack-selected", compact=True)
-                    yield Button("Dismiss filtered", id="alerts-dismiss-filtered", compact=True, variant="warning")
-                    yield Button("Dismiss all", id="alerts-dismiss-all", compact=True, variant="error")
+                # Two rows, filters then actions: in one row the bar scrolled
+                # at 80 columns and cut "Select all" to "Select al" (GAP-0112).
+                with Vertical(id="alerts-controls", classes="panel-controls hidden"):
+                    with Horizontal(classes="control-row"):
+                        yield Button("Actionable", id="alerts-filter-actionable", compact=True)
+                        # h/l step through these chips; the digits stay panel
+                        # keys (GAP-1708).
+                        yield Button("All", id="alerts-filter-all", compact=True)
+                        yield Button(
+                            "Critical", id="alerts-filter-critical", compact=True, classes="severity-critical"
+                        )
+                        yield Button("High", id="alerts-filter-high", compact=True, classes="severity-high")
+                        yield Button("Medium", id="alerts-filter-medium", compact=True, classes="severity-medium")
+                        yield Button("Low", id="alerts-filter-low", compact=True, classes="severity-low")
+                    with Horizontal(classes="control-row"):
+                        yield Button("Select all", id="alerts-select-all", compact=True)
+                        yield Button("Ack selected", id="alerts-ack-selected", compact=True)
+                        yield Button(
+                            "Dismiss filtered", id="alerts-dismiss-filtered", compact=True, variant="warning"
+                        )
+                        yield Button("Dismiss all", id="alerts-dismiss-all", compact=True, variant="error")
                 with Horizontal(id="audit-controls", classes="panel-controls hidden"):
                     yield Button("All", id="audit-filter-all", compact=True)
                     yield Button("Risk", id="audit-filter-risk", compact=True, classes="severity-high")
@@ -3728,7 +3770,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         # Don't carry stale finish/rejection state into a fresh command
         # entry. Idle = strip is hidden, exactly what we want here.
         self._strip_clear()
-        self._set_status("Command palette open. Type, use Up/Down, Tab complete, or click a row.")
+        self._set_status("Command palette. Type or pick.")
 
     def action_open_panel_jumper(self) -> None:
         """Open the Ctrl+P fuzzy panel jumper modal.
@@ -3953,10 +3995,10 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         palette.clear(columns=True)
         self._command_palette_values = []
         self.set_focus(None)
-        # Closing the palette by running a row left "Command palette open."
+        # Closing the palette by running a row left its open hint
         # in the status bar (GAP-1213). Callers that report something else
         # set their own status after this.
-        if self.status_text.startswith("Command palette open"):
+        if self.status_text == "Command palette. Type or pick.":
             self._set_status(self._status_text())
 
     def _handle_command_palette_key(self, event: events.Key) -> bool:
@@ -4007,12 +4049,9 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         if matches:
             palette.move_cursor(row=0, column=0, animate=False)
         else:
-            palette.add_row(
-                "No matching DefenseClaw command",
-                "",
-                "",
-                "Keep typing or use raw defenseclaw ...",
-            )
+            # Short cells: at 80 columns the long first cell pushed the hint
+            # past the right border ("Keep typing or use raw de").
+            palette.add_row(*_PALETTE_NO_MATCH_ROW)
 
     def _palette_matches(self, query: str, *, limit: int = 12) -> tuple[CmdEntry, ...]:
         normalized = query.strip().lower()
@@ -5507,7 +5546,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
 
     def _render_panel_control_visibility(self) -> None:
         overview = self.query_one("#overview-controls", Horizontal)
-        alerts = self.query_one("#alerts-controls", Horizontal)
+        alerts = self.query_one("#alerts-controls", Vertical)
         audit = self.query_one("#audit-controls", Horizontal)
         inventory = self.query_one("#inventory-controls", Horizontal)
         inventory_filters = self.query_one("#inventory-filter-controls", Horizontal)
@@ -5539,7 +5578,8 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             inventory_filters,
             self.active_panel != "inventory"
             or self.help_open
-            or self.inventory_model.active_sub not in {"skills", "plugins"},
+            or self.inventory_model.active_sub not in {"skills", "plugins"}
+            or self._inventory_detail_short(),
         )
         self._set_widget_hidden(logs, self.active_panel != "logs" or self.help_open)
         self._set_widget_hidden(logs_filters, self.active_panel != "logs" or self.help_open)
@@ -9086,7 +9126,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         service_cards = self.overview_model.service_cards()
         self.body_text = self._overview_body_text(service_cards)
 
-        notices = self.overview_model.build_notices()
+        notices = self.overview_model.build_notices(connector=self._connector_filter())
         doctor = self.overview_model.doctor_box()
         ai_box = self.overview_model.ai_discovery_box()
         cfg = self.overview_model.cfg
@@ -9424,9 +9464,10 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         sc_table.add_column(width=2, no_wrap=True)
         sc_table.add_column(width=14, no_wrap=True)
         sc_table.add_column(overflow="fold")
-        # Mirror Go TUI: probe external scanners via PATH so an operator who
-        # runs `brew install skill-scanner` sees the row flip from "missing"
-        # to "installed". The probe is cached for a few seconds: a PATH walk
+        # Probe the scanners as `defenseclaw status` does: DefenseClaw's own
+        # environment first, then PATH, so an operator who runs
+        # `brew install skill-scanner` sees the row flip from "missing" to
+        # "installed". The probe is cached for a few seconds: a PATH walk
         # on every 2 s repaint is disk I/O on the UI thread.
         # Built-ins (aibom + codeguard) ship inside the CLI and are
         # always available. Note: the field is named `aibom` (AI Bill
@@ -9713,6 +9754,8 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         quick_actions = [
             ("s", "Scan all"),
             ("d", "Doctor"),
+            ("G", "Gateway"),
+            ("z", "AI Discovery"),
             ("i", "Inventory"),
             ("g", "Guardrail"),
             ("m", "Connector"),
@@ -10266,7 +10309,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         return f"{count} critical/high {noun} review - press 2 for Alerts."
 
     def _overview_body_text(self, service_cards: tuple[Any, ...]) -> str:
-        notices = self.overview_model.build_notices()
+        notices = self.overview_model.build_notices(connector=self._connector_filter())
         doctor = self.overview_model.doctor_box()
         ai_box = self.overview_model.ai_discovery_box()
         cfg = self.overview_model.cfg
@@ -10529,8 +10572,20 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             "[#9FB2CC]Use the tabs or number keys to drill into Alerts, Audit, Logs, and Setup.[/]"
         )
 
+    def _inventory_detail_short(self) -> bool:
+        """An open Inventory detail on a short terminal (up to 30 rows).
+
+        At 80x24 the sub-tab line, the filter chips and the multi-connector
+        strip left the detail card one row, its top border, and PgDn showed
+        nothing (B-32). While a detail is open those two give their rows to
+        it; the sub-tab bar stays, and Esc brings them back.
+        """
+
+        height = int(getattr(self.size, "height", 0) or 0)
+        return bool(self.inventory_model.detail_open) and 0 < height <= 30
+
     def _inventory_body_text(self) -> str:
-        tabs = "  ".join(
+        tabs = "" if self._inventory_detail_short() else "  ".join(
             f"[{TOKENS.accent_violet} bold]{tab.display_label}[/]"
             if tab.active
             else f"[{TOKENS.text_secondary}]{tab.display_label}[/]"
@@ -10561,7 +10616,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             f"[bold #22D3EE]Inventory[/]  [{TOKENS.text_muted}]r scans:[/] {scan_scope}{filter_text}\n"
             f"{connector_chip}"
             f"{tabs}"
-        )
+        ).rstrip("\n")
 
     def _logs_body_text(self) -> str:
         """Header, search and (for Verdicts) the extra filter rows.
@@ -10673,11 +10728,23 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             self._status_panel = self.active_panel
             self._status_set_at = time.monotonic()
         self.status_text = text
-        strip = render_status_strip(self._hint_status_model())
-        rendered = f"{text}  [#444444]│[/]  {strip}"
+        width = int(getattr(self.size, "width", 0) or 0)
+        # The strip gets the cells the line has left after the text, the
+        # padding (2) and the separator (5), so it ends on a whole segment.
+        status_model = self._hint_status_model()
+        strip = render_status_strip(
+            status_model,
+            width=width - 2 - _status_text_cells(text) - 5 if width > 0 else None,
+        )
+        rendered = f"{text}  [#444444]│[/]  {strip}" if strip else text
+        if not _is_command_result(text) and any(
+            service.label not in strip
+            for service in (status_model.gateway, status_model.watchdog, status_model.guardrail)
+        ):
+            rendered = render_status_with_hint(status_model, text, max(0, width - 2))
         if self._config_error:
             rendered = f"[bold {TOKENS.accent_red}]{rich_escape(self._config_error)}[/]"
-        elif _status_text_fills_line(text, self.size.width):
+        elif _is_command_result(text) and _status_text_fills_line(text, self.size.width):
             # A "Done: ..." fitted to the line lost its last cell to the "…"
             # of the cut-off health strip ("press i for readines…", GAP-2133).
             rendered = text
@@ -11847,6 +11914,10 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
                 key = "U"
             return self._apply_sandbox_action(self.sandbox_model.handle_key(key))
         if self.active_panel == "policies":
+            if key in {"pagedown", "page_down", "pageup", "page_up"} and self._panel_aside_below is not None:
+                # The detail under the table shows four lines at 80x24;
+                # PgUp/PgDn read the rest (GAP-0022).
+                return self._scroll_detail_panel(key)
             return self._apply_policy_action(self.policy_model.handle_key(_vim_key(key)))
         if self.active_panel == "alerts":
             if self.alerts_model.detail_open and key in {"pagedown", "page_down", "pageup", "page_up"}:
@@ -12997,7 +13068,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
                     order = setup_catalog.section_order(self.setup_model.sections)
                     if order:
                         self.setup_model.select_section(order[0])
-                return SetupPanelAction(True, hint="Config editor opened. Esc or w goes back to the tasks.")
+                return SetupPanelAction(True, hint="Config editor. Esc/w: tasks.")
             self.setup_model.active_wizard = setup_catalog.step_group(self.setup_model.active_wizard, delta)
             return SetupPanelAction(True)
         if key == "i":
@@ -13015,7 +13086,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         if key in {"c", "`"}:
             self.setup_model.mode = "config"
             self.setup_model.active_line = self.setup_model.first_editable_line()
-            return SetupPanelAction(True, hint="Config editor opened. Esc or w goes back to the tasks.")
+            return SetupPanelAction(True, hint="Config editor. Esc/w: tasks.")
         if key == "r":
             return SetupPanelAction(True, refresh_credentials=True, hint="Reloading API keys...")
         if self.setup_model.active_wizard == SetupWizard.CREDENTIALS and key in {"f", "s"}:
@@ -13248,7 +13319,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
                 external=False,
                 refresh_disk=False,
             )
-            if self._config_watcher is not None:
+            if self._config_watcher is not None and not self._schedule_saved_config_read_back(staged_config):
                 self._config_watcher.sync_to_disk()
             if roster_changed:
                 self._schedule_roster_catalog_refresh()
@@ -13615,6 +13686,8 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         if (
             self._config_watcher is None
             or self._config_poll_running
+            # The save read-back applies that generation itself.
+            or self._config_read_back_running
             or getattr(self, "_app_shutting_down", False)
         ):
             return
@@ -13757,6 +13830,58 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             self._schedule_signal_data_refresh()
         if roster_changed or storage_changed:
             self._schedule_roster_catalog_refresh()
+
+    def _schedule_saved_config_read_back(self, staged: object) -> bool:
+        """Read config.yaml back after an editor save, off the event loop.
+
+        A save merges only this editor's changes into config.yaml, so a key
+        another writer changed since the TUI loaded is kept on disk but is
+        still old in ``staged``; marking that generation seen showed the old
+        value until restart (GAP-1049). The worker loads the file under the
+        writer lock and marks exactly that generation seen. Returns False
+        when nothing was scheduled (no running app, or not a real Config);
+        the caller then marks the current generation seen as before.
+        """
+
+        if self._config_watcher is None or not isinstance(staged, config_module.Config) or not self.is_running:
+            return False
+        self._config_read_back_running = True
+        self.run_worker(self._read_back_saved_config(), exclusive=False, thread=False, group="config-read-back")
+        return True
+
+    async def _read_back_saved_config(self) -> None:
+        """Load the saved config.yaml and apply it (see _schedule_saved_config_read_back).
+
+        The lock wait is bounded: a writer that holds config.yaml.lock longer
+        leaves the generation unseen, and the next config poll loads it.
+        """
+
+        watcher = self._config_watcher
+        try:
+            if watcher is None:
+                return
+            try:
+                generation, saved = await asyncio.to_thread(
+                    _read_back_config_generation, watcher.path, _SAVE_READ_BACK_LOCK_TIMEOUT_S
+                )
+            except Exception as exc:  # noqa: BLE001 - the save succeeded; the next poll loads the file.
+                self._write_activity(
+                    f"[#FBBF24]config read-back after save deferred:[/] {rich_escape(str(exc))}; "
+                    "the next config check loads the saved file."
+                )
+                return
+            # A draft started since the save is kept and rebased (external).
+            roster_changed, storage_changed = self._apply_config_snapshot(
+                saved, external=self.setup_model.has_changes(), refresh_disk=False
+            )
+            watcher.accept(generation)
+            self._schedule_active_panel_refresh("config-save-read-back")
+            if storage_changed:
+                self._schedule_signal_data_refresh()
+            if roster_changed or storage_changed:
+                self._schedule_roster_catalog_refresh()
+        finally:
+            self._config_read_back_running = False
 
     def _apply_config_snapshot(
         self,
@@ -15669,32 +15794,6 @@ def _gateway_snapshot_detail(snapshot: HealthSnapshot, state: str) -> str:
     return ""
 
 
-def _project_omnigent_effective_readiness(
-    config: object,
-    snapshot: HealthSnapshot,
-) -> HealthSnapshot:
-    """Apply Status's passive OmniGent readiness to TUI presentation state."""
-
-    from defenseclaw.commands.cmd_status import _omnigent_effective_runtime_state
-
-    projected: dict[str, str] = {}
-
-    def _project(connector: ConnectorHealth | None) -> ConnectorHealth | None:
-        if connector is None or connector.name.strip().lower() != "omnigent":
-            return connector
-        if connector.state not in projected:
-            projected[connector.state], _detail = _omnigent_effective_runtime_state(
-                config,
-                connector.state,
-            )
-        state = projected[connector.state]
-        return connector if state == connector.state else replace(connector, state=state)
-
-    return replace(
-        snapshot,
-        connector=_project(snapshot.connector),
-        connectors=tuple(_project(connector) for connector in snapshot.connectors),
-    )
 
 
 _GATEWAY_STARTUP_GRACE_SECONDS = 90
@@ -15753,7 +15852,7 @@ def _fetch_gateway_health(config: object | None) -> GatewayHealthResult:
         return GatewayHealthResult("error", "sidecar API port is not configured")
 
     try:
-        from defenseclaw.gateway import OrchestratorClient, gateway_api_client_host
+        from defenseclaw.gateway import OrchestratorClient, applied_config_generation, gateway_api_client_host
 
         host = gateway_api_client_host(config)
         resolve_token = getattr(gateway_cfg, "resolved_token", None)
@@ -15836,10 +15935,9 @@ def _fetch_gateway_health(config: object | None) -> GatewayHealthResult:
     if isinstance(policy, dict) and policy.get("effective_digest"):
         snapshot = replace(
             snapshot,
-            policy_generation=_coerce_int(policy.get("generation")),
+            policy_generation=applied_config_generation(policy),
             policy_digest=_coerce_str(policy.get("effective_digest")),
         )
-    snapshot = _project_omnigent_effective_readiness(config, snapshot)
     state = _gateway_state_from_snapshot(snapshot)
     detail = _gateway_snapshot_detail(snapshot, state)
     return GatewayHealthResult(state, detail, snapshot)
@@ -16145,8 +16243,23 @@ def _doctor_cache_from_payload(raw: object) -> DoctorCache | None:
     )
 
 
+def _no_connector_configured(config: object) -> bool:
+    """True when ``config`` reports that it configures no connector.
+
+    A ``claw.mode`` that only implies an OpenClaw the machine does not have
+    configures none (GAP-0568), so the TUI names no agent for it.
+    """
+    configured = getattr(config, "has_connector_configured", None)
+    if not callable(configured):
+        return False
+    try:
+        return not configured()
+    except Exception:  # noqa: BLE001 - connector name is cosmetic in the shell.
+        return False
+
+
 def _active_connector(config: object | None) -> str:
-    if config is None:
+    if config is None or _no_connector_configured(config):
         return ""
     active = getattr(config, "active_connector", None)
     if callable(active):
@@ -16274,7 +16387,7 @@ def _overview_config(config: object | None) -> OverviewConfig | None:
     except Exception as exc:  # noqa: BLE001 - a bad connector key must not blank the roster.
         actives = []
         roster_error = f"Connector roster unavailable: {exc}"
-    display_claw_mode = str(getattr(claw, "mode", "") or "")
+    display_claw_mode = "" if _no_connector_configured(config) else str(getattr(claw, "mode", "") or "")
     display_guardrail_connector = str(getattr(guardrail, "connector", "") or "")
 
     # A one-entry ``guardrail.connectors`` map is still connector-scoped.
@@ -16373,7 +16486,7 @@ def _overview_config(config: object | None) -> OverviewConfig | None:
         # collapse an empty mode to "openclaw". OverviewPanelModel.active_connector_name()
         # then resolves the genuinely-zero-connector case to "" (no phantom
         # connector) instead of fabricating "openclaw". The Go-parity
-        # config.active_connector() contract is deliberately left untouched.
+        # The config resolver and Overview both leave an absent agent empty.
         claw_mode=display_claw_mode,
         guardrail_enabled=effective_guardrail_enabled,
         guardrail_connector=display_guardrail_connector,
@@ -16908,13 +17021,19 @@ def _truncate_for_strip(value: str, width: int) -> str:
 _NEXT_STEP_SEP = " · next: "
 
 
+def _status_text_cells(text: str) -> int:
+    """Cells the status text takes on screen (markup removed)."""
+
+    try:
+        return Text.from_markup(text).cell_len
+    except Exception:  # noqa: BLE001 - text that is not valid markup shows as typed.
+        return Text(text).cell_len
+
+
 def _status_text_fills_line(text: str, width: int) -> bool:
     """True when ``text`` leaves no room for the status line's health strip."""
 
-    try:
-        cells = Text.from_markup(text).cell_len
-    except Exception:  # noqa: BLE001 - not markup; count it as typed.
-        cells = len(text)
+    cells = _status_text_cells(text)
     # The status line pads one cell on each side; the strip needs its
     # "  │  " separator and a few cells to say anything.
     return cells + 12 > max(0, width - 2)
@@ -16986,6 +17105,11 @@ def _palette_risk_style(badge: str) -> str:
     if risk == "read-only":
         return TOKENS.text_muted
     return TOKENS.text_secondary
+
+
+# The palette row for a query that matches no command. It fits an 80-column
+# terminal: Enter still runs a full command typed as is.
+_PALETTE_NO_MATCH_ROW = ("No match", "", "", "Keep typing, or type a full command")
 
 
 def _palette_row_for_entry(entry: CmdEntry) -> tuple[str, str, str, str]:
@@ -17210,7 +17334,7 @@ def _enforcement_label(cfg: OverviewConfig | None) -> str:
         return f"not configured ({mode})"
     if connector in {"openclaw", "zeptoclaw"}:
         return f"{connector} proxy guardrail ({mode})"
-    surface = "policy plugin" if connector == "amp" else ("policy" if connector == "omnigent" else "hook")
+    surface = "policy plugin" if connector == "amp" else "hook"
     posture = "enforcement" if mode == "action" else "observability"
     return f"{connector} {surface} {posture} ({mode})"
 

@@ -1269,7 +1269,7 @@ def test_harness_choices_follow_config_and_organization() -> None:
     assert everything[:2] == (("Claude Code", "claudecode"), ("Codex", "codex"))
     assert {name for _label, name in everything} == {
         "amp", "antigravity", "claudecode", "codex", "copilot", "cursor",
-        "devin", "hermes", "kiro", "omnigent", "opencode", "openhands",
+        "devin", "hermes", "kiro",  "opencode",
     }  # fmt: skip
     assert harness_choices(("codex",))[:2] == (("Codex", "codex"), ("Claude Code", "claudecode"))
     assert harness_choices((), ("codex",)) == (("Codex", "codex"),)

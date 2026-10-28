@@ -61,8 +61,8 @@ func windowsCopilotVSCodeUser(home string, verify, remove bool) error {
 	if err != nil {
 		return err
 	}
-	if verify && len(result.Kept) > 0 {
-		return fmt.Errorf("DefenseClaw's Copilot plugin under %s holds hooks DefenseClaw did not write: %s; the guardian leaves such a file in place and the foreign-hook guard denies this user's Copilot calls while it is there: move it aside, and the guardian writes DefenseClaw's plugin on its next pass", home, strings.Join(result.Kept, ", "))
+	if !remove && len(result.Kept) > 0 {
+		return fmt.Errorf("copilot hook files under %s hold handlers DefenseClaw did not write: %s; DefenseClaw leaves them in place and does not claim Local hook coverage", home, strings.Join(result.Kept, ", "))
 	}
 	if verify && len(result.Changed)+len(result.Removed) > 0 {
 		return fmt.Errorf("DefenseClaw's VS Code Local hooks under %s are not current: %s", home, strings.Join(append(result.Changed, result.Removed...), ", "))
@@ -384,6 +384,37 @@ func enterpriseHookWindowsEligibleProfilesFor(ctx context.Context, current *conf
 	return enterpriseHookWindowsStandaloneEligibleList(ctx, opts)
 }
 
+// migrateWindowsClaudeUserHooks removes DefenseClaw's own older per-user
+// Claude Code hooks (those running the per-user launcher in ~/.local/bin,
+// directly or through the launcher guard) from the user's Claude settings,
+// as the Unix guardian removes its leftover registrations each pass. Claude
+// Code is enrolled by machine policy; left in place, the old hooks make every
+// agent that reads the file (Copilot CLI in a project under the home) block
+// as on a foreign hook (GAP-0587). A read-only probe runs first, so a file
+// without such a hook is never rewritten or re-protected; the hooks that
+// still name DefenseClaw are reported, after the removal or, when nothing
+// was removable, from the probe. Passes run once per cleanup interval, so
+// the report repeats at most that often.
+func migrateWindowsClaudeUserHooks(stderr io.Writer, target enterprisehooks.TargetCredentials) {
+	settings := filepath.Join(target.UserHome, ".claude", "settings.json")
+	present, left, err := windowsManagedClaudeRegistrationProbe(target.UserHome, target.SID)
+	removed := 0
+	if err == nil && present {
+		removed, left, err = windowsManagedClaudeSettingsRemover(target.UserHome, target.SID, "")
+	}
+	if err != nil {
+		fmt.Fprintf(stderr, "defenseclaw: enterprise foreign-hook guard: older DefenseClaw hooks in %s: %v\n", settings, err)
+		return
+	}
+	if removed > 0 {
+		fmt.Fprintf(stderr, "defenseclaw: enterprise foreign-hook guard: removed %d older DefenseClaw hook command(s) from %s\n", removed, settings)
+	}
+	for _, hook := range left {
+		fmt.Fprintf(stderr, "defenseclaw: enterprise foreign-hook guard: %s still holds %s; remove it so other agents do not block on it\n",
+			settings, boundedEnterpriseHookUserCleanupText(hook))
+	}
+}
+
 // enterpriseHookStandalonePlatformFinish removes unapproved foreign hooks
 // for every verified Windows user and every eligible profile without rows
 // (a user whose connectors are all machine policy, such as Cursor, has
@@ -469,16 +500,20 @@ func enterpriseHookStandalonePlatformFinish(ctx context.Context, stderr io.Write
 			blocksError = blocksErr.Error()
 		}
 		logEnterpriseForeignHookBlocks(stderr, current.creds.UserHome, blocks, dropped, blocksError)
+		if !current.rows["claudecode"] {
+			migrateWindowsClaudeUserHooks(stderr, current.creds)
+		}
 		for _, name := range connectors {
 			if current.rows[name] {
 				continue
 			}
+			// The cleanup holds the cleanup fence only for each removal and
+			// records it in the removal ledger.
 			result, err := enterpriseForeignHookCleanup(current.creds, name, current.dataDir)
 			for _, finding := range result.Removed {
 				fmt.Fprintf(stderr, "defenseclaw: enterprise foreign-hook guard: removed %s %s hook from %s (sha256:%s); backup in %s\n",
 					finding.Connector, dashIfEmpty(finding.Event), finding.Path, finding.Digest, result.BackupDir)
 			}
-			recordEnterpriseForeignHookRemovals(stderr, current.creds.SID, current.creds.UserHome, name, removedForeignHookPaths(result))
 			if err != nil {
 				fmt.Fprintf(stderr, "defenseclaw: enterprise foreign-hook guard: cleanup for %s %s: %v\n", name, current.creds.UserHome, err)
 			}

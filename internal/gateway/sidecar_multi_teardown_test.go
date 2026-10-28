@@ -25,6 +25,13 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 )
 
+// teardownRemovedConnectors is teardownRemovedConnectorsReport without the
+// dropped names.
+func teardownRemovedConnectors(registry *connector.Registry, previous, current []string, opts connector.SetupOpts, ctx context.Context) []string {
+	failed, _ := teardownRemovedConnectorsReport(registry, previous, current, opts, "", ctx)
+	return failed
+}
+
 // recordingConnector embeds stubConnector (which satisfies the full
 // connector.Connector interface) and records teardown invocations, optionally
 // returning injected errors to exercise the continue-on-error path.
@@ -137,12 +144,12 @@ func TestTeardownRemovedConnectors_NoPreviousIsNoop(t *testing.T) {
 
 func TestReconcileUnconfiguredConnectors_CleansFinalConnectorState(t *testing.T) {
 	dir := t.TempDir()
-	removed := &recordingConnector{stubConnector: stubConnector{name: "omnigent"}}
+	removed := &recordingConnector{stubConnector: stubConnector{name: "cursor"}}
 	reg := newRecordingRegistry(removed)
-	if err := connector.SaveActiveConnectors(dir, []string{"omnigent"}); err != nil {
+	if err := connector.SaveActiveConnectors(dir, []string{"cursor"}); err != nil {
 		t.Fatalf("save active connectors: %v", err)
 	}
-	if err := connector.SaveHookContractLockEntry(dir, connector.HookContractLockEntry{Connector: "omnigent"}); err != nil {
+	if err := connector.SaveHookContractLockEntry(dir, connector.HookContractLockEntry{Connector: "cursor"}); err != nil {
 		t.Fatalf("save hook contract lock: %v", err)
 	}
 	s := &Sidecar{cfg: &config.Config{DataDir: dir}}
@@ -156,7 +163,7 @@ func TestReconcileUnconfiguredConnectors_CleansFinalConnectorState(t *testing.T)
 	if got := connector.LoadActiveConnectors(dir); got != nil {
 		t.Fatalf("active connectors after verified cleanup = %v, want nil", got)
 	}
-	if got := connector.LoadHookContractLockEntry(dir, "omnigent"); got.Connector != "" {
+	if got := connector.LoadHookContractLockEntry(dir, "cursor"); got.Connector != "" {
 		t.Fatalf("hook contract lock survived verified cleanup: %+v", got)
 	}
 }
@@ -164,14 +171,14 @@ func TestReconcileUnconfiguredConnectors_CleansFinalConnectorState(t *testing.T)
 func TestReconcileUnconfiguredConnectors_RetainsFailedConnectorForRetry(t *testing.T) {
 	dir := t.TempDir()
 	removed := &recordingConnector{
-		stubConnector: stubConnector{name: "omnigent"},
-		verifyErr:     errors.New("policy module remains"),
+		stubConnector: stubConnector{name: "cursor"},
+		verifyErr:     errors.New("hook entries remain"),
 	}
 	reg := newRecordingRegistry(removed)
-	if err := connector.SaveActiveConnectors(dir, []string{"omnigent"}); err != nil {
+	if err := connector.SaveActiveConnectors(dir, []string{"cursor"}); err != nil {
 		t.Fatalf("save active connectors: %v", err)
 	}
-	if err := connector.SaveHookContractLockEntry(dir, connector.HookContractLockEntry{Connector: "omnigent"}); err != nil {
+	if err := connector.SaveHookContractLockEntry(dir, connector.HookContractLockEntry{Connector: "cursor"}); err != nil {
 		t.Fatalf("save hook contract lock: %v", err)
 	}
 	s := &Sidecar{cfg: &config.Config{DataDir: dir}}
@@ -183,10 +190,10 @@ func TestReconcileUnconfiguredConnectors_RetainsFailedConnectorForRetry(t *testi
 		t.Fatalf("cleanup calls = teardown:%d verify:%d, want 1 each", removed.teardownCalls, removed.verifyCalls)
 	}
 	got := connector.LoadActiveConnectors(dir)
-	if len(got) != 1 || got[0] != "omnigent" {
-		t.Fatalf("connectors awaiting teardown retry = %v, want [omnigent]", got)
+	if len(got) != 1 || got[0] != "cursor" {
+		t.Fatalf("connectors awaiting teardown retry = %v, want [cursor]", got)
 	}
-	if got := connector.LoadHookContractLockEntry(dir, "omnigent"); got.Connector != "omnigent" {
+	if got := connector.LoadHookContractLockEntry(dir, "cursor"); got.Connector != "cursor" {
 		t.Fatalf("hook contract lock should survive failed cleanup: %+v", got)
 	}
 }

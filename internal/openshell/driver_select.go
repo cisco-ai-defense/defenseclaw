@@ -25,6 +25,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 )
 
@@ -212,19 +213,33 @@ func cpuHasVirtualization(cpuinfo []byte) bool {
 	return false
 }
 
-// UserVMDriverDirs are where a user's OpenShell gateway finds
-// openshell-driver-vm: dir (the rendered driver_dir) first when set, then
-// the user's own ~/.local/libexec/openshell and the system directories
-// (AdminVMDriverDirs; the VM probe runs on Linux only).
-func UserVMDriverDirs(home, dir string) []string {
+// UserVMDriverDirs are where the Linux user probe looks for
+// openshell-driver-vm. It checks the rendered driver_dir first when set,
+// then the selected gateway executable's sibling. Without driver_dir it
+// checks the user's and system directories before that sibling. The caller
+// supplies the executable it will launch or the one on its managed port;
+// an unrelated gateway on PATH or selected in another registration is not
+// a driver source.
+func UserVMDriverDirs(home, dir, gatewayExecutable string) []string {
 	var dirs []string
 	if dir != "" {
 		dirs = append(dirs, dir)
+	} else {
+		if home != "" {
+			dirs = append(dirs, filepath.Join(home, ".local", "libexec", "openshell"))
+		}
+		dirs = append(dirs, AdminVMDriverDirs("linux")...)
 	}
-	if home != "" {
-		dirs = append(dirs, filepath.Join(home, ".local", "libexec", "openshell"))
+	if gatewayExecutable != "" && filepath.IsAbs(gatewayExecutable) {
+		if real, err := filepath.EvalSymlinks(gatewayExecutable); err == nil {
+			gatewayExecutable = real
+		}
+		sibling := filepath.Dir(gatewayExecutable)
+		if !slices.Contains(dirs, sibling) {
+			dirs = append(dirs, sibling)
+		}
 	}
-	return append(dirs, AdminVMDriverDirs("linux")...)
+	return dirs
 }
 
 // FindVMDriverIn is the first executable openshell-driver-vm in dirs, "".

@@ -122,7 +122,7 @@ try {
 
     $manifest = [ordered]@{
         schema_version = 1
-        kind = 'copilot-four-connector-sealed-current'
+        kind = 'copilot-three-connector-sealed-current'
         package_source_commit = $sourceCommit
         hitl_claimed = $false
         roster = @($script:LocalExpectedRoster)

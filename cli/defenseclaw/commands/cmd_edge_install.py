@@ -22,6 +22,8 @@ either locally or on a remote device via SSH.
 
 from __future__ import annotations
 
+import http.client
+import ipaddress
 import os
 import shlex
 import shutil
@@ -35,6 +37,41 @@ import click
 from defenseclaw import ux
 from defenseclaw.context import pass_ctx
 from defenseclaw.dotenv_utils import persist_env_var as _persist_env_var
+
+
+def _fleet_api_request(api_base: str, method: str, suffix: str, token: str, body: str = "") -> tuple[int, str]:
+    """Pin a local Fleet request to a socket proven to belong to this account."""
+    from defenseclaw.gateway import _verify_connected_gateway_socket
+
+    endpoint = urlsplit(api_base.rstrip("/") + suffix)
+    host = endpoint.hostname
+    if not host:
+        raise ValueError("Fleet API host is missing")
+    port = endpoint.port or (443 if endpoint.scheme == "https" else 80)
+    connection_type = http.client.HTTPSConnection if endpoint.scheme == "https" else http.client.HTTPConnection
+    connection = connection_type(host, port, timeout=60)
+    try:
+        connection.connect()
+        if connection.sock is None:
+            raise OSError("Fleet API socket is unavailable")
+        peer_host = connection.sock.getpeername()[0]
+        if ipaddress.ip_address(peer_host.split("%", 1)[0]).is_loopback:
+            _verify_connected_gateway_socket(connection.sock, peer_host, port)
+        elif endpoint.scheme != "https":
+            raise OSError("Fleet API plaintext endpoint is not local")
+        headers = {"X-DefenseClaw-Client": "true"}
+        if token:
+            headers["Authorization"] = f"Bearer {token}"
+        if body:
+            headers["Content-Type"] = "application/json"
+        connection.request(method, endpoint.path or "/", body=body or None, headers=headers)
+        response = connection.getresponse()
+        raw = response.read(1024 * 1024 + 1)
+        if len(raw) > 1024 * 1024:
+            raise ValueError("Fleet API response is too large")
+        return response.status, raw.decode("utf-8")
+    finally:
+        connection.close()
 
 
 def _find_edge_connector_source(source_dir: Path | None = None) -> Path | None:
@@ -278,6 +315,44 @@ def _find_service_file(source: Path) -> Path | None:
     return candidate if candidate.is_file() else None
 
 
+def _ensure_local_service_account() -> bool:
+    """Create the identity required by the shipped unit on a fresh Linux host."""
+    try:
+        group = subprocess.run(["getent", "group", "defenseclaw"], capture_output=True, timeout=10)
+        if group.returncode != 0:
+            _run(["sudo", "groupadd", "--system", "defenseclaw"])
+        account = subprocess.run(["id", "-u", "defenseclaw"], capture_output=True, timeout=10)
+        if account.returncode != 0:
+            _run([
+                "sudo", "useradd", "--system", "--gid", "defenseclaw",
+                "--home-dir", "/var/lib/defenseclaw", "--shell", "/usr/sbin/nologin", "defenseclaw",
+            ])
+    except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
+        ux.err(f"Could not provision defenseclaw service account: {exc}")
+        return False
+    return True
+
+
+def _ensure_remote_service_account(target: str, user: str) -> bool:
+    """Provision the unit identity on the device before enabling its service."""
+    script = (
+        "set -e; "
+        "getent group defenseclaw >/dev/null || sudo groupadd --system defenseclaw; "
+        "id -u defenseclaw >/dev/null 2>&1 || "
+        "sudo useradd --system --gid defenseclaw --home-dir /var/lib/defenseclaw "
+        "--shell /usr/sbin/nologin defenseclaw"
+    )
+    try:
+        result = subprocess.run(_ssh_cmd(target, user, script), text=True, timeout=60)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        ux.err(f"Could not provision defenseclaw service account on {target}: {exc}")
+        return False
+    if result.returncode != 0:
+        ux.err(f"Could not provision defenseclaw service account on {target}")
+        return False
+    return True
+
+
 def _install_systemd_unit(source: Path, target: str, user: str) -> bool:
     """Install the systemd unit file and enable/start the service on the remote device."""
     service_file = _find_service_file(source)
@@ -287,6 +362,9 @@ def _install_systemd_unit(source: Path, target: str, user: str) -> bool:
 
     ux.echo()
     ux.section("Installing systemd service")
+
+    if not _ensure_remote_service_account(target, user):
+        return False
 
     # Copy the unit file to the remote device
     remote_unit = "/etc/systemd/system/edge-connector.service"
@@ -332,6 +410,8 @@ def _install_local_systemd_unit(source: Path) -> bool:
 
     ux.echo()
     ux.section("Installing systemd service (local)")
+    if not _ensure_local_service_account():
+        return False
     target_path = Path("/etc/systemd/system/edge-connector.service")
     try:
         _run(["sudo", "cp", str(service_file), str(target_path)])
@@ -375,39 +455,22 @@ def _register_device_via_api(
     api_base = _validate_fleet_endpoint(api_base)
     api_token = _load_local_env_value("DCLAW_FLEET_API_TOKEN") or os.environ.get("DCLAW_FLEET_API_TOKEN", "")
 
-    url = f"{api_base.rstrip('/')}/devices"
     body = _json.dumps({
         "tenant_id": int(tenant_id),
         "fleet_id": int(fleet_id),
         "device_id": int(device_id),
     })
+    from defenseclaw.gateway import GatewayListenerNotOwnedError
 
-    curl_cmd = [
-        "curl", "-q", "-s", "-o", "-", "-w", "\n%{http_code}",
-        "-X", "POST", url,
-        "-H", "Content-Type: application/json",
-        "-H", "X-DefenseClaw-Client: true",
-    ]
-    if urlsplit(api_base).scheme == "http":
-        # A process-level HTTP proxy must not receive the local bearer token.
-        curl_cmd[2:2] = ["--noproxy", "*"]
-    stdin_data = None
-    if api_token:
-        curl_cmd += ["-H", "@-"]
-        stdin_data = f"Authorization: Bearer {api_token}"
-    curl_cmd += ["-d", body]
-
-    result = subprocess.run(curl_cmd, capture_output=True, text=True,
-                            input=stdin_data, timeout=60)
-    if result.returncode != 0:
-        ux.warn(f"Device registration API call failed (exit {result.returncode}). "
+    try:
+        http_status, resp_body = _fleet_api_request(api_base, "POST", "/devices", api_token, body)
+    except (GatewayListenerNotOwnedError, OSError, http.client.HTTPException, ValueError, UnicodeError):
+        ux.warn("Device registration API call failed or the local Fleet listener is unverified. "
                 "Register the device manually via: defenseclaw edge-connector register")
         return ""
-
-    # Split response body from HTTP status code (last line)
-    output_lines = result.stdout.rsplit("\n", 1)
-    resp_body = output_lines[0] if len(output_lines) > 1 else result.stdout
-    http_status = output_lines[-1].strip() if len(output_lines) > 1 else ""
+    if not 200 <= http_status < 300:
+        ux.warn(f"Device registration API returned HTTP {http_status}. Register the device manually.")
+        return ""
 
     try:
         resp = _json.loads(resp_body)
@@ -415,25 +478,24 @@ def _register_device_via_api(
         ux.warn("Could not parse registration response. Register the device manually.")
         return ""
 
+    if not isinstance(resp, dict):
+        ux.warn("Invalid registration response. Register the device manually.")
+        return ""
     device_key = resp.get("device_key", "")
 
     # Handle duplicate registration (HTTP 200 vs 201)
-    if http_status == "200" and not device_key:
+    if http_status == 200 and not device_key:
         ux.warn("Device already registered (HTTP 200). The device key is only "
                 "returned on first registration.")
         # Attempt to re-fetch the device record to check if a key is available
-        get_url = f"{api_base}/devices/{device_id}"
-        get_cmd = ["curl", "-s", get_url, "-H", "X-DefenseClaw-Client: true"]
-        get_stdin = None
-        if api_token:
-            get_cmd += ["-H", "@-"]
-            get_stdin = f"Authorization: Bearer {api_token}"
-        get_result = subprocess.run(get_cmd, capture_output=True, text=True,
-                                    input=get_stdin, timeout=60)
-        if get_result.returncode == 0:
+        try:
+            get_status, get_body = _fleet_api_request(api_base, "GET", f"/devices/{device_id}", api_token)
+        except (GatewayListenerNotOwnedError, OSError, http.client.HTTPException, ValueError, UnicodeError):
+            get_status, get_body = 0, ""
+        if 200 <= get_status < 300:
             try:
-                existing = _json.loads(get_result.stdout)
-                device_key = existing.get("device_key", "")
+                existing = _json.loads(get_body)
+                device_key = existing.get("device_key", "") if isinstance(existing, dict) else ""
                 if device_key:
                     ux.ok(f"Retrieved existing device key ({len(device_key)} hex chars)")
                 else:

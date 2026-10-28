@@ -77,8 +77,13 @@ func installedScannerRuntime() (string, error) {
 		return "", fmt.Errorf("%s is not a regular file", path)
 	}
 	// Only an administrator-owned runtime that no standard user can
-	// replace is run.
-	if err := managed.ValidateTrustedFilePath(path, "scanner runtime"); err != nil {
+	// replace is run: not the folder, not a file beside the executable,
+	// and not through a folder above them, ProgramData\Cisco included
+	// (review loop round 4).
+	if err := managed.ValidateTrustedRuntimeImage(root, path, "scanner runtime"); err != nil {
+		return "", err
+	}
+	if err := managed.ValidateTrustedRuntimeCodeTree(root, "scanner Python runtime"); err != nil {
 		return "", err
 	}
 	// And only the executable the lifecycle admitted by the payload trust

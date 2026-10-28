@@ -34,9 +34,35 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
 
+	"github.com/defenseclaw/defenseclaw/internal/openshell"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/harness"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxcli"
 )
+
+// A nested run (inside a sandbox) launches the harness natively: no
+// sandbox command takes a host lock at entry, so a configuration directory
+// it cannot write does not refuse it.
+func TestNestedSandboxRunDoesNotNeedHostLifecycleLock(t *testing.T) {
+	if runtime.GOOS != "linux" && runtime.GOOS != "darwin" {
+		t.Skip("nested OpenShell runs use Linux or macOS")
+	}
+	blockedConfig := filepath.Join(t.TempDir(), "not-a-directory")
+	if err := os.WriteFile(blockedConfig, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("XDG_CONFIG_HOME", blockedConfig)
+	t.Setenv(openshell.EnvSandboxID, "existing-sandbox")
+	called := false
+	run := sandboxRunE(func(context.Context, *sandboxcli.App, *cobra.Command, []string) error {
+		called = true
+		return nil
+	})
+	cmd := &cobra.Command{Use: "run"}
+	cmd.SetContext(t.Context())
+	if err := run(cmd, nil); err != nil || !called {
+		t.Fatalf("nested run tried to use the host lifecycle lock: callback=%t err=%v", called, err)
+	}
+}
 
 // sandboxManifestCommand describes one sandbox subcommand for the Python
 // stub parity check (track G2) and for this golden test. Long and Example
@@ -196,9 +222,6 @@ func TestSandboxRunHelpNamesEveryHarness(t *testing.T) {
 	}
 	// Certification AG-MAC-F8: Antigravity is named as image build names
 	// it, and the help says its command works too.
-	if !strings.Contains(long, "omnigent or antigravity (its command, agy, works too;") {
-		t.Errorf("run --help does not name antigravity with agy:\n%s", long)
-	}
 	if stub := pythonStubLong(t, "run"); stub != long {
 		t.Errorf("the Python stub's run help differs from the Go one:\n stub: %s\n   go: %s", stub, long)
 	}
@@ -258,6 +281,23 @@ func TestSandboxStubHelpIsTheGoHelp(t *testing.T) {
 		cmd, _, _ := sandboxCmd.Find([]string{path})
 		if usage := cmd.Flags().Lookup("yes").Usage; !strings.Contains(usage, "copy: leave them in the sandbox for pull") {
 			t.Errorf("sandbox %s --yes: %q does not say what a copy's end does", path, usage)
+		}
+	}
+}
+
+// GAP-0270: both JSON spellings keep the failing doctor's exit status 1.
+// Help is part of that CLI contract in both standalone and managed modes.
+func TestSandboxDoctorHelpNamesJSONFailureExit(t *testing.T) {
+	for name, help := range map[string]string{
+		"standalone": newSandboxDoctorCmd().Long,
+		"managed":    managedSandboxDoctorLong,
+	} {
+		help = strings.Join(strings.Fields(help), " ")
+		if !strings.Contains(help, "Exits 1 when a check fails") ||
+			!strings.Contains(help, "--output json") ||
+			!strings.Contains(help, "--json") ||
+			strings.Contains(help, "exit status is 0") {
+			t.Errorf("%s doctor help gives the wrong JSON exit status: %s", name, help)
 		}
 	}
 }

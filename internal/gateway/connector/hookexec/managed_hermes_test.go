@@ -58,7 +58,7 @@ func TestManagedHermesToolCallBlocksWhenDefenseClawCannotCheck(t *testing.T) {
 	}{
 		{name: "gateway unreachable", want: "the DefenseClaw gateway is not available",
 			rt: &stubRT{err: errors.New("connection refused")}},
-		{name: "gateway 5xx", want: "the DefenseClaw gateway is not available",
+		{name: "gateway 5xx", want: "returned an answer DefenseClaw could not use",
 			rt: &stubRT{status: 503, body: "unavailable"}},
 		{name: "gateway refused", want: "returned an answer DefenseClaw could not use",
 			rt: &stubRT{status: 401, body: "unauthorized"}},
@@ -85,6 +85,7 @@ func TestManagedHermesToolCallBlocksWhenDefenseClawCannotCheck(t *testing.T) {
 					tc.mutate(o)
 				}
 				home = o.Home
+				o.FailureLogHome = userLogHome(o.Home)
 			})
 			message := hermesBlockMessage(t, result.stdout)
 			if result.code != 0 || !strings.HasPrefix(message, "DefenseClaw blocked this tool call: ") ||
@@ -153,6 +154,7 @@ func TestHermesNeutralResultOutsideManagedToolCalls(t *testing.T) {
 				o.StrictAvailability = true
 				mutate(o)
 				home = o.Home
+				o.FailureLogHome = userLogHome(o.Home)
 			})
 			if result.code != 0 || strings.Contains(result.stdout, `"block"`) {
 				t.Fatalf("code %d, stdout %q, want the neutral result", result.code, result.stdout)
@@ -250,11 +252,12 @@ func TestManagedHermesUnboundEventBlocksRefusedInput(t *testing.T) {
 						o.MaxBody = tc.maxBody
 					}
 					home = o.Home
+					o.FailureLogHome = userLogHome(o.Home)
 				})
 				if result.code != 0 {
 					t.Fatalf("code %d, want 0 (stderr %q)", result.code, result.stderr)
 				}
-				if managed && tc.blocks {
+				if tc.blocks {
 					message := hermesBlockMessage(t, result.stdout)
 					if !strings.HasPrefix(message, "DefenseClaw blocked this tool call: ") {
 						t.Fatalf("message %q, want a tool-call block", message)
@@ -276,8 +279,8 @@ func TestManagedHermesUnboundEventBlocksRefusedInput(t *testing.T) {
 // command binds no event and whose top-level hook_event_name and event
 // fields disagree may be a tool call, so a managed hook outside Secure
 // Client blocks it with the Hermes directive, logs fail_mode closed and
-// does not ask the gateway. Agreeing fields, a bound event, per-user and
-// Secure Client hooks keep the gateway's verdict.
+// does not ask the gateway. A per-user hook also closes ambiguous input.
+// Agreeing fields, a bound event and Secure Client keep the gateway's verdict.
 func TestManagedHermesDisagreeingEventFieldsBlock(t *testing.T) {
 	// The 115-byte BW-03 case (e) input.
 	const disagree = `{"hook_event_name":"pre_tool_call","event":"pre_llm_call","tool_name":"terminal","tool_input":{"command":"echo x"}}`
@@ -293,7 +296,7 @@ func TestManagedHermesDisagreeingEventFieldsBlock(t *testing.T) {
 		{name: "managed, fields agree", stdin: agree, managed: true},
 		{name: "managed, bound event", stdin: disagree, event: "pre_llm_call", managed: true},
 		{name: "managed Secure Client, fields disagree", stdin: disagree, managed: true, secureClient: true},
-		{name: "per-user, fields disagree", stdin: disagree},
+		{name: "per-user, fields disagree", stdin: disagree, blocks: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var home string
@@ -309,6 +312,7 @@ func TestManagedHermesDisagreeingEventFieldsBlock(t *testing.T) {
 				o.SecureClient = tc.secureClient
 				o.Stdin = strings.NewReader(tc.stdin)
 				home = o.Home
+				o.FailureLogHome = userLogHome(o.Home)
 			})
 			if result.code != 0 {
 				t.Fatalf("code %d, want 0 (stderr %q)", result.code, result.stderr)

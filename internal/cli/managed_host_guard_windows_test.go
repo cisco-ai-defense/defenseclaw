@@ -91,6 +91,7 @@ func TestSecureClientHostRequiresProtectedLayoutAndRegisteredService(t *testing.
 		{"machine roots unavailable", winpath.EnterpriseDeploymentInstalled, "roots", serviceImage, false},
 		{"metadata inspection fails", winpath.EnterpriseDeploymentInstalled, "deployment", serviceImage, false},
 		{"install directory untrusted", winpath.EnterpriseDeploymentInstalled, "directory", serviceImage, false},
+		{"SYSTEM install marker missing or untrusted", winpath.EnterpriseDeploymentInstalled, "marker", serviceImage, false},
 		{"gateway file untrusted", winpath.EnterpriseDeploymentInstalled, "file", serviceImage, false},
 		{"service lookup fails", winpath.EnterpriseDeploymentInstalled, "service", serviceImage, false},
 		{"service image unquoted", winpath.EnterpriseDeploymentInstalled, "", roots.InstallRoot + `\bin\defenseclaw-gateway.exe`, false},
@@ -122,6 +123,15 @@ func TestSecureClientHostRequiresProtectedLayoutAndRegisteredService(t *testing.
 						t.Fatalf("validated directory %q", path)
 					}
 					if tc.failAt == "directory" {
+						return failure
+					}
+					return nil
+				},
+				trustedMarker: func(path, _ string) error {
+					if path != roots.InstallRoot+`\secure-client.install` {
+						t.Fatalf("validated marker %q", path)
+					}
+					if tc.failAt == "marker" {
 						return failure
 					}
 					return nil

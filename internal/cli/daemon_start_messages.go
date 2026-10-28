@@ -68,6 +68,13 @@ func gatewayLogSize(path string) int64 {
 
 // gatewayLogExitReason returns the last "Error: " line the gateway wrote to
 // gateway.log after offset (the error it exited on), or "".
+// The line the gateway logs for a destination that refused the start: its
+// name, path and rule (destinations factory, GAP-0890).
+const (
+	gatewayLogDestinationRefusal = "defenseclaw: observability destination "
+	gatewayLogDestinationRemedy  = "fix the path or remove the destination"
+)
+
 func gatewayLogExitReason(path string, offset int64) string {
 	file, err := os.Open(path)
 	if err != nil {
@@ -88,10 +95,23 @@ func gatewayLogExitReason(path string, offset int64) string {
 	if _, err := file.ReadAt(tail, offset); err != nil && !errors.Is(err, io.EOF) {
 		return ""
 	}
-	reason := ""
+	reason, destination := "", ""
 	for _, line := range strings.Split(string(tail), "\n") {
-		if line = strings.TrimSpace(line); strings.HasPrefix(line, "Error: ") {
+		line = strings.TrimSpace(line)
+		switch {
+		case strings.HasPrefix(line, "Error: "):
 			reason = strings.TrimSpace(strings.TrimPrefix(line, "Error: "))
+		case strings.HasPrefix(line, gatewayLogDestinationRefusal) && strings.HasSuffix(line, gatewayLogDestinationRemedy):
+			destination = strings.TrimPrefix(line, "defenseclaw: ")
+		}
+	}
+	if destination != "" {
+		// The destination, its path and the rule it breaks, which the
+		// gateway logs before it exits on runtime_unavailable (GAP-0097).
+		if reason == "" {
+			reason = destination
+		} else {
+			reason = destination + " (" + reason + ")"
 		}
 	}
 	if len(reason) > 400 {

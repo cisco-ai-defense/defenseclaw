@@ -971,6 +971,7 @@ const (
 	IssueOpaqueArtifact        IssueCode = "opaque_artifact"
 	IssueUnknownOperandGrammar IssueCode = "unknown_operand_grammar"
 	IssueConflictingSources    IssueCode = "conflicting_sources"
+	IssueIncomparableSources   IssueCode = "incomparable_sources"
 	IssueInputLimit            IssueCode = "input_limit"
 	IssueNodeLimit             IssueCode = "node_limit"
 	IssueDepthLimit            IssueCode = "depth_limit"
@@ -1068,6 +1069,10 @@ type ArgumentFact struct {
 	StaticGlob string
 	Quote      QuoteKind
 	Expands    bool
+	// literalTilde is set by the POSIX parser when the source quoted or
+	// escaped a leading "~" (an unquoted one is an expansion), and kept on
+	// the argv a wrapper passes on. Such a word names "./~", not the home.
+	literalTilde bool
 }
 
 type QuoteKind string

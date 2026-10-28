@@ -10,6 +10,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"slices"
 	"sort"
 	"strings"
@@ -18,6 +19,7 @@ import (
 	"golang.org/x/mod/semver"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/guardrail"
 )
 
 // Warning codes verify adds.
@@ -95,13 +97,23 @@ func CheckProductVersion(min, running string) error {
 	if min == "" {
 		return nil
 	}
-	if !productVersionRegex.MatchString(running) {
+	if !IsReleaseVersion(min) {
+		return refuse(CodeProductTooOld, "min_product_version", "the signed minimum is not a valid release version; run defenseclaw-gateway enterprise bundle sign --help and redeliver a corrected signed bundle")
+	}
+	if !IsReleaseVersion(running) {
 		return refuse(CodeProductTooOld, "min_product_version", "this build (%s) is not a release version; the bundle needs %s or later", boundedText(running, 64), min)
 	}
 	if semver.Compare("v"+running, "v"+min) < 0 {
 		return refuse(CodeProductTooOld, "min_product_version", "this build is %s; the bundle needs %s or later", running, min)
 	}
 	return nil
+}
+
+// IsReleaseVersion reports whether v is a release version
+// (MAJOR.MINOR.PATCH, an optional prerelease and build), the only kind
+// CheckProductVersion places against a min_product_version.
+func IsReleaseVersion(v string) bool {
+	return productVersionRegex.MatchString(v) && semver.IsValid("v"+v)
 }
 
 // VerifyInput is what Verify checks a bundle against.
@@ -122,9 +134,16 @@ type VerifyInput struct {
 	// DeviceLayout is the installed layout on a device. Nil uses the target's
 	// standard layout for offline verification.
 	DeviceLayout *DeviceLayout
-	// SecretPresent reports whether the device holds an enterprise
-	// credential; nil does not check presence (off a device).
-	SecretPresent func(name string) (bool, error)
+	// SecretValue reads an enterprise credential as the gateway would: the
+	// value when it is stored and usable, nil when it is missing or the
+	// gateway's read would refuse it, an error when the store could not be
+	// read. Verify compares the value with the signed value_sha256 and
+	// clears it. Nil checks no credential (off a device).
+	SecretValue func(name string) ([]byte, error)
+	// RequireSecretPresence is set by the apply: a required reference whose
+	// presence could not be checked refuses (secret_ref_missing) instead of
+	// only warning secret_presence_unchecked, as read-only verify does.
+	RequireSecretPresence bool
 	// Stage writes the bundle files to a private directory and returns it;
 	// the config loader and the digest read the policy files from there.
 	Stage func(*Bundle) (string, error)
@@ -152,10 +171,12 @@ type VerifyResult struct {
 	DigestLayoutUnverifiable bool
 	Warnings                 []Warning
 	// SecretRefsMissing names, in manifest order, every secret_refs entry
-	// (required or optional) the device does not hold. It is nil unless the
-	// presence of every reference was checked: off a device, with a store
-	// that could not be read, or on a refusal before that step.
-	SecretRefsMissing []string
+	// (required or optional) the device does not hold, and
+	// SecretRefsMismatch every one it holds with a value the entry does not
+	// sign. Both are nil unless every reference was checked: off a device,
+	// with a store that could not be read, or on a refusal before that step.
+	SecretRefsMissing  []string
+	SecretRefsMismatch []string
 	// Rendered is the config.yaml Verify validated, rendered for the device
 	// layout against the private stage directory. The apply renders the
 	// same file against its version directory, so the two differ only in
@@ -235,31 +256,48 @@ func Verify(ctx context.Context, in VerifyInput) (*VerifyResult, error) {
 	if err := CheckSecretRefs(m, b); err != nil {
 		return res, err
 	}
-	if in.SecretPresent != nil {
+	if in.SecretValue != nil {
 		// Every reference is looked up, so a refusal names the first
-		// required credential missing and the result lists all of them: the
-		// caller stores them in one pass.
-		unchecked, missing, required := false, []string{}, ""
+		// required credential missing or the first one stored with another
+		// value, and the result lists all of them: the caller stores them
+		// in one pass.
+		unchecked, missing, mismatch := false, []string{}, []string{}
+		var refusal error
 		for _, ref := range m.SecretRefs {
-			present, err := in.SecretPresent(ref.Name())
+			value, err := in.SecretValue(ref.Name())
+			bound := err == nil && ref.Binds(m.TenantID, value)
+			stored := len(value) > 0
+			clear(value)
 			switch {
 			case err != nil:
 				unchecked = true
-			case !present:
+				if in.RequireSecretPresence && ref.Required && refusal == nil {
+					refusal = refuse(CodeSecretRefMissing, "secret_refs", "credential %s could not be checked, so the apply does not rely on it; store it again with enterprise secret set", safePath(ref.Name()))
+				}
+			case !stored:
 				missing = append(missing, ref.Name())
-				if ref.Required && required == "" {
-					required = ref.Name()
+				if ref.Required && refusal == nil {
+					refusal = refuse(CodeSecretRefMissing, "secret_refs", "this device has no credential %s", safePath(ref.Name()))
+				}
+			case !bound:
+				// The gateway would use a value the bundle does not sign,
+				// also for an optional reference.
+				mismatch = append(mismatch, ref.Name())
+				if refusal == nil {
+					refusal = refuse(CodeSecretRefMismatch, "secret_refs", "credential %s on this device is not the value the bundle signs; store the value it signs with enterprise secret set --bundle and this bundle, or sign the bundle again with --secret-file for the stored one", safePath(ref.Name()))
 				}
 			}
 		}
-		if !unchecked {
-			res.SecretRefsMissing = missing
-		}
-		if required != "" {
-			return res, refuse(CodeSecretRefMissing, "secret_refs", "this device has no credential %s", safePath(required))
-		}
+		// The warning comes before a refusal for another credential, so the
+		// refusal still says the store was partly unreadable and the lists
+		// are incomplete.
 		if unchecked {
-			res.Warnings = append(res.Warnings, Warning{Code: WarnSecretPresenceUnchecked, Message: "the enterprise secret store could not be read; credential presence was not checked"})
+			res.Warnings = append(res.Warnings, Warning{Code: WarnSecretPresenceUnchecked, Message: "the enterprise secret store could not be read; credential presence and values were not checked"})
+		} else {
+			res.SecretRefsMissing, res.SecretRefsMismatch = missing, mismatch
+		}
+		if refusal != nil {
+			return res, refusal
 		}
 	}
 	root, err := in.Stage(b)
@@ -280,6 +318,9 @@ func Verify(ctx context.Context, in VerifyInput) (*VerifyResult, error) {
 	res.Rendered = rendered
 	ruleWarnings, _, err := RuleNotBlockingWarnings(cfg)
 	if err != nil {
+		if refusal := unreadableRulePackForAccount(err); refusal != nil {
+			return res, refusal
+		}
 		return res, refuse(CodeConfigInvalid, ConfigName, "custom rule pack: %s", boundedDetail(err.Error()))
 	}
 	if err := validateTargetConfig(b, cfg, rendered, []string{in.Platform}); err != nil {
@@ -373,10 +414,28 @@ func computeDigest(ctx context.Context, in VerifyInput, cfg *config.Config, rend
 	var out computedDigest
 	digest, err := in.Digester(withPolicyComponents(ctx, func(got map[string]string) { out.components = got }), cfg, rendered, in.Platform, root)
 	if err != nil {
+		if refusal := unreadableRulePackForAccount(err); refusal != nil {
+			return computedDigest{}, refusal
+		}
 		return computedDigest{}, refuse(CodeConfigInvalid, ConfigName, "effective policy for %s%s: %s", in.Platform, where, boundedDetail(err.Error()))
 	}
 	out.digest = digest
 	return out, nil
+}
+
+func unreadableRulePackForAccount(err error) error {
+	var packErr *guardrail.RulePackError
+	if !errors.As(err, &packErr) {
+		return nil
+	}
+	if packErr.Code != "directory_unreadable" && packErr.Code != "inventory_unreadable" && packErr.Code != "file_unreadable" {
+		return nil
+	}
+	if !strings.Contains(packErr.Reason, "access denied") && !strings.Contains(packErr.Reason, "permission denied") {
+		return nil
+	}
+	return refuse(CodeNotAdmin, ConfigName,
+		"this account cannot read and list a rule pack referenced by the signed config; run the same enterprise bundle verify command as root on Linux/macOS or as an elevated administrator/SYSTEM on Windows, or ask an administrator to grant this account read and list access to that pack and its parent directories")
 }
 
 // compareSignedDigest is the signed-digest rule for every signer and device

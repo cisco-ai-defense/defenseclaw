@@ -9,6 +9,10 @@ keywords:
   - CEL regex fallback
 ---
 
+<Callout title="Shell examples">
+The shell examples require Bash. On native Windows, use Git Bash or WSL; PowerShell uses different continuation and environment-variable syntax.
+</Callout>
+
 DefenseClaw embeds CEL as a bounded semantic matcher, not as a general-purpose
 policy runtime. The server establishes a trusted tool-action boundary,
 normalizes the action into typed `ActionFacts`, and evaluates one immutable
@@ -21,7 +25,7 @@ runtime accept and how a match becomes detection or enforcement evidence.
 ## Evaluation pipeline
 
 Each semantic rule is checked on its own. CEL runs only on arguments the
-parser fully understood, and a match is tried a second time against just the
+parser fully understood, and a match is tried a second time against only the
 commands that will really run.
 
 <Flow
@@ -85,7 +89,7 @@ Catalog categories merge before compilation:
 
 A rejected candidate is not published. If the gateway already has an active
 in-process generation, that generation remains unchanged; offline validation
-simply reports the candidate failure.
+reports the candidate failure.
 
 ## Supported CEL subset
 
@@ -124,6 +128,8 @@ dynamic regexes and global-form `matches(value, pattern)` are rejected.
 These bounds apply before connector action mapping. Exceeding an admission
 limit rejects the candidate; exceeding a runtime limit takes that owner to its
 fallback without stopping unrelated rules.
+
+The 512-byte CEL regex limit caps its size. The static cost limit can reject a shorter pattern; check the whole rule with `defenseclaw guardrail validate-pack`.
 
 ## Runtime results
 
@@ -165,7 +171,7 @@ owner marked alert-only can raise at most `alert`.
 
 For the modeled curl compression/TLS/authentication capability controls, an
 eagerly validated positive option, or the final enabled state of a final-toggle
-option, closes every exact transmission projector, not just the hostname lane.
+option, closes every exact transmission projector, not only the hostname lane.
 A disabled negative form can remain eligible only when no earlier eager
 validation failed, every transfer group ends with the modeled final-toggle
 capability disabled, and every other prerequisite is exact. Other optional
@@ -226,12 +232,13 @@ regex, CEL typing and admission, and aggregate-cost checks. It does not inject
 synthetic facts or prove that a connector projects the fields an expression
 expects.
 
-Repository contributors should add focused Go fixtures and run the command
-below. The gateway package runs for about ten minutes, longer than the default
-`go test` deadline, so set `-timeout`:
+Repository contributors should add focused Go fixtures and use Go 1.26.4, the
+CI toolchain. The gateway suite runs through the shard runner with an explicit
+timeout:
 
 ```bash
-go test -timeout 30m ./internal/guardrail/semantic ./internal/guardrail ./internal/gateway
+go test -timeout 30m ./internal/guardrail/semantic ./internal/guardrail
+python3 scripts/go_test_shards.py --package-dir internal/gateway --shard-count 16 -- go test -timeout 30m ./internal/gateway
 ```
 
 When the compiled default catalog changes, also run

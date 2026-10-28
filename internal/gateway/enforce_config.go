@@ -64,17 +64,18 @@ type assetListEdit struct {
 // connector from both lists (one decision per asset, as the actions table
 // kept), then appends the new rule; an unblock only drops the denied rule.
 // Names compare as the readers match them: skill, MCP and plugin names
-// case-insensitively (assetRuleMatches), tool names exactly
-// (ToolListDecision). An unnamed rule matches the first key shown by
-// /enforce/blocked and /enforce/allowed. An exact compare left a denied
-// MySkill in place on an unblock or allow of myskill (GAP-0319).
+// after Unicode NFC, ignoring case (config.SameAssetName), tool names
+// exactly (ToolListDecision). An unnamed rule matches the first key shown
+// by /enforce/blocked and /enforce/allowed. An exact compare left a denied
+// MySkill in place on an unblock or allow of myskill (GAP-0319), and a
+// compare without NFC left a deny written in the other Unicode spelling of
+// the same name (p0 GAP-0878).
 func assetListChange(cfg *config.Config, edit assetListEdit) []configwrite.Change {
 	base := "asset_policy." + edit.TargetType
 	sameAsset := func(name, connector string) bool {
-		name = strings.TrimSpace(name)
-		sameName := strings.EqualFold(name, strings.TrimSpace(edit.Name))
+		sameName := config.SameAssetName(name, edit.Name)
 		if edit.TargetType == "tool" {
-			sameName = name == edit.Name
+			sameName = strings.TrimSpace(name) == edit.Name
 		}
 		return sameName && config.SameConnector(connector, edit.Connector)
 	}

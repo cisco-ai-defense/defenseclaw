@@ -20,6 +20,7 @@ admission.rego and internal/policy), reading only config.yaml:
 
 from __future__ import annotations
 
+import functools
 import json
 import os
 import unicodedata
@@ -28,6 +29,7 @@ from typing import Any
 
 from defenseclaw import connector_paths
 from defenseclaw.config import SeverityAction
+from defenseclaw.enforce._asset_name_fold import FOLD_RUNS
 
 
 @dataclass(frozen=True)
@@ -286,6 +288,36 @@ def _secure_client_admission(policy_dir: str, target_type: str) -> CompiledAdmis
     )
 
 
+def _legacy_strict_mcp(adm: Any) -> bool:
+    """Keep the MCP actions a v8 -> v9 strict preset inherited and left unset."""
+    defaults = getattr(adm, "defaults", None)
+    if getattr(defaults, "allow_list_bypass_scan", None) is not False or getattr(defaults, "actions", None):
+        return False
+    skill = _compile_action_map(getattr(getattr(adm, "skill", None), "actions", None))
+    return (skill.get("HIGH") == (_QUARANTINE, False)
+            and skill.get("MEDIUM") == (_QUARANTINE, False)
+            and skill.get("LOW") == (_WARN, False))
+
+
+def _legacy_balanced_default_mcp(adm: Any) -> bool:
+    """Recognize only the MCP actions the pre-1.0.4 default preset stored."""
+    defaults = getattr(adm, "defaults", None)
+    if (getattr(defaults, "scan_on_install", None) is not True
+            or getattr(defaults, "allow_list_bypass_scan", None) is not True):
+        return False
+    defaults_actions = _compile_action_map(getattr(defaults, "actions", None))
+    if defaults_actions != {
+        "CRITICAL": (_QUARANTINE, False), "HIGH": (_QUARANTINE, False),
+        "MEDIUM": (_WARN, False), "LOW": (_WARN, False), "INFO": (_WARN, False),
+    }:
+        return False
+    mcp = _compile_action_map(getattr(getattr(adm, "mcp", None), "actions", None))
+    return mcp == {
+        "MEDIUM": (_QUARANTINE, False),
+        "LOW": (SeverityAction(file="none", runtime="disable", install="none"), False),
+    }
+
+
 def compile_admission(cfg: Any, target_type: str) -> CompiledAdmission:
     """Compile ``admission:`` for one asset type, as the gateway does (Go
     ``policy.CompileAdmission``). Each field and severity resolves, first
@@ -296,8 +328,12 @@ def compile_admission(cfg: Any, target_type: str) -> CompiledAdmission:
 
     if asset_lists.is_secure_client(cfg):
         return _secure_client_admission(str(getattr(cfg, "policy_dir", "") or ""), target_type)
-    out = _builtin_admission(target_type)
     adm = getattr(cfg, "admission", None)
+    out = _builtin_admission(target_type)
+    if target_type == "mcp" and not _legacy_strict_mcp(adm):
+        # Balanced MCP scans keep findings visible without refusing ordinary
+        # tools. Secure Client keeps its separate 1.0 action map above.
+        out.actions.update({sev: (_WARN, False) for sev in ("HIGH", "MEDIUM", "LOW")})
     if adm is None:
         return out
     defaults = getattr(adm, "defaults", None)
@@ -339,6 +375,12 @@ def compile_admission(cfg: Any, target_type: str) -> CompiledAdmission:
         source = "derived:scanners.skill_scanner"
     elif "defaults" in used:
         source = "config:admission.defaults.actions"
+
+    if target_type == "mcp" and _legacy_balanced_default_mcp(adm):
+        # The selected shipped preset changed in 1.0.4. Preserve explicit
+        # actions and translate only its old stored action shape.
+        actions.update({sev: (_WARN, False) for sev in ("HIGH", "MEDIUM", "LOW")})
+        source = "compat:pre-1.0.4 default"
 
     sources["actions"] = source
     overrides: dict[str, dict[str, tuple[SeverityAction, bool]]] = {}
@@ -437,9 +479,11 @@ def evaluate_admission(
         return asset_decision
 
     def _done(decision: AdmissionDecision) -> AdmissionDecision:
-        # GAP-2390: keep an observe-mode would-block on whatever decision the
-        # rest of admission reaches, so install paths can warn and audit it.
-        if not asset_decision.source.endswith("-observe"):
+        # GAP-2390: keep an observe-mode would-block, and the warning of an
+        # empty required registry under registry_empty_action warn, on
+        # whatever decision the rest of admission reaches, so install paths
+        # can warn and audit it.
+        if not asset_decision.source.endswith(("-observe", "-empty-warn")):
             return decision
         return replace(
             decision,
@@ -478,7 +522,9 @@ def evaluate_admission(
         from defenseclaw.enforce.asset_lists import path_has_components
 
         configured = policy.field_sources.get("first_party_allow_list", "").startswith("config:")
-        path_matches = (
+        # GAP-1212: the shipped CodeGuard skill is trusted by its content in
+        # every connector's skills folder, not only the folders the entry names.
+        path_matches = (not legacy and _content_verified_first_party(target_type, name)) or (
             any(path_has_components(source_path, marker) for marker in fp_constraints)
             if configured else _matches_provenance(fp_constraints, source_path)
         )
@@ -497,6 +543,9 @@ def evaluate_admission(
         return _done(AdmissionDecision("scan", "scan required", source="scan-required"))
 
     finding_count, severity = _scan_summary(scan_result)
+    judge_only = _judge_only_plugin_high(config, policy, target_type, connector, scan_result, severity)
+    if judge_only:
+        policy = replace(policy, actions={**policy.actions, "HIGH": (_WARN, False)})
     action, allow = effective_action_for(policy, severity=severity, scanner=_scanner_name(scan_result))
 
     if finding_count <= 0:
@@ -507,7 +556,34 @@ def evaluate_admission(
         return _done(AdmissionDecision("rejected", detail, action=action, source="scan-rejected"))
     if allow:
         return _done(AdmissionDecision("allowed", detail, action=action, source="scan-allowed"))
-    return _done(AdmissionDecision("warning", detail, action=action, source="scan-warning"))
+    source = "scan-judge-warning" if judge_only else "scan-warning"
+    return _done(AdmissionDecision("warning", detail, action=action, source=source))
+
+
+def _judge_only_plugin_high(cfg: Any, policy: CompiledAdmission, target_type: str, connector: str,
+                            scan_result: Any, severity: str) -> bool:
+    """The GAP-1389 pre-step: Go ``policy.WarnJudgeOnlyPluginHigh``, same rules."""
+    from defenseclaw.enforce import asset_lists
+
+    adm, findings = getattr(cfg, "admission", None), getattr(scan_result, "findings", None)
+    tier = getattr(getattr(cfg, "guardrail", None), "hook_policy_tier", None)
+    medium, _ = effective_action_for(policy, severity="MEDIUM", scanner=_scanner_name(scan_result))
+    if (target_type != "plugin" or cfg is None or asset_lists.is_secure_client(cfg) or severity.upper() != "HIGH"
+            or not isinstance(findings, list) or _legacy_strict_mcp(adm) or not callable(tier)
+            or "HIGH" in policy.scanner_overrides.get(_scanner_name(scan_result), {})
+            or any("HIGH" in _compile_action_map(getattr(getattr(adm, k, None), "actions", None))
+                   for k in ("plugin", "defaults"))
+            or medium.install == "block" or medium.runtime == "disable" or medium.file == "quarantine"):
+        return False
+    judge_high = False
+    for f in findings:
+        rank, rule = _severity_rank(str(getattr(f, "severity", ""))), str(getattr(f, "rule_id", "") or "")
+        judge = (rule.startswith("LLM-") and rule != "LLM-SCAN-ERROR") or rule.startswith("META-LLM-")
+        if rank == 4 and (rule.startswith("LLM-OB-") or rule == "META-LLM-001"):
+            judge_high = True
+        elif rank == 0 or rank >= 4 or (rank == 3 and not judge and rule != "SCAN-LLM-NO-SOURCE"):
+            return False
+    return judge_high and tier(connector) != "strict"
 
 
 def _legacy_allow_decision(
@@ -640,17 +716,25 @@ def evaluate_asset_policy(
                 "asset-policy-registry-required",
             )
         # Registry required but empty → governed by registry_empty_action.
-        # Only "deny" blocks; "warn"/"allow" fall through to the default check
-        # below. The Go gateway now resolves "warn" the same way (warn → allow),
-        # so this matches the runtime (see _normalize_registry_empty_action).
-        if _normalize_registry_empty_action(
+        # Only "deny" blocks. "warn" lets the asset through to the default
+        # check but says why (p0 GAP-0941), as the Go gateway does; "allow"
+        # falls through silently (see _normalize_registry_empty_action).
+        empty_action = _normalize_registry_empty_action(
             getattr(policy, "registry_empty_action", "deny")
-        ) == "deny":
+        )
+        if empty_action == "deny":
             return _asset_policy_block_or_observe(
                 mode,
                 f"{target_type} {name!r} is blocked because asset policy "
                 f"requires a registry but none is configured",
                 "asset-policy-registry-required-empty",
+            )
+        if empty_action == "warn" and str(getattr(policy, "default", "allow")).strip().lower() not in {"deny", "block"}:
+            return AdmissionDecision(
+                "allowed",
+                f"{target_type} {name!r} is allowed with a warning: asset policy "
+                f"requires a registry but none is configured (registry_empty_action: warn)",
+                source="asset-policy-registry-required-empty-warn",
             )
 
     if str(getattr(policy, "default", "allow")).strip().lower() in {"deny", "block"}:
@@ -685,15 +769,11 @@ def _normalize_registry_empty_action(value: Any) -> str:
 
     Returns one of ``"deny"`` / ``"warn"`` / ``"allow"`` (the three values
     documented on ``config.AssetTypePolicy.registry_empty_action``). Only
-    ``"deny"`` blocks; both ``"warn"`` and ``"allow"`` fall through to the
-    default check. ``"deny"``/``"block"``/``""`` and any unrecognised value
-    stay fail-closed as ``"deny"``.
-
-    Python↔Go parity: the Go gateway's ``normalizeRegistryEmptyAction``
-    (internal/config/asset_policy.go) now also treats ``"warn"`` as
-    fall-through (warn → allow), so both sides agree that ``"warn"`` is
-    "log-but-don't-block at the empty-registry gate". The earlier divergence
-    (Go collapsing ``"warn"`` into ``"deny"``) is closed.
+    ``"deny"`` blocks; ``"warn"`` and ``"allow"`` fall through to the
+    default check, ``"warn"`` with a decision that names the empty registry.
+    ``"deny"``/``"block"``/``""`` and any unrecognised value stay fail-closed
+    as ``"deny"``. The Go gateway's ``normalizeRegistryEmptyAction``
+    (internal/config/asset_policy.go) resolves the same three values.
     """
     v = str(value).strip().lower()
     if v == "allow":
@@ -776,10 +856,27 @@ def _canonical_mcp_transport(transport: Any, url: str = "", command: str = "") -
 
 def asset_name_key(name: Any) -> str:
     """The form asset_policy compares skill, MCP and plugin names in: trimmed,
-    Unicode NFC and lower-cased (Go ``config.SameAssetName``). A rule written
-    in the composed spelling of a name like "café" matches the decomposed
-    spelling another tool wrote (GAP-0432)."""
-    return unicodedata.normalize("NFC", str(name or "").strip()).lower()
+    Unicode NFC and case-folded the way Go ``config.SameAssetName``
+    (``strings.EqualFold``) folds. A rule written in the composed spelling of
+    a name like "café" matches the decomposed spelling another tool wrote
+    (GAP-0432), and final sigma, capital sigma and sigma are one letter on
+    both sides (p0 GAP-1305). The folding is Go's own table
+    (_asset_name_fold.py), not ``str.casefold``/``str.lower``, which fold
+    differently and follow the interpreter's Unicode version."""
+    fold = _name_fold()
+    return "".join(fold.get(ch, ch) for ch in unicodedata.normalize("NFC", str(name or "").strip()))
+
+
+@functools.cache
+def _name_fold() -> dict[str, str]:
+    fold: dict[str, str] = {}
+    for run in FOLD_RUNS.split():
+        start, count, stride, delta = run.split(":")
+        first, step, shift = int(start, 16), int(stride), int(delta)
+        for i in range(int(count)):
+            code = first + i * step
+            fold[chr(code)] = chr(code + shift)
+    return fold
 
 
 def _asset_rule_matches(
@@ -803,8 +900,8 @@ def _asset_rule_matches(
         constrained = True
         # Compare connector-name-insensitively (case + hyphen/underscore
         # aliases) so an asset rule keyed on a documented alias such as
-        # "open-hands" still matches the registry-canonical active connector
-        # "openhands". A literal lower-case compare silently failed to fire
+        # "claude-code" still matches the registry-canonical active connector
+        # "claudecode". A literal lower-case compare silently failed to fire
         # the rule, letting a server through that policy meant to block.
         if connector_paths.normalize(str(rule.connector)) != connector_paths.normalize(connector):
             return False
@@ -933,6 +1030,13 @@ def _matches_amp_user_home(
     if os.path.normcase(common_path) != os.path.normcase(resolved_home):
         return False
     return os.path.normcase(resolved_source) == os.path.normcase(expected_source)
+
+
+def _content_verified_first_party(target_type: str, name: str) -> bool:
+    """Whether :func:`_own_first_party_content` checks this entry by the asset's
+    bytes, so its folder markers add nothing. Mirrors Go
+    ``contentVerifiedFirstParty``."""
+    return target_type == "skill" and name == "codeguard"
 
 
 def _own_first_party_content(target_type: str, name: str, source_path: str) -> bool:

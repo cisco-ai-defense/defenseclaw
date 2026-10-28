@@ -41,11 +41,16 @@ func partialAllowGateway(t *testing.T, drop bool) string {
 
 // B-40 (B-01 merge review item 1): a gateway that sent its headers and a
 // complete-looking allow, then stalled or dropped the connection before the
-// body it declared, has not decided. The call fails at the answer budget:
-// closed for a managed hook whatever its fail mode, and for a per-user hook
-// whose fail mode is closed or not set. The partial bytes are never an allow.
+// body it declared, has not decided. Once HTTP 200 arrived, an incomplete
+// answer is not a gateway outage and cannot use an open outage preference.
 func TestAPartialGatewayBodyIsNotADecision(t *testing.T) {
 	shortAnswerBudget(t, 300*time.Millisecond)
+	// Under CPU contention the watchdog can fire before the response-status
+	// goroutine runs. Both closed reasons are valid in that scheduling race;
+	// the direct read-error case below pins the incomplete-response reason.
+	closedReason := func(stderr string) bool {
+		return strings.Contains(stderr, "incomplete gateway response") || strings.Contains(stderr, "did not answer in time")
+	}
 	for _, test := range []struct {
 		name string
 		drop bool
@@ -56,8 +61,8 @@ func TestAPartialGatewayBodyIsNotADecision(t *testing.T) {
 					result, elapsed := runAgainstGateway(t, connector, partialAllowGateway(t, test.drop), func(opts *Options) {
 						opts.FailMode = mode
 					})
-					if elapsed > time.Second || !blocked(result) || !strings.Contains(result.stdout+result.stderr, perUserGatewayNoAnswerReason) {
-						t.Fatalf("per-user %s fail mode %q: after %s code=%d stdout=%q stderr=%q, want a block naming the gateway that did not answer",
+					if elapsed > time.Second || !blocked(result) || !closedReason(result.stderr) {
+						t.Fatalf("per-user %s fail mode %q: after %s code=%d stdout=%q stderr=%q, want an incomplete-answer block",
 							connector, mode, elapsed, result.code, result.stdout, result.stderr)
 					}
 				}
@@ -65,17 +70,48 @@ func TestAPartialGatewayBodyIsNotADecision(t *testing.T) {
 			managed, elapsed := runAgainstGateway(t, "codex", partialAllowGateway(t, test.drop), func(opts *Options) {
 				managedCodex(opts)
 			})
-			if elapsed > time.Second || !blocked(managed) || !strings.Contains(managed.stdout+managed.stderr, managedGatewayNoAnswerReason) {
-				t.Fatalf("managed: after %s code=%d stdout=%q stderr=%q, want a block naming %s",
-					elapsed, managed.code, managed.stdout, managed.stderr, managedGatewayNoAnswerReason)
+			if elapsed > time.Second || !blocked(managed) || !closedReason(managed.stderr) {
+				t.Fatalf("managed: after %s code=%d stdout=%q stderr=%q, want an incomplete-answer block",
+					elapsed, managed.code, managed.stdout, managed.stderr)
 			}
-			// Open is the operator's own choice for a per-user hook: the
-			// call goes ahead with the notice, not because of the bytes.
-			open, _ := runAgainstGateway(t, "claudecode", partialAllowGateway(t, test.drop), func(opts *Options) {
+			// An HTTP 200 with a broken body is an unusable answer, not an
+			// unreachable gateway. It cannot become an allow in open mode.
+			open, elapsed := runAgainstGateway(t, "claudecode", partialAllowGateway(t, test.drop), func(opts *Options) {
 				opts.FailMode = "open"
 			})
-			if open.code != 0 || !strings.Contains(open.stdout, perUserGatewayNoAnswerReason) {
-				t.Fatalf("per-user open: code=%d stdout=%q stderr=%q, want the fail-open notice", open.code, open.stdout, open.stderr)
+			if elapsed > time.Second || !blocked(open) || !closedReason(open.stderr) {
+				t.Fatalf("per-user open: code=%d stdout=%q stderr=%q, want a block", open.code, open.stdout, open.stderr)
+			}
+		})
+	}
+}
+
+func TestHTTP200MalformedAnswersCannotUseOpenOutageMode(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		rt   func() *stubRT
+	}{
+		{"read error after allow", func() *stubRT {
+			return answering(http.StatusOK, &erroringBody{data: `{"action":"allow"}`, err: io.ErrUnexpectedEOF})
+		}},
+		{"truncated JSON", func() *stubRT { return ok(`{"action":"allow"`) }},
+		{"invalid nested JSON", func() *stubRT { return ok(`{"action":"allow","extra":[invalid]}`) }},
+		{"duplicate action", func() *stubRT { return ok(`{"action":"block","action":"allow"}`) }},
+		{"duplicate nested key", func() *stubRT { return ok(`{"action":"allow","extra":{"x":1,"x":2}}`) }},
+		{"trailing document", func() *stubRT { return ok(`{"action":"allow"}{}`) }},
+		{"oversized body", func() *stubRT {
+			return ok(`{"action":"allow"}` + strings.Repeat(" ", int(defaultMaxBody)))
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			for _, connector := range []string{"codex", "claudecode"} {
+				result := run(t, connector, test.rt(), func(opts *Options) { opts.FailMode = "open" })
+				if !blocked(result) {
+					t.Fatalf("%s: code=%d stdout=%q stderr=%q, want block", connector, result.code, result.stdout, result.stderr)
+				}
+				if test.name == "read error after allow" && !strings.Contains(result.stderr, "incomplete gateway response") {
+					t.Fatalf("%s: error after HTTP 200 had reason %q, want incomplete gateway response", connector, result.stderr)
+				}
 			}
 		})
 	}

@@ -57,17 +57,18 @@ def test_overview_runtime_notice_is_short_and_hangs_under_its_text(tmp_path, mon
     runtime = _standard_account_runtime()
     app = snapshot_app(tmp_path)
     app.overview_model.runtime = runtime.overview()
-    notice = next(n.message for n in app.overview_model.build_notices() if n.message.startswith("Runtime is"))
-    assert "(shadow egress partially covered)" in notice and "N for details" in notice
+    notice = next(n.message for n in app.overview_model.build_notices() if n.message.startswith("Runtime "))
+    assert notice.endswith("N for details: shadow egress partially covered"), notice
     assert "elevated" not in notice and len(notice) <= 110, notice
     assert "run the gateway elevated" in runtime.health_explanation()
 
-    size = SimpleNamespace(width=90, height=40)
+    # Narrow enough that the one-line notice wraps, to see where it hangs.
+    size = SimpleNamespace(width=60, height=40)
     monkeypatch.setattr(DefenseClawTUI, "size", property(lambda _self: size))
-    console = Console(file=io.StringIO(), width=90, color_system=None)
+    console = Console(file=io.StringIO(), width=60, color_system=None)
     console.print(app._overview_renderable())  # noqa: SLF001
     lines = console.file.getvalue().splitlines()
-    first = next(i for i, line in enumerate(lines) if "[>] Runtime is" in line)
-    text_col = lines[first].index("Runtime is")
+    first = next(i for i, line in enumerate(lines) if "[>] Runtime " in line)
+    text_col = lines[first].index("Runtime ")
     continuation = lines[first + 1]
     assert continuation.strip() and len(continuation) - len(continuation.lstrip()) == text_col, lines[first : first + 2]

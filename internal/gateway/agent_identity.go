@@ -5,6 +5,7 @@ package gateway
 
 import (
 	"context"
+	"hash/fnv"
 	"os"
 	osuser "os/user"
 	"path/filepath"
@@ -14,12 +15,14 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/agentidentity"
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/observability"
 	"github.com/defenseclaw/defenseclaw/internal/sandboxauth"
+	"github.com/defenseclaw/defenseclaw/internal/useridentity"
 )
 
 // agentIdentityFromContext returns the agent identity
@@ -46,12 +49,47 @@ type agentIdentityFacts struct {
 	MachineHash string
 	UserID      string
 	UserName    string
-	Connector   string
-	InstallFP   string
+	// UserDomain is the useridentity.AccountDomains of the user's verified
+	// facts when the hook ran (agentIdentityAccountDomains), and
+	// UserIncarnation the account token of the account that held the uid
+	// (agentIdentityAccountToken).
+	UserDomain      string
+	UserIncarnation string
+	// UserUPN is the account's UPN in the directory facts the gateway
+	// cached for the uid or SID (agentIdentityAccountUPN). UPNUnavailable
+	// distinguishes an absent, expired or failed cache answer from a
+	// verified account with no UPN.
+	UserUPN        string
+	UPNUnavailable bool
+	// UPNRead numbers the read of UserUPN (agentIdentityUPNSnapshot): a
+	// hook that read the UPN earlier can reach the recorder after a later
+	// one, and its older UPN must not replace the newer one.
+	UPNRead   uint64
+	Connector string
+	InstallFP string
 	// InstallHint is a config root the agent claimed (a CLAUDE_CONFIG_DIR or
 	// CODEX_HOME style override seen in the payload) that differs from
 	// InstallFP. It is recorded for operators and never moves the ID.
 	InstallHint string
+	// LegacyID is the identity 1.0.0 to 1.0.3 gave this agent
+	// (agentidentity.LegacyAgentID), "" when it is ID. A guardrail profile
+	// assignment may still name it (profileAgentBridge).
+	LegacyID string
+	// The legacy owner is checked only when a profile names LegacyID.
+	account string
+	self    bool
+}
+
+type hookIdentitySnapshotKey struct{}
+
+// One accepted hook uses the same verified identity facts for correlation,
+// evaluation and audit. Later hooks resolve afresh, including current UPN and
+// account ownership, so a changed guardian record is seen on the next call.
+func withHookIdentitySnapshot(ctx context.Context, facts agentIdentityFacts) context.Context {
+	if facts.ID == "" {
+		return ctx
+	}
+	return context.WithValue(ctx, hookIdentitySnapshotKey{}, facts)
 }
 
 // agentIdentityConfig is the config the gateway resolves connector config
@@ -89,8 +127,13 @@ func resolveHookAgentIdentity(ctx context.Context, req agentHookRequest) agentId
 	if connectorName == "" || user.ID == "" {
 		return agentIdentityFacts{}
 	}
+	if snapshot, ok := ctx.Value(hookIdentitySnapshotKey{}).(agentIdentityFacts); ok &&
+		snapshot.Connector == connectorName && snapshot.UserID == agentidentity.NormalizeUserID(user.ID) {
+		return snapshot.withInstallHint(req.Payload)
+	}
 	machine, machineVerified := agentidentity.HostMachineHash()
 	account := agentIdentityAccount(user)
+	upn, upnKnown, upnRead := agentIdentityUPNSnapshot(user.ID)
 	facts := agentIdentityFacts{
 		MachineHash: machine,
 		UserID:      agentidentity.NormalizeUserID(user.ID),
@@ -99,23 +142,158 @@ func resolveHookAgentIdentity(ctx context.Context, req agentHookRequest) agentId
 		// to the other admin views. defenseclaw.user.name stays bare. The
 		// account the ID is keyed on comes first: the listing tells a
 		// removed account's identity by it (GAP-0947).
-		UserName:  firstNonEmpty(account, user.Name),
-		Connector: connectorName,
-		InstallFP: agentIdentityInstallFP(connectorName, user),
+		UserName:        firstNonEmpty(account, user.Name),
+		UserDomain:      agentIdentityAccountDomains(user.ID),
+		UserIncarnation: agentIdentityAccountToken(agentidentity.NormalizeUserID(user.ID)),
+		UserUPN:         upn,
+		UPNUnavailable:  !upnKnown,
+		UPNRead:         upnRead,
+		Connector:       connectorName,
+		InstallFP:       agentIdentityInstallFP(connectorName, user),
+		account:         account,
+		self:            user.Self,
 	}
-	facts.ID = agentidentity.AgentID(agentidentity.Inputs{
+	inputs := agentidentity.Inputs{
 		MachineHash: facts.MachineHash, UserID: facts.UserID, Account: account,
-		Connector: facts.Connector, InstallFP: facts.InstallFP,
-	})
+		Connector: facts.Connector, InstallFP: facts.InstallFP, Incarnation: agentIdentityAccountIncarnation(user),
+	}
+	facts.ID = agentidentity.AgentID(inputs)
 	if facts.ID == "" {
 		return agentIdentityFacts{}
 	}
+	facts.LegacyID = agentidentity.LegacyAgentID(inputs)
 	facts.Verified = machineVerified && user.Verified
-	if hint := claimedInstallHint(req.Payload); hint != "" &&
+	return facts.withInstallHint(req.Payload)
+}
+
+func (facts agentIdentityFacts) withInstallHint(payload map[string]interface{}) agentIdentityFacts {
+	facts.InstallHint = ""
+	if hint := claimedInstallHint(payload); hint != "" &&
 		agentidentity.NormalizeInstallFP(hint) != agentidentity.NormalizeInstallFP(facts.InstallFP) {
 		facts.InstallHint = hint
 	}
 	return facts
+}
+
+// agentIdentityAccountDomains is the provenance an agent identity row keeps
+// of the account a uid's hooks ran as: the useridentity.AccountDomains of
+// the verified facts the gateway cached for the uid. "" for a SID, which no
+// other account is given, and while no facts are cached.
+func agentIdentityAccountDomains(userID string) string {
+	userID = agentidentity.NormalizeUserID(userID)
+	if userID == "" || agentidentity.IsSID(userID) {
+		return ""
+	}
+	facts, _, ok := peerDirectoryCache().peek(userID)
+	if !ok {
+		return ""
+	}
+	return useridentity.AccountDomains(facts)
+}
+
+// agentIdentityUPNReads numbers the hook path's UPN reads
+// (agentIdentityFacts.UPNRead).
+var agentIdentityUPNReads atomic.Uint64
+
+// agentIdentityUPNReadLocks make a UPN read and its number one step per
+// account: of two hooks of one account, the one that read the UPN later
+// gets the larger number, also when the other paused between its read and
+// its number. Accounts share a lock only when their IDs hash alike.
+var agentIdentityUPNReadLocks [64]sync.Mutex
+
+// agentIdentityUPNReadHook, when a test sets it, runs between a UPN read
+// of an account and its number.
+var agentIdentityUPNReadHook atomic.Pointer[func(userID string)]
+
+// agentIdentityUPNSnapshot is agentIdentityAccountUPN with the number of
+// the read, taken under the account's lock.
+func agentIdentityUPNSnapshot(userID string) (upn string, known bool, read uint64) {
+	hash := fnv.New32a()
+	_, _ = hash.Write([]byte(agentidentity.NormalizeUserID(userID)))
+	lock := &agentIdentityUPNReadLocks[hash.Sum32()%uint32(len(agentIdentityUPNReadLocks))]
+	lock.Lock()
+	defer lock.Unlock()
+	upn, known = agentIdentityAccountUPN(userID)
+	if hook := agentIdentityUPNReadHook.Load(); hook != nil {
+		(*hook)(userID)
+	}
+	return upn, known, agentIdentityUPNReads.Add(1)
+}
+
+// agentIdentityAccountUPN is the UPN of the account a uid or SID's hooks ran
+// as. A current Windows guardian record wins before profile lookup refreshes
+// the gateway cache. Otherwise only current cached directory facts may name
+// it. A kept UPN (the last good answer profile matching keeps through an
+// outage, GAP-0129 and GAP-0284) is not current, so the row leaves it out;
+// a managed Unix uid's current guardian record decides that mark
+// (unixSpoolUPNState). known is false when no current answer or directory
+// UPN is available.
+// This never looks the account up, so the hook path does not wait for it.
+func agentIdentityAccountUPN(userID string) (upn string, known bool) {
+	userID = agentidentity.NormalizeUserID(userID)
+	if userID == "" {
+		return "", false
+	}
+	facts, ok := peerDirectoryCache().peekCurrent(userID)
+	if agentidentity.IsSID(userID) && currentIdentitySpoolDir() != "" {
+		if record, current := readIdentitySpoolFacts(userID, time.Now()); current {
+			if record.UPNKept() {
+				return "", false
+			}
+			upn := strings.TrimSpace(record.Facts.UPN)
+			return upn, upn != "" || record.Facts.Directory == useridentity.DirectoryLocal
+		}
+		// A withdrawn or unreadable guardian record cannot keep proving the
+		// UPN that the gateway cached from an earlier guardian pass.
+		if !ok || facts.GuardianRecord {
+			return "", false
+		}
+	}
+	if !ok {
+		return "", false
+	}
+	if !agentidentity.IsSID(userID) && facts.GuardianRecord && currentIdentitySpoolDir() != "" {
+		kept, current := unixSpoolUPNState(userID, facts, time.Now())
+		if !current {
+			return "", false
+		}
+		facts.UPNKept = kept
+	}
+	if facts.UPNKept {
+		return "", false
+	}
+	upn = strings.TrimSpace(facts.UPN)
+	if upn == "" && agentidentity.IsSID(userID) &&
+		(facts.Directory == useridentity.DirectoryActiveDirectory || facts.Directory == useridentity.DirectoryEntraID) {
+		// An unavailable directory UPN does not prove that this account
+		// has none, even when the guardian has a current record.
+		return "", false
+	}
+	return upn, upn != "" || facts.Directory == useridentity.DirectoryLocal || facts.GuardianRecord
+}
+
+// unixSpoolUPNState checks a managed Linux or macOS uid's cached facts,
+// which merged the guardian's record as it was when they were resolved,
+// against the guardian's record now. The policy cache acts only on a record
+// that contradicts or adds to the facts (forgetOnSpoolChange), so a later
+// pass that marked the same UPN kept (infopipe_kept) changes no profile
+// match, but an agent identity row lists current facts only. current is
+// false when the guardian has since withdrawn the identity or its current
+// record names another UPN or none; kept is the current record's mark for
+// the same UPN, or the cached one when no current record can be read (a
+// missing or unreadable record withdraws nothing on Linux and macOS).
+func unixSpoolUPNState(userID string, facts useridentity.DirectoryFacts, now time.Time) (kept, current bool) {
+	if identitySpoolWithdrawnAt(userID, now).After(facts.SpoolSeenAt) {
+		return false, false
+	}
+	record, ok := readIdentitySpoolFacts(userID, now)
+	if !ok {
+		return facts.UPNKept, true
+	}
+	if !strings.EqualFold(strings.TrimSpace(record.Facts.UPN), strings.TrimSpace(facts.UPN)) {
+		return false, false
+	}
+	return record.UPNKept(), true
 }
 
 // hookAgentIdentityUser picks the user an agent identity belongs to, most
@@ -170,6 +348,21 @@ func agentIdentityAccount(user agentIdentityUser) string {
 	return ""
 }
 
+// agentIdentityAccountIncarnation is the account incarnation a uid's agent
+// identity is keyed on besides its name (agentidentity.Inputs.Incarnation):
+// "" for the first account the gateway saw hold the uid, and the token of
+// any other one (agentIdentityIncarnation). One bare name, uid and home in
+// two domains derived one agent ID, so the second account got the first
+// one's match.agents profile and its row of the agent identities ledger
+// (review of GAP-0947). A per-user gateway's own account and a SID are never
+// handed on.
+func agentIdentityAccountIncarnation(user agentIdentityUser) string {
+	if user.Self || agentidentity.IsSID(agentidentity.NormalizeUserID(user.ID)) {
+		return ""
+	}
+	return agentIdentityIncarnation(user.ID)
+}
+
 var gatewaySelf struct {
 	once sync.Once
 	user agentIdentityUser
@@ -217,7 +410,7 @@ func agentIdentityInstallFP(connectorName string, user agentIdentityUser) string
 	cfg := agentIdentityConfig.Load()
 	if user.Self {
 		switch strings.ToLower(strings.TrimSpace(connectorName)) {
-		case "claudecode", "codex", "hermes", "opencode", "omnigent":
+		case "claudecode", "codex", "hermes", "opencode":
 		default:
 			return filepath.Clean(cfg.ConnectorHomeDir(connectorName))
 		}
@@ -247,8 +440,6 @@ func connectorConfigRootRelative(cfg *config.Config, connectorName string) strin
 		return ".hermes"
 	case "opencode":
 		return filepath.Join(".config", "opencode")
-	case "omnigent":
-		return ".omnigent"
 	}
 	if cached, ok := connectorConfigRootRel.Load(connectorName); ok {
 		return cached.(string)
@@ -404,6 +595,7 @@ func inventoryAgentIdentityID(connectorName, userID, userName string) string {
 	return agentidentity.AgentID(agentidentity.Inputs{
 		MachineHash: machine, UserID: agentidentity.NormalizeUserID(user.ID), Account: account,
 		Connector: connectorName, InstallFP: agentIdentityInstallFP(connectorName, user),
+		Incarnation: agentIdentityAccountIncarnation(user),
 	})
 }
 

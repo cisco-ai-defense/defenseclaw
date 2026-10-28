@@ -5,6 +5,7 @@ package gateway
 
 import (
 	"bytes"
+	"context"
 	"database/sql"
 	"encoding/json"
 	"fmt"
@@ -37,6 +38,70 @@ func newHookCorrelationServer(t *testing.T, path string) (*APIServer, *audit.Sto
 
 func installCorrelationHMACForTest() {
 	gatewaylog.SetTelemetryHMACSeed(bytes.Repeat([]byte{0x4a}, 32))
+}
+
+func TestHookCorrelationRetriesConcurrentSQLiteWriter(t *testing.T) {
+	installCorrelationHMACForTest()
+	server, store := newHookCorrelationServer(t, filepath.Join(t.TempDir(), "audit.db"))
+	defer store.Close() //nolint:errcheck
+	server.scannerCfg = &config.Config{DeploymentMode: managed.DeploymentModeManagedEnterprise,
+		Enterprise: config.EnterpriseConfig{Profile: managed.ProfileStandalone}}
+	profile := server.hookProfileForConnector("claudecode")
+	repo, err := store.CorrelationRepository()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := repo.ResolveConnectorInstance(t.Context(), "claudecode", string(profile.Correlation.ProfileVersion), audit.ConnectorCustodyExternal); err != nil {
+		t.Fatal(err)
+	}
+	writer, err := sql.Open("sqlite", store.DatabasePath()+"?_pragma=busy_timeout(0)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer writer.Close()
+	conn, err := writer.Conn(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	if _, err := conn.ExecContext(t.Context(), "BEGIN IMMEDIATE"); err != nil {
+		t.Fatal(err)
+	}
+	defer conn.ExecContext(context.Background(), "ROLLBACK") //nolint:errcheck
+	if _, err := conn.ExecContext(t.Context(), `UPDATE correlation_connector_instances
+		SET updated_time_unix_nano=updated_time_unix_nano+1 WHERE connector='claudecode'`); err != nil {
+		t.Fatal(err)
+	}
+
+	// The hook reads the last committed connector state while another
+	// process owns the writer. Its occurrence transaction must start over
+	// after that writer commits, rather than dropping the correlation claim.
+	// The writer commits when the hook first reports it busy, not after a
+	// fixed delay: on a loaded Windows runner a 120 ms sleep outlasted the
+	// hook's whole bounded retry.
+	busyWaits := 0
+	var commitErr error
+	previousBusyWait := hookCorrelationBusyWait
+	t.Cleanup(func() { hookCorrelationBusyWait = previousBusyWait })
+	hookCorrelationBusyWait = func(int) {
+		busyWaits++
+		if busyWaits == 1 {
+			_, commitErr = conn.ExecContext(context.Background(), "COMMIT")
+		}
+	}
+	const raw = `{"hook_event_name":"PreToolUse","session_id":"writer-test","tool_name":"Bash","tool_use_id":"writer-tool"}`
+	payload := map[string]interface{}{
+		"hook_event_name": "PreToolUse", "session_id": "writer-test",
+		"tool_name": "Bash", "tool_use_id": "writer-tool",
+	}
+	req := normalizeAgentHookRequestWithProfile("claudecode", payload, profile)
+	_, correlated, correlationErr := server.correlateHookOccurrence(t.Context(), profile, req, []byte(raw))
+	if busyWaits == 0 || commitErr != nil {
+		t.Fatalf("the hook never met the competing writer (busy waits %d) or its commit failed: %v", busyWaits, commitErr)
+	}
+	if correlationErr != nil || correlated.SemanticEventID == "" {
+		t.Fatalf("correlation under a competing SQLite writer: id=%q err=%v", correlated.SemanticEventID, correlationErr)
+	}
 }
 
 func persistCanonicalCorrelationObservation(
@@ -861,61 +926,6 @@ func TestHookOccurrenceExactTerminalIDNeverFallsBackToCurrentPendingOperation(t 
 	}
 }
 
-func TestHookOccurrenceOmniGentRejectsUnprovenModelAliasesAcrossRestart(t *testing.T) {
-	installCorrelationHMACForTest()
-	path := filepath.Join(t.TempDir(), "audit.db")
-	server, store := newHookCorrelationServer(t, path)
-	profile := server.hookProfileForConnector("omnigent")
-	startPayload := map[string]interface{}{
-		"hook_event_name": "BeforeModel", "conversation_id": "reported-model-session",
-		"response_id": "reported-model-turn", "agent_id": "reported-model-agent",
-		"request_id": "provider-model-request-1",
-	}
-	start := normalizeAgentHookRequestWithProfile("omnigent", startPayload, profile)
-	_, start, err := server.correlateHookOccurrence(t.Context(), profile, start,
-		[]byte(`{"agent_id":"reported-model-agent","conversation_id":"reported-model-session","hook_event_name":"BeforeModel","request_id":"provider-model-request-1","response_id":"reported-model-turn"}`))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if start.ModelRequestID != "" {
-		t.Fatalf("unproven OmniGent request_id populated model identity: %q", start.ModelRequestID)
-	}
-	if err := store.Close(); err != nil {
-		t.Fatal(err)
-	}
-
-	server, reopened := newHookCorrelationServer(t, path)
-	defer reopened.Close() //nolint:errcheck
-	profile = server.hookProfileForConnector("omnigent")
-	endPayload := map[string]interface{}{
-		"hook_event_name": "AfterModel", "conversation_id": "reported-model-session",
-		"response_id": "reported-model-turn", "agent_id": "reported-model-agent",
-	}
-	end := normalizeAgentHookRequestWithProfile("omnigent", endPayload, profile)
-	_, end, err = server.correlateHookOccurrence(t.Context(), profile, end,
-		[]byte(`{"agent_id":"reported-model-agent","conversation_id":"reported-model-session","hook_event_name":"AfterModel","response_id":"reported-model-turn"}`))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if end.ModelRequestID != "" {
-		t.Fatalf("unproven OmniGent aliases inferred model identity after restart: %q", end.ModelRequestID)
-	}
-	repo, err := reopened.CorrelationRepository()
-	if err != nil {
-		t.Fatal(err)
-	}
-	operations, err := repo.ListPendingOperations(t.Context(), audit.CorrelationPendingQuery{
-		ConnectorInstanceID: audit.ConnectorInstanceID(start.ConnectorInstanceID),
-		Type:                audit.CorrelationOperationModel, Status: audit.CorrelationOperationCompleted, Limit: 10,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(operations) != 0 {
-		t.Fatalf("unproven OmniGent model aliases created completed operations=%+v", operations)
-	}
-}
-
 func TestHookOccurrenceRejectsMalformedReportedSemanticID(t *testing.T) {
 	installCorrelationHMACForTest()
 	server, store := newHookCorrelationServer(t, filepath.Join(t.TempDir(), "audit.db"))
@@ -962,59 +972,6 @@ func TestHookOccurrenceRejectsConflictingTypedAliasesBeforePersistence(t *testin
 		if count != 0 {
 			t.Fatalf("conflicting hook wrote %d rows to %s", count, table)
 		}
-	}
-}
-
-func TestOpenHandsCommandHookRejectsSDKOnlyActionIdentity(t *testing.T) {
-	installCorrelationHMACForTest()
-	path := filepath.Join(t.TempDir(), "audit.db")
-	server, store := newHookCorrelationServer(t, path)
-	defer store.Close() //nolint:errcheck
-	profile := server.hookProfileForConnector("openhands")
-	req := normalizeAgentHookRequestWithProfile("openhands", map[string]interface{}{
-		"hook_event_name": "user_prompt_submit",
-		"session_id":      "session-1",
-		"message_id":      "message-1",
-		"action_id":       "action-1",
-	}, profile)
-	if req.SessionID != "session-1" {
-		t.Fatalf("documented session ID was not preserved before correlation: %+v", req)
-	}
-	if req.ToolInvocationID != "" {
-		t.Fatalf("action ID populated tool invocation before correlation: %+v", req)
-	}
-	_, correlated, err := server.correlateHookOccurrence(t.Context(), profile, req,
-		[]byte(`{"action_id":"action-1","hook_event_name":"user_prompt_submit","message_id":"message-1","session_id":"session-1"}`))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if correlated.SessionID != "session-1" {
-		t.Fatalf("documented session ID was not preserved after correlation: %+v", correlated)
-	}
-	if correlated.ToolInvocationID != "" {
-		t.Fatalf("action ID populated tool invocation after correlation: %+v", correlated)
-	}
-
-	database, err := sql.Open("sqlite", path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer database.Close() //nolint:errcheck
-	var sessions, actions, tools int
-	if err := database.QueryRow(`SELECT COUNT(*) FROM correlation_identifiers
-		WHERE identifier_kind='session' AND normalized_value='session-1'`).Scan(&sessions); err != nil {
-		t.Fatal(err)
-	}
-	if err := database.QueryRow(`SELECT COUNT(*) FROM correlation_identifiers
-		WHERE identifier_kind='action' AND normalized_value='action-1'`).Scan(&actions); err != nil {
-		t.Fatal(err)
-	}
-	if err := database.QueryRow(`SELECT COUNT(*) FROM correlation_identifiers
-		WHERE identifier_kind='tool_invocation' AND normalized_value='action-1'`).Scan(&tools); err != nil {
-		t.Fatal(err)
-	}
-	if sessions != 1 || actions != 0 || tools != 0 {
-		t.Fatalf("session/action/tool identifier rows=%d/%d/%d", sessions, actions, tools)
 	}
 }
 

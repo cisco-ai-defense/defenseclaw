@@ -34,7 +34,6 @@ struct ConnectorOnboardingTests {
         proxyConnectorsNeverEnterInitializationPlans()
         setupCommandNameHyphenatesOnlyClaudeCode()
         commandRegistryIncludesAmpSetup()
-        commandRegistryIncludesOmniGentSetup()
         commandRegistryIncludesCanonicalDevinSetup()
         commandRegistryOmitsRemovedStandaloneSandboxCommands()
         parsesCommandArguments()
@@ -287,14 +286,6 @@ struct ConnectorOnboardingTests {
         let command = CommandRegistry.all.first { $0.title == "setup amp" }
         expect(command?.arguments == ["setup", "amp", "--yes"], "Amp setup command is available")
         expect(CommandRegistry.all.count == CommandRegistry.sourceCount, "native command count matches source")
-    }
-
-    private static func commandRegistryIncludesOmniGentSetup() {
-        let command = CommandRegistry.all.first { $0.title == "setup omnigent" }
-        expect(
-            command?.arguments == ["setup", "omnigent", "--yes"],
-            "OmniGent setup command is available"
-        )
     }
 
     private static func commandRegistryIncludesCanonicalDevinSetup() {

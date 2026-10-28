@@ -655,3 +655,25 @@ func TestManagedFloorCarriesALockedPack(t *testing.T) {
 		t.Fatalf("unlocked managed floor = %+v %v", f, err)
 	}
 }
+
+// r102 GAP-0562: a pack locked only by a profile's sandbox section was
+// refused naming openshell.admin.locked. The refusal names the lock that
+// applies; the organization's own lock keeps its name.
+func TestLockedRefusalNamesTheProfileLock(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		baseLocked   []string
+		want, detail string
+	}{
+		{"profile lock", nil, `guardrail.profiles["engineering"].sandbox.locked`, "your profile engineering locks pack"},
+		{"organization lock", []string{"pack"}, lockedConstraint, "your organization locked pack"},
+	} {
+		cfg := testConfig(func(o *config.OpenShellConfig) {
+			o.Pack, o.Admin.Locked = "strict", tc.baseLocked
+		})
+		floor := config.OpenShellAdminConfig{Locked: []string{"pack"}}
+		_, violations := mustResolve(t, cfg, Flags{Subject: ownSubject(t, t.TempDir()), Floor: &floor, FloorProfile: "engineering",
+			Harness: "claudecode", Pack: "open"})
+		wantViolations(t, violations, Violation{Key: "pack", Constraint: tc.want, Detail: tc.detail})
+	}
+}

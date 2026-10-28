@@ -65,18 +65,14 @@ func TestActiveConnectors_Precedence(t *testing.T) {
 		{
 			name: "normalizes_map_keys",
 			connectors: map[string]PerConnectorGuardrailConfig{
-				"  Codex  ":  {},
-				"open-hands": {},
+				"  Codex  ": {},
 			},
-			want: []string{"codex", "openhands"},
+			want: []string{"codex"},
 		},
 		{
-			name: "dedupes_normalized_aliases",
-			connectors: map[string]PerConnectorGuardrailConfig{
-				"openhands":  {},
-				"open_hands": {},
-			},
-			want: []string{"openhands"},
+			name:       "dedupes_normalized_aliases",
+			connectors: map[string]PerConnectorGuardrailConfig{"codex": {}, "CoDeX": {}},
+			want:       []string{"codex"},
 		},
 		{
 			name: "dedupes_claude_aliases",
@@ -101,25 +97,31 @@ func TestActiveConnectors_Precedence(t *testing.T) {
 	}
 }
 
-// TestActiveConnector_UnchangedByMap proves activeConnector() keeps its
-// original precedence (guardrail.connector → claw.mode → "openclaw") and
-// is NOT influenced by the new guardrail.connectors map: the plural
-// activeConnectors() is purely additive on top of the untouched singular
-// reader, so legacy single-connector call sites behave exactly as before.
-func TestActiveConnector_UnchangedByMap(t *testing.T) {
+// With a roster and no singular selection, the first configured connector
+// is the primary; an OpenClaw default must not be invented.
+func TestActiveConnector_UsesRosterWhenSingularUnset(t *testing.T) {
 	cfg := &Config{}
 	cfg.Guardrail.Connectors = map[string]PerConnectorGuardrailConfig{
 		"codex":       {},
 		"antigravity": {},
 	}
-	// Map present but no singular connector / mode → singular reader
-	// falls back to "openclaw" exactly like before multi-connector.
-	if got := cfg.activeConnector(); got != "openclaw" {
-		t.Errorf("activeConnector() = %q, want openclaw (map must not affect singular reader)", got)
+	if got := cfg.activeConnector(); got != "antigravity" {
+		t.Errorf("activeConnector() = %q, want antigravity", got)
 	}
-	// The plural reader is the additive surface that sees the map.
 	if got := cfg.activeConnectors(); !reflect.DeepEqual(got, []string{"antigravity", "codex"}) {
 		t.Errorf("activeConnectors() = %v, want [antigravity codex]", got)
+	}
+}
+
+func TestActiveConnector_SecureClientRosterDoesNotInventOpenClaw(t *testing.T) {
+	cfg := &Config{
+		DeploymentMode: "managed_enterprise",
+		Enterprise:     EnterpriseConfig{Profile: "secure_client"},
+		Claw:           ClawConfig{Mode: ClawOpenClaw},
+	}
+	cfg.Guardrail.Connectors = map[string]PerConnectorGuardrailConfig{"codex": {}}
+	if got := cfg.activeConnector(); got != "codex" {
+		t.Errorf("secure client activeConnector() = %q, want codex", got)
 	}
 }
 
@@ -172,8 +174,8 @@ func TestEffectiveResolvers_Precedence(t *testing.T) {
 	if got := g.EffectiveMode("empty"); got != "observe" {
 		t.Errorf("EffectiveMode(empty) = %q, want observe", got)
 	}
-	if got := hookFailModeFor(g, "empty"); got != "open" {
-		t.Errorf("EffectiveHookFailModeFor(empty) = %q, want open", got)
+	if got := hookFailModeFor(g, "empty"); got != "closed" {
+		t.Errorf("EffectiveHookFailModeFor(empty) = %q, want closed per user", got)
 	}
 	if got := g.EffectiveBlockMessage("empty"); got != "global-msg" {
 		t.Errorf("EffectiveBlockMessage(empty) = %q, want global-msg", got)
@@ -190,12 +192,12 @@ func TestEffectiveResolvers_Precedence(t *testing.T) {
 		t.Errorf("EffectiveMode(nope) = %q, want observe", got)
 	}
 	// Empty connector name resolves the global value (legacy callers).
-	if got := hookFailModeFor(g, ""); got != "open" {
-		t.Errorf("EffectiveHookFailModeFor(\"\") = %q, want open", got)
+	if got := hookFailModeFor(g, ""); got != "closed" {
+		t.Errorf("EffectiveHookFailModeFor(\"\") = %q, want closed", got)
 	}
 	// The original no-arg global resolver is untouched and still works.
-	if got := hookFailModeFor(g, ""); got != "open" {
-		t.Errorf("EffectiveHookFailMode() = %q, want open", got)
+	if got := hookFailModeFor(g, ""); got != "closed" {
+		t.Errorf("EffectiveHookFailMode() = %q, want closed", got)
 	}
 }
 
@@ -228,7 +230,7 @@ func TestEffectiveResolvers_SafeFallbacks(t *testing.T) {
 	}
 }
 
-func TestEffectiveHookFailMode_ExplicitOverrideWinsInObserve(t *testing.T) {
+func TestEffectiveHookFailMode_PerUserExplicitOpenIsClosedInObserve(t *testing.T) {
 	g := &GuardrailConfig{
 		Mode:         "observe",
 		HookFailMode: "closed",
@@ -237,8 +239,8 @@ func TestEffectiveHookFailMode_ExplicitOverrideWinsInObserve(t *testing.T) {
 			"claudecode": {},
 		},
 	}
-	if got := hookFailModeFor(g, "codex"); got != "open" {
-		t.Fatalf("explicit connector fail mode = %q, want open", got)
+	if got := hookFailModeFor(g, "codex"); got != "closed" {
+		t.Fatalf("explicit connector fail mode = %q, want closed per user", got)
 	}
 	// Observe mode no longer keeps a connector without its own value
 	// fail-open: the global value applies.
@@ -247,10 +249,8 @@ func TestEffectiveHookFailMode_ExplicitOverrideWinsInObserve(t *testing.T) {
 	}
 }
 
-// Owner rules (B-01, 1.0.3, and 2026-10-20): an unset fail mode is closed
-// everywhere except under Secure Client, and an explicit `hook_fail_mode`
-// wins everywhere, a standalone managed host included (its config is the
-// administrator's). Secure Client keeps its observe-mode fail-open contract.
+// Owner rule: per-user hooks are always closed; a managed administrator may
+// choose an outage open, and Secure Client defaults open.
 func TestUnsetHookFailModeIsClosedOutsideSecureClient(t *testing.T) {
 	for _, test := range []struct {
 		name, deployment, profile string
@@ -258,8 +258,8 @@ func TestUnsetHookFailModeIsClosedOutsideSecureClient(t *testing.T) {
 		want                      string
 	}{
 		{name: "per-user, nothing set", want: "closed"},
-		{name: "per-user, global open", global: "open", want: "open"},
-		{name: "per-user, connector open", connector: "open", want: "open"},
+		{name: "per-user, global open", global: "open", want: "closed"},
+		{name: "per-user, connector open", connector: "open", want: "closed"},
 		{name: "per-user, global open, connector closed", global: "open", connector: "closed", want: "closed"},
 		{name: "standalone, nothing set", deployment: "managed_enterprise", profile: "standalone", want: "closed"},
 		{name: "standalone, connector open", deployment: "managed_enterprise", profile: "standalone", connector: "open", want: "open"},
@@ -298,8 +298,8 @@ func TestConnectorsEmptyMapEqualsAbsent(t *testing.T) {
 // TestEffectiveEnabled covers the per-connector on/off resolver: default
 // true everywhere, false only on an explicit `enabled: false` override.
 func TestEffectiveEnabled(t *testing.T) {
-	enabled := true
 	disabled := false
+	enabled := true
 	g := &GuardrailConfig{
 		Mode: "action",
 		Connectors: map[string]PerConnectorGuardrailConfig{
@@ -334,55 +334,6 @@ func TestEffectiveEnabled(t *testing.T) {
 	single := &GuardrailConfig{Mode: "action", Connector: "codex"}
 	if !single.EffectiveEnabled("codex") {
 		t.Errorf("single-connector EffectiveEnabled(codex) = false, want true")
-	}
-}
-
-// TestConnectorOverride_NameInsensitive confirms every Effective*()
-// resolver finds a per-connector override even when the configured key
-// differs from the requested name only by case or a hyphen/underscore
-// alias. The boot loop keys connectors by their canonical registry name
-// (e.g. "openhands"), while operators may hand-write "OpenHands" or
-// "open-hands" in config.yaml; the lookup must reconcile the two so the
-// override is honored instead of silently falling through to the global.
-func TestConnectorOverride_NameInsensitive(t *testing.T) {
-	disabled := false
-	g := &GuardrailConfig{
-		Mode:         "observe",
-		BlockMessage: "global-msg",
-		Connectors: map[string]PerConnectorGuardrailConfig{
-			"Codex":      {Mode: "action", BlockMessage: "codex-msg"},
-			"open-hands": {Mode: "action", Enabled: &disabled},
-		},
-	}
-
-	// Case-insensitive: canonical "codex" must resolve the "Codex" entry.
-	if got := g.EffectiveMode("codex"); got != "action" {
-		t.Errorf("EffectiveMode(codex) = %q, want action (case-insensitive key)", got)
-	}
-	if got := g.EffectiveBlockMessage("codex"); got != "codex-msg" {
-		t.Errorf("EffectiveBlockMessage(codex) = %q, want codex-msg", got)
-	}
-	if !g.HasConnector("CODEX") {
-		t.Errorf("HasConnector(CODEX) = false, want true (case-insensitive)")
-	}
-
-	// Alias-insensitive: canonical "openhands" must resolve "open-hands".
-	if got := g.EffectiveMode("openhands"); got != "action" {
-		t.Errorf("EffectiveMode(openhands) = %q, want action (alias key)", got)
-	}
-	if g.EffectiveEnabled("openhands") {
-		t.Errorf("EffectiveEnabled(openhands) = true, want false (alias key honored)")
-	}
-	if !g.HasConnector("openhands") {
-		t.Errorf("HasConnector(openhands) = false, want true (alias)")
-	}
-
-	// Genuinely-absent connector still falls through to the global.
-	if got := g.EffectiveMode("retired-example"); got != "observe" {
-		t.Errorf("EffectiveMode(retired-example) = %q, want observe (no override)", got)
-	}
-	if g.HasConnector("retired-example") {
-		t.Errorf("HasConnector(retired-example) = true, want false")
 	}
 }
 
@@ -435,11 +386,8 @@ func TestGuardrailValidate(t *testing.T) {
 			wantErr: "",
 		},
 		{
-			name: "duplicate_normalized_alias",
-			cfg: GuardrailConfig{Connectors: map[string]PerConnectorGuardrailConfig{
-				"openhands":  {Mode: "action"},
-				"open-hands": {Mode: "observe"},
-			}},
+			name:    "duplicate_normalized_alias",
+			cfg:     GuardrailConfig{Connectors: map[string]PerConnectorGuardrailConfig{"claude-code": {}, "claude_code": {}}},
 			wantErr: "refer to the same connector",
 		},
 		{
@@ -517,18 +465,16 @@ func TestResolversArePure(t *testing.T) {
 	}
 }
 
-// TestEffectiveHookFailMode_GlobalOpenIgnoresCase keeps the global resolver in
-// step with the per-connector branch and the Python resolver: the "open"
-// sentinel is matched case-insensitively after trimming, so a hand-edited
-// "Open" does not silently flip delivery to closed. Unset stays closed.
+// Per-user hooks stay closed even if a hand-edited value spells open in any
+// case. Managed config canonicalization is covered by the profile matrix.
 func TestEffectiveHookFailMode_GlobalOpenIgnoresCase(t *testing.T) {
 	for _, raw := range []string{"Open", "OPEN", " open ", "\topEN\n"} {
 		g := &GuardrailConfig{Mode: "action", HookFailMode: raw}
-		if got := hookFailModeFor(g, ""); got != "open" {
-			t.Errorf("EffectiveHookFailMode(%q) = %q, want open", raw, got)
+		if got := hookFailModeFor(g, ""); got != "closed" {
+			t.Errorf("EffectiveHookFailMode(%q) = %q, want closed per user", raw, got)
 		}
-		if got := hookFailModeFor(g, "codex"); got != "open" {
-			t.Errorf("EffectiveHookFailModeFor(codex) with global %q = %q, want open", raw, got)
+		if got := hookFailModeFor(g, "codex"); got != "closed" {
+			t.Errorf("EffectiveHookFailModeFor(codex) with global %q = %q, want closed", raw, got)
 		}
 	}
 	for _, raw := range []string{"", "Closed", "opn", "open-ish"} {
@@ -543,4 +489,53 @@ func TestEffectiveHookFailMode_GlobalOpenIgnoresCase(t *testing.T) {
 // (Config.EffectiveHookFailModeForConnector; "" resolves the global value).
 func hookFailModeFor(g *GuardrailConfig, connector string) string {
 	return (&Config{Guardrail: *g}).EffectiveHookFailModeForConnector(connector)
+}
+
+// TestConnectorOverride_NameInsensitive confirms every Effective*()
+// resolver finds a per-connector override even when the configured key
+// differs from the requested name only by case or a hyphen/underscore
+// alias. The boot loop keys connectors by their canonical registry name
+// (e.g. "claudecode"), while operators may hand-write "Claude-Code" or
+// "claude_code" in config.yaml; the lookup must reconcile the two so the
+// override is honored instead of silently falling through to the global.
+func TestConnectorOverride_NameInsensitive(t *testing.T) {
+	disabled := false
+	g := &GuardrailConfig{
+		Mode:         "observe",
+		BlockMessage: "global-msg",
+		Connectors: map[string]PerConnectorGuardrailConfig{
+			"Codex":       {Mode: "action", BlockMessage: "codex-msg"},
+			"claude_code": {Mode: "action", Enabled: &disabled},
+		},
+	}
+
+	// Case-insensitive: canonical "codex" must resolve the "Codex" entry.
+	if got := g.EffectiveMode("codex"); got != "action" {
+		t.Errorf("EffectiveMode(codex) = %q, want action (case-insensitive key)", got)
+	}
+	if got := g.EffectiveBlockMessage("codex"); got != "codex-msg" {
+		t.Errorf("EffectiveBlockMessage(codex) = %q, want codex-msg", got)
+	}
+	if !g.HasConnector("CODEX") {
+		t.Errorf("HasConnector(CODEX) = false, want true (case-insensitive)")
+	}
+
+	// Alias-insensitive: canonical "claudecode" must resolve "claude_code".
+	if got := g.EffectiveMode("claudecode"); got != "action" {
+		t.Errorf("EffectiveMode(claudecode) = %q, want action (alias key)", got)
+	}
+	if g.EffectiveEnabled("claudecode") {
+		t.Errorf("EffectiveEnabled(claudecode) = true, want false (alias key honored)")
+	}
+	if !g.HasConnector("claudecode") {
+		t.Errorf("HasConnector(claudecode) = false, want true (alias)")
+	}
+
+	// Genuinely-absent connector still falls through to the global.
+	if got := g.EffectiveMode("retired-example"); got != "observe" {
+		t.Errorf("EffectiveMode(retired-example) = %q, want observe (no override)", got)
+	}
+	if g.HasConnector("retired-example") {
+		t.Errorf("HasConnector(retired-example) = true, want false")
+	}
 }

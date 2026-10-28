@@ -16,10 +16,28 @@
 
 package observability
 
-import "sort"
+import (
+	"sort"
+	"sync"
+)
 
-var registeredEventNameSet, registeredEventNameOrder, registeredLogEventNameSet,
-	registeredTraceEventNameSet, registeredMetricEventNameSet, registeredEventIdentitySet = buildEventNameRegistry()
+var (
+	registeredEventNameSet       map[EventName]struct{}
+	registeredEventNameOrder     []EventName
+	registeredLogEventNameSet    map[EventName]struct{}
+	registeredTraceEventNameSet  map[EventName]struct{}
+	registeredMetricEventNameSet map[EventName]struct{}
+	registeredEventIdentitySet   map[EventIdentity]struct{}
+)
+
+var registeredEventNamesOnce sync.Once
+
+func ensureRegisteredEventNames() {
+	registeredEventNamesOnce.Do(func() {
+		registeredEventNameSet, registeredEventNameOrder, registeredLogEventNameSet,
+			registeredTraceEventNameSet, registeredMetricEventNameSet, registeredEventIdentitySet = buildEventNameRegistry()
+	})
+}
 
 // buildEventNameRegistry derives the runtime routing vocabulary from the sole
 // generated family catalog. The generated producer catalog contributes only
@@ -142,6 +160,7 @@ func buildEventNameRegistry() (
 // explicitly generated compatibility identity. Lexical validity alone is
 // deliberately insufficient.
 func IsRegisteredEventName(name EventName) bool {
+	ensureRegisteredEventNames()
 	_, ok := registeredEventNameSet[name]
 	return ok
 }
@@ -149,6 +168,7 @@ func IsRegisteredEventName(name EventName) bool {
 // IsRegisteredEventNameForSignal reports whether name belongs to the closed
 // generated vocabulary for signal.
 func IsRegisteredEventNameForSignal(signal Signal, name EventName) bool {
+	ensureRegisteredEventNames()
 	var names map[EventName]struct{}
 	switch signal {
 	case SignalLogs:
@@ -170,6 +190,7 @@ func IsRegisteredEventIdentity(identity EventIdentity) bool {
 	if !IsBucket(identity.Bucket) || !IsSignal(identity.Signal) || identity.Name.Validate() != nil {
 		return false
 	}
+	ensureRegisteredEventNames()
 	_, ok := registeredEventIdentitySet[identity]
 	return ok
 }
@@ -177,5 +198,6 @@ func IsRegisteredEventIdentity(identity EventIdentity) bool {
 // EventNames returns the complete registry in deterministic lexical order. The
 // returned slice is a copy and can be modified safely by the caller.
 func EventNames() []EventName {
+	ensureRegisteredEventNames()
 	return append([]EventName(nil), registeredEventNameOrder...)
 }

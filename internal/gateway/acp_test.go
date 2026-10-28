@@ -5,6 +5,7 @@ package gateway
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/json"
 	"errors"
@@ -107,6 +108,78 @@ func TestACPEvaluateResolvesTheGuardrailProfileForItsConnector(t *testing.T) {
 	}
 	if name, match := events[0].Body["defenseclaw.guardrail.profile.name"], events[0].Body["defenseclaw.guardrail.profile.match"]; name != "acp-kiro" || match != profileMatchConnector {
 		t.Fatalf("ACP record profile=%v match=%v, want acp-kiro by connector (body=%v)", name, match, events[0].Body)
+	}
+}
+
+// ACP scans frame content through the inspect path. An uncertain profile
+// that observes that path cannot change the default's enforcement, while
+// one that acts on inspection still needs the missing identity fact.
+func TestACPEvaluateDecidesUncertainProfilesOnInspectPath(t *testing.T) {
+	stubProfileSources(t)
+	p := identityTestPlatforms[0]
+	frame := json.RawMessage(`{"jsonrpc":"2.0","id":1,"method":"session/prompt","params":{"sessionId":"s","prompt":[{"type":"text","text":"hello"}]}}`)
+	for _, tc := range []struct {
+		name, acpMode, uncertainMode string
+		uncertainGroup               bool
+		wantBlock                    bool
+	}{
+		{"observe ACP, uncertain account, observe profiles", "observe", "observe", false, false},
+		{"action ACP, uncertain account, observe profiles", "action", "observe", false, false},
+		{"observe ACP, uncertain group, observe profiles", "observe", "observe", true, false},
+		{"action ACP, uncertain group, observe profiles", "action", "observe", true, false},
+		{"action ACP, uncertain action profile", "action", "action", false, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			subject := identityTestSubject(p, p.providers[0], stateProven, false)
+			match := config.ProfileMatch{Users: []string{p.name}}
+			if tc.uncertainGroup {
+				subject = identityTestSubject(p, p.providers[1], stateGroupsUnknown, false)
+				match = config.ProfileMatch{Groups: []string{p.group}}
+			} else {
+				subject.holderUnproven = true
+			}
+			cfg := &config.Config{}
+			cfg.Guardrail.Mode = "observe"
+			cfg.Guardrail.Profiles = map[string]config.GuardrailProfile{
+				"watch": {Mode: "observe"}, "other-watch": {Mode: tc.uncertainMode},
+			}
+			cfg.Guardrail.DefaultProfile = "watch"
+			cfg.Guardrail.ProfileAssignments = []config.ProfileAssignment{
+				{Profile: "other-watch", Match: match},
+			}
+			cfg.ACP = config.ACPConfig{
+				Enabled: true, Mode: tc.acpMode, DefaultProfile: "default",
+				Clients: map[string]config.ACPBinding{"zed": {Enabled: true, Profile: "default"}},
+				Agents:  map[string]config.ACPBinding{"kiro": {Enabled: true, Profile: "default"}},
+				Profiles: map[string]config.ACPProfile{"default": {
+					Mode: tc.acpMode, AllowedClients: []string{"zed"}, AllowedAgents: []string{"kiro"},
+				}},
+			}
+			api := &APIServer{scannerCfg: cfg, health: NewSidecarHealth()}
+			api.guardrailProfiles.set.Store(newGuardrailProfileSetFor(t, cfg))
+			body, err := json.Marshal(acp.Evaluation{
+				Profile: "default", Mode: acp.Mode(tc.acpMode), AgentID: "kiro", ClientID: "zed",
+				Direction: acp.ClientToAgent, Surface: acp.SurfacePrompt, Method: "session/prompt", Payload: frame,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			req := httptest.NewRequest(http.MethodPost, "/api/v1/acp/evaluate", bytes.NewReader(body))
+			req = req.WithContext(context.WithValue(req.Context(), testVerifiedSubjectKey{}, subject))
+			rec := httptest.NewRecorder()
+			api.handleACPEvaluate(rec, req)
+			var verdict acp.Verdict
+			if rec.Code != http.StatusOK || json.Unmarshal(rec.Body.Bytes(), &verdict) != nil {
+				t.Fatalf("ACP status=%d body=%s", rec.Code, rec.Body.String())
+			}
+			if tc.wantBlock {
+				if verdict.Action != "block" || !strings.Contains(verdict.Reason, "account holder is unconfirmed") {
+					t.Fatalf("ACP verdict=%+v; want account fact refusal", verdict)
+				}
+			} else if verdict.Action != "allow" || strings.Contains(verdict.Reason, "refused this request") {
+				t.Fatalf("ACP verdict=%+v; want observe-only frame allowed", verdict)
+			}
+		})
 	}
 }
 
@@ -237,14 +310,14 @@ func TestACPScopedTokenRequiresPrivateRegularFile(t *testing.T) {
 	dataDir := writePrivateACPToken(t, "scoped-token")
 	path := filepath.Join(dataDir, "acp", ".token")
 	api := &APIServer{scannerCfg: &config.Config{DataDir: dataDir}}
-	if !api.acpAPITokenMatches("scoped-token") || api.acpAPITokenMatches("wrong") {
-		t.Fatal("scoped ACP token comparison failed")
+	if token, ok := api.loadACPAPIToken(); !ok || token != "scoped-token" {
+		t.Fatalf("private ACP token was not loaded: ok=%v", ok)
 	}
 	if runtime.GOOS != "windows" {
 		if err := os.Chmod(path, 0o644); err != nil {
 			t.Fatal(err)
 		}
-		if api.acpAPITokenMatches("scoped-token") {
+		if _, ok := api.loadACPAPIToken(); ok {
 			t.Fatal("group/world-readable ACP token was accepted")
 		}
 	}
@@ -300,10 +373,13 @@ func TestACPEnterpriseCredentialPinsRequestBinding(t *testing.T) {
 		t.Fatal(err)
 	}
 	r := httptest.NewRequest(http.MethodPost, "/api/v1/acp/evaluate", bytes.NewReader(evaluation))
-	authenticated, ok := api.authenticateACPToken(r, credential.Token)
+	// The signed transport resolves the credential by its key ID and pins
+	// its scope to the request (authenticateACPSignedRequest).
+	matched, _, ok := acp.MatchEnterpriseCredentialKeyID(dataDir, acp.HTTPAuthKeyID(credential.Token))
 	if !ok {
-		t.Fatal("managed credential did not authenticate")
+		t.Fatal("managed credential did not resolve")
 	}
+	authenticated := r.WithContext(withACPEnterpriseCredential(r.Context(), matched))
 	w := httptest.NewRecorder()
 	api.handleACPEvaluate(w, authenticated)
 	if w.Code != http.StatusOK {
@@ -608,11 +684,11 @@ func TestACPEvaluationContextNamesTheSessionInstance(t *testing.T) {
 	// The agent and its ACP session are in the agent identity ledger, as a
 	// hook session is (GAP-0315).
 	if agent := resolveHookAgentIdentity(t.Context(), agentHookRequest{ConnectorName: "kiro"}).ID; agent != "" {
-		pending, _ := sharedAgentIdentities.snapshot()
+		pending, _, _ := sharedAgentIdentities.snapshot()
 		before := pending[agent].SessionsSeen
 		instance(`{"sessionId":"acp-session-ledger"}`)
 		instance(`{"sessionId":"acp-session-ledger"}`)
-		pending, _ = sharedAgentIdentities.snapshot()
+		pending, _, _ = sharedAgentIdentities.snapshot()
 		if got := pending[agent]; got.AgentID != agent || got.SessionsSeen != before+1 || got.LastSessionID != "acp-session-ledger" {
 			t.Fatalf("agent identity ledger row = %+v, want %s with one more session (acp-session-ledger)", got, agent)
 		}

@@ -869,6 +869,9 @@ func (a *API) listPolicyVersions(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to list policy versions"})
 		return
 	}
+	if versions == nil {
+		versions = []policy.PolicyRecord{}
+	}
 
 	writeJSON(w, http.StatusOK, map[string]any{
 		"tenant_id": tenantID,

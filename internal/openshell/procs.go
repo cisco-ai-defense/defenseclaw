@@ -19,11 +19,15 @@ package openshell
 import (
 	"context"
 	"fmt"
+	"net"
+	"os"
 	pathpkg "path"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/defenseclaw/defenseclaw/internal/daemon"
 )
 
 // process is one of the user's processes as ps(1) lists it.
@@ -65,6 +69,16 @@ func (r *doctorRun) processes(ctx context.Context) []process {
 		path := strings.Join(f[3:], " ")
 		if linux {
 			path = f[3]
+			// argv[0] is process-controlled and procps does not escape its
+			// spaces. Use the kernel's executable for this account's PID when
+			// available, so another gateway's argv cannot supply its driver.
+			if err1 == nil && err3 == nil && owner == uid {
+				if exe, err := os.Readlink("/proc/" + strconv.Itoa(pid) + "/exe"); err == nil && filepath.IsAbs(exe) {
+					// Linux marks an unlinked running binary this way. Its
+					// directory can still hold the driver the process uses.
+					path = strings.TrimSuffix(exe, " (deleted)")
+				}
+			}
 		}
 		if err1 != nil || err2 != nil || err3 != nil || owner != uid || !filepath.IsAbs(path) {
 			continue
@@ -85,8 +99,68 @@ func findProcess(procs []process, name string, parent int) *process {
 	return nil
 }
 
-// gatewayProcess is this user's running openshell-gateway, or nil.
+// registeredGatewayPID identifies the owner of the selected local gateway's
+// listening socket. A process merely named openshell-gateway under this uid
+// may belong to another registration and must not supply its driver.
+func registeredGatewayPID(reg *Registration, uid int, holder func(string, int) (daemon.PortHolder, error)) int {
+	if !reg.Local() || holder == nil {
+		return 0
+	}
+	host, portText, err := net.SplitHostPort(reg.Target())
+	if err != nil {
+		return 0
+	}
+	ip := net.ParseIP(host)
+	if !strings.EqualFold(host, "localhost") && (ip == nil || !ip.IsLoopback()) {
+		return 0
+	}
+	port, err := strconv.Atoi(portText)
+	if err != nil || port < 1 || port > 65535 {
+		return 0
+	}
+	owner, err := holder(host, port)
+	if err != nil || owner.UID != uid || owner.PID <= 0 {
+		return 0
+	}
+	return owner.PID
+}
+
+// GatewayExecutableOnPort is the kernel's executable of this account's
+// gateway listening on its managed loopback port. It returns no path when
+// the port is unowned, another account owns it, or the listener is not an
+// openshell-gateway. The managed daemon uses this only on Linux.
+func GatewayExecutableOnPort(port int) string {
+	if port < 1 || port > 65535 {
+		return ""
+	}
+	owner, err := daemon.FindPortHolder("127.0.0.1", port)
+	if err != nil || owner.UID != os.Geteuid() || owner.PID <= 0 {
+		return ""
+	}
+	path, err := os.Readlink("/proc/" + strconv.Itoa(owner.PID) + "/exe")
+	if err != nil || !filepath.IsAbs(path) || filepath.Base(path) != GatewayBinary {
+		return ""
+	}
+	return path
+}
+
+// gatewayProcess is the gateway doctor contacted when it answers, or nil
+// when the listener cannot be tied to this account's process. When no
+// gateway answers, the first process is only a best-effort service hint.
 func (r *doctorRun) gatewayProcess(ctx context.Context) *process {
+	if r.gateway != nil && r.gateway.Healthy {
+		pid := registeredGatewayPID(r.reg, r.Geteuid(), r.PortHolder)
+		if pid == 0 {
+			return nil
+		}
+		procs := r.processes(ctx)
+		for i := range procs {
+			if procs[i].pid == pid && filepath.Base(procs[i].path) == GatewayBinary {
+				return &procs[i]
+			}
+		}
+		return nil
+	}
 	return findProcess(r.processes(ctx), GatewayBinary, 0)
 }
 

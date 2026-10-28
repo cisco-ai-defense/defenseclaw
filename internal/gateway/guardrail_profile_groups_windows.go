@@ -24,22 +24,19 @@ var profileGroupExists = func(_ context.Context, name string) (bool, error) {
 	// Go's os/user.LookupGroup does not reliably resolve DOMAIN\name for
 	// the LocalSystem service. Ask the LSA directly, as profile explain does
 	// for accounts. Only ERROR_NONE_MAPPED proves the group is absent.
-	var sid *windows.SID
-	var err error
-	if strings.HasPrefix(strings.ToUpper(name), "S-1-") {
-		sid, err = windows.StringToSid(name)
-		if err != nil {
-			// Parsing is local and definitive: a malformed SID cannot match.
+	if !strings.HasPrefix(strings.ToUpper(name), "S-1-") {
+		// The lookup the assignment's SID comes from, so .\name is read
+		// as it is there.
+		_, err := lsaProfileGroupSID(name)
+		if errors.Is(err, errProfileGroupUnknown) {
 			return false, nil
 		}
-	} else {
-		sid, _, _, err = windows.LookupSID("", name)
+		return err == nil, err
 	}
-	if errors.Is(err, windows.ERROR_NONE_MAPPED) {
-		return false, nil
-	}
+	sid, err := windows.StringToSid(name)
 	if err != nil {
-		return false, err
+		// Parsing is local and definitive: a malformed SID cannot match.
+		return false, nil
 	}
 	_, _, kind, err := sid.LookupAccount("")
 	if errors.Is(err, windows.ERROR_NONE_MAPPED) {
@@ -52,12 +49,56 @@ var profileGroupExists = func(_ context.Context, name string) (bool, error) {
 		kind == windows.SidTypeWellKnownGroup, nil
 }
 
-func init() { profileGroupSIDLookup = lsaProfileGroupSID }
+func init() {
+	profileGroupSIDLookup = lsaProfileGroupSID
+	profileGroupLocalSIDLookup = lsaLocalProfileGroupSID
+	profileGroupLocalDomain = lsaComputerName
+}
 
-// lsaProfileGroupSID resolves an assignment group name (DOMAIN\name or a bare
-// name) to the SID of that group (LookupAccountName). A name the LSA maps to
-// no group, or to an account that is not a group, is errProfileGroupUnknown.
+func lsaComputerName() string {
+	computer, err := windows.ComputerName()
+	if err != nil {
+		return ""
+	}
+	return computer
+}
+
+// lsaProfileGroupSID resolves an assignment group name (DOMAIN\name, .\name
+// or a bare name) to the SID of that group (LookupAccountName). A name the
+// LSA maps to no group, or to an account that is not a group, is
+// errProfileGroupUnknown. LookupAccountName does not take .\name, the form
+// Windows tools print for this computer's accounts, so a .\name assignment
+// never got a SID (GAP-0636); it is looked up among this computer's groups.
 func lsaProfileGroupSID(name string) (string, error) {
+	if rest, local := strings.CutPrefix(strings.TrimSpace(name), `.\`); local {
+		return lsaLocalProfileGroupSID(rest)
+	}
+	return lsaGroupSID(name)
+}
+
+// lsaLocalProfileGroupSID resolves a bare group name among this computer's
+// own groups, in the order the LSA reads a bare name: BUILTIN, then the
+// computer's account database. Neither asks a domain controller.
+func lsaLocalProfileGroupSID(name string) (string, error) {
+	name = strings.TrimSpace(name)
+	if name == "" || !profileGroupBareName(name) {
+		return "", errProfileGroupUnknown
+	}
+	candidates := []string{`BUILTIN\` + name}
+	if computer := lsaComputerName(); computer != "" {
+		candidates = append(candidates, computer+`\`+name)
+	}
+	for _, candidate := range candidates {
+		sid, err := lsaGroupSID(candidate)
+		if !errors.Is(err, errProfileGroupUnknown) {
+			return sid, err
+		}
+	}
+	return "", errProfileGroupUnknown
+}
+
+// lsaGroupSID asks the LSA for the SID of one group name.
+func lsaGroupSID(name string) (string, error) {
 	sid, _, kind, err := windows.LookupSID("", name)
 	if errors.Is(err, windows.ERROR_NONE_MAPPED) {
 		return "", errProfileGroupUnknown

@@ -6,13 +6,39 @@ on:
     paths:
       - 'docs-site/**'
       - 'docs/**'
+      - 'CHANGELOG.md'
       - 'policies/**'
+      # test:docs-claims reads these product sources as well as the Intune packager.
+      - 'packaging/mdm/**'
+      - 'scripts/install.ps1'
+      - 'scripts/install.sh'
+      - 'cli/defenseclaw/commands/cmd_setup.py'
+      - 'internal/gateway/connector/hookexec/managed_hermes.go'
+      - 'internal/cli/enterprise_hooks_platform_windows.go'
+      - 'internal/enterprisehooks/enumerator_standalone_windows.go'
+      - 'internal/enterprisehooks/managed_policy_windows.go'
+      - 'bundles/local_observability_stack/grafana/dashboards/defenseclaw-agent-360.json'
+      - 'internal/enterprisepolicy/claude.go'
+      - 'internal/openshell/manager/box.go'
       - '.github/workflows/docs-site.yml'
   pull_request:
     paths:
       - 'docs-site/**'
       - 'docs/**'
+      - 'CHANGELOG.md'
       - 'policies/**'
+      # test:docs-claims reads these product sources as well as the Intune packager.
+      - 'packaging/mdm/**'
+      - 'scripts/install.ps1'
+      - 'scripts/install.sh'
+      - 'cli/defenseclaw/commands/cmd_setup.py'
+      - 'internal/gateway/connector/hookexec/managed_hermes.go'
+      - 'internal/cli/enterprise_hooks_platform_windows.go'
+      - 'internal/enterprisehooks/enumerator_standalone_windows.go'
+      - 'internal/enterprisehooks/managed_policy_windows.go'
+      - 'bundles/local_observability_stack/grafana/dashboards/defenseclaw-agent-360.json'
+      - 'internal/enterprisepolicy/claude.go'
+      - 'internal/openshell/manager/box.go'
       - '.github/workflows/docs-site.yml'
   workflow_dispatch:
 
@@ -41,6 +67,7 @@ jobs:
   build:
     name: Build static export
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     defaults:
       run:
         working-directory: docs-site
@@ -85,7 +112,9 @@ jobs:
       - name: Unit tests (policy creator)
         # Gate the deploy on the share/highlighter/cmdk-filter tests so
         # silent regressions in the policy creator can't ship to Pages.
-        run: npm run test:policy-creator
+        run: |
+          npm run test:policy-creator
+          npm run test:docs-w4
 
       - name: Unit tests (feature demos)
         run: npm run test:feature-demos
@@ -95,6 +124,14 @@ jobs:
 
       - name: Unit tests (diagram zones)
         run: npm run test:diagram-zones
+
+      - name: Unit tests (support matrix)
+        run: npm run test:support-matrix
+
+      - name: Unit tests (docs claims)
+        # Page text that must match the product (the Intune packager's
+        # compared blocks, hook fail modes).
+        run: npm run test:docs-claims
 
       - name: Lint docs site
         # Next.js 16 no longer runs lint from `next build`, so keep the
@@ -109,6 +146,13 @@ jobs:
 
       - name: Validate documentation links
         run: npm run validate-links
+
+      - name: Validate documentation media and pages
+        # Every video, image, demo and terminal replay a page showed stays on
+        # its page (or is retired with a reason in data/media-ledger.json),
+        # every media file is used, and every published page or its
+        # redirect still exists.
+        run: npm run validate-media
 
       - name: Build static export
         env:
@@ -158,6 +202,7 @@ jobs:
     name: Deploy to GitHub Pages
     needs: build
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     if: ${{ github.event_name == 'push' || github.event_name == 'workflow_dispatch' }}
     # Job-scoped privileged permissions: only the deploy job ever uses
     # them, and it never runs PR code (guarded by the `if` above).

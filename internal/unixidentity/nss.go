@@ -188,6 +188,23 @@ func (e *NameMismatchError) Error() string {
 	return fmt.Sprintf("unixidentity: getent passwd %s answered for %q", e.Key, e.Answered.Name)
 }
 
+// SharedUIDError is a uid that more than one account holds: a local
+// account and a directory account, two entries of one service, or accounts
+// of two directories or domains. The kernel gives them one identity, so the
+// facts of the one NSS names first would be served to the other, whose
+// groups and domain then select no profile. Such a uid gets no identity
+// facts (the lookup fails closed), and its name is refused in the
+// administrator views.
+type SharedUIDError struct {
+	UID      int
+	Accounts []string
+}
+
+func (e *SharedUIDError) Error() string {
+	return fmt.Sprintf("unixidentity: uid %d is held by more than one account (%s); the uid does not tell them apart, "+
+		"so it gets no identity facts: give each account its own uid", e.UID, strings.Join(e.Accounts, ", "))
+}
+
 // LookupUID resolves an account by uid.
 func (r *NSSResolver) LookupUID(uid int) (Account, error) {
 	if uid < 0 {

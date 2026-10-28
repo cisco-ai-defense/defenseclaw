@@ -173,8 +173,8 @@ const standaloneHookRuntimeRecordMaxBytes = 4 << 20
 // observe-to-action change never reached ~/.defenseclaw/hooks); and the
 // runtime records the hook scripts read (.hookcfg and .hookcfg.<connector>)
 // carry that fail mode. Every hook runtime file DefenseClaw renders for the
-// user (a managed in-agent plugin for Amp and OpenCode, OmniGent's policy
-// module, the hook scripts and _hardening.sh for the rest) also matches this
+// user (a managed in-agent plugin for Amp and OpenCode, the hook scripts
+// and _hardening.sh for the rest) also matches this
 // release's render byte for byte: after a package upgrade the files still
 // match the digests recorded at their last write but carry the previous
 // release's render, and the user can edit those digests as well. The worker

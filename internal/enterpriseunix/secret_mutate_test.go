@@ -18,6 +18,8 @@ import (
 	"path/filepath"
 	"slices"
 	"testing"
+
+	"github.com/defenseclaw/defenseclaw/internal/enterprisebundle"
 )
 
 // A credential change runs inside the lifecycle lock: an apply watcher that
@@ -72,6 +74,22 @@ func TestFailedSecretChangeAppliesNothing(t *testing.T) {
 	}
 	if r := h.run(Options{Action: ActionRepair, Mutate: func(context.Context) error { return nil }}); r.OK {
 		t.Fatal("a change outside ensure must be refused")
+	}
+}
+
+// A secret set the signed bundle refuses (a value it does not bind) fails
+// with the bundle's code, so the agent can tell a rotation that needs a new
+// bundle from a failed write (GAP-0335).
+func TestSecretChangeRefusalKeepsTheBundleCode(t *testing.T) {
+	h := newTestHost(t, "linux")
+	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
+	confirmed := &enterprisebundle.Manifest{TenantID: "acme", SecretRefs: []enterprisebundle.SecretRef{{Ref: "secret://splunk-token", Required: true,
+		ValueSHA256: enterprisebundle.CredentialValueSHA256("acme", "splunk-token", []byte("v1"))}}}
+	r := h.run(Options{Action: ActionEnsure, Reason: "secret", Mutate: func(context.Context) error {
+		return enterprisebundle.CheckCredentialChange(confirmed, nil, "splunk-token", []byte("v2"))
+	}})
+	if r.OK || len(r.Errors) == 0 || r.Errors[0].Code != string(enterprisebundle.CodeSecretRefMismatch) {
+		t.Fatalf("result %+v, want secret_ref_mismatch", r)
 	}
 }
 

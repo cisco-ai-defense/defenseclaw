@@ -10,10 +10,13 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -32,16 +35,16 @@ func withStandaloneHookRuntime(
 ) {
 	t.Helper()
 	oldGOOS, oldLoad, oldPolicy, oldSC := standaloneHookGOOS, standaloneRuntimeDescriptorLoad, standaloneMachinePolicyOptions, standaloneSecureClientInstallDir
-	oldUserNamespace, oldReport := standaloneHookInUserNamespace, reportStandaloneHookRefusal
-	standaloneHookInUserNamespace = func() bool { return false }
-	reportStandaloneHookRefusal = func(string, string, string) {}
+	oldContext, oldReport := standaloneLinuxHookContext, reportStandaloneHookRefusal
+	standaloneLinuxHookContext = func() string { return "" }
+	reportStandaloneHookRefusal = func(string, int, string, string) {}
 	standaloneHookGOOS = goos
 	standaloneRuntimeDescriptorLoad = load
 	standaloneMachinePolicyOptions = policy
 	standaloneSecureClientInstallDir = secureClientDir
 	t.Cleanup(func() {
 		standaloneHookGOOS, standaloneRuntimeDescriptorLoad, standaloneMachinePolicyOptions, standaloneSecureClientInstallDir = oldGOOS, oldLoad, oldPolicy, oldSC
-		standaloneHookInUserNamespace, reportStandaloneHookRefusal = oldUserNamespace, oldReport
+		standaloneLinuxHookContext, reportStandaloneHookRefusal = oldContext, oldReport
 		standaloneHookRuntime.Lock()
 		standaloneHookRuntime.prepared = false
 		standaloneHookRuntime.descriptor = nil
@@ -61,6 +64,7 @@ func testDescriptor() *managed.RuntimeDescriptor {
 		APIAddr:                 managed.StandaloneAPIAddr,
 		HookSocket:              "/run/defenseclaw-hook/hook.sock",
 		MachinePolicyConnectors: []string{"codex"},
+		PolicyViewDigests:       map[string]string{"codex": strings.Repeat("a", 64)},
 	}
 }
 
@@ -163,6 +167,310 @@ func TestStandaloneHookRuntimeUsesDescriptor(t *testing.T) {
 	if opts.Home != layout.ConfigDir {
 		t.Fatalf("home = %q, want the administrator-owned %q", opts.Home, layout.ConfigDir)
 	}
+	if want := filepath.Join(accountDatabaseHomeForTest(t), ".defenseclaw"); opts.FailureLogHome == nil || opts.FailureLogHome() != want {
+		t.Fatalf("failure log home does not resolve to the invoking user's %q", want)
+	}
+}
+
+// Even a readable, valid descriptor cannot make a hook safe when the agent
+// launched it from a private user namespace. An administrator's outage-only
+// open setting must not turn that process-context refusal into an allow.
+func TestStandaloneHookRefusesPrivateAgentContextWithValidDescriptor(t *testing.T) {
+	descriptor := testDescriptor()
+	descriptor.OpenHookConnectors = []string{"codex"}
+	withStandaloneHookRuntime(t, "linux",
+		func(string) (*managed.RuntimeDescriptor, error) { return descriptor, nil },
+		noMarkers, "/nonexistent-secure-client")
+	standaloneLinuxHookContext = func() string { return hookexec.ManagedUserNamespaceReason }
+	reported := ""
+	reportStandaloneHookRefusal = func(_ string, _ int, connectorName, reason string) { reported = connectorName + " " + reason }
+	if prepareEnterpriseManagedHookRuntime("codex") {
+		t.Fatal("a private-context hook became a no-op")
+	}
+	opts := buildHookOptionsForRuntime("codex", "PreToolUse", "", "", true)
+	if opts.ManagedRuntimeFailure != hookexec.ManagedUserNamespaceReason || !opts.ManagedStandalone ||
+		opts.FailMode != "closed" || !opts.StrictAvailability || !enterpriseManagedHookRuntimeForceClosed() {
+		t.Fatalf("valid descriptor hid the private context: failure=%q standalone=%v mode=%q strict=%v",
+			opts.ManagedRuntimeFailure, opts.ManagedStandalone, opts.FailMode, opts.StrictAvailability)
+	}
+	if reported != "codex "+hookexec.ManagedUserNamespaceReason {
+		t.Fatalf("private-context refusal was not reported: %q", reported)
+	}
+}
+
+// Review loop round 1 (P1): a managed hook does no policy-view work on any
+// call. Whatever the vendor policy on the host (the pinned view, a changed
+// one, one far larger than any real policy, or a descriptor from before
+// pins), preparing the runtime and building the call's options never reads
+// machine policy (the policy-path seam is never consulted), never refuses,
+// and keeps the descriptor's transport and fail mode, outage-open included.
+// The hook's p99 stays at the cost of loading its descriptor. The gateway
+// proves the view when it changes and raises the alert
+// (gateway/managed_policy_view.go).
+func TestStandaloneManagedHookDoesNoPolicyViewWork(t *testing.T) {
+	for _, goos := range []string{"linux", "darwin"} {
+		for _, tc := range []struct {
+			name                           string
+			changed, large, prePin, opened bool
+		}{
+			{name: "pinned view"},
+			{name: "changed view", changed: true},
+			{name: "large view", large: true},
+			{name: "descriptor from before pins", prePin: true},
+			{name: "changed view with outage-open", changed: true, opened: true},
+		} {
+			t.Run(goos+"/"+tc.name, func(t *testing.T) {
+				policy := enterprisepolicy.Options{GOOS: goos, Root: t.TempDir(), SkipTrustChecks: true}
+				managedDir, err := enterprisepolicy.ClaudeManagedDir(policy)
+				if err != nil {
+					t.Fatal(err)
+				}
+				dropIns := filepath.Join(managedDir, "managed-settings.d")
+				if err := os.MkdirAll(dropIns, 0o700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(dropIns, enterprisepolicy.DefenseClawDropInName), []byte(`{"hooks": {}}`), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				if tc.large {
+					for i := 0; i < 3; i++ {
+						if err := os.WriteFile(filepath.Join(dropIns, fmt.Sprintf("%02d-large.json", i)), []byte(`{"x": "`+strings.Repeat("a", 3<<20)+`"}`), 0o600); err != nil {
+							t.Fatal(err)
+						}
+					}
+				}
+				pin, err := enterprisepolicy.PolicyViewDigest(policy, enterprisepolicy.ConnectorClaudeCode)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if tc.changed {
+					pin = strings.Repeat("b", 64)
+				}
+				descriptor := testDescriptor()
+				descriptor.MachinePolicyConnectors = []string{enterprisepolicy.ConnectorClaudeCode}
+				descriptor.PolicyViewDigests = map[string]string{enterprisepolicy.ConnectorClaudeCode: pin}
+				if tc.prePin {
+					descriptor.PolicyViewDigests = nil
+				}
+				if tc.opened {
+					descriptor.OpenHookConnectors = []string{enterprisepolicy.ConnectorClaudeCode}
+				}
+				lookups := 0
+				withStandaloneHookRuntime(t, goos,
+					func(string) (*managed.RuntimeDescriptor, error) { return descriptor, nil },
+					func(string) (enterprisepolicy.Options, bool) { lookups++; return policy, true }, "/nonexistent-secure-client")
+				const calls = 200
+				durations := make([]time.Duration, 0, calls)
+				for i := 0; i < calls; i++ {
+					started := time.Now()
+					prepareEnterpriseManagedHookRuntime(enterprisepolicy.ConnectorClaudeCode)
+					opts := buildHookOptionsForRuntime(enterprisepolicy.ConnectorClaudeCode, "PreToolUse", "", "", true)
+					durations = append(durations, time.Since(started))
+					if opts.ManagedRuntimeFailure != "" || enterpriseManagedHookRuntimeForceClosed() {
+						t.Fatalf("call %d was refused: failure %q", i, opts.ManagedRuntimeFailure)
+					}
+					if !opts.ManagedStandalone || opts.ManagedUnixSocket != descriptor.HookSocket || opts.ManagedServiceUID != descriptor.ServiceUID ||
+						opts.FailMode != descriptor.HookFailMode(enterprisepolicy.ConnectorClaudeCode) {
+						t.Fatalf("call %d did not keep the descriptor's transport and fail mode: %+v", i, opts)
+					}
+				}
+				if lookups != 0 {
+					t.Fatalf("the hook read machine policy %d times in %d calls; it must do no policy-view work", lookups, calls)
+				}
+				sort.Slice(durations, func(i, j int) bool { return durations[i] < durations[j] })
+				if p99 := durations[calls*99/100]; p99 > 25*time.Millisecond {
+					t.Fatalf("hook p99 = %s over %d calls; policy-view work is on the call path", p99, calls)
+				}
+			})
+		}
+	}
+}
+
+// A hook with no trusted descriptor has no managed policy to enforce and
+// stays closed.
+func TestStandaloneHookWithoutDescriptorRefuses(t *testing.T) {
+	withStandaloneHookRuntime(t, "linux",
+		func(string) (*managed.RuntimeDescriptor, error) { return nil, managed.ErrNoRuntimeDescriptor },
+		noMarkers, "/nonexistent-secure-client")
+	prepareEnterpriseManagedHookRuntime("codex")
+	opts := buildHookOptionsForRuntime("codex", "PreToolUse", "", "", true)
+	if opts.ManagedRuntimeFailure != standaloneRuntimeReasonDescriptorMissing || opts.FailMode != "closed" || opts.ManagedUnixSocket != "" {
+		t.Fatalf("missing descriptor: failure %q mode %q socket %q", opts.ManagedRuntimeFailure, opts.FailMode, opts.ManagedUnixSocket)
+	}
+}
+
+func TestLinuxManagedHookContextReason(t *testing.T) {
+	for _, tc := range []struct {
+		name, uidMap, selfUser, selfMount, status, want string
+		hostLinksDenied                                 bool
+	}{
+		{name: "host login", uidMap: "0 0 4294967295\n", selfUser: "user:[1]", selfMount: "mnt:[2]", status: "Name:\thook\nTracerPid:\t0\n"},
+		{name: "private user namespace", uidMap: "0 1000 1\n", selfUser: "user:[1]", selfMount: "mnt:[2]", status: "TracerPid:\t0\n", want: hookexec.ManagedUserNamespaceReason},
+		{name: "fully mapped child user namespace", uidMap: "0 0 4294967295\n", selfUser: "user:[9]", selfMount: "mnt:[2]", status: "TracerPid:\t0\n", want: hookexec.ManagedUserNamespaceReason},
+		// pam_namespace logins and PrivateTmp services have a private
+		// mount view: it is not refused (the gateway proves the policy).
+		{name: "private mount view", uidMap: "0 0 4294967295\n", selfUser: "user:[1]", selfMount: "mnt:[3]", status: "TracerPid:\t0\n"},
+		{name: "private mount view behind protected host links", uidMap: "0 0 4294967295\n", selfUser: "user:[1]", selfMount: "mnt:[3]", status: "TracerPid:\t0\n", hostLinksDenied: true},
+		{name: "traced hook", uidMap: "0 0 4294967295\n", selfUser: "user:[1]", selfMount: "mnt:[2]", status: "TracerPid:\t42\n", want: hookexec.ManagedTracedProcessReason},
+		{name: "unverifiable context", uidMap: "0 0 4294967295\n", selfUser: "user:[1]", selfMount: "mnt:[2]", status: "Name:\thook\n", want: hookexec.ManagedProcessContextUnknownReason},
+		{name: "unreadable own user namespace", uidMap: "0 0 4294967295\n", selfMount: "mnt:[2]", status: "TracerPid:\t0\n", want: hookexec.ManagedProcessContextUnknownReason},
+		{name: "protected host namespace links", uidMap: "0 0 4294967295\n", selfUser: "user:[1]", selfMount: "mnt:[2]", status: "TracerPid:\t0\n", hostLinksDenied: true},
+		// Only the head of status is read: lines after TracerPid, such as
+		// a long Groups line, never refuse a valid call.
+		{name: "65,536 supplementary groups", uidMap: "0 0 4294967295\n", selfUser: "user:[1]", selfMount: "mnt:[2]", status: linuxStatusWithGroups("0", 65536)},
+		{name: "traced with 65,536 supplementary groups", uidMap: "0 0 4294967295\n", selfUser: "user:[1]", selfMount: "mnt:[2]", status: linuxStatusWithGroups("42", 65536), want: hookexec.ManagedTracedProcessReason},
+		// A TracerPid line cut by end of file or by the read bound (here
+		// right after its 0) is never trusted, and neither is one past the
+		// bound.
+		{name: "cut TracerPid line", uidMap: "0 0 4294967295\n", selfUser: "user:[1]", selfMount: "mnt:[2]", status: "Name:\thook\nTracerPid:\t0", want: hookexec.ManagedProcessContextUnknownReason},
+		{name: "TracerPid cut by the bound", uidMap: "0 0 4294967295\n", selfUser: "user:[1]", selfMount: "mnt:[2]", status: "Name:\t" + strings.Repeat("x", linuxHookContextMaxBytes-len("Name:\t\nTracerPid:\t0")) + "\nTracerPid:\t0\n", want: hookexec.ManagedProcessContextUnknownReason},
+		{name: "TracerPid past the bound", uidMap: "0 0 4294967295\n", selfUser: "user:[1]", selfMount: "mnt:[2]", status: "Name:\t" + strings.Repeat("x", 2*linuxHookContextMaxBytes) + "\nTracerPid:\t0\n", want: hookexec.ManagedProcessContextUnknownReason},
+		{name: "oversized uid_map", uidMap: "0 0 4294967295\n" + strings.Repeat(" ", linuxHookContextMaxBytes), selfUser: "user:[1]", selfMount: "mnt:[2]", status: "TracerPid:\t0\n", want: hookexec.ManagedProcessContextUnknownReason},
+		{name: "unparsable TracerPid", uidMap: "0 0 4294967295\n", selfUser: "user:[1]", selfMount: "mnt:[2]", status: "TracerPid:\tx\n", want: hookexec.ManagedProcessContextUnknownReason},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			links := map[string]string{
+				"/proc/self/ns/user": tc.selfUser, "/proc/1/ns/user": "user:[1]",
+				"/proc/self/ns/mnt": tc.selfMount, "/proc/1/ns/mnt": "mnt:[2]",
+			}
+			got := linuxManagedHookContextReason(func(path string) (string, error) {
+				if tc.hostLinksDenied && strings.HasPrefix(path, "/proc/1/ns/") {
+					return "", os.ErrPermission
+				}
+				if target := links[path]; target != "" {
+					return target, nil
+				}
+				return "", os.ErrNotExist
+			}, func(path string) (io.ReadCloser, error) {
+				switch path {
+				case "/proc/self/uid_map":
+					return io.NopCloser(strings.NewReader(tc.uidMap)), nil
+				case "/proc/self/status":
+					return io.NopCloser(strings.NewReader(tc.status)), nil
+				default:
+					return nil, os.ErrNotExist
+				}
+			})
+			if got != tc.want {
+				t.Fatalf("reason = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// linuxStatusWithGroups is a /proc/self/status in the kernel's line order
+// (TracerPid before Groups) for an account with groups supplementary
+// seven-digit group ids.
+func linuxStatusWithGroups(tracerPid string, groups int) string {
+	var b strings.Builder
+	b.WriteString("Name:\thook\nUmask:\t0022\nState:\tR (running)\nTgid:\t4242\nNgid:\t0\nPid:\t4242\nPPid:\t4200\n")
+	b.WriteString("TracerPid:\t" + tracerPid + "\nUid:\t1000\t1000\t1000\t1000\nGid:\t1000\t1000\t1000\t1000\nFDSize:\t64\nGroups:\t")
+	for i := 0; i < groups; i++ {
+		fmt.Fprintf(&b, "%d ", 1000000+i)
+	}
+	b.WriteString("\nNStgid:\t4242\nNSpid:\t4242\nNSpgid:\t4242\nNSsid:\t4200\nKthread:\t0\n")
+	for _, field := range []string{"VmPeak", "VmSize", "VmLck", "VmPin", "VmHWM", "VmRSS", "RssAnon", "RssFile", "RssShmem",
+		"VmData", "VmStk", "VmExe", "VmLib", "VmPTE", "VmSwap", "HugetlbPages"} {
+		b.WriteString(field + ":\t  123456 kB\n")
+	}
+	b.WriteString("CoreDumping:\t0\nTHP_enabled:\t1\nuntag_mask:\t0xffffffffffffffff\nThreads:\t1\nSigQ:\t0/63432\n" +
+		"SigPnd:\t0000000000000000\nShdPnd:\t0000000000000000\nSigBlk:\t0000000000000000\nSigIgn:\t0000000000000000\n" +
+		"SigCgt:\t0000000000000000\nCapInh:\t0000000000000000\nCapPrm:\t0000000000000000\nCapEff:\t0000000000000000\n" +
+		"CapBnd:\t000001ffffffffff\nCapAmb:\t0000000000000000\nNoNewPrivs:\t0\nSeccomp:\t0\nSeccomp_filters:\t0\n" +
+		"Speculation_Store_Bypass:\tthread vulnerable\nSpeculationIndirectBranch:\tconditional enabled\n" +
+		"Cpus_allowed:\tffff\nCpus_allowed_list:\t0-15\nMems_allowed:\t00000000,00000001\nMems_allowed_list:\t0\n" +
+		"voluntary_ctxt_switches:\t1\nnonvoluntary_ctxt_switches:\t0\n")
+	return b.String()
+}
+
+// A host login whose account has about 2,000 supplementary groups has a
+// /proc/self/status over the read bound. The hook reads, from the real
+// files, only through TracerPid and takes the call.
+func TestLinuxManagedHookContextReadsOnlyTheStatusHead(t *testing.T) {
+	dir := t.TempDir()
+	files := map[string]string{
+		"/proc/self/uid_map": "         0          0 4294967295\n",
+		"/proc/self/status":  linuxStatusWithGroups("0", 2000),
+	}
+	if len(files["/proc/self/status"]) <= linuxHookContextMaxBytes {
+		t.Fatalf("fixture status is %d bytes; it must exceed the %d-byte bound", len(files["/proc/self/status"]), linuxHookContextMaxBytes)
+	}
+	paths := map[string]string{}
+	for name, body := range files {
+		path := filepath.Join(dir, filepath.Base(name))
+		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		paths[name] = path
+	}
+	open := func(path string) (io.ReadCloser, error) {
+		if paths[path] == "" {
+			return nil, os.ErrNotExist
+		}
+		return openLinuxHookContextFile(paths[path])
+	}
+	readlink := func(string) (string, error) { return "user:[1]", nil }
+	if got := linuxManagedHookContextReason(readlink, open); got != "" {
+		t.Fatalf("host login with 2,000 groups: reason = %q, want none", got)
+	}
+	if err := os.WriteFile(paths["/proc/self/status"], []byte(linuxStatusWithGroups("42", 2000)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := linuxManagedHookContextReason(readlink, open); got != hookexec.ManagedTracedProcessReason {
+		t.Fatalf("traced hook with 2,000 groups: reason = %q, want %q", got, hookexec.ManagedTracedProcessReason)
+	}
+}
+
+// A status reader may have to obtain the account's entire (potentially slow)
+// Groups line to satisfy a large read. A valid hook must not ask for it.
+func TestLinuxManagedHookDoesNotReadTheGroupsLine(t *testing.T) {
+	descriptor := testDescriptor()
+	withStandaloneHookRuntime(t, "linux",
+		func(string) (*managed.RuntimeDescriptor, error) { return descriptor, nil },
+		noMarkers, "/nonexistent-secure-client")
+	status := linuxStatusWithGroups("0", 65536)
+	groups := strings.Index(status, "Groups:")
+	if groups <= 0 || len(status) <= linuxHookContextMaxBytes {
+		t.Fatal("test needs a large kernel-shaped Groups line")
+	}
+	requestedGroups := false
+	standaloneLinuxHookContext = func() string {
+		reader := &statusBeforeGroupsReader{data: status, end: groups, requestedGroups: &requestedGroups}
+		return linuxManagedHookContextReason(
+			func(string) (string, error) { return "user:[1]", nil },
+			func(path string) (io.ReadCloser, error) {
+				if path == "/proc/self/uid_map" {
+					return io.NopCloser(strings.NewReader("0 0 4294967295\n")), nil
+				}
+				if path == "/proc/self/status" {
+					return io.NopCloser(reader), nil
+				}
+				return nil, os.ErrNotExist
+			})
+	}
+	prepareEnterpriseManagedHookRuntime("codex")
+	opts := buildHookOptionsForRuntime("codex", "PreToolUse", "", "", true)
+	if requestedGroups || opts.ManagedRuntimeFailure != "" || opts.ManagedUnixSocket != descriptor.HookSocket || opts.FailMode != "closed" {
+		t.Fatalf("valid hook depended on Groups: read=%v failure=%q socket=%q mode=%q",
+			requestedGroups, opts.ManagedRuntimeFailure, opts.ManagedUnixSocket, opts.FailMode)
+	}
+}
+
+type statusBeforeGroupsReader struct {
+	data            string
+	end             int
+	offset          int
+	requestedGroups *bool
+}
+
+func (r *statusBeforeGroupsReader) Read(p []byte) (int, error) {
+	if len(p) > r.end-r.offset {
+		*r.requestedGroups = true
+		return 0, errors.New("slow Groups line")
+	}
+	n := copy(p, r.data[r.offset:])
+	r.offset += n
+	return n, nil
 }
 
 // A standalone runtime that fails its checks (an untrusted descriptor, or one
@@ -197,8 +505,13 @@ func TestStandaloneHookRuntimeFailsClosed(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			withStandaloneHookRuntime(t, tc.goos, tc.load, noMarkers, "/nonexistent-secure-client")
 			reported := ""
-			standaloneHookInUserNamespace = func() bool { return tc.userns }
-			reportStandaloneHookRefusal = func(_, connectorName, reason string) { reported = connectorName + " " + reason }
+			standaloneLinuxHookContext = func() string {
+				if tc.userns {
+					return hookexec.ManagedUserNamespaceReason
+				}
+				return ""
+			}
+			reportStandaloneHookRefusal = func(_ string, _ int, connectorName, reason string) { reported = connectorName + " " + reason }
 			if prepareEnterpriseManagedHookRuntime("claudecode") {
 				t.Fatal("a failed standalone runtime is never a no-op")
 			}

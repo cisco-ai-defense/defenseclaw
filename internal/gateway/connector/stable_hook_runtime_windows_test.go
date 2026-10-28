@@ -22,8 +22,15 @@ import (
 
 func TestHookRuntimeFlatEvidenceRequiresCanonicalExactBody(t *testing.T) {
 	canonical := []byte("DEFENSECLAW_CONNECTOR=codex\nDEFENSECLAW_FAIL_MODE=open\n")
-	if !hookRuntimeFlatEvidenceCurrent(canonical, "codex", "open") {
+	if !hookRuntimeFlatEvidenceCurrent(canonical, "codex", "open", "") {
 		t.Fatal("canonical Codex flat runtime evidence was rejected")
+	}
+	// A per-user record carries its config source; a managed one does not.
+	sourced := append(append([]byte(nil), canonical...), []byte("FAIL_MODE_SOURCE=config\n")...)
+	if !hookRuntimeFlatEvidenceCurrent(sourced, "codex", "open", HookFailModeSourceConfig) ||
+		hookRuntimeFlatEvidenceCurrent(sourced, "codex", "open", "") ||
+		hookRuntimeFlatEvidenceCurrent(canonical, "codex", "open", HookFailModeSourceConfig) {
+		t.Fatal("flat runtime evidence ignored the config source")
 	}
 	for name, body := range map[string][]byte{
 		"duplicate-mode": append(append([]byte(nil), canonical...), []byte("DEFENSECLAW_FAIL_MODE=closed\n")...),
@@ -31,7 +38,7 @@ func TestHookRuntimeFlatEvidenceRequiresCanonicalExactBody(t *testing.T) {
 		"reordered":      []byte("DEFENSECLAW_FAIL_MODE=open\nDEFENSECLAW_CONNECTOR=codex\n"),
 	} {
 		t.Run(name, func(t *testing.T) {
-			if hookRuntimeFlatEvidenceCurrent(body, "codex", "open") {
+			if hookRuntimeFlatEvidenceCurrent(body, "codex", "open", "") {
 				t.Fatalf("non-canonical flat runtime evidence was accepted: %q", body)
 			}
 		})

@@ -99,8 +99,10 @@ func managedEnterpriseHTTPClient(
 				// retries, so one try could take most of a restart budget:
 				// read the listen table instead, and try again shortly.
 				if listening, known := managedEnterpriseListening(canonicalAddr); known && !listening {
-					return nil, fmt.Errorf("%w: %w: nothing listens on %s yet",
-						errManagedGatewayPeerUnverified, errManagedGatewayNotRunning, canonicalAddr)
+					// The service has a PID, so its absence is not proven. The
+					// restart loop may retry, but open must not allow this call.
+					return nil, fmt.Errorf("%w: %w: running service has no listener on %s yet",
+						errManagedGatewayPeerUnverified, errGatewayNotConnected, canonicalAddr)
 				}
 				conn, err := managedEnterpriseDialContext(ctx, "tcp4", canonicalAddr)
 				if err != nil {
@@ -230,14 +232,24 @@ func queryManagedGatewayServicePID(serviceName string) (uint32, error) {
 		return 0, err
 	}
 	if status.CurrentState != windows.SERVICE_RUNNING || status.ProcessId == 0 {
-		return 0, fmt.Errorf(
-			"%w (state=%d pid=%d)",
-			errManagedGatewayNotRunning,
-			status.CurrentState,
-			status.ProcessId,
-		)
+		return 0, fmt.Errorf("%w (state=%d pid=%d)", errManagedGatewayNotRunning, status.CurrentState, status.ProcessId)
 	}
 	return status.ProcessId, nil
+}
+
+// managedGatewayServiceStartType reads the service's start type.
+func managedGatewayServiceStartType(service windows.Handle) (uint32, bool) {
+	var needed uint32
+	err := windows.QueryServiceConfig(service, nil, 0, &needed)
+	if !errors.Is(err, windows.ERROR_INSUFFICIENT_BUFFER) || needed == 0 || needed > 64<<10 {
+		return 0, false
+	}
+	buffer := make([]byte, needed)
+	config := (*windows.QUERY_SERVICE_CONFIG)(unsafe.Pointer(&buffer[0]))
+	if err := windows.QueryServiceConfig(service, config, needed, &needed); err != nil {
+		return 0, false
+	}
+	return config.StartType, true
 }
 
 func connectedManagedGatewayPID(conn net.Conn) (uint32, error) {
@@ -253,6 +265,10 @@ func connectedManagedGatewayPID(conn net.Conn) (uint32, error) {
 	if err != nil {
 		return 0, fmt.Errorf("parse server endpoint: %w", err)
 	}
+	return connectedManagedGatewayPIDForEndpoints(client, server)
+}
+
+func connectedManagedGatewayPIDForEndpoints(client, server managedIPv4Endpoint) (uint32, error) {
 	rows, err := readTCP4OwnerPIDTable()
 	if err != nil {
 		return 0, err
@@ -277,7 +293,8 @@ func connectedManagedGatewayPID(conn net.Conn) (uint32, error) {
 		}
 	}
 	return 0, fmt.Errorf(
-		"no ESTABLISHED reverse tuple for %v:%d -> %v:%d",
+		"%w: no ESTABLISHED reverse tuple for %v:%d -> %v:%d",
+		errConnectedSocketNotFound,
 		client.addr,
 		client.port,
 		server.addr,

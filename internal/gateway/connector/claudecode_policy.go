@@ -90,7 +90,12 @@ func claudeCodeEffectiveHookContract(opts SetupOpts) (bool, error) {
 	activeManaged := managed.active()
 	// Unix guardian installs harden per-user hook scripts. Only the native
 	// enterprise path pins an administrator-owned executable in managed policy.
-	managedPolicy := opts.ManagedEnterprise && strings.TrimSpace(opts.HookExecutable) != ""
+	// A macOS Secure Client install names the Secure Client gateway as its
+	// HookExecutable (the listener proof, GAP-0810) but registers the per-user
+	// shell hook in the user's settings (claudeCodeHookInvocation), so that is
+	// the source to verify.
+	managedPolicy := opts.ManagedEnterprise && strings.TrimSpace(opts.HookExecutable) != "" &&
+		(runtime.GOOS == "windows" || !shellHookSecureClientProfile(opts))
 	if managedPolicy && activeManaged == managed.userFallback {
 		// HKCU is a user-writable convenience tier. Restoring the higher file
 		// drop-in supersedes it, so even a disabling fallback remains ordinary,
@@ -617,33 +622,24 @@ func jsonValuesEqual(left, right interface{}) bool {
 }
 
 // claudeCodeUserSettingsReadPath is the file to read for the per-user
-// ~/.claude/settings.json. A dotfiles layout makes it a symlink; Setup
-// writes through the link, so the inspection follows it too when it ends at
-// a regular file in the user's home that the user owns. Refusing every link
-// left the gateway unable to start while the hooks were already installed,
-// so every Claude Code prompt was blocked (GAP-1062). Windows keeps
-// refusing links.
+// ~/.claude/settings.json. An OSS account may link either this file or its
+// parent directory to user-owned dotfiles outside the home. Windows keeps
+// its native path handling.
 func claudeCodeUserSettingsReadPath(path string) (string, error) {
-	info, err := os.Lstat(path)
-	if err != nil || info.Mode()&os.ModeSymlink == 0 || runtime.GOOS == "windows" {
+	if runtime.GOOS == "windows" {
 		return path, nil
 	}
-	target, err := filepath.EvalSymlinks(path)
-	if err != nil {
-		return "", fmt.Errorf("settings source is a link that cannot be followed: %w", err)
+	// The enterprise per-user writer confines linked files and parents.
+	if home := activeUserHomeOverride(); home != "" {
+		target, outside, err := AgentConfigOutsideHome(home, path)
+		if err != nil {
+			return "", fmt.Errorf("inspect settings source %s: %w", path, err)
+		}
+		if outside {
+			return "", fmt.Errorf("settings source %s leads outside your home folder, to %s; move it into your home folder or replace the link", path, target)
+		}
 	}
-	home := filepath.Clean(userHomeDir())
-	if resolved, err := filepath.EvalSymlinks(home); err == nil {
-		home = resolved
-	}
-	if rel, err := filepath.Rel(home, target); err != nil || rel == "." || rel == ".." ||
-		strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(rel) {
-		return "", fmt.Errorf("settings source is a link to %s, outside your home folder; link it to a file in your home folder or replace the link with the file", target)
-	}
-	if err := validatePluginOwner(target); err != nil {
-		return "", fmt.Errorf("settings source is a link to a file another account owns: %w", err)
-	}
-	return target, nil
+	return userOwnedSettingsReadPath(path)
 }
 
 func readOptionalClaudeCodeSettings(name, path string) (*claudeCodeSettingsSource, error) {

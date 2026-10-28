@@ -298,12 +298,40 @@ $failures = & $module {
             [IO.File]::WriteAllText($file, '{}')
             [IO.File]::SetAttributes($file, [IO.FileAttributes]::Hidden)
         }
+        $ownHook = 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw-hook.exe'
         $left = @(
-            @(Remove-DefenseClawRuntimeSelectorState -Directories @($selectorDropIns, '', [IO.Path]::Combine($selector, 'absent'))) +
+            @(Remove-DefenseClawRuntimeSelectorState -HookPath $ownHook -Directories @($selectorDropIns, '', [IO.Path]::Combine($selector, 'absent'))) +
             @(Remove-DefenseClawEmptyClaudeManagedSettingsFolders -ProgramFiles $selector)
         )
         if ($left.Count -ne 0 -or (Microsoft.PowerShell.Management\Test-Path -LiteralPath ([IO.Path]::Combine($selector, 'ClaudeCode')))) {
             $failures.Add("the runtime selector state kept ClaudeCode\managed-settings.d: $($left -join '; ')")
+        }
+
+        # GAP-1158: a selector that also holds another deployment's target
+        # stays with its lock, and is named; one with only this deployment's
+        # targets goes.
+        $shared = Microsoft.PowerShell.Management\Join-Path $Scratch 'selector-shared'
+        [void][IO.Directory]::CreateDirectory($shared)
+        $sharedState = [IO.Path]::Combine($shared, '.defenseclaw-managed-runtime-selector.state')
+        $sharedLock = [IO.Path]::Combine($shared, '.defenseclaw-managed-runtime-selector.lock')
+        $sharedDocument = @{ schema_version = 1; connector = 'codex'; targets = @(
+                @{ connector = 'codex'; sid = 'S-1-5-21-1-2-3-1001'; hook_executable = $ownHook },
+                @{ connector = 'codex'; sid = 'S-1-5-21-1-2-3-1002'; hook_executable = 'D:\Other\DefenseClaw\bin\defenseclaw-hook.exe' }
+            ) } | Microsoft.PowerShell.Utility\ConvertTo-Json -Depth 4
+        [IO.File]::WriteAllText($sharedState, $sharedDocument)
+        [IO.File]::WriteAllText($sharedLock, '')
+        $kept = @(Remove-DefenseClawRuntimeSelectorState -HookPath $ownHook -Directories @($shared))
+        if ($kept.Count -ne 1 -or $kept[0] -notlike '*another DefenseClaw deployment*' -or
+            -not [IO.File]::Exists($sharedState) -or -not [IO.File]::Exists($sharedLock)) {
+            $failures.Add("a selector shared with another deployment was removed: $($kept -join '; ')")
+        }
+        $onlyOurs = @{ schema_version = 1; connector = 'codex'; targets = @(
+                @{ connector = 'codex'; sid = 'S-1-5-21-1-2-3-1001'; hook_executable = $ownHook }
+            ) } | Microsoft.PowerShell.Utility\ConvertTo-Json -Depth 4
+        [IO.File]::WriteAllText($sharedState, $onlyOurs)
+        $gone = @(Remove-DefenseClawRuntimeSelectorState -HookPath $ownHook -Directories @($shared))
+        if ($gone.Count -ne 0 -or [IO.File]::Exists($sharedState) -or [IO.File]::Exists($sharedLock)) {
+            $failures.Add("a selector with only this deployment's targets stayed: $($gone -join '; ')")
         }
 
         # GAP-0575, GAP-0562: with no deployment record, the hook machine

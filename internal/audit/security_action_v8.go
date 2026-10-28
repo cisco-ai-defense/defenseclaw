@@ -27,7 +27,6 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
 	"github.com/defenseclaw/defenseclaw/internal/observability"
 	"github.com/defenseclaw/defenseclaw/internal/observability/router"
-	"github.com/google/uuid"
 )
 
 // JudgeCompletionInput contains only facts present on the completed judge call.
@@ -57,6 +56,13 @@ type EnforcementQuarantineAppliedInput struct {
 	AssetType       string
 	SourcePath      string
 	DestinationPath string
+	// PolicyStamped pins the asset.quarantined policy stamp to the
+	// generation of the decision that ordered the quarantine; the live
+	// generation can be a newer one a reload applied meanwhile (p0
+	// GAP-1000). Unset, the record carries the live stamp.
+	PolicyStamped    bool
+	PolicyDigest     observability.Optional[string]
+	PolicyGeneration observability.Optional[int64]
 }
 
 // LogJudgeCompletion routes one validated judge occurrence exclusively through
@@ -178,7 +184,7 @@ func (l *Logger) emitEnforcementQuarantineV8(
 		return auditV8Persisted, fmt.Errorf("audit: v8 quarantine log batch runtime is unavailable")
 	}
 	assetEvent := event
-	assetEvent.ID = uuid.NewString()
+	assetEvent.ID = observability.NewTimeOrderedID()
 	assetEvent.Target = input.SourcePath
 	assetEvent.Details = fmt.Sprintf("dest=%s", input.DestinationPath)
 
@@ -269,6 +275,9 @@ func (l *Logger) emitEnforcementQuarantineV8(
 					return observability.Record{}, buildErr
 				}
 				policyDigest, policyGeneration := livePolicyStamp()
+				if input.PolicyStamped {
+					policyDigest, policyGeneration = input.PolicyDigest, input.PolicyGeneration
+				}
 				record, buildErr := builder.BuildLogAssetQuarantined(observability.LogAssetQuarantinedInput{
 					Envelope: envelope, Severity: severity, LogLevel: logLevel,
 					Outcome:                             observability.OutcomeQuarantined,
@@ -324,7 +333,7 @@ func newQuarantineRuntimeV8GeneratedMetric(
 			}
 			builder, err := observability.NewFamilyBuilder(
 				observability.ClockFunc(func() time.Time { return event.Timestamp.UTC() }),
-				observability.OccurrenceIDGeneratorFunc(func() (string, error) { return uuid.NewString(), nil }),
+				observability.TimeOrderedOccurrenceIDs,
 			)
 			if err != nil {
 				return observability.Record{}, err

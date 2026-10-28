@@ -10,49 +10,31 @@ keywords:
   - OpenShell sandbox tamper tier
 ---
 
-This page answers "can this connector do X?" for every connector. The table is checked against the connector code on every change. Use it to pick the connector that fits your safety needs, or to find the gaps you need to cover another way.
-
-<Callout title="Looking for what works on your OS?">
-This matrix describes each connector's hook or proxy contract, not where it
-runs. Which agents and features work on Linux, macOS and Windows, in the
-open-source and enterprise editions, and what live tests verified in this
-release, is on the [support matrix](/docs/support-matrix). OS-specific
-setup and limits are on each connector page. The Windows package doesn't
-provide the proxy or subprocess-shim wiring some connectors use elsewhere.
-</Callout>
+This page answers "can this connector do X?" for every connector. The table is checked against the connector code on every change. For what works on your operating system, see the [support matrix](/docs/support-matrix).
 
 <CapabilityMatrix />
 
 ## Reading the matrix
 
-<Cards>
-  <Card title="Family" description="proxy = DefenseClaw sits in the LLM data path. hooks = DefenseClaw hooks into the agent's lifecycle; the agent talks directly to its upstream." />
-  <Card title="Tool inspection" description="When DefenseClaw can see the tool call. pre-execution + response-scan means we score before the call fires and after it returns." />
-  <Card title="Subprocess policy" description="shims = connector setup installs DefenseClaw's PATH shims for curl, wget, ssh, nc, pip, and npm, which ask the gateway to inspect each invocation before it runs; shims do not isolate the process. none = the agent's own runtime executes commands; DefenseClaw observes or blocks only through the connector's hook/proxy surface." />
-  <Card title="Block" description="Whether the hooks the connector exposes can return a block decision at all." />
-  <Card title="Native ask" description="Whether the connector's hooks can prompt the operator inside the agent UI for approval. Without native ask, confirm uses a connector-specific alert/allow/context fallback; the TUI can review the event but cannot resume it." />
-  <Card title="Fail-closed" description="Whether the hook surface supports a fail-closed response — i.e. block on transport failure to the gateway. It does not cover a hook process the user kills or stops. Connectors marked false require operator-managed timeouts." />
-  <Card title="OpenShell sandbox" description="The tamper tier of the connector's hooks in a DefenseClaw OpenShell sandbox image, and whether the harness is verified. managed tier = a root-owned policy file that user and project settings can't switch off. user tier = a file the agent can edit, or code the agent or a repository adds runs beside the hooks. verified = the harness ran end to end in a sandbox; unverified = its image never passes the hook check, so it can't run yet; pending = DefenseClaw builds no sandbox image for this connector. The image pin and hook file are in the sandbox table below." />
-  <Card title="HITL" description="The line under each connector: how human-in-the-loop approvals reach you on that connector." />
-</Cards>
+| Column | Meaning |
+| --- | --- |
+| Family | `proxy`: DefenseClaw sits in the model data path. `hooks`: DefenseClaw uses the agent's hooks or plugin and the agent talks to its upstream directly. |
+| Tool inspection | When DefenseClaw sees a tool call. `pre-execution + response-scan` scores it before it fires and again when it returns. |
+| Subprocess policy | `shims`: setup installs PATH shims for `curl`, `wget`, `ssh`, `nc`, `pip` and `npm` that ask the gateway before running the real binary. They do not isolate the process. `none`: the agent runs commands itself. |
+| Block | Whether the connector's hooks can return a block decision at all. |
+| Native ask | Whether the hooks can prompt you inside the agent. Without it, a confirm verdict becomes an alert, allow or context message that the TUI can show but cannot resume. |
+| Fail-closed | Whether DefenseClaw can deny a delivery failure in mode `closed`. A note marks agents that can still allow a call if the hook cannot start or times out. |
+| OpenShell sandbox | Tamper tier and verification of the harness image. See below. |
+| HITL | How human approvals reach you on that connector. |
+
+Two rules sit on top of the columns.
 
 <Callout title="Antigravity asks and blocks only before a tool runs">
-Antigravity can show its approval prompt and hard-block only on `PreToolUse`.
-`PreInvocation` and `PostInvocation` can only change the context the agent
-sees, `PostToolUse` only observes, and DefenseClaw always allows `Stop`.
-DefenseClaw doesn't claim it can override Antigravity's own permission bypass,
-because no recorded test with the official client has shown that.
+Antigravity asks and blocks only on `PreToolUse`. `PreInvocation` and `PostInvocation` only change context, `PostToolUse` only observes, and `Stop` is always allowed.
 </Callout>
 
 <Callout title="A prompt rule blocks only where the agent can block a prompt">
-Claude Code, Codex, Cursor and Devin have a prompt hook that can block, so a
-prompt that matches a rule in action mode is stopped before the model sees it.
-Kiro blocks a matching prompt only in Kiro IDE; `kiro-cli` sends it to the
-model. Copilot CLI, Hermes, OpenCode, Amp and Antigravity have no
-such hook: their only block events are the tool-call ones listed for each
-connector. On those connectors a prompt that matches a rule is not blocked,
-and the agent sends it to the model. Tool-call rules still block there, so a
-command the prompt leads to is judged before it runs.
+Claude Code, Codex, Cursor and Devin can. Kiro blocks a prompt only in Kiro IDE. Copilot CLI, Hermes, OpenCode, Amp and Antigravity have no such hook, so a matching prompt reaches the model. Tool-call rules still block there.
 </Callout>
 
 <Accordions>
@@ -60,15 +42,15 @@ command the prompt leads to is judged before it runs.
 
 | Field | Source |
 | --- | --- |
-| Family | `internal/gateway/connector/*.go` (whether the connector implements `RoutingConnector` for proxy mode) |
+| Family | `internal/gateway/connector/*.go` (whether the connector implements `RoutingConnector`) |
 | Tool inspection | `_CONNECTOR_META[<id>].tool_mode` in `cli/defenseclaw/commands/cmd_setup.py` |
-| Subprocess policy | Effective setup call sites for `SetupSubprocessEnforcement` in `internal/gateway/connector/*.go`, cross-checked with `_CONNECTOR_META[<id>].subprocess_policy` |
-| Block / Native ask / Fail-closed | `HookCapability{}` literals in `internal/gateway/connector/hook_only.go` and the per-connector files |
-| Hook contract versions | `cli/defenseclaw/inventory/hook_contracts.json`, checked against `internal/gateway/connector/hook_contract.go` |
-| HITL behaviour | `_hilt_support_note(<id>)` in `cli/defenseclaw/commands/cmd_setup.py` |
-| OpenShell sandbox | `SandboxArtifacts()` and the `<connector>_sandbox.go` renderers in `internal/gateway/connector/` (tamper tier and hook config file); in `internal/openshell/harness/`, each harness's `DefaultVersion` (image pin), `Verification()` (status, and the reason an unverified harness is unverified), and the credential profiles and in-sandbox login marked unverified (sign-in paths not tested live) |
+| Subprocess policy | `SetupSubprocessEnforcement` call sites in `internal/gateway/connector/*.go` |
+| Block, native ask, fail-closed | `HookCapability{}` literals in `hook_only.go` and the per-connector files |
+| Hook contract versions | `cli/defenseclaw/inventory/hook_contracts.json` |
+| HITL behavior | `_hilt_support_note(<id>)` in `cmd_setup.py` |
+| OpenShell sandbox | `SandboxArtifacts()` and the `<connector>_sandbox.go` renderers; `internal/openshell/harness/` for image pins and verification |
 
-The component renders from `data/capability-matrix.json`, which is the single editable copy and is refreshed against the Go source on every connector change. The Go tests in `internal/gateway/connector` and `internal/openshell/harness` fail when its sandbox fields disagree with the code.
+The component renders from `docs-site/data/capability-matrix.json`. Go tests in `internal/gateway/connector` and `internal/openshell/harness` fail when its sandbox fields disagree with the code.
 
 </Accordion>
 </Accordions>
@@ -77,78 +59,54 @@ The component renders from `data/capability-matrix.json`, which is the single ed
 
 ### "I want maximum safety on a single connector"
 
-Pick a row with **Block: Yes**, **Native ask: Yes** and **Fail-closed: Yes**,
-and a **managed tier** sandbox that is verified end to end:
-[Claude Code](/docs/connectors/claudecode) and
-[OmniGent](/docs/connectors/omnigent). Both ask for approval inside the
-agent, and in a sandbox their hooks sit in a root-owned policy file the agent
-can't switch off.
+Pick one with **Block**, **Native ask** and **Fail-closed** all yes, and a managed-tier sandbox verified end to end. Of the current connectors that is [Claude Code](/docs/connectors/claudecode): it asks inside the agent, and in a sandbox its hooks sit in a root-owned policy file.
 
 ### "I want my agent's own hooks to enforce"
 
-Direct-to-upstream hook enforcement is supported on [Claude Code](/docs/connectors/claudecode), [Codex](/docs/connectors/codex), [Cursor](/docs/connectors/cursor), [Hermes](/docs/connectors/hermes), [Devin](/docs/connectors/devin), [Copilot CLI](/docs/connectors/copilot), [OpenHands](/docs/connectors/openhands), [Antigravity](/docs/connectors/antigravity), [OpenCode](/docs/connectors/opencode), [Kiro](/docs/connectors/kiro), and [OmniGent](/docs/connectors/omnigent). [Amp](/docs/connectors/amp) uses a direct-to-upstream system policy plugin instead. Cursor action uses documented event-native deny from the user hook. Cursor exposes no safe API for detecting an actual higher-priority Enterprise, Team, or Project conflict, so DefenseClaw reports that limitation and does not infer a conflict. The broader constraint is that these connectors cannot block a request the agent has not yet presented to their hook or policy surface.
+[Claude Code](/docs/connectors/claudecode), [Codex](/docs/connectors/codex), [Cursor](/docs/connectors/cursor), [Hermes](/docs/connectors/hermes), [Devin](/docs/connectors/devin), [Copilot CLI](/docs/connectors/copilot), [Antigravity](/docs/connectors/antigravity), [OpenCode](/docs/connectors/opencode) and [Kiro](/docs/connectors/kiro) enforce through the agent's own hooks. [Amp](/docs/connectors/amp) uses a policy plugin. None of them can block a request the agent has not yet shown to its hook or plugin surface.
 
 ### "I want HITL approvals to surface inside the agent UI"
 
-Pick a row with **Native ask: Yes**: Claude Code (`PreToolUse`), GitHub Copilot
-CLI (`preToolUse`), Antigravity (`PreToolUse` only), Amp (`tool.call` and
-model-bound `tool.result` in the active foreground thread), OmniGent
-(`UserPromptSubmit`, `PreToolUse` and `BeforeModel`, which OmniGent calls its
-`request`, `tool_call` and `llm_request` policy phases), or OpenClaw.
-Cursor is not counted because DefenseClaw does not enable its native ask response;
-confirm verdicts remain attributed alerts and cannot resume the original call.
-Confirm verdicts on every other connector/event take an immediate
-connector-specific fallback; there is no TUI approval queue.
+Claude Code (`PreToolUse`, in Manual mode only; other permission modes block), Antigravity (`PreToolUse` only), Amp (`tool.call` and model-bound `tool.result` in the active foreground thread) and OpenClaw can ask inside the agent. Copilot CLI is not counted: its hook does not prove that an approval prompt is available, so DefenseClaw blocks action-mode confirmations. The separate VS Code Local harness retains native ask. Cursor is not counted: DefenseClaw does not turn on its native ask. Every other confirm verdict takes a connector-specific fallback, and there is no TUI approval queue.
 
 ### "I want to run the agent in an OpenShell sandbox"
 
-`defenseclaw sandbox run <harness>` runs a coding agent in an NVIDIA OpenShell
-sandbox that sees only your project folder, on Linux, or on an Apple-silicon
-Mac in an OpenShell MicroVM that works on a copy of it
-([how](/docs/sandboxes/guide#macos)). The
-[sandbox guide](/docs/sandboxes/guide) covers setup and every `sandbox` command.
-DefenseClaw builds sandbox images for twelve harnesses; every other connector is
-pending in the matrix above.
+`defenseclaw sandbox run <harness>` runs a coding agent in an NVIDIA OpenShell sandbox that sees only your project folder, on Linux or in a MicroVM on an Apple-silicon Mac ([how](/docs/sandboxes/macos)). DefenseClaw builds images for the harnesses below. Every other connector is pending.
 
 <SandboxHarnessTable />
 
-- **Tamper tier.** In the managed tier the hooks are in a root-owned system or
-  managed policy file that user and project settings cannot switch off. In the
-  user tier the agent can edit its own hook file, or code the agent or a
-  repository adds runs beside the hooks (Hermes, for example, loads `.env`
-  files and plugins from its home, which its launcher checks before every
-  start). DefenseClaw reports a sandbox whose
-  hooks go silent while the harness is active, and OpenShell's network policy
-  holds either way. `defenseclaw sandbox status <name>` shows the tier.
-- **Verification.** Before DefenseClaw starts a sandbox from an image, the
-  image must pass a hook check against a built-in mock model (for Kiro CLI,
-  Kiro's own scripted-response mode): the hooks fire, a blocked tool call has
-  no effect, and an allowed one runs. *Verified end to end* also means the
-  harness ran in a live OpenShell sandbox with the DefenseClaw daemon, where a
-  blocked command stayed blocked and the egress block list held.
-- **Unverified.** These harnesses send every request, the account check
-  included, to their vendor's service and need an account before the first
-  turn, so no mock model can drive them. Their images build but never pass the
-  hook check: `sandbox run` builds the image (several GB), then refuses it
-  until a check with a vendor account passes, and the unverified image stays
-  until you remove it (see the connector page).
-- **Not tested live.** A sign-in path whose endpoints or login no live run
-  exercised, because no account was available. The connector page says which
-  sign-ins `defenseclaw sandbox run` shares.
-- **Setup defaults.** The `openshell.harnesses` setting (Claude Code and Codex
-  when empty) decides which images `defenseclaw sandbox setup` and a bare
-  `defenseclaw sandbox image build` build and which ones
-  `defenseclaw sandbox doctor` checks. `sandbox setup` writes that list: its
-  `--harness` (repeatable) replaces it, so name every harness you want.
-  `sandbox image build <harness>...` builds the harnesses you name without
-  changing it, and `sandbox run` builds a missing image on the first run. The
-  macOS app's setup wizard lists only Claude Code and Codex, and a wizard run
-  replaces `openshell.harnesses` with the ones you tick.
+| Term | Meaning |
+| --- | --- |
+| Managed tier | The hooks are in a root-owned policy file that user and project settings cannot switch off. |
+| User tier | The agent can edit its hook file, or code it or a repository adds runs beside the hooks. DefenseClaw reports a sandbox whose hooks go silent while the harness is active. |
+| Verified | The image passed a hook check against a mock model, and the harness ran end to end in a live sandbox with the daemon: a blocked command stayed blocked and the egress block list held. |
+| Unverified | The harness needs a vendor account before its first turn, so no mock model can drive it. `sandbox run` builds the image, then refuses it. |
+| Not tested live | A sign-in path no live run exercised. The connector's page says which sign-ins `sandbox run` shares. |
 
-Every sandbox hook fails closed.
+`openshell.harnesses` (Claude Code and Codex when empty) decides which images `defenseclaw sandbox setup` and a bare `defenseclaw sandbox image build` build, and which `defenseclaw sandbox doctor` checks. `sandbox setup --harness` (repeatable) replaces that list, so name every harness you want. `sandbox image build <harness>` builds what you name without changing the list, and `sandbox run` builds a missing image on first use. Every sandbox hook fails closed.
 
 ### "I want fail-closed on transport failures"
 
-Fail-closed here means the hook blocks when it cannot reach the gateway (a transport failure). It does not cover a hook process that the user kills, stops or starves: the agent then decides, and Claude Code, Codex, OpenHands and Devin treat a hook that dies or times out as non-blocking and run the call (see the [enterprise threat model](/docs/enterprise/threat-model#residual-risks)).
+Every listed connector can block a gateway outage: on a per-user install in the strict policy, on a managed host by default. Copilot CLI, Antigravity and Hermes hooks block delivery failures when the effective mode is `closed`. Hermes 0.21+ blocks a `pre_tool_call` on hook spawn error or timeout when Setup has written `fail_closed: true`; it can still run after a killed hook exits non-2 with empty stdout. Earlier Hermes contracts also fail open on timeout. Other agents may still allow a call when the hook process times out or cannot start. The table marks gateway delivery behavior separately from agent-side process failure.
 
-Pick a row with **Fail-closed: Yes**: OpenClaw, ZeptoClaw, Claude Code, Codex, Cursor, Devin, OpenCode, Amp, OpenHands, Kiro, and OmniGent. GitHub Copilot CLI, Hermes, and Antigravity do not expose a generic DefenseClaw-controlled fail-closed transport response. On a managed standalone host (Linux, macOS and Windows) the administrator-owned GitHub Copilot CLI and Hermes hooks still block a tool call DefenseClaw cannot check, and every connector's hook there fails closed in observe mode too; a managed hook never fails open on a gateway outage. On a per-user install a fail-open call is not silent: when the gateway starts again it records a `guardrail-degraded` alert per connector for the calls that ran unchecked ([Fail modes](/docs/reference/fail-modes#reporting-and-diagnosis)). Cursor's support is mode-matched: action writes `failClosed: true`, while observe writes `failClosed: false`. Devin can map DefenseClaw availability failures to vendor exit `2` only on its four declared block-capable events.
+- Fail-closed in this matrix means the running hook blocks when it cannot reach the gateway. A killed or timed-out pre-tool hook is non-blocking in Claude Code and Codex; a killed pre-tool hook can be non-blocking in Devin. Kiro CLI 2.x can run after hook timeout, and Antigravity has no documented timeout-deny setting. See the [enterprise threat model](/docs/enterprise/threat-model).
+- On a managed standalone host, hooks use the administrator's resolved fail mode, also in observe mode. The default is `closed`. If the administrator explicitly selects `open`, a gateway outage can allow the call. Oversized input, a gateway 5xx, an unusable answer and other transport errors still block. See [Fail modes](/docs/reference/fail-modes).
+- On a per-user install, every hook and plugin records a call that ran unchecked in `hook-failures.jsonl`, and the gateway turns those records into a `guardrail-degraded` alert when it starts again ([Reporting](/docs/reference/fail-modes)).
+- Cursor writes `failClosed: true` outside Secure Client in action and observe mode. Observe still allows ordinary calls and records `would_block` findings; the host flag covers a hook process that cannot answer.
+
+## Gateway outage
+
+What each connector's hooks do with a call they can't check because the gateway is not running, is still restarting or gives no answer in time. This table is the only place the docs give it per connector, and it is checked against the hook code on every change.
+
+<OutageMatrix />
+
+- **Per-user** is an install without a managed deployment. Its outage mode follows the connector's policy tier (rule pack): the default (balanced) and permissive policies let the call run with a warning and a `hook-failures.jsonl` record, the strict policy blocks it. Every other failure blocks in every tier ([Fail modes](/docs/reference/fail-modes)).
+- **Managed standalone** is an enterprise host outside Secure Client. Its fail mode is the administrator's `hook_fail_mode`: `closed`, the default, blocks the outage on every connector, and the two managed columns give `open`. A managed connector runs either through vendor [machine policy](/docs/enterprise/machine-policy) (the administrator-owned `defenseclaw-hook --enterprise-managed`) or through a hook or plugin the guardian writes into the user's home (the per-user route, for the connectors without machine policy and for one whose machine policy is off).
+- **Default foreign-hook guard**: with `foreign_hooks: remove`, the machine policy default, the [foreign-hook guard](/docs/enterprise/foreign-hook-guard) checks each call of a connector it covers against the agent session's hook record, which only the gateway holds. While the gateway cannot answer, the guard blocks that call in every fail mode, before the hook's own fail mode applies. With `foreign_hooks: report` or `allow` the guard does not ask the gateway, and the next column applies.
+- **Secure Client** hooks let an outage run in `open`, which is also their default when no fail mode is set.
+- **`DEFENSECLAW_STRICT_AVAILABILITY=1`** makes an outage block on a hook that reads it, whatever the fail mode.
+- **`DEFENSECLAW_FAIL_MODE`** is not read by any 1.0.4 hook: the installed mode is the fail mode ([Fail modes](/docs/reference/fail-modes)).
+- A proxy-backed connector has no hooks: its requests are blocked while the gateway is down.
+- `status --json` reports the administrator's resolved value as `effective_hook_fail_mode`, also for a hook that blocks the outage anyway.
+
+Refusals that are not an outage block in every fail mode: an unapproved hook the [foreign-hook guard](/docs/enterprise/foreign-hook-guard) finds, an invalid managed runtime, a refused credential, and, on a managed standalone host, input over the size limit and an answer DefenseClaw cannot use. See [Fail modes](/docs/reference/fail-modes).

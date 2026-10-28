@@ -52,6 +52,10 @@ _SUMMARY_COUNT_FIELDS: Final = (
 _SUMMARY_DIGEST_FIELDS: Final = ("digest", "files_digest")
 _SUMMARY_FIELDS: Final = frozenset((*_SUMMARY_COUNT_FIELDS, *_SUMMARY_DIGEST_FIELDS))
 _ERROR_FIELDS: Final = frozenset({"path", "code", "reason"})
+# The gateway sends at most this many warnings and counts the rest in the
+# last one (maxRulePackWireWarnings in internal/cli/rulepack.go).
+_MAX_WARNINGS: Final = 256
+_MAX_WARNING_CHARS: Final = 512
 _SAFE_CODE = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
 _SHA256_DIGEST = re.compile(r"^[a-f0-9]{64}$")
 _CONTROL_CHARACTERS = re.compile(r"[\x00-\x1f\x7f]")
@@ -79,6 +83,7 @@ class RulePackValidationResult:
     valid: bool
     summary: dict[str, int | str] | None = None
     error: RulePackValidationIssue | None = None
+    warnings: tuple[str, ...] = ()
 
     def to_wire_dict(self) -> dict[str, Any]:
         """Return a deterministic, JSON-serializable copy of the wire result."""
@@ -89,6 +94,8 @@ class RulePackValidationResult:
         }
         if self.summary is not None:
             payload["summary"] = dict(self.summary)
+        if self.warnings:
+            payload["warnings"] = list(self.warnings)
         if self.error is not None:
             payload["error"] = {
                 "path": self.error.path,
@@ -220,7 +227,7 @@ def _decode_wire(payload: dict[str, Any]) -> RulePackValidationResult:
         raise _protocol_error()
 
     if kind == "validation" and valid:
-        if set(payload) != {"wire_version", "kind", "valid", "summary"}:
+        if set(payload) - {"warnings"} != {"wire_version", "kind", "valid", "summary"}:
             raise _protocol_error()
         summary = _decode_summary(payload.get("summary"))
         return RulePackValidationResult(
@@ -228,6 +235,7 @@ def _decode_wire(payload: dict[str, Any]) -> RulePackValidationResult:
             kind="validation",
             valid=True,
             summary=summary,
+            warnings=_decode_warnings(payload.get("warnings", [])),
         )
 
     if kind == "validation_error" and not valid:
@@ -242,6 +250,18 @@ def _decode_wire(payload: dict[str, Any]) -> RulePackValidationResult:
         )
 
     raise _protocol_error()
+
+
+def _decode_warnings(value: Any) -> tuple[str, ...]:
+    """Decode the detection-only warnings of a valid pack."""
+    if not isinstance(value, list) or len(value) > _MAX_WARNINGS:
+        raise _protocol_error()
+    warnings: list[str] = []
+    for warning in value:
+        if not _safe_text(warning, maximum=_MAX_WARNING_CHARS, allow_empty=False):
+            raise _protocol_error()
+        warnings.append(warning)
+    return tuple(warnings)
 
 
 def _decode_summary(value: Any) -> dict[str, int | str]:

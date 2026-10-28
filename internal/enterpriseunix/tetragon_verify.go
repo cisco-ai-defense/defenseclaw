@@ -1167,7 +1167,7 @@ func RunTetragonVerify(ctx context.Context, env *Env, readyFor string) *Tetragon
 		// The mode the config asks for: the configured one when a cap (Plane
 		// C off) holds it at off, so the check names the cap.
 		readyFor = in.Intent.helperMode()
-		if in.Intent.Reason == config.TetragonReasonPlaneCOff {
+		if in.Intent.capReason() == config.TetragonReasonPlaneCOff {
 			readyFor = in.Intent.Configured
 		}
 	}

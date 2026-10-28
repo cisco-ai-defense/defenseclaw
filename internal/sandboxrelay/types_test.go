@@ -142,6 +142,7 @@ func TestReasonStatus(t *testing.T) {
 		// 403, never 404/409/410: an older daemon treats those as the end of
 		// its registration (GAP-0182).
 		ReasonDaemonOutdated:              http.StatusForbidden,
+		DetailSetupChanging:               http.StatusServiceUnavailable,
 		"enterprise_managed_rate_limited": 0,
 	} {
 		if got := ReasonStatus(reason); got != want {

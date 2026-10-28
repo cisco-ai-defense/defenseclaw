@@ -68,10 +68,6 @@ type unixAgentProbe struct {
 	// sees homes read-only, and some agents (Hermes) refuse to print their
 	// version when they cannot take a lock in their state directory.
 	stateEnv string
-	// uvTool names a `uv tool install` environment (tool, distribution)
-	// whose dist-info directory carries the version, for Python CLIs that
-	// take too long to start for the --version probe.
-	uvTool [2]string
 	// stamp is a home-relative JSON install stamp that records the release
 	// ("displayVersion", else "baseVersion"), for CLIs that no longer print a
 	// version outside their own environment: a current Hermes refuses
@@ -92,8 +88,6 @@ var unixAgentProbes = map[string]unixAgentProbe{
 	"amp":        {npmPackages: []string{"@ampcode/cli"}, binaries: []string{"amp"}},
 	"devin":      {binaries: []string{"devin"}},
 	"hermes":     {binaries: []string{"hermes"}, stateEnv: "HERMES_HOME", stamp: ".hermes/hermes-agent/install-stamp.json"},
-	"openhands":  {binaries: []string{"openhands"}, uvTool: [2]string{"openhands", "openhands"}},
-	"omnigent":   {binaries: []string{"omnigent"}, uvTool: [2]string{"omnigent", "omnigent"}},
 	// "antigravity" is the IDE launcher, a desktop surface that is never
 	// run (DiscoverUnixAgentSurfaces).
 	"antigravity": {binaries: []string{"agy"}},
@@ -116,14 +110,22 @@ func UnixAgentProbeKnown(connector string) bool {
 // prefix elsewhere) belongs to whoever installed it, so discovery reads it
 // only when unixDiscoveryCandidateTrusted admits it.
 func userNodePrefixes(home string) []string {
-	prefixes := []string{
+	prefixes, _ := userNodePrefixesBounded(home, unixVersionedPrefixLimit)
+	return prefixes
+}
+
+// userNodePrefixesBounded is userNodePrefixes with at most limit installed
+// Node versions per version manager; truncated reports that a manager
+// holds more, so a caller that must see every copy can say so.
+func userNodePrefixesBounded(home string, limit int) (prefixes []string, truncated bool) {
+	prefixes = []string{
 		filepath.Join(home, ".npm-global"),
 		filepath.Join(home, ".local"),
 		filepath.Join(home, ".bun", "install", "global"),
 		filepath.Join(home, ".volta", "tools", "image"),
 	}
 	if !unixUserDiscoveryExtended() {
-		return prefixes
+		return prefixes, false
 	}
 	if prefix := userNPMRCPrefix(home); prefix != "" {
 		prefixes = append(prefixes, prefix)
@@ -133,12 +135,14 @@ func userNodePrefixes(home string) []string {
 		filepath.Join(home, ".config", "yarn", "global"),
 	)
 	for _, pattern := range userVersionedNodePrefixPatterns(home) {
-		prefixes = append(prefixes, newestVersionedDirs(pattern, unixVersionedPrefixLimit)...)
+		dirs, more := versionedDirs(pattern, limit)
+		prefixes = append(prefixes, dirs...)
+		truncated = truncated || more
 	}
 	return append(prefixes,
 		filepath.Join(home, ".linuxbrew"),
 		"/home/linuxbrew/.linuxbrew",
-	)
+	), truncated
 }
 
 // unixUserDiscoveryExtended reports whether discovery may look through the
@@ -172,9 +176,16 @@ func userVersionedNodePrefixPatterns(home string) []string {
 // first (the version is the first path element the wildcard matched,
 // "v22.11.0" or "22.11.0"), at most limit of them.
 func newestVersionedDirs(pattern string, limit int) []string {
+	dirs, _ := versionedDirs(pattern, limit)
+	return dirs
+}
+
+// versionedDirs is newestVersionedDirs that also reports whether more than
+// limit directories matched.
+func versionedDirs(pattern string, limit int) ([]string, bool) {
 	matches, err := filepath.Glob(pattern)
 	if err != nil || len(matches) == 0 {
-		return nil
+		return nil, false
 	}
 	star := strings.Index(pattern, "*")
 	versionOf := func(match string) string {
@@ -192,9 +203,9 @@ func newestVersionedDirs(pattern string, limit int) []string {
 	}
 	sort.SliceStable(dirs, func(i, j int) bool { return compareUnixVersions(versionOf(dirs[i]), versionOf(dirs[j])) > 0 })
 	if len(dirs) > limit {
-		dirs = dirs[:limit]
+		return dirs[:limit], true
 	}
-	return dirs
+	return dirs, false
 }
 
 // userNPMRCPrefix returns the npm global prefix set in ~/.npmrc
@@ -280,9 +291,13 @@ func DiscoverUnixAgentVersion(ctx context.Context, home, connector string, allow
 		prefixes := userPrefixes
 		if unixUserDiscoveryExtended() {
 			// Volta keeps each global package in its own image.
-			prefixes = append([]string{filepath.Join(home, ".volta", "tools", "image", "packages", filepath.FromSlash(pkg))}, userPrefixes...)
+			prefixes = append([]string{filepath.Join(home, ".volta", "tools", "image", "packages", filepath.FromSlash(pkg))}, prefixes...)
 		}
-		for _, prefix := range append(append([]string{}, prefixes...), machinePrefixes()...) {
+		allPrefixes := append(append([]string{}, prefixes...), machinePrefixes()...)
+		if connector == "claudecode" {
+			allPrefixes = append(allPrefixes, filepath.Join(home, ".claude", "local"))
+		}
+		for _, prefix := range allPrefixes {
 			for _, candidate := range nodeModulesPackage(prefix, pkg) {
 				if !unixDiscoveryCandidateTrusted(home, candidate) {
 					continue
@@ -298,20 +313,17 @@ func DiscoverUnixAgentVersion(ctx context.Context, home, connector string, allow
 			return version, ""
 		}
 	}
-	if probe.uvTool[0] != "" {
-		if version := readUVToolVersion(home, probe.uvTool[0], probe.uvTool[1]); version != "" {
-			return version, ""
-		}
-	}
+	stampVersion := ""
 	if probe.stamp != "" {
 		stamp := filepath.Join(home, filepath.FromSlash(probe.stamp))
 		if unixDiscoveryCandidateTrusted(home, stamp) {
-			if version := readUnixInstallStampVersion(stamp); version != "" {
-				return version, ""
-			}
+			stampVersion = readUnixInstallStampVersion(stamp)
 		}
 	}
 	if !allowExec {
+		if stampVersion != "" {
+			return stampVersion, ""
+		}
 		return "", fmt.Sprintf("no %s package metadata under this home", connector)
 	}
 	installedAt, installedNote := "", ""
@@ -335,6 +347,12 @@ func DiscoverUnixAgentVersion(ctx context.Context, home, connector string, allow
 				}
 			}
 		}
+	}
+	// The install stamp names the release only when the CLI does not answer
+	// itself: only the installer rewrites the stamp, so a CLI upgraded
+	// another way leaves it naming the older release (GAP-1274).
+	if stampVersion != "" {
+		return stampVersion, ""
 	}
 	if installedAt != "" {
 		return "", UnixAgentUnversionedReasonPrefix + installedAt + installedNote
@@ -442,6 +460,9 @@ func DiscoverUnixMachineAgentVersion(connector string) string {
 func unixAgentBinaryCandidates(home, binary string) []string {
 	dirs := unixAgentDiscoveryDirs(home)
 	candidates := make([]string, 0, len(dirs)+2)
+	if binary == "claude" {
+		candidates = append(candidates, filepath.Join(home, ".claude", "local", "claude"))
+	}
 	for _, dir := range dirs {
 		candidates = append(candidates, filepath.Join(dir, binary))
 	}
@@ -550,26 +571,6 @@ func unixMachineAgentBinDirs() []string {
 		dirs = append(dirs, filepath.Join(prefix, "bin"))
 	}
 	return dirs
-}
-
-// readUVToolVersion reads the version of distribution dist from the default
-// `uv tool install` environment of tool under home (OpenHands needs about
-// 11 s to answer --version, beyond the probe timeout).
-func readUVToolVersion(home, tool, dist string) string {
-	pattern := filepath.Join(home, ".local", "share", "uv", "tools", tool, "lib", "python*", "site-packages", dist+"-*.dist-info")
-	matches, err := filepath.Glob(pattern)
-	if err != nil || len(matches) != 1 {
-		return ""
-	}
-	info, err := os.Lstat(matches[0])
-	if err != nil || !info.IsDir() {
-		return ""
-	}
-	version := strings.TrimSuffix(strings.TrimPrefix(filepath.Base(matches[0]), dist+"-"), ".dist-info")
-	if !validUnixAgentVersion(version) {
-		return ""
-	}
-	return version
 }
 
 // readUnixInstallStampVersion reads the release from a bounded install

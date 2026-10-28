@@ -9,142 +9,99 @@ keywords:
   - DEFENSECLAW_LLM_KEY
 ---
 
-`~/.defenseclaw/config.yaml` is the single source of truth for what an
-administrator decided: every policy decision lives in it, or in a policy asset
-it names by digest, and nothing else stores one. Setup commands,
-`defenseclaw config set` and the policy commands change it through one writer
-that validates the change before it writes; on a per-user install you can also
-edit the file by hand. The running gateway watches `config.yaml`, validates
-the full file on change, builds a new policy generation off the hot path and
-swaps it in atomically, so most changes apply without a restart. A change that
-does not validate leaves the previous generation running. See
-[Reload without restart](#reload-without-restart) for the few keys that need
-`defenseclaw-gateway restart`, and
-[Configuration: one source of truth](/docs/reference/source-of-truth) for the
-model behind this page: what is configuration, what is derived from it, and
-what only records what happened.
+`~/.defenseclaw/config.yaml` is the source of truth for every decision an administrator makes. Setup commands, `defenseclaw config set` and the policy commands change it through one writer that validates before it writes; on a per-user install you can also edit it by hand. The running gateway validates the whole file on change and swaps in a new policy generation, so most changes need no restart; a change that does not validate leaves the previous generation running. The model behind this is on [Source of truth](/docs/reference/source-of-truth); the keys that need a restart are under [Reload without restart](#reload-without-restart).
 
-The current contract is `config_version: 9`. A version 8 file, which is what
-DefenseClaw 0.8.5 to 0.8.10 write, still loads: the gateway migrates it in memory.
-`defenseclaw upgrade` or `defenseclaw migrate` rewrites it as version 9 and
-keeps the old file as `config.yaml.v8.bak`. See
-[Migrate config.yaml from v8 to v9](/docs/reference/migrate-v9) for what moved
-and how to check it, and [Upgrade DefenseClaw](/docs/get-started/upgrade) for
-the upgrade and rollback flow. A file from a released 0.8.x install that is
-older than version 8 is converted once, by `defenseclaw upgrade` or
-`defenseclaw migrate`, with the original kept as a backup; any command that
-meets such a file stops with that instruction instead of reading it.
+The current schema is `config_version: 9`. `defenseclaw config reference --format json-schema` prints the schema of every section with allowed values, and `defenseclaw config validate` checks a file. A version 8 file (written by 0.8.5 to 0.8.10) is migrated in memory when the gateway loads it; see [Migrate to config version 9](/docs/reference/migrate-v9).
 
-<Callout title="Native Windows uses the packaged layout">
-The file tree below describes a source or POSIX installation. The native
-Windows package uses an embedded runtime and `defenseclaw-hook.exe`; it does
-not install a `.venv` or shell hook scripts. See the
-[native Windows path reference](/docs/get-started/windows/paths-troubleshooting)
-before locating or editing Windows state.
+<Callout title="Windows layouts depend on the installer">
+The Windows Setup package uses an embedded runtime and `defenseclaw-hook.exe`, without a `.venv`. The supported per-user `install.ps1` route manages a private `.venv` and generates hook scripts under the data home. See [Windows paths](/docs/get-started/windows/paths-troubleshooting) before locating or editing Windows state.
+</Callout>
+
+<Callout title="Managed computers">
+On a Linux or macOS computer with the standalone enterprise package, `defenseclaw` offers users only `sandbox` commands, `help` and `--version` (every other command exits 2), and `defenseclaw-gateway` is not on their `PATH`. On Windows, `defenseclaw.exe` is the administrator's command. The `defenseclaw` and `defenseclaw-gateway` examples on this page are for a per-user install. The administrator edits the managed config and runs the packaged binary as root: `/opt/defenseclaw/bin/defenseclaw-gateway` on Linux, `/opt/cisco/defenseclaw/bin/defenseclaw-gateway` on macOS, and `defenseclaw.exe enterprise ...` from an elevated PowerShell on Windows. Apply a change with `enterprise <os> ensure`, check it with `enterprise <os> verify`, and use `policy digest` and `policy reload` on the gateway binary. See [Change the config](/docs/enterprise/lifecycle#change-the-config) and [Enterprise settings](#enterprise-settings-enterprise).
 </Callout>
 
 ## On-disk layout
 
-<Files>
-  <Folder name="~/.defenseclaw" defaultOpen>
-    <File name="config.yaml" />
-    <File name="config.generation.json" />
-    <File name="config.yaml.lock" />
-    <File name=".env" />
-    <File name="audit.db" />
-    <File name="device.key" />
-    <File name="doctor_cache.json" />
-    <File name="picked_connector" />
-    <File name="hook_contract_lock.json" />
-    <File name="custom-providers.json (derived from llm_providers)" />
-    <File name="judge_bodies.db (when judge bodies are retained)" />
-    <File name="migration-v9.json (after the v9 migration)" />
-    <File name="config.yaml.v8.bak (after the v9 migration)" />
-    <File name="gateway.log" />
-    <File name="watchdog.log" />
-    <Folder name=".venv">
-      <File name="…" />
-    </Folder>
-    <Folder name="hooks">
-      <File name="<connector>-hook.sh (derived)" />
-    </Folder>
-    <Folder name="logs">
-      <File name="hook-failures.jsonl" />
-    </Folder>
-    <Folder name="policies" defaultOpen>
-      <Folder name="guardrail" defaultOpen>
-        <Folder name="default" defaultOpen>
-          <Folder name="rules">
-            <File name="c2.yaml" />
-            <File name="cognitive.yaml" />
-            <File name="commands.yaml" />
-            <File name="enterprise-data.yaml" />
-            <File name="local-patterns.yaml" />
-            <File name="secrets.yaml" />
-            <File name="sensitive-paths.yaml" />
-            <File name="trust-exploit.yaml" />
-          </Folder>
-          <Folder name="judge">
-            <File name="injection.yaml" />
-            <File name="pii.yaml" />
-            <File name="tool-injection.yaml" />
-          </Folder>
-          <File name="sensitive-tools.yaml" />
-          <File name="suppressions.yaml" />
-        </Folder>
-        <Folder name="strict">
-          <File name="same layout as default" />
-        </Folder>
-        <Folder name="permissive">
-          <File name="same layout as default" />
-        </Folder>
-      </Folder>
-      <Folder name="rego">
-        <File name="admission.rego" />
-        <File name="guardrail.rego" />
-        <File name="data.json.migrated-v9 (after the v9 migration)" />
-      </Folder>
-    </Folder>
-    <Folder name="codeguard-rules" />
-    <Folder name="plugins" />
-    <Folder name="quarantine" />
-    <Folder name="backups" />
-    <Folder name="connector_backups">
-      <Folder name="<connector>">
-        <File name="<logical-name>.json" />
-      </Folder>
-    </Folder>
-  </Folder>
-</Files>
+Where each file lives on macOS and Linux is under [What the install creates](#what-the-install-creates) and [Data](#data). Windows paths are on [Windows paths](/docs/get-started/windows/paths-troubleshooting). Only `config.yaml` and the assets it names by digest are policy. Everything else is one of three other kinds, and none of it is read back as input:
 
-`hooks/`, `hook_contract_lock.json`, and `connector_backups/` appear once a
-connector is set up; `backups/` holds the timestamped copies that commands
-such as `setup redaction` write before they change `config.yaml`.
-
-Only `config.yaml` and the assets it names are policy. Everything else in the
-tree is one of three other things, and none of it is read back as input:
-
-| Kind | Files | What to do about it |
+| Kind | Files | What to do |
 | --- | --- | --- |
-| Derived (rendered from `config.yaml`) | `custom-providers.json`, `hooks/<connector>-hook.sh`, the composed rule packs and compiled admission (these two live in memory and are not on disk) | Never edit. Doctor reports drift. Regenerate with `defenseclaw doctor --fix` (providers) or `defenseclaw-gateway restart` (hook scripts). |
+| Derived (rendered from `config.yaml`) | `custom-providers.json`, `hooks/<connector>-hook.sh`, the composed rule packs and compiled admission (the last two live in memory) | Never edit. Doctor reports drift. Regenerate with `defenseclaw doctor --fix` (providers) or `defenseclaw-gateway restart` (hook scripts). |
 | Evidence (what was applied) | `config.generation.json`, `hook_contract_lock.json`, `migration-v9.json`, `config.yaml.v8.bak`, `data.json.migrated-v9` | Keep; they explain how the file got here. |
 | Runtime state (what was seen or done) | `audit.db`, `doctor_cache.json`, `judge_bodies.db`, quarantine records, the AI-discovery inventory | Reported, never policy. |
 
-`config.generation.json` records the generation counter, the sha256 of the
-file the writer last wrote, the actor and the reason. `config.yaml.lock` is
-the lock Go and Python writers share. In `config_version: 9` there is no
-`policies/rego/data.json` (admission and thresholds live in `config.yaml`) and
-no `policies/guardrail/protected-<scope>/` folders (a rule pack and its
-customisation are composed in memory from `guardrail.rule_pack` and
-`guardrail.rules`). A `data.json` left over from an upgrade is ignored. See
-[Configuration: one source of truth](/docs/reference/source-of-truth#what-is-derived)
-for the full list.
+`config.generation.json` records the generation counter, the SHA-256 of the file the writer last wrote, the actor and the reason. `config.yaml.lock` is the lock the Go and Python writers share. `hooks/`, `hook_contract_lock.json` and `connector_backups/` appear once a connector is set up; `backups/` holds the timestamped copies that commands such as `setup redaction` write before changing `config.yaml`. A `policies/rego/data.json` left over from an upgrade is ignored. `gateway.jsonl` exists only when an optional `kind: jsonl` destination explicitly uses that path.
+
+### What the install creates
+
+The trees below describe the per-user shell installers, including native Windows `install.ps1`, which manages a private `.venv` and generated hook scripts. The Windows Setup package uses an embedded runtime and `defenseclaw-hook.exe` instead; it creates no `.venv`. See [Windows installation](/docs/get-started/windows) for the package layout.
+
+<Files>
+  <Folder name="~/.defenseclaw" defaultOpen>
+    <Folder name=".venv">
+      <File name="… (the CLI's Python environment)" />
+    </Folder>
+    <File name="config.yaml" />
+    <File name="config.generation.json" />
+    <File name="audit.db" />
+    <File name="device.key" />
+    <Folder name="hooks" defaultOpen>
+      <File name="claude-code-hook.sh" />
+      <File name="codex-hook.sh" />
+      <File name="… (one script per agent you set up)" />
+    </Folder>
+    <Folder name="policies" defaultOpen>
+      <Folder name="guardrail" defaultOpen>
+        <Folder name="default" />
+        <Folder name="strict" />
+        <Folder name="permissive" />
+      </Folder>
+      <Folder name="rego" />
+    </Folder>
+    <Folder name="installer" />
+    <Folder name="logs" />
+    <Folder name="previous" />
+  </Folder>
+  <Folder name="~/.local/bin" defaultOpen>
+    <File name="defenseclaw" />
+    <File name="defenseclaw-gateway" />
+    <File name="defenseclaw-acp" />
+    <File name="skill-scanner" />
+    <File name="mcp-scanner" />
+  </Folder>
+</Files>
+
+`config.yaml`, `config.generation.json`, `audit.db` and `device.key` are created by `defenseclaw init` or `quickstart`, and the hook scripts by setting up an agent. Only `config.yaml` is policy; the hook scripts are derived from it. `installer/` is the installer that performed the current install (`defenseclaw rollback` uses it); its `binaries.sha256` lists the SHA-256 of each installed binary as it runs (`cd ~/.local/bin && shasum -a 256 -c ~/.defenseclaw/installer/binaries.sha256`). On macOS these differ from the binaries in the release archive, which the installer checks against `checksums.txt` and then signs ad hoc for this Mac. `previous/` is the install the last upgrade replaced. On Linux, `~/.local/bin` also holds `defenseclaw-sensor-helper` for the opt-in sandbox kernel feed. When the installer installs `uv` for you, `uv` and `uvx` are in `~/.local/bin` too.
+
+On macOS and Linux the installer does not change `PATH`. If `~/.local/bin` is not on it, the installer prints the line to add to your shell profile.
+
+### Data
+
+In `~/.defenseclaw`, `%USERPROFILE%\.defenseclaw` on Windows, or `DEFENSECLAW_HOME` when set.
+
+| Path | What it is | Edit it? |
+| --- | --- | --- |
+| `config.yaml` | Your configuration. | Use `defenseclaw config set` or the setup commands. The gateway applies a valid edit and keeps the previous policy if an edit is invalid; run `defenseclaw config validate` first when you edit by hand. |
+| `config.generation.json` | Generation, SHA-256, actor and time of each write to `config.yaml`. | No. |
+| `custom-providers.json` | Custom LLM providers, derived from `llm_providers`. | No. `defenseclaw doctor --fix` regenerates it. |
+| `config.yaml.v8.bak`, `migration-v9.json` | Kept by the `config_version` 9 migration. | Read them. `defenseclaw config migrate --ack` marks the record read. |
+| `.env` | Protected tokens and API keys. | No. Never print it. Use `defenseclaw keys`. |
+| `audit.db` | The local audit database (SQLite). | No. Do not open it with a second writer or attach it to a ticket. |
+| `gateway.log` | The gateway's output. | Read it locally; check excerpts before sharing. |
+| `logs/install-*.log` | One log per install, upgrade or rollback. | Read it. |
+| `logs/hook-failures.jsonl` | Hook delivery failures. | Read it locally; it can hold sensitive details. |
+| `.venv/` | The Python environment the installer manages. | No. |
+| `previous/` | The install the last upgrade replaced. | No. `defenseclaw rollback` swaps it back. |
+| `hooks/` | Generated hook files and per-connector credentials. | No. Never print or copy them. |
+| `backups/`, `connector_backups/` | Copies needed to restore agent files and earlier settings, including `config.yaml.before-redaction-*`. | No. They can contain credentials. |
+| `quarantine/` | Quarantined skills and plugins. | No. Use `defenseclaw skill restore` or `plugin restore`. |
+| `gateway.pid`, `watchdog.pid` | Records of the running gateway and watchdog. | No. |
+| `gateway.jsonl` | Exists only when an optional `kind: jsonl` destination explicitly uses that path. | Manage it through [observability](/docs/observability). |
 
 ## Doctor cache
 
-`~/.defenseclaw/doctor_cache.json` is the latest non-dry-run Doctor snapshot.
-The Textual TUI reads it for the Overview panel instead of repeating
-network-intensive probes on every redraw.
+`~/.defenseclaw/doctor_cache.json` is the latest non-dry-run Doctor snapshot. The TUI reads it for the Overview panel instead of repeating network probes on every redraw.
 
 ```json
 {
@@ -177,27 +134,16 @@ network-intensive probes on every redraw.
 }
 ```
 
-The top-level and `summary` counts retain their health-only meaning.
-`repair_summary` and `repairs` form a separate ledger; a failed or blocked
-repair can make the aggregate outcome fail without increasing the health
-failure count.
-
-The CLI publishes the cache with an atomic temporary-file replacement after
-each non-dry-run Doctor invocation, including nonzero outcomes.
-`doctor --fix --dry-run` is read-only and never writes it. The TUI marks
-snapshots older than 15 minutes stale. A later healthy check can show that live
-health recovered, but does not erase a cached failed or blocked repair. A
-missing cache is normal before the first Doctor run.
+The top-level and `summary` counts keep their health-only meaning; `repair_summary` and `repairs` form a separate ledger, so a failed or blocked repair can fail the aggregate outcome without raising the health failure count. The CLI publishes the cache atomically after each non-dry-run Doctor run, including nonzero outcomes; `doctor --fix --dry-run` never writes it. The TUI marks snapshots older than 15 minutes stale. A missing cache is normal before the first Doctor run.
 
 ## config.yaml schema
 
-The shape below shows the normal source-authoring surface. Every block is
-optional, and setup commands preserve comments and unrelated hand edits. Use
-`defenseclaw config reference observability` for the generated all-knobs
-observability reference instead of copying every default into this file, and
-`defenseclaw config reference --format json-schema` for the schema of every
-section (each field with its allowed values). `defenseclaw config validate`
-points to the JSON schema when a field is wrong.
+Every block is optional, and setup commands preserve comments and unrelated hand edits. Do not copy every default into the file.
+
+Before validating this example, make `GALILEO_API_KEY` and `SPLUNK_ACCESS_TOKEN`
+available to the validation process from your credential store. The Galileo and
+Splunk destinations below require them. Omit those destinations if you do not use
+them. Validation is read-only and refuses an unresolved credential reference.
 
 ```yaml
 config_version: 9             # current schema; `defenseclaw migrate` rewrites a v8 file (the old file stays as config.yaml.v8.bak)
@@ -231,11 +177,7 @@ gateway:
       take_action: true        # block a rejected new MCP server in the connector's MCP config
 
 # One observability graph owns collection, local history, routing, redaction,
-# sampling, metrics policy, and every optional destination. Defaults collect
-# all logs/traces/metrics, persist collected logs to SQLite, and export every
-# capability of an enabled destination unredacted when send/routes are omitted.
-# Galileo's omitted preset policy is additionally restricted to the generated
-# available galileo-rich-v2 trace-family membership.
+# sampling, metrics policy and every destination (see Reference > Observability).
 observability:
   resource:
     attributes:
@@ -300,41 +242,23 @@ observability:
         buckets: [compliance.activity, security.finding, enforcement.action]
         redaction_profile: soc
 
-# Top-level LLM block. Written by `defenseclaw setup llm` (and copied
-# into per-component blocks via the `--inherit-from` machinery). The
-# `role` field decides who consumes this block at resolve time:
-#   - `unified` (default): every component that does not declare its
-#     own `llm:` reads from here.
-#   - `agent`: guardrail.judge.llm stays empty and inherits through
-#     the unified merge — proxy connectors only.
-#   - `judge`: writes guardrail.judge.llm directly, leaves the top
-#     level alone — useful for hook-based connectors that already
-#     route the agent's traffic elsewhere.
-# See `defenseclaw setup guardrail --llm-role judge_only|judge_and_agent`
-# for the connector-aware variant.
+# Top-level LLM block, written by `defenseclaw setup llm`. Every component
+# without its own llm block reads it. `setup llm --role judge` writes
+# guardrail.judge.llm instead; the role is a command option, not a key.
 llm:
   provider: anthropic          # anthropic | openai | bedrock | vertex_ai | azure | custom
   model: claude-sonnet-4-6
   api_key_env: DEFENSECLAW_LLM_KEY
   base_url: ""                 # optional override; LiteLLM picks a default per provider. For an OpenAI-style provider (openai, openai-compatible, vllm, lm_studio) a bare host such as https://host gets /v1 added, so the judge, doctor and the scanners all call https://host/v1/chat/completions; a URL with a path is used as written
-  role: unified                # unified | agent | judge
   instance_name: ""            # binds to an llm_providers.custom entry; required with provider: custom
   region: ""                   # generic regional hint (Bedrock / Vertex); provider-specific sub-blocks below take precedence
-  # forward_custom_headers controls whether the guardrail gateway
-  # forwards inbound HTTP headers from the agent to the upstream LLM
-  # provider on both /v1/chat/completions and the passthrough path
-  # (/v1/responses, /v1/messages, Bedrock/Gemini native, ...). Default
-  # is on; set to false to suppress all inbound header copying so the
-  # upstream only sees the canonical Authorization the gateway re-mints
-  # from the secrets sidecar. A small blocklist (proxy-hop, auth, host,
-  # X-DC-*, X-DefenseClaw-*, W3C trace context) plus RFC 7230 /
-  # printable-ASCII validation and 64-header / 32 KiB caps apply
-  # regardless.
+  # forward_custom_headers: copy inbound agent HTTP headers to the upstream LLM
+  # provider (default on). A blocklist (proxy-hop, auth, host, X-DC-*,
+  # X-DefenseClaw-*, W3C trace context), RFC 7230 validation and 64-header /
+  # 32 KiB caps apply regardless.
   forward_custom_headers: true
 
-  # Provider-specific sub-blocks. Only the one matching `provider`
-  # is consulted; the others may exist as leftover state from a
-  # previous setup and are ignored at resolve time.
+  # Provider sub-blocks: only the one matching `provider` is consulted.
   bedrock:
     region: us-east-1
     auth_mode: iam_credentials # api_key | iam_credentials | profile | instance_role
@@ -353,14 +277,12 @@ llm:
 
   azure:
     endpoint: https://my-resource.openai.azure.com
-    api_version: 2024-10-21
+    api_version: "2024-10-21"
     auth_mode: api_key         # api_key | managed_identity
     deployment_aliases: {}     # model -> deployment, populated by --azure-deployment-alias
 
-  # Inline TLS posture for self-signed or internal endpoints. Both
-  # `ca_cert_pem` and `insecure_skip_verify` exist so the gateway
-  # never has to read another file at request time; `doctor` warns
-  # when both are set on the same block.
+  # Inline TLS posture for self-signed or internal endpoints; doctor warns
+  # when both are set.
   tls:
     ca_cert_pem: ""            # PEM bundle inlined from --tls-ca-cert-file
     insecure_skip_verify: false
@@ -401,10 +323,10 @@ guardrail:
   mode: action                 # observe | action (default observe)
   scanner_mode: local          # local | remote | both (default both)
   rule_pack: default           # default | strict | permissive, or a guardrail.custom_packs name (guardrail use-pack)
-  custom_packs:                # a pack directory pinned by digest; select it with rule_pack: acme-hardened
-    acme-hardened:
-      path: /etc/acme/defenseclaw/packs/acme-hardened
-      digest: sha256:<64 hex digits>
+  custom_packs: {}             # pack directories pinned by digest; `guardrail use-pack` adds an entry, for example:
+  #   acme-hardened:           # select it with rule_pack: acme-hardened
+  #     path: /etc/acme/defenseclaw/packs/acme-hardened
+  #     digest: sha256:<64 hex digits of the pack files>
   rules:                       # layered on the selected pack in memory; no files are written
     protections: []            # built-in use-case packs, for example database-destruction-protection
     enable: []                 # rule IDs, as the pack spells them (SEC-AWS-KEY, exec.remote_ip_download_execute_same_artifact)
@@ -422,15 +344,7 @@ guardrail:
   detection_strategy_completion: regex_only  # default for tool results and completions; regex_judge also sends them to the judge
   detection_strategy_tool_call: ""   # per-lane override; empty -> detection_strategy
 
-  cisco:
-    endpoint: ""
-    api_key_env: CISCO_AI_DEFENSE_API_KEY
-    timeout_ms: 5000
-
-  # When `judge.llm` is omitted, the judge inherits from the top-level
-  # `llm:` block. Populate it explicitly to point the judge at a
-  # different backend (e.g. an internal Bedrock instance) without
-  # changing what the agent talks to.
+  # judge.llm omitted: the judge inherits the top-level llm block.
   judge:
     enabled: false
     model: anthropic/claude-sonnet-4-6
@@ -443,16 +357,10 @@ guardrail:
     enabled: false
     min_severity: HIGH         # CRITICAL, HIGH, MEDIUM or LOW, any case (empty: HIGH)
 
-  # Multi-connector overlay. One gateway can enforce guardrail policy for
-  # several hook connectors at once; each key under `connectors` is a
-  # connector name (codex, claudecode, antigravity, ...) carrying a
-  # subset of the guardrail knobs above. Every field is OPTIONAL and
-  # inherits the global `guardrail.*` value when unset. The singular
-  # `guardrail.connector` above keeps working for single-connector
-  # installs; this map is purely additive. Proxy connectors (openclaw,
-  # zeptoclaw) cannot appear here — multi-connector is hook-only.
-  # Managed by `defenseclaw setup <connector>` (choosing "Add") and the
-  # `defenseclaw guardrail ... --connector X` command group.
+  # Multi-connector overlay: each key is a hook connector carrying a subset of
+  # the guardrail knobs above; unset fields inherit guardrail.*. Proxy
+  # connectors (openclaw, zeptoclaw) cannot appear here. Managed by
+  # `defenseclaw setup <connector>` and `guardrail ... --connector X`.
   connectors:
     codex:
       enabled: true            # pointer field: omit = inherit (enabled); false = explicitly off
@@ -467,14 +375,13 @@ guardrail:
     claudecode:
       mode: observe            # only logs; everything else inherits the global default
 
-  # Identity-based guardrail profiles (see "Guardrail profiles and identity
-  # keys" below). Assignments are ordered: the first match wins.
+  # Identity-based profiles (see Guardrail profiles below); the strictest applies.
   profiles:
     contractors:
       mode: action
       block_at: MEDIUM
       hilt: {enabled: true, min_severity: HIGH}
-  profile_assignments:        # ordered: the first match wins; keys AND, values OR
+  profile_assignments:        # the strictest applies; keys AND, values OR
     - profile: contractors
       match: {groups: ["contractors@corp.example.com"]}   # or "CORP\\Contractors" on Windows
   default_profile: ""          # "" keeps the guardrail.* settings above
@@ -485,9 +392,7 @@ ai_discovery:
   signature_packs: []          # pack files to load; only listed packs load (see the table below)
   trusted_ad_child_domains: []   # child AD domains whose users are verified on Linux
 
-# What happens to a skill, MCP server or plugin by scan severity. Unset
-# actions derive from the scanner gate (scanners.skill_scanner.*). See
-# "Admission" below.
+# What happens to a skill, MCP server or plugin by scan severity.
 admission:
   defaults: {}                 # scan_on_install, allow_list_bypass_scan, actions, scanner_overrides, first_party_allow_list
   skill: {}                    # per-type overrides of the same keys
@@ -501,7 +406,7 @@ asset_policy:
   plugin: {denied: [], allowed: []}
   tool: {denied: [], allowed: []}
 
-# Scanner model. See "Scanners" below.
+# Scanner model (see Scanners below).
 scanners:
   skill_scanner:
     policy: quiet              # quiet | strict | balanced | permissive | low-noise | custom
@@ -526,31 +431,64 @@ webhooks:
     type: slack
     enabled: true
     url: https://hooks.slack.com/services/T000/B000/XXX
-    secret_env: ""             # optional HMAC for `type: generic`
+    # secret_env: WEBHOOK_HMAC_KEY   # optional HMAC key variable, for type: generic
     min_severity: HIGH
 ```
 
-When `gateway.api_bind` is empty, the sidecar uses `127.0.0.1`. See
-[Gateway API: bind address](/docs/reference/gateway-api#bind-address).
+### Other top-level keys
 
-The `openshell:` block for the NVIDIA OpenShell sandbox is described in
-[OpenShell sandbox settings](#openshell-sandbox-settings) below.
+Defaults from the loader. Omitted keys take these values.
+
+| Key | Default | What it does |
+| --- | --- | --- |
+| `data_dir` | `~/.defenseclaw` | The data directory. `DEFENSECLAW_HOME` relocates it. Restart required. |
+| `audit_db`, `judge_bodies_db` | `<data_dir>/audit.db`, `<data_dir>/judge_bodies.db` | The audit store and the retained judge bodies. |
+| `quarantine_dir`, `plugin_dir`, `policy_dir` | `<data_dir>/quarantine`, `plugins`, `policies` | Quarantined files, connector plugins, policy assets. |
+| `environment` | detected (`macos`, `windows`, `linux`, ...) | Stamped on every record. Restart required. |
+| `tenant_id`, `workspace_id`, `discovery_source` | empty | Identity stamped on every record. Restart required. |
+| `deployment_mode` | empty | `managed_enterprise` on a managed device. Restart required. |
+| `claw.mode` | `openclaw` | The primary connector. With several active it names the first; the OTel attribute `defenseclaw.claw.mode` is set only while a single connector is active. |
+| `claw.home_dir`, `claw.config_file` | `~/.openclaw`, `~/.openclaw/openclaw.json` | Where the OpenClaw install is looked up. |
+| `claw.workspace_dir` | empty | Set by `setup <connector> --workspace`; scopes hooks to one folder ([Per-connector files](#per-connector-files)). |
+| `gateway.host`, `gateway.port` | `127.0.0.1`, `18789` | The upstream agent gateway (OpenClaw and ZeptoClaw fleet link). |
+| `gateway.fleet_mode` | `auto` | `auto`, `enabled` or `disabled`: when to dial `host:port` ([OpenClaw fleet link](#openclaw-fleet-link)). |
+| `gateway.token_env` | `DEFENSECLAW_GATEWAY_TOKEN` | The variable that holds the sidecar API token ([Keys](/docs/reference/keys)). |
+| `gateway.api_port`, `gateway.api_bind` | `18970`, empty | The sidecar REST API. Empty `api_bind` binds `127.0.0.1` ([Gateway API](/docs/reference/gateway-api#bind-address)). |
+| `gateway.device_key_file` | `<data_dir>/device.key` | The device key. |
+| `gateway.auto_approve_safe` | `false` | Auto-approve safe requests from the upstream gateway. |
+| `gateway.reconnect_ms`, `gateway.max_reconnect_ms` | `800`, `15000` | Reconnect backoff to the upstream gateway. |
+| `gateway.approval_timeout_s` | `30` | Seconds to wait for an approval. |
+| `gateway.watchdog.enabled`, `.interval`, `.debounce` | `true`, `30`, `2` | The health watchdog: poll interval in seconds and consecutive failures before an alert. |
+| `gateway.watcher.*` | on | The install watcher for new skills, plugins and MCP servers; `take_action: false` alerts only. |
+| `watch.debounce_ms`, `watch.auto_block` | `500`, `true` | Debounce for file events, and whether a rejected install is blocked. |
+| `watch.rescan_enabled`, `watch.rescan_interval_min`, `watch.rescan_content_gated` | `true`, `60`, `true` | Periodic rescan of installed assets; content gating skips a target whose content did not change. |
+| `llm.timeout`, `llm.max_retries` | `30`, `2` | Seconds and retries for the unified LLM block. |
+| `cisco_ai_defense.endpoint` | `https://us.api.inspect.aidefense.security.cisco.com` | The AI Defense inspection endpoint. |
+| `cisco_ai_defense.api_key_env`, `.timeout_ms` | `CISCO_AI_DEFENSE_API_KEY`, `3000` | The key variable, and the request timeout. |
+| `notifications.enabled` | `true` on macOS and native Windows, else `false` | Desktop notifications master switch (`defenseclaw setup notifications`). |
+| `notifications.block_enforced`, `.hitl_approval` | `true` | Notify on a real block, and on a pending approval. |
+| `notifications.block_would_block` | `false` | Also notify when observe mode would have blocked. |
+| `notifications.sources.hook`, `.guardrail`, `.asset_policy` | `true` | Per-source switches. |
+| `notifications.dedup_window`, `.max_per_minute` | 30 seconds, `12` | Duplicate suppression and rate cap. |
+| `guardrail.stream_buffer_bytes` | `1024` | Buffer for streamed proxy responses. |
+| `guardrail.judge.timeout`, `.adjudication_timeout` | `30`, `5` | Seconds for a judge call, and for adjudication. |
+| `guardrail.judge.injection`, `.pii`, `.pii_prompt`, `.pii_completion`, `.tool_injection`, `.exfil` | `true` | Which judge categories run when the judge is enabled. |
+| `guardrail.judge_sweep` | `true` | Run the full judge on content the regex triage found no signal in. |
+| `guardrail.retain_judge_bodies`, `.judge_persist_queue_depth` | `true`, `1024` | Keep raw judge bodies in `judge_bodies.db`, and the async write queue depth. Restart required. |
+| `guardrail.hook_self_heal`, `.hook_self_heal_debounce_ms` | `true`, `500` | Re-install a deleted DefenseClaw hook block while the gateway runs. Restart required. |
+
+When `gateway.api_bind` is empty the sidecar uses `127.0.0.1` ([bind address](/docs/reference/gateway-api#bind-address)). The `openshell:` block is under [OpenShell sandbox settings](#openshell-sandbox-settings).
 
 ### Cisco AI Defense API-key rule selection
 
-For an API-key inspection sent to `/api/v1/inspect/chat`, an unset, null or
-empty `cisco_ai_defense.enabled_rules` sends no `config` or `enabled_rules` in
-the request. The AI Defense connection's own policy then applies. A nonempty
-list sends only the named cloud rules, in the configured order. If you relied
-on the earlier implicit rule list, put those cloud rule names explicitly in
-`cisco_ai_defense.enabled_rules`.
+For an API-key inspection sent to `/api/v1/inspect/chat`, an unset, null or empty `cisco_ai_defense.enabled_rules` sends no `config` or `enabled_rules`, and the AI Defense connection's own policy applies. A nonempty list sends only the named cloud rules, in the configured order.
 
 ### Guardrail profiles and identity keys
 
 | Key | Default | Meaning |
 | --- | --- | --- |
 | `guardrail.profiles.<name>` | none | A named set of guardrail overrides. `<name>` is lower case, at most 64 characters. Allowed keys: `description`, `mode`, `block_at`, `alert_at`, `hilt`, `rule_pack`, `block_message` and `connectors`. Each `connectors.<connector>` entry allows `mode`, `hilt`, `block_message`, `rule_pack`, `block_at` and `alert_at`. `enabled` and `hook_fail_mode` are rejected at both levels. |
-| `guardrail.profile_assignments` | `[]` | Ordered list of `{profile, match}`. `match` takes `groups`, `users`, `connectors` and `agents`; at least one is required. Keys combine with AND, values of one key with OR, and the first matching assignment wins. `agents` entries are `agt-` followed by 16 hex digits. At most 4,096 assignments fit the schema; the whole config also has a 65,536 YAML node limit. |
+| `guardrail.profile_assignments` | `[]` | Ordered list of `{profile, match}`. `match` takes `groups`, `users`, `connectors` and `agents`; at least one is required. Keys combine with AND, values of one key with OR. When several assignments match, the profile that covers the others, or their strictest combination, applies. `agents` entries are `agt-` followed by 16 hex digits. At most 4,096 assignments fit the schema; the whole config also has a 65,536 YAML node limit. |
 | `guardrail.default_profile` | `""` | The profile for subjects no assignment matches. Empty keeps the `guardrail.*` settings. |
 | `ai_discovery.ide_inventory` | `all` | IDE extension and plugin inventory scope: `all`, `ai_only` or `off`. See [IDE plugin inventory](/docs/ai-discovery#ide-plugin-inventory). |
 | `ai_discovery.include_user_principal` | `false` | Send the user's directory principal and Kerberos principal on every record that carries identity (hook decisions, tool activity, agent, model and tool spans, `identity.observed`). Off, records keep the domain, directory, assurance, session kind and client address but no principal. |
@@ -637,8 +575,8 @@ Each severity resolves in this order, first match wins: `admission.<type>`,
 for skills the scanner gate (`scanners.skill_scanner.fail_on_severity` and
 `review_queue_min`), `admission.defaults`, and the built-in policy. The
 built-in policy quarantines `critical` and `high`, warns on `medium`, `low` and
-`info`, except that MCP servers also quarantine `medium` and disable at runtime
-on `low`. The built-in first-party lists name the `codeguard` skill and the
+`info`, except that balanced MCP servers warn on `high`, `medium` and `low` as
+well. Secure Client keeps its separate admission actions. The built-in first-party lists name the `codeguard` skill and the
 `defenseclaw` plugin. A severity nothing covers fails closed.
 
 ### Block and allow lists
@@ -665,10 +603,7 @@ described in [Admission](/docs/policies/admission#enabled-and-mode) and
 
 ### Scanners
 
-The skill scanner and MCP scanner settings live under `scanners`. The pages
-[Skill scanner](/docs/scanning/skill-scanner) and
-[MCP scanner](/docs/scanning/mcp-scanner) explain what each setting does and
-which combination to recommend.
+The skill scanner and MCP scanner settings live under `scanners` ([Scanners](/docs/scanning)).
 
 | Key | Default | Meaning |
 | --- | --- | --- |
@@ -687,13 +622,11 @@ which combination to recommend.
 | `scanners.mcp_scanner.analyzers` | `[]` | A list of `api`, `yara`, `llm`, `behavioral` and `readiness`. `[]` is automatic: YARA, plus the LLM analyzer when its model and key are ready. |
 | `scanners.mcp_scanner.scan_prompts`, `scan_resources`, `scan_instructions` | `false` | Also scan prompts, resources or server instructions. |
 | `scanners.mcp_scanner.judge_source`, `llm` | `inherit` | As for the skill scanner. |
+| `scanners.mcp_scanner.unverified_server` | `warn` | What `defenseclaw mcp set` and the gateway's install admission do with a server they could not verify: its scan did not finish (a timeout, an unresolved hostname, a launcher that exited, an unreachable URL), or an OpenCode command is outside the trusted install prefixes. `warn` adds or keeps it with a warning and an audit record, and the gateway scans it again later. `block` refuses it, and the gateway blocks and disables it (the strict setting). Unset is `warn` on managed standalone and per-user hosts. Secure Client uses its separate closed admission. Completed HIGH scanner findings follow `admission.mcp.actions.high`: balanced warns and audits; `quarantine` refuses under an explicit strict setting. CRITICAL still refuses by default. |
 | `scanners.mcp_scanner.yara` | bundled rules | `include_bundled` (default `true`) and `extra_rules`, a list of `{path, digest}` files pinned by digest. A scan loads a file only when it matches its digest; a config whose pin does not match is refused when it is applied, and the gateway rejects a reload while a file does not match. |
 
-The MCP scanner's `api` and `timeouts` blocks and the skill scanner's `timeouts.llm_s` were removed: no scan read them. The `api` analyzer uses `cisco_ai_defense`. A file that still holds them loads with them ignored, and `config set` refuses them.
 
-`defenseclaw setup skill-scanner` and `defenseclaw setup` write these keys.
-Because a scanner policy file and extra YARA rules are pinned by digest, a
-changed file never takes effect silently.
+`defenseclaw setup skill-scanner` and `setup mcp-scanner` write these keys. A scanner policy file and extra YARA rules are pinned by digest, so a changed file never takes effect silently.
 
 ### Updates
 
@@ -703,191 +636,69 @@ changed file never takes effect silently.
 | `update.channel` | `stable` | The only channel. |
 | `update.source` | empty | Where release files are downloaded from: empty for the official GitHub releases, otherwise an `https://` base URL that serves the same release layout. It changes only where bytes come from. The signature check always uses the release identity compiled into DefenseClaw, so a mirror must serve the same signed `checksums.txt` and bundle. `DEFENSECLAW_REPO` is a deprecated alias. |
 
-See [Upgrade DefenseClaw](/docs/get-started/upgrade#update-notices) for a mirror
-setup. A managed device does not self-update.
+A managed device does not self-update. Mirror setup is on [Upgrade](/docs/get-started/upgrade#update-notices).
 
 ### Removed in version 9
 
-A `config_version: 9` file that holds one of these keys fails validation. The
-[migration](/docs/reference/migrate-v9) reads them from a version 8 file and
-writes the replacement.
-
-| Removed | Use instead |
-| --- | --- |
-| `policies/rego/data.json` (admission actions, first-party list, thresholds, `cisco_trust_level`) | `admission`, `guardrail.block_at`, `guardrail.alert_at`, `guardrail.cisco_trust_level` |
-| `skill_actions`, `mcp_actions`, `plugin_actions` | `admission.skill.actions`, `admission.mcp.actions`, `admission.plugin.actions` |
-| `watch.allow_list_bypass_scan` | `admission.defaults.allow_list_bypass_scan` |
-| `guardrail.rule_pack_dir` and the same key in connector, profile and application-protection scopes | `guardrail.rule_pack`, `guardrail.custom_packs`, `guardrail.rules` |
-| `scanners.skill_scanner.binary`, `scanners.mcp_scanner.binary` | Nothing; DefenseClaw runs the scanners it ships |
-| `scanners.skill_scanner.use_virustotal`, `use_aidefense` | `scanners.skill_scanner.analyzers.virustotal.enabled`, `analyzers.aidefense.enabled` |
-| `scanners.skill_scanner.virustotal_api_key` (inline), `virustotal_api_key_env` | `scanners.skill_scanner.analyzers.virustotal.api_key_env`, with the key in `.env` |
-| `update_check` | `update.check` |
-| Operator block and allow rows in the `audit.db` `actions` table | `asset_policy` |
-| Ordinary `custom-providers.json` provider entries | `llm_providers.custom` after v9 migration; a legacy overlay with `request_overrides` remains a live input |
-| `DEFENSECLAW_JUDGE_TRACE`, `DEFENSECLAW_REPO` as the setting | `guardrail.judge.trace`, `update.source` |
+A `config_version: 9` file that holds a key the schema retired fails validation. The retired keys and their replacements are listed in [Migrate to config version 9](/docs/reference/migrate-v9#keys-that-no-longer-exist).
 
 ### OpenClaw fleet link
 
-The gateway dials the OpenClaw or ZeptoClaw gateway at `gateway.host` and
-`gateway.port` only when there is one to reach. `gateway.fleet_mode: enabled`
-always dials and `disabled` never does. With `auto`, the default:
+The gateway dials the OpenClaw or ZeptoClaw gateway at `gateway.host` and `gateway.port` only when there is one to reach. `gateway.fleet_mode: enabled` always dials and `disabled` never does. With `auto`, the default:
 
 - the `openclaw` and `zeptoclaw` connectors dial;
 - `codex` and `claudecode` dial only when `gateway.host` is not loopback;
 - every other connector, and an install with no connector, does not dial.
 
-`claw.mode` defaults to `openclaw`, so an install that never picked a
-connector (a sandbox-only install, for example) names OpenClaw without having
-it. When only `claw.mode` names OpenClaw (`guardrail.connector` is empty and
-`guardrail.connectors` has no `openclaw` entry), `gateway.host` is loopback,
-`fleet_mode` is unset or `auto`, and OpenClaw is not installed, the gateway
-does not dial. OpenClaw counts as installed when an `openclaw.json` exists at
-`claw.config_file` or in `claw.home_dir`, or an `openclaw` binary is on `PATH`
-or in `/usr/local/bin`, `/opt/homebrew/bin`, `~/.npm-global/bin` or
-`~/.local/bin`. Instead of reconnecting forever, `defenseclaw-gateway status`
-shows the Gateway subsystem `DISABLED` with
-`OpenClaw gateway off (OpenClaw is not installed)`, doctor reports
-`OpenClaw gateway: off (OpenClaw is not installed)`, the TUI and the Mac app
-show the same text, and `OPENCLAW_GATEWAY_TOKEN` is not required. The gateway
-checks when it starts, so restart it after installing OpenClaw, or set
-`fleet_mode: enabled` to dial regardless.
+`claw.mode` defaults to `openclaw` for older configs, so an install that never picked a connector names OpenClaw without having it. When only that default names OpenClaw (`guardrail.connector` and `guardrail.connectors` are empty) and OpenClaw is not installed, the gateway and CLI resolve no agent connector; with a loopback `gateway.host` and `fleet_mode` unset or `auto`, the gateway does not dial. OpenClaw counts as installed when an `openclaw.json` exists at `claw.config_file` or in `claw.home_dir`, or an `openclaw` binary is on `PATH` or in `/usr/local/bin`, `/opt/homebrew/bin`, `~/.npm-global/bin` or `~/.local/bin`. Then `defenseclaw-gateway status` shows the Gateway subsystem `DISABLED` with `OpenClaw gateway off (OpenClaw is not installed)`, doctor reports `OpenClaw gateway: off (OpenClaw is not installed)`, the TUI and Mac app show the same text, and `OPENCLAW_GATEWAY_TOKEN` is not required. The gateway checks at start: restart it after installing OpenClaw, or set `fleet_mode: enabled`.
+
+When `guardrail.connectors` lists agents, the active connector comes from that roster. An older `claw.mode` default does not add OpenClaw to it.
 
 ### Routing and observability behavior
 
-The `routing` block affects OpenClaw and ZeptoClaw only when they use the proxy's
-OpenAI-compatible Chat Completions path. Hook connectors and other provider API
-shapes keep their existing path. `defenseclaw keys list` dynamically discovers
-each non-empty `api_key_env`; the classifier never receives the key value. See
-[Semantic model routing](/docs/guardrail/semantic-routing) for the exact lifecycle,
-privacy boundary, and compatibility matrix.
+The `routing` block affects OpenClaw and ZeptoClaw only on the proxy's OpenAI-compatible Chat Completions path. `defenseclaw keys list` discovers each non-empty `api_key_env`; the classifier never receives the key value. See [Semantic routing](/docs/guardrail/semantic-routing).
 
-The source file stays small because omissions compile to explicit effective
-policy. With `observability: {}`, all 14 buckets collect logs, traces, and
-metrics, local SQLite stores all collected logs unredacted, and no remote
-destination exists. Adding an enabled destination without `send` or `routes`
-selects every bucket, every signal supported by that destination, and profile
-`none` (unredacted). A logs-only kind therefore sends all logs; a general OTLP
-kind sends logs, traces, and metrics. The Galileo preset instead generates one
-traces-only `capability-default` route whose event-name selector is restricted to
-the available family membership in its generated compatibility profile.
+Omissions compile to an explicit effective policy; inspect it with `defenseclaw config show --effective --section observability` and `defenseclaw observability plan`. Destination kinds, buckets, routes and redaction are on [Observability](/docs/observability).
 
-An explicit `send` block or advanced `routes` block replaces that generated route.
-For Galileo this is operator intent, not an implicit intersection with profile
-membership. Explicit policy can narrow buckets and select a destination-specific
-redaction profile, but any selected nonmember reaches the compatibility projector,
-is rejected as `unsupported_shape`, and is reported through destination failure
-accounting and health. Enumerate reviewed compatible `event_names` in an advanced
-route when exact family control is required; inspect the generated membership and
-effective route with `defenseclaw config show --effective --section observability` and
-`defenseclaw observability plan` before activation.
-
-Multiple destinations are independent fan-out legs. The same collected record
-can go to SQLite, Splunk, local OTLP, and Galileo, with a different selector and
-redaction profile on each leg. An optional destination failure does not disable
-another leg.
-
-For advanced routes, YAML order matters: the first matching route wins for that
-destination and signal, and an unmatched record is not delivered. Selector
-fields are ANDed; values within one field are ORed. Supported selectors are
-`buckets`, `sources`, `connectors`, `actions`, `event_names`, and
-`min_severity`. Collection happens first, so routing cannot recreate a disabled
-signal.
-
-Exactly one generated local SQLite destination is mandatory. It is configured
-only through `observability.local`, not listed under `destinations`, and cannot
-be disabled or filtered. Omitting `retention_days` uses the seven-day rolling
-default shown above. Set a larger value only when the additional local storage
-and retention scope are intentional. The same window bounds AI discovery scan
-history in `<data_dir>/inventory.db`. `retention_days: 0` means retain forever
-and produces a capacity warning. `guardrail.retain_judge_bodies` independently
-controls whether new raw judge bodies are captured.
+- With `observability: {}`, all 14 buckets collect logs, traces and metrics, local SQLite stores all collected logs unredacted, and no remote destination exists.
+- An enabled destination without `send` or `routes` takes every bucket, every signal it supports, and profile `none`. A logs-only kind sends all logs; a general OTLP kind sends logs, traces and metrics. The Galileo preset generates one traces-only `capability-default` route restricted to its available family membership.
+- An explicit `send` or `routes` block replaces the generated route. A selected nonmember of the Galileo family is rejected as `unsupported_shape` and reported through destination failure accounting.
+- Destinations are independent fan-out legs; one failing does not stop another. For advanced routes the first matching route wins per destination and signal, and an unmatched record is not delivered. Selectors AND across fields and OR within one: `buckets`, `sources`, `connectors`, `actions`, `event_names`, `min_severity`. Collection happens first, so routing cannot recreate a disabled signal.
+- Exactly one generated local SQLite destination is mandatory. It is configured only through `observability.local`, cannot be disabled or filtered, and keeps `retention_days` (default 7; `0` retains forever and warns about capacity). The same window bounds AI discovery history in `<data_dir>/inventory.db`.
 
 ### Destination transport and queue limits
 
-At most 64 destinations may be configured, with names unique after canonical
-normalization. One advanced `routes` list has at most 256 entries. Queue-backed
-destinations default to 2,048 projected records and 67,108,864 bytes; valid bounds
-are `1..65536` records and `4198400..268435456` bytes. JSONL and console accept
-only these queue fields.
+| Limit | Value |
+| --- | --- |
+| Destinations | at most 64, names unique after canonical normalization |
+| Advanced `routes` per destination | at most 256 |
+| Queue (queue-backed destinations) | default 2,048 records and 67,108,864 bytes; bounds `1..65536` records and `4198400..268435456` bytes. JSONL and console accept only these queue fields |
+| Batch (Splunk HEC, HTTP JSONL, OTLP) | default at most 512 records and 8,388,608 encoded bytes, 5,000 ms delay, 10,000 ms attempt timeout. Count `1..8192` and not above queue count; bytes `4263936..67108864`; delay `1..600000` ms. Galileo's omitted delay is 1,000 ms. Prometheus is pull-based and rejects `batch` |
 
-Splunk HEC, HTTP JSONL, and OTLP additionally default to batches of at most 512
-records/8,388,608 fully encoded bytes with a 5,000 ms scheduled delay and a
-10,000 ms per-attempt timeout. Batch count is `1..8192` and cannot exceed queue
-count; batch bytes are `4263936..67108864`; delay is `1..600000` ms. Galileo's
-omitted preset delay resolves to 1,000 ms. Prometheus is pull-based and rejects
-`batch`.
+When a queue overflows, the newest enqueue is dropped; older work, the mandatory SQLite store and sibling destinations stay intact. Transient or ambiguous acknowledgements retry the same immutable projection and record ID, so remote delivery is not exactly once.
 
-If queue count or bytes would overflow, the newest attempted enqueue is dropped;
-older FIFO work, mandatory SQLite, and sibling destinations remain intact.
-Transient or ambiguous acknowledgements retry the exact immutable projection and
-record ID. Remote delivery is not exactly once because an acknowledgement can be
-lost after receipt. The effective plan shows all resolved adapter/preset defaults.
+### Config reload mode
 
-See [Observability](/docs/observability) for the bucket catalog, capability
-matrix, route examples, and redaction precedence.
-
-`gateway.config_reload.mode` controls what happens after a valid `config.yaml`
-change:
+`gateway.config_reload.mode` controls what happens after a valid change:
 
 | Mode | Behavior |
 | --- | --- |
-| `hot` | Default. Reload, validate, diff, and reconcile in the running gateway. Simple guardrail settings are hot-applied; affected in-process loops are restarted only when needed. |
-| `restart` | Validate first, then use a fresh gateway process only for edits that cross a restart boundary, such as listener, topology, or storage changes. Fields that are explicitly hot-reloadable—including observability destinations—still reconcile in process so active agent sessions are not interrupted. Built-in daemon mode launches the normal `defenseclaw-gateway restart` path when one is required; service-supervised foreground runs exit cleanly for the supervisor to restart. Changing only this mode arms the behavior and does not immediately restart. |
+| `hot` | Default. Reload, validate, diff and reconcile in the running gateway. |
+| `restart` | Validate first, then use a fresh gateway process only for edits that cross a restart boundary (listener, topology, storage). Hot-reloadable fields, observability destinations included, still reconcile in process. A daemon launches `defenseclaw-gateway restart`; a service-supervised foreground run exits cleanly for its supervisor. Changing only this mode does not restart. |
 
-In `hot` mode, a change to a key that needs a restart (the gateway listener
-and credentials, the resource identity, and the rest of the list under
-[Reload without restart](#reload-without-restart)) is not rejected: the gateway
-keeps that key's running value, logs
-`[config] restart the gateway to apply <key>; the rest of the change applies now`,
-and applies everything else. The storage paths (`data_dir`,
-`observability.local.path`, `observability.local.judge_bodies_path`) and
-`deployment_mode` can not be kept that way: the gateway refuses the reload, and
-every later one, until it restarts. `/health` shows `last_reload_error`, and an
-`/enforce` write answers `applied: false` with the error. Changing
-`gateway.config_reload.mode` itself needs a restart to take effect.
+In `hot` mode a change to a restart-required key is not rejected: the gateway keeps that key's running value, logs `[config] restart the gateway to apply <key>; the rest of the change applies now`, and applies everything else. The storage paths (`data_dir`, `observability.local.path`, `observability.local.judge_bodies_path`) and `deployment_mode` cannot be kept that way: the gateway refuses that reload, and every later one, until it restarts. `/health` shows `last_reload_error`, and an `/enforce` write answers `applied: false`. Changing `gateway.config_reload.mode` itself needs a restart.
 
-The full LLM configuration story — picking a role, binding a custom-provider instance, configuring regional Bedrock / Vertex / Azure backends, and how `defenseclaw doctor` validates each — lives on [Setup → Unified LLM key](/docs/guardrail/unified-llm-key). The schema above is the on-disk shape; the page is the operator-facing how-to.
+The LLM block, regional Bedrock, Vertex and Azure backends and how doctor validates them are on [LLM providers](/docs/guardrail/unified-llm-key).
 
 ## OpenShell sandbox settings
 
-The `openshell:` block configures NVIDIA OpenShell 0.1 sandboxes, the
-[`defenseclaw sandbox`](/docs/reference/sandbox-cli) commands. You rarely
-edit it by hand. `sandbox setup` writes `enabled`, `harnesses`, and
-`upstream_telemetry`, and `sandbox enable` and `disable` keep `wrappers` in
-step with your shell rc files. `sandbox policy allow` and `block` edit the
-egress lists, and "always" answers to an unblock or an ask are saved to
-`egress.unblocked` or `egress.block`. See also
-[Sandbox](/docs/sandboxes/guide). Policy packs, how the layers combine, and the
-administrator's `openshell.admin` limits are explained in
-[Sandbox policy packs and admin controls](/docs/sandboxes/policy-packs).
+The `openshell:` block configures NVIDIA OpenShell 0.1 sandboxes, the [`defenseclaw sandbox`](/docs/reference/sandbox-cli) commands. You rarely edit it by hand: `sandbox setup` writes `enabled`, `harnesses` and `upstream_telemetry`, `sandbox enable` and `disable` keep `wrappers` in step with your shell rc files, `sandbox policy allow` and `block` edit the egress lists, and "always" answers are saved to `egress.unblocked` or `egress.block`. Pack contents, layering and admin limits are on [Sandbox policy](/docs/sandboxes/policy-packs).
 
 <Callout title="Where sandboxes run">
-Sandboxes run on Linux and on Apple-silicon Macs, with the DefenseClaw
-gateway and the OpenShell gateway both running as your own user. On a Mac
-they are OpenShell MicroVMs, which mount no host folders, so
-`openshell.workdir.mode` is always `copy` there (see
-[macOS](/docs/sandboxes/guide#macos)). A standalone `managed_enterprise`
-install runs them too, for each signed-in person, under the policy the
-administrator sets in `openshell.admin` and in each guardrail profile (see
-[Sandboxes on managed computers](/docs/enterprise/sandboxes)). On Windows, on
-an Intel Mac and in a Secure Client profile `/health` reports the `sandbox`
-subsystem as `disabled`.
+Sandboxes run on Linux and on Apple-silicon Macs, with the DefenseClaw and OpenShell gateways running as your own user. On a Mac they are OpenShell MicroVMs that mount no host folders, so `openshell.workdir.mode` is always `copy` there. A standalone `managed_enterprise` install runs them for each signed-in person under the policy in `openshell.admin` and each guardrail profile ([Sandboxes on managed computers](/docs/enterprise/sandboxes)). On Windows, an Intel Mac and a Secure Client profile `/health` reports the `sandbox` subsystem as `disabled`.
 </Callout>
 
-The posture is layered. The selected **sandbox policy pack** supplies every
-default, the keys below override it, the options of `sandbox run` override
-those, and `openshell.admin` clamps the result. Keys the pack governs have no
-loader default, so an unset key follows the pack: `profile`, `yolo`,
-`workdir.mode`, `workdir.max_upload_mb`, `egress.ports`,
-`egress.large_upload_mb`, `egress.block_large_uploads`, `egress.feed`, and
-`mcp.import`. The mask, unmask,
-block, and allow lists add to the pack's lists. Some settings exist only in a
-pack, so a custom pack is the way to change them: the approvals mode, the
-review list, `mcp.blocked_tools`, `mcp.project_servers` (whether the MCP
-servers a repository defines may start), `hooks.on_tamper` (whether a
-sandbox whose hooks were bypassed is stopped or only reported), and
-`hooks.on_silence` with `hooks.silence_after` (the same for a user-tier
-harness that works that long without its hooks).
+The selected sandbox policy pack supplies every default, the keys below override it, `sandbox run` options override those, and `openshell.admin` clamps the result. Keys the pack governs have no loader default, so an unset key follows the pack: `profile`, `yolo`, `workdir.mode`, `workdir.max_upload_mb`, `egress.ports`, `egress.large_upload_mb`, `egress.block_large_uploads`, `egress.feed` and `mcp.import`. The mask, unmask, block and allow lists add to the pack's lists. Some settings exist only in a pack: the approvals mode, the review list, `mcp.blocked_tools`, `mcp.project_servers`, `hooks.on_tamper`, and `hooks.on_silence` with `hooks.silence_after`.
 
 ```yaml
 openshell:
@@ -956,7 +767,7 @@ openshell:
 | `ingress_port` | `0` | The sandbox hook ingress port, 0–65535. `0` means `gateway.api_port + 1` (18971 by default). Its OpenShell provider profile is `defenseclaw-ingress-<port>`. Sandboxes keep the port their image and policy were built for, so re-create them after a change. |
 | `egress_port` | `0` | The egress proxy port, 0–65535. `0` means `gateway.api_port + 2` (18972 by default). |
 | `pack` | `""` | The sandbox policy pack: `open`, `balanced`, `strict`, a custom pack name under `pack_dir`, or an absolute path (or `~/…`) to a `pack.yaml` or its directory. Empty selects `open`. |
-| `pack_dir` | `<data_dir>/policies/sandbox`; `<policy_dir>/sandbox` on a managed standalone install | Where custom packs live, as `<name>/pack.yaml`. An absolute path, or one starting with `~/`. Empty turns custom pack names off. On a managed standalone install the default is the administrator-owned `<policy_dir>/sandbox` that `ensure` and `verify` check; a host upgraded from 1.0.1 keeps reading its packs from `<data_dir>/policies/sandbox` until `<policy_dir>/sandbox` exists (see [Packs](/docs/enterprise/sandboxes#packs)). |
+| `pack_dir` | `<data_dir>/policies/sandbox`; `<policy_dir>/sandbox` on a managed standalone install | Where custom packs live, as `<name>/pack.yaml`. An absolute path or `~/...`; empty turns custom pack names off. On a managed standalone install the default is the administrator-owned `<policy_dir>/sandbox` that `ensure` and `verify` check (see [Packs](/docs/enterprise/sandboxes#packs)). |
 | `profile` | `""` | `open`, `balanced`, or `strict`. Empty follows the pack's network mode. |
 | `yolo` | `null` | Skip-permissions mode for the harness. `null` follows the pack. |
 | `keep_headless` | `false` | `true` keeps the sandbox a headless `sandbox run` creates (`--prompt`, or the harness's print mode, such as the shell wrapper's `claude -p`), as `--keep` does for one run. By default it is deleted when the run ends and nothing is left in it to bring back or undo, by the rules of `--rm`. |
@@ -975,9 +786,9 @@ openshell:
 | `egress.unblocked` | `[]` | Hosts the daemon saves when you choose "always" for an unblock or an approval. Validated like `egress.allow`, and ignored when `admin.allow_unblock` is `false`. Unlike `egress.allow`, an entry here lifts only blocklist-feed and allowlist refusals: it never opens a private address the name resolves to. |
 | `egress.ports` | `[]` | Destination ports for the egress proxy, 1–65535, unique, at most 64. A non-empty list replaces the pack's ports. |
 | `egress.large_upload_mb` | `0` | Report an upload of more than this many MiB to a host the sandbox hasn't contacted before, 0–1048576. `0` follows each sandbox's pack, including a run's `--pack`. A change reaches running sandboxes on the next reload. |
-| `egress.block_large_uploads` | `false` | `true` also cuts that upload before the chunk that crosses the threshold and refuses the sandbox's later requests to the host (and to other new hosts under its domain or at its address), for every sandbox. The feed shows a ✗ with the threshold, and `defenseclaw sandbox unblock` lifts the block for a host. Hosts on an allow list you or your administrator wrote, and hosts you unblocked, are only reported. `false` follows each sandbox's pack (`egress.block_large_uploads`); it can't turn a pack's block off. The block acts on the report, so a sandbox whose pack turns the report off (`large_upload_mb: 0`) keeps it off, and `sandbox policy explain` says why. See [Large-upload alert threshold](/docs/sandboxes/policy-packs#large-upload-alert-threshold). |
+| `egress.block_large_uploads` | `false` | `true` cuts that upload before the chunk that crosses the threshold and refuses the sandbox's later requests to the host (and to other new hosts under its domain or at its address), for every sandbox. The feed shows a ✗ with the threshold, and `defenseclaw sandbox unblock` lifts the block for a host. Hosts on an allow list you or your administrator wrote, and hosts you unblocked, are only reported. `false` follows each pack; it cannot turn a pack's block off, and a pack with `large_upload_mb: 0` keeps the report off. See [Large-upload alert threshold](/docs/sandboxes/policy-packs). |
 | `egress.feed` | `""` | `builtin` turns the built-in blocklist feed on, `none` turns the feeds off. Empty follows the pack. |
-| `trusted_ca_bundle` | `""` | A PEM file of CA certificates that sandboxes trust besides the image's public roots: the root CA of a TLS-inspecting proxy (a secure web gateway that re-signs provider certificates). Every sandbox image built while it is set adds those certificates to its system store, and the sandbox points `SSL_CERT_FILE`, `REQUESTS_CA_BUNDLE`, `CURL_CA_BUNDLE`, `GIT_SSL_CAINFO`, `NODE_EXTRA_CA_CERTS` and `DENO_CERT` at OpenShell's CA bundle plus them, so Node, Python, Go, Rust (Codex), curl and git all trust them. It does not cover the agents' model calls: OpenShell's sandbox supervisor makes those with its own trust store, so the model provider hosts must not be TLS-inspected (see [Behind a TLS-inspecting proxy](/docs/sandboxes/guide#behind-a-tls-inspecting-proxy)). An absolute path, or one starting with `~/`; on a managed computer an absolute path to an administrator-owned file. The file must hold CA certificates only (at most 64, 1 MiB); a private key or a certificate that is not a CA refuses it, and then no sandbox image is built. Changing the file rebuilds the images at the next run. DefenseClaw never copies your computer's own trust store into sandboxes. `defenseclaw sandbox doctor` reports it in the Sandbox TLS trust row. |
+| `trusted_ca_bundle` | `""` | A PEM file of CA certificates that sandboxes trust besides the image's public roots, such as the root of a TLS-inspecting proxy. Every sandbox image built while it is set adds them to its system store, and the sandbox points `SSL_CERT_FILE`, `REQUESTS_CA_BUNDLE`, `CURL_CA_BUNDLE`, `GIT_SSL_CAINFO`, `NODE_EXTRA_CA_CERTS` and `DENO_CERT` at OpenShell's CA bundle plus them. It does not cover the agents' model calls, which OpenShell's supervisor makes with its own trust store, so model provider hosts must not be TLS-inspected ([Sandbox network](/docs/sandboxes/network)). An absolute path or `~/...`; on a managed computer an absolute path to an administrator-owned file. At most 64 CA certificates and 1 MiB; a private key or non-CA certificate refuses it and no image is built. A change rebuilds the images at the next run. `defenseclaw sandbox doctor` reports it in the Sandbox TLS trust row. |
 | `image.base` | `""` | A bring-your-own base image. The image build refuses a base that isn't pinned by digest (`<image>@sha256:<64 hex digits>`). Empty selects the pinned NVIDIA OpenShell community base image. |
 | `image.harness_versions` | `{}` | Harness name to exact version, at most 64 entries. The image build refuses a version outside DefenseClaw's reviewed hook contract. |
 | `approvals.debounce_ms` | `3000` | 0–600000. How long hooks must be quiet before the sandbox manager applies a batch of approvals: every OpenShell policy reload closes open connections. |
@@ -992,79 +803,17 @@ openshell:
 | `token_delivery` | `provider` | How a sandbox receives its hook ingress credential. `provider`: as an OpenShell provider credential, so the agent only sees a placeholder, rotated on every start. `env`: as a plain `DEFENSECLAW_SANDBOX_TOKEN` variable the agent can read, kept for the sandbox's life. Both are revoked when the sandbox is deleted. See [Hook ingress](/docs/reference/gateway-api#hook-ingress). |
 | `middleware.enabled` | `false` | Reserved for an experimental supervisor-middleware switch. Nothing reads it yet. |
 
-**Host patterns** in `egress.block`, `egress.allow`, `egress.unblocked`,
-`admin.egress_block`, and `admin.egress_allow_only` (and in a pack's egress
-lists) use the egress proxy's grammar: a host name, `*.<host>` for every
-subdomain (not the host itself), an IP address, or a CIDR prefix such as
-`198.51.100.0/24`. Addresses compare by value, so `2001:db8::1`, its
-uncompressed spelling, and an IPv4-mapped spelling of an IPv4 address all
-match the same entry. A bare `*` is refused: choose the profile instead
-(`open` allows by default, `strict` turns the web off). Schemes, ports,
-paths, and wildcards inside a name are refused, and so are host names whose
-last label does not start with a letter (`127.1`, `0x7f000001`), because
-resolvers read them as addresses. Matching ignores case and a trailing dot.
-One list widens a host name: on `admin.egress_block`, `example.net` blocks
-the host and all its subdomains, the way an administrator blocking a domain
-means it. Every other list matches a host name exactly.
-Lists hold at most 4096 entries.
+**Host patterns** in `egress.block`, `egress.allow`, `egress.unblocked`, `admin.egress_block`, `admin.egress_allow_only` and a pack's egress lists are a host name, `*.<host>` (every subdomain, not the host), an IP address, or a CIDR prefix such as `198.51.100.0/24`. Addresses compare by value, so `2001:db8::1`, its uncompressed spelling and an IPv4-mapped spelling match one entry. A bare `*`, schemes, ports, paths, wildcards inside a name, and host names whose last label does not start with a letter (`127.1`, `0x7f000001`) are refused. Matching ignores case and a trailing dot. Only `admin.egress_block` widens a host name (`example.net` blocks its subdomains too); every other list matches exactly. Lists hold at most 4096 entries.
 
-**Project globs** (`workdir.masks`, `workdir.unmask`, and
-`sandbox run --unmask`, like a pack's masks) are relative to the project folder
-and use forward slashes. Absolute paths, `~`, drive letters, backslashes, and
-`..` segments are refused. Lists hold at most 1024 entries.
+**Project globs** (`workdir.masks`, `workdir.unmask`, `sandbox run --unmask`, a pack's masks) are relative to the project folder with forward slashes. Absolute paths, `~`, drive letters, backslashes and `..` are refused. Lists hold at most 1024 entries.
 
-**Names** in `harnesses`, `wrappers`, `image.harness_versions`, and
-`admin.allowed_harnesses` start with a letter or digit, then use letters,
-digits, `.`, `_`, and `-`, up to 128 characters. An `image.harness_versions`
-key can't contain `.`, which the configuration loader would read as a nested
-key.
+**Names** in `harnesses`, `wrappers`, `image.harness_versions` and `admin.allowed_harnesses` start with a letter or digit, then letters, digits, `.`, `_` and `-`, up to 128 characters. An `image.harness_versions` key cannot contain `.`.
 
-### Packs at a glance
-
-The built-in packs are:
-
-- `open`, the default: open web through the DefenseClaw egress proxy with the
-  exfiltration blocklist, a live project mount, and skip-permissions mode on.
-  A direct connection request is approved automatically unless the policy
-  refuses it (the blocklists, a public IP address, a port off the list) or it
-  reaches into your machine or private network, which asks.
-- `balanced`: a curated developer allowlist, and triaged approvals. The
-  allowlist is the egress proxy's allowlist feed, host for host. The proxy
-  can't see inside HTTPS tunnels, so its source hosts (GitHub, GitLab,
-  Bitbucket) accept pushes and uploads as well as fetches; a push still needs
-  a credential inside the sandbox.
-- `strict`: no web beyond the harness's model provider, manual approvals, copy
-  mode, the harness's own prompts kept, and no MCP servers.
-
-Every built-in pack masks common secret files (`.env`, `.env.*`, keys and
-certificates, cloud, Kubernetes and Docker credentials) and keeps committed
-templates such as `.env.example` visible (the pack's `workspace.unmask`).
-Whatever the pack, the end-of-session review also flags changes to harness
-and agent-tool project config (`.claude/`, `.mcp.json`, `.codex/`,
-`.cursor/`, `.gemini/`, `AGENTS.md`, `CLAUDE.md`, and similar), to lock
-files, and to `pack.yaml` files: a harness run later outside the sandbox acts
-on them without asking.
-
-Raising the profile above a pack's own network mode, for example
-`profile: balanced` on the `open` pack, brings in the `balanced` pack's
-curated allowlist. Allow entries that cover every host or a whole top-level
-domain (`*.com`) are ignored, and custom packs may not contain them.
-
-A custom pack is one strict YAML file with the same sections as the built-in
-ones. Unknown or repeated keys, anchors, symbolic links, and built-in names are
-refused. The pack file and its directory must belong to you or to root and
-must not be writable by their group or by every user. A pack in a sticky
-directory that other users can write to, such as `/tmp`, loads only when root
-owns it. Because you own your custom packs, keep them out of folders you mount
-into a sandbox: a folder that holds the policy is never shared with the
-sandbox. See [Write a custom pack](/docs/sandboxes/policy-packs#write-a-custom-pack).
+Built-in packs, custom pack format and loading rules are on [Sandbox policy](/docs/sandboxes/policy-packs).
 
 ### Admin keys
 
-`openshell.admin` holds the administrator's limits. Every key is optional; an
-unset key adds no limit, and the `allow_*` switches restrict only when set to
-`false`. Each key is explained, with examples, in
-[Sandbox policy packs and admin controls](/docs/sandboxes/policy-packs#admin-constraints).
+`openshell.admin` holds the administrator's limits. Every key is optional; an unset key adds no limit, and the `allow_*` switches restrict only when `false`. Each is explained with examples on [Sandbox policy](/docs/sandboxes/policy-packs).
 
 ```yaml
 openshell:
@@ -1077,9 +826,9 @@ openshell:
     allow_host_ports: null
     allow_unblock: null      # also governs approve-always, user allow entries, turning the feed off
     allow_learn_mode: null
-    allowed_harnesses: []
+    allowed_harnesses: [claudecode, codex]   # nonempty; leave the key out for no limit
     egress_block: []         # always blocked, never unblockable
-    egress_allow_only: []    # forces an allowlist profile
+    egress_allow_only: [api.example.com]     # nonempty; forces an allowlist profile
     block_large_uploads: false # true: every sandbox's large uploads to new hosts are cut
     require_copy_for: []     # absolute or ~/ path globs that must run in copy mode
     max_resources: {cpu: "", memory: ""}
@@ -1096,49 +845,15 @@ openshell:
 | `allow_host_ports` | `true`, `false`, `null` | `false` refuses every host port. |
 | `allow_unblock` | `true`, `false`, `null` | `false` refuses unblocks and approve-always, ignores saved unblocks and the allow entries of users and of custom packs they chose, and keeps the blocklist feed on. A one-time approval then can't reach a feed-listed or private-network destination. |
 | `allow_learn_mode` | `true`, `false`, `null` | `false` refuses learn mode. |
-| `allowed_harnesses` | Harness names | Only these harnesses may run. |
+| `allowed_harnesses` | Harness names, at least one | Only these harnesses may run. Leave the key out for no limit: an empty list is refused. |
 | `egress_block` | Host patterns | Always blocked, for every sandbox. Nothing unblocks or approves them. A host name also blocks its subdomains (`example.net` covers `www.example.net`). |
-| `egress_allow_only` | Host patterns | The only hosts any sandbox may reach. Raises the profile to at least `balanced`. Entries match exactly: list `*.<host>` for subdomains. |
+| `egress_allow_only` | Host patterns, at least one | Leave the key out for no limit: an empty list is refused. The only hosts any sandbox may reach. Raises the profile to at least `balanced`. Entries match exactly: list `*.<host>` for subdomains. |
 | `block_large_uploads` | `true`, `false` | `true` turns the large-upload block on for every sandbox (see `egress.block_large_uploads`) and keeps its report on: a pack's `large_upload_mb: 0` gets 25 MiB, and a threshold above 25 MiB (a pack's or `egress.large_upload_mb`) is lowered to 25 MiB, or to the required pack's own when that is higher. An unblock still lifts it for one host unless `allow_unblock` is `false`. |
 | `require_copy_for` | Path globs, at most 1024 | Projects that must run in copy mode. |
 | `max_resources.cpu`, `max_resources.memory` | Same formats as `resources` | Ceilings for every sandbox. |
 | `locked` | Up to 16 of `pack`, `profile`, `yolo`, `workdir.mode`, `workdir.unmask`, `mcp.import`, `mcp.host_ports`, `resources` | Keys whose configured value run options may not loosen. |
 
-`required_pack` pins the pack and makes its posture a floor: your keys and run
-options may tighten its profile, skip-permissions default, workspace mode, MCP
-import, blocklist feed, and proxy ports, but every attempt to loosen them is
-refused. That includes a request to skip permissions or to mount a host folder
-when the required pack keeps the prompts or works on a copy. In a
-`managed_enterprise` install, a custom required pack must be a file that root
-owns and no other user can modify, together with every directory above it,
-such as an absolute path under an administrator-owned directory. On a managed
-standalone install the default `pack_dir`, `<policy_dir>/sandbox`, is one; a
-`pack_dir` in the data directory usually does not qualify.
-
-`locked` keeps the configured value of each listed key against run options
-that would loosen it, while options that only tighten it still apply:
-`--safe`, `--copy`, `--no-mcp`, a `--profile` at least as strict as the
-configured one, a `--pack` at least as strict as the configured pack in every
-setting (or, when `pack` itself is not locked, in every setting behind a
-locked key, such as the pack's skip-permissions default for `yolo`), a
-smaller `--cpu` or `--memory`, and `--unmask` or `--host-port` entries the
-configuration already lists.
-
-`require_copy_for` entries are absolute path globs or start with `~/`. `*`,
-`?`, and `[...]` match within one path segment, and `**` across segments. A
-relative entry is refused, because it would never match, and a pattern that
-starts with `**/` covers every mounted folder, since any folder may hold a
-match below it. The list also covers mounting a folder above a listed project,
-a project folder DefenseClaw can't check, and differently cased spellings of
-the path.
-
-Every loosening that `openshell.admin` refuses is reported as "blocked by
-your organization's DefenseClaw policy: `<key>`", and the same limits gate
-runtime actions such as unblocking a destination or opening a host port. In a
-`managed_enterprise` install the administrator owns `config.yaml`, so the
-admin block is authoritative. Elsewhere it is still enforced, but it is
-advisory, because you can edit the file. `sandbox policy explain` and
-`sandbox doctor` say which applies.
+Every loosening `openshell.admin` refuses is reported as "blocked by your organization's DefenseClaw policy: `<key>`", and the same limits gate runtime actions such as unblocking a destination or opening a host port. In a `managed_enterprise` install the admin block is authoritative; elsewhere it is enforced but advisory, because you can edit the file. `sandbox policy explain` and `sandbox doctor` say which applies.
 
 ### Validation and reload
 
@@ -1169,16 +884,6 @@ Turning `enabled` on or off, or moving `ingress_port` or
 `egress_port` while `enabled` is `true`, restarts the API listener inside the
 running gateway.
 
-### Legacy keys
-
-`policy_dir`, `mode`, `version`, `sandbox_home`, `auto_pair`, and
-`host_networking` belong to the retired `openshell-sandbox` 0.0.x standalone
-sandbox. They are accepted and ignored. The upgrade to 1.0 (the
-`config_version` 9 migration) removes `mode` and `sandbox_home`, and on a
-host that ran that sandbox resets `guardrail.host` and `gateway.host`; see
-[Remove a retired standalone sandbox](/docs/sandboxes/guide#remove-a-retired-standalone-sandbox).
-
-
 ## `guardrail.connectors` (several connectors)
 
 A single gateway can enforce guardrail policy for several **hook** connectors at once. Each connector that's active gets a `guardrail.connectors.<name>` block; the gateway resolves policy per connector and falls back to the global `guardrail.*` values for anything a block leaves unset.
@@ -1194,7 +899,8 @@ A single gateway can enforce guardrail policy for several **hook** connectors at
 | `alert_at` | same values — lowest severity that alerts; never above the block level | `guardrail.alert_at`, then the rule pack's level |
 | `hilt` | `{ enabled, min_severity }` | `guardrail.hilt` |
 
-With more than one connector active, `claw.mode` and `guardrail.connector` keep naming the primary connector (the first one in alphabetical order unless setup keeps the existing primary). The gateway then leaves the OTel resource attribute `defenseclaw.claw.mode` off, so a gateway serving several connectors is distinguishable from a single-connector one in dashboards and SIEM; read each event's connector attribute for the connector that produced it. Proxy connectors (OpenClaw, ZeptoClaw) cannot be entries here; multi-connector is hook-only. Manage these blocks with `defenseclaw setup <connector>` (choosing **Add**) and the `defenseclaw guardrail ... --connector X` command group — see [Setup → Multi-connector](/docs/guardrail/multi-connector).
+
+With more than one connector active, `claw.mode` and `guardrail.connector` keep naming the primary connector (the first in alphabetical order unless setup keeps the existing one), and the gateway leaves the OTel attribute `defenseclaw.claw.mode` off. Manage these blocks with `defenseclaw setup <connector>` (choose **Add**) and `defenseclaw guardrail ... --connector X` ([Multi-connector](/docs/guardrail/multi-connector)).
 
 ## Enterprise settings (`enterprise.*`)
 
@@ -1205,7 +911,7 @@ administrator-owned config: `/etc/defenseclaw/config.yaml` on Linux,
 `enterprise` block tunes it. The config is rejected if the block appears in a
 config whose `deployment_mode` is not `managed_enterprise`. In the
 `secure_client` profile, `profile` is the only key allowed. For explanations
-and examples, see the [enterprise settings reference](/docs/enterprise/configuration#settings-reference).
+and examples, see the [enterprise settings reference](/docs/enterprise/configuration).
 
 | Key | Values (default) | OS | Notes |
 | --- | --- | --- | --- |
@@ -1229,7 +935,7 @@ and examples, see the [enterprise settings reference](/docs/enterprise/configura
 | `enterprise.coexistence.per_user_install` | `migrate` \| `block` \| `ignore` | — | Reserved: accepted and validated, no effect in this release |
 | `enterprise.coexistence.disable_self_update` | bool (`true`) | Windows | Sets `HKLM\SOFTWARE\Policies\Cisco\DefenseClaw\DisableSelfUpdate` only when the value is absent, which also stops the per-user `install.ps1`. On every managed host the update notice stays off and the per-user installer, upgrade and rollback refuse, whatever this key says |
 | `enterprise.network.https_proxy`, `enterprise.network.no_proxy` | proxy URL; host list | all | The gateway's outbound proxy: AI Defense, LLM providers (which need an `http://` proxy URL), the passthrough, webhooks, the remote model router and telemetry exporters go through it. Linux and macOS also set `HTTPS_PROXY` and `NO_PROXY` (both cases) in the gateway's service environment; the Windows gateway sets them in its own process. A change needs a gateway restart |
-| `enterprise.tetragon.mode` | `off` \| `consume` \| `observe` \| `enforce` (`consume`) | Linux | Use the Tetragon the computer runs as Plane C's process source (`consume`), also load DefenseClaw's policies in monitor mode (`observe`), or let two fixed kernel controls deny (`enforce`). Capped at `off` when Plane C is off. Windows and macOS accept and ignore it; the Secure Client profile refuses it. See [Tetragon (Linux)](/docs/enterprise/configuration#tetragon-linux) |
+| `enterprise.tetragon.mode` | `off` \| `consume` \| `observe` \| `enforce` (`consume`) | Linux | Use the Tetragon the computer runs as Plane C's process source (`consume`), also load DefenseClaw's policies in monitor mode (`observe`), or let two fixed kernel controls deny (`enforce`). Capped at `off` when Plane C is off. Windows and macOS accept and ignore it; the Secure Client profile refuses it. See [Tetragon (Linux)](/docs/enterprise/configuration) |
 | `enterprise.tetragon.burn_in` | `0` or `24h` to `2160h` in whole hours (`168h`) | Linux | Covered agent time per enrolled user, with no would-block hit, before that user is enforced. `0` skips it and status warns. It counts hours of agent use, not calendar time |
 | `enterprise.tetragon.enforce_ack` | `sha256:` and 12 hex digits, a list of up to 4, or empty (empty) | Linux | The control-set digest you approved. A list approves several builds during a ring upgrade. Without a match the controls stay in monitor mode |
 | `enterprise.tetragon.customer_events` | `agent` \| `off` (`agent`) | Linux | Report the events of your own Tetragon policies when they hit an AI agent. `off` forwards nothing and keeps the counts. DefenseClaw never changes your policies |
@@ -1288,74 +994,19 @@ An entry carries only the sub-block (`bedrock`, `vertex` or `azure`) matching it
 
 The `domains` array drives the gateway's URL → instance lookup: when an inbound request URL (set on `X-DC-Target-URL` by fetch-interceptor agents, or recorded in the connector snapshot for native binaries) matches one of the listed hosts, the resolver applies this entry's TLS, `base_url` and sub-block posture. An entry that declares `base_url` should also list the matching host in `domains`.
 
-A `custom-providers.json` marked `_derived_from` is rendered from this section on config writes. Do not edit that derived file: the gateway does not read its edits back, `defenseclaw doctor` reports drift in the **Custom-provider overlay** row, and `defenseclaw doctor --fix` regenerates it. During the v9 migration, an ordinary 0.8.x overlay is imported into `llm_providers` and retired. An overlay with `request_overrides` cannot be imported; migration reports it and leaves the unmarked file as a **live input** that the gateway still merges after config changes. Preserve and review it until the overrides are no longer needed. For the walkthrough, see [Custom providers](/docs/guardrail/unified-llm-key#custom-providers-for-internal-or-self-hosted-endpoints).
+A `custom-providers.json` marked `_derived_from` is rendered from this section on config writes. Do not edit it: the gateway does not read its edits back, `defenseclaw doctor` reports drift in the **Custom-provider overlay** row, and `defenseclaw doctor --fix` regenerates it. An unmarked overlay with `request_overrides` is a **live input** the gateway still merges ([Custom providers](/docs/reference/migrate-v9#custom-providers)).
 
 ## Environment variables
 
-A handful of high-traffic env vars are inlined below. The full inventory — every variable the CLI and gateway read, with file:line references — lives on [Reference → Environment variables](/docs/reference/env-vars).
+Every variable DefenseClaw reads, with defaults, is on [Environment variables](/docs/reference/env-vars). `DEFENSECLAW_HOME` relocates the data directory and `DEFENSECLAW_LLM_KEY` is the unified LLM key. On a managed standalone device some variables are ignored or may only tighten a setting ([Managed hosts](/docs/reference/env-vars#managed-hosts-and-the-environment)).
 
-<TypeTable
-  type={{
-    "DEFENSECLAW_HOME": {
-      type: "path",
-      description: "Override the data directory (default ~/.defenseclaw). Affects config.yaml, .env, audit.db, hook scripts, and the registries cache; gateway.jsonl exists there only when an optional kind: jsonl destination explicitly uses that path.",
-    },
-    "DEFENSECLAW_LLM_KEY": {
-      type: "string",
-      description: "Unified LLM key. Used by the guardrail upstream, the judge, and any scanner that calls an LLM.",
-    },
-    "CISCO_AI_DEFENSE_API_KEY": {
-      type: "string",
-      description: "Cisco AI Defense API key. Required when guardrail.scanner_mode is remote or both.",
-    },
-    "DEFENSECLAW_STRICT_AVAILABILITY": {
-      type: "0|1",
-      description: "When 1, transport-layer and missing-token hook failures are forced closed. Without this override, both transport and response failures follow guardrail.hook_fail_mode (closed on fresh installs; migrated configs can retain open; Secure Client deployments default to open when it is unset).",
-    },
-    "DEFENSECLAW_FAIL_MODE": {
-      type: "open|closed",
-      description: "Runtime override of guardrail.hook_fail_mode for transport, authentication, and invalid-response failures on hook connectors.",
-    },
-    "SPLUNK_ACCESS_TOKEN": {
-      type: "string",
-      description: "Splunk HEC token. Referenced by an observability.destinations[] splunk_hec token_env field.",
-    },
-  }}
-/>
+There is no `DEFENSECLAW_GATEWAY_BIND`, `DEFENSECLAW_DATA_DIR` or `DEFENSECLAW_LOG_LEVEL`. Configure the sidecar API with `gateway.api_bind` and `gateway.api_port`, the guardrail proxy with `guardrail.host` and `guardrail.port` (`gateway.host` and `gateway.port` are the upstream agent gateway). For extra diagnostics set a variable from [Debug / verbose logging](/docs/reference/env-vars#debug--verbose-logging), such as `DEFENSECLAW_SIDECAR_DIAG=1`, in the gateway's environment and restart it.
 
-On a managed standalone device some variables are ignored or may only tighten a
-setting; see
-[Managed hosts and the environment](/docs/reference/env-vars#managed-hosts-and-the-environment).
-
-There is **no** `DEFENSECLAW_GATEWAY_BIND`, `DEFENSECLAW_DATA_DIR`, or
-`DEFENSECLAW_LOG_LEVEL` env var today. Use `DEFENSECLAW_HOME` to relocate the
-data directory. Configure the sidecar API listener with `gateway.api_bind` and
-`gateway.api_port`, and the separate guardrail proxy listener with
-`guardrail.host` and `guardrail.port`; `gateway.host`/`gateway.port` are the
-upstream agent-gateway address. The gateway has no log-level flag; for extra
-diagnostics, set one of the variables under **Debug / verbose logging** in
-[Environment variables](/docs/reference/env-vars#debug--verbose-logging), such as
-`DEFENSECLAW_SIDECAR_DIAG=1`, in the gateway's environment and restart it.
-
-**Proxy variables.** The gateway's telemetry exporters (OTLP, Galileo, Splunk
-HEC, HTTP JSONL) follow `HTTPS_PROXY` and `NO_PROXY` from the gateway's
-environment (an `enterprise.network.https_proxy` takes precedence); loopback
-destinations always connect directly. The proxy URL must be
-`http(s)://host[:port]`: with a user name or password the gateway logs a
-warning and the exporters connect directly. Restart the gateway from a shell
-that has the variables set after changing them. Whenever a proxy variable is
-set, the CLI and the gateway add the instance-metadata endpoints
-(`169.254.169.254`, `169.254.170.2`, `fd00:ec2::254`) to `NO_PROXY`.
+**Proxy variables.** The telemetry exporters (OTLP, Galileo, Splunk HEC, HTTP JSONL) follow `HTTPS_PROXY` and `NO_PROXY` from the gateway's environment; `enterprise.network.https_proxy` takes precedence, and loopback destinations connect directly. The proxy URL must be `http(s)://host[:port]`; with a user name or password the gateway logs a warning and the exporters connect directly. Restart the gateway from a shell that has the variables set. Whenever a proxy variable is set, the CLI and gateway add the instance-metadata endpoints (`169.254.169.254`, `169.254.170.2`, `fd00:ec2::254`) to `NO_PROXY`.
 
 ## Per-connector files
 
-`defenseclaw setup <connector>` writes these agent-side files from
-`config.yaml`. They are derived output, not a second place to configure
-DefenseClaw: change the setting in `config.yaml` (or with `defenseclaw setup`),
-not in the file. The hook scripts under `~/.defenseclaw/hooks/` carry a
-`# defenseclaw-derived:` header, and doctor warns `stale generated script` when
-one no longer matches the config, with the command that regenerates it
-(`defenseclaw-gateway restart`, or the connector's setup command).
+`defenseclaw setup <connector>` writes these agent-side files from `config.yaml`. They are derived: change the setting in `config.yaml`, not the file. Hook scripts under `~/.defenseclaw/hooks/` carry a `# defenseclaw-derived:` header, and doctor warns `stale generated script` when one no longer matches, naming the command that regenerates it.
 
 | Connector | File DefenseClaw mutates |
 | --- | --- |
@@ -1366,41 +1017,23 @@ one no longer matches the config, with the command that regenerates it
 | Cursor | `~/.cursor/hooks.json` |
 | Devin (Devin CLI and Devin Desktop's Devin Local) | `~/.config/devin/config.json` or `<workspace>/.devin/hooks.v1.json` |
 | GitHub Copilot CLI | `~/.copilot/hooks/defenseclaw.json` by default; `<workspace>/.github/hooks/defenseclaw.json` with `--workspace` |
-| OpenHands | `~/.openhands/hooks.json` by default; `<workspace>/.openhands/hooks.json` with `--workspace` |
 | Antigravity | `~/.gemini/config/hooks.json`; Google documents no configuration-home environment override, and DefenseClaw owns only this global registration. Antigravity also discovers `<workspace>/.agents/hooks.json`, which DefenseClaw does not patch to avoid duplicate ownership. |
 | Hermes | `~/.hermes/config.yaml` |
 | Kiro | `~/.kiro/hooks/defenseclaw.json` (Kiro IDE and `kiro-cli --v3`), `~/.kiro/agents/defenseclaw.json` (Kiro CLI 2.x) and `~/.kiro/settings/cli.json`; a workspace copy under `<workspace>/.kiro/hooks/` with `--workspace` |
 | OpenCode | `~/.config/opencode/plugins/defenseclaw.js` (managed bridge plugin — written whole, not patched; removed on teardown) |
 | Amp | `~/.config/amp/plugins/defenseclaw.ts` on macOS/Linux or `%USERPROFILE%\.config\amp\plugins\defenseclaw.ts` on native Windows (managed system policy plugin) |
-| OmniGent | `$OMNIGENT_CONFIG` when set, then `$OMNIGENT_CONFIG_HOME/config.yaml` or `~/.omnigent/config.yaml`; `~/.defenseclaw/hooks/defenseclaw_omnigent_policy.py`; and `defenseclaw_omnigent.pth` in OmniGent's Python environment. The CLI server must receive the selected YAML through `--config`. |
 
-A managed backup record is stored at
-`~/.defenseclaw/connector_backups/<connector>/<logical-name>.json` before the
-first mutation. The JSON record binds the connector, logical name, and absolute
-target path and stores the pristine bytes, permissions, pristine hash, and
-post-setup hash. Teardown (or `--disable`) restores the pristine bytes only
-when the current file still matches the recorded managed-file identity. If the
-file has drifted, connector-specific teardown removes only DefenseClaw-owned
-entries and preserves unrelated operator edits.
+Before the first mutation, a backup record is stored at `~/.defenseclaw/connector_backups/<connector>/<logical-name>.json`. It binds the connector, logical name and absolute target path, and holds the pristine bytes, permissions, pristine hash and post-setup hash. Teardown (or `--disable`) restores the pristine bytes only when the current file still matches the recorded identity; if it drifted, teardown removes only DefenseClaw-owned entries and keeps unrelated edits.
 
-Hook connectors default to global/user scope. `claw.workspace_dir` is empty unless you pass `--workspace`; when set, OpenHands uses it for repo-local `.openhands/hooks.json`, `.agents/skills`, and deprecated `.openhands/skills` discovery while still scanning global user skills and the OpenHands public skills cache. Copilot uses it for `.github/hooks/defenseclaw.json` and workspace-local component discovery. Re-run `defenseclaw setup <connector>` without `--workspace` to return to global scope. The workspace is one value for the whole install, so `defenseclaw setup <connector> --workspace` refuses while other connectors are configured (their hooks would move into that folder and stop guarding the rest); use `defenseclaw setup guardrail --workspace <dir>` to scope every connector to one folder on purpose.
+Hook connectors default to global scope. `claw.workspace_dir` is empty unless you pass `--workspace`; GitHub Copilot CLI then uses it for `.github/hooks/defenseclaw.json` and workspace-local component discovery. Re-run `defenseclaw setup <connector>` without `--workspace` to return to global scope. The workspace is one value for the whole install, so `setup <connector> --workspace` refuses while other connectors are configured; use `defenseclaw setup guardrail --workspace <dir>` to scope every connector to one folder.
 
-Every hook setup also writes the resolved connector path contract to `~/.defenseclaw/hook_contract_lock.json`. The `locations` block records the pinned workspace, hook config file, generated hook script, and the MCP/skills/rules/plugins/agents surfaces that DefenseClaw will scan for that connector. Use `defenseclaw doctor` to compare that lock against the files the active SDK can actually load.
+Every hook setup writes the resolved path contract to `~/.defenseclaw/hook_contract_lock.json`. Its `locations` block records the pinned workspace, hook config file, generated script, and the MCP, skills, rules, plugins and agents surfaces DefenseClaw scans. `defenseclaw doctor` compares the lock against the files the active SDK can load.
 
 ## Reload without restart
 
-A running gateway applies `config.yaml` changes by itself. One watcher sees the
-file (and the rule pack and Rego files it refers to), builds a new policy
-generation off the hot path, and swaps it in atomically, so a request never
-sees half of a change. A change that fails to build (invalid YAML, an unknown
-rule ID, a pack whose digest no longer matches) keeps the old generation
-running, shows `last_reload_error` in `/health`, fails the **Policy** row in
-`defenseclaw doctor`, and records a `config.reload.rejected` event. Nothing
-needs a manual reload after a normal edit.
+A running gateway applies `config.yaml` changes by itself. One watcher sees the file (and the rule pack and Rego files it refers to), builds a new policy generation off the hot path and swaps it in atomically. A change that fails to build (an unknown rule ID, a pack whose digest no longer matches) keeps the old generation, shows `last_reload_error` in `/health`, fails the **Policy** row in `defenseclaw doctor` and records a `config.reload.rejected` event. Invalid YAML does the same, except that doctor stops at the **Config validation** row with the line and column and shows no **Policy** row until the file parses.
 
-Only process-level keys need `defenseclaw-gateway restart`. A write that
-touches one prints the command, and the gateway keeps that key's running value
-until you restart it:
+Only process-level keys need `defenseclaw-gateway restart`. A write that touches one prints the command, and the gateway keeps that key's running value until you restart it:
 
 ```text
 Set guardrail.hook_self_heal (config generation 5, sha256 b0eecf44591d).
@@ -1415,28 +1048,10 @@ Restart the gateway to apply guardrail.hook_self_heal: defenseclaw-gateway resta
 | `guardrail.host`, `guardrail.port`, `guardrail.enabled`, `guardrail.connector`, `guardrail.scanner_mode`, `guardrail.retain_judge_bodies` | The guardrail listener, whether it runs, and start-up settings |
 | `guardrail.hook_self_heal`, `guardrail.hook_self_heal_debounce_ms` | The hook guard |
 | `claw`, `agent`, `routing`, `plugin_dir` | Paths, identity, the model router and the connector plugins, captured at start |
-| `deployment_mode`, `enterprise.profile`, `enterprise.network` | The deployment boundary |
+| `deployment_mode`, `enterprise.profile`, `enterprise.network`, `enterprise.openshell` | The deployment boundary |
+| `fleet.enabled`, `fleet.mqtt_broker_url`, `fleet.mqtt_require_tls`, `fleet.ota_key_env`, `fleet.emergency_key_env`, `fleet.device_key_env`, `fleet.mqtt_user_env`, `fleet.mqtt_pass_env` | MQTT connections and signing keys |
 | `environment`, `tenant_id`, `workspace_id`, `discovery_source` | Identity stamped on every record from start |
 
-Every other key is hot, including `guardrail.mode`, `guardrail.hook_fail_mode`, thresholds, rule packs and
-rules, `admission`, `asset_policy`, `scanners`, `llm_providers`, `policy_dir`,
-`quarantine_dir`, `observability.destinations` and `update`. The effective policy digest, which
-is the sha256 of the migrated config (secrets dropped) plus the digests of the
-assets it names, is stamped on `/health`, `/status` and every decision event,
-so you can tell which version of the policy decided something:
+Every other key is hot, including `guardrail.mode`, `guardrail.hook_fail_mode`, thresholds, rule packs and rules, `admission`, `asset_policy`, `scanners`, `llm_providers`, `policy_dir`, `quarantine_dir`, `observability.destinations` and `update`. The effective policy digest is stamped on `/health`, `/status` and every decision event; `defenseclaw-gateway policy digest` computes it from the file on disk, and the **Policy** row of `defenseclaw doctor` compares it with what the gateway applied ([Policy generation and digest](/docs/reference/cli#policy-generation-and-digest)).
 
-```bash
-defenseclaw-gateway policy digest
-```
-
-The command prints the digest and generation of the file on disk. Compare it
-with the **Policy** row of `defenseclaw doctor`, which shows what the gateway
-applied. If they differ, doctor fails the row.
-
-`defenseclaw-gateway policy reload` asks the running gateway to rebuild the
-generation now, even when `config.yaml` has not changed. It is for scripts and
-for assets the watcher may not see; you do not need it after a normal edit.
-Connector wiring (hook scripts, agent files) is not re-applied by a reload:
-run `defenseclaw-gateway restart` or `defenseclaw setup <connector>` for that.
-These commands belong to the **Go gateway** (`defenseclaw-gateway`), not the
-Python CLI; the Python CLI has no top-level `gateway` group.
+`defenseclaw-gateway policy reload` asks the running gateway to rebuild the generation now, for scripts and for assets the watcher may not see. Connector wiring (hook scripts, agent files) is not re-applied by a reload: run `defenseclaw-gateway restart` or `defenseclaw setup <connector>`. Both commands belong to the Go gateway binary; the Python CLI has no `gateway` group.

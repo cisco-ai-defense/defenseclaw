@@ -471,57 +471,46 @@ func TestSandboxAuthorityPendingExpires(t *testing.T) {
 	}
 }
 
-// A create on a cold identity cache waits, then registers provisional on
-// the default profile; once the cache warms the registration re-matches
-// to the group's profile, its hooks keep working and its subject never
-// "changes" (GAP-0022).
-func TestSandboxAuthorityColdCacheRematch(t *testing.T) {
+// A create on a cold identity cache waits, then refuses, naming the group
+// fact its assignments need. Once the cache warms, a new registration uses the
+// proven group's profile (GAP-0022).
+func TestSandboxAuthorityColdCacheRefusesUntilIdentityConfirmed(t *testing.T) {
 	f := newSandboxFixture(t, config.EnterpriseEnrollmentConfig{}, nil)
 	f.coldCache(sbxAlice)
 	start := time.Now()
-	resp := f.live(sbxAlice, 1)
+	rec := f.do(sbxAlice, http.MethodPost, sandboxrelay.PathPolicyResolve, claudeResolve(),
+		map[string]string{sandboxrelay.ConnectorHeader: "claudecode"})
 	if waited := time.Since(start); waited < sandboxResolveWait {
 		t.Fatalf("resolve answered after %v without waiting for the lookup", waited)
 	}
-	if !resp.Registration.Provisional || resp.Banner.Profile != "offline-floor" {
-		t.Fatalf("cold create: %+v %+v", resp.Registration, resp.Banner)
-	}
-	if rec := f.hook(sbxAlice, resp.Registration.ID, "claudecode", nil); rec.Code != http.StatusOK {
-		t.Fatalf("hook on a cold cache: %d %s", rec.Code, rec.Body.String())
-	}
-	// policy/current carries the match's provisional flag with its profile,
-	// so the daemon's status follows a re-match (#1199).
-	if code, cur := f.current(sbxAlice, resp.Registration.ID); code != http.StatusOK || cur.Provisional == nil || !*cur.Provisional ||
-		cur.Profile != "offline-floor" {
-		t.Fatalf("current on a cold cache: %d profile %q provisional %v", code, cur.Profile, cur.Provisional)
+	if rec.Code != http.StatusServiceUnavailable || errorReason(t, rec) != sandboxrelay.ReasonUnavailable ||
+		!strings.Contains(rec.Body.String(), "group membership is unconfirmed") {
+		t.Fatalf("cold create: %d %s; want a refusal naming the group fact its assignments need", rec.Code, rec.Body.String())
 	}
 	f.setGroups(sbxAlice, "dc-sbx-contractors")
-	rec := f.hook(sbxAlice, resp.Registration.ID, "claudecode", nil)
+	resp := f.live(sbxAlice, 1)
+	if resp.Registration.Provisional || resp.Banner.Profile != "contractors" {
+		t.Fatalf("create after identity confirmation: %+v %+v", resp.Registration, resp.Banner)
+	}
+	rec = f.hook(sbxAlice, resp.Registration.ID, "claudecode", nil)
 	if rec.Code != http.StatusOK || rec.Header().Get(sandboxrelay.ProfileHeader) != "contractors" {
-		t.Fatalf("hook after the cache warmed: %d %s %v", rec.Code, rec.Body.String(), rec.Header())
+		t.Fatalf("hook after identity confirmation: %d %s %v", rec.Code, rec.Body.String(), rec.Header())
 	}
 	auth, _ := f.api.sandboxAuth()
 	reg, _, _ := auth.store.Get(sbxAlice.UID, resp.Registration.ID)
 	if reg.Provisional || reg.Profile != "contractors" || reg.ProfileMatch != sandboxreg.MatchGroup || reg.State != sandboxreg.StateLive {
-		t.Fatalf("re-matched registration: %+v", reg)
+		t.Fatalf("registration after identity confirmation: %+v", reg)
 	}
 	if code, cur := f.current(sbxAlice, resp.Registration.ID); code != http.StatusOK || cur.Provisional == nil || *cur.Provisional ||
 		cur.Profile != "contractors" {
-		t.Fatalf("current after the re-match: %d profile %q provisional %v", code, cur.Profile, cur.Provisional)
-	}
-	f.mu.Lock()
-	rematched := strings.Join(f.rematched, ";")
-	f.mu.Unlock()
-	if !strings.Contains(rematched, resp.Registration.ID+":live:") || !strings.Contains(rematched, "provisional") {
-		t.Fatalf("re-match record: %q", rematched)
+		t.Fatalf("current after identity confirmation: %d profile %q provisional %v", code, cur.Profile, cur.Provisional)
 	}
 }
 
 // A new run during a hard directory outage (GAP-0507): the account database
-// names no account for the uid. The name the uid last resolved to stands in
-// and the run starts, provisional under the default profile; with no last
-// name it is refused. The registration binds to the account's real subject
-// key, so the account answers for it once the directory is back.
+// names no account for the uid. A remembered name is not proof of the
+// account holder, so both a named and a nameless request refuse. Once the
+// directory answers, the run can bind to the proven account.
 func TestSandboxAuthorityResolveDuringDirectoryOutage(t *testing.T) {
 	f := newSandboxFixture(t, config.EnterpriseEnrollmentConfig{}, nil)
 	f.coldCache(sbxAlice)
@@ -539,9 +528,16 @@ func TestSandboxAuthorityResolveDuringDirectoryOutage(t *testing.T) {
 		}
 		return ""
 	}
+	rec = f.do(nameless, http.MethodPost, sandboxrelay.PathPolicyResolve, claudeResolve(),
+		map[string]string{sandboxrelay.ConnectorHeader: "claudecode"})
+	if rec.Code != http.StatusServiceUnavailable || errorReason(t, rec) != sandboxrelay.ReasonUnavailable ||
+		!strings.Contains(rec.Body.String(), "group membership is unconfirmed") {
+		t.Fatalf("run during an outage: %d %s; want a refusal naming the group fact its assignments need", rec.Code, rec.Body.String())
+	}
+	f.setGroups(sbxAlice, "dc-sbx-contractors")
 	resp := f.resolve(nameless, claudeResolve())
-	if !resp.Registration.Provisional || resp.Banner.Profile != "offline-floor" {
-		t.Fatalf("run during an outage: %+v %+v, want provisional offline-floor", resp.Registration, resp.Banner)
+	if resp.Registration.Provisional || resp.Banner.Profile != "contractors" {
+		t.Fatalf("run after the directory recovers: %+v %+v", resp.Registration, resp.Banner)
 	}
 	auth, _ := f.api.sandboxAuth()
 	reg, ok, _ := auth.store.Get(sbxAlice.UID, resp.Registration.ID)

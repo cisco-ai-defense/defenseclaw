@@ -96,7 +96,8 @@ func (e *execClient) Stream(ctx context.Context, workspace, sandboxName string, 
 		return nil, statusErr(types.ErrorInvalidArgument, "sandbox name must not be empty")
 	}
 	// Like the SDK, resolve the sandbox before opening the stream.
-	if _, err := e.f.sdk.Sandboxes().Get(ctx, workspace, sandboxName); err != nil {
+	sb, err := e.f.sdk.Sandboxes().Get(ctx, workspace, sandboxName)
+	if err != nil {
 		return nil, err
 	}
 	call := ExecCall{Workspace: workspace, Sandbox: sandboxName, Argv: slices.Clone(command)}
@@ -111,6 +112,13 @@ func (e *execClient) Stream(ctx context.Context, workspace, sandboxName string, 
 	e.f.execCalls = append(e.f.execCalls, call)
 	handler := e.f.execHandler
 	e.f.mu.Unlock()
+	// Like OpenShell (0.1.3 and 0.1.5: ExecSandbox's require_ready_sandbox),
+	// run a command only in a ready sandbox: one whose workload completed
+	// or failed, starting or stopping, answers FailedPrecondition. The call
+	// is recorded all the same, so a test sees that it was tried.
+	if sb.Status.Phase != types.SandboxReady {
+		return nil, statusErr(types.ErrorConflict, "sandbox is not ready")
+	}
 	return &execStream{ctx: ctx, call: call, handler: handler}, nil
 }
 

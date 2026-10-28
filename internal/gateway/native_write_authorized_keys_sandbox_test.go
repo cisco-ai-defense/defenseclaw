@@ -38,9 +38,6 @@ func TestNativeWriteToolsOfAuthorizedKeysAreBlockedInASandbox(t *testing.T) {
 		}
 		for target, want := range map[string]bool{keys: true, "/work/app/notes.txt": false} {
 			t.Run(fmt.Sprintf("%s/block=%t", call.name(i), want), func(t *testing.T) {
-				if !want && call.benignGap() != "" {
-					t.Skip(call.benignGap())
-				}
 				_, token := f.mint(t, fmt.Sprintf("dc-%s-%t", call.name(i), want), call.connector, v[0], v[1], f.project)
 				resp := f.hook(t, v[2], token, call.body(t, "/work/app", target), headers...)
 				raw, _ := json.Marshal(resp)

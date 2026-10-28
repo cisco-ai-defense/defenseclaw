@@ -48,6 +48,35 @@ func TestWindowsEnterpriseHookRuntimeMissingFailsStatus(t *testing.T) {
 	}
 }
 
+// GAP-1461: ensure's drift check takes a missing hook runtime folder as
+// drift when an account is enrolled, so a no-op ensure repairs it.
+func TestWindowsEnterpriseHookRuntimeMissingIsDriftForEnsure(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "DefenseClaw-HookRuntime")
+	originalDir, originalTargets := windowsEnterpriseHookRuntimeDir, windowsEnterpriseEnrolledTargets
+	t.Cleanup(func() {
+		windowsEnterpriseHookRuntimeDir, windowsEnterpriseEnrolledTargets = originalDir, originalTargets
+	})
+	windowsEnterpriseHookRuntimeDir = func() (string, error) { return dir, nil }
+	for _, enrolled := range []bool{true, false} {
+		windowsEnterpriseEnrolledTargets = func() (map[string]bool, error) {
+			if !enrolled {
+				return map[string]bool{}, nil
+			}
+			return map[string]bool{"S-1-5-21-1-2-3-1001\x00claudecode": true}, nil
+		}
+		gotDir, problem := windowsEnterpriseHookRuntimeDrift()
+		if gotDir != dir {
+			t.Fatalf("drift folder = %q, want %q", gotDir, dir)
+		}
+		if enrolled && !strings.Contains(problem, dir+" is missing") {
+			t.Fatalf("missing folder with an enrolled account: drift = %q, want the missing folder named", problem)
+		}
+		if !enrolled && problem != "" {
+			t.Fatalf("missing folder with nobody enrolled: drift = %q, want none", problem)
+		}
+	}
+}
+
 // GAP-0927, GAP-0929: status and verify fail on a hook runtime folder that
 // standard users can write and on one they cannot read, and name the
 // folder, the Users entry and the fix.

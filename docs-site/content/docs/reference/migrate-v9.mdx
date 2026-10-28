@@ -11,29 +11,27 @@ keywords:
   - DefenseClaw rollback
 ---
 
-`config_version: 9` makes `config.yaml` the only place an administrator's
-decisions live (see [Configuration: one source of truth](/docs/reference/source-of-truth)).
-DefenseClaw 0.8.x kept some of those decisions elsewhere: admission actions and
-thresholds in `policies/rego/data.json`, operator block and allow entries in
-`audit.db`, scanner switches in loose keys. The migration copies each of them
-into `config.yaml`, keeps the old files, and records every value it moved and
-every disagreement it settled.
+`config_version: 9` makes `config.yaml` the only place an administrator's decisions live ([Source of truth](/docs/reference/source-of-truth)). DefenseClaw 0.8.x kept some elsewhere: admission actions and thresholds in `policies/rego/data.json`, operator block and allow entries in `audit.db`, scanner switches in loose keys. The migration copies each into `config.yaml`, keeps the old files, and records every value it moved and every disagreement it settled. You rarely run it by hand; this page shows what it does so you can check the result.
 
-You rarely run it by hand. This page shows what it does so you can check the
-result.
+## In short
+
+- The upgrade runs the migration for you: `defenseclaw upgrade`, or the install command on 0.8.7 and older and on Windows.
+- It copies admission, thresholds, scanner switches and your block and allow entries into `config.yaml`; nothing you configured stops applying.
+- It keeps `config.yaml.v8.bak` and `data.json.migrated-v9`, and writes `migration-v9.json` with every moved value and every conflict.
+- Check the result with `defenseclaw config migrate --dry-run` before, and `defenseclaw doctor` then `defenseclaw config migrate --ack` after.
+- `defenseclaw rollback` returns to the version 8 file; [Going back to 0.8.x](#going-back-to-08x) covers manual steps.
 
 ## Who needs it
 
 | Install | What happens |
 | --- | --- |
-| Per-user install of 0.8.5 or later (`config_version: 8`) | The upgrade runs the migration: `defenseclaw upgrade`, or the install command on 0.8.7 and older and on Windows ([Upgrading from 0.x to 1.0](/docs/get-started/upgrade#upgrading-from-0x-to-10)). Until it has run, the gateway reads your v8 file as if it were migrated, in memory only, so nothing you configured stops applying. CLI reads such as `defenseclaw config get --effective` still show what the v8 file itself says. |
+| Per-user install of 0.8.5 or later (`config_version: 8`) | The upgrade runs the migration: `defenseclaw upgrade`, or the install command on 0.8.7 and older and on Windows ([Upgrade](/docs/get-started/upgrade)). Until it has run, the gateway reads your v8 file as if it were migrated, in memory only, so nothing you configured stops applying. CLI reads such as `defenseclaw config get --effective` still show what the v8 file itself says. |
 | Per-user install of 0.8.4 or older (`config_version: 7`) | The same upgrade first converts the file to version 8 (the one-time 0.x import), then runs this migration. |
 | Managed standalone host (`deployment_mode: managed_enterprise`, `enterprise.profile: standalone`) | The lifecycle (`ensure` or `upgrade`) migrates a version 8 admin config in place and keeps `config.yaml.v8.bak`. Operator rows in `audit.db` are not moved: the admin config is the policy. See [Lifecycle](/docs/enterprise/lifecycle). |
 | Secure Client profile | No change. It keeps its existing path: the gateway does not migrate its config in memory. |
 | A fresh `defenseclaw init` | `init` writes `config_version: 9`. There is nothing to migrate. |
 
-An unmodified 0.8.x install moves one value (`scanners.skill_scanner.policy:
-quiet`) and no conflicts. The rest of this page covers customised installs.
+An unmodified 0.8.x install moves one value (`scanners.skill_scanner.policy: quiet`) and no conflicts.
 
 ## What runs it
 
@@ -41,7 +39,7 @@ quiet`) and no conflicts. The rest of this page covers customised installs.
 | --- | --- |
 | `defenseclaw upgrade` | The installer checks, before it changes anything, that your configuration can be migrated, then runs `defenseclaw migrate` after the swap. If the migration fails, the installer puts the previous install back. |
 | `defenseclaw migrate` | Brings configuration and data to this release's schema, including the v9 step. `--check` lists the pending steps without changing anything. |
-| `defenseclaw config migrate [--dry-run] [--ack] [--json]` | Runs only the v9 step. `--dry-run` writes nothing. `--ack` marks `migration-v9.json` as read. `--json` prints the whole record. |
+| `defenseclaw config migrate [--dry-run] [--ack] [--json]` | Runs only the v9 step. `--dry-run` writes nothing. `--ack` marks `migration-v9.json` as read; it is refused together with `--dry-run`. `--json` prints the whole record. |
 | `defenseclaw-gateway config migrate [--dry-run] [--ack] [--json]` | The same implementation, which `defenseclaw config migrate` calls. Its output also lists the removed keys and the audit entries it moved. |
 | The gateway, at start and on a reload | A `config_version: 8` file is migrated in memory, read-only. The file on disk is not touched. If the in-memory migration fails, the gateway refuses the file: at start it exits with an error that tells you to run `defenseclaw migrate`, and on a reload the previous configuration keeps running. |
 
@@ -525,7 +523,7 @@ scanners:
 | `scanners.skill_scanner.binary`, `scanners.mcp_scanner.binary` | Removed. DefenseClaw runs the scanners it ships. |
 | `scanners.skill_scanner.policy` empty or missing | `policy: quiet`, the recommended preset. This is the one value an unmodified install moves. |
 | `policy: strict`, `balanced`, `permissive`, `low-noise` or `quiet` | Kept. |
-| `policy: <path to a file>` | `policy: custom` with `policy_file: {path, digest}`. A relative path, including a file named `custom` (not a preset in 0.8.x), is read from the directory where upgrade runs and pinned by its absolute path. If the file cannot be read, migration stops and keeps the v8 config; restore the file or select a preset, then run upgrade again. |
+| `policy: <path to a file>` | `policy: custom` with `policy_file: {path, digest}`. A relative path, including a file named `custom` (not a preset in 0.8.x), is read from `data_dir` first, then from the directory where upgrade runs, and pinned by the absolute path of the file it found. If the file cannot be read, migration stops and keeps the v8 config; restore the file or select a preset, then run upgrade again. |
 | `use_virustotal` | `analyzers.virustotal.enabled` (written only when it was `true`). |
 | `virustotal_api_key` (inline) | Written to `<data_dir>/.env` under the name in `virustotal_api_key_env`, or `VIRUSTOTAL_API_KEY`. The record shows `<redacted>`, and `config.yaml` names only the variable. |
 | `virustotal_api_key_env` | `analyzers.virustotal.api_key_env`. |
@@ -535,8 +533,7 @@ scanners:
 
 The remaining scanner keys are in the
 [configuration reference](/docs/reference/configuration#scanners). The scanner
-pages explain the gate and the judge: [Skill scanner](/docs/scanning/skill-scanner),
-[MCP scanner](/docs/scanning/mcp-scanner).
+pages explain the gate and the judge: [Scanners](/docs/scanning).
 
 ### update_check
 
@@ -566,7 +563,7 @@ rows you wrote:
 | `r1` | skill | `acme-notes` (connector `claudecode`) | `install: block` | vendor not reviewed |
 | `r2` | skill | `acme-lint` | `install: allow` | reviewed by security |
 | `r3` | mcp | `acme-wiki` | `install: block` | sends data to an unknown host |
-| `r4` | skill | `scratch-tool` | `install: block`, `file: quarantine` | `auto-block: HIGH findings` |
+| `r4` | skill | `scratch-tool` | `install: block`, `file: quarantine` | `auto-block: watch detected HIGH findings` |
 | `r5` | tool | `@claudecode/WebFetch` | `install: block` | no web fetch in CI |
 
 ```yaml title="config.yaml (v9, excerpt)"
@@ -591,10 +588,15 @@ asset_policy:
         reason: no web fetch in CI
 ```
 
-- Row `r4` stays in `audit.db`. A block that a scan verdict wrote (a reason
-  that starts `auto-block`, `post-scan:`, `post-install scan:` or `scan:`) is the
-  enforcement journal, not an operator decision. Quarantine and runtime-disable
-  state is unchanged.
+- Row `r4` stays in `audit.db` as it is. Its reason is one the scanners
+  write, so it is the enforcement journal, not an operator decision. The
+  scanner reasons are `auto-block: watch detected <SEV> findings` (it may go on
+  with ` (scanner=<name>)`, `: ` or `; `), `post-scan: <N> findings, max=<SEV>`,
+  `post-install scan: <N> findings, max=<SEV>`, `scan: <N> findings, max=<SEV>`
+  and `scan clean or within policy`, and reasons that start
+  `scanner failure (fail-closed): `, `quarantine failed: ` or `link removed: `.
+  Any other reason is moved, even one that starts `auto-block`. Quarantine and
+  runtime-disable state is unchanged.
 - A moved row loses its `install` field after `config.yaml` is committed, and a
   row left with no state is deleted. If anything fails first, the row is still
   in the table: an entry is never lost.
@@ -635,7 +637,7 @@ per-user install the migration keeps the old module as
 `<name>.rego.migrated-v9` and replaces it with the shipped module. The upgrade
 then moves an unmodified 0.8 `sandbox.rego`, which 1.0 no longer ships, to
 `~/.defenseclaw/backups/rego-<time>/` (see
-[Shipped policy files](/docs/get-started/upgrade#shipped-policy-files)). On a
+[Shipped policy files](/docs/get-started/upgrade)). On a
 managed host the administrator owns `policy_dir`, so the migration only
 records a note, and the gateway refuses the old module and uses the
 config-driven policy.
@@ -663,12 +665,7 @@ provider already in `llm_providers.custom` keeps the values `config.yaml` sets
 and takes the overlay's other domains, keys, path overrides and headers, and
 the fields `config.yaml` leaves unset: the gateway applied `llm_providers` over
 the overlay, so `config.yaml`'s values were the ones in use, except for
-`extra_headers`. Before 1.0.3, a provider entry that merged into one of the
-same name (a built-in provider, or an earlier entry of the overlay or of
-`config.yaml`) lost its headers: the overlay's headers were sent, and
-`config.yaml`'s headers of such an entry were not. Once the overlay is folded,
-every entry's headers are sent. The fold names each header that is sent from
-then on, so you can remove any you do not want.
+`extra_headers`. Once the overlay is folded, every entry's headers are sent, and the fold names each header sent from then on so you can remove any you do not want.
 
 If the overlay sets a field that `config.yaml` sets to another value, or names
 a provider twice with different values for one header, nothing is moved. Both
@@ -695,7 +692,7 @@ hold, migration records a note and leaves the entire unmarked overlay as a
 `llm_providers`. Preserve and review that file until the overrides are no
 longer needed. Managed hosts do not import local provider overlays into their
 admin config. See
-[Custom providers](/docs/guardrail/unified-llm-key#custom-providers-for-internal-or-self-hosted-endpoints).
+[Custom providers](/docs/guardrail/unified-llm-key).
 
 ### Keys that no longer exist
 
@@ -709,10 +706,12 @@ admin config. See
 | `scanners.skill_scanner.use_virustotal`, `use_aidefense`, `virustotal_api_key`, `virustotal_api_key_env` | `scanners.skill_scanner.analyzers.*` |
 | `update_check` | `update.check` |
 | Operator rows in the `audit.db` `actions` table | `asset_policy` |
+| Ordinary `custom-providers.json` provider entries | `llm_providers.custom`; an overlay with `request_overrides` remains a live input |
+| `DEFENSECLAW_JUDGE_TRACE`, `DEFENSECLAW_REPO` as the setting | `guardrail.judge.trace`, `update.source` |
 
-A v9 file that still holds one of them is rejected by validation. Keys that
-earlier releases already retired, such as `privacy.disable_redaction` (use the
-redaction profiles under `observability`), are not part of this migration.
+A v9 file that still holds one of them is rejected by validation. The MCP scanner's `api` and `timeouts` blocks and the skill scanner's `timeouts.llm_s` were removed too (no scan read them; the `api` analyzer uses `cisco_ai_defense`); a file that holds them loads with them ignored, and `config set` refuses them. Keys that earlier releases already retired, such as `privacy.disable_redaction`, are not part of this migration.
+
+`policy_dir`, `mode`, `version`, `sandbox_home`, `auto_pair` and `host_networking` belong to the retired `openshell-sandbox` 0.0.x standalone sandbox. They are accepted and ignored. The migration removes `mode` and `sandbox_home`, and on a host that ran that sandbox resets `guardrail.host` and `gateway.host` ([Remove a retired standalone sandbox](/docs/sandboxes)).
 
 ### MCP servers that can no longer be scanned
 
@@ -832,9 +831,7 @@ are sure you will not go back to 0.8.x, then delete them.
 
 ## Doctor
 
-`defenseclaw doctor` shows a **Config migration** row after a migration, until
-you acknowledge the record. It warns when there are conflicts and passes when
-there are none:
+`defenseclaw doctor` shows a **Config migration** row until you acknowledge the record. It warns when there are conflicts and passes when there are none:
 
 ```text
   [WARN] Config migration  —  migrated to 9 on 2026-10-06: 31 value(s) moved, 2 conflict(s); details in ~/.defenseclaw/migration-v9.json
@@ -859,9 +856,7 @@ stays after `--ack` and goes away once the entry uses `npx`, `uvx` or a URL:
       ↪ Next step: defenseclaw mcp set u33a-mcp --command npx --args <package> --connector codex (or --url <url>)
 ```
 
-The migration row is gone on the next doctor run. A leftover `policies/rego/data.json`
-is reported as **Retired policy data** and ignored; review it with
-`defenseclaw config get admission`, then remove it.
+The row is gone on the next doctor run. A leftover `policies/rego/data.json` is reported as **Retired policy data** and ignored; review it with `defenseclaw config get admission`, then remove it. Other rows: [Doctor](/docs/reference/cli).
 
 ## Check the result
 
@@ -874,10 +869,7 @@ HIGH
 (source: config:guardrail.block_at)
 ```
 
-`--effective` prints the value in force and where it comes from. A value you
-did not set prints the rule pack's default and names the pack as its source.
-`defenseclaw doctor` reports the **Policy** row once the gateway runs, with the
-generation and digest it applied.
+`--effective` prints the value in force and where it comes from; a value you did not set prints the rule pack's default and names the pack. `defenseclaw doctor` reports the **Policy** row once the gateway runs.
 
 ## Going back to 0.8.x
 
@@ -896,7 +888,7 @@ existing data home. Keep the moved directory, including `previous`, for the
 restore. Download `DefenseClawSetup-x64.exe` from the release you had and run
 it in a desktop session. Stop the newly installed gateway, restore the matching
 pre-upgrade data from the moved directory, then start it again. See
-[Moving from the 0.8.x Setup package](/docs/get-started/windows/install-lifecycle#moving-from-the-08x-setup-package).
+[Moving from the 0.8.x Setup package](/docs/get-started/windows).
 
 If you reinstall 0.8.x yourself instead, restore the configuration that
 belonged to that release **before** starting its gateway with your old data.
@@ -911,7 +903,10 @@ Configuration schema v8 is required — run 'defenseclaw upgrade' first.
 and the 0.8.x gateway will not load it (`[config_version_unsupported]
 $.config_version: this configuration version is newer than the supported v8
 contract`). Both messages point at `defenseclaw upgrade`, which would take you
-forward again. To stay on 0.8.x, go back by hand:
+forward again. To stay on 0.8.x, go back by hand. On Windows with the Codex connector, use
+`defenseclaw rollback` from the 1.x install instead: the 0.8.x gateway reads
+Codex's version there only from a receipt that `defenseclaw setup` writes, so step 7
+does not cover it.
 
 1. Stop the 1.x gateway: `defenseclaw-gateway stop`. Uninstall 1.x; on a
    per-user install, `defenseclaw uninstall --binaries` removes its binaries
@@ -935,7 +930,9 @@ forward again. To stay on 0.8.x, go back by hand:
    For 0.8.5 through 0.8.10, `config.yaml.v8.bak` is the version 8
    pre-migration copy, if no later upgrade replaced it.
 4. Restore the matching pre-upgrade `data.json` and `audit.db` from the
-   same backup. If you have verified that only v9 moved them, the **moved**
+   same backup. Restore the matching pre-upgrade `.env` too if you stored
+   provider keys there, and keep its access owner-only. If you have verified
+   that only v9 moved the data files, the **moved**
    data home holds `policies/rego/data.json.migrated-v9`, and
    `migration-v9.json` lists block and allow rows moved from `audit.db`.
 5. Restore each saved pre-9 Rego module. The v9 migration can replace
@@ -972,7 +969,24 @@ forward again. To stay on 0.8.x, go back by hand:
    ```
 
    An overlay outside the data home was left in place and needs no rename.
-7. Start the 0.8.x gateway and verify the restored settings.
+7. Regenerate every connector from the restored config. Restoring config and data
+   alone does not restore the hook registrations that uninstall removed, and the
+   0.8.x gateway refuses to start an action-mode connector whose agent version it
+   has not probed. Refresh the agent discovery cache with the restored 0.8.x CLI.
+   It reads `config.yaml` and does not change it:
+
+   ```bash
+   defenseclaw agent discover --refresh --no-emit-otel
+   ```
+
+   Do not run `quickstart` or `init` here. They keep only the connector you name,
+   set the mode from `--mode` (default `observe`), the scanner mode to `local` and
+   the judge to off.
+8. Start the 0.8.x gateway with `defenseclaw-gateway start`. On start it runs
+   connector setup for every connector in the restored config, which rewrites the
+   hook registrations and the contract lock. Check that `config.yaml` is still the
+   restored file and that the connector list, modes, fail mode, scanner mode, judge
+   and policy match your pre-upgrade record. Then try a safe blocked-call control.
 
 If you do not have a matching pre-upgrade backup, use `defenseclaw rollback`
 from the 1.x install instead (for a Windows 0.8.7-0.8.10 Setup install, the

@@ -298,46 +298,46 @@ func runAuditExport(cmd *cobra.Command, _ []string) (err error) {
 		return fmt.Errorf("audit export: open db: %w", err)
 	}
 	defer db.Close()
+	// A database without audit_events is refused before an -o file is
+	// created, so the export writes nothing (GAP-1044).
+	if ok, tableErr := tableExists(db, "audit_events"); tableErr != nil {
+		return fmt.Errorf("audit export: read db: %w", tableErr)
+	} else if !ok {
+		return fmt.Errorf("audit export: %s has no audit_events table; it is not a DefenseClaw audit database", auditPath)
+	}
 	// A reader that stops early (| head -1, | Select-Object -First 1) is
 	// not an export failure (GAP-1694).
 	defer func() { err = quietClosedOutputPipe(err) }()
 
 	out := io.Writer(os.Stdout)
 	if auditExportOut != "" && auditExportOut != "-" {
-		// ("Audit export output file is created with
-		// default-readable permissions before chmod"): os.Create uses
-		// O_CREATE|O_TRUNC with mode 0666 masked by the process umask,
-		// so on a 022 umask host the file briefly exists as 0644
-		// before the os.Chmod tightens it. A local attacker watching
-		// a shared directory (or holding an FD opened during that
-		// window) could read sensitive audit content written
-		// afterwards. Open with O_CREATE|O_EXCL|0o600 so the file is
-		// 0600 from creation and we refuse to clobber an existing
-		// file (which could be an attacker-pre-created decoy).
-		// --force removes the old file first, so the new one is still
-		// created with O_EXCL and 0600 (GAP-1398).
+		// Create exclusively, with private permissions before any content is
+		// written: 0600 on Unix and the audit store's protected DACL on
+		// Windows. --force removes the old file before this private create.
 		if auditExportForce {
 			if rmErr := os.Remove(auditExportOut); rmErr != nil && !os.IsNotExist(rmErr) {
 				return fmt.Errorf("audit export: remove existing output %s: %w", auditExportOut, rmErr)
 			}
 		}
-		f, err := os.OpenFile(
-			auditExportOut,
-			os.O_WRONLY|os.O_CREATE|os.O_EXCL|os.O_TRUNC,
-			0o600,
-		)
-		if err != nil {
-			if os.IsExist(err) {
+		f, openErr := audit.CreateExportFileExclusive(auditExportOut)
+		if openErr != nil {
+			if os.IsExist(openErr) {
 				return fmt.Errorf("audit export: %s already exists; pass --force to overwrite it or choose another -o path", auditExportOut)
 			}
-			return fmt.Errorf("audit export: create output: %w", err)
+			return fmt.Errorf("audit export: create output: %w", openErr)
 		}
-		defer f.Close()
 		lc := &lineCountWriter{w: f}
 		out = lc
 		// GAP-1494: say what was written instead of finishing silently.
+		// A failed export says only why (err, the named result) and
+		// removes the file it created, so nothing claims an export that
+		// did not happen (GAP-1044).
 		defer func() {
+			if closeErr := f.Close(); err == nil && closeErr != nil {
+				err = fmt.Errorf("audit export: close output: %w", closeErr)
+			}
 			if err != nil {
+				_ = os.Remove(auditExportOut)
 				return
 			}
 			msgOut := io.Writer(os.Stderr)
@@ -358,7 +358,11 @@ func runAuditExport(cmd *cobra.Command, _ []string) (err error) {
 		eventNameCol = "event_name"
 	}
 	hasExactTime, _ := columnExists(db, "audit_events", "retention_timestamp_unix_nano")
-	q := `SELECT id, timestamp, action, target, actor, details, structured_json, severity, run_id,
+	// A native v8 row keeps its structured fields only in payload_json
+	// (GAP-0614).
+	hasPayloadJSON, _ := columnExists(db, "audit_events", "payload_json")
+	structuredCol := audit.StructuredJSONReadSQL("", hasPayloadJSON, eventNameCol != "NULL")
+	q := `SELECT id, timestamp, action, target, actor, details, ` + structuredCol + `, severity, run_id,
 session_id, trace_id, agent_id, agent_name, agent_instance_id, sidecar_instance_id,
 schema_version, content_hash, generation, binary_version,
 destination_app, tool_name, tool_id, policy_id, connector, ` + eventNameCol + `

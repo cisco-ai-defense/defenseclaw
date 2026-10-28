@@ -42,7 +42,7 @@ func physicalMode(t *testing.T, path string) os.FileMode {
 func keptDockerHost(t *testing.T, goos string, sandbox bool) *osHost {
 	t.Helper()
 	h := newOSHost(t, goos)
-	cfg := sandboxConfig(t, goos, true, map[string]any{"install": "setup", "driver": "docker", "version": "0.1.3", "gateway_port": 17671})
+	cfg := sandboxConfig(t, goos, true, map[string]any{"install": "setup", "driver": "docker", "version": "0.1.5", "gateway_port": 17671})
 	requireOK(t, h.ensure(cfg))
 	state := h.env.loadOpenShellState()
 	if state.Applied == nil {
@@ -95,8 +95,8 @@ func TestKeptOpenShellSetupSwitchEqualsDirectSwitch(t *testing.T) {
 			settings map[string]any
 			want     string
 		}{
-			{"docker port", map[string]any{"install": "setup", "driver": "docker", "version": "0.1.3", "gateway_port": 17672}, "gateway port 17671 -> 17672"},
-			{"docker to vm and port", map[string]any{"install": "setup", "driver": "vm", "version": "0.1.3", "gateway_port": 17672}, "driver docker -> vm"},
+			{"docker port", map[string]any{"install": "setup", "driver": "docker", "version": "0.1.5", "gateway_port": 17672}, "gateway port 17671 -> 17672"},
+			{"docker to vm and port", map[string]any{"install": "setup", "driver": "vm", "version": "0.1.5", "gateway_port": 17672}, "driver docker -> vm"},
 		} {
 			t.Run(goos+"/"+tc.name, func(t *testing.T) {
 				direct := keptDockerHost(t, goos, true)
@@ -136,8 +136,8 @@ func TestKeptOpenShellSetupSwitchEqualsDirectSwitch(t *testing.T) {
 				if got := sandboxSwitchLine(t, reactivated); got != wantLine {
 					t.Errorf("reactivated switch = %q\ndirect switch = %q", got, wantLine)
 				}
-				if got := strings.Join(kept.ops.stopped(), ","); got != "alice:daemon+gateway" {
-					t.Errorf("switch stopped %q, want daemon and gateway", got)
+				if got := strings.Join(kept.ops.stopped(), ","); got != "alice:daemon+socket,alice:daemon+gateway" {
+					t.Errorf("switch stopped %q, want the daemon and its socket, then daemon and gateway", got)
 				}
 				if physicalExists(kept.env.openshellKeptStatePath()) {
 					t.Error("successful adoption left the kept record")
@@ -150,7 +150,7 @@ func TestKeptOpenShellSetupSwitchEqualsDirectSwitch(t *testing.T) {
 func TestKeptOpenShellSetupWaitsForRunningSandbox(t *testing.T) {
 	for _, goos := range []string{"linux", "darwin"} {
 		t.Run(goos, func(t *testing.T) {
-			settings := map[string]any{"install": "setup", "driver": "vm", "version": "0.1.3", "gateway_port": 17671}
+			settings := map[string]any{"install": "setup", "driver": "vm", "version": "0.1.5", "gateway_port": 17671}
 			direct := keptDockerHost(t, goos, true)
 			direct.ops.status[direct.alice.UID] = SandboxStatus{Active: true, Running: 1}
 			requireOK(t, ensureKeptHost(t, direct, settings))
@@ -202,10 +202,10 @@ func TestKeptOpenShellSetupUninstallModes(t *testing.T) {
 				strings.Contains(strings.Join(r.Changes, "\n"), "record of the sandbox setup the kept sandboxes") {
 				t.Errorf("no-sandbox uninstall kept a setup record: %v", r.Changes)
 			}
-			reactivated := ensureKeptHost(t, noSandbox, map[string]any{"install": "setup", "driver": "docker", "version": "0.1.3", "gateway_port": 17671})
+			reactivated := ensureKeptHost(t, noSandbox, map[string]any{"install": "setup", "driver": "docker", "version": "0.1.5", "gateway_port": 17671})
 			requireOK(t, reactivated)
 			fresh := newOSHost(t, goos)
-			first := ensureKeptHost(t, fresh, map[string]any{"install": "setup", "driver": "docker", "version": "0.1.3", "gateway_port": 17671})
+			first := ensureKeptHost(t, fresh, map[string]any{"install": "setup", "driver": "docker", "version": "0.1.5", "gateway_port": 17671})
 			requireOK(t, first)
 			if got, want := sandboxResultLines(reactivated), sandboxResultLines(first); !reflect.DeepEqual(got, want) {
 				t.Errorf("no-sandbox reactivation = %v, first-time-on = %v", got, want)
@@ -314,7 +314,7 @@ func TestKeptOpenShellSetupAdoptionHygiene(t *testing.T) {
 					t.Fatal("uninstall did not keep the sandbox setup record")
 				}
 				tc.mutate(t, h)
-				r := ensureKeptHost(t, h, map[string]any{"install": "setup", "driver": "docker", "version": "0.1.3", "gateway_port": 17671})
+				r := ensureKeptHost(t, h, map[string]any{"install": "setup", "driver": "docker", "version": "0.1.5", "gateway_port": 17671})
 				requireOK(t, r)
 				if containsLine(r.Changes, "switched the sandbox setup") || physicalExists(h.env.openshellKeptStatePath()) {
 					t.Errorf("invalid kept record was adopted or left after save: %v", r.Changes)
@@ -328,11 +328,11 @@ func TestKeptOpenShellSetupAdoptionHygiene(t *testing.T) {
 				t.Fatal("uninstall did not keep the sandbox setup record")
 			}
 			active := h.env.loadOpenShellState()
-			active.Applied = &openshellApplied{Enabled: true, Install: "setup", Driver: "docker", Version: "0.1.3", GatewayPort: 17671, DockerNamespace: openshell.ManagedDockerNamespace}
+			active.Applied = &openshellApplied{Enabled: true, Install: "setup", Driver: "docker", Version: "0.1.5", GatewayPort: 17671, DockerNamespace: openshell.ManagedDockerNamespace}
 			if err := h.env.saveOpenShellState(active); err != nil {
 				t.Fatal(err)
 			}
-			r := ensureKeptHost(t, h, map[string]any{"install": "setup", "driver": "docker", "version": "0.1.3", "gateway_port": 17671})
+			r := ensureKeptHost(t, h, map[string]any{"install": "setup", "driver": "docker", "version": "0.1.5", "gateway_port": 17671})
 			requireOK(t, r)
 			if containsLine(r.Changes, "switched the sandbox setup") || physicalExists(h.env.openshellKeptStatePath()) {
 				t.Errorf("stale kept record influenced an active setup: %v", r.Changes)
@@ -342,7 +342,7 @@ func TestKeptOpenShellSetupAdoptionHygiene(t *testing.T) {
 			h := keptDockerHost(t, goos, true)
 			requireOK(t, h.run(Options{Action: ActionUninstall}))
 			h.healthy = false
-			settings := map[string]any{"install": "setup", "driver": "vm", "version": "0.1.3", "gateway_port": 17671}
+			settings := map[string]any{"install": "setup", "driver": "vm", "version": "0.1.5", "gateway_port": 17671}
 			requireError(t, ensureKeptHost(t, h, settings), codeActivate)
 			if !physicalExists(h.env.openshellKeptStatePath()) {
 				t.Fatal("rollback removed the kept setup record")
@@ -382,7 +382,7 @@ func TestKeptOpenShellSetupCarriesPendingRestart(t *testing.T) {
 			requireOK(t, h.run(Options{Action: ActionUninstall}))
 			// The uninstall stopped the daemon. Its pending restart needs no stop.
 			h.ops.status[h.alice.UID] = SandboxStatus{}
-			r := ensureKeptHost(t, h, map[string]any{"install": "setup", "driver": "docker", "version": "0.1.3", "gateway_port": 17672})
+			r := ensureKeptHost(t, h, map[string]any{"install": "setup", "driver": "docker", "version": "0.1.5", "gateway_port": 17672})
 			requireOK(t, r)
 			if len(h.env.loadOpenShellState().Pending) != 0 || !containsLine(r.Changes, "switched the sandbox setup") {
 				t.Errorf("kept pending entry blocked the new switch: %v", r.Changes)

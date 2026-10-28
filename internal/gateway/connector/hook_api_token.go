@@ -573,13 +573,58 @@ func RemoveHookAPIToken(dataDir, connectorName string) error {
 	})
 }
 
+// A per-user teardown calls this only after VerifyClean proves the host no
+// longer registers the connector. Managed deployments own credential cleanup
+// at the machine lifecycle boundary.
+func revokePerUserHookAPIToken(opts SetupOpts, connectorName string) error {
+	if opts.ManagedEnterprise || strings.TrimSpace(opts.DataDir) == "" {
+		return nil
+	}
+	if _, err := os.Lstat(opts.DataDir); errors.Is(err, os.ErrNotExist) {
+		return nil
+	} else if err != nil {
+		return fmt.Errorf("%s inspect hook credential data dir: %w", connectorName, err)
+	}
+	if err := RemoveHookAPIToken(opts.DataDir, connectorName); err != nil {
+		return fmt.Errorf("%s revoke removed hook credential: %w", connectorName, err)
+	}
+	return nil
+}
+
+// HookAPITokenRevocationPending reports a per-user connector-scoped hook API
+// credential that is still on disk (or its temporary copy) after a teardown:
+// its revocation did not finish, and the credential still authenticates to
+// the connector's hook route. Managed deployments revoke credentials at the
+// machine lifecycle boundary, and a connector 1.0.4 removed keeps its token
+// on purpose (removed.go keepHookToken), so neither is pending here.
+func HookAPITokenRevocationPending(opts SetupOpts, connectorName string) error {
+	if opts.ManagedEnterprise || strings.TrimSpace(opts.DataDir) == "" || IsRemovedConnector(connectorName) {
+		return nil
+	}
+	tokenPath, err := HookAPITokenFilePath(opts.DataDir, connectorName)
+	if err != nil {
+		return err
+	}
+	for _, path := range []string{tokenPath, tokenPath + ".tmp"} {
+		if _, err := os.Lstat(path); err == nil {
+			return fmt.Errorf("%s hook credential %s is still present: its revocation did not finish, so the removal is retried", connectorName, path)
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("inspect %s hook credential %s: %w", connectorName, path, err)
+		}
+	}
+	return nil
+}
+
 // LoadHookAPITokens loads connector-scoped hook API tokens for known connector
-// names. Missing tokens are omitted.
+// names. Missing tokens are omitted, and so are the tokens of the connectors
+// 1.0.4 removed: an upgraded host keeps the OpenHands one only so old hooks
+// reach the route that blocks them (removed.go keepHookToken); it
+// authenticates nothing.
 func LoadHookAPITokens(dataDir string, connectorNames []string) (map[string]string, error) {
 	out := map[string]string{}
 	for _, name := range connectorNames {
 		scope, err := normalizeHookAPITokenScope(name)
-		if err != nil {
+		if err != nil || IsRemovedConnector(scope) {
 			continue
 		}
 		tokenPath, err := HookAPITokenFilePath(dataDir, scope)
@@ -650,14 +695,34 @@ func readSecureHookAPITokenFile(dataDir, path string) (string, error) {
 }
 
 func validateHookAPITokenLocation(dataDir, tokenPath string) error {
+	return validateHookAPITokenLocationWith(dataDir, tokenPath, hookAPIValidateDirectoryElement, hookAPIValidateDirectory)
+}
+
+func validateHookAPITokenLocationWith(
+	dataDir, tokenPath string,
+	validateElement, validateDirectory func(string) error,
+) error {
 	if err := validateOTLPPathTokenLocation(dataDir, tokenPath); err != nil {
 		return err
 	}
-	if err := hookAPIValidateDirectory(dataDir); err != nil {
+	hooksDir := filepath.Dir(tokenPath)
+	if _, err := os.Lstat(hooksDir); errors.Is(err, os.ErrNotExist) {
+		// A missing token directory must not turn a symlinked or untrusted
+		// dataDir ancestor into an ordinary absent token. There is no hot
+		// path to optimize here: validate its full chain before reporting
+		// the absence to LoadHookAPIToken.
+		if err := validateDirectory(dataDir); err != nil {
+			return fmt.Errorf("hook API token data dir %s is not trusted: %w", dataDir, err)
+		}
+		return os.ErrNotExist
+	}
+	// Check dataDir as the named, protected directory. The hooks directory
+	// walk below includes its full ancestor chain, so walking all of those
+	// ancestors a second time for dataDir only forks redundant ACL inspectors.
+	if err := validateElement(dataDir); err != nil {
 		return fmt.Errorf("hook API token data dir %s is not trusted: %w", dataDir, err)
 	}
-	hooksDir := filepath.Dir(tokenPath)
-	if err := hookAPIValidateDirectory(hooksDir); err != nil {
+	if err := validateDirectory(hooksDir); err != nil {
 		return fmt.Errorf("hook API token directory %s is not trusted: %w", hooksDir, err)
 	}
 	return nil

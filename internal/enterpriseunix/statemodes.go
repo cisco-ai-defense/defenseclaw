@@ -133,6 +133,13 @@ func (e *Env) stateTrees(account Account) []stateTree {
 					return stateMode{mode: 0o755, owner: rootOwner()}
 				}
 				return stateMode{mode: 0o644, owner: rootOwner()}
+			case name == enterprisestatus.ChangeEventsDirName:
+				// Trust anchor and credential change events: root writes
+				// them, the gateway reads them, nobody else does.
+				if dir {
+					return stateMode{mode: 0o750, owner: rootService}
+				}
+				return stateMode{mode: 0o640, owner: rootService}
 			case name == bundleInboxDirName || strings.HasPrefix(name, ".staging-"):
 				if dir {
 					return stateMode{mode: 0o700, owner: rootOwner()}
@@ -192,7 +199,10 @@ func (e *Env) stateTrees(account Account) []stateTree {
 			case dir:
 				return stateMode{mode: 0o750, owner: rootService, mask: true}
 			case rel == manifest:
-				return stateMode{mode: 0o640, owner: rootService}
+				// As the enumerator publishes it (WriteUnixTargetsManifestAtomic):
+				// root:root, read only by root. Held to the service group, every
+				// repair after a publish "restored" it (GAP-0658).
+				return stateMode{mode: 0o640, owner: rootOwner()}
 			case rel == enterprisehooks.UnixEligibleAccountsFileName, rel == enterprisehooks.UnprotectedAgentsFileName,
 				rel == enterprisehooks.UnixCopilotVSCodeAccountsFileName:
 				// The guardian refuses either one when another account can read it.

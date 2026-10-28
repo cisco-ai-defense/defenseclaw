@@ -31,7 +31,7 @@ func (runtime *Runtime) ApplyAlertAcknowledgement(
 	}
 	result, outcome, applyErr := component.applyAlertAcknowledgement(ctx, command)
 	if applyErr == nil && (len(outcome.OptionalWork()) > 0 || len(outcome.OptionalFailures()) > 0) {
-		runtime.dispatchOptional(lease, graph, outcome)
+		runtime.dispatchOptional(ctx, lease, graph, outcome)
 	}
 	return result, applyErr
 }

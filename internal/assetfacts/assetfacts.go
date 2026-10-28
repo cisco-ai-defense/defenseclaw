@@ -321,6 +321,8 @@ func SkillRoots(connector, home, cwd string) []string {
 type FolderRef struct {
 	Dir  string
 	Name string
+	// Manifest is set when the call names the folder's SKILL.md itself.
+	Manifest bool
 }
 
 // SkillFolderRefs lists the skill folders the strings of a tool input reach
@@ -330,15 +332,16 @@ type FolderRef struct {
 func SkillFolderRefs(input any, home, cwd string) []FolderRef {
 	var values []string
 	collectStrings(input, 0, &values)
-	seen := map[string]bool{}
+	seen := map[string]int{}
 	var refs []FolderRef
 	for _, value := range values {
 		for _, token := range commandPathTokens(value) {
 			for _, ref := range skillFolderRefs(token, home, cwd) {
-				if seen[ref.Dir] {
+				if index, ok := seen[ref.Dir]; ok {
+					refs[index].Manifest = refs[index].Manifest || ref.Manifest
 					continue
 				}
-				seen[ref.Dir] = true
+				seen[ref.Dir] = len(refs)
 				refs = append(refs, ref)
 			}
 		}
@@ -476,7 +479,8 @@ func skillFolderRefs(token, home, cwd string) []FolderRef {
 			continue
 		}
 		skillDir := filepath.FromSlash(strings.Join(parts[:i+2], "/"))
-		refs = append(refs, FolderRef{Dir: skillDir, Name: name})
+		manifest := i+2 < len(parts) && strings.EqualFold(parts[i+2], "SKILL.md")
+		refs = append(refs, FolderRef{Dir: skillDir, Name: name, Manifest: manifest})
 	}
 	return refs
 }

@@ -12,7 +12,8 @@
 # disposable directory (AF_UNIX paths are limited to 108 characters) under
 # Windows PowerShell 5.1 and PowerShell 7; the live socket leaf needs .NET's
 # AF_UNIX support, so only PowerShell 7 binds one. No service or real machine
-# root is touched.
+# root is touched; the strict-ancestor rollback cases use a disposable
+# protected folder under ProgramData, which they remove.
 
 [CmdletBinding()]
 param(
@@ -44,9 +45,10 @@ try {
         $failures = [Collections.Generic.List[string]]::new()
         $openSockets = [Collections.Generic.List[object]]::new()
         $originalProfile = Get-DefenseClawEnterpriseProfile
+        $trustedBase = ''
         try {
-            function New-TestLayout([string]$Name) {
-                $install = [IO.Path]::Combine($Root, $Name, 'DefenseClaw')
+            function New-TestLayout([string]$Name, [string]$Base = $Root) {
+                $install = [IO.Path]::Combine($Base, $Name, 'DefenseClaw')
                 $bin = [IO.Path]::Combine($install, 'bin')
                 $libexec = [IO.Path]::Combine($install, 'libexec')
                 [void][IO.Directory]::CreateDirectory($bin)
@@ -161,6 +163,20 @@ try {
                 $failures.Add("plugin path $($paths.PluginPath), want $plugin")
             }
             Test-Accepted 'standalone tree with the managed OpenCode plugin' $layout
+            try {
+                Assert-DefenseClawInstallTreeRetirementState -Layout $layout -AllowUnretiredAcls
+            }
+            catch {
+                $failures.Add("committed install-tree check refused the managed OpenCode plugin before finalization: $($_.Exception.Message)")
+            }
+            $retiredAllowlist = Get-DefenseClawRetiredInstallTreeAllowlist `
+                -Layout $layout `
+                -RetiredRoot $layout.InstallRoot
+            if ([string]$paths.PluginPath -in $retiredAllowlist.files -or
+                [string]$paths.PluginDirectory -in $retiredAllowlist.directories -or
+                [string]$paths.ShareDirectory -in $retiredAllowlist.directories) {
+                $failures.Add('the retired tree still permits the managed OpenCode plugin after finalization')
+            }
             Remove-DefenseClawStandaloneOpenCodeManagedPlugin -Layout $layout
             foreach ($gone in @($plugin, [string]$paths.PluginDirectory, [string]$paths.ShareDirectory)) {
                 if (Microsoft.PowerShell.Management\Test-Path -LiteralPath $gone) {
@@ -441,6 +457,9 @@ try {
             $plantedPlugin = [IO.Path]::Combine([IO.Path]::GetDirectoryName($extraPlugin), 'planted.js')
             [IO.File]::WriteAllText($plantedPlugin, 'x')
             Test-Refused 'unexpected plugin file (walk)' { Assert-DefenseClawManagedInstallTree -Layout $extra } 'unexpected file'
+            Test-Refused 'unexpected plugin file (committed check)' {
+                Assert-DefenseClawInstallTreeRetirementState -Layout $extra -AllowUnretiredAcls
+            } 'committed InstallRoot contains unexpected content'
             Test-Refused 'unexpected plugin file (removal)' { Remove-DefenseClawStandaloneOpenCodeManagedPlugin -Layout $extra } 'unexpected managed OpenCode content'
             foreach ($kept in @($plantedIPC, $plantedPlugin, $extraPlugin)) {
                 if (-not [IO.File]::Exists($kept)) {
@@ -530,6 +549,79 @@ try {
                 $failures.Add('the refused uninstall removed the renamed copy')
             }
 
+            # GAP-1446: a hook guardian stopped while it restored the hook
+            # (a 1.0.3 guardian during an upgrade) leaves its temporary,
+            # defenseclaw-hook.exe.restore-<16 hex>, in bin. That is
+            # DefenseClaw's own residue: the uninstall sweep and the next
+            # replacement of the hook remove it, and the uninstall goes on.
+            # Look-alike names stay unexpected content and stay in place.
+            $residue = New-TestLayout 'restore-residue'
+            $residue.HookPath = [IO.Path]::Combine($residue.BinDirectory, 'defenseclaw-hook.exe')
+            [IO.File]::WriteAllText($residue.HookPath, 'hook')
+            $temporaries = @(
+                [IO.Path]::Combine($residue.BinDirectory, 'defenseclaw-hook.exe.restore-9665dbd235221f34'),
+                [IO.Path]::Combine($residue.BinDirectory, 'defenseclaw-hook.exe.restore-245951e62c1a3e11')
+            )
+            foreach ($temporary in $temporaries) { [IO.File]::WriteAllText($temporary, 'partial hook') }
+            Test-Refused 'uninstall with a guardian restore temporary (before the sweep)' {
+                Assert-DefenseClawStandaloneUninstallInstallTree -Layout $residue
+            } 'unexpected file from managed install root: .*defenseclaw-hook\.exe\.restore-'
+            Remove-DefenseClawStandaloneInstallTreeReplacementBackups -Layout $residue
+            foreach ($temporary in $temporaries) {
+                if ([IO.File]::Exists($temporary)) {
+                    $failures.Add("the uninstall sweep left the guardian restore temporary $temporary")
+                }
+            }
+            try {
+                Assert-DefenseClawStandaloneUninstallInstallTree -Layout $residue
+            }
+            catch {
+                $failures.Add("uninstall after the sweep of guardian restore temporaries was refused: $($_.Exception.Message)")
+            }
+            foreach ($lookAlike in @(
+                'defenseclaw-hook.exe.restore-9665DBD235221F34',
+                'defenseclaw-hook.exe.restore-9665dbd235221f3',
+                'defenseclaw-hook.exe.restore-9665dbd235221f345',
+                'defenseclaw-hook.exe.restore-9665dbd235221f3g',
+                'defenseclaw-hook.exe.restore-',
+                'xdefenseclaw-hook.exe.restore-9665dbd235221f34'
+            )) {
+                $kept = New-TestLayout ('restore-lookalike-' + [Guid]::NewGuid().ToString('N').Substring(0, 6))
+                $kept.HookPath = [IO.Path]::Combine($kept.BinDirectory, 'defenseclaw-hook.exe')
+                [IO.File]::WriteAllText($kept.HookPath, 'hook')
+                $planted = [IO.Path]::Combine($kept.BinDirectory, $lookAlike)
+                [IO.File]::WriteAllText($planted, 'not ours')
+                Remove-DefenseClawStandaloneInstallTreeReplacementBackups -Layout $kept
+                if (-not [IO.File]::Exists($planted)) {
+                    $failures.Add("the uninstall sweep removed a look-alike file $lookAlike")
+                }
+                Test-Refused "uninstall with the look-alike $lookAlike" {
+                    Assert-DefenseClawStandaloneUninstallInstallTree -Layout $kept
+                } 'unexpected file from managed install root'
+            }
+            # A directory with the temporary's name is not removed by the sweep.
+            $dirResidue = New-TestLayout 'restore-directory'
+            $dirResidue.HookPath = [IO.Path]::Combine($dirResidue.BinDirectory, 'defenseclaw-hook.exe')
+            [IO.File]::WriteAllText($dirResidue.HookPath, 'hook')
+            $dirTemporary = [IO.Path]::Combine($dirResidue.BinDirectory, 'defenseclaw-hook.exe.restore-0123456789abcdef')
+            [void][IO.Directory]::CreateDirectory($dirTemporary)
+            Remove-DefenseClawStandaloneInstallTreeReplacementBackups -Layout $dirResidue
+            if (-not [IO.Directory]::Exists($dirTemporary)) {
+                $failures.Add('the uninstall sweep removed a directory named like a guardian restore temporary')
+            }
+            # The next replacement of the hook removes them too.
+            $replaced = New-TestLayout 'restore-replace'
+            $replacedHook = [IO.Path]::Combine($replaced.BinDirectory, 'defenseclaw-hook.exe')
+            [IO.File]::WriteAllText($replacedHook, 'old hook')
+            $replacedTemporary = $replacedHook + '.restore-00112233445566ff'
+            [IO.File]::WriteAllText($replacedTemporary, 'partial hook')
+            $newHook = [IO.Path]::Combine($Root, 'newer-hook-1446.exe')
+            [IO.File]::WriteAllText($newHook, 'newer hook')
+            Install-DefenseClawFileAtomic -Source $newHook -Destination $replacedHook
+            if ([IO.File]::Exists($replacedTemporary) -or [IO.File]::ReadAllText($replacedHook) -cne 'newer hook') {
+                $failures.Add('the hook replacement left its guardian restore temporary')
+            }
+
             $sibling = New-TestLayout 'sibling'
             [void](New-Plugin $sibling)
             [void][IO.Directory]::CreateDirectory([IO.Path]::Combine($sibling.InstallRoot, 'share', 'policies'))
@@ -559,6 +651,110 @@ try {
             }
             if (-not [IO.File]::Exists($target)) {
                 $failures.Add('link target outside the tree was removed')
+            }
+
+            # GAP-1304: a hook process may still hold the executable when a
+            # failed fresh install removes its transaction-created root. The
+            # authenticated rollback gets a bounded retry after the old
+            # five-second delete window, and cannot use it on another root.
+            # The rollback walks the install root's ancestors strictly: only
+            # SYSTEM, Administrators or TrustedInstaller may own or replace
+            # them. A folder this elevated process creates in its temporary
+            # directory is owned by its account (the built-in Administrator of
+            # a CI runner) and inherits that account's full control, so these
+            # cases run in a protected fixture under ProgramData, as a real
+            # install root does.
+            $trustedBase = [IO.Path]::Combine(
+                $env:ProgramData,
+                ('DefenseClawInstallTreeSmoke-' + [Guid]::NewGuid().ToString('N'))
+            )
+            [void](New-DefenseClawProtectedDirectory -Path $trustedBase)
+            function New-TrustedTestLayout([string]$Name) {
+                $parent = [IO.Path]::Combine($trustedBase, $Name)
+                [void](New-DefenseClawProtectedDirectory -Path $parent)
+                [void](New-DefenseClawProtectedDirectory -Path ([IO.Path]::Combine($parent, 'DefenseClaw')))
+                return New-TestLayout $Name $trustedBase
+            }
+            $rollback = New-TrustedTestLayout 'rollback-held'
+            $rollbackHook = [IO.Path]::Combine($rollback.BinDirectory, 'defenseclaw-hook.exe')
+            $ready = [IO.Path]::Combine($Root, 'rollback-hook-held')
+            [IO.File]::WriteAllText($rollbackHook, 'stand-in')
+            $security = Initialize-DefenseClawNativeSecurity
+            $rootSnapshot = $security::GetDirectorySecuritySnapshotNoFollowIfExists($rollback.InstallRoot)
+            # Run this same smoke against the pre-fix module: it has no retry
+            # parameters, and must fail on the actual held file after its
+            # five old attempts. The new module gets the recorded-root guard.
+            $rollbackOptions = @{}
+            if ((Get-Command Remove-DefenseClawManagedTree).Parameters.ContainsKey('RetryHeldFileMilliseconds')) {
+                $rollbackOptions.RetryHeldFileMilliseconds = 15000
+                $rollbackOptions.ExpectedRootIdentity = [string]$rootSnapshot.Identity
+                $rollbackOptions.ExpectedRootSecurityDescriptor = [byte[]]$rootSnapshot.SecurityDescriptor
+            }
+            $holder = Start-Job -ScriptBlock {
+                param([string]$Hook, [string]$Ready)
+                $stream = [IO.File]::Open($Hook, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
+                try {
+                    [IO.File]::WriteAllText($Ready, 'held')
+                    Start-Sleep -Seconds 12
+                }
+                finally { $stream.Dispose() }
+            } -ArgumentList $rollbackHook, $ready
+            try {
+                $clock = [Diagnostics.Stopwatch]::StartNew()
+                while (-not [IO.File]::Exists($ready) -and $clock.ElapsedMilliseconds -lt 10000) {
+                    Start-Sleep -Milliseconds 100
+                }
+                if (-not [IO.File]::Exists($ready)) {
+                    $failures.Add('the native rollback hook holder did not start')
+                }
+                else {
+                    $priorStrict = [Environment]::GetEnvironmentVariable('DEFENSECLAW_MANAGED_TRUST_STRICT_ANCESTORS', 'Process')
+                    try {
+                        [Environment]::SetEnvironmentVariable('DEFENSECLAW_MANAGED_TRUST_STRICT_ANCESTORS', '1', 'Process')
+                        try {
+                            Remove-DefenseClawManagedTree `
+                                -Path $rollback.InstallRoot `
+                                -RequiredBase $trustedBase `
+                                -Label 'InstallRoot' `
+                                @rollbackOptions
+                        }
+                        catch {
+                            $failures.Add("fresh-install rollback did not wait for an active hook: $($_.Exception.Message)")
+                        }
+                        if ([IO.Directory]::Exists($rollback.InstallRoot)) {
+                            $failures.Add('fresh-install rollback left the transaction-created root after the hook exited')
+                        }
+                    }
+                    finally {
+                        [Environment]::SetEnvironmentVariable('DEFENSECLAW_MANAGED_TRUST_STRICT_ANCESTORS', $priorStrict, 'Process')
+                    }
+                }
+            }
+            finally {
+                if ($null -ne $holder) {
+                    [void](Wait-Job -Job $holder -Timeout 30)
+                    if ($holder.State -eq 'Running') { Stop-Job -Job $holder }
+                    Remove-Job -Job $holder -Force
+                }
+            }
+
+            $otherRoot = New-TrustedTestLayout 'rollback-other-root'
+            $otherSnapshot = $security::GetDirectorySecuritySnapshotNoFollowIfExists($otherRoot.InstallRoot)
+            $otherOptions = @{}
+            if ($rollbackOptions.Count -gt 0) {
+                $otherOptions.RetryHeldFileMilliseconds = 15000
+                $otherOptions.ExpectedRootIdentity = [string]$rootSnapshot.Identity
+                $otherOptions.ExpectedRootSecurityDescriptor = [byte[]]$otherSnapshot.SecurityDescriptor
+            }
+            Test-Refused 'fresh-install rollback root identity changed' {
+                Remove-DefenseClawManagedTree `
+                    -Path $otherRoot.InstallRoot `
+                    -RequiredBase $trustedBase `
+                    -Label 'InstallRoot' `
+                    @otherOptions
+            } 'identity changed'
+            if (-not [IO.File]::Exists($otherRoot.GatewayPath)) {
+                $failures.Add('fresh-install rollback removed a root with a different identity')
             }
 
             # GAP-0942: an editor's ACP thread that runs defenseclaw-acp.exe
@@ -686,6 +882,9 @@ try {
         finally {
             foreach ($open in $openSockets) {
                 $open.Dispose()
+            }
+            if ($trustedBase) {
+                Microsoft.PowerShell.Management\Remove-Item -LiteralPath $trustedBase -Recurse -Force -ErrorAction SilentlyContinue
             }
             Set-DefenseClawEnterpriseProfile -EnterpriseProfile $originalProfile
         }

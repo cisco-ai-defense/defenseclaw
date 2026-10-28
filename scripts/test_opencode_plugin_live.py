@@ -8,6 +8,8 @@ Requires an already downloaded vendor binary. Installs nothing, uses no model
 credentials, and isolates all vendor configuration/data under a temporary home.
 The gateway verdict is synthetic: this tests the vendor's enforcement boundary,
 not a live guardrail provider. Supported on POSIX hosts.
+The fake HTTP transport substitutes for native connected-peer verification;
+the connector transport suites check that boundary separately.
 """
 
 import argparse
@@ -95,6 +97,14 @@ def check(binary: str, major: int, blocked: bool, registration: str) -> None:
             template = Path(__file__).resolve().parents[1] / "internal/gateway/connector/testdata/bridge_host/opencode-plugin.js"
             values = {"APIAddr": f"127.0.0.1:{port}", "TokenFileJS": str(token), "FailMode": "closed", "ServiceUID": "0"}
             rendered = re.sub(r"\{\{\.(\w+)\}\}", lambda m: json.dumps(values.get(m[1], ""))[1:-1], template.read_text())
+            # This tests the vendor callback boundary against a synthetic
+            # HTTP gateway. Native connected-peer verification is exercised
+            # by the connector transport tests, as in writeRenderedPlugin.
+            rendered = rendered.replace('const DC_PER_USER_NATIVE_POST = "1"', 'const DC_PER_USER_NATIVE_POST = ""')
+            rendered = rendered.replace(
+                'throw defenseclawPeerError("the DefenseClaw gateway listener has no account proof");',
+                'return fetch("http://" + DC_API_ADDR + path, init);',
+            )
             (plugin / ("defenseclaw.js" if autoload else "index.js")).write_text(rendered)
             settings = {"baseURL": f"http://127.0.0.1:{port}/v1", "apiKey": "fixture"}
             models = {"fixture": {"name": "Fixture", "limit": {"context": 32768, "output": 1024}}}

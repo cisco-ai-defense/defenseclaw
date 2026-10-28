@@ -22,3 +22,7 @@ func executeEnterpriseSetup(
 ) (int, error) {
 	return 0, errors.New("DefenseClaw enterprise Setup is supported only on native Windows x64")
 }
+
+func runStandaloneSetupRecoveryWatchdog(string, io.Writer, io.Writer) int {
+	return 1
+}

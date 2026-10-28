@@ -31,8 +31,9 @@ import (
 // openshell_block.go, identity_block.go) of a standalone Windows status and
 // verify. Go assembles them from the installed config, the enumerator's
 // manifest and unprotected-agents record, the guardian state and one
-// loopback /health read; the PowerShell report is not involved. They never
-// add an error or change security_complete.
+// loopback /health read; the PowerShell report is not involved. An enabled
+// Hermes target cannot be certified against an unobservable session-only
+// HERMES_HOME, so its coverage and security flags are incomplete.
 
 // windowsEnterpriseStatusV2Inputs are the files the connectors block reads.
 type windowsEnterpriseStatusV2Inputs struct {
@@ -51,6 +52,12 @@ type windowsEnterpriseStatusV2Inputs struct {
 // windowsEnterpriseStatusV2Read reads the inputs of an installed deployment;
 // tests replace it.
 var windowsEnterpriseStatusV2Read = readWindowsEnterpriseStatusV2Inputs
+
+var windowsManagedHermesCoverageAudit = func() error {
+	return postWindowsManagedCoverageAlert("managed-install-coverage", "managed_hermes_session_home_not_covered", map[string]any{
+		"connector": "hermes", "coverage_reason": "session_only_hermes_home_unobservable", "coverage_state": "incomplete",
+	})
+}
 
 func readWindowsEnterpriseStatusV2Inputs() windowsEnterpriseStatusV2Inputs {
 	in := windowsEnterpriseStatusV2Inputs{
@@ -110,15 +117,21 @@ func readWindowsEnterpriseStatusV2Manifest(path string) ([]enterprisestatus.Conn
 }
 
 // applyWindowsEnterpriseStatusV2 adds the status v2 blocks to a status or
-// verify of an installed standalone deployment.
+// verify of an installed standalone deployment. Every other action prints no
+// block but states the same Hermes and hook-process limits, so ensure,
+// install and repair cannot report coverage or security that verify does not
+// (as on Linux and macOS).
 func applyWindowsEnterpriseStatusV2(result *enterprisestatus.Result) {
-	if result.Action != "status" && result.Action != "verify" {
+	publish := result.Action == "status" || result.Action == "verify"
+	in := windowsEnterpriseStatusV2Read()
+	block := windowsEnterpriseConnectorsBlock(result, in, publish)
+	result.AddHookProcessFailureWarnings(block)
+	if !publish {
 		return
 	}
 	// Enterprise OpenShell runs on Linux and macOS only.
 	result.OpenShell = enterprisestatus.OpenShellUnsupportedCapability()
-	in := windowsEnterpriseStatusV2Read()
-	result.Connectors = windowsEnterpriseConnectorsBlock(result, in)
+	result.Connectors = block
 	result.Identity = enterprisestatus.IdentityGatewayNotReady()
 	if result.Readiness.Gateway && in.gatewayHealth != nil {
 		// A failed read is a gateway that did not report.
@@ -131,7 +144,8 @@ func applyWindowsEnterpriseStatusV2(result *enterprisestatus.Result) {
 // the Windows hook renderer's (enterprisehooks.ManagedHookFailMode); a
 // connector's hook is in machine policy when the installer reported its
 // machine policy (Codex, Claude Code, Cursor) or it is a runtime-only row.
-func windowsEnterpriseConnectorsBlock(result *enterprisestatus.Result, in windowsEnterpriseStatusV2Inputs) map[string]enterprisestatus.ConnectorState {
+// Only a published block reports which of its details could not be read.
+func windowsEnterpriseConnectorsBlock(result *enterprisestatus.Result, in windowsEnterpriseStatusV2Inputs, publish bool) map[string]enterprisestatus.ConnectorState {
 	inputs := enterprisestatus.ConnectorInputs{Known: in.knownConnector, Guardian: in.guardian, GuardianKnown: in.guardianKnown}
 	cfg := in.cfg
 	switch {
@@ -139,14 +153,14 @@ func windowsEnterpriseConnectorsBlock(result *enterprisestatus.Result, in window
 		inputs.ConfigLoaded = true
 		inputs.Enabled = enterprisehooks.EffectiveWindowsStandaloneHookConnectors(cfg)
 		inputs.Mode = cfg.EffectiveGuardrailModeForConnector
-	case !errors.Is(in.configErr, os.ErrNotExist):
+	case publish && !errors.Is(in.configErr, os.ErrNotExist):
 		result.AddWarning(enterprisestatus.CodeStatusDetailUnavailable, "connectors: the installed config could not be loaded, "+
 			"so effective_mode and effective_hook_fail_mode are not reported")
 	}
 	switch {
 	case in.manifestErr == nil:
 		inputs.ManifestRead, inputs.Manifest = true, in.manifest
-	case !errors.Is(in.manifestErr, os.ErrNotExist) && !errors.Is(in.manifestErr, os.ErrPermission):
+	case publish && !errors.Is(in.manifestErr, os.ErrNotExist) && !errors.Is(in.manifestErr, os.ErrPermission):
 		result.AddWarning(enterprisestatus.CodeStatusDetailUnavailable, "connectors: the enumerator's targets manifest could not be read, "+
 			"so detected and versions are not reported")
 	}
@@ -168,7 +182,30 @@ func windowsEnterpriseConnectorsBlock(result *enterprisestatus.Result, in window
 	sort.Strings(inputs.MachinePolicy)
 	failMode := func(name string) string { return enterprisehooks.ManagedHookFailMode(cfg, name) }
 	block, hidden := enterprisestatus.BuildConnectors(inputs, failMode)
-	if hidden > 0 {
+	if state, ok := block["hermes"]; ok && state.Enabled &&
+		(state.Detected == nil || *state.Detected || state.Targets != nil && state.Targets.Total > 0) {
+		state.HooksInstalled = enterprisestatus.HooksInstalledUnknown
+		// A persistent-home target cannot prove a session-only HERMES_HOME.
+		state.Targets = nil
+		block["hermes"] = state
+		result.CoverageComplete, result.SecurityComplete = false, false
+		// The limit is the same for every Hermes account and is reported,
+		// not certified: lifecycle verify keeps coverage and security
+		// incomplete and exits 0 (as on Linux and macOS), Setup's live
+		// readiness proves each registered hook, and public hooks verify
+		// still refuses to attest the home (GAP-0766, GAP-1433).
+		message := "connectors.hermes: NOT COVERED: the guardian's persistent-home registration cannot prove a session-only HERMES_HOME is hooked; Windows managed Hermes coverage cannot be verified"
+		result.AddWarning(enterprisestatus.CodeStatusDetailUnavailable, message)
+		if result.Installed && result.Readiness.Gateway {
+			switch result.Action {
+			case "ensure", "install", "upgrade", "repair":
+				if err := windowsManagedHermesCoverageAudit(); err != nil {
+					result.AddWarning(windowsManagedLaunchAuditUnavailable, "could not audit the unobservable Hermes session home: "+err.Error())
+				}
+			}
+		}
+	}
+	if publish && hidden > 0 {
 		result.AddWarning(enterprisestatus.CodeStatusDetailUnavailable, fmt.Sprintf("connectors: %d agent version(s) not shown: "+
 			"they are not plain version strings", hidden))
 	}

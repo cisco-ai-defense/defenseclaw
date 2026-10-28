@@ -25,7 +25,7 @@ from types import SimpleNamespace
 import pytest
 from defenseclaw.commands import cmd_doctor, cmd_status
 from defenseclaw.commands.cmd_doctor import _DoctorResult
-from defenseclaw.hook_integrity import hook_registration_problems, missing_tool_inspection_hooks, repair_command
+from defenseclaw.hook_integrity import hook_registration_problems, repair_command, unguarded_tool_call_hooks
 
 pytestmark = pytest.mark.skipif(sys.platform == "win32", reason="Unix hook scripts only")
 
@@ -61,14 +61,14 @@ def test_status_reports_a_missing_pre_tool_use_hook(tmp_path):
 
 def test_a_foreign_pre_tool_use_hook_does_not_count(tmp_path):
     cfg, _ = _settings(tmp_path, foreign_pre_tool_use=True)
-    problems = missing_tool_inspection_hooks(cfg, "claudecode")
+    problems = unguarded_tool_call_hooks(cfg, "claudecode")
     assert problems and "PreToolUse" in problems[0]
 
 
 def test_a_file_without_defenseclaw_hooks_is_left_to_the_unregistered_check(tmp_path):
     cfg, settings = _settings(tmp_path)
     settings.write_text(json.dumps({"hooks": {"PreToolUse": [{"hooks": [{"command": "/usr/local/bin/lint-guard"}]}]}}))
-    assert missing_tool_inspection_hooks(cfg, "claudecode") == []
+    assert unguarded_tool_call_hooks(cfg, "claudecode") == []
     problems = hook_registration_problems(cfg, "claudecode")
     assert problems and problems[0].startswith("no DefenseClaw hooks are registered")
 
@@ -84,9 +84,9 @@ def test_managed_install_needs_one_layer_with_the_hook(tmp_path):
     }
     (tmp_path / ".defenseclaw" / "hook_contract_lock.json").write_text(json.dumps(lock))
     managed = SimpleNamespace(data_dir=cfg.data_dir, deployment_mode="managed_enterprise")
-    assert missing_tool_inspection_hooks(managed, "claudecode") == []
+    assert unguarded_tool_call_hooks(managed, "claudecode") == []
     # Per-user, every recorded file needs it.
-    assert missing_tool_inspection_hooks(cfg, "claudecode")
+    assert unguarded_tool_call_hooks(cfg, "claudecode")
 
 
 def test_doctor_fails_claude_code_hooks_without_pre_tool_use(tmp_path):
@@ -120,7 +120,9 @@ def test_windows_status_reports_a_missing_pre_tool_use_hook(tmp_path, monkeypatc
     cfg = SimpleNamespace(data_dir=str(data_dir))
 
     def write(events):
-        hooks = {event: [{"matcher": "*", "hooks": [{"type": "command", "command": launcher}]}] for event in events}
+        hooks = {
+            event: [{"matcher": "*", "hooks": [{"type": "command", "command": launcher, "timeout": 30}]}] for event in events
+        }
         settings.write_text(json.dumps({"hooks": hooks}), encoding="utf-8")
 
     write(_EVENTS)

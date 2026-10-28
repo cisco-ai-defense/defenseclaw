@@ -7,69 +7,73 @@ keywords:
   - DefenseClaw teardown
 ---
 
-```bash
-defenseclaw setup guardrail --disable
-```
+`setup guardrail --disable` sets `guardrail.enabled: false` and restarts the gateway. The restart removes the DefenseClaw hook entries from each agent's config, or restores the file from a hash-checked backup. Agents then run without DefenseClaw. Your config and the audit database stay.
 
-This is the safe rollback. It sets `guardrail.enabled: false` in `~/.defenseclaw/config.yaml` and restarts the gateway, which then runs teardown for the configured connectors: it removes the DefenseClaw-owned hook entries or restores agent files from the hash-checked backup. For the proxy connectors it also stops the guardrail proxy. The connectors stay configured, so `defenseclaw setup guardrail` turns protection back on for all of them.
+## Turn the guardrail off
 
-<Callout>
-`--disable` always restarts the gateway, even with `--no-restart`: the restart is what runs the connector teardown.
-</Callout>
+1. Turn the guardrail off.
 
-On a multi-connector install, `setup guardrail --disable` is intentionally broad: it unwires the active connector roster, stops the gateway path, and clears the global guardrail enable flag. To retire only one connector while keeping the rest protected, use the scoped kill switch instead:
+   ```bash
+   defenseclaw setup guardrail --disable
+   ```
 
-```bash
-defenseclaw guardrail disable --connector codex
-defenseclaw guardrail enable  --connector codex
-```
+   ```text
+     Disabling LLM guardrail...
+     Connector: Claude Code (claudecode)
+     OK Config saved (guardrail.enabled = false)
 
-## What it touches
+     Restarting gateway to run connector teardown...
+     …
+     OK Claude Code connector teardown complete
+   ```
 
-| Connector | Restored from backup | Surgically removed if file drifted |
-| --- | --- | --- |
-| Claude Code | `~/.claude/settings.json` (hooks + `OTEL_*` env) | DefenseClaw hook entries only |
-| Codex | `~/.codex/config.toml` (hooks, otel, notify) | DefenseClaw blocks only |
-| Cursor | `~/.cursor/hooks.json` | DefenseClaw hook entries only |
-| Devin | `~/.config/devin/config.json` or `<workspace>/.devin/hooks.v1.json` | DefenseClaw hook groups only; foreign JSONC content is preserved |
-| GitHub Copilot CLI | `~/.copilot/hooks/defenseclaw.json` or pinned `<workspace>/.github/hooks/defenseclaw.json` | DefenseClaw hook entries |
-| OpenHands | `~/.openhands/hooks.json` or pinned `<workspace>/.openhands/hooks.json` | DefenseClaw hook entries |
-| Antigravity | `~/.gemini/config/hooks.json` | DefenseClaw `defenseclaw-antigravity-*` entries |
-| Hermes | `~/.hermes/config.yaml` | DefenseClaw hook entries |
-| OpenCode | `~/.config/opencode/plugins/defenseclaw.js` | Managed bridge plugin (file removed) |
-| Amp | `~/.config/amp/plugins/defenseclaw.ts` or native Windows equivalent | Unchanged managed system plugin is removed; a prior file is restored |
-| Kiro | `~/.kiro/hooks/defenseclaw.json` (or the workspace `.kiro/hooks/defenseclaw.json`), `~/.kiro/agents/defenseclaw.json`, `~/.kiro/settings/cli.json` | DefenseClaw hook and agent entries; the prior default agent in `cli.json` is restored |
-| OmniGent | `$OMNIGENT_CONFIG` when set, then `$OMNIGENT_CONFIG_HOME/config.yaml` or `~/.omnigent/config.yaml`; managed policy module; Python `.pth` file | DefenseClaw policy entries; unchanged managed files are restored/removed |
-| OpenClaw | `~/.openclaw/openclaw.json` | Plugin allow/load entries |
-| ZeptoClaw | `~/.zeptoclaw/config.json` (api_base, safety) | DefenseClaw rewrites |
-
-The audit DB and `~/.defenseclaw/` config are **not** removed. Use `defenseclaw uninstall` for the full reset.
+   The command always restarts the gateway, even with `--no-restart`, because the restart runs the teardown. It is global. To turn off one agent and keep the rest, use `defenseclaw guardrail disable --connector codex`.
 
 ## Verify the rollback
 
 ```bash
-defenseclaw doctor
+defenseclaw guardrail status
 ```
 
-`doctor` shows the guardrail as disabled. Because the connectors stay
-configured, it still checks their hooks and reports them as missing; after a
-disable that is the expected result. This excerpt is from a real run after
-disabling a Claude Code and Codex install:
-
-```text title="defenseclaw doctor (excerpt)"
-  -- Services --
-  [PASS] Sidecar API  -  127.0.0.1:18970
-  [SKIP]   \- guardrail  -  disabled (reported by sidecar)
-  [FAIL] Claude Code hooks [claudecode]  -  ~/.claude/settings.json not found
-      -> Next step: re-register the hooks: defenseclaw setup claude-code --yes, then restart Claude Code
-  [FAIL] Codex hooks [codex]  -  connector torn down: ~/.defenseclaw/hooks/codex-hook.sh is the disabled placeholder teardown leaves
-      -> Next step: re-register the hooks: defenseclaw setup codex --yes
-  [SKIP] Guardrail proxy  -  disabled
-  -- Credentials --
-  [SKIP] LLM API key  -  guardrail disabled
+```text
+  * enabled:    no
+      - Claude Code
+          key:         claudecode
+          state:       disabled (guardrail off)
+  …
+  Enable with:   defenseclaw guardrail enable
 ```
 
-Here `~/.claude/settings.json` is gone because DefenseClaw created it and
-teardown removed it again; a file you had before is restored instead. To check
-one agent's files directly, open them: no DefenseClaw hook entries should
-remain.
+Open the agent's config (for example `~/.claude/settings.json`). No DefenseClaw hook entries remain. A file DefenseClaw created is deleted; a file you had before is restored.
+
+`defenseclaw doctor` shows the guardrail as disabled. It still checks the agents' hooks and reports them missing; after a disable that is expected.
+
+## Turn it back on
+
+```bash
+defenseclaw guardrail enable
+```
+
+```text
+  Enabling guardrail for Claude Code (claudecode)
+  Will restart the gateway so the connector setup runs immediately.
+
+  Proceed? [Y/n]:
+  …
+  OK Claude Code connector setup complete
+```
+
+`--yes` skips the question. The agents stay configured, so this brings back every agent you did not turn off on its own with `guardrail disable --connector`.
+
+OpenClaw and ZeptoClaw route model traffic through the guardrail, so for them `guardrail enable` needs `guardrail.model` and otherwise stops with `Cannot enable: guardrail.model is not set.` Run the agent's `defenseclaw setup openclaw` or `defenseclaw setup zeptoclaw` command again instead.
+
+After `setup guardrail --disable`, `defenseclaw guardrail enable --connector codex` changes nothing: it says the guardrail is off for every agent, names `defenseclaw guardrail enable` and exits `1`. If you also turned Codex off on its own, it names both steps: `defenseclaw guardrail enable`, then `defenseclaw guardrail enable --connector codex`, because the global enable keeps that agent off. To bring back only one agent, run `defenseclaw guardrail enable`, then `defenseclaw guardrail disable --connector <name>` for each agent to keep off. `enable --connector codex` brings back an agent you turned off with `guardrail disable --connector codex`.
+
+## Remove everything
+
+`defenseclaw uninstall` removes DefenseClaw itself. See [Uninstall](/docs/get-started/download).
+
+## See also
+
+- [Add or remove an agent](/docs/guardrail/switching-connectors)
+- [Turn on blocking](/docs/get-started/first-guardrail)

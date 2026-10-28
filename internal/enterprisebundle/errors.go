@@ -28,6 +28,7 @@ type Code string
 
 const (
 	CodeArchiveInvalid   Code = "archive_invalid"
+	CodeDiskFull         Code = "disk_full"
 	CodeManifestInvalid  Code = "manifest_invalid"
 	CodeFileMissing      Code = "file_missing"
 	CodeFileExtra        Code = "file_extra"
@@ -51,19 +52,37 @@ const (
 	CodeVersionNotNewer Code = "version_not_newer"
 	CodeProductTooOld   Code = "product_too_old"
 
-	// Device facts: secret presence and the effective policy digest.
+	// Device facts: secret presence, the signed credential values and the
+	// effective policy digest.
 	CodeSecretRefMissing Code = "secret_ref_missing"
+	// CodeSecretRefMismatch: a stored credential is not the value its
+	// secret_refs entry signs (value_sha256).
+	CodeSecretRefMismatch Code = "secret_ref_mismatch"
+	// CodeSecretRefUnbound: a secret_refs entry signs no value_sha256. Bundles
+	// signed before 1.0.4 bound credential names only; sign them again with
+	// --secret-file.
+	CodeSecretRefUnbound Code = "secret_ref_unbound"
 	CodeDigestMismatch   Code = "digest_mismatch"
 
 	// Apply and the receipt state machine (spec section 7).
 	CodeApplyFailed    Code = "apply_failed"
 	CodeCapabilityLoss Code = "capability_loss"
-	CodeNotConfirmed   Code = "not_confirmed"
-	CodeInterrupted    Code = "interrupted"
+	// CodeRestartDeferred refuses, before anything changes, a bundle whose
+	// config change restarts the gateway when the caller asked to defer
+	// restarts (apply --defer-restart); retry it in a maintenance window.
+	CodeRestartDeferred Code = "restart_deferred"
+	CodeNotConfirmed    Code = "not_confirmed"
+	CodeInterrupted     Code = "interrupted"
+	// CodeSuperseded ends the receipt of an inbox bundle that one run
+	// did not apply because the same inbox held a higher version.
+	CodeSuperseded     Code = "superseded"
 	CodeLifecycleBusy  Code = "lifecycle_busy"
 	CodeBundleRequired Code = "bundle_required"
 	CodeNotManaged     Code = "not_managed"
 	CodeNotAdmin       Code = "not_admin"
+	// CodeNotRoot: a standard account on Linux or macOS cannot read the
+	// root-only bundle state.
+	CodeNotRoot Code = "not_root"
 	// CodeStateInvalid: bundle-state.json cannot be read. Nothing is
 	// applied: an unreadable state must not lower the version floor.
 	CodeStateInvalid Code = "state_invalid"
@@ -96,7 +115,13 @@ type Error struct {
 	Code   Code
 	Path   string
 	Detail string
+	// cause is the operating system error behind the refusal, if any, for
+	// errors.Is (for example fs.ErrPermission); it is never printed.
+	cause error
 }
+
+// Unwrap returns the operating system error behind the refusal.
+func (e *Error) Unwrap() error { return e.cause }
 
 func (e *Error) Error() string {
 	if e.Path == "" {
@@ -117,6 +142,39 @@ func CodeOf(err error) Code {
 
 func refuse(code Code, path, format string, args ...any) *Error {
 	return &Error{Code: code, Path: path, Detail: fmt.Sprintf(format, args...)}
+}
+
+// StageError preserves a storage exhaustion reason when a valid bundle could
+// not be copied into the private stage. The receipt and CLI use the same code.
+func StageError(err error) *Error {
+	code := CodeArchiveInvalid
+	if diskFull(err) {
+		code = CodeDiskFull
+	}
+	return &Error{Code: code, Detail: "cannot stage the bundle: " + err.Error(), cause: err}
+}
+
+// StateWriteError is a bundle-state write (a receipt, the state file) that
+// failed: disk_full when the volume or quota is exhausted, state_invalid
+// otherwise, so a full disk is never reported as a state that cannot be
+// read (GAP-0609). what says what could not be written.
+func StateWriteError(what string, err error) *Error {
+	if diskFull(err) {
+		return &Error{Code: CodeDiskFull, Detail: what + ": " + err.Error() + "; free space on that volume, then deliver the bundle again", cause: err}
+	}
+	return &Error{Code: CodeStateInvalid, Detail: what + ": " + err.Error(), cause: err}
+}
+
+// FailureCode is the code a refusal is recorded with: its own bundle code,
+// disk_full for an exhausted volume or quota, apply_failed otherwise.
+func FailureCode(err error) Code {
+	if code := CodeOf(err); code != "" {
+		return code
+	}
+	if diskFull(err) {
+		return CodeDiskFull
+	}
+	return CodeApplyFailed
 }
 
 // safePath quotes a path taken from untrusted input when it holds anything

@@ -60,7 +60,7 @@ func (a *APIServer) inspectHermesWriteToolPolicyCtx(
 	}
 	cfg, connectorName := a.decisionConfig(ctx), firstNonEmpty(req.Connector, action.Connector)
 	for _, extra := range hermesWriteViewRequests(ctx, action, views) {
-		verdict = mergeSandboxShellCommandVerdict(cfg, connectorName, verdict, dispatchTrustedAction(ctx, extra))
+		verdict = mergeSandboxShellCommandVerdict(ctx, cfg, connectorName, verdict, dispatchTrustedAction(ctx, extra))
 	}
 	return verdict
 }
@@ -112,6 +112,7 @@ func hermesSandboxGuestDirRequest(ctx context.Context, base trustedActionRequest
 	request := base
 	request.Input.Tool, request.Input.Args, request.Input.CWD = view.Tool, args, hostDir
 	request.SandboxGuestCWD = dir
+	request.patchHostView = true
 	// The client's resolved targets name the call's own spelling and
 	// working directory, not this one.
 	request.ResolvedWriteTargets = nil

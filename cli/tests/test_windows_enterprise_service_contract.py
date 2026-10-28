@@ -105,6 +105,66 @@ def read(path: Path) -> str:
     return path.read_text(encoding="utf-8")
 
 
+@pytest.mark.skipif(shutil.which("pwsh") is None, reason="PowerShell 7 is not installed")
+@pytest.mark.allow_subprocess
+def test_install_name_reservation_does_not_trust_the_current_account(tmp_path: Path) -> None:
+    """Execute the reservation classifier with only its OS ACL reads stubbed.
+
+    The native lifecycle smoke also exercises these cases with real ACLs.
+    An account SID keeps its create/owner rights under an unelevated token.
+    """
+    module = read(MODULE)
+    function = _module_function(module, "Get-DefenseClawUntrustedFolderCreator")
+    function = function.replace(
+        "[Security.Principal.WindowsIdentity]::GetCurrent().User.Value", "$CurrentAccountSID"
+    ).replace("Microsoft.PowerShell.Security\\Get-Acl", "Get-TestAcl")
+    rights = module[module.index("$script:InstallRootParentChangeRights =") : module.index(
+        "function Get-DefenseClawUntrustedFolderCreator"
+    )]
+    script = tmp_path / "reservation.ps1"
+    script.write_text(
+        r"""
+$ErrorActionPreference = 'Stop'
+$script:SystemSID = 'S-1-5-18'
+$script:AdministratorsSID = 'S-1-5-32-544'
+$script:TrustedInstallerSID = 'S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464'
+$CurrentAccountSID = 'S-1-5-21-1000-2000-3000-1234'
+$script:OwnerSID = $script:AdministratorsSID
+$script:Rules = @()
+function Get-TestAcl {
+    param([string]$LiteralPath)
+    $acl = [pscustomobject]@{}
+    $acl | Add-Member ScriptMethod GetSecurityDescriptorSddlForm { param($section) 'D:P' }
+    $acl | Add-Member ScriptMethod GetOwner { param($type) [pscustomobject]@{ Value = $script:OwnerSID } }
+    $acl | Add-Member ScriptMethod GetAccessRules { param($explicit, $inherited, $type) $script:Rules }
+    return $acl
+}
+"""
+        + rights
+        + function
+        + r"""
+$script:Rules = @([pscustomobject]@{
+    AccessControlType = [Security.AccessControl.AccessControlType]::Allow
+    PropagationFlags = [Security.AccessControl.PropagationFlags]::None
+    IdentityReference = [pscustomobject]@{ Value = $CurrentAccountSID }
+    FileSystemRights = [Security.AccessControl.FileSystemRights]::CreateDirectories
+})
+if (-not (Get-DefenseClawUntrustedFolderCreator -Path 'parent')) { throw 'current account create rights were trusted' }
+$script:Rules = @()
+$script:OwnerSID = $CurrentAccountSID
+if (-not (Get-DefenseClawUntrustedFolderCreator -Path 'parent')) { throw 'current account ownership was trusted' }
+$script:OwnerSID = $script:AdministratorsSID
+if (Get-DefenseClawUntrustedFolderCreator -Path 'parent') { throw 'administrator group owner was refused' }
+""",
+        encoding="utf-8",
+    )
+    completed = subprocess.run(
+        ["pwsh", "-NoProfile", "-NonInteractive", "-File", str(script)],
+        capture_output=True, text=True, timeout=60, check=False,
+    )
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+
+
 def test_bundle_acl_repair_verify_and_uninstall_use_the_same_store_tree() -> None:
     module = read(MODULE)
     contract = module[
@@ -3569,7 +3629,12 @@ def test_restricted_environment_status_uses_trusted_machine_roots() -> None:
     ]
     assert "[switch]$AllowMissingCertificationCodexHome" in volume_identity
     assert "-AllowMissing:$AllowMissingCertificationCodexHome" in volume_identity
-    assert "-AllowMissingCertificationCodexHome:($Action -in @('Status', 'Verify'))" in module
+    assert "-AllowMissingCertificationCodexHome:($Action -in @('Status', 'Verify', 'Recover'))" in module
+    assert "-AllowMissing:($Action -in @('Status', 'Verify', 'Recover'))" in module
+    assert re.search(
+        r"\$allowMissingCertificationHome = \$LifecycleAction -in @\(\s*'Status',\s*'Verify',\s*'Recover'\s*\)",
+        read(INSTALLER),
+    )
 
     assert "Invoke-DefenseClawEnterpriseLifecycle" in smoke
     assert "-Action Status" in smoke
@@ -3579,9 +3644,31 @@ def test_restricted_environment_status_uses_trusted_machine_roots() -> None:
     assert "module Status did not remain a read-only absent deployment" in smoke
 
 
+def test_timeout_recovery_replays_the_pending_journal_under_the_lifecycle_lock() -> None:
+    module = read(MODULE)
+    setup = read(ROOT / "cmd" / "defenseclaw-enterprise-setup" / "platform_windows.go")
+    lifecycle = module[module.index("function Invoke-DefenseClawEnterpriseLifecycle") :]
+    lock = lifecycle.index("$lifecycleLock = Enter-DefenseClawLifecycleLock -Layout $layout")
+    recovery = lifecycle.index("if ($Action -eq 'Recover') {")
+    next_action = lifecycle.index("if ($Action -in @('Install', 'Upgrade', 'Repair')", recovery)
+    replay = lifecycle[recovery:next_action]
+    assert lock < recovery
+    assert "Invoke-DefenseClawTimeoutRecovery" in replay
+    # The replay and its report are executed by
+    # test_timeout_recovery_reports_settled_only_when_no_lifecycle_record_remains
+    # and the Setup kill and recovery by
+    # TestTimeoutKillsTheLifecycleChildThenRecoversBeforeReturning.
+    assert setup.index("lifecycle := runEnterpriseLifecycleChild(") < setup.index("\n\tcleanupErr := cleanup()")
+
+
 def test_enterprise_is_opt_in_without_disabling_normal_mode_repair() -> None:
     matrix = read(MATRIX_TEST)
-    documentation = read(DEPLOYMENT_DOC)
+    # The deployment page and its reference page together hold the contract.
+    documentation = " ".join(
+        (
+            read(DEPLOYMENT_DOC) + read(DEPLOYMENT_DOC)
+        ).split()
+    )
     harness = read(HARNESS)
     service_host = read(WINDOWS_SERVICE_HOST)
     service_host_test = read(WINDOWS_SERVICE_HOST_TEST)
@@ -3600,11 +3687,8 @@ def test_enterprise_is_opt_in_without_disabling_normal_mode_repair() -> None:
         assert mode in matrix
 
     assert "normal mode uses the existing per-user repair loop" in documentation
-    assert "Enterprise service enforcement is opt-in." in documentation
-    assert (
-        "Installing a release that contains Windows enterprise support does not create a machine service"
-        in documentation
-    )
+    assert "Enterprise enforcement is opt-in" in documentation
+    assert "installing a release does not create a machine service" in documentation
     assert "Test-NormalModePreinstallNoOp" in harness
     assert "Test-NormalModeLiveAutoHeal" in harness
     assert "normal-mode-live-hook-auto-heal-preserved" in harness
@@ -4812,7 +4896,16 @@ def test_fresh_install_commit_and_root_rollback_authority_is_phase_bound() -> No
     post_quarantine_no_reparse = cleanup.index(
         "Assert-DefenseClawManagedTreeNoReparse -Root $path", requery_acl_check
     )
+    holder_retry_gate = cleanup.index(
+        "if ([string]$claim[0] -ceq 'InstallRoot' -and", post_quarantine_no_reparse
+    )
+    holder_retry = cleanup[holder_retry_gate:]
+    assert "(Test-DefenseClawStandaloneProfile)" in holder_retry
+    assert "$removalOptions.RetryHeldFileMilliseconds = 60000" in holder_retry
+    assert "$removalOptions.ExpectedRootIdentity = [string]$rechecked.Identity" in holder_retry
+    assert "$removalOptions.ExpectedRootSecurityDescriptor = [byte[]]$rechecked.SecurityDescriptor" in holder_retry
     removal = cleanup.index("Remove-DefenseClawManagedTree `", post_quarantine_no_reparse)
+    assert "@removalOptions" in cleanup[removal:]
     absence_requery = cleanup.index("GetDirectorySecuritySnapshotNoFollowIfExists(", removal)
     assert (
         service_absence
@@ -4829,6 +4922,7 @@ def test_fresh_install_commit_and_root_rollback_authority_is_phase_bound() -> No
         < requery_identity
         < requery_acl_check
         < post_quarantine_no_reparse
+        < holder_retry_gate
         < removal
         < absence_requery
     )
@@ -5780,7 +5874,7 @@ def test_uninstall_returns_shared_vendor_directories_to_their_prior_state() -> N
         "    $machineStateRemaining = [string[]]@()\n"
         "    if ($Purge -and (Test-DefenseClawStandaloneProfile)) {\n"
         "        $machineStateRemaining = [string[]]@(\n"
-        "            @(Remove-DefenseClawRuntimeSelectorState -Directories @("
+        "            @(Remove-DefenseClawRuntimeSelectorState -HookPath ([string]$Layout.HookPath) -Directories @("
     ) in module
     assert "@(Remove-DefenseClawEmptyClaudeManagedSettingsFolders -ProgramFiles $script:ProgramFiles)" in module
     # GAP-2057: stale installer staging and bootstrap folders go too.

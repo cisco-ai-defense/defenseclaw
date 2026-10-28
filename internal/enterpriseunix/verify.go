@@ -180,12 +180,17 @@ func (l *lifecycle) readOnly(ctx context.Context) int {
 	problems = append(problems, l.describeMachinePolicy(record)...)
 	problems = append(problems, l.describeTetragon(ctx)...)
 	l.describeStatusV2(record)
+	if strict && record != nil {
+		if err := l.verifyManagedHermesRegistration(ctx); err != nil {
+			problems = append(problems, "managed Hermes hook registration: "+err.Error())
+		}
+	}
 	if machinePolicyIncomplete(r) {
 		r.SecurityComplete = false
 	}
-	if strict {
-		l.warnUnprivilegedUserNamespaces()
-	}
+	// This is the observed host setting. The hook proves its managed policy
+	// view separately on each invocation.
+	l.warnOpenPolicyViews()
 	if strict {
 		// An agent the guardian or the enumerator could not protect for one
 		// account (an unverified hook contract, an agent it could not enroll)
@@ -476,9 +481,19 @@ func (l *lifecycle) verifyDeployment(ctx context.Context, record *Deployment, st
 	}
 	// A pack file a standard user came to own (or that turned writable)
 	// changes enforcement at the next restart with no trace (GAP-0552).
+	// A configured pack that is gone fails the next gateway restart, while
+	// the running gateway keeps the rules it loaded (p0 GAP-1207). Shipped
+	// packs are payload files, checked with the other installed files.
 	for _, label := range config.RulePackCheckOrder(record.RulePacks) {
 		dir := record.RulePacks[label]
-		if err := env.Trust(env.P(dir), TrustRulePack); err != nil && !errors.Is(err, os.ErrNotExist) {
+		shipped := pathWithin(dir, env.Layout.VendorPolicyDir)
+		if _, err := os.Lstat(env.P(dir)); errors.Is(err, os.ErrNotExist) {
+			if !shipped {
+				add("%s %q is missing: the gateway cannot load it when it restarts; restore the pack, or remove it from config.yaml and run ensure", label, dir)
+			}
+			continue
+		}
+		if err := env.Trust(env.P(dir), TrustRulePack); err != nil && (!shipped || !errors.Is(err, os.ErrNotExist)) {
 			add("%s %q is not administrator-controlled: %v; %s", label, dir, err, rulePackTrustAdvice)
 		}
 	}
@@ -1053,6 +1068,7 @@ func (l *lifecycle) describe(ctx context.Context, record *Deployment, _ bool) {
 	env, r := l.env, l.result
 	r.Services = r.Services[:0]
 	reportedPolicy, reloadError := "", ""
+	var gatewayPolicy bundleHealth
 	kernelApplied, kernelGeneration := "", ""
 	for _, unit := range env.Services.Units() {
 		status, _ := env.Services.Status(ctx, unit)
@@ -1080,6 +1096,7 @@ func (l *lifecycle) describe(ctx context.Context, record *Deployment, _ bool) {
 					r.Readiness.Gateway = true
 					l.readGatewayPosture(body)
 					reportedPolicy, reloadError = gatewayPolicyHealth(body)
+					gatewayPolicy = parseBundleHealth(body)
 					kernelApplied, kernelGeneration = gatewayKernelPolicy(body)
 				}
 			}
@@ -1099,7 +1116,7 @@ func (l *lifecycle) describe(ctx context.Context, record *Deployment, _ bool) {
 		}
 	}
 	r.Enrollment = l.enrollmentCounts()
-	l.describePolicy(ctx, reportedPolicy, reloadError)
+	l.describePolicy(ctx, reportedPolicy, reloadError, gatewayPolicy)
 	l.describeBundle()
 	l.describeKernelPolicy(kernelApplied, kernelGeneration)
 	if problem := env.rejectedConfigProblem(); problem != "" {
@@ -1108,7 +1125,18 @@ func (l *lifecycle) describe(ctx context.Context, record *Deployment, _ bool) {
 		r.AddWarning(codeConfigRejected, problem)
 	}
 	r.CoverageComplete = r.Readiness.Gateway && r.Readiness.Guardian && r.Readiness.Enumerator
-	r.SecurityComplete = r.CoverageComplete && r.Readiness.SensorHelper && len(r.Errors) == 0 && !machinePolicyIncomplete(r)
+	if record != nil {
+		drift, unpinnable := l.policyViewPinProblems(record.MachinePolicyConnectors)
+		for _, problem := range drift {
+			r.AddWarning(codeMachinePolicyIncomplete, problem+"; run `"+env.lifecycleCommand(ActionReconcile)+"` or `"+env.lifecycleCommand(ActionEnsure)+"` to pin the verified policy view")
+		}
+		for _, problem := range unpinnable {
+			r.AddWarning(codeMachinePolicyIncomplete, problem)
+		}
+	}
+	r.SecurityComplete = r.CoverageComplete && r.Readiness.SensorHelper && len(r.Errors) == 0 &&
+		!machinePolicyIncomplete(r) && !l.gatewayAuditFailure && reloadError == "" &&
+		r.Policy != nil && r.Policy.Applied
 	l.describeHookContracts(ctx)
 	l.describeUnprotectedAgents()
 	l.describeChangedGuardianFiles()
@@ -1122,6 +1150,7 @@ func (l *lifecycle) describe(ctx context.Context, record *Deployment, _ bool) {
 	if record != nil {
 		l.describePerUserGateways(ctx)
 		l.describeAgentSessionsBeforeActivation(ctx, record)
+		l.describePluginLaunchCoverage(ctx, record)
 	}
 	if exists(env.rotationIntentPath()) {
 		r.AddWarning(codeRotationIncomplete, "a credential rotation did not finish; run rotate-credentials, or any other lifecycle action, to complete it or roll it back")
@@ -1133,6 +1162,11 @@ func (l *lifecycle) describe(ctx context.Context, record *Deployment, _ bool) {
 		r.Inspection.AIDefense = "unknown"
 	}
 	r.AddAIDefenseWarning()
+	// Ensure, install and repair describe the same managed Hermes coverage
+	// limit as status and verify, without adding status-v2 output blocks.
+	if record != nil && !l.statusV2() {
+		l.describeConnectors(record)
+	}
 }
 
 // runningDeploymentPrefix starts each warning describeRunning adds.
@@ -1206,6 +1240,7 @@ func (l *lifecycle) warnDirectoryUnreachable() {
 }
 
 const codeOptionalDestination = "optional_destination_failing"
+const codeAuditWriteFailed = "audit_write_failed"
 
 // codeJudgeFailing names an LLM judge whose recent calls all failed, or that
 // could not start.
@@ -1213,8 +1248,8 @@ const codeJudgeFailing = enterprisestatus.CodeJudgeFailing
 
 // readGatewayPosture copies the gateway's inspection posture from /health
 // when the gateway publishes it, and warns when it reports directory lookups
-// that fail: the accounts without cached facts then run under the default
-// guardrail profile, and nothing else in status or verify showed it (GAP-0216).
+// that fail: requests whose assignments need the missing facts are refused
+// and name them, and nothing else in status or verify showed it (GAP-0216).
 func (l *lifecycle) readGatewayPosture(body []byte) {
 	l.noteIdentityHealth(body)
 	var health struct {
@@ -1226,8 +1261,10 @@ func (l *lifecycle) readGatewayPosture(body []byte) {
 		ProfileWarningCount           int `json:"profile_warning_count"`
 		Telemetry                     struct {
 			Details struct {
-				OptionalState  string `json:"optional_destination_state"`
-				FailureSummary string `json:"optional_destination_failure_summary"`
+				OptionalState       string `json:"optional_destination_state"`
+				FailureSummary      string `json:"optional_destination_failure_summary"`
+				EventHistoryFailure string `json:"event_history_failure"`
+				LastSQLiteClass     string `json:"event_history_last_sqlite_class"`
 			} `json:"details"`
 		} `json:"telemetry"`
 		Inspection *struct {
@@ -1247,6 +1284,22 @@ func (l *lifecycle) readGatewayPosture(body []byte) {
 	}
 	if json.Unmarshal(body, &health) != nil {
 		return
+	}
+	l.gatewayAuditFailure = health.Telemetry.Details.EventHistoryFailure != ""
+	if l.gatewayAuditFailure {
+		failure := health.Telemetry.Details.EventHistoryFailure
+		switch failure {
+		case "projection_rejected", "integrity_unsigned", "integrity_signing_failed", "sqlite_write_failed":
+		default:
+			failure = "unknown"
+		}
+		message := "the gateway cannot write mandatory audit records (" + failure + ")"
+		class := health.Telemetry.Details.LastSQLiteClass
+		switch class {
+		case "busy_locked", "deadline", "full", "io", "readonly_cantopen", "constraint_corrupt", "unavailable", "other":
+			message += "; last SQLite failure class: " + class
+		}
+		l.result.AddWarning(codeAuditWriteFailed, message+"; inspect the gateway /health telemetry details")
 	}
 	// A judge that stops answering silently downgrades detection to the
 	// static rules; only /health and the journal said so (GAP-0626).
@@ -1279,8 +1332,8 @@ func (l *lifecycle) readGatewayPosture(body []byte) {
 		if ids := directoryLookupAccounts(d.Accounts); ids != "" {
 			which = " (" + ids + ")"
 		}
-		message := fmt.Sprintf("directory lookups are failing for %d account(s)%s since %s; accounts without cached facts get the "+
-			"default guardrail profile (default_lookup_failed)", d.Failing, which, d.Since)
+		message := fmt.Sprintf("directory lookups are failing for %d account(s)%s since %s; requests whose assignments need missing identity facts are refused "+
+			"(default_lookup_failed), and the refusal names the missing fact", d.Failing, which, d.Since)
 		if d.Stale > 0 {
 			message += fmt.Sprintf(", and %d account(s) are served older facts that are dropped after an hour", d.Stale)
 		}
@@ -1304,7 +1357,12 @@ func (l *lifecycle) readGatewayPosture(body []byte) {
 			break
 		}
 		if warning = strings.TrimSpace(warning); warning != "" && len(warning) <= 1024 {
-			l.result.AddWarning(codeProfileAssignment, "guardrail profile "+warning)
+			// A warning about a setting ("guardrail: human approval ...")
+			// already names where it is.
+			if !strings.HasPrefix(warning, "guardrail") {
+				warning = "guardrail profile " + warning
+			}
+			l.result.AddWarning(codeProfileAssignment, warning)
 		}
 	}
 }
@@ -1332,8 +1390,8 @@ func (l *lifecycle) describeIdentityRecords() {
 	// The guardian removes the record of an account it no longer publishes
 	// (GAP-1113), so a stale record is one it still publishes and could not
 	// refresh: name the account and where the guardian says why.
-	l.result.AddWarning(codeIdentityRecordsStale, fmt.Sprintf("the hook guardian's oldest identity record, of uid %s, was last written at %s by "+
-		"this host's clock: the clock was stepped, the directory lookup for that account keeps failing, or the guardian is not "+
+	l.result.AddWarning(codeIdentityRecordsStale, fmt.Sprintf("the hook guardian's identity record of uid %s was last written at %s by "+
+		"this host's clock, over 30 minutes ago or in the future: the clock was stepped, the directory lookup for that account keeps failing, or the guardian is not "+
 		"running; records over an hour old are ignored, and accounts a guardrail profile assignment selects by UPN then get "+
 		"the default profile. The guardian rewrites them within about a minute of a clock step; if this persists, fix the "+
 		"lookup failure its log names for that uid (%s), or restart the hook guardian if it is not running",

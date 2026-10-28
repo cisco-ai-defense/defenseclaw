@@ -142,6 +142,9 @@ type SandboxDaemonOptions struct {
 	// sandboxes; tests replace them.
 	newRuntime   func(*SandboxDaemon) (*sandboxRuntime, error)
 	countRunning func(context.Context) (int, error)
+	// countMicroVMs counts the MicroVMs that run as this account
+	// (openshell.CountMicroVMs); tests replace it.
+	countMicroVMs func(context.Context) (int, error)
 	// sweepForeign replaces the foreign-sandbox sweep before an idle
 	// gateway stops (SandboxDaemon.sweepForeign); tests only.
 	sweepForeign func(context.Context) (bool, error)
@@ -205,6 +208,7 @@ type SandboxDaemon struct {
 	listenMu     sync.Mutex
 	listenCancel context.CancelFunc
 	listenDone   chan struct{}
+	listenFailed atomic.Pointer[listenerFailure]
 	runCtx       context.Context
 
 	// lifecycle (capacity 1) serializes managed creates and starts with
@@ -815,14 +819,24 @@ func (d *SandboxDaemon) Run(ctx context.Context) error {
 	}
 	// A daemon restarted while sandboxes run (a crash) binds the ports
 	// again at once, or stops them: their hooks must reach this daemon.
+	listenersFailed := false
+	listFailed := false
 	if d.lockLifecycle(ctx) == nil {
-		if n, err := d.runningSandboxes(ctx); err == nil && n > 0 {
+		if n, err := d.runningSandboxes(ctx); err != nil {
+			listFailed = true
+		} else if n > 0 {
 			if err := d.ensureListeners(); err != nil {
 				d.logf("listeners at start: %v", err)
-				stopSandboxesWithoutListener(ctx, d.rt.manager, d.rt.publish, "ingress", map[string]bool{})
+				listenersFailed = true
 			}
 		}
 		d.unlockLifecycle()
+	}
+	if listFailed {
+		go d.retryStartupListeners(ctx)
+	}
+	if listenersFailed {
+		go d.containLostListener(ctx, "ingress")
 	}
 
 	err := d.superviseLoop(ctx, serveErr)
@@ -838,6 +852,39 @@ func (d *SandboxDaemon) Run(ctx context.Context) error {
 	d.api.SetSandboxController(nil)
 	d.opts.Health.SetSandbox(StateStopped, "", nil)
 	return err
+}
+
+// retryStartupListeners waits out a transient OpenShell List failure. Only
+// an actual bind failure needs containment; a recovered List with free ports
+// lets the daemon restore its listeners without stopping healthy sandboxes.
+func (d *SandboxDaemon) retryStartupListeners(ctx context.Context) {
+	every := d.rt.recheck
+	if every <= 0 {
+		every = time.Second
+	}
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(every):
+		}
+		if err := d.lockLifecycle(ctx); err != nil {
+			return
+		}
+		n, err := d.runningSandboxes(ctx)
+		if err == nil && n > 0 {
+			if bindErr := d.ensureListeners(); bindErr != nil {
+				d.logf("listeners at start: %v", bindErr)
+				d.unlockLifecycle()
+				d.containLostListener(ctx, "ingress")
+				return
+			}
+		}
+		d.unlockLifecycle()
+		if err == nil {
+			return
+		}
+	}
 }
 
 // superviseLoop runs the idle, restart and listener checks.
@@ -942,22 +989,49 @@ func (d *SandboxDaemon) checkUpgrade() {
 	}
 }
 
-// runningSandboxes counts the user's sandboxes that may be running.
+// runningSandboxes counts the user's sandboxes that may be running or hold
+// compute (manager.HoldsCompute): while one does, the daemon neither
+// stops the account's OpenShell gateway nor exits for a pending restart,
+// which would take the gateway with it.
 func (d *SandboxDaemon) runningSandboxes(ctx context.Context) (int, error) {
 	if d.opts.countRunning != nil {
 		return d.opts.countRunning(ctx)
+	}
+	if !d.currentSettings().Enabled {
+		// The organization removed the managed OpenShell setup. Its gateway
+		// cannot answer, and an idle daemon must still serve policy views.
+		return d.rt.manager.KnownComputeCount(), nil
 	}
 	list, err := d.rt.manager.List(ctx)
 	if err != nil {
 		return 0, err
 	}
+	return sandboxesHoldingCompute(list), nil
+}
+
+// microVMs counts the MicroVMs that run as this account
+// (openshell.CountMicroVMs): what the daemon trusts before it stops the
+// account's gateway when it cannot read the gateway's own account of its
+// sandboxes, which a stop would end with no flush.
+func (d *SandboxDaemon) microVMs(ctx context.Context) (int, error) {
+	if d.opts.countMicroVMs != nil {
+		return d.opts.countMicroVMs(ctx)
+	}
+	return openshell.CountMicroVMs(ctx, openshell.ExecRunner{})
+}
+
+// sandboxesHoldingCompute counts the sandboxes of list that may run or
+// hold compute (manager.HoldsCompute): a MicroVM counts until OpenShell
+// reports it stopped, deleting or gone, completed and error states
+// included (but for one whose VM is gone).
+func sandboxesHoldingCompute(list []sandboxapi.Sandbox) int {
 	n := 0
 	for _, sb := range list {
-		if sandboxMayRun(sb.Phase) {
+		if manager.HoldsCompute(sb) {
 			n++
 		}
 	}
-	return n, nil
+	return n
 }
 
 // sandboxMayRun reports a phase in which a sandbox may be running.
@@ -1131,13 +1205,14 @@ func (d *SandboxDaemon) pollRegistrations(ctx context.Context, adopt bool) []dae
 		d.refreshSettings(ctx)
 	}
 	if adopt {
-		// Unlisted (nil phases), no sandbox counts as running: only the
-		// closed start-up floor can change, as revalidate's does, and no
-		// lease renews.
 		d.adoptMu.Lock()
-		d.adoptLocked(phases, listed, moved)
+		// The policy requests above can overlap a Create or Start. Re-list
+		// inside the adoption lock so an older phase snapshot cannot put a
+		// previous registration's floor back in force.
+		adoptPhases, adoptListed := d.sandboxPhases(ctx)
+		d.adoptLocked(adoptPhases, adoptListed, moved)
 		d.adoptMu.Unlock()
-		if listed {
+		if adoptListed {
 			for _, a := range answered {
 				d.leases.renew(a.id, a.sent)
 			}
@@ -1196,6 +1271,12 @@ func (d *SandboxDaemon) adoptRunningFloor(phases map[string]string) bool {
 // false when the manager cannot list them, and then nothing is reported (a
 // registration no report renews lapses after sandboxreg.LiveLease).
 func (d *SandboxDaemon) sandboxPhases(ctx context.Context) (map[string]string, bool) {
+	if !d.currentSettings().Enabled {
+		// A stopped registration is kept while sandboxes are off. The
+		// account gateway cannot answer without the managed setup, so do
+		// not try to infer a live phase for the policy report.
+		return nil, false
+	}
 	if d.opts.listPhases != nil {
 		return d.opts.listPhases(ctx)
 	}
@@ -1285,6 +1366,8 @@ func (d *SandboxDaemon) revalidate(ctx context.Context) []daemonRegistration {
 	ctx, cancel := context.WithTimeout(ctx, revalidateTimeout)
 	defer cancel()
 	revoked := d.pollRegistrations(ctx, false)
+	d.adoptMu.Lock()
+	defer d.adoptMu.Unlock()
 	phases, _ := d.sandboxPhases(ctx)
 	floor := d.regs.newestFloor(func(name string) bool { return sandboxMayRun(phases[name]) })
 	if floor == nil {
@@ -1521,6 +1604,8 @@ func (d *SandboxDaemon) stopRevoked(ctx context.Context, r daemonRegistration) {
 // each existing sandbox against its own confirmed registration; the current
 // floor is used for a new run and the daemon's no-run configuration.
 func (d *SandboxDaemon) adoptFloor(name string) {
+	d.adoptMu.Lock()
+	defer d.adoptMu.Unlock()
 	r, ok := d.regs.get(name)
 	if !ok || !r.Confirmed || r.Revoked {
 		return
@@ -1549,13 +1634,16 @@ func (d *SandboxDaemon) ensureListeners() error {
 	ingressAddr := d.api.SandboxIngressAddr()
 	ingress, err := net.Listen("tcp", ingressAddr)
 	if err != nil {
+		d.listenFailed.Store(&listenerFailure{part: "ingress", err: err})
 		return sandboxListenError(err)
 	}
 	egressLn, err := egress.Listen(d.rt.egressAddr)
 	if err != nil {
 		_ = ingress.Close()
+		d.listenFailed.Store(&listenerFailure{part: "egress", err: err})
 		return sandboxListenError(err)
 	}
+	d.listenFailed.Store(nil)
 	ctx, cancel := context.WithCancel(d.runCtx)
 	done := make(chan struct{})
 	d.listenCancel, d.listenDone = cancel, done
@@ -1564,30 +1652,34 @@ func (d *SandboxDaemon) ensureListeners() error {
 	d.rt.setListening("egress", true)
 	var wg sync.WaitGroup
 	wg.Add(2)
-	lost := make(chan string, 2)
+	lost := make(chan listenerFailure, 2)
 	go func() {
 		defer wg.Done()
 		defer d.rt.setListening("ingress", false)
 		if err := d.api.RunSandboxIngressOn(ctx, ingress); err != nil && ctx.Err() == nil {
 			d.logf("sandbox ingress: %v", err)
-			lost <- "ingress"
+			failure := &listenerFailure{part: "ingress", err: err}
+			d.listenFailed.Store(failure)
+			lost <- *failure
 		}
 	}()
 	go func() {
 		defer wg.Done()
 		if err := d.rt.serveEgressOn(ctx, egressLn, true); err != nil && ctx.Err() == nil {
 			d.logf("sandbox egress: %v", err)
-			lost <- "egress"
+			failure := &listenerFailure{part: "egress", err: err}
+			d.listenFailed.Store(failure)
+			lost <- *failure
 		}
 	}()
 	go func() {
+		var failed *listenerFailure
 		select {
-		case part := <-lost:
-			// A listener died under running sandboxes: stop them (their
-			// hooks and egress would reach whatever binds the port next)
-			// and let the next create bind both again.
+		case failure := <-lost:
+			// A listener died under running sandboxes. Once both are
+			// released, keep containing until a create binds them again.
+			failed = &failure
 			cancel()
-			stopSandboxesWithoutListener(context.WithoutCancel(ctx), d.rt.manager, d.rt.publish, part, map[string]bool{})
 		case <-ctx.Done():
 		}
 		wg.Wait()
@@ -1597,8 +1689,48 @@ func (d *SandboxDaemon) ensureListeners() error {
 			d.listenCancel, d.listenDone = nil, nil
 		}
 		d.listenMu.Unlock()
+		if failed != nil {
+			d.containLostListener(d.runCtx, failed.part)
+		}
 	}()
 	return nil
+}
+
+// containLostListener retries the existing containment pass while this
+// managed daemon owns neither listener. The lifecycle lock orders a pass
+// with create and rebind, so a newly rebound listener cannot be followed
+// by a stale stop attempt.
+func (d *SandboxDaemon) containLostListener(ctx context.Context, part string) {
+	every := d.rt.recheck
+	if every <= 0 {
+		every = sandboxListenerRecheck
+	}
+	unstoppable := map[string]bool{}
+	for {
+		if err := d.lockLifecycle(ctx); err != nil {
+			return
+		}
+		if d.listening() {
+			d.unlockLifecycle()
+			return
+		}
+		stopSandboxesWithoutListener(ctx, d.rt.fleet, d.rt.publish, part, unstoppable)
+		d.unlockLifecycle()
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(every):
+		}
+	}
+}
+
+type listenerFailure struct {
+	part string
+	err  error
+}
+
+func (d *SandboxDaemon) lastListenerFailure() *listenerFailure {
+	return d.listenFailed.Load()
 }
 
 // releaseListeners frees the ingress and egress ports.
@@ -1671,7 +1803,10 @@ func sandboxListenError(err error) error {
 // Before any sandbox of the caller registered, the policy is the one the
 // managed gateway names for a new run (GAP-0179).
 func (d *SandboxDaemon) managedStatus(ctx context.Context) *sandboxapi.ManagedStatus {
-	s := d.freshSettings(ctx)
+	return d.managedStatusFor(ctx, d.freshSettings(ctx))
+}
+
+func (d *SandboxDaemon) managedStatusFor(ctx context.Context, s sandboxrelay.DaemonSettings) *sandboxapi.ManagedStatus {
 	out := &sandboxapi.ManagedStatus{
 		RequestAccess:    s.RequestAccess,
 		InstallMode:      s.Enterprise.Install,
@@ -1680,9 +1815,11 @@ func (d *SandboxDaemon) managedStatus(ctx context.Context) *sandboxapi.ManagedSt
 		GatewayPort:      s.Enterprise.GatewayPort,
 		PendingRestart:   d.pendingRestart.Load(),
 		DriverFallback:   s.Enterprise.DriverFallback,
+		NextDriver:       s.SelectedDriver,
 	}
 	if d.openShell != nil {
 		out.OtherGateways = d.openShell.OtherGateways(ctx, s)
+		out.RenderedConfigDrift = d.openShell.RenderedConfigDrift(s)
 	}
 	// A running sandbox keeps its driver. Without one, report the managed
 	// gateway's refreshed choice for the next run. The last create's choice
@@ -1698,15 +1835,44 @@ func (d *SandboxDaemon) managedStatus(ctx context.Context) *sandboxapi.ManagedSt
 	case !s.Available:
 		out.Unavailable = s.Unavailable
 	}
+	registered := false
 	if r, ok := d.regs.newest(); ok {
 		out.Profile, out.Provisional, out.EffectiveDigest, out.UpdatedAt = r.Profile, r.Provisional, r.Digest, r.UpdatedAt
-		return out
+		registered = true
 	}
 	ctx, cancel := context.WithTimeout(ctx, managedViewTimeout)
 	defer cancel()
-	if me, _, err := d.managedExplain(ctx, sandboxapi.ExplainRequest{}, nil); err == nil {
-		out.Profile, out.Description, out.Provisional, out.EffectiveDigest = me.Profile, me.Description, me.Provisional, me.PolicyDigest
-		if me.RequestAccess != "" {
+	// Status and doctor describe whether the configured agents can run at
+	// all. A default connector's permission cannot stand in for another's
+	// connector-scoped profile (GAP-0534).
+	harnesses := s.Operational.Harnesses
+	if len(harnesses) == 0 {
+		harnesses = []string{defaultManagedConnector}
+	}
+	seen := make(map[string]bool, len(harnesses))
+	out.Allowed = true
+	viewSet := false
+	for _, name := range harnesses {
+		connector := d.managedConnector(name)
+		if seen[connector] {
+			continue
+		}
+		seen[connector] = true
+		me, _, err := d.managedExplain(ctx, sandboxapi.ExplainRequest{Harness: connector}, nil)
+		if err != nil {
+			out.Allowed = false
+			continue
+		}
+		allowed := managedExplainAllowsHarness(me, connector)
+		if !allowed {
+			out.Allowed = false
+			out.DeniedHarnesses = append(out.DeniedHarnesses, connector)
+		}
+		if !registered && !viewSet {
+			out.Profile, out.Description, out.Provisional, out.EffectiveDigest = me.Profile, me.Description, me.Provisional, me.PolicyDigest
+			viewSet = true
+		}
+		if me.RequestAccess != "" && (!allowed || out.RequestAccess == "") {
 			out.RequestAccess = me.RequestAccess
 		}
 	}
@@ -1790,6 +1956,22 @@ func (d *SandboxDaemon) managedExplain(ctx context.Context, req sandboxapi.Expla
 	return me, managedExplainFloor(me), nil
 }
 
+// managedExplainAllowsHarness applies both sandbox.allowed and the agent
+// allowlist to a policy view. Resolve checks both before Create; Ready and
+// status must make the same decision before an install or ready verdict.
+func managedExplainAllowsHarness(me sandboxapi.ManagedExplain, name string) bool {
+	if !me.Allowed {
+		return false
+	}
+	if len(me.AllowedHarnesses) == 0 {
+		return true
+	}
+	name = config.NormalizeConnectorName(name)
+	return slices.ContainsFunc(me.AllowedHarnesses, func(h string) bool {
+		return config.NormalizeConnectorName(h) == name
+	})
+}
+
 // managedExplainFloor is the organization floor a managed explain names,
 // in openshell.admin's terms. A setting the explain allows is left unset;
 // the keys it does not carry (min_profile, required_pack, max_resources)
@@ -1831,11 +2013,19 @@ var _ SandboxController = (*managedSandboxController)(nil)
 func (c *managedSandboxController) Status(ctx context.Context) (*sandboxapi.Status, error) {
 	st, err := c.Manager.Status(ctx)
 	if st != nil {
-		st.Managed = c.d.managedStatus(ctx)
+		s := c.d.freshSettings(ctx)
+		st.Managed = c.d.managedStatusFor(ctx, s)
+		// The manager's runtime config can lag a driver switch. Enabled is
+		// the organization's current choice, separate from readiness.
+		st.Enabled = s.Enabled
+		if !s.Enabled || !s.Available {
+			st.Available, st.Reason = false, s.Unavailable
+		}
 		if st.Gateway != nil {
 			c.d.driverInForce(st.Managed, st.Gateway.Driver)
 		}
 		c.d.neutralGatewayStatus(st)
+		c.d.statusListenerAddresses(st)
 		// The daemon's own resolution knows neither the caller's required
 		// pack nor its profile minimum: the pack and profile are the
 		// managed gateway's for the caller's newest sandbox, else for a
@@ -1852,6 +2042,18 @@ func (c *managedSandboxController) Status(ctx context.Context) (*sandboxapi.Stat
 		cancel()
 	}
 	return st, err
+}
+
+// statusListenerAddresses keeps a failed bind or lost managed listener as
+// the status cause until ensureListeners successfully binds again. The
+// runtime still clears every address the daemon no longer holds.
+func (d *SandboxDaemon) statusListenerAddresses(st *sandboxapi.Status) {
+	if failure := d.lastListenerFailure(); st.Enabled && st.Available && failure != nil {
+		st.Available = false
+		st.Reason = fmt.Sprintf("the sandbox %s listener is not running in this process: %v; check openshell.%s_port, fix the listener error, then restart the DefenseClaw daemon",
+			failure.part, failure.err, failure.part)
+	}
+	d.rt.statusListenerAddresses(st)
 }
 
 // driverInForce makes m name the compute driver the connected gateway runs
@@ -2018,18 +2220,151 @@ func managedSettingsRefusal(s sandboxrelay.DaemonSettings) error {
 	return nil
 }
 
+// olderCLIReadyHarnesses are the agents a ready that names none may be for:
+// the agent this daemon's managed configuration runs (managedConnector)
+// first, then every other harness a create may run.
+func (d *SandboxDaemon) olderCLIReadyHarnesses() []string {
+	first := d.managedConnector("")
+	out := []string{first}
+	for _, name := range harness.Names() {
+		if name != first {
+			out = append(out, name)
+		}
+	}
+	return out
+}
+
+// Ready asks the managed gateway at most readyViewsInFlight policy views at
+// once. The gateway admits sandboxBudgetPolicy.InFlight (8) policy requests
+// per account and answers more with 429; half leaves room for the account's
+// other policy calls (a status view, the registrations' policy polls).
+const readyViewsInFlight = 4
+
+// A rate-limited policy view is asked again after readyViewRetryFirst,
+// doubling up to readyViewRetryMax, within the view's own bound.
+const (
+	readyViewRetryFirst = 100 * time.Millisecond
+	readyViewRetryMax   = time.Second
+)
+
+// readyPolicyRefusal refuses a ready unless the managed gateway's current
+// policy allows one of the candidate agents, by both sandbox.allowed and the
+// agent allowlist (managedExplainAllowsHarness). Ready has no run
+// registration yet, so it asks before it installs OpenShell or starts its
+// gateway: a forbidden profile must leave no runtime behind, including when
+// Ready is called directly (GAP-0534). Profiles match per connector, so each
+// candidate gets its own view (readyPolicyView). The views go in candidate
+// order, readyViewsInFlight at a time, each within its own bound, so a view
+// that is slow or unanswered neither holds up nor refuses a ready another
+// agent's profile allows, and the asking stays inside the gateway's
+// admission limit: the first allowed answer readies. With none allowed, a
+// view the gateway did not answer fails the ready closed with its reason
+// (the earliest candidate's, so the daemon's own agent's first); else the
+// organization's refusal stands.
+func (d *SandboxDaemon) readyPolicyRefusal(ctx context.Context, candidates []string) error {
+	askCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	type answer struct {
+		index     int
+		allowed   bool
+		sandboxes bool
+		err       error
+	}
+	next := make(chan int, len(candidates))
+	for index := range candidates {
+		next <- index
+	}
+	close(next)
+	answers := make(chan answer, len(candidates))
+	for range min(readyViewsInFlight, len(candidates)) {
+		go func() {
+			for index := range next {
+				if err := askCtx.Err(); err != nil {
+					answers <- answer{index: index, err: err}
+					continue
+				}
+				allowed, sandboxes, err := d.readyPolicyView(askCtx, candidates[index])
+				answers <- answer{index: index, allowed: allowed, sandboxes: sandboxes, err: err}
+			}
+		}()
+	}
+	errs := make([]error, len(candidates))
+	sandboxesAllowed := false
+	for range candidates {
+		a := <-answers
+		if a.allowed {
+			return nil
+		}
+		errs[a.index] = a.err
+		sandboxesAllowed = sandboxesAllowed || a.sandboxes
+	}
+	for _, err := range errs {
+		if err != nil {
+			return err
+		}
+	}
+	if sandboxesAllowed {
+		return &sandboxapi.Error{Code: sandboxapi.CodeAdminViolation, Status: http.StatusForbidden,
+			Message: "Your organization doesn't allow this agent in a sandbox.", Detail: sandboxrelay.ReasonNotAllowed}
+	}
+	return &sandboxapi.Error{Code: sandboxapi.CodeAdminViolation, Status: http.StatusForbidden,
+		Message: "Your organization doesn't allow sandboxes for your account.", Detail: sandboxrelay.ReasonNotAllowed}
+}
+
+// readyPolicyView is whether the managed gateway's policy view of one agent
+// allows it in a sandbox (managedExplainAllowsHarness), and whether it allows
+// sandboxes at all, within one view's bound (managedViewTimeout). A view
+// the gateway's admission limit refused (429) is asked again within that
+// bound; when the bound ends first, the 429 is the view's error, which fails
+// the ready closed unless another agent is allowed.
+func (d *SandboxDaemon) readyPolicyView(ctx context.Context, name string) (allowed, sandboxes bool, err error) {
+	viewCtx, cancel := context.WithTimeout(ctx, managedViewTimeout)
+	defer cancel()
+	wait := readyViewRetryFirst
+	for {
+		view, _, viewErr := d.managedExplain(viewCtx, sandboxapi.ExplainRequest{Harness: name}, nil)
+		if viewErr == nil {
+			return managedExplainAllowsHarness(view, name), view.Allowed, nil
+		}
+		if sandboxapi.AsError(viewErr).Status != http.StatusTooManyRequests {
+			return false, false, viewErr
+		}
+		timer := time.NewTimer(wait)
+		select {
+		case <-viewCtx.Done():
+			timer.Stop()
+			return false, false, viewErr
+		case <-timer.C:
+		}
+		wait = min(2*wait, readyViewRetryMax)
+	}
+}
+
 // Ready readies the account's OpenShell for a first run (readyOpenShell:
 // setup mode installs the pinned release; both modes start and register the
 // account's managed gateway) and answers the status. A run needs that before
 // its create: its preflight reads the gateway's driver and runs the
 // openshell CLI, and refused every run of an account whose OpenShell was not
 // installed or started yet, before the create that readies it ran
-// (GAP-0437, GAP-0441).
-func (c *managedSandboxController) Ready(ctx context.Context) (*sandboxapi.Status, error) {
+// (GAP-0437, GAP-0441). The managed gateway's policy must allow sandboxes
+// for the named agent first, and only its view is asked
+// (readyPolicyRefusal). A request that names no agent, from a CLI of
+// DefenseClaw 1.0.3 or older, does not say which agent it will run: it
+// readies when the policy allows any agent a create may run
+// (olderCLIReadyHarnesses), and the create judges the run's own agent, as a
+// 1.0.3 daemon did. Kept through the 1.0.4 upgrade window.
+func (c *managedSandboxController) Ready(ctx context.Context, req sandboxapi.ReadyRequest) (*sandboxapi.Status, error) {
 	d := c.d
+	candidates := []string{req.Harness}
+	if strings.TrimSpace(req.Harness) == "" {
+		candidates = d.olderCLIReadyHarnesses()
+	} else if _, ok := harness.Get(config.NormalizeConnectorName(req.Harness)); !ok {
+		return nil, sandboxapi.Errorf(sandboxapi.CodeInvalid, "a supported sandbox harness is required to ready OpenShell")
+	}
 	if err := d.lockLifecycle(ctx); err != nil {
 		return nil, managedBusyError(err)
 	}
+	boundForReady := false
 	s := d.freshSettings(ctx)
 	err := managedSettingsRefusal(s)
 	if err == nil {
@@ -2037,16 +2372,33 @@ func (c *managedSandboxController) Ready(ctx context.Context) (*sandboxapi.Statu
 		// before setup mode installs anything for a run that cannot start.
 		if uid, held := d.openShell.PortHolder(s); held && uid != d.uid {
 			err = accountBusyError()
-		} else {
-			err = d.readyOpenShell(ctx, s, "")
+		} else if err = d.readyPolicyRefusal(ctx, candidates); err == nil {
+			// Status reports unavailable until this process holds both
+			// listeners. Bind them before setup installs anything, so a
+			// busy port refuses Ready without changing the account.
+			wasListening := d.listening()
+			if err = d.ensureListeners(); err == nil {
+				boundForReady = !wasListening
+				err = d.readyOpenShell(ctx, s, "")
+			}
 		}
 	}
-	d.unlockLifecycle()
+	if err != nil && boundForReady {
+		// A failed Ready leaves a listener it found in place, but releases
+		// listeners it bound itself even when the gateway cannot list boxes.
+		d.releaseListeners()
+	}
 	if err != nil {
+		d.unlockLifecycle()
 		d.reportAccountBusy(ctx, "", err)
 		return nil, err
 	}
-	return c.Status(ctx)
+	// A supervisor pass may release idle listeners as soon as the lifecycle
+	// unlocks. Report the readiness this call established while it still
+	// holds that lock; Create will bind again if an idle pass follows.
+	st, statusErr := c.Status(ctx)
+	d.unlockLifecycle()
+	return st, statusErr
 }
 
 // Create resolves the run at the managed gateway, creates the sandbox
@@ -2122,10 +2474,12 @@ func (c *managedSandboxController) Create(ctx context.Context, req sandboxapi.Cr
 		undo()
 		return nil, managedPolicyUnloadable(err)
 	}
+	d.adoptMu.Lock()
 	d.floorMu.Lock()
 	d.floor = &floor
 	d.floorMu.Unlock()
 	d.reloadConfig()
+	d.adoptMu.Unlock()
 	if err := d.readyOpenShell(ctx, s, reg); err != nil {
 		undo()
 		return nil, err
@@ -2135,6 +2489,8 @@ func (c *managedSandboxController) Create(ctx context.Context, req sandboxapi.Cr
 	// refuses the create otherwise); the record keeps the reason.
 	createCtx := withManagedMCPJudge(manager.WithCreateConfig(manager.WithDriverChoice(ctx, choice), d.configWithFloor(floor)),
 		fixedMCPJudge(resolveMCPDecision(resolveReq.Harness, mcp, resp)))
+	// The sandbox this create reserves resolves under createCtx's floor
+	// until its registration is kept (manager.EndCreate, GAP-0016).
 	sb, err := c.Manager.Create(createCtx, req)
 	if err != nil {
 		undo()
@@ -2153,13 +2509,21 @@ func (c *managedSandboxController) Create(ctx context.Context, req sandboxapi.Cr
 		})
 	}
 	if err != nil {
+		// A sandbox the delete leaves behind has no registration: the
+		// closed floor, not the create's.
+		c.EndCreate(sb.Name, sb.ID)
 		if _, delErr := c.Manager.Delete(context.WithoutCancel(ctx), sb.Name, sandboxapi.DeleteRequest{}); delErr != nil {
 			d.logf("delete %s after its registration failed: %v", sb.Name, delErr)
 		}
 		undo()
 		return nil, managedRelayError(err)
 	}
-	d.rt.manager.RefreshPolicies()
+	c.EndCreate(sb.Name, sb.ID)
+	if fresh, err := c.Manager.Get(ctx, sb.Name); err == nil && fresh != nil {
+		// The view under the registration just kept, not one a refresh
+		// during the create judged against the closed floor (GAP-0016).
+		sb = fresh
+	}
 	return sb, nil
 }
 
@@ -2338,6 +2702,23 @@ func (c *managedSandboxController) Explain(ctx context.Context, req sandboxapi.E
 	}
 	applyManagedPosture(out, me.Posture)
 	me.Posture = nil
+	if req.Sandbox == "" && req.Project != "" {
+		// The project's own MCP servers, which only this process can read
+		// as the caller: the MCP row counts them (#1200).
+		project := req.Project
+		if real, err := filepath.EvalSymlinks(project); err == nil {
+			project = real
+		}
+		if spec, ok := harness.Get(connectorName); ok {
+			me.MCPProjectCount = manager.ProjectMCPServerCount(spec.Name, project)
+		}
+		me.MCPProjectBlocked = true
+		for _, s := range out.Settings {
+			if s.Key == "mcp.project_servers" {
+				me.MCPProjectBlocked = s.Value != packs.MCPProjectServersAllow
+			}
+		}
+	}
 	if me.Workspace != nil {
 		// A new run's copy policy is the managed gateway's: the explain floor
 		// leaves out the organization's pack, which the gateway resolves
@@ -2537,11 +2918,16 @@ func lastNonEmptyLine(s string) string {
 
 // daemonVMProbe is the user's own MicroVM probe at sandbox start: the CPU's
 // virtualization flags, /dev/kvm opened read-write as the user (the test the
-// driver itself meets), and openshell-driver-vm where the user's OpenShell
-// gateway finds it (the rendered driver_dir, ~/.local/libexec/openshell, the
-// system directories).
+// driver itself meets), and openshell-driver-vm in the rendered driver_dir
+// when set, or in the user's and system directories otherwise, followed by
+// the executable listening on this account's managed gateway port, or the
+// executable its unit will start when the port is still free.
 func daemonVMProbe(s sandboxrelay.DaemonSettings) openshell.VMProbeResult {
 	home, _ := os.UserHomeDir()
+	return openshell.VMProbe{DriverDirs: daemonVMDriverDirs(s, home, openshell.GatewayExecutableOnPort(gatewayPort(s)))}.Run()
+}
+
+func daemonVMDriverDirs(s sandboxrelay.DaemonSettings, home, gatewayExecutable string) []string {
 	dir := ""
 	if path := s.Enterprise.GatewayConfigPath; path != "" {
 		if data, err := readBounded(path, 1<<20); err == nil && data != nil {
@@ -2550,7 +2936,10 @@ func daemonVMProbe(s sandboxrelay.DaemonSettings) openshell.VMProbeResult {
 			}
 		}
 	}
-	return openshell.VMProbe{DriverDirs: openshell.UserVMDriverDirs(home, dir)}.Run()
+	if gatewayExecutable == "" {
+		gatewayExecutable = newAccountOpenShell(runtime.GOOS, os.Geteuid(), home, nil).gatewayBinary(s)
+	}
+	return openshell.UserVMDriverDirs(home, dir, gatewayExecutable)
 }
 
 // readBounded reads a regular file of at most limit bytes; a missing file

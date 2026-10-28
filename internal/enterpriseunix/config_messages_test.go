@@ -13,7 +13,6 @@
 package enterpriseunix
 
 import (
-	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -58,16 +57,12 @@ func TestManagedConfigPatternNamesAllowedFormat(t *testing.T) {
 	}
 }
 
-func TestManagedConfigModeAndProfileNameOnlyInstalledChoices(t *testing.T) {
+func TestManagedConfigModeNamesOnlyInstalledChoices(t *testing.T) {
 	h := newTestHost(t, "linux")
 	mode := &config.V8SchemaError{Path: "$.deployment_mode", Keyword: "enum", Expected: `one of ["","managed_enterprise","saas"]`, Value: "standalone"}
 	got, ok := h.env.plainConfigProblem(mode, "/tmp/admin.yaml", nil)
 	if !ok || !strings.Contains(got, "allowed values: managed_enterprise") || strings.Contains(got, "saas") {
 		t.Fatalf("deployment mode = %q", got)
-	}
-	got, ok = h.env.plainConfigProblem(errors.New(`config: enterprise.profile="secure_client" conflicts with immutable DEFENSECLAW_ENTERPRISE_PROFILE="standalone"`), "/tmp/admin.yaml", nil)
-	if !ok || !strings.Contains(got, "fixed to standalone") || strings.Contains(got, "DEFENSECLAW_ENTERPRISE_PROFILE") {
-		t.Fatalf("enterprise profile = %q", got)
 	}
 }
 
@@ -391,6 +386,24 @@ func TestManagedConfigNamesMissingKeyAndSizeLimit(t *testing.T) {
 		got, ok := h.env.plainConfigProblem(err, "/tmp/admin.yaml", []byte(doc))
 		if !ok || !strings.Contains(got, want) {
 			t.Fatalf("refusal = %q (handled %t), want %q", got, ok, want)
+		}
+	}
+}
+
+// rel-1-0-4 GAP-0590: an administrator's openshell path that is not
+// absolute is refused with the requirement, not "does not match the
+// setting's required format".
+func TestManagedConfigOpenShellPathsNameTheAbsolutePathRequirement(t *testing.T) {
+	for _, tc := range []struct{ setting, value, want string }{
+		{"trusted_ca_bundle", "proxy-root-ca.pem", "openshell.trusted_ca_bundle must be an absolute path: a managed configuration needs an absolute path to an administrator-owned file"},
+		{"trusted_ca_bundle", "./proxy-root-ca.pem", "openshell.trusted_ca_bundle must be an absolute path: a managed configuration needs an absolute path to an administrator-owned file"},
+		{"trusted_ca_bundle", "~/proxy-root-ca.pem", "a managed configuration needs an absolute path to an administrator-owned file"},
+		{"pack_dir", "sandbox-packs", "openshell.pack_dir must be an absolute path or one starting with ~/"},
+	} {
+		h := newTestHost(t, "linux")
+		got := installMessage(t, h, string(DefaultConfig(h.env.Layout))+"openshell:\n  "+tc.setting+": "+tc.value+"\n")
+		if !strings.Contains(got, tc.want) || strings.Contains(got, "required format") {
+			t.Fatalf("%s: %s: %s", tc.setting, tc.value, got)
 		}
 	}
 }

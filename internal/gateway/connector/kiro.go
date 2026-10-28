@@ -32,6 +32,23 @@ const (
 	kiroDefaultAgentSettingKey  = "chat.defaultAgent"
 )
 
+// KiroCLIHookFloor is the oldest kiro-cli on which every engine runs
+// DefenseClaw's hooks. Before 2.27.1 a V3 non-interactive run (`kiro-cli
+// chat --v3 --no-interactive`) loads no hooks at all (kiro.dev/docs/cli/headless:
+// "Starting with Kiro CLI 2.27.1, V3 non-interactive runs load Hooks"): a
+// real 2.26.1 run completed a tool call that sent DefenseClaw nothing
+// (rel-1-0-4 GAP-0227). The managed profiles do not enroll an older kiro-cli,
+// and per-user setup and doctor refuse it (cli_hook_floor in
+// hook_contracts.json).
+const KiroCLIHookFloor = "2.27.1"
+
+// KiroCLIBelowHookFloorReason says why a kiro-cli below KiroCLIHookFloor
+// is refused.
+func KiroCLIBelowHookFloorReason(normalized string) string {
+	return fmt.Sprintf("kiro-cli %s is below %s: before %s a non-interactive kiro-cli --v3 run loads no hooks, "+
+		"so its tool calls never reach DefenseClaw; update Kiro CLI to %s or later", normalized, KiroCLIHookFloor, KiroCLIHookFloor, KiroCLIHookFloor)
+}
+
 // KiroHooksPathOverride and KiroHomeOverride are test seams. Production
 // Setup always writes the user-global ~/.kiro/hooks/defenseclaw.json file
 // and, when a workspace is selected, the matching workspace copy.
@@ -186,7 +203,15 @@ func (c *KiroConnector) Teardown(_ context.Context, opts SetupOpts) error {
 	if strings.TrimSpace(opts.DataDir) != "" {
 		removeCreatedDirs(filepath.Join(opts.DataDir, kiroCreatedDirsFile), filepath.Dir(kiroHomeDir()))
 	}
-	return errors.Join(errs...)
+	if err := errors.Join(errs...); err != nil {
+		return err
+	}
+	if !opts.ManagedEnterprise && opts.DataDir != "" {
+		if err := c.VerifyClean(opts); err != nil {
+			return fmt.Errorf("kiro verify clean before token revocation: %w", err)
+		}
+	}
+	return revokePerUserHookAPIToken(opts, c.Name())
 }
 
 // kiroCreatedDirsFile, in the DefenseClaw data directory, lists the Kiro
@@ -278,8 +303,12 @@ func (c *KiroConnector) reclaimKiroHookFile(opts SetupOpts, path, command string
 		return fmt.Errorf("kiro restore hook %s: %w", path, err)
 	}
 	if !restored {
-		if err := removeKiroV3Hooks(path, command); err != nil && !os.IsNotExist(err) {
+		operatorFile := kiroPristineIsOperators(opts.DataDir, c.Name(), logical, command)
+		if err := removeKiroV3HooksKeeping(path, command, operatorFile); err != nil && !os.IsNotExist(err) {
 			return fmt.Errorf("kiro remove hook %s: %w", path, err)
+		}
+		if err := keepPristineEmptyHooks(opts.DataDir, c.Name(), logical, path); err != nil {
+			return fmt.Errorf("kiro keep the empty hooks of %s: %w", path, err)
 		}
 	} else if present, err := kiroV3FileReferencesHook(path, command); err != nil {
 		return fmt.Errorf("kiro inspect restored hook %s: %w", path, err)
@@ -295,6 +324,36 @@ func (c *KiroConnector) reclaimKiroHookFile(opts SetupOpts, path, command string
 	return nil
 }
 
+// kiroPristineIsOperators reports whether the copy Setup captured of a Kiro
+// file shows the operator's own file: it existed and held none of
+// DefenseClaw's hooks. A surgical teardown (the file changed since Setup,
+// even only reformatted) keeps such a file when DefenseClaw's entries were
+// all it held. A copy that already held DefenseClaw's hooks (an earlier
+// enrollment whose own backup is gone, GAP-1932) shows no operator file.
+func kiroPristineIsOperators(dataDir, connectorName, logical, command string) bool {
+	b, err := loadManagedFileBackupPath(managedFileBackupPath(dataDir, connectorName, logical))
+	if err != nil || !b.Existed {
+		return false
+	}
+	if len(bytes.TrimSpace(b.PristineBytes)) == 0 {
+		return true
+	}
+	var cfg map[string]interface{}
+	if json.Unmarshal(b.PristineBytes, &cfg) != nil {
+		return false
+	}
+	if containsHookScript(cfg, kiroOwnedHookCommands(command)...) {
+		return false
+	}
+	hooks, _ := cfg["hooks"].([]interface{})
+	for _, item := range hooks {
+		if kiroOwnedV3Hook(item, command) {
+			return false
+		}
+	}
+	return true
+}
+
 // reclaimKiroAgentFile is reclaimKiroHookFile for a CLI 2.x agent file.
 func (c *KiroConnector) reclaimKiroAgentFile(opts SetupOpts, path, command string) error {
 	logical := kiroAgentBackupLogicalName(path)
@@ -303,8 +362,12 @@ func (c *KiroConnector) reclaimKiroAgentFile(opts SetupOpts, path, command strin
 		return fmt.Errorf("kiro restore agent %s: %w", path, err)
 	}
 	if !restored {
-		if err := removeKiroV2AgentHooks(path, command); err != nil && !os.IsNotExist(err) {
+		operatorFile := kiroPristineIsOperators(opts.DataDir, c.Name(), logical, command)
+		if err := removeKiroV2AgentHooksKeeping(path, command, operatorFile); err != nil && !os.IsNotExist(err) {
 			return fmt.Errorf("kiro remove agent hooks %s: %w", path, err)
+		}
+		if err := keepPristineEmptyHooks(opts.DataDir, c.Name(), logical, path); err != nil {
+			return fmt.Errorf("kiro keep the empty hooks of %s: %w", path, err)
 		}
 	} else if present, err := kiroV2AgentReferencesAnyHook(path, command); err != nil {
 		return fmt.Errorf("kiro inspect restored agent %s: %w", path, err)

@@ -182,6 +182,7 @@ func (dispatcher *Dispatcher) Enqueue(payload Payload) EnqueueResult {
 			dispatcher.counters.rejected.Add(1)
 			dispatcher.recordFailure(dispatcher.nowUTC(), FailureCodeAdapterInputInvalid)
 		}
+		payload.complete(false)
 		return EnqueueResult{Disposition: EnqueueRejected, Reason: ReasonInvalidPayload}
 	}
 	identity := payload.identity
@@ -189,6 +190,7 @@ func (dispatcher *Dispatcher) Enqueue(payload Payload) EnqueueResult {
 		dispatcher.counters.rejected.Add(1)
 		dispatcher.recordFailure(dispatcher.nowUTC(), FailureCodeOriginLoop)
 		dispatcher.setOperationalHealth(HealthDegraded, HealthReasonOriginLoop)
+		payload.complete(false)
 		return EnqueueResult{Disposition: EnqueueRejected, Reason: ReasonOriginLoop}
 	}
 
@@ -202,6 +204,7 @@ func (dispatcher *Dispatcher) Enqueue(payload Payload) EnqueueResult {
 		if active || dispatcher.intakeIsStopped() {
 			reason = ReasonIntakeStopped
 		}
+		payload.complete(false)
 		return EnqueueResult{Disposition: EnqueueRejected, Reason: reason}
 	}
 
@@ -220,6 +223,7 @@ func (dispatcher *Dispatcher) Enqueue(payload Payload) EnqueueResult {
 		} else if byteFull {
 			reason = ReasonByteLimit
 		}
+		payload.complete(false)
 		return EnqueueResult{Disposition: EnqueueDropped, Reason: reason}
 	}
 	if dispatcher.config.LegacyCircuit {
@@ -228,6 +232,7 @@ func (dispatcher *Dispatcher) Enqueue(payload Payload) EnqueueResult {
 			dispatcher.queueMu.Unlock()
 			dispatcher.lifecycleMu.Unlock()
 			dispatcher.counters.rejected.Add(1)
+			payload.complete(false)
 			return EnqueueResult{Disposition: EnqueueRejected, Reason: ReasonCircuitOpen}
 		}
 		if halfOpen {
@@ -425,7 +430,15 @@ func (dispatcher *Dispatcher) DeliveryHealthSnapshot() HealthSnapshot {
 		state = HealthDegraded
 		reason = HealthReasonCircuitHalfOpen
 	}
-	items, bytes, inFlightItems, inFlightBytes := dispatcher.QueueUsage()
+	// The queue charge and the counters are read in one queueMu section:
+	// releaseDropped and abandonPending move a record from the charge to the
+	// dropped counter under that lock, so the shutdown loss count, which adds
+	// the two, counts each abandoned record once (GAP-1234).
+	dispatcher.queueMu.Lock()
+	items, bytes := dispatcher.chargedItems, dispatcher.chargedBytes
+	inFlightItems, inFlightBytes := dispatcher.inFlightItems, dispatcher.inFlightBytes
+	counters := dispatcher.Counters()
+	dispatcher.queueMu.Unlock()
 	return HealthSnapshot{
 		Destination:         dispatcher.config.Destination,
 		Generation:          dispatcher.config.Generation,
@@ -442,7 +455,7 @@ func (dispatcher *Dispatcher) DeliveryHealthSnapshot() HealthSnapshot {
 			InFlightItems: inFlightItems, InFlightBytes: inFlightBytes,
 			MaxItems: dispatcher.config.MaxQueueItems, MaxBytes: dispatcher.config.MaxQueueBytes,
 		},
-		Counters: dispatcher.Counters(), LastSuccess: lastSuccess, LastFailure: lastFailure,
+		Counters: counters, LastSuccess: lastSuccess, LastFailure: lastFailure,
 	}
 }
 
@@ -800,8 +813,7 @@ func (dispatcher *Dispatcher) deliver(payloads []Payload, encodedSize int, halfO
 		result := dispatcher.callAdapter(attemptContext, batch)
 		cancelAttempt()
 		if dispatcher.rootContext.Err() != nil {
-			dispatcher.counters.dropped.Add(uint64(len(payloads)))
-			dispatcher.release(payloads)
+			dispatcher.releaseDropped(payloads)
 			return false
 		}
 		failureCode, validResult := deliveryFailureCode(result)
@@ -818,7 +830,7 @@ func (dispatcher *Dispatcher) deliver(payloads []Payload, encodedSize int, halfO
 			dispatcher.counters.delivered.Add(uint64(len(payloads)))
 			dispatcher.recordSuccess(dispatcher.nowUTC())
 			dispatcher.recordCircuitSuccess()
-			dispatcher.release(payloads)
+			dispatcher.releaseDelivered(payloads)
 			dispatcher.setOperationalHealth(HealthHealthy, HealthReasonRecovered)
 			return true
 		case OutcomePartial:
@@ -845,24 +857,23 @@ func (dispatcher *Dispatcher) deliver(payloads []Payload, encodedSize int, halfO
 			now := dispatcher.nowUTC()
 			dispatcher.recordFailure(now, failureCode)
 			if attempt == maxAttempts {
-				if dispatcher.config.LegacyCircuit {
-					dispatcher.counters.rejected.Add(uint64(len(payloads)))
-				} else {
-					dispatcher.counters.dropped.Add(uint64(len(payloads)))
-				}
 				reason := HealthReasonDeliveryFailed
 				if dispatcher.recordCircuitFailure(FailureClassTransient, now) {
 					reason = HealthReasonCircuitOpen
 				}
 				dispatcher.setOperationalHealth(HealthFailing, reason)
-				dispatcher.release(payloads)
+				if dispatcher.config.LegacyCircuit {
+					dispatcher.counters.rejected.Add(uint64(len(payloads)))
+					dispatcher.release(payloads)
+				} else {
+					dispatcher.releaseDropped(payloads)
+				}
 				return true
 			}
 			dispatcher.counters.retried.Add(uint64(len(payloads)))
 			dispatcher.setOperationalHealth(HealthDegraded, HealthReasonRetryable)
 			if !dispatcher.waitBackoff(attempt) {
-				dispatcher.counters.dropped.Add(uint64(len(payloads)))
-				dispatcher.release(payloads)
+				dispatcher.releaseDropped(payloads)
 				return false
 			}
 		case OutcomeAuthentication, OutcomePermanentPayload, OutcomeUnsafeEndpoint:
@@ -1029,16 +1040,53 @@ func safeJitter(function func(time.Duration, int) time.Duration, delay time.Dura
 // release marks payloads complete and may wake Flush. Callers must publish the
 // terminal counters and health state before calling it.
 func (dispatcher *Dispatcher) release(payloads []Payload) {
+	dispatcher.releaseWithOutcome(payloads, false)
+}
+
+// releaseDelivered releases payloads the destination acknowledged in full.
+// Every other release reports them not delivered.
+func (dispatcher *Dispatcher) releaseDelivered(payloads []Payload) {
+	dispatcher.releaseWithOutcome(payloads, true)
+}
+
+func (dispatcher *Dispatcher) releaseWithOutcome(payloads []Payload, delivered bool) {
 	dispatcher.queueMu.Lock()
+	dispatcher.releaseLocked(payloads)
+	dispatcher.queueMu.Unlock()
+	completePayloads(payloads, delivered)
+	dispatcher.completed.Add(uint64(len(payloads)))
+	dispatcher.signalFlush()
+}
+
+// completePayloads reports the terminal outcome of payloads before Flush
+// can observe them complete.
+func completePayloads(payloads []Payload, delivered bool) {
+	for _, payload := range payloads {
+		payload.complete(delivered)
+	}
+}
+
+// releaseDropped counts payloads as dropped and releases their queue charge
+// in one queueMu section. DeliveryHealthSnapshot reads the queue and the
+// counters under the same lock, so a reader sees each dropped record either
+// still queued or in the dropped counter, never in both (GAP-1234).
+func (dispatcher *Dispatcher) releaseDropped(payloads []Payload) {
+	dispatcher.queueMu.Lock()
+	dispatcher.counters.dropped.Add(uint64(len(payloads)))
+	dispatcher.releaseLocked(payloads)
+	dispatcher.queueMu.Unlock()
+	completePayloads(payloads, false)
+	dispatcher.completed.Add(uint64(len(payloads)))
+	dispatcher.signalFlush()
+}
+
+func (dispatcher *Dispatcher) releaseLocked(payloads []Payload) {
 	for _, payload := range payloads {
 		dispatcher.chargedItems--
 		dispatcher.chargedBytes -= payload.Size()
 	}
 	dispatcher.inFlightItems = 0
 	dispatcher.inFlightBytes = 0
-	dispatcher.queueMu.Unlock()
-	dispatcher.completed.Add(uint64(len(payloads)))
-	dispatcher.signalFlush()
 }
 
 func (dispatcher *Dispatcher) abandonPending() {
@@ -1052,8 +1100,10 @@ func (dispatcher *Dispatcher) abandonPending() {
 		dispatcher.chargedItems--
 		dispatcher.chargedBytes -= payload.Size()
 	}
+	abandoned := dispatcher.pending
 	dispatcher.pending = nil
 	dispatcher.queueMu.Unlock()
+	completePayloads(abandoned, false)
 	if dropped > 0 {
 		dispatcher.completed.Add(uint64(dropped))
 		dispatcher.signalFlush()

@@ -23,7 +23,7 @@ import (
 )
 
 var windowsSupportedConnectorNames = []string{
-	"amp", "antigravity", "claudecode", "codex", "copilot", "cursor", "devin", "hermes", "kiro", "omnigent", "opencode",
+	"amp", "antigravity", "claudecode", "codex", "copilot", "cursor", "devin", "hermes", "kiro", "opencode",
 }
 
 var windowsPreviewConnectorNames = []string{}
@@ -32,7 +32,6 @@ var windowsNotCertifiedConnectorNames = []string{}
 
 var windowsUnsupportedConnectorNames = []string{
 	"openclaw",
-	"openhands",
 	"zeptoclaw",
 }
 
@@ -92,7 +91,7 @@ func TestProxyConnectorsRemainTopologyOnly(t *testing.T) {
 	if strings.Join(got, ",") != strings.Join(want, ",") {
 		t.Fatalf("proxyConnectors=%v, want %v", got, want)
 	}
-	for _, name := range []string{"openhands", "omnigent", "hermes"} {
+	for _, name := range []string{"hermes"} {
 		if IsProxyConnector(name) {
 			t.Errorf("IsProxyConnector(%q)=true, want false", name)
 		}
@@ -144,15 +143,20 @@ func TestConnectorSupportOnOS(t *testing.T) {
 	}
 }
 
-func TestValidateConnectorSupportedOnOS(t *testing.T) {
-	for _, name := range []string{"copilot", "antigravity", "hermes"} {
-		if err := validateConnectorSupportedOnOS(name, "windows"); err != nil {
-			t.Fatalf("supported connector %s should remain available: %v", name, err)
+func TestRegistryWindowsFilterKeepsSupportedAndPreview(t *testing.T) {
+	reg := NewDefaultRegistry()
+	var got []string
+	for _, name := range reg.Names() {
+		if connectorSupportedOnOS(name, "windows") {
+			got = append(got, name)
 		}
 	}
-	err := validateConnectorSupportedOnOS("openhands", "windows")
-	if err == nil || !strings.Contains(err.Error(), "requires WSL") {
-		t.Fatalf("expected clear OpenHands Windows rejection, got %v", err)
+	sort.Strings(got)
+	want := append([]string(nil), windowsSupportedConnectorNames...)
+	want = append(want, windowsPreviewConnectorNames...)
+	sort.Strings(want)
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("windows-filtered connectors=%v, want %v", got, want)
 	}
 }
 
@@ -169,29 +173,24 @@ func TestCheckPlatformSupportPreservesOperatorWording(t *testing.T) {
 		}
 	}
 
-	warning, err = CheckPlatformSupport("openhands", "windows")
+	warning, err = CheckPlatformSupport("openclaw", "windows")
 	if warning != "" {
 		t.Fatalf("unsupported warning = %q, want empty", warning)
 	}
-	wantError := "connector \"openhands\" is not supported on windows: " + windowsConnectorSupport["openhands"].Reason
+	wantError := "connector \"openclaw\" is not supported on windows: " + windowsConnectorSupport["openclaw"].Reason
 	if err == nil || err.Error() != wantError {
 		t.Fatalf("unsupported error = %v, want %q", err, wantError)
 	}
 }
 
-func TestRegistryWindowsFilterKeepsSupportedAndPreview(t *testing.T) {
-	reg := NewDefaultRegistry()
-	var got []string
-	for _, name := range reg.Names() {
-		if connectorSupportedOnOS(name, "windows") {
-			got = append(got, name)
+func TestValidateConnectorSupportedOnOS(t *testing.T) {
+	for _, name := range []string{"copilot", "antigravity", "hermes"} {
+		if err := validateConnectorSupportedOnOS(name, "windows"); err != nil {
+			t.Fatalf("supported connector %s should remain available: %v", name, err)
 		}
 	}
-	sort.Strings(got)
-	want := append([]string(nil), windowsSupportedConnectorNames...)
-	want = append(want, windowsPreviewConnectorNames...)
-	sort.Strings(want)
-	if strings.Join(got, ",") != strings.Join(want, ",") {
-		t.Fatalf("windows-filtered connectors=%v, want %v", got, want)
+	err := validateConnectorSupportedOnOS("openclaw", "windows")
+	if err == nil || !strings.Contains(err.Error(), "requires the guardrail proxy") {
+		t.Fatalf("expected clear OpenClaw Windows rejection, got %v", err)
 	}
 }

@@ -288,12 +288,18 @@ async function defenseclawSend(event, payload) {
     if (await defenseclawDeploymentRemoved()) return { reason: "", mode: "" };
     return { reason: "DefenseClaw hook failed closed (empty response)", mode: "" };
   }
+  if (result.code !== 0) {
+    return { reason: "DefenseClaw hook failed closed (exit " + result.code + ")", mode: "" };
+  }
+  if (!data || !["allow", "block", "confirm", "alert"].includes(data.action)) {
+    return { reason: "DefenseClaw hook failed closed (invalid gateway verdict)", mode: "" };
+  }
   const out = data && data.hook_output;
   if (out && (out.decision === "deny" || out.decision === "block")) {
     return { reason: out.reason || "DefenseClaw blocked this tool call.", mode: data.mode || "" };
   }
-  if (!data || result.code !== 0) {
-    return { reason: "DefenseClaw hook failed closed (exit " + result.code + ")", mode: "" };
+  if (data.action === "block" || data.action === "confirm") {
+    return { reason: "DefenseClaw hook failed closed (missing native deny)", mode: data.mode || "" };
   }
   return { reason: "", mode: data.mode || "", notice: defenseclawFailOpenNotice(data) || defenseclawConfirmNotice(data) };
 }

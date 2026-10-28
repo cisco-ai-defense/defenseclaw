@@ -1587,9 +1587,14 @@ class TestAdmissionVerdictWarning(_StoreWithPolicyMixin, unittest.TestCase):
         self.assertIn("2 findings", detail)
         self.assertIn("MEDIUM", detail)
 
-    def test_low_mcp_rejected_by_policy_override(self):
+    def test_low_mcp_warns_by_default_and_rejects_with_policy_override(self):
         pe = self._pe()
         scan = {"finding_count": 1, "max_severity": "LOW", "target": "/x"}
+        verdict, detail = _admission_verdict(
+            pe, "mcp", "minor-issues", scan, None,
+        )
+        self.assertEqual(verdict, "warning")
+        self.cfg.admission.mcp.actions["low"] = "quarantine"
         verdict, detail = _admission_verdict(
             pe, "mcp", "minor-issues", scan, None,
         )
@@ -2108,7 +2113,7 @@ class TestEnrichWithPolicy(_StoreWithPolicyMixin, unittest.TestCase):
         enrich_with_policy(inv, self.store, cfg=cfg)
 
         self.assertEqual(inv["plugins"][0]["policy_verdict"], "rejected")
-        self.assertEqual(inv["mcp"][0]["policy_verdict"], "rejected")
+        self.assertEqual(inv["mcp"][0]["policy_verdict"], "warning")
         shutil.rmtree(tmp, ignore_errors=True)
 
     def test_plugin_policy_enrichment_uses_install_name_aliases(self):
@@ -2204,7 +2209,7 @@ class TestEnrichWithPolicy(_StoreWithPolicyMixin, unittest.TestCase):
 
             enrich_with_policy(inv, self.store, cfg=cfg)
 
-            self.assertEqual(inv["mcp"][0]["policy_verdict"], "rejected")
+            self.assertEqual(inv["mcp"][0]["policy_verdict"], "warning")
             self.assertEqual(inv["mcp"][0]["scan_findings"], 2)
             self.assertEqual(inv["mcp"][0]["scan_severity"], "HIGH")
         finally:
@@ -3010,6 +3015,28 @@ class TestBuildAibomFromFilesystem(unittest.TestCase):
             agents = _agents_from_codex_toml_dirs([str(agents_dir)])
 
         self.assertEqual(agents, [])
+
+    def test_codex_agent_over_the_read_cap_is_listed_not_dropped(self):
+        # GAP-1083: a valid custom agent just over 1 MiB vanished from the
+        # AIBOM with no error; it is listed as not read, with the reason.
+        agents_dir = Path(self.tmp) / "agents"
+        agents_dir.mkdir()
+        cap = 1024 * 1024
+        header = 'name = "{name}"\ndeveloper_instructions = "SECRET-PROMPT-1083"\ndescription = "'
+        for stem, size in (("near", cap - 64), ("over", cap + 64)):
+            text = header.format(name=stem)
+            text += "d" * (size - len(text) - 2) + '"\n'
+            (agents_dir / f"{stem}.toml").write_bytes(text.encode("utf-8"))
+            self.assertEqual((agents_dir / f"{stem}.toml").stat().st_size, size)
+
+        agents = {row["id"]: row for row in _agents_from_codex_toml_dirs([str(agents_dir)])}
+
+        self.assertEqual(sorted(agents), ["near", "over"])
+        self.assertTrue(agents["near"]["eligible"])
+        self.assertNotIn("parse_error", agents["near"])
+        self.assertFalse(agents["over"]["eligible"])
+        self.assertIn(f"exceeds {cap} byte inventory limit", agents["over"]["parse_error"])
+        self.assertNotIn("SECRET-PROMPT-1083", repr(agents["over"]))
 
     def test_codex_rule_reparse_file_is_not_inventoried(self):
         cfg = _make_cfg_for_connector(self.tmp, "codex")
@@ -4084,19 +4111,6 @@ class TestBuildAibomFromFilesystem(unittest.TestCase):
         self.assertTrue(by_id["marked"]["eligible"])
         self.assertFalse(by_id["empty"]["eligible"])
 
-    def test_openhands_installed_container_is_not_a_skill(self):
-        cfg = _make_cfg_for_connector(self.tmp, "openhands")
-        openhands_skills = os.path.join(self.tmp, ".openhands", "skills")
-        installed = os.path.join(openhands_skills, "installed")
-        os.makedirs(installed, exist_ok=True)
-        _seed_skill(installed, "real-installed")
-
-        with self._patch_skill_dirs([openhands_skills, installed]), \
-             self._patch_plugin_dirs([]), \
-             self._patch_mcp([]):
-            inv = build_claw_aibom(cfg, live=True)
-
-        self.assertEqual([s["id"] for s in inv["skills"]], ["real-installed"])
 
     def test_skill_description_extracted_from_skill_md(self):
         cfg = _make_cfg_for_connector(self.tmp, "codex")
@@ -4113,20 +4127,6 @@ class TestBuildAibomFromFilesystem(unittest.TestCase):
             inv = build_claw_aibom(cfg, live=True)
         self.assertEqual(inv["skills"][0]["description"], "Skill Title")
 
-    def test_skill_description_prefers_frontmatter(self):
-        cfg = _make_cfg_for_connector(self.tmp, "openhands")
-        skill_root = os.path.join(self.tmp, "skills")
-        os.makedirs(skill_root, exist_ok=True)
-        _seed_skill(
-            skill_root,
-            "frontmatter",
-            body="---\nname: frontmatter\ndescription: Frontmatter description\n---\n\n# Fallback\n",
-        )
-        with self._patch_skill_dirs([skill_root]), \
-             self._patch_plugin_dirs([]), \
-             self._patch_mcp([]):
-            inv = build_claw_aibom(cfg, live=True)
-        self.assertEqual(inv["skills"][0]["description"], "Frontmatter description")
 
     def test_skill_description_rejects_linked_skill_ancestry(self):
         outside = Path(self.tmp) / "outside"

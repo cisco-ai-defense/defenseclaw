@@ -276,3 +276,51 @@ func TestDevinSetupPutsBackAMissingConfigWithTheAccountsSettings(t *testing.T) {
 		}
 	}
 }
+
+// rel-1-0-2 GAP-0612 (1): the copy DefenseClaw kept of a config.yaml its own
+// first setup created holds its hooks only. A later loss puts that copy back,
+// and the notice says hooks only, not "with that user's settings".
+func TestHermesPutBackHooksOnlyCopyIsReportedAsHooksOnly(t *testing.T) {
+	conn, opts, configPath := hermesRestoreFixture(t, "")
+	if status := AgentConfigStatus("hermes", opts, time.Time{}, true); status != "" {
+		t.Fatalf("status after first setup: %q", status)
+	}
+	if _, err := os.Stat(hermesSpec.copyPath(opts.DataDir)); err != nil {
+		t.Fatalf("no copy of the hooks-only file: %v", err)
+	}
+	if err := os.Remove(configPath); err != nil {
+		t.Fatal(err)
+	}
+	started := time.Now()
+	if err := conn.Setup(context.Background(), opts); err != nil {
+		t.Fatalf("repair Setup: %v", err)
+	}
+	if status := AgentConfigStatus("hermes", opts, started, false); status != AgentConfigRecreatedHooksOnly {
+		t.Fatalf("status = %q, want %q", status, AgentConfigRecreatedHooksOnly)
+	}
+}
+
+// rel-1-0-2 GAP-0612 (2): with the backup record gone, a copy that is there
+// but no longer reads is settings DefenseClaw saw: the file is recreated with
+// the hooks and reported as settings lost, not silently.
+func TestHermesUnreadableCopyWithoutRecordReportsSettingsLost(t *testing.T) {
+	conn, opts, configPath := hermesRestoreFixture(t, hermesAccountSettings)
+	if err := os.Remove(managedFileBackupPath(opts.DataDir, "hermes", "config.yaml")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(hermesSpec.copyPath(opts.DataDir), []byte("{not json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(configPath); err != nil {
+		t.Fatal(err)
+	}
+	if err := conn.Setup(context.Background(), opts); err != nil {
+		t.Fatalf("repair Setup: %v", err)
+	}
+	if got := hermesTopKeys(t, configPath); got != "hooks" {
+		t.Fatalf("recreated config.yaml keys = %s", got)
+	}
+	if status := AgentConfigStatus("hermes", opts, time.Time{}, false); status != AgentConfigSettingsLost {
+		t.Fatalf("status = %q, want %q", status, AgentConfigSettingsLost)
+	}
+}

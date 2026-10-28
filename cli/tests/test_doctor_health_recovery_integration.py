@@ -33,6 +33,8 @@ from defenseclaw.doctor_gateway import ListenerEvidence
 from defenseclaw.doctor_health import ComponentEvidence, HealthStatus
 from defenseclaw.doctor_recovery import DeviceKeyHealthStatus, inspect_device_key
 
+from tests.permissions import set_known_windows_directory_acl
+
 
 @pytest.fixture(autouse=True)
 def _canonical_v8_validator_stub(monkeypatch):
@@ -490,6 +492,43 @@ def test_unavailable_or_untested_compatibility_is_advisory_not_a_lifecycle_block
     assert "no positively unsupported" in connector_gate.detail
 
 
+def test_supported_kiro_ide_keeps_old_cli_finding_without_blocking_gateway_repair(tmp_path) -> None:
+    if os.name == "nt":
+        data_dir = tmp_path / "data"
+        data_dir.mkdir()
+        set_known_windows_directory_acl(data_dir)
+    else:
+        data_dir = _private_data_dir(tmp_path)
+    cfg = _cfg(data_dir, connector="kiro")
+
+    def signal(version, *, cli="", ide=""):
+        return SimpleNamespace(
+            installed=True, version=version, kiro_cli_version=cli, kiro_ide_version=ide
+        )
+
+    from defenseclaw import doctor_health
+
+    cases = (
+        (signal("1.0.182", cli="kiro-cli 2.26.1", ide="1.0.182"), "noop"),
+        (signal("kiro-cli 2.26.1", cli="kiro-cli 2.26.1"), "manual"),
+    )
+    for installed, expected_gate in cases:
+        with patch.object(
+            doctor_health, "read_cached_discovery",
+            return_value=SimpleNamespace(agents={"kiro": installed}),
+        ):
+            problems = cmd_doctor._connector_compatibility_problems(cfg)
+            gate = cmd_doctor._plan_connector_compatibility_gate(cfg)
+
+        assert any(
+            finding.status is HealthStatus.UNSUPPORTED and finding.installed_version == "2.26.1"
+            for finding in problems
+        )
+        assert gate.state == expected_gate
+        if expected_gate == "noop":
+            assert "selected Kiro surface can be repaired" in gate.detail
+
+
 def test_positive_unsupported_compatibility_blocks_gateway_lifecycle(tmp_path) -> None:
     data_dir = _private_data_dir(tmp_path)
     cfg = _cfg(data_dir)
@@ -894,6 +933,8 @@ def test_audit_check_and_repair_plan_reject_world_readable_database(tmp_path) ->
     assert result.checks[0]["reason_code"] == "audit-db-custody-invalid"
     # GAP-0337: a permission slip names the mode and the chmod, not a restore.
     assert "mode 0644" in result.checks[0]["detail"]
+    # GAP-1332: the content was not checked, so it is not called intact.
+    assert "intact" not in result.checks[0]["detail"]
     assert result.checks[0]["remediation"] == f"chmod 600 {cfg.audit_db}"
     assert planned.state == "blocked"
     assert planned.blockers == ("audit-db-custody-invalid",)
@@ -1258,3 +1299,70 @@ def test_gateway_writing_to_a_deleted_audit_db_fails_and_restarts(tmp_path) -> N
         with patch.object(cmd_doctor, "_recovery_gateway_blocker", return_value="gateway running"):
             assert cmd_doctor._plan_audit_db_recovery(cfg).state == "noop"
     restart.assert_called_once()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX mode exposure")
+def test_writable_data_directory_fails_the_private_files_row(tmp_path) -> None:
+    # GAP-1329: another account that can write the data directory can
+    # replace the private files in it.
+    data_dir = _private_data_dir(tmp_path)
+    cfg = _cfg(data_dir)
+    try:
+        os.chmod(data_dir, 0o777)
+        rows = _DoctorResult()
+        cmd_doctor._check_private_file_exposure(cfg, rows)
+        assert rows.checks[-1]["status"] == "fail", rows.checks
+        assert f"chmod 700 {data_dir}" in rows.checks[-1]["remediation"]
+        os.chmod(data_dir, 0o755)
+        rows = _DoctorResult()
+        cmd_doctor._check_private_file_exposure(cfg, rows)
+        assert rows.checks[-1]["status"] == "warn", rows.checks
+    finally:
+        os.chmod(data_dir, 0o700)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX mode bits")
+def test_macos_write_acl_on_the_data_directory_fails_the_private_files_row(tmp_path) -> None:
+    # Review fix (GAP-1329): a mode-0700 data directory with a macOS write
+    # grant ACL lets another account replace private state.
+    data_dir = _private_data_dir(tmp_path)
+    cfg = _cfg(data_dir)
+    for problem, status in (
+        ("extended ACL grants additional write access", "fail"),
+        ("extended ACL could not be inspected", "warn"),
+    ):
+        with patch("defenseclaw.file_permissions.darwin_acl_write_error", return_value=problem):
+            rows = _DoctorResult()
+            cmd_doctor._check_private_file_exposure(cfg, rows)
+        row = rows.checks[-1]
+        assert row["status"] == status, rows.checks
+        assert problem in row["detail"]
+        assert "chmod 700" not in row["remediation"]
+        if status == "fail":
+            assert "chmod -N" in row["remediation"]
+
+
+def test_windows_write_acl_on_the_data_directory_fails_the_private_files_row(tmp_path, monkeypatch) -> None:
+    # Review fix (GAP-1329): the Windows data directory gets the recovery
+    # planner's write custody check instead of being skipped.
+    data_dir = _private_data_dir(tmp_path)
+    cfg = _cfg(data_dir)
+    fake_os = SimpleNamespace(name="nt", path=os.path, lstat=os.lstat)
+    monkeypatch.setattr(cmd_doctor, "os", fake_os)
+    seen = []
+
+    def custody(path, **kwargs):
+        seen.append((path, kwargs))
+        return "ACL grants write access to untrusted SID S-1-5-21-other"
+
+    with (
+        patch("defenseclaw.file_permissions.windows_acl_confidentiality_error", return_value=None),
+        patch("defenseclaw.file_permissions.windows_acl_custody_write_error", side_effect=custody),
+    ):
+        rows = _DoctorResult()
+        cmd_doctor._check_private_file_exposure(cfg, rows)
+    row = rows.checks[-1]
+    assert row["status"] == "fail", rows.checks
+    assert f"{data_dir} (unsafe Windows ACL: ACL grants write access" in row["detail"]
+    assert "remove other accounts' write access" in row["remediation"]
+    assert [kwargs for _path, kwargs in seen] == [{"allow_current_user": True, "require_current_user_owner": True}]

@@ -290,6 +290,9 @@ type fakeRelay struct {
 	// fake answers model the complete floor sent by the current gateway.
 	rawCurrent bool
 	explain    func(sandboxrelay.ExplainRequest) (sandboxapi.ManagedExplain, error)
+	// explainCtx, when set, answers Explain with the caller's context, so
+	// a test can hold a view until the caller gives up on it.
+	explainCtx func(context.Context, sandboxrelay.ExplainRequest) (sandboxapi.ManagedExplain, error)
 	test       func(sandboxrelay.PolicyTestRequest) (sandboxapi.PolicyTestResult, error)
 	packs      func(registration, connector, name string) ([]sandboxrelay.PackView, error)
 	// decisions answers the saved-decisions list of a registration.
@@ -373,7 +376,10 @@ func (f *fakeRelay) reported() []string {
 	defer f.eventsMu.Unlock()
 	return slices.Clone(f.reports)
 }
-func (f *fakeRelay) Explain(_ context.Context, r sandboxrelay.ExplainRequest) (sandboxapi.ManagedExplain, error) {
+func (f *fakeRelay) Explain(ctx context.Context, r sandboxrelay.ExplainRequest) (sandboxapi.ManagedExplain, error) {
+	if f.explainCtx != nil {
+		return f.explainCtx(ctx, r)
+	}
 	if f.explain != nil {
 		return f.explain(r)
 	}
@@ -424,11 +430,12 @@ func (f *fakeRelay) Events(_ context.Context, batch sandboxrelay.EventBatch) err
 // fakeOpenShell is a daemonOpenShell whose answers the test sets; the zero
 // value finds nothing to do.
 type fakeOpenShell struct {
-	drift    []openshell.SettingDrift
-	driftErr error
-	prepare  func(sandboxrelay.DaemonSettings) (bool, error)
-	prepared atomic.Int64
-	stopped  atomic.Int64
+	drift         []openshell.SettingDrift
+	driftErr      error
+	renderedDrift bool
+	prepare       func(sandboxrelay.DaemonSettings) (bool, error)
+	prepared      atomic.Int64
+	stopped       atomic.Int64
 	// holder is the gateway port's listener: 0 free, else the uid.
 	holder atomic.Int64
 }
@@ -444,6 +451,9 @@ func (f *fakeOpenShell) OtherGateways(context.Context, sandboxrelay.DaemonSettin
 
 func (f *fakeOpenShell) Drift(sandboxrelay.DaemonSettings) ([]openshell.SettingDrift, error) {
 	return f.drift, f.driftErr
+}
+func (f *fakeOpenShell) RenderedConfigDrift(sandboxrelay.DaemonSettings) bool {
+	return f.renderedDrift
 }
 func (f *fakeOpenShell) Prepare(_ context.Context, s sandboxrelay.DaemonSettings) (bool, error) {
 	f.prepared.Add(1)
@@ -556,6 +566,29 @@ func portFree(addr string) bool {
 	}
 	_ = ln.Close()
 	return true
+}
+
+// A failed startup List does not mean that the listeners are lost. Once
+// OpenShell answers again, the daemon can bind free ports for the sandbox
+// that survived its restart without stopping it.
+func TestSandboxDaemonStartupListRetryBindsListenersWithoutStopping(t *testing.T) {
+	var lists atomic.Int32
+	f := newSandboxDaemonFixture(t, func(o *SandboxDaemonOptions) {
+		o.countRunning = func(context.Context) (int, error) {
+			if lists.Add(1) == 1 {
+				return 0, errors.New("OpenShell List temporarily unavailable")
+			}
+			return 1, nil
+		}
+	})
+	fleet := &fakeSandboxFleet{phases: map[string]string{"vm": "ready"}}
+	f.d.rt.fleet = fleet
+	f.d.rt.recheck = 5 * time.Millisecond
+	f.run(t)
+	eventuallyTrue(t, func() bool { return lists.Load() >= 2 && f.d.listening() })
+	if stopped := fleet.stops(); len(stopped) != 0 {
+		t.Fatalf("stopped a healthy sandbox after transient List failure: %v", stopped)
+	}
 }
 
 // The CLI socket is 0600 in a 0700 directory, a stale socket is replaced,

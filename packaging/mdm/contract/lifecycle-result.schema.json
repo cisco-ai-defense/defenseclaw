@@ -151,6 +151,22 @@
       }
     },
     {
+      "$comment": "Windows has no OpenShell sandboxes: its openshell block always reports disabled, no driver and platform_unsupported (enterprisestatus.OpenShellUnsupportedCapability).",
+      "if": { "required": ["platform"], "properties": { "platform": { "const": "windows" } } },
+      "then": {
+        "properties": {
+          "openshell": {
+            "required": ["reason_code"],
+            "properties": {
+              "enabled": { "const": false },
+              "driver_available": { "const": "none" },
+              "reason_code": { "const": "platform_unsupported" }
+            }
+          }
+        }
+      }
+    },
+    {
       "$comment": "A not_root result (Linux, macOS) checked nothing: a standard user cannot read the root-only deployment record, so it leaves out every field that reports the deployment. Every other result has them.",
       "if": {
         "required": ["errors"],

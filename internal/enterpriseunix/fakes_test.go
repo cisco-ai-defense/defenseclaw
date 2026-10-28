@@ -26,6 +26,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/config/configwrite"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
@@ -47,6 +48,11 @@ type fakeServices struct {
 	failStart map[string]error
 	// failed units report systemd's failed state.
 	failed map[string]bool
+	// keepActiveOnStop models a systemd stop that returns while a helper is
+	// still active; a later start is then a successful no-op.
+	keepActiveOnStop map[string]bool
+	afterStart       func(Unit)
+	afterRestart     func(Unit)
 	// restarting units are in systemd's restart delay after a run with this
 	// Result ("success" for a planned restart, "exit-code" for a crash).
 	// PlannedRestart reads it once, and the unit is active again after that.
@@ -58,6 +64,8 @@ type fakeServices struct {
 	failReloadOnce bool
 	inner          ServiceManager // definition paths and unit list
 	env            *Env
+	// observe, when set, sees every call as it is made.
+	observe func(call string)
 }
 
 func newFakeServices(env *Env) *fakeServices {
@@ -103,8 +111,12 @@ func (f *fakeServices) DropInPaths(_ context.Context, u Unit) []string {
 
 func (f *fakeServices) record(call string) {
 	f.mu.Lock()
-	defer f.mu.Unlock()
 	f.calls = append(f.calls, call)
+	observe := f.observe
+	f.mu.Unlock()
+	if observe != nil {
+		observe(call)
+	}
 }
 
 func (f *fakeServices) Check(context.Context) error            { return nil }
@@ -129,6 +141,9 @@ func (f *fakeServices) Start(_ context.Context, u Unit) error {
 	f.mu.Lock()
 	f.active[u.Name] = true
 	f.mu.Unlock()
+	if f.afterStart != nil {
+		f.afterStart(u)
+	}
 	return nil
 }
 
@@ -140,13 +155,18 @@ func (f *fakeServices) Restart(_ context.Context, u Unit) error {
 	f.mu.Lock()
 	f.active[u.Name] = true
 	f.mu.Unlock()
+	if f.afterRestart != nil {
+		f.afterRestart(u)
+	}
 	return nil
 }
 
 func (f *fakeServices) Stop(_ context.Context, u Unit) error {
 	f.record("stop " + u.Name)
 	f.mu.Lock()
-	f.active[u.Name] = false
+	if !f.keepActiveOnStop[u.Name] {
+		f.active[u.Name] = false
+	}
 	f.mu.Unlock()
 	return nil
 }
@@ -285,12 +305,18 @@ func (a *fakeAccounts) Remove(_ context.Context, name string) error {
 	return nil
 }
 
+const fakeAppliedPolicyDigest = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+
 // fakeRunner answers the few host commands the lifecycle runs directly.
 type fakeRunner struct {
 	mu       sync.Mutex
 	versions map[string]string // gateway path -> version
 	calls    []string
 	ps       string // what ps -axo pid=,uid=,comm= prints (macOS)
+	// A healthy installed gateway computes the generation the lifecycle
+	// recorded. Tests of a rejected digest replace this answer explicitly.
+	installedGateway string
+	policyState      func() configwrite.GenerationState
 	// replies answer a command by filepath.Base(name) and its joined args.
 	replies map[string]fakeReply
 	// acls are the macOS ACL entries of rooted paths, as ls -le prints them;
@@ -309,6 +335,11 @@ func (r *fakeRunner) Run(_ context.Context, name string, args ...string) (Comman
 	r.mu.Unlock()
 	if reply, ok := r.replies[filepath.Base(name)+" "+strings.Join(args, " ")]; ok {
 		return reply.result, reply.err
+	}
+	if name == r.installedGateway && strings.Join(args, " ") == "policy digest --json" && r.policyState != nil {
+		state := r.policyState()
+		return CommandResult{Stdout: []byte(fmt.Sprintf(`{"effective_digest":%q,"config_generation":%d}`,
+			fakeAppliedPolicyDigest, state.Generation))}, nil
 	}
 	if len(args) > 0 && args[len(args)-1] == "--check" &&
 		strings.HasPrefix(strings.Join(args, " "), "enterprise hooks remove-all ") {
@@ -429,6 +460,21 @@ func newTestHost(t *testing.T, goos string) *testHost {
 		// No guardian runs in the fake host.
 		GuardianReportTimeout: 50 * time.Millisecond,
 	}
+	if goos == "darwin" {
+		// Nor its executable: kern.procargs2 and proc_pidpath of a live PID
+		// with a fake session's number named that process's image, so a
+		// supported npm Claude was judged by whatever ran under that PID on
+		// the macOS runner (TestManagedClaudeSupportedNPMScriptLaunchStaysCovered
+		// failed whenever PID 7181 was alive). Tests that model images set
+		// ProcessExecPath or ProcessImagePath after newTestHost.
+		env.ProcessExecPath = func(int) (string, error) { return "", errors.New("fake macOS host: no process executable") }
+		env.ProcessImagePath = func(int) (string, error) { return "", errors.New("fake macOS host: no process image") }
+	}
+	h.runner.installedGateway = filepath.Join(env.P(layout.BinDir), binGateway)
+	h.runner.policyState = func() configwrite.GenerationState {
+		state, _ := configwrite.ReadGenerationState(env.P(layout.ConfigPath))
+		return state
+	}
 	env.Lchown = func(path string, uid, gid int) error {
 		h.owners[stagedFinal(path)] = [2]int{uid, gid}
 		return nil
@@ -458,7 +504,9 @@ func newTestHost(t *testing.T, goos string) *testHost {
 	// The gateway's health document on its hook socket.
 	env.HealthGet = func(context.Context) (int, []byte, error) {
 		if h.healthy && h.services.isActive(gatewayName) {
-			return 200, []byte(`{"api":{"state":"running"},"inspection":{"local":"active","ai_defense":"disabled"}}`), nil
+			state := h.runner.policyState()
+			return 200, []byte(fmt.Sprintf(`{"api":{"state":"running"},"policy":{"effective_digest":%q,"config_generation":%d,"bundle_id":%q,"bundle_version":%d},"inspection":{"local":"active","ai_defense":"disabled"}}`,
+				fakeAppliedPolicyDigest, state.Generation, state.BundleID, state.BundleVersion)), nil
 		}
 		return 0, nil, errors.New("connection refused")
 	}
@@ -479,6 +527,22 @@ func newTestHost(t *testing.T, goos string) *testHost {
 	env.DockerEngine = func(context.Context, string) error { return nil }
 	env.fillDefaults()
 	h.env = env
+	if goos == "linux" {
+		// An empty fake process table still has a boot-time record. Tests
+		// that need an unavailable process scan remove this file explicitly.
+		stat := env.P("/proc/stat")
+		if err := os.MkdirAll(filepath.Dir(stat), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(stat, []byte(fmt.Sprintf("btime %d\n", time.Now().Unix())), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		// Tests of unrelated lifecycle behavior need explicit, readable
+		// kernel facts before status can claim complete security. Tests for
+		// open or unavailable controls replace or remove these fake values.
+		writeHostFile(t, h, sysctlMaxUserNamespaces, "0\n")
+		writeHostFile(t, h, sysctlPtraceScope, "2\n")
+	}
 	return h
 }
 
@@ -503,7 +567,25 @@ func (h *testHost) payload(version string) string {
 
 func (h *testHost) run(opts Options) *enterprisestatus.Result {
 	h.t.Helper()
-	return Run(context.Background(), h.env, opts)
+	result := Run(context.Background(), h.env, opts)
+	if (opts.Action == ActionInstall || opts.Action == ActionEnsure) && result.OK && result.Installed {
+		// The fake enumerator never publishes its first empty record. Real
+		// status must wait for that record before claiming complete coverage.
+		path := h.env.P(enterprisehooks.UnprotectedAgentsPath(h.env.Layout.ManifestPath))
+		if _, err := os.Stat(path); err == nil {
+			return result
+		} else if !os.IsNotExist(err) {
+			h.t.Fatal(err)
+		}
+		data, err := enterprisehooks.MarshalUnprotectedAgents(nil)
+		if err != nil {
+			h.t.Fatal(err)
+		}
+		if err := os.WriteFile(path, data, 0o600); err != nil {
+			h.t.Fatal(err)
+		}
+	}
+	return result
 }
 
 func (h *testHost) read(canonical string) string {

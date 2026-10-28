@@ -105,6 +105,6 @@ rules:
       defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_DELETE]))
     pattern: '(?i)(?:~|\$HOME|\$\{HOME\}|/root|/(?:home|Users)/[^/\\"'']+|[a-z]:[/\\]Users[/\\][^/\\"'']+)[/\\]\.defenseclaw[/\\](?:\.env|config\.yaml|confidence_policy\.yaml|guardrail_runtime\.json|device\.key|picked_connector|custom-providers\.json|(?:audit|judge|judge_bodies)\.db(?:-(?:wal|shm))?|(?:cache|policies|quarantine|receipts|registries)[/\\][^;\s]+)\b'
     title: "DefenseClaw security state mutation"
-    severity: HIGH
+    severity: CRITICAL
     confidence: 0.98
     tags: [cognitive-tampering, tampering, security-state]

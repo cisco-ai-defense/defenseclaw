@@ -21,16 +21,18 @@
       5. /uninstall JSON=1 removes the services, the marker, the Add/Remove
          Programs entry, the installed CLI and every DefenseClaw machine-policy
          file, and detect.ps1 stops detecting
+      6. A second /ensure after uninstall installs cleanly, verifies, and can
+         uninstall again (GAP-0686)
 
     With -UpgradeFrom it is the enterprise upgrade lane instead of step 1:
     the previous release's Setup /ensure installs with the same config, then
     this Setup's /ensure upgrades it. The upgrade must report the applied
-    policy, keep the secrets and the guardian ledger, and write
-    migration-v9.json plus config.yaml.v8.bak for v8 input. A v8 config is
-    migrated, so its policy comes from a newer config generation; a v9 one
-    (a 1.x previous release) keeps its bytes and its generation.
-    Steps 2-5 then run on the upgraded deployment. The source config, upgraded
-    config and any migration record are kept in -ResultsRoot for
+    policy, keep the secrets (a protected credential the lane stores on the
+    previous release with enterprise secret set) and the guardian ledger. The
+    version 9 config keeps its bytes and its generation. The previous release
+    must be 1.x: no 0.x release ships a standalone enterprise Setup.
+    Steps 2-5 then run on the upgraded deployment. The source and upgraded
+    config are kept in -ResultsRoot for
     scripts/check_enterprise_upgrade_config.py. The rollback drill of the
     Linux and macOS upgrade lanes is not run here: the Windows Setup
     transaction has no lifecycle test fault.
@@ -160,6 +162,45 @@ function Assert-ServicesRunning {
         if ($service.Status -ne 'Running') { Fail "service $name is $($service.Status), want Running" }
     }
     Write-Host "services running: $($serviceNames -join ' ')"
+}
+
+# A secret set restarts the gateway and returns once the service starts.
+function Wait-ServicesRunning([int]$Seconds = 60) {
+    $deadline = (Get-Date).AddSeconds($Seconds)
+    while ((Get-Date) -lt $deadline) {
+        $pending = @($serviceNames | Where-Object { (Get-Service -Name $_ -ErrorAction SilentlyContinue).Status -ne 'Running' })
+        if ($pending.Count -eq 0) { break }
+        Start-Sleep -Milliseconds 500
+    }
+    Assert-ServicesRunning
+}
+
+# The protected credential the upgrade lane stores on the previous release.
+# Its value is random, so only the credential this run stored can match.
+$upgradeSecretName = 'ci-upgrade-lane'
+$script:UpgradeSecretValue = ''
+
+function Test-UpgradeSecretKept {
+    $path = Join-Path $secretsDirectory $upgradeSecretName
+    if (-not $script:UpgradeSecretValue -or -not (Test-Path -LiteralPath $path -PathType Leaf)) { return $false }
+    $stored = [IO.File]::ReadAllBytes($path)
+    $want = [Text.Encoding]::UTF8.GetBytes($script:UpgradeSecretValue)
+    return [Linq.Enumerable]::SequenceEqual([byte[]]$stored, [byte[]]$want)
+}
+
+function Add-UpgradeSecret([string]$Name) {
+    $script:UpgradeSecretValue = 'ci-upgrade-lane-' + [guid]::NewGuid().ToString('N')
+    $result = Join-Path $ResultsRoot "$Name.json"
+    $log = Join-Path $ResultsRoot "$Name.log"
+    $script:UpgradeSecretValue | & $cli enterprise secret set --name $upgradeSecretName --from-stdin --json > $result 2> $log
+    $exitCode = $LASTEXITCODE
+    Write-Host "$Name exited $exitCode"
+    if ($exitCode -ne 0) {
+        if (Test-Path -LiteralPath $log) { Get-Content -LiteralPath $log -Tail 20 | ForEach-Object { Write-Host "  stderr: $_" } }
+        Fail "enterprise secret set exited $exitCode"
+    }
+    if (-not (Test-UpgradeSecretKept)) { Fail "enterprise secret set did not store $(Join-Path $secretsDirectory $upgradeSecretName)" }
+    Wait-ServicesRunning
 }
 
 function Assert-ServicesGone {
@@ -296,11 +337,6 @@ function Invoke-Detect {
     return [pscustomobject]@{ ExitCode = $LASTEXITCODE; Output = (@($output) -join "`n").Trim() }
 }
 
-function Get-FileSha([string]$Path) {
-    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return 'absent' }
-    return (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash
-}
-
 # One digest over every file name and content under a folder.
 function Get-TreeSha([string]$Path) {
     if (-not (Test-Path -LiteralPath $Path -PathType Container)) { return 'absent' }
@@ -388,6 +424,7 @@ if ($UpgradeFrom) {
         throw "-UpgradeFrom must be the absolute path of an existing Setup: $UpgradeFrom"
     }
     if (-not $PreviousVersion) { throw '-UpgradeFrom needs -PreviousVersion' }
+    if ($PreviousVersion -match '^v?0\.') { throw "-PreviousVersion ${PreviousVersion}: no 0.x release ships a standalone enterprise Setup; upgrade from 1.x" }
     $UpgradeFrom = (Resolve-Path -LiteralPath $UpgradeFrom).Path
 }
 if (-not $ResultsRoot) {
@@ -411,6 +448,7 @@ $run = $null
 # scanner_judge_missing once the Setup has installed the scanner runtime.
 $installedChecks = @(
     '--coverage-complete', '--security-incomplete', '--allow-warning', 'scanner_judge_missing',
+    '--allow-warning', 'hook_process_fail_open',
     '--machine-policy-enforced', 'codex', '--machine-policy-target', 'claudecode'
 )
 
@@ -439,14 +477,12 @@ try {
     if ($LASTEXITCODE -ne 0) { Fail "icacls could not protect $stage" }
     & icacls.exe $stage /setowner '*S-1-5-32-544' | Out-Null
     if ($LASTEXITCODE -ne 0) { Fail "icacls could not set the owner of $stage" }
-    $sourceConfigVersion = if ($UpgradeFrom -and $PreviousVersion -match '^v?0\.') { 8 } else { 9 }
     # A standalone Windows host without a policy_dir keeps the embedded rule
     # packs only while the config names none: rule_pack: default would select
     # the default pack of a policy_dir this host does not have, and the Setup
     # refuses it ("policy_dir is not set").
-    $rulePackLines = if ($sourceConfigVersion -eq 8) { @('  rule_pack_dir: ""') } else { @() }
     $configText = @(
-        "config_version: $sourceConfigVersion"
+        'config_version: 9'
         'deployment_mode: managed_enterprise'
         'enterprise:'
         '  profile: standalone'
@@ -456,7 +492,6 @@ try {
         'guardrail:'
         '  enabled: true'
         '  mode: observe'
-        $rulePackLines
         '  connectors:'
         '    claudecode:'
         '      enabled: true'
@@ -479,13 +514,13 @@ try {
         Assert-ServicesRunning
         Assert-PolicyApplied
         Copy-Item -LiteralPath $config -Destination (Join-Path $ResultsRoot 'config-before.yaml')
+        Step "store a protected credential on the previous release ($PreviousVersion)"
+        Add-UpgradeSecret '01-previous-secret'
         $run = Invoke-Lifecycle -Name '01-previous-status' -FilePath $cli -Arguments @('enterprise', 'windows', 'status', '--profile', 'standalone', '--json')
         Assert-Result $run 'previous-status' (@('--action', 'status', '--installed', '--version', $PreviousVersion) + $installedChecks)
         $previousGeneration = Get-ConfigGeneration $run.Result
-        # A v8 config is migrated, so the upgrade applies a new config
-        # generation; a v9 one keeps its bytes and its generation.
-        $generationFloor = if ($sourceConfigVersion -eq 8) { $previousGeneration } else { $previousGeneration - 1 }
-        $previousConfigSha = Get-FileSha $installedConfig
+        # The version 9 config keeps its bytes, so its generation does not drop.
+        $generationFloor = $previousGeneration - 1
         $previousSecretsSha = Get-TreeSha $secretsDirectory
         $previousLedgerTargets = Get-LedgerTargets $guardianLedger
 
@@ -494,14 +529,9 @@ try {
         Assert-Result $run 'setup-ensure-upgrade' (@('--action', 'ensure', '--changed', '--installed', '--version', $Version, '--ready') +
             $installedChecks + @('--allow-warning', 'ensure_upgrade', '--policy-applied', '--config-generation-above', [string]$generationFloor))
         Assert-ServicesRunning
-        $record = Join-Path (Split-Path -Parent $installedConfig) 'migration-v9.json'
-        if ($sourceConfigVersion -eq 8) {
-            if (-not (Test-Path -LiteralPath $record -PathType Leaf)) { Fail "the upgrade wrote no $record" }
-            if ((Get-FileSha "$installedConfig.v8.bak") -ne $previousConfigSha) { Fail "$installedConfig.v8.bak is not the previous config" }
-            Copy-Item -LiteralPath $record -Destination (Join-Path $ResultsRoot 'migration-v9.json')
-        }
         Copy-Item -LiteralPath $installedConfig -Destination (Join-Path $ResultsRoot 'config-upgraded.yaml')
         if ((Get-TreeSha $secretsDirectory) -ne $previousSecretsSha) { Fail "the upgrade changed the secrets under $secretsDirectory" }
+        if (-not (Test-UpgradeSecretKept)) { Fail "the upgrade did not keep the bytes of the protected credential $upgradeSecretName" }
         if ((Get-LedgerTargets $guardianLedger) -ne $previousLedgerTargets) { Fail "the upgrade changed the protected targets in the guardian ledger $guardianLedger" }
     }
     else {
@@ -524,6 +554,57 @@ try {
     Step 'Setup /ensure again with the same CONFIG= (must be a no-op)'
     $run = Invoke-Lifecycle -Name '02-setup-ensure-noop' -FilePath $Setup -Arguments @('/ensure', "CONFIG=$config", 'JSON=1')
     Assert-Result $run 'setup-ensure-noop' (@('--action', 'ensure', '--noop', '--installed', '--version', $Version, '--ready') + $installedChecks)
+
+    Step 'Setup /ensure repairs a drifted runtime ACL with CONFIG='
+    $runtimeDirectory = Join-Path $stateRoot 'runtime'
+    & icacls.exe $runtimeDirectory /grant '*S-1-5-32-545:(OI)(CI)M' | Out-Null
+    if ($LASTEXITCODE -ne 0) { Fail "icacls could not drift $runtimeDirectory" }
+    $run = Invoke-Lifecycle -Name '02-ensure-runtime-acl-repair' -FilePath $Setup -Arguments @('/ensure', "CONFIG=$config", 'JSON=1')
+    Assert-Result $run 'ensure-runtime-acl-repair' (@('--action', 'ensure', '--installed', '--version', $Version, '--ready') +
+        $installedChecks + @('--allow-warning', 'ensure_repair'))
+    Assert-ServicesRunning
+    $writeMask = [int][Security.AccessControl.FileSystemRights]::Write
+    foreach ($ace in (Get-Acl -LiteralPath $runtimeDirectory).Access) {
+        $sid = $ace.IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value
+        if ($sid -eq 'S-1-5-32-545' -and $ace.AccessControlType -eq 'Allow' -and
+            (([int]$ace.FileSystemRights -band $writeMask) -ne 0)) {
+            Fail "Setup left a Users write ACE on $runtimeDirectory"
+        }
+    }
+
+    Step 'Setup /ensure refuses foreign-OS config before replacing the running deployment'
+    $foreignConfig = Join-Path $stage 'foreign-os-config.yaml'
+    [IO.File]::WriteAllText($foreignConfig, "data_dir: /opt/cisco/defenseclaw/runtime`n" + $configText + "`n", [Text.UTF8Encoding]::new($false))
+    & icacls.exe $foreignConfig /setowner '*S-1-5-32-544' | Out-Null
+    if ($LASTEXITCODE -ne 0) { Fail "icacls could not set the owner of $foreignConfig" }
+    $previousHash = (Get-FileHash -LiteralPath $installedConfig -Algorithm SHA256).Hash
+    $previousServices = @{}
+    foreach ($name in $serviceNames) {
+        $previousServices[$name] = Get-CimInstance Win32_Service -Filter "Name='$name'"
+    }
+    $run = Invoke-Lifecycle -Name '02-foreign-os-refused' -FilePath $Setup -Arguments @('/ensure', "CONFIG=$foreignConfig", 'JSON=1')
+    $refusal = Get-Content -LiteralPath $run.Result -Raw | ConvertFrom-Json
+    if ($run.ExitCode -ne 1639 -or [bool]$refusal.transaction_pending -or
+        -not (@($refusal.errors | ForEach-Object { [string]$_.message }) -join ' ').Contains('data_dir')) {
+        Fail "foreign-OS ensure did not refuse data_dir before the transaction (exit $($run.ExitCode))"
+    }
+    if ((Get-FileHash -LiteralPath $installedConfig -Algorithm SHA256).Hash -cne $previousHash) {
+        Fail 'foreign-OS ensure replaced the installed config'
+    }
+    foreach ($name in $serviceNames) {
+        $current = Get-CimInstance Win32_Service -Filter "Name='$name'"
+        $previous = $previousServices[$name]
+        if ([int]$current.ProcessId -ne [int]$previous.ProcessId -or [int]$current.ProcessId -eq 0 -or
+            [string]$current.StartMode -cne [string]$previous.StartMode) {
+            Fail "foreign-OS ensure restarted, stopped or disabled $name"
+        }
+    }
+    Assert-ServicesRunning
+
+    Step 'Setup /repair still converges after a refused foreign-OS config'
+    $run = Invoke-Lifecycle -Name '02-repair-after-refusal' -FilePath $Setup -Arguments @('/repair', 'JSON=1')
+    Assert-Result $run 'repair-after-refusal' (@('--action', 'repair', '--installed', '--version', $Version, '--ready') + $installedChecks)
+    Assert-ServicesRunning
 
     Step 'installed CLI verify'
     $run = Invoke-Lifecycle -Name '03-verify' -FilePath $cli -Arguments @('enterprise', 'windows', 'verify', '--profile', 'standalone', '--json')
@@ -562,6 +643,27 @@ try {
     $detected = Invoke-Detect
     if ($detected.ExitCode -eq 0) { Fail "detect.ps1 still detects a deployment after uninstall: $($detected.Output)" }
     Write-Host 'detect.ps1: not detected'
+
+    if (-not $UpgradeFrom) {
+        Step 'Setup /ensure after uninstall installs a second time'
+        $run = Invoke-Lifecycle -Name '07-setup-ensure-after-uninstall' -FilePath $Setup -Arguments @('/ensure', "CONFIG=$config", 'JSON=1')
+        Assert-Result $run 'setup-ensure-after-uninstall' (@('--action', 'ensure', '--changed', '--installed', '--version', $Version, '--ready') +
+            $installedChecks + @('--allow-warning', 'ensure_install'))
+        Assert-ServicesRunning
+        Assert-PolicyApplied
+
+        Step 'installed CLI verify after the second install'
+        $run = Invoke-Lifecycle -Name '08-verify-after-reinstall' -FilePath $cli -Arguments @('enterprise', 'windows', 'verify', '--profile', 'standalone', '--json')
+        Assert-Result $run 'verify-after-reinstall' (@('--action', 'verify', '--installed', '--version', $Version, '--ready') + $installedChecks)
+
+        Step 'Setup /uninstall after the second install'
+        $run = Invoke-Lifecycle -Name '09-setup-uninstall-again' -FilePath $Setup -Arguments @('/uninstall', 'JSON=1')
+        Assert-Result $run 'setup-uninstall-again' @('--action', 'uninstall', '--changed', '--not-installed')
+        Assert-ServicesGone
+        if (Test-Path -LiteralPath $markerKey) { Fail "$markerKey remains after the second uninstall" }
+        if (Test-Path -LiteralPath $cli) { Fail "$cli remains after the second uninstall" }
+        Assert-PolicyGone 'after the second uninstall'
+    }
 
     Write-Host ''
     Write-Host "install lane passed: Windows Setup $Version (results in $ResultsRoot)"

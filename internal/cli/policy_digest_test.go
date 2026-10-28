@@ -101,10 +101,15 @@ func TestPolicyDigestReportsWhetherTheGatewayAppliedIt(t *testing.T) {
 		!strings.Contains(result.Warnings[0].Message, "records it as a hand edit") {
 		t.Fatalf("recorded hand edit: state=%+v warnings=%s", state, codes(result))
 	}
-	// No generation recorded yet is not an edit.
-	if result, state := run(false, `{"effective_digest":"`+reported+`","config_generation":0,"config_generation_recorded":false,"gateway_reported_digest":"`+reported+`"}`); state == nil ||
-		state.ConfigUnrecorded || codes(result) != "" {
+	// Windows must not report a lost generation as recorded/compliant.
+	unrecorded := `{"effective_digest":"` + reported + `","config_generation":0,"config_generation_recorded":false,"gateway_reported_digest":"` + reported + `"}`
+	if result, state := run(false, unrecorded); state == nil ||
+		!state.ConfigUnrecorded || codes(result) != "config_edited_outside_lifecycle" {
 		t.Fatalf("no generation yet: state=%+v warnings=%s", state, codes(result))
+	}
+	legacy := enterprisestatus.New("ensure", "standalone", "linux", "1.0.0")
+	if state := applyEnterprisePolicyReport(legacy, []byte(unrecorded), false); state == nil || state.ConfigUnrecorded || len(legacy.Warnings) != 0 {
+		t.Fatalf("legacy Unix generation bootstrap changed: %+v", legacy)
 	}
 	// A policy that cannot be built is a warning, not a policy block.
 	if result, state := run(false, `{"error":"rule pack \"p\": digest does not match","gateway_reported_digest":"`+reported+`"}`); state != nil ||

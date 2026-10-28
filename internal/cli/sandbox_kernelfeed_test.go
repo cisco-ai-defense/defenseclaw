@@ -203,8 +203,20 @@ func TestSandboxKernelFeedRefusals(t *testing.T) {
 		t.Fatalf("uninstall as a user: %v", err)
 	}
 	t.Setenv(managed.DeploymentModeEnv, "managed_enterprise")
-	if _, err := runKernelFeed(t, "install"); err == nil || commandExitCode(err) != 3 || !strings.Contains(err.Error(), "managed") {
+	// Managed computers run sandboxes; only this per-user installer is not
+	// theirs (GAP-0017).
+	if _, err := runKernelFeed(t, "install"); err == nil || commandExitCode(err) != 3 || !strings.Contains(err.Error(), "managed") ||
+		strings.Contains(err.Error(), "not supported") || !strings.Contains(err.Error(), "installer") {
 		t.Fatalf("install on a managed host: %v", err)
+	}
+	if help := newSandboxKernelFeedCmd().Commands(); len(help) == 0 {
+		t.Fatal("no kernel-feed subcommands")
+	} else {
+		for _, sub := range help {
+			if strings.Contains(sub.Long, "not supported") {
+				t.Fatalf("%s help says managed sandboxes are not supported: %q", sub.Name(), sub.Long)
+			}
+		}
 	}
 	t.Setenv(managed.DeploymentModeEnv, "")
 	sandboxKernelFeedGOOS = "darwin"

@@ -597,8 +597,6 @@ func sortSkippedRows(rows []applicationProtectionSkippedRow) []applicationProtec
 func normalizeAppProtectionConnector(name string) string {
 	n := strings.ToLower(strings.TrimSpace(name))
 	switch n {
-	case "open-hands", "open_hands":
-		return "openhands"
 	case "claude-code", "claude_code":
 		return "claudecode"
 	default:

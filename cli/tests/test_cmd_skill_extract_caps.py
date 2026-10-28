@@ -192,6 +192,31 @@ class SafeTarExtractAllCappedTest(unittest.TestCase):
                 _safe_tar_extractall_capped(tf_read, d)
             self.assertIn("path-traversal", str(exc.exception))
 
+    def test_clawhub_prefix_uses_selected_member_cap(self):
+        buf = io.BytesIO()
+        with tarfile.open(fileobj=buf, mode="w:gz") as tf:
+            for i in range(5):
+                name = f"package/other/file{i}.txt"
+                info = tarfile.TarInfo(name)
+                info.size = 1
+                tf.addfile(info, io.BytesIO(b"x"))
+            info = tarfile.TarInfo("package/skills/weather/SKILL.md")
+            info.size = 7
+            tf.addfile(info, io.BytesIO(b"weather"))
+        with tempfile.TemporaryDirectory() as d:
+            archive = os.path.join(d, "openclaw.tgz")
+            with open(archive, "wb") as out:
+                out.write(buf.getvalue())
+            skill_dir = os.path.join(d, "skill")
+            os.mkdir(skill_dir)
+            with patch.object(cmd_skill, "MAX_SKILL_MEMBER_COUNT", 3):
+                cmd_skill._safe_tar_extract(archive, skill_dir, "package/skills/weather/", strip=3)
+            with open(os.path.join(skill_dir, "SKILL.md"), "rb") as extracted:
+                self.assertEqual(extracted.read(), b"weather")
+            with patch.object(cmd_skill, "MAX_CLAWHUB_INSPECTED_MEMBERS", 4):
+                with self.assertRaises(_SkillExtractTooLargeError):
+                    cmd_skill._safe_tar_extract(archive, skill_dir, "package/skills/weather/", strip=3)
+
 
 class SafeZipExtractAllCappedTest(unittest.TestCase):
     """Pin zip extraction rejection branches.

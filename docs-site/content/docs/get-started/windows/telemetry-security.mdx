@@ -9,11 +9,10 @@ keywords:
   - DefenseClaw token rotation
 ---
 
-On Windows, blocking and telemetry are separate paths. An agent's hook or
-plugin can wait for DefenseClaw's decision and be blocked; the agent's own
-OpenTelemetry (OTLP) export cannot. Both arrive at the same local gateway over
-authenticated loopback, and both end up in the same local audit log and any
-destinations you configure.
+On Windows, an agent's hook or plugin waits for DefenseClaw's decision and
+can block. Isolated OpenShell agents may also export native OpenTelemetry
+(OTLP), which records activity but cannot block it. Host Codex and Claude Code
+use hooks because their native exporters cannot verify a local TCP listener.
 
 ## Connector telemetry channels
 
@@ -25,11 +24,17 @@ The rule on Windows: only a hook or plugin that waits for DefenseClaw's answer
 can block. OTLP and other telemetry add detail to the audit log and
 dashboards, but cannot block an action after the fact.
 
-When a connector supports native OTLP, DefenseClaw gives it a separate scoped
-credential and pins the source identity to that connector. Hook and plugin
+Host setup disables Codex and Claude Code native OTLP and revokes credentials
+from earlier releases because those exporters cannot verify who holds a
+stopped gateway's port. Hook and plugin
 credentials are also connector-scoped and remain distinct from the gateway
 master token. Connector pages identify which channels exist and where their
 managed settings live.
+
+Standalone OpenCode and Amp plugins use one TCP connection for the listener
+challenge and hook request. The gateway checks that the account opening the
+challenge owns the scoped credential before it returns a proof. Per-user
+plugins verify the connected listener's account through the native helper.
 
 A scoped credential is accepted only for its connector and route; it cannot
 authenticate the management API, another connector, or a non-loopback request.
@@ -85,7 +90,7 @@ DefenseClaw uses distinct credentials for distinct jobs:
 | --- | --- | --- |
 | Gateway master token | Local gateway control/lifecycle authentication. Stored through the protected DefenseClaw environment file. | Rotate with the CLI; do not edit, print, or pass it on an argv. |
 | Connector hook/plugin credential | One connector's hook or plugin API route. | Managed by setup/teardown; never copy its sidecar or the credential-bearing Amp plugin. |
-| Connector native-OTLP credential | One connector's OTLP routes where configured: Codex, Claude Code, or opt-in OmniGent. Hermes has no official native OTLP surface. | Stable across unrelated master-token rotation and revoked during connector teardown. |
+| Connector native-OTLP credential | One connector's OTLP routes where configured: Codex or Claude Code. Hermes has no official native OTLP surface. | Stable across unrelated master-token rotation and revoked during connector teardown. |
 | Provider or destination credentials | Only the configured external provider/destination. | Reference protected environment names; do not place literal values in YAML or support output. |
 
 ### Rotate safely
@@ -160,7 +165,7 @@ files on a Windows x64 runner before it publishes them.
 
 Local and pull-request artifacts are not published releases. Passing their
 tests proves code and lifecycle behavior, not release provenance. See
-[Install and maintain](/docs/get-started/windows/install-lifecycle#upgrade).
+[Windows](/docs/get-started/windows).
 
 ## Ownership and filesystem boundary
 
@@ -197,7 +202,7 @@ What happens when something fails depends on where it fails:
 | --- | --- |
 | Install and upgrade checks | `install.ps1` refuses an unsupported architecture, a download that does not match `checksums.txt` (or its signature, with `cosign`), an unsafe path, or a foreign install before it changes anything. |
 | Install and upgrade | A failure before the switch-over leaves the old install as it was; a later failure restores the previous install. After an interrupted run, the next run first restores the previous install, then carries on. |
-| Hook delivery | With fail mode `closed`, a hook that cannot reach the gateway, or gets a malformed or unauthorized answer, blocks the step, on events the agent lets a hook block. For OpenCode that is only `tool.execute.before`; other OpenCode events are best effort. Hermes always continues after a hook failure (timeout, nonzero exit, bad output, authentication or connection failure), so Hermes never fails closed. |
+| Hook delivery | With fail mode `closed`, a hook that cannot reach the gateway, or gets a malformed or unauthorized answer, blocks the step, on events the agent lets a hook block. For OpenCode that is only `tool.execute.before`; other OpenCode events are best effort. Hermes blocks on DefenseClaw's valid block answer when gateway delivery or authentication fails in mode `closed`. Hermes itself still runs the call if the hook times out or cannot start. See [Fail modes](/docs/reference/fail-modes). |
 | Enterprise Claude Code hook | The machine-wide Claude Code hook of an [enterprise deployment](/docs/enterprise) blocks when its protected policy is invalid. |
 | Disabled skills | If DefenseClaw cannot read which skills are disabled, Codex and Claude Code skill selection is blocked. Hermes has no skill-selection event. Amp has no skill-load event; the tool calls a skill makes are still checked at `tool.call`. |
 | Amp plugin loading | Amp runs every plugin's top-level code while loading. DefenseClaw checks start once its plugin is loaded and receives `tool.call`; it does not control other plugins' loading or their order. |
@@ -219,7 +224,7 @@ published through Claude Code's managed-settings policy, Codex and Cursor
 managed hooks, and GitHub Copilot machine policy (standalone profile only), is
 part of [enterprise deployment](/docs/enterprise): the
 [standalone profile](/docs/enterprise/windows) or the
-[Secure Client profile](/docs/enterprise/secure-client#native-windows-claude-code-managed-hooks).
+[Secure Client profile](/docs/enterprise/secure-client).
 
 ## Security operations links
 
@@ -228,5 +233,5 @@ part of [enterprise deployment](/docs/enterprise): the
 - [Fail modes](/docs/reference/fail-modes)
 - [Redaction](/docs/observability/redaction)
 - [Observability](/docs/observability)
-- [Skill scanner](/docs/scanning/skill-scanner)
-- [MCP scanner](/docs/scanning/mcp-scanner)
+- [Scan a skill](/docs/scanning/skill-scanner)
+- [Scan an MCP server](/docs/scanning/mcp-scanner)

@@ -130,3 +130,58 @@ func TestReportHookFailOpenCallsWithoutAFile(t *testing.T) {
 		t.Fatalf("got %d alerts without a hook-failures file", got)
 	}
 }
+
+// rel-1-0-4 GAP-0127: with Codex set open, two calls ran fail-open and two
+// that DEFENSECLAW_STRICT_AVAILABILITY blocked were logged with fail mode open
+// and outcome fail_closed. The recovery alert counts the two that ran.
+func TestReportHookFailOpenCallsSkipsStrictClosedCalls(t *testing.T) {
+	store, logger := testStoreAndLogger(t)
+	logDir := filepath.Join(t.TempDir(), "logs")
+	now := time.Date(2026, 10, 21, 8, 30, 0, 0, time.UTC)
+	appendHookFailures(t, logDir,
+		`{"ts":"2026-10-21T08:27:22Z","connector":"codex","hook":"codex-hook","reason":"gateway unreachable","category":"transport","fail_mode":"open","outcome":"fail_open"}`+"\n",
+		`{"ts":"2026-10-21T08:27:23Z","connector":"codex","hook":"codex-hook","reason":"gateway unreachable","category":"transport","fail_mode":"open","outcome":"fail_open"}`+"\n",
+		`{"ts":"2026-10-21T08:27:47Z","connector":"codex","hook":"codex-hook","reason":"gateway unreachable","category":"transport","fail_mode":"open","outcome":"fail_closed"}`+"\n",
+		`{"ts":"2026-10-21T08:27:48Z","connector":"codex","hook":"codex-hook","reason":"gateway unreachable","category":"transport","fail_mode":"open","outcome":"fail_closed"}`+"\n",
+	)
+	if err := reportHookFailOpenCallsIn(logDir, logger, now); err != nil {
+		t.Fatalf("report: %v", err)
+	}
+	alerts := degradedAlerts(t, store)
+	if len(alerts) != 1 {
+		t.Fatalf("got %d fail-open alerts, want 1: %+v", len(alerts), alerts)
+	}
+	if d := alerts[0].Details; !strings.Contains(d, "2 codex hook calls") || !strings.Contains(d, "last 2026-10-21T08:27:23Z") {
+		t.Fatalf("alert counts the strict-closed calls: %s", d)
+	}
+}
+
+// 1.0.4 review: a diagnostic record (a call the gateway still checked) and a
+// strict-blocked Hermes call are not unchecked calls; lines an older hook
+// wrote without an outcome, or with unknown (1.0.3 shell hooks), keep the
+// fail-mode rule so an upgrade does not hide a call that ran unchecked.
+func TestReportHookFailOpenCallsCountsOnlyCallsThatRanUnchecked(t *testing.T) {
+	store, logger := testStoreAndLogger(t)
+	logDir := filepath.Join(t.TempDir(), "logs")
+	now := time.Date(2026, 10, 21, 8, 30, 0, 0, time.UTC)
+	appendHookFailures(t, logDir,
+		`{"ts":"2026-10-21T08:27:20Z","connector":"hermes","hook":"hermes-hook","reason":"gateway unreachable","category":"transport","fail_mode":"open","outcome":"fail_open"}`+"\n",
+		`{"ts":"2026-10-21T08:27:21Z","connector":"hermes","hook":"hermes-hook","reason":"gateway unreachable","category":"transport","fail_mode":"open","outcome":"fail_closed"}`+"\n",
+		`{"ts":"2026-10-21T08:27:22Z","connector":"hermes","hook":"hermes-hook","reason":"rejected malformed traceparent (length=3)","category":"response","fail_mode":"open","outcome":"diagnostic"}`+"\n",
+		`{"ts":"2026-10-21T08:27:23Z","connector":"kiro","hook":"kiro-hook","reason":"gateway unreachable","category":"transport","fail_mode":"open","outcome":"unknown"}`+"\n",
+		`{"ts":"2026-10-21T08:27:24Z","connector":"kiro","hook":"kiro-hook","reason":"gateway unreachable","category":"transport","fail_mode":"open"}`+"\n",
+		`{"ts":"2026-10-21T08:27:25Z","connector":"kiro","hook":"kiro-hook","reason":"gateway unreachable","category":"transport","fail_mode":"closed","outcome":"unknown"}`+"\n",
+	)
+	if err := reportHookFailOpenCallsIn(logDir, logger, now); err != nil {
+		t.Fatalf("report: %v", err)
+	}
+	alerts := degradedAlerts(t, store)
+	if len(alerts) != 2 {
+		t.Fatalf("got %d fail-open alerts, want 2: %+v", len(alerts), alerts)
+	}
+	details := alerts[0].Details + "\n" + alerts[1].Details
+	if !strings.Contains(details, "1 hermes hook call") || strings.Contains(details, "2 hermes hook calls") ||
+		!strings.Contains(details, "2 kiro hook calls") {
+		t.Fatalf("alerts count calls that did not run unchecked: %s", details)
+	}
+}

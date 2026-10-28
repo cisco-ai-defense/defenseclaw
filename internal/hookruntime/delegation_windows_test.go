@@ -7,6 +7,9 @@ package hookruntime
 
 import (
 	"bytes"
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -15,11 +18,131 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/safefile"
 	"golang.org/x/sys/windows"
 )
+
+// An active stable launcher must answer a tool call when the full hook it
+// names is gone or no longer starts. These are not disabled tombstones: the
+// agent still invokes this launcher as its registered hook.
+func TestActiveDelegationFailureAnswersClosed(t *testing.T) {
+	for _, cause := range []string{"missing-full-hook", "cannot-start-full-hook"} {
+		for _, connector := range []string{"claudecode", "copilot", "hermes", "cursor", "antigravity", "kiro", "opencode"} {
+			t.Run(cause+"/"+connector, func(t *testing.T) {
+				fixture := newDelegationFixture(t)
+				switch cause {
+				case "missing-full-hook":
+					if err := os.Remove(fixture.hook); err != nil {
+						t.Fatal(err)
+					}
+				case "cannot-start-full-hook":
+					bad := []byte("MZ-invalid-image")
+					if err := os.WriteFile(fixture.hook, bad, 0o600); err != nil {
+						t.Fatal(err)
+					}
+					state, _, err := readTrustedAt(fixture.paths, fixture.executable)
+					if err != nil {
+						t.Fatal(err)
+					}
+					sum := sha256.Sum256(bad)
+					state.HookSHA256 = hex.EncodeToString(sum[:])
+					if err := writeState(fixture.paths, state); err != nil {
+						t.Fatal(err)
+					}
+				}
+				args := []string{"hook", "--connector", connector}
+				event := "PreToolUse"
+				if connector == "copilot" {
+					event = "preToolUse"
+				}
+				if connector == "cursor" {
+					event = "beforeShellExecution"
+				}
+				if connector == "hermes" {
+					event = "pre_tool_call"
+				}
+				if connector == "opencode" {
+					event = "tool.execute.before"
+				}
+				if connector != "claudecode" && connector != "hermes" {
+					args = append(args, "--event", event)
+				}
+				var stdout, stderr bytes.Buffer
+				code := delegateAt(fixture.paths, fixture.executable, args,
+					strings.NewReader(`{"hook_event_name":"`+event+`","tool_name":"Bash"}`), &stdout, &stderr)
+				if stderr.Len() == 0 {
+					t.Fatalf("active launcher answered without a block: code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+				}
+				var response map[string]any
+				switch connector {
+				case "copilot", "hermes", "cursor", "antigravity", "opencode":
+					if err := json.Unmarshal(stdout.Bytes(), &response); err != nil {
+						t.Fatalf("%s native failure response %q: %v", connector, stdout.String(), err)
+					}
+				}
+				switch connector {
+				case "copilot":
+					if response["permissionDecision"] != "deny" {
+						t.Fatalf("Copilot did not receive a deny: %v", response)
+					}
+				case "hermes":
+					if response["action"] != "block" {
+						t.Fatalf("Hermes did not receive a block: %v", response)
+					}
+				case "cursor":
+					if response["permission"] != "deny" {
+						t.Fatalf("Cursor did not receive a deny: %v", response)
+					}
+				case "antigravity":
+					if response["decision"] != "deny" {
+						t.Fatalf("Antigravity did not receive a deny: %v", response)
+					}
+				case "opencode":
+					hook, _ := response["hook_output"].(map[string]any)
+					if hook["decision"] != "deny" {
+						t.Fatalf("OpenCode did not receive a deny: %v", response)
+					}
+				default:
+					if code != 2 {
+						t.Fatalf("%s did not exit closed: %d, %q", connector, code, stdout.String())
+					}
+				}
+			})
+		}
+	}
+}
+
+func TestUnavailableDelegationUsesNativeFailureControls(t *testing.T) {
+	tests := []struct {
+		name     string
+		args     []string
+		payload  string
+		wantCode int
+		wantBody string
+	}{
+		{"codex tool", []string{"hook", "--connector", "codex", "--event", "PreToolUse"}, "", 0, `"permissionDecision":"deny"`},
+		{"copilot permission", []string{"hook", "--connector", "copilot", "--event", "permissionRequest"}, "", 0, `"behavior":"deny"`},
+		{"copilot vscode local", []string{"hook", "--connector", "copilot", "--hook-surface", "vscode-local", "--event", "PreToolUse"}, "", 0, `"hookSpecificOutput":`},
+		{"cursor prompt", []string{"hook", "--connector", "cursor"}, `{"event":"beforeSubmitPrompt"}`, 2, `"continue":false`},
+		{"missing copilot event", []string{"hook", "--connector", "copilot"}, `{`, 0, `"permissionDecision":"deny"`},
+		{"amp", []string{"hook", "--connector", "amp"}, "", 2, ""},
+		{"kiro", []string{"hook", "--connector", "kiro"}, "", 2, ""},
+		{"unknown connector", []string{"hook", "--connector", "unknown"}, "", 2, ""},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			code := answerUnavailableDelegation(test.args, strings.NewReader(test.payload), &stdout, &stderr, "full hook unavailable")
+			if code != test.wantCode || stderr.Len() == 0 || !strings.Contains(stdout.String(), test.wantBody) {
+				t.Fatalf("code=%d stdout=%q stderr=%q, want code=%d body=%q", code, stdout.String(), stderr.String(), test.wantCode, test.wantBody)
+			}
+		})
+	}
+}
 
 const delegationHelperEnvironment = "DEFENSECLAW_HOOK_DELEGATION_TEST_HELPER"
 
@@ -329,8 +452,9 @@ func TestActiveDelegationPreservesArgumentsCWDStdioEnvironmentAndExit(t *testing
 
 func TestDelegationFailsClosedBeforeLaunchingForInactiveOrUnsafeState(t *testing.T) {
 	tests := []struct {
-		name   string
-		mutate func(*testing.T, delegationFixture)
+		name          string
+		mutate        func(*testing.T, delegationFixture)
+		activeFailure bool
 	}{
 		{
 			name: "disabled",
@@ -378,7 +502,8 @@ func TestDelegationFailsClosedBeforeLaunchingForInactiveOrUnsafeState(t *testing
 			},
 		},
 		{
-			name: "hook-digest-mismatch",
+			name:          "hook-digest-mismatch",
+			activeFailure: true,
 			mutate: func(t *testing.T, fixture delegationFixture) {
 				if err := os.WriteFile(fixture.hook, []byte("changed"), 0o600); err != nil {
 					t.Fatal(err)
@@ -386,13 +511,15 @@ func TestDelegationFailsClosedBeforeLaunchingForInactiveOrUnsafeState(t *testing
 			},
 		},
 		{
-			name: "hook-private-dacl-mismatch",
+			name:          "hook-private-dacl-mismatch",
+			activeFailure: true,
 			mutate: func(t *testing.T, fixture delegationFixture) {
 				addDACLDrift(t, fixture.hook, windows.GENERIC_READ)
 			},
 		},
 		{
-			name: "hook-path-mismatch",
+			name:          "hook-path-mismatch",
+			activeFailure: true,
 			mutate: func(t *testing.T, fixture delegationFixture) {
 				state, _, err := readTrustedAt(fixture.paths, fixture.executable)
 				if err != nil {
@@ -420,6 +547,12 @@ func TestDelegationFailsClosedBeforeLaunchingForInactiveOrUnsafeState(t *testing
 				&stdout,
 				&stderr,
 			)
+			if test.activeFailure {
+				if exitCode != 2 || stdout.Len() != 0 || stderr.Len() == 0 {
+					t.Fatalf("active failed delegation = exit %d, stdout %q, stderr %q", exitCode, stdout.String(), stderr.String())
+				}
+				return
+			}
 			if exitCode != 0 || stdout.Len() != 0 || stderr.Len() != 0 {
 				t.Fatalf(
 					"fail-closed delegation = exit %d, stdout %q, stderr %q",
@@ -795,5 +928,73 @@ func TestPublishedFullHookHasPrivateHandleSecurity(t *testing.T) {
 	}
 	if err := locked.Close(); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// GAP-1211: the launcher of every tool call hashed the whole full hook while
+// it held the account's gateway start mutex, so parallel tool calls (Codex
+// runs them side by side, beside Copilot) waited for each other's hash and
+// spent the hook's answer budget before the gateway was asked. The
+// verification now runs outside the mutex, so parallel calls verify at the
+// same time, and the call still launches the verified generation.
+func TestParallelDelegationsVerifyTheFullHookOutsideTheStartMutex(t *testing.T) {
+	fixture := newDelegationFixture(t)
+	t.Setenv(delegationHelperEnvironment, "1")
+	const calls = 3
+	var mu sync.Mutex
+	type span struct{ start, end time.Time }
+	var spans []span
+	mutexHeld := false
+	previous := lockVerifiedHook
+	t.Cleanup(func() { lockVerifiedHook = previous })
+	lockVerifiedHook = func(state State) (*os.File, error) {
+		// Another OS thread tries the mutex: a Windows mutex is recursive for
+		// the thread that owns it.
+		probe := make(chan error, 1)
+		go func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+			defer cancel()
+			probe <- WithGatewayStartLock(ctx, func() error { return nil })
+		}()
+		held := <-probe != nil
+		start := time.Now()
+		time.Sleep(300 * time.Millisecond) // a slow hash of a large full hook
+		locked, err := previous(state)
+		mu.Lock()
+		spans = append(spans, span{start, time.Now()})
+		mutexHeld = mutexHeld || held
+		mu.Unlock()
+		return locked, err
+	}
+	codes := make(chan int, calls)
+	for i := 0; i < calls; i++ {
+		go func() {
+			var stdout, stderr bytes.Buffer
+			codes <- delegateAt(fixture.paths, fixture.executable,
+				[]string{"-test.run=^TestHookDelegationHelper$"}, strings.NewReader(""), &stdout, &stderr)
+		}()
+	}
+	for i := 0; i < calls; i++ {
+		if code := <-codes; code != 37 {
+			t.Fatalf("delegated exit code = %d, want 37 (the verified full hook ran)", code)
+		}
+	}
+	if mutexHeld {
+		t.Fatal("the full hook was verified while the gateway start mutex was held")
+	}
+	if len(spans) != calls {
+		t.Fatalf("verifications = %d, want %d (one per call)", len(spans), calls)
+	}
+	latestStart, earliestEnd := spans[0].start, spans[0].end
+	for _, s := range spans[1:] {
+		if s.start.After(latestStart) {
+			latestStart = s.start
+		}
+		if s.end.Before(earliestEnd) {
+			earliestEnd = s.end
+		}
+	}
+	if !latestStart.Before(earliestEnd) {
+		t.Fatalf("parallel calls verified one after another: %+v", spans)
 	}
 }

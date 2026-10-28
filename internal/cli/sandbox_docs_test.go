@@ -22,7 +22,6 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
-	"runtime"
 	"strconv"
 	"strings"
 	"testing"
@@ -143,11 +142,7 @@ func sandboxDocsBlock(t *testing.T, path string) string {
 // flag the tree lacks. DEFENSECLAW_UPDATE_GOLDEN=1 rewrites the generated
 // blocks from the tree.
 func TestSandboxCLIReferenceDocs(t *testing.T) {
-	_, filename, _, ok := runtime.Caller(0)
-	if !ok {
-		t.Fatal("resolve test source path")
-	}
-	page := filepath.Join(filepath.Dir(filename), "..", "..", "docs-site", "content", "docs", "reference", sandboxDocsPage)
+	page := filepath.Join(cliTestRepoRoot(t), "docs-site", "content", "docs", "reference", sandboxDocsPage)
 	raw, err := os.ReadFile(page)
 	raw = bytes.ReplaceAll(raw, []byte("\r\n"), []byte("\n")) // CRLF on a Windows checkout
 	if err != nil {
@@ -236,11 +231,7 @@ func TestSandboxCLIReferenceDocs(t *testing.T) {
 // patch, a session none of whose hooks reached DefenseClaw) are in the CLI
 // reference's exit-status list and in the sandbox guide's.
 func TestSandboxDocsExitStatuses(t *testing.T) {
-	_, filename, _, ok := runtime.Caller(0)
-	if !ok {
-		t.Fatal("resolve test source path")
-	}
-	docs := filepath.Join(filepath.Dir(filename), "..", "..", "docs-site", "content", "docs")
+	docs := filepath.Join(cliTestRepoRoot(t), "docs-site", "content", "docs")
 	read := func(rel, from, to string) string {
 		t.Helper()
 		raw, err := os.ReadFile(filepath.Join(docs, rel))
@@ -272,7 +263,7 @@ func TestSandboxDocsExitStatuses(t *testing.T) {
 			t.Errorf("%s: the exit-status list lacks %q:\n%s", sandboxDocsPage, c.reference, reference)
 		}
 		if !strings.Contains(guide, c.guide) {
-			t.Errorf("sandbox.mdx: the exit statuses lack %q:\n%s", c.guide, guide)
+			t.Errorf("sandboxes/guide.mdx: the exit statuses lack %q:\n%s", c.guide, guide)
 		}
 	}
 }

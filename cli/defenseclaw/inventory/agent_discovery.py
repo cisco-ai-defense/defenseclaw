@@ -34,7 +34,7 @@ from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from contextvars import ContextVar
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta, timezone
 from functools import lru_cache
 from io import StringIO
@@ -63,7 +63,6 @@ from defenseclaw.connector_paths import (
     connector_home,
     devin_hook_config_path,
     hermes_config_path,
-    omnigent_config_path,
 )
 from defenseclaw.file_permissions import (
     atomic_write_private_bytes,
@@ -79,11 +78,9 @@ from defenseclaw.file_permissions import (
 # sides — if the wording ever changes, the consumer can't silently drift.
 UNTRUSTED_PREFIX_ERROR = "binary path is not in a trusted install prefix"
 
-# Version 4 adds passive macOS application-bundle discovery. Version 3
-# separates a connector's on-disk configuration from a verified application
-# installation; older caches therefore cannot represent every current install
-# signal faithfully.
-CACHE_SCHEMA_VERSION = 6
+# Version 7 keeps Kiro CLI and IDE versions separately; an older cache can
+# incorrectly call the whole connector supported after seeing only one binary.
+CACHE_SCHEMA_VERSION = 7
 CACHE_TTL_SECONDS = 86_400
 CACHE_FILENAME = "agent_discovery.json"
 # Node and Python CLIs take over a second for --version when idle, and
@@ -96,6 +93,7 @@ VERSION_PROBE_TIMED_OUT = "version probe timed out"
 VERSION_NOT_PROBED = "version not probed: not being set up"
 PACKAGE_MANAGER_CONFIG_TIMEOUT_SECONDS = 5.0
 _ANTIGRAVITY_BINARY_MAX_BYTES = 256 << 20
+_KIRO_IDE_PRODUCT_MAX_BYTES = 256 << 10
 _WINDOWS_LOCAL_APP_DATA_FOLDER_ID = "F1B32785-6FBA-4FCF-9D55-7B8E7F157091"
 _WINDOWS_KF_FLAG_NO_PACKAGE_REDIRECTION = 0x00010000
 
@@ -710,6 +708,7 @@ def _windows_default_trusted_bin_prefixes() -> tuple[str, ...]:
                 # admission; passive Python discovery only trusts this
                 # bounded path and the existing ACL-chain checks.
                 os.path.join(codex_local_app_data, "devin", "cli", "bin"),
+                os.path.join(codex_local_app_data, "Kiro-Cli"),
                 # Hermes' official Windows updater owns this exact venv. Bind
                 # discovery to the current token's Known Folder instead of an
                 # inherited LOCALAPPDATA value or a coexisting legacy home.
@@ -789,11 +788,9 @@ DISCOVERY_PRECEDENCE: tuple[str, ...] = (
     "cursor",
     "devin",
     "copilot",
-    "openhands",
     "antigravity",
     "opencode",
     "amp",
-    "omnigent",
     "kiro",
 )
 
@@ -811,6 +808,34 @@ class AgentSignal:
     configured: bool = False
     active: bool = False
     mode: str = ""
+    # Candidates ahead of binary_path that the version probe passed over. A
+    # later scan that does not probe carries the version only while exactly
+    # these are still ahead of it, so a newly preferred binary is not
+    # reported at the old one's version.
+    skipped_binaries: tuple[str, ...] = ()
+    kiro_cli_version: str = ""
+    kiro_ide_version: str = ""
+    #: Every Kiro install the probe found (connector_contracts.assess_kiro):
+    #: ``{"kind": "cli"|"ide", "version": ..., "unread": ..., "path": ...}``.
+    #: ``version`` is empty and ``unread`` says why when the probe failed.
+    kiro_forms: list[dict[str, str]] = field(default_factory=list)
+
+
+#: The most Kiro forms one signal records.
+_KIRO_FORMS_MAX = 16
+
+
+def _kiro_forms_from_cache(raw: Any) -> list[dict[str, str]]:
+    """Validated ``kiro_forms`` from a cache entry (bounded, strings only)."""
+
+    if not isinstance(raw, list):
+        return []
+    forms: list[dict[str, str]] = []
+    for item in raw[:_KIRO_FORMS_MAX]:
+        if not isinstance(item, dict) or item.get("kind") not in ("cli", "ide"):
+            continue
+        forms.append({key: str(item.get(key) or "")[:512] for key in ("kind", "version", "unread", "path")})
+    return forms
 
 
 @dataclass
@@ -869,18 +894,6 @@ _SPECS: dict[str, _AgentSpec] = {
         "copilot",
         ("--version",),
     ),
-    "openhands": _AgentSpec(
-        (
-            ".openhands/hooks.json",
-            "~/.openhands/hooks.json",
-            "~/.openhands/mcp.json",
-            "~/.openhands/settings.json",
-            "~/.openhands/agent_settings.json",
-            "~/.openhands/cli_config.json",
-        ),
-        "openhands",
-        ("--version",),
-    ),
     "antigravity": _AgentSpec(
         # The documented global hooks file is configuration evidence, but
         # configuration alone never proves an installed official client.
@@ -922,11 +935,6 @@ _SPECS: dict[str, _AgentSpec] = {
         "amp",
         ("--version",),
     ),
-    "omnigent": _AgentSpec(
-        ("~/.omnigent/config.yaml",),
-        "omnigent",
-        ("--version",),
-    ),
     "kiro": _AgentSpec(
         (
             "~/.kiro/settings/cli.json",
@@ -962,27 +970,36 @@ def _configured_probe_names(data_dir: str | os.PathLike[str] | None) -> frozense
         guardrail = document.get("guardrail", {})
         connectors = guardrail.get("connectors", {})
         names = {
-            str(name).lower() for name, entry in connectors.items()
-            if isinstance(entry, dict) and entry.get("enabled") is not False
+            _normalize_connector(str(name)) for name, entry in connectors.items()
+            if not (isinstance(entry, dict) and entry.get("enabled") is False)
         } if isinstance(connectors, dict) else set()
-        primary = guardrail.get("connector")
-        if guardrail.get("enabled") and isinstance(primary, str) and primary:
-            names.add(primary.lower())
+        if guardrail.get("enabled"):
+            # Config.active_connector precedence: guardrail.connector, then
+            # claw.mode. A 0.8.x single-connector config names its connector
+            # only in claw.mode, and a targeted setup scan must still probe
+            # it before it replaces that peer's cached version.
+            claw = document.get("claw", {})
+            for primary in (guardrail.get("connector"), claw.get("mode") if isinstance(claw, dict) else None):
+                if isinstance(primary, str) and primary.strip():
+                    names.add(_normalize_connector(primary.strip()))
+                    break
         return frozenset(names)
     except (OSError, ValueError, TypeError, AttributeError, yaml.YAMLError):
         return frozenset()
 
 
 def restrict_probes(connectors: list[str]) -> Any:
-    """Run only the CLIs of ``connectors`` in this command's discovery scans.
+    """Run only the CLIs of ``connectors`` and of the connectors the config
+    already enrolls in this command's discovery scans.
 
     ``init --connector copilot`` ran every installed agent CLI as a version
     probe, and those CLIs wrote their own config and cache folders
     (~/.codex, ~/.cursor, ~/.config/opencode, ...) into the home of a user
-    who never started them (GAP-0901). The other agents are still found by
-    binary and config path; their version is the last one observed for the
-    same unchanged binary, else unknown. Returns the token for
-    :func:`end_probe_restriction`.
+    who never started them (GAP-0901). Configured active peers must also be
+    probed before a setup scan replaces the gateway's version cache. Other
+    agents are still found by binary and config path; their version is the
+    last one observed for the same unchanged binary, else unknown. Returns
+    the token for :func:`end_probe_restriction`.
     """
     return _PROBE_ONLY.set(frozenset(connectors))
 
@@ -992,7 +1009,7 @@ def end_probe_restriction(token: Any) -> None:
 
 
 def discover_with_probes(connectors: list[str], **kwargs: Any) -> AgentDiscovery:
-    """Probe only connectors explicitly selected by the current setup flow."""
+    """Probe selected connectors and configured peers without probing strangers."""
     token = restrict_probes(connectors)
     try:
         return discover_agents(**kwargs)
@@ -1176,15 +1193,17 @@ def discover_agents(
 
     scanned_at = _format_rfc3339(_now_utc())
     require_trusted, _prefixes = _ai_discovery_trust_config(data_dir)
-    probe_only = _PROBE_ONLY.get()
-    if probe_only is None:
-        probe_only = _configured_probe_names(data_dir)
+    # A restricted scan still probes every connector the config enrolls: the
+    # gateway reads each one's version from this cache when setup restarts it,
+    # so an enrolled agent that updated itself since the last scan came back
+    # unversioned and the gateway could not start (GAP-0547).
+    probe_only = _configured_probe_names(data_dir) | (_PROBE_ONLY.get() or frozenset())
     shared = _FRESH_SCANS.get()
     shared_key = (
         str(config_path_for_data_dir(data_dir)),
         require_trusted,
         tuple(_prefixes),
-        tuple(sorted(probe_only)) if probe_only is not None else None,
+        tuple(sorted(probe_only)),
     )
     if shared is not None and shared_key in shared:
         reused = shared[shared_key]
@@ -1204,7 +1223,7 @@ def discover_agents(
                     data_dir=data_dir,
                     require_trusted_binary_paths=require_trusted,
                     include_workspace_config=False,
-                    probe=probe_only is None or name in probe_only,
+                    probe=name in probe_only,
                 ),
                 DISCOVERABLE_CONNECTORS,
             )
@@ -1252,6 +1271,17 @@ def _keep_versions_of_slow_unchanged_agents(
     requires it) is under a trusted prefix; an agent that was removed has
     no file there and is reported as not installed. Windows keeps its
     protected selection rules.
+
+    An agent that is not probed is reported at its first binary candidate;
+    the last scan may have probed a later one (``cursor`` before ``agent``,
+    GAP-0002). That still counts as the same selection only while the
+    candidates ahead of it are exactly the ones that probe passed over and
+    are unchanged since; a new or changed one ahead could answer, so the
+    agent stays unversioned until probed. A binary outside the trusted
+    prefixes (when discovery requires them) never keeps a version. An
+    installed agent that was never probed has no version to keep; it keeps
+    its binary path, so an upgrade run without the agents on PATH does not
+    report it as not installed (rel-1-0-3 GAP-0277).
     """
     not_found = not _is_windows_host()
     slow = [
@@ -1273,7 +1303,10 @@ def _keep_versions_of_slow_unchanged_agents(
             payload = json.load(fh)
     except Exception:
         return
-    if not isinstance(payload, dict) or payload.get("version") != CACHE_SCHEMA_VERSION:
+    # Versions 3 (0.8.10) and 6 (1.0.0-1.0.3) carry the same binary/version
+    # evidence. A fresh scan still owns the result; these schemas supply only
+    # unchanged-binary evidence when that scan could not obtain a version.
+    if not isinstance(payload, dict) or payload.get("version") not in {3, 6, CACHE_SCHEMA_VERSION}:
         return
     previous_scan = _parse_rfc3339(str(payload.get("scanned_at") or ""))
     previous_agents = payload.get("agents")
@@ -1285,12 +1318,28 @@ def _keep_versions_of_slow_unchanged_agents(
             continue
         version = str(previous.get("version") or "")
         previous_binary = str(previous.get("binary_path") or "")
-        if not version or not previous_binary or (signal.binary_path and previous_binary != signal.binary_path):
+        if not previous_binary:
             continue
-        if not signal.binary_path and (
-            not os.path.isfile(previous_binary)
-            or (require_trusted_binary_paths and not _is_trusted_binary_path(previous_binary, data_dir=data_dir))
-        ):
+        if require_trusted_binary_paths and not _is_trusted_binary_path(previous_binary, data_dir=data_dir):
+            continue
+        skipped = signal.skipped_binaries
+        if not signal.binary_path:
+            if not os.path.isfile(previous_binary):
+                continue
+            skipped = _recorded_skipped_binaries(previous)
+        elif previous_binary != signal.binary_path:
+            if signal.error != VERSION_NOT_PROBED:
+                continue
+            ahead = _unchanged_candidates_ahead(signal.name, previous_binary, previous, previous_scan.timestamp())
+            if ahead is None:
+                continue
+            skipped = ahead
+        if not version:
+            never_probed = previous.get("installed") is True and previous.get("error") == VERSION_NOT_PROBED
+            if not signal.binary_path and never_probed:
+                signal.binary_path = previous_binary
+                signal.error = VERSION_NOT_PROBED
+                signal.installed = True
             continue
         try:
             changed_at = os.stat(os.path.realpath(previous_binary)).st_mtime
@@ -1300,13 +1349,56 @@ def _keep_versions_of_slow_unchanged_agents(
             continue
         signal.binary_path = previous_binary
         signal.version = version
+        if signal.name == "kiro":
+            if payload["version"] in {3, 6}:
+                if _kiro_binary_surface(previous_binary, version) == "cli":
+                    signal.kiro_cli_version = version
+                else:
+                    signal.kiro_ide_version = version
+            else:
+                signal.kiro_cli_version = str(previous.get("kiro_cli_version") or "")
+                signal.kiro_ide_version = str(previous.get("kiro_ide_version") or "")
+            # The forms of the scan whose version is kept; an earlier schema
+            # has none, so assess_kiro reads the versions above.
+            signal.kiro_forms = _kiro_forms_from_cache(previous.get("kiro_forms"))
         signal.error = ""
         signal.installed = True
+        signal.skipped_binaries = skipped
+
+
+def _recorded_skipped_binaries(previous: dict[str, Any]) -> tuple[str, ...]:
+    recorded = previous.get("skipped_binaries")
+    if not isinstance(recorded, list):
+        return ()
+    return tuple(str(path) for path in recorded if isinstance(path, str))
+
+
+def _unchanged_candidates_ahead(
+    name: str,
+    previous_binary: str,
+    previous: dict[str, Any],
+    previous_scan: float,
+) -> tuple[str, ...] | None:
+    """Return the candidates ahead of *previous_binary* when they are exactly
+    the ones the last probe passed over and none changed since, else None."""
+    candidates = _binary_candidates_for_agent(name, _SPECS.get(name, _AgentSpec((), "", ("--version",))))
+    if previous_binary not in candidates:
+        return None
+    ahead = tuple(candidates[: candidates.index(previous_binary)])
+    if ahead != _recorded_skipped_binaries(previous):
+        return None
+    for candidate in ahead:
+        try:
+            if os.stat(os.path.realpath(candidate)).st_mtime >= previous_scan:
+                return None
+        except OSError:
+            return None
+    return ahead
 
 
 def first_installed(disc: AgentDiscovery, fallback: str = "codex") -> str:
-    """Return the preferred installed connector, or *fallback* when none match."""
-    fallback = _normalize_connector(fallback) or "codex"
+    """Return the preferred installed connector, or no connector when none match."""
+    fallback = _normalize_connector(fallback)
     preferred = disc.agents.get(fallback)
     if preferred and preferred.installed:
         return fallback
@@ -1316,7 +1408,7 @@ def first_installed(disc: AgentDiscovery, fallback: str = "codex") -> str:
         if signal and signal.installed:
             return name
 
-    return fallback if fallback in DISCOVERABLE_CONNECTORS else "codex"
+    return ""
 
 
 def apply_config_state(disc: AgentDiscovery, cfg: Any) -> AgentDiscovery:
@@ -1453,9 +1545,6 @@ def _agent_config_path(name: str, *, include_workspace_config: bool = True) -> s
         config_candidates = _dedup_nonempty_candidates(
             (amp_managed_settings_path(), *config_candidates)
         )
-    elif name == "omnigent":
-        config_path = omnigent_config_path()
-        config_candidates = (config_path,)
     elif name == "devin":
         workspace = os.getcwd()
         config_candidates = _dedup_nonempty_candidates(
@@ -1475,6 +1564,16 @@ def _scan_agent(
     include_workspace_config: bool = True,
     probe: bool = True,
 ) -> AgentSignal:
+    # connector_contracts loads its bundled manifest through inventory, so
+    # importing it at module load time would create a cycle for CLI startup.
+    from defenseclaw.connector_contracts import (
+        assess_kiro,
+        judge_kiro_form,
+        kiro_cli_below_hook_floor,
+        kiro_ide_below_hook_floor,
+        normalize_agent_version,
+    )
+
     spec = _SPECS.get(name, _AgentSpec((), "", ("--version",)))
     config_path = _agent_config_path(name, include_workspace_config=include_workspace_config)
     binary_candidates = _binary_candidates_for_agent(name, spec)
@@ -1497,6 +1596,32 @@ def _scan_agent(
         require_trusted_binary_paths = True
     probe_errors: list[str] = []
     timed_out = ""
+    skipped: tuple[str, ...] = ()
+    kiro_versions: dict[str, tuple[str, str]] = {}
+    # Every Kiro install probed, read or not (assess_kiro judges each one; a
+    # failed probe is an installed form whose version is unknown, GAP-0895).
+    kiro_forms: list[dict[str, str]] = []
+
+    def kiro_found(surface: str, candidate: str, version_for_surface: str) -> None:
+        # Per surface the first install at or above its floor wins over an
+        # earlier one below it, so the version cached for the gateway is the
+        # one setup protects; every install stays a form for reporting.
+        below = kiro_cli_below_hook_floor if surface == "cli" else kiro_ide_below_hook_floor
+        recorded = kiro_versions.get(surface)
+        if recorded is None or (below(recorded[1]) and not below(version_for_surface)):
+            kiro_versions[surface] = (candidate, version_for_surface)
+        kiro_forms.append({"kind": surface, "version": version_for_surface, "unread": "", "path": candidate})
+
+    def kiro_unread(candidate: str, why: str) -> None:
+        kiro_forms.append(
+            {
+                "kind": "ide" if _kiro_binary_surface(candidate, "") == "ide" else "cli",
+                "version": "",
+                "unread": f"{candidate} is installed, but its version could not be read ({why})",
+                "path": candidate,
+            }
+        )
+
     missing_state = _missing_probe_state(name) if binary_candidates else ([], [])
     for candidate in binary_candidates:
         candidate_version, candidate_error = _version_for_agent_binary(
@@ -1507,16 +1632,32 @@ def _scan_agent(
             data_dir=data_dir,
         )
         if candidate_version and not candidate_error:
+            if name == "kiro":
+                surface = _kiro_binary_surface(candidate, candidate_version)
+                normalized = normalize_agent_version(candidate_version)
+                if not surface or not normalized:
+                    probe_errors.append(f"{candidate}: Kiro surface or version could not be identified")
+                    kiro_unread(candidate, "Kiro surface or version could not be identified")
+                    continue
+                kiro_found(surface, candidate, f"kiro-cli {normalized}" if surface == "cli" else normalized)
+                continue
             binary_path = candidate
             version = candidate_version
             error = ""
             version_ok = True
+            skipped = binary_candidates[: binary_candidates.index(candidate)]
             break
         if candidate_error:
             probe_errors.append(f"{candidate}: {candidate_error}")
             if candidate_error == VERSION_PROBE_TIMED_OUT and not timed_out:
                 timed_out = candidate
-    if not version_ok and timed_out:
+            elif name == "kiro":
+                kiro_unread(candidate, candidate_error)
+    timed_out_read = False
+    kiro_supported = bool(
+        (cli := kiro_versions.get("cli")) and not kiro_cli_below_hook_floor(cli[1])
+    ) or bool((ide := kiro_versions.get("ide")) and not kiro_ide_below_hook_floor(ide[1]))
+    if not version_ok and timed_out and not kiro_supported:
         # The first start of a CLI on a cold disk (a fresh host or clone) can
         # outlast the budget and answer in seconds right after, so ask once
         # more before calling it slow (GAP-0066).
@@ -1528,7 +1669,34 @@ def _scan_agent(
             data_dir=data_dir,
         )
         if candidate_version and not candidate_error:
-            binary_path, version, version_ok = timed_out, candidate_version, True
+            if name == "kiro":
+                surface = _kiro_binary_surface(timed_out, candidate_version)
+                normalized = normalize_agent_version(candidate_version)
+                if surface and normalized:
+                    kiro_found(surface, timed_out, f"kiro-cli {normalized}" if surface == "cli" else normalized)
+                    timed_out_read = True
+            else:
+                binary_path, version, version_ok = timed_out, candidate_version, True
+                skipped = binary_candidates[: binary_candidates.index(timed_out)]
+    if name == "kiro" and timed_out and not timed_out_read:
+        # A supported surface skips the retry; the slow install is still a
+        # form whose version is unknown, never hidden by the supported one.
+        kiro_unread(timed_out, VERSION_PROBE_TIMED_OUT)
+    if name == "kiro" and kiro_versions:
+        # The version cached for the gateway is the form setup preflight
+        # selects (assess_kiro over the forms it records); without a protected one
+        # it is the kiro-cli's, else the IDE's, so admission refuses it.
+        protected = assess_kiro(
+            [
+                judge_kiro_form(form["kind"], form["version"], unread=form["unread"], path=form["path"])
+                for form in kiro_forms[:_KIRO_FORMS_MAX]
+            ]
+        ).selected
+        if protected is not None and protected.path:
+            binary_path, version = protected.path, protected.version
+        else:
+            binary_path, version = kiro_versions.get("cli") or kiro_versions["ide"]
+        version_ok = True
     if missing_state[0]:
         _record_probe_state(missing_state, data_dir=data_dir)
     if not version_ok and probe_errors:
@@ -1537,8 +1705,14 @@ def _scan_agent(
         # A trusted binary that is only slow is installed; its version stays
         # unknown, so action mode still refuses it until a probe answers.
         binary_path = timed_out
+        skipped = binary_candidates[: binary_candidates.index(timed_out)]
 
-    installed = bool(binary_path) and (version_ok or bool(timed_out))
+    if name == "kiro" and not version_ok and not timed_out and kiro_forms:
+        # A Kiro whose every probe failed is installed with an unknown
+        # version (GAP-0895): setup refuses action mode for it instead of
+        # treating it as not installed.
+        binary_path = kiro_forms[0]["path"]
+    installed = bool(binary_path) and (version_ok or bool(timed_out) or (name == "kiro" and bool(kiro_forms)))
     return AgentSignal(
         name=name,
         installed=installed,
@@ -1547,7 +1721,21 @@ def _scan_agent(
         version=version,
         error=error,
         configured=bool(config_path),
+        skipped_binaries=tuple(skipped),
+        kiro_cli_version=kiro_versions.get("cli", ("", ""))[1],
+        kiro_ide_version=kiro_versions.get("ide", ("", ""))[1],
+        kiro_forms=kiro_forms[:_KIRO_FORMS_MAX],
     )
+
+
+def _kiro_binary_surface(path: str, version: str) -> str:
+    name = ntpath.splitext(ntpath.basename(path))[0].lower()
+    # A `kiro` shim can invoke kiro-cli. Its banner is CLI evidence, never
+    # evidence that an IDE capable of reading global hooks is installed.
+    banner = version.split(maxsplit=1)
+    if banner and banner[0].casefold() == "kiro-cli":
+        return "cli"
+    return "cli" if name == "kiro-cli" else "ide" if name == "kiro" else ""
 
 
 def _dedup_nonempty_candidates(candidates: tuple[str, ...]) -> tuple[str, ...]:
@@ -2119,12 +2307,11 @@ def _version_for_binary(
     binary_name = _binary_command_name(binary_path)
     env = None
     timeout = VERSION_TIMEOUT_SECONDS
-    if binary_name in {"openhands", "hermes"}:
-        # OpenHands' --version loads the whole Python agent stack (15 s idle
-        # on Linux); Hermes' runs a synchronous update check (17.5 s on
-        # Windows), and a timeout made init drop an enrolled Hermes (GAP-1604).
+    if binary_name == "hermes":
+        # Hermes runs a synchronous update check (17.5 s on Windows), and a
+        # timeout made init drop an enrolled Hermes (GAP-1604).
         timeout = 30.0
-    elif binary_name in {"claude", "omnigent"} or (
+    elif binary_name == "claude" or (
         os.name == "nt" and binary_name in {"amp", "agent", "copilot", "cursor-agent"}
     ):
         timeout = 8.0
@@ -2135,8 +2322,6 @@ def _version_for_binary(
         # Keep discovery bounded, but do not reject the authentic client at
         # the generic two-second budget before signature/version admission.
         timeout = 10.0
-    if binary_name == "openhands":
-        env = {**os.environ, "OPENHANDS_SUPPRESS_BANNER": "1"}
     if timeout_override is not None:
         timeout = max(timeout, timeout_override)
 
@@ -2171,7 +2356,7 @@ def _version_for_binary(
         return "", f"version probe exited {result.returncode}"
     if not stdout:
         return "", "version probe returned empty stdout"
-    return _version_line_for_binary(binary_path, stdout), ""
+    return _version_line_for_binary(stdout), ""
 
 
 def _version_for_agent_binary(
@@ -2194,6 +2379,8 @@ def _version_for_agent_binary(
     bundle_relatives = spec.macos_bundle_binaries if spec is not None else ()
     if bundle_relatives and _macos_app_bundle_for_binary(binary_path, bundle_relatives) is not None:
         return _macos_app_version_for_binary(binary_path, bundle_relatives)
+    if name == "kiro" and _windows_kiro_ide_root_for_binary(binary_path):
+        return _windows_kiro_ide_version_for_binary(binary_path)
 
     if name == "antigravity" and _is_windows_host():
         if not _is_canonical_antigravity_windows_binary(binary_path):
@@ -2425,16 +2612,9 @@ def _windows_file_version_for_binary(
         return "", f"version metadata probe failed: {exc}"
 
 
-def _version_line_for_binary(binary_path: str, stdout: str) -> str:
+def _version_line_for_binary(stdout: str) -> str:
     lines = [line.strip() for line in stdout.splitlines() if line.strip()]
-    if not lines:
-        return ""
-    binary_name = _binary_command_name(binary_path)
-    if binary_name == "openhands":
-        for line in reversed(lines):
-            if "openhands cli" in line.lower():
-                return line
-    return lines[0]
+    return lines[0] if lines else ""
 
 
 def _first_existing_file(candidates: tuple[str, ...]) -> str:
@@ -2457,11 +2637,13 @@ def _which(binary_name: str) -> str:
 
 
 def binary_on_path(connector: str) -> str:
-    """The connector's agent executable on PATH now, or "" (a lookup, no run).
+    """The connector's agent executable on this process's PATH now, or "" (a lookup, no run).
 
-    Doctor reads discovery evidence that is cached for a day and never runs
-    an agent itself, so this tells an agent installed after the last scan
-    from one that is missing (GAP-0052)."""
+    Doctor and status read discovery evidence that is cached for a day and
+    never run an agent themselves, so this names an agent that may have been
+    installed after the last scan (GAP-0052). It is a hint, never proof: the
+    caller's PATH is not the agent's, and only a refreshed scan or a hook
+    call the gateway took makes the agent count (1.0.4 review, loop round 4)."""
     spec = _SPECS.get(_normalize_connector(connector))
     if spec is None or not spec.binary_name:
         return ""
@@ -2551,6 +2733,16 @@ def _binary_candidates_for_agent(name: str, spec: _AgentSpec) -> tuple[str, ...]
             if os.path.isfile(candidate):
                 candidates.append(os.path.abspath(candidate))
 
+    if name == "kiro":
+        for local_app_data in _windows_current_user_local_app_data_roots():
+            cli = os.path.join(local_app_data, "Kiro-Cli", "kiro-cli.exe")
+            if _windows_plain_kiro_executable(cli):
+                candidates.append(os.path.abspath(cli))
+        for root in _windows_kiro_ide_install_roots():
+            ide = os.path.join(root, "Kiro.exe")
+            if _windows_plain_kiro_executable(ide):
+                candidates.append(os.path.abspath(ide))
+
     if name == "codex":
         for local_app_data in _windows_current_user_local_app_data_roots():
             desktop_bin = Path(local_app_data) / "OpenAI" / "Codex" / "bin"
@@ -2562,6 +2754,66 @@ def _binary_candidates_for_agent(name: str, spec: _AgentSpec) -> tuple[str, ...]
                     candidates.append(os.path.abspath(candidate))
 
     return _deduplicate_paths(candidates)
+
+
+def _windows_plain_kiro_executable(path: str) -> bool:
+    try:
+        reject_reparse_path(path)
+    except OSError:
+        return False
+    return os.path.isfile(path)
+
+
+def _windows_kiro_ide_install_roots() -> tuple[str, ...]:
+    """Exact per-user and machine roots of the Windows Kiro IDE."""
+
+    roots = [
+        os.path.join(local, "Programs", "Kiro")
+        for local in _windows_current_user_local_app_data_roots()
+    ]
+    program_files = _windows_current_user_known_folder("6D809377-6AF0-444B-8957-A3773F02200E")
+    if program_files:
+        roots.append(os.path.join(program_files, "Kiro"))
+    return tuple(root for root in roots if os.path.isabs(root))
+
+
+def _windows_kiro_ide_root_for_binary(binary_path: str) -> str:
+    if not _is_windows_host():
+        return ""
+    for root in _windows_kiro_ide_install_roots():
+        if _path_key(binary_path) == _path_key(os.path.join(root, "Kiro.exe")):
+            return root
+    return ""
+
+
+def _windows_kiro_ide_version_for_binary(binary_path: str) -> tuple[str, str]:
+    """Read the official IDE's bounded product metadata without running its GUI."""
+
+    from defenseclaw.connector_contracts import normalize_agent_version
+
+    try:
+        reject_reparse_path(binary_path)
+        if not os.path.isfile(binary_path):
+            return "", "Kiro IDE executable is missing"
+        product_path = os.path.join(os.path.dirname(binary_path), "resources", "app", "product.json")
+        fd = open_regular_file_no_follow(product_path)
+        with os.fdopen(fd, "rb") as stream:
+            data = stream.read(_KIRO_IDE_PRODUCT_MAX_BYTES + 1)
+        if len(data) > _KIRO_IDE_PRODUCT_MAX_BYTES:
+            return "", "Kiro IDE product metadata exceeds size limit"
+        product = json.loads(data)
+    except (OSError, ValueError):
+        return "", "Kiro IDE product metadata is unavailable or invalid"
+    if (
+        not isinstance(product, dict)
+        or product.get("nameShort") != "Kiro"
+        or product.get("applicationName") != "kiro"
+    ):
+        return "", "Kiro IDE product identity is invalid"
+    version = str(product.get("version") or "").strip()
+    if not version or normalize_agent_version(version) != version:
+        return "", "Kiro IDE product version is invalid"
+    return version, ""
 
 
 def _deduplicate_paths(candidates: list[str]) -> tuple[str, ...]:
@@ -2768,6 +3020,10 @@ def _read_cache(*, data_dir: str | os.PathLike[str] | None = None) -> AgentDisco
                 version=str(raw.get("version") or ""),
                 error=str(raw.get("error") or ""),
                 configured=bool(raw.get("configured")),
+                skipped_binaries=_recorded_skipped_binaries(raw),
+                kiro_cli_version=str(raw.get("kiro_cli_version") or ""),
+                kiro_ide_version=str(raw.get("kiro_ide_version") or ""),
+                kiro_forms=_kiro_forms_from_cache(raw.get("kiro_forms")),
             )
     except Exception:
         return None
@@ -2823,8 +3079,6 @@ def _normalize_connector(value: str | None) -> str:
     name = value.strip().lower()
     if name in {"claude-code", "claude_code", "claude"}:
         return "claudecode"
-    if name in {"open-hands", "open_hands"}:
-        return "openhands"
     return name
 
 

@@ -9,44 +9,25 @@ keywords:
   - DefenseClaw configuration
 ---
 
-This is the supported environment-variable catalog generated from [`internal/envvars/registry.json`](https://github.com/cisco-ai-defense/defenseclaw/blob/main/internal/envvars/registry.json). CI checks all `DEFENSECLAW_*` references and direct Fleet/Edge `DCLAW_*` readers against the registry.
+Every environment variable DefenseClaw reads, with defaults, accepted values and the file that reads it. The catalog is generated from `internal/envvars/registry.json`; CI checks every `DEFENSECLAW_*` reference and every direct Fleet and Edge `DCLAW_*` reader against it.
 
-<Callout title="Config v8 observability policy lives in YAML">
-V8 does not use ambient `DEFENSECLAW_OTEL_*`, standard
-`OTEL_EXPORTER_OTLP_*`, or `DEFENSECLAW_DISABLE_REDACTION` values as live
-collection/routing/redaction policy. Destinations refer to credential environment
-variables explicitly through fields such as `token_env`, `bearer_env`, or
-`{env: NAME}`. Entries below described as legacy observability inputs are read
-only by the automatic v7-to-v8 upgrade converter and are retired after their
-effective value is materialized. The generated table names that compatibility
-scope at each such row.
+<Callout title="Observability policy lives in config.yaml">
+Ambient `DEFENSECLAW_OTEL_*`, standard `OTEL_EXPORTER_OTLP_*` and `DEFENSECLAW_DISABLE_REDACTION` values are not live collection, routing or redaction policy. Destinations name credential variables explicitly through fields such as `token_env`, `bearer_env` or `{env: NAME}`. Rows described as legacy observability inputs are read only by the automatic upgrade converter and are retired after their value is materialized.
 </Callout>
 
-<Callout title="See live what's active">
-`defenseclaw doctor` reports active security override flags visible to the CLI process. Inspect the gateway and Edge Connector service environments separately when they run under systemd or another supervisor.
-</Callout>
+On per-user installs, `defenseclaw doctor` reports active security override flags visible to the CLI process. Inspect the gateway and Edge Connector service environments separately when they run under systemd or another supervisor. A Codex TUI or app server can outlive the shell that launched it, so set its hook posture in `guardrail.hook_fail_mode` instead of relying on a shell export.
 
 ## Managed hosts and the environment
 
-On a per-user install the environment is yours, and DefenseClaw reads the
-variables below as written. A **managed standalone** host is different: a
-device on `deployment_mode: managed_enterprise` with `enterprise.profile:
-standalone`, where an administrator owns `config.yaml` and that file is the
-policy. The core `DEFENSECLAW_*` registry policies prevent user-controlled
-opt-outs from weakening managed configuration. Every row has a **Managed host**
-policy. Per-user installs and the Secure Client profile read the raw environment,
-so that policy does not apply to them.
+Per-user installs and the Secure Client profile read the raw environment for the variables they support. Secure Client profile selection requires its trusted install marker, and its 1.0.4 hooks ignore `DEFENSECLAW_FAIL_MODE`. A **managed standalone** host (`deployment_mode: managed_enterprise`, `enterprise.profile: standalone`) is different: the administrator owns `config.yaml`, and every row below has a **Managed host** policy that stops user-controlled opt-outs from weakening it.
 
-Fleet and Edge `DCLAW_*` variables marked `allow` are read by the Go or C
-service process. Some can weaken security, such as TLS verification overrides.
-Administrators must control the service environment; the CLI cannot inspect a
-separate systemd service's environment through `defenseclaw doctor`.
+Fleet and Edge `DCLAW_*` variables marked `allow` are read by the Go or C service process, and some (TLS verification overrides) can weaken security. Administrators control the service environment; `defenseclaw doctor` cannot inspect a separate systemd service's environment.
 
 | Managed host | What a managed standalone host does with the value |
 | --- | --- |
 | `allow` | Uses it. This includes runtime paths, credentials, hook-script values, and Fleet service variables. Restrict access to service environments containing Fleet secrets or TLS overrides. |
 | `ignore` | Treats it as unset. This covers core `DEFENSECLAW_*` security opt-outs except `DEFENSECLAW_FAIL_MODE` and `DEFENSECLAW_STRICT_AVAILABILITY`, the debug switches, most telemetry inputs, discovery probes, the Splunk bridge variables, test fixtures, `DEFENSECLAW_REPO`, `DEFENSECLAW_NO_UPDATE_CHECK`, most upgrade-internal variables, and the two deployment pins described below. |
-| `tighten_only` | Uses it only when it makes the host stricter: `DEFENSECLAW_FAIL_MODE` counts only as `closed`, `DEFENSECLAW_STRICT_AVAILABILITY` can only force fail-closed, and `DEFENSECLAW_HOOK_MAX_BODY` can lower the hook body cap but never raise it. |
+| `tighten_only` | Uses it only when it makes the host stricter: `DEFENSECLAW_FAIL_MODE` is passed through for older installed hooks but no 1.0.4 hook reads it, `DEFENSECLAW_STRICT_AVAILABILITY` can only force fail-closed, and `DEFENSECLAW_HOOK_MAX_BODY` can lower the hook body cap but never raise it. |
 
 - **`.env` follows the same rule.** The gateway and the CLI load
   `<data_dir>/.env` at start. A variable that is already set in the process
@@ -57,9 +38,9 @@ separate systemd service's environment through `defenseclaw doctor`.
   `DEFENSECLAW_FAIL_MODE`, `DEFENSECLAW_STRICT_AVAILABILITY`, every
   `DEFENSECLAW_ALLOW_*` switch, and `DEFENSECLAW_ENTERPRISE_PROFILE`, among
   others.
-- **Doctor names what it ignored.** When a managed standalone host sees an
-  ignored variable set, `defenseclaw doctor` lists it by name, never by value,
-  in the Security overrides section, and leaves it out of the active overrides:
+- **Python doctor names what it ignored.** If the Python CLI reads a managed
+  config, its Security overrides section lists ignored names, never values.
+  Managed packages do not ship this doctor; use [Check what is active](#when-in-doubt) below.
 
   ```text
   [PASS] Ignored environment overrides  —  this device is managed, so these have no effect: DEFENSECLAW_ALLOW_CGNAT, DEFENSECLAW_JUDGE_TRACE
@@ -75,14 +56,7 @@ separate systemd service's environment through `defenseclaw doctor`.
   `DEFENSECLAW_DEPLOYMENT_MODE=managed_enterprise` in a shell only makes that
   process's writers refuse changes (exit code `3`, `This device is managed`).
   It does not enrol the device or apply an administrator's policy.
-- **Settings have a config key where one exists.** The registry points to it:
-  `DEFENSECLAW_REPO` is the deprecated alias of `update.source`,
-  `DEFENSECLAW_NO_UPDATE_CHECK` has `update.check: false`, and
-  `DEFENSECLAW_JUDGE_TRACE` was replaced by `guardrail.judge.trace` (it is read
-  only on the Secure Client integration). `DEFENSECLAW_CUSTOM_PROVIDERS_PATH`
-  names the derived `custom-providers.json`, not an input. See
-  [Configuration: one source of truth](/docs/reference/source-of-truth#environment-variables-and-env)
-  for how the environment fits the model.
+- **Settings have a config key where one exists.** `DEFENSECLAW_REPO` is the deprecated alias of `update.source`, `DEFENSECLAW_NO_UPDATE_CHECK` has `update.check: false`, and `guardrail.judge.trace` replaces `DEFENSECLAW_JUDGE_TRACE` (which is read only on the Secure Client integration). `DEFENSECLAW_CUSTOM_PROVIDERS_PATH` names the derived `custom-providers.json`, not an input. See [Source of truth](/docs/reference/source-of-truth#environment-variables-and-env).
 
 {/* AUTOGEN-BEGIN: env-vars */}
 {/* The block below is auto-generated from `internal/envvars/registry.json` via `scripts/gen_envvars_docs.py`. Edit the JSON, not this file. */}
@@ -92,7 +66,7 @@ separate systemd service's environment through `defenseclaw doctor`.
 | Variable | What it does |
 | --- | --- |
 | `DEFENSECLAW_ALLOW_CGNAT`<br/>Impact: **HIGH**<br/>Default: `unset` (CGNAT blocked)<br/>Values: `1`, `unset`<br/>Managed host: `ignore` | Allow RFC 6598 carrier-grade NAT addresses (100.64.0.0/10, used by Tailscale and similar overlays) through the SSRF / private-IP guards.<br/>**Security:** CGNAT egress guard — prevents SSRF into shared carrier-grade NAT / overlay-network address space (e.g. another tenant's Tailscale node).<br/>**Read by:** `internal/netguard/netguard.go`, `cli/defenseclaw/webhooks/writer.py`, `cli/defenseclaw/registries/ssrf.py` |
-| `DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT`<br/>Impact: **HIGH**<br/>Default: `unset` (fail-closed in action mode)<br/>Values: `1`, `unset`<br/>Managed host: `ignore` | Bypass the action-mode fail-closed checks for agent versions with no hook contract (below the tested floor, on the known-broken list, or an unmatched exact build) and for incompatible hook-contract lock drift during connector setup.<br/>**Security:** Hook contract verification — prevents installing an enforcing hook whose request/response contract has drifted from the verified matrix (a silent guardrail bypass).<br/>**Read by:** `internal/gateway/sidecar.go`, `cli/defenseclaw/commands/cmd_setup.py` |
+| `DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT`<br/>Impact: **HIGH**<br/>Default: `unset` (fail-closed)<br/>Values: `1`, `unset`<br/>Managed host: `ignore` | Bypass the fail-closed checks for agent versions with no hook contract (below the tested floor, on the known-broken list, or an unmatched exact build; refused in observe and action mode by setup, init, quickstart and a single-connector gateway start), for unverified versions in action mode, and for incompatible hook-contract lock drift during connector setup.<br/>**Security:** Hook contract verification — prevents installing an enforcing hook whose request/response contract has drifted from the verified matrix (a silent guardrail bypass).<br/>**Read by:** `internal/gateway/sidecar.go`, `cli/defenseclaw/commands/cmd_setup.py`, `cli/defenseclaw/bootstrap.py` |
 | `DEFENSECLAW_ALLOW_LOCAL_MCP_TARGETS`<br/>Impact: **HIGH**<br/>Default: `unset` (SSRF guard enforced)<br/>Values: `1`, `unset`<br/>Managed host: `ignore` | Skip SSRF validation for MCP scan target URLs, permitting loopback, private, link-local, and cloud-metadata destinations.<br/>**Security:** MCP scan-target SSRF guard — prevents a scan request from reaching IMDS / loopback / private hosts.<br/>**Read by:** `internal/scanner/mcp.go` |
 | `DEFENSECLAW_ALLOW_PRIVATE_UPSTREAMS`<br/>Impact: **HIGH**<br/>Default: `unset` (all private IPs blocked)<br/>Values: `comma-separated IPs (e.g. 10.50.2.100,172.16.0.5)`, `unset`<br/>Managed host: `ignore` | Comma-separated list of specific IP addresses exempt from the SSRF private-address block for LLM upstream forwarding.<br/>**Security:** Private-upstream SSRF guard exemption — allows operator-specified on-prem LLM gateways on RFC 1918 addresses to bypass the private-IP block. Each IP must be explicitly listed (no CIDR).<br/>**Read by:** `internal/netguard/allowlist.go`, `cli/defenseclaw/registries/ssrf.py` |
 | `DEFENSECLAW_CODEX_LOOPBACK_TRUST`<br/>Impact: **HIGH**<br/>Default: `unset` (fail-closed)<br/>Values: `1`, `unset`<br/>Managed host: `ignore` | Restore legacy loopback-trusts-any-bearer behavior for the Codex connector.<br/>**Security:** Per-bearer Codex authentication on loopback — prevents same-host user-to-user impersonation when multiple users share an OS account.<br/>**Read by:** `internal/gateway/connector/codex.go` |
@@ -100,7 +74,7 @@ separate systemd service's environment through `defenseclaw doctor`.
 | `DEFENSECLAW_DISABLE_AWS_HTTP1_SHIM`<br/>Impact: **medium**<br/>Default: `unset` (shim active for Bedrock)<br/>Values: `1`, `unset`<br/>Managed host: `ignore` | Disable the AWS Bedrock HTTP/1 monkey-patch the OpenClaw plugin installs to make Bedrock traffic visible to the guardrail proxy.<br/>**Read by:** `extensions/defenseclaw/src/aws-sdk-http1-for-guardrail.ts` |
 | ~~`DEFENSECLAW_DISABLE_REDACTION`~~<br/>Impact: **HIGH**<br/>Default: `unset` (ignored by the v8 runtime)<br/>Values: `1`, `true`, `unset`<br/>Managed host: `ignore` | Upgrade-only v7 migration input.<br/>**Fix:** Configure observability.defaults, bucket, or destination redaction_profile in config v8.<br/>**Read by:** `cli/defenseclaw/observability/v8_migration.py` |
 | `DEFENSECLAW_DUMP_RAW_SECRETS`<br/>Impact: **HIGH**<br/>Default: `unset`<br/>Values: `1`, `unset`<br/>Managed host: `ignore` | E2E test toggle ONLY.<br/>**Read by:** `scripts/test-e2e-full-stack.sh` |
-| `DEFENSECLAW_FAIL_MODE`<br/>Impact: **medium**<br/>Default: (value from guardrail.hook_fail_mode in config.yaml)<br/>Values: `open`, `closed`, `unset`<br/>Managed host: `tighten_only` | Per-process override of guardrail.hook_fail_mode for hook delivery, missing-token/authentication, and invalid-response failures.<br/>**Read by:** `internal/gateway/connector/hooks/inspect-tool.sh` |
+| `DEFENSECLAW_FAIL_MODE`<br/>Impact: **medium**<br/>Default: (value from guardrail.hook_fail_mode in config.yaml)<br/>Values: `open`, `closed`, `unset`<br/>Managed host: `tighten_only` | Not read by 1.0.4 hooks in any profile: a hook's fail mode is the guardrail.hook_fail_mode installed with it (the shell hook, the OpenCode plugin, hooks/.hookcfg for the native Windows hook), and status and doctor report that.<br/>**Read by:** `cli/defenseclaw/fail_mode.py` |
 | `DEFENSECLAW_FORCE_AWS_HTTP1_SHIM`<br/>Impact: low<br/>Default: `unset` (shim only on Bedrock)<br/>Values: `1`, `unset`<br/>Managed host: `ignore` | Force the AWS HTTP/1 shim to install even on non-Bedrock setups.<br/>**Read by:** `extensions/defenseclaw/src/aws-sdk-http1-for-guardrail.ts` |
 | `DEFENSECLAW_GATEWAY_AUTOSTART`<br/>Impact: low<br/>Default: `unset` (hooks start a stopped per-user gateway)<br/>Values: `0`, `false`, `no`, `off`<br/>Managed host: `ignore` | Set to 0, false, no or off in the agent's environment to stop the Unix hooks from starting a stopped per-user gateway when their request is refused.<br/>**Read by:** `internal/gateway/connector/hooks/_hardening.sh`, `internal/gateway/connector/hook_test_env_helpers_test.go` |
 | ~~`DEFENSECLAW_JSONL_DISABLE`~~<br/>Impact: low<br/>Default: `unset` (ignored by the v8 runtime)<br/>Values: `1`, `true`, `unset`<br/>Managed host: `ignore` | Upgrade-only v7 migration input.<br/>**Fix:** Add, disable, or remove an explicit kind: jsonl destination in config v8.<br/>**Read by:** `cli/defenseclaw/observability/v8_migration.py` |
@@ -109,7 +83,7 @@ separate systemd service's environment through `defenseclaw doctor`.
 | ~~`DEFENSECLAW_OTEL_TLS_INSECURE`~~<br/>Impact: **HIGH**<br/>Default: `unset`<br/>Values: `true`, `false`, `1`, `0`, `unset`<br/>Managed host: `ignore` | Upgrade-only v7 migration input for the former flat OTLP TLS-insecure toggle.<br/>**Fix:** Configure observability.destinations[].tls in config v8.<br/>**Security:** Enabling this variable disables OTLP server-certificate verification after legacy configuration is migrated into a named destination.<br/>**Read by:** `cli/defenseclaw/observability/v8_migration.py` |
 | `DEFENSECLAW_POLICY_VALIDATE_ALLOW_NO_OPA`<br/>Impact: **medium**<br/>Default: `unset` (validation needs opa or defenseclaw-gateway)<br/>Values: `1`, `unset`<br/>Managed host: `ignore` | Skip the Rego compile check when neither opa nor defenseclaw-gateway is available.<br/>**Read by:** `cli/defenseclaw/commands/cmd_policy.py` |
 | `DEFENSECLAW_REVEAL_PII`<br/>Impact: **medium**<br/>Default: `unset` (PII redacted everywhere)<br/>Values: `1`, `true`, `unset`<br/>Managed host: `ignore` | Reveal PII in operator-facing logs only (CLI stdout, TUI).<br/>**Read by:** `internal/redaction/redaction.go` |
-| `DEFENSECLAW_STRICT_AVAILABILITY`<br/>Default: `unset` (no additional force-closed override)<br/>Values: `1`, `true`, `TRUE`, `yes`, `YES`, `unset`<br/>Managed host: `tighten_only` | Force transport and missing-token hook failures closed even when the effective fail mode is open.<br/>**Read by:** `internal/gateway/connector/hooks/_hardening.sh` |
+| `DEFENSECLAW_STRICT_AVAILABILITY`<br/>Default: `unset` (no additional force-closed override)<br/>Values: `1`, `true`, `TRUE`, `yes`, `YES`, `unset`<br/>Managed host: `tighten_only` | Force transport and missing-token hook failures closed even when the effective fail mode is open, on the hooks that read it (the gateway outage table of the connectors capability matrix lists them), and only when the process running the hook inherits this variable.<br/>**Read by:** `internal/gateway/connector/hooks/_hardening.sh` |
 | `DEFENSECLAW_TEST`<br/>Impact: low<br/>Default: `unset`<br/>Values: `1`, `true`, `unset`<br/>Managed host: `ignore` | Mark the process as running under tests.<br/>**Read by:** `internal/redaction/credentials.go` |
 | `DEFENSECLAW_TOOL_INSPECT_FAIL_OPEN`<br/>Impact: **HIGH**<br/>Default: `unset` (fail-closed)<br/>Values: `1`, `true`, `unset`<br/>Managed host: `ignore` | Make the plugin-side tool-inspect hook fail-open (allow tool) when the gateway is unreachable.<br/>**Read by:** `extensions/defenseclaw/src/index.ts` |
 | `DEFENSECLAW_TRUSTED_PROXY_CIDRS`<br/>Impact: **medium**<br/>Default: `unset` (X-Forwarded-For ignored)<br/>Values: `comma-separated CIDRs or IPs`, `unset`<br/>Managed host: `ignore` | Comma-separated CIDRs (or bare IPs) of reverse-proxy peers whose X-Forwarded-For header is trusted for client-IP attribution in logs.<br/>**Security:** Client-IP attribution — trusting forwarded headers from an untrusted peer lets a caller spoof the source IP recorded in auth-failure and audit logs.<br/>**Read by:** `internal/gateway/requestctx.go` |
@@ -148,7 +122,7 @@ separate systemd service's environment through `defenseclaw doctor`.
 | `DEFENSECLAW_SIEM_SECRET`<br/>Impact: **medium**<br/>Default: `unset`<br/>Values: `any-string`, `unset`<br/>Managed host: `allow` | SIEM webhook secret default.<br/>**Read by:** `cli/defenseclaw/commands/cmd_setup_webhook.py` |
 | `DEFENSECLAW_SKILLSSH_TOKEN`<br/>Impact: **medium**<br/>Default: `unset`<br/>Values: `registry-token`, `unset`<br/>Managed host: `allow` | Example registry-specific token env var.<br/>**Read by:** `cli/defenseclaw/commands/cmd_registry.py` |
 | `DEFENSECLAW_SKILL_SCANNER_LLM_KEY`<br/>Impact: **HIGH**<br/>Default: `unset`<br/>Values: `LLM API key string`, `unset`<br/>Managed host: `allow` | Override the LLM key used by the skill scanner only.<br/>**Read by:** `cli/defenseclaw/credentials.py` |
-| `DEFENSECLAW_SPLUNK_HEC_TOKEN`<br/>Impact: **HIGH**<br/>Default: `unset`<br/>Values: `HEC token`, `unset`<br/>Managed host: `allow` | Alternative HEC token consulted by the Python sink wiring when the canonical splunk_hec.token_env points to a different var.<br/>**Read by:** `cli/defenseclaw/commands/cmd_setup.py` |
+| `DEFENSECLAW_SPLUNK_HEC_TOKEN`<br/>Impact: **HIGH**<br/>Default: `unset`<br/>Values: `HEC token`, `unset`<br/>Managed host: `allow` | Credential reference of remote Splunk HEC destinations written before 1.0.4.<br/>**Read by:** `cli/defenseclaw/observability/presets.py` |
 | `DEFENSECLAW_WEBEX_TOKEN`<br/>Impact: **medium**<br/>Default: `unset`<br/>Values: `webex-bot-token`, `unset`<br/>Managed host: `allow` | Webex bot token default for webhook entries.<br/>**Read by:** `cli/defenseclaw/commands/cmd_setup_webhook.py` |
 | `DEFENSECLAW_WEBHOOK_SECRET`<br/>Impact: **medium**<br/>Default: `unset`<br/>Values: `any-string`, `unset`<br/>Managed host: `allow` | Generic webhook HMAC secret default.<br/>**Read by:** `cli/defenseclaw/commands/cmd_setup_webhook.py` |
 
@@ -251,6 +225,7 @@ separate systemd service's environment through `defenseclaw doctor`.
 | `DEFENSECLAW_CLEANUP_WAIT_MS`<br/>Default: `unset` (set and overwritten by native Setup)<br/>Values: `non-negative decimal milliseconds`, `unset`<br/>Managed host: `allow` | Bounded parent-process wait duration for the native Setup delayed directory cleanup helper.<br/>**Read by:** `cmd/defenseclaw-setup/platform_windows.go` |
 | `DEFENSECLAW_CLIENT`<br/>Default: (set by plugin)<br/>Values: `any-string`<br/>Managed host: `allow` | Client name (e.g. openclaw-plugin) stamped on the X-DefenseClaw-Client correlation header.<br/>**Read by:** `extensions/defenseclaw/src/policy/enforcer.ts` |
 | `DEFENSECLAW_CONNECTOR`<br/>Default: `unset`<br/>Values: `normalized connector identifier`, `unset`<br/>Managed host: `allow` | Runtime selector for the connector that owns an invocation of the shared hook scripts.<br/>**Read by:** `internal/gateway/connector/hooks/_hardening.sh`, `internal/gateway/connector/subprocess.go` |
+| `DEFENSECLAW_CONTAINED_RUN_SUPERVISOR`<br/>Default: `unset`<br/>Values: `1`, `unset`<br/>Managed host: `allow` | Set to 1, together with the argv[0] defenseclaw-contained-run, only when a DefenseClaw Go binary re-runs itself on Linux as the PID-namespace runner of processutil.RunContained (the Hermes Verify execution probe) or the PID-namespace scanner launcher of processutil.RunTracked.<br/>**Read by:** `internal/processutil/contain_linux.go` |
 | `DEFENSECLAW_DAEMON`<br/>Default: (set by daemon launcher; child only)<br/>Values: `1`<br/>Managed host: `allow` | Sentinel set by the daemon launcher in the child process so it knows it's the daemon.<br/>**Read by:** `internal/daemon/daemon.go` |
 | `DEFENSECLAW_DATA_DIR`<br/>Default: `unset` (set by the daemon on child processes)<br/>Values: `absolute data-directory path`<br/>Managed host: `allow` | Marker injected by the daemon launcher into the spawned gateway child process environment, recording which data directory that child belongs to.<br/>**Read by:** `internal/daemon/daemon.go` |
 | `DEFENSECLAW_DELEGATED_FROM`<br/>Default: `unset`<br/>Values: `defenseclaw`, `unset`<br/>Managed host: `allow` | Set to 'defenseclaw' by the Python CLI when it runs a gateway command for the user ('defenseclaw audit export' and 'audit findings' run 'defenseclaw-gateway audit ...'), so the gateway's usage errors name the command the user typed.<br/>**Read by:** `cli/defenseclaw/commands/cmd_audit.py`, `internal/cli/usage_args.go` |
@@ -296,6 +271,8 @@ separate systemd service's environment through `defenseclaw doctor`.
 | `DEFENSECLAW_SIDECAR_INSTANCE_ID`<br/>Default: (auto-generated by gateway)<br/>Values: `uuid-or-similar`<br/>Managed host: `allow` | Sidecar instance ID; auto-generated by the gateway at boot, propagated via headers.<br/>**Read by:** `internal/cli/scan_v7.go` |
 | `DEFENSECLAW_SSH_SHIM_PROBE`<br/>Default: `unset` (set only for the probe run)<br/>Values: `probe token`, `unset`<br/>Managed host: `allow` | Set by DefenseClaw only for the one probe run of the ssh shim it puts first on the OpenShell CLI's PATH: the shim prints the value and exits without running ssh, which proves a PATH search finds and executes it.<br/>**Read by:** `internal/openshell/sshshim.go`, `internal/openshell/sshshim_test.go` |
 | `DEFENSECLAW_STAMP_LOG`<br/>Default: `unset`<br/>Values: `1`, `unset`<br/>Managed host: `allow` | Internal marker set by DefenseClaw on a detached helper (the background watchdog) so it stamps its log lines like the gateway; cleared by the helper so its children do not inherit it.<br/>**Read by:** `internal/daemon/logstamp.go` |
+| `DEFENSECLAW_TRACKED_HOST_STAT_FD`<br/>Default: `unset`<br/>Values: `5`, `unset`<br/>Managed host: `allow` | Linux scanner custody channel descriptor, set to 5 by the trusted RunTracked launcher.<br/>**Read by:** `internal/processutil/contain_linux.go`, `internal/managed/trust_owner_linux.go`, `cli/defenseclaw/file_permissions.py` |
+| `DEFENSECLAW_TRACKED_RUN_SUPERVISOR`<br/>Default: `unset`<br/>Values: `1`, `unset`<br/>Managed host: `allow` | Set to 1, together with the argv[0] defenseclaw-tracked-run, only when a DefenseClaw Go binary re-runs itself on macOS as the process-tree supervisor of processutil.RunTracked (gateway scanner runs).<br/>**Read by:** `internal/processutil/track_darwin.go` |
 | `DEFENSECLAW_WINDOWS_APPROVED_AGENT_CLIENTS_ENFORCED`<br/>Impact: **HIGH**<br/>Default: `unset` (optional application-control posture is not attested)<br/>Values: `1`, `unset`<br/>Managed host: `allow` | Carry protected installer evidence that optional application control restricts every enabled enterprise agent client to approved binaries.<br/>**Security:** Authenticated service evidence — only the signed installer may publish this marker after live WDAC or AppLocker certification. Its absence does not block managed-hook installation or reconciliation.<br/>**Read by:** `internal/cli/windows_codex_requirements.go`, `packaging/windows/DefenseClawEnterprise.psm1` |
 | `DEFENSECLAW_WINDOWS_CLAUDE_EFFECTIVE_POLICY_VERIFIED`<br/>Impact: **HIGH**<br/>Default: `unset` (effective policy is unverified)<br/>Values: `1`, `unset`<br/>Managed host: `allow` | Carry protected installer evidence that DefenseClaw is Claude Code's effective first-source-wins managed policy.<br/>**Security:** Authenticated service evidence — protected local policy bytes alone do not establish which Claude managed-policy source is effective.<br/>**Read by:** `internal/cli/windows_codex_requirements.go`, `packaging/windows/DefenseClawEnterprise.psm1` |
 | `DEFENSECLAW_WINDOWS_CODEX_APPROVED_CLIENT_ENFORCED`<br/>Impact: **HIGH**<br/>Default: `unset`<br/>Values: `1`, `unset`<br/>Managed host: `allow` | Retain the protected Codex-specific compatibility alias for the all-agent application-control attestation.<br/>**Security:** Compatibility-only service claim — it is not a substitute for DEFENSECLAW_WINDOWS_APPROVED_AGENT_CLIENTS_ENFORCED or live application-control certification.<br/>**Read by:** `packaging/windows/DefenseClawEnterprise.psm1` |
@@ -313,6 +290,7 @@ separate systemd service's environment through `defenseclaw doctor`.
 | `DEFENSECLAW_INTERNAL_SETUP_CONNECTOR`<br/>Impact: **HIGH**<br/>Default: `unset`<br/>Values: `antigravity`, `unset`<br/>Managed host: `ignore` | Identifies the connector selected by the packaged Windows Setup process for its private initialization child.<br/>**Security:** Private paired Setup binding only. The value is not sufficient by itself: the child also requires DEFENSECLAW_INTERNAL_SETUP_PARENT to match the packaged Setup ancestor through the custody-bound installed launcher.<br/>**Read by:** `cmd/defenseclaw-setup/main.go`, `cli/defenseclaw/commands/cmd_init.py` |
 | `DEFENSECLAW_INTERNAL_SETUP_PARENT`<br/>Impact: **HIGH**<br/>Default: `unset`<br/>Values: `absolute path to the running DefenseClawSetup-x64.exe parent`, `unset`<br/>Managed host: `ignore` | Carries the absolute path of the running packaged Windows Setup executable into its private initialization child.<br/>**Security:** Private paired Setup binding only. This is not a public path override and must be accepted only when it names the packaged Setup process above the custody-bound installed launcher.<br/>**Read by:** `cmd/defenseclaw-setup/main.go`, `cli/defenseclaw/commands/cmd_init.py` |
 | ~~`DEFENSECLAW_PERSIST_JUDGE`~~<br/>Impact: **medium**<br/>Default: `unset`<br/>Values: `1`, `true`, `unset`<br/>Managed host: `ignore` | Read only by the 0.x observability migration, which folds it into config.yaml; nothing reads it at runtime.<br/>**Read by:** `cli/defenseclaw/observability/v8_migration.py` |
+| `DEFENSECLAW_REMOVED_CONNECTOR_UNINSTALL`<br/>Impact: low<br/>Default: `unset`<br/>Values: `1`, `unset`<br/>Managed host: `allow` | Set to 1 only by an uninstall (the Python uninstall's connector teardown child and the native Setup uninstall transaction's connector children) so that connector teardown also removes what an older setup wrote for a removed connector (OpenHands, OmniGent) and a removed DefenseClaw does not keep blocking the agent.<br/>**Security:** Internal uninstall flag, removed with the OpenHands/OmniGent compatibility teardown (until 1.1). It only widens what an uninstall removes for retired connectors.<br/>**Read by:** `internal/gateway/connector/removed_uninstall.go`, `internal/cli/connector_cmd.go`, `cmd/defenseclaw-setup/transaction.go`, `cli/defenseclaw/commands/cmd_uninstall.py` |
 | `DEFENSECLAW_REPO`<br/>Impact: **medium**<br/>Default: cisco-ai-defense/defenseclaw<br/>Values: `owner/name`, `https mirror base URL`<br/>Managed host: `ignore` | Deprecated alias of update.source in config.yaml: the GitHub owner/name (or https mirror base URL) whose releases `defenseclaw upgrade` and the installers use, for testing on a fork.<br/>**Read by:** `cli/defenseclaw/upgrade_shim.py`, `scripts/install.sh`, `scripts/defenseclaw-upgrade.sh` |
 | `DEFENSECLAW_STANDALONE_COLLECT_RUNTIME_GENERATIONS`<br/>Impact: low<br/>Default: `unset`<br/>Values: `1`, `unset`<br/>Managed host: `ignore` | Asks the standalone Windows installer's Verify, run by an elevated ensure that found the deployment compliant, to collect the old managed hook runtime copies a retire left and to name each per-user DefenseClaw folder still untrusted.<br/>**Read by:** `internal/cli/windows_enterprise_standalone.go`, `packaging/windows/install-enterprise.ps1` |
 | `DEFENSECLAW_STANDALONE_FORCED_UNINSTALL`<br/>Impact: **HIGH**<br/>Default: `unset`<br/>Values: `1`, `unset`<br/>Managed host: `ignore` | Carries Setup /uninstall FORCE=1 (enterprise windows uninstall --force) from the native lifecycle CLI to the standalone Windows installer, which removes the deployment without reading its pending transaction.<br/>**Security:** Skips recovery of a pending transaction, so it is honoured only in the environment the signed, elevated lifecycle CLI builds for the installer and cleared before any child starts.<br/>**Read by:** `internal/cli/windows_enterprise_standalone.go`, `packaging/windows/install-enterprise.ps1` |
@@ -349,7 +327,7 @@ separate systemd service's environment through `defenseclaw doctor`.
 | `DCLAW_EMERGENCY_KEY`<br/>Impact: **HIGH**<br/>Default: `unset`<br/>Values: `string`<br/>Managed host: `allow` | Separate nonzero 32-byte hex HMAC key required for emergency commands and lockdown release; no OTA-key fallback.<br/>**Read by:** `internal/fleet/policy/signer.go`, `edge-connector/src/comms/ota_receiver.c` |
 | `DCLAW_FLASH_PATH`<br/>Impact: **medium**<br/>Default: `unset`<br/>Values: `path`<br/>Managed host: `allow` | Override path to edge device emulated flash storage.<br/>**Read by:** `edge-connector/src/platform/hal_linux.c` |
 | `DCLAW_FLEET_API_TOKEN`<br/>Impact: **HIGH**<br/>Default: `unset`<br/>Values: `string`<br/>Managed host: `allow` | Opaque bearer token for the Fleet management API; the CLI generator uses URL-safe random text.<br/>**Read by:** `internal/fleet/api.go` |
-| `DCLAW_FLEET_API_URL`<br/>Impact: low<br/>Default: `unset`<br/>Values: `URL`<br/>Managed host: `allow` | Fleet API URL used by the remote device installer.<br/>**Read by:** `cli/defenseclaw/commands/cmd_edge_install.py` |
+| `DCLAW_FLEET_API_URL`<br/>Impact: low<br/>Default: `unset`<br/>Values: `URL`<br/>Managed host: `allow` | Fleet API URL used by the remote device installer and Fleet CLI.<br/>**Read by:** `cli/defenseclaw/commands/cmd_edge_install.py`, `cli/defenseclaw/commands/cmd_edge_connector_cli.py` |
 | `DCLAW_FLEET_AUTO_REGISTER`<br/>Impact: **medium**<br/>Default: `unset`<br/>Values: `string`<br/>Managed host: `allow` | Allow devices to self-register via MQTT heartbeat.<br/>**Read by:** `internal/gateway/sidecar.go` |
 | `DCLAW_FLEET_ID`<br/>Impact: low<br/>Default: `unset`<br/>Values: `uint32`<br/>Managed host: `allow` | Numeric Fleet identifier assigned to the edge device.<br/>**Read by:** `edge-connector/src/main.c` |
 | `DCLAW_FLEET_TENANT_TOKENS`<br/>Impact: **HIGH**<br/>Default: `unset`<br/>Values: `string`<br/>Managed host: `allow` | Comma-separated tenant-scoped tokens (token:tid,... format).<br/>**Read by:** `internal/fleet/api.go` |
@@ -375,7 +353,7 @@ separate systemd service's environment through `defenseclaw doctor`.
 These variables exist for DefenseClaw's own test suites. Do not set them on a real install.
 
 <Accordions type="single">
-<Accordion title="Show the 140 test-only variables">
+<Accordion title="Show the 145 test-only variables">
 
 | Variable | What it does |
 | --- | --- |
@@ -398,13 +376,18 @@ These variables exist for DefenseClaw's own test suites. Do not set them on a re
 | `DEFENSECLAW_DEFERRED_VERIFY_PARENT_HELPER`<br/>Default: `unset`<br/>Values: `1`, `unset`<br/>Managed host: `ignore` | Selects the isolated parent-process helper used to verify stable deferred-cleanup process identity on Windows.<br/>**Read by:** `internal/cli/connector_deferred_verify_windows_test.go` |
 | `DEFENSECLAW_DELEGATION_ENV_SENTINEL`<br/>Default: `unset`<br/>Values: `test-defined value`, `unset`<br/>Managed host: `ignore` | Carries an inherited environment sentinel through the isolated stable-hook delegation fixture.<br/>**Read by:** `internal/hookruntime/delegation_windows_test.go` |
 | `DEFENSECLAW_E2E_CODEX_POLICY_HELPER`<br/>Default: `unset`<br/>Values: `1`, `unset`<br/>Managed host: `ignore` | Selects the bounded Codex app-server fixture used by native connector lifecycle E2E tests.<br/>**Read by:** `test/e2e/codex_policy_fixture_windows_test.go` |
-| `DEFENSECLAW_E2E_HARNESS`<br/>Default: `unset`<br/>Values: `hermes`, `openhands`, `antigravity`, `omnigent`, `unset`<br/>Managed host: `ignore` | Names the hook-only harness the live hook-only sandbox test drives (hermes, openhands, antigravity or omnigent); the test is skipped when it is unset.<br/>**Read by:** `test/e2e/openshell/hookonly_e2e_test.go` |
+| `DEFENSECLAW_E2E_HARNESS`<br/>Default: `unset`<br/>Values: `hermes`, `antigravity`, `unset`<br/>Managed host: `ignore` | Names the hook-only harness the live hook-only sandbox test drives (hermes or antigravity); the test is skipped when it is unset.<br/>**Read by:** `test/e2e/openshell/hookonly_e2e_test.go` |
 | `DEFENSECLAW_ENV_CONFIG_SKIP_TRUST`<br/>Impact: **medium**<br/>Default: `unset` (trust check enforced)<br/>Values: `1`, `unset`<br/>Managed host: `ignore` | Skip the on-disk trust check LoadEnvConfigEndpoint enforces on the AVC-authored env_config.json: root ownership and no group/world write on Unix, administrator ownership across the ancestor chain on Windows.<br/>**Security:** Bypassing the env_config file trust check lets a file at the canonical path that untrusted principals can write retarget bearer-authenticated inspection POSTs. Test-only.<br/>**Read by:** `internal/config/env_config.go`, `internal/config/env_config_windows.go` |
 | `DEFENSECLAW_FAKE_CLAUDE_LIST`<br/>Default: `unset`<br/>Values: `comma-separated mock responses`, `unset`<br/>Managed host: `ignore` | Test-only stub: comma-separated list of responses the fake claude CLI returns.<br/>**Read by:** `internal/gateway/connector/codeguard_native_test.go` |
 | `DEFENSECLAW_FAKE_CLAUDE_LOG`<br/>Default: `unset`<br/>Values: `absolute-path`, `unset`<br/>Managed host: `ignore` | Test-only stub: path the fake claude CLI logs invocations to.<br/>**Read by:** `internal/gateway/connector/codeguard_native_test.go` |
 | `DEFENSECLAW_GATEWAY_CODEX_APP_SERVER_HELPER`<br/>Default: `unset`<br/>Values: `1`, `unset`<br/>Managed host: `ignore` | Selects the bounded Codex app-server fixture used by gateway package tests.<br/>**Read by:** `internal/gateway/codex_setup_fixture_windows_test.go` |
 | `DEFENSECLAW_GATEWAY_URL`<br/>Default: `unset` (in-process e2e server)<br/>Values: `http(s) base URL e.g. http://127.0.0.1:18970`, `unset`<br/>Managed host: `ignore` | Base URL of an external gateway for the security-suite e2e tier (TestSecuritySuiteE2E).<br/>**Read by:** `internal/gateway/security_suite_test.go` |
 | `DEFENSECLAW_HOOKEXEC_TEST_CPU_BURN`<br/>Default: `unset`<br/>Values: `1`, `unset`<br/>Managed host: `ignore` | Marks a child process of the hookexec answer-watchdog tests that keeps one CPU busy, so the tests can fill every CPU of the host while a hook call runs.<br/>**Read by:** `internal/gateway/connector/hookexec/answer_watchdog_test.go` |
+| `DEFENSECLAW_HOOK_BURST_CALLS`<br/>Default: `unset`<br/>Values: `non-negative integer`, `unset`<br/>Managed host: `ignore` | Sets the number of hook calls in the probe burst.<br/>**Read by:** `internal/gateway/hook_burst_probe_test.go` |
+| `DEFENSECLAW_HOOK_BURST_OUT`<br/>Default: `unset`<br/>Values: `temporary directory path`, `unset`<br/>Managed host: `ignore` | Selects the output directory for burst probe profiles.<br/>**Read by:** `internal/gateway/hook_burst_probe_test.go` |
+| `DEFENSECLAW_HOOK_BURST_PROBE`<br/>Default: `unset`<br/>Values: `1`, `unset`<br/>Managed host: `ignore` | Enables the opt-in hook burst probe test.<br/>**Read by:** `internal/gateway/hook_burst_probe_test.go` |
+| `DEFENSECLAW_HOOK_BURST_WARM`<br/>Default: `unset`<br/>Values: `non-negative integer`, `unset`<br/>Managed host: `ignore` | Sets the number of hook calls written before the probe burst.<br/>**Read by:** `internal/gateway/hook_burst_probe_test.go` |
+| `DEFENSECLAW_HOOK_BURST_WORKERS`<br/>Default: `unset`<br/>Values: `non-negative integer`, `unset`<br/>Managed host: `ignore` | Sets the number of concurrent callers in the probe burst.<br/>**Read by:** `internal/gateway/hook_burst_probe_test.go` |
 | `DEFENSECLAW_HOOK_DELEGATED_ADMISSION_TEST_ROOT`<br/>Default: `unset`<br/>Values: `test-defined absolute directory path`, `unset`<br/>Managed host: `ignore` | Selects the isolated protected runtime root for the delegated hook-admission helper subprocess.<br/>**Read by:** `internal/hookruntime/delegation_windows_test.go` |
 | `DEFENSECLAW_HOOK_DELEGATION_TEST_HELPER`<br/>Default: `unset`<br/>Values: `1`, `unset`<br/>Managed host: `ignore` | Selects the isolated stable-hook delegation helper subprocess.<br/>**Read by:** `internal/hookruntime/delegation_windows_test.go` |
 | `DEFENSECLAW_HOOK_FLOOD_CALLS`<br/>Default: `unset`<br/>Values: `non-negative integer`, `unset`<br/>Managed host: `ignore` | Sets the number of hook calls in each probe flood.<br/>**Read by:** `internal/gateway/hook_flood_probe_test.go` |
@@ -540,33 +523,50 @@ in the services by hand.
 | `DEFENSECLAW_UNIX_SERVICE_ACCOUNT` | The macOS service definitions, and the gateway commands the macOS lifecycle runs, set it to `_defenseclaw`. Linux uses the default, `defenseclaw`. Set it yourself only for custom packaging that runs the gateway under another account; a wrong value makes the runtime trust check reject the real service account |
 | `DEFENSECLAW_INSTALL_MANAGED_DESCRIPTOR` | Test-only. Points `install.sh` at a temporary runtime descriptor. The per-user gateway still refuses to start on a managed host |
 
-On this release, administrators also set `DEFENSECLAW_CONFIG` when they run the
-`enterprise policy` commands, so the commands read the managed config instead
-of the caller's `~/.defenseclaw/config.yaml`:
+On standalone managed Linux and macOS, run the installed `enterprise policy`
+commands as root without setting `DEFENSECLAW_CONFIG`. The commands use the
+trusted runtime descriptor to pin the installed config, data directory and
+deployment mode together instead of reading root's per-user config:
 
 ```bash
-sudo DEFENSECLAW_CONFIG=/etc/defenseclaw/config.yaml /opt/defenseclaw/bin/defenseclaw-gateway enterprise policy show --json
+sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise policy show --json
+sudo /opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise policy show --json
 ```
 
-On macOS use `/opt/cisco/defenseclaw/etc/config.yaml`. On Windows, set
-`$env:DEFENSECLAW_CONFIG = 'C:\ProgramData\Cisco\DefenseClaw\etc\config.yaml'`
-in an elevated PowerShell first. See
+The first command is for Linux; the second is for macOS. On managed Windows with
+the standalone profile, use an elevated PowerShell prompt to run
+`enterprise policy show --json` without setting `DEFENSECLAW_CONFIG`:
+
+```powershell
+& 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw.exe' enterprise policy show --json
+```
+
+The Windows CLI pins the installed config, data directory and service identity
+together. On every OS, setting only `DEFENSECLAW_CONFIG` skips automatic pinning
+and can make the command read the caller's runtime directory. See
 [Machine policy status](/docs/enterprise/operations#machine-policy-status).
 
 ## When in doubt
 
-Run `defenseclaw doctor` to inspect the CLI process environment and core managed-host overrides. For Fleet and Edge services, also inspect the supervisor's environment file and resolved `config.yaml`; doctor cannot read another process's effective environment.
+On a per-user install, run `defenseclaw doctor` to inspect the CLI process environment and `defenseclaw keys list` to check credential sources.
 
 ```bash
 defenseclaw doctor
 defenseclaw keys list
 ```
 
-## Reference
+On managed Linux and macOS, the user's `defenseclaw` launcher offers only sandbox commands;
+it refuses `doctor` and `keys list`. An administrator runs the packaged binary as root:
 
-- [`internal/envvars/registry.json`](https://github.com/cisco-ai-defense/defenseclaw/blob/main/internal/envvars/registry.json) — single source of truth.
-- [`cli/defenseclaw/envvars.py`](https://github.com/cisco-ai-defense/defenseclaw/blob/main/cli/defenseclaw/envvars.py) — Python loader.
-- [`internal/envvars/registry.go`](https://github.com/cisco-ai-defense/defenseclaw/blob/main/internal/envvars/registry.go) — Go loader.
-- [Reference → Keys](/docs/reference/keys) — credential resolution order.
-- [Observability → Redaction](/docs/observability/redaction) — v8 profiles and the explicitly labeled v7 compatibility controls.
-- [Reference → Fail modes](/docs/reference/fail-modes) — `DEFENSECLAW_FAIL_MODE` / `DEFENSECLAW_STRICT_AVAILABILITY`.
+```bash
+sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux status --json
+sudo /opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise macos status --json
+```
+
+These status commands report deployment health. To check ignored overrides, compare
+the administrator-owned service environment's variable names with this catalog's
+`ignore` and `tighten_only` rows. On managed Windows, use `enterprise windows status --json`
+from an elevated prompt; its `doctor` command only prints administrator guidance.
+For Fleet and Edge services, inspect their supervisor's environment and resolved `config.yaml`.
+
+See also [Keys](/docs/reference/keys), [Redaction](/docs/observability/redaction), and [Fail modes](/docs/reference/fail-modes) for `DEFENSECLAW_FAIL_MODE` and `DEFENSECLAW_STRICT_AVAILABILITY`.

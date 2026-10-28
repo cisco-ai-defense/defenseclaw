@@ -8,19 +8,15 @@ keywords:
   - DefenseClaw OTel exporter
 ---
 
-DefenseClaw can export to an existing telemetry stack, but the bundled local
-stack gives you a loopback-only environment for development and evaluation.
+The local stack gives you 19 DefenseClaw dashboards on `localhost:3000` in one command. It is meant for development and evaluation. Every port is bound to `127.0.0.1`.
 
-For the full deep-dive on flags, dashboards, and tear-down, see [Observability → Local stack](/docs/observability/local-observability).
+This story retells the walkthrough briefly. For the full page on flags, dashboards and tear-down, see [Observability → Local stack](/docs/observability/local-observability).
 
-## What you get
+## Before you start
 
-<Cards>
-  <Card title="Prometheus" description="Metrics exported through the local OTel Collector." />
-  <Card title="Loki" description="Canonical gateway logs with connector and severity attributes." />
-  <Card title="Tempo" description="Gateway and connector traces exported through OTLP." />
-  <Card title="Grafana" description="Sixteen provisioned DefenseClaw dashboards backed by Prometheus, Loki, and Tempo." />
-</Cards>
+- Docker with Compose v2, running.
+- Ports 3000, 3100, 3200, 4317, 4318 and 9090 free. There is no flag to move them.
+- On Windows, Docker Desktop with Linux containers on Windows Pro, Enterprise or Education. Windows Server and WSL2-only Docker are not supported; send to an existing collector instead ([Send to an OTLP collector](/docs/observability)).
 
 ## Run it
 
@@ -34,24 +30,25 @@ For the full deep-dive on flags, dashboards, and tear-down, see [Observability �
 defenseclaw setup local-observability up
 ```
 
-Docker Compose starts the OTel Collector, Prometheus, Loki, Tempo, and
-Grafana, all bound to `127.0.0.1`. The
-[reference page](/docs/observability/local-observability#what-it-brings-up)
-lists the images and ports.
+The command starts the five containers, waits for their health checks, and adds a destination named `local-observability` to your observability config. A running gateway picks it up without a restart.
 
 </Step>
 
 <Step>
 
-### Check the destination
-
-`up` also writes a `local-observability` destination to `config.yaml`. A
-running gateway picks it up without a restart, and active agent sessions keep
-running. Confirm that it is reachable:
+### Print the addresses
 
 ```bash
-defenseclaw setup observability list
-defenseclaw observability destination test local-observability
+defenseclaw setup local-observability url
+```
+
+```text
+Grafana:    http://localhost:3000
+Prometheus: http://localhost:9090
+Tempo API:  http://localhost:3200
+Loki API:   http://localhost:3100
+OTLP gRPC:  127.0.0.1:4317
+OTLP HTTP:  127.0.0.1:4318
 ```
 
 </Step>
@@ -60,15 +57,7 @@ defenseclaw observability destination test local-observability
 
 ### Open Grafana
 
-Visit [http://localhost:3000](http://localhost:3000) and sign in as `admin`
-with the password stored in
-`~/.defenseclaw/observability-stack/.grafana-admin-password`. The setup
-summary tells you if your stack uses anonymous access instead; see
-[Grafana access](/docs/observability/local-observability#bring-it-up).
-
-Open **Dashboards → DefenseClaw → DefenseClaw — Overview**. The
-[Grafana dashboard catalog](/docs/observability/grafana-dashboards) explains
-what each of the 16 boards is for.
+Open Grafana and sign in as `admin`. The generated password is in `~/.defenseclaw/observability-stack/.grafana-admin-password`. A stack that was already running with anonymous access keeps it, read-only (Viewer): to edit dashboards, rerun setup with `--password`. The setup summary says which mode applies.
 
 </Step>
 
@@ -76,11 +65,27 @@ what each of the 16 boards is for.
 
 ### Generate one real event
 
-Dashboards fill only from real traffic; the destination test above does not add
-events. Use a connected agent for one turn, for example ask Claude Code or Codex
-to list the files in a folder. Shortly afterwards, **Hook Connectors** shows the
-connector's hook calls and **Agent identity → Runtime Agent Directory** lists
-the agent. Click its **Agent ID** to open [Agent360](/docs/observability/agent360).
+Run one agent turn, for example ask Claude Code or Codex to list the files in a folder. Dashboards fill only from real traffic; a destination test adds nothing.
+
+</Step>
+
+<Step>
+
+### Open the dashboards
+
+Open **Dashboards → DefenseClaw → Overview**. **Hook Connectors** shows the connector's hook calls. **Agent identity → Runtime Agent Directory** lists the agent; click its **Agent ID** to open [Agent360](/docs/observability/agent360).
+
+</Step>
+
+<Step>
+
+### Check the destination
+
+```bash
+defenseclaw observability destination test local-observability
+```
+
+The test checks the connection without adding events to history or dashboard counts.
 
 </Step>
 
@@ -92,16 +97,7 @@ the agent. Click its **Agent ID** to open [Agent360](/docs/observability/agent36
 defenseclaw setup local-observability down
 ```
 
-Stops the containers while preserving their named volumes and the configured
-destination. Your audit DB is untouched. To stop the stack and disable the
-destination in config, use:
-
-```bash
-defenseclaw setup local-observability down --disable-config
-```
-
-Use `reset --yes` only when you also intend to delete the stack's
-Prometheus/Loki/Tempo/Grafana data.
+`down` stops the containers and keeps their data. The destination stays in your config, so the gateway keeps trying to send; add `--disable-config` to turn it off too. To delete the stored metrics, logs and traces, run `defenseclaw setup local-observability reset --yes`.
 
 </Step>
 
@@ -112,7 +108,7 @@ Prometheus/Loki/Tempo/Grafana data.
 <Flow
   direction="TB"
   compact
-  caption="The gateway sends logs, metrics and traces over OTLP to the collector, which writes each signal to its own store. Grafana queries the three stores for its dashboards. Every published port is bound to 127.0.0.1."
+  caption="The gateway sends logs, metrics and traces over OTLP to the collector, which writes each signal to its own store. Grafana queries the three stores. Ports are bound to 127.0.0.1."
 >
   <Node id="gateway" kind="gateway">{`Gateway\ndefenseclaw-gateway`}</Node>
   <Node id="collector" kind="generic">{`OTel Collector\n:4317 gRPC · :4318 HTTP`}</Node>
@@ -129,26 +125,17 @@ Prometheus/Loki/Tempo/Grafana data.
   <Edge from="tempo" to="graf" label="queried by" variant="dashed" />
 </Flow>
 
-## When to graduate to your own stack
+## Keep the destination name
 
-The local stack is for building intuition. For production, replace each component with the equivalent in your existing telemetry estate:
-
-- Prometheus → your metrics platform (Datadog, New Relic, Honeycomb, ...).
-- Loki → your log aggregator (Splunk, Datadog Logs, ...).
-- Tempo → your tracing backend (Honeycomb, Tempo, Jaeger, ...).
-- Grafana → whatever your team already uses for dashboards.
-
-Add your collector as another destination, and DefenseClaw's signals land
-alongside the rest of your telemetry:
+Do not rename `local-observability`. The bundled dashboards read metric labels that DefenseClaw only exports to a destination with that name. To feed the stack from a gateway on another computer, add the destination with the preset:
 
 ```bash
-defenseclaw setup observability add otlp \
-  --name engineering \
-  --endpoint otel.example.com:4317 \
-  --protocol grpc
+defenseclaw setup observability add local-otlp --endpoint <stack-host>:4317 --non-interactive
 ```
 
-Destinations live under `observability.destinations` in `config.yaml`; see
-[Observability](/docs/observability#destination-capabilities-and-fan-out) for
-routing and redaction, and the
-[configuration reference](/docs/reference/configuration) for every field.
+## Next
+
+- [Dashboards](/docs/observability/grafana-dashboards): what each board shows and how to read empty panels.
+- [Observability reference](/docs/observability): stack images, ports and `up` flags.
+- [Troubleshoot the local stack](/docs/observability): no data, port conflicts and detaching the gateway.
+- [Send to Splunk](/docs/observability/splunk): run Splunk next to this stack.

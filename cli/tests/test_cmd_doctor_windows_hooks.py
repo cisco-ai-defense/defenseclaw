@@ -548,7 +548,7 @@ class WindowsHookDoctorTests(unittest.TestCase):
                 "antigravity": "antigravity-hooks-v2",
                 "codex": "codex-hooks-v1",
                 "claudecode": "claudecode-hooks-v1",
-                "hermes": "hermes-hooks-v1",
+                "hermes": "hermes-hooks-v2",
                 "devin": "devin-hooks-v1",
             }[connector]
         normalized_agent_version = {
@@ -561,7 +561,8 @@ class WindowsHookDoctorTests(unittest.TestCase):
             "claudecode-hooks-v2": "2.1.219",
             "devin-hooks-v1": "3000.4.25",
             "hermes-hooks-v1": "0.19.0",
-            "hermes-hooks-v2": "0.21.0",
+            # 0.19.0-0.21.0 carry the TUI warning on the host (GAP-0978).
+            "hermes-hooks-v2": "0.21.1",
             "antigravity-hooks-v2": "1.1.8",
         }[contract]
         locations = {"hook_config_paths": [str(config)]}
@@ -771,6 +772,74 @@ class WindowsHookDoctorTests(unittest.TestCase):
         )
         return path
 
+    def _antigravity_config(self, runtime: Path, *, legacy: bool = False) -> Path:
+        document: dict[str, object] = {}
+        for event in ("PreInvocation", "PreToolUse", "PostToolUse", "PostInvocation", "Stop"):
+            handler = {
+                "type": "command",
+                "command": self._encoded_hook_command(runtime, "antigravity", event=event, legacy=legacy),
+                "timeout": 30,
+            }
+            entries: list[object]
+            if event in {"PreToolUse", "PostToolUse"}:
+                entries = [{"matcher": "*", "hooks": [handler]}]
+            else:
+                entries = [handler]
+            document[f"defenseclaw-antigravity-{event.lower()}"] = {event: entries}
+        config = self.profile / ".gemini" / "config" / "hooks.json"
+        config.parent.mkdir(parents=True, exist_ok=True)
+        config.write_text(json.dumps(document), encoding="utf-8")
+        self._lock("antigravity", config, version="v8")
+        return config
+
+    def _fail_mode_drift(self, connector: str) -> list[str]:
+        from defenseclaw import fail_mode
+
+        cfg = SimpleNamespace(
+            data_dir=str(self.data), claw=SimpleNamespace(workspace_dir=""), deployment_mode="single_user"
+        )
+        with (
+            patch.object(fail_mode, "_is_windows", return_value=True),
+            patch.object(fail_mode, "registration_unguarded", return_value=False),
+            patch.object(cmd_doctor, "_packaged_windows_install_root", return_value=str(self.install)),
+            patch("defenseclaw.inventory.agent_discovery._windows_acl_write_error", return_value=None),
+            patch.dict(os.environ, {"PATH": str(self.install), "PATHEXT": ".EXE;.CMD"}),
+        ):
+            return fail_mode.registration_integrity_drift(cfg, connector)
+
+    def test_windows_antigravity_and_hermes_fail_mode_run_the_doctor_validator(self) -> None:
+        # guardrail fail-mode checks the Windows Antigravity and Hermes
+        # registration with the doctor's validator (rel-1-0-4 GAP-0600). A
+        # Hermes host that has not reloaded yet runs DefenseClaw's current
+        # file, so pending-reload is not drift.
+        runtime = self._runtime()
+        lane = self.root / "lane" / "defenseclaw-hook.exe"
+        lane.parent.mkdir()
+        lane.write_bytes(b"MZold-copy")
+        command = f'"{runtime}" hook --connector hermes'
+        cases = {
+            "antigravity pristine": (lambda: self._antigravity_config(runtime), []),
+            "antigravity old launcher": (
+                lambda: self._antigravity_config(runtime, legacy=True),
+                ["hook-runtime-stale"],
+            ),
+            "antigravity repointed": (lambda: self._antigravity_config(lane), ["registration-foreign"]),
+            "hermes pending reload": (lambda: self._config("hermes", command), []),
+            "hermes old launcher": (
+                lambda: self._config("hermes", f"& '{runtime}' hook --connector hermes"),
+                ["hook-runtime-stale"],
+            ),
+            "hermes repointed": (
+                lambda: self._config("hermes", f'"{lane}" hook --connector hermes'),
+                ["registration-foreign"],
+            ),
+        }
+        for label, (install, drift) in cases.items():
+            with self.subTest(label):
+                install()
+                connector = label.split()[0]
+                self.assertEqual(self._fail_mode_drift(connector), drift)
+
     def test_hermes_direct_native_registration_is_pending_reload(self) -> None:
         runtime = self._runtime()
         command = f'"{runtime}" hook --connector hermes'
@@ -784,6 +853,11 @@ class WindowsHookDoctorTests(unittest.TestCase):
         self.assertIn("allowlist_entries=23", check.detail)
         self.assertIn("Windows-native executable", check.detail)
         self.assertIn("live=false", check.detail)
+        self.assertIn("cannot verify which hooks an already running host loaded", check.detail)
+        self.assertNotIn("must be reloaded or restarted", check.detail)
+        self.assertIn("close every Hermes CLI/TUI/gateway/desktop/service host", check.repair)
+        self.assertIn("run 'defenseclaw doctor'", check.repair)
+        self.assertIn("start Hermes again after the on-disk checks pass", check.repair)
 
     def test_hermes_direct_command_matches_upstream_shlex_argv(self) -> None:
         command = (
@@ -1072,6 +1146,30 @@ class WindowsHookDoctorTests(unittest.TestCase):
 
         for entries in document["hooks"].values():
             entries[0]["hooks"][0]["args"] = [*guard[:-2], "0", ")"]
+        config.write_text(json.dumps(document), encoding="utf-8")
+        self.assertNotEqual(self._validate("claudecode", config).state, "healthy")
+
+    def test_claude_pretool_guard_form_is_healthy_and_edits_are_not(self) -> None:
+        # Per-user Setup's PreToolUse handler runs the installed full hook as
+        # the launcher guard (cmd.exe broke Cursor's import, GAP-1011); doctor
+        # must read it as the exec form it runs.
+        runtime = self._runtime()
+        installed = self.install / "bin" / "defenseclaw-hook.exe"
+        installed.parent.mkdir(parents=True, exist_ok=True)
+        installed.write_bytes(b"MZfixture")
+        config = self._config("claudecode", str(runtime))
+        document = json.loads(config.read_text(encoding="utf-8"))
+        guard_args = ["launcher-guard", str(runtime), "hook", "--connector", "claudecode"]
+        for entries in document["hooks"].values():
+            entries[0]["hooks"][0]["args"] = ["hook", "--connector", "claudecode"]
+        document["hooks"]["PreToolUse"][0]["hooks"][0]["command"] = str(installed)
+        document["hooks"]["PreToolUse"][0]["hooks"][0]["args"] = guard_args
+        config.write_text(json.dumps(document), encoding="utf-8")
+        check = self._validate("claudecode", config)
+        self.assertEqual(check.state, "healthy", check.detail)
+        self.assertEqual(os.path.normcase(check.target), os.path.normcase(str(runtime)))
+
+        document["hooks"]["PreToolUse"][0]["hooks"][0]["args"] = [*guard_args, "--fail-open"]
         config.write_text(json.dumps(document), encoding="utf-8")
         self.assertNotEqual(self._validate("claudecode", config).state, "healthy")
 
@@ -2885,8 +2983,30 @@ class WindowsHookDoctorTests(unittest.TestCase):
 
         self.assertEqual(result.checks[-1]["status"], "fail", result.checks[-1])
         self.assertIn("pending-reload", result.checks[-1]["detail"])
+        self.assertIn("cannot verify which hooks an already running host loaded", result.checks[-1]["detail"])
+        self.assertIn("close every Hermes", result.checks[-1]["remediation"])
         self.assertIn(f"agent_executable={executable}", result.checks[-1]["detail"])
         self.assertNotIn("99.0.0", result.checks[-1]["detail"])
+
+    def test_windows_hermes_pending_reload_is_a_passive_warning(self) -> None:
+        # --passive does not list processes, so a Hermes that may be idle is
+        # unverified there, not a failure; the full doctor decides (GAP-0660).
+        runtime = self._runtime()
+        config = self._config("hermes", f'"{runtime}" hook --connector hermes')
+        result = _DoctorResult(passive=True)
+        paths = {
+            "config_path": str(config),
+            "install_root": str(self.install),
+            "search_path": str(self.install),
+            "pathext": ".EXE;.CMD",
+        }
+
+        with patch.object(cmd_doctor, "_hermes_host_running", side_effect=AssertionError("listed processes")):
+            _check_hook_contract_lock(self.cfg, "hermes", result, platform_name="nt", **paths)
+            cmd_doctor._check_windows_native_hooks(self.cfg, "hermes", "Hermes hooks", result, **paths)
+
+        self.assertEqual([row["status"] for row in result.checks], ["warn", "warn"], result.checks)
+        self.assertTrue(all("pending-reload" in row["detail"] for row in result.checks), result.checks)
 
     def test_windows_contract_preserves_access_denied_classification(self) -> None:
         runtime = self._runtime()

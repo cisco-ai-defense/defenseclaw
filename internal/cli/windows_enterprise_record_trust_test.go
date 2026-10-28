@@ -109,6 +109,7 @@ func TestInspectTrustedWindowsEnterpriseDeployment(t *testing.T) {
 // to Secure Client and is not refused as a profile conflict, and a planted
 // Secure Client record does not block a standalone install.
 func TestPlantedDeploymentRecordDoesNotAffectLifecycleProfile(t *testing.T) {
+	skipIfLocalSystem(t, "LocalSystem owns its t.TempDir() tree, so the fixture cannot stand in for a file a standard account owns")
 	planted := filepath.Join(t.TempDir(), "deployment.json")
 	if err := os.WriteFile(planted, []byte(`{}`), 0o600); err != nil {
 		t.Fatal(err)
@@ -180,6 +181,7 @@ func TestPlantedDeploymentRecordDoesNotAffectLifecycleProfile(t *testing.T) {
 
 // The per-user gateway guard honors only an administrator-owned marker key.
 func TestWindowsEnterpriseMarkerRequiresAdministratorKey(t *testing.T) {
+	skipIfLocalSystem(t, "the LocalSystem HKCU cannot stand in for a standard account's")
 	suffix := make([]byte, 6)
 	if _, err := rand.Read(suffix); err != nil {
 		t.Fatal(err)

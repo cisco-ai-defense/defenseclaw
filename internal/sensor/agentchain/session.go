@@ -64,14 +64,63 @@ type Observation struct {
 	// place in the chain at either time, so an early, unrelated sighting
 	// cannot hold a later real one out of order (GAP-1419).
 	LastAt time.Time
+	// between holds the sightings of the same key after At and before
+	// LastAt, ascending and bounded by maxSightingsPerKey. Expiring the
+	// earliest sighting then leaves a middle one that can still complete a
+	// chain inside the window (GAP-1427).
+	between []time.Time
 }
 
-// lastSighting is the latest time this observation was seen.
-func (o Observation) lastSighting() time.Time {
+// maxSightingsPerKey bounds the sightings one observation key keeps, so a
+// loop that repeats one read cannot grow a session without bound.
+const maxSightingsPerKey = 32
+
+// sightings returns every time this observation was seen, ascending.
+func (o Observation) sightings() []time.Time {
+	times := make([]time.Time, 0, len(o.between)+2)
+	times = append(times, o.At)
+	times = append(times, o.between...)
 	if o.LastAt.After(o.At) {
-		return o.LastAt
+		times = append(times, o.LastAt)
 	}
-	return o.At
+	return times
+}
+
+// setSightings stores ascending, distinct, non-empty times as At, between and
+// LastAt.
+func (o *Observation) setSightings(times []time.Time) {
+	o.At, o.LastAt, o.between = times[0], time.Time{}, nil
+	if last := len(times) - 1; last > 0 {
+		o.LastAt = times[last]
+		if last > 1 {
+			o.between = append([]time.Time(nil), times[1:last]...)
+		}
+	}
+}
+
+// mergeSightings returns the distinct times of a and b, ascending. Over the
+// bound it drops the inner sighting closest to the one before it, so the
+// earliest and latest stay and the rest stay spread over the span.
+func mergeSightings(a, b []time.Time) []time.Time {
+	merged := make([]time.Time, 0, len(a)+len(b))
+	merged = append(append(merged, a...), b...)
+	sort.Slice(merged, func(i, j int) bool { return merged[i].Before(merged[j]) })
+	distinct := merged[:0]
+	for _, at := range merged {
+		if len(distinct) == 0 || !at.Equal(distinct[len(distinct)-1]) {
+			distinct = append(distinct, at)
+		}
+	}
+	for len(distinct) > maxSightingsPerKey {
+		drop := 1
+		for index := 2; index < len(distinct)-1; index++ {
+			if distinct[index].Sub(distinct[index-1]) < distinct[drop].Sub(distinct[drop-1]) {
+				drop = index
+			}
+		}
+		distinct = append(distinct[:drop], distinct[drop+1:]...)
+	}
+	return distinct
 }
 
 // Key deduplicates observations within a session. Two reads of the same
@@ -116,27 +165,17 @@ func NewSession(rootPID int, agentName string, at time.Time) *Session {
 // forward, and Progressed reads the sighting times to decide whether the
 // session moved through its stages in order -- so re-observing an early stage
 // more confidently could reorder a chain that had already formed, or form one
-// that never happened. The latest sighting is kept beside the earliest so a
-// stage that recurs still counts at the time it recurred.
+// that never happened. Every sighting is kept (bounded), so a stage that
+// recurs still counts at each time it recurred.
 func (s *Session) Record(observation Observation) {
 	key := observation.Key()
 	kept := observation
 	if existing, ok := s.observations[key]; ok {
-		latest := existing.lastSighting()
-		if observation.lastSighting().After(latest) {
-			latest = observation.lastSighting()
-		}
+		times := mergeSightings(existing.sightings(), observation.sightings())
 		if observation.Confidence <= existing.Confidence {
 			kept = existing
 		}
-		kept.At = existing.At
-		if observation.At.Before(kept.At) {
-			kept.At = observation.At
-		}
-		kept.LastAt = time.Time{}
-		if latest.After(kept.At) {
-			kept.LastAt = latest
-		}
+		kept.setSightings(times)
 	}
 	s.observations[key] = kept
 	if observation.At.After(s.LastSeen) {
@@ -147,16 +186,23 @@ func (s *Session) Record(observation Observation) {
 // Expire drops observations older than cutoff, so a chain is a chain within a
 // window rather than over the lifetime of a long-running agent.
 //
-// A key seen again inside the window keeps only that later sighting, so the
-// chain is still built from sightings within the window.
+// A key seen again inside the window keeps every sighting inside it, so the
+// chain is still built from sightings within the window, and one that a
+// middle sighting completes is not lost when the first expires (GAP-1427).
 func (s *Session) Expire(cutoff time.Time) {
 	for key, observation := range s.observations {
+		times := observation.sightings()
+		inside := times[:0]
+		for _, at := range times {
+			if !at.Before(cutoff) {
+				inside = append(inside, at)
+			}
+		}
 		switch {
-		case observation.lastSighting().Before(cutoff):
+		case len(inside) == 0:
 			delete(s.observations, key)
-		case observation.At.Before(cutoff):
-			observation.At = observation.lastSighting()
-			observation.LastAt = time.Time{}
+		case len(inside) < len(times):
+			observation.setSightings(inside)
 			s.observations[key] = observation
 		}
 	}
@@ -214,9 +260,8 @@ func (s *Session) Progressed(minimum int) bool {
 		if stage < 0 {
 			continue
 		}
-		sightings = append(sightings, stageSighting{stage: stage, at: observation.At})
-		if last := observation.lastSighting(); last.After(observation.At) {
-			sightings = append(sightings, stageSighting{stage: stage, at: last})
+		for _, at := range observation.sightings() {
+			sightings = append(sightings, stageSighting{stage: stage, at: at})
 		}
 	}
 	return orderedStages(sightings) >= minimum

@@ -454,7 +454,6 @@ func (m *mockLLM) responses(w http.ResponseWriter, r *http.Request) {
 		case 0:
 			call := responsesShellCall(sc.command, tools, seq)
 			if name, ok := pickShellTool(schemas); call == nil && ok {
-				// Any other known shell tool (OmniGent's sys_os_shell), filled
 				// from its schema.
 				args, _ := json.Marshal(shellToolArgs(schemas[name], sc.command))
 				call = map[string]interface{}{"type": "function_call", "name": name, "call_id": fmt.Sprintf("call_dcprobe_%d", seq), "arguments": string(args)}

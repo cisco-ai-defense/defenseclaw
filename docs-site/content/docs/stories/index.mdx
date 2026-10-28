@@ -10,13 +10,15 @@ keywords:
   - DefenseClaw HITL
 ---
 
-Six walkthroughs. Each one starts from a real operator goal, ends with an outcome you can check, and explains the trade-offs along the way.
+Six walkthroughs. Each one starts from a goal and ends with an outcome you can check.
 
 <Cards>
-  <Card title="Stop Claude Code from deleting a critical path" href="/docs/stories/observe-claude-code" description="Wire Claude Code, switch to action mode, and watch rm -rf on a protected root path get blocked." />
-  <Card title="Catch a prompt injection on Codex" href="/docs/stories/prompt-injection-codex" description="Local rules catch the obvious phrasing; the optional LLM judge catches the subtler cases." />
-  <Card title="Stop a secret upload from Cursor" href="/docs/stories/cursor-secret-exfil" description="Cursor's beforeShellExecution hook stops a command that pipes a key file into curl before the shell runs it." />
-  <Card title="Approve risky tool calls before they run" href="/docs/stories/hitl-approvals" description="HITL sits between observe and full enforcement: pause, review, then continue or stop." />
-  <Card title="Run the local observability stack" href="/docs/stories/local-observability" description="Start the bundled five-container stack, let the gateway pick it up without a restart, and open the dashboards." />
-  <Card title="Add a connector without losing audit history" href="/docs/stories/switch-connectors" description="The audit database is shared by every connector, so adding or replacing one keeps your history." />
+  <Card title="Stop Claude Code from deleting a critical path" href="/docs/stories/observe-claude-code" description="Watch Claude Code in observe mode, then block rm -rf against a protected path with the bundled CMD-RM-RF rule." />
+  <Card title="Catch a prompt injection on Codex" href="/docs/stories/prompt-injection-codex" description="Block a prompt injection in Codex with the bundled TRUST-IGNORE-PREVIOUS rule, then add the LLM judge for subtler cases." />
+  <Card title="Stop a secret upload from Cursor" href="/docs/stories/cursor-secret-exfil" description="Block a command that pipes a key file into curl, using Cursor's beforeShellExecution hook and a fake key." />
+  <Card title="Approve risky tool calls before they run" href="/docs/stories/hitl-approvals" description="Turn on human approval (HITL) so a confirmable HIGH-severity tool call pauses in the agent and waits for your yes or no." />
+  <Card title="Run the local observability stack" href="/docs/stories/local-observability" description="Start the bundled Grafana, Prometheus, Loki and Tempo stack, send DefenseClaw telemetry to it, and tear it down." />
+  <Card title="Add a connector without losing audit history" href="/docs/stories/switch-connectors" description="Guard a second agent next to the first, replace one with another, or remove one. Audit history is kept." />
 </Cards>
+
+Related how-to pages: [Turn on blocking](/docs/get-started/first-guardrail), [Allow a blocked call](/docs/guardrail#allow-a-blocked-call) and [Turn off the guardrail](/docs/guardrail/disabling).

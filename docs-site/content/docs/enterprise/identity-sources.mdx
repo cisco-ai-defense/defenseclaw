@@ -12,21 +12,23 @@ keywords:
 ---
 
 DefenseClaw ties each agent action to a person without integrating with your
-identity provider. It makes **no calls to Active Directory, Okta or Entra**,
+identity provider. It makes **no directory API calls to Active Directory, Okta or Entra**,
 and it needs **no credentials, tokens, service accounts or app
 registrations**. It reads what the operating system already knows about the
 account that is running the agent, and it says how far each fact can be
 trusted.
 
-This page is the reference for what is read, where, and how much to trust it.
-For the supported identity types and the task guides, see
+This page is the reference for what is read, where, and how much to trust it. Active Directory is the identity stack certified in 1.0.4; the Okta and Entra parts were last verified live in October 2026.
+For the supported identity types and the checks, see
 [Identity and authentication](/docs/enterprise/identity-and-authentication).
 
 ## What it never does
 
-- It never contacts an identity provider, a domain controller or a directory
-  API of its own. A lookup is a call to the host's own account database
+- It makes no identity-provider or directory API calls. A lookup is a call to the host's own account database
   (`getent`, SSSD, the Windows token and registry, Open Directory).
+- On a domain-bound Mac, the root guardian makes a TCP port 389 reachability
+  probe to a domain controller to detect directory recovery. It sends no LDAP
+  query or credentials. See [Limits](#limits-stated-plainly).
 - It holds no identity credentials: no passwords, tokens, tickets or keys. It
   records the Kerberos principal name, not the ticket contents. On macOS, it may
   run `/usr/bin/klist --json` to read the default API cache.
@@ -127,6 +129,28 @@ names the qualified group the host knows. An answer with a group that is only a
 number (a directory that did not answer for it) is kept 2 minutes instead of
 15, and the next request after that waits for a fresh lookup.
 
+On a qualified-name SSSD Active Directory host with one joined domain, a bare
+`users` entry keeps matching that domain's account after an upgrade from
+1.0.3. With more than one joined Active Directory domain or a configured
+trusted child, the same entry can refer to several accounts. DefenseClaw
+refuses a request when that ambiguity could change its profile. Profile
+explain, status, verify and doctor name the qualified principal to write for
+accounts the guardian has resolved. Use that principal or the uid to select
+one account. Managed macOS hooks ask Open Directory for current group membership on every
+call; a failed lookup cannot reuse an earlier secondary group to select a
+more relaxed profile.
+
+On a host whose `passwd` line lists `sss` after `files`, a local account's uid
+may also be an SSSD account's, and only root can show that SSSD's "no such
+account" for it is final (`sssctl` answers root only). On standalone enterprise
+the root guardian makes that check for each enrolled account, and the gateway
+takes it from the guardian's current identity record. A per-user gateway takes
+its own account's groups from its kernel credentials (the groups its process
+holds, named through NSS), so group assignments decide as usual; which account
+holds the uid stays unconfirmed, and a users entry that names an account
+refuses the request with `the account holder is unconfirmed`. A users entry by
+uid (`"1020"`) still matches.
+
 The NSS, SSSD SID and realmd lookups run on every Linux install, without
 privilege. The root guardian adds the InfoPipe facts on
 the standalone enterprise profile only. SSSD serves AD, IPA and plain LDAP
@@ -192,7 +216,11 @@ decides the domain of an SSSD account from its uid, not from its name:
   not answer in time, the lookup fails as a whole. The gateway keeps the
   account's last facts for up to an hour and retries every 15 seconds, instead
   of keeping facts without the realm, principal or groups. With no earlier
-  facts, requests get the default profile with `default_lookup_failed`.
+  facts, requests whose assignments need the missing account or group fact
+  are refused, with that fact named (`default_lookup_failed`). A verified
+  uid, SID or agent assignment applies when no assignment depends on those
+  missing facts (see
+  [Only verified facts select a profile](/docs/guardrail/user-and-group-policies#only-verified-facts-select-a-profile)).
   Meanwhile `profile-explain --user` (by name or uid) shows the profile the
   hooks apply from those kept facts, with a warning that names their age.
   After a domain controller outage, SSSD goes back online on its own
@@ -210,8 +238,8 @@ decides the domain of an SSSD account from its uid, not from its name:
   enrolled account (what `sssctl domain-status` reports), about once a minute
   and every 15 seconds while it is offline. While it is offline, the lookup of
   an account of that domain that SSSD lists in its primary group only (or only
-  in Domain Users, beside a private group) fails: the account gets the default
-  profile with `default_lookup_failed` (a new sandbox starts provisional), and
+  in Domain Users, beside a private group) fails: a group-dependent request
+  is refused with `default_lookup_failed` and names the missing group fact, and
   `status` and `verify` warn `directory_lookups_failing`. An account whose
   memberships SSSD cached keeps them. When SSSD is online again, the guardian
   runs `sss_cache -E` once (its memory cache included; the guardian unit may
@@ -234,16 +262,46 @@ decides the domain of an SSSD account from its uid, not from its name:
   enterprise drops a realm that InfoPipe places in another domain. Without InfoPipe (`sssd_ifp` not running, or `ifp` missing from
   `services` in `sssd.conf`) the principal of a confirmed account is
   `account@realm`. If InfoPipe stops reporting `userPrincipalName`, a UPN it
-  reported earlier is kept for at most 24 hours (`upn_source: infopipe_kept`);
-  after that, the principal is the derived `account@realm` until InfoPipe
-  reports the UPN again. Standalone enterprise keeps the facts of an SSSD account
+  reported earlier is kept for at most 24 hours (`upn_source: infopipe_kept`),
+  and only for the same account. An account deleted and recreated under the
+  same uid and name has another SID, so it does not keep it. When a SID is
+  missing (a record written before 1.0.4, or an account without one), the
+  guardian asks SSSD which user holds the UPN: the UPN stays when that user
+  is this account, and goes when it is another account (or, for an Active
+  Directory account, no account). When SSSD does not answer, the UPN stays
+  and the guardian asks again at its next pass. After that, the
+  principal is the derived `account@realm` until InfoPipe reports the UPN
+  again. Standalone enterprise keeps the facts of an SSSD account
   that has no UPN for 2 minutes, then asks again. The gateway trusts a
   guardian record for an hour by the wall clock; the guardian rewrites the
   records every 15 minutes, and within about a minute after the clock is
   stepped (an NTP correction, a resume from suspend). It removes the record of
-  an account it no longer publishes (excluded, left the manifest, or deleted)
-  after its next pass; while the directory does not answer it keeps a domain
-  account's record for up to an hour. While the oldest record of an account it
+  an account the enrollment leaves out (excluded, or out of the manifest) at
+  its next pass, once the gateway no longer accepts the account's hook calls.
+  While the guardian still protects a hook of the account (the manifest that
+  leaves it out was not published, or could not be applied), the record
+  stays, so those calls keep the profile assigned to the account's UPN. The
+  record of an `exempt_users` account stays too, and so does every account's
+  while a machine-policy connector is deployed and `unenrolled_users` is not
+  `deny`: the gateway still accepts and inspects those hook calls under the
+  account's own profile. An `exclude_users` name withdraws a record only
+  while the uid still names the excluded account, by the directory's answer
+  or, when the directory does not answer, by the record itself (and its SID,
+  where SSSD holds one). An account that reused the uid keeps its record and
+  its scans, also while a directory cache still answers the excluded name
+  with that uid. The record of a
+  deleted local account goes at the guardian's next pass in which every
+  enrolled account resolves. A directory account that a
+  pass does not list (a partial listing, an account that is not signed in)
+  keeps its record for at most an hour. The record goes sooner when the
+  account's uid now names another account, the same name in another domain
+  or with another SID, or a local account, or when its uid does not resolve
+  at two passes in a row that do not list it; a pass that finds the uid
+  still naming the account starts that count again. The gateway ignores a
+  record whose SID is not the one SSSD holds for the uid now: the
+  account's lookup fails until the guardian writes its record, so a users
+  entry written as a UPN refuses the request with the missing fact named (`default_lookup_failed`). While the directory does not answer, the record
+  stays until the hour is up. While the oldest record of an account it
   still publishes looks older than 30 minutes, or any record is dated in the
   future, `status` and `verify` warn `identity_records_stale` and name that
   account's uid: the directory lookup for it keeps failing (the guardian's log
@@ -283,7 +341,8 @@ ai_discovery:
 ```
 
 Each entry is a DNS domain of at least two labels, compared without regard to
-case and a trailing dot. `defenseclaw config validate` refuses a wildcard
+case and a trailing dot. On a managed Linux host, the administrator runs
+`sudo /opt/defenseclaw/bin/defenseclaw-gateway config validate ./config.yaml`; per-user installs use `defenseclaw config validate`. Validation refuses a wildcard
 (`*.corp.example.com`), a NetBIOS name (`EMEA`), an account (`alice@...` or
 `EMEA\alice`) and an entry listed twice. The gateway applies a changed list
 at reload and looks every account up again; the guardian uses it at its next
@@ -291,16 +350,21 @@ pass. List only domains of your forest that the domain controllers of the
 joined domain trust: a listed domain is trusted for every account SSSD holds
 in it.
 
-To see whether an account was trusted, run
-`defenseclaw guardrail profile explain --user gail@emea.corp.example.com --json`.
+On a managed Linux host, check an account as root:
+
+```bash
+sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux profile-explain --user gail@emea.corp.example.com --json
+```
+
+The per-user `defenseclaw guardrail profile explain` and `defenseclaw config get` commands refuse there. The configured `ai_discovery.trusted_ad_child_domains` list is in the administrator's `/etc/defenseclaw/config.yaml`.
+
 For an account of a child domain that is not listed, `subject.domain`,
 `subject.directory` and `subject.principal` are empty, and the text output
-shows the account name with no realm. `defenseclaw config get
-ai_discovery.trusted_ad_child_domains` shows the configured list.
+shows the account name with no realm.
 
 A users assignment that names only a principal (`alice@CORP.EXAMPLE.COM`)
-matches an account only while it has that principal. Check it with
-`defenseclaw guardrail profile explain --user alice --json`: `subject.principal`
+matches an account only while it has that principal. Check it with the managed
+`enterprise linux profile-explain --user alice --json`: `subject.principal`
 is the principal the gateway attributed, and is empty when no joined domain
 confirms the account's SID. Add the uid to the assignment when the account must
 match while SSSD does not answer; a short account name also matches a local or
@@ -312,7 +376,7 @@ LDAP account of that name.
 | --- | --- | --- |
 | Which user made the request | Standalone enterprise: the SID a per-user credential is bound to, presented over loopback TCP (the kernel does not verify it). Per-user install: the account the gateway runs as | Verified |
 | Account name and domain | `LookupAccountSid`. The domain is reported in lower case | Verified |
-| AD UPN | `TranslateNameW`. An account's first lookup waits up to 1.5 seconds for it when a users or groups assignment exists, and otherwise resolves it in the background. A successful translation is cached for 5 minutes, below the 15-minute directory refresh interval, so a UPN rename is checked on the next refresh. A failed lookup (no domain controller reachable) is retried after 2 minutes; the last good answer is kept during the outage | Verified |
+| AD UPN | `TranslateNameW`. An account's first lookup waits up to 1.5 seconds for it when a users or groups assignment exists, and otherwise resolves it in the background. A successful translation is cached for 5 minutes, below the 15-minute directory refresh interval, so a UPN rename is checked on the next refresh. A failed lookup (no domain controller reachable) is retried after 2 minutes; the last good answer is kept during the outage for profile matching. Agent identity rows leave that kept UPN out until a lookup verifies one and the agent hooks again | Verified |
 | Entra UPN, provider and tenant | `HKLM\SOFTWARE\Microsoft\IdentityStore\Cache\<SID>` and the `CloudDomainJoin\JoinInfo` join state, for Entra-joined and hybrid-joined computers | Verified |
 | Groups | The SYSTEM enumerator's cache of each user's sign-in token groups: local and AD groups, and only the Entra groups that a built-in local group lists (see [Entra groups on Windows](#entra-groups-on-windows)). Standalone enterprise only; a per-user install has no group list | Verified |
 | Remote desktop and logon type | `LsaGetLogonSessionData` for the hook's own logon session | Claimed |
@@ -322,8 +386,9 @@ LDAP account of that name.
 Windows groups follow the sign-in token. A user added to or removed from a
 group gets a new token after signing out and back in; a new Entra group SID may
 also need `dsregcmd /refreshprt` followed by another sign-out and sign-in.
-Live hooks can keep the old profile until the gateway's 15-minute directory
-cache expires. `profile-explain` can show the new profile before live hooks use it.
+After the sign-in the enumerator records the new groups, which drops the
+account's old directory facts: the next hook request, a few seconds later at most,
+uses the new profile, and `profile-explain` shows the same one.
 
 ### macOS
 
@@ -463,59 +528,17 @@ Windows, name an Entra user to `guardrail profile explain --user` by SID, as
 - **Group changes take time.** The gateway caches a user's directory facts for
   15 minutes and refreshes them in the background (2 minutes for an answer with
   a group that has no name, or an SSSD account still waiting for its UPN on
-  standalone enterprise). A Windows user must also sign out and back in, and
-  Himmelblau and SSSD add their own caches. On Linux and macOS the facts belong
+  standalone enterprise). A Windows user must also sign out and back in; the new
+  sign-in applies at the next request. Himmelblau and SSSD add their own caches. On Linux and macOS the facts belong
   to the account that held the uid when they were read: a new account given
   the uid of a removed one gets its own facts within 5 minutes (when the
   gateway next resolves the uid's account), never the old holder's for the
   full 15.
 - **A first lookup can be slow.** A cold SSSD or Active Directory answer can
-  take seconds. The first request waits up to two seconds, then the default
-  profile applies for 15 seconds until the lookup is retried.
-- **A bound Mac whose domain controller does not answer.** Open Directory
-  still answers at once, but lists an Active Directory account without its
-  domain groups (a mobile account keeps its primary group, Domain Users, by
-  name; others list it only as a number), and after the domain controller is
-  back it can keep listing the account that way for a few minutes. While
-  `odutil show nodenames` lists the domain's node (`/Active Directory/CORP` or
-  its `All Domains` node) `Offline`, or the primary group has no name, the
-  gateway treats an Active Directory account's lookup as failed (a mobile
-  account counts as an Active Directory account, though Open Directory keeps
-  it in the local node): it keeps the facts it cached for up to an hour after
-  the last lookup that succeeded, and no longer than the guardian's identity
-  record of the account, which the guardian rewrites every 15 minutes while it
-  reaches the directory (so 45 to 60 minutes into an outage),
-  retries every 15 seconds, `status` and `verify` warn
-  `directory_lookups_failing`, and `profile-explain` gives the reason and the
-  time the facts are dropped. Assignment groups of that domain are not
-  reported as renamed or deleted meanwhile. Without cached facts the account
-  gets the default profile with `default_lookup_failed` (sandboxes start
-  provisional), so keep `default_profile` strict where a group profile
-  blocks. For five minutes after the node was last seen offline the gateway
-  looks the account up again every 15 seconds, so the group profile comes back
-  within 15 seconds of Open Directory listing the groups again. Open Directory
-  can keep listing an account without its groups for more than ten minutes
-  after the domain controller is back. While it lists an enrolled
-  Active Directory account that way, the root guardian checks every 15 seconds
-  whether a domain controller of the account's domain accepts a connection on
-  the LDAP port (TCP 389, to the domain controllers its `_ldap._tcp.dc._msdcs`
-  SRV records name), and flushes the caches (`dscacheutil -flushcache`,
-  `dsmemberutil flushcache`) as soon as one does; it never flushes while no
-  domain controller of those domains answers. With accounts in more than one
-  domain, each domain is checked on its own, so a domain that is still away
-  does not hold up one that is back. The group profile then comes back within
-  about a minute of the domain controller's return, without a manual flush.
-  Open Directory does not always list the node offline, and 20 minutes or so
-  into an outage it can list an account with its primary group still named
-  but without its other domain groups. So the root guardian also checks a
-  domain controller of each enrolled account's Active Directory domain about
-  once a minute, and every 15 seconds while none answers. A domain whose
-  domain controllers answered before and stopped answering is treated like an
-  offline node: its accounts' lookups fail, with the reason in
-  `profile-explain`, and the caches are flushed once a domain controller
-  answers again. A domain the guardian never reached since it started is not
-  treated as away. Where the Mac cannot reach TCP 389 on the domain
-  controllers, neither check works: flush the caches by hand after an outage.
+  take seconds. The first request waits up to two seconds. An assignment
+  that needs the unanswered identity fact refuses the request until the
+  lookup is retried; otherwise the proven match or default applies.
+- **A bound Mac whose domain controller does not answer.** Open Directory can still answer at once while omitting an Active Directory account's domain groups. While `odutil show nodenames` lists the domain's node `Offline`, or the primary group has no name, the gateway treats the lookup as failed. On managed macOS, every hook requires a current Open Directory answer: a group-dependent assignment is unproven and the request is refused, even when the gateway has older facts. `profile-explain` reports the lookup error rather than an older group profile. On a per-user Mac, cached facts are retained for at most an hour and refreshed every 15 seconds during the outage. `status` and `verify` warn `directory_lookups_failing`. The root guardian checks a domain controller of each enrolled account's domain about once a minute (every 15 seconds while none answers, on TCP 389), and flushes the Open Directory caches (`dscacheutil -flushcache`, `dsmemberutil flushcache`) as soon as one answers. Where the Mac cannot reach TCP 389 on the domain controllers, flush the caches by hand after an outage.
 - **Some facts need the enterprise profile.** The UPN on
   Linux, the group list on Windows and the bound-Mac facts on macOS are read
   with privilege by the root guardian or enumerator, which a per-user install
@@ -523,41 +546,17 @@ Windows, name an Entra user to `guardrail profile explain --user` by SID, as
 - **The Kerberos principal and the session can be changed by the user.** They
   are always `claimed`, except an SSH session the gateway confirmed through
   logind or utmp.
-- **Three bridges send no Kerberos principal.** The OpenCode plugin, the Amp
-  plugin and the Omnigent policy bridge run inside the agent process. They
-  report the SSH and login-session facts but do not read the ticket cache, so
-  the records of those connectors carry no
-  `defenseclaw.session.kerberos_principal`. Hooks that go through the
+- **Two plugins send no Kerberos principal.** The OpenCode plugin and the Amp
+  plugin run inside the agent process. They report the SSH and login-session
+  facts but do not read the ticket cache, so the records of those connectors
+  carry no `defenseclaw.session.kerberos_principal`. Hooks that go through the
   DefenseClaw hook runner read it.
 - **Okta through the Okta LDAP Interface and Entra ID were tested live; the
   other cloud paths are parsed from OS state.** The Okta Device Access and
   bound-Mac readers, and Platform SSO with Okta, are covered by tests against
   recorded OS output, not against a live tenant.
 
-What was exercised end to end on real hosts, with a Samba Active Directory
-domain: local accounts on all three OSes; AD over Kerberos with SSSD on RHEL 9
-and Ubuntu 24.04, per-user and managed; and AD UPN and groups on a
-domain-joined Windows per-user install. Group-based profiles on a managed
-Windows computer were exercised with local groups. With a live Okta org, on
-RHEL 9.8: Okta users read through the Okta LDAP Interface by SSSD, signed in
-over SSH with their Okta passwords, on per-user installs and on standalone
-enterprise. Their uid, name and Okta groups were verified, the groups chose
-guardrail profiles on live Claude Code hooks, an Okta group change reached
-the profile, and an Okta outage fell back as documented. Okta Device Access
-was not tested live. Microsoft Entra ID was
-exercised on a live tenant: per-user installs on an Entra-joined Windows 11
-computer and on Ubuntu 22.04 with Entra ID SSH sign-in (the `aad` module),
-with the fields [above](#entra-id-fields-as-seen-live), and Entra group SIDs in
-the Windows sign-in token with and without a built-in local group listing the
-group. On standalone enterprise on that computer, a `groups` assignment that
-names the Entra group by SID selected its profile while Users listed the group,
-and the default profile after the group was taken out of Users and the user
-signed in again. Intune delivery of the local group membership was not tested.
-Entra groups on Linux were exercised with Himmelblau 5.0.0 on Ubuntu 24.04 and
-with Microsoft Entra Domain Services and SSSD on RHEL 9.8, each per user and on
-standalone enterprise; a group member got the group profile on live Claude Code
-hooks. On macOS 15.8 with Platform SSO no Entra group reached the Mac, and a
-local group that carried the membership selected the profile.
+What was exercised end to end on real hosts: local accounts on all three OSes; AD over Kerberos with SSSD on RHEL 9 and Ubuntu 24.04, per-user and managed; AD UPN and groups on a domain-joined Windows per-user install; and group-based profiles on a managed Windows computer with local groups. The Okta and Entra ID results are in [Okta on Linux](/docs/enterprise/identity-okta) and [Deploy with Microsoft Entra ID](/docs/enterprise/identity-entra-id), each with its test date.
 
 ## What a record carries
 
@@ -582,7 +581,8 @@ attribute list and how to join records.
 ## Next steps
 
 <Cards>
-  <Card title="Identity and authentication" href="/docs/enterprise/identity-and-authentication" description="Supported identity types, agent identity, and the task guides." />
+  <Card title="Identity and authentication" href="/docs/enterprise/identity-and-authentication" description="Supported identity types, agent identity, and the checks." />
+  <Card title="Join a Linux host to AD" href="/docs/enterprise/identity-and-authentication" description="SSSD join and what DefenseClaw learns." />
   <Card title="User- and group-based policies" href="/docs/guardrail/user-and-group-policies" description="Write profiles and assignments, and read the audit record." />
   <Card title="End-user identity" href="/docs/observability/end-user-identity" description="Every identity attribute and how to join records." />
 </Cards>

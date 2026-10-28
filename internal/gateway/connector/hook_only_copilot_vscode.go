@@ -17,8 +17,9 @@
 package connector
 
 import (
-	"encoding/json"
 	"strings"
+
+	"github.com/defenseclaw/defenseclaw/internal/copilotargs"
 )
 
 // GitHub Copilot in VS Code runs agent-mode hooks in its Local harness. That
@@ -39,14 +40,12 @@ import (
 //     Copilot CLI also accepts PascalCase events and then sends this
 //     snake_case body)
 //
-// The Local harness publishes no list of built-in tool names ("tool names and
-// arguments differ between harnesses"), so the projections below cover the
-// VS Code agent tools DefenseClaw can judge exactly and pass every other tool
-// or argument shape through unchanged, which ActionFacts parses as partial.
+// The tool and argument projection is copilotargs.LocalToolArgs, shared with
+// the hook-side write-target resolver.
 
 // CopilotHookSurfaceVSCodeLocal is the --hook-surface value of a hook command
 // registered for the VS Code Local harness.
-const CopilotHookSurfaceVSCodeLocal = "vscode-local"
+const CopilotHookSurfaceVSCodeLocal = copilotargs.SurfaceVSCodeLocal
 
 // CopilotVSCodeLocalContractID names the VS Code Local dialect. It is a
 // dialect contract, selected only by the hook command's surface marker:
@@ -115,7 +114,7 @@ func copilotVSCodeLocalDecode(payload map[string]interface{}) HookProfileRequest
 	case "PreToolUse", "PostToolUse":
 		if input, ok := payload["tool_input"]; ok {
 			req.ToolArgsAuthoritative = true
-			req.ToolArgs = copilotVSCodeLocalToolArgs(req.ToolName, input)
+			req.ToolArgs = copilotargs.LocalToolArgs(req.ToolName, input)
 		}
 		if req.HookEventName == "PostToolUse" {
 			req.Content = cursorHookContent(payload["tool_response"])
@@ -126,156 +125,6 @@ func copilotVSCodeLocalDecode(payload map[string]interface{}) HookProfileRequest
 		req.Direction = "prompt"
 	}
 	return req
-}
-
-// copilotVSCodeLocalProjection maps one VS Code agent tool onto the canonical
-// ActionFacts tool and argument names. keys is the closed set of argument
-// names the tool is known to send; fields maps the ones DefenseClaw judges.
-type copilotVSCodeLocalProjection struct {
-	action string
-	keys   []string
-	fields map[string]string
-}
-
-var copilotVSCodeLocalProjections = map[string]copilotVSCodeLocalProjection{
-	"run_in_terminal": {
-		action: "shell",
-		keys:   []string{"command", "explanation", "goal", "isBackground", "mode", "timeout"},
-		fields: map[string]string{"command": "command"},
-	},
-	"read_file": {
-		action: "read_file",
-		keys:   []string{"filePath", "startLine", "endLine", "offset", "limit"},
-		fields: map[string]string{"filePath": "path"},
-	},
-	"list_dir": {
-		action: "list_directory",
-		keys:   []string{"path"},
-		fields: map[string]string{"path": "path"},
-	},
-	"create_file": {
-		action: "create_file",
-		keys:   []string{"filePath", "content"},
-		fields: map[string]string{"filePath": "path", "content": "content"},
-	},
-	"replace_string_in_file": {
-		action: "edit_file",
-		keys:   []string{"filePath", "oldString", "newString", "explanation"},
-		fields: map[string]string{"filePath": "path", "newString": "content"},
-	},
-	"insert_edit_into_file": {
-		action: "edit_file",
-		keys:   []string{"filePath", "code", "explanation"},
-		fields: map[string]string{"filePath": "path", "code": "content"},
-	},
-}
-
-// copilotCLIHookFileLocalEvents is how the VS Code Local harness maps the
-// events of a Copilot CLI-format hook file such as the per-user
-// ~/.copilot/hooks/defenseclaw.json (HOOKS_BY_TARGET[Target.GitHubCopilot] in
-// microsoft/vscode src/vs/workbench/contrib/chat/common/promptSyntax/hookTypes.ts).
-// The harness then sends its own Local payload to that command
-// (chatHookService.ts: hook_event_name, tool_name, tool_input), never the CLI's
-// camelCase body: "Runtime payloads still use the Local schema."
-var copilotCLIHookFileLocalEvents = map[string]string{
-	"sessionStart":        "SessionStart",
-	"userPromptSubmitted": "UserPromptSubmit",
-	"preToolUse":          "PreToolUse",
-	"postToolUse":         "PostToolUse",
-	"agentStop":           "Stop",
-	"subagentStop":        "SubagentStop",
-}
-
-// CopilotVSCodeLocalEventForCLIHook returns the Local event a Copilot CLI
-// hook-file entry bound to cliEvent runs as in the VS Code Local harness. ok
-// is false for CLI events the harness maps to no Local dialect event
-// (sessionEnd, errorOccurred) or never runs.
-func CopilotVSCodeLocalEventForCLIHook(cliEvent string) (string, bool) {
-	local, ok := copilotCLIHookFileLocalEvents[strings.TrimSpace(cliEvent)]
-	return local, ok
-}
-
-// CopilotVSCodeLocalTool reports a VS Code Local agent tool DefenseClaw
-// projects. The Local harness also runs the per-user Copilot CLI hook file
-// (~/.copilot/hooks) and then sends a CLI-shaped body (toolName, toolArgs)
-// with these tool names, which the Copilot CLI never uses, so the CLI
-// dialect projects them the same way (GAP-1903).
-func CopilotVSCodeLocalTool(toolName string) bool {
-	toolName = strings.TrimSpace(toolName)
-	_, ok := copilotVSCodeLocalProjections[toolName]
-	return ok || toolName == "fetch_webpage"
-}
-
-// CopilotVSCodeLocalActionTool is the ActionFacts tool name for a VS Code
-// Local tool: its projection's canonical name, or the native name.
-func CopilotVSCodeLocalActionTool(toolName string) string {
-	toolName = strings.TrimSpace(toolName)
-	if toolName == "fetch_webpage" {
-		return "web_fetch"
-	}
-	if p, ok := copilotVSCodeLocalProjections[toolName]; ok {
-		return p.action
-	}
-	return toolName
-}
-
-// copilotVSCodeLocalToolArgs projects a known tool's arguments onto canonical
-// names. An unknown tool, an unknown argument name, or a non-string judged
-// value keeps the native object, so ActionFacts sees the shape it cannot
-// prove instead of a projection that drops part of the call.
-func copilotVSCodeLocalToolArgs(toolName string, input interface{}) json.RawMessage {
-	native, err := MarshalToolArgs(input)
-	if err != nil {
-		return nil
-	}
-	args, ok := input.(map[string]interface{})
-	if !ok {
-		return native
-	}
-	toolName = strings.TrimSpace(toolName)
-	if toolName == "fetch_webpage" {
-		// One URL is one fetch; a list or a query-only call stays native.
-		urls, ok := args["urls"].([]interface{})
-		if !ok || len(urls) != 1 || !copilotVSCodeLocalOnlyKeys(args, "urls", "query") {
-			return native
-		}
-		url, ok := urls[0].(string)
-		if !ok || strings.TrimSpace(url) == "" {
-			return native
-		}
-		out, _ := MarshalToolArgs(map[string]string{"url": url})
-		return out
-	}
-	p, ok := copilotVSCodeLocalProjections[toolName]
-	if !ok || !copilotVSCodeLocalOnlyKeys(args, p.keys...) {
-		return native
-	}
-	out := make(map[string]string, len(p.fields))
-	for from, to := range p.fields {
-		value, present := args[from]
-		if !present {
-			continue
-		}
-		text, ok := value.(string)
-		if !ok {
-			return native
-		}
-		out[to] = text
-	}
-	encoded, err := MarshalToolArgs(out)
-	if err != nil {
-		return native
-	}
-	return encoded
-}
-
-func copilotVSCodeLocalOnlyKeys(args map[string]interface{}, keys ...string) bool {
-	for key := range args {
-		if !containsExact(keys, key) {
-			return false
-		}
-	}
-	return true
 }
 
 // copilotVSCodeLocalRespond renders the Local harness response. An allow is

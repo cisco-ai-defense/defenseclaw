@@ -20,6 +20,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/netip"
 	"os"
@@ -33,18 +34,112 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail/semantic"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail/semanticpb"
+	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
 	"mvdan.cc/sh/v3/expand"
 	"mvdan.cc/sh/v3/pattern"
 	"mvdan.cc/sh/v3/syntax"
 )
 
 // trustedActionDispatchMaxCost bounds the semantic rules' total CEL cost per
-// action (each program also has its own cost limit). The bound is on cost,
-// not wall-clock time: a 50 ms deadline here skipped every semantic rule
-// left when a loaded host stalled the gateway, so a CRITICAL command rule
-// only alerted and the call ran (GAP-2140). The caller's context still
-// cancels the evaluation.
-const trustedActionDispatchMaxCost = uint64(24_000_000)
+// action (each program also has its own cost limit), for one profile and for
+// a strictest combination of profiles alike (trustedActionBudget). The bound
+// is on cost, not wall-clock time: a 50 ms deadline here skipped every
+// semantic rule left when a loaded host stalled the gateway, so a CRITICAL
+// command rule only alerted and the call ran (GAP-2140). The caller's
+// context still cancels the evaluation. A variable only so tests can lower it.
+var trustedActionDispatchMaxCost = uint64(24_000_000)
+
+// trustedActionBudget is the semantic CEL cost one action has used. The
+// members of a strictest combination of profiles share one
+// (newTrustedActionBudget(true)): together they cost no more than one
+// profile, and an expression several members have is judged once on each
+// view of the action (evals), so overlapping packs do not spend the budget
+// twice. A judged expression stays usable once the budget is spent: it costs
+// nothing more, so a member whose rule another member already judged keeps
+// its finding however much the members before it spent. A rule the budget
+// does not reach keeps its fallback lane, as in one profile, and a
+// combination that reaches it says so once (noteMeetBudget).
+type trustedActionBudget struct {
+	consumed uint64
+	reached  bool
+	evals    map[trustedActionEvalKey]trustedActionEval
+}
+
+// trustedActionEvalKey is one expression on one projection of the action:
+// view 0 is the judged view, 1 its enforcement projection, 2 and 3 the same
+// for the PowerShell body view.
+type trustedActionEvalKey struct {
+	expression string
+	view       int
+}
+
+type trustedActionEval struct {
+	result semantic.Result
+	code   semantic.EvalCode
+}
+
+// newTrustedActionBudget is an empty budget; shared is set for the members of
+// a strictest combination, which judge a shared expression once.
+func newTrustedActionBudget(shared bool) *trustedActionBudget {
+	budget := &trustedActionBudget{}
+	if shared {
+		budget.evals = make(map[trustedActionEvalKey]trustedActionEval)
+	}
+	return budget
+}
+
+// spent reports whether the budget leaves no cost for another evaluation.
+func (b *trustedActionBudget) spent() bool {
+	done := b.consumed >= trustedActionDispatchMaxCost
+	b.reached = b.reached || done
+	return done
+}
+
+// judged reports whether candidate's expression has a result on the view
+// numbered view that costs nothing more (a shared budget's evals).
+func (b *trustedActionBudget) judged(candidate compiledSemanticRule, view int) bool {
+	_, ok := b.evals[trustedActionEvalKey{expression: candidate.rule.Expression, view: view}]
+	return ok
+}
+
+// eval judges candidate on projection, the view numbered view
+// (trustedActionEvalKey), and charges its cost; for a shared budget once per
+// expression and view, also after the budget is spent. ok is false when the
+// budget had no cost left for a new evaluation or the new evaluation went
+// past it: then the rule was not judged within the budget. A shared budget
+// keeps that last result too, already paid for, for the members after.
+func (b *trustedActionBudget) eval(ctx context.Context, candidate compiledSemanticRule, view int, projection *semanticpb.Facts) (result semantic.Result, code semantic.EvalCode, ok bool) {
+	key := trustedActionEvalKey{expression: candidate.rule.Expression, view: view}
+	if hit, cached := b.evals[key]; cached {
+		return hit.result, hit.code, true
+	}
+	if b.spent() {
+		return semantic.Result{}, code, false
+	}
+	result, code = candidate.program.EvalBool(ctx, projection)
+	b.consumed += result.Cost
+	if b.evals != nil && code == semantic.EvalOK {
+		b.evals[key] = trustedActionEval{result: result, code: code}
+	}
+	if b.consumed > trustedActionDispatchMaxCost {
+		b.reached = true
+		return semantic.Result{}, code, false
+	}
+	return result, code, true
+}
+
+// noteMeetBudget says once per combination that its members' semantic rules
+// of one action reached the budget, so rules past it were judged by their
+// fallback lanes only.
+func noteMeetBudget(generation *compiledRulePackCategories, budget *trustedActionBudget) {
+	if generation == nil || generation.budgetNote == nil || budget == nil || !budget.reached {
+		return
+	}
+	generation.budgetNote.Do(func() {
+		fmt.Fprintf(os.Stderr, "[guardrail] strictest combination of profiles: the semantic rules of one action reached their cost budget (%d); the rules past it were judged by their fallback patterns\n",
+			trustedActionDispatchMaxCost)
+	})
+}
 
 // trustedActionRequest is private so a remote payload cannot assert that an
 // arbitrary body is a trusted or enforcement-capable action. Only adapters
@@ -54,6 +149,11 @@ type trustedActionRequest struct {
 	LegacyText         string
 	Connector          string
 	EnforcementCapable bool
+	// ArtifactBody is set when LegacyText and Input.Command are the whole
+	// body of a script the call runs (the artifact lane): its comments and
+	// data are not tool-call text, so a migrated literal rule must match a
+	// word the parse took from an executed command (GAP-1513).
+	ArtifactBody bool
 	// conflictSource is the tool call's argument object before a connector
 	// projection took arguments out of Input.Args, for the conflicting-keys
 	// check (conflictingToolArgumentKeys); nil when Input.Args is the object
@@ -72,8 +172,21 @@ type trustedActionRequest struct {
 	// A present empty map means the client inspected the action and found no
 	// static write target; nil denotes missing or invalid client evidence.
 	ResolvedWriteTargets map[string]string
-	record               func(actionfacts.Facts, []RuleFinding)
-	recordTelemetry      func(trustedActionTelemetry)
+	// Hermes' native patch parser can reinterpret a symlink target containing
+	// a line break as another file directive. Its write views require the
+	// narrower patch-target proof, including in guest-directory views.
+	patchTarget bool
+	// Sandbox absolute targets are guest names; their host-directory views
+	// carry the filesystem proof.
+	patchHostView   bool
+	record          func(actionfacts.Facts, []RuleFinding)
+	recordTelemetry func(trustedActionTelemetry)
+	// Prevent recursive standalone evaluation of an already flattened command.
+	simpleCommandPass bool
+	// evidenceCWD places a simple command whose cwd the gateway cannot see
+	// (ProtectHome) where the managed hook client keyed its evidence: the
+	// client's cwd followed through the command's static cd.
+	evidenceCWD string
 	// SandboxGuestCWD is a sandbox call's working directory in the guest's
 	// namespace (sandboxHookGuestCWD); Input.CWD is its host mount. Only
 	// the authorized-keys proofs read it, and only to add a match.
@@ -83,6 +196,16 @@ type trustedActionRequest struct {
 	// a command judged on its own (inspectSandboxShellToolPolicyCtx) then
 	// has its hint inferred again from that command (GAP-0686).
 	windowsShellDialect bool
+	// generation is the rule generation the call is judged with; nil: the
+	// request profile's (snapshotRulePackGenerationFor). A caller that
+	// combines several dispatches of one request judges each with each
+	// member's generation of a strictest combination of profiles
+	// (promotedArtifactFindings).
+	generation *compiledRulePackCategories
+	// budget is the semantic cost budget the call is judged within; nil: a
+	// new one. The dispatches of the members of a strictest combination of
+	// profiles for one action share one (trustedActionBudget).
+	budget *trustedActionBudget
 }
 
 // trustedActionTelemetry is value-free dispatch telemetry. It deliberately
@@ -99,6 +222,14 @@ func (t *trustedActionTelemetry) merge(other trustedActionTelemetry) {
 	t.ParserUncertaintyCount += other.ParserUncertaintyCount
 	t.ParserUncertaintyCatalogMatchCount += other.ParserUncertaintyCatalogMatchCount
 	t.ParserUncertaintyShadowFindingCount += other.ParserUncertaintyShadowFindingCount
+}
+
+// widen raises each count of t to other's where that is larger: a call
+// judged with the rules of several generations counts its parse once.
+func (t *trustedActionTelemetry) widen(other trustedActionTelemetry) {
+	t.ParserUncertaintyCount = max(t.ParserUncertaintyCount, other.ParserUncertaintyCount)
+	t.ParserUncertaintyCatalogMatchCount = max(t.ParserUncertaintyCatalogMatchCount, other.ParserUncertaintyCatalogMatchCount)
+	t.ParserUncertaintyShadowFindingCount = max(t.ParserUncertaintyShadowFindingCount, other.ParserUncertaintyShadowFindingCount)
 }
 
 func (t trustedActionTelemetry) empty() bool {
@@ -147,13 +278,131 @@ func dispatchTrustedAction(
 		// Two argument keys name one field: judge each candidate (GAP-0678).
 		return dispatchConflictingToolArguments(parent, request, conflict)
 	}
-	ctx := parent
+	generation := request.generation
+	if generation == nil {
+		generation = snapshotRulePackGenerationFor(parent, request.Connector)
+	}
+	budget := request.budget
+	if generation == nil || len(generation.members) == 0 {
+		if budget == nil {
+			budget = newTrustedActionBudget(false)
+		}
+		return dispatchTrustedActionWith(parent, request, facts, generation, budget, &telemetry)
+	}
+	// A strictest combination of profiles judges the call with each
+	// member's own rules within one budget. Each finding keeps its member for
+	// the later verdict and audit, even when two members share a rule ID.
+	if budget == nil {
+		budget = newTrustedActionBudget(true)
+	}
+	for i, member := range generation.members {
+		var memberTelemetry trustedActionTelemetry
+		found := dispatchTrustedActionWith(parent, request, facts, member, budget, &memberTelemetry)
+		if i < len(generation.memberNames) {
+			for j := range found {
+				found[j].profile = generation.memberNames[i]
+			}
+		}
+		findings = append(findings, found...)
+		telemetry.widen(memberTelemetry)
+	}
+	noteMeetBudget(generation, budget)
+	return findings
+}
 
-	generation := snapshotRulePackGenerationFor(ctx, request.Connector)
+// dispatchTrustedActionWith is dispatchTrustedAction's judgment of the
+// call's facts with the rules of one generation, within budget.
+func dispatchTrustedActionWith(
+	ctx context.Context,
+	request trustedActionRequest,
+	facts actionfacts.Facts,
+	generation *compiledRulePackCategories,
+	budget *trustedActionBudget,
+	telemetry *trustedActionTelemetry,
+) (findings []RuleFinding) {
 	// After every lane below, on what it returns (GAP-1469, GAP-1478).
 	defer func() {
 		findings = withMigratedLiteralRuleFindings(generation, request, facts, findings)
 	}()
+	defer func() {
+		findings = withActiveStateTargetMention(generation, request, findings)
+	}()
+	if !request.simpleCommandPass {
+		defer func() {
+			checkedWholeWrite := false
+			wholeWriteSafe := false
+			wholeCommand, wholeCommandKnown := trustedBashCommandInput(request.Input)
+			simples := actionfacts.SimpleCommands(request.Input, facts)
+			evidenceCWDs := trustedSimpleCommandEvidenceCWDs(request, simples)
+			for index, simple := range simples {
+				if simple.EvaluationFailure != "" {
+					if simple.EvaluationFailure != "limit" {
+						// A parser gap is already represented by the whole-action
+						// evaluation. It is not itself an enforcement finding.
+						continue
+					}
+					const ruleID = "ACTION-COMPOUND-LIMIT"
+					failure := RuleFinding{
+						RuleID: ruleID, Title: "Shell command exceeds policy evaluation limit",
+						Severity: "CRITICAL", Confidence: 1,
+						enforcement: findingEnforcementAllowed,
+					}.withTrustedActionProof(newEvaluationFailureFindingProof(ruleID))
+					findings = withSimpleCommandFindings(findings,
+						applyTrustedActionProofBoundary([]RuleFinding{failure}, request.EnforcementCapable))
+					break
+				}
+				child := request
+				child.Input.Command = simple.Text
+				child.Input.CWD = simple.CWD
+				if evidenceCWDs != nil {
+					child.evidenceCWD = evidenceCWDs[index]
+				}
+				// The managed hook has already walked a static cd. Its write
+				// targets are keyed in that physical directory, which may
+				// differ from the shell's logical PWD through a symlink.
+				// Judge the standalone child in the same directory as the
+				// hook's target evidence.
+				if request.ProtectedHomeHook {
+					if physical := request.ResolvedWriteTargets[hookpaths.DirectoryFactPrefix+simple.CWD]; filepath.IsAbs(physical) {
+						child.Input.CWD = physical
+					}
+				}
+				child.Input.Args, child.Input.Argv = nil, nil
+				child.LegacyText = simple.Text
+				child.conflictSource = nil
+				child.record, child.recordTelemetry = nil, nil
+				child.simpleCommandPass = true
+				// The child is judged by this generation (a meet member) within
+				// the call budget, like its parent.
+				child.generation, child.budget = generation, budget
+				childFindings := dispatchTrustedAction(ctx, child)
+				if simple.ZshHistoryBuiltin {
+					// Zsh's history builtin lists events (fc -l). The Bash-only
+					// history -c clear rule does not apply inside that shell.
+					childFindings = slices.DeleteFunc(childFindings, func(f RuleFinding) bool {
+						return f.RuleID == "integrity.history_tamper"
+					})
+				}
+				if simple.UnresolvedBoundVariable {
+					if !checkedWholeWrite {
+						checkedWholeWrite = true
+						wholeWriteSafe = wholeCommandKnown &&
+							hookpaths.ActionCommandDecisionWithGlobFacts(wholeCommand,
+								request.Input.CWD, request.Input.ActiveHome, clientGlobFacts(request)) == ""
+					}
+					if wholeWriteSafe {
+						// A child with a missing action-local value cannot prove a
+						// protected write by itself. The full action's class resolver
+						// has already judged that binding; retain every other rule.
+						childFindings = slices.DeleteFunc(childFindings, func(f RuleFinding) bool {
+							return f.RuleID == "persistence.ssh_authorized_keys_command"
+						})
+					}
+				}
+				findings = withSimpleCommandFindings(findings, childFindings)
+			}
+		}()
+	}
 	options := ruleScanOptions{
 		includeToolCallOnly: true,
 		excludeTrustExploit: true,
@@ -224,6 +473,14 @@ func dispatchTrustedAction(
 			semanticFacts, staticTargetTwin, viewCandidate = view, &twin, redirectReductionCandidate
 		} else if view, ok := actionfacts.ShortCircuitListReduction(request.Input, facts); ok {
 			semanticFacts, viewCandidate = view, listReductionCandidate
+		} else if view, ok := actionfacts.CompoundCommandReduction(request.Input, facts); ok {
+			// A simple command in a subshell, group, if, loop or case body,
+			// or a negated or background statement, is judged as if it ran
+			// alone: `(rm -rf /)` as `rm -rf /`. The view has every command
+			// of the action, as a list read as a sequence does, but not the
+			// scope of a subshell or the count of a loop, so only a match
+			// counts.
+			semanticFacts, viewCandidate, subsetView = view, listReductionCandidate, true
 		} else if view, ok := actionfacts.PowerShellProfileWrapperReduction(request.Input, facts); ok {
 			// pwsh -Command "<body>" without -NoProfile, alone or first in a
 			// list: a profile only runs more commands before the body, so a
@@ -282,13 +539,13 @@ func dispatchTrustedAction(
 	excluded := make(map[string]struct{})
 	semanticFindings := make([]RuleFinding, 0, len(generation.semanticRules))
 	matchedSemanticOwnerIDs := make(map[string]struct{})
-	var consumedCost uint64
 
 	// evaluateSemanticRules runs the semantic rules that candidateOK admits
 	// on view (projection is its projection) and reports whether the view's
 	// enforcement projection failed, in which case no finding was added
 	// after the failure and the caller decides what that means.
 	evaluateSemanticRules := func(
+		viewID int,
 		view actionfacts.Facts,
 		projection *semanticpb.Facts,
 		candidateOK func(compiledSemanticRule) bool,
@@ -300,9 +557,17 @@ func dispatchTrustedAction(
 		enforcementProjected := false
 		projectionCode := semantic.ProjectionOK
 		for _, candidate := range generation.semanticRules {
-			if ctx.Err() != nil ||
-				consumedCost >= trustedActionDispatchMaxCost {
+			if ctx.Err() != nil {
 				break
+			}
+			if budget.spent() && !budget.judged(candidate, viewID) {
+				// Past the budget, only an expression another member of a
+				// strictest combination already judged here still counts:
+				// it costs nothing more (trustedActionBudget).
+				if budget.evals == nil {
+					break
+				}
+				continue
 			}
 			if _, alreadyMatched := matchedSemanticOwnerIDs[candidate.rule.ID]; alreadyMatched {
 				continue
@@ -320,10 +585,12 @@ func dispatchTrustedAction(
 			if staticTargetTwin != nil && !candidate.owner.eligible(*staticTargetTwin) {
 				continue
 			}
-			result, evalCode := candidate.program.EvalBool(ctx, projection)
-			consumedCost += result.Cost
-			if consumedCost > trustedActionDispatchMaxCost {
-				break
+			result, evalCode, judged := budget.eval(ctx, candidate, viewID, projection)
+			if !judged {
+				if budget.evals == nil {
+					break
+				}
+				continue
 			}
 			if evalCode != semantic.EvalOK {
 				if ctx.Err() != nil {
@@ -346,13 +613,12 @@ func dispatchTrustedAction(
 			if projectionCode != semantic.ProjectionOK {
 				return true
 			}
-			enforcementResult, enforcementCode := candidate.program.EvalBool(
-				ctx,
-				enforcementProjection,
-			)
-			consumedCost += enforcementResult.Cost
-			if consumedCost > trustedActionDispatchMaxCost {
-				break
+			enforcementResult, enforcementCode, judged := budget.eval(ctx, candidate, viewID+1, enforcementProjection)
+			if !judged {
+				if budget.evals == nil {
+					break
+				}
+				continue
 			}
 			if enforcementCode != semantic.EvalOK {
 				if ctx.Err() != nil {
@@ -403,6 +669,7 @@ func dispatchTrustedAction(
 	}
 
 	if evaluateSemanticRules(
+		0,
 		semanticFacts,
 		fullProjection,
 		viewCandidate,
@@ -417,6 +684,7 @@ func dispatchTrustedAction(
 	if powerShellView != nil {
 		if projection, code := semantic.Project(*powerShellView); code == semantic.ProjectionOK {
 			evaluateSemanticRules(
+				2,
 				*powerShellView,
 				projection,
 				argvSubsetReductionCandidate,
@@ -480,8 +748,11 @@ func dispatchTrustedAction(
 		legacyFindings = withSequenceProvenFindings(legacyFindings, viewFindings)
 	}
 	findings = append(semanticFindings, legacyFindings...)
-	finalized := finalizeTrustedActionFindings(generation, request, contextFacts, findings)
+	finalized := finalizeTrustedActionFindings(
+		generation, request, contextFacts, findings,
+	)
 	finalized = appendTrustedWriteTargetFindings(finalized, generation, request, facts)
+	finalized = appendTrustedPrivateKeyReaderFinding(finalized, generation, request, facts)
 	if staticTargetTwin == nil {
 		return finalized
 	}
@@ -498,6 +769,46 @@ func dispatchTrustedAction(
 		append(append([]RuleFinding(nil), semanticFindings...), twinLegacy...),
 	)
 	return withTwinProvenBlocks(finalized, twinFindings)
+}
+
+// The action target check treats a resolved active security-state mention as
+// a protected target independently of the command's operand roles. Keep its
+// finding separate from the SSH-key proof and honor the selected rule pack.
+func withActiveStateTargetMention(
+	generation *compiledRulePackCategories,
+	request trustedActionRequest,
+	findings []RuleFinding,
+) []RuleFinding {
+	command, known := trustedBashCommandInput(request.Input)
+	if !known || !hookpaths.ActionStateTargetMention(command, request.Input.CWD, request.Input.ActiveHome) {
+		return findings
+	}
+	const ruleID = "tamper.detector_state_write"
+	_, rule, ok := trustedActionCatalogRule(generation, ruleID)
+	if !ok {
+		return findings
+	}
+	index := slices.IndexFunc(findings, func(f RuleFinding) bool { return f.RuleID == ruleID })
+	finding := RuleFinding{
+		RuleID: rule.ID, Title: rule.Title, Severity: rule.Severity,
+		Confidence: rule.Confidence, Tags: append([]string(nil), rule.Tags...),
+		Evidence: trustedActionInputText(request.Input, ""), LineNumber: 1,
+	}
+	if index >= 0 {
+		finding = findings[index]
+	} else {
+		finding = adjustConfidence(request.Input.Tool, finding)
+	}
+	finding.enforcement = findingEnforcementDetectionOnly
+	if request.EnforcementCapable {
+		finding.enforcement = findingEnforcementAllowed
+	}
+	finding = finding.withTrustedActionProof(newExactFallbackFindingProof(ruleID, true, true, true, true))
+	if index >= 0 {
+		findings[index] = finding
+		return findings
+	}
+	return append(findings, finding)
 }
 
 // withMigratedLiteralRuleFindings blocks a tool call that a migrated 0.8.x
@@ -575,11 +886,24 @@ func withMigratedLiteralRuleFindings(
 // the parse of its commands took from it, with its path values and network
 // hosts.
 func trustedActionTexts(request trustedActionRequest, facts actionfacts.Facts) []string {
-	texts := []string{request.LegacyText, request.Input.Command, string(request.Input.Args)}
-	texts = append(texts, request.Input.Argv...)
-	texts = appendJSONStrings(texts, request.Input.Args)
+	var texts []string
+	if !request.ArtifactBody {
+		texts = append(texts, request.LegacyText, request.Input.Command, string(request.Input.Args))
+		texts = append(texts, request.Input.Argv...)
+		texts = appendJSONStrings(texts, request.Input.Args)
+	}
 	for _, command := range facts.Commands {
 		texts = append(texts, command.Argv...)
+		// The quoted heredoc fed to a command (cat > file <<'EOF') is data
+		// the command may act on, so a migrated literal in it counts in a
+		// script body too, whatever the command's name. No name proves that
+		// stdin goes unread: the shell that runs the script may bind any
+		// name, true, cat or /bin/cat alike, to a function that reads it
+		// (exported to the shell, or defined by BASH_ENV or a profile), and
+		// the gateway sees none of that shell's state.
+		if command.LiteralStdinComplete && !command.LiteralStdinAmbiguous {
+			texts = append(texts, command.LiteralStdin)
+		}
 		for _, argument := range command.Arguments {
 			texts = append(texts, argument.Value)
 		}
@@ -636,6 +960,37 @@ func withTwinProvenBlocks(findings, twin []RuleFinding) []RuleFinding {
 			findings = append(findings, proven)
 		case !findings[index].contributesToEnforcement():
 			findings[index] = proven
+		}
+	}
+	return findings
+}
+
+// withSimpleCommandFindings adds each command's ordinary standalone result
+// beside the whole action's result. An enforcing or alert-only proof replaces
+// a weaker finding for the same rule; a sibling removes nothing.
+func withSimpleCommandFindings(findings, alone []RuleFinding) []RuleFinding {
+	rank := func(finding RuleFinding) int {
+		switch {
+		case finding.contributesToEnforcement() && finding.proof.authorizes(finding.RuleID):
+			return 3
+		case finding.contributesToAlertOnly():
+			return 2
+		default:
+			return 1
+		}
+	}
+	for _, finding := range alone {
+		key := trustedActionFindingKey(finding.RuleID)
+		index := slices.IndexFunc(findings, func(existing RuleFinding) bool {
+			return trustedActionFindingKey(existing.RuleID) == key
+		})
+		if index < 0 {
+			findings = append(findings, finding)
+		} else if rank(finding) > rank(findings[index]) ||
+			(rank(finding) == rank(findings[index]) &&
+				canonicalTrustedRuleID(finding.RuleID) == key &&
+				canonicalTrustedRuleID(findings[index].RuleID) != key) {
+			findings[index] = finding
 		}
 	}
 	return findings
@@ -2148,7 +2503,8 @@ func dispatchTrustedFallback(
 		findings = withSequenceProvenFindings(findings, viewFindings)
 	}
 	findings = finalizeTrustedActionFindings(generation, request, contextFacts, findings)
-	return appendTrustedWriteTargetFindings(findings, generation, request, facts), fallbackTelemetry
+	findings = appendTrustedWriteTargetFindings(findings, generation, request, facts)
+	return appendTrustedPrivateKeyReaderFinding(findings, generation, request, facts), fallbackTelemetry
 }
 
 // trustedFallbackLanes runs the recovery lanes over findings, the legacy scan
@@ -2392,30 +2748,27 @@ func finalizeTrustedActionFindings(
 	findings []RuleFinding,
 ) []RuleFinding {
 	findings = deduplicateTrustedActionFindings(findings)
-	findings = applyTrustedActionContextDisposition(
-		generation,
-		facts,
-		findings,
-	)
+	findings = applyTrustedActionContextDisposition(generation, facts, findings)
 	return applyTrustedActionProofBoundary(findings, request.EnforcementCapable)
 }
 
-// deduplicateTrustedActionFindings collapses both exact duplicate rule IDs and
-// equivalent aliases claimed by one semantic owner. Recovery lanes may prove
-// the same action independently; that strengthens provenance but must not
-// inflate finding counts or operator noise.
+// deduplicateTrustedActionFindings collapses exact duplicate rule IDs and
+// equivalent aliases claimed by one semantic owner within each profile.
+// Recovery lanes may prove the same action independently, but findings from
+// different meet members must remain for their own verdicts and audit.
 func deduplicateTrustedActionFindings(findings []RuleFinding) []RuleFinding {
 	deduplicated := make([]RuleFinding, 0, len(findings))
 	positions := make(map[string]int, len(findings))
 	for _, finding := range findings {
-		key := trustedActionFindingKey(finding.RuleID)
+		key := finding.profile + "\x00" + trustedActionFindingKey(finding.RuleID)
 		_, claimed := trustedSemanticOwnerClaimingRule(finding.RuleID)
 		if position, duplicate := positions[key]; duplicate {
 			current := deduplicated[position]
 			candidateRank := severityRank[strings.ToUpper(strings.TrimSpace(finding.Severity))]
 			currentRank := severityRank[strings.ToUpper(strings.TrimSpace(current.Severity))]
-			candidateCanonical := claimed && canonicalTrustedRuleID(finding.RuleID) == key
-			currentCanonical := canonicalTrustedRuleID(current.RuleID) == key
+			ownerKey := trustedActionFindingKey(finding.RuleID)
+			candidateCanonical := claimed && canonicalTrustedRuleID(finding.RuleID) == ownerKey
+			currentCanonical := canonicalTrustedRuleID(current.RuleID) == ownerKey
 			if candidateRank > currentRank ||
 				(candidateRank == currentRank && finding.Confidence > current.Confidence) ||
 				(candidateRank == currentRank && finding.Confidence == current.Confidence &&
@@ -6156,4 +6509,56 @@ func trustedSameHostHome() string {
 		return ""
 	}
 	return filepath.Clean(home)
+}
+
+// clientGlobFacts is the evidence map whose pathname-pattern answers
+// (hookpaths.GlobFactPrefix) the action target scan may use. Only a
+// kernel-verified managed hook client expands the user's patterns for a
+// gateway that ProtectHome keeps out of the home.
+func clientGlobFacts(request trustedActionRequest) map[string]string {
+	if !request.ProtectedHomeHook {
+		return nil
+	}
+	return request.ResolvedWriteTargets
+}
+
+// trustedSimpleCommandEvidenceCWDs places each simple command of a managed
+// hook call whose cwd the gateway cannot see (ProtectHome) in the directory
+// the hook client keyed its evidence in: the client's cwd, followed through
+// the command's static cd, so a child after cd is not judged in the
+// starting directory. It is nil when the gateway knows the cwd, the client
+// sent none, or the placed commands differ; an unplaced child stays "".
+func trustedSimpleCommandEvidenceCWDs(request trustedActionRequest, simples []actionfacts.SimpleCommand) []string {
+	clientCWD := request.ResolvedWriteTargets[hookpaths.CWDKey]
+	if !request.ProtectedHomeHook || filepath.IsAbs(request.Input.CWD) || !filepath.IsAbs(clientCWD) {
+		return nil
+	}
+	placed := request.Input
+	placed.CWD = filepath.Clean(clientCWD)
+	// The unplaced split can add evaluation failures (a relative operand in
+	// an unknown directory); match the commands in order and skip those.
+	var placedCommands []actionfacts.SimpleCommand
+	for _, simple := range actionfacts.SimpleCommands(placed, actionfacts.Analyze(placed)) {
+		if simple.EvaluationFailure == "" {
+			placedCommands = append(placedCommands, simple)
+		}
+	}
+	cwds := make([]string, len(simples))
+	next := 0
+	for index, simple := range simples {
+		if simple.EvaluationFailure != "" {
+			continue
+		}
+		if next >= len(placedCommands) || placedCommands[next].Text != simple.Text {
+			return nil
+		}
+		if filepath.IsAbs(placedCommands[next].CWD) {
+			cwds[index] = filepath.Clean(placedCommands[next].CWD)
+		}
+		next++
+	}
+	if next != len(placedCommands) {
+		return nil
+	}
+	return cwds
 }

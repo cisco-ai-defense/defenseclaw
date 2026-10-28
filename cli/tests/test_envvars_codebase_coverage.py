@@ -123,6 +123,10 @@ _ALLOWLIST_PATHS: tuple[str, ...] = (
     # configuration, not env vars DefenseClaw itself reads.
     "cli/tests/test_cmd_registry.py",
     "cli/tests/test_cmd_keys.py",
+    # hooks/.hookcfg bodies the native hook and the status reader share as
+    # test vectors; the 0.8.x sidecar keys in them are file content, not
+    # environment variables.
+    "internal/cli/testdata/windows_hook_sidecar_vectors.json",
     # End-to-end harness scripts (developer-run, not shipped). They define
     # DEFENSECLAW_E2E_* knobs to drive throwaway stacks against real
     # providers; none are consumed by the gateway or CLI at runtime.
@@ -145,6 +149,9 @@ _ALLOWLIST_PATHS: tuple[str, ...] = (
     # published as such.
     "internal/gateway/connector/otlp_token_test.go",
     "internal/observability/redaction/key_store_windows_test.go",
+    # DEFENSECLAW_HOOK_STARTUP_HELPER marks the re-executed hook test binary
+    # that measures package init cost (GAP-1340); it is never read by the hook.
+    "cmd/defenseclaw-hook/main_test.go",
     # Native Windows enterprise tests use synthetic caller-poison, temporary
     # environment, source-file label, and stdout readiness marker names. They
     # are test protocol data, not supported process configuration.
@@ -218,7 +225,9 @@ _NON_ENVVAR_TOKENS = frozenset(
 # exemption.
 _DYNAMIC_ENVVAR_PREFIX_PATHS: dict[str, frozenset[str]] = {
     "DEFENSECLAW_CLAWHUB_ARG_": frozenset({"cli/defenseclaw/commands/cmd_skill.py"}),
-    "DEFENSECLAW_FAIL_MODE_": frozenset({"internal/cli/hook.go"}),
+    # The status reader still recognizes connector-scoped keys in older
+    # 0.8.x hooks/.hookcfg records. Native hooks no longer read this family.
+    "DEFENSECLAW_FAIL_MODE_": frozenset({"cli/defenseclaw/fail_mode.py"}),
     "DEFENSECLAW_MIGRATED_": frozenset(
         {
             "cli/defenseclaw/observability/v8_migration.py",

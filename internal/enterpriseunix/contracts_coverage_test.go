@@ -36,8 +36,8 @@ func TestAgentWithoutAHookContractIsNotCovered(t *testing.T) {
 		}
 	}
 
-	writeState(map[string]any{"user": "carol", "connector": "omnigent", "ok": false,
-		"error": "enterprise hooks: connector omnigent setup failed: interpreter is not in a trusted install prefix"})
+	writeState(map[string]any{"user": "carol", "connector": "codex", "ok": false,
+		"error": "enterprise hooks: connector codex setup failed: executable is not in a trusted install prefix"})
 	if baseline := h.run(Options{Action: ActionStatus}); !baseline.CoverageComplete {
 		t.Fatalf("baseline status is not coverage complete: readiness=%+v", baseline.Readiness)
 	}

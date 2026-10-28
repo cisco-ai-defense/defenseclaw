@@ -15,50 +15,113 @@ keywords:
   - agent kill chain
 ---
 
-Most security teams find that the first useful question DefenseClaw answers isn't "did you block X?" — it's *"what AI is installed or running on this machine?"* AI Discovery is the inventory pipeline that answers it.
+AI Discovery answers two questions. What AI is installed on this machine? And what actually ran, and where did it send data? The first answer comes from an inventory scan. The second comes from three runtime planes inside the gateway.
 
 <DefenseClawDemo scenario="ai-discovery-evidence" />
 
 ## What you just saw
 
-Connector configuration, process, MCP, package, provider-domain, and environment-variable-name signals were classified and deduplicated into one sanitized inventory record. Discovery reports evidence and confidence; it does not prove that every detected component is active or safe.
-
 ![DefenseClaw TUI AI Discovery panel: a local GGUF model in the Local models table, and Codex, Claude Code and npm and PyPI AI SDK dependencies in the AI products and tools table](/images/tui/ai-discovery.png)
 
-The TUI's **AI Discovery** panel (press `V`, above) shows the same inventory this page documents. Local models get their own table above the agents and tools, so long model IDs do not crowd the main table.
+### Installed or ran
 
-<Cards>
-  <Card title="Continuous discovery" description="Go sidecar scanner. Fingerprints local AI artifacts, emits ai_discovery events on new / changed / gone." />
-  <Card title="On-demand discovery" description="defenseclaw agent discover. Operator-side path scan that lists every connector and its install state." />
-  <Card title="AIBOM" description="defenseclaw aibom scan. Connector inventory of skills, plugins, MCP servers, agents, tools, models, memory." />
-  <Card title="Registry" description="defenseclaw registry. Catalog-based admission for skills and MCP servers from corporate, smithery, git, or Clawhub manifests." />
-  <Card title="Runtime planes" description="defenseclaw agent discovery runtime. Three in-gateway planes that observe what actually ran: inference compute, per-process egress, and agent actions." />
-  <Card title="IDE plugin inventory" href="#ide-plugin-inventory" description="defenseclaw agent ide-plugins. Every extension and plugin in VS Code and its forks, JetBrains, Visual Studio, Zed, Eclipse and Neovim, per user, with enabled state and an AI flag." />
-</Cards>
+| Question | Answered by | Needs the gateway |
+| --- | --- | --- |
+| Which agents are installed? | `defenseclaw agent discover` | No |
+| What AI is on the machine (agents, CLIs, local models, MCP servers, skills, packages, desktop apps)? | The continuous scan, read with `defenseclaw agent usage` | Yes |
+| Which agent assets exist, with provenance? | `defenseclaw aibom scan` | No |
+| Which IDE plugins does each user have? | `defenseclaw agent ide-plugins` | Yes |
+| What ran, and who did it talk to? | The runtime planes | Yes |
 
-The six are independent — you can run any subset. Most teams start with `defenseclaw agent discover` to see what's there, then turn on continuous discovery in the gateway, then add AIBOM for compliance evidence, then read the IDE plugin inventory per user, then enable the runtime planes to find out which of the inventory was ever actually used.
+The inventory proves presence, not activity. A detected component may be dormant. A process that ran but is not in the inventory is the case only the runtime planes see.
+
+### The three runtime planes
+
+| Plane | Watches | Needs |
+| --- | --- | --- |
+| A, inference heartbeat | Sustained CPU in a scriptable runtime, or memory large enough to hold model weights | Nothing for your own processes |
+| B, shadow egress | Which process sends data to which AI provider, with the DNS answer that names the peer | Elevated rights for other users' processes |
+| C, agent actions | Process, file and identity events that descend from an AI agent | Root and Full Disk Access on macOS, capabilities on Linux, audit policy on Windows |
+
+A new configuration turns on A and B. Plane C is opt-in. Every plane reports what it cannot see instead of showing a clean host. Per-OS grants and detail: [Runtime planes](#runtime-planes-what-actually-ran).
 
 ## Run it now: 30-second tour
 
+Take a 30-second inventory of the AI on a machine.
+
+### Before you start
+
+`agent discover` and `aibom scan` need no gateway. `agent usage`, `agent ide-plugins` and the TUI panel read the gateway's continuous scan, so start the gateway and turn it on first.
+
+### Steps
+
+1. List the agents that are installed.
+
+   ```bash
+   defenseclaw agent discover
+   ```
+
+   ```text
+                        Agent discovery (cached)
+   ┃ Connector   ┃ Installed ┃ Configured ┃ Active / Mode ┃ Config ┃ Binary                ┃
+   │ codex       │ yes       │ no         │ no            │ -      │ /usr/local/bin/codex  │
+   │ claudecode  │ yes       │ no         │ no            │ -      │ /usr/local/bin/claude │
+   │ openclaw    │ no        │ no         │ no            │ -      │ -                     │
+   …
+   ```
+
+   Add `--json` for machine output. It carries full local paths, so treat it as host inventory. `--no-emit-otel` keeps the run strictly local.
+
+2. Turn on continuous discovery and scan now.
+
+   ```bash
+   defenseclaw agent discovery enable --restart --scan
+   defenseclaw agent discovery status
+   ```
+
+   A fresh install has discovery off. `enable` also turns on runtime planes A and B.
+
+3. Read the inventory.
+
+   ```bash
+   defenseclaw agent usage
+   defenseclaw agent usage --category local_model --detail
+   defenseclaw agent ide-plugins --user alice --ai-only
+   ```
+
+   The `ide-plugins` table looks like this (sample data; your plugins differ):
+
+   ```text
+   ┏━━━━━━━┳━━━━━━━━┳━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┳━━━━━━━━━┳━━━━━━━━━┳━━━━━┓
+   ┃ User  ┃ IDE    ┃ Plugin                                          ┃ Version ┃ Enabled ┃ AI  ┃
+   ┡━━━━━━━╇━━━━━━━━╇━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╇━━━━━━━━━╇━━━━━━━━━╇━━━━━┩
+   │ alice │ cursor │ anthropic.claude-code (Claude Code for VS Code) │ 2.1.0   │ yes     │ yes │
+   │ alice │ vscode │ github.copilot (GitHub Copilot)                 │ 1.250.0 │ yes     │ yes │
+   └───────┴────────┴─────────────────────────────────────────────────┴─────────┴─────────┴─────┘
+   2 plugin(s) shown; 7 in total, 4 AI, 0 disabled, 1 user(s)
+   ```
+
+   {/* needs-live-capture: agent usage table and ide-plugins on a running gateway (the ide-plugins sample above is rendered by the CLI table code from sample rows) */}
+
+4. Open the TUI panel. Run `defenseclaw tui` and press `V`. Local models get their own table above agents and tools. Press `a` to show all models, `t` to switch tables.
+
+5. Export an AI bill of materials.
+
+   ```bash
+   defenseclaw aibom scan --json > aibom.json
+   defenseclaw aibom scan --summary
+   ```
+
+   `--only skills,mcp` limits categories. `--connector <name>` limits to one connector. Each item carries a `provenance` block (schema version, content hash, configuration generation, DefenseClaw version). The BOM is not signed and has no CycloneDX format.
+
+### Check it worked
+
+`agent discovery status` shows `Configured: enabled` and a last-scan time. `aibom scan` prints a count per category. A `-` means that category is not collected for the connector.
+
+### Turn it off
+
 ```bash
-defenseclaw agent discover
-```
-
-That's it. The CLI walks the known connector paths (OpenClaw, ZeptoClaw,
-Claude Code, Codex, Cursor, Devin, GitHub Copilot CLI,
-OpenHands, Antigravity, Hermes, OpenCode, Amp, Kiro, OmniGent), checks for config files
-and binaries, probes versions under the configured trusted-prefix policy, and
-prints a table of what's installed.
-
-Add `--json` for machine-readable output. Sanitized telemetry emission is
-best-effort and **enabled by default**; use `--no-emit-otel` for a strictly
-local run, or `--require-otel` when an unreachable gateway must fail the
-command:
-
-```bash
-defenseclaw agent discover --json
-defenseclaw agent discover --json --no-emit-otel
-defenseclaw agent discover --require-otel
+defenseclaw agent discovery disable
 ```
 
 ## Where discovery data goes
@@ -66,7 +129,7 @@ defenseclaw agent discover --require-otel
 <Flow
   direction="LR"
   compact
-  caption="The two CLI commands run when you call them. The continuous scan (every 5 minutes by default) and the runtime planes run inside the gateway. The gateway records everything in the local audit log and exports it to your telemetry. The Registry is not a discovery source: it decides what is allowed."
+  caption="The CLI commands run when you call them. The continuous scan (every 5 minutes by default) and the runtime planes run inside the gateway, which records everything in the local audit log and exports it to your telemetry. A registry is not a discovery source: it decides what is allowed."
 >
   <Node id="rt" kind="generic" tag="in the gateway">{`What actually ran\nruntime planes`}</Node>
   <Node id="cont" kind="generic" tag="in the gateway">{`AI on the host\ncontinuous scan`}</Node>
@@ -77,11 +140,31 @@ defenseclaw agent discover --require-otel
   <Node id="audit" kind="datastore">{`Audit log\nlocal SQLite`}</Node>
   <Edge from="rt" to="gateway" label="reports" />
   <Edge from="cont" to="gateway" label="reports" />
-  <Edge from="bom" to="gateway" label="sends" />
-  <Edge from="disc" to="gateway" label="sends" />
+  <Edge from="disc" to="gateway" label="emits" />
+  <Edge from="bom" to="audit" label="stores" />
   <Edge from="gateway" to="sinks" label="exports" />
   <Edge from="gateway" to="audit" label="records" />
 </Flow>
+
+- The gateway keeps every scan in the local audit database. This is always on.
+- It exports `ai_discovery`, `ai_component.*` and `ai.runtime.*` records to your observability destinations: Grafana, Splunk or any OTLP destination.
+- It never sends discovery results to Galileo.
+- On managed enterprise devices it also reaches the AI Defense destination, if configured.
+
+## At a glance
+
+What AI Discovery finds, where it looks, and what it sends.
+
+| Section | What it covers | Commands and keys |
+| --- | --- | --- |
+| [What gets discovered](#what-gets-discovered) | The 16 signal categories, the local model inventory and its modes | `agent usage`, `agent usage --category local_model` |
+| [Continuous discovery](#continuous-discovery-gateway) | The gateway scan, per-user scans, sandboxes, tunable knobs, signature packs | `agent discovery` (enable, status, scan), `agent signatures`, `ai_discovery.scan_interval_min` |
+| [IDE plugin inventory](#ide-plugin-inventory) | Which IDEs, whose plugins, what is and is not collected, privacy | `agent ide-plugins` |
+| [Operator CLI](#operator-cli) | The `agent` commands that read the inventory | `agent discover`, `usage`, `processes`, `components`, `confidence` |
+| [AIBOM](#aibom-ai-bill-of-materials) | The bill of materials output | `aibom scan` |
+| [Where the data lands](#where-the-data-lands) | SQLite, destinations, Splunk, Grafana | Observability destinations |
+| [Privacy and trust model](#privacy-and-trust-model) | What is never collected, and how far to trust each signal | |
+| [Runtime planes](#runtime-planes-what-actually-ran) | The three planes that watch what AI runtimes ran, per OS, and the privileges each needs | `agent discovery runtime` (enable, selftest, findings) |
 
 ## What gets discovered
 
@@ -89,7 +172,7 @@ The continuous scanner in the gateway classifies every signal into one of the wi
 
 | Category | What it surfaces |
 | --- | --- |
-| `supported_connector` | OpenClaw, ZeptoClaw, Claude Code, Codex, Cursor, Devin, GitHub Copilot CLI, OpenHands, Antigravity, Hermes, OpenCode, Amp, Kiro, OmniGent |
+| `supported_connector` | OpenClaw, ZeptoClaw, Claude Code, Codex, Cursor, Devin, GitHub Copilot CLI, Antigravity, Hermes, OpenCode, Amp, Kiro |
 | `ai_cli` | Standalone AI CLIs and helpers (`gh copilot`, `aider`, `chatblade`, …) |
 | `active_process` | Running processes whose name matches a catalog entry — agent CLIs, local model servers such as Ollama or vLLM, and AI desktop apps |
 | `editor_extension` | AI extensions and plugins in VS Code and its forks, JetBrains IDEs, Visual Studio, Zed and Vim/Neovim. The full list of every plugin, AI or not, is the [IDE plugin inventory](#ide-plugin-inventory) |
@@ -182,7 +265,7 @@ For [Lemonade Server](https://lemonade-server.ai/models.html), the built-in sign
 
 Known model stores are automatic and additive. The scanner checks environment-selected roots (`HF_HUB_CACHE`, `HF_HOME`, `OLLAMA_MODELS`, `LM_STUDIO_HOME`, and `FLM_MODEL_PATH`), conventional Hugging Face, Ollama, LM Studio, llama.cpp, and MLX caches, Lemonade-configured model directories, and then eligible operator `scan_roots`. On native Windows it additionally prioritizes the documented [GPT4All LocalAppData store](https://docs.gpt4all.io/gpt4all_desktop/settings.html), the [Jan RoamingAppData model store](https://jan.ai/docs/data-folder), and the catalogued AnythingLLM model directory, so a bounded home scan does not need several cursor cycles to reach them. Setting `--scan-roots` does not disable specialized stores. Passive mode honors narrower configured roots but suppresses a root equal to a user home; enhanced mode also honors that broad home root.
 
-Windows discovery uses token-bound Known Folders rather than trusting process overrides for Profile, AppData, ProgramData, or Program Files. It inventories unique exact executable aliases across the full signature catalog and fails closed when a basename is shared by multiple products. Installed applications come from Start Menu/Programs roots, uninstall display names, and the current user's supported virtual AppsFolder, including launchable Store/MSIX/UWP registrations; discovery also covers both Windows PowerShell and PowerShell 7 history plus AppData-backed VS Code-family and JetBrains extension stores. Application display names and bounded, path-free package identity names are reduced to hashed evidence before they leave the detector, just like the existing macOS and Linux application inventory.
+Windows discovery uses token-bound Known Folders rather than trusting process overrides for Profile, AppData, ProgramData, or Program Files. It inventories unique exact executable aliases across the full signature catalog and fails closed when a basename is shared by multiple products. Installed applications come from Start Menu/Programs roots, uninstall display names, and the current user's supported virtual AppsFolder, including launchable Store/MSIX/UWP registrations; discovery also covers both Windows PowerShell and PowerShell 7 history plus AppData-backed VS Code-family and JetBrains extension stores. Application display names and bounded, path-free package identity names are reduced to hashed evidence before they leave the detector, as the macOS and Linux application inventory is.
 
 Each `local_model` signal keeps its potentially high-cardinality identity under a dedicated `model` block. For example, an installed Lemonade model can appear as:
 
@@ -304,7 +387,7 @@ enabled:
   account's Claude Code and Codex address goes to your destinations on one
   `ai_component.observed` record per account and connector each discovery
   cycle, without entry names
-  ([Optional connector email](/docs/observability/end-user-identity#optional-connector-email)).
+  ([Optional connector email](/docs/observability/end-user-identity)).
 - The gateway's own process detector does not run; the scan summary reports
   `detector_notes.process: provided by per-user scans`.
 - A user's results turn `gone` when the user leaves the manifest, or after the longer of three
@@ -438,11 +521,13 @@ The scanner uses a versioned signature pack to know what an "AI artifact" looks 
 
 ```bash
 defenseclaw agent signatures list
-defenseclaw agent signatures install ./corp-signatures.yaml
-defenseclaw agent signatures validate ./corp-signatures.yaml
+defenseclaw agent signatures install ./corp-signatures.json
+defenseclaw agent signatures validate ./corp-signatures.json
 defenseclaw agent signatures disable codex
 defenseclaw agent signatures enable codex
 ```
+
+A pack file is JSON, not YAML; `install` and `validate` reject other formats with `invalid JSON`.
 
 `disable` and `enable` take an individual signature ID, not a pack name; use
 `signatures list` to find the ID. The bundled pack covers every connector listed
@@ -551,8 +636,10 @@ IDE or plugin folder shows up after the next cycle and the next scan:
 | Eclipse | `.eclipse` | `eclipse` (Oomph's installs) and each install's `bundles.info` |
 
 Nothing is granted through a link or junction inside a profile. The
-enumerator reads the default `%APPDATA%` and `%LOCALAPPDATA%` under each
-profile, so a profile whose AppData is redirected elsewhere is not read. The
+enumerator reads `%APPDATA%` and `%LOCALAPPDATA%` under each profile.
+AppData that folder redirection moves to a local folder the user owns is
+inventoried. AppData on a network share, or reached through a link or
+junction, is not. The
 Secure Client profile keeps its historical editor-extension detector and
 has no IDE inventory, so it gets none of these grants. JetBrains Toolbox's
 own folder is not read on any platform: the IDEs it installs keep their
@@ -653,8 +740,9 @@ ide-plugins` (on a Mac, `sudo /opt/cisco/defenseclaw/bin/defenseclaw-gateway
 enterprise macos ide-plugins`) prints the managed gateway's inventory as
 JSON, with the `--user`, `--ide`, `--ai-only` and `--cursor` filters. On a
 managed Windows computer, `defenseclaw.exe enterprise windows ide-plugins`
-does the same from an elevated prompt. These commands print the counts of the
-whole machine next to the filtered rows. An answer without an inventory
+does the same from an elevated prompt. The counts describe the rows the filters
+select, so `--ai-only` or an unmatched `--user` can give zero; run the command with no
+filter for the machine total. An answer without an inventory
 carries a `reason`: on a managed computer whose config leaves AI discovery
 off, it says to set `ai_discovery.enabled: true` in the managed config (the
 file Setup, the package or the MDM delivers); `agent discovery enable` is a
@@ -668,7 +756,7 @@ per-user command.
   across all pages, and with `ai_only` the `installations` list keeps only the
   installations that hold an AI plugin. `GET /api/v1/ai-usage` carries the
   same counts for the whole machine. See the
-  [gateway API](/docs/reference/gateway-api#identity-profiles-and-ide-inventory).
+  [gateway API](/docs/reference/gateway-api).
   Secure Client does not register the IDE plugin route, so it returns `404`.
 - **AIBOM.** The `ide_plugins` category lists the same rows. `--only` can
   leave it out or select it alone.
@@ -676,7 +764,7 @@ per-user command.
   Enabled and AI, with a User column when more than one user is present.
   `Enter` opens a detail card with the version, publisher, where the enabled
   state came from, the scope, the matched AI signature and the times;
-  `PageUp` and `PageDown` scroll it. See the [TUI guide](/docs/tui#ide-plugins).
+  `PageUp` and `PageDown` scroll it. See the [TUI guide](/docs/tui).
 - **Grafana.** The **AI Agent Usage & Detection** board has an IDE plugins
   section: plugins installed, AI plugins and disabled plugins as counters,
   plugins by IDE, AI against other plugins by IDE, plugins by enabled state,
@@ -696,6 +784,8 @@ The CLI has two distinct discovery paths. `agent discover` runs a connector inve
 ```bash
 defenseclaw agent discover --json --emit-otel
 ```
+
+Sanitized telemetry is best-effort and on by default. `--no-emit-otel` keeps a run strictly local. `--require-otel` fails the command when the gateway is unreachable.
 
 Checks every connector DefenseClaw knows. The local `--json` output has an
 `agents` object with one entry per connector (`{"agents": {"codex": {...}, ...}}`),
@@ -751,9 +841,13 @@ Process names match a catalog name exactly or as a distinct part separated by a 
   <Tab value="Components">
 ```bash
 defenseclaw agent components --ecosystem npm --min-identity 0.8
-defenseclaw agent components show ai-sdk
-defenseclaw agent components history ai-sdk
+defenseclaw agent components show ai
+defenseclaw agent components history ai
 ```
+
+Use the component ID from `agent components`; package IDs such as `ai` and
+`openai` resolve only after discovery finds those packages. A display label or
+connector name is not a component ID.
 
 Package-dependency view: every AI-related npm, PyPI, Go, Cargo, or other package dependency across your workspaces. `--ecosystem` takes the ecosystem name (`npm`, `pypi`, `go`, …). `show` and `history` drill into a single component's identity score and detection trail.
   </Tab>
@@ -772,7 +866,7 @@ The macOS app decodes the same wire shape and uses the same recommended scope. I
 Discovery isn't binary — every signal has a confidence score. To inspect what evidence backed a particular decision:
 
 ```bash
-defenseclaw agent confidence explain claudecode
+defenseclaw agent confidence explain openai
 defenseclaw agent confidence policy show
 defenseclaw agent confidence policy default
 defenseclaw agent confidence policy validate ./my-policy.yaml
@@ -816,7 +910,7 @@ complete BOM:
     "schema_version": 7,
     "content_hash": "8c3a000000000000000000000000000000000000000000000000000000000000",
     "generation": 0,
-    "binary_version": "1.0.0"
+    "binary_version": "<version>"
   },
   "skills": [
     {
@@ -827,7 +921,7 @@ complete BOM:
         "schema_version": 7,
         "content_hash": "8c3a000000000000000000000000000000000000000000000000000000000000",
         "generation": 0,
-        "binary_version": "1.0.0"
+        "binary_version": "<version>"
       }
     }
   ],
@@ -928,6 +1022,16 @@ It cross-links from the overview, runtime, and agent-identity dashboards so you 
 
 ## Privacy and trust model
 
+In short:
+
+- Environment variable names are recorded, never values.
+- File paths leave the host as hashes. Raw paths need `ai_discovery.store_raw_local_paths: true`.
+- Model discovery reads file headers and small metadata files, never model weights or document contents.
+- The IDE plugin scan reads small metadata files only and runs per user. `ai_discovery.ide_inventory` limits it to AI plugins or turns it off.
+- Runtime planes read process arguments. Those are classified as content, so each destination's redaction profile decides whether they leave the host.
+
+In detail:
+
 Discovery touches the most sensitive parts of the host filesystem. DefenseClaw is deliberately conservative:
 
 <Steps>
@@ -981,7 +1085,7 @@ a sequence of host actions add up to a chain?
 | Question | Answered by |
 | --- | --- |
 | What AI is **present**? | Discovery / AIBOM |
-| What AI is **allowed**? | [Registry](/docs/scanning/registries) |
+| What AI is **allowed**? | [Registries](/docs/scanning/registries) |
 | What AI **actually ran, and where did it send data**? | Runtime planes |
 
 Neither half produces the interesting pair alone. *Present but never running*
@@ -1156,19 +1260,18 @@ whole. `defenseclaw agent discovery runtime permissions --grant` applies both.
 
 **Managed enterprise install — the installer arranges these**
 
-The gateway is deliberately de-privileged here, so with one exception these
-grants do not go to it:
+The gateway is deliberately de-privileged here, so these grants do not go to it:
 
 | Setting | macOS | Linux | Windows |
 | --- | --- | --- | --- |
-| Gateway runs as | root (LaunchDaemon) | unprivileged `defenseclaw`, systemd sandbox | write-restricted LocalSystem with the gateway service SID |
-| Acquisition | direct | **brokered** via `defenseclaw-sensor-helper` | **brokered** via `defenseclaw-sensor-helper` |
-| Who holds the privilege | the gateway | the helper (root) | the helper |
-| Operator still grants | Full Disk Access, via an MDM PPPC profile | nothing — the unit declares its capabilities | Advanced Audit Policy and the command-line policy, via GPO |
+| Gateway runs as | `_defenseclaw` (LaunchDaemon) | unprivileged `defenseclaw`, systemd sandbox | write-restricted LocalSystem with the gateway service SID |
+| Acquisition | **brokered** via `defenseclaw-sensor-helper` | **brokered** via `defenseclaw-sensor-helper` | **brokered** via `defenseclaw-sensor-helper` |
+| Who holds the privilege | the helper (root) | the helper (root) | the helper |
+| Operator still grants | Full Disk Access to the helper, via an MDM PPPC profile | nothing — the unit declares its capabilities | Advanced Audit Policy and the command-line policy, via GPO |
 
-macOS is the exception: its managed gateway already runs as root for an
-unrelated reason, so there is nothing to broker and the only outstanding grant
-is the TCC profile. Linux and Windows use the helper for sensor acquisition.
+On macOS the gateway runs as `_defenseclaw` and the root sensor helper does the
+acquisition; the only outstanding grant is the TCC profile, which names the
+helper. Linux and Windows use the helper the same way.
 On Windows the gateway's LocalSystem token is write-restricted, but reads
 outside user profiles are checked as LocalSystem; it refuses profile paths
 and its scanner children inherit that token.
@@ -1178,9 +1281,8 @@ and its scanner children inherit that token.
 Plane C needs to read the kernel. The gateway is the component least entitled
 to: it is network-facing, so a managed deployment de-privileges it on purpose.
 On Linux it runs as an unprivileged account inside a systemd sandbox; on
-Windows it runs as a dedicated virtual service account. Only the managed macOS
-daemon runs as root, and for an unrelated reason — the cloud auth provider has
-to re-perm its per-machine credential store.
+Windows it runs as a dedicated virtual service account. On managed macOS it runs as `_defenseclaw`. On all three, only the sensor
+helper holds root.
 
 Measured under the shipped Linux unit, a gateway reading directly sees
 **one process and zero connections**. `ProcSubset=pid` removes `/proc/net` and
@@ -1208,9 +1310,7 @@ root process into a general-purpose file reader.
 | Helper network access | none — the unit allows `AF_UNIX`, `AF_NETLINK` and `AF_PACKET` only |
 
 The gateway brokers through the helper only where it was de-privileged *and* a
-helper is therefore installed. It reads directly on a managed macOS host,
-because that gateway is already root and a broker would add a failure mode for
-nothing, and on an unmanaged workstation, where there is no helper to ask and
+helper is therefore installed. It reads directly on an unmanaged workstation, where there is no helper to ask and
 the honest answer is to read what it can and report the shortfall. The choice
 is automatic; there is no setting for it.
 
@@ -1274,7 +1374,7 @@ OpenShell keep their roles; see
 setup, the readiness check and the pause runbook are on
 [Tetragon on a Linux fleet](/docs/enterprise/tetragon),
 and the settings are under
-[`enterprise.tetragon`](/docs/enterprise/configuration#tetragon-linux).
+[`enterprise.tetragon`](/docs/enterprise/configuration).
 
 If you run Tetragon policies of your own on kprobe or LSM hooks, the helper
 also reports their events when they hit an AI agent (`customer_events`, on by
@@ -1291,7 +1391,7 @@ root-only and grants control of kernel policy. `defenseclaw doctor` and
 Tetragon serves its API on a TCP port.
 
 Only a managed Linux gateway reports a Tetragon backend, and the managed Linux
-packages ship no `defenseclaw` command line or TUI in this release (the
+packages ship no TUI, and their `defenseclaw` runs only `sandbox` commands (the
 per-user installer refuses to run on a managed computer). So the TUI Runtime
 panel, `agent discovery runtime status` and `defenseclaw doctor` have no
 managed Tetragon lines. The administrator's surfaces are the Go commands
@@ -1424,7 +1524,7 @@ readable only for the caller's own processes — so an unprivileged run watches
 the whole machine *compute* and only its own share of it *talk*. Windows is the
 exception: its connection table carries the owning pid in every row.
 
-Note that Plane C is *running* here and still incomplete. Partial coverage is
+Plane C is *running* here and still incomplete. Partial coverage is
 reported as partial rather than as either healthy or down, because a plane
 delivering process events but not file events is missing a whole tactic class,
 and calling that complete would let an operator read reduced coverage as a
@@ -1460,7 +1560,7 @@ ai_discovery:
 chain. Too short and a patient agent never chains; too long and unrelated
 activity in the same session joins up. `sanctioned_endpoints` is where an
 environment states its own approved providers — matching egress still appears
-in the plane's output, it just stops being scored as unsanctioned.
+in the plane's output, it stops being scored as unsanctioned.
 
 `ai_discovery.runtime.correlate` defaults on. Setting it to `false` removes the
 inventory read entirely; it does **not** make findings score as though the
@@ -1503,65 +1603,16 @@ header beside the finding count, because a reader who sees only the count
 cannot tell a quiet host from a blind sensor. `Enter` opens a finding, which
 renders a kill chain as a sequence rather than a set, and always states the
 inventory verdict including `unobserved`. Neither shows Tetragon: only a
-managed Linux gateway reports it, the managed Linux packages ship no TUI in
-this release (see
+managed Linux gateway reports it, the managed Linux packages ship no TUI (see
 [Plane C on managed Linux](#plane-c-on-managed-linux-tetragon)), and the macOS
 app manages only the Mac's own gateway.
 
-## Use it alongside Registry
-
-Discovery tells you *what's there*. The [Registry](/docs/scanning/registries)
-tells you *what's approved*, and the [block and allow lists](/docs/policies/admission)
-say what is never or always allowed. The runtime planes tell you *what actually ran*.
-
-A common production pattern:
-
-<Steps>
-  <Step>
-    Run `agent discover` and `aibom scan` to baseline connector assets. With continuous discovery enabled, run `agent usage --refresh --category local_model` to add installed and loaded local models to that baseline.
-  </Step>
-  <Step>
-    Promote the entries you trust into your registry: `defenseclaw registry sync --all` after curating the manifests.
-  </Step>
-  <Step>
-    Flip on registry-required mode with enforcement: `defenseclaw registry require --type skill --enabled --enforce`. `--enforce` turns on `asset_policy.enabled` and sets `asset_policy.mode` to `action`; without it the requirement is recorded but nothing is blocked. Now a new skill that the registry doesn't list is blocked by the install watcher when it appears.
-  </Step>
-  <Step>
-    Approve specific entries as you go: `defenseclaw registry approve <source-id> <entry-name> --type skill` (or `--type mcp`). Approval is per entry, not per source — the source ID identifies the registry, and the entry name picks one cached skill or MCP server inside it. Discovery + admission are now closed-loop.
-  </Step>
-  <Step>
-    Keep a short list of names you never want, whatever a catalog says: `defenseclaw skill block <name>` or `defenseclaw mcp block <name>`. These write `asset_policy` `denied` rules, which apply even when asset policy is off. See [Admission and the block/allow list](/docs/policies/admission).
-  </Step>
-</Steps>
-
-## Common workflows
-
-<Accordions>
-  <Accordion title="Audit shadow AI on a developer laptop">
-    `defenseclaw agent discover --json | jq '[.agents[] | select(.installed)]'` inventories connectors without a gateway. To include standalone models downloaded by known and unknown macOS applications, enable continuous discovery in `enhanced` mode and run `defenseclaw agent usage --refresh --category local_model --detail`.
-  </Accordion>
-  <Accordion title="Trigger a fresh scan after onboarding a tool">
-    `defenseclaw agent discovery scan`. Faster than waiting for the next scheduled rescan, and fires `ai_discovery` events for the new artifacts so your dashboards reflect the install immediately.
-  </Accordion>
-  <Accordion title="Build an SBOM-shaped artifact for a release">
-    `defenseclaw aibom scan --json > aibom.json`. The provenance
-    `content_hash` is stable while the active DefenseClaw configuration and
-    policy files are unchanged. Hash or sign the complete exported file
-    separately when CI needs BOM-content integrity.
-  </Accordion>
-  <Accordion title="My internal connector is mis-detected as `unknown`">
-    Two options: (1) author a custom signature pack and `defenseclaw agent signatures install ./my-pack` so continuous discovery learns it, or (2) run `defenseclaw agent confidence policy validate ./policy.yaml` and adjust the weights so the existing detectors score it correctly.
-  </Accordion>
-  <Accordion title="Discovery is too noisy on this host">
-    Switch automatic model coverage to `passive`, or reduce broad workspace traversal: `defenseclaw agent discovery enable --mode passive --scan-roots ~/work --no-include-shell-history --no-include-network-domains`. Known model stores remain additive to `scan_roots`; on shared dev hosts you may also want to disable package-manifest discovery with `--no-include-package-manifests`.
-  </Accordion>
-</Accordions>
-
 ## See also
 
-- [Observability](/docs/observability) — where the discovery events actually surface
-- [Splunk](/docs/observability/splunk) — the AI Discovery Inventory dashboard
-- [Capability Matrix](/docs/connectors/capability-matrix) — what hooks each discovered connector exposes
-- [Setup → Skill Scanner](/docs/scanning/skill-scanner) and [MCP Scanner](/docs/scanning/mcp-scanner) — what to do *with* discovered skills and MCP servers
-- [Reference → CLI](/docs/reference/cli) — full flag surface for `agent`, `aibom`, `registry`
-- [Reference → Redaction](/docs/observability/redaction) — which field classes govern argv and provider hostnames
+<Cards>
+  <Card title="Find AI on this machine" href="#run-it-now-30-second-tour" description="The 30-second tour: discover, usage, the TUI panel, AIBOM export." />
+  <Card title="AI Discovery reference" href="#what-gets-discovered" description="Categories, knobs, signature packs, IDE inventory, planes per OS." />
+  <Card title="Registries" href="/docs/scanning/registries" description="What is approved, as opposed to what is present." />
+</Cards>
+
+All scanning guides and reference: [Scanning](/docs/scanning).

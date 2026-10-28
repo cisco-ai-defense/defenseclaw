@@ -85,6 +85,11 @@ type machineVersionReport struct {
 	Commit             string `json:"commit,omitempty"`
 	Built              string `json:"built,omitempty"`
 	ManagementContract int    `json:"management_contract"`
+	// SecretSetBundle reports that `enterprise secret set` takes --bundle
+	// (from 1.0.4, when signed bundles bind credential values). An optional
+	// member: an older build refuses the flag, and the MDM wrappers store a
+	// credential without it there.
+	SecretSetBundle bool `json:"secret_set_bundle,omitempty"`
 }
 
 func writeMachineVersion(w io.Writer) error {
@@ -95,6 +100,7 @@ func writeMachineVersion(w io.Writer) error {
 		Commit:             appCommit,
 		Built:              appBuildDate,
 		ManagementContract: managementContract,
+		SecretSetBundle:    true,
 	})
 }
 
@@ -380,6 +386,15 @@ func loadGatewayConfigV8(path string) (*config.Config, *observabilityV8Startup, 
 	if err != nil {
 		return nil, nil, err
 	}
+	// Start uses this loader before launching a child. Refuse an unsafe
+	// personal JSONL destination here, with its name and path, rather than
+	// depending on a later, content-free runtime bootstrap error (GAP-0097).
+	// Managed service accounts have their own ACL-aware lifecycle preflight.
+	if !managed.IsManagedEnterprise(candidate.DeploymentMode) {
+		if err := checkJSONLDestinationPaths(loaded.compiled, ""); err != nil {
+			return nil, nil, err
+		}
+	}
 	return candidate, startup, nil
 }
 
@@ -420,7 +435,10 @@ func prepareCompiledObservabilityV8Startup(c *config.Config, loaded *loadedConfi
 	c.JudgeBodiesDB = snapshot.Local.JudgeBodiesPath
 	return &observabilityV8Startup{
 		sourceName: loaded.source,
-		raw:        append([]byte(nil), loaded.raw...),
+		// Reconciliation compares this with the exact file on disk. The
+		// runtime bootstrap normalizes a legacy v8 source in memory, using
+		// the same path as a later reload.
+		raw: append([]byte(nil), loaded.sourceRaw...),
 	}, nil
 }
 
@@ -622,6 +640,7 @@ func dotEnvKeyIsProcessControl(key string) bool {
 		"DEFENSECLAW_REVEAL_PII",
 		"DEFENSECLAW_SANDBOX_ID", "DEFENSECLAW_SANDBOX_NAME", "DEFENSECLAW_SANDBOX_TOKEN",
 		"DEFENSECLAW_STRICT_AVAILABILITY",
+		"DEFENSECLAW_TRACKED_HOST_STAT_FD",
 		"DEFENSECLAW_TEST", "DEFENSECLAW_TOOL_INSPECT_FAIL_OPEN",
 		"DEFENSECLAW_TRUSTED_PROXY_CIDRS", "DEFENSECLAW_UNGUARDED_CHATGPT_CODEX_RESPONSES",
 		"DEFENSECLAW_UPGRADE_ALLOW_UNVERIFIED", "DEFENSECLAW_WEBHOOK_ALLOW_LOCALHOST",

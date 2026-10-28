@@ -142,6 +142,9 @@ type controlPlaneV8Evidence struct {
 	// config.change.applied or config.bundle.receipt record.
 	bundle  policyBundleV8Fields
 	receipt *policyBundleReceiptV8Fields
+	// change is the trust anchor or credential change of a
+	// config.trust_anchors.changed or config.secret.* record.
+	change *configChangeV8Fields
 }
 
 var controlPlaneV8PrincipalPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:/-]*$`)
@@ -153,6 +156,9 @@ const (
 	controlPlaneV8FamilyAuthenticationFailed
 	controlPlaneV8FamilyApprovalResolved
 	controlPlaneV8FamilyBundleReceipt
+	controlPlaneV8FamilyTrustAnchorsChanged
+	controlPlaneV8FamilySecretChanged
+	controlPlaneV8FamilySecretChangeFailed
 )
 
 // emitControlPlaneV8 sends one selected v7 Event through the canonical runtime.
@@ -211,6 +217,9 @@ func (l *Logger) emitControlPlaneV8WithEvidenceAndMetrics(
 			event, family, source, classification, normalized, snapshot, admission, evidence,
 		)
 	}
+	if spooled := spooledChangeFrom(ctx); spooled != nil {
+		build = spooled.builder(build)
+	}
 	result, err := binding.emitter.EmitRuntimeV8(
 		contextWithLegacyEventProjection(ctx, event), metadata, build,
 	)
@@ -221,7 +230,10 @@ func (l *Logger) emitControlPlaneV8WithEvidenceAndMetrics(
 	if outcomeErr != nil {
 		return auditV8Persisted, fmt.Errorf("audit: v8 control-plane action %q: %w", event.Action, outcomeErr)
 	}
-	if disposition == auditV8Persisted {
+	// An offer that skips the local write (observability.WithSkipLocalWrite)
+	// only goes to the remote destinations: its metrics are recorded with
+	// its row.
+	if disposition == auditV8Persisted && !observability.SkipLocalWrite(ctx) {
 		auditMetric, metricErr := newAuditEventRuntimeV8GeneratedMetric(event)
 		if metricErr == nil {
 			metrics := make([]RuntimeV8GeneratedMetric, 0, 1+len(companionMetrics))
@@ -388,6 +400,7 @@ func buildControlPlaneV8Record(
 			DefenseClawAdminReason:                 evidence.reason,
 			DefenseClawPolicyBundleReceiptID:       receipt.receiptID,
 			DefenseClawPolicyBundleState:           receipt.state,
+			DefenseClawPolicyBundleDeliveryID:      receipt.deliveryID,
 			DefenseClawPolicyBundleID:              evidence.bundle.id,
 			DefenseClawPolicyBundleVersion:         evidence.bundle.version,
 			DefenseClawPolicyBundleSignerKeyID:     evidence.bundle.signerKeyID,
@@ -400,6 +413,9 @@ func buildControlPlaneV8Record(
 			DefenseClawConfigGeneration:            receipt.generation,
 			MandatoryControlPlaneMutation:          true,
 		})
+	case controlPlaneV8FamilyTrustAnchorsChanged, controlPlaneV8FamilySecretChanged, controlPlaneV8FamilySecretChangeFailed:
+		record, err = buildConfigChangeV8Record(builder, family, event.Action, envelope, severity, logLevel,
+			principal, principalKnown, actorRef, origin, targetRef, evidence)
 	case controlPlaneV8FamilyPolicyUpdated:
 		record, err = builder.BuildLogPolicyUpdated(observability.LogPolicyUpdatedInput{
 			Envelope: envelope, Severity: severity, LogLevel: logLevel,
@@ -458,6 +474,12 @@ func controlPlaneV8FamilyForAction(action string) controlPlaneV8Family {
 		return controlPlaneV8FamilyConfigApplied
 	case ActionConfigBundleReceipt:
 		return controlPlaneV8FamilyBundleReceipt
+	case ActionConfigTrustAnchorsChanged:
+		return controlPlaneV8FamilyTrustAnchorsChanged
+	case ActionConfigSecretChanged:
+		return controlPlaneV8FamilySecretChanged
+	case ActionConfigSecretChangeFailed:
+		return controlPlaneV8FamilySecretChangeFailed
 	case ActionPolicyUpdate, ActionPolicyReload:
 		return controlPlaneV8FamilyPolicyUpdated
 	case ActionAPIAuthFailure:
@@ -478,6 +500,18 @@ func controlPlaneV8Classification(family controlPlaneV8Family, severity string) 
 		context.MandatoryFacts.ControlPlaneMutation = true
 	case controlPlaneV8FamilyBundleReceipt:
 		context.EventName = observability.EventName(observability.TelemetryEventConfigBundleReceipt)
+		context.Bucket = observability.BucketComplianceActivity
+		context.MandatoryFacts.ControlPlaneMutation = true
+	case controlPlaneV8FamilyTrustAnchorsChanged:
+		context.EventName = observability.EventName(observability.TelemetryEventConfigTrustAnchorsChanged)
+		context.Bucket = observability.BucketComplianceActivity
+		context.MandatoryFacts.ControlPlaneMutation = true
+	case controlPlaneV8FamilySecretChanged:
+		context.EventName = observability.EventName(observability.TelemetryEventConfigSecretChanged)
+		context.Bucket = observability.BucketComplianceActivity
+		context.MandatoryFacts.ControlPlaneMutation = true
+	case controlPlaneV8FamilySecretChangeFailed:
+		context.EventName = observability.EventName(observability.TelemetryEventConfigSecretChangeFailed)
 		context.Bucket = observability.BucketComplianceActivity
 		context.MandatoryFacts.ControlPlaneMutation = true
 	case controlPlaneV8FamilyPolicyUpdated:
@@ -508,6 +542,9 @@ func controlPlaneV8Phase(family controlPlaneV8Family) string {
 func controlPlaneV8EvidenceOutcome(family controlPlaneV8Family, action string, evidence controlPlaneV8Evidence) observability.Outcome {
 	if family == controlPlaneV8FamilyBundleReceipt && evidence.receipt != nil {
 		return evidence.receipt.outcome
+	}
+	if evidence.change != nil {
+		return evidence.change.outcome
 	}
 	return controlPlaneV8Outcome(family, action)
 }
@@ -653,6 +690,14 @@ func controlPlaneV8ActivityEvidence(input ActivityInput) (controlPlaneV8Evidence
 	if err != nil {
 		return controlPlaneV8Evidence{}, fmt.Errorf("audit: encode administrative diff: %w", err)
 	}
+	var change *configChangeV8Fields
+	if input.ConfigChange != nil {
+		fields, err := configChangeV8FieldsFor(input.ConfigChange)
+		if err != nil {
+			return controlPlaneV8Evidence{}, err
+		}
+		change = &fields
+	}
 	var receipt *policyBundleReceiptV8Fields
 	if input.BundleReceipt != nil {
 		fields, err := policyBundleReceiptV8FieldsFor(input.BundleReceipt)
@@ -665,6 +710,7 @@ func controlPlaneV8ActivityEvidence(input ActivityInput) (controlPlaneV8Evidence
 		operation:       optionalControlPlaneV8Identifier(input.Operation),
 		bundle:          policyBundleV8FieldsFor(input.Bundle),
 		receipt:         receipt,
+		change:          change,
 		actorRef:        optionalControlPlaneV8Actor(input.Actor),
 		principalRef:    optionalControlPlaneV8Identifier(input.Principal),
 		targetRef:       optionalControlPlaneV8Target(activityTargetReference(input.TargetType, input.TargetID)),
@@ -757,3 +803,67 @@ func controlPlaneV8Principal(actor string) (observability.Optional[string], bool
 }
 
 func timePointer(value time.Time) *time.Time { return &value }
+
+// buildConfigChangeV8Record builds a config.trust_anchors.changed,
+// config.secret.changed or config.secret.change_failed record.
+func buildConfigChangeV8Record(
+	builder *observability.FamilyBuilder,
+	family controlPlaneV8Family,
+	operation string,
+	envelope observability.FamilyEnvelopeInput,
+	severity observability.Optional[observability.Severity],
+	logLevel observability.Optional[observability.LogLevel],
+	principal observability.Optional[string],
+	principalKnown bool,
+	actorRef, origin, targetRef observability.Optional[string],
+	evidence controlPlaneV8Evidence,
+) (observability.Record, error) {
+	change := evidence.change
+	if change == nil {
+		return observability.Record{}, fmt.Errorf("audit: config change record has no change")
+	}
+	switch family {
+	case controlPlaneV8FamilyTrustAnchorsChanged:
+		return builder.BuildLogConfigTrustAnchorsChanged(observability.LogConfigTrustAnchorsChangedInput{
+			Envelope: envelope, Severity: severity, LogLevel: logLevel, Outcome: change.outcome,
+			DefenseClawAdminOperation: operation, DefenseClawAdminPrincipalRef: principal,
+			ConditionAdminPrincipalKnown: principalKnown, DefenseClawAdminActorRef: actorRef,
+			DefenseClawAdminOrigin: origin, DefenseClawAdminTargetRef: targetRef,
+			DefenseClawAdminAfterSummary: evidence.afterSummary, DefenseClawAdminAfterState: evidence.afterState,
+			DefenseClawAdminReason:    evidence.reason,
+			DefenseClawConfigChangeID: change.id, DefenseClawTrustAnchorsSha256: change.sha256,
+			DefenseClawTrustAnchorsPreviousSha256: change.previous,
+			DefenseClawTrustAnchorsKeyIdsAdded:    change.keysAdded, DefenseClawTrustAnchorsKeyIdsRemoved: change.keysGone,
+			DefenseClawConfigChangeReasonCode: change.reasonCode,
+			MandatoryControlPlaneMutation:     true,
+		})
+	case controlPlaneV8FamilySecretChanged:
+		name, ok := change.secretName.Get()
+		if !ok {
+			return observability.Record{}, fmt.Errorf("audit: credential change record names no credential")
+		}
+		return builder.BuildLogConfigSecretChanged(observability.LogConfigSecretChangedInput{
+			Envelope: envelope, Severity: severity, LogLevel: logLevel, Outcome: change.outcome,
+			DefenseClawAdminOperation: operation, DefenseClawAdminPrincipalRef: principal,
+			ConditionAdminPrincipalKnown: principalKnown, DefenseClawAdminActorRef: actorRef,
+			DefenseClawAdminOrigin: origin, DefenseClawAdminTargetRef: targetRef,
+			DefenseClawAdminAfterSummary: evidence.afterSummary, DefenseClawAdminAfterState: evidence.afterState,
+			DefenseClawAdminReason:    evidence.reason,
+			DefenseClawConfigChangeID: change.id, DefenseClawSecretName: name, DefenseClawSecretAction: change.secretAction,
+			MandatoryControlPlaneMutation: true,
+		})
+	default:
+		code, _ := change.reasonCode.Get()
+		return builder.BuildLogConfigSecretChangeFailed(observability.LogConfigSecretChangeFailedInput{
+			Envelope: envelope, Severity: severity, LogLevel: logLevel, Outcome: change.outcome,
+			DefenseClawAdminOperation: operation, DefenseClawAdminPrincipalRef: principal,
+			ConditionAdminPrincipalKnown: principalKnown, DefenseClawAdminActorRef: actorRef,
+			DefenseClawAdminOrigin: origin, DefenseClawAdminTargetRef: targetRef,
+			DefenseClawAdminAfterSummary: evidence.afterSummary, DefenseClawAdminAfterState: evidence.afterState,
+			DefenseClawAdminReason:    evidence.reason,
+			DefenseClawConfigChangeID: change.id, DefenseClawSecretName: change.secretName,
+			DefenseClawSecretAction: change.secretAction, DefenseClawConfigChangeReasonCode: code,
+			MandatoryControlPlaneMutation: true,
+		})
+	}
+}

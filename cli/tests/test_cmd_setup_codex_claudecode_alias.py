@@ -62,10 +62,8 @@ HOOK_ALIAS_CONNECTORS = (
     "cursor",
     "devin",
     "copilot",
-    "openhands",
     "antigravity",
     "opencode",
-    "omnigent",
 )
 
 
@@ -484,7 +482,7 @@ class TestSetupNewConnectorAliases(unittest.TestCase):
                 if connector == "cursor":
                     self.assertIn("defenseclaw setup cursor --mode action", result.output)
                     self.assertIn(
-                        "cursor hook failures=open (failClosed=false)",
+                        "cursor gateway outage=open (failClosed=true)",
                         result.output,
                     )
                     self.assertIn(
@@ -536,7 +534,7 @@ class TestSetupNewConnectorAliases(unittest.TestCase):
                 self.assertNotIn("set guardrail.mode=observe", result.output)
                 if connector == "cursor":
                     self.assertIn(
-                        "cursor hook failures=closed (failClosed=true)",
+                        "cursor gateway outage=open (failClosed=true)",
                         result.output,
                     )
                     self.assertIn(
@@ -545,6 +543,7 @@ class TestSetupNewConnectorAliases(unittest.TestCase):
                     )
                 version_mock.assert_called_with(
                     connector,
+                    _refusal_scope={},
                     mode=expected_mode,
                     data_dir=self.app.cfg.data_dir,
                     _allow_prompt=False,
@@ -571,34 +570,6 @@ class TestSetupNewConnectorAliases(unittest.TestCase):
         self.assertEqual(again.exit_code, 0, msg=again.output)
         self.assertEqual(self.app.cfg.guardrail.effective_mode(connector), "action")
 
-    def test_omnigent_restart_reports_staged_policy_not_live_enforcement(self):
-        with (
-            patch(
-                "defenseclaw.commands.cmd_setup._restart_services",
-                return_value=None,
-            ) as restart_mock,
-            patch(
-                "defenseclaw.commands.cmd_setup._maybe_bring_up_local_stack",
-                return_value=None,
-            ),
-            patch(
-                "defenseclaw.commands.cmd_setup._check_connector_version_supported_for_setup",
-                return_value=True,
-            ),
-        ):
-            result = _invoke(["omnigent", "--yes", "--mode", "action"], self.app)
-
-        self.assertEqual(result.exit_code, 0, msg=result.output)
-        restart_mock.assert_called_once()
-        self.assertIn("OmniGent on-disk policy registration staged", result.output)
-        self.assertIn("loaded policy generation/module/config identity", result.output)
-        self.assertIn("action/fail-closed enforcement remains unverified", result.output)
-        self.assertIn(
-            "enforcement:           configured (custom policy API; live policy generation unverified)",
-            result.output,
-        )
-        self.assertNotIn("OmniGent connector setup complete", result.output)
-        self.assertNotIn("enforcement:           enabled", result.output)
 
     def test_hermes_selection_failure_preserves_prior_connector_roster_before_save(self):
         from defenseclaw.config import PerConnectorGuardrailConfig
@@ -668,11 +639,12 @@ class TestSetupNewConnectorAliases(unittest.TestCase):
 
         self.assertEqual(result.exit_code, 0, msg=result.output)
         self.assertIn("cursor mode=observe", result.output)
+        # failClosed is true in observe mode too; while the gateway is down
+        # the hook follows the default tier's open (oss-outage-open).
         self.assertIn(
-            "cursor hook failures=open (failClosed=false)",
+            "cursor gateway outage=open (failClosed=true)",
             result.output,
         )
-        self.assertNotIn("failClosed=true", result.output)
 
     def test_later_connector_setup_waits_for_cursor_and_full_active_roster(self):
         from defenseclaw.config import PerConnectorGuardrailConfig
@@ -748,7 +720,6 @@ class TestSetupNewConnectorAliases(unittest.TestCase):
             "claudecode": ("action", "closed"),
             "codex": ("observe", "open"),
             "cursor": ("action", "closed"),
-            "omnigent": ("observe", "open"),
         }
         self.app.cfg.guardrail.connector = "claudecode"
         self.app.cfg.claw.mode = "claudecode"
@@ -853,6 +824,7 @@ class TestSetupNewConnectorAliases(unittest.TestCase):
                 self.assertNotIn("NameError", result.output)
                 version_mock.assert_called_with(
                     connector,
+                    _refusal_scope={},
                     mode="observe",
                     data_dir=self.app.cfg.data_dir,
                     _allow_prompt=False,
@@ -867,7 +839,7 @@ class TestSetupNewConnectorAliases(unittest.TestCase):
             patch("defenseclaw.commands.cmd_setup._maybe_bring_up_local_stack", return_value=None),
             patch("defenseclaw.commands.cmd_setup._check_connector_version_supported_for_setup", return_value=True),
         ):
-            result = _invoke(["openhands", "--yes", "--no-restart", "--workspace", workspace], self.app)
+            result = _invoke(["codex", "--yes", "--no-restart", "--workspace", workspace], self.app)
 
         self.assertEqual(result.exit_code, 0, msg=result.output)
         self.assertEqual(self.app.cfg.claw.workspace_dir, os.path.realpath(workspace))
@@ -951,13 +923,6 @@ class TestSetupNewConnectorAliases(unittest.TestCase):
                 self.assertNotIn("Pins claw.mode", result.output)
                 self.assertNotIn("OpenClaw default layout", result.output)
 
-    def test_omnigent_help_describes_policy_api_not_pretool_hooks(self):
-        result = _invoke(["omnigent", "--help"], self.app)
-        self.assertEqual(result.exit_code, 0, msg=result.output)
-        self.assertIn("custom policy API", result.output)
-        self.assertIn("approval verdict", result.output)
-        self.assertNotIn("PreToolUse deny", result.output)
-        self.assertNotIn("pre-tool hook", result.output)
 
     def test_guardrail_help_mentions_new_connector_choices(self):
         host = "windows"

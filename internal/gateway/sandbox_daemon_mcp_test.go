@@ -156,6 +156,11 @@ func TestSandboxExplainJudgesTheCallersMCPServers(t *testing.T) {
 		!slices.Equal(me.MCPBlocked, []sandboxapi.ManagedMCP{{Name: "blocked-srv", Reason: sandboxapi.MCPCodeOrganizationBlock}}) {
 		t.Fatalf("explain MCP: included %v blocked %v (judged %d)", me.MCPIncluded, me.MCPBlocked, len(judged))
 	}
+	// A floor that leaves foreign_sandboxes unset stops them, and the
+	// explain says so (r103 GAP-0225).
+	if me.ForeignSandboxes != config.OpenShellForeignSandboxesStop {
+		t.Fatalf("explain foreign_sandboxes = %q, want stop", me.ForeignSandboxes)
+	}
 	bad := []sandboxrelay.MCPServerClaim{{Name: "bad\x01", Command: "npx"}}
 	if rec := f.do(sbxBob, http.MethodPost, sandboxrelay.PathPolicyExplain, sandboxrelay.ExplainRequest{V: 1, Connector: "claudecode", MCP: bad}, nil); rec.Code != http.StatusBadRequest {
 		t.Fatalf("malformed claim: %d %s", rec.Code, rec.Body.String())

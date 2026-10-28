@@ -124,6 +124,7 @@ func TestMicroVMFirstStartDiskFloor(t *testing.T) {
 func TestDoctorOnAMacRunningMicroVMs(t *testing.T) {
 	f := newDoctorFixture(t)
 	f.onMicroVMs()
+	f.atRelease(openshell.InstallerVersion)
 	r := f.run()
 	var got []string
 	for _, c := range r.Checks {
@@ -443,6 +444,7 @@ func TestDoctorOnReleaseBinaries(t *testing.T) {
 	release := func(t *testing.T) (*doctorFixture, string) {
 		f := newDoctorFixture(t)
 		f.onMicroVMs()
+		f.contactedGatewayPID(7976)
 		f.doctor.Gateway.BrewFormulaInstalled = func() bool { return false }
 		_ = os.Remove(f.vmDriverPath())
 		prefix := filepath.Join(f.home, "openshell-direct", "prefix")
@@ -468,7 +470,7 @@ func TestDoctorOnReleaseBinaries(t *testing.T) {
 		wantUnmanagedFix(t, c, restartYourself)
 		expectCheck(t, r, openshell.CheckIDTelemetry, openshell.StatusSkip,
 			"the gateway reads OPENSHELL_TELEMETRY_ENABLED from the environment it was started with, which DefenseClaw does not change")
-		if !r.OK() || !r.MicroVM.DriverRunning || r.MicroVM.DriverBinary != driver || len(r.MicroVM.Problems()) != 0 {
+		if !okButTheRelease(r) || !r.MicroVM.DriverRunning || r.MicroVM.DriverBinary != driver || len(r.MicroVM.Problems()) != 0 {
 			t.Fatalf("report:\n%s\nmicrovm %+v", r, r.MicroVM)
 		}
 		if !f.runner.Called(codesign + " " + driver) {
@@ -483,7 +485,7 @@ func TestDoctorOnReleaseBinaries(t *testing.T) {
 		c := expectCheck(t, r, openshell.CheckIDGatewayService, warn, filepath.Join(prefix, "bin", "openshell-gateway")+
 			" runs under launchd (com.example.openshell-gateway), not Homebrew's nvidia/openshell/openshell service, so DefenseClaw cannot restart it")
 		wantUnmanagedFix(t, c, restartYourself)
-		if !r.OK() || !r.OpenShellOutsideFormula() {
+		if !okButTheRelease(r) || !r.OpenShellOutsideFormula() {
 			t.Fatalf("outside the formula %v\n%s", r.OpenShellOutsideFormula(), r)
 		}
 	})
@@ -515,6 +517,7 @@ func TestDoctorOnReleaseBinaries(t *testing.T) {
 		touchExecutable(t, driver)
 		f.runner.On("ps -axww -o pid=,ppid=,uid=,comm=", " 7976  7974   501 "+filepath.Join(f.brew, "Cellar", "openshell", "0.1.1", "bin", "openshell-gateway")+"\n"+
 			" 7989  7976   501 "+driver+"\n", nil)
+		f.contactedGatewayPID(7976)
 		f.runner.On(codesign, "code object is not signed at all", errors.New("exit status 1"))
 		r := f.run()
 		c := expectCheck(t, r, openshell.CheckIDVMDriver, fail, driver+" is not signed for Apple's Hypervisor")
@@ -522,10 +525,11 @@ func TestDoctorOnReleaseBinaries(t *testing.T) {
 			t.Fatalf("driver fix = %+v, microvm %+v", c.Fix, r.MicroVM)
 		}
 	})
-	// The driver next to the openshell-gateway on PATH, in the libexec
-	// beside its bin, is found without asking ps.
+	// The driver in the libexec beside the registered gateway's bin is
+	// found even when that gateway is on PATH.
 	t.Run("on PATH", func(t *testing.T) {
 		f, prefix := release(t)
+		f.runner.On("ps -axww -o pid=,ppid=,uid=,comm=", ps(prefix), nil)
 		lookPath := f.doctor.LookPath
 		f.doctor.LookPath = func(name string) (string, error) {
 			if name == "openshell-gateway" {
@@ -535,14 +539,15 @@ func TestDoctorOnReleaseBinaries(t *testing.T) {
 		}
 		r := f.run()
 		expectCheck(t, r, openshell.CheckIDVMDriver, pass, filepath.Join(prefix, "libexec", "openshell-driver-vm")+" signed for Apple's Hypervisor")
-		wantUnmanagedFix(t, expectCheck(t, r, openshell.CheckIDGatewayService, warn, "the gateway answers, but not Homebrew's nvidia/openshell/openshell service runs it (DefenseClaw could not tell what does)"), restartYourself)
+		wantUnmanagedFix(t, expectCheck(t, r, openshell.CheckIDGatewayService, warn, filepath.Join(prefix, "bin", "openshell-gateway")+
+			" (process 7976) was started by hand"), restartYourself)
 	})
 	// ps lists nothing: the answering gateway still runs the driver.
 	t.Run("driver not found", func(t *testing.T) {
 		f, _ := release(t)
 		r := f.run()
 		c := expectCheck(t, r, openshell.CheckIDVMDriver, pass, "; the gateway runs openshell-driver-vm (DefenseClaw did not find where, to check its signature)")
-		if c.Fix != nil || !r.OK() {
+		if c.Fix != nil || !okButTheRelease(r) {
 			t.Fatalf("fix %+v\n%s", c.Fix, r)
 		}
 	})

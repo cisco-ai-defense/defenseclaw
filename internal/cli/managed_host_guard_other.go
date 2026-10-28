@@ -13,8 +13,9 @@
 package cli
 
 import (
-	"os"
 	"runtime"
+
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
 // secureClientHost reports a Secure Client DefenseClaw install (macOS only);
@@ -23,8 +24,7 @@ var secureClientHost = func() bool {
 	if runtime.GOOS != "darwin" {
 		return false
 	}
-	_, err := os.Stat("/opt/cisco/secureclient/defenseclaw")
-	return err == nil
+	return managed.ValidateTrustedInstallMarkerDir("/opt/cisco/secureclient/defenseclaw", "Secure Client install marker") == nil
 }
 
 // managedHostWindowsStandalone is Windows-only; unix hosts use the runtime

@@ -22,6 +22,10 @@ import (
 	"github.com/spf13/cobra"
 )
 
+func enterpriseHookGuardianVerify(ctx context.Context, opts enterprisehooks.InstallOptions) (enterprisehooks.InstallResult, error) {
+	return enterprisehooks.Verify(ctx, opts)
+}
+
 var enterpriseHookSIDProfilePath = func(string) (string, error) {
 	return "", fmt.Errorf("SID-only targets are supported only on native Windows")
 }
@@ -75,6 +79,12 @@ var enterpriseHookManifestCatchUpAllowed = func() bool { return false }
 
 func enterpriseHookTargetSessionAvailable(enterprisehooks.ManifestTarget) (bool, error) {
 	return true, nil
+}
+
+// enterpriseHookTargetClosingLogon is the native Windows check; no other
+// platform's guardian defers a target to a sign-in.
+func enterpriseHookTargetClosingLogon(enterprisehooks.ManifestTarget) error {
+	return fmt.Errorf("deferred enterprise hook targets are supported only on native Windows")
 }
 
 func stageEnterpriseHookDeferredManagedPolicies(

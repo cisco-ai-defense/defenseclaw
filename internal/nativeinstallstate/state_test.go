@@ -40,7 +40,6 @@ func fixtureState(t *testing.T) (State, string) {
 		CursorHome:           filepath.Join(t.TempDir(), "cursor-home"),
 		AntigravityConfigDir: filepath.Join(t.TempDir(), ".gemini", "config"),
 		OpenCodeConfigDir:    filepath.Join(t.TempDir(), "opencode-home"),
-		OmnigentConfigHome:   filepath.Join(t.TempDir(), "omnigent-home"),
 		HermesHome:           filepath.Join(t.TempDir(), "hermes-home"),
 	}
 	body, err := json.Marshal(state)
@@ -51,6 +50,18 @@ func fixtureState(t *testing.T) (State, string) {
 		t.Fatal(err)
 	}
 	return state, executable
+}
+
+func TestLoadAtRejectsRelocatedOrMalformedState(t *testing.T) {
+	state, executable := fixtureState(t)
+	state.InstallRoot = filepath.Join(t.TempDir(), "foreign")
+	body, _ := json.Marshal(state)
+	if err := os.WriteFile(filepath.Join(filepath.Dir(filepath.Dir(executable)), "installer", "install-state.json"), body, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := loadAt(executable, filepath.Dir(filepath.Dir(executable))); err == nil {
+		t.Fatal("relocated state was accepted")
+	}
 }
 
 func TestLoadAtAndEnvironmentRehydrateDocumentedConnectorHomes(t *testing.T) {
@@ -66,7 +77,6 @@ func TestLoadAtAndEnvironmentRehydrateDocumentedConnectorHomes(t *testing.T) {
 		"copilot_home=project-copilot",
 		"defenseclaw_cursor_config_home=project-cursor",
 		"opencode_config_dir=project-opencode",
-		"omnigent_config_home=project-omnigent",
 		"hermes_home=project-hermes",
 		"DEFENSECLAW_HOME=project-data",
 		"ANTIGRAVITY_CONFIG_DIR=project-antigravity",
@@ -79,7 +89,6 @@ func TestLoadAtAndEnvironmentRehydrateDocumentedConnectorHomes(t *testing.T) {
 		"COPILOT_HOME=" + want.CopilotHome,
 		"DEFENSECLAW_CURSOR_CONFIG_HOME=" + want.CursorHome,
 		"OPENCODE_CONFIG_DIR=" + want.OpenCodeConfigDir,
-		"OMNIGENT_CONFIG_HOME=" + want.OmnigentConfigHome,
 		"HERMES_HOME=" + want.HermesHome,
 		"DEFENSECLAW_HOME=" + want.DataRoot,
 		"DEFENSECLAW_INSTALL_ROOT=" + want.InstallRoot,
@@ -113,7 +122,6 @@ func TestEnvironmentRemovesAmbientConnectorHomesFromLegacyState(t *testing.T) {
 		"copilot_home=project-copilot",
 		"defenseclaw_cursor_config_home=project-cursor",
 		"opencode_config_dir=project-opencode",
-		"omnigent_config_home=project-omnigent",
 		"hermes_home=project-hermes",
 		"antigravity_config_dir=project-antigravity",
 		"defenseclaw_antigravity_config_home=project-internal",
@@ -124,22 +132,9 @@ func TestEnvironmentRemovesAmbientConnectorHomesFromLegacyState(t *testing.T) {
 		strings.Contains(strings.ToUpper(joined), "COPILOT_HOME=") ||
 		strings.Contains(strings.ToUpper(joined), "DEFENSECLAW_CURSOR_CONFIG_HOME=") ||
 		strings.Contains(strings.ToUpper(joined), "OPENCODE_CONFIG_DIR=") ||
-		strings.Contains(strings.ToUpper(joined), "OMNIGENT_CONFIG_HOME=") ||
 		strings.Contains(strings.ToUpper(joined), "HERMES_HOME=") ||
 		strings.Contains(strings.ToUpper(joined), "ANTIGRAVITY_CONFIG_DIR=") ||
 		strings.Contains(strings.ToUpper(joined), "DEFENSECLAW_ANTIGRAVITY_CONFIG_HOME=") {
 		t.Fatalf("ambient connector home survived legacy state: %v", env)
-	}
-}
-
-func TestLoadAtRejectsRelocatedOrMalformedState(t *testing.T) {
-	state, executable := fixtureState(t)
-	state.InstallRoot = filepath.Join(t.TempDir(), "foreign")
-	body, _ := json.Marshal(state)
-	if err := os.WriteFile(filepath.Join(filepath.Dir(filepath.Dir(executable)), "installer", "install-state.json"), body, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := loadAt(executable, filepath.Dir(filepath.Dir(executable))); err == nil {
-		t.Fatal("relocated state was accepted")
 	}
 }

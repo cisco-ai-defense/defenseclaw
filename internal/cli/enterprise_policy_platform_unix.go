@@ -101,7 +101,7 @@ func enterprisePolicyLiveAvailable() error { return nil }
 
 // enterprisePolicyUnprotectedAgents is the Windows unprotected-agents
 // listing of policy show; Linux and macOS status and verify report them.
-var enterprisePolicyUnprotectedAgents = func(string) []enterprisehooks.UnprotectedAgent { return nil }
+var enterprisePolicyUnprotectedAgents = func(string) ([]enterprisehooks.UnprotectedAgent, error) { return nil, nil }
 
 // enterprisePolicyTarget resolves the account through the platform resolver
 // profile-explain uses (NSS on Linux, Open Directory on macOS): os/user in
@@ -132,12 +132,18 @@ func enterprisePolicyTarget(name string) (enterprisehooks.TargetCredentials, err
 	} else if !strings.ContainsAny(name, `@\`) && strings.Trim(name, "0123456789") != "" {
 		// A bare name a local and a directory account share names both;
 		// policy show refuses it as profile-explain does (GAP-1087).
-		if twins := unixidentity.SameNameAccounts(ctx, resolver, account); len(twins) > 0 {
+		twins, err := unixidentity.SameNameAccounts(ctx, resolver, account)
+		if len(twins) > 0 {
 			refs := []useridentity.AccountRef{{ID: strconv.Itoa(account.UID), Name: account.Name}}
 			for _, twin := range twins {
 				refs = append(refs, useridentity.AccountRef{ID: strconv.Itoa(twin.UID), Name: twin.Name})
 			}
 			return enterprisehooks.TargetCredentials{}, &useridentity.AmbiguousAccountError{Name: name, Accounts: refs}
+		}
+		if err != nil {
+			// The joined domains are unknown, so a directory twin cannot be
+			// ruled out (GAP-1131).
+			return enterprisehooks.TargetCredentials{}, err
 		}
 	}
 	return enterprisehooks.TargetCredentials{UserHome: account.Home, UID: account.UID, GID: account.GID, Username: account.Name}, nil

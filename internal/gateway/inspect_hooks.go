@@ -27,8 +27,8 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/observability"
 	"github.com/defenseclaw/defenseclaw/internal/redaction"
-	"github.com/google/uuid"
 )
 
 // inspectMode returns the authenticated connector's guardrail mode for the
@@ -136,6 +136,9 @@ func (a *APIServer) handleInspectRequest(w http.ResponseWriter, r *http.Request)
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
+	if a.refuseProfileInspect(w, r, "/api/v1/inspect/request", "inspect-request-block", "pre-request") {
+		return
+	}
 
 	var req RequestInspectRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -172,6 +175,9 @@ func (a *APIServer) handleInspectRequest(w http.ResponseWriter, r *http.Request)
 		verdict = a.buildVerdict(r.Context(), ruleFindings, "prompt", false)
 	}
 	verdict.applyMode(inspectMode(a.decisionConfig(r.Context()), profileRequestConnector(r.Context())))
+	// The strict tier refuses a prompt while an install or upgrade holds this
+	// account's data directory, as on the hook and tool routes (GAP-1438).
+	a.strictInstallWindowInspectPrompt(r.Context(), inspectRequestConnector(r.Context(), a.connectorName()), verdict)
 
 	elapsed := time.Since(t0)
 
@@ -207,17 +213,19 @@ func (a *APIServer) handleInspectRequest(w http.ResponseWriter, r *http.Request)
 	auditDetails = appendHookEvaluationDetails(auditDetails, evalCtx)
 	_ = a.logger.LogEventCtx(r.Context(), a.inspectAuditEvent(r, "/api/v1/inspect/request", auditAction, "pre-request", auditDetails))
 
-	reveal := wantsReveal(r)
 	if managedAIDOnly {
 		a.recordManagedAIDFailOpenForSelectedGenericResult(r.Context(), verdict)
 	}
-	a.writeJSON(w, http.StatusOK, verdict.sanitizeForResponse(reveal))
+	a.writeInspectVerdict(w, r, "/api/v1/inspect/request", "pre-request", verdict)
 }
 
 // handleInspectResponse inspects LLM response content after it is returned.
 func (a *APIServer) handleInspectResponse(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if a.refuseProfileInspect(w, r, "/api/v1/inspect/response", "inspect-response-block", "post-response") {
 		return
 	}
 
@@ -288,17 +296,19 @@ func (a *APIServer) handleInspectResponse(w http.ResponseWriter, r *http.Request
 	auditDetails = appendHookEvaluationDetails(auditDetails, evalCtx)
 	_ = a.logger.LogEventCtx(r.Context(), a.inspectAuditEvent(r, "/api/v1/inspect/response", auditAction, "post-response", auditDetails))
 
-	reveal := wantsReveal(r)
 	if managedAIDOnly {
 		a.recordManagedAIDFailOpenForSelectedGenericResult(r.Context(), verdict)
 	}
-	a.writeJSON(w, http.StatusOK, verdict.sanitizeForResponse(reveal))
+	a.writeInspectVerdict(w, r, "/api/v1/inspect/response", "post-response", verdict)
 }
 
 // handleInspectToolResponse inspects tool execution output before it is fed back to the LLM.
 func (a *APIServer) handleInspectToolResponse(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if a.refuseProfileInspect(w, r, "/api/v1/inspect/tool-response", "inspect-tool-response-block", "tool") {
 		return
 	}
 
@@ -404,11 +414,10 @@ func (a *APIServer) handleInspectToolResponse(w http.ResponseWriter, r *http.Req
 		a.alertSensitiveToolResult(r, req.Tool, outputStr, verdict)
 	}
 
-	reveal := wantsReveal(r)
 	if managedAIDOnly {
 		a.recordManagedAIDFailOpenForSelectedGenericResult(r.Context(), verdict)
 	}
-	a.writeJSON(w, http.StatusOK, verdict.sanitizeForResponse(reveal))
+	a.writeInspectVerdict(w, r, "/api/v1/inspect/tool-response", req.Tool, verdict)
 }
 
 // alertSensitiveToolResult raises tool-result-pii-alert for a tool result on
@@ -459,7 +468,7 @@ func (a *APIServer) raiseToolResultAlert(ctx context.Context, event audit.Event,
 	// event its id first: the webhook payload then carries the id of the audit
 	// row, and the delivery can be matched to the alert (GAP-0218).
 	if event.ID == "" {
-		event.ID = uuid.New().String()
+		event.ID = observability.NewTimeOrderedID()
 	}
 	_ = a.logger.LogEventCtx(ctx, event)
 	if a.webhookSource == nil {
@@ -488,31 +497,26 @@ func toolResultAlertSeverity(severity string) string {
 // that scanned this request. Findings from a judge or another category do not
 // prove a sensitive value; only matched entity values count.
 func (a *APIServer) sensitiveToolResultAlert(ctx context.Context, connectorName, tool, severity string, findings []string, output string) (string, bool) {
-	g := a.decisionGeneration(ctx)
-	if g == nil {
-		return "", false
-	}
-	pack := g.RulePacks["conn:"+connectorName]
-	if pack == nil {
-		pack = g.RulePacks["global"]
-	}
-	if g.Profiles != nil {
-		resolved := resolvedGuardrailProfileFrom(ctx)
-		if resolved == nil || resolved.set != g.Profiles {
-			resolved = resolveGuardrailProfileFor(ctx, g.Profiles)
-		}
-		if resolved != nil && resolved.derived != nil {
-			key := effectiveRulePackKey(resolved.derived, connectorName)
-			if key != effectiveRulePackKey(g.Profiles.base, connectorName) {
-				if selected := g.Profiles.packs[key]; selected != nil {
-					pack = selected
-				} else if retry := g.Profiles.missing[key]; retry != nil {
-					if selected := retry.rulePack(time.Now()); selected != nil {
-						pack = selected
-					}
+	if resolved := resolvedGuardrailProfileFrom(ctx); resolved != nil && resolved.set != nil {
+		if meet := resolved.evaluationMeet(); meet != nil {
+			for _, member := range meet.members {
+				if reason, alert := a.sensitiveToolResultAlertSingle(meetMemberContext(ctx, resolved, member), connectorName, tool, severity, findings, output); alert {
+					return reason, true
 				}
 			}
+			return "", false
 		}
+	}
+	return a.sensitiveToolResultAlertSingle(ctx, connectorName, tool, severity, findings, output)
+}
+
+func (a *APIServer) sensitiveToolResultAlertSingle(ctx context.Context, connectorName, tool, severity string, findings []string, output string) (string, bool) {
+	if a.decisionGeneration(ctx) == nil {
+		return "", false
+	}
+	pack := a.connectorRulePack(ctx, connectorName)
+	if pack == nil {
+		return "", false
 	}
 	entry := pack.LookupSensitiveTool(tool)
 	if entry == nil || !entry.ResultInspection {
@@ -555,7 +559,11 @@ func (a *APIServer) buildVerdict(ctx context.Context, ruleFindings []RuleFinding
 	if cfg != nil && cfg.SecureClientIntegration() {
 		connector = ""
 	}
-	return buildVerdictWithConfig(ruleFindings, direction, cfg, connector, confirmable)
+	verdict := buildVerdictWithConfig(ruleFindings, direction, cfg, connector, confirmable)
+	if len(ruleFindings) > 0 {
+		verdict.Action = profileMeetActionForFindings(ctx, cfg, connector, ruleFindings, confirmable, true)
+	}
+	return verdict
 }
 
 func buildVerdictWithConfig(ruleFindings []RuleFinding, direction string, cfg *config.Config, connector string, confirmable bool) *ToolInspectVerdict {

@@ -23,11 +23,16 @@ import (
 	"strings"
 	"sync/atomic"
 
+	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
 	"github.com/defenseclaw/defenseclaw/internal/redaction"
 	"github.com/defenseclaw/defenseclaw/internal/scanner"
 )
 
 const builtInMatchReasonPrefix = "matched: "
+
+// A period keeps this fixed title inside one finding label. Semicolons split
+// independent verdicts in agentMatchedRules.
+const unprovenWriteGuidance = ". Use a literal path or split the command"
 
 // trustedBuiltInMatchReason reports whether reason consists exclusively of
 // exact rule ID/title pairs from the compiled-in catalog. The equality check
@@ -72,12 +77,22 @@ func splitMatchLabels(body string) []string {
 }
 
 func trustedBuiltInFindingLabel(label string) bool {
-	for _, category := range defaultRuleCategories {
+	for _, category := range defaultRuleCategories() {
 		for _, rule := range category.Rules {
 			base := rule.ID + ":" + rule.Title
 			if label == base || label == base+obfuscatedFindingLabelSuffix {
 				return true
 			}
+		}
+	}
+	// The authorized-keys block after an archive extraction (GAP-1555).
+	if label == "persistence.ssh_authorized_keys_command:"+archiveBeforeWriteTitle {
+		return true
+	}
+	if title, ok := strings.CutPrefix(label, "persistence.ssh_authorized_keys_command:"); ok {
+		if classTitle, hasGuidance := strings.CutSuffix(title, unprovenWriteGuidance); hasGuidance &&
+			hookpaths.IsUnprovenWriteTitle(classTitle) {
+			return true
 		}
 	}
 	// A built-in CodeGuard rule on a file write (GAP-2029).
@@ -97,7 +112,7 @@ func agentDisplayReason(reason string, policy redaction.SinkPolicy) string {
 	if policy != redaction.SinkPolicyDefault {
 		return redaction.ReasonForSink(reason, policy)
 	}
-	if trustedBuiltInMatchReason(reason) || trustedCodeGuardHookReason(reason) {
+	if trustedBuiltInMatchReason(reason) || trustedCodeGuardHookReason(reason) || trustedUnparsedToolCallReason(reason) || trustedStrictInstallWindowReason(reason) {
 		return reason
 	}
 	return redaction.ReasonForAgent(reason)
@@ -110,7 +125,7 @@ func agentDisplayReason(reason string, policy redaction.SinkPolicy) string {
 // ("LLM judge: personal data or credentials"), not as raw judge labels with
 // redaction tokens (GAP-1981).
 func notificationDisplayReason(reason string, policy redaction.SinkPolicy) string {
-	if policy == redaction.SinkPolicyDefault && (trustedBuiltInMatchReason(reason) || trustedCodeGuardHookReason(reason)) {
+	if policy == redaction.SinkPolicyDefault && (trustedBuiltInMatchReason(reason) || trustedCodeGuardHookReason(reason) || trustedUnparsedToolCallReason(reason) || trustedStrictInstallWindowReason(reason)) {
 		return reason
 	}
 	if policy == redaction.SinkPolicyDefault && !managedEnterpriseActive.Load() {
@@ -130,7 +145,7 @@ func notificationDisplayReason(reason string, policy redaction.SinkPolicy) strin
 // defaultSinkDisplayReason applies the catalog carve-out to compatibility
 // response bodies only when no managed override is active.
 func defaultSinkDisplayReason(reason string, policy redaction.SinkPolicy) string {
-	if policy == redaction.SinkPolicyDefault && (trustedBuiltInMatchReason(reason) || trustedCodeGuardHookReason(reason)) {
+	if policy == redaction.SinkPolicyDefault && (trustedBuiltInMatchReason(reason) || trustedCodeGuardHookReason(reason) || trustedUnparsedToolCallReason(reason) || trustedStrictInstallWindowReason(reason)) {
 		return reason
 	}
 	return redaction.ReasonForSink(reason, policy)
@@ -182,6 +197,9 @@ func agentVerdictReason(action, sourceReason, displayReason string, policy redac
 	}
 	if action == "block" {
 		if sentence := agentMCPAdmissionPendingSentence(sourceReason); sentence != "" {
+			return sentence
+		}
+		if sentence := agentProjectSkillPendingSentence(sourceReason); sentence != "" {
 			return sentence
 		}
 	}
@@ -417,6 +435,10 @@ func agentAssetPolicySubject(reason string) string {
 		return kind + " " + name + " is denied by the default asset policy"
 	case "admin-deny":
 		return kind + " " + name + " is denied by asset policy"
+	case "install-block":
+		if values["asset_type"] == "plugin" {
+			return kind + " " + name + " was blocked by install admission"
+		}
 	case "runtime-disable":
 		// A disabled or quarantined asset: say so in words, not with the
 		// registry fields of the record (GAP-0362).
@@ -475,6 +497,23 @@ func agentMCPAdmissionPendingSentence(reason string) string {
 		"Try the same call again in about a minute. If the scan rejects the server, its calls stay blocked."
 }
 
+// A project skill awaiting its first scan is a temporary refusal, so name
+// the scan step instead of the generic permanent-block or registry wording.
+func agentProjectSkillPendingSentence(reason string) string {
+	values, ok := agentAssetPolicyFields(reason)
+	if !ok || values["reason_code"] != "project-skill-pending" || values["asset_type"] != "skill" || values["asset_name"] == "" {
+		return ""
+	}
+	prefix := "DefenseClaw has not scanned project skill " + values["asset_name"] + " yet, so it is blocked. "
+	if standaloneEnterpriseActive.Load() {
+		if reasonDisplayGOOS == "windows" {
+			return prefix + "Wait for the managed skill watcher to scan it, or ask your administrator to review the scan; then retry the skill."
+		}
+		return prefix + "Ask your administrator to run `defenseclaw-gateway scan skill PATH` for its folder; then retry the skill."
+	}
+	return prefix + "Run `defenseclaw skill scan --path PATH` for its folder; then retry the skill."
+}
+
 // agentOrderedRulePrefix starts the note an ordered tool-call chain match
 // appends to a reason (agent_hook_chain.go).
 const agentOrderedRulePrefix = "matched ordered safety rule: "
@@ -498,6 +537,7 @@ func activeRulePackLabel(id, title string) bool {
 	if id == "" || title == "" {
 		return false
 	}
+	ensureDefaultRuleGeneration()
 	ruleCategoriesMu.RLock()
 	defer ruleCategoriesMu.RUnlock()
 	if allRuleGeneration != nil {

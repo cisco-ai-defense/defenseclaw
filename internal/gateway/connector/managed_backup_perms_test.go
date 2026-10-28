@@ -16,6 +16,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -45,12 +46,12 @@ func TestWriteManagedFileBackup_DirIs0o700(t *testing.T) {
 }
 
 func TestCodexExplicitSetupMovesRememberedRoot(t *testing.T) {
-	home := t.TempDir()
+	home := testenv.PrivateTempDir(t)
 	t.Setenv("HOME", home)
 	t.Setenv("USERPROFILE", home)
-	oldRoot := filepath.Join(home, ".codex")
-	newRoot := filepath.Join(home, "dotfiles", "codex")
-	dataDir := filepath.Join(home, ".defenseclaw")
+	oldRoot := home
+	newRoot := testenv.PrivateTempDir(t)
+	dataDir := testenv.PrivateTempDir(t)
 	t.Setenv("CODEX_HOME", oldRoot)
 	c := NewCodexConnector()
 	opts := SetupOpts{DataDir: dataDir, APIAddr: "127.0.0.1:18970"}
@@ -90,6 +91,287 @@ func TestCodexExplicitSetupMovesRememberedRoot(t *testing.T) {
 	}
 	if got := codexHomeDir(); got != newRoot {
 		t.Fatalf("gateway root = %q, want %q", got, newRoot)
+	}
+	// A failed batch after the forward move asks Setup to move this same
+	// registration back. The old backup must again name the enforcing root.
+	t.Setenv("CODEX_HOME", oldRoot)
+	t.Setenv("DEFENSECLAW_EXPLICIT_CODEX_SETUP", oldRoot)
+	if err := c.Setup(context.Background(), opts); err != nil {
+		t.Fatalf("restore previous Codex root: %v", err)
+	}
+	for _, root := range []struct {
+		path     string
+		wantHook bool
+	}{{oldRoot, true}, {newRoot, false}} {
+		raw, err := os.ReadFile(filepath.Join(root.path, "config.toml"))
+		if err != nil && !os.IsNotExist(err) {
+			t.Fatal(err)
+		}
+		if got := bytes.Contains(raw, hookMarker); got != root.wantHook {
+			t.Fatalf("%s hook presence after rollback = %t, want %t", root.path, got, root.wantHook)
+		}
+	}
+	backup, err := loadManagedFileBackupPath(managedFileBackupPath(dataDir, "codex", "config.toml"))
+	if err != nil {
+		t.Fatalf("read restored Codex backup: %v", err)
+	}
+	if backup.Path != filepath.Join(oldRoot, "config.toml") {
+		t.Fatalf("rollback backup path = %q, want old root", backup.Path)
+	}
+}
+
+func TestCodexExplicitSetupRestoresCopiedHomeRoot(t *testing.T) {
+	for _, oldHomeState := range []string{"unrelated", "empty-codex"} {
+		t.Run(oldHomeState, func(t *testing.T) {
+			testCodexExplicitSetupRestoresCopiedHomeRoot(t, oldHomeState)
+		})
+	}
+}
+
+func TestCodexCopiedHomeKeepsPopulatedOldWindowsRoot(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("native Windows launcher ownership")
+	}
+	oldHome := testenv.PrivateTempDir(t)
+	currentHome := testenv.PrivateTempDir(t)
+	t.Setenv("HOME", currentHome)
+	t.Setenv("USERPROFILE", currentHome)
+	oldConfig := filepath.Join(oldHome, ".codex", "config.toml")
+	currentConfig := filepath.Join(currentHome, ".codex", "config.toml")
+	for _, path := range []string{oldConfig, currentConfig} {
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	contract := builtinHookContracts["codex"][0]
+	event := contract.Events[0]
+	for _, item := range []struct {
+		path string
+		home string
+	}{{oldConfig, oldHome}, {currentConfig, currentHome}} {
+		launcher := filepath.Join(item.home, ".local", "bin", windowsHookBinaryName)
+		command := windowsNativePowerShellHookCommandForCodexEvent(event, contract.ContractID, launcher)
+		config := "[[hooks." + event + "]]\n[[hooks." + event + ".hooks]]\ncommand = " + strconv.Quote(command) + "\n"
+		if err := os.WriteFile(item.path, []byte(config), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	record := managedFileBackupPath(filepath.Join(currentHome, ".defenseclaw"), "codex", "config.toml")
+	moved, err := codexBackupTargetMatchingPostHash(record, oldConfig, sha256Hex([]byte("prior installed bytes")))
+	if err != nil || moved != "" {
+		t.Fatalf("populated old Codex root was rebound to %q (error %v)", moved, err)
+	}
+}
+
+func TestCodexCopiedHomeFindsEditedWindowsConfigBeforeRepair(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("native Windows launcher ownership")
+	}
+	for _, oldHomeState := range []string{"unrelated", "empty-codex"} {
+		t.Run(oldHomeState, func(t *testing.T) {
+			oldHome := testenv.PrivateTempDir(t)
+			currentHome := testenv.PrivateTempDir(t)
+			t.Setenv("HOME", currentHome)
+			t.Setenv("USERPROFILE", currentHome)
+			oldConfig := filepath.Join(oldHome, ".codex", "config.toml")
+			currentConfig := filepath.Join(currentHome, ".codex", "config.toml")
+			if err := os.MkdirAll(filepath.Dir(currentConfig), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if oldHomeState == "empty-codex" {
+				if err := os.MkdirAll(filepath.Dir(oldConfig), 0o700); err != nil {
+					t.Fatal(err)
+				}
+			} else if err := os.WriteFile(filepath.Join(oldHome, ".profile"), []byte("kept"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			contract := builtinHookContracts["codex"][0]
+			event := contract.Events[0]
+			launcher := filepath.Join(oldHome, ".local", "bin", windowsHookBinaryName)
+			command := windowsNativePowerShellHookCommandForCodexEvent(event, contract.ContractID, launcher)
+			installed := "[[hooks." + event + "]]\n[[hooks." + event + ".hooks]]\ncommand = " + strconv.Quote(command) + "\n"
+			if oldHomeState == "empty-codex" {
+				installed = "[[hooks." + event + "]]\n[[hooks." + event + ".hooks]]\ncommand = " +
+					strconv.Quote("user-owned fallback") + "\ncommand_windows = " + strconv.Quote(command) + "\n"
+			}
+			installedBytes := []byte(installed)
+			edited := append(append([]byte(nil), installedBytes...), []byte("\n[projects.\"trusted\"]\ntrust_level = \"trusted\"\n")...)
+			if err := os.WriteFile(currentConfig, edited, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			record := managedFileBackupPath(filepath.Join(currentHome, ".defenseclaw"), "codex", "config.toml")
+			moved, err := codexBackupTargetMatchingPostHash(record, oldConfig, sha256Hex(installedBytes))
+			if err != nil || moved != currentConfig {
+				t.Fatalf("edited copied Codex config resolved to %q, want %q (error %v)", moved, currentConfig, err)
+			}
+		})
+	}
+}
+
+func TestCodexCopiedHomeFindsEditedUnixConfigBeforeRepair(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix Codex hook script")
+	}
+	for _, oldHomeState := range []string{"unrelated", "empty-codex"} {
+		t.Run(oldHomeState, func(t *testing.T) {
+			oldHome := testenv.PrivateTempDir(t)
+			currentHome := testenv.PrivateTempDir(t)
+			t.Setenv("HOME", currentHome)
+			oldConfig := filepath.Join(oldHome, ".codex", "config.toml")
+			currentConfig := filepath.Join(currentHome, ".codex", "config.toml")
+			if err := os.MkdirAll(filepath.Dir(currentConfig), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if oldHomeState == "empty-codex" {
+				if err := os.MkdirAll(filepath.Dir(oldConfig), 0o700); err != nil {
+					t.Fatal(err)
+				}
+			} else if err := os.WriteFile(filepath.Join(oldHome, ".profile"), []byte("kept"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			oldScript := filepath.Join(oldHome, ".defenseclaw", "hooks", "codex-hook.sh")
+			installed := []byte("[[hooks.PreToolUse]]\n[[hooks.PreToolUse.hooks]]\ncommand = " +
+				strconv.Quote(oldScript+" --event PreToolUse --hook-contract codex-hooks-v4") + "\n")
+			edited := append(append([]byte(nil), installed...), []byte("\n[projects.\"trusted\"]\ntrust_level = \"trusted\"\n")...)
+			if err := os.WriteFile(currentConfig, edited, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			record := managedFileBackupPath(filepath.Join(currentHome, ".defenseclaw"), "codex", "config.toml")
+			moved, err := codexBackupTargetMatchingPostHash(record, oldConfig, sha256Hex(installed))
+			if err != nil || moved != currentConfig {
+				t.Fatalf("edited copied Codex config resolved to %q, want %q (error %v)", moved, currentConfig, err)
+			}
+		})
+	}
+}
+
+func testCodexExplicitSetupRestoresCopiedHomeRoot(t *testing.T, oldHomeState string) {
+	oldHome := testenv.PrivateTempDir(t)
+	currentHome := oldHome + "-current"
+	oldRoot := filepath.Join(oldHome, ".codex")
+	currentRoot := filepath.Join(currentHome, ".codex")
+	nextRoot := testenv.PrivateTempDir(t)
+	oldData := filepath.Join(oldHome, ".defenseclaw")
+	currentData := filepath.Join(currentHome, ".defenseclaw")
+	if err := os.Rename(testenv.PrivateTempDir(t), oldRoot); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(testenv.PrivateTempDir(t), oldData); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", oldHome)
+	t.Setenv("USERPROFILE", oldHome)
+	t.Setenv("CODEX_HOME", oldRoot)
+	c := NewCodexConnector()
+	opts := SetupOpts{DataDir: oldData, APIAddr: "127.0.0.1:18970"}
+	if err := c.Setup(context.Background(), opts); err != nil {
+		t.Fatalf("initial setup: %v", err)
+	}
+	if err := os.Rename(oldHome, currentHome); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = os.RemoveAll(oldHome)
+		_ = os.Rename(currentHome, oldHome)
+	})
+	t.Setenv("HOME", currentHome)
+	t.Setenv("USERPROFILE", currentHome)
+	t.Setenv("CODEX_HOME", currentRoot)
+	t.Setenv("DEFENSECLAW_EXPLICIT_CODEX_SETUP", currentRoot)
+	opts.DataDir = currentData
+	if err := c.Setup(context.Background(), opts); err != nil {
+		t.Fatalf("repair after home move: %v", err)
+	}
+	configPath := filepath.Join(currentRoot, "config.toml")
+	config, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if runtime.GOOS == "windows" {
+		groups, err := codexHookGroupsForOptions(opts)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got, want := bytes.Count(config, []byte("-EncodedCommand")), 2*len(groups); got != want {
+			t.Fatalf("copied-home repair registered %d native hook commands, want %d", got, want)
+		}
+	}
+	recordPath := managedFileBackupPath(currentData, "codex", "config.toml")
+	preSetup, err := loadManagedFileBackupPath(recordPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The copied receipt still names the prior home. An unrelated file or
+	// empty .codex folder there must not make Setup move hooks back to it.
+	preSetup.Path = filepath.Join(oldRoot, "config.toml")
+	preSetup.PostSHA256 = sha256Hex(config)
+	if err := writeManagedFileBackup(recordPath, preSetup); err != nil {
+		t.Fatal(err)
+	}
+	configWithTrust := append(append([]byte(nil), config...), []byte(
+		"\n[projects."+strconv.Quote(filepath.Join(currentHome, "trusted-project"))+"]\ntrust_level = \"trusted\"\n",
+	)...)
+	if err := os.WriteFile(configPath, configWithTrust, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(oldRoot, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if oldHomeState == "unrelated" {
+		if err := os.WriteFile(filepath.Join(oldHome, ".profile"), []byte("kept"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	t.Setenv("CODEX_HOME", nextRoot)
+	t.Setenv("DEFENSECLAW_EXPLICIT_CODEX_SETUP", nextRoot)
+	previous, err := codexPreviousSetupRoot(currentData)
+	if err != nil || previous != currentRoot {
+		t.Fatalf("forward move chose previous root %q, want %q (error %v)", previous, currentRoot, err)
+	}
+	if err := c.Setup(context.Background(), opts); err != nil {
+		t.Fatalf("forward root move: %v", err)
+	}
+	hookMarker := []byte("codex-hook")
+	if runtime.GOOS == "windows" {
+		hookMarker = []byte("-EncodedCommand")
+	}
+	forwardPrevious, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(forwardPrevious, hookMarker) {
+		t.Fatal("forward root move left managed hooks in the previous Codex config")
+	}
+	t.Setenv("CODEX_HOME", currentRoot)
+	t.Setenv("DEFENSECLAW_EXPLICIT_CODEX_SETUP", currentRoot)
+	if err := c.Setup(context.Background(), opts); err != nil {
+		t.Fatalf("reverse root move: %v", err)
+	}
+	for _, item := range []struct {
+		root string
+		want bool
+	}{{currentRoot, true}, {nextRoot, false}, {oldRoot, false}} {
+		raw, err := os.ReadFile(filepath.Join(item.root, "config.toml"))
+		if err != nil && !os.IsNotExist(err) {
+			t.Fatal(err)
+		}
+		if got := bytes.Contains(raw, hookMarker); got != item.want {
+			t.Fatalf("%s hook presence after rollback = %t, want %t", item.root, got, item.want)
+		}
+		if item.root == currentRoot && !bytes.Contains(raw, []byte("trust_level = \"trusted\"")) {
+			t.Fatal("Codex's project trust edit was lost during root migration")
+		}
+	}
+	restored, err := loadManagedFileBackupPath(recordPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pristineHasHooks := bytes.Contains(restored.PristineBytes, hookMarker)
+	pristineHasTrust := bytes.Contains(restored.PristineBytes, []byte("trust_level = \"trusted\""))
+	if restored.Path != configPath || !restored.Existed || pristineHasHooks || !pristineHasTrust {
+		t.Fatalf("Codex rollback lost the current root or pristine config: path=%q existed=%v hooks=%v trust=%v",
+			restored.Path, restored.Existed, pristineHasHooks, pristineHasTrust)
 	}
 }
 
@@ -180,36 +462,6 @@ func TestRestoreManagedFileBackupsPutsBackWhatSetupFound(t *testing.T) {
 	}
 	if _, err := os.Lstat(managedFileBackupPath(dataDir, "antigravity", "hooks.json")); !os.IsNotExist(err) {
 		t.Fatalf("a restored backup record must be consumed: %v", err)
-	}
-}
-
-// A restore the target's directory refuses names the target and the cause
-// once, not the rename twice with the staged temp file (#1032).
-func TestRestoreFailureNamesTheTargetAndCauseOnce(t *testing.T) {
-	if runtime.GOOS == "windows" || os.Geteuid() == 0 {
-		t.Skip("needs a directory the test user cannot write")
-	}
-	dataDir, dir := t.TempDir(), t.TempDir()
-	target := filepath.Join(dir, "hooks.json")
-	if err := os.WriteFile(target, []byte("{}"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if err := captureManagedFileBackup(dataDir, "openhands", "config", target); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(target, []byte(`{"hooks":1}`), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if err := updateManagedFileBackupPostHash(dataDir, "openhands", "config", target); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Chmod(dir, 0o500); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = os.Chmod(dir, 0o700) })
-	_, err := restoreManagedFileBackupIfUnchanged(dataDir, "openhands", "config", target)
-	if got, want := restoreBackupFailure(err), "could not restore "+target+": permission denied"; got != want {
-		t.Fatalf("restore failure = %q, want %q", got, want)
 	}
 }
 
@@ -339,5 +591,35 @@ func TestPinCodexConfigRootToSetup(t *testing.T) {
 	}
 	if got := codexConfigPath(); got != target {
 		t.Fatalf("Codex config after pin = %q, want %q", got, target)
+	}
+}
+
+// A restore the target's directory refuses names the target and the cause
+// once, not the rename twice with the staged temp file (#1032).
+func TestRestoreFailureNamesTheTargetAndCauseOnce(t *testing.T) {
+	if runtime.GOOS == "windows" || os.Geteuid() == 0 {
+		t.Skip("needs a directory the test user cannot write")
+	}
+	dataDir, dir := t.TempDir(), t.TempDir()
+	target := filepath.Join(dir, "hooks.json")
+	if err := os.WriteFile(target, []byte("{}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := captureManagedFileBackup(dataDir, "copilot", "config", target); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(target, []byte(`{"hooks":1}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := updateManagedFileBackupPostHash(dataDir, "copilot", "config", target); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(dir, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o700) })
+	_, err := restoreManagedFileBackupIfUnchanged(dataDir, "copilot", "config", target)
+	if got, want := restoreBackupFailure(err), "could not restore "+target+": permission denied"; got != want {
+		t.Fatalf("restore failure = %q, want %q", got, want)
 	}
 }

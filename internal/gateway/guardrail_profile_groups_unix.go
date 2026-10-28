@@ -183,6 +183,11 @@ func matchedGroupSource(_ *guardrailProfileSet, subject *profileSubject, group s
 			return "local"
 		}
 	}
+	// NSS retains an unnamed primary gid as a numeric group. The absence
+	// of a local group name does not establish that a directory supplied it.
+	if gid, err := strconv.Atoi(group); err == nil && gid >= 0 {
+		return ""
+	}
 	return "directory"
 }
 

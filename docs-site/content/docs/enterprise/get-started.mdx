@@ -10,183 +10,118 @@ keywords:
   - observe mode pilot
 ---
 
-This page is the short path through an enterprise deployment. Each step makes
-one decision and links to the page with the details. You need an MDM,
-configuration-management tool or administrator shell that runs commands as
-SYSTEM on Windows and as root on Linux and macOS. Terms such as *profile*,
-*lifecycle* and *ensure* are defined in [Concepts](/docs/enterprise/concepts).
-
-Not sure enterprise deployment is what you need? Read
-[Is this for you?](/docs/enterprise#is-this-for-you) first. To compare the
-open-source and enterprise editions feature by feature, see the
-[support matrix](/docs/support-matrix#features).
+Deploy the standalone profile in six steps. You need an MDM, configuration-management
+tool or administrator shell that runs commands as SYSTEM on Windows and as root on
+Linux and macOS. [Concepts](/docs/enterprise/concepts) defines *profile*,
+*lifecycle* and *ensure*. Not sure you need this? Read
+[Is this for you?](/docs/enterprise#is-this-for-you).
 
 ## 1. Pick the profile
 
-A managed deployment runs in one of two profiles, and each computer runs only
-one of them.
-
-| Detail | Standalone | Secure Client |
-| --- | --- | --- |
-| Choose it when | You deploy with Intune or any other MDM, a package, configuration management or an administrator shell | You run Cisco Secure Client and want DefenseClaw as one of its modules |
-| Platforms | Windows, Linux, macOS | Windows, macOS |
-| Who decides on each tool call | The local policy engine. Cisco AI Defense is added when you turn it on and store a key | Cisco AI Defense only |
-| Next | Continue with step 2 on this page | [Secure Client managed deployment](/docs/enterprise/secure-client) |
-
-The rest of this page covers the standalone profile. On Windows and macOS the
-profile defaults to Secure Client, so set `enterprise.profile: standalone` in
-the config ([Two profiles](/docs/enterprise#two-profiles)).
+Use **standalone** unless you run Cisco Secure Client and want DefenseClaw as one of
+its modules ([Secure Client](/docs/enterprise/secure-client)). On Windows and
+macOS the profile defaults to Secure Client, so set `enterprise.profile: standalone`
+([Two profiles](/docs/enterprise#two-profiles)).
 
 ## 2. Pick the agents
 
-Each agent you protect is a key under `guardrail.connectors` in the config.
-Nothing is protected until you list one. DefenseClaw protects each agent in
-one of two ways:
+Each agent you protect is a key under `guardrail.connectors` in the config. Nothing
+is protected until you list one.
 
-| Route | Agents | What DefenseClaw writes |
-| --- | --- | --- |
-| [Machine policy](/docs/enterprise/concepts#machine-policy-connector) | Claude Code, Codex, Cursor, GitHub Copilot, and OpenCode with DefenseClaw's managed OpenCode plugin | Its hooks in the vendor's administrator-owned policy files, which apply to every user of the computer |
-| [Per-user](/docs/enterprise/concepts#per-user-connector) | Devin, Antigravity, Hermes, Amp and Kiro, and OpenCode while the managed plugin is not in force. On Linux and macOS also OpenHands and OmniGent | The guardian writes the hook, or plugin, into each enrolled user's own agent config and repairs it |
+| Route | Agents |
+| --- | --- |
+| [Machine policy](/docs/enterprise/concepts#machine-policy-connector): hooks in the vendor's administrator-owned policy files | Claude Code, Codex, Cursor, GitHub Copilot, OpenCode (with the managed plugin) |
+| [Per-user](/docs/enterprise/concepts#per-user-connector): the guardian writes and repairs the hook in each enrolled user's config | Devin, Antigravity, Hermes, Amp, Kiro |
 
-ACP (Agent Client Protocol) editors are not supported in enterprise managed mode in DefenseClaw 1.0.
+OpenClaw and ZeptoClaw are not supported here. The verified combinations are in the
+[enterprise route table](/docs/support-matrix#enterprise); how to list
+agents and users is in [Plan a rollout](/docs/enterprise/rollout#step-1-choose-the-agents).
 
-OpenHands and OmniGent are refused on Windows. Which agent and OS combinations
-were verified in this release is in the
-[enterprise route table](/docs/support-matrix#enterprise). How to list agents,
-users and per-agent modes is in
-[Choose the agents to protect](/docs/enterprise/configuration#choose-the-agents-to-protect)
-and [Plan a rollout](/docs/enterprise/rollout#step-1-choose-the-agents).
+ACP (Agent Client Protocol) editors are a separate route, in preview, and not a
+`guardrail.connectors` key. The central config needs `acp.enabled: true`, a
+binding for each editor and agent pair, and an ACP profile that allows both
+([ACP configuration](/docs/acp-guard#configuration)). Then enroll each
+user with `defenseclaw-gateway enterprise acp enroll --user --client --agent
+--profile` ([Managed computers](/docs/acp-guard)).
+Enrollment refuses a pair the config does not allow.
 
 ## 3. Pick your MDM
 
-Every recipe follows the same [MDM contract](/docs/enterprise/mdm) and uses
-the scripts in
-[`packaging/mdm`](https://github.com/cisco-ai-defense/defenseclaw/tree/main/packaging/mdm).
-Each card names what you push.
+Every recipe follows the same [MDM contract](/docs/enterprise/mdm) and uses the
+scripts in [`packaging/mdm`](https://github.com/cisco-ai-defense/defenseclaw/tree/main/packaging/mdm).
 
-<Cards>
-  <Card title="Intune on Windows" href="/docs/enterprise/mdm/intune-windows" description="A Win32 app (.intunewin) that wraps the standalone Setup and your config, plus a PowerShell 7 app it depends on." />
-  <Card title="Intune on macOS" href="/docs/enterprise/mdm/intune-macos" description="One root shell script: the kit wrapper, which downloads the .pkg and runs ensure." />
-  <Card title="Intune on Linux" href="/docs/enterprise/mdm/intune-linux" description="One root platform script: the kit wrapper, which downloads the .deb, .rpm or payload archive." />
-  <Card title="Jamf Pro" href="/docs/enterprise/mdm/jamf" description="The .pkg from your distribution point, with kit scripts that stage the config and run ensure." />
-  <Card title="Iru (formerly Kandji)" href="/docs/enterprise/mdm/kandji" description="A Custom App with the .pkg and a Custom Script that runs ensure, or a script-only route." />
-  <Card title="Workspace ONE UEM" href="/docs/enterprise/mdm/workspace-one" description="A Win32 app from a ZIP on Windows, an internal app with the .pkg on macOS, and scripts that run ensure." />
-  <Card title="Configuration Manager" href="/docs/enterprise/mdm/configmgr" description="An application whose content folder holds the standalone Setup and your config." />
-  <Card title="Linux configuration management" href="/docs/enterprise/mdm/linux-config-management" description="Ansible, Puppet, Chef, Salt or plain apt and dnf, installing the .deb or .rpm package." />
-  <Card title="Any other tool" href="/docs/enterprise/mdm#what-you-deliver" description="Any tool that runs a command as SYSTEM or root can call the kit wrapper directly." />
-</Cards>
-
-The MDM recipes are templates, checked by simulating each MDM's execution
-context; they have not been run in a live tenant. The release files they
-deliver:
-
-| OS | Release file |
+| Tool | What you push |
 | --- | --- |
-| Windows x64 | `DefenseClawSetup-Enterprise-Standalone-x64.exe` |
-| Linux | `defenseclaw-enterprise-<version>-linux-<arch>.deb` or `.rpm`, or the payload archive `defenseclaw-enterprise-<version>-linux-<arch>.tar.gz` |
-| macOS (Apple silicon) | `defenseclaw-enterprise-<version>-darwin-arm64.pkg` |
+| [Intune on Windows](/docs/enterprise/mdm/intune-windows) | A Win32 app that wraps the Setup and your config, plus a PowerShell 7 app |
+| [Intune on macOS](/docs/enterprise/mdm/intune-macos), [Linux](/docs/enterprise/mdm/intune-linux) | One root script: the kit wrapper |
+| [Jamf Pro](/docs/enterprise/mdm/jamf), [Iru (Kandji)](/docs/enterprise/mdm/kandji) | The `.pkg` and kit scripts |
+| [Workspace ONE UEM](/docs/enterprise/mdm/workspace-one) | A Win32 app or the `.pkg`, with scripts and sensors |
+| [Configuration Manager](/docs/enterprise/mdm/configmgr) | An application with the Setup and your config |
+| [Linux configuration management](/docs/enterprise/mdm/linux-config-management) | The `.deb` or `.rpm` through Ansible, Puppet, Chef, Salt, apt or dnf |
+| Any other tool | The kit wrapper, run as SYSTEM or root ([What you deliver](/docs/enterprise/mdm#what-you-deliver)) |
 
-`<arch>` is `amd64` or `arm64`. `DefenseClawSetup-Enterprise-x64.exe`, without
-`-Standalone-`, is the Secure Client Setup. Verify the release's signed
-`checksums.txt` once and pin each file by its SHA-256, as
-[What you deliver](/docs/enterprise/mdm#what-you-deliver) shows.
+The release files: `DefenseClawSetup-Enterprise-Standalone-x64.exe` on Windows,
+`defenseclaw-enterprise-<version>-linux-<arch>.deb`, `.rpm` or `.tar.gz` on Linux,
+and `defenseclaw-enterprise-<version>-darwin-arm64.pkg` on macOS. Verify the
+signed `checksums.txt` once and pin each file by its SHA-256.
 
 ## 4. Deliver the config and the AI Defense key
 
-The config is one YAML file that only administrators can change, and it is the
-only policy the host enforces: thresholds, block and allow lists, rule packs and
-the agents to protect all live in it. Local tools cannot change it on a managed
-host ([Policy changes on a managed host](/docs/enterprise#policy-changes-on-a-managed-host)).
-The lifecycle installs it at a fixed path:
+The config is one YAML file only administrators can change. It is the only policy
+the host enforces ([Policy changes on a managed host](/docs/enterprise)).
+The lifecycle installs it at `C:\ProgramData\Cisco\DefenseClaw\etc\config.yaml`
+(Windows), `/etc/defenseclaw/config.yaml` (Linux) or
+`/opt/cisco/defenseclaw/etc/config.yaml` (macOS). Start from
+[A minimal config](/docs/enterprise#a-minimal-config). A first install on Windows
+needs a config; on Linux and macOS an install without one protects no agents. How
+each wrapper takes it: [Deliver the config](/docs/enterprise/mdm#deliver-the-config).
 
-| OS | Installed config |
-| --- | --- |
-| Windows | `C:\ProgramData\Cisco\DefenseClaw\etc\config.yaml` |
-| Linux | `/etc/defenseclaw/config.yaml` |
-| macOS | `/opt/cisco/defenseclaw/etc/config.yaml` |
-
-Start from [A minimal config](/docs/enterprise#a-minimal-config), which
-protects Codex and Claude Code in observe mode. A first install on Windows
-needs a config. On Linux and macOS an install without one protects no agents.
-How each wrapper takes the config is in
-[Deliver the config](/docs/enterprise/mdm#deliver-the-config).
-
-The Cisco AI Defense key is optional. It never goes in the config, an MDM
-script or a command line. Store it with `enterprise secret set`, from
-standard input or a file only administrators can change: after the install
-on Windows, and before or after it on Linux and macOS; see
-[Deliver the AI Defense key](/docs/enterprise/mdm#deliver-the-ai-defense-key)
-and [Cisco AI Defense key](/docs/enterprise/ai-defense-key).
+The Cisco AI Defense key is optional. It never goes in the config, an MDM script or
+a command line; store it with `enterprise secret set`
+([Deliver the AI Defense key](/docs/enterprise/mdm#deliver-the-ai-defense-key)).
 
 ## 5. Run ensure and read the result
 
-`ensure` is the one action your MDM runs. It installs when nothing is
-installed, upgrades when the version differs, repairs drift and applies a
-changed config. When the host already matches, it changes nothing and reports
-`"noop": true`, so it is safe on every check-in. The kit's wrappers print one
-result document per run and exit with one of these codes:
-
-| Result | Windows | Linux, macOS | MDM action |
-| --- | --- | --- | --- |
-| Success, or nothing to do | `0` | `0` | Success |
-| Failed. The change has already rolled back | `1603` | `1` | Read `errors[].code` |
-| Another run or the package manager is busy | `1618` | `75` | Retry later |
-| Invalid arguments, such as a first Windows install without a config | `1639` | `2` | Fix the assignment |
-
-For MDM detection, use the registry marker (Windows), the package database or
-pkg receipt for inventory, and `detect.ps1` or `detect.sh` with the health
-option for health; see [Detection](/docs/enterprise/mdm#detection). To check a
-host by hand:
-
-<Tabs items={['Linux', 'macOS', 'Windows']}>
-  <Tab value="Linux">
+`ensure` is the one action your MDM runs. It installs, upgrades, repairs drift and
+applies a changed config; when the host already matches it reports `"noop": true`,
+so it is safe on every check-in. Exit codes: success `0` (Windows and Unix), failed
+and rolled back `1603` or `1`, busy `1618` or `75`, invalid arguments `1639` or `2`
+([Exit codes](/docs/enterprise/mdm#exit-codes)). Check a host by hand:
 
 ```bash
 sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux status --json
-sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux verify --json
 ```
 
-  </Tab>
-  <Tab value="macOS">
-
-```bash
-sudo /opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise macos status --json
-sudo /opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise macos verify --json
+```json title="Output (healthy, trimmed)"
+{
+  "ok": true,
+  "action": "status",
+  "profile": "standalone",
+  "installed": true,
+  "readiness": { "gateway": true, "guardian": true, "enumerator": true, "sensor_helper": true },
+  "coverage_complete": true,
+  "security_complete": false,
+  "warnings": [{ "code": "hook_process_fail_open", "message": "Codex can run a tool after its PreToolUse hook is killed or times out" }],
+  "errors": []
+}
 ```
 
-  </Tab>
-  <Tab value="Windows">
-
-```powershell
-# From an elevated PowerShell
-$Cli = 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw.exe'
-& $Cli enterprise windows status --profile standalone --json
-& $Cli enterprise windows verify --profile standalone --json
-```
-
-  </Tab>
-</Tabs>
-
-Read `coverage_complete` and `security_complete` in the result
-([Health fields](/docs/enterprise/operations#health-fields)). On Linux and
-macOS, `policy.effective_digest` and `policy.applied` say which config the host
-runs and whether the gateway applied it
-([Effective policy digest](/docs/enterprise/operations#effective-policy-digest-and-config-generation)).
-Every exit code is listed in [Exit codes](/docs/enterprise/mdm#exit-codes).
+On macOS use `/opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise macos status --json`.
+On Windows, from an elevated prompt:
+`& 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw.exe' enterprise windows status --profile standalone --json`.
+Read `coverage_complete` and `security_complete` ([Health fields](/docs/enterprise/operations#health-fields)).
+With Codex, Claude Code, Copilot, Devin, Hermes, Kiro or Antigravity enabled, installed hooks can provide complete coverage
+while `security_complete` remains `false`: the agent can continue after a stopped
+or timed-out hook. `hook_process_fail_open` names that residual risk.
 
 ## 6. Pilot in observe mode, then expand in rings
 
-Deploy a pilot ring with `guardrail.mode: observe`. Observe mode records every
-decision, including what DefenseClaw would have blocked, without blocking on
-policy verdicts. When the pilot is healthy and the decisions are reviewed, set
-`guardrail.mode: action` and deliver the config again. Then grow the
-deployment in rings (pilot, early, broad, everyone), moving on only when a
-ring is healthy.
-
-[Plan a rollout](/docs/enterprise/rollout) has a ring plan with sizes and exit
-criteria ([Step 5](/docs/enterprise/rollout#step-5-expand-in-rings)), and
-covers choosing users, handling existing per-user installs and planning
-upgrades and rollback.
+Deploy a pilot ring with `guardrail.mode: observe`. It records every decision,
+including what DefenseClaw would have blocked, without blocking on policy verdicts.
+When the pilot is healthy and you have reviewed the decisions, set
+`guardrail.mode: action` and deliver the config again. Then grow in rings (pilot,
+early, broad, everyone). [Plan a rollout](/docs/enterprise/rollout#step-5-expand-in-rings)
+has ring sizes and exit criteria.
 
 ## Next steps
 

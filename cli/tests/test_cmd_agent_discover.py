@@ -575,16 +575,24 @@ class TestAgentDiscoverCommand(unittest.TestCase):
         try:
             result = self.runner.invoke(
                 agent,
-                ["signatures", "disable", "Custom_AI"],
+                ["signatures", "disable", "Codex"],
                 obj=app,
                 catch_exceptions=False,
             )
+            # GAP-0557: an ID no pack defines is refused, and nothing is stored.
+            unknown = [
+                self.runner.invoke(agent, ["signatures", verb, "no-such-signature-id"], obj=app)
+                for verb in ("disable", "enable")
+            ]
         finally:
             cleanup_app(app, db_path, tmp_dir)
 
         self.assertEqual(result.exit_code, 0, result.output)
-        self.assertIn("custom-ai", result.output)
-        self.assertIn("custom-ai", app.cfg.ai_discovery.disabled_signature_ids)
+        self.assertIn("codex", result.output)
+        self.assertEqual(app.cfg.ai_discovery.disabled_signature_ids, ["codex"])
+        for refused in unknown:
+            self.assertNotEqual(refused.exit_code, 0, refused.output)
+            self.assertIn("signatures list", refused.output)
 
 
 def _ai_signal(

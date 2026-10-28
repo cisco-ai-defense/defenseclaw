@@ -1,0 +1,206 @@
+// Copyright 2026 Cisco Systems, Inc. and its affiliates
+// SPDX-License-Identifier: Apache-2.0
+
+package connector
+
+import (
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"strings"
+	"sync"
+	"testing"
+
+	"github.com/defenseclaw/defenseclaw/internal/testenv"
+)
+
+// ampInstallInFlightHarness runs one Amp tool.call for a command that names
+// the marker the test gateway reacts to.
+const ampInstallInFlightHarness = `
+import { pathToFileURL } from "node:url";
+import { readFile } from "node:fs/promises";
+globalThis.Bun = { file: (path) => ({ slice: () => ({ text: () => readFile(path, "utf8") }) }) };
+const loaded = await import(pathToFileURL(process.argv[1]).href);
+const handlers = {};
+const amp = {
+  system: { workspaceRoot: "", executor: { kind: "" }, user: {} },
+  helpers: { filePathFromURI: (uri) => uri, isPluginUINotAvailableError: () => true },
+  on: (event, handler) => { handlers[event] = handler; },
+  activeThread: { current: null }, ui: { notify: async () => {} },
+};
+loaded.default(amp);
+const event = { thread: { id: "s-1" }, toolUseID: "c-1", tool: "shell", input: { command: "echo in-flight-marker" } };
+const ctx = { thread: { agent: async () => ({ name: "amp" }) }, ui: { confirm: async () => false } };
+console.log(JSON.stringify(await handlers["tool.call"](event, ctx)));
+`
+
+// GAP-0893: the per-user OpenCode plugin in fail mode open read
+// .install.lock once, before its gateway request. An install or upgrade
+// that began while the request was out (the installer then stops the
+// gateway) left that early read open, and the failure allowed the tool.
+// Both in-agent plugins now read the install state when a failure answers:
+// a dropped connection, an outage or error status and no verdict. Without
+// an install the account's open choice still applies.
+func TestPerUserPluginAnswersClosedWhenAnInstallStartsDuringTheCall(t *testing.T) {
+	failures := []struct {
+		name   string
+		answer func(w http.ResponseWriter)
+	}{
+		{"gateway drops the connection", func(w http.ResponseWriter) {
+			if conn, _, err := w.(http.Hijacker).Hijack(); err == nil {
+				_ = conn.Close()
+			}
+		}},
+		{"gateway answers HTTP 503", func(w http.ResponseWriter) { w.WriteHeader(http.StatusServiceUnavailable) }},
+		{"gateway answers HTTP 401", func(w http.ResponseWriter) { w.WriteHeader(http.StatusUnauthorized) }},
+		{"gateway answers no verdict", func(w http.ResponseWriter) { _, _ = w.Write([]byte(`{"action":"maybe"}`)) }},
+	}
+	for _, plugin := range []string{"opencode", "amp"} {
+		for _, failure := range failures {
+			for _, install := range []bool{false, true} {
+				name := plugin + "/" + failure.name + "/no install"
+				if install {
+					name = plugin + "/" + failure.name + "/install starts during the call"
+				}
+				t.Run(name, func(t *testing.T) {
+					dataDir := testenv.PrivateTempDir(t)
+					token := filepath.Join(dataDir, "hooks", ".hook-"+plugin+".token")
+					if err := os.MkdirAll(filepath.Dir(token), 0o700); err != nil {
+						t.Fatal(err)
+					}
+					if err := os.WriteFile(token, []byte(strings.Repeat("a", 64)+"\n"), 0o600); err != nil {
+						t.Fatal(err)
+					}
+					var once sync.Once
+					server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+						body, _ := io.ReadAll(r.Body)
+						if !strings.Contains(string(body), "marker") {
+							// Load and lifecycle reports are not the tool call.
+							_, _ = w.Write([]byte(`{"action":"allow"}`))
+							return
+						}
+						if install {
+							once.Do(func() {
+								if err := os.Mkdir(filepath.Join(dataDir, ".install.lock"), 0o700); err != nil {
+									t.Error(err)
+								}
+							})
+						}
+						failure.answer(w)
+					}))
+					t.Cleanup(server.Close)
+					data := templateData{APIAddr: strings.TrimPrefix(server.URL, "http://"),
+						TokenFileJS: javaScriptStringContent(token), FailMode: "open"}
+					var blocked bool
+					var lines []string
+					if plugin == "opencode" {
+						lines = runOpenCodePluginHarness(t, data, 1)
+						blocked = len(lines) > 0 && strings.HasPrefix(lines[0], "block:")
+					} else {
+						lines = runNodeHarness(t, ampInstallInFlightHarness, writeRenderedPlugin(t, "amp-plugin.ts", "defenseclaw.mts", data))
+						blocked = len(lines) > 0 && strings.Contains(lines[len(lines)-1], `"action":"reject-and-continue"`)
+					}
+					// A per-user plugin is closed whatever mode it was set up with
+					// (sa-port-peer): the failure blocks with or without an install.
+					if !blocked {
+						t.Fatalf("blocks=%v, want true (install %v): %q", blocked, install, lines)
+					}
+				})
+			}
+		}
+	}
+}
+
+// GAP-1002: the per-user OpenCode and Amp plugins looked for .install.lock
+// only in the gateway's data_dir (the folder above the hook credential).
+// install.sh and install.ps1 lock DEFENSECLAW_HOME, else ~/.defenseclaw, so
+// with data_dir set apart from it an open plugin let a failed call run
+// during an install. Both plugins now read both folders, as the shell hooks
+// do (GAP-0948), at every failure answer, and the closed answer says an
+// install is running. No lock in either folder keeps the open (control).
+func TestPerUserPluginFindsTheInstallLockOfTheInstallerHome(t *testing.T) {
+	failures := []struct {
+		name   string
+		answer func(w http.ResponseWriter)
+	}{
+		{"gateway drops the connection", func(w http.ResponseWriter) {
+			if conn, _, err := w.(http.Hijacker).Hijack(); err == nil {
+				_ = conn.Close()
+			}
+		}},
+		{"gateway answers HTTP 503", func(w http.ResponseWriter) { w.WriteHeader(http.StatusServiceUnavailable) }},
+		{"gateway answers no verdict", func(w http.ResponseWriter) { _, _ = w.Write([]byte(`{"action":"maybe"}`)) }},
+	}
+	for _, plugin := range []string{"opencode", "amp"} {
+		for _, failure := range failures {
+			for _, lock := range []string{"none", "data_dir", "DEFENSECLAW_HOME", "default home", "DEFENSECLAW_HOME is a file"} {
+				t.Run(plugin+"/"+failure.name+"/"+lock, func(t *testing.T) {
+					profile := testenv.PrivateTempDir(t)
+					installerHome := testenv.PrivateTempDir(t)
+					dataDir := testenv.PrivateTempDir(t)
+					t.Setenv("HOME", profile)
+					t.Setenv("USERPROFILE", profile)
+					t.Setenv("DEFENSECLAW_HOME", "")
+					token := filepath.Join(dataDir, "hooks", ".hook-"+plugin+".token")
+					if err := os.MkdirAll(filepath.Dir(token), 0o700); err != nil {
+						t.Fatal(err)
+					}
+					if err := os.WriteFile(token, []byte(strings.Repeat("a", 64)+"\n"), 0o600); err != nil {
+						t.Fatal(err)
+					}
+					switch lock {
+					case "data_dir":
+						mustMkdirForTest(t, filepath.Join(dataDir, ".install.lock"))
+					case "DEFENSECLAW_HOME":
+						t.Setenv("DEFENSECLAW_HOME", installerHome)
+						mustMkdirForTest(t, filepath.Join(installerHome, ".install.lock"))
+					case "default home":
+						mustMkdirForTest(t, filepath.Join(profile, ".defenseclaw", ".install.lock"))
+					case "DEFENSECLAW_HOME is a file":
+						// A folder that cannot be read is held, as in the shell hooks.
+						file := filepath.Join(installerHome, "not-a-folder")
+						if err := os.WriteFile(file, nil, 0o600); err != nil {
+							t.Fatal(err)
+						}
+						t.Setenv("DEFENSECLAW_HOME", file)
+					}
+					server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+						body, _ := io.ReadAll(r.Body)
+						if !strings.Contains(string(body), "marker") {
+							_, _ = w.Write([]byte(`{"action":"allow"}`))
+							return
+						}
+						failure.answer(w)
+					}))
+					t.Cleanup(server.Close)
+					data := templateData{APIAddr: strings.TrimPrefix(server.URL, "http://"),
+						TokenFileJS: javaScriptStringContent(token), FailMode: "open"}
+					var blocked bool
+					var lines []string
+					if plugin == "opencode" {
+						lines = runOpenCodePluginHarness(t, data, 1)
+						blocked = len(lines) > 0 && strings.HasPrefix(lines[0], "block:")
+					} else {
+						lines = runNodeHarness(t, ampInstallInFlightHarness, writeRenderedPlugin(t, "amp-plugin.ts", "defenseclaw.mts", data))
+						blocked = len(lines) > 0 && strings.Contains(lines[len(lines)-1], `"action":"reject-and-continue"`)
+					}
+					// Per-user plugins fail closed in every mode outside Secure
+					// Client (sa-port-peer), so the lock-free control blocks too;
+					// it returns with an OSS open render.
+					if !blocked {
+						t.Fatalf("blocks=%v, want true (lock %s): %q", blocked, lock, lines)
+					}
+				})
+			}
+		}
+	}
+}
+
+func mustMkdirForTest(t *testing.T, path string) {
+	t.Helper()
+	if err := os.MkdirAll(path, 0o700); err != nil {
+		t.Fatal(err)
+	}
+}

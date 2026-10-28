@@ -127,14 +127,24 @@ func resolveWindowsEnterpriseLifecycleProfile(action string, opts *windowsEnterp
 	if path := strings.TrimSpace(opts.configPath); path != "" {
 		configured, err := readWindowsEnterpriseConfigProfile(path)
 		var content windowsEnterpriseConfigContentError
-		if err != nil && errors.As(err, &content) && requested == "" && windowsEnterpriseStandaloneRecordedOnly(opts) {
+		var unreadable windowsEnterpriseConfigReadError
+		if err != nil && (errors.As(err, &content) || errors.As(err, &unreadable)) && requested == "" && windowsEnterpriseStandaloneRecordedOnly(opts) {
 			// The file cannot name its profile, but this host runs only the
 			// standalone profile, where no Secure Client config applies: it
-			// is the standalone profile's refusal (1639), not a Secure
-			// Client preflight failure (1603, GAP-0103).
+			// is the standalone profile's refusal, not a Secure Client
+			// preflight failure (GAP-0103, GAP-0537).
 			requested = managed.ProfileStandalone
 		}
-		if err != nil {
+		if err != nil && requested == managed.ProfileStandalone && errors.As(err, &unreadable) &&
+			windowsEnterpriseSuppliedConfigRefusalAction(action) {
+			// A file that is missing or cannot be read is refused as a
+			// preflight failure (1603), but once the installer is trusted,
+			// so the refusal reports the running deployment, its advisories
+			// and enrollment, as a refused config that does not parse
+			// (GAP-0537, GAP-0103).
+			opts.suppliedConfigRefusal = err
+			opts.suppliedConfigUnreadable = true
+		} else if err != nil {
 			if requested != managed.ProfileStandalone || !errors.As(err, &content) {
 				return err
 			}
@@ -415,14 +425,7 @@ func readWindowsEnterpriseConfiguredTrust(action string, opts *windowsEnterprise
 		}
 		return windowsEnterpriseConfiguredTrust{}, fmt.Errorf("read enterprise.trust from %s: %w", path, err)
 	}
-	var document struct {
-		Enterprise struct {
-			Trust struct {
-				Mode           string   `yaml:"mode"`
-				AllowedSigners []string `yaml:"allowed_signers"`
-			} `yaml:"trust"`
-		} `yaml:"enterprise"`
-	}
+	var document windowsEnterpriseTrustDocument
 	if err := yaml.Unmarshal(trimWindowsJSONBOM(body), &document); err != nil {
 		if !supplied {
 			// A run that keeps the installed config cannot heal it; one given
@@ -433,6 +436,25 @@ func readWindowsEnterpriseConfiguredTrust(action string, opts *windowsEnterprise
 		}
 		return windowsEnterpriseConfiguredTrust{}, fmt.Errorf("the config %s does not parse %s; fix it and run again", path, windowsEnterpriseYAMLProblem(err))
 	}
+	return windowsEnterpriseTrustFromDocument(path, document)
+}
+
+// windowsEnterpriseTrustDocument is the enterprise.trust part of a config.
+// It stays an unnamed struct type (an alias), so a YAML type error names the
+// destination "struct" and windowsEnterpriseYAMLProblem says "a mapping of
+// keys is expected".
+type windowsEnterpriseTrustDocument = struct {
+	Enterprise struct {
+		Trust struct {
+			Mode           string   `yaml:"mode"`
+			AllowedSigners []string `yaml:"allowed_signers"`
+		} `yaml:"trust"`
+	} `yaml:"enterprise"`
+}
+
+// windowsEnterpriseTrustFromDocument validates the enterprise.trust the
+// config at path carries.
+func windowsEnterpriseTrustFromDocument(path string, document windowsEnterpriseTrustDocument) (windowsEnterpriseConfiguredTrust, error) {
 	configured := windowsEnterpriseConfiguredTrust{path: path}
 	switch mode := strings.ToLower(strings.TrimSpace(document.Enterprise.Trust.Mode)); mode {
 	case "", windowsEnterpriseTrustAuthenticode, windowsEnterpriseTrustHashPinned:
@@ -529,18 +551,24 @@ type windowsEnterpriseConfigContentError struct{ error }
 
 func (err windowsEnterpriseConfigContentError) Unwrap() error { return err.error }
 
+// windowsEnterpriseConfigReadError is an administrator config that could not
+// be opened or read (it does not exist, or access is denied).
+type windowsEnterpriseConfigReadError struct{ error }
+
+func (err windowsEnterpriseConfigReadError) Unwrap() error { return err.error }
+
 // readWindowsEnterpriseConfigProfile reads enterprise.profile from an
 // administrator-supplied config. The lifecycle validates the whole file
 // later; this only chooses which lifecycle validates it.
 func readWindowsEnterpriseConfigProfile(path string) (string, error) {
 	file, err := os.Open(path)
 	if err != nil {
-		return "", fmt.Errorf("open managed config %s: %w", path, err)
+		return "", windowsEnterpriseConfigReadError{fmt.Errorf("open managed config %s: %w", path, err)}
 	}
 	defer file.Close()
 	body, err := io.ReadAll(io.LimitReader(file, windowsEnterpriseConfigProfileLimit+1))
 	if err != nil {
-		return "", fmt.Errorf("read managed config %s: %w", path, err)
+		return "", windowsEnterpriseConfigReadError{fmt.Errorf("read managed config %s: %w", path, err)}
 	}
 	if len(body) > windowsEnterpriseConfigProfileLimit {
 		return "", windowsEnterpriseConfigContentError{fmt.Errorf("managed config %s exceeds %d bytes", path, windowsEnterpriseConfigProfileLimit)}

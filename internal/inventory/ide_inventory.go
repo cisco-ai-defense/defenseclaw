@@ -16,10 +16,12 @@ import (
 	"fmt"
 	"os"
 	"os/user"
+	"path/filepath"
 	"regexp"
 	"runtime"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
@@ -252,16 +254,29 @@ func (s *ContinuousDiscoveryService) detectEditorExtensions() ([]AISignal, *IDEI
 	inv := &IDEInventory{Scope: s.ideInventoryScope(), ScannedAt: now}
 	var signals []AISignal
 	for _, home := range homes {
-		// Only a user's own gateway follows links: a link a user planted
-		// toward another readable home must not put that account's
-		// plugins in a managed inventory (GAP-0396).
-		limits := ideplugins.Limits{FollowSymlinks: !serviceContext && !s.userHomeScan}
-		if !serviceContext {
-			limits.RoamingAppData, limits.LocalAppData = platformIDEAppData(home)
+		installs, published := s.publishedOwnerIDE(home, serviceContext)
+		if !published {
+			// Only a user's own gateway follows links: a link a user
+			// planted toward another readable home must not put that
+			// account's plugins in a managed inventory (GAP-0396).
+			limits := ideplugins.Limits{FollowSymlinks: !serviceContext && !s.userHomeScan}
+			if !serviceContext {
+				limits.RoamingAppData, limits.LocalAppData = platformIDEAppData(home)
+			}
+			installs = ideplugins.Scan(home, runtime.GOOS, limits)
 		}
-		installs := ideplugins.Scan(home, runtime.GOOS, limits)
-		signals = append(signals, s.ideSignals(installs, index, serviceContext)...)
-		inv.add(installs, s.ideOwnerForHome(home, serviceContext), index, now)
+		owner := s.ideOwnerForHome(home, serviceContext)
+		homeSignals := s.ideSignals(installs, index, serviceContext)
+		if published {
+			// The enumerator read a redirected AppData folder the profile's
+			// owner owns. Its path is outside the profile, or inside
+			// another one, so it does not name the owner of what it holds.
+			for i := range homeSignals {
+				homeSignals[i].UserID, homeSignals[i].UserName = owner.id, owner.name
+			}
+		}
+		signals = append(signals, homeSignals...)
+		inv.add(installs, owner, index, now)
 	}
 	if runtime.GOOS == "windows" {
 		machine := ideplugins.ScanMachine(runtime.GOOS, ideplugins.Limits{ProgramFiles: programFilesDirs()})
@@ -270,6 +285,51 @@ func (s *ContinuousDiscoveryService) detectEditorExtensions() ([]AISignal, *IDEI
 	}
 	inv.applyScope()
 	return signals, inv
+}
+
+// ownerIDE is the lookup of the IDE installations the managed Windows
+// enumerator read, as LocalSystem, for a profile whose AppData folder
+// redirection moved out of the reach of the gateway service (GAP-1249).
+var ownerIDE struct {
+	sync.Mutex
+	generation uint64
+	lookup     func(sid, home string) ([]ideplugins.Install, bool)
+}
+
+// SetOwnerIDELookup installs lookup for later scans. The returned function
+// removes it again unless a later call replaced it.
+func SetOwnerIDELookup(lookup func(sid, home string) ([]ideplugins.Install, bool)) func() {
+	ownerIDE.Lock()
+	defer ownerIDE.Unlock()
+	ownerIDE.generation++
+	generation := ownerIDE.generation
+	ownerIDE.lookup = lookup
+	return func() {
+		ownerIDE.Lock()
+		defer ownerIDE.Unlock()
+		if ownerIDE.generation == generation {
+			ownerIDE.lookup = nil
+		}
+	}
+}
+
+// publishedOwnerIDE returns the installations the enumerator published for
+// home, a profile of a managed scan, and whether it published any.
+func (s *ContinuousDiscoveryService) publishedOwnerIDE(home string, serviceContext bool) ([]ideplugins.Install, bool) {
+	if !serviceContext || s.opts.SecureClient {
+		return nil, false
+	}
+	owner, ok := s.homeOwnerForPath(home)
+	if !ok || !strings.EqualFold(filepath.Clean(owner.Home), filepath.Clean(home)) {
+		return nil, false
+	}
+	ownerIDE.Lock()
+	lookup := ownerIDE.lookup
+	ownerIDE.Unlock()
+	if lookup == nil {
+		return nil, false
+	}
+	return lookup(owner.UserID, home)
 }
 
 func (s *ContinuousDiscoveryService) ideInventoryScope() string {

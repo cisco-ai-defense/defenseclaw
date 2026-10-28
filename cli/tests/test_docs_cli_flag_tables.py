@@ -67,7 +67,60 @@ def test_a_flag_the_command_lacks_fails() -> None:
 
 def test_the_first_run_quickstart_table_is_checked_and_current() -> None:
     checker = _load_checker()
-    first_run = [e for e in checker.documented_flags() if e.path.name == "first-run.mdx"]
+    first_run = [
+        e for e in checker.documented_flags() if e.path.name == "first-run.mdx" and e.command == ("quickstart",)
+    ]
     flags = {e.flag for e in first_run}
     assert {"--connector", "--agent", "--skip-gateway", "--json-summary", "--json"} <= flags
     assert not flags & {"--yes", "--non-interactive"}
+
+
+PIPE_PAGE = '''## `defenseclaw init`
+
+| Flag | What it does |
+| --- | --- |
+| `--connector` / `--agent` `<name>` | Pre-select a single agent. |
+| `--fail-mode open\\|closed` | Hook fail mode. |
+| `--llm-provider`, `--llm-model` | The LLM settings. |
+
+`--not-in-a-table` is prose.
+
+## Which to use
+
+| Flag | What it does |
+| --- | --- |
+| `--under-a-non-command-heading` | Not read. |
+'''
+
+
+def test_a_markdown_flag_table_under_a_command_heading_is_read() -> None:
+    # GAP-0613: only TypeTables were read, so the init table's `--agent` went unchecked.
+    checker = _load_checker()
+    entries = checker.flag_table_entries(Path("page.mdx"), PIPE_PAGE)
+    assert [(e.command, e.flag) for e in entries] == [
+        (("init",), "--connector"),
+        (("init",), "--agent"),
+        (("init",), "--fail-mode"),
+        (("init",), "--llm-provider"),
+        (("init",), "--llm-model"),
+    ]
+    tree = checker._no_op_command_tree()
+    agent = next(e for e in entries if e.flag == "--agent")
+    assert checker.validate_flag(tree, agent) == "`defenseclaw init` has no option --agent"
+
+
+def test_the_first_run_init_table_lists_every_init_option_and_no_other() -> None:
+    # GAP-0613: the table listed `--agent` and left out options `init --help` prints.
+    checker = _load_checker()
+    documented = {
+        e.flag for e in checker.documented_flags() if e.path.name == "first-run.mdx" and e.command == ("init",)
+    }
+    init = checker._no_op_command_tree().commands["init"]
+    options = {
+        name
+        for param in init.params
+        if not getattr(param, "hidden", False)
+        for name in (*param.opts, *param.secondary_opts)
+        if name.startswith("--") and name != "--help"
+    }
+    assert documented == options

@@ -15,7 +15,6 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/observability/pipeline"
 	"github.com/defenseclaw/defenseclaw/internal/observability/router"
 	observabilityruntime "github.com/defenseclaw/defenseclaw/internal/observability/runtime"
-	"github.com/google/uuid"
 )
 
 const (
@@ -127,7 +126,7 @@ func emitLocalWriteGapV8(
 		}
 		builder, buildErr := observability.NewFamilyBuilder(
 			observability.ClockFunc(func() time.Time { return observedAt }),
-			observability.OccurrenceIDGeneratorFunc(func() (string, error) { return uuid.NewString(), nil }),
+			observability.TimeOrderedOccurrenceIDs,
 		)
 		if buildErr != nil {
 			return observability.Record{}, &sidecarObservabilityError{code: sidecarObservabilityBuildFailed}

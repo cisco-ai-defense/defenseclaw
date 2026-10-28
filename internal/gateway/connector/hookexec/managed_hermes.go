@@ -100,7 +100,7 @@ func managedHermesAnswerUsable(action string) bool {
 // text for layer, so Hermes says why: for example that the DefenseClaw
 // gateway service is not running (a managed hook,
 // managedStandaloneFailClosedText) or that this account's gateway is not
-// running and how to start it (a per-user hook, perUserHermesFailClosedText).
+// running and how to start it (a per-user hook, perUserFailClosedText).
 // handled is false for every other invocation.
 func hermesFailClosed(opts Options, sp spec, layer, reason string) (int, bool) {
 	if !hermesBlocksFailures(opts, sp) {
@@ -112,7 +112,7 @@ func hermesFailClosed(opts Options, sp spec, layer, reason string) (int, bool) {
 	}
 	if !opts.ManagedEnterprise {
 		fmt.Fprintf(opts.Stderr, "defenseclaw: blocking %s (fail mode closed): %s\n", sp.subject, reason)
-		fmt.Fprintln(opts.Stdout, `{"action":"block","message":`+mustJSONString(perUserHermesFailClosedText(opts, layer, reason))+`}`)
+		fmt.Fprintln(opts.Stdout, `{"action":"block","message":`+mustJSONString(perUserFailClosedText(opts, layer, reason))+`}`)
 		return 0, true
 	}
 	text := managedStandaloneFailClosedText(opts.Event, layer, reason)
@@ -121,17 +121,19 @@ func hermesFailClosed(opts Options, sp spec, layer, reason string) (int, bool) {
 		text = "DefenseClaw blocked this tool call: " + unenrolledAccountExplanation + "."
 	case managedUIDUnregisteredReason:
 		text = "DefenseClaw blocked this tool call: " + unixUnenrolledAccountExplanation + "."
+	case managedRootDeniedReason:
+		text = "DefenseClaw blocked this tool call: " + rootDeniedExplanation + "."
 	}
 	fmt.Fprintf(opts.Stderr, "defenseclaw: blocking managed %s (fail mode closed): %s\n", sp.subject, reason)
 	fmt.Fprintln(opts.Stdout, `{"action":"block","message":`+mustJSONString(text)+`}`)
 	return 0, true
 }
 
-// perUserHermesFailClosedText is what a per-user Hermes hook that fails
+// perUserFailClosedText is what a per-user Hermes or Copilot hook that fails
 // closed shows as the reason the tool call did not run: why, in plain words,
 // and the next step, as hermes-hook.sh does on Linux and macOS
 // (hermes_block_message).
-func perUserHermesFailClosedText(opts Options, layer, reason string) string {
+func perUserFailClosedText(opts Options, layer, reason string) string {
 	const lead = "DefenseClaw blocked this tool call: "
 	switch layer {
 	case "oversized":
@@ -154,16 +156,17 @@ func perUserHermesFailClosedText(opts Options, layer, reason string) string {
 }
 
 // failOpenOnlyCloses reports whether a connector without a fail-closed hook
-// contract (failOpenOnly) still blocks this failed invocation: a managed
-// Copilot tool call or permission request (managedCopilotFailClosed) or a
-// Hermes tool call that fails closed (hermesBlocksFailures). The hook-failure log
+// contract (failOpenOnly) still blocks this failed invocation: a Copilot tool
+// call or permission request of a managed hook or of a per-user hook that
+// fails closed (copilotFailClosed), or a Hermes tool call that fails closed
+// (hermesBlocksFailures). The hook-failure log
 // records that outcome, not the configured fail mode, so a call that ran
 // fail-open is reported as one (rel-1-0-2 GAP-0446).
 func failOpenOnlyCloses(opts Options, sp spec) bool {
 	switch sp.connector {
 	case "copilot":
 		if !opts.ManagedEnterprise {
-			return false
+			return perUserCopilotFailsClosed(opts, sp) && (opts.Event == "preToolUse" || opts.Event == "permissionRequest")
 		}
 		if sp.dialect == copilotVSCodeLocalSurface {
 			return copilotVSCodeLocalOutput(opts.Event, "block", failedClosed) != ""

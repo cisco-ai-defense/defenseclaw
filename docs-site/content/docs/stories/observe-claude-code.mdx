@@ -10,18 +10,21 @@ keywords:
 
 > I want to observe Claude Code and block recursive force deletion against critical system paths.
 
-That sentence is the original DefenseClaw user story. Here is the entire flow, end to end.
+Run Claude Code under observe mode first, then switch to action mode so the bundled `CMD-RM-RF` rule (CRITICAL) blocks a recursive force delete of `/` or a top-level directory such as `/etc`, `/var`, `/home`, `/usr` or `/opt`. The rule does not flag every `rm -rf`: a path below those directories (`/var/tmp/build`), a relative path or a home subdirectory is not matched.
+
+## Before you start
+
+- Claude Code is installed.
+- DefenseClaw is installed ([Install](/docs/get-started/download)).
 
 ## Outcome
 
 By the end of this story, you'll have:
 
-- Claude Code wired to DefenseClaw via [native hooks + OTel](/docs/connectors/claudecode).
-- Representative audit data in `~/.defenseclaw/audit.db` for the lifecycle
-  and native telemetry surfaces DefenseClaw receives.
-- An `action` mode policy that blocks recursive force deletion under protected
-  root prefixes with a CRITICAL finding.
-- An audit row showing the block, with the rule reference for the next reviewer.
+- Claude Code wired to DefenseClaw through its [native hooks and OpenTelemetry](/docs/connectors/claudecode).
+- Observe-mode alerts and audit rows from normal Claude Code use.
+- An `action` mode policy that blocks `rm -rf` against `/` and protected top-level directories with the CRITICAL `CMD-RM-RF` rule.
+- An audit row showing the block, with the rule ID for the next reviewer.
 
 <Steps>
 
@@ -29,15 +32,13 @@ By the end of this story, you'll have:
 
 ### Wire Claude Code (observability only)
 
+Wire Claude Code. It starts in observe mode.
+
 ```bash
 defenseclaw setup claude-code
 ```
 
-This is the [Claude Code alias](/docs/connectors/claudecode), which starts in observe mode. Claude
-Code talks directly to its native upstream. DefenseClaw inspects through the
-version-selected hook contract: 28 lifecycle events for `>=2.1.154,<2.1.219`
-or 29 for `>=2.1.219`, where `DirectoryAdded` is observational. It also
-receives native OTel logs and metrics.
+DefenseClaw registers the hook events for your Claude Code version (28 events, or 29 from 2.1.219 where `DirectoryAdded` is observation only) and receives its native OpenTelemetry logs and metrics. See the [Claude Code connector](/docs/connectors/claudecode).
 
 </Step>
 
@@ -45,24 +46,12 @@ receives native OTel logs and metrics.
 
 ### Watch the audit log fill up
 
-Open the live dashboard:
+Use Claude Code normally for a while, then read what was recorded.
 
 ```bash
+defenseclaw alerts --limit 10
 defenseclaw tui
 ```
-
-Or print the last 50 audit rows for Claude Code as JSON Lines:
-
-```bash
-defenseclaw-gateway audit export --connector claudecode --limit 50 --newest \
-  | jq -c '{timestamp, action, severity}'
-```
-
-Open Claude Code and use it normally. DefenseClaw records the version-selected
-28 or 29 supported lifecycle events—including observational `DirectoryAdded`
-on `>=2.1.219`—plus the native OTel logs and metrics that Claude Code emits. It
-does not claim activity outside those registered surfaces. Collect enough
-representative traffic to understand your agent before the first block decision.
 
 </Step>
 
@@ -70,40 +59,30 @@ representative traffic to understand your agent before the first block decision.
 
 ### Inspect the rule pack
 
+Look at the rule.
+
 ```bash
-ls ~/.defenseclaw/policies/guardrail/default/
 grep -n -A10 'id: CMD-RM-RF' ~/.defenseclaw/policies/guardrail/default/rules/commands.yaml
 ```
 
-The `CMD-RM-RF` rule is CRITICAL and matches `/` plus protected top-level
-prefixes such as `/etc`, `/var`, `/home`, `/usr`, and `/opt`. It deliberately
-does not flag every `rm -rf` command or arbitrary home subdirectory. The three
-bundled packs currently carry the same command-rule boundary; their default
-thresholds and other configuration differ.
+```text
+114:  - id: CMD-RM-RF
+…
+121-    title: "Recursive force delete from critical root path"
+122-    severity: CRITICAL
+```
 
 </Step>
 
 <Step>
 
-### Promote to action mode with HITL
+### Turn on blocking
+
+Turn on blocking for Claude Code ([Turn on blocking](/docs/get-started/first-guardrail) has the detail).
 
 ```bash
-defenseclaw setup claude-code \
-  --mode action \
-  --rule-pack default \
-  --human-approval \
-  --hilt-min-severity high \
-  --restart
+defenseclaw guardrail mode action --connector claudecode
 ```
-
-The enforcement flags here are:
-
-- `--mode action` — CRITICAL findings now block.
-- `--human-approval` — HIGH findings become confirmation requests on ask-capable events.
-- `--hilt-min-severity high` — MEDIUM and LOW do not enter HITL; eligible
-  HIGH findings can prompt, while CRITICAL findings remain blocks.
-
-Claude Code supports native PreToolUse ask, so the approval prompt surfaces inside the agent UI itself.
 
 </Step>
 
@@ -111,20 +90,13 @@ Claude Code supports native PreToolUse ask, so the approval prompt surfaces insi
 
 ### Trigger the rule
 
-Use `/proc` as the target so the exercise remains safe even if the connector
-is not enforcing: on Linux it is a kernel pseudo-filesystem whose entries can't
-be deleted, and macOS has no `/proc`. A path below a protected prefix, such as
-`/var/tmp/defenseclaw-demo`, is deliberately not matched. Ask Claude Code:
+Ask Claude Code to run `rm -rf /proc`. `/proc` is a kernel pseudo-filesystem, so the exercise stays safe even if blocking were off. The hook sends the command to the gateway, the gateway matches `CMD-RM-RF`, and Claude Code gets a deny before the shell starts:
 
-> Please run `rm -rf /proc`.
+```text
+DefenseClaw policy blocked this action (rule CMD-RM-RF: Recursive force delete from critical root path). Do not retry it in another form.
+```
 
-The PreToolUse hook fires, the gateway scores the command, the default rule pack
-returns `CMD-RM-RF` at CRITICAL, and Claude Code receives a deny decision before
-the shell runs.
-
-Many models refuse to run this command at all. Then no tool call is made and
-there is nothing to block; use the harmless test rule in
-[First guardrail](/docs/get-started/first-guardrail) to see a block instead.
+Many models refuse this command themselves. Then no tool call is made and there is nothing to block; use the test rule in the [quickstart](/docs/get-started/quickstart) instead.
 
 </Step>
 
@@ -133,16 +105,16 @@ there is nothing to block; use the harmless test rule in
 ### Confirm in the audit log
 
 ```bash
-defenseclaw alerts --limit 10
-# or read the hook decisions from the last 30 minutes of audit history:
+defenseclaw alerts --limit 5
 defenseclaw-gateway audit export --connector claudecode --since 30m \
-  | jq 'select(.action == "connector-hook" and .structured.action == "block")
-        | {timestamp, severity, rule_ids: .structured.rule_ids}'
+  | jq -c 'select(.action == "connector-hook") | {timestamp, action: .structured.action, rule_ids: .structured.rule_ids}'
 ```
 
-Each hook call writes one `connector-hook` row. Its `structured.action` is
-the answer returned to Claude Code (`block` here), and `structured.rule_ids`
-lists `CMD-RM-RF`. IDs and timestamps differ on every run.
+```text
+{"timestamp":"2026-10-21T06:59:40.323651948Z","action":"block","rule_ids":["CMD-RM-RF"]}
+```
+
+Each hook call writes one `connector-hook` row. `action` is the answer Claude Code received.
 
 </Step>
 
@@ -152,7 +124,7 @@ lists `CMD-RM-RF`. IDs and timestamps differ on every run.
 
 <Flow
   direction="TB"
-  caption="The gateway makes the decision, not Claude Code; the PreToolUse hook only carries the command and the answer. The same CMD-RM-RF finding is recorded in both modes. Only action mode turns it into a deny, and CRITICAL findings never become an approval prompt."
+  caption="The gateway makes the decision, not Claude Code. The PreToolUse hook only carries the command and the answer. The same CMD-RM-RF finding is recorded in both modes. Only action mode turns it into a deny, and a CRITICAL finding never becomes an approval prompt."
 >
   <Node id="cc" kind="agent">{`Claude Code\nBash: rm -rf /proc`}</Node>
   <Node id="hook" kind="connector">{`PreToolUse hook\nruns before the tool`}</Node>
@@ -173,65 +145,29 @@ lists `CMD-RM-RF`. IDs and timestamps differ on every run.
 
 <Accordions>
 
-<Accordion title="What if I want to allow it on a specific path?">
-
-Use a less destructive command when possible. If your organization truly needs
-a different boundary, copy the pack, edit its `rules/commands.yaml`, then check
-and select it:
-
-```bash
-cp -R ~/.defenseclaw/policies/guardrail/default ~/my-guardrail-pack
-defenseclaw guardrail validate-pack ~/my-guardrail-pack
-defenseclaw guardrail use-pack ~/my-guardrail-pack --connector claudecode
-```
-
-`use-pack` records the copied pack's digest as
-`guardrail.custom_packs.my-guardrail-pack`. If you edit the pack afterwards, the
-gateway keeps enforcing the previous policy and `defenseclaw doctor` shows the
-Policy row as failed, until you pin the new digest. Take it from
-`defenseclaw guardrail validate-pack ~/my-guardrail-pack` and run
-`defenseclaw config set guardrail.custom_packs.my-guardrail-pack.digest sha256:<digest>`.
-The rule schema has no per-path allow-list field, and CRITICAL findings cannot
-be approved through HITL.
-
-</Accordion>
-
-<Accordion title="What if I'm running an autonomous agent with no operator?">
-
-Drop HITL (`--no-human-approval`) and rely on `--mode action`. In the bundled
-default policy, CRITICAL still blocks while HIGH does not pause for approval.
-Use a strict or custom pack if HIGH must block, and configure a reviewed sink
-if the event should reach an on-call channel.
-
-</Accordion>
-
-<Accordion title="What if I want the same protection on Codex / Cursor / Copilot CLI?">
-
-`defenseclaw setup codex` (or `cursor`, `copilot`). The rule pack is
-connector-agnostic; the hook surface differs. See
-[Connector Compatibility](/docs/connectors/compatibility) and the individual
-connector page for exact events.
-
-</Accordion>
-
 <Accordion title="What if the gateway is unreachable when the hook fires?">
 
-Transport and invalid-response failures follow Claude Code's effective hook
-fail mode; observe mode does not create a separate transport exception. Check
-the resolved value with `defenseclaw guardrail status`: `open` allows and logs
-the failure, while `closed` blocks on the hook events that expose a block
-response. `DEFENSECLAW_STRICT_AVAILABILITY=1` additionally forces transport and
-missing-token failures closed. See
-[Fail modes](/docs/reference/fail-modes) and
-[Connector Compatibility](/docs/connectors/compatibility).
+If this account's gateway is not running, the default and permissive policies let the call run with one warning, and the strict policy blocks it. Every other failure blocks. Check it with `defenseclaw guardrail status` and read [fail modes](/docs/reference/fail-modes).
+
+</Accordion>
+
+<Accordion title="What if I want to allow it on a specific path?">
+
+To allow a path the rule blocks, see [Allow a blocked call](/docs/guardrail).
 
 </Accordion>
 
 </Accordions>
 
+## Undo
+
+```bash
+defenseclaw guardrail mode observe --connector claudecode
+```
+
 ## Next
 
 <Cards>
-  <Card title="Catch a prompt injection on Codex" href="/docs/stories/prompt-injection-codex" description="The same flow, applied to a more interesting threat model." />
-  <Card title="HITL approvals" href="/docs/stories/hitl-approvals" description="The operator side of the loop." />
+  <Card title="Catch a prompt injection on Codex" href="/docs/stories/prompt-injection-codex" description="Block a prompt injection in Codex with the bundled TRUST-IGNORE-PREVIOUS rule, then add the LLM judge for subtler cases." />
+  <Card title="HITL approvals" href="/docs/stories/hitl-approvals" description="Turn on human approval (HITL) so a confirmable HIGH-severity tool call pauses in the agent and waits for your yes or no." />
 </Cards>

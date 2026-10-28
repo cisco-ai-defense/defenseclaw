@@ -14,7 +14,6 @@ const OFFICIAL_ICONS: Partial<Record<string, ConnectorIconDefinition>> = connect
 
 const FALLBACKS: Record<string, { initials: string; color: string }> = {
   zeptoclaw: { initials: 'ZC', color: '#7c5ce7' },
-  omnigent: { initials: 'OG', color: '#cc4b9a' },
 };
 
 const labels = new Map(matrix.connectors.map((connector) => [connector.id, connector.label]));

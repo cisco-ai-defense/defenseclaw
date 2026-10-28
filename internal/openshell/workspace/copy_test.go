@@ -366,7 +366,6 @@ func TestCopyReapplyKeepsThePreApplyState(t *testing.T) {
 // what changed since, flags only that, and its apply merges only that, so
 // what the operator took back of the earlier work stays taken back. An
 // undo of the apply starts the next pull from the baseline again (cert
-// hermes:HERMES-5, openhands:MAC-OSH-OH-2: a second session with no edits
 // offered the same three files, the Makefile warning and two questions,
 // then said "nothing to apply").
 func TestCopyPullStartsFromTheLastApply(t *testing.T) {

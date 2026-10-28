@@ -480,7 +480,7 @@ func mergeWithLaneVerdict(local *ToolInspectVerdict, aid *ScanVerdict, findingTa
 		// A judge finding is titled by its category and keeps the
 		// severity of the judge that reported it, not the strictest one
 		// of the judges merged into the lane verdict (GAP-1886).
-		for _, f := range aid.Findings {
+		for i, f := range aid.Findings {
 			rf := RuleFinding{
 				RuleID:   f,
 				Title:    f,
@@ -489,6 +489,12 @@ func mergeWithLaneVerdict(local *ToolInspectVerdict, aid *ScanVerdict, findingTa
 			}
 			if s := aid.findingSeverity[f]; s != "" {
 				rf.Severity = s
+			}
+			if i < len(aid.findingSeverities) && aid.findingSeverities[i] != "" {
+				rf.Severity = aid.findingSeverities[i]
+			}
+			if i < len(aid.findingProfiles) {
+				rf.profile = aid.findingProfiles[i]
 			}
 			if findingTag == "llm-judge:" {
 				if title := judgeFindingTitle(f); title != "" {
@@ -545,8 +551,9 @@ func inspectToolTrustedShellCWD(dir string) string {
 func (a *APIServer) inspectToolPolicyCtx(ctx context.Context, req *ToolInspectRequest) *ToolInspectVerdict {
 	action := trustedActionRequest{
 		Input: actionfacts.Input{
-			Tool: req.Tool,
-			Args: req.Args,
+			Tool:       req.Tool,
+			Args:       req.Args,
+			ActiveHome: hookActiveHome(ctx),
 		},
 		LegacyText:         string(req.Args),
 		Connector:          req.Connector,
@@ -715,12 +722,20 @@ func (a *APIServer) inspectTrustedToolPolicyCtx(
 			Findings:   []string{"STATIC-BLOCK"},
 		}
 	}
-	// An explicit allow skips rule/pattern/AID/judge scanning. Write tools
-	// still run CodeGuard on their content (D2): the allow bypasses the
-	// scan gate, not code-content inspection.
+	// An explicit allow skips ordinary rule/pattern/AID/judge scanning. A
+	// resolved high-severity write is still inspected: allowing the tool name
+	// cannot authorize an active instruction-file mutation. Write tools also
+	// keep CodeGuard inspection of their content (D2).
 	allowed, err := pe.IsToolAllowedForConnector(req.Tool, req.Connector)
 	if err != nil {
 		return toolPolicyLookupErrorVerdict("inspect", "allow-list", req.Tool, req.Connector, err)
+	}
+	if allowed {
+		cfg := a.decisionConfig(ctx)
+		if (cfg == nil || !cfg.SecureClientIntegration()) &&
+			len(provedHighWriteFindings(ctx, action, nil)) != 0 {
+			allowed = false
+		}
 	}
 	if allowed {
 		if !isWriteToolName(strings.ToLower(req.Tool)) {
@@ -750,6 +765,7 @@ func (a *APIServer) inspectTrustedToolPolicyCtx(
 		)
 	}
 	ruleFindings := dispatchTrustedAction(ctx, action)
+	ruleFindings = provedHighWriteFindings(ctx, action, ruleFindings)
 
 	// CodeGuard: scan file content for any file-write tool.
 	//
@@ -787,12 +803,12 @@ func (a *APIServer) inspectTrustedToolPolicyCtx(
 		)
 		confidence := highestInspectConfidence(ruleFindings, cgFindings, severity)
 
-		runtimeAction := guardrailActionForConnectorFindings(
-			a.decisionConfig(ctx), req.Connector, ruleFindings, true,
+		runtimeAction := profileMeetActionForFindings(
+			ctx, a.decisionConfig(ctx), req.Connector, ruleFindings, true, false,
 		)
 		if enforceableSeverity != "NONE" {
-			codeGuardAction := guardrailActionForConnector(
-				a.decisionConfig(ctx), req.Connector, enforceableSeverity, true,
+			codeGuardAction := profileMeetActionForSeverity(
+				ctx, a.decisionConfig(ctx), req.Connector, enforceableSeverity, true, false,
 			)
 			runtimeAction = strongerGuardrailAction(runtimeAction, codeGuardAction)
 		}
@@ -1090,7 +1106,7 @@ func (a *APIServer) codeGuardOnlyVerdict(
 	)
 	action := guardrailActionAllow
 	if enforceableSeverity != "NONE" {
-		action = guardrailActionForConnector(a.decisionConfig(ctx), req.Connector, enforceableSeverity, true)
+		action = profileMeetActionForSeverity(ctx, a.decisionConfig(ctx), req.Connector, enforceableSeverity, true, false)
 	}
 	findingStrs := make([]string, 0, len(cgFindings))
 	for _, cf := range cgFindings {
@@ -1223,37 +1239,15 @@ func (a *APIServer) inspectMessageContent(ctx context.Context, req *ToolInspectR
 	// Outbound messages get the full scan — tool name "message" for context.
 	// Routed through the request's connector so each connector scans against
 	// its own rule pack (empty ⇒ process-global default set).
-	var ruleFindings []RuleFinding
-	if req.contentScope != ruleContentScopeAll {
-		ruleFindings = scanContentRulesForConnectorFor(
-			ctx,
-			req.Connector,
-			content,
-			"message",
-			req.contentScope,
-		)
-	} else {
-		ruleFindings = scanAllRulesForConnectorFor(ctx, req.Connector, content, "message")
-	}
 	// Prompts and tool results can contain invisible separators or letters
 	// that resemble Latin script. Keep this extra view confined to trust rules.
+	folded := ""
 	if cfg := a.decisionConfig(ctx); cfg == nil || !cfg.SecureClientIntegration() {
-		if folded := trustPatternText(content); folded != content {
-			generation := snapshotRulePackGenerationFor(ctx, req.Connector)
-			seen := make(map[string]bool, len(ruleFindings))
-			for _, finding := range ruleFindings {
-				seen[finding.RuleID] = true
-			}
-			for _, finding := range scanRuleGeneration(generation, folded, "message", ruleScanOptions{
-				contentScope: req.contentScope, onlyCategory: "trust-exploit",
-			}) {
-				if !seen[finding.RuleID] {
-					ruleFindings = append(ruleFindings, finding)
-					seen[finding.RuleID] = true
-				}
-			}
+		if view := trustPatternText(content); view != content {
+			folded = view
 		}
 	}
+	ruleFindings := messageRuleFindings(snapshotRulePackGenerationFor(ctx, req.Connector), content, folded, req.contentScope, !ManagedEnterpriseActive())
 
 	var verdict *ToolInspectVerdict
 	if len(ruleFindings) == 0 {
@@ -1270,11 +1264,9 @@ func (a *APIServer) inspectMessageContent(ctx context.Context, req *ToolInspectR
 
 		action := guardrailActionAllow
 		if enforceable := enforceableRuleFindings(ruleFindings); len(enforceable) > 0 {
-			action = guardrailContentAction(
-				a.decisionConfig(ctx),
-				req.Connector,
-				HighestSeverity(enforceable),
-				strings.EqualFold(req.Direction, "outbound"),
+			action = profileMeetActionForFindings(
+				ctx, a.decisionConfig(ctx), req.Connector, enforceable,
+				strings.EqualFold(req.Direction, "outbound"), true,
 			)
 		}
 
@@ -1441,6 +1433,92 @@ func (a *APIServer) connectorRulePack(ctx context.Context, connector string) *gu
 // failure/timeout is logged LOUDLY to stderr; the lane never silently
 // substitutes a clean pass.
 func (a *APIServer) runHookJudge(ctx context.Context, strategyDirection, judgeDirection, connector, content, toolName string, current *ToolInspectVerdict) *ScanVerdict {
+	if resolved := resolvedGuardrailProfileFrom(ctx); resolved != nil && resolved.set != nil {
+		if meet := resolved.evaluationMeet(); meet != nil {
+			// The hook client has one round-trip budget even when several
+			// profiles judge. Start every member under that same deadline so
+			// a slow observer cannot spend an action member's entire budget.
+			timeout := defaultHookJudgeTimeout
+			if cfg := a.decisionConfig(ctx); cfg != nil && cfg.Guardrail.Judge.HookTimeout > 0 {
+				timeout = time.Duration(cfg.Guardrail.Judge.HookTimeout * float64(time.Second))
+			}
+			judgeCtx, cancel := context.WithTimeout(ctx, timeout)
+			defer cancel()
+			results := make([]*ScanVerdict, len(meet.members))
+			var judges sync.WaitGroup
+			for i, member := range meet.members {
+				judges.Add(1)
+				go func() {
+					defer judges.Done()
+					memberCtx := meetMemberContext(judgeCtx, resolved, member)
+					memberCurrent := meetMemberJudgeCurrent(memberCtx, connector, current, member)
+					results[i] = a.runHookJudgeSingle(memberCtx, strategyDirection, judgeDirection, connector, content, toolName, memberCurrent)
+				}()
+			}
+			judges.Wait()
+			var combined *ScanVerdict
+			for i, member := range meet.members {
+				verdict := results[i]
+				if verdict == nil {
+					continue
+				}
+				if !configBlocksOn(resolved.set.profileConfig(member), connector, requestProfilePath(ctx)) &&
+					(verdict.Action == guardrailActionBlock || verdict.Action == guardrailActionConfirm) {
+					verdict.Action = guardrailActionAlert
+				}
+				if combined == nil {
+					combined = &ScanVerdict{Action: guardrailActionAllow, Severity: "NONE"}
+				}
+				if strongerGuardrailAction(combined.Action, verdict.Action) != combined.Action {
+					combined.Action, combined.Reason = verdict.Action, verdict.Reason
+				}
+				if guardrailSeverityRank(verdict.Severity) > guardrailSeverityRank(combined.Severity) {
+					combined.Severity = verdict.Severity
+				}
+				if combined.Scanner == "" {
+					combined.Scanner = verdict.Scanner
+				}
+				if verdict.Confidence > combined.Confidence {
+					combined.Confidence = verdict.Confidence
+				}
+				combined.Findings = append(combined.Findings, verdict.Findings...)
+				for _, finding := range verdict.Findings {
+					combined.findingProfiles = append(combined.findingProfiles, member)
+					severity := verdict.Severity
+					if own := verdict.findingSeverity[finding]; own != "" {
+						severity = own
+					}
+					combined.findingSeverities = append(combined.findingSeverities, severity)
+				}
+				combined.ScannerSources = appendUniqueStrings(combined.ScannerSources, verdict.ScannerSources...)
+			}
+			return combined
+		}
+	}
+	return a.runHookJudgeSingle(ctx, strategyDirection, judgeDirection, connector, content, toolName, current)
+}
+
+func meetMemberJudgeCurrent(ctx context.Context, connector string, current *ToolInspectVerdict, member string) *ToolInspectVerdict {
+	if current == nil || len(current.DetailedFindings) == 0 {
+		return current
+	}
+	var own []RuleFinding
+	for _, finding := range current.DetailedFindings {
+		if finding.profile == "" || finding.profile == member {
+			own = append(own, finding)
+		}
+	}
+	if len(own) == 0 {
+		return nil
+	}
+	memberConfig := resolvedGuardrailProfileFrom(ctx).derived
+	return &ToolInspectVerdict{
+		Action:   profileMeetActionForFindings(ctx, memberConfig, connector, own, true, true),
+		Severity: HighestSeverity(own),
+	}
+}
+
+func (a *APIServer) runHookJudgeSingle(ctx context.Context, strategyDirection, judgeDirection, connector, content, toolName string, current *ToolInspectVerdict) *ScanVerdict {
 	judge := a.judgeFor(ctx)
 	if judge == nil || content == "" {
 		return nil
@@ -1484,6 +1562,8 @@ func (a *APIServer) runHookJudge(ctx context.Context, strategyDirection, judgeDi
 	// tool lanes pass a deadline-free context.Background() so they are
 	// never gated out here (J3-3c).
 	if dl, ok := ctx.Deadline(); ok && time.Until(dl) < time.Second {
+		fmt.Fprintf(os.Stderr, "[inspect] hook judge skipped (deadline too short) connector=%s direction=%s; keeping regex/AID verdict\n",
+			connector, strategyDirection)
 		return nil
 	}
 
@@ -1545,6 +1625,9 @@ func (a *APIServer) runHookJudge(ctx context.Context, strategyDirection, judgeDi
 func (a *APIServer) handleInspectTool(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if a.refuseProfileInspect(w, r, "/api/v1/inspect/tool", "inspect-tool-block", "tool") {
 		return
 	}
 
@@ -1625,6 +1708,9 @@ func (a *APIServer) handleInspectTool(w http.ResponseWriter, r *http.Request) {
 
 	verdict.applyMode(inspectMode(a.decisionConfig(r.Context()), serverConnector))
 	a.resolveOpenClawInspectConfirm(r.Context(), &req, verdict)
+	// The strict tier refuses a call while an install or upgrade holds this
+	// account's data directory, as on the hook route (GAP-1438).
+	a.strictInstallWindowInspect(r.Context(), serverConnector, &req, verdict)
 
 	// Count the check against the authenticated connector so /health (and the
 	// TUI's "0 requests ... verify your agent is dialing the gateway port"
@@ -1744,26 +1830,30 @@ func (a *APIServer) handleInspectTool(w http.ResponseWriter, r *http.Request) {
 	// user PII. Callers who need raw evidence for triage set
 	// X-DefenseClaw-Reveal-PII: 1; we record that fact in the
 	// canonical compliance history so every reveal is discoverable.
-	reveal := wantsReveal(r)
-	responseVerdict := verdict.sanitizeForResponse(reveal)
-	if reveal {
-		// Audit the reveal BEFORE exposing the raw response. The reveal
-		// occurrence is deliberately content-free: the preceding canonical
-		// guardrail/finding records already contain the source evidence and
-		// receive the destination's configured redaction projection. Copying
-		// that evidence into this mandatory compliance record would add no
-		// forensic value and could expose it through the mandatory floor.
-		_ = a.logger.LogActionCtx(r.Context(), string(audit.ActionInspectReveal), req.Tool,
-			fmt.Sprintf("severity=%s remote=%s reason_present=%t finding_count=%d",
-				verdict.Severity, r.RemoteAddr, strings.TrimSpace(verdict.Reason) != "",
-				len(verdict.DetailedFindings)))
-	}
 	// The worker only classifies the managed AID fail-open reason. Account for
 	// it after this handler has selected the allow result; the 504
 	// path returns above and deliberately records nothing because installed
 	// hooks fail closed on an unreachable gateway.
 	a.recordManagedAIDFailOpenForSelectedGenericResult(r.Context(), verdict)
-	a.writeJSON(w, http.StatusOK, responseVerdict)
+	a.writeInspectVerdict(w, r, "/api/v1/inspect/tool", req.Tool, verdict)
+}
+
+// writeInspectVerdict is the only response boundary for direct inspect routes
+// that can reveal matched evidence. The content-free reveal record must be
+// saved first; a failed audit write cannot authorize a raw response.
+func (a *APIServer) writeInspectVerdict(w http.ResponseWriter, r *http.Request, route, target string, verdict *ToolInspectVerdict) {
+	reveal := wantsReveal(r)
+	if reveal {
+		details := fmt.Sprintf("severity=%s remote=%s reason_present=%t finding_count=%d",
+			verdict.Severity, r.RemoteAddr, strings.TrimSpace(verdict.Reason) != "",
+			len(verdict.DetailedFindings))
+		event := a.inspectAuditEvent(r, route, string(audit.ActionInspectReveal), target, details)
+		if err := a.logger.LogEventCtx(r.Context(), event); err != nil {
+			a.writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "reveal audit unavailable"})
+			return
+		}
+	}
+	a.writeJSON(w, http.StatusOK, verdict.sanitizeForResponse(reveal))
 }
 
 // inspectToolAuditEvent is the inspect-tool-* audit row.
@@ -1913,4 +2003,52 @@ func (a *APIServer) emitCodeGuardTelemetry(
 			ctx, connectorName, verdict.Severity, "codeguard-finding", "codeguard",
 		)
 	}
+}
+
+// messageRuleFindings is the rule scan of an inspected message with
+// generation: every rule on content (scanRaw; scope as for
+// scanContentRuleCategoryWithGeneration), then the trust rules on folded
+// ("" for none), the same content with invisible separators and look-alike
+// letters folded, for a rule the first pass did not find. A strictest
+// combination of profiles runs it with each member's own rules and keeps
+// every member's finding, so even distinct definitions of one rule ID keep
+// their separate audit provenance.
+func messageRuleFindings(generation *compiledRulePackCategories, content, folded string, scope ruleContentScope, scanRaw bool) []RuleFinding {
+	if generation != nil && len(generation.members) > 0 {
+		var out []RuleFinding
+		for i, member := range generation.members {
+			findings := messageRuleFindings(member, content, folded, scope, scanRaw)
+			if i < len(generation.memberNames) {
+				for j := range findings {
+					findings[j].profile = generation.memberNames[i]
+				}
+			}
+			out = append(out, findings...)
+		}
+		return out
+	}
+	var findings []RuleFinding
+	if scanRaw {
+		if scope != ruleContentScopeAll {
+			findings = scanContentRuleCategoryWithGeneration(generation, content, "message", scope, "")
+		} else {
+			findings = scanRuleGeneration(generation, content, "message", ruleScanOptions{})
+		}
+	}
+	if folded == "" {
+		return findings
+	}
+	seen := make(map[string]bool, len(findings))
+	for _, finding := range findings {
+		seen[finding.RuleID] = true
+	}
+	for _, finding := range scanRuleGeneration(generation, folded, "message", ruleScanOptions{
+		contentScope: scope, onlyCategory: "trust-exploit",
+	}) {
+		if !seen[finding.RuleID] {
+			findings = append(findings, finding)
+			seen[finding.RuleID] = true
+		}
+	}
+	return findings
 }

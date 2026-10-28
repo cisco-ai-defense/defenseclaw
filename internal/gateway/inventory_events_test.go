@@ -134,138 +134,6 @@ func withUserEmailCollection(t *testing.T, on bool) {
 	t.Cleanup(func() { SetUserEmailCollectionEnabled(previous) })
 }
 
-func TestEmitEndpointInventoryManagedUsesCanonicalV8Snapshots(t *testing.T) {
-	withManagedEnterprise(t, true)
-	capture := &endpointInventoryCapture{}
-	cfg := &config.Config{Claw: config.ClawConfig{Mode: config.ClawMode("omnigent")}}
-	registry := connector.NewDefaultRegistry()
-
-	if err := EmitEndpointInventory(t.Context(), cfg, registry, capture); err != nil {
-		t.Fatal(err)
-	}
-	records := capture.snapshot()
-	connectorComponentsForHost, _ := endpointConnectorComponents(registry)
-	connectorCount := len(connectorComponentsForHost)
-
-	summaries := map[string]map[string]any{}
-	summaryActions := map[string]string{}
-	connectorComponents := 0
-	mcpComponents := 0
-	for _, record := range records {
-		body, ok := record.Body()
-		if !ok {
-			t.Fatalf("record %s has no canonical body", record.EventName())
-		}
-		bodyMap, err := body.Object()
-		if err != nil {
-			t.Fatalf("record %s body: %v", record.EventName(), err)
-		}
-		switch record.EventName() {
-		case "ai.discovery.completed":
-			source, _ := bodyMap[observability.TelemetryAttributeDefenseClawAIDiscoverySource].(string)
-			summaries[source] = bodyMap
-			summaryActions[source] = record.Action()
-		case "ai_component.observed":
-			componentType, _ := bodyMap[observability.TelemetryAttributeDefenseClawAIComponentType].(string)
-			source, _ := bodyMap[observability.TelemetryAttributeDefenseClawAIDiscoverySource].(string)
-			switch {
-			case componentType == "supported_connector" && source == endpointConnectorInventorySource:
-				connectorComponents++
-				for _, field := range []string{
-					observability.TelemetryAttributeDefenseClawInventoryItemName,
-					observability.TelemetryAttributeDefenseClawInventoryItemDescription,
-					observability.TelemetryAttributeDefenseClawInventoryConnectorSource,
-					observability.TelemetryAttributeDefenseClawInventoryConnectorToolInspectionMode,
-					observability.TelemetryAttributeDefenseClawInventoryConnectorSubprocessPolicy,
-				} {
-					if value, ok := bodyMap[field].(string); !ok || value == "" {
-						t.Fatalf("connector inventory field %s=%T(%v)", field, bodyMap[field], bodyMap[field])
-					}
-				}
-			case componentType == "mcp_server":
-				// Per-connector MCP fanout ships one ai_component.observed per
-				// (home, connector, server) triple under the endpoint per-
-				// connector source. These are optional (empty registries or
-				// zero-HOME test fixtures skip them) but we allow them here
-				// so the test isn't tied to per-connector filesystem fixtures.
-				mcpComponents++
-			default:
-				t.Fatalf("unexpected component type=%q source=%q", componentType, source)
-			}
-		default:
-			t.Fatalf("legacy or unexpected event family %q", record.EventName())
-		}
-		encoded, err := json.Marshal(bodyMap)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if strings.Contains(string(encoded), "device_id") || strings.Contains(string(encoded), "hostname") {
-			t.Fatalf("endpoint resource anchor duplicated into body: %s", encoded)
-		}
-	}
-	if connectorComponents != connectorCount {
-		t.Fatalf("connector components=%d want=%d", connectorComponents, connectorCount)
-	}
-	// Baseline shape: connector components + connector summary + aggregate
-	// MCP summary. Optional additions: per-connector MCP fanout summary +
-	// N per-item mcp_server components when any configured home has native
-	// MCP config on disk.
-	baseline := connectorCount + 2
-	if len(records) != baseline && len(records) != baseline+1+mcpComponents {
-		t.Fatalf(
-			"canonical records=%d want %d (baseline) or %d (with per-connector MCP fanout)",
-			len(records), baseline, baseline+1+mcpComponents,
-		)
-	}
-	connectorSummary := summaries[endpointConnectorInventorySource]
-	if connectorSummary == nil || canonicalInt64(t, connectorSummary[observability.TelemetryAttributeDefenseClawAIDiscoverySignalsTotal]) != int64(connectorCount) {
-		t.Fatalf("connector summary=%#v", connectorSummary)
-	}
-	if got := summaryActions[endpointConnectorInventorySource]; got != string(config.ObservabilityV8ManagedConnectorInventoryAction) {
-		t.Fatalf("connector summary action=%q", got)
-	}
-	connectorIdentifiers := canonicalObjectArray(
-		t, connectorSummary[observability.TelemetryAttributeDefenseClawInventoryConnectorIdentifiers],
-	)
-	connectorMetadata := canonicalObjectArray(
-		t, connectorSummary[observability.TelemetryAttributeDefenseClawInventoryConnectorMetadata],
-	)
-	connectorContent := canonicalObjectArray(
-		t, connectorSummary[observability.TelemetryAttributeDefenseClawInventoryConnectorContent],
-	)
-	if len(connectorIdentifiers) != connectorCount || len(connectorMetadata) != connectorCount ||
-		len(connectorContent) != connectorCount {
-		t.Fatalf(
-			"connector carrier lengths identifiers/metadata/content=%d/%d/%d want=%d",
-			len(connectorIdentifiers), len(connectorMetadata), len(connectorContent), connectorCount,
-		)
-	}
-	for index := 1; index < len(connectorIdentifiers); index++ {
-		previous, _ := connectorIdentifiers[index-1]["name"].(string)
-		current, _ := connectorIdentifiers[index]["name"].(string)
-		if previous > current {
-			t.Fatalf("connector carrier order[%d]=%q > %q", index, previous, current)
-		}
-	}
-	mcpSummary := summaries[endpointMCPInventorySource]
-	if mcpSummary == nil || canonicalInt64(t, mcpSummary[observability.TelemetryAttributeDefenseClawAIDiscoverySignalsTotal]) != 0 {
-		t.Fatalf("empty MCP collection was not represented: %#v", mcpSummary)
-	}
-	if got := summaryActions[endpointMCPInventorySource]; got != string(config.ObservabilityV8ManagedMCPInventoryAction) {
-		t.Fatalf("MCP summary action=%q", got)
-	}
-	if identifiers := canonicalObjectArray(
-		t, mcpSummary[observability.TelemetryAttributeDefenseClawInventoryMcpIdentifiers],
-	); len(identifiers) != 0 {
-		t.Fatalf("empty MCP identifiers=%#v", identifiers)
-	}
-	if metadata := canonicalObjectArray(
-		t, mcpSummary[observability.TelemetryAttributeDefenseClawInventoryMcpMetadata],
-	); len(metadata) != 0 {
-		t.Fatalf("empty MCP metadata=%#v", metadata)
-	}
-}
-
 func TestEmitManagedAgentInventoryUsesCompleteCanonicalSafeSnapshot(t *testing.T) {
 	withManagedEnterprise(t, true)
 	capture := &endpointInventoryCapture{}
@@ -1320,7 +1188,6 @@ func TestEndpointConnectorComponentsWindowsExactNativeRoster(t *testing.T) {
 		"devin",
 		"hermes",
 		"kiro",
-		"omnigent",
 		"opencode",
 	}
 	if !reflect.DeepEqual(got, want) {
@@ -1544,7 +1411,6 @@ func TestPerConnectorMCPEntriesWindowsExcludesUnsupportedAndDeprecated(t *testin
 		Guardrail: config.GuardrailConfig{Connectors: map[string]config.PerConnectorGuardrailConfig{
 			"copilot":   {},
 			"openclaw":  {},
-			"openhands": {},
 			"zeptoclaw": {},
 		}},
 	}
@@ -1647,5 +1513,141 @@ func TestInventoryHomeOwnerRefusesEmailWithoutAnOwner(t *testing.T) {
 	missing := filepath.Join(t.TempDir(), "no-such-profile")
 	if got := inventoryHomeOwner("claudecode", missing); !reflect.DeepEqual(got, llmEventUser{}) {
 		t.Fatalf("unresolvable profile produced %+v, want an empty owner", got)
+	}
+}
+
+func TestEmitEndpointInventoryManagedUsesCanonicalV8Snapshots(t *testing.T) {
+	withManagedEnterprise(t, true)
+	// An isolated home keeps the MCP collection empty.
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("CODEX_HOME", filepath.Join(home, ".codex"))
+	capture := &endpointInventoryCapture{}
+	cfg := &config.Config{Claw: config.ClawConfig{Mode: config.ClawMode("codex")}}
+	registry := connector.NewDefaultRegistry()
+
+	if err := EmitEndpointInventory(t.Context(), cfg, registry, capture); err != nil {
+		t.Fatal(err)
+	}
+	records := capture.snapshot()
+	connectorComponentsForHost, _ := endpointConnectorComponents(registry)
+	connectorCount := len(connectorComponentsForHost)
+
+	summaries := map[string]map[string]any{}
+	summaryActions := map[string]string{}
+	connectorComponents := 0
+	mcpComponents := 0
+	for _, record := range records {
+		body, ok := record.Body()
+		if !ok {
+			t.Fatalf("record %s has no canonical body", record.EventName())
+		}
+		bodyMap, err := body.Object()
+		if err != nil {
+			t.Fatalf("record %s body: %v", record.EventName(), err)
+		}
+		switch record.EventName() {
+		case "ai.discovery.completed":
+			source, _ := bodyMap[observability.TelemetryAttributeDefenseClawAIDiscoverySource].(string)
+			summaries[source] = bodyMap
+			summaryActions[source] = record.Action()
+		case "ai_component.observed":
+			componentType, _ := bodyMap[observability.TelemetryAttributeDefenseClawAIComponentType].(string)
+			source, _ := bodyMap[observability.TelemetryAttributeDefenseClawAIDiscoverySource].(string)
+			switch {
+			case componentType == "supported_connector" && source == endpointConnectorInventorySource:
+				connectorComponents++
+				for _, field := range []string{
+					observability.TelemetryAttributeDefenseClawInventoryItemName,
+					observability.TelemetryAttributeDefenseClawInventoryItemDescription,
+					observability.TelemetryAttributeDefenseClawInventoryConnectorSource,
+					observability.TelemetryAttributeDefenseClawInventoryConnectorToolInspectionMode,
+					observability.TelemetryAttributeDefenseClawInventoryConnectorSubprocessPolicy,
+				} {
+					if value, ok := bodyMap[field].(string); !ok || value == "" {
+						t.Fatalf("connector inventory field %s=%T(%v)", field, bodyMap[field], bodyMap[field])
+					}
+				}
+			case componentType == "mcp_server":
+				// Per-connector MCP fanout ships one ai_component.observed per
+				// (home, connector, server) triple under the endpoint per-
+				// connector source. These are optional (empty registries or
+				// zero-HOME test fixtures skip them) but we allow them here
+				// so the test isn't tied to per-connector filesystem fixtures.
+				mcpComponents++
+			default:
+				t.Fatalf("unexpected component type=%q source=%q", componentType, source)
+			}
+		default:
+			t.Fatalf("legacy or unexpected event family %q", record.EventName())
+		}
+		encoded, err := json.Marshal(bodyMap)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(string(encoded), "device_id") || strings.Contains(string(encoded), "hostname") {
+			t.Fatalf("endpoint resource anchor duplicated into body: %s", encoded)
+		}
+	}
+	if connectorComponents != connectorCount {
+		t.Fatalf("connector components=%d want=%d", connectorComponents, connectorCount)
+	}
+	// Baseline shape: connector components + connector summary + aggregate
+	// MCP summary. Optional additions: per-connector MCP fanout summary +
+	// N per-item mcp_server components when any configured home has native
+	// MCP config on disk.
+	baseline := connectorCount + 2
+	if len(records) != baseline && len(records) != baseline+1+mcpComponents {
+		t.Fatalf(
+			"canonical records=%d want %d (baseline) or %d (with per-connector MCP fanout)",
+			len(records), baseline, baseline+1+mcpComponents,
+		)
+	}
+	connectorSummary := summaries[endpointConnectorInventorySource]
+	if connectorSummary == nil || canonicalInt64(t, connectorSummary[observability.TelemetryAttributeDefenseClawAIDiscoverySignalsTotal]) != int64(connectorCount) {
+		t.Fatalf("connector summary=%#v", connectorSummary)
+	}
+	if got := summaryActions[endpointConnectorInventorySource]; got != string(config.ObservabilityV8ManagedConnectorInventoryAction) {
+		t.Fatalf("connector summary action=%q", got)
+	}
+	connectorIdentifiers := canonicalObjectArray(
+		t, connectorSummary[observability.TelemetryAttributeDefenseClawInventoryConnectorIdentifiers],
+	)
+	connectorMetadata := canonicalObjectArray(
+		t, connectorSummary[observability.TelemetryAttributeDefenseClawInventoryConnectorMetadata],
+	)
+	connectorContent := canonicalObjectArray(
+		t, connectorSummary[observability.TelemetryAttributeDefenseClawInventoryConnectorContent],
+	)
+	if len(connectorIdentifiers) != connectorCount || len(connectorMetadata) != connectorCount ||
+		len(connectorContent) != connectorCount {
+		t.Fatalf(
+			"connector carrier lengths identifiers/metadata/content=%d/%d/%d want=%d",
+			len(connectorIdentifiers), len(connectorMetadata), len(connectorContent), connectorCount,
+		)
+	}
+	for index := 1; index < len(connectorIdentifiers); index++ {
+		previous, _ := connectorIdentifiers[index-1]["name"].(string)
+		current, _ := connectorIdentifiers[index]["name"].(string)
+		if previous > current {
+			t.Fatalf("connector carrier order[%d]=%q > %q", index, previous, current)
+		}
+	}
+	mcpSummary := summaries[endpointMCPInventorySource]
+	if mcpSummary == nil || canonicalInt64(t, mcpSummary[observability.TelemetryAttributeDefenseClawAIDiscoverySignalsTotal]) != 0 {
+		t.Fatalf("empty MCP collection was not represented: %#v", mcpSummary)
+	}
+	if got := summaryActions[endpointMCPInventorySource]; got != string(config.ObservabilityV8ManagedMCPInventoryAction) {
+		t.Fatalf("MCP summary action=%q", got)
+	}
+	if identifiers := canonicalObjectArray(
+		t, mcpSummary[observability.TelemetryAttributeDefenseClawInventoryMcpIdentifiers],
+	); len(identifiers) != 0 {
+		t.Fatalf("empty MCP identifiers=%#v", identifiers)
+	}
+	if metadata := canonicalObjectArray(
+		t, mcpSummary[observability.TelemetryAttributeDefenseClawInventoryMcpMetadata],
+	); len(metadata) != 0 {
+		t.Fatalf("empty MCP metadata=%#v", metadata)
 	}
 }

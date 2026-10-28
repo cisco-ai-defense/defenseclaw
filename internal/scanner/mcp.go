@@ -27,6 +27,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -445,21 +446,62 @@ func (s *MCPScanner) workDirNote() string {
 	return "the server was not started in its folder " + s.workDirRefused + "; it ran in the scanner folder instead: "
 }
 
+// ErrMCPScanRefused marks an MCP scan refused for the server's own
+// definition: a URL on a local, private or metadata address, a path the
+// scanner does not read, a server that must start as its user, or a local
+// launcher other than npx and uvx. It is a verdict about the definition, not
+// a scan that could not finish, so unverified_server warn does not keep such
+// a server.
+var ErrMCPScanRefused = errors.New("the MCP scanner refused the server definition")
+
+// mcpScanRefusal keeps the refusal's own message and wraps ErrMCPScanRefused.
+type mcpScanRefusal struct{ error }
+
+func (r mcpScanRefusal) Unwrap() []error { return []error{r.error, ErrMCPScanRefused} }
+
+// mcpScanRefusalWords are how the scanner's children word a server they
+// refuse to start or dial: the Python scanner (defenseclaw/scanner/mcp.py:
+// "refusing to scan local MCP server", "refusing to scan MCP URL") and the
+// managed as-user launch (enterprisehooks: "MCP server %q is not started in
+// <folder>", "... is not started: <launcher>"). Output that contains one can
+// only make a failed scan a refusal, which blocks as before.
+var mcpScanRefusalWords = []string{"refusing to scan ", " is not started in ", " is not started: "}
+
+// refusedMCPScan wraps err as a refusal, or when one of output carries a
+// child's refusal.
+func refusedMCPScan(err error, output ...string) error {
+	if len(output) == 0 || slices.ContainsFunc(output, mentionsMCPScanRefusal) {
+		return mcpScanRefusal{err}
+	}
+	return err
+}
+
+func mentionsMCPScanRefusal(text string) bool {
+	return slices.ContainsFunc(mcpScanRefusalWords, func(words string) bool { return strings.Contains(text, words) })
+}
+
+// MCPScanRefused reports a failed MCP scan that refused the server's
+// definition (ErrMCPScanRefused, or a child's refusal in the error text)
+// rather than one that could not finish.
+func MCPScanRefused(err error) bool {
+	return err != nil && (errors.Is(err, ErrMCPScanRefused) || mentionsMCPScanRefusal(err.Error()))
+}
+
 // runMCPScannerCommand owns the runtime process and its Python descendants.
-var runMCPScannerCommand = processutil.RunTree
+var runMCPScannerCommand = processutil.RunTreeIsolated
 
 func (s *MCPScanner) Scan(ctx context.Context, target string) (*ScanResult, error) {
 	// URLs and server names are scanner inputs, not filesystem paths. The
 	// project directory is a separate path handed to the scanner child.
 	if s.Project != "" {
 		if err := requireScannerTargetPath(s.Project); err != nil {
-			return nil, err
+			return nil, refusedMCPScan(err)
 		}
 	}
 	if s.asUser() && !usesScannerRuntime(s.Config.Binary) {
 		// Only the managed Windows scanner runtime can start a server as
 		// its user; nothing else may start it with the gateway's rights.
-		return nil, fmt.Errorf("scanner: MCP server %q of an enrolled user starts only as that user, through the managed Windows scanner runtime", s.ServerEntry.Name)
+		return nil, refusedMCPScan(fmt.Errorf("scanner: MCP server %q of an enrolled user starts only as that user, through the managed Windows scanner runtime", s.ServerEntry.Name))
 	}
 	if entry := s.ServerEntry; entry != nil && entry.RunAsSID == "" {
 		// The gateway neither reads nor starts anything at the paths of an
@@ -469,7 +511,7 @@ func (s *MCPScanner) Scan(ctx context.Context, target string) (*ScanResult, erro
 		for _, path := range []string{entry.Home, entry.Project, entry.Source, entry.Command} {
 			if filepath.IsAbs(path) {
 				if err := requireScannerTargetPath(path); err != nil {
-					return nil, err
+					return nil, refusedMCPScan(err)
 				}
 			}
 		}
@@ -485,14 +527,14 @@ func (s *MCPScanner) Scan(ctx context.Context, target string) (*ScanResult, erro
 		}
 		if cwd != "" {
 			if err := requireScannerTargetPath(cwd); err != nil {
-				return nil, err
+				return nil, refusedMCPScan(err)
 			}
 		}
 	}
 	if !mcpScanTargetLooksLikeURL(target) &&
 		(filepath.IsAbs(target) || strings.ContainsAny(target, `/\`) || strings.HasSuffix(strings.ToLower(target), ".json")) {
 		if err := requireScannerTargetPath(target); err != nil {
-			return nil, err
+			return nil, refusedMCPScan(err)
 		}
 	}
 	start := time.Now()
@@ -520,7 +562,7 @@ func (s *MCPScanner) Scan(ctx context.Context, target string) (*ScanResult, erro
 				ScanError:  err.Error(),
 				ExitCode:   -1,
 			}
-			scanErr = err
+			scanErr = refusedMCPScan(err)
 			return result, scanErr
 		}
 	}
@@ -556,7 +598,7 @@ func (s *MCPScanner) Scan(ctx context.Context, target string) (*ScanResult, erro
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 
-	err := runMCPScannerCommand(cmd)
+	err := runMCPScannerCommand(ctx, cmd)
 	duration := time.Since(start)
 	stderrStr := stderr.String()
 
@@ -577,8 +619,13 @@ func (s *MCPScanner) Scan(ctx context.Context, target string) (*ScanResult, erro
 			scanErr = scannerNotFound(s.Name(), s.Config.Binary, "MCP scanning requires a Python 3.11+ runtime with cisco-ai-mcp-scanner; on 3.11+ repair the managed installation, or run uv sync in a source checkout")
 			return nil, scanErr
 		}
+		if !errors.As(err, &exitErr) {
+			result.ExitCode = -1
+			result.ScanError = err.Error()
+			return result, fmt.Errorf("scanner: %s could not complete: %w", s.Name(), err)
+		}
 		if stdout.Len() == 0 {
-			scanErr = fmt.Errorf("scanner: %s exited %d: %s%s", s.Name(), exitCode, s.workDirNote(), scannerFailureText(stderrStr))
+			scanErr = refusedMCPScan(fmt.Errorf("scanner: %s exited %d: %s%s", s.Name(), exitCode, s.workDirNote(), scannerFailureText(stderrStr)), stderrStr)
 			return nil, scanErr
 		}
 	}
@@ -607,7 +654,7 @@ func (s *MCPScanner) Scan(ctx context.Context, target string) (*ScanResult, erro
 	// watcher and REST scan handlers. See finding "Non-zero MCP
 	// scanner exits can be treated as successful scans".
 	if exitCode != 0 {
-		scanErr = fmt.Errorf("scanner %s exited %d (%sstderr=%s)", s.Name(), exitCode, s.workDirNote(), scannerFailureText(stderrStr))
+		scanErr = refusedMCPScan(fmt.Errorf("scanner %s exited %d (%sstderr=%s)", s.Name(), exitCode, s.workDirNote(), scannerFailureText(stderrStr)), stderrStr, stdout.String())
 		return result, scanErr
 	}
 

@@ -122,6 +122,10 @@ type windowsEnterpriseInstallerReport struct {
 	// could not remove ("user (SID) [connectors]: item", or a machine item).
 	// Decoded leniently, like the registration lists.
 	RollbackLeftovers json.RawMessage `json:"rollback_leftovers"`
+	// A linked or unreadable user agent file cannot be captured for rollback.
+	// Setup still proceeds with the machine transaction and reports each skip.
+	UserNativeOTLPCaptureSkipped json.RawMessage `json:"user_native_otlp_capture_skipped"`
+
 	// StaleLifecycleJournalRemoved is set when the lifecycle removed a
 	// stale committed managed-hook lifecycle journal itself (GAP-1322); it
 	// holds the retire failure that made the journal stale.
@@ -163,6 +167,16 @@ type windowsEnterpriseInstallerReport struct {
 	// LifecycleCollectError why that collect could not run (GAP-0211).
 	LifecycleGenerationsCollected int    `json:"lifecycle_generations_collected"`
 	LifecycleCollectError         string `json:"lifecycle_collect_error"`
+	// A self-uninstall (the installed CLI removing its own deployment)
+	// leaves cleanup to a detached finalizer that runs once the CLI exits:
+	// SelfUninstallCleanupPending says so, CanonicalInstallRootAbsent (nil
+	// when not reported) whether InstallRoot is already renamed aside to
+	// RetiredInstallRoot, and InstallRootRetirementDeferred names the program
+	// that still held InstallRoot when the rename was deferred.
+	SelfUninstallCleanupPending   bool   `json:"self_uninstall_cleanup_pending"`
+	CanonicalInstallRootAbsent    *bool  `json:"canonical_install_root_absent"`
+	InstallRootRetirementDeferred string `json:"install_root_retirement_deferred"`
+	RetiredInstallRoot            string `json:"retired_install_root"`
 
 	// probeFailed marks a failure document that reports no deployment
 	// state at all (no installed field and no pending transaction): the
@@ -193,6 +207,11 @@ var (
 // windowsEnterpriseLifecycleBusyMarker is the installer's lock-contention
 // diagnostic (Enter-DefenseClawLifecycleLock).
 const windowsEnterpriseLifecycleBusyMarker = "holds the protected file lock"
+
+// windowsEnterpriseUnreadableMetadataMarker opens the module's refusal of a
+// deployment.json that is not JSON (ConvertFrom-DefenseClawDeploymentMetadataText),
+// which Repair rebuilds.
+const windowsEnterpriseUnreadableMetadataMarker = "could not read the installed deployment metadata"
 
 // windowsEnterpriseRemoveReplacementCopies removes the unused replacement
 // copies in the production bin folder; replaceable in tests.
@@ -241,14 +260,10 @@ func runWindowsEnterprisePowerShell7(
 	}
 	environment := func(temp string) ([]string, error) {
 		env, err := trustedWindowsEnterprisePowerShell7Environment(temp, engine)
-		if err == nil && windowsEnterpriseForcedUninstallRequested(ctx) {
-			env = append(env, windowsEnterpriseForcedUninstallVariable+"=1")
+		if err != nil {
+			return env, err
 		}
-		if err == nil && windowsEnterpriseCollectGenerationsRequested(ctx) &&
-			windowsEnterpriseInstallerAction(args) == "Verify" {
-			env = append(env, windowsEnterpriseCollectGenerationsVariable+"=1")
-		}
-		return env, err
+		return append(env, windowsEnterpriseInstallerRequestEnvironment(ctx, args)...), nil
 	}
 	stderr := &windowsEnterpriseOutputCapture{}
 	console := &windowsEnterprisePhaseFilter{writer: cmd.ErrOrStderr()}
@@ -370,7 +385,7 @@ func runWindowsEnterprisePowerShellChild(child *exec.Cmd) error {
 	if err != nil {
 		return fmt.Errorf("create Windows enterprise installer job: %w", err)
 	}
-	defer windows.CloseHandle(job) //nolint:errcheck -- closes the kill-on-close job.
+	defer windows.CloseHandle(job) //nolint:errcheck // closes the kill-on-close job.
 	child.Cancel = func() error {
 		_ = windows.TerminateJobObject(job, 1)
 		return child.Process.Kill()
@@ -454,6 +469,61 @@ func windowsEnterpriseCollectGenerationsRequested(ctx context.Context) bool {
 	return requested
 }
 
+// windowsEnterpriseInstallerRequestEnvironment is what a run asks the
+// standalone installer for in its environment: a forced uninstall and the
+// generation collect of a Verify.
+func windowsEnterpriseInstallerRequestEnvironment(ctx context.Context, args []string) []string {
+	var env []string
+	if windowsEnterpriseForcedUninstallRequested(ctx) {
+		env = append(env, windowsEnterpriseForcedUninstallVariable+"=1")
+	}
+	action := windowsEnterpriseInstallerAction(args)
+	if windowsEnterpriseCollectGenerationsRequested(ctx) && action == "Verify" {
+		env = append(env, windowsEnterpriseCollectGenerationsVariable+"=1")
+	}
+	return env
+}
+
+// refuseWindowsEnterpriseStandaloneDeferredState refuses the install,
+// upgrade and repair requests the installer refuses for the recorded
+// deployment before it changes anything (Assert-DefenseClawDeferredInstallIsFresh
+// and the deferred-configuration checks of Invoke-DefenseClawInstallLikeLifecycle),
+// so they come before the run's first change, the repair of the hook runtime
+// access included (q-win-lifecycle review, loop round 3): a deferred install over an installed deployment and, while the
+// deployment waits for its deferred configuration, an install or upgrade,
+// or a repair without both --config and --manifest or with --no-start. With
+// a record of an interrupted lifecycle of this run's scope
+// (windowsEnterpriseStandaloneRecoveryPending) the installer recovers it
+// first, which can change the record (a first install interrupted before
+// its pending transaction cleared rolls back to no deployment), so the
+// installer decides; so it does for a deployment record this cannot read.
+func refuseWindowsEnterpriseStandaloneDeferredState(action string, opts *windowsEnterpriseLifecycleOptions) error {
+	if opts == nil || (action != "install" && action != "upgrade" && action != "repair") {
+		return nil
+	}
+	deployment, err := windowsEnterpriseTargetDeployment(opts)
+	if err != nil || deployment.State != winpath.EnterpriseDeploymentInstalled || windowsEnterpriseStandaloneRecoveryPending(opts) {
+		return nil
+	}
+	if action == "install" && opts.deferredConfig {
+		return windowsEnterpriseInvalidArguments("deferred Install without Config and Manifest requires an empty deployment; " +
+			"use Repair or Ensure for the installed deployment (nothing was changed)")
+	}
+	if !deployment.DeferredConfigPending {
+		return nil
+	}
+	switch {
+	case action != "repair":
+		return windowsEnterpriseInvalidArguments("this deployment waits for its deferred configuration, which only a repair with "+
+			"--config and --manifest completes; the %s was refused (nothing was changed)", action)
+	case strings.TrimSpace(opts.configPath) == "" || strings.TrimSpace(opts.manifestPath) == "":
+		return windowsEnterpriseInvalidArguments("the repair that completes a deferred configuration needs both --config and --manifest (nothing was changed)")
+	case opts.noStart:
+		return windowsEnterpriseInvalidArguments("the repair that completes a deferred configuration starts the services and cannot use --no-start (nothing was changed)")
+	}
+	return nil
+}
+
 // windowsEnterpriseInstallerAction is the -Action value of installer args.
 func windowsEnterpriseInstallerAction(args []string) string {
 	for i := 0; i+1 < len(args); i++ {
@@ -511,6 +581,9 @@ func runWindowsEnterpriseStandaloneAction(
 	if action == "status" && windowsEnterpriseIsElevated() && windowsEnterpriseStandaloneInstalled() {
 		var err error
 		if unsettledBundles, err = settleWindowsBundleStatusReport(ctx); err != nil {
+			if failure := enterprisebundle.StateWriteError("settle the policy bundle receipt", err); failure.Code == enterprisebundle.CodeDiskFull {
+				return writeWindowsEnterpriseStandalonePreflightFailure(cmd, action, opts, fmt.Errorf("%s: %s", failure.Code, failure.Detail))
+			}
 			return writeWindowsEnterpriseStandalonePreflightFailure(cmd, action, opts, fmt.Errorf("settle policy bundle receipt: %w", err))
 		}
 	}
@@ -522,6 +595,15 @@ func runWindowsEnterpriseStandaloneAction(
 			return writeWindowsEnterpriseStandalonePreflightFailure(cmd, action, opts, err)
 		}
 	}
+	// The installer refuses these for the recorded deployment, or for an
+	// untrusted scanner runtime it cannot remove, before it changes
+	// anything: refused here, they come before this run's first change too.
+	if err := refuseWindowsEnterpriseStandaloneDeferredState(action, opts); err != nil {
+		return writeWindowsEnterpriseStandalonePreflightFailure(cmd, action, opts, err)
+	}
+	if err := refuseUntrustedWindowsScannerRuntimeBeforeChange(canonicalWindowsEnterpriseAction(action), opts); err != nil {
+		return writeWindowsEnterpriseStandalonePreflightFailure(cmd, action, opts, err)
+	}
 	if action == "uninstall" {
 		present, err := windowsEnterpriseStandaloneFootprint()
 		if err == nil && !present {
@@ -530,6 +612,19 @@ func runWindowsEnterpriseStandaloneAction(
 			result.NoopReason = "not_installed"
 			result.Inspection.Local = "disabled"
 			return finishWindowsEnterpriseStandalone(cmd, opts, result, 0)
+		}
+	}
+	// Repair without CONFIG= on a bundle-mode device keeps the confirmed
+	// bundle config, not an edit made outside the lifecycle (GAP-0114). The
+	// restore comes before anything else this run changes: when it fails,
+	// repair stops with bundle_restore_failed and has changed nothing.
+	var bundleRestore windowsBundleRestore
+	if windowsBundleRestoreRequested(action, opts) {
+		if bundleRestore = restoreWindowsBundleConfig(ctx, windowsBundleSettleReplacing(opts)); bundleRestore.failed() {
+			result := newWindowsEnterpriseStandaloneResult(action, opts)
+			bundleRestore.apply(result)
+			applyWindowsEnterpriseRecordedDeployment(result)
+			return finishWindowsEnterpriseStandalone(cmd, opts, result, windowsEnterpriseFailureCodeFor(result))
 		}
 	}
 	hookRuntimeRepaired := ""
@@ -548,17 +643,6 @@ func runWindowsEnterpriseStandaloneAction(
 		}
 		if kept != "" {
 			configReplaced = windowsEnterpriseUnparseableConfigChange(kept, action)
-		}
-	}
-	// Repair without CONFIG= on a bundle-mode device keeps the confirmed
-	// bundle config, not an edit made outside the lifecycle (GAP-0114).
-	var bundleRestore windowsBundleRestore
-	if windowsBundleRestoreRequested(action, opts) {
-		if bundleRestore = restoreWindowsBundleConfig(ctx, windowsBundleSettleReplacing(opts)); bundleRestore.failed() {
-			result := newWindowsEnterpriseStandaloneResult(action, opts)
-			bundleRestore.apply(result)
-			applyWindowsEnterpriseRecordedDeployment(result)
-			return finishWindowsEnterpriseStandalone(cmd, opts, result, windowsEnterpriseFailureCodeFor(result))
 		}
 	}
 	report, run, err := runWindowsEnterpriseStandaloneInstaller(ctx, cmd, opts, script, args)
@@ -671,12 +755,25 @@ var windowsEnterprisePolicyDigest = func(ctx context.Context) ([]byte, error) {
 // machine registration. An elevated lifecycle can inherit ProgramFiles from
 // a caller, so the path used for a subprocess must not use that environment.
 func windowsEnterpriseInstalledAdminCLI() (string, error) {
-	programFiles, err := trustedWindowsEnterpriseProgramFiles()
+	programFiles, err := windowsEnterpriseProgramFilesResolver()
 	if err != nil {
 		return "", fmt.Errorf("resolve trusted Program Files for installed CLI: %w", err)
 	}
-	return filepath.Join(programFiles, "Cisco", "DefenseClaw", "bin", "defenseclaw.exe"), nil
+	installedCLI := filepath.Join(programFiles, "Cisco", "DefenseClaw", "bin", "defenseclaw.exe")
+	// An elevated lifecycle runs this image with the service pins. Check
+	// that only SYSTEM, Administrators and TrustedInstaller can replace it
+	// or any folder above it (Program Files\Cisco included), and that its
+	// folders are not links, before any process is created (GAP-1493).
+	if err := windowsEnterpriseInstalledCLICustody(installedCLI, "installed DefenseClaw CLI"); err != nil {
+		return "", fmt.Errorf("refuse to run the installed CLI: %w", err)
+	}
+	return installedCLI, nil
 }
+
+// windowsEnterpriseInstalledCLICustody validates the installed CLI file and
+// every folder above it, with no advisory verdict for the installer-owned
+// Cisco folders. A seam for tests.
+var windowsEnterpriseInstalledCLICustody = managed.ValidateTrustedFilePathStrictAncestors
 
 func windowsEnterprisePolicyDigestCommand(ctx context.Context) (*exec.Cmd, error) {
 	layout, err := windowsEnterpriseHotConfigLayout()
@@ -699,7 +796,7 @@ func windowsEnterprisePolicyDigestCommand(ctx context.Context) (*exec.Cmd, error
 // policy-state.json beside deployment.json when it does. A gateway that
 // rejected a reload and a config.yaml edited outside the lifecycle are
 // reported for every action. Nothing is reported while the gateway is not
-// ready or when the installed CLI cannot compute it.
+// ready; when the installed CLI cannot compute it, policy_unverified names why.
 func applyWindowsEnterprisePolicy(ctx context.Context, result *enterprisestatus.Result) {
 	applyWindowsEnterprisePolicyAs(ctx, result, result.Action != "status" && result.Action != "verify")
 }
@@ -712,8 +809,38 @@ func applyWindowsEnterprisePolicyAs(ctx context.Context, result *enterprisestatu
 	if !result.Installed || !result.Readiness.Gateway {
 		return
 	}
-	out, _ := windowsEnterprisePolicyDigest(ctx)
+	out, err := windowsEnterprisePolicyDigest(ctx)
+	warnings := len(result.Warnings)
 	state := applyEnterprisePolicyReport(result, out, change)
+	if state != nil && state.ConfigUnrecorded {
+		result.SecurityComplete, result.Noop, result.NoopReason = false, false, ""
+		result.AddError("lifecycle_error", "config generation is unproven or records a hand edit; run DefenseClawSetup-Enterprise-Standalone-x64.exe /ensure CONFIG=<approved absolute config path> JSON=1 from an elevated prompt")
+	}
+	if state == nil {
+		result.SecurityComplete = false
+		if len(result.Warnings) > warnings {
+			// A digest response with a build error already named the cause.
+			// Verify must fail on that cause rather than echo it as a warning.
+			if result.Action == "verify" {
+				message := result.Warnings[len(result.Warnings)-1]
+				result.Warnings = result.Warnings[:len(result.Warnings)-1]
+				result.AddError(message.Code, message.Message)
+			}
+		} else {
+			// Name a check that never returned a digest, including an installed
+			// CLI the custody check refused to run (GAP-0594).
+			cause := "the installed CLI reported no effective policy digest"
+			if err != nil {
+				cause = err.Error()
+			}
+			message := "the effective policy the gateway enforces could not be checked: " + cause
+			if result.Action == "verify" {
+				result.AddError("policy_unverified", message)
+			} else {
+				result.AddWarning("policy_unverified", message)
+			}
+		}
+	}
 	if state == nil || !state.Applied || !change || len(result.Errors) != 0 {
 		return
 	}
@@ -744,15 +871,27 @@ func writeWindowsEnterprisePolicyState(state *enterprisestatus.PolicyState) erro
 
 // writeFileKeepingDACL replaces path with data, giving the new file the
 // DACL of sibling before it is renamed into place, so it is never readable
-// by more than sibling is.
+// by more than sibling is. Each write stages in its own exclusively created
+// file beside path: two lifecycle runs that finish at the same time shared
+// path+".tmp" before, so one could publish the other's bytes or fail on a
+// staging file the other had already renamed (GAP-1404).
 func writeFileKeepingDACL(path string, data []byte, sibling string) error {
 	restore, err := keepConfigDACL(sibling)
 	if err != nil {
 		return err
 	}
-	temporary := path + ".tmp"
-	if err := os.WriteFile(temporary, data, 0o600); err != nil {
+	staging, err := os.CreateTemp(filepath.Dir(path), filepath.Base(path)+".*.tmp")
+	if err != nil {
 		return err
+	}
+	temporary := staging.Name()
+	_, writeErr := staging.Write(data)
+	if closeErr := staging.Close(); writeErr == nil {
+		writeErr = closeErr
+	}
+	if writeErr != nil {
+		_ = os.Remove(temporary)
+		return writeErr
 	}
 	if err := restore(temporary); err != nil {
 		_ = os.Remove(temporary)
@@ -778,7 +917,10 @@ func windowsStandaloneGatewayHealth() ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	client := &http.Client{Timeout: 1500 * time.Millisecond, Transport: &http.Transport{Proxy: nil}}
+	client, err := managedGatewayClientFactory(1500*time.Millisecond, strings.TrimPrefix(base, "http://"), managed.StandaloneWindowsGatewaySvc)
+	if err != nil {
+		return nil, err
+	}
 	resp, err := client.Get(base + "/health")
 	if err != nil {
 		return nil, err
@@ -804,7 +946,10 @@ func windowsStandaloneGatewayStatus() []byte {
 		return nil
 	}
 	req.Header.Set("Authorization", "Bearer "+token)
-	client := &http.Client{Timeout: 5 * time.Second, Transport: &http.Transport{Proxy: nil}}
+	client, err := managedGatewayClientFactory(5*time.Second, strings.TrimPrefix(base, "http://"), managed.StandaloneWindowsGatewaySvc)
+	if err != nil {
+		return nil
+	}
 	resp, err := client.Do(req)
 	if err != nil {
 		return nil
@@ -904,6 +1049,9 @@ func runWindowsEnterpriseStandaloneInstaller(
 	if opts != nil && opts.force && windowsEnterpriseInstallerAction(args) == "Uninstall" {
 		ctx = context.WithValue(ctx, windowsEnterpriseForcedUninstallKey{}, true)
 	}
+	if err := retireUntrustedWindowsScannerRuntimeBeforeStart(windowsEnterpriseInstallerAction(args), opts); err != nil {
+		return nil, windowsEnterpriseStandaloneRun{}, err
+	}
 	migrationRecord := readWindowsEnterpriseMigrationRecord()
 	run, err := windowsEnterpriseStandaloneRunner(ctx, cmd, script, args)
 	if opts != nil {
@@ -929,17 +1077,65 @@ func runWindowsEnterpriseStandaloneInstaller(
 }
 
 // readWindowsEnterpriseMigrationRecord reads the migration-v9.json beside the
-// installed config, or nil when there is none.
+// installed config for the result's migration note, or nil when there is
+// none or it cannot be read.
 func readWindowsEnterpriseMigrationRecord() []byte {
 	layout, err := windowsEnterpriseHotConfigLayout()
-	if err != nil || strings.TrimSpace(layout.ConfigPath) == "" {
-		return nil
-	}
-	raw, err := readWindowsEnterpriseBoundedFile(config.MigrationRecordPath(layout.ConfigPath), windowsEnterpriseHotConfigMaxBytes)
 	if err != nil {
 		return nil
 	}
+	raw, _ := readWindowsEnterpriseMigrationRecordAt(layout.ConfigPath)
 	return raw
+}
+
+// readWindowsEnterpriseMigrationRecordAt reads the migration-v9.json beside
+// configPath: nil and no error only when nothing is there. A record that is
+// there but cannot be read (access denied, not a plain file, a link or
+// reparse point, more than managedMigrationRecordMaxBytes) is an error,
+// never no record (readManagedMigrationRecord).
+func readWindowsEnterpriseMigrationRecordAt(configPath string) ([]byte, error) {
+	if strings.TrimSpace(configPath) == "" {
+		return nil, errors.New("the standalone layout names no installed config")
+	}
+	return readManagedMigrationRecord(config.MigrationRecordPath(configPath), managedMigrationRecordMaxBytes)
+}
+
+// A compliant ensure still needs the one-time Cursor correction recorded by
+// the old v9 migration. The actual write stays inside the installer's repair
+// transaction; this read only selects that transaction when every proof and
+// signed-bundle guard already accepts it. Only a missing record, or a config
+// a signed bundle owns, means no correction: a record that cannot be read or
+// decoded (G-small loop 4), or that decodes without the fields every
+// migration writes ({} or null, G-small loop round 2,
+// config.DecodeMigrationRecord), made ensure report a compliant deployment
+// while the Cursor fail mode it proves rewritten stayed open. Ensure reports
+// that error as preflight_failed.
+var windowsEnterpriseCursorMigrationRepairPending = func() (bool, error) {
+	layout, err := windowsEnterpriseHotConfigLayout()
+	if err != nil {
+		return false, err
+	}
+	recordRaw, recordErr := readWindowsEnterpriseMigrationRecordAt(layout.ConfigPath)
+	if recordErr == nil && recordRaw == nil {
+		return false, nil
+	}
+	fromBundle, err := managedStandaloneConfigFromBundle(layout.ConfigPath)
+	if err != nil || fromBundle {
+		return false, err
+	}
+	if recordErr != nil {
+		return false, recordErr
+	}
+	raw, err := readWindowsEnterpriseBoundedFile(layout.ConfigPath, windowsEnterpriseHotConfigMaxBytes)
+	if err != nil {
+		return false, err
+	}
+	record, err := config.DecodeMigrationRecord(recordRaw)
+	if err != nil {
+		return false, fmt.Errorf("decode %s: %w", config.MigrationRecordPath(layout.ConfigPath), err)
+	}
+	_, _, pending := config.RepairMigratedCursorFailMode(raw, record)
+	return pending, nil
 }
 
 // noteWindowsEnterpriseMigration keeps the audit.db block/allow entries a
@@ -953,11 +1149,11 @@ func noteWindowsEnterpriseMigration(opts *windowsEnterpriseLifecycleOptions, bef
 	if opts == nil || after == nil || bytes.Equal(before, after) {
 		return
 	}
-	var record, previous config.MigrationRecord
-	if json.Unmarshal(trimWindowsJSONBOM(after), &record) != nil {
+	record, err := config.DecodeMigrationRecord(after)
+	if err != nil {
 		return
 	}
-	if json.Unmarshal(trimWindowsJSONBOM(before), &previous) == nil && previous.MigratedAt == record.MigratedAt &&
+	if previous, err := config.DecodeMigrationRecord(before); err == nil && previous.MigratedAt == record.MigratedAt &&
 		previous.SourceSHA256 == record.SourceSHA256 && len(record.Repaired) > len(previous.Repaired) {
 		// The same migration, with a Cursor fail mode it wrote restored.
 		opts.configFailModeRepairs = record.Repaired[len(previous.Repaired):]
@@ -1244,6 +1440,7 @@ func applyWindowsEnterpriseInstallerReport(
 		}
 		result.AddError(code, message)
 	}
+	addWindowsEnterpriseSelfUninstallCleanup(result, report)
 	if !report.OK && len(result.Errors) == 0 {
 		code := "not_ready"
 		if !report.Installed {
@@ -1253,15 +1450,17 @@ func applyWindowsEnterpriseInstallerReport(
 	}
 	if lifecycle && !report.OK && len(result.Errors) > firstError {
 		configPath := ""
-		purge := false
+		purge, force := false, false
 		if opts != nil {
 			configPath = opts.configPath
-			purge = opts.purge
+			purge, force = opts.purge, opts.force
 		}
 		if next := windowsEnterpriseStandaloneNextStep(
 			result.Action,
 			configPath,
 			purge,
+			windowsBundleHasCode(result.Errors[firstError:], "lifecycle_busy"),
+			force,
 			report.TransactionPending,
 			decodeWindowsEnterpriseRecoveryGatewayRuns(report.RecoveryGatewayRuns),
 			decodeWindowsEnterpriseRecoveryGatewayRefusal(report.RecoveryGatewayRefusal),
@@ -1303,6 +1502,45 @@ func applyWindowsEnterpriseInstallerReport(
 	// complete.
 	if report.Installed || report.TransactionPending {
 		addEnterpriseSecurityIncompleteReasons(result, report.TransactionPending)
+	}
+}
+
+// windowsEnterpriseSelfUninstallStrandedMessage is the uninstall_in_use error
+// of a self-uninstall whose installer report says InstallRoot is still there
+// but carries no error of its own.
+const windowsEnterpriseSelfUninstallStrandedMessage = "a program still holds a file in the DefenseClaw install folder, so the uninstall " +
+	"could not remove it. DefenseClaw is already uninstalled (its services and hooks are removed); a cleanup that starts when this " +
+	"command exits removes the folder and finishes the uninstall cleanup once that program closes the file. Close the program, then " +
+	"run the uninstall again to confirm that it finished"
+
+// addWindowsEnterpriseSelfUninstallCleanup carries a self-uninstall's pending
+// cleanup into the result. While InstallRoot is still there (a program held a
+// file in it past the rename retry) the uninstall is not finished and nothing
+// this process can wait for confirms that the finalizer finishes it, so the
+// run fails with the retryable uninstall_in_use, whatever ok the installer
+// reported: an ok result let an exit-code-driven manager stop retrying with
+// InstallRoot and the purge left behind (W2B-G-win review, loop round 2). A
+// self-uninstall that retired InstallRoot only waits for this process to exit
+// before the retired copy goes, which a warning says.
+func addWindowsEnterpriseSelfUninstallCleanup(result *enterprisestatus.Result, report *windowsEnterpriseInstallerReport) {
+	if report == nil {
+		return
+	}
+	stranded := strings.TrimSpace(report.InstallRootRetirementDeferred) != "" ||
+		(report.CanonicalInstallRootAbsent != nil && !*report.CanonicalInstallRootAbsent)
+	if stranded {
+		if !windowsEnterpriseResultHasError(result, "uninstall_in_use") {
+			message := windowsEnterpriseSelfUninstallStrandedMessage
+			if deferred := strings.TrimSpace(report.InstallRootRetirementDeferred); deferred != "" {
+				message += " (" + windowsEnterpriseBoundedDiagnostic(deferred) + ")"
+			}
+			result.AddError("uninstall_in_use", message)
+		}
+		return
+	}
+	if report.OK && report.SelfUninstallCleanupPending && strings.TrimSpace(report.RetiredInstallRoot) != "" {
+		result.AddWarning("self_uninstall_cleanup_pending", "the retired install folder "+
+			strings.TrimSpace(report.RetiredInstallRoot)+" is removed by a cleanup that runs once this command exits")
 	}
 }
 
@@ -1375,24 +1613,42 @@ func addWindowsEnterpriseUserStateWarning(result *enterprisestatus.Result, repor
 		))
 	}
 	if len(remaining) > 0 {
-		result.AddError("per_user_state_remaining", fmt.Sprintf(
-			"--purge could not remove all DefenseClaw per-user data and binaries of %d enrolled account(s), which keep per-user hook tokens that nothing accepts any more; remove what stays as LocalSystem: %s",
-			len(remaining),
-			windowsEnterpriseBoundedLabels(remaining),
-		))
+		result.AddError("per_user_state_remaining", windowsEnterpriseUserStateRemainingMessage(len(remaining), windowsEnterpriseBoundedLabels(remaining)))
 	}
 }
 
 // addWindowsEnterpriseMachineStateWarning names the machine folders outside
 // StateRoot that the uninstall could not remove. Every standalone uninstall
 // removes them, not only --purge, so the MDM default uninstall reports them
-// too (GAP-1734).
+// too (GAP-1734). A retained selector shared with another deployment is
+// intentional, and two cleanup steps can report the same path (GAP-0571).
 func addWindowsEnterpriseMachineStateWarning(result *enterprisestatus.Result, report *windowsEnterpriseInstallerReport) {
-	if kept := windowsEnterpriseReportStrings(report.MachineStateRemaining); len(kept) > 0 {
+	var failed, kept []string
+	seen := map[string]bool{}
+	for _, entry := range windowsEnterpriseReportStrings(report.MachineStateRemaining) {
+		path, reason, _ := strings.Cut(entry, ": ")
+		key := strings.ToLower(path)
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		if strings.HasPrefix(reason, "kept: ") {
+			kept = append(kept, entry)
+		} else {
+			failed = append(failed, entry)
+		}
+	}
+	if len(failed) > 0 {
 		result.AddWarning("machine_state_remaining", fmt.Sprintf(
 			"the uninstall could not remove %d DefenseClaw machine folder(s); remove them from an elevated prompt: %s",
-			len(kept),
-			windowsEnterpriseBoundedLabels(kept),
+			len(failed),
+			windowsEnterpriseBoundedLabels(failed),
+		))
+	}
+	if len(kept) > 0 {
+		result.AddWarning("machine_state_kept", fmt.Sprintf(
+			"the uninstall kept %d DefenseClaw machine file(s) or folder(s) on purpose; leave them in place: %s",
+			len(kept), windowsEnterpriseBoundedLabels(kept),
 		))
 	}
 }
@@ -1411,6 +1667,14 @@ func addWindowsEnterpriseRecoveryGatewayWarnings(result *enterprisestatus.Result
 		decodeWindowsEnterpriseRecoveryGatewayRefusal(report.RecoveryGatewayRefusal),
 	)
 	warnings = append(warnings, windowsEnterpriseRollbackLeftoverWarnings(report.RollbackLeftovers)...)
+	if skipped := windowsEnterpriseReportStrings(report.UserNativeOTLPCaptureSkipped); len(skipped) != 0 {
+		warnings = append(warnings, enterprisestatus.Message{
+			Code: "user_native_otlp_capture_skipped",
+			Message: "Setup skipped native OTLP rollback preimages for these user paths; the machine operation continued, " +
+				"but a rollback cannot restore the skipped paths. Inspect their links or access permissions, " +
+				"then run Setup /ensure again: " + windowsEnterpriseBoundedLabels(skipped),
+		})
+	}
 	if removed := strings.TrimSpace(report.StaleLifecycleJournalRemoved); removed != "" {
 		// The lifecycle deleted a protected journal on its own; say so in
 		// the result and the lifecycle log (GAP-1680).
@@ -1537,17 +1801,44 @@ const (
 		"reset its permissions or remove it if that account no longer uses DefenseClaw, then run Setup /ensure again to remove the old copies"
 )
 
-// windowsEnterpriseRollbackLeftoverWarnings names each item the rollback of
-// a failed first install could not remove, with what removes it. A file the
-// account changed after DefenseClaw wrote it is kept whole, so only a manual
+// windowsEnterpriseRollbackLeftoverWarnings names each item a rollback could
+// not restore or remove. A native OTLP user preimage needs manual repair;
+// an upgrade rollback retains the restored release. For a failed first
+// install, a file the account changed after DefenseClaw wrote it is kept
+// whole, so only a manual
 // edit removes DefenseClaw's entries from it. Everything else is removed by a
 // successful install followed by an uninstall, both as LocalSystem while the
 // accounts are signed in (an uninstall acts only for signed-in accounts). An
 // administrator at an elevated prompt gets LocalSystem from a one-time
 // scheduled task, which the remedy names.
+// windowsEnterpriseRollbackCreatedFolderLeftover marks a rollback leftover
+// that is a per-user folder the rolled back change created
+// (Invoke-DefenseClawTargetRuntimeRollbackCleanupOrKeep).
+const windowsEnterpriseRollbackCreatedFolderLeftover = ": a per-user DefenseClaw folder this change created; the rollback could not remove it ("
+const windowsEnterpriseNativeOTLPRollbackLeftover = "native OTLP user rollback: "
+
 func windowsEnterpriseRollbackLeftoverWarnings(raw json.RawMessage) []enterprisestatus.Message {
 	var warnings []enterprisestatus.Message
 	for _, leftover := range windowsEnterpriseReportStrings(raw) {
+		if detail, ok := strings.CutPrefix(leftover, windowsEnterpriseNativeOTLPRollbackLeftover); ok {
+			warnings = append(warnings, enterprisestatus.Message{
+				Code: "rollback_leftover",
+				Message: "the rollback could not restore " + detail + "; the restored release is running; " +
+					"inspect that link or its permissions and restore it by hand",
+			})
+			continue
+		}
+		if strings.Contains(leftover, windowsEnterpriseRollbackCreatedFolderLeftover) {
+			// A rollback whose per-user runtime cleanup failed went on and
+			// put the previous release back (GAP-0856); the folder is not
+			// one that release uses.
+			warnings = append(warnings, enterprisestatus.Message{
+				Code: "rollback_leftover",
+				Message: "the rollback left " + leftover + "; the restored release does not use that folder, " +
+					"so remove it as an administrator after that account signs out",
+			})
+			continue
+		}
 		remedy := "to remove it, run DefenseClaw Setup /ensure and then /uninstall, both as LocalSystem " + windowsEnterpriseActiveSessionWhen + " " +
 			"(an MDM system context, or from an elevated prompt a one-time scheduled task that runs as SYSTEM; " +
 			"see \"Run Setup as LocalSystem\" in the Windows enterprise guide)"
@@ -1735,33 +2026,55 @@ var windowsEnterpriseUnprotectedAgentsReader = func() ([]enterprisehooks.Unprote
 // are, so verify fails on it.
 func applyWindowsEnterpriseUnprotectedAgents(result *enterprisestatus.Result) {
 	agents, err := windowsEnterpriseUnprotectedAgentsReader()
-	if err != nil {
-		// A token that cannot read the protected record reports nothing
-		// about it, as for the manifest summary.
-		if !errors.Is(err, os.ErrNotExist) && !errors.Is(err, os.ErrPermission) {
-			message := "the enumerator's unprotected-agents record is unreadable: " + err.Error()
-			if result.Action == "verify" {
-				result.AddError(enterprisehooks.UnprotectedCodeAgentUnprotected, message)
-			} else {
-				result.AddWarning(enterprisehooks.UnprotectedCodeAgentUnprotected, message)
-			}
-			result.SecurityComplete = false
+	if stale := (enterprisehooks.UnprotectedAgentsStaleError{}); errors.As(err, &stale) || errors.Is(err, os.ErrNotExist) {
+		age := stale.Age
+		if age == "" {
+			age = enterprisehooks.UnprotectedAgentsRecordMissing
 		}
+		result.AddWarning(enterprisehooks.UnprotectedCodeInstallScanIncomplete, enterprisehooks.UnprotectedAgentsScanPending(age,
+			"Restart-Service DefenseClawHookEnumerator (from an elevated prompt)"))
+		result.CoverageComplete, result.SecurityComplete = false, false
+		// Only the pending scan is a warning. A stale record still names the agents its last scan found; they
+		// are reported below, so verify keeps failing on a known gap.
+		err = nil
+	}
+	if err != nil {
+		message := "the enumerator's unprotected-agents record is missing or unreadable: " + err.Error()
+		if errors.Is(err, os.ErrPermission) {
+			message = "this token cannot inspect the enumerator's protected unprotected-agents record; run status or verify from an elevated Administrator prompt: " + err.Error()
+		}
+		if result.Action == "verify" {
+			result.AddError(enterprisehooks.UnprotectedCodeInstallScanIncomplete, message)
+		} else {
+			result.AddWarning(enterprisehooks.UnprotectedCodeInstallScanIncomplete, message)
+		}
+		result.CoverageComplete, result.SecurityComplete = false, false
 		return
 	}
 	for _, agent := range agents {
-		if agent.Code == enterprisehooks.UnprotectedCodeHookContractUnverified {
-			// No hook contract: the agent runs with no DefenseClaw hook, so
-			// the deployment does not cover it (GAP-0151).
+		if agent.Code == enterprisehooks.UnprotectedCodeHookContractUnverified ||
+			agent.Code == enterprisehooks.UnprotectedCodeInstallScanIncomplete ||
+			agent.Code == enterprisehooks.UnprotectedCodeKiroCLIBelowHookFloor ||
+			agent.Code == enterprisehooks.UnprotectedCodeKiroIDEBelowGlobalHooksFloor {
+			// No contract, an incomplete install scan, a headless CLI path
+			// without hooks, or an IDE that cannot read global hooks: the
+			// deployment does not cover it (GAP-0151).
 			result.CoverageComplete = false
 		}
 		// unverified_versions: refuse that nothing enforces fails verify.
-		if agent.Refusal == enterprisehooks.RefusalMissing && result.Action == "verify" {
+		if result.Action == "verify" && (agent.Refusal == enterprisehooks.RefusalMissing ||
+			agent.Code == enterprisehooks.UnprotectedCodeKiroCLIBelowHookFloor ||
+			agent.Code == enterprisehooks.UnprotectedCodeKiroIDEBelowGlobalHooksFloor) {
 			result.AddError(agent.Code, agent.Message())
 		} else {
 			result.AddWarning(agent.Code, agent.Message())
 		}
 		result.SecurityComplete = false
+		if agent.InstallPath != "" && (result.Action == "status" || result.Action == "verify") {
+			if err := windowsManagedInstallAudit(agent); err != nil {
+				result.AddWarning(windowsManagedLaunchAuditUnavailable, "could not audit the unprotected "+agent.Connector+" install: "+err.Error())
+			}
+		}
 	}
 }
 
@@ -2253,7 +2566,7 @@ func windowsEnterpriseFailureCodeFor(result *enterprisestatus.Result) int {
 	}
 	for _, message := range result.Errors {
 		switch message.Code {
-		case "lifecycle_busy":
+		case "lifecycle_busy", string(enterprisebundle.CodeRestartDeferred), string(enterprisebundle.CodeNotConfirmed):
 			return enterprisestatus.WindowsExitBusy
 		case "bundle_apply_failed", "bundle_policy_not_adopted", "bundle_post_verify_failed", "bundle_targets_refresh_failed":
 			return enterprisestatus.WindowsExitBusy
@@ -2274,9 +2587,26 @@ func finishWindowsEnterpriseStandalone(
 	result *enterprisestatus.Result,
 	failureCode int,
 ) error {
+	if len(opts.recoveryChanges) != 0 {
+		// The recovery before the config check changed the host: not a
+		// no-op, whatever the run decided after it.
+		result.Changes = append(append([]string{}, opts.recoveryChanges...), result.Changes...)
+		result.Noop, result.NoopReason = false, ""
+	}
+	if windowsBundleHasCode(result.Errors, "powershell7_untrusted") {
+		for i := range result.Warnings {
+			if result.Warnings[i].Code == windowsEnterpriseHealthNotChecked {
+				result.Warnings[i].Message = windowsEnterpriseUncheckedHealthMessage(result.Profile, true)
+			}
+		}
+	}
 	addWindowsEnterprisePipeWaitWarning(result, opts)
 	deliveredBundle := opts.bundle != nil && opts.bundle.prepared != nil && opts.bundle.prepared.Receipt != nil
 	finishWindowsEnterpriseBundle(cmd, opts, result)
+	if result.Bundle != nil && result.Bundle.State == enterprisebundle.StateApplied &&
+		windowsBundleHasCode(result.Errors, string(enterprisebundle.CodeNotConfirmed)) {
+		failureCode = enterprisestatus.WindowsExitBusy
+	}
 	addWindowsBundleEnforcementError(result, opts, deliveredBundle)
 	if result.Noop && windowsBundleHasCode(result.Warnings, "bundle_config_restored") {
 		// The plan after the restore found nothing to do, but the run put the
@@ -2287,6 +2617,7 @@ func finishWindowsEnterpriseStandalone(
 	addWindowsEnterpriseMigrationChange(result, opts)
 	addWindowsEnterpriseMissingCredentialWarnings(result)
 	applyWindowsEnterpriseAgentSessions(result, opts)
+	applyWindowsEnterpriseLaunchCoverage(result)
 	applyWindowsEnterpriseAgentSettings(result)
 	if opts.localEnforcementEntriesIgnored > 0 {
 		result.AddWarning(config.LocalEnforcementEntriesIgnored, fmt.Sprintf(
@@ -2441,12 +2772,18 @@ func writeWindowsEnterpriseStandaloneConfigRefusal(
 // supplied config the gateway could not load, and reports refused=false
 // when the config passes. An interrupted upgrade leaves a pending
 // transaction with the services stopped, and only a lifecycle run recovers
-// it: refusing an ensure or upgrade before that run left the host stopped on
-// every MDM retry (GAP-1433). Those two actions first run the repair ensure
-// uses to recover a pending transaction, which restores the previous
-// deployment and its services, and check the config again: the restored
-// rule packs can make it load. A config still refused is refused, and the
-// refusal reports the restored host.
+// it: refusing a supplied config before that run left the host stopped on
+// every MDM retry (GAP-1433, GAP-0705). Each action first recovers a pending
+// transaction, which restores the previous deployment and its services, and
+// checks the config again: the restored rule packs can make it load. Ensure
+// and upgrade recover with the source-free repair GAP-1433 gave them. A
+// repair recovers with the transaction recovery alone (Recover): the full
+// repair went on past the recovery and changed services, access lists and
+// hooks for a request it then refused, which the 1.0.3 lifecycle never did
+// for a repair; the requested repair runs only once its config passes. A
+// config still refused is refused, and the refusal reports the restored
+// host. The result reports what the recovery changed, whichever way the run
+// goes on (noteWindowsEnterpriseRefusalRecovery).
 func refuseWindowsEnterpriseStandaloneSuppliedConfig(
 	ctx context.Context,
 	cmd *cobra.Command,
@@ -2460,14 +2797,18 @@ func refuseWindowsEnterpriseStandaloneSuppliedConfig(
 	if err == nil {
 		err = windowsEnterpriseStandaloneConfigPreflight(opts.configPath)
 	}
-	if err != nil && (action == "ensure" || action == "upgrade") && windowsEnterpriseStandaloneTransactionPending() {
-		recovery := *opts
-		recovery.jsonOutput = true
-		clearWindowsEnterpriseSources(&recovery)
-		// The refusal below probes the host, so the recovery report adds
-		// nothing: a recovery that failed leaves transaction_pending there.
-		_, _, _ = runWindowsEnterpriseStandaloneInstaller(ctx, cmd, opts, script,
-			windowsEnterprisePowerShellArgs("repair", windowsEnterpriseRepairRecordingOptions("repair", &recovery)))
+	if err != nil && (action == "ensure" || action == "upgrade" || action == "repair") && windowsEnterpriseStandaloneTransactionPending() {
+		recoveryArgs := windowsEnterprisePowerShellArgs("recover", windowsEnterpriseEnsureProbeOptions(opts))
+		if action != "repair" {
+			recovery := *opts
+			recovery.jsonOutput = true
+			clearWindowsEnterpriseSources(&recovery)
+			recoveryArgs = windowsEnterprisePowerShellArgs("repair", windowsEnterpriseRepairRecordingOptions("repair", &recovery))
+		}
+		// A recovery that failed leaves transaction_pending, which the
+		// refusal's probe of the host reports.
+		_, _, _ = runWindowsEnterpriseStandaloneInstaller(ctx, cmd, opts, script, recoveryArgs)
+		noteWindowsEnterpriseRefusalRecovery(opts, windowsEnterpriseInstallerAction(recoveryArgs))
 		if opts.suppliedConfigRefusal == nil {
 			err = windowsEnterpriseStandaloneConfigPreflight(opts.configPath)
 		}
@@ -2475,8 +2816,26 @@ func refuseWindowsEnterpriseStandaloneSuppliedConfig(
 	if err == nil {
 		return false, nil
 	}
-	return true, writeWindowsEnterpriseStandaloneConfigRefusal(ctx, cmd, action, opts, script,
-		fmt.Errorf("%w: %w", errWindowsEnterpriseInvalidArguments, err))
+	if !opts.suppliedConfigUnreadable {
+		err = fmt.Errorf("%w: %w", errWindowsEnterpriseInvalidArguments, err)
+	}
+	return true, writeWindowsEnterpriseStandaloneConfigRefusal(ctx, cmd, action, opts, script, err)
+}
+
+// noteWindowsEnterpriseRefusalRecovery records, for the result of the run
+// (finishWindowsEnterpriseStandalone), that the recovery before a config
+// check settled the pending transaction, whether the run then refuses the
+// config or goes on with it. A recovery that left the transaction pending
+// changed nothing this can name; the result reports transaction_pending.
+func noteWindowsEnterpriseRefusalRecovery(opts *windowsEnterpriseLifecycleOptions, moduleAction string) {
+	if windowsEnterpriseStandaloneTransactionPending() {
+		return
+	}
+	change := "recovered the interrupted lifecycle transaction before checking the supplied config, which restored the previous deployment and its services"
+	if moduleAction == "Repair" {
+		change += ", and repaired it without new sources"
+	}
+	opts.recoveryChanges = append(opts.recoveryChanges, change)
 }
 
 // writeWindowsEnterpriseStandaloneRefusal writes the schema-2 result of a
@@ -2532,7 +2891,13 @@ func writeWindowsEnterpriseStandaloneRefusal(
 				strings.TrimSpace(opts.profile), managed.ProfileStandalone, managed.ProfileSecureClient)
 		}
 		describeHost(result)
+	default:
+		// Every refusal changed nothing, so it reports the host as it is.
+		// An ensure whose --config did not exist reported a healthy
+		// deployment as installed=false with no services (GAP-0036).
+		describeHost(result)
 	}
+
 	result.AddError(code, message)
 	failure := windowsEnterpriseFailureCodeFor(result)
 	if invalid {
@@ -2588,9 +2953,7 @@ func applyWindowsEnterpriseRecordedDeployment(result *enterprisestatus.Result) {
 				result.Readiness.SensorHelper = state == "running"
 			}
 		}
-		result.AddWarning(windowsEnterpriseHealthNotChecked, "this request was refused before any health check ran, so readiness.gateway, readiness.guardian, "+
-			"coverage_complete and security_complete were not checked (they read false); only the recorded deployment and the service states are reported. "+
-			"For the deployment's health, run `& '"+managedWindowsAdminCLI()+"' enterprise windows verify --profile "+profile+" --json` from an elevated PowerShell prompt")
+		result.AddWarning(windowsEnterpriseHealthNotChecked, windowsEnterpriseUncheckedHealthMessage(profile, false))
 		return
 	}
 }
@@ -2724,8 +3087,6 @@ func windowsEnterpriseFootprintUserCreated(path string) bool {
 	return err == nil && owner != nil && !windowsEnterpriseAdminSID(owner)
 }
 
-// readWindowsEnterpriseStandaloneEnrollment summarizes the installed
-// guardian manifest when this token can read it.
 // readWindowsEnterpriseStandaloneDestinations lists, for status, the
 // observability destinations the installed config.yaml compiles to with each
 // one's effective redaction profiles. `defenseclaw observability plan` is a
@@ -2747,8 +3108,10 @@ func readWindowsEnterpriseStandaloneDestinations() []enterprisestatus.Destinatio
 	return enterprisestatus.DestinationsFromSummaries(summaries)
 }
 
+// readWindowsEnterpriseStandaloneEnrollment summarizes the installed
+// guardian manifest when this token can read it.
 func readWindowsEnterpriseStandaloneEnrollment() (enterprisestatus.Enrollment, error) {
-	layout, err := managed.StandaloneWindowsLayout()
+	layout, err := windowsEnterpriseHotConfigLayout()
 	if err != nil {
 		return enterprisestatus.Enrollment{}, err
 	}
@@ -2835,13 +3198,6 @@ func readWindowsEnterpriseBoundedFile(path string, limit int64) ([]byte, error) 
 }
 
 // ensure ------------------------------------------------------------------
-
-// windowsEnterpriseEnsurePlan is the action ensure selected and why.
-type windowsEnterpriseEnsurePlan struct {
-	Action string // "", install, upgrade, repair
-	Reason string
-	Detail string // the failed read-only check behind a verify_failed repair
-}
 
 var windowsEnterpriseEnsureTimeout = 12 * time.Minute
 
@@ -3052,7 +3408,7 @@ func windowsEnterpriseVerifyFailureDetail(report *windowsEnterpriseInstallerRepo
 
 // windowsEnterpriseCodexTargetTransactionReason is how the ensure result
 // says why a config change ran the upgrade transaction.
-const windowsEnterpriseCodexTargetTransactionReason = "the config turns Codex protection on or off, and only the lifecycle transaction installs and removes Codex's machine policy, so every service was restarted"
+const windowsEnterpriseCodexTargetTransactionReason = "the config turns Codex protection on or off, or its Codex target differs from the protected deployment record, and only the lifecycle transaction installs and removes Codex's machine policy, so every service was restarted"
 
 func runWindowsEnterpriseStandaloneEnsureOnce(
 	ctx context.Context,
@@ -3088,11 +3444,25 @@ func runWindowsEnterpriseStandaloneEnsureOnce(
 				code = windowsEnterpriseFailureCodeFor(result)
 			}
 		}
+		if err := windowsEnterpriseReleaseHotConfigClosureIfProven(ctx, result, code); err != nil {
+			result.AddError("hook_closure_release_failed", "standalone hooks remain closed after the unproven config undo: "+
+				windowsEnterpriseBoundedDiagnostic(err.Error())+"; rerun ensure after repairing the gateway")
+			code = windowsEnterpriseFailureCodeFor(result)
+		}
 		return finishWindowsEnterpriseStandalone(cmd, opts, result, code)
+	}
+	configStateRepaired, stateErr := windowsEnterpriseConfigGenerationRepair(ctx, opts, statusReport)
+	if stateErr != nil {
+		applyWindowsEnterpriseInstallerReport(result, opts, statusReport, statusRun)
+		result.AddError("lifecycle_error", stateErr.Error())
+		return false, finishEnsure(windowsEnterpriseFailureCodeFor(result))
+	}
+	if configStateRepaired {
+		result.Changes = append(result.Changes, "recovered config generation from the approved config and proven previous counter")
 	}
 	alreadyAppliedNeedsRepair := false
 	verifyFailure := ""
-	if run := opts.bundle; run != nil && run.prepared != nil && run.prepared.AlreadyApplied &&
+	if run := opts.bundle; !configStateRepaired && run != nil && run.prepared != nil && run.prepared.AlreadyApplied &&
 		statusReport.Installed && !statusReport.TransactionPending &&
 		compareWindowsEnterpriseVersions(opts.productVersion, statusReport.InstalledVersion) == 0 &&
 		windowsBundleInstalledSHA(run.layout.ConfigPath) == run.prepared.ConfigSHA256 {
@@ -3132,16 +3502,27 @@ func runWindowsEnterpriseStandaloneEnsureOnce(
 			}
 		}
 		if verified && !compilerDrift {
-			// The module can set ok:false for security_incomplete with no
-			// failed check. Keep its warning, without turning that into a
-			// synthetic not_ready error during result translation.
-			accepted := *verifyReport
-			accepted.OK = true
-			applyWindowsEnterpriseInstallerReport(result, opts, &accepted, verifyRun)
-			result.Noop = true
-			result.NoopReason = "already_applied"
-			applyWindowsEnterprisePolicy(ctx, result)
-			return false, finishEnsure(windowsEnterpriseFailureCodeFor(result))
+			pending := false
+			if windowsEnterpriseIsElevated() {
+				pending, err = windowsEnterpriseCursorMigrationRepairPending()
+				if err != nil {
+					result.AddError("preflight_failed", "check the recorded Cursor fail-mode repair: "+err.Error())
+					return false, finishEnsure(windowsEnterpriseFailureCodeFor(result))
+				}
+			}
+			if !pending {
+				// The module can set ok:false for security_incomplete with no
+				// failed check. Keep its warning, without turning that into a
+				// synthetic not_ready error during result translation.
+				accepted := *verifyReport
+				accepted.OK = true
+				applyWindowsEnterpriseInstallerReport(result, opts, &accepted, verifyRun)
+				result.Noop = true
+				result.NoopReason = "already_applied"
+				applyWindowsEnterprisePolicy(ctx, result)
+				return false, finishEnsure(windowsEnterpriseFailureCodeFor(result))
+			}
+			verifyFailure = "recorded Cursor fail-mode repair"
 		}
 		if !compilerDrift {
 			alreadyAppliedNeedsRepair = true
@@ -3152,7 +3533,12 @@ func runWindowsEnterpriseStandaloneEnsureOnce(
 	}
 	plan := windowsEnterpriseEnsurePlan{Action: "repair", Reason: "verify_failed", Detail: verifyFailure}
 	var planErr error
-	if !alreadyAppliedNeedsRepair {
+	switch {
+	case configStateRepaired:
+		plan, planErr = planWindowsEnterpriseEnsureAfterGenerationRecovery(func() (windowsEnterpriseEnsurePlan, error) {
+			return planWindowsEnterpriseEnsure(statusReport, opts, script)
+		})
+	case !alreadyAppliedNeedsRepair:
 		plan, planErr = planWindowsEnterpriseEnsure(statusReport, opts, script)
 	}
 	if planErr != nil {
@@ -3162,8 +3548,22 @@ func runWindowsEnterpriseStandaloneEnsureOnce(
 		return false, finishEnsure(windowsEnterpriseFailureCodeFor(result))
 	}
 	if plan.Action == "" {
-		verifyCtx := ctx
+		// A compliant deployment can still owe the one-time Cursor fail-mode
+		// correction the old v9 migration recorded. Its repair is selected
+		// only after Verify accepts the deployment, and it meets the rule-pack
+		// preflight below like any repair, before anything stops.
+		cursorRepairPending := false
 		if windowsEnterpriseIsElevated() {
+			pending, repairErr := windowsEnterpriseCursorMigrationRepairPending()
+			if repairErr != nil {
+				applyWindowsEnterpriseInstallerReport(result, opts, statusReport, statusRun)
+				result.AddError("preflight_failed", "check the recorded Cursor fail-mode repair: "+repairErr.Error())
+				return false, finishEnsure(windowsEnterpriseFailureCodeFor(result))
+			}
+			cursorRepairPending = pending
+		}
+		verifyCtx := ctx
+		if windowsEnterpriseIsElevated() && !cursorRepairPending {
 			// A compliant deployment runs no retire, so this Verify collects
 			// the old runtime copies a retire left and names each per-user
 			// folder still untrusted (#1105, GAP-0211).
@@ -3175,7 +3575,11 @@ func runWindowsEnterpriseStandaloneEnsureOnce(
 			return false, finishEnsure(windowsEnterpriseFailureCodeFor(result))
 		}
 		_, drifted := windowsEnterpriseHookRuntimeDrift()
-		if windowsEnterpriseVerifyAcceptable(verifyReport) && drifted == "" {
+		verified := windowsEnterpriseVerifyAcceptable(verifyReport) && drifted == ""
+		switch {
+		case verified && cursorRepairPending:
+			plan = windowsEnterpriseEnsurePlan{Action: "repair", Reason: "recorded_cursor_fail_mode"}
+		case verified:
 			accepted := *verifyReport
 			accepted.OK = true
 			applyWindowsEnterpriseInstallerReport(result, opts, &accepted, verifyRun)
@@ -3194,11 +3598,12 @@ func runWindowsEnterpriseStandaloneEnsureOnce(
 			result.NoopReason = plan.Reason
 			applyWindowsEnterprisePolicy(ctx, result)
 			return false, finishEnsure(windowsEnterpriseFailureCodeFor(result))
+		default:
+			// Name the failed check: a compliant-looking host that ensure
+			// repaired said only "ensure_repair: verify_failed" (#1282).
+			plan = windowsEnterpriseEnsurePlan{Action: "repair", Reason: "verify_failed",
+				Detail: windowsEnterpriseVerifyFailureDetail(verifyReport, drifted)}
 		}
-		// Name the failed check: a compliant-looking host that ensure
-		// repaired said only "ensure_repair: verify_failed" (#1282).
-		plan = windowsEnterpriseEnsurePlan{Action: "repair", Reason: "verify_failed",
-			Detail: windowsEnterpriseVerifyFailureDetail(verifyReport, drifted)}
 	}
 
 	// An upgrade that keeps the installed config: this release's gateway must
@@ -3215,8 +3620,11 @@ func runWindowsEnterpriseStandaloneEnsureOnce(
 
 	// A repair restarts the gateway on the installed config: refuse one whose
 	// rule packs the gateway would not load, before anything stops (GAP-0672).
-	if plan.Action == "repair" && plan.Reason == "verify_failed" {
-		if err := windowsEnterpriseStandaloneRepairRulePackPreflight(); err != nil {
+	// Every repair ensure selects here restarts it (verify_failed and the
+	// recorded Cursor correction alike); a pending transaction is left to its
+	// recovery, which restores the packs the deployment had.
+	if plan.Action == "repair" && plan.Reason != "transaction_pending" {
+		if err := windowsEnterpriseStandaloneRepairRulePackPreflight(opts.configPath); err != nil {
 			applyWindowsEnterpriseInstallerReport(result, opts, statusReport, statusRun)
 			result.Errors = []enterprisestatus.Message{}
 			result.AddError("preflight_failed", err.Error())
@@ -3228,7 +3636,10 @@ func runWindowsEnterpriseStandaloneEnsureOnce(
 	var startOnlyKeys []string
 	if plan.Action == "upgrade" && (plan.Reason == "drift:config" || plan.Reason == "drift:bundle") {
 		applied, keys := windowsEnterpriseHotConfigApply(ctx, cmd, opts, script, statusReport, result)
-		if applied {
+		if applied || opts.hotConfigRestoreFailed {
+			// A failed apply whose restore could not be proven stops here:
+			// the transaction would snapshot the config it left behind
+			// (GAP-1178).
 			return false, finishEnsure(windowsEnterpriseFailureCodeFor(result))
 		}
 		// A signed bundle has no transaction fallback after a hot apply that
@@ -3306,7 +3717,7 @@ func runWindowsEnterpriseStandaloneEnsureOnce(
 		defer cleanupManifest()
 	}
 	beforeGatewayPID := uint32(0)
-	if opts.bundle != nil && opts.bundle.prepared != nil && opts.bundle.prepared.Receipt != nil {
+	if opts.bundle != nil && windowsBundleConfigChange(opts.bundle.prepared) {
 		beforeGatewayPID = windowsStandaloneGatewayPID()
 	}
 	serviceMutationAttempted = true
@@ -3433,6 +3844,28 @@ func runWindowsEnterpriseStandaloneEnsureOnce(
 	return false, finishEnsure(windowsEnterpriseFailureCodeFor(result))
 }
 
+func windowsEnterpriseReleaseHotConfigClosureIfProven(ctx context.Context, result *enterprisestatus.Result, code int) error {
+	if code != 0 || !result.OK || !result.Installed {
+		return nil
+	}
+	// A failed hot-config undo left this administrator-owned closure across
+	// runs. A successful repair or no-op Verify may release it only after the
+	// live gateway proves the installed policy again.
+	held, err := windowsEnterpriseHotConfigHooksHeld()
+	if err != nil || !held {
+		return err
+	}
+	// An unavailable CLI proves nothing either: the closure stays.
+	if enforced, _ := windowsEnterpriseHotConfigEnforcesInstalled(ctx, windowsEnterpriseHotConfigTimeout); !enforced {
+		return errors.New("the gateway has not proven the installed config's policy")
+	}
+	layout, err := windowsEnterpriseHotConfigLayout()
+	if err != nil {
+		return err
+	}
+	return windowsEnterpriseHotConfigReleaseHooks(layout)
+}
+
 // windowsEnterpriseStandaloneProfilesPreflight refuses a first install, in
 // seconds and before it changes anything, when a target profile holds a
 // .defenseclaw folder the install plan would refuse (a per-user install
@@ -3514,6 +3947,16 @@ func planWindowsEnterpriseEnsure(
 	if err != nil {
 		return windowsEnterpriseEnsurePlan{}, err
 	}
+	if drift == "codex_target" {
+		opts.codexTargetTransaction = true
+		return windowsEnterpriseEnsurePlan{Action: windowsEnterpriseCodexTargetAction(opts), Reason: "drift:codex_target"}, nil
+	}
+	// Equal config bytes still need the new bundle's generation and identity
+	// recorded and adopted; only a confirmed repeat can be a no-op (GAP-0359).
+	if drift == "" && opts.bundle != nil && opts.bundle.prepared != nil &&
+		opts.bundle.prepared.Receipt != nil && !opts.bundle.prepared.AlreadyApplied {
+		drift = "bundle"
+	}
 	if drift == "config" && windowsBundleRollbackWithoutPayload(opts) {
 		// The rollback of a bundle the installed CLI applied puts the last
 		// good config back on the running deployment, as the bundle was
@@ -3550,6 +3993,9 @@ func windowsEnterpriseEnsureProbeFailure(status *windowsEnterpriseInstallerRepor
 	}
 	if windowsEnterpriseMessageCode(message, "") != "" {
 		return errors.New(message)
+	}
+	if strings.Contains(message, windowsEnterpriseUnreadableMetadataMarker) {
+		return fmt.Errorf("ensure_refused: %s", message)
 	}
 	return fmt.Errorf("status_failed: ensure could not read the deployment state: %s", message)
 }
@@ -3699,6 +4145,13 @@ func windowsEnterpriseEnsureDrift(opts *windowsEnterpriseLifecycleOptions, scrip
 		}
 	}
 	if path := strings.TrimSpace(opts.configPath); path != "" {
+		supplied, err := readWindowsEnterpriseBoundedFile(path, windowsEnterpriseHotConfigMaxBytes)
+		if err != nil {
+			return "", err
+		}
+		if windowsConfigCodexTargetNeedsReconcile(supplied, trimWindowsJSONBOM(body)) {
+			return "codex_target", nil
+		}
 		want, err := windowsEnterpriseFileSHA256(path)
 		if err != nil {
 			return "", err
@@ -3707,7 +4160,7 @@ func windowsEnterpriseEnsureDrift(opts *windowsEnterpriseLifecycleOptions, scrip
 		// A config_version 8 source is installed as its v9 migration, so the
 		// same source is not drift while the installed file is that result.
 		if err != nil || (got != want && !config.MigratedFrom(layout.ConfigPath, want, got)) {
-			if opts.bundle != nil && opts.bundle.prepared != nil && opts.bundle.prepared.Receipt != nil {
+			if opts.bundle != nil && windowsBundleConfigChange(opts.bundle.prepared) {
 				return "bundle", nil
 			}
 			return "config", nil

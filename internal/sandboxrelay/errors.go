@@ -96,7 +96,7 @@ func ReasonStatus(reason string) int {
 		return http.StatusForbidden
 	case ReasonSubjectChanged:
 		return http.StatusConflict
-	case ReasonUnavailable, ReasonPolicyUnloadable:
+	case ReasonUnavailable, ReasonPolicyUnloadable, DetailSetupChanging:
 		return http.StatusServiceUnavailable
 	case ReasonRelayFilesUnsupported:
 		return http.StatusBadRequest

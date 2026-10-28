@@ -299,6 +299,13 @@ class TestSetupSplunkRefreshWiring(unittest.TestCase):
         )
         self._native_local_splunk.start()
         self.addCleanup(self._native_local_splunk.stop)
+        # Local setup records the container it started; no Docker here.
+        self._container = patch(
+            "defenseclaw.commands.cmd_setup._local_splunk_container_id",
+            return_value="0123456789abcdef" * 4,
+        )
+        self._container.start()
+        self.addCleanup(self._container.stop)
 
     def tearDown(self) -> None:
         import shutil
@@ -481,6 +488,27 @@ class TestSetupSplunkRefreshWiring(unittest.TestCase):
 class TestRefreshAndMaybeRestartSplunkBridge(unittest.TestCase):
     """Direct coverage of the stop → refresh decision logic."""
 
+    def test_refreshed_bundle_message_names_custom_home(self) -> None:
+        from defenseclaw.bundle_refresh import RefreshResult
+        from defenseclaw.commands.cmd_setup import _refresh_and_maybe_restart_splunk_bridge
+
+        with tempfile.TemporaryDirectory(prefix="dclaw-custom-home-") as data_dir:
+            dest = os.path.join(data_dir, "splunk-bridge")
+            refresh_result = RefreshResult(
+                bundle_kind="splunk-bridge", seeded_dest=dest, bundle_source="/src",
+                refreshed=True, refreshed_paths=["(initial seed)"],
+            )
+            output = io.StringIO()
+            with (
+                patch.dict(os.environ, {"DEFENSECLAW_HOME": data_dir}),
+                patch("defenseclaw.commands.cmd_setup.is_compose_project_running", return_value=False),
+                patch("defenseclaw.commands.cmd_setup.refresh_splunk_bridge", return_value=refresh_result),
+                redirect_stdout(output),
+            ):
+                _refresh_and_maybe_restart_splunk_bridge(data_dir)
+            self.assertIn(f"Bundle refreshed: {dest}{os.sep}", output.getvalue())
+            self.assertNotIn("~/.defenseclaw/splunk-bridge/", output.getvalue())
+
     @patch(
         "defenseclaw.commands.cmd_setup.refresh_splunk_bridge",
     )
@@ -535,10 +563,16 @@ class TestRefreshAndMaybeRestartSplunkBridge(unittest.TestCase):
                 env_file=env_file,
                 child_env=os.environ.copy(),
                 gateway_token_env=custom_name,
+                image_override="splunk/splunk:10.2.0",
             )
 
         self.assertTrue(result.was_running)
         self.assertTrue(result.stopped)
+        self.assertEqual(
+            mock_run.call_args_list[0].args[0][1:],
+            ["preflight-image", "--env-file", env_file, "--image", "splunk/splunk:10.2.0"],
+        )
+        self.assertEqual(mock_run.call_args_list[1].args[0][1:], ["down", "--env-file", env_file])
         # The down call must precede the refresh call. Pull the
         # subprocess args to confirm we asked the bridge for `down`.
         self.assertTrue(
@@ -1001,6 +1035,27 @@ class TestSetupLocalObservabilityRefreshWiring(unittest.TestCase):
 
 class TestRefreshAndMaybeRestartLocalObservability(unittest.TestCase):
     """Direct coverage for local-observability refresh messaging."""
+
+    @patch("defenseclaw.commands.cmd_setup_local_observability.refresh_local_observability_stack")
+    def test_refreshed_bundle_message_names_custom_home(self, mock_refresh: MagicMock) -> None:
+        from defenseclaw.bundle_refresh import RefreshResult
+        from defenseclaw.commands.cmd_setup_local_observability import _refresh_and_maybe_restart_local_observability
+
+        with tempfile.TemporaryDirectory(prefix="dclaw-custom-home-") as data_dir:
+            dest = os.path.join(data_dir, "observability-stack")
+            mock_refresh.return_value = RefreshResult(
+                bundle_kind="observability-stack", seeded_dest=dest, bundle_source="/src",
+                refreshed=True, refreshed_paths=["bin/launcher"],
+            )
+            controller = MagicMock()
+            controller.is_running.return_value = False
+            output = io.StringIO()
+            with patch.dict(os.environ, {"DEFENSECLAW_HOME": data_dir}), redirect_stdout(output):
+                _refresh_and_maybe_restart_local_observability(
+                    data_dir, refresh_config=False, controller=controller,
+                )
+            self.assertIn(f"Bundle refreshed: {dest}{os.sep}", output.getvalue())
+            self.assertNotIn("~/.defenseclaw/observability-stack/", output.getvalue())
 
     @patch(
         "defenseclaw.commands.cmd_setup_local_observability.refresh_local_observability_stack",

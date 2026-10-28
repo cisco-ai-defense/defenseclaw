@@ -11,9 +11,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"net"
 	"net/http"
 	"time"
+
+	"github.com/defenseclaw/defenseclaw/internal/gateway/connector/hookexec"
 )
 
 const enterpriseHookGuardianRepairAuditPath = "/api/v1/managed/guardian-repair"
@@ -26,16 +27,23 @@ type enterpriseHookGuardianAuditReport struct {
 	Connector string `json:"connector"`
 }
 
+var guardianAuditClientFactory = hookexec.NewManagedStandaloneHookSocketHTTPClient
+
 func reportEnterpriseHookGuardianRepairs(ctx context.Context, socket string, repaired []enterpriseHookGuardianAuditReport) {
 	if socket == "" || len(repaired) == 0 {
 		return
 	}
-	transport := &http.Transport{DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
-		var dialer net.Dialer
-		return dialer.DialContext(ctx, "unix", socket)
-	}}
-	defer transport.CloseIdleConnections()
-	client := &http.Client{Timeout: 2 * time.Second, Transport: transport}
+	trustedSocket, serviceUID, err := enterpriseHookStandaloneHookTransport()
+	if err != nil || trustedSocket != socket {
+		return
+	}
+	client, err := guardianAuditClientFactory(2*time.Second, socket, serviceUID)
+	if err != nil {
+		return
+	}
+	if transport, ok := client.Transport.(*http.Transport); ok {
+		defer transport.CloseIdleConnections()
+	}
 	for _, repair := range repaired {
 		body, err := json.Marshal(repair)
 		if err != nil {

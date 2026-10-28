@@ -851,7 +851,7 @@ func TestWindowsCodexMachinePolicyLifecycleIsTransactionalAndFailClosed(t *testi
 	preflight := strings.Index(installLike, "Assert-DefenseClawCodexMachinePolicyFilePreflight -Layout $Layout")
 	snapshot := strings.Index(installLike, "$snapshot = New-DefenseClawTransaction `")
 	aclBackup := strings.Index(installLike, "Initialize-DefenseClawCodexRequirementsAclBackup `")
-	firstCanonicalACL := strings.Index(installLike, "Set-DefenseClawManagedAcls `")
+	firstCanonicalACL := firstCodexCanonicalACLStamp(installLike)
 	reconcile := strings.Index(installLike, "-Action reconcile)")
 	metadataWrite := strings.Index(installLike, "Write-DefenseClawJsonAtomic -Value $newMetadata")
 	fullVerify := strings.Index(installLike, "Assert-DefenseClawEnterpriseDeployment `")
@@ -1755,5 +1755,36 @@ func waitForServiceState(t *testing.T, changes <-chan svc.Status, want svc.State
 		case <-deadline:
 			t.Fatalf("service did not report state %v", want)
 		}
+	}
+}
+
+// firstCodexCanonicalACLStamp is the offset of the first
+// Set-DefenseClawManagedAcls call in body that stamps the Codex machine
+// policy: a call with -SkipCodexMachineState leaves that file as it is.
+func firstCodexCanonicalACLStamp(body string) int {
+	const call = "Set-DefenseClawManagedAcls `"
+	for offset := 0; ; {
+		index := strings.Index(body[offset:], call)
+		if index < 0 {
+			return -1
+		}
+		start := offset + index
+		end := start
+		for {
+			newline := strings.IndexByte(body[end:], '\n')
+			if newline < 0 {
+				end = len(body)
+				break
+			}
+			line := strings.TrimRight(body[end:end+newline], " \r")
+			end += newline + 1
+			if !strings.HasSuffix(line, "`") {
+				break
+			}
+		}
+		if !strings.Contains(body[start:end], "-SkipCodexMachineState") {
+			return start
+		}
+		offset = end
 	}
 }

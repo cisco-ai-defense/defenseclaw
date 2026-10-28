@@ -68,11 +68,9 @@ class TestCheckSchemasResourceEnum(unittest.TestCase):
                 "cursor",
                 "devin",
                 "copilot",
-                "openhands",
         "antigravity",
         "opencode",
         "amp",
-        "omnigent",
         "kiro",
                 # Sentinel set by telemetry/resource.go when more than one
                 # connector is active (multi-connector install). Not a

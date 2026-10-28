@@ -153,12 +153,12 @@ func sandboxUnavailableText(avail sandboxAvailability) string {
 // sandboxDriverClaim checks the compute driver the caller's daemon chose
 // at sandbox start (its own KVM probe, as the user) against
 // enterprise.openshell.driver and the caller's driver_fallback under floor
-// F, and returns the driver and reason to register, or the refusal text. A
+// F, and returns the driver and reason to register, or a typed refusal. A
 // daemon that names no driver gets the gateway's own view (avail). The
 // docker fallback is only for a MicroVM configuration on Linux whose
 // fallback is docker, and only with a fallback reason; a profile's
 // driver_fallback: none refuses it.
-func sandboxDriverClaim(cfg *config.Config, goos string, floor config.OpenShellAdminConfig, driver, reason string, avail sandboxAvailability) (string, string, string) {
+func sandboxDriverClaim(cfg *config.Config, goos string, floor config.OpenShellAdminConfig, driver, reason string, avail sandboxAvailability) (string, string, *sandboxrelay.Refusal) {
 	want := sandboxDriverFor(cfg, goos)
 	if driver == "" {
 		driver, reason = avail.Driver, avail.DriverReason
@@ -170,20 +170,31 @@ func sandboxDriverClaim(cfg *config.Config, goos string, floor config.OpenShellA
 			want = config.EnterpriseOpenShellDriverVM
 		}
 		if driver != want {
-			return "", "", "Your organization runs sandboxes on the " + want + " driver on this computer."
+			return "", "", sandboxDriverSwitchRefusal(driver, want)
 		}
-		return driver, openshell.DriverReasonConfigured, ""
+		return driver, openshell.DriverReasonConfigured, nil
+	case driver == config.EnterpriseOpenShellDriverDocker && reason == openshell.DriverReasonConfigured:
+		// A daemon holding the earlier explicit Docker configuration must
+		// refresh it before claiming a VM or an auto-selected fallback. It
+		// receives no registration or permission to keep the old choice.
+		return "", "", sandboxDriverSwitchRefusal(driver, want)
 	case driver == config.EnterpriseOpenShellDriverVM:
 		if want == config.EnterpriseOpenShellDriverAuto {
-			return driver, openshell.DriverReasonKVMAvailable, ""
+			return driver, openshell.DriverReasonKVMAvailable, nil
 		}
-		return driver, openshell.DriverReasonConfigured, ""
+		return driver, openshell.DriverReasonConfigured, nil
 	case driver != config.EnterpriseOpenShellDriverDocker || !openshell.IsFallbackReason(reason):
-		return "", "", "The sandbox request is malformed: unknown compute driver choice."
+		return "", "", &sandboxrelay.Refusal{Reason: sandboxrelay.ReasonUnavailable, Message: "The sandbox request is malformed: unknown compute driver choice."}
 	case sandboxDriverFallbackFor(cfg, goos, floor) != config.EnterpriseOpenShellFallbackDocker:
-		return "", "", sandboxUnavailableText(sandboxVMRequired(reason))
+		return "", "", &sandboxrelay.Refusal{Reason: sandboxrelay.ReasonUnavailable, Message: sandboxUnavailableText(sandboxVMRequired(reason))}
 	}
-	return driver, reason, ""
+	return driver, reason, nil
+}
+
+func sandboxDriverSwitchRefusal(running, selected string) *sandboxrelay.Refusal {
+	return &sandboxrelay.Refusal{Reason: sandboxrelay.DetailSetupChanging,
+		Message: "Your sandbox service still uses the " + running + " driver, but the current sandbox configuration selects " + selected +
+			". Stop your sandboxes with `defenseclaw sandbox stop NAME`, then retry the command so the authorized update can finish."}
 }
 
 func sandboxOperational(cfg *config.Config, floor config.OpenShellAdminConfig) sandboxrelay.OperationalSettings {
@@ -227,6 +238,9 @@ func sandboxEnterprise(cfg *config.Config, floor config.OpenShellAdminConfig) sa
 	if out.Install == "" {
 		out.Install = "prerequisite"
 	}
+	// The release the daemon installs in setup mode (the 1.0.3 pin "0.1.3"
+	// runs no sandbox), as ensure renders it.
+	out.Version, _ = openshell.ManagedSetupPin(out.Install == config.EnterpriseOpenShellInstallSetup, strings.TrimSpace(out.Version))
 	if out.GatewayPort == 0 {
 		out.GatewayPort = config.DefaultEnterpriseOpenShellGatewayPort
 	}
@@ -235,9 +249,8 @@ func sandboxEnterprise(cfg *config.Config, floor config.OpenShellAdminConfig) sa
 }
 
 // sandboxRenderedGateway is the gateway.toml the lifecycle renders from
-// enterprise.openshell (<ConfigDir>/openshell, root's, world-readable, no
-// secrets) and the digest of it and gateway.env, as `ensure` computes it
-// (openshell.RenderedDigest); "" for both before the first render.
+// enterprise.openshell and its independent pinned digest. Reading a digest
+// of gateway.toml itself would accept a hand edit as its own baseline.
 var sandboxRenderedGateway = func(goos string) (path, digest string) {
 	layout, err := managed.StandaloneLayoutFor(goos)
 	if err != nil || layout.ConfigDir == "" {
@@ -245,15 +258,14 @@ var sandboxRenderedGateway = func(goos string) (path, digest string) {
 	}
 	dir := filepath.Join(layout.ConfigDir, "openshell")
 	path = filepath.Join(dir, openshell.GatewayTOMLFile)
-	tomlData, err := os.ReadFile(path)
-	if err != nil {
+	if _, err := os.Stat(path); err != nil {
 		return "", ""
 	}
-	envData, err := os.ReadFile(filepath.Join(dir, openshell.GatewayEnvFile))
+	digest, err = openshell.ReadRenderedGatewayDigest(filepath.Join(dir, openshell.GatewayRenderedDigestFile))
 	if err != nil {
-		envData = nil
+		return path, "invalid"
 	}
-	return path, openshell.RenderedDigest(tomlData, envData)
+	return path, digest
 }
 
 // sandboxSettingsDigest digests the host sandbox settings a daemon runs
@@ -291,6 +303,10 @@ func (a *APIServer) handleSandboxSettings(w http.ResponseWriter, r *http.Request
 	}
 	cfg := a.liveBaseConfig(r.Context())
 	match := a.sandboxMatchPeer(r.Context(), peer, connectorName, 0)
+	if match.decision.Refused != "" {
+		sandboxRefuseView(w, match.decision)
+		return
+	}
 	floor, floorDigest, err := sandboxFloorFor(cfg, match.decision.Name)
 	if err != nil {
 		writeSandboxReason(w, sandboxrelay.ReasonPolicyUnloadable, sandboxTextUnloadable)
@@ -367,7 +383,7 @@ var sandboxResolveEffective = func(cfg *config.Config, floor config.OpenShellAdm
 		// Managed hosts are copy-only (D2).
 		Copy: true, Safe: f.Safe, Yolo: f.Yolo, Unmask: slices.Clone(f.Unmask), HostPorts: slices.Clone(f.HostPorts),
 		NoMCP: f.NoMCP, Learn: f.Learn, ProcessTree: f.ProcessTree, CPU: f.CPU, Memory: f.Memory,
-		RepoPolicy: in.Repo, FloorProfile: in.Profile,
+		RepoPolicy: in.Repo, FloorProfile: profileUserLabel(in.Profile),
 		Subject: &subject, Floor: &floor, UserPack: in.Req.UserPack, ProjectReal: in.Req.ProjectReal,
 	})
 }
@@ -540,6 +556,10 @@ func (a *APIServer) handleSandboxResolve(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	match := a.sandboxMatchPeer(r.Context(), peer, req.Connector, sandboxResolveWait)
+	if match.decision.Refused != "" {
+		refuse(sandboxrelay.ReasonUnavailable, match.decision.Refused, baseAccess)
+		return
+	}
 	attempt.Profile, attempt.ProfileMatch, attempt.MatchedGroup = match.decision.Name, match.decision.Match, match.decision.MatchedGroup
 	attempt.ProfileDigest, attempt.Provisional = match.decision.Digest, match.provisional
 	floor, floorDigest, err := sandboxFloorFor(cfg, match.decision.Name)
@@ -563,8 +583,8 @@ func (a *APIServer) handleSandboxResolve(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	driver, driverReason, refusal := sandboxDriverClaim(cfg, runtime.GOOS, floor, req.Driver, req.DriverReason, avail)
-	if refusal != "" {
-		refuse(sandboxrelay.ReasonUnavailable, refusal, access)
+	if refusal != nil {
+		refuse(refusal.Reason, refusal.Message, access)
 		return
 	}
 	if floor.Allowed != nil && !*floor.Allowed {
@@ -629,9 +649,11 @@ func (a *APIServer) handleSandboxResolve(w http.ResponseWriter, r *http.Request)
 		ProjectReal: req.ProjectReal, Driver: driver, DriverReason: driverReason, OpenShell: req.OpenShell.Version,
 		InstallMode: sandboxEnterprise(cfg, floor).Install, CreatedAt: auth.clock(),
 	}
+	reg.ProfileMembers, _ = config.ProfileMeetMembers(reg.Profile)
 	if !match.provisional {
 		created := match.decision.Name
 		reg.CreateProfile = &created
+		reg.CreateProfileMembers = slices.Clone(reg.ProfileMembers)
 	}
 	run := &sandboxreg.Run{
 		Flags: req.Flags, RepoOverlay: req.RepoOverlay, UserPack: req.UserPack,
@@ -649,6 +671,7 @@ func (a *APIServer) handleSandboxResolve(w http.ResponseWriter, r *http.Request)
 	}
 	stored, _, _ := auth.store.Get(peer.UID, id)
 	sandboxRecordResolved(a, stored)
+	bannerProfile, bannerDescription := sandboxProfileLabel(cfg, stored.Profile, stored.ProfileMatch)
 	a.writeJSON(w, http.StatusOK, sandboxrelay.ResolveResponse{
 		V: sandboxrelay.WireVersion,
 		Registration: sandboxrelay.RegistrationView{
@@ -657,7 +680,7 @@ func (a *APIServer) handleSandboxResolve(w http.ResponseWriter, r *http.Request)
 		},
 		Effective: effective, RequiredPack: requiredPack, Operational: sandboxOperational(cfg, floor), MCPKept: kept, MCPSkipped: skipped,
 		Banner: sandboxrelay.BannerView{
-			Profile: stored.Profile, Description: sandboxProfileDescription(cfg, stored.Profile),
+			Profile: bannerProfile, Description: bannerDescription,
 			Provisional: stored.Provisional, PolicyDigest: stored.EffectiveDigest,
 		},
 		Generation: a.sandboxViewGeneration(cfg, stored),
@@ -865,7 +888,7 @@ func (a *APIServer) serveSandboxCurrent(w http.ResponseWriter, r *http.Request, 
 	provisional := reg.Provisional
 	current := sandboxrelay.CurrentPolicy{
 		V: sandboxrelay.WireVersion, Generation: a.sandboxViewGeneration(cfg, reg),
-		Floor: &floor, RequiredPack: requiredPack, Digest: reg.EffectiveDigest, Profile: reg.Profile, Provisional: &provisional,
+		Floor: &floor, RequiredPack: requiredPack, Digest: reg.EffectiveDigest, Profile: sandboxUserProfile(cfg, reg), Provisional: &provisional,
 		UpdatedAt: sandboxreg.PolicyUpdatedAt(reg),
 	}
 	minProfile := floor.MinProfile
@@ -920,6 +943,10 @@ func (a *APIServer) sandboxScope(w http.ResponseWriter, r *http.Request, auth *s
 			return sandboxOwnScope{}, false
 		}
 		reg = a.sandboxRematchIfDue(r.Context(), auth, peer, reg)
+		if match := a.sandboxMatchPeer(r.Context(), peer, reg.Connector, sandboxExplainLookupIn); match.decision.Refused != "" {
+			sandboxRefuseView(w, match.decision)
+			return sandboxOwnScope{}, false
+		}
 		return sandboxOwnScope{
 			reg: reg, registered: true, connector: reg.Connector,
 			match: sandboxMatch{
@@ -936,7 +963,18 @@ func (a *APIServer) sandboxScope(w http.ResponseWriter, r *http.Request, auth *s
 	if !a.sandboxDecide(w, r, peer, connectorName) {
 		return sandboxOwnScope{}, false
 	}
-	return sandboxOwnScope{connector: connectorName, match: a.sandboxMatchPeer(r.Context(), peer, connectorName, sandboxExplainLookupIn)}, true
+	match := a.sandboxMatchPeer(r.Context(), peer, connectorName, sandboxExplainLookupIn)
+	if match.decision.Refused != "" {
+		sandboxRefuseView(w, match.decision)
+		return sandboxOwnScope{}, false
+	}
+	return sandboxOwnScope{connector: connectorName, match: match}, true
+}
+
+// sandboxRefuseView does not expose Name: it may include a candidate
+// profile whose membership was not proven for this account.
+func sandboxRefuseView(w http.ResponseWriter, decision profileDecision) {
+	writeSandboxReason(w, sandboxrelay.ReasonUnavailable, decision.Refused)
 }
 
 // sandboxScopeFloor is the floor of scope: its sandbox's registration floor
@@ -949,23 +987,59 @@ func sandboxScopeFloor(cfg *config.Config, scope sandboxOwnScope) (config.OpenSh
 	return sandboxFloorFor(cfg, scope.match.decision.Name)
 }
 
+// sandboxTextProfileWithheld is the explain description of a decision whose
+// profiles are withheld (sandboxProfileWithheld).
+const sandboxTextProfileWithheld = "More than one guardrail profile may apply until your identity is confirmed: the strictest " +
+	"combination of them is enforced, which can be stricter than the policy shown here."
+
+// sandboxProfileWithheld reports whether the caller's profile decision was
+// taken on identity facts that are not proven (default_lookup_failed) and
+// is not the default profile: its profile, or a member of its combination,
+// may be another account's, so the caller's views name and show none of it.
+func sandboxProfileWithheld(cfg *config.Config, profile, match string) bool {
+	return cfg != nil && match == profileMatchDefaultLookupFailed && strings.TrimSpace(profile) != strings.TrimSpace(cfg.Guardrail.DefaultProfile)
+}
+
+// sandboxProfileLabel is how the caller's own views name profile, matched
+// by match: profileUserLabel, and profileMeetLabel with no description when
+// its details are withheld (sandboxProfileWithheld).
+func sandboxProfileLabel(cfg *config.Config, profile, match string) (label, description string) {
+	if sandboxProfileWithheld(cfg, profile, match) {
+		return profileMeetLabel, ""
+	}
+	return profileUserLabel(profile), sandboxProfileDescription(cfg, profile)
+}
+
+// sandboxUserProfile is the name of reg's profile in its owner's views.
+func sandboxUserProfile(cfg *config.Config, reg sandboxreg.Registration) string {
+	label, _ := sandboxProfileLabel(cfg, reg.Profile, reg.ProfileMatch)
+	return label
+}
+
 // sandboxOverlayKeys are the floor keys a profile's sandbox section sets
 // (by their config names).
+// A meet's are the keys any of its members' sections sets.
 func sandboxOverlayKeys(cfg *config.Config, profile string) map[string]bool {
 	keys := map[string]bool{}
 	if cfg == nil || profile == "" {
 		return keys
 	}
-	p, ok := cfg.Guardrail.Profiles[profile]
-	if !ok || p.Sandbox == nil {
-		return keys
+	members := []string{profile}
+	if meet, ok := config.ProfileMeetMembers(profile); ok {
+		members = meet
 	}
-	v := reflect.ValueOf(*p.Sandbox)
-	t := v.Type()
-	for i := range t.NumField() {
-		name, _, _ := strings.Cut(t.Field(i).Tag.Get("mapstructure"), ",")
-		if name != "" && !v.Field(i).IsZero() {
-			keys[name] = true
+	for _, member := range members {
+		p, ok := cfg.Guardrail.Profiles[member]
+		if !ok || p.Sandbox == nil {
+			continue
+		}
+		v := reflect.ValueOf(*p.Sandbox)
+		t := v.Type()
+		for i := range t.NumField() {
+			name, _, _ := strings.Cut(t.Field(i).Tag.Get("mapstructure"), ",")
+			if name != "" && !v.Field(i).IsZero() {
+				keys[name] = true
+			}
 		}
 	}
 	return keys
@@ -998,15 +1072,29 @@ func (a *APIServer) handleSandboxExplain(w http.ResponseWriter, r *http.Request)
 		writeSandboxReason(w, sandboxrelay.ReasonPolicyUnloadable, sandboxTextUnloadable)
 		return
 	}
+	label, description := profileUserLabel(profile), sandboxProfileDescription(cfg, profile)
+	if sandboxProfileWithheld(cfg, profile, scope.match.decision.Match) {
+		// The profiles that may apply include ones not proven to be the
+		// caller's, possibly another account's: the floor enforced stays
+		// theirs combined, but the caller is shown only the organization's
+		// floor and its default profile's (privacy: users see only their own
+		// effective policy).
+		if floor, _, err = sandboxFloorFor(cfg, strings.TrimSpace(cfg.Guardrail.DefaultProfile)); err != nil {
+			writeSandboxReason(w, sandboxrelay.ReasonPolicyUnloadable, sandboxTextUnloadable)
+			return
+		}
+		profile, label, description = strings.TrimSpace(cfg.Guardrail.DefaultProfile), profileMeetLabel, sandboxTextProfileWithheld
+	}
 	out := sandboxapi.ManagedExplain{
-		Profile: profile, Description: sandboxProfileDescription(cfg, profile),
+		Profile: label, Description: description,
 		Match: scope.match.decision.Match, MatchedGroup: scope.match.decision.MatchedGroup,
 		Provisional: scope.match.provisional, Allowed: floor.Allowed == nil || *floor.Allowed,
 		RequiredFor: slices.Clone(floor.RequiredFor), WhenUnavailable: floor.WhenUnavailable,
 		AllowedHarnesses: slices.Clone(floor.AllowedHarnesses), AllowedCredentials: slices.Clone(floor.AllowedCredentials),
 		EgressAllowOnly: slices.Clone(floor.EgressAllowOnly), EgressBlock: slices.Clone(floor.EgressBlock),
 		UserApprovals: floor.UserApprovals, AllowUnblock: floor.AllowUnblock == nil || *floor.AllowUnblock,
-		ForeignSandboxes: floor.ForeignSandboxes,
+		// The action in force, stop when the floor leaves it unset (r103 GAP-0225).
+		ForeignSandboxes: sandboxForeignAction(floor),
 		WorkdirMode:      "copy", AllowMount: false, AllowHostPorts: floor.AllowHostPorts == nil || *floor.AllowHostPorts,
 		AllowYolo: floor.AllowYolo == nil || *floor.AllowYolo, OnSilence: floor.OnSilence, MaxSilenceAfter: floor.MaxSilenceAfter,
 		ProcessTree: floor.ProcessTree != nil && *floor.ProcessTree, DeleteStoppedAfter: floor.DeleteStoppedAfter,
@@ -1369,6 +1457,12 @@ func (a *APIServer) handleSandboxDecide(w http.ResponseWriter, r *http.Request) 
 		writeSandboxReason(w, sandboxrelay.ReasonRegistrationRevoked, sandboxTextRegistrationGone)
 		return
 	}
+	if match := a.sandboxMatchPeer(r.Context(), peer, reg.Connector, 0); match.decision.Refused != "" {
+		// The floor a decision is checked against is the person's own:
+		// none is proven while a fact an assignment needs is not.
+		sandboxRefuseView(w, match.decision)
+		return
+	}
 	if !sandboxDecisionStored(req) && !sandboxAdmitsCalls(w, auth, reg) {
 		// A session-only answer is for the sandbox while it runs; a stopped
 		// one has nothing to apply it to (GAP-0574). A saved decision is
@@ -1391,7 +1485,7 @@ func (a *APIServer) handleSandboxDecide(w http.ResponseWriter, r *http.Request) 
 			// (GAP-0632).
 			sandboxRecordAskDecided(r.Context(), a, reg, req, sandboxAskOutcome{Refused: true})
 			writeSandboxRefusal(w, http.StatusForbidden, sandboxrelay.ReasonDecisionRefused,
-				sandboxapi.AccessRefusedWhy(refused.Message, refused.Rule, req.Host, reg.Profile, reg.SandboxName, floor.RequestAccess))
+				sandboxapi.AccessRefusedWhy(refused.Message, refused.Rule, req.Host, sandboxUserProfile(cfg, reg), reg.SandboxName, floor.RequestAccess))
 			return
 		}
 		fmt.Fprintf(os.Stderr, "[sandbox-authority] decision check uid=%d: %v\n", peer.UID, err)
@@ -1509,7 +1603,7 @@ func (a *APIServer) handleSandboxEvents(w http.ResponseWriter, r *http.Request) 
 		switch ev.Kind {
 		case sandboxrelay.EventForeignSandbox, sandboxrelay.EventForeignRule, sandboxrelay.EventForeignContainer,
 			sandboxrelay.EventSettingsDrift, sandboxrelay.EventAccessRefused, sandboxrelay.EventAccountBusy,
-			sandboxrelay.EventSandboxLifecycle, sandboxrelay.EventSandboxEgress:
+			sandboxrelay.EventSandboxLifecycle, sandboxrelay.EventSandboxEgress, sandboxrelay.EventSandboxAskDecision:
 		default:
 			writeSandboxRefusal(w, http.StatusBadRequest, "invalid_request", sandboxTextBadRequest)
 			return

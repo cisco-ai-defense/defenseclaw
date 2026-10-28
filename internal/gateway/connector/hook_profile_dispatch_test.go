@@ -22,6 +22,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"slices"
+	"strings"
 	"testing"
 )
 
@@ -47,9 +48,7 @@ func TestHookProfile_HasDispatchCallbacks(t *testing.T) {
 		{"hermes", func() Connector { return NewHermesConnector() }, false, true, true},
 		{"cursor", func() Connector { return NewCursorConnector() }, true, true, true},
 		{"copilot", func() Connector { return NewCopilotConnector() }, true, true, true},
-		// OpenHands uses Decode only to map the CLI's PascalCase SDK
 		// event_type onto the contract's snake_case event names.
-		{"openhands", func() Connector { return NewOpenHandsConnector() }, true, true, true},
 		// Antigravity uses Decode because agy v1 ships a nested
 		// `toolCall` wire shape that the generic normalizer cannot read.
 		// Cursor uses Decode only for its connector-native
@@ -60,7 +59,6 @@ func TestHookProfile_HasDispatchCallbacks(t *testing.T) {
 		// hookOnlyProfileRespond opencode case.
 		{"opencode", func() Connector { return NewOpenCodeConnector() }, false, true, true},
 		{"amp", func() Connector { return NewAMPConnector() }, false, true, true},
-		{"omnigent", func() Connector { return NewOmnigentConnector() }, false, true, true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -112,6 +110,28 @@ func TestCopilotProfileDecodeUsesDocumentedToolArgsAuthority(t *testing.T) {
 	})
 	if !malformed.ToolArgsAuthoritative || len(malformed.ToolArgs) != 0 {
 		t.Fatalf("non-object Copilot toolArgs became trusted: %+v", malformed)
+	}
+}
+
+func TestCopilotPermissionRequestEditProjectsNativeDiff(t *testing.T) {
+	path := "/home/alice/project/notes.txt"
+	diff := "\ndiff --git a/home/alice/project/notes.txt b/home/alice/project/notes.txt\n" +
+		"index 1234567..abcdef0 100644\n--- a/home/alice/project/notes.txt\n+++ b/home/alice/project/notes.txt\n" +
+		"@@ -1,2 +1,2 @@\n-# base\n+# reviewed\n \n"
+	got := copilotProfileDecode(map[string]interface{}{
+		"hookName": "permissionRequest", "toolName": "edit",
+		"toolInput": map[string]interface{}{"file_path": path, "diff": diff},
+	})
+	if !got.ToolArgsAuthoritative || string(got.ToolArgs) !=
+		`{"new_str":"# reviewed","old_str":"# base","path":"/home/alice/project/notes.txt"}` {
+		t.Fatalf("native permission edit args = %s authoritative=%t", got.ToolArgs, got.ToolArgsAuthoritative)
+	}
+	bad := copilotProfileDecode(map[string]interface{}{
+		"hookName": "permissionRequest", "toolName": "edit",
+		"toolInput": map[string]interface{}{"file_path": path, "diff": strings.Replace(diff, "+++ b/home/alice/project/notes.txt", "+++ b/home/alice/project/other.txt", 1)},
+	})
+	if !bad.ToolArgsAuthoritative || len(bad.ToolArgs) != 0 {
+		t.Fatalf("mismatched diff became trusted: %+v", bad)
 	}
 }
 
@@ -340,7 +360,10 @@ func TestClaudeCodeProfileMapVerdict(t *testing.T) {
 		{"policy_config_change_is_advisory", "block", "ConfigChange", "action", map[string]interface{}{"source": "policy_settings"}, "allow", true},
 		{"user_config_change_is_enforceable", "block", "ConfigChange", "action", map[string]interface{}{"source": "user_settings"}, "block", false},
 		{"action_alert_surfaces", "alert", "UserPromptSubmit", "action", nil, "alert", false},
-		{"action_confirm_ask_event", "confirm", "PreToolUse", "action", nil, "confirm", false},
+		{"action_confirm_ask_event", "confirm", "PreToolUse", "action", map[string]interface{}{"permission_mode": "default"}, "confirm", false},
+		{"action_confirm_accept_edits_blocks", "confirm", "PreToolUse", "action", map[string]interface{}{"permission_mode": "acceptEdits"}, "block", false},
+		{"action_confirm_without_mode_blocks", "confirm", "PreToolUse", "action", nil, "block", false},
+		{"observe_confirm_stays_allow", "confirm", "PreToolUse", "observe", map[string]interface{}{"permission_mode": "acceptEdits"}, "allow", false},
 		{"action_confirm_non_ask_event_demotes_to_alert", "confirm", "PostToolUse", "action", nil, "alert", false},
 	}
 	for _, tc := range cases {
@@ -676,6 +699,19 @@ func TestAntigravityProfileRespond_Parity(t *testing.T) {
 			expected: map[string]interface{}{
 				"decision": "deny",
 				"reason":   "matched policy: deny-rm-rf",
+			},
+		},
+		{
+			// GAP-0405: a plain ask honors a cached Always Allow grant;
+			// force_ask always prompts.
+			name:   "PreToolUse_action_mode_confirm_forces_a_fresh_prompt",
+			event:  "PreToolUse",
+			action: "confirm",
+			raw:    "confirm",
+			reason: "matched policy: C2-WEBHOOK-SITE",
+			expected: map[string]interface{}{
+				"decision": "force_ask",
+				"reason":   "matched policy: C2-WEBHOOK-SITE",
 			},
 		},
 		{
@@ -1172,35 +1208,6 @@ func TestCursorProfileRespond_BeforeSubmitPromptBlockUsesContinue(t *testing.T) 
 	}
 	if _, hasPerm := out.Output["permission"]; hasPerm {
 		t.Errorf("beforeSubmitPrompt block must not rely on `permission` (Cursor ignores it): %#v", out.Output)
-	}
-}
-
-func TestOpenHandsProfileRespondConfirmContextIsPromptOnly(t *testing.T) {
-	caps := NewOpenHandsConnector().HookCapabilities(SetupOpts{})
-	for _, tc := range []struct {
-		event string
-		want  map[string]interface{}
-	}{
-		{event: "user_prompt_submit", want: map[string]interface{}{"additionalContext": "review this finding"}},
-		{event: "UserPromptSubmit", want: map[string]interface{}{"additionalContext": "review this finding"}},
-		{event: "pre_tool_use", want: nil},
-		{event: "stop", want: nil},
-	} {
-		t.Run(tc.event, func(t *testing.T) {
-			out := hookOnlyProfileRespond(HookRespondInput{
-				Req: HookProfileRequest{
-					ConnectorName: "openhands",
-					HookEventName: tc.event,
-				},
-				Action:            "alert",
-				RawAction:         "confirm",
-				AdditionalContext: "review this finding",
-				Caps:              caps,
-			})
-			if out.FieldName != "hook_output" || !reflect.DeepEqual(out.Output, tc.want) {
-				t.Fatalf("OpenHands %s confirm response = %#v/%#v, want hook_output/%#v", tc.event, out.FieldName, out.Output, tc.want)
-			}
-		})
 	}
 }
 

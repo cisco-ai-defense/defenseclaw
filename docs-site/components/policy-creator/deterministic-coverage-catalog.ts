@@ -332,6 +332,11 @@ export const YARA_RULES = [
     category: 'Financial action',
   },
   {
+    id: 'defenseclaw_hidden_credential_exfiltration',
+    description: 'Instructions to secretly read and exfiltrate credential files',
+    category: 'Credential harvesting',
+  },
+  {
     id: 'defenseclaw_exact_destructive_user_data',
     description: 'Narrow destructive operations against owned user data',
     category: 'Destructive action',

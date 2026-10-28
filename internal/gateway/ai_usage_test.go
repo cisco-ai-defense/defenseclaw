@@ -20,6 +20,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -323,8 +324,22 @@ func TestHandleAIUsageRedactsStoredRawPaths(t *testing.T) {
 	if err := json.Unmarshal(w.Body.Bytes(), &page); err != nil || w.Code != http.StatusOK {
 		t.Fatalf("ide-plugins = %d %s", w.Code, w.Body.String())
 	}
-	if page.ScanID != report.Summary.ScanID || page.Total != 3 || page.Counts.Total != 3 || page.Counts.Installations != 2 || len(page.Installations) != 2 || page.NextCursor != "1" || len(page.Plugins) != 1 || strings.Contains(w.Body.String(), home) {
+	if page.ScanID != report.Summary.ScanID || page.Total != 3 || page.Counts.Total != 3 || page.Counts.Installations != 2 || len(page.Installations) != 2 || !strings.HasPrefix(page.NextCursor, "1.") || len(page.Plugins) != 1 || strings.Contains(w.Body.String(), home) {
 		t.Fatalf("ide-plugins page = %s", w.Body.String())
+	}
+	// The next page continues the same scan; a cursor of another scan, or
+	// without one, is refused (GAP-1125).
+	w = httptest.NewRecorder()
+	api.handleAIUsageIDEPlugins(w, httptest.NewRequest(http.MethodGet, "/api/v1/ai-usage/ide-plugins?limit=1&cursor="+page.NextCursor, nil))
+	if w.Code != http.StatusOK {
+		t.Fatalf("second page = %d %s", w.Code, w.Body.String())
+	}
+	for cursor, want := range map[string]int{"1": http.StatusBadRequest, "1.000000000000": http.StatusConflict} {
+		w = httptest.NewRecorder()
+		api.handleAIUsageIDEPlugins(w, httptest.NewRequest(http.MethodGet, "/api/v1/ai-usage/ide-plugins?limit=1&cursor="+cursor, nil))
+		if w.Code != want {
+			t.Fatalf("cursor %q = %d %s, want %d", cursor, w.Code, w.Body.String(), want)
+		}
 	}
 	w = httptest.NewRecorder()
 	api.handleAIUsageIDEPlugins(w, httptest.NewRequest(http.MethodGet, "/api/v1/ai-usage/ide-plugins?ai_only=true", nil))
@@ -382,5 +397,52 @@ func TestSecureClientDiscoveryRejectsIDEInventoryMember(t *testing.T) {
 	api.handleAIUsageDiscovery(w, req)
 	if w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), "invalid JSON body") {
 		t.Fatalf("status = %d, body = %s", w.Code, w.Body.String())
+	}
+}
+
+func TestExternalDiscoveryRejectsSummaryThatCanonicalTelemetrySkips(t *testing.T) {
+	api := NewAPIServer("127.0.0.1:0", NewSidecarHealth(), nil, nil, nil, &config.Config{})
+	service := inventory.NewContinuousDiscoveryServiceWithOptions(
+		inventory.AIDiscoveryOptions{Enabled: true, DataDir: t.TempDir()}, nil)
+	t.Cleanup(func() { _, _ = service.CloseIfNeverStarted() })
+	api.SetAIDiscoveryService(service)
+	for _, tc := range []struct {
+		name, result, privacy string
+		count                 int
+		want                  int
+	}{
+		{"valid", "ok", "enhanced", 0, http.StatusOK},
+		{"unsupported result", "complete", "enhanced", 0, http.StatusBadRequest},
+		{"missing privacy", "ok", "", 0, http.StatusBadRequest},
+		{"negative count", "ok", "enhanced", -1, http.StatusBadRequest},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			body := fmt.Sprintf(`{"summary":{"scan_id":"%s","source":"sidecar","result":"%s","privacy_mode":"%s","total_signals":%d},"signals":[]}`,
+				strings.ReplaceAll(tc.name, " ", "-"), tc.result, tc.privacy, tc.count)
+			w := httptest.NewRecorder()
+			api.handleAIUsageDiscovery(w, httptest.NewRequest(http.MethodPost, "/api/v1/ai-usage/discovery", strings.NewReader(body)))
+			if w.Code != tc.want {
+				t.Fatalf("status = %d, want %d: %s", w.Code, tc.want, w.Body.String())
+			}
+		})
+	}
+}
+
+// A next_cursor names the scan its page came from: a newer scan's inventory
+// gives another generation, so a continuation cannot mix two scans' rows
+// (GAP-1125).
+func TestIDEInventoryCursorPinsTheScan(t *testing.T) {
+	at := time.Unix(1_760_000_000, 0)
+	first := &inventory.IDEInventory{ScanID: "scan-1", ScannedAt: at}
+	second := &inventory.IDEInventory{ScanID: "scan-2", ScannedAt: at.Add(time.Minute)}
+	cursor := "50." + ideInventoryGeneration(first)
+	offset, generation, ok := splitIDEInventoryCursor(cursor)
+	if !ok || offset != 50 || generation != ideInventoryGeneration(first) || generation == ideInventoryGeneration(second) {
+		t.Fatalf("cursor %q = %d %q %v", cursor, offset, generation, ok)
+	}
+	for _, bad := range []string{"50", "-1." + generation, "x." + generation, "50.zz", "50." + generation + "0"} {
+		if _, _, ok := splitIDEInventoryCursor(bad); ok {
+			t.Errorf("cursor %q accepted", bad)
+		}
 	}
 }

@@ -79,3 +79,43 @@ func TestSSSDAccountListedInItsPrimaryGroupOnly(t *testing.T) {
 		}
 	}
 }
+
+// W2B-G-enum review loop 4: the facts name the SID SSSD holds for the uid
+// (AccountSID), which binds the guardian's identity record to the account:
+// an account recreated under the same uid and name has another one. A SID
+// that SSSD maps back to another uid is not the account's.
+func TestSSSDDirectoryFactsNameTheAccountSID(t *testing.T) {
+	origNSS, origRealms, origPasswd, origGroup := nsswitchPath, hostRealms, localPasswdPath, localGroupPath
+	t.Cleanup(func() {
+		nsswitchPath, hostRealms, localPasswdPath, localGroupPath = origNSS, origRealms, origPasswd, origGroup
+	})
+	dir := t.TempDir()
+	nsswitchPath, localPasswdPath, localGroupPath = filepath.Join(dir, "nsswitch.conf"), filepath.Join(dir, "passwd"), filepath.Join(dir, "group")
+	for path, content := range map[string]string{nsswitchPath: "passwd: files sss\n", localPasswdPath: "", localGroupPath: ""} {
+		if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	hostRealms = func(context.Context) ([]Realm, error) {
+		return []Realm{{Domain: "corp.example.com", Name: "CORP.EXAMPLE.COM", ServerSoftware: "active-directory", ClientSoftware: "sssd"}}, nil
+	}
+	const sid = "S-1-5-21-1-2-3-1101"
+	for _, tc := range []struct {
+		name, mappedUID, want string
+	}{
+		{"the account's SID", "80001", sid},
+		{"a SID SSSD maps to another uid", "80002", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			startFakeSSSD(t, map[string]string{
+				"uid:80001": sid, `name:corp.example.com\alice`: sid, "sid:" + sid: tc.mappedUID, `name:CORP\alice`: sid,
+			})
+			account := commandResult{stdout: []byte("alice:*:80001:5000::/home/alice:/bin/bash\n")}
+			f := &fakeRun{results: map[string]commandResult{"passwd 80001": account, "-s sss passwd 80001": account}}
+			facts, err := newFakeNSS(f).DirectoryFactsWithoutGroupsForUID(80001, time.Now())
+			if err != nil || facts.AccountSID != tc.want {
+				t.Fatalf("AccountSID = %q (err %v), want %q", facts.AccountSID, err, tc.want)
+			}
+		})
+	}
+}

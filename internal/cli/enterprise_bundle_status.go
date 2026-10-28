@@ -7,6 +7,7 @@
 package cli
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -39,8 +40,11 @@ type bundleStatusResult struct {
 	Command       string `json:"command"`
 	OK            bool   `json:"ok"`
 	// BundleMode is true when the MDM installed the trust anchors.
-	BundleMode              bool                                  `json:"bundle_mode"`
-	Anchors                 string                                `json:"anchors,omitempty"`
+	BundleMode bool   `json:"bundle_mode"`
+	Anchors    string `json:"anchors,omitempty"`
+	// AnchorsSummary describes the installed trust anchors; absent when
+	// they are missing or fail their checks (see the warnings).
+	AnchorsSummary          *enterprisebundle.AnchorsSummary      `json:"anchors_summary,omitempty"`
 	Current                 *enterprisebundle.Ref                 `json:"current"`
 	LastGood                *enterprisebundle.Ref                 `json:"last_good"`
 	Floor                   uint64                                `json:"floor"`
@@ -70,6 +74,8 @@ rollback, the version floor, the last enforcing receipt, the last refusal
 and whether the running gateway enforces the current bundle digest.
 On Windows, status confirms an applied receipt left by an interrupted run
 only after the installed config and running gateway pass the confirm gate.
+Status warns gateway_unchecked when the running gateway cannot be asked. The
+receipt history keeps the last 20 receipts.
 Run it as root or an administrator.`,
 		Args:         bundleNoArgs,
 		SilenceUsage: true,
@@ -86,9 +92,9 @@ Run it as root or an administrator.`,
 				res.Errors, err = bundleRefusal(err)
 			}
 			res.OK = err == nil
-			if enterprisebundle.CodeOf(err) == enterprisebundle.CodeNotAdmin {
+			if code := enterprisebundle.CodeOf(err); code == enterprisebundle.CodeNotAdmin || code == enterprisebundle.CodeNotRoot {
 				// The protected state was not read. Do not present zero values as
-				// facts about the device in the privilege refusal.
+				// facts about the device in the privilege refusal (GAP-1052).
 				return printBundleResult(cmd, asJSON, struct {
 					SchemaVersion int           `json:"schema_version"`
 					Command       string        `json:"command"`
@@ -115,10 +121,15 @@ func bundleStatus(ctx context.Context, res *bundleStatusResult) error {
 		return &enterprisebundle.Error{Code: enterprisebundle.CodeNotManaged,
 			Detail: "this computer is not a standalone managed device; bundle status reports a device"}
 	}
+	var anchors *enterprisebundle.Anchors
+	var anchorsErr error
 	if path, err := bundleDefaultAnchors(); err == nil {
 		res.Anchors = path
 		_, statErr := os.Lstat(path)
 		res.BundleMode = statErr == nil
+		var raw []byte
+		anchors, raw, anchorsErr = enterprisebundle.ReadAnchorsFile(path, bundleAnchorTrust)
+		res.AnchorsSummary = enterprisebundle.SummarizeAnchors(anchors, raw)
 	}
 	store, err := bundleStore()
 	if err != nil {
@@ -234,7 +245,7 @@ func bundleStatus(ctx context.Context, res *bundleStatusResult) error {
 	} else if st.Current != nil {
 		signer = st.Current.SignerKeyID
 	}
-	if warning := bundleCurrentSignerWarning(res.Anchors, signer); warning != nil {
+	if warning := bundleAnchorsSignerWarning(res.Anchors, anchors, anchorsErr, signer); warning != nil {
 		res.Warnings = append(res.Warnings, *warning)
 	}
 	if currentReceipt != nil {
@@ -247,6 +258,8 @@ func bundleStatus(ctx context.Context, res *bundleStatusResult) error {
 	if !res.BundleMode {
 		res.Warnings = append(res.Warnings, enterprisebundle.Warning{Code: "anchor_missing",
 			Message: "no trust anchor file is installed, so this device does not take bundles"})
+	} else if warning := bundleAnchorsFileWarning(anchorsErr); warning != nil {
+		res.Warnings = append(res.Warnings, *warning)
 	}
 	policy := bundleGatewayPolicy(ctx)
 	if policy == nil {
@@ -258,8 +271,30 @@ func bundleStatus(ctx context.Context, res *bundleStatusResult) error {
 	if st.Current != nil {
 		addReceiptWarning(enterprisebundle.DigestWarningCode(signedExpected, policy.GatewayReportedDigest, gatewayComparable))
 	}
-	res.Applied = st.Current != nil && policy.GatewayReportedDigest != "" &&
+	res.Applied = st.Current != nil && policy.Applied && !policy.ConfigUnrecorded && policy.GatewayReportedDigest != "" &&
+		policy.EffectiveDigest == policy.GatewayReportedDigest &&
 		policy.GatewayReportedDigest == st.Current.EffectivePolicyDigest && policy.LastReloadError == ""
+	if st.Current != nil && !res.Applied && policy.Applied && !policy.ConfigUnrecorded && policy.LastReloadError == "" &&
+		policy.EffectiveDigest != "" && policy.EffectiveDigest == policy.GatewayReportedDigest {
+		// A confirmed receipt keeps the digest of the build that applied it.
+		// An upgrade can change the derived digest without changing the
+		// signed bundle. The state pins the manifest that was verified on
+		// apply; read it and its hashed files again with this build, then
+		// check its exact rendered config against the installed bytes. Anchor
+		// rotation after confirmation does not change what now enforces.
+		if digest, rendered, err := currentBuildBundleDigest(ctx, store, st.Current); err == nil && digest == policy.EffectiveDigest {
+			if installed, err := bundleInstalledConfig(runtime.GOOS); err == nil && bytes.Equal(installed, rendered) {
+				res.Applied = true
+				current := *st.Current
+				current.EffectivePolicyDigest = digest
+				res.Current = &current
+				if res.Bundle != nil && res.Bundle.BundleID == current.BundleID && res.Bundle.Version == current.Version &&
+					res.Bundle.State == enterprisebundle.StateConfirmed {
+					res.Bundle.EffectivePolicyDigest = digest
+				}
+			}
+		}
+	}
 	if policy.LastReloadError != "" {
 		res.Warnings = append(res.Warnings, enterprisebundle.Warning{Code: "policy_reload_rejected",
 			Message: "the gateway rejected its last reload and keeps enforcing the policy it last built"})
@@ -267,14 +302,24 @@ func bundleStatus(ctx context.Context, res *bundleStatusResult) error {
 	return nil
 }
 
+func currentBuildBundleDigest(ctx context.Context, store *enterprisebundle.Store, ref *enterprisebundle.Ref) (string, []byte, error) {
+	layout, err := enterprisebundle.Layout(runtime.GOOS)
+	if err != nil {
+		return "", nil, err
+	}
+	return enterprisebundle.VerifiedCurrentDigest(ctx, store, ref, runtime.GOOS,
+		enterprisebundle.DeviceLayoutFromManaged(layout), bundleDigester)
+}
+
 // bundleReceiptWarningMessage explains a warning code the confirmed
-// receipt recorded. Digest mismatch codes keep the generic text.
+// receipt recorded, in the lifecycle result's words where it has them
+// (receipt_publish_failed read as a digest mismatch, GAP-1013). Digest
+// mismatch codes keep the generic text.
 func bundleReceiptWarningMessage(code string, receipt *enterprisebundle.Receipt) string {
+	if message, ok := enterprisestatus.BundleReceiptWarningMessage(code); ok {
+		return message
+	}
 	switch code {
-	case enterprisebundle.WarnDigestUnverifiable:
-		return "the signer used a different product version, so its signed digest cannot be compared with this build's; bundle file hashes and the gateway-versus-installed digest were checked"
-	case enterprisebundle.WarnDigestLayoutUnverifiable:
-		return "the device's non-standard managed layout changed the effective digest; the signed digest matched this device's digest for the standard layout, and the gateway's enforcing digest was recorded"
 	case enterprisebundle.WarnConfirmedAfterInterrupt:
 		return "the run that applied this bundle ended before the gateway confirmed it; a later lifecycle run confirmed it once the gateway reported its policy"
 	case "capability_disabled":
@@ -295,10 +340,35 @@ func bundleCurrentSignerWarning(anchorsPath, signerKeyID string) *enterprisebund
 		return nil
 	}
 	anchors, err := enterprisebundle.LoadAnchors(anchorsPath, bundleAnchorTrust)
-	if err != nil {
+	return bundleAnchorsSignerWarning(anchorsPath, anchors, err, signerKeyID)
+}
+
+// bundleAnchorsSignerWarning is bundleCurrentSignerWarning for anchors the
+// caller already read from anchorsPath (loadErr: the read failed).
+func bundleAnchorsSignerWarning(anchorsPath string, anchors *enterprisebundle.Anchors, loadErr error, signerKeyID string) *enterprisebundle.Warning {
+	if anchorsPath == "" || signerKeyID == "" {
+		return nil
+	}
+	if loadErr != nil {
 		return &enterprisebundle.Warning{Code: "anchor_unreadable", Message: "the installed trust anchors could not be checked for the confirmed bundle signer"}
 	}
 	return bundleSignerWarning(anchors, signerKeyID)
+}
+
+// bundleAnchorsFileWarning explains an installed anchor file that fails its
+// checks (anchor_insecure, anchor_invalid), with or without a confirmed
+// bundle: anchors_summary is then absent and every bundle is refused until
+// the file is fixed. nil when the read succeeded.
+func bundleAnchorsFileWarning(loadErr error) *enterprisebundle.Warning {
+	if loadErr == nil {
+		return nil
+	}
+	code := enterprisebundle.CodeOf(loadErr)
+	if code != enterprisebundle.CodeAnchorInsecure {
+		code = enterprisebundle.CodeAnchorInvalid
+	}
+	return &enterprisebundle.Warning{Code: string(code),
+		Message: "the installed trust anchor file fails its checks, so this device refuses every bundle until the file is fixed: " + loadErr.Error()}
 }
 
 // bundleSignerWarning is key_unknown or key_revoked when anchors no longer
@@ -321,7 +391,7 @@ func bundleSignerWarning(anchors *enterprisebundle.Anchors, signerKeyID string) 
 // standard account (not_root), else state_invalid.
 func bundleStateError(err error) error {
 	if errors.Is(err, fs.ErrPermission) {
-		return &enterprisebundle.Error{Code: "not_root", Detail: "run this command as root or an administrator: the bundle state is readable only there"}
+		return &enterprisebundle.Error{Code: enterprisebundle.CodeNotRoot, Detail: "run this command as root or an administrator: the bundle state is readable only there"}
 	}
 	return &enterprisebundle.Error{Code: enterprisebundle.CodeStateInvalid, Detail: err.Error()}
 }
@@ -338,6 +408,9 @@ func printStatusText(w io.Writer, res *bundleStatusResult) {
 		mode = "on"
 	}
 	fmt.Fprintf(w, "Bundle mode: %s\n", mode)
+	if a := res.AnchorsSummary; a != nil {
+		fmt.Fprintf(w, "Trust anchors: tenant %s, %d keys, minimum version %d, sha256 %s\n", a.TenantID, len(a.Keys), a.MinVersion, a.SHA256[:12])
+	}
 	describe := func(label string, ref *enterprisebundle.Ref) {
 		if ref == nil {
 			fmt.Fprintf(w, "%s: none\n", label)

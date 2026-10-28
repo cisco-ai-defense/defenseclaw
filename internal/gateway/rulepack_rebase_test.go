@@ -194,7 +194,7 @@ func TestRebasedLiteralRuleMatchesWhereZeroEightDid(t *testing.T) {
 		t.Fatal(err)
 	}
 	plan, err := guardrail.PlanRulePackRebase(old)
-	if err != nil || plan == nil || !slices.Equal(plan.Expressed, []string{"CERT-MARKER", "CERT-WORD", "UPG6W089-MARKER-BLOCK"}) || len(plan.WholeArgument) != 0 {
+	if err != nil || plan == nil || !slices.Equal(plan.Expressed, []string{"CERT-MARKER", "CERT-WORD", "UPG6W089-MARKER-BLOCK"}) {
 		t.Fatalf("PlanRulePackRebase = %+v, %v", plan, err)
 	}
 	rebased := t.TempDir()

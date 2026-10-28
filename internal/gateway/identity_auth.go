@@ -14,9 +14,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/google/uuid"
 	"go.opentelemetry.io/otel/trace"
 
+	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
 	"github.com/defenseclaw/defenseclaw/internal/observability"
 	"github.com/defenseclaw/defenseclaw/internal/observability/router"
@@ -96,8 +96,26 @@ func verifiedAccountName(id, name string) string {
 // (identitySpoolMaxAge). The name only attributes the audit rows: it takes no
 // part in authorization, which keeps matching the name the account database
 // gave (managedHookPeer.Name).
+//
+// A uid is handed to the next account once its account is removed, so a
+// record keyed by a uid names its holder only when the gateway itself last
+// saw the uid under that same name (managedHookPeerLastName); otherwise the
+// rows keep the uid and no name, rather than the previous holder's
+// (GAP-1195). A SID is never reused.
 func spooledAccountName(id string) string {
-	record, ok := readIdentitySpoolFacts(id, time.Now())
+	now := time.Now()
+	var record enterprisehooks.IdentitySpoolRecord
+	var ok bool
+	if useridentity.KindForID(id) == useridentity.KindPOSIXUID {
+		uid, err := strconv.Atoi(id)
+		if err != nil {
+			return ""
+		}
+		// No SID is given, so no other-account error is possible.
+		record, ok, _ = readIdentitySpoolFactsForAccount(id, strings.TrimSpace(managedHookPeerLastName(uid)), "", now)
+	} else {
+		record, ok = readIdentitySpoolFacts(id, now)
+	}
 	if !ok {
 		return ""
 	}
@@ -151,6 +169,14 @@ type identityObservedMark struct {
 	fingerprint string
 }
 
+// identityObservedMaxUsers bounds the users remembered. At the bound, the
+// marks older than the cache lifetime are dropped, and while every mark is
+// younger the oldest one is: a user seen for the first time always gets its
+// record. Emptying the whole table let every recent user's record out again
+// at once (GAP-1130), and making a new user wait for a mark to age out lost
+// its first record, the one compliance needs. One new user lets one
+// remembered user's record out again, so the records stay at most one per
+// request of a user past the bound.
 const identityObservedMaxUsers = 4096
 
 func identityObservedBegin(userID string, facts useridentity.DirectoryFacts, now time.Time) (func(bool), bool) {
@@ -160,10 +186,14 @@ func identityObservedBegin(userID string, facts useridentity.DirectoryFacts, now
 	if identityObservedState.pending == nil {
 		identityObservedState.pending = map[string]bool{}
 	}
+	if identityObservedState.last == nil {
+		identityObservedState.last = map[string]identityObservedMark{}
+	}
 	if identityObservedState.pending[userID] {
 		return nil, false
 	}
-	if last, ok := identityObservedState.last[userID]; ok && last.fingerprint == fingerprint && now.Sub(last.at) < identityDirectoryTTL {
+	last, known := identityObservedState.last[userID]
+	if known && last.fingerprint == fingerprint && now.Sub(last.at) < identityDirectoryTTL {
 		return nil, false
 	}
 	identityObservedState.pending[userID] = true
@@ -174,11 +204,33 @@ func identityObservedBegin(userID string, facts useridentity.DirectoryFacts, now
 		if !success {
 			return
 		}
-		if len(identityObservedState.last) >= identityObservedMaxUsers {
-			identityObservedState.last = map[string]identityObservedMark{}
+		if _, known := identityObservedState.last[userID]; !known {
+			identityObservedMakeRoomLocked(now)
 		}
 		identityObservedState.last[userID] = identityObservedMark{at: now, fingerprint: fingerprint}
 	}, true
+}
+
+// identityObservedMakeRoomLocked makes room for one more remembered user at
+// the bound: it drops the marks past the cache lifetime, or, when every mark
+// is younger, the oldest one.
+func identityObservedMakeRoomLocked(now time.Time) {
+	if len(identityObservedState.last) < identityObservedMaxUsers {
+		return
+	}
+	oldestID, oldest := "", time.Time{}
+	for id, mark := range identityObservedState.last {
+		if now.Sub(mark.at) >= identityDirectoryTTL {
+			delete(identityObservedState.last, id)
+			continue
+		}
+		if oldestID == "" || mark.at.Before(oldest) {
+			oldestID, oldest = id, mark.at
+		}
+	}
+	if len(identityObservedState.last) >= identityObservedMaxUsers {
+		delete(identityObservedState.last, oldestID)
+	}
 }
 
 // identityFactsFingerprint digests the directory facts an identity.observed
@@ -245,7 +297,7 @@ func observeIdentity(ctx context.Context, emitter sidecarRuntimeEmitter, subject
 		}
 		builder, buildErr := observability.NewFamilyBuilder(
 			observability.ClockFunc(func() time.Time { return time.Now().UTC() }),
-			observability.OccurrenceIDGeneratorFunc(func() (string, error) { return uuid.NewString(), nil }),
+			observability.TimeOrderedOccurrenceIDs,
 		)
 		if buildErr != nil {
 			return observability.Record{}, &sidecarObservabilityError{code: sidecarObservabilityBuildFailed}

@@ -19,12 +19,23 @@ package packs
 import (
 	"fmt"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 )
 
 const lockedConstraint = "openshell.admin.locked"
+
+// lockConstraint names the lock that holds key: openshell.admin.locked when
+// the organization's own list has it, else the sandbox section of the
+// caller's profile, whose locks the floor adds (r102 GAP-0562).
+func (r *resolver) lockConstraint(key string) string {
+	if r.floorProfile == "" || (config.OpenShellAdminConfig{Locked: r.baseLocked}).IsLocked(key) {
+		return lockedConstraint
+	}
+	return "guardrail.profiles[" + strconv.Quote(r.floorProfile) + "].sandbox.locked"
+}
 
 // dropLockedFlags applies openshell.admin.locked to the run flags. A locked
 // key keeps its configured value (what the run gets from the selected pack
@@ -48,11 +59,14 @@ func (r *resolver) dropLockedFlags(o config.OpenShellConfig, flags Flags) Flags 
 	}
 	refuse := func(key, attempted, reason string) {
 		detail := "your organization locked " + key
+		if r.lockConstraint(key) != lockedConstraint {
+			detail = "your profile " + r.floorProfile + " locks " + key
+		}
 		if reason != "" {
 			detail += "; " + reason
 		}
 		r.violate(Violation{
-			Key: key, Source: SourceFlag, Attempted: attempted, Constraint: lockedConstraint,
+			Key: key, Source: SourceFlag, Attempted: attempted, Constraint: r.lockConstraint(key),
 			Detail: detail + "; the run uses the configured value",
 		})
 	}

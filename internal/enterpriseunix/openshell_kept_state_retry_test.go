@@ -47,7 +47,7 @@ func retrySandboxPaths(h *osHost) (homeRecord, store, key string) {
 }
 
 func TestKeptOpenShellSetupRetryPlainUninstallKeepsSandboxState(t *testing.T) {
-	settings := map[string]any{"install": "setup", "driver": "docker", "version": "0.1.3", "gateway_port": 17672}
+	settings := map[string]any{"install": "setup", "driver": "docker", "version": "0.1.5", "gateway_port": 17672}
 	for _, goos := range []string{"linux", "darwin"} {
 		t.Run(goos, func(t *testing.T) {
 			direct := keptDockerHost(t, goos, true)
@@ -188,7 +188,7 @@ func TestKeptOpenShellSetupRetryControls(t *testing.T) {
 		t.Run(goos+"/populated active setup wins", func(t *testing.T) {
 			h := failedUninstallWithKeptSandbox(t, goos)
 			active := h.env.loadOpenShellState()
-			active.Applied = &openshellApplied{Enabled: true, Install: "setup", Driver: "docker", Version: "0.1.3", GatewayPort: 17671, DockerNamespace: openshell.ManagedDockerNamespace}
+			active.Applied = &openshellApplied{Enabled: true, Install: "setup", Driver: "docker", Version: "0.1.5", GatewayPort: 17671, DockerNamespace: openshell.ManagedDockerNamespace}
 			if err := h.env.saveOpenShellState(active); err != nil {
 				t.Fatal(err)
 			}

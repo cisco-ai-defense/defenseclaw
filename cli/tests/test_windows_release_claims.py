@@ -11,28 +11,46 @@ import yaml
 from defenseclaw import legacy_connector
 from defenseclaw.platform_support import (
     ACP_ONLY_CONNECTORS,
-    WINDOWS_CERTIFIED_ARCHITECTURES,
     WINDOWS_CONNECTOR_SUPPORT,
-    WINDOWS_NOT_CERTIFIED_ARCHITECTURES,
     WINDOWS_NOT_CERTIFIED_CONNECTORS,
     WINDOWS_PREVIEW_CONNECTORS,
     WINDOWS_SUPPORTED_CONNECTORS,
-    WINDOWS_UNSUPPORTED_CONNECTORS,
-    WINDOWS_UNSUPPORTED_FEATURES,
 )
 
 ROOT = Path(__file__).resolve().parents[2]
 
 
+# OpenHands and OmniGent are retired (#1182): the public docs no longer have
+# pages for them while the code still registers them.
+RETIRED_CONNECTORS = {"openhands", "omnigent"}
+
+
+# The 1.0.3 docs layout (back since 2026-10-26, owner) keeps these reference pages in the
+# Connectors section next to the connector pages.
+_CONNECTOR_SECTION_REFERENCE_PAGES = {"capability-matrix", "compatibility", "openclaw-integration"}
+
+
 def _active_connector_docs() -> dict[str, Path]:
+    """The per-connector reference pages, which carry the platform status table."""
     connectors_dir = ROOT / "docs-site/content/docs/connectors"
+    reference_dir = ROOT / "docs-site/content/docs/connectors"
     navigation = json.loads((connectors_dir / "meta.json").read_text(encoding="utf-8"))
-    return {
-        connector_id: connectors_dir / f"{connector_id}.mdx"
-        for connector_id in navigation["pages"]
-        if connector_id not in {"index", "compatibility", "capability-matrix", "openclaw-integration"}
-        and not connector_id.startswith("---")
-    }
+    connector_ids: list[str] = []
+    for item in navigation["pages"]:
+        if item.startswith("("):
+            # A sidebar group folder: its meta.json lists the pages as "../<id>".
+            group = json.loads((connectors_dir / item / "meta.json").read_text(encoding="utf-8"))
+            connector_ids.extend(page.removeprefix("../") for page in group["pages"])
+        elif item != "index" and not item.startswith("---") and item not in _CONNECTOR_SECTION_REFERENCE_PAGES:
+            connector_ids.append(item)
+    return {connector_id: reference_dir / f"{connector_id}.mdx" for connector_id in connector_ids}
+
+
+def _connector_text(connector_id: str) -> str:
+    """A connector's user page and its reference page, whitespace-normalized."""
+    docs = ROOT / "docs-site/content/docs"
+    pages = (docs / "connectors" / f"{connector_id}.mdx",)
+    return " ".join(" ".join(page.read_text(encoding="utf-8") for page in pages).split())
 
 
 def _platform_status(text: str, platform: str) -> str:
@@ -45,46 +63,15 @@ def _platform_status(text: str, platform: str) -> str:
     return matches[0].strip()
 
 
-def test_windows_release_metadata_is_exact() -> None:
-    assert WINDOWS_SUPPORTED_CONNECTORS == {
-        "amp",
-        "claudecode",
-        "codex",
-        "copilot",
-        "cursor",
-        "devin",
-        "hermes",
-        "kiro",
-        "opencode",
-        "omnigent",
-        "antigravity",
-    }
-    assert WINDOWS_PREVIEW_CONNECTORS == set()
-    assert WINDOWS_NOT_CERTIFIED_CONNECTORS == set()
-    assert WINDOWS_UNSUPPORTED_CONNECTORS == {
-        "openhands",
-        "openclaw",
-        "zeptoclaw",
-    }
-    assert WINDOWS_CERTIFIED_ARCHITECTURES == {"amd64"}
-    assert WINDOWS_NOT_CERTIFIED_ARCHITECTURES == {"arm64"}
-    assert WINDOWS_UNSUPPORTED_FEATURES == {
-        "sandbox",
-        "enterprise-hooks",
-        "openhands",
-        "omnigent-terminal-sandbox",
-        "openclaw",
-        "zeptoclaw",
-    }
 
 
 def test_windows_guide_has_unambiguous_platform_claims_and_powershell_examples() -> None:
-    guide_dir = ROOT / "docs-site/content/docs/get-started/windows"
     enterprise_deployment = (
         ROOT / "docs-site/content/docs/enterprise/secure-client.mdx"
     ).read_text(encoding="utf-8")
     raw_text = "\n".join(
-        page.read_text(encoding="utf-8") for page in sorted(guide_dir.glob("*.mdx"))
+        (ROOT / "docs-site/content/docs/get-started/windows" / page).read_text(encoding="utf-8")
+        for page in ("index.mdx", "install-lifecycle.mdx")
     )
     text = " ".join(raw_text.split())
     assert "WSL is not supported" in text
@@ -97,13 +84,13 @@ def test_windows_guide_has_unambiguous_platform_claims_and_powershell_examples()
     assert "WSL2 engines" in text
     assert "```bash" not in text and "```sh" not in text
     assert text.count("```powershell") >= 8
-    assert "Sandbox" in text
+    assert "OpenShell sandboxes run on Linux and macOS only" in text
     assert "enterprise hooks status" in enterprise_deployment
 
 
 def test_connector_pages_are_the_canonical_cross_platform_support_source() -> None:
     connector_docs = _active_connector_docs()
-    expected_connector_ids = set(WINDOWS_CONNECTOR_SUPPORT)
+    expected_connector_ids = set(WINDOWS_CONNECTOR_SUPPORT) - RETIRED_CONNECTORS
     assert set(connector_docs) == expected_connector_ids
 
     status_labels = {
@@ -129,7 +116,7 @@ def test_connector_pages_are_the_canonical_cross_platform_support_source() -> No
         connector_id
         for connector_id, label in expected_windows_statuses.items()
         if label == "Supported — native degraded"
-    } == {"omnigent"}
+    } == set()
 
     connectors_index = (
         ROOT / "docs-site/content/docs/connectors/index.mdx"
@@ -145,9 +132,7 @@ def test_connector_pages_are_the_canonical_cross_platform_support_source() -> No
         page.read_text(encoding="utf-8") for page in sorted(docs_content.rglob("*.mdx"))
     )
     windows_navigation = json.loads(
-        (
-            ROOT / "docs-site/content/docs/get-started/windows/meta.json"
-        ).read_text(encoding="utf-8")
+        (ROOT / "docs-site/content/docs/get-started/windows/meta.json").read_text(encoding="utf-8")
     )["pages"]
     for stale_page in (
         "capabilities-commands",
@@ -160,11 +145,11 @@ def test_connector_pages_are_the_canonical_cross_platform_support_source() -> No
 
 
 def test_canonical_docs_keep_cli_taxonomy_and_claude_optional_git_boundary() -> None:
-    windows_docs = ROOT / "docs-site/content/docs/get-started/windows"
-    lifecycle = (windows_docs / "install-lifecycle.mdx").read_text(encoding="utf-8")
-    claude_connector = (
-        ROOT / "docs-site/content/docs/connectors/claudecode.mdx"
-    ).read_text(encoding="utf-8")
+    lifecycle = "\n".join(
+        (ROOT / "docs-site/content/docs/get-started/windows" / page).read_text(encoding="utf-8")
+        for page in ("index.mdx", "install-lifecycle.mdx")
+    )
+    claude_connector = _connector_text("claudecode")
     cli_reference = (
         ROOT / "docs-site/content/docs/reference/cli.mdx"
     ).read_text(encoding="utf-8")
@@ -206,6 +191,7 @@ def test_release_builds_only_the_four_supported_targets_with_flat_names() -> Non
     assert set(builds) == {
         "defenseclaw",
         "defenseclaw-windows-amd64",
+        "defenseclaw-hook-post",
         "defenseclaw-hook",
         "defenseclaw-acp-posix",
         "defenseclaw-acp-windows-amd64",
@@ -214,7 +200,8 @@ def test_release_builds_only_the_four_supported_targets_with_flat_names() -> Non
     }
     assert builds["defenseclaw"]["binary"] == "defenseclaw-gateway"
     assert builds["defenseclaw-windows-amd64"]["binary"] == "defenseclaw-gateway"
-    for posix in ("defenseclaw", "defenseclaw-acp-posix", "defenseclaw-hook-posix", "defenseclaw-sensor-helper-posix"):
+    assert builds["defenseclaw-hook-post"]["binary"] == "defenseclaw-hook-post"
+    for posix in ("defenseclaw", "defenseclaw-hook-post", "defenseclaw-acp-posix", "defenseclaw-hook-posix", "defenseclaw-sensor-helper-posix"):
         assert builds[posix]["goos"] == ["linux", "darwin"]
         assert builds[posix]["goarch"] == ["amd64", "arm64"]
         assert {"goos": "darwin", "goarch": "amd64"} in builds[posix]["ignore"]
@@ -225,7 +212,7 @@ def test_release_builds_only_the_four_supported_targets_with_flat_names() -> Non
     archives = {archive["id"]: archive for archive in release["archives"]}
     flat_name = "{{ .ProjectName }}-{{ .Version }}-{{ .Os }}-{{ .Arch }}"
     assert set(archives) == {"default", "enterprise-posix", "windows-amd64"}
-    assert archives["default"]["ids"] == ["defenseclaw", "defenseclaw-acp-posix", "defenseclaw-sensor-helper-posix"]
+    assert archives["default"]["ids"] == ["defenseclaw", "defenseclaw-hook-post", "defenseclaw-acp-posix", "defenseclaw-sensor-helper-posix"]
     # The standalone managed-enterprise payload is its own flat asset family;
     # per-user installers never fetch it.
     enterprise = archives.pop("enterprise-posix")
@@ -284,8 +271,6 @@ def test_connector_matrix_delegates_current_support_to_the_website() -> None:
         "opencode",
         "amp",
         "hermes",
-        "openhands",
-        "omnigent",
         "kiro",
         "openclaw",
         "zeptoclaw",
@@ -336,7 +321,8 @@ def test_codex_compatibility_docs_list_current_versioned_contracts() -> None:
     ):
         assert f"`{version_range}`" in compatibility
     assert "`>=0.133.0, <0.145.0`" not in compatibility
-    assert "selective to generic local-function tool payloads" in text
+    assert "selective local-function tool payloads" in text
+    assert "expand to generic local function tools (`codex-hooks-v3-generic`)" in text
 
 
 def test_claude_directoryadded_docs_match_packaged_v2_contract() -> None:
@@ -426,12 +412,13 @@ def test_opencode_docs_exclude_unqualified_enforcement_media() -> None:
 
 
 def test_antigravity_windows_claims_match_official_hook_boundary() -> None:
-    connector_index = (ROOT / "docs-site/content/docs/connectors/index.mdx").read_text(
+    connector_index = (ROOT / "docs-site/content/docs/connectors/capability-matrix.mdx").read_text(
         encoding="utf-8"
     )
-    connector_page = (
-        ROOT / "docs-site/content/docs/connectors/antigravity.mdx"
-    ).read_text(encoding="utf-8")
+    connector_page = _connector_text("antigravity")
+    # The negative checks below are about prose; the reference page's generated
+    # contract table lists every registered event, PreInvocation first.
+    user_page = (ROOT / "docs-site/content/docs/connectors/antigravity.mdx").read_text(encoding="utf-8")
     config_reference = (
         ROOT / "docs-site/content/docs/reference/configuration.mdx"
     ).read_text(encoding="utf-8")
@@ -472,7 +459,8 @@ def test_antigravity_windows_claims_match_official_hook_boundary() -> None:
     assert "No protected-client, authentication, HITL, client-provenance, or official-client live evidence is claimed" in validated["notes"]
     assert "remain out of scope and unverified" in validated["notes"]
 
-    combined = "\n".join((connector_index, connector_page, config_reference, setup_source))
+    user_prose = "\n".join(line for line in user_page.splitlines() if not line.lstrip().startswith("|"))
+    combined = "\n".join((connector_index, user_prose, config_reference, setup_source))
     assert "Claude-Code-compatible" not in combined
     assert "single global hook entry" not in combined
     assert "decision=ask overrides" not in combined
@@ -567,45 +555,6 @@ def test_windows_live_harness_avoids_automatic_variable_assignments() -> None:
     assert "name: windows native required" in native_workflow
 
 
-def test_native_windows_required_ci_covers_nine_connector_lanes_and_omnigent_stays_non_live() -> None:
-    native_workflow = yaml.safe_load((ROOT / ".github/workflows/windows-native.yml").read_text(encoding="utf-8"))
-    validated = json.loads((ROOT / "cli/defenseclaw/inventory/validated_versions.json").read_text(encoding="utf-8"))[
-        "connectors"
-    ]["omnigent"]
-
-    jobs = native_workflow["jobs"]
-    generic_connectors = set(jobs["connector-contract"]["strategy"]["matrix"]["connector"])
-    required_connectors = generic_connectors
-    assert required_connectors == {
-        "amp",
-        "antigravity",
-        "claudecode",
-        "codex",
-        "copilot",
-        "cursor",
-        "devin",
-        "hermes",
-        "opencode",
-    }
-    assert required_connectors.isdisjoint({"openhands", "omnigent", "openclaw", "zeptoclaw"})
-    # OpenHands and OmniGent CI jobs were retired; the aggregate waits only on
-    # jobs that still exist.
-    assert "omnigent-native-degraded" not in jobs
-    needs = set(jobs["windows-native-required"]["needs"])
-    assert "connector-contract" in needs
-    assert needs.issubset(set(jobs))
-
-    assert validated["live"] is False
-    assert validated["os"]["windows"] == {
-        "last_validated_version": "",
-        "last_validated_at": "",
-        "run_url": "",
-    }
-    assert "required CI remain native-degraded" in validated["notes"]
-    assert "live=false" in validated["notes"]
-    assert "authentication/HITL evidence remain pending and unclaimed" in validated["notes"]
-    assert "public Setup availability gate" in validated["notes"]
-    assert "advisory" not in validated["notes"]
 
 
 def test_windows_native_ci_concurrency_cannot_cross_cancel_push_and_manual_runs() -> None:

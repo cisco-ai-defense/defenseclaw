@@ -19,23 +19,16 @@ package harness
 import (
 	"encoding/json"
 	"fmt"
-	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime"
 	"slices"
-	"strconv"
 	"strings"
 	"testing"
-	"time"
 	"unicode/utf16"
 
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 )
-
-// The launchers of the hook-only harnesses (Hermes, OpenHands, Antigravity
-// and OmniGent) and what they refuse to start with.
 
 func writeExecutable(t *testing.T, path, body string) string {
 	t.Helper()
@@ -58,9 +51,10 @@ func writeFile(t *testing.T, path string, data []byte) {
 // yamlCheckStub stands in for a harness interpreter's `-I -c <script> FILE`
 // YAML check: it exits 3 for a file with a non-empty secrets or a non-local
 // server key on one line, as the real check does for the parsed document.
-const yamlCheckStub = "#!/bin/sh\n/usr/bin/grep -qE '^secrets: *[^ ]|^server: *[^ l]' \"$4\" && exit 3\nexit 0\n"
+// The Hermes .env assignment check (FILE then a pattern) runs on the system
+// Python: it needs nothing but the standard library.
+const yamlCheckStub = "#!/bin/sh\n[ $# -eq 5 ] && exec /usr/bin/python3 \"$@\"\n/usr/bin/grep -qE '^secrets: *[^ ]|^server: *[^ l]' \"$4\" && exit 3\nexit 0\n"
 
-// newYAMLCheckedLauncher is newLauncher with the Hermes or OmniGent
 // launcher's pinned interpreter, which runs its YAML checks, replaced by py
 // (yamlCheckStub when empty). Other launchers are left as they are.
 func newYAMLCheckedLauncher(t *testing.T, spec *Spec, py string) testLauncher {
@@ -69,8 +63,6 @@ func newYAMLCheckedLauncher(t *testing.T, spec *Spec, py string) testLauncher {
 	switch spec {
 	case Hermes:
 		interpreter = hermesTool.interpreter()
-	case OmniGent:
-		interpreter = omnigentTool.interpreter()
 	default:
 		return newLauncher(t, spec)
 	}
@@ -136,17 +128,50 @@ func TestHermesLauncherRefusesHomeCode(t *testing.T) {
 		// refusal is what the launcher must say; empty: it must start.
 		refusal string
 	}{
-		"env safe mode":          {".env", []byte("HERMES_SAFE_MODE=1\n"), ".env sets HERMES_SAFE_MODE"},
-		"env managed dir":        {".env", []byte("export HERMES_MANAGED_DIR=/tmp/x\n"), "sets HERMES_MANAGED_DIR"},
-		"env home":               {".env", []byte("HERMES_HOME=/tmp/x\n"), "sets HERMES_HOME"},
-		"env project plugins":    {".env", []byte("HERMES_ENABLE_PROJECT_PLUGINS=true\n"), "sets HERMES_ENABLE_PROJECT_PLUGINS"},
-		"env python path":        {".env", []byte("PYTHONPATH=/tmp/x\n"), "sets PYTHONPATH"},
-		"env glued pair":         {".env", []byte("OPENAI_API_KEY=sk-xHERMES_SAFE_MODE=1\n"), "sets HERMES_SAFE_MODE"},
-		"env nul padded":         {".env", []byte("HERMES_\x00MANAGED_DIR=/tmp/x\n"), "sets HERMES_MANAGED_DIR"},
-		"env utf-16":             {".env", utf16LE("HERMES_MANAGED_DIR=/tmp/x\n"), "sets HERMES_MANAGED_DIR"},
-		"op env":                 {".op.env", []byte("HERMES_MANAGED_DIR=/tmp/x\n"), ".op.env sets HERMES_MANAGED_DIR"},
-		"profile env":            {"profiles/work/.env", []byte("HERMES_SAFE_MODE=1\n"), "profiles/work/.env sets HERMES_SAFE_MODE"},
-		"env directory":          {".env/", nil, ".env is not a readable regular file"},
+		"env safe mode":       {".env", []byte("HERMES_SAFE_MODE=1\n"), ".env sets HERMES_SAFE_MODE"},
+		"env managed dir":     {".env", []byte("export HERMES_MANAGED_DIR=/tmp/x\n"), "sets HERMES_MANAGED_DIR"},
+		"env home":            {".env", []byte("HERMES_HOME=/tmp/x\n"), "sets HERMES_HOME"},
+		"env project plugins": {".env", []byte("HERMES_ENABLE_PROJECT_PLUGINS=true\n"), "sets HERMES_ENABLE_PROJECT_PLUGINS"},
+		"env python path":     {".env", []byte("PYTHONPATH=/tmp/x\n"), "sets PYTHONPATH"},
+		"env glued pair":      {".env", []byte("OPENAI_API_KEY=sk-xHERMES_SAFE_MODE=1\n"), "sets HERMES_SAFE_MODE"},
+		"env nul padded":      {".env", []byte("HERMES_\x00MANAGED_DIR=/tmp/x\n"), "sets HERMES_MANAGED_DIR"},
+		"env utf-16":          {".env", utf16LE("HERMES_MANAGED_DIR=/tmp/x\n"), "sets HERMES_MANAGED_DIR"},
+		"op env":              {".op.env", []byte("HERMES_MANAGED_DIR=/tmp/x\n"), ".op.env sets HERMES_MANAGED_DIR"},
+		"profile env":         {"profiles/work/.env", []byte("HERMES_SAFE_MODE=1\n"), "profiles/work/.env sets HERMES_SAFE_MODE"},
+		"env directory":       {".env/", nil, ".env is not a readable regular file"},
+		// Hermes drops /etc/hermes under PYTEST_CURRENT_TEST only while
+		// HERMES_MANAGED_DIR is unset, and the launcher sets it, so no file
+		// that names the variable is refused (GAP-1122, 1.0.4 review).
+		"env pytest switch":           {".env", []byte("PYTEST_CURRENT_TEST=x\n"), ""},
+		"env empty pytest switch":     {".env", []byte("export PYTEST_CURRENT_TEST=\n"), ""},
+		"env quoted pytest switch":    {".env", []byte("'PYTEST_CURRENT_TEST'=x\n"), ""},
+		"env utf-16 pytest switch":    {".env", utf16LE("PYTEST_CURRENT_TEST=x\n"), ""},
+		"op env pytest switch":        {".op.env", []byte("PYTEST_CURRENT_TEST=x\n"), ""},
+		"profile env pytest switch":   {"profiles/work/.env", []byte("PYTEST_CURRENT_TEST=x\n"), ""},
+		"env commented pytest switch": {".env", []byte("# PYTEST_CURRENT_TEST=1\n"), ""},
+		// Only a real assignment, as python-dotenv reads it, sets a loader,
+		// interpreter or Tirith variable; a comment or a value that only
+		// mentions one does not (1.0.4 review).
+		"env commented loader path":  {".env", []byte("# LD_PRELOAD=/tmp/x.so\n# PYTHONPATH=/tmp/x\n"), ""},
+		"env indented comment":       {".env", []byte("   #LD_PRELOAD=/tmp/x.so\n"), ""},
+		"env inline comment":         {".env", []byte("OPENAI_API_KEY=sk-x # LD_PRELOAD=/tmp/x.so\n"), ""},
+		"env value names loader":     {".env", []byte("NOTE=\"set PYTHONPATH=/tmp/x to test\"\n"), ""},
+		"env spaced value":           {".env", []byte("OPENAI_API_KEY=sk-x LD_PRELOAD=/tmp/x.so\n"), ""},
+		"env double-quoted key":      {".env", []byte("\"LD_PRELOAD\"=/tmp/x.so\n"), ""},
+		"env bare loader name":       {".env", []byte("LD_PRELOAD\n"), ""},
+		"env utf-16 comment":         {".env", utf16LE("# LD_PRELOAD=/tmp/x.so\n"), ""},
+		"env spaced loader path":     {".env", []byte("  LD_PRELOAD = /tmp/x.so\n"), "sets LD_PRELOAD"},
+		"env loader after a comment": {".env", []byte("# note\nLD_PRELOAD=/tmp/x.so\n"), "sets LD_PRELOAD"},
+		"env loader after a value":   {".env", []byte("A=\"x\ny\"\nLD_PRELOAD=/tmp/x.so\n"), "sets LD_PRELOAD"},
+		"env cr line ends":           {".env", []byte("A=1\rLD_PRELOAD=/tmp/x.so\r"), "sets LD_PRELOAD"},
+		"env unicode space":          {".env", utf16LE("\u3000PYTHONPATH=/tmp/x\n"), "sets PYTHONPATH"},
+		"env latin-1 space":          {".env", []byte("A=\xff\n\xa0PYTHONPATH=/tmp/x\n"), "sets PYTHONPATH"},
+		"env utf-8 space":            {".env", []byte("\u00a0TIRITH_BIN=/tmp/x\n"), "sets TIRITH_BIN"},
+		// The managed .env pins HERMES_TUI=0 over these (GAP-1036 review);
+		// HERMES_TUI_DIR still moves the code the TUI runs.
+		"env tui":                {".env", []byte("export HERMES_TUI = 1\n"), ""},
+		"env tui settings":       {".env", []byte("HERMES_TUI_THEME=light\nHERMES_TUI_LIGHT=1\n"), ""},
+		"env tui dir":            {".env", []byte("HERMES_TUI_DIR=/tmp/x\n"), "sets HERMES_TUI_DIR"},
 		"api keys":               {".env", []byte("OPENAI_API_KEY=sk-x\nHERMES_MAX_ITERATIONS=40\nHELLO_WORLD_SIZE=3\n"), ""},
 		"exported loader path":   {".env", []byte("export LD_PRELOAD=/tmp/x.so\n"), "sets LD_PRELOAD"},
 		"quoted python key":      {".env", []byte("'PYTHONSTARTUP'=/tmp/x.py\n"), "sets PYTHONSTARTUP"},
@@ -191,7 +216,6 @@ func TestHermesLauncherRefusesHomeCode(t *testing.T) {
 	}
 }
 
-// TestYAMLChecksReadKeysAsTheHarnessesDo runs the OmniGent project server
 // check and the Hermes secrets check (in the home and in a profile) with a
 // real YAML loader: a key the loader decodes from escapes or folded lines
 // must be refused like a plain one, and a file it cannot parse must be
@@ -205,8 +229,6 @@ func TestYAMLChecksReadKeysAsTheHarnessesDo(t *testing.T) {
 		setRefusal, lead string
 		cwdIsProject     bool
 	}{
-		{spec: OmniGent, rel: ".omnigent/config.yaml", key: "server", value: "http://127.0.0.1:7000", allowed: "local",
-			setRefusal: " sets server", cwdIsProject: true},
 		{spec: Hermes, rel: ".hermes/config.yaml", key: "secrets", value: "{onepassword: {map: {HERMES_MANAGED_DIR: op://v/i/f}}}", allowed: "{}",
 			setRefusal: " has a secrets section", lead: "refusing to start Hermes: "},
 		{spec: Hermes, rel: ".hermes/profiles/work/config.yaml", key: "secrets", value: "{onepassword: {}}", allowed: "{}",
@@ -237,64 +259,6 @@ func TestYAMLChecksReadKeysAsTheHarnessesDo(t *testing.T) {
 				}
 			})
 		}
-	}
-}
-
-// TestOmniGentLauncherKeepsTheProjectOnTheLocalServer: a server key in the
-// project's .omnigent/config.yaml would run the session on a server the
-// image does not configure.
-func TestOmniGentLauncherKeepsTheProjectOnTheLocalServer(t *testing.T) {
-	l := newYAMLCheckedLauncher(t, OmniGent, "")
-	project := t.TempDir()
-	cfg := filepath.Join(project, ".omnigent", "config.yaml")
-	writeFile(t, cfg, []byte("server: http://127.0.0.1:7000\n"))
-	if r := l.run(t, project, nil, "run"); r.exit != 2 || r.started() || !strings.Contains(r.output, cfg+" sets server") {
-		t.Fatalf("project server: exit %d output %q", r.exit, r.output)
-	}
-	writeFile(t, cfg, []byte("server: local\nmodel: m\n"))
-	if r := l.run(t, project, nil, "run"); r.exit != 0 || !r.started() {
-		t.Fatalf("project config with a local server refused: %s", r.output)
-	}
-}
-
-// TestOpenHandsLauncher: the user hooks are restored from the canonical copy
-// at every start, and a project hooks file (also one OPENHANDS_WORK_DIR
-// points at), a symlinked ~/.openhands or a missing canonical copy stop the
-// launcher.
-func TestOpenHandsLauncher(t *testing.T) {
-	l := newLauncher(t, OpenHands)
-	project := t.TempDir()
-	hooks := filepath.Join(l.dir, ".openhands", "hooks.json")
-	writeFile(t, hooks, []byte(`{}`))
-	canonical := filepath.Join(l.dir, filepath.FromSlash(connector.OpenHandsSandboxCanonicalHooksPath))
-	want, _ := os.ReadFile(canonical)
-	if r := l.run(t, project, nil, "--headless", "-t", "p"); r.exit != 0 || !r.started() {
-		t.Fatalf("exit %d: %s", r.exit, r.output)
-	}
-	if raw, _ := os.ReadFile(hooks); len(want) == 0 || string(raw) != string(want) {
-		t.Fatalf("user hooks not restored: %q", raw)
-	}
-	writeFile(t, filepath.Join(project, ".openhands", "hooks.json"), []byte(`{}`))
-	if r := l.run(t, project, nil); r.exit != 2 || r.started() || !strings.Contains(r.output, "would replace DefenseClaw's hooks") {
-		t.Fatalf("project hooks: exit %d output %q", r.exit, r.output)
-	}
-	elsewhere := t.TempDir()
-	if r := l.run(t, elsewhere, []string{"OPENHANDS_WORK_DIR=" + project}); r.exit != 2 || r.started() {
-		t.Fatalf("OPENHANDS_WORK_DIR project hooks: exit %d", r.exit)
-	}
-	// A symlinked hooks directory is refused rather than written through.
-	linked := t.TempDir()
-	if err := os.Symlink(t.TempDir(), filepath.Join(linked, ".openhands")); err != nil {
-		t.Fatal(err)
-	}
-	if r := l.run(t, elsewhere, []string{"HOME=" + linked}); r.exit != 2 || r.started() {
-		t.Fatalf("symlinked ~/.openhands: exit %d", r.exit)
-	}
-	if err := os.Remove(canonical); err != nil {
-		t.Fatal(err)
-	}
-	if r := l.run(t, elsewhere, nil); r.exit != 2 || r.started() {
-		t.Fatalf("no canonical hooks: exit %d", r.exit)
 	}
 }
 
@@ -472,107 +436,6 @@ func TestAntigravityLauncherRefusesReusedHookKeys(t *testing.T) {
 				}
 			} else if r.exit != 2 || r.started() || !strings.Contains(r.output, file+" ") || !strings.Contains(r.output, "refusing to start agy") {
 				t.Fatalf("exit %d output %q, want a refusal naming %s", r.exit, r.output, file)
-			}
-		})
-	}
-}
-
-// TestOmniGentLauncherReusesOnlyItsOwnServer records processes the way
-// OmniGent does in ~/.omnigent and requires the launcher to stop, and stop
-// reusing, every one that is not the pinned OmniGent started with the
-// DefenseClaw configuration, and to leave its own alone.
-func TestOmniGentLauncherReusesOnlyItsOwnServer(t *testing.T) {
-	if runtime.GOOS != "linux" {
-		t.Skip("the guard reads /proc")
-	}
-	bash, err := filepath.EvalSymlinks("/bin/bash")
-	if err != nil {
-		t.Fatal(err)
-	}
-	// The pinned interpreter is bash here: an "OmniGent" process is bash
-	// running a script named omnigent.cli, so its argv reads
-	// [bash -m omnigent.cli server ...].
-	py := filepath.Join(t.TempDir(), "python")
-	if err := os.Symlink(bash, py); err != nil {
-		t.Fatal(err)
-	}
-	l := newYAMLCheckedLauncher(t, OmniGent, py)
-	scripts := t.TempDir()
-	writeExecutable(t, filepath.Join(scripts, "omnigent.cli"), "sleep 30\n")
-	start := func(env []string, args ...string) int {
-		t.Helper()
-		cmd := exec.Command(bash, append([]string{"-m", "omnigent.cli"}, args...)...)
-		cmd.Dir = scripts
-		cmd.Env = append([]string{"PATH=/usr/bin:/bin"}, env...)
-		if err := cmd.Start(); err != nil {
-			t.Fatal(err)
-		}
-		t.Cleanup(func() { _ = cmd.Process.Kill(); _, _ = cmd.Process.Wait() })
-		// Wait for bash to have read its environment and argv.
-		deadline := time.Now().Add(5 * time.Second)
-		for time.Now().Before(deadline) {
-			if raw, _ := os.ReadFile(fmt.Sprintf("/proc/%d/cmdline", cmd.Process.Pid)); strings.Contains(string(raw), "omnigent.cli") {
-				break
-			}
-			time.Sleep(20 * time.Millisecond)
-		}
-		return cmd.Process.Pid
-	}
-	ours := []string{"OMNIGENT_CONFIG_HOME=" + connector.OmnigentSandboxConfigHome}
-	for _, tc := range []struct {
-		name string
-		env  []string
-		args []string
-		// pidfile records the process as the local server on a port it
-		// does not listen on; otherwise it is recorded as a host daemon.
-		pidfile bool
-		// portHeld makes the test listen on that port itself.
-		portHeld bool
-		foreign  bool
-	}{
-		{name: "own daemon", env: ours, args: []string{"server"}},
-		{name: "no configuration home", args: []string{"server"}, foreign: true},
-		{name: "other configuration home", env: []string{"OMNIGENT_CONFIG_HOME=/tmp/elsewhere"}, args: []string{"server"}, foreign: true},
-		{name: "python path", env: append([]string{"PYTHONPATH=/tmp/x"}, ours...), args: []string{"server"}, foreign: true},
-		{name: "other config file", env: ours, args: []string{"server", "--config", "/tmp/x.yaml"}, foreign: true},
-		{name: "own config file", env: ours, args: []string{"server", "--config", connector.OmnigentSandboxConfigPath}},
-		// Nothing listens on the recorded port yet: a server still starting,
-		// which OmniGent does not reuse before it answers /health.
-		{name: "server still starting", env: ours, args: []string{"server"}, pidfile: true},
-		{name: "server port held by another process", env: ours, args: []string{"server"}, pidfile: true, portHeld: true, foreign: true},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			home := t.TempDir()
-			pid := start(tc.env, tc.args...)
-			record := filepath.Join(home, ".omnigent", "daemons", "local.json")
-			if tc.pidfile {
-				port := 1
-				if tc.portHeld {
-					ln, err := net.Listen("tcp", "127.0.0.1:0")
-					if err != nil {
-						t.Fatal(err)
-					}
-					defer ln.Close()
-					port = ln.Addr().(*net.TCPAddr).Port
-				}
-				record = filepath.Join(home, ".omnigent", "local_server.pid")
-				writeFile(t, record, []byte(strconv.Itoa(pid)+"\n"+strconv.Itoa(port)+"\n"))
-			} else {
-				raw, _ := json.Marshal(map[string]interface{}{"pid": pid, "target": "local", "mode": "local"})
-				writeFile(t, record, raw)
-			}
-			r := l.run(t, home, []string{"HOME=" + home}, "run", "-p", "hi")
-			if r.exit != 0 || !slices.Equal(r.last().args, []string{"run", "-p", "hi"}) {
-				t.Fatalf("OmniGent never started: exit %d %+v\n%s", r.exit, r.calls, r.output)
-			}
-			stopped := len(r.calls) == 2 && slices.Equal(r.calls[0].args, []string{"stop", "--force"})
-			_, statErr := os.Stat(record)
-			if tc.foreign {
-				if !stopped || !os.IsNotExist(statErr) || !strings.Contains(r.output, "not started with DefenseClaw's configuration") {
-					t.Fatalf("foreign process kept: stopped %t record %v\n%+v\n%s", stopped, statErr, r.calls, r.output)
-				}
-			} else if len(r.calls) != 1 || statErr != nil {
-				t.Fatalf("own process stopped, record %v:\n%+v", statErr, r.calls)
 			}
 		})
 	}

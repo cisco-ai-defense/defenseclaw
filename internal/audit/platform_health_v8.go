@@ -21,7 +21,6 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/observability"
 	"github.com/defenseclaw/defenseclaw/internal/observability/router"
 	"github.com/defenseclaw/defenseclaw/internal/version"
-	"github.com/google/uuid"
 )
 
 // RuntimeV8GeneratedMetric is an opaque, audit-owned generated metric
@@ -736,9 +735,7 @@ func buildSinkRuntimeV8GeneratedMetric(
 	}
 	builder, err := observability.NewFamilyBuilder(
 		observability.ClockFunc(func() time.Time { return input.timestamp.UTC() }),
-		observability.OccurrenceIDGeneratorFunc(func() (string, error) {
-			return uuid.NewString(), nil
-		}),
+		observability.TimeOrderedOccurrenceIDs,
 	)
 	if err != nil {
 		return observability.Record{}, err
@@ -842,7 +839,7 @@ func newAuditEventRuntimeV8GeneratedMetric(event Event) (RuntimeV8GeneratedMetri
 			}
 			builder, err := observability.NewFamilyBuilder(
 				observability.ClockFunc(func() time.Time { return event.Timestamp.UTC() }),
-				observability.OccurrenceIDGeneratorFunc(func() (string, error) { return uuid.NewString(), nil }),
+				observability.TimeOrderedOccurrenceIDs,
 			)
 			if err != nil {
 				return observability.Record{}, err
@@ -900,7 +897,7 @@ func newActivityRuntimeV8GeneratedMetrics(
 				}
 				builder, err := observability.NewFamilyBuilder(
 					observability.ClockFunc(func() time.Time { return event.Timestamp.UTC() }),
-					observability.OccurrenceIDGeneratorFunc(func() (string, error) { return uuid.NewString(), nil }),
+					observability.TimeOrderedOccurrenceIDs,
 				)
 				if err != nil {
 					return observability.Record{}, err

@@ -123,3 +123,34 @@ func TestReadActiveConnectorStateDuringConcurrentPublication(t *testing.T) {
 		}
 	}
 }
+
+// GAP-0584: a fail-mode change publishes the .hookcfg sidecar while the
+// gateway hook guard reads it. The publisher's renamed handle, and a holder
+// that briefly denies sharing, delay the guard's snapshot; they do not fail it.
+func TestHookConfigSidecarSnapshotSharesWithPublisherHandle(t *testing.T) {
+	hookDir := t.TempDir()
+	path := filepath.Join(hookDir, hookConfigSidecarName)
+	body := []byte(`{"version":2,"gateway_addr":"127.0.0.1:18970","fail_modes":{"claudecode":"closed"}}`)
+	if err := os.WriteFile(path, body, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	holdConnectorStateFile(t, path, windows.GENERIC_READ|windows.GENERIC_WRITE|windows.DELETE, windows.FILE_SHARE_READ)
+	for _, managed := range []bool{false, true} {
+		snapshot, err := snapshotHookRuntimeFileForMode(path, managed)
+		if err != nil || !snapshot.existed || string(snapshot.data) != string(body) {
+			t.Fatalf("snapshot(managed=%v) = %v, %q, %v; want the sidecar", managed, snapshot.existed, snapshot.data, err)
+		}
+	}
+
+	exclusiveDir := t.TempDir()
+	exclusive := filepath.Join(exclusiveDir, hookConfigSidecarName)
+	if err := os.WriteFile(exclusive, body, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	release := holdConnectorStateFile(t, exclusive, windows.GENERIC_READ|windows.GENERIC_WRITE, 0)
+	timer := time.AfterFunc(300*time.Millisecond, release)
+	defer timer.Stop()
+	if _, err := RefreshHookFailModes(exclusiveDir, func(string) string { return "open" }); err != nil {
+		t.Fatalf("RefreshHookFailModes() with a transient holder = %v", err)
+	}
+}

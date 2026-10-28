@@ -33,14 +33,17 @@ import json
 import os
 import shutil
 import socket
+import stat
 import subprocess
 import sys
 from collections.abc import Iterable, Iterator, Mapping, Sequence
 from functools import lru_cache
 from typing import Any
-from urllib.parse import quote
+from urllib.parse import quote, urlsplit
 
 import requests
+from urllib3.connection import HTTPConnection
+from urllib3.connectionpool import HTTPConnectionPool
 
 PLUGIN_MUTATION_TIMEOUT = 90
 ALERT_DISPOSITION_MIN_TIMEOUT_SECONDS = 30
@@ -91,9 +94,11 @@ def current_user_guardrail_profile(cfg: Any, *, connector: str = "", timeout: fl
         )
         try:
             result = client.guardrail_profile_resolve(user=user, connector=connector)
+            unchecked: list[bool] = []
             overrides = (
-                _scoped_profile_overrides(cfg, client, user, str(result.get("profile") or ""))
-                if not connector else []
+                _scoped_profile_overrides(cfg, client, user, str(result.get("profile") or ""), unchecked)
+                if not connector
+                else []
             )
         finally:
             client.close()
@@ -102,7 +107,12 @@ def current_user_guardrail_profile(cfg: Any, *, connector: str = "", timeout: fl
         return {"user": label, "error": str(exc), "timed_out": True}
     except Exception as exc:  # noqa: BLE001 - any transport or HTTP failure.
         return {"user": label, "error": str(exc)}
-    return {**result, "user": label, "overrides": overrides}
+    answer = {**result, "user": label, "overrides": overrides}
+    if unchecked:
+        # Agent assignments whose owner could not be confirmed (GAP-1054);
+        # no agent ID is named until its owner is known.
+        answer["agent_assignments_unchecked"] = True
+    return answer
 
 
 def policy_reload_rejection(policy: dict) -> str:
@@ -116,6 +126,21 @@ def policy_reload_rejection(policy: dict) -> str:
     error = str(policy.get("last_reload_error") or "").strip()
     fallback = str(policy.get("opa_unavailable") or "").strip()
     return "" if fallback and error == f"opa: {fallback}" else error
+
+
+def applied_config_generation(policy: dict) -> int:
+    """The config generation the gateway built its policy from, 0 when unknown.
+
+    ``policy.config_generation`` is the writer counter of config.generation.json,
+    the number ``config set`` prints, and it survives a gateway restart.
+    ``policy.generation`` only counts the rebuilds of the running gateway and
+    starts again at 1 when it restarts, so status, doctor and the TUI name the
+    config generation (GAP-0642).
+    """
+    try:
+        return max(int(policy.get("config_generation") or 0), 0)
+    except (TypeError, ValueError):
+        return 0
 
 
 def gateway_reload_notice(cfg: Any, *, timeout: float = 3) -> str:
@@ -157,9 +182,11 @@ def _gateway_reload_notice(cfg: Any, timeout: float) -> str:
         return ""
     error = policy_reload_rejection(policy)
     if error:
+        generation = applied_config_generation(policy)
+        enforced = f"config generation {generation}" if generation else "the previous policy"
         return (
             f"The running gateway has NOT applied this config.yaml: it rejected the last reload ({error}) "
-            f"and still enforces generation {policy.get('generation')}. Fix the file; the gateway reloads it "
+            f"and still enforces {enforced}. Fix the file; the gateway reloads it "
             "when it is saved."
         )
     pending = [str(key) for key in policy.get("pending_restart") or [] if str(key).strip()]
@@ -230,7 +257,13 @@ def current_profile_account(*, secure_client: bool = False) -> tuple[str, str]:
     return label, label
 
 
-def _scoped_profile_overrides(cfg: Any, client: Any, user: str, profile: str) -> list[dict[str, str]]:
+def _scoped_profile_overrides(
+    cfg: Any,
+    client: Any,
+    user: str,
+    profile: str,
+    unchecked: list[bool] | None = None,
+) -> list[dict[str, str]]:
     """Connector/agent subjects whose resolved profile differs from *profile*.
 
     An assignment matching ``connectors`` or ``agents`` decides only for that
@@ -238,6 +271,10 @@ def _scoped_profile_overrides(cfg: Any, client: Any, user: str, profile: str) ->
     decides everywhere. Each candidate is resolved by the gateway, which
     applies the assignment order; an agent is attributed to its connector
     through the user's agent identities, and agents of other users are skipped.
+    An agent runs under one connector only, so an assignment that lists
+    connectors names it only under its own (GAP-1270). When the user's agents
+    cannot be listed, no agent is attributed or named; *unchecked* gets one
+    entry so the caller can say agent assignments were not checked (GAP-1054).
     """
     from defenseclaw.connector_paths import KNOWN_CONNECTORS, normalize
 
@@ -256,15 +293,24 @@ def _scoped_profile_overrides(cfg: Any, client: Any, user: str, profile: str) ->
     for assignment in scoped:
         configured = getattr(cfg.guardrail, "connectors", {}) or {}
         connectors = [
-            normalized for name in assignment.match.connectors
+            normalized
+            for name in assignment.match.connectors
             if (normalized := normalize(name)) in KNOWN_CONNECTORS or normalized in configured
         ]
         if assignment.match.connectors and not connectors:
             continue
         for agent in assignment.match.agents or [""]:
-            if agent and owners is not None and agent not in owners:
+            if not agent:
+                candidates = connectors or [""]
+            elif owners is None:
+                if unchecked is not None and not unchecked:
+                    unchecked.append(True)
                 continue
-            for connector in connectors or [owners.get(agent, "") if agent and owners else ""]:
+            elif agent not in owners or (connectors and owners[agent] not in connectors):
+                continue
+            else:
+                candidates = [owners[agent]]
+            for connector in candidates:
                 if (connector, agent) not in probes:
                     probes.append((connector, agent))
     overrides: list[dict[str, str]] = []
@@ -495,11 +541,11 @@ class SandboxActivityStream:
 
 
 class GatewayListenerNotOwnedError(requests.ConnectionError):
-    """Another account holds this account's loopback API port: no token was sent."""
+    """The local API listener was not proven to be this account's gateway."""
 
 
-_LISTENER_OWNER_TTL_SECONDS = 5.0
-_listener_owner_cache: dict[tuple[str, int], tuple[float, str]] = {}
+class GatewayNotRunningError(GatewayListenerNotOwnedError):
+    """The verified gateway PID is absent, so no request bytes were sent."""
 
 
 def foreign_loopback_listener(host: str, port: int) -> str:
@@ -516,7 +562,6 @@ def foreign_loopback_listener(host: str, port: int) -> str:
     host, where the gateway is a service of another account by design.
     """
     import ipaddress
-    import time
 
     if not 0 < int(port) <= 65535:
         return ""
@@ -530,23 +575,41 @@ def foreign_loopback_listener(host: str, port: int) -> str:
 
     if managed_descriptor() or (os.name == "nt" and _windows_managed_profile()):
         return ""
-    key = (str(host), int(port))
-    now = time.monotonic()
-    cached = _listener_owner_cache.get(key)
-    if cached is not None and now - cached[0] < _LISTENER_OWNER_TTL_SECONDS:
-        return cached[1]
     if os.name == "nt":
         problem = _windows_foreign_listener(str(host), int(port))
     else:
-        problem = _foreign_loopback_listener_uncached(int(port))
+        problem = _foreign_loopback_listener_uncached(int(port), host=str(host))
     if problem:
         problem = (
             f"{_url_host(str(host))}:{port} is held by {problem}, not by this account's gateway, "
             "so the gateway token was not sent. Run `defenseclaw-gateway start` to see how to "
             "move this account's gateway to a free port"
         )
-    _listener_owner_cache[key] = (now, problem)
     return problem
+
+
+def _unproven_per_user_gateway_target(host: str, port: int) -> str:
+    """Return why a token-bearing CLI target is not proven to be this gateway."""
+    if _managed_connected_verifier_spec() is not None:
+        return ""
+    try:
+        from defenseclaw import config
+        from defenseclaw.commands.cmd_doctor import _trusted_gateway_listener
+
+        cfg = config.load(without_guardrail_profiles=True)
+        configured = gateway_api_client_host(cfg)
+        if host != configured or int(port) != int(cfg.gateway.api_port):
+            return f"{host}:{port} is not the configured gateway endpoint for this account"
+        trust = _trusted_gateway_listener(cfg)
+        if not trust.trusted:
+            if getattr(trust, "code", None) == "missing":
+                raise GatewayNotRunningError(trust.detail or "the gateway is not running")
+            return trust.detail or "gateway listener ownership could not be verified"
+    except GatewayNotRunningError:
+        raise
+    except Exception:  # noqa: BLE001 - unknown ownership fails closed.
+        return "gateway listener ownership could not be verified"
+    return ""
 
 
 def _windows_foreign_listener(host: str, port: int) -> str:
@@ -572,7 +635,16 @@ def _windows_foreign_listener(host: str, port: int) -> str:
     return f"PID {listener.pid}, a process of another account"
 
 
-def _foreign_loopback_listener_uncached(port: int, proc_net: str = "/proc/net") -> str:
+def _foreign_loopback_listener_uncached(port: int, proc_net: str = "/proc/self/net", *, host: str = "127.0.0.1") -> str:
+    import ipaddress
+
+    target_host = host.strip("[]")
+    try:
+        target = ipaddress.ip_address(target_host)
+    except ValueError:
+        if target_host.casefold() != "localhost":
+            return ""
+        target = ipaddress.ip_address("127.0.0.1")
     own_uid = os.getuid()
     if sys.platform.startswith("linux"):
         from defenseclaw.doctor_gateway import _linux_proc_net_endpoint
@@ -592,11 +664,12 @@ def _foreign_loopback_listener_uncached(port: int, proc_net: str = "/proc/net") 
                 endpoint = _linux_proc_net_endpoint(fields[1])
                 if endpoint is None or endpoint[1] != port:
                     continue
-                if endpoint[0].is_loopback or endpoint[0].is_unspecified:
+                if endpoint[0].version == target.version and (endpoint[0] == target or endpoint[0].is_unspecified):
                     owners.add(int(fields[7]))
-        if not owners or own_uid in owners:
+        foreign_owners = owners - {own_uid}
+        if not foreign_owners:
             return ""
-        uid = min(owners)
+        uid = min(foreign_owners)
         try:
             import pwd
 
@@ -613,7 +686,7 @@ def _foreign_loopback_listener_uncached(port: int, proc_net: str = "/proc/net") 
             return ""
         try:
             proc = subprocess.run(
-                [lsof, "-nP", "-a", "-u", str(own_uid), f"-iTCP:{port}", "-sTCP:LISTEN", "-t"],
+                [lsof, "-nP", "-a", "-u", str(own_uid), f"-iTCP@{host}:{port}", "-sTCP:LISTEN", "-t"],
                 capture_output=True,
                 text=True,
                 timeout=3,
@@ -626,12 +699,186 @@ def _foreign_loopback_listener_uncached(port: int, proc_net: str = "/proc/net") 
         # lsof lists only this account's sockets: a listener it does not show
         # that still accepts connections belongs to another account.
         try:
-            with socket.create_connection(("127.0.0.1", port), timeout=1):
+            with socket.create_connection((target_host, port), timeout=1):
                 pass
         except OSError:
             return ""
         return "a process of another account"
     return ""
+
+
+#: How long the gateway's peer check waits for a managed gateway that socket
+#: activation is still starting (defaultHookRequestTimeout in
+#: internal/gateway/connector/hookexec).
+_CONNECTED_VERIFIER_MAX_WAIT = 10.0
+#: The wait the check had before it followed the caller's budget.
+_CONNECTED_VERIFIER_MIN_WAIT = 3.0
+#: The helper's own start and exit.
+_CONNECTED_VERIFIER_MARGIN = 1.0
+
+
+def _connected_verifier_timeout(budget: object) -> float:
+    """How long the helper may take to prove a connected socket.
+
+    It used to be killed after 3 s while the gateway's check waits up to
+    10 s for a socket-activated gateway to start and accept, so a request
+    the release client answered within its 5 s read timeout was refused
+    (GAP-1138). The helper now gets the caller's timeout, between 3 and
+    10 s, plus its own start-up. The HTTP response keeps its whole read
+    timeout: urllib3 sets it on the socket after the request is written.
+    """
+    try:
+        seconds = float(budget)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        seconds = _CONNECTED_VERIFIER_MAX_WAIT
+    if not seconds > 0 or seconds == float("inf"):
+        seconds = _CONNECTED_VERIFIER_MAX_WAIT
+    return min(max(seconds, _CONNECTED_VERIFIER_MIN_WAIT), _CONNECTED_VERIFIER_MAX_WAIT) + _CONNECTED_VERIFIER_MARGIN
+
+
+def _verify_connected_gateway_socket(sock: socket.socket, host: str, port: int) -> None:
+    """Prove the accepted server socket before urllib3 writes request bytes.
+
+    The socket's timeout is still the caller's connect budget, which the
+    helper gets (:func:`_connected_verifier_timeout`).
+    """
+    remote = sock.getpeername()
+    local = sock.getsockname()
+    if remote[1] != port or (host.strip("[]") != "localhost" and remote[0] != host.strip("[]")):
+        raise GatewayListenerNotOwnedError("connected gateway endpoint changed")
+    managed = _managed_connected_verifier_spec()
+    try:
+        if managed:
+            binary = _trusted_connected_verifier_binary(managed[0], managed=True)
+        else:
+            binary = _per_user_connected_verifier()
+
+        def format_addr(endpoint) -> str:
+            return f"{_url_host(endpoint[0])}:{endpoint[1]}"
+
+        argv = [binary, "hook-verify-connected", "--local", format_addr(local), "--remote", format_addr(remote)]
+        if managed:
+            argv.extend(["--managed-service", managed[1]])
+        result = subprocess.run(
+            argv,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=_connected_verifier_timeout(getattr(sock, "gettimeout", lambda: None)()),
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise GatewayListenerNotOwnedError("connected gateway owner could not be verified") from exc
+    if result.returncode != 0:
+        raise GatewayListenerNotOwnedError("connected gateway socket belongs to another account or is unverified")
+
+
+def _managed_connected_verifier_spec() -> tuple[str, str] | None:
+    """Select only the fixed package helper and protected service identity."""
+    from defenseclaw.upgrade_shim import _windows_managed_profile, managed_descriptor
+
+    if os.name == "nt" and _windows_managed_profile():
+        return (packaged_windows_gateway_path() or "", "DefenseClawGateway")
+    descriptor = managed_descriptor()
+    if descriptor:
+        binary = _MANAGED_GATEWAY_BINARIES.get(descriptor, "")
+        service = "defenseclaw-gateway.service" if sys.platform.startswith("linux") else "com.cisco.defenseclaw.gateway"
+        return binary, service
+    if sys.platform == "darwin" and os.path.lexists("/opt/cisco/secureclient/defenseclaw"):
+        return "/opt/cisco/secureclient/defenseclaw/bin/defenseclaw-gateway", "com.cisco.secureclient.defenseclaw"
+    return None
+
+
+def _per_user_connected_verifier() -> str:
+    """The gateway that proves a per-user socket, from a supported location.
+
+    Only ``~/.local/bin`` was tried, so an install that runs its gateway
+    from the native Windows package, ``DEFENSECLAW_GATEWAY_BIN``, ``PATH``
+    or the folder of this ``defenseclaw`` launcher refused every request
+    (GAP-1138). These are the locations of :func:`resolve_gateway_binary`,
+    in its order; a corroborated Windows package uses only its own sibling.
+    The first candidate that passes the custody check runs.
+    """
+    if packaged_windows_install_root():
+        candidates = [packaged_windows_gateway_path() or ""]
+    else:
+        candidates = [
+            os.environ.get("DEFENSECLAW_GATEWAY_BIN", "").strip(),
+            shutil.which(GATEWAY_BIN_NAME) or "",
+            _launcher_sibling_gateway() or "",
+            canonical_install_path(),
+        ]
+    for candidate in dict.fromkeys(candidates):
+        if not candidate:
+            continue
+        try:
+            return _trusted_connected_verifier_binary(candidate, managed=False)
+        except OSError:
+            continue
+    raise OSError("gateway verifier binary is unavailable")
+
+
+def _trusted_connected_verifier_binary(binary: str, *, managed: bool) -> str:
+    """Return the path to run, after its custody check.
+
+    The managed package's helper and every folder above it belong to root.
+    A per-user helper passes the check of the gateway lifecycle
+    (:func:`trusted_posix_executable_path`): held, with every folder above
+    it, by root or this account and writable by no other. A symlinked
+    helper is refused on every OS.
+    """
+    if not binary or not os.path.isabs(binary):
+        raise OSError("gateway verifier binary is unavailable")
+    if not managed:
+        info = os.lstat(binary)
+        if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
+            raise OSError("gateway helper is not a regular file")
+        if os.name != "nt":
+            from defenseclaw.file_permissions import trusted_posix_executable_path
+
+            return trusted_posix_executable_path(binary)
+        # Windows: no symlinked folder in the last three levels either.
+        path = binary
+        for _ in range(3):
+            path = os.path.dirname(path)
+            if stat.S_ISLNK(os.lstat(path).st_mode):
+                raise OSError("untrusted gateway helper path")
+        return binary
+    path = binary
+    while True:
+        info = os.lstat(path)
+        if stat.S_ISLNK(info.st_mode) or (os.name != "nt" and (info.st_uid != 0 or info.st_mode & 0o022)):
+            raise OSError("untrusted gateway helper path")
+        if path == binary and not stat.S_ISREG(info.st_mode):
+            raise OSError("gateway helper is not a regular file")
+        if path == binary and os.name != "nt" and not os.access(binary, os.X_OK):
+            raise OSError("gateway helper is not executable")
+        parent = os.path.dirname(path)
+        if parent == path:
+            break
+        path = parent
+    return binary
+
+
+class _GatewayVerifiedConnection(HTTPConnection):
+    def connect(self) -> None:
+        super().connect()
+        try:
+            _verify_connected_gateway_socket(self.sock, self.host, self.port)
+        except Exception:
+            self.close()
+            raise
+
+
+class _GatewayVerifiedPool(HTTPConnectionPool):
+    ConnectionCls = _GatewayVerifiedConnection
+
+
+class _GatewayVerifiedAdapter(requests.adapters.HTTPAdapter):
+    def init_poolmanager(self, connections, maxsize, block=False, **pool_kwargs) -> None:
+        super().init_poolmanager(connections, maxsize, block=block, **pool_kwargs)
+        self.poolmanager.pool_classes_by_scheme = dict(self.poolmanager.pool_classes_by_scheme)
+        self.poolmanager.pool_classes_by_scheme["http"] = _GatewayVerifiedPool
 
 
 class _GatewaySession(requests.Session):
@@ -640,12 +887,22 @@ class _GatewaySession(requests.Session):
     def __init__(self, host: str, port: int) -> None:
         super().__init__()
         self._dc_target = (host, port)
+        self.mount("http://", _GatewayVerifiedAdapter())
 
     def send(self, request, **kwargs):  # type: ignore[override]
-        if request.headers.get("Authorization") or request.headers.get("X-DC-Auth"):
-            problem = foreign_loopback_listener(*self._dc_target)
-            if problem:
-                raise GatewayListenerNotOwnedError(problem, request=request)
+        target = urlsplit(request.url)
+        if (
+            target.scheme != "http"
+            or target.hostname != self._dc_target[0].strip("[]")
+            or target.port != self._dc_target[1]
+            or target.username is not None
+        ):
+            raise GatewayListenerNotOwnedError(
+                "request target changed from the verified gateway endpoint", request=request
+            )
+        problem = _unproven_per_user_gateway_target(*self._dc_target)
+        if problem:
+            raise GatewayListenerNotOwnedError(problem, request=request)
         return super().send(request, **kwargs)
 
 
@@ -917,13 +1174,16 @@ class OrchestratorClient:
         return resp.json()
 
     def agent_identities(
-        self, *, user: str | None = None, connector: str | None = None, cursor: str = "", limit: int = 0,
+        self,
+        *,
+        user: str | None = None,
+        connector: str | None = None,
+        cursor: str = "",
+        limit: int = 0,
     ) -> dict[str, Any]:
         """Fetch one page of agent identities (``GET /api/v1/agents/identities``),
         optionally narrowed to one user or one connector."""
-        params = {
-            key: value for key, value in (("user", user), ("connector", connector), ("cursor", cursor)) if value
-        }
+        params = {key: value for key, value in (("user", user), ("connector", connector), ("cursor", cursor)) if value}
         if limit > 0:
             params["limit"] = str(limit)
         resp = self._session.get(
@@ -936,7 +1196,12 @@ class OrchestratorClient:
         return resp.json()
 
     def agent_identities_all(
-        self, *, user: str | None = None, connector: str | None = None, limit: int = 0, max_pages: int = 64,
+        self,
+        *,
+        user: str | None = None,
+        connector: str | None = None,
+        limit: int = 0,
+        max_pages: int = 64,
     ) -> dict[str, Any]:
         """Fetch every page of agent identities, or the ``limit`` most recently
         seen, into one payload.
@@ -1327,9 +1592,7 @@ class OrchestratorClient:
         )
         return self._sandbox_object(result, "review")
 
-    def accept_sandbox_changes(
-        self, name: str, *, snapshot_created_at: str = "", session: int = 0
-    ) -> dict[str, Any]:
+    def accept_sandbox_changes(self, name: str, *, snapshot_created_at: str = "", session: int = 0) -> dict[str, Any]:
         """Record that the user kept the changes on top of a stopped mounted sandbox's undo point.
 
         Its next start takes a new undo point, whoever starts it.
@@ -1713,4 +1976,3 @@ def local_policy_digest(cfg: Any, *, timeout: float = 60) -> dict | None:
     except ValueError:
         return None
     return report if isinstance(report, dict) and report.get("effective_digest") else None
-

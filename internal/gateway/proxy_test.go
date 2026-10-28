@@ -3166,8 +3166,9 @@ func TestRateLimitMiddleware(t *testing.T) {
 	proxy := newTestProxy(t, prov, insp, "observe")
 	proxy.bindObservabilityV8Trace(runtime)
 
-	// Tight limiter: 1 req/s, burst 2
-	proxy.limiter = rate.NewLimiter(rate.Limit(1), 2)
+	// Keep the two-token burst from refilling while the handlers run.
+	// Race instrumentation or a busy host can delay each request by seconds.
+	proxy.limiter = rate.NewLimiter(0, 2)
 
 	body := mustJSON(t, map[string]interface{}{
 		"model":      "gpt-4",

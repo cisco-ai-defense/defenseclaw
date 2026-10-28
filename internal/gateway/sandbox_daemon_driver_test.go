@@ -21,6 +21,7 @@ package gateway
 import (
 	"context"
 	"errors"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -30,6 +31,37 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxapi"
 	"github.com/defenseclaw/defenseclaw/internal/sandboxrelay"
 )
+
+// The managed daemon probes before it starts its first gateway. In setup
+// mode, the planned gateway's sibling is a valid fallback after driver_dir.
+func TestDaemonVMProbeUsesPlannedGatewayBeforeFirstStart(t *testing.T) {
+	home := t.TempDir()
+	binDir := filepath.Join(home, ".local", "bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	driver := filepath.Join(binDir, "openshell-driver-vm")
+	if err := os.WriteFile(driver, []byte("driver"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	missingDir := filepath.Join(home, "configured")
+	rendered := openshell.RenderedGateway{BindAddress: "127.0.0.1:17670", ComputeDriver: openshell.DriverVM,
+		DriverDir: missingDir, VMSandboxUID: 1000, VMSandboxGID: 1000}
+	data, err := rendered.TOML()
+	if err != nil {
+		t.Fatal(err)
+	}
+	configPath := filepath.Join(home, "gateway.toml")
+	if err := os.WriteFile(configPath, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	settings := sandboxrelay.DaemonSettings{Enterprise: sandboxrelay.EnterpriseOpenShell{
+		Install: "setup", GatewayConfigPath: configPath}}
+	dirs := daemonVMDriverDirs(settings, home, "")
+	if got := openshell.FindVMDriverIn(dirs); got != driver {
+		t.Fatalf("pre-start driver directories %v selected %q, want planned gateway sibling %q", dirs, got, driver)
+	}
+}
 
 // The daemon picks a create's driver at sandbox start from its own probe,
 // sends it in the resolve, and shows it in status; under driver_fallback:
@@ -159,5 +191,26 @@ func TestSandboxDaemonIdleDriverFollowsRefreshedAvailability(t *testing.T) {
 		if st.Driver != "docker" || st.DriverReason != openshell.DriverReasonKVMAccess {
 			t.Fatalf("idle gateway overrode the refreshed choice: %+v", st)
 		}
+	}
+}
+
+// A stopped MicroVM sandbox stays the newest registration after the
+// organization moved to docker: Driver keeps naming its driver, and
+// NextDriver the managed gateway's choice for the next start, which image
+// build and prune follow while no gateway runs.
+func TestSandboxDaemonStatusNamesTheNextStartsDriver(t *testing.T) {
+	regs, err := loadDaemonRegistrations(filepath.Join(t.TempDir(), "registrations.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := regs.put(daemonRegistration{ID: "reg-vm", Sandbox: "stopped-vm", Driver: "vm", Confirmed: true, UpdatedAt: time.Now()}); err != nil {
+		t.Fatal(err)
+	}
+	d := &SandboxDaemon{regs: regs, relay: &fakeRelay{}, logf: t.Logf}
+	d.settings = sandboxrelay.DaemonSettings{Enabled: true, Available: true, SelectedDriver: "docker",
+		Enterprise: sandboxrelay.EnterpriseOpenShell{Driver: "docker"}}
+	d.settingsAt.Store(time.Now().UnixNano())
+	if st := d.managedStatus(context.Background()); st.Driver != "vm" || st.NextDriver != "docker" {
+		t.Fatalf("status = driver %q, next %q; want vm (the stopped sandbox) and docker (the next start)", st.Driver, st.NextDriver)
 	}
 }

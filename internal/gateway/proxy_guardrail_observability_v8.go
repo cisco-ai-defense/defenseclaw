@@ -185,7 +185,7 @@ func startProxyGuardrailInspectionV8(
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	evaluationID := uuid.NewString()
+	evaluationID := observability.NewTimeOrderedID()
 	placeholder := &ScanVerdict{Action: "allow", Severity: "NONE", EvaluationID: evaluationID}
 	facts, valid := proxyGuardrailV8FactsFrom(ctx, connector, direction, placeholder, 0, mode, false)
 	operation := &proxyGuardrailTraceV8Operation{
@@ -236,7 +236,7 @@ func (operation *proxyGuardrailTraceV8Operation) finish(
 	}
 	if normalized := NormalizeScanVerdict(verdict); len(normalized) > 0 {
 		if verdict.ScanID == "" {
-			verdict.ScanID = uuid.NewString()
+			verdict.ScanID = observability.NewTimeOrderedID()
 		}
 		if len(verdict.RuleIDs) == 0 {
 			verdict.RuleIDs = scanner.TopRuleIDs(normalizedFindingsToInspect(normalized, verdict.Severity), 8)
@@ -929,7 +929,7 @@ func (facts proxyGuardrailV8Facts) emitEnforcementLog(ctx context.Context, runti
 		if admission == observabilityrouter.AdmissionFloor {
 			builder, buildErr := observability.NewRecordBuilder(
 				observability.ClockFunc(func() time.Time { return facts.observedAt }),
-				observability.OccurrenceIDGeneratorFunc(func() (string, error) { return uuid.NewString(), nil }),
+				observability.TimeOrderedOccurrenceIDs,
 			)
 			if buildErr != nil {
 				return observability.Record{}, buildErr
@@ -1033,7 +1033,7 @@ func (facts proxyGuardrailV8Facts) ruleIDValues() []string {
 func proxyGuardrailV8Builder(observedAt time.Time) (*observability.FamilyBuilder, error) {
 	return observability.NewFamilyBuilder(
 		observability.ClockFunc(func() time.Time { return observedAt }),
-		observability.OccurrenceIDGeneratorFunc(func() (string, error) { return uuid.NewString(), nil }),
+		observability.TimeOrderedOccurrenceIDs,
 	)
 }
 

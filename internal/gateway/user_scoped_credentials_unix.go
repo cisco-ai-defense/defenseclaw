@@ -80,3 +80,78 @@ var agentIdentityAccountName = func(identity string) string {
 	}
 	return managedHookPeerHomes.lastName(uid)
 }
+
+// agentIdentityAccountToken is the account token an agent identity row of
+// a uid is recorded with (managedHookPeerHomeCache.rowToken), "" for a SID
+// or a uid no token was ever known for. Tests replace it.
+var agentIdentityAccountToken = func(identity string) string {
+	if useridentity.KindForID(identity) != useridentity.KindPOSIXUID {
+		return ""
+	}
+	uid, err := strconv.Atoi(identity)
+	if err != nil {
+		return ""
+	}
+	return managedHookPeerHomes.rowToken(uid)
+}
+
+// agentIdentityVerifiedAccountToken names only the account proven to hold the
+// uid now. Inventory must not use rowToken's last-known fallback as proof of
+// ownership when the account lookup is unavailable.
+var agentIdentityVerifiedAccountToken = func(identity string) string {
+	if useridentity.KindForID(identity) != useridentity.KindPOSIXUID {
+		return ""
+	}
+	uid, err := strconv.Atoi(identity)
+	if err != nil {
+		return ""
+	}
+	token, known := managedHookPeerHomes.accountToken(uid)
+	if !known {
+		return ""
+	}
+	return token
+}
+
+// agentIdentityAdminHolderToken is the account token of the account that
+// holds a uid now as the administrator's root proof of its home shows it,
+// and whether it is another one than the hooks last recorded
+// (managedHookPeerHomeCache.adminHolderToken). Tests replace it.
+var agentIdentityAdminHolderToken = func(identity, proof string) (string, bool) {
+	if useridentity.KindForID(identity) != useridentity.KindPOSIXUID {
+		return "", false
+	}
+	uid, err := strconv.Atoi(identity)
+	if err != nil {
+		return "", false
+	}
+	return managedHookPeerHomes.adminHolderToken(uid, proof)
+}
+
+// agentIdentityHolderHistory is the last account token of a uid and whether
+// another account is known to have held it (managedHookPeerHomeCache.holderHistory).
+// Tests replace it.
+var agentIdentityHolderHistory = func(identity string) (string, bool) {
+	if useridentity.KindForID(identity) != useridentity.KindPOSIXUID {
+		return "", false
+	}
+	uid, err := strconv.Atoi(identity)
+	if err != nil {
+		return "", false
+	}
+	return managedHookPeerHomes.holderHistory(uid)
+}
+
+// agentIdentityIncarnation is the account incarnation a uid's agent identity
+// is keyed on besides its account name (managedHookPeerHomeCache.agentIncarnation):
+// "" for the first account this gateway saw hold the uid. Tests replace it.
+var agentIdentityIncarnation = func(identity string) string {
+	if useridentity.KindForID(identity) != useridentity.KindPOSIXUID {
+		return ""
+	}
+	uid, err := strconv.Atoi(identity)
+	if err != nil {
+		return ""
+	}
+	return managedHookPeerHomes.agentIncarnation(uid)
+}

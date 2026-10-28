@@ -15,13 +15,18 @@ package cli
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 	"unsafe"
@@ -29,8 +34,10 @@ import (
 	"github.com/spf13/cobra"
 	"golang.org/x/sys/windows"
 
+	"github.com/defenseclaw/defenseclaw/internal/enterprisebundle"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
+	"github.com/defenseclaw/defenseclaw/internal/processutil"
 	"github.com/defenseclaw/defenseclaw/internal/winpath"
 )
 
@@ -52,7 +59,16 @@ func windowsSecretTestHarness(t *testing.T) string {
 	dir := filepath.Join(root, "secrets")
 	previousAccount := windowsSecretGatewayAccount
 	t.Cleanup(func() { windowsSecretGatewayAccount = previousAccount })
-	stubWindowsSecretHost(t, managed.StandaloneLayout{GOOS: "windows", SecretsDir: dir, LifecycleDir: filepath.Join(root, "install")})
+	// The change spool keeps its state in the lifecycle folder and its
+	// events beside the config, as on an installed computer.
+	layout := managed.StandaloneLayout{GOOS: "windows", SecretsDir: dir, LifecycleDir: filepath.Join(root, "install"),
+		ConfigDir: filepath.Join(root, "config"), DataDir: filepath.Join(root, "data")}
+	for _, folder := range []string{layout.LifecycleDir, layout.ConfigDir, layout.DataDir} {
+		if err := os.MkdirAll(folder, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	stubWindowsSecretHost(t, layout)
 	// A virtual service account that always exists stands in for the
 	// gateway service.
 	windowsSecretGatewayAccount = `NT SERVICE\TrustedInstaller`
@@ -66,23 +82,104 @@ type windowsSecretLockEvents struct {
 	bundleErr, lifecycleErr error
 }
 
+type fakeWindowsSecretRecovery struct {
+	armed, cancelled, recovered, finished bool
+}
+
+func (r *fakeWindowsSecretRecovery) arm() error { r.armed = true; return nil }
+func (r *fakeWindowsSecretRecovery) finish(recoverGateway bool) error {
+	r.finished = true
+	r.cancelled = r.armed && !recoverGateway
+	r.recovered = r.armed && recoverGateway
+	return nil
+}
+
+func TestWindowsSecretNoopDisarmsGatewayRecovery(t *testing.T) {
+	dir := windowsSecretTestHarness(t)
+	stubWindowsSecretHost(t, managed.StandaloneLayout{GOOS: "windows", SecretsDir: dir, LifecycleDir: filepath.Join(filepath.Dir(dir), "install")})
+	recovery := &fakeWindowsSecretRecovery{}
+	windowsSecretSpawnRecovery = func() (windowsSecretRecoveryControl, error) { return recovery, nil }
+	windowsSecretRestartGateway = func(func() error) (bool, error) { return false, nil }
+	out, err := runWindowsSecretCommand(t, "remove", enterpriseSecretOptions{name: "absent-key", json: true}, "")
+	if err != nil || !strings.Contains(out, `"gateway_restarted":false`) || !recovery.finished || recovery.armed || recovery.recovered {
+		t.Fatalf("absent credential started or retained a gateway recovery: output=%q error=%v recovery=%+v", out, err, recovery)
+	}
+}
+
+func TestWindowsSecretCompletedRestartCancelsGatewayRecovery(t *testing.T) {
+	dir := windowsSecretTestHarness(t)
+	stubWindowsSecretHost(t, managed.StandaloneLayout{GOOS: "windows", SecretsDir: dir, LifecycleDir: filepath.Join(filepath.Dir(dir), "install")})
+	recovery := &fakeWindowsSecretRecovery{}
+	windowsSecretSpawnRecovery = func() (windowsSecretRecoveryControl, error) { return recovery, nil }
+	if _, err := runWindowsSecretCommand(t, "set", enterpriseSecretOptions{name: "example-key", fromStdin: true}, "test-value\n"); err != nil {
+		t.Fatal(err)
+	}
+	if !recovery.armed || !recovery.cancelled || recovery.recovered {
+		t.Fatalf("completed restart left recovery armed: %+v", recovery)
+	}
+	recovery = &fakeWindowsSecretRecovery{}
+	windowsSecretSpawnRecovery = func() (windowsSecretRecoveryControl, error) { return recovery, nil }
+	windowsSecretRestartGateway = func(beforeStop func() error) (bool, error) {
+		if err := beforeStop(); err != nil {
+			return false, err
+		}
+		return false, fmt.Errorf("SCM stop: %w", errWindowsGatewayStopRefused)
+	}
+	if _, err := runWindowsSecretCommand(t, "remove", enterpriseSecretOptions{name: "example-key"}, ""); err == nil {
+		t.Fatal("SCM stop refusal was reported as a completed credential change")
+	}
+	if !recovery.cancelled || recovery.recovered {
+		t.Fatalf("SCM stop refusal left recovery free to start an independently stopped gateway: %+v", recovery)
+	}
+}
+
 // stubWindowsSecretHost points the secret verb at layout on an elevated,
 // installed host whose locks and gateway restart are recorded, not taken.
 func stubWindowsSecretHost(t *testing.T, layout managed.StandaloneLayout) *windowsSecretLockEvents {
 	t.Helper()
-	previousLayout, previousInstalled, previousElevated, previousRestart := windowsSecretLayout, windowsSecretDeploymentInstalled, windowsSecretIsElevated, windowsSecretRestartGateway
+	if layout.ConfigPath == "" {
+		layout.ConfigPath = filepath.Join(t.TempDir(), "config.yaml")
+		if err := os.WriteFile(layout.ConfigPath, []byte(standaloneGatewayCheckConfig), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	previousLayout, previousInstalled, previousElevated, previousRestart, previousRecovery, previousConfigTrusted, previousAbsentParentTrusted := windowsSecretLayout, windowsSecretDeploymentInstalled, windowsSecretIsElevated, windowsSecretRestartGateway, windowsSecretSpawnRecovery, windowsSecretConfigTrusted, windowsSecretAbsentConfigParentTrusted
 	previousBundle, previousPath, previousLifecycle, previousWait, previousArgs := windowsSecretLockBundleStore, windowsSecretLifecycleLockPath, windowsSecretLifecycleLock, windowsSecretInstallerLockWait, secretRawArgs
+	previousChangeSpool := windowsChangeSpool
 	previousManaged := managedHostWindowsStandalone
+	previousLive := windowsSecretGatewayLive
 	t.Cleanup(func() {
-		windowsSecretLayout, windowsSecretDeploymentInstalled, windowsSecretIsElevated, windowsSecretRestartGateway = previousLayout, previousInstalled, previousElevated, previousRestart
+		windowsSecretGatewayLive = previousLive
+		windowsSecretLayout, windowsSecretDeploymentInstalled, windowsSecretIsElevated, windowsSecretRestartGateway, windowsSecretSpawnRecovery, windowsSecretConfigTrusted, windowsSecretAbsentConfigParentTrusted = previousLayout, previousInstalled, previousElevated, previousRestart, previousRecovery, previousConfigTrusted, previousAbsentParentTrusted
 		windowsSecretLockBundleStore, windowsSecretLifecycleLockPath, windowsSecretLifecycleLock, windowsSecretInstallerLockWait, secretRawArgs = previousBundle, previousPath, previousLifecycle, previousWait, previousArgs
+		windowsChangeSpool = previousChangeSpool
 		managedHostWindowsStandalone = previousManaged
 	})
 	host := &windowsSecretLockEvents{}
+	// Credential tests exercise real durable reservations while replacing
+	// the installer's protected spool layout with a disposable test root.
+	// A standalone command uses ConfigDir and LifecycleDir from the installed
+	// deployment; most fixture layouts intentionally omit those directories.
+	spoolRoot := t.TempDir()
+	windowsChangeSpool = func(managed.StandaloneLayout) (enterprisestatus.ChangeSpool, error) {
+		return enterprisestatus.ChangeSpool{
+			Dir: filepath.Join(spoolRoot, "change-events"), StateDir: spoolRoot,
+		}, nil
+	}
 	windowsSecretLayout = func() (managed.StandaloneLayout, error) { return layout, nil }
 	windowsSecretDeploymentInstalled = func() (bool, error) { return true, nil }
 	windowsSecretIsElevated = func() bool { return true }
-	windowsSecretRestartGateway = func() (bool, error) { host.events = append(host.events, "restart"); return true, nil }
+	windowsSecretRestartGateway = func(beforeStop func() error) (bool, error) {
+		if err := beforeStop(); err != nil {
+			return false, err
+		}
+		host.events = append(host.events, "restart")
+		return true, nil
+	}
+	windowsSecretSpawnRecovery = func() (windowsSecretRecoveryControl, error) { return &fakeWindowsSecretRecovery{}, nil }
+	windowsSecretGatewayLive = func() (bool, error) { return true, nil }
+	windowsSecretConfigTrusted = func(string) error { return nil }
+	windowsSecretAbsentConfigParentTrusted = func(string) error { return nil }
 	windowsSecretLockBundleStore = func(_ context.Context, dir string, wait time.Duration) (func(), error) {
 		if dir != layout.LifecycleDir {
 			t.Errorf("bundle.lock taken in %q, want %q", dir, layout.LifecycleDir)
@@ -109,6 +206,199 @@ func stubWindowsSecretHost(t *testing.T, layout managed.StandaloneLayout) *windo
 	// a managed computer stubs the marker itself.
 	managedHostWindowsStandalone = func() (string, bool) { return "", false }
 	return host
+}
+
+// GAP-0749: a restart helper must be armed before a credential is changed.
+// A failed launch leaves the old value and service untouched.
+func TestWindowsSecretArmsGatewayRecoveryBeforeChange(t *testing.T) {
+	dir := windowsSecretTestHarness(t)
+	host := stubWindowsSecretHost(t, managed.StandaloneLayout{GOOS: "windows", SecretsDir: dir, LifecycleDir: filepath.Join(filepath.Dir(dir), "install")})
+	windowsSecretSpawnRecovery = func() (windowsSecretRecoveryControl, error) {
+		host.events = append(host.events, "armed")
+		return &fakeWindowsSecretRecovery{}, nil
+	}
+	windowsSecretRestartGateway = func(beforeStop func() error) (bool, error) {
+		if err := beforeStop(); err != nil {
+			return false, err
+		}
+		host.events = append(host.events, "restart")
+		if !windowsSecretStored(dir, "ai-defense-api-key") {
+			t.Error("gateway restarted before the credential was stored")
+		}
+		return true, nil
+	}
+	if _, err := runWindowsSecretCommand(t, "set", enterpriseSecretOptions{name: "ai-defense-api-key", fromStdin: true}, "previous-value\n"); err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(host.events, ","); got != "lock bundle,lock lifecycle,armed,restart,unlock lifecycle,unlock bundle" {
+		t.Fatalf("recovery was not armed before restart: %s", got)
+	}
+	host.events = nil
+	windowsSecretSpawnRecovery = func() (windowsSecretRecoveryControl, error) { return nil, errors.New("helper launch failed") }
+	_, err := runWindowsSecretCommand(t, "set", enterpriseSecretOptions{name: "ai-defense-api-key", fromStdin: true}, "replacement-value\n")
+	if err == nil || !strings.Contains(err.Error(), "nothing was changed") {
+		t.Fatalf("missing recovery helper did not refuse: %v", err)
+	}
+	if raw, readErr := os.ReadFile(filepath.Join(dir, "ai-defense-api-key")); readErr != nil || string(raw) != "previous-value" {
+		t.Fatalf("failed helper launch changed credential: %q %v", raw, readErr)
+	}
+}
+
+func TestWindowsSecretRecoveryRefusesUnreadyOrUnbreakableChild(t *testing.T) {
+	oldStart, oldCommand := windowsSecretStartRecovery, windowsSecretRecoveryCommand
+	t.Cleanup(func() { windowsSecretStartRecovery, windowsSecretRecoveryCommand = oldStart, oldCommand })
+	// A job the child cannot leave: nothing starts, and the change refuses.
+	started := false
+	windowsSecretStartRecovery = func(*exec.Cmd) error {
+		return fmt.Errorf("%w: the job kills its processes when it closes", processutil.ErrChildBoundToJob)
+	}
+	windowsSecretRecoveryCommand = func(executable string) *exec.Cmd {
+		started = true
+		return exec.Command(executable, "-test.run=^TestWindowsSecretRecoveryUnreadyHelper$")
+	}
+	if _, err := spawnWindowsSecretGatewayRecovery(); !errors.Is(err, processutil.ErrChildBoundToJob) || !started {
+		t.Fatalf("a recovery child bound to the job was accepted: %v", err)
+	}
+	windowsSecretStartRecovery = func(child *exec.Cmd) error {
+		child.SysProcAttr = &syscall.SysProcAttr{CreationFlags: windows.DETACHED_PROCESS}
+		return child.Start()
+	}
+	windowsSecretRecoveryCommand = func(executable string) *exec.Cmd {
+		child := exec.Command(executable, "-test.run=^TestWindowsSecretRecoveryUnreadyHelper$")
+		child.Env = append(os.Environ(), "DC_WINDOWS_SECRET_UNREADY_HELPER=1")
+		return child
+	}
+	// This child starts and exits without READY. The credential operation
+	// must refuse even though CreateProcess succeeded.
+	if _, err := spawnWindowsSecretGatewayRecovery(); err == nil {
+		t.Fatal("credential change accepted an unready recovery child")
+	}
+}
+
+// The finding of loop round 2: a LocalSystem caller whose process job
+// cannot be inspected (a scheduled task) could not set or remove a
+// credential at all. A gateway that is stopped or not installed needs no
+// restart and so no recovery child: the change goes through without one. A
+// gateway that starts after that check gets its child at the restart
+// decision, before it is stopped; a child that cannot start there leaves the
+// gateway running and the restart failed, never stopped without recovery.
+func TestWindowsSecretChangeStartsRecoveryOnlyForARestart(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		live         bool
+		liveErr      error
+		raceStart    bool
+		wantSpawned  bool
+		wantErr      string
+		wantRestart  bool
+		wantValue    string
+		wantArmed    bool
+		spawnFailure error
+	}{
+		{name: "stopped gateway, unreadable job", live: false, spawnFailure: processutil.ErrChildBoundToJob, wantValue: "new-value"},
+		{name: "stopped gateway", live: false, wantValue: "new-value"},
+		{name: "gateway started after the check", live: false, raceStart: true, wantSpawned: true, wantRestart: true, wantArmed: true, wantValue: "new-value"},
+		{name: "gateway started after the check, unreadable job", live: false, raceStart: true, spawnFailure: processutil.ErrChildBoundToJob,
+			wantSpawned: true, wantErr: "restarting the gateway failed", wantValue: "new-value"},
+		{name: "running gateway, unreadable job", live: true, spawnFailure: processutil.ErrChildBoundToJob, wantSpawned: true,
+			wantErr: "nothing was changed", wantValue: "old-value"},
+		{name: "unknown gateway state, unreadable job", liveErr: errors.New("SCM unavailable"), spawnFailure: processutil.ErrChildBoundToJob,
+			wantSpawned: true, wantErr: "nothing was changed", wantValue: "old-value"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := windowsSecretTestHarness(t)
+			if _, err := runWindowsSecretCommand(t, "set", enterpriseSecretOptions{name: "example-key", fromStdin: true}, "old-value\n"); err != nil {
+				t.Fatal(err)
+			}
+			spawned, stopped := false, false
+			recovery := &fakeWindowsSecretRecovery{}
+			windowsSecretGatewayLive = func() (bool, error) { return tc.live, tc.liveErr }
+			windowsSecretSpawnRecovery = func() (windowsSecretRecoveryControl, error) {
+				spawned = true
+				if tc.spawnFailure != nil {
+					return nil, tc.spawnFailure
+				}
+				return recovery, nil
+			}
+			windowsSecretRestartGateway = func(beforeStop func() error) (bool, error) {
+				if !tc.live && !tc.raceStart && tc.liveErr == nil {
+					return false, nil // stopped: no restart decision
+				}
+				if err := beforeStop(); err != nil {
+					return false, err
+				}
+				stopped = true
+				return true, nil
+			}
+			_, err := runWindowsSecretCommand(t, "set", enterpriseSecretOptions{name: "example-key", fromStdin: true}, "new-value\n")
+			if tc.wantErr == "" && err != nil || tc.wantErr != "" && (err == nil || !strings.Contains(err.Error(), tc.wantErr)) {
+				t.Fatalf("error = %v, want %q", err, tc.wantErr)
+			}
+			if spawned != tc.wantSpawned || stopped != tc.wantRestart || recovery.armed != tc.wantArmed {
+				t.Fatalf("spawned=%v stopped=%v armed=%v, want %v %v %v", spawned, stopped, recovery.armed, tc.wantSpawned, tc.wantRestart, tc.wantArmed)
+			}
+			if tc.wantArmed && (!recovery.cancelled || recovery.recovered) {
+				t.Fatalf("a completed restart left its recovery armed: %+v", recovery)
+			}
+			if raw, readErr := os.ReadFile(filepath.Join(dir, "example-key")); readErr != nil || string(raw) != tc.wantValue {
+				t.Fatalf("credential = %q %v, want %q", raw, readErr, tc.wantValue)
+			}
+		})
+	}
+}
+
+func TestWindowsSecretRecoveryUnreadyHelper(t *testing.T) {
+	if os.Getenv("DC_WINDOWS_SECRET_UNREADY_HELPER") == "1" {
+		os.Exit(0)
+	}
+}
+
+// GAP-0750: a missing or malformed config is an unproven policy, not proof
+// that no reference exists. Refuse before reserving an audit row or deleting
+// the credential, and leave the gateway running on its previous value.
+func TestWindowsSecretRemoveRefusesUnprovenInstalledConfig(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		body *string
+	}{
+		{name: "missing"},
+		{name: "malformed", body: func() *string { s := "guardrail: [\n"; return &s }()},
+		{name: "untrusted", body: func() *string { s := standaloneGatewayCheckConfig; return &s }()},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := windowsSecretTestHarness(t)
+			if _, err := runWindowsSecretCommand(t, "set", enterpriseSecretOptions{name: "ai-defense-api-key", fromStdin: true}, "saved-value\n"); err != nil {
+				t.Fatal(err)
+			}
+			layout, err := windowsSecretLayout()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tc.body == nil {
+				if err := os.Remove(layout.ConfigPath); err != nil {
+					t.Fatal(err)
+				}
+			} else if err := os.WriteFile(layout.ConfigPath, []byte(*tc.body), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if tc.name == "untrusted" {
+				windowsSecretConfigTrusted = func(string) error { return errors.New("config ACL drift") }
+			}
+			restarted := false
+			windowsSecretRestartGateway = func(beforeStop func() error) (bool, error) {
+				if err := beforeStop(); err != nil {
+					return false, err
+				}
+				restarted = true
+				return true, nil
+			}
+			out, err := runWindowsSecretCommand(t, "remove", enterpriseSecretOptions{name: "ai-defense-api-key", json: true}, "")
+			windowsSecretFailureDoc(t, out, err, "remove", "state_invalid")
+			if !windowsSecretStored(dir, "ai-defense-api-key") || restarted {
+				t.Fatalf("unproven config changed credential or gateway: stored=%t restarted=%t", windowsSecretStored(dir, "ai-defense-api-key"), restarted)
+			}
+		})
+	}
 }
 
 func runWindowsSecretCommand(t *testing.T, action string, opts enterpriseSecretOptions, stdin string) (string, error) {
@@ -221,7 +511,13 @@ func TestWindowsSecretRemoveRefusesAnUnreadableConfig(t *testing.T) {
 	layout.ConfigPath = t.TempDir()
 	windowsSecretLayout = func() (managed.StandaloneLayout, error) { return layout, nil }
 	restarted := false
-	windowsSecretRestartGateway = func() (bool, error) { restarted = true; return true, nil }
+	windowsSecretRestartGateway = func(beforeStop func() error) (bool, error) {
+		if err := beforeStop(); err != nil {
+			return false, err
+		}
+		restarted = true
+		return true, nil
+	}
 	_, err = runWindowsSecretCommand(t, "remove", enterpriseSecretOptions{name: "ai-defense-api-key"}, "")
 	if err == nil || !strings.Contains(err.Error(), "cannot read the installed config") || !strings.Contains(err.Error(), "nothing was removed") {
 		t.Fatalf("remove with an unreadable config: %v", err)
@@ -289,7 +585,8 @@ func windowsSecretFailureDoc(t *testing.T, out string, err error, action, code s
 		}
 	}
 	allowed := map[string]bool{"elevation_required": true, "invalid_arguments": true, "not_installed": true, "lifecycle_busy": true,
-		"credential_in_use": true, "change_failed": true, "restart_failed": true, "state_invalid": true, "not_supported_secure_client": true}
+		"credential_in_use": true, "credential_changed": true, "change_failed": true, "restart_failed": true, "state_invalid": true, "not_supported_secure_client": true,
+		"rotation_confirmed": true, "confirmed_bundle_changed": true}
 	exit := commandExitCode(err)
 	if doc.SchemaVersion != 1 || doc.OK || doc.Action != action || doc.GatewayRestarted || len(doc.Errors) != 1 ||
 		doc.Errors[0].Code != code || !allowed[doc.Errors[0].Code] || doc.Errors[0].Message == "" || doc.ExitCode != exit {
@@ -436,18 +733,33 @@ func TestWindowsSecretFlagErrorsPrintTheFailureDocument(t *testing.T) {
 
 // A5: set and remove take bundle.lock (with --lock-wait), then
 // lifecycle.lock, and change the credential and restart the gateway under
-// both; an identical value is written and restarted again.
+// both. A byte-identical value is not rewritten, but a running gateway still
+// restarts (nothing proves the value it loaded); with no running gateway it
+// is a no-op.
 func TestWindowsSecretChangesUnderBothLocks(t *testing.T) {
 	dir := windowsSecretTestHarness(t)
-	host := stubWindowsSecretHost(t, managed.StandaloneLayout{GOOS: "windows", SecretsDir: dir, LifecycleDir: filepath.Join(filepath.Dir(dir), "install")})
+	layout, err := windowsSecretLayout()
+	if err != nil {
+		t.Fatal(err)
+	}
+	host := stubWindowsSecretHost(t, layout)
 	written := false
-	windowsSecretRestartGateway = func() (bool, error) {
+	windowsSecretRestartGateway = func(beforeStop func() error) (bool, error) {
+		if err := beforeStop(); err != nil {
+			return false, err
+		}
 		_, statErr := os.Stat(filepath.Join(dir, "ai-defense-api-key"))
 		written = statErr == nil
 		host.events = append(host.events, "restart")
 		return true, nil
 	}
 	want := []string{"lock bundle", "lock lifecycle", "restart", "unlock lifecycle", "unlock bundle"}
+	storedPath := filepath.Join(dir, "ai-defense-api-key")
+	// The repeat models an administrator who repaired the file ACL after
+	// the gateway started without the credential: same bytes, an old
+	// preserved timestamp. The running gateway must restart, and the file
+	// must not be rewritten.
+	preserved := time.Date(2001, 2, 3, 4, 5, 6, 0, time.UTC)
 	for i := 0; i < 2; i++ {
 		host.events = nil
 		out, err := runWindowsSecretCommand(t, "set", enterpriseSecretOptions{name: "ai-defense-api-key", fromStdin: true, json: true, lockWait: 10 * time.Minute}, "same-value\n")
@@ -455,11 +767,53 @@ func TestWindowsSecretChangesUnderBothLocks(t *testing.T) {
 			t.Fatalf("set %d: %v", i, err)
 		}
 		if out != `{"action":"set","gateway_restarted":true,"name":"ai-defense-api-key","ok":true,"schema_version":1}`+"\n" {
-			t.Fatalf("success document changed: %q", out)
+			t.Fatalf("set %d: success document changed: %q", i, out)
 		}
 		if strings.Join(host.events, ",") != strings.Join(want, ",") || host.bundle != 10*time.Minute || !written {
 			t.Fatalf("set %d: events %v, bundle wait %s, written before restart %v", i, host.events, host.bundle, written)
 		}
+		if i == 0 {
+			if err := os.Chtimes(storedPath, preserved, preserved); err != nil {
+				t.Fatal(err)
+			}
+		} else if info, err := os.Stat(storedPath); err != nil || !info.ModTime().Equal(preserved) {
+			t.Fatalf("identical value was rewritten: %v, %v", info, err)
+		}
+	}
+	// No running gateway (stopped or not installed): the identical value is
+	// a no-op and the next start reads the stored file.
+	host.events = nil
+	windowsSecretRestartGateway = func(func() error) (bool, error) {
+		host.events = append(host.events, "restart")
+		return false, nil
+	}
+	if out, err := runWindowsSecretCommand(t, "set", enterpriseSecretOptions{name: "ai-defense-api-key", fromStdin: true, json: true}, "same-value\n"); err != nil ||
+		out != `{"action":"set","gateway_restarted":false,"name":"ai-defense-api-key","ok":true,"schema_version":1}`+"\n" {
+		t.Fatalf("stopped gateway identical set: %q, %v", out, err)
+	}
+	if info, err := os.Stat(storedPath); err != nil || !info.ModTime().Equal(preserved) {
+		t.Fatalf("identical value was rewritten for a stopped gateway: %v, %v", info, err)
+	}
+	windowsSecretRestartGateway = func(beforeStop func() error) (bool, error) {
+		if err := beforeStop(); err != nil {
+			return false, err
+		}
+		_, statErr := os.Stat(storedPath)
+		written = statErr == nil
+		host.events = append(host.events, "restart")
+		return true, nil
+	}
+	// The gateway reader trims whitespace, but an on-disk byte difference
+	// still rewrites the credential and restarts the service.
+	if err := os.WriteFile(storedPath, []byte("same-value\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	host.events = nil
+	if out, err := runWindowsSecretCommand(t, "set", enterpriseSecretOptions{name: "ai-defense-api-key", fromStdin: true, json: true}, "same-value\n"); err != nil || !strings.Contains(out, `"gateway_restarted":true`) {
+		t.Fatalf("byte-different set: %q, %v", out, err)
+	}
+	if data, err := os.ReadFile(storedPath); err != nil || string(data) != "same-value" || strings.Join(host.events, ",") != strings.Join(want, ",") {
+		t.Fatalf("byte-different value was not rewritten and restarted: %v, %v", err, host.events)
 	}
 	host.events = nil
 	if _, err := runWindowsSecretCommand(t, "remove", enterpriseSecretOptions{name: "ai-defense-api-key", json: true}, ""); err != nil {
@@ -471,7 +825,12 @@ func TestWindowsSecretChangesUnderBothLocks(t *testing.T) {
 
 	// The credential was stored, the restart failed: restart_failed, and
 	// the value is not printed.
-	windowsSecretRestartGateway = func() (bool, error) { return false, errors.New("service did not start") }
+	windowsSecretRestartGateway = func(beforeStop func() error) (bool, error) {
+		if err := beforeStop(); err != nil {
+			return false, err
+		}
+		return false, errors.New("service did not start")
+	}
 	out, err := runWindowsSecretCommand(t, "set", enterpriseSecretOptions{name: "ai-defense-api-key", fromStdin: true, json: true}, "rotated-value")
 	windowsSecretFailureDoc(t, out, err, "set", "restart_failed")
 	if strings.Contains(out, "rotated-value") || !strings.Contains(err.Error(), "credential ai-defense-api-key stored") {
@@ -484,7 +843,11 @@ func TestWindowsSecretChangesUnderBothLocks(t *testing.T) {
 // locks, writes nothing and restarts nothing.
 func TestWindowsSecretRechecksTheDeploymentUnderTheLocks(t *testing.T) {
 	dir := windowsSecretTestHarness(t)
-	host := stubWindowsSecretHost(t, managed.StandaloneLayout{GOOS: "windows", SecretsDir: dir, LifecycleDir: filepath.Join(filepath.Dir(dir), "install")})
+	layout, err := windowsSecretLayout()
+	if err != nil {
+		t.Fatal(err)
+	}
+	host := stubWindowsSecretHost(t, layout)
 	for _, action := range []string{"set", "remove"} {
 		t.Run(action, func(t *testing.T) {
 			host.events = nil
@@ -690,7 +1053,16 @@ func TestWindowsSecretRemoveStaysInsideTheRealFolder(t *testing.T) {
 		}
 	}
 	windowsSecretTestJunction(t, filepath.Join(dir, "llm-key"), target)
-	stubWindowsSecretHost(t, managed.StandaloneLayout{GOOS: "windows", SecretsDir: dir, LifecycleDir: filepath.Join(root, "install")})
+	// The change spool keeps its state in the lifecycle folder and its
+	// events beside the config, as on an installed computer.
+	layout := managed.StandaloneLayout{GOOS: "windows", SecretsDir: dir, LifecycleDir: filepath.Join(root, "install"),
+		ConfigDir: filepath.Join(root, "config"), DataDir: filepath.Join(root, "data")}
+	for _, folder := range []string{layout.LifecycleDir, layout.ConfigDir, layout.DataDir} {
+		if err := os.MkdirAll(folder, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	stubWindowsSecretHost(t, layout)
 	for _, name := range []string{"ai-defense-api-key", "llm-key", "never-stored"} {
 		out, err := runWindowsSecretCommand(t, "remove", enterpriseSecretOptions{name: name, json: true}, "")
 		if err != nil || !strings.Contains(out, `"ok":true`) {
@@ -714,5 +1086,517 @@ func TestWindowsSecretRemoveStaysInsideTheRealFolder(t *testing.T) {
 	}
 	if !windowsSecretStored(dir, "other-key") || windowsSecretStored(dir, "ai-defense-api-key") {
 		t.Fatal("windowsSecretStored disagrees with the store")
+	}
+}
+
+// An ACL edit that drops the gateway service SID's read ACEs from a stored
+// credential and its folder leaves the bytes alone. An identical set is still
+// a no-op (nothing rewritten), but it applies both descriptors again: the
+// administrator's own read of the value succeeds without them, while the
+// gateway's restricted token cannot load the credential.
+func TestWindowsSecretIdenticalSetRepairsTheGatewayReadACEs(t *testing.T) {
+	dir := windowsSecretTestHarness(t)
+	stubWindowsSecretHost(t, managed.StandaloneLayout{GOOS: "windows", SecretsDir: dir, LifecycleDir: filepath.Join(filepath.Dir(dir), "install")})
+	windowsSecretRestartGateway = func(func() error) (bool, error) { return false, nil }
+	set := func() string {
+		t.Helper()
+		out, err := runWindowsSecretCommand(t, "set", enterpriseSecretOptions{name: "ai-defense-api-key", fromStdin: true, json: true}, "same-value\n")
+		if err != nil {
+			t.Fatal(err)
+		}
+		return out
+	}
+	set()
+	path := filepath.Join(dir, "ai-defense-api-key")
+	if err := applyWindowsSDDL(path, "O:BAG:SYD:P(A;;FA;;;SY)(A;;FA;;;BA)"); err != nil {
+		t.Fatal(err)
+	}
+	if err := applyWindowsSDDL(dir, "O:BAG:SYD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)"); err != nil {
+		t.Fatal(err)
+	}
+	preserved := time.Date(2001, 2, 3, 4, 5, 6, 0, time.UTC)
+	if err := os.Chtimes(path, preserved, preserved); err != nil {
+		t.Fatal(err)
+	}
+	if out := set(); out != `{"action":"set","gateway_restarted":false,"name":"ai-defense-api-key","ok":true,"schema_version":1}`+"\n" {
+		t.Fatalf("identical set after an ACL edit: %q", out)
+	}
+	if info, err := os.Stat(path); err != nil || !info.ModTime().Equal(preserved) {
+		t.Fatalf("identical value was rewritten: %v, %v", info, err)
+	}
+	gateway, err := managed.WindowsServiceAccountSID(windowsSecretGatewayAccount)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ace, ok := windowsSecretTestACEs(t, path)[gateway.String()]; !ok || ace.mask != 0x120089 { // FR (FILE_GENERIC_READ)
+		t.Fatalf("credential read ACE of the gateway not repaired: %+v, %v", ace, ok)
+	}
+	if ace, ok := windowsSecretTestACEs(t, dir)[gateway.String()]; !ok || ace.mask != 0x1200a0 { // windowsSecretDirectoryReaderAccess
+		t.Fatalf("folder ACE of the gateway not repaired: %+v, %v", ace, ok)
+	}
+}
+
+// The identical-value check reads the stored bytes only through the pinned
+// folder and a handle that follows no reparse point, and never more than the
+// credential limit: a link or junction named like the credential and an
+// oversized file are refused before anything is read.
+func TestWindowsSecretOpenCredentialRefusesLinksAndOversizedFiles(t *testing.T) {
+	dir := windowsSecretTestHarness(t)
+	store, err := openWindowsSecretStore(dir, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.close()
+	if err := os.WriteFile(filepath.Join(dir, "oversized"), bytes.Repeat([]byte("a"), managed.ServiceCredentialLimit+1), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	outside := t.TempDir()
+	target := filepath.Join(outside, "target")
+	if err := os.WriteFile(target, []byte("same-value"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, filepath.Join(dir, "linked")); err != nil {
+		t.Fatal(err)
+	}
+	windowsSecretTestJunction(t, filepath.Join(dir, "junction"), outside)
+	for _, name := range []string{"oversized", "linked", "junction"} {
+		if entry, data, err := store.openCredential(name); err == nil {
+			_ = windows.CloseHandle(entry)
+			t.Fatalf("%s was read: %q", name, data)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(dir, "plain"), []byte("same-value"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	entry, data, err := store.openCredential("plain")
+	if err != nil || string(data) != "same-value" {
+		t.Fatalf("plain credential: %q, %v", data, err)
+	}
+	_ = windows.CloseHandle(entry)
+}
+
+// GAP-0335: Windows `secret set` stores a credential the confirmed bundle
+// references only with the value that bundle signs. Another value is
+// refused secret_ref_mismatch with exit 1603 under the change locks: nothing
+// is written and the gateway is not restarted. The signed value is stored.
+func TestWindowsSecretSetStoresOnlyTheValueTheConfirmedBundleSigns(t *testing.T) {
+	dir := windowsSecretTestHarness(t)
+	e, store := credentialBundleEnv(t)
+	confirmSignedBundle(t, store, e.signCredentialBundle(t, "5", "key-1", filepath.Join(e.dir, "key.pem")))
+	layout, err := windowsSecretLayout()
+	if err != nil {
+		t.Fatal(err)
+	}
+	host := stubWindowsSecretHost(t, layout)
+	credential := filepath.Join(dir, "ai-defense-api-key")
+
+	out, err := runWindowsSecretCommand(t, "set", enterpriseSecretOptions{name: "ai-defense-api-key", fromStdin: true, json: true}, "key-2\r\n")
+	if err == nil || commandExitCode(err) != windowsSecretExitFailure {
+		t.Fatalf("set of a value the bundle does not sign: %v (exit %d), want exit %d", err, commandExitCode(err), windowsSecretExitFailure)
+	}
+	var doc struct {
+		OK     bool `json:"ok"`
+		Errors []struct {
+			Code string `json:"code"`
+		} `json:"errors"`
+	}
+	if err := json.Unmarshal([]byte(out), &doc); err != nil || doc.OK || len(doc.Errors) != 1 || doc.Errors[0].Code != "secret_ref_mismatch" {
+		t.Fatalf("refusal document %s (%v), want one secret_ref_mismatch error", out, err)
+	}
+	if strings.Contains(out, "key-2") {
+		t.Fatal("the refusal prints the value")
+	}
+	if _, statErr := os.Stat(credential); !os.IsNotExist(statErr) {
+		t.Fatalf("a refused value was written: %v", statErr)
+	}
+	want := []string{"lock bundle", "lock lifecycle", "unlock lifecycle", "unlock bundle"}
+	if strings.Join(host.events, ",") != strings.Join(want, ",") {
+		t.Fatalf("events %v, want the refusal under both locks and no restart: %v", host.events, want)
+	}
+
+	host.events = nil
+	if out, err := runWindowsSecretCommand(t, "set", enterpriseSecretOptions{name: "ai-defense-api-key", fromStdin: true, json: true}, "key-1\r\n"); err != nil {
+		t.Fatalf("set of the signed value: %v\n%s", err, out)
+	}
+	if data, err := os.ReadFile(credential); err != nil || strings.TrimSpace(string(data)) != "key-1" {
+		t.Fatalf("stored credential %q, %v; want the signed value", data, err)
+	}
+	if !slices.Contains(host.events, "restart") {
+		t.Fatalf("events %v, want a gateway restart after the change", host.events)
+	}
+}
+
+// Loop round 2 (rc.7), finding 1: the MDM wrapper's put-back of a credential
+// a failed rotation added to a config that references it with no value
+// stored. secret remove refuses credential_in_use, which proves nothing
+// about the rotation. remove --undo-rotation with the bundle confirmed
+// before the rotation removes it; with another bundle confirmed since, it
+// refuses rotation_confirmed and leaves it. A rotation guarded by a bundle
+// that is no longer confirmed writes nothing.
+func TestWindowsSecretUndoRotationRemovesWhatAFailedRotationAdded(t *testing.T) {
+	dir := windowsSecretTestHarness(t)
+	layout, err := windowsSecretLayout()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := strings.Replace(standaloneGatewayCheckConfig, "enterprise:\n  profile: standalone\n",
+		"enterprise:\n  profile: standalone\n  inspection:\n    ai_defense:\n      enabled: true\n      credential: ai-defense-api-key\n", 1)
+	if cfg == standaloneGatewayCheckConfig {
+		t.Fatal("the test config has no enterprise profile line to extend")
+	}
+	if err := os.WriteFile(layout.ConfigPath, []byte(cfg), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	previous := bundleStore
+	t.Cleanup(func() { bundleStore = previous })
+	store := enterprisebundle.NewStore(filepath.Join(t.TempDir(), "bundles"), filepath.Join(t.TempDir(), "lifecycle"))
+	bundleStore = func() (*enterprisebundle.Store, error) { return store, nil }
+	const name = "ai-defense-api-key"
+	other := strings.Repeat("a", 64)
+	out, err := runWindowsSecretCommand(t, "set", enterpriseSecretOptions{name: name, fromStdin: true, json: true, bundle: "unused.dcbundle", ifConfirmed: other}, "new-key\n")
+	windowsSecretFailureDoc(t, out, err, "set", "confirmed_bundle_changed")
+	if windowsSecretStored(dir, name) {
+		t.Fatal("a rotation guarded by a bundle no longer confirmed stored the value")
+	}
+	if _, err := runWindowsSecretCommand(t, "set", enterpriseSecretOptions{name: name, fromStdin: true}, "new-key\n"); err != nil {
+		t.Fatal(err)
+	}
+	out, err = runWindowsSecretCommand(t, "remove", enterpriseSecretOptions{name: name, json: true}, "")
+	windowsSecretFailureDoc(t, out, err, "remove", "credential_in_use")
+	out, err = runWindowsSecretCommand(t, "remove", enterpriseSecretOptions{name: name, json: true, undoRotation: other, ifStored: windowsTestSHA256("new-key")}, "")
+	windowsSecretFailureDoc(t, out, err, "remove", "rotation_confirmed")
+	if !windowsSecretStored(dir, name) {
+		t.Fatal("a refused put-back removed the credential")
+	}
+	// Without the config from before the rotation (--undo-config), or with
+	// another one, the reference stands (loop round 1, review at b97e9ab4).
+	for _, undoConfig := range []string{"", "none", windowsTestSHA256(standaloneGatewayCheckConfig)} {
+		out, err = runWindowsSecretCommand(t, "remove", enterpriseSecretOptions{name: name, json: true, undoRotation: "none", undoConfig: undoConfig, ifStored: windowsTestSHA256("new-key")}, "")
+		windowsSecretFailureDoc(t, out, err, "remove", "credential_in_use")
+		if !windowsSecretStored(dir, name) {
+			t.Fatalf("a put-back with --undo-config %q removed a credential the installed config references", undoConfig)
+		}
+	}
+	out, err = runWindowsSecretCommand(t, "remove", enterpriseSecretOptions{name: name, json: true, undoRotation: "none", undoConfig: windowsTestSHA256(cfg), ifStored: windowsTestSHA256("new-key")}, "")
+	if err != nil {
+		t.Fatalf("put-back: %v\n%s", err, out)
+	}
+	if windowsSecretStored(dir, name) {
+		t.Fatal("the put-back left the credential the failed rotation added")
+	}
+}
+
+func windowsTestSHA256(text string) string {
+	sum := sha256.Sum256([]byte(text))
+	return hex.EncodeToString(sum[:])
+}
+
+// Loop round 1 (review at b97e9ab4): the wrapper journaled an absent
+// credential and stored a new value with no bundle confirmed; before its
+// lifecycle finished, another ensure installed a config that uses the
+// value; the lifecycle then failed. The put-back (remove --undo-rotation
+// none) skipped credential_in_use, deleted the credential that config needs
+// and restarted the gateway. It now takes a referenced credential only while
+// the config journaled before the rotation (--undo-config) is installed;
+// otherwise credential_in_use, and the credential stays.
+func TestWindowsSecretUndoRotationKeepsACredentialALaterConfigUses(t *testing.T) {
+	dir := windowsSecretTestHarness(t)
+	layout, err := windowsSecretLayout()
+	if err != nil {
+		t.Fatal(err)
+	}
+	previous := bundleStore
+	t.Cleanup(func() { bundleStore = previous })
+	store := enterprisebundle.NewStore(filepath.Join(t.TempDir(), "bundles"), filepath.Join(t.TempDir(), "lifecycle"))
+	bundleStore = func() (*enterprisebundle.Store, error) { return store, nil }
+	const name = "ai-defense-api-key"
+	unused := standaloneGatewayCheckConfig
+	uses := strings.Replace(unused, "enterprise:\n  profile: standalone\n",
+		"enterprise:\n  profile: standalone\n  inspection:\n    ai_defense:\n      enabled: true\n      credential: ai-defense-api-key\n", 1)
+	if uses == unused {
+		t.Fatal("the test config has no enterprise profile line to extend")
+	}
+	reapplied := uses + "# installed again by another ensure\n"
+	for _, tc := range []struct {
+		name, before, after string
+		removed             bool
+	}{
+		{"a config installed since uses it", unused, uses, false},
+		{"a config installed since still uses it", uses, reapplied, false},
+		{"the config from before uses it", uses, uses, true},
+		{"a config installed since does not use it", uses, unused, true},
+		// A bundle confirmed since the rotation (here: the journaled one
+		// is no longer confirmed) proves it committed: rotation_confirmed,
+		// whatever config is installed now, so the wrapper retires its
+		// entry instead of keeping it for good.
+		{"a bundle confirmed since and a config installed since", unused, uses, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := os.WriteFile(layout.ConfigPath, []byte(tc.before), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := runWindowsSecretCommand(t, "set", enterpriseSecretOptions{name: name, fromStdin: true}, "new-key\n"); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(layout.ConfigPath, []byte(tc.after), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			undoRotation, code := "none", "credential_in_use"
+			if strings.HasPrefix(tc.name, "a bundle confirmed since") {
+				undoRotation, code = strings.Repeat("a", 64), "rotation_confirmed"
+			}
+			out, err := runWindowsSecretCommand(t, "remove", enterpriseSecretOptions{name: name, json: true, undoRotation: undoRotation, undoConfig: windowsTestSHA256(tc.before), ifStored: windowsTestSHA256("new-key")}, "")
+			if tc.removed {
+				if err != nil {
+					t.Fatalf("put-back: %v\n%s", err, out)
+				}
+				if windowsSecretStored(dir, name) {
+					t.Fatal("the put-back left the credential the failed rotation added")
+				}
+				return
+			}
+			windowsSecretFailureDoc(t, out, err, "remove", code)
+			if code == "rotation_confirmed" {
+				if !windowsSecretStored(dir, name) {
+					t.Fatal("a put-back refused rotation_confirmed removed the credential")
+				}
+				return
+			}
+			if !strings.Contains(out, "not the config installed before the rotation") || strings.Contains(out, "new-key") {
+				t.Fatalf("refusal does not say why, or prints the value:\n%s", out)
+			}
+			if !windowsSecretStored(dir, name) {
+				t.Fatal("the put-back removed a credential a config installed since uses")
+			}
+		})
+	}
+}
+
+// A journaled absent credential can be restored when no config.yaml existed
+// before the rotation or at replay. The ordinary remove path still requires
+// an inspectable config.
+func TestWindowsSecretUndoRotationRemovesAnAddedCredentialWithoutConfig(t *testing.T) {
+	dir := windowsSecretTestHarness(t)
+	layout, err := windowsSecretLayout()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(layout.ConfigPath); err != nil {
+		t.Fatal(err)
+	}
+	previous := bundleStore
+	t.Cleanup(func() { bundleStore = previous })
+	store := enterprisebundle.NewStore(filepath.Join(t.TempDir(), "bundles"), filepath.Join(t.TempDir(), "lifecycle"))
+	bundleStore = func() (*enterprisebundle.Store, error) { return store, nil }
+	const name = "ai-defense-api-key"
+	if _, err := runWindowsSecretCommand(t, "set", enterpriseSecretOptions{name: name, fromStdin: true}, "new-key\n"); err != nil {
+		t.Fatal(err)
+	}
+	out, err := runWindowsSecretCommand(t, "remove", enterpriseSecretOptions{name: name, json: true}, "")
+	windowsSecretFailureDoc(t, out, err, "remove", "state_invalid")
+	windowsSecretAbsentConfigParentTrusted = func(string) error { return errors.New("untrusted parent") }
+	out, err = runWindowsSecretCommand(t, "remove", enterpriseSecretOptions{
+		name: name, json: true, undoRotation: "none", undoConfig: "none", ifStored: windowsTestSHA256("new-key"),
+	}, "")
+	windowsSecretFailureDoc(t, out, err, "remove", "state_invalid")
+	if !windowsSecretStored(dir, name) {
+		t.Fatal("the failed rotation's credential was removed through an untrusted config parent")
+	}
+	windowsSecretAbsentConfigParentTrusted = func(string) error { return nil }
+	out, err = runWindowsSecretCommand(t, "remove", enterpriseSecretOptions{
+		name: name, json: true, undoRotation: "none", undoConfig: "none", ifStored: windowsTestSHA256("new-key"),
+	}, "")
+	if err != nil {
+		t.Fatalf("undo absent-config rotation: %v\n%s", err, out)
+	}
+	if windowsSecretStored(dir, name) {
+		t.Fatal("the failed rotation's added credential remains")
+	}
+}
+
+// Both put-back forms compare the exact value the rotation wrote under the
+// credential locks. A later direct administrator save must survive even if
+// the config and confirmed bundle still match the journal's older identity.
+func TestWindowsSecretUndoRotationKeepsALaterCredentialValue(t *testing.T) {
+	for _, action := range []string{"set", "remove"} {
+		t.Run(action, func(t *testing.T) {
+			dir := windowsSecretTestHarness(t)
+			layout, err := windowsSecretLayout()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if action == "remove" {
+				if err := os.Remove(layout.ConfigPath); err != nil {
+					t.Fatal(err)
+				}
+			}
+			previous := bundleStore
+			t.Cleanup(func() { bundleStore = previous })
+			store := enterprisebundle.NewStore(filepath.Join(t.TempDir(), "bundles"), filepath.Join(t.TempDir(), "lifecycle"))
+			bundleStore = func() (*enterprisebundle.Store, error) { return store, nil }
+			const name = "ai-defense-api-key"
+			if _, err := runWindowsSecretCommand(t, "set", enterpriseSecretOptions{name: name, fromStdin: true}, "new-key\n"); err != nil {
+				t.Fatal(err)
+			}
+			credential := filepath.Join(dir, name)
+			if err := os.WriteFile(credential, []byte("admin-new-key"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			opts := enterpriseSecretOptions{name: name, json: true, undoRotation: "none", ifStored: windowsTestSHA256("new-key"), undoConfig: "none"}
+			input := ""
+			if action == "set" {
+				opts.fromStdin, input = true, "old-key\n"
+			}
+			out, err := runWindowsSecretCommand(t, action, opts, input)
+			windowsSecretFailureDoc(t, out, err, action, "credential_changed")
+			if raw, err := os.ReadFile(credential); err != nil || string(raw) != "admin-new-key" {
+				t.Fatalf("administrator's value changed to %q: %v", raw, err)
+			}
+		})
+	}
+}
+
+// The wrapper journals before secret set writes the delivered value. A
+// refused launch or an interrupted run can therefore replay while the old
+// value (or its absence) is still in the store. That replay is already done;
+// it must not strand the entry behind --if-stored's digest of the new value.
+func TestWindowsSecretUndoRotationAlreadyRestoredBeforeSet(t *testing.T) {
+	for _, oldPresent := range []bool{true, false} {
+		t.Run(fmt.Sprint("old-present=", oldPresent), func(t *testing.T) {
+			dir := windowsSecretTestHarness(t)
+			layout, err := windowsSecretLayout()
+			if err != nil {
+				t.Fatal(err)
+			}
+			previous := bundleStore
+			t.Cleanup(func() { bundleStore = previous })
+			store := enterprisebundle.NewStore(filepath.Join(t.TempDir(), "bundles"), filepath.Join(t.TempDir(), "lifecycle"))
+			bundleStore = func() (*enterprisebundle.Store, error) { return store, nil }
+			const name = "ai-defense-api-key"
+			if oldPresent {
+				if _, err := runWindowsSecretCommand(t, "set", enterpriseSecretOptions{name: name, fromStdin: true}, "old-key\n"); err != nil {
+					t.Fatal(err)
+				}
+				// Older stores can retain source whitespace. The replay's
+				// input is normalized, but the exact old bytes stay in place.
+				if err := os.WriteFile(filepath.Join(dir, name), []byte(" old-key\r\n"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				// Even a config installed since the journal cannot cause a
+				// removal: there is still nothing stored to remove.
+				cfg := strings.Replace(standaloneGatewayCheckConfig, "enterprise:\n  profile: standalone\n",
+					"enterprise:\n  profile: standalone\n  inspection:\n    ai_defense:\n      enabled: true\n      credential: ai-defense-api-key\n", 1)
+				if cfg == standaloneGatewayCheckConfig {
+					t.Fatal("the later config did not gain a credential reference")
+				}
+				if err := os.WriteFile(layout.ConfigPath, []byte(cfg), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			windowsSecretGatewayLive = func() (bool, error) { return false, nil }
+			windowsSecretRestartGateway = func(func() error) (bool, error) { return false, nil }
+			opts := enterpriseSecretOptions{name: name, json: true, undoRotation: "none", ifStored: windowsTestSHA256("new-key")}
+			action, input := "remove", ""
+			if oldPresent {
+				action, input, opts.fromStdin = "set", "old-key\n", true
+			} else {
+				opts.undoConfig = windowsTestSHA256(standaloneGatewayCheckConfig)
+			}
+			out, err := runWindowsSecretCommand(t, action, opts, input)
+			if err != nil || !strings.Contains(out, `"gateway_restarted":false`) {
+				t.Fatalf("already-undone replay: %v\n%s", err, out)
+			}
+			if oldPresent {
+				raw, err := os.ReadFile(filepath.Join(dir, name))
+				if err != nil || string(raw) != " old-key\r\n" {
+					t.Fatalf("old credential changed to %q: %v", raw, err)
+				}
+			} else if windowsSecretStored(dir, name) {
+				t.Fatal("replay created a credential that was absent before the rotation")
+			}
+		})
+	}
+}
+
+func TestWindowsSecretUndoRotationAlreadyRestoredReloadsLiveGateway(t *testing.T) {
+	for _, oldPresent := range []bool{true, false} {
+		for _, restartFails := range []bool{true, false} {
+			t.Run(fmt.Sprintf("old-present=%t/restart-fails=%t", oldPresent, restartFails), func(t *testing.T) {
+				dir := windowsSecretTestHarness(t)
+				previous := bundleStore
+				t.Cleanup(func() { bundleStore = previous })
+				store := enterprisebundle.NewStore(filepath.Join(t.TempDir(), "bundles"), filepath.Join(t.TempDir(), "lifecycle"))
+				bundleStore = func() (*enterprisebundle.Store, error) { return store, nil }
+				const name = "ai-defense-api-key"
+				if oldPresent {
+					if err := os.MkdirAll(dir, 0o700); err != nil {
+						t.Fatal(err)
+					}
+					if err := os.WriteFile(filepath.Join(dir, name), []byte("old-key"), 0o600); err != nil {
+						t.Fatal(err)
+					}
+				}
+				restarts := 0
+				windowsSecretRestartGateway = func(beforeStop func() error) (bool, error) {
+					restarts++
+					if restartFails {
+						return false, errWindowsGatewayStopRefused
+					}
+					if err := beforeStop(); err != nil {
+						return false, err
+					}
+					return true, nil
+				}
+				opts := enterpriseSecretOptions{name: name, json: true, undoRotation: "none", ifStored: windowsTestSHA256("new-key")}
+				action, input := "remove", ""
+				if oldPresent {
+					action, input, opts.fromStdin = "set", "old-key\n", true
+				} else {
+					opts.undoConfig = "none"
+				}
+				out, err := runWindowsSecretCommand(t, action, opts, input)
+				if restartFails {
+					windowsSecretFailureDoc(t, out, err, action, "restart_failed")
+				} else if err != nil || !strings.Contains(out, `"gateway_restarted":true`) {
+					t.Fatalf("restored replay did not reload the gateway: %v\n%s", err, out)
+				}
+				if restarts != 1 {
+					t.Fatalf("gateway restart calls = %d, want 1", restarts)
+				}
+				if oldPresent {
+					raw, readErr := os.ReadFile(filepath.Join(dir, name))
+					if readErr != nil || string(raw) != "old-key" {
+						t.Fatalf("old value changed: %q, %v", raw, readErr)
+					}
+				} else if windowsSecretStored(dir, name) {
+					t.Fatal("absent credential was created")
+				}
+			})
+		}
+	}
+}
+
+func TestWindowsSecretSetIfStoredProvesAbsence(t *testing.T) {
+	dir := windowsSecretTestHarness(t)
+	const name = "ai-defense-api-key"
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, name), []byte("administrator-value"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	opts := enterpriseSecretOptions{name: name, fromStdin: true, json: true, ifStored: "none"}
+	out, err := runWindowsSecretCommand(t, "set", opts, "delivered-value\n")
+	windowsSecretFailureDoc(t, out, err, "set", "credential_changed")
+	raw, err := os.ReadFile(filepath.Join(dir, name))
+	if err != nil || string(raw) != "administrator-value" {
+		t.Fatalf("administrator value changed: %q, %v", raw, err)
+	}
+	if err := os.Remove(filepath.Join(dir, name)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runWindowsSecretCommand(t, "set", opts, "delivered-value\n"); err != nil {
+		t.Fatalf("proven absence refused: %v", err)
 	}
 }

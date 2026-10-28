@@ -28,6 +28,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"slices"
 	"strings"
 	"syscall"
@@ -43,6 +44,51 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/openshell/workspace"
 	"github.com/defenseclaw/defenseclaw/internal/sandboxrelay"
 )
+
+// rel-1-0-3 GAP-0332: exercise run's status preflight, which can refuse
+// before Create returns the daemon's disabled error.
+func TestRunDisabledNamesTheMissingRuntimeBeforeCreating(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("Linux prerequisite message")
+	}
+	oldManaged, oldRuntime := onManagedHost, hostHasSandboxRuntime
+	t.Cleanup(func() { onManagedHost, hostHasSandboxRuntime = oldManaged, oldRuntime })
+	for _, managed := range []bool{false, true} {
+		for _, hasRuntime := range []bool{false, true} {
+			onManagedHost = func() bool { return managed }
+			hostHasSandboxRuntime = func() bool { return hasRuntime }
+			ta := newTestApp(t, "")
+			ta.daemon.status.Enabled = false
+			if managed {
+				ta.daemon.status.Managed = &sandboxapi.ManagedStatus{}
+			}
+			err := ta.Run(bg, RunOptions{Harness: "claude"})
+			if err == nil || ta.creates() != 0 || len(ta.term.runs) != 0 {
+				t.Fatalf("disabled run started work: %v", err)
+			}
+			wantHint := !managed && !hasRuntime
+			if strings.Contains(err.Error(), "lacks Docker") != wantHint {
+				t.Fatalf("managed=%t runtime=%t: %v", managed, hasRuntime, err)
+			}
+			if wantHint && (!strings.Contains(err.Error(), "Docker Engine 28") || !strings.Contains(err.Error(), "defenseclaw sandbox doctor")) {
+				t.Fatalf("missing prerequisite remedy: %v", err)
+			}
+		}
+	}
+}
+
+func TestStartConflictInLandlockErrorStateNamesMicroVMStep(t *testing.T) {
+	ta := newTestApp(t, "")
+	ta.GOOS = "darwin"
+	ta.daemon.status.Gateway.Driver = "docker"
+	sb := sampleSandbox("stuck")
+	cause := sandboxapi.Errorf(sandboxapi.CodeConflict, "stuck is in OpenShell's error state: Landlock is unavailable")
+	err := ta.startError(context.Background(), ta.API, &sb, cause)
+	if !sandboxapi.IsCode(err, sandboxapi.CodeConflict) || !strings.Contains(err.Error(), "Landlock is unavailable") ||
+		!strings.Contains(err.Error(), "switch the gateway to MicroVMs with `defenseclaw sandbox setup`") {
+		t.Fatalf("typed conflict lost cause or next step: %v", err)
+	}
+}
 
 func TestRunMountSessionKeepsChanges(t *testing.T) {
 	ta := newTestApp(t, "y\n")
@@ -269,138 +315,6 @@ func TestRunDetachedStartsInBackground(t *testing.T) {
 		t.Fatalf("detached codex argv = %q", last)
 	}
 	lacks(t, ta.output(), "may leave no saved conversation")
-}
-
-// A refused run creates no sandbox and stages no copy, and says why: a
-// --name OpenShell 0.1.1 cannot create is refused before anything else (H3),
-// an existing sandbox's name before staging over its copy (H6), a host port
-// before the banner calls it reachable (M15), and the organization's
-// refusal before what the terminal lacks (L9).
-func TestRunRefusals(t *testing.T) {
-	ingress := newTestApp(t, "").Cfg.OpenShellIngressPort()
-	off := false
-	existing := func(name, phase string, tty bool) func(*testApp) {
-		return func(ta *testApp) {
-			sb := copySandbox(name)
-			sb.Phase = phase
-			ta.daemon.add(sb)
-			ta.IO.TTY = tty
-		}
-	}
-	cases := []struct {
-		name    string
-		opts    RunOptions
-		setup   func(*testApp)
-		want    []string
-		not     string
-		offline bool // refused before anything reaches the daemon
-	}{
-		{name: "detach with rm", opts: RunOptions{Harness: "claude", Detach: true, Rm: true, Prompt: "x"}, want: []string{"--rm cannot be combined with --detach"}},
-		{name: "detach without prompt", opts: RunOptions{Harness: "claude", Detach: true}, want: []string{"needs a prompt"}},
-		{name: "no terminal", opts: RunOptions{Harness: "codex"}, setup: func(ta *testApp) { ta.IO.TTY = false }, want: []string{"there is none"}},
-		{name: "unknown harness", opts: RunOptions{Harness: "vim"}, want: []string{"unknown harness"}},
-		{name: "disabled", opts: RunOptions{Harness: "claude"}, setup: func(ta *testApp) { ta.daemon.status.Enabled = false }, want: []string{"sandboxes are off"}},
-		{name: "unavailable", opts: RunOptions{Harness: "claude"}, setup: func(ta *testApp) {
-			ta.daemon.status.Available, ta.daemon.status.Reason = false, "the OpenShell gateway is down"
-		}, want: []string{"the OpenShell gateway is down"}},
-		{name: "admin refuses harness", opts: RunOptions{Harness: "codex"}, setup: func(ta *testApp) {
-			ta.daemon.explain.Violations = []sandboxapi.Violation{{Key: "harness", Fatal: true, Admin: true, Message: "codex is not an allowed harness"}}
-		}, want: []string{"blocked by your organization's DefenseClaw policy: harness"}},
-		{name: "the organization before the terminal", opts: RunOptions{Harness: "codex"}, setup: func(ta *testApp) {
-			ta.IO.TTY = false
-			ta.daemon.explain.Violations = []sandboxapi.Violation{{Key: "harness", Fatal: true, Admin: true, Constraint: "openshell.admin.allowed_harnesses",
-				Message: "blocked by your organization's DefenseClaw policy: harness", Detail: "your organization allows only claudecode"}}
-		}, want: []string{"blocked by your organization's DefenseClaw policy: harness — your organization allows only claude " +
-			"(openshell.admin.allowed_harnesses); ask your administrator if you need it"}, not: "there is none"},
-		// A repository policy that would loosen names every key, one per line.
-		{name: "a repository policy that loosens", opts: RunOptions{Harness: "claude"}, setup: func(ta *testApp) {
-			ta.daemon.explain.Violations = []sandboxapi.Violation{
-				{Key: "harness.yolo", Source: "repo", Fatal: true, Message: "the repository policy .defenseclaw/sandbox.yaml would loosen the sandbox policy: harness.yolo true"},
-				{Key: "egress.allow", Source: "repo", Fatal: true, Message: "the repository policy .defenseclaw/sandbox.yaml would loosen the sandbox policy: egress.allow 2 entries"},
-			}
-		}, want: []string{"harness.yolo true\nthe repository policy .defenseclaw/sandbox.yaml would loosen the sandbox policy: egress.allow 2 entries"}},
-		{name: "daemon down", opts: RunOptions{Harness: "claude"}, setup: func(ta *testApp) { ta.API = sandboxapi.NewClient("http://127.0.0.1:1", "x") },
-			want: []string{"daemon is not running"}},
-		{name: "windows", opts: RunOptions{Harness: "claude"}, setup: func(ta *testApp) { ta.GOOS = "windows" }, want: []string{"Windows and WSL2 are not supported"}},
-		{name: "wsl2", opts: RunOptions{Harness: "claude"}, setup: func(ta *testApp) { ta.WSL = func() bool { return true } }, want: []string{"Windows and WSL2 are not supported"}},
-		{name: "root", opts: RunOptions{Harness: "claude"}, setup: func(ta *testApp) { ta.Geteuid = func() int { return 0 } },
-			want: []string{"not root: the OpenShell gateway is a per-user service"}},
-		// OpenShell's MicroVM driver, which a Mac runs sandboxes with, needs
-		// Apple silicon.
-		{name: "an Intel Mac", opts: RunOptions{Harness: "claude"}, setup: func(ta *testApp) { ta.GOOS, ta.GOARCH = "darwin", "amd64" },
-			want: []string{"OpenShell sandboxes are not supported here", "Apple silicon"}},
-		{name: "bad credential", opts: RunOptions{Harness: "claude", Credentials: []string{"NOPE=api.x.com"}}, want: []string{"is not set in this shell"}},
-		{name: "--github-write without a token", opts: RunOptions{Harness: "claude", GitHubWrite: true}, want: []string{"GH_TOKEN"}},
-		// The OmniGent sandbox agent names no model, and a profile without a
-		// default one needs --model.
-		{name: "omnigent without a model", opts: RunOptions{Harness: "omnigent"}, setup: func(ta *testApp) { ta.env["OPENAI_API_KEY"] = "sk-test" },
-			want: []string{"--model"}},
-		{name: "a long name", opts: RunOptions{Harness: "claude", Copy: true, Name: "dc-claude-m1-calc-7500"}, offline: true,
-			want: []string{`--name "dc-claude-m1-calc-7500" is 22 characters; OpenShell takes at most 19`}},
-		{name: "a bad name", opts: RunOptions{Harness: "claude", Copy: true, Name: "Bad_Name"}, offline: true,
-			want: []string{"use at most 19 lowercase letters, digits and '-'"}},
-		{name: "a trailing dash", opts: RunOptions{Harness: "claude", Copy: true, Name: "trailing-"}, offline: true,
-			want: []string{"starting and ending with a letter or digit"}},
-		{name: "an existing name, headless copy", opts: RunOptions{Harness: "codex", Copy: true, Name: "m2-a", Detach: true, Prompt: "x"},
-			setup: existing("m2-a", "stopped", false), want: []string{"a sandbox named m2-a already exists",
-				"resume it with `defenseclaw sandbox connect m2-a --prompt TEXT`", "delete it with `defenseclaw sandbox delete m2-a`"}},
-		{name: "an existing name, terminal", opts: RunOptions{Harness: "claude", Name: "m2-a"}, setup: existing("m2-a", "stopped", true),
-			want: []string{"a sandbox named m2-a already exists", "resume it with `defenseclaw sandbox connect m2-a`", "delete it with `defenseclaw sandbox delete m2-a`"}},
-		{name: "a kept snapshot's name", opts: RunOptions{Harness: "claude", Copy: true, Name: "keptbox"}, setup: existing("keptbox", "deleted", true),
-			want: []string{"holds the kept undo point of a deleted sandbox", "`defenseclaw sandbox delete keptbox` drops it"}, not: "connect"},
-		{name: "the hook ingress port", opts: RunOptions{Harness: "claude", HostPorts: []int{3000, ingress}},
-			want: []string{fmt.Sprintf("--host-port %d: DefenseClaw never opens DefenseClaw's sandbox hook ingress (port %d) to a sandbox — choose another port", ingress, ingress)}},
-		{name: "host ports the organization disables", opts: RunOptions{Harness: "claude", HostPorts: []int{3000}},
-			setup: func(ta *testApp) { ta.Cfg.OpenShell.Admin.AllowHostPorts = &off },
-			want: []string{"--host-port 3000: blocked by your organization's DefenseClaw policy: mcp.host_ports — host ports cannot be opened to sandboxes " +
-				"(openshell.admin.allow_host_ports); run it without --host-port"}},
-		// Manual R2-104: the refusal of the organization's required pack.
-		{name: "a host port the required pack refuses", opts: RunOptions{Harness: "claude", HostPorts: []int{38790}}, setup: func(ta *testApp) {
-			ta.Cfg.OpenShell.Admin.RequiredPack = "strict"
-			ta.daemon.explain.Settings = append(ta.daemon.explain.Settings, sandboxapi.Setting{Key: "pack", Value: "strict", Source: "admin",
-				Origin: "openshell.admin.required_pack"})
-		}, want: []string{"--host-port 38790: not allowed by the strict sandbox pack your organization requires (openshell.admin.required_pack)"}},
-		// GAP-0558, GAP-0580, GAP-0628: on a managed computer a flag the
-		// caller's profile forbids is refused before the copy and the
-		// create, naming the profile and the rule, not the organization's
-		// key.
-		{name: "a managed profile that opens no host port", opts: RunOptions{Harness: "claude", HostPorts: []int{8080}}, setup: func(ta *testApp) {
-			ta.daemon.explain.Managed = &sandboxapi.ManagedExplain{Profile: "contractors", Allowed: true, RequestAccess: "it@example.invalid"}
-		}, want: []string{"--host-port 8080 isn't allowed: your profile doesn't let sandboxes reach ports on this computer", "(profile contractors)",
-			"(quote rule allow_host_ports)", "it@example.invalid"}, not: "openshell.admin"},
-		{name: "a managed --context", opts: RunOptions{Harness: "claude", Context: []string{"/tmp/x"}}, setup: func(ta *testApp) {
-			ta.daemon.explain.Managed = &sandboxapi.ManagedExplain{Profile: "contractors", Allowed: true, AllowHostPorts: true, RequestAccess: "it@example.invalid"}
-		}, want: []string{"--context mounts a folder into the sandbox", "work on a copy of the project only", "(profile contractors)",
-			"(quote rule allow_mount)"}, not: "openshell.admin"},
-	}
-	for _, c := range cases {
-		t.Run(c.name, func(t *testing.T) {
-			ta := newTestApp(t, "")
-			if c.setup != nil {
-				c.setup(ta)
-			}
-			err := ta.Run(bg, c.opts)
-			wantErr(t, err, c.want...)
-			if c.not != "" && strings.Contains(err.Error(), c.not) {
-				t.Fatalf("err = %v, which holds %q", err, c.not)
-			}
-			if ta.creates() != 0 || len(ta.copy.steps) != 0 || strings.Contains(ta.output(), "reachable") {
-				t.Fatalf("a refused run created a sandbox or staged a copy %v:\n%s", ta.copy.steps, ta.output())
-			}
-			if paths := ta.daemon.paths(); c.offline && len(paths) != 0 {
-				t.Fatalf("a refused name reached the daemon: %v", paths)
-			}
-		})
-	}
-	ta := newTestApp(t, "")
-	ta.ok(t, ta.Run(bg, RunOptions{Harness: "claude", Name: strings.Repeat("a", 19)}))
-	// The daemon's own refusal of the create says why.
-	ta = newTestApp(t, "")
-	ta.daemon.errors["POST "+sandboxapi.PathSandboxes] = &sandboxapi.Error{Code: sandboxapi.CodeAdminViolation, Message: sandboxapi.AdminMessage,
-		Violation: &sandboxapi.Violation{Key: "yolo", Admin: true, Message: "skip-permissions mode is not allowed"}}
-	if err := ta.Run(bg, RunOptions{Harness: "claude"}); err == nil || err.Error() != "blocked by your organization's DefenseClaw policy: yolo (skip-permissions mode is not allowed)" {
-		t.Fatalf("Run = %v", err)
-	}
 }
 
 // GAP-0595: a managed run during a directory outage says so once, at its
@@ -1064,7 +978,6 @@ func TestSummaryLine(t *testing.T) {
 	// The blocked sites are the ✗ lines the session announced, one per
 	// destination however often it was tried, also when the daemon had
 	// blocked one of them before the session (cert copilot:F8, kiro:KR-F7,
-	// hermes:HERMES-8, openhands:MAC-OSH-OH-5: an invalid destination and
 	// webhook.site read "1 request blocked" over two ✗ lines).
 	box := sampleSandbox("f-box")
 	s := &session{app: newTestApp(t, "").App, sb: &box, before: egress(1)}
@@ -1125,8 +1038,6 @@ func TestBanner(t *testing.T) {
 		}, nil, []string{"skip-permissions OFF (your organization disables skip-permissions)"}, nil},
 		{"the harness keeps the prompts", func(_ *testApp, sb *sandboxapi.Sandbox) { sb.Launch.Yolo = false }, nil,
 			[]string{"skip-permissions OFF (harness prompts kept)"}, nil},
-		{"omnigent", func(_ *testApp, sb *sandboxapi.Sandbox) { sb.Harness, sb.HarnessName = "omnigent", "OmniGent" }, nil,
-			[]string{"OmniGent · approvals from OmniGent's policies, DefenseClaw's included"}, []string{"skip-permissions"}},
 		// A user tier says what the image protects for that harness: Kiro's
 		// and Hermes' hooks are root-owned (cert kiro:KR-F3,
 		// hermes:HERMES-3).
@@ -1172,7 +1083,7 @@ func TestBanner(t *testing.T) {
 	if n := strings.Count(ta.output(), "inside the git repository at /p"); n != 1 {
 		t.Fatalf("the project warning shows %d times:\n%s", n, ta.output())
 	}
-	for name, want := range map[string]string{"OpenHands": "an OpenHands", "OmniGent": "an OmniGent", "Codex": "a Codex"} {
+	for name, want := range map[string]string{"Codex": "a Codex"} {
 		if got := withArticle(name); got != want {
 			t.Errorf("withArticle(%s) = %q", name, got)
 		}
@@ -1722,5 +1633,133 @@ func TestVMDiskHintOnlyForStartFailures(t *testing.T) {
 	}
 	if !hint(&sandboxapi.Error{Code: sandboxapi.CodeUpstream}) || !hint(errors.New("timeout")) {
 		t.Fatal("a start failure lost the disk hint")
+	}
+}
+
+// A refused run creates no sandbox and stages no copy, and says why: a
+// --name OpenShell 0.1.1 cannot create is refused before anything else (H3),
+// an existing sandbox's name before staging over its copy (H6), a host port
+// before the banner calls it reachable (M15), and the organization's
+// refusal before what the terminal lacks (L9).
+func TestRunRefusals(t *testing.T) {
+	ingress := newTestApp(t, "").Cfg.OpenShellIngressPort()
+	off := false
+	existing := func(name, phase string, tty bool) func(*testApp) {
+		return func(ta *testApp) {
+			sb := copySandbox(name)
+			sb.Phase = phase
+			ta.daemon.add(sb)
+			ta.IO.TTY = tty
+		}
+	}
+	cases := []struct {
+		name    string
+		opts    RunOptions
+		setup   func(*testApp)
+		want    []string
+		not     string
+		offline bool // refused before anything reaches the daemon
+	}{
+		{name: "detach with rm", opts: RunOptions{Harness: "claude", Detach: true, Rm: true, Prompt: "x"}, want: []string{"--rm cannot be combined with --detach"}},
+		{name: "detach without prompt", opts: RunOptions{Harness: "claude", Detach: true}, want: []string{"needs a prompt"}},
+		{name: "no terminal", opts: RunOptions{Harness: "codex"}, setup: func(ta *testApp) { ta.IO.TTY = false }, want: []string{"there is none"}},
+		{name: "unknown harness", opts: RunOptions{Harness: "vim"}, want: []string{"unknown harness"}},
+		{name: "disabled", opts: RunOptions{Harness: "claude"}, setup: func(ta *testApp) { ta.daemon.status.Enabled = false }, want: []string{"sandboxes are off"}},
+		{name: "unavailable", opts: RunOptions{Harness: "claude"}, setup: func(ta *testApp) {
+			ta.daemon.status.Available, ta.daemon.status.Reason = false, "the OpenShell gateway is down"
+		}, want: []string{"the OpenShell gateway is down"}},
+		{name: "admin refuses harness", opts: RunOptions{Harness: "codex"}, setup: func(ta *testApp) {
+			ta.daemon.explain.Violations = []sandboxapi.Violation{{Key: "harness", Fatal: true, Admin: true, Message: "codex is not an allowed harness"}}
+		}, want: []string{"blocked by your organization's DefenseClaw policy: harness"}},
+		{name: "the organization before the terminal", opts: RunOptions{Harness: "codex"}, setup: func(ta *testApp) {
+			ta.IO.TTY = false
+			ta.daemon.explain.Violations = []sandboxapi.Violation{{Key: "harness", Fatal: true, Admin: true, Constraint: "openshell.admin.allowed_harnesses",
+				Message: "blocked by your organization's DefenseClaw policy: harness", Detail: "your organization allows only claudecode"}}
+		}, want: []string{"blocked by your organization's DefenseClaw policy: harness — your organization allows only claude " +
+			"(openshell.admin.allowed_harnesses); ask your administrator if you need it"}, not: "there is none"},
+		// A repository policy that would loosen names every key, one per line.
+		{name: "a repository policy that loosens", opts: RunOptions{Harness: "claude"}, setup: func(ta *testApp) {
+			ta.daemon.explain.Violations = []sandboxapi.Violation{
+				{Key: "harness.yolo", Source: "repo", Fatal: true, Message: "the repository policy .defenseclaw/sandbox.yaml would loosen the sandbox policy: harness.yolo true"},
+				{Key: "egress.allow", Source: "repo", Fatal: true, Message: "the repository policy .defenseclaw/sandbox.yaml would loosen the sandbox policy: egress.allow 2 entries"},
+			}
+		}, want: []string{"harness.yolo true\nthe repository policy .defenseclaw/sandbox.yaml would loosen the sandbox policy: egress.allow 2 entries"}},
+		{name: "daemon down", opts: RunOptions{Harness: "claude"}, setup: func(ta *testApp) { ta.API = sandboxapi.NewClient("http://127.0.0.1:1", "x") },
+			want: []string{"daemon is not running"}},
+		{name: "windows", opts: RunOptions{Harness: "claude"}, setup: func(ta *testApp) { ta.GOOS = "windows" }, want: []string{"Windows and WSL2 are not supported"}},
+		{name: "wsl2", opts: RunOptions{Harness: "claude"}, setup: func(ta *testApp) { ta.WSL = func() bool { return true } }, want: []string{"Windows and WSL2 are not supported"}},
+		{name: "root", opts: RunOptions{Harness: "claude"}, setup: func(ta *testApp) { ta.Geteuid = func() int { return 0 } },
+			want: []string{"not root: the OpenShell gateway is a per-user service"}},
+		// OpenShell's MicroVM driver, which a Mac runs sandboxes with, needs
+		// Apple silicon.
+		{name: "an Intel Mac", opts: RunOptions{Harness: "claude"}, setup: func(ta *testApp) { ta.GOOS, ta.GOARCH = "darwin", "amd64" },
+			want: []string{"OpenShell sandboxes are not supported here", "Apple silicon"}},
+		{name: "bad credential", opts: RunOptions{Harness: "claude", Credentials: []string{"NOPE=api.x.com"}}, want: []string{"is not set in this shell"}},
+		{name: "--github-write without a token", opts: RunOptions{Harness: "claude", GitHubWrite: true}, want: []string{"GH_TOKEN"}},
+		{name: "a long name", opts: RunOptions{Harness: "claude", Copy: true, Name: "dc-claude-m1-calc-7500"}, offline: true,
+			want: []string{`--name "dc-claude-m1-calc-7500" is 22 characters; OpenShell takes at most 19`}},
+		{name: "a bad name", opts: RunOptions{Harness: "claude", Copy: true, Name: "Bad_Name"}, offline: true,
+			want: []string{"use at most 19 lowercase letters, digits and '-'"}},
+		{name: "a trailing dash", opts: RunOptions{Harness: "claude", Copy: true, Name: "trailing-"}, offline: true,
+			want: []string{"starting and ending with a letter or digit"}},
+		{name: "an existing name, headless copy", opts: RunOptions{Harness: "codex", Copy: true, Name: "m2-a", Detach: true, Prompt: "x"},
+			setup: existing("m2-a", "stopped", false), want: []string{"a sandbox named m2-a already exists",
+				"resume it with `defenseclaw sandbox connect m2-a --prompt TEXT`", "delete it with `defenseclaw sandbox delete m2-a`"}},
+		{name: "an existing name, terminal", opts: RunOptions{Harness: "claude", Name: "m2-a"}, setup: existing("m2-a", "stopped", true),
+			want: []string{"a sandbox named m2-a already exists", "resume it with `defenseclaw sandbox connect m2-a`", "delete it with `defenseclaw sandbox delete m2-a`"}},
+		{name: "a kept snapshot's name", opts: RunOptions{Harness: "claude", Copy: true, Name: "keptbox"}, setup: existing("keptbox", "deleted", true),
+			want: []string{"holds the kept undo point of a deleted sandbox", "`defenseclaw sandbox delete keptbox` drops it"}, not: "connect"},
+		{name: "the hook ingress port", opts: RunOptions{Harness: "claude", HostPorts: []int{3000, ingress}},
+			want: []string{fmt.Sprintf("--host-port %d: DefenseClaw never opens DefenseClaw's sandbox hook ingress (port %d) to a sandbox — choose another port", ingress, ingress)}},
+		{name: "host ports the organization disables", opts: RunOptions{Harness: "claude", HostPorts: []int{3000}},
+			setup: func(ta *testApp) { ta.Cfg.OpenShell.Admin.AllowHostPorts = &off },
+			want: []string{"--host-port 3000: blocked by your organization's DefenseClaw policy: mcp.host_ports — host ports cannot be opened to sandboxes " +
+				"(openshell.admin.allow_host_ports); run it without --host-port"}},
+		// Manual R2-104: the refusal of the organization's required pack.
+		{name: "a host port the required pack refuses", opts: RunOptions{Harness: "claude", HostPorts: []int{38790}}, setup: func(ta *testApp) {
+			ta.Cfg.OpenShell.Admin.RequiredPack = "strict"
+			ta.daemon.explain.Settings = append(ta.daemon.explain.Settings, sandboxapi.Setting{Key: "pack", Value: "strict", Source: "admin",
+				Origin: "openshell.admin.required_pack"})
+		}, want: []string{"--host-port 38790: not allowed by the strict sandbox pack your organization requires (openshell.admin.required_pack)"}},
+		// GAP-0558, GAP-0580, GAP-0628: on a managed computer a flag the
+		// caller's profile forbids is refused before the copy and the
+		// create, naming the profile and the rule, not the organization's
+		// key.
+		{name: "a managed profile that opens no host port", opts: RunOptions{Harness: "claude", HostPorts: []int{8080}}, setup: func(ta *testApp) {
+			ta.daemon.explain.Managed = &sandboxapi.ManagedExplain{Profile: "contractors", Allowed: true, RequestAccess: "it@example.invalid"}
+		}, want: []string{"--host-port 8080 isn't allowed: your profile doesn't let sandboxes reach ports on this computer", "(profile contractors)",
+			"(quote rule allow_host_ports)", "it@example.invalid"}, not: "openshell.admin"},
+		{name: "a managed --context", opts: RunOptions{Harness: "claude", Context: []string{"/tmp/x"}}, setup: func(ta *testApp) {
+			ta.daemon.explain.Managed = &sandboxapi.ManagedExplain{Profile: "contractors", Allowed: true, AllowHostPorts: true, RequestAccess: "it@example.invalid"}
+		}, want: []string{"--context mounts a folder into the sandbox", "work on a copy of the project only", "(profile contractors)",
+			"(quote rule allow_mount)"}, not: "openshell.admin"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			ta := newTestApp(t, "")
+			if c.setup != nil {
+				c.setup(ta)
+			}
+			err := ta.Run(bg, c.opts)
+			wantErr(t, err, c.want...)
+			if c.not != "" && strings.Contains(err.Error(), c.not) {
+				t.Fatalf("err = %v, which holds %q", err, c.not)
+			}
+			if ta.creates() != 0 || len(ta.copy.steps) != 0 || strings.Contains(ta.output(), "reachable") {
+				t.Fatalf("a refused run created a sandbox or staged a copy %v:\n%s", ta.copy.steps, ta.output())
+			}
+			if paths := ta.daemon.paths(); c.offline && len(paths) != 0 {
+				t.Fatalf("a refused name reached the daemon: %v", paths)
+			}
+		})
+	}
+	ta := newTestApp(t, "")
+	ta.ok(t, ta.Run(bg, RunOptions{Harness: "claude", Name: strings.Repeat("a", 19)}))
+	// The daemon's own refusal of the create says why.
+	ta = newTestApp(t, "")
+	ta.daemon.errors["POST "+sandboxapi.PathSandboxes] = &sandboxapi.Error{Code: sandboxapi.CodeAdminViolation, Message: sandboxapi.AdminMessage,
+		Violation: &sandboxapi.Violation{Key: "yolo", Admin: true, Message: "skip-permissions mode is not allowed"}}
+	if err := ta.Run(bg, RunOptions{Harness: "claude"}); err == nil || err.Error() != "blocked by your organization's DefenseClaw policy: yolo (skip-permissions mode is not allowed)" {
+		t.Fatalf("Run = %v", err)
 	}
 }

@@ -1195,6 +1195,99 @@
       }
     },
     {
+      "id": 132,
+      "type": "timeseries",
+      "title": "Managed sandbox events (counters, all hosts, all names)",
+      "description": "The defenseclaw.sandbox.managed.* counters: refusals, asks decided, foreign items, provisional resolutions and settings drift. They carry profile, driver, connector and the host OS, never a user, host or sandbox label, so they ignore the Host and Sandbox boxes. Counters miss a series' first increment, so the log panels are the exact count.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "defenseclaw-prometheus"
+      },
+      "gridPos": {
+        "x": 4,
+        "y": 14,
+        "w": 20,
+        "h": 4
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "defenseclaw-prometheus"
+          },
+          "expr": "sum(increase(defenseclaw_sandbox_managed_refusals_total{deployment_environment_name=~\"$environment\", os_type=~\"$os\", driver=~\"$driver\", profile=~\"$profile\"}[$__rate_interval]))",
+          "refId": "A",
+          "legendFormat": "refusals",
+          "range": true
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "defenseclaw-prometheus"
+          },
+          "expr": "sum(increase(defenseclaw_sandbox_managed_asks_total{deployment_environment_name=~\"$environment\", os_type=~\"$os\", driver=~\"$driver\", profile=~\"$profile\"}[$__rate_interval]))",
+          "refId": "B",
+          "legendFormat": "asks decided",
+          "range": true
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "defenseclaw-prometheus"
+          },
+          "expr": "sum(increase(defenseclaw_sandbox_managed_foreign_items_total{deployment_environment_name=~\"$environment\", os_type=~\"$os\", driver=~\"$driver\", profile=~\"$profile\"}[$__rate_interval]))",
+          "refId": "C",
+          "legendFormat": "foreign items",
+          "range": true
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "defenseclaw-prometheus"
+          },
+          "expr": "sum(increase(defenseclaw_sandbox_managed_provisional_total{deployment_environment_name=~\"$environment\", os_type=~\"$os\", driver=~\"$driver\", profile=~\"$profile\"}[$__rate_interval]))",
+          "refId": "D",
+          "legendFormat": "provisional resolutions",
+          "range": true
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "defenseclaw-prometheus"
+          },
+          "expr": "sum(increase(defenseclaw_sandbox_managed_drift_total{deployment_environment_name=~\"$environment\", os_type=~\"$os\", driver=~\"$driver\", profile=~\"$profile\"}[$__rate_interval]))",
+          "refId": "E",
+          "legendFormat": "settings drift",
+          "range": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "drawStyle": "bars",
+            "fillOpacity": 40,
+            "lineWidth": 1,
+            "stacking": {
+              "mode": "normal",
+              "group": "A"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "right"
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
       "id": 114,
       "type": "bargauge",
       "title": "Sandboxes by profile",

@@ -11,13 +11,7 @@ keywords:
   - fail open fail closed
 ---
 
-DefenseClaw watches and limits a coding agent with several layers. Each layer
-answers one question, and no two layers should enforce the same intent in the
-same place. This page shows which layer sees and which layer enforces each
-intent, on each kind of computer, so you can tell what a given setup covers
-and what it leaves to another layer.
-
-The short version:
+DefenseClaw limits a coding agent with several layers. Each layer answers one question, and no two layers enforce the same intent in the same place. This page shows which layer sees and which layer enforces each intent on each kind of computer.
 
 - **Hooks** judge intent: the tool, the command text and the session.
 - **OpenShell sandboxes** contain an agent that you run inside a sandbox.
@@ -32,10 +26,7 @@ The short version:
 - **The sandbox manager** joins the sandbox signals and reacts: it can stop a
   sandbox, turn its egress off or raise an alert.
 
-Nothing here replaces another layer. A host-run agent is covered by hooks, the
-runtime planes and, on managed Linux, the kernel controls. A sandboxed agent is
-covered by OpenShell, the egress proxy, the sandbox hooks and the sandbox
-manager.
+A host-run agent is covered by hooks, the runtime planes and, on managed Linux, the kernel controls. A sandboxed agent is covered by OpenShell, the egress proxy, the sandbox hooks and the sandbox manager.
 
 ## The layers
 
@@ -43,28 +34,42 @@ manager.
 | --- | --- | --- | --- |
 | **Hooks, guardrail rules, the judge and asset policy** | Each agent calls the hook before and after a tool call; the gateway decides | The tool name, the tool input or command text, the session and the working directory. Not what a script does once it runs, the agent's `!` shell mode, detached jobs, or MCP servers that start outside a tool call | Deny or ask per tool call. Asset policy blocks skills, MCP servers and tools by name |
 | **Hook registration guard** | The computer | Edits to the agent's hook configuration | Puts the registration back after the edit. On a managed computer the guardian does it and machine policy is root-owned |
-| **OpenShell sandbox** | A Linux container, or a MicroVM on a Mac | Network and HTTP events for the sandbox, and process starts the OpenShell supervisor launches | The sandbox boundary: filesystem rules (Landlock), seccomp, no network of its own, your uid without capabilities |
+| **OpenShell sandbox** | A Linux container, an optional MicroVM on managed Linux with KVM, or a MicroVM on a Mac | Network and HTTP events for the sandbox, and process starts the OpenShell supervisor launches | The sandbox boundary: filesystem rules (Landlock), seccomp, no network of its own, your uid without capabilities |
 | **Workspace protections** | The host side of a sandbox | New `.git` entries, hidden files, changed files at the end | Read-only `.git/hooks` and `.git/config`, empty stand-ins for secret files, quarantine of nested repositories |
 | **The egress proxy** | The DefenseClaw gateway, reached from the sandbox | Every site a sandboxed agent contacts | Allow list, block feeds, admin lists and large-upload blocks, per sandbox |
-| **The runtime planes** (A, B and C) | The computer | A: process compute. B: connections per process. C: process starts, file opens and identity changes | Nothing. They detect and score; see [AI discovery](/docs/ai-discovery#runtime-planes-what-actually-ran) |
+| **The runtime planes** (A, B and C) | The computer | A: process compute. B: connections per process. C: process starts, file opens and identity changes | Nothing. They detect and score; see [AI discovery](/docs/ai-discovery) |
 | **Tetragon** (customer-owned, Linux only) | The Linux kernel | Every process start with its arguments, file opens of credential and persistence paths, and connects. The events of your own kprobe and LSM policies, when they hit an AI agent | DefenseClaw: on managed Linux only, `EPERM` for two fixed controls, when the administrator approves it. Your own policies enforce whatever you wrote in them. See [Tetragon on managed Linux](#what-tetragon-adds-on-managed-linux) |
-| **The sandbox manager** | The per-user gateway | Hook traffic, destinations, the process tree and the agent's activity inside each sandbox | Stops the sandbox on tampering or hook silence, turns its egress off in deny mode, raises alerts |
+| **The sandbox manager** | The per-user gateway, or the user's sandbox daemon on a managed computer | Hook traffic, destinations, the process tree and the agent's activity inside each sandbox | Stops the sandbox on tampering or hook silence, turns its egress off in deny mode, raises alerts |
 
-Each layer stands on its own. A host-run agent has no sandbox layers, and a
-sandboxed agent's hooks run inside the sandbox and reach the gateway through a
-dedicated hook port.
+A sandboxed agent's hooks run inside the sandbox and reach the gateway through a dedicated hook port.
 
 ## Where each layer exists
 
 | Computer | Hooks | Sandbox layers | Runtime planes | Tetragon |
 | --- | --- | --- | --- | --- |
-| **Linux, open-source (per-user)** | Yes | Yes, on the Docker driver (rootful Docker and the `docker` group) | A and B. C needs capabilities a per-user install does not have; see [What to grant](/docs/ai-discovery#what-to-grant-per-os) | Detected and explained; the per-user gateway never connects to it. For docker sandboxes, see the next row |
-| **Linux, managed (standalone enterprise)** | Yes; the native hook is a root-owned binary | No: sandboxes are refused on a managed computer | A, B and C, through the root sensor helper | Consume, observe or enforce, through the root sensor helper |
-| **Linux sandbox** (Docker driver) | Yes, always fail closed | Yes | None inside the sandbox; the per-user gateway has no Plane C | Read only, when an administrator runs Tetragon and installs the opt-in [sandbox kernel feed](/docs/sandboxes/linux#kernel-feed-tetragon): every process start and exit in your sandboxes joins their process tree. No policy and no enforcement; the sandbox is contained by OpenShell |
+| **Linux, open-source (per-user)** | Yes | Yes, on the Docker driver (rootful Docker and the `docker` group) | A and B. C needs capabilities a per-user install does not have; see [What to grant](/docs/ai-discovery) | Detected and explained; the per-user gateway never connects to it. For docker sandboxes, see the next row |
+| **Linux, managed (standalone enterprise)** | Yes; the native hook is a root-owned binary | Yes, Docker or an optional MicroVM driver with KVM; copy mode only, under the administrator's [sandbox policy](/docs/enterprise/sandboxes) | A, B and C, through the root sensor helper | Consume, observe or enforce, through the root sensor helper |
+| **Linux sandbox** (Docker driver) | Yes | Yes | None inside the sandbox; the per-user gateway has no Plane C | Read only, when an administrator runs Tetragon and installs the opt-in [sandbox kernel feed](/docs/sandboxes/linux): every process start and exit in your sandboxes joins their process tree. No policy and no enforcement; the sandbox is contained by OpenShell |
 | **macOS, open-source** | Yes | Yes, MicroVM driver on Apple silicon | A and B | Not available: Tetragon has no macOS agent |
-| **macOS sandbox** (MicroVM) | Yes, always fail closed | Yes; copy mode only | None inside the guest | Not available: the guest kernel is not visible to the host |
-| **macOS, managed** | Yes | No | A, B and C (Endpoint Security, notify only) | Not available |
+| **macOS sandbox** (MicroVM) | Yes | Yes; copy mode only | None inside the guest | Not available: the guest kernel is not visible to the host |
+| **macOS, managed** | Yes | Yes, MicroVM driver on Apple silicon; copy mode only, under the administrator's [sandbox policy](/docs/enterprise/sandboxes). Intel Macs refuse | A, B and C (Endpoint Security, notify only) | Not available |
 | **Windows** | Yes; native hook runner | No: sandboxes are refused | A and B. C needs an elevated token and the Advanced Audit Policy | Not available |
+
+Hooks fail closed for every failure that is not a gateway outage, everywhere
+except Secure Client. During an outage a per-user hook follows its policy tier:
+the default and permissive policies let the call run with a warning, strict
+denies it (see the [gateway outage table](/docs/connectors/capability-matrix#gateway-outage)). On a managed
+standalone computer, the administrator may choose `hook_fail_mode: open`, an
+outage-only exception for a gateway service that is stopped, restarting or gives
+no answer in time. With `foreign_hooks: remove`, a guarded call needs fresh,
+trusted records for its agent process and session to follow that outage mode.
+Windows Amp keeps its guard record locally; its managed plugin's outage result
+is in the [gateway outage table](/docs/connectors/capability-matrix#gateway-outage).
+A missing or invalid administrator-owned runtime, an unverified gateway peer,
+missing or refused credentials, rate limits (HTTP 429, also when the resends
+run out) and unusable responses still block. Secure Client keeps its separate open default and honors an explicit
+`closed`. See [Fail modes](/docs/reference/fail-modes) for the
+connector and event limits.
 
 The Secure Client profile is outside this page. It does not use the Tetragon
 settings, and its configuration is refused if it carries them.
@@ -146,12 +151,12 @@ What a process did under which agent.
 | --- | --- | --- |
 | Linux host, open-source | Plane C when granted; findings are gated on agent lineage | - |
 | Linux host, managed | Plane C, through Tetragon when it is present (exec identity, parent and container), or `cn_proc` and `fanotify` | The kernel controls apply only below an enrolled agent's own processes |
-| Linux sandbox | The opt-in process tree (a 5-second sample, plus every exec and exit from the [sandbox kernel feed](/docs/sandboxes/linux#kernel-feed-tetragon) when it is installed), plus the OpenShell supervisor's launches | The container is the boundary; stopping the sandbox ends every job in it |
+| Linux sandbox | The opt-in process tree (a 5-second sample, plus every exec and exit from the [sandbox kernel feed](/docs/sandboxes/linux) when it is installed), plus the OpenShell supervisor's launches | The container is the boundary; stopping the sandbox ends every job in it |
 | macOS host | Managed Endpoint Security exec events | - |
 | macOS sandbox | The process tree every 15 seconds | The virtual machine |
 | Windows | Process-creation audit events when enabled | - |
 
-On a Linux sandbox with the [sandbox kernel feed](/docs/sandboxes/linux#kernel-feed-tetragon)
+On a Linux sandbox with the [sandbox kernel feed](/docs/sandboxes/linux)
 installed, `sandbox ps --tree` names the source of the tree and how much of it
 the kernel recorded:
 
@@ -176,10 +181,10 @@ The layers divide the work so that two of them never make the same decision:
    never enforces egress, and never enforces a path that OpenShell or the mount
    pins already confine. On a host, DefenseClaw's kernel layer enforces only its fixed
    two controls; hooks keep everything that needs intent.
-2. **The kernel mode never exceeds the guardrail mode.** A connector whose
-   hooks run in observe mode fails open and only reports "would block". The
-   kernel controls do not deny for that connector either: they stay in monitor
-   mode and status says `kernel_enforce_guardrail_observe`.
+2. **The kernel mode never exceeds the guardrail mode.** A connector in
+   guardrail observe mode does not block on a policy verdict; it reports
+   "would block"; hook failures still follow the effective hook fail mode. The kernel controls do not deny for that connector either:
+   they stay in monitor mode and status says `kernel_enforce_guardrail_observe`.
 3. **The kernel never denies what the hook path needs.** The controls cover
    SSH private keys and shell and autostart writes. They never cover the hook
    runtime, provider credentials, repository files or program execution, so a
@@ -201,9 +206,9 @@ The layers divide the work so that two of them never make the same decision:
 
 | Layer and failure | What happens |
 | --- | --- |
-| A hook cannot reach the gateway, in action mode | Closed: the call is denied |
-| A hook cannot reach the gateway, in observe mode | Open: the call runs and the failure is recorded |
-| Managed Claude Code and Codex hooks | Always closed |
+| A hook cannot reach the gateway | On a per-user install the policy tier decides, in observe and action mode alike: default and permissive run the call with a warning and a record, strict denies a supported event. On a managed host `closed` (the default outside Secure Client) denies it and an administrator's `open` runs an outage only. Per-user Cursor registration has `failClosed: true` outside Secure Client, so a hook process that cannot answer blocks. |
+| Managed hooks on a standalone computer, every connector | Closed by default. The administrator's `open` covers a gateway outage only, and not for a connector whose foreign-hook guard checks the session with the gateway. Rate limits, refusals and unusable answers always block |
+| Secure Client hooks | Open by default; an explicit `closed` is kept |
 | Sandbox hooks | Always closed; silence is detected and can stop the sandbox |
 | The judge is unavailable | Falls back to the local verdict |
 | The egress proxy, credential revoked or deny mode | Closed: 403 or 407, and open tunnels are closed |
@@ -255,7 +260,7 @@ The two controls, and nothing else, are:
 The controls apply only to processes that descend from an enrolled user's
 agent CLI and run as that user. A developer's normal shell, other users, IDE
 terminals and programs that only look like an agent by name are observed, not
-denied. In this release they deny only through a native agent binary, and for
+denied. They deny only through a native agent binary, and for
 one user per computer: a script-hosted agent (such as an npm install) and,
 when several users who finished burn-in have a native agent install, every one
 but the lowest uid stay in monitor mode
@@ -266,7 +271,7 @@ reason.
 
 Read [Tetragon on a Linux fleet](/docs/enterprise/tetragon)
 for the setup, the readiness check, the pause runbook and the removal
-steps, and [Tetragon (Linux)](/docs/enterprise/configuration#tetragon-linux) for
+steps, and [Tetragon (Linux)](/docs/enterprise/configuration) for
 the settings.
 
 ### Your own Tetragon policies
@@ -323,9 +328,7 @@ separate decisions. See [Your policies' events](/docs/enterprise/tetragon#step-2
 
 ## See also
 
-- [AI discovery](/docs/ai-discovery): the runtime planes and what each platform delivers
-- [OpenShell sandboxes](/docs/sandboxes): containment, the egress proxy and the sandbox manager
+- [AI discovery reference](/docs/ai-discovery): the runtime planes and what each platform delivers
+- [Sandboxes](/docs/sandboxes): containment, the egress proxy and the sandbox manager
 - [Fail modes](/docs/reference/fail-modes): the hook fail mode
-- [Tetragon on a Linux fleet](/docs/enterprise/tetragon): the rollout guide, readiness check and reference
-- [Linux standalone deployment](/docs/enterprise/linux): the sensor helper and the layout
-- [Enterprise threat model](/docs/enterprise/threat-model): what the kernel controls do not cover
+- [Tetragon on a Linux fleet](/docs/enterprise/tetragon): rollout guide, readiness check and reference

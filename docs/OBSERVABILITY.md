@@ -29,7 +29,7 @@ It is a schema artifact, not a second operator guide.
 
 - [Local OpenTelemetry, Prometheus, Loki, Tempo, and Grafana](https://cisco-ai-defense.github.io/defenseclaw/docs/observability/local-observability/)
 - [Grafana dashboard catalog](https://cisco-ai-defense.github.io/defenseclaw/docs/observability/grafana-dashboards/)
-- [Agent360](https://cisco-ai-defense.github.io/defenseclaw/docs/observability/agent360/)
+- [Agent360](https://cisco-ai-defense.github.io/defenseclaw/docs/observability/local-observability/#agent-directory-and-agent360)
 - [Splunk](https://cisco-ai-defense.github.io/defenseclaw/docs/observability/splunk/)
 - [Galileo](https://cisco-ai-defense.github.io/defenseclaw/docs/observability/galileo/)
 

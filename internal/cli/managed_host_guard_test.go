@@ -114,8 +114,18 @@ func TestManagedWindowsSetupAnswer(t *testing.T) {
 	root.SetArgs([]string{"setup", "rotate-token", "--yes"})
 	root.SetOut(io.Discard)
 	root.SetErr(io.Discard)
-	if err := root.Execute(); err == nil || !strings.Contains(err.Error(), "managed by your organization") {
+	if err := root.Execute(); err == nil || !strings.Contains(err.Error(), "managed by your organization") ||
+		!strings.Contains(err.Error(), "Rotating the credentials") {
 		t.Fatalf("setup rotate-token on a managed Windows computer: %v", err)
+	}
+	// GAP-0551: every other setup subcommand also ended with the
+	// credential-rotation sentence.
+	for _, args := range [][]string{{"setup"}, {"setup", "claude-code"}, {"setup", "codex"}, {"setup", "guardrail", "--disable"}, {"setup", "llm"}, {"setup", "kiro"}, {"setup", "trusted-paths"}} {
+		root.SetArgs(args)
+		if err := root.Execute(); err == nil || !strings.Contains(err.Error(), "per-user setup commands are not available") ||
+			strings.Contains(err.Error(), "Rotating") || !strings.HasSuffix(err.Error(), "Nothing was changed.") {
+			t.Fatalf("%v on a managed Windows computer: %v", args, err)
+		}
 	}
 	// GAP-0779: the MCP scanner named trusted-paths as a remedy, and the
 	// refusal spoke of rotating credentials.
@@ -131,7 +141,8 @@ func TestManagedWindowsSetupAnswer(t *testing.T) {
 	// `doctor` was an unknown command and `status` printed the raw missing
 	// per-user config error (WIN-R1-23).
 	root.SetArgs([]string{"doctor"})
-	if err := root.Execute(); err == nil || !strings.Contains(err.Error(), "managed by your organization") {
+	if err := root.Execute(); err == nil || !strings.Contains(err.Error(), "managed by your organization") ||
+		!strings.Contains(err.Error(), "session-only HERMES_HOME is NOT COVERED") {
 		t.Fatalf("doctor on a managed Windows computer: %v", err)
 	}
 	// GAP-1719: `upgrade` was a bare unknown command.

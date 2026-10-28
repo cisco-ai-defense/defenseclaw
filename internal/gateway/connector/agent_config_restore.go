@@ -83,7 +83,6 @@ type agentConfigCopy struct {
 	Path    string `json:"path"`
 	SHA256  string `json:"sha256"`
 	Bytes   []byte `json:"bytes"`
-	SavedAt string `json:"saved_at"`
 }
 
 // agentConfigNotice records how setup recreated a missing agent config.
@@ -225,7 +224,6 @@ func (s agentConfigSpec) recordCopy(dataDir, configPath string) error {
 		Path:    configPath,
 		SHA256:  sha256Hex(data),
 		Bytes:   data,
-		SavedAt: time.Now().UTC().Format(time.RFC3339),
 	})
 	if err != nil {
 		return err
@@ -258,7 +256,11 @@ func (s agentConfigSpec) seedMissing(dataDir, configPath string) (string, error)
 	case !os.IsNotExist(err):
 		return "", err
 	case !haveCopy:
-		return "", nil // a first setup
+		if _, copyErr := os.Lstat(s.copyPath(dataDir)); copyErr != nil {
+			return "", nil // a first setup
+		}
+		// The backup record is gone but a copy is there that no longer
+		// reads: DefenseClaw saw settings it cannot put back (GAP-0612).
 	}
 	haveRecord := err == nil
 	notice := agentConfigNotice{Version: agentConfigCopyVersion, Path: configPath, Source: AgentConfigHooksOnly,
@@ -408,10 +410,13 @@ func AgentConfigStatus(connectorName string, opts SetupOpts, since time.Time, re
 			status = AgentConfigSettingsLost
 		case since.IsZero() || at.Before(since.Add(-time.Second)):
 			// Reported by the setup that recreated the file.
-		case notice.Source == AgentConfigFromLastGood:
+		case notice.Source == AgentConfigFromLastGood && settingsBack:
 			status = AgentConfigRestoredLastGood
-		case notice.Source == AgentConfigFromPristine:
+		case notice.Source == AgentConfigFromPristine && settingsBack:
 			status = AgentConfigRestoredPristine
+		// A copy put back that held DefenseClaw's hooks only (a file setup
+		// created, say) is reported as hooks only, not as the user's settings
+		// (GAP-0612).
 		default:
 			status = AgentConfigRecreatedHooksOnly
 		}

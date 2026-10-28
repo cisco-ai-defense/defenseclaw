@@ -26,8 +26,7 @@ import (
 // bundle file (GAP-0158). The lifecycle confirms an apply only when these two
 // agree.
 func TestBundleDigesterMatchesGatewayForSettingsOnlyBundle(t *testing.T) {
-	_, file, _, _ := runtime.Caller(0)
-	packs := filepath.Join(filepath.Dir(file), "..", "..", "policies", "guardrail", "default")
+	packs := filepath.Join(cliTestRepoRoot(t), "policies", "guardrail", "default")
 	if _, err := os.Stat(packs); err != nil {
 		t.Skipf("policies not found: %v", err)
 	}

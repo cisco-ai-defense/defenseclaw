@@ -15,13 +15,44 @@ var neutralLifecycleSets = map[string][]string{
 	"opencode":   {"session.created", "session.updated", "session.status", "session.idle", "session.compacted", "session.error", "session.deleted"},
 }
 
+// loopingStopEvents are stop events outside the neutral set whose only native
+// veto re-enters the agent loop. Antigravity's Stop decision "continue" starts
+// another turn; DefenseClaw renders allow for every Stop verdict there, so its
+// native runners need no neutral failure rule for it.
+var loopingStopEvents = map[string][]string{
+	"antigravity": {"Stop"},
+}
+
 // NeutralLifecycleEvents is the exact event set whose denial would prolong a
 // stopped session or cannot stop a tool. Kiro PostToolUse and OpenCode
 // tool.execute.after report tool results, so they are outside this stop set.
 // The set is shared by the foreign-hook guard, standalone hook failures, and
-// gateway panic recovery.
+// the gateway's failed checks, recovered evaluator panics included
+// (LifecycleEvent).
 func NeutralLifecycleEvents(connector string) []string {
 	return append([]string(nil), neutralLifecycleSets[connector]...)
+}
+
+// LifecycleEvent reports an event whose denial keeps the agent running and
+// repeats the hook instead of stopping a tool call: a neutral lifecycle event
+// or a looping stop event. The gateway never answers a failed check on one
+// with a retrying block, a recovered evaluator panic included.
+func LifecycleEvent(connector, event string) bool {
+	if NeutralLifecycleEvent(connector, event) {
+		return true
+	}
+	for _, candidate := range loopingStopEvents[connector] {
+		if strings.TrimSpace(event) == candidate {
+			return true
+		}
+	}
+	return false
+}
+
+// LifecycleEvents lists every LifecycleEvent of connector: the neutral set
+// followed by the looping stop events.
+func LifecycleEvents(connector string) []string {
+	return append(NeutralLifecycleEvents(connector), loopingStopEvents[connector]...)
 }
 
 // NeutralLifecycleEvent matches only the named lifecycle events. Cursor's

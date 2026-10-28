@@ -303,6 +303,13 @@ func (a *APIServer) evaluateClaudeCodeHook(ctx context.Context, req claudeCodeHo
 		reason, policy = resolveHookBlockReasonForConfig(a.decisionConfig(ctx), "claudecode", req.HookEventName, action, reason,
 			evalCtx.RuleIDs, policy)
 	}
+	// Claude Code shows the native ask only in its default (Manual) mode; in
+	// any other mode the ask would run the call or be refused without the
+	// reason, so the confirmation blocks with the next step (GAP-0371). The
+	// reason was resolved as a confirmation, so no block message replaces it.
+	if action == "confirm" && req.HookEventName == "PreToolUse" && !gatewayconnector.ClaudeCodeModeCanAsk(req.PermissionMode) {
+		action = "block"
+	}
 	resp := claudeCodeResponseFor(req, action, rawAction, verdict.Severity, reason, verdict.Findings, mode, wouldBlock, policy)
 	resp.SourceReason = verdict.Reason
 	// Stamp the unified-pipeline correlation keys so the agent-hook
@@ -429,7 +436,7 @@ func (a *APIServer) claudeCodeEnabled() bool {
 func (a *APIServer) claudeCodeMode(ctx context.Context) string {
 	// The request's guardrail profile, when one applies, replaces the live
 	// configuration (see guardrail_profile.go).
-	return hookModeForConfig(a.decisionConfigFrom(ctx, a.runtimeConfigSnapshot()), "claudecode")
+	return a.decisionConfigFrom(ctx, a.runtimeConfigSnapshot()).HookModeForConnector("claudecode")
 }
 
 func claudeCodeResponseFor(req claudeCodeHookRequest, action, rawAction, severity, reason string, findings []string, mode string, wouldBlock bool, policy ...redaction.SinkPolicy) claudeCodeHookResponse {
@@ -442,9 +449,19 @@ func claudeCodeResponseFor(req claudeCodeHookRequest, action, rawAction, severit
 	if rawAction == "" {
 		rawAction = action
 	}
+	// A confirmation blocked because the permission mode cannot ask keeps the
+	// confirmation wording and adds the next step (GAP-0371).
+	noAsk := req.HookEventName == "PreToolUse" && action == "block" && strings.EqualFold(rawAction, "confirm")
+	reasonAction := action
+	if noAsk {
+		reasonAction = "confirm"
+	}
 	safeReason := agentDisplayReason(reason, notificationSinkPolicy(policy))
-	safeReason = agentVerdictReason(action, reason, safeReason, notificationSinkPolicy(policy))
-	safeReason = agentObservedReason(action, reason, safeReason, notificationSinkPolicy(policy))
+	safeReason = agentVerdictReason(reasonAction, reason, safeReason, notificationSinkPolicy(policy))
+	safeReason = agentObservedReason(reasonAction, reason, safeReason, notificationSinkPolicy(policy))
+	if noAsk {
+		safeReason = gatewayconnector.ClaudeCodeNoAskReason(safeReason, req.PermissionMode)
+	}
 	// wouldBlock remains a shadow-telemetry signal for post-result events, but
 	// the connector cannot enforce those events. Do not describe an advisory
 	// result as something Claude would block in action mode.
@@ -493,6 +510,9 @@ func claudeCodeOutput(req claudeCodeHookRequest, action, rawAction, reason, addi
 			"permissionDecisionReason": reasonOrDefaultClaudeCode(reason),
 		}}
 	}
+	if action == "block" && event == "PreToolUse" && strings.EqualFold(rawAction, "confirm") {
+		reason = gatewayconnector.ClaudeCodeNoAskReason(reason, req.PermissionMode)
+	}
 	if action == "block" {
 		switch event {
 		case "PreToolUse":
@@ -509,10 +529,11 @@ func claudeCodeOutput(req claudeCodeHookRequest, action, rawAction, reason, addi
 					"message":  reasonOrDefaultClaudeCode(reason),
 				},
 			}}
-		case "TaskCreated", "TaskCompleted", "TeammateIdle":
+		case "SessionStart", "TaskCreated", "TaskCompleted", "TeammateIdle":
 			// These team/task events use exit 2 + stderr as event-specific
-			// feedback. Top-level continue:false stops the teammate entirely,
-			// which is not the documented denial behavior for these events.
+			// feedback. SessionStart also uses exit 2 + stderr: a JSON
+			// decision:block is not a native SessionStart block and caused
+			// hookexec to replace the identity refusal with a generic error.
 			return nil
 		case "Elicitation":
 			return map[string]interface{}{"hookSpecificOutput": map[string]interface{}{
@@ -594,15 +615,17 @@ func reasonOrDefaultClaudeCode(reason string) string {
 
 // claudeCodeOmniGentShellTool is OmniGent's shell tool as Claude Code names
 // it when OmniGent's claude harness runs Claude Code: the MCP tool
-// sys_os_shell of the "omnigent" server, {"command": "..."}.
+// sys_os_shell of the "omnigent" server, {"command": "..."}. DefenseClaw no
+// longer ships an OmniGent connector (#1182), but OmniGent itself still runs
+// Claude Code with this server, so the Claude Code connector keeps the alias.
 const claudeCodeOmniGentShellTool = "mcp__omnigent__sys_os_shell"
 
 // claudeCodeTrustedActionTool names the tool the trusted-action parser sees.
 // OmniGent's MCP shell tool is the same shell shape under another name;
 // unmapped, its commands parsed to no command facts, so a CRITICAL command
 // rule stayed an unproven candidate and the nested Claude Code PreToolUse
-// allowed the call (GAP-1055; only OmniGent's own hook blocked it). This is a
-// name alias like agentHookTrustedActionTool's, not a capability grant.
+// allowed the call (GAP-1055). This is a name alias like
+// agentHookTrustedActionTool's, not a capability grant.
 func claudeCodeTrustedActionTool(toolName, actionTool string) string {
 	if strings.TrimSpace(toolName) == claudeCodeOmniGentShellTool {
 		return "shell"

@@ -107,7 +107,7 @@ BOOTSTRAP_PYTHON := $(shell if [ -x "$(VENV_BIN)/python$(EXE)" ]; then printf '%
         set-version \
         _bundle-data _stage-extension-fingerprint _checkout-write-preflight _source-install-preflight _source-install-dev-preflight _source-dev-install source-migrate source-acp-refresh source-restart-gateway \
         proto proto-check proto-tools \
-        dist dist-cli dist-gateway dist-installers dist-requirements dist-test dist-checksums dist-clean
+        dist dist-cli dist-fleet-assets dist-gateway dist-installers dist-requirements dist-test dist-checksums dist-clean
 
 # ---------------------------------------------------------------------------
 # Developer workflow help
@@ -527,10 +527,16 @@ proto-check: proto
 gateway: _checkout-write-preflight sync-openclaw-extension
 	go build $(GO_BUILD_FLAGS) -o $(GATEWAY)$(EXE) ./cmd/defenseclaw
 	go build $(GO_BUILD_FLAGS) -o $(ACP_GUARD)$(EXE) ./cmd/defenseclaw-acp
+ifneq ($(OS),Windows_NT)
+	go build $(GO_BUILD_FLAGS) -o defenseclaw-hook-post ./cmd/defenseclaw-hook-post
+endif
 	$(if $(filter Windows_NT,$(OS)),go run ./internal/tools/windowsresources -target windows_amd64 -executable $(GATEWAY)$(EXE) -component gateway -version $(VERSION) -icon "$(CURDIR)/macos/DefenseClawMac/DefenseClawMac/Assets.xcassets/AppIcon.appiconset/icon_256.png",)
 	$(if $(filter Windows_NT,$(OS)),go run ./internal/tools/windowsresources -target windows_amd64 -executable $(ACP_GUARD)$(EXE) -component acp-guard -version $(VERSION) -icon "$(CURDIR)/macos/DefenseClawMac/DefenseClawMac/Assets.xcassets/AppIcon.appiconset/icon_256.png",)
 	@echo "Built $(GATEWAY)$(EXE)"
 	@echo "Built $(ACP_GUARD)$(EXE)"
+ifneq ($(OS),Windows_NT)
+	@echo "Built defenseclaw-hook-post"
+endif
 	@echo "  Run with: ./$(GATEWAY)$(EXE)"
 	@echo "  Check status: ./$(GATEWAY)$(EXE) status"
 ifeq ($(OS),Windows_NT)
@@ -729,6 +735,11 @@ endif
 	@./scripts/source-install-preflight.sh dev-publish-acp \
 		"$(CURDIR)" "$(INSTALL_DIR)" "$(VENV_BIN)" \
 		"defenseclaw$(EXE)" "$(GATEWAY)$(EXE)"
+ifneq ($(OS),Windows_NT)
+	@./scripts/source-install-preflight.sh dev-publish-hook-post \
+		"$(CURDIR)" "$(INSTALL_DIR)" "$(VENV_BIN)" \
+		"defenseclaw$(EXE)" "$(GATEWAY)$(EXE)"
+endif
 ifeq ($(OS),Windows_NT)
 	@./scripts/source-install-preflight.sh dev-publish-hook \
 		"$(CURDIR)" "$(INSTALL_DIR)" "$(VENV_BIN)" \
@@ -743,6 +754,9 @@ endif
 	@echo "  • Python CLI   → $(VENV_BIN)/defenseclaw$(EXE)  (activate with: source $(VENV_BIN)/activate)"
 	@echo "  • Go gateway   → $(INSTALL_DIR)/$(GATEWAY)$(EXE)"
 	@echo "  • ACP guard    → $(INSTALL_DIR)/$(ACP_GUARD)$(EXE)"
+ifneq ($(OS),Windows_NT)
+	@echo "  • Hook transport → $(INSTALL_DIR)/defenseclaw-hook-post"
+endif
 	$(if $(filter Windows_NT,$(OS)),@echo "  • Hook launcher → $(INSTALL_DIR)/$(HOOK_LAUNCHER).exe",)
 	@if [ "$${CONNECTOR:-}" = "openclaw" ]; then \
 		echo "  • OpenClaw plugin → ~/.defenseclaw/extensions/defenseclaw/"; \
@@ -797,6 +811,11 @@ gateway-install: _source-install-preflight cli-install
 	@./scripts/source-install-preflight.sh publish-acp \
 		"$(CURDIR)" "$(INSTALL_DIR)" "$(VENV_BIN)" \
 		"defenseclaw$(EXE)" "$(GATEWAY)$(EXE)"
+ifneq ($(OS),Windows_NT)
+	@./scripts/source-install-preflight.sh publish-hook-post \
+		"$(CURDIR)" "$(INSTALL_DIR)" "$(VENV_BIN)" \
+		"defenseclaw$(EXE)" "$(GATEWAY)$(EXE)"
+endif
 ifeq ($(OS),Windows_NT)
 	@./scripts/source-install-preflight.sh publish-hook \
 		"$(CURDIR)" "$(INSTALL_DIR)" "$(VENV_BIN)" \
@@ -1372,13 +1391,17 @@ _stage-extension-fingerprint: plugin
 		--source $(PLUGIN_DIR) \
 		--output $(EXTENSION_FINGERPRINT)
 
-dist-cli: _bundle-data _stage-extension-fingerprint
+dist-cli: _bundle-data _stage-extension-fingerprint dist-fleet-assets
 	@mkdir -p $(DIST_DIR)
 	@rm -rf build cli/*.egg-info
 	@find cli/ -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true
 	uv build --wheel --out-dir $(DIST_DIR)
+
+dist-fleet-assets:
+	@mkdir -p $(DIST_DIR)
 	tar -czf "$(DIST_DIR)/defenseclaw-fleet-assets.tar.gz" -C . \
-		edge-connector bundles/local_observability_stack/docker-compose.fleet.yml \
+		edge-connector docs-site/content/docs/edge-connector/policies.mdx \
+		bundles/local_observability_stack/docker-compose.fleet.yml \
 		bundles/local_observability_stack/prometheus/examples/fleet.yml \
 		bundles/local_observability_stack/grafana/dashboards/defenseclaw-fleet.json
 
@@ -1490,6 +1513,10 @@ dist-gateway: _checkout-write-preflight sync-openclaw-extension
 			-o "$$stage/defenseclaw-gateway$$exe" ./cmd/defenseclaw; \
 		CGO_ENABLED=0 GOOS=$$goos GOARCH=$$goarch go build -trimpath -ldflags "-s -w -X main.version=$(VERSION) $(BUILD_INFO_LDFLAGS)" \
 			-o "$$stage/defenseclaw-acp$$exe" ./cmd/defenseclaw-acp; \
+		if [ "$$goos" != windows ]; then \
+			CGO_ENABLED=0 GOOS=$$goos GOARCH=$$goarch go build -trimpath -ldflags "-s -w -X main.version=$(VERSION)" \
+				-o "$$stage/defenseclaw-hook-post" ./cmd/defenseclaw-hook-post; \
+		fi; \
 		if [ "$$goos" = windows ]; then \
 			CGO_ENABLED=0 GOOS=$$goos GOARCH=$$goarch go build -trimpath -ldflags "-s -w -H=windowsgui -X main.version=$(VERSION) $(BUILD_INFO_LDFLAGS)" \
 				-o "$$stage/defenseclaw-hook.exe" ./cmd/defenseclaw-hook; \
@@ -1534,7 +1561,7 @@ dist-clean: _checkout-write-preflight
 	rm -rf cli/defenseclaw/_data
 
 clean:
-	rm -f $(GATEWAY) $(GATEWAY)$(EXE) $(ACP_GUARD) $(ACP_GUARD)$(EXE) $(HOOK_LAUNCHER).exe $(BINARY)-linux-* $(BINARY)-darwin-* $(ACP_GUARD)-linux-* $(ACP_GUARD)-darwin-* $(ACP_GUARD)-windows-*.exe $(HOOK_LAUNCHER)-windows-*.exe
+	rm -f $(GATEWAY) $(GATEWAY)$(EXE) $(ACP_GUARD) $(ACP_GUARD)$(EXE) defenseclaw-hook-post $(HOOK_LAUNCHER).exe $(BINARY)-linux-* $(BINARY)-darwin-* $(ACP_GUARD)-linux-* $(ACP_GUARD)-darwin-* $(ACP_GUARD)-windows-*.exe $(HOOK_LAUNCHER)-windows-*.exe
 	rm -rf $(VENV) cli/*.egg-info
 	rm -rf $(PLUGIN_DIR)/dist $(PLUGIN_DIR)/node_modules
 	rm -f coverage.out coverage-py.xml

@@ -455,7 +455,7 @@ func (a *App) vmDiskShortage(ctx context.Context, d openshell.Driver, spec *harn
 // MicroVM gateway boots only an image built for it, which answers
 // localhost itself; a docker gateway's images stay as they were.
 func (a *App) gatewayDriverNow(ctx context.Context) openshell.Driver {
-	if d, ok := a.gatewayDriverKnown(ctx); ok {
+	if d, _, ok := a.gatewayDriver(ctx); ok {
 		return d
 	}
 	d, _ := openshell.LookupDriver(string(openshell.DriverDocker))
@@ -464,22 +464,58 @@ func (a *App) gatewayDriverNow(ctx context.Context) openshell.Driver {
 
 // gatewayDriverKnown is the compute driver gatewayDriverNow finds when the
 // daemon or the gateway's configuration says which (a configuration that
-// names none selects docker), and false when neither does.
+// names none selects docker), and false when neither does or a managed
+// gateway that does not run may start on another (image prune then keeps
+// both kinds of image).
 func (a *App) gatewayDriverKnown(ctx context.Context) (openshell.Driver, bool) {
+	d, certain, ok := a.gatewayDriver(ctx)
+	return d, ok && certain
+}
+
+// gatewayDriver is the compute driver of the gateway sandboxes start on,
+// with ok false when nothing says which, and certain false when it is the
+// best guess for a managed gateway that does not run.
+func (a *App) gatewayDriver(ctx context.Context) (d openshell.Driver, certain, ok bool) {
 	if api, err := a.api(); err == nil {
-		if st, err := api.Status(ctx); err == nil && st.Gateway != nil && st.Gateway.Driver != "" {
+		st, err := api.Status(ctx)
+		if err == nil && st.Gateway != nil && st.Gateway.Driver != "" {
 			// A driver DefenseClaw does not drive (podman, say) is not
 			// known: nothing says which images it boots.
 			d, ok := openshell.LookupDriver(st.Gateway.Driver)
-			return d, ok
+			return d, true, ok
+		}
+		if err == nil && st.Managed != nil {
+			// A managed gateway that does not run yet starts on the driver
+			// the organization's settings select for this account, never on
+			// the account's own gateway.toml: an image built from that file
+			// was a docker one the MicroVM gateway could not boot (GAP-0005).
+			if name, certain := managedNextDriver(st.Managed); name != "" {
+				d, ok := openshell.LookupDriver(name)
+				return d, certain, ok
+			}
 		}
 	}
 	if st, err := a.Gateway.State(); err == nil && st != nil {
 		if d, ok := st.Driver(); ok {
-			return d, true
+			return d, true, true
 		}
 	}
-	return openshell.Driver{}, false
+	return openshell.Driver{}, false, false
+}
+
+// managedNextDriver is the driver a managed gateway that does not run
+// starts on at the next sandbox start: the managed gateway's choice for the
+// account (NextDriver), not Driver, which names the newest registration's
+// even when its sandbox is stopped and the organization changed drivers
+// since. certain is false when the account's own probe at the start may
+// still choose the docker fallback, or a daemon before 1.0.4 names only
+// Driver.
+func managedNextDriver(m *sandboxapi.ManagedStatus) (name string, certain bool) {
+	if m.NextDriver == "" {
+		return m.Driver, false
+	}
+	vm := m.NextDriver == string(openshell.DriverVM)
+	return m.NextDriver, !vm || m.DriverFallback != string(openshell.DriverDocker)
 }
 
 // defaultHarnesses are the harnesses setup selects, and image commands and

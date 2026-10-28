@@ -170,9 +170,6 @@ func TestOnlyTheStandaloneHermesHookRendersTheForeignHookGuard(t *testing.T) {
 			t.Fatalf("%s: the Hermes hook rendered the guard", name)
 		}
 	}
-	if hook := render(standalone, NewOpenHandsConnector(), "openhands-hook.sh"); strings.Contains(hook, "foreign-hook-check") {
-		t.Fatal("another connector's shell hook rendered the Hermes guard")
-	}
 }
 
 // A standalone Hermes hook rendered before it ran the guard (or for another

@@ -34,6 +34,8 @@
     "allow_unblock": {"type": "boolean"},
     "foreign_sandboxes": {"type": "string", "enum": ["", "stop", "alert"]},
     "mcp_included": {"type": "array", "items": {"type": "string"}},
+    "mcp_project_count": {"type": "integer", "minimum": 0},
+    "mcp_project_blocked": {"type": "boolean"},
     "mcp_blocked": {
       "type": "array",
       "items": {

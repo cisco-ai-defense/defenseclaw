@@ -25,7 +25,6 @@ import (
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/managed"
-	"github.com/defenseclaw/defenseclaw/internal/testenv"
 )
 
 func stringSliceContains(values []string, needle string) bool {
@@ -543,9 +542,9 @@ func TestManagedEnterpriseListenerBindingsModeMatrix(t *testing.T) {
 			cfg.Gateway.APIBind = test.apiBind
 			cfg.Guardrail.Host = test.guardrailHost
 			cfg.Guardrail.Enabled = test.guardrail
-			err := validateManagedEnterpriseListenerBindings(cfg)
+			err := ValidateManagedEnterpriseListenerBindings(cfg)
 			if test.wantErr == "" && err != nil {
-				t.Fatalf("validateManagedEnterpriseListenerBindings: %v", err)
+				t.Fatalf("ValidateManagedEnterpriseListenerBindings: %v", err)
 			}
 			if test.wantErr != "" && (err == nil || !strings.Contains(err.Error(), test.wantErr)) {
 				t.Fatalf("error = %v, want %q", err, test.wantErr)
@@ -584,7 +583,7 @@ func TestManagedEnterpriseWindowsPeerAuthKnobsAreRejected(t *testing.T) {
 			cfg.Managed.AllowedTeamIDs = c.team
 			cfg.Managed.AllowedSigningIDs = c.sig
 			cfg.Managed.AllowedBundleIDs = c.id
-			err := validateManagedEnterpriseWindowsPeerAuthKnobs(cfg)
+			err := ValidateManagedEnterpriseWindowsPeerAuthKnobs(cfg)
 			if runtime.GOOS != "windows" {
 				if err != nil {
 					t.Fatalf("non-windows: got err=%v, want nil (validator scoped to windows)", err)
@@ -878,6 +877,7 @@ func TestSkillDirsForOpenClaw_WithOpenclawJSON(t *testing.T) {
 func TestConfig_InstalledSkillCandidates(t *testing.T) {
 	cfg := &Config{
 		Claw: ClawConfig{
+			Mode:       "openclaw",
 			HomeDir:    "/tmp/test-home",
 			ConfigFile: "/tmp/nonexistent/openclaw.json",
 		},
@@ -907,44 +907,10 @@ func TestConfig_InstalledSkillCandidates(t *testing.T) {
 	}
 }
 
-func TestConfig_WorkspaceScopedOpenHandsPathsUsePinnedWorkspace(t *testing.T) {
-	root := t.TempDir()
-	home := filepath.Join(root, "home")
-	testenv.SetHome(t, home)
-	workspace := filepath.Join(root, "repo")
-	cfg := &Config{
-		Claw: ClawConfig{
-			Mode:         ClawMode("openhands"),
-			WorkspaceDir: workspace,
-		},
-	}
-
-	if got, want := cfg.ConnectorWorkspaceDir(), workspace; got != want {
-		t.Fatalf("ConnectorWorkspaceDir() = %q, want %q", got, want)
-	}
-	if got, want := cfg.ConnectorHomeDir("openhands"), filepath.Join(workspace, ".openhands"); got != want {
-		t.Fatalf("ConnectorHomeDir(openhands) = %q, want %q", got, want)
-	}
-
-	dirs := cfg.SkillDirsForConnector("openhands")
-	if !stringSliceContains(dirs, filepath.Join(workspace, ".agents", "skills")) {
-		t.Fatalf("OpenHands skill dirs = %v, want pinned workspace .agents/skills", dirs)
-	}
-	if !stringSliceContains(dirs, filepath.Join(workspace, ".openhands", "skills")) {
-		t.Fatalf("OpenHands skill dirs = %v, want pinned workspace .openhands/skills", dirs)
-	}
-	if !stringSliceContains(dirs, filepath.Join(workspace, ".openhands", "microagents")) {
-		t.Fatalf("OpenHands skill dirs = %v, want pinned workspace .openhands/microagents", dirs)
-	}
-	if !stringSliceContains(dirs, filepath.Join(home, ".openhands", "cache", "skills", "public-skills", "skills")) {
-		t.Fatalf("OpenHands skill dirs = %v, want user public skills cache", dirs)
-	}
-}
-
 func TestConfig_PluginDirs(t *testing.T) {
 	home := filepath.Join(t.TempDir(), "test-oc-home")
 	cfg := &Config{
-		Claw: ClawConfig{HomeDir: home},
+		Claw: ClawConfig{Mode: "openclaw", HomeDir: home},
 	}
 	dirs := cfg.PluginDirs()
 	if len(dirs) != 1 {

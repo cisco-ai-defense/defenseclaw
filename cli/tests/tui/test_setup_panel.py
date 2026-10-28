@@ -41,7 +41,6 @@ from defenseclaw.tui.panels.setup import (
     admission_action_fields,
     build_setup_sections,
     build_wizard_args,
-    connector_setup_command,
     connector_setup_wizard_fields,
     guardrail_wizard_fields,
     llm_model_candidates,
@@ -552,126 +551,6 @@ def test_readiness_renders_every_active_connector_without_setup_filtering() -> N
     assert "Connector: hermes" in model_titles
 
 
-def test_connector_wizard_builds_go_argv_for_supported_connectors() -> None:
-    assert connector_setup_command("claudecode") == (
-        ("setup", "claude-code", "--yes"),
-        "setup claude-code",
-    )
-
-    # Linux: Windows has no openclaw, so the form would open on a hook connector.
-    fields = connector_setup_wizard_fields({"guardrail": {"connector": "openclaw"}}, "linux")
-    fields = _with_field(fields, "Connector", "openclaw")
-    fields = _with_field(fields, "Guardrail Mode", "action")
-    fields = _with_field(fields, "Scanner Mode", "both")
-    fields = _with_field(fields, "Restart Gateway", "no")
-    # GAP-0226: the retired Verify After Setup row is gone; doctor is the check.
-    assert "Verify After Setup" not in {field.label for field in fields}
-    assert build_wizard_args(SetupWizard.CONNECTOR_SETUP, fields) == (
-        "setup",
-        "openclaw",
-        "--yes",
-        "--mode",
-        "action",
-        "--no-restart",
-        "--scanner-mode",
-        "both",
-    )
-    fields = connector_setup_wizard_fields({})
-    fields = _with_field(fields, "Connector", "codex")
-    fields = _with_field(fields, "Restart Gateway", "no")
-    fields = _with_field(fields, "Local Stack", "yes")
-    assert build_wizard_args(SetupWizard.CONNECTOR_SETUP, fields) == (
-        "setup",
-        "codex",
-        "--yes",
-        "--mode",
-        "observe",
-        "--no-restart",
-        "--with-local-stack",
-    )
-
-    # Regression: hook-connector wizard must forward --mode so action
-    # mode actually sticks. Previously the hook branch dropped --mode
-    # and codex/claudecode silently downgraded to observe.
-    fields = connector_setup_wizard_fields({})
-    fields = _with_field(fields, "Connector", "codex")
-    fields = _with_field(fields, "Guardrail Mode", "action")
-    assert build_wizard_args(SetupWizard.CONNECTOR_SETUP, fields) == (
-        "setup",
-        "codex",
-        "--yes",
-        "--mode",
-        "action",
-    )
-
-    fields = connector_setup_wizard_fields({})
-    fields = _with_field(fields, "Connector", "claudecode")
-    fields = _with_field(fields, "Guardrail Mode", "action")
-    fields = _with_field(fields, "Local Stack", "yes")
-    assert build_wizard_args(SetupWizard.CONNECTOR_SETUP, fields) == (
-        "setup",
-        "claude-code",
-        "--yes",
-        "--mode",
-        "action",
-        "--with-local-stack",
-    )
-
-    fields = connector_setup_wizard_fields({})
-    fields = _with_field(fields, "Connector", "omnigent")
-    fields = _with_field(fields, "Guardrail Mode", "action")
-    fields = _with_field(fields, "Restart Gateway", "no")
-    assert build_wizard_args(SetupWizard.CONNECTOR_SETUP, fields) == (
-        "setup",
-        "omnigent",
-        "--yes",
-        "--mode",
-        "action",
-        "--no-restart",
-    )
-
-    fields = connector_setup_wizard_fields({})
-    fields = _with_field(fields, "Connector", "antigravity")
-    fields = _with_field(fields, "Replace Existing", "yes")
-    assert build_wizard_args(SetupWizard.CONNECTOR_SETUP, fields) == (
-        "setup",
-        "antigravity",
-        "--yes",
-        "--mode",
-        "observe",
-        "--replace",
-    )
-
-    fields = connector_setup_wizard_fields({})
-    fields = _with_field(fields, "Action", "remove")
-    fields = _with_field(fields, "Connector", "opencode")
-    fields = _with_field(fields, "Restart Gateway", "no")
-    fields = _with_field(fields, "Force Last Connector Removal", "yes")
-    assert build_wizard_args(SetupWizard.CONNECTOR_SETUP, fields) == (
-        "setup",
-        "remove",
-        "opencode",
-        "--yes",
-        "--no-restart",
-        "--force",
-    )
-
-    assert set(CONNECTORS) == {
-        "openclaw",
-        "zeptoclaw",
-        "codex",
-        "claudecode",
-        "hermes",
-        "cursor",
-        "devin",
-        "copilot",
-        "openhands",
-        "antigravity",
-        "opencode",
-        "amp",
-        "omnigent",
-        "kiro",
-    }
 
 
 def test_acp_wizard_defaults_to_observe_and_requires_explicit_action() -> None:
@@ -773,12 +652,11 @@ def test_connector_choices_are_os_filtered_for_windows() -> None:
     assert "amp" in win_options
     assert wizard_field_value(win_fields, "Connector") not in {"openclaw", "zeptoclaw"}
 
-    # A stored proxy ``claw.mode`` (e.g. a config copied from macOS) is
-    # rewritten to the first supported connector rather than seeding an
-    # unusable default the operator would have to notice and change.
+    # A stored proxy ``claw.mode`` (e.g. a config copied from macOS) leaves
+    # the choice empty so no unsupported agent is selected automatically.
     proxy_cfg = {"claw": {"mode": "openclaw"}}
     seeded = wizard_field_value(connector_setup_wizard_fields(proxy_cfg, os_name="windows"), "Connector")
-    assert seeded == win_options[0]
+    assert seeded == ""
 
     # macOS/Linux keep active connectors while hiding global retirements.
     mac_options = _wizard_options(connector_setup_wizard_fields({}, os_name="darwin"), "Connector")
@@ -795,7 +673,12 @@ def test_connector_choices_are_os_filtered_for_windows() -> None:
 def test_setup_wizards_keep_connector_scope_inside_the_form() -> None:
     model = SetupPanelModel({})
     model.open_wizard_form(SetupWizard.CONNECTOR_SETUP)
-    assert wizard_field_value(model.form_fields, "Connector")
+    assert wizard_field_value(model.form_fields, "Connector") == ""
+    assert model.missing_required_fields() == ("Connector",)
+    assert build_wizard_args(SetupWizard.CONNECTOR_SETUP, model.form_fields) == ()
+    blocked = model.submit_wizard_form()
+    assert blocked.handled
+    assert "Connector" in model.form_error
     model.close_wizard_form()
 
     model.open_wizard_form(SetupWizard.GUARDRAIL)
@@ -1974,14 +1857,14 @@ def test_cli_choices_roles_auth_modes_match_cli_source_of_truth() -> None:
     assert AZURE_AUTH_MODES == _choices(setup_guardrail, "judge_azure_auth_mode")
 
 
-def test_every_wizard_arg_builder_returns_non_empty_argv_for_defaults() -> None:
+def test_wizard_arg_builders_require_connector_choice_before_setup() -> None:
     """Regression guard for every wizard's ``build_wizard_args``.
 
     The hook-connector ``--mode`` bug slipped in because the arg builder
     silently swallowed a field; this test exercises every registered
     wizard with its default form so we catch the next class of silent
-    drops. The assertion is intentionally weak (argv non-empty + base
-    command prefix correct) so adding new fields doesn't churn it.
+    drops. Connector Setup is the exception: an empty connector must not
+    turn into a command for an agent that may be absent.
     """
 
     from defenseclaw.tui.panels.setup import WIZARD_COMMANDS
@@ -1989,6 +1872,10 @@ def test_every_wizard_arg_builder_returns_non_empty_argv_for_defaults() -> None:
     for wizard in SetupWizard:
         fields = wizard_form_defs(wizard)
         argv = build_wizard_args(wizard, fields)
+        if wizard == SetupWizard.CONNECTOR_SETUP:
+            assert argv == ()
+            assert missing_required_fields(wizard, fields) == ("Connector",)
+            continue
         assert argv, f"{wizard.name}: build_wizard_args returned empty argv for defaults"
         prefix = WIZARD_COMMANDS.get(wizard)
         if prefix is not None and prefix:
@@ -2702,6 +2589,8 @@ def test_guardrail_section_renders_effective_per_connector_overrides() -> None:
                 "codex": PerConnectorGuardrailConfig(
                     enabled=False,
                     hook_fail_mode="closed",
+                    # The strict tier: its outage mode is closed (oss-outage-open).
+                    rule_pack="strict",
                     block_message="codex blocked",
                     hilt=HILTConfig(enabled=True, min_severity="LOW"),
                 ),
@@ -2714,7 +2603,10 @@ def test_guardrail_section_renders_effective_per_connector_overrides() -> None:
     # codex pins its own overrides — the editor shows the *effective* value.
     assert fields["guardrail.connectors.codex.enabled"].value == "false"
     assert fields["guardrail.connectors.codex.enabled"].kind == "bool"
-    assert fields["guardrail.connectors.codex.hook_fail_mode"].value.startswith("closed (provenance: config; status:")
+    # No installed hook names a mode: the native Windows hook then fails
+    # closed on its own (no-installed-mode); a POSIX hook falls back to config.
+    provenance = "no-installed-mode" if os.name == "nt" else "config"
+    assert fields["guardrail.connectors.codex.hook_fail_mode"].value.startswith(f"closed (provenance: {provenance}; status:")
     policy_status = fields["guardrail.connectors.codex.hook_fail_mode"].value
     if os.name == "nt":
         assert "policy-unverified" in policy_status
@@ -2728,7 +2620,7 @@ def test_guardrail_section_renders_effective_per_connector_overrides() -> None:
     assert fields["guardrail.judge.hook_connectors.codex"].value == "true"
     assert fields["guardrail.judge.hook_connectors.hermes"].value == "false"
 
-    # hermes has no override → inherits the global effective values.
+    # Hermes has no override: its outage mode is the default tier's open.
     assert fields["guardrail.connectors.hermes.enabled"].value == "true"
     assert fields["guardrail.connectors.hermes.hook_fail_mode"].value == "open"
     assert fields["guardrail.connectors.hermes.block_message"].value == "global blocked"

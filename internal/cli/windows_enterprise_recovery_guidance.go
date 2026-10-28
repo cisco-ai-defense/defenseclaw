@@ -433,11 +433,11 @@ func windowsEnterpriseStandaloneSetupCommand(action, configPath string, purge bo
 }
 
 // windowsEnterprisePendingInspectionStep is what status and verify say about
-// a pending transaction. Status named only not_ready and the installed
-// version, and verify said "run Repair", which an administrator shell cannot
-// use to recover it; a failed Setup names this same command.
+// a pending transaction. Its service states are reported separately: an
+// in-flight ensure can have all four services running. A failed Setup names
+// this same recovery command.
 func windowsEnterprisePendingInspectionStep(configPath string) string {
-	return "A lifecycle transaction is pending, so the DefenseClaw services stay stopped until it finishes or is recovered. " +
+	return "A lifecycle transaction is pending; check the reported service states until it finishes or is recovered. " +
 		"If no DefenseClaw Setup or lifecycle command is running now, run DefenseClaw Setup (this release or a newer one) as LocalSystem: " +
 		windowsEnterpriseStandaloneSetupCommand("ensure", configPath, false) + "; as LocalSystem, Setup recovers the transaction with its own verified gateway."
 }
@@ -494,22 +494,45 @@ func windowsEnterpriseStandaloneRosterRunning(services []enterprisestatus.Servic
 // windowsEnterpriseStandaloneNextStep names what the administrator runs
 // after a failed lifecycle left its transaction pending: the exact Setup
 // command, and when the recovery could not use this Setup's gateway, why.
+// busy is a run refused lifecycle_busy. force is a FORCE=1 uninstall.
 // services are the DefenseClaw services as the service manager reports them
-// now. It is empty when nothing is pending.
+// now. It is empty when nothing is pending and the run was not busy.
 func windowsEnterpriseStandaloneNextStep(
 	action string,
 	configPath string,
 	purge bool,
+	busy bool,
+	force bool,
 	pending bool,
 	runs []windowsEnterpriseRecoveryGatewayRun,
 	refusal *windowsEnterpriseRecoveryGatewayRefusal,
 	services []enterprisestatus.Service,
 ) string {
+	command := windowsEnterpriseStandaloneSetupCommand(action, configPath, purge)
+	if busy {
+		// The lock is held by a live lifecycle run, and a pending
+		// transaction is that run's: it finishes or rolls back on its own.
+		// This run did not recover anything, so the FORCE=1 last resort
+		// would remove a deployment an upgrade is still changing (GAP-0622).
+		return "Another DefenseClaw lifecycle run (an install, upgrade, repair or uninstall) is in progress and holds the lock; this run changed nothing." +
+			" Next step: wait for that run to finish, then run " + command + " again (an MDM retries exit 1618 on its own)."
+	}
 	if !pending {
 		return ""
 	}
-	command := windowsEnterpriseStandaloneSetupCommand(action, configPath, purge)
 	lead := windowsEnterprisePendingLead(services)
+	if force && action == "uninstall" {
+		// The forced uninstall is the last resort the other steps name, so
+		// it is never told to run itself "otherwise" (GAP-0848). What stops
+		// it is a program that keeps a DefenseClaw file open, which the
+		// error names; a restart closes every such program.
+		forced := windowsEnterpriseStandaloneSetupName + " /uninstall FORCE=1 JSON=1"
+		return lead + " The forced uninstall did not finish." +
+			" Next step: end or close each program the error above says holds a DefenseClaw file (or fix what else it names), then run " + forced + " again as LocalSystem." +
+			" If the error names no program, or the program cannot be ended, restart Windows and run " + forced + " as LocalSystem before any other DefenseClaw Setup;" +
+			" a restart closes every program that holds a DefenseClaw file. If it still fails, send the lifecycle log (" +
+			windowsEnterpriseLifecycleLogPath + ") to DefenseClaw support."
+	}
 	const recovers = "; as LocalSystem, Setup recovers the transaction with its own verified gateway."
 	// The last resort when no recovery finishes: it removes the deployment
 	// without recovering the transaction (GAP-0920, GAP-1041).

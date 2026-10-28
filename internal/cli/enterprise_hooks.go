@@ -45,6 +45,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks/guardianstate"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisepolicy"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"github.com/defenseclaw/defenseclaw/internal/hermespath"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/winsession"
 )
@@ -135,6 +136,7 @@ var (
 	enterpriseHooksWatchRunE                   = runEnterpriseHooksWatch
 	enterpriseHooksStatusRunE                  = runEnterpriseHooksStatus
 	enterpriseHooksVerifyRunE                  = runEnterpriseHooksVerify
+	enterpriseHooksReadinessRunE               = runEnterpriseHooksReadiness
 	enterpriseHookAuthorizationOwnershipSetter = setEnterpriseHookAuthorizationOwnership
 	enterpriseHookAuthorizationDirTrustCheck   = func(path string) error {
 		return managed.ValidateTrustedRuntimeDir(path, "hook guardian authorization directory")
@@ -303,6 +305,17 @@ target or aggregate guardian control is unhealthy.`,
 	},
 }
 
+// Setup checks live hook registration before it commits machine readiness.
+// Public Verify separately refuses to certify a session-only Hermes home.
+var enterpriseHooksReadinessCmd = &cobra.Command{
+	Use:    "readiness",
+	Short:  "Check live machine hook registration for managed Setup",
+	Hidden: true,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		return enterpriseHooksReadinessRunE(cmd, args)
+	},
+}
+
 func init() {
 	enterpriseHooksInstallCmd.Flags().StringVar(&enterpriseHookConnector, "connector", "",
 		"Hook-native connector to install or repair (codex, claudecode, or cursor on native Windows)")
@@ -378,6 +391,14 @@ func init() {
 		"Local guardrail proxy host:port (default: 127.0.0.1:<guardrail.port>)")
 	enterpriseHooksVerifyCmd.Flags().BoolVar(&enterpriseHookJSON, "json", false,
 		"Emit machine-readable JSON")
+	enterpriseHooksReadinessCmd.Flags().StringVar(&enterpriseHookManifest, "manifest", defaultEnterpriseHookManifest,
+		"YAML manifest of per-user hook targets")
+	enterpriseHooksReadinessCmd.Flags().StringVar(&enterpriseHookAPIAddr, "api-addr", "",
+		"Local gateway API host:port used by hook scripts (default: 127.0.0.1:<gateway.api_port>)")
+	enterpriseHooksReadinessCmd.Flags().StringVar(&enterpriseHookProxyAddr, "proxy-addr", "",
+		"Local guardrail proxy host:port (default: 127.0.0.1:<guardrail.port>)")
+	enterpriseHooksReadinessCmd.Flags().BoolVar(&enterpriseHookJSON, "json", false,
+		"Emit machine-readable JSON")
 
 	enterpriseHooksCmd.AddCommand(enterpriseHooksInstallCmd)
 	enterpriseHooksCmd.AddCommand(enterpriseHooksUninstallCmd)
@@ -385,6 +406,7 @@ func init() {
 	enterpriseHooksCmd.AddCommand(enterpriseHooksWatchCmd)
 	enterpriseHooksCmd.AddCommand(enterpriseHooksStatusCmd)
 	enterpriseHooksCmd.AddCommand(enterpriseHooksVerifyCmd)
+	enterpriseHooksCmd.AddCommand(enterpriseHooksReadinessCmd)
 	enterpriseCmd.AddCommand(enterpriseHooksCmd)
 	rootCmd.AddCommand(enterpriseCmd)
 }
@@ -597,13 +619,23 @@ type enterpriseHookReconcileRun struct {
 }
 
 var (
-	enterpriseHookReconcileVerifier         = enterprisehooks.Verify
+	enterpriseHookReconcileVerifier         = enterpriseHookGuardianVerify
 	enterpriseHookReconcileInstaller        = enterprisehooks.Install
 	enterpriseHookReconcileSessionAvailable = enterpriseHookTargetSessionAvailable
 	// enterpriseHookReconcileTargetRelease names the other DefenseClaw
 	// release whose hook-contract lock a target still carries. Tests
 	// replace it.
 	enterpriseHookReconcileTargetRelease = enterprisehooks.WindowsProtectedTargetFromOtherRelease
+	// enterpriseHookReconcileTargetFailModeChange returns the hook fail mode
+	// a target's lock records and the one the config asks for. Tests
+	// replace it.
+	enterpriseHookReconcileTargetFailModeChange = enterprisehooks.WindowsProtectedTargetHookFailModeChange
+	// enterpriseHookReconcileClosingLogon proves a logon the guardian can
+	// close a target's hook fail mode under while its account has no active
+	// session (enterprisehooks.WindowsTargetLogonAnyWithS4U), without acting
+	// as the account; ErrEnrolledUserSignedOut when Windows gives none.
+	// Tests replace it.
+	enterpriseHookReconcileClosingLogon = enterpriseHookTargetClosingLogon
 	// enterpriseHookReconcileSecureClient reports a Secure Client guardian.
 	// Tests replace it.
 	enterpriseHookReconcileSecureClient = enterprisehooks.WindowsSecureClientProfileProcess
@@ -633,6 +665,40 @@ const enterpriseHookAwaitingSignInPrefix = "enterprise hooks: protected target w
 // target, so the reconcile counts exactly the rows it left waiting.
 var errEnterpriseHookAwaitingSignIn = errors.New(enterpriseHookAwaitingSignInPrefix)
 
+// The causes of a sign-in wait start the error after the prefix, so status
+// and verify say why the target waits (enterpriseHookAwaitingSignInCause):
+// another release protected it (GAP-0644), or a hook fail mode change left
+// its hooks failing closed or open until the guardian renders the new mode
+// (GAP-0585).
+const (
+	enterpriseHookAwaitingSignInFailClosed = "its hooks fail closed"
+	enterpriseHookAwaitingSignInFailOpen   = "its hooks keep hook fail mode open"
+	// A signed-out account's Hermes home is unobservable (GAP-1433).
+	enterpriseHookAwaitingSignInHermesHome = "its Hermes home cannot be read while the account is signed out"
+)
+
+// enterpriseHookAwaitingSignInCause words, for status and verify, why a
+// guardian row that waits for its account's next sign-in (its error) is not
+// in its configured state yet.
+func enterpriseHookAwaitingSignInCause(guardianErr string) string {
+	cause := strings.TrimPrefix(strings.TrimSpace(guardianErr), enterpriseHookAwaitingSignInPrefix+": ")
+	switch {
+	case strings.HasPrefix(cause, enterpriseHookAwaitingSignInFailClosed):
+		return "its hooks still fail closed, and the guardian renders hook fail mode open in the account's own " +
+			"Windows session at its next sign-in"
+	case strings.HasPrefix(cause, enterpriseHookAwaitingSignInHermesHome):
+		return "Hermes NOT COVERED: the account is signed out, so its registry hive and the HERMES_HOME it selects " +
+			"cannot be read; its installed hook is unchanged, and the guardian verifies it again at the account's next sign-in"
+	case strings.HasPrefix(cause, enterpriseHookAwaitingSignInFailOpen):
+		return "Windows gave no S4U logon to close its hooks while the account is signed out, so they keep hook " +
+			"fail mode open, allowing calls during a gateway outage, until the guardian closes them at the " +
+			"account's next sign-in"
+	default:
+		return "an earlier DefenseClaw release protected it, and the guardian installs this release's hooks only " +
+			"in the account's own Windows session, at its next sign-in; it is not protected until then"
+	}
+}
+
 // errEnterpriseHookProtectionRetired marks a Secure Client deferred target a
 // committed non-purge uninstall retired: its protected records survived in
 // the retained StateRoot, but its machine enrollment and runtime selector
@@ -642,8 +708,9 @@ var errEnterpriseHookProtectionRetired = errors.New("enterprise hooks: protected
 
 // enterpriseHookVerifyOrRepairTarget keeps repair classification adjacent to
 // the operation that proves it. A target is repaired only when it was already
-// protected, verification failed, its authenticated session was available,
-// and the subsequent install completed successfully.
+// protected, verification failed, its authenticated session was available
+// (for a change that closes the hook fail mode, a disconnected session or an
+// S4U logon also serves), and the subsequent install completed successfully.
 func enterpriseHookVerifyOrRepairTarget(
 	ctx context.Context,
 	target enterprisehooks.ManifestTarget,
@@ -663,8 +730,10 @@ func enterpriseHookVerifyOrRepairTarget(
 		return enterprisehooks.InstallResult{}, false, err
 	}
 	if !available {
-		// Only a deferred target whose lock another release wrote waits for
-		// the sign-in. One this release protected that no longer verifies
+		// Only a deferred target whose lock another release wrote, or one a
+		// hook fail mode change alone made fail, waits for the sign-in (a
+		// change to closed is rendered now when Windows gives a logon for
+		// it). One this release protected that no longer verifies
 		// was changed while its account was signed out, and stays a failure,
 		// unless on Secure Client a committed non-purge uninstall retired it:
 		// a reinstall over the retained StateRoot then found every
@@ -673,6 +742,19 @@ func enterpriseHookVerifyOrRepairTarget(
 		// protected and is pending until the account signs in, its hooks
 		// failing closed as a pending target's do.
 		if target.IsDeferred() {
+			// A signed-out account's Hermes home is unobservable, not
+			// changed: Windows has not loaded the registry hive that holds
+			// its HERMES_HOME. One account signing out never fails the host;
+			// the target waits for that account's sign-in (GAP-1433).
+			if !enterpriseHookReconcileSecureClient() &&
+				strings.EqualFold(strings.TrimSpace(target.Connector), "hermes") &&
+				errors.Is(verifyErr, hermespath.ErrAccountSignedOut) {
+				return enterprisehooks.InstallResult{}, false, fmt.Errorf(
+					"%w: %s, so Hermes is NOT COVERED for it until the guardian verifies it at its next sign-in; "+
+						"its exact active Windows session is unavailable (verification: %v)",
+					errEnterpriseHookAwaitingSignIn, enterpriseHookAwaitingSignInHermesHome, verifyErr,
+				)
+			}
 			if written, other, releaseErr := enterpriseHookReconcileTargetRelease(opts); releaseErr == nil && other {
 				return enterprisehooks.InstallResult{}, false, fmt.Errorf(
 					"%w: DefenseClaw %s protected it, and this release's hooks install only in the account's own "+
@@ -690,6 +772,14 @@ func enterpriseHookVerifyOrRepairTarget(
 					)
 				}
 			}
+			if locked, wanted, modeErr := enterpriseHookReconcileTargetFailModeChange(opts); modeErr == nil &&
+				locked != "" && locked != wanted {
+				if result, repaired, handled, err := enterpriseHookFailModeChangeWithoutSession(
+					ctx, target, opts, locked, wanted, verifyErr,
+				); handled {
+					return result, repaired, err
+				}
+			}
 		}
 		return enterprisehooks.InstallResult{}, false, fmt.Errorf(
 			"enterprise hooks: protected target requires repair but its exact active Windows session is unavailable (verification: %v)",
@@ -698,6 +788,54 @@ func enterpriseHookVerifyOrRepairTarget(
 	}
 	result, err = enterpriseHookReconcileInstaller(ctx, opts)
 	return result, err == nil, err
+}
+
+// enterpriseHookFailModeChangeWithoutSession handles a deferred target an
+// administrator's hook fail mode change (from locked to wanted) made fail
+// verification while its account has no active session (rel-1-0-4
+// GAP-0585). A Setup that failed it rolled the whole host back to the old
+// mode. A change to open waits for the account's next sign-in while the
+// fail mode is the only drift: its hooks fail closed until then. A change
+// to closed is rendered now, under the account's disconnected session or an
+// S4U logon; only when Windows gives neither, and the fail mode is the only
+// drift, does it wait for the sign-in, the change committed for everyone
+// else. Any other drift is not handled here and stays a failure.
+func enterpriseHookFailModeChangeWithoutSession(
+	ctx context.Context,
+	target enterprisehooks.ManifestTarget,
+	opts enterprisehooks.InstallOptions,
+	locked, wanted string,
+	verifyErr error,
+) (result enterprisehooks.InstallResult, repaired, handled bool, err error) {
+	var signedOut error
+	if wanted == "closed" {
+		signedOut = enterpriseHookReconcileClosingLogon(target)
+		if signedOut == nil {
+			closing := opts
+			closing.WindowsTargetLogon = enterprisehooks.WindowsTargetLogonAnyWithS4U
+			result, err = enterpriseHookReconcileInstaller(ctx, closing)
+			return result, err == nil, true, err
+		}
+		if !errors.Is(signedOut, enterprisehooks.ErrEnrolledUserSignedOut) {
+			return enterprisehooks.InstallResult{}, false, true, signedOut
+		}
+	}
+	rendered := opts
+	rendered.HookFailMode = locked
+	if _, renderedErr := enterpriseHookReconcileVerifier(ctx, rendered); renderedErr != nil {
+		return enterprisehooks.InstallResult{}, false, false, nil
+	}
+	if wanted == "closed" {
+		return enterprisehooks.InstallResult{}, false, true, fmt.Errorf(
+			"%w: %s until the account's next sign-in, when the guardian closes them; %v (verification: %v)",
+			errEnterpriseHookAwaitingSignIn, enterpriseHookAwaitingSignInFailOpen, signedOut, verifyErr,
+		)
+	}
+	return enterprisehooks.InstallResult{}, false, true, fmt.Errorf(
+		"%w: %s, and hook fail mode open installs only in the account's own Windows session; its exact active "+
+			"Windows session is unavailable, so the guardian repairs it at the account's next sign-in (verification: %v)",
+		errEnterpriseHookAwaitingSignIn, enterpriseHookAwaitingSignInFailClosed, verifyErr,
+	)
 }
 
 func runEnterpriseHooksReconcile(cmd *cobra.Command, _ []string) error {
@@ -1166,11 +1304,8 @@ func enterpriseHookGuardianFailureIssue(row enterpriseHookReconcileRow) string {
 		if account == "" {
 			account = enterpriseHookTargetLabel(row)
 		}
-		return fmt.Sprintf(
-			"%s for %s is pending until that account signs in: an earlier DefenseClaw release protected it, and "+
-				"the guardian installs this release's hooks only in the account's own Windows session, at its next "+
-				"sign-in; it is not protected until then",
-			strings.TrimSpace(row.Connector), account)
+		return fmt.Sprintf("%s for %s is pending until that account signs in: %s",
+			strings.TrimSpace(row.Connector), account, enterpriseHookAwaitingSignInCause(row.Error))
 	}
 	if account != "" {
 		// The same next step the refused repair gives: nothing an
@@ -1265,6 +1400,35 @@ func enterpriseHookGuardianRecordComplete(ok bool, successes, failures, pending,
 		return failures == excused && successes+pending+failures == total
 	}
 	return ok && failures == 0 && successes+pending == total
+}
+
+// enterpriseHookPartialGuardianRecord reports a protected guardian record
+// pair of a pass in which some targets failed but every target has exactly
+// one disposition. Only the hidden registration readiness accepts such a
+// pass: it proves each other target, while the failed ones stay failures
+// and readiness stays not ok. Public verify keeps requiring a complete pass.
+func enterpriseHookPartialGuardianRecord(
+	authorization enterpriseHookGuardianAuthorization,
+	activation enterpriseHookGuardianActivation,
+) bool {
+	return !authorization.OK && !activation.OK && authorization.FailureCount > 0 &&
+		authorization.SuccessCount+authorization.PendingCount+authorization.FailureCount == authorization.TargetCount &&
+		activation.SuccessCount+activation.PendingCount+activation.FailureCount == activation.TargetCount
+}
+
+// enterpriseHookPartialRegistrationProof is run with each currently failed
+// row excused from the protected disposition comparison: the protected
+// records carry forward a failed target's prior row, which proves nothing
+// about current readiness. The run itself is unchanged.
+func enterpriseHookPartialRegistrationProof(run enterpriseHookVerifyRun) enterpriseHookVerifyRun {
+	proof := run
+	proof.Excused = append([]enterpriseHookReconcileRow(nil), run.Excused...)
+	for _, row := range run.Rows {
+		if !row.OK && !row.Pending && !enterpriseHookVerifyRowExcused(run, row) {
+			proof.Excused = append(proof.Excused, row)
+		}
+	}
+	return proof
 }
 
 // compareEnterpriseHookGuardianRecordsExcusing is
@@ -1490,26 +1654,25 @@ type enterpriseHookVerifyRun struct {
 	// row of the last guardian reconcile qualifies
 	// (enterpriseHookExcusedFailures). They count in Failures, so the
 	// dispositions still match the guardian's records, and verify reports
-	// them as warnings, as status does. AwaitingSignIn are those of Excused
-	// that wait for a sign-in.
-	Excused          []enterpriseHookReconcileRow
-	AwaitingSignIn   []enterpriseHookReconcileRow
-	AuthorizationErr error
+	// them as warnings, as status does.
+	Excused []enterpriseHookReconcileRow
+	// AwaitingSignIn maps the key of each excused row that waits for a
+	// sign-in to the error of the guardian row that records the wait.
+	AwaitingSignIn map[string]string
+	// RecordedProtected names the excused signed-out Hermes rows
+	// (enterpriseHookHermesSignedOutRow) the guardian last recorded as
+	// protected; the protected records are compared with them as protected.
+	RecordedProtected map[string]bool
+	AuthorizationErr  error
 }
 
-// enterpriseHookAwaitingSignInNote follows a verify row that waits for its
-// signed-out account's next sign-in.
-const enterpriseHookAwaitingSignInNote = " (pending until the account signs in: an earlier DefenseClaw release " +
-	"protected it, and the guardian repairs it in the account's own Windows session at its next sign-in; " +
-	"it is not protected until then)"
-
-// enterpriseHookVerifyExcusedNote is the note of one of run.Excused.
+// enterpriseHookVerifyExcusedNote is the note of one of run.Excused: for a
+// row that waits for its signed-out account's next sign-in, why, from the
+// guardian row that records the wait.
 func enterpriseHookVerifyExcusedNote(run enterpriseHookVerifyRun, row enterpriseHookReconcileRow) string {
 	key := enterpriseHookProtectedTargetKey(row)
-	for _, awaiting := range run.AwaitingSignIn {
-		if key != "" && enterpriseHookProtectedTargetKey(awaiting) == key {
-			return enterpriseHookAwaitingSignInNote
-		}
+	if guardianErr, ok := run.AwaitingSignIn[key]; ok && key != "" {
+		return " (pending until the account signs in: " + enterpriseHookAwaitingSignInCause(guardianErr) + ")"
 	}
 	return enterpriseHookRemovedAccountNote
 }
@@ -1530,11 +1693,20 @@ func enterpriseHookVerifyRowExcused(run enterpriseHookVerifyRun, row enterpriseH
 // sign-in, while that account is still signed out. Once the account signs
 // in, the row fails verify until the guardian has repaired it.
 func enterpriseHookVerifyAwaitingSignIn(
-	awaiting map[string]struct{},
+	awaiting map[string]string,
 	target enterprisehooks.ManifestTarget,
 	row enterpriseHookReconcileRow,
 ) bool {
-	if _, ok := awaiting[enterpriseHookProtectedTargetKey(row)]; !ok || !target.IsDeferred() {
+	guardianErr, ok := awaiting[enterpriseHookProtectedTargetKey(row)]
+	if !ok || !target.IsDeferred() {
+		return false
+	}
+	if enterpriseHookHermesSignedOutApplies() && strings.EqualFold(strings.TrimSpace(row.Connector), "hermes") &&
+		enterpriseHookHermesHomeWaitRecorded(enterpriseHookReconcileRow{Error: guardianErr}, true) {
+		// That wait excused only an unreadable Hermes home, which
+		// enterpriseHookHermesSignedOutRow already reports. A Hermes target
+		// whose home now reads and whose hook fails is a failure, signed in
+		// or not, until the guardian classifies it again (GAP-1433).
 		return false
 	}
 	available, err := enterpriseHookReconcileSessionAvailable(target)
@@ -1596,7 +1768,29 @@ type enterpriseHookVerifyGenerationCapture func() (
 var enterpriseHookVerifyCaptureGeneration enterpriseHookVerifyGenerationCapture = captureEnterpriseHookVerifyGeneration
 
 func runEnterpriseHooksVerify(cmd *cobra.Command, _ []string) error {
-	run, err := runEnterpriseHookVerifyOnce(cmd.Context())
+	return runEnterpriseHooksVerifyWithScope(cmd, false)
+}
+
+func runEnterpriseHooksReadiness(cmd *cobra.Command, _ []string) error {
+	if cfg == nil || !cfg.StandaloneEnterprise() ||
+		(runtime.GOOS != "windows" && runtime.GOOS != "linux" && runtime.GOOS != "darwin") {
+		platform := "Unix"
+		if runtime.GOOS == "windows" {
+			platform = "Windows"
+		}
+		return fmt.Errorf("enterprise hooks readiness is available only for managed standalone %s Setup", platform)
+	}
+	return runEnterpriseHooksVerifyWithScope(cmd, true)
+}
+
+func runEnterpriseHooksVerifyWithScope(cmd *cobra.Command, registrationOnly bool) error {
+	var run enterpriseHookVerifyRun
+	var err error
+	if registrationOnly {
+		run, err = runEnterpriseHookRegistrationOnce(cmd.Context())
+	} else {
+		run, err = runEnterpriseHookVerifyOnce(cmd.Context())
+	}
 	if err != nil {
 		return err
 	}
@@ -1609,27 +1803,49 @@ func runEnterpriseHooksVerify(cmd *cobra.Command, _ []string) error {
 			"results":                          run.Rows,
 			"claude_effective_policy_verified": enterpriseHooksClaudeEffectivePolicyVerified(run.Rows),
 		}
+		if registrationOnly {
+			payload["scope"] = "machine_hook_registration"
+			for _, row := range run.Rows {
+				if strings.EqualFold(row.Connector, "hermes") {
+					payload["hermes_session_coverage"] = "not_covered"
+					break
+				}
+			}
+		}
 		if run.AuthorizationErr != nil {
 			payload["authorization_error"] = run.AuthorizationErr.Error()
 		}
 		if len(run.Excused) != 0 {
 			warnings := make([]string, 0, len(run.Excused))
+			// The excused targets by SID and connector, so a caller that waits
+			// for the guardian (a signed bundle's hook proof) treats them as
+			// verify does instead of waiting for a sign-in (review loop 2).
+			excused := make([]map[string]string, 0, len(run.Excused))
 			for _, row := range run.Excused {
 				warnings = append(warnings, enterpriseHookTargetLabel(row)+": "+row.Error+enterpriseHookVerifyExcusedNote(run, row))
+				excused = append(excused, map[string]string{"sid": row.SID, "connector": row.Connector})
 			}
 			payload["warnings"] = warnings
+			payload["excused"] = excused
 		}
 		if err := json.NewEncoder(cmd.OutOrStdout()).Encode(payload); err != nil {
 			return err
 		}
 		if !ok {
+			if registrationOnly {
+				return fmt.Errorf("enterprise hooks readiness failed")
+			}
 			return fmt.Errorf("enterprise hooks verify failed")
 		}
 		return nil
 	}
+	verb := "verified"
+	if registrationOnly {
+		verb = "registered"
+	}
 	for _, row := range run.Rows {
 		if row.OK {
-			fmt.Fprintf(cmd.OutOrStdout(), "  %s %s verified%s\n", Style("✓", "fg=green", "bold"), enterpriseHookTargetLabel(row), enterpriseHookAgentVersionNote(row))
+			fmt.Fprintf(cmd.OutOrStdout(), "  %s %s %s%s\n", Style("✓", "fg=green", "bold"), enterpriseHookTargetLabel(row), verb, enterpriseHookAgentVersionNote(row))
 		} else if row.Pending {
 			fmt.Fprintf(cmd.OutOrStdout(), "  %s %s pending an exact active Windows session\n", Style("•", "fg=yellow", "bold"), enterpriseHookTargetLabel(row))
 		} else if enterpriseHookVerifyRowExcused(run, row) {
@@ -1642,6 +1858,9 @@ func runEnterpriseHooksVerify(cmd *cobra.Command, _ []string) error {
 		fmt.Fprintf(cmd.ErrOrStderr(), "  %s protected authorization: %s\n", Style("✗", "fg=red", "bold"), run.AuthorizationErr)
 	}
 	if !ok {
+		if registrationOnly {
+			return fmt.Errorf("enterprise hooks readiness failed for %d target(s)", failures)
+		}
 		return fmt.Errorf("enterprise hooks verify failed for %d target(s)", failures)
 	}
 	return nil
@@ -1665,6 +1884,20 @@ func runEnterpriseHookVerifyOnce(ctx context.Context) (enterpriseHookVerifyRun, 
 		enterpriseHookVerifyGenerationRetryDelay,
 		runEnterpriseHookVerifyAttempt,
 	)
+}
+
+func runEnterpriseHookRegistrationOnce(ctx context.Context) (enterpriseHookVerifyRun, error) {
+	return runEnterpriseHookVerifyGenerationConsistent(
+		ctx,
+		enterpriseHookVerifyCaptureGeneration,
+		enterpriseHookVerifyGenerationAttempts,
+		enterpriseHookVerifyGenerationRetryDelay,
+		runEnterpriseHookRegistrationAttempt,
+	)
+}
+
+func runEnterpriseHookRegistrationAttempt(ctx context.Context) (enterpriseHookVerifyRun, error) {
+	return runEnterpriseHookVerifyAttemptWithScope(ctx, true)
 }
 
 func captureEnterpriseHookVerifyGeneration() (
@@ -1783,12 +2016,26 @@ func runEnterpriseHookVerifyGenerationConsistent(
 }
 
 func runEnterpriseHookVerifyAttempt(ctx context.Context) (enterpriseHookVerifyRun, error) {
+	return runEnterpriseHookVerifyAttemptWithScope(ctx, false)
+}
+
+var enterpriseHookLivePublicVerifier = enterprisehooks.Verify
+var enterpriseHookLiveRegistrationVerifier = enterpriseHookGuardianVerify
+
+func enterpriseHookLiveTargetVerifier(ctx context.Context, opts enterprisehooks.InstallOptions, registrationOnly bool) (enterprisehooks.InstallResult, error) {
+	if registrationOnly && strings.EqualFold(strings.TrimSpace(opts.ConnectorName), "hermes") {
+		return enterpriseHookLiveRegistrationVerifier(ctx, opts)
+	}
+	return enterpriseHookLivePublicVerifier(ctx, opts)
+}
+
+func runEnterpriseHookVerifyAttemptWithScope(ctx context.Context, registrationOnly bool) (enterpriseHookVerifyRun, error) {
 	run := enterpriseHookVerifyRun{Manifest: enterpriseHookManifest}
 	if cfg == nil {
 		return run, fmt.Errorf("enterprise hooks verify: config is not loaded")
 	}
 	if enterpriseHooksStandaloneUnixActive() {
-		return runEnterpriseHookVerifyAttemptStandaloneUnix(ctx)
+		return runEnterpriseHookVerifyAttemptStandaloneUnix(ctx, registrationOnly)
 	}
 	if cfg != nil && managed.IsManagedEnterprise(cfg.DeploymentMode) {
 		if err := enterpriseHookManifestFileTrustCheck(enterpriseHookManifest); err != nil {
@@ -1811,22 +2058,38 @@ func runEnterpriseHookVerifyAttempt(ctx context.Context) (enterpriseHookVerifyRu
 	// release protected fail until their signed-out account signs in again;
 	// verify accepts exactly those failures, as status does.
 	excused := 0
-	awaitingSignIn := map[string]struct{}{}
+	awaitingSignIn := map[string]string{}
+	// The guardian's last row of each target, for a Hermes target whose
+	// account is signed out (enterpriseHookHermesSignedOutRow).
+	recorded := map[string]enterpriseHookReconcileRow{}
 	if guardianStateErr == nil && guardianStateExists {
+		for _, row := range guardianState.Results {
+			if key := enterpriseHookProtectedTargetKey(row); key != "" {
+				recorded[key] = row
+			}
+		}
 		removed, awaiting := enterpriseHookExcusedFailures(guardianState)
 		excused = removed + awaiting
 		for _, row := range guardianState.Results {
 			if awaiting > 0 && enterpriseHookAwaitingSignInRow(row) {
-				awaitingSignIn[enterpriseHookProtectedTargetKey(row)] = struct{}{}
+				awaitingSignIn[enterpriseHookProtectedTargetKey(row)] = row.Error
 			}
 		}
+	}
+	// Registration readiness scopes a target's own guardian failure to that
+	// target: one target's failure never fails another target's proof (a
+	// hot-config undo or Setup readiness of the rest).
+	recordExcused := excused
+	partialRegistration := registrationOnly && excused == 0 && enterpriseHookPartialGuardianRecord(authorization, activation)
+	if partialRegistration {
+		recordExcused = authorization.FailureCount
 	}
 	if authorizationErr != nil {
 		run.AuthorizationErr = authorizationErr
 	} else if !exists {
 		run.AuthorizationErr = fmt.Errorf("protected hook guardian authorization is missing")
 	} else if !enterpriseHookGuardianRecordComplete(authorization.OK, authorization.SuccessCount, authorization.FailureCount,
-		authorization.PendingCount, authorization.TargetCount, excused) {
+		authorization.PendingCount, authorization.TargetCount, recordExcused) {
 		run.AuthorizationErr = fmt.Errorf("protected hook guardian authorization is incomplete (%d succeeded, %d pending, %d total)", authorization.SuccessCount, authorization.PendingCount, authorization.TargetCount)
 	} else if freshnessErr := managed.ValidateHookGuardianFreshness(authorization.UpdatedAt, time.Now()); freshnessErr != nil {
 		run.AuthorizationErr = fmt.Errorf("protected hook guardian authorization is not fresh: %w", freshnessErr)
@@ -1834,7 +2097,7 @@ func runEnterpriseHookVerifyAttempt(ctx context.Context) (enterpriseHookVerifyRu
 		run.AuthorizationErr = activationErr
 	} else if !activationExists {
 		run.AuthorizationErr = fmt.Errorf("protected hook guardian activation is missing")
-	} else if !(activation.OK || (excused > 0 && activation.FailureCount == excused)) ||
+	} else if (!activation.OK && (recordExcused <= 0 || activation.FailureCount != recordExcused)) ||
 		activation.UpdatedAt != authorization.UpdatedAt ||
 		activation.ManifestSHA256 != manifestSHA256 {
 		run.AuthorizationErr = fmt.Errorf("protected hook guardian activation does not cover the current manifest bytes")
@@ -1854,7 +2117,7 @@ func runEnterpriseHookVerifyAttempt(ctx context.Context) (enterpriseHookVerifyRu
 				activation,
 				enterpriseHookManifest,
 				manifestSHA256,
-				excused,
+				recordExcused,
 			)
 			if err != nil {
 				run.AuthorizationErr = err
@@ -1954,7 +2217,7 @@ func runEnterpriseHookVerifyAttempt(ctx context.Context) (enterpriseHookVerifyRu
 			}
 			opts.MachinePolicyContractID = enterpriseHookMachinePolicyContractFor(target.Connector, claudeMachineContract)
 			var result enterprisehooks.InstallResult
-			result, targetErr = enterprisehooks.Verify(ctx, opts)
+			result, targetErr = enterpriseHookLiveTargetVerifier(ctx, opts, registrationOnly)
 			if targetErr == nil {
 				row.Result = &result
 				row.UserHome = result.UserHome
@@ -1974,6 +2237,27 @@ func runEnterpriseHookVerifyAttempt(ctx context.Context) (enterpriseHookVerifyRu
 				targetErr = fmt.Errorf("protected authorization does not cover target")
 			}
 		}
+		if waiting, ok := enterpriseHookHermesSignedOutRow(target, row, targetErr, recorded); ok {
+			// Unobservable, not failed: reported pending until the
+			// account signs in (Hermes NOT COVERED), never protected,
+			// and compared with the protected records as the guardian
+			// last recorded it.
+			row.OK, row.Pending, row.Result, row.Error = false, false, nil, waiting
+			run.Failures++
+			run.Excused = append(run.Excused, row)
+			if run.AwaitingSignIn == nil {
+				run.AwaitingSignIn = map[string]string{}
+			}
+			run.AwaitingSignIn[enterpriseHookProtectedTargetKey(row)] = waiting
+			if last := recorded[enterpriseHookProtectedTargetKey(row)]; last.OK {
+				if run.RecordedProtected == nil {
+					run.RecordedProtected = map[string]bool{}
+				}
+				run.RecordedProtected[enterpriseHookProtectedTargetKey(row)] = true
+			}
+			run.Rows = append(run.Rows, row)
+			continue
+		}
 		if targetErr != nil {
 			row.OK = false
 			row.Error = targetErr.Error()
@@ -1982,14 +2266,21 @@ func runEnterpriseHookVerifyAttempt(ctx context.Context) (enterpriseHookVerifyRu
 				run.Excused = append(run.Excused, row)
 			} else if excused > 0 && enterpriseHookVerifyAwaitingSignIn(awaitingSignIn, target, row) {
 				run.Excused = append(run.Excused, row)
-				run.AwaitingSignIn = append(run.AwaitingSignIn, row)
+				if run.AwaitingSignIn == nil {
+					run.AwaitingSignIn = map[string]string{}
+				}
+				run.AwaitingSignIn[enterpriseHookProtectedTargetKey(row)] = awaitingSignIn[enterpriseHookProtectedTargetKey(row)]
 			}
 		}
 		run.Rows = append(run.Rows, row)
 	}
 	if run.AuthorizationErr == nil && exists && activationExists {
+		proof := enterpriseHookRecordedProtectionProof(run)
+		if partialRegistration {
+			proof = enterpriseHookPartialRegistrationProof(proof)
+		}
 		if issues := enterpriseHookVerifyDispositionIssues(
-			run,
+			proof,
 			authorization,
 			activation,
 		); len(issues) > 0 {
@@ -1997,6 +2288,105 @@ func runEnterpriseHookVerifyAttempt(ctx context.Context) (enterpriseHookVerifyRu
 		}
 	}
 	return run, nil
+}
+
+// enterpriseHookHermesSignedOutRow reports a managed standalone Windows
+// Hermes target whose account is signed out (GAP-1433): Windows has not
+// loaded the registry hive that holds its HERMES_HOME, so the home its Hermes
+// reads is unobservable. That is the live verification failing with
+// hermespath.ErrAccountSignedOut, or the guardian's last pass recording the
+// target as waiting for that reason while live verification now passes (the
+// hive comes and goes with other logons; the guardian verifies it again at
+// the account's sign-in). It returns the sign-in wait the row reports.
+// Every other failure, Secure Client and other connectors are unchanged.
+func enterpriseHookHermesSignedOutRow(
+	target enterprisehooks.ManifestTarget,
+	row enterpriseHookReconcileRow,
+	liveErr error,
+	recorded map[string]enterpriseHookReconcileRow,
+) (string, bool) {
+	if !enterpriseHookHermesSignedOutApplies() || !target.IsDeferred() ||
+		!strings.EqualFold(strings.TrimSpace(row.Connector), "hermes") {
+		return "", false
+	}
+	last, known := recorded[enterpriseHookProtectedTargetKey(row)]
+	lastWaits := enterpriseHookHermesHomeWaitRecorded(last, known)
+	switch {
+	case liveErr != nil && errors.Is(liveErr, hermespath.ErrAccountSignedOut):
+		if lastWaits {
+			return strings.TrimSpace(last.Error), true
+		}
+		return fmt.Sprintf("%s: %s, so Hermes is NOT COVERED for it until the guardian verifies it at its next sign-in "+
+			"(verification: %v)", enterpriseHookAwaitingSignInPrefix, enterpriseHookAwaitingSignInHermesHome, liveErr), true
+	case liveErr == nil && lastWaits:
+		return strings.TrimSpace(last.Error), true
+	case liveErr != nil && known && !lastWaits && enterpriseHookAwaitingSignInError(last):
+		// The guardian left the target waiting for its sign-in for another
+		// cause (an earlier release protected it, GAP-0644). The wait
+		// excuses the live failure only with fresh evidence that the
+		// account is still signed out: the session check, or, for an
+		// elevated administrator, who cannot query another account's
+		// session token, the session list read now. Being unable to query
+		// the session is never taken as a sign-out (GAP-1433).
+		available, err := enterpriseHookReconcileSessionAvailable(target)
+		if err == nil && !available {
+			return strings.TrimSpace(last.Error), true
+		}
+		if err != nil && enterpriseHookSessionCheckNotLocalSystem(err) {
+			if signedOut, listErr := enterpriseHookTargetHasNoSession(target); listErr == nil && signedOut {
+				return strings.TrimSpace(last.Error), true
+			}
+		}
+	}
+	return "", false
+}
+
+// enterpriseHookHermesHomeWaitRecorded reports a guardian row that waits for
+// its account's sign-in only because the account's Hermes home could not be
+// read (hermespath.ErrAccountSignedOut).
+func enterpriseHookHermesHomeWaitRecorded(last enterpriseHookReconcileRow, known bool) bool {
+	return known && enterpriseHookAwaitingSignInError(last) &&
+		strings.HasPrefix(strings.TrimSpace(last.Error), enterpriseHookAwaitingSignInPrefix+": "+enterpriseHookAwaitingSignInHermesHome)
+}
+
+// enterpriseHookTargetHasNoSession reports, from the Windows session list,
+// that no session is signed in as the target's account. It works without
+// LocalSystem. Tests replace it.
+var enterpriseHookTargetHasNoSession = func(target enterprisehooks.ManifestTarget) (bool, error) {
+	return enterprisehooks.WindowsTargetHasNoSession(target.SID)
+}
+
+// enterpriseHookHermesSignedOutApplies reports the managed standalone
+// Windows deployment, the only one whose Hermes home lives in a registry
+// hive. Tests replace it.
+var enterpriseHookHermesSignedOutApplies = func() bool {
+	return runtime.GOOS == "windows" && cfg != nil && cfg.StandaloneEnterprise() && !cfg.SecureClientIntegration()
+}
+
+// enterpriseHookRecordedProtectionProof is run with each signed-out Hermes
+// row the guardian last recorded as protected compared as protected: the
+// protected records still describe that target, and verify neither claims
+// nor drops its protection while its home cannot be observed. The run itself
+// is unchanged.
+func enterpriseHookRecordedProtectionProof(run enterpriseHookVerifyRun) enterpriseHookVerifyRun {
+	if len(run.RecordedProtected) == 0 {
+		return run
+	}
+	proof := run
+	proof.Rows = append([]enterpriseHookReconcileRow(nil), run.Rows...)
+	proof.Excused = nil
+	for i, row := range proof.Rows {
+		if run.RecordedProtected[enterpriseHookProtectedTargetKey(row)] {
+			proof.Rows[i].OK, proof.Rows[i].Error = true, ""
+			proof.Failures--
+		}
+	}
+	for _, row := range run.Excused {
+		if !run.RecordedProtected[enterpriseHookProtectedTargetKey(row)] {
+			proof.Excused = append(proof.Excused, row)
+		}
+	}
+	return proof
 }
 
 func enterpriseHookVerifyAuthenticatedPendingTarget(
@@ -3660,6 +4050,16 @@ func writeEnterpriseHookGuardianState(
 // prepareEnterpriseHookAuthorizationDir creates (or re-hardens) the
 // protected directory that holds the guardian's records and returns it.
 func prepareEnterpriseHookAuthorizationDir(dataDir string) (string, error) {
+	authorizationDir, err := hardenEnterpriseHookAuthorizationDir(dataDir)
+	if err != nil {
+		return "", err
+	}
+	return authorizationDir, nil
+}
+
+// hardenEnterpriseHookAuthorizationDir creates (or re-hardens) the protected
+// directory that holds the guardian's records and returns it.
+func hardenEnterpriseHookAuthorizationDir(dataDir string) (string, error) {
 	authorizationDir := managed.HookGuardianAuthorizationDir(dataDir)
 	if info, statErr := os.Lstat(authorizationDir); statErr == nil {
 		if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
@@ -3873,7 +4273,7 @@ func readEnterpriseHookBoundedFile(
 	if info.Size() > maxBytes {
 		return nil, fmt.Errorf("%s exceeds %d-byte limit", label, maxBytes)
 	}
-	file, err := os.Open(path)
+	file, err := openEnterpriseHookBoundedFileWithRetry(path, openEnterpriseHookBoundedFile)
 	if err != nil {
 		return nil, err
 	}
@@ -3903,6 +4303,20 @@ func readEnterpriseHookBoundedFile(
 		return nil, fmt.Errorf("%s exceeds %d-byte limit", label, maxBytes)
 	}
 	return data, nil
+}
+
+// A guardian publication can briefly hold a Windows file while replacing it.
+// Retry only a sharing/lock violation; every other read and identity failure
+// remains immediate and the wait is bounded below one second.
+func openEnterpriseHookBoundedFileWithRetry(path string, open func(string) (*os.File, error)) (*os.File, error) {
+	const attempts = 10
+	for attempt := 1; ; attempt++ {
+		file, err := open(path)
+		if err == nil || !enterpriseHookGuardianRecordBusy(err) || attempt >= attempts {
+			return file, err
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
 }
 
 func mergeProtectedEnterpriseHookTargets(previous, current []enterpriseHookReconcileRow) []enterpriseHookReconcileRow {

@@ -39,13 +39,23 @@ func verifyV2Device(t *testing.T) (e *bundleCLIEnv, signed string, source string
 	writeBundleTestFile(t, path, []byte(source))
 	e.writeAnchors(t, map[string]any{"k1": e.edKey.Public()})
 	signed = filepath.Join(e.dir, "v5.dcbundle")
-	if out, code := runBundle(t, e.signArgs("--out", signed, "--key", filepath.Join(e.dir, "key.pem"), "--key-id", "k1")...); code != 0 {
+	if out, code := runBundle(t, e.signArgs("--out", signed, "--key", filepath.Join(e.dir, "key.pem"), "--key-id", "k1",
+		"--secret-file", "ai-defense-api-key="+e.secretSource(t, "key-1"))...); code != 0 {
 		t.Fatalf("sign exit %d:\n%s", code, out)
 	}
 	bundleDevice(t, e)
-	savedPresent, savedInstalled := bundleSecretPresent, bundleInstalledConfig
-	t.Cleanup(func() { bundleSecretPresent, bundleInstalledConfig = savedPresent, savedInstalled })
+	savedValue, savedInstalled := bundleSecretValue, bundleInstalledConfig
+	t.Cleanup(func() { bundleSecretValue, bundleInstalledConfig = savedValue, savedInstalled })
 	return e, signed, source
+}
+
+// secretSource writes value to a credential source file for --secret-file.
+func (e *bundleCLIEnv) secretSource(t *testing.T, value string) string {
+	t.Helper()
+	path := filepath.Join(e.dir, fmt.Sprintf("secret-%d", len(value)+len(e.secretFiles)))
+	e.secretFiles = append(e.secretFiles, path)
+	writeBundleTestFile(t, path, []byte(value+"\n"))
+	return path
 }
 
 // treeOf lists every file and directory below root with its exact size,
@@ -72,8 +82,17 @@ func treeOf(t *testing.T, root string) []string {
 func TestManagementContractBundleVerifyV2(t *testing.T) {
 	schemas := contracttest.Compile(t)
 	e, signed, source := verifyV2Device(t)
-	stored := func(names ...string) func(string) (bool, error) {
-		return func(name string) (bool, error) { return slices.Contains(names, name), nil }
+	// stored holds the signed value "key-1" of names; holding holds value.
+	stored := func(names ...string) func(string) ([]byte, error) {
+		return func(name string) ([]byte, error) {
+			if !slices.Contains(names, name) {
+				return nil, nil
+			}
+			return []byte("key-1"), nil
+		}
+	}
+	holding := func(value string) func(string) ([]byte, error) {
+		return func(string) ([]byte, error) { return []byte(value), nil }
 	}
 	installed := func(raw string, err error) func(string) ([]byte, error) {
 		return func(platform string) ([]byte, error) {
@@ -86,21 +105,23 @@ func TestManagementContractBundleVerifyV2(t *testing.T) {
 	restartInstalled := strings.Replace(source, "  mode: observe\n", "  mode: observe\n  hook_self_heal: false\n", 1)
 	for _, tc := range []struct {
 		name      string
-		present   func(string) (bool, error)
+		value     func(string) ([]byte, error)
 		installed func(string) ([]byte, error)
 		exit      int
 		missing   []string // nil: absent
+		mismatch  []string // nil: absent
 		restart   string   // "": absent
 		settings  []string
 	}{
-		{"stored, hot", stored("ai-defense-api-key"), installed(source, nil), 0, []string{}, bundleRestartNotRequired, nil},
-		{"stored, restart", stored("ai-defense-api-key"), installed(restartInstalled, nil), 0, []string{}, bundleRestartRequired, []string{"guardrail.hook_self_heal"}},
-		{"installed config unreadable", stored("ai-defense-api-key"), installed("", fs.ErrPermission), 0, []string{}, bundleRestartUnknown, nil},
-		{"credential missing", stored(), installed(source, nil), bundleFailureExitCode(), []string{"ai-defense-api-key"}, "", nil},
-		{"store unreadable", func(string) (bool, error) { return false, fs.ErrPermission }, installed(source, nil), 0, nil, bundleRestartNotRequired, nil},
+		{"stored, hot", stored("ai-defense-api-key"), installed(source, nil), 0, []string{}, []string{}, bundleRestartNotRequired, nil},
+		{"stored, restart", stored("ai-defense-api-key"), installed(restartInstalled, nil), 0, []string{}, []string{}, bundleRestartRequired, []string{"guardrail.hook_self_heal"}},
+		{"installed config unreadable", stored("ai-defense-api-key"), installed("", fs.ErrPermission), 0, []string{}, []string{}, bundleRestartUnknown, nil},
+		{"credential missing", stored(), installed(source, nil), bundleFailureExitCode(), []string{"ai-defense-api-key"}, []string{}, "", nil},
+		{"credential not the signed value", holding("key-2"), installed(source, nil), bundleFailureExitCode(), []string{}, []string{"ai-defense-api-key"}, "", nil},
+		{"store unreadable", func(string) ([]byte, error) { return nil, fs.ErrPermission }, installed(source, nil), 0, nil, nil, bundleRestartNotRequired, nil},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			bundleSecretPresent, bundleInstalledConfig = tc.present, tc.installed
+			bundleSecretValue, bundleInstalledConfig = tc.value, tc.installed
 			before := treeOf(t, e.dir)
 			out, code := runBundle(t, "verify", "--bundle", signed, "--anchors", e.anchors, "--json")
 			doc := schemas.Validate(t, "bundle-verify.schema.json", []byte(out))
@@ -119,6 +140,15 @@ func TestManagementContractBundleVerifyV2(t *testing.T) {
 				t.Fatalf("secret_refs_missing = %v, want %v:\n%s", res.SecretRefsMissing, tc.missing, out)
 			}
 			switch {
+			case tc.mismatch == nil && res.SecretRefsMismatch != nil:
+				t.Fatalf("secret_refs_mismatch = %v, want absent", *res.SecretRefsMismatch)
+			case tc.mismatch != nil && (res.SecretRefsMismatch == nil || !slices.Equal(*res.SecretRefsMismatch, tc.mismatch)):
+				t.Fatalf("secret_refs_mismatch = %v, want %v:\n%s", res.SecretRefsMismatch, tc.mismatch, out)
+			}
+			if strings.Contains(out, "key-2") {
+				t.Fatalf("verify printed a credential value:\n%s", out)
+			}
+			switch {
 			case tc.restart == "" && res.RestartPrediction != nil:
 				t.Fatalf("restart_prediction = %+v, want absent", res.RestartPrediction)
 			case tc.restart != "" && (res.RestartPrediction == nil || res.RestartPrediction.GatewayRestart != tc.restart || !slices.Equal(res.RestartPrediction.Settings, tc.settings)):
@@ -130,12 +160,17 @@ func TestManagementContractBundleVerifyV2(t *testing.T) {
 		})
 	}
 
-	// The text form names the missing credential and the restart.
-	bundleSecretPresent, bundleInstalledConfig = stored(), installed(source, nil)
+	// The text form names the missing or changed credential and the
+	// restart.
+	bundleSecretValue, bundleInstalledConfig = stored(), installed(source, nil)
 	if out, _ := runBundle(t, "verify", "--bundle", signed, "--anchors", e.anchors); !strings.Contains(out, "Credentials missing: ai-defense-api-key") {
 		t.Fatalf("text refusal:\n%s", out)
 	}
-	bundleSecretPresent, bundleInstalledConfig = stored("ai-defense-api-key"), installed(restartInstalled, nil)
+	bundleSecretValue = holding("key-2")
+	if out, _ := runBundle(t, "verify", "--bundle", signed, "--anchors", e.anchors); !strings.Contains(out, "Credentials not the signed value: ai-defense-api-key") {
+		t.Fatalf("text mismatch refusal:\n%s", out)
+	}
+	bundleSecretValue, bundleInstalledConfig = stored("ai-defense-api-key"), installed(restartInstalled, nil)
 	if out, code := runBundle(t, "verify", "--bundle", signed, "--anchors", e.anchors); code != 0 ||
 		!strings.Contains(out, "Gateway restart on apply: required (restart_settings); settings: guardrail.hook_self_heal") {
 		t.Fatalf("text restart (exit %d):\n%s", code, out)
@@ -158,6 +193,9 @@ func TestManagementContractBundleVerifyV2(t *testing.T) {
 	requireExit(t, doc, code, 0)
 	if _, ok := doc["secret_refs_missing"]; ok {
 		t.Fatalf("secret_refs_missing off a device: %s", out)
+	}
+	if _, ok := doc["secret_refs_mismatch"]; ok {
+		t.Fatalf("secret_refs_mismatch off a device: %s", out)
 	}
 	if _, ok := doc["restart_prediction"]; ok {
 		t.Fatalf("restart_prediction off a device: %s", out)

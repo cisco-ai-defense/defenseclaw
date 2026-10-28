@@ -19,6 +19,7 @@
 package actionfacts
 
 import (
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -379,7 +380,53 @@ func projectPOSIXStatement(
 		out.markPartial(IssueDynamicWord)
 	}
 	projectPOSIXRedirects(stmt.Redirs, &command, out)
+	classifyPOSIXGitConfigEnvironmentOutput(out, &command, call.Assigns)
 	return command, true
+}
+
+// Git uses GIT_CONFIG_GLOBAL as the output file for a command-local
+// `git config --global` mutation. Prefix assignments make the entire call
+// partial because they can also change executable lookup, but this static
+// destination remains positive evidence of a possible write.
+func classifyPOSIXGitConfigEnvironmentOutput(out *parseOutput, command *CommandFact, assignments []*syntax.Assign) {
+	if command.Program != "git" || command.Effect != EffectExecute ||
+		len(command.Argv) < 3 || command.Argv[1] != "config" ||
+		!gitConfigMutates(command.Argv[2:]) {
+		return
+	}
+	global := false
+	for _, arg := range command.Argv[2:] {
+		if arg == "--global" {
+			global = true
+		}
+		if arg == "-f" || strings.HasPrefix(arg, "-f") && len(arg) > 2 ||
+			arg == "--file" || strings.HasPrefix(arg, "--file=") {
+			// An explicit file option selects the destination instead.
+			return
+		}
+	}
+	if !global {
+		return
+	}
+	for _, argument := range command.Arguments {
+		if argument.Expands || argument.StaticGlob != "" {
+			return
+		}
+	}
+	for _, assignment := range assignments {
+		if assignment == nil || assignment.Name == nil ||
+			assignment.Name.Value != "GIT_CONFIG_GLOBAL" ||
+			assignment.Append || assignment.Naked || assignment.Index != nil ||
+			assignment.Array != nil {
+			continue
+		}
+		target := projectPOSIXWord(assignment.Value)
+		if target.Expands || target.Value == "" {
+			continue
+		}
+		addOperation(command, OperationWrite)
+		appendCommandPath(out, command, PathAccessWrite, target.Value)
+	}
 }
 
 func projectPOSIXWord(word *syntax.Word) ArgumentFact {
@@ -426,8 +473,32 @@ func projectPOSIXWord(word *syntax.Word) ArgumentFact {
 			result.StaticGlob = staticValue
 		}
 		result.Value = ""
+	} else {
+		result.literalTilde = strings.HasPrefix(staticValue, "~")
 	}
 	return result
+}
+
+// carryPOSIXLiteralTildes keeps the parser's quoted-tilde mark on the argv a
+// wrapper (sudo, env, command, exec) passes on: each child command whose
+// argv is a suffix of the parent's takes the mark of the aligned word.
+func carryPOSIXLiteralTildes(child *parseOutput, parent CommandFact) {
+	if len(parent.Arguments) != len(parent.Argv) {
+		return
+	}
+	for i := range child.commands {
+		command := &child.commands[i]
+		offset := len(parent.Argv) - len(command.Argv)
+		if offset <= 0 || len(command.Arguments) != len(command.Argv) ||
+			!slices.Equal(command.Argv, parent.Argv[offset:]) {
+			continue
+		}
+		for j := range command.Arguments {
+			if parent.Arguments[offset+j].literalTilde {
+				command.Arguments[j].literalTilde = true
+			}
+		}
+	}
 }
 
 func posixControlFlowUncertain(stmt *syntax.Stmt, stack []syntax.Node) bool {
@@ -1034,6 +1105,7 @@ func expandStaticPOSIXWrappers(out *parseOutput, wrapperDepth int) {
 			// The argv was projected exactly by the surrounding POSIX parser;
 			// it does not introduce a second action dialect.
 			child.dialect = DialectPOSIX
+			carryPOSIXLiteralTildes(&child, command)
 		default:
 			continue
 		}

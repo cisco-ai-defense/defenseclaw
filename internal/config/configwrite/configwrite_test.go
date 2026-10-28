@@ -393,3 +393,30 @@ func TestChangedPathsNamesTheLeavesOfABlockAddedOrRemovedWhole(t *testing.T) {
 		t.Fatalf("empty block: ChangedPaths = %v, %v", got, err)
 	}
 }
+
+func TestLifecycleGenerationRepairKeepsTheProvenCounter(t *testing.T) {
+	path := writeTestConfig(t, "guardrail:\n  mode: observe\n")
+	if err := os.WriteFile(GenerationPath(path), []byte("broken record"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got, err := Locked(context.Background(), path, Options{Actor: ActorLifecycle, GenerationFloor: 10}, func() (bool, error) { return true, nil })
+	if err != nil || got.Generation != 11 {
+		t.Fatalf("repaired generation = %+v, %v; want 11", got, err)
+	}
+	before, err := os.ReadFile(GenerationPath(path))
+	if err != nil {
+		t.Fatal(err)
+	}
+	approved, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = Locked(context.Background(), path, Options{Actor: ActorLifecycle, GenerationFloor: 11, RecordSHA256: SHA256Hex(approved)}, func() (bool, error) {
+		return true, os.WriteFile(path, append(approved, []byte("\n# concurrent edit\n")...), 0o600)
+	})
+	after, readErr := os.ReadFile(GenerationPath(path))
+	if !errors.Is(err, ErrConflict) || readErr != nil || string(before) != string(after) {
+		t.Fatalf("unapproved concurrent bytes were recorded: error=%v, record changed=%v", err, string(before) != string(after))
+	}
+
+}

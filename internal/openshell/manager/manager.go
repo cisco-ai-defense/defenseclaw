@@ -222,6 +222,18 @@ type Options struct {
 	// join the process trees of docker sandboxes (kernelfeed.go). Nil uses
 	// DefaultKernelFeedDialer: the feed's socket on Linux, none elsewhere.
 	KernelFeed KernelFeedDialer
+	// StartLock takes the gateway's lifecycle lock that a create or a start
+	// holds, shared, over OpenShell's call, and that DefenseClaw's restarts
+	// and upgrades of the gateway hold exclusively
+	// (openshell.LockSandboxStart): it fails with openshell.ErrGatewayBusy
+	// while one of them runs. Nil holds none.
+	StartLock func() (unlock func(), err error)
+	// MigrateBootstrap moves the Docker bootstrap that an OpenShell before
+	// 0.1.5 left for the sandbox of an OpenShell id to the format 0.1.5
+	// reads (openshell.MigrateDockerBootstrap), and names the files it
+	// rewrote. A start on a docker gateway runs it first (GAP-0300). Nil
+	// moves none.
+	MigrateBootstrap func(sandboxID string) ([]string, error)
 	// ManagedAccount marks a managed computer's per-user sandbox daemon: a
 	// user service the organization installs, which starts at login. What a
 	// failure tells the user to do names signing in again, never a command
@@ -264,7 +276,8 @@ type Manager struct {
 	toolCalls *hookTamperTracker
 	// signatures is the AI signature catalog of the sandbox discoveries.
 	signatures discoveryCatalog
-	// tamperStops tracks the stops hook tamper started.
+	// tamperStops tracks the stops DefenseClaw starts on its own: for a hook
+	// alarm, and of a session on an old supervisor.
 	tamperStops sync.WaitGroup
 
 	runMu  sync.Mutex
@@ -904,12 +917,38 @@ func (m *Manager) config() *config.Config {
 
 // configForSandbox keeps fallback policy checks under the same floor as
 // normal resolution. A managed sandbox without a confirmed policy has no
-// configuration to borrow from another sandbox.
+// configuration to borrow from another sandbox. A sandbox a managed create
+// made resolves under the configuration that create pinned until the
+// daemon keeps its registration (box.createCfg). Callers must not hold
+// Manager.mu.
 func (m *Manager) configForSandbox(name string) *config.Config {
+	m.mu.Lock()
+	var pinned *config.Config
+	if b := m.boxes[name]; b != nil {
+		pinned = b.createCfg
+	}
+	m.mu.Unlock()
+	if pinned != nil {
+		return pinned
+	}
 	if m.opts.ConfigForSandbox != nil {
 		return m.opts.ConfigForSandbox(name)
 	}
 	return m.config()
+}
+
+// EndCreate tells the manager the daemon is done with the managed create
+// of the sandbox name (OpenShell id), whether it kept the registration or
+// not: the sandbox's policy follows its registration from now on
+// (ConfigForSandbox; the closed floor without one), and every sandbox's
+// policy is resolved again (RefreshPolicies).
+func (m *Manager) EndCreate(name, id string) {
+	m.mu.Lock()
+	if b := m.boxes[name]; b != nil && b.rec.ID == id {
+		b.createCfg = nil
+	}
+	m.mu.Unlock()
+	m.RefreshPolicies()
 }
 
 // keepIgnored is what a mounted project's undo point keeps a copy of

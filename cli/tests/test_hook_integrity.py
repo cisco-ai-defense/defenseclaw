@@ -37,6 +37,8 @@ from defenseclaw.hook_integrity import (
     unrunnable_hook_problem,
 )
 
+from tests.test_hook_integrity_layouts import approve_hermes_hooks
+
 pytestmark = pytest.mark.skipif(sys.platform == "win32", reason="Unix hook scripts only")
 
 
@@ -183,7 +185,7 @@ def test_empty_token_is_a_problem_like_a_missing_one(tmp_path, monkeypatch):
 def test_removed_hook_registration_is_reported(tmp_path):
     # GAP-1230: the hooks key deleted from the agent's settings file.
     settings = tmp_path / "settings.json"
-    hook = {"command": str(tmp_path / "hooks" / "claude-code-hook.sh")}
+    hook = {"type": "command", "command": str(tmp_path / "hooks" / "claude-code-hook.sh"), "timeout": 30}
     settings.write_text(json.dumps({"hooks": {"PreToolUse": [{"hooks": [hook]}]}}))
     lock = {"version": 2, "connectors": {"claudecode": {"locations": {"hook_config_paths": [str(settings)]}}}}
     (tmp_path / "hook_contract_lock.json").write_text(json.dumps(lock))
@@ -214,7 +216,8 @@ def test_unquoted_hook_path_with_a_space_fails_doctor(tmp_path):
     cfg = SimpleNamespace(data_dir=str(data_dir))
 
     def register(command):
-        settings.write_text(json.dumps({"hooks": {"PreToolUse": [{"hooks": [{"command": command}]}]}}))
+        handler = {"type": "command", "command": command, "timeout": 30}
+        settings.write_text(json.dumps({"hooks": {"PreToolUse": [{"hooks": [handler]}]}}))
 
     register(shlex.quote(script))
     assert hook_registration_problems(cfg, "claudecode") == []
@@ -307,6 +310,18 @@ def test_install_moved_with_the_home_names_the_old_folder(tmp_path, monkeypatch)
     assert "not guarding" in problem
 
 
+def test_dangling_script_link_is_reported_as_unguarded(tmp_path, monkeypatch):
+    # p0 GAP-1384: a sealed hook script replaced by a link to a missing
+    # target is a hook the agent cannot run, so status and guardrail status
+    # show the not-guarded posture warning.
+    monkeypatch.delenv("DEFENSECLAW_GATEWAY_TOKEN", raising=False)
+    cfg, script = _install(tmp_path)
+    script.unlink()
+    script.symlink_to(tmp_path / "gone.sh")
+    problem = unrunnable_hook_problem(cfg, "codex")
+    assert str(script) in problem and "cannot run it" in problem and "not guarding" in problem
+
+
 @pytest.mark.skipif(hasattr(os, "geteuid") and os.geteuid() == 0, reason="root reads mode 000 files")
 def test_unreadable_script_is_reported_as_unguarded_not_edited(tmp_path, monkeypatch):
     # GAP-0403: chmod 000 makes every hook a non-blocking error, so the
@@ -350,7 +365,8 @@ def test_claude_disable_all_hooks_is_degraded_with_its_own_repair(tmp_path, monk
     # GAP-1066/GAP-1067: the hooks stay registered but Claude Code runs none of them.
     monkeypatch.chdir(tmp_path)
     cfg, settings = _agent_config(tmp_path, "claudecode", "settings.json")
-    hooks = {"PreToolUse": [{"hooks": [{"type": "command", "command": "/x/.defenseclaw/hooks/claude-code-hook.sh"}]}]}
+    handler = {"type": "command", "command": "/x/.defenseclaw/hooks/claude-code-hook.sh", "timeout": 30}
+    hooks = {"PreToolUse": [{"hooks": [handler]}]}
     settings.write_text(json.dumps({"hooks": hooks}))
     assert hook_registration_problems(cfg, "claudecode") == []
 
@@ -370,7 +386,7 @@ def test_codex_hooks_turned_off_or_left_without_command_fail_doctor(tmp_path):
     cfg, config = _agent_config(tmp_path, "codex", "config.toml")
     (tmp_path / "hooks").mkdir()
     (tmp_path / "hooks" / "codex-hook.sh").write_text("#!/bin/bash\n")
-    command = "/home/u/.defenseclaw/hooks/codex-hook.sh --event PreToolUse"
+    command = f"{tmp_path}/hooks/codex-hook.sh --event PreToolUse"
     entry = "[[hooks.PreToolUse]]\nmatcher = '*'\n[[hooks.PreToolUse.hooks]]\ntype = 'command'\ntimeout = 30\n"
     config.write_text("[features]\nhooks = false\n" + entry + f"command = '{command}'\n")
 
@@ -382,7 +398,22 @@ def test_codex_hooks_turned_off_or_left_without_command_fail_doctor(tmp_path):
 
     config.write_text(entry + entry + f"command = '{command}'\n")
     problems = hook_registration_problems(cfg, "codex")
-    assert problems and "without a command" in problems[0] and "refuses to start" in problems[0]
+    assert problems and "without a command" in problems[0]
+    assert "may run without its DefenseClaw hooks" in problems[0]
+
+    # GAP-0976: Doctor must inspect the config file passed to it even when
+    # stale trust records still contain the word "defenseclaw".
+    config.write_text(entry + "[hooks.state]\nold_defenseclaw = true\n")
+    result = _DoctorResult()
+    _check_codex_hooks(cfg, result, platform_name="posix", config_path=str(config))
+    row = next(check for check in result.checks if check["label"] == "Codex hooks")
+    assert row["status"] == "fail", row
+
+    config.write_text(entry + f"command = '{command}'\n" + entry + "[hooks.state]\nold_defenseclaw = true\n")
+    result = _DoctorResult()
+    _check_codex_hooks(cfg, result, platform_name="posix", config_path=str(config))
+    row = next(check for check in result.checks if check["label"] == "Codex hooks")
+    assert row["status"] == "fail", row
 
 
 _EDITED_GOLDEN = (
@@ -447,13 +478,15 @@ def test_edited_hook_entry_fails_doctor_and_fix_reruns_setup(tmp_path, monkeypat
 
     def register(*paths):
         if connector == "hermes":
-            entries = "".join(f"  - command: \"'{path}'\"\n" for path in paths)
+            entries = "".join(f"  - command: \"'{path}'\"\n    matcher: .*\n    timeout: 30\n" for path in paths)
             config.write_text("hooks:\n  pre_tool_call:\n" + entries)
+            approve_hermes_hooks(config)
         elif connector == "copilot":
-            entries = [{"type": "command", "bash": f"'{path}' --event 'preToolUse'"} for path in paths]
+            entries = [{"type": "command", "bash": f"'{path}' --event 'preToolUse'", "timeoutSec": 30} for path in paths]
             config.write_text(json.dumps({"version": 1, "hooks": {"preToolUse": entries}}))
         else:
-            config.write_text(json.dumps({"hooks": {"PreToolUse": [{"hooks": [{"command": p} for p in paths]}]}}))
+            handlers = [{"type": "command", "command": p, "timeout": 30} for p in paths]
+            config.write_text(json.dumps({"hooks": {"PreToolUse": [{"hooks": handlers}]}}))
 
     register(current)
     assert hook_registration_problems(cfg, connector) == []

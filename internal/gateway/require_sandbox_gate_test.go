@@ -18,6 +18,7 @@ package gateway
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io/fs"
 	"net/http"
@@ -65,6 +66,34 @@ func captureRequireSandboxRecords(t *testing.T) *[]requireSandboxRecord {
 	recordRequireSandbox = func(_ context.Context, _ *APIServer, rec requireSandboxRecord) { got = append(got, rec) }
 	t.Cleanup(func() { recordRequireSandbox = old })
 	return &got
+}
+
+// GAP-0266: an installed 0.1.3 prerequisite is unavailable, but it must
+// never be described to the caller as absent. The lifecycle has already
+// published the version and the administrator's remedy in the trusted record.
+func TestSandboxPrerequisiteNamesInstalledUnsupportedOpenShell(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Enterprise.OpenShell.Install = config.EnterpriseOpenShellInstallPrerequisite
+	record := sandboxPrerequisitesRecord{Version: 1, Install: cfg.Enterprise.OpenShell.Install, Driver: "docker"}
+	if err := json.Unmarshal([]byte(`{"missing":[{"item":"openshell cli","detail":"openshell is not installed"}]}`), &record); err != nil {
+		t.Fatal(err)
+	}
+	// Read the real record shape, including its detail and fix, to catch a
+	// parser that discards the part that distinguishes old from absent.
+	var fromRecord sandboxPrerequisitesRecord
+	if err := json.Unmarshal([]byte(`{"version":1,"install":"prerequisite","driver":"docker","ready":false,"missing":[{"item":"openshell cli","detail":"openshell: OpenShell 0.1.3 runs no DefenseClaw sandbox: upgrade OpenShell to 0.1.5 in place","fix":"upgrade OpenShell to 0.1.5"}]}`), &fromRecord); err != nil {
+		t.Fatal(err)
+	}
+	why := sandboxPrerequisiteWhy(cfg, "linux", "docker", fromRecord, true)
+	if !strings.Contains(why, "OpenShell 0.1.3") || !strings.Contains(why, "upgrade OpenShell to 0.1.5") || strings.Contains(why, "not installed") {
+		t.Fatalf("installed unsupported OpenShell: %q", why)
+	}
+	if code := sandboxUnavailable(why).Code; code != "prerequisite_missing" {
+		t.Fatalf("installed unsupported OpenShell reason code = %q", code)
+	}
+	if got := sandboxPrerequisiteWhy(cfg, "linux", "docker", record, true); got != sandboxUnavailableNoOpenShell {
+		t.Fatalf("absent OpenShell = %q", got)
+	}
 }
 
 // TestRequireSandboxExemptWindowsAccountForms (GAP-0092): a per-user
@@ -184,6 +213,18 @@ func TestSandboxPrerequisiteRecord(t *testing.T) {
 			docker, sandboxUnavailableNoOpenShell},
 		"no docker": {write("docker.json", `{"version":1,"install":"prerequisite","driver":"docker","ready":false,"missing":[{"item":"docker"}]}`),
 			docker, sandboxUnavailableDockerMissing},
+		// GAP-0266: an installed release the host refuses is named, never
+		// "not installed".
+		"unsupported release": {write("old.json", `{"version":1,"install":"prerequisite","driver":"docker","ready":false,"missing":[{"item":"openshell cli","detail":"d","fix":"f","version":"0.1.3"},{"item":"openshell gateway","version":"0.1.3"}]}`),
+			docker, "OpenShell 0.1.3 is installed, but that release is unsupported: sandboxes need OpenShell 0.1.5 or later, below 0.2.0"},
+		"unsupported prerelease": {write("pre.json", `{"version":1,"install":"prerequisite","driver":"vm","ready":false,"missing":[{"item":"microvm driver","version":"0.1.5-pre.3"}]}`),
+			vm, "OpenShell 0.1.5-pre.3 is installed, but that release is unsupported: sandboxes need OpenShell 0.1.5 or later, below 0.2.0"},
+		"release above the window": {write("new.json", `{"version":1,"install":"prerequisite","driver":"docker","ready":false,"missing":[{"item":"openshell gateway","version":"0.2.0"}]}`),
+			docker, "OpenShell 0.2.0 is installed, but that release is unsupported: sandboxes need OpenShell 0.1.5 or later, below 0.2.0"},
+		"not the pinned release": {write("pin.json", `{"version":1,"install":"prerequisite","driver":"docker","ready":false,"missing":[{"item":"openshell cli","version":"0.1.6"}]}`),
+			docker, "OpenShell 0.1.6 is installed, but it is not the release your organization requires"},
+		"unreadable release": {write("junk.json", `{"version":1,"install":"prerequisite","driver":"docker","ready":false,"missing":[{"item":"openshell cli","version":"x.y"}]}`),
+			docker, sandboxUnavailableNoOpenShell},
 		"other item": {write("e2fs.json", `{"version":1,"install":"setup","driver":"docker","ready":false,"missing":[{"item":"e2fsprogs"}]}`),
 			setup, sandboxUnavailablePrerequisiteOther},
 	} {
@@ -333,7 +374,7 @@ func TestRequireSandboxRecordsCarryTheProfile(t *testing.T) {
 	if rec.Profile != "contractors" || rec.ProfileMatch != profileMatchDefault || rec.ProfileDigest == "" || rec.Provisional {
 		t.Fatalf("record profile = %+v", rec)
 	}
-	identity := api.requireSandboxIdentity(rec)
+	identity := api.requireSandboxIdentity(context.Background(), rec)
 	m := identity.Managed
 	if m.GuardrailProfile != "contractors" || m.ProfileMatch != audit.SandboxProfileMatchDefault || m.ProfileDigest != rec.ProfileDigest ||
 		m.Provisional == nil || *m.Provisional || !regexp.MustCompile(`^hmac-sha256:[0-9a-f]{64}$`).MatchString(m.SubjectKey) {

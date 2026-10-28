@@ -21,6 +21,8 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"sort"
+	"strings"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
@@ -31,9 +33,10 @@ import (
 )
 
 // The status v2 blocks (enterprisestatus connector_block.go,
-// openshell_block.go, identity_block.go) on Linux and macOS: status and
-// verify only, from files and rows the other describe steps already read.
-// They never add an error or change security_complete.
+// openshell_block.go, identity_block.go) on Linux and macOS appear on status
+// and verify only. Hermes session-home attestation and the hook-process
+// failure limit also run for lifecycle changes, so those actions cannot claim
+// coverage or security that verify cannot prove.
 
 // statusV2 reports whether this run prints the status v2 blocks.
 func (l *lifecycle) statusV2() bool {
@@ -55,8 +58,10 @@ func (l *lifecycle) describeStatusV2(record *Deployment) {
 
 // describeConnectors builds the connectors block from the installed config,
 // the enumerator's manifest and unprotected-agents record, and the guardian
-// state the attestation vouches for. The fail mode is the hook renderer's
-// (enterprisehooks.ManagedHookFailMode).
+// state the attestation vouches for. Only status/verify publish the block;
+// every lifecycle action uses its Hermes coverage verdict and hook-process
+// failure limit. The fail mode is
+// the hook renderer's (enterprisehooks.ManagedHookFailMode).
 func (l *lifecycle) describeConnectors(record *Deployment) {
 	env, r := l.env, l.result
 	registry := connector.NewDefaultRegistry()
@@ -106,11 +111,142 @@ func (l *lifecycle) describeConnectors(record *Deployment) {
 	}
 	failMode := func(name string) string { return enterprisehooks.ManagedHookFailMode(cfg, name) }
 	block, hidden := enterprisestatus.BuildConnectors(in, failMode)
-	r.Connectors = block
-	if hidden > 0 {
-		r.AddWarning(enterprisestatus.CodeStatusDetailUnavailable, fmt.Sprintf("connectors: %d agent version(s) not shown: "+
-			"they are not plain version strings", hidden))
+	if state, ok := block["hermes"]; ok && state.Enabled &&
+		(state.Detected == nil || *state.Detected || state.Targets != nil && state.Targets.Total > 0) {
+		state.HooksInstalled = enterprisestatus.HooksInstalledUnknown
+		// Persistent-home targets cannot establish coverage of a session-only
+		// HERMES_HOME. Do not publish their counts as coverage for this state.
+		state.Targets = nil
+		block["hermes"] = state
+		r.CoverageComplete, r.SecurityComplete = false, false
+		if err := enterprisehooks.ManagedHermesSessionHomeAttestation(env.GOOS, "hermes", true, false); err != nil {
+			message := "connectors.hermes: NOT COVERED: " + err.Error()
+			r.AddWarning(enterprisestatus.CodeStatusDetailUnavailable, message)
+			if env.ReportLaunchCoverage != nil {
+				if auditErr := env.ReportLaunchCoverage(context.Background(), managed.LaunchCoverageReport{
+					Connector: "hermes", Reason: "session_only_hermes_home_unobservable", UID: 0,
+				}); auditErr != nil {
+					r.AddWarning(codeManagedLaunchAuditUnavailable, "could not audit the managed Hermes session-home limit: "+auditErr.Error())
+				}
+			}
+		}
 	}
+	r.AddHookProcessFailureWarnings(block)
+	if l.statusV2() {
+		r.Connectors = block
+		if hidden > 0 {
+			r.AddWarning(enterprisestatus.CodeStatusDetailUnavailable, fmt.Sprintf("connectors: %d agent version(s) not shown: "+
+				"they are not plain version strings", hidden))
+		}
+	}
+}
+
+// verifyManagedHermesRegistration proves the installed default-home hook on
+// lifecycle Verify. The public hooks Verify keeps refusing session-home
+// attestation; the hidden readiness check verifies the same physical hook,
+// render, credentials and protected authorization without that claim.
+//
+// One account's or one target's Hermes state never fails another target or
+// the host: an enabled Hermes the enumerator could not enroll has no hook to
+// prove (GAP-1420), and a Hermes target the guardian's attested last
+// reconcile recorded as failed is reported NOT COVERED here and classified
+// by the guardian target warnings (describeHookContracts), as every other
+// connector's target is. A Hermes hook that fails live while the guardian
+// last proved it, a report that omits or duplicates a target, and invalid
+// protected authorization still fail Verify.
+func (l *lifecycle) verifyManagedHermesRegistration(ctx context.Context) error {
+	state, ok := l.result.Connectors["hermes"]
+	if !ok || !state.Enabled || state.HooksInstalled != enterprisestatus.HooksInstalledUnknown {
+		return nil
+	}
+	manifest, err := enterprisehooks.LoadStandaloneManifest(l.env.P(l.env.Layout.ManifestPath))
+	if err != nil {
+		return fmt.Errorf("read managed Hermes targets: %w", err)
+	}
+	expected := make(map[string]bool)
+	key := func(connector, user, home string) string {
+		return strings.ToLower(strings.TrimSpace(connector)) + "\x00" + strings.TrimSpace(user) + "\x00" +
+			strings.TrimSpace(home)
+	}
+	for _, target := range manifest.Targets {
+		if target.IsEnabled() && strings.EqualFold(target.Connector, "hermes") {
+			expected[key(target.Connector, target.User, target.UserHome)] = false
+		}
+	}
+	if len(expected) == 0 {
+		// No Hermes target is enrolled, so no DefenseClaw Hermes hook is
+		// installed to prove. The install the enumerator could not enroll
+		// stays NOT COVERED with its reason (connectors.hermes and the
+		// unprotected-agent warning, which is audited).
+		return nil
+	}
+	out, err := l.env.runGatewayCLI(ctx, "enterprise", "hooks", "readiness", "--manifest", l.env.Layout.ManifestPath, "--json")
+	// ExecRunner returns the report together with an error when another
+	// target makes readiness exit nonzero. A launch failure has no exit code.
+	if err != nil && out.ExitCode <= 0 {
+		return fmt.Errorf("live registration check failed: %w", err)
+	}
+	var proof struct {
+		OK                    bool   `json:"ok"`
+		Scope                 string `json:"scope"`
+		HermesSessionCoverage string `json:"hermes_session_coverage"`
+		AuthorizationError    string `json:"authorization_error"`
+		Results               []struct {
+			Connector string `json:"connector"`
+			User      string `json:"user"`
+			UserHome  string `json:"user_home"`
+			OK        bool   `json:"ok"`
+			Pending   bool   `json:"pending"`
+		} `json:"results"`
+	}
+	if json.Unmarshal(out.Stdout, &proof) != nil || proof.Scope != "machine_hook_registration" ||
+		proof.HermesSessionCoverage != "not_covered" || proof.AuthorizationError != "" ||
+		(out.ExitCode == 0) != proof.OK {
+		return errors.New("live registration check did not prove the current managed Hermes target")
+	}
+	guardianFailed := map[string]bool{}
+	if rows, known := l.attestedGuardianResults(); known {
+		for _, row := range rows {
+			if !row.OK && !row.Pending {
+				guardianFailed[key(row.Connector, row.User, row.UserHome)] = true
+			}
+		}
+	}
+	explainedFailure := false
+	var notCovered []string
+	for _, row := range proof.Results {
+		failed := !row.OK && !row.Pending
+		if !strings.EqualFold(row.Connector, "hermes") {
+			explainedFailure = explainedFailure || failed
+			continue
+		}
+		rowKey := key(row.Connector, row.User, row.UserHome)
+		if _, enrolled := expected[rowKey]; !enrolled || expected[rowKey] {
+			return errors.New("live registration check reported an unprotected Hermes target")
+		}
+		expected[rowKey] = true
+		if failed {
+			if !guardianFailed[rowKey] {
+				return errors.New("live registration check reported an unprotected Hermes target")
+			}
+			explainedFailure = true
+			notCovered = append(notCovered, strings.TrimSpace(row.User))
+		}
+	}
+	for _, found := range expected {
+		if !found {
+			return errors.New("live registration check omitted the managed Hermes target")
+		}
+	}
+	if !proof.OK && !explainedFailure {
+		return errors.New("live registration check did not prove the current managed Hermes target")
+	}
+	sort.Strings(notCovered)
+	for _, user := range notCovered {
+		l.result.AddWarning(enterprisestatus.CodeStatusDetailUnavailable, "connectors.hermes: NOT COVERED for user "+user+
+			": the guardian's last reconcile could not protect its Hermes hook; the guardian target warning names the cause")
+	}
+	return nil
 }
 
 // machinePolicyCoverage is the hooks_installed value of each connector the
@@ -141,6 +277,29 @@ func machinePolicyCoverage(connectors []string, states map[string]enterprisestat
 // attestation is bound to the ledger of the same reconcile (as
 // describeHookContracts reads them).
 func (l *lifecycle) attestedGuardianRows() ([]enterprisestatus.ConnectorTarget, bool) {
+	results, known := l.attestedGuardianResults()
+	if !known {
+		return nil, false
+	}
+	rows := make([]enterprisestatus.ConnectorTarget, 0, len(results))
+	for _, row := range results {
+		rows = append(rows, enterprisestatus.ConnectorTarget{Connector: row.Connector, OK: row.OK, Pending: row.Pending})
+	}
+	return rows, true
+}
+
+// attestedGuardianResult is one target row of the guardian's last reconcile.
+type attestedGuardianResult struct {
+	Connector string `json:"connector"`
+	User      string `json:"user"`
+	UserHome  string `json:"user_home"`
+	OK        bool   `json:"ok"`
+	Pending   bool   `json:"pending"`
+}
+
+// attestedGuardianResults are attestedGuardianRows with each target's
+// account and home.
+func (l *lifecycle) attestedGuardianResults() ([]attestedGuardianResult, bool) {
 	env := l.env
 	ledgerPath := env.P(filepath.Join(env.Layout.GuardianAuthDir, managed.HookGuardianAuthorizationFile))
 	ledger, err := readBounded(ledgerPath, 4<<20)
@@ -156,11 +315,7 @@ func (l *lifecycle) attestedGuardianRows() ([]enterprisestatus.ConnectorTarget, 
 		return nil, false
 	}
 	var state struct {
-		Results []struct {
-			Connector string `json:"connector"`
-			OK        bool   `json:"ok"`
-			Pending   bool   `json:"pending"`
-		} `json:"results"`
+		Results []attestedGuardianResult `json:"results"`
 	}
 	if json.Unmarshal(data, &state) != nil {
 		return nil, false
@@ -168,11 +323,7 @@ func (l *lifecycle) attestedGuardianRows() ([]enterprisestatus.ConnectorTarget, 
 	if again, err := readBounded(ledgerPath, 4<<20); err != nil || !bytes.Equal(again, ledger) {
 		return nil, false
 	}
-	rows := make([]enterprisestatus.ConnectorTarget, 0, len(state.Results))
-	for _, row := range state.Results {
-		rows = append(rows, enterprisestatus.ConnectorTarget{Connector: row.Connector, OK: row.OK, Pending: row.Pending})
-	}
-	return rows, true
+	return state.Results, true
 }
 
 // noteIdentityHealth keeps the identity block of the gateway's /health body

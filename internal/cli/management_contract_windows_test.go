@@ -113,6 +113,27 @@ func TestManagementContractWindowsSecret(t *testing.T) {
 	if doc := schemas.Validate(t, "secret-result.schema.json", []byte(out)); doc["ok"] != true || doc["action"] != "set" {
 		t.Fatalf("set result %s", out)
 	}
+	// An identical set keeps the contract v1 success shape, whose schema
+	// allows no other member, with the gateway stopped and running alike.
+	previousRestart := windowsSecretRestartGateway
+	t.Cleanup(func() { windowsSecretRestartGateway = previousRestart })
+	for _, running := range []bool{false, true} {
+		windowsSecretRestartGateway = func(beforeStop func() error) (bool, error) {
+			if running {
+				if err := beforeStop(); err != nil {
+					return false, err
+				}
+			}
+			return running, nil
+		}
+		out, err = runWindowsSecretCommand(t, "set", enterpriseSecretOptions{name: "ai-defense-api-key", fromStdin: true, json: true}, value+"\r\n")
+		if err != nil {
+			t.Fatalf("identical set (gateway running %v): %v", running, err)
+		}
+		if doc := schemas.Validate(t, "secret-result.schema.json", []byte(out)); doc["gateway_restarted"] != running || len(doc) != 5 {
+			t.Fatalf("identical set result (gateway running %v): %s", running, out)
+		}
+	}
 
 	out, err = runWindowsSecretCommand(t, "status", enterpriseSecretOptions{json: true}, "")
 	if err != nil {
@@ -194,7 +215,6 @@ func TestManagementContractWindowsSecretEveryVerbAndFailure(t *testing.T) {
 		return map[string]outcome{"set": o, "remove": o, "status": o}
 	}
 	listing := outcome{}
-	unreadable := errors.New("the standalone deployment record cannot be read")
 	for _, class := range []struct {
 		name  string
 		args  func(verb string) []string
@@ -236,8 +256,14 @@ func TestManagementContractWindowsSecretEveryVerbAndFailure(t *testing.T) {
 			want: map[string]outcome{"set": {"lifecycle_busy", enterprisestatus.WindowsExitBusy}, "remove": {"lifecycle_busy", enterprisestatus.WindowsExitBusy}, "status": listing}},
 		{name: "corrupt deployment",
 			setup: func(*testing.T, *windowsSecretLockEvents, managed.StandaloneLayout) {
-				windowsSecretLayout = func() (managed.StandaloneLayout, error) { return managed.StandaloneLayout{}, unreadable }
-				windowsSecretDeploymentInstalled = func() (bool, error) { return false, unreadable }
+				// Each path lookup makes a new error in production. A stable
+				// sentinel would hide duplicate stderr after the JSON refusal.
+				windowsSecretLayout = func() (managed.StandaloneLayout, error) {
+					return managed.StandaloneLayout{}, errors.New("the standalone deployment record cannot be read")
+				}
+				windowsSecretDeploymentInstalled = func() (bool, error) {
+					return false, errors.New("the standalone deployment record cannot be read")
+				}
 			},
 			want: every(outcome{"state_invalid", windowsSecretExitFailure})},
 		{name: "corrupt store",

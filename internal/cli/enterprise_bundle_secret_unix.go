@@ -10,15 +10,16 @@ package cli
 
 import "github.com/defenseclaw/defenseclaw/internal/enterpriseunix"
 
-// managedBundleSecretPresent reports whether the standalone enterprise
-// secret store holds a credential, from the listing `enterprise secret
-// status` and the Linux and macOS bundle apply read, so verify and apply
-// agree; no credential is opened. An unreadable store (a standard account)
-// is reported as an error, so verify warns instead of refusing.
-func managedBundleSecretPresent(name string) (bool, error) {
+// managedBundleSecretValue reads a credential from the standalone
+// enterprise secret store with the checks the Linux and macOS bundle apply
+// runs (enterpriseunix Env.SecretValue), so verify and apply agree. A
+// stored file the gateway would refuse is missing (nil). An unreadable store
+// (a standard account) is reported as an error, so verify warns instead of
+// refusing.
+func managedBundleSecretValue(name string) ([]byte, error) {
 	env, err := newUnixLifecycleEnv(enterpriseunix.CurrentGOOS())
 	if err != nil {
-		return false, err
+		return nil, err
 	}
-	return env.SecretPresent(name)
+	return env.SecretValue(name)
 }

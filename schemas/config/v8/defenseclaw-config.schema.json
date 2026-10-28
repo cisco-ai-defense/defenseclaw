@@ -1,8 +1,8 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://schemas.defenseclaw.dev/config/v8/defenseclaw-config.schema.json",
-  "title": "DefenseClaw configuration v8",
-  "description": "Canonical source schema for DefenseClaw config_version 8. Every defined configuration object is closed; extensible maps declare the schema of their values explicitly.",
+  "title": "DefenseClaw configuration v9",
+  "description": "Canonical source schema for DefenseClaw config_version 9, the current version written by this build; config_version 8 sources remain accepted as migration input. Every defined configuration object is closed; extensible maps declare the schema of their values explicitly.",
   "type": "object",
   "additionalProperties": false,
   "required": [
@@ -724,6 +724,14 @@
         },
         "scan_instructions": {
           "type": "boolean"
+        },
+        "unverified_server": {
+          "type": "string",
+          "enum": [
+            "warn",
+            "block"
+          ],
+          "description": "What defenseclaw mcp set and the gateway's install admission do with a server they could not verify (its scan did not finish, including DNS failure, or an OpenCode command outside the trusted install prefixes): warn adds or keeps it with a warning and an audit record, block refuses it (the strict setting). Unset is warn on managed standalone and per-user hosts; Secure Client uses separate closed admission."
         },
         "judge_source": {
           "$ref": "#/$defs/scannerJudgeSource"
@@ -1923,7 +1931,7 @@
           "items": {
             "$ref": "#/$defs/guardrailProfileAssignment"
           },
-          "description": "Ordered profile assignments; the first match wins."
+          "description": "Profile assignments; when several profiles may apply, the one that enforces at least what each of the others does applies, otherwise their strictest combination."
         },
         "default_profile": {
           "type": "string",
@@ -3628,6 +3636,25 @@
         },
         "routes": {
           "$ref": "#/$defs/logRoutes"
+        },
+        "local_stack": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "Written only by local Splunk setup: the record that DefenseClaw started the local Splunk container this destination sends to. Every Splunk destination without it is remote.",
+          "required": [
+            "marker",
+            "container_id"
+          ],
+          "properties": {
+            "marker": {
+              "const": "defenseclaw-local-splunk"
+            },
+            "container_id": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$",
+              "description": "Full ID of the Splunk container local setup started."
+            }
+          }
         }
       },
       "allOf": [

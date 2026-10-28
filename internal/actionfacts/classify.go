@@ -375,6 +375,12 @@ func classifyCommand(out *parseOutput, command *CommandFact) {
 	case "grep", "rg", "ripgrep", "find", "fd":
 		addOperation(command, OperationSearch)
 		classifySearchPaths(out, command, program)
+	case "gawk", "awk", "mawk", "nawk":
+		if !classifyPOSIXAwkRead(out, command) {
+			classifyAwkOutputOperands(out, command, program)
+		}
+	case "uniq":
+		classifyUniqOutputOperand(out, command)
 	case "getcap":
 		classifyGetcap(out, command)
 	case "where", "where.exe":
@@ -475,7 +481,7 @@ func classifyCommand(out *parseOutput, command *CommandFact) {
 		}
 	case "tee":
 		classifyTee(out, command)
-	case "sed":
+	case "sed", "gsed":
 		classifyPOSIXSed(out, command)
 		classifyPOSIXLoggingHardeningControl(out, command)
 	case "add-content":
@@ -753,6 +759,7 @@ func classifyCommand(out *parseOutput, command *CommandFact) {
 		// Known command grammar; the parser or wrapper analysis owns any nested
 		// command source.
 	default:
+		classifyUnknownOutputOperand(out, command)
 		if posixVersionedPythonProgram(program) {
 			classifyPOSIXStdinScriptInterpreter(out, command)
 			break
@@ -1212,6 +1219,24 @@ func canonicalPowerShellPathMutatorParameter(program, key string) string {
 		return "-recurse"
 	case "-fo":
 		return "-force"
+	default:
+		return key
+	}
+}
+
+// These content parameters have unambiguous prefixes for the three file
+// writers. Binding them as data prevents a value from becoming a write path.
+func canonicalPowerShellContentParameter(program, key string) string {
+	switch program {
+	case "set-content", "add-content", "out-file":
+	default:
+		return key
+	}
+	switch {
+	case len(key) >= 3 && strings.HasPrefix("-value", key):
+		return "-value"
+	case len(key) >= 4 && strings.HasPrefix("-inputobject", key):
+		return "-inputobject"
 	default:
 		return key
 	}
@@ -2039,7 +2064,7 @@ func classifyStructuredPowerShellPathMutator(
 			continue
 		}
 		key, joinedValue, joined := powerShellParameter(arg)
-		key = canonicalPowerShellPathMutatorParameter(program, key)
+		key = canonicalPowerShellContentParameter(program, canonicalPowerShellPathMutatorParameter(program, key))
 		consume := func() (string, bool) {
 			if _, duplicate := seen[key]; duplicate {
 				return "", false
@@ -2856,6 +2881,7 @@ func classifySearchPaths(out *parseOutput, command *CommandFact, program string)
 			addOperation(command, OperationExecute)
 			out.markPartial(IssueUnsupportedConstruct)
 		}
+		classifyFindOutputOperands(out, command)
 	case "fd":
 		operands := pathOperands(command.Argv, optionValues(
 			"-c", "-e", "-j", "-d", "-o", "-s", "-t", "-x",
@@ -3240,6 +3266,35 @@ func ApplyStaticPOSIXSedInPlaceLiteralMutation(
 	}
 }
 
+// classifyPOSIXAwkRead accepts a bounded read-only AWK program and its fixed
+// file operands. An unrecognized program or option does not acquire a
+// complete file-read proof.
+func classifyPOSIXAwkRead(out *parseOutput, command *CommandFact) bool {
+	if command.Dialect != DialectPOSIX || !command.ArgvComplete || len(command.Argv) < 2 {
+		return false
+	}
+	program := command.Argv[1]
+	if program != "NR==1 {print}" && program != "{print}" && program != "{print $0}" {
+		return false
+	}
+	for _, operand := range command.Argv[2:] {
+		if operand == "-" {
+			continue
+		}
+		if operand == "" || strings.HasPrefix(operand, "-") || strings.Contains(operand, "=") {
+			return false
+		}
+	}
+	addOperation(command, OperationRead)
+	for _, operand := range command.Argv[2:] {
+		if operand == "-" {
+			continue
+		}
+		appendCommandPath(out, command, PathAccessRead, operand)
+	}
+	return true
+}
+
 func classifyPOSIXSed(out *parseOutput, command *CommandFact) {
 	_, target, ok := StaticPOSIXSedInPlaceLiteralMutation(*command)
 	if ok {
@@ -3308,8 +3363,8 @@ func staticPOSIXSedNumericPrintTargets(command CommandFact) ([]string, bool) {
 	if (command.Dialect != DialectPOSIX && command.Dialect != DialectArgv) ||
 		!command.ArgvComplete || len(command.Argv) < 4 ||
 		len(command.Arguments) != len(command.Argv) ||
-		command.Program != "sed" ||
-		!exactCaseSensitivePOSIXProgram(&command, "sed") ||
+		(command.Program != "sed" && command.Program != "gsed") ||
+		!exactCaseSensitivePOSIXProgram(&command, command.Program) ||
 		(command.Argv[1] != "-n" && command.Argv[1] != "--quiet" &&
 			command.Argv[1] != "--silent") {
 		return nil, false
@@ -9985,6 +10040,12 @@ func classifyGit(out *parseOutput, command *CommandFact) {
 		}
 		if gitConfigMutates(command.Argv[index+1:]) {
 			addOperation(command, OperationConfigChange)
+			for _, key := range []string{"-f", "--file"} {
+				if target := parsed.values[key]; target != "" {
+					addOperation(command, OperationWrite)
+					appendCommandPath(out, command, PathAccessWrite, target)
+				}
+			}
 		}
 	case "show", "log", "diff", "whatchanged":
 		classifyGitReadOutput(out, command, index)

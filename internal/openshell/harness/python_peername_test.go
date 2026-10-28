@@ -113,7 +113,7 @@ with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
 	if run := WorkloadPythonStep().Run; !strings.Contains(run, `"$(command -v python3 || true)" /usr/bin/python3`) {
 		t.Fatalf("the workload Python step does not cover the image's python3: %s", run)
 	}
-	for _, spec := range []*Spec{Hermes, OpenHands, OmniGent} {
+	for _, spec := range []*Spec{Hermes} {
 		steps, err := spec.InstallSteps("")
 		if err != nil || len(steps) != 1 {
 			t.Fatalf("%s install steps = %v, %v", spec.Name, steps, err)

@@ -50,7 +50,7 @@ iot_extensions:
       action: block
 ```
 
-The policy compiler converts these into deterministic finite automata (DFA) tables evaluated in constant time per input symbol. Sequences are tracked per `session_id`.
+The policy compiler converts these into deterministic finite automata (DFA) tables evaluated in constant time per input symbol. Sequences are tracked per `session_id`. Each sequence must list one to four known capabilities; actions must be `allow`, `block`, `warn`, or `escalate`. Unknown capabilities, actions, severity names and malformed values are rejected before either artifact is written. Invalid policy data returns exit 65; an unreadable input returns a concise error and exit 1.
 
 ## Destination rules
 
@@ -58,14 +58,14 @@ The policy compiler converts these into deterministic finite automata (DFA) tabl
 iot_extensions:
   destination_allowlist:
     - "1.1.1.1" # illustrative public IP; replace with one approved for your service
-
+    - "2606:4700:4700::1111" # illustrative public IPv6, written without brackets
 ```
 
 <Callout type="info">
 The compiler rejects `destination_denylist`, `ssrf_protection`, and hostname entries rather than treating them as working controls. The built-in SSRF guard blocks private and metadata addresses across profiles. Replace `1.1.1.1` with an approved public literal for your service.
 </Callout>
 
-The current on-device SSRF check blocks hostname destinations across build profiles until an enforced egress resolver/proxy exists. Network tools also need a nonempty destination. The allowlist therefore needs a canonical public IPv4 or bracketed globally scoped IPv6 literal for a network destination; the parser does not prove external routability. `1.1.1.1` is an illustrative public IP; replace it with an approved address for your service in a real policy. Private, loopback, and link-local addresses, numeric aliases such as octal/hex/decimal forms, and malformed ports are blocked even if listed. A destination absent from the allowlist is also blocked.
+The on-device SSRF check blocks hostname destinations on every build profile. Network tools need a nonempty destination, so the allowlist needs a public IPv4 or globally scoped IPv6 literal. Write an IPv6 entry without brackets (`2606:4700:4700::1111`, not `[2606:4700:4700::1111]`): the device takes the host out of each destination, removes the brackets and compares it with the entries as text (case-insensitive), so `https://[2606:4700:4700::1111]:443/` matches the unbracketed entry, and the compiler refuses a bracketed one. Write the address in the form the tool sends. The parser does not prove the address is routable. Private, loopback and link-local addresses, numeric aliases such as octal, hex or decimal forms, and malformed ports are blocked even if listed. A destination absent from the allowlist is also blocked. `1.1.1.1` in the examples is only an illustration; use an address approved for your service.
 
 ## Built-in rate and escalation behavior
 
@@ -73,7 +73,7 @@ The C runtime has fixed token-bucket limits of 60 tool calls, 30 network request
 
 ## Content inspection
 
-The current C build uses fixed content patterns for secrets, credentials, PII, exfiltration indicators, injection text, and dangerous commands. These patterns are generated from constants in the compiler source and are not configured by the policy YAML. The compiler rejects `content_inspection` and custom regex settings so a policy cannot appear to enable a protection the device will ignore. There is no YAML toggle to disable the built-in SSRF guard.
+The C build uses fixed content patterns for secrets, credentials, PII, exfiltration indicators, injection text, and dangerous commands. These patterns are generated from constants in the compiler source and are not configured by the policy YAML. The compiler rejects `content_inspection` and custom regex settings so a policy cannot appear to enable a protection the device will ignore. There is no YAML toggle to disable the built-in SSRF guard.
 
 ## Compile the policy
 

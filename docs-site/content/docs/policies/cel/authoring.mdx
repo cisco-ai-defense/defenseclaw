@@ -9,13 +9,16 @@ keywords:
   - validate-pack
 ---
 
+<Callout title="Shell examples">
+The shell examples require Bash. On native Windows, use Git Bash or WSL; PowerShell uses different continuation and environment-variable syntax.
+</Callout>
+
 CEL rules are Boolean matchers inside guardrail rule packs. A rule combines a
 typed `expression` for authoritative tool-call facts with a required Go/RE2
 `pattern` for compatible fallback detection.
 
-Start with the [complete rule on the CEL overview](/docs/policies/cel#start-with-a-complete-rule),
-then use this page to adapt it to your command, path, network, or data-flow
-case. The [CEL engine reference](/docs/policies/cel/engine) is normative for
+For a worked rule, see [write a custom rule](/docs/policies/cel).
+Use this page to adapt it to your command, path, network, or data-flow case. The [CEL engine reference](/docs/policies/cel/engine) is normative for
 field types, admitted syntax, costs, and runtime behavior.
 
 ## Rule-file contract
@@ -210,63 +213,16 @@ The authoritative schema is
 
 ## Validate what you author
 
-<Steps>
+Store organization rules in a uniquely named category so omitted bundled components keep the compiled baseline. Run `defenseclaw guardrail validate-pack PATH` to check schema, required metadata, regex fallback, CEL typing and admission, and cost limits ([validate a rule pack](/docs/policies/rulepack-validation)). Compilation does not prove every connector projects the facts your expression reads, so run positive and near-miss calls through each target connector in observe mode, and check the [tool-surface matrix](/docs/policies/cel/tool-call-state#tool-surface-matrix) first. No public CLI injects synthetic `ActionFacts` into one expression.
 
-<Step>
-
-**Keep additions isolated.** Store organization rules in a uniquely named
-category so omitted bundled components continue to inherit the compiled
-baseline.
-
-```text
-~/.defenseclaw/policies/guardrail/my-org/
-  rules/
-    my-org.yaml
-```
-
-</Step>
-
-<Step>
-
-**Compile the complete candidate.** The authoritative loader checks schema,
-required metadata, regex fallback, CEL typing and admission, and cost limits.
+For repository contributors: add Go fixtures and use Go 1.26.4, the CI toolchain. Run the gateway suite through the shard runner with an explicit timeout:
 
 ```bash
-defenseclaw guardrail validate-pack \
-  ~/.defenseclaw/policies/guardrail/my-org
+go test -timeout 30m ./internal/guardrail/semantic ./internal/guardrail
+python3 scripts/go_test_shards.py --package-dir internal/gateway --shard-count 16 -- go test -timeout 30m ./internal/gateway
 ```
 
-See [Validate rule packs](/docs/policies/rulepack-validation) for JSON output,
-exit semantics, partial-pack inheritance, and activation.
-
-</Step>
-
-<Step>
-
-**Exercise representative calls in observe mode.** Compilation does not prove
-that every connector projects the facts your expression expects. Run positive
-and negative cases through each target connector, inspect the finding ID, and
-check the [tool-surface matrix](/docs/policies/cel/tool-call-state#tool-surface-matrix)
-before enabling action mode.
-
-</Step>
-
-</Steps>
-
-There is no public CLI that injects synthetic `ActionFacts` into one CEL
-expression. Validate the complete pack, then test real calls in observe mode.
-
-<Accordions>
-<Accordion title="For repository contributors">
-
-Add focused Go fixtures and run
-`go test -timeout 30m ./internal/guardrail/semantic ./internal/guardrail ./internal/gateway`
-(the gateway package runs longer than the default `go test` deadline).
-When the compiled default catalog changes, also run `make generate-guardrail-catalog` and
-`make check-guardrail-catalog`.
-
-</Accordion>
-</Accordions>
+When the compiled default catalog changes, also run `make generate-guardrail-catalog` and `make check-guardrail-catalog`.
 
 ## Authoring checklist
 

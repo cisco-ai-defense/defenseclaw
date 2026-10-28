@@ -111,7 +111,7 @@ func hostHookGoldenCases() []hostHookGoldenCase {
 		}
 	})
 	add("legacy/all-scripts-no-token", func(t *testing.T, dir string) {
-		if err := WriteAllHookScripts(dir, "127.0.0.1:18999"); err != nil {
+		if err := WriteHookScriptsWithToken(dir, "127.0.0.1:18999", ""); err != nil {
 			t.Fatal(err)
 		}
 	})
@@ -295,7 +295,8 @@ const bridgeHostTemplateDir = "testdata/bridge_host"
 // bridge; the host template keeps each as its {{.Field}} placeholder.
 var bridgeHostTemplateFields = []string{
 	"APIAddr", "TokenFileJS", "FailMode", "HookSocketJS", "ServiceUID",
-	"ForeignHookGuardJS", "InstallMarkerJS", "ListenerProofJS",
+	"ForeignHookGuardJS", "InstallMarkerJS", "ListenerProofJS", "OutageFailMode",
+	"LifecycleMarkerJS", "GatewayBinaryJS",
 }
 
 // renderBridgeHostTemplate resolves a bridge template's sandbox branches to
@@ -311,7 +312,7 @@ func renderBridgeHostTemplate(asset string, managed bool) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	data := map[string]any{"Sandbox": false, "Managed": managed, "SecureClient": false}
+	data := map[string]any{"Sandbox": false, "Managed": managed, "SecureClient": false, "ManagedOutageClosed": managed}
 	for _, field := range bridgeHostTemplateFields {
 		data[field] = "{{." + field + "}}"
 	}
@@ -337,11 +338,7 @@ func renderBridgeHostTemplate(asset string, managed bool) ([]byte, error) {
 
 func TestBridgeHostTemplatesGolden(t *testing.T) {
 	for _, asset := range []string{"opencode-plugin.js", "amp-plugin.ts"} {
-		variants := []bool{false}
-		if asset == "opencode-plugin.js" {
-			variants = append(variants, true)
-		}
-		for _, managed := range variants {
+		for _, managed := range []bool{false, true} {
 			got, err := renderBridgeHostTemplate(asset, managed)
 			if err != nil {
 				t.Fatalf("render %s managed=%v: %v", asset, managed, err)
@@ -377,7 +374,7 @@ func TestManagedBridgeTemplatesCloseOpenRender(t *testing.T) {
 		for _, tc := range []struct {
 			managed, secureClient bool
 			wantClosed            bool
-		}{{true, false, true}, {false, false, false}, {true, true, false}} {
+		}{{true, false, true}, {false, false, true}, {true, true, false}} {
 			body, err := renderHookTemplate(asset, templateData{FailMode: "open", Managed: tc.managed, SecureClient: tc.secureClient})
 			if err != nil {
 				t.Fatal(err)

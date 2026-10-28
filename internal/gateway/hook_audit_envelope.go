@@ -137,6 +137,13 @@ type HookAuditEnvelope struct {
 	// JSON): the Secure Client synthetic Codex notify path writes its row
 	// under ActionConnectorHookSynthetic (issue #1092).
 	AuditActionOverride string `json:"-"`
+
+	occurrenceID string
+	// configGeneration and configHash, when set, are the configuration
+	// the audit row names in place of the current one (a journaled call,
+	// pendingHookProvenance).
+	configGeneration uint64
+	configHash       string
 }
 
 // renderHookAuditEnvelope serializes the envelope as a compact JSON

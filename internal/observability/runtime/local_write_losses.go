@@ -332,8 +332,16 @@ func (journal *localWriteLossJournal) flushAfterDelay() {
 	journal.flushLocked(journal.now())
 }
 
-// flushLocked writes a pending consumed slot, then the running totals. A
-// journal that could not be opened is opened again first.
+// flushLocked writes the running totals or, when no losses are waiting, a
+// pending consumed slot. A journal that could not be opened is opened again
+// first.
+//
+// It writes one slot per flush. The totals of a newer generation supersede a
+// consumed marker of the reported one, because only the newest valid slot is
+// read back. Writing the marker first and then the totals left the marker as
+// the newest valid slot when the second write was torn, which hid the newer
+// losses (GAP-1319). A torn single slot leaves the previous slot as the state:
+// at worst a reported generation is reported again, never a loss hidden.
 func (journal *localWriteLossJournal) flushLocked(now time.Time) {
 	if journal.path == "" || journal.closed ||
 		!journal.dirty && journal.marker == nil && (journal.file != nil || !journal.failing) {
@@ -346,19 +354,17 @@ func (journal *localWriteLossJournal) flushLocked(now time.Time) {
 			return
 		}
 	}
-	if journal.marker != nil {
-		if err := journal.writeSlotLocked(*journal.marker); err != nil {
-			journal.noteFailureLocked(err)
-			return
-		}
-		journal.marker = nil
-	}
+	slot := journal.marker
 	if journal.dirty && journal.generation != ([16]byte{}) {
-		if err := journal.writeSlotLocked(localWriteLossSlot{generation: journal.generation, totals: journal.totals}); err != nil {
+		slot = &localWriteLossSlot{generation: journal.generation, totals: journal.totals}
+	}
+	if slot != nil {
+		if err := journal.writeSlotLocked(*slot); err != nil {
 			journal.noteFailureLocked(err)
 			return
 		}
 	}
+	journal.marker = nil
 	journal.dirty = false
 	if journal.failing {
 		journal.failing = false

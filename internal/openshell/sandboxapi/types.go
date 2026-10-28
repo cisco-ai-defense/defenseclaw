@@ -17,6 +17,7 @@
 package sandboxapi
 
 import (
+	"encoding/json"
 	"slices"
 	"strconv"
 	"strings"
@@ -47,6 +48,14 @@ const (
 	// the Status.
 	PathReady = "/api/v1/sandbox/ready"
 )
+
+// ReadyRequest names the agent whose policy must allow a first run before
+// the managed daemon installs or starts the account's OpenShell. A request
+// that names none (a CLI of DefenseClaw 1.0.3 or older sends an empty
+// object) is judged for the agent the daemon's managed configuration runs.
+type ReadyRequest struct {
+	Harness string `json:"harness,omitempty"`
+}
 
 // PolicyDecisionRequest records one managed user's lasting host decision
 // through a sandbox registration. Kind is allow or block.
@@ -92,8 +101,16 @@ type Status struct {
 	Profile string      `json:"profile,omitempty"`
 	Admin   AdminStatus `json:"admin"`
 	// Sandboxes counts the DefenseClaw sandboxes; Running those Ready.
-	Sandboxes        int       `json:"sandboxes"`
-	Running          int       `json:"running"`
+	Sandboxes int `json:"sandboxes"`
+	Running   int `json:"running"`
+	// Live counts those that may hold compute a stop of the OpenShell
+	// gateway would end unflushed or half started (manager.HoldsCompute):
+	// the running ones, those starting or stopping or in an unknown phase,
+	// and a MicroVM that completed or is in OpenShell's error state, which
+	// OpenShell does not stop and whose VM may still run, until OpenShell
+	// reports it stopped or deleted (openshell.HoldsGateway). Unset by a
+	// daemon before DefenseClaw 1.0.4 (Busy).
+	Live             *int      `json:"live,omitempty"`
 	PendingApprovals int       `json:"pending_approvals"`
 	LastReconcile    time.Time `json:"last_reconcile,omitzero"`
 	// StartedAt is when the daemon's sandbox subsystem started. Nothing
@@ -118,6 +135,20 @@ type Status struct {
 	Managed *ManagedStatus `json:"managed,omitempty"`
 }
 
+// Busy is how many sandboxes may hold compute (Live, and never fewer than
+// Running): what a stop of the gateway or of the daemon, which takes the
+// gateway with it, waits for. A daemon that does not report Live does not
+// say which phases its sandboxes are in, so every one of them counts.
+func (s *Status) Busy() int {
+	if s == nil {
+		return 0
+	}
+	if s.Live == nil {
+		return max(s.Sandboxes, s.Running)
+	}
+	return max(*s.Live, s.Running)
+}
+
 // ManagedStatus is the managed part of Status: the caller's own sandbox
 // policy as the managed gateway resolved it, and the daemon's OpenShell.
 type ManagedStatus struct {
@@ -125,6 +156,16 @@ type ManagedStatus struct {
 	// organization's floor alone) and Description its description.
 	Profile     string `json:"profile"`
 	Description string `json:"description,omitempty"`
+	// Allowed is true only when the managed gateway allows every configured
+	// sandbox harness for this account. An unavailable policy answer leaves
+	// it false, so doctor cannot claim broad readiness without one.
+	Allowed bool `json:"allowed"`
+	// LegacyAllowedMissing is true only after decoding a status from an older
+	// daemon that did not send allowed. It is not an authorization verdict.
+	LegacyAllowedMissing bool `json:"-"`
+	// DeniedHarnesses names configured harnesses whose profile forbids a
+	// sandbox. Empty with Allowed false means the policy could not be read.
+	DeniedHarnesses []string `json:"denied_harnesses,omitempty"`
 	// HostRunGate, when present, is the caller's gateway decision carried
 	// from a managed explain into a launch banner.
 	HostRunGate string `json:"host_run_gate,omitempty"`
@@ -149,9 +190,18 @@ type ManagedStatus struct {
 	// MicroVM driver can't run (docker, none or "").
 	DriverReason   string `json:"driver_reason,omitempty"`
 	DriverFallback string `json:"driver_fallback,omitempty"`
+	// NextDriver is the compute driver the managed gateway gives the
+	// caller's next sandbox start (the daemon's own probe at the start
+	// decides), whatever Driver says of the last sandbox: a stopped one may
+	// be of a driver the organization replaced since. "" when the managed
+	// gateway does not say, or from a daemon before DefenseClaw 1.0.4.
+	NextDriver string `json:"next_driver,omitempty"`
 	// PendingRestart says an upgrade or setting change waits for the
 	// caller's sandboxes to stop.
 	PendingRestart bool `json:"pending_restart,omitempty"`
+	// RenderedConfigDrift says the root-owned OpenShell gateway render no
+	// longer matches the lifecycle's independently pinned digest.
+	RenderedConfigDrift bool `json:"rendered_config_drift,omitempty"`
 	// OtherGateways are the OpenShell gateways the caller's account runs
 	// besides the one the organization's service runs, each as "pid N:
 	// command": they share the account's MicroVM state with the managed
@@ -160,6 +210,28 @@ type ManagedStatus struct {
 	// Unavailable is why sandboxes can't run for the caller ("" = they
 	// can).
 	Unavailable string `json:"unavailable,omitempty"`
+}
+
+// UnmarshalJSON preserves the difference between an older daemon omitting
+// allowed and a current daemon explicitly denying it.
+func (m *ManagedStatus) UnmarshalJSON(data []byte) error {
+	type plain ManagedStatus
+	var decoded plain
+	var wire struct {
+		*plain
+		Allowed *bool `json:"allowed"`
+	}
+	wire.plain = &decoded
+	if err := json.Unmarshal(data, &wire); err != nil {
+		return err
+	}
+	*m = ManagedStatus(decoded)
+	if wire.Allowed == nil {
+		m.LegacyAllowedMissing = true
+	} else {
+		m.Allowed = *wire.Allowed
+	}
+	return nil
 }
 
 // Gateway is the OpenShell gateway the daemon is connected to.
@@ -373,6 +445,16 @@ type Sandbox struct {
 	// Orphaned marks an OpenShell sandbox with DefenseClaw labels but no
 	// DefenseClaw binding; its hooks cannot authenticate.
 	Orphaned bool `json:"orphaned,omitempty"`
+	// OldSupervisor marks a sandbox whose session runs the supervisor of an
+	// OpenShell release older than openshell.SupportedMin (or of one its
+	// record does not name), whose network broker can bypass sandbox policy
+	// (NVIDIA/OpenShell#4494): a ready session, or a MicroVM whose workload
+	// ended but whose VM may still run. The daemon never stops it on its
+	// own: it closes its egress proxy and withdraws its network rules, which
+	// does not contain that broker, so it reports it unprotected (Warnings,
+	// with the command that ends it) and creates and starts no sandbox
+	// while it runs. The CLI runs nothing in it.
+	OldSupervisor bool `json:"old_supervisor,omitempty"`
 	// NestedRepos are the git repositories the nested-repository guard
 	// found in a mounted project during the current session.
 	NestedRepos []NestedRepo `json:"nested_repos,omitempty"`
@@ -759,6 +841,13 @@ type StartRequest struct {
 	// an earlier session's changes: they are accepted, and undo no longer
 	// reverts them.
 	NewSnapshot bool `json:"new_snapshot,omitempty"`
+	// EndVM starts a MicroVM whose workload ended but whose VM may still run
+	// what it left running (openshell.LingeringVM): OpenShell's start ends
+	// that VM with no flush first, so what it has not written to its disk is
+	// lost. Without it the daemon refuses such a start with
+	// CodeConflict. A daemon before 1.0.4, which refuses no such start,
+	// refuses the field (Client.Start sends the start again without it).
+	EndVM bool `json:"end_vm,omitempty"`
 	// LLM is the model credential as the caller's environment holds it now
 	// (secret values): when it is of the profile the sandbox was created
 	// with and differs from the one its provider holds (a rotated or
@@ -1155,6 +1244,12 @@ type ManagedExplain struct {
 	// MCPBlocked those it leaves out, with the reason.
 	MCPIncluded []string     `json:"mcp_included,omitempty"`
 	MCPBlocked  []ManagedMCP `json:"mcp_blocked,omitempty"`
+	// MCPProjectCount is how many MCP servers the project of a new run
+	// defines (.mcp.json, .codex/config.toml), and MCPProjectBlocked says
+	// the pack's mcp.project_servers keeps them from starting. The sandbox
+	// daemon reads the project as the caller; the gateway never sets them.
+	MCPProjectCount   int  `json:"mcp_project_count,omitempty"`
+	MCPProjectBlocked bool `json:"mcp_project_blocked,omitempty"`
 	// WorkdirMode is copy on managed hosts; AllowMount, AllowHostPorts and
 	// AllowYolo are the floor's.
 	WorkdirMode    string `json:"workdir_mode,omitempty"`
@@ -1441,6 +1536,11 @@ const ReasonToolHostRefused = "tool_host_refused"
 // when it goes down without DefenseClaw stopping it: its last writes may
 // be lost (no flush).
 const ReasonUnflushedStop = "unflushed_stop"
+
+// ReasonOldSupervisor is the Reason of the (HIGH) finding event a running
+// sandbox gets when its session started on an OpenShell release older than
+// openshell.SupportedMin, whose supervisor it keeps until it stops.
+const ReasonOldSupervisor = "old_supervisor"
 
 // ReasonUpstreamFailed is the Reason of the (INFO) finding event the feed
 // gets the first time the egress proxy could not complete an allowed

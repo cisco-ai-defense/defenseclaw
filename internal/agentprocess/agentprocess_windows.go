@@ -23,6 +23,9 @@ const stillActive = 259
 
 // currentClock reads the wall clock as a FILETIME, the unit of process
 // creation times.
+// clockUnitsPerSecond is the unit of currentClock.
+const clockUnitsPerSecond = 10_000_000
+
 func currentClock() (string, int64, bool) {
 	now := windows.NsecToFiletime(time.Now().UnixNano())
 	return "", int64(now.HighDateTime)<<32 | int64(now.LowDateTime), true

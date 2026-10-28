@@ -369,10 +369,16 @@ func TestLauncherJobControl(t *testing.T) {
 		// running; an echoed ^C can still target the launcher's group.
 		stub := stubState + "trap 'echo stub-got-INT; exit 9' INT; " +
 			"until state=$(st); [[ $state =~ pgrp=([0-9]+).*tpgid=([0-9]+) ]] && [[ ${BASH_REMATCH[1]} == ${BASH_REMATCH[2]} ]]; do :; done; " +
-			// Keep the stub in Bash's read builtin after readiness. Starting
-			// external sleep children creates a transition during which the
-			// test cannot attribute a lost interrupt to PTY job control.
-			"echo stub-up; read -r _; exit 97\n"
+			// Keep the stub in Bash builtins after readiness: external sleep
+			// children create a transition during which the test cannot
+			// attribute a lost interrupt to PTY job control. A single
+			// blocking read is not enough either: a SIGINT that lands after
+			// Bash checked for pending traps but before read(2) blocks is
+			// only acted on when the read returns, which it never did, so
+			// one run in a few hundred hung under CPU contention. Bash runs
+			// the trap at the next command boundary, so a bounded read in a
+			// loop always reaches it.
+			"echo stub-up; while :; do read -r -t 0.2 _ && exit 97; done\n"
 		r, _ := run(t, stub)
 		r.waitOutput("stub-up")
 		if _, err := r.master.Write([]byte{0x03}); err != nil {

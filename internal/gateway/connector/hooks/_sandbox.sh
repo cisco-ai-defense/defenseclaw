@@ -138,7 +138,7 @@ defenseclaw_sandbox_require_token() {
   if [ -z "$reason" ]; then
     return 0
   fi
-  defenseclaw_log_hook_failure "$connector" "$hook_name" "$reason" transport closed
+  defenseclaw_log_hook_failure "$connector" "$hook_name" "$reason" transport closed fail_closed
   echo "defenseclaw: ${reason}, blocking ${subject} (sandbox hooks fail closed)" >&2
   exit 2
 }
@@ -254,7 +254,11 @@ defenseclaw_sandbox_post() {
       "${auth_args[@]+"${auth_args[@]}"}" \
       --connect-timeout "$DC_SANDBOX_CONNECT_TIMEOUT" \
       --max-time "$max_time" \
-      --data-binary @- 2>/dev/null 7< <(printf 'header = "%s"\n' "$auth"))" || status=$?
+      --data-binary @- 2>/dev/null 7< <(printf 'header = "%s"\n' "$auth") |
+      tr '\000' '\001'
+      # Command substitution drops NUL bytes: keep them visible as U+0001,
+      # which jq refuses unescaped, so "al<NUL>low" is no allow (GAP-1008).
+      exit "${PIPESTATUS[1]}")" || status=$?
     if [ "$status" -eq 0 ]; then
       code="${out##*$'\n'}"
       case "$code" in
@@ -278,4 +282,32 @@ defenseclaw_sandbox_post() {
     return "$status"
   fi
   printf '%s' "$out"
+}
+
+# The buffered relay cannot carry the native hook's full-duplex receipt.
+# A new managed gateway adds delivery_receipt to a proposed tool answer; an
+# older gateway omits it. A successful receipt post commits that proposal's
+# final audit row before the hook hands the answer to its agent. The same
+# binding token is used on both calls, and any failed acknowledgement closes
+# the hook. The receipt ID is an opaque UUID, never shell syntax or a path.
+defenseclaw_sandbox_confirm_receipt() {
+  local path="$1" result="$2" receipt="" body="" reply="" code="" received=""
+  # Use the same baked sandbox binding token as the first request. The post
+  # helper moves this header into curl's descriptor-backed config, keeping
+  # the bearer off every external process command line.
+  case "${DEFENSECLAW_SANDBOX_TOKEN:-}" in
+    ''|*$'\n'*|*$'\r'*) return 1 ;;
+  esac
+  receipt="$(printf '%s' "$result" | _dc_jq -r '.delivery_receipt // empty' 2>/dev/null)" || return 1
+  [ -n "$receipt" ] || return 0
+  [[ "$receipt" =~ ^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$ ]] || return 1
+  body="$(printf '{"delivery_receipt":"%s","result":"ack"}' "$receipt")"
+  reply="$(defenseclaw_sandbox_post "$path" "$body" 3 3 \
+    -H "Content-Type: application/json" \
+    -H "X-DefenseClaw-Client: sandbox-hook/1.0" \
+    -H "Authorization: Bearer ${DEFENSECLAW_SANDBOX_TOKEN}")" || return 1
+  code="${reply##*$'\n'}"
+  [ "$code" = 200 ] || return 1
+  received="$(printf '%s' "${reply%$'\n'*}" | _dc_jq -r '.received // false' 2>/dev/null)" || return 1
+  [ "$received" = true ]
 }

@@ -13,6 +13,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
+from defenseclaw.commands import cmd_doctor
 from defenseclaw.commands.cmd_doctor import (
     _authenticated_origin_main_gateway_lifecycle_trust,
     _check_gateway_auth,
@@ -28,7 +29,9 @@ from defenseclaw.commands.cmd_doctor import (
     _gateway_listener_pid,
     _GatewayTrust,
     _http_probe,
+    _linux_gateway_listener_evidence,
     _linux_gateway_listener_pid,
+    _lsof_gateway_listener_evidence,
     _remove_stale_pid_if_unchanged,
     _run_fixers,
     _subsystem_expected_enabled,
@@ -124,6 +127,29 @@ def _origin_main_gateway_trust(
     )
 
 
+def _trust_by_generation(before, after):
+    """Return before until the lifecycle restarts the gateway, then after.
+
+    Doctor reads health only from a verified accepting process, so every
+    health read, lifecycle proof and replacement check consults the listener
+    trust. The mock answers by gateway generation, not by call order.
+    """
+    state = {"restarted": False}
+
+    def trust(*_args, **_kwargs):
+        return after if state["restarted"] else before
+
+    def restarted(*_args, **_kwargs):
+        state["restarted"] = True
+        return (True, "")
+
+    def restarted_bool(*_args, **_kwargs):
+        state["restarted"] = True
+        return True
+
+    return trust, restarted, restarted_bool
+
+
 def _health(**states: str) -> str:
     return json.dumps({name: {"state": state} for name, state in states.items()})
 
@@ -210,6 +236,35 @@ def test_gateway_auth_fails_actionably_when_token_missing(tmp_path):
     row = next(row for row in result.checks if row["label"] == "Gateway authentication")
     assert row["status"] == "fail"
     assert "doctor --fix" in row["detail"]
+
+
+@pytest.mark.skipif(os.name == "nt" or os.geteuid() == 0, reason="needs a POSIX account that mode 000 locks out")
+def test_gateway_auth_names_an_unreadable_dotenv_and_fix_keeps_it(tmp_path):
+    # GAP-0662: the token exists in a .env this account cannot read; doctor
+    # names that and --fix does not replace the file with a new token.
+    dotenv = tmp_path / ".env"
+    dotenv.write_text("DEFENSECLAW_GATEWAY_TOKEN=" + "cd" * 32 + "\nOTHER_SECRET=x\n", encoding="utf-8")
+    dotenv.chmod(0)
+    cfg = _cfg(str(tmp_path))
+    clean_env = {
+        key: value
+        for key, value in os.environ.items()
+        if key not in {"DEFENSECLAW_GATEWAY_TOKEN", "OPENCLAW_GATEWAY_TOKEN"}
+    }
+    result = _DoctorResult()
+    try:
+        with patch.dict(os.environ, clean_env, clear=True):
+            _check_gateway_auth(cfg, result)
+            tag, detail = _fix_gateway_token(cfg, assume_yes=True)
+    finally:
+        dotenv.chmod(0o600)
+
+    row = next(row for row in result.checks if row["label"] == "Gateway authentication")
+    assert row["status"] == "fail"
+    assert "cannot read" in row["detail"] and str(dotenv) in row["detail"]
+    assert "generate" not in row["detail"]
+    assert tag == "fail" and "cannot read" in detail
+    assert dotenv.read_text(encoding="utf-8") == "DEFENSECLAW_GATEWAY_TOKEN=" + "cd" * 32 + "\nOTHER_SECRET=x\n"
 
 
 def test_gateway_auth_probes_status_with_bearer_without_rendering_token(tmp_path):
@@ -388,7 +443,7 @@ def test_http_probe_normalizes_malformed_ipv6_authority() -> None:
 @pytest.mark.skipif(os.name == "nt", reason="/proc socket layout is POSIX-only")
 def test_linux_listener_owner_falls_back_to_proc_without_lsof(tmp_path):
     proc_root = tmp_path / "proc"
-    net = proc_root / "net"
+    net = proc_root / "self" / "net"
     descriptors = proc_root / "4242" / "fd"
     net.mkdir(parents=True)
     descriptors.mkdir(parents=True)
@@ -405,10 +460,10 @@ def test_linux_listener_owner_falls_back_to_proc_without_lsof(tmp_path):
 @pytest.mark.skipif(os.name == "nt", reason="/proc socket layout is POSIX-only")
 def test_linux_listener_owner_filters_the_exact_connect_address(tmp_path):
     proc_root = tmp_path / "proc"
-    net = proc_root / "net"
+    net = proc_root / "self" / "net"
     for pid in ("4242", "9001"):
         (proc_root / pid / "fd").mkdir(parents=True)
-    net.mkdir(exist_ok=True)
+    net.mkdir(parents=True, exist_ok=True)
     port = 18_970
     header = "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt uid timeout inode\n"
     rows = (
@@ -430,6 +485,119 @@ def test_linux_listener_owner_filters_the_exact_connect_address(tmp_path):
         )
         == 4242
     )
+
+
+def _proc_process(proc_root, pid: int, parent: int, executable, argv: bytes, sockets=()) -> None:
+    process = proc_root / str(pid)
+    (process / "fd").mkdir(parents=True)
+    (process / "stat").write_text(f"{pid} (defenseclaw-gat) S {parent} 1 1 0 -1\n", encoding="ascii")
+    (process / "cmdline").write_bytes(argv)
+    os.symlink(executable, process / "exe")
+    for index, inode in enumerate(sockets):
+        os.symlink(f"socket:[{inode}]", process / "fd" / str(3 + index))
+
+
+def _proc_listener(tmp_path, port: int):
+    proc_root = tmp_path / "proc"
+    (proc_root / "self" / "net").mkdir(parents=True)
+    header = "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt uid timeout inode\n"
+    row = f"   0: 0100007F:{port:04X} 00000000:0000 0A 00000000:00000000 00:00000000 00000000 1000 0 12345 1\n"
+    (proc_root / "self" / "net" / "tcp").write_text(header + row, encoding="ascii")
+    (proc_root / "self" / "net" / "tcp6").write_text(header, encoding="ascii")
+    gateway = tmp_path / "defenseclaw-gateway"
+    gateway.write_bytes(b"gateway")
+    return proc_root, gateway
+
+
+@pytest.mark.skipif(os.name == "nt", reason="/proc socket layout is POSIX-only")
+def test_linux_listener_held_by_the_gateways_fork_before_exec_is_the_gateways(tmp_path):
+    # GAP-0535: between fork and exec a child of the gateway holds a copy of
+    # the listening socket and runs the gateway's image. On dc-rhel a scan
+    # saw such children every few seconds; doctor reported them as a second
+    # owner and printed FAIL Gateway home.
+    port = 18_970
+    proc_root, gateway = _proc_listener(tmp_path, port)
+    argv = os.fsencode(gateway) + b"\x00"
+    _proc_process(proc_root, 4242, 1, gateway, argv, ["12345"])
+    _proc_process(proc_root, 4243, 4242, gateway, argv, ["12345"])
+
+    evidence = _linux_gateway_listener_evidence(port, proc_root=str(proc_root))
+
+    assert (evidence.status, evidence.pid) == ("ok", 4242)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="/proc socket layout is POSIX-only")
+def test_linux_listener_second_owner_is_named_and_fails_closed(tmp_path):
+    port = 18_970
+    proc_root, gateway = _proc_listener(tmp_path, port)
+    other = tmp_path / "other"
+    other.write_bytes(b"other")
+    argv = os.fsencode(gateway) + b"\x00"
+    _proc_process(proc_root, 4242, 1, gateway, argv, ["12345"])
+    # A child that exec'd another program and kept the descriptor, and an
+    # unrelated process with the gateway's image, are real second owners.
+    _proc_process(proc_root, 4243, 4242, other, argv, ["12345"])
+    _proc_process(proc_root, 9001, 1, gateway, argv, ["12345"])
+
+    evidence = _linux_gateway_listener_evidence(port, proc_root=str(proc_root))
+
+    assert evidence.status == "ambiguous"
+    assert evidence.reason == (
+        "multiple processes own listeners for the configured API endpoint: PIDs 4242, 4243, 9001"
+    )
+
+
+@pytest.mark.skipif(os.name == "nt", reason="/proc socket layout is POSIX-only")
+def test_linux_listener_holder_that_let_go_during_the_scan_is_not_an_owner(tmp_path):
+    port = 18_970
+    proc_root, gateway = _proc_listener(tmp_path, port)
+    other = tmp_path / "scanner"
+    other.write_bytes(b"scanner")
+    argv = os.fsencode(gateway) + b"\x00"
+    _proc_process(proc_root, 4242, 1, gateway, argv, ["12345"])
+    _proc_process(proc_root, 4243, 4242, other, b"scanner\x00", ["12345"])
+    original = cmd_doctor._linux_process_socket_inodes
+    seen: list[str] = []
+
+    def exec_after_first_look(process_path: str) -> set[str]:
+        # The child exec'd (closing the gateway's descriptors) after the
+        # scan read its fd table once.
+        if process_path.endswith("4243"):
+            seen.append(process_path)
+            if len(seen) > 1:
+                return set()
+        return original(process_path)
+
+    with patch.object(cmd_doctor, "_linux_process_socket_inodes", side_effect=exec_after_first_look):
+        evidence = _linux_gateway_listener_evidence(port, proc_root=str(proc_root))
+
+    assert (evidence.status, evidence.pid) == ("ok", 4242)
+
+
+def test_lsof_listener_held_by_the_gateways_fork_before_exec_is_the_gateways():
+    # GAP-0535 on macOS: lsof names the parent (R) and command (c).
+    completed = SimpleNamespace(
+        returncode=0,
+        stdout=(
+            "p4242\nR1\ncdefenseclaw-gateway\nf3\nn127.0.0.1:18970\n"
+            "p4243\nR4242\ncdefenseclaw-gateway\nf3\nn127.0.0.1:18970\n"
+        ),
+    )
+    with (
+        patch("defenseclaw.commands.cmd_doctor._trusted_lsof_path", return_value="/usr/sbin/lsof"),
+        patch("defenseclaw.commands.cmd_doctor.subprocess.run", return_value=completed),
+    ):
+        evidence = _lsof_gateway_listener_evidence(18_970, host="127.0.0.1")
+    assert (evidence.status, evidence.pid) == ("ok", 4242)
+
+    completed.stdout = completed.stdout.replace("R4242\ncdefenseclaw-gateway", "R4242\ncpython3")
+    with (
+        patch("defenseclaw.commands.cmd_doctor._trusted_lsof_path", return_value="/usr/sbin/lsof"),
+        patch("defenseclaw.commands.cmd_doctor.subprocess.run", return_value=completed),
+    ):
+        evidence = _lsof_gateway_listener_evidence(18_970, host="127.0.0.1")
+    assert evidence.status == "ambiguous"
+    assert evidence.reason.endswith(": PIDs 4242, 4243")
 
 
 def test_lsof_listener_owner_fails_closed_when_multiple_pids_are_reported():
@@ -465,7 +633,7 @@ def test_lsof_listener_owner_filters_the_exact_connect_address():
         assert _gateway_listener_pid(18_970, host="127.0.0.2") == 4242
 
     assert "-i4TCP:18970" in run.call_args.args[0]
-    assert "-Fpn" in run.call_args.args[0]
+    assert "-FpRcn" in run.call_args.args[0]
 
 
 def test_lsof_listener_owner_accepts_wildcard_bind_for_loopback_target():
@@ -1306,19 +1474,20 @@ def test_fix_gateway_service_restarts_deterministic_config_runtime_drift(
         pid=4343,
         start_identity="101",
     )
+    trust_for, restarted, _ = _trust_by_generation(before_trust, after_trust)
 
     with (
         patch(
             "defenseclaw.commands.cmd_doctor._http_probe",
             side_effect=[(200, before_health), (200, after_health)],
-        ),
+        ) as probe,
         patch(
             "defenseclaw.commands.cmd_doctor._trusted_gateway_listener",
-            side_effect=[before_trust, after_trust],
+            side_effect=trust_for,
         ) as trust,
         patch(
             "defenseclaw.commands.cmd_doctor._repair_gateway_lifecycle",
-            return_value=(True, ""),
+            side_effect=restarted,
         ) as repair,
     ):
         tag, detail = _fix_gateway_service(cfg, assume_yes=True)
@@ -1326,7 +1495,9 @@ def test_fix_gateway_service_restarts_deterministic_config_runtime_drift(
     assert tag == "pass"
     assert expected_reason in detail
     repair.assert_called_once_with(cfg, start_if_stopped=True)
-    assert trust.call_count == 2
+    # Health read, lifecycle proof, verified health read, replacement proof.
+    assert trust.call_count == 4
+    assert [call.kwargs["bound_peer"] for call in probe.call_args_list] == [before_trust, after_trust]
 
 
 def test_origin_main_bridge_refuses_foreign_listener_before_sending_token(tmp_path):
@@ -1413,6 +1584,7 @@ def test_doctor_service_repair_migrates_linux_env_bound_origin_main_pid_after_ap
     cfg = _cfg(str(tmp_path), token="configured-token")
     cfg.guardrail = SimpleNamespace(enabled=True)
     current_controller = os.fspath(tmp_path / "current-defenseclaw-gateway")
+    trust_for, _, restarted_bool = _trust_by_generation(origin_main, replacement)
 
     with (
         patch(
@@ -1426,8 +1598,7 @@ def test_doctor_service_repair_migrates_linux_env_bound_origin_main_pid_after_ap
         ) as probe,
         patch(
             "defenseclaw.commands.cmd_doctor._trusted_gateway_listener",
-            # The first call is the foreign-port-holder check.
-            side_effect=[origin_main, origin_main, replacement],
+            side_effect=trust_for,
         ),
         patch(
             "defenseclaw.commands.cmd_doctor._managed_gateway_process_trust",
@@ -1443,7 +1614,7 @@ def test_doctor_service_repair_migrates_linux_env_bound_origin_main_pid_after_ap
         ) as confirm,
         patch(
             "defenseclaw.commands.cmd_setup._restart_defense_gateway",
-            return_value=True,
+            side_effect=restarted_bool,
         ) as restart,
         patch(
             "defenseclaw.commands.cmd_setup._gateway_lifecycle_executable",
@@ -1484,18 +1655,23 @@ def test_fix_gateway_service_does_not_restart_operational_subsystem_errors(
         cfg._source_config_version = 8
     else:
         cfg.openshell = SimpleNamespace(enabled=True)
+    peer = _strong_gateway_trust(str(tmp_path))
 
     with (
         patch(
             "defenseclaw.commands.cmd_doctor._http_probe",
             return_value=(200, _health(api="running", **{subsystem: "error"})),
-        ),
+        ) as probe,
         patch(
             "defenseclaw.commands.cmd_doctor._repair_gateway_lifecycle",
         ) as repair,
         patch(
             "defenseclaw.commands.cmd_doctor._trusted_gateway_listener",
+            return_value=peer,
         ) as trust,
+        patch(
+            "defenseclaw.commands.cmd_doctor._trusted_gateway_listener_for_lifecycle",
+        ) as lifecycle_trust,
     ):
         tag, detail = _fix_gateway_service(cfg, assume_yes=True)
 
@@ -1503,7 +1679,10 @@ def test_fix_gateway_service_does_not_restart_operational_subsystem_errors(
     assert "automatic restart was not attempted" in detail
     assert f"{subsystem} reports error" in detail
     repair.assert_not_called()
-    trust.assert_not_called()
+    # Only the health read's peer check runs; no lifecycle proof is attempted.
+    trust.assert_called_once()
+    lifecycle_trust.assert_not_called()
+    assert probe.call_args.kwargs["bound_peer"] is peer
 
 
 def test_fix_gateway_service_restarts_running_guardrail_when_disabled(
@@ -1518,6 +1697,7 @@ def test_fix_gateway_service_restarts_running_guardrail_when_disabled(
         pid=4343,
         start_identity="101",
     )
+    trust_for, restarted, _ = _trust_by_generation(before_trust, after_trust)
 
     with (
         patch(
@@ -1529,11 +1709,11 @@ def test_fix_gateway_service_restarts_running_guardrail_when_disabled(
         ),
         patch(
             "defenseclaw.commands.cmd_doctor._trusted_gateway_listener",
-            side_effect=[before_trust, after_trust],
+            side_effect=trust_for,
         ),
         patch(
             "defenseclaw.commands.cmd_doctor._repair_gateway_lifecycle",
-            return_value=(True, ""),
+            side_effect=restarted,
         ) as repair,
     ):
         tag, detail = _fix_gateway_service(cfg, assume_yes=True)
@@ -1546,16 +1726,24 @@ def test_fix_gateway_service_restarts_running_guardrail_when_disabled(
 def test_fix_gateway_service_uses_explicit_api_bind_without_proxy(tmp_path):
     cfg = _cfg(str(tmp_path), token="configured")
     cfg.gateway.api_bind = "10.200.0.1"
+    peer = _strong_gateway_trust(str(tmp_path))
 
-    with patch(
-        "defenseclaw.commands.cmd_doctor._http_probe",
-        return_value=(200, _health(api="running")),
-    ) as probe:
+    with (
+        patch(
+            "defenseclaw.commands.cmd_doctor._http_probe",
+            return_value=(200, _health(api="running")),
+        ) as probe,
+        patch(
+            "defenseclaw.commands.cmd_doctor._trusted_gateway_listener",
+            return_value=peer,
+        ),
+    ):
         tag, _ = _fix_gateway_service(cfg, assume_yes=True)
 
     assert tag == "skip"
     assert probe.call_args.args[0] == "http://10.200.0.1:18970/health"
     assert probe.call_args.kwargs["bypass_proxy"] is True
+    assert probe.call_args.kwargs["bound_peer"] is peer
 
 
 def test_fix_dotenv_permissions_uses_private_windows_dacl(tmp_path):
@@ -1721,6 +1909,7 @@ def test_fix_gateway_service_restarts_stale_enabled_subsystem(tmp_path):
         start_identity="101",
     )
     current_controller = os.fspath(tmp_path / "current-defenseclaw-gateway")
+    trust_for, _, restarted_bool = _trust_by_generation(before_trust, after_trust)
 
     with (
         patch(
@@ -1732,11 +1921,11 @@ def test_fix_gateway_service_restarts_stale_enabled_subsystem(tmp_path):
         ),
         patch(
             "defenseclaw.commands.cmd_doctor._trusted_gateway_listener",
-            side_effect=[before_trust, after_trust],
+            side_effect=trust_for,
         ),
         patch(
             "defenseclaw.commands.cmd_setup._restart_defense_gateway",
-            return_value=True,
+            side_effect=restarted_bool,
         ) as restart,
         patch(
             "defenseclaw.commands.cmd_setup._gateway_lifecycle_executable",
@@ -1762,12 +1951,42 @@ def test_fix_gateway_service_restarts_stale_enabled_subsystem(tmp_path):
 def test_fix_gateway_service_skips_healthy_current_gateway(tmp_path):
     cfg = _cfg(str(tmp_path), token="configured")
     body = _health(api="running", gateway="disabled", guardrail="disabled")
+    peer = _strong_gateway_trust(str(tmp_path))
 
-    with patch("defenseclaw.commands.cmd_doctor._http_probe", return_value=(200, body)):
+    with (
+        patch("defenseclaw.commands.cmd_doctor._http_probe", return_value=(200, body)) as probe,
+        patch(
+            "defenseclaw.commands.cmd_doctor._trusted_gateway_listener",
+            return_value=peer,
+        ),
+    ):
         tag, detail = _fix_gateway_service(cfg, assume_yes=True)
 
     assert tag == "skip"
     assert "healthy and current" in detail
+    assert probe.call_args.kwargs["bound_peer"] is peer
+
+
+def test_fix_gateway_service_reads_no_health_from_an_unverified_listener(tmp_path):
+    """A listener Doctor cannot bind to its gateway gets no health request."""
+    cfg = _cfg(str(tmp_path), token="configured")
+    foreign = _GatewayTrust("foreign_listener", "configured API endpoint is owned by another account")
+
+    with (
+        patch("defenseclaw.commands.cmd_doctor._http_probe") as probe,
+        patch(
+            "defenseclaw.commands.cmd_doctor._trusted_gateway_listener",
+            return_value=foreign,
+        ),
+        patch("defenseclaw.commands.cmd_doctor._repair_gateway_lifecycle") as repair,
+    ):
+        tag, detail = _fix_gateway_service(cfg, assume_yes=True)
+
+    assert tag == "fail"
+    assert "another account" in detail
+    assert "refusing lifecycle mutation" in detail
+    probe.assert_not_called()
+    repair.assert_not_called()
 
 
 def test_fix_gateway_service_surfaces_only_safe_lifecycle_reason(tmp_path):

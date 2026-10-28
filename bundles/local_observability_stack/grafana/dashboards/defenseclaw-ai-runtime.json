@@ -90,7 +90,7 @@
         "label": "Connector",
         "description": "Connector of a kernel denial (enforcement.block.applied, initiator kernel); denials the gateway could not attribute have none and show under All.",
         "type": "custom",
-        "query": "claudecode,codex,cursor,copilot,opencode,amp,devin,hermes,openhands,omnigent,kiro",
+        "query": "claudecode,codex,cursor,copilot,opencode,amp,devin,hermes,kiro",
         "multi": true,
         "includeAll": true,
         "allValue": ".*",
@@ -140,14 +140,6 @@
           {
             "text": "hermes",
             "value": "hermes"
-          },
-          {
-            "text": "openhands",
-            "value": "openhands"
-          },
-          {
-            "text": "omnigent",
-            "value": "omnigent"
           },
           {
             "text": "kiro",

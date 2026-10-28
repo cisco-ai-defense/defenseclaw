@@ -129,12 +129,14 @@ func TestEarlyAnswerWatchdogOnlyForToolCalls(t *testing.T) {
 	stdout := &firstWriteRecorder{}
 	opts := base
 	opts.Event, opts.Stdout, opts.Stderr = "PreToolUse", stdout, stdout
-	watchdog := ArmAnswerWatchdog(opts, []byte(`{}`))
-	if watchdog == nil {
-		t.Fatal("no watchdog for --event PreToolUse")
-	}
 	run(t, "claudecode", &stubRT{status: http.StatusOK, body: `{"action":"allow"}`}, func(o *Options) {
 		managedCodex(o)
+		// Fixture directory/token writes are not part of this invocation.
+		opts.StartedAt = time.Now()
+		watchdog := ArmAnswerWatchdog(opts, []byte(`{}`))
+		if watchdog == nil {
+			t.Fatal("no watchdog for --event PreToolUse")
+		}
 		o.Event = "SessionStart"
 		o.StartedAt = opts.StartedAt
 		o.AnswerWatchdog = watchdog

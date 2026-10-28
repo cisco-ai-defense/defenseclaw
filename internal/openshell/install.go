@@ -31,7 +31,6 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
-	"slices"
 	"strings"
 	"text/tabwriter"
 	"time"
@@ -59,12 +58,13 @@ var (
 	// ErrUnmanagedUpgrade means Upgrade found a supported CLI that NVIDIA's
 	// installer did not install, and would not replace.
 	ErrUnmanagedUpgrade = errors.New("openshell: DefenseClaw upgrades only an OpenShell that NVIDIA's installer installed")
-	// ErrSandboxesRunning means Upgrade ran nothing: sandboxes run (or may
-	// run) on a gateway whose driver's stop keeps only what they synced (the
-	// MicroVM driver). NVIDIA's script restarts the gateway, which stops
-	// them, only after its downloads and the install, so a flush before the
-	// script would leave all they wrote meanwhile to be lost.
-	ErrSandboxesRunning = errors.New("openshell: the upgrade's gateway restart would stop running MicroVM sandboxes without a flush")
+	// ErrSandboxesRunning means Upgrade ran nothing: on a gateway whose
+	// driver's stop keeps only what the sandboxes synced (the MicroVM
+	// driver), OpenShell does not report every sandbox stopped. NVIDIA's
+	// script restarts the gateway, which stops them with no flush, only
+	// after its downloads and the install (PrepareUpgrade).
+	ErrSandboxesRunning = errors.New("openshell: the upgrade was not run: its gateway restart stops every MicroVM on the gateway with no flush, " +
+		"so DefenseClaw upgrades only once OpenShell reports each sandbox on it stopped")
 	// ErrRuntimeImages means Upgrade ran nothing: Docker could not pull the
 	// release's supervisor images (Installer.PrepareUpgrade), without which
 	// the restarted gateway's docker driver does not start.
@@ -246,6 +246,15 @@ type Installer struct {
 	// discover the Discover registration, dial it and PrepareUpgrade, with
 	// the images gateway.toml leaves to the release: RuntimeImages).
 	PrepareUpgrade func(ctx context.Context, release Version) error
+	// CountMicroVMs counts the MicroVMs that run as this account, which
+	// PrepareUpgrade's default trusts only when it cannot read the
+	// gateway's sandboxes (default CountMicroVMs with Runner).
+	CountMicroVMs VMCount
+	// LockLifecycle takes the lifecycle lock that keeps DefenseClaw from
+	// creating or starting a sandbox from PrepareUpgrade's check to the
+	// healthy upgraded gateway, minutes later (default:
+	// LockGatewayLifecycle on Discover.ConfigDir).
+	LockLifecycle func(context.Context) (unlock func(), err error)
 	// Geteuid is the caller's uid (default os.Geteuid): root needs no sudo.
 	Geteuid func() int
 	// HomebrewPrefixProblem says, on a Mac, why Homebrew cannot install a
@@ -356,8 +365,14 @@ func (i *Installer) defaults() {
 	if i.MaxScriptBytes <= 0 {
 		i.MaxScriptBytes = 1 << 20
 	}
+	if i.CountMicroVMs == nil {
+		i.CountMicroVMs = func(ctx context.Context) (int, error) { return CountMicroVMs(ctx, i.Runner) }
+	}
 	if i.PrepareUpgrade == nil {
 		i.PrepareUpgrade = i.prepareUpgrade
+	}
+	if i.LockLifecycle == nil {
+		i.LockLifecycle = func(ctx context.Context) (func(), error) { return LockGatewayLifecycle(ctx, i.Discover.ConfigDir) }
 	}
 	if i.Geteuid == nil {
 		i.Geteuid = os.Geteuid
@@ -399,6 +414,10 @@ func (i *Installer) checkSudo(ctx context.Context) error {
 // install, a separate confirmation), run the script with
 // OPENSHELL_VERSION pinned, then verify `openshell --version` and the
 // gateway. A supported CLI is kept as it is: nothing is downloaded or run.
+// One older than SupportedMin (a legacy release, LegacyMin, or an older
+// one the installer upgrades in place) is upgraded in place, as Upgrade
+// does: PrepareUpgrade runs first, so a MicroVM that OpenShell does not
+// report stopped defers the upgrade with nothing run.
 func (i *Installer) Install(ctx context.Context) (*InstallResult, error) {
 	return i.install(ctx, false)
 }
@@ -427,29 +446,31 @@ func (i *Installer) install(ctx context.Context, upgrade bool) (*InstallResult, 
 	}
 	existing := i.findExisting(ctx)
 	plan := &InstallPlan{Release: i.Release, URL: i.URL, SHA256: i.SHA256, Existing: existing, GOOS: i.GOOS, ConfigDir: i.configDir()}
-	// upgrading: a supported CLI older than the release, which Upgrade
-	// replaces in place.
-	upgrading := false
 	target, targetErr := ParseVersion(i.Release)
 	if existing != nil && existing.Version != (Version{}) {
 		v := existing.Version
-		if err := CheckSupported(v); err == nil {
-			if !upgrade || targetErr != nil || v.Compare(target) >= 0 {
-				return &InstallResult{Plan: plan, CLIVersion: v}, nil
-			}
+		if aboveWindow(v) {
+			return nil, &ErrUnsupportedVersion{Found: v}
+		}
+		if CheckSupported(v) == nil && (!upgrade || targetErr != nil || v.Compare(target) >= 0) {
+			return &InstallResult{Plan: plan, CLIVersion: v}, nil
+		}
+		if Legacy(v) || CheckSupported(v) == nil {
 			if i.staleCLIRemoval(existing) != "" {
 				// The package (the formula) would install the release
 				// beside it, and the old CLI would still answer.
 				return nil, fmt.Errorf("%w: OpenShell %s at %s was installed another way, which NVIDIA's installer does not replace; upgrade it to %s the way you installed it",
 					ErrUnmanagedUpgrade, v, existing.Path, target)
 			}
-			upgrading = true
-		}
-		if v.Compare(mustParse(SupportedBelow)) >= 0 {
-			return nil, &ErrUnsupportedVersion{Found: v}
 		}
 	}
 	plan.BreakingUpgrade = existing != nil && (existing.Version == (Version{}) || existing.Version.Compare(mustParse(breakingReleaseFloor)) < 0)
+	// upgrading: an OpenShell the script upgrades in place, whose gateway
+	// it restarts once the release is installed: a supported CLI older
+	// than the release (Upgrade), and any older than SupportedMin, legacy
+	// or not, that is not a pre-0.0.37 one (whose runtime the user cleaned
+	// up first: ConfirmBreakingUpgrade).
+	upgrading := existing != nil && !plan.BreakingUpgrade
 	if i.GOOS == "darwin" {
 		// NVIDIA's script taps and installs with Homebrew as this account.
 		if err := i.HomebrewPrefixProblem(); err != nil {
@@ -554,6 +575,14 @@ func (i *Installer) install(ctx context.Context, upgrade bool) (*InstallResult, 
 		return nil, err
 	}
 	if upgrading {
+		// Held until the upgraded gateway is healthy: NVIDIA's script
+		// restarts it minutes after the check, and a sandbox DefenseClaw
+		// started meanwhile would be stopped by that restart unflushed.
+		unlock, lerr := i.LockLifecycle(ctx)
+		if lerr != nil {
+			return nil, lerr
+		}
+		defer unlock()
 		if err := i.PrepareUpgrade(ctx, target); err != nil {
 			return nil, err
 		}
@@ -658,22 +687,24 @@ func (i *Installer) ResignVMDriver(ctx context.Context) error {
 }
 
 // prepareUpgrade is PrepareUpgrade on the gateway of i.Discover, whose
-// gateway.toml (in Discover.ConfigDir) may name its own runtime images. A
-// gateway that cannot be reached runs no sandbox the restart could stop.
+// gateway.toml (in Discover.ConfigDir) may name its own runtime images. One
+// DefenseClaw finds no registration of, or cannot connect to, refuses the
+// upgrade unless no MicroVM runs as this account (unreachableRefusal): the
+// script's restart would end every one.
 func (i *Installer) prepareUpgrade(ctx context.Context, release Version) error {
 	reg, err := Discover(i.Discover)
 	if err != nil {
-		return nil
+		return unreachableRefusal(ctx, ErrSandboxesRunning, fmt.Errorf("no usable registration: %w", err), i.CountMicroVMs, "upgrade")
 	}
 	c, err := Dial(reg, ClientOptions{RPCTimeout: 10 * time.Second})
 	if err != nil {
-		return nil
+		return unreachableRefusal(ctx, ErrSandboxesRunning, fmt.Errorf("no connection: %w", err), i.CountMicroVMs, "upgrade")
 	}
 	defer c.Close()
 	return PrepareUpgrade(ctx, c, func(ctx context.Context) error {
 		st, _ := (&GatewayConfigurator{Dir: i.Discover.ConfigDir, GOOS: i.GOOS, Runner: i.Runner}).Read()
 		return PullRuntimeImages(ctx, i.Runner, st.RuntimeImages(release))
-	})
+	}, i.CountMicroVMs)
 }
 
 // PrepareUpgrade readies the gateway c talks to for the restart of an
@@ -685,15 +716,20 @@ func (i *Installer) prepareUpgrade(ctx context.Context, release Version) error {
 //     release's supervisor images unless they are local, and does not
 //     start without them.
 //   - Elsewhere (the MicroVM driver, or a gateway whose driver
-//     GetGatewayInfo did not name) the restart stops every sandbox, and a
-//     MicroVM stopped without a flush loses what it wrote since its last
-//     sync: a flush before the script would leave minutes of writes
-//     unsynced. A sandbox running or starting refuses the upgrade
-//     (ErrSandboxesRunning, naming them), and so does a list that fails.
-//     One that answers neither call is taken to be down, and runs nothing.
+//     GetGatewayInfo did not name) the restart stops every sandbox with no
+//     flush. The upgrade is refused (ErrSandboxesRunning, naming each with
+//     the exact way to stop it: StopWayOn) unless OpenShell reports every
+//     sandbox on the gateway stopped, deleting, or in the error state with
+//     its VM gone (HoldsGateway), and so is a list that fails. Nothing is
+//     stopped or run in a sandbox, and nothing is inferred from time. A
+//     gateway that answers neither call refuses too, unless vms shows that
+//     no MicroVM runs as this account (unreachableRefusal).
 //
-// A sandbox started after this, while the script runs, is not covered.
-func PrepareUpgrade(ctx context.Context, c Client, pull func(context.Context) error) error {
+// The caller holds the lifecycle lock (LockGatewayLifecycle) from this
+// check until the upgraded gateway is healthy, so DefenseClaw starts no
+// sandbox while the script runs; another OpenShell client is not held
+// back.
+func PrepareUpgrade(ctx context.Context, c Client, pull func(context.Context) error, vms VMCount) error {
 	info, infoErr := c.GatewayInfo(ctx)
 	if infoErr == nil {
 		if d, err := GatewayDriver(info); err == nil && d.StopFlushes {
@@ -706,22 +742,11 @@ func PrepareUpgrade(ctx context.Context, c Client, pull func(context.Context) er
 	list, err := c.ListSandboxes(ctx, nil)
 	if err != nil {
 		if infoErr != nil && ctx.Err() == nil && IsUnavailable(err) {
-			return nil
+			return unreachableRefusal(ctx, ErrSandboxesRunning, err, vms, "upgrade")
 		}
-		return fmt.Errorf("%w, and the sandboxes on it could not be listed: %v", ErrSandboxesRunning, err)
+		return fmt.Errorf("%w (the sandboxes on it could not be listed: %v); then upgrade", ErrSandboxesRunning, err)
 	}
-	var running []string
-	for _, sb := range list {
-		if sb != nil && (sb.Status.Phase == PhaseReady || sb.Status.Phase == PhaseProvisioning) {
-			running = append(running, sb.Name)
-		}
-	}
-	if len(running) == 0 {
-		return nil
-	}
-	slices.Sort(running)
-	return fmt.Errorf("%w (%s): stop them first with `defenseclaw sandbox stop NAME`, which flushes their disks, then upgrade",
-		ErrSandboxesRunning, strings.Join(running, ", "))
+	return stoppedRefusal(ErrSandboxesRunning, list, func() string { return restartGatewayRelease(ctx, c) }, "upgrade")
 }
 
 // runtimeImageRepository holds the images OpenShell's docker driver runs

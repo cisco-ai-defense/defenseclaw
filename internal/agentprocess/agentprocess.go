@@ -28,6 +28,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // Process is one process-table entry.
@@ -122,6 +123,39 @@ func StartedBefore(identity, mark string) bool {
 	return startErr == nil && clockErr == nil && start <= clock
 }
 
+// CompareMarks orders two Now values of one host: -1, 0 or +1 as a is
+// earlier than, the same as or later than b. ok is false when they cannot
+// be compared: they name another OS or boot, or one does not parse.
+func CompareMarks(a, b string) (order int, ok bool) {
+	x, y := strings.Split(a, ":"), strings.Split(b, ":")
+	if len(x) != 3 || len(y) != 3 || x[0] != y[0] || x[1] != y[1] {
+		return 0, false
+	}
+	first, firstErr := strconv.ParseInt(x[2], 10, 64)
+	second, secondErr := strconv.ParseInt(y[2], 10, 64)
+	if firstErr != nil || secondErr != nil {
+		return 0, false
+	}
+	switch {
+	case first < second:
+		return -1, true
+	case first > second:
+		return 1, true
+	}
+	return 0, true
+}
+
+// NowAfter is Now moved d ahead: a mark that also covers agent processes
+// that start within d from now (the hook guardian records a removal with it
+// before the file changes, GAP-0381). "" when the clock cannot be read.
+func NowAfter(d time.Duration) string {
+	boot, clock, ok := currentClock()
+	if !ok || clockUnitsPerSecond <= 0 {
+		return ""
+	}
+	return fmt.Sprintf("%s:%s:%d", runtime.GOOS, boot, clock+int64(d.Seconds()*float64(clockUnitsPerSecond))+1)
+}
+
 // Identity returns the identity of the agent process that runs this
 // process, or "" when no agent ancestor can be named.
 func Identity() string {
@@ -191,6 +225,14 @@ func CommandLine() ([]string, string, error) {
 		return nil, "", ErrNoAgent
 	}
 	return commandLine(agent.PID)
+}
+
+// CommandLineForPID reads an agent process's arguments for a privileged
+// managed coverage scan. Callers must first classify the process by its
+// executable and must not expose the returned arguments in status or audit.
+func CommandLineForPID(pid int) ([]string, error) {
+	argv, _, err := commandLine(pid)
+	return argv, err
 }
 
 // Host returns the normalized executable name of the process that started

@@ -14,7 +14,7 @@ import re
 from typing import Any
 from urllib.parse import urlparse
 
-from defenseclaw.observability.presets import Preset
+from defenseclaw.observability.presets import SPLUNK_HEC, Preset
 from defenseclaw.observability.v8_activation import update_private_file
 from defenseclaw.safety import sanitize_dotenv_value
 
@@ -163,6 +163,64 @@ def apply_secret(
     return [f"{preset.token_env}: written to {path}"]
 
 
+NATIVE_LOCAL_SPLUNK_DESTINATION = "local-splunk"
+LOCAL_SPLUNK_MARKER = "defenseclaw-local-splunk"
+_CONTAINER_ID_RE = re.compile(r"^[0-9a-f]{64}$")
+
+
+def local_splunk_destination_name(hec_url: str) -> str:
+    """Return the name macOS and Linux local setup gives a new local Splunk sink.
+
+    It is only a name. Whether a destination is the local sink is decided by
+    its record (:func:`is_recorded_local_splunk`), never by its name, address
+    or credential.
+    """
+
+    parsed = urlparse(hec_url if "://" in hec_url else f"//{hec_url}")
+    return destination_name(SPLUNK_HEC, None, {"host": parsed.hostname or "127.0.0.1", "endpoint": hec_url})
+
+
+def local_splunk_record(container_id: str) -> dict[str, str]:
+    """Return the record local setup stores in the sink it creates.
+
+    The record holds the ID of the Splunk container DefenseClaw started and
+    DefenseClaw's own marker. It is the only thing that makes a destination
+    the local Splunk sink.
+    """
+
+    if not _CONTAINER_ID_RE.fullmatch(container_id):
+        raise ValueError("local Splunk setup needs the full ID of the Splunk container it started")
+    return {"marker": LOCAL_SPLUNK_MARKER, "container_id": container_id}
+
+
+def is_recorded_local_splunk(destination: Any) -> bool:
+    """Return whether the authored *destination* carries the local setup record.
+
+    Every other destination is remote, whatever its name, address or
+    credential, also a remote Splunk reached through a tunnel on loopback.
+    """
+
+    if not isinstance(destination, dict) or destination.get("kind") != "splunk_hec":
+        return False
+    record = destination.get("local_stack")
+    return (
+        isinstance(record, dict)
+        and record.get("marker") == LOCAL_SPLUNK_MARKER
+        and isinstance(record.get("container_id"), str)
+        and bool(_CONTAINER_ID_RE.fullmatch(record["container_id"]))
+    )
+
+
+def splunk_sink_token_env(name: str) -> str:
+    """Return the credential reference of the remote Splunk HEC destination *name*.
+
+    Each remote Splunk destination keeps its credential under its own
+    reference, so setting one up never changes the credential of another.
+    """
+
+    return f"{SPLUNK_HEC.token_env}_{re.sub(r'[^A-Z0-9]', '_', name.upper())}"
+
+
 def restore_secret(
     data_dir: str, key: str, previous: str | None, previous_environ: str | None, written: str
 ) -> None:
@@ -189,9 +247,12 @@ def restore_secret(
 def secret_note_is_info(preset: Preset, message: str) -> bool:
     """Whether an :func:`apply_secret` message reports a write, not a problem."""
 
-    return bool(preset.token_env) and message.startswith(
-        (f"{preset.token_env}: written to ", f"{preset.token_env}: (would write to ")
-    )
+    # A Splunk destination stores its secret under its own reference, so the
+    # note can name another variable than the preset's.
+    return bool(preset.token_env) and bool(_SECRET_WRITTEN_NOTE_RE.match(message))
+
+
+_SECRET_WRITTEN_NOTE_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*: (written to |\(would write to )")
 
 
 def parse_bool(value: str) -> bool:
@@ -233,13 +294,19 @@ def _write_dotenv(entries: dict[str, str]) -> bytes:
 
 __all__ = [
     "DESTINATION_NAME_RE",
+    "LOCAL_SPLUNK_MARKER",
+    "NATIVE_LOCAL_SPLUNK_DESTINATION",
     "adapter_destination_fields",
     "apply_secret",
     "destination_name",
+    "is_recorded_local_splunk",
+    "local_splunk_destination_name",
+    "local_splunk_record",
     "parse_bool",
     "render_header_template",
     "render_template",
     "resolve_inputs",
     "restore_secret",
     "secret_note_is_info",
+    "splunk_sink_token_env",
 ]

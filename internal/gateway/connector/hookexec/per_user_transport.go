@@ -1,0 +1,248 @@
+// Copyright 2026 Cisco Systems, Inc. and its affiliates
+// SPDX-License-Identifier: Apache-2.0
+
+package hookexec
+
+import (
+	"bytes"
+	"context"
+	"errors"
+	"fmt"
+	"io"
+	"net"
+	"net/http"
+	"strconv"
+	"strings"
+	"sync/atomic"
+	"time"
+)
+
+// VerifyPerUserConnectedTuple proves ownership of the accepted server socket
+// for a client connection that is already open. The Python CLI invokes this
+// before urllib3 writes headers or a body on that connection.
+func VerifyPerUserConnectedTuple(local, remote string) error {
+	client, server, err := parseConnectedLoopbackTuple(local, remote)
+	if err != nil {
+		return err
+	}
+	return verifyPerUserConnectedTuple(client, server)
+}
+
+// VerifyManagedConnectedTuple checks a Python CLI's already-connected socket
+// against the active protected gateway service before urllib3 writes a byte.
+func VerifyManagedConnectedTuple(local, remote, serviceName string) error {
+	client, server, err := parseConnectedLoopbackTuple(local, remote)
+	if err != nil {
+		return err
+	}
+	return verifyManagedConnectedTuple(client, server, serviceName)
+}
+
+func parseConnectedLoopbackTuple(local, remote string) (*net.TCPAddr, *net.TCPAddr, error) {
+	parse := func(raw string) (*net.TCPAddr, error) {
+		host, portText, err := net.SplitHostPort(raw)
+		if err != nil {
+			return nil, err
+		}
+		ip := net.ParseIP(host)
+		port, err := strconv.Atoi(portText)
+		if ip == nil || err != nil || port < 1 || port > 65535 {
+			return nil, fmt.Errorf("connected gateway endpoint is invalid")
+		}
+		return &net.TCPAddr{IP: ip, Port: port}, nil
+	}
+	client, err := parse(local)
+	if err != nil {
+		return nil, nil, err
+	}
+	server, err := parse(remote)
+	if err != nil {
+		return nil, nil, err
+	}
+	if !client.IP.IsLoopback() || !server.IP.IsLoopback() {
+		return nil, nil, fmt.Errorf("connected gateway endpoint is not loopback")
+	}
+	return client, server, nil
+}
+
+// connectedSocketNameMatches accepts lsof's optional protocol and state text
+// while requiring both TCP endpoint ports to match exactly. A prefix match
+// could mistake a different same-account connection for the accepted socket.
+func connectedSocketNameMatches(name, want string) bool {
+	name = strings.TrimPrefix(name, "TCP ")
+	tuple, _, _ := strings.Cut(strings.TrimSpace(name), " ")
+	return tuple == want
+}
+
+// PerUserHookReply is the bounded response sent back to an in-agent plugin.
+type PerUserHookReply struct {
+	Status     int    `json:"status"`
+	Body       string `json:"body"`
+	RetryAfter string `json:"retry_after,omitempty"`
+}
+
+// NewPerUserGatewayHTTPClient verifies the accepted socket's account before
+// any HTTP request writes headers or a body. Go CLI management requests use
+// this same transport for every per-user gateway call, including retries.
+// A zero timeout leaves long operations bounded by their request context.
+func NewPerUserGatewayHTTPClient(timeout time.Duration, apiAddr string) (*http.Client, error) {
+	client, err := newPerUserHookHTTPClient(timeout, apiAddr)
+	if err != nil {
+		return nil, err
+	}
+	client.CheckRedirect = func(*http.Request, []*http.Request) error {
+		return http.ErrUseLastResponse
+	}
+	return client, nil
+}
+
+// PostPerUserHook sends a plugin request only after verifying the owner of
+// the very socket that carries its bearer and payload. A separate preflight
+// would leave a race when the gateway stops and another account binds its
+// port before the plugin opens a second connection.
+// errPerUserAnswerIncomplete wraps a body read failure after the gateway
+// sent a status line.
+var errPerUserAnswerIncomplete = errors.New("per-user gateway answer incomplete")
+
+// errPerUserPeerUnverified wraps every failure of the connected-listener
+// check. A listener this transport could not prove to be this account's is
+// never an outage, whatever the check's own error wraps: a foreign listener
+// that closes or unbinds during the check (ENOENT, EOF, a reset) or a check
+// still running at the restart deadline must keep the refusal closed.
+var errPerUserPeerUnverified = errors.New("per-user gateway connected listener is unverified")
+
+// errPerUserPeerCheckUnfinished ends a per-user hook try (connectBy) whose
+// connection was open at its connect deadline while the listener's owner was
+// still being checked.
+var errPerUserPeerCheckUnfinished = fmt.Errorf("%w: its owner was still being checked at the connect deadline", errPerUserPeerUnverified)
+
+// perUserPeerCheck records, for one try, a connection that is open and whose
+// listener's owner is not proven yet (verifiedPerUserHTTPClient). The dial
+// outlives a canceled request, so only this mark says the try had reached a
+// listener when connectBy ended it.
+type perUserPeerCheck struct{ pending atomic.Bool }
+
+type perUserPeerCheckKey struct{}
+
+func withPerUserPeerCheck(ctx context.Context) (context.Context, *perUserPeerCheck) {
+	check := &perUserPeerCheck{}
+	return context.WithValue(ctx, perUserPeerCheckKey{}, check), check
+}
+
+// PerUserPostOutageExit is the exit status of `hook-post` for a gateway
+// outage (PerUserPostOutage), curl's "could not connect" status, which the
+// shell hooks and in-agent plugins already read as this account's gateway
+// not running.
+const PerUserPostOutageExit = 7
+
+// PerUserPostOutage reports whether err, from PostPerUserHook, is a gateway
+// outage: this account's gateway refused or dropped the connection before it
+// sent any status. A status line followed by a cut-off body, a listener
+// whose owner could not be verified, a timeout after the connection and
+// every other error are not.
+func PerUserPostOutage(err error) bool {
+	if err == nil || errors.Is(err, errPerUserPeerUnverified) || errors.Is(err, errPerUserAnswerIncomplete) ||
+		errors.Is(err, errInvalidHookRequest) || errors.Is(err, errGatewayTookCallNoAnswer) {
+		return false
+	}
+	return gatewayRestartShaped(err)
+}
+
+func PostPerUserHook(ctx context.Context, apiAddr, path string, headers map[string]string, body []byte) (PerUserHookReply, error) {
+	client, err := NewPerUserGatewayHTTPClient(30*time.Second, apiAddr)
+	if err != nil {
+		return PerUserHookReply{}, err
+	}
+	return postPluginHook(ctx, client, apiAddr, path, headers, body)
+}
+
+// PostManagedEnterprisePluginHook sends one plugin event through the service
+// peer transport. The connected listener is checked before net/http can write
+// its shared Secure Client bearer or any event bytes.
+func PostManagedEnterprisePluginHook(ctx context.Context, apiAddr, serviceName, path string, headers map[string]string, body []byte) (PerUserHookReply, error) {
+	client, err := NewManagedEnterpriseGatewayHTTPClient(30*time.Second, apiAddr, serviceName)
+	if err != nil {
+		return PerUserHookReply{}, err
+	}
+	return postPluginHook(ctx, client, apiAddr, path, headers, body)
+}
+
+func postPluginHook(ctx context.Context, client *http.Client, apiAddr, path string, headers map[string]string, body []byte) (PerUserHookReply, error) {
+	switch path {
+	case "/api/v1/amp/hook", "/api/v1/opencode/hook",
+		"/api/v1/codex/hook", "/api/v1/claude-code/hook",
+		"/api/v1/copilot/hook", "/api/v1/cursor/hook",
+		"/api/v1/devin/hook", "/api/v1/hermes/hook",
+		"/api/v1/kiro/hook", "/api/v1/antigravity/hook",
+		"/api/v1/inspect/request", "/api/v1/inspect/response",
+		"/api/v1/inspect/tool", "/api/v1/inspect/tool-response":
+	default:
+		return PerUserHookReply{}, fmt.Errorf("unsupported per-user plugin hook path")
+	}
+	if len(body) > 900*1024 {
+		return PerUserHookReply{}, fmt.Errorf("per-user plugin hook body is too large")
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "http://"+apiAddr+path, bytes.NewReader(body))
+	if err != nil {
+		return PerUserHookReply{}, err
+	}
+	for name, value := range headers {
+		req.Header.Set(name, value)
+	}
+	response, err := client.Do(req)
+	if err != nil {
+		return PerUserHookReply{}, err
+	}
+	defer response.Body.Close()
+	if response.StatusCode >= http.StatusMultipleChoices && response.StatusCode < http.StatusBadRequest {
+		return PerUserHookReply{}, fmt.Errorf("per-user gateway hook response redirected")
+	}
+	data, err := io.ReadAll(io.LimitReader(response.Body, 1<<20+1))
+	if err != nil {
+		// The gateway sent its status: a cut-off body is its unusable
+		// answer, never an outage (PerUserPostOutage).
+		return PerUserHookReply{}, fmt.Errorf("%w: %w", errPerUserAnswerIncomplete, err)
+	}
+	if len(data) > 1<<20 {
+		return PerUserHookReply{}, fmt.Errorf("per-user gateway hook response is too large")
+	}
+	return PerUserHookReply{Status: response.StatusCode, Body: string(data), RetryAfter: response.Header.Get("Retry-After")}, nil
+}
+
+// verifiedPerUserHTTPClient proves the owner of the connected socket before
+// net/http can write a hook credential or event. Each request gets a fresh
+// connection so retries and redirects must pass verification again.
+func verifiedPerUserHTTPClient(
+	timeout time.Duration,
+	apiAddr string,
+	dial func(context.Context, string, string) (net.Conn, error),
+	verify func(net.Conn) error,
+) *http.Client {
+	return &http.Client{
+		Timeout: timeout,
+		Transport: &http.Transport{
+			DisableKeepAlives: true,
+			DialContext: func(ctx context.Context, network, address string) (net.Conn, error) {
+				if address != apiAddr || (network != "tcp" && network != "tcp4") {
+					return nil, fmt.Errorf("per-user gateway target %q is not configured endpoint %q", address, apiAddr)
+				}
+				conn, err := dial(ctx, network, address)
+				if err != nil {
+					return nil, err
+				}
+				check, _ := ctx.Value(perUserPeerCheckKey{}).(*perUserPeerCheck)
+				if check != nil {
+					check.pending.Store(true)
+				}
+				if err := verify(conn); err != nil {
+					_ = conn.Close()
+					return nil, fmt.Errorf("%w: %w", errPerUserPeerUnverified, err)
+				}
+				if check != nil {
+					check.pending.Store(false)
+				}
+				return conn, nil
+			},
+		},
+	}
+}

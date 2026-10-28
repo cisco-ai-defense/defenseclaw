@@ -11,13 +11,14 @@
 # CLI to be the exact symlink for this checkout, then atomically records source
 # ownership so a later same-checkout rebuild stays idempotent. `ensure-dir`
 # reserves the source-owned install directory; `publish-cli`,
-# `publish-gateway`, `publish-acp`, and (Windows builds only) `publish-hook`
+# `publish-gateway`, `publish-acp`, `publish-hook-post` on POSIX, and
+# (Windows builds only) `publish-hook`
 # perform create-new publication under that claim.
 
 set -euo pipefail
 
 usage() {
-    echo "usage: $0 <check|claim|ensure-dir|publish-cli|publish-gateway|publish-acp|publish-hook> REPO_ROOT INSTALL_DIR VENV_BIN CLI_NAME GATEWAY_NAME" >&2
+    echo "usage: $0 <check|claim|ensure-dir|publish-cli|publish-gateway|publish-acp|publish-hook-post|publish-hook> REPO_ROOT INSTALL_DIR VENV_BIN CLI_NAME GATEWAY_NAME" >&2
     exit 64
 }
 
@@ -56,10 +57,10 @@ fi
 
 DEV_RECLAIM_SOURCE=0
 case "${REQUESTED_MODE}" in
-    check|claim|ensure-dir|publish-cli|publish-gateway|publish-acp|publish-hook)
+    check|claim|ensure-dir|publish-cli|publish-gateway|publish-acp|publish-hook-post|publish-hook)
         MODE="${REQUESTED_MODE}"
         ;;
-    dev-check|dev-claim|dev-ensure-dir|dev-publish-cli|dev-publish-gateway|dev-publish-acp|dev-publish-hook)
+    dev-check|dev-claim|dev-ensure-dir|dev-publish-cli|dev-publish-gateway|dev-publish-acp|dev-publish-hook-post|dev-publish-hook)
         DEV_RECLAIM_SOURCE=1
         MODE="${REQUESTED_MODE#dev-}"
         ;;
@@ -71,7 +72,7 @@ FOREIGN_INSTALL=0
 refuse() {
     echo "error: source install refused: $1" >&2
     case "${MODE}" in
-        publish-gateway|publish-acp|publish-hook|claim)
+        publish-gateway|publish-acp|publish-hook-post|publish-hook|claim)
             echo "This step changed nothing; earlier make all steps may already have published the CLI." >&2
             ;;
         *) echo "No installed files or services were changed." >&2 ;;
@@ -180,6 +181,13 @@ fi
 readonly ACP_NAME
 readonly ACP_PATH="${INSTALL_DIR}/${ACP_NAME}"
 readonly EXPECTED_ACP="${REPO_ROOT}/${ACP_NAME}"
+HOOK_POST_NAME=""
+if [[ "${IS_WINDOWS}" -eq 0 ]]; then
+    HOOK_POST_NAME="${GATEWAY_NAME%-gateway}-hook-post"
+fi
+readonly HOOK_POST_NAME
+readonly HOOK_POST_PATH="${INSTALL_DIR}/${HOOK_POST_NAME}"
+readonly EXPECTED_HOOK_POST="${REPO_ROOT}/${HOOK_POST_NAME}"
 # Windows builds also ship the GUI-subsystem hook launcher next to the
 # gateway; connector hooks registered by init point at that path. Unix hooks
 # run the gateway itself, so there is no per-user hook launcher there.
@@ -197,6 +205,7 @@ readonly PUBLISH_MODULE="${REPO_ROOT}/cli/defenseclaw/install_publish.py"
 readonly SOURCE_IDENTITY_HELPER="${REPO_ROOT}/scripts/source_release_identity.py"
 VERIFIED_GATEWAY_DIGEST=""
 VERIFIED_ACP_DIGEST=""
+VERIFIED_HOOK_POST_DIGEST=""
 VERIFIED_HOOK_DIGEST=""
 VERIFIED_MARKER_DIGEST=""
 SOURCE_RELEASE=""
@@ -272,6 +281,16 @@ bind_dev_acp() {
         || refuse "the developer-owned ACP guard returned an invalid digest"
 }
 
+bind_dev_hook_post() {
+    [[ -n "${HOOK_POST_NAME}" ]] || return 0
+    [[ -e "${HOOK_POST_PATH}" || -L "${HOOK_POST_PATH}" ]] || return 0
+    if ! VERIFIED_HOOK_POST_DIGEST="$(sha256_regular "${HOOK_POST_PATH}" --require-executable)"; then
+        refuse "the developer-owned hook transport is missing or no longer a regular executable"
+    fi
+    [[ "${VERIFIED_HOOK_POST_DIGEST}" =~ ^[0-9a-f]{64}$ ]] \
+        || refuse "the developer-owned hook transport returned an invalid digest"
+}
+
 bind_dev_hook() {
     [[ -n "${HOOK_NAME}" ]] || return 0
     [[ -e "${HOOK_PATH}" || -L "${HOOK_PATH}" ]] || return 0
@@ -286,6 +305,7 @@ bind_dev_hook() {
 # under the same ownership claim.
 bind_dev_companions() {
     bind_dev_acp
+    bind_dev_hook_post
     bind_dev_hook
 }
 
@@ -413,6 +433,9 @@ check_owner() {
         if [[ -e "${ACP_PATH}" || -L "${ACP_PATH}" ]]; then
             refuse_foreign "an unowned ACP guard already exists at ${ACP_PATH}"
         fi
+        if [[ -n "${HOOK_POST_NAME}" ]] && [[ -e "${HOOK_POST_PATH}" || -L "${HOOK_POST_PATH}" ]]; then
+            refuse_foreign "an unowned hook transport already exists at ${HOOK_POST_PATH}"
+        fi
         if [[ -n "${HOOK_NAME}" ]] && [[ -e "${HOOK_PATH}" || -L "${HOOK_PATH}" ]]; then
             refuse_foreign "an unowned hook launcher already exists at ${HOOK_PATH}"
         fi
@@ -522,6 +545,27 @@ case "${MODE}" in
         fi
         python3 "${PUBLISH_HELPER}" "${publish_args[@]}" \
             || refuse "the source ACP guard destination changed after preflight"
+        ;;
+    publish-hook-post)
+        [[ -n "${HOOK_POST_NAME}" ]] \
+            || refuse "the hook transport is published only for POSIX builds"
+        if ! SOURCE_HOOK_POST_DIGEST="$(sha256_regular "${EXPECTED_HOOK_POST}" --require-executable)"; then
+            refuse "this checkout's built hook transport is unavailable for publication"
+        fi
+        readonly SOURCE_HOOK_POST_DIGEST
+        if [[ -e "${HOOK_POST_PATH}" || -L "${HOOK_POST_PATH}" ]]; then
+            [[ -n "${VERIFIED_HOOK_POST_DIGEST}" ]] \
+                || refuse "the installed hook transport was not bound to the completed ownership check"
+        fi
+        publish_args=(
+            regular "${EXPECTED_HOOK_POST}" "${HOOK_POST_PATH}"
+            --expected-source-sha256 "${SOURCE_HOOK_POST_DIGEST}"
+        )
+        if [[ -n "${VERIFIED_HOOK_POST_DIGEST}" ]]; then
+            publish_args+=(--expected-current-sha256 "${VERIFIED_HOOK_POST_DIGEST}")
+        fi
+        python3 "${PUBLISH_HELPER}" "${publish_args[@]}" \
+            || refuse "the source hook transport destination changed after preflight"
         ;;
     publish-hook)
         [[ -n "${HOOK_NAME}" ]] \

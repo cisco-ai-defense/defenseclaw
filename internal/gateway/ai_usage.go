@@ -18,6 +18,8 @@ package gateway
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -134,14 +136,10 @@ func (a *APIServer) handleAIUsageIDEPlugins(w http.ResponseWriter, r *http.Reque
 		}
 		limit = min(n, idePluginsMaxLimit)
 	}
-	offset := 0
-	if raw := strings.TrimSpace(q.Get("cursor")); raw != "" {
-		n, err := strconv.Atoi(raw)
-		if err != nil || n < 0 {
-			a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid cursor"})
-			return
-		}
-		offset = n
+	cursor := strings.TrimSpace(q.Get("cursor"))
+	if _, _, ok := splitIDEInventoryCursor(cursor); cursor != "" && !ok {
+		a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid cursor"})
+		return
 	}
 	aiOnly := false
 	if raw := strings.TrimSpace(q.Get("ai_only")); raw != "" {
@@ -179,6 +177,15 @@ func (a *APIServer) handleAIUsageIDEPlugins(w http.ResponseWriter, r *http.Reque
 		a.writeJSON(w, http.StatusOK, resp)
 		return
 	}
+	offset := 0
+	if cursor != "" {
+		n, generation, _ := splitIDEInventoryCursor(cursor)
+		if generation != ideInventoryGeneration(inv) {
+			a.writeJSON(w, http.StatusConflict, map[string]string{"error": ideInventoryCursorStale})
+			return
+		}
+		offset = n
+	}
 	resp["scope"] = inv.Scope
 	resp["partial"] = inv.Partial
 	resp["scan_id"] = ""
@@ -206,7 +213,7 @@ func (a *APIServer) handleAIUsageIDEPlugins(w http.ResponseWriter, r *http.Reque
 	}
 	end := min(offset+limit, total)
 	if end < total {
-		resp["next_cursor"] = strconv.Itoa(end)
+		resp["next_cursor"] = strconv.Itoa(end) + "." + ideInventoryGeneration(inv)
 	}
 	resp["total"] = total
 	resp["counts"] = (&inventory.IDEInventory{Installations: installs, Plugins: plugins}).Counts()
@@ -215,6 +222,31 @@ func (a *APIServer) handleAIUsageIDEPlugins(w http.ResponseWriter, r *http.Reque
 	resp["plugins"] = plugins[offset:end]
 	resp["scan_id"] = inv.ScanID
 	a.writeJSON(w, http.StatusOK, resp)
+}
+
+// ideInventoryCursorStale answers a cursor of an inventory a newer scan
+// replaced: its offsets name rows of the old lists.
+const ideInventoryCursorStale = "the IDE plugin inventory changed since the previous page (a new scan finished); request the first page again"
+
+// ideInventoryGeneration names the scan an IDE inventory page comes from. A
+// next_cursor carries it, so a page is never cut from another scan's lists
+// than the page before it (GAP-1125).
+func ideInventoryGeneration(inv *inventory.IDEInventory) string {
+	sum := sha256.Sum256([]byte(inv.ScanID + "\x00" + inv.ScannedAt.UTC().Format(time.RFC3339Nano)))
+	return hex.EncodeToString(sum[:6])
+}
+
+// splitIDEInventoryCursor parses a next_cursor: "<offset>.<generation>".
+func splitIDEInventoryCursor(raw string) (offset int, generation string, ok bool) {
+	head, generation, found := strings.Cut(raw, ".")
+	n, err := strconv.Atoi(head)
+	if !found || err != nil || n < 0 || len(generation) != 12 {
+		return 0, "", false
+	}
+	if _, err := hex.DecodeString(generation); err != nil {
+		return 0, "", false
+	}
+	return n, generation, true
 }
 
 // ideInventoryEmptyReason says why an IDE plugin answer has no inventory and
@@ -785,6 +817,14 @@ func (a *APIServer) handleAIUsageDiscovery(w http.ResponseWriter, r *http.Reques
 	defer releaseDiscovery()
 	if discovery == nil {
 		a.writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "ai discovery disabled"})
+		return
+	}
+	// IngestExternalReport forces the source to external, but its fanout
+	// otherwise accepts summaries that canonical observability cannot emit.
+	summary := report.Summary
+	summary.Source = inventory.AISourceExternal
+	if !aiDiscoveryV8SummaryValid(summary) {
+		a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid discovery summary"})
 		return
 	}
 	if err := discovery.IngestExternalReport(r.Context(), &report); err != nil {

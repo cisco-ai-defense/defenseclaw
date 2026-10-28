@@ -617,6 +617,155 @@ func tetragonCLIHost(t *testing.T) *testHost {
 	return h
 }
 
+// GAP-0084: with Plane C off, the absent block runs the helper off like a
+// written one: a drop-in sets mode off (the helper's own default is
+// consume), tetragon status reports mode off and names the cap, and
+// lifecycle status does not warn on every host without Plane C.
+func TestTetragonStatusOfTheDefaultBlockWithPlaneCOff(t *testing.T) {
+	h := newTestHost(t, "linux")
+	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0"), ConfigFile: tetragonTestConfig(t, h, "", false)}))
+	dropin := h.read(tetragonDropinPath)
+	if want := expectedTetragonDropin("off", "168h", "", ""); dropin != want {
+		t.Fatalf("drop-in:\n%s\nwant:\n%s", dropin, want)
+	}
+	env := map[string]string{}
+	for _, line := range strings.Split(dropin, "\n") {
+		if name, value, ok := strings.Cut(strings.TrimPrefix(line, "Environment="), "="); ok && strings.HasPrefix(line, "Environment=") {
+			env[name] = value
+		}
+	}
+	if helper := kernelpolicy.IntentFromLookup(func(name string) (string, bool) { value, ok := env[name]; return value, ok }); helper.Mode != kernelpolicy.ModeOff {
+		t.Fatalf("the helper reads mode %s from the drop-in, want off", helper.Mode)
+	}
+	old := tetragonLoginUID
+	tetragonLoginUID = func() int { return 1234 }
+	t.Cleanup(func() { tetragonLoginUID = old })
+	stubTetragonAccounts(t)
+	rep := RunTetragon(context.Background(), h.env, TetragonOptions{Action: TetragonActionStatus})
+	if rep.Intent.Mode != config.TetragonModeOff || rep.Intent.CapReason != config.TetragonReasonPlaneCOff || !rep.Intent.Dropin {
+		t.Fatalf("intent %+v", rep.Intent)
+	}
+	found := false
+	for _, warning := range rep.Warnings {
+		found = found || warning.Code == config.TetragonReasonPlaneCOff
+	}
+	if !found {
+		t.Fatalf("tetragon status does not name the Plane C cap: %+v", rep.Warnings)
+	}
+	if status := h.run(Options{Action: ActionStatus}); hasWarning(status, config.TetragonReasonPlaneCOff) {
+		t.Fatalf("lifecycle status warns about the default block: %+v", status.Warnings)
+	}
+}
+
+// The default block on a host without Plane C renders the off drop-in, so
+// the helper runs the mode status and verify report. A helper that still
+// runs another mode (an upgrade from a release that rendered no drop-in left
+// it on its built-in consume) makes ensure apply and restart it, the step
+// kernel_policy_not_applied names, instead of a no-op; once the helper runs
+// the rendered mode ensure settles and the warning is gone.
+func TestEnsureRestartsAHelperThatRunsAnotherTetragonMode(t *testing.T) {
+	h := newTestHost(t, "linux")
+	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0"), ConfigFile: tetragonTestConfig(t, h, "", false)}))
+	if got, want := h.read(tetragonDropinPath), expectedTetragonDropin("off", "168h", "", ""); got != want {
+		t.Fatalf("drop-in of the default block without Plane C:\n%s\nwant:\n%s", got, want)
+	}
+	h.services.active[unitSensorHelper] = true
+	published := func(mode kernelpolicy.Mode) {
+		h.writeTetragonState(kernelpolicy.FileState{Version: 1, UpdatedAt: time.Now(), KernelPolicy: kernelpolicy.Digest(),
+			Effective: string(mode), InSync: true, Intent: kernelpolicy.IntentStatus{Mode: mode}})
+	}
+	published(kernelpolicy.ModeConsume)
+	status := h.run(Options{Action: ActionStatus})
+	if got := messagesOf(status.Warnings, codeKernelPolicyNotApplied); !strings.Contains(got, "runs Tetragon mode consume") || !strings.Contains(got, "renders off") {
+		t.Fatalf("status does not report the helper's other mode: %+v", status.Warnings)
+	}
+	h.services.afterStart = func(unit Unit) {
+		if unit.Name == unitSensorHelper {
+			published(kernelpolicy.ModeOff)
+		}
+	}
+	calls := len(h.services.calls)
+	r := h.run(Options{Action: ActionEnsure})
+	requireOK(t, r)
+	if r.Noop {
+		t.Fatalf("ensure is a no-op while the helper runs another mode: %+v", r)
+	}
+	restarted := strings.Join(h.services.calls[calls:], "\n")
+	if !strings.Contains(restarted, "stop "+unitSensorHelper) || !strings.Contains(restarted, "start "+unitSensorHelper) {
+		t.Fatalf("ensure did not restart the helper: %v", h.services.calls[calls:])
+	}
+	if !strings.Contains(strings.Join(r.Changes, "\n"), "the sensor helper restarted into enterprise.tetragon mode off") {
+		t.Fatalf("ensure does not report the helper restart: %v", r.Changes)
+	}
+	if r := h.run(Options{Action: ActionEnsure}); !r.Noop {
+		t.Fatalf("ensure does not settle once the helper runs the rendered mode: %+v", r)
+	}
+	if status := h.run(Options{Action: ActionStatus}); hasWarning(status, codeKernelPolicyNotApplied) {
+		t.Fatalf("status still reports the mode: %+v", status.Warnings)
+	}
+	if verify := h.run(Options{Action: ActionVerify}); strings.Contains(messagesOf(verify.Warnings, codeKernelPolicyNotApplied)+messagesOf(verify.Errors, codeVerify), "kernel_policy_not_applied") {
+		t.Fatalf("verify still reports the mode: %+v %+v", verify.Warnings, verify.Errors)
+	}
+}
+
+// GAP-0241: an RPM upgrade can observe systemd's stop/start handoff while
+// the old helper is still active. start then returns successfully without
+// replacing that process, leaving its published consume mode after the
+// package result claims it restarted into the rendered off mode.
+func TestPackageUpgradeWaitsForSensorHelperMode(t *testing.T) {
+	for _, previous := range []string{"1.0.2", "1.0.3"} {
+		t.Run(previous, func(t *testing.T) {
+			h := packageHost(t, previous)
+			requireOK(t, h.run(Options{Action: ActionEnsure, FromPackage: true, Reason: "package"}))
+			h.writeTetragonState(kernelpolicy.FileState{Version: 1, UpdatedAt: time.Now().Add(-time.Minute),
+				HelperPID: 42, KernelPolicy: kernelpolicy.Digest(), Effective: "consume", InSync: true,
+				Intent: kernelpolicy.IntentStatus{Mode: kernelpolicy.ModeConsume}})
+			stagePackage(t, h, "1.0.4")
+			h.services.keepActiveOnStop = map[string]bool{unitSensorHelper: true}
+			h.services.afterRestart = func(unit Unit) {
+				if unit.Name == unitSensorHelper {
+					h.writeTetragonState(kernelpolicy.FileState{Version: 1, UpdatedAt: time.Now(),
+						HelperPID: 43, KernelPolicy: kernelpolicy.Digest(), Effective: "off", InSync: true,
+						Intent: kernelpolicy.IntentStatus{Mode: kernelpolicy.ModeOff}})
+				}
+			}
+			before := len(h.services.calls)
+			requireOK(t, h.run(Options{Action: ActionEnsure, FromPackage: true, Reason: "package"}))
+			if !strings.Contains(strings.Join(h.services.calls[before:], "\n"), "restart "+unitSensorHelper) {
+				t.Fatal("upgrade only started the helper that remained active")
+			}
+			if status := h.run(Options{Action: ActionStatus}); hasWarning(status, codeKernelPolicyNotApplied) {
+				t.Fatalf("upgrade returned before the helper ran its rendered mode: %+v", status.Warnings)
+			}
+			if ensure := h.run(Options{Action: ActionEnsure, FromPackage: true}); !ensure.Noop {
+				t.Fatalf("a second ensure should be a no-op: %+v", ensure)
+			}
+		})
+	}
+}
+
+// A restart acknowledgement is insufficient when the helper keeps
+// publishing the previous mode. The package run must report an activation
+// failure so an operator never mistakes the upgrade for a verified install.
+func TestPackageUpgradeRefusesStaleSensorHelperMode(t *testing.T) {
+	h := packageHost(t, "1.0.3")
+	requireOK(t, h.run(Options{Action: ActionEnsure, FromPackage: true, Reason: "package"}))
+	h.writeTetragonState(kernelpolicy.FileState{Version: 1, UpdatedAt: time.Now().Add(-time.Minute),
+		HelperPID: 42, KernelPolicy: kernelpolicy.Digest(), Effective: "consume", InSync: true,
+		Intent: kernelpolicy.IntentStatus{Mode: kernelpolicy.ModeConsume}})
+	stagePackage(t, h, "1.0.4")
+	h.services.keepActiveOnStop = map[string]bool{unitSensorHelper: true}
+	r := h.run(Options{Action: ActionEnsure, FromPackage: true, Reason: "package"})
+	requireError(t, r, codeActivate)
+	if !strings.Contains(r.Errors[0].Message, "did not publish enterprise.tetragon mode off") {
+		t.Fatalf("activation did not name the unverified helper mode: %+v", r.Errors)
+	}
+	if !strings.Contains(r.Errors[0].Message, "sudo journalctl -u "+unitSensorHelper+" --no-pager") ||
+		!strings.Contains(r.Errors[0].Message, "retry the package command") {
+		t.Fatalf("activation did not name the helper diagnosis and upgrade retry: %+v", r.Errors)
+	}
+}
+
 // GAP-0046: a pause or resume that wrote its file succeeds whatever else
 // the host reports (here a recorded policy with no helper running, which
 // status fails on), and prints the change, not the whole status: the fleet

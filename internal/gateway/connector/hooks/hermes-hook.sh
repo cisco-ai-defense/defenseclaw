@@ -3,7 +3,81 @@
 # DefenseClaw Hermes hook — forwards Hermes shell-hook payloads to the
 # DefenseClaw gateway.
 set -euo pipefail
-# Windows: HOME may be unset when agents spawn hooks. Fall back to USERPROFILE.
+{{if not .Sandbox}}# The macOS execution probe has a hard zero-process limit. Reach the proof
+# using shell builtins, while still sourcing the installed hardening helper
+# and applying its resource limits. The registered hook path is absolute.
+if [ "${1:-}" = "--defenseclaw-execution-probe" ] && [ "${2:-}" = "--forkless" ]; then
+  case "${BASH_SOURCE[0]}" in /*) ;; *) exit 125 ;; esac
+  _DC_PROBE_HOOK_DIR="${BASH_SOURCE[0]%/*}"
+  # command: bash 3.2 (macOS /bin/bash) exits 0 when a sourced helper is missing or unreadable.
+  command . "${_DC_PROBE_HOOK_DIR}/_hardening.sh" || exit "$?"
+  declare -F defenseclaw_harden_resources >/dev/null || exit 125
+  declare -F defenseclaw_harden_env >/dev/null || exit 125
+  _DC_FORKLESS_PROBE=1
+  defenseclaw_harden_resources
+  printf '%s\n' 'defenseclaw-execution-probe-ok'
+  exit 0
+fi
+{{end}}{{if and (not .Managed) (not .Sandbox)}}# _DC_HOOK_DATA_DIR is the data directory this hook was installed in, the
+# folder above its hooks folder (defenseclaw_install_held). Until the hook
+# path is resolved below it is the folder above the path the agent ran.
+_DC_HOOK_DATA_DIR="${BASH_SOURCE[0]:-$0}"
+case "$_DC_HOOK_DATA_DIR" in
+  */*) _DC_HOOK_DATA_DIR="${_DC_HOOK_DATA_DIR%/*}/.." ;;
+  *) _DC_HOOK_DATA_DIR=".." ;;
+esac
+# defenseclaw_install_lock_held DATA returns 0 (true) while this account's
+# installer holds its data directory DATA: DATA/.install.lock exists as any
+# file type, or DATA exists but cannot be searched, so the lock cannot be
+# shown absent; no DATA to look in counts as held too. The native hook
+# (installLockHeld), the in-agent plugins and the Windows adapters apply the
+# same rule (GAP-0914). defenseclaw_install_held below, the one install check
+# of every shell hook, reads it.
+defenseclaw_install_lock_held() {
+  local data="${1:-}"
+  [ -n "$data" ] || return 0
+  if [ -e "${data}/.install.lock" ] || [ -L "${data}/.install.lock" ]; then
+    return 0
+  fi
+  if [ -e "$data" ] || [ -L "$data" ]; then
+    if [ -d "$data" ] && [ -x "$data" ]; then
+      return 1
+    fi
+    return 0
+  fi
+  return 1
+}
+# defenseclaw_install_held returns 0 (true) while an installer holds either
+# data directory of this account's hook: the one DEFENSECLAW_HOME names, else
+# ~/.defenseclaw, where install.sh and install.ps1 take the lock, and the one
+# the hook was installed in (_DC_HOOK_DATA_DIR, the folder above its hooks
+# folder), which the gateway rendered it into from its resolved data
+# directory. An agent that runs the hook without DEFENSECLAW_HOME, or a
+# data_dir apart from DEFENSECLAW_HOME, still finds the lock (GAP-0948).
+defenseclaw_install_held() {
+  defenseclaw_install_lock_held "${DEFENSECLAW_HOME:-${HOME:+${HOME}/.defenseclaw}}" && return 0
+  [ -n "${_DC_HOOK_DATA_DIR:-}" ] && defenseclaw_install_lock_held "${_DC_HOOK_DATA_DIR}"
+}
+# A failure before the helpers load (a hook path that does not resolve, a
+# missing or broken _hardening.sh, a set -e error) answers Hermes' block
+# in fail mode closed, under strict availability and while this account's
+# installer holds its data directory; fail mode open keeps the exit status.
+# The installed mode decides (GAP-0315).
+# defenseclaw_harden_env replaces this trap with the hook's own.
+_DC_BOOT_FAIL_MODE="{{.FailMode}}"
+defenseclaw_boot_fails_closed() {
+  [ "$_DC_BOOT_FAIL_MODE" = "open" ] || return 0
+  case "${DEFENSECLAW_STRICT_AVAILABILITY:-}" in 1|true|TRUE|yes|YES) return 0 ;; esac
+  defenseclaw_install_held
+}
+hermes_bootstrap_failure() {
+  echo "defenseclaw: hermes hook could not start; blocking (fail mode closed)" >&2
+  # Hermes acts on a synchronous JSON block, not on process status.
+  printf '%s\n' '{"action":"block","message":"DefenseClaw hook failed closed"}'
+  exit 0
+}
+trap '_dc_boot_rc=$?; if [ "$_dc_boot_rc" -ne 0 ] && defenseclaw_boot_fails_closed; then hermes_bootstrap_failure; fi' EXIT
+{{end}}# Windows: HOME may be unset when agents spawn hooks. Fall back to USERPROFILE.
 HOME="${HOME:-${USERPROFILE:-$(cd ~ 2>/dev/null && pwd)}}"
 export HOME
 {{if .ForeignHookGuardSH}}DEFENSECLAW_GUARD_AGENT_HOME="$HOME"
@@ -40,10 +114,22 @@ _DC_SECURE_CLIENT_DELIVERY={{if .SecureClientDelivery}}1{{else}}0{{end}}
 {{end}}DEFENSECLAW_HOME="$(cd "${HOOK_DIR}/.." && pwd -P)"
 export DEFENSECLAW_HOME
 {{else}}
+# A per-user render is never a managed or Secure Client hook: those markers
+# come only from a managed render (the branch above), never from the
+# agent's environment, where they would change how the per-user hook answers
+# a missing token.
+unset DEFENSECLAW_MANAGED_HOOK _DC_SECURE_CLIENT_HOOK _DC_SECURE_CLIENT_DELIVERY
 DEFENSECLAW_HOME="${DEFENSECLAW_HOME:-${HOME}/.defenseclaw}"
-if [ ! -d "${DEFENSECLAW_HOME}" ] || [ -f "${DEFENSECLAW_HOME}/.disabled" ]; then
+{{if not .Sandbox}}# The hook path is resolved: this is the data directory it was installed in.
+_DC_HOOK_DATA_DIR="${HOOK_DIR}/.."
+{{end}}if [ ! -d "${DEFENSECLAW_HOME}" ] || [ -f "${DEFENSECLAW_HOME}/.disabled" ]; then
   # A registered closed hook cannot treat missing local state as retirement.
-  if [ "{{.FailMode}}" = "closed" ] || [ "${DEFENSECLAW_STRICT_AVAILABILITY:-}" = "1" ]; then
+  # The installed mode decides; strict availability tightens this exit as it
+  # tightens every later outage.
+  _DC_HOME_FAIL_MODE="{{.FailMode}}"
+  ! defenseclaw_install_held || _DC_HOME_FAIL_MODE="closed"
+  case "${DEFENSECLAW_STRICT_AVAILABILITY:-}" in 1|true|TRUE|yes|YES) _DC_HOME_FAIL_MODE="closed" ;; esac
+  if [ "$_DC_HOME_FAIL_MODE" != "open" ]; then
     echo "defenseclaw: hook home unavailable; blocking (fail mode closed)" >&2
     # Hermes acts on a synchronous JSON block, not on process status.
     printf '%s\n' '{"action":"block","message":"DefenseClaw hook failed closed"}'
@@ -61,18 +147,25 @@ fi
 # controls (HOME, PATH, locale, GIT_*); none of the subsequent
 # token-resolution logic depends on the operator's original PATH or
 # HOME.
-. "${HOOK_DIR}/_hardening.sh"
+# command: bash 3.2 (macOS /bin/bash) exits 0 when a sourced helper is missing or unreadable.
+command . "${HOOK_DIR}/_hardening.sh" || exit "$?"
 {{if .Sandbox}}# OpenShell sandbox: _sandbox.sh drops every inherited variable the hook
 # does not read and pins the baked PATH before the first child process
 # (mktemp in defenseclaw_harden_env) or helper call.
 . "${HOOK_DIR}/_sandbox.sh"
 {{end}}defenseclaw_harden_resources
 defenseclaw_harden_env
+# Doctor and Verify execute the exact command Hermes has registered. The
+# bounded probe checks the shell and local helper without sending a tool event.
+if [ "${1:-}" = "--defenseclaw-execution-probe" ]; then
+  printf '%s\n' 'defenseclaw-execution-probe-ok'
+  exit 0
+fi
 
 # FAIL_MODE set BEFORE the missing-token check so the helper has a
-# stable FAIL_MODE to log against. Response-layer and transport-layer
-# failures respect FAIL_MODE; DEFENSECLAW_STRICT_AVAILABILITY=1 remains
-# a force-closed override.
+# stable FAIL_MODE to log against. Outside Secure Client, response failures
+# close and eligible connection outages follow FAIL_MODE.
+# DEFENSECLAW_STRICT_AVAILABILITY=1 can only close.
 {{if .Sandbox}}# OpenShell sandbox hooks always fail closed, with no environment override:
 # the workload can make the ingress, or the relay in front of it, answer any
 # status, so no failed, refused or unparseable reply may turn into an allow.
@@ -83,16 +176,15 @@ FAIL_MODE="closed"
 readonly FAIL_MODE
 
 hermes_sandbox_block() {
-  defenseclaw_log_hook_failure hermes hermes-hook "$1" "$2" closed
+  defenseclaw_log_hook_failure hermes hermes-hook "$1" "$2" closed fail_closed
   echo "defenseclaw: hermes hook: $1, blocking (sandbox hooks fail closed)" >&2
   printf '{"action":"block","message":"%s"}\n' "$(defenseclaw_json_escape "DefenseClaw blocked this tool call because its policy check failed: $1")"
   exit 2
-}{{else if and .Managed (not .SecureClientDelivery)}}# Managed hooks outside an authenticated Secure Client deployment use the
-# installer-owned delivery policy; an inherited DEFENSECLAW_FAIL_MODE cannot
-# weaken an explicitly closed managed hook. Secure Client hooks keep the
-# environment override (#1163).
-FAIL_MODE="{{.FailMode}}"{{else}}FAIL_MODE="${DEFENSECLAW_FAIL_MODE:-{{.FailMode}}}"{{end}}
-
+}{{else}}FAIL_MODE="{{.FailMode}}"
+# The installed mode is the fail mode: DEFENSECLAW_FAIL_MODE in the agent's
+# environment is not read, so status and doctor report what runs (GAP-0461).{{end}}
+{{if and (not .Managed) (not .Sandbox)}}defenseclaw_close_during_install
+{{end}}
 # Bail early on missing token via the shared helper so the bypass is
 # logged to hook-failures.jsonl AND honors strict availability — the
 # previous v1 behaviour silently `exit 0`'d, which hid the bypass and
@@ -107,7 +199,7 @@ case "${DEFENSECLAW_SANDBOX_TOKEN:-}" in
   *$'\n'*|*$'\r'*) hermes_sandbox_block "malformed sandbox binding token" transport ;;
 esac
 
-PAYLOAD="$(defenseclaw_read_stdin_capped)" || hermes_sandbox_block "hook payload too large" response
+PAYLOAD="$(defenseclaw_read_stdin_capped fail_closed)" || hermes_sandbox_block "hook payload too large" response
 API_ADDR="{{.APIAddr}}"
 
 # The per-sandbox binding token is an OpenShell provider placeholder; the
@@ -115,11 +207,13 @@ API_ADDR="{{.APIAddr}}"
 API_TOKEN="${DEFENSECLAW_SANDBOX_TOKEN}"
 
 fail_unreachable() {
-  hermes_sandbox_block "$1" transport
+{{if and (not .Managed) (not .Sandbox)}}  defenseclaw_close_during_install
+{{end}}  hermes_sandbox_block "$1" transport
 }
 
 fail_response() {
-  hermes_sandbox_block "$(defenseclaw_response_failure_reason "$1")" response
+{{if and (not .Managed) (not .Sandbox)}}  defenseclaw_close_during_install
+{{end}}  hermes_sandbox_block "$(defenseclaw_response_failure_reason "$1")" response
 }
 {{else}}if [ ! -f "${HOOK_DIR}/{{.TokenFile}}" ] && [ -z "${DEFENSECLAW_GATEWAY_TOKEN:-}" ]; then
   defenseclaw_handle_missing_token hermes hermes-hook "hermes tool" "${HOOK_DIR}/{{.TokenFile}}"
@@ -171,9 +265,13 @@ hermes_block() {
   printf '{"action":"block","message":"%s"}\n' "$(defenseclaw_json_escape "$(hermes_block_message "$1" "$2")")"
 }
 
-PAYLOAD="$(defenseclaw_read_stdin_capped)" || {
-  echo "defenseclaw: hermes hook refusing oversized payload" >&2
-  if [ "$FAIL_MODE" = "closed" ]; then
+{{if and .Managed (not .SecureClient) (not .Sandbox)}}# A standalone managed hook blocks input too large to inspect in every
+# fail mode: the administrator's open covers a gateway outage only.
+{{end}}PAYLOAD="$(defenseclaw_read_stdin_capped "$(defenseclaw_hook_delivery_outcome response "{{if and .Managed (not .SecureClient) (not .Sandbox)}}closed{{else}}$FAIL_MODE{{end}}")")" || {
+{{if and (not .Managed) (not .Sandbox)}}  defenseclaw_close_during_install
+{{end}}{{if and .Managed (not .SecureClient) (not .Sandbox)}}  FAIL_MODE=closed
+{{end}}  echo "defenseclaw: hermes hook refusing oversized payload" >&2
+  if [ "{{if and .Managed (not .SecureClient) (not .Sandbox)}}closed{{else}}$FAIL_MODE{{end}}" != "open" ]; then
     hermes_block oversized "stdin body exceeded cap"
     exit 2
   fi
@@ -198,7 +296,8 @@ API_TOKEN="${DEFENSECLAW_GATEWAY_TOKEN:-}"
 unset DEFENSECLAW_GATEWAY_TOKEN
 
 fail_unreachable() {
-  defenseclaw_log_hook_failure hermes hermes-hook "$1" transport "$FAIL_MODE"
+{{if and (not .Managed) (not .Sandbox)}}  defenseclaw_close_during_install
+{{end}}  defenseclaw_log_hook_delivery_failure hermes hermes-hook "$1" transport "$FAIL_MODE"
   defenseclaw_emit_unreachable_stderr "hermes tool" "$1"
   if defenseclaw_should_fail_closed_on_unreachable; then
 {{if .SecureClient}}    printf '{"action":"block","message":"DefenseClaw hook failed closed"}\n'
@@ -209,7 +308,12 @@ fail_unreachable() {
 }
 
 fail_response() {
-  defenseclaw_log_hook_failure hermes hermes-hook "$1" response "$FAIL_MODE"
+{{if and (not .Managed) (not .Sandbox)}}  defenseclaw_close_during_install
+{{end}}{{if and .Managed (not .SecureClient) (not .Sandbox)}}  # A standalone managed hook: the administrator's open covers a gateway
+  # outage only (the service not running, restarting or giving no answer
+  # in time). A refusal, an error status or an unusable answer blocks.
+  FAIL_MODE="closed"
+{{end}}  defenseclaw_log_hook_delivery_failure hermes hermes-hook "$1" response "$FAIL_MODE"
   echo "defenseclaw: hermes hook error: $1" >&2
   if [ "$FAIL_MODE" = "open" ]; then
     exit 0
@@ -218,7 +322,42 @@ fail_response() {
   exit 0
 }
 {{end}}
-{{.HookSocketTransportSH}}AUTH_HEADER_ARGS=()
+{{if and .Managed (not .SecureClient) (not .Sandbox)}}{{.ManagedHTTPFailureSH}}{{end}}{{.HookSocketTransportSH}}{{if .HermesNativeHookSH}}# The registered Hermes command remains this shell hook. The trusted native
+# hook speaks the managed answer/receipt protocol for the same payload.
+# Restore the original soft virtual-memory limit before starting Go. Buffer
+# its one JSON answer so a missing executable or failed native hook cannot
+# leave Hermes with an empty answer (Hermes ignores the process status).
+ulimit -S -v "${_DC_HOOK_NATIVE_VMEM_LIMIT:-$(ulimit -H -v)}" 2>/dev/null || :
+_DC_NATIVE_STATUS=0
+_DC_NATIVE_ANSWER="$(HOME="${DEFENSECLAW_GUARD_AGENT_HOME:-${DEFENSECLAW_AGENT_HOME:-$HOME}}" {{.HermesNativeHookSH}} hook --connector hermes --enterprise-managed <<<"$PAYLOAD")" || _DC_NATIVE_STATUS=$?
+if [ "$_DC_NATIVE_STATUS" -eq 0 ] && [ -z "$_DC_NATIVE_ANSWER" ]; then
+  # Native Hermes returns an empty successful answer only for its neutral
+  # allow result; managed failures print a block directive or exit nonzero.
+  exit 0
+fi
+if [ "$_DC_NATIVE_STATUS" -eq 0 ]; then
+  # The native hook has already validated the gateway answer. Preserve each
+  # documented Hermes output shape while rejecting an unusable nonempty
+  # result. The string-field reader validates the whole JSON, including
+  # duplicate keys, even on hosts without jq or Python.
+  _DC_NATIVE_EVENT="$(defenseclaw_json_string_field "$PAYLOAD" hook_event_name)" ||
+    _DC_NATIVE_EVENT="$(defenseclaw_json_string_field "$PAYLOAD" event)" || _DC_NATIVE_EVENT=""
+  _DC_NATIVE_ACTION="$(defenseclaw_json_string_field "$_DC_NATIVE_ANSWER" action)" || _DC_NATIVE_ACTION=""
+  _DC_NATIVE_DECISION="$(defenseclaw_json_string_field "$_DC_NATIVE_ANSWER" decision)" || _DC_NATIVE_DECISION=""
+  _DC_NATIVE_MESSAGE="$(defenseclaw_json_string_field "$_DC_NATIVE_ANSWER" message)" || _DC_NATIVE_MESSAGE=""
+  _DC_NATIVE_REASON="$(defenseclaw_json_string_field "$_DC_NATIVE_ANSWER" reason)" || _DC_NATIVE_REASON=""
+  _DC_NATIVE_CONTEXT="$(defenseclaw_json_string_field "$_DC_NATIVE_ANSWER" context)" || _DC_NATIVE_CONTEXT=""
+  if { [ "$_DC_NATIVE_ACTION" = "block" ] && [ -n "$_DC_NATIVE_MESSAGE" ]; } ||
+     { [ "$_DC_NATIVE_DECISION" = "block" ] && [ -n "$_DC_NATIVE_REASON" ]; } ||
+     { [ "$_DC_NATIVE_EVENT" = "pre_llm_call" ] && [ -n "$_DC_NATIVE_CONTEXT" ]; } ||
+     { [ "$_DC_NATIVE_EVENT" = "pre_verify" ] && [ "$_DC_NATIVE_ACTION" = "continue" ] && [ -n "$_DC_NATIVE_MESSAGE" ]; }; then
+    printf '%s\n' "$_DC_NATIVE_ANSWER"
+    exit 0
+  fi
+fi
+hermes_block response "the trusted native hook could not start"
+exit 2
+{{end}}AUTH_HEADER_ARGS=()
 if [ -n "${API_TOKEN}" ]; then
 {{if not .Sandbox}}  # A bearer is an HTTP field value: CR or LF is never valid in it, and either
   # would end the curl config line defenseclaw_gateway_post writes it to.
@@ -230,9 +369,10 @@ fi
 
 # W3C trace propagation: forward validated traceparent / tracestate via _hardening.sh v6.
 TRACE_HEADER_ARGS=()
-if command -v mapfile >/dev/null 2>&1; then
-  mapfile -t TRACE_HEADER_ARGS < <(defenseclaw_extract_trace_context)
-fi
+# A read loop, not mapfile: macOS ships bash 3.2, which has no mapfile.
+while IFS= read -r trace_header_arg; do
+  TRACE_HEADER_ARGS+=("$trace_header_arg")
+done < <(defenseclaw_extract_trace_context)
 
 # Per-user attribution: the gateway cannot read the real user's identity from
 # its own service-account process, so the hook reports it.
@@ -256,10 +396,7 @@ RESPONSE="$(defenseclaw_sandbox_post "/api/v1/hermes/hook" "$PAYLOAD" \
   "${TRACE_HEADER_ARGS[@]+"${TRACE_HEADER_ARGS[@]}"}" \
   "${IDENTITY_HEADER_ARGS[@]+"${IDENTITY_HEADER_ARGS[@]}"}")" || {
   fail_unreachable "$(defenseclaw_sandbox_unreachable_reason "$RESPONSE")"
-}{{else}}if defenseclaw_api_listener_foreign "$API_ADDR"; then
-  fail_unreachable "${API_ADDR} is held by another account while this account's gateway is not running; no token was sent. Run \`defenseclaw-gateway start\` for the fix"
-fi
-# A refused or dropped connection means this account's gateway is
+}{{else}}# A refused or dropped connection means this account's gateway is
 # restarting or not running (after a reboot, for example): send the call
 # again for up to 3 seconds, starting the gateway after a refusal. See
 # defenseclaw_await_gateway in _hardening.sh.
@@ -275,21 +412,36 @@ defenseclaw_hook_post() {
     --unix-socket "${DEFENSECLAW_HOOK_SOCKET}"{{end}}
 }
 RESPONSE=$(defenseclaw_hook_post) || {
-  defenseclaw_await_gateway "$?" _dc_hook_post_response || fail_unreachable "gateway unreachable"
+{{if and .Managed (not .SecureClient) (not .Sandbox)}}  DC_POST_STATUS=$?
+  defenseclaw_split_response
+  defenseclaw_managed_http_result "$HTTP_CODE" incomplete
+  defenseclaw_await_gateway "$DC_POST_STATUS" _dc_hook_post_response || {
+    defenseclaw_split_response
+    defenseclaw_managed_http_result "$HTTP_CODE" incomplete
+    fail_unreachable "gateway unreachable"
+  }
+{{else}}  defenseclaw_await_gateway "$?" _dc_hook_post_response || fail_unreachable "$(defenseclaw_gateway_unreachable_reason 2>/dev/null || printf 'gateway unreachable')"{{end}}
 }
-defenseclaw_retry_busy _dc_hook_post_response || fail_unreachable "gateway unreachable"{{end}}
+{{if and .Managed (not .SecureClient) (not .Sandbox)}}# The gateway answered 429, so it is up: a resend that fails after it is no
+# outage in a standalone managed hook.
+{{end}}defenseclaw_retry_busy _dc_hook_post_response || {{if and (not .SecureClient) (not .Sandbox)}}fail_response "gateway returned HTTP 429"{{else}}fail_unreachable "gateway unreachable"{{end}}{{end}}
 
 HTTP_CODE=$(echo "$RESPONSE" | tail -1)
 RESULT=$(echo "$RESPONSE" | sed '$d')
 
-if [ -z "$HTTP_CODE" ]; then
+{{if and .Managed (not .SecureClient) (not .Sandbox)}}defenseclaw_managed_http_result "$HTTP_CODE"
+{{else}}if [ -z "$HTTP_CODE" ]; then
   fail_unreachable "gateway returned no HTTP status"
 elif [ "$HTTP_CODE" -ge 500 ] 2>/dev/null && [ "$HTTP_CODE" -lt 600 ] 2>/dev/null; then
-  fail_unreachable "gateway returned HTTP ${HTTP_CODE}"
+{{if and .Managed (not .SecureClient) (not .Sandbox)}}  fail_response "gateway returned HTTP ${HTTP_CODE}"
+{{else}}  fail_unreachable "gateway returned HTTP ${HTTP_CODE}"
+{{end}}
 elif [ "$HTTP_CODE" -lt 200 ] 2>/dev/null || [ "$HTTP_CODE" -ge 300 ] 2>/dev/null; then
   fail_response "gateway returned HTTP ${HTTP_CODE}"
-fi
+fi{{end}}
 
+{{if and (not .SecureClient) (not .Sandbox)}}defenseclaw_json_string_field "$RESULT" action >/dev/null || fail_response "invalid or ambiguous JSON response"
+{{end}}
 OUTPUT=$(echo "$RESULT" | _dc_jq -c '.hook_output // empty' 2>/dev/null) || {
   fail_response "invalid JSON response"
 }

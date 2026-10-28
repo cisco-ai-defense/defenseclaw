@@ -22,6 +22,17 @@ import (
 	"strings"
 )
 
+// encodeTrustedShellArgs is shared by the supported shell-tool adapters.
+func encodeTrustedShellArgs(fields map[string]string) (json.RawMessage, error) {
+	var out bytes.Buffer
+	enc := json.NewEncoder(&out)
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(fields); err != nil {
+		return nil, err
+	}
+	return bytes.TrimSuffix(out.Bytes(), []byte("\n")), nil
+}
+
 // trustedShellArg is how TrustedShellArgs handles a shell tool argument it
 // knows, and the JSON value the argument must have (null is always
 // accepted).
@@ -71,10 +82,10 @@ var copilotShellArgs = map[string]trustedShellArg{
 //
 // Arguments that change where or how the command runs are left for the
 // parser, which does not prove them: Devin's env, shell_flavor and shell_id,
-// Copilot's shellId, and OpenClaw's env, elevated, host and node. Claude Code's and Codex's shell calls take their
-// own hook paths (Codex passes its hooks only the command); OpenHands'
-// terminal, agy's run_command and Hermes' process have their own
-// projections, and OmniGent's sys_os_shell has only the command.
+// Copilot's shellId, and OpenClaw's env, elevated, host and node. Claude Code's
+// and Codex's shell calls take their own hook paths; the Codex exec_command
+// hook resolves its workdir before proving the command. Agy's run_command
+// and Hermes' process have their own projections.
 var trustedShellTools = map[string]map[string]map[string]trustedShellArg{
 	"opencode": {"bash": {"workdir": trustedShellWorkdir}},
 	"hermes": {"terminal": {
@@ -184,8 +195,8 @@ func trustedShellArgValue(kind trustedShellArg, raw json.RawMessage) bool {
 
 // shellCommandKeys names, per connector and shell tool (as the tool is
 // named to hooks), the argument that holds the command: the tools
-// trustedShellTools lists, OpenHands' terminal, agy's run_command,
-// OmniGent's sys_os_shell, and Claude Code's and Codex's Bash.
+// trustedShellTools lists, agy's run_command, Claude Code's Bash, and
+// Codex's Bash and exec_command.
 var shellCommandKeys = map[string]map[string]string{
 	"opencode":    {"bash": "command"},
 	"hermes":      {"terminal": "command"},
@@ -198,7 +209,7 @@ var shellCommandKeys = map[string]map[string]string{
 	"antigravity": {"run_command": "CommandLine"},
 	"omnigent":    {"sys_os_shell": "command"},
 	"claudecode":  {"Bash": "command"},
-	"codex":       {"Bash": "command"},
+	"codex":       {"Bash": "command", "exec_command": "cmd"},
 	"openclaw":    {"exec": "command"},
 }
 

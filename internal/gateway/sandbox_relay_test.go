@@ -178,6 +178,16 @@ func (s *relayTestStore) Get(uid int, id string) (sandboxreg.Registration, bool,
 	return reg, ok, err
 }
 
+// GetWithRun answers the registration as Get does.
+func (s *relayTestStore) GetWithRun(uid int, id string) (sandboxreg.Registration, bool, sandboxreg.Run, bool, error) {
+	reg, ok, err := s.Get(uid, id)
+	if err != nil {
+		return sandboxreg.Registration{}, false, sandboxreg.Run{}, false, err
+	}
+	run, hasRun, err := s.Run(uid, id)
+	return reg, ok, run, hasRun, err
+}
+
 func (s *relayTestStore) set(err error, unbound bool) {
 	s.mu.Lock()
 	s.err, s.unbound = err, unbound
@@ -411,7 +421,7 @@ func TestSandboxRelayMatchesLocalIngressForEveryHarness(t *testing.T) {
 	relay := newRelayFixture(t)
 
 	names := harness.Names()
-	if len(names) < 12 {
+	if len(names) < 10 {
 		t.Fatalf("harnesses = %v", names)
 	}
 	for _, name := range names {
@@ -1143,5 +1153,52 @@ func TestSandboxRelayThroughTheHookSocketServer(t *testing.T) {
 	}
 	if resp, body := post(sandboxrelay.PathOTLPPrefix+"logs", "application/x-protobuf", raw); resp.StatusCode/100 != 2 {
 		t.Fatalf("2 MiB protobuf OTLP export: %d %s", resp.StatusCode, body)
+	}
+}
+
+// A relayed hook with an unproven group uses the observe default when the
+// possible group profile also only observes. The registration's last proven
+// profile is not assumed to be the caller's current policy (GAP-0522).
+func TestSandboxRelayUsesObserveDefaultForUnprovenGroup(t *testing.T) {
+	restoreFacts, restoreBlocking := identityFactsEnabled.Load(), identityLookupBlocking.Load()
+	prevDirectory, prevRematched := managedHookPeerDirectory, sandboxRecordRematched
+	identityFactsEnabled.Store(true)
+	identityLookupBlocking.Store(true)
+	managedHookPeerDirectory = func(uid int, _ bool) (useridentity.DirectoryFacts, bool) {
+		if uid != relayTestPeer.UID {
+			return useridentity.DirectoryFacts{}, false
+		}
+		return useridentity.DirectoryFacts{
+			Principal: "dev@DCLAB.TEST", Domain: "dclab.test", Directory: useridentity.DirectoryActiveDirectory,
+			GroupsPartial: true, Source: "sssd", ResolvedAt: time.Now(),
+		}, true
+	}
+	sandboxRecordRematched = func(*APIServer, sandboxreg.Registration, sandboxreg.Registration, []string, string) {}
+	t.Cleanup(func() {
+		identityFactsEnabled.Store(restoreFacts)
+		identityLookupBlocking.Store(restoreBlocking)
+		managedHookPeerDirectory, sandboxRecordRematched = prevDirectory, prevRematched
+	})
+	f := newRelayFixture(t, func(c *config.Config) {
+		c.Guardrail.Connector = "claudecode"
+		c.Guardrail.Profiles = map[string]config.GuardrailProfile{
+			"contractors":   {Description: "Contractors", Mode: "observe"},
+			"offline-floor": {Description: "Offline floor", Mode: "observe"},
+		}
+		c.Guardrail.ProfileAssignments = []config.ProfileAssignment{
+			{Profile: "contractors", Match: config.ProfileMatch{Groups: []string{"dc-sbx-contractors"}}},
+		}
+		c.Guardrail.DefaultProfile = "offline-floor"
+	})
+	reg := f.register(t, "unproven", "claudecode", relayTestBindingID(0xa02), func(r *sandboxreg.Registration) {
+		r.Profile, r.ProfileMatch = "contractors", "group"
+	})
+	resp, body := f.post(t, sandboxrelay.PathHookPrefix+"claudecode", reg.ID,
+		`{"hook_event_name":"UserPromptSubmit","session_id":"u1","prompt":"hello"}`)
+	d, ok := relayTrailer(t, resp)
+	if resp.StatusCode != http.StatusOK || !ok || d.Action != "allow" || d.FailedClosed ||
+		strings.Contains(body, "DefenseClaw refused this request") ||
+		strings.Contains(body, "contractors") || strings.Contains(body, "offline-floor") {
+		t.Fatalf("relayed hook: %d %s trailer %+v; want observe default without a profile name", resp.StatusCode, body, d)
 	}
 }

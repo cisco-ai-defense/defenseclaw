@@ -132,7 +132,7 @@ type InspectFindingSource struct {
 func BuildInspectScanResult(src InspectFindingSource) (evaluationID string, result *ScanResult) {
 	evaluationID = strings.TrimSpace(src.EvaluationID)
 	if evaluationID == "" {
-		evaluationID = uuid.New().String()
+		evaluationID = uuid.Must(uuid.NewV7()).String()
 	}
 
 	if strings.TrimSpace(src.Scanner) == "" {
@@ -184,7 +184,7 @@ func adaptInspectFinding(in InspectFinding, scannerName string) Finding {
 	if id == "" {
 		id = "finding"
 	}
-	id = id + ":" + uuid.New().String()
+	id = id + ":" + uuid.Must(uuid.NewV7()).String()
 
 	f := Finding{
 		ID:                  id,

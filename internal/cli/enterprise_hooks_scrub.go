@@ -68,30 +68,31 @@ var scrubCodexOtelMarkers = []string{
 // connector writes into ~/.claude/settings.json. Kept in sync with
 // claudeCodeOtelEnvKeys in internal/gateway/connector/claudecode.go.
 var claudeManagedEnvKeys = map[string]struct{}{
-	"CLAUDE_CODE_ENABLE_TELEMETRY":        {},
-	"DEFENSECLAW_FAIL_MODE":               {},
-	"OTEL_METRICS_EXPORTER":               {},
-	"OTEL_LOGS_EXPORTER":                  {},
-	"OTEL_TRACES_EXPORTER":                {},
-	"OTEL_EXPORTER_OTLP_PROTOCOL":         {},
-	"OTEL_EXPORTER_OTLP_ENDPOINT":         {},
-	"OTEL_EXPORTER_OTLP_HEADERS":          {},
-	"OTEL_EXPORTER_OTLP_METRICS_PROTOCOL": {},
-	"OTEL_EXPORTER_OTLP_METRICS_ENDPOINT": {},
-	"OTEL_EXPORTER_OTLP_METRICS_HEADERS":  {},
-	"OTEL_EXPORTER_OTLP_LOGS_PROTOCOL":    {},
-	"OTEL_EXPORTER_OTLP_LOGS_ENDPOINT":    {},
-	"OTEL_EXPORTER_OTLP_LOGS_HEADERS":     {},
-	"OTEL_EXPORTER_OTLP_TRACES_PROTOCOL":  {},
-	"OTEL_EXPORTER_OTLP_TRACES_ENDPOINT":  {},
-	"OTEL_EXPORTER_OTLP_TRACES_HEADERS":   {},
-	"OTEL_LOG_USER_PROMPTS":               {},
-	"OTEL_LOG_ASSISTANT_RESPONSES":        {},
-	"OTEL_LOG_RAW_API_BODIES":             {},
-	"OTEL_LOG_TOOL_CONTENT":               {},
-	"OTEL_LOG_TOOL_DETAILS":               {},
-	"OTEL_RESOURCE_ATTRIBUTES":            {},
-	"OTEL_SERVICE_NAME":                   {},
+	"CLAUDE_CODE_ENABLE_TELEMETRY":                {},
+	"CLAUDE_CODE_OTEL_HEADERS_HELPER_DEBOUNCE_MS": {},
+	"DEFENSECLAW_FAIL_MODE":                       {},
+	"OTEL_METRICS_EXPORTER":                       {},
+	"OTEL_LOGS_EXPORTER":                          {},
+	"OTEL_TRACES_EXPORTER":                        {},
+	"OTEL_EXPORTER_OTLP_PROTOCOL":                 {},
+	"OTEL_EXPORTER_OTLP_ENDPOINT":                 {},
+	"OTEL_EXPORTER_OTLP_HEADERS":                  {},
+	"OTEL_EXPORTER_OTLP_METRICS_PROTOCOL":         {},
+	"OTEL_EXPORTER_OTLP_METRICS_ENDPOINT":         {},
+	"OTEL_EXPORTER_OTLP_METRICS_HEADERS":          {},
+	"OTEL_EXPORTER_OTLP_LOGS_PROTOCOL":            {},
+	"OTEL_EXPORTER_OTLP_LOGS_ENDPOINT":            {},
+	"OTEL_EXPORTER_OTLP_LOGS_HEADERS":             {},
+	"OTEL_EXPORTER_OTLP_TRACES_PROTOCOL":          {},
+	"OTEL_EXPORTER_OTLP_TRACES_ENDPOINT":          {},
+	"OTEL_EXPORTER_OTLP_TRACES_HEADERS":           {},
+	"OTEL_LOG_USER_PROMPTS":                       {},
+	"OTEL_LOG_ASSISTANT_RESPONSES":                {},
+	"OTEL_LOG_RAW_API_BODIES":                     {},
+	"OTEL_LOG_TOOL_CONTENT":                       {},
+	"OTEL_LOG_TOOL_DETAILS":                       {},
+	"OTEL_RESOURCE_ATTRIBUTES":                    {},
+	"OTEL_SERVICE_NAME":                           {},
 }
 
 var (
@@ -346,6 +347,11 @@ func scrubClaudeCodeFile(path string, markers []string) (bool, error) {
 		} else {
 			hooks[event] = keptGroups
 		}
+	}
+	// The per-user otelHeadersHelper lives in the hooks folder this purge
+	// deletes (GAP-1421).
+	if helper, present := cfg["otelHeadersHelper"]; present && looksOwned(helper, markers) {
+		delete(cfg, "otelHeadersHelper")
 	}
 	if env, ok := cfg["env"].(map[string]any); ok {
 		for key, val := range env {

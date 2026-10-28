@@ -14,6 +14,7 @@ package gateway
 
 import (
 	"context"
+	"os"
 	"path/filepath"
 	"reflect"
 	"slices"
@@ -22,6 +23,7 @@ import (
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/peercred"
 	"github.com/defenseclaw/defenseclaw/internal/unixidentity"
 	"github.com/defenseclaw/defenseclaw/internal/useridentity"
@@ -31,6 +33,84 @@ type fakePeerHomeResolver struct {
 	unixidentity.Resolver
 	accounts map[int]unixidentity.Account
 	calls    int
+}
+
+// The guardian may publish a recreated account's SID while the gateway's
+// account-name cache still holds the preceding owner of the same UID/name.
+// Its cached UPN must be dropped before the directory TTL expires.
+func TestManagedHookPeerDirectoryRefreshesOnSpoolSIDChange(t *testing.T) {
+	const uid = 5000
+	const key = "5000"
+	dir := t.TempDir()
+	oldDir, oldValidate, oldEnabled := currentIdentitySpoolDir(), validateManagedGuardianAuthorization, identityFactsEnabled.Load()
+	oldIncarnation := managedHookPeerAccountIncarnation
+	managedHookPeerAccountIncarnation = func(unixidentity.Account) (string, bool) { return "sid:old", true }
+	setIdentitySpoolDir(dir)
+	validateManagedGuardianAuthorization = func(string, string) error { return nil }
+	setIdentityFactsEnabled(true)
+	t.Cleanup(func() {
+		setIdentitySpoolDir(oldDir)
+		validateManagedGuardianAuthorization = oldValidate
+		setIdentityFactsEnabled(oldEnabled)
+		managedHookPeerAccountIncarnation = oldIncarnation
+	})
+	write := func(sid, upn string) {
+		t.Helper()
+		data, err := enterprisehooks.MarshalIdentitySpoolRecord(enterprisehooks.IdentitySpoolRecord{
+			Key: key, User: "alice", AccountSID: sid, UpdatedAt: time.Now().UTC(),
+			Facts: useridentity.DirectoryFacts{UPN: upn, AccountSID: sid, Groups: []string{"users"}},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, key+".json"), data, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write("S-1-5-21-1-2-3-1001", "old@corp.example")
+	cache := &managedHookPeerHomeCache{
+		newResolver: func() unixidentity.Resolver {
+			return &fakePeerHomeResolver{accounts: map[int]unixidentity.Account{uid: {Name: "alice", UID: uid, Home: "/home/alice"}}}
+		},
+		now: time.Now,
+	}
+	cache.directoriesOnce.Do(func() {
+		cache.directories = newIdentityDirectoryCache(func(string) (useridentity.DirectoryFacts, error) {
+			record, ok := readIdentitySpoolFacts(key, time.Now())
+			if !ok {
+				return useridentity.DirectoryFacts{}, os.ErrNotExist
+			}
+			facts := record.Facts
+			facts.AccountSID = record.AccountSID
+			return facts, nil
+		})
+	})
+	if facts, ok := cache.directory(uid, true); !ok || facts.UPN != "old@corp.example" {
+		t.Fatalf("original facts = %+v, %v", facts, ok)
+	}
+	write("S-1-5-21-1-2-3-2002", "new@corp.example")
+	if facts, ok := cache.directory(uid, true); !ok || facts.UPN != "new@corp.example" {
+		t.Fatalf("recreated account kept predecessor's UPN: %+v, %v", facts, ok)
+	}
+	// Loop round 3: a missing record is no withdrawal (the guardian has not
+	// written one yet, or removed one), and the verified facts stay.
+	if err := os.Remove(filepath.Join(dir, key+".json")); err != nil {
+		t.Fatal(err)
+	}
+	if facts, ok := cache.directory(uid, true); !ok || facts.UPN != "new@corp.example" {
+		t.Fatalf("a removed record dropped the verified facts: %+v, %v", facts, ok)
+	}
+	// The guardian's explicit withdrawal drops them.
+	data, err := enterprisehooks.MarshalIdentitySpoolRecord(enterprisehooks.IdentitySpoolRecord{Key: key, UpdatedAt: time.Now().UTC()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, key+enterprisehooks.IdentitySpoolWithdrawalSuffix), data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if facts, ok := cache.directory(uid, true); ok && facts.UPN != "" {
+		t.Fatalf("withdrawn identity kept its UPN: %+v", facts)
+	}
 }
 
 func (f *fakePeerHomeResolver) LookupUID(uid int) (unixidentity.Account, error) {

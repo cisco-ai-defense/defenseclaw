@@ -49,7 +49,7 @@ const (
 	launcherCommand = "defenseclaw"
 
 	// launcherRefusal answers every command the launcher does not offer.
-	launcherRefusal = "This computer is managed; only `defenseclaw sandbox` commands are available here."
+	launcherRefusal = "This computer is managed; use `defenseclaw sandbox status` for your read-only status and `defenseclaw sandbox policy explain` for your policy. Other commands require an administrator."
 )
 
 // launcherArgv0 is the name the process was started under; a seam for tests.
@@ -124,6 +124,7 @@ func prepareLauncherRoot(root *cobra.Command) {
 your coding agents in sandboxes under the policy your organization set for you:
 
   defenseclaw sandbox run claude     run Claude Code in a sandbox
+  defenseclaw sandbox status         show your sandbox and managed policy state
   defenseclaw sandbox policy explain show the policy that applies to you
 
 Every other DefenseClaw command is for administrators.`
@@ -173,7 +174,7 @@ Every other DefenseClaw command is for administrators.`
 const launcherRunLong = `Runs the harness in a new sandbox on a copy of the current folder: your
 organization manages sandboxes on this computer, so every run works on a copy,
 with secret files held back, that you bring the changes back from after a review.
-The harness is claude, codex, copilot, opencode, kiro, hermes, openhands, omnigent
+The harness is claude, codex, copilot, opencode, kiro, hermes
 or antigravity, as far as your organization allows it for you ("defenseclaw sandbox
 policy explain" lists them). The harness gets your terminal; when it exits you get a
 summary, a review of the changed files, and the choice to bring the changes back or
@@ -302,19 +303,43 @@ func withLauncherClient(newApp func(*cobra.Command) *sandboxcli.App) func(*cobra
 	}
 }
 
+// launcherWriters are the commands that change policy or configuration: a
+// refusal of one is a row in the managed audit store, as it was when the
+// per-user CLI refused it (mp0.GAP-0002). Reads and other commands record
+// nothing. The words come from this table, never from the arguments.
+var launcherWriters = map[string]map[string]bool{
+	"config": {"set": true, "unset": true},
+	"guardrail": {
+		"alert-at": true, "allow-private-upstream": true, "block-at": true, "block-message": true, "disable": true,
+		"enable": true, "fail-mode": true, "hilt": true, "judge": true, "mode": true, "protection": true,
+		"rule": true, "suppress": true, "use-pack": true,
+	},
+	"policy": {"activate": true, "create": true, "delete": true, "edit": true},
+}
+
+// launcherAuditedWriter returns the command words of a refused writer.
+func launcherAuditedWriter(args []string) (string, bool) {
+	if len(args) == 0 {
+		return "", false
+	}
+	if args[0] == "uninstall" {
+		return "uninstall", true
+	}
+	if len(args) > 1 && launcherWriters[args[0]][args[1]] {
+		if args[0] == "guardrail" && args[1] == "protection" && len(args) > 2 && args[2] == "list" {
+			return "", false
+		}
+		return args[0] + " " + args[1], true
+	}
+	return "", false
+}
+
 // executeLauncher runs the launcher over root with args and returns the exit
 // code.
 func executeLauncher(ctx context.Context, root *cobra.Command, args []string) int {
 	if !launcherOffers(args) {
-		if len(args) > 0 {
-			switch args[0] {
-			case "guardrail":
-				if len(args) > 1 && args[1] == "disable" {
-					reportManagedCommandRefusal("guardrail disable", "")
-				}
-			case "uninstall":
-				reportManagedCommandRefusal("uninstall", "")
-			}
+		if command, ok := launcherAuditedWriter(args); ok {
+			reportManagedCommandRefusal(command, "")
 		}
 		fmt.Fprintln(root.ErrOrStderr(), launcherRefusal)
 		return 2

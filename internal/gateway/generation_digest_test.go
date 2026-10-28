@@ -725,6 +725,30 @@ func TestDiscoveryAssetsChangedFollowsTheFileNotTheConfig(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+
+	// A glob with a wildcard folder is watched at its fixed folder and at
+	// each folder it matches: a new matching folder rebuilds and is
+	// watched, then a pack created in it rebuilds again (GAP-0858).
+	entry := filepath.Join(packs, "*", "pack.json")
+	cfg.AIDiscovery.SignaturePacks = []string{entry}
+	live = &Generation{Components: assetDigestComponents(cfg, newDigestScope(cfg, "", ""))}
+	if !slices.Contains(generationAssetDirs(cfg, &Generation{}), packs) || discoveryAssetsChanged(live, cfg) {
+		t.Fatalf("%s: the fixed folder is not watched, or an untouched entry rebuilt discovery", entry)
+	}
+	team := filepath.Join(packs, "team")
+	if err := os.Mkdir(team, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if !discoveryAssetsChanged(live, cfg) || !slices.Contains(generationAssetDirs(cfg, &Generation{}), team) {
+		t.Fatalf("%s: a new matching folder did not rebuild discovery or is not watched", entry)
+	}
+	live = &Generation{Components: assetDigestComponents(cfg, newDigestScope(cfg, "", ""))}
+	if err := os.WriteFile(filepath.Join(team, "pack.json"), []byte(`{"version":1}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if !discoveryAssetsChanged(live, cfg) {
+		t.Fatalf("%s: a pack in the new folder did not rebuild discovery", entry)
+	}
 }
 
 // livePolicyStampPresent reports whether records outside a request would carry

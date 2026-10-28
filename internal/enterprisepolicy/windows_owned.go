@@ -126,7 +126,7 @@ func PublishWindowsSecureClientCopilot(opts Options, enabled bool) (State, error
 	}
 	target := copilotTarget{}
 	if enabled {
-		return target.Reconcile(opts)
+		return reconcileTarget(target, opts)
 	}
 	return RemoveWindowsSecureClientCopilot(opts)
 }
@@ -146,7 +146,7 @@ func RemoveWindowsSecureClientCopilot(opts Options) (State, error) {
 	if err := takeBackWindowsGoOwnedForRemoval(opts, target); err != nil {
 		return State{}, fmt.Errorf("%s: %w", copilotConnector, err)
 	}
-	return target.RemoveOwned(opts)
+	return removeTargetOwned(target, opts)
 }
 
 // takeBackWindowsGoOwnedForRemoval takes back a target's vendor folders that
@@ -190,7 +190,7 @@ func RemoveWindowsGoOwned(opts Options) (Result, error) {
 			errs = append(errs, fmt.Errorf("%s: %w", name, err))
 			continue
 		}
-		state, err := target.RemoveOwned(opts)
+		state, err := removeTargetOwned(target, opts)
 		if err != nil {
 			errs = append(errs, fmt.Errorf("%s: %w", name, err))
 		} else if name == ConnectorOpenCode {

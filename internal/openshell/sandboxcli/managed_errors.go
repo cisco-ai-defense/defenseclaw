@@ -48,12 +48,12 @@ const managedFactsTimeout = 5 * time.Second
 // and every error on any other computer, is returned as it is. An exit
 // status err carries is kept.
 func (a *App) ManagedError(ctx context.Context, err error) error {
-	if err == nil || (!(a.ManagedHost()) && !(onManagedHost())) {
+	var silent *Silent
+	if err == nil || errors.As(err, &silent) {
 		return err
 	}
-	var silent *Silent
-	if errors.As(err, &silent) {
-		return err
+	if !(a.ManagedHost()) && !(onManagedHost()) {
+		return withoutReasonCode(err)
 	}
 	var e *sandboxapi.Error
 	if !errors.As(err, &e) {
@@ -71,8 +71,26 @@ func (a *App) ManagedError(ctx context.Context, err error) error {
 	}
 	text, ok := managedErrorText(e, a.managedFacts(ctx))
 	if !ok {
+		return withoutReasonCode(err)
+	}
+	var exit *ExitError
+	if errors.As(err, &exit) {
+		return &ExitError{Code: exit.Code, Err: &refusalError{text: text, err: e}}
+	}
+	return &refusalError{text: text, err: e}
+}
+
+// withoutReasonCode is err without the bare reason code a daemon error
+// carries as its detail ("...stop them and run this again: driver_mismatch"):
+// the message already says what happened and what to do, and the code is
+// for programs, which read it from the detail (GAP-0607). An exit status
+// err carries is kept; any other error is returned as it is.
+func withoutReasonCode(err error) error {
+	var e *sandboxapi.Error
+	if !errors.As(err, &e) || strings.TrimSpace(e.Message) == "" || !reasonCode(strings.TrimSpace(e.Detail)) {
 		return err
 	}
+	text := strings.Replace(err.Error(), e.Error(), strings.TrimSpace(e.Message), 1)
 	var exit *ExitError
 	if errors.As(err, &exit) {
 		return &ExitError{Code: exit.Code, Err: &refusalError{text: text, err: e}}
@@ -292,6 +310,9 @@ func managedErrorText(e *sandboxapi.Error, m *sandboxapi.ManagedStatus) (string,
 		return sandboxapi.ManagedRefusal(adminKeyNote.ReplaceAllString(why, ""), profile, quote, access), true
 	}
 	sentence, code := managedSentence(e)
+	if sentence != "" && (code == sandboxrelay.ReasonDaemonOutdated || code == sandboxrelay.DetailSetupChanging) {
+		return sentence, true
+	}
 	switch e.Code {
 	case sandboxapi.CodeAdminViolation:
 		quote := ""
@@ -359,7 +380,13 @@ func managedSentence(e *sandboxapi.Error) (sentence, code string) {
 var gatewayTransportErrors = []string{
 	"client connection is closing", "transport is closing", "code = unavailable", "connection error: desc",
 	"error reading from server", "grpc: ",
+	"h2 protocol error: error reading a body from connection", "peer closed connection without sending tls close_notify",
 }
+
+// gatewayUnreachableErrors are the words of the OpenShell CLI's failure to
+// reach a gateway that does not listen ("× transport error ├─▶ tcp connect
+// error ... Connection refused").
+var gatewayUnreachableErrors = []string{"tcp connect error", "transport error", "connection refused"}
 
 // gatewayTransportText is why with a raw gRPC transport failure of the
 // OpenShell gateway ("Cancelled: grpc: the client connection is closing")
@@ -368,6 +395,11 @@ var gatewayTransportErrors = []string{
 // returned unchanged.
 func gatewayTransportText(why string) string {
 	lower := strings.ToLower(why)
+	for _, raw := range gatewayUnreachableErrors {
+		if strings.Contains(lower, raw) {
+			return "the OpenShell gateway does not answer"
+		}
+	}
 	for _, raw := range gatewayTransportErrors {
 		if strings.Contains(lower, raw) {
 			return "the connection to the OpenShell gateway closed"

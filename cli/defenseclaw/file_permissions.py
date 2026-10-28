@@ -21,10 +21,13 @@ from __future__ import annotations
 import contextlib
 import os
 import shlex
+import socket
 import stat
+import struct
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import uuid
 from collections.abc import Callable
@@ -45,6 +48,87 @@ UNSAFE_PATH_CHANGED = "unsafe-path-changed"
 UNSAFE_PATH_UNTRUSTED_CUSTODY = "unsafe-path-untrusted-custody"
 UNSAFE_PATH_NOT_ABSOLUTE = "unsafe-path-not-absolute"
 UNSAFE_PATH_INSPECTION_FAILED = "unsafe-path-inspection-failed"
+
+_tracked_host_stat_lock = threading.Lock()
+
+
+def tracked_host_owner_uid(path: str | os.PathLike[str], info: os.stat_result) -> int:
+    """Recover a file's host UID inside a tracked scanner's user namespace.
+
+    An unmapped owner appears as 65534 there. The scanner launcher, which is
+    outside that namespace, checks the same inode and reports its actual UID.
+    Missing or mismatched evidence is refused even when the scanner itself
+    uses the overflow UID. This channel is present only in the PID-1 scanner.
+    """
+    owner = info.st_uid
+    if sys.platform != "linux" or owner != 65534:
+        return owner
+    # The overflow UID can also equal the scanner's own UID. Without host
+    # evidence, accepting it would trust an unmapped file owner.
+    if os.getpid() != 1:
+        return -1
+    raw = os.fsencode(path)
+    if not raw or len(raw) > 4096:
+        return -1
+    nonce = os.urandom(8)
+    request = struct.pack("!QQ", info.st_dev, info.st_ino) + nonce + struct.pack("!H", len(raw)) + raw
+    channel = tracked_host_stat_channel()
+    if channel is None:
+        return -1
+    try:
+        with _tracked_host_stat_lock, channel:
+            channel.settimeout(2.0)
+            channel.sendall(request)
+            response = channel.recv(12)
+        if len(response) != 12 or response[:8] != nonce:
+            return -1
+        reported = struct.unpack("!I", response[8:])[0]
+        return -1 if reported == 0xFFFFFFFF else reported
+    except OSError:
+        return -1
+
+
+def tracked_host_stat_channel() -> socket.socket | None:
+    """The scanner launcher's host-owner channel on fd 5, or None.
+
+    The environment variable only names the descriptor; the process and the
+    socket must prove it. The process runs in a PID namespace other than the
+    host's, and fd 5 is a connected AF_UNIX SOCK_SEQPACKET socket whose peer
+    runs as this user outside that namespace, so the kernel reports the peer's
+    PID as 0. Every other socket on fd 5 (TCP, UDP, a stream or a socketpair of
+    this process) is refused before a request is sent.
+    """
+    if sys.platform != "linux" or os.environ.get("DEFENSECLAW_TRACKED_HOST_STAT_FD") != "5":
+        return None
+    if not _in_child_pid_namespace():
+        return None
+    try:
+        channel = socket.socket(fileno=os.dup(5))
+    except OSError:
+        return None
+    try:
+        if channel.family != socket.AF_UNIX or channel.type != socket.SOCK_SEQPACKET:
+            raise OSError("not the launcher's socket")
+        credentials = channel.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, struct.calcsize("iII"))
+        pid, uid, gid = struct.unpack("iII", credentials)
+        if pid != 0 or uid != os.geteuid() or gid != os.getegid():
+            raise OSError("not the launcher's socket")
+    except OSError:
+        channel.close()
+        return None
+    return channel
+
+
+def _in_child_pid_namespace() -> bool:
+    """True when this process has a PID in more than one PID namespace."""
+    try:
+        with open("/proc/self/status", encoding="ascii", errors="replace") as status:
+            for line in status:
+                if line.startswith("NSpid:"):
+                    return len(line.split()) > 2
+    except OSError:
+        return False
+    return False
 
 
 class UnsafePathError(OSError):
@@ -237,6 +321,7 @@ _DOTENV_PROCESS_CONTROL_NAMES = frozenset(
         "DEFENSECLAW_SANDBOX_TOKEN",
         "DEFENSECLAW_STRICT_AVAILABILITY",
         "DEFENSECLAW_TEST",
+        "DEFENSECLAW_TRACKED_HOST_STAT_FD",
         "DEFENSECLAW_TOOL_INSPECT_FAIL_OPEN",
         "DEFENSECLAW_TRUSTED_PROXY_CIDRS",
         "DEFENSECLAW_UNGUARDED_CHATGPT_CODEX_RESPONSES",
@@ -691,7 +776,7 @@ def trusted_posix_executable_path(path: str | os.PathLike[str]) -> str:
         )
     geteuid = getattr(os, "geteuid", None)
     current_uid = geteuid() if callable(geteuid) else info.st_uid
-    if info.st_uid not in {0, current_uid} or stat.S_IMODE(info.st_mode) & 0o022:
+    if tracked_host_owner_uid(resolved, info) not in {0, current_uid} or stat.S_IMODE(info.st_mode) & 0o022:
         raise UnsafePathError(
             f"gateway executable {resolved} can be changed by another account; "
             f"make this account or root its owner and run: chmod go-w {shlex.quote(str(resolved))}",
@@ -716,8 +801,9 @@ def trusted_posix_executable_path(path: str | os.PathLike[str]) -> str:
         # can replace this account's folder inside it (the gateway's own
         # directory check allows it too). Without this, every config check
         # failed for a home under /tmp.
-        root_sticky = parent_info.st_uid == 0 and parent_info.st_mode & stat.S_ISVTX
-        if parent_info.st_uid not in {0, current_uid} or (
+        parent_uid = tracked_host_owner_uid(current, parent_info)
+        root_sticky = parent_uid == 0 and parent_info.st_mode & stat.S_ISVTX
+        if parent_uid not in {0, current_uid} or (
             stat.S_IMODE(parent_info.st_mode) & 0o022 and not root_sticky
         ):
             # Name the folder: a chmod on the (possibly symlinked) command
@@ -1648,6 +1734,77 @@ def windows_acl_confidentiality_error(path: str | os.PathLike[str]) -> str | Non
     if not _windows_acl_has_required_access(path):
         return "owner/SYSTEM effective access is missing"
     return None
+
+
+def guard_private_dacl_error(
+    owner_sid: str,
+    null_dacl: bool,
+    entries: list[tuple[int, int, int, str]],
+    current_sid: str,
+) -> str | None:
+    """Apply the Go guard's private-file DACL rule to one ACL snapshot.
+
+    This is ``privateSecurityDescriptorIsSafeForSubject`` in
+    internal/safefile/protect_windows.go for a non-impersonated caller: the
+    current user owns the object; no allow entry with a non-empty mask names
+    anyone but the current user, OWNER RIGHTS or LocalSystem (read-only and
+    inherit-only grants included); no deny entry with a non-empty mask names
+    one of those three; and both the owner and LocalSystem hold a grant.
+    *entries* are ``(mask, access_mode, ace_flags, sid)`` as returned by
+    ``_windows_acl_snapshot`` (access mode 1 allows, 3 denies).
+    """
+    system, owner_rights = "S-1-5-18", "S-1-3-4"
+    if not current_sid:
+        return "current user SID could not be resolved"
+    if null_dacl:
+        return "ACL is a null DACL"
+    if owner_sid != current_sid:
+        return f"owner SID {owner_sid or '<unknown>'} is not the current user"
+    found_owner, found_system = False, current_sid == system
+    for mask, access_mode, _flags, sid in entries:
+        if not mask:
+            continue
+        if access_mode == 3:
+            if sid in {current_sid, system, owner_rights}:
+                return f"ACL denies access to {sid}"
+            continue
+        if access_mode not in (1, 2):
+            return f"ACL has an entry the guard cannot read for {sid or '<unknown>'}"
+        if sid in {current_sid, owner_rights}:
+            found_owner = True
+        elif sid == system:
+            found_system = True
+        else:
+            return f"ACL grants access to untrusted SID {sid or '<unknown>'}"
+    if not (found_owner and found_system):
+        return "owner/SYSTEM access missing"
+    return None
+
+
+def windows_guard_private_file_error(path: str | os.PathLike[str]) -> str | None:
+    """Return why the Go guard would refuse *path* as a private file, or ``None``.
+
+    Mirrors ``safefile.ValidatePrivateFile`` on Windows: no reparse point on
+    the path or any ancestor, a regular file, owned by the current user, and
+    a DACL that passes :func:`guard_private_dacl_error`. Non-Windows callers
+    get ``None``; POSIX callers check the mode bits themselves.
+    """
+    if os.name != "nt":
+        return None
+    target = os.path.abspath(os.fspath(path))
+    try:
+        reject_reparse_path(target)
+        info = os.lstat(target)
+    except OSError as exc:
+        return f"cannot inspect {target} ({exc})"
+    if not stat.S_ISREG(info.st_mode):
+        return "not a regular file"
+    try:
+        owner_sid, null_dacl, entries = _windows_acl_snapshot(target)
+        current_sid = _windows_current_user_sid()
+    except OSError as exc:
+        return f"cannot read Windows ACL ({exc})"
+    return guard_private_dacl_error(owner_sid, null_dacl, entries, current_sid)
 
 
 def windows_acl_custody_confidentiality_error(

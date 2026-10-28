@@ -444,7 +444,7 @@ func TestManagedDiscoverySkipsExcludedAccounts(t *testing.T) {
 	procs := svc.withoutExcludedAccounts([]processInfo{
 		{PID: 1, Comm: "claude.exe", SessionOwnerID: alice.UserID},
 		{PID: 2, Comm: "claude.exe", SessionOwnerID: bob.UserID},
-	})
+	}, processAccountsOnce())
 	if len(procs) != 1 || procs[0].PID != 1 {
 		t.Fatalf("processes = %+v, want only alice's", procs)
 	}

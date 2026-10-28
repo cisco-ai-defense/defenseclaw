@@ -64,10 +64,13 @@ func TestStatusMatchesMacOSGatewaysByExecutablePath(t *testing.T) {
 	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
 	writeFreshLedger(t, h)
 	managedGateway := filepath.Join(h.env.Layout.BinDir, "defenseclaw-gateway")
+	// The LaunchAgents run the sandbox daemon from the package's copy of the
+	// managed gateway (GAP-0007).
+	launchAgent := filepath.Join(h.env.Layout.BinDir, "launch-agents", strings.Repeat("ab", 32), "defenseclaw-gateway")
 	// status skips its own process: keep the listed pids clear of the pid of
 	// the test binary (a macOS runner once ran it as pid 4203).
 	base := 4200
-	if own := os.Getpid(); own >= base && own <= base+5 {
+	if own := os.Getpid(); own >= base && own <= base+6 {
 		base = own + 10
 	}
 	pid := func(n int) string { return fmt.Sprint(base + n) }
@@ -78,12 +81,14 @@ func TestStatusMatchesMacOSGatewaysByExecutablePath(t *testing.T) {
 		pid(3) + " 502 defenseclaw-gateway",                         // a per-user gateway run by bare name
 		pid(4) + " 503 defenseclaw-gateway",                         // exited before its path was read
 		pid(5) + " 0 /bin/zsh",
+		pid(6) + " 504 " + launchAgent, // an account's managed sandbox daemon
 	}, "\n")
 	execs := map[int]string{
 		base:     managedGateway,
 		base + 1: managedGateway,
 		base + 2: "/Users/alice/.local/bin/defenseclaw-gateway",
 		base + 3: "/Users/bob/.local/bin/defenseclaw-gateway",
+		base + 6: launchAgent,
 	}
 	h.env.ProcessExecPath = func(pid int) (string, error) {
 		if exe, ok := execs[pid]; ok {
@@ -99,7 +104,7 @@ func TestStatusMatchesMacOSGatewaysByExecutablePath(t *testing.T) {
 			t.Fatalf("status must name the per-user gateway %s: %+v", want, got.Warnings)
 		}
 	}
-	for _, other := range []string{pid(0), pid(1), pid(4), pid(5)} {
+	for _, other := range []string{pid(0), pid(1), pid(4), pid(5), pid(6)} {
 		if strings.Contains(message, other) {
 			t.Fatalf("status names pid %s, which is not a per-user gateway: %+v", other, got.Warnings)
 		}
@@ -117,7 +122,9 @@ func TestStatusNamesAgentSessionsOlderThanTheActivation(t *testing.T) {
 	if err != nil || record == nil {
 		t.Fatalf("no deployment: %v", err)
 	}
-	activated, err := time.Parse(time.RFC3339, record.InstalledAt)
+	// Status compares sessions with activation, which can follow installation
+	// by several seconds on a busy host.
+	activated, err := time.Parse(time.RFC3339Nano, record.ActivatedAt)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -163,7 +170,7 @@ func TestStatusNamesClaudeSessionsOpenWhileTheDropInWasChanged(t *testing.T) {
 	if err != nil || record == nil {
 		t.Fatalf("no deployment: %v", err)
 	}
-	activated, err := time.Parse(time.RFC3339, record.InstalledAt)
+	activated, err := time.Parse(time.RFC3339Nano, record.ActivatedAt)
 	if err != nil {
 		t.Fatal(err)
 	}

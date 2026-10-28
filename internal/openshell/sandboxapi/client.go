@@ -36,8 +36,11 @@ import (
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/gateway/connector/hookexec"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
+
+var sandboxPeerClientFactory = hookexec.NewPerUserGatewayHTTPClient
 
 // Client is a typed client of the daemon's sandbox API.
 type Client struct {
@@ -50,6 +53,8 @@ type Client struct {
 	HTTP *http.Client
 	// UserAgent defaults to ClientName.
 	UserAgent string
+	// Only per-user CLI reads retry a transient verified connection failure.
+	retryReadTransport bool
 }
 
 // NewClient returns a client for baseURL authenticated with token.
@@ -79,8 +84,28 @@ func ClientForConfig(cfg *config.Config) (*Client, error) {
 	if port <= 0 {
 		port = config.DefaultGatewayAPIPort
 	}
-	host := config.APIBindHost(cfg)
-	return NewClient("http://"+net.JoinHostPort(host, strconv.Itoa(port)), token), nil
+	host := strings.Trim(config.APIBindHost(cfg), "[]")
+	if host == "" || host == "*" {
+		host = "127.0.0.1"
+	} else if ip := net.ParseIP(host); ip != nil && ip.IsUnspecified() {
+		if ip.To4() != nil {
+			host = "127.0.0.1"
+		} else {
+			host = "::1"
+		}
+	}
+	address := net.JoinHostPort(host, strconv.Itoa(port))
+	// The sandbox CLI carries the gateway master token and may send a full
+	// sandbox request body. Prove the connected peer before sending either.
+	// A zero client timeout preserves context-bound image and create calls.
+	httpClient, err := sandboxPeerClientFactory(0, address)
+	if err != nil {
+		return nil, fmt.Errorf("sandboxapi: verify per-user gateway target: %w", err)
+	}
+	client := NewClient("http://"+address, token)
+	client.HTTP = httpClient
+	client.retryReadTransport = true
+	return client, nil
 }
 
 // ErrNotManagedHost is returned by ClientForHost on a computer without a
@@ -205,25 +230,48 @@ func (c *Client) httpClient() *http.Client {
 	return http.DefaultClient
 }
 
-// do sends one JSON request and decodes a JSON answer into out (nil skips).
+// do sends a JSON request and decodes its answer into out (nil skips).
 func (c *Client) do(ctx context.Context, method, path string, query url.Values, body, out any) error {
-	var rdr io.Reader
+	var payload []byte
 	if body != nil {
 		buf, err := json.Marshal(body)
 		if err != nil {
 			return fmt.Errorf("sandboxapi: encode request: %w", err)
 		}
-		rdr = bytes.NewReader(buf)
+		payload = buf
 	} else if method != http.MethodGet {
-		rdr = strings.NewReader("{}")
+		payload = []byte("{}")
 	}
-	req, err := c.newRequest(ctx, method, path, query, rdr)
-	if err != nil {
-		return err
+	attempts := 1
+	if c.retryReadTransport && method == http.MethodGet {
+		attempts = 3
 	}
-	resp, err := c.httpClient().Do(req)
-	if err != nil {
-		return &Error{Code: CodeUnavailable, Message: "the DefenseClaw daemon is not reachable", Detail: err.Error()}
+	var resp *http.Response
+	for attempt := range attempts {
+		var rdr io.Reader
+		if payload != nil {
+			rdr = bytes.NewReader(payload)
+		}
+		req, err := c.newRequest(ctx, method, path, query, rdr)
+		if err != nil {
+			return err
+		}
+		resp, err = c.httpClient().Do(req)
+		if err == nil {
+			break
+		}
+		if attempt == attempts-1 || ctx.Err() != nil {
+			return &Error{Code: CodeUnavailable, Message: "the DefenseClaw daemon is not reachable", Detail: err.Error()}
+		}
+		// The verified transport checks the connected peer again on every
+		// attempt. A response or a write request is never retried here.
+		timer := time.NewTimer(100 * time.Millisecond)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return ctx.Err()
+		case <-timer.C:
+		}
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode > 299 {
@@ -320,13 +368,32 @@ func (c *Client) Status(ctx context.Context) (*Status, error) {
 }
 
 // Ready asks a managed computer's sandbox daemon to ready the account's
-// OpenShell for a run and returns the status after it (PathReady).
-func (c *Client) Ready(ctx context.Context) (*Status, error) {
+// OpenShell for a run and returns the status after it (PathReady). A daemon
+// of DefenseClaw 1.0.3 or older, whose decoder refuses any field it does
+// not know, refuses ReadyRequest.Harness: the request then goes again as
+// the empty object that daemon takes, which judges no agent there (the
+// run's create still does). Kept while a managed computer can run a 1.0.3
+// daemon under a 1.0.4 CLI, through the 1.0.4 upgrade window.
+func (c *Client) Ready(ctx context.Context, req ReadyRequest) (*Status, error) {
 	var out Status
-	if err := c.do(ctx, http.MethodPost, PathReady, nil, struct{}{}, &out); err != nil {
+	err := c.do(ctx, http.MethodPost, PathReady, nil, req, &out)
+	if err != nil && req.Harness != "" && unknownFieldRefused(err, "harness") {
+		out = Status{}
+		err = c.do(ctx, http.MethodPost, PathReady, nil, struct{}{}, &out)
+	}
+	if err != nil {
 		return nil, err
 	}
 	return &out, nil
+}
+
+// unknownFieldRefused reports an older daemon's refusal of a request field
+// its strict decoder does not know (field, as JSON names it): a daemon of
+// DefenseClaw 1.0.3 or older answers "invalid JSON body: json: unknown
+// field" for every field 1.0.4 added.
+func unknownFieldRefused(err error, field string) bool {
+	e := AsError(err)
+	return e.Code == CodeInvalid && strings.Contains(e.Message, `unknown field "`+field+`"`)
 }
 
 // List returns every DefenseClaw sandbox.
@@ -399,9 +466,19 @@ func (c *Client) Stop(ctx context.Context, name string) (*Sandbox, error) {
 }
 
 // Start starts a stopped sandbox with a freshly rotated binding.
+// A daemon of DefenseClaw 1.0.3 or older refuses StartRequest.EndVM, a
+// field its strict decoder does not know; it refuses no start of an ended
+// MicroVM either, so the start the user asked to end the VM goes again
+// without the field. Kept, like Ready's, through the 1.0.4 upgrade window.
 func (c *Client) Start(ctx context.Context, name string, req StartRequest) (*Sandbox, error) {
 	var out Sandbox
-	if err := c.do(ctx, http.MethodPost, sandboxPath(name, "start"), nil, req, &out); err != nil {
+	err := c.do(ctx, http.MethodPost, sandboxPath(name, "start"), nil, req, &out)
+	if err != nil && req.EndVM && unknownFieldRefused(err, "end_vm") {
+		req.EndVM = false
+		out = Sandbox{}
+		err = c.do(ctx, http.MethodPost, sandboxPath(name, "start"), nil, req, &out)
+	}
+	if err != nil {
 		return nil, err
 	}
 	return &out, nil

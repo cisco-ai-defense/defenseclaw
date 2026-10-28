@@ -13,7 +13,6 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/observability"
 	"github.com/defenseclaw/defenseclaw/internal/observability/router"
 	"github.com/defenseclaw/defenseclaw/internal/useridentity"
-	"github.com/google/uuid"
 )
 
 // networkEgressV8Event builds the legacy-compatible audit projection for the
@@ -30,7 +29,7 @@ func networkEgressV8Event(event NetworkEgressEvent, row NetworkEgressRow) Event 
 	details := fmt.Sprintf("url=%s method=%s decision=%s outcome=%s",
 		truncateStr(row.URL, 200), event.HTTPMethod, event.DecisionCode, event.PolicyOutcome)
 	result := Event{
-		ID:                uuid.NewString(),
+		ID:                observability.NewTimeOrderedID(),
 		Timestamp:         event.Timestamp.UTC(),
 		Action:            string(action),
 		Target:            event.Hostname,

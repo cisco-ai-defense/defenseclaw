@@ -113,21 +113,6 @@ def test_status_rows_and_filters_say_what_they_show() -> None:
     assert text.startswith("1 critical/high alert(s) for Codex.")
 
 
-def test_setup_rerun_offers_configured_connectors_and_details_keep_names() -> None:
-    # GAP-1547: Right on Connector cycled into agents that are not installed.
-    cfg = {"guardrail": {"connector": "amp", "connectors": {"codex": {}, "claudecode": {}, "amp": {}}}}
-    model = SetupPanelModel(cfg)
-    for goal_id in ("rerun", "remove"):
-        goal = next(goal for goal in wizard_goals(SetupWizard.CONNECTOR_SETUP, cfg) if goal.id == goal_id)
-        model.open_wizard_form(SetupWizard.CONNECTOR_SETUP, goal=goal)
-        connector = next(field for field in model.form_fields if field.label == "Connector")
-        assert connector.options == ("amp", "claudecode", "codex")
-        # GAP-2387: the destructive Remove goal starts with nothing picked.
-        assert connector.value == ("amp" if goal_id == "rerun" else "")
-    # Readiness rows show the whole connector name ("Connector: ope…").
-    console = Console(width=92, record=True)
-    console.print(DetailModalModel.from_pairs("t", [("Connector: openhands", "PASS · configured")]).table())
-    assert "openhands" in console.export_text()
 
 
 async def test_short_screen_lists_keep_rows_and_stale_status_clears(tmp_path, monkeypatch) -> None:

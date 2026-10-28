@@ -1010,10 +1010,8 @@ $payload = [ordered]@{
         (Join-Path $root 'internal\gateway\connector\hooks\copilot-hook.ps1')
     )
     $copilotAdapter = Join-Path $temp 'copilot-hook.ps1'
-    $renderedCopilotAdapter = $copilotAdapterSource.Replace(
-        '{{.HookBinaryPS}}',
-        'C:\Program Files\DefenseClaw\bin\defenseclaw-hook.exe'
-    ).Replace('{{.CopilotHookTimeoutMS}}', '25000')
+    $renderedCopilotAdapter = ConvertTo-WindowsNativeCopilotAdapter -Template $copilotAdapterSource `
+        -HookBinary 'C:\Program Files\DefenseClaw\bin\defenseclaw-hook.exe' -TimeoutMS 25000
     [IO.File]::WriteAllText(
         $copilotAdapter,
         $renderedCopilotAdapter,
@@ -2775,7 +2773,7 @@ threading.Event().wait()
         'cursor', 'devin', 'hermes', 'opencode'
     )
     $excludedContractConnectors = @(
-        'openhands', 'openclaw', 'zeptoclaw'
+        'openclaw', 'zeptoclaw'
     )
     $genericContractConnectors = if ($connectorMatrix.Success) {
         @($connectorMatrix.Groups[1].Value -split '\s*,\s*')
@@ -2940,27 +2938,32 @@ threading.Event().wait()
         Assert-True ($nativeWorkflowText -match [regex]::Escape($testName)) "native Windows Go DACL step reaches $testName"
     }
     Assert-True ($nativeWorkflowText -match '''test'', ''-vet=off'', ''-v'', ''-count=1'', ''-run'', \$daclTestPattern, ''\./internal/safefile'', ''\./internal/managed'', ''\./internal/gateway/connector''') 'Go DACL regressions execute in every owning package without cache reuse'
+    $gatewayMatrixIndexes = @([regex]::Matches($nativeWorkflowText,
+        '- \{ shard: gw(\d+), kind: gateway, index: \1 \}') | ForEach-Object { [int]$_.Groups[1].Value } | Sort-Object)
     Assert-True ($nativeWorkflowText -match
-        '''test'', ''-vet=off'', ''-list'', ''\^\(Test\|Fuzz\|Example\)'', ''\./internal/gateway''' -and
-        $nativeWorkflowText -match '''-run'', \$gatewayShardPattern, ''\./internal/gateway''' -and
-        $nativeWorkflowText -match
-        '''test'', ''-vet=off'', ''-list'', ''\^\(Test\|Fuzz\|Example\)'', ''\./internal/gateway/connector''' -and
-        $nativeWorkflowText -match '''-run'', \$connectorShardPattern, ''\./internal/gateway/connector''' -and
+        '@\{ Dir = ''internal/gateway''; Skip = \$windowsInapplicable; Extra = @\(''-parallel=1''\) \}' -and
+        $nativeWorkflowText -match '@\{ Dir = ''internal/gateway/connector''; Skip = \$connectorSkip; Extra = @\(\) \}' -and
+        $nativeWorkflowText -match '''--package-dir'', \$part\.Dir,' -and
+        $nativeWorkflowText -match '''--shard-count'', \[string\]\$nativeTestShardCount,' -and
+        [regex]::Matches($nativeWorkflowText, '''--shard-index'', \[string\]\$matrixShard').Count -eq 2 -and
+        $nativeWorkflowText -match 'foreach \(\$part in @\(' -and
+        $nativeWorkflowText -match 'throw "go_test_shards\.py selected no \$\(\$part\.Dir\) tests for shard \$matrixShard"' -and
+        $nativeWorkflowText -match '\$suiteKind -eq ''gateway'' -and \(\$matrixShard -lt 0 -or \$matrixShard -ge \$nativeTestShardCount\)' -and
+        ($gatewayMatrixIndexes -join ',') -eq ((0..15) -join ',') -and
+        $nativeWorkflowText -match '''-skip'', \$part\.Skip, ''-run'', \$shardPattern, \(''\./'' \+ \$part\.Dir\)' -and
         $nativeWorkflowText -match '\$nativeTestShardCount = 16' -and
-        [regex]::Matches($nativeWorkflowText, 'foreach \(\$shard in 0\.\.\(\$nativeTestShardCount - 1\)\)').Count -eq 2 -and
-        [regex]::Matches($nativeWorkflowText, '\(\$index % \$nativeTestShardCount\) -eq \$shard').Count -eq 2 -and
         [regex]::Matches($nativeWorkflowText, '''-parallel=1''').Count -eq 1 -and
         $nativeWorkflowText -match '\$connectorIsolatedTests = @\(' -and
-        $nativeWorkflowText -match '\$_ -notin \$connectorIsolatedTests' -and
+        $nativeWorkflowText -match '\$connectorSkip = ''\^\('' \+ \(\(\$windowsInapplicableTests \+ \$connectorIsolatedTests\) -join ''\|''\) \+ ''\)\$''' -and
         $nativeWorkflowText -match '''TestCodexLifecycle_CrossProcessSetupTeardownTransaction''' -and
         $nativeWorkflowText -match '''TestMaintenanceCodexTeardownPreservesDriftWithoutInstalledLayout''' -and
         $nativeWorkflowText -match 'foreach \(\$isolatedTest in \$connectorIsolatedTests\)' -and
         $nativeWorkflowText -match '''-run'', \(''\^'' \+ \[regex\]::Escape\(\$isolatedTest\) \+ ''\$''\), ''\./internal/gateway/connector''' -and
         $nativeWorkflowText -match '''--exclude'', ''github\.com/defenseclaw/defenseclaw/internal/gateway'',' -and
         $nativeWorkflowText -match '''--exclude'', ''github\.com/defenseclaw/defenseclaw/internal/gateway/connector'',' -and
-        $nativeWorkflowText -match '''--timings'', ''scripts/test-timings/go-windows\.json''' -and
+        [regex]::Matches($nativeWorkflowText, '''--timings'', ''scripts/test-timings/go-windows\.json''').Count -eq 2 -and
         $nativeWorkflowText -match '\$remainingArguments = @\(') `
-        'full native Go suite bounds gateway and connector selectors across sequential processes, isolates native lifecycle regressions, serializes gateway tests with process-global capture state, and separately selects every remaining package'
+        'full native Go suite runs one timing-balanced gateway and connector shard per runner across all sixteen matrix shards, isolates native lifecycle regressions, serializes gateway tests with process-global capture state, and separately selects every remaining package'
     Assert-True ($nativeWorkflowText -match '(?s)''-p=1''.*?''-skip''.*?\$windowsInapplicable') 'native Go suite serializes packages and excludes only declared Windows-inapplicable tests'
     Assert-True ([regex]::Matches($nativeWorkflowText, '''test'', ''-vet=off''').Count -eq
         [regex]::Matches($nativeWorkflowText, '''test''').Count -and
@@ -3058,12 +3061,14 @@ threading.Event().wait()
         $nativeHarnessText,
         '(?s)function Assert-PackagedAntigravitySupportedAvailability\b.*?(?=\r?\nfunction )'
     ).Value
+    # Since c525bd3d7e an action-mode setup of an absent Antigravity client is
+    # refused at the discovery gate (exit 1) instead of downgrading to observe.
     Assert-True ($antigravitySupportedAvailability -match
-        '(?s)Invoke-Installed \$Launcher @\(.*?\)\s*\x60\s*@\(0\)\s+300\s+\$LogPath' -and
+        '(?s)Invoke-Installed \$Launcher @\(.*?\)\s*\x60\s*@\(1\)\s+300\s+\$LogPath' -and
         $antigravitySupportedAvailability -match
         'connector was not detected locally; refusing action-mode hook setup' -and
         $antigravitySupportedAvailability -match 'unexpectedly wrote hooks') `
-        'supported Antigravity absent-client setup succeeds after a truthful observe downgrade without writing hooks'
+        'supported Antigravity absent-client action setup is refused at the discovery gate without writing hooks'
     foreach ($wizardChoice in @(
         'none = 0',
         'codex = 1',
@@ -3074,8 +3079,7 @@ threading.Event().wait()
         'cursor = 6',
         'hermes = 7',
         'devin = 8',
-        'omnigent = 9',
-        'opencode = 10'
+        'opencode = 9'
     )) {
         Assert-True ($wizardHarnessText.Contains($wizardChoice)) `
             "wizard driver preserves the integrated selection contract: $wizardChoice"
@@ -3226,7 +3230,7 @@ threading.Event().wait()
             $contractFunction.IndexOf("3EB685DB-65F9-4CF6-A03A-E3EF65729F3D", [StringComparison]::Ordinal)) `
         'connector contract binds Profile, LocalAppData, and RoamingAppData to the current process token before hostile environment isolation'
     Assert-True ($connectorContractJob -match '(?s)Required connector contract\r?\n.*?Invoke-WindowsNativeProcess.*?-Mode'', ''contract'', ''-Connector'', \$env:CONNECTOR.*?-DiagnosticsRoot'', \$contractDiagnostics' -and
-        $connectorContractJob -match "timeout-minutes: \$\{\{ matrix\.connector == 'devin' && 50 \|\| 35 \}\}" -and
+        $connectorContractJob -match '(?m)^    timeout-minutes: 20\r?$' -and
         $nativeWorkflowText -notmatch '\./scripts/windows-native-ci\.ps1 -Operation contract') `
         'hosted connector contracts run as disposable real standard users and preserve the matrix connector'
     $connectorContractStep = [regex]::Match(
@@ -4628,7 +4632,7 @@ threading.Event().wait()
         $interactiveEvidence -match 'lacks an authentic record identity' -and
         $interactiveEvidence -match 'CMD-SOCAT-EXEC' -and
         $interactiveEvidence -match 'CMD-ENV-DUMP' -and
-        $interactiveEvidence -match "native_decision = 'ask'" -and
+        $interactiveEvidence -match "native_decision = 'force_ask'" -and
         $interactiveEvidence -match "native_interaction = 'approved'" -and
         $interactiveEvidence -match "native_interaction = 'declined'" -and
         $interactiveEvidence -notmatch '(?s)PostToolUse.*?step_idx\s+-ceq' -and
@@ -4731,7 +4735,7 @@ threading.Event().wait()
         '(?s)wizardConnectorChoices = \[\]wizardChoice\{.*?\n\s*\}'
     ).Value
     Assert-True ($wizardConnectorChoices -match 'Google Antigravity.*?antigravity' -and
-        $setupMainSourceText -match 'CONNECTOR=amp\|antigravity\|codex\|claudecode\|copilot\|cursor\|devin\|hermes\|omnigent\|opencode\|none' -and
+        $setupMainSourceText -match 'CONNECTOR=amp\|antigravity\|codex\|claudecode\|copilot\|cursor\|devin\|hermes\|opencode\|none' -and
         $setupMainSourceText -notmatch 'Antigravity is not_certified and cannot be selected by public Setup' -and
         $setupMainTestsText -match 'TestParseArgsAllowsPublicAntigravitySetupSelection' -and
         $setupMainTestsText -match 'TestParseArgsAllowsRecordedAntigravityMaintenanceWithoutOverride' -and
@@ -4881,9 +4885,9 @@ threading.Event().wait()
     Assert-True ($doctorContract.Contains('[string]$ExpectedFailMode = ''closed''') -and
         $doctorContract.Contains('''const DC_FAIL_MODE: string = "'' + $ExpectedFailMode + ''"''') -and
         $harnessText.Contains('Assert-DoctorWindowsHookRegistration -ExpectedFailMode closed') -and
-        $harnessText.Contains('Assert-DoctorWindowsHookRegistration -ExpectedFailMode open') -and
+        $harnessText.Contains("Write-Result 'amp:explicit-open-render' skip 'GAP-1023: known 1.0.4 issue, fixed in 1.0.5'") -and
         $wizardHookContract.Contains('const DC_FAIL_MODE: string = "closed"')) `
-        'Windows Amp contracts verify the closed default and independently exercise explicit open policy'
+        'Windows Amp contracts verify the closed per-user render (explicit open skipped: GAP-1023)'
     $ampNativeHookPattern = 'defenseclaw-hook(?:\.exe|\.cmd)'
     $ampCompatibilityPattern = '\bwsl\b|\bbash\b|\bchmod\b'
     $hasAmpShellRejectionContract = {
@@ -4950,13 +4954,13 @@ threading.Event().wait()
         $hermesSetupContract -match 'allowlist_entries' -and
         $hermesSetupContract -notmatch 'hooks_auto_accept is not true') `
         'Hermes packaged contract preserves operator consent and requires exactly 23 scoped owned approvals'
-    Assert-True ($doctorContract.Contains("Assert-CursorSynchronousWindowsHookCommand `$config (`$script:LastSetupMode -eq 'action') 'Cursor setup'") -and
+    Assert-True ($doctorContract.Contains("Assert-CursorSynchronousWindowsHookCommand `$config `$true 'Cursor setup'") -and
         $doctorContract.Contains("`$expectedMode = if (`$script:LastSetupMode -eq 'action') { 'action' } else { 'observe' }") -and
-        $doctorContract.Contains("`$expectedFailClosed = if (`$expectedMode -eq 'action') { 'true' } else { 'false' }") -and
-        $doctorContract.Contains("`$expectedFailure = if (`$expectedMode -eq 'action') { 'fail-closed' } else { 'fail-open' }") -and
+        $doctorContract.Contains("`$expectedFailClosed = 'true'") -and
+        $doctorContract.Contains("`$expectedFailure = 'fail-open'") -and
         $doctorContract.Contains("`$check.detail -notmatch 'higher-priority conflict detection=unavailable \(none inferred\)'") -and
         $doctorContract.Contains("`$check.detail -notmatch 'human-approval=unsupported'")) `
-        'Cursor contract requires mode-matched action/fail-closed or observe/fail-open posture without unsupported claims'
+        'Cursor contract requires the mode, the per-user failClosed registration and the default-tier open outage mode without unsupported claims'
     Assert-True ($doctorContract -match "'cursor' \{ 'configured file has no DefenseClaw Cursor command entries' \}") `
         'Cursor tamper contract expects exact zero-managed-entry rejection after lock-bound ownership filtering'
     Assert-True ([IO.File]::ReadAllText($openCodeAssertion) -match 'await hooks\.config') `

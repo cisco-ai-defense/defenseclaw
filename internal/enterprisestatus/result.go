@@ -180,8 +180,9 @@ type Result struct {
 	Warnings           []Message                     `json:"warnings,omitempty"`
 	// Changes lists, in plain words, what a Linux or macOS repair or ensure
 	// changed on a deployment that was already installed (files rewritten,
-	// services started, per-account hooks rewritten), or which key a
-	// rotate-credentials committed and whom it moved. Empty means there was
+	// services started, per-account hooks rewritten), which key a
+	// rotate-credentials committed and whom it moved, or, on every OS, which
+	// config a run migrated to config_version 9. Empty means there was
 	// nothing to repair.
 	Changes        []string     `json:"changes,omitempty"`
 	APIPortHolders []PortHolder `json:"api_port_holders,omitempty"`

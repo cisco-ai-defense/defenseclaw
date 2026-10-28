@@ -753,8 +753,9 @@ def _start_splunk_container() -> bool:
         return False
     try:
         r = subprocess.run(
-            f"SPLUNK_ENV_FILE={env_file} SPLUNK_IMAGE=vivekrsplunk/splunk:10.2.0 docker compose -f {compose} up -d",
-            shell=True, capture_output=True, text=True, timeout=120,
+            ["docker", "compose", "--env-file", env_file, "-f", compose, "up", "-d"],
+            env={**os.environ, "SPLUNK_ENV_FILE": env_file},
+            capture_output=True, text=True, timeout=120,
         )
         return r.returncode == 0
     except Exception:

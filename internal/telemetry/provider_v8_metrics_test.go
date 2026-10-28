@@ -93,8 +93,8 @@ func TestV8MetricAttributePolicyIsGeneratedAndCoversLegacyEmitterKeys(t *testing
 		want = append(want, key)
 	}
 	sort.Strings(want)
-	got := make([]string, 0, len(v8MetricAllowedAttributeKeys))
-	for key := range v8MetricAllowedAttributeKeys {
+	got := make([]string, 0, len(v8MetricAllowedAttributeKeys()))
+	for key := range v8MetricAllowedAttributeKeys() {
 		got = append(got, string(key))
 	}
 	sort.Strings(got)
@@ -133,7 +133,7 @@ func TestV8MetricAttributePolicyIsGeneratedAndCoversLegacyEmitterKeys(t *testing
 func TestV8MetricAllowedAttributeKeysIsSortedAndDetached(t *testing.T) {
 	first := V8MetricAllowedAttributeKeys()
 	second := V8MetricAllowedAttributeKeys()
-	if len(first) != len(v8MetricAllowedAttributeKeys) || !sort.StringsAreSorted(first) ||
+	if len(first) != len(v8MetricAllowedAttributeKeys()) || !sort.StringsAreSorted(first) ||
 		!reflect.DeepEqual(first, second) {
 		t.Fatalf("public metric labels are not an exact sorted snapshot: first=%v second=%v", first, second)
 	}
@@ -459,9 +459,9 @@ func TestV8MetricAttributesAreClosedBoundedAndDeterministic(t *testing.T) {
 		t.Fatalf("oversized scanner=%v found=%v", scanner, found)
 	}
 
-	attrs := make([]attribute.KeyValue, 0, len(v8MetricAllowedAttributeKeys))
-	keys := make([]string, 0, len(v8MetricAllowedAttributeKeys))
-	for key := range v8MetricAllowedAttributeKeys {
+	attrs := make([]attribute.KeyValue, 0, len(v8MetricAllowedAttributeKeys()))
+	keys := make([]string, 0, len(v8MetricAllowedAttributeKeys()))
+	for key := range v8MetricAllowedAttributeKeys() {
 		keys = append(keys, string(key))
 	}
 	sort.Strings(keys)

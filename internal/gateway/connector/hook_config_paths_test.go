@@ -162,8 +162,8 @@ func TestOwnedHooksPresent_CursorRequiresExactObserveContract(t *testing.T) {
 		"millisecond timeout": func(hooks map[string]interface{}) {
 			hooks["preToolUse"].([]interface{})[0].(map[string]interface{})["timeout"] = json.Number("30000")
 		},
-		"fail closed": func(hooks map[string]interface{}) {
-			hooks["preToolUse"].([]interface{})[0].(map[string]interface{})["failClosed"] = true
+		"fail open": func(hooks map[string]interface{}) {
+			hooks["preToolUse"].([]interface{})[0].(map[string]interface{})["failClosed"] = false
 		},
 		"duplicate": func(hooks map[string]interface{}) {
 			entry := hooks["preToolUse"].([]interface{})[0]

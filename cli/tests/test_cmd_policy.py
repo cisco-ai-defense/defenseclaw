@@ -19,6 +19,7 @@
 import os
 import sys
 import unittest
+from pathlib import Path
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
@@ -217,6 +218,34 @@ class TestPolicyActivate(PolicyCommandTestBase):
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertIn("activated", result.output)
         self.assertEqual(self.app.cfg.admission.defaults.actions["medium"]["install"], "block")
+
+    def test_activate_keeps_allow_apart_from_warn(self):
+        # p0 GAP-0998: --low-action allow became a warning on activation.
+        from defenseclaw.enforce.admission import compile_admission
+
+        self.invoke(["create", "lax", "--medium-action", "warn", "--low-action", "allow"])
+        result = self.invoke(["activate", "lax"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        actions = self.app.cfg.admission.defaults.actions
+        self.assertEqual(actions["low"], "allow")
+        self.assertEqual(actions["medium"], {"install": "none", "file": "none", "runtime": "enable"})
+        compiled = compile_admission(self.app.cfg, "plugin").actions
+        self.assertTrue(compiled["LOW"][1])
+        self.assertFalse(compiled["MEDIUM"][1])
+
+    def test_activate_refuses_an_allowed_verdict_on_a_blocking_action(self):
+        import yaml
+
+        self.invoke(["create", "odd"])
+        path = os.path.join(self.app.cfg.policy_dir, "odd.yaml")
+        with open(path) as f:
+            data = yaml.safe_load(f)
+        data["skill_actions"]["low"] = {"install": "block", "file": "none", "runtime": "disable", "verdict": "allowed"}
+        with open(path, "w") as f:
+            yaml.safe_dump(data, f)
+        result = self.runner.invoke(policy, ["activate", "odd"], obj=self.app)
+        self.assertNotEqual(result.exit_code, 0)
+        self.assertIn("verdict", result.output)
 
     def test_activate_builtin_updates_watch_rescan_config(self):
         import yaml
@@ -761,6 +790,40 @@ class TestPolicyDeleteKeepsConfig(PolicyCommandTestBase):
         self.assertFalse(os.path.exists(
             os.path.join(self.app.cfg.policy_dir, "drop.yaml")
         ))
+
+
+class TestPolicyLoadRefusals(PolicyCommandTestBase):
+    def test_malformed_or_nonmapping_yaml_names_the_cause(self):
+        source = Path(self.tmp_dir) / "input.yaml"
+        for content, cause in (
+            ("name: [unterminated\n", "invalid YAML"),
+            ("- one\n- two\n", "mapping"),
+        ):
+            with self.subTest(content=content):
+                source.write_text(content, encoding="utf-8")
+                result = self.invoke(["load", str(source)])
+                self.assertEqual(result.exit_code, 1, result.output)
+                self.assertIn(cause, result.output)
+                self.assertNotIn("Traceback", result.output)
+                self.assertEqual(list(Path(self.app.cfg.policy_dir).glob("input*.yaml")), [])
+
+    def test_linked_catalog_destination_is_refused_without_touching_its_target(self):
+        source = Path(self.tmp_dir) / "source.yaml"
+        source.write_text("name: linked\nadmission:\n  scan_on_install: true\n", encoding="utf-8")
+        target = Path(self.tmp_dir) / "outside.yaml"
+        original = b"outside target remains untouched\n"
+        target.write_bytes(original)
+        dest = Path(self.app.cfg.policy_dir) / "linked.yaml"
+        try:
+            dest.symlink_to(target)
+        except OSError as exc:
+            self.skipTest(f"cannot create a file symlink on this host: {exc}")
+
+        result = self.invoke(["load", str(source)])
+        self.assertEqual(result.exit_code, 1, result.output)
+        self.assertIn("symbolic link", result.output)
+        self.assertTrue(dest.is_symlink())
+        self.assertEqual(target.read_bytes(), original)
 
 
 if __name__ == "__main__":

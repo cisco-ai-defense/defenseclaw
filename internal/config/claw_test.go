@@ -30,7 +30,7 @@ import (
 
 // TestActiveConnector_Precedence pins the resolution order:
 //
-//	guardrail.connector  >  claw.mode  >  "openclaw"
+//	guardrail.connector  >  claw.mode  >  no connector
 //
 // Whitespace-only values must not "win" the fallback chain — they are
 // treated as unset so a stray "  " in YAML can't silently mask a real
@@ -46,8 +46,8 @@ func TestActiveConnector_Precedence(t *testing.T) {
 		{"connector_overrides_mode", "claudecode", "openclaw", "claudecode"},
 		{"empty_connector_uses_mode", "", "openclaw", "openclaw"},
 		{"whitespace_connector_uses_mode", "  ", "zeptoclaw", "zeptoclaw"},
-		{"both_empty_defaults_openclaw", "", "", "openclaw"},
-		{"whitespace_mode_defaults_openclaw", "", "  ", "openclaw"},
+		{"both_empty_selects_none", "", "", ""},
+		{"whitespace_mode_selects_none", "", "  ", ""},
 		{"trims_connector", "  codex  ", "openclaw", "codex"},
 	}
 	for _, tt := range tests {
@@ -64,8 +64,8 @@ func TestActiveConnector_Precedence(t *testing.T) {
 
 func TestActiveConnector_NilSafe(t *testing.T) {
 	var cfg *Config
-	if got := cfg.activeConnector(); got != "openclaw" {
-		t.Errorf("nil cfg activeConnector() = %q, want openclaw", got)
+	if got := cfg.activeConnector(); got != "" {
+		t.Errorf("nil cfg activeConnector() = %q, want none", got)
 	}
 }
 
@@ -241,9 +241,10 @@ func TestClaudePluginDirsIncludeAncestorAndNestedSkillsRoots(t *testing.T) {
 	}
 }
 
-func TestSkillDirs_FallsBackToOpenClaw(t *testing.T) {
+func TestSkillDirs_ExplicitOpenClaw(t *testing.T) {
 	homeDir := t.TempDir()
 	cfg := &Config{}
+	cfg.Claw.Mode = "openclaw"
 	cfg.Claw.HomeDir = homeDir
 	cfg.Claw.ConfigFile = filepath.Join(homeDir, "openclaw.json")
 
@@ -259,12 +260,11 @@ func TestSkillDirs_FallsBackToOpenClaw(t *testing.T) {
 	}
 }
 
-// TestPluginDirs_FallsBackToOpenClaw is the parallel guarantee for
-// plugins — must continue producing claw_home/extensions when no
-// connector is configured.
-func TestPluginDirs_FallsBackToOpenClaw(t *testing.T) {
+// An explicit OpenClaw selection keeps its plugin directories.
+func TestPluginDirs_ExplicitOpenClaw(t *testing.T) {
 	home := filepath.Join(t.TempDir(), "legacy-oc-home")
 	cfg := &Config{}
+	cfg.Claw.Mode = "openclaw"
 	cfg.Claw.HomeDir = home
 
 	dirs := cfg.PluginDirs()
@@ -275,11 +275,8 @@ func TestPluginDirs_FallsBackToOpenClaw(t *testing.T) {
 }
 
 // TestSkillDirsForConnector_DefaultArmDoesNotRecurse ensures the
-// "openclaw" / unknown branch of SkillDirsForConnector calls the
-// private skillDirsOpenClaw helper directly. Before S1.2 it called
-// c.SkillDirs() which now dispatches polymorphically — that would
-// have caused infinite recursion when guardrail.connector was set
-// to a non-built-in name.
+// OpenClaw's explicit branch avoids recursion, while an unknown connector
+// returns no agent paths.
 func TestSkillDirsForConnector_DefaultArmDoesNotRecurse(t *testing.T) {
 	homeDir := t.TempDir()
 	cfg := &Config{}
@@ -293,8 +290,8 @@ func TestSkillDirsForConnector_DefaultArmDoesNotRecurse(t *testing.T) {
 	}
 
 	dirs = cfg.SkillDirsForConnector("totally-unknown-connector")
-	if !containsPath(dirs, filepath.Join(homeDir, "skills")) {
-		t.Errorf("SkillDirsForConnector(unknown) did not fall back to OpenClaw: %v", dirs)
+	if len(dirs) != 0 {
+		t.Errorf("SkillDirsForConnector(unknown) = %v, want none", dirs)
 	}
 }
 
@@ -1107,18 +1104,6 @@ func TestConnectorHomeDir_OpenCodeHonorsConfigDir(t *testing.T) {
 	}
 }
 
-func TestConnectorHomeDir_OmnigentConfigHome(t *testing.T) {
-	home := t.TempDir()
-	configHome := filepath.Join(home, "isolated-omnigent")
-	testenv.SetHome(t, home)
-	t.Setenv("OMNIGENT_CONFIG_HOME", configHome)
-	cfg := &Config{}
-
-	if got := cfg.ConnectorHomeDir("omnigent"); got != configHome {
-		t.Fatalf("ConnectorHomeDir(omnigent) = %q, want %q", got, configHome)
-	}
-}
-
 func TestAMPReadsJSONCSettingsAndSkillBundledMCPWithPrecedence(t *testing.T) {
 	home := t.TempDir()
 	testenv.SetHome(t, home)
@@ -1394,8 +1379,7 @@ func TestHermesSurfacesHonorHermesHome(t *testing.T) {
 
 // TestHasConnectorConfigured pins the Go mirror of Python's
 // has_connector_configured() (mcp.md M1). It must distinguish a
-// genuinely-unconfigured install from an explicit one — WITHOUT changing
-// the activeConnector() "openclaw" floor that many call sites depend on.
+// genuinely-unconfigured install from an explicit one.
 func TestHasConnectorConfigured(t *testing.T) {
 	var nilCfg *Config
 	if nilCfg.HasConnectorConfigured() {
@@ -1406,10 +1390,8 @@ func TestHasConnectorConfigured(t *testing.T) {
 	if empty.HasConnectorConfigured() {
 		t.Error("all-empty config must NOT report a configured connector (phantom-openclaw root)")
 	}
-	// The floor is deliberately preserved — only the helper distinguishes
-	// the phantom from a real install.
-	if got := empty.activeConnector(); got != "openclaw" {
-		t.Errorf("activeConnector() floor changed to %q; must stay openclaw", got)
+	if got := empty.activeConnector(); got != "" {
+		t.Errorf("activeConnector() = %q, want none", got)
 	}
 
 	withConn := &Config{}

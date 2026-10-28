@@ -17,10 +17,26 @@
 package cli
 
 import (
+	"encoding/json"
 	"strings"
 
 	"gopkg.in/yaml.v3"
 )
+
+// A guardian can discover Codex after install and create its hooks while
+// deployment.json still records Codex disabled. Matching config bytes do not
+// prove that the lifecycle owns the machine policy (GAP-0360). Missing or
+// malformed evidence also requires the validating lifecycle transaction.
+func windowsConfigCodexTargetNeedsReconcile(supplied, metadata []byte) bool {
+	want, ok := windowsConfigProtectsCodex(supplied)
+	var recorded struct {
+		Enabled *bool `json:"codex_target_enabled"`
+	}
+	if !ok || json.Unmarshal(metadata, &recorded) != nil || recorded.Enabled == nil {
+		return true
+	}
+	return want != *recorded.Enabled
+}
 
 // On Windows the lifecycle transaction, not the hook guardian, owns Codex's
 // machine policy: C:\ProgramData\OpenAI\Codex\requirements.toml, the

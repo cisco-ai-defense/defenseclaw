@@ -11,81 +11,38 @@ keywords:
   - sandbox undo
 ---
 
-On Linux, each sandbox is by default a container that OpenShell's Docker
-driver runs. Your project folder is mounted into it live, so you see the
-agent's edits in your editor as they happen, and a snapshot taken at the start
-of each session lets `defenseclaw sandbox undo` put the folder back. A host
-with KVM can run OpenShell's MicroVM driver instead (see
-[MicroVMs with KVM](#run-sandboxes-in-microvms-with-kvm)). On a computer your
-organization manages, an administrator sets the policy: see
-[Sandboxes on managed computers](/docs/enterprise/sandboxes).
+Install and configure OpenShell sandboxes on Linux with `defenseclaw sandbox setup`, then check the machine with `defenseclaw sandbox doctor`. By default each sandbox is a Docker container with your project folder mounted live.
 
 ## How it fits together
 
-<Flow direction="TB" caption="A sandbox on Linux. The container has no network of its own: OpenShell's supervisor passes hooks and web traffic to DefenseClaw and model calls to the provider. DefenseClaw's main API (port 18970) is never reachable from a sandbox.">
-  <Zone id="box" label="Sandbox container (your uid)" tone="untrusted">
-    <Node id="agent" kind="agent">{`Claude Code or Codex\nskip-permissions on`}</Node>
-    <Node id="proj" kind="datastore">{`Your project folder\nlive at /work/myapp`}</Node>
-    <Node id="sup" kind="policy">{`OpenShell supervisor\nthe only way out`}</Node>
-  </Zone>
-  <Zone id="host" label="Your machine (your user)" tone="trusted">
-    <Node id="dc" kind="gateway">{`DefenseClaw daemon\nchecks hooks, proxies the web`}</Node>
-    <Node id="gw" kind="connector">{`OpenShell gateway\nsystemd user service`}</Node>
-  </Zone>
-  <Zone id="net" label="Internet" tone="external">
-    <Node id="net1" kind="generic">{`The internet\nmodel provider, allowed sites`}</Node>
-  </Zone>
-  <Edge from="agent" to="proj" label="edits" />
-  <Edge from="agent" to="sup" label="sends everything" />
-  <Edge from="sup" to="dc" label="hooks :18971 · web :18972" />
-  <Edge from="sup" to="net1" label="model calls, real key added" />
-  <Edge from="dc" to="gw" label="creates sandboxes" />
-  <Edge from="dc" to="net1" label="allowed requests" />
+<Flow direction="TB" caption="A Linux sandbox. The agent's tool calls and web traffic go through DefenseClaw; model calls go straight to the provider, opened by OpenShell for the harness's own program.">
+  <Node id="agent" kind="agent">{`Claude Code or Codex\nskip-permissions on`}</Node>
+  <Node id="sup" kind="generic">{`OpenShell supervisor\nthe only way out`}</Node>
+  <Node id="dc" kind="operator">{`DefenseClaw daemon\nchecks hooks, proxies the web`}</Node>
+  <Node id="gw" kind="generic">{`OpenShell gateway\nsystemd user service`}</Node>
+  <Node id="proj" kind="generic">{`Your project folder\nlive at /work/myapp`}</Node>
+  <Node id="net" kind="generic">{`Internet\nallowed sites`}</Node>
+  <Node id="model" kind="generic">{`Model provider`}</Node>
+  <Edge from="agent" to="sup" />
+  <Edge from="sup" to="dc" label="hooks, web" />
+  <Edge from="dc" to="net" />
+  <Edge from="sup" to="model" label="model calls" />
+  <Edge from="gw" to="sup" label="starts" />
+  <Edge from="proj" to="agent" label="mounted" />
 </Flow>
-
-What is mounted, and how:
-
-- **Your folder** appears at `/work/<folder>`, read-write. Secret files such
-  as `.env`, keys and certificates appear empty inside (`--unmask PATH`
-  shares one).
-- **Git internals** `.git/hooks`, `.git/config` and `.git/config.worktree`
-  are read-only, so the agent cannot plant a hook or setting that runs the
-  next time you use git. A new `.git` the agent creates inside the folder is
-  renamed out of the way while the sandbox runs.
-- **Nothing else** from your machine is in the sandbox.
-
-For an untrusted repository, `defenseclaw sandbox run claude --copy` works
-on a copy instead, as every run on a Mac does. See
-[work on a copy](/docs/sandboxes/guide#work-on-a-copy).
 
 ## Before you start
 
 | You need | Details |
 | --- | --- |
-| DefenseClaw | Installed and initialized (see the [quickstart](/docs/get-started/quickstart)), with the daemon running (`defenseclaw-gateway start`). Run everything as your own user, not root. |
-| Linux | amd64 or arm64. WSL2 is not supported. |
-| Kernel | Landlock ABI 3 or newer, enabled in the kernel's `lsm=` list. Upstream kernels have ABI 3 from 6.2; a distribution kernel with a backport (RHEL 9 lists `landlock` on its 5.14 kernel) can have it too, and `defenseclaw sandbox doctor` reports the ABI of the running kernel. OpenShell refuses to start a sandbox without it. |
-| Docker | A rootful Docker Engine 28 or newer that your user can use (a member of the `docker` group), with the buildx plugin (`docker-buildx-plugin` from Docker's repository). Rootless Docker is not supported: it keeps containers off the host network, so sandboxes cannot reach DefenseClaw. Every member of the `docker` group can list and enter every container on the machine, sandboxes of other accounts included (see [one OpenShell gateway per machine](#one-openshell-gateway-per-machine)). |
-| systemd | A user session with a systemd user manager. The OpenShell gateway runs as the `openshell-gateway` user service, one per machine (see [one OpenShell gateway per machine](#one-openshell-gateway-per-machine)). |
-| Disk | At least 5 GiB free for Docker, 10 GiB recommended. The first image build downloads about 3 GB. |
+| DefenseClaw | Installed, with the daemon running ([quickstart](/docs/get-started/quickstart)). Run as your own user, not root. |
+| Linux | amd64 or arm64 with systemd user sessions. WSL2 is not supported. |
+| Kernel | Landlock ABI 3 or newer in `cat /sys/kernel/security/lsm`. |
+| Docker | Rootful Docker Engine 28 or newer with buildx, and your user in the `docker` group. Rootless Docker is not supported. |
+| Disk | 5 GiB free for Docker (10 GiB recommended). The first image build downloads about 3 GB. |
+| OpenShell | 0.1.5 or newer. Setup installs it, or upgrades an older one, after asking. |
 
-You don't need OpenShell installed first: setup offers to install it.
-
-Check the kernel yourself if you are not sure:
-
-```bash
-uname -r
-cat /sys/kernel/security/lsm
-```
-
-The second command should list `landlock`.
-
-So that the OpenShell gateway keeps running after you log out, turn on
-linger for your user. The doctor warns when it is off:
-
-```bash
-sudo loginctl enable-linger $USER
-```
+Turn on linger so the gateway keeps running after you log out: `sudo loginctl enable-linger $USER`.
 
 ## Set up
 
@@ -99,163 +56,98 @@ sudo loginctl enable-linger $USER
 defenseclaw sandbox setup
 ```
 
-Setup checks the machine, then asks before each change. A first run looks
-like this (the install plan and build lines are shortened):
+Setup checks the machine and asks before each change: installing OpenShell (NVIDIA's installer, sha256 verified, `sudo`), turning on project-folder mounts and turning off OpenShell's usage telemetry on your local gateway, adding the `claude` and `codex` shell wrappers, and building the harness images.
 
 ```text
 DefenseClaw sandbox setup
   Checking this machine…  ✓ linux/arm64  ✓ Landlock  ✓ Docker 29.4.0  ✗ OpenShell not installed
-Install OpenShell 0.1.3 with NVIDIA's installer? (sudo; sha256 verified) [y/N] y
-OpenShell install plan
-  Release     v0.1.3 (NVIDIA OpenShell upstream installer)
-  SHA-256     … (verified)
-  Privileges  the script uses sudo to install the openshell package, then enables and
-              starts the openshell-gateway user service (systemd --user)
-Run this plan? [y/N] y
-  ✓ OpenShell 0.1.3 installed, gateway running
-Allow sandboxes to mount the project folder you launch from? (enables bind mounts on your local OpenShell gateway; DefenseClaw mounts only the launch folder and the read-only settings Claude Code and Codex sandboxes need) [Y/n]
-Disable OpenShell's anonymous usage telemetry? (edits ~/.config/openshell/gateway.env and restarts the OpenShell gateway; no sandbox runs on it now) [Y/n]
-  OpenShell gateway configuration changes
-    edit ~/.config/openshell/gateway.toml (a timestamped backup is kept)
-  …
+Install OpenShell … with NVIDIA's installer? (sudo; sha256 verified) [y/N] y
   ✓ gateway configured and restarted
-  Harnesses (add another with `defenseclaw sandbox setup --harness NAME`):
-    Claude Code (claude)  model credential ANTHROPIC_API_KEY ✓
-    Codex (codex)         model credential ~/.codex/auth.json ✓
-  Other harnesses: amp (not verified yet), antigravity, copilot, cursor-agent (not verified yet), devin (not verified yet), hermes, kiro, omnigent, opencode, openhands
   ✓ openshell.enabled is on in ~/.defenseclaw/config.yaml
-Make `claude` and `codex` run sandboxed automatically? (shell wrapper; undo any time) [y/N]
-Build the Claude Code image now? (the first build downloads about 3 GB; otherwise the first `defenseclaw sandbox run claude` builds it) [Y/n]
-  Building the Claude Code image (the first build downloads about 3 GB)…
-  ✓ Claude Code 2.1.156: defenseclaw/sandbox:claudecode-…-u1000, hooks verified (built in 6m10s)
-  …
   ✓ the daemon runs the sandbox subsystem (ingress 127.0.0.1:18971, egress proxy 127.0.0.1:18972)
 
   ✓ Done →  cd <project> && defenseclaw sandbox run claude
 ```
 
-On a machine that already has OpenShell, the questions come in another
-order. Here OpenShell 0.1.1 is installed, its gateway service is not
-started for this account, and the gateway's configuration selects a
-compute driver DefenseClaw does not drive (the answers are the defaults;
-some lines are shortened):
+Setup is safe to run again. Say no to mounts, or pass `--no-mounts`, and no Claude Code or Codex sandbox can start. Flags and the full list of steps are in the [sandbox CLI reference](/docs/reference/sandbox-cli). The TUI runs the same setup: `defenseclaw tui`, `0`, **Sandboxes (OpenShell)**.
 
-```text
-DefenseClaw sandbox setup
-  Checking this machine…  ✓ linux/amd64  ✓ Landlock  ✓ Docker 29.8.1  ⚠ OpenShell 0.1.1 (0.1.3 available)
-  ✗ Gateway service: openshell-gateway is inactive (dead)
-Fix "Gateway service" now: start the gateway and enable it at login, then register it (openshell gateway add https://127.0.0.1:17670 --local --name openshell)? [Y/n]
-  fixing "Gateway service"…
-  ✓ fixed "Gateway service"
-Upgrade OpenShell 0.1.1 to 0.1.3 in place with NVIDIA's installer? (sudo; sha256 verified; pulls OpenShell's 0.1.3 supervisor images from ghcr.io; restarts the gateway: no sandbox runs on it now) [y/N]
-  OpenShell 0.1.1 at /bin/openshell; OpenShell 0.1.3 fixes a supervisor bug that can stall a sandbox's first connection (0.1.2), cuts the CPU an idle sandbox uses (0.1.2) and ships the MicroVM driver already signed for Apple's Hypervisor (0.1.3)
-  → upgrade OpenShell to 0.1.3 in place (this pulls its supervisor images from ghcr.io and restarts the gateway, which drops the connections of every sandbox on it): defenseclaw sandbox setup --install-openshell
-Allow sandboxes to mount the project folder you launch from? (…) [Y/n]
-Disable OpenShell's anonymous usage telemetry? (…) [Y/n]
-Switch your local OpenShell gateway to the docker compute driver? (its configuration selects the "podman" compute driver, which DefenseClaw does not drive; sandboxes made on the current driver cannot start after the switch) [Y/n]
-  OpenShell gateway configuration changes
-    edit /home/alice/.config/openshell/gateway.toml (a timestamped backup is kept)
-      …
-      set [openshell.gateway] compute_driver = "docker"
-    …
-    then restart the gateway (systemctl --user restart openshell-gateway) on the docker compute driver; running sandboxes stop, and sandboxes made on the podman driver cannot start again (one gateway runs one driver), and OpenShell drops them a few minutes later with any work not brought back
-  ✓ gateway configured and restarted
-  Harnesses (add another with `defenseclaw sandbox setup --harness NAME`):
-  …
-```
+You can also run setup from the TUI (`defenseclaw tui`, `0`, **Sandboxes (OpenShell)**). The form shows the command it will run before you start it.
 
-The same setup on a machine whose OpenShell was already at 0.1.2, replayed from a
-real run (on 0.1.2 setup now also offers the upgrade to 0.1.3):
+![DefenseClaw TUI Setup, Sandboxes (OpenShell) form on Linux: the command it will run, the harnesses to set up, the credentials found, the This machine checks (Docker, Landlock, OpenShell 0.1.5, bind mounts), and the Mount Project Folder and OpenShell telemetry options](/images/sandboxes/screens/tui-setup-linux.png)
 
 <TerminalAnimation
   cwd="~/code/myapp"
   speed={1.6}
-  height={560}
-  ariaLabel="Animated terminal replay of defenseclaw sandbox setup on Linux with OpenShell 0.1.2 already installed: the machine checks, the gateway service fix, the questions about project mounts, OpenShell telemetry and the compute driver, the gateway changes it lists, the harnesses and their model credentials, and the Claude Code image build."
-  caption="Recorded from a real run on Linux with OpenShell 0.1.2 already installed. Every question shows its default answer (Enter); the Codex image was skipped with `n`. The shell wrapper question was left at its default, no."
+  height={600}
+  ariaLabel="Animated terminal replay of defenseclaw sandbox setup on Linux with an older OpenShell 0.1.1 installed: the machine checks, the gateway service fix, the NVIDIA installer plan that upgrades OpenShell to 0.1.5, the questions about project mounts, OpenShell telemetry and the compute driver, the gateway changes it lists, the harnesses and their model credentials, and the Claude Code image build."
+  caption="Recorded on DefenseClaw 1.0.4 on RHEL 9 with Docker 29.8.1 and OpenShell 0.1.1 installed, so setup offers the in-place upgrade to the pinned OpenShell 0.1.5 (the package manager output is trimmed). Every question shows its default answer (Enter); the plan is approved with `y` and the Codex image was skipped with `n`. The shell wrapper question was left at its default, no. On a host with no OpenShell, the same question reads 'Install OpenShell'."
   frames={[
-    { type: 'cmd', text: "defenseclaw sandbox setup", pauseMs: 800 },
-    { type: 'out', text: "DefenseClaw sandbox setup" },
-    { type: 'out', text: "  Checking this machine…  ✓ linux/amd64  ✓ Landlock  ✓ Docker 29.8.1  ✓ OpenShell 0.1.2" },
-    { type: 'out', text: "  ✗ Gateway service: openshell-gateway is inactive (dead)" },
-    { type: 'prompt', text: "Fix \"Gateway service\" now: start the gateway and enable it at login? [Y/n] ", reply: "", pauseMs: 600 },
-    { type: 'out', text: "  fixing \"Gateway service\"…" },
-    { type: 'ok', text: "  ✓ fixed \"Gateway service\"" },
-    { type: 'prompt', text: "Allow sandboxes to mount the project folder you launch from? (enables bind mounts on your local OpenShell gateway; DefenseClaw mounts only the launch folder and the read-only settings Claude Code and Codex sandboxes need) [Y/n] ", reply: "", pauseMs: 600 },
-    { type: 'prompt', text: "Disable OpenShell's anonymous usage telemetry? (edits ~/.config/openshell/gateway.env and restarts the OpenShell gateway; no sandbox runs on it now) [Y/n] ", reply: "", pauseMs: 600 },
-    { type: 'prompt', text: "Switch your local OpenShell gateway to the docker compute driver? (its configuration selects the \"podman\" compute driver, which DefenseClaw does not drive; sandboxes made on the current driver cannot start after the switch) [Y/n] ", reply: "", pauseMs: 600 },
-    { type: 'out', text: "  OpenShell gateway configuration changes" },
-    { type: 'out', text: "    edit ~/.config/openshell/gateway.toml (a timestamped backup is kept)" },
-    { type: 'out', text: "      set [openshell.drivers.docker] allow_driver_config = true" },
-    { type: 'out', text: "      set [openshell.drivers.docker] enable_bind_mounts = true" },
-    { type: 'out', text: "      set [openshell.drivers.docker.resource_admission] enabled = false" },
-    { type: 'out', text: "      set [openshell.gateway] compute_driver = \"docker\"" },
-    { type: 'out', text: "        - compute_driver = \"podman\"" },
-    { type: 'out', text: "        + compute_driver = \"docker\"" },
-    { type: 'out', text: "        +" },
-    { type: 'out', text: "        + [openshell.drivers.docker]" },
-    { type: 'out', text: "        + allow_driver_config = true" },
-    { type: 'out', text: "        + enable_bind_mounts = true" },
-    { type: 'out', text: "        +" },
-    { type: 'out', text: "        + [openshell.drivers.docker.resource_admission]" },
-    { type: 'out', text: "        + enabled = false" },
-    { type: 'out', text: "    create ~/.config/openshell/gateway.env" },
-    { type: 'out', text: "      set OPENSHELL_TELEMETRY_ENABLED=false" },
-    { type: 'out', text: "    then restart the gateway (systemctl --user restart openshell-gateway) on the docker compute driver; running sandboxes stop, and sandboxes made on the podman driver cannot start again (one gateway runs one driver), and OpenShell drops them a few minutes later with any work not brought back" },
-    { type: 'ok', text: "  ✓ gateway configured and restarted" },
-    { type: 'out', text: "  Harnesses (add another with `defenseclaw sandbox setup --harness NAME`):" },
-    { type: 'out', text: "    Claude Code (claude)  model credential AWS_BEARER_TOKEN_BEDROCK ✓" },
-    { type: 'out', text: "    Codex (codex)         model credential AWS_BEARER_TOKEN_BEDROCK ✓" },
-    { type: 'out', text: "  Other harnesses: amp (not verified yet), antigravity, copilot, cursor-agent (not verified yet), devin (not verified yet), hermes, kiro, omnigent, opencode, openhands" },
-    { type: 'ok', text: "  ✓ openshell.enabled is on in ~/.defenseclaw/config.yaml" },
-    { type: 'prompt', text: "Make `claude` and `codex` run sandboxed automatically? (shell wrapper; undo any time) [y/N] ", reply: "", pauseMs: 600 },
-    { type: 'prompt', text: "Build the Claude Code image now? (the first build downloads about 3 GB; otherwise the first `defenseclaw sandbox run claude` builds it) [Y/n] ", reply: "", pauseMs: 600 },
-    { type: 'out', text: "  Building the Claude Code image (the first build downloads about 3 GB)…" },
-    { type: 'ok', text: "  ✓ Claude Code 2.1.156: defenseclaw/sandbox:claudecode-e192ffbfcbf1ecbf-u1007, hooks verified (built in 27s)" },
-    { type: 'prompt', text: "Build the Codex image now? (the first build downloads about 3 GB; otherwise the first `defenseclaw sandbox run codex` builds it) [Y/n] ", reply: "n", pauseMs: 600 },
-    { type: 'ok', text: "  ✓ the daemon runs the sandbox subsystem (ingress 127.0.0.1:19021, egress proxy 127.0.0.1:19022)" },
-    { type: 'out', text: "  skipped: the Codex image (the first `defenseclaw sandbox run codex` builds it, or `defenseclaw sandbox image build codex`)" },
-    { type: 'spacer' },
-    { type: 'ok', text: "  ✓ Done →  cd <project> && defenseclaw sandbox run claude" },
-    { type: 'spacer' },
+    { type: "cmd", text: "defenseclaw sandbox setup", pauseMs: 700 },
+    { type: "out", text: "DefenseClaw sandbox setup" },
+    { type: "out", text: "  Checking this machine…  ✓ linux/amd64  ✓ Landlock  ✓ Docker 29.8.1  ⚠ OpenShell 0.1.1 (0.1.5 available)" },
+    { type: "out", text: "  ✗ Gateway service: openshell-gateway is inactive (dead)" },
+    { type: "prompt", text: "Fix \"Gateway service\" now: start the gateway and enable it at login, then register it (openshell gateway add https://127.0.0.1:17670 --local --name openshell)? [Y/n] ", reply: "", pauseMs: 800 },
+    { type: "out", text: "  fixing \"Gateway service\"…" },
+    { type: "ok", text: "  ✓ fixed \"Gateway service\"" },
+    { type: "prompt", text: "Upgrade OpenShell 0.1.1 to 0.1.5 in place with NVIDIA's installer? (OpenShell 0.1.1 runs no DefenseClaw sandbox; sudo; sha256 verified; pulls OpenShell's 0.1.5 supervisor images from ghcr.io; restarts the gateway: no sandbox runs on it now) [Y/n] ", reply: "", pauseMs: 800 },
+    { type: "out", text: "OpenShell install plan" },
+    { type: "out", text: "  Release     v0.1.5 (NVIDIA OpenShell upstream installer)" },
+    { type: "out", text: "  Script      https://raw.githubusercontent.com/NVIDIA/OpenShell/v0.1.5/install.sh" },
+    { type: "out", text: "  SHA-256     7bf6706741b8b59c1b61e0c47030f0a34fefba6cee3c74cd52638cbf7cdc3655 (verified)" },
+    { type: "out", text: "  Privileges  the script uses sudo to install the openshell package, then enables and" },
+    { type: "out", text: "              starts the openshell-gateway user service (systemd --user)" },
+    { type: "out", text: "  Existing    openshell 0.1.1 at /bin/openshell" },
+    { type: "warn", text: "! upgrades the installed openshell 0.1.1 to v0.1.5 in place" },
+    { type: "warn", text: "! the script restarts the OpenShell gateway once the release is installed, which drops the connections of every sandbox on it" },
+    { type: "prompt", text: "Run this plan? [y/N] ", reply: "y", pauseMs: 800 },
+    { type: "dim", text: "openshell: downloading v0.1.5 release checksums..." },
+    { type: "dim", text: "openshell: verifying checksum for openshell-0.1.5-1.fc44.x86_64.rpm..." },
+    { type: "dim", text: "... (package manager output trimmed) ..." },
+    { type: "dim", text: "openshell: installed openshell RPM packages from v0.1.5" },
+    { type: "dim", text: "openshell: restarting openshell-gateway user service..." },
+    { type: "dim", text: "openshell: openshell status reports connected" },
+    { type: "ok", text: "  ✓ OpenShell upgraded to 0.1.5, gateway running" },
+    { type: "prompt", text: "Allow sandboxes to mount the project folder you launch from? (enables bind mounts on your local OpenShell gateway; DefenseClaw mounts only the launch folder and the read-only settings Claude Code and Codex sandboxes need) [Y/n] ", reply: "", pauseMs: 800 },
+    { type: "prompt", text: "Disable OpenShell's anonymous usage telemetry? (edits ~/.config/openshell/gateway.env and restarts the OpenShell gateway; no sandbox runs on it now) [Y/n] ", reply: "", pauseMs: 800 },
+    { type: "prompt", text: "Switch your local OpenShell gateway to the docker compute driver? (its configuration selects the \"podman\" compute driver, which DefenseClaw does not drive; sandboxes made on the current driver cannot start after the switch) [Y/n] ", reply: "", pauseMs: 800 },
+    { type: "out", text: "  OpenShell gateway configuration changes" },
+    { type: "out", text: "    edit ~/.config/openshell/gateway.toml (a timestamped backup is kept)" },
+    { type: "out", text: "      set [openshell.drivers.docker] allow_driver_config = true" },
+    { type: "out", text: "      set [openshell.drivers.docker] enable_bind_mounts = true" },
+    { type: "out", text: "      set [openshell.drivers.docker.resource_admission] enabled = false" },
+    { type: "out", text: "      set [openshell.gateway] compute_driver = \"docker\"" },
+    { type: "out", text: "      set [openshell.drivers.docker] sandbox_label = \"defenseclaw-u1009\"" },
+    { type: "out", text: "        - compute_driver = \"podman\"" },
+    { type: "out", text: "        + compute_driver = \"docker\"" },
+    { type: "out", text: "        +" },
+    { type: "out", text: "        + [openshell.drivers.docker]" },
+    { type: "out", text: "        + allow_driver_config = true" },
+    { type: "out", text: "        + enable_bind_mounts = true" },
+    { type: "out", text: "        + sandbox_label = \"defenseclaw-u1009\"" },
+    { type: "out", text: "        +" },
+    { type: "out", text: "        + [openshell.drivers.docker.resource_admission]" },
+    { type: "out", text: "        + enabled = false" },
+    { type: "out", text: "    create ~/.config/openshell/gateway.env" },
+    { type: "out", text: "      set OPENSHELL_TELEMETRY_ENABLED=false" },
+    { type: "out", text: "    then restart the gateway (systemctl --user restart openshell-gateway) on the docker compute driver; running sandboxes stop, and sandboxes made on the podman driver cannot start again (one gateway runs one driver), and OpenShell drops them a few minutes later with any work not brought back" },
+    { type: "ok", text: "  ✓ gateway configured and restarted" },
+    { type: "out", text: "  Harnesses (add another with `defenseclaw sandbox setup --harness NAME`):" },
+    { type: "out", text: "    Claude Code (claude)  model credential AWS_BEARER_TOKEN_BEDROCK ✓" },
+    { type: "out", text: "    Codex (codex)         model credential AWS_BEARER_TOKEN_BEDROCK ✓" },
+    { type: "out", text: "  Other harnesses: amp (not verified yet), antigravity, copilot, cursor-agent (not verified yet), devin (not verified yet), hermes, kiro, opencode" },
+    { type: "ok", text: "  ✓ openshell.enabled is on in ~/.defenseclaw/config.yaml" },
+    { type: "out", text: "  openshell.binary is /bin/openshell: the daemon runs the OpenShell CLI from there, as that folder may not be on the PATH it started with" },
+    { type: "prompt", text: "Make `claude` and `codex` run sandboxed automatically? (shell wrapper; undo any time) [y/N] ", reply: "", pauseMs: 800 },
+    { type: "prompt", text: "Build the Claude Code image now? (the first build downloads about 3 GB; otherwise the first `defenseclaw sandbox run claude` builds it) [Y/n] ", reply: "", pauseMs: 800 },
+    { type: "out", text: "  Building the Claude Code image (the first build downloads about 3 GB)…" },
+    { type: "ok", text: "  ✓ Claude Code 2.1.156: defenseclaw/sandbox:claudecode-0c61e3e41504692d-u1009, hooks verified (built in 50s)" },
+    { type: "prompt", text: "Build the Codex image now? (the first build downloads about 3 GB; otherwise the first `defenseclaw sandbox run codex` builds it) [Y/n] ", reply: "n", pauseMs: 800 },
+    { type: "ok", text: "  ✓ the daemon runs the sandbox subsystem (ingress 127.0.0.1:19011, egress proxy 127.0.0.1:19012)" },
+    { type: "out", text: "  skipped: the Codex image (the first `defenseclaw sandbox run codex` builds it, or `defenseclaw sandbox image build codex`)" },
+    { type: "spacer" },
+    { type: "ok", text: "  ✓ Done →  cd <project> && defenseclaw sandbox run claude" },
   ]}
 />
-
-</Step>
-
-<Step>
-
-### Understand what it changed
-
-- **OpenShell 0.1.3** is installed with NVIDIA's installer, whose script is
-  checked against a pinned SHA-256 before it runs. It uses `sudo` for the
-  package, then enables and starts the `openshell-gateway` user service.
-  DefenseClaw drives OpenShell 0.1.1 and later 0.1 releases, not 0.2. On
-  OpenShell 0.1.1 or 0.1.2 setup offers the upgrade to 0.1.3 in place (see
-  [upgrade OpenShell](/docs/sandboxes/guide#upgrade-openshell)).
-- **The gateway** listens on `localhost:17670` with mTLS, so only you can
-  call it. Setup turns on project-folder mounts in
-  `~/.config/openshell/gateway.toml`, and turns OpenShell's anonymous usage
-  telemetry off in `gateway.env`, each with a timestamped backup, then
-  restarts the gateway once. Say no to mounts, or pass `--no-mounts`, and
-  no Claude Code or Codex sandbox can start (DefenseClaw mounts their
-  per-run settings read-only, on a `--copy` run too); other harnesses run
-  on a copy.
-- **The compute driver.** DefenseClaw drives OpenShell's `docker` driver on
-  Linux. When the gateway's configuration selects another one, such as
-  `podman`, setup offers to switch it to `docker` in the same edit of
-  `gateway.toml` (`compute_driver = "docker"` under `[openshell.gateway]`)
-  and restart. One gateway runs one driver, so sandboxes made on the old
-  driver cannot start after the switch unless you switch it back. Say no,
-  and no sandbox starts until the gateway runs `docker`.
-- **DefenseClaw's config** gets `openshell.enabled: true` and the harnesses
-  you set up in `openshell.harnesses`.
-- **The harness images** are built in Docker, and each is checked to prove
-  that its hooks fire and block before it is used.
-
-Setup is safe to run again. When sandboxes are running, it asks before it
-restarts the shared gateway. `defenseclaw sandbox teardown` undoes it (see
-[tear down](/docs/sandboxes/guide#tear-down-and-uninstall)).
 
 </Step>
 
@@ -268,45 +160,21 @@ defenseclaw sandbox doctor
 ```
 
 ```text
-  ✓ Platform                   linux/arm64
-  ✓ User                       alice (uid 1000)
   ✓ Landlock                   ABI 6
   ✓ Docker                     Docker 29.4.0 (Ubuntu 24.04 LTS)
-  ✓ Docker BuildKit            docker build uses BuildKit (buildx v0.30.1)
-  ✓ Docker host networking     Docker Engine shares the host network
-  - Docker file sharing        bind mounts come straight from the host filesystem
-  ✓ Disk space                 40.0 GiB free under /var/lib/docker
-  ✓ systemd linger             enabled for alice
   ✓ Gateway service            openshell-gateway active (running)
-  ✓ OpenShell CLI              0.1.3 at /usr/bin/openshell
-  ✓ SSH connection sharing     off for the OpenShell sessions DefenseClaw runs (ssh -o ControlMaster=no -o ControlPath=none -o ControlPersist=no); your ssh configuration shares none for host sandbox either
-  ✓ Gateway registration       openshell at https://127.0.0.1:17670 (mtls)
-  ✓ Gateway mTLS files         private key is owner-only
-  ✓ Gateway                    0.1.3 healthy at https://127.0.0.1:17670
   ✓ Gateway compute driver     docker
-  ✓ Global policy              none; sandbox policies apply
   ✓ Project bind mounts        enabled for the docker driver
-  ✓ OpenShell telemetry        OpenShell usage telemetry is off
   ✓ Sandbox ingress port       127.0.0.1:18971 is served by the DefenseClaw daemon
-  ✓ Sandbox egress port        127.0.0.1:18972 is served by the DefenseClaw daemon
-  ✓ DefenseClaw daemon         connected to OpenShell 0.1.3 gateway openshell; ingress 127.0.0.1:18971, egress proxy 127.0.0.1:18972
-  ✓ Sandbox hooks              no sandbox is running
   ✓ Harness images             hook-verified: claudecode 2.1.156, codex 0.146.0
-  ✓ Shell wrappers             none (`defenseclaw sandbox enable claude` makes `claude` run sandboxed)
-  ✓ Organization policy        no openshell.admin constraints
+  …
 
   ✓ ready for sandboxes
 ```
 
-The same check on a real Red Hat Enterprise Linux 9 host:
+Every warning or failure names its fix on the next line. `defenseclaw sandbox doctor --fix` applies the fixes that need only your user. The command exits 1 when a check fails.
 
-![defenseclaw sandbox doctor on Linux: Landlock, Docker with BuildKit and host networking, disk space, systemd linger, the openshell-gateway service, its registration and health, the sandbox ingress and egress ports served by the DefenseClaw daemon, the hook-verified harness images, the organization policy, and the closing line ready for sandboxes](/images/sandboxes/screens/linux-doctor.png)
-
-`✓` passed, `⚠` is a warning, `✗` failed and `-` was skipped, with the
-reason. Every warning and failure names its fix on the next line (`→ …`).
-`defenseclaw sandbox doctor --fix` applies the fixes that need only your
-user, such as starting the gateway or turning bind mounts on, after asking.
-The command exits 1 when a check fails.
+![defenseclaw sandbox doctor on Linux: every check passes, with OpenShell 0.1.5 on the docker driver, the sandbox ports served by the DefenseClaw daemon, hook-verified harness images and the sandbox TLS trust row, ending ready for sandboxes](/images/sandboxes/screens/linux-doctor.png)
 
 </Step>
 
@@ -319,241 +187,137 @@ cd ~/code/myapp
 defenseclaw sandbox run claude
 ```
 
-The banner shows what the sandbox can see before the harness takes over your
-terminal:
-
-```text
-Sandbox myapp-7f3a · Claude Code · skip-permissions ON · network: open + blocklist
-  Project   ~/code/myapp → /work/myapp (live)   undo point taken → `defenseclaw sandbox undo myapp-7f3a` restores it
-  Hidden    .env  certs/dev.pem  (secret files appear empty inside; --unmask PATH to share)
-  Protected .git/hooks .git/config .git/config.worktree (read-only)
-            Not visible: everything else on this machine
-  Model     ANTHROPIC_API_KEY → api.anthropic.com only (the sandbox sees a placeholder)
-            opened to the harness's own program directly, around DefenseClaw's egress proxy; for an npm or Python harness that is its node or python, so a script it runs reaches them too
-  Asks      Claude Code keeps this terminal's title, so watch for them in another terminal: defenseclaw sandbox approvals --watch --sandbox myapp-7f3a (or `defenseclaw tui`: 7, then t); each one also rings the bell here
-```
-
-Continue with [your first session](/docs/sandboxes/first-session).
+Continue with [run an agent](/docs/sandboxes/first-session).
 
 </Step>
 
 </Steps>
 
-You can run the same setup from the TUI (`defenseclaw tui`, press `0` for
-Setup, then choose **Sandboxes (OpenShell)**). See
-[TUI and macOS app](/docs/sandboxes/apps#set-up-from-the-tui).
+### Understand what it changed
+
+- **OpenShell 0.1.5**, installed with NVIDIA's installer pinned by SHA-256, using `sudo`. DefenseClaw supports 0.1.5 up to, not including, 0.2.0. An older release only connects so that setup can upgrade it.
+- **The gateway** listens on `127.0.0.1:17670` with mutual TLS. Setup turns on project-folder mounts for the Docker driver in `~/.config/openshell/gateway.toml`, turns OpenShell's usage telemetry off in `gateway.env`, backs both files up and restarts the gateway once. The compute driver is `docker` unless you choose MicroVMs.
+- **DefenseClaw's config:** `openshell.enabled: true`, and `openshell.harnesses` lists the harnesses setup prepared (`--harness NAME` adds one; the default is Claude Code and Codex).
+- **Harness images**, built and checked that their hooks reach DefenseClaw. `defenseclaw sandbox image list` shows them.
+- **Shell wrappers** for `claude` and `codex`, if you said yes (`--no-wrappers` skips them).
+
+`defenseclaw sandbox teardown` reverses all of it except the OpenShell install.
 
 ## Run sandboxes in MicroVMs with KVM
 
-On a Linux host with KVM, OpenShell's MicroVM driver (`vm`) runs each sandbox
-as a small virtual machine with a Linux kernel of its own, as it does on a Mac.
-The Docker driver stays the default. MicroVMs are the way on where the host
-kernel has no usable Landlock, because the MicroVM's own kernel enforces it,
-and an option elsewhere. OpenShell calls the driver experimental, and NVIDIA
-tests it on Ubuntu 24.04 on amd64; DefenseClaw has also run it on RHEL 9.8 with
-nested KVM. `sandbox setup` offers the switch on a host where `/dev/kvm`
-exists, and the answer defaults to yes only when Landlock is missing.
-
-On a managed computer the organization chooses the driver. With
-`driver: auto` or `vm`, a sandbox that starts where KVM does not work for you
-falls back to the Docker driver under the same policy, unless the organization
-requires MicroVMs. The banner says so, for example
-`Driver docker (fallback: KVM not available on this computer)`. See
-[The docker fallback](/docs/enterprise/sandboxes#the-docker-fallback).
-
-A MicroVM host needs, besides Docker (which still builds the harness images):
-
-| Needs | Details |
-| --- | --- |
-| KVM | `/dev/kvm` that your user can open for reading and writing. Some distributions make it world-writable; where it belongs to the `kvm` group, add yourself (`sudo usermod -aG kvm $USER`) and log in again, or have an administrator grant a named user read-write ACL. On a cloud VM, use an instance type with nested virtualization enabled (on EC2, for example, an m8i type) or a `.metal` size; Graviton needs metal. |
-| `e2fsprogs` | Version 1.43 or newer, whose `mke2fs` and `debugfs` format each MicroVM's disks. |
-| The driver | `openshell-driver-vm`, which NVIDIA's package does not install. Download it from the OpenShell release with its `.sha256` file, check the digest and put it in `~/.local/libexec/openshell`. The doctor prints the commands for your architecture. |
-| The service umask | The `openshell-gateway` service must run with a umask no stricter than `0022`. With the `0077` of some packages, the directories the driver builds each MicroVM's disk from are unreadable to the sandbox's own user, and every MicroVM fails with `read /proc/self/status: Permission denied`. Setup writes a systemd drop-in (`zz-defenseclaw-umask.conf`) with `UMask=0022` as part of the gateway change. |
-
-Setup installs none of this for you. KVM access and `e2fsprogs` need an
-administrator, and the driver is a download you verify, so setup stops with the
-way on and asks you to run it again. If the driver's cache was built while the
-gateway ran with a stricter umask, the doctor's **MicroVM driver** check warns
-and prints the command that removes the cache (it deletes the MicroVM
-sandboxes' disks, none of which could start).
-
-What changes against the Docker driver is the list in the macOS column of
-[the guide's driver table](/docs/sandboxes/guide#macos): every run works on a
-copy, `--context` is refused, `--cpu` and `--memory` have no effect (every
-MicroVM gets the gateway's `vcpus` and `mem_mib`), and the first start of an
-image prepares a disk of about 5 GB, which takes about a minute. Sandboxes made
-on the Docker driver cannot start on the MicroVM driver; setup lists them first,
-they can be deleted, and they start again if you switch the gateway back. The doctor replaces its Docker network and Landlock
-rows with the MicroVM checks.
-
-## Keep or undo
-
-When a session on a mounted folder ends, DefenseClaw summarizes it, flags
-the changed files that can run code on your machine, and asks:
-
-```text
-Keep changes? [Y] keep  [u] undo everything  [d] show diff (then Enter)
-```
-
-Keeping makes the changes the base of the next session. Undo, now or later,
-restores the snapshot:
-
-```bash
-defenseclaw sandbox undo myapp-7f3a
-```
-
-In a git project undo puts back the working tree, HEAD, the branch, the
-staging area and the git files the agent could write. It first saves every
-tip the session created or moved, so an undo can be undone too. Files git
-ignores, such as `node_modules/` and `.venv/`, are not in the snapshot:
-undo names each one it cannot restore. See
-[undo the session](/docs/sandboxes/guide#undo-the-session).
-
-## Only one live mount per folder
-
-`undo` and the review cover the whole folder, so only one sandbox at a time
-can mount a folder live. To run agents in parallel on the same project, give
-each its own copy:
-
-```bash
-defenseclaw sandbox run claude --copy --name fix-tests
-defenseclaw sandbox run codex --copy --name docs
-```
-
-## Kernel feed (Tetragon)
-
-When your administrator runs [Tetragon](https://tetragon.io) on this
-computer, the opt-in sandbox kernel feed adds every process the kernel starts
-in your docker sandboxes to their process trees, including the many that live
-for milliseconds, which the 5-second sample never sees. Without it nothing
-changes.
-
-```bash
-defenseclaw sandbox kernel-feed status
-defenseclaw sandbox kernel-feed install
-```
-
-Run as yourself, `install` prints the exact `sudo` command for this install.
-The commands are in the [sandbox CLI reference](/docs/reference/sandbox-cli#sandbox-kernel-feed).
-
-With the feed installed and the process tree on, `sandbox ps --tree` says
-where its records come from and how many it holds:
-
-![defenseclaw sandbox ps with --tree on a Claude Code sandbox: the sandbox's init process, a login shell, the DefenseClaw supervisor and Claude Code, then the line source: kernel (Tetragon, through the sandbox kernel feed) with 112 execs and exits recorded so far and 103 of them with their pid in the sandbox](/images/segmentation/terminal-sandbox-ps-tree-kernel.png)
-
-And `kernel-feed status` shows that the feed answers and its Tetragon stream is
-connected:
-
-![defenseclaw-gateway sandbox kernel-feed status: installed and active, the root copy of the helper at the gateway's version, the feed answers with the same build and protocol 1 and its Tetragon stream is connected, and the gateway reads protocol 1 and 0](/images/segmentation/terminal-sandbox-kernel-feed-status.png)
-
-| Topic | Detail |
-| --- | --- |
-| Requirements | Docker sandboxes; Tetragon 1.6 or 1.7 serving its API on `unix:///var/run/tetragon/tetragon.sock` (its TCP default `localhost:54321` is refused) with a root-owned `tetragon-info.json`; systemd; you in the `docker` group |
-| What it reads | Only the exec and exit of container processes. Tetragon drops ancestors, environment variables, capabilities, namespaces, credentials and pod data before it sends them. Command lines are redacted in the root process (secret flags and values, key-shaped words, URL passwords), and a Codex notify program's turn payload is withheld |
-| Who sees what | Members of the `docker` group, each only their own sandboxes' records (the image's owner label). Members of the `docker` group can already see every container and run commands in it, so this is a courtesy between users, not a security boundary: one of them can also add process records, real or made up, to another account's sandbox tree and audit records (a container labelled as that sandbox is enough). Give the group only to accounts that trust each other ([One OpenShell gateway per machine](#one-openshell-gateway-per-machine)) |
-| What it does not do | No Tetragon policy, no enforcement, no file or network events. macOS MicroVM sandboxes and the Linux vm driver are not covered: their guest kernel is not the host's |
-| Turn it on per sandbox | The process tree must be on (`sandbox run --process-tree`, or a pack's `observe.process_tree: true`). `sandbox ps` then says `source: kernel`, and a process whose in-sandbox pid was not captured is listed among the ended ones with its `host_pid` |
-| DefenseClaw's own hook calls | Each Claude Code hook call runs DefenseClaw's hook script, which starts about a dozen short system tools (`jq`, `curl`, `id`, `sed` and others). The feed shows a call as one row, the script, with `[hook tools: N]` after its command line (`hook` and `hook_tools` in `sandbox ps --json`, one `sandbox.process_tree` record per call; when Claude runs several hooks at once, each counts its own tools, except a tool whose parent ended before the feed could read it, which counts with the newest of them), so the calls do not push your own processes out of the ended list. While the feed streams, a process only the 5-second sample sees is recorded one sample later, so a sample that lands in a call adds none of the call's processes. Only a call of the installed hook script by a Claude Code that the sandbox itself started is folded, and only its known tools: any other child of the script is shown and flagged `hook_subtree_unexpected`, and a call that runs over 30 seconds is shown in full. Calls are also shown in full in a sandbox that was already running when the feed connected to Tetragon (after a feed install, update or restart, or a Tetragon restart; `sandbox ps` counts them, `unfolded_hook_calls` in `--json`, and prints the fix: stop and start the sandbox), and, after Tetragon reports lost or throttled events, until the feed's next connection |
-| Audit records | Every process of the tree is one `sandbox.process_tree` start record and one exit record, at most 10 a second per sandbox (a burst of 200). Past that the tree still holds every process, but its records are not sent: the gateway log says once a minute how many, and `sandbox ps` warns with the count (`records_not_sent` in `--json`). A build or a test run in a sandbox passes 10 a second easily |
-| Files | `/usr/local/libexec/defenseclaw/defenseclaw-sensor-helper` (the root copy), `/etc/systemd/system/defenseclaw-sandbox-feed.service`, the socket `/run/defenseclaw-sandbox-feed/feed.sock` (`root:docker 0660`); its log is `journalctl -u defenseclaw-sandbox-feed` |
-| Versions | The feed's protocol is versioned. Your gateway reads its own protocol and the previous one; otherwise it uses the 5-second sample and `sandbox ps`, `kernel-feed status`, `defenseclaw doctor` (**Sandbox kernel feed**) and the gateway log print the `sudo ... sandbox kernel-feed install` command. `defenseclaw upgrade` prints it too when the feed runs another release |
-| After a reboot | The feed starts by itself, after Tetragon and Docker, and reads Tetragon within seconds. Your DefenseClaw gateway does not start with the computer ([Startup behavior](/docs/get-started/install#startup-behavior)): until the next hook call or `defenseclaw-gateway start` starts it, `sandbox list` says so, a sandboxed agent's hook calls are refused with a message that names the stopped gateway, and `sandbox ps` has no `source: kernel`. Once the gateway runs, `source: kernel` returns |
-| Uninstall | `defenseclaw uninstall` leaves the root service in place and prints `sudo <gateway> sandbox kernel-feed uninstall`. After `--binaries`, use `sudo /usr/local/libexec/defenseclaw/defenseclaw-sensor-helper --sandbox-feed --uninstall` |
-
-| Reason | Means |
-| --- | --- |
-| `kernel_feed_not_installed` | No feed on this computer |
-| `kernel_feed_not_permitted` | You are not in the `docker` group, or your gateway started before you joined it |
-| `kernel_feed_untrusted` | The socket or its directory is not root's, or is writable by others, or root does not serve it |
-| `kernel_feed_unavailable` | The feed is installed but stopped, or runs and does not answer. For a stopped feed, `kernel-feed status`, `sandbox ps` and `defenseclaw doctor` print the command that starts it, `sudo systemctl restart defenseclaw-sandbox-feed.service`. For one that runs and does not answer, `kernel-feed status` and `doctor` print `sudo systemctl status defenseclaw-sandbox-feed.service`, which says why; `sandbox ps` cannot tell the two apart and prints the restart command, which fixes both |
-| `kernel_feed_version_skew` | The feed speaks another protocol: run the `install` command it prints |
-| `kernel_feed_unsupported` | Not Linux |
-
-When the feed answers but its Tetragon stream is not connected (Tetragon is
-stopped, or its socket is gone), `kernel-feed status` says
-`its Tetragon stream is unavailable (tetragon_unavailable)`, `sandbox ps`
-warns and uses the 5-second sample, and `defenseclaw doctor` warns on the
-**Sandbox kernel feed** row. Ask the administrator to check Tetragon
-(`sudo systemctl status tetragon`). The feed reconnects by itself when
-Tetragon is back.
-
-```text
-$ defenseclaw doctor | grep -A1 "Sandbox kernel feed"
-  [WARN] Sandbox kernel feed  -  build 1.0.45, protocol 1; its Tetragon stream is unavailable (tetragon_unavailable)
-      -> Next step: ask the administrator to check Tetragon ('sudo systemctl status tetragon'); the feed reconnects by itself, and sandbox process trees use the 5-second sample until then
-```
+On a host with KVM, the `vm` driver runs each sandbox as a small virtual machine with its own kernel. It is the way on when the host kernel has no Landlock. Setup offers it when `/dev/kvm` exists and stops with the way on if something is missing: access to `/dev/kvm`, `e2fsprogs` 1.43 or newer, and the `openshell-driver-vm` download. Every MicroVM run works on a copy, so [pull](/docs/sandboxes/guide#pull-on-macos) brings the work back.
 
 ## One OpenShell gateway per machine
 
-OpenShell's packaged gateway listens on the fixed port `127.0.0.1:17670`
-and runs as the `openshell-gateway` user service of the account that
-started it. A machine runs one gateway, so only that account can run
-sandboxes: a second account's gateway cannot get the port. On a second
-account, `sandbox setup` and `sandbox doctor` say that the gateway's port
-is held by a process of another account, even if OpenShell is not installed
-in the second account. Setup installs and starts nothing there. The doctor
-skips the checks that follow from it (`not checked: the OpenShell gateway
-on this machine is another account's`): the gateway, its registration and
-Docker, whose fixes would not help. `sandbox list`, `sandbox status`,
-`sandbox run` and the TUI's Sandboxes panel say the same in that account
-(`OpenShell sandboxes are off for this account, and another account runs
-this machine's OpenShell gateway`, with what holds the port), instead of
-sending you to `sandbox setup`.
+OpenShell's gateway listens on `127.0.0.1:17670` for the account that started it, so only that account can run sandboxes. To hand sandboxes to another account, run `systemctl --user disable --now openshell-gateway` in the first, then `defenseclaw sandbox setup` in the second. Every sandbox on the gateway stops. Members of the `docker` group can see every sandbox container, so give the group only to accounts that trust each other.
 
-To hand sandboxes to another account, stop the gateway in the account that
-runs it. `disable --now` also keeps it from starting again at that
-account's next login or boot, which a plain `systemctl --user stop` would
-not, taking the port back:
+## A gateway that runs another way
 
-```bash
-systemctl --user disable --now openshell-gateway
-```
+If you started OpenShell's gateway yourself, not as the `openshell-gateway` user service, setup cannot restart it. It writes `gateway.toml` and `gateway.env` and asks you to restart the gateway the way you started it. Until you do, `sandbox doctor` warns that the gateway has not been restarted since the change. Details: [OpenShell installed another way](/docs/sandboxes/guide#openshell-installed-another-way).
 
-Then run `defenseclaw sandbox setup` in the other account, adding
-`--install-openshell` if OpenShell is not installed there.
+## Check it worked
 
-<Callout type="warn" title="Handing the gateway over stops the sandboxes it runs">
-When the gateway stops, every sandbox it runs stops with it, and an agent
-working in one loses its session. A live-mounted sandbox's edits are
-already in your folder and its undo point is kept; a copy keeps its work
-in the sandbox. Neither account can connect to those sandboxes, or pull a
-copy's work, until the account that made them runs the gateway again. To
-hand it back, stop it in the other account
-(`systemctl --user disable --now openshell-gateway`), start it in yours
-(`systemctl --user enable --now openshell-gateway`), then resume a sandbox
-with `defenseclaw sandbox connect NAME`.
-</Callout>
+`defenseclaw sandbox doctor` ends with `ready for sandboxes`.
 
-Several users on one host are tracked upstream in
-[NVIDIA/OpenShell#4273](https://github.com/NVIDIA/OpenShell/issues/4273).
+## Undo
 
-Membership in the `docker` group is root-equivalent on the machine.
-DefenseClaw keeps each account's state, tokens and project files to that
-account, and the OpenShell gateway refuses another account's client
-certificate, but every account in the `docker` group can list every
-sandbox container on the machine, whichever account started it
-(`docker ps`), and run commands in it (`docker exec`). That isolation does
-not hold against another member of the group, so give the `docker` group
-only to accounts that trust each other: one trusted group of users per
-machine.
+`defenseclaw sandbox teardown --dry-run` prints every step. `defenseclaw sandbox teardown` removes this install's sandboxes, images and gateway changes. OpenShell stays installed.
 
 ## Common problems
 
-| You see | Do this |
-| --- | --- |
-| The **Gateway service** check says `127.0.0.1:17670, the gateway's port, is held by a process of another account` | Another account runs this machine's OpenShell gateway. See [one OpenShell gateway per machine](#one-openshell-gateway-per-machine). |
-| The **Landlock** check fails | Boot a kernel that reports Landlock ABI 3 or newer (6.2 or newer upstream, or a distribution kernel with a backport) with `landlock` in its `lsm=` list. |
-| The **Docker** check says rootless Docker, or that Docker is older than 28 | Use a rootful Docker Engine 28 or newer and add yourself to the `docker` group (`sudo usermod -aG docker $USER`, then log in again). With linger on, logging out does not restart your systemd user manager, so the OpenShell gateway service still lacks the group: see the next row. |
-| The **Gateway service** check says it runs under a user manager that started before you joined the docker group, or setup's gateway restart fails with `the restarted gateway is not healthy` and names `sudo systemctl restart user@<uid>.service` | Your systemd user manager keeps the groups it started with, and linger keeps it running when you log out. Restart it with `sudo systemctl restart user@$(id -u).service` (this stops your user services, which then start again), then run setup again. |
-| The **Docker BuildKit** check fails | Install the `docker-buildx-plugin` package from Docker's repository. |
-| **systemd linger** warns | `sudo loginctl enable-linger $USER`, so the gateway keeps running after you log out. |
-| **Gateway service** fails with `openshell-gateway is inactive` | `defenseclaw sandbox doctor --fix` starts it. |
-| **Gateway service** says `openshell-gateway is not installed`, yet a gateway answers | OpenShell was installed another way than NVIDIA's installer. Setup uses that gateway as it runs, but DefenseClaw cannot restart it: after a gateway change, restart it yourself, the way you started it. The fix line names how to switch to the `openshell-gateway` user service. |
-| `the DefenseClaw daemon is not running` (also at the end of `sandbox setup`), or `the DefenseClaw gateway has not started on this account yet` | `defenseclaw-gateway start`. With the daemon down, sandbox hooks block every tool call. |
-| `the DefenseClaw daemon started before you joined the docker group`, or a run fails with `permission denied` on `/var/run/docker.sock` | The daemon keeps the groups it started with. Restart it so it picks up the `docker` group: `defenseclaw-gateway restart`. |
-| `refusing to share /home/alice with a sandbox: it is your home directory` | Run from a project folder inside your home, not from home itself. |
-| Inside a sandbox, every `make` recipe fails with `make: <command>: Operation not permitted` (`Error 127`), and so do node-gyp builds | The sandbox runs an image built before DefenseClaw's `make` wrapper (see [what is in the sandbox image](/docs/sandboxes/guide#what-is-in-the-sandbox-image)), or the agent ran `/usr/bin/make` by its full path. Delete the sandbox and run again, which builds the current image, and run `make` by name. |
-| Inside a sandbox on a kernel older than 5.19 (RHEL 9 runs 5.14), a Python program fails every HTTPS request with `[Errno 95] Operation not supported` | OpenShell 0.1 can't tell a program on those kernels whom its connection goes to, and Python's `ssl` module asks before every handshake. DefenseClaw works around it in the Python harnesses (Hermes Agent, OpenHands, OmniGent) and in the image's own Python: `python3`, `pip` and the virtual environments you make with them. A Python you download inside the sandbox, for example with `uv python install`, keeps failing until an OpenShell release after 0.1.2 fixes it: use the image's `python3`, or `uv pip`, which is not affected. |
+Run `defenseclaw sandbox doctor` first. These are the Linux-only failures it reports, plus the folder problems of a live-mounted run.
 
-The [troubleshooting table](/docs/sandboxes/guide#troubleshooting) in the complete
-guide covers the rest.
+### The Landlock check fails
+
+**You see:** the **Landlock** check fails.
+
+**Cause:** the kernel does not report Landlock ABI 3 or newer with `landlock` in its `lsm=` list. OpenShell refuses to start a sandbox without it.
+
+**Fix:** boot a kernel with Landlock ABI 3 or newer (6.2 or newer upstream, or a distribution kernel with a backport), or switch to MicroVMs on a KVM host ([Linux setup](/docs/sandboxes/linux#run-sandboxes-in-microvms-with-kvm)).
+
+**Check:** `cat /sys/kernel/security/lsm` lists `landlock` and the check passes.
+
+### Docker is rootless or too old
+
+**You see:** the **Docker** check says rootless Docker, or Docker older than 28.
+
+**Cause:** sandboxes need a rootful Docker Engine 28 or newer. Rootless Docker keeps containers off the host network.
+
+**Fix:** install a rootful Engine and run `sudo usermod -aG docker $USER`, then log in again. With linger on, logging out does not restart your systemd user manager, so the gateway service still lacks the group (next entry).
+
+**Check:** the **Docker** check passes.
+
+### The gateway service started before you joined the docker group
+
+**You see:** the **Gateway service** check says it runs under a user manager that started before you joined the docker group, or setup's restart fails with ``the restarted gateway is not healthy`` and names `sudo systemctl restart user@<uid>.service`. Or a run fails with `permission denied` on `/var/run/docker.sock`, or ``the DefenseClaw daemon started before you joined the docker group``.
+
+**Cause:** your systemd user manager and the daemon keep the groups they started with.
+
+**Fix:** run `sudo systemctl restart user@$(id -u).service` (this stops your user services, which start again), then `defenseclaw-gateway restart`, then run setup again.
+
+**Check:** `defenseclaw sandbox doctor` passes the **Gateway service** and **Docker** checks.
+
+### `make` fails inside a sandbox
+
+**You see:** every `make` recipe fails with ``make: <command>: Operation not permitted`` (`Error 127`), and so do node-gyp builds.
+
+**Cause:** the sandbox runs an image built before DefenseClaw's `make` wrapper, or the agent ran `/usr/bin/make` by its full path.
+
+**Fix:** delete the sandbox and run again, which builds the current image. Run `make` by name.
+
+**Check:** `make test` runs inside the new sandbox.
+
+### Python HTTPS fails on an old kernel
+
+**You see:** on a kernel older than 5.19 (RHEL 9 runs 5.14), a Python program fails every HTTPS request with `[Errno 95] Operation not supported`.
+
+**Cause:** OpenShell cannot tell a program on those kernels whom its connection goes to, and Python's `ssl` module asks before every handshake. DefenseClaw works around it in the Python harnesses and the image's own Python (`python3`, `pip` and virtual environments made with them). A Python you download inside the sandbox, for example with `uv python install`, is not covered.
+
+**Fix:** use the image's `python3`, or `uv pip`, which is not affected.
+
+**Check:** the HTTPS request succeeds.
+
+### Docker BuildKit or buildx is missing
+
+**You see:** ``docker's buildx plugin is not available (`docker buildx version`: …)``, the **Docker BuildKit** check fails, or ``DOCKER_BUILDKIT=0 turns BuildKit off``.
+
+**Cause:** the harness images need BuildKit, which docker uses only through its buildx plugin. Without it docker falls back to a legacy builder that cannot build them (`the --chmod option requires BuildKit`). A `DOCKER_CONFIG` or `HOME` that points elsewhere hides the plugin.
+
+**Fix:** install the plugin (Docker Desktop includes it, on Linux it is `docker-buildx-plugin` from Docker's repository), point `DOCKER_CONFIG` at the config that has `cli-plugins/docker-buildx`, unset `DOCKER_BUILDKIT` or set it to `1`, then restart the daemon with `defenseclaw-gateway restart`. The daemon builds in the environment it started with.
+
+**Check:** the **Docker BuildKit** check passes.
+
+### An image build fails
+
+**You see:** an error ending with the last lines docker printed (up to 40, with anything token-shaped redacted).
+
+**Cause:** the build failed, whether `setup`, `image build` or the daemon ran it.
+
+**Fix:** read `~/.defenseclaw/logs/sandbox-image-<harness>.log`, or run `defenseclaw sandbox image build <harness> --verbose` to stream the build. The daemon log (`~/.defenseclaw/gateway.log`) has the lines under `OPENSHELL_IMAGE_BUILD_FAILED`.
+
+**Check:** `defenseclaw sandbox doctor` shows the image as hook-verified.
+
+### A folder cannot be mounted live or has no snapshot room
+
+**You see:** ``… cannot be mounted live: …; run with --copy to work on a copy``, or ``the folder (for its undo snapshot) is …, above the 1.0 GiB limit``.
+
+**Cause:** the folder's git state cannot be protected in place, or a folder without git passes the 1 GiB snapshot cap.
+
+**Fix:** add `--copy`. For the cap, make the folder a git repository, use `--copy`, or use `--no-snapshot` (no undo).
+
+**Check:** the run starts.
+
+### `npm install` fails with EROFS
+
+**You see:** in a live-mounted sandbox, `npm install` fails in a `prepare` script with `EROFS` under the folder the banner's **Protected** line marks as `the repository's core.hooksPath`.
+
+**Cause:** the project points git's hooks at that folder (husky does), and DefenseClaw keeps it read-only.
+
+**Fix:** run `npm install --ignore-scripts` in the sandbox, or work on a copy with `--copy`.
+
+**Check:** the install finishes.
+
+## Next
+
+- [Run an agent in a sandbox](/docs/sandboxes/first-session)
+- [Troubleshooting](/docs/sandboxes/guide)

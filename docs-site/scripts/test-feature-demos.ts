@@ -52,9 +52,7 @@ describe('command generator shell safety', () => {
       matrix.connectors.map((connector) => [connector.id, connector.windowsSupport]),
     );
     assert.equal(statuses.size, matrix.connectors.length);
-    assert.equal(statuses.get('omnigent'), 'degraded');
     assert.equal(statuses.get('openclaw'), 'unsupported');
-    assert.equal(statuses.get('openhands'), 'unsupported');
     assert.equal(statuses.get('zeptoclaw'), 'unsupported');
     for (const status of statuses.values()) {
       assert.match(status, /^(supported|degraded|unsupported)$/);
@@ -275,7 +273,11 @@ describe('feature demo catalog', () => {
     assert.ok(mcp!.boundaries.didNot.some((item) => /remote URL/i.test(item)));
 
     const registry = featureDemos.find((scenario) => scenario.id === 'registry-promote-require');
-    assert.match(registry!.tabs.map((tab) => tab.source).join('\n'), /sync: on_demand/);
+    // Registry sources have no sync field: sync is on demand because there is no poller,
+    // and registry_required lives under asset_policy.<type> (cli/defenseclaw/config.py).
+    const registrySource = registry!.tabs.map((tab) => tab.source).join('\n');
+    assert.doesNotMatch(registrySource, /^sync:|allow_private_network/m);
+    assert.match(registrySource, /asset_policy:\n  skill:\n    registry_required: true/);
     assert.match(registry!.summary + registry!.syntheticDataNotice, /on-demand|on demand/i);
   });
 
@@ -300,6 +302,40 @@ describe('feature demo catalog', () => {
     assert.match(cursorStory, /conflict-detection\s+API/);
     assert.match(cursorStory, /does not enable native ask\/HITL/);
     assert.doesNotMatch(cursorStory, /Keep the user hook advisory|would-block|allow \+ advisory evidence/);
+  });
+
+  it('describes the shipped curl upload rules in each pack', () => {
+    const packs = ['default', 'permissive', 'strict'] as const;
+    for (const pack of packs) {
+      const file = readFileSync(
+        new URL(`../../policies/guardrail/${pack}/rules/commands.yaml`, import.meta.url),
+        'utf8',
+      );
+      const rules = (yaml.load(file) as {
+        rules: { id: string; expression?: string; severity?: string; tags?: string[] }[];
+      }).rules;
+      const curl = rules.find((rule) => rule.id === 'CMD-CURL-UPLOAD');
+      const credential = rules.find((rule) => rule.id === 'exfil.credential_file_external_upload');
+      assert.ok(curl && credential, `${pack} must contain both rule definitions`);
+      assert.match(credential.expression ?? '', /OPERATION_KIND_UPLOAD/);
+      assert.equal(credential.severity, 'HIGH');
+      assert.ok(credential.tags?.includes('detection-only'));
+      if (pack === 'strict') {
+        assert.match(curl.expression ?? '', /OPERATION_KIND_UPLOAD/);
+      } else {
+        assert.equal(curl.expression?.trim(), 'false');
+      }
+    }
+    assert.match(cursorStory, /`default` and `permissive`[^\n]*`exfil\.credential_file_external_upload`/);
+    assert.match(cursorStory, /`strict`[^\n]*`CMD-CURL-UPLOAD`/);
+  });
+
+  it('shows a prompt-free Cursor setup command and real CLI output', () => {
+    assert.match(cursorStory, /defenseclaw setup cursor --yes --mode action --rule-pack default --no-human-approval --restart/);
+    assert.match(cursorStory, /✓ cursor rule pack: default \(per-connector override\)/);
+    assert.match(cursorStory, /✓ cursor mode=action/);
+    assert.match(cursorStory, /✓ cursor hook failures=closed \(failClosed=true\)/);
+    assert.match(cursorStory, /ℹ Cursor runs all matching hooks/);
   });
 });
 

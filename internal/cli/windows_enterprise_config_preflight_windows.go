@@ -7,13 +7,19 @@
 package cli
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 
+	"gopkg.in/yaml.v3"
+
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 	"github.com/defenseclaw/defenseclaw/internal/gateway"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
@@ -22,6 +28,7 @@ import (
 
 // windowsEnterpriseStandaloneLayoutForPreflight is replaceable in tests.
 var windowsEnterpriseStandaloneLayoutForPreflight = managed.StandaloneWindowsLayout
+var windowsEnterpriseStandaloneRuntimeCandidateCheck = config.ValidateManagedStandaloneRuntimeCandidate
 
 // windowsEnterpriseStandaloneConfigSource refuses an administrator config
 // that a standard user could change before the lifecycle reads it, naming
@@ -57,6 +64,9 @@ func windowsEnterpriseStandaloneConfigPreflight(configPath string) error {
 	// failed to start and the rollback ended with 1603 after almost five
 	// minutes, advising the per-user `defenseclaw keys set` (GAP-0966).
 	if raw, err := os.ReadFile(configPath); err == nil {
+		if err := refuseUnsupportedWindowsGuardrailConnectors(raw); err != nil {
+			return fmt.Errorf("%s: %w; nothing was changed", configPath, err)
+		}
 		if refusal, found := config.ScanManagedEnvSecretReferences(raw).Refusal(configPath,
 			"from an elevated prompt with `defenseclaw.exe enterprise secret set --name <name> --from-file <key file>`",
 			config.EnterpriseSettingsReferenceURL); found {
@@ -69,6 +79,37 @@ func windowsEnterpriseStandaloneConfigPreflight(configPath string) error {
 		}
 	}
 	return windowsEnterpriseStandaloneConfigCompile(configPath)
+}
+
+// The generic config decoder accepts proxy-only and retired connector names.
+// On a managed Windows host the enumerator drops those names, so accepting
+// them as installed hooks would report a protected deployment that has none.
+// Inspect the source before migration can discard a removed connector key.
+func refuseUnsupportedWindowsGuardrailConnectors(raw []byte) error {
+	var document map[string]any
+	if err := yaml.Unmarshal(raw, &document); err != nil {
+		return nil // the normal config compiler reports the syntax error
+	}
+	guardrail, ok := document["guardrail"].(map[string]any)
+	if !ok {
+		return nil
+	}
+	var names []string
+	if connector, ok := guardrail["connector"].(string); ok && strings.TrimSpace(connector) != "" {
+		names = append(names, connector)
+	}
+	if connectors, ok := guardrail["connectors"].(map[string]any); ok {
+		for name := range connectors {
+			names = append(names, name)
+		}
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		if !enterprisehooks.WindowsStandaloneHookConnectorSupported(name) {
+			return fmt.Errorf("guardrail connector %q is not supported by managed Windows hooks; remove it or select a supported Windows connector", name)
+		}
+	}
+	return nil
 }
 
 // windowsEnterpriseStandaloneConfigCompile proves the gateway service can
@@ -96,6 +137,32 @@ func windowsEnterpriseStandaloneConfigCompile(configPath string) error {
 	if err := validateStandaloneGatewayConfig(configPath, layout.DataDir, layout.SecretsDir); err != nil {
 		return fmt.Errorf("%v; fix it and run again (nothing was changed)", err)
 	}
+	// The generic compiler accepts settings that the installed service rejects
+	// against the fixed Windows layout. Check the exact candidate bytes as if
+	// they were at config.yaml before the transaction can replace that file.
+	raw, err := readConfigV8Source(configPath)
+	if err != nil {
+		return err
+	}
+	if layout.GOOS == "" {
+		layout.GOOS = "windows"
+	}
+	// Resolve omitted paths with the service's installed config identity,
+	// rather than the arbitrary directory holding CONFIG=.
+	restoreCandidate := setTemporaryEnvironment(map[string]string{
+		managed.ConfigPathEnv: layout.ConfigPath,
+	})
+	defer restoreCandidate()
+	candidate, err := config.LoadRuntimeV8InspectionCandidateFromBytes(layout.ConfigPath, raw)
+	if err == nil {
+		err = config.ValidateManagedStandaloneConfig(raw, candidate, nil, layout)
+	}
+	if err == nil {
+		err = windowsEnterpriseStandaloneRuntimeCandidateCheck(candidate)
+	}
+	if err != nil {
+		return fmt.Errorf("%v; fix it and run again (nothing was changed)", err)
+	}
 	return nil
 }
 
@@ -108,6 +175,12 @@ func windowsEnterpriseStandaloneConfigCompile(configPath string) error {
 // the transaction, which migrates it (writing its pins with this release's
 // digest) and then runs the same check.
 func windowsEnterpriseStandaloneKeptConfigPreflight() error {
+	// An interrupted transaction may have left the candidate in config.yaml
+	// while its services are stopped. The lifecycle must restore its recorded
+	// preimage before this release inspects the kept config.
+	if windowsEnterpriseStandaloneTransactionPending() {
+		return nil
+	}
 	layout, err := windowsEnterpriseStandaloneLayoutForPreflight()
 	if err != nil {
 		return nil
@@ -249,6 +322,112 @@ var windowsEnterpriseStandaloneTransactionPending = func() bool {
 	return err == nil
 }
 
+// windowsEnterpriseStandaloneRecoveryPending reports a record an
+// interrupted lifecycle left for this run's deployment scope that the
+// installer recovers, under its lock, before it reads the deployment record
+// for a refusal (Invoke-DefenseClawPreLayoutRecovery): a pending
+// transaction under the scope's StateRoot, and the scope's state-purge
+// intent, self-uninstall receipt or install-rollback intent in the
+// profile's lifecycle folder. Their recovery can change the record (an
+// interrupted first install rolls back to no deployment), so a refusal read
+// from the record before that is the installer's to make. Only the records
+// at the exact paths the installer's layout names for this run count
+// (Test-DefenseClawPreLayoutRecoveryPending): a record of another scope, a
+// certification run's beside production or production's beside a
+// certification run, is not this run's to recover, and the installer then
+// refuses, after the session keys went (S2 review, loop round 2). Tests
+// replace it.
+var windowsEnterpriseStandaloneRecoveryPending = func(opts *windowsEnterpriseLifecycleOptions) bool {
+	roots, err := windowsEnterpriseStandaloneRecoveryRoots()
+	if err != nil {
+		roots = winpath.EnterpriseRoots{}
+	}
+	return windowsEnterpriseStandaloneRecoveryRecords(windowsEnterpriseStandaloneRecoveryRecordPaths(roots, opts))
+}
+
+// windowsEnterpriseStandaloneRecoveryRoots are the standalone profile's
+// trusted roots, which name the production scope and the lifecycle folder.
+// Tests replace it.
+var windowsEnterpriseStandaloneRecoveryRoots = func() (winpath.EnterpriseRoots, error) {
+	return winpath.TrustedEnterpriseRoots(managed.ProfileStandalone)
+}
+
+// The service names install-enterprise.ps1 takes when the CLI passes none
+// (-GatewayServiceName, -GuardianServiceName).
+const (
+	windowsEnterpriseInstallerGatewayService  = "DefenseClawGateway"
+	windowsEnterpriseInstallerGuardianService = "DefenseClawHookGuardian"
+)
+
+// windowsEnterpriseStandaloneRecoveryRecordPaths are the recovery records
+// of the deployment scope opts names, as Get-DefenseClawLayout names them
+// (PendingPath, PurgeIntentPath, SelfUninstallReceiptPath,
+// InstallRollbackIntentPath): the roots and service names the CLI passes
+// the installer, or the installer's own defaults (roots, the production
+// ones). A path that cannot be named (no trusted roots) is left out.
+func windowsEnterpriseStandaloneRecoveryRecordPaths(roots winpath.EnterpriseRoots, opts *windowsEnterpriseLifecycleOptions) []string {
+	if opts == nil {
+		opts = &windowsEnterpriseLifecycleOptions{}
+	}
+	value := func(given, fallback string) string {
+		if given = strings.TrimSpace(given); given != "" {
+			return given
+		}
+		return fallback
+	}
+	installRoot := value(opts.installRoot, roots.InstallRoot)
+	stateRoot := value(opts.stateRoot, roots.StateRoot)
+	var paths []string
+	if stateRoot != "" {
+		paths = append(paths, filepath.Join(stateRoot, "install", "pending.json"))
+	}
+	if installRoot == "" || stateRoot == "" || strings.TrimSpace(roots.LifecycleDir) == "" {
+		return paths
+	}
+	full := func(path string) string {
+		if abs, err := filepath.Abs(path); err == nil {
+			path = abs
+		}
+		return strings.TrimRight(path, `\`)
+	}
+	scope := windowsEnterpriseLifecycleScopeSHA256(
+		full(installRoot),
+		full(stateRoot),
+		value(opts.gatewayServiceName, windowsEnterpriseInstallerGatewayService),
+		value(opts.guardianServiceName, windowsEnterpriseInstallerGuardianService),
+	)
+	for _, kind := range []string{"purge", "self-uninstall", "install-rollback"} {
+		paths = append(paths, filepath.Join(roots.LifecycleDir, kind+"-"+scope+".json"))
+	}
+	return paths
+}
+
+// windowsEnterpriseLifecycleScopeSHA256 is Get-DefenseClawStableScopeSHA256:
+// the lower-case hex SHA-256 of the lower-cased values joined by NUL, the
+// scope every lifecycle-folder record name carries.
+func windowsEnterpriseLifecycleScopeSHA256(values ...string) string {
+	lowered := make([]string, len(values))
+	for i, v := range values {
+		lowered[i] = strings.ToLower(v)
+	}
+	sum := sha256.Sum256([]byte(strings.Join(lowered, "\x00")))
+	return hex.EncodeToString(sum[:])
+}
+
+// windowsEnterpriseStandaloneRecoveryRecords reports a recovery record at
+// one of paths, as Test-DefenseClawPreLayoutRecoveryPending does
+// (Test-Path -PathType Leaf): a path that holds anything but a folder. A
+// path it cannot read counts as no record, as Test-Path counts it, so the
+// two agree.
+func windowsEnterpriseStandaloneRecoveryRecords(paths []string) bool {
+	for _, path := range paths {
+		if info, err := os.Stat(path); err == nil && !info.IsDir() {
+			return true
+		}
+	}
+	return false
+}
+
 // windowsEnterpriseStandaloneRepairRulePackPreflight checks the rule packs
 // of the installed config before a repair stops the services: the trust
 // check, and the packs as the gateway builds them at start, digest pins
@@ -257,9 +436,11 @@ var windowsEnterpriseStandaloneTransactionPending = func() bool {
 // restarted the gateway into a failed start and left it stopped for every
 // user (GAP-0672). Refused here, the running gateway keeps that policy. A
 // pending transaction is left to its recovery, which restores the packs the
-// deployment had.
-func windowsEnterpriseStandaloneRepairRulePackPreflight() error {
-	if windowsEnterpriseStandaloneTransactionPending() {
+// deployment had. A repair that supplies a config installs that config,
+// whose packs its own preflight already checked, so the packs only the old
+// config selects do not block it (GAP-1194).
+func windowsEnterpriseStandaloneRepairRulePackPreflight(suppliedConfig string) error {
+	if strings.TrimSpace(suppliedConfig) != "" || windowsEnterpriseStandaloneTransactionPending() {
 		return nil
 	}
 	layout, err := windowsEnterpriseStandaloneLayoutForPreflight()

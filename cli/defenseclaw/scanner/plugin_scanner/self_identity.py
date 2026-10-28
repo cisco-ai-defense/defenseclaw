@@ -37,6 +37,7 @@ import hashlib
 import json
 import os
 import stat
+import sys
 from collections.abc import Iterable
 from pathlib import Path
 
@@ -68,19 +69,36 @@ _BRIDGE_PUBLICATION_SCHEMA = {
 # standalone variant when distinct (internal/gateway/connector/testdata/
 # bridge_host), and the copy the Secure Client profile renders
 # (internal/gateway/connector/hooks/*-secure-client.*), which its release pins.
+_BRIDGE_STANDALONE_TEMPLATE_DIGESTS = {
+    "amp": "492c8ef226d7724c86b7b7d50e5b9605f405529a3c43c2f4844fc49864125eb5",
+    "opencode": "d51e6ef6981597f4893ee2d619c507c061e8a44e0c13717ad879fe556e7b5f7d",
+}
 _BRIDGE_TEMPLATE_DIGESTS = {
     "amp": frozenset(
         {
-            "bfd4fb5dfd71c5c8257677caa86f8f4897dafbdc7d6acb53c3f004a0c8da89dc",  # amp-plugin.ts
-            "392bc21bb99d9978b69683dca8fd022d074037a1e9df6f885916c6525537cdd6",  # amp-plugin-secure-client.ts
+            "c41c17ed0bdf9fb8dac02fb81ab11a089bea2aa56af58c8cfaff8d60a2102fe8",  # amp-plugin.ts
+            _BRIDGE_STANDALONE_TEMPLATE_DIGESTS["amp"],
+            "cf00f9f404c0711357f55535dd1062667d398acbf7603dfa15fa951d212b4d4b",  # amp-plugin-secure-client.ts
         }
     ),
     "opencode": frozenset(
         {
-            "56333dddf38ea050db8d6e059eca2f450066fde834d982867ef766df0952b696",  # opencode-plugin.js
-            "c971075a66f22f790dd8b5e6245cbc5c48b91573266216d1792b83441a10c8e2",  # opencode-plugin-managed.js
-            "f81b5b2f208d2535ac028c49bc95941d5666bee72315053386c05cd9411e34de",  # opencode-plugin-secure-client.js
+            "a1aef1cc73f76ba301ef0b444519bec3fd987a8470bf40f9f39e721e055a490f",  # opencode-plugin.js
+            _BRIDGE_STANDALONE_TEMPLATE_DIGESTS["opencode"],
+            "72ee5dcb51e28d153714e63401233ace81c17519e8970675d08a19d5730a5ab3",  # opencode-plugin-secure-client.js
         }
+    ),
+}
+_BRIDGE_VARIABLE_MODE_LINES = {
+    "amp": (
+        b'const DC_FAIL_MODE: string = "',
+        b'" // per-user and standalone hooks stay closed\n',
+        b'const DC_FAIL_MODE: string = "{{.FailMode}}" // per-user and standalone hooks stay closed\n',
+    ),
+    "opencode": (
+        b'const DC_FAIL_MODE = "',
+        b'"; // per-user and standalone hooks stay closed\n',
+        b'const DC_FAIL_MODE = "{{.FailMode}}"; // per-user and standalone hooks stay closed\n',
     ),
 }
 _BRIDGE_DYNAMIC_LINES = {
@@ -96,6 +114,12 @@ _BRIDGE_DYNAMIC_LINES = {
             b'"\n',
             b'const DC_TOKEN_FILE = "{{.TokenFileJS}}"\n',
             "token",
+        ),
+        (
+            b'const DC_NATIVE_POST_BINARY = "',
+            b'"\n',
+            b'const DC_NATIVE_POST_BINARY = "{{.NativePostBinaryJS}}"\n',
+            "native",
         ),
         (
             b'const DC_FAIL_MODE: string = "',
@@ -128,10 +152,22 @@ _BRIDGE_DYNAMIC_LINES = {
             "marker",
         ),
         (
+            b'const DC_LIFECYCLE_MARKER: string = "',
+            b'"\n',
+            b'const DC_LIFECYCLE_MARKER: string = "{{.LifecycleMarkerJS}}"\n',
+            "lifecycle",
+        ),
+        (
             b'const DC_LISTENER_PROOF: string = "',
             b'"\n',
             b'const DC_LISTENER_PROOF: string = "{{.ListenerProofJS}}"\n',
             "proof",
+        ),
+        (
+            b'const DC_GATEWAY_BINARY: string = "',
+            b'"\n',
+            b'const DC_GATEWAY_BINARY: string = "{{.GatewayBinaryJS}}"\n',
+            "gateway",
         ),
     ),
     "opencode": (
@@ -146,6 +182,12 @@ _BRIDGE_DYNAMIC_LINES = {
             b'";\n',
             b'const DC_TOKEN_FILE = "{{.TokenFileJS}}";\n',
             "token",
+        ),
+        (
+            b'const DC_NATIVE_POST_BINARY = "',
+            b'";\n',
+            b'const DC_NATIVE_POST_BINARY = "{{.NativePostBinaryJS}}";\n',
+            "native",
         ),
         (
             b'const DC_FAIL_MODE = "',
@@ -178,11 +220,38 @@ _BRIDGE_DYNAMIC_LINES = {
             "marker",
         ),
         (
+            b'const DC_LIFECYCLE_MARKER = "',
+            b'";\n',
+            b'const DC_LIFECYCLE_MARKER = "{{.LifecycleMarkerJS}}";\n',
+            "lifecycle",
+        ),
+        (
             b'const DC_LISTENER_PROOF = "',
             b'";\n',
             b'const DC_LISTENER_PROOF = "{{.ListenerProofJS}}";\n',
             "proof",
         ),
+        (
+            b'const DC_GATEWAY_BINARY = "',
+            b'";\n',
+            b'const DC_GATEWAY_BINARY = "{{.GatewayBinaryJS}}";\n',
+            "gateway",
+        ),
+    ),
+}
+# A per-user bridge's gateway-outage mode line (Go pluginOutageFailMode):
+# present once in a per-user render, absent from managed and Secure Client
+# ones; its value is open or closed.
+_BRIDGE_OUTAGE_MODE_LINES = {
+    "amp": (
+        b'const DC_OUTAGE_FAIL_MODE: string = "',
+        b'"\n',
+        b'const DC_OUTAGE_FAIL_MODE: string = "{{.OutageFailMode}}"\n',
+    ),
+    "opencode": (
+        b'const DC_OUTAGE_FAIL_MODE = "',
+        b'";\n',
+        b'const DC_OUTAGE_FAIL_MODE = "{{.OutageFailMode}}";\n',
     ),
 }
 _LOWER_HEX = frozenset("0123456789abcdef")
@@ -398,6 +467,8 @@ def _valid_bridge_managed_path(kind: str, value: bytes) -> bool:
     absolute paths.
     """
 
+    if kind == "native" and value == b"":
+        return False
     if value == b"":
         return True
     try:
@@ -406,7 +477,7 @@ def _valid_bridge_managed_path(kind: str, value: bytes) -> bool:
         return False
     if not isinstance(path, str) or not os.path.isabs(path) or any(ord(char) < 0x20 for char in path):
         return False
-    if kind != "guard":
+    if kind not in {"guard", "native"}:
         return True
     try:
         info = os.lstat(path)
@@ -422,6 +493,29 @@ def _valid_bridge_managed_path(kind: str, value: bytes) -> bool:
     return info.st_uid == 0 and not info.st_mode & 0o022
 
 
+def _valid_bridge_gateway_binary(value: bytes) -> bool:
+    """Accept the gateway binary a per-user bridge runs (Go
+    perUserPluginGatewayBinary): unset (the ~/.local/bin gateway) or the
+    absolute path of a defenseclaw-gateway binary in a bin folder, as native
+    Windows Setup renders it. The account owns that install, as it owns
+    ~/.local/bin, so no ownership check applies.
+    """
+
+    if value == b"":
+        return True
+    try:
+        path = json.loads('"' + value.decode("utf-8", errors="strict") + '"')
+    except (UnicodeError, json.JSONDecodeError):
+        return False
+    if not isinstance(path, str) or not os.path.isabs(path) or any(ord(char) < 0x20 for char in path):
+        return False
+    name = "defenseclaw-gateway.exe" if os.name == "nt" else "defenseclaw-gateway"
+    return (
+        os.path.normcase(os.path.basename(path)) == os.path.normcase(name)
+        and os.path.normcase(os.path.basename(os.path.dirname(path))) == "bin"
+    )
+
+
 def _valid_bridge_dynamic_value(
     kind: str,
     value: bytes,
@@ -431,15 +525,17 @@ def _valid_bridge_dynamic_value(
 ) -> bool:
     if kind == "api":
         return _valid_bridge_api_address(value)
-    if kind == "mode":
-        return value in {b"open", b"closed"}
     if kind == "uid":
         return value.isdigit() and len(value) <= 10
     if kind == "proof":
         # The Windows standalone listener proof is on ("1") or off ("").
         return value in {b"", b"1"}
-    if kind in {"socket", "guard", "marker"}:
+    if kind == "mode":
+        return value in {b"open", b"closed"}
+    if kind in {"socket", "guard", "marker", "native", "lifecycle"}:
         return _valid_bridge_managed_path(kind, value)
+    if kind == "gateway":
+        return _valid_bridge_gateway_binary(value)
     if kind != "token":
         return False
     try:
@@ -467,12 +563,17 @@ def _matches_immutable_bridge_template(
     if specifications is None or expected_digests is None:
         return False
     lines = payload.splitlines(keepends=True)
+    dynamic_values: dict[str, bytes] = {}
     for prefix, suffix, canonical, kind in specifications:
         matches = [
             index
             for index, line in enumerate(lines)
             if line.startswith(prefix) and line.endswith(suffix)
         ]
+        if not matches and kind in {"native", "proof", "mode", "lifecycle", "gateway"}:
+            # Current and Secure Client templates have distinct fields, each
+            # still covered by its exact pinned digest.
+            continue
         if len(matches) != 1:
             return False
         index = matches[0]
@@ -484,8 +585,57 @@ def _matches_immutable_bridge_template(
             data_dir=data_dir,
         ):
             return False
+        dynamic_values[kind] = value
         lines[index] = canonical
-    return hashlib.sha256(b"".join(lines)).hexdigest() in expected_digests
+    # A different lifecycle marker, including an empty one on a Unix
+    # standalone bridge, could hide an active upgrade from the plugin.
+    socket = dynamic_values.get("socket", b"")
+    if sys.platform == "darwin" and socket == b"/opt/cisco/defenseclaw/run/hook.sock":
+        required_lifecycle = b"/var/run/defenseclaw-lifecycle.active"
+    elif sys.platform == "linux" and socket == b"/run/defenseclaw-hook/hook.sock":
+        required_lifecycle = b"/run/defenseclaw-lifecycle.active"
+    else:
+        required_lifecycle = b""
+    if dynamic_values.get("lifecycle", b"") != required_lifecycle:
+        return False
+    prefix, suffix, canonical = _BRIDGE_OUTAGE_MODE_LINES[connector]
+    outage = [index for index, line in enumerate(lines) if line.startswith(prefix) and line.endswith(suffix)]
+    if len(outage) > 1:
+        return False
+    if outage:
+        if lines[outage[0]][len(prefix) : -len(suffix)] not in {b"open", b"closed"}:
+            return False
+        lines[outage[0]] = canonical
+    def standalone_socket_matches(digest: str) -> bool:
+        if digest != _BRIDGE_STANDALONE_TEMPLATE_DIGESTS[connector]:
+            return True
+        if sys.platform == "darwin":
+            required_socket = b"/opt/cisco/defenseclaw/run/hook.sock"
+        elif sys.platform == "linux":
+            required_socket = b"/run/defenseclaw-hook/hook.sock"
+        else:
+            required_socket = b""
+        return socket == required_socket
+
+    canonical_digest = hashlib.sha256(b"".join(lines)).hexdigest()
+    if canonical_digest in expected_digests:
+        return standalone_socket_matches(canonical_digest)
+    # Managed and Secure Client variants retain an administrator-selected
+    # mode. Per-user host templates bake in closed; their altered mode does
+    # not normalize to a trusted managed digest.
+    prefix, suffix, canonical = _BRIDGE_VARIABLE_MODE_LINES[connector]
+    matches = [
+        index for index, line in enumerate(lines)
+        if line.startswith(prefix) and line.endswith(suffix)
+    ]
+    if len(matches) != 1:
+        return False
+    index = matches[0]
+    if lines[index][len(prefix) : -len(suffix)] not in {b"open", b"closed"}:
+        return False
+    lines[index] = canonical
+    canonical_digest = hashlib.sha256(b"".join(lines)).hexdigest()
+    return canonical_digest in expected_digests and standalone_socket_matches(canonical_digest)
 
 
 def _matches_registered_bridge_publication(path: str, payload: bytes) -> bool:

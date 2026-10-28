@@ -20,7 +20,7 @@
 
 .DESCRIPTION
       powershell -File scripts\test-install-lifecycle.ps1 -Assets DIR [-PreviousAssets DIR]
-          [-Lanes "fresh fleet-opt-in setup-import files-in-use failure-drill policy upgrade-previous shim upgrade-0.8.3"]
+          [-Lanes "fresh fleet-opt-in setup-import files-in-use failure-drill failure-drill-exit3 policy upgrade-previous shim upgrade-0.8.3"]
           [-CodexExe PATH] [-Root DIR] [-Keep]
 
     upgrade-previous and shim need -PreviousAssets (an older 1.x release); the
@@ -648,8 +648,10 @@ function Test-Shim {
     Check ((Get-Content -LiteralPath (Join-Path $DcHome "previous\VERSION") -ErrorAction SilentlyContinue) -eq $from) "previous\VERSION is not $from"
 }
 
-# Upgrade while DefenseClaw programs hold files: running .exe files are renamed
-# aside, and a program running from the venv stops the install before any change.
+# A continuously mapped hook image cannot be replaced on Windows. The first
+# attempt keeps its old bytes and proves the restored state; after that call exits, the
+# same install completes. A program running from the venv also stops the
+# install before any change.
 function Test-FilesInUse {
     Enter-Lane files-in-use
     Check ((Install-Candidate $Seed) -eq 0) "install of $(Get-AssetVersion $Seed) failed"
@@ -668,18 +670,26 @@ function Test-FilesInUse {
     # beside it: without the lane's there, it would find no install and exit.
     $state = Get-Content -Raw -LiteralPath (Join-Path $Bin "defenseclaw-hook-state.json") -ErrorAction SilentlyContinue | ConvertFrom-Json
     Check ($state -and [IO.Path]::GetFullPath($state.data_root) -eq [IO.Path]::GetFullPath($DcHome)) "defenseclaw-hook-state.json does not bind the hook to $DcHome"
+    $oldHookSha = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $Bin "defenseclaw-hook.exe")).Hash
     $hook = Start-Held (Join-Path $Bin "defenseclaw-hook.exe") @("hook", "--connector", "codex")
     Start-Sleep -Seconds 2
     if ($hook.HasExited) {
         Fail "defenseclaw-hook.exe did not stay running (exit $($hook.ExitCode)): $($hook.StandardError.ReadToEnd()) $($hook.StandardOutput.ReadToEnd())"
     }
-    Write-Log "install $Target while defenseclaw-hook.exe runs"
-    Check ((Install-Candidate $next) -eq 0) "an install with a running hook failed"
+    Write-Log "refuse safely while defenseclaw-hook.exe remains mapped"
+    Check ((Install-Candidate $next) -eq 1) "the installer claimed it replaced a continuously mapped hook"
+    Check (-not $hook.HasExited) "the running hook was stopped"
+    Check ((Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $Bin "defenseclaw-hook.exe")).Hash -eq $oldHookSha) "the old canonical hook changed after a refused swap"
+    Check (-not (Test-Path -LiteralPath (Join-Path $DcHome ".lifecycle-txn.json"))) "the refused swap left a lifecycle record for an unchanged install"
+    Check (-not (Test-Path -LiteralPath (Join-Path $DcHome ".install.lock"))) "the refused swap left the unchanged install locked"
+    Stop-Held
+    Write-Log "retry the same install after the held hook exits"
+    Check ((Install-Candidate $next) -eq 0) "the installer did not recover and finish after the held hook exited"
     Assert-Versions $Target
     Assert-Healthy
-    Check (-not $hook.HasExited) "the running hook was stopped"
-    Check (@(Get-ChildItem -LiteralPath $Bin -Filter "defenseclaw-hook.exe.old-*").Count -eq 1) "the running defenseclaw-hook.exe was not renamed aside"
-    Stop-Held
+    Check ((Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $Bin "defenseclaw-hook.exe")).Hash -ne $oldHookSha) "the retry did not publish the new hook at its canonical path"
+    Check (-not (Test-Path -LiteralPath (Join-Path $DcHome ".lifecycle-txn.json"))) "the retry left its lifecycle record"
+    Check (-not (Test-Path -LiteralPath (Join-Path $DcHome ".install.lock"))) "the retry left its install lock"
 
     Write-Log "re-run while the CLI runs from the venv (must stop, nothing changed)"
     $holder = Start-Held (Join-Path $DcHome ".venv\Scripts\python.exe") @("-c", "import time; time.sleep(900)")
@@ -703,18 +713,17 @@ function Test-FilesInUse {
     Check (-not @(Get-ChildItem -LiteralPath $Bin -Filter "*.old-*").Count) "stale .old-* files were not removed"
 }
 
-# A release whose gateway reports its version but does not start: the
-# install is undone. A start that exits 3 (a connector needs attention)
-# keeps the new version and exits 3. The drill gateway hands every other
-# command to the real one, so the staged check, which runs the staged
-# gateway's config validator (GAP-0158), passes and the swap happens.
-function Test-FailureDrill {
-    Enter-Lane failure-drill
+# A release whose gateway reports its version but does not start must be
+# undone. Exit 3 alone does not prove that a connector is guarded: a gateway
+# that reports 3 without running must also be undone. The drill gateway
+# hands every other command to the real one, so the staged config check passes.
+# New-FailureDrill: in a lane with a running $Target install, build release
+# assets whose gateway refuses to start (exit DC_DRILL_START_EXIT, default 1)
+# and passes every other command to the real gateway. Returns the assets
+# directory, or "" when the install or the gateway did not come up.
+function New-FailureDrill {
     Check ((Install-Candidate $Assets) -eq 0) "install of $Target failed"
-    if (-not (Initialize-Gateway)) { return }
-    $gateway = Join-Path $Bin "defenseclaw-gateway.exe"
-    $goodGateway = Get-Sha256 $gateway
-    $config = Get-Sha256 (Join-Path $DcHome "config.yaml")
+    if (-not (Initialize-Gateway)) { return "" }
     $source = Join-Path $Lane "DrillGateway.cs"
     $realGateway = Join-Path $Lane "real-gateway.exe"
     # The command line after the program name goes to the real gateway as is.
@@ -740,22 +749,49 @@ public static class DrillGateway {
             "Add-Type -Path '$source' -OutputAssembly '$(Join-Path $Zip "defenseclaw-gateway.exe")' -OutputType ConsoleApplication")
         Check ($built -eq 0) "could not build the drill gateway"
     }
+    return $drill
+}
+
+# The two failure drills run as two lanes (each about half of the 13 to 20
+# minutes they took together on a hosted runner).
+function Test-FailureDrill {
+    Enter-Lane failure-drill
+    $gateway = Join-Path $Bin "defenseclaw-gateway.exe"
+    $drill = New-FailureDrill
+    if (-not $drill) { return }
+    $goodGateway = Get-Sha256 $gateway
+    $config = Get-Sha256 (Join-Path $DcHome "config.yaml")
 
     Write-Log "an install whose gateway does not start is undone"
     Check ((Install-Candidate $drill) -eq 1) "an install whose gateway does not start must exit 1"
     Check ((Get-Sha256 $gateway) -eq $goodGateway) "the working gateway was not put back"
     Assert-Versions $Target
-    Assert-Healthy
+    Check (-not (Get-GatewayImage)) "the refused start should keep the restored gateway stopped"
     Assert-DataKept
     Check ((Get-Sha256 (Join-Path $DcHome "config.yaml")) -eq $config) "the failed install changed config.yaml"
     Check (@(Get-ChildItem -LiteralPath $DcHome -Directory -Force -Filter ".failed-*").Count -eq 1) "the failed install was not kept in .failed-*"
     Check (-not (Test-Path -LiteralPath (Join-Path $DcHome ".repair"))) "the repair slot was left behind"
+    Check ((Invoke-Exe $gateway @("start")) -eq 0) "the restored gateway did not start for the next upgrade"
+    Assert-Healthy
+}
 
-    Write-Log "a gateway start that exits 3 keeps the new version and exits 3"
+function Test-FailureDrillExit3 {
+    Enter-Lane failure-drill-exit3
+    $gateway = Join-Path $Bin "defenseclaw-gateway.exe"
+    $drill = New-FailureDrill
+    if (-not $drill) { return }
+    $goodGateway = Get-Sha256 $gateway
+    Assert-Healthy
+
+    Write-Log "exit 3 without a running gateway cannot certify the new version"
     $env:DC_DRILL_START_EXIT = "3"
-    try { Check ((Install-Candidate $drill) -eq 3) "an install whose gateway start exits 3 must exit 3" } finally { Remove-Item Env:DC_DRILL_START_EXIT }
-    Check ((Get-Sha256 $gateway) -ne $goodGateway) "exit 3 must keep the new version"
+    try { Check ((Install-Candidate $drill) -eq 1) "an install whose gateway is down must refuse exit 3" } finally { Remove-Item Env:DC_DRILL_START_EXIT }
+    Check ((Get-Sha256 $gateway) -eq $goodGateway) "an unproven exit 3 changed the working gateway"
     Assert-DataKept
+    Check ((Invoke-Exe $gateway @("start")) -eq 0) "the restored gateway did not restart after exit 3"
+    Assert-Healthy
+    Check ((Install-Candidate $Assets) -eq 0) "a refused upgrade prevented the next valid upgrade"
+    Assert-Healthy
 }
 
 # HKLM\SOFTWARE\Policies\Cisco\DefenseClaw\DisableSelfUpdate stops install,
@@ -821,7 +857,19 @@ function Test-SetupImport {
         Remove-TreeLong (Join-Path $DcHome ".venv")
         Remove-TreeLong (Join-Path $DcHome "installer")
         Set-Content -LiteralPath (Join-Path $cache "DefenseClawSetup-x64.exe") -Value "setup" -Encoding Ascii
-        Set-Content -LiteralPath (Join-Path $hookRuntime "hook-runtime-state.json") -Value '{"schema_version":2,"status":"active"}' -Encoding Ascii
+        # Setup 0.8.10's state (internal/hookruntime State): its stable
+        # launcher is a trampoline to the hook in Setup's tree, so the upgrade
+        # can point it at this release's hook (GAP-1000, GAP-1071).
+        $launcherPath = Join-Path $hookRuntime "defenseclaw-hook.exe"
+        [ordered]@{
+            schema_version = 2; status = "active"; runtime_root = $hookRuntime
+            launcher_path = $launcherPath; launcher_sha256 = (Get-Sha256 $launcherPath).ToLowerInvariant(); launcher_kind = "trampoline"
+            hook_path = (Join-Path $setupRoot "bin\defenseclaw-hook.exe")
+            hook_sha256 = (Get-Sha256 (Join-Path $setupRoot "bin\defenseclaw-hook.exe")).ToLowerInvariant()
+            data_root = $DcHome; gateway_path = (Join-Path $setupRoot "bin\defenseclaw-gateway.exe")
+            gateway_sha256 = (Get-Sha256 (Join-Path $setupRoot "bin\defenseclaw-gateway.exe")).ToLowerInvariant()
+            transaction_id = [guid]::NewGuid().ToString("N")
+        } | ConvertTo-Json -Compress | Set-Content -LiteralPath (Join-Path $hookRuntime "hook-runtime-state.json") -Encoding Ascii
         [ordered]@{
             schema_version = 1; version = "0.8.10"; distribution_flavor = "oss"; install_kind = "native-windows-exe"
             install_scope = "user"; install_root = $setupRoot; command_dir = (Join-Path $setupRoot "bin"); data_root = $DcHome
@@ -858,6 +906,14 @@ function Test-SetupImport {
         Check (Test-Path -LiteralPath (Join-Path $DcHome "previous\legacy-setup\hook-runtime-state.json")) "the Setup hook runtime was not disabled"
         Check ((Get-Content -LiteralPath (Join-Path $DcHome "previous\VERSION")) -eq "0.8.10") "previous\VERSION is not 0.8.10"
         Check (Test-Path -LiteralPath (Join-Path $hookRuntime "defenseclaw-hook.exe")) "HookRuntime must be left in place"
+        # Agent sessions started before the upgrade keep the cached launcher:
+        # it now delegates to a copy of this release's hook and gateway.
+        $delegation = Get-Content -Raw -LiteralPath (Join-Path $hookRuntime "hook-runtime-state.json") | ConvertFrom-Json
+        Check ($delegation.status -eq "active" -and $delegation.launcher_kind -eq "trampoline" -and
+            $delegation.hook_sha256 -eq (Get-Sha256 (Join-Path $Bin "defenseclaw-hook.exe")).ToLowerInvariant() -and
+            (Test-Path -LiteralPath $delegation.hook_path -PathType Leaf) -and
+            [IO.Path]::GetFullPath($delegation.gateway_path) -eq [IO.Path]::GetFullPath((Join-Path $Bin "defenseclaw-gateway.exe"))) `
+            "Setup's cached hook launcher does not delegate to this release's hook"
         Check (-not (Test-Path -LiteralPath $cache)) "InstallerCache was not removed"
         Check (-not (Test-Path -LiteralPath $uninstallKey)) "the Uninstall key was not removed"
         $run = Get-ItemProperty -LiteralPath $runKey
@@ -894,6 +950,7 @@ try {
             "files-in-use" { Invoke-Lane $lane { Test-FilesInUse } }
             "setup-import" { Invoke-Lane $lane { Test-SetupImport } }
             "failure-drill" { Invoke-Lane $lane { Test-FailureDrill } }
+            "failure-drill-exit3" { Invoke-Lane $lane { Test-FailureDrillExit3 } }
             "policy" { Invoke-Lane $lane { Test-Policy } }
             { $_ -like "upgrade-0.*" } { Invoke-Lane $lane { Test-UpgradeLegacy $lane.Substring(8) } }
             default { throw "unknown lane: $lane" }

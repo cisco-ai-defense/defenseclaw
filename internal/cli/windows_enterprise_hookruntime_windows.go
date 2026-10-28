@@ -41,15 +41,20 @@ var (
 )
 
 // windowsEnterpriseHookRuntimeDrift returns the hook runtime folder and how
-// its access differs from DefenseClaw's, or "" when it does not (or the
-// folder is not there yet).
+// it differs from DefenseClaw's: its access, or that it is missing while an
+// account is enrolled (windowsEnterpriseHookRuntimeMissing). It returns ""
+// when it does not differ, or when nobody is enrolled and it is not there
+// yet. Ensure takes a missing folder as drift too, so a no-op ensure repairs
+// it instead of reporting the deployment healthy (GAP-1461).
 func windowsEnterpriseHookRuntimeDrift() (string, string) {
 	dir, err := windowsEnterpriseHookRuntimeDir()
 	if err != nil || strings.TrimSpace(dir) == "" {
 		return "", ""
 	}
-	if _, err := os.Lstat(dir); err != nil {
-		return dir, ""
+	if _, err := os.Lstat(dir); errors.Is(err, os.ErrNotExist) {
+		return dir, windowsEnterpriseHookRuntimeMissing()
+	} else if err != nil {
+		return dir, dir + ": DefenseClaw could not read it (" + err.Error() + "), so every user's hook may refuse the machine policy summary in it"
 	}
 	drift, err := windowsEnterpriseInspectPublicDir(dir)
 	if err != nil {

@@ -11,23 +11,13 @@ keywords:
   - asset_policy registry_required
 ---
 
-A **registry source** is a fetchable manifest of skills and/or MCP servers that DefenseClaw ingests on demand. Public catalogs (clawhub, smithery, skills.sh), internal HTTPS YAMLs / JSONs, git repos, and on-disk YAMLs are all supported. Synced entries flow through the existing skill / MCP scanners; clean ones land in `asset_policy.{skill,mcp}.registry` so a later admission decision can say "approved by registry:`<id>`" instead of "approved by an unattributed rule someone wrote in 2024."
-
-A registry is the approved catalog. It is not the block list or the allow list.
-Those are the `denied` and `allowed` rules of `asset_policy`, described in
-[Admission and the block/allow list](/docs/policies/admission), and they always
-apply: a name on the `denied` list stays blocked even when a catalog lists it,
-and a name on the `allowed` list skips the scan.
-
-<Callout title="Why registries matter">
-Without a registry, every new skill / MCP that lands on disk is admission-evaluated against ad-hoc operator-authored rules. With one or more registries, the catalog drives admission: clean entries get auto-promoted, everything else is held for review, and toggling `registry_required` flips the asset class to deny-by-default for anything the catalog hasn't blessed.
-</Callout>
+A registry source is a fetchable manifest of skills or MCP servers. Synced entries go through the skill or MCP scanner, and clean ones are promoted into `asset_policy.{skill,mcp}.registry`. A registry is the approved catalog. It is not the block or allow list: those are the `denied` and `allowed` rules in [Admission](/docs/policies/admission), and they always apply. To set one up, see [Subscribe to a registry](#subscribe-to-a-registry).
 
 <DefenseClawDemo scenario="registry-promote-require" variant="clean" />
 
 ## What you just saw
 
-An **on-demand** registry sync verified source integrity, routed an entry through its existing scanner, and selected a deterministic outcome: promote a clean entry, hold a warning for review, or deny an unknown asset when `registry_required=true`. Stored sync settings do not create a runtime poller.
+Guided example with synthetic data. In the demo, an on-demand sync checks the source, scans an entry and promotes it because it is clean. A warning entry would be held for review, and with `registry_required` on an unknown asset is refused. Saved sync settings do not start a background poller.
 
 ## The seven registry kinds
 
@@ -64,66 +54,68 @@ An **on-demand** registry sync verified source integrity, routed an entry throug
   }}
 />
 
-## Three worked examples
+## Subscribe to a registry
 
-<Tabs items={['Internal mirror', 'Smithery MCPs', 'ClawHub']}>
+Subscribe to a catalog of skills or MCP servers. DefenseClaw fetches it, scans each entry and promotes clean entries into `asset_policy`. A registry is the approved catalog. It does not replace your block and allow lists.
 
-<Tab value="Internal mirror">
+### Before you start
 
-Most enterprises run a curated mirror inside their own DNS:
+- A catalog URL, or an absolute path to a manifest file. Kinds: `clawhub`, `smithery`, `skills_sh`, `http_yaml`, `http_json`, `git`, `file`. See [The seven registry kinds](#the-seven-registry-kinds).
+- For `http_yaml`, `http_json`, `git` and `file`, every entry's `source_url` needs a SHA-256.
 
-```bash
-defenseclaw registry add corp-skills \
-  --kind http_yaml \
-  --url https://catalog.corp.example.com/skills.yaml \
-  --content skill \
-  --auth-env CORP_CATALOG_TOKEN \
-  --non-interactive
+### Steps
 
-export CORP_CATALOG_TOKEN="$(vault kv get -field=token kv/defenseclaw/catalog)"
-defenseclaw registry test corp-skills              # dry-run: fetch + parse, no writes
-defenseclaw registry sync corp-skills              # fetch + scan + promote
-```
+1. Add the source. `--auth-env` takes the name of an environment variable that holds a token, never the token.
 
-The `--auth-env` option takes the **name** of an env var; the literal token never lands in `config.yaml`. SHA-256 is required on every entry's `source_url` for `http_yaml`, `http_json`, `git`, and `file` kinds — the manifest publisher computes it once.
+   ```bash
+   defenseclaw registry add corp-skills --kind http_yaml --url https://catalog.example.com/skills.yaml --content skill --auth-env CORP_CATALOG_TOKEN --non-interactive
+   ```
 
-</Tab>
+   ```text
+     OK Registered registry source 'corp-skills'.
+     Run `defenseclaw registry sync corp-skills` to fetch + scan + promote entries.
+   ```
 
-<Tab value="Smithery MCPs">
+2. Dry-run the fetch. Nothing is written.
 
-For the smithery.ai public MCP catalog:
+   ```bash
+   defenseclaw registry test corp-skills
+   ```
 
-```bash
-defenseclaw registry add smithery-public \
-  --kind smithery \
-  --content mcp \
-  --non-interactive
+3. Sync. Each entry goes through the skill or MCP scanner. Clean entries are promoted.
 
-defenseclaw registry sync smithery-public
-```
+   ```bash
+   defenseclaw registry sync corp-skills
+   ```
 
-Each entry is run through the MCP scanner; clean ones land in `asset_policy.mcp.registry` so an MCP listed in the catalog passes admission with the registry named as the reason. Remote (URL) entries are scanned directly. Scanning a stdio entry starts the publisher's package on your machine, so it happens only with `registry sync --scan-stdio`; without that flag the entry stays `pending` and is not promoted. Use `--scan-stdio` only for a catalog whose packages you are willing to run.
+   Stdio MCP entries start the publisher's package on your machine. They stay `pending` unless you pass `--scan-stdio`.
 
-</Tab>
+4. Look at what landed, then approve or reject held entries.
 
-<Tab value="ClawHub">
+   ```bash
+   defenseclaw registry list
+   defenseclaw registry entries corp-skills --status warning
+   defenseclaw registry approve corp-skills my-skill --type skill
+   ```
 
-ClawHub lists OpenClaw plugins, so it matters mainly for OpenClaw installs. No URL and no auth are needed:
+   ```text
+     Registry sources
+     ID            KIND  CONTENT  ON  ENTRIES  LAST SYNC  URL
+     corp-skills   file  skill    yes -        -          /path/to/m.yaml
+     ENTRIES column: total (clean/warning/blocked/error/rejected)
+   ```
 
-```bash
-defenseclaw registry add clawhub \
-  --kind clawhub \
-  --content skill \
-  --non-interactive
+5. Optional: refuse anything the catalog does not list.
 
-defenseclaw registry sync clawhub
-```
+   ```bash
+   defenseclaw registry require --type skill --enabled --enforce
+   ```
 
-The first sync downloads the manifest, runs the skill scanner on every entry, and promotes the clean ones into `asset_policy.skill.registry`.
+   `--enforce` turns on `asset_policy.enabled` and sets `asset_policy.mode` to `action`. Without it nothing is blocked, and the CLI says so.
 
-</Tab>
+### Undo
 
-</Tabs>
+`defenseclaw registry remove corp-skills` removes the source and every rule it promoted.
 
 ## All twelve subcommands
 
@@ -192,7 +184,7 @@ The first sync downloads the manifest, runs the skill scanner on every entry, an
   <Node id="verdict" kind="decision">Scan result?</Node>
   <Node id="hold" kind="operator">{`Held for review\nwarning or blocked\nerror or pending`}</Node>
   <Node id="promote" kind="policy">{`Added to asset policy\nrule tagged registry:<id>`}</Node>
-  <Node id="never" kind="generic">{`Never promoted\nlisted as blocked`}</Node>
+  <Node id="never" kind="generic">{`Never promoted\nstatus rejected`}</Node>
   <Edge from="add" to="sync" />
   <Edge from="sync" to="scan" />
   <Edge from="scan" to="verdict" />
@@ -215,8 +207,9 @@ defenseclaw registry require --type mcp   --enabled --enforce
 `allowed` lists it follows `enabled` and `mode`. The requirement is enforced
 only while asset policy is on: `asset_policy.enabled: true` and
 `asset_policy.mode: action`. A per-user
-install starts with `enabled: false` and `mode: observe`, so `require` alone
-blocks nothing and the CLI says so. Add `--enforce` to turn both on in the same
+install starts with `enabled: false` and `mode: observe`, so a `require` rule
+does not take effect until asset policy is enabled for action; the CLI says so.
+Add `--enforce` to turn both on in the same
 save, or set them in the TUI config editor (Setup → `c` → Asset Policy). In
 `observe` mode an unregistered asset is logged, not blocked. To turn
 enforcement back off, run
@@ -301,7 +294,7 @@ defenseclaw registry reject  corp-skills evil-skill --type skill
 
 ## Sync schedules
 
-Today, syncing is **on demand**: scheduled sync is not available yet. Run `registry sync --all` on a schedule (cron, a systemd timer or a CI schedule) until scheduled sync ships in a future release.
+Syncing is on demand. Stored sync settings do not start a poller. Run `registry sync --all` on a schedule (cron, a systemd timer or a CI schedule).
 
 DefenseClaw configuration is per user, so schedule the sync as the user who
 runs DefenseClaw, for example in that user's crontab (`crontab -e`):
@@ -346,7 +339,7 @@ SDK is unavailable, MCP entries are fetched but remain `pending` because no
 verdict is computed.
 
 Do not repair a packaged runtime with `pip`. Use the
-[supported install or repair path](/docs/get-started/install), then rerun
+[supported install or repair path](/docs/get-started/download), then rerun
 `defenseclaw registry sync --all`. Source contributors should run `uv sync`
 from the checkout. Use Python 3.11 or newer when MCP scanning is required.
 
@@ -356,9 +349,7 @@ from the checkout. Use Python 3.11 or newer when MCP scanning is required.
 
 ## Reference
 
-- [`cli/defenseclaw/commands/cmd_registry.py`](https://github.com/cisco-ai-defense/defenseclaw/blob/main/cli/defenseclaw/commands/cmd_registry.py) — every subcommand, validator, and the lifecycle helpers.
-- [`cli/defenseclaw/registries/`](https://github.com/cisco-ai-defense/defenseclaw/tree/main/cli/defenseclaw/registries) — adapters, manifest schema, sync engine, promotion rules.
-- [Reference → CLI](/docs/reference/cli) — full CLI catalog.
-- [Skill scanner](/docs/scanning/skill-scanner) and [MCP scanner](/docs/scanning/mcp-scanner) — what the scanners look at when verdicts get computed.
-- [Admission and the block/allow list](/docs/policies/admission) — the `denied` and `allowed` lists and the admission actions that sit beside a registry.
-- [Policies](/docs/policies) — how the policy layers fit together.
+`cli/defenseclaw/commands/cmd_registry.py` has every subcommand and validator. `cli/defenseclaw/registries/` has the adapters, manifest schema, sync engine and promotion rules. Full CLI catalog: [CLI reference](/docs/reference/cli).
+
+- [Skill scanner](/docs/scanning/skill-scanner) and [MCP scanner](/docs/scanning/mcp-scanner): what the scanners look at when verdicts are computed
+- [Admission and the block/allow list](/docs/policies/admission): the `denied` and `allowed` lists and the admission actions that sit beside a registry

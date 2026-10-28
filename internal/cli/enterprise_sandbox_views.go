@@ -473,6 +473,20 @@ func sandboxPolicyOf(c *config.Config, profile string) sandboxPolicyView {
 				if orgValue, ok := view.Organization[key]; ok && reflect.DeepEqual(view.Floor[key], orgValue) {
 					view.Sources[key] = sandboxapi.ExplainSourceOrganization
 				}
+				if _, inFloor := view.Floor[key]; !inFloor {
+					// The overlay's value lost to the organization's unset
+					// one (when_unavailable: alert under an unset base).
+					view.Sources[key] = sandboxapi.ExplainSourceOrganization
+				}
+			}
+			if len(floor.RequiredFor) > 0 && strings.TrimSpace(floor.WhenUnavailable) == "" {
+				// An unset when_unavailable is refuse; show the winning
+				// value and whose it is (GAP-0102).
+				if view.Floor == nil {
+					view.Floor = map[string]any{}
+				}
+				view.Floor["when_unavailable"] = config.OpenShellWhenUnavailableRefuse
+				view.Sources["when_unavailable"] = sandboxapi.ExplainSourceOrganization
 			}
 		}
 	}
@@ -517,7 +531,11 @@ func managedExplainOfFloor(reg sandboxreg.Registration, f config.OpenShellAdminC
 		OnSilence: f.OnSilence, MaxSilenceAfter: f.MaxSilenceAfter, ProcessTree: f.ProcessTree != nil && *f.ProcessTree,
 		DeleteStoppedAfter: f.DeleteStoppedAfter, PolicyDigest: reg.EffectiveDigest, UpdatedAt: updated,
 		RequestAccess: f.RequestAccess, Driver: reg.Driver, DriverReason: reg.DriverReason,
-		MCPIncluded: reg.MCPKept,
+		ForeignSandboxes: config.OpenShellForeignSandboxesStop,
+		MCPIncluded:      reg.MCPKept,
+	}
+	if strings.EqualFold(strings.TrimSpace(f.ForeignSandboxes), config.OpenShellForeignSandboxesAlert) {
+		m.ForeignSandboxes = config.OpenShellForeignSandboxesAlert
 	}
 	for _, s := range reg.MCPSkipped {
 		m.MCPBlocked = append(m.MCPBlocked, sandboxapi.ManagedMCP{Name: s.Name, Reason: s.Reason})

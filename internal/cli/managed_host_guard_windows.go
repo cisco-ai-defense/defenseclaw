@@ -48,22 +48,24 @@ import (
 // deployment record; that does not demote an otherwise verified installation.
 var secureClientHost = func() bool {
 	return classifySecureClientHost(secureClientClassificationChecks{
-		roots:        winpath.TrustedEnterpriseRoots,
-		deployment:   winpath.InspectEnterpriseDeploymentAt,
-		trustedDir:   managed.ValidateTrustedRuntimeDir,
-		trustedFile:  managed.ValidateTrustedFilePath,
-		serviceImage: windowsServiceImagePath,
+		roots:         winpath.TrustedEnterpriseRoots,
+		deployment:    winpath.InspectEnterpriseDeploymentAt,
+		trustedDir:    managed.ValidateTrustedRuntimeDir,
+		trustedMarker: managed.ValidateTrustedInstallMarkerDir,
+		trustedFile:   managed.ValidateTrustedFilePath,
+		serviceImage:  windowsServiceImagePath,
 	})
 }
 
 // The checks are supplied explicitly so Windows tests can represent a real
 // protected installation without replacing the runner's machine registration.
 type secureClientClassificationChecks struct {
-	roots        func(string) (winpath.EnterpriseRoots, error)
-	deployment   func(string, string) (winpath.EnterpriseDeployment, error)
-	trustedDir   func(string, string) error
-	trustedFile  func(string, string) error
-	serviceImage func(string) (string, error)
+	roots         func(string) (winpath.EnterpriseRoots, error)
+	deployment    func(string, string) (winpath.EnterpriseDeployment, error)
+	trustedDir    func(string, string) error
+	trustedMarker func(string, string) error
+	trustedFile   func(string, string) error
+	serviceImage  func(string) (string, error)
 }
 
 func classifySecureClientHost(checks secureClientClassificationChecks) bool {
@@ -76,6 +78,9 @@ func classifySecureClientHost(checks secureClientClassificationChecks) bool {
 		return false
 	}
 	if err := checks.trustedDir(roots.InstallRoot, "Secure Client installation"); err != nil {
+		return false
+	}
+	if err := checks.trustedMarker(roots.InstallRoot+`\secure-client.install`, "Secure Client install marker"); err != nil {
 		return false
 	}
 	if err := checks.trustedFile(roots.InstallRoot+`\bin\defenseclaw-gateway.exe`, "Secure Client gateway executable"); err != nil {

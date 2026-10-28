@@ -237,7 +237,7 @@ through `intent`, `committed`, `converged`, and `complete`. The journal contains
 a random operation identity; every destructive application/cache path is
 derived from Windows Known Folders. It also records the explicitly selected
 connector configuration homes needed for Codex, Claude Code, GitHub Copilot
-CLI, Cursor, Devin, Hermes, Antigravity, OpenCode, and OmniGent, plus the
+CLI, Cursor, Devin, Hermes, Antigravity, and OpenCode, plus the
 observed user PATH. Recovery
 rejects an altered destructive path, an unrelated install-state identity, an
 untrusted journal ACL, or a reparse point in a transaction-owned root. Agent

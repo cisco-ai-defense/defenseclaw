@@ -5380,8 +5380,8 @@
       },
       "why": "Pattern shipped in the bundled strict rule pack (secrets.yaml). Severity CRITICAL.",
       "examples": [
-        "AKIAIOSFODNN7EXAMPLE",
-        "ASIA1234567890ABCDEFGHIJ"
+        "AKIA0000000000000000",
+        "ASIA0000000000000000"
       ],
       "counterexamples": [
         "BANANAFRUITNOTAKEY",

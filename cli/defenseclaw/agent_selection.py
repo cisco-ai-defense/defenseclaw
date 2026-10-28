@@ -30,7 +30,6 @@ import json
 import os
 import re
 import stat
-import sys
 import uuid
 from collections.abc import Iterable
 from dataclasses import dataclass
@@ -73,12 +72,11 @@ _CODEX_WINDOWS_PLATFORM_VARIANTS = (
 _MAX_AGENT_EXECUTABLE_BYTES = 512 * 1024 * 1024
 _WINDOWS_KF_FLAG_NO_PACKAGE_REDIRECTION = 0x00010000
 _SUPPORTED_CONNECTORS = frozenset(
-    {"codex", "claudecode", "hermes", "omnigent", "opencode", "amp", "openhands"}
+    {"codex", "claudecode", "hermes", "opencode", "amp"}
 )
 _PROTECTED_LOCK_EXECUTABLE_NAMES = {
     "codex": frozenset({"codex.exe"}),
     "hermes": frozenset({"hermes.exe"}),
-    "omnigent": frozenset({"omnigent.exe", "omni.exe"}),
     "opencode": frozenset({"opencode.exe"}),
     "amp": frozenset({"amp.exe"}),
 }
@@ -111,7 +109,6 @@ def setup_agent_selection_connectors(connectors: Iterable[str]) -> tuple[str, ..
             name
             for raw in connectors
             if (name := agent_discovery._normalize_connector(str(raw))) in _SUPPORTED_CONNECTORS
-            and (name != "openhands" or sys.platform == "darwin")
         )
     )
 
@@ -271,23 +268,11 @@ def _select_agent_executable(data_dir: str, connector: str) -> SetupAgentSelecti
     untrusted_found = ""
     for candidate in _setup_agent_candidates(connector, spec, data_dir):
         protected_windows_opencode = connector == "opencode" and os.name == "nt"
-        protected_darwin_openhands = connector == "openhands" and sys.platform == "darwin"
-        identity = _stable_selection_identity(candidate) if protected_darwin_openhands else None
-        if protected_darwin_openhands and identity is None:
-            # A uv-tool install puts a symlink on PATH (~/.local/bin/openhands
-            # -> ~/.local/share/uv/tools/openhands/bin/openhands). Name the
-            # real file so the refusal gives the trusted-paths command for it.
-            target = os.path.realpath(os.path.abspath(candidate))
-            if not untrusted_found and os.path.isfile(target):
-                untrusted_found = target
-            continue
         if protected_windows_opencode:
             trusted = _is_windows_opencode_setup_binary(candidate)
-        elif protected_darwin_openhands:
-            trusted = is_setup_trusted_binary(candidate, data_dir, connector=connector)
         else:
             trusted = is_setup_trusted_binary(candidate, data_dir)
-        if not trusted or (protected_darwin_openhands and _stable_selection_identity(candidate) != identity):
+        if not trusted:
             if not trusted and not untrusted_found:
                 untrusted_found = os.path.realpath(os.path.abspath(candidate))
             continue
@@ -326,9 +311,6 @@ def _select_agent_executable(data_dir: str, connector: str) -> SetupAgentSelecti
         if probe_error or not raw_version:
             rejection = probe_error or "version probe returned no version"
             continue
-        if protected_darwin_openhands and _stable_selection_identity(executable) != identity:
-            rejection = "selected OpenHands executable changed while probing its version"
-            continue
         normalized = normalize_agent_version(raw_version)
         if not normalized:
             rejection = f"could not normalize agent version {raw_version!r}"
@@ -336,14 +318,12 @@ def _select_agent_executable(data_dir: str, connector: str) -> SetupAgentSelecti
         if connector == "codex" and (problem := codex_setup_version_problem(raw_version)):
             rejection = problem
             continue
-        if connector == "amp" or protected_windows_opencode or protected_darwin_openhands:
+        if connector == "amp" or protected_windows_opencode:
             compatibility = resolve_connector_contract(connector, raw_version)
             if compatibility.status != STATUS_KNOWN or compatibility.normalized_version != normalized:
                 label = "Amp"
                 if protected_windows_opencode:
                     label = "OpenCode"
-                elif protected_darwin_openhands:
-                    label = "OpenHands"
                 rejection = f"{label} version {raw_version!r} is outside the validated hook contract"
                 continue
         if not digest:
@@ -352,9 +332,6 @@ def _select_agent_executable(data_dir: str, connector: str) -> SetupAgentSelecti
             except OSError as exc:
                 rejection = str(exc)
                 continue
-        if protected_darwin_openhands and _stable_selection_identity(executable) != identity:
-            rejection = "selected OpenHands executable changed while hashing"
-            continue
         return SetupAgentSelection(
             connector=connector,
             executable=executable,
@@ -387,33 +364,6 @@ def _select_agent_executable(data_dir: str, connector: str) -> SetupAgentSelecti
     raise OSError(f"cannot select {connector} executable: {rejection}")
 
 
-def untrusted_setup_executable(data_dir: str | os.PathLike[str], connector: str) -> str:
-    """Return the real path of an installed agent that setup would refuse as untrusted.
-
-    Empty when a candidate is already trusted or none is installed. Only the
-    macOS OpenHands selection is covered (a ``uv tool`` install puts an
-    untrusted symlink on PATH); interactive init uses this to offer its
-    trusted-paths prompt before the selection skips the agent.
-    """
-
-    if connector != "openhands":
-        return ""
-    spec = agent_discovery._SPECS.get(connector)
-    if spec is None:
-        return ""
-    target_dir = os.path.abspath(os.fspath(data_dir))
-    untrusted = ""
-    for candidate in _setup_agent_candidates(connector, spec, target_dir):
-        if _stable_selection_identity(candidate) is None:
-            target = os.path.realpath(os.path.abspath(candidate))
-            if not untrusted and os.path.isfile(target):
-                untrusted = target
-            continue
-        if is_setup_trusted_binary(candidate, target_dir, connector=connector):
-            return ""
-        if not untrusted:
-            untrusted = os.path.realpath(os.path.abspath(candidate))
-    return untrusted
 
 
 def is_setup_trusted_binary(candidate: str, data_dir: str, *, connector: str = "") -> bool:
@@ -441,10 +391,6 @@ def is_setup_trusted_binary(candidate: str, data_dir: str, *, connector: str = "
         return any(agent_discovery._windows_acl_chain_is_safe(resolved, root) for root in matching_roots)
     if not os.path.isfile(resolved) or not os.access(resolved, os.X_OK):
         return False
-    if connector == "openhands" and sys.platform == "darwin":
-        if os.path.basename(resolved) != "openhands":
-            return False
-        return any(_posix_setup_chain_is_safe(resolved, root) for root in matching_roots)
     try:
         binary_info = os.stat(resolved)
         parent_info = os.stat(os.path.dirname(resolved))
@@ -461,23 +407,6 @@ def is_setup_trusted_binary(candidate: str, data_dir: str, *, connector: str = "
     return True
 
 
-def _stable_selection_identity(path: str) -> tuple[int, int, int, int, int] | None:
-    """Return replacement-sensitive identity for one non-link regular file."""
-
-    try:
-        lexical = os.path.abspath(path)
-        info = os.lstat(lexical)
-        if is_link_or_reparse(lexical) or not stat.S_ISREG(info.st_mode):
-            return None
-        return (
-            info.st_dev,
-            info.st_ino,
-            info.st_size,
-            info.st_mtime_ns,
-            info.st_ctime_ns,
-        )
-    except (OSError, ValueError):
-        return None
 
 
 def _posix_setup_chain_is_safe(executable: str, root: str) -> bool:
@@ -628,10 +557,8 @@ def _setup_agent_candidates(connector: str, spec, data_dir: str) -> tuple[str, .
         "codex": ("codex.exe", "codex.cmd", "codex.bat", "codex.com"),
         "claudecode": ("claude.exe", "claude.cmd", "claude.bat", "claude.com"),
         "hermes": ("hermes.exe",),
-        "omnigent": ("omnigent.exe", "omni.exe"),
         "opencode": ("opencode.exe",),
         "amp": ("amp.exe",),
-        "openhands": ("openhands",),
     }[connector]
     for root in roots:
         for name in names:

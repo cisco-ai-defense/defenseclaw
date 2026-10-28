@@ -52,7 +52,8 @@ def _helpers() -> str:
         "Remove-FailedInstall",
         "New-FailedInstallDirectory",
         "Get-DataEntries",
-        "Move-RestoreConnectorRecovery",
+        "Get-Sha256",
+        "Get-LifecycleNextStep",
         "Restore-Slot",
         "Clear-SetupDataDir",
         "Invoke-Quietly",
@@ -68,11 +69,16 @@ def _run(data_dir: Path, body: str) -> str:
     script = f"""
 $ErrorActionPreference = 'Stop'
 $DataDir = {_literal(data_dir)}
+# The run state the installer keeps; an undo that does not finish marks it.
+$Run = @{{ Lock = $false; RestorePending = $false; UndoPending = $false; Log = 'install.log' }}
 function Write-Warn([string]$Message) {{ Write-Host $Message }}
 function Write-Info([string]$Message) {{ Write-Host $Message }}
 function Remove-Tree([string]$Path) {{
     if (Test-Path -LiteralPath $Path) {{ [IO.Directory]::Delete($Path, $true) }}
 }}
+# No OpenCode or Amp process runs in these fixtures. The plugin-agent refusal
+# and its place before every gateway stop are tested in test_install_ps1.py.
+function Assert-NoLoadedPluginAgents {{ }}
 {_helpers()}
 {body}
 exit 0
@@ -193,6 +199,31 @@ try {{ Assert-NoActiveConnectorRecovery 'Downgrade' {_literal(root)}; throw 'gua
     )
     if kind in ("junction", "ancestor_junction"):
         assert (external / "unchanged").read_bytes() == b"external"
+
+
+# Invoke-Install from the final room check to the swap: the hook fail-mode
+# hold, the lifecycle record and the early hook snapshot, which have their own
+# tests in test_install_ps1.py, pass here. The real Start-SwapHookFailModes
+# takes the hold for the running gateway.
+_SWAP_PHASE_STUBS = (
+    """
+function Die([string]$Message) { throw $Message }
+function Start-HookFailModeHold { return $true }
+function Complete-HookFailModeHold { return $true }
+function Stop-HookFailModeHold {}
+function Update-HookFailModes { return $true }
+function Write-LifecycleManifest { return $null }
+function Assert-LifecycleRestored {}
+function Wait-LifecycleProof { return @() }
+function Save-BinarySnapshot {}
+function Undo-EarlySnapshot {}
+function Clear-StagedRelease {}
+function Test-RecoveryPending { return $false }
+function Get-RestoredNote { return 'Your previous install is back.' }
+function Get-UnchangedNote { return 'nothing was changed' }
+"""
+    + _function("Start-SwapHookFailModes")
+)
 
 
 def _handoff_stubs(version: str, exit_code: int, marker: str | None = "1") -> str:
@@ -499,6 +530,13 @@ function Restore-HooksAfterAbortedRollback {{ $script:restores++ }}
 function Switch-WithPrevious {{ $script:swaps++; return 0 }}
 function Protect-UvDirectory {{}}
 function Invoke-PruneOrphanedHooks {{}}
+function Write-LifecycleManifest {{ return $null }}
+function Get-BinariesState {{ return @{{}} }}
+function Remove-LifecycleManifest {{}}
+function Assert-LifecycleRestored {{}}
+function Test-LifecycleProof {{ return @() }}
+function Wait-LifecycleProof {{ return @() }}
+function Get-Field($Object, [string]$Name) {{ return $null }}
 """
 
 
@@ -958,7 +996,9 @@ def test_direct_installer_guards_version_changes_before_staging_and_after_quiesc
     assert early < install.index('Assert-InstallRoom $InstallRoom') < install.index('New-InstallDirectory $Staging')
     assert install.index('Wait-VenvFree', early) < install.index('Stop-Watchdog', early) < late
     assert late < install.index('Save-Snapshot')
-    assert 'Restart-Old\n            throw' in install[late:]
+    tail = install[late:]
+    restart = tail.index("        Restart-Old\n        if (-not (Test-RecoveryPending)) {")
+    assert restart < tail.index("Assert-LifecycleRestored $Manifest", restart) < tail.index('Die "$reason. $(Get-RestoredNote)"')
 
 
 @WINDOWS_POWERSHELL
@@ -967,15 +1007,22 @@ def test_direct_installer_guards_version_changes_before_staging_and_after_quiesc
 def test_direct_installer_late_guard_runs_after_watchdog_and_before_snapshot(tmp_path, version_change: bool) -> None:
     install = _function("Invoke-Install")
     start = install.index('    Assert-InstallRoom $FinalEnvRoom')
-    end = install.index('    $Snap =', start)
+    # Since r104 the new hook goes in before the gateway stops, so the late
+    # guard runs in the step that undoes that swap (see the "local" route of
+    # test_a_surviving_watchdog_refuses_older_readers_and_restarts_the_current_gateway).
+    end = install.index("    # Ctrl+C now would leave", start)
     phase = install[start:end]
     receipt = tmp_path / ".defenseclaw-cas-v2-late"
     _run(
         tmp_path,
-        f"""
+        _SWAP_PHASE_STUBS
+        + f"""
 $versionChange = ${str(version_change).lower()}
 $Setup = $null
 $Ver = '1.0.1'
+$PrevVersion = '1.0.2'
+$stagedGateway = 'staged'
+$Run = @{{ UndoPending = $false; RestorePending = $false }}
 $script:starts = 0
 $script:snapshots = 0
 $script:running = $true
@@ -1020,11 +1067,17 @@ def test_a_surviving_watchdog_refuses_older_readers_and_restarts_the_current_gat
         unchanged = "$script:swaps -eq 0 -and $script:conversions -eq 0"
     else:
         install = _function("Invoke-Install")
+        # Since r104 the new hook goes in before the gateway stops, so the
+        # quiescence refusal runs inside the step that undoes the hook swap
+        # and restarts the current gateway (fix/r104-windows).
         start = install.index("    Assert-InstallRoom $FinalEnvRoom")
-        end = install.index("    $Snap =", start)
+        end = install.index("    # Ctrl+C now would leave", start)
         call = install[start:end] + "\n$script:snapshots++"
-        stubs = """
+        stubs = _SWAP_PHASE_STUBS + """
 $versionChange = $true
+$PrevVersion = '1.0.2'
+$stagedGateway = 'staged'
+$Run = @{ UndoPending = $false; RestorePending = $false }
 $Setup = $null
 $Ver = '1.0.1'
 $BinDir = Join-Path $DataDir 'bin'
@@ -1072,7 +1125,7 @@ def _local_install_stubs(data: Path, assets: Path, target: str, installed: str =
     # real native helper rather than the short function slicer's first brace.
     source = INSTALLER.read_text(encoding="utf-8")
     native = source[source.index("function Initialize-Native") : source.index("function Update-UserPath")]
-    return native + "\n".join(_function(name) for name in functions) + f"""
+    return native + "\n".join(_function(name) for name in functions) + _SWAP_PHASE_STUBS + f"""
 $Help = $false
 $UnknownArguments = @()
 $Connector = 'none'
@@ -1112,6 +1165,7 @@ function Confirm-Step {{ return $true }}
 function Start-Transcript {{}}
 function Wait-UninstallCleanup {{}}
 function Resume-InterruptedRun {{}}
+function Save-BinarySnapshot {{}}
 function Protect-UvDirectory {{}}
 function Get-Cosign {{ return '' }}
 function Assert-InstallRoom([long]$Bytes, [string]$Purpose) {{
@@ -1133,6 +1187,8 @@ function Invoke-Native([string]$Path, [string[]]$Arguments) {{
     $script:migrations++
     return 0
 }}
+function Get-BinariesState {{ return @{{}} }}
+function Get-OtherBuildInstalled {{ return $null }}
 """
 
 
@@ -1252,6 +1308,7 @@ def test_snapshot_receipt_copy_would_block_rollback_after_live_recovery(tmp_path
         tmp_path,
         f"""
 {_function('New-InstallDirectory')}
+{_function('Save-BinarySnapshot')}
 {_function('Save-Snapshot')}
 $Previous = Join-Path $DataDir 'previous'
 $Snap = $Previous
@@ -1458,13 +1515,20 @@ def test_every_automatic_failed_tree_removal_preserves_receipts_first() -> None:
     assert "Remove-Tree $old.FullName" not in slot
     cleanup = _function("Remove-FailedInstall")
     assert cleanup.index("Save-FailedConnectorRecovery $Failed") < cleanup.index("Remove-Tree $Failed")
-    # Both strict receipt directions precede all live runtime/data exchange.
-    phase = slot.index("Move-RestoreConnectorRecovery $Slot $failed")
-    assert phase < slot.index("Restore-BinDir") < slot.index("foreach ($part")
+    # The programs go back first: a refused program restore stops before any
+    # receipt or data moves (W4b loop round 1). Then the write-ahead restore
+    # plan (GAP-0450) moves both receipt directions before the environment
+    # and the ordinary data, and never removes a receipt.
+    programs = slot.index('Restore-BinDir (Join-Path $Slot "bin")')
+    assert programs < slot.index("$moves = New-Object")
+    receipts_out = slot.index("foreach ($entry in @($liveData | Where-Object { Test-ConnectorRecoveryArtifactName $_.Name }))")
+    receipts_in = slot.index("foreach ($entry in @($savedData | Where-Object { Test-ConnectorRecoveryArtifactName $_.Name }))")
+    assert receipts_out < receipts_in < slot.index("foreach ($part") < slot.index("-not (Test-ConnectorRecoveryArtifactName $_.Name)")
     assert slot.count("-not (Test-ConnectorRecoveryArtifactName $_.Name)") == 2
-    receipts = _function("Move-RestoreConnectorRecovery")
-    assert "Remove-Tree" not in receipts
-    assert "Move-Path $entry.To $entry.From" in receipts
+    plan = slot[slot.index("$moves = New-Object") : slot.index("Restore-ExternalConfig $Slot")]
+    assert "Remove-Tree" not in plan
+    # The marked snapshot is retired only after every proof (W6).
+    assert slot.index('Remove-Item -LiteralPath (Join-Path $Slot "COMPLETE")') < slot.index("Remove-Tree $Slot")
 
 
 def _restore_stubs(data: Path, slot: Path) -> str:
@@ -1473,6 +1537,7 @@ $Venv = {_literal(data / '.venv')}
 $InstallerDir = {_literal(data / 'installer')}
 $NotData = @('.venv', 'installer', 'backups', 'previous.new', '.failed-*')
 function Restore-BinDir([string]$From) {{}}
+function Assert-BinDirRestored([string]$From) {{}}
 function Restore-ExternalConfig([string]$Slot) {{}}
 """
 
@@ -1488,6 +1553,8 @@ def test_same_second_restore_never_reuses_a_failed_tree_retained_after_archive_f
     identity = evidence.stat().st_ino
     slot = data / "previous.new"
     (slot / "data").mkdir(parents=True)
+    # Restore-Slot runs only on a marked (complete) snapshot.
+    (slot / "COMPLETE").write_bytes(b"complete snapshot")
     (slot / "data" / "config.yaml").write_bytes(b"restored configuration")
     _run(
         data,
@@ -1535,6 +1602,7 @@ def test_receipt_move_failure_keeps_the_exact_receipt_and_marked_rollback_slot(r
     blocked = active if direction == "live" else prior
     contents = blocked.read_bytes()
     identity = blocked.stat().st_ino
+    active_identity = active.stat().st_ino
     _run(
         data,
         f"""
@@ -1549,14 +1617,26 @@ function Move-Path([string]$From, [string]$To, [int]$Seconds = 10) {{
 try {{ Restore-Slot {_literal(slot)}; throw 'restore unexpectedly succeeded' }} catch {{
     if ($_.Exception.Message -notlike '*injected receipt move failure*') {{ throw }}
 }}
-if ($script:binRestores -ne 0) {{ throw 'Live binaries changed before receipt refusal' }}
+# Programs go back first (Restore-Slot): a program that cannot go back stops
+# the restore before any receipt or data moves. A receipt that cannot move
+# then stops it with the programs back and the slot still marked.
+if ($script:binRestores -ne 1) {{ throw 'Programs were not put back once before the receipt refusal' }}
 """,
     )
     assert blocked.read_bytes() == contents
     assert blocked.stat().st_ino == identity
     assert marker.read_bytes() == b"complete snapshot"
     assert prior.read_bytes() == b"prior receipt"
-    assert active.read_bytes() == b"restored active receipt"
+    if direction == "live":
+        assert active.read_bytes() == b"restored active receipt"
+    else:
+        # The write-ahead restore plan moves the live receipts out before the
+        # saved ones come in, so the live one is in the planned failed copy,
+        # moved (the same file), once; the retry below resumes the plan.
+        moved = list(data.glob(f".failed-*/data/{active.name}"))
+        assert not active.exists() and len(moved) == 1, moved
+        assert moved[0].read_bytes() == b"restored active receipt"
+        assert moved[0].stat().st_ino == active_identity
     assert (data / ".venv" / "runtime.txt").read_bytes() == b"current runtime"
     assert (slot / "venv" / "runtime.txt").read_bytes() == b"prior runtime"
     assert (data / "config.yaml").read_bytes() == b"current config"

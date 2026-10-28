@@ -34,6 +34,8 @@ type Result struct {
 	Changed bool    `json:"changed"`
 }
 
+var errRecordedPolicyBytesChanged = errors.New("writable policy bytes differ from the recorded publication")
+
 // Complete reports whether every machine-policy connector is covered.
 func (r Result) Complete() bool {
 	for _, state := range r.States {
@@ -72,7 +74,35 @@ func Publish(opts Options, connectors []string) (Result, error) {
 	result := Result{}
 	var errs []error
 	for _, name := range published {
+		var restored []string
+		if opts.PolicyFor(name).Ownership == config.MachinePolicyOwnershipMerge {
+			for _, recordName := range ownershipRecordNames(opts, name) {
+				record, recordErr := loadRecord(opts, recordName)
+				if recordErr != nil {
+					errs = append(errs, fmt.Errorf("%s policy record: %w", recordName, recordErr))
+					continue
+				}
+				if record == nil {
+					continue
+				}
+				fixed, fixErr := restoreRecordedPolicyFileMode(opts, record.Path, record.PostimageSHA256)
+				if fixErr != nil {
+					if recordName == claudeVersionFloorRecord && errors.Is(fixErr, errRecordedPolicyBytesChanged) {
+						continue // the administrator changed this optional floor drop-in
+					}
+					errs = append(errs, fmt.Errorf("%s policy mode: %w", recordName, fixErr))
+					continue
+				}
+				if fixed {
+					restored = append(restored, record.Path)
+				}
+			}
+		}
 		state, err := reconcileOne(opts, name)
+		for _, path := range restored {
+			state.Changed = true
+			state.detail("restored the recorded machine-policy file %s to mode 0644", path)
+		}
 		if err != nil {
 			errs = append(errs, fmt.Errorf("%s: %w", name, err))
 		}
@@ -155,7 +185,7 @@ func retireUnpublished(opts Options, intended, candidates []string) ([]State, er
 		if !recorded {
 			continue
 		}
-		state, err := target.RemoveOwned(opts)
+		state, err := removeTargetOwned(target, opts)
 		if err != nil {
 			errs = append(errs, &RetireError{Connector: name, Err: err})
 		}
@@ -199,7 +229,7 @@ func reconcileOne(opts Options, name string) (State, error) {
 		return state, nil
 	}
 	target, _ := TargetFor(name)
-	return target.Reconcile(opts)
+	return reconcileTarget(target, opts)
 }
 
 // kiroRouteDetail says where Kiro's hook lives on its route and that the
@@ -285,7 +315,7 @@ func RemoveAll(opts Options) (Result, error) {
 	var errs []error
 	for _, name := range names {
 		target, _ := TargetFor(name)
-		state, err := target.RemoveOwned(opts)
+		state, err := removeTargetOwned(target, opts)
 		if err != nil {
 			errs = append(errs, fmt.Errorf("%s: %w", name, err))
 		}

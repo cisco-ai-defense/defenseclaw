@@ -89,13 +89,44 @@ def _ensure_policies_dir(app: AppContext) -> str:
 
 
 def _load_policy(path: str) -> dict:
-    with open(path) as f:
-        return yaml.safe_load(f) or {}
+    try:
+        with open(path, encoding="utf-8") as f:
+            data = yaml.safe_load(f)
+    except yaml.YAMLError as exc:
+        mark = getattr(exc, "problem_mark", None)
+        location = f" at line {mark.line + 1}, column {mark.column + 1}" if mark else ""
+        raise click.ClickException(f"invalid YAML in policy file {path}{location}") from exc
+    except UnicodeError as exc:
+        raise click.ClickException(f"policy file {path} is not UTF-8 text") from exc
+    except OSError as exc:
+        raise click.ClickException(f"cannot read policy file {path}: {exc.strerror or exc}") from exc
+    if data is None:
+        return {}
+    if not isinstance(data, dict):
+        raise click.ClickException(f"policy YAML in {path} must be a mapping at the top level")
+    return data
 
 
 def _save_policy(path: str, data: dict) -> None:
-    with open(path, "w") as f:
-        yaml.dump(data, f, default_flow_style=False, sort_keys=False)
+    # A catalog entry may already be a symlink. Never open it for writing:
+    # write an exclusive temporary file in the catalog and atomically replace
+    # only the directory entry after refusing any link observed there.
+    def refuse_link() -> None:
+        if os.path.islink(path):
+            raise click.ClickException(f"policy catalog destination {path} is a symbolic link; remove it before saving")
+
+    refuse_link()
+    fd, staged = tempfile.mkstemp(prefix=".policy-", suffix=".yaml", dir=os.path.dirname(path) or ".")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            yaml.dump(data, f, default_flow_style=False, sort_keys=False)
+            f.flush()
+            os.fsync(f.fileno())
+        refuse_link()
+        os.replace(staged, path)
+    finally:
+        if os.path.lexists(staged):
+            os.unlink(staged)
 
 
 def _sanitize_policy_name(name: str) -> str:
@@ -297,9 +328,11 @@ def create(
         if action is not None:
             actions[sev] = _action_for_level(action)
 
+    # A severity the preset and the flags leave out warns, as it always did:
+    # the fill-in predates the distinct allow (p0 GAP-0998).
     for sev in SEVERITIES:
         if sev not in actions:
-            actions[sev] = _action_for_level("allow")
+            actions[sev] = _action_for_level("warn")
 
     _save_policy(dest, data)
 
@@ -513,10 +546,15 @@ def load(app: AppContext, path: str) -> None:
 
     # Standard policy: treat as activate. The file must contain a
     # ``name`` field so the catalog can register it.
-    name = data.get("name") or data.get("metadata", {}).get("name", "")
+    metadata = data.get("metadata") or {}
+    if not isinstance(metadata, dict):
+        raise click.ClickException("policy YAML metadata must be a mapping")
+    name = data.get("name") or metadata.get("name", "")
     if not name:
         click.echo("error: policy YAML has no 'name' field; cannot activate.", err=True)
         raise SystemExit(1)
+    if not isinstance(name, str):
+        raise click.ClickException("policy YAML name must be a string")
 
     # Copy the file into the user policy directory so activate can find it.
     dest = os.path.join(_ensure_policies_dir(app), f"{_sanitize_policy_name(name)}.yaml")
@@ -883,17 +921,28 @@ def _reload_gateway_policy(app: AppContext) -> tuple[str, str]:
     return "reloaded", ""
 
 
-def _admission_triple(raw: dict) -> dict:
-    """A policy action in config ``admission`` triple form. Policy YAML uses
-    either runtime vocabulary (enable/disable or allow/block, F-0241)."""
+def _admission_triple(raw: dict) -> dict | str:
+    """A policy action in config ``admission`` form: the install/file/runtime
+    triple, or the ``allow`` shorthand for an action with ``verdict:
+    allowed`` (a triple cannot carry the allowed verdict, p0 GAP-0998).
+    Policy YAML uses either runtime vocabulary (enable/disable or
+    allow/block, F-0241)."""
     runtime = str(raw.get("runtime", "enable")).strip().lower()
     if runtime not in {"enable", "disable", "allow", "block"}:
         raise ValueError(f"invalid runtime action {runtime!r}; expected enable, disable, allow or block")
-    return {
+    triple = {
         "install": str(raw.get("install") or "none"),
         "file": str(raw.get("file") or "none"),
         "runtime": "disable" if runtime in ("disable", "block") else "enable",
     }
+    verdict = raw.get("verdict")
+    if verdict is None:
+        return triple
+    if verdict != "allowed" or triple != {"install": "none", "file": "none", "runtime": "enable"}:
+        raise ValueError(
+            f"invalid verdict {verdict!r}; only verdict: allowed is valid, with install none, file none, runtime enable"
+        )
+    return "allow"
 
 
 def _policy_bool(value: object, key: str) -> bool:
@@ -1063,6 +1112,31 @@ def _activate_policy(app: AppContext, name: str) -> tuple[str, list[str]]:
 
     watch_raw = data.get("watch", {})
     secure_client = asset_lists.is_secure_client(app.cfg)
+    if not secure_client:
+        guardrail_data = data.get("guardrail")
+        target_mode = app.cfg.guardrail.mode
+        if isinstance(guardrail_data, dict) and "mode" in guardrail_data:
+            target_mode = str(guardrail_data["mode"]).strip()
+        if target_mode in {"observe", "action"}:
+            from defenseclaw.commands.cmd_guardrail import (
+                _action_hook_switch_problems,
+                _ActionHookInspectionError,
+                _connector_label,
+            )
+            from defenseclaw.hook_integrity import repair_command
+
+            try:
+                switched_off = _action_hook_switch_problems(app.cfg, global_mode=target_mode)
+            except _ActionHookInspectionError as exc:
+                raise click.ClickException(
+                    f"Nothing was changed: {_connector_label(exc.connector)} hook settings could not be inspected."
+                ) from exc
+            if switched_off:
+                details = "; ".join(f"{_connector_label(name)}: {problem}" for name, problem in switched_off)
+                repairs = "; ".join(f"Next: {repair_command(name, problem)}" for name, problem in switched_off)
+                raise click.ClickException(
+                    f"Nothing was changed: action mode cannot guard these connectors: {details}. {repairs}"
+                )
     opa_update = _prepare_opa_data(app, data) if secure_client else None
     first_party_notes: list[str] = []
     if not secure_client:
@@ -1728,13 +1802,18 @@ def _default_policy_data() -> dict:
 
 
 def _action_for_level(level: str) -> dict:
-    """Convert a simple action level (block/warn/allow) to a full action dict."""
+    """Convert a simple action level (block/warn/allow) to a full action dict.
+
+    warn and allow take the same actions and differ in the verdict
+    (warning vs allowed), so allow carries ``verdict: allowed``, which
+    activation turns into the ``allow`` admission shorthand (p0 GAP-0998).
+    """
     if level == "block":
         return {"file": "quarantine", "runtime": "disable", "install": "block"}
-    elif level == "warn":
-        return {"file": "none", "runtime": "enable", "install": "none"}
-    else:
-        return {"file": "none", "runtime": "enable", "install": "none"}
+    action = {"file": "none", "runtime": "enable", "install": "none"}
+    if level == "allow":
+        action["verdict"] = "allowed"
+    return action
 
 
 def _is_bundled_path(path: str) -> bool:

@@ -50,6 +50,13 @@ func platformInstall(ctx context.Context, opts InstallOptions) (InstallResult, b
 		return InstallResult{}, true, err
 	}
 	defer unlockRuntime()
+	if opts.WindowsTargetLogon != WindowsTargetLogonActive {
+		sid, err := validateWindowsEnterpriseTargetSID(opts.OwnerSID)
+		if err != nil {
+			return InstallResult{}, true, err
+		}
+		defer useWindowsEnterpriseInstallLogon(sid.String(), opts.WindowsTargetLogon)()
+	}
 	var result InstallResult
 	switch strings.ToLower(strings.TrimSpace(opts.ConnectorName)) {
 	case "claudecode":
@@ -370,6 +377,9 @@ func verifyWindowsClaudeManagedResult(ctx context.Context, opts InstallOptions) 
 
 	lock, err := verifyWindowsClaudeUserRuntimeReadOnly(home, dataDir, policyPath, targetSID, setupOpts, conn)
 	if err != nil {
+		return InstallResult{}, err
+	}
+	if err := windowsManagedUserNativeOTLPAbsent(conn.Name(), home, dataDir, targetSID); err != nil {
 		return InstallResult{}, err
 	}
 	lockUpdatedAt, entryUpdatedAt, err := connector.ManagedHookContractTimestamps(
@@ -747,7 +757,7 @@ func installWindowsGenericManagedResult(ctx context.Context, opts InstallOptions
 			if err := hardenWindowsGenericFootprint(target, configPaths, footprint); err != nil {
 				return rollback(err)
 			}
-			if err := verifyWindowsGenericManagedTarget(ctx, target, configPaths, footprint); err != nil {
+			if err := verifyWindowsGenericManagedTarget(ctx, target, configPaths, footprint, false); err != nil {
 				return rollback(err)
 			}
 			generation, generationUsed, err = prepareWindowsPerUserManagedGeneration(target, lockEntry.ContractID)
@@ -789,6 +799,30 @@ func installWindowsGenericManagedResult(ctx context.Context, opts InstallOptions
 }
 
 func verifyWindowsGenericManagedResult(ctx context.Context, opts InstallOptions) (InstallResult, error) {
+	return verifyWindowsGenericManagedResultWithSessionAttestation(ctx, opts, true)
+}
+
+// VerifyWindowsManagedRegistration proves the Hermes hook that Setup wrote
+// before the guardian publishes machine readiness. It does not attest a
+// session-only HERMES_HOME; public Verify keeps that coverage refusal.
+func VerifyWindowsManagedRegistration(ctx context.Context, opts InstallOptions) (InstallResult, error) {
+	if !strings.EqualFold(strings.TrimSpace(opts.ConnectorName), "hermes") || secureClientHookDelivery() {
+		return Verify(ctx, opts)
+	}
+	if err := requireWindowsEnterpriseManagedAgentVersion(opts.ConnectorName, opts.AgentVersion); err != nil {
+		return InstallResult{}, err
+	}
+	if err := requireWindowsEnterpriseStandaloneAgentFloor(opts.ConnectorName, opts.AgentVersion); err != nil {
+		return InstallResult{}, err
+	}
+	result, err := verifyWindowsGenericManagedResultWithSessionAttestation(ctx, opts, false)
+	if err == nil {
+		err = requireWindowsStandaloneAgentVersionUnchanged(opts, result)
+	}
+	return result, err
+}
+
+func verifyWindowsGenericManagedResultWithSessionAttestation(ctx context.Context, opts InstallOptions, attestSession bool) (InstallResult, error) {
 	if err := windowsEnterpriseAdministratorCheck(); err != nil {
 		return InstallResult{}, err
 	}
@@ -812,7 +846,7 @@ func verifyWindowsGenericManagedResult(ctx context.Context, opts InstallOptions)
 		if err := prepareWindowsGenericFootprint(target, configPaths, footprint, false); err != nil {
 			return err
 		}
-		if err := verifyWindowsGenericManagedTarget(ctx, target, configPaths, footprint); err != nil {
+		if err := verifyWindowsGenericManagedTarget(ctx, target, configPaths, footprint, attestSession); err != nil {
 			return err
 		}
 		lock, err := connector.LoadHookContractLockEntryForMode(
@@ -1247,7 +1281,7 @@ func publishWindowsPluginScopedHookToken(target windowsGenericManagedTarget) err
 	return nil
 }
 
-func verifyWindowsGenericManagedTarget(ctx context.Context, target windowsGenericManagedTarget, configPaths []string, footprint connector.AgentPaths) error {
+func verifyWindowsGenericManagedTarget(ctx context.Context, target windowsGenericManagedTarget, configPaths []string, footprint connector.AgentPaths, attestSession bool) error {
 	if err := prepareWindowsGenericFootprint(target, configPaths, footprint, false); err != nil {
 		return err
 	}
@@ -1316,6 +1350,11 @@ func verifyWindowsGenericManagedTarget(ctx context.Context, target windowsGeneri
 	}
 	if strings.TrimSpace(lock.HookFailMode) != strings.TrimSpace(current.HookFailMode) {
 		return fmt.Errorf("enterprise hooks: connector %s fail mode %q does not match configured mode %q", target.conn.Name(), lock.HookFailMode, current.HookFailMode)
+	}
+	if attestSession {
+		if err := ManagedHermesSessionHomeAttestation("windows", target.conn.Name(), target.setup.ManagedEnterprise, target.setup.SecureClientHookDelivery); err != nil {
+			return fmt.Errorf("enterprise hooks: connector %s cannot be verified: %w", target.conn.Name(), err)
+		}
 	}
 	return nil
 }
@@ -1767,7 +1806,7 @@ func teardownWindowsGenericManagedTarget(
 	if len(remaining) != 0 {
 		return fmt.Errorf("enterprise hooks: connector %s teardown left DefenseClaw's registration in %s", name, strings.Join(remaining, ", "))
 	}
-	return nil
+	return returnWindowsStandalonePatchedFilesToOwner(target, configPaths, footprint)
 }
 
 // windowsRelaxedPathsToRestoreAfterTeardown returns the paths relaxed for a

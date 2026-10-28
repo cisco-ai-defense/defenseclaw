@@ -6,8 +6,8 @@ import click
 from defenseclaw.commands.cmd_setup import setup
 
 CONNECTOR_COMMANDS = (
-    "claude-code", "codex", "hermes", "cursor", "devin", "copilot", "openhands",
-    "antigravity", "opencode", "amp", "omnigent", "kiro", "openclaw", "zeptoclaw", "remove",
+    "claude-code", "codex", "hermes", "cursor", "devin", "copilot",
+    "antigravity", "opencode", "amp",  "kiro", "openclaw", "zeptoclaw", "remove",
     # GAP-1387: the other setup commands that take --yes.
     "acp", "notifications", "rotate-token", "routing",
 )

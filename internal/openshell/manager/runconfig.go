@@ -845,6 +845,13 @@ func localMCPURL(raw string) bool {
 	return false
 }
 
+// ProjectMCPServerCount is how many MCP servers a repository defines for
+// the harness (projectMCPServers).
+func ProjectMCPServerCount(harnessName, project string) int {
+	names, other := projectMCPServers(harnessName, project)
+	return len(names) + other
+}
+
 // projectMCPServers lists the MCP servers a repository defines for the
 // harness: .mcp.json for Claude Code, .codex/config.toml for Codex. Names a
 // terminal cannot show safely are only counted (other).

@@ -25,6 +25,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/contracttest"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
 // statusV2Host is an installed host with the published sample config
@@ -114,6 +115,290 @@ func TestStatusV2BlocksLinuxAndMacOS(t *testing.T) {
 			// ensure keeps its document unchanged.
 			if r := h.run(Options{Action: ActionEnsure}); r.Connectors != nil || r.OpenShell != nil || r.Identity != nil {
 				t.Fatalf("ensure carries status v2 blocks: %+v %+v %+v", r.Connectors, r.OpenShell, r.Identity)
+			}
+		})
+	}
+}
+
+// A shell that was already running can export HERMES_HOME after its process
+// environment was captured. The guardian's healthy default-home receipt
+// cannot prove what a later Hermes process launched from that shell reads.
+func TestStatusAndVerifyDoNotCertifyManagedHermesSessionHome(t *testing.T) {
+	for _, goos := range []string{"linux", "darwin"} {
+		t.Run(goos, func(t *testing.T) {
+			h := newTestHost(t, goos)
+			var audited []managed.LaunchCoverageReport
+			h.env.ReportLaunchCoverage = func(_ context.Context, report managed.LaunchCoverageReport) error {
+				audited = append(audited, report)
+				return nil
+			}
+			file, home := "linux-standalone.yaml", "/home/alice"
+			if goos == "darwin" {
+				file, home = "macos-standalone.yaml", "/Users/alice"
+			}
+			raw := strings.Replace(string(readSampleConfig(t, file)), "    claudecode: {}", "    claudecode: {}\n    hermes: {}", 1)
+			requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0"), ConfigFile: writeTempConfig(t, []byte(raw))}))
+			writeHostFile(t, h, h.env.Layout.ManifestPath, "version: 1\ntargets:\n"+
+				"  - user: alice\n    uid: 1001\n    user_home: "+home+"\n    connector: hermes\n    agent_version: 0.21.0\n")
+			writeFreshLedger(t, h)
+			state, err := json.Marshal(map[string]any{"results": []map[string]any{{
+				"user": "alice", "user_home": home, "connector": "hermes", "ok": true,
+			}}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(h.env.P(filepath.Join(h.env.Layout.DataDir, guardianStateFile)), state, 0o640); err != nil {
+				t.Fatal(err)
+			}
+			readiness := "defenseclaw-gateway enterprise hooks readiness --manifest " + h.env.Layout.ManifestPath + " --json"
+			h.runner.replies = map[string]fakeReply{readiness: {result: CommandResult{Stdout: []byte(`{"ok":true,"scope":"machine_hook_registration","hermes_session_coverage":"not_covered","results":[{"connector":"hermes","user":"alice","user_home":"` + home + `","uid":1001,"ok":true}]}`)}}}
+			for _, action := range []string{ActionStatus, ActionVerify} {
+				r := h.run(Options{Action: action})
+				contracttest.Compile(t).ValidateValue(t, "lifecycle-result.schema.json", r)
+				if got := r.Connectors["hermes"].HooksInstalled; got != enterprisestatus.HooksInstalledUnknown {
+					t.Fatalf("%s certified Hermes hooks from a persistent-home receipt: %q", action, got)
+				}
+				if r.CoverageComplete || r.SecurityComplete {
+					t.Fatalf("%s certified universal Hermes coverage: coverage=%t security=%t", action, r.CoverageComplete, r.SecurityComplete)
+				}
+				messages := messagesOf(r.Warnings, enterprisestatus.CodeStatusDetailUnavailable) +
+					messagesOf(r.Errors, enterprisestatus.CodeStatusDetailUnavailable)
+				if !strings.Contains(messages, "session-only HERMES_HOME") {
+					t.Fatalf("%s did not name the unknown home: %q", action, messages)
+				}
+				if action == ActionVerify && (r.ExitCode != 0 || !r.OK) {
+					t.Fatalf("registration proof was rejected even though coverage remains incomplete: errors=%+v", r.Errors)
+				}
+			}
+			h.runner.replies[readiness] = fakeReply{err: errors.New("owned Hermes hook command is missing")}
+			missing := h.run(Options{Action: ActionVerify})
+			if missing.ExitCode == 0 || !strings.Contains(messagesOf(missing.Errors, codeVerify), "owned Hermes hook command is missing") {
+				t.Fatalf("missing owned hook passed lifecycle verify: %+v", missing.Errors)
+			}
+			// A no-op ensure describes the same managed deployment without
+			// status-v2 blocks. It must not certify coverage that verify rejects.
+			ensure := h.run(Options{Action: ActionEnsure})
+			if ensure.CoverageComplete || ensure.SecurityComplete || ensure.Connectors != nil {
+				t.Fatalf("ensure certified Hermes or changed its result shape: coverage=%t security=%t connectors=%+v",
+					ensure.CoverageComplete, ensure.SecurityComplete, ensure.Connectors)
+			}
+			if message := messagesOf(ensure.Warnings, enterprisestatus.CodeStatusDetailUnavailable); !strings.Contains(message, "session-only HERMES_HOME") {
+				t.Fatalf("ensure did not name the unobservable home: %q", message)
+			}
+			if message := messagesOf(ensure.Warnings, enterprisestatus.CodeStatusDetailUnavailable); !strings.Contains(message, "NOT COVERED") {
+				t.Fatalf("ensure did not label the Hermes limit: %q", message)
+			}
+			if len(audited) == 0 || audited[len(audited)-1].Connector != "hermes" ||
+				audited[len(audited)-1].Reason != "session_only_hermes_home_unobservable" {
+				t.Fatalf("ensure did not audit the managed Hermes coverage limit: %+v", audited)
+			}
+		})
+	}
+}
+
+func TestManagedHermesRegistrationScopesRowsAndRequiresAuthorization(t *testing.T) {
+	for _, goos := range []string{"linux", "darwin"} {
+		t.Run(goos, func(t *testing.T) {
+			h := newTestHost(t, goos)
+			home := "/home/"
+			if goos == "darwin" {
+				home = "/Users/"
+			}
+			writeHostFile(t, h, h.env.Layout.ManifestPath, "version: 1\ntargets:\n"+
+				"  - user: alice\n    uid: 1001\n    user_home: "+home+"alice\n    connector: hermes\n"+
+				"  - user: bob\n    uid: 1002\n    user_home: "+home+"bob\n    connector: hermes\n")
+			l := &lifecycle{env: h.env, result: &enterprisestatus.Result{Connectors: map[string]enterprisestatus.ConnectorState{
+				"hermes": {Enabled: true, HooksInstalled: enterprisestatus.HooksInstalledUnknown},
+			}}}
+			readiness := "defenseclaw-gateway enterprise hooks readiness --manifest " + h.env.Layout.ManifestPath + " --json"
+			for _, tc := range []struct {
+				name, payload string
+				wantError     bool
+			}{
+				{"unrelated failure", `{"ok":false,"scope":"machine_hook_registration","hermes_session_coverage":"not_covered","results":[{"connector":"hermes","user":"alice","user_home":"HOMEalice","uid":1001,"ok":true},{"connector":"hermes","user":"bob","user_home":"HOMEbob","uid":1002,"ok":true},{"connector":"codex","user":"carol","ok":false}]}`, false},
+				{"invalid authorization", `{"ok":false,"scope":"machine_hook_registration","hermes_session_coverage":"not_covered","authorization_error":"protected record invalid","results":[{"connector":"hermes","user":"alice","user_home":"HOMEalice","uid":1001,"ok":true},{"connector":"hermes","user":"bob","user_home":"HOMEbob","uid":1002,"ok":true}]}`, true},
+				{"missing target", `{"ok":false,"scope":"machine_hook_registration","hermes_session_coverage":"not_covered","results":[{"connector":"hermes","user":"alice","user_home":"HOMEalice","uid":1001,"ok":true}]}`, true},
+				{"failed target", `{"ok":false,"scope":"machine_hook_registration","hermes_session_coverage":"not_covered","results":[{"connector":"hermes","user":"alice","user_home":"HOMEalice","uid":1001,"ok":true},{"connector":"hermes","user":"bob","user_home":"HOMEbob","uid":1002,"ok":false}]}`, true},
+				{"conflicting duplicate", `{"ok":false,"scope":"machine_hook_registration","hermes_session_coverage":"not_covered","results":[{"connector":"hermes","user":"alice","user_home":"HOMEalice","uid":1001,"ok":true},{"connector":"hermes","user":"bob","user_home":"HOMEbob","uid":1002,"ok":true},{"connector":"hermes","user":"bob","user_home":"HOMEbob","uid":1002,"ok":false}]}`, true},
+			} {
+				t.Run(tc.name, func(t *testing.T) {
+					payload := strings.ReplaceAll(tc.payload, "HOME", home)
+					// ExecRunner returns both the JSON and an error for exit 1.
+					h.runner.replies = map[string]fakeReply{readiness: {
+						result: CommandResult{Stdout: []byte(payload), ExitCode: 1},
+						err:    errors.New("readiness exited 1"),
+					}}
+					if err := l.verifyManagedHermesRegistration(context.Background()); (err != nil) != tc.wantError {
+						t.Fatalf("registration error = %v, want error %t", err, tc.wantError)
+					}
+				})
+			}
+		})
+	}
+}
+
+// GAP-1420: Hermes the enumerator could not enroll (no hook contract for its
+// version) has no installed hook to prove. Lifecycle verify must not run a
+// live registration check for it or fail on it: it is reported NOT COVERED
+// with its reason (the session-home limit and the audited unprotected-agent
+// warning) and verify exits 0. An enrolled Hermes target still needs the
+// live proof.
+func TestVerifyDoesNotProveAnUnenrolledManagedHermes(t *testing.T) {
+	for _, goos := range []string{"linux", "darwin"} {
+		t.Run(goos, func(t *testing.T) {
+			h := newTestHost(t, goos)
+			var audited []managed.LaunchCoverageReport
+			h.env.ReportLaunchCoverage = func(_ context.Context, report managed.LaunchCoverageReport) error {
+				audited = append(audited, report)
+				return nil
+			}
+			file, home := "linux-standalone.yaml", "/home/alice"
+			if goos == "darwin" {
+				file, home = "macos-standalone.yaml", "/Users/alice"
+			}
+			raw := strings.Replace(string(readSampleConfig(t, file)), "    claudecode: {}", "    claudecode: {}\n    hermes: {}", 1)
+			requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0"), ConfigFile: writeTempConfig(t, []byte(raw))}))
+			uid := 1001
+			for name, manifest := range map[string]string{
+				"no targets":      "version: 1\ntargets: []\n",
+				"disabled hermes": "version: 1\ntargets:\n  - user: alice\n    uid: 1001\n    user_home: " + home + "\n    connector: hermes\n    enabled: false\n",
+			} {
+				writeHostFile(t, h, h.env.Layout.ManifestPath, manifest)
+				writeFreshLedger(t, h)
+				if err := os.WriteFile(h.env.P(filepath.Join(h.env.Layout.DataDir, guardianStateFile)), []byte(`{"results":[]}`), 0o640); err != nil {
+					t.Fatal(err)
+				}
+				data, err := enterprisehooks.MarshalUnprotectedAgents([]enterprisehooks.UnprotectedAgent{{
+					User:        "alice",
+					UID:         &uid,
+					Connector:   "hermes",
+					Version:     "0.18.0",
+					InstallPath: home + "/.local/bin/hermes",
+					Code:        enterprisehooks.UnprotectedCodeHookContractUnverified,
+					Reason:      "version 0.18.0 is not verified against a known hook contract; DefenseClaw installs no hooks for it, so it runs without DefenseClaw hooks",
+				}})
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(h.env.P(enterprisehooks.UnprotectedAgentsPath(h.env.Layout.ManifestPath)), data, 0o600); err != nil {
+					t.Fatal(err)
+				}
+				readiness := "defenseclaw-gateway enterprise hooks readiness --manifest " + h.env.Layout.ManifestPath + " --json"
+				h.runner.replies = map[string]fakeReply{readiness: {err: errors.New("readiness must not run without an enrolled Hermes target")}}
+				audited = nil
+				r := h.run(Options{Action: ActionVerify})
+				if r.ExitCode != 0 || !r.OK {
+					t.Fatalf("%s: verify failed an unenrolled Hermes: errors=%+v", name, r.Errors)
+				}
+				if r.CoverageComplete || r.SecurityComplete {
+					t.Fatalf("%s: verify certified Hermes coverage: coverage=%t security=%t", name, r.CoverageComplete, r.SecurityComplete)
+				}
+				if msg := messagesOf(r.Warnings, enterprisestatus.CodeStatusDetailUnavailable); !strings.Contains(msg, "NOT COVERED") {
+					t.Fatalf("%s: verify did not report the Hermes limit: %q", name, msg)
+				}
+				if msg := messagesOf(r.Warnings, enterprisehooks.UnprotectedCodeHookContractUnverified); !strings.Contains(msg, "hermes 0.18.0 at "+home+"/.local/bin/hermes for user alice is not protected") {
+					t.Fatalf("%s: verify dropped the unprotected Hermes reason: %q", name, msg)
+				}
+				reasons := map[string]bool{}
+				for _, report := range audited {
+					if report.Connector == "hermes" {
+						reasons[report.Reason] = true
+					}
+				}
+				if !reasons["session_only_hermes_home_unobservable"] || !reasons["unsupported_installed_version"] {
+					t.Fatalf("%s: verify did not audit the uncovered Hermes: %+v", name, audited)
+				}
+			}
+			// An enrolled Hermes target: the live proof is required.
+			writeHostFile(t, h, h.env.Layout.ManifestPath, "version: 1\ntargets:\n"+
+				"  - user: alice\n    uid: 1001\n    user_home: "+home+"\n    connector: hermes\n    agent_version: 0.21.0\n")
+			writeFreshLedger(t, h)
+			if err := os.WriteFile(h.env.P(filepath.Join(h.env.Layout.DataDir, guardianStateFile)),
+				[]byte(`{"results":[{"user":"alice","user_home":"`+home+`","connector":"hermes","ok":true}]}`), 0o640); err != nil {
+				t.Fatal(err)
+			}
+			readiness := "defenseclaw-gateway enterprise hooks readiness --manifest " + h.env.Layout.ManifestPath + " --json"
+			for name, reply := range map[string]fakeReply{
+				"failed":      {err: errors.New("owned Hermes hook command is missing")},
+				"no hermes":   {result: CommandResult{Stdout: []byte(`{"ok":true,"scope":"machine_hook_registration","hermes_session_coverage":"not_covered","results":[]}`)}},
+				"wrong scope": {result: CommandResult{Stdout: []byte(`{"ok":true,"results":[{"connector":"hermes","user":"alice","user_home":"` + home + `","ok":true}]}`)}},
+				"failed row":  {result: CommandResult{Stdout: []byte(`{"ok":false,"scope":"machine_hook_registration","hermes_session_coverage":"not_covered","results":[{"connector":"hermes","user":"alice","user_home":"` + home + `","ok":false}]}`), ExitCode: 1}, err: errors.New("readiness exited 1")},
+			} {
+				h.runner.replies = map[string]fakeReply{readiness: reply}
+				if got := h.run(Options{Action: ActionVerify}); got.ExitCode == 0 {
+					t.Fatalf("%s: verify passed without a live Hermes registration proof", name)
+				}
+			}
+		})
+	}
+}
+
+// One account's own Hermes failure that the guardian's attested last
+// reconcile recorded is that target's: the guardian target warnings classify
+// it (here a symbolic link in the account's own home, a warning), and the
+// Hermes registration proof reports it NOT COVERED instead of failing the
+// host. The other account's Hermes still needs its live proof, and a Hermes
+// hook that fails live while the guardian last proved it still fails Verify.
+func TestVerifyLeavesAGuardianRecordedHermesFailureToItsTarget(t *testing.T) {
+	for _, goos := range []string{"linux", "darwin"} {
+		t.Run(goos, func(t *testing.T) {
+			h := newTestHost(t, goos)
+			h.env.ReportLaunchCoverage = func(context.Context, managed.LaunchCoverageReport) error { return nil }
+			file, base := "linux-standalone.yaml", "/home/"
+			if goos == "darwin" {
+				file, base = "macos-standalone.yaml", "/Users/"
+			}
+			raw := strings.Replace(string(readSampleConfig(t, file)), "    claudecode: {}", "    claudecode: {}\n    hermes: {}", 1)
+			requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0"), ConfigFile: writeTempConfig(t, []byte(raw))}))
+			writeHostFile(t, h, h.env.Layout.ManifestPath, "version: 1\ntargets:\n"+
+				"  - user: alice\n    uid: 1001\n    user_home: "+base+"alice\n    connector: hermes\n    agent_version: 0.21.0\n"+
+				"  - user: bob\n    uid: 1002\n    user_home: "+base+"bob\n    connector: hermes\n    agent_version: 0.21.0\n")
+			writeFreshLedger(t, h)
+			state := func(bobOK bool) {
+				t.Helper()
+				data := mustJSON(t, map[string]any{"results": []map[string]any{
+					{"user": "alice", "user_home": base + "alice", "connector": "hermes", "ok": true},
+					{"user": "bob", "user_home": base + "bob", "connector": "hermes", "ok": bobOK,
+						"error": map[bool]string{false: "enterprise hooks: refusing symlink in hook config path: " + base + "bob/.hermes/config.yaml"}[bobOK]},
+				}})
+				if err := os.WriteFile(h.env.P(filepath.Join(h.env.Layout.DataDir, guardianStateFile)), data, 0o640); err != nil {
+					t.Fatal(err)
+				}
+			}
+			readiness := "defenseclaw-gateway enterprise hooks readiness --manifest " + h.env.Layout.ManifestPath + " --json"
+			reply := func(aliceOK bool) fakeReply {
+				payload := `{"ok":false,"scope":"machine_hook_registration","hermes_session_coverage":"not_covered","results":[` +
+					`{"connector":"hermes","user":"alice","user_home":"` + base + `alice","uid":1001,"ok":` + map[bool]string{true: "true", false: "false"}[aliceOK] + `},` +
+					`{"connector":"hermes","user":"bob","user_home":"` + base + `bob","uid":1002,"ok":false,"error":"refusing symlink"}]}`
+				return fakeReply{result: CommandResult{Stdout: []byte(payload), ExitCode: 1}, err: errors.New("readiness exited 1")}
+			}
+
+			state(false)
+			h.runner.replies = map[string]fakeReply{readiness: reply(true)}
+			r := h.run(Options{Action: ActionVerify})
+			if r.ExitCode != 0 || !r.OK {
+				t.Fatalf("one account's own Hermes failure failed host verify: errors=%+v", r.Errors)
+			}
+			if r.CoverageComplete || r.SecurityComplete {
+				t.Fatalf("verify certified Hermes coverage: coverage=%t security=%t", r.CoverageComplete, r.SecurityComplete)
+			}
+			if msg := messagesOf(r.Warnings, enterprisestatus.CodeStatusDetailUnavailable); !strings.Contains(msg, "NOT COVERED for user bob") {
+				t.Fatalf("verify did not report Bob's Hermes NOT COVERED: %q", msg)
+			}
+			if msg := messagesOf(r.Warnings, codeGuardianTargetUserPath); !strings.Contains(msg, "hermes for user bob is not protected") {
+				t.Fatalf("verify dropped the guardian's classification of Bob's target: %q", msg)
+			}
+
+			// Alice's hook fails live although the guardian last proved it.
+			h.runner.replies[readiness] = reply(false)
+			if got := h.run(Options{Action: ActionVerify}); got.ExitCode == 0 {
+				t.Fatal("verify passed a Hermes hook that fails live while the guardian last proved it")
+			}
+			// Bob fails live, but the guardian last proved him.
+			state(true)
+			h.runner.replies[readiness] = reply(true)
+			if got := h.run(Options{Action: ActionVerify}); got.ExitCode == 0 {
+				t.Fatal("verify passed a Hermes failure the guardian has not recorded")
 			}
 		})
 	}
@@ -213,6 +498,38 @@ func TestStatusV2IdentityFromGatewayHealth(t *testing.T) {
 	notReady.describeStatusV2(nil)
 	if got := notReady.result.Identity; got.State != enterprisestatus.IdentityStateUnknown || got.ReasonCode != enterprisestatus.CodeGatewayNotReady {
 		t.Fatalf("not ready identity = %+v", got)
+	}
+}
+
+// A live local audit-write failure makes managed enforcement incomplete even
+// while the gateway and its hook socket remain healthy.
+func TestStatusAndVerifyReportActiveGatewayAuditWriteFailure(t *testing.T) {
+	h := newTestHost(t, "linux")
+	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
+	writeFreshLedger(t, h)
+	for _, action := range []string{ActionStatus, ActionVerify} {
+		baseline := h.run(Options{Action: action})
+		if !baseline.SecurityComplete || hasWarning(baseline, codeAuditWriteFailed) {
+			t.Fatalf("%s baseline: security_complete=%t warnings=%+v", action, baseline.SecurityComplete, baseline.Warnings)
+		}
+	}
+	health := h.env.HealthGet
+	h.env.HealthGet = func(context.Context) (int, []byte, error) {
+		return 200, []byte(`{"api":{"state":"running"},"telemetry":{"state":"error","details":{"event_history_failure":"sqlite_write_failed","event_history_last_sqlite_class":"constraint_corrupt"}}}`), nil
+	}
+	for _, action := range []string{ActionStatus, ActionVerify} {
+		result := h.run(Options{Action: action})
+		if result.SecurityComplete || !hasWarning(result, "audit_write_failed") {
+			t.Fatalf("%s: security_complete=%t warnings=%+v, want the active audit failure", action, result.SecurityComplete, result.Warnings)
+		}
+		if message := messagesOf(result.Warnings, "audit_write_failed"); !strings.Contains(message, "sqlite_write_failed") || !strings.Contains(message, "constraint_corrupt") {
+			t.Fatalf("%s: audit warning %q", action, message)
+		}
+	}
+	h.env.HealthGet = health
+	recovered := h.run(Options{Action: ActionStatus})
+	if hasWarning(recovered, "audit_write_failed") {
+		t.Fatalf("recovered status retained an active audit warning: %+v", recovered.Warnings)
 	}
 }
 

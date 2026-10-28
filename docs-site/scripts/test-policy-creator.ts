@@ -36,6 +36,8 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { createElement } from 'react';
+import { renderToStaticMarkup } from 'react-dom/server';
 import yaml from 'js-yaml';
 
 import {
@@ -54,6 +56,7 @@ import { highlightJsonToHtml, tokenizeJson } from '../components/policy-creator/
 import { filterIndex } from '../components/policy-creator/playground/cmdk-filter.js';
 import { policyFromPreset } from '../components/policy-creator/lib/presets.js';
 import { lintRegex, testRegex, validatePolicy } from '../components/policy-creator/lib/validators.js';
+import { Playground } from '../components/policy-creator/playground.js';
 import {
   ALLOW_CARDS,
   BLOCK_CARDS,
@@ -69,6 +72,20 @@ import {
   YARA_RULES,
 } from '../components/policy-creator/deterministic-coverage-catalog.js';
 import type { CorrelationPattern, Policy, UseCasePacksFile } from '../components/policy-creator/types.js';
+
+test('Playground expands every finding, including warnings after informational rows', () => {
+  const policy = policyFromPreset('default');
+  policy.suppressions.pre_judge_strips.push({
+    id: 'blanket',
+    pattern: '.*',
+    context: '',
+    applies_to: ['pii'],
+  });
+  const findings = validatePolicy(policy);
+  assert.ok(findings.findIndex((finding) => finding.code === 'SUPP_OVER_BROAD') >= 6);
+  const html = renderToStaticMarkup(createElement(Playground, { policy, onPolicyChange: () => {} }));
+  assert.ok(html.includes('Pre-judge strip &quot;blanket&quot; matches every input'));
+});
 
 // ── fixtures ────────────────────────────────────────────────────────
 
@@ -253,7 +270,7 @@ test('deterministic inventory: fixed chain and YARA IDs match runtime sources', 
     YARA_RULES.map((rule) => rule.id).sort(),
     sourceYaraIds,
   );
-  assert.equal(sourceYaraIds.length, 10);
+  assert.equal(sourceYaraIds.length, 11);
 });
 
 test('deterministic docs: profile totals and chain posture match canonical sources', () => {
@@ -321,9 +338,10 @@ test('deterministic docs: profile totals and chain posture match canonical sourc
   assert.ok(index.includes(
     `The balanced/default enabled catalog currently contains ${balanced.enabled} local rules`,
   ));
-  assert.ok(creator.includes(
-    `Balanced/default exposes ${balanced.declared} declared rules (${balanced.enabled} enabled)`,
-  ));
+  // Counts live in the reference and policy overview. The creator guide
+  // defines the boundary of its browser replay, not a second rule catalog.
+  assert.ok(creator.includes('Live Test evaluates only the admission and guardrail Rego.'));
+  assert.ok(creator.includes('does not run ActionFacts parsing, CEL, regex, YARA or bounded chains.'));
 
   const enforcementCapable = BOUNDED_CHAINS.filter(
     (chain) => chain.mode === 'enforcement-capable',
@@ -1361,6 +1379,22 @@ test('validators: empty correlator pattern surfaces CORRELATOR_PATTERN_EMPTY', (
   const findings = validatePolicy(policy);
   const codes = findings.map((f) => f.code);
   assert.ok(codes.includes('CORRELATOR_PATTERN_EMPTY'), `expected CORRELATOR_PATTERN_EMPTY in ${codes.join(',')}`);
+});
+
+test('validators: blanket pre-judge strips warn like other blanket suppressions', () => {
+  const policy = makePolicy({
+    suppressions: {
+      pre_judge_strips: [{ id: 'STRIP-ALL', pattern: '.*', context: 'test', applies_to: ['pii'] }],
+      finding_suppressions: [],
+      tool_suppressions: [],
+    },
+  });
+  const broad = validatePolicy(policy).filter((f) => f.code === 'SUPP_OVER_BROAD');
+  assert.equal(broad.length, 1);
+  assert.equal(broad[0].level, 'warning');
+  assert.match(broad[0].location, /pre_judge/);
+  policy.suppressions.pre_judge_strips[0].pattern = '^sender: system$';
+  assert.equal(validatePolicy(policy).filter((f) => f.code === 'SUPP_OVER_BROAD').length, 0);
 });
 
 test('validators: window_events=0 surfaces CORRELATOR_WINDOW_INVALID as error', () => {

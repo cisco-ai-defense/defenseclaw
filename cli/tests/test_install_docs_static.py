@@ -27,7 +27,7 @@ ROOT = Path(__file__).resolve().parents[2]
 def test_enrollment_docs_use_windows_status_for_managed_accounts() -> None:
     enrollment = (ROOT / "docs-site/content/docs/enterprise/enrollment.mdx").read_text()
     operations = (ROOT / "docs-site/content/docs/enterprise/operations.mdx").read_text()
-    sections = (enrollment.split("## Supported agent versions", 1)[1],
+    sections = (enrollment.split("## Check it worked", 1)[1],
                 operations.split("## Review activity from the CLI", 1)[1])
     for section in sections:
         assert "enterprise windows status --profile standalone --json" in section
@@ -45,10 +45,6 @@ LATEST_WINDOWS_INSTALL_COMMAND = (
     "irm https://github.com/cisco-ai-defense/defenseclaw/releases/latest/download/install.ps1 | iex"
 )
 DOC_INSTALL_COMMANDS = {
-    "docs-site/content/docs/get-started/install.mdx": (
-        LATEST_POSIX_INSTALL_COMMAND,
-        LATEST_WINDOWS_INSTALL_COMMAND,
-    ),
     # Quickstart and Upgrade include this shared snippet.
     "docs-site/content/snippets/install-commands.mdx": (
         LATEST_POSIX_INSTALL_COMMAND,
@@ -67,12 +63,11 @@ INSTALLER_FILES = (
 OBSERVABILITY_V8_CURRENT_AUTHORITY_FILES = (
     "docs-site/components/command-generator.tsx",
     "docs-site/content/docs/command-generator.mdx",
-    "docs-site/content/docs/guardrail/index.mdx",
+    "docs-site/content/docs/guardrail/aliases.mdx",
     "docs-site/content/docs/connectors/openclaw.mdx",
     "docs-site/content/docs/connectors/zeptoclaw.mdx",
     "docs-site/content/docs/connectors/claudecode.mdx",
     "docs-site/content/docs/connectors/codex.mdx",
-    "docs-site/content/docs/reference/setup-commands.mdx",
     "docs-site/content/docs/observability/redaction.mdx",
     "docs-site/content/docs/reference/cli.mdx",
     "docs-site/content/docs/observability/index.mdx",
@@ -83,7 +78,6 @@ OBSERVABILITY_V8_CURRENT_AUTHORITY_FILES = (
 
 OBSERVABILITY_V8_WORKFLOW_GUIDES = (
     "docs-site/components/command-generator.tsx",
-    "docs-site/content/docs/command-generator.mdx",
     "docs-site/content/docs/observability/redaction.mdx",
     "bundles/local_observability_stack/prometheus/rules/alerts.yml",
 )
@@ -96,7 +90,7 @@ OBSERVABILITY_V8_CONNECTOR_GUIDES = (
 )
 
 OBSERVABILITY_V8_JSONL_GUIDES = {
-    "docs-site/content/docs/reference/setup-commands.mdx": "kind: jsonl",
+    "docs-site/content/docs/reference/cli.mdx": "kind: jsonl",
     "docs-site/content/docs/reference/configuration.mdx": "kind: jsonl",
 }
 
@@ -735,11 +729,17 @@ def test_published_posix_install_examples_default_to_latest_release() -> None:
         assert "INSTALL_URL=" not in text
         assert "INSTALL_VERSION" not in text
 
+    # The install page shows the command in an <InstallCommand> per OS tab, before
+    # anything else the page asks the reader to do.
     install_page = (
         ROOT / "docs-site/content/docs/get-started/install.mdx"
     ).read_text(encoding="utf-8")
+    assert f'<InstallCommand command="{LATEST_POSIX_INSTALL_COMMAND}"' in install_page
+    assert LATEST_WINDOWS_INSTALL_COMMAND in install_page
+    assert "raw.githubusercontent.com/cisco-ai-defense/defenseclaw/" not in install_page
+    assert "INSTALL_VERSION" not in install_page
     assert install_page.index(LATEST_POSIX_INSTALL_COMMAND) < install_page.index(
-        "## Prerequisites"
+        "## Check it worked"
     )
 
 
@@ -802,24 +802,20 @@ def test_dev_installer_only_offers_jsonl_tail_when_the_destination_exists() -> N
     assert text.index(existence_check) < text.index(tail_command) < text.index(enablement)
 
 
-def test_setup_index_separates_commands_from_policy_reference_cards() -> None:
-    text = (ROOT / "docs-site/content/docs/reference/setup-commands.mdx").read_text(encoding="utf-8")
-    command_start = text.index("## Auxiliary configuration commands")
-    reference_start = text.index("## Deployment and policy references")
-    matrix_start = text.index("## Interactive vs non-interactive")
-    command_cards = text[command_start:reference_start]
-    reference_cards = text[reference_start:matrix_start]
-    assert 'title="setup redaction"' in command_cards
-    assert 'title="Redaction profiles"' in reference_cards
-    assert "more depth\nthan the command cards above" in reference_cards
+def test_cli_setup_section_lists_redaction_and_links_its_reference() -> None:
+    # reference/setup-commands was merged into the Setup section of reference/cli (1.0.4 docs IA).
+    text = (ROOT / "docs-site/content/docs/reference/cli.mdx").read_text(encoding="utf-8")
+    setup = text[text.index("\n## Setup"):]
+    setup = setup[: setup.index("\n## ", 1)]
+    assert "defenseclaw setup redaction" in setup
+    assert "/docs/observability/redaction" in setup
 
 
 def test_redaction_cli_docs_cover_simple_advanced_and_scripted_workflows() -> None:
     redaction = (ROOT / "docs-site/content/docs/observability/redaction.mdx").read_text(encoding="utf-8")
-    setup = (ROOT / "docs-site/content/docs/reference/setup-commands.mdx").read_text(encoding="utf-8")
     cli = (ROOT / "docs-site/content/docs/reference/cli.mdx").read_text(encoding="utf-8")
 
-    for text in (redaction, setup, cli):
+    for text in (redaction, cli):
         assert "defenseclaw setup redaction" in text
         normalized = " ".join(text.replace("**", "").split())
         assert "Show advanced settings?" in normalized
@@ -838,8 +834,8 @@ def test_redaction_cli_docs_cover_simple_advanced_and_scripted_workflows() -> No
 
 def test_redaction_workflow_documents_linux_windows_macos_and_tui_surfaces() -> None:
     redaction = (ROOT / "docs-site/content/docs/observability/redaction.mdx").read_text(encoding="utf-8")
-    setup = (ROOT / "docs-site/content/docs/reference/setup-commands.mdx").read_text(encoding="utf-8")
     cli = (ROOT / "docs-site/content/docs/reference/cli.mdx").read_text(encoding="utf-8")
+    setup = cli  # reference/setup-commands was merged into reference/cli
     windows_paths = (
         ROOT / "docs-site/content/docs/get-started/windows/paths-troubleshooting.mdx"
     ).read_text(encoding="utf-8")
@@ -935,6 +931,7 @@ def test_zeptoclaw_calls_out_local_history_retention_and_trust_boundary() -> Non
 
 
 def test_enterprise_example_uses_secure_managed_redaction_default() -> None:
+    # The Secure Client config example moved to the install reference page.
     text = (ROOT / "docs-site/content/docs/enterprise/secure-client.mdx").read_text(encoding="utf-8")
     assert "  defaults:\n    redaction_profile: sensitive" in text
 
@@ -968,6 +965,8 @@ def test_enterprise_docs_say_how_to_turn_on_ai_discovery() -> None:
     for page in ("linux.mdx", "macos.mdx"):
         text = (ROOT / "docs-site/content/docs/enterprise" / page).read_text(encoding="utf-8")
         assert "ai_discovery:\n  enabled: true" in text, page
+        assert "`ai_discovery.enabled: true`" in text, page
+    # The three sample configs (Linux, macOS, Windows) now live in the configure reference.
     configuration = (ROOT / "docs-site/content/docs/enterprise/configuration.mdx").read_text(encoding="utf-8")
     samples = configuration[configuration.index("## Sample configs"):]
     assert samples.count("ai_discovery:\n  enabled: true") == 3
@@ -1017,6 +1016,7 @@ def test_v9_migration_docs_name_the_released_config_v8_source() -> None:
     for page in (
         "reference/migrate-v9.mdx",
         "get-started/upgrade.mdx",
+        "get-started/upgrade.mdx",
         "get-started/install.mdx",
         "reference/cli.mdx",
         "reference/configuration.mdx",
@@ -1027,7 +1027,7 @@ def test_v9_migration_docs_name_the_released_config_v8_source() -> None:
         assert not re.search(r"\b1\.0\.x\b|the 1\.0 (?:behavior|admission)", (docs / page).read_text(encoding="utf-8")), page
 
     upgrade = (docs / "get-started/upgrade.mdx").read_text(encoding="utf-8")
-    path = upgrade.split("## Upgrading from 0.x to 1.0", 1)[1].split("\n## Rollback", 1)[0]
+    path = upgrade.split("## Migrations", 1)[1].split("\n## Roll back to 0.8.x", 1)[0]
     for name in ("data.json", "audit.db", "config.yaml.v8.bak", "migration-v9.json"):
         assert name in path, name
 

@@ -406,6 +406,22 @@ func TestURLQueryEveryKeyEncodedOffsetsAndMalformedInput(t *testing.T) {
 	}
 }
 
+func TestHTTPUserinfoPasswordUsesExistingURIOffsets(t *testing.T) {
+	t.Parallel()
+	for _, scheme := range []string{"http", "https", "HTTPS"} {
+		uri := scheme + "://unit:reserved-user-pass@example.test/path?tok%65n=reserved-query&note=ok"
+		assertDetectorExact(t, "secrets.url_query", uri, "reserved-user-pass")
+		assertDetectorExact(t, "secrets.url_query", uri, "reserved-query")
+	}
+	for _, uri := range []string{
+		"https://unit@example.test/path?note=ok",
+		"https://unit:@example.test/path?note=ok",
+		"ftp://unit:reserved-user-pass@example.test/path?note=ok",
+	} {
+		assertDetectorAbsent(t, "secrets.url_query", uri)
+	}
+}
+
 func TestCloudIdentifierEveryContextAndExclusion(t *testing.T) {
 	t.Parallel()
 	values := []struct{ input, match string }{

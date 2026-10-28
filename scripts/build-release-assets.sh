@@ -69,6 +69,11 @@ shutil.copytree(
 )
 PY
 fi
+# dist-cli builds the Fleet archive, whose policy compiler CTest reads this
+# page. Keep the rest of docs-site out of the release smoke source copy.
+FLEET_POLICY_PAGE="docs-site/content/docs/edge-connector/policies.mdx"
+mkdir -p "${WORK}/src/${FLEET_POLICY_PAGE%/*}"
+cp "${ROOT}/${FLEET_POLICY_PAGE}" "${WORK}/src/${FLEET_POLICY_PAGE}"
 cd "${WORK}/src"
 scripts/stamp-version.sh "${VERSION}" >/dev/null
 make --no-print-directory dist-cli dist-installers dist-requirements DIST_DIR="${OUT}" >/dev/null
@@ -92,6 +97,8 @@ for target in "${TARGETS[@]}"; do
     GOOS="${goos}" GOARCH="${goarch}" CGO_ENABLED=0 go build -trimpath -ldflags "${ldflags}" \
         -o "${stage}/defenseclaw-acp${exe}" ./cmd/defenseclaw-acp
     if [[ "${goos}" != windows ]]; then
+        GOOS="${goos}" GOARCH="${goarch}" CGO_ENABLED=0 go build -trimpath -ldflags "${ldflags}" \
+            -o "${stage}/defenseclaw-hook-post" ./cmd/defenseclaw-hook-post
         # The sandbox kernel feed (Linux); the release archive carries it on
         # every POSIX target, as .goreleaser.yaml's default archive does.
         GOOS="${goos}" GOARCH="${goarch}" CGO_ENABLED=0 go build -trimpath -ldflags "${ldflags}" \

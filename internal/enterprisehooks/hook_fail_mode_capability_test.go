@@ -69,6 +69,7 @@ func TestManagedHookFailModeIsTheRenderedValue(t *testing.T) {
 // except for an agent that cannot fail closed (Hermes, Copilot: status must
 // not say closed, GAP-0001), and an explicit open stays open.
 func TestSecureClientManagedHookFailModeFollowsTheConfig(t *testing.T) {
+	useSecureClientHookDelivery(t)
 	cfg := managedConfigForProfile(t, managed.ProfileSecureClient)
 	if !cfg.SecureClientIntegration() {
 		t.Fatal("test config does not resolve to Secure Client")

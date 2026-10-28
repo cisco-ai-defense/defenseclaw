@@ -8,6 +8,7 @@ package cli
 
 import (
 	"errors"
+	"os"
 	"slices"
 	"strings"
 	"testing"
@@ -94,33 +95,62 @@ func TestPredictBundleRestartNamesNoMapKey(t *testing.T) {
 // nothing); any other verified bundle is classified against the installed
 // config the seam reads.
 func TestBundleVerifyRestartPrediction(t *testing.T) {
-	saved := bundleInstalledConfig
-	t.Cleanup(func() { bundleInstalledConfig = saved })
-	bundleInstalledConfig = func(string) ([]byte, error) {
-		t.Fatal("an already-applied bundle read the installed config")
-		return nil, nil
-	}
-	got := bundleVerifyRestartPrediction("linux", &enterprisebundle.VerifyResult{AlreadyApplied: true})
-	if got.GatewayRestart != bundleRestartNotRequired || !slices.Equal(got.ReasonCodes, []string{restartReasonAlreadyApplied}) {
-		t.Fatalf("already applied: %+v", got)
-	}
+	savedInstalled, savedCurrent := bundleInstalledConfig, bundleCurrentConfig
+	t.Cleanup(func() { bundleInstalledConfig, bundleCurrentConfig = savedInstalled, savedCurrent })
 	const installed = "config_version: 9\nguardrail:\n  mode: observe\n"
+	// The repeat of the confirmed bundle is compared with the confirmed
+	// bundle's config from the store, the bytes its apply installs again,
+	// not with verify's staging render: unchanged is not_required
+	// (already_applied, no drift); a drift is reported and classified like
+	// any change, a hot one not_required with no already_applied reason; an
+	// unreadable installed config is unknown with drift unchecked.
+	staging := []byte(installed + "  hook_self_heal: false\n")
+	repeat := &enterprisebundle.VerifyResult{AlreadyApplied: true, Rendered: staging}
+	bundleInstalledConfig = func(string) ([]byte, error) { return []byte(installed), nil }
+	for _, tc := range []struct {
+		name, current, restart string
+		reasons, settings      []string
+	}{
+		{"no drift", installed, bundleRestartNotRequired, []string{restartReasonAlreadyApplied}, nil},
+		{"hot drift", "config_version: 9\nguardrail:\n  mode: action\n", bundleRestartNotRequired, []string{}, nil},
+		{"restart drift", installed + "  hook_self_heal: false\n", bundleRestartRequired, []string{restartReasonSettings}, []string{"guardrail.hook_self_heal"}},
+	} {
+		bundleCurrentConfig = func() ([]byte, error) { return []byte(tc.current), nil }
+		got, drift := bundleVerifyRestartPrediction("linux", repeat)
+		if got.GatewayRestart != tc.restart || !slices.Equal(got.ReasonCodes, tc.reasons) || !slices.Equal(got.Settings, tc.settings) {
+			t.Fatalf("%s: %+v", tc.name, got)
+		}
+		if drift == nil || *drift != (tc.current != installed) {
+			t.Fatalf("%s: config_drift %v", tc.name, drift)
+		}
+	}
+	bundleCurrentConfig = func() ([]byte, error) { return []byte(installed), nil }
+	bundleInstalledConfig = func(string) ([]byte, error) { return nil, os.ErrPermission }
+	got, drift := bundleVerifyRestartPrediction("linux", repeat)
+	if got.GatewayRestart != bundleRestartUnknown || !slices.Equal(got.ReasonCodes, []string{restartReasonInstalledUnreadable}) || drift != nil {
+		t.Fatalf("already applied, installed config unreadable: %+v, drift %v", got, drift)
+	}
+	bundleInstalledConfig = func(string) ([]byte, error) { return nil, os.ErrNotExist }
+	if _, drift := bundleVerifyRestartPrediction("linux", repeat); drift == nil || !*drift {
+		t.Fatalf("already applied, installed config deleted: drift %v, want true", drift)
+	}
 	bundleInstalledConfig = func(platform string) ([]byte, error) {
 		if platform != "darwin" {
 			t.Fatalf("installed config read for %s", platform)
 		}
 		return []byte(installed), nil
 	}
-	got = bundleVerifyRestartPrediction("darwin", &enterprisebundle.VerifyResult{Rendered: []byte(installed + "  hook_self_heal: false\n")})
-	if got.GatewayRestart != bundleRestartRequired || !slices.Equal(got.Settings, []string{"guardrail.hook_self_heal"}) {
-		t.Fatalf("restart bundle: %+v", got)
+	bundleCurrentConfig = func() ([]byte, error) { t.Fatal("store read for a new bundle"); return nil, nil }
+	got, drift = bundleVerifyRestartPrediction("darwin", &enterprisebundle.VerifyResult{Rendered: staging})
+	if got.GatewayRestart != bundleRestartRequired || !slices.Equal(got.Settings, []string{"guardrail.hook_self_heal"}) || drift != nil {
+		t.Fatalf("restart bundle: %+v, drift %v", got, drift)
 	}
 	// The device layout's defaults resolve an omitted data_dir and listener
 	// the way the apply does (F03).
 	bundleInstalledConfig = func(string) ([]byte, error) {
 		return []byte("data_dir: /opt/cisco/defenseclaw/runtime\ngateway:\n  api_bind: 127.0.0.1\n  api_port: 18970\n" + installed), nil
 	}
-	got = bundleVerifyRestartPrediction("darwin", &enterprisebundle.VerifyResult{Rendered: []byte(installed)})
+	got, _ = bundleVerifyRestartPrediction("darwin", &enterprisebundle.VerifyResult{Rendered: []byte(installed)})
 	if got.GatewayRestart != bundleRestartNotRequired {
 		t.Fatalf("bundle omitting the device defaults: %+v", got)
 	}

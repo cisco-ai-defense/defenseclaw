@@ -33,6 +33,11 @@ type EgressProxy struct {
 	NoProxy string
 }
 
+// ProxyURLAdvice is what to write instead of a refused proxy URL. The parse
+// errors below say only what is wrong; callers that show them to an
+// administrator add this advice once.
+const ProxyURLAdvice = "use http://host:port or https://host:port, without a user name, password or path"
+
 // ParseEgressProxyURL validates an enterprise.network.https_proxy value.
 // Credentials are refused because the managed config is readable by every
 // user on the device; an authenticating proxy must accept the device's
@@ -43,11 +48,11 @@ func ParseEgressProxyURL(raw string) (*url.URL, error) {
 		return nil, errors.New("proxy URL is empty")
 	}
 	if !strings.Contains(raw, "://") {
-		return nil, errors.New("proxy URL needs a scheme: use http://host:port or https://host:port")
+		return nil, errors.New("proxy URL needs a scheme")
 	}
 	u, err := url.Parse(raw)
 	if err != nil {
-		return nil, errors.New("proxy URL is malformed: use http://host:port or https://host:port")
+		return nil, errors.New("proxy URL is malformed")
 	}
 	if u.Scheme != "http" && u.Scheme != "https" {
 		return nil, fmt.Errorf("proxy URL scheme %q must be http or https", u.Scheme)

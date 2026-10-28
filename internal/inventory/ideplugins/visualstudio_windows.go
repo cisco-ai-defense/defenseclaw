@@ -29,16 +29,14 @@ func init() {
 func readVisualStudioEnabled(s *scanner, instanceDir, instanceName string) (map[string]bool, bool) {
 	hive := filepath.Join(instanceDir, "privateregistry.bin")
 	const maxHiveBytes = 64 << 20
-	if !s.isFile(hive) {
-		return nil, false
-	}
-	source, err := openNonblocking(hive, s.limits.FollowSymlinks)
-	if err != nil {
+	source, ok := s.openFile(hive)
+	if !ok {
 		return nil, false
 	}
 	defer source.Close()
 	info, err := source.Stat()
-	if err != nil || !info.Mode().IsRegular() || info.Size() <= 0 || info.Size() > maxHiveBytes {
+	if err != nil || !info.Mode().IsRegular() || info.Size() <= 0 || info.Size() > maxHiveBytes ||
+		!s.openedInPlace(source, hive) {
 		return nil, false
 	}
 	if !s.charge(info.Size()) {

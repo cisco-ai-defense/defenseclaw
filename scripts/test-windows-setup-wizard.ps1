@@ -23,7 +23,7 @@ param(
     [string]$StateRoot = (Join-Path ([IO.Path]::GetTempPath()) "defenseclaw-wizard-smoke-$PID"),
     [ValidateRange(1, 60)]
     [int]$TimeoutSeconds = 15,
-    [ValidateSet('none', 'codex', 'claudecode', 'amp', 'antigravity', 'copilot', 'cursor', 'hermes', 'devin', 'omnigent', 'opencode')]
+    [ValidateSet('none', 'codex', 'claudecode', 'amp', 'antigravity', 'copilot', 'cursor', 'hermes', 'devin', 'opencode')]
     [string]$Connector = 'claudecode',
     [ValidateSet('observe', 'action')]
     [string]$Mode = 'observe',
@@ -418,8 +418,7 @@ $connectorIndices = @{
     cursor = 6
     hermes = 7
     devin = 8
-    omnigent = 9
-    opencode = 10
+    opencode = 9
 }
 $connectorLabels = @(
     'Configure later',
@@ -431,7 +430,6 @@ $connectorLabels = @(
     'Cursor Agent',
     'Hermes Agent',
     'Devin CLI',
-    'OmniGent (native degraded)',
     'OpenCode'
 )
 if ($connectorLabels.Count -ne $connectorIndices.Count) {

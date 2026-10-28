@@ -229,6 +229,94 @@ func managedEnv(t *testing.T, edit func(*config.Config)) (*harnessEnv, *fakeAuth
 	return e, auth
 }
 
+func TestManagedAskDecisionsMissingGatewayRouteReachTelemetryOnce(t *testing.T) {
+	e, auth := managedEnv(t, nil)
+	e.live(sandboxapi.CreateRequest{Name: "askbox"})
+	e.register("askbox")
+	e.setConfig(func(c *config.Config) { c.OpenShell.Profile = config.OpenShellProfileBalanced })
+	e.m.refreshEgress()
+	e.propose("askbox", "rejected.example.org")
+	e.draft("askbox")
+	rejectID := e.waitAsks("askbox", 1)[0].ID
+	if _, err := e.m.DecideApproval(t.Context(), rejectID, sandboxapi.ApprovalDecision{Decision: sandboxapi.DecisionReject}); err != nil {
+		t.Fatalf("reject ask: %v", err)
+	}
+	e.setConfig(func(c *config.Config) { c.OpenShell.Admin.UserApprovals = config.OpenShellUserApprovalsSession })
+	e.m.refreshEgress()
+	e.propose("askbox", "bounded.example.org")
+	e.draft("askbox")
+	boundedID := e.waitAsks("askbox", 1)[0].ID
+	if _, err := e.m.DecideApproval(t.Context(), boundedID, sandboxapi.ApprovalDecision{Decision: sandboxapi.DecisionApprove, Always: true}); !sandboxapi.IsCode(err, sandboxapi.CodeAdminViolation) {
+		t.Fatalf("approval past session floor = %v", err)
+	}
+	e.tel.mu.Lock()
+	got := append([]audit.SandboxAskDecidedEvent(nil), e.tel.askDecisions...)
+	e.tel.mu.Unlock()
+	if len(got) != 2 || got[0].ApprovalID != rejectID || got[0].Result != audit.SandboxApprovalDenied || got[0].Reason != "" ||
+		got[1].ApprovalID != boundedID || got[1].Result != audit.SandboxApprovalDenied || got[1].Reason != "floor_denied" {
+		t.Fatalf("missing gateway decision records = %+v", got)
+	}
+	if _, err := e.m.DecideApproval(t.Context(), boundedID, sandboxapi.ApprovalDecision{Decision: sandboxapi.DecisionApprove}); err != nil {
+		t.Fatalf("ordinary gateway approval: %v", err)
+	}
+	e.tel.mu.Lock()
+	got = append([]audit.SandboxAskDecidedEvent(nil), e.tel.askDecisions...)
+	e.tel.mu.Unlock()
+	if len(got) != 2 || len(auth.decisions()) != 1 {
+		t.Fatalf("gateway approval was relayed twice: records=%+v, decisions=%+v", got, auth.decisions())
+	}
+	e.setConfig(func(c *config.Config) { c.OpenShell.Admin.UserApprovals = "" })
+	e.m.refreshEgress()
+	e.propose("askbox", "always-rejected.example.org")
+	e.draft("askbox")
+	alwaysID := e.waitAsks("askbox", 1)[0].ID
+	if _, err := e.m.DecideApproval(t.Context(), alwaysID, sandboxapi.ApprovalDecision{Decision: sandboxapi.DecisionReject, Always: true}); err != nil {
+		t.Fatalf("gateway-kept rejection: %v", err)
+	}
+	e.tel.mu.Lock()
+	got = append([]audit.SandboxAskDecidedEvent(nil), e.tel.askDecisions...)
+	e.tel.mu.Unlock()
+	if len(got) != 2 || len(auth.decisions()) != 2 {
+		t.Fatalf("gateway-kept rejection was relayed twice: records=%+v, decisions=%+v", got, auth.decisions())
+	}
+}
+
+func TestManagedAskDecisionReadsIdentityUnderManagerLock(t *testing.T) {
+	e, _ := managedEnv(t, nil)
+	e.live(sandboxapi.CreateRequest{Name: "askbox"})
+	e.register("askbox")
+	e.setConfig(func(c *config.Config) { c.OpenShell.Profile = config.OpenShellProfileBalanced })
+	e.m.refreshEgress()
+	e.propose("askbox", "locked.example.org")
+	e.draft("askbox")
+	approvalID := e.waitAsks("askbox", 1)[0].ID
+
+	e.m.mu.Lock()
+	b, a := e.m.boxes["askbox"], e.m.approvals[approvalID]
+	started, finished := make(chan struct{}), make(chan struct{})
+	go func() {
+		close(started)
+		e.m.recordManagedAskDecision(t.Context(), b, a, "")
+		close(finished)
+	}()
+	<-started
+	returnedWhileLocked := false
+	select {
+	case <-finished:
+		returnedWhileLocked = true
+	case <-time.After(250 * time.Millisecond):
+	}
+	e.m.mu.Unlock()
+	select {
+	case <-finished:
+	case <-time.After(5 * time.Second):
+		t.Fatal("managed ask decision did not finish after the manager lock was released")
+	}
+	if returnedWhileLocked {
+		t.Fatal("managed ask decision read the box identity without the manager lock")
+	}
+}
+
 // Re-resolving one sandbox must use its registration's floor, even while a
 // second sandbox in the same account has a different floor in force.
 func TestManagedManagerResolvesEachSandboxUnderItsOwnFloor(t *testing.T) {
@@ -1458,6 +1546,19 @@ func TestManagedPolicyAllowAndBlockUseTheGatewayDecisionStore(t *testing.T) {
 	if len(got) != 2 || got[1].Kind != sandboxrelay.DecisionEgressAllow {
 		t.Fatalf("stored decisions = %+v", got)
 	}
+	checked, err := e.m.PolicyTest(t.Context(), sandboxapi.PolicyTestRequest{Sandbox: "onebox", Checks: []sandboxapi.PolicyCheck{
+		{Host: "example.org", Port: 443}, {Host: "api.example.org", Port: 443},
+	}})
+	if err != nil || len(checked.Decisions) != 2 {
+		t.Fatalf("saved decision policy test: %+v, %v", checked, err)
+	}
+	for i, kind := range []string{"block", "allow"} {
+		d := checked.Decisions[i]
+		if d.Allowed != (kind == "allow") || !strings.Contains(d.Source, "your saved "+kind+" decision") ||
+			!strings.Contains(d.Source, "managed gateway") || !strings.Contains(d.Reason, "You ") {
+			t.Fatalf("saved %s provenance: %+v", kind, d)
+		}
+	}
 	off := false
 	auth.gatewayOnly.Store(&config.OpenShellAdminConfig{AllowUnblock: &off})
 	if _, err := e.m.PolicyDecision(t.Context(), sandboxapi.PolicyDecisionRequest{Host: "another.example.org", Kind: "allow"}); !sandboxapi.IsCode(err, sandboxapi.CodeAdminViolation) || len(auth.decisions()) != 2 {
@@ -1745,5 +1846,48 @@ func TestManagedForeignStopAfterTheRegistrationFloorTightens(t *testing.T) {
 	}
 	if p := e.get("mine").Phase; p != string(audit.SandboxPhaseReady) {
 		t.Fatalf("the registered sandbox is %s", p)
+	}
+}
+
+// A managed create's floor binds the sandbox that create reserved, never
+// its name. The refresh inside the create resolves the new sandbox under it,
+// not the closed floor (GAP-0016), until the daemon keeps its registration.
+// A same-name create that fails on the name lends its floor to nothing: the
+// sandbox that holds the name, whose registration is missing, stays
+// unconfirmed and its egress credential stays off.
+func TestManagedCreateFloorBindsTheReservedSandbox(t *testing.T) {
+	e, _ := managedEnv(t, nil)
+	e.m.opts.ConfigForSandbox = func(string) *config.Config { return nil } // no registration kept
+	pinned := func(block string) context.Context {
+		cfg := *e.config()
+		cfg.OpenShell.Admin.EgressBlock = []string{block}
+		return WithCreateConfig(context.Background(), &cfg)
+	}
+	req := sandboxapi.CreateRequest{Name: "newbox", Harness: "claudecode", Project: e.project, Copy: true}
+	sb, err := e.m.Create(pinned("paste.example"), req)
+	must(t, err)
+	b, err := e.m.box("newbox")
+	must(t, err)
+	e.m.mu.Lock()
+	eff, policyErr := b.eff, b.policyErr
+	e.m.mu.Unlock()
+	if policyErr != "" || eff == nil {
+		t.Fatalf("the create's own refresh judged the new sandbox unconfirmed: %q", policyErr)
+	}
+	if got := eff.DecideEgress("paste.example", 443); got.Rule != packs.RuleAdminBlock {
+		t.Fatalf("the new sandbox does not resolve under its create floor: %+v", got)
+	}
+	e.m.EndCreate("newbox", sb.ID)
+	if _, err := e.m.resolveBox(b); err == nil {
+		t.Fatal("after its registration was kept, the sandbox still resolves under the create floor")
+	}
+	if _, err := e.m.Create(pinned("other.example"), req); !sandboxapi.IsCode(err, sandboxapi.CodeConflict) {
+		t.Fatalf("same-name create = %v, want a conflict", err)
+	}
+	if cfg := e.m.configForSandbox("newbox"); cfg != nil {
+		t.Fatalf("the sandbox holding the name borrowed the failed create's floor: %v", cfg.OpenShell.Admin.EgressBlock)
+	}
+	if _, err := e.m.resolveBox(b); err == nil {
+		t.Fatal("the sandbox holding the name resolves after a failed same-name create")
 	}
 }

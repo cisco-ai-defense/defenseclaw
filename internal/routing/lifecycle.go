@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strings"
 	"time"
 )
@@ -92,7 +93,15 @@ func (l *Lifecycle) dockerRunArgs() ([]string, error) {
 	}
 	configDir := filepath.Dir(l.configPath)
 	configFile := filepath.Base(l.configPath)
-	return []string{
+	bindMode := "ro"
+	if runtime.GOOS == "linux" {
+		// Docker relabels only this generated directory for the private
+		// container. The bind stays read-only, and the container uses the
+		// host file owner to read the 0700/0600 directory and config without
+		// DAC override capabilities.
+		bindMode = "ro,Z"
+	}
+	args := []string{
 		"run", "-d", "--pull=missing",
 		"--name", l.containerName,
 		"--label", srContainerNameLabel,
@@ -100,13 +109,28 @@ func (l *Lifecycle) dockerRunArgs() ([]string, error) {
 		"--security-opt=no-new-privileges:true",
 		"--read-only",
 		"--tmpfs", "/tmp:rw,noexec,nosuid,size=64m",
-		"-v", fmt.Sprintf("%s:/app/config:ro", configDir),
+	}
+	if runtime.GOOS == "linux" {
+		args = append(args, "--user", fmt.Sprintf("%d:%d", os.Getuid(), os.Getgid()))
+	}
+	args = append(args,
+		"-v", fmt.Sprintf("%s:/app/config:%s", configDir, bindMode),
 		// The stock v0.3.0 entrypoint binds the classification API to
 		// container port 8080. Port is the operator-selected host port.
 		"-p", fmt.Sprintf("127.0.0.1:%d:%d", l.port, DefaultAPIPort),
 		image,
 		fmt.Sprintf("/app/config/%s", configFile),
-	}, nil
+	)
+	return args, nil
+}
+
+// removeContainerArgs removes this instance's container together with the
+// anonymous volumes Docker created for it. The router image declares
+// /app/models a volume, so every run gets a fresh one, and a plain rm -f left
+// the replaced one behind on every gateway restart (GAP-0842). Docker never
+// removes a named volume this way.
+func (l *Lifecycle) removeContainerArgs() []string {
+	return []string{"rm", "-f", "-v", l.containerName}
 }
 
 // Start launches only the router container via Docker.
@@ -117,7 +141,7 @@ func (l *Lifecycle) Start(ctx context.Context) error {
 		return err
 	}
 	// Stop any existing container with this instance name.
-	_ = exec.CommandContext(ctx, "docker", "rm", "-f", l.containerName).Run()
+	_ = exec.CommandContext(ctx, "docker", l.removeContainerArgs()...).Run()
 
 	cmd := exec.CommandContext(ctx, "docker", args...)
 	cmd.Stdout = os.Stderr
@@ -162,7 +186,7 @@ func (l *Lifecycle) WaitForHealth(ctx context.Context, timeout time.Duration) er
 func (l *Lifecycle) Stop() error {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	_ = exec.CommandContext(ctx, "docker", "rm", "-f", l.containerName).Run()
+	_ = exec.CommandContext(ctx, "docker", l.removeContainerArgs()...).Run()
 	fmt.Fprintf(os.Stderr, "[routing] router container %s stopped\n", l.containerName)
 	return nil
 }

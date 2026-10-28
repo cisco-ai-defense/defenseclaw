@@ -134,7 +134,8 @@ When `cosign` is installed and the assets carry `checksums.txt.bundle`, the
 `fresh` lane also checks that the installer verified the release signature.
 The PowerShell script takes `-Assets`, `-PreviousAssets` and `-Lanes`. Its
 lanes are `fresh`, `setup-import` (replacing a synthetic 0.8.x Setup install),
-`files-in-use`, `failure-drill`, `policy` (the `DisableSelfUpdate` refusal;
+`files-in-use`, `failure-drill` and `failure-drill-exit3` (an upgrade whose
+gateway refuses to start, or exits 3 without running, is undone), `policy` (the `DisableSelfUpdate` refusal;
 needs an elevated shell), and `upgrade-previous` and `shim`, which need
 `-PreviousAssets`. `upgrade-0.X.Y` (0.8.0-0.8.3) needs `-CodexExe`, a Codex CLI
 `codex.exe`: 0.x sets up the codex connector, and DefenseClaw on Windows runs
@@ -158,10 +159,10 @@ the detection script and uninstall, and checks every lifecycle result.
 
 | Script | What it does |
 | --- | --- |
-| `scripts/test-enterprise-unix-install.sh` | Installs a `.deb`, `.rpm` or macOS `.pkg` and applies a config that enables Claude Code and Codex, whose machine policy must be owned and locked. Checks that a second `ensure` is a no-op, and runs `verify`, `status` and the MDM `detect.sh`. Then uninstalls, checks that no service or machine-policy entry is left and that the config is kept, and purges |
+| `scripts/test-enterprise-unix-install.sh` | Installs a `.deb`, `.rpm` or macOS `.pkg`, applies Claude Code and Codex machine policy, checks no-op `ensure`, `verify`, `status`, MDM detection and uninstall. Fresh installs and upgrades on every OS leave host kernel settings as found. Linux results report current namespace and ptrace facts; the lane checks those warnings against `security_complete` |
 | `scripts/test-enterprise-linux-container.sh` | Runs the Linux lane in a container that boots systemd (`--image`), for a distribution other than the host's |
 | `scripts/test-enterprise-windows-install.ps1` | Runs the hash-pinned unsigned `DefenseClawSetup-Enterprise-Standalone-x64.exe` through `/ensure`, a no-op `/ensure`, `verify`, `status`, `detect.ps1`, the installed CLI's own `ensure` and `/uninstall`. Checks the four services, the HKLM marker, the Add/Remove Programs entry, and that the Codex requirements and the Claude Code managed-settings fragment name the DefenseClaw hook after `/ensure` and are gone after `/uninstall` |
-| `scripts/check_enterprise_lifecycle_result.py` | Checks one saved lifecycle result against what the step must produce. Every lane uses it. A step fails on any error and on any warning it does not allow (`--allow-warning`); `--complete` also requires `coverage_complete` and `security_complete` |
+| `scripts/check_enterprise_lifecycle_result.py` | Checks one saved lifecycle result against the step contract. Every lane uses it. Any unexpected error or warning fails; `--policy-view-status` matches Linux kernel fact warnings to incomplete security, and `--complete` requires full coverage and security |
 
 Build the packages the lanes install:
 

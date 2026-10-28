@@ -18,8 +18,12 @@ package config
 
 import (
 	"bytes"
+	"encoding/json"
+	"errors"
 	"fmt"
+	"regexp"
 	"strings"
+	"time"
 
 	"gopkg.in/yaml.v3"
 
@@ -34,6 +38,66 @@ const (
 	migratedCursorConnectorFailMode = "guardrail.connectors.cursor.hook_fail_mode"
 	migratedGlobalFailMode          = "guardrail.hook_fail_mode"
 )
+
+// migrationRecordDigest is the hex SHA-256 a migration record names the
+// config bytes by.
+var migrationRecordDigest = regexp.MustCompile(`^[0-9a-fA-F]{64}$`)
+
+// DecodeMigrationRecord decodes a migration-v9.json that is there, for the
+// Cursor fail-mode repair. Every release since 1.0.0 writes a JSON object
+// with the schema and config versions, the time, the actor and both config
+// digests, and each value a repair restored is one Cursor fail mode set back
+// to closed. A record that decodes without them ({}, null, a hand-edited or
+// cut-short record, a repaired entry the repair never writes) proves nothing
+// either way, so it is an error like one that does not decode, never
+// "nothing to repair": the ensure planner and the config writers took a zero
+// record for no repair and reported a compliant deployment while the Cursor
+// fail mode stayed open (G-small loop round 2). A later schema version is
+// accepted: its records keep these fields. A UTF-8 byte order mark is
+// ignored.
+func DecodeMigrationRecord(raw []byte) (MigrationRecord, error) {
+	raw = bytes.TrimSpace(bytes.TrimPrefix(raw, []byte("\xef\xbb\xbf")))
+	if len(raw) == 0 || raw[0] != '{' {
+		return MigrationRecord{}, errors.New("not a migration record: not a JSON object")
+	}
+	var record MigrationRecord
+	if err := json.Unmarshal(raw, &record); err != nil {
+		return MigrationRecord{}, err
+	}
+	var invalid []string
+	if record.SchemaVersion < MigrationRecordSchemaVersion {
+		invalid = append(invalid, "schema_version")
+	}
+	if record.ToVersion != ConfigVersionV9 {
+		invalid = append(invalid, "to_version")
+	}
+	if record.FromVersion < 1 || record.FromVersion > ConfigVersionV9 {
+		invalid = append(invalid, "from_version")
+	}
+	if _, err := time.Parse(time.RFC3339, record.MigratedAt); err != nil {
+		invalid = append(invalid, "migrated_at")
+	}
+	if record.Actor != "migration" && record.Actor != "lifecycle" {
+		invalid = append(invalid, "actor")
+	}
+	if !migrationRecordDigest.MatchString(record.SourceSHA256) {
+		invalid = append(invalid, "source_sha256")
+	}
+	if !migrationRecordDigest.MatchString(record.ResultSHA256) {
+		invalid = append(invalid, "result_sha256")
+	}
+	for i, move := range record.Repaired {
+		value, _ := move.Value.(string)
+		if move.Source != "repair" || move.From != move.To || value != "closed" ||
+			(move.To != migratedCursorConnectorFailMode && move.To != migratedGlobalFailMode) {
+			invalid = append(invalid, fmt.Sprintf("repaired[%d]", i))
+		}
+	}
+	if len(invalid) > 0 {
+		return MigrationRecord{}, fmt.Errorf("not a migration record: missing or invalid %s", strings.Join(invalid, ", "))
+	}
+	return record, nil
+}
 
 // RepairMigratedCursorFailMode sets a managed standalone Cursor hook fail
 // mode that the 1.0.0-1.0.2 migration rewrote to "open" back to "closed".

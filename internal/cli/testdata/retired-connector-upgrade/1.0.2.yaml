@@ -1,0 +1,75 @@
+# config.yaml as published 1.0.2 (f9c88b4bd348) left it on a host that set up
+# six connectors, OpenHands among them (GAP-0290, T2 dc-fc-r103-a4-rhel1;
+# secrets replaced by their env names).
+cisco_ai_defense:
+  api_key_env: CISCO_AI_DEFENSE_API_KEY
+claw:
+  mode: claudecode
+gateway:
+  api_port: 18970
+guardrail:
+  connector: claudecode
+  enabled: true
+  hook_fail_mode: open
+  mode: action
+  port: 4010
+  scanner_mode: local
+  connectors:
+    claudecode:
+      mode: ''
+      hook_fail_mode: ''
+      block_message: ''
+    codex:
+      mode: action
+      hook_fail_mode: open
+      block_message: ''
+    copilot:
+      mode: action
+      hook_fail_mode: open
+      block_message: ''
+    opencode:
+      mode: action
+      hook_fail_mode: open
+      block_message: ''
+    hermes:
+      mode: action
+      hook_fail_mode: ''
+      block_message: ''
+    openhands:
+      mode: action
+      hook_fail_mode: ''
+      block_message: ''
+  detection_strategy_completion: regex_only
+data_dir: '@HOME@'
+config_version: 9
+observability: {}
+ai_discovery:
+  enabled: true
+  mode: enhanced
+  scan_interval_min: 5
+  process_interval_s: 60
+  scan_roots:
+    - '~'
+  signature_packs: []
+  signature_pack_digests: {}
+  allow_workspace_signatures: false
+  disabled_signature_ids: []
+  include_shell_history: true
+  include_package_manifests: true
+  include_env_var_names: true
+  include_network_domains: true
+  include_user_email: false
+  lookup_model_provenance_online: false
+  max_files_per_scan: 1000
+  max_file_bytes: 524288
+  store_raw_local_paths: false
+  confidence_policy_path: ''
+  require_trusted_binary_paths: false
+  trusted_binary_prefixes: []
+  runtime:
+    enabled: true
+    planes:
+      - a
+      - b
+    enable_host_plane: false
+    dns_capture: false

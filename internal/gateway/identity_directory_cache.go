@@ -16,7 +16,9 @@ import (
 
 // Directory facts on the hot path.
 //
-// Hook calls read only memory. A cached answer is served even when it is
+// Linux and Windows hook calls read only memory. Managed macOS hook calls
+// wait for current Open Directory groups before deciding (getFresh).
+// Otherwise, a cached answer is served even when it is
 // older than identityDirectoryTTL, and one background refresh replaces it
 // (stale-while-revalidate). A key never seen before starts one shared
 // lookup (singleflight), and the request that started it waits for it at
@@ -29,21 +31,22 @@ import (
 //
 // Callers block when a guardrail profile assignment selects by user or
 // group, so the budget covers a cold SSSD or Active Directory lookup (often
-// one to two seconds) and every request still gets its group profile while
-// the first lookup is in flight or after it failed. A lookup slower than
-// that selects the default profile with match default_lookup_failed; the
-// budget stays well inside the hook request timeout.
+// one to two seconds). If it fails or exceeds the budget, a request whose
+// assignment needs an unconfirmed fact is refused and names that fact;
+// other requests use their proven or default profile. The budget stays well
+// inside the hook request timeout.
 //
 // The first failure of a key's lookup, and its recovery, are logged once
 // (logf) with the resolver's own reason, so an account that cannot resolve at
 // all (in more groups than DefenseClaw names, a directory that never answers)
-// leaves a line in the gateway log instead of only a default_lookup_failed on
-// every record (GAP-0124).
+// leaves a line in the gateway log alongside refused requests that name the
+// missing fact (GAP-0124).
 //
 // Facts whose refreshes keep failing are not served forever: past maxAge
 // (identityDirectoryMaxAge for directory facts, four times the TTL) they are
-// dropped, and directory-dependent assignments use default_lookup_failed
-// until a lookup succeeds. Without the bound a user removed from the directory kept the
+// dropped. Requests whose assignments need the missing facts are refused and
+// name them; other requests use their proven or default profile until a lookup
+// succeeds. Without the bound a user removed from the directory kept the
 // profile of the group they had left, and a user added to one stayed on the
 // default, for as long as the outage lasted (GAP-0145). health reports how many
 // accounts are failing and how stale their facts are, for doctor and status.
@@ -55,8 +58,11 @@ import (
 const (
 	identityDirectoryTTL    = 15 * time.Minute
 	identityDirectoryBudget = 2 * time.Second
-	identityDirectoryRetry  = 15 * time.Second
-	identityDirectoryMax    = 4096
+	// Consecutive identity checks in one hook share a completed directory
+	// answer. A later hook starts another lookup so removal is seen soon.
+	identityDirectoryFreshCoalesce = 100 * time.Millisecond
+	identityDirectoryRetry         = 15 * time.Second
+	identityDirectoryMax           = 4096
 	// identityDirectoryIncompleteTTL is how long an incomplete answer lasts.
 	identityDirectoryIncompleteTTL = 2 * time.Minute
 	// identityDirectoryMaxAge is the age past which directory facts are no
@@ -64,6 +70,9 @@ const (
 	// the guardian's identity spool record is trusted (identitySpoolMaxAge).
 	identityDirectoryMaxAge = 4 * identityDirectoryTTL
 )
+
+const directoryLookupFailureOutcome = "requests whose assignments need missing identity facts are refused (default_lookup_failed), " +
+	"and the refusal names the missing fact; other requests use their proven or default profile until a lookup succeeds"
 
 // identityDirectoryCache caches directory facts per uid or SID.
 type identityDirectoryCache = identityCache[useridentity.DirectoryFacts]
@@ -118,11 +127,18 @@ type identityCache[T any] struct {
 }
 
 type identityCacheEntry[T any] struct {
-	facts       T
-	ok          bool
-	fetchedAt   time.Time
-	nextAttempt time.Time
-	inflight    chan struct{}
+	facts      T
+	ok         bool
+	usedByHook bool
+	fetchedAt  time.Time
+	// generation identifies a successful current lookup. A fresh read that
+	// timed out may use its completion shortly after it finishes, and nearby
+	// reads within one hook interval share that answer.
+	generation, servedGeneration uint64
+	pendingFresh                 bool
+	freshUntil                   time.Time
+	nextAttempt                  time.Time
+	inflight                     chan struct{}
 	// failedSince is when the key's lookup began failing (zero while it
 	// succeeds) and lastErr the reason last logged for it.
 	failedSince time.Time
@@ -134,6 +150,9 @@ type identityCacheEntry[T any] struct {
 	// trustedUntil is when the inputs of the served facts stop being
 	// trusted (identityCache.trustedUntil); zero for no bound.
 	trustedUntil time.Time
+	// staleBefore makes the facts due for a refresh that a blocking request
+	// waits for, when they were fetched before it (refreshSoon).
+	staleBefore time.Time
 }
 
 func newIdentityDirectoryCache(resolve func(string) (useridentity.DirectoryFacts, error)) *identityDirectoryCache {
@@ -171,6 +190,10 @@ func newIdentityCache[T any](resolve func(string) (T, error)) *identityCache[T] 
 // lookup did not finish within the budget (or, after the first request for
 // key, the caller did not ask to block).
 func (c *identityCache[T]) get(key string, block bool) (T, bool) {
+	return c.getWithColdWait(key, block, true)
+}
+
+func (c *identityCache[T]) getWithColdWait(key string, block, waitCold bool) (T, bool) {
 	var zero T
 	if c == nil || key == "" || c.resolve == nil {
 		return zero, false
@@ -186,9 +209,10 @@ func (c *identityCache[T]) get(key string, block bool) (T, bool) {
 		entry = &identityCacheEntry[T]{}
 		c.entries[key] = entry
 	}
+	entry.usedByHook = true
 	c.dropAgedLocked(key, entry, now)
 	age := now.Sub(entry.fetchedAt)
-	invalidated := entry.ok && entry.fetchedAt.Before(c.staleBefore)
+	invalidated := entry.ok && (entry.fetchedAt.Before(c.staleBefore) || entry.fetchedAt.Before(entry.staleBefore))
 	expired := age >= c.lifetime(entry.facts) || invalidated
 	if (!entry.ok || expired) && entry.inflight == nil && !now.Before(entry.nextAttempt) {
 		c.refreshLocked(key, entry)
@@ -239,7 +263,7 @@ func (c *identityCache[T]) get(key string, block bool) (T, bool) {
 	}
 	wait := entry.inflight
 	c.mu.Unlock()
-	if (!block && !first) || wait == nil {
+	if (!block && (!first || !waitCold)) || wait == nil {
 		return zero, false
 	}
 	timer := time.NewTimer(identityDirectoryBudget)
@@ -274,8 +298,7 @@ func (c *identityCache[T]) dropAgedLocked(key string, entry *identityCacheEntry[
 	}
 	entry.facts, entry.ok = none, false
 	if c.logf != nil {
-		c.logf("directory facts for %s are %s old and no longer used; the account gets the default guardrail profile "+
-			"(default_lookup_failed) until a lookup succeeds", key, age.Round(time.Minute))
+		c.logf("directory facts for %s are %s old and no longer used; %s", key, age.Round(time.Minute), directoryLookupFailureOutcome)
 	}
 }
 
@@ -434,9 +457,9 @@ func (c *identityCache[T]) lifetime(facts T) time.Duration {
 	}
 }
 
-// failing reports a key whose lookups fail and that has no facts to serve:
-// its requests get default_lookup_failed until a lookup succeeds. reason is
-// the resolver's own text for the failure.
+// failing reports a key whose lookups fail and that has no facts to serve.
+// Requests whose assignments need the missing facts are refused and name
+// them; reason is the resolver's own text for the lookup failure.
 func (c *identityCache[T]) failing(key string) (since time.Time, reason string, ok bool) {
 	if c == nil {
 		return time.Time{}, "", false
@@ -474,6 +497,31 @@ func (c *identityCache[T]) peek(key string) (T, time.Time, bool) {
 	return entry.facts, entry.fetchedAt, true
 }
 
+// peekCurrent returns only a completed, unexpired lookup whose latest
+// refresh has not failed. Agent identity fields describe what the directory
+// currently verifies; the policy cache may separately retain an older
+// answer during an outage to make its fail-closed decision.
+func (c *identityCache[T]) peekCurrent(key string) (T, bool) {
+	var zero T
+	if c == nil {
+		return zero, false
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	entry := c.entries[key]
+	if entry == nil {
+		return zero, false
+	}
+	now := c.now()
+	c.dropAgedLocked(key, entry, now)
+	if !entry.ok || !entry.failedSince.IsZero() || entry.fetchedAt.IsZero() ||
+		entry.fetchedAt.Before(c.staleBefore) || entry.fetchedAt.Before(entry.staleBefore) ||
+		!now.Before(entry.fetchedAt.Add(c.lifetime(entry.facts))) {
+		return zero, false
+	}
+	return entry.facts, true
+}
+
 // invalidate makes every cached answer due for a refresh. A pushed profile
 // assignment that selects by group applied only once the facts cached before
 // the push expired, up to 15 minutes later, while profile-explain already
@@ -491,6 +539,26 @@ func (c *identityCache[T]) invalidate() {
 		if entry.ok {
 			entry.nextAttempt = time.Time{}
 		}
+	}
+}
+
+// refreshSoon makes key's cached answer due for a refresh that a blocking
+// request waits for within the budget, as invalidate does for every key.
+// Unlike forget it keeps the answer: when the refresh fails or does not
+// finish in time, the facts are served as before. News that only adds to
+// the facts (a guardian record that names the account's UPN, or one written
+// after the facts were resolved without one) never costs a request the
+// facts it had. If those facts later become unconfirmed, requests whose
+// assignments need them are refused and name the missing fact (loop round 3).
+func (c *identityCache[T]) refreshSoon(key string) {
+	if c == nil {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if entry := c.entries[key]; entry != nil && entry.ok {
+		entry.staleBefore = c.now()
+		entry.nextAttempt = time.Time{}
 	}
 }
 
@@ -542,9 +610,20 @@ func (c *identityCache[T]) refreshLocked(key string, entry *identityCacheEntry[T
 		switch {
 		case err == nil:
 			entry.facts, entry.ok, entry.fetchedAt, entry.trustedUntil = facts, true, now, until
+			entry.generation++
+			if !entry.pendingFresh {
+				// An ordinary cache refresh has no timed-out fresh reader
+				// waiting to consume its result.
+				entry.servedGeneration = entry.generation
+			}
+			entry.freshUntil = now.Add(identityDirectoryFreshCoalesce)
 		case entry.ok && errors.As(err, &unconfirmed):
 			var none T
 			entry.facts, entry.ok = none, false
+		}
+		if err != nil {
+			entry.pendingFresh = false
+			entry.freshUntil = time.Time{}
 		}
 		entry.nextAttempt = now.Add(identityDirectoryRetry)
 		entry.inflight = nil
@@ -585,10 +664,9 @@ func (c *identityCache[T]) noteResultLocked(key string, entry *identityCacheEntr
 		entry.failedSince = now
 	}
 	entry.lastErr = reason
-	keeps := "directory-dependent assignments use the default guardrail profile (default_lookup_failed) until a lookup succeeds"
+	keeps := directoryLookupFailureOutcome
 	if entry.ok && c.maxAge > 0 {
-		keeps = fmt.Sprintf("the account keeps its last facts for at most %s, then directory-dependent assignments use the default guardrail "+
-			"profile (default_lookup_failed) until a lookup succeeds", c.maxAge)
+		keeps = fmt.Sprintf("the account keeps its last facts for at most %s; after they expire, %s", c.maxAge, directoryLookupFailureOutcome)
 	}
 	return fmt.Sprintf("directory lookup for %s failed: %s; %s", key, reason, keeps)
 }
@@ -642,6 +720,12 @@ func (c *identityCache[T]) health() identityCacheHealth {
 	now := c.now()
 	for key, entry := range c.entries {
 		if entry.failedSince.IsZero() || now.Sub(entry.lastFailedAt) >= identityDirectoryTTL {
+			continue
+		}
+		if entry.gone && entry.fetchedAt.IsZero() && !entry.usedByHook {
+			// A deliberately queried nonexistent account has never supplied facts
+			// to hook calls. Keep its lookup refusal, but do not turn it into a
+			// directory outage warning for the managed deployment.
 			continue
 		}
 		if c.confirmGone && entry.gone && c.answeredAt.After(entry.lastFailedAt) {

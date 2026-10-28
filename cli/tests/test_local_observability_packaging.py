@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -21,11 +22,145 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 BUNDLE = REPO_ROOT / "bundles" / "local_observability_stack"
+
+
+def test_grafana_provisions_the_documented_defenseclaw_folder() -> None:
+    provider = (BUNDLE / "grafana/provisioning/dashboards/dashboards.yml").read_text(encoding="utf-8")
+    # Grafana requires foldersFromFilesStructure to be unset when a provider
+    # names a folder. The dashboard JSON files live at the path root.
+    assert "folder: DefenseClaw" in provider
+    assert "foldersFromFilesStructure:" not in provider
+
+
 FLEET_TEMPLATES = {
     "docker-compose.fleet.yml",
     "prometheus/examples/fleet.yml",
     "grafana/dashboards/defenseclaw-fleet.json",
 }
+
+
+# A fake docker that records each Compose call and renders the Grafana sign-in
+# mode the given files produce, as real Compose does: the base file alone keeps
+# anonymous read-only Viewer access; the password overlay turns it off.
+_FAKE_DOCKER = """#!/bin/sh
+set -eu
+test "$1" = compose
+shift
+files=""
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -f) shift; test -f "$1"; files="$files $(basename "$1")" ;;
+    --project-directory|--project-name) echo "$1=$2" >> "$COMPOSE_LOG"; shift ;;
+    *) break ;;
+  esac
+  shift
+done
+case "$1" in
+  config)
+    case "$files" in
+      *docker-compose.password.yml*) [ -z "${FAKE_OVERLAY_IGNORED:-}" ] && anonymous='"false"' || anonymous='"true"' ;;
+      *) anonymous='"true"' ;;
+    esac
+    printf 'services:\n  grafana:\n    environment:\n      GF_AUTH_ANONYMOUS_ENABLED: %s\n      GF_AUTH_ANONYMOUS_ORG_ROLE: %s\n' "$anonymous" "${FAKE_ANONYMOUS_ROLE:-Viewer}" ;;
+  up)
+    test -f grafana/dashboards/defenseclaw-fleet.json
+    test -f prometheus/scrape.d/fleet.yml
+    echo "up files:$files password:${GRAFANA_ADMIN_PASSWORD:-}" >> "$COMPOSE_LOG" ;;
+  *) exit 64 ;;
+esac
+"""
+
+
+def _run_fleet_recipe(
+    tmp_path: Path, mode: str | None, **extra_env: str
+) -> tuple[subprocess.CompletedProcess[str], Path, Path]:
+    home = tmp_path / "home"
+    stack = home / ".defenseclaw/observability-stack"
+    shutil.copytree(BUNDLE, stack)
+    for generated in (".grafana-access-mode", ".grafana-admin-password"):
+        (stack / generated).unlink(missing_ok=True)
+    if mode is not None:
+        # What `defenseclaw setup local-observability up` leaves behind.
+        (stack / ".grafana-access-mode").write_text(mode + "\n", encoding="utf-8")
+        (stack / ".grafana-admin-password").write_text("saved-test-password", encoding="utf-8")
+    assets = tmp_path / "extracted-assets"
+    for relative in FLEET_TEMPLATES:
+        source = stack / relative
+        target = assets / "bundles/local_observability_stack" / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, target)
+        source.unlink()
+    shutil.rmtree(stack / "prometheus/scrape.d", ignore_errors=True)
+    commands = tmp_path / "bin"
+    commands.mkdir()
+    docker = commands / "docker"
+    docker.write_text(_FAKE_DOCKER, encoding="utf-8")
+    docker.chmod(0o755)
+    page = (REPO_ROOT / "docs-site/content/docs/edge-connector/install.mdx").read_text(encoding="utf-8")
+    section = page.split("## Grafana dashboard\n", 1)[1].split("## Benchmark\n", 1)[0]
+    recipe = re.search(r"```bash\n(.*?)```", section, re.DOTALL)
+    assert recipe is not None
+    log = tmp_path / "compose.log"
+    environment = os.environ.copy()
+    environment.pop("GRAFANA_ADMIN_PASSWORD", None)
+    environment.update(
+        HOME=str(home),
+        PATH=str(commands) + os.pathsep + environment["PATH"],
+        DCLAW_FLEET_API_TOKEN="provided by the test credential store",
+        COMPOSE_LOG=str(log),
+        **extra_env,
+    )
+    result = subprocess.run(
+        ["bash", "-euc", recipe[1].replace("/path/to/extracted-assets", str(assets))],
+        cwd=assets,
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=30,
+    )
+    return result, stack, log
+
+
+@pytest.mark.skipif(os.name == "nt", reason="documented POSIX shell recipe")
+@pytest.mark.parametrize(
+    ("mode", "want_files", "want_password"),
+    [
+        ("password", " docker-compose.yml docker-compose.password.yml docker-compose.fleet.yml", "saved-test-password"),
+        ("no-password", " docker-compose.yml docker-compose.fleet.yml", ""),
+    ],
+)
+def test_fleet_dashboard_recipe_keeps_the_saved_grafana_sign_in(
+    tmp_path: Path, mode: str, want_files: str, want_password: str
+) -> None:
+    result, stack, log = _run_fleet_recipe(tmp_path, mode)
+    assert result.returncode == 0, result.stdout + result.stderr
+    for relative in ("grafana/dashboards/defenseclaw-fleet.json", "prometheus/scrape.d/fleet.yml"):
+        assert (stack / relative).is_file()
+    calls = log.read_text(encoding="utf-8").splitlines()
+    ups = [line for line in calls if line.startswith("up ")]
+    # One start, in the managed project, with the saved sign-in overlay and
+    # its password (anonymous Viewer only where setup chose no-password).
+    assert ups == [f"up files:{want_files} password:{want_password}"], calls
+    assert "--project-name=defenseclaw-observability" in calls, calls
+
+
+@pytest.mark.skipif(os.name == "nt", reason="documented POSIX shell recipe")
+@pytest.mark.parametrize(
+    ("mode", "extra_env"),
+    [
+        (None, {}),  # no stack made by setup: the sign-in mode is unknown
+        ("anonymous", {}),  # unrecognized saved mode
+        ("password", {"FAKE_OVERLAY_IGNORED": "1"}),  # Compose renders anonymous access anyway
+    ],
+)
+def test_fleet_dashboard_recipe_starts_nothing_without_the_saved_sign_in(
+    tmp_path: Path, mode: str | None, extra_env: dict[str, str]
+) -> None:
+    result, _stack, log = _run_fleet_recipe(tmp_path, mode, **extra_env)
+    assert result.returncode != 0, result.stdout + result.stderr
+    calls = log.read_text(encoding="utf-8").splitlines() if log.exists() else []
+    assert not [line for line in calls if line.startswith("up ")], calls
 
 
 def _is_generated_grafana_credential(relative_path: str) -> bool:
@@ -203,3 +338,16 @@ def test_wheel_resolves_complete_stack_outside_source_checkout(tmp_path: Path) -
     )
     assert probe.returncode == 0, probe.stdout + probe.stderr
     assert "_data" in probe.stdout
+
+
+@pytest.mark.skipif(os.name == "nt", reason="documented POSIX shell recipe")
+@pytest.mark.parametrize("role", ["Admin", "Editor"])
+def test_fleet_dashboard_recipe_refuses_anonymous_access_that_is_not_read_only(tmp_path: Path, role: str) -> None:
+    # fix/r104-windows: Grafana recipes never enable anonymous Admin. An
+    # effective config that would make anonymous visitors Admin or Editor
+    # starts nothing.
+    result, _stack, log = _run_fleet_recipe(tmp_path, "no-password", FAKE_ANONYMOUS_ROLE=role)
+    assert result.returncode != 0, result.stdout + result.stderr
+    assert "would not be read-only (Viewer)" in result.stderr, result.stderr
+    calls = log.read_text(encoding="utf-8").splitlines() if log.exists() else []
+    assert not [line for line in calls if line.startswith("up ")], calls

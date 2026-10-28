@@ -78,6 +78,10 @@ type runResult struct {
 }
 
 // run executes a hook against a stub gateway with a temp Home + .token file.
+// userLogHome is the failure-log resolver of a managed test call whose
+// invoking user's diagnostic directory is home.
+func userLogHome(home string) func() string { return func() string { return home } }
+
 func run(t *testing.T, connector string, rt *stubRT, mutate func(*Options)) runResult {
 	return runWithContext(t, context.Background(), connector, rt, mutate)
 }
@@ -147,6 +151,121 @@ func claudeBlocked(r runResult) bool {
 		(strings.Contains(r.stdout, `"permissionDecision":"deny"`) || strings.Contains(r.stdout, `"decision":"block"`)))
 }
 
+func TestClosedPanicStopNativeAnswersSurviveHookRunner(t *testing.T) {
+	for _, tc := range []struct {
+		connector, event, response, wantOutput string
+	}{
+		{
+			connector:  "claudecode",
+			event:      "Stop",
+			response:   `{"action":"block","claude_code_output":{"continue":false,"stopReason":"DefenseClaw stopped this turn after an internal evaluator error."}}`,
+			wantOutput: `{"continue":false,"stopReason":"DefenseClaw stopped this turn after an internal evaluator error."}`,
+		},
+		{
+			// Antigravity's continue veto re-enters the agent loop: the
+			// gateway allows termination after a recovered panic.
+			connector:  "antigravity",
+			event:      "Stop",
+			response:   `{"action":"allow","raw_action":"block","would_block":true,"hook_output":{"decision":"allow"}}`,
+			wantOutput: `{"decision":"allow"}`,
+		},
+	} {
+		t.Run(tc.connector, func(t *testing.T) {
+			result := run(t, tc.connector, ok(tc.response), func(opts *Options) {
+				opts.Event = tc.event
+				opts.FailMode = "closed"
+				if tc.connector == "claudecode" {
+					opts.Stdin = strings.NewReader(`{"hook_event_name":"Stop","session_id":"panic-stop"}`)
+				} else {
+					opts.Stdin = strings.NewReader(`{"conversationId":"panic-stop","terminationReason":"error","fullyIdle":true}`)
+				}
+			})
+			if result.code != 0 || strings.TrimSpace(result.stdout) != tc.wantOutput {
+				t.Fatalf("native answer: code=%d stdout=%q stderr=%q, want %q", result.code, result.stdout, result.stderr, tc.wantOutput)
+			}
+		})
+	}
+}
+
+// The native runner never synthesizes Antigravity's Stop veto: "continue"
+// re-enters the agent loop and would repeat a failing Stop hook.
+func TestAntigravityStopRunnerNeverSynthesizesLoopingVeto(t *testing.T) {
+	for _, response := range []string{
+		`{"action":"block","reason":"internal evaluator error","hook_output":{"decision":"allow"}}`,
+		`{"action":"block","reason":"internal evaluator error"}`,
+		`{"action":"allow","raw_action":"block","would_block":true,"hook_output":{"decision":"allow"}}`,
+	} {
+		for _, managedStandalone := range []bool{false, true} {
+			result := run(t, "antigravity", ok(response), func(opts *Options) {
+				opts.Event = "Stop"
+				opts.FailMode = "closed"
+				opts.ManagedEnterprise, opts.ManagedStandalone = managedStandalone, managedStandalone
+				opts.Stdin = strings.NewReader(`{"conversationId":"panic-stop","terminationReason":"error","fullyIdle":true}`)
+			})
+			if result.code != 0 || strings.Contains(result.stdout, "continue") {
+				t.Fatalf("gateway answer %s (standalone=%v) yielded code=%d stdout=%q stderr=%q, want no Stop veto", response, managedStandalone, result.code, result.stdout, result.stderr)
+			}
+		}
+	}
+}
+
+func TestClaudeClosedStopBlockCannotEmitNativeAllow(t *testing.T) {
+	for _, response := range []string{
+		`{"action":"block","reason":"internal evaluator error","claude_code_output":{"decision":"allow"}}`,
+		`{"action":"block","reason":"internal evaluator error","claude_code_output":{"continue":null,"stopReason":"claimed terminal"}}`,
+		`{"action":"block","reason":"internal evaluator error","claude_code_output":{"continue":true,"stopReason":"claimed terminal"}}`,
+	} {
+		result := run(t, "claudecode", ok(response), func(opts *Options) {
+			opts.Event = "Stop"
+			opts.FailMode = "closed"
+			opts.Stdin = strings.NewReader(`{"hook_event_name":"Stop","session_id":"panic-stop"}`)
+		})
+		var output map[string]interface{}
+		if result.code != 0 || json.Unmarshal([]byte(result.stdout), &output) != nil || output["continue"] != false || output["stopReason"] == "" {
+			t.Fatalf("gateway block %s yielded code=%d stdout=%q stderr=%q, want terminal closed Stop", response, result.code, result.stdout, result.stderr)
+		}
+	}
+}
+
+// A Claude Code policy block on Stop, SubagentStop or TeammateIdle has no
+// terminal directive: the runner keeps the exit-2 feedback that asks Claude
+// Code to keep working, and never turns it into continue:false. Only the
+// gateway's recovered-panic answer ends the turn.
+func TestClaudeLifecyclePolicyBlockKeepsExitTwoFeedback(t *testing.T) {
+	body := `{"action":"block","reason":"policy: finish the open task first"}`
+	sp, found := specFor("claudecode")
+	if !found {
+		t.Fatal("missing claudecode spec")
+	}
+	for _, event := range []string{"Stop", "SubagentStop", "TeammateIdle"} {
+		result := run(t, "claudecode", ok(body), func(opts *Options) {
+			opts.Event = event
+			opts.FailMode = "closed"
+			opts.Stdin = strings.NewReader(`{"hook_event_name":"` + event + `","session_id":"policy-stop"}`)
+		})
+		if result.code != blockExit || strings.TrimSpace(result.stdout) != "" ||
+			!strings.Contains(result.stderr, "policy: finish the open task first") {
+			t.Fatalf("%s: code=%d stdout=%q stderr=%q, want exit-2 policy feedback", event, result.code, result.stdout, result.stderr)
+		}
+		// The standalone managed answer path decides the same response.
+		var stdout, stderr bytes.Buffer
+		code := sp.decide(Options{Connector: "claudecode", Event: event, ManagedEnterprise: true, ManagedStandalone: true,
+			FailMode: "closed", Stdout: &stdout, Stderr: &stderr}, []byte(body))
+		if code != blockExit || strings.TrimSpace(stdout.String()) != "" || !strings.Contains(stderr.String(), "policy: finish the open task first") {
+			t.Fatalf("%s standalone: code=%d stdout=%q stderr=%q, want exit-2 policy feedback", event, code, stdout.String(), stderr.String())
+		}
+	}
+	// A policy Stop decision passes through unchanged.
+	result := run(t, "claudecode", ok(`{"action":"block","reason":"policy","claude_code_output":{"decision":"block","reason":"policy"}}`), func(opts *Options) {
+		opts.Event = "Stop"
+		opts.FailMode = "closed"
+		opts.Stdin = strings.NewReader(`{"hook_event_name":"Stop","session_id":"policy-stop"}`)
+	})
+	if result.code != 0 || strings.TrimSpace(result.stdout) != `{"decision":"block","reason":"policy"}` {
+		t.Fatalf("policy Stop decision: code=%d stdout=%q stderr=%q", result.code, result.stdout, result.stderr)
+	}
+}
+
 func TestClaudeAndCodexNativeOutputAgreesWithGatewayAction(t *testing.T) {
 	for _, connector := range []string{"claudecode", "codex"} {
 		field := "claude_code_output"
@@ -185,6 +304,7 @@ func TestClaudeAndCodexNativeOutputAgreesWithGatewayAction(t *testing.T) {
 						o.FailMode = "closed"
 						o.ManagedEnterprise = managed
 						home = o.Home
+						o.FailureLogHome = userLogHome(o.Home)
 					})
 					if tc.blocked {
 						denied := claudeBlocked(r)
@@ -618,20 +738,6 @@ func TestDecisionGolden(t *testing.T) {
 			wantCode:   0,
 		},
 		{
-			name:       "openhands deny in hook_output exits 2",
-			connector:  "openhands",
-			respBody:   `{"action":"block","hook_output":{"decision":"deny","reason":"no"}}`,
-			wantStdout: `{"decision":"deny","reason":"no"}` + "\n",
-			wantCode:   2,
-		},
-		{
-			name:       "openhands allow in hook_output exits 0",
-			connector:  "openhands",
-			respBody:   `{"action":"allow","hook_output":{"decision":"allow"}}`,
-			wantStdout: `{"decision":"allow"}` + "\n",
-			wantCode:   0,
-		},
-		{
 			name:       "amp block writes stderr exit 2 no stdout",
 			connector:  "amp",
 			respBody:   `{"action":"block","reason":"nope"}`,
@@ -730,7 +836,6 @@ func TestAlertRemainsAdvisoryUnderClosedFailMode(t *testing.T) {
 		"copilot",
 		"cursor",
 		"devin",
-		"openhands",
 	} {
 		t.Run(connector, func(t *testing.T) {
 			result := run(t, connector, ok(`{"action":"alert","reason":"advisory finding"}`), func(opts *Options) {
@@ -799,7 +904,7 @@ func TestHermesJSONStdinAndValidOutputShapes(t *testing.T) {
 	}
 }
 
-func TestHermesMalformedOrMismatchedGatewayOutputFailsOpen(t *testing.T) {
+func TestHermesMalformedOrMismatchedGatewayOutputBlocksToolCalls(t *testing.T) {
 	for _, tc := range []struct {
 		name     string
 		event    string
@@ -842,22 +947,20 @@ func TestHermesMalformedOrMismatchedGatewayOutputFailsOpen(t *testing.T) {
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			// A per-user hook in fail mode open: these answers never block.
-			// In fail mode closed a tool call blocks instead
-			// (TestPerUserHermesToolCallFailsClosedUnlessOpen).
+			// An unusable pre-tool answer blocks even with outage-open selected.
+			// Audit-only events still cannot veto a tool call.
 			input := fmt.Sprintf(`{"event":%q}`, tc.event)
 			result := run(t, "hermes", ok(tc.response), func(opts *Options) {
 				opts.Event = ""
 				opts.Stdin = strings.NewReader(input)
 				opts.FailMode = "open"
 			})
-			if result.code != 0 || result.stdout != "" {
-				t.Fatalf(
-					"Hermes mismatch synthesized enforcement: code=%d stdout=%q stderr=%q",
-					result.code,
-					result.stdout,
-					result.stderr,
-				)
+			if tc.event == "pre_tool_call" {
+				if !blocked(result) {
+					t.Fatalf("Hermes tool call allowed unusable answer: code=%d stdout=%q stderr=%q", result.code, result.stdout, result.stderr)
+				}
+			} else if result.code != 0 || result.stdout != "" {
+				t.Fatalf("Hermes audit-only event blocked: code=%d stdout=%q stderr=%q", result.code, result.stdout, result.stderr)
 			}
 		})
 	}
@@ -896,24 +999,24 @@ func TestCodexUserPromptSubmitBlockSchema(t *testing.T) {
 	})
 }
 
-// --- Oversized payload: fail-open allows, fail-closed emits per-connector ---
+// --- Oversized payload: closed outside Secure Client ---
 
 func TestOversizedPayload(t *testing.T) {
 	big := strings.Repeat("a", 64)
-	t.Run("fail open allows, never calls gateway", func(t *testing.T) {
+	t.Run("per-user open still blocks, never calls gateway", func(t *testing.T) {
 		rt := ok(`{"action":"allow"}`)
 		r := run(t, "claudecode", rt, func(o *Options) {
 			o.MaxBody = 8
 			o.Stdin = strings.NewReader(big)
 		})
-		if r.code != 0 {
-			t.Fatalf("code = %d, want 0", r.code)
+		if r.code != blockExit {
+			t.Fatalf("code = %d, want %d", r.code, blockExit)
 		}
 		if rt.requests != 0 {
 			t.Fatalf("gateway called %d times on oversized payload, want 0", rt.requests)
 		}
-		if r.stdout != "" {
-			t.Errorf("stdout = %q, want empty for non-Cursor fail-open", r.stdout)
+		if !strings.Contains(r.stdout, `"decision":"block"`) {
+			t.Errorf("stdout = %q, want native block", r.stdout)
 		}
 	})
 
@@ -924,9 +1027,8 @@ func TestOversizedPayload(t *testing.T) {
 		"amp":        {stdout: "", code: 2},
 		"claudecode": {stdout: `{"decision":"block","reason":"DefenseClaw hook payload too large"}` + "\n", code: 2},
 		"codex":      {stdout: `{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"DefenseClaw hook payload too large"}}` + "\n", code: 0},
-		"openhands":  {stdout: `{"decision":"deny","reason":"DefenseClaw hook payload too large"}` + "\n", code: 2},
 		"cursor":     {stdout: cursorFallbackOutput("PreToolUse", true, "DefenseClaw hook payload too large") + "\n", code: 2},
-		"copilot":    {stdout: "", code: 0},
+		"copilot":    {stdout: `{"permissionDecision":"deny","permissionDecisionReason":"DefenseClaw blocked this tool call: it is too large for DefenseClaw to inspect. Make it smaller and try again."}` + "\n", code: 0},
 		"hermes":     {stdout: "", code: 0},
 	}
 	for connector, want := range cases {
@@ -947,67 +1049,6 @@ func TestOversizedPayload(t *testing.T) {
 }
 
 // --- Transport failure (unreachable + 5xx): fail-open by default ---
-
-func TestUnreachable(t *testing.T) {
-	t.Run("default fail open", func(t *testing.T) {
-		r := run(t, "claudecode", &stubRT{err: errors.New("dial tcp: refused")}, nil)
-		if r.code != 0 {
-			t.Fatalf("code = %d, want 0 (DefenseClaw outage must not brick agent)", r.code)
-		}
-		if !strings.Contains(r.stderr, "allowing claude-code tool") {
-			t.Errorf("stderr = %q, want allow notice", r.stderr)
-		}
-		// GAP-0377: Claude Code hides stderr after exit 0, so the user reads
-		// the per-user outage notice from systemMessage, as on Unix.
-		var notice map[string]string
-		if json.Unmarshal([]byte(r.stdout), &notice) != nil ||
-			!strings.Contains(notice["systemMessage"], "defenseclaw-gateway start") {
-			t.Errorf("stdout = %q, want a systemMessage naming defenseclaw-gateway start", r.stdout)
-		}
-		managed := run(t, "claudecode", &stubRT{err: errors.New("dial tcp: refused")}, func(o *Options) {
-			o.ManagedUnixSocket = "/run/defenseclaw/hook.sock"
-		})
-		if managed.stdout != "" {
-			t.Errorf("socket hook stdout = %q, want no per-user notice", managed.stdout)
-		}
-	})
-
-	t.Run("cursor fail open emits valid allow json", func(t *testing.T) {
-		r := run(t, "cursor", &stubRT{err: errors.New("dial tcp: refused")}, nil)
-		if r.code != 0 {
-			t.Fatalf("code = %d, want 0", r.code)
-		}
-		if r.stdout != cursorFallbackOutput("PreToolUse", false, "")+"\n" {
-			t.Errorf("stdout = %q, want Cursor allow JSON", r.stdout)
-		}
-	})
-
-	t.Run("strict availability fails closed", func(t *testing.T) {
-		r := run(t, "openhands", &stubRT{err: errors.New("refused")}, func(o *Options) {
-			o.StrictAvailability = true
-		})
-		if r.code != 2 {
-			t.Fatalf("code = %d, want 2", r.code)
-		}
-		// GAP-1337: the denial names the stopped gateway and the start command.
-		if !strings.HasPrefix(r.stdout, `{"decision":"deny","reason":"DefenseClaw blocked this `) ||
-			!strings.Contains(r.stdout, "defenseclaw-gateway start") {
-			t.Errorf("stdout = %q", r.stdout)
-		}
-	})
-
-	t.Run("5xx treated as transport", func(t *testing.T) {
-		r := run(t, "codex", &stubRT{status: 503, body: "boom"}, func(o *Options) {
-			o.StrictAvailability = true
-		})
-		if r.code != 0 {
-			t.Fatalf("code = %d, want 0 for structured Codex deny", r.code)
-		}
-		if r.stdout != `{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"DefenseClaw hook failed closed"}}`+"\n" {
-			t.Errorf("stdout = %q", r.stdout)
-		}
-	})
-}
 
 // GAP-0159: a per-user hook the gateway refused with its own message (a
 // Codex update left the protected hook setup stale: HTTP 409) showed only
@@ -1169,16 +1210,13 @@ func TestPerUserColdStartOutlivesTheCall(t *testing.T) {
 	}
 }
 
-// --- Response-layer failure (4xx / bad JSON): honors FAIL_MODE ---
+// --- Response-layer failures are closed outside Secure Client. ---
 
 func TestResponseFailure(t *testing.T) {
-	t.Run("4xx fail open allows", func(t *testing.T) {
+	t.Run("4xx fail open blocks", func(t *testing.T) {
 		r := run(t, "claudecode", &stubRT{status: 401, body: "unauthorized"}, nil)
-		if r.code != 0 {
-			t.Fatalf("code = %d, want 0", r.code)
-		}
-		if r.stdout != "" {
-			t.Errorf("stdout = %q, want empty for non-Cursor fail-open", r.stdout)
+		if r.code != blockExit || !strings.Contains(r.stderr, "HTTP 401") {
+			t.Fatalf("code = %d stderr = %q, want an authentication refusal", r.code, r.stderr)
 		}
 	})
 
@@ -1194,13 +1232,13 @@ func TestResponseFailure(t *testing.T) {
 		}
 	})
 
-	t.Run("cursor response failure fail open emits valid allow json", func(t *testing.T) {
+	t.Run("cursor response failure fail open emits valid deny json", func(t *testing.T) {
 		r := run(t, "cursor", &stubRT{status: 401, body: "unauthorized"}, nil)
 		if r.code != 0 {
 			t.Fatalf("code = %d, want 0", r.code)
 		}
-		if r.stdout != cursorFallbackOutput("PreToolUse", false, "")+"\n" {
-			t.Errorf("stdout = %q, want Cursor allow JSON", r.stdout)
+		if r.stdout != cursorFallbackOutput("PreToolUse", true, "DefenseClaw hook failed closed")+"\n" {
+			t.Errorf("stdout = %q, want Cursor deny JSON", r.stdout)
 		}
 	})
 
@@ -1233,7 +1271,7 @@ func TestResponseFailure(t *testing.T) {
 		if r.stdout != `{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"DefenseClaw hook failed closed"}}`+"\n" {
 			t.Errorf("stdout = %q", r.stdout)
 		}
-		if !strings.Contains(r.stderr, "invalid JSON response") {
+		if !strings.Contains(r.stderr, "invalid or ambiguous JSON response") {
 			t.Errorf("stderr = %q, want invalid JSON", r.stderr)
 		}
 	})
@@ -1516,9 +1554,14 @@ func TestAntigravityEventBindingRequiresReviewedExactEvent(t *testing.T) {
 			if rt.requests != 0 || rt.gotReq != nil {
 				t.Fatalf("unreviewed event %q reached the gateway", event)
 			}
-			if result.code != 0 || strings.Contains(result.stdout, `"deny"`) {
+			// The payload's event fields are never used. The input is not
+			// clearly another event, so the closed hook refuses it as a
+			// possible tool call (review round 3), with the binding as the
+			// reason, not a gateway verdict.
+			if result.code != 0 || !strings.Contains(result.stdout, `"decision":"deny"`) ||
+				!strings.Contains(result.stdout, "registered without an Antigravity event") {
 				t.Fatalf(
-					"unreviewed event %q synthesized enforcement: code=%d stdout=%q stderr=%q",
+					"unreviewed event %q: code=%d stdout=%q stderr=%q, want the binding refusal",
 					event, result.code, result.stdout, result.stderr,
 				)
 			}
@@ -1526,9 +1569,11 @@ func TestAntigravityEventBindingRequiresReviewedExactEvent(t *testing.T) {
 	}
 }
 
-// Per-user Copilot hooks fail open on every DefenseClaw-side failure;
-// administrator-managed (standalone enterprise) Copilot hooks deny the tool
-// call with Copilot's native structured decision instead.
+// A Copilot hook denies the tool call on every DefenseClaw-side failure with
+// Copilot's native structured decision: an administrator-managed
+// (standalone enterprise) hook always, a per-user hook in fail mode closed
+// with a text that says why and what to do. A per-user open hook still blocks
+// a completed gateway error response.
 func TestCopilotFailureContract(t *testing.T) {
 	type failureCase struct {
 		name   string
@@ -1554,31 +1599,84 @@ func TestCopilotFailureContract(t *testing.T) {
 		}},
 	}
 	for _, tc := range cases {
-		for _, managedHook := range []bool{false, true} {
-			t.Run(fmt.Sprintf("%s/managed=%t", tc.name, managedHook), func(t *testing.T) {
+		for _, hook := range []string{"managed", "per-user closed", "per-user open"} {
+			t.Run(tc.name+"/"+hook, func(t *testing.T) {
 				result := run(t, "copilot", tc.rt, func(o *Options) {
 					o.Event = "preToolUse"
 					o.FailMode = "closed"
-					o.StrictAvailability = true
-					o.ManagedEnterprise = managedHook
+					switch hook {
+					case "managed":
+						o.StrictAvailability = true
+						o.ManagedEnterprise = true
+					case "per-user open":
+						o.FailMode = "open"
+					}
 					if tc.mutate != nil {
 						tc.mutate(o)
 					}
 				})
-				want := ""
-				if managedHook {
-					want = `{"permissionDecision":"deny","permissionDecisionReason":"DefenseClaw policy service is unavailable."}` + "\n"
-				} else if tc.name == "unavailable-home" {
-					want = `{"permissionDecision":"deny","permissionDecisionReason":"DefenseClaw hook failed closed"}` + "\n"
+				if result.code != 0 {
+					t.Fatalf("Copilot failure result: code=%d stdout=%q stderr=%q, want 0", result.code, result.stdout, result.stderr)
 				}
-				if result.code != 0 || result.stdout != want {
-					t.Fatalf(
-						"Copilot failure result: code=%d stdout=%q stderr=%q, want stdout %q",
-						result.code, result.stdout, result.stderr, want,
-					)
+				switch {
+				case hook == "managed":
+					want := `{"permissionDecision":"deny","permissionDecisionReason":"DefenseClaw policy service is unavailable."}` + "\n"
+					if result.stdout != want {
+						t.Fatalf("managed: stdout=%q stderr=%q, want %q", result.stdout, result.stderr, want)
+					}
+				case hook == "per-user open" && (tc.name == "network" || tc.name == "missing-token" || tc.name == "unavailable-home"):
+					// Only a refused connection, a missing token and an
+					// unavailable home use the per-user open choice; an
+					// answered, timed-out, malformed or oversized call blocks.
+					if result.stdout != "" {
+						t.Fatalf("per-user open: stdout=%q stderr=%q, want the fail-open result", result.stdout, result.stderr)
+					}
+				case tc.name == "unavailable-home":
+					want := `{"permissionDecision":"deny","permissionDecisionReason":"DefenseClaw hook failed closed"}` + "\n"
+					if result.stdout != want {
+						t.Fatalf("per-user closed: stdout=%q, want %q", result.stdout, want)
+					}
+				default:
+					var answer struct {
+						Decision string `json:"permissionDecision"`
+						Reason   string `json:"permissionDecisionReason"`
+					}
+					if err := json.Unmarshal([]byte(result.stdout), &answer); err != nil || answer.Decision != "deny" ||
+						!strings.HasPrefix(answer.Reason, "DefenseClaw blocked this tool call: ") || strings.Contains(answer.Reason, "administrator") {
+						t.Fatalf("per-user closed: stdout=%q stderr=%q, want Copilot's deny with the per-user reason", result.stdout, result.stderr)
+					}
 				}
 			})
 		}
+	}
+}
+
+// A per-user Copilot permission request DefenseClaw cannot check in fail mode
+// closed gets Copilot's permissionRequest deny, and the hook-failure log says
+// the call was refused; the events Copilot cannot block keep the fail-open
+// result.
+func TestPerUserCopilotClosedDeniesPermissionRequestsAndLogsClosed(t *testing.T) {
+	for _, tc := range []struct{ event, want string }{
+		{"permissionRequest", `"behavior":"deny"`},
+		{"sessionStart", ""},
+	} {
+		t.Run(tc.event, func(t *testing.T) {
+			var home string
+			result := run(t, "copilot", &stubRT{err: errors.New("connection refused")}, func(o *Options) {
+				o.Event = tc.event
+				o.FailMode = "closed"
+				home = o.Home
+			})
+			if result.code != 0 || (tc.want == "") != (result.stdout == "") || !strings.Contains(result.stdout, tc.want) {
+				t.Fatalf("code=%d stdout=%q stderr=%q, want %q", result.code, result.stdout, result.stderr, tc.want)
+			}
+			if tc.want == "" {
+				return
+			}
+			if logged := lastHookFailure(t, home)["fail_mode"]; logged != "closed" {
+				t.Fatalf("logged fail_mode = %q, want closed", logged)
+			}
+		})
 	}
 }
 
@@ -2218,6 +2316,10 @@ func TestWindowsUnenrolledRefusalLeadsWithTheNextStep(t *testing.T) {
 			Stderr:                   &errb,
 			HTTPClient:               &http.Client{Transport: rt},
 		})
+		if !strings.Contains(errb.String(), "once you have signed in and the agent is installed") ||
+			!strings.Contains(errb.String(), "first start if that is later") {
+			t.Fatalf("enrollment wait must name its prerequisites and later starting point: %q", errb.String())
+		}
 		first, _, _ := strings.Cut(errb.String(), "\n")
 		if code == 0 || rt.requests != 0 || !strings.HasPrefix(first, lead) || len(lead) > 80 {
 			t.Fatalf("%s: code %d requests %d first stderr line %q, want a block that starts %q", reason, code, rt.requests, first, lead)
@@ -2270,6 +2372,39 @@ func TestUnknownConnector(t *testing.T) {
 	}
 }
 
+// until 1.1: a hook an older release registered for a removed connector (on
+// Windows, the native launcher) blocks every call, in every fail mode, and
+// says that support was removed in 1.0.4; it never reaches the gateway.
+func TestRemovedConnectorHookBlocksWithTheRemovalReason(t *testing.T) {
+	for _, connector := range []string{"openhands", "OpenHands", "omnigent"} {
+		for _, failMode := range []string{"open", "closed"} {
+			t.Run(connector+"/"+failMode, func(t *testing.T) {
+				var out, errb bytes.Buffer
+				home := t.TempDir()
+				code := Run(context.Background(), Options{
+					Connector: connector, Event: "PreToolUse", FailMode: failMode, Home: home, HookDir: home, Token: "t",
+					Stdin: strings.NewReader(`{"tool_name":"bash"}`), Stdout: &out, Stderr: &errb,
+				})
+				if code != 2 {
+					t.Fatalf("code = %d, want 2 (block)", code)
+				}
+				if !strings.Contains(errb.String(), "support was removed in DefenseClaw 1.0.4") {
+					t.Fatalf("stderr = %q, want the removal reason", errb.String())
+				}
+				if strings.EqualFold(connector, "openhands") {
+					var decision map[string]string
+					if err := json.Unmarshal(out.Bytes(), &decision); err != nil || decision["decision"] != "deny" ||
+						!strings.Contains(decision["reason"], "OpenHands support was removed") {
+						t.Fatalf("stdout = %q, want the OpenHands deny decision", out.String())
+					}
+				} else if out.Len() != 0 {
+					t.Fatalf("stdout = %q, want none", out.String())
+				}
+			})
+		}
+	}
+}
+
 func TestReadTokenFile(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, ".token")
@@ -2315,7 +2450,7 @@ func TestReadTokenFileManagedRejectsOversizedSparseFileWithoutChangingUnmanagedM
 
 func TestSupportedConnectorsSorted(t *testing.T) {
 	got := SupportedConnectors()
-	want := []string{"amp", "antigravity", "claudecode", "codex", "copilot", "cursor", "devin", "hermes", "kiro", "opencode", "openhands"}
+	want := []string{"amp", "antigravity", "claudecode", "codex", "copilot", "cursor", "devin", "hermes", "kiro", "opencode"}
 	if len(got) != len(want) {
 		t.Fatalf("got %v, want %v", got, want)
 	}
@@ -2428,9 +2563,9 @@ func TestCodexSessionEndDeadlineCancelsBlockingTransport(t *testing.T) {
 	}
 }
 
-// gatewayDownReason is the per-user denial text of an unreachable gateway (GAP-1337).
-func gatewayDownReason(event string) string {
-	return mustJSONString(perUserGatewayDownText(Options{Event: event}, "gateway unreachable"))
+// gatewayNoAnswerReason is the per-user denial text for a deadline with no answer.
+func gatewayNoAnswerReason(event string) string {
+	return mustJSONString(perUserGatewayDownText(Options{Event: event}, perUserGatewayNoAnswerReason))
 }
 
 func TestCodexFailClosedUsesEventSpecificControlSchema(t *testing.T) {
@@ -2440,15 +2575,15 @@ func TestCodexFailClosedUsesEventSpecificControlSchema(t *testing.T) {
 	}{
 		{
 			event:      "SessionStart",
-			wantStdout: `{"continue":false,"stopReason":` + gatewayDownReason("SessionStart") + "}\n",
+			wantStdout: `{"continue":false,"stopReason":` + gatewayNoAnswerReason("SessionStart") + "}\n",
 		},
 		{
 			event:      "PreCompact",
-			wantStdout: `{"continue":false,"stopReason":` + gatewayDownReason("PreCompact") + "}\n",
+			wantStdout: `{"continue":false,"stopReason":` + gatewayNoAnswerReason("PreCompact") + "}\n",
 		},
 		{
 			event:      "PostCompact",
-			wantStdout: `{"continue":false,"stopReason":` + gatewayDownReason("PostCompact") + "}\n",
+			wantStdout: `{"continue":false,"stopReason":` + gatewayNoAnswerReason("PostCompact") + "}\n",
 		},
 		{
 			// A blocked stop event keeps Codex running the turn (#1140):
@@ -2463,7 +2598,7 @@ func TestCodexFailClosedUsesEventSpecificControlSchema(t *testing.T) {
 		{
 			event: "PreToolUse",
 			wantStdout: `{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny",` +
-				`"permissionDecisionReason":` + gatewayDownReason("PreToolUse") + "}}\n",
+				`"permissionDecisionReason":` + gatewayNoAnswerReason("PreToolUse") + "}}\n",
 		},
 		{
 			event:      "SessionEnd",
@@ -2495,7 +2630,7 @@ func TestCodexV3GenericFailClosedUsesLifecycleControl(t *testing.T) {
 		opts.FailMode = "closed"
 		opts.StrictAvailability = true
 	})
-	wantStdout := `{"continue":false,"stopReason":` + gatewayDownReason("SessionStart") + "}\n"
+	wantStdout := `{"continue":false,"stopReason":` + gatewayNoAnswerReason("SessionStart") + "}\n"
 	if result.code != 0 || result.stdout != wantStdout {
 		t.Fatalf("code=%d stdout=%q want %q stderr=%q", result.code, result.stdout, wantStdout, result.stderr)
 	}
@@ -2544,8 +2679,12 @@ func TestCodexGatewayControlIsDiscardedOutsideBoundContract(t *testing.T) {
 				opts.Event = "PreCompact"
 				opts.HookContractID = contractID
 			})
-			if result.code != 0 || result.stdout != "" {
-				t.Fatalf("unsupported gateway control leaked: code=%d stdout=%q", result.code, result.stdout)
+			wantCode := 2
+			if contractID == "codex-hooks-v2" {
+				wantCode = 0
+			}
+			if result.code != wantCode || result.stdout != "" {
+				t.Fatalf("unsupported gateway control leaked: code=%d stdout=%q, want code %d", result.code, result.stdout, wantCode)
 			}
 		})
 	}
@@ -2831,7 +2970,7 @@ func TestSecureClientCopilotHookFollowsItsDeliveryMode(t *testing.T) {
 		home := t.TempDir()
 		var stdout, stderr bytes.Buffer
 		opts := Options{Connector: "copilot", Event: "preToolUse", ManagedEnterprise: true, SecureClient: true,
-			Home: home, Stdout: &stdout, Stderr: &stderr, Now: time.Now}
+			Home: home, FailureLogHome: userLogHome(home), Stdout: &stdout, Stderr: &stderr, Now: time.Now}
 		mutate(&opts)
 		code := fail(opts)
 		failures, _ := os.ReadFile(filepath.Join(home, "logs", "hook-failures.jsonl"))
@@ -2857,9 +2996,13 @@ func TestSecureClientCopilotHookFollowsItsDeliveryMode(t *testing.T) {
 	if _, stdout, _ := run(strict, unreachable); !strings.Contains(stdout, `"permissionDecision":"deny"`) {
 		t.Fatalf("strict availability allowed a stopped gateway: %q", stdout)
 	}
-	unenrolled := func(opts Options) int { return failUnenrolled(opts, sp, managedUIDUnregisteredReason) }
+	unenrolled := func(opts Options) int { return failEnrollmentRefusal(opts, sp, managedUIDUnregisteredReason) }
 	if _, stdout, _ := run(open, unenrolled); !strings.Contains(stdout, `"permissionDecision":"deny"`) {
 		t.Fatalf("an unenrolled account's call was allowed: %q", stdout)
+	}
+	rootDenied := func(opts Options) int { return failEnrollmentRefusal(opts, sp, managedRootDeniedReason) }
+	if _, stdout, _ := run(open, rootDenied); !strings.Contains(stdout, `"permissionDecision":"deny"`) {
+		t.Fatalf("root's refused call was allowed: %q", stdout)
 	}
 	// A standalone hook follows the administrator's mode (owner decision
 	// 2026-10-20): open allows a stopped gateway, closed denies it.
@@ -2992,25 +3135,26 @@ func TestManagedNativeDecisionRejectsMissingActionAndOutput(t *testing.T) {
 	}
 }
 
-func TestOSSOpenNativeDecisionMissingActionUsesOpenFailure(t *testing.T) {
+func TestOSSOpenNativeDecisionMissingActionClosesWhereSupported(t *testing.T) {
 	for _, tc := range []struct {
 		connector, event, body, wantOutput string
+		wantCode                           int
 	}{
-		{"cursor", "beforeShellExecution", `{}`, `{"permission":"allow"}` + "\n"},
-		{"copilot", "preToolUse", `{}`, ""},
-		{"devin", "PreToolUse", `{}`, ""},
-		{"kiro", "PreToolUse", `{}`, ""},
-		{"opencode", "tool.execute.before", `{}`, ""},
-		{"cursor", "beforeShellExecution", `{"action":"allow"}`, `{"permission":"allow"}` + "\n"},
-		{"copilot", "preToolUse", `{"action":"allow"}`, ""},
-		{"devin", "PreToolUse", `{"action":"allow"}`, ""},
-		{"kiro", "PreToolUse", `{"action":"allow"}`, ""},
-		{"opencode", "tool.execute.before", `{"action":"allow"}`, `{"action":"allow"}` + "\n"},
+		{"cursor", "beforeShellExecution", `{}`, `{"permission":"deny","user_message":"DefenseClaw hook failed closed","agent_message":"DefenseClaw hook failed closed"}` + "\n", 0},
+		{"copilot", "preToolUse", `{}`, `{"permissionDecision":"deny","permissionDecisionReason":"DefenseClaw blocked this tool call: the DefenseClaw gateway returned an answer DefenseClaw could not use. Run ` + "`defenseclaw doctor`" + ` to see why."}` + "\n", 0},
+		{"devin", "PreToolUse", `{}`, "DefenseClaw hook failed closed\n", 2},
+		{"kiro", "PreToolUse", `{}`, "", 2},
+		{"opencode", "tool.execute.before", `{}`, `{"hook_output":{"decision":"deny","reason":"DefenseClaw hook failed closed"}}` + "\n", 2},
+		{"cursor", "beforeShellExecution", `{"action":"allow"}`, `{"permission":"allow"}` + "\n", 0},
+		{"copilot", "preToolUse", `{"action":"allow"}`, "", 0},
+		{"devin", "PreToolUse", `{"action":"allow"}`, "", 0},
+		{"kiro", "PreToolUse", `{"action":"allow"}`, "", 0},
+		{"opencode", "tool.execute.before", `{"action":"allow"}`, `{"action":"allow"}` + "\n", 0},
 	} {
 		var stdout, stderr bytes.Buffer
 		opts := Options{Connector: tc.connector, Event: tc.event, FailMode: "open", Stdout: &stdout, Stderr: &stderr}
 		code := specs[tc.connector].decide(opts, []byte(tc.body))
-		if code != 0 || stdout.String() != tc.wantOutput {
+		if code != tc.wantCode || stdout.String() != tc.wantOutput {
 			t.Errorf("%s %s: code=%d stdout=%q stderr=%q, want %q", tc.connector, tc.body, code, stdout.String(), stderr.String(), tc.wantOutput)
 		}
 	}
@@ -3029,4 +3173,66 @@ func TestManagedNativeDecisionAcceptsExplicitAllowWithoutNativeOutput(t *testing
 			t.Errorf("%s explicit allow: code=%d stdout=%q stderr=%q", tc.connector, code, stdout.String(), stderr.String())
 		}
 	}
+}
+
+func TestUnreachable(t *testing.T) {
+	t.Run("default fail open", func(t *testing.T) {
+		r := run(t, "claudecode", &stubRT{err: errors.New("dial tcp: refused")}, nil)
+		if r.code != 0 {
+			t.Fatalf("code = %d, want 0 (DefenseClaw outage must not brick agent)", r.code)
+		}
+		if !strings.Contains(r.stderr, "allowing claude-code tool") {
+			t.Errorf("stderr = %q, want allow notice", r.stderr)
+		}
+		// GAP-0377: Claude Code hides stderr after exit 0, so the user reads
+		// the per-user outage notice from systemMessage, as on Unix.
+		var notice map[string]string
+		if json.Unmarshal([]byte(r.stdout), &notice) != nil ||
+			!strings.Contains(notice["systemMessage"], "defenseclaw-gateway start") ||
+			!strings.Contains(notice["systemMessage"], "`defenseclaw-gateway status`") {
+			t.Errorf("stdout = %q, want a systemMessage naming defenseclaw-gateway start and status", r.stdout)
+		}
+		managed := run(t, "claudecode", &stubRT{err: errors.New("dial tcp: refused")}, func(o *Options) {
+			o.ManagedUnixSocket = "/run/defenseclaw/hook.sock"
+		})
+		if managed.stdout != "" {
+			t.Errorf("socket hook stdout = %q, want no per-user notice", managed.stdout)
+		}
+	})
+
+	t.Run("cursor fail open emits valid allow json", func(t *testing.T) {
+		r := run(t, "cursor", &stubRT{err: errors.New("dial tcp: refused")}, nil)
+		if r.code != 0 {
+			t.Fatalf("code = %d, want 0", r.code)
+		}
+		if r.stdout != cursorFallbackOutput("PreToolUse", false, "")+"\n" {
+			t.Errorf("stdout = %q, want Cursor allow JSON", r.stdout)
+		}
+	})
+
+	t.Run("strict availability fails closed", func(t *testing.T) {
+		r := run(t, "devin", &stubRT{err: errors.New("refused")}, func(o *Options) {
+			o.StrictAvailability = true
+		})
+		if r.code != 2 {
+			t.Fatalf("code = %d, want 2", r.code)
+		}
+		// GAP-1337: the denial names the stopped gateway and the start command.
+		if !strings.HasPrefix(r.stdout, "DefenseClaw blocked this ") ||
+			!strings.Contains(r.stdout, "defenseclaw-gateway start") {
+			t.Errorf("stdout = %q", r.stdout)
+		}
+	})
+
+	t.Run("5xx treated as transport", func(t *testing.T) {
+		r := run(t, "codex", &stubRT{status: 503, body: "boom"}, func(o *Options) {
+			o.StrictAvailability = true
+		})
+		if r.code != 0 {
+			t.Fatalf("code = %d, want 0 for structured Codex deny", r.code)
+		}
+		if r.stdout != `{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"DefenseClaw hook failed closed"}}`+"\n" {
+			t.Errorf("stdout = %q", r.stdout)
+		}
+	})
 }

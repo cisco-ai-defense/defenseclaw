@@ -237,7 +237,8 @@ def test_f0561_local_grafana_is_loopback_bound_and_authenticated() -> None:
     password_environment = overlay["services"]["grafana"]["environment"]
 
     assert base_environment["GF_AUTH_ANONYMOUS_ENABLED"] == "true"
-    assert base_environment["GF_AUTH_ANONYMOUS_ORG_ROLE"] == "Admin"
+    # Anonymous access is read-only, never Admin (fix/r104-windows).
+    assert base_environment["GF_AUTH_ANONYMOUS_ORG_ROLE"] == "Viewer"
     assert base_environment["GF_AUTH_DISABLE_LOGIN_FORM"] == "true"
     assert password_environment["GF_AUTH_ANONYMOUS_ENABLED"] == "false"
     assert password_environment["GF_AUTH_DISABLE_LOGIN_FORM"] == "false"

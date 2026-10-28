@@ -143,7 +143,7 @@ func TestEnumerateWindowsGroupThatDoesNotResolve(t *testing.T) {
 		}
 		// A member of another, resolvable include group is still admitted.
 		stubGroupDirectory(t, map[string]string{"developers": testLocalDevelopers}, map[string][]string{testLocalDevelopers: {testLocalUserThree}})
-		groups := newWindowsEnrollmentGroups([]string{"Develpers", "Developers"}, nil, nil, NewWindowsEnrollmentGroupCache(), nil)
+		groups := newWindowsEnrollmentGroups([]string{"Develpers", "Developers"}, nil, nil, nil, NewWindowsEnrollmentGroupCache(), nil)
 		if decision, reason := groups.decide(testLocalUserThree); decision != windowsEnrollmentEnrolled {
 			t.Fatalf("a member of a resolvable include group: %d (%s)", decision, reason)
 		}
@@ -176,7 +176,7 @@ func TestWindowsEnrollmentGroupsDecideWellKnownGroupsFromTokens(t *testing.T) {
 		{"a local group reached through a well-known member is unknown for a signed-out non-member", []string{users}, nil, testLocalUserTwo, windowsEnrollmentUndecided},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			groups := newWindowsEnrollmentGroups(tc.include, tc.exclude, sessions, NewWindowsEnrollmentGroupCache(), nil)
+			groups := newWindowsEnrollmentGroups(tc.include, tc.exclude, sessions, nil, NewWindowsEnrollmentGroupCache(), nil)
 			if got, reason := groups.decide(tc.sid); got != tc.want {
 				t.Fatalf("decision %d (%s), want %d", got, reason, tc.want)
 			}
@@ -194,7 +194,7 @@ func TestWindowsEnrollmentGroupsDecideWellKnownGroupsFromTokens(t *testing.T) {
 		cache := NewWindowsEnrollmentGroupCache()
 		cache.Users[testDomainUserB] = []string{testLocalDevelopers}
 		sessions := map[string][]string{testDomainUserA: {testDomainGroupSID, testLocalDevelopers}}
-		groups := newWindowsEnrollmentGroups([]string{"Developers"}, []string{`CONTOSO\Contractors`}, sessions, cache, nil)
+		groups := newWindowsEnrollmentGroups([]string{"Developers"}, []string{`CONTOSO\Contractors`}, sessions, nil, cache, nil)
 
 		for sid, want := range map[string]windowsEnrollmentDecision{
 			testLocalUserSID: windowsEnrollmentEnrolled,  // local account, direct member of Developers
@@ -215,27 +215,31 @@ func TestWindowsEnrollmentGroupsDecideWellKnownGroupsFromTokens(t *testing.T) {
 			t.Fatalf("resolved names must be cached: %v", cache.Names)
 		}
 
-		// Off the network the names no longer resolve; the cached SIDs keep
-		// deciding.
+		// Off the network the names no longer resolve. Their cached SIDs
+		// decide no one, since the groups may have been recreated under
+		// those names (W2B-G-enum review loop 4): a holder of a cached SID is
+		// pending, neither excluded nor admitted.
 		stubGroupDirectory(t, map[string]string{}, map[string][]string{testLocalDevelopers: {testLocalUserSID}})
-		offline := newWindowsEnrollmentGroups([]string{"Developers"}, []string{`CONTOSO\Contractors`}, nil, cache, nil)
-		if got, reason := offline.decide(testDomainUserA); got != windowsEnrollmentExcluded {
-			t.Fatalf("cached membership off the network: %d (%s)", got, reason)
+		offline := newWindowsEnrollmentGroups([]string{"Developers"}, []string{`CONTOSO\Contractors`}, nil, nil, cache, nil)
+		for _, sid := range []string{testDomainUserA, testDomainUserB, testLocalUserSID} {
+			if got, reason := offline.decide(sid); got != windowsEnrollmentUndecided || !strings.Contains(reason, "did not resolve this cycle") {
+				t.Fatalf("%s: cached membership off the network: %d (%s), want pending", sid, got, reason)
+			}
 		}
 		// An exclude_groups name that never resolved excludes no one; an
 		// include_groups one leaves the users no other entry admits pending,
 		// never excluded.
-		unknown := newWindowsEnrollmentGroups(nil, []string{`CONTOSO\Offline`}, nil, NewWindowsEnrollmentGroupCache(), nil)
+		unknown := newWindowsEnrollmentGroups(nil, []string{`CONTOSO\Offline`}, nil, nil, NewWindowsEnrollmentGroupCache(), nil)
 		if got, reason := unknown.decide(testLocalUserSID); got != windowsEnrollmentEnrolled {
 			t.Fatalf("unresolved exclude group: %d (%s), want enrolled", got, reason)
 		}
-		unknownInclude := newWindowsEnrollmentGroups([]string{`CONTOSO\Offline`}, nil, nil, NewWindowsEnrollmentGroupCache(), nil)
+		unknownInclude := newWindowsEnrollmentGroups([]string{`CONTOSO\Offline`}, nil, nil, nil, NewWindowsEnrollmentGroupCache(), nil)
 		if got, _ := unknownInclude.decide(testLocalUserSID); got != windowsEnrollmentUndecided {
 			t.Fatalf("unresolved include group: %d, want undecided", got)
 		}
 		// SIDs work without any lookup, including Entra ID groups.
 		const entraGroup = "S-1-12-1-1111111111-2222222222-3333333333-4044444444"
-		bySID := newWindowsEnrollmentGroups([]string{entraGroup}, nil, map[string][]string{testEntraUserSID: {entraGroup}}, NewWindowsEnrollmentGroupCache(), nil)
+		bySID := newWindowsEnrollmentGroups([]string{entraGroup}, nil, map[string][]string{testEntraUserSID: {entraGroup}}, nil, NewWindowsEnrollmentGroupCache(), nil)
 		if got, _ := bySID.decide(testEntraUserSID); got != windowsEnrollmentEnrolled {
 			t.Fatalf("Entra ID group by SID: %d", got)
 		}
@@ -247,6 +251,7 @@ func TestWindowsEnrollmentGroupsDecideWellKnownGroupsFromTokens(t *testing.T) {
 // oldest enrolled contract, so one user editing their package.json moved
 // every user from claudecode-hooks-v2 to v1, which lacks hooks v2 has.
 func TestStandaloneKnownClaudeRowNeverMovesTheSharedPolicyToAnOlderContract(t *testing.T) {
+	stubWindowsSurfaceReadAs(t)
 	stubMachineWinGet(t, nil)
 	const older, newer = "2.1.160", "2.1.230"
 	v2 := connector.ResolveHookContract("claudecode", newer).Contract.ContractID

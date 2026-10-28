@@ -16,7 +16,6 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/observability/router"
 	observabilityruntime "github.com/defenseclaw/defenseclaw/internal/observability/runtime"
 	"github.com/defenseclaw/defenseclaw/internal/version"
-	"github.com/google/uuid"
 )
 
 const (
@@ -164,7 +163,7 @@ func (r *EventRouter) emitAgentRunObservationV8(
 		}
 		builder, buildErr := observability.NewFamilyBuilder(
 			observability.ClockFunc(time.Now),
-			observability.OccurrenceIDGeneratorFunc(func() (string, error) { return uuid.NewString(), nil }),
+			observability.TimeOrderedOccurrenceIDs,
 		)
 		if buildErr != nil {
 			return observability.Record{}, buildErr
@@ -272,7 +271,7 @@ func (r *EventRouter) emitAgentRunObservationRejectionV8() {
 			return observability.Record{}, &sidecarObservabilityError{code: sidecarObservabilityBuildFailed}
 		}
 		clock := observability.ClockFunc(func() time.Time { return time.Now().UTC() })
-		ids := observability.OccurrenceIDGeneratorFunc(func() (string, error) { return uuid.NewString(), nil })
+		ids := observability.TimeOrderedOccurrenceIDs
 		provenance := observability.Provenance{
 			Producer:              agentRunObservationProducer,
 			BinaryVersion:         version.Current().BinaryVersion,

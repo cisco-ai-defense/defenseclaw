@@ -21,13 +21,7 @@ This page inventories the detectors currently shipped in the repository and
 explains which layer owns each decision. Benchmark scores for these layers are
 published in [Deterministic Detection Benchmarks](/docs/guardrail/benchmarks).
 
-<Callout type="info" title="Repository snapshot">
-The balanced/default enabled rule catalog contains 239 local rules across seven
-families. The repository also contains 26 fixed bounded chains, ten
-MCP-description YARA signatures, two post-event correlator patterns, five
-selectable high-assurance packs, and one staged SSH integrity policy contract.
-The YAML and Go files linked below remain authoritative if these counts change.
-</Callout>
+The balanced/default enabled rule catalog contains 239 local rules across seven families. The repository also contains 26 fixed bounded chains, eleven MCP-description YARA signatures, two post-event correlator patterns, five selectable high-assurance packs and one staged SSH integrity policy contract. The YAML and Go files in [Source of truth](#source-of-truth-and-validation) are authoritative if these counts change.
 
 ## Decision architecture
 
@@ -99,7 +93,7 @@ installers use that pattern. The strict profile enables the rule at `CRITICAL`.
 To get the finding for `curl` pipelines, switch to the strict pack with
 `defenseclaw guardrail use-pack strict`, or add your own rule in a pack of your
 own. [Authoring CEL rules](/docs/policies/cel/authoring) shows the rule format,
-and [Rules and custom packs](/docs/policies/rules#add-your-own-pack) shows how to
+and [Rules and custom packs](/docs/policies/rules) shows how to
 activate it.
 
 ## ActionFacts
@@ -273,50 +267,12 @@ incomplete proof complete.
 | MEDIUM | Allow | Alert | Block |
 | LOW | Allow | Allow | Alert |
 
-Strict intentionally accepts more interruption risk. Balanced/default is the
-recommended general posture, while permissive is useful for observation-heavy
-deployments. Connector capability still controls whether `block` can become a
+Connector capability still controls whether `block` can become a
 native deny; unsupported surfaces retain the finding and audit action without
 claiming prevention. See [Defaults](/docs/policies/defaults) for the complete operator
 configuration.
 
-To change these levels without switching packs, set the lowest severity that
-blocks and the lowest that alerts, globally or for one connector:
-
-```bash
-defenseclaw guardrail block-at HIGH                       # every connector
-defenseclaw guardrail block-at CRITICAL --connector codex # except codex
-defenseclaw guardrail alert-at MEDIUM --connector codex
-defenseclaw guardrail block-at inherit --connector codex  # back to the global level
-```
-
-Levels are `CRITICAL`, `HIGH`, `MEDIUM` or `LOW`. The commands write
-`guardrail.block_at` and `guardrail.alert_at`, or the same keys under
-`guardrail.connectors.<name>`, and the running gateway applies the change
-without a restart. The most specific value wins: a profile connector, then a
-profile, then the connector's own value, then the global one, and last the
-pack's level. The alert level never ends up above the block level, so anything
-that blocks also alerts, and `CRITICAL` always blocks. The same settings in
-`config.yaml`:
-
-```yaml
-guardrail:
-  block_at: HIGH           # every connector blocks HIGH and CRITICAL
-  connectors:
-    codex:
-      block_at: CRITICAL   # except codex, which blocks only CRITICAL
-      alert_at: MEDIUM
-```
-
-The levels apply in action mode to every guardrail surface: hook tool calls
-(including bounded chains, CodeGuard on file writes and sandbox shell
-commands), hook prompts, and the guardrail proxy's prompts, completions and
-tool calls. Human approval only ever applies below the block level: anything at
-or above it blocks without asking. The pack decides everything else, such as
-which rules run. The gateway picks up an edit to these keys, from a command or
-by hand in `config.yaml`, on its next reload; no restart is needed. See
-[Thresholds](/docs/policies/thresholds) for the scopes, precedence and the
-commands that read the effective value.
+Strict accepts more interruption risk. Connector capability still controls whether `block` becomes a native deny; unsupported surfaces keep the finding and audit action without claiming prevention. Change the levels without switching packs with `defenseclaw guardrail block-at` and `alert-at` ([change block and alert levels](/docs/policies/thresholds), [thresholds](/docs/policies/thresholds)). Human approval applies only below the block level.
 
 ### Low-noise rollout
 
@@ -336,7 +292,7 @@ separate benign or mixed data; an attack-only corpus cannot establish FPR.
 
 ## YARA MCP-description scanning
 
-The MCP scanner adds ten YARA signatures from
+The MCP scanner adds eleven YARA signatures from
 `policies/yara/mcp-tools/description_injection.yara`:
 
 | Signature | Requires |
@@ -351,6 +307,7 @@ The MCP scanner adds ten YARA signatures from
 | Traffic-control override | A bounded emergency-priority or individual signal override |
 | Physical-access change | A concrete smart-lock guest grant or owned-door unlock request |
 | Network-security policy change | A concrete allowlist or business-service denylist change |
+| Hidden credential exfiltration | A home credential-file path with an instruction to read and send it, or to override earlier instructions and send or hide the access |
 
 These signatures are high-precision description-injection signals, not proof of
 authorization or tool execution. They remain alert-only. The scanner loads the
@@ -393,35 +350,297 @@ contract is refused. None of this adds another value to `defenseclaw setup guard
 Policy Creator export, validate the pack, review the declared trust boundary,
 then switch to it with `defenseclaw guardrail use-pack`. Either way, assigning
 a production-protection pack asserts that the selected connector context is
-actually protected. See [Opt-in protection packs](/docs/reference/cli#opt-in-protection-packs),
-[Authoring custom rule packs](/docs/policies#authoring-custom-rule-packs), and [Rules and custom packs](/docs/policies/rules) for the `guardrail.rules` scopes.
+actually protected. See [Opt-in protection packs](/docs/reference/cli),
+[Authoring custom rule packs](/docs/policies/cel), and [Rules and custom packs](/docs/policies/rules) for the `guardrail.rules` scopes.
+
+## Rule files
+
+Each bundled pack is a directory:
+
+```text
+policies/guardrail/<pack>/
+  rules/
+    local-patterns.yaml       # triage phrases, PII regexes, secrets, exfil
+    commands.yaml             # shell and execution rules
+    sensitive-paths.yaml      # credential and config paths
+    c2.yaml                   # command-and-control indicators
+    cognitive.yaml            # cognitive tampering
+    enterprise-data.yaml      # enterprise data exposure
+    secrets.yaml              # credential signatures
+    trust-exploit.yaml        # prompt and trust exploitation
+  judge/
+    injection.yaml
+    pii.yaml
+    tool-injection.yaml       # the exfil judge's config is compiled in
+  sensitive-tools.yaml
+  suppressions.yaml
+```
+
+### Rule shape
+
+Rules are YAML for portability and review:
+
+```yaml title="policies/guardrail/default/rules/local-patterns.yaml (excerpt)"
+version: 1
+
+# Literal substring matches (case-folded against the normalized
+# triage view, so "/ etc / passwd" still matches "/etc/passwd").
+injection:
+  - "ignore previous"
+  - "ignore all instructions"
+  - "jailbreak"
+
+# Regex matches. Compiled during candidate validation; any invalid
+# expression rejects the complete candidate.
+injection_regexes:
+  - 'ignore\s+(?:all\s+)?(?:previous|prior|above|your)\s+(?:instructions|rules|directives|guidelines)'
+
+# Per-family pattern sets the gateway scans on every request.
+# Omitting any key keeps the compiled-in default for that family.
+# Setting `field: []` explicitly clears it (rare, used in testbed
+# profiles that want a family disabled).
+secrets:
+  - "sk-"
+  - "ghp_"
+  - "-----begin rsa"
+
+pii_requests:
+  - "social security number"
+  - "credit card number"
+
+pii_data_regexes:
+  - '\b\d{3}-\d{2}-\d{4}\b'
+
+exfiltration:
+  - "/etc/passwd"
+  - "exfiltrate"
+```
+
+Regexes compile during [rule-pack validation](/docs/policies/rulepack-validation). Any invalid expression rejects the complete candidate; DefenseClaw does not log-and-drop a bad pattern while applying the rest of the file.
+
+Three-state semantics for each top-level key:
+
+- **Omit the key entirely** — keep the compiled-in default for that family. Useful when you only want to tweak one thing without copying the whole baseline.
+- **`field: [...]`** — operator override; replaces the default wholesale.
+- **`field: []`** — operator explicitly cleared the family. Mostly used in testbed profiles; rarely useful in production.
+
+The bundled `default`, `strict`, and `permissive` `local-patterns.yaml` files each carry the full baseline 1:1 with what the gateway ships compiled-in. The Go test `TestLocalPatternsDefaultsParity` fails CI if the bundled YAML drifts from the Go source, so editing one without the other can't silently downgrade posture.
 
 ## Other deterministic detection lanes
 
-### Post-event correlator
-
-Two bundled patterns operate on persisted findings:
-
-- `LETHAL-TRIFECTA`: ordered untrusted ingress, sensitive access, then external egress;
-- `TRIFECTA-WITH-FINGERPRINT-MATCH`: the same content fingerprint appears in sensitive access and later external egress.
-
-Both emit a synthetic CRITICAL `CORR-*` finding. They are post-event detection,
-not retroactive blocking and not a substitute for exact bounded tool-call
-chains.
-
 ### Optional LLM judge
 
-The injection, PII, exfil and tool-injection judges handle ambiguous content.
-They are optional, non-deterministic secondary detectors and are deliberately
-outside the benchmarked deterministic block path. The exfil judge reads prompts
-only and its configuration is compiled in; the tool-injection judge also has a
-data-exfiltration category. See [Layer 3 — LLM judge](/docs/policies#layer-3--llm-judge) on the Policies page.
+The LLM judge is an *optional* second opinion, and it is off until you enable
+`guardrail.judge.enabled`. It runs four judges:
+
+| Judge | Reads | Asks |
+| --- | --- | --- |
+| **injection** | prompts | Is this trying to override the agent's instructions? |
+| **PII** | prompts and completions | Does this contain personal data? |
+| **exfil** | prompts | Is this trying to read or ship out sensitive files, credentials or secrets? Reports `JUDGE-EXFIL-FILE` and `JUDGE-EXFIL-CHANNEL`, both HIGH. |
+| **tool-injection** | tool calls | Does the call's stated purpose disagree with its effect? Data exfiltration is one of its categories. |
+
+Each judge has its own switch under `guardrail.judge`: `injection`, `pii`
+(with `pii_prompt` and `pii_completion`), `exfil` (on by default) and
+`tool_injection`.
+
+The bundled packs ship `judge/injection.yaml`, `judge/pii.yaml` and
+`judge/tool-injection.yaml`. The exfil judge's prompt and categories are
+compiled in; a pack can override them with its own `judge/exfil.yaml`, which is
+why `validate-pack` reports `judges=4` for a bundled pack.
+
+The judges are particularly useful for:
+
+- Subtle prompt injection that doesn't match a regex.
+- Tool calls whose stated purpose disagrees with their effects (most common in MCP).
+- Categorical content checks — "does this prompt try to extract proprietary code?"
+
+#### Shared severity rubric
+
+All judges evaluate against the same severity rubric. The rubric is embedded directly in each judge's system prompt so verdicts stay consistent across categories.
+
+| Tier | Meaning |
+| --- | --- |
+| **CRITICAL** | Direct unambiguous harm, provable from the content alone. Credential exfil, destructive shell, jailbreak succeeded, SSN/passport disclosed. |
+| **HIGH** | Clear adversarial intent or high-impact sensitive data. Prompt injection with explicit override, `/etc/passwd` probe, phone number in completion. |
+| **MEDIUM** | Suspicious but ambiguous. Benign readings are plausible. |
+| **LOW** | Weak indicator; context-dependent (e.g. user self-disclosing their own email). |
+| **NONE** | No concern. |
+
+#### Signal-strength scoring
+
+For each category a judge flags, it also emits a `signal_strength` label derived from two booleans: *unambiguous* (no plausible benign reading) and *high_impact* (hard-to-reverse damage possible).
+
+| `unambiguous` | `high_impact` | `signal_strength` |
+| --- | --- | --- |
+| ✓ | ✓ | `strong_signal` |
+| ✓ | ✗ | `signal` |
+| ✗ | ✓ | `needs_review` |
+| ✗ | ✗ | `weak_signal` |
+
+The Go-side tool-judge aggregation ignores `weak_signal`. A `needs_review`
+finding can alert but cannot block by itself. Blocking requires an actionable
+corroborated category or strong structural exfiltration/destruction evidence;
+ordinary authorized coding context therefore does not become a block merely
+because one ambiguous category fired. Read the
+[contextual judge benchmark](/docs/guardrail/llm-judge-benchmark) for the production-path
+F1, false-positive, benign-block, latency, token, and cost results.
+
+Judge configuration is split by detector under `judge/`. For example, the
+injection judge declares its categories and severity mapping in
+`judge/injection.yaml`:
+
+```yaml title="policies/guardrail/default/judge/injection.yaml (excerpt)"
+version: 1
+name: injection
+enabled: true
+categories:
+  "Instruction Manipulation":
+    finding_id: JUDGE-INJ-INSTRUCT
+    severity: HIGH
+  "Obfuscation":
+    finding_id: JUDGE-INJ-OBFUSC
+    severity: CRITICAL
+min_categories_for_high: 1
+single_category_max_severity: HIGH
+min_categories_for_critical: 2
+```
+
+The judge call goes through the same Bifrost pipeline as everything else and uses the [unified LLM key](/docs/guardrail/unified-llm-key). Each judge call is emitted as a `judge` gateway event, and its token usage is reported on the judge trace and the GenAI token-usage metric, so you can monitor cost from your dashboards.
+
+You can target a different model than the rest of the stack by setting `guardrail.judge.llm` in `config.yaml`:
+
+```yaml
+guardrail:
+  judge:
+    enabled: true
+    llm:
+      model: anthropic/claude-haiku-4-5
+      api_key_env: DEFENSECLAW_LLM_KEY
+```
+
+### Suppressions
+
+Suppressions tune the LLM judge. Every rule pack carries three suppression
+lists in `suppressions.yaml`. They change only judge input and judge findings:
+a regex or CEL rule finding is never suppressed, and the request itself is
+never redacted.
+
+| List | Where it runs | Use it for |
+| --- | --- | --- |
+| `pre_judge_strips` | Before a judge reads the content | Removing known-benign metadata, such as the sender labels `cli`, `system` or `bot` (`STRIP-SYSTEM-SENDER`), from the input of the judges listed in `applies_to` |
+| `finding_suppressions` | After the PII judge reports an entity | Dropping one entity when its finding ID (for example `JUDGE-PII-EMAIL`) and the entity text both match, with a required `reason` |
+| `tool_suppressions` | After the PII judge, for one tool | Dropping only the listed PII-judge finding IDs for tool names that match `tool_pattern` |
+
+```yaml title="policies/guardrail/default/suppressions.yaml (excerpt)"
+finding_suppressions:
+  - id: SUPP-EMAIL-CHATID
+    finding_pattern: JUDGE-PII-EMAIL
+    entity_pattern: '^19:[a-f0-9\-]+@unq\.gbl\.spaces$'
+    reason: "Teams chatId format, not email address"
+```
+
+Strips don't protect secrets: a credential in a prompt is still caught by the
+`SEC-*` rules and still reaches the upstream model. To keep values out of logs
+and telemetry, see [Redaction](/docs/observability/redaction).
+
+[Tune the LLM judge](/docs/policies/suppression-cookbook) shows how to add them.
+To add a finding suppression without copying a pack, put it in
+`guardrail.rules.suppressions` in `config.yaml` or run
+`defenseclaw guardrail suppress add`; see
+[Rules and custom packs](/docs/policies/rules#customise-a-pack-with-guardrailrules).
+
+### Post-event correlator
+
+Rules, the judge and suppressions evaluate each event on its own. The **correlator** works across events: it watches the recent-finding stream for the same session and raises a synthetic `CORR-*` meta-finding when a pattern of individually-benign-looking events combines into something worse.
+
+This closes a class of attacks where no single event crosses the action threshold on its own, but the sequence across turns is an exfil path — for example, Simon Willison's **lethal trifecta** (untrusted content + sensitive data access + external egress in the same session).
+
+#### How it runs
+
+<Flow direction="TB" caption="Each time a scan that carries session and agent IDs is saved, the correlator reads that agent's most recent findings in the session (up to the largest pattern window, 30 with the bundled patterns) and checks them against the patterns. A match saves one CORR-* finding per pattern per session, at the pattern's severity (CRITICAL for both bundled patterns), in the local audit database. It never changes the request that completed the pattern.">
+  <Node id="events" kind="generic">{`Scan saved\nwith session and agent IDs`}</Node>
+  <Node id="window" kind="policy">{`Read recent findings\nsame session and agent`}</Node>
+  <Node id="patterns" kind="policy">{`Check the patterns\ndata axes · order · fingerprints`}</Node>
+  <Node id="synth" kind="datastore">{`Save a CORR-* finding\nlocal audit database`}</Node>
+  <Edge from="events" to="window" label="triggers" />
+  <Edge from="window" to="patterns" label="feeds" />
+  <Edge from="patterns" to="synth" label="on match" />
+</Flow>
+
+Every finding DefenseClaw records is tagged with a **data axis** (one or more of `ingress_untrusted`, `sensitive_access`, `egress_external`) and — on the tool-call surface — a **tool capability class** (`read_fs`, `write_fs`, `exec_shell`, `network_fetch`, `send_message`, `none`). Regex rules and judge categories resolve through the canonical mapping in `internal/guardrail/axes.go`, so patterns can reason across detectors without hard-coding rule IDs.
+
+#### Bundled patterns
+
+Two high-confidence patterns ship in `internal/guardrail/defaults/correlation-patterns.yaml`:
+
+| Pattern ID | Window | Match severity | Trigger |
+| --- | --- | --- | --- |
+| `LETHAL-TRIFECTA` | 30 events | CRITICAL | Ordered axes: untrusted ingress, then sensitive access, then external egress. |
+| `TRIFECTA-WITH-FINGERPRINT-MATCH` | 30 events | CRITICAL | Same content fingerprint seen in a `sensitive_access` finding and a later `egress_external` finding — direct exfil, not only temporal coincidence. |
+
+Broad severity-only and capability-only sequences are intentionally not bundled. The two patterns are compiled into the gateway and always run; a rule pack can't add, change or disable them (a `correlation-patterns.yaml` file in a pack fails validation as an unexpected component).
+
+#### What the operator sees
+
+When a pattern matches, the correlator writes a synthetic row into `scan_findings`:
+
+```yaml
+scanner: "correlator"
+rule_id: "CORR-LETHAL-TRIFECTA"
+severity: CRITICAL
+tags: ["correlation", "LETHAL-TRIFECTA"]
+description: |
+  contributing findings:
+    - INJ-IGNORE-ALL   at 2026-05-12T14:03:11Z
+    - SENSITIVE-PATH-SSH-KEY at 2026-05-12T14:05:42Z
+    - SRC-FETCH        at 2026-05-12T14:06:18Z
+```
+
+The row is written only to the local audit database (`scan_findings`, with a
+`scan_results` summary from scanner `correlator`). It does not go through the
+audit logger, so Splunk, OTLP and webhook sinks do not receive it today; query
+the database to act on it.
+
+<Callout>
+The correlator is **post-event detection**, not an in-flight block of the request that completed the pattern. It writes a synthetic scan summary whose verdict is `block` and a CRITICAL `CORR-*` finding to the local audit database for operator workflows, but it does not retroactively stop the contributing action or automatically quarantine later requests.
+</Callout>
+
+#### Why alert-only, not block
+
+Promoting a later request in the session to *deny* based on an earlier pattern match has two honest costs:
+
+- It inverts the existing "each request is evaluated on its own" contract.
+- It can cause spurious blocks on legitimate parallel/retry traffic in the same session.
+
+Ways to act on correlations without changing the gateway runtime:
+
+- Tail `scan_findings` for `rule_id LIKE 'CORR-%'` and invoke a custom script.
+- Feed that query into an external response workflow that disables a connector, revokes a credential, or opens an incident under your organization's policy.
 
 ### OPA/Rego
 
-OPA/Rego owns admission and final guardrail policy-domain
-decisions. It does not replace ActionFacts/CEL parsing;
-instead, it maps accepted findings and deployment context to policy outcomes.
+OPA/Rego owns admission and the final guardrail policy-domain decision. It does not replace ActionFacts and CEL parsing; it maps accepted findings and deployment context to outcomes. `config.yaml` is the only input: the gateway compiles it into each evaluation's `input.admission` and `input.thresholds`, and the bundled Rego modules read only their input. Each package returns its own result:
+
+| Rego package | Primary outputs |
+| --- | --- |
+| `defenseclaw.admission` | `verdict`, `reason` |
+| `defenseclaw.guardrail` | `action`, `severity`, `reason`, `scanner_sources` |
+
+<Sequence
+  caption="OPA is embedded in the gateway process, not a separate service. It prepares the .rego modules once per configuration generation (at start and on each reload) and receives the policy compiled from config.yaml as each query's input. If a query fails, admission denies by default and the guardrail falls back to the active profile's severity mapping."
+  participants={[
+    { id: 'gw',     label: 'Gateway',       kind: 'gateway' },
+    { id: 'engine', label: 'Policy engine', kind: 'policy' },
+    { id: 'files',  label: 'Policy files',  kind: 'datastore' },
+  ]}
+>
+  <Message from="engine" to="files"  label="prepares the .rego modules at start and reload" />
+  <Message from="gw"     to="engine" label="asks a package, with input compiled from config.yaml" />
+  <Message from="engine" to="gw"     kind="return" label="returns that package's result" />
+</Sequence>
+
+Guardrail events keep matching rule IDs, evaluation IDs, reasons and severity in their audit payloads. These power the per-rule breakdowns in [Splunk](/docs/observability/splunk) and [Grafana](/docs/observability/local-observability). An upgrade replaces the shipped `admission.rego` and `guardrail.rego` and saves your edited copy in `~/.defenseclaw/backups/rego-<time>/`; keep your own rules in a file of another name in `policies/rego` ([shipped policy files](/docs/get-started/upgrade/)).
 
 ## Source of truth and validation
 
@@ -437,11 +656,12 @@ instead, it maps accepted findings and deployment context to policy outcomes.
 | High-assurance packs | `policies/guardrail-use-cases/` |
 | Reproducible public scores | `benchmarks/` |
 
-Run the repository checks after changing a detector:
+Run the repository checks after changing a detector, using Go 1.26.4 (the CI toolchain). Run the gateway suite through the shard runner:
 
 ```bash
 make check-guardrail-catalog
-go test -timeout 30m ./internal/actionfacts ./internal/guardrail ./internal/gateway
+go test -timeout 30m ./internal/actionfacts ./internal/guardrail
+python3 scripts/go_test_shards.py --package-dir internal/gateway --shard-count 16 -- go test -timeout 30m ./internal/gateway
 go test ./benchmarks/...
 ```
 

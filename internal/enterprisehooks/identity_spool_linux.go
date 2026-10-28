@@ -47,16 +47,21 @@ import (
 // principal is sAMAccountName@REALM, recorded as upn_source=derived.
 
 const (
-	infoPipeService   = "org.freedesktop.sssd.infopipe"
-	infoPipeUPNAttr   = "userPrincipalName"
-	infoPipeUsers     = "/org/freedesktop/sssd/infopipe/Users"
-	infoPipeFindByID  = "org.freedesktop.sssd.infopipe.Users.FindByID"
-	infoPipeUserIface = "org.freedesktop.sssd.infopipe.Users.User"
-	infoPipeDomIface  = "org.freedesktop.sssd.infopipe.Domains"
-	dbusPropertiesGet = "org.freedesktop.DBus.Properties.Get"
-	dbusGetAll        = "org.freedesktop.DBus.Properties.GetAll"
-	infoPipeCallLimit = 5 * time.Second
-	infoPipeRoot      = "/org/freedesktop/sssd/infopipe"
+	infoPipeService  = "org.freedesktop.sssd.infopipe"
+	infoPipeUPNAttr  = "userPrincipalName"
+	infoPipeUsers    = "/org/freedesktop/sssd/infopipe/Users"
+	infoPipeFindByID = "org.freedesktop.sssd.infopipe.Users.FindByID"
+	// infoPipeFindByName finds a user by name; SSSD also searches the
+	// userPrincipalName of the domains for a name with an @ that names no
+	// user, whatever the [ifp] user_attributes list.
+	infoPipeFindByName = "org.freedesktop.sssd.infopipe.Users.FindByName"
+	infoPipeNotFound   = "org.freedesktop.sssd.Error.NotFound"
+	infoPipeUserIface  = "org.freedesktop.sssd.infopipe.Users.User"
+	infoPipeDomIface   = "org.freedesktop.sssd.infopipe.Domains"
+	dbusPropertiesGet  = "org.freedesktop.DBus.Properties.Get"
+	dbusGetAll         = "org.freedesktop.DBus.Properties.GetAll"
+	infoPipeCallLimit  = 5 * time.Second
+	infoPipeRoot       = "/org/freedesktop/sssd/infopipe"
 	// infoPipeFindDomain and infoPipeDomainOnline ask whether SSSD is
 	// online for a domain, as sssctl domain-status does.
 	infoPipeFindDomain   = "org.freedesktop.sssd.infopipe.FindDomainByName"
@@ -163,10 +168,21 @@ func collectIdentitySpoolRecord(ctx context.Context, account IdentitySpoolAccoun
 	if err != nil {
 		return IdentitySpoolRecord{}, err
 	}
-	record := IdentitySpoolRecord{Key: strconv.Itoa(account.UID), User: nss.Name, UpdatedAt: now}
+	record := IdentitySpoolRecord{Key: strconv.Itoa(account.UID), User: nss.Name, UpdatedAt: now, AccountSID: facts.AccountSID}
+	// The gateway lays the record only over the facts of the account whose
+	// incarnation it names: a uid handed to another account of the same
+	// name keeps its key and name (review of GAP-0551).
+	incarnation, incarnationKnown := resolver.AccountIncarnation(account.UID, nss.Name)
+	if incarnationKnown {
+		record.AccountIncarnation = incarnation
+	}
 	if facts.Source != useridentity.SourceSSSD && facts.Source != useridentity.SourceWinbind {
 		record.Facts = facts
 		return record, nil
+	}
+	if !incarnationKnown {
+		record.Facts = facts
+		return record, fmt.Errorf("cannot tell which account holds uid %d (the NSS service that answers it, or the SID SSSD holds for it)", account.UID)
 	}
 	if facts.Source == useridentity.SourceSSSD {
 		callCtx, cancel := context.WithTimeout(ctx, infoPipeCallLimit)
@@ -306,6 +322,78 @@ func infoPipeAccount(ctx context.Context, uid int) (infoPipeHeld, error) {
 		held.upn = values[0]
 	}
 	return held, nil
+}
+
+// bindIdentitySpoolUPN asks InfoPipe which user holds upn (Users.FindByName)
+// and compares its uid and SSSD domain with the account's. SSSD resolves a
+// UPN through its directory search, so the answer does not depend on the
+// [ifp] user_attributes listing userPrincipalName: the lost attribute that
+// sends the guardian here (GAP-1114) does not hide it. A user found under
+// another uid or domain holds the UPN instead: UPNBindingOther. A not-found
+// answer is UPNBindingOther only when notFoundIsOther (an Active Directory
+// account, whose domain SSSD searches by UPN); any other error is
+// UPNBindingUnknown.
+func bindIdentitySpoolUPN(ctx context.Context, uid int, sssdDomain, upn string, notFoundIsOther bool) UPNBinding {
+	upn = strings.TrimSpace(upn)
+	if upn == "" || sssdDomain == "" {
+		return UPNBindingUnknown
+	}
+	callCtx, cancel := context.WithTimeout(ctx, infoPipeCallLimit)
+	defer cancel()
+	heldUID, domain, err := infoPipeUserByName(callCtx, upn)
+	var dbusErr dbus.Error
+	switch {
+	case err == nil && heldUID == uid && strings.EqualFold(domain, sssdDomain):
+		return UPNBindingBound
+	case err == nil:
+		return UPNBindingOther
+	case notFoundIsOther && callCtx.Err() == nil && errors.As(err, &dbusErr) && dbusErr.Name == infoPipeNotFound:
+		return UPNBindingOther
+	}
+	return UPNBindingUnknown
+}
+
+// infoPipeUserByName asks InfoPipe for the uid and SSSD domain of the user
+// name names. Tests replace it.
+var infoPipeUserByName = func(ctx context.Context, name string) (int, string, error) {
+	conn, err := dbus.ConnectSystemBus(dbus.WithContext(ctx))
+	if err != nil {
+		return 0, "", err
+	}
+	defer conn.Close()
+	if err := infoPipeGate(sssdServiceState(ctx, conn)); err != nil {
+		return 0, "", err
+	}
+	var user dbus.ObjectPath
+	if err := conn.Object(infoPipeService, infoPipeUsers).CallWithContext(ctx, infoPipeFindByName, 0, name).Store(&user); err != nil {
+		return 0, "", err
+	}
+	userObject := conn.Object(infoPipeService, user)
+	var uidNumber dbus.Variant
+	if err := userObject.CallWithContext(ctx, dbusPropertiesGet, 0, infoPipeUserIface, "uidNumber").Store(&uidNumber); err != nil {
+		return 0, "", err
+	}
+	uid, ok := uidNumber.Value().(uint32)
+	if !ok || uid == 0 || uint64(uid) > math.MaxInt32 {
+		return 0, "", errors.New("unexpected InfoPipe uidNumber")
+	}
+	var domain dbus.Variant
+	if err := userObject.CallWithContext(ctx, dbusPropertiesGet, 0, infoPipeUserIface, "domain").Store(&domain); err != nil {
+		return 0, "", err
+	}
+	domainPath, ok := domain.Value().(dbus.ObjectPath)
+	if !ok || !domainPath.IsValid() {
+		return 0, "", errors.New("unexpected InfoPipe user domain")
+	}
+	var domainName dbus.Variant
+	if err := conn.Object(infoPipeService, domainPath).CallWithContext(ctx, dbusPropertiesGet, 0, infoPipeDomIface, "name").Store(&domainName); err != nil {
+		return 0, "", err
+	}
+	held, _ := domainName.Value().(string)
+	if held = strings.TrimSpace(held); held == "" {
+		return 0, "", errors.New("unexpected InfoPipe domain name")
+	}
+	return int(uid), held, nil
 }
 
 // sssdProviderDirectory maps the id provider of an SSSD domain to the

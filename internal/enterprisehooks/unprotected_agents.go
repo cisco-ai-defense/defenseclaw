@@ -17,14 +17,15 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
+
+	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 )
 
-// An agent the standalone enumerator knows is installed for an eligible user
-// but cannot enroll (its version has no verified hook contract, is below the
-// platform minimum, cannot be read, or its install is not one the guardian
-// can manage) gets no DefenseClaw hooks. The enumerator records every such
-// agent next to the manifest, and the lifecycle's status and verify report
-// them, so an unprotected agent is never a silent gap.
+// The standalone enumerator records installed agents and surfaces that
+// DefenseClaw cannot cover. An earlier enrolled Kiro CLI below the headless
+// hook floor remains installed for interactive sessions, but is still
+// uncovered. The record sits next to the manifest for status and verify.
 
 // UnprotectedAgentsFileName is the record the standalone enumerator writes
 // next to the guardian manifest (root-only on Linux and macOS; SYSTEM and
@@ -34,11 +35,59 @@ const UnprotectedAgentsFileName = "unprotected-agents.json"
 // UnprotectedAgentsMaxBytes bounds the record a reader accepts.
 const UnprotectedAgentsMaxBytes = 4 << 20
 
+// The enumerator runs every five minutes. Three missed cycles mean its last
+// result can no longer establish which agent copies are runnable now.
+const UnprotectedAgentsMaxAge = 16 * time.Minute
+
+// UnprotectedAgentsRecordStale uses the protected file's mtime as evidence
+// of the latest completed scan. The writer refreshes it even for an empty,
+// unchanged result.
+func UnprotectedAgentsRecordStale(modTime, now time.Time) bool {
+	return now.Sub(modTime) > UnprotectedAgentsMaxAge || modTime.After(now.Add(5*time.Minute))
+}
+
+// UnprotectedAgentsRecordMissing describes a record no scan has published.
+const UnprotectedAgentsRecordMissing = "missing (no scan has published it yet)"
+
+// UnprotectedAgentsStaleError is a record UnprotectedAgentsRecordStale
+// rejects; Age describes it (UnprotectedAgentsRecordAge).
+type UnprotectedAgentsStaleError struct{ Age string }
+
+func (e UnprotectedAgentsStaleError) Error() string {
+	return "enterprise hooks: unprotected-agents record is stale (" + e.Age + ")"
+}
+
+// UnprotectedAgentsRecordAge describes how old the record is.
+func UnprotectedAgentsRecordAge(modTime, now time.Time) string {
+	if modTime.After(now) {
+		return "dated " + modTime.Sub(now).Round(time.Second).String() + " in the future"
+	}
+	return now.Sub(modTime).Round(time.Second).String() + " old"
+}
+
+// UnprotectedAgentsScanPending is the one NOT COVERED row status and verify
+// show for a missing or stale record, as right after a fresh install or an
+// upgrade: a warning, not a verify failure, because no agent is known to be
+// unprotected and enforcement is unchanged (GAP-1430). An unreadable record
+// still fails verify.
+func UnprotectedAgentsScanPending(age, remedy string) string {
+	return "NOT COVERED (scan pending): the enumerator's unprotected-agents record is " + age +
+		" (limit " + UnprotectedAgentsMaxAge.String() + "), so agents installed since its last scan are not proven protected; " +
+		"enforcement is unchanged; the record refreshes on the next scheduled scan (every five minutes), or now with: " + remedy
+}
+
 // Status codes for an unprotected agent.
 const (
 	// UnprotectedCodeHookContractUnverified: the agent's version has no
 	// verified DefenseClaw hook contract.
 	UnprotectedCodeHookContractUnverified = "hook_contract_unverified"
+	// UnprotectedCodeInstallScanIncomplete means an enrolled user's install
+	// locations could not be fully inspected within the scan bound.
+	UnprotectedCodeInstallScanIncomplete = "agent_install_scan_incomplete"
+	// UnprotectedCodeKiroCLIBelowHookFloor: old kiro-cli has a headless
+	// engine that never loads the hook, even when an earlier release left
+	// interactive hooks installed for the account.
+	UnprotectedCodeKiroCLIBelowHookFloor = "kiro_cli_below_hook_floor"
 	// UnprotectedCodeAgentUnprotected: any other reason the agent could not
 	// be enrolled.
 	UnprotectedCodeAgentUnprotected = "agent_unprotected"
@@ -55,14 +104,16 @@ const (
 // unprotectedReasonMaxRunes bounds the user-influenced reason text.
 const unprotectedReasonMaxRunes = 400
 
-// UnprotectedAgent is one agent install the enumerator found but could not
-// enroll.
+// UnprotectedAgent is one installed agent or surface the enumerator found
+// that DefenseClaw cannot fully cover.
 type UnprotectedAgent struct {
 	User      string `json:"user"`
 	SID       string `json:"sid,omitempty"`
 	UID       *int   `json:"uid,omitempty"`
 	Connector string `json:"connector"`
 	Version   string `json:"version,omitempty"`
+	// InstallPath distinguishes multiple runnable copies of the same CLI.
+	InstallPath string `json:"install_path,omitempty"`
 	// Surface, Host and HostVersion describe an app or extension install
 	// (connector.AgentSurface); Version is then its engine version. Empty
 	// for a CLI install.
@@ -89,6 +140,13 @@ func UnprotectedAgentsPath(manifestPath string) string {
 
 // UnprotectedCodeForReason classifies an admission reason.
 func UnprotectedCodeForReason(reason string) string {
+	if strings.Contains(reason, "kiro-cli ") && strings.Contains(reason, "is below "+connector.KiroCLIHookFloor) {
+		return UnprotectedCodeKiroCLIBelowHookFloor
+	}
+	if strings.Contains(reason, "Kiro IDE version ") &&
+		strings.Contains(reason, "is below the certified minimum "+KiroIDEGlobalHooksFloor) {
+		return UnprotectedCodeKiroIDEBelowGlobalHooksFloor
+	}
 	if strings.Contains(reason, "not verified against a known hook contract") ||
 		strings.Contains(reason, "not covered by a known hook contract") {
 		return UnprotectedCodeHookContractUnverified
@@ -101,6 +159,9 @@ func (a UnprotectedAgent) Message() string {
 	name := strings.TrimSpace(a.Connector)
 	if version := strings.TrimSpace(a.Version); version != "" {
 		name += " " + version
+	}
+	if path := strings.TrimSpace(a.InstallPath); path != "" {
+		name += " at " + path
 	}
 	who := strings.TrimSpace(a.User)
 	if sid := strings.TrimSpace(a.SID); sid != "" {
@@ -127,7 +188,8 @@ func (a UnprotectedAgent) Message() string {
 }
 
 // MarshalUnprotectedAgents serializes agents deterministically (sorted, one
-// entry per user and connector) so an unchanged set rewrites nothing.
+// entry per user and connector, except separate Kiro CLI and IDE surfaces)
+// so an unchanged set rewrites nothing.
 func MarshalUnprotectedAgents(agents []UnprotectedAgent) ([]byte, error) {
 	normalized := normalizeUnprotectedAgents(agents)
 	data, err := json.MarshalIndent(unprotectedAgentsFile{Version: 1, Agents: normalized}, "", "  ")
@@ -153,12 +215,13 @@ func ParseUnprotectedAgents(data []byte) ([]UnprotectedAgent, error) {
 	for _, agent := range record.Agents {
 		accountOnly := agent.Code == UnprotectedCodeHomeUntrusted
 		if accountOnly {
-			agent.Connector, agent.Version, agent.Surface, agent.Host, agent.HostVersion = "", "", "", "", ""
+			agent.Connector, agent.Version, agent.InstallPath, agent.Surface, agent.Host, agent.HostVersion = "", "", "", "", "", ""
 		}
 		if (strings.TrimSpace(agent.Connector) == "" && !accountOnly) || (strings.TrimSpace(agent.User) == "" && strings.TrimSpace(agent.SID) == "") {
 			continue
 		}
-		if agent.Code != UnprotectedCodeHookContractUnverified && agent.Code != UnprotectedCodeSurfaceUnverified &&
+		if agent.Code != UnprotectedCodeHookContractUnverified && agent.Code != UnprotectedCodeInstallScanIncomplete && agent.Code != UnprotectedCodeSurfaceUnverified &&
+			agent.Code != UnprotectedCodeKiroCLIBelowHookFloor &&
 			agent.Code != UnprotectedCodeKiroIDEBelowGlobalHooksFloor && !accountOnly {
 			agent.Code = UnprotectedCodeAgentUnprotected
 		}
@@ -177,6 +240,7 @@ func normalizeUnprotectedAgents(agents []UnprotectedAgent) []UnprotectedAgent {
 		agent.SID = boundedStatusText(agent.SID, 128)
 		agent.Connector = strings.ToLower(boundedStatusText(agent.Connector, 64))
 		agent.Version = boundedStatusText(agent.Version, 128)
+		agent.InstallPath = boundedStatusText(agent.InstallPath, 512)
 		agent.Surface = strings.ToLower(boundedStatusText(agent.Surface, 32))
 		agent.Host = boundedStatusText(agent.Host, 64)
 		agent.HostVersion = boundedStatusText(agent.HostVersion, 128)
@@ -184,7 +248,14 @@ func normalizeUnprotectedAgents(agents []UnprotectedAgent) []UnprotectedAgent {
 		if agent.Code == "" {
 			agent.Code = UnprotectedCodeForReason(agent.Reason)
 		}
-		key := strings.ToLower(agent.SID) + "\x00" + agent.User + "\x00" + agent.Connector + "\x00" + agent.Surface + "\x00" + agent.Host
+		key := strings.ToLower(agent.SID) + "\x00" + agent.User + "\x00" + agent.Connector + "\x00" + agent.Surface + "\x00" + agent.Host + "\x00" + agent.InstallPath + "\x00" + agent.Version + "\x00" + agent.Code
+		if agent.Connector == "kiro" {
+			// One Kiro row can describe two installed products (kiro-cli and
+			// the IDE), each with its own reason. Forms are also told apart by
+			// the install their reason names first (AssessKiro).
+			form, _, _ := strings.Cut(agent.Reason, ";")
+			key += "\x00" + form
+		}
 		byKey[key] = agent
 	}
 	out := make([]UnprotectedAgent, 0, len(byKey))
@@ -203,6 +274,9 @@ func normalizeUnprotectedAgents(agents []UnprotectedAgent) []UnprotectedAgent {
 		}
 		if out[i].Surface != out[j].Surface {
 			return out[i].Surface < out[j].Surface
+		}
+		if out[i].InstallPath != out[j].InstallPath {
+			return out[i].InstallPath < out[j].InstallPath
 		}
 		return out[i].Host < out[j].Host
 	})

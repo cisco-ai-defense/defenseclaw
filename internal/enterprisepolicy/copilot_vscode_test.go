@@ -100,6 +100,52 @@ func TestCopilotVSCodeLocalAndManagedSettings(t *testing.T) {
 	}
 }
 
+func TestCopilotVSCodeStatusRejectsHookOutsideEnrollment(t *testing.T) {
+	home := t.TempDir()
+	if _, err := EnsureCopilotVSCodeUser(CopilotVSCodeUserRequest{
+		Home: home, GOOS: "linux", HookBinary: testHookBinary, HookFile: true, Plugin: true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	opts := testOptions(t)
+	opts.CopilotOutOfScopeHomes = []string{home}
+	state := State{}
+	copilotVSCodeStatus(opts, &state)
+	if len(state.Conflicts) == 0 || !strings.Contains(strings.Join(state.Conflicts, " "), CopilotVSCodeLocalHookFilePath(home)) {
+		t.Fatalf("active hook for an unenrolled account must be a conflict: %+v", state)
+	}
+	if _, err := EnsureCopilotVSCodeUser(CopilotVSCodeUserRequest{
+		Home: home, GOOS: "linux", HookBinary: testHookBinary,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	state = State{}
+	copilotVSCodeStatus(opts, &state)
+	if len(state.Conflicts) != 0 {
+		t.Fatalf("cleaned unenrolled account is still a conflict: %+v", state)
+	}
+	released, err := os.ReadFile(filepath.Join("testdata", "copilot-vscode-1.0.0", "linux-hooks.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, CopilotVSCodeLocalHookFilePath(home), string(released))
+	state = State{}
+	copilotVSCodeStatus(opts, &state)
+	if len(state.Conflicts) == 0 {
+		t.Fatal("released Copilot Local hook in an unenrolled home was reported healthy")
+	}
+	if _, err := EnsureCopilotVSCodeUser(CopilotVSCodeUserRequest{
+		Home: home, GOOS: "linux", HookBinary: testHookBinary,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	state = State{}
+	copilotVSCodeStatus(opts, &state)
+	if len(state.Conflicts) != 0 {
+		t.Fatalf("removed released Local hook is still a conflict: %+v", state)
+	}
+}
+
 // A managed 1.0.0 install wrote the Local hook file and plugin without the
 // removed-deployment guard; testdata holds the bytes 1.0.0 (06b1c9e68)
 // rendered. After the upgrade both are DefenseClaw's: the guard allows the
@@ -171,9 +217,9 @@ func TestCopilotVSCodeUpgradeFromTheReleasedRender(t *testing.T) {
 	}
 }
 
-// The Local hook file is the guardian's (WIN-R1-25): verify reports a
-// deleted or edited copy as drift, setup rewrites it and uninstall removes
-// it, whatever the user left at its name.
+// The Local hook file is the guardian's path (WIN-R1-25): a deleted copy is
+// repaired. An independent handler added at that path is kept and reported;
+// non-file entries at the dedicated path are still replaced or removed.
 func TestCopilotVSCodeRepairsATamperedHookFile(t *testing.T) {
 	home := t.TempDir()
 	run := func(keep, dryRun bool) CopilotVSCodeUserResult {
@@ -200,13 +246,19 @@ func TestCopilotVSCodeRepairsATamperedHookFile(t *testing.T) {
 	if err := os.WriteFile(hookFile, edited, 0o400); err != nil {
 		t.Fatal(err)
 	}
-	if result := run(true, true); len(result.Changed) != 1 || len(result.Kept) != 0 {
-		t.Fatalf("verify must report the edited hook file as drift: %+v", result)
+	if result := run(true, true); len(result.Kept) != 1 || result.HookFileOK {
+		t.Fatalf("verify must report the independent hook: %+v", result)
 	}
-	if result := run(true, false); !result.HookFileOK {
-		t.Fatalf("setup must repair the edited hook file: %+v", result)
+	if result := run(true, false); len(result.Kept) != 1 || result.HookFileOK {
+		t.Fatalf("setup must leave the independent hook alone: %+v", result)
+	}
+	if got := readFile(t, hookFile); got != string(edited) {
+		t.Fatalf("setup changed the independent hook: %s", got)
 	}
 	// A directory (or link) a user puts at the name is replaced too.
+	if err := os.Chmod(hookFile, 0o600); err != nil {
+		t.Fatal(err)
+	}
 	if err := os.Remove(hookFile); err != nil {
 		t.Fatal(err)
 	}
@@ -227,6 +279,117 @@ func TestCopilotVSCodeRepairsATamperedHookFile(t *testing.T) {
 	}
 	if _, err := os.Stat(hookFile); !os.IsNotExist(err) {
 		t.Fatalf("hook file left behind: %v", err)
+	}
+}
+
+func TestCopilotVSCodeClaimsInertPluginDocument(t *testing.T) {
+	for _, goos := range []string{"linux", "darwin", "windows"} {
+		for _, document := range []string{`{}`, `{"hooks":null}`, `{"hooks":{"PreToolUse":[]}}`} {
+			t.Run(goos+"/"+document, func(t *testing.T) {
+				home := t.TempDir()
+				hookBinary := testHookBinary
+				if goos == "windows" {
+					hookBinary = `C:\DefenseClaw\defenseclaw-hook.exe`
+				}
+				path := CopilotPluginHooksPath(home)
+				writeFile(t, path, document)
+				if goos == "linux" {
+					opts := withPolicy(testOptions(t), copilotConnector, func(p *config.EnterpriseConnectorPolicy) {
+						p.ManagedHooksOnly = config.ManagedHooksOnlyEnforce
+					})
+					opts.CopilotUserHomes = []string{home}
+					writeFile(t, rooted(opts, "/usr/share/code/resources/app/package.json"), `{"version":"1.139.2"}`)
+					state := State{}
+					copilotVSCodeStatus(opts, &state)
+					if slices.Contains(state.UserFileForeign, path) || !slices.Contains(state.UserFileDrift, path) {
+						t.Fatalf("inert plugin is not independent content: %+v", state)
+					}
+				}
+				req := CopilotVSCodeUserRequest{Home: home, GOOS: goos, HookBinary: hookBinary, Plugin: true}
+				result, err := EnsureCopilotVSCodeUser(req)
+				if err != nil || !result.PluginOK || slices.Contains(result.Kept, path) {
+					t.Fatalf("setup did not repair inert plugin document: %+v, %v", result, err)
+				}
+				want, err := RenderCopilotVSCodeLocalHooks(goos, hookBinary)
+				if err != nil || readFile(t, path) != string(want) {
+					t.Fatalf("plugin hooks were not rewritten: %v", err)
+				}
+				writeFile(t, path, document)
+				req.Plugin = false
+				result, err = EnsureCopilotVSCodeUser(req)
+				if err != nil || !slices.Contains(result.Removed, path) {
+					t.Fatalf("uninstall did not remove inert plugin document: %+v, %v", result, err)
+				}
+				if _, err := os.Lstat(path); !os.IsNotExist(err) {
+					t.Fatalf("inert plugin hooks remain: %v", err)
+				}
+			})
+		}
+	}
+	home := t.TempDir()
+	path := CopilotPluginHooksPath(home)
+	independent := `{"hooks":{"PreToolUse":[]},"operator":{"enabled":true}}`
+	for _, independent := range []string{independent, `{"hooks":null,"operator":{"enabled":true}}`} {
+		writeFile(t, path, independent)
+		for _, keep := range []bool{true, false} {
+			result, err := EnsureCopilotVSCodeUser(CopilotVSCodeUserRequest{
+				Home: home, GOOS: "linux", HookBinary: testHookBinary, Plugin: keep,
+			})
+			if err != nil || !slices.Contains(result.Kept, path) || readFile(t, path) != independent {
+				t.Fatalf("independent plugin content was changed: %+v, %v", result, err)
+			}
+		}
+	}
+}
+
+func TestCopilotVSCodeStatusClassifiesRetainedLocalHook(t *testing.T) {
+	for _, goos := range []string{"linux", "darwin"} {
+		t.Run(goos, func(t *testing.T) {
+			home := t.TempDir()
+			if _, err := EnsureCopilotVSCodeUser(CopilotVSCodeUserRequest{
+				Home: home, GOOS: goos, HookBinary: testHookBinary, HookFile: true, Plugin: true,
+			}); err != nil {
+				t.Fatal(err)
+			}
+			path := CopilotVSCodeLocalHookFilePath(home)
+			writeFile(t, path, `{"hooks":{"PreToolUse":[{"type":"command","command":"operator-tool"}]}}`)
+			opts := testOptions(t)
+			opts.GOOS, opts.HookBinary, opts.CopilotUserHomes = goos, testHookBinary, []string{home}
+			state := State{}
+			copilotVSCodeStatus(opts, &state)
+			if !slices.Contains(state.UserFileForeign, path) || slices.Contains(state.UserFileDrift, path) {
+				t.Fatalf("retained Local hook classified as repairable drift: %+v", state)
+			}
+		})
+	}
+}
+
+// The Python orphan cleanup consumes these exact current Go renders. Keep
+// its guarded POSIX and PowerShell fixtures in sync with the writer.
+func TestCopilotVSCodeGuardedOrphanFixturesMatchRender(t *testing.T) {
+	for _, tc := range []struct{ goos, hookBinary string }{
+		{"linux", "/opt/dc/defenseclaw-hook"},
+		{"windows", `C:\DefenseClaw\defenseclaw-hook.exe`},
+	} {
+		t.Run(tc.goos, func(t *testing.T) {
+			want, err := RenderCopilotVSCodeLocalHooks(tc.goos, tc.hookBinary)
+			if err != nil {
+				t.Fatal(err)
+			}
+			got, err := os.ReadFile(filepath.Join("testdata", "copilot-vscode-guarded", tc.goos+"-hooks.json"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tc.goos == "windows" {
+				// GetSystemDirectoryW reports "system32" on some Windows
+				// installs; the non-Windows renderer uses "System32".
+				got = bytes.ReplaceAll(got, []byte(`\\System32\\WindowsPowerShell`), []byte(`\\system32\\WindowsPowerShell`))
+				want = bytes.ReplaceAll(want, []byte(`\\System32\\WindowsPowerShell`), []byte(`\\system32\\WindowsPowerShell`))
+			}
+			if !bytes.Equal(got, want) {
+				t.Fatal("orphan cleanup fixture differs from the current Go render")
+			}
+		})
 	}
 }
 

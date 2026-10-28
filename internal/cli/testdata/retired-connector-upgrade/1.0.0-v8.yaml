@@ -1,0 +1,16 @@
+# A config_version 8 host (1.0.0 and 1.0.1 before their own migrate) with
+# OpenHands, its old open-hands spelling and OmniGent next to Codex.
+guardrail:
+  connector: codex
+  enabled: true
+  mode: observe
+  connectors:
+    codex:
+      mode: observe
+    open-hands:
+      mode: action
+    omnigent:
+      mode: action
+data_dir: '@HOME@'
+config_version: 8
+observability: {}

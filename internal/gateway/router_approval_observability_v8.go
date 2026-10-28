@@ -17,7 +17,6 @@ import (
 	observabilityrouter "github.com/defenseclaw/defenseclaw/internal/observability/router"
 	observabilityruntime "github.com/defenseclaw/defenseclaw/internal/observability/runtime"
 	"github.com/defenseclaw/defenseclaw/internal/version"
-	"github.com/google/uuid"
 )
 
 const eventRouterApprovalV8Producer = "gateway.event_router.approval"
@@ -301,7 +300,7 @@ func (r *EventRouter) emitEventRouterApprovalLogV8(
 			}
 			builder, buildErr := observability.NewRecordBuilder(
 				observability.ClockFunc(func() time.Time { return observedAt }),
-				observability.OccurrenceIDGeneratorFunc(func() (string, error) { return uuid.NewString(), nil }),
+				observability.TimeOrderedOccurrenceIDs,
 			)
 			if buildErr != nil {
 				return observability.Record{}, buildErr
@@ -319,7 +318,7 @@ func (r *EventRouter) emitEventRouterApprovalLogV8(
 		}
 		builder, buildErr := observability.NewFamilyBuilder(
 			observability.ClockFunc(func() time.Time { return observedAt }),
-			observability.OccurrenceIDGeneratorFunc(func() (string, error) { return uuid.NewString(), nil }),
+			observability.TimeOrderedOccurrenceIDs,
 		)
 		if buildErr != nil {
 			return observability.Record{}, buildErr
@@ -476,7 +475,7 @@ func (r *EventRouter) recordEventRouterApprovalMetricsV8(
 func eventRouterApprovalMetricBuilder(observedAt time.Time) (*observability.FamilyBuilder, error) {
 	return observability.NewFamilyBuilder(
 		observability.ClockFunc(func() time.Time { return observedAt }),
-		observability.OccurrenceIDGeneratorFunc(func() (string, error) { return uuid.NewString(), nil }),
+		observability.TimeOrderedOccurrenceIDs,
 	)
 }
 

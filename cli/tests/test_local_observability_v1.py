@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 import json
+import re
 import shutil
 from pathlib import Path
 
@@ -109,7 +110,12 @@ def test_collector_preserves_three_signal_pipeline_and_agent360_dimensions() -> 
     collector = yaml.safe_load(compat.COLLECTOR.read_text(encoding="utf-8"))
     pipelines = collector["service"]["pipelines"]
 
-    assert pipelines["metrics"]["processors"] == ["resource", "deltatocumulative", "batch"]
+    assert pipelines["metrics"]["processors"] == [
+        "resource",
+        "filter/managed-sandbox-out",
+        "deltatocumulative",
+        "batch",
+    ]
     # A rare counter (a block every few minutes) must keep its total.
     assert collector["processors"]["deltatocumulative"]["max_stale"] == "24h"
     assert pipelines["metrics"]["exporters"].count("prometheusremotewrite/prometheus") == 1
@@ -138,6 +144,59 @@ def test_collector_preserves_three_signal_pipeline_and_agent360_dimensions() -> 
         "defenseclaw.tool.result",
         "error.message",
     }
+
+
+def test_managed_sandbox_counters_reach_prometheus_without_host_or_account_labels() -> None:
+    """Remote write makes every resource attribute a label; the managed
+    sandbox counters take their own branch that keeps only the service,
+    environment and OS attributes (owner rule: no host or account label)."""
+    collector = yaml.safe_load(compat.COLLECTOR.read_text(encoding="utf-8"))
+    pipelines = collector["service"]["pipelines"]
+    processors = collector["processors"]
+    condition = 'IsMatch(metric.name, "^defenseclaw[.]sandbox[.]managed[.]")'
+
+    assert processors["filter/managed-sandbox-out"]["metric_conditions"] == [condition]
+    assert processors["filter/managed-sandbox-only"]["metric_conditions"] == ["not " + condition]
+    assert "filter/managed-sandbox-out" in pipelines["metrics"]["processors"]
+    managed = pipelines["metrics/managed-sandbox"]
+    assert managed["receivers"] == ["otlp"]
+    assert managed["exporters"] == pipelines["metrics"]["exporters"]
+    order = managed["processors"]
+    assert order.index("filter/managed-sandbox-only") < order.index("transform/managed-sandbox-resource")
+    assert order.index("transform/managed-sandbox-resource") < order.index("deltatocumulative")
+    (statement,) = processors["transform/managed-sandbox-resource"]["metric_statements"]
+    assert statement["context"] == "resource"
+    (keep,) = statement["statements"]
+    kept = set(re.findall(r'"([^"]+)"', keep))
+    assert keep.startswith("keep_keys(resource.attributes, [")
+    assert kept == {
+        "service.name",
+        "service.namespace",
+        "service.version",
+        "service.instance.id",
+        "deployment.environment.name",
+        "os.type",
+    }
+    assert not {key for key in kept if key.startswith(("host.", "tenant.", "workspace.", "defenseclaw.device"))}
+    assert set(compat.MANAGED_SANDBOX_RESOURCE_ATTRIBUTES) == kept
+
+
+def test_collector_validator_rejects_a_host_label_on_the_managed_sandbox_counters(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    collector = yaml.safe_load(compat.COLLECTOR.read_text(encoding="utf-8"))
+    statements = collector["processors"]["transform/managed-sandbox-resource"]["metric_statements"][0]["statements"]
+    statements[0] = statements[0].replace('"os.type"', '"os.type", "host.name"')
+    collector["service"]["pipelines"]["metrics"]["processors"].remove("filter/managed-sandbox-out")
+    path = tmp_path / "collector.yaml"
+    path.write_text(yaml.safe_dump(collector), encoding="utf-8")
+    monkeypatch.setattr(compat, "COLLECTOR", path)
+
+    errors = compat._collector_errors()
+
+    assert any("managed-sandbox-resource must keep only" in error for error in errors)
+    assert "Collector signal pipelines drifted from local-observability-v1" in errors
 
 
 def test_local_logs_preserve_the_canonical_post_redaction_projection() -> None:

@@ -21,6 +21,7 @@ package gateway
 import (
 	"context"
 	"encoding/json"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -167,18 +168,6 @@ func workdirShellCalls() []workdirShellCall {
 				`"description":"write marker","mode":"sync","initial_wait":30}}`,
 			dirs: []string{""},
 		},
-		{
-			name: "openhands-terminal", connector: "openhands", version: "1.16.0", contract: "openhands-hooks-v1", path: "/api/v1/openhands/hook",
-			body: `{"event_type":"PreToolUse","tool_name":"terminal","tool_input":{"command":"` + c + `","is_input":false,"timeout":null,"reset":false,"kind":"TerminalAction"},` +
-				`"session_id":"c1c2b756-f8e9-4e9d-97d0-2c27ecb6c3d1","working_dir":"/work/app","metadata":{}}`,
-			dirs: []string{""},
-		},
-		{
-			name: "omnigent-sys-os-shell", connector: "omnigent", version: "0.13.0", contract: "omnigent-custom-policy-v1", path: "/api/v1/omnigent/hook",
-			body: `{"hook_event_name":"PreToolUse","omnigent_event_type":"tool_call","agent_name":"OmniGent","agent_type":"omnigent",` +
-				`"tool_name":"sys_os_shell","tool_input":{"command":"` + c + `"}}`,
-			dirs: []string{""},
-		},
 	}
 }
 
@@ -201,9 +190,9 @@ func sandboxShellCallMistyped(tc workdirShellCall) (string, bool) {
 	return "", false
 }
 
-// TestSandboxShellCallsAreJudged pins that the shell tool call of every
-// sandboxed harness reaches the command rules, and is blocked with the
-// marker rule's plain reason, whatever else the call names:
+// TestSandboxShellCallsAreJudged pins that a readable shell tool call of
+// every sandboxed harness reaches the command rules and is blocked with
+// the marker rule's plain reason, whatever else the call names:
 //   - its own working directory (a subdirectory of the mounted /work/app,
 //     the workspace itself, one outside the mount, a relative one). Left as
 //     a second working directory next to the request's (mapped to the host
@@ -212,7 +201,8 @@ func sandboxShellCallMistyped(tc workdirShellCall) (string, bool) {
 //   - an argument the connector's projection does not list, or a listed one
 //     with a value of another type. Either left the parse partial, so one
 //     extra argument turned a block into an allow. The command is now also
-//     judged on its own.
+//     judged on its own. A malformed top-level Cursor cwd is refused by the
+//     event validator before the command projection runs.
 func TestSandboxShellCallsAreJudged(t *testing.T) {
 	installSandboxMarkerRules(t)
 	f := newSandboxIngressFixture(t)
@@ -242,6 +232,16 @@ func TestSandboxShellCallsAreJudged(t *testing.T) {
 					t.Fatal("the variant did not change the call")
 				}
 				_, token := f.mint(t, "dc-"+tc.connector+"-"+strconv.Itoa(i)+"-"+variant, tc.connector, tc.version, tc.contract, f.project)
+				if tc.connector == "cursor" && variant == "mistyped" {
+					// This variant also makes Cursor's top-level cwd numeric.
+					// The event validator now rejects that malformed envelope
+					// before the sandbox command projection can run.
+					rec := f.do(t, http.MethodPost, tc.path, token, body, tc.headers...)
+					if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), `"reason":"malformed_hook_payload"`) {
+						t.Fatalf("malformed Cursor cwd was not refused: %d %s", rec.Code, rec.Body.String())
+					}
+					return
+				}
 				resp := f.hook(t, tc.path, token, body, tc.headers...)
 				if resp["action"] != "block" || resp["raw_action"] != "block" {
 					t.Fatalf("verdict = %v", resp)
@@ -321,7 +321,7 @@ func TestMergeSandboxShellCommandVerdict(t *testing.T) {
 	allow := &ToolInspectVerdict{Action: "allow", Severity: "CRITICAL", Reason: "matched: E2E-SANDBOX-MARKER:E2E sandbox marker command",
 		Findings: []string{"E2E-SANDBOX-MARKER:E2E sandbox marker command"}, DetailedFindings: []RuleFinding{candidate}}
 
-	got := mergeSandboxShellCommandVerdict(nil, "opencode", allow, []RuleFinding{proven})
+	got := mergeSandboxShellCommandVerdict(t.Context(), nil, "opencode", allow, []RuleFinding{proven})
 	if got == allow || got.Action != "block" || got.Severity != "CRITICAL" ||
 		len(got.DetailedFindings) != 1 || !got.DetailedFindings[0].contributesToEnforcement() ||
 		len(got.Findings) != 1 || got.Reason != "matched: E2E-SANDBOX-MARKER:E2E sandbox marker command" {
@@ -332,19 +332,19 @@ func TestMergeSandboxShellCommandVerdict(t *testing.T) {
 	}
 	// A candidate alone, or no finding, adds nothing.
 	for _, findings := range [][]RuleFinding{{candidate}, nil} {
-		if got := mergeSandboxShellCommandVerdict(nil, "opencode", allow, findings); got != allow {
+		if got := mergeSandboxShellCommandVerdict(t.Context(), nil, "opencode", allow, findings); got != allow {
 			t.Fatalf("merged %+v = %+v", findings, got)
 		}
 	}
 	// Never lifts a verdict: a block stays a block whatever the command.
 	block := &ToolInspectVerdict{Action: "block", Severity: "HIGH", Findings: []string{"STATIC-BLOCK"}}
-	if got := mergeSandboxShellCommandVerdict(nil, "opencode", block, nil); got != block {
+	if got := mergeSandboxShellCommandVerdict(t.Context(), nil, "opencode", block, nil); got != block {
 		t.Fatalf("block = %+v", got)
 	}
 	// A new rule is added next to the call's findings and raises severity.
 	low := &ToolInspectVerdict{Action: "allow", Severity: "LOW", Findings: []string{"OTHER:Other"},
 		DetailedFindings: []RuleFinding{{RuleID: "OTHER", Title: "Other", Severity: "LOW"}}}
-	got = mergeSandboxShellCommandVerdict(nil, "opencode", low, []RuleFinding{proven})
+	got = mergeSandboxShellCommandVerdict(t.Context(), nil, "opencode", low, []RuleFinding{proven})
 	if got.Action != "block" || got.Severity != "CRITICAL" || got.Confidence != 0.99 ||
 		len(got.DetailedFindings) != 2 || len(got.Findings) != 2 {
 		t.Fatalf("merged = %+v", got)
@@ -420,6 +420,73 @@ func connectorProfileForHostTest(t *testing.T, registry *connector.Registry, nam
 	return provider.HookProfile(connector.SetupOpts{})
 }
 
+// TestSandboxHookOnlyShellCallsAreJudged pins that the shell tool calls and
+// running-process input the hook-only harnesses send, in their exact payload
+// shapes, reach the command rules through the sandbox ingress: the E2E
+// marker rule must block them with its plain reason, rendered in the
+// harness's own block shape. TestSandboxShellCallsAreJudged covers the
+// other shell shapes.
+func TestSandboxHookOnlyShellCallsAreJudged(t *testing.T) {
+	installSandboxMarkerRules(t)
+	var obs sandboxObserver
+	// Mount mode, as the E2E runs: the request working directory /work/app
+	// maps to a host directory.
+	f := newSandboxIngressFixture(t, obs.observe)
+	const command = "echo DCE2E-BLOCK-MARKER > /tmp/dce2e-blocked.txt"
+	for i, tc := range []struct {
+		connector, version, contract, path, body, tool string
+		headers                                        []string
+		// decision is the harness's own rendering of the block, if checked;
+		// reason says whether that rendering carries the plain reason too.
+		decision string
+		reason   bool
+	}{
+		{
+			connector: "hermes", version: "0.19.0", contract: "hermes-hooks-v1", path: "/api/v1/hermes/hook", tool: "terminal",
+			body: `{"hook_event_name":"pre_tool_call","tool_name":"terminal","tool_input":{"command":"` + command + `"},` +
+				`"session_id":"20260927_1","cwd":"/work/app","extra":{"tool_call_id":"call_1","task_id":"t1"}}`,
+			decision: "block", reason: true,
+		},
+		{
+			connector: "antigravity", version: "1.2.12", contract: "antigravity-hooks-v2", path: "/api/v1/antigravity/hook", tool: "run_command",
+			headers: []string{"X-DefenseClaw-Antigravity-Event", "PreToolUse"},
+			// agy 1.2's run_command schema requires WaitMsBeforeAsync,
+			// toolSummary and toolAction next to CommandLine and Cwd.
+			body: `{"conversationId":"c1","workspacePaths":["/work/app"],"stepIdx":3,"toolCall":{"name":"run_command","args":{` +
+				`"CommandLine":"` + command + `","Cwd":"/tmp","WaitMsBeforeAsync":500,` +
+				`"toolSummary":"write marker","toolAction":"Writing marker"}}}`,
+			decision: "deny",
+		},
+		// Text sent to a running process is judged as shell input.
+		{
+			connector: "antigravity", version: "1.2.12", contract: "antigravity-hooks-v2", path: "/api/v1/antigravity/hook", tool: "send_command_input",
+			headers: []string{"X-DefenseClaw-Antigravity-Event", "PreToolUse"},
+			body: `{"conversationId":"c1","workspacePaths":["/work/app"],"stepIdx":4,"toolCall":{"name":"send_command_input","args":{` +
+				`"CommandId":"cmd-1","Input":"` + command + `","WaitMs":500,"toolSummary":"type","toolAction":"Typing"}}}`,
+		},
+		{
+			connector: "hermes", version: "0.19.0", contract: "hermes-hooks-v1", path: "/api/v1/hermes/hook", tool: "process",
+			body: `{"hook_event_name":"pre_tool_call","tool_name":"process","tool_input":{"action":"submit","session_id":"proc_1","data":"` + command + `"},` +
+				`"session_id":"20260927_1","cwd":"/work/app","extra":{"tool_call_id":"call_2","task_id":"t1"}}`,
+		},
+	} {
+		t.Run(tc.connector+"-"+tc.tool, func(t *testing.T) {
+			name := "dc-" + tc.connector + "-" + strings.ReplaceAll(tc.tool, "_", "-") + "-" + strconv.Itoa(i)
+			_, token := f.mint(t, name, tc.connector, tc.version, tc.contract, t.TempDir())
+			obs.take()
+			resp := f.hook(t, tc.path, token, tc.body, tc.headers...)
+			out, _ := resp["hook_output"].(map[string]interface{})
+			if resp["action"] != "block" || resp["reason"] != sandboxMarkerBlockReason ||
+				(tc.decision != "" && out["decision"] != tc.decision) || (tc.reason && out["reason"] != sandboxMarkerBlockReason) {
+				t.Fatalf("%s verdict = %v", tc.connector, resp)
+			}
+			if decisions, _ := obs.take(); len(decisions) != 1 || decisions[0].Action != "block" || decisions[0].Tool != tc.tool {
+				t.Fatalf("decisions = %+v", decisions)
+			}
+		})
+	}
+}
+
 // TestAgentHookTrustedActionShellShapes pins the mapping of shell shapes
 // that did not parse completely, so command rules could not prove a trusted
 // action and a CRITICAL finding stayed an allowed candidate. The shapes of
@@ -465,10 +532,6 @@ func TestAgentHookTrustedActionShellShapes(t *testing.T) {
 	if got, cwd := agentHookTrustedActionArgs("hermes", "terminal", args); string(got) != string(args) || cwd != "" {
 		t.Errorf("hermes terminal args = %s (cwd %q), want passthrough", got, cwd)
 	}
-	// Input to a running process is judged as shell input.
-	if got, _ := agentHookTrustedActionArgs("openhands", "terminal", json.RawMessage(`{"command":"ls","is_input":true}`)); string(got) != `{"command":"ls"}` {
-		t.Errorf("input to a running process was not projected: %s", got)
-	}
 	// The tool call's directory replaces the session's, mapped the same way
 	// (on the host: an existing absolute directory, symlinks resolved).
 	if got := agentHookTrustedActionCWD(context.Background(), "/work/app", ""); got != "/work/app" {
@@ -497,84 +560,5 @@ func TestAgentHookTrustedActionShellShapes(t *testing.T) {
 		if got := agentHookTrustedActionCWD(context.Background(), tc.request, tc.tool); got != "" {
 			t.Errorf("tool cwd %q in %q = %q, want none", tc.tool, tc.request, got)
 		}
-	}
-}
-
-// TestSandboxHookOnlyShellCallsAreJudged pins that the shell tool calls and
-// running-process input the hook-only harnesses send, in their exact payload
-// shapes, reach the command rules through the sandbox ingress: the E2E
-// marker rule must block them with its plain reason, rendered in the
-// harness's own block shape. TestSandboxShellCallsAreJudged covers the
-// other shell shapes.
-func TestSandboxHookOnlyShellCallsAreJudged(t *testing.T) {
-	installSandboxMarkerRules(t)
-	var obs sandboxObserver
-	// Mount mode, as the E2E runs: the request working directory /work/app
-	// maps to a host directory.
-	f := newSandboxIngressFixture(t, obs.observe)
-	const command = "echo DCE2E-BLOCK-MARKER > /tmp/dce2e-blocked.txt"
-	for i, tc := range []struct {
-		connector, version, contract, path, body, tool string
-		headers                                        []string
-		// decision is the harness's own rendering of the block, if checked;
-		// reason says whether that rendering carries the plain reason too.
-		decision string
-		reason   bool
-	}{
-		{
-			connector: "hermes", version: "0.19.0", contract: "hermes-hooks-v1", path: "/api/v1/hermes/hook", tool: "terminal",
-			body: `{"hook_event_name":"pre_tool_call","tool_name":"terminal","tool_input":{"command":"` + command + `"},` +
-				`"session_id":"20260927_1","cwd":"/work/app","extra":{"tool_call_id":"call_1","task_id":"t1"}}`,
-			decision: "block", reason: true,
-		},
-		{
-			connector: "openhands", version: "1.16.0", contract: "openhands-hooks-v1", path: "/api/v1/openhands/hook", tool: "terminal",
-			body: `{"event_type":"PreToolUse","tool_name":"terminal","tool_input":{"command":"` + command + `","is_input":false,` +
-				`"timeout":null,"reset":false,"kind":"TerminalAction"},"tool_response":null,"message":null,` +
-				`"session_id":"c1c2b756-f8e9-4e9d-97d0-2c27ecb6c3d1","working_dir":"/work/app","metadata":{}}`,
-			decision: "deny", reason: true,
-		},
-		{
-			connector: "antigravity", version: "1.2.12", contract: "antigravity-hooks-v2", path: "/api/v1/antigravity/hook", tool: "run_command",
-			headers: []string{"X-DefenseClaw-Antigravity-Event", "PreToolUse"},
-			// agy 1.2's run_command schema requires WaitMsBeforeAsync,
-			// toolSummary and toolAction next to CommandLine and Cwd.
-			body: `{"conversationId":"c1","workspacePaths":["/work/app"],"stepIdx":3,"toolCall":{"name":"run_command","args":{` +
-				`"CommandLine":"` + command + `","Cwd":"/tmp","WaitMsBeforeAsync":500,` +
-				`"toolSummary":"write marker","toolAction":"Writing marker"}}}`,
-			decision: "deny",
-		},
-		// Text sent to a running process is judged as shell input.
-		{
-			connector: "openhands", version: "1.16.0", contract: "openhands-hooks-v1", path: "/api/v1/openhands/hook", tool: "terminal",
-			body: `{"event_type":"PreToolUse","tool_name":"terminal","tool_input":{"command":"` + command + `","is_input":true,` +
-				`"timeout":null,"reset":false,"kind":"TerminalAction"},"session_id":"c1c2b756-f8e9-4e9d-97d0-2c27ecb6c3d1","working_dir":"/work/app"}`,
-		},
-		{
-			connector: "antigravity", version: "1.2.12", contract: "antigravity-hooks-v2", path: "/api/v1/antigravity/hook", tool: "send_command_input",
-			headers: []string{"X-DefenseClaw-Antigravity-Event", "PreToolUse"},
-			body: `{"conversationId":"c1","workspacePaths":["/work/app"],"stepIdx":4,"toolCall":{"name":"send_command_input","args":{` +
-				`"CommandId":"cmd-1","Input":"` + command + `","WaitMs":500,"toolSummary":"type","toolAction":"Typing"}}}`,
-		},
-		{
-			connector: "hermes", version: "0.19.0", contract: "hermes-hooks-v1", path: "/api/v1/hermes/hook", tool: "process",
-			body: `{"hook_event_name":"pre_tool_call","tool_name":"process","tool_input":{"action":"submit","session_id":"proc_1","data":"` + command + `"},` +
-				`"session_id":"20260927_1","cwd":"/work/app","extra":{"tool_call_id":"call_2","task_id":"t1"}}`,
-		},
-	} {
-		t.Run(tc.connector+"-"+tc.tool, func(t *testing.T) {
-			name := "dc-" + tc.connector + "-" + strings.ReplaceAll(tc.tool, "_", "-") + "-" + strconv.Itoa(i)
-			_, token := f.mint(t, name, tc.connector, tc.version, tc.contract, t.TempDir())
-			obs.take()
-			resp := f.hook(t, tc.path, token, tc.body, tc.headers...)
-			out, _ := resp["hook_output"].(map[string]interface{})
-			if resp["action"] != "block" || resp["reason"] != sandboxMarkerBlockReason ||
-				(tc.decision != "" && out["decision"] != tc.decision) || (tc.reason && out["reason"] != sandboxMarkerBlockReason) {
-				t.Fatalf("%s verdict = %v", tc.connector, resp)
-			}
-			if decisions, _ := obs.take(); len(decisions) != 1 || decisions[0].Action != "block" || decisions[0].Tool != tc.tool {
-				t.Fatalf("decisions = %+v", decisions)
-			}
-		})
 	}
 }

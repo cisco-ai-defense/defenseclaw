@@ -8,15 +8,11 @@ keywords:
   - JetBrains ACP
 ---
 
-The ACP guard is a local, protocol-aware security boundary between an editor
-and an agent. It lets Zed, JetBrains, or another ACP client keep its native
-agent UX while every JSON-RPC frame passes through DefenseClaw policy.
-
-ACP (Agent Client Protocol) editors are not supported in enterprise managed mode in DefenseClaw 1.0. This guide covers the per-user install.
+The ACP guard sits between an editor that speaks the Agent Client Protocol (ACP), such as Zed or JetBrains, and the coding agent it runs. The editor keeps its normal agent experience. Every message between the two passes through DefenseClaw policy first.
 
 <Flow
   direction="TB"
-  caption="The editor starts defenseclaw-acp instead of the agent. Every message between the editor and the agent passes through the guard, which asks the local gateway for a verdict before it forwards the message. An agent entry that the editor launches directly does not pass through the guard."
+  caption="The editor starts defenseclaw-acp instead of the agent. The guard asks the local gateway for a verdict on each message before it forwards it. An agent entry that the editor launches directly does not pass through the guard."
 >
   <Node id="editor" kind="operator">{`Editor\nZed or JetBrains`}</Node>
   <Node id="guard" kind="connector" emphasis>{`ACP guard\ndefenseclaw-acp`}</Node>
@@ -33,144 +29,181 @@ ACP (Agent Client Protocol) editors are not supported in enterprise managed mode
   <Edge from="gateway" to="audit" label="records" />
 </Flow>
 
-## Use cases
+## How it works
 
-- Run Kiro in Zed or JetBrains without giving the editor an unmediated Kiro
-  process.
-- Apply one guardrail profile to several native ACP agents instead of building
-  a different extension for every IDE/agent pair.
-- Record prompt, output, permission, filesystem, terminal, tool, and
-  vendor-extension traffic in the audit log and your telemetry.
-- Block a denied method or unsafe content before it crosses the editor-agent
-  boundary.
-- Let an organization allow only selected client/agent pairs, such as
-  `zed + kiro`, in a policy profile.
-
-ACP complements connector hooks. Hooks observe vendor lifecycle events inside
-an agent. ACP protects the editor-to-agent protocol boundary, including client
-filesystem and terminal callbacks that a hook contract may not expose.
+- `defenseclaw acp setup` replaces the editor's agent entry with a `DefenseClaw · <agent>` entry that starts `defenseclaw-acp`.
+- The guard checks prompts, agent output, permission requests, file and terminal calls, and vendor extensions.
+- It talks only to the gateway on a loopback address. Each request is encrypted and each verdict is authenticated, so another process on the port cannot read content or fake a verdict.
+- Setup starts in observe mode: it records policy findings without blocking on them. A standalone managed guard refuses an unevaluated frame by default; a previously authenticated profile verdict selecting `fail_mode: closed` also refuses it on a per-user install. Add `--activate` for action mode.
+- In action mode a blocked prompt ends that turn, and the editor shows the reason as an agent message.
+- Policy is set per editor and agent pair through [profiles](/docs/acp-guard#configuration), so one editor can enforce on one agent and observe another.
 
 ## Quick start: Kiro in Zed
 
-[Install DefenseClaw](/docs/get-started/install), start the gateway, and add
-a guarded Kiro entry to Zed:
+This page puts Kiro behind the [ACP guard](/docs/acp-guard) in Zed, then finds agents the guard does not cover.
 
-```bash
-defenseclaw-gateway start
-defenseclaw acp setup --client zed --agent kiro
-defenseclaw acp status
-```
+### Before you start
 
-Setup defaults to **observe**. Review the events, then explicitly activate
-blocking:
+- DefenseClaw is [installed](/docs/get-started/download) and the gateway runs.
+- You use Zed or JetBrains, and the agent has run from a terminal once (for Kiro, `kiro-cli login`). An editor starts it with no terminal, so a first-run question would hang the thread.
 
-```bash
-defenseclaw acp setup --client zed --agent kiro --activate
-```
+### Guard Kiro in Zed
 
-For JetBrains, replace `--client zed` with `--client jetbrains`. The command
-preserves unrelated JSON keys and foreign agent entries, but it writes the
-settings file back as plain JSON with two-space indentation and sorted keys:
-the comment block before the opening `{` is kept, while every other comment
-and trailing comma is dropped. Keep a copy of a settings file whose comments you want. It writes one
-`DefenseClaw · Kiro` entry, a mode-0600 scoped token, and a runtime contract
-lock. A failed config write rolls all three changes back.
+1. Start the gateway and add a guarded entry.
+
+   ```bash
+   defenseclaw-gateway start
+   defenseclaw acp setup --client zed --agent kiro
+   ```
+
+
+   Setup writes one `DefenseClaw · Kiro` entry, a private token file and a contract lock; a failed write rolls all three back. Your other settings stay, but Zed's file is rewritten as plain JSON, so comments after the opening block and trailing commas are dropped. For JetBrains use `--client jetbrains`.
+
+2. Check the binding.
+
+   ```bash
+   defenseclaw acp status
+   ```
+
+   A healthy binding shows the guard on and the profile and mode it uses. Setup starts in observe mode.
+
+3. Open a Kiro thread from the `DefenseClaw · Kiro` entry in Zed, then look at the events in the TUI Audit panel or with `defenseclaw audit export`.
+
+4. When the events look right, turn on blocking.
+
+   ```bash
+   defenseclaw acp setup --client zed --agent kiro --activate
+   ```
 
 ## Finding what is already unguarded
 
-An editor may already be launching an ACP agent directly. That is exactly the
-traffic the guard exists to mediate, so DefenseClaw reads the clients it knows
-and says so rather than waiting to be asked about a specific pair:
+An editor may launch an agent directly. Those launches skip the guard.
 
 ```bash
 defenseclaw acp detect
 ```
 
 ```text
-  zed — /Users/you/.config/zed/settings.json
+  zed - ~/.config/zed/settings.json
   guarded    DefenseClaw · Kiro
-  ⚠  UNGUARDED  cursor → launched from the client's own registry; replace with a guarded cursor entry
+  !   UNGUARDED  cursor -> launched from the client's own registry; replace with a guarded cursor entry
   foreign    Something Else (left untouched)
-  installed but not configured here: devin, hermes, opencode
 ```
 
-Each agent server falls into one class:
+`guarded` entries start `defenseclaw-acp`. `UNGUARDED` is a native agent the guard can wrap (direct launch), or an agent the editor starts from its own registry, which cannot be wrapped. `foreign` entries are not agents DefenseClaw knows and are never changed.
 
-| Class | Meaning |
-| --- | --- |
-| `guarded` | The entry launches `defenseclaw-acp` |
-| `adoptable` | A direct launch of a native catalog agent — the guard can wrap it |
-| `client_registry` | The client resolves and launches the agent itself, so there is no argv to wrap. Unmediated, and adoption cannot close it |
-| `foreign` | Not an ACP agent DefenseClaw knows. Never rewritten |
-
-Then take the adoptable ones over:
+Wrap the direct launches:
 
 ```bash
-defenseclaw setup acp          # or: defenseclaw acp adopt
+defenseclaw setup acp
 ```
 
-Adoption runs the same `acp setup` transaction per pair — same executable
-resolution, digest pinning and contract lock — and then points the entry you
-already had at the guard, keeping its key and its `env`. Your familiar picker
-entry stops reaching the agent unmediated; it does not sit beside a guarded
-duplicate, because that would leave a bypass the guard cannot see. Re-running
-finds nothing to adopt rather than wrapping twice. Adoption defaults to
-observe; pass `--activate` for action mode.
-
-First-run names the editors with unguarded agents and points here, so this is
-visible without knowing the command exists.
-
-<Callout type="warn">
-A `client_registry` entry cannot be adopted. DefenseClaw installs a guarded
-entry for the same agent when it has a native entry point, but the registry
-entry remains a way to launch that agent without the guard until you remove it
-in the client. `detect` keeps reporting it for exactly that reason.
-</Callout>
+This runs setup for each pair and points your entry at the guard, keeping its key and `env` without adding a duplicate picker entry. Later `acp setup` updates that same entry when its profile or mode changes, and `acp verify` checks every guarded entry for the pair. If the reserved `DefenseClaw · <Agent>` name is taken by an entry DefenseClaw has no record of writing (an unrelated command, or an entry from DefenseClaw 1.0.3 or earlier), setup leaves it and writes its own entry next to it as `DefenseClaw · <Agent> (2)`, and removal leaves it too. `acp verify` fails until you delete that entry in the editor settings and run setup again. It starts in observe mode; add `--activate` for action mode. Remove a client-registry entry in the editor once the guarded entry exists, or the agent can still start without the guard.
 
 ## Several guarded agents in one editor
 
-You can guard more than one agent in the same editor. Run setup once per
-agent:
-
-```bash
-defenseclaw acp setup --client zed --agent kiro
-defenseclaw acp setup --client zed --agent devin
-```
-
-Each run writes its own entry (`DefenseClaw · Kiro`, `DefenseClaw · Devin`),
-leaves the other entries and every foreign agent server untouched, and pins its
-own runtime contract lock at `<data-dir>/acp/<client>-<agent>.contract-lock.json`.
-The editor launches one `defenseclaw-acp` process per entry, so the two
-sessions are independent: separate stdio pipes, separate turn buffers, separate
-pending-ID accounting. A block in one does not interrupt the other.
-
-Policy is **per pair**. Each `<client>/<agent>` binding resolves its own
-profile, so one editor can run one agent in action mode while another stays in
-observe. Give each pair its own profile with `--profile` at setup (without it,
-both pairs share the `default` profile, and setup refuses to change that
-profile's mode for one pair only):
+Run setup once for each agent. Each run writes its own entry and contract lock and leaves the others alone.
 
 ```bash
 defenseclaw acp setup --client zed --agent kiro --profile locked --activate
 defenseclaw acp setup --client zed --agent devin --profile watch
 ```
 
-Setup writes the binding, the profile, and the client and agent switches.
-The resulting configuration looks like this, and you can tighten a profile
-further by hand (here, `denied_methods`):
+Each editor and agent pair has its own profile, so Kiro can enforce while Devin only observes. Without `--profile`, both use the `default` profile, and setup refuses to change that profile's mode for one pair only. Profile keys are in the [reference](/docs/acp-guard#configuration).
+
+### Check it worked
+
+```bash
+defenseclaw acp status
+```
+
+```text
+ACP guard: off (1 binding)
+  Bindings:
+    zed/kiro             NEEDS ATTENTION  profile default (observe, inherited)
+      ! contract lock is missing or unsafe
+  Fix with: defenseclaw acp verify, then re-run defenseclaw acp setup for that pair
+```
+
+The sample shows a binding with a missing contract lock. After a good setup the binding is not flagged. `defenseclaw doctor` lists the same bindings and fails on a broken one.
+
+### Undo
+
+```bash
+defenseclaw acp remove --client zed --agent kiro
+```
+
+This removes the entry and the contract lock for that pair.
+
+## Managed computers
+
+`defenseclaw acp setup` is for a per-user install. On an enterprise managed computer an administrator enrolls each user, editor and agent with `defenseclaw-gateway enterprise acp enroll`, and the user then runs the setup command it reports, `defenseclaw-gateway enterprise acp setup`. The administrator tools are `enroll`, `list`, `verify` and `revoke`; `list` shows each enrollment and whether its user has run setup. `revoke` leaves the user's editor entry and contract lock in place; [Managed computers](/docs/acp-guard#managed-computers) says how the user removes them. Secure Client deployments are not covered.
+
+`defenseclaw-gateway enterprise acp` has `enroll`, `verify` and `revoke`, each taking `--user`, `--client`, `--agent` and `--profile`, and `list`. Each enrollment is a unique credential for one user, editor, agent and central profile. `list` shows every enrollment with its user, editor, agent, profile and whether the user has run setup (`--json` for the same rows). The administrator commands never write an editor profile. The enrolled user runs the command the enrollment reports, `defenseclaw-gateway enterprise acp setup --client --agent --profile`, which writes the editor entry and the contract lock as that user. `revoke` removes the credential and the user's copy of it (`token_file`), but not the editor entry or the contract lock. Those stay, and the editor's next start of that agent fails because the gateway no longer accepts the credential. `defenseclaw acp remove` is a per-user command and is refused on a managed computer, so the user removes the two by hand: the `DefenseClaw · Kiro` entry (named after the agent) from the editor's file (Zed: `~/.config/zed/settings.json`, or `$XDG_CONFIG_HOME/zed/settings.json`, `%APPDATA%\Zed\settings.json` on Windows; JetBrains: `~/.jetbrains/acp.json`), and `~/.defenseclaw/acp/<client>-<agent>.contract-lock.json`, for example `zed-kiro.contract-lock.json`.
+
+## What is guarded
+
+| Surface | ACP methods | Protection |
+| --- | --- | --- |
+| Protocol | initialize, auth, session lifecycle, cancellation, extensions | Strict JSON-RPC 2.0 NDJSON; no batches; 1 MiB frame and 128 pending-ID limits. An error response with a null `id` is checked and forwarded. In action mode any other invalid frame ends the session and names the side that sent it. |
+| Prompt | `session/prompt` | Rules, scanners, optional judge, observe or action policy. |
+| Output | `session/update` and the prompt response | Checked per frame and again over the whole buffered turn. Action mode releases nothing before the terminal prompt response passes. |
+| Approval | `session/request_permission`, `elicitation/create` | Allow or block. An unresolved confirmation fails closed in action mode. |
+| Filesystem | `fs/read_text_file`, `fs/write_text_file` | Content and method policy in both directions. |
+| Terminal | `terminal/*` | Content and method policy in both directions. |
+| Extensions | for example `cursor/*` | Kept as ACP extensions and checked as tool traffic. |
+
+Protocol version: ACP `schema-v1.21.0`.
+
+### When a step is blocked or cannot be checked
+
+| Situation | Editor sees |
+| --- | --- |
+| Blocked prompt (action mode) | The turn ends with the reason as an agent message, for example "DefenseClaw policy blocked this action (rule SEC-AWS-KEY: AWS access key). Do not retry it in another form." The next prompt runs. |
+| Blocked agent output | The turn ends and the guard cancels it in the agent. The message says the agent may already have run the step. |
+| Gateway does not answer (one retry) | Only that step is refused: "DefenseClaw could not check this step because the gateway did not answer". The session stays open. |
+| Gateway rejects the credential | "the gateway did not accept this editor's ACP credential: your administrator may have revoked your access" |
+| ACP checking switched off centrally | "your administrator switched ACP checking off" |
+| Observe mode, step cannot be checked | The session goes on unchecked and the guard says once: "DefenseClaw is not checking this session". |
+| Guard cannot start | The editor shows the reason (Zed: under **Failed to Launch**). |
+| Agent silent for 60 seconds after a prompt | The guard says the agent may be waiting for first-run questions in a terminal. |
+
+A profile's `fail_mode: closed` makes an observe-mode guard refuse a step it could not check, once the gateway has answered that session. `fail_mode: open` lets such a step through. Hook fail modes are separate; per-user hooks default to closed.
+
+If the central profile mode and the mode the entry was set up for differ, the guard stops the session and names both modes and the setup command to run. Zed keeps one guard for every thread of an agent, so after such an end the guard answers with the same message until you run the command.
+
+## Observability
+
+Every guarded decision is a `guardrail.evaluation.completed` event with these attributes.
+
+| Attribute | Example |
+| --- | --- |
+| `defenseclaw.acp.client` | `zed` |
+| `defenseclaw.acp.agent` | `kiro` |
+| `defenseclaw.acp.method` | `session/prompt` |
+| `defenseclaw.acp.direction` | `client_to_agent`, `agent_to_client` |
+| `defenseclaw.acp.surface` | `prompt`, `output`, `permission`, `filesystem`, `terminal`, `tool`, `protocol` |
+| `defenseclaw.acp.profile` | `kiro-only` |
+| `defenseclaw.acp.protocol.version` | `schema-v1.21.0` |
+
+The event also carries `defenseclaw.guardrail.raw_action`, `effective_action` and `would_block` (so an observe-mode pass-through is not mistaken for an action-mode allow), `rule_ids`, `finding_count`, `reason` and `defenseclaw.security.severity`. A profile-denied method blocks with `finding_count` 0 and no `rule_ids`.
+
+A decision with findings, and a profile-denied method, also export a trace: an `invoke_agent <agent>` span with an `apply_guardrail` child. Both carry the ACP `sessionId` as session and conversation ID.
+
+## Configuration
 
 ```yaml
 acp:
   enabled: true
   default_profile: locked
   clients:
-    zed: {enabled: true}          # the pin records only that the half is enabled
+    zed: {enabled: true}
   agents:
     kiro:  {enabled: true}
     devin: {enabled: true}
   bindings:
-    zed/kiro:  {enabled: true, profile: locked}   # action
-    zed/devin: {enabled: true, profile: watch}    # observe while it earns trust
+    zed/kiro:  {enabled: true, profile: locked}
+    zed/devin: {enabled: true, profile: watch}
   profiles:
     locked:
       mode: action
@@ -184,276 +217,82 @@ acp:
       allowed_agents: [devin]
 ```
 
-`defenseclaw acp status` prints whether the guard is on, how many bindings it
-has, and each binding's health, resolved profile and mode. `defenseclaw doctor`
-lists the same bindings and fails on a broken one. `defenseclaw acp status --json` reports each
-binding's resolved profile and whether it came from the binding or was inherited:
+| Key | What it does |
+| --- | --- |
+| `acp.enabled` | Turns the guard on. |
+| `acp.default_profile` | Profile used when nothing more specific applies. |
+| `acp.clients.<id>`, `acp.agents.<id>` | Enable or pin a profile for an editor or an agent. Disabling one disables every pair that uses it. |
+| `acp.bindings.<client>/<agent>` | Per-pair switch and profile. |
+| `acp.profiles.<name>.mode` | `observe` or `action`. |
+| `acp.profiles.<name>.fail_mode` | `closed` or `open`. |
+| `acp.profiles.<name>.allowed_clients`, `allowed_agents` | The pairs the profile admits. The resolved profile must admit the pair. |
+| `acp.profiles.<name>.denied_methods` | ACP methods always blocked, for example `fs/write_text_file`. |
 
-```json
-"zed/kiro":  {"profile": "locked", "mode": "action",  "profile_source": "binding"}
-"zed/devin": {"profile": "watch",  "mode": "observe", "profile_source": "binding"}
-```
+A pair's profile is chosen most specific first: the binding, then the agent, then the editor, then `default_profile`. `defenseclaw acp status --json` shows `profile_source` for each binding.
 
-Resolution is most-specific-first: the `bindings` entry, then the agent pin,
-then the client pin, then `default_profile`. A configuration with no
-`bindings` therefore behaves exactly as it did before they existed.
-
-Two boundaries a per-pair binding does **not** cross:
-
-- **Disabling a client or an agent still disables every pair that uses it.** A
-  binding adds policy; it is not a way around either switch.
-- **The resolved profile must still admit the pair** through
-  `allowed_clients` and `allowed_agents`.
-
-A request naming a profile the configuration does not assign to that pair is
-refused rather than evaluated under either name. The guard's profile is pinned
-into its contract lock at setup, so a mismatch means a stale or forged
-request, and the refusal says so rather than reporting the profile as
-undefined.
-
-That makes editing a pair's profile by hand a two-step change: the guard keeps
-the profile pinned in its argv until setup rewrites it. `defenseclaw acp
-verify` and `defenseclaw acp status` report the drift instead of calling the
-binding healthy, so you find out before the next editor session fails closed:
+The profile name is pinned into the contract lock at setup. If you edit a pair's profile by hand, `acp verify` and `acp status` report the drift instead of calling the binding healthy:
 
 ```text
 ACP binding verification failed: contract lock profile 'locked' no longer
 matches the configured 'watch' for zed/kiro; re-run acp setup
 ```
 
-Other consequences worth planning around:
+A request that names a profile the configuration does not assign to that pair is refused.
 
-- **`allowed_agents` is the "only these agents" control.** Removing an agent
-  from the shared profile refuses its evaluations while leaving its editor
-  entry in place; removing the entry with
-  `defenseclaw acp remove --client zed --agent devin` also reclaims its
-  contract lock.
-- **The agents share one scoped token**, the private file named by argv.
-- **Each binding's digests are pinned separately.** Upgrading the guard rebinds
-  every matching user-owned lock in one transaction; a stale digest on one
-  binding fails that binding closed without disturbing the other.
+Each binding pins its own lock at `<data-dir>/acp/<client>-<agent>.contract-lock.json`. The lock records the guard and agent executable paths and SHA-256 digests, the client configuration path and digest, and the ACP schema version. Agents share one scoped token, a private file named on the guard's command line. Setup uses only the catalog that ships with DefenseClaw and never downloads from the online ACP registry.
 
-## Enterprise managed mode
-
-ACP (Agent Client Protocol) editors are not supported in enterprise managed mode in DefenseClaw 1.0.
-
-## What is guarded
-
-| Surface | ACP methods or messages | Protection |
-| --- | --- | --- |
-| Protocol | initialize, auth, session lifecycle, cancellation, extensions | Strict JSON-RPC 2.0 NDJSON validation; no batches; 1 MiB frame and 128 pending-ID bounds. An error response with a null `id` (a peer that could not read a frame's `id`) is checked and forwarded; in action mode any other invalid frame ends the session with a message that names which side sent it |
-| Prompt | `session/prompt` | Rules, scanners, optional judge, observe/action policy |
-| Output | `session/update` and prompt response | Evaluated per frame and again as canonical per-field streams across the complete buffered turn; action mode releases nothing before the terminal prompt response passes |
-| Approval | `session/request_permission`, `elicitation/create` | Allow or block; an unresolved confirmation verdict fails closed in action mode |
-| Filesystem | `fs/read_text_file`, `fs/write_text_file` | Bidirectional content/method policy |
-| Terminal | `terminal/*` | Bidirectional content/method policy |
-| Extensions | for example `cursor/*` | Preserved as ACP extensions and evaluated as tool traffic |
-
-In action mode a blocked prompt ends that turn normally: the editor shows the
-reason as an agent message, in the wording the hook connectors use
-("DefenseClaw policy blocked this action (rule SEC-AWS-KEY: AWS access key).
-Do not retry it in another form."), and the next
-prompt runs. Agent output
-blocked in the middle of a turn ends the turn the same way, and the guard
-cancels the turn in the agent. The guard can only withhold what the agent
-sends: an agent that runs its own tools has already run a step by the time
-its `tool_call` update arrives, so an output block says "DefenseClaw policy
-withheld agent output (rule ...). The agent may already have run the step;
-check its effects." To stop such a step before it runs, keep the agent's own
-connector hooks in action mode next to the guard. If the gateway does not answer an evaluation
-(the guard retries once), only that step is refused, with "DefenseClaw could
-not check this step because the gateway did not answer"; the session stays
-open. A credential the gateway no longer accepts is refused as "the gateway did not accept this editor's ACP
-credential: your administrator may have revoked your access", and ACP
-checking switched off centrally as "your administrator switched ACP checking
-off". In observe
-mode the session goes on unchecked, and the guard says so once in the editor:
-"DefenseClaw is not checking this session". A managed computer outside Secure
-Client is stricter by default: there an observe-mode guard refuses a step it
-could not check, as action mode does, and ACP checking switched off centrally
-lets the session go on unchecked. An administrator who sets the profile's
-`fail_mode: open` chooses otherwise: once the gateway has answered that
-session, a step the guard could not check in it goes through unchecked, as on
-a per-user install. An observe-mode profile may also set `fail_mode: closed`:
-once the gateway has answered the session, its guard refuses a step it could
-not check, on every install. A credential the gateway refused is still
-refused, and so is an answer that fails authentication, which also ends the
-open behavior until the gateway answers again. On Linux and macOS the gateway's
-authentication-failure audit row names the account (uid) the kernel reports
-for the refused caller.
-
-The guard starts the agent directly, never through a shell. It talks only to
-the gateway on a loopback address, ignores proxy settings and redirects, and
-checks that it is talking to the real gateway before it sends anything. Each
-request is encrypted (AES-256-GCM) and each verdict is authenticated (HMAC),
-so another process that takes the gateway's port sees neither the credential
-nor the content and cannot fake a verdict; the guard fails closed instead. The
-ACP credential works for the ACP routes only. The contract lock pins the selected guard and agent executable paths
-and SHA-256 digests, the exact client configuration path and digest, plus ACP
-[schema-v1.21.0](https://github.com/agentclientprotocol/agent-client-protocol/releases/tag/schema-v1.21.0).
-An upgrade replaces the guard, and the installer then re-pins the new guard in
-every user-owned lock that pinned the guard it replaced (`defenseclaw acp
-refresh --from-sha256 <old digest>`); a rolled-back upgrade restores the old
-locks with the rest of the data. Agent and editor configuration digests stay exactly pinned.
-If central policy mode and the launched contract mode drift,
-the guard stops the session even when the old contract was observe-only; rerun
-setup to make an observe-to-action promotion explicit. The guard's message
-names the profile mode, the mode the entry was set up for, and the setup
-command to run (with `--activate` when the profile is in action mode). Zed
-keeps one guard for every thread of an agent: after such an end the guard
-stays, answers with the same message until you have run the setup command,
-and then starts the new guard for the next thread, so no Retry or editor
-restart is needed.
-
-A guard that cannot start answers the editor with its reason and waits for
-the editor to read it, so Zed shows the text under **Failed to Launch**
-instead of only "Server exited with status exit code: 1".
-
-## Observability
-
-Every guarded decision is recorded as a `guardrail.evaluation.completed`
-event with these ACP attributes:
-
-| Attribute | Example |
-| --- | --- |
-| `defenseclaw.acp.client` | `zed` |
-| `defenseclaw.acp.agent` | `kiro` |
-| `defenseclaw.acp.method` | `session/prompt` |
-| `defenseclaw.acp.direction` | `client_to_agent`, `agent_to_client` |
-| `defenseclaw.acp.surface` | `prompt`, `output`, `permission`, `filesystem`, `terminal`, `tool`, `protocol` |
-| `defenseclaw.acp.profile` | `kiro-only` |
-| `defenseclaw.acp.protocol.version` | `schema-v1.21.0` |
-
-The event keeps `defenseclaw.guardrail.raw_action`,
-`defenseclaw.guardrail.effective_action`, and
-`defenseclaw.guardrail.would_block` distinct, so an observe-mode
-pass-through cannot be mistaken for an action-mode allow. Matched rules are
-published in `defenseclaw.guardrail.rule_ids` with
-`defenseclaw.guardrail.finding_count`, alongside
-`defenseclaw.guardrail.reason` and `defenseclaw.security.severity`.
-
-A blocked prompt therefore looks like this:
-
-```json
-{
-  "defenseclaw.acp.client": "zed",
-  "defenseclaw.acp.agent": "kiro",
-  "defenseclaw.acp.method": "session/prompt",
-  "defenseclaw.acp.surface": "prompt",
-  "defenseclaw.guardrail.decision": "block",
-  "defenseclaw.guardrail.raw_action": "block",
-  "defenseclaw.guardrail.effective_action": "block",
-  "defenseclaw.guardrail.would_block": false,
-  "defenseclaw.guardrail.rule_ids": ["TRUST-IGNORE-PREVIOUS"],
-  "defenseclaw.guardrail.finding_count": 1,
-  "defenseclaw.security.severity": "CRITICAL"
-}
-```
-
-A profile-denied method blocks with `finding_count` 0 and no `rule_ids`: that
-veto comes from the allow-list, not a scanner match, and the event does not
-invent a finding to justify it.
-
-A decision with findings (a block, an alert, or an observe-mode would-block)
-and a profile-denied method are also exported as a trace: an
-`invoke_agent <agent>` span (for example `invoke_agent kiro`, outcome
-`blocked` for a block) with an `apply_guardrail` child that carries the
-decision and rule IDs. Tempo shows both. Galileo has no guardrail span type,
-so it records the `invoke_agent` span, whose metadata names the user and the
-`blocked` outcome. The event, the finding rows and both spans carry the ACP
-`sessionId` as the session and conversation ID and the trace and span IDs of
-the decision. On a per-user gateway the finding rows and both spans also name
-the user the gateway runs as (`user.id`, `defenseclaw.user.name`). A
-rule-pack rule keeps its own ID in `rule_ids`.
-
-## Configuration
-
-```yaml
-config_version: 9
-acp:
-  enabled: true
-  mode: action
-  default_profile: kiro-only
-  clients:
-    zed: {enabled: true, profile: kiro-only}
-  agents:
-    kiro: {enabled: true, profile: kiro-only}
-  profiles:
-    kiro-only:
-      mode: action
-      fail_mode: closed
-      allowed_clients: [zed]
-      allowed_agents: [kiro]
-      denied_methods: [fs/write_text_file]
-```
-
-This profile rejects a guard invocation claiming another client or agent. It
-does **not** control an unrelated editor entry that launches an agent directly,
-outside `defenseclaw-acp`. To make “Kiro only” an organization-wide guarantee,
-combine the ACP entry with IDE policy and operating-system
-application control that prevents unapproved agent binaries or configuration.
-DefenseClaw deliberately reports that bypass boundary instead of claiming it
-can govern a process it never receives.
+Setup and adopt also record a SHA-256 digest of each editor entry they write, in `<data-dir>/acp/owned-entries.json` (private to your account). An entry is DefenseClaw's only while it still matches that record. The mode or model Zed stores in the entry when you pick one in its agent panel does not count as a change. Setup, adopt and remove change only those entries. They leave any other entry for the pair exactly as it is: one you edited, one pointed back at the agent, or a `DefenseClaw · <Agent>` entry that DefenseClaw 1.0.3 or earlier wrote without a record. Setup writes its own entry next to it (`DefenseClaw · <Agent> (2)` when the reserved name is taken). Setup, remove and `acp verify` print the step to take: `defenseclaw acp adopt` to guard an entry that starts the agent directly, or delete the entry in the editor settings and run setup again. `acp verify` fails while such an entry is there, and for an entry whose `--gateway` is not this gateway. After an upgrade from 1.0.3 or earlier the old entry keeps starting, because the upgrade re-pins its contract lock, but `acp verify` asks you to replace it this way.
 
 ## Supported agents
 
-DefenseClaw ships its own list of ACP clients and agents, kept separately
-from connector hooks. For each agent it records whether the entry point is
-native or a bridge, where it is documented, and its ID in the upstream
-[ACP Registry](https://agentclientprotocol.com/get-started/registry) when it has one.
-`defenseclaw acp catalog` prints the list.
+`defenseclaw acp catalog` prints the list. Only agents with their own ACP mode are guarded. Other connectors are guarded through their [hooks](/docs/connectors).
 
-Kiro's native hooks are a separate, second enforcement path; see
-[Kiro](/docs/connectors/kiro). The ACP guard needs none of that and covers
-every surface in the table above on its own. ACP adds no secret environment
-variable: agents keep their own credentials, and the guard token is a private
-file named on the guard's command line.
-
-| DefenseClaw connector | ACP form | Entry point |
+| Agent | Entry point | Status |
 | --- | --- | --- |
-| Kiro | Native | `kiro-cli acp` |
-| Cursor | Native | `agent acp` |
-| OpenCode | Native | `opencode acp` |
-| Hermes | Native | `hermes acp` |
-| GitHub Copilot CLI | Native, public preview | `copilot --acp --stdio` |
-| Devin | Native | `devin acp` |
+| Kiro | `kiro-cli acp` | Tested with Zed |
+| Cursor | `agent acp` | Cataloged |
+| OpenCode | `opencode acp` | Cataloged |
+| Hermes | `hermes acp` | Cataloged |
+| GitHub Copilot CLI | `copilot --acp --stdio` | Cataloged |
+| Devin | `devin acp` | Cataloged |
 
-The guard supports **native ACP entry points only** — an agent the vendor
-ships with an ACP mode of its own. Community bridges, vendor companion
-servers, and gateway-backed shims are deliberately out of scope: each adds a
-third-party process between DefenseClaw and the agent whose argv, schema and
-release cadence DefenseClaw does not control, which is the wrong place for a
-security boundary to depend on. Every other DefenseClaw connector therefore
-reports no ACP claim and is guarded through its native hook surface instead.
+Zed is tested. JetBrains is cataloged. A cataloged entry point matches the vendor's documentation; it does not mean DefenseClaw tested that editor and agent together.
 
-A listed entry point was checked against the vendor's documentation or the
-ACP Registry; that alone does not mean DefenseClaw tested that editor and
-agent together.
+## What it does not do
 
-Run each agent once in a terminal before its first guarded thread. Started by
-the editor, an agent has no terminal: Hermes asks its first-run questions
-there (the telemetry choice, installing its Bedrock feature) and waits, so the
-thread showed only a spinner, and Kiro reports a missing sign-in as "dispatch
-failure" (run `kiro-cli login` once). The guard passes an agent's sign-in
-methods and messages through unchanged. When an agent sends nothing for 60
-seconds after a prompt, the guard says in the thread that it may be waiting
-for first-run questions in a terminal.
-
-Setup uses only the list that ships with DefenseClaw. It never downloads or
-runs commands from the online registry. Every
-selected guard and agent executable is resolved to an absolute path, hashed,
-and bound into the client-specific contract lock before the editor can launch
-it.
+- It does not stop an agent entry the editor launches without `defenseclaw-acp`. `defenseclaw acp detect` lists those entries.
+- It can only withhold what the agent sends. An agent that runs its own tools may already have run a step when its output is blocked. Keep the agent's connector hooks in action mode next to the guard to stop a step before it runs.
+- An organization-wide "only these agents" rule also needs IDE policy and operating-system application control.
 
 ## API and diagnostics
 
-| Endpoint | Purpose |
-| --- | --- |
-| `POST /api/v1/acp/challenge` | Empty, scoped request that authenticates the loopback gateway before ACP content is encrypted and sent |
-| `POST /api/v1/acp/evaluate` | Scoped, loopback-only, mutually authenticated frame evaluation |
-| `GET /v1/acp/catalog` | Compiled client/agent catalog |
-| `GET /v1/acp/profiles` | Effective profile inventory |
-| `GET /health` | ACP enabled/mode/schema/configuration/token readiness |
+### Commands
 
-Use `defenseclaw acp catalog` for the local catalog and
-`defenseclaw acp remove --client zed --agent kiro` for surgical removal.
+| Command | What it does |
+| --- | --- |
+| `defenseclaw acp catalog` | Prints the compiled client and agent catalog as JSON. |
+| `defenseclaw acp setup --client C --agent A` | Writes the guarded entry, token and contract lock. Flags: `--profile`, `--activate`, `--guard-binary`, `--agent-binary`, `--json`. |
+| `defenseclaw acp status` | Guard state and each binding's health, profile and mode. `--json` adds where each profile came from. |
+| `defenseclaw acp verify` | Checks the contract lock against what is configured. |
+| `defenseclaw acp detect` | Lists guarded, unguarded and foreign agent entries in each editor. |
+| `defenseclaw acp adopt` (also `defenseclaw setup acp`) | Points existing unguarded entries at the guard. Flags: `--client`, `--activate`. |
+| `defenseclaw acp refresh --from-sha256 DIGEST` | Re-pins a new guard in locks that pinned the old one. The installer runs it on upgrade. |
+| `defenseclaw acp remove --client C --agent A` | Removes the entry and reclaims the contract lock. |
+
+### Gateway routes
+
+| Route | Purpose |
+| --- | --- |
+| `POST /api/v1/acp/challenge` | Authenticates the loopback gateway before ACP content is encrypted. |
+| `POST /api/v1/acp/evaluate` | Loopback-only, mutually authenticated frame evaluation. |
+| `GET /v1/acp/catalog` | Compiled client and agent catalog. Gateway token only. |
+| `GET /v1/acp/profiles` | Effective profile inventory. Gateway token only. |
+
+The ACP credential works on the two signed routes only; it gets `401` on the two read routes.
+
+## Next
+
+- [ACP guard reference](/docs/acp-guard)
+- [Kiro connector](/docs/connectors/kiro), the separate hook path
+- [Change block and alert levels](/docs/policies/thresholds)
+- [Connectors](/docs/connectors) and [Reference](/docs/reference)

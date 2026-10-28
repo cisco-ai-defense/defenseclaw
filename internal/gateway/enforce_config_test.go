@@ -103,6 +103,18 @@ func TestEnforceBlockWritesAssetPolicy(t *testing.T) {
 		t.Fatalf("unblock in another case = %d %v %#v", code, out, *casedRecorded)
 	}
 
+	// The same name in its other Unicode spelling (decomposed é) is the
+	// same asset: an allow removes the deny written in the composed one
+	// (p0 GAP-0878).
+	nfc, nfcRecorded := enforceTestAPI(t, "asset_policy:\n  skill:\n    denied:\n      - {name: \"caf\u00e9-skill\"}\n")
+	if code, out := enforceRequest(t, nfc.handleEnforceAllow, http.MethodPost, `{"target_type":"skill","target_name":"cafe\u0301-skill"}`); code != http.StatusOK ||
+		!reflect.DeepEqual(*nfcRecorded, []configwrite.Change{
+			{Path: "asset_policy.skill.denied", Value: []map[string]any{}},
+			{Path: "asset_policy.skill.allowed", Value: []map[string]any{{"name": "cafe\u0301-skill", "reason": "allowed via REST API"}}},
+		}) {
+		t.Fatalf("allow in the decomposed spelling = %d %v %#v", code, out, *nfcRecorded)
+	}
+
 	*recorded = nil
 	// A reload the gateway refused is reported, not the old digest.
 	api.configReloader = func(context.Context, string) error { return errors.New("requires gateway restart for: data_dir") }

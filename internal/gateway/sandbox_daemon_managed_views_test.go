@@ -21,10 +21,12 @@ package gateway
 import (
 	"context"
 	"errors"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -239,5 +241,183 @@ func TestManagedStatusRereadsStaleSettings(t *testing.T) {
 	f.d.settingsAt.Store(0)
 	if st, err = client.Status(context.Background()); err != nil || st.Managed.Unavailable != "" {
 		t.Fatalf("a failed read dropped the settings: %+v, %v", st.Managed, err)
+	}
+}
+
+// A driver switch can leave the manager's last runtime config disabled while
+// the managed gateway has already made sandboxes available again. Status must
+// report the current setting so run does not offer an exception for a switch.
+func TestManagedStatusUsesCurrentEnablementAfterDriverSwitch(t *testing.T) {
+	f := newSandboxDaemonFixture(t)
+	f.run(t)
+	f.d.settingsMu.Lock()
+	f.d.settings.Enabled, f.d.settings.Available = true, false
+	f.d.settings.Unavailable = sandboxrelay.UnavailableSetupChanging
+	f.d.settingsMu.Unlock()
+	f.d.reloadConfig()
+	f.d.settingsMu.Lock()
+	f.d.settings.Available, f.d.settings.Unavailable = true, ""
+	f.d.settingsMu.Unlock()
+	st, err := sandboxapi.NewUnixClient(f.socket).Status(context.Background())
+	if err != nil || !st.Enabled || st.Managed == nil || st.Managed.Unavailable != "" {
+		t.Fatalf("driver switch completed but status still says off: %+v, %v", st, err)
+	}
+}
+
+func TestManagedStatusPreservesGatewayCauseWhenListenersIdle(t *testing.T) {
+	f := newSandboxDaemonFixture(t)
+	f.run(t)
+	f.d.rt.setListening("ingress", false)
+	st, err := sandboxapi.NewUnixClient(f.socket).Status(context.Background())
+	if err != nil || st == nil || st.Available || st.IngressAddr != "" ||
+		!strings.Contains(st.Reason, "gateway registration") || strings.Contains(st.Reason, "openshell.ingress_port") {
+		t.Fatalf("managed status hid the primary unavailable cause: %+v, %v", st, err)
+	}
+}
+
+// An idle managed daemon deliberately releases both sandbox listeners. A
+// reachable gateway still makes it ready for the next run, which binds them.
+func TestManagedStatusIdleReleaseKeepsGatewayAvailable(t *testing.T) {
+	f := newSandboxDaemonFixture(t)
+	f.run(t)
+	if err := f.d.ensureListeners(); err != nil {
+		t.Fatal(err)
+	}
+	if stop, err := f.d.check(context.Background()); stop || err != nil || f.d.listening() {
+		t.Fatalf("idle check did not release listeners: stop %t, err %v", stop, err)
+	}
+	zero := 0
+	st := &sandboxapi.Status{Enabled: true, Available: true, Live: &zero,
+		Gateway: &sandboxapi.Gateway{Healthy: true, Driver: "docker"}, Managed: &sandboxapi.ManagedStatus{},
+		IngressAddr: f.d.api.SandboxIngressAddr(), EgressAddr: f.d.rt.egressAddr}
+	f.d.statusListenerAddresses(st)
+	if !st.Available || st.Reason != "" || st.IngressAddr != "" || st.EgressAddr != "" {
+		t.Fatalf("healthy idle managed status = %+v", st)
+	}
+	active := 1
+	st.Live = &active
+	f.d.statusListenerAddresses(st)
+	if st.Available || !strings.Contains(st.Reason, "listener is not running") {
+		t.Fatalf("lost listener under a running sandbox = %+v", st)
+	}
+}
+
+func TestManagedStatusKeepsBindFailureUntilListenersRecover(t *testing.T) {
+	// freePort releases the port it found, so another test's leftover
+	// listener or an outgoing loopback connection could take the egress
+	// port before the recovery below binds it (CI saw sandbox_account_busy
+	// there). Hold the egress port until just before the recovery.
+	egressHold, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer egressHold.Close()
+	f := newSandboxDaemonFixture(t, func(o *SandboxDaemonOptions) {
+		o.Settings.Operational.EgressPort = egressHold.Addr().(*net.TCPAddr).Port
+	})
+	f.run(t)
+	addr := f.d.api.SandboxIngressAddr()
+	squatter, err := net.Listen("tcp", addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.d.ensureListeners(); err == nil {
+		t.Fatal("busy ingress port was accepted")
+	}
+	zero := 0
+	status := func() *sandboxapi.Status {
+		st := &sandboxapi.Status{Enabled: true, Available: true, Live: &zero,
+			Gateway: &sandboxapi.Gateway{Healthy: true}, Managed: &sandboxapi.ManagedStatus{},
+			IngressAddr: addr, EgressAddr: f.d.rt.egressAddr}
+		f.d.statusListenerAddresses(st)
+		return st
+	}
+	if st := status(); st.Available || !strings.Contains(st.Reason, "address already in use") ||
+		!strings.Contains(st.Reason, "openshell.ingress_port") || st.IngressAddr != "" {
+		t.Fatalf("bind failure hidden by idle status: %+v", st)
+	}
+	if err := squatter.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := egressHold.Close(); err != nil {
+		t.Fatal(err)
+	}
+	// A port taken for a moment by another program is retried; one that
+	// stays in use (a listener this daemon did not close) still fails.
+	for deadline := time.Now().Add(5 * time.Second); ; {
+		err := f.d.ensureListeners()
+		if err == nil {
+			break
+		}
+		failure := f.d.listenFailed.Load()
+		if failure == nil || !isAddrInUse(failure.err) || time.Now().After(deadline) {
+			part := ""
+			if failure != nil {
+				part = failure.part
+			}
+			t.Fatalf("listeners did not recover (part %q): %v", part, err)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if st := status(); !st.Available || st.Reason != "" || st.IngressAddr == "" || st.EgressAddr == "" {
+		t.Fatalf("recovered listener still unavailable: %+v", st)
+	}
+}
+
+// A policy view of an off computer must not wait for the kept sandbox's
+// OpenShell gateway during daemon startup. That gateway cannot start without
+// the organization's gateway.toml after sandboxes were turned off.
+func TestManagedPolicyExplainWhenOffSkipsKeptGateway(t *testing.T) {
+	var probed atomic.Int32
+	f := newSandboxDaemonFixture(t, func(o *SandboxDaemonOptions) {
+		o.listPhases = func(ctx context.Context) (map[string]string, bool) {
+			probed.Add(1)
+			<-ctx.Done()
+			return nil, false
+		}
+	})
+	f.d.settingsMu.Lock()
+	f.d.settings.Enabled, f.d.settings.Available = false, false
+	f.d.settingsMu.Unlock()
+	f.d.reloadConfig()
+	if err := f.d.regs.put(daemonRegistration{ID: "kept-reg", Sandbox: "kept", UpdatedAt: time.Now()}); err != nil {
+		t.Fatal(err)
+	}
+	var seen []sandboxrelay.ExplainRequest
+	f.relay.explain = contractorsExplain(&seen)
+	f.run(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if _, err := sandboxapi.NewUnixClient(f.socket).Explain(ctx, sandboxapi.ExplainRequest{}); err != nil {
+		t.Fatalf("policy explain on an off computer waited for OpenShell: %v", err)
+	}
+	if probed.Load() != 0 {
+		t.Fatalf("probed the stopped account gateway %d times", probed.Load())
+	}
+}
+
+// #1200: the MCP row of a new run's explain counted only the caller's own
+// servers; a project's .mcp.json server, which the pack keeps from
+// starting, was in no view. The daemon counts the project's servers.
+func TestManagedExplainCountsTheProjectsMCPServers(t *testing.T) {
+	f := newSandboxDaemonFixture(t)
+	var seen []sandboxrelay.ExplainRequest
+	f.relay.explain = contractorsExplain(&seen)
+	f.run(t)
+	client := sandboxapi.NewUnixClient(f.socket)
+	project := t.TempDir()
+	if err := os.WriteFile(filepath.Join(project, ".mcp.json"), []byte(`{"mcpServers":{"site-docs":{"type":"http","url":"https://example.invalid/mcp"}}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ex, err := client.Explain(context.Background(), sandboxapi.ExplainRequest{Harness: "claudecode", Project: project})
+	if err != nil || ex.Managed == nil {
+		t.Fatalf("explain: %+v, %v", ex, err)
+	}
+	if ex.Managed.MCPProjectCount != 1 || !ex.Managed.MCPProjectBlocked {
+		t.Fatalf("project MCP = %d blocked %t, want 1 blocked", ex.Managed.MCPProjectCount, ex.Managed.MCPProjectBlocked)
+	}
+	// An explain of a sandbox already made is its registration's: no project read.
+	if ex, err := client.Explain(context.Background(), sandboxapi.ExplainRequest{Harness: "claudecode"}); err != nil || ex.Managed.MCPProjectCount != 0 {
+		t.Fatalf("explain without a project: %+v, %v", ex, err)
 	}
 }

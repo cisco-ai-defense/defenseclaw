@@ -89,7 +89,7 @@ func TestPurgeNamesTheAgentsTheAccountsOwnStopUnloaded(t *testing.T) {
 		t.Skipf("uid %d is below the first macOS user account", h.alice.UID)
 	}
 	requireOK(t, h.ensure(sandboxConfig(t, "darwin", true, setupVMSettings)))
-	h.installTarballFiles(t, h.alice, "0.1.3")
+	h.installTarballFiles(t, h.alice, "0.1.5")
 	uid := strconv.Itoa(h.alice.UID)
 	var calls []string
 	runner := bootoutRunner{

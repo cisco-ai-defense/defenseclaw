@@ -57,7 +57,7 @@ MAX_IMAGE_STORE_BYTES = 4 << 20
 # hook_contracts.json manifest. The setup gate cannot resolve their sandbox
 # contract, so it keeps its host-based verdict rather than accepting evidence
 # the gateway might refuse.
-SANDBOX_ONLY_CONTRACT_CONNECTORS = frozenset({"kiro", "omnigent"})
+SANDBOX_ONLY_CONTRACT_CONNECTORS = frozenset({"kiro"})
 
 # Sandbox hooks always fail closed (connector.SandboxFailMode).
 SANDBOX_FAIL_MODE = "closed"

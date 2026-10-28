@@ -59,6 +59,8 @@ func TestRunReadiesManagedOpenShellAtFirstRun(t *testing.T) {
 	ta.ok(t, ta.Run(bg, RunOptions{Harness: "claude", Rm: true}))
 	if r, c := ta.daemon.callsTo("POST", sandboxapi.PathReady), ta.daemon.callsTo("POST", sandboxapi.PathSandboxes); len(r) != 1 || len(c) != 1 {
 		t.Fatalf("ready calls %d, create calls %d", len(r), len(c))
+	} else if string(r[0].Body) != `{"harness":"claudecode"}` {
+		t.Fatalf("ready request = %s, want the run's harness", r[0].Body)
 	}
 	has(t, ta.output()+ta.err.String(), "Installing OpenShell 0.1.3 for your account and starting it (first run only)")
 	if ta.Cfg.OpenShell.Binary != cli {
@@ -79,6 +81,29 @@ func TestRunReadiesManagedOpenShellAtFirstRun(t *testing.T) {
 	}
 	if r := off.daemon.callsTo("POST", sandboxapi.PathReady); len(r) != 0 {
 		t.Fatalf("an unavailable computer readied OpenShell: %d calls", len(r))
+	}
+}
+
+// A run's ready names the run's own agent, so the daemon asks only that
+// agent's policy view (S2 review, loop round 2).
+func TestRunReadiesTheRequestedManagedHarness(t *testing.T) {
+	ta := newTestApp(t, "")
+	gw := ta.daemon.status.Gateway
+	ta.daemon.status.Available, ta.daemon.status.Gateway = false, nil
+	ta.daemon.status.Managed = managedStatusFixture()
+	ta.daemon.onReady = func(st *sandboxapi.Status) {
+		st.Available, st.Gateway = true, gw
+	}
+	api, err := ta.api()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ta.preflight(bg, api, "codex"); err != nil {
+		t.Fatal(err)
+	}
+	ready := ta.daemon.callsTo("POST", sandboxapi.PathReady)
+	if len(ready) != 1 || string(ready[0].Body) != `{"harness":"codex"}` {
+		t.Fatalf("codex ready request = %+v", ready)
 	}
 }
 
@@ -170,5 +195,32 @@ func TestManagedCopyStagesWithTheDaemonsPolicy(t *testing.T) {
 	}
 	if _, err := ta.copyStageOptions(packs.Flags{Pack: "contractors", Project: ta.project}, "dc-claude-a", nil); err == nil {
 		t.Fatal("staged without the daemon's copy policy")
+	}
+}
+
+// A 1.0.4 CLI on a managed computer whose sandbox daemon is still 1.0.3
+// (it has not restarted since the package upgrade): that daemon's Ready
+// refuses the harness field, so the CLI readies with the empty object it
+// takes. The doctor's daemon row, which says the first run readies
+// OpenShell, is then true: the run readies it and creates the sandbox.
+func TestFirstRunReadiesOnAnOlderManagedDaemon(t *testing.T) {
+	ta := newTestApp(t, "")
+	gw := ta.daemon.status.Gateway
+	ta.daemon.status.Available, ta.daemon.status.Gateway = false, nil
+	ta.daemon.status.Managed = managedStatusFixture()
+	ta.daemon.statusWithoutAllowed, ta.daemon.strictReady = true, true
+	ta.daemon.onReady = func(st *sandboxapi.Status) {
+		st.Available, st.Reason, st.Gateway = true, "", gw
+	}
+	if c := ta.probeDaemon(bg, true).check; c.Status != openshell.StatusPass {
+		t.Fatalf("doctor daemon row before the first run: %+v", c)
+	}
+	ta.ok(t, ta.Run(bg, RunOptions{Harness: "claude", Rm: true}))
+	ready := ta.daemon.callsTo("POST", sandboxapi.PathReady)
+	if len(ready) != 2 || string(ready[0].Body) != `{"harness":"claudecode"}` || string(ready[1].Body) != `{}` {
+		t.Fatalf("ready requests = %+v, want the harness, then the older daemon's empty object", ready)
+	}
+	if c := ta.daemon.callsTo("POST", sandboxapi.PathSandboxes); len(c) != 1 {
+		t.Fatalf("create calls %d after readying an older daemon", len(c))
 	}
 }

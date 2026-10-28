@@ -28,17 +28,17 @@ import (
 )
 
 // The sandbox variants of the hook-only connectors that run in OpenShell
-// images (Hermes, OpenHands, Antigravity). Their hooks run in the shared
+// images (Hermes, Antigravity). Their hooks run in the shared
 // tables of sandbox_hooks_shell_test.go against each harness's own block
 // signal.
 
 // TestHookOnlySandboxArtifacts: the root-owned Hermes managed .env pins the
 // switches Hermes would otherwise take from the workload-writable
-// ~/.hermes/.env, and the OpenHands and agy hooks seeded in HOME are byte for
+// ~/.hermes/.env, and the agy hooks seeded in HOME are byte for
 // byte the root-owned copies their launchers restore them from.
 func TestHookOnlySandboxArtifacts(t *testing.T) {
 	env := sandboxFile(t, sandboxArtifactsFor(t, NewHermesConnector(), "0.19.0"), HermesSandboxManagedEnvPath)
-	for _, pin := range []string{"\nHERMES_SAFE_MODE=0\n", "\nHERMES_ENABLE_PROJECT_PLUGINS=0\n", "\nHERMES_ACCEPT_HOOKS=1\n", "\nTIRITH_ENABLED=0\n", "\nHERMES_DISABLE_LAZY_INSTALLS=1\n"} {
+	for _, pin := range []string{"\nHERMES_SAFE_MODE=0\n", "\nHERMES_ENABLE_PROJECT_PLUGINS=0\n", "\nHERMES_ACCEPT_HOOKS=1\n", "\nTIRITH_ENABLED=0\n", "\nHERMES_DISABLE_LAZY_INSTALLS=1\n", "\nHERMES_TUI=0\n"} {
 		if env.Owner != SandboxOwnerRoot || !strings.Contains(string(env.Data), pin) {
 			t.Fatalf("managed env (%s) lacks %q:\n%s", env.Owner, pin, env.Data)
 		}
@@ -48,7 +48,6 @@ func TestHookOnlySandboxArtifacts(t *testing.T) {
 		version         string
 		canonical, user string
 	}{
-		{NewOpenHandsConnector(), "1.16.0", OpenHandsSandboxCanonicalHooksPath, OpenHandsSandboxHooksPath},
 		{NewAntigravityConnector(), "1.2.12", AntigravitySandboxCanonicalHooksPath, AntigravitySandboxHooksPath},
 	} {
 		a := sandboxArtifactsFor(t, tc.provider, tc.version)
@@ -111,6 +110,10 @@ func TestVerifyHermesSandboxManagedConfigRejectsTampering(t *testing.T) {
 		"lazy-installs-on":       mutate(func(d map[string]interface{}) { d["security"] = map[string]interface{}{"tirith_enabled": false} }),
 		"model-catalog-on":       mutate(func(d map[string]interface{}) { d["model_catalog"] = map[string]interface{}{"enabled": true} }),
 		"model-catalog-unpinned": mutate(func(d map[string]interface{}) { delete(d, "model_catalog") }),
+		// GAP-1036 review: the pinned Hermes' TUI runs without the hooks.
+		"tui-interface":      mutate(func(d map[string]interface{}) { d["display"] = map[string]interface{}{"interface": "tui"} }),
+		"interface-unpinned": mutate(func(d map[string]interface{}) { d["display"] = map[string]interface{}{"skin": "default"} }),
+		"display-unpinned":   mutate(func(d map[string]interface{}) { delete(d, "display") }),
 		"provider-pinned-url": mutate(func(d map[string]interface{}) {
 			d["providers"].(map[string]interface{})[HermesSandboxProviderName].(map[string]interface{})["base_url"] = "http://example.invalid/v1"
 		}),

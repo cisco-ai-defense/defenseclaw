@@ -146,8 +146,12 @@ func cleanUserSources(req GuardRequest, backupDir string, first func(hookSource)
 					}
 					continue
 				}
-				if err := movePluginAside(finding.Path, backupDir); err != nil {
+				path := finding.Path
+				ran, removeErr, err := req.guardedRemoval([]string{path}, func() error { return movePluginAside(path, backupDir) })
+				if err != nil {
 					errs = append(errs, err)
+				}
+				if !ran || removeErr != nil {
 					result.Reported = append(result.Reported, finding)
 					continue
 				}
@@ -169,7 +173,7 @@ func cleanUserSources(req GuardRequest, backupDir string, first func(hookSource)
 				continue
 			}
 			for _, entry := range entries {
-				if entry.IsDir() || strings.HasPrefix(entry.Name(), ".") || !strings.HasSuffix(strings.ToLower(entry.Name()), ".json") {
+				if !effectivePolicyDropIn(entry) {
 					continue
 				}
 				child := source.child(filepath.Join(source.path, entry.Name()), formatFlat)
@@ -290,20 +294,45 @@ func cleanJSONSource(scan *guardScan, source hookSource, backupDir string, resul
 	if err != nil {
 		return err
 	}
-	if err := backupUserFile(source.path, data, backupDir); err != nil {
-		return err
+	return rewriteUserSource(req, source, data, rendered, removed, backupDir, result)
+}
+
+// rewriteUserSource replaces source's file with rendered, which drops the
+// removed hooks, as one guarded removal (GuardRequest.GuardRemoval), after
+// a backup of the original data.
+func rewriteUserSource(req GuardRequest, source hookSource, data, rendered []byte, removed []Finding, backupDir string, result *CleanupResult) error {
+	backedUp := false
+	ran, removeErr, err := req.guardedRemoval(findingPaths(removed), func() error {
+		if err := backupUserFile(source.path, data, backupDir); err != nil {
+			return err
+		}
+		backedUp = true
+		info, err := os.Lstat(source.path)
+		if err != nil {
+			return err
+		}
+		return rewriteUserFile(source.path, rendered, info.Mode().Perm())
+	})
+	if backedUp {
+		result.BackupDir = backupDir
 	}
-	result.BackupDir = backupDir
-	info, err := os.Lstat(source.path)
-	if err != nil {
-		return err
+	switch {
+	case !ran:
+		result.Reported = append(result.Reported, removed...)
+	case removeErr == nil:
+		result.Removed = append(result.Removed, removed...)
+		result.FilesTouch = appendUnique(result.FilesTouch, source.path)
 	}
-	if err := rewriteUserFile(source.path, rendered, info.Mode().Perm()); err != nil {
-		return err
+	return err
+}
+
+// findingPaths lists the files findings name, each once.
+func findingPaths(findings []Finding) []string {
+	var paths []string
+	for _, finding := range findings {
+		paths = appendUnique(paths, finding.Path)
 	}
-	result.Removed = append(result.Removed, removed...)
-	result.FilesTouch = appendUnique(result.FilesTouch, source.path)
-	return nil
+	return paths
 }
 
 func backupName(path string) string {

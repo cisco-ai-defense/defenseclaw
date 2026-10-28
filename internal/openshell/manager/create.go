@@ -126,6 +126,12 @@ func (m *Manager) Create(ctx context.Context, req sandboxapi.CreateRequest) (*sa
 	if err != nil {
 		return nil, err
 	}
+	if err := m.sandboxReleaseRefusal(gw); err != nil {
+		return nil, err
+	}
+	if err := m.legacyRunRefusal(""); err != nil {
+		return nil, err
+	}
 	// On a managed host the daemon chose the driver at sandbox start (its
 	// KVM probe and the organization's driver_fallback): the gateway must
 	// run that one. It is never switched under running sandboxes.
@@ -190,6 +196,14 @@ func (m *Manager) Create(ctx context.Context, req sandboxapi.CreateRequest) (*sa
 	b, err := m.reserve(name, project, mode)
 	if err != nil {
 		return nil, err
+	}
+	if pinned, ok := ctx.Value(createConfigKey{}).(*config.Config); ok && pinned != nil {
+		// The refreshes during the create, and until the daemon keeps the
+		// registration, judge this sandbox under the floor its create
+		// resolved with, not the closed one (GAP-0016).
+		m.mu.Lock()
+		b.createCfg = pinned
+		m.mu.Unlock()
 	}
 	b.op.Lock()
 	defer b.op.Unlock()
@@ -575,6 +589,12 @@ func (m *Manager) create(ctx context.Context, gw *Gateway, b *box, in createInpu
 	// Once the box holds its binding: the harness has not run yet, so the
 	// session's tool-call ledger is complete.
 	m.toolCalls.Begin(rec.BindingID)
+	// Not while DefenseClaw restarts or upgrades the gateway, whose check
+	// of its sandboxes came before this one (lockStart).
+	unlockStart, err := m.lockStart()
+	if err != nil {
+		return nil, err
+	}
 	m.lifecycle(ctx, b, audit.SandboxPhaseCreating, audit.SandboxTriggerCreate, false, nil, nil)
 	sbSpec := &openshell.SandboxSpec{Environment: envOut, Template: tmpl, Providers: providerNames, Policy: pol}
 	// Registered before the request: a failure that leaves open whether
@@ -582,7 +602,9 @@ func (m *Manager) create(ctx context.Context, gw *Gateway, b *box, in createInpu
 	// call, a deadline) must not leave one behind that holds the project
 	// mount and providers with no record.
 	rb.add("delete sandbox", func(ctx context.Context) error { return m.deleteCreated(ctx, gw, name) })
-	if _, err := gw.Client.CreateSandbox(ctx, name, sbSpec, openshell.CreateSandboxOptions{Labels: labels}); err != nil {
+	_, err = gw.Client.CreateSandbox(ctx, name, sbSpec, openshell.CreateSandboxOptions{Labels: labels})
+	unlockStart()
+	if err != nil {
 		m.dropGateway(gw, err)
 		if tmpl.DriverConfig != nil && openshell.IsConflict(err) && strings.Contains(err.Error(), "driver config") {
 			return nil, bindMountsOff(spec, plan != nil, len(delivered.mounts) > 0, m.managedMode(), err)

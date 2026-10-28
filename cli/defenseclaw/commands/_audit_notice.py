@@ -39,8 +39,9 @@ NOT_RECORDED_WARNING = not_recorded_warning()
 
 
 class _SavedChangeAudit:
-    def __init__(self, logger: Any) -> None:
+    def __init__(self, logger: Any, *, unavailable_warning: str | None = None) -> None:
         self._logger = logger
+        self._unavailable_warning = unavailable_warning or NOT_RECORDED_WARNING
 
     def _record(self, method: str, *args: Any, **kwargs: Any) -> None:
         from defenseclaw.logger import CanonicalObservabilityUnavailableError
@@ -51,7 +52,7 @@ class _SavedChangeAudit:
         except CanonicalObservabilityUnavailableError:
             if not _NOTED:
                 _NOTED = True
-                ux.echo(NOT_RECORDED_WARNING, err=True)
+                ux.echo(self._unavailable_warning, err=True)
 
     def log_action(self, *args: Any, **kwargs: Any) -> None:
         self._record("log_action", *args, **kwargs)
@@ -63,34 +64,37 @@ class _SavedChangeAudit:
         self._record("log_scan", *args, **kwargs)
 
 
-def saved_change_audit(logger: Any) -> _SavedChangeAudit:
+def saved_change_audit(logger: Any, *, unavailable_warning: str | None = None) -> _SavedChangeAudit:
     """Wrap *logger* for the audit event of an already applied change."""
-    return _SavedChangeAudit(logger)
+    return _SavedChangeAudit(logger, unavailable_warning=unavailable_warning)
 
 
 def note_asset_policy_observed(
     logger: Any, decision: Any, *, target_type: str, name: str, connector: str = "",
 ) -> None:
-    """Warn and audit an asset-policy would-block in observe mode (GAP-2390).
+    """Warn and audit an asset-policy would-block in observe mode (GAP-2390),
+    or an asset admitted because registry_empty_action is warn.
 
     Observe mode admits the asset, but operators must still see what action
-    mode would refuse, both on screen and in the audit trail.
+    mode would refuse, both on screen and in the audit trail. An empty
+    required registry with registry_empty_action warn admits the asset in
+    either mode and says why, as the gateway does.
     """
     reason = getattr(decision, "observed_reason", "")
     if not reason:
         return
     source = getattr(decision, "observed_source", "")
     where = f" [{connector}]" if connector else ""
-    ux.secho(
-        ux.console_text(
-            f"  ⚠ asset policy (observe){where}: {reason}; allowed now, "
-            "action mode would block it."
-        ),
-        fg="yellow",
-    )
+    if source.endswith("-empty-warn"):
+        line = f"  ⚠ asset policy{where}: {reason}."
+        detail = "registry_empty_action=warn"
+    else:
+        line = f"  ⚠ asset policy (observe){where}: {reason}; allowed now, action mode would block it."
+        detail = "mode=observe"
+    ux.secho(ux.console_text(line), fg="yellow")
     if logger:
         saved_change_audit(logger).log_action(
             "install-warning", name,
-            f"type={target_type} connector={connector} mode=observe would-block "
+            f"type={target_type} connector={connector} {detail} would-block "
             f"source={source} reason={reason}",
         )

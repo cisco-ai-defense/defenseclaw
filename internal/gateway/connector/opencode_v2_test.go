@@ -5,6 +5,7 @@ package connector
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -15,6 +16,7 @@ import (
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/opencodebridge"
+	"github.com/defenseclaw/defenseclaw/internal/testenv"
 )
 
 func TestOpenCodeV2Contract(t *testing.T) {
@@ -40,10 +42,7 @@ func TestOpenCodeV2Contract(t *testing.T) {
 		}
 	}))
 	defer server.Close()
-	plugin := filepath.Join(t.TempDir(), "defenseclaw.mjs")
-	if err := os.WriteFile(plugin, []byte(renderOpenCodePluginTemplate(t, openCodePluginTestData(t, server))), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	plugin := writeRenderedPlugin(t, "opencode-plugin.js", "defenseclaw.mjs", openCodePluginTestData(t, server))
 	harness, err := filepath.Abs("../../opencodebridge/testdata/contract.mjs")
 	if err != nil {
 		t.Fatal(err)
@@ -78,27 +77,51 @@ func TestOpenCodeV2OutageAndCredentialFailures(t *testing.T) {
 	for _, tc := range []struct {
 		name, mode              string
 		missingToken, wantBlock bool
+		nativeStatus            int
 	}{
-		{"closed outage", "closed", false, true},
-		{"open outage", "open", false, false},
-		{"closed missing credential", "closed", true, true},
-		{"open missing credential", "open", true, true},
+		{"closed outage", "closed", false, true, 7},
+		{"open outage", "open", false, false, 7},
+		{"closed missing credential", "closed", true, true, 0},
+		{"open missing credential", "open", true, true, 0},
+		{"open unverified native peer", "open", false, true, 8},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("DEFENSECLAW_STRICT_AVAILABILITY", "")
 			server := openCodeStubGateway(t)
 			data := openCodePluginTestData(t, server)
 			data.FailMode = tc.mode
+			data.OutageFailMode = tc.mode
 			if tc.missingToken {
 				data.TokenFileJS = javaScriptStringContent(filepath.Join(t.TempDir(), "missing.token"))
 			} else {
 				server.Close()
 			}
-			plugin := filepath.Join(t.TempDir(), "plugin.mjs")
-			if err := os.WriteFile(plugin, []byte(renderOpenCodePluginTemplate(t, data)), 0o600); err != nil {
-				t.Fatal(err)
+			plugin := writeRenderedPlugin(t, "opencode-plugin.js", "plugin.mjs", data)
+			if tc.nativeStatus != 0 {
+				// Keep the installed transport and mock only the native
+				// process result: exit 7 is a classified outage; other
+				// failures must stay closed even when outage mode is open.
+				binary := filepath.Join(testenv.PrivateTempDir(t), "bin", "defenseclaw-gateway.exe")
+				if err := os.MkdirAll(filepath.Dir(binary), 0o700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(binary, []byte("fixture native process"), 0o700); err != nil {
+					t.Fatal(err)
+				}
+				data.GatewayBinaryJS = javaScriptStringContent(binary)
+				if err := os.WriteFile(plugin, []byte(renderOpenCodePluginTemplate(t, data)), 0o600); err != nil {
+					t.Fatal(err)
+				}
 			}
 			lines := runNodeHarness(t, `
 import {pathToFileURL} from "node:url";
+import childProcess from "node:child_process";
+import {syncBuiltinESMExports} from "node:module";
+const nativeStatus = Number(process.argv[2]);
+if (nativeStatus) {
+ childProcess.execFileSync = () => { throw Object.assign(new Error("fixture native process result"), {status:nativeStatus}); };
+ syncBuiltinESMExports();
+}
 const {default: plugin} = await import(pathToFileURL(process.argv[1]));
 const location = {directory:"/work"}; let before;
 const cleanup = await plugin.setup({location,
@@ -108,7 +131,7 @@ const cleanup = await plugin.setup({location,
 });
 try { await before({tool:"shell",input:{command:"echo test"},id:"call_1",sessionID:"ses_1"}); console.log("allow"); }
 catch { console.log("block"); }
-await cleanup();`, plugin)
+await cleanup();`, plugin, fmt.Sprint(tc.nativeStatus))
 			if got := lines[len(lines)-1] == "block"; got != tc.wantBlock {
 				t.Fatalf("block=%v, want %v", got, tc.wantBlock)
 			}

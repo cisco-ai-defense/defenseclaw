@@ -22,7 +22,7 @@ export interface HomeConnector {
 // Display order: most-installed agents first (matches the docs connector nav).
 const ORDER = [
   'claudecode', 'codex', 'copilot', 'cursor', 'devin', 'antigravity',
-  'kiro', 'opencode', 'amp', 'hermes', 'openhands', 'omnigent',
+  'kiro', 'opencode', 'amp', 'hermes',
 ];
 
 const SHORT: Record<string, string> = { copilot: 'Copilot' };

@@ -18,6 +18,7 @@ import (
 	"path/filepath"
 
 	"github.com/defenseclaw/defenseclaw/internal/enterprisebundle"
+	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 	"github.com/defenseclaw/defenseclaw/internal/safefile"
 )
 
@@ -30,9 +31,9 @@ import (
 // the managed trust check on the file and every folder above it) and read
 // once, the write happens under the lifecycle lock, so it cannot land in
 // the middle of a bundle apply, and the installed file is checked again and
-// put back when that check fails. No audit event records the change: the
-// agent reports it from the result (anchors and secrets are not audited by
-// DefenseClaw, management agent contract section 0).
+// put back when that check fails. Every install that changed the file,
+// was refused or failed leaves a change event the gateway reports as a
+// config.trust_anchors.changed audit event (recordAnchorsChange).
 
 // Results of InstallBundleAnchors.
 const (
@@ -60,19 +61,46 @@ type AnchorsInstall struct {
 	// SignerKeyID signed the confirmed bundle ("" for none): the caller warns
 	// when the new anchors no longer trust it.
 	SignerKeyID string
+	// previousKeyIDs are the key ids of the replaced file; attempted is set
+	// once the install started writing, so a refusal after it is a failure.
+	previousKeyIDs []string
+	attempted      bool
+	// Unrecorded is set when the change event of this install could not be
+	// written: the caller reports it as the warning change_unrecorded.
+	Unrecorded error
+	// ReleaseUnflushed is set when this install recorded nothing and its
+	// change event reservation could not be removed durably: the caller
+	// reports it as the warning change_release_unflushed.
+	ReleaseUnflushed error
 }
 
 // InstallBundleAnchors installs the anchor file src as the device trust
 // anchors. Refusals are *enterprisebundle.Error with codes not_root,
 // anchor_missing, anchor_insecure, anchor_invalid, anchor_restore_failed,
-// lifecycle_busy and state_invalid; nothing is written for any of them but
+// lifecycle_busy, state_invalid and disk_full; nothing is written for any of them but
 // anchor_restore_failed.
 func (e *Env) InstallBundleAnchors(ctx context.Context, src string) (*AnchorsInstall, error) {
+	var reservation *enterprisestatus.ChangeReservation
+	defer func() { _ = reservation.Release() }()
+	out, err := e.installBundleAnchors(ctx, src, &reservation)
+	if recordErr := e.recordAnchorsChange(reservation, out, err); recordErr != nil && out != nil {
+		out.Unrecorded = recordErr
+	}
+	if releaseErr := reservation.Release(); releaseErr != nil && out != nil {
+		out.ReleaseUnflushed = releaseErr
+	}
+	return out, err
+}
+
+// installBundleAnchors sets *reservation once it reserved room for the
+// change event, before the file is written.
+func (e *Env) installBundleAnchors(ctx context.Context, src string, reservation **enterprisestatus.ChangeReservation) (*AnchorsInstall, error) {
 	dest := e.bundleAnchorsPath()
 	out := &AnchorsInstall{Path: filepath.Join(e.Layout.ConfigDir, "trust", enterprisebundle.AnchorsName)}
+	attempted := false
 	refused := func(err error) (*AnchorsInstall, error) {
 		// Only the file still installed is reported, never the refused one.
-		out = &AnchorsInstall{Path: out.Path}
+		out = &AnchorsInstall{Path: out.Path, attempted: attempted}
 		if installed, readErr := readInstalledAnchors(dest); readErr == nil && installed != nil {
 			out.SHA256 = sha256Bytes(installed)
 		}
@@ -94,7 +122,7 @@ func (e *Env) InstallBundleAnchors(ctx context.Context, src string) (*AnchorsIns
 	}
 
 	if err := e.ensureDir(e.P(e.Layout.LifecycleDir), 0o700, rootOwner()); err != nil {
-		return refuse(enterprisebundle.CodeStateInvalid, "%v", err)
+		return refuse(anchorsWriteCode(err), "%v%s", err, stateWriteAction(err))
 	}
 	lock, err := e.acquireLock(ctx)
 	if errors.Is(err, errLockBusy) {
@@ -120,10 +148,30 @@ func (e *Env) InstallBundleAnchors(ctx context.Context, src string) (*AnchorsIns
 		return out, nil
 	}
 	if err := e.ensureDir(filepath.Dir(dest), 0o755, rootOwner()); err != nil {
-		return refuse(enterprisebundle.CodeStateInvalid, "prepare the trust anchor folder: %v", err)
+		return refuse(anchorsWriteCode(err), "prepare the trust anchor folder: %v%s", err, stateWriteAction(err))
 	}
-	if err := e.writeFileAtomic(dest, raw, 0o644, rootOwner()); err != nil {
-		return refuse(enterprisebundle.CodeStateInvalid, "write the trust anchor file: %v", err)
+	// An install this device could not audit is not made: the spool must
+	// hold room for its change event before the file is written, until the
+	// event is written.
+	reserved, err := e.ReserveChange(enterprisestatus.ChangeKindTrustAnchors, enterprisestatus.ChangeActionInstall, "")
+	if err != nil {
+		return refuse(anchorsWriteCode(err), "cannot record the trust anchor change: %v%s", err, stateWriteAction(err))
+	}
+	*reservation = reserved
+	if previous != nil {
+		if old, err := enterprisebundle.DecodeAnchors(previous); err == nil {
+			for _, key := range old.Keys {
+				out.previousKeyIDs = append(out.previousKeyIDs, key.KeyID)
+			}
+		}
+	}
+	attempted = true
+	err = e.fault("anchors-write")
+	if err == nil {
+		err = e.writeFileAtomic(dest, raw, 0o644, rootOwner())
+	}
+	if err != nil {
+		return refuse(anchorsWriteCode(err), "write the trust anchor file: %v%s", err, stateWriteAction(err))
 	}
 	if _, installed, err := enterprisebundle.ReadAnchorsFile(dest, trust); err != nil || !bytes.Equal(installed, raw) {
 		problem := "the installed bytes differ from the checked file"
@@ -143,6 +191,16 @@ func (e *Env) InstallBundleAnchors(ctx context.Context, src string) (*AnchorsIns
 		out.Result, out.PreviousSHA256 = AnchorsReplaced, sha256Bytes(previous)
 	}
 	return out, nil
+}
+
+// anchorsWriteCode is the code of an anchor install whose own write failed:
+// disk_full when the filesystem or quota is full, state_invalid otherwise
+// (GAP-0609).
+func anchorsWriteCode(err error) enterprisebundle.Code {
+	if noSpace(err) {
+		return enterprisebundle.CodeDiskFull
+	}
+	return enterprisebundle.CodeStateInvalid
 }
 
 // readInstalledAnchors returns the installed anchor file (nil when there is

@@ -30,11 +30,9 @@ CONNECTOR_CHOICES: tuple[str, ...] = (
     "cursor",
     "devin",
     "copilot",
-    "openhands",
     "antigravity",
     "opencode",
     "amp",
-    "omnigent",
     "kiro",
 )
 

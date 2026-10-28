@@ -443,7 +443,9 @@ func copyWindowsManagedFile(source, destination, sddl string, replace bool) erro
 }
 
 func windowsFileSHA256Hex(path string) (string, error) {
-	file, err := os.Open(path)
+	// The guardian hashes the installed hook while hook calls run; a
+	// delete-sharing open lets an installer replace it meanwhile (GAP-0200).
+	file, err := winpath.OpenReadShared(path)
 	if err != nil {
 		return "", err
 	}

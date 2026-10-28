@@ -17,7 +17,7 @@ them with their default return-code tables.
 | --- | --- | --- | --- |
 | `0` | success | Installed, upgraded, repaired, removed, or nothing to do (`noop: true`). | Success |
 | `1603` | `ERROR_INSTALL_FAILURE` | The action failed. Mutating actions have already rolled back to the previous deployment. | Failure; read `errors[].code` |
-| `1618` | `ERROR_INSTALL_ALREADY_RUNNING` | Another lifecycle run holds the lock, or a signed policy bundle did not finish applying to the running deployment (`bundle_apply_failed`). | Retry later (Intune's default table retries 1618) |
+| `1618` | `ERROR_INSTALL_ALREADY_RUNNING` | Another lifecycle run holds the lock, or a signed policy bundle did not finish applying to the running deployment (`bundle_apply_failed`), or `bundle apply --defer-restart` refused a bundle that would restart the gateway (`restart_deferred`). | Retry later (Intune's default table retries 1618); for `restart_deferred`, apply without the flag in a maintenance window |
 | `1639` | `ERROR_INVALID_COMMAND_LINE` | Invalid arguments, for example a first install without a config. Retrying will not help. | Failure; fix the assignment |
 | `5` | `ERROR_ACCESS_DENIED` | A standard account ran the installed CLI's `enterprise windows status` or `verify`, or `enterprise secret`, which need an elevated administrator or SYSTEM token (`elevation_required`). `enterprise secret` exits `5` only on a managed computer and `1603` with the same code on a computer without the standalone deployment marker. Setup and the wrappers report an unelevated token as `1603` instead. | Failure; run the command as SYSTEM |
 | `3010` | `ERROR_SUCCESS_REBOOT_REQUIRED` | Reserved. The standalone lifecycle does not require reboots today. | Soft reboot |
@@ -50,7 +50,7 @@ Setup returns only `0` and `1603`, its argument errors included.
 | `0` | Success or nothing to do. | Success |
 | `1` | The action failed (already rolled back), the config is invalid (`config_invalid`), or the wrapper refused an input. | Failure; read `errors[].code` |
 | `2` | Invalid arguments. | Failure; fix the script settings |
-| `75` | `EX_TEMPFAIL`: another lifecycle run or the package manager holds a lock, or a signed policy bundle whose gateway stopped reporting its policy before the receipt was confirmed (`not_confirmed`, receipt `applied`). | Retry later (set Intune's retry count or your MDM's retry policy) |
+| `75` | `EX_TEMPFAIL`: another lifecycle run or the package manager holds a lock, or a signed policy bundle whose gateway stopped reporting its policy before the receipt was confirmed (`not_confirmed`, receipt `applied`), or `bundle apply --defer-restart` refused a bundle that would restart the gateway (`restart_deferred`). | Retry later (set Intune's retry count or your MDM's retry policy); for `restart_deferred`, apply without the flag in a maintenance window |
 
 ## Error codes
 
@@ -93,7 +93,14 @@ lifecycle itself.
 
 A signed policy bundle (`--bundle-file`, `-BundlePath`, Setup `BUNDLE=`) uses
 the same exit codes. Its refusals (`signature_invalid`, `version_not_newer`,
-`secret_ref_missing`, `not_confirmed` and the rest) exit `1603` / `1`;
+`secret_ref_missing`, `secret_ref_mismatch`, `secret_ref_unbound`,
+`not_confirmed` and the rest) exit `1603` / `1`.
+`disk_full` identifies a staging or bundle-state write (the receipt, the state
+file, the rendered config, the trust anchor file and its change record) that
+exhausted the destination volume or quota. The
+failed receipt carries the same code when it could be written; free space and
+redeliver the bundle. An invalid archive remains `archive_invalid`, and a state
+that cannot be read `state_invalid` / `bundle_state_unreadable`.
 `lifecycle_busy` exits `1618` / `75`. On Linux and macOS a bundle whose
 config the transaction committed, but whose gateway stopped reporting its
 policy (it crashed or was killed) before the receipt was confirmed, exits

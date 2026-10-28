@@ -249,6 +249,7 @@ def add_destination(  # noqa: PLR0912, PLR0913 — many flags to mirror preset p
             raise SystemExit(2)
         signal_tuple = parsed  # type: ignore[assignment]
 
+    destination_name = name or ""
     try:
         resolved_inputs = _resolve_inputs(preset, inputs)
         _gate_local_preset(
@@ -289,9 +290,14 @@ def add_destination(  # noqa: PLR0912, PLR0913 — many flags to mirror preset p
     except ConfigInspectError as exc:
         message = str(exc)
         if "secret_reference_unresolved" in (exc.reason or "") and preset.token_env:
+            token_env = (
+                _splunk_reference_hint(app.cfg.data_dir, destination_name)
+                if preset.adapter_kind == "splunk_hec"
+                else preset.token_env
+            )
             message = (
-                f"{preset.token_env} is not set. Pass --token <value>, or store it first with: "
-                f"defenseclaw keys set {preset.token_env}"
+                f"{token_env} is not set. Pass --token <value>, or store it first with: "
+                f"defenseclaw keys set {token_env}"
             )
         raise click.ClickException(message) from exc
     except ValueError as exc:
@@ -350,6 +356,20 @@ def add_destination(  # noqa: PLR0912, PLR0913 — many flags to mirror preset p
         )
 
 
+def _splunk_reference_hint(data_dir: str, name: str) -> str:
+    """The credential reference the Splunk destination *name* uses (for a message)."""
+
+    from defenseclaw.observability.v8_presets import splunk_sink_token_env
+
+    try:
+        for item in _v8_authored_destinations(data_dir):
+            if item.get("name") == name and item.get("token_env"):
+                return str(item["token_env"])
+    except (OSError, ValueError):
+        pass
+    return splunk_sink_token_env(name)
+
+
 def _refuse_endpoint_credentials(preset: Preset, inputs: dict[str, str]) -> None:
     """Refuse user:password in --endpoint/--url in plain words (GAP-2205).
 
@@ -364,7 +384,9 @@ def _refuse_endpoint_credentials(preset: Preset, inputs: dict[str, str]) -> None
         if "@" not in authority:
             continue
         where = (
-            f"pass it with --token (stored as {preset.token_env} in ~/.defenseclaw/.env)"
+            "pass it with --token (stored under the destination's own reference in ~/.defenseclaw/.env)"
+            if preset.adapter_kind == "splunk_hec"
+            else f"pass it with --token (stored as {preset.token_env} in ~/.defenseclaw/.env)"
             if preset.token_env
             else "add a header to the destination in config.yaml, for example "
             "headers: {Authorization: {env: OTEL_AUTHORIZATION}}, and put the value in that environment variable"
@@ -510,8 +532,14 @@ def _add_v8_destination(
     extra_mutations=(),
     allow_private_networks: bool = False,
     plaintext: bool = False,
+    local_stack: dict[str, str] | None = None,
+    legacy_local_destination: tuple[dict[str, Any], str] | None = None,
 ):
-    """Add or update one v8 destination through the surgical writer."""
+    """Add or update one v8 destination through the surgical writer.
+
+    Only local Splunk setup passes *local_stack*, the record of the container
+    it started; see :func:`_splunk_destination_preset`.
+    """
 
     from defenseclaw.observability.v8_writer import mutate_v8_config
     from defenseclaw.observability.v8_yaml import V8YAMLMutation
@@ -551,80 +579,205 @@ def _add_v8_destination(
             )
     elif plaintext:
         raise ValueError("--plaintext applies to OTLP destinations only")
-    authored, expected_sha256 = _v8_authored_destination_snapshot(data_dir)
-    matches = [
-        (index, existing)
-        for index, existing in enumerate(authored)
-        if existing.get("name") == destination_name
-    ]
-    if matches:
-        index, existing = matches[0]
-        if existing.get("kind") != destination["kind"]:
-            raise ValueError(
-                f"destination {destination_name!r} already has kind {existing.get('kind')!r}; "
-                "remove it before changing adapter kind"
-            )
-        mutations = _v8_destination_update_mutations(index, existing, destination)
-    else:
-        mutations = [
-            V8YAMLMutation.set(
-                ("observability", "destinations", len(authored)),
-                destination,
-            )
-        ]
-    mutations.extend(extra_mutations)
+    # GAP-1320: one setup at a time stages the secret, commits config.yaml and
+    # takes the secret back out on a failure. A second setup that committed
+    # in between could rely on the staged value, and the rollback would then
+    # break its destination. The config writer's lock serializes the whole
+    # transaction across both files; mutate_v8_config joins it.
+    from defenseclaw import config_writer
 
-    stored_secret = token_value
-    if preset.id == "grafana-cloud":
-        if stored_secret and not stored_secret.startswith("Basic "):
-            stored_secret = "Basic " + stored_secret
-        elif not stored_secret:
-            warnings.append(
-                "GRAFANA_OTLP_TOKEN must contain the complete Authorization value, including the Basic prefix"
+    with config_writer.hold_lock(config_path_for_data_dir(data_dir), timeout_s=None):
+        authored, expected_sha256 = _v8_authored_destination_snapshot(data_dir)
+        if legacy_local_destination is not None and expected_sha256 != legacy_local_destination[1]:
+            raise ValueError("Local Splunk destination changed during setup; run setup splunk --logs again")
+        if preset.adapter_kind == "splunk_hec":
+            preset = _splunk_destination_preset(
+                preset, destination_name, authored, token_value=token_value, local_stack=local_stack,
+                legacy_local_destination=legacy_local_destination[0] if legacy_local_destination else None,
             )
-    secret_before = _stored_secret(data_dir, preset.token_env)
-    environ_before = os.environ.get(preset.token_env) if preset.token_env else None
-    warnings.extend(_apply_secret(data_dir, preset, stored_secret, dry_run=dry_run))
-    secret_changed = not dry_run and _stored_secret(data_dir, preset.token_env) != secret_before
-    validator = None
-    if dry_run and stored_secret and preset.token_env:
-        validator = _staged_secret_validator({preset.token_env: stored_secret})
-    try:
-        result = mutate_v8_config(
-            config_path_for_data_dir(data_dir),
-            mutations,
-            data_dir=data_dir,
-            validator=validator,
-            dry_run=dry_run,
-            expected_before_sha256=expected_sha256,
-        )
-    except BaseException:
-        if secret_changed:
-            # GAP-0210: a failed add leaves no key behind in .env.
-            try:
-                restore_secret(data_dir, preset.token_env, secret_before, environ_before, stored_secret)
-            except Exception as restore_error:  # noqa: BLE001 - the add error is the one to report.
-                # GAP-0374: a hand-made .env whose permissions DefenseClaw did
-                # not write can refuse the restore. Keep the original error,
-                # take the key out of this process, and say what is left.
-                if os.environ.get(preset.token_env) == stored_secret:
-                    if environ_before is None:
-                        os.environ.pop(preset.token_env, None)
-                    else:
-                        os.environ[preset.token_env] = environ_before
-                dotenv_path = os.path.join(data_dir, ".env")
-                click.echo(
-                    f"  Note: {preset.token_env} is still in {dotenv_path}: it could not be "
-                    f"taken out again ({type(restore_error).__name__}), because the permissions of that file are "
-                    "not the private ones DefenseClaw writes. Delete that line, then run: defenseclaw doctor --fix",
-                    err=True,
+            destination["token_env"] = preset.token_env
+            if local_stack is not None:
+                destination["local_stack"] = dict(local_stack)
+        elif local_stack is not None:
+            raise ValueError("only a Splunk HEC destination carries the local Splunk setup record")
+        matches = [
+            (index, existing)
+            for index, existing in enumerate(authored)
+            if existing.get("name") == destination_name
+        ]
+        if matches:
+            index, existing = matches[0]
+            if existing.get("kind") != destination["kind"]:
+                raise ValueError(
+                    f"destination {destination_name!r} already has kind {existing.get('kind')!r}; "
+                    "remove it before changing adapter kind"
                 )
-        raise
-    if secret_changed:
-        # GAP-2356: the running gateway still holds the old key, and
-        # config.yaml may be unchanged, so the restart has to be asked for.
-        mark_setup_secret_changed()
-    return result, warnings
+            mutations = _v8_destination_update_mutations(index, existing, destination)
+        else:
+            mutations = [
+                V8YAMLMutation.set(
+                    ("observability", "destinations", len(authored)),
+                    destination,
+                )
+            ]
+        mutations.extend(extra_mutations)
+
+        stored_secret = token_value
+        if preset.id == "grafana-cloud":
+            if stored_secret and not stored_secret.startswith("Basic "):
+                stored_secret = "Basic " + stored_secret
+            elif not stored_secret:
+                warnings.append(
+                    "GRAFANA_OTLP_TOKEN must contain the complete Authorization value, including the Basic prefix"
+                )
+        secret_before = _stored_secret(data_dir, preset.token_env)
+        environ_before = os.environ.get(preset.token_env) if preset.token_env else None
+        warnings.extend(_apply_secret(data_dir, preset, stored_secret, dry_run=dry_run))
+        secret_changed = not dry_run and _stored_secret(data_dir, preset.token_env) != secret_before
+        validator = None
+        if dry_run and stored_secret and preset.token_env:
+            validator = _staged_secret_validator({preset.token_env: stored_secret})
+        try:
+            result = mutate_v8_config(
+                config_path_for_data_dir(data_dir),
+                mutations,
+                data_dir=data_dir,
+                validator=validator,
+                dry_run=dry_run,
+                expected_before_sha256=expected_sha256,
+            )
+        except BaseException:
+            if secret_changed:
+                # GAP-0210: a failed add leaves no key behind in .env.
+                try:
+                    restore_secret(data_dir, preset.token_env, secret_before, environ_before, stored_secret)
+                except Exception as restore_error:  # noqa: BLE001 - the add error is the one to report.
+                    # GAP-0374: a hand-made .env whose permissions DefenseClaw did
+                    # not write can refuse the restore. Keep the original error,
+                    # take the key out of this process, and say what is left.
+                    if os.environ.get(preset.token_env) == stored_secret:
+                        if environ_before is None:
+                            os.environ.pop(preset.token_env, None)
+                        else:
+                            os.environ[preset.token_env] = environ_before
+                    dotenv_path = os.path.join(data_dir, ".env")
+                    click.echo(
+                        f"  Note: {preset.token_env} is still in {dotenv_path}: it could not be "
+                        f"taken out again ({type(restore_error).__name__}), because the permissions of that file are "
+                        "not the private ones DefenseClaw writes. Delete that line, then run: defenseclaw doctor --fix",
+                        err=True,
+                    )
+            raise
+        if secret_changed:
+            # GAP-2356: the running gateway still holds the old key, and
+            # config.yaml may be unchanged, so the restart has to be asked for.
+            mark_setup_secret_changed()
+        return result, warnings
+
+
+def _local_splunk_sink_name(
+    authored: list[dict[str, Any]], preferred: str, *,
+    legacy_local_destination: dict[str, Any] | None = None,
+) -> str:
+    """Return the destination local Splunk setup writes: its recorded sink, or *preferred*.
+
+    An unrecorded destination is reused only when setup supplies the exact
+    legacy destination it proved belongs to the managed bridge and container.
+    """
+
+    from defenseclaw.observability.local_splunk import LOCAL_TOKEN_ENV
+    from defenseclaw.observability.v8_presets import is_recorded_local_splunk
+
+    recorded = [str(item.get("name")) for item in authored if is_recorded_local_splunk(item)]
+    if recorded:
+        name = recorded[0]
+    elif any(item.get("name") == preferred for item in authored) and not any(
+        item.get("name") == preferred and legacy_local_destination is not None
+        and item == legacy_local_destination for item in authored
+    ):
+        raise ValueError(
+            f"Destination {preferred!r} exists, but local Splunk setup did not record it, so DefenseClaw "
+            "treats it as a remote destination and does not change it. Nothing was changed. If an older "
+            f"local setup created it, remove it with defenseclaw setup observability remove {preferred} --yes "
+            "and run local setup again. If it is a remote Splunk, add it again under another name with "
+            "defenseclaw setup observability add splunk-enterprise --name <new name>, then remove this one."
+        )
+    else:
+        name = preferred
+    # This is also called before either local runtime starts. The writer's
+    # reference check alone is too late: it runs after the bridge is ready.
+    shared = _splunk_credential_reference_users(authored, name, LOCAL_TOKEN_ENV)
+    if shared:
+        other = shared[0]
+        raise ValueError(
+            f"Destination {other!r} already uses {LOCAL_TOKEN_ENV}, the local Splunk credential reference. "
+            "Nothing was changed. Give it an independent token with defenseclaw setup observability add "
+            f"splunk-enterprise --name {other} --endpoint <HEC_URL> --token <independent_token>, or remove it with "
+            f"defenseclaw setup observability remove {other} --yes before running local setup."
+        )
+    return name
+
+
+def _splunk_credential_reference_users(authored: list[dict[str, Any]], name: str, token_env: str) -> list[str]:
+    """Names of other destinations that already claim this credential reference."""
+
+    return sorted(
+        str(item.get("name"))
+        for item in authored
+        if item.get("name") != name and token_env in (item.get("token_env"), item.get("bearer_env"))
+    )
+
+
+def _splunk_destination_preset(
+    preset: Preset,
+    name: str,
+    authored: list[dict[str, Any]],
+    *,
+    token_value: str | None,
+    local_stack: dict[str, str] | None,
+    legacy_local_destination: dict[str, Any] | None = None,
+) -> Preset:
+    """Choose the credential reference of one Splunk HEC destination.
+
+    The local sink is the one destination local setup recorded; it keeps the
+    isolated local reference. Every other Splunk destination is remote and
+    keeps its credential under its own reference, which no other destination
+    uses. Run without a new token, an existing destination keeps the
+    reference it has. A remote write never changes the recorded local sink.
+    """
+
+    from dataclasses import replace
+
+    from defenseclaw.observability.local_splunk import LOCAL_TOKEN_ENV
+    from defenseclaw.observability.v8_presets import is_recorded_local_splunk, splunk_sink_token_env
+
+    existing = next((item for item in authored if item.get("name") == name), None)
+    keeps_reference = token_value is None and existing is not None and bool(existing.get("token_env"))
+    if local_stack is not None:
+        if _local_splunk_sink_name(
+            authored, name, legacy_local_destination=legacy_local_destination,
+        ) != name:
+            raise ValueError(f"local Splunk setup already recorded another destination than {name!r}")
+        token_env = LOCAL_TOKEN_ENV
+        keeps_reference = False
+    elif existing is not None and is_recorded_local_splunk(existing):
+        raise ValueError(
+            f"Destination {name!r} is the local Splunk sink that local setup recorded. Nothing was changed. "
+            "Change it with defenseclaw setup splunk --logs --accept-splunk-license, or remove it with "
+            f"defenseclaw setup observability remove {name} --yes."
+        )
+    elif keeps_reference:
+        token_env = str(existing["token_env"])
+    else:
+        token_env = splunk_sink_token_env(name)
+    if not keeps_reference and local_stack is None:
+        shared = _splunk_credential_reference_users(authored, name, token_env)
+        if shared:
+            raise ValueError(
+                f"Destination {shared[0]!r} already uses the credential reference {token_env}, and a "
+                "credential is never shared between destinations. Nothing was changed. Choose another --name."
+            )
+    return replace(preset, token_env=token_env)
 
 
 def _stored_secret(data_dir: str, key: str) -> str | None:
@@ -823,7 +976,7 @@ def _v8_destination_update_mutations(
     ):
         if field in destination:
             mutations.append(V8YAMLMutation.set((*base, field), destination[field]))
-    for field in ("tls", "network_safety", "batch", "rotation"):
+    for field in ("tls", "network_safety", "batch", "rotation", "local_stack"):
         nested = destination.get(field)
         if isinstance(nested, dict):
             for key, value in nested.items():
@@ -1230,7 +1383,9 @@ def _prompt_secret(preset, data_dir: str) -> str | None:
         return None
     env_val = os.environ.get(preset.token_env, "")
     dotenv_val = _peek_dotenv(data_dir, preset.token_env)
-    existing = env_val or dotenv_val
+    # A Splunk destination never takes a credential saved for another one,
+    # so its prompt shows none.
+    existing = "" if preset.adapter_kind == "splunk_hec" else env_val or dotenv_val
     hint = _mask(existing) if existing else "(not set)"
     label = preset.token_label or preset.token_env
     val = click.prompt(

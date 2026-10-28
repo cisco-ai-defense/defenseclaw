@@ -77,8 +77,22 @@ type RenderedGateway struct {
 	DefaultDockerNamespaceBridge bool
 }
 
+// dockerNamespace is the docker sandbox namespace r renders:
+// ManagedDockerNamespace, or OpenShell's default one under the 1.0.1
+// upgrade bridge (remove with DefaultDockerNamespaceBridge).
+func (r RenderedGateway) dockerNamespace() string {
+	if r.DefaultDockerNamespaceBridge {
+		return DefaultDockerNamespace
+	}
+	return ManagedDockerNamespace
+}
+
 // renderedHeader marks the files the lifecycle owns.
 const renderedHeader = "# Written by the DefenseClaw enterprise lifecycle from enterprise.openshell. Do not edit.\n"
+
+// GatewayRenderedDigestFile pins the lifecycle's intended render independently
+// of gateway.toml, so a later hand edit cannot redefine its own baseline.
+const GatewayRenderedDigestFile = "gateway.rendered.sha256"
 
 // Docker sandbox namespaces. OpenShell's docker driver labels every
 // container and volume it makes with its sandbox namespace
@@ -86,7 +100,7 @@ const renderedHeader = "# Written by the DefenseClaw enterprise lifecycle from e
 // and, each time its gateway starts, force-removes every supervisor, staging
 // and identity container of that namespace and every channel volume of it
 // whose sandbox has no container (reconcile_runtime_resources_at_startup,
-// OpenShell 0.1.1 to 0.1.3), whichever account's gateway made them. Every
+// OpenShell 0.1.1 to 0.1.5), whichever account's gateway made them. Every
 // account's gateway on a host shares one Docker engine. With the default
 // namespace a managed account's gateway start removed the supervisors of
 // another account's running sandboxes (a per-user gateway the account
@@ -276,6 +290,23 @@ func RenderedDigest(tomlData, envData []byte) string {
 	return "sha256:" + hex.EncodeToString(sum.Sum(nil))
 }
 
+// ReadRenderedGatewayDigest reads the administrator's pinned render digest.
+// Older installations have no pin until their 1.0.4 ensure writes one.
+func ReadRenderedGatewayDigest(path string) (string, error) {
+	data, _, err := readRenderedFile(path)
+	if err != nil || data == nil {
+		return "", err
+	}
+	digest := strings.TrimSpace(string(data))
+	if len(digest) != len("sha256:")+sha256.Size*2 || !strings.HasPrefix(digest, "sha256:") {
+		return "", fmt.Errorf("openshell: rendered gateway digest is invalid")
+	}
+	if _, err := hex.DecodeString(strings.TrimPrefix(digest, "sha256:")); err != nil {
+		return "", fmt.Errorf("openshell: rendered gateway digest is invalid: %w", err)
+	}
+	return digest, nil
+}
+
 // ReadRenderedGateway reads the rendered configuration at tomlPath and
 // envPath (the root-owned files readRenderedFile accepts; gateway.env may be
 // absent) and returns it with its RenderedDigest. A missing gateway.toml is
@@ -313,6 +344,9 @@ func ParseRenderedGateway(tomlData, envData []byte) (RenderedGateway, error) {
 	if doc.OpenShell.Drivers != nil && doc.OpenShell.Drivers.VM != nil {
 		vm := doc.OpenShell.Drivers.VM
 		r.DriverDir, r.VMSandboxUID, r.VMSandboxGID = vm.DriverDir, vm.SandboxUID, vm.SandboxGID
+	}
+	if doc.OpenShell.Drivers != nil && doc.OpenShell.Drivers.Docker != nil {
+		r.DefaultDockerNamespaceBridge = strings.TrimSpace(doc.OpenShell.Drivers.Docker.SandboxLabel) == ""
 	}
 	if v, ok := parseEnvFile(envData)[EnvTelemetryEnabled]; ok {
 		if b, err := strconv.ParseBool(strings.TrimSpace(v)); err == nil {
@@ -357,6 +391,17 @@ func (s *GatewayConfigState) Drift(want RenderedGateway) []SettingDrift {
 	if want.ComputeDriver == DriverVM {
 		id := s.VM.Identity()
 		add("MicroVM workload identity", VMIdentity{UID: want.VMSandboxUID, GID: want.VMSandboxGID}.String(), id.String())
+	}
+	if want.ComputeDriver == DriverDocker {
+		// A gateway lists only its own namespace's sandboxes: one made in
+		// another is lost to the rendered gateway, with its unpulled work,
+		// and one in the shared default namespace removes the supervisors
+		// of other accounts' sandboxes each time it starts.
+		have := s.DockerNamespace
+		if have == "" {
+			have = DefaultDockerNamespace
+		}
+		add("Docker sandbox namespace", want.dockerNamespace(), have)
 	}
 	add("OpenShell telemetry", strconv.FormatBool(want.TelemetryEnabled), strconv.FormatBool(s.TelemetryEnabled()))
 	return drift

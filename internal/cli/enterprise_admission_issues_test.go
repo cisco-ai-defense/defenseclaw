@@ -56,3 +56,27 @@ func TestAdmissionIssuesAreStatusWarnings(t *testing.T) {
 		t.Fatalf("warnings %+v", result.Warnings)
 	}
 }
+
+// GAP-0643: status names a signed-out account as not signed in, not as a
+// file SYSTEM cannot read.
+func TestAdmissionIssueWarningsNameASignedOutAccount(t *testing.T) {
+	guardian := t.TempDir()
+	spool := enterprisehooks.ClaudeMCPSpoolDir(guardian)
+	if err := os.MkdirAll(spool, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	marker, _ := enterprisehooks.MarshalClaudeMCPSpoolUnreadable("S-1-5-21-1-1002", enterprisehooks.ClaudeStateUnreadable{
+		User: "DCLAB\\dcw-std2", Home: `C:\Users\dcw-std2`, Path: `C:\Users\dcw-std2\.claude.json`,
+		Reason: "read Claude Code projects as enrolled user: no session", SignedOut: true,
+	})
+	if err := os.WriteFile(filepath.Join(spool, "S-1-5-21-1-1002.json"), marker, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	result := &enterprisestatus.Result{}
+	appendAdmissionIssueWarnings(result, t.TempDir(), guardian)
+	if len(result.Warnings) != 1 || result.Warnings[0].Code != "claude_state_unreadable" ||
+		!strings.Contains(result.Warnings[0].Message, `DCLAB\dcw-std2 is not signed in`) ||
+		strings.Contains(result.Warnings[0].Message, "SYSTEM") {
+		t.Fatalf("warnings %+v", result.Warnings)
+	}
+}

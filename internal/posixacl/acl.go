@@ -8,7 +8,6 @@ package posixacl
 import (
 	"fmt"
 	"os"
-	"strconv"
 	"strings"
 )
 
@@ -44,69 +43,6 @@ func (v View) NamedUserAllows(uid int, want uint16) (found, allowed bool) {
 
 type Reader interface {
 	Read(path string, mode os.FileMode) (View, error)
-}
-
-// ParseGetfacl parses the numeric, comment-free output of getfacl -cpn.
-func ParseGetfacl(output string) (View, error) {
-	v := View{Present: true, Mask: 7}
-	seen := map[string]bool{}
-	for _, line := range strings.Split(output, "\n") {
-		line = strings.TrimSpace(strings.SplitN(line, "#", 2)[0])
-		if line == "" {
-			continue
-		}
-		if strings.HasPrefix(line, "default:") {
-			continue
-		}
-		parts := strings.Split(line, ":")
-		if len(parts) != 3 || len(parts[2]) != 3 {
-			return View{}, fmt.Errorf("invalid getfacl entry %q", line)
-		}
-		var perm uint16
-		for i, c := range parts[2] {
-			if c == rune("rwx"[i]) {
-				perm |= 4 >> i
-			} else if c != '-' {
-				return View{}, fmt.Errorf("invalid getfacl permission %q", line)
-			}
-		}
-		if parts[1] == "" {
-			if seen[parts[0]] {
-				return View{}, fmt.Errorf("duplicate getfacl entry %q", line)
-			}
-			seen[parts[0]] = true
-			switch parts[0] {
-			case "user":
-				v.Owner = perm
-			case "group":
-				v.Group = perm
-			case "other":
-				v.Other = perm
-			case "mask":
-				v.Mask = perm
-			default:
-				return View{}, fmt.Errorf("invalid getfacl entry %q", line)
-			}
-			continue
-		}
-		id, err := strconv.Atoi(parts[1])
-		if err != nil || id < 0 {
-			return View{}, fmt.Errorf("invalid getfacl identity %q", line)
-		}
-		e := Entry{Kind: parts[0], ID: id, Perm: perm}
-		switch parts[0] {
-		case "user":
-			v.Users = append(v.Users, e)
-		case "group":
-			v.Groups = append(v.Groups, e)
-		default:
-			return View{}, fmt.Errorf("invalid getfacl entry %q", line)
-		}
-	}
-	if !seen["user"] || !seen["group"] || !seen["other"] {
-		return View{}, fmt.Errorf("incomplete getfacl output")
-	}
-	return v, nil
 }
 
 // Allows follows the POSIX ACL precedence: owner, named user, all matching

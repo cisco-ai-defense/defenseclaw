@@ -16,130 +16,145 @@ keywords:
   - IoT setup
 ---
 
+This page builds the [Edge Connector](/docs/edge-connector) on a Linux device. It starts with a local test that needs no network, then connects the device to Fleet.
+
 ## Choose a path
 
-For an ordinary agent on macOS, Linux, or Windows, use the [core install](/docs/get-started/install) and [quickstart](/docs/get-started/quickstart). Fleet stays off, and the separate C daemon is not installed.
+For an ordinary agent on macOS, Linux or Windows, use the [core install](/docs/get-started/download) instead. It leaves Fleet off and does not install the C engine.
 
-For a Linux device without a Fleet gateway, use the local-only smoke below. It builds the `MINIMAL` development profile, runs the C tests, and needs no broker, certificates, or Fleet API token. The policy compiler test needs Python 3 and PyYAML. Use the production build and deployment steps later on this page when connecting real devices to Fleet.
+### Before you start
 
-For an optional Fleet deployment, install the core gateway first, extract the matching `defenseclaw-fleet-assets.tar.gz` release asset, run `defenseclaw setup edge-connector --source-dir /path/to/extracted-assets` on the gateway host, then provision an authenticated TLS broker with per-device topic ACLs and registration-issued device keys before starting Linux C devices. The wizard saves the API token, signing keys, and selected registration endpoint before enabling Fleet. On Linux it also provisions the local C service's environment through `sudo`; on macOS and Windows it configures the gateway only. The C daemon itself runs on Linux. CLI health and policy commands use the configured local gateway; `--endpoint` is used by device installation and registration.
+- A Linux device with Git, a C compiler, CMake 3.22 or newer, Make, Python 3 and PyYAML.
+- For Fleet: the core gateway and a trusted TLS proxy on the same host, with a valid certificate for the Fleet hostname, and an MQTT broker with TLS and per-device topic ACLs. The proxy must connect to the gateway over loopback and send `X-Forwarded-Proto: https`. The broker steps are in [MQTT broker setup](#mqtt-broker-setup).
 
 ### Local-only Linux smoke
 
-Install Git, a C compiler, CMake 3.22+, Make, Python 3, and PyYAML before running the commands below.
+The `MINIMAL` profile has no MQTT. It needs no broker, certificates or Fleet token.
 
-```bash
-git clone https://github.com/cisco-ai-defense/defenseclaw.git
-cd defenseclaw
-cmake -S edge-connector -B edge-connector/build-local \
-  -DDCLAW_PROFILE=MINIMAL -DDCLAW_DEV_MODE=ON
-cmake --build edge-connector/build-local -j2
-ctest --test-dir edge-connector/build-local --output-on-failure
-./edge-connector/build-local/edge-connector --help
-```
+1. Build and test it.
 
-This checks the local C engine and binary without enabling the gateway or installing a service. The `MINIMAL` profile has no MQTT; use `STANDARD` or `EDGE` with TLS and keys for Fleet devices.
+   ```bash
+   git clone https://github.com/cisco-ai-defense/defenseclaw.git
+   cd defenseclaw
+   cmake -S edge-connector -B edge-connector/build-local \
+     -DDCLAW_PROFILE=MINIMAL -DDCLAW_DEV_MODE=ON
+   cmake --build edge-connector/build-local -j2
+   ctest --test-dir edge-connector/build-local --output-on-failure
+   ```
+
+   {/* needs-live-capture: cmake and ctest output on a Linux device with cmake */}
+
+2. Run the binary.
+
+   ```bash
+   ./edge-connector/build-local/edge-connector --help
+   ```
+
+All tests passing means the local engine works. Nothing is installed as a service.
 
 ## Build a Linux Fleet device from source
 
-Required: `gcc`, `cmake` (3.22+), `make`, and mbedTLS 3.x development libraries for production MQTT over TLS.
+### Connect a device to Fleet
+
+1. On the gateway host, extract the matching `defenseclaw-fleet-assets.tar.gz` release asset and run the setup.
+
+   ```bash
+   defenseclaw setup edge-connector --source-dir /path/to/extracted-assets \
+     --endpoint https://fleet.example.com/api/v1/fleet
+   defenseclaw config set fleet.trust_proxy_headers true
+   defenseclaw-gateway restart
+   ```
+
+   Replace the example hostname with your TLS proxy's real hostname. The proxy must run on the gateway host, connect to the gateway at `127.0.0.1:18970`, and set `X-Forwarded-Proto: https` on forwarded requests. Keep the gateway API inaccessible except through loopback and the TLS proxy. Setup saves the Fleet API token, the signing keys and the HTTPS registration endpoint, then enables Fleet. The second command explicitly permits this same-host proxy to attest to HTTPS; the restart applies the Fleet setup before installation registers the device. On Linux setup also prepares the local service environment through `sudo`. On macOS and Windows it configures the gateway only; the C engine runs on Linux.
+
+2. Build and install the engine on the device. Use the `STANDARD` profile for Raspberry Pi, Jetson and single-board computers, or `EDGE` for edge gateways.
+
+   ```bash
+   defenseclaw setup edge-connector install --source-dir /path/to/extracted-assets \
+     --target DEVICE --user USER \
+     --profile standard --broker-url mqtts://broker.example.com:8883
+   ```
+
+   Replace `DEVICE` and `USER` with the SSH host and account. The remote install copies the source, builds it, automatically registers the device through the configured HTTPS Fleet API, writes the returned key to `/etc/defenseclaw/edge-connector.env`, creates the `defenseclaw` system service account if needed, installs the `edge-connector` systemd unit and starts it. The install needs `sudo` rights for account and service setup. Do not register the same device again: re-registration replaces its key.
+
+3. Push a policy. See [Edge Connector policies](/docs/edge-connector/policies).
+
+   ```bash
+   defenseclaw edge-connector policy push policy.yaml --tenant-id 1 --fleet-id 2
+   ```
+
+The `defenseclaw edge-connector register` command uses the Fleet endpoint saved by setup, so it can register through the configured HTTPS URL. The default loopback HTTP endpoint is for loopback-only test mode: on a dedicated test gateway, run `defenseclaw config set fleet.allow_key_over_http true` before registering, then run `defenseclaw config set fleet.allow_key_over_http false` when the test ends. Production key delivery requires TLS or the trusted same-host TLS proxy above. For manual production registration, use this CLI command after saving the HTTPS endpoint, or call the [Fleet API over HTTPS](/docs/edge-connector/api-reference#register-a-device) and provision the returned key on the device.
+
+### Fleet credential delivery
+
+Fleet refuses to return device keys over plain HTTP by default. When the gateway is behind an HTTPS proxy, run the proxy on the **same host** as the gateway, forward to `127.0.0.1:18970`, and set `X-Forwarded-Proto: https`. Keep the gateway API reachable only through loopback and that TLS proxy. Then enable the explicit proxy trust setting before registering devices:
 
 ```bash
-git clone https://github.com/cisco-ai-defense/defenseclaw.git
-cd defenseclaw/edge-connector
-mkdir build && cd build
-cmake .. -DDCLAW_PROFILE=STANDARD -DDCLAW_DEV_MODE=OFF -DDCLAW_ALLOW_HMAC_OTA=ON
-make -j$(nproc)
+defenseclaw config set fleet.trust_proxy_headers true
 ```
 
-### Run tests
+`fleet.trust_proxy_headers` defaults to `false`. The gateway accepts the forwarded HTTPS claim only from a loopback peer when this setting is `true`; a remote proxy or a missing header still gets `key_delivery_requires_tls`. For a dedicated loopback-only test gateway, run `defenseclaw config set fleet.allow_key_over_http true` to deliver a test key over HTTP, then set it back to `false` after the test. This key defaults to `false` and must stay `false` in production. Both settings are hot-reloadable. See the [installation steps](/docs/edge-connector/install#connect-a-device-to-fleet) for the HTTPS endpoint and remote install commands.
 
-```bash
-ctest --output-on-failure
-```
-
-Run the unit and acceptance suites for your selected build profile. The exact test count may change as suites are added.
-
-### Install system-wide
-
-```bash
-sudo make install
-```
-
-CMake installs the binary and support files. For a managed Linux service, also install the shipped [systemd unit](https://github.com/cisco-ai-defense/defenseclaw/blob/main/edge-connector/packaging/edge-connector.service) and provision its required environment file as shown in the [repository installation guide](https://github.com/cisco-ai-defense/defenseclaw/blob/main/edge-connector/INSTALL.md#production-deployment).
+For an internal Fleet certificate authority, set `REQUESTS_CA_BUNDLE` (or `CURL_CA_BUNDLE`) to its PEM bundle when running the `defenseclaw edge-connector` CLI. HTTPS Fleet calls also honor `HTTPS_PROXY` and the usual proxy bypass variables while retaining certificate verification. The CLI does not use a `.netrc` entry in place of the saved Fleet bearer token.
 
 ### Build profiles
 
+Set with `-DDCLAW_PROFILE=<profile>`; the default is `STANDARD`. These values come from `edge-connector/CMakeLists.txt`.
+
+| Setting | `MINIMAL` | `STANDARD` | `EDGE` |
+| --- | --- | --- | --- |
+| MQTT | off | on | on |
+| Content scan | off | on | on |
+| PII redaction | off | on | on |
+| Bloom filter | off | off | on |
+| Speculative execution | off | on | on |
+| Audit ring size | 64 | 127 | 127 |
+| Verdict cache size | 0 | 64 | 256 |
+| Heartbeat interval (s) | 0 | 30 | 10 |
+| Audit RAM buffer | 4 | 16 | 32 |
+| Canary window (s) | 0 | 600 | 600 |
+| Max sessions | 4 | 16 | 64 |
+| `DCLAW_ESCALATION_PAYLOAD_MAX` (bytes) | 256 | 1024 | 2048 |
+| Pending ring size | 4 | 16 | 64 |
+
+### Check it worked
+
 ```bash
-cmake .. -DDCLAW_PROFILE=MINIMAL   # no MQTT; constrained builds
-cmake .. -DDCLAW_PROFILE=STANDARD  # Raspberry Pi, Jetson, SBCs
-cmake .. -DDCLAW_PROFILE=EDGE      # edge gateways with bloom filter
+defenseclaw edge-connector devices
+defenseclaw edge-connector health
 ```
 
-Binary size depends on the target toolchain, linked TLS libraries, and build flags. Measure the installed binary for your target.
+The device shows as `online` once its signed heartbeat arrives. On the device, `systemctl is-active edge-connector` prints `active`, and `journalctl -u edge-connector -n 20` shows the log.
+
+### Undo
+
+Stop and disable the unit with `sudo systemctl disable --now edge-connector`. Remove the device with `defenseclaw edge-connector decommission`.
 
 ## Configure the policy
 
-### Step 1 — Copy and edit
+The policy file is described in [Edge Connector policies](/docs/edge-connector/policies). Push it with `defenseclaw edge-connector policy push`, as shown in [Connect a device to Fleet](/docs/edge-connector/install#connect-a-device-to-fleet).
 
-```bash
-# Return to the repository root (if you are still in edge-connector/build)
-cd ../..
+### Policy compiler requirements
 
-mkdir -p ~/.defenseclaw
-cp edge-connector/policies/strict.yaml ~/.defenseclaw/policy.yaml
-```
+The policy compiler (`edge-connector/tools/policy_compiler.py`) needs Python 3 and PyYAML on the gateway host.
 
-Edit `~/.defenseclaw/policy.yaml`:
+| Install | Where the compiler runs from |
+| --- | --- |
+| Raw release tar | Provision Python 3 and PyYAML yourself before the first policy push. |
+| Per-user `install.sh` / `install.ps1` | The bundled Python environment. The compiler is copied only when Fleet is already enabled; `defenseclaw setup edge-connector --source-dir` installs it and enables Fleet after credential setup succeeds. |
+| Managed Linux RPM or DEB, macOS `.pkg`, Windows Setup | Not carried. With `fleet.enabled: true` they refuse to install unless you supply the compiler (below). |
+| Secure Client profiles on macOS and Windows | Reject Fleet-enabled configuration; they do not ship the compiler. |
 
-```yaml title="~/.defenseclaw/policy.yaml"
-name: my-device-policy
-version: 1
+Only the per-user archives and the raw release tar carry the Fleet compiler, at `edge-connector/tools/policy_compiler.py`. Managed packages and Setup do not, and a managed host with Fleet off needs no Python or PyYAML.
 
-skill_actions:
-  critical:
-    runtime: disable    # BLOCK
-  high:
-    runtime: disable    # BLOCK
-  medium:
-    runtime: warn       # WARN (allow but log)
+With `fleet.enabled: true`, a managed install with no compiler stops before it changes anything:
 
-iot_extensions:
-  capability_sequences:
-    - sequence: [net_fetch, exec_shell]
-      action: block
-    - sequence: [net_fetch, actuate]
-      action: block
+- **Linux and macOS.** An install from the RPM, DEB or `.pkg` fails with `payload_invalid`: `fleet.enabled is set but the managed payload has no policy_compiler.py; provide a release payload or package with the Fleet compiler`. If the folder `share/fleet` exists under the install root (`/opt/defenseclaw` on Linux, `/opt/cisco/defenseclaw` on macOS), the message names the missing file instead, for example `inspect payload /opt/defenseclaw/share/fleet/policy_compiler.py: lstat /opt/defenseclaw/share/fleet/policy_compiler.py: no such file or directory`.
 
-  destination_allowlist:
-    - "1.1.1.1" # illustrative public IP; replace with one approved for your service
+  To install with Fleet on, stage a payload folder and run `defenseclaw-gateway enterprise linux|macos install --payload <dir>`. Extract the enterprise payload archive `defenseclaw-enterprise-<version>-<os>-<arch>.tar.gz` as root into `<dir>`, then copy, as root, `edge-connector/tools/policy_compiler.py` from the per-user archive `defenseclaw-<version>-<os>-<arch>.tar.gz` of the same version to `<dir>/edge-connector/tools/policy_compiler.py`. Neither archive works alone: the per-user archive has no `defenseclaw-hook` (`payload is missing defenseclaw-hook`) and the enterprise archive has no compiler. A later `repair` or `ensure` without `--payload` keeps the installed copy. `install` on a host that is already installed fails with `already_installed`. A Linux host whose binaries belong to the RPM or DEB refuses `--payload` with `package_owned_binaries`, so keep Fleet off there. Python 3 and PyYAML must be on the host.
+- **Windows.** Setup neither carries nor passes a compiler. It keeps the compiler a Fleet-enabled install already recorded on the host; with none it refuses: `turn Fleet off in the config, then run Setup again`. To install one, run the lifecycle CLI from a payload folder with `--policy-compiler <file>`, using `policy_compiler.py` from the same release. A file that differs from that release's compiler is refused.
 
-```
-
-### Step 2 — Check built-in protection
-
-Content patterns, rate limits (60 tool calls, 30 network requests, 10 actuations per minute), and the SSRF guard are built into this C release. The policy compiler rejects unsupported `content_inspection`, `ssrf_protection`, custom regex, `destination_denylist`, `rate_limits`, and `escalation_mode` settings. Production uses synchronous Fleet escalation by default; OTA policy cannot change this mode. Network tools require a nonempty destination. Hostnames, private IPs, and numeric aliases are blocked across profiles; an approved destination must be a canonical public IPv4 or bracketed globally scoped IPv6 literal in `destination_allowlist`. The parser does not prove external routability. Replace the illustrative `1.1.1.1` address with the approved endpoint for your service.
-
-### Step 3 — Compile (optional)
-
-Only needed when you change the policy. Pre-built binaries include the default policy.
-
-The compiler needs Python 3 and PyYAML. CMake installs the script but does not install its Python dependency. A raw release tar needs provisioned Python 3 and PyYAML before Fleet policy push. Linux enterprise RPM/DEB leaves them optional while Fleet is off; provision trusted `/usr/bin/python3` and distro PyYAML before enabling Fleet. Managed install/ensure checks the prerequisite before service changes. Per-user installers use their bundled Python environment. A managed macOS `.pkg` with Fleet enabled requires PyYAML **6.0.3** inside a trusted Python.org framework interpreter (3.10–3.14). For example, check `/Library/Frameworks/Python.framework/Versions/3.13/bin/python3.13 -I -c 'import yaml; print(yaml.__version__)'`. The interpreter, framework parents, and PyYAML package tree must be root-owned and not group/world-writable; managed install/ensure refuses Fleet-enabled config if none of the trusted candidates passes. Apple's `/usr/bin/python3` and Homebrew PATH are not selected for this channel. Managed Windows standalone Setup carries the compiler in its signed Setup payload and activates it only for authenticated Fleet-enabled config, using the admitted Python/PyYAML scanner runtime. Fleet-off Setup/upgrade leaves no active compiler; disabling Fleet removes a previous active script. Managed Secure Client profiles on macOS and Windows reject Fleet-enabled configuration because they do not ship this compiler/runtime.
-
-Fleet is an optional gateway subsystem. Managed Linux/macOS packages carry the compiler as inert source under `<InstallRoot>/share/fleet/`; validated Fleet-enabled install/ensure copies it into the protected `<InstallRoot>/lib/defenseclaw/` path. Fleet-off install/upgrade does not activate the compiler or need Python/PyYAML. A Fleet-off raw payload install discards its optional compiler source; provide the staged release `--payload` to enable Fleet later. The separate Fleet asset archive contains the dashboard and scrape examples. The default per-user wheel installs no Fleet templates or Edge Connector source.
-
-Standard per-user `install.sh`/`install.ps1` leave Fleet off and copy the matching compiler only when the existing config explicitly enables it. `defenseclaw setup edge-connector --source-dir /path/to/extracted-assets` installs the optional compiler and enables `fleet.enabled` only after credential setup succeeds. The core gateway installer does not install or start the separate C Edge Connector service.
-
-```bash
-cd edge-connector
-python3 tools/policy_compiler.py \
-  --input ~/.defenseclaw/policy.yaml \
-  --profile standard --version 1 \
-  --output-header generated/policy_tables.h \
-  --output-binary dist/policy.bin
-```
-
-The command's binary output has a development stub signature when no signing key is supplied; production devices will reject it as an OTA update. Use the Fleet policy-push API with matching `DCLAW_OTA_HMAC_KEY` secrets to compile and sign production OTA updates. The compiler's Ed25519 `--signing-key` output is not accepted by this C receiver.
+The compiler's output is described in [policies](/docs/edge-connector/policies#compile-the-policy).
 
 ## Integrate with your AI agent
 
@@ -147,7 +162,7 @@ The Edge Connector is framework-agnostic. Choose the integration that matches yo
 
 ### Generic Python adapter (recommended)
 
-The simplest starting point for any Python agent. Three lines to add security enforcement:
+The starting point for any Python agent:
 
 When using the source checkout, run your agent with `PYTHONPATH=/path/to/defenseclaw/edge-connector/tools`; after `sudo make install`, use the installed adapter directory (normally `/usr/local/lib/defenseclaw`). CMake copies the Python files there but does not add that directory to Python's import path. Set `DCLAW_LIB_PATH` if your shared library is not at `/usr/local/lib/libdclaw_core.so`.
 
@@ -164,7 +179,7 @@ if verdict.blocked:
     print(f"Blocked: {verdict.reason}")
 ```
 
-Uses the Unix socket first when the daemon is running, then FFI (ctypes) when no daemon is available. The adapter fails closed if the engine is unavailable. In production, `DCLAW_FAIL_OPEN=1` also requires an authorized `DCLAW_FAIL_OPEN_TOKEN` tied to `DCLAW_AUDIT_KEY`; the flag alone does not enable fail-open.
+The adapter uses the Unix socket (`DCLAW_SOCKET_PATH`) when the daemon is running, then FFI (ctypes) when no daemon is available. The adapter fails closed if the engine is unavailable. In production, `DCLAW_FAIL_OPEN=1` also requires an authorized `DCLAW_FAIL_OPEN_TOKEN` tied to `DCLAW_AUDIT_KEY`; the flag alone does not enable fail-open.
 
 ### MCP proxy (Model Context Protocol)
 
@@ -443,7 +458,7 @@ export DCLAW_MQTT_BROKER_URL=tcp://127.0.0.1:1883
 export DCLAW_BROKER_URL=mqtt://127.0.0.1:1883
 ```
 
-Both sides must point to the same broker. Enable the Fleet subsystem explicitly in `~/.defenseclaw/config.yaml`:
+Both sides must use the same broker. Enable the Fleet subsystem explicitly in `~/.defenseclaw/config.yaml`:
 
 ```yaml
 fleet:
@@ -453,53 +468,74 @@ fleet:
 
 The gateway publishes policy updates; devices publish heartbeats and escalation requests. Use [per-device broker topic ACLs](https://github.com/cisco-ai-defense/defenseclaw/blob/main/edge-connector/integrations/mqtt-broker/README.md), because the gateway subscriber cannot infer a verified publisher ClientID from an MQTT PUBLISH packet.
 
-**Upgrade together:** Heartbeat and registration messages now carry a durable 4-byte boot counter and 4-byte last-applied emergency sequence. Keyed C devices send a 40-byte payload plus a 32-byte HMAC (72 bytes total); the gateway rejects older 64- and 68-byte signed frames. Upgrade the Edge Connector on each device with the Fleet gateway, and confirm heartbeats resume before relying on device status or policy distribution. The gateway replays missed emergency commands in signed predecessor order from durable history, up to 32 per signed registration or heartbeat; later heartbeats request the next page. A history gap or unavailable durable store fails closed. Broker publication alone does not prove device application.
+**Keep the gateway and devices on the same version.** Heartbeat and registration messages carry a durable 4-byte boot counter and 4-byte last-applied emergency sequence. Keyed C devices send a 40-byte payload plus a 32-byte HMAC (72 bytes total); the gateway rejects older 64- and 68-byte signed frames. Upgrade the Edge Connector on each device together with the Fleet gateway, and confirm heartbeats resume before relying on device status or policy distribution. The gateway replays missed emergency commands in signed predecessor order from durable history, up to 32 per signed registration or heartbeat; later heartbeats request the next page. A history gap or unavailable durable store fails closed. Broker publication alone does not prove device application.
 
 Legacy flash partitions with unsigned policy payloads are preserved but refused at boot, including in a development build. Back up the device state and use a trusted re-sign/reprovisioning procedure before starting the new connector. An in-place metadata migration alone does not make the old policy executable; verify the signed flash policy and authenticated heartbeat after upgrade.
 
-The gateway rejects missing or invalid device HMAC keys by default. Pre-register every production device through the authenticated Fleet API; MQTT auto-registration is for unmanaged local development only. An unmanaged development host can opt into the legacy zero-key behavior only with `DCLAW_DEV_MODE=ON`; managed deployments never permit that fallback. For multiple devices, use registration-issued per-device keys rather than the one shared test key above. The C device binds its durable emergency sequence to tenant/fleet identity; moving it requires trusted flash reset and reprovisioning, because a new identity with the prior emergency state refuses startup.
+The gateway rejects missing or invalid device HMAC keys by default. Pre-register every production device through the [authenticated Fleet API over HTTPS](/docs/edge-connector/api-reference#register-a-device), or through a configured trusted TLS proxy, and provision the returned key on the device. The `defenseclaw edge-connector register` command uses the Fleet endpoint saved by `setup edge-connector`; set that endpoint to your HTTPS gateway URL for production. The default loopback HTTP endpoint is for local test mode only and succeeds only when Fleet explicitly permits HTTP key delivery; the default production setting refuses it with `key_delivery_requires_tls`. MQTT auto-registration is for unmanaged local development only. An unmanaged development host can opt into the legacy zero-key behavior only with `DCLAW_DEV_MODE=ON`; managed deployments never permit that fallback. For multiple devices, use registration-issued per-device keys rather than the one shared test key above. The C device binds its durable emergency sequence to tenant/fleet identity; moving it requires trusted flash reset and reprovisioning, because a new identity with the prior emergency state refuses startup.
 
 ## Environment variables
 
-### Server-side (Go fleet gateway)
+The `DCLAW_*` variables below are in the registry at `internal/envvars/registry.json`; the full list is in [environment variables](/docs/reference/env-vars).
 
-| Variable | Required | Description |
+### Gateway (Go Fleet server)
+
+| Variable | Required | What it does |
 | --- | --- | --- |
-| `DCLAW_FLEET_API_TOKEN` | yes | Bearer token for authenticating Fleet API requests. If unset, all API requests are rejected. |
-| `DCLAW_MQTT_BROKER_URL` | if `fleet.mqtt_broker_url` is unset | MQTT broker URI. Use TLS and `fleet.mqtt_require_tls: true` in production. |
-| `DCLAW_TLS_CA_CERT` | for private broker CAs | PEM CA file used by the Go Fleet MQTT client; otherwise it uses the system trust store. |
-| `DCLAW_TLS_CLIENT_CERT`, `DCLAW_TLS_CLIENT_KEY` | for broker mTLS | Client PEM certificate and private key for the Go Fleet MQTT client. |
-| `DCLAW_OTA_HMAC_KEY` | for OTA push | Nonzero 32-byte hex HMAC secret for policy signing. Must match the device secret. |
-| `DCLAW_EMERGENCY_KEY` | for emergency commands | Separate nonzero 32-byte hex signing secret. Must match the device secret. |
-| `DCLAW_DEVICE_KEY` | if no per-device key store | Nonzero 32-byte hex fallback HMAC key for a one-device test; production fleets should provision per-device keys. An unset or invalid key fails closed by default. |
+| `DCLAW_FLEET_API_TOKEN` | yes | Admin bearer token for the Fleet API. With no token, every request is rejected. |
+| `DCLAW_FLEET_TENANT_TOKENS` | no | Tenant-scoped tokens, `token:tid,...`. |
+| `DCLAW_MQTT_BROKER_URL` | if `fleet.mqtt_broker_url` is unset | Broker address. Use TLS and `fleet.mqtt_require_tls: true` in production. |
+| `DCLAW_MQTT_USER`, `DCLAW_MQTT_PASS` | if the broker needs a login | Broker credentials. The client does not read userinfo from the URL. |
+| `DCLAW_TLS_CA_CERT` | for private broker CAs | CA PEM for the Go MQTT client; otherwise the system trust store. |
+| `DCLAW_TLS_CLIENT_CERT`, `DCLAW_TLS_CLIENT_KEY` | for broker mTLS | Client certificate and key. |
+| `DCLAW_REQUIRE_TLS` | no | Require TLS for the Go MQTT client. |
+| `DCLAW_TLS_SKIP_VERIFY` | never in production | Skips broker certificate verification in explicit unmanaged development only. |
+| `DCLAW_OTA_HMAC_KEY` | to push policy | Nonzero 32-byte hex secret that signs policy. Must match the device. |
+| `DCLAW_EMERGENCY_KEY` | for emergency commands | Separate nonzero 32-byte hex secret. Must match the device. |
+| `DCLAW_DEVICE_KEY` | if no per-device key store | Fleet-wide fallback device HMAC key for a one-device test. Per-device keys override it. |
+| `DCLAW_FLEET_AUTO_REGISTER` | no | Lets devices self-register by MQTT heartbeat. Unmanaged development only. |
+| `DCLAW_PRODUCTION` | no | Forces the production MQTT security checks (already the default). |
+| `DCLAW_DEV_MODE` | no | `ON` enables legacy development MQTT behavior on unmanaged hosts only. |
 
-### Device-side (C edge connector and Python hooks)
+### Device (C engine)
 
-| Variable | Default | Description |
-| --- | --- | --- |
-| `DCLAW_TENANT_ID` | (none) | Tenant identifier for this device. |
-| `DCLAW_FLEET_ID` | (none) | Fleet identifier for this device. |
-| `DCLAW_DEVICE_ID` | (none) | Unique device identifier within the fleet. |
-| `DCLAW_BROKER_URL` | (none) | MQTT broker URI. Production builds require `mqtts://broker-host:8883`. |
-| `DCLAW_OTA_HMAC_KEY` | (none) | Nonzero 32-byte hex shared secret. Production HMAC OTA also requires `-DDCLAW_ALLOW_HMAC_OTA=ON`. |
-| `DCLAW_EMERGENCY_KEY` | (none) | Separate nonzero 32-byte hex secret for emergency commands. |
-| `DCLAW_CA_CERT_PATH` | (none) | Broker CA PEM file for TLS server verification. |
-| `DCLAW_DEVICE_CERT_PATH`, `DCLAW_DEVICE_KEY_PATH` | (none) | Client PEM certificate and private key when broker mTLS is enabled. |
-| `DCLAW_FLASH_PATH` | `/var/lib/defenseclaw/flash.bin` | Persistent flash backing file; production overrides must stay under `/var/lib/defenseclaw/` or `/etc/defenseclaw/`. |
-| `DCLAW_IPC_SOCKET_PATH` | `/run/defenseclaw/defenseclaw.sock` | Local IPC socket path. |
-| `DCLAW_LIB_PATH` | `/usr/local/lib/libdclaw_core.so` | Path to the Edge Connector shared library. |
-| `DCLAW_LOG_PATH` | `~/edge-connector.log` | Audit log file path. |
-| `DCLAW_AUDIT_KEY` | (none) | Nonzero 32-byte hex audit HMAC key. Production builds refuse to start without it. |
+| Variable | What it does |
+| --- | --- |
+| `DCLAW_TENANT_ID`, `DCLAW_FLEET_ID`, `DCLAW_DEVICE_ID` | Numeric identity assigned at registration. |
+| `DCLAW_BROKER_URL` | Broker URL. Production builds require `mqtts://broker-host:8883`. |
+| `DCLAW_OTA_HMAC_KEY`, `DCLAW_EMERGENCY_KEY`, `DCLAW_DEVICE_KEY` | Same secrets as the gateway side. |
+| `DCLAW_AUDIT_KEY` | Nonzero 32-byte hex key for the audit HMAC chain. Production builds refuse to start without it. |
+| `DCLAW_CA_CERT_PATH` | Broker CA PEM for TLS server verification. |
+| `DCLAW_CRL_PATH` | Optional revocation list. An unreadable or invalid explicit list aborts TLS setup. |
+| `DCLAW_DEVICE_CERT_PATH`, `DCLAW_DEVICE_KEY_PATH` | Client certificate and key when the broker requires mTLS. |
+| `DCLAW_TLS_INSECURE` | Development only. Production C builds reject it. |
+| `DCLAW_FLASH_PATH` | Flash backing file. Default `/var/lib/defenseclaw/flash.bin`; production overrides must stay under `/var/lib/defenseclaw/` or `/etc/defenseclaw/`. |
+| `DCLAW_IPC_SOCKET_PATH` | IPC socket. Default `/run/defenseclaw/defenseclaw.sock`. |
+| `DCLAW_IPC_ALLOWED_UID`, `DCLAW_IPC_ALLOWED_GID` | Local user and group allowed to use the socket. |
+| `DCLAW_STRICT_MODE` | Default on: an undecided call waits for a Fleet verdict and stays blocked when the gateway is unreachable. `0` permits speculative execution for the first four capabilities below on builds that support it. |
+
+### Installer and Python adapters
+
+| Variable | What it does |
+| --- | --- |
+| `DCLAW_FLEET_API_URL` | Fleet API URL used by the remote installer and `defenseclaw edge-connector` commands. Use HTTPS for production key delivery. |
+| `DCLAW_LIB_PATH` | Path to `libdclaw_core.so`. Default `/usr/local/lib/libdclaw_core.so`. |
+| `DCLAW_SOCKET_PATH` | Socket the Python adapters connect to. Default `/run/defenseclaw/defenseclaw.sock`. |
+| `DCLAW_LOG_PATH` | Adapter audit log. Default `~/edge-connector.log`. |
+| `DCLAW_FAIL_OPEN`, `DCLAW_FAIL_OPEN_TOKEN` | `DCLAW_FAIL_OPEN=1` allows calls when the engine is unavailable, but only with a `DCLAW_FAIL_OPEN_TOKEN` tied to `DCLAW_AUDIT_KEY` in production. The flag alone does not enable it. |
+| `DCLAW_MCP_UPSTREAM`, `DCLAW_MCP_TRANSPORT`, `DCLAW_MCP_PORT` | MCP proxy upstream command or URL, `stdio` or `http`, and port (default 8089). |
 
 ### Compile-time constants
 
-Set in `CMakeLists.txt`; changing these requires rebuilding the C library:
+Changing these means rebuilding the C library.
 
-| Constant | Default | Description |
+| Constant | Default | What it does |
 | --- | --- | --- |
-| `DCLAW_POLICY_PATH` | (embedded in binary) | Policy tables compiled into binary via `policy_tables.h` |
-| `DCLAW_DEV_MODE` | `OFF` | Development-only build flag. Keep `OFF` in production. |
-| `DCLAW_ESCALATION_PAYLOAD_MAX` | `1024` | Max content snippet size for cloud escalation (set in `config.h.in`) |
+| `DCLAW_PROFILE` | `STANDARD` | Build profile. |
+| `DCLAW_DEV_MODE` | `OFF` | Development build: relaxes audit-key and zero-key checks and permits plaintext MQTT. Keep `OFF` in production. A separate runtime variable of the same name controls the Go side. |
+| `DCLAW_ALLOW_HMAC_OTA` | `OFF` | Production builds need `ON` to accept HMAC-signed policy updates. |
+| `DCLAW_ESCALATION_PAYLOAD_MAX` | per profile | Largest content snippet sent to Fleet. |
+| `DCLAW_POLICY_PATH` | embedded | Policy tables compiled into the binary through `policy_tables.h`. |
 
 ## Grafana dashboard
 
@@ -509,22 +545,47 @@ Fleet is disabled by default. Enable `fleet.enabled: true` on the gateway and se
 
 For a local Docker stack, enable the optional scrape after confirming `host.docker.internal:18970` reaches your gateway **from a container**. Docker Desktop on macOS provides this host name. On Linux, set `gateway.api_bind` to the Docker bridge's host IP only if your firewall restricts access to the Docker network; this changes the bind for the entire gateway REST API. Managed enterprise installs require loopback and cannot use that bind change. For those hosts, run Prometheus on the host or provide a separately secured metrics-only proxy. Keep the gateway API bearer token secret and use TLS for any nonlocal access.
 
+First create the user stack with `defenseclaw setup local-observability up`. The recipe below uses its default directory, `$HOME/.defenseclaw/observability-stack`; use your configured data directory if it differs. Set `FLEET_ASSETS` to the absolute path of the extracted Fleet archive. The archive supplies the optional overlay, scrape example and dashboard; the installed user stack supplies the core Compose file and Grafana provisioning.
+
+The recipe restarts the stack with the same Grafana sign-in mode that setup chose and saved in `.grafana-access-mode`. In `password` mode it adds the stack's `docker-compose.password.yml` and its saved admin password. It checks the effective Compose config first and starts nothing if Grafana would allow anonymous access that the saved mode does not allow, or anonymous access that is not read-only (`Viewer`).
+
 ```bash
-cd bundles/local_observability_stack
+FLEET_ASSETS="/path/to/extracted-assets"
+cd "$HOME/.defenseclaw/observability-stack"
 test -n "$DCLAW_FLEET_API_TOKEN" || { echo 'Fleet API token is empty' >&2; exit 1; }
 install -d -m 0700 "$HOME/.defenseclaw/fleet-secrets"
 printf '%s' "$DCLAW_FLEET_API_TOKEN" > "$HOME/.defenseclaw/fleet-secrets/metrics-token"
 chgrp "$(id -g)" "$HOME/.defenseclaw/fleet-secrets/metrics-token"
 chmod 0640 "$HOME/.defenseclaw/fleet-secrets/metrics-token"
-cp /path/to/extracted-assets/bundles/local_observability_stack/prometheus/examples/fleet.yml prometheus/scrape.d/fleet.yml
+mkdir -p prometheus/scrape.d grafana/dashboards
+cp "$FLEET_ASSETS/bundles/local_observability_stack/prometheus/examples/fleet.yml" prometheus/scrape.d/fleet.yml
+cp "$FLEET_ASSETS/bundles/local_observability_stack/grafana/dashboards/defenseclaw-fleet.json" grafana/dashboards/defenseclaw-fleet.json
 chmod 0755 prometheus/scrape.d
 chmod 0644 prometheus/scrape.d/fleet.yml # Prometheus runs as a non-root user
 export FLEET_METRICS_TOKEN_FILE="$HOME/.defenseclaw/fleet-secrets/metrics-token"
 export FLEET_METRICS_TOKEN_GID="$(id -g)"
-docker compose -f docker-compose.yml -f /path/to/extracted-assets/bundles/local_observability_stack/docker-compose.fleet.yml up -d
+compose=(docker compose --project-directory "$PWD" --project-name defenseclaw-observability -f docker-compose.yml)
+case "$(cat .grafana-access-mode)" in
+  password)
+    compose+=(-f docker-compose.password.yml)
+    GRAFANA_ADMIN_PASSWORD="$(cat .grafana-admin-password)"
+    export GRAFANA_ADMIN_PASSWORD
+    anonymous=false ;;
+  no-password) anonymous=true ;;
+  *) echo 'Grafana sign-in mode unknown: run defenseclaw setup local-observability up first' >&2; exit 1 ;;
+esac
+compose+=(-f "$FLEET_ASSETS/bundles/local_observability_stack/docker-compose.fleet.yml")
+effective="$("${compose[@]}" config)"
+grep -E "^ +GF_AUTH_ANONYMOUS_ENABLED: \"?$anonymous\"?\$" >/dev/null <<<"$effective" ||
+  { echo 'Grafana sign-in would not match .grafana-access-mode; nothing was started' >&2; exit 1; }
+if [ "$anonymous" = true ]; then
+  grep -E '^ +GF_AUTH_ANONYMOUS_ORG_ROLE: "?Viewer"?$' >/dev/null <<<"$effective" ||
+    { echo 'Anonymous Grafana access would not be read-only (Viewer); nothing was started' >&2; exit 1; }
+fi
+"${compose[@]}" up -d
 ```
 
-Keep the private `fleet-secrets` directory outside the bundle so wheel staging and bundle upgrades cannot copy the token. The token file needs group-read permission because the Prometheus container runs as a non-root user; the optional Compose file grants only this file's group to that container. Verify **Status → Targets** in Prometheus at `http://127.0.0.1:9090/targets`: `defenseclaw-fleet` must be **UP**. A `401` means the token is wrong; `connection refused` means the gateway bind/target is unreachable. Remove `prometheus/scrape.d/fleet.yml` and restart Compose to disable the scrape. When using another Prometheus instance, import the JSON and point its `defenseclaw-prometheus` data source at that instance. On an existing managed stack, the normal refresh preserves Grafana and Prometheus operator configuration; use `--refresh-config` only after backing up custom files, or copy the Fleet dashboard and scrape settings into the installed bundle by hand.
+Keep the private `fleet-secrets` directory outside the bundle so wheel staging and bundle upgrades cannot copy the token. The token file needs group-read permission because the Prometheus container runs as a non-root user; the optional Compose file grants only this file's group to that container. Verify **Status → Targets** in Prometheus at `http://127.0.0.1:9090/targets`: `defenseclaw-fleet` must be **UP**. A `401` means the token is wrong; `connection refused` means the gateway bind/target is unreachable. Remove `prometheus/scrape.d/fleet.yml` and run `defenseclaw setup local-observability up` to disable the scrape; that command restarts the stack without the Fleet overlay, so run this recipe again after it whenever you want to keep the scrape. When using another Prometheus instance, import the JSON and point its `defenseclaw-prometheus` data source at that instance. On an existing managed stack, the normal refresh preserves Grafana and Prometheus operator configuration; use `--refresh-config` only after backing up custom files, or copy the Fleet dashboard and scrape settings into the installed bundle by hand.
 
 ## Benchmark
 
@@ -542,7 +603,12 @@ Measure latency and throughput on your own target hardware and selected build pr
 | `libdclaw_core.so: cannot open shared object file` | Run `sudo ldconfig` or set `LD_LIBRARY_PATH` |
 | All tools blocked | Check the C capability table (`src/decision/policy_table.c`). Unknown tool names fail closed before cache or Fleet escalation. A custom name needs a reviewed C mapping; a Python adapter mapping alone cannot authorize it. |
 | Shipped adapter network/message tool blocked | Bubbaloop `http_fetch`/`model_download` and ESP-Claw `http_request` require one unambiguous HTTP(S) public numeric `url` and a matching C allowlist entry. Home Assistant webhook/integration and broker/Zenoh tools remain blocked until their target schemas are reviewed. A downstream MCP server must also constrain redirects and actual egress. |
-| `CLOUD_TIMEOUT` on allowed tools | Change escalation from `sync_block` to `speculative` |
+| `CLOUD_TIMEOUT` on allowed tools | The gateway did not answer in time. Check the broker and gateway. `DCLAW_STRICT_MODE=0` permits speculative execution for the first four capabilities on builds that support it; leave the default in production |
 | `DEST_DENY` on a public IP | Add that public IP to `destination_allowlist` |
-| `CONTENT_BLOCK` false positives | Review or disable the offending built-in category; custom exception patterns are not implemented |
+| `CONTENT_BLOCK` false positives | The content patterns are fixed in the build. Policy YAML cannot disable a category or add exceptions |
 | `SSRF_BLOCK` on hostnames or private addresses | Use an approved public numeric IP. Hostname destinations are blocked until a controlled egress resolver/proxy is available; private destinations have no policy bypass |
+
+## Next steps
+
+- [Integrate with an agent](#integrate-with-your-ai-agent): Python adapter, MCP proxy, LangChain, HTTP middleware and PicoClaw.
+- [Fleet API](/docs/edge-connector/api-reference)

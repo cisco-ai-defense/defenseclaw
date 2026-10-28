@@ -86,6 +86,13 @@ func TestWindowsMCPAsUserStarterRefusesBeforeStarting(t *testing.T) {
 	if _, err := starter.Start(context.Background(), request); err == nil || !strings.Contains(err.Error(), "unknown") {
 		t.Fatalf("unreadable state: %v", err)
 	}
+	// GAP-0643: once the enumerator republished the record of a user who
+	// signed out, the repeat scan still says the user is not signed in.
+	unreadable = &ClaudeStateUnreadable{Path: home + `\.claude.json`, Reason: "no session", SignedOut: true}
+	if _, err := starter.Start(context.Background(), request); err == nil ||
+		!strings.Contains(err.Error(), `dcw-std1 is not signed in, so their MCP server "notes" cannot be started`) {
+		t.Fatalf("state of a signed-out user: %v", err)
+	}
 	unreadable = nil
 	changed := server
 	changed.Args = []string{"-y", "evil"}
@@ -211,13 +218,16 @@ func TestStartWindowsMCPAsUserProcessRunsOnItsOwnDesktop(t *testing.T) {
 	env := append(os.Environ(), windowsMCPAsUserHelperEnv+"=1")
 	session, err := startWindowsMCPAsUserProcess(primary, []string{exe, "-test.run=^TestWindowsMCPAsUserHelperChild$"}, env, work)
 	if err != nil {
-		if errors.Is(err, windows.ERROR_PRIVILEGE_NOT_HELD) || strings.Contains(err.Error(), "does not hold") ||
-			strings.Contains(err.Error(), "Secondary Logon") {
-			if os.Getenv("GITHUB_ACTIONS") == "true" {
-				// The hosted runner is an elevated administrator with
-				// Secondary Logon: there the start must work.
-				t.Fatalf("start a process with a token on the CI runner: %v", err)
+		if errors.Is(err, windows.ERROR_PRIVILEGE_NOT_HELD) || strings.Contains(err.Error(), "does not hold") {
+			enabled, privilegeErr := windowsTestProcessImpersonatePrivilegeEnabled(process)
+			if privilegeErr != nil {
+				t.Fatalf("check the runner's process token after %v: %v", err, privilegeErr)
 			}
+			if !enabled {
+				t.Skipf("the runner's process token has SeImpersonatePrivilege disabled: %v", err)
+			}
+		}
+		if strings.Contains(err.Error(), "Secondary Logon") && os.Getenv("GITHUB_ACTIONS") != "true" {
 			t.Skipf("this runner cannot start a process with a token: %v", err)
 		}
 		t.Fatal(err)
@@ -264,4 +274,40 @@ func TestStartWindowsMCPAsUserProcessRunsOnItsOwnDesktop(t *testing.T) {
 		t.Fatalf("child reported %q (stderr %q); want cwd %s, session %d, a private station and the stdin line",
 			got.out, got.errOut, work, own)
 	}
+}
+
+// The preflight job carries GITHUB_ACTIONS=true but disables its process
+// token's privileges to match a hosted runner. CreateProcessWithTokenW can
+// return ERROR_PRIVILEGE_NOT_HELD in that token even when the helper enabled
+// SeImpersonatePrivilege on its impersonated thread. Inspect the capability
+// that the failed process actually inherited instead of guessing from CI env.
+func windowsTestProcessImpersonatePrivilegeEnabled(token windows.Token) (bool, error) {
+	name, err := windows.UTF16PtrFromString("SeImpersonatePrivilege")
+	if err != nil {
+		return false, err
+	}
+	var want windows.LUID
+	if err := windows.LookupPrivilegeValue(nil, name, &want); err != nil {
+		return false, err
+	}
+	var size uint32
+	err = windows.GetTokenInformation(token, windows.TokenPrivileges, nil, 0, &size)
+	if !errors.Is(err, windows.ERROR_INSUFFICIENT_BUFFER) || size == 0 || size > 64<<10 {
+		return false, fmt.Errorf("size process token privileges: %w", err)
+	}
+	data := make([]byte, size)
+	if err := windows.GetTokenInformation(token, windows.TokenPrivileges, &data[0], size, &size); err != nil {
+		return false, err
+	}
+	privileges := (*windows.Tokenprivileges)(unsafe.Pointer(&data[0]))
+	needed := unsafe.Offsetof(windows.Tokenprivileges{}.Privileges) + uintptr(privileges.PrivilegeCount)*unsafe.Sizeof(windows.LUIDAndAttributes{})
+	if needed > uintptr(len(data)) {
+		return false, errors.New("process token privileges exceed their returned buffer")
+	}
+	for _, privilege := range privileges.AllPrivileges() {
+		if privilege.Luid == want {
+			return privilege.Attributes&windows.SE_PRIVILEGE_ENABLED != 0, nil
+		}
+	}
+	return false, nil
 }

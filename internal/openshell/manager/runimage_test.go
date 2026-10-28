@@ -672,8 +672,7 @@ func TestCreateRefusesAFirstBootWithoutDiskRoom(t *testing.T) {
 	free = 40 << 30
 	sb := e.create(sandboxapi.CreateRequest{Name: "vm-room", Copy: true})
 	// Its run image is prepared now: the same posture needs no room.
-	name := "sandbox-prepared-rootfs-ext4-umoci-v3-openshell-0.1.1-configured-1000-1000-sha256-" + strings.TrimPrefix(sb.RunImageID, "sha256:")
-	must(t, os.MkdirAll(filepath.Join(cache, name), 0o755))
+	must(t, os.MkdirAll(filepath.Join(cache, preparedDiskName(openshell.SupportedMin, sb.RunImageID)), 0o755))
 	free = 1 << 30
 	// Explain looks in the same cache (the gateway's state_dir).
 	if ex, err := e.m.Explain(t.Context(), sandboxapi.ExplainRequest{Harness: "claudecode", Copy: true, Project: e.project}); err != nil || ex.VMFirstBoot {
@@ -681,9 +680,9 @@ func TestCreateRefusesAFirstBootWithoutDiskRoom(t *testing.T) {
 	}
 	e.create(sandboxapi.CreateRequest{Name: "vm-cached", Copy: true, Project: e.otherProject("other")})
 	// After an in-place upgrade the gateway prepares its own disk: the one
-	// OpenShell 0.1.1 prepared counts for neither.
-	e.fake.SetRelease(openshell.InstallerVersion)
-	e.gw.Version = openshell.InstallerVersion
+	// the release before prepared counts for neither.
+	e.fake.SetRelease("0.1.6")
+	e.gw.Version = "0.1.6"
 	if ex, err := e.m.Explain(t.Context(), sandboxapi.ExplainRequest{Harness: "claudecode", Copy: true, Project: e.project}); err != nil || !ex.VMFirstBoot {
 		t.Fatalf("Explain on the upgraded gateway = %+v, %v", ex, err)
 	}
@@ -694,6 +693,14 @@ func TestCreateRefusesAFirstBootWithoutDiskRoom(t *testing.T) {
 	d := newEnv(t, nil)
 	disk(d)
 	d.create(sandboxapi.CreateRequest{Name: "dk-full"})
+}
+
+// preparedDiskName is the name the vm driver of release (0.1.4 or later)
+// gives the disk it prepares from the image id for uid and gid 1000
+// (NVIDIA/OpenShell#4342).
+func preparedDiskName(release, id string) string {
+	sum := sha256.Sum256([]byte(id))
+	return "sandbox-prepared-rootfs-ext4-umoci-v4-openshell-" + release + "-configured-1000-1000-" + hex.EncodeToString(sum[:])
 }
 
 // The pre-create Explain says whether the image a new sandbox would boot
@@ -707,8 +714,7 @@ func TestExplainReportsAVMFirstBoot(t *testing.T) {
 	cache := filepath.Join(home, vm.ImageCache)
 	prepare := func(id string) {
 		t.Helper()
-		name := "sandbox-prepared-rootfs-ext4-umoci-v3-openshell-0.1.1-configured-1000-1000-sha256-" + strings.TrimPrefix(id, "sha256:")
-		must(t, os.MkdirAll(filepath.Join(cache, name), 0o755))
+		must(t, os.MkdirAll(filepath.Join(cache, preparedDiskName(openshell.SupportedMin, id)), 0o755))
 	}
 	explain := func(e *harnessEnv, req sandboxapi.ExplainRequest) bool {
 		t.Helper()

@@ -24,6 +24,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"github.com/defenseclaw/defenseclaw/internal/testenv"
 )
 
 func TestKiroOnlyWatcherRunsWithNoAssetDirectories(t *testing.T) {
@@ -308,7 +309,7 @@ func TestResolveWatcherDirs_NilConnectorFallsBackToConfigDefault(t *testing.T) {
 
 // TestResolveWatcherDirs_HookOnlyConnectorMatrix locks the watcher
 // contract for the hook-only connectors (hermes, cursor,
-// copilot, openhands). Two contracts differ from the
+// copilot). Two contracts differ from the
 // claudecode/codex matrix above and are pinned here:
 //
 //  1. Hermes exposes documented user/workspace plugins as read-only
@@ -320,7 +321,7 @@ func TestResolveWatcherDirs_NilConnectorFallsBackToConfigDefault(t *testing.T) {
 //     surface rather than applying one connector's plugin semantics to all
 //     hook-only connectors.
 //
-//  2. Skills support varies: hermes/cursor/copilot/openhands
+//  2. Skills support varies: hermes/cursor/copilot
 //     advertise their own skill paths so src.Skill must be
 //     watcherDirsFromConnector and the slice must contain a
 //     framework-owned subpath. This split is what justifies a dedicated
@@ -370,13 +371,6 @@ func TestResolveWatcherDirs_HookOnlyConnectorMatrix(t *testing.T) {
 			expectPluginSrc:  watcherDirsFromConnector,
 			expectPluginNone: true,
 		},
-		{
-			name:            "openhands",
-			ctor:            func() connector.Connector { return connector.NewOpenHandsConnector() },
-			expectSkillSrc:  watcherDirsFromConnector,
-			expectSkillFrag: filepath.Join(".agents", "skills"),
-			expectPluginSrc: watcherDirsFromDefault,
-		},
 	}
 
 	wcfg := config.GatewayWatcherConfig{}
@@ -409,27 +403,6 @@ func TestResolveWatcherDirs_HookOnlyConnectorMatrix(t *testing.T) {
 				t.Errorf("plugin dirs = %v, want empty for connector-owned command inventory", pluginDirs)
 			}
 		})
-	}
-}
-
-func TestResolveWatcherDirs_OpenHandsUsesPinnedWorkspace(t *testing.T) {
-	t.Parallel()
-
-	workspace := filepath.Join(t.TempDir(), "repo")
-	cfg := &config.Config{
-		Claw: config.ClawConfig{WorkspaceDir: workspace},
-	}
-	wcfg := config.GatewayWatcherConfig{}
-	wcfg.Skill.Enabled = true
-	wcfg.Plugin.Enabled = true
-
-	skillDirs, _, src := resolveWatcherDirs(cfg, connector.NewOpenHandsConnector(), wcfg)
-
-	if src.Skill != watcherDirsFromConnector {
-		t.Fatalf("skill source = %q, want %q", src.Skill, watcherDirsFromConnector)
-	}
-	if !anyContains(skillDirs, filepath.Join(workspace, ".agents", "skills")) {
-		t.Fatalf("OpenHands skill dirs = %v, want pinned workspace %s", skillDirs, workspace)
 	}
 }
 
@@ -681,6 +654,30 @@ func TestWatcherUsesConnectorDirsSkipsManagedServiceHome(t *testing.T) {
 	cfg.Guardrail.Connector = ""
 	if !watcherStartupEnabled(cfg) {
 		t.Fatal("Secure Client startup must report the enabled watcher switch")
+	}
+}
+
+// GAP-0568: a config.yaml without a claw block, upgraded on an account
+// without OpenClaw, resolves no connector, so the watcher watches no OpenClaw
+// folders and never creates ~/.openclaw.
+func TestWatcherWatchesNoOpenClawFoldersForAnImpliedOpenClawThatIsNotInstalled(t *testing.T) {
+	home := t.TempDir()
+	testenv.SetHome(t, home)
+	stubOpenClawBinary(t, false)
+	path := filepath.Join(t.TempDir(), config.DefaultConfigName)
+	raw := "config_version: 9\ngateway:\n  watcher:\n    enabled: true\n    skill:\n      enabled: true\n    plugin:\n      enabled: true\n"
+	if err := os.WriteFile(path, []byte(raw), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.LoadFromFile(path)
+	if err != nil {
+		t.Fatalf("LoadFromFile: %v", err)
+	}
+	if watcherUsesConnectorDirs(cfg) || WatcherWatchesDirs(cfg) {
+		t.Fatal("the watcher must not watch the folders of an OpenClaw that is not installed")
+	}
+	if _, err := os.Stat(filepath.Join(home, ".openclaw")); !os.IsNotExist(err) {
+		t.Fatalf("~/.openclaw must not exist, stat err = %v", err)
 	}
 }
 

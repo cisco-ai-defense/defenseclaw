@@ -16,3 +16,6 @@ func IsServiceAccountUnresolved(error) bool { return false }
 // ValidateServiceCanWriteFile is a Windows preflight check, like
 // ValidateServiceCanReadTree.
 func ValidateServiceCanWriteFile(_, _ string) error { return nil }
+
+// ValidateServiceCanReadRotatedFile is Windows-only.
+func ValidateServiceCanReadRotatedFile(_, _ string) error { return nil }

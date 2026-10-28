@@ -6,63 +6,61 @@
 package hookexec
 
 import (
+	"context"
+	"fmt"
 	"net"
 	"net/http"
+	"strconv"
 	"time"
 )
 
-// managedEnterpriseHTTPClient on macOS / Linux returns a plain
-// loopback-friendly HTTP client. The Windows sibling performs an
-// SCM-based peer-verification because Windows managed_enterprise
-// runs the gateway as a named SCM service (`DefenseClawGateway`) and
-// SCM lets a client resolve "what PID owns this exact registered
-// service" at connect time — a check the Windows path uses to
-// refuse a malicious replacement that briefly bound the same
-// loopback port.
-//
-// macOS has no equivalent primitive on TCP loopback (LOCAL_PEERCRED
-// is UDS-only), and the equivalent invariants come from a different
-// mechanism: the launchd LaunchDaemon plist that binds
-// `<APIAddr>` (loopback `127.0.0.1:<PORT>`) lives in
-// /Library/LaunchDaemons/ which is root:wheel 0644 — a non-root
-// process cannot install a replacement service or rebind an
-// already-bound port. The gateway's own codesign identity is
-// verified separately by the macOS IPC accept path
-// (peerauth_darwin.go) at accept-time via LOCAL_PEERCRED + codesign
-// on the peer. This client is the reverse leg (hook → gateway)
-// where the loopback-plus-admin-plist trust chain suffices.
-//
-// Prior behaviour returned errManagedGatewayPeerUnverified
-// unconditionally on non-Windows, which broke every Codex / Claude
-// hook call on macOS managed_enterprise (the caller's fail-closed
-// branch fires with reason enterprise_managed_gateway_peer_unverified
-// before any request bytes leave the process).
-//
-// The standalone managed profile on Linux and macOS does not use this
-// client: hooks bound to the root-owned runtime descriptor select
-// managedStandaloneHTTPClient (managed_standalone_transport.go), which
-// verifies the listener's uid before sending a byte. This function remains
-// the unchanged path for the Secure Client macOS deployment.
-func managedEnterpriseHTTPClient(
-	timeout time.Duration,
-	_ string,
-	_ string,
-) (*http.Client, error) {
+// managedEnterpriseHTTPClient checks an accepted TCP socket against the
+// protected gateway LaunchDaemon on macOS or systemd service on Linux before
+// net/http writes a credential or event. The Unix lifecycle also uses it for
+// an older gateway whose hook socket cannot answer /health.
+func managedEnterpriseHTTPClient(timeout time.Duration, apiAddr, serviceName string) (*http.Client, error) {
+	host, rawPort, err := net.SplitHostPort(apiAddr)
+	if err != nil || host != "127.0.0.1" {
+		return nil, fmt.Errorf("%w: managed gateway address must be canonical IPv4 loopback", errManagedGatewayPeerUnverified)
+	}
+	port, err := strconv.Atoi(rawPort)
+	if err != nil || port < 1 || port > 65535 || strconv.Itoa(port) != rawPort {
+		return nil, fmt.Errorf("%w: managed gateway port is invalid", errManagedGatewayPeerUnverified)
+	}
 	if timeout <= 0 {
 		timeout = defaultHookRequestTimeout
 	}
+	dialer := &net.Dialer{Timeout: 2 * time.Second}
 	return &http.Client{
 		Timeout: timeout,
 		Transport: &http.Transport{
-			// Match the Windows sibling's transport shape:
-			// DisableKeepAlives so each hook call reuses the
-			// full dial-and-connect discipline; DialContext with
-			// a 2-second dial timeout to bound a busy loopback.
+			Proxy:             nil,
 			DisableKeepAlives: true,
-			DialContext:       (&net.Dialer{Timeout: 2 * time.Second}).DialContext,
+			DialContext: func(ctx context.Context, network, address string) (net.Conn, error) {
+				if address != apiAddr || (network != "tcp" && network != "tcp4") {
+					return nil, fmt.Errorf("%w: managed gateway dial target changed", errManagedGatewayPeerUnverified)
+				}
+				conn, err := dialer.DialContext(ctx, "tcp4", apiAddr)
+				if err != nil {
+					return nil, err
+				}
+				client, clientOK := conn.LocalAddr().(*net.TCPAddr)
+				server, serverOK := conn.RemoteAddr().(*net.TCPAddr)
+				if !clientOK || !serverOK {
+					_ = conn.Close()
+					return nil, fmt.Errorf("%w: managed gateway connected endpoints are invalid", errManagedGatewayPeerUnverified)
+				}
+				if err := verifyManagedConnectedPeer(ctx, client, server, serviceName); err != nil {
+					_ = conn.Close()
+					return nil, fmt.Errorf("%w: %v", errManagedGatewayPeerUnverified, err)
+				}
+				return conn, nil
+			},
 		},
-		CheckRedirect: func(*http.Request, []*http.Request) error {
-			return http.ErrUseLastResponse
-		},
+		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
 	}, nil
+}
+
+func verifyManagedConnectedTuple(client, server *net.TCPAddr, serviceName string) error {
+	return verifyManagedConnectedPeer(context.Background(), client, server, serviceName)
 }

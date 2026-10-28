@@ -47,15 +47,15 @@ func TestDiscoverUnixAgentSurfacesReadsExtensionsAndNeverRunsHostApps(t *testing
 		t.Fatal(err)
 	}
 
-	claude := DiscoverUnixAgentSurfaces(context.Background(), home, "claudecode", true)
+	claude, _ := DiscoverUnixAgentSurfaces(context.Background(), home, "claudecode", true)
 	if len(claude) != 1 || claude[0].Host != "vscode" || claude[0].EngineVersion != "2.1.220" {
 		t.Fatalf("claudecode surfaces = %+v", claude)
 	}
-	codex := DiscoverUnixAgentSurfaces(context.Background(), home, "codex", true)
+	codex, _ := DiscoverUnixAgentSurfaces(context.Background(), home, "codex", true)
 	if len(codex) != 1 || codex[0].EngineVersion != "" || codex[0].HostVersion != "26.5908.31748" {
 		t.Fatalf("codex surfaces = %+v", codex)
 	}
-	ide := DiscoverUnixAgentSurfaces(context.Background(), home, "antigravity", true)
+	ide, _ := DiscoverUnixAgentSurfaces(context.Background(), home, "antigravity", true)
 	if len(ide) != 1 || ide[0].Surface != connector.HostSurfaceDesktop || ide[0].EngineVersion != "" {
 		t.Fatalf("antigravity surfaces = %+v", ide)
 	}
@@ -84,7 +84,7 @@ func TestDiscoverUnixDevinDesktopReadsBundledCLIVersion(t *testing.T) {
 	if err := os.WriteFile(page, []byte(".ie \\n(.g .ds Aq \\(aq\n.el .ds Aq '\n.TH devin 1  \"devin 3000.10.48 (fcf7ba39)\" \n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	surfaces := DiscoverUnixAgentSurfaces(context.Background(), home, "devin", true)
+	surfaces, _ := DiscoverUnixAgentSurfaces(context.Background(), home, "devin", true)
 	if len(surfaces) != 1 || surfaces[0].Host != "devin-desktop" || surfaces[0].EngineVersion != "3000.10.48" {
 		t.Fatalf("devin surfaces = %+v", surfaces)
 	}

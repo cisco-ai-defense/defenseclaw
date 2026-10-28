@@ -5,7 +5,9 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -61,6 +63,17 @@ func TestLifecycle_DockerRunArgsAreLoopbackReadOnlyAndVersioned(t *testing.T) {
 	}
 	if slices.Contains(args, "--entrypoint") {
 		t.Fatalf("docker args %q should use the versioned image entrypoint", joined)
+	}
+	if runtime.GOOS == "linux" {
+		// The generated config is private (0700 directory, 0600 file). The
+		// router must use that owner under DAC and a private container label
+		// under enforcing SELinux, even with all capabilities dropped.
+		if !slices.Contains(args, fmt.Sprintf("%d:%d", os.Getuid(), os.Getgid())) ||
+			!slices.Contains(args, configDir+":/app/config:ro,Z") {
+			t.Fatalf("Linux router cannot read its private SELinux-labeled config: %q", joined)
+		}
+	} else if !slices.Contains(args, configDir+":/app/config:ro") || slices.Contains(args, "--user") {
+		t.Fatalf("non-Linux router mount changed: %q", joined)
 	}
 }
 

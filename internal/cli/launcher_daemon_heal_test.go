@@ -7,10 +7,26 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/defenseclaw/defenseclaw/internal/openshell"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxapi"
+)
+
+// With no tagged plist installed, the jobs have the bare labels of 1.0.0 to
+// 1.0.3 (openshell.FindLaunchAgent). The plist paths are joined the way
+// FindLaunchAgent joins them on the host running the test.
+const (
+	launcherAgentLabel   = openshell.SandboxAgentBase
+	launcherGatewayLabel = openshell.GatewayAgentBase
+)
+
+var (
+	launcherAgentPlist   = filepath.Join(openshell.LaunchAgentsDir, openshell.SandboxAgentBase+".plist")
+	launcherGatewayPlist = filepath.Join(openshell.LaunchAgentsDir, openshell.GatewayAgentBase+".plist")
 )
 
 const launcherCodeSigningState = "state = not running\nruns = 2\nlast exit reason = OS_REASON_CODESIGNING\n"
@@ -66,7 +82,7 @@ func TestLauncherLaunchAgentPreKickstartHeal(t *testing.T) {
 			} else if err != nil {
 				t.Fatal(err)
 			}
-			want := []string{"print gui/501", "print gui/501/" + launcherAgentLabel}
+			want := []string{"print gui/501", "print user/501", "print gui/501/" + launcherAgentLabel}
 			if tc.wantReload == launcherAgentLabel {
 				want = append(want, "bootout gui/501/"+launcherAgentLabel, "bootstrap gui/501 "+launcherAgentPlist)
 			}
@@ -158,6 +174,71 @@ func TestLauncherFirstUseHealAfterFailedAwait(t *testing.T) {
 			}
 			if bootouts == 1 && !strings.Contains(strings.Join(calls, "\n"), "bootstrap gui/501 "+launcherAgentPlist) {
 				t.Fatalf("the failed job was not bootstrapped: %v", calls)
+			}
+		})
+	}
+}
+
+// After an upgrade the launcher starts the job of the installed, tagged
+// label: macOS killed the bare label's start for code signing whatever was
+// reloaded (GAP-0206). An earlier label that does not run is booted out; one
+// that runs still serves its sandboxes and is the lifecycle's to replace.
+func TestLauncherStartsTheTaggedLabelAfterAnUpgrade(t *testing.T) {
+	const tagged = openshell.SandboxAgentBase + ".0123456789ab"
+	const gateway = openshell.GatewayAgentBase + ".0123456789ab"
+	for _, tc := range []struct {
+		name, oldState string
+		wantBootout    bool
+	}{
+		{name: "killed earlier label", oldState: launcherCodeSigningState, wantBootout: true},
+		{name: "running earlier label", oldState: "state = running\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			for _, label := range []string{tagged, gateway} {
+				if err := os.WriteFile(filepath.Join(dir, label+".plist"), []byte("<plist/>"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			oldDir := launcherAgentsDir
+			launcherAgentsDir = dir
+			t.Cleanup(func() { launcherAgentsDir = oldDir })
+			var calls []string
+			oldRun := launcherRun
+			launcherRun = func(_ context.Context, name string, args ...string) (string, error) {
+				line := strings.Join(args, " ")
+				calls = append(calls, line)
+				switch line {
+				case "print gui/501":
+					return "", errors.New("exit status 125")
+				case "print user/501":
+					return "user/501 = {\n\tservices = {\n\t\t0 -9\t" + openshell.SandboxAgentBase + "\n\t\t0 -\t" + openshell.GatewayAgentBase + "\n\t}\n}\n", nil
+				case "print user/501/" + openshell.SandboxAgentBase:
+					return tc.oldState, nil
+				case "print user/501/" + openshell.GatewayAgentBase:
+					return "state = not running\n", nil
+				case "print user/501/" + tagged, "print user/501/" + gateway:
+					return "Could not find service", errors.New("exit status 113")
+				}
+				return "", nil
+			}
+			t.Cleanup(func() { launcherRun = oldRun })
+			if err := launcherStartDaemon(context.Background(), "darwin", 501); err != nil {
+				t.Fatal(err)
+			}
+			want := []string{"print gui/501", "print user/501", "print user/501/" + openshell.SandboxAgentBase}
+			if tc.wantBootout {
+				want = append(want, "bootout user/501/"+openshell.SandboxAgentBase)
+			}
+			want = append(want,
+				"print user/501/"+tagged,
+				"bootstrap user/501 "+filepath.Join(dir, tagged+".plist"),
+				"print user/501/"+openshell.GatewayAgentBase,
+				"bootout user/501/"+openshell.GatewayAgentBase,
+				"print user/501/"+gateway,
+				"kickstart user/501/"+tagged)
+			if strings.Join(calls, "\n") != strings.Join(want, "\n") {
+				t.Fatalf("launchctl calls:\n%s\nwant:\n%s", strings.Join(calls, "\n"), strings.Join(want, "\n"))
 			}
 		})
 	}

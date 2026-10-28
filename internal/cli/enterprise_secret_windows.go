@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -38,6 +39,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/enterprisebundle"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
+	"github.com/defenseclaw/defenseclaw/internal/processutil"
 	"github.com/defenseclaw/defenseclaw/internal/winpath"
 )
 
@@ -72,8 +74,18 @@ var (
 		}
 		return deployment.State == winpath.EnterpriseDeploymentInstalled, nil
 	}
-	windowsSecretIsElevated     = func() bool { return windows.GetCurrentProcessToken().IsElevated() }
-	windowsSecretRestartGateway = restartWindowsStandaloneGateway
+	windowsSecretIsElevated      = func() bool { return windows.GetCurrentProcessToken().IsElevated() }
+	windowsSecretRestartGateway  = restartWindowsStandaloneGatewayBeforeStop
+	windowsSecretSpawnRecovery   = spawnWindowsSecretGatewayRecovery
+	windowsSecretStartRecovery   = processutil.StartIndependent
+	windowsSecretGatewayLive     = windowsStandaloneGatewayLive
+	windowsSecretRecoveryCommand = func(executable string) *exec.Cmd {
+		return exec.Command(executable, "enterprise", "secret", "recover-gateway")
+	}
+	windowsSecretConfigTrusted             = managed.ValidateTrustedConfigPath
+	windowsSecretAbsentConfigParentTrusted = func(path string) error {
+		return managed.ValidateTrustedDirectoryAncestor(path, "installed config directory")
+	}
 	// windowsSecretLockBundleStore, windowsSecretLifecycleLockPath and
 	// windowsSecretLifecycleLock are the two locks set and remove take.
 	windowsSecretLockBundleStore   = lockWindowsBundleStoreWithin
@@ -97,6 +109,12 @@ func init() {
 	enterpriseSecretArgumentRefusal = func(cmd *cobra.Command, action string, opts *enterpriseSecretOptions, err error) error {
 		return reportWindowsSecretFailure(cmd, action, opts, err, opts.json || secretArgsRequestJSON(secretRawArgs()))
 	}
+	enterpriseSecretCmd.AddCommand(&cobra.Command{
+		Use: "recover-gateway", Hidden: true, Args: cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			return recoverWindowsSecretGateway(cmd.Context(), cmd.InOrStdin(), cmd.OutOrStdout())
+		},
+	})
 }
 
 // windowsSecretStandardUserAnswer is a standard account's refusal of
@@ -140,16 +158,39 @@ func runEnterpriseSecret(cmd *cobra.Command, action string, opts *enterpriseSecr
 		}
 		return nil
 	}
-	restarted, err := changeWindowsSecret(cmd, action, opts)
+	change, err := changeWindowsSecret(cmd, action, opts)
+	defer func() { _ = change.reservation.Release() }()
+	if ev, ok := secretChangeEvent(action, opts.name, change.changed, secretFailureCode(err, windowsSecretExitInvalid), err, false); ok {
+		// The success document (secret-result.schema.json) has no warnings.
+		layout, layoutErr := windowsSecretLayout()
+		if layoutErr == nil {
+			warnChangeUnrecorded(cmd.ErrOrStderr(), recordWindowsChange(layout, change.reservation, ev))
+		} else if change.changed || !change.layoutPreflightFailed {
+			// A post-change or different layout failure still names the
+			// missing audit event.
+			warnChangeUnrecorded(cmd.ErrOrStderr(), layoutErr)
+		}
+		// The same unreadable layout before any change is already in the
+		// JSON refusal; retrying it cannot record another refusal event.
+	}
+	// A run that recorded nothing (the stored value, an absent credential)
+	// gives its reservation back here, durably.
+	warnChangeReleaseUnflushed(cmd.ErrOrStderr(), change.reservation.Release())
 	if err != nil {
 		return reportWindowsSecretFailure(cmd, action, opts, err, opts.json)
 	}
 	if opts.json {
+		// Contract v1 success shape (secret-result.schema.json, which allows
+		// no other member): a no-op shows as gateway_restarted false.
 		return json.NewEncoder(cmd.OutOrStdout()).Encode(map[string]any{
-			"schema_version": 1, "ok": true, "action": action, "name": opts.name, "gateway_restarted": restarted,
+			"schema_version": 1, "ok": true, "action": action, "name": opts.name, "gateway_restarted": change.restarted,
 		})
 	}
-	fmt.Fprintf(cmd.OutOrStdout(), "credential %s %s; gateway restarted: %v\n", opts.name, windowsSecretChanged(action), restarted)
+	if change.noop {
+		fmt.Fprintf(cmd.OutOrStdout(), "credential %s already holds this value; gateway restart not needed\n", opts.name)
+		return nil
+	}
+	fmt.Fprintf(cmd.OutOrStdout(), "credential %s %s; gateway restarted: %v\n", opts.name, windowsSecretChanged(action), change.restarted)
 	return nil
 }
 
@@ -196,87 +237,275 @@ func runWindowsSecretStatus(cmd *cobra.Command, opts *enterpriseSecretOptions) e
 	return nil
 }
 
+// windowsSecretChange is the outcome of a set or remove: whether the gateway
+// was restarted, and whether set found the exact value already stored with
+// no running gateway to restart (noop).
+type windowsSecretChange struct {
+	restarted bool
+	noop      bool
+	// changed is set when the run wrote or removed the credential.
+	changed bool
+	// layoutPreflightFailed means no change could begin because the first
+	// layout lookup failed. Its JSON refusal already names that failure.
+	layoutPreflightFailed bool
+	// reservation holds room for the change event from before the change
+	// until the caller writes the event (or releases it).
+	reservation *enterprisestatus.ChangeReservation
+}
+
 // changeWindowsSecret stores or removes the credential and restarts the
 // gateway so it reads the change. Arguments and the value are checked
 // before any lock is taken; the change and the restart run under both
-// locks (lockWindowsSecretChange). It reports whether the gateway was
-// restarted.
-func changeWindowsSecret(cmd *cobra.Command, action string, opts *enterpriseSecretOptions) (bool, error) {
+// locks (lockWindowsSecretChange). A set of the exact stored bytes is not
+// rewritten, but a running gateway still restarts: nothing proves which
+// value the running process loaded (it may have started while the file was
+// unreadable, and an ACL repair or a preserved timestamp leaves no trace).
+func changeWindowsSecret(cmd *cobra.Command, action string, opts *enterpriseSecretOptions) (windowsSecretChange, error) {
 	if err := windowsSecretElevation(action, opts); err != nil {
-		return false, err
+		return windowsSecretChange{}, err
 	}
 	if err := checkWindowsLockWait(cmd, opts.lockWait); err != nil {
-		return false, err
+		return windowsSecretChange{}, err
 	}
 	layout, err := windowsSecretLayout()
 	if err != nil {
-		return false, secretFailed(string(enterprisebundle.CodeStateInvalid), windowsSecretExitFailure, err)
+		return windowsSecretChange{layoutPreflightFailed: true}, secretFailed(string(enterprisebundle.CodeStateInvalid), windowsSecretExitFailure, err)
 	}
 	if !managed.ValidCredentialName(opts.name) {
-		return false, secretFailed("invalid_arguments", windowsSecretExitInvalid, fmt.Errorf("--name %q must be lowercase letters, digits and dashes", opts.name))
+		return windowsSecretChange{}, secretFailed("invalid_arguments", windowsSecretExitInvalid, fmt.Errorf("--name %q must be lowercase letters, digits and dashes", opts.name))
+	}
+	if err := secretTransactionArguments(opts); err != nil {
+		return windowsSecretChange{}, secretFailed("invalid_arguments", windowsSecretExitInvalid, err)
 	}
 	if err := requireWindowsSecretDeployment(); err != nil {
-		return false, err
+		return windowsSecretChange{}, err
 	}
 	var value []byte
 	switch action {
 	case "set":
 		if opts.fromStdin == (opts.fromFile != "") {
-			return false, secretFailed("invalid_arguments", windowsSecretExitInvalid, errors.New("pass exactly one of --from-stdin or --from-file"))
+			return windowsSecretChange{}, secretFailed("invalid_arguments", windowsSecretExitInvalid, errors.New("pass exactly one of --from-stdin or --from-file"))
 		}
 		var source io.Reader = cmd.InOrStdin()
 		if opts.fromFile != "" {
 			if err := managed.ValidateTrustedFilePath(opts.fromFile, "credential source"); err != nil {
-				return false, secretFailed("invalid_arguments", windowsSecretExitInvalid, err)
+				return windowsSecretChange{}, secretFailed("invalid_arguments", windowsSecretExitInvalid, err)
 			}
 			file, err := os.Open(opts.fromFile)
 			if err != nil {
-				return false, secretFailed("change_failed", windowsSecretExitFailure, err)
+				return windowsSecretChange{}, secretFailed("change_failed", windowsSecretExitFailure, err)
 			}
 			defer file.Close()
 			source = file
 		}
 		if value, err = readWindowsSecretValue(source); err != nil {
-			return false, secretFailed("invalid_arguments", windowsSecretExitInvalid, err)
+			return windowsSecretChange{}, secretFailed("invalid_arguments", windowsSecretExitInvalid, err)
 		}
 	case "remove":
 	default:
-		return false, secretFailed("invalid_arguments", windowsSecretExitInvalid, fmt.Errorf("unknown action %q", action))
+		return windowsSecretChange{}, secretFailed("invalid_arguments", windowsSecretExitInvalid, fmt.Errorf("unknown action %q", action))
 	}
 	release, err := lockWindowsSecretChange(cmd.Context(), layout, opts.lockWait)
 	if err != nil {
-		return false, err
+		return windowsSecretChange{}, err
 	}
 	defer release()
 	// An uninstall holds lifecycle.lock, so one can finish while this run
 	// waits for it; check again under both locks before anything is written.
 	if err := requireWindowsSecretDeployment(); err != nil {
-		return false, err
+		return windowsSecretChange{}, err
 	}
+	if opts.undoRotation != "" {
+		// The wrapper writes its journal before secret set. If that set
+		// never wrote its value, the old value (or absence) is already
+		// restored. Check through the pinned store under both locks; no
+		// credential write is needed. A live gateway may still hold the
+		// rotated value, so reload it before retiring the journal.
+		prior, err := openWindowsSecretStore(layout.SecretsDir, false)
+		if err != nil {
+			return windowsSecretChange{}, secretFailed(string(enterprisebundle.CodeStateInvalid), windowsSecretExitFailure, err)
+		}
+		entry, stored, readErr := prior.openCredential(opts.name)
+		if readErr == nil {
+			_ = windows.CloseHandle(entry)
+		}
+		prior.close()
+		if (action == "set" && readErr == nil && bytes.Equal(bytes.TrimSpace(stored), value)) ||
+			(action == "remove" && windowsSecretAbsentRead(readErr)) {
+			return reloadAlreadyRestoredWindowsSecret(opts.name)
+		}
+	}
+	var installedConfig []byte
+	var inUse error
+	if action == "remove" {
+		installedConfig, err = readWindowsSecretInstalledConfig(layout, opts.undoRotation != "" && opts.undoConfig == "none")
+		if err != nil {
+			return windowsSecretChange{}, err
+		}
+		// A put-back (--undo-rotation) removes what a failed rotation added
+		// to the config installed before it, which may reference the
+		// credential with no value stored: only while that same config is
+		// installed (--undo-config, read under the lifecycle lock), and
+		// checkSecretTransaction decides the rest. A config installed since
+		// may use the stored value, so it keeps it.
+		if at := config.InstalledCredentialReference(layout.ConfigPath, installedConfig, layout.DataDir, opts.name); at != "" && !undoRotationOnConfig(opts, installedConfig) {
+			err := fmt.Errorf("the installed config still references credential %s at %s; remove that reference and apply the config first", opts.name, at)
+			if opts.undoRotation != "" {
+				err = fmt.Errorf("the installed config references credential %s at %s and is not the config installed before the rotation (--undo-config), so it may use the value stored now; credential %s was not removed", opts.name, at, opts.name)
+			}
+			inUse = secretFailed("credential_in_use", windowsSecretExitFailure, err)
+			// A put-back first learns whether its rotation committed
+			// (rotation_confirmed, below), the only refusal that retires
+			// the wrapper's entry; neither refusal changes anything.
+			if opts.undoRotation == "" {
+				return windowsSecretChange{}, inUse
+			}
+		}
+	}
+	// Start an independent child before changing credentials, but only arm it
+	// at a live gateway's restart decision. Closing its pipe on a refusal or
+	// no-op cannot start a gateway that the administrator left stopped. A
+	// gateway that is stopped or not installed needs no restart, so no child.
+	recovery, err := prepareWindowsSecretRecovery()
+	if err != nil {
+		return windowsSecretChange{}, secretFailed("change_failed", windowsSecretExitFailure,
+			fmt.Errorf("cannot arm gateway restart recovery; nothing was changed: %w", err))
+	}
+	recoverOnExit := false
+	defer func() { _ = recovery.finish(recoverOnExit) }()
 	// Pin the store before anything in it is read, written or deleted: a
 	// junction, mount point, symlink or file where the folder belongs is
 	// state_invalid. Remove deleted the credential a junction target held
 	// and reported success (GAP-1315); set reported change_failed (GAP-1314).
 	store, err := openWindowsSecretStore(layout.SecretsDir, action == "set")
 	if err != nil {
-		return false, secretFailed(string(enterprisebundle.CodeStateInvalid), windowsSecretExitFailure, err)
+		return windowsSecretChange{}, secretFailed(string(enterprisebundle.CodeStateInvalid), windowsSecretExitFailure, err)
 	}
 	defer store.close()
-	if action == "set" {
-		if err := writeWindowsSecret(store, opts.name, value); err != nil {
-			return false, secretFailed("change_failed", windowsSecretExitFailure, err)
+	if opts.ifConfirmed != "" || opts.undoRotation != "" || opts.ifStored != "" {
+		var stored []byte
+		entry, raw, readErr := store.openCredential(opts.name)
+		if readErr == nil {
+			_ = windows.CloseHandle(entry)
+			stored = raw
 		}
-	} else if err := removeWindowsSecret(layout, store, opts.name); err != nil {
-		return false, err
+		if opts.ifStored == "none" && readErr != nil && !windowsSecretAbsentRead(readErr) {
+			return windowsSecretChange{}, secretFailed(string(enterprisebundle.CodeStateInvalid), windowsSecretExitFailure, readErr)
+		}
+		if err := checkSecretTransaction(opts.name, opts, stored, readErr == nil); err != nil {
+			return windowsSecretChange{}, secretFailed(secretBindingCode(err), windowsSecretExitFailure, err)
+		}
+	}
+	if inUse != nil {
+		return windowsSecretChange{}, inUse
+	}
+	// A change this computer could not audit is not made: the spool must
+	// hold room for its change event before the credential is written or
+	// removed, until the event is written. A concurrent command cannot take
+	// that room in between.
+	reservation, err := reserveWindowsChange(layout, enterprisestatus.ChangeKindSecret, action, opts.name)
+	if err != nil {
+		return windowsSecretChange{}, secretFailed(string(enterprisebundle.CodeStateInvalid), windowsSecretExitFailure,
+			fmt.Errorf("cannot record the credential change: %w", err))
+	}
+	change := windowsSecretChange{reservation: reservation}
+	unchanged := false
+	if action == "set" {
+		unchanged = keepIdenticalWindowsSecret(store, opts.name, value)
+		if !unchanged {
+			// A value the signed bundle does not bind is not stored.
+			if err := checkSecretBinding(cmd.Context(), opts.name, value, opts.bundle, windowsSecretStored(layout.SecretsDir, opts.name)); err != nil {
+				return change, secretFailed(secretBindingCode(err), windowsSecretExitFailure, err)
+			}
+			if err := writeWindowsSecret(store, opts.name, value); err != nil {
+				return change, secretFailed("change_failed", windowsSecretExitFailure, err)
+			}
+		}
+	} else {
+		unchanged = !windowsSecretStored(layout.SecretsDir, opts.name)
+		if err := removeWindowsSecret(store, opts.name); err != nil {
+			return change, err
+		}
 	}
 	store.close()
 	// The gateway reads credentials when it starts; apply the change now.
-	restarted, err := windowsSecretRestartGateway()
+	restarted, err := windowsSecretRestartGateway(recovery.arm)
 	if err != nil {
-		return false, secretFailed("restart_failed", windowsSecretExitFailure,
-			fmt.Errorf("credential %s %s, but restarting the gateway failed: %w", opts.name, windowsSecretChanged(action), err))
+		// A refused SCM stop did not stop this service. A concurrent
+		// administrator stop is not this command's restart to recover.
+		recoverOnExit = !errors.Is(err, errWindowsGatewayStopRefused)
+		done := windowsSecretChanged(action)
+		if unchanged {
+			done = "was already stored"
+		}
+		return change, secretFailed("restart_failed", windowsSecretExitFailure,
+			fmt.Errorf("credential %s %s, but restarting the gateway failed: %w", opts.name, done, err))
 	}
-	return restarted, nil
+	if err := recovery.finish(false); err != nil {
+		return change, secretFailed("restart_failed", windowsSecretExitFailure,
+			fmt.Errorf("credential %s changed, but cancelling gateway restart recovery failed: %w", opts.name, err))
+	}
+	change.restarted, change.noop, change.changed = restarted, unchanged && !restarted, !unchanged
+	return change, nil
+}
+
+func windowsSecretAbsentRead(err error) bool {
+	return errors.Is(err, os.ErrNotExist) || errors.Is(err, windows.STATUS_OBJECT_NAME_NOT_FOUND)
+}
+
+// An interrupted rotation can find its before-value already on disk while a
+// live gateway still uses the delivered value. Settle the journal only after
+// the gateway has loaded that before-state. A refused restart leaves it for
+// the next ensure, and the recovery child covers a stop that already began.
+func reloadAlreadyRestoredWindowsSecret(name string) (windowsSecretChange, error) {
+	recovery, err := prepareWindowsSecretRecovery()
+	if err != nil {
+		return windowsSecretChange{}, secretFailed("restart_failed", windowsSecretExitFailure,
+			fmt.Errorf("cannot prepare gateway reload for already-restored credential %s: %w", name, err))
+	}
+	recoverOnExit := false
+	defer func() { _ = recovery.finish(recoverOnExit) }()
+	restarted, err := windowsSecretRestartGateway(recovery.arm)
+	if err != nil {
+		recoverOnExit = !errors.Is(err, errWindowsGatewayStopRefused)
+		return windowsSecretChange{}, secretFailed("restart_failed", windowsSecretExitFailure,
+			fmt.Errorf("credential %s is restored on disk, but restarting the gateway failed: %w", name, err))
+	}
+	if err := recovery.finish(false); err != nil {
+		return windowsSecretChange{}, secretFailed("restart_failed", windowsSecretExitFailure,
+			fmt.Errorf("credential %s is restored on disk, but cancelling gateway restart recovery failed: %w", name, err))
+	}
+	return windowsSecretChange{restarted: restarted, noop: !restarted}, nil
+}
+
+// keepIdenticalWindowsSecret reports whether credential name already holds
+// exactly value and still grants the gateway its read, so set need not
+// rewrite it. The gateway reader normalizes whitespace, so the value it
+// accepts and the exact stored bytes must both match. The raw bytes are read
+// only after that trusted, size-limited read succeeded, from the pinned
+// store through a handle that follows no reparse point (openCredential). An
+// ACL edit leaves the bytes alone but can drop the gateway's read ACEs, which
+// the administrator's own read does not notice, so the directory and file
+// descriptors are applied again, the file's through the open handle. Any
+// failure rewrites the credential instead.
+func keepIdenticalWindowsSecret(store *windowsSecretStore, name string, value []byte) bool {
+	stored, _, err := managed.ResolveServiceCredentialAs(name, store.dir, windowsSecretGatewayAccount)
+	if err != nil || !bytes.Equal(stored, value) {
+		return false
+	}
+	gateway, err := managed.WindowsServiceAccountSID(windowsSecretGatewayAccount)
+	if err != nil || gateway == nil {
+		return false
+	}
+	entry, raw, err := store.openCredential(name)
+	if err != nil {
+		return false
+	}
+	defer func() { _ = windows.CloseHandle(entry) }()
+	if !bytes.Equal(raw, value) || ensureWindowsSecretsDir(store, gateway) != nil {
+		return false
+	}
+	return applyWindowsSDDLToHandle(entry, windowsSecretFileSDDL(gateway)) == nil
 }
 
 // requireWindowsSecretDeployment refuses not_installed (1603) unless a
@@ -292,25 +521,47 @@ func requireWindowsSecretDeployment() error {
 	return nil
 }
 
-// removeWindowsSecret deletes the credential unless the installed config
-// still references it. The restart that follows would start the gateway on a
-// config it cannot compile without this credential, or run the judge without
-// its key (GAP-0674). A config that exists but cannot be read may still
-// reference it, so nothing is removed (GAP-1507).
-func removeWindowsSecret(layout managed.StandaloneLayout, store *windowsSecretStore, name string) error {
-	if strings.TrimSpace(layout.ConfigPath) != "" {
-		raw, err := os.ReadFile(layout.ConfigPath)
-		switch {
-		case err == nil:
-			if at := config.InstalledCredentialReference(layout.ConfigPath, raw, layout.DataDir, name); at != "" {
-				return secretFailed("credential_in_use", windowsSecretExitFailure,
-					fmt.Errorf("the installed config still references credential %s at %s; remove that reference and apply the config first", name, at))
+// readWindowsSecretInstalledConfig proves the active config can be inspected
+// before remove changes the credential. A missing, unreadable, or malformed
+// config cannot prove that the key is unused (GAP-0674, GAP-1507).
+func readWindowsSecretInstalledConfig(layout managed.StandaloneLayout, allowAbsent bool) ([]byte, error) {
+	if strings.TrimSpace(layout.ConfigPath) == "" {
+		return nil, secretFailed(string(enterprisebundle.CodeStateInvalid), windowsSecretExitFailure,
+			errors.New("cannot locate the installed config; nothing was removed"))
+	}
+	if allowAbsent {
+		// Only an absent-credential undo that journaled no config may treat
+		// ENOENT as an empty reference roster. The stored-value comparison
+		// still runs under the same locks before removal. Ordinary remove and
+		// a journal from a prior config keep the state_invalid refusal.
+		if _, err := os.Lstat(layout.ConfigPath); errors.Is(err, os.ErrNotExist) {
+			if err := windowsSecretAbsentConfigParentTrusted(filepath.Dir(layout.ConfigPath)); err != nil {
+				return nil, secretFailed(string(enterprisebundle.CodeStateInvalid), windowsSecretExitFailure,
+					fmt.Errorf("cannot trust the directory of the absent installed config %s (%v); nothing was removed", layout.ConfigPath, err))
 			}
-		case !errors.Is(err, os.ErrNotExist):
-			return secretFailed(string(enterprisebundle.CodeStateInvalid), windowsSecretExitFailure,
-				fmt.Errorf("cannot read the installed config %s to check that it no longer references credential %s (%v); nothing was removed: restore read access to the config and run it again", layout.ConfigPath, name, err))
+			return nil, nil
+		} else if err != nil {
+			return nil, secretFailed(string(enterprisebundle.CodeStateInvalid), windowsSecretExitFailure,
+				fmt.Errorf("cannot inspect the installed config %s (%v); nothing was removed", layout.ConfigPath, err))
 		}
 	}
+	if err := windowsSecretConfigTrusted(layout.ConfigPath); err != nil {
+		return nil, secretFailed(string(enterprisebundle.CodeStateInvalid), windowsSecretExitFailure,
+			fmt.Errorf("cannot trust the installed config %s (%v); nothing was removed", layout.ConfigPath, err))
+	}
+	raw, err := os.ReadFile(layout.ConfigPath)
+	if err != nil {
+		return nil, secretFailed(string(enterprisebundle.CodeStateInvalid), windowsSecretExitFailure,
+			fmt.Errorf("cannot read the installed config %s (%v); nothing was removed: restore read access to the config and run it again", layout.ConfigPath, err))
+	}
+	if _, err := config.LoadRuntimeV8InspectionCandidateFromBytes(layout.ConfigPath, raw); err != nil {
+		return nil, secretFailed(string(enterprisebundle.CodeStateInvalid), windowsSecretExitFailure,
+			fmt.Errorf("cannot load the installed config %s (%v); nothing was removed", layout.ConfigPath, err))
+	}
+	return raw, nil
+}
+
+func removeWindowsSecret(store *windowsSecretStore, name string) error {
 	if err := store.remove(name); err != nil {
 		return secretFailed("change_failed", windowsSecretExitFailure, err)
 	}
@@ -494,24 +745,8 @@ func (s *windowsSecretStore) remove(name string) error {
 	if !s.exists() {
 		return nil
 	}
-	if !managed.ValidCredentialName(name) {
-		return fmt.Errorf("credential name %q is not valid", name)
-	}
-	objectName, err := windows.NewNTUnicodeString(name)
-	if err != nil {
-		return err
-	}
-	attributes := windows.OBJECT_ATTRIBUTES{
-		Length:        uint32(unsafe.Sizeof(windows.OBJECT_ATTRIBUTES{})),
-		RootDirectory: s.handle,
-		ObjectName:    objectName,
-		Attributes:    windows.OBJ_CASE_INSENSITIVE | windows.OBJ_DONT_REPARSE,
-	}
-	var entry windows.Handle
-	var status windows.IO_STATUS_BLOCK
-	err = windows.NtCreateFile(&entry, windows.DELETE|windows.FILE_READ_ATTRIBUTES|windows.SYNCHRONIZE, &attributes, &status, nil, 0,
-		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE, windows.FILE_OPEN,
-		windows.FILE_OPEN_REPARSE_POINT|windows.FILE_OPEN_FOR_BACKUP_INTENT|windows.FILE_SYNCHRONOUS_IO_NONALERT, 0, 0)
+	entry, err := s.openEntry(name, windows.DELETE|windows.FILE_READ_ATTRIBUTES|windows.SYNCHRONIZE,
+		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE)
 	if errors.Is(err, windows.STATUS_OBJECT_NAME_NOT_FOUND) {
 		return nil
 	}
@@ -533,8 +768,85 @@ func (s *windowsSecretStore) remove(name string) error {
 	return nil
 }
 
+// openEntry opens entry name of the pinned folder relative to the folder
+// handle, following no reparse point (OBJ_DONT_REPARSE,
+// FILE_OPEN_REPARSE_POINT): a link named like the credential is opened
+// itself, never its target.
+func (s *windowsSecretStore) openEntry(name string, access, share uint32) (windows.Handle, error) {
+	if !managed.ValidCredentialName(name) {
+		return 0, fmt.Errorf("credential name %q is not valid", name)
+	}
+	objectName, err := windows.NewNTUnicodeString(name)
+	if err != nil {
+		return 0, err
+	}
+	attributes := windows.OBJECT_ATTRIBUTES{
+		Length:        uint32(unsafe.Sizeof(windows.OBJECT_ATTRIBUTES{})),
+		RootDirectory: s.handle,
+		ObjectName:    objectName,
+		Attributes:    windows.OBJ_CASE_INSENSITIVE | windows.OBJ_DONT_REPARSE,
+	}
+	var entry windows.Handle
+	var status windows.IO_STATUS_BLOCK
+	err = windows.NtCreateFile(&entry, access, &attributes, &status, nil, 0, share, windows.FILE_OPEN,
+		windows.FILE_OPEN_REPARSE_POINT|windows.FILE_OPEN_FOR_BACKUP_INTENT|windows.FILE_SYNCHRONOUS_IO_NONALERT, 0, 0)
+	return entry, err
+}
+
+// openCredential opens credential name in the pinned folder (openEntry) to
+// read it and to repair its descriptor, and reads at most
+// managed.ServiceCredentialLimit bytes. A link, a folder or a larger file is
+// refused before anything is read. Writers are shut out while the handle is
+// open; the caller closes it.
+func (s *windowsSecretStore) openCredential(name string) (windows.Handle, []byte, error) {
+	if !s.exists() {
+		return 0, nil, fmt.Errorf("%s: %w", s.dir, os.ErrNotExist)
+	}
+	entry, err := s.openEntry(name, windows.FILE_READ_DATA|windows.FILE_READ_ATTRIBUTES|windows.READ_CONTROL|
+		windows.WRITE_DAC|windows.WRITE_OWNER|windows.SYNCHRONIZE, windows.FILE_SHARE_READ)
+	if err != nil {
+		return 0, nil, fmt.Errorf("open credential %s in %s: %w", name, s.dir, err)
+	}
+	data, err := readWindowsSecretEntry(entry)
+	if err != nil {
+		_ = windows.CloseHandle(entry)
+		return 0, nil, fmt.Errorf("credential %s in %s: %w", name, s.dir, err)
+	}
+	return entry, data, nil
+}
+
+func readWindowsSecretEntry(entry windows.Handle) ([]byte, error) {
+	var info windows.ByHandleFileInformation
+	if err := windows.GetFileInformationByHandle(entry, &info); err != nil {
+		return nil, fmt.Errorf("inspect: %w", err)
+	}
+	if info.FileAttributes&(windows.FILE_ATTRIBUTE_REPARSE_POINT|windows.FILE_ATTRIBUTE_DIRECTORY) != 0 {
+		return nil, errors.New("is a link or a folder, not a credential file")
+	}
+	if info.FileSizeHigh != 0 || info.FileSizeLow > managed.ServiceCredentialLimit {
+		return nil, fmt.Errorf("exceeds %d bytes", managed.ServiceCredentialLimit)
+	}
+	data := make([]byte, managed.ServiceCredentialLimit+1)
+	total := 0
+	for total < len(data) {
+		var n uint32
+		err := windows.ReadFile(entry, data[total:], &n, nil)
+		if err != nil && !errors.Is(err, windows.ERROR_HANDLE_EOF) {
+			return nil, fmt.Errorf("read: %w", err)
+		}
+		if n == 0 {
+			break
+		}
+		total += int(n)
+	}
+	if total > managed.ServiceCredentialLimit {
+		return nil, fmt.Errorf("exceeds %d bytes", managed.ServiceCredentialLimit)
+	}
+	return data[:total], nil
+}
+
 // windowsSecretStored reports whether credential name is in the store at
-// dir. A store that is not a real directory holds none: the gateway reader
+// // dir. A store that is not a real directory holds none: the gateway reader
 // refuses it too. A store this account cannot open counts as stored
 // (unchecked), so a standard account is not warned about it.
 func windowsSecretStored(dir, name string) bool {
@@ -635,16 +947,28 @@ func storeWindowsSecret(store *windowsSecretStore, name string, value []byte, re
 	return final, nil
 }
 
-func applyWindowsSDDL(path, sddl string) error {
+// windowsSDDLOwnerAndDACL is the owner and the protected DACL that
+// applyWindowsSDDL and applyWindowsSDDLToHandle set.
+func windowsSDDLOwnerAndDACL(sddl string) (*windows.SID, *windows.ACL, error) {
 	sd, err := windows.SecurityDescriptorFromString(sddl)
 	if err != nil {
-		return fmt.Errorf("build security descriptor: %w", err)
+		return nil, nil, fmt.Errorf("build security descriptor: %w", err)
 	}
 	owner, _, err := sd.Owner()
 	if err != nil {
-		return err
+		return nil, nil, err
 	}
 	dacl, _, err := sd.DACL()
+	if err != nil {
+		return nil, nil, err
+	}
+	return owner, dacl, nil
+}
+
+const windowsSDDLApplied = windows.OWNER_SECURITY_INFORMATION | windows.DACL_SECURITY_INFORMATION | windows.PROTECTED_DACL_SECURITY_INFORMATION
+
+func applyWindowsSDDL(path, sddl string) error {
+	owner, dacl, err := windowsSDDLOwnerAndDACL(sddl)
 	if err != nil {
 		return err
 	}
@@ -652,9 +976,17 @@ func applyWindowsSDDL(path, sddl string) error {
 	if err != nil {
 		return err
 	}
-	return windows.SetNamedSecurityInfo(extended, windows.SE_FILE_OBJECT,
-		windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION,
-		owner, nil, dacl, nil)
+	return windows.SetNamedSecurityInfo(extended, windows.SE_FILE_OBJECT, windowsSDDLApplied, owner, nil, dacl, nil)
+}
+
+// applyWindowsSDDLToHandle is applyWindowsSDDL for an open handle (opened
+// with WRITE_DAC and WRITE_OWNER), so no path is resolved again.
+func applyWindowsSDDLToHandle(handle windows.Handle, sddl string) error {
+	owner, dacl, err := windowsSDDLOwnerAndDACL(sddl)
+	if err != nil {
+		return err
+	}
+	return windows.SetSecurityInfo(handle, windows.SE_FILE_OBJECT, windowsSDDLApplied, owner, nil, dacl, nil)
 }
 
 func windowsSecretStatus(dir string) ([]windowsSecretState, error) {
@@ -694,10 +1026,92 @@ func windowsSecretStatus(dir string) ([]windowsSecretState, error) {
 	return states, nil
 }
 
-// restartWindowsStandaloneGateway restarts the gateway service when it is
-// running so it reads the changed credential; a stopped gateway reads it on
-// its next start.
+// restartWindowsStandaloneGateway restarts the gateway service so a new
+// process reads the changed credential or config; a stopped gateway reads it
+// on its next start (restartWindowsGatewayService). A gateway in StartPending
+// is a process that may already hold the old value: it is restarted once it
+// runs, not taken for stopped.
 func restartWindowsStandaloneGateway() (bool, error) {
+	return restartWindowsStandaloneGatewayBeforeStop(nil)
+}
+
+func restartWindowsStandaloneGatewayBeforeStop(beforeStop func() error) (bool, error) {
+	manager, err := mgr.Connect()
+	if err != nil {
+		return false, err
+	}
+	defer manager.Disconnect()
+	service, err := manager.OpenService(managed.StandaloneWindowsGatewaySvc)
+	if err != nil {
+		if errors.Is(err, windows.ERROR_SERVICE_DOES_NOT_EXIST) {
+			return false, nil
+		}
+		return false, err
+	}
+	defer service.Close()
+	return restartWindowsGatewayServiceBeforeStop(scmGatewayService{service}, managed.StandaloneWindowsGatewaySvc, 60*time.Second, 250*time.Millisecond, beforeStop)
+}
+
+type windowsSecretRecoveryControl interface {
+	arm() error
+	finish(recoverGateway bool) error
+}
+
+type windowsSecretRecoveryChild struct {
+	child  *exec.Cmd
+	input  io.WriteCloser
+	armed  bool
+	closed bool
+}
+
+// deferredWindowsSecretRecovery is the recovery a credential change holds.
+// changeWindowsSecret starts its child before the change when the gateway
+// runs (prepareWindowsSecretRecovery). With the gateway stopped or not
+// installed no restart is due and no child runs; one that started after that
+// check gets its child at the restart decision, before its stop, and a child
+// that cannot start there leaves the gateway running and the restart failed.
+type deferredWindowsSecretRecovery struct {
+	spawn func() (windowsSecretRecoveryControl, error)
+	child windowsSecretRecoveryControl
+}
+
+func (r *deferredWindowsSecretRecovery) arm() error {
+	if r.child == nil {
+		child, err := r.spawn()
+		if err != nil {
+			return err
+		}
+		r.child = child
+	}
+	return r.child.arm()
+}
+
+func (r *deferredWindowsSecretRecovery) finish(recoverGateway bool) error {
+	if r.child == nil {
+		return nil
+	}
+	return r.child.finish(recoverGateway)
+}
+
+// prepareWindowsSecretRecovery starts the recovery child up front unless the
+// service manager reports the gateway stopped or not installed. A state it
+// cannot read counts as running.
+func prepareWindowsSecretRecovery() (windowsSecretRecoveryControl, error) {
+	recovery := &deferredWindowsSecretRecovery{spawn: windowsSecretSpawnRecovery}
+	if live, err := windowsSecretGatewayLive(); err == nil && !live {
+		return recovery, nil
+	}
+	child, err := recovery.spawn()
+	if err != nil {
+		return nil, err
+	}
+	recovery.child = child
+	return recovery, nil
+}
+
+// windowsStandaloneGatewayLive reports whether the gateway service runs or
+// is changing state: false only for a stopped or absent service.
+func windowsStandaloneGatewayLive() (bool, error) {
 	manager, err := mgr.Connect()
 	if err != nil {
 		return false, err
@@ -715,35 +1129,185 @@ func restartWindowsStandaloneGateway() (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	if status.State != svc.Running {
-		return false, nil
+	return windowsServiceState(status.State) != windowsServiceStopped, nil
+}
+
+func (r *windowsSecretRecoveryChild) arm() error {
+	if r.closed || r.armed {
+		return errors.New("gateway restart recovery is not ready to arm")
 	}
-	if _, err := service.Control(svc.Stop); err != nil {
-		return false, fmt.Errorf("stop %s: %w", managed.StandaloneWindowsGatewaySvc, err)
+	if _, err := io.WriteString(r.input, "ARM\n"); err != nil {
+		return err
+	}
+	r.armed = true
+	return nil
+}
+
+func (r *windowsSecretRecoveryChild) finish(recoverGateway bool) error {
+	if r.closed {
+		return nil
+	}
+	r.closed = true
+	if r.armed && !recoverGateway {
+		// The child waits for the locks before reading this cancellation, so
+		// it cannot start a gateway after the completed command releases them.
+		if _, err := io.WriteString(r.input, "CANCEL\n"); err != nil {
+			_ = r.child.Process.Kill()
+			_ = r.input.Close()
+			_ = r.child.Wait()
+			return fmt.Errorf("cancel gateway recovery child: %w", err)
+		}
+	}
+	closeErr := r.input.Close()
+	releaseErr := r.child.Process.Release()
+	return errors.Join(closeErr, releaseErr)
+}
+
+// spawnWindowsSecretGatewayRecovery starts a detached child before the
+// credential write. The child has no credential value or writable state and
+// cannot start a service until the parent explicitly arms its restart. It
+// must outlive this command's process job (processutil.StartIndependent),
+// including the unreadable job of a LocalSystem scheduled task.
+func spawnWindowsSecretGatewayRecovery() (windowsSecretRecoveryControl, error) {
+	executable, err := os.Executable()
+	if err != nil {
+		return nil, err
+	}
+	child := windowsSecretRecoveryCommand(executable)
+	child.Dir = filepath.Dir(executable)
+	child.Stderr = io.Discard
+	input, err := child.StdinPipe()
+	if err != nil {
+		return nil, fmt.Errorf("create gateway recovery control pipe: %w", err)
+	}
+	ready, err := child.StdoutPipe()
+	if err != nil {
+		_ = input.Close()
+		return nil, fmt.Errorf("create gateway recovery readiness pipe: %w", err)
+	}
+	if err := windowsSecretStartRecovery(child); err != nil {
+		_ = input.Close()
+		_ = ready.Close()
+		return nil, fmt.Errorf("start gateway recovery: %w", err)
+	}
+	result := make(chan error, 1)
+	go func() {
+		marker := make([]byte, len("READY\n"))
+		_, readErr := io.ReadFull(ready, marker)
+		if readErr == nil && string(marker) != "READY\n" {
+			readErr = errors.New("gateway recovery sent an invalid readiness marker")
+		}
+		result <- readErr
+	}()
+	select {
+	case err = <-result:
+	case <-time.After(30 * time.Second):
+		err = errors.New("gateway recovery did not become ready within 30 seconds")
+	}
+	if err != nil {
+		_ = child.Process.Kill()
+		_ = input.Close()
+		_ = ready.Close()
+		_ = child.Wait()
+		return nil, fmt.Errorf("gateway recovery was not ready: %w", err)
+	}
+	_ = ready.Close()
+	return &windowsSecretRecoveryChild{child: child, input: input}, nil
+}
+
+func recoverWindowsSecretGateway(ctx context.Context, stdin io.Reader, stdout io.Writer) error {
+	if err := windowsSecretElevation("recover-gateway", nil); err != nil {
+		return err
+	}
+	return runWindowsSecretRecoveryProtocol(stdin, stdout, func() (func(), error) {
+		layout, err := windowsSecretLayout()
+		if err != nil {
+			return nil, err
+		}
+		return lockWindowsSecretChange(ctx, layout, 10*time.Minute)
+	}, func() error {
+		if err := requireWindowsSecretDeployment(); err != nil {
+			return err
+		}
+		manager, err := mgr.Connect()
+		if err != nil {
+			return err
+		}
+		defer manager.Disconnect()
+		service, err := manager.OpenService(managed.StandaloneWindowsGatewaySvc)
+		if err != nil {
+			return err
+		}
+		defer service.Close()
+		_, err = startWindowsGatewayServiceIfStopped(scmGatewayService{service}, managed.StandaloneWindowsGatewaySvc, 60*time.Second, 250*time.Millisecond)
+		return err
+	})
+}
+
+// scmGatewayService drives the installed gateway service through the SCM.
+type scmGatewayService struct{ service *mgr.Service }
+
+func (s scmGatewayService) state() (windowsServiceState, error) {
+	status, err := s.service.Query()
+	return windowsServiceState(status.State), err
+}
+
+func (s scmGatewayService) stop() error {
+	_, err := s.service.Control(svc.Stop)
+	return err
+}
+
+func (s scmGatewayService) start() error { return s.service.Start() }
+
+// stopWindowsStandaloneGatewayFailClosed stops the gateway service after a
+// hot config undo that could not be proven, and returns nil only once the
+// service manager reports it stopped (or there is no gateway service). The
+// hooks then treat it as an outage. Nothing starts it again but a lifecycle
+// run: the hook guardian never starts the gateway, and the service manager
+// restarts it only after a crash.
+func stopWindowsStandaloneGatewayFailClosed() error {
+	manager, err := mgr.Connect()
+	if err != nil {
+		return err
+	}
+	defer manager.Disconnect()
+	service, err := manager.OpenService(managed.StandaloneWindowsGatewaySvc)
+	if err != nil {
+		if errors.Is(err, windows.ERROR_SERVICE_DOES_NOT_EXIST) {
+			return nil
+		}
+		return err
+	}
+	defer service.Close()
+	status, err := service.Query()
+	if err != nil {
+		return err
+	}
+	if status.State != svc.Stopped && status.State != svc.StopPending {
+		if _, err := service.Control(svc.Stop); err != nil && !errors.Is(err, windows.ERROR_SERVICE_NOT_ACTIVE) {
+			return fmt.Errorf("stop %s: %w", managed.StandaloneWindowsGatewaySvc, err)
+		}
 	}
 	deadline := time.Now().Add(60 * time.Second)
 	for {
 		status, err = service.Query()
 		if err != nil {
-			return false, err
+			return err
 		}
 		if status.State == svc.Stopped {
-			break
+			return nil
 		}
-		if time.Now().After(deadline) {
-			return false, fmt.Errorf("%s did not stop within 60s", managed.StandaloneWindowsGatewaySvc)
+		if !time.Now().Before(deadline) {
+			return fmt.Errorf("%s did not stop within 60s", managed.StandaloneWindowsGatewaySvc)
 		}
 		time.Sleep(250 * time.Millisecond)
 	}
-	if err := service.Start(); err != nil {
-		return false, fmt.Errorf("start %s: %w", managed.StandaloneWindowsGatewaySvc, err)
-	}
-	return true, nil
 }
 
 // windowsStandaloneGatewayPID observes the SCM process identity around an
 // installer transaction. A bundle receipt records a restart only when the
-// gateway process actually changed.
+// gateway process actually changed. A starting gateway has a process
+// (windowsServiceProcessLive), so it counts as running.
 func windowsStandaloneGatewayPID() uint32 {
 	manager, err := mgr.Connect()
 	if err != nil {
@@ -756,7 +1320,7 @@ func windowsStandaloneGatewayPID() uint32 {
 	}
 	defer service.Close()
 	status, err := service.Query()
-	if err != nil || status.State != svc.Running {
+	if err != nil || !windowsServiceProcessLive(windowsServiceState(status.State)) {
 		return 0
 	}
 	return status.ProcessId
@@ -764,7 +1328,8 @@ func windowsStandaloneGatewayPID() uint32 {
 
 // startWindowsStandaloneGatewayIfStopped is the rollback recovery for a
 // bundle restart whose stop succeeded but start failed. It never stops a
-// running gateway.
+// running gateway, and reports a start only once the gateway runs
+// (startWindowsGatewayServiceIfStopped).
 func startWindowsStandaloneGatewayIfStopped() (bool, error) {
 	manager, err := mgr.Connect()
 	if err != nil {
@@ -776,24 +1341,5 @@ func startWindowsStandaloneGatewayIfStopped() (bool, error) {
 		return false, err
 	}
 	defer service.Close()
-	deadline := time.Now().Add(60 * time.Second)
-	for {
-		status, err := service.Query()
-		if err != nil {
-			return false, err
-		}
-		switch status.State {
-		case svc.Running, svc.StartPending:
-			return false, nil
-		case svc.Stopped:
-			if err := service.Start(); err != nil {
-				return false, err
-			}
-			return true, nil
-		}
-		if time.Now().After(deadline) {
-			return false, fmt.Errorf("%s did not become restartable within 60s", managed.StandaloneWindowsGatewaySvc)
-		}
-		time.Sleep(250 * time.Millisecond)
-	}
+	return startWindowsGatewayServiceIfStopped(scmGatewayService{service}, managed.StandaloneWindowsGatewaySvc, 60*time.Second, 250*time.Millisecond)
 }

@@ -20,8 +20,8 @@ import "strings"
 
 // copilotCLIToLocalHookEvent maps the Copilot CLI hook event names to the
 // Claude-style names the VS Code Local harness stores for the same hook point
-// (PreToolUse vs preToolUse). Mirrors copilotCLIHookFileLocalEvents in
-// internal/gateway/connector/hook_only_copilot_vscode.go and
+// (PreToolUse vs preToolUse). Mirrors cliHookLocalEvents in
+// internal/copilotargs/dialect.go and
 // _COPILOT_LOCAL_TO_CLI_EVENT in cli/defenseclaw/alert_semantics.py.
 var copilotCLIToLocalHookEvent = map[string]string{
 	"sessionStart":        "SessionStart",

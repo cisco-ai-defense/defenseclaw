@@ -22,6 +22,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -30,9 +31,12 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/spf13/cobra"
+
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks/guardianstate"
+	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/inventory"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/unixidentity"
@@ -132,6 +136,38 @@ func TestEnterpriseHookWorkerHelperProcess(t *testing.T) {
 		}
 		return "", "not installed"
 	}
+	if mode == "slow-discover" {
+		enterpriseHookWorkerDiscoverSurfaces = func(context.Context, string, string, bool) ([]connector.AgentSurface, bool) {
+			return nil, true
+		}
+		enterpriseHookWorkerDiscoverPrivateInstalls = func(ctx context.Context, _ string, names []string) []enterprisehooks.PrivateAgentInstall {
+			<-ctx.Done() // Model a home walk that outlasts the worker's limit.
+			out := make([]enterprisehooks.PrivateAgentInstall, 0, len(names))
+			for _, name := range names {
+				out = append(out, enterprisehooks.PrivateAgentInstall{Connector: name, Incomplete: true, Skipped: enterprisehooks.PrivateInstallSkippedHome})
+			}
+			return out
+		}
+	}
+	if mode == "blocked-private" || mode == "blocked-version" {
+		// A file system call that never returns and never observes the
+		// context (GAP-1413: macOS held an open() in the home walk).
+		enterpriseHookWorkerDiscoverVersion = func(_ context.Context, _, connector string, _ bool) (string, string) {
+			switch {
+			case connector == "hermes":
+				return "0.21.5", ""
+			case connector == "codex" && mode == "blocked-version":
+				select {}
+			}
+			return "", "not installed"
+		}
+		enterpriseHookWorkerDiscoverSurfaces = func(context.Context, string, string, bool) ([]connector.AgentSurface, bool) {
+			return nil, true
+		}
+		enterpriseHookWorkerDiscoverPrivateInstalls = func(context.Context, string, []string) []enterprisehooks.PrivateAgentInstall {
+			select {}
+		}
+	}
 	os.Exit(enterpriseHookWorkerMain(context.Background(), os.Stdin, os.Stdout, os.Stderr))
 }
 
@@ -206,7 +242,7 @@ func TestEnterpriseHookWorkerRunsTargetsWithAMinimalEnvironment(t *testing.T) {
 	}
 
 	// The worker PATH keeps the system directories first and then the
-	// discovery directories (OmniGent setup looks itself up on PATH).
+	// discovery directories.
 	path := enterpriseHookWorkerPath("/home/alice", 1000)
 	parts := strings.Split(path, ":")
 	if len(parts) < 3 || parts[0] != "/usr/bin" || parts[1] != "/bin" {
@@ -291,6 +327,69 @@ func TestEnterpriseHookWorkerDiscoverRunsAsTheUser(t *testing.T) {
 			t.Fatalf("static discover response = %+v, want the static finding only", response)
 		}
 	})
+}
+
+func TestEnterpriseHookWorkerSlowPrivateScanReturnsPartialResponse(t *testing.T) {
+	useEnterpriseHookWorkerHelper(t, "slow-discover")
+	account := selfWorkerAccount(t)
+	response, err := runEnterpriseHookWorker(context.Background(), account, enterpriseHookWorkerRequest{
+		Operation: enterpriseHookWorkerOpDiscover, Connectors: []string{"codex"}, TimeoutSeconds: 12,
+	})
+	if err != nil {
+		t.Fatalf("slow private scan timed out without a response: %v", err)
+	}
+	if len(response.PrivateInstalls) != 1 || !response.PrivateInstalls[0].Incomplete ||
+		response.PrivateInstalls[0].Skipped != enterprisehooks.PrivateInstallSkippedHome {
+		t.Fatalf("slow private scan = %+v, want home_unreadable", response.PrivateInstalls)
+	}
+}
+
+// GAP-1413: a discover worker blocked in a file system call that never
+// returns timed out, and the parent discarded every version it had found, so
+// a supported installed Hermes stayed unenrolled after a reinstall. The
+// worker answers by its own deadline with what it found and names what it
+// could not finish as incomplete (NOT COVERED with its reason).
+func TestEnterpriseHookWorkerAnswersWhenDiscoveryBlocks(t *testing.T) {
+	for _, tc := range []struct {
+		mode       string
+		connectors []string
+		hermes     string
+		incomplete []string
+	}{
+		// The private-home scan blocks after the versions are found.
+		{"blocked-private", []string{"hermes", "codex"}, "0.21.5", []string{"codex"}},
+		// One connector's version discovery blocks before Hermes is reached.
+		{"blocked-version", []string{"codex", "hermes"}, "", []string{"codex", "hermes"}},
+	} {
+		t.Run(tc.mode, func(t *testing.T) {
+			useEnterpriseHookWorkerHelper(t, tc.mode)
+			account := selfWorkerAccount(t)
+			response, err := runEnterpriseHookWorker(context.Background(), account, enterpriseHookWorkerRequest{
+				Operation: enterpriseHookWorkerOpDiscover, Connectors: tc.connectors, TimeoutSeconds: 20,
+			})
+			if err != nil {
+				t.Fatalf("a blocked discovery left the worker without an answer: %v", err)
+			}
+			if response.Versions["hermes"] != tc.hermes {
+				t.Fatalf("versions = %v, want hermes %q", response.Versions, tc.hermes)
+			}
+			incomplete := map[string]bool{}
+			for _, install := range response.PrivateInstalls {
+				if !install.Incomplete || install.Skipped != enterprisehooks.PrivateInstallSkippedTimedOut {
+					t.Fatalf("private installs = %+v, want only scan_timed_out rows", response.PrivateInstalls)
+				}
+				incomplete[install.Connector] = true
+			}
+			if len(incomplete) != len(tc.incomplete) {
+				t.Fatalf("incomplete = %v, want %v", incomplete, tc.incomplete)
+			}
+			for _, name := range tc.incomplete {
+				if !incomplete[name] {
+					t.Fatalf("incomplete = %v, want %v", incomplete, tc.incomplete)
+				}
+			}
+		})
+	}
 }
 
 func TestEnterpriseHookWorkerRejectsMalformedOrRunawayWorkers(t *testing.T) {
@@ -1180,6 +1279,176 @@ func TestStandaloneVerifyAcceptsOnlyRecordedPendingTargets(t *testing.T) {
 	}
 }
 
+func TestStandaloneVerifyRefusesUnattestableHermesHome(t *testing.T) {
+	uid, gid := os.Getuid(), os.Getgid()
+	resolver := standaloneTestResolver{accounts: map[string]unixidentity.Account{}}
+	f := newStandaloneFixture(t, resolver)
+	alice := f.home(t, "alice", 0o700)
+	bob := filepath.Join(f.homes, "bob")
+	resolver.accounts["alice"] = unixidentity.Account{Name: "alice", UID: uid, GID: gid, Home: alice}
+	resolver.accounts["bob"] = unixidentity.Account{Name: "bob", UID: uid, GID: gid, Home: bob}
+	f.writeManifest(t,
+		enterprisehooks.ManifestTarget{User: "alice", Connector: "hermes"},
+		enterprisehooks.ManifestTarget{User: "bob", Connector: "hermes"},
+	)
+	_, sha, err := enterprisehooks.LoadManifestWithSHA256(f.manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	standalone := cfg
+	cfg = &config.Config{DataDir: f.dataDir}
+	err = writeEnterpriseHookGuardianState(f.dataDir, f.manifest, sha, []enterpriseHookReconcileRow{
+		protectedRow("alice", alice, "hermes"),
+		{User: "bob", UserHome: bob, Connector: "hermes", Pending: true},
+	}, 0, true)
+	cfg = standalone
+	if err != nil {
+		t.Fatal(err)
+	}
+	run, err := runEnterpriseHookVerifyAttempt(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(run.Rows) != 2 || run.Failures != 1 || run.Pending != 1 {
+		t.Fatalf("unobservable session home must fail a successful Hermes target and preserve recorded pending: rows=%+v failures=%d pending=%d", run.Rows, run.Failures, run.Pending)
+	}
+	if row := run.Rows[0]; row.OK || row.Pending || !strings.Contains(row.Error, "session-only HERMES_HOME") {
+		t.Fatalf("Hermes target was certified or the cause was hidden: %+v", row)
+	}
+	if row := run.Rows[1]; row.OK || !row.Pending || row.Error != "" {
+		t.Fatalf("recorded unavailable home must remain pending: %+v", row)
+	}
+	// Setup and the guardian prove the registered persistent home without
+	// claiming that a later shell cannot select a different HERMES_HOME.
+	registration, err := runEnterpriseHookRegistrationAttempt(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if registration.AuthorizationErr != nil || registration.Failures != 0 || registration.Pending != 1 ||
+		!registration.Rows[0].OK || !registration.Rows[1].Pending {
+		t.Fatalf("registered Hermes target must pass the machine check: %+v", registration)
+	}
+	readiness := &cobra.Command{}
+	readiness.SetContext(context.Background())
+	readiness.SetOut(io.Discard)
+	if err := runEnterpriseHooksReadiness(readiness, nil); err != nil {
+		t.Fatalf("standalone Unix Setup readiness rejected a registered Hermes hook: %v", err)
+	}
+	// Registration still depends on the worker's physical hook proof.
+	worker := enterpriseHookWorkerRunner
+	enterpriseHookWorkerRunner = func(ctx context.Context, account enterpriseHookWorkerAccount, request enterpriseHookWorkerRequest) (enterpriseHookWorkerResponse, error) {
+		response, err := worker(ctx, account, request)
+		for i := range response.Targets {
+			response.Targets[i].OK = false
+			response.Targets[i].Result = nil
+			response.Targets[i].Error = "owned Hermes hook command is missing"
+		}
+		return response, err
+	}
+	registration, err = runEnterpriseHookRegistrationAttempt(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if registration.Failures != 1 || registration.Rows[0].OK || !strings.Contains(registration.Rows[0].Error, "owned Hermes hook command is missing") {
+		t.Fatalf("missing owned hook passed registration: %+v", registration)
+	}
+}
+
+func TestStandaloneHermesReadinessScopesProtectedAuthorization(t *testing.T) {
+	uid, gid := os.Getuid(), os.Getgid()
+	resolver := standaloneTestResolver{accounts: map[string]unixidentity.Account{}}
+	f := newStandaloneFixture(t, resolver)
+	alice := f.home(t, "alice", 0o700)
+	bob := f.home(t, "bob", 0o700)
+	resolver.accounts["alice"] = unixidentity.Account{Name: "alice", UID: uid, GID: gid, Home: alice}
+	resolver.accounts["bob"] = unixidentity.Account{Name: "bob", UID: uid, GID: gid, Home: bob}
+	f.writeManifest(t,
+		enterprisehooks.ManifestTarget{User: "alice", Connector: "hermes"},
+		enterprisehooks.ManifestTarget{User: "bob", Connector: "codex"},
+	)
+	_, sha, err := enterprisehooks.LoadManifestWithSHA256(f.manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	failed := enterpriseHookReconcileRow{User: "bob", UserHome: bob, Connector: "codex", Error: "path in bob's home refused"}
+	standalone := cfg
+	cfg = &config.Config{DataDir: f.dataDir}
+	err = writeEnterpriseHookGuardianState(f.dataDir, f.manifest, sha, []enterpriseHookReconcileRow{
+		protectedRow("alice", alice, "hermes"), failed,
+	}, 1, true)
+	cfg = standalone
+	if err != nil {
+		t.Fatal(err)
+	}
+	worker := enterpriseHookWorkerRunner
+	enterpriseHookWorkerRunner = func(ctx context.Context, account enterpriseHookWorkerAccount, request enterpriseHookWorkerRequest) (enterpriseHookWorkerResponse, error) {
+		response, err := worker(ctx, account, request)
+		for i, target := range request.Targets {
+			if target.Options.ConnectorName == "codex" {
+				response.Targets[i].OK = false
+				response.Targets[i].Result = nil
+				response.Targets[i].Error = failed.Error
+			}
+		}
+		return response, err
+	}
+	registration, err := runEnterpriseHookRegistrationAttempt(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if registration.AuthorizationErr != nil || registration.Failures != 1 || !registration.Rows[0].OK || registration.Rows[1].OK {
+		t.Fatalf("unrelated user refusal defeated Hermes registration: rows=%+v auth=%v", registration.Rows, registration.AuthorizationErr)
+	}
+	carol := filepath.Join(f.homes, "carol") // the home has not been created yet
+	resolver.accounts["carol"] = unixidentity.Account{Name: "carol", UID: uid, GID: gid, Home: carol}
+	f.writeManifest(t,
+		enterprisehooks.ManifestTarget{User: "alice", Connector: "hermes"},
+		enterprisehooks.ManifestTarget{User: "bob", Connector: "codex"},
+		enterprisehooks.ManifestTarget{User: "carol", Connector: "codex"},
+	)
+	_, sha, err = enterprisehooks.LoadManifestWithSHA256(f.manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	standalone = cfg
+	cfg = &config.Config{DataDir: f.dataDir}
+	err = writeEnterpriseHookGuardianState(f.dataDir, f.manifest, sha, []enterpriseHookReconcileRow{
+		protectedRow("alice", alice, "hermes"), failed,
+		{User: "carol", UserHome: carol, Connector: "codex", Pending: true},
+	}, 1, true)
+	cfg = standalone
+	if err != nil {
+		t.Fatal(err)
+	}
+	registration, err = runEnterpriseHookRegistrationAttempt(context.Background())
+	if err != nil || registration.AuthorizationErr != nil || registration.Failures != 1 || registration.Pending != 1 ||
+		!registration.Rows[0].OK || !registration.Rows[2].Pending {
+		t.Fatalf("unrelated failure plus authenticated pending defeated Hermes registration: rows=%+v auth=%v run=%v",
+			registration.Rows, registration.AuthorizationErr, err)
+	}
+	activationPath := filepath.Join(f.authDir, hookGuardianActivationFile)
+	data, err := os.ReadFile(activationPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var activation enterpriseHookGuardianActivation
+	if err := json.Unmarshal(data, &activation); err != nil {
+		t.Fatal(err)
+	}
+	activation.ProtectedTargets = nil
+	data, err = json.Marshal(activation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(activationPath, data, 0o640); err != nil {
+		t.Fatal(err)
+	}
+	registration, err = runEnterpriseHookRegistrationAttempt(context.Background())
+	if err != nil || registration.AuthorizationErr == nil {
+		t.Fatalf("missing protected Hermes activation passed: auth=%v run=%v", registration.AuthorizationErr, err)
+	}
+}
+
 func TestResolveEnterpriseHookTargetFallsBackToTheDirectory(t *testing.T) {
 	resolver := standaloneTestResolver{accounts: map[string]unixidentity.Account{
 		"ldap-only-user": {Name: "ldap-only-user", UID: 1234567, GID: 1234567, Home: "/home/ldap-only-user"},
@@ -1199,12 +1468,12 @@ func TestResolveEnterpriseHookTargetFallsBackToTheDirectory(t *testing.T) {
 }
 
 // With unenrolled_users: deny the enumerator writes rows for connectors the
-// lifecycle published through machine policy. Those rows only mark the uid
-// as enrolled: running the per-user installer for them failed live on RHEL
-// (Codex refuses user hooks under allow_managed_hooks_only, Claude Code
-// verification trips over the managed settings). They succeed when the
-// machine policy is in place and never reach a worker.
-func TestStandaloneReconcileMachinePolicyRowsOnlyRecordEnrollment(t *testing.T) {
+// lifecycle published through machine policy. They mark the uid as enrolled
+// without running the per-user installer (Codex refuses user hooks under
+// allow_managed_hooks_only, Claude Code verification trips over managed
+// settings). The Codex row may use a target-user worker only to remove a
+// conflicting user feature preference.
+func TestStandaloneReconcileMachinePolicyRowsAvoidPerUserInstall(t *testing.T) {
 	uid, gid := os.Getuid(), os.Getgid()
 	resolver := standaloneTestResolver{accounts: map[string]unixidentity.Account{}}
 	f := newStandaloneFixture(t, resolver)
@@ -1245,10 +1514,54 @@ func TestStandaloneReconcileMachinePolicyRowsOnlyRecordEnrollment(t *testing.T) 
 	}
 	for _, request := range f.requests {
 		for _, target := range request.Targets {
-			if target.Options.ConnectorName == "codex" || target.Options.ConnectorName == "claudecode" {
+			if target.Options.ConnectorName == "codex" && target.Mode != "repair_managed_codex_feature" || target.Options.ConnectorName == "claudecode" {
 				t.Fatalf("a machine-policy row reached the per-user worker: %+v", target)
 			}
 		}
+	}
+}
+
+func TestStandaloneReconcileManagedCodexFeatureChangeQueuesRepair(t *testing.T) {
+	uid, gid := os.Getuid(), os.Getgid()
+	resolver := standaloneTestResolver{accounts: map[string]unixidentity.Account{}}
+	f := newStandaloneFixture(t, resolver)
+	alice := f.home(t, "alice", 0o700)
+	resolver.accounts["alice"] = unixidentity.Account{Name: "alice", UID: uid, GID: gid, Home: alice, Shell: "/bin/bash"}
+	f.writeManifest(t, enterprisehooks.ManifestTarget{User: "alice", Connector: "codex"})
+	configDir := filepath.Join(alice, ".codex")
+	if err := os.MkdirAll(configDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	configPath := filepath.Join(configDir, "config.toml")
+	if err := os.WriteFile(configPath, []byte("model = 'gpt-5'\n[features]\nhooks = false\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	previousSet, previousCovered := enterpriseHookStandaloneMachinePolicySet, enterpriseHookStandaloneMachinePolicyCovered
+	t.Cleanup(func() {
+		enterpriseHookStandaloneMachinePolicySet, enterpriseHookStandaloneMachinePolicyCovered = previousSet, previousCovered
+	})
+	enterpriseHookStandaloneMachinePolicySet = func() map[string]struct{} { return map[string]struct{}{"codex": {}} }
+	enterpriseHookStandaloneMachinePolicyCovered = func(name string) (bool, error) { return name == "codex", nil }
+	run, err := runEnterpriseHookReconcileOnce(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	requireLedgerOrStateTrust(t, run.StateErr)
+	if len(run.Rows) != 1 || !run.Rows[0].OK {
+		t.Fatalf("managed Codex row not covered: %+v", run.Rows)
+	}
+	if !slices.Contains(run.WatchDirs, alice) || !slices.Contains(run.WatchDirs, configDir) ||
+		!slices.Contains(run.WatchSharedFiles, configDir) || !slices.Contains(run.WatchSharedFiles, configPath) {
+		t.Fatalf("managed Codex config change will not trigger repair: dirs=%v shared=%v", run.WatchDirs, run.WatchSharedFiles)
+	}
+	found := false
+	for _, request := range f.requests {
+		for _, target := range request.Targets {
+			found = found || target.Options.ConnectorName == "codex" && target.Mode == "repair_managed_codex_feature"
+		}
+	}
+	if !found {
+		t.Fatal("managed Codex row did not queue user-owned feature repair")
 	}
 }
 
@@ -1505,18 +1818,6 @@ func TestStandaloneAIDiscoveryPassPausesAHomeWhoseScanKeepsFailing(t *testing.T)
 	}
 }
 
-// A worker error ends with its cause. The remove-all report cut it at 256
-// bytes, in the middle of a path, so the uninstall never said why a
-// registration stayed. An oversized error keeps its start and its cause.
-func TestRemoveAllReportKeepsTheWorkerErrorCause(t *testing.T) {
-	path := "/Users/alice/.openhands/" + strings.Repeat("nested/", 60) + "hooks.json"
-	cause := "enterprise hooks: connector openhands teardown failed: restore config backup: rename " + path + ".tmp \u2192 " + path + ": operation not permitted"
-	got := boundedWorkerError(cause)
-	if len(got) > workerErrorMaxBytes || !utf8.ValidString(got) || !strings.HasPrefix(got, "enterprise hooks: connector openhands") || !strings.HasSuffix(got, ": operation not permitted") {
-		t.Fatalf("bounded worker error = %q", got)
-	}
-}
-
 // A deployment that selects only machine-policy connectors has no manifest
 // rows; the guardian still writes identity records and per-user scans for
 // every eligible account the enumerator published (GAP-0021).
@@ -1534,7 +1835,7 @@ func TestStandaloneGuardianCoversEligibleAccountsWithoutRows(t *testing.T) {
 			{User: "bob@corp.example", UID: 94401104, Home: "/home/bob@corp.example"},
 		}, nil
 	}
-	rows := enterpriseHookEnrolledAccountRows(io.Discard, enterpriseHookReconcileRun{
+	rows := enterpriseHookEnrolledAccountRows(context.Background(), io.Discard, enterpriseHookReconcileRun{
 		Manifest: "/etc/defenseclaw/hooks/manifest.json",
 		Rows:     []enterpriseHookReconcileRow{{User: "alice", UserHome: "/home/alice", Connector: "opencode", OK: true, UID: 1001}},
 	})
@@ -1542,7 +1843,7 @@ func TestStandaloneGuardianCoversEligibleAccountsWithoutRows(t *testing.T) {
 		t.Fatalf("rows = %+v, want the manifest row and one row for the eligible account without one", rows)
 	}
 	cfg.Enterprise.Enrollment.Mode = config.EnterpriseEnrollmentManifest
-	rows = enterpriseHookEnrolledAccountRows(io.Discard, enterpriseHookReconcileRun{
+	rows = enterpriseHookEnrolledAccountRows(context.Background(), io.Discard, enterpriseHookReconcileRun{
 		Manifest: "/etc/defenseclaw/hooks/manifest.json",
 		Rows:     []enterpriseHookReconcileRow{{User: "alice", UserHome: "/home/alice", Connector: "opencode", OK: true, UID: 1001}},
 	})
@@ -1560,13 +1861,14 @@ func TestStandaloneGuardianCoversEligibleAccountsWithoutRows(t *testing.T) {
 		}, nil
 	}
 	alice := 1001
-	accounts, _ := enterpriseHookIdentitySpoolAccounts(io.Discard, enterpriseHookReconcileRun{
+	accounts, _, _ := enterpriseHookIdentitySpoolAccounts(context.Background(), io.Discard, "", enterpriseHookReconcileRun{
 		Manifest: "/etc/defenseclaw/hooks/manifest.json",
 		Targets:  []enterprisehooks.ManifestTarget{{User: "alice", UID: &alice, Connector: "opencode"}, {User: "carol", Connector: "opencode"}},
 		Rows:     []enterpriseHookReconcileRow{{User: "alice", UserHome: "/home/alice", Connector: "opencode", OK: true, UID: 1001}},
 	})
-	if len(accounts) != 2 || accounts[0].UID != 1001 || accounts[1].UID != 1003 {
-		t.Fatalf("manifest mode published identity records for %+v, want alice and carol only", accounts)
+	if len(accounts) != 3 || accounts[0].UID != 1001 || accounts[1].UID != 1003 || accounts[0].Left || accounts[1].Left ||
+		accounts[2].UID != 94401104 || !accounts[2].Left {
+		t.Fatalf("manifest mode identity accounts %+v, want alice and carol published and bob's record withdrawn", accounts)
 	}
 }
 
@@ -1661,7 +1963,7 @@ func TestIdentitySpoolCanonicalizesManifestAlias(t *testing.T) {
 	enterprisehooks.SetStandaloneResolver(standaloneTestResolver{accounts: map[string]unixidentity.Account{
 		"canonical": {Name: "canonical", UID: 4242, GID: 4242},
 	}})
-	accounts, _ := enterpriseHookIdentitySpoolAccounts(io.Discard, enterpriseHookReconcileRun{
+	accounts, _, _ := enterpriseHookIdentitySpoolAccounts(context.Background(), io.Discard, "", enterpriseHookReconcileRun{
 		Rows: []enterpriseHookReconcileRow{{UID: 4242, User: "accepted-alias", Connector: "codex", OK: true}},
 	})
 	if len(accounts) != 1 || accounts[0].User != "canonical" {
@@ -1680,7 +1982,7 @@ func TestIdentitySpoolCanonicalizesManifestAlias(t *testing.T) {
 	}
 	canceled, cancel := context.WithCancel(context.Background())
 	cancel()
-	_ = enterprisehooks.WriteIdentitySpool(canceled, dir, accounts, nil, nil)
+	_ = enterprisehooks.WriteIdentitySpool(canceled, dir, accounts, nil, nil, nil)
 	record, err := enterprisehooks.ReadIdentitySpoolRecord(dir, "4242", nil)
 	if err != nil || record.Facts.UPN != "alice@example.test" {
 		t.Fatalf("failed refresh lost the verified UPN: record=%+v err=%v", record, err)
@@ -1694,10 +1996,169 @@ func TestIdentitySpoolNamesHomeOnlyTarget(t *testing.T) {
 	enterprisehooks.SetStandaloneResolver(standaloneTestResolver{accounts: map[string]unixidentity.Account{
 		"alice": {Name: "alice", UID: 4242, GID: 4242, Home: "/Users/alice"},
 	}})
-	accounts, _ := enterpriseHookIdentitySpoolAccounts(io.Discard, enterpriseHookReconcileRun{
+	accounts, _, _ := enterpriseHookIdentitySpoolAccounts(context.Background(), io.Discard, "", enterpriseHookReconcileRun{
 		Rows: []enterpriseHookReconcileRow{{UID: 4242, UserHome: "/Users/alice", Connector: "codex", OK: true}},
 	})
 	if len(accounts) != 1 || accounts[0].UID != 4242 || accounts[0].User != "alice" {
 		t.Fatalf("identity spool accounts = %+v; want alice for uid 4242", accounts)
+	}
+}
+
+// A worker error ends with its cause. The remove-all report cut it at 256
+// bytes, in the middle of a path, so the uninstall never said why a
+// registration stayed. An oversized error keeps its start and its cause.
+func TestRemoveAllReportKeepsTheWorkerErrorCause(t *testing.T) {
+	path := "/Users/alice/.cursor/" + strings.Repeat("nested/", 60) + "hooks.json"
+	cause := "enterprise hooks: connector cursor teardown failed: restore config backup: rename " + path + ".tmp \u2192 " + path + ": operation not permitted"
+	got := boundedWorkerError(cause)
+	if len(got) > workerErrorMaxBytes || !utf8.ValidString(got) || !strings.HasPrefix(got, "enterprise hooks: connector cursor") || !strings.HasSuffix(got, ": operation not permitted") {
+		t.Fatalf("bounded worker error = %q", got)
+	}
+}
+
+// W2B-G-enum review loop 1: an account a partial listing already omitted
+// has no key, so adding it to exclude_users (or leaving the manifest)
+// changed nothing the guardian compares, and its record stayed until the
+// 15-minute refresh. A left account now has a key of its own, and the
+// exclude_users entries are keys too, since the pass checks every record it
+// does not list against them (review loop 6). exempt_users withdraw
+// nothing, but an exempt account the listing omitted is listed again, so
+// its record keeps being refreshed (GAP-0399): that changes the keys too.
+func TestIdentitySpoolKeysChangeWhenAnOmittedAccountLeaves(t *testing.T) {
+	previousCfg := cfg
+	t.Cleanup(func() {
+		cfg = previousCfg
+		enterprisehooks.SetStandaloneResolver(nil)
+	})
+	enterprisehooks.SetStandaloneResolver(standaloneTestResolver{accounts: map[string]unixidentity.Account{
+		"alice": {Name: "alice", UID: 4242, GID: 4242},
+		"bob":   {Name: "bob", UID: 4243, GID: 4243},
+	}})
+	run := enterpriseHookReconcileRun{Rows: []enterpriseHookReconcileRow{{UID: 4242, User: "alice", Connector: "codex", OK: true}}}
+	// bob's record is still in the spool: the listing omitted him.
+	dir := t.TempDir()
+	data, err := enterprisehooks.MarshalIdentitySpoolRecord(enterprisehooks.IdentitySpoolRecord{Key: "4243", User: "bob", UpdatedAt: time.Now().UTC()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "4243.json"), data, 0o640); err != nil {
+		t.Fatal(err)
+	}
+	fingerprint := func() string {
+		_, keys, _ := enterpriseHookIdentitySpoolAccounts(context.Background(), io.Discard, dir, run)
+		slices.Sort(keys)
+		return strings.Join(keys, ";")
+	}
+	cfg = &config.Config{}
+	before := fingerprint()
+	for _, tc := range []struct {
+		name            string
+		exclude, exempt []string
+		same            bool
+	}{
+		{name: "excluded by name", exclude: []string{"bob"}},
+		{name: "excluded by uid", exclude: []string{"4243"}},
+		{name: "exempt", exempt: []string{"bob"}},
+	} {
+		cfg = &config.Config{}
+		cfg.Enterprise.Enrollment.ExcludeUsers, cfg.Enterprise.Enrollment.ExemptUsers = tc.exclude, tc.exempt
+		if got := fingerprint(); got == before && !tc.same {
+			t.Errorf("%s: the identity pass keys stayed %q, so the left account's record waits for the refresh interval", tc.name, got)
+		} else if got != before && tc.same {
+			t.Errorf("%s: the identity pass keys changed to %q", tc.name, got)
+		}
+	}
+}
+
+// W2B-G-enum review loop 4: the enumerator published a manifest that leaves
+// out an account the settings now exclude, but its later write of
+// eligible-accounts.json failed and left the old file. The guardian took the
+// account from that file, as a pseudo row for the scans and as an identity
+// account, and marked its uid seen before it read exclude_users, so its
+// identity record was never withdrawn. The current exclude_users and
+// exempt_users now apply before the rows and the eligible accounts, by uid,
+// by name, by another spelling the directory resolves, and by the spelling
+// the stale file carries while the directory does not answer. Both keep the
+// account out of the scans; only exclude_users withdraw its identity record
+// (review loop 6: the gateway still accepts an exempt account's hook calls
+// and inspects them under its own profile).
+func TestStaleEligibleAccountsDoNotOverrideAnExclusion(t *testing.T) {
+	previousCfg := cfg
+	previousEligible, previousIdentity := enterpriseHookLoadEligibleAccounts, enterpriseHookLoadIdentityAccounts
+	t.Cleanup(func() {
+		cfg = previousCfg
+		enterpriseHookLoadEligibleAccounts, enterpriseHookLoadIdentityAccounts = previousEligible, previousIdentity
+		enterprisehooks.SetStandaloneResolver(nil)
+	})
+	const manifest = "/etc/defenseclaw/hooks/manifest.json"
+	const aliceUID, bobUID = 1001, 94401104
+	stale := func(string) ([]enterprisehooks.UnixEligibleAccount, error) {
+		return []enterprisehooks.UnixEligibleAccount{
+			{User: "alice", UID: aliceUID, Home: "/home/alice"},
+			{User: "bob@corp.example", UID: bobUID, Home: "/home/bob@corp.example"},
+		}, nil
+	}
+	enterpriseHookLoadEligibleAccounts, enterpriseHookLoadIdentityAccounts = stale, stale
+	bob := unixidentity.Account{Name: "bob@corp.example", UID: bobUID, GID: bobUID}
+	directory := standaloneTestResolver{accounts: map[string]unixidentity.Account{
+		"alice":            {Name: "alice", UID: aliceUID, GID: aliceUID},
+		"bob@corp.example": bob,
+		"bob":              bob,
+	}}
+	for _, tc := range []struct {
+		name            string
+		exclude, exempt []string
+		offline         bool
+	}{
+		{name: "excluded by name", exclude: []string{"bob@corp.example"}},
+		{name: "excluded by uid", exclude: []string{strconv.Itoa(bobUID)}},
+		{name: "excluded by another spelling", exclude: []string{"bob"}},
+		{name: "exempt by name", exempt: []string{"bob@corp.example"}},
+		{name: "excluded by name while the directory does not answer", exclude: []string{"bob@corp.example"}, offline: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.offline {
+				enterprisehooks.SetStandaloneResolver(standaloneTestResolver{transient: map[string]bool{"bob@corp.example": true}})
+			} else {
+				enterprisehooks.SetStandaloneResolver(directory)
+			}
+			cfg = &config.Config{DeploymentMode: managed.DeploymentModeManagedEnterprise}
+			cfg.Enterprise.Profile = managed.ProfileStandalone
+			cfg.Enterprise.Enrollment.ExcludeUsers, cfg.Enterprise.Enrollment.ExemptUsers = tc.exclude, tc.exempt
+			run := enterpriseHookReconcileRun{Manifest: manifest,
+				Rows: []enterpriseHookReconcileRow{{User: "alice", UserHome: "/home/alice", Connector: "opencode", OK: true, UID: aliceUID}}}
+			run.Rows = enterpriseHookEnrolledAccountRows(context.Background(), io.Discard, run)
+			if len(run.Rows) != 1 || run.Rows[0].UID != aliceUID {
+				t.Fatalf("rows = %+v, want alice's row only: the stale file added a scan row for the excluded account", run.Rows)
+			}
+			check := func(when string, run enterpriseHookReconcileRun) {
+				t.Helper()
+				accounts, keys, _ := enterpriseHookIdentitySpoolAccounts(context.Background(), io.Discard, "", run)
+				var enrolled, left []int
+				for _, account := range accounts {
+					if account.Left {
+						left = append(left, account.UID)
+					} else {
+						enrolled = append(enrolled, account.UID)
+					}
+				}
+				if len(tc.exempt) > 0 {
+					if !slices.Equal(enrolled, []int{aliceUID, bobUID}) || len(left) != 0 {
+						t.Fatalf("%s: identity accounts %+v (keys %v), want alice and the exempt bob enrolled", when, accounts, keys)
+					}
+					return
+				}
+				if !slices.Equal(enrolled, []int{aliceUID}) || !slices.Equal(left, []int{bobUID}) || !slices.Contains(keys, "left:"+strconv.Itoa(bobUID)) {
+					t.Fatalf("%s: identity accounts %+v (keys %v), want alice enrolled and bob's record withdrawn", when, accounts, keys)
+				}
+			}
+			check("stale eligible accounts", run)
+			// A pseudo row built before the settings changed, or a row of a
+			// stale manifest, does not keep the record either.
+			run.Rows = append(run.Rows,
+				enterpriseHookReconcileRow{User: "bob@corp.example", UserHome: "/home/bob@corp.example", Connector: "opencode", OK: true, UID: bobUID},
+				enterpriseHookReconcileRow{User: "bob@corp.example", UserHome: "/home/bob@corp.example", Connector: "codex", OK: true, UID: bobUID})
+			check("a stale row", run)
+		})
 	}
 }

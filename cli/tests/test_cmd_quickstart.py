@@ -266,7 +266,7 @@ class QuickstartProfileDefaultsTests(unittest.TestCase):
 
     def test_windows_rejects_unsupported_connectors_before_first_run_writes(self):
         forbidden = AssertionError("unsupported connector reached first-run mutation")
-        for connector in ("openclaw", "zeptoclaw", "openhands"):
+        for connector in ("openclaw", "zeptoclaw", ):
             with (
                 self.subTest(connector=connector),
                 patch("defenseclaw.platform_support.host_os", return_value="windows"),
@@ -435,6 +435,35 @@ class QuickstartProfileDefaultsTests(unittest.TestCase):
             cfg = yaml.safe_load(fh)
         self.assertEqual(cfg["guardrail"]["connectors"]["hermes"]["mode"], "action")
 
+    @patch("defenseclaw.commands.cmd_setup._check_connector_version_supported_for_setup", return_value=True)
+    def test_repeat_quickstart_keeps_the_global_mode_of_a_scoped_action(self, _gate):
+        # GAP-0115: the re-run kept the connector in action by making action
+        # the global mode, so clearing the connector's mode left it in action.
+        atomic_write_private_bytes(
+            os.path.join(self.tmp_dir, "config.yaml"),
+            b"config_version: 8\n"
+            b"observability: {}\n"
+            b"claw:\n"
+            b"  mode: hermes\n"
+            b"guardrail:\n"
+            b"  enabled: true\n"
+            b"  connector: hermes\n"
+            b"  mode: observe\n"
+            b"  scanner_mode: local\n"
+            b"  connectors:\n"
+            b"    hermes:\n"
+            b"      mode: action\n",
+        )
+
+        result = self._invoke(["--connector", "hermes", "--skip-gateway", "--json-summary"])
+        self.assertEqual(result.exit_code, 0, result.output + (result.stderr or ""))
+
+        import yaml
+        with open(os.path.join(self.tmp_dir, "config.yaml"), encoding="utf-8") as fh:
+            cfg = yaml.safe_load(fh)
+        self.assertEqual(cfg["guardrail"]["mode"], "observe")
+        self.assertEqual(cfg["guardrail"]["connectors"]["hermes"]["mode"], "action")
+
     @patch("defenseclaw.bootstrap.agent_discovery.discover_agents")
     @patch("defenseclaw.commands.cmd_setup._check_connector_version_supported_for_setup", return_value=False)
     def test_action_mode_trusted_path_downgrade_is_structured(self, _gate, mock_discover):
@@ -482,7 +511,8 @@ class QuickstartProfileDefaultsTests(unittest.TestCase):
         text = " ".join(result.output.split())
         self.assertNotIn("'open' (default)", text)
         self.assertNotIn("'open' (the default", text)
-        self.assertIn("'closed' (the default on a new install)", text)
+        # Per-user hooks follow the policy tier during an outage (oss-outage-open).
+        self.assertIn("follow the policy tier", text)
 
     def test_fail_mode_closed_persists_to_config(self):
         result = self._invoke([
@@ -752,24 +782,30 @@ class QuickstartProfileDefaultsTests(unittest.TestCase):
         self.assertIn("claudecode, codex", output)
         self.assertNotIn('"connector": "codex"', result.output)
 
-    def test_picked_hint_without_detection_is_reported_in_json(self):
+    def test_picked_hint_for_an_agent_that_is_not_installed_is_not_set_up(self):
+        # GAP-0568: an older installer recorded codex when it had no terminal
+        # to ask on; quickstart must not set up an agent the machine lacks.
         atomic_write_private_bytes(os.path.join(self.tmp_dir, "picked_connector"), b"codex")
         with patch(
             "defenseclaw.commands.cmd_setup._detect_installed_connectors",
             return_value=[],
         ):
             result = self._invoke(["--skip-gateway", "--json-summary"])
+        self.assertEqual(result.exit_code, 2, result.output + (result.stderr or ""))
+        self.assertNotIn('"connector": "codex"', result.output)
+        self.assertIn("Could not detect", result.output + (result.stderr or ""))
+
+    def test_picked_hint_for_an_agent_that_is_not_installed_yields_to_detection(self):
+        atomic_write_private_bytes(os.path.join(self.tmp_dir, "picked_connector"), b"codex")
+        with patch(
+            "defenseclaw.commands.cmd_setup._detect_installed_connectors",
+            return_value=["claudecode"],
+        ):
+            result = self._invoke(["--skip-gateway", "--json-summary"])
         self.assertEqual(result.exit_code, 0, result.output + (result.stderr or ""))
         summary = json.loads(result.output)
-        self.assertEqual(summary["connector"], "codex")
-        self.assertEqual(
-            summary["connector_source"],
-            {
-                "type": "picked_connector",
-                "connector": "codex",
-                "path": os.path.join(self.tmp_dir, "picked_connector"),
-            },
-        )
+        self.assertEqual(summary["connector"], "claudecode")
+        self.assertNotIn("connector_source", summary)
 
     def test_multiple_configured_connectors_error_even_with_picked_hint(self):
         with open(os.path.join(self.tmp_dir, "config.yaml"), "w", encoding="utf-8") as fh:

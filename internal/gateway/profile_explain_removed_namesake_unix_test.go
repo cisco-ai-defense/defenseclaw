@@ -89,7 +89,7 @@ func TestL1ExplainedRemovedNamesakeDoesNotPoisonLiveName(t *testing.T) {
 	delete(resolver.accounts, oldUID)
 	resolver.accounts[liveUID] = live
 	stamp = "after" // local account database changed when alice was removed
-	if twins := sameNameProfileAccounts(context.Background(), resolver, "alice", live); len(twins) != 0 {
+	if twins, _ := sameNameProfileAccounts(context.Background(), resolver, "alice", live); len(twins) != 0 {
 		t.Fatalf("bare name alice became ambiguous from removed uid: %+v", twins)
 	}
 	if uid, _, ok := managedHookPeerHomes.cachedHolder("alice"); ok {
@@ -125,14 +125,14 @@ func TestL1ExplainedDirectoryHolderSurvivesOutageOnlyWhileFactsAreServed(t *test
 	if gotUID, _, ok := managedHookPeerHomes.cachedHolder("alice"); !ok || gotUID != uid {
 		t.Fatalf("cached name during outage = %d, %t", gotUID, ok)
 	}
-	if _, ok := profileExplainCachedSubject("alice", now()); !ok {
+	if _, err := profileExplainCachedSubject("alice", now()); err != nil {
 		t.Fatal("explain lost the account whose cached facts hooks still serve")
 	}
 	clock.Add(int64(identityDirectoryMaxAge + time.Minute))
 	if gotUID, _, ok := managedHookPeerHomes.cachedHolder("alice"); ok {
 		t.Fatalf("expired directory holder still names uid %d", gotUID)
 	}
-	if _, ok := profileExplainCachedSubject("alice", now()); ok {
+	if _, err := profileExplainCachedSubject("alice", now()); err == nil {
 		t.Fatal("explain used facts the hooks no longer serve")
 	}
 }

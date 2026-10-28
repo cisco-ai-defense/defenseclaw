@@ -39,6 +39,7 @@ func TestWindowsCorrelationKeyAccessSeparatesReadFromHardening(t *testing.T) {
 }
 
 func TestWindowsCorrelationKeyCreateLoadAndProtectedDACL(t *testing.T) {
+	skipCorrelationKeyAsLocalSystem(t)
 	dir := t.TempDir()
 	created, err := LoadOrCreateCorrelationKey(dir)
 	if err != nil {
@@ -81,6 +82,7 @@ func TestWindowsCorrelationKeyCreateLoadAndProtectedDACL(t *testing.T) {
 }
 
 func TestWindowsCorrelationKeyIsHardenedAndUnopenableBeforePublication(t *testing.T) {
+	skipCorrelationKeyAsLocalSystem(t)
 	dir := t.TempDir()
 	entropy := bytes.NewReader(bytes.Repeat([]byte{0x6a}, hashV1KeySize+keyTempRandomBytes))
 	stagingCanonical := false
@@ -149,6 +151,7 @@ func TestWindowsCorrelationKeyIsHardenedAndUnopenableBeforePublication(t *testin
 }
 
 func TestWindowsCorrelationKeyInterruptedBeforePublicationCleansTemp(t *testing.T) {
+	skipCorrelationKeyAsLocalSystem(t)
 	dir := t.TempDir()
 	entropy := bytes.NewReader(bytes.Repeat([]byte{0x71}, hashV1KeySize+keyTempRandomBytes))
 	hooks := keyStoreHooks{afterTempSync: func() error {
@@ -165,6 +168,7 @@ func TestWindowsCorrelationKeyInterruptedBeforePublicationCleansTemp(t *testing.
 }
 
 func TestWindowsCorrelationKeyCrashAfterPublicationLeavesCanonicalInode(t *testing.T) {
+	skipCorrelationKeyAsLocalSystem(t)
 	dir := t.TempDir()
 	directories, err := openWindowsCorrelationKeyDirectoryChain(dir)
 	if err != nil {
@@ -236,6 +240,7 @@ func TestWindowsCorrelationKeyCrashAfterPublicationLeavesCanonicalInode(t *testi
 }
 
 func TestWindowsCorrelationKeyHandleRenamePublishesNoReplace(t *testing.T) {
+	skipCorrelationKeyAsLocalSystem(t)
 	dir := t.TempDir()
 	directories, err := openWindowsCorrelationKeyDirectoryChain(dir)
 	if err != nil {
@@ -304,6 +309,7 @@ func TestWindowsCorrelationKeyHandleRenamePublishesNoReplace(t *testing.T) {
 }
 
 func TestWindowsCorrelationKeyConcurrentCreatorsConverge(t *testing.T) {
+	skipCorrelationKeyAsLocalSystem(t)
 	dir := t.TempDir()
 	const creators = 24
 	start := make(chan struct{})
@@ -367,6 +373,7 @@ func TestWindowsCorrelationKeyConcurrentCreatorsConverge(t *testing.T) {
 }
 
 func TestWindowsCorrelationKeyNoReplaceCollisionPreservesWinnerAndCleansLoser(t *testing.T) {
+	skipCorrelationKeyAsLocalSystem(t)
 	dir := t.TempDir()
 	winner, err := LoadOrCreateCorrelationKey(dir)
 	if err != nil {
@@ -680,6 +687,7 @@ func assertWindowsCorrelationAdministratorsDisabled(t *testing.T) {
 }
 
 func TestWindowsCorrelationKeyRetriesTransientBusyHandle(t *testing.T) {
+	skipCorrelationKeyAsLocalSystem(t)
 	// Repeat the timing-sensitive first reopen so a future removal of the
 	// trusted-inheritance repair cannot disappear as a low-frequency flake.
 	for attempt := 0; attempt < 8; attempt++ {
@@ -845,6 +853,7 @@ func TestWindowsCorrelationKeyRequiresServicePinInManagedMode(t *testing.T) {
 }
 
 func TestWindowsCorrelationKeyMigratesLegacyServiceFullACLWithoutChangingMaterial(t *testing.T) {
+	skipCorrelationKeyAsLocalSystem(t)
 	dir := t.TempDir()
 	created, err := LoadOrCreateCorrelationKey(dir)
 	if err != nil {
@@ -888,6 +897,7 @@ func TestWindowsCorrelationKeyMigratesLegacyServiceFullACLWithoutChangingMateria
 }
 
 func TestWindowsCorrelationKeyRepairsTrustedUnprotectedDACL(t *testing.T) {
+	skipCorrelationKeyAsLocalSystem(t)
 	dir := t.TempDir()
 	created, err := LoadOrCreateCorrelationKey(dir)
 	if err != nil {
@@ -938,6 +948,7 @@ func TestWindowsCorrelationKeyRepairsTrustedUnprotectedDACL(t *testing.T) {
 }
 
 func TestWindowsCorrelationKeyFreshProcessRestartRepairsTrustedDACL(t *testing.T) {
+	skipCorrelationKeyAsLocalSystem(t)
 	const (
 		dirEnv = "DEFENSECLAW_TEST_CORRELATION_RESTART_DIR"
 		idEnv  = "DEFENSECLAW_TEST_CORRELATION_RESTART_ID"
@@ -1021,6 +1032,7 @@ func setWindowsCorrelationTrustedUnprotectedDACL(t *testing.T, path string) {
 }
 
 func TestWindowsCorrelationKeyDoesNotRepairUntrustedUnprotectedDACL(t *testing.T) {
+	skipCorrelationKeyAsLocalSystem(t)
 	dir := t.TempDir()
 	if _, err := LoadOrCreateCorrelationKey(dir); err != nil {
 		t.Fatal(err)
@@ -1096,6 +1108,7 @@ func TestWindowsCorrelationKeyDoesNotRepairUntrustedUnprotectedDACL(t *testing.T
 }
 
 func TestWindowsCorrelationKeyRejectsUntrustedReadACL(t *testing.T) {
+	skipCorrelationKeyAsLocalSystem(t)
 	dir := t.TempDir()
 	if _, err := LoadOrCreateCorrelationKey(dir); err != nil {
 		t.Fatal(err)
@@ -1127,6 +1140,7 @@ func TestWindowsCorrelationKeyRejectsUntrustedReadACL(t *testing.T) {
 }
 
 func TestWindowsCorrelationKeyRejectsInvalidLength(t *testing.T) {
+	skipCorrelationKeyAsLocalSystem(t)
 	dir := t.TempDir()
 	if _, err := LoadOrCreateCorrelationKey(dir); err != nil {
 		t.Fatal(err)
@@ -1141,6 +1155,7 @@ func TestWindowsCorrelationKeyRejectsInvalidLength(t *testing.T) {
 }
 
 func TestWindowsCorrelationKeyPostMoveFailureLeavesLoadableKey(t *testing.T) {
+	skipCorrelationKeyAsLocalSystem(t)
 	dir := t.TempDir()
 	entropy := bytes.NewReader(bytes.Repeat([]byte{0x4a}, hashV1KeySize+keyTempRandomBytes))
 	hooks := keyStoreHooks{afterLink: func() error { return errors.New("injected post-move failure") }}
@@ -1177,6 +1192,7 @@ func TestWindowsCorrelationKeyRejectsReparsePoint(t *testing.T) {
 }
 
 func TestWindowsCorrelationKeyRejectsHardLinkedLeaf(t *testing.T) {
+	skipCorrelationKeyAsLocalSystem(t)
 	dir := t.TempDir()
 	if _, err := LoadOrCreateCorrelationKey(dir); err != nil {
 		t.Fatal(err)
@@ -1338,5 +1354,17 @@ func assertNoWindowsCorrelationTemps(t *testing.T, dir string) {
 	}
 	if len(matches) != 0 {
 		t.Fatalf("temporary key files remain: %v", matches)
+	}
+}
+
+// skipCorrelationKeyAsLocalSystem skips a per-user key store test run as
+// LocalSystem: the store keys a per-user process to its own account, and the
+// gateway service names its service SID, so LocalSystem is no owner it
+// serves and the store refuses it (unsafe_key_permissions).
+func skipCorrelationKeyAsLocalSystem(t *testing.T) {
+	t.Helper()
+	user, err := windows.GetCurrentProcessToken().GetTokenUser()
+	if err == nil && user != nil && user.User.Sid != nil && user.User.Sid.IsWellKnown(windows.WinLocalSystemSid) {
+		t.Skip("skipped as LocalSystem: the per-user redaction key store does not run as LocalSystem")
 	}
 }

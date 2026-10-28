@@ -77,7 +77,6 @@ func TestHandleAgentHook_AIDAppliesAcrossHookProfiles(t *testing.T) {
 		{"hermes", "/api/v1/hermes/hook", "pre_tool_call", "block", false},
 		{"devin", "/api/v1/devin/hook", "PreToolUse", "block", false},
 		{"copilot", "/api/v1/copilot/hook", "preToolUse", "block", false},
-		{"openhands", "/api/v1/openhands/hook", "pre_tool_use", "block", false},
 	}
 
 	for _, tc := range cases {
@@ -108,14 +107,25 @@ func TestHandleAgentHook_AIDAppliesAcrossHookProfiles(t *testing.T) {
 					client:   srv.Client(),
 				},
 			}
-			body, err := json.Marshal(map[string]interface{}{
+			payload := map[string]interface{}{
 				"hook_event_name": tc.event,
 				"session_id":      "sess-aid-" + tc.connector,
 				"turn_id":         "turn-aid-" + tc.connector,
 				"tool_name":       "safeTool",
 				"tool_use_id":     "tool-aid-" + tc.connector,
 				"tool_input":      map[string]interface{}{"value": "ordinary payload"},
-			})
+			}
+			if tc.connector == "copilot" {
+				// This case uses a CLI-registered preToolUse hook. Its body must
+				// follow the CLI schema; Local fields now fail closed on this route.
+				payload = map[string]interface{}{
+					"sessionId": "sess-aid-copilot",
+					"timestamp": 1,
+					"toolName":  "safeTool",
+					"toolArgs":  map[string]interface{}{"value": "ordinary payload"},
+				}
+			}
+			body, err := json.Marshal(payload)
 			if err != nil {
 				t.Fatalf("marshal: %v", err)
 			}

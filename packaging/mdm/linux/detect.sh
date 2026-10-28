@@ -481,6 +481,7 @@ if [ "$DC_REQUIRE_HEALTHY" = 1 ]; then
     package_problem=$(dc_package_interrupted)
     [ -z "$package_problem" ] || dc_report 0 unhealthy "$package_problem"
     dc_json_true "$verify" ok || dc_report 0 unhealthy "verify reported problems; run: $gateway enterprise $group verify"
+    dc_json_true "$verify" security_complete || dc_report 0 unhealthy "verify reported incomplete security; run: $gateway enterprise $group verify"
 fi
 [ -z "$DC_REQUIRE_TETRAGON" ] || dc_require_tetragon "$gateway" "$DC_REQUIRE_TETRAGON"
 [ -z "$DC_REQUIRE_BUNDLE" ] || dc_require_bundle "$gateway" "$DC_REQUIRE_BUNDLE"

@@ -122,7 +122,7 @@ func retryPendingConnectorReconciliation(
 			antigravityHome = failure.ConfigHome
 		} else if connectorName == "opencode" {
 			openCodeHome = failure.ConfigHome
-		} else if connectorName == "omnigent" {
+		} else if connectorName == "omnigent" { // until 1.1: teardown and verify only
 			omnigentHome = failure.ConfigHome
 		} else if connectorName == "hermes" {
 			hermesHome = failure.ConfigHome
@@ -323,7 +323,7 @@ func connectorCleanupHomes(transaction setupTransaction, connectorName string) [
 			candidates = append(candidates, transaction.PreviousState.AntigravityConfigDir)
 		case "opencode":
 			candidates = append(candidates, transaction.PreviousState.OpenCodeConfigDir)
-		case "omnigent":
+		case "omnigent": // until 1.1
 			candidates = append(candidates, transaction.PreviousState.OmnigentConfigHome)
 		case "hermes":
 			candidates = append(candidates, transaction.PreviousState.HermesHome)
@@ -376,7 +376,7 @@ func connectorManagedBackupExists(dataRoot, connectorName string) bool {
 		logicalName = "settings.json"
 	case "amp":
 		logicalName = "config"
-	case "copilot", "omnigent":
+	case "copilot", "omnigent": // until 1.1: omnigent
 		logicalName = "config"
 	case "cursor":
 		logicalName = "hooks.json"
@@ -420,7 +420,7 @@ func connectorDefaultHomeBesideDataRoot(dataRoot, connectorName string) string {
 		return filepath.Join(filepath.Dir(cleanDataRoot), ".gemini", "config")
 	case "opencode":
 		directory = filepath.Join(".config", "opencode")
-	case "omnigent":
+	case "omnigent": // until 1.1
 		directory = ".omnigent"
 	case "hermes":
 		// Native Hermes defaults to LocalAppData, which is not derivable from
@@ -458,7 +458,7 @@ func connectorLifecycleEnvForHome(transaction setupTransaction, connectorName, c
 		antigravityHome = configHome
 	} else if connectorName == "opencode" {
 		openCodeHome = configHome
-	} else if connectorName == "omnigent" {
+	} else if connectorName == "omnigent" { // until 1.1
 		omnigentHome = configHome
 	} else if connectorName == "hermes" {
 		hermesHome = configHome
@@ -514,6 +514,19 @@ func reconcilePreservedConnectors(
 			) {
 				continue
 			}
+		}
+		if isRetiredNativeConnector(connectorName) {
+			// until 1.1: a removed connector is never reconciled; tear down
+			// and verify what a 1.0.x install left at its current home.
+			if samePath(previousHome, currentHome) &&
+				reconciliation.run(transaction.ID, connectorName, currentHome, "teardown", func() error {
+					return run(gatewayPath, transaction.DataRoot, connectorName, "teardown", currentChildEnv)
+				}) {
+				reconciliation.run(transaction.ID, connectorName, currentHome, "verify", func() error {
+					return run(gatewayPath, transaction.DataRoot, connectorName, "verify", currentChildEnv)
+				})
+			}
+			continue
 		}
 		reconciliation.run(transaction.ID, connectorName, currentHome, "reconcile", func() error {
 			return run(gatewayPath, transaction.DataRoot, connectorName, "reconcile", currentChildEnv)
@@ -683,7 +696,7 @@ func validateConnectorReconciliationState(state *connectorReconciliationState) e
 }
 
 func validateConnectorReconciliationIdentity(connectorName, configHome string) error {
-	if connectorName == "none" || !validConnector(connectorName) {
+	if connectorName == "none" || !validPreviousConnector(connectorName) {
 		return fmt.Errorf("invalid connector reconciliation target %q", connectorName)
 	}
 	if configHome == "" || !filepath.IsAbs(configHome) || filepath.Clean(configHome) != configHome {
@@ -776,7 +789,7 @@ func connectorConfigHome(transaction setupTransaction, connectorName string, pre
 			return transaction.PreviousOpenCodeConfigDir
 		}
 		return transaction.OpenCodeConfigDir
-	case "omnigent":
+	case "omnigent": // until 1.1
 		if previous {
 			return transaction.PreviousOmnigentConfigHome
 		}

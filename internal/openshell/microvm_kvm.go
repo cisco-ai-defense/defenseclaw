@@ -28,6 +28,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // What OpenShell's MicroVM (vm) driver needs on a Linux host, which runs a
@@ -38,8 +39,9 @@ import (
 // directories the gateway process creates, and with the 0077 of NVIDIA's
 // deb unit they are 0700 and owned by the host uid: the sandbox's own uid
 // then cannot traverse /newroot, and every MicroVM dies with "read
-// /proc/self/status: Permission denied" (OpenShell 0.1.2 and 0.1.3,
-// NVIDIA/OpenShell#4014).
+// /proc/self/status: Permission denied" (OpenShell 0.1.2 to 0.1.5,
+// NVIDIA/OpenShell#4014, still open: the drop-in stays until a release
+// that fixes it is SupportedMin).
 const (
 	kvmDevice = "/dev/kvm"
 	// ServiceUMask is the umask DefenseClaw gives the gateway service of a
@@ -219,6 +221,12 @@ func InstallE2fsprogsFix() *Fix {
 // against a checksum file fetched from the same release as the archive,
 // which proved only that the two downloads agreed (#1224).
 func InstallVMDriverFix(goarch string) *Fix {
+	return installVMDriverFixIn(goarch, "~/.local/libexec/openshell")
+}
+
+// installVMDriverFixIn installs into the selected user's driver directory.
+// The default uses $HOME in the command so it expands even when quoted.
+func installVMDriverFixIn(goarch, dir string) *Fix {
 	archive := vmDriverArchive(goarch)
 	if archive == "" {
 		return &Fix{Summary: "OpenShell publishes its MicroVM driver for amd64 and arm64 Linux only"}
@@ -227,13 +235,17 @@ func InstallVMDriverFix(goarch string) *Fix {
 	if digest == "" {
 		return &Fix{Summary: "this DefenseClaw build pins no digest for OpenShell " + InstallerTag + "'s " + archive + "; install " + vmDriverBinary + " from that release by hand"}
 	}
+	commandDir := shellQuote(dir)
+	if dir == "~/.local/libexec/openshell" {
+		commandDir = `"$HOME/.local/libexec/openshell"`
+	}
 	base := TarballBaseURL + InstallerTag + "/"
 	return &Fix{
-		Summary: "install " + vmDriverBinary + " from OpenShell " + InstallerTag + " into ~/.local/libexec/openshell, after checking the archive against the SHA-256 " +
+		Summary: "install " + vmDriverBinary + " from OpenShell " + InstallerTag + " into " + dir + ", after checking the archive against the SHA-256 " +
 			"this DefenseClaw build pins for it (the openshell package ships no MicroVM driver)",
-		Command: "d=$(mktemp -d) && cd \"$d\" && curl -fsSLO " + base + archive +
-			" && echo '" + digest + "  " + archive + "' | sha256sum -c - && mkdir -p ~/.local/libexec/openshell && tar -xzf " + archive +
-			" -C ~/.local/libexec/openshell " + vmDriverBinary + " && chmod 0755 ~/.local/libexec/openshell/" + vmDriverBinary + "; cd - >/dev/null; rm -rf \"$d\"",
+		Command: "d=$(mktemp -d) && (trap 'rm -rf \"$d\"' EXIT; cd \"$d\" && curl -fsSLO " + base + archive +
+			" && echo '" + digest + "  " + archive + "' | sha256sum -c - && tar -xzf " + archive + " " + vmDriverBinary +
+			" && mkdir -p " + commandDir + " && install -m 0755 " + vmDriverBinary + " " + commandDir + "/" + vmDriverBinary + ")",
 	}
 }
 
@@ -247,7 +259,21 @@ func (r *doctorRun) linuxMicroVMHost(ctx context.Context) *MicroVMHost {
 	}
 	m.E2fsprogs = e2fsprogsIn(r.E2fsprogsDirs)
 	m.DriverRunning = r.running.Name == DriverVM
-	m.DriverBinary = r.findVMDriver(ctx)
+	m.DriverBinary, m.userRepairDir = r.findVMDriver(ctx)
+	if m.DriverBinary == "" && r.config != nil && filepath.IsAbs(r.config.VM.DriverDir) {
+		m.missingDriverDir = r.config.VM.DriverDir
+	}
+	if r.gateway != nil && r.gateway.Version != (Version{}) {
+		m.gatewayVersion = r.gateway.Version.String()
+	}
+	if m.DriverBinary != "" && m.gatewayVersion != "" {
+		if v, err := r.vmDriverVersion(ctx, m.DriverBinary); err == nil {
+			m.DriverVersion = v.String()
+			if v.Compare(r.gateway.Version) < 0 {
+				m.DriverOlderThan = m.gatewayVersion
+			}
+		}
+	}
 	m.StateDir = r.vmStateDir()
 	m.StaleCache = staleVMCache(m.StateDir)
 	if r.service != nil {
@@ -255,6 +281,106 @@ func (r *doctorRun) linuxMicroVMHost(ctx context.Context) *MicroVMHost {
 		m.UMaskTooStrict = UMaskTooStrict(r.service.UMask)
 	}
 	return m
+}
+
+// vmDriverVersion is the release the driver at path reports
+// ("openshell-driver-vm 0.1.5").
+func (r *doctorRun) vmDriverVersion(ctx context.Context, path string) (Version, error) {
+	out, err := r.Runner.Output(ctx, Command{Name: path, Args: []string{"--version"}, Timeout: 15 * time.Second})
+	if err != nil {
+		return Version{}, err
+	}
+	fields := strings.Fields(string(out))
+	if len(fields) == 0 {
+		return Version{}, fmt.Errorf("%s --version printed nothing", path)
+	}
+	return ParseVersion(fields[len(fields)-1])
+}
+
+// vmDriverFix repairs a missing or stale driver for the answering gateway.
+// A PATH-adjacent driver is searched after the user's default directory, so
+// a new copy there wins without writing beside the gateway. Only the build's
+// pinned release gets an install command; other releases need a verified
+// matching driver. If the driver is missing and the gateway does not answer,
+// the pinned command is conditional on confirming that gateway's release.
+func (m *MicroVMHost) vmDriverFix(goarch string) *Fix {
+	release := m.gatewayVersion
+	if release == "" {
+		release = m.DriverOlderThan
+	}
+	dir := "~/.local/libexec/openshell"
+	if m.DriverBinary != "" {
+		dir = filepath.Dir(m.DriverBinary)
+	} else if m.missingDriverDir != "" {
+		dir = m.missingDriverDir
+	}
+	if m.userRepairDir != "" && !vmDriverDirNeedsSudo(m.userRepairDir) {
+		dir = m.userRepairDir
+	}
+	if release == "" && m.DriverBinary != "" {
+		return &Fix{Summary: "the gateway version is unknown; restore the gateway connection and rerun `defenseclaw sandbox doctor` before choosing a MicroVM driver release"}
+	}
+	if release != "" && release != InstallerVersion {
+		v, err := ParseVersion(release)
+		if err != nil {
+			return &Fix{Summary: "the gateway version is unrecognized; restore a supported gateway and rerun `defenseclaw sandbox doctor` before choosing a MicroVM driver release"}
+		}
+		if CheckSupported(v) != nil {
+			return &Fix{Summary: "move the gateway to a supported OpenShell release first (see the Gateway check), then rerun `defenseclaw sandbox doctor` for its matching MicroVM driver"}
+		}
+		archive := vmDriverArchive(goarch)
+		if archive == "" {
+			return &Fix{Summary: "OpenShell publishes its MicroVM driver for amd64 and arm64 Linux only"}
+		}
+		ownership := ""
+		sudo := dir != "~/.local/libexec/openshell" && vmDriverDirNeedsSudo(dir)
+		if sudo {
+			ownership = " with administrator rights and root ownership"
+		}
+		return &Fix{Summary: "if a matching OpenShell " + release + " " + archive + " and independently trusted SHA-256 digest are available, verify the archive and install its " +
+			vmDriverBinary + " into " + dir + ownership + "; this DefenseClaw build pins no digest for that release, so it cannot offer an install command; restart the OpenShell gateway and run `defenseclaw sandbox doctor` to verify its effective driver",
+			Sudo: sudo}
+	}
+	var fix *Fix
+	if dir != "~/.local/libexec/openshell" && vmDriverDirNeedsSudo(dir) {
+		fix = adminVMDriverFixIn("linux", goarch, dir)
+	} else {
+		fix = installVMDriverFixIn(goarch, dir)
+	}
+	if release == "" {
+		if fix.Command != "" {
+			fix.Summary = "restore the gateway connection and confirm it runs OpenShell " + InstallerVersion + " before using this pinned install command; " +
+				fix.Summary + "; if the gateway runs another release, install its matching driver instead"
+		}
+		return fix
+	}
+	if m.DriverBinary == "" {
+		return fix
+	}
+	fix.Summary += "; restart the OpenShell gateway and run `defenseclaw sandbox doctor` to verify its effective driver"
+	return fix
+}
+
+// vmDriverDirNeedsSudo uses the first existing directory in the target's
+// ancestry. The directory itself may be missing, but the repair will need
+// to create it in that ancestor. An unknown owner or access check chooses
+// the administrator's install rather than suggesting a command that fails.
+func vmDriverDirNeedsSudo(dir string) bool {
+	for {
+		info, err := os.Stat(dir)
+		if err == nil {
+			uid, known := fileUID(info)
+			return !info.IsDir() || !known || uid == 0 || !writableByCaller(dir)
+		}
+		if !errors.Is(err, fs.ErrNotExist) {
+			return true
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return true
+		}
+		dir = parent
+	}
 }
 
 // linuxMicroVMChecks makes, once, the machine checks of a Linux host
@@ -320,8 +446,8 @@ func (r *doctorRun) linuxVMDriverCheck() Check {
 	switch {
 	case m.E2fsprogs == "":
 		c.Fix = InstallE2fsprogsFix()
-	case m.DriverBinary == "" && !m.DriverRunning:
-		c.Fix = InstallVMDriverFix(r.GOARCH)
+	case m.driverMissing(), m.DriverOlderThan != "":
+		c.Fix = m.vmDriverFix(r.GOARCH)
 	case len(stale) > 0:
 		c.Fix = m.StaleCacheFix()
 	}
@@ -352,8 +478,8 @@ func (m *MicroVMHost) Fixes(goarch string) []*Fix {
 	if m.E2fsprogs == "" {
 		out = append(out, InstallE2fsprogsFix())
 	}
-	if m.DriverBinary == "" && !m.DriverRunning {
-		out = append(out, InstallVMDriverFix(goarch))
+	if m.driverMissing() || m.DriverOlderThan != "" {
+		out = append(out, m.vmDriverFix(goarch))
 	}
 	return out
 }
@@ -398,8 +524,19 @@ func (m *MicroVMHost) toolProblems() []string {
 	if m.E2fsprogs == "" {
 		out = append(out, "e2fsprogs (mke2fs and debugfs) is not installed: the MicroVM driver formats every MicroVM's disks with them")
 	}
-	if m.DriverBinary == "" && !m.DriverRunning {
+	if m.driverMissing() {
 		out = append(out, vmDriverBinary+" is not installed (NVIDIA's openshell package does not ship it)")
 	}
+	if m.DriverOlderThan != "" {
+		out = append(out, fmt.Sprintf("%s is OpenShell %s's, older than the gateway's %s, and the gateway starts every MicroVM with it "+
+			"(an upgrade of NVIDIA's openshell package leaves the driver, which the package does not ship, as it was)", m.DriverBinary, m.DriverVersion, m.DriverOlderThan))
+	}
 	return out
+}
+
+// A running VM gateway proves a driver was usable when it started. With an
+// explicit driver_dir, its binary still needs to be present for the next
+// gateway start; a driver found elsewhere cannot make that path usable.
+func (m *MicroVMHost) driverMissing() bool {
+	return m.DriverBinary == "" && (!m.DriverRunning || m.missingDriverDir != "")
 }

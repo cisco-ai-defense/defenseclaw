@@ -114,6 +114,12 @@ func sandboxHelp(cmd *cobra.Command, args []string) {
 	rootCmd.HelpFunc()(cmd, args)
 }
 
+const managedSandboxDoctorLong = `Checks that your account can run sandboxes under the policy your organization set
+for you: the platform, sandbox service, OpenShell CLI and compute driver, harness
+images, shell wrappers and organization policy. Exits 1 when a check fails,
+with --output json too and with --json (both print ok=false). Your
+organization sets up and repairs sandboxes; if a check fails, ask your administrator.`
+
 func applyManagedSandboxHelp() {
 	sandboxCmd.Long = launcherSandboxLong
 	for _, cmd := range sandboxCmd.Commands() {
@@ -129,11 +135,7 @@ func applyManagedSandboxHelp() {
 				}
 			})
 		case "doctor":
-			cmd.Long = `Checks that your account can run sandboxes under the policy your organization set
-for you: the platform, sandbox service, OpenShell CLI and compute driver, harness
-images, shell wrappers and organization policy. Exits 1 when a check fails (with
---output json the result is printed and the exit status is 0; read "ok"). Your
-organization sets up and repairs sandboxes; if a check fails, ask your administrator.`
+			cmd.Long = managedSandboxDoctorLong
 		case "run":
 			cmd.Long = launcherRunLong
 			hide = []string{"context", "no-snapshot"}
@@ -449,8 +451,7 @@ func newSandboxDoctorCmd() *cobra.Command {
 version and compute driver (on a Mac, the MicroVM driver: e2fsprogs, its signature,
 the sandbox identity and resources), bind mounts, telemetry, ports, the DefenseClaw
 daemon, harness images, shell wrappers and the organization policy. Exits 1 when a
-check fails (with --output json the result is printed and the exit status is 0; read
-"ok").`,
+check fails, with --output json too and with --json (both print ok=false).`,
 		Args: cobra.NoArgs,
 		RunE: sandboxRunE(func(ctx context.Context, app *sandboxcli.App, cmd *cobra.Command, _ []string) error {
 			out, err := parseOutput(cmd.Flag("output").Value.String())
@@ -479,7 +480,7 @@ func newSandboxRunCmd() *cobra.Command {
 		Long: `Runs the harness in a new sandbox on the current folder: on Linux (the Docker driver)
 live-mounted by default with a pre-session snapshot, or a copy with --copy; on macOS
 (the MicroVM driver) every run works on a copy. The harness is claude, codex,
-copilot, opencode, kiro, hermes, openhands, omnigent or antigravity (its command, agy,
+copilot, opencode, kiro, hermes or antigravity (its command, agy,
 works too; amp, cursor-agent and devin are not verified yet, so they do not run).
 Skip-permissions mode is on by default;
 --safe keeps the harness's own prompts. The harness gets your terminal; when it exits
@@ -693,6 +694,8 @@ on): then the earlier undo point stays, so "sandbox undo" still reverts them.
 	cmd.Flags().BoolVar(&o.NoSnapshot, "no-snapshot", false, "keep the previous session's snapshot instead of taking a new one")
 	cmd.Flags().BoolVar(&o.NewSnapshot, "new-snapshot", false,
 		"take a new snapshot even if the folder still has an earlier session's changes (undo no longer reverts them)")
+	cmd.Flags().BoolVar(&o.EndVM, "end-vm", false,
+		"start a MicroVM whose workload completed or failed though its VM still runs: OpenShell ends that VM with no flush first, so what it has not written to its disk is lost")
 	return cmd
 }
 

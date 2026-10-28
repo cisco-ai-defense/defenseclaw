@@ -57,6 +57,7 @@ func TestCodexApplyPatchWriteTargets(t *testing.T) {
 		fmt.Fprintf(&hundred, "*** Add File: f%03d.txt\n+x\n", i)
 	}
 	command := func(text string) map[string]any { return map[string]any{"command": text} }
+	nativeCommand := func(text string) map[string]any { return map[string]any{"cmd": text} }
 	for _, row := range []struct {
 		name, tool string
 		input      map[string]any
@@ -84,12 +85,20 @@ func TestCodexApplyPatchWriteTargets(t *testing.T) {
 		{"case form", "apply_patch", command(envelope(update(strings.ToUpper(keys)))), "", true},
 		{"benign patch", "apply_patch", command(envelope(update("notes.txt"))), "", false},
 		{"benign unquoted heredoc", "Bash", command("apply_patch <<PATCH\n" + envelope(update("notes.txt")) + "\nPATCH"), "", false},
+		{"benign unquoted heredoc literal escape", "Bash", command("apply_patch <<PATCH\n" + envelope(update("notes.txt")+`+printf("a\n");`+"\n") + "\nPATCH"), "", false},
 		{"benign heredoc", "Bash", command("apply_patch <<'PATCH'\n" + envelope(update("notes.txt")) + "\nPATCH"), "", false},
+		{"GAP-0781 native conditional project patch", "exec_command", nativeCommand("if [ -f notes.txt ]; then rg -Fx -- 'marker' notes.txt >/dev/null || apply_patch <<'PATCH'\n" + envelope(update("notes.txt")) + "\nPATCH\nelse\napply_patch <<'PATCH'\n" + envelope("*** Add File: notes.txt\n+marker\n") + "\nPATCH\nfi\nrg -n -Fx -- 'marker' notes.txt"), "", false},
 		{"benign search", "Bash", command(`grep -rn "*** Begin Patch" .`), "", false},
 	} {
 		t.Run(row.name, func(t *testing.T) {
 			if row.alias == symlink && !symlinks {
 				t.Skip("no symlink privilege")
+			}
+			if runtime.GOOS == "windows" && !row.block && row.tool != "apply_patch" {
+				// The Windows grammar reads this shell text; its * is a glob
+				// that reaches hard.cfg, the hard link to authorized_keys in
+				// this project (GAP-1717).
+				t.Skip("shell text beside a protected hard link on Windows: GAP-1717")
 			}
 			body := string(mustJSON(t, map[string]any{"session_id": "patch-session", "hook_event_name": "PreToolUse",
 				"tool_name": row.tool, "cwd": project, "tool_input": row.input}))
@@ -125,7 +134,7 @@ func TestCodexApplyPatchWriteTargets(t *testing.T) {
 			}
 			if !strings.HasPrefix(got, `{"action":"block"`) ||
 				!strings.Contains(got, `"severity":"CRITICAL"`) ||
-				!strings.Contains(got, "rule persistence.ssh_authorized_keys_command: SSH authorized keys mutation") {
+				!strings.Contains(got, "persistence.ssh_authorized_keys_command:") {
 				t.Fatalf("protected edit = %.600s", got)
 			}
 

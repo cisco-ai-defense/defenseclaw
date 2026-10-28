@@ -153,9 +153,22 @@ func (plan AssetQuarantinePlan) PerSourceQuarantinePath() string {
 	return filepath.Join(append(parts, hex.EncodeToString(sum[:8]), plan.TargetName)...)
 }
 
+// ErrQuarantinePublished marks an ExecuteAssetQuarantine failure that came
+// after a verified copy was in quarantine storage: the copy stays there, and
+// the pending journal is the provenance that recovers or restores it, so the
+// caller must keep it.
+var ErrQuarantinePublished = errors.New("enforce: quarantine copy published")
+
+type quarantinePublishedError struct{ err error }
+
+func (e quarantinePublishedError) Error() string { return e.err.Error() }
+
+func (e quarantinePublishedError) Unwrap() []error { return []error{e.err, ErrQuarantinePublished} }
+
 // ExecuteAssetQuarantine performs copy, hash verification, atomic publication,
 // source re-verification, then source removal. A verified published copy is
-// retained on later failure so the pending durable journal can recover it.
+// retained on later failure so the pending durable journal can recover it;
+// such a failure matches ErrQuarantinePublished.
 func ExecuteAssetQuarantine(plan AssetQuarantinePlan, recordID string) error {
 	if err := validateQuarantinePlan(plan); err != nil {
 		return err
@@ -173,15 +186,18 @@ func ExecuteAssetQuarantine(plan AssetQuarantinePlan, recordID string) error {
 		}
 		sourceExists, sourceErr := assetPathExists(plan.SourcePath)
 		if sourceErr != nil {
-			return sourceErr
+			return quarantinePublishedError{sourceErr}
 		}
 		if !sourceExists {
 			return nil
 		}
 		if err := requireAssetHash(plan.SourcePath, plan.ContentHash); err != nil {
-			return fmt.Errorf("enforce: source changed during quarantine recovery: %w", err)
+			return quarantinePublishedError{fmt.Errorf("enforce: source changed during quarantine recovery: %w", err)}
 		}
-		return removeQuarantinedSource(plan, recordID)
+		if err := removeQuarantinedSource(plan, recordID); err != nil {
+			return quarantinePublishedError{err}
+		}
+		return nil
 	}
 	if err := requireAssetHash(plan.SourcePath, plan.ContentHash); err != nil {
 		return fmt.Errorf("enforce: source changed before quarantine: %w", err)
@@ -218,13 +234,13 @@ func ExecuteAssetQuarantine(plan AssetQuarantinePlan, recordID string) error {
 	}
 	published = true
 	if err := requireAssetHash(plan.QuarantinePath, plan.ContentHash); err != nil {
-		return fmt.Errorf("enforce: verify quarantine destination: %w", err)
+		return quarantinePublishedError{fmt.Errorf("enforce: verify quarantine destination: %w", err)}
 	}
 	if err := requireAssetHash(plan.SourcePath, plan.ContentHash); err != nil {
-		return fmt.Errorf("enforce: source changed during quarantine: %w", err)
+		return quarantinePublishedError{fmt.Errorf("enforce: source changed during quarantine: %w", err)}
 	}
 	if err := removeQuarantinedSource(plan, recordID); err != nil {
-		return fmt.Errorf("enforce: remove quarantined source: %w", err)
+		return quarantinePublishedError{fmt.Errorf("enforce: remove quarantined source: %w", err)}
 	}
 	return nil
 }
