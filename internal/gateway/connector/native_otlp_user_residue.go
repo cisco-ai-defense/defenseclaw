@@ -436,6 +436,7 @@ func codexWithoutUserNativeOTLP(raw []byte, backup codexConfigBackup, opts Setup
 	if !ok {
 		return nil, nil, nil
 	}
+	opts = withMarkedOrphanExporterCredentials(opts, "codex", raw)
 	// Any [otel] value that carries a DefenseClaw credential is the
 	// product's, an exporter or not.
 	if !otlpCarriesProductCredential(otel, otlpKnownProductTokens(opts, OTLPScopeCodex)) {
@@ -542,6 +543,7 @@ func claudeCodeWithoutUserNativeOTLP(raw []byte, backup claudeCodeBackup, opts S
 	if helper, present := settings[claudeCodeOTLPHeadersHelperKey]; present {
 		helperOwned = claudeCodeOTLPHeadersHelperOwned(helper, backup.ManagedOTLPHeadersHelper)
 	}
+	opts = withMarkedOrphanExporterCredentials(opts, "claudecode", raw)
 	known := claudeCodeKnownProductTokens(backup, opts)
 	proof := helperOwned
 	for key, value := range env {
@@ -809,6 +811,9 @@ type nativeOTLPTakeBackPendingRecord struct {
 	At               string `json:"at"`
 	CredentialSHA256 string `json:"credential_sha256,omitempty"`
 	CredentialLength int    `json:"credential_length,omitempty"`
+	// Backup (the removed-exporter note only) is the copy of the agent
+	// config the take-back kept before it removed a managed orphan exporter.
+	Backup string `json:"backup,omitempty"`
 }
 
 func nativeOTLPTakeBackPendingPath(dataDir, connectorName string) (string, OTLPPathTokenScope, bool) {
@@ -895,6 +900,63 @@ func ClearNativeOTLPTakeBackPending(dataDir, connectorName string) error {
 		return err
 	}
 	return nil
+}
+
+// The managed Windows take-back that removes an exporter only the managed
+// orphan shape proves (GAP-0836) keeps a copy of the account's file beside
+// it (NativeOTLPMarkedOrphanBackupSuffix) and leaves this note in the
+// account's managed data directory; status and verify name the removal
+// (AgentConfigNativeOTLPMarkedRemoved) while the note and the copy are both
+// there, so the account deletes the copy once it has checked it.
+const (
+	nativeOTLPMarkedRemovedPrefix      = "native-otlp-removed-"
+	NativeOTLPMarkedOrphanBackupSuffix = ".defenseclaw-otlp-removed.bak"
+)
+
+func nativeOTLPMarkedRemovedPath(dataDir, connectorName string) (string, bool) {
+	if strings.TrimSpace(dataDir) == "" {
+		return "", false
+	}
+	if _, ok := OTLPPathTokenScopeForConnector(connectorName); !ok {
+		return "", false
+	}
+	return filepath.Join(dataDir, nativeOTLPMarkedRemovedPrefix+strings.ToLower(strings.TrimSpace(connectorName))+".json"), true
+}
+
+// RecordNativeOTLPMarkedOrphanRemoved leaves the removed-exporter note for
+// connectorName in dataDir naming backup, the copy the take-back kept.
+func RecordNativeOTLPMarkedOrphanRemoved(dataDir, connectorName, backup string) error {
+	path, ok := nativeOTLPMarkedRemovedPath(dataDir, connectorName)
+	if !ok {
+		return fmt.Errorf("native OTLP removed-exporter note: no exporter for connector %q", connectorName)
+	}
+	data, err := json.Marshal(nativeOTLPTakeBackPendingRecord{
+		Connector: strings.ToLower(strings.TrimSpace(connectorName)),
+		At:        time.Now().UTC().Format(time.RFC3339),
+		Backup:    backup,
+	})
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(path, append(data, '\n'), 0o600)
+}
+
+// NativeOTLPMarkedOrphanRemoved reports the removed-exporter note for
+// connectorName in dataDir while the copy it names is still there. The note
+// is read like the take-back-pending marker (a regular file the account
+// owns, never through a link); a copy that is not a regular file with the
+// product's suffix does not count.
+func NativeOTLPMarkedOrphanRemoved(dataDir, connectorName string) bool {
+	path, ok := nativeOTLPMarkedRemovedPath(dataDir, connectorName)
+	if !ok {
+		return false
+	}
+	record, ok := readNativeOTLPTakeBackPending(path)
+	if !ok || !strings.HasSuffix(record.Backup, NativeOTLPMarkedOrphanBackupSuffix) || !filepath.IsAbs(record.Backup) {
+		return false
+	}
+	info, err := os.Lstat(record.Backup)
+	return err == nil && info.Mode().IsRegular()
 }
 
 // NativeOTLPTakeBackPending reports a take-back-pending marker for

@@ -677,6 +677,30 @@ func enterpriseHookInstallConnectorPublished(cfg *config.Config, name string) er
 		config.NormalizeConnectorName(name), list)
 }
 
+// enterpriseHookReconcileConnectorEnabled fails, on a standalone managed
+// deployment, the reconcile row of a connector the loaded config does not
+// publish (enterprisepolicy.StandaloneConnectorPublished), instead of
+// verifying and repairing it. The guardian takes a changed config before the
+// hook enumerator rewrites targets.yaml, and its machine policy publish has
+// already withdrawn the connector, so a repair of the stale row took the
+// per-user route: an administrator's guardrail.connectors.opencode.enabled
+// false left a per-user OpenCode plugin that blocked every tool call
+// (GAP-2373). The row fails this pass only; the enumerator drops it next.
+// Other deployments are unchanged. Tests replace it.
+var enterpriseHookReconcileConnectorEnabled = func(name string) error {
+	return enterpriseHookReconcileConnectorPublished(cfg, name)
+}
+
+func enterpriseHookReconcileConnectorPublished(current *config.Config, name string) error {
+	if current == nil || !managed.IsManagedEnterprise(current.DeploymentMode) || !current.StandaloneEnterprise() ||
+		strings.TrimSpace(name) == "" || enterprisepolicy.StandaloneConnectorPublished(current, name) {
+		return nil
+	}
+	return fmt.Errorf("enterprise hooks reconcile: connector %q is not enabled by this computer's DefenseClaw configuration, "+
+		"so DefenseClaw does not install or repair its hooks for this account; the hook enumerator removes the row on its next pass",
+		config.NormalizeConnectorName(name))
+}
+
 func enterpriseHooksInstallError(cmd *cobra.Command, err error) error {
 	if enterpriseHookJSON {
 		payload := map[string]any{"ok": false, "error": err.Error()}
@@ -2841,6 +2865,11 @@ func runEnterpriseHookReconcileOnce(ctx context.Context) (enterpriseHookReconcil
 			if authorizationErr != nil {
 				err = authorizationErr
 			}
+		}
+		if err == nil {
+			// A row of a connector the loaded config no longer enables is
+			// stale: the enumerator has not dropped it yet (GAP-2373).
+			err = enterpriseHookReconcileConnectorEnabled(target.Connector)
 		}
 		if err == nil && target.IsDeferred() &&
 			!previousProtection.PreviouslyProtected {

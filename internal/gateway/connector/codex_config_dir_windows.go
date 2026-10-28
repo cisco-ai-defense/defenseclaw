@@ -58,9 +58,13 @@ func codexHomeLinkRefusal(home string) error {
 	if err == nil || !errors.Is(err, safefile.ErrReparsePoint) {
 		return nil
 	}
+	// defenseclaw setup passes the default home as CODEX_HOME too, so only a
+	// CODEX_HOME that names another folder is the user's own choice to undo;
+	// for the default home "unset it" would point at the same link (GAP-2402).
 	fix := "make " + home + " a real folder"
-	if strings.TrimSpace(os.Getenv("CODEX_HOME")) != "" {
-		fix = "set CODEX_HOME to the real folder, or unset it to use " + filepath.Join(userHomeDir(), ".codex")
+	defaultHome := filepath.Join(userHomeDir(), ".codex")
+	if env := strings.TrimSpace(os.Getenv("CODEX_HOME")); env != "" && !strings.EqualFold(filepath.Clean(env), filepath.Clean(defaultHome)) {
+		fix = "set CODEX_HOME to the real folder, or unset it to use " + defaultHome
 	}
 	return refuseForAgentConfig(fmt.Errorf( //nolint:staticcheck // Preserve the product name in this operator diagnostic.
 		"Codex home %s goes through a symbolic link or junction (%v), and DefenseClaw does not write Codex settings through one on Windows; %s, then run: defenseclaw setup codex",

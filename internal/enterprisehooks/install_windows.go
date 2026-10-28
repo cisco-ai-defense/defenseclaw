@@ -382,7 +382,7 @@ func verifyWindowsClaudeManagedResult(ctx context.Context, opts InstallOptions) 
 	if err != nil {
 		return InstallResult{}, err
 	}
-	otlpReport, err := windowsManagedUserNativeOTLPCheck(conn.Name(), home, dataDir, targetSID)
+	otlpReport, err := windowsManagedUserNativeOTLPCheck(conn.Name(), home, dataDir, targetSID, setupOpts.APIAddr, setupOpts.ProxyAddr)
 	if err != nil {
 		return InstallResult{}, err
 	}

@@ -382,6 +382,12 @@ const (
 	// exporter (GAP-0929). Its hooks are in place: a warning, not a failed
 	// row.
 	AgentConfigNativeOTLPUnchecked = "native_otlp_unchecked"
+	// AgentConfigNativeOTLPMarkedRemoved (Codex, Claude Code on standalone
+	// Windows): the managed install removed an exporter of an earlier
+	// per-user install that only its DefenseClaw markers and an unserved
+	// loopback port proved, and kept a copy of the file (GAP-0836). Reported
+	// while the copy is there.
+	AgentConfigNativeOTLPMarkedRemoved = "native_otlp_marked_removed"
 )
 
 // ValidAgentConfigStatus reports whether code is one AgentConfigStatus
@@ -389,7 +395,7 @@ const (
 func ValidAgentConfigStatus(code string) bool {
 	switch code {
 	case "", AgentConfigRestoredLastGood, AgentConfigRestoredPristine, AgentConfigRecreatedHooksOnly, AgentConfigSettingsLost,
-		AgentConfigNativeOTLPUnchecked, AgentConfigNativeOTLPTakeBackPending:
+		AgentConfigNativeOTLPUnchecked, AgentConfigNativeOTLPTakeBackPending, AgentConfigNativeOTLPMarkedRemoved:
 		return true
 	}
 	return false
@@ -477,6 +483,9 @@ func AgentConfigNotice(connectorName, user, code string) (string, bool) {
 	if code == AgentConfigNativeOTLPUnchecked {
 		return nativeOTLPUncheckedNotice(connectorName, user)
 	}
+	if code == AgentConfigNativeOTLPMarkedRemoved {
+		return nativeOTLPMarkedRemovedNotice(connectorName, user)
+	}
 	file, ok := agentConfigFiles[connectorName]
 	if !ok {
 		return "", false
@@ -495,6 +504,24 @@ func AgentConfigNotice(connectorName, user, code string) (string, bool) {
 		return "", false
 	}
 	return fmt.Sprintf("%s for user %s: the %s %s", connectorName, user, file, what), true
+}
+
+// nativeOTLPMarkedRemovedNotice words AgentConfigNativeOTLPMarkedRemoved.
+func nativeOTLPMarkedRemovedNotice(connectorName, user string) (string, bool) {
+	var file, what string
+	switch connectorName {
+	case "codex":
+		file, what = `.codex\config.toml`, "[otel] exporter tables"
+	case "claudecode":
+		file, what = `.claude\settings.json`, "OTEL_* env entries"
+	default:
+		return "", false
+	}
+	return fmt.Sprintf("%s for user %s: the managed install removed the %s of an earlier per-user DefenseClaw install from the account's %s "+
+		"(a 127.0.0.1 endpoint on a port the managed gateway does not serve, with DefenseClaw's x-defenseclaw-source and x-defenseclaw-client headers), "+
+		"so the agent no longer sends prompt telemetry to a port another account could hold; a copy of the file as it was is beside it (%s%s): "+
+		"if that exporter was the account's own collector, put it back from the copy; delete the copy to clear this notice",
+		connectorName, user, what, file, file, NativeOTLPMarkedOrphanBackupSuffix), true
 }
 
 // nativeOTLPTakeBackPendingNotice words AgentConfigNativeOTLPTakeBackPending.
