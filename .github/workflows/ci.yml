@@ -616,7 +616,14 @@ jobs:
           # FileLock (SoftFileLock only where flock is unsupported) and never
           # ReadWriteLock. The advisories are local multi-user races on a
           # shared lock directory.
-          audit_ignores=()
+          # TODO: Remove the LiteLLM proxy ignores once the litellm pin moves
+          # to a fixed release (>= 1.100.4 for CVE-2026-114612, >= 1.95.0 for
+          # GHSA-g5ff-637f-6q2m). Both are in the LiteLLM proxy server: forged
+          # admin bearer tokens from reused salt-key encryption, and a file
+          # read through /utils/transform_request. DefenseClaw only calls
+          # litellm.completion as a client library and never imports or runs
+          # litellm.proxy.
+          audit_ignores=(--ignore-vuln CVE-2026-114612 --ignore-vuln GHSA-g5ff-637f-6q2m)
           if [ "${{ matrix.python-version }}" = "3.10" ]; then
             for id in CVE-2026-112906 CVE-2026-112907 CVE-2026-112913 \
                       CVE-2026-112914 CVE-2026-112937 CVE-2026-112940; do
@@ -989,6 +996,11 @@ jobs:
       # DefenseClaw's gateway is pure Go and does not use aiohttp at runtime.
       # TODO: Remove python-multipart ignores once >= 0.0.31 is available
       # and pinned. Same skill-scanner transitive; not in the gateway.
+      # TODO: Remove the CVE-2026-114612 and GHSA-g5ff-637f-6q2m ignores once
+      # the litellm pin moves to a fixed release (>= 1.100.4 and >= 1.95.0).
+      # Both are LiteLLM proxy-server flaws (forged admin bearer tokens,
+      # file read via /utils/transform_request). DefenseClaw only uses
+      # litellm as a client library and never runs litellm.proxy.
       # NOTE: comments must NOT appear inside the `>` folded scalar below
       # - YAML keeps `#` as literal text there and bash then consumes
       # everything after the `#` as an inline shell comment, dropping any
@@ -1018,6 +1030,8 @@ jobs:
           --ignore-vuln GHSA-537c-gmf6-5ccf
           --ignore-vuln GHSA-6v7p-g79w-8964
           --ignore-vuln GHSA-4xgf-cpjx-pc3j
+          --ignore-vuln CVE-2026-114612
+          --ignore-vuln GHSA-g5ff-637f-6q2m
 
   ts-build-test:
     name: TypeScript Build & Test
