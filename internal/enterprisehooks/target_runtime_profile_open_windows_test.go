@@ -354,3 +354,27 @@ func TestWindowsManagedRuntimeSkippedProfilesValidation(t *testing.T) {
 		t.Fatalf("bounded reason = %q, want control characters folded", got)
 	}
 }
+
+// A holder that reads the folder without sharing writes does not stop
+// planning, but staging's and finalize's write opens would collide with it
+// after planning, failing the install for everyone. A fresh Install probes
+// that open while planning and skips the user instead.
+func TestWindowsManagedRuntimeFreshInstallPlanSkipsUserBlockedForWriters(t *testing.T) {
+	sid := currentWindowsTestSID(t)
+	home := newWindowsManagedRuntimeBAOwnedProfile(t, sid)
+	shortenWindowsManagedRuntimeProfileRetry(t, 3, nil)
+	holdWindowsTestDirectory(t, home, windows.GENERIC_READ, windows.FILE_SHARE_READ)
+
+	plan, err := PlanWindowsManagedRuntimeRootsSkippingBusyProfiles(
+		windowsManagedRuntimeTestManifest(home, sid),
+		`C:\ProgramData\DefenseClaw\etc\targets.yaml`,
+		strings.Repeat("a", 64),
+		func(Manifest) (string, error) { return strings.Repeat("b", 64), nil },
+	)
+	if err != nil {
+		t.Fatalf("fresh-install plan with a writer-blocking holder: %v", err)
+	}
+	if len(plan.Roots) != 0 || len(plan.SkippedProfiles) != 1 || plan.SkippedProfiles[0].SID != sid.String() {
+		t.Fatalf("plan = %+v, want the user skipped because staging could not open the folder", plan)
+	}
+}

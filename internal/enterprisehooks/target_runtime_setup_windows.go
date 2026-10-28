@@ -197,7 +197,9 @@ func PlanWindowsManagedRuntimeRoots(
 // PlanWindowsManagedRuntimeRootsSkippingBusyProfiles plans like
 // PlanWindowsManagedRuntimeRoots, for a fresh Install, but leaves out a user
 // whose profile folder another process still holds open after the retry
-// window, instead of failing the install for every user. All of that user's
+// window, instead of failing the install for every user. Because a fresh
+// Install goes on to stage, the folder must also open the way staging opens
+// it; a holder that only blocks writers skips the user here too. All of that user's
 // manifest rows are removed, publish writes the reduced manifest and returns
 // its digest, and the plan binds the reduced manifest, so the Guardian never
 // expects a runtime the installer did not create. The skipped users are
@@ -253,6 +255,14 @@ func planWindowsManagedRuntimeRoots(
 	err = windowsManagedRuntimeSetupPrivilege(func() error {
 		for _, target := range targets {
 			root, inspectErr := planWindowsManagedRuntimeRoot(target)
+			if inspectErr == nil && publish != nil {
+				// Staging opens the folder for writing and finalize's rename
+				// opens it for writing again, so a holder that only blocks
+				// writers would fail the install there, after planning, for
+				// every user. Probe the same open now so that holder skips
+				// this user instead.
+				inspectErr = probeWindowsManagedRuntimeProfileMutable(target)
+			}
 			if inspectErr != nil {
 				if publish != nil && errors.Is(inspectErr, windows.ERROR_SHARING_VIOLATION) {
 					skipped = append(skipped, WindowsManagedRuntimeSkippedProfile{
@@ -291,6 +301,16 @@ func planWindowsManagedRuntimeRoots(
 		SkippedProfiles: skipped,
 	}
 	return plan, validateWindowsManagedRuntimePlan(plan, manifest)
+}
+
+// probeWindowsManagedRuntimeProfileMutable opens the profile folder the way
+// stage, finalize and cleanup do, with the same retries, and closes it.
+func probeWindowsManagedRuntimeProfileMutable(target windowsManagedRuntimeTarget) error {
+	handle, err := openWindowsManagedRuntimeProfile(target, windowsManagedRuntimeProfileMutate)
+	if err != nil {
+		return err
+	}
+	return windows.CloseHandle(handle)
 }
 
 func windowsManagedRuntimeEnabledTargetCount(manifest Manifest) int {
