@@ -397,9 +397,9 @@ The host has a managed deployment. The per-user `install.ps1`, `defenseclaw upgr
 
 #### Setup upgrade says another program holds a file open
 
-Setup could not replace the named file while another program had it open.
+Setup could not replace the named file while another program had it open. For the installed hook, Setup first gives a program outside the install folder (an antivirus scan, an editor, a backup agent) 30 seconds to close it. If one still holds it, the run stops with `hook_in_use` and exit `1618` before it replaces anything, and names the program and its process id. `hook_calls_running`, also exit `1618`, means hook calls of the installed release were still running: let those agent calls finish or close those sessions.
 
-**Fix.** Close the program holding it (for example an antivirus or editor), then run Setup again.
+**Fix.** Close the program holding it (for example an antivirus or editor), then run Setup again. An MDM retries `1618` on its own.
 
 **Check.** Setup exits `0`.
 
@@ -413,7 +413,7 @@ Setup waits up to 10 minutes for the guardian's first reconcile while it makes p
 
 #### An action exits `1618`, `75`, `1639` or `2`
 
-`1618` and `75` mean another lifecycle run holds the lock. `1639` and `2` mean invalid arguments.
+`1618` and `75` mean another lifecycle run holds the lock. On Windows, `1618` with `hook_in_use` or `hook_calls_running` means the installed hook is still in use ([above](#setup-upgrade-says-another-program-holds-a-file-open)). `1639` and `2` mean invalid arguments.
 
 **Fix.** Retry for `1618` and `75` (Intune retries `1618` by default). For `1639` and `2`, fix the command line or the MDM settings; retrying does not help.
 

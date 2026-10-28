@@ -223,6 +223,10 @@ Every other bug that 1.0.4 listed here is fixed in 1.0.5; the release notes list
 - **Busy hosts:** when many agent sessions start at once or the CPU is saturated, a few ordinary calls can be denied with "gateway is running but did not answer", "hook client disconnected before the gateway decision was delivered", or on managed Windows after an upgrade `runtime_state_invalid` once a minute. Retry the call, and don't start many sessions at once on a small host.
 - **Not certified on every per-user Windows agent:** the 1.0.5 certification ran Antigravity, Cursor (command line) and Devin on per-user Windows. It did not run Amp or Kiro there.
 
+### Action mode
+
+- **Ordinary work blocked:** action mode can block a few benign commands as an SSH key write: a bare alias definition such as `alias ll=ls`, some PowerShell `if` blocks, and on Windows some Codex `apply_patch` edits that name the file through a PowerShell variable. Observe, the default, only reports them. On a per-user install, switch that agent to observe while you work: `defenseclaw guardrail mode observe --connector NAME`.
+
 ### Security
 
 - **Protected files in action mode:** on a per-user install the agent runs as the account that owns SSH keys, `authorized_keys`, agent instruction files and DefenseClaw's own state, so action mode blocks the commands it recognises and some indirect forms can still get through. DefenseClaw's hook guard and `defenseclaw doctor` detect and repair a change to its own state afterwards. Managed installs protect that state with operating-system ownership and permissions. Don't rely on DefenseClaw alone for these files: keep SSH keys passphrase-protected and file permissions tight, and review changes to `CLAUDE.md`, `AGENTS.md` and `SOUL.md` (for example with `git diff`). `defenseclaw rollback` refuses a saved installer whose digest changed.
