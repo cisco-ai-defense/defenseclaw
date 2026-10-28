@@ -795,13 +795,18 @@ func withActiveStateTargetMention(
 	facts actionfacts.Facts,
 	findings []RuleFinding,
 ) []RuleFinding {
-	command, known := trustedBashCommandInput(request.Input)
-	if !known || !hookpaths.ActionStateTargetMention(command, request.Input.CWD, request.Input.ActiveHome) &&
-		!factsHaveFindHandOff(facts) {
-		return findings
-	}
-	if !provenStateMutationPath(facts, request) {
-		return findings
+	// A pattern, brace list, rsync or git clean that expands onto the
+	// state names no path fact, so it is proved from the shell words
+	// (GAP-2047).
+	if !globbedStateMutation(facts) {
+		command, known := trustedBashCommandInput(request.Input)
+		if !known || !hookpaths.ActionStateTargetMention(command, request.Input.CWD, request.Input.ActiveHome) &&
+			!factsHaveFindHandOff(facts) {
+			return findings
+		}
+		if !provenStateMutationPath(facts, request) {
+			return findings
+		}
 	}
 	const ruleID = "tamper.detector_state_write"
 	_, rule, ok := trustedActionCatalogRule(generation, ruleID)

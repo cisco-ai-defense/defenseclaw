@@ -206,7 +206,9 @@ func activeStateMutationOwner() semanticOwner {
 				return true
 			}
 		}
-		return false
+		// A pattern, brace list, rsync or git clean that the shell or the
+		// program expands onto the state (GAP-2047).
+		return globbedStateMutation(facts)
 	}
 	return owner
 }
@@ -2550,19 +2552,14 @@ func matchesActiveDefenseClawState(
 		return findAncestorStartChangesState(facts, candidate)
 	}
 	state := strings.TrimPrefix(strings.TrimPrefix(relative, ".defenseclaw"), "/")
-	switch state {
+	switch {
 	// The state root and the protected trees themselves: removing,
 	// moving or replacing one removes every file in it (GAP-1774). Removing
 	// hooks/ turns protection off; removing installer/ breaks rollback.
 	// Any other access is judged by the file it reaches (GAP-2045).
-	case "", "cache", "hooks", "installer", "policies", "previous",
-		"previous/installer", "quarantine", "receipts", "registries":
+	case state == "", state == "previous/installer", slices.Contains(activeStateTreeNames, state):
 		return stateTreeEntryChanged(facts, candidate, state)
-	case ".env", "config.yaml", "confidence_policy.yaml",
-		"guardrail_runtime.json", "device.key", "picked_connector",
-		"custom-providers.json", "audit.db", "audit.db-wal",
-		"audit.db-shm", "judge.db", "judge.db-wal", "judge.db-shm",
-		"judge_bodies.db", "judge_bodies.db-wal", "judge_bodies.db-shm":
+	case slices.Contains(activeStateFileNames, state):
 		return true
 	}
 	// installer/ and previous/installer/ hold the saved installer the
