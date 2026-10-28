@@ -142,13 +142,14 @@ func ensureHookAPITokenFileLocked(dataDir, tokenPath string) (string, error) {
 	}
 	tok := hex.EncodeToString(buf)
 
-	tmp := tokenPath + ".tmp"
-	_ = os.Remove(tmp)
-	flags := os.O_WRONLY | os.O_CREATE | os.O_EXCL
-	if nofollow := otlpOpenNoFollow(); nofollow != 0 {
-		flags |= nofollow
-	}
-	f, err := os.OpenFile(tmp, flags, 0o600)
+	// 1.0.0-1.0.4 staged the token at the fixed name <token>.tmp; a mint
+	// interrupted there leaves it behind. Until 1.1.
+	_ = os.Remove(tokenPath + ".tmp")
+	// The stage is created private: on Windows with a protected owner-only
+	// DACL, as PublishHookAPIToken does. A plain create inherited the hooks
+	// folder's entries, and `defenseclaw setup rotate-token` refuses an
+	// inheritable credential (GAP-2207).
+	f, tmp, err := createSecureOTLPPathTokenTempFile(tokenPath)
 	if err != nil {
 		return "", fmt.Errorf("write hook API token: %w", err)
 	}
@@ -162,10 +163,6 @@ func ensureHookAPITokenFileLocked(dataDir, tokenPath string) (string, error) {
 	if err != nil {
 		_ = os.Remove(tmp)
 		return "", fmt.Errorf("write hook API token: %w", err)
-	}
-	if err := os.Chmod(tmp, 0o600); err != nil {
-		_ = os.Remove(tmp)
-		return "", fmt.Errorf("chmod hook API token: %w", err)
 	}
 	if err := os.Rename(tmp, tokenPath); err != nil {
 		_ = os.Remove(tmp)

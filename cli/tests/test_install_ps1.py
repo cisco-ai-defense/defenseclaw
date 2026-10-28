@@ -5470,6 +5470,40 @@ def test_a_rollback_makes_the_backups_folder_private_before_the_hook_conversion(
     assert f"SET {backups}" in out and "PROTECTION=True,True" in out, out
 
 
+@pytest.mark.skipif(sys.platform != "win32" or POWERSHELL is None, reason="native Windows PowerShell required")
+def test_a_rollback_makes_inherited_copies_of_the_settings_backup_private(tmp_path: Path) -> None:
+    # GAP-2050 / GAP-1883: a settings copy and witness from an earlier
+    # conversion that came back with inherited permissions (a profile restore,
+    # a plain file copy) made prepare-rollback refuse ("keep a copy of the
+    # settings: bound private compare-and-swap object has an inheritable
+    # DACL"), so every later rollback or downgrade left two Claude Code
+    # handlers. Those two files become private (same access, explicit); other
+    # files in backups\ keep their permissions.
+    data = str(tmp_path / "data").replace("'", "''")
+    script = f"""
+$ErrorActionPreference = 'Stop'
+$DataDir = '{data}'
+function Write-Warn([string]$m) {{ "WARN $m" }}
+{_ps_functions("Set-DirectoryAcl", "Test-OwnedByCurrentUser")}
+{_ps1_function("Protect-BackupsFolder")}
+$backups = Join-Path $DataDir 'backups'
+New-Item -ItemType Directory -Path $backups -Force | Out-Null
+$names = @('claudecode-settings.before-rollback.json', 'claudecode-settings.before-rollback.witness.json', 'guardrail-profiles.json')
+foreach ($n in $names) {{ Set-Content -LiteralPath (Join-Path $backups $n) -Value '{{}}' }}
+foreach ($n in $names) {{ if ((Get-Acl -LiteralPath (Join-Path $backups $n)).AreAccessRulesProtected) {{ throw "precondition: $n is already private" }} }}
+Protect-BackupsFolder
+"DIR=$((Get-Acl -LiteralPath $backups).AreAccessRulesProtected)"
+foreach ($n in $names) {{ "$n=$((Get-Acl -LiteralPath (Join-Path $backups $n)).AreAccessRulesProtected)" }}
+"""
+    result = _run_powershell(script)
+    out = result.stdout + result.stderr
+    assert result.returncode == 0 and "WARN" not in out, out
+    assert "DIR=True" in out, out
+    assert "claudecode-settings.before-rollback.json=True" in out, out
+    assert "claudecode-settings.before-rollback.witness.json=True" in out, out
+    assert "guardrail-profiles.json=False" in out, out
+
+
 @pytest.mark.skipif(POWERSHELL is None, reason="PowerShell is not installed")
 def test_uv_runs_below_normal_priority_so_hook_calls_keep_their_budget(tmp_path: Path) -> None:
     # GAP-1150: while uv built and byte-compiled the environment on every
