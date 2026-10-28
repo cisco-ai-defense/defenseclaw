@@ -679,11 +679,22 @@ func TestSandboxDaemonUnitsMatchTheCommands(t *testing.T) {
 		// A stop or restart of the gateway stops the account's sandboxes
 		// first, so no MicroVM is left in Error (GAP-0281).
 		"ExecStop=-/opt/defenseclaw/bin/defenseclaw-gateway " + sandboxDaemonCmd.Name() + " " + sandboxDaemonStopCmd.Name() + "\n",
+		// Then every MicroVM still running (one a raw openshell client
+		// created or started after the daemon's list) has its disk synced
+		// before the gateway stops (GAP-0380).
+		"ExecStop=-/opt/defenseclaw/bin/defenseclaw-gateway " + sandboxDaemonCmd.Name() + " " + sandboxDaemonSyncCmd.Name() + " --managed\n",
 		"UMask=0022\n", "Restart=on-failure\n",
 	} {
 		if !strings.Contains(gatewaySvc, want) {
 			t.Fatalf("OpenShell gateway unit lacks %q", want)
 		}
+	}
+	if stop, sync := strings.Index(gatewaySvc, "ExecStop=-/opt/defenseclaw/bin/defenseclaw-gateway "+sandboxDaemonCmd.Name()+" "+sandboxDaemonStopCmd.Name()),
+		strings.Index(gatewaySvc, sandboxDaemonSyncCmd.Name()+" --managed"); sync < stop {
+		t.Fatal("the managed gateway unit syncs before the daemon stops its sandboxes: a sandbox started meanwhile is not synced")
+	}
+	if f := sandboxDaemonSyncCmd.Flags().Lookup("managed"); f == nil {
+		t.Fatal("sync-sandboxes has no --managed flag for the managed gateway unit")
 	}
 	// A missing prerequisite (an account without OpenShell) is never
 	// restarted, any other failure only up to the start limit, and the
@@ -729,4 +740,55 @@ func envValue(env []string, key string) string {
 		}
 	}
 	return ""
+}
+
+// The managed gateway unit's stop sync dials the registration the account's
+// sandbox daemon registered its managed gateway under (the managed
+// openshell.gateway.name, the default name when unset or unread), not the
+// openshell CLI's active one, and notes an unsynced sandbox in the daemon's
+// own state directory, whose feed reads it (GAP-0380, GAP-2081).
+func TestManagedGatewayStopSyncsTheDaemonsRegistration(t *testing.T) {
+	if runtime.GOOS != "linux" && runtime.GOOS != "darwin" {
+		t.Skip("managed sandboxes run on Linux and macOS")
+	}
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	ctx := context.Background()
+	named := func(context.Context) (sandboxrelay.DaemonSettings, bool) {
+		var s sandboxrelay.DaemonSettings
+		s.Operational.GatewayName = "corp-gw"
+		return s, true
+	}
+	got, err := managedStopSyncTarget(ctx, runtime.GOOS, named)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, state, err := sandboxDaemonPaths(runtime.GOOS)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.gateway != "corp-gw" || got.dataDir != state || state == "" {
+		t.Fatalf("named gateway: %+v (state %q)", got, state)
+	}
+	for name, settings := range map[string]func(context.Context) (sandboxrelay.DaemonSettings, bool){
+		"unset":      func(context.Context) (sandboxrelay.DaemonSettings, bool) { return sandboxrelay.DaemonSettings{}, true },
+		"unanswered": func(context.Context) (sandboxrelay.DaemonSettings, bool) { return sandboxrelay.DaemonSettings{}, false },
+	} {
+		got, err := managedStopSyncTarget(ctx, runtime.GOOS, settings)
+		if err != nil || got.gateway != openshell.DefaultGatewayName || got.dataDir != state {
+			t.Fatalf("%s: %+v %v", name, got, err)
+		}
+	}
+	// A managed gateway that hangs does not hold the stop past the wait.
+	hung := func(ctx context.Context) (sandboxrelay.DaemonSettings, bool) {
+		<-ctx.Done()
+		return sandboxrelay.DaemonSettings{}, false
+	}
+	start := time.Now()
+	if got, err := managedStopSyncTarget(ctx, runtime.GOOS, hung); err != nil || got.gateway != openshell.DefaultGatewayName {
+		t.Fatalf("hung: %+v %v", got, err)
+	}
+	if d := time.Since(start); d > managedStopSyncSettingsWait+2*time.Second {
+		t.Fatalf("a hung managed gateway held the stop sync %s", d)
+	}
 }
