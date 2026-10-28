@@ -964,12 +964,22 @@ defenseclaw_json_string_field() {
       exit 1
     }
   ')"; then
+    # A caller that only validates the answer reads no value: no sed for it
+    # (defenseclaw_json_answer_valid, issue #1130 / GAP-0267).
+    [ "${3:-}" = --check ] && return 0
     printf '%s' "$extracted" | sed 's/\\"/"/g; s/\\\\/\\/g; s/\\n/ /g; s/\\r/ /g; s/\\t/ /g'
     return 0
   else
     status=$?
     return "$status"
   fi
+}
+
+# defenseclaw_json_answer_valid JSON FIELD returns 0 when JSON is one valid
+# object with exactly one top-level string FIELD: the check of
+# defenseclaw_json_string_field without decoding the value.
+defenseclaw_json_answer_valid() {
+  defenseclaw_json_string_field "${1:-}" "${2:-}" --check
 }
 
 # _dc_python3_usable returns 0 when python3 is on PATH AND can be safely
@@ -1727,6 +1737,14 @@ defenseclaw_gateway_binary() {
   # --folder proves the record and the folders only: the hook-post helper
   # beside a gateway is checked by its caller (GAP-1755).
   [ "${1:-}" = --folder ] && want=6
+  # --folder --set leaves the result in _DC_GATEWAY_BINARY (no command
+  # substitution) and also proves the mode of the hook-post helper beside the
+  # gateway in the same stat (_DC_HOOK_POST_MODE_OK), so the caller runs no
+  # second stat (issue #1130 / GAP-0267).
+  local set_result=0 post=""
+  [ "${1:-}" = --folder ] && [ "${2:-}" = --set ] && set_result=1
+  _DC_GATEWAY_BINARY=""
+  _DC_HOOK_POST_MODE_OK=""
   case "$hook_dir" in /*) ;; *) return 1 ;; esac
   record="${hook_dir}/.gateway-helper"
   [ -f "$record" ] && [ -O "$record" ] && [ ! -L "$record" ] || return 1
@@ -1747,6 +1765,15 @@ defenseclaw_gateway_binary() {
   done
   checked=("$hook_dir" "${hook_dir}/.." "$record" "$home" "$home/.local" "$home/.local/bin")
   [ "$want" = 6 ] || checked+=("$candidate")
+  if [ "$set_result" = 1 ]; then
+    post="${candidate%/*}/defenseclaw-hook-post"
+    if [ -f "$post" ] && [ -x "$post" ] && [ -O "$post" ] && [ ! -L "$post" ]; then
+      checked+=("$post")
+      want=7
+    else
+      post=""
+    fi
+  fi
   modes="$(stat -c %a "${checked[@]}" 2>/dev/null)" ||
     modes="$(stat -f %Lp "${checked[@]}" 2>/dev/null)" || return 1
   while IFS= read -r mode; do
@@ -1755,6 +1782,11 @@ defenseclaw_gateway_binary() {
     count=$((count + 1))
   done <<< "$modes"
   [ "$count" -eq "$want" ] || return 1
+  if [ "$set_result" = 1 ]; then
+    _DC_GATEWAY_BINARY="$candidate"
+    _DC_HOOK_POST_MODE_OK="$post"
+    return 0
+  fi
   printf '%s' "$candidate"
 }
 
@@ -2807,23 +2839,18 @@ defenseclaw_missing_token_next_step() {
 # cap were never inspected). JSON carries NUL only escaped (\u0000), so no
 # real connector payload has one.
 #
-# How the usual tier reads:
-#   - `head -c cap+1` bounds the read: a producer streaming 1GB is cut off
-#     after cap+1 bytes. One call only: BSD head drains the pipe, so a second
-#     probe (`head -c 1`) would always see EOF.
-#   - bash's `read -r -d ''` takes that output with every byte but NUL intact
-#     (trailing newlines too) and returns 0 only when it stopped at a NUL, so
-#     both checks see the raw bytes. It reads a pipe one byte at a time (about
-#     0.2 s per MiB on Linux, 0.3 s on macOS bash 3.2) and starts no program.
+# How it reads: bash's `read -r -d '' -n cap+1` takes at most cap+1 bytes
+# (a producer streaming 1GB is cut off) with every byte but NUL intact
+# (trailing newlines too), and it stops at a NUL, so both checks see the raw
+# bytes. It reads a pipe one byte at a time (about 0.2 s per MiB on Linux,
+# 0.3 s on macOS bash 3.2) and starts no program: no head(1) or python3
+# (issue #1130 / GAP-0267).
 #
 # Usage:
 #   PAYLOAD="$(defenseclaw_read_stdin_capped fail_closed)" || exit 2
 #
-# Returns 0 with the body on stdout. Returns 1 (overflow or NUL) with an
-# empty stdout. If `head` is missing we read the body with a bounded
-# python3 reader (same refusals); only when both head(1) and python3 are
-# absent is the read unbounded (the cap and NUL checks still apply after
-# it), logged as a transport-category event so operators can spot it.
+# Returns 0 with the body on stdout. Returns 3 (overflow, with the first cap
+# bytes on stdout) or 4 (NUL, empty stdout).
 defenseclaw_read_stdin_capped() {
   # The caller passes the outcome its oversized-payload branch applies
   # (fail_open or fail_closed); an older caller without one logs unknown.
@@ -2832,47 +2859,9 @@ defenseclaw_read_stdin_capped() {
   case "$cap" in
     ''|*[!0-9]*) cap=1048576 ;;
   esac
-  # Tier 1 — bounded python3 read, only on a host without head(1), so
-  # python3 is not started on every hook call (issue #1130: it was one of
-  # about 15 programs each Claude Code call ran). python3 reads at most cap+1
-  # bytes and exits 4 on a NUL byte, 3 on overflow; the trailing x keeps
-  # the body's trailing newlines through the command substitution.
-  #
-  # _dc_python3_usable (not a bare `command -v python3`) is the gate:
-  # stock macOS hosts without CLT resolve /usr/bin/python3 to a launcher
-  # stub that would trigger an OS installer dialog on first invocation
-  # and return no body at all.
-  if ! command -v head >/dev/null 2>&1 && _dc_python3_usable; then
-    local _dc_body _dc_rc
-    _dc_body="$(DCHOOK_CAP="$cap" python3 -c \
-'import sys,os
-cap=int(os.environ.get("DCHOOK_CAP","1048576"))
-data=sys.stdin.buffer.read(cap+1)
-if b"\0" in data:
-    sys.exit(4)
-if len(data)>cap:
-    sys.stdout.buffer.write(data[:cap])
-    sys.exit(3)
-sys.stdout.buffer.write(data+b"x")')"
-    _dc_rc=$?
-    case "$_dc_rc" in
-      3) _dc_stdin_refused "$cap" overflow "$overflow_outcome"; printf '%s' "$_dc_body"; return 3 ;;
-      4) _dc_stdin_refused "$cap" nul "$overflow_outcome"; return 4 ;;
-    esac
-    printf '%s' "${_dc_body%x}"
-    return 0
-  fi
-  # Tier 2 — head(1), the usual reader (see above).
-  if command -v head >/dev/null 2>&1; then
-    head -c "$((cap + 1))" | _dc_read_stdin_exact "$cap" "$overflow_outcome"
-    return
-  fi
-  # Tier 3 — neither python3 nor head present (minimal container): the
-  # read is unbounded, logged so operators can spot the missing-tooling
-  # condition; the cap and NUL refusals still apply.
-  defenseclaw_log_hook_failure "${DEFENSECLAW_HOOK_CONNECTOR:-unknown}" "${DEFENSECLAW_HOOK_NAME:-unknown}" \
-    "head(1)/python3 missing; reading stdin unbounded (set DEFENSECLAW_HOOK_MAX_BODY)" \
-    transport "${FAIL_MODE:-closed}" diagnostic
+  # bash reads at most cap+1 bytes itself: no head(1) or python3 process on
+  # any host (issue #1130 / GAP-0267), and the read stays bounded when
+  # neither is installed.
   _dc_read_stdin_exact "$cap" "$overflow_outcome"
 }
 
@@ -2881,7 +2870,10 @@ sys.stdout.buffer.write(data+b"x")')"
 # ${#body} a byte count. See defenseclaw_read_stdin_capped.
 _dc_read_stdin_exact() {
   local cap="$1" outcome="$2" body="" LC_ALL=C
-  if IFS= read -r -d '' body; then
+  # -n cap+1 bounds the read (a producer streaming 1GB is cut off after
+  # cap+1 bytes). read returns 0 when it stopped at a NUL or took all cap+1
+  # bytes, and non-zero at the end of input.
+  if IFS= read -r -d '' -n "$((cap + 1))" body && [ "${#body}" -le "$cap" ]; then
     _dc_stdin_refused "$cap" nul "$outcome"
     return 4
   fi
@@ -3086,7 +3078,19 @@ defenseclaw_user_identity_args() {
       ;;
   esac
 
-  name="$(id -un 2>/dev/null)" || name=""
+  name=""
+  # A local account's name comes from /etc/passwd without a program (issue
+  # #1130 / GAP-0267); a directory account (SSSD, macOS) still asks id.
+  if [ "$secure_client" = 0 ] && [ -n "$uid" ] && [ -r /etc/passwd ]; then
+    local pw_name="" pw_pass="" pw_uid="" pw_rest=""
+    while IFS=: read -r pw_name pw_pass pw_uid pw_rest; do
+      if [ "$pw_uid" = "$uid" ]; then
+        name="$pw_name"
+        break
+      fi
+    done < /etc/passwd
+  fi
+  [ -n "$name" ] || name="$(id -un 2>/dev/null)" || name=""
   # SSSD fully qualified names (alice@realm) report the bare account.
   [ "$secure_client" = 1 ] || name="${name%%@*}"
   case "$name" in
@@ -3310,8 +3314,14 @@ defenseclaw_payload_tool_gate_max_time() {
 # "al<NUL>low" read as "allow" (GAP-1008). No JSON parser here (the strict
 # validator, jq, Python) accepts an unescaped control character, so such an
 # answer now fails as malformed.
+# bash's read -d '' stops at each NUL, so the copy starts no program (issue
+# #1130 / GAP-0267); each stop is one NUL, replaced by U+0001.
 defenseclaw_keep_nul_visible() {
-  tr '\000' '\001'
+  local part="" out="" LC_ALL=C
+  while IFS= read -r -d '' part; do
+    out="${out}${part}"$'\001'
+  done
+  printf '%s' "${out}${part}"
 }
 
 # defenseclaw_gateway_post URL MAX_TIME BODY [CURL_ARGS...]
@@ -3468,7 +3478,8 @@ _dc_gateway_post_once() {
     # (GAP-1755), as the OpenCode and Amp plugins read it.
     local _dc_recovery_home="" _dc_recovery_path="" _dc_secure_meta="" _dc_secure_uid=""
     local _dc_secure_path _dc_secure_mode _dc_post_dir
-    _dc_post_bin="$(defenseclaw_gateway_binary --folder)" || return 1
+    defenseclaw_gateway_binary --folder --set || return 1
+    _dc_post_bin="$_DC_GATEWAY_BINARY"
     _dc_post_dir="${_dc_post_bin%/*}"
     # The small helper has the same connected-socket peer check as the full
     # CLI. An older installation without it keeps the verified CLI path.
@@ -3478,9 +3489,12 @@ _dc_gateway_post_once() {
       _dc_post_bin="${_dc_post_dir}/defenseclaw-hook-post"
       _dc_legacy_post=0
       [ -f "$_dc_post_bin" ] && [ -x "$_dc_post_bin" ] && [ -O "$_dc_post_bin" ] && [ ! -L "$_dc_post_bin" ] || return 1
-      _dc_secure_mode="$(stat -c %a "$_dc_post_bin" 2>/dev/null || stat -f %Lp "$_dc_post_bin" 2>/dev/null)" || return 1
-      case "$_dc_secure_mode" in ""|*[!0-7]*) return 1 ;; esac
-      [ $((8#${_dc_secure_mode} & 8#022)) -eq 0 ] || return 1
+      # The folder check already proved this helper's mode in its stat.
+      if [ "${_DC_HOOK_POST_MODE_OK:-}" != "$_dc_post_bin" ]; then
+        _dc_secure_mode="$(stat -c %a "$_dc_post_bin" 2>/dev/null || stat -f %Lp "$_dc_post_bin" 2>/dev/null)" || return 1
+        case "$_dc_secure_mode" in ""|*[!0-7]*) return 1 ;; esac
+        [ $((8#${_dc_secure_mode} & 8#022)) -eq 0 ] || return 1
+      fi
     else
       # An older installer's roll-forward restores its saved installer folder
       # but does not know this new binary name. That folder carries a checked
