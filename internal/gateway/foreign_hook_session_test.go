@@ -663,11 +663,6 @@ func publishForeignHookRemovalsForTest(t *testing.T, guardianDir string, identit
 // account that started after that is allowed, and the other accounts are
 // never denied or refused.
 func TestForeignHookSessionRemovalCommitLandsUnderSustainedExchanges(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		// Timing-flaky on the Windows runner: alice's allow can be written
-		// after the guardian took her removal lock.
-		t.Skip("GAP-1729: known 1.0.4 issue, fixed in 1.0.5")
-	}
 	guardianDir := foreignHookGuardianDirForTest(t)
 	api, _, _ := newUserScopedTestServer(t, true, &userScopedTestLedger{}, nil)
 	dataDir := api.configDataDir()
