@@ -975,9 +975,13 @@ func correlationRetentionDeleteStatement(class RetentionTableClass) (string, err
 			ORDER BY relationship.last_seen_time_unix_nano, relationship.relationship_id LIMIT ?
 		)`, nil
 	case RetentionCorrelationEvents:
-		// One receipt test per indexed column, for the same reason as the
+		// One test per indexed column, for the same reason as the
 		// relationship batch: an OR of two columns made SQLite scan the
-		// receipts for every candidate event (GAP-1862).
+		// receipts for every candidate event (GAP-1862). The pending
+		// operations and relationships get the same split: statistics that
+		// call the terminal column one value (every open operation has it
+		// NULL) made SQLite scan the operations once per candidate while
+		// retention held the writer at gateway start (GAP-1979).
 		return `DELETE FROM correlation_events WHERE rowid IN (
 			SELECT event.rowid FROM correlation_events AS event
 			WHERE NOT EXISTS (
@@ -993,7 +997,8 @@ func correlationRetentionDeleteStatement(class RetentionTableClass) (string, err
 			AND NOT EXISTS (SELECT 1 FROM correlation_cursors AS cursor
 				WHERE cursor.last_semantic_event_id=event.semantic_event_id)
 			AND NOT EXISTS (SELECT 1 FROM correlation_pending_operations AS operation WHERE
-				operation.start_semantic_event_id=event.semantic_event_id OR
+				operation.start_semantic_event_id=event.semantic_event_id)
+			AND NOT EXISTS (SELECT 1 FROM correlation_pending_operations AS operation WHERE
 				operation.terminal_semantic_event_id=event.semantic_event_id)
 			AND NOT EXISTS (SELECT 1 FROM correlation_relationship_evidence AS evidence
 				WHERE evidence.semantic_event_id=event.semantic_event_id)
@@ -1004,10 +1009,13 @@ func correlationRetentionDeleteStatement(class RetentionTableClass) (string, err
 				WHERE observation.semantic_event_id=event.semantic_event_id
 			)
 			AND NOT EXISTS (SELECT 1 FROM correlation_relationships AS relationship WHERE
-				(relationship.from_kind='semantic_event' AND relationship.from_id=event.semantic_event_id) OR
-				(relationship.to_kind='semantic_event' AND relationship.to_id=event.semantic_event_id) OR
-				(relationship.from_kind='logical_event' AND relationship.from_id=event.logical_group_id) OR
-				(relationship.to_kind='logical_event' AND relationship.to_id=event.logical_group_id))
+				relationship.from_kind='semantic_event' AND relationship.from_id=event.semantic_event_id)
+			AND NOT EXISTS (SELECT 1 FROM correlation_relationships AS relationship WHERE
+				relationship.to_kind='semantic_event' AND relationship.to_id=event.semantic_event_id)
+			AND NOT EXISTS (SELECT 1 FROM correlation_relationships AS relationship WHERE
+				relationship.from_kind='logical_event' AND relationship.from_id=event.logical_group_id)
+			AND NOT EXISTS (SELECT 1 FROM correlation_relationships AS relationship WHERE
+				relationship.to_kind='logical_event' AND relationship.to_id=event.logical_group_id)
 			ORDER BY event.received_time_unix_nano, event.semantic_event_id LIMIT ?
 		)`, nil
 	default:
