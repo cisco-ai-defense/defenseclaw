@@ -865,23 +865,94 @@ func provenBashAggregateStateWrite(request trustedActionRequest) bool {
 	return provenStateMutationPath(actionfacts.Analyze(input), twin)
 }
 
-// cmdSlashCBody matches cmd [/d] [/q] [/s] /c BODY, the way an agent's
-// PowerShell or Git Bash call hands a cmd command line to cmd.exe.
-var cmdSlashCBody = regexp.MustCompile(`(?is)^\s*"?(?:[a-z]:[\\/](?:[^"<>|&^%!\r\n]*[\\/])?)?cmd(?:\.exe)?"?((?:\s+/[dqs])*)\s+/c\s+(.+?)\s*$`)
+// cmdProgramWord finds a word that starts cmd.exe in an agent's shell
+// command: cmd or cmd.exe, bare or with a (quoted) path, %ComSpec% and
+// PowerShell's $env:ComSpec / ${env:ComSpec}, at the start of the command or
+// of a statement, after the PowerShell call operator & or a pipe.
+var cmdProgramWord = regexp.MustCompile(`(?i)(?:^|[\s;|&(){}])(?:"[^"\r\n]*?[\\/]|"|[^\s"';|&(){}]*[\\/])?(?:cmd(?:\.exe)?|\$\{?env:comspec\}?|%comspec%)"?`)
 
-// provenCMDSlashCStateWrite judges the body of a cmd /c call as the cmd
-// command it is (GAP-2408). Without /d the parser keeps cmd /c opaque, because
-// a Command Processor AutoRun entry may run first; AutoRun cannot stop the
-// body from running, so a body that writes, empties, moves or deletes
+// cmdRunSwitch finds the /c or /k switch that hands the rest of the line to
+// cmd: /c, /k and the Git Bash spelling //c, //k (MSYS turns //c into /c),
+// after any other switch (/d /q /s /u /v:on /e:on) or inside a PowerShell
+// Start-Process -ArgumentList string.
+var cmdRunSwitch = regexp.MustCompile(`(?i)(?:^|[\s'"])/{1,2}[ck](?:[\s'"]|$)`)
+
+// cmdInvocationBodies returns the command lines a shell command hands to
+// cmd.exe through cmd /c or cmd /k, read after the outer shell's own quote
+// removal: a single-quoted (PowerShell, Git Bash) body is its text, a
+// double-quoted one loses its first and last quote as cmd /c does, and a body
+// inside a Start-Process argument string ends at its closing quote. Each
+// reading is returned; the state-write proof judges every one of them.
+func cmdInvocationBodies(command string) []string {
+	var bodies []string
+	add := func(body string) {
+		body = strings.TrimSpace(body)
+		if body != "" && !slices.Contains(bodies, body) {
+			bodies = append(bodies, body)
+		}
+	}
+	for _, loc := range cmdProgramWord.FindAllStringIndex(command, -1) {
+		rest := command[loc[1]:]
+		if rest != "" && !strings.ContainsRune(" \t\r\n/'\"", rune(rest[0])) {
+			continue // cmdlet, cmdkey, ...: another program.
+		}
+		run := cmdRunSwitch.FindStringIndex(rest)
+		if run == nil {
+			continue
+		}
+		opening := byte(0)
+		if c := rest[run[0]]; c == '\'' || c == '"' {
+			opening = c
+		}
+		body := rest[run[1]:]
+		if c := rest[run[1]-1]; c == '\'' || c == '"' {
+			body = rest[run[1]-1:]
+		}
+		if opening != 0 {
+			// '/c BODY' inside an argument string (Start-Process).
+			if end := strings.IndexByte(body, opening); end >= 0 {
+				add(body[:end])
+			}
+			add(body)
+			continue
+		}
+		add(body)
+		trimmed := strings.TrimSpace(body)
+		if trimmed == "" {
+			continue
+		}
+		quote := trimmed[0]
+		if quote != '\'' && quote != '"' {
+			continue
+		}
+		if end := strings.IndexByte(trimmed[1:], quote); end >= 0 {
+			// The outer shell's quoted word.
+			add(trimmed[1 : end+1])
+		}
+		if last := strings.LastIndexByte(trimmed, quote); last > 0 {
+			// cmd /c strips the first and the last quote of the line.
+			add(trimmed[1:last] + trimmed[last+1:])
+		}
+	}
+	return bodies
+}
+
+// provenCMDSlashCStateWrite judges the body of a cmd /c or cmd /k call as
+// the cmd command it is (GAP-2408). Without /d the parser keeps cmd /c opaque,
+// because a Command Processor AutoRun entry may run first; AutoRun cannot stop
+// the body from running, so a body that writes, empties, moves or deletes
 // DefenseClaw state (cmd /c "type nul > %USERPROFILE%\.defenseclaw\config.yaml",
-// cmd /c ren state x) still does. Only the state-write proof reads the twin.
+// & cmd /c, cmd //c from Git Bash, cmd /v:on /c, cmd /k, $env:ComSpec /c,
+// Start-Process cmd -ArgumentList '/c ...') still does. Only the state-write
+// proof reads the twin.
 func provenCMDSlashCStateWrite(request trustedActionRequest) bool {
 	home := request.Input.ActiveHome
+	windowsHome := len(home) >= 2 && home[1] == ':'
 	switch request.Input.DialectHint {
 	case actionfacts.DialectCMD, actionfacts.DialectPowerShell:
-	case "":
-		// No grammar was picked for the call; only a Windows home has cmd.
-		if len(home) < 2 || home[1] != ':' {
+	case "", actionfacts.DialectPOSIX:
+		// No grammar or the Git Bash one: only a Windows home has cmd.
+		if !windowsHome {
 			return false
 		}
 	default:
@@ -891,25 +962,27 @@ func provenCMDSlashCStateWrite(request trustedActionRequest) bool {
 	if !known {
 		return false
 	}
-	for depth := 0; depth < 3; depth++ {
-		match := cmdSlashCBody.FindStringSubmatch(command)
-		if match == nil {
-			return false
+	const maxReadings = 24
+	pending, readings := []string{command}, 0
+	for depth := 0; depth < 3 && len(pending) > 0; depth++ {
+		var next []string
+		for _, outer := range pending {
+			for _, body := range cmdInvocationBodies(outer) {
+				if readings++; readings > maxReadings {
+					return false
+				}
+				input := request.Input
+				input.Command, input.Args, input.Argv = body, nil, nil
+				input.DialectHint = actionfacts.DialectCMD
+				twin := request
+				twin.Input = input
+				if provenStateMutationPath(actionfacts.Analyze(input), twin) {
+					return true
+				}
+				next = append(next, body)
+			}
 		}
-		body := match[2]
-		if len(body) >= 2 && body[0] == '"' && body[len(body)-1] == '"' {
-			// cmd /c strips the first and the last quote of the line.
-			body = body[1 : len(body)-1]
-		}
-		input := request.Input
-		input.Command, input.Args, input.Argv = body, nil, nil
-		input.DialectHint = actionfacts.DialectCMD
-		twin := request
-		twin.Input = input
-		if provenStateMutationPath(actionfacts.Analyze(input), twin) {
-			return true
-		}
-		command = body
+		pending = next
 	}
 	return false
 }
