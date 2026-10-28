@@ -306,6 +306,10 @@ type Options struct {
 	// requestFacts are the headers of a call that cost work to compute,
 	// computed once for all of its tries (doRequest).
 	requestFacts *hookRequestFacts
+	// perUserLoopbackDial is set when Run made the per-user loopback client
+	// itself (newPerUserHookHTTPClient), so the listener table describes the
+	// endpoint the call dials (perUserInstallWindowWithoutListener).
+	perUserLoopbackDial bool
 	// HookContractID is the finite Setup-selected connector contract bound into
 	// the protected native Windows command. Codex uses it to prevent local
 	// failure paths from backfilling newer lifecycle controls into legacy tiers.
@@ -715,6 +719,7 @@ func sendToGateway(ctx context.Context, opts Options, sp spec, failMode string, 
 			if err != nil {
 				return failUnreachable(opts, sp, "closed", "per-user gateway listener ownership could not be verified: "+err.Error())
 			}
+			opts.perUserLoopbackDial = true
 		}
 	}
 
@@ -933,6 +938,13 @@ func doRequest(ctx context.Context, opts Options, sp spec, failMode string, payl
 	if !opts.ManagedEnterprise {
 		// Every try of a per-user hook.
 		send = sendConnectedBy
+	}
+	if perUserInstallWindowWithoutListener(opts) {
+		// This account's installer holds the lock and its gateway is not
+		// listening: the call gets the install-window answer at once, not
+		// after a dial Windows refuses only after its SYN retries and a
+		// restart wait the installer outlasts (GAP-1150).
+		return failUnreachable(withPerUserOutage(opts), sp, failMode, perUserGatewayRestartingReason)
 	}
 	resp, err := send()
 	if !opts.ManagedEnterprise {
