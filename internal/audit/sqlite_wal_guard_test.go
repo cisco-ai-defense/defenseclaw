@@ -417,12 +417,20 @@ func TestCheckpointWALIfLargeTakesTheWriterOnlyInAnIdleGap(t *testing.T) {
 	}
 }
 
+// floodWrite is one audit write of floodTheStore: when it started and how long
+// LogEvent took.
+type floodWrite struct {
+	started time.Time
+	took    time.Duration
+}
+
 // floodTheStore commits an audit row every millisecond until the returned stop
-// runs, so the store never has an idle gap.
-func floodTheStore(t *testing.T, store *Store) (stop func(), longestWrite *atomic.Int64) {
+// runs, so the store never has an idle gap. writes returns every write made.
+func floodTheStore(t *testing.T, store *Store) (stop func(), writes func() []floodWrite) {
 	t.Helper()
 	done := make(chan struct{})
-	longestWrite = new(atomic.Int64)
+	var mu sync.Mutex
+	var made []floodWrite
 	var flood sync.WaitGroup
 	flood.Add(1)
 	go func() {
@@ -438,17 +446,30 @@ func floodTheStore(t *testing.T, store *Store) (stop func(), longestWrite *atomi
 				t.Errorf("flood LogEvent: %v", err)
 				return
 			}
-			for elapsed := time.Since(started).Nanoseconds(); ; {
-				old := longestWrite.Load()
-				if elapsed <= old || longestWrite.CompareAndSwap(old, elapsed) {
-					break
-				}
-			}
+			took := time.Since(started)
+			mu.Lock()
+			made = append(made, floodWrite{started: started, took: took})
+			mu.Unlock()
 			time.Sleep(time.Millisecond)
 		}
 	}()
 	var once sync.Once
-	return func() { once.Do(func() { close(done); flood.Wait() }) }, longestWrite
+	return func() { once.Do(func() { close(done); flood.Wait() }) }, func() []floodWrite {
+		mu.Lock()
+		defer mu.Unlock()
+		return append([]floodWrite(nil), made...)
+	}
+}
+
+// longestFloodWrite is the longest of writes that started in [from, to].
+func longestFloodWrite(writes []floodWrite, from, to time.Time) time.Duration {
+	var longest time.Duration
+	for _, write := range writes {
+		if !write.started.Before(from) && !write.started.After(to) {
+			longest = max(longest, write.took)
+		}
+	}
+	return longest
 }
 
 // GAP-1303: a persistent final copy three times slower than the ordinary hold
@@ -456,6 +477,12 @@ func floodTheStore(t *testing.T, store *Store) (stop func(), longestWrite *atomi
 func TestCheckpointWALIfLargeBoundsALogOverTheLimitUnderAFlood(t *testing.T) {
 	store, cleanup := newTestStore(t)
 	defer cleanup()
+	// What an ordinary commit takes on this runner under this flood, before
+	// any WAL pass runs.
+	stopOrdinary, ordinaryWrites := floodTheStore(t, store)
+	time.Sleep(200 * time.Millisecond)
+	stopOrdinary()
+	ordinary := longestFloodWrite(ordinaryWrites(), time.Time{}, time.Now())
 	logWALGuardEvents(t, store, 200)
 	// Scale the measured frames to the production band between the emergency
 	// arm and the 256 MiB alarm without allocating a 176 MiB fixture.
@@ -471,9 +498,11 @@ func TestCheckpointWALIfLargeBoundsALogOverTheLimitUnderAFlood(t *testing.T) {
 	original := walWriterPhaseHook
 	walWriterPhaseHook = func(context.Context) { time.Sleep(slowCopy) }
 	t.Cleanup(func() { walWriterPhaseHook = original })
-	stop, longestWrite := floodTheStore(t, store)
+	stop, floodWrites := floodTheStore(t, store)
 	defer stop()
+	passStarted := time.Now()
 	pass, err := store.CheckpointWALIfLarge(context.Background(), 0, testWALWriterBudget)
+	passEnded := time.Now()
 	stop()
 	if pass.LogBytes < WALEmergencyArmBytes || pass.LogBytes >= WALHardLimitBytes {
 		t.Fatalf("measured log = %d bytes; want emergency hold armed before the %d-byte ceiling at %d bytes", pass.LogBytes, WALHardLimitBytes, WALEmergencyArmBytes)
@@ -484,8 +513,17 @@ func TestCheckpointWALIfLargeBoundsALogOverTheLimitUnderAFlood(t *testing.T) {
 	if pass.WriterHeld < slowCopy || pass.WriterHeld > time.Second {
 		t.Fatalf("emergency catch-up held the writer for %v; want the %v copy inside a fixed 1s cap", pass.WriterHeld, slowCopy)
 	}
-	if got := time.Duration(longestWrite.Load()); got >= 500*time.Millisecond {
-		t.Fatalf("hook audit write waited %v during the continuous flood; want under 500ms", got)
+	// The contract: a hook write that arrives during the pass waits for the
+	// writer hold the pass reports (inside the fixed 1s cap, checked above)
+	// plus its own commit and at most one commit queued ahead of it. A commit
+	// is the longest ordinary one measured above, never under 100ms
+	// (GAP-2407: a fixed 500ms total failed on a slow Windows runner whose
+	// commits, not the hold, took the time). A write that waits for more than
+	// one hold, or for the copy itself, still fails.
+	duringPass := longestFloodWrite(floodWrites(), passStarted, passEnded)
+	t.Logf("writer held %v; longest write during the pass %v, longest ordinary %v", pass.WriterHeld, duringPass, ordinary)
+	if allowed := pass.WriterHeld + 2*max(ordinary, 100*time.Millisecond); duringPass >= allowed {
+		t.Fatalf("hook audit write waited %v during the pass; want under %v (writer held %v, longest ordinary commit %v)", duringPass, allowed, pass.WriterHeld, ordinary)
 	}
 	if store.WALOverLimit() {
 		t.Fatal("a bounded catch-up that restarted the log left the store marked over the WAL limit")
