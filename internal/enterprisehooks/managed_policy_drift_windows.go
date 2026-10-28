@@ -29,9 +29,18 @@ import (
 // it never invents a policy. It reports whether it wrote the file; nothing
 // changes when the drop-in matches its record, when no record exists, or
 // when no rendering matches (the error says so).
+//
+// The guardian runs it as LocalSystem. Setup /repair and `enterprise windows
+// repair` run it in the administrator's elevated token, before their
+// lifecycle snapshot: the drop-in is written with its Administrators owner
+// and DACL either way. It refused every token but LocalSystem, so an
+// administrator's repair with the guardian stopped kept the changed drop-in
+// and failed 1603 (GAP-2336).
 func RestoreWindowsClaudeManagedPolicyDrift() (bool, error) {
 	if err := windowsEnterpriseMutationIdentityCheck(); err != nil {
-		return false, err
+		if requireWindowsClaudeTeardownAdministrator() != nil {
+			return false, err
+		}
 	}
 	restored := false
 	err := windowsClaudeManagedPolicyTransaction(func() error {
@@ -125,4 +134,35 @@ func renderRecordedWindowsClaudeManagedPolicy(record windowsClaudeManagedPolicyS
 		}
 	}
 	return nil, fmt.Errorf("enterprise hooks: no Claude Code policy this release renders for %s has the digest its ownership record keeps, so the changed drop-in is left as it is", record.HookExecutable)
+}
+
+// WindowsClaudeManagedPolicyDrift names DefenseClaw's own Claude Code drop-in
+// when it no longer has the digest its ownership record keeps: an
+// administrator or a tool edited or deleted it, so some DefenseClaw hook
+// entries may be missing until the guardian, repair or reconcile puts it
+// back. It only reads. It returns "" when there is no trusted record, when
+// the drop-in matches it, or when the files cannot be read; removed says the
+// drop-in is gone.
+func WindowsClaudeManagedPolicyDrift() (path string, removed bool) {
+	policyPath, err := windowsClaudeManagedPolicyPath()
+	if err != nil {
+		return "", false
+	}
+	statePath := filepath.Join(filepath.Dir(policyPath), windowsClaudeManagedStateFile)
+	state, err := snapshotWindowsManagedFileWithLimit(statePath, windowsClaudeManagedStateLimit)
+	if err != nil || !state.existed || windowsManagedPolicyFileTrustCheck(statePath) != nil {
+		return "", false
+	}
+	var record windowsClaudeManagedPolicyState
+	if decodeWindowsClaudeManagedPolicyState(state.data, &record) != nil || record.PolicySHA256 == "" {
+		return "", false
+	}
+	policy, err := snapshotWindowsManagedFileWithLimit(policyPath, windowsClaudeManagedPolicyLimit)
+	if err != nil {
+		return "", false
+	}
+	if policy.existed && windowsManagedPolicyDigest(policy.data) == record.PolicySHA256 {
+		return "", false
+	}
+	return policyPath, !policy.existed
 }

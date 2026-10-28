@@ -668,8 +668,10 @@ func runWindowsEnterpriseStandaloneAction(
 		}
 	}
 	hookRuntimeRepaired := ""
+	claudeDropInRepaired := ""
 	if action == "repair" && windowsEnterpriseIsElevated() {
 		hookRuntimeRepaired = repairWindowsEnterpriseHookRuntimeAccess()
+		claudeDropInRepaired = repairWindowsEnterpriseClaudeDropIn()
 	}
 	configReplaced := ""
 	if action == "repair" || action == "upgrade" {
@@ -690,6 +692,9 @@ func runWindowsEnterpriseStandaloneAction(
 	bundleRestore.apply(result)
 	if hookRuntimeRepaired != "" {
 		result.Changes = append(result.Changes, hookRuntimeRepaired)
+	}
+	if claudeDropInRepaired != "" {
+		result.Changes = append(result.Changes, claudeDropInRepaired)
 	}
 	if configReplaced != "" {
 		result.Changes = append(result.Changes, configReplaced)
@@ -1518,6 +1523,7 @@ func applyWindowsEnterpriseInstallerReport(
 		applyWindowsEnterpriseAccountFolders(result)
 		if result.Action == "status" || result.Action == "verify" {
 			applyWindowsEnterpriseHookRuntimeAccess(result)
+			applyWindowsEnterpriseClaudeDropInDrift(result)
 			applyWindowsEnterpriseGuardianTargets(result)
 		}
 		applyWindowsEnterpriseDiscoveryHomeDirs(result)
@@ -3893,6 +3899,9 @@ func runWindowsEnterpriseStandaloneEnsureOnce(
 		}
 		actionOpts = *windowsEnterpriseRepairRecordingOptions("repair", &actionOpts)
 		if repaired := repairWindowsEnterpriseHookRuntimeAccess(); repaired != "" {
+			result.Changes = append(result.Changes, repaired)
+		}
+		if repaired := repairWindowsEnterpriseClaudeDropIn(); repaired != "" {
 			result.Changes = append(result.Changes, repaired)
 		}
 	}
