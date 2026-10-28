@@ -320,7 +320,13 @@ func NewSandboxDaemon(opts SandboxDaemonOptions) (*SandboxDaemon, error) {
 		home: accountHome(uid), openShell: opts.openShell,
 	}
 	if d.openShell == nil {
-		d.openShell = newAccountOpenShell(runtime.GOOS, uid, d.home, opts.Logf)
+		ao := newAccountOpenShell(runtime.GOOS, uid, d.home, opts.Logf)
+		ao.recordUnsynced = func(names []string) {
+			if err := manager.RecordUnsyncedStops(opts.StateDir, names, time.Now()); err != nil && opts.Logf != nil {
+				opts.Logf("could not record the unsynced stop for the sandbox feed: %v", err)
+			}
+		}
+		d.openShell = ao
 	}
 	d.settingsAt.Store(time.Now().UnixNano())
 	// The registrations file is the user's own. Until the managed gateway
@@ -1862,9 +1868,12 @@ func (d *SandboxDaemon) managedStatusFor(ctx context.Context, s sandboxrelay.Dae
 		me, _, err := d.managedExplain(ctx, sandboxapi.ExplainRequest{Harness: connector}, nil)
 		if err != nil {
 			out.Allowed = false
+			if out.PolicyUnread == "" {
+				out.PolicyUnread, out.PolicyLimited = managedPolicyUnread(err)
+			}
 			continue
 		}
-		allowed := managedExplainAllowsHarness(me, connector)
+		allowed := managedExplainAllowsHarness(me, connector) && managedPostureFatal(me) == nil
 		if !allowed {
 			out.Allowed = false
 			out.DeniedHarnesses = append(out.DeniedHarnesses, connector)
@@ -1878,6 +1887,17 @@ func (d *SandboxDaemon) managedStatusFor(ctx context.Context, s sandboxrelay.Dae
 		}
 	}
 	return out
+}
+
+// managedPolicyUnread is why a status's managed explain gave no answer, as
+// the user may read it, and whether the caller's request limit refused it
+// (GAP-2203): doctor then names the limit, not a failed policy.
+func managedPolicyUnread(err error) (string, bool) {
+	var apiErr *sandboxapi.Error
+	if errors.As(err, &apiErr) {
+		return sandboxapi.DisplayText(apiErr.Message), apiErr.Status == http.StatusTooManyRequests
+	}
+	return sandboxapi.DisplayText(err.Error()), false
 }
 
 // managedViewTimeout bounds the managed gateway calls a status makes.
@@ -1971,6 +1991,25 @@ func managedExplainAllowsHarness(me sandboxapi.ManagedExplain, name string) bool
 	return slices.ContainsFunc(me.AllowedHarnesses, func(h string) bool {
 		return config.NormalizeConnectorName(h) == name
 	})
+}
+
+// managedPostureFatal is the first fatal violation of the run a policy
+// view resolves (ManagedExplain.Posture), nil without one: a run the
+// organization's pack forbids (its harness.allowed leaves the agent out,
+// for one) is refused at its create even when sandbox.allowed and the
+// agent allowlist let it through, so ready and status must not call it
+// allowed either (GAP-0812).
+func managedPostureFatal(me sandboxapi.ManagedExplain) *sandboxapi.Violation {
+	if me.Posture == nil {
+		return nil
+	}
+	for i := range me.Posture.Violations {
+		if me.Posture.Violations[i].Fatal {
+			v := me.Posture.Violations[i]
+			return &v
+		}
+	}
+	return nil
 }
 
 // managedExplainFloor is the organization floor a managed explain names,
@@ -2169,7 +2208,7 @@ func (d *SandboxDaemon) stoppedAfterFailedStop(ctx context.Context, name string,
 func (c *managedSandboxController) List(ctx context.Context) ([]sandboxapi.Sandbox, error) {
 	c.d.confirmIfClosed(ctx)
 	list, err := c.Manager.List(ctx)
-	if err == nil && slices.ContainsFunc(list, unconfirmedSandbox) && c.d.openShellForKept(ctx, false) == nil {
+	if err == nil && slices.ContainsFunc(list, unconfirmedSandbox) && c.mayReadyForRead() && c.d.openShellForKept(ctx, false) == nil {
 		list, err = c.Manager.List(ctx)
 	}
 	for i := range list {
@@ -2184,7 +2223,7 @@ func (c *managedSandboxController) List(ctx context.Context) ([]sandboxapi.Sandb
 func (c *managedSandboxController) Get(ctx context.Context, name string) (*sandboxapi.Sandbox, error) {
 	c.d.confirmIfClosed(ctx)
 	sb, err := c.Manager.Get(ctx, name)
-	if err == nil && sb != nil && unconfirmedSandbox(*sb) && c.d.openShellForKept(ctx, false) == nil {
+	if err == nil && sb != nil && unconfirmedSandbox(*sb) && c.mayReadyForRead() && c.d.openShellForKept(ctx, false) == nil {
 		sb, err = c.Manager.Get(ctx, name)
 	}
 	if err == nil && sb != nil && sandboxPolicyConfirmAsked(ctx) && sandboxMayRun(sb.Phase) && c.d.confirmRunningView(ctx, name) {
@@ -2195,6 +2234,16 @@ func (c *managedSandboxController) Get(ctx context.Context, name string) (*sandb
 		c.registrationView(sb)
 	}
 	return sb, err
+}
+
+// mayReadyForRead reports whether a read (List, Get) may start the account's
+// OpenShell gateway to confirm a phase: not while the organization has
+// sandboxes off, where the gateway cannot start without the managed setup
+// and a kept sandbox's list waited out its start (GAP-1421, the GAP-0720
+// class: a read-only view never waits for an unavailable gateway). The
+// record's phase is the answer then.
+func (c *managedSandboxController) mayReadyForRead() bool {
+	return c.d.currentSettings().Enabled
 }
 
 // unconfirmedSandbox is a sandbox whose phase the gateway could not say.
@@ -2262,7 +2311,7 @@ const (
 // view the gateway did not answer fails the ready closed with its reason
 // (the earliest candidate's, so the daemon's own agent's first); else the
 // organization's refusal stands.
-func (d *SandboxDaemon) readyPolicyRefusal(ctx context.Context, candidates []string) error {
+func (d *SandboxDaemon) readyPolicyRefusal(ctx context.Context, candidates []string, pack string) error {
 	askCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	type answer struct {
@@ -2284,7 +2333,7 @@ func (d *SandboxDaemon) readyPolicyRefusal(ctx context.Context, candidates []str
 					answers <- answer{index: index, err: err}
 					continue
 				}
-				allowed, sandboxes, err := d.readyPolicyView(askCtx, candidates[index])
+				allowed, sandboxes, err := d.readyPolicyView(askCtx, candidates[index], pack)
 				answers <- answer{index: index, allowed: allowed, sandboxes: sandboxes, err: err}
 			}
 		}()
@@ -2318,23 +2367,68 @@ func (d *SandboxDaemon) readyPolicyRefusal(ctx context.Context, candidates []str
 // the gateway's admission limit refused (429) is asked again within that
 // bound; when the bound ends first, the 429 is the view's error, which fails
 // the ready closed unless another agent is allowed.
-func (d *SandboxDaemon) readyPolicyView(ctx context.Context, name string) (allowed, sandboxes bool, err error) {
+//
+// The view decides only once it is settled. A provisional one (the
+// caller's directory lookup had not finished, so the default profile
+// answered) can still change, also to a group the organization denies, and
+// the create's resolve waits for that lookup (sandboxrelay.
+// ResolveIdentityWait): the ready asks again until the view is settled or
+// that wait is over, and then goes by the view as the create would
+// (GAP-0820). A view whose run the organization's pack forbids
+// (managedPostureFatal) refuses the ready with that violation (GAP-0812).
+func (d *SandboxDaemon) readyPolicyView(ctx context.Context, name, pack string) (allowed, sandboxes bool, err error) {
+	settled := time.Now().Add(sandboxrelay.ResolveIdentityWait)
+	for {
+		view, err := d.readyPolicyViewOnce(ctx, name, pack)
+		if err != nil {
+			return false, false, err
+		}
+		if !view.Provisional || !time.Now().Before(settled) {
+			allowed := managedExplainAllowsHarness(view, name)
+			if v := managedPostureFatal(view); v != nil && allowed {
+				return false, view.Allowed, &sandboxapi.Error{Code: sandboxapi.CodeAdminViolation, Status: http.StatusForbidden,
+					Message: firstNonEmpty(v.Message, "Your organization doesn't allow this agent in a sandbox."), Detail: v.Detail, Violation: v}
+			}
+			return allowed, view.Allowed, nil
+		}
+		timer := time.NewTimer(readyProvisionalPoll)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return false, false, ctx.Err()
+		case <-timer.C:
+		}
+	}
+}
+
+// readyProvisionalPoll paces readyPolicyView's asks while the view is
+// provisional; the managed gateway's explain itself waits a moment for the
+// lookup it runs.
+var readyProvisionalPoll = 500 * time.Millisecond
+
+// readyPolicyViewOnce is one policy view of the agent name for a ready,
+// within one view's bound (managedViewTimeout). A view the gateway's
+// admission limit refused (429) is asked again within that bound; when the
+// bound ends first, the 429 is the view's error.
+func (d *SandboxDaemon) readyPolicyViewOnce(ctx context.Context, name, pack string) (sandboxapi.ManagedExplain, error) {
 	viewCtx, cancel := context.WithTimeout(ctx, managedViewTimeout)
 	defer cancel()
 	wait := readyViewRetryFirst
 	for {
-		view, _, viewErr := d.managedExplain(viewCtx, sandboxapi.ExplainRequest{Harness: name}, nil)
+		// The run's own pack: an organization pack the run names may allow
+		// an agent the default pack leaves out (GAP-1551).
+		view, _, viewErr := d.managedExplain(viewCtx, sandboxapi.ExplainRequest{Harness: name, Pack: pack}, nil)
 		if viewErr == nil {
-			return managedExplainAllowsHarness(view, name), view.Allowed, nil
+			return view, nil
 		}
 		if sandboxapi.AsError(viewErr).Status != http.StatusTooManyRequests {
-			return false, false, viewErr
+			return sandboxapi.ManagedExplain{}, viewErr
 		}
 		timer := time.NewTimer(wait)
 		select {
 		case <-viewCtx.Done():
 			timer.Stop()
-			return false, false, viewErr
+			return sandboxapi.ManagedExplain{}, viewErr
 		case <-timer.C:
 		}
 		wait = min(2*wait, readyViewRetryMax)
@@ -2373,7 +2467,7 @@ func (c *managedSandboxController) Ready(ctx context.Context, req sandboxapi.Rea
 		// before setup mode installs anything for a run that cannot start.
 		if uid, held := d.openShell.PortHolder(s); held && uid != d.uid {
 			err = accountBusyError()
-		} else if err = d.readyPolicyRefusal(ctx, candidates); err == nil {
+		} else if err = d.readyPolicyRefusal(ctx, candidates, req.Pack); err == nil {
 			// Status reports unavailable until this process holds both
 			// listeners. Bind them before setup installs anything, so a
 			// busy port refuses Ready without changing the account.

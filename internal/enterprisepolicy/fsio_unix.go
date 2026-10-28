@@ -752,6 +752,23 @@ func restorePublishedDirs(opts Options, path string) ([]string, error) {
 	return restored, nil
 }
 
+// restoreWritablePublishedDirs is restorePublishedDirs for a published file
+// with a group- or other-writable directory above it, the one fault that
+// makes reading the file fail (validateTrustedElement). It changes nothing
+// while no directory above path is writable by other accounts or path does
+// not exist.
+func restoreWritablePublishedDirs(opts Options, path string) ([]string, error) {
+	if _, err := os.Lstat(platformPath(opts, path)); err != nil {
+		return nil, nil
+	}
+	for _, dir := range publishedDirs(opts, path) {
+		if info, err := os.Lstat(dir); err == nil && info.IsDir() && info.Mode().Perm()&0o022 != 0 {
+			return restorePublishedDirs(opts, path)
+		}
+	}
+	return nil, nil
+}
+
 // exposedByBroadening lists the entries of dir, other than the names in
 // keep, that an account could open once dir gives search to a class that has
 // none now: an entry with any permission bit for that class. group is the

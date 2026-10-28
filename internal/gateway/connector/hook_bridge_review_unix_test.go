@@ -311,6 +311,69 @@ defenseclaw_gateway_post "http://${API_ADDR}/api/v1/codex/hook" 2 '{}' \
 	}
 }
 
+// GNU stat takes -c and BSD stat (macOS) takes -f. The hooks learn the
+// spelling once per process: a stat that refuses -c costs one failed launch,
+// not one per check (GAP-1755). The fake stat below behaves like BSD stat on
+// any runner, so the class is proven on Linux as well as macOS.
+func TestShellStatSpellingIsLearnedOncePerCall(t *testing.T) {
+	dir := t.TempDir()
+	home := filepath.Join(dir, "account")
+	writeBridgeReviewBinary(t, home, "allow")
+	hookDir := filepath.Join(home, ".defenseclaw", "hooks")
+	wrapperDir := filepath.Join(dir, "wrappers")
+	for _, path := range []string{hookDir, wrapperDir} {
+		if err := os.MkdirAll(path, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	actual, err := exec.LookPath("stat")
+	if err != nil {
+		t.Skip("stat unavailable")
+	}
+	marker := filepath.Join(dir, "spellings")
+	wrapper := `#!/bin/bash
+real='` + actual + `'
+case "$1" in
+  -c) printf 'c\n' >>"$DC_PROCESS_MARKER"; echo "stat: illegal option -- c" >&2; exit 1 ;;
+  -f) printf 'f\n' >>"$DC_PROCESS_MARKER"; fmt="$2"; shift 2
+      if "$real" --version >/dev/null 2>&1; then
+        fmt="${fmt//%Lp/%a}"; fmt="${fmt//%m/%Y}"; exec "$real" -c "$fmt" "$@"
+      fi
+      exec "$real" -f "$fmt" "$@" ;;
+esac
+exec "$real" "$@"
+`
+	if err := os.WriteFile(filepath.Join(wrapperDir, "stat"), []byte(wrapper), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	helper := writeBridgeReviewHelper(t, dir)
+	script := `set -euo pipefail; . "$1"; HOOK_DIR="$2"; API_ADDR=127.0.0.1:18960
+defenseclaw_api_listener_unproven() { return 1; }
+defenseclaw_gateway_post "http://${API_ADDR}/api/v1/codex/hook" 2 '{}' \
+  -H 'Content-Type: application/json' -H 'Authorization: Bearer example' >/dev/null`
+	cmd := exec.Command("bash", "-c", script, "bash", helper, hookDir)
+	cmd.Env = append(sanitizedTestEnv(), "HOME="+home, "DEFENSECLAW_AGENT_HOME="+home,
+		"PATH="+wrapperDir+":"+os.Getenv("PATH"), "DC_PROCESS_MARKER="+marker)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("bridge failed: %v\n%s", err, out)
+	}
+	launches, err := os.ReadFile(marker)
+	if err != nil {
+		t.Fatalf("no stat ran: %v", err)
+	}
+	fields := strings.Fields(string(launches))
+	refused := 0
+	for _, f := range fields {
+		if f == "c" {
+			refused++
+		}
+	}
+	if refused > 1 || len(fields) > 3 {
+		t.Fatalf("stat ran %d times (%d refused -c) for one call, want the spelling learned once: %v", len(fields), refused, fields)
+	}
+}
+
 // A ten-per-second stream must start just one bounded POST helper per hook
 // process. No retry or header creates an accumulating bridge child.
 func TestShellBridgeTenHertzHasOneHelperPerHookProcess(t *testing.T) {

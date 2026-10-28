@@ -7,7 +7,12 @@
 set -euo pipefail
 
 HOOK_EVENT="${1:-}"
-# A failure before the helpers load (a hook path that does not resolve, a
+{{if and (not .Managed) (not .Sandbox)}}# _DC_UNBOUND_TOOL_INPUT is this hook's own marker for a registration that
+# lost its event, set only below: a value inherited from the agent's
+# environment must never skip the gateway for a bound call (GAP-1321).
+unset -v _DC_UNBOUND_TOOL_INPUT
+_DC_UNBOUND_TOOL_INPUT=0
+{{end}}# A failure before the helpers load (a hook path that does not resolve, a
 # missing or broken _hardening.sh, a set -e error) still answers: in fail
 # mode closed PreToolUse gets Antigravity's deny, which needs no helper. Other
 # events and fail mode open keep the exit status. The installed mode decides
@@ -223,8 +228,18 @@ defenseclaw_boot_fails_closed() {
   case "${DEFENSECLAW_STRICT_AVAILABILITY:-}" in 1|true|TRUE|yes|YES) return 0 ;; esac
   defenseclaw_install_held
 }
+# antigravity_deny_unbound answers an input that may be a tool call from a
+# per-user registration that lost its event when this account's tier does
+# not open it (antigravity_unbound_open): Antigravity's deny with the repair
+# command.
+antigravity_deny_unbound() {
+  echo "defenseclaw: antigravity hook is registered without a reviewed event; blocking an input that may be a tool call (fail mode closed)" >&2
+  printf '%s\n' '{"decision":"deny","reason":"DefenseClaw blocked this tool call: its DefenseClaw hook is registered without an Antigravity event DefenseClaw reviewed. Run `defenseclaw setup antigravity` to register it again."}'
+  exit 0
+}
 {{end}}antigravity_bootstrap_failure() {
-  if {{if and (not .Managed) (not .Sandbox)}}defenseclaw_boot_fails_closed{{else}}[ "$_DC_BOOT_FAIL_MODE" != "open" ]{{end}} && [ "$HOOK_EVENT" = "PreToolUse" ]; then
+{{if and (not .Managed) (not .Sandbox)}}  [ "${_DC_UNBOUND_TOOL_INPUT:-0}" != 1 ] || antigravity_deny_unbound
+{{end}}  if {{if and (not .Managed) (not .Sandbox)}}defenseclaw_boot_fails_closed{{else}}[ "$_DC_BOOT_FAIL_MODE" != "open" ]{{end}} && [ "$HOOK_EVENT" = "PreToolUse" ]; then
     echo "defenseclaw: antigravity hook could not start; blocking (fail mode closed)" >&2
     printf '%s\n' '{"decision":"deny","reason":"DefenseClaw hook failed closed"}'
     exit 0
@@ -252,12 +267,15 @@ case "$HOOK_EVENT" in
         printf '%s\n' '{}'
         exit 0
       fi
-      echo "defenseclaw: antigravity hook is registered without a reviewed event; blocking an input that may be a tool call (fail mode closed)" >&2
+{{if and (not .Managed) (not .Sandbox)}}      # A per-user hook decides once its helpers can read this account's
+      # tier (antigravity_unbound_open below); every failure before that
+      # denies (antigravity_bootstrap_failure).
+      _DC_UNBOUND_TOOL_INPUT=1
+{{else}}      echo "defenseclaw: antigravity hook is registered without a reviewed event; blocking an input that may be a tool call (fail mode closed)" >&2
 {{if .Sandbox}}      printf '%s\n' '{"decision":"deny","reason":"DefenseClaw hook was called without its registered event, so the tool call is blocked."}'
-{{else if .Managed}}      printf '%s\n' '{"decision":"deny","reason":"DefenseClaw blocked this tool call: its DefenseClaw hook is registered without an Antigravity event DefenseClaw reviewed. Ask your administrator to run ensure, which rewrites the DefenseClaw hooks."}'
-{{else}}      printf '%s\n' '{"decision":"deny","reason":"DefenseClaw blocked this tool call: its DefenseClaw hook is registered without an Antigravity event DefenseClaw reviewed. Run `defenseclaw setup antigravity` to register it again."}'
+{{else}}      printf '%s\n' '{"decision":"deny","reason":"DefenseClaw blocked this tool call: its DefenseClaw hook is registered without an Antigravity event DefenseClaw reviewed. Ask your administrator to run ensure, which rewrites the DefenseClaw hooks."}'
 {{end}}      exit 0
-    fi
+{{end}}    fi
     ;;
 esac
 HOOK_SOURCE="${BASH_SOURCE[0]:-$0}"
@@ -315,6 +333,7 @@ _DC_HOOK_DATA_DIR="${HOOK_DIR}/.."
   # tightens every later outage (_DC_BOOT_FAIL_MODE).
   ! defenseclaw_install_held || _DC_BOOT_FAIL_MODE="closed"
   if [ "$_DC_BOOT_FAIL_MODE" != "open" ]; then
+    [ "${_DC_UNBOUND_TOOL_INPUT:-0}" != 1 ] || antigravity_deny_unbound
     echo "defenseclaw: hook home unavailable; blocking (fail mode closed)" >&2
     if [ "$HOOK_EVENT" = "PreToolUse" ]; then
       printf '%s\n' '{"decision":"deny","reason":"DefenseClaw hook failed closed"}'
@@ -344,7 +363,28 @@ HOOK_EVENT="${1:-}"
 defenseclaw_harden_env
 # defenseclaw_harden_env replaced the EXIT trap with its cleanup: keep both.
 trap '_dc_boot_rc=$?; _defenseclaw_hook_cleanup; if [ "$_dc_boot_rc" -ne 0 ]; then antigravity_bootstrap_failure "$_dc_boot_rc"; fi' EXIT
-
+{{if and (not .Managed) (not .Sandbox)}}# A per-user registration that lost its event (_DC_UNBOUND_TOOL_INPUT): in
+# the default and permissive tiers, where this account's config opens an
+# outage, the call runs with a warning and an audit entry, as an outage
+# does (balanced defaults, GAP-1321). Strict availability, a closed tier
+# and this account's install window keep the deny. The gateway requires the
+# event, so it is not asked.
+antigravity_unbound_open() {
+  case "${DEFENSECLAW_STRICT_AVAILABILITY:-0}" in 1|true|TRUE|yes|YES) return 1 ;; esac
+  ! defenseclaw_install_held || return 1
+  defenseclaw_config_outage_open antigravity
+}
+if [ "${_DC_UNBOUND_TOOL_INPUT:-0}" = 1 ]; then
+  if antigravity_unbound_open; then
+    defenseclaw_log_hook_failure antigravity antigravity-hook "missing or unsupported Antigravity hook event binding" response open fail_open
+    echo "defenseclaw: DefenseClaw is not checking this Antigravity tool call: its hook is registered without an Antigravity event DefenseClaw reviewed, so the call runs unchecked (fail mode open). Run \`defenseclaw setup antigravity\` to register it again." >&2
+    printf '%s\n' '{"decision":"allow","reason":"DefenseClaw did not check this tool call: its DefenseClaw hook is registered without an Antigravity event DefenseClaw reviewed. Run `defenseclaw setup antigravity` to register it again."}'
+    exit 0
+  fi
+  defenseclaw_log_hook_failure antigravity antigravity-hook "missing or unsupported Antigravity hook event binding" response closed fail_closed
+  antigravity_deny_unbound
+fi
+{{end}}
 {{if .Sandbox}}# OpenShell sandbox hooks always fail closed, with no environment override:
 # the workload can make the ingress, or the relay in front of it, answer any
 # status, so no failed, refused or unparseable reply may turn into an allow.
@@ -572,7 +612,7 @@ elif [ "$HTTP_CODE" -ge 500 ] 2>/dev/null && [ "$HTTP_CODE" -lt 600 ] 2>/dev/nul
   fail_response "gateway returned HTTP ${HTTP_CODE}"
 fi{{end}}
 
-{{if and (not .SecureClient) (not .Sandbox)}}defenseclaw_json_string_field "$RESULT" action >/dev/null || fail_response "invalid or ambiguous JSON response"
+{{if and (not .SecureClient) (not .Sandbox)}}defenseclaw_json_answer_valid "$RESULT" action || fail_response "invalid or ambiguous JSON response"
 {{end}}
 OUTPUT=$(echo "$RESULT" | _dc_jq -c '.hook_output // empty' 2>/dev/null) || {
   fail_response "invalid JSON response"

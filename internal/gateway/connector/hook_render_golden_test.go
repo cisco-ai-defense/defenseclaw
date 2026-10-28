@@ -188,6 +188,12 @@ func snapshotHookDir(t *testing.T, dir string) map[string]hostHookGoldenFile {
 		// into (HookHomeSH); the test's temporary folder stands for the
 		// golden one.
 		data = bytes.ReplaceAll(data, []byte(shellSingleQuote(filepath.Dir(dir))), []byte("'/home/golden/.defenseclaw'"))
+		// The per-user .gateway-helper record names the gateway under the
+		// home of the account that runs the test; /home/golden stands for
+		// it, so the golden does not depend on that account.
+		if home := userHomeDir(); filepath.IsAbs(home) {
+			data = bytes.ReplaceAll(data, []byte(filepath.Join(home, ".local", "bin")+"/"), []byte("/home/golden/.local/bin/"))
+		}
 		sum := sha256.Sum256(data)
 		out[filepath.ToSlash(rel)] = hostHookGoldenFile{
 			Mode:   info.Mode().Perm().String(),

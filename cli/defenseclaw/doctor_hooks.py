@@ -808,7 +808,15 @@ def _read_config(path: str, connector: str) -> dict[str, Any]:
         raise _InspectionError("access-denied", f"access denied to hook registration file {path}: {exc}") from exc
     except OSError as exc:
         raise _InspectionError("malformed", f"cannot inspect hook registration file {path}: {exc}") from exc
-    if is_link_or_reparse(path) or not stat.S_ISREG(before.st_mode):
+    if is_link_or_reparse(path):
+        # Setup on Windows refuses to write through a link (GAP-0034), so the
+        # repair step alone would fail the same way: say what to fix first.
+        raise _InspectionError(
+            "foreign",
+            f"hook registration file is a symlink or reparse point: {path}; "
+            "replace the link with the regular file it points to first",
+        )
+    if not stat.S_ISREG(before.st_mode):
         raise _InspectionError("foreign", f"hook registration file is a symlink or reparse point: {path}")
     try:
         with open(path, "rb") as handle:

@@ -1829,6 +1829,63 @@ namespace $nativeNamespace
             finally { LocalFree(descriptor); }
         }
 
+        [DllImport("kernel32.dll", SetLastError = true, EntryPoint = "SetFileInformationByHandle")]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool SetFileDispositionInformationByHandle(
+            IntPtr file, int informationClass, ref byte deleteFile, uint size);
+
+        // Deletes one regular, singly linked user file through a handle that
+        // did not follow a link, with every ancestor pinned. Returns false
+        // when the file (or its folder) is absent.
+        public static bool RemoveUserFileNoFollow(string path)
+        {
+            const uint DELETE = 0x00010000;
+            const uint FILE_READ_ATTRIBUTES = 0x00000080;
+            const uint FILE_SHARE_READ = 0x00000001;
+            const uint FILE_SHARE_DELETE = 0x00000004;
+            const uint OPEN_EXISTING = 3;
+            const uint FILE_FLAG_OPEN_REPARSE_POINT = 0x00200000;
+            const uint FILE_FLAG_BACKUP_SEMANTICS = 0x02000000;
+            const int FileDispositionInfo = 4;
+            using (new UninstallFilePrivilegeScope())
+            {
+                List<IntPtr> pins;
+                try { pins = PinUserFileParent(path); }
+                catch (Win32Exception error)
+                {
+                    if (error.NativeErrorCode == 2 || error.NativeErrorCode == 3)
+                        return false;
+                    throw;
+                }
+                try
+                {
+                    IntPtr handle = CreateFileW(path, DELETE | FILE_READ_ATTRIBUTES,
+                        FILE_SHARE_READ | FILE_SHARE_DELETE, IntPtr.Zero, OPEN_EXISTING,
+                        FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS,
+                        IntPtr.Zero);
+                    if (handle == new IntPtr(-1))
+                    {
+                        int error = Marshal.GetLastWin32Error();
+                        if (error == 2 || error == 3)
+                            return false;
+                        throw new Win32Exception(error, "open user file for delete failed: " + path);
+                    }
+                    try
+                    {
+                        CheckUserFileHandle(handle, path);
+                        byte deleteFile = 1;
+                        if (!SetFileDispositionInformationByHandle(handle,
+                                FileDispositionInfo, ref deleteFile, 1))
+                            throw new Win32Exception(Marshal.GetLastWin32Error(),
+                                "delete user file failed: " + path);
+                        return true;
+                    }
+                    finally { CloseHandle(handle); }
+                }
+                finally { CloseUserFilePins(pins); }
+            }
+        }
+
         public static void RemoveEmptyUserCasStateNoFollow(string path)
         {
             List<IntPtr> pins;
@@ -6971,6 +7028,17 @@ function Get-DefenseClawStateFileHolders {
     foreach ($holder in $found) {
         $id = [int]$holder.ProcessId
         $process = $images[$id]
+        # GAP-2265: a holder that is no longer running holds nothing. Under
+        # agent load the installed hook's own short-lived processes, which
+        # the install-folder rule below does not count, often exited between
+        # the Restart Manager query and the process list, were reported
+        # unnamed ("a program") or by their description and deferred every
+        # upgrade with hook_in_use. The process list holds every running
+        # process, a protected one (an antivirus scan) included; an empty
+        # list (the query failed) keeps every holder.
+        if ($null -eq $process -and $images.Count -gt 0) {
+            continue
+        }
         $image = ''
         $account = ''
         $parent = ''
@@ -14903,14 +14971,37 @@ function Restore-DefenseClawTransactionConfigPreimage {
 # The guardian edits these user-owned files after Setup has opened its machine
 # transaction. Keep their exact preimages in that transaction so a failed
 # upgrade does not restore 1.0.2 with the old native exporter removed.
+# Offsets 0-1 are the agent files, 2-3 the scoped credentials and 4-5 the
+# take-back-pending markers the guardian writes in the account's data dir
+# (GAP-2023): a rolled-back upgrade must not keep the new marker beside the
+# restored credential.
 function Get-DefenseClawUserNativeOTLPTransactionPaths {
     param([Parameter(Mandatory)][string]$UserHome)
     return @(
         [IO.Path]::Combine($UserHome, '.codex', 'config.toml'),
         [IO.Path]::Combine($UserHome, '.claude', 'settings.json'),
         [IO.Path]::Combine($UserHome, '.defenseclaw', 'hooks', '.otlp-codex.token'),
-        [IO.Path]::Combine($UserHome, '.defenseclaw', 'hooks', '.otlp-claudecode.token')
+        [IO.Path]::Combine($UserHome, '.defenseclaw', 'hooks', '.otlp-claudecode.token'),
+        [IO.Path]::Combine($UserHome, '.defenseclaw', 'native-otlp-take-back-pending-codex.json'),
+        [IO.Path]::Combine($UserHome, '.defenseclaw', 'native-otlp-take-back-pending-claudecode.json')
     )
+}
+
+# Files recorded per target root. A transaction a module before GAP-2023
+# opened has four (no marker entries); this module records six. Anything else
+# is not a record this module wrote.
+function Get-DefenseClawUserNativeOTLPTransactionStride {
+    param([Parameter(Mandatory)]$Saved)
+    if ($null -eq $Saved.PSObject.Properties['roots'] -or
+        $null -eq $Saved.PSObject.Properties['files']) {
+        return 0
+    }
+    $roots = @($Saved.roots).Count
+    $files = @($Saved.files).Count
+    foreach ($stride in @(6, 4)) {
+        if ($files -eq $stride * $roots) { return $stride }
+    }
+    return 0
 }
 
 function Add-DefenseClawUserNativeOTLPTransactionSnapshot {
@@ -15042,8 +15133,8 @@ function Set-DefenseClawUserNativeOTLPTransactionPostimages {
     $property = $snapshot.PSObject.Properties['user_native_otlp_preimages']
     if ($null -eq $property) { return }
     $saved = $property.Value
-    if ($saved.schema_version -ne 1 -or
-        @($saved.files).Count -ne 4 * @($saved.roots).Count -or
+    $stride = Get-DefenseClawUserNativeOTLPTransactionStride -Saved $saved
+    if ($saved.schema_version -ne 1 -or $stride -eq 0 -or
         @($saved.state_directories).Count -ne 2 * @($saved.roots).Count) {
         throw 'invalid user native OTLP postimage target list'
     }
@@ -15052,8 +15143,10 @@ function Set-DefenseClawUserNativeOTLPTransactionPostimages {
         $userHome = [string]$saved.roots[$rootIndex].user_home
         $paths = @(Get-DefenseClawUserNativeOTLPTransactionPaths `
                 -UserHome $userHome)
+        # The markers (offsets 4-5) are DefenseClaw state, not user edits:
+        # rollback puts back their preimage without a postimage proof.
         for ($offset = 0; $offset -lt 4; $offset++) {
-            $fileIndex = 4 * $rootIndex + $offset
+            $fileIndex = $stride * $rootIndex + $offset
             $entry = $saved.files[$fileIndex]
             if (-not [bool]$entry.captured -or -not [bool]$entry.existed) {
                 continue
@@ -15118,6 +15211,50 @@ function Add-DefenseClawUserNativeOTLPRollbackLeftover {
     Write-DefenseClawLifecyclePhase -Stage ('rollback left ' + $message)
 }
 
+# A take-back-pending marker returns to its preimage: one the transaction
+# created is deleted, one it changed or deleted gets its bytes and ACL back.
+# Both steps open the file without following a link and refuse a multiply
+# linked file, so SYSTEM never deletes or writes outside the data dir.
+function Restore-DefenseClawUserNativeOTLPMarkerPreimage {
+    param(
+        [Parameter(Mandatory)]$NativeSecurity,
+        [Parameter(Mandatory)][string]$Path,
+        [Parameter(Mandatory)]$Entry,
+        [Parameter(Mandatory)][hashtable]$Layout,
+        [Parameter(Mandatory)][string]$Backup
+    )
+    $current = $NativeSecurity::CaptureUserFileNoFollowIfExists($Path)
+    if (-not [bool]$Entry.existed) {
+        if ($null -ne $current) {
+            [void]$NativeSecurity::RemoveUserFileNoFollow($Path)
+        }
+        return
+    }
+    $currentSha = if ($null -eq $current) { 'absent' } else {
+        Get-DefenseClawNuclearSHA256 -Bytes $current.Content
+    }
+    if ($currentSha -ceq [string]$Entry.sha256 -and
+        [string]$current.SecurityDescriptor -ceq [string]$Entry.security_descriptor) {
+        return
+    }
+    Assert-DefenseClawDescendant -Path $Backup `
+        -Root $Layout.StateRoot -Label 'native OTLP rollback backup' |
+        Microsoft.PowerShell.Core\Out-Null
+    Assert-DefenseClawNoReparsePath -Path $Backup
+    $bytes = [IO.File]::ReadAllBytes($Backup)
+    if ((Get-DefenseClawNuclearSHA256 -Bytes $bytes) -cne [string]$Entry.sha256) {
+        throw 'user native OTLP rollback backup digest mismatch'
+    }
+    $actualSDDL = $NativeSecurity::RestoreUserFileNoFollow(
+        $Path, $bytes, [string]$Entry.security_descriptor,
+        [IO.File]::GetCreationTimeUtc($Backup),
+        [IO.File]::GetLastWriteTimeUtc($Backup),
+        $currentSha)
+    if ($actualSDDL -cne [string]$Entry.security_descriptor) {
+        throw 'user native OTLP rollback did not restore exact ACL'
+    }
+}
+
 function Restore-DefenseClawUserNativeOTLPTransactionSnapshot {
     param(
         [Parameter(Mandatory)]$Snapshot,
@@ -15127,10 +15264,11 @@ function Restore-DefenseClawUserNativeOTLPTransactionSnapshot {
     $property = $Snapshot.PSObject.Properties['user_native_otlp_preimages']
     if ($null -eq $property) { return }
     $saved = $property.Value
+    $stride = Get-DefenseClawUserNativeOTLPTransactionStride -Saved $saved
     if ($saved.schema_version -ne 1 -or
         [string]$saved.manifest_sha256 -cnotmatch '^[0-9a-f]{64}$' -or
         @($saved.roots).Count -gt 128 -or
-        @($saved.files).Count -ne 4 * @($saved.roots).Count -or
+        $stride -eq 0 -or
         @($saved.state_directories).Count -ne
             2 * @($saved.roots).Count) {
         throw 'invalid user native OTLP rollback preimages'
@@ -15152,8 +15290,10 @@ function Restore-DefenseClawUserNativeOTLPTransactionSnapshot {
             [string]$root.sid -cnotmatch '^S-1-[0-9-]+$') {
             throw 'native OTLP rollback target root is not canonical'
         }
-        foreach ($path in @(Get-DefenseClawUserNativeOTLPTransactionPaths `
-                    -UserHome $userHome)) {
+        $paths = @(Get-DefenseClawUserNativeOTLPTransactionPaths `
+                -UserHome $userHome)
+        for ($offset = 0; $offset -lt $stride; $offset++) {
+            $path = $paths[$offset]
             $entry = $saved.files[$index]
             $capture = $entry.PSObject.Properties['captured']
             if ($null -eq $capture -or [bool]$capture.Value) {
@@ -15162,6 +15302,15 @@ function Restore-DefenseClawUserNativeOTLPTransactionSnapshot {
                         ([bool]$entry.existed -and
                             [string]$entry.sha256 -cnotmatch '^[0-9a-f]{64}$')) {
                         throw 'invalid user native OTLP rollback file record'
+                    }
+                    if ($offset -ge 4) {
+                        Restore-DefenseClawUserNativeOTLPMarkerPreimage `
+                            -NativeSecurity $nativeSecurity -Path $path `
+                            -Entry $entry -Layout $Layout `
+                            -Backup ([IO.Path]::Combine(
+                                $directory, ('native-otlp-{0:D3}.bak' -f $index)))
+                        $index++
+                        continue
                     }
                     $postimage = [string]$entry.postimage_sha256
                     $restoreThisFile = $false
@@ -15175,7 +15324,7 @@ function Restore-DefenseClawUserNativeOTLPTransactionSnapshot {
                         $restoreThisFile = -not (Microsoft.PowerShell.Management\Test-Path `
                             -LiteralPath $path -PathType Leaf)
                     }
-                    elseif ($index % 4 -lt 2) {
+                    elseif ($offset -lt 2) {
                         # Even when no transaction postimage exists, report a
                         # linked or unreadable agent path without touching it.
                         [void]$nativeSecurity::CaptureUserFileNoFollowIfExists($path)
@@ -21594,10 +21743,14 @@ function Test-DefenseClawManagedHooksCommittedTeardownSupported {
         those releases did: a newer Setup's /uninstall of an older deployment
         never commits a tombstone that no helper can finish. Anything but one
         well-formed report that says so counts as an older helper.
+        -Capability precommit_check asks instead whether the helper accepts
+        the read-only "check" action (GAP-0571).
     #>
     param(
         [Parameter(Mandatory)][hashtable]$Layout,
-        [Parameter(Mandatory)][string]$GatewayServiceName
+        [Parameter(Mandatory)][string]$GatewayServiceName,
+        [ValidateSet('committed_standalone_prepare', 'precommit_check')]
+        [string]$Capability = 'committed_standalone_prepare'
     )
     $probe = Invoke-DefenseClawGatewayCommand `
         -Layout $Layout `
@@ -21626,16 +21779,16 @@ function Test-DefenseClawManagedHooksCommittedTeardownSupported {
         return $false
     }
     $report = $reports[0]
-    foreach ($name in @('schema_version', 'action', 'ok', 'committed_standalone_prepare')) {
+    foreach ($name in @('schema_version', 'action', 'ok', $Capability)) {
         if ($null -eq $report.PSObject.Properties[$name]) {
             return $false
         }
     }
+    $flag = $report.PSObject.Properties[$Capability].Value
     return (
         [string]$report.action -ceq 'capabilities' -and
         $report.ok -is [bool] -and $report.ok -and
-        $report.committed_standalone_prepare -is [bool] -and
-        $report.committed_standalone_prepare
+        $flag -is [bool] -and $flag
     )
 }
 
@@ -21732,7 +21885,7 @@ function Invoke-DefenseClawManagedHooksTeardownCommand {
         [Parameter(Mandatory)][string]$GatewayServiceName,
         [Parameter(Mandatory)][string]$GuardianServiceName,
         [Parameter(Mandatory)]
-        [ValidateSet('prepare', 'verify', 'rollback', 'finalize')]
+        [ValidateSet('prepare', 'verify', 'rollback', 'finalize', 'check')]
         [string]$Action,
         [switch]$PurgeContractLocks
     )
@@ -21950,6 +22103,21 @@ function Invoke-DefenseClawManagedHooksTeardownCommand {
                 $counts.enrollment_target_count) {
             throw 'managed-hook teardown rollback did not restore and verify the exact pre-teardown enrollment'
         }
+    }
+    elseif ($Action -ceq 'check') {
+        # GAP-0571: the read-only check changes nothing, so it attests the
+        # installed targets and never that the binary may go.
+        $safeToRemove = $report.PSObject.Properties['safe_to_remove_binary']
+        if ($null -eq $safeToRemove -or
+            $safeToRemove.Value -isnot [bool] -or
+            [bool]$safeToRemove.Value) {
+            throw 'managed-hook teardown check prematurely attested safe_to_remove_binary'
+        }
+        if ($counts.verified_installed_count -ne $counts.target_count) {
+            throw 'managed-hook teardown check did not verify every installed target'
+        }
+        # Nothing is journaled before the commit: there is no journal to check.
+        return $report
     }
     else {
         $finalized = $report.PSObject.Properties['finalization_completed']
@@ -22338,7 +22506,10 @@ function Compare-DefenseClawRecoveryGatewayRelease {
     <#
         Orders two parsed releases like compareWindowsEnterpriseVersions:
         numerically with missing parts read as 0, then a prerelease before its
-        release, then prereleases by ordinal text. Returns -1, 0 or 1.
+        release, then prereleases by their dot-separated identifiers like
+        compareWindowsEnterprisePrerelease (semver: numeric identifiers as
+        numbers and below alphanumeric ones, others by ordinal text, a shorter
+        list first), so rc.10 follows rc.9 (GAP-1987). Returns -1, 0 or 1.
     #>
     param(
         [Parameter(Mandatory)]$Left,
@@ -22374,7 +22545,37 @@ function Compare-DefenseClawRecoveryGatewayRelease {
     if ($rightPrerelease -ceq '') {
         return -1
     }
-    return [Math]::Sign([string]::CompareOrdinal($leftPrerelease, $rightPrerelease))
+    $leftParts = $leftPrerelease.Split([char]'.')
+    $rightParts = $rightPrerelease.Split([char]'.')
+    $shared = [Math]::Min($leftParts.Count, $rightParts.Count)
+    for ($index = 0; $index -lt $shared; $index++) {
+        $leftNumber = [uint64]0
+        $rightNumber = [uint64]0
+        $leftNumeric = [uint64]::TryParse($leftParts[$index], [Globalization.NumberStyles]::None,
+            [Globalization.CultureInfo]::InvariantCulture, [ref]$leftNumber)
+        $rightNumeric = [uint64]::TryParse($rightParts[$index], [Globalization.NumberStyles]::None,
+            [Globalization.CultureInfo]::InvariantCulture, [ref]$rightNumber)
+        if ($leftNumeric -and $rightNumeric) {
+            if ($leftNumber -ne $rightNumber) {
+                if ($leftNumber -lt $rightNumber) {
+                    return -1
+                }
+                return 1
+            }
+            continue
+        }
+        if ($leftNumeric) {
+            return -1
+        }
+        if ($rightNumeric) {
+            return 1
+        }
+        $order = [Math]::Sign([string]::CompareOrdinal($leftParts[$index], $rightParts[$index]))
+        if ($order -ne 0) {
+            return $order
+        }
+    }
+    return [Math]::Sign($leftParts.Count - $rightParts.Count)
 }
 
 function Test-DefenseClawRecoveryActivationDeferral {
@@ -23928,6 +24129,32 @@ function Test-DefenseClawGatewayReady {
     return ([int]$probe.exit_code -eq 0)
 }
 
+function Get-DefenseClawGuardianDiagnosticAccountLabel {
+    # A Windows guardian row carries only the account's SID: name it as the
+    # other Windows notices do, "DOMAIN\user (SID)", and keep the bare SID
+    # when it does not resolve (GAP-2290). One lookup per SID per diagnostic.
+    param(
+        [Parameter(Mandatory)][string]$Sid,
+        [Parameter(Mandatory)][hashtable]$Cache
+    )
+    if ($Cache.ContainsKey($Sid)) {
+        return [string]$Cache[$Sid]
+    }
+    $label = $Sid
+    try {
+        $account = [Security.Principal.SecurityIdentifier]::new($Sid).Translate(
+            [Security.Principal.NTAccount]).Value
+        if (-not [string]::IsNullOrWhiteSpace($account)) {
+            $label = "$account ($Sid)"
+        }
+    }
+    catch {
+        $label = $Sid
+    }
+    $Cache[$Sid] = $label
+    return $label
+}
+
 function Get-DefenseClawGuardianVerificationFailureDiagnostic {
     param([Parameter(Mandatory)]$Probe)
 
@@ -23963,6 +24190,7 @@ function Get-DefenseClawGuardianVerificationFailureDiagnostic {
 
     $issues = [Collections.Generic.List[string]]::new()
     $pendingCount = 0
+    $accountLabels = @{}
     $resultsProperty = $report.PSObject.Properties['results']
     if ($null -ne $resultsProperty) {
         foreach ($row in @($resultsProperty.Value)) {
@@ -24001,7 +24229,13 @@ function Get-DefenseClawGuardianVerificationFailureDiagnostic {
                     -not [string]::IsNullOrWhiteSpace(
                         [string]$identityProperty.Value
                     )) {
-                    $label += "@$([string]$identityProperty.Value)"
+                    $identity = [string]$identityProperty.Value
+                    if ($identityName -eq 'sid') {
+                        $identity = Get-DefenseClawGuardianDiagnosticAccountLabel `
+                            -Sid $identity `
+                            -Cache $accountLabels
+                    }
+                    $label += "@$identity"
                     break
                 }
             }
@@ -24819,6 +25053,13 @@ function Get-DefenseClawStandaloneManifestAdoption {
         $gatewayRemoved = [Math]::Max([int64](& $count $report 'removed_account_failures'), [int64]0)
         if ($gatewayRemoved -lt $removedRows) {
             $excused += $removedRows - $gatewayRemoved
+        }
+        # Next to a row waiting for its account's next sign-in the gateway
+        # counts neither kind (its counts are all or nothing), so the waiting
+        # rows are counted here too: a removed profile and a signed-out
+        # account kept repair failing (GAP-1657).
+        if ($awaitingSignIn -le 0) {
+            $excused += $waitingRows
         }
     }
     if ($folderRows -gt 0) {
@@ -37321,6 +37562,31 @@ function Invoke-DefenseClawUninstallLifecycle {
             -Layout $Layout `
             -GatewayServiceName $GatewayServiceName)
     )
+    # GAP-0571: the post-commit prepare authenticates the guardian evidence,
+    # the enrollment and the runtime selectors and refuses anything it cannot
+    # bind (a failed guardian row, a selector it cannot read). Ask the same
+    # helper the same questions, read-only, while nothing has changed: a
+    # refusal then leaves the deployment fully installed and says what to
+    # repair, instead of a committed tombstone that every retry refuses.
+    if ($postCommitHookTeardown -and
+        (Test-DefenseClawManagedHooksCommittedTeardownSupported `
+            -Layout $Layout `
+            -GatewayServiceName $GatewayServiceName `
+            -Capability precommit_check)) {
+        try {
+            [void](Invoke-DefenseClawManagedHooksTeardownCommand `
+                -Layout $Layout `
+                -GatewayServiceName $GatewayServiceName `
+                -GuardianServiceName $GuardianServiceName `
+                -Action check)
+        }
+        catch {
+            throw ("The uninstall stopped before it removed anything; DefenseClaw is still installed. " +
+                "The hook removal it runs after the commit would refuse this deployment: " +
+                "$($_.Exception.Message). Repair that (run Setup /repair, or undo the change to the file it names), " +
+                "then run the uninstall again.")
+        }
+    }
     # The native InstallRoot seal/delete (#1068) admits only the Secure Client
     # tree and its single gateway socket. Standalone keeps the PowerShell
     # removal that knows its sensor-helper sockets and plugin folders.
@@ -39459,20 +39725,41 @@ function Invoke-DefenseClawEnterpriseLifecycle {
             $script:DefenseClawRemoveLifecycleLockOnExit = $false
             Remove-DefenseClawStandaloneLifecycleLockLeftover -Layout $layout
         }
+        $script:DefenseClawMdmRotationJournalKept = ''
         if ($leftNothing) {
             # LEAD STEER (GAP-1913): a purge removes the kit's journal; a
-            # plain uninstall keeps it and says so.
-            if ($Purge) {
+            # plain uninstall keeps it and says so. The note also goes into
+            # the result (mdm_rotation_journal_kept, read by
+            # install-enterprise.ps1), so the Setup and CLI JSON name a kept
+            # or left journal, not only the warning stream. A standalone
+            # uninstall always runs with $Purge (it removes StateRoot), so
+            # the purge the administrator asked for is the per-user flag.
+            $purgeRequested = if (Test-DefenseClawStandaloneProfile) {
+                [bool]$script:DefenseClawUninstallPurgeUserState
+            }
+            else {
+                [bool]$Purge
+            }
+            if ($purgeRequested) {
                 Remove-DefenseClawMdmRotationJournal -Purge
             }
             elseif ([IO.Directory]::Exists([IO.Path]::Combine($script:ProgramData, 'Cisco\DefenseClaw-MDM\rotation'))) {
-                Microsoft.PowerShell.Utility\Write-Warning -Message (
+                $script:DefenseClawMdmRotationJournalKept = (
                     'kept the MDM kit credential rotation journal ' +
                     [IO.Path]::Combine($script:ProgramData, 'Cisco\DefenseClaw-MDM\rotation') +
                     ' (it can hold a copy of an earlier credential); run the uninstall with PURGE=1 to remove it')
+                Microsoft.PowerShell.Utility\Write-Warning -Message $script:DefenseClawMdmRotationJournalKept
             }
         }
     }
+}
+
+# The last uninstall's note on an MDM kit rotation journal it kept or left
+# (GAP-1913); install-enterprise.ps1 copies it into the result.
+$script:DefenseClawMdmRotationJournalKept = ''
+
+function Get-DefenseClawMdmRotationJournalKept {
+    return [string]$script:DefenseClawMdmRotationJournalKept
 }
 
 function Remove-DefenseClawMdmRotationJournal {
@@ -39491,6 +39778,7 @@ function Remove-DefenseClawMdmRotationJournal {
         [switch]$Purge,
         [string]$StateDirectory = ''
     )
+    $script:DefenseClawMdmRotationJournalKept = ''
     try {
         $state = $StateDirectory
         if ([string]::IsNullOrWhiteSpace($state)) {
@@ -39500,14 +39788,16 @@ function Remove-DefenseClawMdmRotationJournal {
         $item = Microsoft.PowerShell.Management\Get-Item -LiteralPath $journal -Force -ErrorAction SilentlyContinue
         if ($null -ne $item) {
             if (-not $item.PSIsContainer -or ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
-                Microsoft.PowerShell.Utility\Write-Warning -Message "left $journal as it is: it is not an administrator-only folder"
+                $script:DefenseClawMdmRotationJournalKept = "left the MDM kit credential rotation journal $journal as it is: it is not an administrator-only folder; check it and remove it by hand"
+                Microsoft.PowerShell.Utility\Write-Warning -Message $script:DefenseClawMdmRotationJournalKept
                 return
             }
             Assert-DefenseClawPathAcl -Path $journal -AllowedWriterSIDs @($script:SystemSID, $script:AdministratorsSID)
             $entries = @(Microsoft.PowerShell.Management\Get-ChildItem -LiteralPath $journal -Force)
             foreach ($entry in $entries) {
                 if ($entry.PSIsContainer -or ($entry.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
-                    Microsoft.PowerShell.Utility\Write-Warning -Message "left $journal as it is: it holds $($entry.Name), which the MDM kit does not write"
+                    $script:DefenseClawMdmRotationJournalKept = "left the MDM kit credential rotation journal $journal as it is: it holds $($entry.Name), which the MDM kit does not write; check it and remove it by hand"
+                    Microsoft.PowerShell.Utility\Write-Warning -Message $script:DefenseClawMdmRotationJournalKept
                     return
                 }
             }
@@ -39529,7 +39819,8 @@ function Remove-DefenseClawMdmRotationJournal {
         }
     }
     catch {
-        Microsoft.PowerShell.Utility\Write-Warning -Message "could not remove the MDM credential rotation journal: $($_.Exception.Message)"
+        $script:DefenseClawMdmRotationJournalKept = "could not remove the MDM kit credential rotation journal: $($_.Exception.Message)"
+        Microsoft.PowerShell.Utility\Write-Warning -Message $script:DefenseClawMdmRotationJournalKept
     }
 }
 
@@ -39558,4 +39849,4 @@ function Test-DefenseClawStandaloneUninstallLeftNothing {
     return $true
 }
 
-Microsoft.PowerShell.Core\Export-ModuleMember -Function Invoke-DefenseClawEnterpriseLifecycle
+Microsoft.PowerShell.Core\Export-ModuleMember -Function Invoke-DefenseClawEnterpriseLifecycle, Get-DefenseClawMdmRotationJournalKept

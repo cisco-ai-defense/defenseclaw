@@ -673,3 +673,28 @@ func TestAFailedWaitForAnErrorMicroVMSaysTheWayOn(t *testing.T) {
 		t.Fatalf("the stop whose wait OpenShell failed = %+v", apiErr)
 	}
 }
+
+// GAP-1859: an approval, automatic or the user's, adds no network rule to a
+// legacy guest whose network DefenseClaw withdrew: OpenShell is not asked to
+// approve its drafts, which would undo the containment.
+func TestAContainedLegacyGuestGetsNoApprovedRule(t *testing.T) {
+	e, _ := newEndedVM(t, "legacy")
+	b := e.boxOf("legacy")
+	e.m.mu.Lock()
+	b.rec.SessionRelease = "0.1.3"
+	e.m.mu.Unlock()
+	endIn(t, e, "legacy", openshell.PhaseCompleted)
+	if rec := loadRecord(t, e, "legacy"); rec == nil || !rec.OldSupervisorNetworkClosed {
+		t.Fatalf("the legacy guest's network was not withdrawn: %+v", rec)
+	}
+	calls := func() int {
+		return e.fake.Calls(openshelltest.MethodApproveDraftChunk) + e.fake.Calls(openshelltest.MethodApproveAllChunks)
+	}
+	before := calls()
+	app := batchApplier{m: e.m}
+	_, one := app.ApproveDraftChunk(t.Context(), "legacy", "chunk-1", "review-token")
+	_, all := app.ApproveDraftChunks(t.Context(), "legacy", []openshell.DraftChunkApproval{{}})
+	if calls() != before || !sandboxapi.IsCode(one, sandboxapi.CodeConflict) || !sandboxapi.IsCode(all, sandboxapi.CodeConflict) {
+		t.Fatalf("approvals of a contained legacy guest: OpenShell asked %d times, errors %v / %v", calls()-before, one, all)
+	}
+}

@@ -304,6 +304,56 @@ def test_adopted_entry_pins_the_guarded_entry(tmp_path, monkeypatch):
         cleanup_app(app, db_path, data_dir)
 
 
+def test_a_pin_problem_names_the_entries_the_lock_pins_not_the_reserved_name(tmp_path, monkeypatch):
+    """GAP-0043: an adopted entry has its own name; verify names it, or the copy that starts the guard with its lock."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / ".config"))
+    monkeypatch.setenv("APPDATA", str(tmp_path / "AppData" / "Roaming"))
+    settings = (
+        tmp_path / "AppData" / "Roaming" / "Zed" / "settings.json"
+        if os.name == "nt"
+        else tmp_path / ".config" / "zed" / "settings.json"
+    )
+    settings.parent.mkdir(parents=True)
+    data = tmp_path / "data"
+    data.mkdir()
+    app, data_dir, db_path = make_app_context(str(data))
+    guard = _binary(tmp_path / "defenseclaw-acp")
+    agent = _binary(tmp_path / "kiro-cli")
+    settings.write_text(json.dumps({"agent_servers": {"My Kiro": {"command": agent, "args": ["acp"], "env": {}}}}))
+    try:
+        adopted = CliRunner().invoke(
+            acp_cmd, ["adopt", "--client", "zed", "--guard-binary", guard, "--yes", "--json-output"], obj=app
+        )
+        assert adopted.exit_code == 0, adopted.output
+        assert _verify(app).exit_code == 0
+        kept = settings.read_text()
+        document = json.loads(kept)
+
+        # A copy of the adopted entry starts the guard with the same lock.
+        document["agent_servers"]["My Kiro stale"] = json.loads(json.dumps(document["agent_servers"]["My Kiro"]))
+        settings.write_text(json.dumps(document))
+        result = _verify(app)
+        assert result.exit_code != 0, result.output
+        assert "DefenseClaw · Kiro" not in result.output, result.output
+        assert "'My Kiro stale' starts the guard with this pair's contract lock" in result.output, result.output
+        assert "the 'My Kiro' entry changed after setup" not in result.output, result.output
+
+        # The adopted entry itself changes: verify names it.
+        document = json.loads(kept)
+        document["agent_servers"]["My Kiro"]["env"] = {"LD_PRELOAD": "/tmp/x.so"}
+        settings.write_text(json.dumps(document))
+        result = _verify(app)
+        assert result.exit_code != 0, result.output
+        assert "DefenseClaw · Kiro" not in result.output, result.output
+        assert "the 'My Kiro' entry changed after setup" in result.output, result.output
+
+        settings.write_text(kept)
+        assert _verify(app).exit_code == 0
+    finally:
+        cleanup_app(app, db_path, data_dir)
+
+
 def test_another_pairs_setup_and_removal_leave_an_entry_pin(tmp_path, monkeypatch):
     """GAP-0504/GAP-0513: an entry pin covers only its own entry; other pairs' changes do not re-pin it."""
     app, data_dir, db_path, settings, guard, _agent, kiro_lock = _setup(tmp_path, monkeypatch)

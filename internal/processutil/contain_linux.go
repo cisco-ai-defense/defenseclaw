@@ -77,6 +77,10 @@ const (
 	containExitNotContained = 125
 	// containExitNotStarted: the command could not start.
 	containExitNotStarted = 127
+	// containExitNoNamespace: the launcher could not create the runner's
+	// namespaces, so the command never ran (ErrContainmentUnavailable). A
+	// command that ran and exited 123 is reported by the launcher as 1.
+	containExitNoNamespace = 123
 )
 
 // A killed PID-namespace init can briefly leave a descendant holding a pipe.
@@ -182,6 +186,9 @@ func runContainedMode(cmd *exec.Cmd, mode string) error {
 	if err := cmd.Start(); err != nil {
 		// No namespace (user namespaces disabled, a sandbox that refuses
 		// them): the command never runs.
+		if mode == containInitMode && namespaceRefused(err) {
+			return fmt.Errorf("%w: %w: %s: %v", ErrNotContained, ErrContainmentUnavailable, target, err)
+		}
 		return fmt.Errorf("%w: %s: %v", ErrNotContained, target, err)
 	}
 	err := cmd.Wait()
@@ -189,7 +196,22 @@ func runContainedMode(cmd *exec.Cmd, mode string) error {
 	if errors.As(err, &exitErr) && exitErr.ExitCode() == containExitNotContained {
 		return fmt.Errorf("%w: %s", ErrNotContained, target)
 	}
+	if mode == containLauncherMode && errors.As(err, &exitErr) && exitErr.ExitCode() == containExitNoNamespace {
+		return fmt.Errorf("%w: %w: %s", ErrNotContained, ErrContainmentUnavailable, target)
+	}
 	return err
+}
+
+// namespaceRefused reports whether a runner start failed because a seccomp
+// filter or sandbox (EPERM) or a namespace limit (ENOSPC, EUSERS) refused its
+// namespaces. Any other start failure stays ErrNotContained alone.
+func namespaceRefused(err error) bool {
+	for _, errno := range []syscall.Errno{syscall.EPERM, syscall.ENOSPC, syscall.EUSERS} {
+		if errors.Is(err, errno) {
+			return true
+		}
+	}
+	return false
 }
 
 // mixedCredentials reports whether this process's real, effective and saved
@@ -235,7 +257,7 @@ func launchContained(argv []string) int {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	if os.Getenv(containFailNamespaceEnv) == "1" {
-		return containExitNotContained
+		return containExitNoNamespace
 	}
 	go func() {
 		<-terms
@@ -251,8 +273,15 @@ func launchContained(argv []string) int {
 		return containExitTerminated
 	case err == nil:
 		return 0
+	case errors.As(err, &exitErr) && exitErr.ExitCode() == containExitNoNamespace:
+		// The command ran and ended with the code this launcher keeps for
+		// a refused namespace: report it as a plain failure, so a command
+		// that ran is never read as one that could not (GAP-1945).
+		return 1
 	case errors.As(err, &exitErr) && exitErr.ExitCode() >= 0:
 		return exitErr.ExitCode()
+	case errors.Is(err, ErrContainmentUnavailable):
+		return containExitNoNamespace
 	default:
 		return containExitNotContained
 	}

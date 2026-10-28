@@ -307,4 +307,63 @@ if [ -f "$state/lifecycle.lock" ] && command -v flock >/dev/null 2>&1; then
         echo "defenseclaw-enterprise: another DefenseClaw lifecycle run held the lock for 8 minutes; the upgrade continues, and the postinstall waits for that run before it applies the package." >&2
     fi
 fi
+# A sandbox daemon of DefenseClaw before 1.0.4 exits by itself once the
+# package replaced its program, as soon as it counts no running sandbox,
+# and its exit stops the account's OpenShell gateway: also under a MicroVM
+# that completed or whose main process failed while its VM still runs,
+# which it does not count, so that VM ends with no flush (GAP-0868). The
+# postinstall ensure replaces such a daemon without letting it exit
+# (StopKill), but the old daemon acted first, between the file swap and the
+# ensure. Hold each one (SIGSTOP) before any file is replaced; the
+# postinstall ends the held ones with SIGKILL, which runs nothing on their
+# way out, before its ensure, and systemd starts the installed daemon. Their
+# sandboxes' hooks wait meanwhile, so they are held last, after the wait for
+# the lifecycle lock (GAP-1553). If the transaction never reaches the
+# postinstall (an unpack that fails, where dpkg runs the old postinst), a
+# timer lets them go on after 10 minutes. A held daemon whose program was
+# swapped by then (a dpkg unpack whose configure comes later) would act on
+# the swap as GAP-0868 says, so the timer ends it as the postinstall would
+# (same start time, its program deleted) and systemd starts the installed
+# one (GAP-1804).
+sandbox_held=/run/defenseclaw-sandbox-daemons.held
+sandbox_recovery=defenseclaw-sandbox-daemons-recovery
+sandbox_daemon_cmd="/opt/defenseclaw/bin/defenseclaw-gateway sandbox-daemon"
+proc=/proc
+# deployed_before_1_0_4: the deployed release, as its root-owned record
+# names it, is older than 1.0.4.
+deployed_before_1_0_4() {
+    root_owned "$record" || return 1
+    d_version=$(sed -n 's/.*"product_version": *"\([^"]*\)".*/\1/p' "$record" 2>/dev/null | head -n 1)
+    [ -n "$d_version" ] && ! not_older "$d_version" 1.0.4
+}
+# sandbox_daemons prints "<pid> <start time>" of each running sandbox
+# daemon (its command line exactly the unit's ExecStart).
+sandbox_daemons() {
+    for s_dir in "$proc"/[0-9]*; do
+        s_cmd=$(tr '\0' ' ' 2>/dev/null <"$s_dir/cmdline") || continue
+        [ "$s_cmd" = "$sandbox_daemon_cmd " ] || continue
+        s_start=$(sed 's/^.*) //' "$s_dir/stat" 2>/dev/null | cut -d' ' -f20)
+        [ -n "$s_start" ] && printf '%s %s\n' "${s_dir##*/}" "$s_start"
+    done
+}
+if deployed_before_1_0_4; then
+    s_list=$(sandbox_daemons)
+    if [ -n "$s_list" ]; then
+        systemctl stop "$sandbox_recovery.timer" >/dev/null 2>&1 || true
+        # The recovery expands its own variables.
+        # shellcheck disable=SC2016
+        if printf '%s\n' "$s_list" >"$sandbox_held" 2>/dev/null &&
+            systemd-run --quiet --unit="$sandbox_recovery" --on-active=10m /bin/sh -c \
+                'f='"$sandbox_held"'; [ -e "$f" ] || exit 0; while read -r p s; do x=$(readlink "/proc/$p/exe" 2>/dev/null); n=$(sed "s/^.*) //" "/proc/$p/stat" 2>/dev/null | cut -d" " -f20); case "$x" in *" (deleted)") if [ "$n" = "$s" ]; then kill -KILL "$p" 2>/dev/null; continue; fi ;; esac; kill -CONT "$p" 2>/dev/null; done <"$f"; rm -f "$f"' \
+                >/dev/null 2>&1; then
+            printf '%s\n' "$s_list" | while read -r s_pid s_start; do
+                kill -STOP "$s_pid" 2>/dev/null || true
+            done
+        else
+            rm -f "$sandbox_held"
+            echo "defenseclaw-enterprise: could not hold the sandbox daemons of the earlier DefenseClaw; one may stop its account's OpenShell gateway during the upgrade." >&2
+        fi
+    fi
+fi
+
 exit 0

@@ -300,7 +300,13 @@ and readiness check, and exits `1` when anything fails. A healthy `status`, trim
   "enrollment": { "targets": 16, "pending": 0, "failed": 0, "exempt": 0 },
   "coverage_complete": true,
   "security_complete": false,
-  "warnings": [{ "code": "hook_process_fail_open", "message": "Codex can run a tool after its PreToolUse hook is killed or times out" }],
+  "warnings": [
+    { "code": "hook_process_fail_open", "message": "claudecode: a killed PreToolUse hook or PreToolUse timeout is non-blocking; ..." },
+    { "code": "hook_process_fail_open", "message": "codex: a killed PreToolUse hook or PreToolUse timeout is non-blocking; ..." },
+    { "code": "unprivileged_user_namespaces", "message": "standard users can create user namespaces (user.max_user_namespaces=...): ..." },
+    { "code": "unprivileged_ptrace", "message": "standard users can trace their own processes (kernel.yama.ptrace_scope=0): ..." },
+    { "code": "security_incomplete", "message": "security_complete is false because of: hook_process_fail_open, unprivileged_user_namespaces, unprivileged_ptrace; ..." }
+  ],
   "errors": []
 }
 ```
@@ -312,6 +318,9 @@ and readiness check, and exits `1` when anything fails. A healthy `status`, trim
   reconcile at once: `sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux reconcile --json`.
 - On most distributions `status` and `verify` warn `unprivileged_user_namespaces`
   or `unprivileged_ptrace` and report incomplete security. See [User namespaces](#user-namespaces).
+- `hook_process_fail_open` appears once per enabled connector, with the connector
+  name first, and `security_incomplete` lists the warnings that keep
+  `security_complete` false.
 
 ### Gateway sandbox
 
@@ -519,7 +528,7 @@ removing any file ([Remove the policies, or downgrade](/docs/enterprise/tetragon
 The result's `kept:` line names accounts that still have `~/.defenseclaw` or
 per-user binaries. With `--purge` it also stops each enrolled user's per-user
 gateway and removes `~/.defenseclaw`, the empty agent folders DefenseClaw created,
-the per-user binaries in `~/.local/bin` and DefenseClaw's wheels in `~/.cache/uv`. If an enrolled account had its own DefenseClaw install before the enrollment (its `~/.defenseclaw` holds `config.yaml`, `.env`, `audit.db` or `previous/`), `--purge` leaves that folder and the install's binaries exactly as they are and names the account in the result (`kept the DefenseClaw per-user data of user <name> ...` and a `per_user_state_remaining` warning). A machine uninstall never deletes or moves an account's own data. Accounts the deployment never enrolled keep their DefenseClaw files (an earlier per-user install, or hooks a former enrollment left). The purge result lists each such account on a `kept:` warning; delete those files with the account's owner. Use `--purge` instead of a plain uninstall to
+the per-user binaries in `~/.local/bin` and DefenseClaw's wheels in `~/.cache/uv`. If an enrolled account had its own DefenseClaw install before the enrollment (its `~/.defenseclaw` holds `config.yaml`, `.env`, `audit.db` or `previous/`), `--purge` leaves that folder and the install's binaries exactly as they are and names the account in the result (`kept the DefenseClaw per-user data of user <name> ...` and a `per_user_state_remaining` warning). A machine uninstall never deletes or moves an account's own data. Accounts the deployment never enrolled keep their DefenseClaw files (an earlier per-user install, or hooks a former enrollment left). The purge result lists each such account on a `kept:` warning; delete those files with the account's owner. An account the machine policy covered without a per-user enrollment (not named in the enrollment manifest) keeps its `~/.defenseclaw` too: when that folder holds only the hook files and connector backups DefenseClaw wrote, the result lists those accounts on their own `kept:` warning, and an administrator can delete the folders; when it holds the account's own install, the account is named as above. Use `--purge` instead of a plain uninstall to
 delete user data: the plain uninstall removes the enrollment record a later
 `--purge` needs, and a purge after it warns `per_user_state_remaining`. To clean up
 afterward, run `ensure --from-package --config <file>` and then `uninstall --purge`,

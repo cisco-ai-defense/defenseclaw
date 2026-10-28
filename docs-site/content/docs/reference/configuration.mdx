@@ -543,12 +543,14 @@ defenseclaw config get guardrail.block_at --effective
 ```
 
 ```text
-HIGH
 (source: config:guardrail.block_at)
+HIGH
 ```
 
-When nothing sets the threshold, the same command prints the pack's level and
-names the pack, for example `(source: pack-default:default)`.
+The source line comes first and goes to standard error, so `$(...)` or a pipe
+gets only the value. When nothing sets the threshold, the same command prints
+the pack's level and names the pack, for example
+`(source: pack-default:default)`.
 
 ### Admission
 
@@ -990,7 +992,7 @@ llm_providers:
   ollama_ports: [11434]
 ```
 
-An entry carries only the sub-block (`bedrock`, `vertex` or `azure`) matching its `base_provider_type`; `defenseclaw doctor` warns about family mismatches and unknown `auth_mode` values. Auth modes are the same as on `setup llm` (`api_key` / `iam_credentials` / `profile` / `instance_role` for Bedrock; `service_account` / `adc` / `workload_identity` for Vertex; `api_key` / `managed_identity` for Azure). Other keys an entry accepts are `profile_id` (an OpenClaw auth-profile ID) and `extra_headers`. `ollama_ports` lists extra loopback ports to treat as Ollama.
+An entry carries only the sub-block (`bedrock`, `vertex` or `azure`) matching its `base_provider_type`. An unknown `auth_mode` makes the file invalid: `defenseclaw config validate` exits `1` naming the field and the allowed values (for example `llm_providers.custom[0].bedrock.auth_mode is "bogus_mode"; allowed values: api_key, iam_credentials, profile, instance_role.`), `defenseclaw doctor` shows it as a failed **Config validation** row, and the gateway does not load the file (a reload or start fails and a running gateway keeps its previous configuration). A sub-block from another family is accepted and ignored; once a config write has rendered `custom-providers.json`, `defenseclaw doctor` warns about it in the **Custom-provider overlay** row (`overlay sub-block family does not match base_provider_type`). Auth modes are the same as on `setup llm` (`api_key` / `iam_credentials` / `profile` / `instance_role` for Bedrock; `service_account` / `adc` / `workload_identity` for Vertex; `api_key` / `managed_identity` for Azure). Other keys an entry accepts are `profile_id` (an OpenClaw auth-profile ID) and `extra_headers`. `ollama_ports` lists extra loopback ports to treat as Ollama.
 
 The `domains` array drives the gateway's URL → instance lookup: when an inbound request URL (set on `X-DC-Target-URL` by fetch-interceptor agents, or recorded in the connector snapshot for native binaries) matches one of the listed hosts, the resolver applies this entry's TLS, `base_url` and sub-block posture. An entry that declares `base_url` should also list the matching host in `domains`.
 

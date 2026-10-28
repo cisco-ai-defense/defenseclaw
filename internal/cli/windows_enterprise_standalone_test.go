@@ -2198,6 +2198,23 @@ func TestWindowsEnterpriseUninstallReportsTheUserRegistrationsItLeft(t *testing.
 	if code := failed.Finish("windows", windowsEnterpriseFailureCodeFor(failed)); failed.OK || code == 0 {
 		t.Fatalf("not-LocalSystem purge finished ok=%t exit %d", failed.OK, code)
 	}
+	// GAP-2231: a signed-out account whose data and binaries went keeps only
+	// its user Path entry: the documented warning, not a failed purge.
+	signedOutPath, err := parseWindowsEnterpriseInstallerReport([]byte(base + `,"user_state_purged":["` + sid + `: C:\\Users\\carol\\.defenseclaw"],` +
+		`"user_state_remaining":["` + sid + `: C:\\Users\\carol\\.defenseclaw: ` + strings.ReplaceAll(windowsManagedHooksSignedOutPathEntryReason, `\`, `\\`) + `"]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	pathKept := enterprisestatus.New("uninstall", "standalone", "windows", "test")
+	applyWindowsEnterpriseInstallerReport(pathKept, &windowsEnterpriseLifecycleOptions{purge: true}, signedOutPath, windowsEnterpriseStandaloneRun{})
+	if len(pathKept.Errors) != 0 || len(pathKept.Warnings) != 1 || pathKept.Warnings[0].Code != "per_user_state_remaining" ||
+		!strings.Contains(pathKept.Warnings[0].Message, "signed-out enrolled account(s)") ||
+		!strings.HasSuffix(pathKept.Warnings[0].Message, `Accounts: `+sid+`: C:\Users\carol\.defenseclaw`) {
+		t.Fatalf("signed-out Path entry purge: errors %+v warnings %+v", pathKept.Errors, pathKept.Warnings)
+	}
+	if code := pathKept.Finish("windows", windowsEnterpriseFailureCodeFor(pathKept)); !pathKept.OK || code != 0 {
+		t.Fatalf("signed-out Path entry purge finished ok=%t exit %d", pathKept.OK, code)
+	}
 	// A purge names each account whose data and binaries went.
 	gone, err := parseWindowsEnterpriseInstallerReport([]byte(base + `,"user_state_purged":["bob (` + sid + `): C:\\Users\\bob\\.defenseclaw"]}`))
 	if err != nil {
@@ -4022,5 +4039,100 @@ func TestWindowsRepairConfigRefusalRunsOnlyTheTransactionRecovery(t *testing.T) 
 		if reported := strings.Join(result.Changes, " | "); (tc.changes == "") != (reported == "") || !strings.HasPrefix(reported, tc.changes) {
 			t.Fatalf("%s: the refusal reports changes %q", tc.name, reported)
 		}
+	}
+}
+
+// GAP-2265: under Setup the ensure deadline is the --timeout-seconds Setup
+// passes (its TIMEOUTSECONDS budget), not the fixed default; a value outside
+// Setup's range is refused before anything runs.
+func TestWindowsEnterpriseEnsureDeadlineFollowsSetupTimeoutSeconds(t *testing.T) {
+	previousTimeout := windowsEnterpriseEnsureTimeout
+	windowsEnterpriseEnsureTimeout = 30 * time.Millisecond
+	t.Cleanup(func() { windowsEnterpriseEnsureTimeout = previousTimeout })
+	stub := &ensureStub{t: t}
+	stub.install(t)
+	var remaining time.Duration
+	windowsEnterpriseStandaloneRunner = func(ctx context.Context, _ *cobra.Command, _ string, _ []string) (windowsEnterpriseStandaloneRun, error) {
+		deadline, ok := ctx.Deadline()
+		if !ok {
+			t.Fatal("ensure ran its installer without a deadline")
+		}
+		remaining = time.Until(deadline)
+		return windowsEnterpriseStandaloneRun{}, errors.New("stop after the deadline check")
+	}
+	command := &cobra.Command{}
+	command.SetOut(&bytes.Buffer{})
+	command.SetErr(&bytes.Buffer{})
+	opts := ensureTestOptions()
+	opts.timeoutSeconds = 1680
+	_ = runWindowsEnterpriseStandaloneEnsure(context.Background(), command, opts, `C:\stage\install-enterprise.ps1`)
+	if remaining < 1670*time.Second || remaining > 1680*time.Second {
+		t.Fatalf("ensure deadline %s from now, want the 1680 s Setup passed", remaining)
+	}
+
+	for _, seconds := range []int{30, windowsEnterpriseEnsureMaximumTimeoutSeconds + 1} {
+		called := false
+		windowsEnterpriseStandaloneRunner = func(context.Context, *cobra.Command, string, []string) (windowsEnterpriseStandaloneRun, error) {
+			called = true
+			return windowsEnterpriseStandaloneRun{}, errors.New("must not run")
+		}
+		var output bytes.Buffer
+		command.SetOut(&output)
+		opts := ensureTestOptions()
+		opts.timeoutSeconds = seconds
+		err := runWindowsEnterpriseStandaloneEnsure(context.Background(), command, opts, `C:\stage\install-enterprise.ps1`)
+		if called || commandExitCode(err) != enterprisestatus.WindowsExitInvalidArgs {
+			t.Fatalf("--timeout-seconds %d: ran=%v exit=%d (%v)", seconds, called, commandExitCode(err), err)
+		}
+		var result enterprisestatus.Result
+		if err := json.Unmarshal(output.Bytes(), &result); err != nil {
+			t.Fatal(err)
+		}
+		if len(result.Errors) != 1 || result.Errors[0].Code != "invalid_arguments" {
+			t.Fatalf("--timeout-seconds %d result %+v", seconds, result.Errors)
+		}
+	}
+}
+
+// GAP-2307: a purge that removed the target manifest and then failed on a
+// held per-user file must not advise a rerun that finds no account; it names
+// the folders to delete by hand. While the manifest stays, the rerun advice
+// stays.
+func TestWindowsEnterprisePurgeUserStateRemainingAfterTheManifestWentNamesTheFoldersToDelete(t *testing.T) {
+	restore := windowsEnterprisePurgeManifestExists
+	t.Cleanup(func() { windowsEnterprisePurgeManifestExists = restore })
+	stateRoot := filepath.Join(t.TempDir(), "DefenseClaw")
+	remaining := json.RawMessage(`["S-1-5-21-1-2-3-1017: C:\\Users\\u1\\.defenseclaw: RemoveAll held.log: in use"]`)
+	for _, tc := range []struct {
+		name      string
+		manifest  bool
+		stateRoot string
+		wantRerun bool
+	}{
+		{name: "manifest removed", manifest: false, stateRoot: stateRoot, wantRerun: false},
+		{name: "manifest kept", manifest: true, stateRoot: stateRoot, wantRerun: true},
+		{name: "no state root", manifest: false, stateRoot: "", wantRerun: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var asked string
+			windowsEnterprisePurgeManifestExists = func(path string) bool { asked = path; return tc.manifest }
+			result := enterprisestatus.Result{}
+			report := &windowsEnterpriseInstallerReport{StateRoot: tc.stateRoot, UserStateRemaining: remaining}
+			addWindowsEnterpriseUserStateWarning(&result, report)
+			if len(result.Errors) != 1 || result.Errors[0].Code != "per_user_state_remaining" {
+				t.Fatalf("errors = %+v", result.Errors)
+			}
+			message := result.Errors[0].Message
+			rerun := strings.Contains(message, "then run /uninstall PURGE=1 again as LocalSystem")
+			byHand := strings.Contains(message, "delete each folder named below by hand") &&
+				strings.Contains(message, "no longer finds them") &&
+				strings.Contains(message, "Do not delete a folder kept for the account's agent registrations")
+			if rerun != tc.wantRerun || byHand == tc.wantRerun || !strings.Contains(message, `.defenseclaw`) {
+				t.Fatalf("message = %q", message)
+			}
+			if tc.stateRoot != "" && asked != filepath.Join(stateRoot, "hook-guardian", "targets.yaml") {
+				t.Fatalf("manifest probe = %q", asked)
+			}
+		})
 	}
 }

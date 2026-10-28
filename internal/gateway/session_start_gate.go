@@ -250,7 +250,7 @@ func (g *sessionStartGate) await(ctx context.Context, key string, wait, arrival 
 			// The wait uses no gateway CPU: the call gives up its caller's
 			// run slot for it, so unseen sessions of one account do not
 			// queue behind each other's windows (GAP-1822).
-			resume := pauseHookRunSlot(ctx)
+			resume := waitWithoutHookRunSlot(ctx)
 			window := time.NewTimer(min(arrival, wait))
 			timedOut := false
 			select {
@@ -264,6 +264,13 @@ func (g *sessionStartGate) await(ctx context.Context, key string, wait, arrival 
 			}
 			window.Stop()
 			resume()
+			// A request that ended while it waited to take its run slot
+			// back is not judged: a start check (or a Codex registration
+			// repair) run with a done context would record a sticky
+			// start block for a live session.
+			if ctx.Err() != nil {
+				return sessionStartPendingReason, true
+			}
 			if timedOut {
 				g.judgeMissingStart(ctx, key, startCheck)
 			}
@@ -373,6 +380,10 @@ func (a *APIServer) sessionStartRecordedEarlier(ctx context.Context, connectorNa
 // whose managed runtime registration could not be repaired.
 const codexStartRegistrationUnavailable = "Codex runtime registration is unavailable"
 
+// codexStartRegistrationSetupStep follows the refusal when the cause names
+// no step of its own.
+const codexStartRegistrationSetupStep = "; run: defenseclaw setup codex --yes"
+
 // codexStartRegistrationRefusal repairs a missing managed runtime
 // registration for a Codex session start and returns the refusal when it
 // cannot ("" otherwise, and for every other connector and a sandboxed
@@ -386,7 +397,9 @@ func (a *APIServer) codexStartRegistrationRefusal(ctx context.Context, connector
 		if step := registrationRepairStep(err); step != "" {
 			return codexStartRegistrationUnavailable + ": " + step
 		}
-		return codexStartRegistrationUnavailable
+		// Setup registers it again or says what stops it (GAP-1744: the
+		// refusal names a usable next step, not only the outcome).
+		return codexStartRegistrationUnavailable + codexStartRegistrationSetupStep
 	}
 	return ""
 }

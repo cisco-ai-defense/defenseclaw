@@ -449,6 +449,75 @@ func TestWindowsScannerRuntimeUninstallKeepsALaterInstallsRuntime(t *testing.T) 
 	}
 }
 
+// GAP-2230: a purge that removed the deployment but failed on per-user state
+// (a file another program held in a user's .defenseclaw) retires the scanner
+// runtime as a clean uninstall does; before, any uninstall error left the
+// runtime folder with no warning. A failed run reports no changes, so the
+// deployment record decides: a standard account, a failed run that left the
+// deployment installed, and a record that cannot be read keep it.
+func TestWindowsScannerRuntimeFailedUninstallThatRemovedTheDeploymentRetiresIt(t *testing.T) {
+	root, runtimeFile := newWindowsScannerRuntimeRemovalTest(t)
+	deploymentSeam, elevatedSeam := windowsScannerRuntimeDeployment, windowsEnterpriseIsElevated
+	t.Cleanup(func() { windowsScannerRuntimeDeployment, windowsEnterpriseIsElevated = deploymentSeam, elevatedSeam })
+	failed := func(code string) *enterprisestatus.Result {
+		result := enterprisestatus.New("uninstall", managed.ProfileStandalone, "windows", "1.0.5")
+		result.AddError(code, "--purge could not remove the DefenseClaw per-user data of 1 enrolled account(s)")
+		return result
+	}
+	for _, tc := range []struct {
+		name     string
+		code     string
+		state    winpath.EnterpriseDeploymentState
+		err      error
+		elevated bool
+	}{
+		{name: "a standard account", state: winpath.EnterpriseDeploymentAbsent},
+		{name: "a run deferred as busy", code: "lifecycle_busy", state: winpath.EnterpriseDeploymentAbsent, elevated: true},
+		{name: "a run that left the deployment installed", state: winpath.EnterpriseDeploymentInstalled, elevated: true},
+		{name: "an unreadable record", state: winpath.EnterpriseDeploymentUnknown, elevated: true},
+		{name: "a record that cannot be inspected", err: errors.New("access denied"), elevated: true},
+	} {
+		state, recordErr, elevated := tc.state, tc.err, tc.elevated
+		windowsScannerRuntimeDeployment = func(*windowsEnterpriseLifecycleOptions) (winpath.EnterpriseDeployment, error) {
+			return winpath.EnterpriseDeployment{State: state, ProductVersion: "1.0.5"}, recordErr
+		}
+		windowsEnterpriseIsElevated = func() bool { return elevated }
+		code := tc.code
+		if code == "" {
+			code = "per_user_state_remaining"
+		}
+		result := failed(code)
+		applyWindowsStandaloneScannerRuntime(result, &windowsEnterpriseLifecycleOptions{productVersion: "1.0.5"})
+		if _, err := os.Stat(runtimeFile); err != nil {
+			t.Fatalf("%s: the failed uninstall removed the runtime: %v", tc.name, err)
+		}
+		if len(result.Warnings) != 0 {
+			t.Fatalf("%s: warned %+v", tc.name, result.Warnings)
+		}
+	}
+	windowsEnterpriseIsElevated = func() bool { return true }
+	for _, state := range []winpath.EnterpriseDeploymentState{winpath.EnterpriseDeploymentTombstone, winpath.EnterpriseDeploymentAbsent} {
+		if err := os.MkdirAll(root, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(runtimeFile, []byte("runtime"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		record := winpath.EnterpriseDeployment{State: state}
+		windowsScannerRuntimeDeployment = func(*windowsEnterpriseLifecycleOptions) (winpath.EnterpriseDeployment, error) {
+			return record, nil
+		}
+		result := failed("per_user_state_remaining")
+		applyWindowsStandaloneScannerRuntime(result, &windowsEnterpriseLifecycleOptions{productVersion: "1.0.5"})
+		if _, err := os.Lstat(root); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("%s: a failed purge that removed the deployment left the runtime folder: %v (warnings %+v)", state, err, result.Warnings)
+		}
+		if len(result.Errors) != 1 || result.Errors[0].Code != "per_user_state_remaining" {
+			t.Fatalf("%s: errors %+v, want the per-user failure kept", state, result.Errors)
+		}
+	}
+}
+
 // GAP-1166 review: the uninstall step waits for a scanner step that holds
 // the scanner runtime lock, and removes the runtime only after it.
 func TestWindowsScannerRuntimeRemovalWaitsForAScannerStep(t *testing.T) {

@@ -1336,6 +1336,9 @@ $ErrorActionPreference = 'Stop'
 function Invoke-Robocopy([string[]]$Arguments) {{
     [pscustomobject]@{{ Code = 8; Error = 'ERROR 5 (0x00000005) Copying NTFS Security to Destination File Access is denied.' }}
 }}
+$BinDir = '{tmp_path / "bin"}'
+$DataDir = '{source.parent}'
+{_ps1_function("Get-ProcessesUnder")}
 {_ps1_function("Copy-Kept")}
 Copy-Kept '{source}' '{slot}'
 try {{ Copy-Kept '{source}' '{tmp_path / "missing"}' }} catch {{ Write-Output $_.Exception.Message }}
@@ -1350,6 +1353,56 @@ try {{ Copy-Kept '{source}' '{tmp_path / "missing"}' }} catch {{ Write-Output $_
     assert completed.returncode == 0, completed.stdout + completed.stderr
     assert (slot / "audit.db").read_text(encoding="utf-8") == "db"
     assert "ERROR 5" in completed.stdout and "then run the installer again" in completed.stdout, completed.stdout
+
+
+@pytest.mark.skipif(POWERSHELL is None, reason="PowerShell is not installed")
+def test_a_refused_copy_names_only_this_installs_programs(tmp_path: Path) -> None:
+    # GAP-2245: a locked hooks file stopped the rollback copy, and the message
+    # told the user to Stop-Process every defenseclaw* process on the computer,
+    # another account's gateway and watchdog included.
+    source = tmp_path / "data" / "hooks"
+    source.mkdir(parents=True)
+    bin_dir = tmp_path / "bin"
+    script = f"""
+$ErrorActionPreference = 'Stop'
+$BinDir = '{bin_dir}'
+$DataDir = '{source.parent}'
+function Invoke-Robocopy([string[]]$Arguments) {{
+    [pscustomobject]@{{ Code = 8; Error = 'ERROR 32 (0x00000020) Copying File locked.txt The process cannot access the file.' }}
+}}
+function Get-CimInstance {{
+    @(
+        [pscustomobject]@{{ ProcessId = 4242; Name = 'defenseclaw-gateway.exe'; ExecutablePath = "$BinDir\\defenseclaw-gateway.exe" }},
+        [pscustomobject]@{{ ProcessId = 4243; Name = 'defenseclaw-hook.exe.old-20261027T120000000'; ExecutablePath = "$BinDir\\defenseclaw-hook.exe.old-20261027T120000000" }},
+        [pscustomobject]@{{ ProcessId = 4244; Name = 'python.exe'; ExecutablePath = "$DataDir\\.venv\\Scripts\\python.exe" }},
+        [pscustomobject]@{{ ProcessId = 5151; Name = 'claude.exe'; ExecutablePath = "$BinDir\\claude.exe" }},
+        [pscustomobject]@{{ ProcessId = 5152; Name = 'uv.exe'; ExecutablePath = "$BinDir\\uv.exe" }},
+        [pscustomobject]@{{ ProcessId = 8344; Name = 'defenseclaw-gateway.exe'; ExecutablePath = "C:\\Users\\other\\.local\\bin\\defenseclaw-gateway.exe" }}
+    )
+}}
+{_ps1_function("Get-ProcessesUnder")}
+{_ps1_function("Copy-Kept")}
+try {{ Copy-Kept '{source}' '{tmp_path / "slot"}' }} catch {{ Write-Output $_.Exception.Message }}
+"""
+    completed = subprocess.run(
+        [POWERSHELL, "-NoProfile", "-NonInteractive", "-Command", script],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    out = " ".join(completed.stdout.split())
+    # A working agent run from the same bin folder (Claude Code's native
+    # claude.exe, uv.exe) is not a DefenseClaw program to stop.
+    assert (
+        "DefenseClaw programs still running: defenseclaw-gateway (PID 4242), "
+        "defenseclaw-hook.exe.old-20261027T120000000 (PID 4243), python (PID 4244)"
+    ) in out, out
+    assert "claude" not in out and "PID 5151" not in out and "PID 5152" not in out and "PID 8344" not in out, out
+    assert "then run the installer again" in out, out
+    copy_kept = _ps1_function("Copy-Kept")
+    assert "Get-Process -ErrorAction" not in copy_kept
 
 
 def test_a_stopped_or_undone_install_frees_the_staged_release_first() -> None:
@@ -3251,6 +3304,7 @@ $script:children = 0
 {_ps1_function("Test-Version")}
 {_ps1_function("Get-LifecycleNextStep")}
 {_ps1_function("Invoke-ReleaseInstaller")}
+{_ps1_function("Convert-HooksForOlderRelease")}
 function Write-Warn([string]$Message) {{ Write-Host $Message }}
 function Write-Info([string]$Message) {{ Write-Host $Message }}
 function Die([string]$Message) {{ throw $Message }}
@@ -3288,6 +3342,99 @@ Write-Output "CHILDREN=$script:children"
     else:
         assert "HANDED" in out and "CHILDREN=1" in out, out
     assert (tmp_path / ".lifecycle-txn.json").exists() == record
+
+
+@pytest.mark.skipif(POWERSHELL is None, reason="PowerShell is not installed")
+@pytest.mark.parametrize(
+    ("target", "child_installs", "restore_reader", "expected"),
+    [
+        ("1.0.4", True, True, "convert,child"),
+        ("1.0.4", False, True, "convert,child,restore"),
+        ("1.0.6", True, True, "child"),
+        ("1.0.4", True, False, "child"),
+    ],
+    ids=["downgrade-installed", "downgrade-restored", "upgrade", "no-restore-reader"],
+)
+def test_a_downgrade_converts_this_releases_hook_entries_before_the_older_installer_runs(
+    tmp_path: Path, target: str, child_installs: bool, restore_reader: bool, expected: str
+) -> None:
+    # GAP-1883: `defenseclaw upgrade --version 1.0.4` (or -Version 1.0.4) over
+    # 1.0.5 ran 1.0.4's setup, which does not own 1.0.5's one-line Claude Code
+    # PreToolUse handler (defenseclaw-gateway.exe launcher-guard): it added its
+    # own beside it and doctor failed. The live (newer) gateway converts the
+    # entries before the older installer runs, as rollback does; a downgrade
+    # that ends with this release still installed gets its own entries back.
+    installer = f'$DcVersion = "{target}"\n$DcVersionChangeGuard = 1\n$DcLifecycleRecord = 1'
+    reader = "return $true" if restore_reader else "throw 'The current gateway cannot safely restore converted rollback hooks'"
+    script = f"""
+$ErrorActionPreference = 'Stop'
+$DataDir = '{tmp_path}'
+$BinDir = Join-Path $DataDir 'bin'
+$LifecycleManifest = Join-Path $DataDir '.lifecycle-txn.json'
+$ReleaseBase = 'https://release.invalid'
+$OfficialReleaseBase = $ReleaseBase
+$Ver = '1.0.5'
+$Local = ''
+$script:installed = '1.0.5'
+$script:events = @()
+{_ps1_function("Test-Version")}
+{_ps1_function("Get-LifecycleNextStep")}
+{_ps1_function("Invoke-ReleaseInstaller")}
+{_ps1_function("Convert-HooksForOlderRelease")}
+function Test-HookRollbackRestoreAvailable {{ {reader} }}
+function Convert-HooksForRollback([string]$From, [string]$BackTo) {{ $script:events += 'convert' }}
+function Restore-HooksAfterAbortedRollback {{ $script:events += 'restore' }}
+function Write-Warn([string]$Message) {{ Write-Host $Message }}
+function Write-Info([string]$Message) {{ Write-Host $Message }}
+function Die([string]$Message) {{ throw $Message }}
+function Invoke-Quietly([scriptblock]$Block) {{ & $Block }}
+function Remove-Tree([string]$Path) {{ if (Test-Path -LiteralPath $Path) {{ Remove-Item -LiteralPath $Path -Recurse -Force }} }}
+function Get-InstalledVersion {{ return $script:installed }}
+function Assert-NoLoadedPluginAgents {{ }}
+function Assert-NoActiveConnectorRecovery {{ }}
+function Save-Url([string]$Url, [string]$To) {{ [IO.File]::WriteAllText($To.Replace([char]92, [IO.Path]::DirectorySeparatorChar), '{installer.replace("'", "''")}'); return $true }}
+function Get-ListedSha256 {{ return 'verified' }}
+function Get-Sha256 {{ return 'verified' }}
+function Get-Cosign {{ return '' }}
+function Wait-VenvFree {{ }}
+function Get-GatewayProcess {{ return $null }}
+function Stop-Gateway {{ return $true }}
+function Stop-Watchdog {{ }}
+function Assert-GatewayQuiescent {{ }}
+function Start-Gateway {{ return 0 }}
+function ConvertTo-ProcessArgument([string]$Value) {{ return $Value }}
+function Start-Process {{
+    $script:events += 'child'
+    if (${str(child_installs).lower()}) {{ $script:installed = '{target}' }}
+    $child = [PSCustomObject]@{{ Handle = [IntPtr]::Zero; ExitCode = {0 if child_installs else 1} }}
+    $child | Add-Member -MemberType ScriptMethod -Name WaitForExit -Value {{}}
+    return $child
+}}
+$code = Invoke-ReleaseInstaller '{target}' @('-Yes')
+Write-Output "EVENTS=$($script:events -join ',') CODE=$code"
+"""
+    completed = _run_powershell(script)
+    out = completed.stdout + completed.stderr
+    assert completed.returncode == 0, out
+    assert f"EVENTS={expected} CODE={0 if child_installs else 1}" in out, out
+
+
+def test_a_local_downgrade_converts_the_hooks_after_the_gateway_stops_and_restores_them_with_this_release() -> None:
+    # GAP-1883, the -Local -Version route `defenseclaw upgrade --version`
+    # takes with a local folder: this installer installs the older release
+    # itself. It converts once the live gateway is quiet, before the recovery
+    # check, and a restore of this release puts its entries back before its
+    # gateway starts again.
+    install = _ps1_function("Invoke-Install")
+    quiet = install.index('Assert-GatewayQuiescent "Version change to $Ver"')
+    convert = install.index("$script:OlderHooksConverted = Convert-HooksForOlderRelease $PrevVersion $Ver")
+    assert quiet < convert < install.index('Assert-NoActiveConnectorRecovery "Version change to $Ver"', quiet)
+    assert convert < install.index("try { $saved = Save-Snapshot }") < install.index("try { $installed = Install-New }")
+    restart = _ps1_function("Restart-Old")
+    assert restart.index("Restore-HooksAfterAbortedRollback") < restart.index("Start-Gateway")
+    helper = _ps1_function("Convert-HooksForOlderRelease")
+    assert "[version]$To -ge [version]$From) { return $false }" in helper
+    assert helper.index("Test-HookRollbackRestoreAvailable") < helper.index("Convert-HooksForRollback $From $To")
 
 
 def test_this_installer_declares_that_it_reads_the_lifecycle_record() -> None:
@@ -5323,6 +5470,57 @@ def test_a_rollback_makes_the_backups_folder_private_before_the_hook_conversion(
     assert f"SET {backups}" in out and "PROTECTION=True,True" in out, out
 
 
+@pytest.mark.skipif(sys.platform != "win32" or POWERSHELL is None, reason="native Windows PowerShell required")
+def test_a_rollback_makes_inherited_copies_of_the_settings_backup_private(tmp_path: Path) -> None:
+    # GAP-2050 / GAP-1883: a settings copy and witness from an earlier
+    # conversion that came back with inherited permissions (a profile restore,
+    # a plain file copy) made prepare-rollback refuse ("keep a copy of the
+    # settings: bound private compare-and-swap object has an inheritable
+    # DACL"), so every later rollback or downgrade left two Claude Code
+    # handlers. Those two files become private (same access, explicit); other
+    # files in backups\ keep their permissions.
+    text = _text()
+    # Its C# here-string has its own "}" lines, so cut it up to the next function.
+    native = text[text.index("function Initialize-Native {") : text.index("function Update-UserPath(")]
+    data = str(tmp_path / "data").replace("'", "''")
+    script = f"""
+$ErrorActionPreference = 'Stop'
+$DataDir = '{data}'
+function Write-Warn([string]$m) {{ "WARN $m" }}
+{native}
+{_ps_functions("Set-DirectoryAcl", "Test-OwnedByCurrentUser")}
+{_ps1_function("Protect-BackupsFolder")}
+$backups = Join-Path $DataDir 'backups'
+New-Item -ItemType Directory -Path $backups -Force | Out-Null
+$names = @('claudecode-settings.before-rollback.json', 'claudecode-settings.before-rollback.witness.json', 'guardrail-profiles.json')
+# Elevated (the GitHub runner, an elevated console) a new file belongs to the
+# Administrators group. The installer creates its files as the user when it
+# runs elevated (SwapDefaultOwner), so the copies here are made the same way.
+Initialize-Native
+$me = [Security.Principal.WindowsIdentity]::GetCurrent().User
+$sid = New-Object byte[] $me.BinaryLength
+$me.GetBinaryForm($sid, 0)
+$previousOwner = [DefenseClawInstall.Native]::SwapDefaultOwner([DefenseClawInstall.Native]::NewOwner($sid))
+try {{
+    foreach ($n in $names) {{ Set-Content -LiteralPath (Join-Path $backups $n) -Value '{{}}' }}
+}} finally {{
+    if ($previousOwner -ne [IntPtr]::Zero) {{ [void][DefenseClawInstall.Native]::SwapDefaultOwner($previousOwner) }}
+}}
+foreach ($n in $names) {{ if (-not (Test-OwnedByCurrentUser (Join-Path $backups $n))) {{ throw "precondition: $n is not this account's own" }} }}
+foreach ($n in $names) {{ if ((Get-Acl -LiteralPath (Join-Path $backups $n)).AreAccessRulesProtected) {{ throw "precondition: $n is already private" }} }}
+Protect-BackupsFolder
+"DIR=$((Get-Acl -LiteralPath $backups).AreAccessRulesProtected)"
+foreach ($n in $names) {{ "$n=$((Get-Acl -LiteralPath (Join-Path $backups $n)).AreAccessRulesProtected)" }}
+"""
+    result = _run_powershell(script)
+    out = result.stdout + result.stderr
+    assert result.returncode == 0 and "WARN" not in out, out
+    assert "DIR=True" in out, out
+    assert "claudecode-settings.before-rollback.json=True" in out, out
+    assert "claudecode-settings.before-rollback.witness.json=True" in out, out
+    assert "guardrail-profiles.json=False" in out, out
+
+
 @pytest.mark.skipif(POWERSHELL is None, reason="PowerShell is not installed")
 def test_uv_runs_below_normal_priority_so_hook_calls_keep_their_budget(tmp_path: Path) -> None:
     # GAP-1150: while uv built and byte-compiled the environment on every
@@ -5443,8 +5641,11 @@ function Test-OwnedByCurrentUser([string]$Path) {{ return {owned} }}
 function Write-Warn([string]$m) {{ "WARN $m" }}
 function Write-Info([string]$m) {{ "INFO $m" }}
 {_ps1_function("Remove-KeptNewCopies")}
+{_ps1_function("Get-UndoHint")}
 {_ps1_function("Publish-PreviousSlot")}
+$script:KeptRollbackCopy = ""
 try {{ Publish-PreviousSlot (Join-Path $DataDir 'previous.new') }} catch {{ "THROWN $($_.Exception.Message)" }}
+"UNDO $(Get-UndoHint)"
 'OK'
 """
     result = _run_powershell(script)
@@ -5467,9 +5668,17 @@ try {{ Publish-PreviousSlot (Join-Path $DataDir 'previous.new') }} catch {{ "THR
         assert len(kept) == 1 and kept[0] != ".failed-kept-previous-20261020T000000-new", out
         assert (data / kept[0] / "VERSION").read_text(encoding="ascii") == "1.0.4", out
         assert asides == [] and "belongs to another account" in out and "Exception" not in out, out
+        # The install summary must not send `defenseclaw rollback` at the
+        # other account's older copy without the steps that make this copy
+        # the rollback copy again.
+        undo = re.search(r"UNDO (.*)", out).group(1)
+        assert undo != "Undo with: defenseclaw rollback", out
+        assert str(data / "previous") in undo and str(data / kept[0]) in undo and undo.endswith("defenseclaw rollback"), out
+        assert '$changed. $(Get-UndoHint)' in _text() and '$changed. Undo with: defenseclaw rollback' not in _text()
         return
     assert (data / "previous" / "VERSION").read_text(encoding="ascii") == "1.0.4"
     assert not (data / ".failed-kept-previous-20261020T000000-new").exists(), out
+    assert "UNDO Undo with: defenseclaw rollback" in out, out
     if old == "deletable":
         assert asides == [] and "WARN" not in out, out
     else:
@@ -5494,6 +5703,67 @@ try {{ Publish-PreviousSlot (Join-Path $DataDir 'previous.new') }} catch {{ "THR
     publish = _ps1_function("Publish-PreviousSlot")
     names = re.findall(r'Join-Path \$DataDir "(\.[a-z-]+)', publish)
     assert names and all(name.startswith(".failed-kept-previous-") for name in names), names
+
+
+@pytest.mark.skipif(POWERSHELL is None, reason="PowerShell is not installed")
+@pytest.mark.parametrize("case", ["updated", "same", "missing", "no-lock", "not-setup-selected"])
+def test_a_rollback_refuses_before_any_change_when_codex_changed_since_the_older_setup(tmp_path: Path, case: str) -> None:
+    # GAP-2299: after a Codex update (0.160.0 -> 0.164.0) and setup codex on
+    # 1.0.5, 'defenseclaw rollback' swapped to 1.0.4, whose gateway does not
+    # start with a Codex program other than the one its setup recorded
+    # (previous\data\hook_contract_lock.json path + SHA-256); the start
+    # rewrote the Claude Code settings first, and the undo left them in the
+    # 1.0.4 form with "protection could not be verified" for claudecode.
+    data = tmp_path / "previous" / "data"
+    data.mkdir(parents=True)
+    exe = tmp_path / "codex.exe"
+    exe.write_bytes(b"codex 0.160.0")
+    recorded = hashlib.sha256(b"codex 0.160.0").hexdigest()
+    if case == "updated":
+        exe.write_bytes(b"codex 0.164.0")
+    if case == "missing":
+        exe.unlink()
+    source = "setup-selected" if case != "not-setup-selected" else ""
+    if case != "no-lock":
+        (data / "hook_contract_lock.json").write_text(
+            json.dumps(
+                {
+                    "version": 1,
+                    "connectors": {
+                        "claudecode": {"raw_agent_version": "2.1.311 (Claude Code)"},
+                        "codex": {
+                            "raw_agent_version": "codex-cli 0.160.0",
+                            "agent_executable": str(exe),
+                            "agent_executable_source": source,
+                            "agent_executable_sha256": recorded,
+                        },
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+    script = f"""
+$ErrorActionPreference = 'Stop'
+{_ps1_function("Get-Field")}
+{_ps1_function("Get-StaleAgentEvidence")}
+@(Get-StaleAgentEvidence '{data}') | ForEach-Object {{ "STALE $_" }}
+'OK'
+"""
+    result = _run_powershell(script)
+    out = result.stdout + result.stderr
+    assert result.returncode == 0 and "OK" in out, out
+    stale = re.findall(r"STALE (.*)", out)
+    if case == "updated":
+        assert stale == [f"Codex was updated after DefenseClaw set up Codex 0.160.0 ({exe} changed)"], out
+    elif case == "missing":
+        assert stale == [f"Codex 0.160.0, which DefenseClaw set up before the upgrade, is no longer at {exe}"], out
+    else:
+        assert stale == [], out
+    rollback = _ps1_function("Invoke-Rollback")
+    check = rollback.index("Get-StaleAgentEvidence (Join-Path $Previous \"data\")")
+    assert check < rollback.index("Confirm-Step $question") < rollback.index("Stop-Gateway")
+    assert check < rollback.index("Convert-HooksForRollback") and check < rollback.index("Switch-WithPrevious")
+    assert check < rollback.index("Nothing was changed", check) < rollback.index("Confirm-Step $question")
 
 
 def test_the_fail_mode_hold_outlasts_the_installers_own_steps() -> None:
@@ -6549,7 +6819,8 @@ def test_a_rollback_is_done_only_once_its_gateway_runs_and_is_proven(tmp_path: P
         "function Start-Gateway { $script:starts++; if ($script:case -like 'start-fails*') { return 1 }; return 0 }\n"
         "function Wait-LifecycleProof { if ($script:case -eq 'not-proven') { return @('the gateway is not running') }; return @() }\n"
         "function Undo-Rollback { param($Reason) $script:undone++; Write-Host \"undo: $Reason\"; return 1 }\n"
-        + _ps1_function("Get-Field") + _ps1_function("Read-Text") + _ps1_function("Test-Version") + _ps1_function("Invoke-Rollback")
+        + _ps1_function("Get-Field") + _ps1_function("Get-StaleAgentEvidence") + _ps1_function("Read-Text")
+        + _ps1_function("Test-Version") + _ps1_function("Invoke-Rollback")
         + "\n$rc = Invoke-Rollback\nWrite-Host \"rc: $rc undone: $script:undone removed: $script:removed\"\n",
         encoding="utf-8",
     )
@@ -6564,6 +6835,67 @@ def test_a_rollback_is_done_only_once_its_gateway_runs_and_is_proven(tmp_path: P
     else:
         assert "rc: 1 undone: 1 removed: 0" in out and "Now running" not in out, out
         assert ("did not start" in out) if case.startswith("start-fails") else ("not proven running" in out), out
+
+
+@pytest.mark.skipif(POWERSHELL is None, reason="PowerShell is not installed")
+@pytest.mark.parametrize("back_to", ["1.0.2", "1.0.3", "1.0.4"])
+def test_a_codex_update_refuses_only_a_rollback_whose_gateway_would_not_start(tmp_path: Path, back_to: str) -> None:
+    # GAP-2299 review: 1.0.4 does not start with a Codex program its setup
+    # did not record, so that rollback is refused before anything changes.
+    # 1.0.2 and 1.0.3 skip the failed Codex setup and start, so their
+    # rollback completes as before, with a warning that Codex is unguarded
+    # until setup codex runs; the refusal must not reach them.
+    previous = tmp_path / "previous"
+    (previous / "data").mkdir(parents=True)
+    (previous / "VERSION").write_text(back_to, encoding="ascii")
+    exe = tmp_path / "codex.exe"
+    exe.write_bytes(b"codex 0.164.0")
+    (previous / "data" / "hook_contract_lock.json").write_text(
+        json.dumps({"version": 1, "connectors": {"codex": {
+            "raw_agent_version": "codex-cli 0.160.0", "agent_executable": str(exe),
+            "agent_executable_source": "setup-selected",
+            "agent_executable_sha256": hashlib.sha256(b"codex 0.160.0").hexdigest()}}}),
+        encoding="utf-8",
+    )
+    script = tmp_path / "rollback.ps1"
+    script.write_text(
+        "Set-StrictMode -Version Latest\n$ErrorActionPreference = 'Stop'\n"
+        f"$DataDir = '{tmp_path}'\n$Previous = '{previous}'\n$BinDir = '{tmp_path / 'bin'}'\n$ReleaseBase = 'https://example.invalid'\n"
+        "$Run = @{ Log = 'install.log'; RestorePending = $false }\n"
+        "$script:stops = 0; $script:removed = 0\n"
+        "function Write-Step([string]$m) {}\nfunction Write-Info([string]$m) { Write-Host \"info: $m\" }\n"
+        "function Write-Ok([string]$m) { Write-Host \"ok: $m\" }\nfunction Write-Warn([string]$m) { Write-Host \"warn: $m\" }\n"
+        "function Die([string]$m) { throw $m }\n"
+        "function Get-InstalledVersion { return '1.0.5' }\n"
+        "function Assert-NoLoadedPluginAgents { }\n"
+        "function Assert-NoActiveConnectorRecovery { }\nfunction Confirm-Step { return $true }\n"
+        "function Test-HookRollbackRestoreAvailable { return $false }\nfunction Wait-VenvFree { }\n"
+        "function Test-RollbackData { return $false }\nfunction Get-GatewayProcess { return $true }\n"
+        "function Stop-Gateway { $script:stops++; return $true }\nfunction Stop-Watchdog { }\nfunction Assert-GatewayQuiescent { }\n"
+        "function Switch-WithPrevious { return 0 }\nfunction Protect-UvDirectory { }\nfunction Invoke-PruneOrphanedHooks { }\n"
+        "function Write-LifecycleManifest { return [pscustomobject]@{ TargetBins = @{} } }\nfunction Get-BinariesState { return @{} }\n"
+        "function Remove-LifecycleManifest { $script:removed++ }\n"
+        "function Start-Gateway { return 0 }\nfunction Wait-LifecycleProof { return @() }\n"
+        "function Undo-Rollback { param($Reason) Write-Host \"undo: $Reason\"; return 1 }\n"
+        + _ps1_function("Get-Field") + _ps1_function("Get-StaleAgentEvidence") + _ps1_function("Read-Text")
+        + _ps1_function("Test-Version") + _ps1_function("Invoke-Rollback")
+        + "\ntry { $rc = Invoke-Rollback } catch { Write-Host \"refused: $($_.Exception.Message)\"; $rc = 'refused' }\n"
+        + "Write-Host \"rc: $rc stops: $script:stops removed: $script:removed\"\n",
+        encoding="utf-8",
+    )
+    completed = subprocess.run(
+        [str(POWERSHELL), "-NoProfile", "-NonInteractive", "-File", str(script)],
+        capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=120, check=False,
+    )
+    out = completed.stdout + completed.stderr
+    assert completed.returncode == 0, out
+    if back_to == "1.0.4":
+        assert "rc: refused stops: 0 removed: 0" in out and "Nothing was changed" in out, out
+        assert "warn: Codex was updated" not in out, out
+    else:
+        assert "rc: 0 stops: 1 removed: 1" in out and f"ok: Now running DefenseClaw {back_to}" in out, out
+        assert "refused:" not in out, out
+        assert f"warn: Codex was updated after DefenseClaw set up Codex 0.160.0 ({exe} changed). DefenseClaw {back_to} starts without Codex hooks until you run 'defenseclaw setup codex' after the rollback" in out, out
 
 
 @pytest.mark.skipif(POWERSHELL is None, reason="PowerShell is not installed")
@@ -6867,8 +7199,11 @@ def test_the_windows_installer_asks_for_every_connector_to_be_guarded() -> None:
     # asked for it (an older one refuses the flag), also after a slow first
     # start, and its 3 keeps the install with "a connector needs attention".
     body = _ps1_function("Start-Gateway")
-    probe = 'if ((Invoke-Native $gateway @("start", "--require-every-connector", "--help") -Quiet) -eq 0) { $startArgs += "--require-every-connector" }'
+    probe = 'if (Test-GatewayRequiresEveryConnector $gateway $version) { $startArgs += "--require-every-connector" }'
     assert body.index('$startArgs = @("start")') < body.index(probe) < body.index("$rc = Invoke-Native $gateway $startArgs")
+    assert 'return (Invoke-Native $Gateway @("start", "--require-every-connector", "--help") -Quiet) -eq 0' in _ps1_function(
+        "Test-GatewayRequiresEveryConnector"
+    )
     slow = body[body.index('Write-Ok "The gateway finished starting"') :]
     assert slow.index("if ($startArgs.Count -gt 1 -and (Invoke-Native $gateway $startArgs) -ne 0) { return 3 }") < slow.index(
         "return 0"
@@ -6915,6 +7250,7 @@ def test_start_gateway_passes_the_every_connector_flag_only_to_a_gateway_that_ha
         'function Get-UtcClock { "now" }\nfunction Get-InstalledVersion { "1.0.4" }\n'
         "function Test-Version($v) { $true }\nfunction Reset-AuditJournalMode { }\nfunction Get-GatewayProcess { $null }\n"
         + _ps1_function("Invoke-Native")
+        + _ps1_function("Test-GatewayRequiresEveryConnector")
         + _ps1_function("Start-Gateway")
         + '$rc = Start-Gateway\nWrite-Host "rc=$rc"\n'
     )
@@ -7583,6 +7919,16 @@ def _outage_notice_python() -> tuple[str, str]:
     return sh_py, ps_py
 
 
+def _posix_bash() -> str | None:
+    # On Windows `bash` on PATH can be the WSL launcher (System32\bash.exe,
+    # "no installed distribution" on the CI runners, GAP-2139): use Git for
+    # Windows' bash there, or none.
+    if os.name != "nt":
+        return shutil.which("bash")
+    git = Path(os.environ.get("ProgramFiles", r"C:\Program Files")) / "Git" / "bin" / "bash.exe"
+    return str(git) if git.is_file() else None
+
+
 @pytest.mark.allow_subprocess
 def test_the_outage_notice_runs_under_the_installers_readonly_home(tmp_path: Path) -> None:
     # GAP-0016: install.sh declares DEFENSECLAW_HOME readonly (and exports
@@ -7604,11 +7950,6 @@ def test_the_outage_notice_runs_under_the_installers_readonly_home(tmp_path: Pat
         f"readonly DEFENSECLAW_HOME={str(home)!r}\nexport DEFENSECLAW_HOME\n"
         f"readonly VENV={str(venv)!r}\n" + func + 'echo "got=[$(outage_open_notice)]"\n'
     )
-    env = {k: v for k, v in os.environ.items() if k != "DEFENSECLAW_HOME"}
-    result = subprocess.run(["bash", "-c", script], capture_output=True, text=True, env=env, timeout=60)
-    assert result.returncode == 0, result.stderr
-    assert "readonly" not in result.stderr, result.stderr
-    assert result.stdout.strip() == f"got=[notice home={home}]", result.stdout + result.stderr
     # No other assignment to a readonly installer variable (the class; the
     # sed that reads a stamped installer quotes the declaration itself).
     names = re.findall(r"^readonly ([A-Z_][A-Z0-9_]*)=", sh, flags=re.M)
@@ -7617,6 +7958,14 @@ def test_the_outage_notice_runs_under_the_installers_readonly_home(tmp_path: Pat
         later = sh[decl + len(f"readonly {name}=") :]
         hits = [m.group(0) for m in re.finditer(rf"(?m)(?:^|[\s;(&|])(?<!readonly ){name}=", later)]
         assert not hits, (name, hits)
+    bash = _posix_bash()
+    if bash is None:
+        pytest.skip("install.sh runs only under a POSIX bash (no Git for Windows bash here; GAP-2139)")
+    env = {k: v for k, v in os.environ.items() if k != "DEFENSECLAW_HOME"}
+    result = subprocess.run([bash, "-c", script], capture_output=True, text=True, env=env, timeout=60)
+    assert result.returncode == 0, result.stderr
+    assert "readonly" not in result.stderr, result.stderr
+    assert result.stdout.strip() == f"got=[notice home={home}]", result.stdout + result.stderr
 
 
 @pytest.mark.allow_subprocess
@@ -7876,6 +8225,81 @@ if (-not $r) {{ throw 'no report' }}
         body = _ps1_function(name)
         parsed = [line for line in body.splitlines() if "$probe = Get-NativeProbe" in line and "--help" not in line]
         assert parsed and all(line.rstrip().endswith("-Json") for line in parsed), (name, parsed)
+
+
+# rel-1-0-5 GAP-0047: Windows PowerShell 5.1's transcript (the install log)
+# records a native command's stderr as a red NativeCommandError even when the
+# installer discards it, under the Continue preference: a rollback to 1.0.3
+# logged the restored gateway's "unknown flag: --require-every-connector"
+# answer to the start-flag probe. A quiet call and a JSON probe leave nothing
+# of the discarded stream in the log and keep the exit code.
+@pytest.mark.skipif(POWERSHELL is None, reason="PowerShell is not installed")
+@pytest.mark.allow_subprocess
+def test_a_quiet_native_probe_leaves_no_error_record_in_the_install_log(tmp_path: Path) -> None:
+    line = "Error: unknown flag: --require-every-connector"
+    if os.name == "nt":
+        gateway = tmp_path / "defenseclaw-gateway.cmd"
+        gateway.write_text(f"@echo off\r\necho {line} 1>&2\r\necho {{}}\r\nexit /b 1\r\n", encoding="ascii")
+    else:
+        gateway = tmp_path / "defenseclaw-gateway"
+        gateway.write_text(f"#!/bin/sh\necho '{line}' >&2\necho '{{}}'\nexit 1\n", encoding="ascii")
+        gateway.chmod(0o755)
+    log = tmp_path / "install.log"
+    script = f"""
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
+{_ps1_function('Invoke-Native')}
+{_ps1_function('Get-NativeProbe')}
+Start-Transcript -LiteralPath '{log}' | Out-Null
+$rc = Invoke-Native '{gateway}' @('start', '--require-every-connector', '--help') -Quiet
+$probe = Get-NativeProbe '{gateway}' @('status', '--json') -Json
+Stop-Transcript | Out-Null
+"rc:$rc"
+"probe:$($probe.Exit):$($probe.Output.Trim())"
+"""
+    result = _run_powershell(script)
+    assert result.returncode == 0, result.stdout + result.stderr
+    out = result.stdout.split()
+    assert "rc:1" in out, result.stdout + result.stderr
+    assert "probe:1:{}" in out, result.stdout + result.stderr
+    text = log.read_text(encoding="utf-8", errors="replace")
+    assert "NativeCommandError" not in text, text
+    # PowerShell 7's transcript copies a redirected native stderr line as
+    # plain text whatever the preference; 5.1 (powershell.exe) keeps it out.
+    if "PSEdition: Core" not in text:
+        assert "unknown flag" not in text, text
+
+
+@pytest.mark.skipif(POWERSHELL is None, reason="PowerShell is not installed")
+@pytest.mark.allow_subprocess
+@pytest.mark.parametrize(
+    ("version", "asked", "flag"),
+    [("1.0.3", False, False), ("1.0.2", False, False), ("1.0.4", True, True), ("1.0.5", True, True), ("", True, True)],
+    ids=["restored-1.0.3", "restored-1.0.2", "1.0.4", "1.0.5", "unknown-version"],
+)
+def test_a_restored_release_without_the_every_connector_flag_is_not_asked_for_it(
+    tmp_path: Path, version: str, asked: bool, flag: bool
+) -> None:
+    calls = tmp_path / "calls.txt"
+    if os.name == "nt":
+        gateway = tmp_path / "defenseclaw-gateway.cmd"
+        gateway.write_text(f"@echo off\r\necho %* >> \"{calls}\"\r\nexit /b 0\r\n", encoding="ascii")
+    else:
+        gateway = tmp_path / "defenseclaw-gateway"
+        gateway.write_text(f"#!/bin/sh\necho \"$*\" >> '{calls}'\nexit 0\n", encoding="ascii")
+        gateway.chmod(0o755)
+    script = f"""
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
+{_ps1_function('Test-Version')}
+{_ps1_function('Invoke-Native')}
+{_ps1_function('Test-GatewayRequiresEveryConnector')}
+"flag:$(Test-GatewayRequiresEveryConnector '{gateway}' '{version}')"
+"""
+    result = _run_powershell(script)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert f"flag:{flag}" in result.stdout.split(), result.stdout + result.stderr
+    assert calls.exists() == asked, calls.read_text() if calls.exists() else ""
 
 
 # A failed upgrade to 1.0.5 that restored 1.0.2-1.0.4 kept the Claude Code

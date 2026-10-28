@@ -616,7 +616,11 @@ func TestReloadRejectsInvalidAndRestartRequiredFieldsWithoutInitialization(t *te
 	}
 }
 
-func TestReloadRejectsSamePrometheusBindingBeforeCandidateInitialization(t *testing.T) {
+// A reload that keeps a Prometheus destination on the same listen address
+// is applied live: the successor generation joins the socket the process
+// already holds, so a redaction, bucket or destination edit next to it needs
+// no restart (GAP-2072).
+func TestReloadKeepsTheSamePrometheusBindingLive(t *testing.T) {
 	log := &lifecycleLog{}
 	factory := successfulFactory("prometheus", log)
 	initial := prometheusTestConfig(t, 90, "127.0.0.1:9464")
@@ -627,24 +631,26 @@ func TestReloadRejectsSamePrometheusBindingBeforeCandidateInitialization(t *test
 	result, reloadErr := manager.Reload(
 		t.Context(), prometheusTestConfig(t, 30, "127.0.0.1:9464"),
 	)
-	if reloadErr == nil || reloadErr.Code() != ErrorRestartRequired ||
-		reloadErr.FieldPath() != "observability.destinations.metrics.listen" ||
-		result.ActiveGraph() != old || result.Status() != ReloadRejected || manager.Active() != old {
-		t.Fatalf("same-binding reload active=%p old=%p err=%v", result.ActiveGraph(), old, reloadErr)
+	if reloadErr != nil || result.Status() != ReloadApplied ||
+		result.ActiveGraph() == old || manager.Active() != result.ActiveGraph() ||
+		manager.Active().Generation() != old.Generation()+1 {
+		t.Fatalf("same-binding reload status=%s active=%p old=%p err=%v", result.Status(), result.ActiveGraph(), old, reloadErr)
 	}
-	if events := log.snapshot(); len(events) != initialBuildEvents {
-		t.Fatalf("same-binding reload initialized candidate resources: %#v", events)
+	if events := log.snapshot(); len(events) <= initialBuildEvents {
+		t.Fatalf("same-binding reload did not build the successor generation: %#v", events)
 	}
 	flushReports(t, manager)
-	reports := reporter.snapshot()
-	if len(reports) < 3 {
-		t.Fatalf("same-binding rejection reports = %#v", reports)
-	}
-	for _, report := range reports[len(reports)-2:] {
-		if report.graph != old || report.value.Code != ReportRestartRequired ||
-			report.value.FieldPath != "observability.destinations.metrics.listen" {
-			t.Fatalf("same-binding rejection report = %#v", report)
+	applied := false
+	for _, report := range reporter.snapshot() {
+		if report.value.Code == ReportRestartRequired {
+			t.Fatalf("same-binding reload reported restart_required: %#v", report)
 		}
+		if report.graph == manager.Active() && report.value.Code == ReportReloadApplied {
+			applied = true
+		}
+	}
+	if !applied {
+		t.Fatalf("same-binding reload reports = %#v", reporter.snapshot())
 	}
 }
 

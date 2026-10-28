@@ -10527,12 +10527,25 @@ def _resolve_connector_workspace(workspace_dir: str | None) -> str:
 
 
 def _configure_connector_workspace(cfg, workspace_dir: str | None = None) -> str:
-    """Persist an explicit workspace, or clear it for global/user scope."""
+    """Persist an explicit workspace, or clear it for global/user scope.
+
+    Setup without ``--workspace`` selects global scope. A workspace pinned
+    earlier (``config set claw.workspace_dir`` or an earlier ``--workspace``)
+    is then cleared, and setup says so and names the flag that keeps it
+    (GAP-0201): before, the pin vanished without a word.
+    """
     workspace = _resolve_connector_workspace(workspace_dir)
     try:
+        previous = str(getattr(cfg.claw, "workspace_dir", "") or "").strip()
         cfg.claw.workspace_dir = workspace
     except AttributeError:
-        pass
+        return workspace
+    if previous and not workspace:
+        ux.warn(
+            f"Workspace pin {previous} cleared: setup without --workspace selects global scope. "
+            f"To keep it, pass --workspace {previous} (with more than one connector: "
+            f"defenseclaw setup guardrail --workspace {previous})."
+        )
     return workspace
 
 
@@ -10821,8 +10834,9 @@ def _apply_hook_connector_setup(
       4. Persists config.yaml and writes the
          ``<data_dir>/picked_connector`` hint.
       5. When ``restart`` is true, bounces the gateway so its
-         ``Connector.Setup()`` wires hooks + native OTel exporter +
-         (codex only) the notify bridge against the running sidecar.
+         ``Connector.Setup()`` wires the hooks against the running
+         sidecar (for codex under Secure Client also the notify
+         bridge; a host install never writes a native OTel exporter).
 
     Returns True on success, False on any persistence error.
     """
@@ -11250,6 +11264,8 @@ def _apply_hook_connector_setup(
             if connector == "copilot":
                 _warn_leftover_copilot_managed_plugin_key()
     elif _batch_summary is None:
+        if connector == "codex":
+            _warn_codex_home_not_applied_without_restart(cfg)
         _echo_saved_without_restart()
 
     if not defer_audit:
@@ -11288,6 +11304,11 @@ def _echo_batch_setup_summary(applied: list[str], summary: dict[str, Any], *, re
             f"(your saved fail mode). To block them: {hint}"
         )
     if not restart:
+        if "codex" in applied:
+            ctx = click.get_current_context(silent=True)
+            app = ctx.find_object(AppContext) if ctx is not None else None
+            if app is not None and app.cfg is not None:
+                _warn_codex_home_not_applied_without_restart(app.cfg)
         _echo_saved_without_restart(plural=True)
 
 
@@ -12878,7 +12899,7 @@ def _hook_guardrail_options(fn):
     show_default=True,
     help=(
         "Restart defenseclaw-gateway after applying changes "
-        "(needed so the connector's hook scripts + OTel block are wired)."
+        "(needed so the connector's hooks are wired)."
     ),
 )
 @click.option(
@@ -12956,18 +12977,18 @@ def setup_codex(
     so inventory follows Codex's current ``.agents`` asset layouts and
     user/project ``.codex/config.toml`` layers.
 
-    Wires three telemetry channels at gateway boot:
+    Wires Codex's lifecycle hooks at gateway boot:
 
     \b
       • Hooks   — version-selected lifecycle contract: six events on
                   0.124-0.128, eight on 0.129-0.132, ten on
                   0.133-0.144, and eleven from 0.145 (with SessionEnd
                   advisory-only)
-      • OTel    — native Codex logs, metrics, and traces using a
-                  connector-scoped bearer and X-DefenseClaw-Source
-                  header on the loopback /v1/<signal> routes
-      • Notify  — agent-turn-complete webhooks via the bundled
-                  native notification bridge
+
+    A host install registers no native OTel exporter and no notify
+    bridge (setup removes the OTel entries older releases wrote).
+    An OpenShell sandbox adds both; Secure Client adds only the
+    notify bridge.
 
     Default mode is ``observe`` (record only); re-running setup keeps
     the current mode. Pass ``--mode action``
@@ -13020,7 +13041,7 @@ def setup_codex(
     show_default=True,
     help=(
         "Restart defenseclaw-gateway after applying changes "
-        "(needed so the connector's hook scripts + OTel env vars are wired)."
+        "(needed so the connector's hooks are wired)."
     ),
 )
 @click.option(
@@ -13098,14 +13119,16 @@ def setup_claude_code(
     connector set so the TUI, skill scanner, MCP scanner, and plugin
     scanner read from ``~/.claude/`` for Claude-scoped surfaces.
 
-    Wires two telemetry channels at gateway boot:
+    Wires Claude Code's lifecycle hooks at gateway boot:
 
     \b
       • Hooks — the exact version-selected Claude Code contract: 28
                 events for >=2.1.154,<2.1.219 or 29 events for
                 >=2.1.219, including observational DirectoryAdded
-      • OTel  — native Claude Code OTel exporter (env-driven) pointing
-                at the gateway's /v1/logs and /v1/metrics
+
+    A host install registers no native OTel exporter (setup removes
+    the OTEL_* entries older releases wrote). Only an OpenShell
+    sandbox adds it.
 
     Default mode is ``observe`` (record only); re-running setup keeps
     the current mode. Pass ``--mode action``
@@ -13209,7 +13232,7 @@ def _warn_leftover_copilot_managed_plugin_key(path: str | None = None) -> bool:
 
 # The connectors whose gateway Setup refuses the agent's own settings before it
 # changes anything (connector.CheckAgentSettings).
-_GATEWAY_RESTART_STEP_RE = re.compile(r",? then run: defenseclaw-gateway restart\.?$")
+_GATEWAY_RESTART_STEP_RE = re.compile(r"[,;]? then run: defenseclaw-gateway restart\.?$")
 
 
 def _agent_settings_refusal(
@@ -13282,6 +13305,62 @@ def _agent_settings_refusal(
 
 def _selected_codex_setup_root() -> str:
     return os.path.abspath(connector_paths.codex_home())
+
+
+def _recorded_codex_root(data_dir: str) -> str | None:
+    """The Codex folder this data dir's gateway registered or backed up, or None."""
+    data_dir = os.path.abspath(os.fspath(data_dir))
+    try:
+        existed, body, _generation = _capture_protected_setup_file(
+            os.path.join(data_dir, _HOOK_CONTRACT_LOCK_FILENAME),
+            _HOOK_CONTRACT_LOCK_MAX_BYTES,
+            "hook_contract_lock.json",
+        )
+        registered = _codex_registration_path(body) if existed else None
+        if registered:
+            return os.path.dirname(registered)
+        existed, body, _generation = _capture_protected_setup_file(
+            _codex_backup_path(data_dir),
+            _SETUP_CODEX_BACKUP_MAX_BYTES,
+            "Codex managed backup",
+            trust_windows_administrators=True,
+        )
+        if existed:
+            return os.path.dirname(_codex_backup_identity(body)["path"])
+    except Exception:  # noqa: BLE001 - an unreadable record proves no folder.
+        return None
+    return None
+
+
+def _warn_codex_home_not_applied_without_restart(cfg) -> None:
+    """Say when --no-restart leaves this shell's CODEX_HOME unused (GAP-1664).
+
+    Only a setup that restarts the gateway hands it this shell's CODEX_HOME
+    (and DEFENSECLAW_EXPLICIT_CODEX_SETUP); with --no-restart the running
+    gateway, or the next plain start, keeps the Codex folder it has. Setup
+    said "Saved. The running gateway applies it" and the variable was
+    silently ignored, for a plain folder as well as a junction. Nothing is
+    printed when CODEX_HOME is unset, or when it is the folder already
+    registered, or when the gateway is stopped and has no Codex folder yet
+    (its next start from this shell uses the variable).
+    """
+    if not (os.environ.get("CODEX_HOME") or "").strip():
+        return
+    selected = _selected_codex_setup_root()
+    data_dir = str(cfg.data_dir)
+    recorded = _recorded_codex_root(data_dir)
+    if recorded is not None and (
+        os.path.normcase(os.path.normpath(recorded)) == os.path.normcase(os.path.normpath(selected))
+    ):
+        return
+    if recorded is None and not _is_pid_alive(os.path.join(data_dir, "gateway.pid")):
+        return
+    kept = f" ({recorded})" if recorded else ""
+    ux.warn(
+        f"CODEX_HOME={selected} is set in this shell, but with --no-restart the gateway keeps the "
+        f"Codex folder it already uses{kept}. To set up Codex in {selected}, run "
+        "defenseclaw setup codex --yes again without --no-restart."
+    )
 
 
 @contextmanager

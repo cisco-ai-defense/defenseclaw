@@ -412,3 +412,48 @@ func TestStandaloneTransportRequiresSocketAndServiceUID(t *testing.T) {
 		t.Fatalf("trusted socket refused: %v", err)
 	}
 }
+
+// GAP-2405: a hook socket directory that is not owned by root or the gateway
+// account is a peer failure the hook names: the guard's session exchange and
+// the native hook both say the directory is the cause, in the words of the
+// managed shell hooks.
+func TestUntrustedHookSocketDirectoryIsNamed(t *testing.T) {
+	dir := shortSocketDir(t)
+	socket := filepath.Join(dir, "hook.sock")
+	listener, err := net.Listen("unix", socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	gatewayUID := os.Getuid() + 1 // the directory belongs to this test's account, not the gateway's
+	if os.Getuid() == 0 {
+		t.Skip("root owns a directory every hook trusts")
+	}
+	_, err = managedStandaloneHTTPClient(time.Second, socket, gatewayUID)
+	if !errors.Is(err, errManagedGatewayPeerUnverified) || !ManagedHookSocketDirectoryUntrusted(err) {
+		t.Fatalf("foreign-owned socket directory: %v; want a peer failure that names the directory", err)
+	}
+	if err := os.Chmod(dir, 0o777); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := managedStandaloneHTTPClient(time.Second, socket, os.Getuid()); !ManagedHookSocketDirectoryUntrusted(err) {
+		t.Fatalf("world-writable socket directory: %v; want it named", err)
+	}
+	if reason := managedPeerFailureReason(Options{ManagedEnterprise: true, ManagedStandalone: true}, err); reason != managedHookSocketDirectoryUntrustedReason {
+		t.Fatalf("peer failure reason = %q", reason)
+	}
+	text, ok := ManagedTransportFailureText("PreToolUse", managedHookSocketDirectoryUntrustedReason)
+	if !ok || !strings.Contains(text, "hook socket directory is not owned by root or the gateway account") ||
+		strings.Contains(text, managedGatewayPeerUnverifiedReason) || strings.Contains(text, "not available") {
+		t.Fatalf("block text = %q", text)
+	}
+	// A socket that is missing in a trusted directory is still a stopped gateway.
+	if err := os.Chmod(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	listener.Close()
+	_ = os.Remove(socket)
+	if _, err := managedStandaloneHTTPClient(time.Second, socket, os.Getuid()); ManagedHookSocketDirectoryUntrusted(err) || !errors.Is(err, errManagedGatewayNotRunning) {
+		t.Fatalf("missing socket in a trusted directory: %v; want the stopped-gateway error", err)
+	}
+}

@@ -64,6 +64,27 @@ type V8SchemaError struct {
 	Version int
 }
 
+// EnumChoices returns the values an enum violation allows, in the schema's
+// order, for a message that names them. An empty string in the enum means
+// "unset" (a per-connector key that inherits the global value), not a value
+// to type, so it is left out (GAP-2213, as config validate does for GAP-0199).
+// ok is false when the violation is not an enum or names no value.
+func (e *V8SchemaError) EnumChoices() (names []string, ok bool) {
+	if e == nil || e.Keyword != "enum" || !strings.HasPrefix(e.Expected, "one of ") {
+		return nil, false
+	}
+	var choices []any
+	if json.Unmarshal([]byte(strings.TrimPrefix(e.Expected, "one of ")), &choices) != nil {
+		return nil, false
+	}
+	for _, choice := range choices {
+		if name := fmt.Sprint(choice); name != "" {
+			names = append(names, name)
+		}
+	}
+	return names, len(names) > 0
+}
+
 func (e *V8SchemaError) Error() string {
 	if e == nil {
 		return ""

@@ -132,9 +132,23 @@ func StopWayOn(name string, p SandboxPhase, said, release string) string {
 		return "wait a minute for OpenShell's cleanup of the provisioning that timed out, then `defenseclaw sandbox start " + name + "`; save or sync any accessible guest work first, then " + dcStop +
 			" once it is ready (OpenShell refuses to stop a sandbox whose provisioning timed out); for a raw OpenShell sandbox, `openshell sandbox start " + name + "`, then save or sync its work before " + rawStop + " once it is ready"
 	case p == PhaseCompleted || p == PhaseError && LingeringVM(p, said, false) && MainProcessFailed(said):
-		return "save or sync any accessible guest work first; " + LingeringVMLoss + ": `defenseclaw sandbox start " + name + " --end-vm` ends the VM that way, then " + dcStop + " once it is ready; for a raw OpenShell sandbox, `openshell sandbox start " + name + "` ends its VM the same way, then " + rawStop + " once it is ready; only if OpenShell refuses that path or still reports the VM running, `openshell sandbox delete " + name + "` deletes it and its work"
+		return EndedVMWayOn(name)
 	}
 	return stop
+}
+
+// EndedVMWayOn is how the user ends name, a MicroVM whose workload
+// completed or whose main process failed while its VM still runs
+// (LingeringVM), on OpenShell SupportedMin: its stop returns it as it is,
+// and its start, `start --end-vm` too, fails with Conflict ("VM sandbox is
+// already running generation") and leaves it starting, where its stop is
+// refused as well, so no command named here may advise either (GAP-0570).
+// Its delete ends it, with its work; until then it keeps the gateway.
+func EndedVMWayOn(name string) string {
+	return "save or sync any accessible guest work first; nothing in OpenShell writes this MicroVM's disk back or stops it: on OpenShell " + SupportedMin +
+		" its start (`defenseclaw sandbox start " + name + " --end-vm` or `openshell sandbox start " + name + "` too) fails with Conflict and leaves it starting, " +
+		"so keep it while you need what it holds (it keeps the OpenShell gateway); only then `defenseclaw sandbox delete " + name + "` (DefenseClaw sandbox) or `openshell sandbox delete " +
+		name + "` (raw OpenShell sandbox), which deletes it and its work"
 }
 
 // LingeringVMLoss is what keeping or ending a MicroVM whose main process

@@ -162,6 +162,15 @@ type activeAgentContextCache struct {
 	prunedOrder  []string
 	prunedBytes  int
 	prunedLoaded bool
+	// storeRecords and storeBytes count the saved records and their size
+	// once storeCounted (the last scan of the store); the saves since then
+	// keep them current. storeSaves counts the saves, so a scan every
+	// instructionLoadRescanSaves of them also sees records others changed.
+	// All are guarded by storeMu.
+	storeRecords int
+	storeBytes   int64
+	storeCounted bool
+	storeSaves   int
 }
 
 func (cache *activeAgentContextCache) currentTime() time.Time {

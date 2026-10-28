@@ -1557,7 +1557,11 @@ func refreshHookFailModesLocked(hookDir string, mode func(connector string) stri
 	if err != nil {
 		return out, err
 	}
-	if named {
+	kept, err := keepListenerCheckInLegacyHardening(hookDir)
+	if err != nil {
+		return out, err
+	}
+	if named || kept {
 		out.Scripts = append(out.Scripts, legacyHardeningScript)
 	}
 	shims, err := refreshShimFailModes(filepath.Join(filepath.Dir(hookDir), "shims"), mode)
@@ -1709,6 +1713,94 @@ fi
 `
 }
 
+// legacyListenerCheckFunc is the pre-send listener check every 1.0.2 and
+// 1.0.3 per-user hook script calls from _hardening.sh.
+const legacyListenerCheckFunc = "defenseclaw_api_listener_foreign"
+
+// legacyListenerCheckMarker opens the block keepListenerCheckInLegacyHardening
+// appends.
+const legacyListenerCheckMarker = "# defenseclaw-legacy-listener-check-v1"
+
+// keepListenerCheckInLegacyHardening gives a released _hardening.sh without
+// defenseclaw_api_listener_foreign that function back while a hook script in
+// the same folder still calls it (GAP-1532). The 1.0.4 helper dropped it, and
+// a 1.0.2 or 1.0.3 gateway never replaces a newer helper, so going back from
+// 1.0.4 to 1.0.2 or 1.0.3 leaves those scripts with the 1.0.4 helper. An
+// upgrade from there leaves both in place until the new gateway starts, and
+// every call in that window printed "defenseclaw_api_listener_foreign:
+// command not found" before its answer. The block defines the function as
+// this release's helper does (send nothing while this account's gateway is
+// stopped and the listener is not proven its own) from the two checks the
+// 1.0.4 helper still has. Only the missing function is added: decisions, fail
+// modes and texts stay the same. The gateway of this release writes its own
+// _hardening.sh when it starts, which drops the block. Remove with the 1.0.2
+// and 1.0.3 upgrade paths.
+func keepListenerCheckInLegacyHardening(hookDir string) (bool, error) {
+	path := filepath.Join(hookDir, legacyHardeningScript)
+	info, err := os.Lstat(path)
+	if os.IsNotExist(err) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("inspect hook %s: %w", legacyHardeningScript, err)
+	}
+	if !info.Mode().IsRegular() || info.Size() > hookScriptMaxBytes {
+		return false, nil
+	}
+	body, err := readConnectorStateFile(path)
+	if err != nil {
+		return false, fmt.Errorf("read hook %s: %w", legacyHardeningScript, err)
+	}
+	text := string(body)
+	if strings.Contains(text, legacyListenerCheckFunc+"()") ||
+		!strings.Contains(text, "defenseclaw_own_gateway_stopped()") ||
+		!strings.Contains(text, "defenseclaw_api_listener_unproven()") ||
+		!hookScriptInFolderCalls(hookDir, legacyListenerCheckFunc) {
+		return false, nil
+	}
+	if !strings.HasSuffix(text, "\n") {
+		text += "\n"
+	}
+	text += legacyListenerCheckMarker + ` (GAP-1532): written by the upgrade's fail-mode refresh;
+# the new gateway replaces this file when it starts.
+if ! declare -F ` + legacyListenerCheckFunc + ` >/dev/null 2>&1; then
+  ` + legacyListenerCheckFunc + `() {
+    defenseclaw_own_gateway_stopped || return 1
+    local rc=0
+    defenseclaw_api_listener_unproven "${1:-}" || rc=$?
+    [ "$rc" = 0 ]
+  }
+fi
+`
+	if err := atomicWriteFile(path, []byte(text), info.Mode().Perm()); err != nil {
+		return false, fmt.Errorf("update hook %s: %w", legacyHardeningScript, err)
+	}
+	return true, nil
+}
+
+// hookScriptInFolderCalls reports whether a shell hook script in hookDir
+// (not the helper itself) names fn.
+func hookScriptInFolderCalls(hookDir, fn string) bool {
+	entries, err := os.ReadDir(hookDir)
+	if err != nil {
+		return false
+	}
+	for _, entry := range entries {
+		name := entry.Name()
+		if name == legacyHardeningScript || !strings.HasSuffix(name, ".sh") || !entry.Type().IsRegular() {
+			continue
+		}
+		info, err := entry.Info()
+		if err != nil || info.Size() > hookScriptMaxBytes {
+			continue
+		}
+		if body, err := readConnectorStateFile(filepath.Join(hookDir, name)); err == nil && strings.Contains(string(body), fn) {
+			return true
+		}
+	}
+	return false
+}
+
 // connectorHookAdapters are the Windows PowerShell adapters a per-user Cursor
 // or Copilot registration runs before the native hook (HookScriptNames). An
 // adapter answers for itself when the hook launcher is missing or times out
@@ -1798,10 +1890,23 @@ const (
 		"  defenseclaw_log_hook_failure copilot copilot-hook \"$1\" response \"$FAIL_MODE\"\n" +
 		"  echo \"defenseclaw: copilot hook error: $1\" >&2\n" +
 		"  exit 0\n}\n"
-	copilotToolDenial = `  case "${COPILOT_HOOK_EVENT:-}" in` + "\n" +
-		`    preToolUse) printf '%s\n' '{"permissionDecision":"deny","permissionDecisionReason":"DefenseClaw hook failed closed"}' ;;` + "\n" +
-		`    permissionRequest) printf '%s\n' '{"behavior":"deny","message":"DefenseClaw hook failed closed"}' ;;` + "\n" +
+	copilotToolDenial = copilotDenyReason +
+		`  case "${COPILOT_HOOK_EVENT:-}" in` + "\n" +
+		`    preToolUse) printf '{"permissionDecision":"deny","permissionDecisionReason":"%s"}\n' "$_dc_deny" ;;` + "\n" +
+		`    permissionRequest) printf '{"behavior":"deny","message":"%s"}\n' "$_dc_deny" ;;` + "\n" +
 		"  esac\n"
+	// copilotInstallWindowReason is the reason this release's per-user
+	// copilot-hook.sh (copilot_per_user_install_block) gives Copilot while
+	// an install or upgrade holds the account's lock.
+	copilotInstallWindowReason = "DefenseClaw is being installed or upgraded for this account; try again in a moment, or run the installer again if it has stopped."
+	// copilotDenyReason sets the reason a refreshed released copilot-hook.sh
+	// denies with: the install sentence while the lock in the hook's own data
+	// folder (HOOK_DIR/..) is held, so Copilot names the upgrade the
+	// installer's hold is for (GAP-2319); otherwise the generic one. Only the
+	// text depends on the lock: the call is denied either way.
+	copilotDenyReason = `  _dc_deny='DefenseClaw hook failed closed'` + "\n" +
+		`  if [ -n "${HOOK_DIR:-}" ] && { [ -e "${HOOK_DIR}/../.install.lock" ] || [ -L "${HOOK_DIR}/../.install.lock" ]; }; then _dc_deny='` +
+		copilotInstallWindowReason + `'; fi` + "\n"
 )
 
 func copilotClosedFailure(open string) string {
@@ -1892,6 +1997,16 @@ func closeBakedHookFailMode(path string, opens *strings.Replacer) (bool, error) 
 
 const copilotUpgradeEarlyMarker = "_DC_COPILOT_UPGRADE_EARLY=1"
 
+// hookBodyIsDisabledTombstone reports a hook script whose line-2 marker is
+// the v0 one teardown writes (writeDisabledHookTombstone and the failed-setup
+// placeholder): it calls no gateway and has no failure paths to close, so a
+// refresh leaves it as it is (GAP-2282: an upgrade with a torn-down Copilot
+// hook stopped with "unrecognized released hook layout").
+func hookBodyIsDisabledTombstone(body string) bool {
+	lines := strings.SplitN(body, "\n", 3)
+	return len(lines) >= 2 && strings.HasPrefix(lines[1], "# defenseclaw-managed-hook v0 ")
+}
+
 // closeReleasedCopilotEarlyFailures closes the paths of a 0.8.10 or 1.0.0 to
 // 1.0.3 per-user copilot-hook.sh that run before its failure functions: a
 // missing helper, token or payload exited 0, so Copilot ran the tool even
@@ -1902,7 +2017,7 @@ const copilotUpgradeEarlyMarker = "_DC_COPILOT_UPGRADE_EARLY=1"
 // (copilot_hook_failure) or an already closed one is left as it is.
 func closeReleasedCopilotEarlyFailures(body string) (string, error) {
 	if strings.Contains(body, copilotUpgradeEarlyMarker) || strings.Contains(body, "copilot_hook_failure()") ||
-		!strings.Contains(body, "# defenseclaw-managed-hook v") {
+		!strings.Contains(body, "# defenseclaw-managed-hook v") || hookBodyIsDisabledTombstone(body) {
 		return body, nil
 	}
 	const start = "set -euo pipefail\n"
@@ -1919,6 +2034,12 @@ func closeReleasedCopilotEarlyFailures(body string) (string, error) {
 	prefix = strings.Replace(prefix,
 		"defenseclaw_handle_missing_token copilot copilot-hook \"copilot tool\"",
 		"(defenseclaw_handle_missing_token copilot copilot-hook \"copilot tool\") || true\n  _dc_copilot_upgrade_early_failure", 1)
+	// Any exit while the marker is armed is an early failure, whatever its
+	// status: macOS /bin/bash 3.2 runs the EXIT trap with $? 0 when a
+	// sourced helper is missing (GAP-2141), so the trap cannot test the
+	// status. The denial disarms the marker first, so its own exit 0 does
+	// not print a second object.
+	//
 	// The released scripts read --event only after these exits, so the
 	// preamble reads it from the script's own arguments. A hook bound to no
 	// event (0.8.10) prints one object with both denies, as copilot_deny does.
@@ -1926,20 +2047,21 @@ func closeReleasedCopilotEarlyFailures(body string) (string, error) {
 _DC_COPILOT_UPGRADE_EVENT=""
 if [ "$#" -eq 2 ] && [ "$1" = "--event" ]; then _DC_COPILOT_UPGRADE_EVENT="$2"; fi
 _dc_copilot_upgrade_early_failure() {
-  case "$_DC_COPILOT_UPGRADE_EVENT" in
-    preToolUse) printf '%s\n' '{"permissionDecision":"deny","permissionDecisionReason":"DefenseClaw hook failed closed"}' ;;
-    permissionRequest) printf '%s\n' '{"behavior":"deny","message":"DefenseClaw hook failed closed"}' ;;
+  _DC_COPILOT_UPGRADE_EARLY=0
+` + copilotDenyReason + `  case "$_DC_COPILOT_UPGRADE_EVENT" in
+    preToolUse) printf '{"permissionDecision":"deny","permissionDecisionReason":"%s"}\n' "$_dc_deny" ;;
+    permissionRequest) printf '{"behavior":"deny","message":"%s"}\n' "$_dc_deny" ;;
     sessionStart|sessionEnd|userPromptSubmitted|userPromptTransformed|postToolUse|agentStop|subagentStart|subagentStop|postToolUseFailure|errorOccurred|preCompact|notification) ;;
-    *) printf '%s\n' '{"permissionDecision":"deny","permissionDecisionReason":"DefenseClaw hook failed closed","behavior":"deny","message":"DefenseClaw hook failed closed"}' ;;
+    *) printf '{"permissionDecision":"deny","permissionDecisionReason":"%s","behavior":"deny","message":"%s"}\n' "$_dc_deny" "$_dc_deny" ;;
   esac
   exit 0
 }
-trap '_dc_upgrade_rc=$?; if [ "${_DC_COPILOT_UPGRADE_EARLY:-0}" = 1 ] && [ "$_dc_upgrade_rc" -ne 0 ]; then _dc_copilot_upgrade_early_failure; fi' EXIT
+trap 'if [ "${_DC_COPILOT_UPGRADE_EARLY:-0}" = 1 ]; then _dc_copilot_upgrade_early_failure; fi' EXIT
 `
 	prefix = strings.Replace(prefix, start, start+preamble, 1)
 	// Hardening installs its own cleanup trap: keep it and re-arm the
 	// native denial until the first gateway request has been prepared.
-	cleanup := "trap '_dc_upgrade_rc=$?; _defenseclaw_hook_cleanup; if [ \"${_DC_COPILOT_UPGRADE_EARLY:-0}\" = 1 ] && [ \"$_dc_upgrade_rc\" -ne 0 ]; then _dc_copilot_upgrade_early_failure; fi' EXIT"
+	cleanup := "trap '_defenseclaw_hook_cleanup; if [ \"${_DC_COPILOT_UPGRADE_EARLY:-0}\" = 1 ]; then _dc_copilot_upgrade_early_failure; fi' EXIT"
 	if strings.Contains(prefix, "if ! defenseclaw_harden_env; then") {
 		anchor := "fi\n\n# Copilot documents timeout failures"
 		if !strings.Contains(prefix, anchor) {

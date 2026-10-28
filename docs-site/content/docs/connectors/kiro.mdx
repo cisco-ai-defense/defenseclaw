@@ -90,7 +90,7 @@ The surface is resolved per request from the hook config that invoked the hook, 
 
 ### Which Kiro builds read the global hook file
 
-Kiro documents a global scope, `~/.kiro/hooks/`, merged with the project's `.kiro/hooks/`, for Kiro IDE 1.0.182 and later and for `kiro-cli --v3`. Older IDE builds read only `<workspace>/.kiro/hooks/*.json`, so DefenseClaw does not count them as protected: update Kiro IDE to 1.0.182 or later ([Supported versions](#supported-versions)). `defenseclaw setup kiro --workspace <project>` also writes a workspace copy; setup without `--workspace` selects global scope and clears a previously set `claw.workspace_dir`.
+Kiro documents a global scope, `~/.kiro/hooks/`, merged with the project's `.kiro/hooks/`, for Kiro IDE 1.0.182 and later and for `kiro-cli --v3`. Older IDE builds read only `<workspace>/.kiro/hooks/*.json`, so DefenseClaw does not count them as protected: update Kiro IDE to 1.0.182 or later ([Supported versions](#supported-versions)). `defenseclaw setup kiro --workspace <project>` also writes a workspace copy; setup without `--workspace` selects global scope and clears a previously set `claw.workspace_dir`, and says so with the flag that keeps it.
 
 `defenseclaw doctor`'s `Connector scope [kiro]` check passes when the global file holds DefenseClaw's hooks. Doctor reads the IDE's version from `resources/app/product.json` without starting it. It warns (`kiro_ide_below_global_hooks_floor`) below 1.0.182, or (`kiro_ide_version_unknown`) when `product.json` names no version, and fails (`kiro_hooks_not_workspace_scoped`) only when neither the global registration nor a workspace copy exists.
 
@@ -179,6 +179,6 @@ For a per-user, single-connector install:
 defenseclaw guardrail disable --yes
 ```
 
-With the default gateway restart, disabling removes DefenseClaw's hook registrations from Kiro's hook and agent files and preserves your other Kiro settings. `defenseclaw guardrail enable` restores DefenseClaw's hooks. To remove the connector, run `defenseclaw setup remove kiro --yes` (add `--force` if it is the last one). On Linux and macOS, `kiro-hook.sh` stays as an inert stub until Kiro restarts.
+With the default gateway restart, disabling removes DefenseClaw's hook registrations from Kiro's hook and agent files and preserves your other Kiro settings. `defenseclaw guardrail enable` restores DefenseClaw's hooks. Enable runs setup again, so with a kiro-cli below 2.27.1 (one an earlier release enrolled) it is refused and Kiro stays unprotected until you update Kiro CLI; `guardrail disable` warns about this before it removes the hooks. To remove the connector, run `defenseclaw setup remove kiro --yes` (add `--force` if it is the last one). On Linux and macOS, `kiro-hook.sh` stays as an inert stub until Kiro restarts.
 
 On a multi-connector install, add `--connector kiro` to `guardrail disable` and `guardrail enable` to change only this agent.

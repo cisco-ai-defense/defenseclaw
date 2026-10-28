@@ -228,6 +228,10 @@ class UninstallPlan:
     # sandboxes run ("" when it did). The teardown would delete whatever
     # runs, so an unknown answer stops the run too, unless stop_sandboxes.
     sandbox_list_error: str = ""
+    # sandboxes_off is set when that unknown answer came with sandboxes off:
+    # `sandbox list` cannot list them then, and the off-state teardown's dry
+    # run is what names them, once the OpenShell gateway answers (GAP-0037).
+    sandboxes_off: bool = False
     # setup_leftovers are the %LOCALAPPDATA%\DefenseClaw folders that
     # DefenseClaw Setup left after the installer replaced it (Windows,
     # --binaries only).
@@ -2088,6 +2092,11 @@ def _render_plan(plan: UninstallPlan, *, dry_run: bool) -> None:
             unread = f"the sandbox list could not be read ({plan.sandbox_list_error})"
             if plan.stop_sandboxes:
                 ux.echo(f"      {ux.dim('·')} {unread}: any running sandbox is stopped and deleted (--stop-sandboxes)")
+            elif plan.sandboxes_off:
+                ux.echo(
+                    f"      {ux.dim('·')} {unread}: this run stops before any change; while sandboxes are off, "
+                    f"{_OFF_SANDBOXES_CHECK}; or add --stop-sandboxes or --skip-sandbox-teardown"
+                )
             else:
                 ux.echo(
                     f"      {ux.dim('·')} {unread}: this run stops before any change; check with "
@@ -3287,15 +3296,15 @@ def _sandbox_kernel_feed_hint(plan: UninstallPlan, unit: str = _SANDBOX_FEED_UNI
 _SANDBOX_LIST_TIMEOUT_SECONDS = 10
 
 
-def _listed_sandboxes(gateway_path: str) -> tuple[list, str]:
-    """The sandbox rows ``sandbox list`` prints, and why it could not say ('' when it did).
+def _listed_sandboxes(gateway_path: str) -> tuple[list, str, bool]:
+    """The sandbox rows ``sandbox list`` prints, why it could not say ('' when it did), and whether sandboxes are off.
 
     No gateway binary, or a gateway that reports sandboxes unsupported here,
     answers with no rows: no sandbox can run, and the teardown deletes none.
     A failed, timed-out or unreadable list is an unknown answer (GAP-0448).
     """
     if not gateway_path or not os.path.isfile(gateway_path):
-        return [], ""
+        return [], "", False
     try:
         proc = subprocess.run(
             [gateway_path, "sandbox", "list", "--output", "json"],
@@ -3305,11 +3314,19 @@ def _listed_sandboxes(gateway_path: str) -> tuple[list, str]:
             timeout=_SANDBOX_LIST_TIMEOUT_SECONDS,
         )
     except subprocess.TimeoutExpired:
-        return [], f"`sandbox list` did not answer within {_SANDBOX_LIST_TIMEOUT_SECONDS} seconds"
+        return [], f"`sandbox list` did not answer within {_SANDBOX_LIST_TIMEOUT_SECONDS} seconds", False
     except OSError as exc:
-        return [], f"`sandbox list` could not run: {exc.strerror or exc}"
+        return [], f"`sandbox list` could not run: {exc.strerror or exc}", False
     if proc.returncode == _SANDBOX_UNSUPPORTED_EXIT:
-        return [], ""
+        return [], "", False
+    off = proc.returncode != 0 and _sandboxes_off(proc.stdout)
+    if off and _off_teardown_finds_no_running_sandbox(gateway_path):
+        # Sandboxes are off and the teardown, which asks OpenShell itself
+        # while they are off, finds no sandbox that runs: none, or only
+        # stopped ones, as with sandboxes on (GAP-0765, GAP-1810). One that
+        # may run, or sandboxes it could not list (GAP-1782), keep the
+        # unknown answer below.
+        return [], "", False
     if proc.returncode != 0:
         lines = [
             line.strip().removeprefix("✗").strip().removeprefix("Error:").strip()
@@ -3317,14 +3334,69 @@ def _listed_sandboxes(gateway_path: str) -> tuple[list, str]:
             if line.strip()
         ]
         reason = lines[-1][:300] if lines else f"it exited with status {proc.returncode}"
-        return [], f"`sandbox list` failed: {reason}"
+        return [], f"`sandbox list` failed: {reason}", off
     try:
         rows = json.loads(proc.stdout or "").get("sandboxes")
     except (ValueError, AttributeError):
         rows = None
     if not isinstance(rows, list):
-        return [], "`sandbox list` printed no sandbox list"
-    return [row for row in rows if isinstance(row, dict) and row.get("name")], ""
+        return [], "`sandbox list` printed no sandbox list", False
+    return [row for row in rows if isinstance(row, dict) and row.get("name")], "", False
+
+
+def _sandboxes_off(stdout: str) -> bool:
+    """Whether ``sandbox list --output json`` said sandboxes are off.
+
+    While they are off the gateway answers ``{"enabled": false,
+    "available": false, "reason": ...}`` and exits 1 (GAP-1817).
+    """
+    try:
+        answer = json.loads(stdout or "")
+    except ValueError:
+        return False
+    return isinstance(answer, dict) and answer.get("enabled") is False and answer.get("available") is False
+
+
+# The dry run's "sandboxes" row ("sandboxes         none", "unknown (...)",
+# or the names, a stopped one as "NAME (stopped)"), and its line when it has
+# nothing to tear down at all.
+_TEARDOWN_SANDBOXES = re.compile(r"^\s*sandboxes\s+(\S.*?)\s*$", re.MULTILINE)
+_TEARDOWN_STOPPED_SANDBOX = re.compile(r"^[a-z0-9][a-z0-9-]* \((?:stopped|completed|deleted|missing)\)$")
+_TEARDOWN_NOTHING = "nothing to tear down"
+
+
+def _off_teardown_finds_no_running_sandbox(gateway_path: str) -> bool:
+    """Whether ``sandbox teardown --dry-run`` names no sandbox that may run.
+
+    With sandboxes off no daemon lists the sandboxes, and the teardown asks
+    OpenShell's gateway directly for those of this data directory: a dry run
+    that names none, or only stopped ones, is the answer the list could not
+    give. A dry run that fails, could not list them ("unknown") or names one
+    that may run keeps the list unknown.
+    """
+    if not _gateway_supports_sandbox_teardown(gateway_path):
+        return False
+    try:
+        proc = subprocess.run(
+            [gateway_path, "sandbox", "teardown", "--dry-run"],
+            capture_output=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=_SANDBOX_LIST_TIMEOUT_SECONDS,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    out = proc.stdout or ""
+    if proc.returncode != 0:
+        return False
+    if _TEARDOWN_NOTHING in out:
+        return True
+    row = _TEARDOWN_SANDBOXES.search(out)
+    if not row:
+        return False
+    if row.group(1) == "none":
+        return True
+    return all(_TEARDOWN_STOPPED_SANDBOX.match(entry) for entry in row.group(1).split(", "))
 
 
 def _live_mounted_sandboxes(rows: list) -> tuple[str, ...]:
@@ -3357,7 +3429,7 @@ def _with_listed_sandboxes(plan: UninstallPlan, stop_sandboxes: bool) -> Uninsta
     """*plan* with the sandboxes its teardown would stop, from one ``sandbox list``."""
     if not plan.sandbox_teardown:
         return plan
-    rows, error = _listed_sandboxes(plan.gateway_path)
+    rows, error, off = _listed_sandboxes(plan.gateway_path)
     if error and not _gateway_supports_sandbox_teardown(plan.gateway_path):
         # A gateway without ``sandbox teardown`` deletes no sandbox
         # (_sandbox_teardown), so there is nothing to protect.
@@ -3368,7 +3440,18 @@ def _with_listed_sandboxes(plan: UninstallPlan, stop_sandboxes: bool) -> Uninsta
         running_sandboxes=_running_sandboxes(rows),
         stop_sandboxes=stop_sandboxes,
         sandbox_list_error=error,
+        sandboxes_off=bool(error) and off,
     )
+
+
+# How to see the sandboxes while they are off: `sandbox list` asks the
+# sandbox daemon, which has them off; the teardown asks OpenShell itself.
+_OFF_SANDBOXES_CHECK = (
+    "`defenseclaw sandbox list` cannot list them: `defenseclaw-gateway sandbox teardown --dry-run` names them "
+    "once the OpenShell gateway answers (when it does not, start it"
+    + (" with `systemctl --user start openshell-gateway`" if sys.platform.startswith("linux") else "")
+    + ")"
+)
 
 
 def _running_sandboxes_refusal(plan: UninstallPlan) -> str:
@@ -3381,6 +3464,18 @@ def _running_sandboxes_refusal(plan: UninstallPlan) -> str:
     """
     if not plan.sandbox_teardown or plan.stop_sandboxes:
         return ""
+    if plan.sandbox_list_error and plan.sandboxes_off:
+        # With sandboxes off `sandbox list` fails whatever runs, so it is no
+        # way to check (GAP-0037): the off-state teardown's dry run names the
+        # sandboxes once the OpenShell gateway answers.
+        return (
+            f"the sandbox list could not be read ({plan.sandbox_list_error}), so this run cannot tell whether "
+            "OpenShell sandboxes still run for this account; a running sandbox may hold work never pulled back, "
+            "and the sandbox teardown would stop and delete it; nothing was changed. While sandboxes are off, "
+            f"{_OFF_SANDBOXES_CHECK}. Then run this command again, add --stop-sandboxes to stop and delete any "
+            "running sandbox with the teardown, or add --skip-sandbox-teardown to uninstall without the sandbox "
+            "teardown."
+        )
     if plan.sandbox_list_error:
         # A destructive step does not go ahead on an unknown answer (GAP-0448).
         return (

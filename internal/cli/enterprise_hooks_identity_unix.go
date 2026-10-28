@@ -48,8 +48,10 @@ const enterpriseHookIdentitySpoolRetryInterval = time.Minute
 var enterpriseHookLoadIdentityAccounts = enterprisehooks.LoadUnixIdentityAccounts
 
 // The guardian lists local accounts under its root identity, independently
-// of whether an agent's per-user files produced an enrollment row.
-var enterpriseHookLocalAccounts = unixidentity.LocalAccounts
+// of whether an agent's per-user files produced an enrollment row: those of
+// every local account database, so a systemd-userdb account is warmed up as
+// an /etc/passwd one is (GAP-0026).
+var enterpriseHookLocalAccounts = unixidentity.LocalDatabaseAccounts
 
 // enterpriseHookAccountDatabasePoll is how often the watch loop reads the
 // local account database's stamp (enterpriseHookLocalAccountsStamp).
@@ -358,7 +360,7 @@ func enterpriseHookIdentitySpoolAccounts(ctx context.Context, stderr io.Writer, 
 			}
 		}
 		for _, uid := range enterpriseHookRecordedCallerUIDs(dir) {
-			if !seen[uid] && !enterpriseHookLocalRecordLeft(dir, uid) {
+			if !seen[uid] && !enterpriseHookLocalRecordLeft(ctx, dir, uid) {
 				list(uid, canonicalUser(uid), 0)
 			}
 		}
@@ -674,16 +676,59 @@ func enterpriseHookIdentityDataDir() string {
 // signal). Such a record is not refreshed as a recorded caller's: the pass
 // does not list it, so the cleanup removes it as any unlisted local record.
 // Refreshing it kept a deleted local account's record for good, and status
-// and verify warned identity_records_stale for it (GAP-1864). Tests replace
-// it.
-var enterpriseHookLocalRecordLeft = func(dir string, uid int) bool {
+// and verify warned identity_records_stale for it (GAP-1864).
+//
+// Where the process's own account lookups keep answering for an account
+// deleted after the process first asked (macOS: the guardian's getpwuid
+// kept naming a local account sysadminctl had deleted, while a new process
+// and dscl found none), a found answer is checked against a fresh listing
+// of the local account database (enterpriseHookLocalAccounts, which runs
+// dscl): the uid has left when that listing answers and holds no account
+// with it. A listing that fails or lists nothing shows nothing. That
+// listing holds only the local node, so an account of another directory
+// node that the record's facts read as local (a network account of an
+// LDAPv3 or Open Directory bind with no Active Directory or mobile marker)
+// is not in it either: the uid has left only when a fresh read across the
+// search policy (enterpriseHookRecordedAccountGone) also shows that the
+// account's name no longer holds the uid: it has no record, or its record
+// now holds another uid while no record across the search policy holds
+// this one (the name was given to a new account after the deletion).
+func enterpriseHookLocalRecordLeft(ctx context.Context, dir string, uid int) bool {
 	record, err := enterprisehooks.ReadIdentitySpoolRecord(dir, strconv.Itoa(uid), nil)
 	if err != nil || record.Facts.Directory != useridentity.DirectoryLocal {
 		return false
 	}
-	_, err = enterprisehooks.StandaloneResolver().LookupUID(uid)
-	return errors.Is(err, unixidentity.ErrNotFound)
+	account, err := enterprisehooks.StandaloneResolver().LookupUID(uid)
+	if errors.Is(err, unixidentity.ErrNotFound) {
+		return true
+	}
+	if err != nil || !enterpriseHookLookupsOutliveDeletion {
+		return false
+	}
+	local, err := enterpriseHookLocalAccounts(ctx)
+	if err != nil || len(local) == 0 {
+		return false
+	}
+	for _, listed := range local {
+		if listed == uid {
+			return false
+		}
+	}
+	name := strings.TrimSpace(account.Name)
+	if name == "" {
+		name = strings.TrimSpace(record.User)
+	}
+	return enterpriseHookRecordedAccountGone(ctx, name, uid)
 }
+
+// enterpriseHookRecordedAccountGone is unixidentity.AccountUIDGone: fresh
+// dscl /Search reads show that the name no longer holds the uid while no
+// bound directory node is offline. Tests replace it.
+var enterpriseHookRecordedAccountGone = unixidentity.AccountUIDGone
+
+// enterpriseHookLookupsOutliveDeletion is
+// unixidentity.ProcessLookupsOutliveDeletion; tests set it.
+var enterpriseHookLookupsOutliveDeletion = unixidentity.ProcessLookupsOutliveDeletion
 
 func enterpriseHookRecordedCallerUIDs(dir string) []int {
 	entries, err := os.ReadDir(dir)

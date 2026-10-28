@@ -49,19 +49,37 @@ func observeAppendBatches(t *testing.T) func() []int {
 	}
 }
 
+// waitPendingAppends waits until a leader runs a transaction (it holds the
+// group) and want appends queue behind it. A count alone is not enough: the
+// queue is also empty before the leader's goroutine has appended, and a
+// leader that starts late takes every append queued by then into its own
+// batch, so the queue never reaches the count the test expects (GAP-2406).
 func waitPendingAppends(t *testing.T, writer *EventHistoryWriter, want int) {
 	t.Helper()
 	deadline := time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline) {
 		writer.group.mu.Lock()
-		pending := len(writer.group.pending)
+		active, pending := writer.group.active, len(writer.group.pending)
 		writer.group.mu.Unlock()
-		if pending == want {
+		if active && pending == want {
 			return
 		}
 		time.Sleep(time.Millisecond)
 	}
-	t.Fatalf("pending appends never reached %d", want)
+	t.Fatalf("pending appends behind a running leader never reached %d", want)
+}
+
+// holdWriterConn takes the store's only connection so every append waits.
+// The cleanup gives it back, so a test that fails while appends wait for it
+// ends instead of hanging the package (GAP-2406).
+func holdWriterConn(t *testing.T, store *Store) *sql.Conn {
+	t.Helper()
+	conn, err := store.db.Conn(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+	return conn
 }
 
 func countAuditEvents(t *testing.T, store *Store, ids ...string) int {
@@ -84,10 +102,7 @@ func TestConcurrentEventHistoryAppendsShareOneTransaction(t *testing.T) {
 	store, writer := newGroupCommitWriter(t)
 	batches := observeAppendBatches(t)
 	ctx := context.Background()
-	conn, err := store.db.Conn(ctx) // the store's only connection: every append waits
-	if err != nil {
-		t.Fatal(err)
-	}
+	conn := holdWriterConn(t, store) // the store's only connection: every append waits
 	const callers = 8
 	ids := make([]string, callers)
 	errs := make(chan error, callers)
@@ -124,10 +139,7 @@ func TestGroupedAppendFailureAndCancellationStayTheirOwn(t *testing.T) {
 	store, writer := newGroupCommitWriter(t)
 	batches := observeAppendBatches(t)
 	ctx := context.Background()
-	conn, err := store.db.Conn(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
+	conn := holdWriterConn(t, store)
 	type call struct {
 		id         string
 		ctx        context.Context

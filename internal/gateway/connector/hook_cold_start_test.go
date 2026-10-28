@@ -462,14 +462,16 @@ func TestShellHookDoesNotColdStartAStoppedGateway(t *testing.T) {
 // A frozen or hung gateway keeps its listener, so the request times out
 // (native post exit 28) while gateway.pid names a live process. The line says so once,
 // with the next step, instead of "gateway unreachable ...: gateway
-// unreachable" (GAP-1204).
+// unreachable" (GAP-1204). The call is no outage, so it is blocked in every
+// fail mode and the line says that, not "fail mode closed", which read as a
+// saved open mode ignored (GAP-2279, as the native line since GAP-1735).
 func TestShellHookNamesTheNextStepForAHungGateway(t *testing.T) {
 	alive := func(dataDir string) {
 		_ = os.WriteFile(filepath.Join(dataDir, "gateway.pid"), []byte(strconv.Itoa(os.Getpid())+"\n"), 0o600)
 	}
 	run := runHookForColdStart(t, NewClaudeCodeConnector(), "claude-code-hook.sh", nil, alive,
 		"DEFENSECLAW_FAIL_MODE=closed", "DC_COLD_FIRST_RC=28")
-	want := "defenseclaw: gateway unreachable, blocking claude-code tool (fail mode closed): " +
+	want := "defenseclaw: gateway unreachable, blocking claude-code tool (not a gateway outage, so it is blocked in every fail mode): " +
 		"the gateway is running but did not answer; check `defenseclaw-gateway status`, or run `defenseclaw-gateway restart`"
 	if got := strings.TrimSpace(run.stderr); got != want {
 		t.Fatalf("stderr = %q\nwant %q", got, want)
@@ -488,6 +490,17 @@ func TestShellHookNamesTheNextStepForAHungGateway(t *testing.T) {
 		"DEFENSECLAW_FAIL_MODE=open", "DC_COLD_FIRST_RC=28")
 	if reason := failClosedDenyReason(t, open); !strings.Contains(reason, "the gateway is running but did not answer") {
 		t.Errorf("per-user open request yielded %q, want a closed deny naming the hung gateway", reason)
+	}
+	if got := strings.TrimSpace(open.stderr); got != want {
+		t.Errorf("per-user open stderr = %q\nwant %q (a saved open mode must not read as closed)", got, want)
+	}
+
+	// An outage a closed mode blocks (no gateway took the connection) keeps
+	// "fail mode closed".
+	down := runHookForColdStart(t, NewClaudeCodeConnector(), "claude-code-hook.sh", nil, nil,
+		"DEFENSECLAW_FAIL_MODE=closed", "DEFENSECLAW_GATEWAY_AUTOSTART=0", "DC_COLD_FAILS=1000")
+	if !strings.Contains(down.stderr, "blocking claude-code tool (fail mode closed): ") {
+		t.Errorf("outage stderr = %q, want the fail mode closed line", down.stderr)
 	}
 }
 

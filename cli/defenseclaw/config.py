@@ -2989,7 +2989,8 @@ def _go_quote(value: Any) -> str:
 
 
 def _sandbox_enum_error(field_name: str, value: Any, *allowed: str) -> str | None:
-    if value in (None, "") or value in allowed:
+    # Any letter case, as the Go loader folds it (GAP-0691, #1226).
+    if value in (None, "") or (isinstance(value, str) and value.lower() in allowed):
         return None
     return f"{field_name} {_go_quote(value)} must be one of {', '.join(allowed)}"
 
@@ -7183,7 +7184,9 @@ def _apply_instance_overlay(out: LLMConfig, data_dir: str, providers: list[dict[
             break
     if entry is None:
         return
-    if not out.provider:
+    # provider "custom" is what ``setup llm --provider custom --instance-name``
+    # saves: the bound instance's base_provider_type is the family (GAP-2393).
+    if not out.provider or out.provider.strip().lower() == "custom":
         bp = entry.get("base_provider_type") or entry.get("provider") or ""
         if isinstance(bp, str) and bp:
             out.provider = bp.strip().lower()
@@ -7547,6 +7550,11 @@ def load(
     ss_raw = scanners_raw.get("skill_scanner", {})
     gw_raw = raw.get("gateway", {})
     source_config_version = _exact_config_version(raw.get("config_version"))
+    # config.yaml stays in the install home; the stores and folders the file
+    # leaves out are under the data_dir it names, as the gateway resolves them
+    # (GAP-2126: the CLI seeded and read <home>/policies after config set
+    # data_dir while the gateway read <data_dir>/policies).
+    data_dir = _configured_data_dir(raw, data_dir)
     audit_db = _audit_database_path(raw, data_dir)
 
     cfg = Config(
@@ -7717,6 +7725,15 @@ def _exact_config_version(value: Any) -> int:
     if isinstance(value, str) and value.strip().isdigit():
         return int(value.strip())
     return 0
+
+
+def _configured_data_dir(raw: dict[str, Any], home: str) -> str:
+    """The data_dir config.yaml sets (``~/`` expanded, made absolute like the
+    Go compiler), else ``home``: the folder the omitted paths are under."""
+    configured = raw.get("data_dir")
+    if not isinstance(configured, str) or not configured.strip():
+        return home
+    return os.path.abspath(os.path.normpath(_expand_store_home(configured.strip())))
 
 
 def _audit_database_path(raw: dict[str, Any], data_dir: str) -> str:

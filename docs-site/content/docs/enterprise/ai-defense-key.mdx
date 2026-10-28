@@ -100,8 +100,14 @@ unset AID_KEY
 ```
 
 The command stores the key, then runs `ensure` with reason `secret`, which
-restarts the gateway so it reads the key. The output starts with
-`✓ secret set: done` and `- stored credential ai-defense-api-key`.
+restarts the gateway so it reads the key. On a host whose status has
+warnings the output starts with `! secret set: done with N warnings` and the
+warning lines (for example `openshell_prerequisite_missing`,
+`hook_process_fail_open`, `security_incomplete`), then
+`- stored credential ai-defense-api-key`; on a host without warnings it starts
+with `✓ secret set: done` and `- stored credential ai-defense-api-key`. The
+warnings are the host's normal status, not a failed store, and
+`secret remove` prints the same header.
 
   </Tab>
   <Tab value="Windows">

@@ -624,9 +624,12 @@ func jsonValuesEqual(left, right interface{}) bool {
 // claudeCodeUserSettingsReadPath is the file to read for the per-user
 // ~/.claude/settings.json. An OSS account may link either this file or its
 // parent directory to user-owned dotfiles outside the home. Windows keeps
-// its native path handling.
+// its native path handling and refuses a settings file that is a link.
 func claudeCodeUserSettingsReadPath(path string) (string, error) {
 	if runtime.GOOS == "windows" {
+		if err := windowsSettingsFileLinkRefusal(path); err != nil {
+			return "", err
+		}
 		return path, nil
 	}
 	// The enterprise per-user writer confines linked files and parents.

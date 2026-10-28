@@ -706,6 +706,44 @@ def _shadowed_hilt_notes(changes: list) -> list[str]:
     ]
 
 
+def _seed_moved_data_dir(changes: list) -> list[str]:
+    """Seed the rule packs and Rego policies under a new data_dir.
+
+    The gateway loads its default rule pack from <policy_dir>/guardrail, and
+    an omitted policy_dir is under data_dir, so after config set data_dir it
+    refused to start until init had seeded the new folder (GAP-2126). Packs
+    already there are kept.
+    """
+    if not any(getattr(change, "path", "") == "data_dir" for change in changes):
+        return []
+    try:
+        cfg = config_module.load()
+    except Exception:  # noqa: BLE001 - the change is committed; seeding is best effort
+        return []
+    policy_dir = str(cfg.policy_dir or "")
+    if not policy_dir or os.path.isdir(os.path.join(policy_dir, "guardrail", "default")):
+        return []
+    from defenseclaw import bootstrap
+    from defenseclaw.file_permissions import make_private_directory
+
+    report = bootstrap.BootstrapReport(data_dir=cfg.data_dir)
+    for folder in (cfg.data_dir, policy_dir):
+        try:
+            make_private_directory(folder)
+        except OSError as exc:
+            report.errors.append(f"mkdir {folder}: {exc}")
+    if not report.errors:
+        bootstrap._seed_rego(cfg, report)
+        bootstrap._seed_guardrail_profiles(policy_dir, report)
+    if report.errors or not os.path.isdir(os.path.join(policy_dir, "guardrail", "default")):
+        detail = "; ".join(report.errors) or "no bundled rule packs"
+        return [
+            f"warning: the rule packs were not written to {policy_dir} ({detail}); the gateway cannot "
+            "start from the new data_dir until they are: defenseclaw init --non-interactive --yes"
+        ]
+    return [f"Seeded the rule packs and Rego policies in {policy_dir} for the new data_dir."]
+
+
 def _write_config_change(app: AppContext, changes: list, expect_sha256: str | None, verb: str) -> bool:
     """Apply the changes in one write through the writer; False when they changed nothing."""
     from defenseclaw import config_writer
@@ -781,6 +819,8 @@ def _write_config_change(app: AppContext, changes: list, expect_sha256: str | No
         click.echo(note)
     for note in _unloaded_signature_pack_notes(cfg):
         click.echo(note)
+    for note in _seed_moved_data_dir(changes):
+        click.echo(note, err=note.startswith("warning:"))
     pending = result.restart_required
     if pending:
         click.echo(f"Restart the gateway to apply {', '.join(pending)}: defenseclaw-gateway restart")

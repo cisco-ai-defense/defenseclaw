@@ -147,6 +147,9 @@ type PurgeSummary struct {
 	// UVCache reports that DefenseClaw's entries in ~/.cache/uv were
 	// removed (GAP-1947).
 	UVCache bool
+	// KeptRemovedConnectorBackups names the folders the purge moved the
+	// OpenHands/OmniGent backups to instead of deleting them (GAP-2015).
+	KeptRemovedConnectorBackups []string
 }
 
 // purgeUserFiles removes the per-user binaries and DefenseClaw's uv cache
@@ -266,6 +269,11 @@ func PurgeUserState(ctx context.Context, opts InstallOptions) (PurgeSummary, err
 				summary.Kept = true
 				return nil
 			}
+			kept, err := moveRemovedConnectorBackupsOut(dataDir)
+			summary.KeptRemovedConnectorBackups = kept
+			if err != nil {
+				return fmt.Errorf("enterprise hooks: kept the per-user state: %w", err)
+			}
 			if err := connector.PurgeUserState(dataDir); err != nil {
 				return fmt.Errorf("enterprise hooks: remove the per-user state: %w", err)
 			}
@@ -330,6 +338,13 @@ func RemovePersonalClaudeHookBlocker(dataDir string) (bool, error) {
 // machine directories), so one of them means the folder holds the account's
 // own install from before the managed deployment enrolled it.
 var perUserInstallMarkers = []string{"config.yaml", ".env", "audit.db", "previous"}
+
+// HoldsPerUserInstall reports whether dataDir holds one of
+// perUserInstallMarkers: the account's own per-user install, which a purge
+// keeps as it is.
+func HoldsPerUserInstall(dataDir string) (bool, error) {
+	return holdsPerUserInstall(dataDir)
+}
 
 // holdsPerUserInstall reports whether dataDir holds one of
 // perUserInstallMarkers.

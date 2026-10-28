@@ -70,6 +70,8 @@ func init() {
 var sidecarScannerRuntimeStartProblem = scanner.StandaloneRuntimeStartProblem
 
 func runSidecar(cmd *cobra.Command, _ []string) error {
+	// A Windows gateway answers at its hooks' priority class (GAP-0050).
+	sidecarAnswerAtHookPriority()
 	// A detached gateway's gateway.log lines carry a time (GAP-1319). The
 	// root pre-run usually started the stamper already (GAP-2109).
 	startDaemonLogStamp()

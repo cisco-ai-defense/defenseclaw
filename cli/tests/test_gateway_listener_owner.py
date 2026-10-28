@@ -322,11 +322,14 @@ def test_saved_port_edit_keeps_the_running_listener_provable_until_restart(tmp_p
 
     from defenseclaw import config
     from defenseclaw.commands import cmd_doctor
+    from defenseclaw.file_permissions import protect_private_file
 
     (tmp_path / "gateway.pid").write_text(str(os.getpid()), encoding="utf-8")
     record = tmp_path / "gateway-api.json"
     record.write_text(json.dumps({"pid": os.getpid(), "host": "127.0.0.1", "port": 19080}), encoding="utf-8")
-    record.chmod(0o600)
+    # The gateway publishes the record private to its account: 0600 on POSIX,
+    # a protected owner-only DACL on Windows (GAP-2277).
+    protect_private_file(record)
     cfg = SimpleNamespace(data_dir=str(tmp_path), gateway=SimpleNamespace(host="127.0.0.1", api_port=19082))
     proven: list[int] = []
 
@@ -346,8 +349,32 @@ def test_saved_port_edit_keeps_the_running_listener_provable_until_restart(tmp_p
     assert "not the configured gateway endpoint" in gateway._unproven_per_user_gateway_target("127.0.0.1", 19081)
     # A descriptor of another process never vouches for a port.
     record.write_text(json.dumps({"pid": os.getpid() + 1, "host": "127.0.0.1", "port": 19080}), encoding="utf-8")
+    protect_private_file(record)
     assert "not the configured gateway endpoint" in gateway._unproven_per_user_gateway_target("127.0.0.1", 19080)
     assert proven == [19080, 19082]
+
+
+def test_a_running_listener_record_that_is_not_private_vouches_for_no_port(tmp_path, monkeypatch) -> None:
+    """GAP-2277: only a record private to this account names the running listener."""
+    import json
+    import os
+
+    from defenseclaw import config
+    from defenseclaw.commands import cmd_doctor
+
+    (tmp_path / "gateway.pid").write_text(str(os.getpid()), encoding="utf-8")
+    record = tmp_path / "gateway-api.json"
+    record.write_text(json.dumps({"pid": os.getpid(), "host": "127.0.0.1", "port": 19080}), encoding="utf-8")
+    if os.name != "nt":
+        record.chmod(0o644)
+    cfg = SimpleNamespace(data_dir=str(tmp_path), gateway=SimpleNamespace(host="127.0.0.1", api_port=19082))
+    monkeypatch.setattr(gateway, "_managed_connected_verifier_spec", lambda: None)
+    monkeypatch.setattr(config, "load", lambda **_kwargs: cfg)
+    monkeypatch.setattr(gateway, "gateway_api_client_host", lambda _cfg: "127.0.0.1")
+    monkeypatch.setattr(
+        cmd_doctor, "_trusted_gateway_listener", lambda *_a, **_k: SimpleNamespace(trusted=True, code="", detail="")
+    )
+    assert "not the configured gateway endpoint" in gateway._unproven_per_user_gateway_target("127.0.0.1", 19080)
 
 
 def test_listener_proof_checks_the_named_running_port(monkeypatch) -> None:

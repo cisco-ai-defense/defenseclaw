@@ -9,6 +9,7 @@ import (
 	"errors"
 	"testing"
 
+	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/observability"
 	"github.com/defenseclaw/defenseclaw/internal/observability/delivery"
@@ -90,6 +91,67 @@ func TestRuntimeLocalWriteFailureIsCountedOnLocalSQLite(t *testing.T) {
 		runtimeContentRecordBuilder("runtime-local-stored", "stored")); err != nil {
 		t.Fatal(err)
 	}
+	snapshot, err := runtime.DestinationHealthSnapshot(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	counters := destinationHealthByName(t, snapshot, config.ObservabilityV8LocalDestinationName).Counters
+	if counters.Accepted != 2 || counters.Delivered != 1 || counters.Dropped != 1 {
+		t.Fatalf("local-sqlite counters = %+v, want accepted 2 delivered 1 dropped 1", counters)
+	}
+	if lost := runtime.PendingLocalWriteLosses().Records; lost != 1 {
+		t.Fatalf("pending local write losses = %d, want 1", lost)
+	}
+}
+
+// RV-ha1-1791 (GAP-1129, GAP-1791): a record whose append waits in a hook
+// call's write batch is counted when the batch settles it. When neither the
+// shared transaction nor the retry on its own keeps it, it is dropped on
+// local-sqlite and pending for the sqlite.write_failed report, as a
+// synchronous failed append is; a committed one is delivered.
+func TestRuntimeLocalWriteFailureInAHookCallBatchIsCountedOnLocalSQLite(t *testing.T) {
+	dependencies := newRuntimeTestDependencies(t)
+	plan := runtimeTestPlan(t, dependencies.storePath, dependencies.judgePath, 90,
+		func(source *config.ObservabilityV8Source) {
+			source.Destinations = []config.ObservabilityV8DestinationSource{
+				runtimeConsoleDestination("sink", "none", 8),
+			}
+		},
+	)
+	sink := newRuntimeRecordingAdapter(8)
+	factory := runtimeAdapterFactoryFunc(func(
+		context.Context, config.ObservabilityV8EffectiveDestination, telemetry.V8ResourceContext,
+	) (delivery.Adapter, DestinationAdapterCleanup, error) {
+		return sink, func(context.Context) error { return nil }, nil
+	})
+	runtime := runtimeWithAdapterFactory(t, dependencies, plan, factory, nil)
+	database, err := sql.Open("sqlite", dependencies.storePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	if _, err := database.Exec(`CREATE TRIGGER local_history_full BEFORE INSERT ON audit_events
+		BEGIN SELECT RAISE(ABORT, 'database or disk is full'); END`); err != nil {
+		t.Fatal(err)
+	}
+	call := audit.WithCallWriteBatch(t.Context(), dependencies.store)
+	if _, err := runtime.Emit(call, diagnosticMetadata(t),
+		runtimeContentRecordBuilder("runtime-call-full", "exported only")); err != nil {
+		t.Fatalf("the queued append failed before the flush: %v", err)
+	}
+	audit.CloseCallWrites(call)
+	if item := receiveRuntimeDelivery(t, sink); item.identity.RecordID != "runtime-call-full" {
+		t.Fatalf("sink received %q", item.identity.RecordID)
+	}
+	if _, err := database.Exec(`DROP TRIGGER local_history_full`); err != nil {
+		t.Fatal(err)
+	}
+	stored := audit.WithCallWriteBatch(t.Context(), dependencies.store)
+	if _, err := runtime.Emit(stored, diagnosticMetadata(t),
+		runtimeContentRecordBuilder("runtime-call-stored", "stored")); err != nil {
+		t.Fatal(err)
+	}
+	audit.CloseCallWrites(stored)
 	snapshot, err := runtime.DestinationHealthSnapshot(t.Context())
 	if err != nil {
 		t.Fatal(err)

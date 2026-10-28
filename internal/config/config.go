@@ -19,7 +19,9 @@ package config
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
+	"io/fs"
 	"log"
 	"net"
 	"net/url"
@@ -1301,8 +1303,52 @@ func (c *Config) ResolveLLM(path string) LLMConfig {
 		out.protectedCredentialRequired = true
 	}
 
+	c.applyLLMInstance(&out)
 	maybeWarnUnknownProvider(out.ProviderPrefix(), path, out.InstanceName)
 	return out
+}
+
+// applyLLMInstance fills the blanks of a resolved role from the
+// llm_providers.custom entry its instance_name binds, as the gateway
+// provider merge and the Python resolver (_apply_instance_overlay) do:
+// provider "custom" (what `setup llm --provider custom --instance-name`
+// saves) or no provider takes the instance's base_provider_type, and an
+// unset base_url or bedrock/vertex/azure sub-block comes from the
+// instance. Explicit role values win. Every Go caller of ResolveLLM,
+// the watcher and hook scanners included, so sees the instance's family
+// and routing instead of "custom/<model>" (GAP-2396). An instance_name
+// that names no entry is left as is (the gateway reports it).
+func (c *Config) applyLLMInstance(out *LLMConfig) {
+	name := strings.ToLower(strings.TrimSpace(out.InstanceName))
+	if name == "" {
+		return
+	}
+	for i := range c.LLMProviders.Custom {
+		inst := &c.LLMProviders.Custom[i]
+		if strings.ToLower(strings.TrimSpace(inst.Name)) != name {
+			continue
+		}
+		provider := strings.ToLower(strings.TrimSpace(out.Provider))
+		if base := strings.ToLower(strings.TrimSpace(inst.BaseProviderType)); base != "" && (provider == "" || provider == "custom") {
+			out.Provider = base
+		}
+		if strings.TrimSpace(out.BaseURL) == "" && strings.TrimSpace(inst.BaseURL) != "" {
+			out.BaseURL = inst.BaseURL
+		}
+		if out.Bedrock == nil && inst.Bedrock != nil {
+			b := *inst.Bedrock
+			out.Bedrock = &b
+		}
+		if out.Vertex == nil && inst.Vertex != nil {
+			v := *inst.Vertex
+			out.Vertex = &v
+		}
+		if out.Azure == nil && inst.Azure != nil {
+			a := *inst.Azure
+			out.Azure = &a
+		}
+		return
+	}
 }
 
 type FirewallConfig struct {
@@ -2838,6 +2884,17 @@ func applyRuntimeV8DataDirDefaultsForPlatform(candidate *Config, document *V8YAM
 		candidate.Guardrail.RulePackDir = join(dataDir, "policies", "guardrail", "default")
 		if candidate.StandaloneEnterprise() {
 			standaloneRulePackDefault(candidate, dataDir, goos)
+		} else if policyDir := strings.TrimSpace(candidate.PolicyDir); policyDir != "" &&
+			join(policyDir) != join(dataDir, "policies") {
+			// The implicit default pack is the default preset under the
+			// policy_dir config.yaml names, where the CLI seeds and reads
+			// it and where a named "default" resolves (GAP-2126). A file
+			// from before that whose policy_dir has no such folder keeps
+			// the data_dir pack it started with.
+			policyPack := join(policyDir, "guardrail", "default")
+			if _, err := os.Stat(policyPack); err == nil || !errors.Is(err, fs.ErrNotExist) {
+				candidate.Guardrail.RulePackDir = policyPack
+			}
 		}
 	}
 	if !has("openshell", "pack_dir") {

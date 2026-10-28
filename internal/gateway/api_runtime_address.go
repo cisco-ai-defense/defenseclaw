@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 
 	"github.com/defenseclaw/defenseclaw/internal/config/configwrite"
+	"github.com/defenseclaw/defenseclaw/internal/safefile"
 )
 
 // recordRuntimeAPIAddress publishes delivery evidence for this process. Saved
@@ -43,5 +44,10 @@ func (a *APIServer) recordRuntimeAPIAddress(listener net.Listener) error {
 	if err != nil {
 		return err
 	}
-	return configwrite.WriteFileDurable(filepath.Join(cfg.DataDir, "gateway-api.json"), body, 0o600)
+	// The CLI trusts the record only when it is private: 0600 on POSIX, an
+	// owner-only protected DACL on Windows. A temp file in the data dir
+	// inherits that folder's ACEs, which the CLI refuses, so every saved
+	// listener edit's audit fact went to the saved port (GAP-2322). Protect
+	// the temp file before it is renamed into place.
+	return configwrite.WriteFileDurablePublished(filepath.Join(cfg.DataDir, "gateway-api.json"), body, 0o600, safefile.ProtectFile)
 }

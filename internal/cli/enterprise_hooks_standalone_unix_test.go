@@ -37,6 +37,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks/guardianstate"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"github.com/defenseclaw/defenseclaw/internal/hermespath"
 	"github.com/defenseclaw/defenseclaw/internal/inventory"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/unixidentity"
@@ -119,6 +120,15 @@ func TestEnterpriseHookWorkerHelperProcess(t *testing.T) {
 		return result(opts), nil
 	}
 	enterpriseHookWorkerVerifier = func(_ context.Context, opts enterprisehooks.InstallOptions) (enterprisehooks.InstallResult, error) {
+		if mode == "launchd" {
+			// Report HERMES_HOME of the account's launchd domain as the
+			// worker's Hermes check reads it.
+			value, err := hermespath.ReadLaunchdHermesHome(os.Getuid())
+			if err != nil {
+				return enterprisehooks.InstallResult{}, err
+			}
+			return enterprisehooks.InstallResult{Connector: opts.ConnectorName, AgentVersion: value}, nil
+		}
 		if mode == "drift" || mode == "fail" {
 			return enterprisehooks.InstallResult{}, errors.New("hook config drifted")
 		}
@@ -169,6 +179,37 @@ func TestEnterpriseHookWorkerHelperProcess(t *testing.T) {
 		}
 	}
 	os.Exit(enterpriseHookWorkerMain(context.Background(), os.Stdin, os.Stdout, os.Stderr))
+}
+
+// GAP-2374 (macOS): the managed worker runs as the account in the system
+// bootstrap, where launchctl getenv misses a HERMES_HOME set in the
+// account's launchd user domain and the account cannot read that domain.
+// The root guardian reads it and the worker's Hermes check uses that read.
+func TestEnterpriseHookWorkerUsesTheGuardiansLaunchdRead(t *testing.T) {
+	useEnterpriseHookWorkerHelper(t, "launchd")
+	origReads, origRead := enterpriseHookWorkerReadsLaunchd, enterpriseHookWorkerLaunchdHermesHome
+	t.Cleanup(func() { enterpriseHookWorkerReadsLaunchd, enterpriseHookWorkerLaunchdHermesHome = origReads, origRead })
+	redirect := "/Users/someone/.hermes-elsewhere"
+	var readFor []int
+	enterpriseHookWorkerReadsLaunchd = func() bool { return true }
+	enterpriseHookWorkerLaunchdHermesHome = func(account enterpriseHookWorkerAccount) *string {
+		readFor = append(readFor, account.UID)
+		return &redirect
+	}
+	account := selfWorkerAccount(t)
+	response, err := runEnterpriseHookWorker(context.Background(), account, enterpriseHookWorkerRequest{
+		Operation: enterpriseHookWorkerOpApply,
+		Targets:   []enterpriseHookWorkerTarget{workerTarget(account, 1, enterpriseHookWorkerModeVerify, "hermes", true)},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(readFor) != 1 || readFor[0] != account.UID {
+		t.Fatalf("guardian read the launchd domain for %v, want [%d]", readFor, account.UID)
+	}
+	if len(response.Targets) != 1 || response.Targets[0].Result == nil || response.Targets[0].Result.AgentVersion != redirect {
+		t.Fatalf("worker saw launchd HERMES_HOME %+v, want %q", response.Targets, redirect)
+	}
 }
 
 func useEnterpriseHookWorkerHelper(t *testing.T, mode string) {
@@ -627,14 +668,14 @@ func newStandaloneFixture(t *testing.T, resolver unixidentity.Resolver) *standal
 	origOwner, origDirTrust, origFileTrust, origStateTrust := enterpriseHookAuthorizationOwnershipSetter, enterpriseHookAuthorizationDirTrustCheck, enterpriseHookAuthorizationFileTrustCheck, enterpriseHookGuardianStateFileTrustCheck
 	origToken, origOTLP, origRunner, origLog := enterpriseHookScopedTokenMinter, enterpriseHookScopedOTLPTokenMinter, enterpriseHookWorkerRunner, enterpriseHookWorkerLog
 	origUserToken, origUserTokenLoader, origTransport := enterpriseHookUserTokenMinter, enterpriseHookUserTokenLoader, enterpriseHookStandaloneHookTransport
-	origCheckHome := enterpriseHookCheckHome
+	origCheckHome, origAccountGone := enterpriseHookCheckHome, enterpriseHookCleanupAccountGone
 	t.Cleanup(func() {
 		cfg, enterpriseHookManifest = origCfg, origManifest
 		enterpriseHooksMutationIdentityPreflight, enterpriseHookManifestFileTrustCheck, enterpriseHookStandaloneRuntimeCheck = origPreflight, origManifestTrust, origRuntime
 		enterpriseHookAuthorizationOwnershipSetter, enterpriseHookAuthorizationDirTrustCheck, enterpriseHookAuthorizationFileTrustCheck, enterpriseHookGuardianStateFileTrustCheck = origOwner, origDirTrust, origFileTrust, origStateTrust
 		enterpriseHookScopedTokenMinter, enterpriseHookScopedOTLPTokenMinter, enterpriseHookWorkerRunner, enterpriseHookWorkerLog = origToken, origOTLP, origRunner, origLog
 		enterpriseHookUserTokenMinter, enterpriseHookUserTokenLoader, enterpriseHookStandaloneHookTransport = origUserToken, origUserTokenLoader, origTransport
-		enterpriseHookCheckHome = origCheckHome
+		enterpriseHookCheckHome, enterpriseHookCleanupAccountGone = origCheckHome, origAccountGone
 		enterprisehooks.SetStandaloneUnix(false)
 		enterprisehooks.SetStandaloneResolver(nil)
 	})
@@ -665,6 +706,12 @@ func newStandaloneFixture(t *testing.T, resolver unixidentity.Resolver) *standal
 		return "/run/defenseclaw-hook/hook.sock", 995, nil
 	}
 	enterpriseHookWorkerLog = io.Discard
+	// The fixture's accounts exist only in its resolver. The real fresh
+	// directory read (dscl on macOS) has no record of alice or bob on the
+	// test machine and would retire their pending cleanups (r105
+	// GAP-2323), so no fixture account is confirmed gone unless a test
+	// says so.
+	enterpriseHookCleanupAccountGone = func(context.Context, string) bool { return false }
 	enterprisehooks.SetStandaloneUnix(true)
 	enterprisehooks.SetStandaloneResolver(resolver)
 	enterpriseHookWorkerRunner = func(_ context.Context, account enterpriseHookWorkerAccount, request enterpriseHookWorkerRequest) (enterpriseHookWorkerResponse, error) {
@@ -1567,6 +1614,102 @@ func TestStandaloneReconcileManagedCodexFeatureChangeQueuesRepair(t *testing.T) 
 	}
 	if !found {
 		t.Fatal("managed Codex row did not queue user-owned feature repair")
+	}
+}
+
+// Machine policy pins Codex hooks for every user, so a managed macOS
+// enumerator enrolls an account only for its per-user connector (Hermes) and
+// lists no Codex row. The account's own `codex features disable hooks` must
+// still be undone, or Codex refuses every project trust write (GAP-0791).
+func TestStandaloneReconcileRemovesTheCodexFeatureKeyForAnAccountWithoutACodexRow(t *testing.T) {
+	uid, gid := os.Getuid(), os.Getgid()
+	resolver := standaloneTestResolver{accounts: map[string]unixidentity.Account{}}
+	f := newStandaloneFixture(t, resolver)
+	alice := f.home(t, "alice", 0o700)
+	resolver.accounts["alice"] = unixidentity.Account{Name: "alice", UID: uid, GID: gid, Home: alice, Shell: "/bin/bash"}
+	f.writeManifest(t, enterprisehooks.ManifestTarget{User: "alice", Connector: "amp"})
+	configDir := filepath.Join(alice, ".codex")
+	configPath := filepath.Join(configDir, "config.toml")
+	previousSet, previousCovered := enterpriseHookStandaloneMachinePolicySet, enterpriseHookStandaloneMachinePolicyCovered
+	t.Cleanup(func() {
+		enterpriseHookStandaloneMachinePolicySet, enterpriseHookStandaloneMachinePolicyCovered = previousSet, previousCovered
+	})
+	enterpriseHookStandaloneMachinePolicySet = func() map[string]struct{} { return map[string]struct{}{"codex": {}} }
+	covered := true
+	enterpriseHookStandaloneMachinePolicyCovered = func(name string) (bool, error) { return name == "codex" && covered, nil }
+	codexRepairs := func() int {
+		n := 0
+		for _, request := range f.requests {
+			for _, target := range request.Targets {
+				if target.Mode == "repair_managed_codex_feature" {
+					if target.Options.ConnectorName != "codex" || target.Options.UserHome != alice || target.Options.OwnerUID != uid {
+						t.Fatalf("codex feature repair names the wrong account: %+v", target)
+					}
+					n++
+				}
+			}
+		}
+		return n
+	}
+
+	run, err := runEnterpriseHookReconcileOnce(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	requireLedgerOrStateTrust(t, run.StateErr)
+	if len(run.Rows) != 1 || run.Rows[0].Connector != "amp" || !run.Rows[0].OK {
+		t.Fatalf("the repair must add no row and keep the per-user row: %+v", run.Rows)
+	}
+	if got := codexRepairs(); got != 1 {
+		t.Fatalf("codex feature repairs queued = %d, want 1 for the enrolled account", got)
+	}
+	if !slices.Contains(run.WatchDirs, configDir) || !slices.Contains(run.WatchSharedFiles, configPath) {
+		t.Fatalf("a later codex features disable hooks will not start a pass: dirs=%v shared=%v", run.WatchDirs, run.WatchSharedFiles)
+	}
+
+	// Machine policy that does not pin Codex hooks: the key is the user's.
+	f.requests = nil
+	covered = false
+	if _, err := runEnterpriseHookReconcileOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if got := codexRepairs(); got != 0 {
+		t.Fatalf("codex feature repair queued without covered Codex machine policy: %d", got)
+	}
+}
+
+// An account the manifest also enrolls for Codex gets the repair once.
+func TestStandaloneReconcileQueuesTheCodexFeatureRepairOncePerAccount(t *testing.T) {
+	uid, gid := os.Getuid(), os.Getgid()
+	resolver := standaloneTestResolver{accounts: map[string]unixidentity.Account{}}
+	f := newStandaloneFixture(t, resolver)
+	alice := f.home(t, "alice", 0o700)
+	resolver.accounts["alice"] = unixidentity.Account{Name: "alice", UID: uid, GID: gid, Home: alice, Shell: "/bin/bash"}
+	f.writeManifest(t,
+		enterprisehooks.ManifestTarget{User: "alice", Connector: "codex"},
+		enterprisehooks.ManifestTarget{User: "alice", Connector: "amp"},
+	)
+	previousSet, previousCovered := enterpriseHookStandaloneMachinePolicySet, enterpriseHookStandaloneMachinePolicyCovered
+	t.Cleanup(func() {
+		enterpriseHookStandaloneMachinePolicySet, enterpriseHookStandaloneMachinePolicyCovered = previousSet, previousCovered
+	})
+	enterpriseHookStandaloneMachinePolicySet = func() map[string]struct{} { return map[string]struct{}{"codex": {}} }
+	enterpriseHookStandaloneMachinePolicyCovered = func(name string) (bool, error) { return name == "codex", nil }
+	run, err := runEnterpriseHookReconcileOnce(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	requireLedgerOrStateTrust(t, run.StateErr)
+	n := 0
+	for _, request := range f.requests {
+		for _, target := range request.Targets {
+			if target.Mode == "repair_managed_codex_feature" {
+				n++
+			}
+		}
+	}
+	if n != 1 || len(run.Rows) != 2 {
+		t.Fatalf("codex feature repairs = %d (want 1), rows = %+v", n, run.Rows)
 	}
 }
 

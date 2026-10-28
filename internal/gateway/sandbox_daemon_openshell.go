@@ -22,6 +22,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"os"
@@ -161,6 +162,14 @@ type accountOpenShell struct {
 	// pid and the command line.
 	hostProcs func(ctx context.Context) (string, error)
 
+	// stopSync syncs the disk of every MicroVM the OpenShell gateway
+	// registered as gateway lists ready and says on out which it synced
+	// (openshell.SyncGatewaySandboxes), and recordUnsynced notes the ones it
+	// could not for the sandbox feed (manager.RecordUnsyncedStops). The
+	// macOS stop runs them: launchd gives the LaunchAgent no stop command.
+	stopSync       func(ctx context.Context, gateway string, out io.Writer) error
+	recordUnsynced func(names []string)
+
 	// installed is the release this process installed or found intact.
 	mu        sync.Mutex
 	installed string
@@ -188,8 +197,11 @@ func newAccountOpenShell(goos string, uid int, home string, logf func(string, ..
 		readRendered: openshell.ReadRenderedGateway,
 		configDir:    openshell.UserConfigDir,
 		discover:     openshell.Discover,
-		portPID:      loopbackPortPID,
-		procArgs:     processArgs,
+		stopSync: func(ctx context.Context, gateway string, out io.Writer) error {
+			return openshell.SyncGatewaySandboxes(ctx, openshell.DiscoverOptions{Gateway: gateway}, out)
+		},
+		portPID:  loopbackPortPID,
+		procArgs: processArgs,
 		accountProcs: func(ctx context.Context) (string, error) {
 			return runServiceCommand(ctx, "/bin/ps", []string{"-ww", "-u", strconv.Itoa(uid), "-o", "pid=,args="}, nil)
 		},
@@ -278,14 +290,21 @@ func (o *accountOpenShell) Drift(s sandboxrelay.DaemonSettings) ([]openshell.Set
 	compare := e.Install != config.EnterpriseOpenShellInstallSetup && e.GatewayConfigPath != ""
 	var want openshell.RenderedGateway
 	var renderedDrift []openshell.SettingDrift
-	if compare {
+	if e.GatewayConfigPath != "" {
+		// Both install modes run the administrator's rendered file (the
+		// managed unit's exec shim), so a hand edit of it is drift in setup
+		// mode too: reported, as status reports it, never a pause
+		// (blockingOpenShellDrift). Setup mode, whose gateway may also run
+		// the account's own install, does not fail on a render it cannot
+		// read (GAP-0730).
 		envPath := filepath.Join(filepath.Dir(e.GatewayConfigPath), openshell.GatewayEnvFile)
 		var digest string
 		var err error
-		if want, digest, err = o.readRendered(e.GatewayConfigPath, envPath); err != nil {
+		want, digest, err = o.readRendered(e.GatewayConfigPath, envPath)
+		switch {
+		case err != nil && compare:
 			return nil, err
-		}
-		if e.GatewayConfigDigest != "" && digest != e.GatewayConfigDigest {
+		case err == nil && e.GatewayConfigDigest != "" && digest != e.GatewayConfigDigest:
 			renderedDrift = []openshell.SettingDrift{{Field: renderedGatewayDriftField, Want: "installed render", Have: "changed"}}
 		}
 	}
@@ -758,6 +777,7 @@ func (o *accountOpenShell) Stop(ctx context.Context, s sandboxrelay.DaemonSettin
 		if _, perr := o.run(ctx, daemonLaunchctl, []string{"print", target}, nil); perr != nil {
 			return false
 		}
+		o.syncBeforeStop(ctx, s)
 		out, err = o.run(ctx, daemonLaunchctl, []string{"kill", "SIGTERM", target}, nil)
 	default:
 		return false
@@ -768,6 +788,36 @@ func (o *accountOpenShell) Stop(ctx context.Context, s sandboxrelay.DaemonSettin
 	}
 	o.logf("stopped your OpenShell gateway: no sandbox of yours runs")
 	return true
+}
+
+// syncBeforeStop syncs the disk of every MicroVM the account's gateway lists
+// ready right before the macOS stop of its LaunchAgent (GAP-0380). The
+// daemon counted none a moment ago, but a raw openshell client can start one
+// in between, and the gateway's stop ends it with what its guest had not
+// synced. On Linux the managed unit's second ExecStop does this
+// (sandbox-daemon sync-sandboxes --managed); launchd runs no stop command.
+// A sandbox it could not sync is noted for the feed (stop_unflushed); the
+// stop goes ahead either way, as on Linux.
+func (o *accountOpenShell) syncBeforeStop(ctx context.Context, s sandboxrelay.DaemonSettings) {
+	if o.stopSync == nil {
+		return
+	}
+	sctx, cancel := context.WithTimeout(ctx, openshell.StopSyncTimeout)
+	defer cancel()
+	var out bytes.Buffer
+	err := o.stopSync(sctx, gatewayRegistrationName(s), &out)
+	for _, line := range strings.Split(strings.TrimSpace(out.String()), "\n") {
+		if line != "" {
+			o.logf("%s", line)
+		}
+	}
+	names := openshell.UnsyncedSandboxes(err)
+	switch {
+	case len(names) > 0 && o.recordUnsynced != nil:
+		o.recordUnsynced(names)
+	case err != nil && len(names) == 0:
+		o.logf("sync the MicroVMs before the OpenShell gateway stops: %v", err)
+	}
 }
 
 // startUnit starts the account's OpenShell gateway unit.
@@ -899,15 +949,31 @@ func registrationPortOf(reg *openshell.Registration) int {
 // accepts connections but has no listener this process can see (macOS lsof
 // lists only this account's processes) is another account's (-1).
 func loopbackPortHolder(port int) (int, bool) {
-	holder, err := daemon.FindPortHolder("127.0.0.1", port)
+	return portHolderSeen(port, daemon.FindPortHolder, func(addr string) (net.Conn, error) {
+		return net.DialTimeout("tcp", addr, time.Second)
+	})
+}
+
+// portHolderSeen is loopbackPortHolder with its lookup and dial. The
+// listener is looked up again after a dial that connected: the account's
+// own gateway that starts listening between the first lookup and the dial
+// (the daemon polls the port while the gateway it just started binds it)
+// is then seen as the account's, not as another account's (r103 GAP-0038:
+// a fresh run after kept sandboxes was refused as "another account is
+// using them" the moment its own gateway came up).
+func portHolderSeen(port int, find func(string, int) (daemon.PortHolder, error), dial func(string) (net.Conn, error)) (int, bool) {
+	holder, err := find("127.0.0.1", port)
 	if err == nil && holder.UID >= 0 {
 		return holder.UID, true
 	}
-	conn, derr := net.DialTimeout("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(port)), time.Second)
+	conn, derr := dial(net.JoinHostPort("127.0.0.1", strconv.Itoa(port)))
 	if derr != nil {
 		return 0, false
 	}
 	_ = conn.Close()
+	if holder, err := find("127.0.0.1", port); err == nil && holder.UID >= 0 {
+		return holder.UID, true
+	}
 	return -1, true
 }
 

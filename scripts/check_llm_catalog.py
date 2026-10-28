@@ -29,6 +29,10 @@ Validation rules:
 * Providers with no LiteLLM mapping are skipped (not failed) so adding a
   new provider to the catalog never hard-breaks this gate before the
   mapping is taught here.
+* Runtime-resolved providers (``RUNTIME_RESOLVED_PROVIDERS``: OpenRouter):
+  LiteLLM 1.95 and later look their models up from the provider at
+  runtime and the registry carries no entry for them. They are validated
+  only while the registry still tracks at least one model of theirs.
 
 Two modes, so the per-PR gate cannot go red on a date or an upstream edit:
 
@@ -78,6 +82,10 @@ PROVIDER_LL_MAP: dict[str, str] = {
 # Bedrock catalog ids carry a regional inference-profile prefix that the
 # pricing key may or may not include; strip it before falling back.
 BEDROCK_REGION_PREFIXES = ("us.", "eu.", "apac.", "global.", "au.", "jp.", "us-gov.")
+
+# LiteLLM providers whose models LiteLLM resolves at runtime instead of
+# listing them in its registry (the 1.103 snapshot has no openrouter entry).
+RUNTIME_RESOLVED_PROVIDERS = {"openrouter"}
 
 # kind values treated as self-hosted; their model lists are not validated.
 LOCAL_KINDS = {"local"}
@@ -151,12 +159,19 @@ def check_catalog(
     An empty list means the catalog is clean.
     """
     problems: list[tuple[str, str, str]] = []
+    tracked = {
+        str(entry.get("litellm_provider"))
+        for entry in model_cost.values()
+        if isinstance(entry, dict) and entry.get("litellm_provider")
+    }
     for provider in catalog.get("providers", []):
         name = str(provider.get("name", ""))
         if str(provider.get("kind", "")) in LOCAL_KINDS:
             continue
         provider_ll = PROVIDER_LL_MAP.get(name)
         if provider_ll is None:
+            continue
+        if provider_ll in RUNTIME_RESOLVED_PROVIDERS and provider_ll not in tracked:
             continue
         for model in provider.get("models", []) or []:
             key = resolve(model_cost, provider_ll, str(model))

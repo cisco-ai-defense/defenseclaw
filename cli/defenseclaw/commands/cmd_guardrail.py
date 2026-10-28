@@ -316,10 +316,47 @@ def _refuse_unverified_plugin_teardown(app: AppContext, connectors: list[str]) -
             raise SystemExit(1)
 
 
-# Connectors whose version floor setup applies in every mode (a kiro-cli below
-# 2.27.1 loads no hooks in a headless run, GAP-0828): guardrail mode applies it
-# to an observe switch too (GAP-1638).
-_EVERY_MODE_VERSION_FLOOR = frozenset({"kiro"})
+def _warn_setup_refuses_reenable(app: AppContext, names: list[str]) -> None:
+    """Say before a disable when enable could not undo it (GAP-2340).
+
+    ``guardrail enable`` runs connector setup again in the connector's saved
+    mode. When setup refuses the installed agent now (for example a kiro-cli
+    below its hook floor that an earlier release enrolled), a disable cannot
+    be undone until the agent is updated, and the agent stays unprotected
+    meanwhile. This only warns: the disable itself is unchanged.
+    """
+    if not names:
+        return
+    from defenseclaw import policy_catalog
+    from defenseclaw.commands.cmd_setup import _check_connector_version_supported_for_setup
+
+    gc = app.cfg.guardrail
+    multi = bool(getattr(gc, "connectors", None))
+    for name in names:
+        scope_record: dict[str, object] = {}
+        try:
+            supported = _check_connector_version_supported_for_setup(
+                name,
+                mode=policy_catalog.mode_label(gc.effective_mode(name)),
+                emit=False,
+                data_dir=app.cfg.data_dir,
+                _allow_prompt=False,
+                _refusal_scope=scope_record,
+            )
+        except Exception:  # noqa: BLE001 - a failed probe must not change the disable
+            continue
+        if supported:
+            continue
+        label = _connector_label(name)
+        reason = str(scope_record.get("reason") or "").strip().rstrip(".")
+        enable = f"defenseclaw guardrail enable{f' --connector {name}' if multi else ''}"
+        ux.warn(
+            f"{label}: setup refuses this agent at its installed version"
+            f"{f' ({reason})' if reason else ''}, so after this disable '{enable}' "
+            f"and 'defenseclaw setup {name}' are refused and {label} stays unprotected "
+            "until you update it.",
+            indent="  ",
+        )
 
 
 def _toggle_connector_guardrail(
@@ -378,6 +415,7 @@ def _toggle_connector_guardrail(
     if not enable:
         _preflight_config_write(app)
         _refuse_unverified_plugin_teardown(app, [key])
+        _warn_setup_refuses_reenable(app, [key])
 
     # Disabling the last remaining enabled connector is effectively a global
     # disable — warn so the operator can use the clearer command.
@@ -1224,6 +1262,7 @@ def disable_cmd(
     _already_off = [name for name in _actives if _disabled_on_its_own(gc, name)]
     _torn_down = [name for name in _actives if name not in _already_off]
     _refuse_unverified_plugin_teardown(app, _torn_down)
+    _warn_setup_refuses_reenable(app, _torn_down)
 
     click.echo()
     if len(_actives) > 1 or _already_off:
@@ -1771,6 +1810,8 @@ def _apply_global_fail_mode_transaction(
             raise click.Abort() from exc
 
         old_global = gc.hook_fail_mode
+        # An unset global reads as the in-memory "closed" placeholder; a
+        # rollback must put it back unset, not save it as a choice (GAP-2208).
         old_global_saved = bool(getattr(gc, "_hook_fail_mode_saved", True))
         old_entries: dict[str, tuple[object, str]] = {}
         gc.hook_fail_mode = mode
@@ -5668,38 +5709,46 @@ def mode_cmd(
                     f"then run: defenseclaw guardrail mode action{f' --connector {scope}' if connector_key else ''}"
                 ],
             )
-    elif _EVERY_MODE_VERSION_FLOOR.intersection(affected):
-        # Setup refuses a kiro-cli below its hook floor in observe and action
-        # mode alike. The switch to observe skipped that check, so the
-        # switch back to action was refused and the CLI could not undo its
-        # own change (GAP-1638): the observe switch now applies it too.
+    else:
+        # Setup refuses some versions in observe and action mode alike: a
+        # kiro-cli below its hook floor (GAP-0828), an OpenCode outside its
+        # plugin contract, an old Codex. The observe switch skipped that
+        # check, so the switch back to action was refused and the CLI could
+        # not undo its own change (GAP-1638 for kiro, GAP-1946 for the
+        # others): every connector this switch moves out of action runs the
+        # same check, and only a refusal that holds in every mode stops it.
         from defenseclaw.commands.cmd_setup import _check_connector_version_supported_for_setup
 
-        refused: list[str] = []
-        for c in sorted(_EVERY_MODE_VERSION_FLOOR.intersection(affected)):
+        refused: list[tuple[str, str]] = []
+        for c in sorted(set(affected)):
+            if policy_catalog.mode_label(gc.effective_mode(c)) != "action":
+                continue
             scope_record: dict[str, object] = {}
             if not _check_connector_version_supported_for_setup(
                 c,
                 mode="observe",
-                emit=not json_out,
+                emit=False,
                 data_dir=app.cfg.data_dir,
                 _allow_prompt=False,
                 _refusal_scope=scope_record,
             ) and scope_record.get("observe_admitted") is False:
-                refused.append(c)
+                refused.append((c, str(scope_record.get("reason") or "").strip()))
         if refused:
-            names = ", ".join(_connector_label(c) for c in refused)
+            names = ", ".join(_connector_label(c) for c, _ in refused)
             _finish(
                 ok=False,
                 exit_code=1,
                 new_mode=previous,
                 previous=previous,
                 message=(
-                    f"Nothing was changed: setup refuses {names} in observe and action mode at this version "
-                    "(see the check above), so this switch is refused the same way."
+                    f"Nothing was changed: setup refuses {names} in observe and action mode at this version, "
+                    "so this switch is refused the same way."
                 ),
-                notes=["Update it to a supported version, then run: defenseclaw guardrail mode "
-                       f"{mode}{f' --connector {scope}' if connector_key else ''}"],
+                notes=[reason for _, reason in refused if reason]
+                + [
+                    "Update it to a supported version, then run: defenseclaw guardrail mode "
+                    f"{mode}{f' --connector {scope}' if connector_key else ''}"
+                ],
             )
     _preflight_config_write(app)
     if connector_key is None:

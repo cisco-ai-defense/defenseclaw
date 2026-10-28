@@ -6,6 +6,7 @@ package connector
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -61,23 +62,35 @@ func hermesRegisteredCommandExecutable(opts SetupOpts, hookCommand string) bool 
 			args = append(args, "--forkless")
 		}
 		if reason := hermesExecutionContainmentUnavailable(); reason != "" {
-			// The probe never runs without its PID namespace, and a host
-			// that cannot create one is not a host whose registration is
-			// gone: a registration read back above whose script still has
-			// the digest setup sealed stays current, for read-back, the
-			// gateway start and the guard (GAP-1525). An edited script is
-			// not current.
-			if !hermesHookScriptSealed(opts, target) {
-				return false
-			}
-			hermesContainmentWarning.Do(func() {
-				fmt.Fprintf(os.Stderr, "[guardrail] connector hermes: execution proof unavailable (%s); "+
-					"the sealed hook registration was read back without running it\n", reason)
-			})
-			return true
+			return hermesSealedRegistrationWithoutProof(opts, target, reason)
 		}
 	}
-	return runHermesExecutionProbe(target, args)
+	ok, err := runHermesExecutionProbeResult(target, args)
+	if !ok && errors.Is(err, processutil.ErrContainmentUnavailable) {
+		// The sysctls allow user namespaces but something else refused
+		// them (a container seccomp profile, a sandbox): the probe never
+		// ran, the same case as above (GAP-1945). A probe that ran and
+		// failed is not current.
+		return hermesSealedRegistrationWithoutProof(opts, target, "this host refuses the user namespace the probe needs")
+	}
+	return ok
+}
+
+// hermesSealedRegistrationWithoutProof decides a registration whose
+// execution probe cannot run on this host. The probe never runs without its
+// PID namespace, and a host that cannot create one is not a host whose
+// registration is gone: a registration read back whose script still has the
+// digest setup sealed stays current, for read-back, the gateway start and the
+// guard (GAP-1525). An edited script is not current.
+func hermesSealedRegistrationWithoutProof(opts SetupOpts, target, reason string) bool {
+	if !hermesHookScriptSealed(opts, target) {
+		return false
+	}
+	hermesContainmentWarning.Do(func() {
+		fmt.Fprintf(os.Stderr, "[guardrail] connector hermes: execution proof unavailable (%s); "+
+			"the sealed hook registration was read back without running it\n", reason)
+	})
+	return true
 }
 
 // hermesHookScriptSealed reports whether the hook script at target has the
@@ -127,6 +140,13 @@ var hermesExecutionContainmentUnavailable = func() string {
 // W5b). Stdout left open by a descendant is closed after
 // hermesExecutionProbePipeWait.
 func runHermesExecutionProbe(target string, args []string) bool {
+	ok, _ := runHermesExecutionProbeResult(target, args)
+	return ok
+}
+
+// runHermesExecutionProbeResult is runHermesExecutionProbe with the
+// RunContained error, so the caller can tell a probe that never ran.
+func runHermesExecutionProbeResult(target string, args []string) (bool, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), hermesExecutionProbeTimeout)
 	defer cancel()
 	cmd := processutil.CommandContext(ctx, target, args...)
@@ -134,5 +154,5 @@ func runHermesExecutionProbe(target string, args []string) bool {
 	cmd.Stdout = stdout
 	cmd.WaitDelay = hermesExecutionProbePipeWait
 	err := processutil.RunContained(cmd)
-	return err == nil && stdout.String() == hermesExecutionProbeResponse
+	return err == nil && stdout.String() == hermesExecutionProbeResponse, err
 }

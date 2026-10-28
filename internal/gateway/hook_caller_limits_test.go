@@ -437,3 +437,65 @@ func TestSandboxCLIReadBurstIsNotThrottled(t *testing.T) {
 		t.Fatal("sandbox policy writes lost their budget")
 	}
 }
+
+// Once a request has offered its answer, what it still does (wait for the
+// delivery receipt, write the call's audit rows) must not take a run slot
+// back from the caller's next hook. With one slot (a host of two or three
+// processors) and slow audit writes (a cold page cache on a large store),
+// every new hook of a 10 calls a second load queued behind the previous
+// calls' audit writes and was blocked as a gateway no-answer (GAP-1790).
+func TestAnsweredRequestDoesNotTakeTheRunSlotBackFromTheNextHook(t *testing.T) {
+	const route = "/api/v1/claude-code/hook"
+	api := &APIServer{}
+	api.hookCallerLimits = hookCallerLimiter{rate: 1000, burst: 1000, running: 1}
+	request := func() *http.Request { return httptest.NewRequest(http.MethodPost, route, nil) }
+	answered, releaseAnswered := api.admitHookCaller(httptest.NewRecorder(), request(), "1001", route)
+	if releaseAnswered == nil {
+		t.Fatal("first request refused")
+	}
+	next := make(chan func(), 1)
+	go func() {
+		_, release := api.admitHookCaller(httptest.NewRecorder(), request(), "1001", route)
+		next <- release
+	}()
+	select {
+	case <-next:
+		t.Fatal("the caller's second request ran beside its first before the first answered")
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	// The first request offers its answer: the next hook starts.
+	resume := pauseHookRunSlot(answered.Context())
+	var releaseNext func()
+	select {
+	case releaseNext = <-next:
+		if releaseNext == nil {
+			t.Fatal("the caller's next request was refused")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the next hook did not start when the first request offered its answer")
+	}
+
+	// The answered request goes on to its audit writes while the next hook
+	// still runs: it neither waits for nor takes that hook's slot.
+	resumed := make(chan struct{})
+	go func() {
+		resume()
+		close(resumed)
+	}()
+	select {
+	case <-resumed:
+	case <-time.After(2 * time.Second):
+		releaseNext()
+		t.Fatal("the answered request waited for the next hook's run slot before its audit writes")
+	}
+	budget := api.hookCallerLimits.callers["1001"]
+	if got := len(budget.running); got != 1 {
+		t.Fatalf("running = %d while the next hook runs, want 1 (its own slot only)", got)
+	}
+	releaseAnswered()
+	releaseNext()
+	if budget.inFlight != 0 || len(budget.running) != 0 {
+		t.Fatalf("in-flight = %d, running = %d, want 0 and 0", budget.inFlight, len(budget.running))
+	}
+}

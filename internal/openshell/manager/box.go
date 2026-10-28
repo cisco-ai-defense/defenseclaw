@@ -736,8 +736,7 @@ func lingeringStartRefusal(name string, d openshell.Driver, sb *openshell.Sandbo
 	}
 	return &sandboxapi.Error{Code: sandboxapi.CodeConflict,
 		Message: "sandbox " + name + " was not started: it is a MicroVM that OpenShell reports " + strings.ToLower(string(sb.Status.Phase)) + "; " + openshell.LingeringVMLoss,
-		Detail: "`defenseclaw sandbox start " + name + " --end-vm` starts it all the same, and what its VM had not written to its disk is lost; `defenseclaw sandbox delete " +
-			name + "` deletes it and its work"}
+		Detail:  openshell.EndedVMWayOn(name)}
 }
 
 // migrateBootstrap moves the Docker bootstrap of the sandbox name (sb, as
@@ -950,8 +949,7 @@ func legacyWayOn(name string, phase audit.SandboxPhase, driver string) string {
 		}
 		return way
 	}
-	return "OpenShell does not stop this VM, whose workload ended: `defenseclaw sandbox delete " + name + "` deletes it and its work, or on OpenShell " +
-		openshell.SupportedMin + " or later `defenseclaw sandbox start " + name + " --end-vm` ends the VM, losing what it has not written to its disk"
+	return openshell.EndedVMWayOn(name)
 }
 
 // legacyStopCommand is the command that ends the live legacy or contained

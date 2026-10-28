@@ -41,6 +41,7 @@ const codeNotStarted = "not_started"
 // readOnly handles status and verify.
 func (l *lifecycle) readOnly(ctx context.Context) int {
 	env, r := l.env, l.result
+	env.boundedHomeLookups = true
 	// status waits for a run that holds the lock the same way, because the
 	// run stops and starts the services (GAP-2246). It still reports the
 	// recorded deployment below, so detection sees it installed.
@@ -167,6 +168,12 @@ func (l *lifecycle) readOnly(ctx context.Context) int {
 			"; the deployment keeps running as it was. Fix that, then apply the package with `"+env.lifecycleCommand(ActionEnsure)+" --from-package`")
 	}
 	strict := l.opts.Action == ActionVerify
+	if strict && pending == nil {
+		// The enumerator may have just rewritten the manifest (a fresh install
+		// enrolls every eligible account): verify the guardian reconcile of it,
+		// not the seconds before it (GAP-2176).
+		l.awaitGuardianManifestReconcile(ctx)
+	}
 	problems := l.verifyInstalled(ctx, record, strict)
 	l.warnLowDiskSpace()
 	dropInProblems, dropIns := l.unitDropIns(ctx, record)
@@ -180,10 +187,15 @@ func (l *lifecycle) readOnly(ctx context.Context) int {
 	problems = append(problems, l.describeMachinePolicy(record)...)
 	problems = append(problems, l.describeTetragon(ctx)...)
 	l.describeStatusV2(record)
+	l.describeUnansweredHomes()
 	if strict && record != nil {
 		if err := l.verifyManagedHermesRegistration(ctx); err != nil {
 			problems = append(problems, "managed Hermes hook registration: "+err.Error())
 		}
+	}
+	if strict && record != nil && !record.NoStart {
+		// The check managed Windows verify runs (GAP-1360): a warning only.
+		l.warnUserNativeOTLPExporters(ctx)
 	}
 	if machinePolicyIncomplete(r) {
 		r.MarkSecurityIncomplete(codeMachinePolicyIncomplete)

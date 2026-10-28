@@ -1042,10 +1042,13 @@ defenseclaw sandbox logs fix-tests --lines 50
 ### `sandbox list`
 
 Lists this DefenseClaw's sandboxes with their harness, phase, workspace mode,
-profile, uptime, hook traffic, and project folder. PROFILE is the profile the
-sandbox runs, followed by its pack when that is another one: `balanced (pack
-open)` is the balanced profile of the open pack, as a repository policy or
-`--profile` that tightens a pack's profile leaves it. The HOOKS column reads
+network profile, uptime, hook traffic, and project folder, under the columns
+`NAME HARNESS PHASE MODE NETWORK UPTIME HOOKS PROJECT`. NETWORK is the network
+profile the sandbox runs (`open`, `balanced` or `strict`), followed by its pack
+when that is another one: `balanced (pack open)` is the balanced profile of
+the open pack, as a repository policy or `--profile` that tightens a pack's
+profile leaves it. It reads `pending` while a sandbox is being created and its
+policy is not resolved yet. The HOOKS column reads
 `tamper!` once a tool call ran without a DefenseClaw verdict, `unreachable!`
 while the hooks do not reach DefenseClaw, and `silent!` while the harness
 works without hook traffic.
@@ -1103,7 +1106,7 @@ the destinations by kind (`AI: 1 model provider, 2 shadow AI`):
 
 ### `sandbox stop`
 
-Stops a sandbox. It is kept, so `start` or `connect` can resume it. On a MicroVM, `defenseclaw sandbox stop` syncs the VM's disk before it stops it. If that sync fails, DefenseClaw does not stop the VM: it keeps running with its work, and the command says why. Save the work you need (`defenseclaw sandbox pull NAME` for a copy run), then run `defenseclaw sandbox stop NAME` again; `defenseclaw sandbox delete NAME` ends it without keeping its work. A stop DefenseClaw makes for your organization's policy (a hook alarm, a revoked registration) does not end a MicroVM whose disk could not sync either: DefenseClaw contains it instead (it closes its egress proxy, withdraws its network rules and providers, reports it not protected and refuses new DefenseClaw runs), and it keeps running until you stop it with `--discard-unsynced` or delete it. When a
+Stops a sandbox. It is kept, so `start` or `connect` can resume it. On a MicroVM, `defenseclaw sandbox stop` syncs the VM's disk before it stops it. If that sync fails, DefenseClaw does not stop the VM: it keeps running with its work, the command says what a stop would lose and, on a terminal, asks whether to stop it anyway (`--yes` does not answer that question); `--discard-unsynced` stops it anyway without asking. Or save the work you need (`defenseclaw sandbox pull NAME` for a copy run) and run `defenseclaw sandbox stop NAME` again; `defenseclaw sandbox delete NAME` ends it without keeping its work. A stop DefenseClaw makes for your organization's policy (a hook alarm, a revoked registration) does not end a MicroVM whose disk could not sync either, and neither does one it makes on its own for repeated foreign network rules or a lost sandbox listener: DefenseClaw contains it instead (it closes its egress proxy, withdraws its network rules and providers, reports it not protected and refuses new DefenseClaw runs), `sandbox status` names it, and it keeps running until you stop it with `--discard-unsynced` or delete it. When a
 detached run is still going, or a session runs in it from another terminal
 (a harness session, or `connect --shell`), `stop` names it and asks first on
 a terminal (`--yes` skips the question; without a terminal it warns), and

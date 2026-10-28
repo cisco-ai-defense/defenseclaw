@@ -11,7 +11,6 @@ import (
 )
 
 func TestR104ActionProtectedMentionIndependentOfOperandRole(t *testing.T) {
-	skipNativeWindowsHomeGrammar(t)
 	home := t.TempDir()
 	cwd := filepath.Join(home, "project")
 	if err := os.Mkdir(cwd, 0o700); err != nil {
@@ -35,7 +34,7 @@ func TestR104ActionProtectedMentionIndependentOfOperandRole(t *testing.T) {
 		"git show HEAD --output=" + target,
 		"rg --pre='sh -c \"echo marker > " + target + "\"' marker .",
 		"cd " + filepath.Join(home, ".ssh") + " && echo " + target,
-		"grep marker " + target,
+		"grep marker report.pub >> " + target,
 	} {
 		t.Run(command, func(t *testing.T) {
 			if got := ActionCommandDecision(command, cwd, home); got != "protected-target" {
@@ -46,6 +45,8 @@ func TestR104ActionProtectedMentionIndependentOfOperandRole(t *testing.T) {
 	for _, command := range []string{
 		"cat " + target,
 		"cat " + target + " | head -n 1",
+		// A plain read stays allowed in action (owner decision 2, GAP-2168).
+		"grep marker " + target,
 		"echo '$HOME/.ssh/authorized_keys'",
 		"stat " + target,
 		"cd " + filepath.Join(home, ".ssh"),
@@ -110,7 +111,7 @@ func TestR104WindowsProtectedMentionNormalizationAndReadOnly(t *testing.T) {
 		`env -S 'pwsh -Command "Add-Content -Path $env:USERPROFILE\.ssh\authorized_keys -Value marker"'`,
 		`env -u OLD -S 'pwsh -Command "Add-Content -Path $env:USERPROFILE\.ssh\authorized_keys -Value marker"'`,
 		`env -u OLD --split-string 'pwsh -Command "Add-Content -Path $env:USERPROFILE\.ssh\authorized_keys -Value marker"'`,
-		`Get-Content ` + target + ` | Select-Object -First 1`,
+		`Get-Content ` + target + ` | Select-Object -First 1 | Set-Content ` + target,
 	} {
 		t.Run(command, func(t *testing.T) {
 			if got := ActionCommandDecision(command, cwd, home); got != "protected-target" {
@@ -121,6 +122,9 @@ func TestR104WindowsProtectedMentionNormalizationAndReadOnly(t *testing.T) {
 	for _, command := range []string{
 		`Get-Content ` + target,
 		`cat ` + target + ` | head -n 1`,
+		// A read piped into a select filter writes nothing, as cat | head
+		// (owner decision 2, GAP-2168).
+		`Get-Content ` + target + ` | Select-Object -First 1`,
 		`Test-Path C:\Users\Alice\.ssh`,
 		`cd C:\Users\Alice\.ssh`,
 		`cd -- C:\Users\Alice\.ssh`,
@@ -348,6 +352,7 @@ func TestR104WindowsNestedProtectedMention(t *testing.T) {
 }
 
 func TestR104ActionSSHDirectoryOnlyMentions(t *testing.T) {
+	skipPOSIXGrammarOnWindows(t)
 	home := t.TempDir()
 	cwd := filepath.Join(home, "project")
 	if err := os.MkdirAll(filepath.Join(home, ".ssh"), 0o700); err != nil {

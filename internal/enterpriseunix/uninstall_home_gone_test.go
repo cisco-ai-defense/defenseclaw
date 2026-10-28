@@ -69,6 +69,71 @@ func TestUninstallKeepsTheDeploymentForAPerUserHomeThatIsNotAvailable(t *testing
 	}
 }
 
+// GAP-2358: the hook-removal precheck already names a live account whose
+// home is not available. The uninstall refused only after remove-all had
+// run, so the Claude Code blockers and hooks of every other user were gone
+// and the services had stopped. It now refuses before anything changes; a
+// pending entry with a reason (a home that is gone) does not refuse.
+func TestUninstallRefusesBeforeAnyChangeForAPerUserHomeThatIsNotAvailable(t *testing.T) {
+	for _, goos := range []string{"linux", "darwin"} {
+		t.Run(goos, func(t *testing.T) {
+			h := newTestHost(t, goos)
+			requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
+			gone := "gone-user/codex: its home /home/gone-user no longer exists, so no DefenseClaw hook registration is left there; if that home is restored, remove DefenseClaw's entries from the codex config in it"
+			h.env.Runner = removeAllRunner{Runner: h.runner, answer: func(string) (CommandResult, error) {
+				t.Fatal("remove-all ran (and removed the other users' hooks and blockers) after its precheck named a home that is not available")
+				return CommandResult{}, nil
+			}, check: func() (CommandResult, error) {
+				return CommandResult{Stdout: []byte(`{"ok":true,"removed":0,"pending":["` + gone + `","sample-user/hermes"]}`)}, nil
+			}}
+			h.env.MachinePolicy = observingPolicy{MachinePolicyManager: h.env.MachinePolicy, observe: func() {
+				t.Fatal("the machine policy was removed after the precheck named a home that is not available")
+			}}
+			before := len(h.services.calls)
+			refused := h.run(Options{Action: ActionUninstall})
+			requireError(t, refused, codeUninstallPrecheck)
+			got := messagesOf(refused.Errors, codePerUserHooks)
+			if !strings.Contains(got, "hermes hooks for user sample-user were not removed because that account's home is not available, so a DefenseClaw registration may remain in it") ||
+				!strings.Contains(got, "make that home available (mount its volume) and rerun") {
+				t.Fatalf("the refusal does not name the home that is not available and the next step: %q", got)
+			}
+			if strings.Contains(got, "gone-user") {
+				t.Fatalf("a home that is gone must not refuse the uninstall: %q", got)
+			}
+			if len(refused.Changes) != 0 {
+				t.Fatalf("the refused uninstall reports changes: %q", refused.Changes)
+			}
+			for _, call := range h.services.calls[before:] {
+				if strings.HasPrefix(call, "stop ") || strings.HasPrefix(call, "disable ") {
+					t.Fatalf("the refused uninstall ran %q", call)
+				}
+			}
+			if !exists(h.env.P(filepath.Join(h.env.Layout.BinDir, binGateway))) || !exists(h.env.deploymentPath()) {
+				t.Fatal("the refused uninstall removed the binaries or the deployment record")
+			}
+		})
+	}
+}
+
+// A precheck whose only pending entry carries a reason (a home that is gone)
+// does not refuse: the uninstall warns for it and completes (GAP-2358 keeps
+// GAP-0553's rule).
+func TestUninstallPrecheckDoesNotRefuseAHomeThatIsGone(t *testing.T) {
+	h := newTestHost(t, "linux")
+	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
+	gone := "gone-user/codex: its home /home/gone-user no longer exists, so no DefenseClaw hook registration is left there; if that home is restored, remove DefenseClaw's entries from the codex config in it"
+	h.env.Runner = removeAllRunner{Runner: h.runner, answer: func(string) (CommandResult, error) {
+		return CommandResult{Stdout: []byte(`{"ok":true,"removed":0,"pending":["` + gone + `"]}`)}, nil
+	}, check: func() (CommandResult, error) {
+		return CommandResult{Stdout: []byte(`{"ok":true,"removed":0,"pending":["` + gone + `"]}`)}, nil
+	}}
+	done := h.run(Options{Action: ActionUninstall})
+	requireOK(t, done)
+	if exists(h.env.deploymentPath()) {
+		t.Fatal("the uninstall did not complete for a home that is gone")
+	}
+}
+
 // GAP-0553: remove-all reports the pending cleanup of a removed account
 // with a reason that names its recorded home and a remedy. The uninstall
 // warns with that reason, not with "once it is available", and goes on.

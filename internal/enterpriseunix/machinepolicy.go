@@ -192,6 +192,10 @@ func (m *policyManager) copilotAccountHomes(cfg *config.Config) ([]string, []str
 			}
 		}
 	}
+	// Status and verify read no settings below a home that does not answer
+	// (GAP-1751); describeUnansweredHomes names it.
+	scoped = slices.DeleteFunc(scoped, func(home string) bool { return !env.homeAnswers(home) })
+	outOfScope = slices.DeleteFunc(outOfScope, func(home string) bool { return !env.homeAnswers(home) })
 	return scoped, outOfScope, nil
 }
 

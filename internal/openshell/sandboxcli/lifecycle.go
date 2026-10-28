@@ -89,11 +89,18 @@ func otherDriverSandboxes(list []sandboxapi.Sandbox, live string) []sandboxapi.S
 	}
 	var out []sandboxapi.Sandbox
 	for _, sb := range list {
-		if sb.Phase != "deleted" && createdDriver(sb) != live {
+		if sb.Phase != "deleted" && !beingCreated(sb) && createdDriver(sb) != live {
 			out = append(out, sb)
 		}
 	}
 	return out
+}
+
+// beingCreated reports a sandbox whose create is still under way and has
+// recorded no driver yet: it is being made on the driver the gateway runs
+// now, never an old record of the docker driver (GAP-1431).
+func beingCreated(sb sandboxapi.Sandbox) bool {
+	return sb.Driver == "" && (sb.Phase == "creating" || sb.Phase == "provisioning" || sb.Phase == "pending")
 }
 
 // otherDriverNote says which sandboxes belong to a driver the gateway no
@@ -1151,6 +1158,17 @@ func (d overlayDisk) percent() int64 {
 // filling reports a disk that is full or nearly so.
 func (d overlayDisk) filling() bool {
 	return d.known && (d.full() || d.percent() >= overlayDiskWarnPercent)
+}
+
+// fillsWithin reports whether d, at the rate its free space fell since the
+// look before (prev, elapsed ago), runs out of room within horizon.
+func (d overlayDisk) fillsWithin(prev overlayDisk, elapsed, horizon time.Duration) bool {
+	if !d.known || !prev.known || prev.size != d.size || elapsed <= 0 || d.avail >= prev.avail {
+		return false
+	}
+	perSecond := float64(prev.avail-d.avail) / elapsed.Seconds()
+	left := float64(d.avail - lowDiskBytes)
+	return left <= 0 || left/perSecond <= horizon.Seconds()
 }
 
 // overlayDiskOf looks at the own disk of the running MicroVM name with

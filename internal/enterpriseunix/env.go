@@ -25,6 +25,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/enterprisebundle"
@@ -258,6 +259,15 @@ type Env struct {
 	// installs, which tags the macOS LaunchAgent labels (launchAgentLabel);
 	// "" outside a plan, where the installed gateway is read.
 	agentDigest string
+	// boundedHomeLookups is set by status and verify: an account's home is
+	// looked up in a bounded child before it is opened in this process, so a
+	// home on a stalled mount cannot keep them from answering (GAP-1751).
+	boundedHomeLookups bool
+	// homeLookups holds each home's bounded lookup answer for this run.
+	homeLookups struct {
+		sync.Mutex
+		answered map[string]bool
+	}
 
 	// ProductVersion is the version of the running lifecycle binary.
 	ProductVersion string

@@ -19,6 +19,7 @@ package gateway
 import (
 	"context"
 	"encoding/json"
+	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 )
@@ -119,6 +120,8 @@ func decodeClaudeCodeRequestForContext(ctx context.Context, rawBody []byte, payl
 	}
 	req.AgentType = firstNonEmpty(req.AgentType, agentType)
 	req.guestCWD = sandboxHookGuestCWD(ctx, req.CWD, "")
+	req.reportedCWD = strings.TrimSpace(req.CWD)
+	req.reportedNewCWD = strings.TrimSpace(req.NewCWD)
 	req.CWD = hookCWDForContext(ctx, req.CWD)
 	req.NewCWD = hookCWDForContext(ctx, req.NewCWD)
 	req.OldCWD = hookCWDForContext(ctx, req.OldCWD)

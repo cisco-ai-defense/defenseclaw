@@ -1382,3 +1382,70 @@ func TestReadWindowsManagedHooksLifecycleCursorTargetsRestoresAChangedAdapter(t 
 		})
 	}
 }
+
+// GAP-0571: a failed, non-waiting guardian row (here the Codex runtime
+// selector the guardian could not read) is still refused, and the refusal
+// names the row and the guardian's own error so the operator knows what to
+// repair before the uninstall commits.
+func TestWindowsManagedHooksGuardianRefusalNamesTheFailedRow(t *testing.T) {
+	manifestSHA256 := strings.Repeat("a", 64)
+	ctx := windowsManagedHooksLifecycleContext{
+		manifestPath: `C:\ProgramData\DefenseClaw\hook-guardian\targets.yaml`,
+		targets: []windowsManagedHooksTeardownTarget{
+			{Connector: "claudecode", SID: "S-1-5-21-111-222-333-1001"},
+			{Connector: "codex", SID: "S-1-5-21-111-222-333-1001"},
+		},
+	}
+	protected := []enterpriseHookReconcileRow{
+		{Connector: "claudecode", SID: "S-1-5-21-111-222-333-1001", OK: true},
+	}
+	results := []enterpriseHookReconcileRow{
+		protected[0],
+		{
+			Connector: "codex",
+			SID:       "S-1-5-21-111-222-333-1001",
+			Error:     "codex runtime selector: enterprise hooks: managed runtime selector targets are not strictly sorted",
+		},
+	}
+	activation := enterpriseHookGuardianActivation{
+		Version:          enterpriseHookGuardianActivationVersion,
+		UpdatedAt:        "2026-08-24T00:00:00Z",
+		ReconcileID:      strings.Repeat("f", 32),
+		Manifest:         ctx.manifestPath,
+		ManifestSHA256:   manifestSHA256,
+		TargetCount:      2,
+		SuccessCount:     1,
+		FailureCount:     1,
+		ProtectedTargets: protected,
+	}
+	authorization := enterpriseHookGuardianAuthorization{
+		Version:          1,
+		UpdatedAt:        activation.UpdatedAt,
+		TargetCount:      2,
+		SuccessCount:     1,
+		FailureCount:     1,
+		ProtectedTargets: protected,
+	}
+	state := enterpriseHookGuardianState{
+		Version:      1,
+		UpdatedAt:    activation.UpdatedAt,
+		Manifest:     ctx.manifestPath,
+		TargetCount:  2,
+		SuccessCount: 1,
+		FailureCount: 1,
+		Results:      results,
+	}
+	_, err := validateWindowsManagedHooksGuardianActivation(activation, authorization, state, ctx, manifestSHA256)
+	if err == nil {
+		t.Fatal("a failed guardian row was accepted for teardown")
+	}
+	for _, want := range []string{
+		"ambiguous target disposition",
+		"codex target S-1-5-21-111-222-333-1001",
+		"managed runtime selector targets are not strictly sorted",
+	} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("refusal %q does not name %q", err, want)
+		}
+	}
+}

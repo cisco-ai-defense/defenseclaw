@@ -710,6 +710,12 @@ func (e *Env) checkCandidateAssets(v *validatedConfig) error {
 	return nil
 }
 
+// CheckRequiredSandboxPacks is checkRequiredSandboxPacks for `config
+// validate`, which must refuse what ensure refuses (GAP-0546).
+func (e *Env) CheckRequiredSandboxPacks(cfg *config.Config) error {
+	return e.checkRequiredSandboxPacks(cfg)
+}
+
 // checkRequiredSandboxPacks loads every administrator-required sandbox pack
 // that a gateway generation would load. A malformed or mismatched pack must
 // fail planning before ensure writes config.yaml or restarts the gateway

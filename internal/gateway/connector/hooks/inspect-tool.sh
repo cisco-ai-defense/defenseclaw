@@ -458,7 +458,7 @@ elif [ "$HTTP_CODE" -lt 200 ] 2>/dev/null || [ "$HTTP_CODE" -ge 300 ] 2>/dev/nul
   fail_response "gateway returned HTTP ${HTTP_CODE}"
 fi{{end}}
 
-{{if not .SecureClient}}defenseclaw_json_string_field "$RESULT" action >/dev/null || fail_response "invalid or ambiguous JSON response"
+{{if not .SecureClient}}defenseclaw_json_answer_valid "$RESULT" action || fail_response "invalid or ambiguous JSON response"
 {{end}}
 {{if .Sandbox}}# Every DefenseClaw inspect verdict names its action: an empty or
 # action-less reply from the sandbox ingress is not a verdict.

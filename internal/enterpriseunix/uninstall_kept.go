@@ -30,6 +30,11 @@ type perUserKept struct {
 	home     string
 	data     bool
 	binaries bool
+	// manifest is set when the enrollment manifest names the account, so
+	// the purge removes its ~/.defenseclaw. An eligible account the
+	// manifest does not name is covered only by the machine policy, and the
+	// purge keeps its folder (GAP-2237).
+	manifest bool
 }
 
 // perUserLeftovers lists the enrolled accounts (from the enumerator's
@@ -42,13 +47,21 @@ func (env *Env) perUserLeftovers() (kept []perUserKept, enrolled map[string]bool
 		return nil, nil, false
 	}
 	var record struct {
-		Accounts []struct {
-			User string `json:"user"`
-			Home string `json:"home"`
-		} `json:"accounts"`
+		Accounts []enterprisehooks.UnixEligibleAccount `json:"accounts"`
 	}
 	if json.Unmarshal(data, &record) != nil {
 		return nil, nil, false
+	}
+	// The accounts the manifest names, whose ~/.defenseclaw the purge
+	// removes. An unreadable manifest names every eligible account, as
+	// before.
+	named := record.Accounts
+	if manifest, err := enterprisehooks.LoadStandaloneManifest(env.P(env.Layout.ManifestPath)); err == nil {
+		named = enterprisehooks.ManifestEnrolledAccounts(record.Accounts, manifest)
+	}
+	inManifest := map[string]bool{}
+	for _, account := range named {
+		inManifest[strings.TrimSpace(account.User)] = true
 	}
 	enrolled = map[string]bool{}
 	for _, account := range record.Accounts {
@@ -58,6 +71,7 @@ func (env *Env) perUserLeftovers() (kept []perUserKept, enrolled map[string]bool
 		}
 		enrolled[filepath.Clean(env.P(home))] = true
 		if entry := perUserFilesOf(user, env.P(home)); entry.data || entry.binaries {
+			entry.manifest = inManifest[user]
 			kept = append(kept, entry)
 		}
 	}
@@ -88,14 +102,43 @@ func (l *lifecycle) reportUnenrolledUserData(ctx context.Context) {
 // enrolled users whose OSS data survived remove-all. The lifecycle only
 // observes these user-owned files; it never deletes them to make the result
 // look complete.
+//
+// An account the machine policy covers but the enrollment manifest does not
+// name keeps the folder too, and when that folder holds no install of its
+// own (only the hook files and connector backups DefenseClaw wrote there)
+// it is not the account's own data: those accounts go on one kept: line
+// that says so, instead of a per-account "enrolled user ... account-owned
+// folder" warning (GAP-2237).
 func (l *lifecycle) reportRetainedEnrolledUserData() {
+	var policyOnly []perUserKept
 	for _, before := range l.keptPerUser {
 		// The remove-all worker may already have removed eligible-accounts.json.
 		// Use the home captured before removal to inspect what still exists.
-		if before.data && !l.perUserStateKept[before.user] && perUserFilesOf(before.user, before.home).data {
-			l.result.AddWarning(codePerUserState, "kept per-user data (~/.defenseclaw) for enrolled user "+before.user+" after --purge; this account-owned folder still exists and must be reviewed with its owner")
+		if !before.data || l.perUserStateKept[before.user] || !perUserFilesOf(before.user, before.home).data {
+			continue
 		}
+		if !before.manifest && !holdsOwnInstall(before.home) {
+			policyOnly = append(policyOnly, perUserKept{user: before.user, home: before.home, data: true})
+			continue
+		}
+		l.result.AddWarning(codePerUserState, "kept per-user data (~/.defenseclaw) for enrolled user "+before.user+" after --purge; this account-owned folder still exists and must be reviewed with its owner")
 	}
+	if files := describePerUserFiles(policyOnly); files != "" {
+		l.result.AddWarning(codePerUserState, "kept: "+files+", accounts the machine policy covered without a per-user enrollment; a purge removes ~/.defenseclaw only of the accounts the enrollment manifest names. These folders hold no DefenseClaw install of their own, only the hook files and connector backups DefenseClaw wrote there; an administrator can delete them")
+	}
+}
+
+// holdsOwnInstall reports whether home/.defenseclaw holds the account's own
+// per-user install. A folder that is not a plain directory, or that cannot
+// be read, counts as one, so its account keeps the account-owned warning.
+func holdsOwnInstall(home string) bool {
+	dataDir := filepath.Join(home, ".defenseclaw")
+	info, err := os.Lstat(dataDir)
+	if err != nil || !info.IsDir() {
+		return true
+	}
+	own, err := enterprisehooks.HoldsPerUserInstall(dataDir)
+	return own || err != nil
 }
 
 // perUserFilesOf is what the account user has in home: ~/.defenseclaw,

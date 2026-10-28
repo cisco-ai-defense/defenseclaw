@@ -226,7 +226,7 @@ error: This device is managed: change config.yaml in the admin config (MDM or ma
 That covers `defenseclaw config set` and `unset`, `defenseclaw policy activate`, the `setup` commands that save configuration, the TUI Setup panel (read-only), and the gateway's `/enforce/block` and `/enforce/allow` routes, which answer `403` with `managed_device`. `skill block`, `mcp block`, `plugin block` and `tool block` refuse the same way and point at `asset_policy`:
 
 ```text
-This device is managed: add it to asset_policy in the admin config (MDM or management plane)
+This device is managed: the asset_policy block and allow lists are set in the admin config (MDM or management plane)
 ```
 
 Reads work: `config get`, `config show`, `status`, `doctor`, `enterprise policy show`. Runtime actions are not config writes and stay available: quarantine, restore, disable, enable, and `enterprise linux tetragon pause` and `resume`. What a standard user may do beyond that is set by the enterprise profile ([Enterprise concepts](/docs/enterprise/concepts)).

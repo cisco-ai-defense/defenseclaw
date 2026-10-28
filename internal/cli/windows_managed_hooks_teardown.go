@@ -209,6 +209,29 @@ var windowsManagedHooksStandaloneCursorTombstonePurger = enterprisehooks.PurgeWi
 // lifecycle result fails on it.
 const windowsManagedHooksNotLocalSystemReason = "the uninstall did not run as LocalSystem"
 
+// windowsManagedHooksSignedOutPathEntryReason ends a user_state_remaining
+// entry of an account whose DefenseClaw data and binaries a purge removed
+// but whose user Path entry for %USERPROFILE%\.local\bin stays: the account
+// is signed out, so its registry hive is not loaded and its Path cannot be
+// changed. The docs call that a warning, so the lifecycle result warns and
+// the purge does not fail on it (GAP-2231).
+const windowsManagedHooksSignedOutPathEntryReason = "only its user Path entry for .local\\bin stays: the account is signed out, so its registry hive is not loaded"
+
+// windowsManagedHooksKeptForRegistrationsReason marks, in user_state_remaining,
+// the DefenseClaw folder of an account whose agent registrations stay (it
+// had no active session, or their removal failed): its connector_backups
+// restore them, so the purge keeps it on purpose.
+const windowsManagedHooksKeptForRegistrationsReason = "kept: the account's agent registrations were not all removed, and its connector_backups restore them"
+
+// windowsManagedHooksUserBinariesReason is the user_state_remaining reason of
+// a failed per-user binaries purge.
+func windowsManagedHooksUserBinariesReason(err error) string {
+	if errors.Is(err, enterprisehooks.ErrWindowsUserHiveNotLoaded) {
+		return windowsManagedHooksSignedOutPathEntryReason
+	}
+	return boundedEnterpriseHookUserCleanupText(err.Error())
+}
+
 // windowsManagedHooksPurgeUserStateEnv is set to 1 by the lifecycle for an
 // uninstall with purge (Setup PURGE=1, --purge). A flag would fail the
 // finalize of an installed helper from before it; that helper ignores the
@@ -295,7 +318,7 @@ func windowsManagedHooksStandaloneUserState(
 				if home != "" && !errors.Is(err, os.ErrNotExist) && identityErr == nil && !keepsRegistrations(sid) {
 					// The folder is gone; the binaries may still be there.
 					if _, err := windowsManagedHooksStandaloneUserBinariesPurger(home, sid); err != nil {
-						remaining = append(remaining, label+": "+boundedEnterpriseHookUserCleanupText(err.Error()))
+						remaining = append(remaining, label+": "+windowsManagedHooksUserBinariesReason(err))
 					}
 				}
 				continue
@@ -304,7 +327,7 @@ func windowsManagedHooksStandaloneUserState(
 		case identityErr != nil:
 			reason = windowsManagedHooksNotLocalSystemReason
 		case keepsRegistrations(sid):
-			reason = "kept: the account's agent registrations were not all removed, and its connector_backups restore them"
+			reason = windowsManagedHooksKeptForRegistrationsReason
 		default:
 			err := windowsManagedHooksStandaloneUserStatePurger(home, sid, target.DataDir)
 			var binaries []string
@@ -315,7 +338,12 @@ func windowsManagedHooksStandaloneUserState(
 				purged = append(purged, windowsManagedHooksPurgedLabel(label, binaries))
 				continue
 			}
-			reason = boundedEnterpriseHookUserCleanupText(err.Error())
+			if errors.Is(err, enterprisehooks.ErrWindowsUserHiveNotLoaded) {
+				// The data and binaries went; only the Path entry of a
+				// signed-out account stays (GAP-2231).
+				purged = append(purged, windowsManagedHooksPurgedLabel(label, binaries))
+			}
+			reason = windowsManagedHooksUserBinariesReason(err)
 		}
 		remaining = append(remaining, label+": "+reason)
 	}
@@ -330,7 +358,7 @@ func newWindowsManagedHooksTeardownCommand() *cobra.Command {
 		Short:  "Transactionally revoke managed hook machine wiring",
 		Hidden: true,
 	}
-	for _, action := range []string{"prepare", "verify", "rollback", "finalize"} {
+	for _, action := range []string{"prepare", "verify", "rollback", "finalize", "check"} {
 		action := action
 		var jsonOutput bool
 		var purgeContractLocks bool
@@ -548,6 +576,10 @@ type windowsManagedHooksTeardownCapabilities struct {
 	Action                     string `json:"action"`
 	OK                         bool   `json:"ok"`
 	CommittedStandalonePrepare bool   `json:"committed_standalone_prepare"`
+	// PrecommitCheck says the helper accepts the read-only "check" action:
+	// a standalone uninstall asks it before its tombstone commits whether
+	// the post-commit prepare would accept this deployment (GAP-0571).
+	PrecommitCheck bool `json:"precommit_check"`
 }
 
 func newWindowsManagedHooksTeardownCapabilitiesCommand() *cobra.Command {
@@ -564,6 +596,7 @@ func newWindowsManagedHooksTeardownCapabilitiesCommand() *cobra.Command {
 				Action:                     "capabilities",
 				OK:                         true,
 				CommittedStandalonePrepare: true,
+				PrecommitCheck:             true,
 			}
 			if jsonOutput {
 				return json.NewEncoder(cmd.OutOrStdout()).Encode(report)
@@ -603,7 +636,7 @@ func runWindowsManagedHooksTeardown(
 		return report, err
 	}
 	if action != "prepare" && action != "verify" && action != "rollback" &&
-		action != "finalize" {
+		action != "finalize" && action != "check" {
 		return fail(fmt.Errorf("unsupported managed-hook teardown action %q", action))
 	}
 	// Authorization intentionally precedes protected layout discovery.
@@ -816,6 +849,17 @@ func runWindowsManagedHooksTeardown(
 			report.VerifiedCleanCount = report.TargetCount
 			report.SucceededCount = report.TargetCount
 		}
+	case "check":
+		// Read-only (GAP-0571): the guardian evidence above, the installed
+		// enrollment and the runtime selectors are what the post-commit
+		// prepare authenticates. A standalone uninstall asks this before its
+		// tombstone commits, so a deployment that prepare would refuse stays
+		// fully installed instead of being left half-uninstalled.
+		err = windowsManagedHooksTeardownCheckReady(opts, identity)
+		if err == nil {
+			report.VerifiedInstalledCount = report.TargetCount
+			report.SucceededCount = report.TargetCount
+		}
 	case "verify":
 		var journal windowsManagedHooksTeardownJournal
 		journal, err = readWindowsManagedHooksTeardownJournal(report.JournalPath)
@@ -1006,6 +1050,30 @@ func windowsManagedHooksTeardownValidationAction(
 		return "", false, fmt.Errorf("inspect pending managed-hook transaction: %w", err)
 	}
 	return "finalize", true, nil
+}
+
+// windowsManagedHooksTeardownCheckReady runs, without any write, the
+// installed-state checks prepareWindowsManagedHooksTeardown makes before its
+// first mutation (GAP-0571). Tests replace it.
+var windowsManagedHooksTeardownCheckReady = checkWindowsManagedHooksTeardownReady
+
+func checkWindowsManagedHooksTeardownReady(
+	opts connector.WindowsCodexMachineRequirementsOptions,
+	identity windowsManagedHooksTeardownJournal,
+) error {
+	if err := verifyWindowsManagedHooksTeardownInstalled(opts, identity, nil); err != nil {
+		return err
+	}
+	selectorTargets, err := captureWindowsManagedHooksRuntimeSelectors(
+		identity.Targets,
+		identity.PendingTargets,
+		identity.HookBinary,
+		identity.ActivationState,
+	)
+	if err != nil {
+		return err
+	}
+	return verifyWindowsManagedHooksTeardownInstalled(opts, identity, selectorTargets)
 }
 
 func prepareWindowsManagedHooksTeardown(
@@ -1986,7 +2054,7 @@ func validateWindowsManagedHooksTeardownDeployment(
 	targetCount int,
 ) (windowsManagedHooksActivationRecord, error) {
 	switch action {
-	case "prepare", "verify", "rollback":
+	case "prepare", "verify", "rollback", "check":
 		// A rollback runs only after the transaction restore has put the exact
 		// installed metadata preimage back in place. Accept the legacy omitted
 		// installed flag as active, but never let an inactive tombstone authorize

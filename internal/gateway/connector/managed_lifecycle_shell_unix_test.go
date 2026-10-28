@@ -18,26 +18,46 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
-func TestManagedHermesAnswersLifecycleBeforeForeignGuardWait(t *testing.T) {
-	invoke := hookArgvConnectorCase(t, "hermes")
-	data := t.TempDir()
-	hooks := filepath.Join(data, "hooks")
-	guardCalls := filepath.Join(data, "foreign-guard-called")
-	guard := filepath.Join(data, "defenseclaw-hook")
-	guardScript := "#!/bin/sh\n: > '" + guardCalls + "'\nsleep 2\nprintf '{\"deny\":false}\\n'\n"
-	if err := os.WriteFile(guard, []byte(guardScript), 0o700); err != nil {
+// GAP-1676: a no-op ensure holds the lifecycle marker while the gateway
+// keeps answering. The standalone Hermes hook answered every tool call with
+// the lifecycle block while the marker existed, before it asked the guard or
+// the gateway, so Hermes blocked benign calls that the native managed hooks
+// allowed in the same window. Like the native hook, it now gives the
+// lifecycle answer only when the gateway could not answer (no check answer,
+// or a deny the check marked retryable); an allow goes on to the gateway and
+// a confirmed deny keeps its own block.
+func TestManagedHermesLifecycleMarkerBlocksOnlyWhatTheGatewayCannotAnswer(t *testing.T) {
+	curlPath, err := exec.LookPath("curl")
+	if err != nil {
+		t.Skip("curl is required to run shell hooks")
+	}
+	f := newHookSocketFixture(t, "dclm", nil)
+	guard := filepath.Join(f.root, "bin", "defenseclaw-hook")
+	if err := os.Mkdir(filepath.Dir(guard), 0o755); err != nil {
 		t.Fatal(err)
 	}
+	answerPath := filepath.Join(f.root, "answer")
+	guardScript := "#!/bin/bash\n" +
+		"[ \"$*\" = \"hook session-facts\" ] && exit 0\n" +
+		"cat > /dev/null\n" +
+		"cat " + shellSingleQuoteForTest(answerPath) + " 2>/dev/null\n"
+	if err := os.WriteFile(guard, []byte(guardScript), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	agentHome := filepath.Join(f.root, "home")
+	dataDir := filepath.Join(agentHome, ".defenseclaw")
+	hooks := filepath.Join(dataDir, "hooks")
 	opts := SetupOpts{
-		DataDir: data, APIAddr: "127.0.0.1:1", APIToken: "test-token",
+		DataDir: dataDir, APIAddr: "127.0.0.1:1", APIToken: "tok",
 		HookFailMode: "closed", GuardrailMode: "action", ManagedEnterprise: true,
-		ManagedHookSocket:      filepath.Join(data, "hook.sock"),
+		ManagedHookSocket:      f.socket,
+		ManagedServiceUID:      os.Getuid(),
 		ForeignHookGuardBinary: guard,
 	}
 	if err := WriteHookScriptsForConnectorObjectWithOpts(hooks, opts, NewHermesConnector()); err != nil {
 		t.Fatal(err)
 	}
-	marker := filepath.Join(data, "lifecycle.active")
+	marker := filepath.Join(f.root, "lifecycle.active")
 	hardening := filepath.Join(hooks, "_hardening.sh")
 	script, err := os.ReadFile(hardening)
 	if err != nil {
@@ -49,20 +69,48 @@ func TestManagedHermesAnswersLifecycleBeforeForeignGuardWait(t *testing.T) {
 	if err := os.WriteFile(marker, nil, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 2500*time.Millisecond)
-	defer cancel()
-	cmd := exec.CommandContext(ctx, "bash", append([]string{filepath.Join(hooks, invoke.script)}, invoke.args...)...)
-	cmd.Stdin = strings.NewReader(invoke.stdin)
-	cmd.Env = append(sanitizedTestEnv(), "HOME="+data, "DEFENSECLAW_HOME="+data)
-	cmd.Env = append(cmd.Env, invoke.env...)
-	started := time.Now()
-	output, err := cmd.CombinedOutput()
-	if err != nil || time.Since(started) > time.Second || !bytes.Contains(output, []byte(`"action":"block"`)) ||
-		!bytes.Contains(output, []byte("installed or upgraded")) {
-		t.Fatalf("managed Hermes lifecycle answer took %s: %q (%v)", time.Since(started), output, err)
+	hookPath := filepath.Join(hooks, "hermes-hook.sh")
+	bakeHookPathForTest(t, hookPath, filepath.Dir(curlPath)+":/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin")
+	requests := func() int {
+		paths, _, _ := f.gateway.recorded()
+		return len(paths)
 	}
-	if _, err := os.Stat(guardCalls); !os.IsNotExist(err) {
-		t.Fatalf("foreign guard ran during the closed lifecycle: %v", err)
+	run := func(answer string) (string, string) {
+		t.Helper()
+		if err := os.WriteFile(answerPath, []byte(answer), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		cmd := exec.CommandContext(ctx, "bash", hookPath)
+		cmd.Env = append(os.Environ(), "HOME="+agentHome)
+		cmd.Stdin = strings.NewReader(`{"hook_event_name":"pre_tool_call","session_id":"s-1","tool_name":"terminal","tool_input":{"command":"echo marker"}}`)
+		var stdout, stderr bytes.Buffer
+		cmd.Stdout, cmd.Stderr = &stdout, &stderr
+		if err := cmd.Run(); err != nil {
+			t.Fatalf("run hook: %v (stderr %q)", err, stderr.String())
+		}
+		return strings.TrimSpace(stdout.String()), stderr.String()
+	}
+	const lifecycle = "being installed or upgraded"
+
+	// The check allows: the gateway decides, as for the native hooks.
+	if stdout, stderr := run(`{"deny":false}` + "\n"); strings.Contains(stdout, lifecycle) || !strings.Contains(stdout, "hook-socket") || requests() != 1 {
+		t.Fatalf("allowed check while the marker is held: stdout=%q stderr=%q requests=%d, want the gateway's answer", stdout, stderr, requests())
+	}
+	// The gateway could not answer the check: the lifecycle answer.
+	for _, answer := range []string{
+		`{"deny":true,"reason":"enterprise_managed_gateway_not_running","retryable":true}` + "\n",
+		"",
+	} {
+		if stdout, stderr := run(answer); !strings.HasPrefix(stdout, `{"action":"block"`) || !strings.Contains(stdout, lifecycle) || requests() != 1 {
+			t.Fatalf("check %q while the marker is held: stdout=%q stderr=%q requests=%d, want the lifecycle block", answer, stdout, stderr, requests())
+		}
+	}
+	// A confirmed deny keeps its own block.
+	block := `{"action":"block","message":"DefenseClaw blocked this tool call: the user file defines a hook. (enterprise_foreign_hook_blocked)"}`
+	if stdout, stderr := run(`{"deny":true,"reason":"enterprise_foreign_hook_blocked: x","hook_output":` + block + `}` + "\n"); stdout != block {
+		t.Fatalf("confirmed deny while the marker is held: stdout=%q stderr=%q, want the guard's block", stdout, stderr)
 	}
 }
 

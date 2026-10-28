@@ -15,7 +15,7 @@ import (
 // the same dynamic values still fail closed when the program has an
 // unproved file or command effect.
 func TestR104Loop1DynamicOperandWriteProof(t *testing.T) {
-	skipNativeWindowsHomeGrammar(t)
+	skipPOSIXGrammarOnWindows(t)
 	home := t.TempDir()
 	cwd := filepath.Join(home, "project")
 	if err := os.MkdirAll(filepath.Join(home, ".ssh"), 0o700); err != nil {

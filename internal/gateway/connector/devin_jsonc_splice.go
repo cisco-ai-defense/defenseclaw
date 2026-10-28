@@ -17,17 +17,23 @@ import (
 // json.MarshalIndent, which dropped the comments. ok is false when the
 // document cannot be edited in place (not a JSONC object, a duplicate key),
 // or when the edit would not decode to want; the caller then renders want.
+// An event that want no longer has is removed with its member, so teardown
+// keeps the operator's comments too. A leading UTF-8 BOM (Windows
+// PowerShell 5.1 writes one) is kept (GAP-1944).
 func spliceDevinProjectHooks(data []byte, events []string, want map[string]interface{}) ([]byte, bool) {
+	bom := []byte{0xEF, 0xBB, 0xBF}
+	hasBOM := bytes.HasPrefix(data, bom)
+	data = bytes.TrimPrefix(data, bom)
 	members, closing, ok := scanJSONCObjectMembers(data)
 	if !ok {
 		return nil, false
 	}
-	seen := map[string]jsoncMember{}
-	for _, member := range members {
+	seen := map[string]int{}
+	for index, member := range members {
 		if _, dup := seen[member.key]; dup {
 			return nil, false
 		}
-		seen[member.key] = member
+		seen[member.key] = index
 	}
 	type edit struct {
 		start, end int
@@ -35,23 +41,70 @@ func spliceDevinProjectHooks(data []byte, events []string, want map[string]inter
 	}
 	var edits []edit
 	var inserted [][]byte
+	removed := map[int]bool{}
 	for _, event := range events {
+		index, exists := seen[event]
+		if _, keep := want[event]; !keep {
+			if exists {
+				removed[index] = true
+			}
+			continue
+		}
 		value, err := json.MarshalIndent(want[event], "  ", "  ")
 		if err != nil {
 			return nil, false
 		}
-		if member, exists := seen[event]; exists {
+		if exists {
+			member := members[index]
 			edits = append(edits, edit{member.valueStart, member.valueEnd, value})
 			continue
 		}
 		key, _ := json.Marshal(event)
 		inserted = append(inserted, append(append(append([]byte("\n  "), key...), ": "...), value...))
 	}
+	// A removed member goes with the comma before it (the first member with
+	// the comma before the first member that stays). The comma and the
+	// member are cut apart, so a comment between them stays.
+	commaBefore := func(index int) int {
+		if at := skipJSONCSpace(data, members[index-1].valueEnd); at < len(data) && data[at] == ',' {
+			return at
+		}
+		return -1
+	}
+	for index := range members {
+		if !removed[index] {
+			continue
+		}
+		comma := index
+		if index == 0 {
+			for comma = 1; comma < len(members) && removed[comma]; comma++ {
+			}
+		}
+		start, end := members[index].keyStart, members[index].valueEnd
+		if comma < len(members) {
+			at := commaBefore(comma)
+			if at < 0 {
+				return nil, false
+			}
+			if comma == index && len(bytes.TrimSpace(data[at+1:start])) == 0 {
+				// Nothing but layout between the comma and the member.
+				edits = append(edits, edit{at, end, nil})
+				continue
+			}
+			edits = append(edits, edit{at, at + 1, nil})
+		}
+		start, end = wholeJSONCLines(data, start, end)
+		edits = append(edits, edit{start, end, nil})
+	}
 	// Members are edited in document order, whatever the event order.
 	sort.Slice(edits, func(a, b int) bool { return edits[a].start < edits[b].start })
 	var out bytes.Buffer
 	last := 0
 	for _, e := range edits {
+		if e.start < last {
+			// Two removals share a comma; render the whole file instead.
+			return nil, false
+		}
 		out.Write(data[last:e.start])
 		out.Write(e.text)
 		last = e.end
@@ -64,6 +117,9 @@ func spliceDevinProjectHooks(data []byte, events []string, want map[string]inter
 				// A trailing comma stays one: the new members follow it.
 				insertAt, comma = next+1, false
 			}
+		}
+		if insertAt < last {
+			return nil, false
 		}
 		out.Write(data[last:insertAt])
 		for i, member := range inserted {
@@ -89,6 +145,9 @@ func spliceDevinProjectHooks(data []byte, events []string, want map[string]inter
 	if decoder.Decode(&got) != nil || !reflect.DeepEqual(devinJSONPlain(got), devinJSONPlain(want)) {
 		return nil, false
 	}
+	if hasBOM {
+		spliced = append(append([]byte{}, bom...), spliced...)
+	}
 	return spliced, true
 }
 
@@ -107,8 +166,8 @@ func devinJSONPlain(v interface{}) interface{} {
 }
 
 type jsoncMember struct {
-	key                  string
-	valueStart, valueEnd int
+	key                            string
+	keyStart, valueStart, valueEnd int
 }
 
 // scanJSONCObjectMembers lists the members of the JSONC object data holds
@@ -138,6 +197,7 @@ func scanJSONCObjectMembers(data []byte) ([]jsoncMember, int, bool) {
 		if data[i] != '"' {
 			return nil, 0, false
 		}
+		keyStart := i
 		end := skipJSONCString(data, i)
 		if end < 0 {
 			return nil, 0, false
@@ -155,7 +215,7 @@ func scanJSONCObjectMembers(data []byte) ([]jsoncMember, int, bool) {
 		if valueEnd < 0 {
 			return nil, 0, false
 		}
-		members = append(members, jsoncMember{key: key, valueStart: start, valueEnd: valueEnd})
+		members = append(members, jsoncMember{key: key, keyStart: keyStart, valueStart: start, valueEnd: valueEnd})
 		i = skipJSONCSpace(data, valueEnd)
 		if i < len(data) && data[i] == ',' {
 			i++
@@ -163,6 +223,27 @@ func scanJSONCObjectMembers(data []byte) ([]jsoncMember, int, bool) {
 			return nil, 0, false
 		}
 	}
+}
+
+// wholeJSONCLines widens [start, end) to the lines it fills when only
+// spaces and tabs share those lines, so a removed member leaves no blank
+// line behind.
+func wholeJSONCLines(data []byte, start, end int) (int, int) {
+	from := start
+	for from > 0 && (data[from-1] == ' ' || data[from-1] == '\t') {
+		from--
+	}
+	if from > 0 && data[from-1] != '\n' {
+		return start, end
+	}
+	to := end
+	for to < len(data) && (data[to] == ' ' || data[to] == '\t' || data[to] == '\r') {
+		to++
+	}
+	if to >= len(data) || data[to] != '\n' {
+		return start, end
+	}
+	return from, to + 1
 }
 
 func skipJSONCSpace(data []byte, i int) int {

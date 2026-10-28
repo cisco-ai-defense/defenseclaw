@@ -291,7 +291,7 @@ func TestManagedStatusIdleReleaseKeepsGatewayAvailable(t *testing.T) {
 		Gateway: &sandboxapi.Gateway{Healthy: true, Driver: "docker"}, Managed: &sandboxapi.ManagedStatus{},
 		IngressAddr: f.d.api.SandboxIngressAddr(), EgressAddr: f.d.rt.egressAddr}
 	f.d.statusListenerAddresses(st)
-	if !st.Available || st.Reason != "" || st.IngressAddr != "" || st.EgressAddr != "" {
+	if !st.Available || st.Reason != "" || st.IngressAddr != "" || st.EgressAddr != "" || !st.ListenersProven {
 		t.Fatalf("healthy idle managed status = %+v", st)
 	}
 	active := 1
@@ -419,5 +419,33 @@ func TestManagedExplainCountsTheProjectsMCPServers(t *testing.T) {
 	// An explain of a sandbox already made is its registration's: no project read.
 	if ex, err := client.Explain(context.Background(), sandboxapi.ExplainRequest{Harness: "claudecode"}); err != nil || ex.Managed.MCPProjectCount != 0 {
 		t.Fatalf("explain without a project: %+v, %v", ex, err)
+	}
+}
+
+// A status whose managed explain the account's request limit refused says
+// so, apart from an unreachable gateway; neither is a denial (GAP-2203).
+func TestManagedStatusSaysTheRequestLimitRefusedThePolicyRead(t *testing.T) {
+	f := newSandboxDaemonFixture(t)
+	f.relay.explain = func(sandboxrelay.ExplainRequest) (sandboxapi.ManagedExplain, error) {
+		return sandboxapi.ManagedExplain{}, &sandboxrelay.Error{Status: http.StatusTooManyRequests, Reason: "rate_limited",
+			Message: "DefenseClaw is limiting the hook requests of this account; retry shortly"}
+	}
+	f.run(t)
+	client := sandboxapi.NewUnixClient(f.socket)
+	st, err := client.Status(context.Background())
+	if err != nil || st.Managed == nil {
+		t.Fatalf("status = %+v, %v", st, err)
+	}
+	if m := st.Managed; m.Allowed || len(m.DeniedHarnesses) != 0 || !m.PolicyLimited ||
+		!strings.Contains(m.PolicyUnread, "limiting the hook requests") {
+		t.Fatalf("limited managed status = %+v", m)
+	}
+	f.relay.explain = func(sandboxrelay.ExplainRequest) (sandboxapi.ManagedExplain, error) {
+		return sandboxapi.ManagedExplain{}, sandboxrelay.ErrGatewayUnreachable
+	}
+	st, err = client.Status(context.Background())
+	if err != nil || st.Managed == nil || st.Managed.Allowed || st.Managed.PolicyLimited ||
+		!strings.Contains(st.Managed.PolicyUnread, "not reachable") {
+		t.Fatalf("unreachable managed status = %+v, %v", st, err)
 	}
 }

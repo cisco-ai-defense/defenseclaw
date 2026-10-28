@@ -471,6 +471,7 @@ func New(opts Options) (*Manager, error) {
 	if err := m.loadRecords(); err != nil {
 		return nil, err
 	}
+	m.publishUnsyncedStops()
 	return m, nil
 }
 

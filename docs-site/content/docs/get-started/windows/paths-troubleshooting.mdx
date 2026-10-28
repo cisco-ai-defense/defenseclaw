@@ -75,9 +75,11 @@ Setup adds DefenseClaw's own marked entries to each agent's configuration and le
 
 The Amp and OpenCode plugin files carry a connector credential: never print or copy them. macOS and Linux paths are on each [connector page](/docs/connectors).
 
+Setup changes the Claude Code `settings.json` only as a regular file. If it is a symbolic link or junction, setup refuses, names the link and its target, and changes nothing. Replace the link with the file it points to, then run `defenseclaw setup claude-code --yes` again.
+
 ## Supported path overrides
 
-Claude Code, Codex, GitHub Copilot CLI, Hermes and OpenCode let you move their configuration folder with `CLAUDE_CONFIG_DIR`, `CODEX_HOME`, `COPILOT_HOME`, `HERMES_HOME` and `OPENCODE_CONFIG_DIR`. Set them to absolute native paths before you install DefenseClaw or set up the connector. Setup checks and remembers them and refuses a path through a symbolic link or junction. Amp, Antigravity, Cursor and Devin have no such variable.
+Claude Code, Codex, GitHub Copilot CLI, Hermes and OpenCode let you move their configuration folder with `CLAUDE_CONFIG_DIR`, `CODEX_HOME`, `COPILOT_HOME`, `HERMES_HOME` and `OPENCODE_CONFIG_DIR`. Set them to absolute native paths before you install DefenseClaw or set up the connector. Setup checks and remembers them and refuses a path through a symbolic link or junction. For Codex, `defenseclaw setup codex --no-restart` keeps the folder the running gateway already uses and says so when `CODEX_HOME` names another one; run it again without `--no-restart` to move. Amp, Antigravity, Cursor and Devin have no such variable.
 
 <Tabs items={['PowerShell', 'cmd']}>
   <Tab value="PowerShell">
@@ -239,7 +241,7 @@ Disabling stops only what the agent loads by that exact name (Codex `$skill` sel
 
 <Accordion title="Native OTLP authentication fails">
 
-**Fix.** Host Codex and Claude Code setups remove native OTLP settings and tokens because their exporters cannot verify the local listener. Run the connector's setup again, then restart the agent to drop settings already loaded by its process. Native OTLP remains available inside isolated OpenShell. Never print, copy or replace token files or OTLP headers by hand. Hermes and Amp have no native OTLP export; for Amp run `defenseclaw setup amp --yes` again and relaunch Amp. Omitting `--mode` keeps Amp's saved mode.
+**Fix.** Host Codex and Claude Code setups remove the native OTLP settings and tokens they can prove DefenseClaw wrote, because those exporters cannot verify the local listener. An exporter you set yourself stays. An earlier install's exporter whose token is gone also stays, because setup can no longer prove it is DefenseClaw's; delete its `OTEL_*` entries from `%USERPROFILE%\.claude\settings.json` or its `[otel]` table from `%USERPROFILE%\.codex\config.toml`. Run the connector's setup again, then restart the agent to drop settings already loaded by its process. Native OTLP remains available inside isolated OpenShell. Never print, copy or replace token files or OTLP headers by hand. Hermes and Amp have no native OTLP export; for Amp run `defenseclaw setup amp --yes` again and relaunch Amp. Omitting `--mode` keeps Amp's saved mode.
 
 **Check.** The doctor authentication row is `[PASS]`.
 

@@ -24,10 +24,14 @@ package cli
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
@@ -84,25 +88,40 @@ func accountHasRemovedConnectorFiles(home string) bool {
 	return false
 }
 
+// removedConnectorsLoggedName is the file in the account's data folder that
+// holds a digest of the leftovers each removed connector last logged. The
+// first job that finds a leftover always logs it, also when the teardown could
+// remove nothing (GAP-2016: an account whose only leftover is the copy 1.0.4
+// saved of an edited module); later jobs log only a change (GAP-1917). The
+// purge removes it with the data folder.
+const removedConnectorsLoggedName = "removed-connectors-logged.json"
+
 func removeRetiredConnectorsIn(ctx context.Context, home string, opts connector.SetupOpts) {
 	restore, err := connector.BindUserHomeDir(home)
 	if err != nil {
 		return
 	}
 	defer restore()
+	logged := readRemovedConnectorsLogged(opts.DataDir)
+	changedLog := false
 	noticed := false
 	for _, name := range []string{"openhands", "omnigent"} {
 		before, _ := connector.RemovedConnectorLeftovers(name, opts)
 		if len(before) == 0 {
+			if _, ok := logged[name]; ok {
+				delete(logged, name)
+				changedLog = true
+			}
 			continue
 		}
 		if retired, ok := connector.RetiredConnector(name); ok {
 			_ = retired.Teardown(ctx, opts)
 		}
 		left, _ := connector.RemovedConnectorLeftovers(name, opts)
-		if len(left) >= len(before) {
-			// Nothing changed since the run that logged these (a copy 1.0.4
-			// saved stays by design): log nothing again (GAP-1917).
+		digest := removedLeftoversDigest(left)
+		if removedLeftoversDigest(before) == digest && logged[name] == digest {
+			// Logged already and nothing changed since (a copy 1.0.4 saved
+			// stays by design): log nothing again (GAP-1917).
 			continue
 		}
 		if !noticed {
@@ -112,5 +131,77 @@ func removeRetiredConnectorsIn(ctx context.Context, home string, opts connector.
 		for _, item := range left {
 			fmt.Fprintf(enterpriseHookWorkerRemovedLog, "[enterprise-hooks] removed connector %s left %s: %s; to remove it: %s\n", name, item.Path, item.What, item.Step)
 		}
+		if len(left) == 0 {
+			delete(logged, name)
+		} else {
+			logged[name] = digest
+		}
+		changedLog = true
+	}
+	if changedLog {
+		writeRemovedConnectorsLogged(opts.DataDir, logged)
+	}
+}
+
+func removedLeftoversDigest(items []connector.RemovedLeftover) string {
+	if len(items) == 0 {
+		return ""
+	}
+	lines := make([]string, 0, len(items))
+	for _, item := range items {
+		lines = append(lines, item.Path+"\x00"+item.What)
+	}
+	sort.Strings(lines)
+	sum := sha256.Sum256([]byte(strings.Join(lines, "\n")))
+	return hex.EncodeToString(sum[:])
+}
+
+func readRemovedConnectorsLogged(dataDir string) map[string]string {
+	logged := map[string]string{}
+	if strings.TrimSpace(dataDir) == "" {
+		return logged
+	}
+	path := filepath.Join(dataDir, removedConnectorsLoggedName)
+	if info, err := os.Lstat(path); err != nil || !info.Mode().IsRegular() || info.Size() > 4096 {
+		return logged
+	}
+	data, err := os.ReadFile(path)
+	if err != nil || json.Unmarshal(data, &logged) != nil {
+		return map[string]string{}
+	}
+	return logged
+}
+
+// writeRemovedConnectorsLogged records what was logged. Best effort, and only
+// in a data folder that exists: when it cannot be written, a later job logs
+// the same leftovers again, which is the safe side.
+func writeRemovedConnectorsLogged(dataDir string, logged map[string]string) {
+	if strings.TrimSpace(dataDir) == "" {
+		return
+	}
+	if info, err := os.Lstat(dataDir); err != nil || !info.IsDir() {
+		return
+	}
+	path := filepath.Join(dataDir, removedConnectorsLoggedName)
+	if info, err := os.Lstat(path); err == nil && !info.Mode().IsRegular() {
+		return
+	}
+	if len(logged) == 0 {
+		_ = os.Remove(path)
+		return
+	}
+	data, err := json.Marshal(logged)
+	if err != nil {
+		return
+	}
+	tmp, err := os.CreateTemp(dataDir, "."+removedConnectorsLoggedName+".*")
+	if err != nil {
+		return
+	}
+	name := tmp.Name()
+	_, werr := tmp.Write(data)
+	cerr := tmp.Close()
+	if werr != nil || cerr != nil || os.Chmod(name, 0o600) != nil || os.Rename(name, path) != nil {
+		_ = os.Remove(name)
 	}
 }

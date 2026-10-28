@@ -776,3 +776,47 @@ func TestManagedEnrollmentIdentityRejectsStaleDeploymentWithSameSID(t *testing.T
 		t.Fatal("stale Codex gateway identity was accepted because the SID set matched")
 	}
 }
+
+// GAP-0929 review: a guardian notice of a row that carries only the SID
+// names the account as "user (SID)", like the other Windows notices, not by
+// the SID alone.
+func TestWindowsGuardianNoticeNamesTheAccountOfASIDOnlyRow(t *testing.T) {
+	current, err := user.Current()
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := enterpriseHookNoticeAccount(enterpriseHookReconcileRow{SID: current.Uid})
+	name := current.Username
+	if i := strings.LastIndex(name, `\`); i >= 0 {
+		name = name[i+1:]
+	}
+	if !strings.HasSuffix(got, " ("+current.Uid+")") || !strings.Contains(strings.ToLower(got), strings.ToLower(name)) {
+		t.Fatalf("notice account = %q, want the name of %s (%s)", got, current.Username, current.Uid)
+	}
+	if got := enterpriseHookNoticeAccount(enterpriseHookReconcileRow{User: "dcw-std1", SID: current.Uid}); got != "dcw-std1 ("+current.Uid+")" {
+		t.Fatalf("named row = %q", got)
+	}
+}
+
+// GAP-2290: a failing or drifted SID-only target is named "user (SID)" in the
+// coverage and authorization messages; an unresolvable SID stays bare.
+func TestWindowsTargetIssueNamesTheAccountOfASIDOnlyRow(t *testing.T) {
+	current, err := user.Current()
+	if err != nil {
+		t.Fatal(err)
+	}
+	stale := enterpriseHookReconcileRow{SID: current.Uid, Connector: "codex", OK: true}
+	issues := strings.Join(compareEnterpriseHookProtectedTargetSets(nil, []enterpriseHookReconcileRow{stale}, "authorization"), "\n")
+	want := "protected authorization contains extra or stale target codex@" + enterpriseHookWindowsAccountLabel(stale)
+	if !strings.Contains(issues, want) || !strings.HasSuffix(want, " ("+current.Uid+")") {
+		t.Fatalf("issues = %q, want %q", issues, want)
+	}
+	failed := enterpriseHookReconcileRow{SID: current.Uid, Connector: "claudecode", Error: "publish managed policy: access denied"}
+	if got := enterpriseHookGuardianFailureIssue(failed); !strings.Contains(got, "claudecode@"+enterpriseHookWindowsAccountLabel(failed)+": publish managed policy") {
+		t.Fatalf("failure issue = %q", got)
+	}
+	unknown := enterpriseHookReconcileRow{SID: "S-1-5-21-111-222-333-1001", Connector: "codex"}
+	if got := enterpriseHookTargetIssueLabel(unknown); got != "codex@S-1-5-21-111-222-333-1001" {
+		t.Fatalf("unresolvable SID label = %q", got)
+	}
+}

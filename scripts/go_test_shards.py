@@ -24,7 +24,9 @@ recorded time still runs and weighs the recorded mean of the package's
 tests under two seconds ("*"), or the median recorded time. Without
 timings a file weighs its source size. --check prints the shard weights and
 fails unless every discovered test (test mode) or package (package mode) is
-in exactly one shard.
+in exactly one shard. --match (test mode) keeps only the tests whose name a
+`go test -run` pattern without "/" selects (an unanchored search), so a job
+can shard a package's filtered subset.
 """
 
 from __future__ import annotations
@@ -50,6 +52,16 @@ def discover_test_files(package_dir: Path) -> list[tuple[Path, tuple[str, ...]]]
         if names:
             discovered.append((path, names))
     return discovered
+
+
+def match_test_files(files: list[tuple[Path, tuple[str, ...]]], pattern: str) -> list[tuple[Path, tuple[str, ...]]]:
+    """Keep the tests `go test -run pattern` runs (a pattern without "/"
+    selects top-level names by unanchored search); drop files left empty."""
+    if "/" in pattern:
+        raise ValueError("--match takes a top-level -run pattern (no '/')")
+    selector = re.compile(pattern)
+    kept = [(path, tuple(name for name in names if selector.search(name))) for path, names in files]
+    return [(path, names) for path, names in kept if names]
 
 
 def load_timings(path: Path | None) -> dict:
@@ -249,6 +261,7 @@ def main() -> int:
     parser.add_argument("--shard-index", type=int)
     parser.add_argument("--timings", type=Path, help="recorded seconds (scripts/test-timings/*.json)")
     parser.add_argument("--check", action="store_true", help="print every shard and verify the exact cover")
+    parser.add_argument("--match", help="test mode: keep only the tests this go test -run pattern selects")
     parser.add_argument("command", nargs=argparse.REMAINDER)
     args = parser.parse_args()
     command = args.command[1:] if args.command[:1] == ["--"] else args.command
@@ -258,9 +271,13 @@ def main() -> int:
         if args.packages_file is not None:
             if command:
                 parser.error("package mode does not run a command")
+            if args.match is not None:
+                parser.error("--match is for test mode")
             shards, expected, problems = _package_mode(args, timings)
         else:
             files = discover_test_files(args.package_dir)
+            if args.match is not None:
+                files = match_test_files(files, args.match)
             package_dir = args.package_dir.resolve()
             key = package_dir.relative_to(ROOT).as_posix() if package_dir.is_relative_to(ROOT) else ""
             shards = partition_test_files(files, args.shard_count, timings.get("tests", {}).get(key))

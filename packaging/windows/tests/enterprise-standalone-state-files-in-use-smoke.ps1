@@ -284,6 +284,50 @@ $stream.Dispose()
                 Microsoft.PowerShell.Management\Set-Item -Path function:script:Initialize-DefenseClawNativeSecurity -Value $savedNative
             }
 
+            # GAP-2265: a holder Restart Manager reported that has exited
+            # by the time the process list is read holds nothing. Under
+            # agent load the hook's own short-lived processes were named
+            # "a program" or "DefenseClaw Agent Hook" that way and deferred
+            # every upgrade with hook_in_use; a running holder outside the
+            # install folder is still named.
+            if (-not ('DcsfListedRestartManager' -as [type])) {
+                Microsoft.PowerShell.Utility\Add-Type -TypeDefinition @'
+public class DcsfListedHolder { public int ProcessId { get; set; } public string ServiceName { get; set; } public string AppName { get; set; } public long StartFileTime { get; set; } }
+public static class DcsfListedRestartManager {
+    public static int[] Ids = new int[0];
+    public static object[] GetFileHolders(string[] paths) {
+        object[] found = new object[Ids.Length];
+        for (int i = 0; i < Ids.Length; i++) { found[i] = new DcsfListedHolder { ProcessId = Ids[i], ServiceName = "", AppName = "DefenseClaw Agent Hook", StartFileTime = i }; }
+        return found;
+    }
+}
+'@
+            }
+            $exited = Microsoft.PowerShell.Management\Start-Process -FilePath $engine -ArgumentList @('-NoProfile', '-Command', 'exit 0') -WindowStyle Hidden -PassThru
+            [void]$exited.WaitForExit(60000)
+            $running = Start-TestReader ([IO.Path]::Combine($layout.RuntimeDirectory, 'audit.db')) 120000
+            $savedNative = ${function:Initialize-DefenseClawNativeSecurity}
+            try {
+                function script:Initialize-DefenseClawNativeSecurity { return [DcsfListedRestartManager] }
+                $self = [Collections.Generic.HashSet[int]]::new()
+                [void]$self.Add([int]$PID)
+                [DcsfListedRestartManager]::Ids = @([int]$exited.Id)
+                $seen = Get-DefenseClawStateFileHolders -Layout $layout -Paths @([IO.Path]::Combine($layout.RuntimeDirectory, 'audit.db')) -Excluded $self
+                if ($seen.Count -ne 0) {
+                    $failures.Add("an exited holder (pid $($exited.Id)) still counted: $(@($seen.Values | Microsoft.PowerShell.Core\ForEach-Object { $_.Name }) -join ', ')")
+                }
+                [DcsfListedRestartManager]::Ids = @([int]$exited.Id, [int]$running.Id)
+                $seen = Get-DefenseClawStateFileHolders -Layout $layout -Paths @([IO.Path]::Combine($layout.RuntimeDirectory, 'audit.db')) -Excluded $self
+                $named = @($seen.Values | Microsoft.PowerShell.Core\Where-Object { $_.Id -eq [int]$running.Id })
+                if ($seen.Count -ne 1 -or $named.Count -ne 1 -or $named[0].Name -ne $engineName) {
+                    $failures.Add("a running holder beside an exited one was not named alone: $(@($seen.Values | Microsoft.PowerShell.Core\ForEach-Object { '{0}={1}' -f $_.Id, $_.Name }) -join ', ')")
+                }
+            }
+            finally {
+                Microsoft.PowerShell.Management\Set-Item -Path function:script:Initialize-DefenseClawNativeSecurity -Value $savedNative
+                Stop-TestReader $running
+            }
+
             # The Secure Client profile has no data-file check.
             $reader = Start-TestReader ([IO.Path]::Combine($layout.RuntimeDirectory, 'audit.db')) 120000
             Set-DefenseClawEnterpriseProfile -EnterpriseProfile SecureClient

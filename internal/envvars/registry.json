@@ -309,6 +309,26 @@
       "since": "1.0.3"
     },
     {
+      "name": "DEFENSECLAW_TEST_SIDECAR_HOOK_PRIORITY",
+      "category": "test_fixture",
+      "purpose": "Marks the child process of the Windows gateway priority-class test (GAP-0050), so the class checks run in a child and the test binary keeps its own priority class.",
+      "default": "unset",
+      "accepted_values": [
+        "1",
+        "unset"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "managed": "ignore",
+      "consumers": [
+        {
+          "location": "internal/cli/sidecar_priority_windows_test.go",
+          "description": "TestSidecarAnswersAtTheHookPriorityClass re-runs itself with the variable set to 1 and checks the class the gateway answers at"
+        }
+      ],
+      "since": "1.0.5"
+    },
+    {
       "name": "DEFENSECLAW_TEST_WINDOWS_LIFECYCLE_PRIORITY",
       "category": "test_fixture",
       "purpose": "Marks the child process of the Windows lifecycle-priority test that reports the priority class it inherited from a lifecycle run.",
@@ -2342,7 +2362,7 @@
     {
       "name": "DEFENSECLAW_HOOK_MAX_BODY",
       "category": "hook_internal",
-      "purpose": "Request-body cap (in bytes) for hooks. Default 1048576 (1 MiB).",
+      "purpose": "Request-body cap (in bytes) for hooks; a per-user hook sends at most 921600 bytes (900 KiB) of a call to its own gateway and treats a larger call as oversized input. Default 1048576 (1 MiB).",
       "default": "1048576",
       "accepted_values": [
         "positive integer"

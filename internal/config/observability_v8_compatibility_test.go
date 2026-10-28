@@ -236,9 +236,10 @@ func TestObservabilityV8EffectivePlanPublishesCompatibilityAndReloadApplicabilit
 			t.Fatalf("destination %q reload applicability = %+v", name, destination.ReloadApplicability)
 		}
 	}
+	// A same-address Prometheus reload joins the held socket (GAP-2072).
 	prometheusReload := assertDestination("prometheus").ReloadApplicability
-	if prometheusReload.Policy != ObservabilityV8RestartRequired ||
-		prometheusReload.Transport != ObservabilityV8RestartRequired {
+	if prometheusReload.Policy != ObservabilityV8LiveReloadable ||
+		prometheusReload.Transport != ObservabilityV8LiveReloadable {
 		t.Fatalf("Prometheus reload applicability = %+v", prometheusReload)
 	}
 	localProfile := assertDestination(observability.RuntimeLocalObservabilityDestination).CompatibilityProfiles

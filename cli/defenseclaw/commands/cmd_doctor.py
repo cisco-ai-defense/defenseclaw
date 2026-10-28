@@ -7059,6 +7059,13 @@ _HERMES_PROBE_UNIX_CONTAINMENT = (
 # The supervisor's exit code when it cannot establish that nothing is left;
 # any other code is the probe's own (124 when Doctor ended it).
 _HERMES_PROBE_NOT_CONTAINED = 125
+# The supervisor's exit code when the kernel or a seccomp filter refused the
+# probe's user/PID namespace, so the registered command never ran (GAP-1945:
+# a container seccomp profile, not only the two sysctls). A probe that ran
+# never ends with it: the supervisor returns it only before the namespace,
+# and reports a hook's own exit 123 as 1.
+_HERMES_PROBE_NAMESPACE_REFUSED = 123
+_HERMES_PROOF_NAMESPACE_REFUSED = "this host refuses the user namespace the probe needs (a seccomp profile or sandbox)"
 _HERMES_PROBE_SUPERVISOR = r"""
 import ctypes, os, select, signal, subprocess, sys, time
 
@@ -7146,7 +7153,9 @@ def namespace(libc, flags, ready, mapped, argv):
     if libc.prctl(PR_SET_PDEATHSIG, signal.SIGKILL, 0, 0, 0) != 0:
         return 125
     if libc.unshare(flags) != 0:
-        return 125
+        # EPERM (a seccomp profile, a sandbox) or ENOSPC/EUSERS (limits):
+        # this host refuses the namespace. Anything else fails closed.
+        return 123 if ctypes.get_errno() in (1, 28, 87) else 125
     os.write(ready, b"u")
     if os.read(mapped, 1) != b"m":
         return 125
@@ -7222,6 +7231,8 @@ def main():
             write_maps(pid, caps)
         except OSError:
             contained = False
+    # Ended by a signal (not by the end() below for a refused namespace).
+    signalled = state["ended"]
     if contained:
         os.write(mapped_w, b"m")
     else:
@@ -7231,11 +7242,16 @@ def main():
         code = status(os.waitpid(pid, 0)[1])
     except ChildProcessError:
         code = 125
-    if not reap_all(budget) or not contained:
+    reaped = reap_all(budget)
+    if reaped and not contained and code == 123 and not signalled:
+        return 123
+    if not reaped or not contained:
         return 125
     if state["ended"]:
         return 124
-    return code
+    # The hook ran: its own 123 is a plain failure, never a refused
+    # namespace (GAP-1945).
+    return 1 if code == 123 else code
 
 
 sys.exit(main())
@@ -8235,6 +8251,60 @@ def _codex_otel_unchecked_value(otel, product_token: str = "") -> str:
     return ""
 
 
+def _codex_otel_marked_kept(otel, api_port: int, product_token: str = "") -> list[tuple[str, str]]:
+    """Name Codex exporters that look like an earlier DefenseClaw render but are kept.
+
+    An exporter with both of DefenseClaw's markers (x-defenseclaw-source =
+    codex, x-defenseclaw-client = codex-otel/...) and a bearer, sent to a
+    loopback port other than this gateway's, with no credential this install
+    can name, is kept by setup as the operator's (the ownership rule never
+    goes by markers, GAP-1511). It is often a pre-setup copy an earlier
+    release saved and setup put back (GAP-1610), so Doctor warns with the
+    fields and the manual step (LEAD DECISION 05:36, option (b)); it never
+    fails or removes it. Returns (field, endpoint) pairs.
+    """
+    if not isinstance(otel, dict):
+        return []
+    known = [product_token] if product_token else []
+    kept = []
+    for key in sorted(otel, key=str):
+        table = otel.get(key)
+        if not isinstance(table, dict) or _otel_carries_product_credential(table, known):
+            continue
+        for kind in ("otlp-http", "otlp-grpc"):
+            exporter = table.get(kind)
+            if not isinstance(exporter, dict):
+                continue
+            raw_headers = exporter.get("headers")
+            headers = (
+                {str(k).strip().lower(): str(v).strip() for k, v in raw_headers.items() if isinstance(v, str)}
+                if isinstance(raw_headers, dict)
+                else {}
+            )
+            if headers.get("x-defenseclaw-source") != "codex" or not headers.get("x-defenseclaw-client", "").startswith(
+                "codex-otel/"
+            ):
+                continue
+            scheme, _, credential = headers.get("authorization", "").partition(" ")
+            if scheme.lower() != "bearer" or len(credential.strip()) < 8:
+                continue
+            endpoint = exporter.get("endpoint")
+            try:
+                parsed = urllib.parse.urlsplit(endpoint) if isinstance(endpoint, str) else None
+                port = parsed.port if parsed is not None else None
+            except ValueError:
+                parsed, port = None, None
+            if (
+                parsed is None
+                or (parsed.hostname or "") not in ("127.0.0.1", "localhost", "::1")
+                or port is None
+                or port == api_port
+            ):
+                continue
+            kept.append((f"otel.{key}", f"{parsed.hostname}:{port}"))
+    return kept
+
+
 def _codex_scoped_otlp_token(cfg) -> str:
     """The scoped Codex OTLP credential this install issued, or ""."""
     data_dir = str(getattr(cfg, "data_dir", "") or "")
@@ -8374,6 +8444,21 @@ def _check_codex_otel_alignment(cfg, r: _DoctorResult) -> None:
                 "so DefenseClaw kept it",
                 r=r,
                 remediation="if it is a DefenseClaw token, remove it; otherwise no action is needed",
+            )
+        marked = _codex_otel_marked_kept(otel, _gateway_api_port(cfg), _codex_scoped_otlp_token(cfg))
+        if marked:
+            fields = ", ".join(field for field, _ in marked)
+            targets = ", ".join(sorted({target for _, target in marked}))
+            _emit(
+                "warn",
+                "Codex OTel ownership",
+                f"config.toml {fields} carries DefenseClaw's x-defenseclaw-source and "
+                "x-defenseclaw-client headers and a bearer, but no credential this install "
+                "recorded, so setup keeps it as yours; Codex sends its prompt telemetry and "
+                f"that bearer to {targets}, which DefenseClaw does not serve",
+                r=r,
+                remediation=f"if you did not add it, delete the {fields} tables from {config_path} "
+                "(an earlier DefenseClaw setup or a copied config may have left them)",
             )
 
     try:
@@ -9845,10 +9930,10 @@ def _hermes_python_argv_verdict(args, name) -> bool | None:
     return None if hermes_python or "/hermes_cli/" in lowered or "/hermes-agent/" in lowered else False
 
 
-def _hermes_proc_argv(pid: str) -> tuple[str, ...] | None:
+def _hermes_proc_argv(pid: str, proc_root: str = "/proc") -> tuple[str, ...] | None:
     """Read the complete argv when procps splits a multiline ``-c`` value."""
     try:
-        with open(f"/proc/{pid}/cmdline", "rb") as stream:
+        with open(f"{proc_root}/{pid}/cmdline", "rb") as stream:
             data = stream.read()
     except OSError:
         return None
@@ -9875,9 +9960,12 @@ def _hermes_host_running() -> bool | None:
             check=False,
         )
     except (FileNotFoundError, subprocess.SubprocessError, OSError):
-        return None
+        return _hermes_host_running_from_proc()
     if proc.returncode != 0:
-        return None
+        # ps fails where /proc hides its system files (hidepid=2,subset=pid
+        # has no /proc/stat): this account's own processes are still there
+        # (GAP-0015).
+        return _hermes_host_running_from_proc()
     uid = str(os.getuid())
     own = {str(os.getpid()), str(os.getppid())}
     wrapped = False
@@ -9893,6 +9981,48 @@ def _hermes_host_running() -> bool | None:
             complete = _hermes_proc_argv(fields[0])
             if complete:
                 verdict = _hermes_argv_verdict(complete)
+        if verdict is True:
+            return True
+        if verdict is None:
+            wrapped = True
+    return None if wrapped else False
+
+
+def _hermes_host_running_from_proc(proc_root: str = "/proc") -> bool | None:
+    """:func:`_hermes_host_running` from /proc when ps cannot list processes.
+
+    Reads each process's real uid from ``status`` and its argv from
+    ``cmdline``; only processes of this account count. A /proc that cannot be
+    listed, or that does not show this process itself, leaves it unknown.
+    """
+    try:
+        entries = os.listdir(proc_root)
+    except OSError:
+        return None
+    me = str(os.getpid())
+    if me not in entries:
+        return None
+    uid = str(os.getuid())
+    own = {me, str(os.getppid())}
+    wrapped = False
+    for pid in entries:
+        if not pid.isdigit() or pid in own:
+            continue
+        try:
+            with open(f"{proc_root}/{pid}/status", encoding="utf-8", errors="replace") as stream:
+                status = stream.read()
+        except OSError:
+            continue
+        real = next(
+            (line.split()[1] for line in status.splitlines() if line.startswith("Uid:") and len(line.split()) > 1),
+            None,
+        )
+        if real != uid:
+            continue
+        argv = _hermes_proc_argv(pid, proc_root)
+        if not argv:
+            continue
+        verdict = _hermes_argv_verdict(list(argv))
         if verdict is True:
             return True
         if verdict is None:
@@ -10305,19 +10435,20 @@ def _check_hook_health(cfg, connector: str, r: _DoctorResult) -> None:
                 _check_opencode_later_plugins(cfg, path, r)
             elif connector == "hermes":
                 problem = _hermes_registered_execution_problem(cfg, path)
-                if problem:
+                refused = problem == _HERMES_PROOF_NAMESPACE_REFUSED
+                if problem and not refused:
                     _emit("fail", label, problem, r=r,
                           remediation="run 'defenseclaw setup hermes --yes --restart', then rerun 'defenseclaw doctor'")
                     return
-                if unavailable := _hermes_execution_proof_unavailable():
+                if unavailable := (problem if refused else _hermes_execution_proof_unavailable()):
                     _emit(
                         "warn",
                         label,
                         f"registered at {path}; {_HERMES_PROOF_UNAVAILABLE}: {unavailable}, so the "
                         "registered hook is read back without running it",
                         r=r,
-                        remediation="enable unprivileged user namespaces (sysctl user.max_user_namespaces) "
-                        "for the execution proof",
+                        remediation="enable unprivileged user namespaces (sysctl user.max_user_namespaces, "
+                        "or the container seccomp profile) for the execution proof",
                     )
                     return
                 if r.list_processes and _hermes_host_running() is False:
@@ -10412,6 +10543,9 @@ def _hermes_registered_execution_problem(cfg, config_path: str) -> str:
     if sys.platform == "darwin":
         probe_argv.append("--forkless")
     returncode, stdout = _run_hermes_execution_probe(probe_argv)
+    if returncode == _HERMES_PROBE_NAMESPACE_REFUSED and _HERMES_PROBE_UNIX_CONTAINMENT == "pidns":
+        # The probe never ran; the sealed registration was read back above.
+        return _HERMES_PROOF_NAMESPACE_REFUSED
     if returncode is None:
         return "Hermes registered hook execution probe could not run"
     if returncode != 0 or stdout != _HERMES_EXECUTION_PROBE_RESPONSE:

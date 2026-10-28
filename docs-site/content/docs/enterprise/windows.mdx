@@ -891,7 +891,10 @@ computer without DefenseClaw, uninstall succeeds and changes nothing.
   (including `foreign-hooks-backup`; copy it first if the account wants those
   hooks back), its `.defenseclaw.rollback-<random>` copies, the DefenseClaw
   launchers and binaries in `%USERPROFILE%\.local\bin`, the Claude Code drop-ins,
-  `machine-policy.json`, the runtime selectors and the lifecycle lock. It needs
+  `machine-policy.json`, the runtime selectors and the lifecycle lock. An account
+  without an active session keeps its `.defenseclaw` for the registrations that
+  stay (`user_registrations_pending` and `per_user_state_remaining` warnings; the
+  purge exits `0`). It needs
   LocalSystem: otherwise it removes the machine deployment but none of these
   folders, fails with a nonzero exit and names each account
   (`per_user_state_remaining`). Run Setup `/ensure` and then `/uninstall PURGE=1`

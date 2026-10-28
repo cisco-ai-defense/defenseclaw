@@ -1480,6 +1480,24 @@ def _edited_hook_problem(connector: str, path: Path, runs: str, current: str) ->
     )
 
 
+def _independent_handler_problem(connector: str, path: Path, runs: str, current: str) -> HookProblem:
+    """Another entry on a bound event of DefenseClaw's own Copilot file.
+
+    Setup replaces DefenseClaw's own entries there, but it cannot restore the
+    event without dropping a handler that is not DefenseClaw's: it refuses
+    that event and the gateway does not start the connector
+    (hook_only.go copilotIndependentHandler, GAP-2372). The repair names the
+    move first.
+    """
+
+    return HookProblem(
+        f"{_EDITED_HOOK_PREFIX}{connector}: {path} runs {runs}, not the hook script setup "
+        f"registered ({current}), so that entry fails or runs unguarded",
+        f"move a handler that is not DefenseClaw's to another file in {path.parent} (Copilot reads every hook "
+        f"file there), then run `{setup_command(connector)} --yes`; it replaces DefenseClaw's edited entries",
+    )
+
+
 def edited_hook_problems(cfg: Any, connector: str) -> list[str]:
     """Report DefenseClaw hook entries whose script path or name was edited.
 
@@ -1516,6 +1534,8 @@ def edited_hook_problems(cfg: Any, connector: str) -> list[str]:
             # Setup's command with a type, timeout, matcher or enabled flag
             # that leaves the tool call unchecked: that check names the field.
             unguarded = [] if command_changed else unguarded_tool_call_hooks(cfg, connector)
+            if not unguarded and connector == "copilot" and command_changed:
+                return [_independent_handler_problem(connector, path, repr(runs.strip()), current)]
             return unguarded or [_edited_hook_problem(connector, path, repr(runs.strip()), current)]
         for command in _hook_command_strings(document):
             word = edited_hook_script(command, script_name)

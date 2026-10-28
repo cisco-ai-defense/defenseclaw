@@ -784,9 +784,6 @@ func (a *APIServer) inspectTrustedToolPolicyCtx(
 			observation.ParserUncertaintyCount,
 		)
 	}
-	ruleFindings := dispatchTrustedAction(ctx, action)
-	ruleFindings = provedHighWriteFindings(ctx, action, ruleFindings)
-
 	// CodeGuard: scan file content for any file-write tool.
 	//
 	// the legacy gate matched only the canonical
@@ -794,12 +791,19 @@ func (a *APIServer) inspectTrustedToolPolicyCtx(
 	// emit aliases like Claude Code "Write" / "Edit" / "MultiEdit",
 	// Codex "patch", and Cursor "applyDiff". Those bypassed CodeGuard
 	// entirely while carrying the same code payload. We accept any
-	// recognised file-write alias (case-insensitive).
+	// recognised file-write alias (case-insensitive). The scan runs beside
+	// the rule dispatch (startCodeGuardOnArgs, GAP-2284).
 	tool := strings.ToLower(toolName)
 	isWriteTool := isWriteToolName(tool)
-	var cgScan codeGuardArgsScan
+	var waitCodeGuard func() codeGuardArgsScan
 	if isWriteTool {
-		cgScan = a.runCodeGuardOnArgsWithProvenance(ctx, req)
+		waitCodeGuard = a.startCodeGuardOnArgs(ctx, req)
+	}
+	ruleFindings := inspectDispatchTrustedAction(ctx, action)
+	ruleFindings = provedHighWriteFindings(ctx, action, ruleFindings)
+	var cgScan codeGuardArgsScan
+	if waitCodeGuard != nil {
+		cgScan = waitCodeGuard()
 	}
 	cgFindings := codeGuardRuleFindings(cgScan, true, action.EnforcementCapable)
 
@@ -1886,7 +1890,14 @@ func (a *APIServer) handleInspectTool(w http.ResponseWriter, r *http.Request) {
 	// path returns above and deliberately records nothing because installed
 	// hooks fail closed on an unreachable gateway.
 	a.recordManagedAIDFailOpenForSelectedGenericResult(r.Context(), verdict)
-	a.writeInspectVerdict(w, r, "/api/v1/inspect/tool", req.Tool, inspectToolResponseEvidence(verdict, req.Args))
+	response := verdict
+	// Secure Client answers stay byte-identical to origin/main (issue
+	// #1092, GAP-2137): the GAP-1602 evidence fill is for the other
+	// profiles only.
+	if cfg := a.decisionConfig(r.Context()); cfg == nil || !cfg.SecureClientIntegration() {
+		response = inspectToolResponseEvidence(verdict, req.Args)
+	}
+	a.writeInspectVerdict(w, r, "/api/v1/inspect/tool", req.Tool, response)
 }
 
 // inspectToolResponseEvidence gives each finding of the response that names

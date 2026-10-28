@@ -17,6 +17,8 @@ import (
 	"runtime"
 	"strconv"
 	"syscall"
+
+	"github.com/defenseclaw/defenseclaw/internal/unixidentity"
 )
 
 // LocalAccountsStamp is the size, modification time and inode of
@@ -51,7 +53,7 @@ var LocalAccountsStamp = func() string {
 // earlier holder's home proof as current until the guardian's next pass
 // (GAP-2028). A path that does not exist adds nothing, so the stamp stays the
 // /etc/passwd one where none of them is used. Tests replace it.
-var LocalAccountDatabases = []string{"/etc/userdb", "/run/userdb", "/usr/lib/userdb", "/usr/lib/passwd", "/lib/passwd"}
+var LocalAccountDatabases = append(append([]string{}, unixidentity.UserdbRecordDirs...), unixidentity.AltfilesPasswdFiles...)
 
 // localAccountDatabaseStamp is the modification time, size and inode of
 // path; "" when it cannot be read.

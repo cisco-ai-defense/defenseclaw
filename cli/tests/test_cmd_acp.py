@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 import os
@@ -2088,6 +2089,64 @@ def test_editor_owned_keys_keep_the_entry_defenseclaws(tmp_path, monkeypatch):
             removed = CliRunner().invoke(acp_cmd, ["remove", "--client", "zed", "--agent", "kiro"], obj=app)
             assert removed.exit_code == 0 and "Left editor entry" not in removed.output, (name, removed.output)
             assert json.loads(settings.read_text())["agent_servers"] == {"Foreign": foreign}, name
+    finally:
+        cleanup_app(app, db_path, data_dir)
+
+
+def test_a_direct_entry_that_starts_the_pinned_agent_keeps_verify_red(tmp_path, monkeypatch):
+    """A direct entry that starts the pinned agent file is a bypass of the pair (GAP-0496).
+
+    The agent is recognised by the file the lock pins, not only by the catalog
+    command: a renamed agent file, a flag before the ACP subcommand or a link
+    to the file still starts the agent without the guard. Setup leaves the
+    entry as it is; verify and status stay red until it is deleted.
+    """
+    _isolate_client_config(monkeypatch, tmp_path)
+    app, data_dir, db_path = _app(tmp_path)
+    settings = _zed_settings(tmp_path)
+    settings.parent.mkdir(parents=True)
+    guard = _binary(tmp_path / "defenseclaw-acp")
+    agent = _binary(tmp_path / "oc-agent")
+    link = tmp_path / "oc-link"
+    setup_args = ["setup", "--client", "zed", "--agent", "opencode", "--guard-binary", guard, "--agent-binary", agent]
+    try:
+        settings.write_text(json.dumps({"agent_servers": {"Foreign": {"command": "other"}}}))
+        assert CliRunner().invoke(acp_cmd, setup_args, obj=app).exit_code == 0
+        assert CliRunner().invoke(acp_cmd, ["verify"], obj=app).exit_code == 0
+        clean = json.loads(settings.read_text())
+        variants = {
+            "renamed": {"command": agent, "args": ["acp"]},
+            "flag first": {"command": agent, "args": ["--print-logs", "acp"]},
+        }
+        if os.name != "nt":
+            link.symlink_to(agent)
+            variants["link"] = {"command": str(link), "args": ["acp"]}
+        for label, direct in variants.items():
+            document = copy.deepcopy(clean)
+            document["agent_servers"]["My OpenCode"] = direct
+            settings.write_text(json.dumps(document))
+
+            verified = CliRunner().invoke(acp_cmd, ["verify"], obj=app)
+            assert verified.exit_code != 0, (label, verified.output)
+            assert "'My OpenCode' is not DefenseClaw's: it launches opencode without the DefenseClaw guard" in (
+                verified.output
+            ), (label, verified.output)
+            status = json.loads(CliRunner().invoke(acp_cmd, ["status", "--json"], obj=app).output)
+            assert status["bindings"]["zed/opencode"]["healthy"] is False, label
+
+            again = CliRunner().invoke(acp_cmd, setup_args, obj=app)
+            assert again.exit_code == 0, (label, again.output)
+            assert json.loads(settings.read_text())["agent_servers"]["My OpenCode"] == direct, label
+            assert "Left editor entry 'My OpenCode'" in again.output, (label, again.output)
+            assert CliRunner().invoke(acp_cmd, ["verify"], obj=app).exit_code != 0, label
+
+        # Control: another agent's file and the entry deleted are not this pair's bypass.
+        document = copy.deepcopy(clean)
+        document["agent_servers"]["Other agent"] = {"command": _binary(tmp_path / "other-agent"), "args": ["acp"]}
+        settings.write_text(json.dumps(document))
+        assert CliRunner().invoke(acp_cmd, ["verify"], obj=app).exit_code == 0
+        settings.write_text(json.dumps(clean))
+        assert CliRunner().invoke(acp_cmd, ["verify"], obj=app).exit_code == 0
     finally:
         cleanup_app(app, db_path, data_dir)
 
