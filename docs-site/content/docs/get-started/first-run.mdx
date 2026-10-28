@@ -21,7 +21,7 @@ On a terminal, `init` runs local agent discovery, prints the **Agent discovery**
 4. Only when you ticked an agent in step 3: **Require human approval for risky actions?** (default no; yes also asks the minimum severity), asked once and shared by every action agent, then **Select action connector(s) for LLM judge** (leave it clear for rules-only scanning; a ticked agent asks for the judge LLM settings).
 5. **Start gateway after setup?** (default yes), then **Run targeted readiness checks?** (default yes).
 
-`init` does not ask for an outage mode and saves none: while the gateway is not running, the default and permissive policies let a call run with a warning and strict blocks it. Pass `--fail-mode` to save a choice; a saved choice wins over the policy.
+`init` does not ask for an outage mode and saves none: while the gateway is not running, the default and permissive policies let a call run with a warning and strict blocks it. Pass `--fail-mode` to save a choice; a saved choice wins over the policy, also over `use-pack strict`. When a saved `open` decides, the `Next` lines say `While the gateway is not running, hooks let calls run with a warning (your saved fail mode; to block them: ...)` and name the command that saves `closed` instead. A later `init` run keeps the fail modes already saved for your connectors.
 
 Proxy connectors are detected but left out of the observe-all set, because they own the single LLM proxy port. Use `defenseclaw setup <proxy>` for them.
 
