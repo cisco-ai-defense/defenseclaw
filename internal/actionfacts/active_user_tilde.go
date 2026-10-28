@@ -164,22 +164,35 @@ func MSYSDrivePath(value string) string {
 // path (C:/...), when activeHome is a Windows drive home: Git Bash, the
 // shell Claude Code and other agents run there, maps those mounts to the
 // drive for every program, so the twin names the same files (GAP-2375).
-// Only an unquoted or single-quoted literal at the start of a word, or
-// right after a literal key ending at "=" (of=/c/...), is respelled. ok is false when there is no such word, the home is not a
-// drive home or the command does not parse.
+// The mount is read from the literal text of the word, quotes removed
+// (/c/x, '/c/x', "/c/x", '/c'/x), at its start or right after a literal
+// key ending at "=" (of=/c/..., 'of='/c/..., "of=/c/...", GAP-2468); the
+// literal text ends at the first expansion. The same twin spells
+// $USERPROFILE as $HOME (windowsProfileHomeTwin). ok is false when there
+// is nothing to respell, the home is not a drive home or the command does
+// not parse.
 func MSYSDrivePathTwin(command, activeHome string) (string, bool) {
 	home, valid := normalizeActiveHome(activeHome)
-	if !valid || !posixShellHome(strings.TrimRight(home, "/")) || strings.HasPrefix(home, "/") ||
-		!strings.Contains(command, "/") {
+	if !valid || !posixShellHome(strings.TrimRight(home, "/")) || strings.HasPrefix(home, "/") {
 		return "", false
+	}
+	command, profiled := windowsProfileHomeTwin(command)
+	unchanged := func() (string, bool) {
+		if profiled {
+			return command, true
+		}
+		return "", false
+	}
+	if !strings.Contains(command, "/") {
+		return unchanged()
 	}
 	file, err := syntax.NewParser(syntax.Variant(syntax.LangBash)).Parse(strings.NewReader(command), "")
 	if err != nil {
 		return "", false
 	}
 	type span struct {
-		start, end int
-		value      string
+		start, end    int
+		prefix, value string
 	}
 	var spans []span
 	syntax.Walk(file, func(node syntax.Node) bool {
@@ -189,50 +202,141 @@ func MSYSDrivePathTwin(command, activeHome string) (string, bool) {
 				return false
 			}
 		case *syntax.Word:
-			if len(typed.Parts) == 0 {
+			pieces := msysWordLiteralPieces(typed)
+			if len(pieces) == 0 {
 				return true
 			}
-			var value string
-			start := 0
-			switch part := typed.Parts[0].(type) {
-			case *syntax.Lit:
-				value, start = part.Value, int(part.Pos().Offset())
-			case *syntax.SglQuoted:
-				if part.Dollar {
-					return true
-				}
-				value, start = part.Value, int(part.Pos().Offset())+1
-			default:
-				return true
+			var joined strings.Builder
+			for _, piece := range pieces {
+				joined.WriteString(piece.text)
 			}
+			value, skip := joined.String(), 0
 			// A key ending at "=" may precede the mount in the same word
 			// (dd of=/c/..., --output=/c/...): Git Bash maps that value to
 			// the drive too (GAP-2399).
 			if key := msysOptionKeyPrefix.FindStringIndex(value); key != nil && msysDrivePrefix.MatchString(value[key[1]:]) {
-				value, start = value[key[1]:], start+key[1]
+				value, skip = value[key[1]:], key[1]
 			}
 			match := msysDrivePrefix.FindStringIndex(value)
 			if match == nil {
 				return true
 			}
 			prefix := strings.TrimSuffix(value[:match[1]], "/")
-			spans = append(spans, span{start, start + len(prefix), strings.TrimSuffix(MSYSDrivePath(prefix+"/"), "/")})
+			// The respelled prefix must sit inside one literal piece, so its
+			// source bytes are the prefix itself.
+			for _, piece := range pieces {
+				if skip < len(piece.text) {
+					if skip+len(prefix) <= len(piece.text) {
+						start := piece.start + skip
+						spans = append(spans, span{start, start + len(prefix), prefix, strings.TrimSuffix(MSYSDrivePath(prefix+"/"), "/")})
+					}
+					break
+				}
+				skip -= len(piece.text)
+			}
 		}
 		return true
 	})
 	if len(spans) == 0 {
-		return "", false
+		return unchanged()
 	}
 	sort.Slice(spans, func(i, j int) bool { return spans[i].start < spans[j].start })
 	var out strings.Builder
 	last := 0
 	for _, item := range spans {
-		if item.start < last || item.end > len(command) || command[item.start] != '/' {
+		if item.start < last || item.end > len(command) || command[item.start:item.end] != item.prefix {
 			return "", false
 		}
 		out.WriteString(command[last:item.start])
 		out.WriteString(item.value)
 		last = item.end
+	}
+	out.WriteString(command[last:])
+	return out.String(), true
+}
+
+// msysLiteralPiece is a run of literal word text and the source offset of
+// its first byte.
+type msysLiteralPiece struct {
+	text  string
+	start int
+}
+
+// msysWordLiteralPieces returns the literal text of word up to its first
+// expansion: unquoted literals, single-quoted strings and the literals of
+// double-quoted strings, with their source offsets. A $'...' or $"..."
+// string ends the literal text.
+func msysWordLiteralPieces(word *syntax.Word) []msysLiteralPiece {
+	var pieces []msysLiteralPiece
+	for _, part := range word.Parts {
+		switch typed := part.(type) {
+		case *syntax.Lit:
+			pieces = append(pieces, msysLiteralPiece{typed.Value, int(typed.Pos().Offset())})
+		case *syntax.SglQuoted:
+			if typed.Dollar {
+				return pieces
+			}
+			pieces = append(pieces, msysLiteralPiece{typed.Value, int(typed.Pos().Offset()) + 1})
+		case *syntax.DblQuoted:
+			if typed.Dollar {
+				return pieces
+			}
+			for _, inner := range typed.Parts {
+				lit, isLit := inner.(*syntax.Lit)
+				if !isLit {
+					return pieces
+				}
+				pieces = append(pieces, msysLiteralPiece{lit.Value, int(lit.Pos().Offset())})
+			}
+		default:
+			return pieces
+		}
+	}
+	return pieces
+}
+
+// windowsProfileHomeTwin returns command with every plain $USERPROFILE or
+// ${USERPROFILE} expansion spelled as $HOME, and whether it changed. Under
+// Git Bash on a Windows home USERPROFILE is the profile directory that
+// HOME names (C:\Users\<u> and /c/Users/<u>), so the twin names the same
+// files, which the $HOME readings resolve (GAP-2468). It applies only when
+// nothing in the command mentions HOME and every USERPROFILE in the text
+// is such an expansion (no assignment, export, read or quoted name).
+func windowsProfileHomeTwin(command string) (string, bool) {
+	const name = "USERPROFILE"
+	if !strings.Contains(command, name) || strings.Contains(command, "HOME") {
+		return command, false
+	}
+	file, err := syntax.NewParser(syntax.Variant(syntax.LangBash)).Parse(strings.NewReader(command), "")
+	if err != nil {
+		return command, false
+	}
+	var offsets []int
+	syntax.Walk(file, func(node syntax.Node) bool {
+		param, isParam := node.(*syntax.ParamExp)
+		if !isParam || param.Param == nil || param.Param.Value != name {
+			return true
+		}
+		if param.Excl || param.Length || param.Width || param.Index != nil || param.Slice != nil ||
+			param.Repl != nil || param.Names != 0 || param.Exp != nil {
+			return true
+		}
+		offsets = append(offsets, int(param.Param.Pos().Offset()))
+		return true
+	})
+	if len(offsets) == 0 || len(offsets) != strings.Count(command, name) {
+		return command, false
+	}
+	sort.Ints(offsets)
+	var out strings.Builder
+	last := 0
+	for _, offset := range offsets {
+		if offset < last || offset+len(name) > len(command) || command[offset:offset+len(name)] != name {
+			return command, false
+		}
+		out.WriteString(command[last:offset])
+		out.WriteString("HOME")
+		last = offset + len(name)
 	}
 	out.WriteString(command[last:])
 	return out.String(), true
