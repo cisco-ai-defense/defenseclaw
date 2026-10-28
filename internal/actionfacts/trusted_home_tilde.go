@@ -213,7 +213,9 @@ func rewriteTrustedPOSIXHomeTilde(source, activeHome string) (trustedPOSIXHomeRe
 // declaration naming it or a computed name, or a builtin that sets
 // variables by computed name or runs code (eval, source, read, printf -v,
 // ...). It returns false when there is no such target, when the command
-// does not parse, or when it declares a function.
+// does not parse, or when it declares a function. On a Windows home only
+// the drive paths below the home are returned (C:/Users/<u>/...): active
+// state lives below the home.
 func ShellRedirectTargets(command, activeHome string) ([]string, bool) {
 	home, ok := normalizeActiveHome(activeHome)
 	if !ok || home == "" || !trustedPOSIXHomeLiteral.MatchString(home) {
@@ -323,9 +325,28 @@ func ShellRedirectTargets(command, activeHome string) ([]string, bool) {
 		if item.homed && changedAt >= 0 && item.offset >= changedAt {
 			continue
 		}
+		if windows {
+			// Active state lives below the home: a drive path outside it
+			// is left out, one below it is spelled with the home's case.
+			if _, below := windowsHomeRelative(item.path, home); !below {
+				continue
+			}
+			paths = append(paths, home+item.path[len(home):])
+			continue
+		}
 		paths = append(paths, item.path)
 	}
 	return paths, len(paths) > 0
+}
+
+// windowsHomeRelative returns the part of a drive path below home ("/..."),
+// compared without case as the Windows file system does.
+func windowsHomeRelative(value, home string) (string, bool) {
+	if len(value) <= len(home) || !strings.EqualFold(value[:len(home)], home) || value[len(home)] != '/' {
+		return "", false
+	}
+	rest := value[len(home):]
+	return rest, trustedPOSIXHomeLiteral.MatchString(rest)
 }
 
 // redirectOpensForWrite reports a redirect that opens its word as a file

@@ -119,3 +119,65 @@ func TestR105ShellOpensEveryRedirectTarget(t *testing.T) {
 		}
 	}
 }
+
+// RV14-5: the Windows Git Bash leg of the same class. Git Bash expands ~,
+// $HOME and the MSYS /c/... spelling to the Windows home and opens the
+// target before it runs the program, so each of these is the write the
+// control printf x > ~/... is, with and without the POSIX dialect hint.
+func TestR105GitBashRedirectTargetOfWindowsHome(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("native Windows home")
+	}
+	home := t.TempDir()
+	cwd := filepath.Join(home, "project")
+	for _, dir := range []string{filepath.Join(home, ".defenseclaw", "hooks"), filepath.Join(cwd, "sub")} {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, name := range []string{
+		filepath.Join(home, ".defenseclaw", "config.yaml"),
+		filepath.Join(cwd, "build.sh"),
+	} {
+		if err := os.WriteFile(name, []byte("x\n"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	forward := filepath.ToSlash(home)
+	msys := "/" + strings.ToLower(forward[:1]) + forward[2:]
+	programs := []string{"printf x", "make", "echo $X", "make $FLAGS", `./build.sh "$X"`,
+		"env ./build.sh", "./build.sh", "cd sub && make", "true && ./build.sh", "git $SUB", "cat <<< x"}
+	for _, connectorName := range []string{"claudecode", "codex"} {
+		installDefaultProfileConnector(t, connectorName)
+		for _, hint := range []actionfacts.Dialect{"", actionfacts.DialectPOSIX} {
+			for _, program := range programs {
+				for _, redirect := range []string{">", ">&", "1<>"} {
+					for _, spelling := range []string{"~", "$HOME", forward, msys} {
+						for _, row := range []struct {
+							target string
+							block  bool
+						}{
+							{spelling + "/.defenseclaw/config.yaml", true},
+							{spelling + "/build.log", false},
+						} {
+							command := program + " " + redirect + " " + row.target
+							input := actionfacts.Input{
+								Tool: "Bash", Command: command, CWD: cwd,
+								ActiveHome: home, DialectHint: hint,
+							}
+							findings := dispatchTrustedAction(t.Context(), trustedActionRequest{
+								Input: input, Connector: connectorName, EnforcementCapable: true,
+							})
+							if blocked := buildVerdict(findings, "tool_call").Action == "block"; blocked != row.block {
+								t.Errorf("%s hint=%q %q: blocked=%v, want %v (%v)",
+									connectorName, hint, command, blocked, row.block, FindingStrings(findings))
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+}

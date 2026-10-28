@@ -894,6 +894,23 @@ func provenShellRedirectStateWrite(request trustedActionRequest) bool {
 		input.DialectHint = actionfacts.DialectPOSIX
 		twin := request
 		twin.Input = input
+		if !strings.HasPrefix(target, "/") {
+			// A drive path below a Windows home (Git Bash): the POSIX reading
+			// places it as a relative word, so the twin carries the physical
+			// target the gateway resolves for it, as a hook target map does.
+			if request.SkipLocalFilesystemResolution || request.ProtectedHomeHook {
+				continue
+			}
+			physical, ok := hookpaths.ResolveWriteTarget(target)
+			if !ok {
+				continue
+			}
+			twin.ResolvedWriteTargets = make(map[string]string, len(request.ResolvedWriteTargets)+1)
+			for spelling, value := range request.ResolvedWriteTargets {
+				twin.ResolvedWriteTargets[spelling] = value
+			}
+			twin.ResolvedWriteTargets[target] = physical
+		}
 		if provenStateMutationPath(actionfacts.Analyze(input), twin) {
 			return true
 		}
