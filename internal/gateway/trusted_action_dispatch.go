@@ -872,7 +872,7 @@ func provenStateMutationPath(facts actionfacts.Facts, request trustedActionReque
 		}
 		if entry, ok := stateDirectoryEntryTarget(command, candidate, request); ok {
 			candidate.Resolved = entry
-			if matchesActiveDefenseClawStateInLine(projected, candidate, lineStaysOff) {
+			if matchesActiveDefenseClawStateInLine(projected, candidate, lineStaysOff, request.ResolvedWriteTargets) {
 				return true
 			}
 			continue
@@ -900,7 +900,7 @@ func provenStateMutationPath(facts actionfacts.Facts, request trustedActionReque
 			physical = active
 		}
 		candidate.Resolved = physical
-		if matchesActiveDefenseClawStateInLine(projected, candidate, lineStaysOff) {
+		if matchesActiveDefenseClawStateInLine(projected, candidate, lineStaysOff, request.ResolvedWriteTargets) {
 			return true
 		}
 	}

@@ -20,15 +20,20 @@ import (
 
 // r105ManagedHook posts command as a managed hook call of connector in
 // mode, as the managed gateway sees it: a kernel-verified hook peer, a
-// home it may not list (the _defenseclaw service account; pod check20 read
-// `ls /Users/<user>` as Permission denied), and the hook client's target
-// map computed as the user before the call (nil: an old client that sends
-// none).
+// home it may not list and a state tree it may not read (_defenseclaw on
+// macOS, ProtectHome on Linux), and the hook client's target map computed
+// as the user before the call.
 func r105ManagedHook(t *testing.T, connector, mode, command, cwd, home string, targets map[string]string) (bool, string) {
 	t.Helper()
 	payload := mustJSON(t, map[string]any{"session_id": "s", "hook_event_name": "PreToolUse", "cwd": cwd,
 		"permission_mode": "default", "tool_name": "Bash", "tool_use_id": "toolu_r105",
 		"tool_input": map[string]any{"command": command, "description": "Run test fixture command"}})
+	// The gateway may not list the home or read the state tree.
+	state := filepath.Join(home, ".defenseclaw")
+	if err := os.Chmod(state, 0); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = os.Chmod(state, 0o700) }()
 	if err := os.Chmod(home, 0o311); err != nil {
 		t.Fatal(err)
 	}
@@ -81,7 +86,8 @@ func r105ClientTargets(t *testing.T, command, cwd string) map[string]string {
 // refused every home find that unzips into "${1%.zip}" (BENIGN-W2). The
 // hook client lists the home as the user and carries the answer; with no
 // state-named archive W2 is allowed, with one it blocks, and without the
-// client's fact a gateway that cannot read the home still refuses.
+// client's facts (the listing and the state tree's names for the -name
+// test) a gateway that cannot read the home still refuses.
 func TestR105GAP2404ManagedHomeFindUsesTheClientListing(t *testing.T) {
 	if runtime.GOOS == "windows" || os.Geteuid() == 0 {
 		t.Skip("POSIX shell forms; needs a home the process cannot list")
@@ -136,7 +142,10 @@ func TestR105GAP2404ManagedHomeFindUsesTheClientListing(t *testing.T) {
 					// An older client sends its map without the listing fact:
 					// the gateway cannot list the home and refuses the strip.
 					old := maps.Clone(clientMaps[connector+row])
-					delete(old, hookpaths.StateRootSiblingsPrefix+filepath.Join(home, ".defenseclaw"))
+					maps.DeleteFunc(old, func(key, _ string) bool {
+						return strings.HasPrefix(key, hookpaths.StateRootSiblingsPrefix) ||
+							strings.HasPrefix(key, hookpaths.StateTreeNamePrefix)
+					})
 					if blocked, findings := r105ManagedHook(t, connector, mode, row, cwd, home, old); !blocked {
 						t.Errorf("%s %s archive %q: %q without the client listing allowed: %v", mode, connector, archive, row, findings)
 					}

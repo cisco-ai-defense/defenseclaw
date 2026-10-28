@@ -25,6 +25,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
 )
 
 // activeStateNameIndexLimit bounds one walk of the protected trees. A
@@ -41,9 +43,7 @@ const activeStateNameIndexTTL = 10 * time.Minute
 
 // activeStateProtectedTrees are the directories of the state root whose
 // files are protected state (not logs/, backups/ or the uv cache).
-var activeStateProtectedTrees = []string{
-	"cache", "hooks", "installer", "policies", "previous", "quarantine", "receipts", "registries",
-}
+var activeStateProtectedTrees = hookpaths.ActiveStateProtectedTrees
 
 type activeStateNameIndex struct {
 	built time.Time
@@ -158,6 +158,17 @@ func activeStateTreeHasName(root, pattern string, fold bool) bool {
 		}
 	}
 	return false
+}
+
+// activeStateTreeHasNameFor is activeStateTreeHasName with the hook
+// client's answer (hookpaths.StateTreeHasName, read as the user) used
+// first: a managed gateway cannot read the home, so its own index counts
+// every pattern as a match (GAP-2404 pod check20).
+func activeStateTreeHasNameFor(targets map[string]string, root, pattern string, fold bool) bool {
+	if value, present := targets[hookpaths.StateTreeNameKey(root, pattern, fold)]; present {
+		return value != "0"
+	}
+	return activeStateTreeHasName(root, pattern, fold)
 }
 
 // findPatternIsRegenerableBytecode reports a -name/-iname pattern that

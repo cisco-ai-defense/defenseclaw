@@ -822,6 +822,11 @@ func ResolveConnector(connector, surface, event string, payload []byte) string {
 					root := filepath.Join(home, ".defenseclaw")
 					sourceFacts[StateRootSiblingsPrefix+root] = StateRootSiblings(root)
 				}
+				// A home find's name tests are judged against the state
+				// tree, which such a gateway cannot read either.
+				for key, value := range stateTreeNameFacts(fallbackFacts, home) {
+					sourceFacts[key] = value
+				}
 				directoryOperands, directoryUnknown = ShellDirectoryWriteOperands(command, cwd, home, sourceFacts, true, false)
 				truncated = truncated || directoryUnknown
 				truncated = truncated || !parsed
@@ -1277,6 +1282,13 @@ func Decode(value string) (map[string]string, bool) {
 		if strings.HasPrefix(key, StateRootSiblingsPrefix) && (value != "0" && value != "1" ||
 			!filepath.IsAbs(strings.TrimPrefix(key, StateRootSiblingsPrefix))) {
 			return nil, false
+		}
+		if strings.HasPrefix(key, StateTreeNamePrefix) {
+			root, test, cut := strings.Cut(strings.TrimPrefix(key, StateTreeNamePrefix), "\x00")
+			if !cut || !filepath.IsAbs(root) || test == "" || test[0] != 'i' && test[0] != 'c' ||
+				value != "0" && value != "1" {
+				return nil, false
+			}
 		}
 	}
 	return targets, true
