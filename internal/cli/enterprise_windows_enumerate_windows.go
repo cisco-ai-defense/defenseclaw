@@ -66,6 +66,10 @@ var enterpriseWindowsEnumerateSessionSettle = 15 * time.Second
 // replace it to fire the window on an explicit event instead of a clock.
 var enterpriseWindowsEnumerateSessionSettleAfter = time.After
 
+// enterpriseWindowsEnumeratePrivateWalkLate fires when a profile walk the last
+// cycle could not wait for has finished. Tests replace it.
+var enterpriseWindowsEnumeratePrivateWalkLate = enterprisehooks.WindowsPrivateWalkCompletedLate
+
 // enterpriseWindowsEnumerateSessionNow reads the clock for sign-in times.
 // Tests replace it so a late sign-in's remaining settle time is exact.
 var enterpriseWindowsEnumerateSessionNow = time.Now
@@ -702,6 +706,16 @@ func runEnterpriseWindowsEnumerateInterval(
 			}
 		case <-mcpRefresh.C:
 			_ = enterpriseWindowsMCPRefresh.Run(ctx, func() error { return refreshEnterpriseWindowsMCPServers(stderr, manifestPath) })
+		case <-enterpriseWindowsEnumeratePrivateWalkLate():
+			// A profile's private-install walk outlasted its share of the
+			// last cycle and has now finished: publish the account as
+			// inspected without waiting for the next tick (GAP-2002).
+			fmt.Fprintf(stderr, "[hook-enumerator] a slow profile scan finished: running an extra cycle\n")
+			if err := runEnterpriseWindowsEnumerateSingleCycle(ctx, stderr, manifestPath); err != nil {
+				if !isEnterpriseWindowsEnumerateConfigMissing(err) {
+					fmt.Fprintf(stderr, "[hook-enumerator] cycle failed: %v\n", err)
+				}
+			}
 		case <-ticker.C:
 			if err := runEnterpriseWindowsEnumerateSingleCycle(ctx, stderr, manifestPath); err != nil {
 				if !isEnterpriseWindowsEnumerateConfigMissing(err) {
