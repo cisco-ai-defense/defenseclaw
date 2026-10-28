@@ -117,7 +117,7 @@ credential, each with its own new value. It stops the gateway, saves the new
 values, updates each agent's hook or plugin, and starts the gateway again. If
 a step fails after the gateway stopped, it puts the previous values and
 gateway back. Rotation always includes the gateway restart, and it does not
-rewrite a token that you supply through your own environment variable.
+rewrite a token that you supply through your own environment variable. Hook credentials are private to your account, including those an upgrade from an earlier 1.0 release carried over, so `rotate-token` works after an upgrade.
 
 Each connector still gets its own credential, separate from the gateway
 token; rotation never prints them or lets one connector use another's. After
