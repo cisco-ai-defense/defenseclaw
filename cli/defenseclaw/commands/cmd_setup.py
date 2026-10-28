@@ -91,6 +91,8 @@ from defenseclaw.config import (
     enable_user_runtime_planes,
     locked_config_yaml,
     locked_file_update,
+    outage_block_hint,
+    saved_hook_fail_mode_scope,
 )
 from defenseclaw.config import (
     load as load_config,
@@ -11043,12 +11045,16 @@ def _apply_hook_connector_setup(
         and connector not in {"cursor", "hermes", "copilot", "antigravity"}
         and gc.effective_hook_fail_mode(connector) == "open"
     ):
-        if _batch_summary is not None:
+        if _batch_summary is not None and saved_hook_fail_mode_scope(gc, connector):
+            # A saved open wins over the strict policy (GAP-0039).
+            _batch_summary.setdefault("fail_open_saved", {})[connector] = outage_block_hint(gc, connector)
+        elif _batch_summary is not None:
             _batch_summary.setdefault("fail_open", []).append(connector)
         else:
+            why = "your saved fail mode" if saved_hook_fail_mode_scope(gc, connector) else "default policy"
             ux.echo(
                 f"  ⚠ {connector} hooks let tool calls run with a warning while the gateway is not "
-                "running (default policy). To block them: defenseclaw guardrail use-pack strict"
+                f"running ({why}). To block them: {outage_block_hint(gc, connector)}"
             )
     if connector == "cursor":
         if hilt:
@@ -11259,6 +11265,11 @@ def _echo_batch_setup_summary(applied: list[str], summary: dict[str, Any], *, re
         ux.echo(
             f"  ⚠ While the gateway is not running, {', '.join(fail_open)} hooks let tool calls run "
             "with a warning (default policy). To block them: defenseclaw guardrail use-pack strict"
+        )
+    for name, hint in (summary.get("fail_open_saved") or {}).items():
+        ux.echo(
+            f"  ⚠ While the gateway is not running, {name} hooks let tool calls run with a warning "
+            f"(your saved fail mode). To block them: {hint}"
         )
     if not restart:
         _echo_saved_without_restart(plural=True)

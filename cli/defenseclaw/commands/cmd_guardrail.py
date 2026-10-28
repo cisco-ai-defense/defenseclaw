@@ -61,7 +61,12 @@ from contextlib import contextmanager
 import click
 
 from defenseclaw import ux
-from defenseclaw.config import _assert_config_write_allowed, config_path_for_data_dir
+from defenseclaw.config import (
+    _assert_config_write_allowed,
+    config_path_for_data_dir,
+    outage_block_hint,
+    saved_hook_fail_mode_scope,
+)
 from defenseclaw.config_writer import ConfigWriteError
 from defenseclaw.connector_contracts import has_native_approval_prompt, normalize_connector
 from defenseclaw.context import AppContext, pass_ctx
@@ -1047,12 +1052,16 @@ def status_cmd(app: AppContext, connector_flag: str | None, as_json: bool = Fals
                 )
                 deployment = str(getattr(app.cfg, "deployment_mode", "") or "")
                 managed_host = deployment.strip().lower() == "managed_enterprise"
-                fix = (
-                    f"set closed with defenseclaw guardrail fail-mode closed{scope}"
-                    if managed_host
-                    else "block them with the strict policy: defenseclaw guardrail use-pack strict"
-                    + (f" --connector {name}" if scope else "")
-                )
+                saved_scope = saved_hook_fail_mode_scope(gc, name)
+                if managed_host:
+                    fix = f"set closed with defenseclaw guardrail fail-mode closed{scope}"
+                elif saved_scope:
+                    # A saved open wins over the strict policy (GAP-0039).
+                    fix = "your saved fail mode keeps them open; block them with " + outage_block_hint(gc, name)
+                else:
+                    fix = "block them with the strict policy: defenseclaw guardrail use-pack strict" + (
+                        f" --connector {name}" if scope else ""
+                    )
                 posture_rows.append(
                     f"{_connector_label(name)} ({name}) {where} with fail mode open: while the gateway "
                     f"is down its hooks allow calls that policy blocks; {fix}"

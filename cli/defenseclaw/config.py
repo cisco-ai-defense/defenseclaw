@@ -8028,3 +8028,35 @@ def prepare_fresh_v8_config(cfg: Config) -> Config:
     cfg._source_config_version = CURRENT_CONFIG_VERSION
     cfg._loaded_v8_modeled_snapshot = copy.deepcopy(_config_to_dict(cfg))
     return cfg
+
+
+def saved_hook_fail_mode_scope(guardrail: Any, connector: str = "") -> str:
+    """Where an explicitly saved ``hook_fail_mode`` that decides ``connector`` lives.
+
+    ``"connector"`` for the connector's own saved mode, ``"global"`` for a
+    saved top-level one, ``""`` when none is saved and the policy tier decides
+    (:meth:`GuardrailConfig.effective_hook_fail_mode`). A saved mode wins over
+    ``guardrail use-pack strict``, so a hint to close an outage names
+    ``guardrail fail-mode closed`` then (GAP-0039).
+    """
+    override = (getattr(guardrail, "connectors", None) or {}).get(connector)
+    if override is not None and str(getattr(override, "hook_fail_mode", "") or "").strip():
+        return "connector"
+    value = str(getattr(guardrail, "hook_fail_mode", "") or "").strip()
+    if value and getattr(guardrail, "_hook_fail_mode_saved", True):
+        return "global"
+    return ""
+
+
+def outage_block_hint(guardrail: Any, connector: str = "") -> str:
+    """The command that makes a per-user ``connector``'s hooks block while the gateway is down.
+
+    ``guardrail fail-mode closed`` (``--connector NAME`` for the connector's
+    own save) when a saved open decides it, else the strict policy (GAP-0039).
+    """
+    scope = saved_hook_fail_mode_scope(guardrail, connector)
+    if scope == "connector":
+        return f"defenseclaw guardrail fail-mode closed --connector {connector}"
+    if scope == "global":
+        return "defenseclaw guardrail fail-mode closed"
+    return "defenseclaw guardrail use-pack strict"

@@ -249,7 +249,10 @@ class StatusCommandTests(unittest.TestCase):
         result = CliRunner().invoke(cmd_guardrail.status_cmd, [], obj=app)
         self.assertEqual(result.exit_code, 0, msg=result.output)
         self.assertIn("action mode with fail mode open", result.output)
-        self.assertIn("defenseclaw guardrail use-pack strict", result.output)
+        # The open is saved, and a saved mode wins over the strict policy
+        # (GAP-0039): the hint names fail-mode closed.
+        self.assertIn("defenseclaw guardrail fail-mode closed", result.output)
+        self.assertNotIn("use-pack strict", result.output)
 
     def test_status_shows_a_proxy_connector_closed_whatever_hook_fail_mode_says(self):
         # GAP-1646: ZeptoClaw and OpenClaw are proxy-backed, so their proxy
@@ -283,7 +286,7 @@ class StatusCommandTests(unittest.TestCase):
                 result = CliRunner().invoke(cmd_guardrail.status_cmd, [], obj=app)
             self.assertEqual(result.exit_code, 0, msg=result.output)
             self.assertIn("action mode for guardrail profile(s) engineering with fail mode open", result.output)
-            self.assertIn("defenseclaw guardrail use-pack strict", result.output)
+            self.assertIn("defenseclaw guardrail fail-mode closed", result.output)  # saved open (GAP-0039)
         # A profile that keeps observe (or sets action for another connector)
         # adds no warning.
         app = make_ctx(enabled=True, connector="kiro", hook_fail_mode="open")
