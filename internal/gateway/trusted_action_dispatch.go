@@ -1207,8 +1207,27 @@ func appendJSONStrings(texts []string, raw json.RawMessage) []string {
 // withTwinProvenBlocks returns findings, the finalized findings of a
 // redirect-target action, with each finding of twin, the same lanes judged on
 // its static-target twin, that may block there in place of the finding of the
-// same rule or owner that may not.
+// same rule or owner that may not, or that may block on a stronger proof: an
+// authorized proof over an unauthorized one, and a proven mutation of
+// DefenseClaw's own state (the observe-mode self-protection block,
+// provenActiveStateMutation) over any other. A weaker finding the original
+// spelling raised (a ~<login> path the gateway cannot place, GAP-2378) must
+// not hide the twin's proof.
 func withTwinProvenBlocks(findings, twin []RuleFinding) []RuleFinding {
+	strength := func(finding RuleFinding) int {
+		switch {
+		case !finding.contributesToEnforcement():
+			return 0
+		case !finding.proof.authorizes(finding.RuleID):
+			return 1
+		case finding.proof.kind == findingProofActionFactsSemantic ||
+			finding.proof.kind == findingProofActionFactsSubgraph ||
+			finding.proof.kind == findingProofActiveStateMutation:
+			return 3
+		default:
+			return 2
+		}
+	}
 	for _, proven := range twin {
 		if !proven.contributesToEnforcement() {
 			continue
@@ -1220,7 +1239,7 @@ func withTwinProvenBlocks(findings, twin []RuleFinding) []RuleFinding {
 		switch {
 		case index < 0:
 			findings = append(findings, proven)
-		case !findings[index].contributesToEnforcement():
+		case strength(proven) > strength(findings[index]):
 			findings[index] = proven
 		}
 	}

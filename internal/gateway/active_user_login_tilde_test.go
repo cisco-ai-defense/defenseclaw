@@ -203,3 +203,23 @@ func TestActiveUserLoginTildeBehindProtectHomeUsesClientTargets(t *testing.T) {
 		}
 	}
 }
+
+// GAP-2378: the original ~<login> spelling can raise a weaker finding of
+// the rule its twin proves (the gateway cannot place that spelling); the
+// twin's proven state mutation must replace it, or managed observe mode
+// loses its self-protection block. A stronger original finding stays.
+func TestTwinProvenBlockReplacesAWeakerProof(t *testing.T) {
+	const ruleID = "tamper.detector_state_write"
+	weak := RuleFinding{RuleID: ruleID, enforcement: findingEnforcementAllowed}
+	weak = weak.withTrustedActionProof(newFindingProof(findingProofExactFallback, ruleID, false))
+	strong := RuleFinding{RuleID: ruleID, enforcement: findingEnforcementAllowed}
+	strong = strong.withTrustedActionProof(newFindingProof(findingProofActiveStateMutation, ruleID, true))
+	got := withTwinProvenBlocks([]RuleFinding{weak}, []RuleFinding{strong})
+	if len(got) != 1 || got[0].proof.kind != findingProofActiveStateMutation || !got[0].proof.authorizes(ruleID) {
+		t.Fatalf("weak original kept: %+v", got)
+	}
+	got = withTwinProvenBlocks([]RuleFinding{strong}, []RuleFinding{weak})
+	if len(got) != 1 || got[0].proof.kind != findingProofActiveStateMutation {
+		t.Fatalf("strong original replaced: %+v", got)
+	}
+}
