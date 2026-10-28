@@ -655,3 +655,17 @@ def test_docs_table_rows_have_no_cells_beyond_the_header() -> None:
             elif _table_cells(line) > header:
                 wide.append(f"{page.relative_to(DOCS)}:{number}")
     assert wide == []
+
+
+def test_windows_rollback_docs_name_the_hermes_fail_closed_limit_of_older_releases() -> None:
+    """GAP-2120: 1.0.4 and later write fail_closed on the Hermes pre_tool_call
+    hook; 1.0.0-1.0.3 read that hook as foreign, so a signed-out Hermes user
+    fails the older /verify after an /upgrade rollback until they sign in."""
+    hook_only = (ROOT / "internal/gateway/connector/hook_only.go").read_text(encoding="utf-8")
+    if 'entry["fail_closed"] = true' not in hook_only:
+        pytest.skip("Setup no longer writes the Hermes fail_closed key")
+    roll_back = _flat("enterprise/operate/lifecycle.mdx").split("## Roll back", 1)[1].split(" ## ", 1)[0]
+    assert "Windows rollback to 1.0.0–1.0.3 with Hermes users" in roll_back
+    bullet = roll_back.split("Windows rollback to 1.0.0–1.0.3 with Hermes users", 1)[1].split("- **", 1)[0]
+    for phrase in ("fail_closed: true", "pre_tool_call", "signed out", "1603", "signs in", "uninstall the newer release"):
+        assert phrase in bullet, phrase
