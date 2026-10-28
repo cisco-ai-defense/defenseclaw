@@ -136,6 +136,9 @@ func platformLocalAccountRecord(context.Context, string) (LocalAccountRecord, bo
 // current.
 func platformAccountRecordGone(context.Context, string) bool { return false }
 
+// platformAccountUIDGone is false for the same reason.
+func platformAccountUIDGone(context.Context, string, int) bool { return false }
+
 // platformLocalGroups reads /etc/group, the files backend itself.
 func platformLocalGroups(context.Context) (map[string]int, error) {
 	data, err := readSmallFile(localGroupPath, 16<<20)

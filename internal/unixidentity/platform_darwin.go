@@ -15,6 +15,7 @@ package unixidentity
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -196,6 +197,22 @@ func platformAccountRecordGone(ctx context.Context, name string) bool {
 	}
 	result, err := runTrustedCommand(ctx, darwinDSCL, []string{"/Search", "-read", "/Users/" + name, "UniqueID"})
 	return dsclRecordNotFound(result, err) && !OpenDirectoryOffline(ctx)
+}
+
+// platformAccountUIDGone asks Open Directory in fresh dscl processes, across
+// the search policy, whether name still holds uid (dsclAccountUIDGone).
+func platformAccountUIDGone(ctx context.Context, name string, uid int) bool {
+	if err := validateTrustedTool(darwinDSCL); err != nil {
+		return false
+	}
+	return dsclAccountUIDGone(uid,
+		func() (commandResult, error) {
+			return runTrustedCommand(ctx, darwinDSCL, []string{"/Search", "-read", "/Users/" + name, "UniqueID"})
+		},
+		func() (commandResult, error) {
+			return runTrustedCommand(ctx, darwinDSCL, []string{"/Search", "-search", "/Users", "UniqueID", strconv.Itoa(uid)})
+		},
+		func() bool { return OpenDirectoryOffline(ctx) })
 }
 
 // platformMobileAccounts lists the local node's mobile accounts with the

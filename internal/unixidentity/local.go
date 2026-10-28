@@ -219,6 +219,87 @@ func AccountRecordGone(ctx context.Context, name string) bool {
 	return platformAccountRecordGone(ctx, name)
 }
 
+// AccountUIDGone reports whether a fresh directory read, in its own process,
+// shows that no account holds uid under name any more. It is
+// AccountRecordGone for the name, and also true when the name's record now
+// holds another uid (the account was deleted and its name given to a new
+// local account, or a network account of that name answers first) while a
+// fresh search across the search policy finds no record with uid: a check
+// of the name alone kept the deleted account's identity record for as long
+// as the process ran (GAP-1864). A record that still holds uid, a search
+// that finds uid under another name, a bound directory node that is
+// offline, and any failed or unclear answer say nothing, so it is false.
+// Every platform other than macOS is false, as for AccountRecordGone.
+func AccountUIDGone(ctx context.Context, name string, uid int) bool {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if validName(name) != nil || uid <= 0 {
+		return false
+	}
+	return platformAccountUIDGone(ctx, name, uid)
+}
+
+// dsclAccountUIDGone decides AccountUIDGone from fresh dscl answers: read
+// runs `dscl /Search -read /Users/<name> UniqueID`, search runs
+// `dscl /Search -search /Users UniqueID <uid>` (asked only when the name's
+// record holds another uid), and offline reports a bound directory node
+// that is offline. It is shared so it can be tested on every platform.
+func dsclAccountUIDGone(uid int, read, search func() (commandResult, error), offline func() bool) bool {
+	result, err := read()
+	if dsclRecordNotFound(result, err) {
+		return !offline()
+	}
+	if err != nil || result.exitCode != 0 {
+		return false
+	}
+	held, ok := dsclReadUniqueID(string(result.stdout))
+	if !ok || held == uid {
+		return false
+	}
+	found, err := search()
+	if err != nil || found.exitCode != 0 || len(strings.TrimSpace(string(found.stdout))) != 0 {
+		return false
+	}
+	return !offline()
+}
+
+// dsclReadUniqueID reads the one UniqueID value of a `dscl -read ...
+// UniqueID` answer ("UniqueID: 507", or the value on the next line). No
+// value, several values or a value that is not a uid is not ok.
+func dsclReadUniqueID(output string) (int, bool) {
+	var values []string
+	pending := false
+	for _, line := range strings.Split(output, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" {
+			continue
+		}
+		if pending && (strings.HasPrefix(line, " ") || strings.HasPrefix(line, "\t")) {
+			values = append(values, strings.Fields(trimmed)...)
+			continue
+		}
+		pending = false
+		key, value, ok := strings.Cut(trimmed, ":")
+		if !ok || key != "UniqueID" {
+			continue
+		}
+		if value = strings.TrimSpace(value); value == "" {
+			pending = true
+			continue
+		}
+		values = append(values, strings.Fields(value)...)
+	}
+	if len(values) != 1 {
+		return 0, false
+	}
+	uid, err := parseSignedDSCLID(values[0])
+	if err != nil {
+		return 0, false
+	}
+	return uid, true
+}
+
 // dsclRecordNotFoundExit is dscl's exit status for eDSRecordNotFound
 // (DS Error -14136).
 const dsclRecordNotFoundExit = 56

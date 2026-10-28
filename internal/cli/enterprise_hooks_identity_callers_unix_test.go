@@ -338,8 +338,8 @@ func TestDeletedLocalAccountRecordGoesWhenTheProcessLookupStillNamesIt(t *testin
 	} {
 		enterpriseHookLocalAccounts = func(context.Context) (map[string]int, error) { return tc.local, tc.err }
 		var searched []string
-		enterpriseHookRecordedAccountGone = func(_ context.Context, name string) bool {
-			searched = append(searched, name)
+		enterpriseHookRecordedAccountGone = func(_ context.Context, name string, uid int) bool {
+			searched = append(searched, name+":"+strconv.Itoa(uid))
 			return tc.searchGone
 		}
 		accounts, _, _ := enterpriseHookIdentitySpoolAccounts(context.Background(), io.Discard, dir, enterpriseHookReconcileRun{})
@@ -350,8 +350,8 @@ func TestDeletedLocalAccountRecordGoesWhenTheProcessLookupStillNamesIt(t *testin
 		if !slices.Contains(listed, kept) {
 			t.Fatalf("%s: accounts %+v; want the existing local account's record refreshed", tc.name, accounts)
 		}
-		if slices.ContainsFunc(searched, func(name string) bool { return name != "fcmx1" }) {
-			t.Fatalf("%s: directory search asked for %v; want only the account the lookup named", tc.name, searched)
+		if slices.ContainsFunc(searched, func(asked string) bool { return asked != "fcmx1:"+strconv.Itoa(deleted) }) {
+			t.Fatalf("%s: directory search asked for %v; want only the account and uid the lookup named", tc.name, searched)
 		}
 	}
 	// Without the cache (Linux) a found answer is taken at its word.
