@@ -4725,15 +4725,32 @@ function Protect-BackupsFolder {
     # inheritable DACL"), the handler stayed in the 1.0.5 form and the older
     # release added its own beside it (GAP-1891). The inherited entries become
     # explicit ones: the same access, no longer inherited. Best effort.
+    # The gateway also refuses its own earlier settings copy and witness when
+    # they inherit their permissions: the gateway writes them private, but a
+    # profile restore or a plain file copy brings them back inherited, and
+    # every later rollback or downgrade then left two handlers (GAP-2050,
+    # GAP-1883). The conversion replaces both files; only this account's own
+    # regular files are made private here.
     $backups = Join-Path $DataDir "backups"
     try {
         if (-not (Test-Path -LiteralPath $backups -PathType Container)) { return }
         if ((Get-Item -LiteralPath $backups -Force).Attributes -band [IO.FileAttributes]::ReparsePoint) { return }
         $acl = Get-Acl -LiteralPath $backups
-        if ($acl.AreAccessRulesProtected) { return }
-        $acl.SetAccessRuleProtection($true, $true)
-        Set-DirectoryAcl $backups $acl
-    } catch { Write-Warn "Could not make $backups private: $($_.Exception.Message)" }
+        if (-not $acl.AreAccessRulesProtected) {
+            $acl.SetAccessRuleProtection($true, $true)
+            Set-DirectoryAcl $backups $acl
+        }
+    } catch { Write-Warn "Could not make $backups private: $($_.Exception.Message)"; return }
+    foreach ($file in @(Get-ChildItem -LiteralPath $backups -File -Force -Filter "claudecode-settings.before-rollback*.json" -ErrorAction SilentlyContinue)) {
+        try {
+            if ($file.Attributes -band [IO.FileAttributes]::ReparsePoint) { continue }
+            if (-not (Test-OwnedByCurrentUser $file.FullName)) { continue }
+            $fileAcl = if ($file.PSObject.Methods["GetAccessControl"]) { $file.GetAccessControl("Access") } else { [IO.FileSystemAclExtensions]::GetAccessControl($file, "Access") }
+            if ($fileAcl.AreAccessRulesProtected) { continue }
+            $fileAcl.SetAccessRuleProtection($true, $true)
+            if ($file.PSObject.Methods["SetAccessControl"]) { $file.SetAccessControl($fileAcl) } else { [IO.FileSystemAclExtensions]::SetAccessControl($file, $fileAcl) }
+        } catch { Write-Warn "Could not make $($file.FullName) private: $($_.Exception.Message)" }
+    }
 }
 
 function Convert-HooksForRollback([string]$From, [string]$BackTo) {
