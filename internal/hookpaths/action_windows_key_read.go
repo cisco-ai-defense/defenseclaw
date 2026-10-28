@@ -171,8 +171,9 @@ func actionWindowsLoopBindings(statement []string, loops map[string][]string) []
 // inside a double-quoted string or an expandable @"..."@ here-string; the
 // argument list of a .NET file read ([IO.File]::ReadAllText(path)) becomes
 // "get-content <args>". In the plain reading (Git Bash): $(...) and a ( that
-// starts a command. Single-quoted text, comments and literal here-strings are
-// not evaluated, so they yield nothing.
+// starts a command. Single-quoted text, comments, literal here-strings,
+// quoted-delimiter here-documents (<<'EOF') and text after an unterminated
+// Git Bash backtick are not evaluated, so they yield nothing.
 func actionWindowsExpressionBodies(text string, plain, hereBody bool, bodies []string) []string {
 	type frame struct {
 		open              int
@@ -182,6 +183,7 @@ func actionWindowsExpressionBodies(text string, plain, hereBody bool, bodies []s
 	}
 	var stack []frame
 	var quote byte
+	var heredocs []actionHeredoc
 	quoteHere := false
 	if hereBody {
 		quote, quoteHere = '"', true
@@ -211,6 +213,9 @@ func actionWindowsExpressionBodies(text string, plain, hereBody bool, bodies []s
 			switch {
 			case c == escape && i+1 < len(text):
 				i++
+			case plain && c == '`' && !actionPlainBacktickClosed(text, i+1):
+				// Git Bash cannot parse the rest: nothing after it runs.
+				return bodies
 			case kind == '"' && !quoteHere:
 				quote = 0
 				i += size - 1
@@ -224,6 +229,9 @@ func actionWindowsExpressionBodies(text string, plain, hereBody bool, bodies []s
 		if c == escape && i+1 < len(text) {
 			i++
 			continue
+		}
+		if plain && c == '`' && !actionPlainBacktickClosed(text, i+1) {
+			return bodies
 		}
 		if kind != 0 {
 			if !plain && i > 0 && text[i-1] == '@' {
@@ -242,7 +250,7 @@ func actionWindowsExpressionBodies(text string, plain, hereBody bool, bodies []s
 			i += size - 1
 			continue
 		}
-		if !plain && c == '#' && (i == 0 || strings.IndexByte(" \t\r\n;|&(", text[i-1]) >= 0) {
+		if c == '#' && (i == 0 || strings.IndexByte(" \t\r\n;|&(", text[i-1]) >= 0) {
 			end := strings.IndexAny(text[i:], "\r\n")
 			if end < 0 {
 				break
@@ -256,6 +264,18 @@ func actionWindowsExpressionBodies(text string, plain, hereBody bool, bodies []s
 				break
 			}
 			i += end + 3
+			continue
+		}
+		if c == '<' && i+1 < len(text) && text[i+1] == '<' && (i == 0 || text[i-1] != '<') {
+			if doc, after, ok := actionQuotedHeredoc(text, i+2); ok {
+				heredocs = append(heredocs, doc)
+				i = after - 1
+				continue
+			}
+		}
+		if c == '\n' && len(heredocs) > 0 {
+			i = actionSkipHeredocBodies(text, i+1, heredocs) - 1
+			heredocs = nil
 			continue
 		}
 		switch c {
@@ -286,6 +306,100 @@ func actionWindowsExpressionBodies(text string, plain, hereBody bool, bodies []s
 		}
 	}
 	return bodies
+}
+
+// actionHeredoc is a pending here-document whose delimiter was quoted
+// (<<'EOF', << "EOF", <<\EOF, <<-'EOF'): the shell does not expand its body.
+type actionHeredoc struct {
+	delim     string
+	stripTabs bool
+}
+
+// actionQuotedHeredoc reads the delimiter word after a << operator at start
+// and reports it only when part of it is quoted. An unquoted delimiter's body
+// is expanded, so it stays scanned (GAP-2397 review row RV2-1).
+func actionQuotedHeredoc(text string, start int) (actionHeredoc, int, bool) {
+	var doc actionHeredoc
+	j := start
+	if j < len(text) && text[j] == '<' {
+		return doc, 0, false
+	}
+	if j < len(text) && text[j] == '-' {
+		doc.stripTabs = true
+		j++
+	}
+	for j < len(text) && (text[j] == ' ' || text[j] == '\t') {
+		j++
+	}
+	var word strings.Builder
+	quoted := false
+	for j < len(text) && strings.IndexByte(" \t\r\n;|&<>()", text[j]) < 0 {
+		switch c := text[j]; c {
+		case '\'', '"':
+			end := strings.IndexByte(text[j+1:], c)
+			if end < 0 {
+				return doc, 0, false
+			}
+			word.WriteString(text[j+1 : j+1+end])
+			quoted = true
+			j += end + 2
+		case '\\':
+			quoted = true
+			if j+1 < len(text) {
+				word.WriteByte(text[j+1])
+			}
+			j += 2
+		default:
+			word.WriteByte(c)
+			j++
+		}
+	}
+	doc.delim = word.String()
+	if !quoted || doc.delim == "" {
+		return doc, 0, false
+	}
+	return doc, min(j, len(text)), true
+}
+
+// actionSkipHeredocBodies returns the offset after the delimiter line of
+// each pending here-document, read in order from start (the line after the
+// operator). A body without its delimiter runs to the end of the text.
+func actionSkipHeredocBodies(text string, start int, docs []actionHeredoc) int {
+	pos := start
+	for _, doc := range docs {
+		for pos < len(text) {
+			end := strings.IndexByte(text[pos:], '\n')
+			next := len(text)
+			line := text[pos:]
+			if end >= 0 {
+				line, next = text[pos:pos+end], pos+end+1
+			}
+			line = strings.TrimSuffix(line, "\r")
+			if doc.stripTabs {
+				line = strings.TrimLeft(line, "\t")
+			}
+			pos = next
+			if line == doc.delim {
+				break
+			}
+		}
+	}
+	return pos
+}
+
+// actionPlainBacktickClosed reports whether a Git Bash backtick command
+// substitution opened just before from has its closing backtick. Without it
+// the shell stops with a syntax error and runs nothing after the backtick.
+func actionPlainBacktickClosed(text string, from int) bool {
+	for j := from; j < len(text); j++ {
+		switch text[j] {
+		case '\\':
+			j++
+		case '`':
+			return true
+		}
+	}
+	return false
 }
 
 // actionWindowsFileReadMethod reports a .NET static method call that reads a
