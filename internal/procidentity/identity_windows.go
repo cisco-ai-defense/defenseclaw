@@ -25,5 +25,11 @@ func of(pid int) (string, bool) {
 	if ticks == 0 {
 		return "", false
 	}
+	// An exited process stays an object while any other process holds a
+	// handle to it, and GetProcessTimes still answers, with its exit time
+	// set. It names no process (GAP-2325), as on Linux and macOS.
+	if exit.HighDateTime != 0 || exit.LowDateTime != 0 {
+		return "", false
+	}
 	return strconv.FormatUint(ticks, 10), true
 }
