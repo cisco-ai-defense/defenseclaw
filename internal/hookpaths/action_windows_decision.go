@@ -433,15 +433,6 @@ type actionWindowsResolvedSpan struct {
 
 // Keep bounded assignment resolution common to audit and enforcement. Only
 // literal assignments and Join-Path children are substituted into commands.
-func actionWindowsResolvedStatements(words []string, cwd, home string) [][]string {
-	spans := actionWindowsResolvedSpans(words, cwd, home)
-	statements := make([][]string, 0, len(spans))
-	for _, span := range spans {
-		statements = append(statements, span.words)
-	}
-	return statements
-}
-
 func actionWindowsResolvedSpans(words []string, cwd, home string) []actionWindowsResolvedSpan {
 	values := make(map[string]string)
 	var spans []actionWindowsResolvedSpan
