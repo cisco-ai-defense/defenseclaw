@@ -2382,6 +2382,27 @@ class TestSetupSplunkCommand(unittest.TestCase):
         self.assertIn("Username:  admin", result.output)
         self.assertIn("Password:  test-splunk-pass", result.output)
 
+    def test_setup_splunk_show_credentials_follows_the_bridge_license(self):
+        """GAP-2423: only a Free bridge env says Web auth is disabled; any other licence says log in."""
+        from defenseclaw.commands.cmd_setup import setup
+
+        env_dir = os.path.join(self.tmp_dir, "splunk-bridge", "env")
+        os.makedirs(env_dir)
+        env_file = os.path.join(env_dir, ".env")
+        for license_uri, free in (("Free", True), ("", False), ("/opt/splunk/etc/licenses/trial.lic", False)):
+            with open(env_file, "w") as f:
+                f.write(f"SPLUNK_LICENSE_URI={license_uri}\nSPLUNK_PASSWORD=test-splunk-pass\n")
+            result = self.runner.invoke(
+                setup, ["splunk", "--show-credentials"], obj=self.app, catch_exceptions=False,
+            )
+            self.assertEqual(result.exit_code, 0, result.output)
+            self.assertIn("Username:  admin", result.output)
+            if free:
+                self.assertIn("Web auth:  disabled in Splunk Free mode", result.output)
+            else:
+                self.assertNotIn("Free mode", result.output, license_uri)
+                self.assertIn("Web auth:  required", result.output)
+
 
 # ---------------------------------------------------------------------------
 # Setup migrate-llm — v4→v5 config rewrite

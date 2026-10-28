@@ -20241,7 +20241,11 @@ def _show_splunk_credentials(data_dir: str) -> None:
         click.echo("  Splunk Web Credentials")
         ux.echo("  ──────────────────────")
         click.echo("    URL:       http://127.0.0.1:8000")
-        click.echo("    Web auth:  disabled in Splunk Free mode; these apply only if Splunk asks for a login")
+        # Same rule as the bridge (bridge_runs_in_free_mode): only SPLUNK_LICENSE_URI=Free has no Web login (GAP-2423).
+        if values.get("SPLUNK_LICENSE_URI", "") == "Free":
+            click.echo("    Web auth:  disabled in Splunk Free mode; these apply only if Splunk asks for a login")
+        else:
+            click.echo("    Web auth:  required (this local Splunk does not run the Free licence); log in with these")
         click.echo("    Username:  admin")
         click.echo(f"    Password:  {password}")
     click.echo()
