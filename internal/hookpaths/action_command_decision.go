@@ -205,6 +205,10 @@ func ActionPrivateKeyRead(command, cwd, home string) bool {
 			// GAP-1823). The previous directories stay candidates: cmd's cd
 			// without /d does not switch the drive.
 			words, start, dirs := scan.words, 0, []string{cwd}
+			// The first statement of the current pipeline: a stage after |
+			// reads what it lists (Get-ChildItem $HOME\.ssh | Select-String
+			// ., RV22-1).
+			var pipeHead []string
 			for i := 0; i <= len(words); i++ {
 				if i < len(words) {
 					switch words[i] {
@@ -214,8 +218,13 @@ func ActionPrivateKeyRead(command, cwd, home string) bool {
 					}
 				}
 				statement := words[start:i]
+				piped := start > 0 && words[start-1] == "|"
+				if !piped {
+					pipeHead = statement
+				}
 				for _, dir := range dirs {
-					if actionPrivateKeyReadWords(statement, dir, home, keyReadWindows, 0) {
+					if actionPrivateKeyReadWords(statement, dir, home, keyReadWindows, 0) ||
+						piped && actionWindowsPipedKeyDirectoryRead(pipeHead, statement, dir, home) {
 						return true
 					}
 				}
@@ -252,6 +261,18 @@ func ActionPrivateKeyRead(command, cwd, home string) bool {
 	// A reader fed by a static stdin redirect (xxd < ~/.ssh/id_ed25519)
 	// reads the file as if it were an operand (GAP-0281).
 	stdin := make(map[*syntax.CallExpr][]string)
+	// A reader after a directory change reads relative to it (cd ~/.ssh &&
+	// grep -r . ., RV22-1). The previous directories stay candidates, as on
+	// a Windows home: the change may fail or sit in a subshell.
+	dirs := []string{cwd}
+	readAt := func(words []string) bool {
+		for _, dir := range dirs {
+			if actionPrivateKeyReadWords(words, dir, home, mode, 0) {
+				return true
+			}
+		}
+		return false
+	}
 	found := false
 	syntax.Walk(file, func(node syntax.Node) bool {
 		if found {
@@ -301,13 +322,21 @@ func ActionPrivateKeyRead(command, cwd, home string) bool {
 			}
 		}
 		if bound < 0 {
-			found = actionPrivateKeyReadWords(words, cwd, home, mode, 0)
+			found = readAt(words)
+			if base := programBase(words[0]); (base == "cd" || base == "pushd") && len(dirs) < 8 {
+				switch {
+				case len(words) == 1:
+					dirs = append(dirs, home)
+				case len(words) == 2 && words[1] != "" && words[1] != "-":
+					dirs = append(dirs, OperandPath(words[1], dirs[len(dirs)-1]))
+				}
+			}
 			return !found
 		}
 		name := actionSoleParameter(call.Args[bound])
 		for _, item := range loops[name] {
 			words[bound] = item
-			if actionPrivateKeyReadWords(words, cwd, home, mode, 0) {
+			if readAt(words) {
 				found = true
 				break
 			}
@@ -484,6 +513,9 @@ func actionPrivateKeyReadWords(words []string, cwd, home string, mode keyReadMod
 	if kind := actionInterpreterKind(words[0]); kind != "" {
 		code, ok := actionInterpreterInlineCode(words, 0)
 		return ok && actionInterpreterReadsPrivateKey(code, kind)
+	}
+	if actionRecursiveKeyDirectoryRead(words, cwd, home, windows) {
+		return true
 	}
 	switch program {
 	case "cat", "head", "tail", "type", "get-content", "gc", "base64",
