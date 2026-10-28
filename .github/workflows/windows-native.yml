@@ -553,6 +553,9 @@ jobs:
       - name: Exact ACL and shared vendor ACE regressions
         if: ${{ !cancelled() }}
         run: ./packaging/windows/tests/enterprise-exact-acl-smoke.ps1
+      - name: Secure Client install marker regression
+        if: ${{ !cancelled() }}
+        run: ./packaging/windows/tests/enterprise-secure-client-install-marker-smoke.ps1
       - name: Standalone forced uninstall restores the administrator Codex policy
         if: ${{ !cancelled() }}
         run: ./packaging/windows/tests/enterprise-forced-uninstall-codex-policy-smoke.ps1
