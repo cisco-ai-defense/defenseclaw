@@ -1424,7 +1424,7 @@ describe('Known limits by lead decision (rel-1-0-4 P1 reconcile)', () => {
 type DocRow = { gap: string; page: string; section?: string; has?: string[]; lacks?: string[] };
 const r105Rows: DocRow[] = [
   { gap: "GAP-2354", page: "support-matrix.mdx", has: ["On a per-user install with the `default` or `permissive` rule pack the call runs", "With the `strict` rule pack, on a managed install and inside a sandbox, the call is denied."], lacks: ["(disk full, database busy), the call is denied."] },
-  { gap: "GAP-2332", page: "scanning/index.mdx", has: ["A skill whose worst finding is MEDIUM, LOW or INFO is installed with the `warning` verdict"], lacks: ["warn on MEDIUM, and allow the rest"] },
+  { gap: "GAP-2332", page: "scanning/index.mdx", has: ["The defaults quarantine CRITICAL and HIGH skills, warn on MEDIUM and queue it for review, and allow LOW and INFO.", "`defenseclaw config get admission.skill` shows the actions in force"], lacks: ["A skill whose worst finding is MEDIUM, LOW or INFO is installed with the `warning` verdict"] },
   { gap: "GAP-2353", page: "guardrail/unified-llm-key.mdx", has: ["While the guardrail is on, the `DEFENSECLAW_LLM_KEY` row still reads `OPTIONAL`", "A local judge's `JUDGE_API_KEY` row reads `NOT_USED`."], lacks: ["correctly classifies them as `NOT_USED` even when the feature is on"] },
   { gap: "GAP-0515", page: "connectors/hermes.mdx", has: ["On Windows, where Hermes has no guard, an administrator's `open` lets the call run during an outage: the user's `hook-failures.jsonl` gets a line with `fail_mode` `open` and `outcome` `fail_open`.", "through the [foreign-hook guard](/docs/enterprise/foreign-hook-guard) while `foreign_hooks` is `remove`"], lacks: ["(service not running, unusable answer, call too large to inspect)", "The administrator-owned hook is stricter"] },
   { gap: "GAP-2350", page: "enterprise/troubleshooting.mdx", has: ["| `security_incomplete` | Linux, macOS, Windows |", "security_complete is false because of:"], lacks: ["| `security_incomplete` | Windows |"] },
@@ -1855,13 +1855,21 @@ describe('doctor hook freshness wording matches cmd_doctor.py (GAP-2351)', () =>
 // GAP-2354 / GAP-2332 / GAP-2353: the three sentences follow the code that
 // decides them; a change there re-opens the page.
 describe('audit-failure tiers, admission defaults and local-provider keys match the code (GAP-2354, GAP-2332, GAP-2353)', () => {
-  it('keeps the per-user degraded allow, the warning verdict below HIGH and OPTIONAL for an enabled guardrail', () => {
+  it('keeps the per-user degraded allow, the skill scanner gate (warn MEDIUM, allow LOW/INFO) and OPTIONAL for an enabled guardrail', () => {
     const hook = source('internal/gateway/agent_hook.go');
     assert.ok(hook.includes('DefenseClaw audit is degraded: this call was allowed, but its audit record could not be written.'), 'agent_hook.go no longer prints the degraded-audit message');
     assert.match(hook, /!managed\.IsManagedEnterprise\(cfg\.DeploymentMode\) &&\s*cfg\.HookPolicyTierForConnector\(connectorName\) != config\.HookPolicyTierStrict &&\s*!sandboxHookForConnector/, 'the audit-failure allow is no longer per-user non-strict outside sandboxes: re-check support-matrix.mdx');
+    // Skills: the scanner gate (fail_on_severity HIGH, review_queue_min
+    // MEDIUM) decides before the built-in map, so LOW and INFO allow.
     const adm = source('internal/policy/admission.go');
-    assert.ok(adm.includes('"MEDIUM": actionWarn, "LOW": actionWarn, "INFO": actionWarn,'), 'builtin admission changed for MEDIUM/LOW/INFO: re-check scanning/index.mdx');
-    assert.ok(source('cli/defenseclaw/enforce/admission.py').includes('"MEDIUM": (_WARN, False), "LOW": (_WARN, False), "INFO": (_WARN, False),'), 'Python builtin admission changed: re-check scanning/index.mdx');
+    assert.match(adm, /derived = derivedScannerGate\(skill\.EffectiveFailOnSeverity\(\), skill\.EffectiveReviewQueueMin\(\)\)/, 'skills no longer take the scanner gate: re-check scanning/index.mdx');
+    assert.match(adm, /case rank >= review:\s*out\[sev\] = actionWarn\s*default:\s*out\[sev\] = actionAllow/, 'the scanner gate no longer allows below review_queue_min: re-check scanning/index.mdx');
+    const settings = source('internal/config/scanner_settings.go');
+    assert.match(settings, /DefaultSkillScannerFailOnSeverity\s*=\s*"HIGH"/, 'skill scanner fail_on_severity default changed: re-check scanning/index.mdx');
+    assert.match(settings, /DefaultSkillScannerReviewQueueMin\s*=\s*"MEDIUM"/, 'skill scanner review_queue_min default changed: re-check scanning/index.mdx');
+    const py = source('cli/defenseclaw/enforce/admission.py');
+    assert.ok(py.includes('_DEFAULT_FAIL_ON_SEVERITY = "HIGH"') && py.includes('_DEFAULT_REVIEW_QUEUE_MIN = "MEDIUM"'), 'Python scanner gate defaults changed: re-check scanning/index.mdx');
+    assert.ok(py.includes('out[sev] = _SHORTHANDS["warn"] if rank >= review else _SHORTHANDS["allow"]'), 'Python scanner gate no longer allows below review_queue_min: re-check scanning/index.mdx');
     const cred = source('cli/defenseclaw/credentials.py');
     assert.match(cred, /def _defenseclaw_llm_key[\s\S]*?getattr\(gc, "enabled", False\):\s*return Requirement\.OPTIONAL/, 'DEFENSECLAW_LLM_KEY is no longer OPTIONAL with the guardrail on: re-check unified-llm-key.mdx');
   });
