@@ -814,6 +814,14 @@ func ResolveConnector(connector, surface, event string, payload []byte) string {
 				boundedOperands, _ := BoundedShellWriteOperands(command, cwd, home)
 				literalOperands = append(literalOperands, boundedOperands...)
 				literalOperands = append(literalOperands, QuotedDynamicCopyDestinations(command, cwd, home)...)
+				// A find that unzips each archive into its stripped name
+				// reaches the state only when an archive's name strips to
+				// it; the gateway may not be able to list the home
+				// (GAP-2404 pod check20).
+				if strings.Contains(command, "%") {
+					root := filepath.Join(home, ".defenseclaw")
+					sourceFacts[StateRootSiblingsPrefix+root] = StateRootSiblings(root)
+				}
 				directoryOperands, directoryUnknown = ShellDirectoryWriteOperands(command, cwd, home, sourceFacts, true, false)
 				truncated = truncated || directoryUnknown
 				truncated = truncated || !parsed
@@ -1264,6 +1272,10 @@ func Decode(value string) (map[string]string, bool) {
 		}
 		if strings.HasPrefix(key, GlobFactPrefix) && (value != "0" && value != "1" ||
 			!filepath.IsAbs(strings.TrimPrefix(key, GlobFactPrefix))) {
+			return nil, false
+		}
+		if strings.HasPrefix(key, StateRootSiblingsPrefix) && (value != "0" && value != "1" ||
+			!filepath.IsAbs(strings.TrimPrefix(key, StateRootSiblingsPrefix))) {
 			return nil, false
 		}
 	}

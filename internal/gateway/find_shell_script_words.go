@@ -4,13 +4,13 @@
 package gateway
 
 import (
-	"os"
 	"path"
 	"strings"
 
 	"mvdan.cc/sh/v3/syntax"
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
+	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
 	"github.com/defenseclaw/defenseclaw/internal/shellparse"
 )
 
@@ -779,17 +779,26 @@ func findStripDirectoriesStayOff(
 	if rootName == "" || !findStripFactsStayOff(facts, find.ID, rootName) {
 		return false
 	}
-	entries, err := os.ReadDir(path.Dir(path.Clean(root)))
-	if err != nil {
+	if lineStaysOff == nil {
+		return hookpaths.StateRootSiblings(root) == "0"
+	}
+	return lineStaysOff()
+}
+
+// findStripSiblingsStayOff reports that no name beside the state root
+// starts with its name (hookpaths.StateRootSiblings). The hook client's
+// listing, read as the user, is used first: a managed gateway runs as
+// _defenseclaw or behind ProtectHome and cannot list the home, so its own
+// listing would refuse every home find (GAP-2404 pod check20). Without
+// the client's fact only a gateway that may read the home lists it.
+func findStripSiblingsStayOff(request trustedActionRequest, root string) bool {
+	if value, present := request.ResolvedWriteTargets[hookpaths.StateRootSiblingsPrefix+root]; present {
+		return value == "0"
+	}
+	if request.SkipLocalFilesystemResolution || request.ProtectedHomeHook {
 		return false
 	}
-	for _, entry := range entries {
-		name := strings.ToLower(entry.Name())
-		if name != rootName && strings.HasPrefix(name, rootName) {
-			return false
-		}
-	}
-	return lineStaysOff == nil || lineStaysOff()
+	return hookpaths.StateRootSiblings(root) == "0"
 }
 
 func findStripRootName(root string) string {
@@ -837,10 +846,21 @@ func findStripFactsStayOff(facts actionfacts.Facts, except int64, rootName strin
 	return true
 }
 
-// findStripLineStaysOffOf judges the other simple commands of the whole
-// command line a hook child was cut from (request.parentPatch): each must
-// stay off as findStripFactsStayOff reads it. It is computed once.
+// findStripLineStaysOffOf judges, for a find under judgment in request,
+// the names beside the state root (findStripSiblingsStayOff) and the other
+// simple commands of the whole command line a hook child was cut from
+// (findStripOtherCommandsStayOffOf).
 func findStripLineStaysOffOf(request trustedActionRequest, root string) func() bool {
+	others := findStripOtherCommandsStayOffOf(request, root)
+	return func() bool {
+		return findStripSiblingsStayOff(request, root) && (others == nil || others())
+	}
+}
+
+// findStripOtherCommandsStayOffOf judges the other simple commands of the
+// whole command line a hook child was cut from (request.parentPatch): each
+// must stay off as findStripFactsStayOff reads it. It is computed once.
+func findStripOtherCommandsStayOffOf(request trustedActionRequest, root string) func() bool {
 	if !request.simpleCommandPass || request.parentPatch == nil {
 		return nil
 	}
