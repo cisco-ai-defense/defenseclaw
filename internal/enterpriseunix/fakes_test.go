@@ -341,6 +341,9 @@ func (r *fakeRunner) Run(_ context.Context, name string, args ...string) (Comman
 		return CommandResult{Stdout: []byte(fmt.Sprintf(`{"effective_digest":%q,"config_generation":%d}`,
 			fakeAppliedPolicyDigest, state.Generation))}, nil
 	}
+	if strings.HasPrefix(strings.Join(args, " "), "enterprise hooks native-otlp-check ") {
+		return CommandResult{Stdout: []byte(`{"ok":true,"accounts":0,"findings":[]}`)}, nil
+	}
 	if strings.HasPrefix(strings.Join(args, " "), "enterprise hooks remove-all ") {
 		return CommandResult{Stdout: []byte(`{"ok":true,"removed":0}`)}, nil
 	}
