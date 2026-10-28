@@ -1284,7 +1284,13 @@ func (c *Config) ResolveLLM(path string) LLMConfig {
 		out.protectedCredentialRequired = true
 	}
 
-	maybeWarnUnknownProvider(out.ProviderPrefix(), path)
+	// provider "custom" with an instance_name is the saved form of
+	// `setup llm --provider custom --instance-name`: the instance's
+	// base_provider_type is the family, resolved where the overlay is
+	// read (GAP-2393), so it is not an unknown prefix.
+	if out.ProviderPrefix() != "custom" || strings.TrimSpace(out.InstanceName) == "" {
+		maybeWarnUnknownProvider(out.ProviderPrefix(), path)
+	}
 	return out
 }
 
