@@ -5,6 +5,7 @@ package enterprisepolicy
 
 import (
 	"encoding/json"
+	"errors"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -317,14 +318,21 @@ func TestOutageBehaviourIsStatedOnlyInTheCapabilityMatrix(t *testing.T) {
 // Client (GAP-2309).
 func TestPluginPagesScopeAdministratorOutageOpenToSecureClient(t *testing.T) {
 	docs := filepath.Join(repoRoot(), "docs-site", "content", "docs")
+	read := 0
+	// The reference/connectors pages exist only in the newer docs layout;
+	// a layout without them is checked on the pages it has.
 	for _, rel := range []string{
 		"connectors/opencode.mdx", "connectors/amp.mdx",
 		"reference/connectors/opencode.mdx", "reference/connectors/amp.mdx",
 	} {
 		data, err := os.ReadFile(filepath.Join(docs, filepath.FromSlash(rel)))
+		if errors.Is(err, fs.ErrNotExist) {
+			continue
+		}
 		if err != nil {
 			t.Fatal(err)
 		}
+		read++
 		for _, sentence := range sentenceBreak.Split(string(data), -1) {
 			low := strings.ToLower(strings.Join(strings.Fields(sentence), " "))
 			if strings.Contains(low, "administrator") && strings.Contains(low, "outage") &&
@@ -333,5 +341,8 @@ func TestPluginPagesScopeAdministratorOutageOpenToSecureClient(t *testing.T) {
 				t.Errorf("%s offers administrator outage open without scoping it to Secure Client: %.240q", rel, sentence)
 			}
 		}
+	}
+	if read == 0 {
+		t.Fatal("no OpenCode or Amp connector page found")
 	}
 }
