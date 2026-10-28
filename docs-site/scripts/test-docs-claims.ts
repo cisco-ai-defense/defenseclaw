@@ -1423,6 +1423,7 @@ describe('Known limits by lead decision (rel-1-0-4 P1 reconcile)', () => {
 // heading of the page; the row reads only that section and its subsections.
 type DocRow = { gap: string; page: string; section?: string; has?: string[]; lacks?: string[] };
 const r105Rows: DocRow[] = [
+  { gap: "GAP-2242", page: "sandboxes/network.mdx", has: ["for example `pack open (sha256:…), network allowlist (balanced), approvals triage`"], lacks: ["for example `profile balanced, pack open`"] },
   { gap: "GAP-2360", page: "guardrail/index.mdx", has: ["| **Select hook fail mode** *(asked only when this run turns the guardrail on or switches between observe and action;", "`defenseclaw init` already turns the guardrail on, so a later run that keeps the mode does not ask it."], lacks: ["asked on first setup or when the mode changes", "there is no hook fail mode question"] },
   { gap: "GAP-2235", page: "guardrail/unified-llm-key.mdx", has: ["and no `--instance-name` drops the instance", "binding, so the role stops using the custom instance."] },
   { gap: "GAP-2249", page: "stories/observe-claude-code.mdx", has: ["through its [native hooks](/docs/connectors/claudecode).", "Host setup turns Claude Code's native OpenTelemetry export off", "`CLAUDE_CODE_ENABLE_TELEMETRY=0`", "DefenseClaw sees Claude Code through its hooks only. Only an isolated OpenShell sandbox keeps native logs and metrics."], lacks: ["receives its native OpenTelemetry logs and metrics", "native hooks and OpenTelemetry]"] },
