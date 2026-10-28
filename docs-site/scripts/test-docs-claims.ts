@@ -1640,9 +1640,13 @@ const r105Rows: DocRow[] = [
   { gap: "GAP-2391", page: "guardrail/unified-llm-key.mdx", has: ["`audit export` shows it as `action=config.change.applied` with `actor=cli:<your user name>`", "`defenseclaw.admin.target_ref=config:dotenv:<ENV>`"], lacks: ["action=config-update target=config:dotenv:<ENV>"] },
   { gap: "GAP-2391", page: "reference/keys.mdx", has: ["(`audit export` action `config.change.applied`, `structured` `defenseclaw.admin.operation=config-update` and `defenseclaw.admin.target_ref=config:dotenv:<ENV>`)"], lacks: ["record a `config-update` audit event with target `dotenv:<ENV>`"] },
   { gap: "GAP-2391", page: "reference/cli.mdx", has: ["Configuration changes are audit rows with action `config.change.applied`;"], lacks: ["Configuration changes are audit rows (action `config-update`)."] },
-  { gap: "GAP-0730", page: "observability/sandbox-telemetry.mdx", has: ["A changed root-owned `gateway.toml` render on its own (field `gateway configuration`) is reported the same way but does not pause"] },
+  { gap: "GAP-0730", page: "observability/sandbox-telemetry.mdx", has: ["A changed root-owned `gateway.toml` render on its own (field `gateway_configuration`) is reported the same way but does not pause"], lacks: ["(field `gateway configuration`)"] },
   { gap: "GAP-0730", page: "enterprise/sandboxes.mdx", has: ["A hand edit of the rendered `gateway.toml` itself (only root can make it) is reported with the same record, and status and doctor show the drift, but it does not pause", "| Settings drift (not for a changed rendered `gateway.toml` alone, which is reported without a pause) |"] },
-  { gap: "GAP-1883", page: "get-started/upgrade.mdx", section: "Upgrade", has: ["To go back to an earlier release, use `defenseclaw rollback` or `defenseclaw upgrade --version X.Y.Z`.", "Running an older release's installer (`install.sh` or `install.ps1` of that release) directly over a newer install is not a supported downgrade", "`defenseclaw doctor` then reports two DefenseClaw PreToolUse handlers"] },
+  { gap: "GAP-1883", page: "get-started/upgrade.mdx", section: "Upgrade", has: ["To go back to an earlier release, use `defenseclaw rollback` or `defenseclaw upgrade --version X.Y.Z`.", "Running an older release's installer (`install.sh` or `install.ps1` of that release) directly over a newer install is not a supported downgrade", "`defenseclaw doctor` reports two DefenseClaw PreToolUse handlers", "Claude Code tool calls fail in the older release's hook (`unknown flag: --connector`)"] },
+  { gap: "GAP-1883", page: "get-started/windows/install-lifecycle.mdx", section: "Upgrade", has: ["running an older release's `install.ps1` over a newer install is not a supported downgrade", "use `defenseclaw rollback` or `defenseclaw upgrade --version X.Y.Z`"] },
+  { gap: "GAP-2391", page: "reference/cli.mdx", has: ["they are audit rows with action `config.change.applied` and others."], lacks: ["they are audit rows with action `config-update` and others."] },
+  { gap: "GAP-2262", page: "guardrail/unified-llm-key.mdx", section: "Undo", has: ["defenseclaw setup guardrail --non-interactive --detection-strategy regex_only", "Without `--non-interactive` the command starts the full setup wizard"], lacks: ["and run `defenseclaw setup guardrail --detection-strategy regex_only` to turn the judge off."] },
+  { gap: "GAP-2392", page: "tui.mdx", section: "Panels", has: ["The quick-action row at the end of Overview lists both as `[G] Gateway` and `[z] AI Discovery`", "The hint line above the status line is not a key list on Overview"], lacks: ["The key row shows both actions at 80 columns."] },
 ];
 
 function pageSection(name: string, heading?: string): string {
@@ -1995,6 +1999,32 @@ describe('keys set audit row matches the pages (GAP-2391)', () => {
     const keys = source('cli/defenseclaw/commands/cmd_keys.py');
     assert.ok(keys.includes('action=ACTION_CONFIG_UPDATE,') && keys.includes('target_type="config",') && keys.includes('target_id=f"dotenv:{env_name}",'), 'keys set audit target changed: re-check the GAP-2391 pages');
     assert.ok(source('cli/defenseclaw/commands/cmd_audit.py').includes('config changes included (action config.change.applied):'), 'audit --help names the old export action');
+    // Class residual (checker it12): the Go audit export help and its --include-activity note.
+    const exp = source('internal/cli/audit_export.go');
+    assert.ok(!exp.includes('(action config-update and others)'), 'audit export help or the --include-activity note names the stored action, not the exported one');
+    assert.equal((exp.match(/\(action config\.change\.applied and others\)/g) ?? []).length, 2, 'audit export help and the --include-activity note must name config.change.applied');
+  });
+});
+
+// GAP-2262: --non-interactive --detection-strategy regex_only turns the judge off.
+describe('Undo turns the judge off without the wizard (GAP-2262)', () => {
+  it('regex_only disables the judge in setup guardrail', () => {
+    const py = source('cli/defenseclaw/commands/cmd_setup.py');
+    assert.ok(py.includes('elif detection_strategy == "regex_only":\n                gc.judge.enabled = False'), 'setup guardrail --detection-strategy regex_only no longer turns the judge off: re-check unified-llm-key.mdx Undo');
+    assert.ok(py.includes('@click.option("--non-interactive", is_flag=True, help="Use flags instead of prompts")'), 'setup guardrail lost --non-interactive: re-check unified-llm-key.mdx Undo');
+  });
+});
+
+// GAP-2392: Overview's hint line shows notices or tips, never a KEYS row; the
+// G and z keys are in the quick-action row of the Overview body.
+describe('Overview G and z keys are where tui.mdx says (GAP-2392)', () => {
+  it('quick actions list G and z; the Overview hint is a notice or a tip', () => {
+    const app = source('cli/defenseclaw/tui/app.py');
+    assert.ok(app.includes('("G", "Gateway"),') && app.includes('("z", "AI Discovery"),'), 'Overview quick actions changed: re-check tui.mdx Panels');
+    const hint = source('cli/defenseclaw/tui/widgets/hint_bar.py');
+    const ov = hint.slice(hint.indexOf('def _overview_hint'), hint.indexOf('def _alerts_hint'));
+    assert.ok(ov.length > 0 && !ov.includes('KEYS'), 'Overview hint line now has a KEYS row: re-check tui.mdx Panels');
+    assert.ok(ov.includes('"Press 2 for Alerts."') && ov.includes('return self.next_tip()'), 'Overview hint notices changed: re-check tui.mdx Panels');
   });
 });
 
@@ -2006,6 +2036,7 @@ describe('rendered gateway.toml drift is reported without a pause (GAP-0730)', (
     assert.ok(go.includes('renderedGatewayDriftField     = "gateway configuration"'), 'rendered drift field renamed: re-check observability/sandbox-telemetry.mdx and enterprise/sandboxes.mdx');
     assert.ok(go.includes('if item.Field != renderedGatewayDriftField || item.Have != "changed" {'), 'blockingOpenShellDrift changed: a changed render may pause again, re-check the GAP-0730 pages');
     assert.ok(go.includes('drift = blockingOpenShellDrift(drift)'), 'readyOpenShell no longer filters drift: re-check the GAP-0730 pages');
+    assert.ok(go.includes('return "gateway_configuration"') && go.includes('driftFieldInvalid.ReplaceAllString(strings.ToLower(field), "_")'), 'driftEventField changed: re-check the field value sandbox-telemetry.mdx names');
   });
 });
 

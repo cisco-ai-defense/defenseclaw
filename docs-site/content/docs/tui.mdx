@@ -45,7 +45,12 @@ arrow keys, Page Up/Page Down or End to reach lower metrics such as Agents.
 ![DefenseClaw TUI Overview panel: the tab bar, hook call, block, finding and guardrail cards, the connector scope, services and enforcement summaries, and the Restart Gateway, Run Doctor and Scan AI Agents buttons](/images/tui/overview.png)
 
 On Overview, press `G` to start or restart the gateway and `z` to enable or run
-AI Discovery. The key row shows both actions at 80 columns.
+AI Discovery. The quick-action row at the end of Overview lists both as
+`[G] Gateway` and `[z] AI Discovery` (at 80x24, scroll down to it). The hint
+line above the status line is not a key list on Overview: it shows the most
+urgent notice, for example `500 recent critical/high alert events need review.
+Press 2 for Alerts.`, and a rotating tip when there is none; press `?` for
+every key.
 
 Switch panels with the number/letter key shown, from any panel (only an open
 Setup form or a `/` search box types digits and letters), or cycle with `Tab` /

@@ -662,7 +662,13 @@ defenseclaw setup llm \
 
 ## Undo
 
-Remove the line from `~/.defenseclaw/.env` and run `defenseclaw setup guardrail --detection-strategy regex_only` to turn the judge off.
+Remove the line from `~/.defenseclaw/.env` and turn the judge off with:
+
+```bash
+defenseclaw setup guardrail --non-interactive --detection-strategy regex_only
+```
+
+`guardrail status` then shows `regex_only` under Scan and `off` under Judge for each connector; the mode, fail mode and rule pack stay as they were. Without `--non-interactive` the command starts the full setup wizard and its judge question still defaults to yes.
 
 ## Reference
 
