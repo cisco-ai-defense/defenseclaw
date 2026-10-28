@@ -46,6 +46,11 @@ func TestR105WindowsQuotedHeredocIsText(t *testing.T) {
 		{"cat > notes.txt <<'EOF'\n$(cat ~/.ssh/id_rsa)", true},
 		{"echo `date` $(cat ~/.ssh/id_rsa)", true},
 		{"Write-Output \"a`nb $(Get-Content ~/.ssh/id_ed25519)\"", true},
+		// RV4-1: an unquoted here-document before a quoted one on the same
+		// line keeps its expanded body scanned.
+		{"cat <<B; cat <<'A'\n$(cat ~/.ssh/id_ed25519)\nB\nhello\nA", true},
+		{"cat <<B <<'A'\n$(cat ~/.ssh/id_ed25519)\nB\nhello\nA", true},
+		{"cat <<B > x; cat <<'A' > y\necho $(cat ~/.ssh/id_rsa)\nB\nhello\nA\necho done", true},
 	} {
 		if got := ActionPrivateKeyRead(tc.command, cwd, home); got != tc.want {
 			t.Errorf("ActionPrivateKeyRead(%q) = %t, want %t", tc.command, got, tc.want)

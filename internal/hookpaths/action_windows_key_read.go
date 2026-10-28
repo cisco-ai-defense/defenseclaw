@@ -269,8 +269,10 @@ func actionWindowsExpressionBodies(text string, plain, hereBody bool, bodies []s
 		if c == '<' && i+1 < len(text) && text[i+1] == '<' && (i == 0 || text[i-1] != '<') {
 			if doc, after, ok := actionQuotedHeredoc(text, i+2); ok {
 				heredocs = append(heredocs, doc)
-				i = after - 1
-				continue
+				if doc.quoted {
+					i = after - 1
+					continue
+				}
 			}
 		}
 		if c == '\n' && len(heredocs) > 0 {
@@ -313,11 +315,15 @@ func actionWindowsExpressionBodies(text string, plain, hereBody bool, bodies []s
 type actionHeredoc struct {
 	delim     string
 	stripTabs bool
+	// quoted is false for an unquoted delimiter (<<EOF): its body is
+	// expanded and must stay scanned (RV4-1).
+	quoted bool
 }
 
 // actionQuotedHeredoc reads the delimiter word after a << operator at start
-// and reports it only when part of it is quoted. An unquoted delimiter's body
-// is expanded, so it stays scanned (GAP-2397 review row RV2-1).
+// and reports every pending here-document, with quoted set when part of the
+// delimiter is quoted. An unquoted delimiter's body is expanded, so it stays
+// scanned (GAP-2397 review rows RV2-1, RV4-1).
 func actionQuotedHeredoc(text string, start int) (actionHeredoc, int, bool) {
 	var doc actionHeredoc
 	j := start
@@ -364,9 +370,10 @@ func actionQuotedHeredoc(text string, start int) (actionHeredoc, int, bool) {
 		}
 	}
 	doc.delim = word.String()
-	if !quoted || doc.delim == "" {
+	if doc.delim == "" {
 		return doc, 0, false
 	}
+	doc.quoted = quoted
 	return doc, min(j, len(text)), true
 }
 
@@ -374,8 +381,15 @@ func actionQuotedHeredoc(text string, start int) (actionHeredoc, int, bool) {
 // each pending here-document, read in order from start (the line after the
 // operator). When a delimiter line is never found (a malformed here-document
 // or a delimiter spelling this reading does not model) it returns start, so
-// the rest stays scanned: over-block, never under-block (RV3-1).
+// the rest stays scanned: over-block, never under-block (RV3-1). It also
+// returns start when any pending here-document is unquoted, because its
+// expanded body lies on these lines (cat <<B; cat <<'A', RV4-1).
 func actionSkipHeredocBodies(text string, start int, docs []actionHeredoc) int {
+	for _, doc := range docs {
+		if !doc.quoted {
+			return start
+		}
+	}
 	pos := start
 	for _, doc := range docs {
 		found := false
