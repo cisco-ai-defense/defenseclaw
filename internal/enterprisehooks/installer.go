@@ -193,6 +193,9 @@ func Verify(ctx context.Context, opts InstallOptions) (InstallResult, error) {
 	if err := validateUserDataDir(home, dataDir, uid); err != nil {
 		return InstallResult{}, err
 	}
+	if err := verifyOwnedDataDirModes(home, dataDir, uid); err != nil {
+		return InstallResult{}, err
+	}
 
 	reg := opts.Registry
 	if reg == nil {
