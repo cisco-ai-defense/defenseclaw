@@ -524,7 +524,8 @@ ready. Once the account is fixed, the next reconcile (within a minute) clears th
 warning.
 
 When the guardian is refused by a path in the user's own home (a link, a file where a
-folder belongs, a folder where a file belongs, or a folder the worker cannot read),
+folder belongs, a folder where a file belongs, or a folder the worker cannot read,
+other than `~/.defenseclaw` and its hooks folder, which the guardian sets back to `0700`),
 `status`, `verify` and `reconcile` report the warning `guardian_target_user_path`,
 which names the path. It does not fail `reconcile`, `verify`,
 `detect.sh --require-healthy` or `security_complete`, because only that account is
@@ -556,6 +557,8 @@ lists every user and connector with its state.
 ### When a user breaks their own setup (Linux and macOS)
 
 A user can break files DefenseClaw needs in their own account, for example by replacing an agent's config folder with a link. That account is then unprotected for the affected per-user agents; everyone else stays protected. The guardian reports `guardian_target_user_path` (a path in the user's home refused it; does not fail `verify`) or `guardian_target_failed` (sets `security_complete: false`). Read `warnings[]` in `status --json` to find the account.
+
+`~/.defenseclaw` and `~/.defenseclaw/hooks` follow one rule. While each is a real folder the user owns, the guardian sets its mode back to `0700` within a minute, also after `chmod 000`, and reports nothing. A link or a file in place of either folder is not changed: it is reported as `guardian_target_user_path` until the user puts the folder back.
 
 ## Rotate per-user credentials
 
