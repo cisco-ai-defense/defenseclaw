@@ -11,6 +11,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"golang.org/x/sys/windows"
 )
 
@@ -213,21 +214,72 @@ func TestAtomicTransformV2UninstallAcceptsEnrolledUsersLegacyNamespace(t *testin
 			t.Fatal(err)
 		}
 	}
+	// inheritDACL gives the namespace's parent sddl (inheritable entries)
+	// and makes the namespace an ordinary unprotected child of it, as a
+	// copied or restored .claude folder is (GAP-1539).
+	inheritDACL := func(t *testing.T, path, parentSDDL string) {
+		t.Helper()
+		setDACL(t, filepath.Dir(path), parentSDDL)
+		emptyDescriptor, err := windows.SecurityDescriptorFromString("D:")
+		if err != nil {
+			t.Fatal(err)
+		}
+		empty, _, err := emptyDescriptor.DACL()
+		if err != nil || empty == nil {
+			t.Fatalf("empty DACL: %v", err)
+		}
+		if err := windows.SetNamedSecurityInfo(path, windows.SE_FILE_OBJECT,
+			windows.DACL_SECURITY_INFORMATION|windows.UNPROTECTED_DACL_SECURITY_INFORMATION,
+			nil, nil, empty, nil); err != nil {
+			t.Fatal(err)
+		}
+		security, err := windows.GetNamedSecurityInfo(path, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION)
+		if err != nil {
+			t.Fatal(err)
+		}
+		control, _, err := security.Control()
+		if err != nil || control&windows.SE_DACL_PROTECTED != 0 {
+			t.Fatalf("fixture namespace DACL is still protected: %s, %v", security.String(), err)
+		}
+	}
+	// A managed install grants its gateway service read access on .claude
+	// (GAP-1539): the pin is the virtual account the Setup passes.
+	t.Setenv(managed.DeploymentModeEnv, managed.DeploymentModeManagedEnterprise)
+	t.Setenv(managed.WindowsServiceAccountEnv, `NT SERVICE\DefenseClawGap1539Test`)
+	gateway, err := managed.WindowsServiceAccountSID(`NT SERVICE\DefenseClawGap1539Test`)
+	if err != nil || gateway == nil {
+		t.Fatalf("derive the test gateway service SID: %v", err)
+	}
 	for _, tc := range []struct {
 		name  string
 		owner *windows.SID
 		dacl  string
-		ok    bool
+		// inherited puts dacl on the profile folder and lets the namespace
+		// inherit it instead of setting a protected DACL on it.
+		inherited bool
+		ok        bool
 		// knownIssue skips a row that fails under an elevated administrator
 		// token without SeBackupPrivilege (the GitHub runner, the preflight
 		// clones); LocalSystem passes it.
 		knownIssue string
 	}{
-		{"enrolled user's private namespace", target, "D:P(A;;FA;;;SY)(A;;FA;;;" + target.String() + ")", true,
+		{"enrolled user's private namespace", target, "D:P(A;;FA;;;SY)(A;;FA;;;" + target.String() + ")", false, true,
 			"GAP-1738: known 1.0.4 issue, fixed in 1.0.5"},
-		{"enrolled user's namespace with Administrators", target, "D:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;FA;;;" + target.String() + ")", true, ""},
-		{"another account's namespace", foreign, "D:P(A;;FA;;;SY)(A;;FA;;;" + foreign.String() + ")", false, ""},
-		{"enrolled user's namespace shared with everyone", target, "D:P(A;;FA;;;SY)(A;;FA;;;WD)(A;;FA;;;" + target.String() + ")", false, ""},
+		{"enrolled user's namespace with Administrators", target, "D:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;FA;;;" + target.String() + ")", false, true, ""},
+		{"another account's namespace", foreign, "D:P(A;;FA;;;SY)(A;;FA;;;" + foreign.String() + ")", false, false, ""},
+		{"enrolled user's namespace shared with everyone", target, "D:P(A;;FA;;;SY)(A;;FA;;;WD)(A;;FA;;;" + target.String() + ")", false, false, ""},
+		{"enrolled user's namespace inheriting the profile's entries", target,
+			"D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;FA;;;" + target.String() + ")", true, true, ""},
+		{"enrolled user's namespace inheriting an entry for everyone", target,
+			"D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;FA;;;WD)(A;OICI;FA;;;" + target.String() + ")", true, false, ""},
+		{"enrolled user's namespace inheriting the managed gateway's read entry", target,
+			"D:P(A;;0x1200a9;;;" + gateway.String() + ")(A;OICIIO;GXGR;;;" + gateway.String() + ")" +
+				"(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;FA;;;" + target.String() + ")", true, true, ""},
+		{"enrolled user's namespace inheriting a managed gateway write entry", target,
+			"D:P(A;OICI;0x1301bf;;;" + gateway.String() + ")" +
+				"(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;FA;;;" + target.String() + ")", true, false, ""},
+		{"another account's namespace inheriting the profile's entries", foreign,
+			"D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;FA;;;" + foreign.String() + ")", true, false, ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if tc.knownIssue != "" && !current.IsWellKnown(windows.WinLocalSystemSid) {
@@ -245,7 +297,11 @@ func TestAtomicTransformV2UninstallAcceptsEnrolledUsersLegacyNamespace(t *testin
 			}
 			setOwner(t, path, target, false)
 			setOwner(t, legacy, tc.owner, true)
-			setDACL(t, legacy, tc.dacl)
+			if tc.inherited {
+				inheritDACL(t, legacy, tc.dacl)
+			} else {
+				setDACL(t, legacy, tc.dacl)
+			}
 			err := atomicTransformFileV2(path, stateDir, 0o600,
 				atomicTransformV2Options{preserveExistingProtection: true, expectedOwner: target},
 				func([]byte, bool) (atomicTransformResult, error) {
