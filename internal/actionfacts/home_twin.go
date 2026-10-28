@@ -263,7 +263,7 @@ func optionHomeAnchoredWord(word *syntax.Word) (*syntax.Lit, *syntax.Word, bool)
 // trusted-home rewrite can spell as ActiveHome exactly.
 func optionHomeRewriteWord(word *syntax.Word) (*syntax.Word, bool) {
 	_, rest, ok := optionHomeAnchoredWord(word)
-	if !ok || !(plainHomeRewriteWord(rest) || quotedPlainHomeRewriteWord(rest)) {
+	if !ok || (!plainHomeRewriteWord(rest) && !quotedPlainHomeRewriteWord(rest)) {
 		return nil, false
 	}
 	return rest, true
