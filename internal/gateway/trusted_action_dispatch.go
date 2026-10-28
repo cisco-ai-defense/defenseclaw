@@ -797,8 +797,9 @@ func withActiveStateTargetMention(
 ) []RuleFinding {
 	// A pattern, brace list, rsync or git clean that expands onto the
 	// state names no path fact, so it is proved from the shell words
-	// (GAP-2047).
-	if !globbedStateMutation(facts) && !globbedStateMutationThroughLink(facts, request) {
+	// (GAP-2047); so is an archive extraction into it (GAP-2415).
+	if !globbedStateMutation(facts) && !globbedStateMutationThroughLink(facts, request) &&
+		!archiveExtractsIntoState(facts, request) {
 		command, known := trustedBashCommandInput(request.Input)
 		if !known || !hookpaths.ActionStateTargetMention(command, request.Input.CWD, request.Input.ActiveHome) &&
 			!factsHaveFindHandOff(facts) && !stateOperandThroughLink(facts, request) {
