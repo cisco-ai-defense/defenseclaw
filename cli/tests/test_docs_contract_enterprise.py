@@ -650,6 +650,8 @@ def test_windows_docs_say_how_to_leave_bundle_mode() -> None:
     windows = (DOCS / "enterprise/windows.mdx").read_text(encoding="utf-8")
     assert "\n## Remove\n" in windows
     assert "\n### Run Setup as LocalSystem\n" in windows
+
+
 def _table_cells(line: str) -> int:
     """Count the cells GFM sees in a table row (code spans and escaped pipes do not split)."""
     seps = 0

@@ -1537,6 +1537,8 @@ func runEnterpriseHookWorkerProcess(ctx context.Context, cmd *exec.Cmd, uid int)
 	gaveUp = true
 	enterpriseHookWorkersStuck.set(uid, true)
 	return true, nil
+}
+
 // enterpriseHookWorkerReadsLaunchd says whether this guardian reads each
 // account's launchd user domain for its worker: a root guardian on macOS.
 // Replaceable in tests.

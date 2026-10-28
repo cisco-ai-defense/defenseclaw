@@ -2249,6 +2249,8 @@ func issuesNarrowed(resolved, original parseOutput) bool {
 		return false
 	}
 	return dropped
+}
+
 // findRewriteKeepsOnlyEmbeddedPartial reports a home rewrite whose parse is
 // find commands, alone or piped into xargs, left partial only by the
 // command find or xargs runs (GAP-2122). The shell expands the starting
