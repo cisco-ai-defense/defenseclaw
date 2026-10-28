@@ -25,6 +25,7 @@ func TestClaudeCodePerUserSetupTakesBackTheFailModeCarrier(t *testing.T) {
 		name     string
 		opts     func(SetupOpts) SetupOpts
 		recorded string // what an earlier setup wrote and recorded; "" for a fresh install
+		absent   bool   // the backup records the carrier taken away; current is written back over it
 		current  string // what settings.json holds before the setup ("" for absent)
 		want     string // "" for absent
 	}{
@@ -33,6 +34,11 @@ func TestClaudeCodePerUserSetupTakesBackTheFailModeCarrier(t *testing.T) {
 		{name: "1.0.3 upgrade, product-owned open of a saved open", recorded: "open", current: "open"},
 		{name: "earlier 1.0.4 build, product-owned closed", recorded: "closed", current: "closed"},
 		{name: "the user changed it", recorded: "closed", current: "open", want: "open"},
+		// GAP-2388: rollback to 1.0.3 and roll forward. The live backup is the
+		// one this setup wrote (carrier recorded absent); the 1.0.3 gateway put
+		// the saved mode back.
+		{name: "an earlier release wrote back the saved mode", absent: true, current: "open"},
+		{name: "a different value after the absence stays", absent: true, current: "closed", want: "closed"},
 		{name: "managed install keeps the administrator's mode",
 			opts: func(o SetupOpts) SetupOpts { o.ManagedEnterprise = true; o.HookFailMode = "open"; return o },
 			want: "open"},
@@ -69,6 +75,28 @@ func TestClaudeCodePerUserSetupTakesBackTheFailModeCarrier(t *testing.T) {
 			}
 			if err := c.Setup(context.Background(), opts); err != nil {
 				t.Fatal(err)
+			}
+			if tc.absent {
+				data, err := os.ReadFile(settingsPath)
+				if err != nil {
+					t.Fatal(err)
+				}
+				var settings map[string]interface{}
+				if err := json.Unmarshal(data, &settings); err != nil {
+					t.Fatal(err)
+				}
+				env, _ := settings["env"].(map[string]interface{})
+				if env == nil {
+					env = map[string]interface{}{}
+					settings["env"] = env
+				}
+				env[carrier] = tc.current
+				if data, err = json.Marshal(settings); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(settingsPath, data, 0o600); err != nil {
+					t.Fatal(err)
+				}
 			}
 			if tc.recorded != "" {
 				// The settings and backup an earlier setup or release left.

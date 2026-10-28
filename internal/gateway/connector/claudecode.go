@@ -2078,6 +2078,16 @@ func (c *ClaudeCodeConnector) patchClaudeCodeOtelEnv(opts SetupOpts) error {
 					currentString, isString := current.(string)
 					remove = present && isString && currentString == previousValue
 				}
+				// A per-user setup took the fail-mode carrier away; an earlier
+				// release run since (a rollback to 1.0.3 and its gateway start)
+				// wrote it back with the saved mode, and a roll forward kept it
+				// as the user's (GAP-2388). That value is the earlier release's
+				// render, not the user's; a different value stays.
+				if wasAbsent && present && key == "DEFENSECLAW_FAIL_MODE" &&
+					!opts.ManagedEnterprise && !opts.SecureClientHookDelivery {
+					currentString, _ := current.(string)
+					remove = currentString == claudeCodeEarlierReleaseFailMode(opts)
+				}
 				if !remove {
 					continue
 				}
@@ -2233,6 +2243,16 @@ func claudeCodeOtelValueLooksManaged(key string, value interface{}, managed stri
 	default:
 		return false
 	}
+}
+
+// claudeCodeEarlierReleaseFailMode is the DEFENSECLAW_FAIL_MODE value a
+// 1.0.3 or older per-user setup wrote into the Claude env for opts: the saved
+// hook fail mode, open when none is saved.
+func claudeCodeEarlierReleaseFailMode(opts SetupOpts) string {
+	if strings.TrimSpace(opts.HookFailMode) == "" {
+		return "open"
+	}
+	return normalizeHookFailMode(opts.HookFailMode)
 }
 
 // claudeCodeEarlierReleaseEnv lists Claude env values that earlier releases
