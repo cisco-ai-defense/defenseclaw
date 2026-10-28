@@ -24844,6 +24844,13 @@ function Get-DefenseClawStandaloneManifestAdoption {
         if ($gatewayRemoved -lt $removedRows) {
             $excused += $removedRows - $gatewayRemoved
         }
+        # Next to a row waiting for its account's next sign-in the gateway
+        # counts neither kind (its counts are all or nothing), so the waiting
+        # rows are counted here too: a removed profile and a signed-out
+        # account kept repair failing (GAP-1657).
+        if ($awaitingSignIn -le 0) {
+            $excused += $waitingRows
+        }
     }
     if ($folderRows -gt 0) {
         # Every failed row must be one of these, a waiting row or a removed
