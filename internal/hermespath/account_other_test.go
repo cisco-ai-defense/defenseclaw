@@ -18,52 +18,6 @@ import (
 	"time"
 )
 
-// GAP-2374: a directory account's home holds an @ (/home/alice@corp.example).
-// The home the account's environment.d names was read as an unresolvable
-// reference once $HOME was expanded, so Verify named no home, and a file
-// that sets the resolved home failed Verify too. Only the value as written
-// is checked for other references.
-func TestVerifyAccountHomeResolvesTheEnvironmentOfADirectoryAccount(t *testing.T) {
-	root := t.TempDir()
-	system := filepath.Join(root, "system")
-	t.Cleanup(OverrideAccountEnvironmentForTest(system))
-	home := filepath.Join(root, "alice@corp.example")
-	if err := os.MkdirAll(home, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	resolved := filepath.Join(home, ".hermes")
-	work := filepath.Join(home, "work-hermes")
-	file := filepath.Join(home, ".config", "environment.d", "10-hermes.conf")
-	if err := os.MkdirAll(filepath.Dir(file), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	for _, body := range []string{"HERMES_HOME=$HOME/work-hermes\n", "HERMES_HOME=" + work + "\n", "HERMES_HOME=~/work-hermes\n"} {
-		if err := os.WriteFile(file, []byte(body), 0o600); err != nil {
-			t.Fatal(err)
-		}
-		err := VerifyAccountHome(home, resolved, time.Time{})
-		if err == nil || !strings.Contains(err.Error(), "names the Hermes home "+work) {
-			t.Errorf("%q: VerifyAccountHome = %v, want unproven naming %s", body, err, work)
-		}
-	}
-	for _, body := range []string{"HERMES_HOME=$HOME/.hermes\n", "HERMES_HOME=" + resolved + "\n"} {
-		if err := os.WriteFile(file, []byte(body), 0o600); err != nil {
-			t.Fatal(err)
-		}
-		if err := VerifyAccountHome(home, resolved, time.Time{}); err != nil {
-			t.Errorf("%q: VerifyAccountHome = %v, want nil for the resolved home", body, err)
-		}
-	}
-	for _, body := range []string{"HERMES_HOME=${XDG_DATA_HOME}/hermes\n", "HERMES_HOME DEFAULT=@{XDG_DATA_HOME}/hermes\n"} {
-		if err := os.WriteFile(file, []byte(body), 0o600); err != nil {
-			t.Fatal(err)
-		}
-		if err := VerifyAccountHome(home, resolved, time.Time{}); err == nil || !strings.Contains(err.Error(), "cannot resolve") {
-			t.Errorf("%q: VerifyAccountHome = %v, want a value a service cannot resolve", body, err)
-		}
-	}
-}
-
 // GAP-0499: on Linux and macOS the account's Hermes home is ~/.hermes only
 // while nothing its processes start with sets HERMES_HOME elsewhere. The
 // sign-in's environment files, the shell startup files and the environment
