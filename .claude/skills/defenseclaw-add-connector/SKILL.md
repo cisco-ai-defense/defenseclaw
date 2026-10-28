@@ -117,7 +117,7 @@ Enterprise (per OS):
 8. **Stop events:** put the vendor's stop and session-end events in `foreignHookStopEvent`. Otherwise a fail-closed standalone session loops on the stop hook.
 9. **Teardown:** teardown must recognize every command form ever rendered (legacy Windows forms, script versus admin binary). Keep old forms as teardown identities.
 10. **Enterprise guard:** a guarded connector must run the admin-owned `defenseclaw-hook ... --enterprise-managed` (or call `--foreign-hook-check`), never a user-writable script (Devin, `0f728f8b`).
-11. **Secure Client:** the Secure Client profile must stay byte-identical. Never edit `*-secure-client.*` templates, `secureClientPluginAssets`, the three-connector Windows certified set, or the macOS allow-list.
+11. **Secure Client:** the Secure Client profile must stay byte-identical. Do not change frozen Secure Client assets without an explicitly requested scope. The requested OpenCode V1 removal ports its Secure Client plugin to the shared V2-only adapter; its account/service verification remains unchanged. Other `*-secure-client.*` templates, the three-connector Windows certified set and the macOS allow-list stay frozen.
 12. **Hygiene:** don't hand-edit generated `openwiki/` pages. Don't spell retired connector names; `cli/tests/test_retired_connector_names.py` scans every tracked file. Keep host names, accounts and local paths out of the repository.
 
 ## End-to-end order

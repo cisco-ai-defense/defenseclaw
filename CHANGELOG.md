@@ -10,7 +10,7 @@ for current behavior.
 
 ## [Unreleased] — 1.0.4
 
-- OpenCode v2 connector contract and dependency-free default plugin definition, with the v1 factory retained. The same setup command selects the API by major version. Managed installs use a directory entrypoint; v2 native plugin/MCP config, structured tool outcomes, and session events are supported. Secure Client stays on its pinned v1 bridge.
+- **OpenCode V2 only:** remove V1 runtime contracts and factories across plugin delivery modes; refuse detected non-V2 majors before setup writes, including with the drift override. Upgrade OpenCode to V2, rerun setup and restart. The sandbox pin moves to 2.1.4; its V1 certification is retired pending fresh V2 verification.
 - OpenCode v2 preview CI fixes: stable bridge line endings on Windows, sandbox entrypoint verification, patched dependency floors, and less style work during TUI tab changes. The existing Windows responsiveness limit stays at 150 ms.
 
 - **Raw OpenShell MicroVM stop advice now names the gateway version that flushes the guest.** OpenShell 0.1.5 and later request a guest flush before a planned stop; on an older gateway, save the work first. A failed flush may still lose changes after the last successful disk sync.

@@ -8,7 +8,7 @@ import assert from "node:assert/strict";
 // for the bridge itself. The host awaits each before hook before execution.
 export async function contract(plugin, fixture) {
   assert.equal(plugin.id, "cisco.defenseclaw");
-  assert.equal(typeof plugin.server, "function");
+  assert.equal(plugin.server, undefined, "V1 must have no entrypoint");
   assert.equal(typeof plugin.setup, "function");
   const hooks = new Map();
   const location = { directory: "/work/repo", workspaceID: "ws_test" };

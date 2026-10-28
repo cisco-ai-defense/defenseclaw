@@ -140,8 +140,8 @@ func TestDiscoverUnixAgentVersionFindsVersionManagerInstalls(t *testing.T) {
 	t.Cleanup(func() { machinePrefixes = origPrefixes; SetStandaloneUnix(false) })
 	home := t.TempDir()
 	// nvm: the newest Node that has the package wins.
-	writeTestPackage(t, filepath.Join(home, ".nvm", "versions", "node", "v20.1.0", "lib", "node_modules", "opencode-ai"), "opencode-ai", "0.9.0")
-	writeTestPackage(t, filepath.Join(home, ".nvm", "versions", "node", "v22.11.0", "lib", "node_modules", "opencode-ai"), "opencode-ai", "1.2.0-dev")
+	writeTestPackage(t, filepath.Join(home, ".nvm", "versions", "node", "v20.1.0", "lib", "node_modules", "@opencode", "cli"), "@opencode/cli", "0.9.0")
+	writeTestPackage(t, filepath.Join(home, ".nvm", "versions", "node", "v22.11.0", "lib", "node_modules", "@opencode", "cli"), "@opencode/cli", "1.2.0-dev")
 	// fnm, asdf and mise Node installs.
 	writeTestPackage(t, filepath.Join(home, ".local", "share", "fnm", "node-versions", "v22.0.0", "installation", "lib", "node_modules", "@github", "copilot"), "@github/copilot", "1.0.3")
 	writeTestPackage(t, filepath.Join(home, ".asdf", "installs", "nodejs", "22.3.0", "lib", "node_modules", "@ampcode", "cli"), "@ampcode/cli", "0.0.170")

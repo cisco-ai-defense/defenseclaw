@@ -16,9 +16,8 @@ from defenseclaw.inventory.claw_inventory import (
 
 @pytest.mark.parametrize(
     ("version", "contract"),
-    [("1.18.10", "opencode-hooks-v1"), ("1.18.33", "opencode-hooks-v1"),
-     ("1.19.0", "opencode-hooks-v1"), ("2.0.0", "opencode-hooks-v2"),
-     ("2.1.4", "opencode-hooks-v2"), ("2.2.0", "opencode-hooks-v2")],
+    [("2.0.0", "opencode-hooks-v2"), ("2.1.4", "opencode-hooks-v2"),
+     ("2.2.0", "opencode-hooks-v2")],
 )
 def test_opencode_version_selects_its_own_api(version, contract):
     resolved = resolve_connector_contract("opencode", version)
@@ -26,9 +25,9 @@ def test_opencode_version_selects_its_own_api(version, contract):
     assert resolved.contract.contract_id == contract
 
 
-def test_opencode_future_major_is_not_silently_admitted():
-    assert resolve_connector_contract("opencode", "3.0.0").status == "unknown"
-    assert resolve_connector_contract("opencode", "vgit.5bba024").status == "unknown"
+@pytest.mark.parametrize("version", ["1.18.10", "1.18.33", "1.19.0", "3.0.0", "vgit.5bba024"])
+def test_opencode_only_v2_is_admitted(version):
+    assert resolve_connector_contract("opencode", version).status == "unknown"
 
 
 def test_v2_native_inventory_and_mcp_round_trip(tmp_path, monkeypatch):

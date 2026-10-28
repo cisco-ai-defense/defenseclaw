@@ -4654,6 +4654,9 @@ func (s *Sidecar) runGuardrail(ctx context.Context) error {
 		}
 		return refuseAdmission(err)
 	}
+	if err := connector.RequireOpenCodeV2(conn.Name(), agentVersion); err != nil {
+		return refuseUnverified(fmt.Errorf("%w: %w", ErrHookContractAdmission, err))
+	}
 	if !guardianManagedLifecycle && contractResolution.Status == connector.HookCompatibilityUnknown && envvars.Getenv("DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT") != "1" {
 		return refuseUnverified(fmt.Errorf("%w: connector %s agent version %q is not covered by a known hook contract: %s (set DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT=1 only for exploratory testing)", ErrHookContractAdmission, conn.Name(), agentVersion, contractResolution.Reason))
 	}
@@ -6856,6 +6859,9 @@ func (s *Sidecar) setupOneConnector(ctx context.Context, conn connector.Connecto
 			return fmt.Errorf("%w: %w", errReleaseContractRefusal, err)
 		}
 		return err
+	}
+	if err := connector.RequireOpenCodeV2(conn.Name(), opts.AgentVersion); err != nil {
+		return markUnverified(fmt.Errorf("%w: %w", ErrHookContractAdmission, err))
 	}
 	if contractResolution.Status == connector.HookCompatibilityUnknown &&
 		(actionMode || strictUnknownVersion) &&

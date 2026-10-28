@@ -266,8 +266,8 @@ func TestEnumerateUnixKeptRowsOfUninspectedAccountsAreIncomplete(t *testing.T) {
 			homes := filepath.Join(root, "home")
 			manifestPath := filepath.Join(root, "targets.yaml")
 			targets := []ManifestTarget{
-				{User: "alice", UserHome: filepath.Join(homes, "alice"), UID: intPointer(alice), GID: intPointer(alice), Connector: "opencode", AgentVersion: "1.18.33", HomeInode: 42},
-				{User: "carol", UserHome: filepath.Join(homes, "carol"), UID: intPointer(carol), GID: intPointer(carol), Connector: "opencode", AgentVersion: "1.18.33", HomeInode: 42},
+				{User: "alice", UserHome: filepath.Join(homes, "alice"), UID: intPointer(alice), GID: intPointer(alice), Connector: "opencode", AgentVersion: "2.1.4", HomeInode: 42},
+				{User: "carol", UserHome: filepath.Join(homes, "carol"), UID: intPointer(carol), GID: intPointer(carol), Connector: "opencode", AgentVersion: "2.1.4", HomeInode: 42},
 			}
 			resolver := &fakeResolver{accounts: map[string]unixidentity.Account{
 				"root": {Name: "root", UID: 0, GID: 0, Home: "/root", Shell: "/bin/bash"},
@@ -278,7 +278,7 @@ func TestEnumerateUnixKeptRowsOfUninspectedAccountsAreIncomplete(t *testing.T) {
 			}
 			cfg := enumeratorConfig("opencode")
 			if tc.filtered {
-				targets = append(targets, ManifestTarget{User: "dana", UserHome: filepath.Join(homes, "dana"), UID: intPointer(dana), GID: intPointer(dana), Connector: "opencode", AgentVersion: "1.18.33", HomeInode: 42})
+				targets = append(targets, ManifestTarget{User: "dana", UserHome: filepath.Join(homes, "dana"), UID: intPointer(dana), GID: intPointer(dana), Connector: "opencode", AgentVersion: "2.1.4", HomeInode: 42})
 				resolver.accounts["dana"] = unixidentity.Account{Name: "dana", UID: dana, GID: dana, Home: filepath.Join(homes, "dana"), Shell: "/bin/bash"}
 				resolver.listed = append(resolver.listed, "dana")
 				cfg.Enterprise.Enrollment.IncludeGroups = []string{"ai-devs"}

@@ -6528,9 +6528,9 @@ function Get-WindowsReleaseClientSpecifications {
         },
         [pscustomobject]@{
             Connector = 'opencode'
-            Version = '1.18.11'
-            Package = 'opencode-ai'
-            Manifest = 'node_modules\opencode-ai\package.json'
+            Version = '2.1.4'
+            Package = '@opencode/cli'
+            Manifest = 'node_modules\@opencode\cli\package.json'
             Command = 'opencode.cmd'
         }
     )

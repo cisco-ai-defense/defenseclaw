@@ -240,7 +240,7 @@ func TestOverLimitNativeWritesThroughAHomeSymlinkUnderProtectHome(t *testing.T) 
 func TestOverLimitNativeWritesOfAuthorizedKeysAreBlockedInASandbox(t *testing.T) {
 	f := newSandboxIngressFixture(t)
 	versions := map[string][3]string{
-		"opencode":   {"1.18.10", "opencode-hooks-v1", "/api/v1/opencode/hook"},
+		"opencode":   {"2.1.4", "opencode-hooks-v2", "/api/v1/opencode/hook"},
 		"claudecode": {"2.1.156", "claudecode-hooks-v1", "/api/v1/claude-code/hook"},
 		"codex":      {"0.128.0", "codex-hooks-v1", "/api/v1/codex/hook"},
 		"copilot":    {"1.0.40", "copilot-hooks-v1", "/api/v1/copilot/hook"},

@@ -1,6 +1,6 @@
 {
   "connector": "opencode",
-  "hook_contract": "opencode-hooks-v1",
+  "hook_contract": "opencode-hooks-v2",
   "tamper_tier": "user",
   "env": {
     "OPENCODE_DISABLE_AUTOUPDATE": "1"
@@ -18,8 +18,8 @@
     "/usr/local/lib/defenseclaw/opencode/index.js": {
       "mode": "-rw-r--r--",
       "owner": "root",
-      "size": 38764,
-      "sha256": "6c531f26f5c7219e59b9013172b168b847473acd313cb8395449eccaecbb6c27"
+      "size": 34280,
+      "sha256": "a78b17ba678dde830670bca7fda993562e0fa08d46baaaf363a06cd5a8c44dad"
     }
   }
 }

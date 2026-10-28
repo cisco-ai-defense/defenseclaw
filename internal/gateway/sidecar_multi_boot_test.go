@@ -2115,8 +2115,8 @@ func TestSingleConnectorSwitchOpenCodeSnapshotFailureLeavesPriorConnectorUntouch
 		DataDir:        s.cfg.DataDir,
 		GuardrailMode:  "observe",
 		HookFailMode:   "open",
-		AgentVersion:   "1.18.11",
-		HookContractID: "opencode-hooks-v1",
+		AgentVersion:   "2.1.4",
+		HookContractID: "opencode-hooks-v2",
 	}
 
 	_, err = s.prepareSingleConnectorSetupTransaction(

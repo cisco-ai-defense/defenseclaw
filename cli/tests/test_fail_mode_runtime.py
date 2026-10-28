@@ -357,7 +357,7 @@ def _write_opencode_runtime(
                 "connectors": {
                     "opencode": {
                         "connector": "opencode",
-                        "contract_id": "opencode-hooks-v1",
+                        "contract_id": "opencode-hooks-v2",
                         "hook_fail_mode": lock_mode,
                         "locations": {"hook_config_paths": [str(plugin_path)]},
                     }

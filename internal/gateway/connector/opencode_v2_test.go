@@ -4,6 +4,7 @@
 package connector
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -18,6 +19,44 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/opencodebridge"
 	"github.com/defenseclaw/defenseclaw/internal/testenv"
 )
+
+func TestOpenCodeRejectsOtherMajorsBeforeAnyWriteEvenWithDriftOverride(t *testing.T) {
+	t.Setenv("DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT", "1")
+	root := t.TempDir()
+	previous := OpenCodePluginPathOverride
+	OpenCodePluginPathOverride = filepath.Join(root, "plugins", "defenseclaw.js")
+	t.Cleanup(func() { OpenCodePluginPathOverride = previous })
+	if err := os.MkdirAll(filepath.Dir(OpenCodePluginPathOverride), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	const original = "existing installation remains untouched\n"
+	if err := os.WriteFile(OpenCodePluginPathOverride, []byte(original), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, agentVersion := range []string{"1.18.33", "3.0.0"} {
+		for _, mode := range []SetupOpts{
+			{GuardrailMode: "observe"},
+			{GuardrailMode: "action"},
+			{ManagedEnterprise: true},
+			{ManagedEnterprise: true, SecureClientHookDelivery: true},
+		} {
+			mode.AgentVersion = agentVersion
+			mode.HookContractID = openCodeV2ContractID
+			mode.DataDir = filepath.Join(root, "data")
+			err := NewOpenCodeConnector().Setup(context.Background(), mode)
+			if err == nil || !strings.Contains(err.Error(), "OpenCode V2 is required") {
+				t.Fatalf("version %s with %+v: %v", agentVersion, mode, err)
+			}
+			body, readErr := os.ReadFile(OpenCodePluginPathOverride)
+			if readErr != nil || string(body) != original {
+				t.Fatal("refused setup changed the existing plugin")
+			}
+			if _, err := os.Lstat(mode.DataDir); !os.IsNotExist(err) {
+				t.Fatalf("refused setup created the data directory: %v", err)
+			}
+		}
+	}
+}
 
 func TestOpenCodeV2Contract(t *testing.T) {
 	var mu sync.Mutex
@@ -51,8 +90,10 @@ func TestOpenCodeV2Contract(t *testing.T) {
 import assert from "node:assert/strict";
 import { pathToFileURL } from "node:url";
 const [path, harness, gateway] = process.argv.slice(1);
-const {default: plugin, DefenseClaw} = await import(pathToFileURL(path));
-assert.equal(plugin.server, DefenseClaw);
+const module = await import(pathToFileURL(path));
+const plugin = module.default;
+assert.deepEqual(Object.keys(module), ["default"]);
+assert.equal(plugin.server, undefined);
 assert.equal((await (await fetch(gateway + "/test/payloads")).json()), null, "import must not start any work");
 const {contract} = await import(pathToFileURL(harness));
 await contract(plugin, {
@@ -62,7 +103,7 @@ await contract(plugin, {
 }
 
 func TestOpenCodeV2GeneratedAdapter(t *testing.T) {
-	for _, file := range []string{"hooks/opencode-plugin.js", "../../enterprisepolicy/opencode_managed_plugin.js"} {
+	for _, file := range []string{"hooks/opencode-plugin.js", "hooks/opencode-plugin-secure-client.js", "../../enterprisepolicy/opencode_managed_plugin.js"} {
 		body, err := os.ReadFile(file)
 		if err != nil {
 			t.Fatal(err)
@@ -141,9 +182,9 @@ await cleanup();`, plugin, fmt.Sprint(tc.nativeStatus))
 
 func TestOpenCodeV2VersionSelection(t *testing.T) {
 	for _, tc := range []struct{ version, contract, status string }{
-		{"1.18.10", "opencode-hooks-v1", HookCompatibilityKnown},
-		{"1.18.33", "opencode-hooks-v1", HookCompatibilityKnown},
-		{"1.19.0", "opencode-hooks-v1", HookCompatibilityKnown},
+		{"1.18.10", "", HookCompatibilityUnknown},
+		{"1.18.33", "", HookCompatibilityUnknown},
+		{"1.19.0", "", HookCompatibilityUnknown},
 		{"2.0.0", openCodeV2ContractID, HookCompatibilityKnown},
 		{"2.1.4", openCodeV2ContractID, HookCompatibilityKnown},
 		{"2.2.0", openCodeV2ContractID, HookCompatibilityKnown},
@@ -163,8 +204,8 @@ func TestOpenCodeV2VersionSelection(t *testing.T) {
 		ResolveHookContractStrict("opencode", "2.1.4"),
 		resolveHookContractForOptions("opencode", SetupOpts{AgentVersion: "2.1.4", ManagedEnterprise: true}),
 	} {
-		if resolve.Status != HookCompatibilityUnknown {
-			t.Fatalf("pinned Secure Client profile must not admit v2: %+v", resolve)
+		if resolve.Status != HookCompatibilityKnown || resolve.Contract.ContractID != openCodeV2ContractID {
+			t.Fatalf("every profile must admit the reviewed V2 contract: %+v", resolve)
 		}
 	}
 	if spec, ok := CorrelationSpecForConnector("opencode", openCodeV2ContractID); !ok || spec.ProfileVersion != CorrelationProfileOpenCodeV2 {
@@ -195,7 +236,7 @@ func TestOpenCodeV2TerminalOutcomes(t *testing.T) {
 				t.Fatal(err)
 			}
 			payload := map[string]any{"tool_name": tc.tool, "tool_response": result}
-			if got := openCodeV2ToolCallLifecycle().ClassifyTerminalOutcome("opencode", "tool.execute.after", payload); got != tc.want {
+			if got := openCodeToolCallLifecycle().ClassifyTerminalOutcome("opencode", "tool.execute.after", payload); got != tc.want {
 				t.Fatalf("outcome %q, want %q", got, tc.want)
 			}
 		})

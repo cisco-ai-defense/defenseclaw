@@ -91,10 +91,9 @@ vendor CLI. It uses a temporary home, a local fake model and a local fake
 gateway to verify that a blocked command never executes and that an allowed
 command returns the matching tool result, through both automatic discovery and
 a configured directory entrypoint. It installs nothing and needs no
-model credentials. On a POSIX host, run each supported major separately:
+model credentials. On a POSIX host, run it with an OpenCode V2 binary:
 
 ```bash
-python3 scripts/test_opencode_plugin_live.py --binary /path/to/opencode-v1 --major 1
 python3 scripts/test_opencode_plugin_live.py --binary /path/to/opencode-v2 --major 2
 ```
 

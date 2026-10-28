@@ -71,7 +71,7 @@ _BRIDGE_PUBLICATION_SCHEMA = {
 # (internal/gateway/connector/hooks/*-secure-client.*), which its release pins.
 _BRIDGE_STANDALONE_TEMPLATE_DIGESTS = {
     "amp": "492c8ef226d7724c86b7b7d50e5b9605f405529a3c43c2f4844fc49864125eb5",
-    "opencode": "d51e6ef6981597f4893ee2d619c507c061e8a44e0c13717ad879fe556e7b5f7d",
+    "opencode": "187ef10118c49e42b8e509616f13f23a30d6f6a719fe58cc0331539138134455",
 }
 _BRIDGE_TEMPLATE_DIGESTS = {
     "amp": frozenset(
@@ -83,9 +83,9 @@ _BRIDGE_TEMPLATE_DIGESTS = {
     ),
     "opencode": frozenset(
         {
-            "a1aef1cc73f76ba301ef0b444519bec3fd987a8470bf40f9f39e721e055a490f",  # opencode-plugin.js
+            "bb302fdcbdd3256391e5d401d9133cfb3ab292952d149b344d8e590837124d06",  # opencode-plugin.js
             _BRIDGE_STANDALONE_TEMPLATE_DIGESTS["opencode"],
-            "72ee5dcb51e28d153714e63401233ace81c17519e8970675d08a19d5730a5ab3",  # opencode-plugin-secure-client.js
+            "30a42f0eb628107f7f4d0f4913755456bd72404df89cfd3bf219c5c2e957c06e",  # opencode-plugin-secure-client.js
         }
     ),
 }

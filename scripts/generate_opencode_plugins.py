@@ -12,6 +12,7 @@ END = "// END GENERATED OPENCODE V2 ADAPTER"
 TARGETS = (
     "internal/gateway/connector/hooks/opencode-plugin.js",
     "internal/enterprisepolicy/opencode_managed_plugin.js",
+    "internal/gateway/connector/hooks/opencode-plugin-secure-client.js",
 )
 
 

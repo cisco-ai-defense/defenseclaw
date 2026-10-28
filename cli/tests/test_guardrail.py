@@ -2500,7 +2500,7 @@ class TestRestartServicesRestartsAgentGateway(unittest.TestCase):
                 elif name == "opencode":
                     value.update(
                         {
-                            "contract_id": "opencode-hooks-v1",
+                            "contract_id": "opencode-hooks-v2",
                             "compatibility_status": "known",
                             "hook_script_version": "v7",
                             "locations": {"hook_config_paths": [plugin_path]},
@@ -2687,7 +2687,7 @@ class TestRestartServicesRestartsAgentGateway(unittest.TestCase):
             elif name == "opencode":
                 value.update(
                     {
-                        "contract_id": "opencode-hooks-v1",
+                        "contract_id": "opencode-hooks-v2",
                         "compatibility_status": "known",
                         "hook_script_version": "v7",
                         "locations": {"hook_config_paths": ["unused-opencode.js"]},
@@ -3181,9 +3181,9 @@ class TestRestartServicesRestartsAgentGateway(unittest.TestCase):
                 "connectors": {
                     "opencode": {
                         "connector": "opencode",
-                        "raw_agent_version": "1.18.10",
-                        "normalized_agent_version": "1.18.10",
-                        "contract_id": "opencode-hooks-v1",
+                        "raw_agent_version": "2.1.4",
+                        "normalized_agent_version": "2.1.4",
+                        "contract_id": "opencode-hooks-v2",
                         "compatibility_status": "known",
                         "hook_script_version": "v7",
                         "hook_fail_mode": "open",

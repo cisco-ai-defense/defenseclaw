@@ -311,7 +311,7 @@ import { pathToFileURL } from "node:url";
 import { createInterface } from "node:readline";
 const href = pathToFileURL(process.argv[1]).href;
 const loaded = await import(href);
-const plugin = await loaded.DefenseClaw({ directory: "" });
+const plugin = await fixtureBridge(loaded, { directory: "" });
 await plugin.config({ plugin_origins: [{ spec: href }], mcp: {} });
 console.log("` + nodeHarnessReady + `");
 const lines = createInterface({ input: process.stdin, crlfDelay: Infinity });
@@ -481,10 +481,8 @@ func TestOpenCodeBridgeDistinguishesBlockingAndObserveOnlyHooks(t *testing.T) {
 	if strings.Contains(afterBody[:afterEnd], "const verdict") || strings.Contains(afterBody[:afterEnd], "throw new Error") {
 		t.Fatal("tool.execute.after must ignore the advisory verdict and remain observe-only")
 	}
-	for _, field := range []string{"output.title", "output.output", "output.metadata"} {
-		if !strings.Contains(afterBody[:afterEnd], field) {
-			t.Fatalf("tool.execute.after omits official result field %q", field)
-		}
+	if !strings.Contains(afterBody[:afterEnd], "const result = output;") {
+		t.Fatal("V2 must forward the native result without projecting V1 string fields")
 	}
 	if !strings.Contains(afterBody[:afterEnd], "input && input.args") {
 		t.Fatal("tool.execute.after must read tool args from the official input object")
@@ -519,12 +517,10 @@ func TestOpenCodeBridgePinsPluginOrderMCPIdentityAndHeartbeat(t *testing.T) {
 	text := string(body)
 	for _, want := range []string{
 		"defenseclaw-managed-plugin v7",
-		"const DC_PLUGIN_URL = import.meta.url",
-		"Array.isArray(config.plugin_origins)",
-		"DC_ARGUMENTS_AUTHORITATIVE = ownIndex >= 0 && DC_LATER_PLUGIN_COUNT === 0",
+		"defenseclawPinV2Event(event)",
+		"DC_ARGUMENTS_AUTHORITATIVE = true",
 		`replace(/[^a-zA-Z0-9_-]/g, "_")`,
-		`mcp[name].enabled !== false`,
-		`return { status: "ambiguous", name: "" }`,
+		`"ambiguous"`,
 		"payload.mcp_server_name = mcpIdentity.name",
 		`verdict.mode === "action" && mcpIdentity.status === "ambiguous"`,
 		`verdict.mode === "action" && !DC_ARGUMENTS_AUTHORITATIVE`,
@@ -532,7 +528,7 @@ func TestOpenCodeBridgePinsPluginOrderMCPIdentityAndHeartbeat(t *testing.T) {
 		`load_heartbeat: true`,
 	} {
 		if !strings.Contains(text, want) {
-			t.Errorf("OpenCode bridge is missing audited v1.18.10-v1.18.19 behavior %q", want)
+			t.Errorf("OpenCode bridge is missing V2 bridge behavior %q", want)
 		}
 	}
 	if strings.Contains(text, "mcp__") || strings.Contains(text, `startsWith("mcp:")`) {

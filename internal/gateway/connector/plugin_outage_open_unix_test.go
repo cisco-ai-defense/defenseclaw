@@ -20,7 +20,7 @@ const openCodeOutageHarness = `
 import { pathToFileURL } from "node:url";
 const toasts = [];
 const href = pathToFileURL(process.argv[1]).href;
-const plugin = await (await import(href)).DefenseClaw({ directory: "", client: { tui: { showToast: async (arg) => { toasts.push(arg && arg.body ? arg.body.message : ""); return true; } } } });
+const plugin = await fixtureBridge(await import(href), { directory: "", client: { tui: { showToast: async (arg) => { toasts.push(arg && arg.body ? arg.body.message : ""); return true; } } } });
 await plugin.config({ plugin_origins: [{ spec: href }], mcp: {} });
 let verdict = "allow";
 try {

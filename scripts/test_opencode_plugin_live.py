@@ -15,7 +15,6 @@ the connector transport suites check that boundary separately.
 import argparse
 import json
 import os
-from pathlib import Path
 import re
 import shlex
 import signal
@@ -24,9 +23,10 @@ import tempfile
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 
 
-def check(binary: str, major: int, blocked: bool, registration: str) -> None:
+def check(binary: str, blocked: bool, registration: str) -> None:
     with tempfile.TemporaryDirectory(prefix="defenseclaw-opencode-live-") as temporary:
         root = Path(temporary).resolve()
         project = root / "project"
@@ -50,8 +50,12 @@ def check(binary: str, major: int, blocked: bool, registration: str) -> None:
                     payloads.append(data)
                     deny = blocked and data.get("hook_event_name") == "tool.execute.before"
                     verdict = {
-                        "action": "block" if deny else "allow", "mode": "action",
-                        "hook_output": {"decision": "deny" if deny else "allow", "reason": "DefenseClaw smoke-test denial"},
+                        "action": "block" if deny else "allow",
+                        "mode": "action",
+                        "hook_output": {
+                            "decision": "deny" if deny else "allow",
+                            "reason": "DefenseClaw smoke-test denial",
+                        },
                     }
                     self.send_response(200)
                     self.send_header("Content-Type", "application/json")
@@ -60,23 +64,38 @@ def check(binary: str, major: int, blocked: bool, registration: str) -> None:
                     return
                 model_calls += 1
                 done = any(m.get("role") == "tool" for m in data.get("messages", [])) or model_calls > 2
-                tool = "shell" if major == 2 else "bash"
+                tool = "shell"
                 names = [item.get("function", {}).get("name") for item in data.get("tools", [])]
                 if not done and tool not in names:
                     self.send_error(422, "Expected native shell tool is unavailable")
                     return
-                delta = {"content": "Fixture complete."} if done else {"tool_calls": [{
-                    "index": 0, "id": "call_fixture", "type": "function", "function": {
-                        "name": tool, "arguments": json.dumps({"command": "/usr/bin/touch " + shlex.quote(str(marker))}),
-                    },
-                }]}
+                delta = (
+                    {"content": "Fixture complete."}
+                    if done
+                    else {
+                        "tool_calls": [
+                            {
+                                "index": 0,
+                                "id": "call_fixture",
+                                "type": "function",
+                                "function": {
+                                    "name": tool,
+                                    "arguments": json.dumps({"command": "/usr/bin/touch " + shlex.quote(str(marker))}),
+                                },
+                            }
+                        ]
+                    }
+                )
                 self.send_response(200)
                 self.send_header("Content-Type", "text/event-stream")
                 self.end_headers()
                 for value, finish in [(delta, None), ({}, "stop" if done else "tool_calls")]:
                     chunk = {
-                        "id": "chatcmpl-fixture", "object": "chat.completion.chunk", "created": int(time.time()),
-                        "model": "fixture", "choices": [{"index": 0, "delta": value, "finish_reason": finish}],
+                        "id": "chatcmpl-fixture",
+                        "object": "chat.completion.chunk",
+                        "created": int(time.time()),
+                        "model": "fixture",
+                        "choices": [{"index": 0, "delta": value, "finish_reason": finish}],
                     }
                     self.wfile.write(("data: " + json.dumps(chunk) + "\n\n").encode())
                 self.wfile.write(b"data: [DONE]\n\n")
@@ -94,9 +113,19 @@ def check(binary: str, major: int, blocked: bool, registration: str) -> None:
             token = root / "token"
             token.write_text("a" * 64 + "\n")
             token.chmod(0o600)
-            template = Path(__file__).resolve().parents[1] / "internal/gateway/connector/testdata/bridge_host/opencode-plugin.js"
-            values = {"APIAddr": f"127.0.0.1:{port}", "TokenFileJS": str(token), "FailMode": "closed", "ServiceUID": "0"}
-            rendered = re.sub(r"\{\{\.(\w+)\}\}", lambda m: json.dumps(values.get(m[1], ""))[1:-1], template.read_text())
+            template = (
+                Path(__file__).resolve().parents[1]
+                / "internal/gateway/connector/testdata/bridge_host/opencode-plugin.js"
+            )
+            values = {
+                "APIAddr": f"127.0.0.1:{port}",
+                "TokenFileJS": str(token),
+                "FailMode": "closed",
+                "ServiceUID": "0",
+            }
+            rendered = re.sub(
+                r"\{\{\.(\w+)\}\}", lambda m: json.dumps(values.get(m[1], ""))[1:-1], template.read_text()
+            )
             # This tests the vendor callback boundary against a synthetic
             # HTTP gateway. Native connected-peer verification is exercised
             # by the connector transport tests, as in writeRenderedPlugin.
@@ -108,30 +137,53 @@ def check(binary: str, major: int, blocked: bool, registration: str) -> None:
             (plugin / ("defenseclaw.js" if autoload else "index.js")).write_text(rendered)
             settings = {"baseURL": f"http://127.0.0.1:{port}/v1", "apiKey": "fixture"}
             models = {"fixture": {"name": "Fixture", "limit": {"context": 32768, "output": 1024}}}
-            config = {"share": "disabled"}
-            if major == 2:
-                config.update({
-                    "plugins": [] if autoload else [str(plugin)], "update": "disable", "snapshots": False,
-                    "permissions": [{"action": "*", "resource": "*", "effect": "allow"}],
-                    "providers": {"fixture": {"package": "@ai-sdk/openai-compatible", "settings": settings, "models": models}},
-                })
-            else:
-                config.update({
-                    "plugin": [] if autoload else [str(plugin)], "autoupdate": False, "snapshot": False, "permission": "allow",
-                    "provider": {"fixture": {"npm": "@ai-sdk/openai-compatible", "options": settings, "models": models}},
-                })
+            config = {
+                "share": "disabled",
+                "plugins": [] if autoload else [str(plugin)],
+                "update": "disable",
+                "snapshots": False,
+                "permissions": [{"action": "*", "resource": "*", "effect": "allow"}],
+                "providers": {
+                    "fixture": {"package": "@ai-sdk/openai-compatible", "settings": settings, "models": models}
+                },
+            }
             (config_dir / "opencode.json").write_text(json.dumps(config))
-            env = {key: value for key, value in os.environ.items() if key in ("PATH", "TMPDIR", "LANG", "USER", "SHELL")}
-            env.update({
-                "HOME": str(root / "home"), "XDG_DATA_HOME": str(root / "data"), "XDG_STATE_HOME": str(root / "state"),
-                "XDG_CACHE_HOME": str(root / "cache"), "XDG_CONFIG_HOME": str(root / "config"),
-                "OPENCODE_CONFIG_DIR": str(config_dir), "OPENCODE_TEST_MANAGED_CONFIG_DIR": str(root / "managed"),
-                "OPENCODE_DISABLE_AUTOUPDATE": "1",
-            })
-            command = [binary, "run", *(["--standalone"] if major == 2 else []), "--format", "json",
-                       "--model", "fixture/fixture", "--title", "DefenseClaw fixture", "Run the fixture tool once."]
-            process = subprocess.Popen(command, cwd=project, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                                       text=True, start_new_session=True)
+            env = {
+                key: value for key, value in os.environ.items() if key in ("PATH", "TMPDIR", "LANG", "USER", "SHELL")
+            }
+            env.update(
+                {
+                    "HOME": str(root / "home"),
+                    "XDG_DATA_HOME": str(root / "data"),
+                    "XDG_STATE_HOME": str(root / "state"),
+                    "XDG_CACHE_HOME": str(root / "cache"),
+                    "XDG_CONFIG_HOME": str(root / "config"),
+                    "OPENCODE_CONFIG_DIR": str(config_dir),
+                    "OPENCODE_TEST_MANAGED_CONFIG_DIR": str(root / "managed"),
+                    "OPENCODE_DISABLE_AUTOUPDATE": "1",
+                }
+            )
+            command = [
+                binary,
+                "run",
+                "--standalone",
+                "--format",
+                "json",
+                "--model",
+                "fixture/fixture",
+                "--title",
+                "DefenseClaw fixture",
+                "Run the fixture tool once.",
+            ]
+            process = subprocess.Popen(
+                command,
+                cwd=project,
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                start_new_session=True,
+            )
             try:
                 stdout, stderr = process.communicate(timeout=90)
             finally:
@@ -157,8 +209,11 @@ def check(binary: str, major: int, blocked: bool, registration: str) -> None:
                 assert len(after) == 1
                 assert after[0]["tool_call_id"] == before[0]["tool_call_id"]
                 result = after[0]["tool_response"]
-                assert (result["output"]["exit"] if major == 2 else result["metadata"]["exit"]) == 0
-            print(f"OpenCode v{major} {registration} {'block' if blocked else 'allow'}: PASS (native before hook, execution, result)")
+                assert result["output"]["exit"] == 0
+            print(
+                f"OpenCode V2 {registration} {'block' if blocked else 'allow'}: "
+                "PASS (native before hook, execution, result)"
+            )
         finally:
             server.shutdown()
             server.server_close()
@@ -168,11 +223,11 @@ def check(binary: str, major: int, blocked: bool, registration: str) -> None:
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--binary", required=True, type=lambda value: str(Path(value).resolve(strict=True)))
-    parser.add_argument("--major", required=True, type=int, choices=(1, 2))
+    parser.add_argument("--major", default=2, type=int, choices=(2,))
     parser.add_argument("--registration", choices=("auto", "configured", "both"), default="both")
     args = parser.parse_args()
     if os.name != "posix":
         parser.error("this smoke test requires a POSIX host")
-    for registration in (("auto", "configured") if args.registration == "both" else (args.registration,)):
-        check(args.binary, args.major, blocked=True, registration=registration)
-        check(args.binary, args.major, blocked=False, registration=registration)
+    for registration in ("auto", "configured") if args.registration == "both" else (args.registration,):
+        check(args.binary, blocked=True, registration=registration)
+        check(args.binary, blocked=False, registration=registration)

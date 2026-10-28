@@ -91,7 +91,7 @@ func TestPlatformHookContractsPreservePR655Bands(t *testing.T) {
 			{"hermes-hooks-v2", "0.21.0", "0.22.0", true, "v6", 23},
 		},
 		"antigravity": {{"antigravity-hooks-v2", "1.1.8", "", true, "v8", 5}},
-		"opencode":    {{"opencode-hooks-v1", "1.18.10", "1.19.0", false, "v7", 10}, {"opencode-hooks-v2", "2.0.0", "2.2.0", false, "v7", 8}},
+		"opencode":    {{"opencode-hooks-v2", "2.0.0", "2.2.0", false, "v7", 8}},
 		"amp":         {{"amp-plugin-v1", "0.0.1785334225", "", true, "v2", 5}},
 	}
 
@@ -179,12 +179,12 @@ func TestHookContractResolution(t *testing.T) {
 		{"cursor_desktop_current", "cursor", "3.19.13", HookCompatibilityKnown, "cursor-hooks-v1", "3.19.13"},
 		{"cursor_desktop_before_floor", "cursor", "cursor 2.3.99", HookCompatibilityUnknown, "", "2.3.99"},
 		{"cursor_desktop_at_ceiling_untested", "cursor", "cursor 4.0.0", HookCompatibilityKnown, "cursor-hooks-v1", "4.0.0"},
-		{"opencode_reviewed_pin", "opencode", "opencode 1.18.10", HookCompatibilityKnown, "opencode-hooks-v1", "1.18.10"},
-		{"opencode_previous_pin", "opencode", "opencode 1.18.11", HookCompatibilityKnown, "opencode-hooks-v1", "1.18.11"},
-		{"opencode_previous_pin_11819", "opencode", "opencode 1.18.19", HookCompatibilityKnown, "opencode-hooks-v1", "1.18.19"},
-		{"opencode_current_pin", "opencode", "opencode 1.18.33", HookCompatibilityKnown, "opencode-hooks-v1", "1.18.33"},
-		{"opencode_next_minor_untested", "opencode", "opencode 1.19.0", HookCompatibilityKnown, "opencode-hooks-v1", "1.19.0"},
-		{"opencode_unversioned_requires_override", "opencode", "", HookCompatibilityUnversioned, "opencode-hooks-v1", ""},
+		{"opencode_reviewed_floor", "opencode", "opencode 2.0.0", HookCompatibilityKnown, "opencode-hooks-v2", "2.0.0"},
+		{"opencode_v1_refused", "opencode", "opencode 1.18.33", HookCompatibilityUnknown, "", "1.18.33"},
+		{"opencode_future_major_refused", "opencode", "opencode 3.0.0", HookCompatibilityUnknown, "", "3.0.0"},
+		{"opencode_current_pin", "opencode", "opencode 2.1.4", HookCompatibilityKnown, "opencode-hooks-v2", "2.1.4"},
+		{"opencode_next_minor_untested", "opencode", "opencode 2.2.0", HookCompatibilityKnown, "opencode-hooks-v2", "2.2.0"},
+		{"opencode_unversioned_requires_override", "opencode", "", HookCompatibilityUnversioned, "opencode-hooks-v2", ""},
 		{"antigravity_before_documented_floor", "antigravity", "Antigravity CLI v1.1.7", HookCompatibilityUnknown, "", "1.1.7"},
 		{"antigravity_documented_minimum", "antigravity", "Antigravity CLI v1.1.8", HookCompatibilityKnown, "antigravity-hooks-v2", "1.1.8"},
 		{"unversioned_uses_default", "cursor", "", HookCompatibilityUnversioned, "cursor-hooks-v1", ""},
@@ -1074,7 +1074,7 @@ func TestToolCallLifecycleRuntimeHelpers(t *testing.T) {
 			want:    ToolLifecycleOutcomeUnknown,
 		},
 		{
-			name:      "opencode_result_requires_string_output",
+			name:      "opencode_result_requires_native_completion_status",
 			connector: "opencode", event: "tool.execute.after",
 			payload: map[string]interface{}{
 				"tool_response": map[string]interface{}{"output": map[string]interface{}{}},
@@ -1085,50 +1085,50 @@ func TestToolCallLifecycleRuntimeHelpers(t *testing.T) {
 			name:      "opencode_empty_string_result_is_success",
 			connector: "opencode", event: "tool.execute.after",
 			payload: map[string]interface{}{
-				"tool_response": map[string]interface{}{"output": ""},
+				"tool_response": map[string]interface{}{"opencode_v2_status": "completed", "output": ""},
 			},
 			want: ToolLifecycleOutcomeSuccess,
 		},
 		{
-			name:      "opencode_bash_zero_exit_is_success",
+			name:      "opencode_shell_zero_exit_is_success",
 			connector: "opencode", event: "tool.execute.after",
 			payload: map[string]interface{}{
-				"tool_name": "bash",
+				"tool_name": "shell",
 				"tool_response": map[string]interface{}{
-					"output": "", "metadata": map[string]interface{}{"exit": float64(0)},
+					"opencode_v2_status": "completed", "output": map[string]interface{}{"output": "", "exit": float64(0)},
 				},
 			},
 			want: ToolLifecycleOutcomeSuccess,
 		},
 		{
-			name:      "opencode_bash_nonzero_exit_is_failure",
+			name:      "opencode_shell_nonzero_exit_is_failure",
 			connector: "opencode", event: "tool.execute.after",
 			payload: map[string]interface{}{
-				"tool_name": "bash",
+				"tool_name": "shell",
 				"tool_response": map[string]interface{}{
-					"output": "failed", "metadata": map[string]interface{}{"exit": float64(7)},
+					"opencode_v2_status": "completed", "output": map[string]interface{}{"output": "failed", "exit": float64(7)},
 				},
 			},
 			want: ToolLifecycleOutcomeFailure,
 		},
 		{
-			name:      "opencode_bash_null_exit_is_unknown",
+			name:      "opencode_shell_null_exit_is_unknown",
 			connector: "opencode", event: "tool.execute.after",
 			payload: map[string]interface{}{
-				"tool_name": "bash",
+				"tool_name": "shell",
 				"tool_response": map[string]interface{}{
-					"output": "timeout", "metadata": map[string]interface{}{"exit": nil},
+					"opencode_v2_status": "completed", "output": map[string]interface{}{"output": "unfinished", "exit": nil},
 				},
 			},
 			want: ToolLifecycleOutcomeUnknown,
 		},
 		{
-			name:      "opencode_bash_missing_exit_is_unknown",
+			name:      "opencode_shell_missing_exit_is_unknown",
 			connector: "opencode", event: "tool.execute.after",
 			payload: map[string]interface{}{
-				"tool_name": "bash",
+				"tool_name": "shell",
 				"tool_response": map[string]interface{}{
-					"output": "", "metadata": map[string]interface{}{},
+					"opencode_v2_status": "completed", "output": map[string]interface{}{"output": ""},
 				},
 			},
 			want: ToolLifecycleOutcomeUnknown,
@@ -2480,8 +2480,8 @@ func TestSetupSelectionReceiptCarriesProtectedAgentsForGatewayConsumption(t *tes
 				Connector:         "opencode",
 				Source:            "setup-selected",
 				Executable:        filepath.Join(dir, "opencode.exe"),
-				RawVersion:        "opencode 1.18.11",
-				NormalizedVersion: "1.18.11",
+				RawVersion:        "opencode 2.1.4",
+				NormalizedVersion: "2.1.4",
 				SHA256:            strings.Repeat("c", 64),
 				SelectedAt:        now.Format(time.RFC3339),
 				ExpiresAt:         now.Add(agentSelectionMaxLifetime).Format(time.RFC3339),
@@ -2518,7 +2518,7 @@ func TestSetupSelectionReceiptCarriesProtectedAgentsForGatewayConsumption(t *tes
 	if !ok || opencodeSelection.Executable != filepath.Join(dir, "opencode.exe") {
 		t.Fatalf("OpenCode selection = %+v, %t", opencodeSelection, ok)
 	}
-	if got := LoadCachedAgentVersion(dir, "opencode"); got != "opencode 1.18.11" {
+	if got := LoadCachedAgentVersion(dir, "opencode"); got != "opencode 2.1.4" {
 		t.Fatalf("OpenCode selected version = %q", got)
 	}
 	if got := LoadCachedAgentExecutable(dir, "opencode"); got != filepath.Join(dir, "opencode.exe") {
@@ -2812,7 +2812,7 @@ func TestAmpAuthorityNeverFallsBackToAnotherConnectorCacheOrReceipt(t *testing.T
 		Selections: map[string]agentSelectionEvidence{
 			"opencode": {
 				Connector: "opencode", Source: "setup-selected", Executable: foreignExecutable,
-				RawVersion: "opencode 1.18.11", NormalizedVersion: "1.18.11", SHA256: digest,
+				RawVersion: "opencode 2.1.4", NormalizedVersion: "2.1.4", SHA256: digest,
 				SelectedAt: now.Format(time.RFC3339), ExpiresAt: now.Add(agentSelectionMaxLifetime).Format(time.RFC3339),
 			},
 		},

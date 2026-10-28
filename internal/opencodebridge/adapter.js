@@ -128,8 +128,8 @@ async function defenseclawV2Lifecycle(ctx, event, sessions, hooks) {
 async function defenseclawV2Setup(ctx, createHooks) {
   // V2 server plugins have no TUI toast API. Preserve notices in the host's
   // log/stderr and return blocking reasons through the rejected tool Promise.
-  const client = { tui: { showToast: ({ body }) => { console.warn((body.title || "DefenseClaw") + ": " + body.message); } } };
-  const hooks = await createHooks({ client, directory: ctx.location?.directory }, true);
+  const client = { tui: { showToast: ({ body }) => { console.warn(String(body.message).startsWith("DefenseClaw") ? body.message : (body.title || "DefenseClaw") + ": " + body.message); } } };
+  const hooks = await createHooks({ client, directory: ctx.location?.directory });
   const registrations = [];
   const sessions = new Map();
   const controller = new AbortController();
@@ -153,9 +153,9 @@ async function defenseclawV2Setup(ctx, createHooks) {
       } catch (_) {}
     }));
     // In v2 authority comes from the pinned event above, independently of
-    // registration order. Reuse the v1 verdict/heartbeat path with that fact.
-    await hooks.config({ plugin_origins: [{ spec: DC_PLUGIN_URL }], mcp: {} });
-    // V2 events use data and location, while the v1 callback uses properties.
+    // registration order. Initialize the common verdict/heartbeat path with that fact.
+    await hooks.initialize();
+    // Convert native data/location into the gateway event envelope.
     // The subscription belongs to this plugin instance and stops on unload.
     void (async () => {
       try {

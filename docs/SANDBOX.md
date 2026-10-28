@@ -36,8 +36,8 @@ Overview and a Sandboxes panel. Still to come:
   [per-sandbox managed configuration](#per-sandbox-managed-configuration)).
 - **Harnesses.** `claudecode`, `codex`, `opencode`, `copilot`, `kiro`,
   `hermes`, `antigravity`, `amp`, `cursor` and
-  `devin` have harness specs and sandbox artifacts. The `amp`, `cursor` and
-  `devin` images stay unverified until a probe runs with a vendor account
+  `devin` have harness specs and sandbox artifacts. The `opencode`, `amp`, `cursor` and
+  `devin` images stay unverified until a fresh end-to-end probe succeeds
   (see [Sandboxed connectors](#sandboxed-connectors)).
 - **macOS.** A Mac runs sandboxes on OpenShell's MicroVM (`vm`) compute
   driver, since no sandbox can start on Docker Desktop, whose Linux VM kernel
@@ -2346,7 +2346,7 @@ images stay unverified, so they are never selected for a sandbox.
 | --- | --- | --- | --- | --- | --- | --- |
 | Claude Code | 2.1.156 (the base image's copy) | `/etc/claude-code/managed-settings.d/50-defenseclaw.json` | managed | `--dangerously-skip-permissions` | Anthropic API key, `CLAUDE_CODE_OAUTH_TOKEN`, Bedrock Mantle | verified |
 | Codex | 0.146.0 (npm, native sha256 pinned) | `/etc/codex/requirements.toml` | managed | `--dangerously-bypass-approvals-and-sandbox` | OpenAI API key, Bedrock Mantle | verified |
-| OpenCode | 1.18.31 (npm, native sha256 pinned) | Root-owned plugin `/usr/local/lib/defenseclaw/opencode/defenseclaw.js`, registered in `/etc/opencode/opencode.json`; the launcher refuses to start beside any other plugin | user | `--auto` | Anthropic API key, OpenAI API key, Bedrock Mantle | verified |
+| OpenCode | 2.1.4 (@opencode/cli, native sha256 pinned) | Root-owned plugin `/usr/local/lib/defenseclaw/opencode/defenseclaw.js`, registered in `/etc/opencode/opencode.json`; the launcher refuses to start beside any other plugin | user | `--auto` | Anthropic API key, OpenAI API key, Bedrock Mantle | unverified (fresh V2 OpenShell run required) |
 | GitHub Copilot CLI | 1.0.88 (npm, native sha256 pinned) | `/etc/github-copilot/policy.d/50-defenseclaw.json`, with `allowManagedHooksOnly` in `/etc/github-copilot/managed-settings.json` | managed | `--yolo` | GitHub token (endpoints unverified), bring-your-own Anthropic key or Bedrock Mantle | verified |
 | Amp | 0.0.1785334225-g9abe75 (npm, native sha256 pinned) | User-owned plugin `~/.config/amp/plugins/defenseclaw.ts` | user | `--dangerously-allow-all` | Amp API key (endpoints unverified) | unverified |
 | Cursor Agent | 2026.07.23-e383d2b (release archive, sha256 measured by DefenseClaw) | Enterprise `/etc/cursor/hooks.json`, every event `failClosed` | managed | `--force` | Cursor API key (endpoints unverified), or `cursor-launch login` inside the sandbox (the session is readable by the workload) | unverified |

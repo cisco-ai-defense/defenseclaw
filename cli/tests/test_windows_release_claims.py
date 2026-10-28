@@ -389,11 +389,7 @@ def test_opencode_docs_exclude_unqualified_enforcement_media() -> None:
     ]["opencode"]
 
     by_id = {contract["contract_id"]: contract for contract in contracts}
-    assert set(by_id) == {"opencode-hooks-v1", "opencode-hooks-v2"}
-    assert by_id["opencode-hooks-v1"]["agent_version"] == {
-        "min_inclusive": "1.18.10",
-        "max_exclusive": "1.19.0",
-    }
+    assert set(by_id) == {"opencode-hooks-v2"}
     assert by_id["opencode-hooks-v2"]["agent_version"] == {
         "min_inclusive": "2.0.0",
         "max_exclusive": "2.2.0",
@@ -405,7 +401,7 @@ def test_opencode_docs_exclude_unqualified_enforcement_media() -> None:
         "last_validated_at": "",
         "run_url": "",
     }
-    # Enforcement media may return only with exact official-package 1.18.19
+    # Enforcement media may return only with exact official V2 package
     # SHA-256 provenance plus matching version/date/run acceptance metadata.
     assert not re.search(r"<Video\b", connector_page)
     assert "v1.17.3" not in connector_page

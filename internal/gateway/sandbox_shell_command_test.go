@@ -56,7 +56,7 @@ func workdirShellCalls() []workdirShellCall {
 	const c = workdirMarkerCommand
 	return []workdirShellCall{
 		{
-			name: "opencode-bash", connector: "opencode", version: "1.18.10", contract: "opencode-hooks-v1", path: "/api/v1/opencode/hook",
+			name: "opencode-bash", connector: "opencode", version: "2.1.4", contract: "opencode-hooks-v2", path: "/api/v1/opencode/hook",
 			body: `{"hook_event_name":"tool.execute.before","tool_name":"bash","tool_input":{"command":"` + c + `","timeout":120000,"workdir":"{DIR}"},` +
 				`"session_id":"s1","turn_id":"m1","tool_call_id":"c1","agent_name":"build","cwd":"/work/app","load_heartbeat":true,"arguments_authoritative":true,"mcp_identity_status":"not_mcp"}`,
 			dirs: []string{"/work/app/sub", "/work/app", "/tmp", "sub"},
@@ -268,7 +268,7 @@ func TestSandboxShellCommandOnlyAddsVerdicts(t *testing.T) {
 		`{"command":"ls -la","workdir":"/work/app","dc_unlisted_arg":"DCE2E-BLOCK-MARKER"}`,
 	} {
 		t.Run(strconv.Itoa(i), func(t *testing.T) {
-			_, token := f.mint(t, "dc-opencode-harmless-"+strconv.Itoa(i), "opencode", "1.18.10", "opencode-hooks-v1", f.project)
+			_, token := f.mint(t, "dc-opencode-harmless-"+strconv.Itoa(i), "opencode", "2.1.4", "opencode-hooks-v2", f.project)
 			resp := f.hook(t, "/api/v1/opencode/hook", token, `{"hook_event_name":"tool.execute.before","tool_name":"bash","tool_input":`+args+
 				`,"session_id":"s1","turn_id":"m1","tool_call_id":"c1","agent_name":"build","cwd":"/work/app","load_heartbeat":true,`+
 				`"arguments_authoritative":true,"mcp_identity_status":"not_mcp"}`)

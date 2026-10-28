@@ -25,7 +25,7 @@ func TestStandaloneRowAdmissionRefusesVersionsAboveTheFloorWithoutAContract(t *t
 		{"devin", "1.0.0"},               // Devin has no minimum, only exact pins
 		{"devin", "3000.11.3"},           // pinned on Linux only
 		{"hermes", "0.22.1"},             // above hermes-hooks-v2
-		{"opencode", "1.19.2"},           // above opencode-hooks-v1
+		{"opencode", "1.19.2"},           // above opencode-hooks-v2
 	} {
 		if minimum := windowsEnterpriseStandaloneAgentMinimum(tc.connector); minimum != "" &&
 			compareWindowsEnterpriseVersion(connector.NormalizeAgentVersion(tc.connector, tc.version), minimum) < 0 {

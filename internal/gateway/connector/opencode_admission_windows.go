@@ -28,15 +28,13 @@ var openCodeWindowsExecutablePathResolver = func() string {
 }
 
 // openCodeWindowsNPMExecutablePathResolver names the native image npm's
-// opencode.cmd launches from the opencode-ai package for the user whose
+// opencode.cmd launches from the @opencode/cli V2 package for the user whose
 // paths are being resolved.
 var openCodeWindowsNPMExecutablePathResolver = currentUserOpenCodeWindowsNPMExecutablePath
 
-var openCodeWindowsV2NPMExecutablePathResolver = currentUserOpenCodeWindowsV2NPMExecutablePath
-
 // OpenCodeWindowsPackageIdentityVerified reports whether an OpenCode image
 // comes from a recognized package: the SST WinGet package directory, or the
-// npm opencode-ai package whose package.json names it.
+// npm @opencode/cli package whose package.json names it.
 func OpenCodeWindowsPackageIdentityVerified(executable string) bool {
 	clean := filepath.Clean(strings.TrimSpace(executable))
 	if !strings.EqualFold(filepath.Base(clean), "opencode.exe") {
@@ -50,8 +48,6 @@ func OpenCodeWindowsPackageIdentityVerified(executable string) bool {
 	expectedName := ""
 	if strings.EqualFold(filepath.Base(bin), "bin") {
 		switch {
-		case strings.EqualFold(filepath.Base(pkg), "opencode-ai") && strings.EqualFold(filepath.Base(filepath.Dir(pkg)), "node_modules"):
-			expectedName = "opencode-ai"
 		case strings.EqualFold(filepath.Base(pkg), "cli") && strings.EqualFold(filepath.Base(filepath.Dir(pkg)), "@opencode") &&
 			strings.EqualFold(filepath.Base(filepath.Dir(filepath.Dir(pkg))), "node_modules"):
 			expectedName = "@opencode/cli"
@@ -147,7 +143,7 @@ func validateOpenCodeExecutableEvidence(selected string, authority openCodeExecu
 		return errors.New("selected executable is not an absolute normalized opencode.exe path")
 	}
 	matched := false
-	for _, expected := range []string{openCodeWindowsExecutablePathResolver(), openCodeWindowsNPMExecutablePathResolver(), openCodeWindowsV2NPMExecutablePathResolver()} {
+	for _, expected := range []string{openCodeWindowsNPMExecutablePathResolver(), openCodeWindowsExecutablePathResolver()} {
 		if expected == "" || strings.TrimSpace(expected) != expected ||
 			strings.ContainsAny(expected, "\x00\r\n") || !filepath.IsAbs(expected) ||
 			filepath.Clean(expected) != expected {
@@ -158,7 +154,7 @@ func validateOpenCodeExecutableEvidence(selected string, authority openCodeExecu
 		}
 	}
 	if !matched || !sameCodexExecutablePath(selected, authority.path) {
-		return errors.New("selected executable is not the protected SST WinGet, npm opencode-ai or @opencode/cli executable for this user")
+		return errors.New("selected executable is not the protected V2 SST WinGet or @opencode/cli executable for this user")
 	}
 	if !OpenCodeWindowsPackageIdentityVerified(selected) {
 		return errors.New("selected executable package identity is not verified")
@@ -210,17 +206,7 @@ func currentUserOpenCodeWindowsNPMExecutablePath() string {
 	if strings.TrimSpace(roaming) == "" || strings.ContainsAny(roaming, "\x00\r\n") || !filepath.IsAbs(roaming) {
 		return ""
 	}
-	return filepath.Join(filepath.Clean(roaming), "npm", "node_modules", "opencode-ai", "bin", "opencode.exe")
-}
-
-// The v2 npm postinstall copies the native image into @opencode/cli/bin.
-func currentUserOpenCodeWindowsV2NPMExecutablePath() string {
-	v1 := currentUserOpenCodeWindowsNPMExecutablePath()
-	if v1 == "" {
-		return ""
-	}
-	modules := filepath.Dir(filepath.Dir(filepath.Dir(v1)))
-	return filepath.Join(modules, "@opencode", "cli", "bin", "opencode.exe")
+	return filepath.Join(filepath.Clean(roaming), "npm", "node_modules", "@opencode", "cli", "bin", "opencode.exe")
 }
 
 func currentUserOpenCodeWindowsExecutablePath() string {

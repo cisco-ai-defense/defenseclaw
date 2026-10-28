@@ -769,12 +769,8 @@ func CorrelationSpecForConnector(name, hookContractID string) (CorrelationSpec, 
 		)
 		return makeSpec(CorrelationProfileAntigravityV1, "antigravity-hooks-v2", []CorrelationSurface{CorrelationSurfaceHook}, bindings, nil, []CorrelationInferenceRule{CorrelationInferencePromptBoundaryTurn, CorrelationInferenceUniquePendingTool}, complete(CorrelationCompletenessComplete, CorrelationCompletenessPartial, CorrelationCompletenessAbsent, CorrelationCompletenessPartial, CorrelationCompletenessPartial, CorrelationCompletenessAbsent, "stepIdx is a trajectory step, not a turn", "no documented customer OTLP surface"))
 	case "opencode":
-		profileVersion := CorrelationProfileOpenCodeV1
-		contractVersion := "opencode-hooks-v1"
-		if hookContractID == openCodeV2ContractID {
-			profileVersion = CorrelationProfileOpenCodeV2
-			contractVersion = openCodeV2ContractID
-		}
+		profileVersion := CorrelationProfileOpenCodeV2
+		contractVersion := openCodeV2ContractID
 		bindings := appendBindings(base,
 			reported(CorrelationTargetSession, ns, "session", "sessionId"),
 			reported(CorrelationTargetParentSession, ns, "parent_session", "parentID", "parentId", "parentSessionId"),

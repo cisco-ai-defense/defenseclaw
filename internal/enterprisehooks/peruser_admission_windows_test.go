@@ -58,10 +58,10 @@ func TestWindowsStandalonePerUserAdmissionSelectsOnlyAdmissibleImages(t *testing
 		t.Fatalf("amp with unknown version: ok=%v reason=%q", ok, reason)
 	}
 
-	// npm OpenCode is admitted only when the opencode-ai package identity
+	// npm OpenCode is admitted only when the @opencode/cli V2 package identity
 	// checks out; the SST WinGet image wins when both exist.
-	npmOpenCode := writePerUserAdmissionFixture(t, home, "AppData", "Roaming", "npm", "node_modules", "opencode-ai", "bin", "opencode.exe")
-	if _, reason := windowsStandalonePerUserManagedExecutable(home, "opencode"); !strings.Contains(reason, "opencode-ai") {
+	npmOpenCode := writePerUserAdmissionFixture(t, home, "AppData", "Roaming", "npm", "node_modules", "@opencode", "cli", "bin", "opencode.exe")
+	if _, reason := windowsStandalonePerUserManagedExecutable(home, "opencode"); !strings.Contains(reason, "@opencode/cli") {
 		t.Fatalf("npm OpenCode without its package.json: reason = %q", reason)
 	}
 	manifest := filepath.Join(filepath.Dir(filepath.Dir(npmOpenCode)), "package.json")
@@ -71,7 +71,7 @@ func TestWindowsStandalonePerUserAdmissionSelectsOnlyAdmissibleImages(t *testing
 	if got, _ := windowsStandalonePerUserManagedExecutable(home, "opencode"); got != "" {
 		t.Fatalf("npm OpenCode with a foreign package name was admitted: %q", got)
 	}
-	if err := os.WriteFile(manifest, []byte(`{"name":"opencode-ai","version":"1.18.32"}`), 0o644); err != nil {
+	if err := os.WriteFile(manifest, []byte(`{"name":"@opencode/cli","version":"2.1.4"}`), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	if got, reason := windowsStandalonePerUserManagedExecutable(home, "opencode"); got != npmOpenCode {

@@ -112,6 +112,7 @@ func nodeForTest(t *testing.T) string {
 // lines. The test fails if node fails.
 func runNodeHarness(t *testing.T, harness string, args ...string) []string {
 	t.Helper()
+	harness = withOpenCodeV2Fixture(t, harness)
 	node := nodeForTest(t)
 	ctx, cancel := context.WithTimeout(context.Background(), nodeHarnessTimeout)
 	defer cancel()
@@ -123,6 +124,18 @@ func runNodeHarness(t *testing.T, harness string, args ...string) []string {
 		t.Fatalf("node: %v\nstdout=%s\nstderr=%s", err, out, stderr.String())
 	}
 	return strings.Split(strings.TrimSpace(string(out)), "\n")
+}
+
+func withOpenCodeV2Fixture(t *testing.T, harness string) string {
+	t.Helper()
+	if !strings.Contains(harness, "fixtureBridge(") {
+		return harness
+	}
+	fixture, err := os.ReadFile("../../opencodebridge/testdata/fixture.mjs")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(fixture) + "\n" + harness
 }
 
 // nodeHarnessReady is the line an interactive harness prints once its
@@ -164,6 +177,7 @@ func nodeHarnessStartTimeout(t *testing.T) time.Duration {
 // for its ready line.
 func startNodeHarnessSession(t *testing.T, harness string, args ...string) *nodeHarnessSession {
 	t.Helper()
+	harness = withOpenCodeV2Fixture(t, harness)
 	node := nodeForTest(t)
 	s := &nodeHarnessSession{
 		t:      t,
@@ -296,11 +310,11 @@ func withoutPeerCheckForTest(body string) string {
 // prints one verdict per call, then the toasts it showed.
 const openCodePluginHarness = `
 import { pathToFileURL } from "node:url";
-const toasts = [];
-const client = { tui: { showToast: async (arg) => { toasts.push(arg && arg.body ? arg.body : arg); return true; } } };
+const notices = [];
+console.warn = (message) => notices.push(String(message));
 const href = pathToFileURL(process.argv[1]).href;
 const loaded = await import(href);
-const plugin = await loaded.DefenseClaw({ directory: "", client });
+const plugin = await fixtureBridge(loaded, { directory: "/work/repo" });
 await plugin.config({ plugin_origins: [{ spec: href }], mcp: {} });
 for (let i = 0; i < Number(process.argv[2]); i++) {
   try {
@@ -311,7 +325,7 @@ for (let i = 0; i < Number(process.argv[2]); i++) {
   }
 }
 await new Promise((resolve) => setTimeout(resolve, 50));
-console.log("toasts:" + JSON.stringify(toasts));
+console.log("notices:" + JSON.stringify(notices));
 `
 
 func runOpenCodePluginHarness(t *testing.T, data templateData, calls int) []string {

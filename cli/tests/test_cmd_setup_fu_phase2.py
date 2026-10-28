@@ -796,7 +796,7 @@ class TestPerConnectorWriteSurface(_BaseSetup):
 
     def test_windows_opencode_admission_scan_preserves_prior_connector_discovery(self):
         signal = SimpleNamespace(
-            version="opencode 1.18.11",
+            version="opencode 2.1.4",
             installed=True,
             error="",
             binary_path=(
@@ -896,7 +896,7 @@ class TestPerConnectorWriteSurface(_BaseSetup):
             patch(
                 "defenseclaw.commands.cmd_setup._record_windows_setup_agent_selections",
                 side_effect=click.ClickException(
-                    "exact SST OpenCode 1.18.20 is outside the validated contract; PATH 1.18.19 is irrelevant"
+                    "exact SST OpenCode 1.18.20 is outside the validated contract; PATH 2.1.4 is irrelevant"
                 ),
             ),
             patch(
