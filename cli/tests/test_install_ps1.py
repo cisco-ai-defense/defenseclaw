@@ -8521,3 +8521,68 @@ Write-Output 'SWAPPED_BACK'
     assert (data / "config.yaml").read_text(encoding="ascii") == "old"
     assert not (data / ".failed-hooks-bridge").exists()
     assert (hold / "data" / "hooks" / ".hook-claudecode.token").read_text(encoding="ascii") == "new-token"
+
+
+def _tiktoken_site(root: Path, rank: bytes, expected: bytes) -> tuple[Path, Path, str]:
+    site = root / "Lib" / "site-packages"
+    tokenizers = site / "litellm" / "litellm_core_utils" / "tokenizers"
+    tokenizers.mkdir(parents=True)
+    (site / "tiktoken_ext").mkdir()
+    (site / "tiktoken_ext" / "openai_public.py").write_text(
+        f"def cl100k_base():\n    load(\"x\", expected_hash=\"{hashlib.sha256(expected).hexdigest()}\")\n",
+        encoding="utf-8",
+    )
+    name = "9b5ad71b2ce5302211f9c61530b329a4922fc6a4"
+    (tokenizers / name).write_bytes(rank)
+    record = site / "litellm-1.103.10.dist-info" / "RECORD"
+    record.parent.mkdir()
+    record.write_bytes(
+        f"litellm/__init__.py,sha256=abc,1\r\nlitellm/litellm_core_utils/tokenizers/{name},sha256=old,{len(rank)}\r\n".encode()
+    )
+    return site, tokenizers / name, f"litellm/litellm_core_utils/tokenizers/{name}"
+
+
+def test_the_windows_venv_gets_the_published_tiktoken_rank_files_so_the_first_import_needs_no_download(
+    tmp_path: Path,
+) -> None:
+    # GAP-2441 (the per-user twin of the managed GAP-2395): the Windows
+    # LiteLLM wheel ships the tiktoken rank files with CRLF line ends, their
+    # SHA-256 never matches, and tiktoken downloads them again on the first
+    # import (offline it fails). New-Venv puts back the published bytes, in
+    # a new file, so the uv cache entry the venv file is linked to keeps its own.
+    import base64
+
+    code = re.search(r"^\$TiktokenRanksPy = @\x27\n(.*?)\n\x27@$", _text(), re.M | re.S)
+    assert code
+    script = tmp_path / "ranks.py"
+    script.write_text(code.group(1), encoding="utf-8")
+    published = b"IQ== 0\nIg== 1\n"
+    site, rank, member = _tiktoken_site(tmp_path / "venv", published.replace(b"\n", b"\r\n"), published)
+    cache = tmp_path / "uv-cache-entry"
+    os.link(rank, cache)
+    done = subprocess.run([sys.executable, "-I", str(script), str(site)], capture_output=True, text=True)
+    assert done.returncode == 0 and done.stdout.strip() == "1", done.stdout + done.stderr
+    assert rank.read_bytes() == published
+    assert cache.read_bytes() == published.replace(b"\n", b"\r\n")
+    digest = base64.urlsafe_b64encode(hashlib.sha256(published).digest()).rstrip(b"=").decode()
+    record = (site / "litellm-1.103.10.dist-info" / "RECORD").read_bytes().decode()
+    assert f"{member},sha256={digest},{len(published)}\r\n" in record
+    assert record.startswith("litellm/__init__.py,sha256=abc,1\r\n")
+    assert not list(site.rglob("*.defenseclaw-new"))
+    again = subprocess.run([sys.executable, "-I", str(script), str(site)], capture_output=True, text=True)
+    assert again.returncode == 0 and again.stdout.strip() == "0"
+
+    # A rank file that differs in more than its line ends is not touched.
+    other, foreign, _ = _tiktoken_site(tmp_path / "other", b"something else\r\n", published)
+    refused = subprocess.run([sys.executable, "-I", str(script), str(other)], capture_output=True, text=True)
+    assert refused.returncode == 3 and "match no expected hash" in refused.stderr
+    assert foreign.read_bytes() == b"something else\r\n"
+
+    venv = _ps1_function("New-Venv")
+    assert (
+        venv.index("Invoke-UvPipInstall $lockArgs")
+        < venv.index("Repair-TiktokenRanks $python $Where")
+        < venv.index("Installing the DefenseClaw package")
+    )
+    repair = _ps1_function("Repair-TiktokenRanks")
+    assert "Invoke-Native $Python @(\"-I\", $code, $site) -Quiet" in repair and "Write-Warn" in repair

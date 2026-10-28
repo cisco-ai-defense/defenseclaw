@@ -2166,6 +2166,77 @@ function Assert-BinDirRestored([string]$From, [string]$GuardSHA256 = "") {
     if ($wrong.Count) { throw "$BinDir does not hold the saved copy of $($wrong -join ', ')" }
 }
 
+# The Windows LiteLLM wheel ships the tiktoken rank files with CRLF line ends,
+# so their SHA-256 never matches the hash tiktoken expects: tiktoken deletes
+# each one and downloads it again on the first import, and offline that
+# import fails (GAP-2441; the managed runtime build does the same, GAP-2395).
+# A rank file whose CRLF form is the only difference goes back to its
+# published bytes, through a new file so the uv cache it is linked to stays
+# as it was, and the wheel RECORD says so. Any other mismatch is left alone.
+$TiktokenRanksPy = @'
+import base64, hashlib, os, re, sys
+from pathlib import Path
+
+site = Path(sys.argv[1])
+folder = site / "litellm" / "litellm_core_utils" / "tokenizers"
+source = site / "tiktoken_ext" / "openai_public.py"
+if not folder.is_dir() or not source.is_file():
+    sys.exit(0)
+expected = set(re.findall(r"expected_hash\s*=\s*[\"\x27]([0-9a-f]{64})[\"\x27]", source.read_text(encoding="utf-8")))
+if not expected:
+    sys.exit(0)
+
+
+def replace(path, data):
+    fresh = path.with_name(path.name + ".defenseclaw-new")
+    fresh.write_bytes(data)
+    os.replace(fresh, path)
+
+
+fixed, unknown = {}, []
+for path in sorted(folder.iterdir()):
+    if not path.is_file() or not re.fullmatch(r"[0-9a-f]{40}", path.name):
+        continue
+    data = path.read_bytes()
+    if hashlib.sha256(data).hexdigest() in expected:
+        continue
+    lf = data.replace(b"\r\n", b"\n")
+    if hashlib.sha256(lf).hexdigest() not in expected:
+        unknown.append(path.name)
+        continue
+    replace(path, lf)
+    fixed["litellm/litellm_core_utils/tokenizers/" + path.name] = lf
+for record in site.glob("litellm-*.dist-info/RECORD") if fixed else []:
+    lines = record.read_bytes().decode("utf-8").splitlines(keepends=True)
+    for index, line in enumerate(lines):
+        name = line.split(",", 1)[0]
+        if name in fixed:
+            data = fixed[name]
+            digest = base64.urlsafe_b64encode(hashlib.sha256(data).digest()).rstrip(b"=").decode("ascii")
+            ending = "\r\n" if line.endswith("\r\n") else "\n"
+            lines[index] = f"{name},sha256={digest},{len(data)}{ending}"
+    replace(record, "".join(lines).encode("utf-8"))
+print(len(fixed))
+if unknown:
+    print("tiktoken rank files that match no expected hash: " + ", ".join(unknown), file=sys.stderr)
+    sys.exit(3)
+'@
+
+function Repair-TiktokenRanks([string]$Python, [string]$Where) {
+    $site = Join-Path (Split-Path -Parent (Split-Path -Parent $Python)) "Lib\site-packages"
+    $code = Join-Path ([IO.Path]::GetTempPath()) "defenseclaw-tiktoken-ranks-$PID.py"
+    try {
+        [IO.File]::WriteAllText($code, $TiktokenRanksPy)
+        if ((Invoke-Native $Python @("-I", $code, $site) -Quiet) -ne 0) {
+            Write-Warn "Could not restore the published tiktoken rank files in $Where; the first token count downloads them again"
+        }
+    } catch {
+        Write-Warn "Could not restore the published tiktoken rank files in ${Where}: $($_.Exception.Message)"
+    } finally {
+        Remove-Item -LiteralPath $code -Force -ErrorAction SilentlyContinue
+    }
+}
+
 # $Where names the environment in the progress lines: the installer builds
 # a staging one to check the release, then the final one (GAP-1727).
 function New-Venv([string]$Path, [string]$Where) {
@@ -2183,6 +2254,7 @@ function New-Venv([string]$Path, [string]$Where) {
         "-r", (Join-Path $Staging $Requirements))
     Write-Info "Installing the Python packages into $Where"
     if (-not (Invoke-UvPipInstall $lockArgs)) { return $false }
+    Repair-TiktokenRanks $python $Where
     Write-Info "Installing the DefenseClaw package into $Where and compiling it"
     return (Invoke-UvPipInstall @("pip", "install", "--quiet", "--compile-bytecode", "--python", $python, "--no-deps", (Join-Path $Staging $Wheel)))
 }
