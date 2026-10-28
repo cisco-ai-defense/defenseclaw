@@ -17,6 +17,7 @@
 package actionfacts
 
 import (
+	"regexp"
 	"sort"
 	"strings"
 
@@ -116,11 +117,19 @@ func homeResolvedSource(source, home string) (string, bool) {
 		case *syntax.Redirect:
 			declined = typed.Op == syntax.Hdoc || typed.Op == syntax.DashHdoc
 		case *syntax.Word:
+			target := typed
 			suffix, anchored := homeAnchoredLiteralWord(typed)
+			if !anchored {
+				// dd of=$HOME/f: the home word after a literal option key.
+				if _, rest, ok := optionHomeAnchoredWord(typed); ok {
+					target = rest
+					suffix, anchored = homeAnchoredLiteralWord(rest)
+				}
+			}
 			if !anchored {
 				return true
 			}
-			start, end := int(typed.Pos().Offset()), int(typed.End().Offset())
+			start, end := int(target.Pos().Offset()), int(target.End().Offset())
 			path := home + suffix
 			if start < 0 || end <= start || end > len(source) ||
 				strings.ContainsAny(path, "\x00\r\n") {
@@ -224,4 +233,38 @@ func homeAnchoredLiteralWord(word *syntax.Word) (string, bool) {
 		return "", false
 	}
 	return path, true
+}
+
+// homeOptionKey is a literal option or operand key that ends at "=" (of=,
+// --output=, --target-directory=).
+var homeOptionKey = regexp.MustCompile(`^-{0,2}[A-Za-z_][A-Za-z0-9_-]*=$`)
+
+// optionHomeAnchoredWord splits a word that is a literal key ending at "="
+// followed by a home-anchored word ($HOME/..., ${HOME}/..., "$HOME/...")
+// into the key and that home word. The shell expands HOME anywhere in a
+// word, so dd of=$HOME/f writes the file of=<home>/f names, as the ~/,
+// ~<login>/ and absolute spellings already read (GAP-2399).
+func optionHomeAnchoredWord(word *syntax.Word) (*syntax.Lit, *syntax.Word, bool) {
+	if word == nil || len(word.Parts) < 2 {
+		return nil, nil, false
+	}
+	key, ok := word.Parts[0].(*syntax.Lit)
+	if !ok || !homeOptionKey.MatchString(key.Value) {
+		return nil, nil, false
+	}
+	rest := &syntax.Word{Parts: word.Parts[1:]}
+	if _, anchored := homeAnchoredLiteralWord(rest); !anchored {
+		return nil, nil, false
+	}
+	return key, rest, true
+}
+
+// optionHomeRewriteWord is optionHomeAnchoredWord for a home word the
+// trusted-home rewrite can spell as ActiveHome exactly.
+func optionHomeRewriteWord(word *syntax.Word) (*syntax.Word, bool) {
+	_, rest, ok := optionHomeAnchoredWord(word)
+	if !ok || !(plainHomeRewriteWord(rest) || quotedPlainHomeRewriteWord(rest)) {
+		return nil, false
+	}
+	return rest, true
 }

@@ -111,7 +111,9 @@ func rewriteTrustedPOSIXHomeTilde(source, activeHome string) (trustedPOSIXHomeRe
 			}
 			for _, word := range cmd.Args {
 				if _, user := userHomeRewriteWord(word, activeHome); !user && !staticHomeRewriteWord(word) {
-					return false
+					if _, option := optionHomeRewriteWord(word); !option {
+						return false
+					}
 				}
 			}
 			words = append(words, cmd.Args[1:]...)
@@ -144,6 +146,19 @@ func rewriteTrustedPOSIXHomeTilde(source, activeHome string) (trustedPOSIXHomeRe
 	for _, word := range words {
 		if suffix, user := userHomeRewriteWord(word, activeHome); user {
 			start, end := int(word.Pos().Offset()), int(word.End().Offset())
+			if start < last || end > len(source) {
+				return trustedPOSIXHomeRewrite{}, false
+			}
+			out.WriteString(source[last:start])
+			out.WriteString(activeHome + suffix)
+			last = end
+			rewrite.tildeOperands[activeHome+suffix] = source[start:end]
+			continue
+		}
+		if rest, option := optionHomeRewriteWord(word); option {
+			// dd of=$HOME/f: only the home word after the key is respelled.
+			suffix, _ := homeAnchoredLiteralWord(rest)
+			start, end := int(rest.Pos().Offset()), int(rest.End().Offset())
 			if start < last || end > len(source) {
 				return trustedPOSIXHomeRewrite{}, false
 			}
