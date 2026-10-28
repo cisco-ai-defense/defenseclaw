@@ -86,6 +86,10 @@ var (
 	// errManagedHookSocketSELinuxDenied wraps a Unix standalone peer failure
 	// where SELinux kept this account from the hook socket.
 	errManagedHookSocketSELinuxDenied = errors.New("SELinux denied this account access to the DefenseClaw hook socket")
+	// errManagedHookSocketDirectoryUntrusted wraps a Unix standalone peer
+	// failure where the hook socket's directory is not owned by root or the
+	// gateway account, or others may write it (GAP-2405).
+	errManagedHookSocketDirectoryUntrusted = errors.New("the DefenseClaw hook socket directory is not trusted")
 	// errManagedGatewayPortHeld wraps a peer-verification failure whose
 	// cause is that the gateway service runs but another process listens on
 	// its API port (Windows). The hook still fails closed.
@@ -98,6 +102,12 @@ var (
 const managedHookSocketSELinuxDeniedReason = "enterprise_managed_hook_socket_selinux_denied"
 
 const managedGatewayPeerUnverifiedReason = "enterprise_managed_gateway_peer_unverified"
+
+// managedHookSocketDirectoryUntrustedReason is the hook-failure reason of a
+// Unix standalone managed hook whose hook socket directory is not owned by
+// root or the gateway account (or is writable by others). The block text
+// names the directory, as the managed shell hooks do (GAP-2405).
+const managedHookSocketDirectoryUntrustedReason = "enterprise_managed_hook_socket_directory_untrusted"
 
 // managedGatewayNotRunningReason is the hook-failure reason of a Windows
 // standalone managed hook whose gateway service is stopped, instead of
@@ -3351,6 +3361,9 @@ func managedPeerFailureReason(opts Options, err error) string {
 	if managedStandaloneHook(opts) && errors.Is(err, errManagedHookSocketSELinuxDenied) {
 		return managedHookSocketSELinuxDeniedReason
 	}
+	if managedStandaloneHook(opts) && errors.Is(err, errManagedHookSocketDirectoryUntrusted) {
+		return managedHookSocketDirectoryUntrustedReason
+	}
 	if opts.ExplainUnenrolledAccount && errors.Is(err, errManagedGatewayPortHeld) {
 		return managedGatewayPortHeldReason
 	}
@@ -3365,12 +3378,27 @@ const ManagedGatewayNotRunningReason = managedGatewayNotRunningReason
 // error that means the gateway service is not running.
 var ErrManagedGatewayNotRunning = errManagedGatewayNotRunning
 
+// ErrManagedHookSocketDirectoryUntrusted is wrapped by a Unix standalone
+// hook transport error whose hook socket directory is not trusted.
+var ErrManagedHookSocketDirectoryUntrusted = errManagedHookSocketDirectoryUntrusted
+
 // ManagedGatewayNotRunning reports an error from a managed hook transport
 // (ExchangeForeignHookSession included) that means the gateway service is
 // not running: a stopped Windows service, or a missing or refusing Unix hook
 // socket.
 func ManagedGatewayNotRunning(err error) bool {
 	return errors.Is(err, errManagedGatewayNotRunning)
+}
+
+// ManagedHookSocketDirectoryUntrustedReason is the reason of a Unix
+// standalone managed hook whose hook socket directory is not trusted.
+const ManagedHookSocketDirectoryUntrustedReason = managedHookSocketDirectoryUntrustedReason
+
+// ManagedHookSocketDirectoryUntrusted reports a managed hook transport error
+// (ExchangeForeignHookSession included) whose cause is a hook socket
+// directory not owned by root or the gateway account, or writable by others.
+func ManagedHookSocketDirectoryUntrusted(err error) bool {
+	return errors.Is(err, errManagedHookSocketDirectoryUntrusted)
 }
 
 // ManagedGatewayPortHeldReason is the reason code of a Windows standalone
@@ -3389,7 +3417,8 @@ func ManagedGatewayPortHeld(err error) bool {
 // false for any other reason.
 func ManagedTransportFailureText(event, reason string) (string, bool) {
 	if reason != managedGatewayNotRunningReason && reason != managedGatewayPortHeldReason &&
-		reason != managedGatewayRestartingReason && reason != managedGatewayNoAnswerReason {
+		reason != managedGatewayRestartingReason && reason != managedGatewayNoAnswerReason &&
+		reason != managedHookSocketDirectoryUntrustedReason {
 		return "", false
 	}
 	return managedStandaloneFailClosedText(event, "transport", reason), true
@@ -3518,6 +3547,13 @@ func managedStandaloneFailClosedText(event, layer, reason string) string {
 	case reason == ManagedProcessContextUnknownReason:
 		cause, advice = "DefenseClaw cannot verify this agent's Linux process context and managed policy view",
 			"Start the agent from your normal login session; if this continues, contact your administrator."
+	case reason == managedHookSocketDirectoryUntrustedReason:
+		// The words of the managed shell hooks for the same check (GAP-0715,
+		// GAP-2405); the gateway may well be running. Like every other
+		// peer failure of the native hook, the internal peer reason code
+		// is not shown.
+		cause, advice = "the DefenseClaw hook socket directory is not owned by root or the gateway account, so DefenseClaw cannot trust the gateway it would reach",
+			"Ask your administrator to run `"+managedRepairCommand(runtime.GOOS)+"`."
 	case reason == managedHookSocketSELinuxDeniedReason:
 		cause, advice = "SELinux does not let your account reach the DefenseClaw gateway on this computer",
 			"Ask your administrator to run `enterprise linux repair`, which loads the DefenseClaw SELinux module that SELinux-confined accounts need."
@@ -3553,6 +3589,12 @@ func managedStatusCommand(goos string) string {
 		return "enterprise macos status"
 	}
 	return "enterprise linux status"
+}
+
+// managedRepairCommand is the lifecycle repair command of the platform the
+// hook runs on.
+func managedRepairCommand(goos string) string {
+	return strings.TrimSuffix(managedStatusCommand(goos), " status") + " repair"
 }
 
 // hookEventSubject names what an agent hook event carries, in the words a
