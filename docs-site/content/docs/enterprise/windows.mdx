@@ -602,6 +602,9 @@ asset_policy:
         source_path_contains: ["C:\\ApprovedSkills\\<account>\\reviewed-skill"]
 ```
 
+Replace `<account>` with the folder you list for that user and `reviewed-skill` with the
+skill's folder name.
+
 For a Claude Code plugin from a marketplace use `asset_policy.plugin`; an allow
 rule needs `plugin@marketplace` (the name `claude plugin list` shows), and a deny
 rule also matches the bare name. To lift a hook refusal of a profile skill denied

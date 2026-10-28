@@ -2149,3 +2149,39 @@ def test_a_direct_entry_that_starts_the_pinned_agent_keeps_verify_red(tmp_path, 
         assert CliRunner().invoke(acp_cmd, ["verify"], obj=app).exit_code == 0
     finally:
         cleanup_app(app, db_path, data_dir)
+
+
+def test_windows_npm_launcher_entry_is_adopted_in_place(tmp_path, monkeypatch):
+    """GAP-0191 (Windows): npm installs agents as a .cmd launcher, and a Zed
+    entry that names it must be adopted in place like opencode.exe, not left
+    as an unguarded picker entry beside a new DefenseClaw duplicate."""
+    for command in ("C:\\Users\\u\\AppData\\Roaming\\npm\\opencode.cmd", "OPENCODE.CMD", "opencode.bat", "opencode.exe"):
+        assert cmd_acp_module._agent_for_entry({"command": command, "args": ["acp"]}) == "opencode", command
+    # A PowerShell script is not something an editor can start directly.
+    assert cmd_acp_module._agent_for_entry({"command": "opencode.ps1", "args": ["acp"]}) == ""
+
+    _isolate_client_config(monkeypatch, tmp_path)
+    app, data_dir, db_path = _app(tmp_path)
+    settings = _zed_settings(tmp_path)
+    settings.parent.mkdir(parents=True)
+    guard = _binary(tmp_path / "defenseclaw-acp")
+    agent = _binary(tmp_path / "kiro-cli.cmd")
+    settings.write_text(json.dumps({"agent_servers": {"Kiro": {"command": agent, "args": ["acp"], "env": {"KEEP": "me"}}}}))
+    try:
+        with patch("defenseclaw.commands.cmd_acp._agent_version", return_value="kiro-cli 2.22.0"):
+            result = CliRunner().invoke(
+                acp_cmd,
+                ["adopt", "--client", "zed", "--guard-binary", guard, "--yes", "--json-output"],
+                obj=app,
+            )
+        assert result.exit_code == 0, result.output
+        assert json.loads(result.output)["adopted"] == [{"agent": "kiro", "client": "zed", "entry": "Kiro"}]
+        servers = json.loads(settings.read_text())["agent_servers"]
+        assert set(servers) == {"Kiro"}
+        assert servers["Kiro"]["command"] == guard
+        assert servers["Kiro"]["env"] == {"KEEP": "me"}
+        assert any(str(value).endswith("kiro-cli.cmd") for value in servers["Kiro"]["args"])
+        verified = CliRunner().invoke(acp_cmd, ["verify", "--client", "zed", "--agent", "kiro"], obj=app)
+        assert verified.exit_code == 0, verified.output
+    finally:
+        cleanup_app(app, db_path, data_dir)

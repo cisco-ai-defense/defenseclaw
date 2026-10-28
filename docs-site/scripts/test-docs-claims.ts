@@ -1308,7 +1308,7 @@ const knownLimitEntries = [
     from: ['connectors/codex.mdx', 'connectors/codex.mdx'],
   },
   { gaps: 'GAP-1110', section: 'Local Splunk', phrases: ['works only with an x86_64 Docker engine', 'published for x86_64 (amd64) only', 'This is a Splunk image limit.', '/docs/observability/splunk#before-you-start'], from: [] },
-  { gaps: 'GAP-1565', section: 'Upgrade and policy limits', phrases: ['**Restored hook records on managed macOS:**', '`hook_contract_lock.json`', 'the guardian and gateway rewrite them at the next check', 'compare the hook commands, not the file bytes'], from: [] },
+  { gaps: 'GAP-1565', section: 'Upgrade and policy limits', phrases: ['**Restored hook records on managed macOS:**', '`hook_contract_lock.json`', 'the guardian rewrites, within seconds, the records that no longer match the live registration', 'compare the hook commands, not the file bytes'], from: [] },
   { gaps: 'GAP-0999', section: 'Sandboxes', phrases: ['**Raw OpenShell during a gateway restart:**', 'OpenShell has no admission barrier that raw clients honor', 'one started after the last check is ended by the restart', 'This is an OpenShell limit.', '/docs/sandboxes/guide#a-raw-openshell-sandbox-stops-a-restart-or-rollback'], from: [] },
   { gaps: 'GAP-1177', section: 'Sandboxes', phrases: ['**No network cutoff for a contained MicroVM:**', 'the VM stays reported as unprotected and new DefenseClaw runs are refused', 'OpenShell has no VM pause or network-off operation', 'This is an OpenShell and platform limit.', '/docs/sandboxes/guide#a-contained-vm-has-no-confirmed-network-withdrawal'], from: [] },
   // Known issues moved to 1.0.5 by the owner decision of 2026-10-25 10:40 (KNOWN-ISSUES-1.0.4.md).
@@ -1423,6 +1423,9 @@ describe('Known limits by lead decision (rel-1-0-4 P1 reconcile)', () => {
 // heading of the page; the row reads only that section and its subsections.
 type DocRow = { gap: string; page: string; section?: string; has?: string[]; lacks?: string[] };
 const r105Rows: DocRow[] = [
+  { gap: "GAP-1519", page: "connectors/index.mdx", section: "Pick yours", has: ["| [GitHub Copilot CLI](/docs/connectors/copilot) | Hook | Tool calls | No: a confirmation blocks |", "Where an agent cannot ask, a confirm verdict becomes an alert with the original action kept; Copilot CLI blocks it instead."], lacks: ["| Tool calls | `preToolUse` |"] },
+  { gap: "GAP-1537", page: "enterprise/mdm/intune-linux.mdx", has: ["The wrapper itself makes up to three attempts on exit `75` (busy): the first run and two retries, 10 seconds apart."], lacks: ["retries exit `75` (busy) up to three times"] },
+  { gap: "GAP-2242", page: "sandboxes/network.mdx", has: ["for example `pack open (sha256:…), network allowlist (balanced), approvals triage`"], lacks: ["for example `profile balanced, pack open`"] },
   { gap: "GAP-2360", page: "guardrail/index.mdx", has: ["| **Select hook fail mode** *(asked only when this run turns the guardrail on or switches between observe and action;", "`defenseclaw init` already turns the guardrail on, so a later run that keeps the mode does not ask it."], lacks: ["asked on first setup or when the mode changes", "there is no hook fail mode question"] },
   { gap: "GAP-2235", page: "guardrail/unified-llm-key.mdx", has: ["and no `--instance-name` drops the instance", "binding, so the role stops using the custom instance."] },
   { gap: "GAP-2249", page: "stories/observe-claude-code.mdx", has: ["through its [native hooks](/docs/connectors/claudecode).", "Host setup turns Claude Code's native OpenTelemetry export off", "`CLAUDE_CODE_ENABLE_TELEMETRY=0`", "DefenseClaw sees Claude Code through its hooks only. Only an isolated OpenShell sandbox keeps native logs and metrics."], lacks: ["receives its native OpenTelemetry logs and metrics", "native hooks and OpenTelemetry]"] },
@@ -1684,10 +1687,36 @@ const r105Rows: DocRow[] = [
   { gap: "GAP-1883", page: "get-started/windows/install-lifecycle.mdx", section: "Upgrade", has: ["running an older release's `install.ps1` over a newer install is not a supported downgrade", "use `defenseclaw rollback` or `defenseclaw upgrade --version X.Y.Z`"] },
   { gap: "GAP-2391", page: "reference/cli.mdx", has: ["they are audit rows with action `config.change.applied` and others."], lacks: ["they are audit rows with action `config-update` and others."] },
   { gap: "GAP-2262", page: "guardrail/unified-llm-key.mdx", section: "Undo", has: ["defenseclaw setup guardrail --non-interactive --detection-strategy regex_only", "Without `--non-interactive` the command starts the full setup wizard"], lacks: ["and run `defenseclaw setup guardrail --detection-strategy regex_only` to turn the judge off."] },
+  { gap: "GAP-1921", page: "reference/fail-modes.mdx", has: ["`config validate`, `config set` and `guardrail fail-mode` accept only `open` or `closed`, in lower case; any other value (`OPEN`, `banana`) is refused.", "The `--fail-mode` flag of `defenseclaw init`, `quickstart` and `setup <connector>` takes either case and saves it in lower case."], lacks: ["`config validate` and the writers accept only `open` or `closed`"] },
   { gap: "GAP-2392", page: "tui.mdx", section: "Panels", has: ["The quick-action row at the end of Overview lists both as `[G] Gateway` and `[z] AI Discovery`", "The hint line above the status line is not a key list on Overview"], lacks: ["The key row shows both actions at 80 columns."] },
   { gap: "GAP-2239", page: "policies/defaults.mdx", section: "What `setup guardrail` actually writes", has: ["If `config.yaml` already has an entry for the connector under `guardrail.connectors` (`defenseclaw setup claude-code` or an `init` that picked several agents writes one), the command saves `mode` and `rule_pack` in that entry instead of at the top level. The setup summary and `defenseclaw guardrail status` show the values the connector runs with; `defenseclaw config show --section guardrail` shows where they are saved."] },
   { gap: "GAP-2224", page: "stories/cursor-secret-exfil.mdx", has: ["✓ cursor gateway outage=open (failClosed=true)", "This is the output in a terminal. Piped to another command or saved to a file, the same lines start with `OK` and `i` instead of the check mark and the info sign."] },
+  { gap: "GAP-2349", page: "tui.mdx", section: "Panels", has: ["The one exception is Sandboxes: there `P`, `R` and `A` are the", "On Sandboxes, press `p` for"] },
+  { gap: "GAP-2228", page: "tui.mdx", has: ["generation and policy digest as its own segment, right after the gateway:", "The active policy and mode are a separate segment further along the line"], lacks: ["example `policy strict · action · gen 10 · 8b19ede82344`", "ends with the policy the running"] },
+  { gap: "GAP-2345", page: "get-started/first-run.mdx", section: "Path A: interactive (`defenseclaw init`)", has: ["1. **Select active connector(s)**: every installed hook connector is pre-selected", "2. **Scanner mode** (`local`, `remote` or `both`, default `local`).", "3. **Select connector(s) for action enforcement**", "**Select action connector(s) for LLM judge**", "5. **Start gateway after setup?** (default yes), then **Run targeted readiness checks?** (default yes)."], lacks: ["pre-selects every installed hook connector and configures them all in `observe` mode. It then shows one checklist"] },
+  { gap: "GAP-2223", page: "connectors/codex.mdx", has: ["A per-user install writes no `.env` block", "On a managed Linux or macOS computer, setup keeps a marked block in `$CODEX_HOME/.env`"], lacks: ["On Linux and macOS, setup keeps a marked block in `$CODEX_HOME/.env`"] },
+  { gap: "GAP-2361", page: "enterprise/operations.mdx", has: ["On a managed standalone computer `/health` carries the `policy`", "`curl http://127.0.0.1:18970/health`, even under `sudo`, has no `policy` key", "sudo curl -s --unix-socket /opt/cisco/defenseclaw/run/hook.sock http://localhost/health"], lacks: ["The gateway stamps it on `/health` and `/status`"] },
   { gap: "GAP-2342", page: "get-started/first-run.mdx", has: ["You do not need `init` before `quickstart`.", "If `init` chose no agent and started the gateway, `quickstart --connector <name>` restarts the gateway so it loads the agent and writes its hooks."] },
+  { gap: "GAP-0010", page: "connectors/kiro.mdx", section: "ACP guard", has: ["In enterprise managed mode an administrator enrolls each user, editor and agent with `defenseclaw-gateway enterprise acp enroll`, and the user runs the setup command it reports.", "Managed ACP is preview"], lacks: ["ACP editors are not supported in enterprise managed mode"] },
+  { gap: "GAP-2190", page: "connectors/codex.mdx", section: "Files DefenseClaw will modify", has: ["| Connector credentials | `~/.defenseclaw/hooks` | `%USERPROFILE%\\.defenseclaw\\hooks` | | Proxy bypass for cloud credentials (managed Linux and macOS only) | `$CODEX_HOME/.env` (marked block; a per-user install writes none) | not written |"] },
+  { gap: "GAP-1536", page: "enterprise/mdm/intune-macos.mdx", has: ["| Upload script | Your edited copy of `defenseclaw-enterprise.sh`, with the config added |"], lacks: ["the wrapper is about"] },
+  // pod docs i1 (2026-10-28)
+  { gap: "GAP-2051", page: "get-started/windows/telemetry-security.mdx", has: ["OpenCode's managed plugin also grant access only to the user (or `OWNER RIGHTS`) and SYSTEM", "`judge_bodies.db`", "also grant Administrators"], lacks: ["readable by the user, Administrators, and SYSTEM, and so is OpenCode's managed"] },
+  { gap: "GAP-1766", page: "enterprise/troubleshooting.mdx", has: ["and `verify` reports it as an error and exits `1`. On Windows `status` warns `policy_not_applied` with the Setup `/repair` next step, `security_complete` is `false`, and `verify` fails (exit `1603`)."], lacks: ["computes to. The message gives both and says the gateway applies the config on its next reload. `status` and `verify` show the same condition"] },
+  { gap: "GAP-1766", page: "enterprise/troubleshooting.mdx", has: ["`policy.last_reload_error` and `policy.applied: false` say the same. `verify` fails with this code (exit `1603`)."] },
+  { gap: "GAP-2099", page: "support-matrix.mdx", has: ["the guardian rewrites, within seconds, the records that no longer match the live registration", "Records that still match stay byte for byte as restored."], lacks: ["the guardian and gateway rewrite them at the next check", "the running guardian rewrites them within minutes"] },
+  // pod docs it2 (2026-10-28)
+  { gap: "GAP-2257", page: "connectors/codex.mdx", section: "Setup", has: ["On a terminal it still asks: `Select mode (1, 2) [2]:` with the current mode as the default (Enter keeps it)", "`Codex is already configured; re-apply its hooks (mode=action)? [Y/n]:`", "`Add LLM judge on top of rule scanning? [y/N]:`", "`--yes` skips the questions and keeps the current mode"] },
+  // pod docs it3 (2026-10-28)
+  { gap: "GAP-2264", page: "hitl.mdx", has: ["Outside Manual mode Claude Code cannot ask, so the call is blocked and its row shows `decision=blocked` in the list and `blocked` on the `Decision` line of `--show`."], lacks: ["Outside Manual mode, the decision is `block`."] },
+  { gap: "GAP-2264", page: "stories/hitl-approvals.mdx", has: ["Outside Manual mode Claude Code cannot ask, so the call is blocked and its row shows `decision=blocked` in the list and `blocked` on the `Decision` line of `--show`."], lacks: ["Outside Manual mode, the decision is `block`."] },
+  { gap: "GAP-2260", page: "guardrail/semantic-routing.mdx", has: ["Native Windows is not supported: there `defenseclaw setup routing` says so and refuses `--enable`, and `--disable` still turns off a routing block copied from another machine."] },
+  { gap: "GAP-2334", page: "enterprise/mdm/linux-config-management.mdx", section: "Check health", has: ["| Kit detection script | `packaging/mdm/linux/detect.sh --require-healthy` (exit `1`, or `unhealthy` with `--format value`, when `verify` reports a problem or `security_complete` is `false`: a host whose `verify` passes with incomplete security still fails it, and the message says which) |"], lacks: ["| Kit detection script | `packaging/mdm/linux/detect.sh --require-healthy` |"] },
+  // pod docs r105 loop i1 (2026-10-28)
+  { gap: "GAP-2411", page: "enterprise/troubleshooting.mdx", has: ["On Linux and macOS `status` warns `policy_not_applied` with `policy.applied: false` and `security_complete: false`, and `verify` reports it as an error and exits `1`."], lacks: ["`policy.applied: false` and do not warn"] },
+  { gap: "GAP-2411", page: "enterprise/operations.mdx", has: ["`verify` reports `policy_not_applied` or `policy_reload_rejected` as an error"] },
+  { gap: "GAP-2412", page: "enterprise/ai-defense-key.mdx", has: ["that applies signed policy bundles, contact your administrator: `secret set`"], lacks: ["bundle apply --bundle", "bundle sign --secret-file"] },
+  { gap: "GAP-2412", page: "enterprise/troubleshooting.mdx", has: ["| `disk_full` | Linux, macOS; Windows policy bundles |"], lacks: ["Windows bundle apply"] },
 ];
 
 function pageSection(name: string, heading?: string): string {
@@ -2000,6 +2029,27 @@ describe('wizard fail-mode question and per-connector confirmations match the CL
   });
 });
 
+// GAP-2257: a re-run of a hook connector setup keeps the mode but still asks
+// on a terminal (mode, re-apply, judge in action mode). Every page that says a
+// re-run keeps the current mode must also say it asks and that --yes skips it.
+describe('setup re-run pages say the re-run asks on a terminal (GAP-2257)', () => {
+  it('keeps the asking code the pages describe', () => {
+    const setup = source('cli/defenseclaw/commands/cmd_setup.py');
+    assert.ok(setup.includes('if interactive and not mode_from_flag:\n        normalized_mode = _prompt_connector_mode(connector, default_mode=normalized_mode)'), 're-run mode question changed: re-check the connector pages (GAP-2257)');
+    assert.ok(setup.includes('if interactive and normalized_mode == "action" and enable_judge is None and _prompt_enable_judge(connector, gc):'), 'judge question condition changed: re-check connectors/codex.mdx (GAP-2257)');
+    assert.ok(setup.includes('"  Add LLM judge on top of rule scanning?",\n        default=already,'), 'judge question text changed: re-check connectors/codex.mdx (GAP-2257)');
+  });
+  it('every keeps-the-current-mode sentence names the questions and --yes', () => {
+    const pages = ['amp', 'antigravity', 'claudecode', 'codex', 'copilot', 'cursor', 'devin', 'hermes', 'kiro', 'opencode'].map((c) => `connectors/${c}.mdx`);
+    for (const page of [...pages, 'reference/cli.mdx', 'reference/setup-commands.mdx']) {
+      const text = pageSection(page);
+      for (const m of text.matchAll(/re-run without `--mode` keeps the current mode[^\n]*/g)) {
+        assert.ok(/asks/.test(m[0]) && m[0].includes('`--yes` skips the questions'), `${page}: a re-run sentence does not say it asks on a terminal and that --yes skips it: ${m[0].slice(0, 120)}`);
+      }
+    }
+  });
+});
+
 // GAP-2365 / GAP-2367 / GAP-2368: the setup re-run question, where
 // trusted-paths writes and the watchdog default follow the code.
 describe('setup re-run question, trusted-paths store and watchdog default match the code (GAP-2365, GAP-2367, GAP-2368)', () => {
@@ -2053,6 +2103,66 @@ describe('edge-connector setup prompts and sudo refusal match the CLI (GAP-2221)
   });
 });
 
+// GAP-1519: the "Can ask you first" column of the connectors table follows
+// capability-matrix.json (canAskNative and askEvents) for every connector.
+describe('connectors table ask column matches the capability data (GAP-1519)', () => {
+  it('says No exactly where canAskNative is false and names every ask event otherwise', () => {
+    const matrix = JSON.parse(readFileSync(join(site, 'data/capability-matrix.json'), 'utf8')) as { connectors: { id: string; hooks?: { canAskNative?: boolean; askEvents?: string[] } }[] };
+    const byId = new Map(matrix.connectors.map((c) => [c.id, c.hooks ?? {}]));
+    const table = readFileSync(join(site, 'content/docs/connectors/index.mdx'), 'utf8').split('## Pick yours')[1]?.split('\n## ')[0] ?? '';
+    const rows = table.split('\n').filter((line) => /^\| \[[^\]]+\]\(\/docs\/connectors\/[a-z]+\)/.test(line));
+    assert.ok(rows.length >= 10, 'connectors/index.mdx Pick yours table not found');
+    for (const row of rows) {
+      const id = /\/docs\/connectors\/([a-z]+)\)/.exec(row)![1];
+      const hooks = byId.get(id);
+      assert.ok(hooks, `${id}: not in capability-matrix.json`);
+      const ask = row.split('|')[4].trim();
+      if (hooks.canAskNative) {
+        assert.ok(!ask.startsWith('No'), `${id}: canAskNative true but the table says ${ask}`);
+        for (const event of hooks.askEvents ?? []) assert.ok(ask.includes('`' + event + '`'), `${id}: ask event ${event} missing from the table`);
+      } else {
+        assert.ok(ask.startsWith('No'), `${id}: canAskNative false but the table says ${ask} (GAP-1519)`);
+      }
+    }
+  });
+});
+
+// GAP-1537: the Linux MDM wrapper makes at most three attempts (two retries,
+// 10 s apart) on busy; intune-linux.mdx says so.
+describe('Linux MDM wrapper busy retries match intune-linux.mdx (GAP-1537)', () => {
+  it('retries busy twice, 10 seconds apart', () => {
+    const sh = source('packaging/mdm/linux/defenseclaw-enterprise.sh');
+    const fn = sh.split('dc_run_lifecycle_retry() {')[1]?.split('\n}')[0] ?? '';
+    assert.ok(fn.includes('attempt=1') && fn.includes('[ "$attempt" -ge 3 ]') && fn.includes('retry $attempt of 2') && fn.includes('sleep 10'), 'dc_run_lifecycle_retry changed: re-check intune-linux.mdx Execution retries');
+    assert.equal((sh.match(/dc_busy_output "\$output" && \[ "\$attempt" -lt 3 \]/g) ?? []).length, 2, 'package busy retry loops changed: re-check intune-linux.mdx Execution retries');
+  });
+});
+
+// GAP-2334: detect.sh --require-healthy fails on security_complete false as
+// well as on a verify problem; the Linux config-management page says so.
+describe('kit detect.sh health gate matches the Linux Check health row (GAP-2334)', () => {
+  it('fails on a verify problem and on incomplete security', () => {
+    const detect = source('packaging/mdm/linux/detect.sh');
+    assert.ok(detect.includes('dc_json_true "$verify" ok || dc_report 0 unhealthy') && detect.includes('dc_json_true "$verify" security_complete || dc_report 0 unhealthy "verify reported incomplete security'), 'detect.sh --require-healthy gate changed: re-check enterprise/mdm/linux-config-management.mdx Check health');
+  });
+});
+
+// GAP-2264: a hook block shows as "blocked" in defenseclaw alerts; the HITL pages quote that word.
+describe('alerts decision label for a hook block matches the HITL pages (GAP-2264)', () => {
+  it('labels a hook block "blocked"', () => {
+    const py = source('cli/defenseclaw/commands/cmd_alerts.py');
+    assert.ok(py.includes('if action == "block":') && py.includes('else "blocked"'), 'alerts no longer labels a hook block "blocked": re-check hitl.mdx and stories/hitl-approvals.mdx Check it worked');
+  });
+});
+
+// GAP-2260: setup routing refuses --enable on native Windows; semantic-routing.mdx says so.
+describe('setup routing on native Windows matches semantic-routing.mdx (GAP-2260)', () => {
+  it('refuses --enable and names the reason on native Windows', () => {
+    const py = source('cli/defenseclaw/commands/cmd_setup.py');
+    assert.ok(py.includes('if enable and _routing_unsupported_on_host():') && py.includes('"Semantic routing is not supported on native Windows: it routes OpenClaw and "'), 'setup routing no longer refuses --enable on native Windows: re-check semantic-routing.mdx Prerequisites');
+  });
+});
+
 describe('1.0.5 docs rows', () => {
   for (const row of r105Rows) {
     it(`${row.gap}: ${row.page}${row.section ? ` "${row.section}"` : ''}`, () => {
@@ -2100,6 +2210,17 @@ describe('Undo turns the judge off without the wizard (GAP-2262)', () => {
   });
 });
 
+// GAP-1921: the CLI flags take OPEN (click Choice, case_sensitive=False) and
+// save the lower-case choice; guardrail fail-mode, config set and validate refuse it.
+describe('fail-mode case rules match fail-modes.mdx (GAP-1921)', () => {
+  it('init, quickstart and setup flags ignore case; guardrail fail-mode does not', () => {
+    for (const f of ['cli/defenseclaw/commands/cmd_init.py', 'cli/defenseclaw/commands/cmd_quickstart.py', 'cli/defenseclaw/commands/cmd_setup.py']) {
+      assert.ok(/"--fail-mode",\s*type=click\.Choice\(\["open", "closed"\], case_sensitive=False\)/.test(source(f)), `${f} --fail-mode case rule changed: re-check reference/fail-modes.mdx`);
+    }
+    assert.ok(source('cli/defenseclaw/commands/cmd_guardrail.py').includes('@click.argument("mode", required=False, type=click.Choice(["open", "closed"]))'), 'guardrail fail-mode now ignores case: re-check reference/fail-modes.mdx');
+  });
+});
+
 // GAP-2392: Overview's hint line shows notices or tips, never a KEYS row; the
 // G and z keys are in the quick-action row of the Overview body.
 describe('Overview G and z keys are where tui.mdx says (GAP-2392)', () => {
@@ -2110,6 +2231,20 @@ describe('Overview G and z keys are where tui.mdx says (GAP-2392)', () => {
     const ov = hint.slice(hint.indexOf('def _overview_hint'), hint.indexOf('def _alerts_hint'));
     assert.ok(ov.length > 0 && !ov.includes('KEYS'), 'Overview hint line now has a KEYS row: re-check tui.mdx Panels');
     assert.ok(ov.includes('"Press 2 for Alerts."') && ov.includes('return self.next_tip()'), 'Overview hint notices changed: re-check tui.mdx Panels');
+  });
+});
+
+// GAP-2349, GAP-2228: the Sandboxes panel keeps P, R and A for its own actions
+// (p still opens Policies), and the status strip renders gen/digest and the
+// policy posture as separate segments.
+describe('Sandboxes panel keys and status strip segments match tui.mdx (GAP-2349, GAP-2228)', () => {
+  it('Sandboxes binds P, R and A; p falls back to Policies; gen/digest is its own segment', () => {
+    const sb = source('cli/defenseclaw/tui/sandbox_panel.py');
+    assert.ok(sb.includes('"sandboxes-pull": "P",') && sb.includes('"sandboxes-review": "R",') && sb.includes('"sandboxes-always": "A",'), 'Sandboxes P/R/A changed: re-check tui.mdx Panels');
+    const app = source('cli/defenseclaw/tui/app.py');
+    assert.ok(/LOWERCASE_PANEL_FALLBACK[^\n]*"sandboxes": frozenset\(\{"p"/.test(app), 'Sandboxes p no longer opens Policies: re-check tui.mdx Panels');
+    const strip = source('cli/defenseclaw/tui/widgets/status_strip.py');
+    assert.ok(strip.includes('segments.append(StatusSegment(model.applied_policy, "active"))') && strip.includes('segments.append(StatusSegment(model.policy_posture, "active"))'), 'status strip segments changed: re-check tui.mdx Config generation and policy digest');
   });
 });
 
@@ -2254,5 +2389,82 @@ describe('config.generation.json fields match the writer (GAP-2300)', () => {
     const missing = fields.filter((f) => !f.startsWith('transaction_') && !row.includes('`' + f + '`'));
     assert.deepEqual(missing, []);
     if (fields.some((f) => f.startsWith('transaction_'))) assert.ok(row.includes('`transaction_*`'), 'transaction_* fields not named');
+  });
+});
+
+// GAP-2345 / GAP-2223 / GAP-2361: the code behind the first-run prompt list,
+// the per-user Codex .env sentence and the managed /health socket paths.
+describe('first-run prompts, Codex .env block scope and managed hook sockets match the code (GAP-2345, GAP-2223, GAP-2361)', () => {
+  it('asks the five first-run prompts the page lists, in that order', () => {
+    const init = source('cli/defenseclaw/commands/cmd_init.py');
+    const wizard = init.split('ux.section("DefenseClaw First-Run Setup")')[1]?.split('\ndef ')[0] ?? '';
+    const order = ['_prompt_connector_selection(', '"  " + ux.bold("Scanner mode")', '_prompt_action_connectors(', 'if action_set:\n        shared_fail, shared_human, shared_sev = _prompt_action_policy(', 'judge_hook_connectors = _prompt_first_run_judge_connectors(', '"  " + ux.bold("Start gateway after setup?")', '"  " + ux.bold("Run targeted readiness checks?")'];
+    let at = -1;
+    for (const needle of order) {
+      const next = wizard.indexOf(needle, at + 1);
+      assert.ok(next > at, `first-run prompt moved or renamed: ${needle}: re-check get-started/first-run.mdx Path A`);
+      at = next;
+    }
+    for (const title of ['title = "Select active connector(s). Detected connectors are pre-selected."', 'title="Select connector(s) for action enforcement."', '"  " + ux.bold("Require human approval for risky actions?")', 'title="Select action connector(s) for LLM judge."']) {
+      assert.ok(init.includes(title), `first-run prompt renamed: ${title}: re-check get-started/first-run.mdx Path A`);
+    }
+  });
+  it('writes the Codex .env block only on a managed install', () => {
+    const codex = source('internal/gateway/connector/codex.go');
+    assert.match(codex, /if opts\.ManagedEnterprise \{\n(?:\t+\/\/[^\n]*\n)*\t+if err := ensureCodexDotEnvProxyBypass\(opts\)/, 'Codex .env block no longer managed-only: re-check connectors/codex.mdx');
+  });
+  it('names the managed hook socket paths', () => {
+    const layout = source('internal/managed/standalone_layout.go');
+    assert.ok(layout.includes('HookSocketPath:  "/run/defenseclaw-hook/hook.sock"') && layout.includes('HookSocketPath:  root + "/run/hook.sock"'), 'hook socket path changed: re-check enterprise/operations.mdx');
+  });
+});
+
+// GAP-0010 / GAP-1536: managed ACP is enrolled, never called unsupported, and
+// no page pins a byte or line count of an MDM kit script (it goes stale).
+describe('managed ACP wording and MDM kit size claims (GAP-0010, GAP-1536)', () => {
+  it('ships the managed ACP enroll and setup commands the pages name', () => {
+    const acp = source('internal/cli/enterprise_acp.go');
+    assert.ok(acp.includes('Use:   "enroll",') && acp.includes('enterpriseCmd.AddCommand(enterpriseACPCmd)'), 'enterprise acp enroll is gone: re-check connectors/kiro.mdx and support-matrix.mdx');
+  });
+  it('no page says ACP editors are unsupported in managed mode or gives an MDM script size', () => {
+    const files = execFileSync('git', ['ls-files', 'docs-site/content/docs'], { cwd: repo, encoding: 'utf8' }).split('\n').filter((f) => f.endsWith('.mdx'));
+    const bad: string[] = [];
+    for (const f of files) {
+      const text = readFileSync(join(repo, f), 'utf8').split(/\s+/).join(' ');
+      if (/ACP editors are not supported in (enterprise )?managed mode/.test(text)) bad.push(`${f}: managed ACP unsupported`);
+      if (/(wrapper|script) is about [0-9,.]+ ?KB/.test(text)) bad.push(`${f}: fixed script size`);
+    }
+    assert.deepEqual(bad, []);
+  });
+});
+
+// GAP-2331: the edge-connector allowlist takes IPv6 literals without brackets;
+// policy_compiler.py refuses a bracketed entry, so no page or README may ask for one.
+describe('edge-connector IPv6 allowlist entries are written without brackets (GAP-2331)', () => {
+  it('compiler refuses brackets and no page or README asks for them', () => {
+    assert.ok(source('edge-connector/tools/policy_compiler.py').includes("write the IPv6 literal without brackets"), 'policy compiler no longer refuses a bracketed IPv6 entry: re-check edge-connector pages');
+    const bad = ['docs-site/content/docs/edge-connector/architecture.mdx', 'docs-site/content/docs/edge-connector/policies.mdx', 'edge-connector/README.md', 'edge-connector/INSTALL.md']
+      .filter((f) => /bracketed globally scoped IPv6/.test(source(f).split(/\s+/).join(' ')));
+    assert.deepEqual(bad, []);
+  });
+});
+
+// GAP-2190: a table row placed after a paragraph renders as stray text, not a
+// row of the table above it. No page may start a table line right after prose.
+describe('no table row is detached from its table (GAP-2190)', () => {
+  it('every table line follows a blank line, another table line or an MDX comment', () => {
+    const files = execFileSync('git', ['ls-files', 'docs-site/content/docs'], { cwd: repo, encoding: 'utf8' }).split('\n').filter((f) => f.endsWith('.mdx'));
+    const bad: string[] = [];
+    for (const f of files) {
+      const lines = readFileSync(join(repo, f), 'utf8').split('\n');
+      let fence = false;
+      lines.forEach((line, i) => {
+        if (line.trimStart().startsWith('```')) fence = !fence;
+        if (fence || i === 0 || !line.trimStart().startsWith('|')) return;
+        const prev = lines[i - 1].trim();
+        if (prev && !prev.startsWith('|') && !/^\{\/\*.*\*\/\}$/.test(prev)) bad.push(`${f}:${i + 1}`);
+      });
+    }
+    assert.deepEqual(bad, []);
   });
 });

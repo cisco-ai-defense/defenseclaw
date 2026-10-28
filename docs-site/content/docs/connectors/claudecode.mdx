@@ -33,7 +33,7 @@ defenseclaw setup claude-code                # first setup defaults to observe: 
 defenseclaw setup claude-code --mode action  # block on policy hits
 ```
 
-A re-run without `--mode` keeps the current mode, including with `--yes`. Use `--mode observe` or `--mode action` to choose a mode explicitly.
+A re-run without `--mode` keeps the current mode, including with `--yes`. On a terminal it still asks for the mode, with the current one as the default (Enter keeps it), and whether to re-apply the hooks; in action mode it also asks whether to add the LLM judge. `--yes` skips the questions ([the questions setup asks](/docs/guardrail/switching-connectors#the-questions-setup-asks)). Use `--mode observe` or `--mode action` to choose a mode explicitly.
 
 On Windows, run the same commands in PowerShell. Quit and reopen Claude Code afterwards so it loads the hooks. After upgrading from an earlier release, quit all running Claude Code processes and reopen them so they stop using any old exporter settings.
 

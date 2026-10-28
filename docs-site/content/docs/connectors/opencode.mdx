@@ -33,7 +33,7 @@ defenseclaw setup opencode                # first setup defaults to observe: rec
 defenseclaw setup opencode --mode action  # block on policy hits by throwing
 ```
 
-A re-run without `--mode` keeps the current mode. On Windows, run the same commands in PowerShell. Restart OpenCode afterwards. Until it starts, `defenseclaw status` shows OpenCode as `IDLE`, which is normal.
+A re-run without `--mode` keeps the current mode. On a terminal setup still asks for the mode, with the current one as the default (Enter keeps it), and whether to re-apply the hooks; in action mode it also asks whether to add the LLM judge. `--yes` skips the questions ([the questions setup asks](/docs/guardrail/switching-connectors#the-questions-setup-asks)). On Windows, run the same commands in PowerShell. Restart OpenCode afterwards. Until it starts, `defenseclaw status` shows OpenCode as `IDLE`, which is normal.
 
 ### Check it
 

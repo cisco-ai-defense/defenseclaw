@@ -36,7 +36,7 @@ defenseclaw setup hermes                # first setup defaults to observe
 defenseclaw setup hermes --mode action  # block on policy hits
 ```
 
-A re-run without `--mode` keeps the current mode. On Windows, run the same commands in PowerShell. Interactive setup asks for the mode, whether to add to or replace an existing connector roster, and whether to add an LLM judge. For scripts, pass `--yes --mode observe` (or `--mode action`).
+A re-run without `--mode` keeps the current mode. On a terminal setup still asks for the mode, with the current one as the default (Enter keeps it), and whether to re-apply the hooks; in action mode it also asks whether to add the LLM judge. `--yes` skips the questions ([the questions setup asks](/docs/guardrail/switching-connectors#the-questions-setup-asks)). On Windows, run the same commands in PowerShell. Interactive setup asks for the mode, whether to add to or replace an existing connector roster, and whether to add an LLM judge. For scripts, pass `--yes --mode observe` (or `--mode action`).
 
 <Callout type="warning" title="Reload Hermes before treating setup or disable as live">
 On macOS and Linux, setup registers the portable `hermes-hook.sh` in Hermes's `config.yaml`; macOS and Linux do not write `hermes-direct-native-state.json`. On Windows, setup registers `defenseclaw-hook.exe` directly and writes `hooks/hermes-direct-native-state.json` under the DefenseClaw data directory with `"status": "pending_reload"`. That file records a staged registration, not proof that a running Hermes host loaded it.

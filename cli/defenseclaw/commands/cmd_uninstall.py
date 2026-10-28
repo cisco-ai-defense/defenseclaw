@@ -3899,18 +3899,41 @@ def _is_reparse_path(path: str | os.PathLike[str]) -> bool:
     return bool(attributes & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0))
 
 
+def _rmtree_gone_ok(path: str) -> None:
+    """rmtree that counts a file or folder another remover took first as removed.
+
+    Two uninstalls of one account at once (two terminals) walk the same
+    trees: each failed with ENOENT on what the other had just deleted and
+    left data behind for a second run (GAP-2355).
+    """
+
+    def gone_ok(function, failed_path, exc) -> None:
+        error = exc if isinstance(exc, BaseException) else exc[1]
+        if isinstance(error, FileNotFoundError):
+            return
+        raise error
+
+    if sys.version_info >= (3, 12):
+        shutil.rmtree(path, onexc=gone_ok)
+    else:
+        shutil.rmtree(path, onerror=gone_ok)
+
+
 def _remove_tree_entry(entry: os.DirEntry[str]) -> None:
     """Remove one direct child without following symlinks/reparse points."""
-    if _is_reparse_path(entry.path):
-        if os.path.isdir(entry.path):
-            os.rmdir(entry.path)
-        else:
-            os.unlink(entry.path)
-        return
-    if entry.is_dir(follow_symlinks=False):
-        shutil.rmtree(entry.path)
-        return
-    os.unlink(entry.path)
+    try:
+        if _is_reparse_path(entry.path):
+            if os.path.isdir(entry.path):
+                os.rmdir(entry.path)
+            else:
+                os.unlink(entry.path)
+            return
+        if entry.is_dir(follow_symlinks=False):
+            _rmtree_gone_ok(entry.path)
+            return
+        os.unlink(entry.path)
+    except FileNotFoundError:
+        return  # another remover took it first: it is gone (GAP-2355)
 
 
 def _remove_data_dir(
@@ -3999,6 +4022,8 @@ def _remove_data_dir(
 
     try:
         os.rmdir(data_dir)
+    except FileNotFoundError:
+        pass  # a concurrent uninstall of this account removed it (GAP-2355)
     except OSError as exc:
         # A data dir on its own filesystem (GAP-1447) is a mount point: the
         # contents are gone, and only an administrator can unmount the folder.

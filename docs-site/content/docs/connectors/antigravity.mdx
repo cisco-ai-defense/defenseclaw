@@ -42,7 +42,7 @@ defenseclaw setup antigravity                 # first setup defaults to observe
 defenseclaw setup antigravity --mode action   # deny or ask at PreToolUse
 ```
 
-A re-run without `--mode` keeps the current mode. On Windows, run the same commands in PowerShell. Sign-in still goes through Windows Credential Manager or Google's browser flow.
+A re-run without `--mode` keeps the current mode. On a terminal setup still asks for the mode, with the current one as the default (Enter keeps it), and whether to re-apply the hooks; in action mode it also asks whether to add the LLM judge. `--yes` skips the questions ([the questions setup asks](/docs/guardrail/switching-connectors#the-questions-setup-asks)). On Windows, run the same commands in PowerShell. Sign-in still goes through Windows Credential Manager or Google's browser flow.
 
 ### Check it
 

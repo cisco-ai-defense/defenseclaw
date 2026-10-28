@@ -106,7 +106,7 @@ In the Intune admin center: **Devices** > **Manage devices** > **Configuration**
 | --- | --- |
 | Execution context | **Root**. The Intune daemon still needs authorization for `com.microsoft.intune.actions.ConfigureDevice` (polkit rule below) |
 | Execution frequency | **Every 1 day**. With `DC_SOURCE_URL` set, every run downloads the artifact before it compares versions |
-| Execution retries | **No retries**. The wrapper itself retries exit `75` (busy) up to three times, 10 seconds apart. Intune may count a cached retry inside its frequency window as successful without rerunning the script |
+| Execution retries | **No retries**. The wrapper itself makes up to three attempts on exit `75` (busy): the first run and two retries, 10 seconds apart. Intune may count a cached retry inside its frequency window as successful without rerunning the script |
 | Execution script | Your edited copy of `defenseclaw-enterprise.sh` |
 
 Assign it to device groups. A busy package manager, for example during unattended

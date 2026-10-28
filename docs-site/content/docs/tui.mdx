@@ -54,7 +54,9 @@ every key.
 
 Switch panels with the number/letter key shown, from any panel (only an open
 Setup form or a `/` search box types digits and letters), or cycle with `Tab` /
-`Shift+Tab`. Press `Ctrl+P` to fuzzy-jump to any panel by name. At 80 columns, the tab strip keeps every panel's key on screen and spells out
+`Shift+Tab`. The one exception is Sandboxes: there `P`, `R` and `A` are the
+panel's own pull, review and always-approve keys. On Sandboxes, press `p` for
+Policies, and `Tab` or `Ctrl+P` to reach Registries or Activity. Press `Ctrl+P` to fuzzy-jump to any panel by name. At 80 columns, the tab strip keeps every panel's key on screen and spells out
 the current panel (for example, `1 Overview`); other tabs may show only their
 keys. The title below the strip names the current panel. Wider terminals add
 short or full names to other tabs as room allows. Unread counts stay visible
@@ -160,15 +162,17 @@ file format.
 
 ### Config generation and policy digest
 
-The status line at the bottom of every panel ends with the policy the running
-gateway applies. With the guardrail off it reads:
+The status line at the bottom of every panel shows the applied config
+generation and policy digest as its own segment, right after the gateway:
 
 ```text
-● guardrail off · gen 10 · 8b19ede82344
+Ready.  │  ● Gateway (up 2m)  │  ● gen 10 · 8b19ede82344  │  ● Watchdog  │  ● Guardrail (action)  │ …
 ```
 
-With the guardrail on, the first part is the active policy and mode, for
-example `policy strict · action · gen 10 · 8b19ede82344`. `gen` is the
+The active policy and mode are a separate segment further along the line, for
+example `● policy strict · action` (`● guardrail off` with the guardrail off);
+a narrow terminal cuts the end of the line to `…`, so that segment may not
+show at 80 columns. `gen` is the
 applied config generation counter from `config.generation.json`, reported as
 `policy.config_generation` by the gateway. It survives a gateway restart;
 when the counter is unknown or zero, the footer shows only the digest. The hex

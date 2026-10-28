@@ -88,3 +88,36 @@ def test_routing_status_separates_config_and_runtime(routing_app) -> None:
     assert "Mode:       managed Docker" in result.output
     assert "Runtime:    healthy" in result.output
     assert "proxy-mode OpenAI chat-completions traffic" in result.output
+
+
+def test_routing_on_native_windows_says_unsupported_and_refuses_enable(routing_app) -> None:
+    # rel-1-0-4 GAP-2260: the page says native Windows is not supported, but
+    # --status offered --enable and --enable failed only on models or Docker.
+    app, saved = routing_app
+    app.cfg.routing.models = [_local_model()]
+    app.cfg.routing.remote = {"endpoint": "https://router.example.test"}
+    with patch("defenseclaw.commands.cmd_setup._routing_unsupported_on_host", return_value=True):
+        status = CliRunner().invoke(setup, ["routing", "--status"], obj=app)
+        enable = CliRunner().invoke(setup, ["routing", "--enable"], obj=app)
+    assert status.exit_code == 0, status.output
+    assert "Semantic routing is not supported on native Windows" in status.output
+    assert "Enable with" not in status.output
+    assert enable.exit_code != 0
+    assert "Semantic routing is not supported on native Windows" in enable.output
+    assert saved == []
+    assert app.cfg.routing.enabled is False
+
+
+def test_routing_disable_still_works_on_native_windows(routing_app) -> None:
+    app, saved = routing_app
+    app.cfg.routing.enabled = True
+    with (
+        patch("defenseclaw.commands.cmd_setup._routing_unsupported_on_host", return_value=True),
+        patch("defenseclaw.commands.cmd_setup._log_setup_action"),
+    ):
+        status = CliRunner().invoke(setup, ["routing", "--status"], obj=app)
+        result = CliRunner().invoke(setup, ["routing", "--disable"], obj=app)
+    assert "Turn it off with: defenseclaw setup routing --disable" in status.output
+    assert result.exit_code == 0, result.output
+    assert app.cfg.routing.enabled is False
+    assert saved == [True]

@@ -31,7 +31,7 @@ Per-user connectors resolve an explicit saved connector or global value first, t
 3. The global `guardrail.hook_fail_mode`.
 4. `closed` outside Secure Client; `open` under it.
 
-`config validate` and the writers accept only `open` or `closed`, in lower case; any other value (`OPEN`, `banana`) is refused. Per-user Cursor writes `failClosed: true` in observe and action mode, so a hook process that never answers blocks. On a managed computer the running hook follows the administrator's resolved fail mode.
+`config validate`, `config set` and `guardrail fail-mode` accept only `open` or `closed`, in lower case; any other value (`OPEN`, `banana`) is refused. The `--fail-mode` flag of `defenseclaw init`, `quickstart` and `setup <connector>` takes either case and saves it in lower case. Per-user Cursor writes `failClosed: true` in observe and action mode, so a hook process that never answers blocks. On a managed computer the running hook follows the administrator's resolved fail mode.
 
 ### Per-user installs
 
