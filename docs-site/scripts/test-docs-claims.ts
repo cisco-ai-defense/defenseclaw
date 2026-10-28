@@ -1449,6 +1449,7 @@ const r105Rows: DocRow[] = [
   { gap: "GAP-0885", page: "enterprise/enrollment.mdx", has: ["under `unenrolled_users: inspect` (the default) an extension-only user of it gets no target row", "with `deny` the user becomes a target"] },
   { gap: "GAP-1609", page: "tui.mdx", has: ["The **Blocks** filter chip (move between chips with `h` and `l`; `3` still opens Skills)"], lacks: ["`3` (Blocks) lists"] },
   { gap: "GAP-1610", page: "stories/prompt-injection-codex.mdx", has: ["Host setup does not wire Codex's native OpenTelemetry; only an isolated OpenShell sandbox uses it."], lacks: ["Setup also wires Codex's native OpenTelemetry."] },
+  { gap: "GAP-1610", page: "connectors/codex.mdx", has: ["when they carry a credential this install recorded", "puts it back when it removes its own", "delete those tables by hand"], lacks: ["Host setup removes native OpenTelemetry exporters installed by earlier releases: Codex"] },
   { gap: "GAP-1618", page: "enterprise/macos.mdx", has: ["`enterprise macos status --json` and `enterprise macos verify` report `tetragon_not_applicable`"] },
   { gap: "GAP-1618", page: "enterprise/configuration.mdx", has: ["on macOS `status --json` and `verify` report `tetragon_not_applicable`"] },
   { gap: "GAP-1591", page: "policies/cel/engine.mdx", has: ["`exists`, `all`, `map` and `filter` comprehensions; nesting is limited to two levels"] },
