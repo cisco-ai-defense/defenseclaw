@@ -1474,7 +1474,7 @@ const r105Rows: DocRow[] = [
   { gap: "GAP-1821", page: "support-matrix.mdx", section: "Known issues", has: ["**Claude Code settings can keep a variable from 1.0.2 or 1.0.3**. After an upgrade from 1.0.2 or 1.0.3 to 1.0.4", "The upgrade to 1.0.5 removes it."], lacks: ["keep a variable from 1.0.2**. After an upgrade from 1.0.2, the"] },
   { gap: "GAP-0012", page: "support-matrix.mdx", section: "Upgrade and policy limits", has: ["If that sync fails (a frozen guest, for one), the stop is held and the guest keeps running", "`defenseclaw sandbox stop NAME --discard-unsynced` stops it anyway and loses what it wrote since its last sync; the activity feed then shows `stop_unflushed`"], lacks: ["The stop requests a disk sync, but changes made after the last successful sync may be lost."] },
   { gap: "GAP-0012", page: "sandboxes/guide.mdx", section: "A MicroVM stop is held because its disk could not sync", has: ["To stop it anyway, run `defenseclaw sandbox stop NAME --discard-unsynced`", "the activity feed shows `stop_unflushed`"] },
-  { gap: "GAP-0516", page: "reference/env-vars.mdx", section: "Managed hosts and the environment", has: ["`DEFENSECLAW_FAIL_MODE` is not one of them: a managed hook uses only the fail mode the administrator installed", "(`DEFENSECLAW_FAIL_MODE` is one of them)"], lacks: ["`DEFENSECLAW_FAIL_MODE` is passed through for older installed hooks", "opt-outs except `DEFENSECLAW_FAIL_MODE` and"] },
+  { gap: "GAP-0516", page: "reference/env-vars.mdx", section: "Managed hosts and the environment", has: ["`DEFENSECLAW_FAIL_MODE` is not one of them: a managed hook uses only the fail mode the administrator installed", "security opt-outs (`DEFENSECLAW_FAIL_MODE` among them;"], lacks: ["`DEFENSECLAW_FAIL_MODE` is passed through for older installed hooks", "opt-outs except `DEFENSECLAW_FAIL_MODE` and"] },
   { gap: "GAP-0516", page: "enterprise/threat-model.mdx", has: ["`DEFENSECLAW_FAIL_MODE` is ignored in both directions: the installed fail mode applies"], lacks: ["`DEFENSECLAW_FAIL_MODE`, `DEFENSECLAW_STRICT_AVAILABILITY`, `DEFENSECLAW_HOOK_MAX_BODY` and `DEFENSECLAW_MANAGED_TRUST_STRICT_ANCESTORS` count only when stricter"] },
   { gap: "GAP-0669", page: "stories/cursor-secret-exfil.mdx", has: ["cursor gateway outage=open (failClosed=true)", "`failClosed=true` in `hooks.json` only covers a hook process that cannot answer."], lacks: ["cursor hook failures=closed"] },
   { gap: "GAP-2132", page: "guardrail/index.mdx", has: ["`defenseclaw doctor` shows `Config file` (`canonical schema valid`) and `Rule pack` as `[PASS]`"], lacks: ["shows `Config validation` and `Rule pack` as `[PASS]`"] },
@@ -2089,6 +2089,12 @@ describe('managed env-var rules match the registry (GAP-0045)', () => {
       assert.ok(ignoreRow.includes('`' + name + '`'), `env-vars ignore row except-list omits ${name}`);
     }
     assert.ok(!/`DEFENSECLAW_FAIL_MODE` remains `tighten_only`/.test(b17), 'B17 still calls DEFENSECLAW_FAIL_MODE tighten_only');
+    // The ignore row names DEFENSECLAW_FAIL_MODE as ignored, before the
+    // tighten_only exception, so it never reads as one of the tighten_only pair.
+    const failAt = ignoreRow.indexOf('`DEFENSECLAW_FAIL_MODE`');
+    const tightAt = ignoreRow.indexOf('`tighten_only`');
+    assert.ok(failAt >= 0, 'env-vars ignore row does not name DEFENSECLAW_FAIL_MODE');
+    assert.ok(tightAt < 0 || failAt < tightAt, 'env-vars ignore row names DEFENSECLAW_FAIL_MODE after tighten_only');
   });
 });
 
