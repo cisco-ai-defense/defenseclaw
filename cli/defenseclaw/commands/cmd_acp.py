@@ -17,7 +17,7 @@ import shutil
 import stat
 import time
 from datetime import datetime, timezone
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from typing import Any
 
 import click
@@ -1948,9 +1948,18 @@ def refresh_cmd(app: AppContext, from_sha256: str, guard_path: str) -> None:
 _GUARD_BASENAMES = {"defenseclaw-acp", "defenseclaw-acp.exe"}
 
 
+# Windows launchers an editor can start directly. npm installs agents such as
+# OpenCode as a .cmd launcher, so an entry that names opencode.cmd launches the
+# same catalog agent as opencode.exe (GAP-0191). A .ps1 is not startable.
+_WINDOWS_LAUNCHER_SUFFIXES = (".exe", ".cmd", ".bat")
+
+
 def _entry_basename(command: str) -> str:
-    name = Path(str(command or "")).name.lower()
-    return name[:-4] if name.endswith(".exe") else name
+    name = PureWindowsPath(str(command or "")).name.lower()
+    for suffix in _WINDOWS_LAUNCHER_SUFFIXES:
+        if name.endswith(suffix):
+            return name[: -len(suffix)]
+    return name
 
 
 def _entry_is_guarded(entry: dict[str, Any]) -> bool:
