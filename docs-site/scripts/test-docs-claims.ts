@@ -1678,6 +1678,8 @@ const r105Rows: DocRow[] = [
   // pod docs r105 loop i1 (2026-10-28)
   { gap: "GAP-2411", page: "enterprise/troubleshooting.mdx", has: ["On Linux and macOS `status` warns `policy_not_applied` with `policy.applied: false` and `security_complete: false`, and `verify` reports it as an error and exits `1`."], lacks: ["`policy.applied: false` and do not warn"] },
   { gap: "GAP-2411", page: "enterprise/operations.mdx", has: ["`verify` reports `policy_not_applied` or `policy_reload_rejected` as an error"] },
+  { gap: "GAP-2412", page: "enterprise/ai-defense-key.mdx", has: ["that applies signed policy bundles, contact your administrator: `secret set`"], lacks: ["bundle apply --bundle", "bundle sign --secret-file"] },
+  { gap: "GAP-2412", page: "enterprise/troubleshooting.mdx", has: ["| `disk_full` | Linux, macOS; Windows policy bundles |"], lacks: ["Windows bundle apply"] },
 ];
 
 function pageSection(name: string, heading?: string): string {
