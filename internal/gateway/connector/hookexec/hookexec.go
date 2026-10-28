@@ -2555,6 +2555,9 @@ func unreachableDetail(opts Options, reason string) string {
 	if opts.ManagedEnterprise || opts.ManagedUnixSocket != "" {
 		return reason
 	}
+	if perUserInstallWindowNamesTheInstall(opts, reason) {
+		return perUserInstallWindowDetail
+	}
 	switch reason {
 	case "gateway unreachable":
 		return "check `defenseclaw-gateway status`, or run `defenseclaw-gateway restart`"
@@ -2566,6 +2569,22 @@ func unreachableDetail(opts Options, reason string) string {
 			"try again in a moment, or check `defenseclaw-gateway status`"
 	}
 	return reason
+}
+
+// perUserInstallWindowDetail is the stderr detail of a per-user call blocked
+// while this account's installer holds the data directory: the same cause
+// the agent is shown (perUserGatewayDownText), not "restarting or not
+// running" (GAP-2394).
+const perUserInstallWindowDetail = "DefenseClaw is being installed or upgraded for this account, and its gateway " +
+	"starts again when that is done; try again in a moment, or run the installer again if it has stopped"
+
+// perUserInstallWindowNamesTheInstall reports a per-user failure whose
+// answer names the install window (perUserGatewayDownText): this account's
+// installer holds the data directory, and the failure is neither the
+// gateway's own error answer nor a listener DefenseClaw cannot verify,
+// which keep their cause.
+func perUserInstallWindowNamesTheInstall(opts Options, reason string) bool {
+	return opts.gatewayRefusal == "" && !strings.HasPrefix(reason, foreignListenerReasonPrefix) && perUserInstallWindow(opts)
 }
 
 // perUserGatewayDownText is what a per-user hook that fails closed because
@@ -2585,7 +2604,7 @@ func perUserGatewayDownText(opts Options, reason string) string {
 	if opts.ManagedEnterprise || opts.ManagedUnixSocket != "" {
 		return ""
 	}
-	if perUserInstallWindow(opts) {
+	if perUserInstallWindowNamesTheInstall(opts, reason) {
 		return "DefenseClaw blocked this " + hookEventSubject(opts.Event) + ": DefenseClaw is being installed or " +
 			"upgraded for this account, and its gateway starts again when that is done. Try again in a moment; " +
 			"if the installer has stopped, run the installer again to finish or undo the interrupted install."
