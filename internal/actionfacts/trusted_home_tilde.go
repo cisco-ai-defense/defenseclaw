@@ -442,10 +442,6 @@ func staticRedirectPath(word *syntax.Word, windows bool) (string, bool) {
 	return value, strings.HasPrefix(value, "/")
 }
 
-func homeVariableName(name string) bool {
-	return name == "HOME" || name == "USER" || name == "LOGNAME"
-}
-
 // currentShellStmts returns the statements of list that the shell runs in
 // its own process whenever the list runs, in order: the members of a { }
 // group and the left side of && or ||. A background job, a coprocess, a
