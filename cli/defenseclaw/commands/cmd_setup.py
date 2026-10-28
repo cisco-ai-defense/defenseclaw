@@ -91,6 +91,8 @@ from defenseclaw.config import (
     enable_user_runtime_planes,
     locked_config_yaml,
     locked_file_update,
+    outage_block_hint,
+    saved_hook_fail_mode_scope,
 )
 from defenseclaw.config import (
     load as load_config,
@@ -1710,6 +1712,10 @@ def _configure_llm(
         flag_value=None,
         non_interactive=False,
     )
+    if llm.provider != previous_provider and llm.provider != "custom" and llm.provider in _WIZARD_LLM_PROVIDERS:
+        # A catalog provider replacing provider custom drops its instance
+        # binding, as setup llm --provider does (GAP-2379, GAP-2235).
+        llm.instance_name = ""
     current_model = (llm.model or "") if llm.provider == previous_provider else ""
     if llm.provider in _LOCAL_LLM_WIZARD_PROVIDERS:
         # Local runtimes: no API key. Ask for the endpoint first so we
@@ -1896,8 +1902,14 @@ def _configure_llm_non_interactive(
     llm = _target_llm_block(cfg, target_path)
     if provider is not None:
         next_provider = provider.strip().lower()
-        if next_provider != (llm.provider or "").strip().lower() and base_url is None:
+        provider_changed = next_provider != (llm.provider or "").strip().lower()
+        if provider_changed and base_url is None:
             llm.base_url = ""
+        # A switch away from provider custom drops its instance binding
+        # unless --instance-name names one again, so the role cannot keep
+        # routing to the old custom instance (GAP-2235).
+        if provider_changed and next_provider != "custom" and instance_name is None:
+            llm.instance_name = ""
         llm.provider = next_provider
     elif not llm.provider:
         llm.provider = "anthropic"
@@ -7422,7 +7434,16 @@ def setup_guardrail(
             gc.judge.api_base = ""
             gc.judge.api_key_env = ""
         if judge_provider is not None:
-            gc.judge.llm.provider = judge_provider.strip().lower()
+            next_judge_provider = judge_provider.strip().lower()
+            # A switch away from provider custom drops the judge's instance
+            # binding unless --judge-instance-name names one (GAP-2379, as GAP-2235).
+            if (
+                next_judge_provider != (gc.judge.llm.provider or "").strip().lower()
+                and next_judge_provider != "custom"
+                and judge_instance_name is None
+            ):
+                gc.judge.llm.instance_name = ""
+            gc.judge.llm.provider = next_judge_provider
         if judge_region is not None:
             gc.judge.llm.region = judge_region.strip()
         if judge_instance_name is not None:
@@ -7779,11 +7800,13 @@ def setup_guardrail(
         rows = [
             ("guardrail.connector", f"{connector_label} ({gc.connector})"),
             ("scope", scope_val),
-            ("guardrail.mode", gc.mode),
+            # The values this connector runs with: a guardrail.connectors entry
+            # wins over the top-level keys, as guardrail status shows (GAP-2239).
+            ("guardrail.mode", gc.effective_mode(gc.connector)),
             ("guardrail.port", str(gc.port)),
             *_legacy_guardrail_llm_rows(gc),
             ("guardrail.detection_strategy", _effective_detection_strategy(gc, gc.connector)),
-            ("guardrail.rule_pack", gc.effective_rule_pack() or "default"),
+            ("guardrail.rule_pack", gc.effective_rule_pack(gc.connector) or "default"),
         ]
         if gc.api_base:
             rows.append(("guardrail.api_base", gc.api_base[:60] + "..." if len(gc.api_base) > 60 else gc.api_base))
@@ -7791,8 +7814,9 @@ def setup_guardrail(
             truncated = gc.block_message[:60] + "..." if len(gc.block_message) > 60 else gc.block_message
             rows.append(("guardrail.block_message", truncated))
         rows.append(("guardrail.hook_fail_mode", _guardrail_summary_hook_fail_mode(app.cfg, gc.connector)))
-        rows.append(("guardrail.hilt.enabled", str(bool(gc.hilt.enabled)).lower()))
-        rows.append(("guardrail.hilt.min_severity", gc.hilt.min_severity or "HIGH"))
+        hilt = gc.effective_hilt(gc.connector)
+        rows.append(("guardrail.hilt.enabled", str(bool(hilt.enabled)).lower()))
+        rows.append(("guardrail.hilt.min_severity", hilt.min_severity or "HIGH"))
     if gc.judge.enabled:
         rows.append(("guardrail.judge.enabled", "true"))
         # GAP-2056: show the judge LLM in use (guardrail.judge.llm layered on
@@ -11051,12 +11075,16 @@ def _apply_hook_connector_setup(
         and connector not in {"cursor", "hermes", "copilot", "antigravity"}
         and gc.effective_hook_fail_mode(connector) == "open"
     ):
-        if _batch_summary is not None:
+        if _batch_summary is not None and saved_hook_fail_mode_scope(gc, connector):
+            # A saved open wins over the strict policy (GAP-0039).
+            _batch_summary.setdefault("fail_open_saved", {})[connector] = outage_block_hint(gc, connector)
+        elif _batch_summary is not None:
             _batch_summary.setdefault("fail_open", []).append(connector)
         else:
+            why = "your saved fail mode" if saved_hook_fail_mode_scope(gc, connector) else "default policy"
             ux.echo(
                 f"  ⚠ {connector} hooks let tool calls run with a warning while the gateway is not "
-                "running (default policy). To block them: defenseclaw guardrail use-pack strict"
+                f"running ({why}). To block them: {outage_block_hint(gc, connector)}"
             )
     if connector == "cursor":
         if hilt:
@@ -11269,6 +11297,11 @@ def _echo_batch_setup_summary(applied: list[str], summary: dict[str, Any], *, re
         ux.echo(
             f"  ⚠ While the gateway is not running, {', '.join(fail_open)} hooks let tool calls run "
             "with a warning (default policy). To block them: defenseclaw guardrail use-pack strict"
+        )
+    for name, hint in (summary.get("fail_open_saved") or {}).items():
+        ux.echo(
+            f"  ⚠ While the gateway is not running, {name} hooks let tool calls run with a warning "
+            f"(your saved fail mode). To block them: {hint}"
         )
     if not restart:
         if "codex" in applied:

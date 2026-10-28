@@ -58,7 +58,9 @@ variable changes it.
 ## Step 1: Choose the agents
 
 List every agent to protect under `guardrail.connectors`. Each key turns that agent
-on; with none, nothing is protected.
+on; with none, nothing is protected. A key that names no DefenseClaw connector (a
+misspelled agent) is refused before anything changes: Linux and macOS ensure
+stop with `config_invalid` and name the key; Windows Setup refuses it the same way.
 
 ```yaml title="config.yaml (excerpt)"
 guardrail:

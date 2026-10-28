@@ -1011,9 +1011,15 @@ _OPENAI_STYLE_LLM_PROVIDERS = frozenset(
 _warned_llm_prefixes: set[tuple[str, str]] = set()
 
 
-def _maybe_warn_unknown_provider(prefix: str, component_path: str) -> None:
+def _maybe_warn_unknown_provider(prefix: str, component_path: str, instance_name: str = "") -> None:
     if not prefix or prefix in _RECOGNIZED_LLM_PROVIDERS:
         return
+    # ``provider: custom`` with a bound instance routes through its
+    # llm_providers.custom entry, so it is not an unknown prefix (GAP-2234).
+    # Without an instance it still warns: nothing tells the gateway where to go.
+    if prefix == "custom" and (instance_name or "").strip():
+        return
+    component_path = component_path or "llm"
     key = (component_path, prefix)
     if key in _warned_llm_prefixes:
         return
@@ -4377,6 +4383,16 @@ class Config:
         if override.model:
             out.model = override.model
         if override.provider:
+            # A role naming another provider and no instance of its own does
+            # not inherit the custom instance binding (GAP-2379); Go ResolveLLM
+            # applies the same rule.
+            role_provider = override.provider.strip().lower()
+            if (
+                not override.instance_name
+                and role_provider != "custom"
+                and role_provider != (out.provider or "").strip().lower()
+            ):
+                out.instance_name = ""
             out.provider = override.provider
         if override.api_key:
             out.api_key = override.api_key
@@ -4430,7 +4446,7 @@ class Config:
                     out.instance_name,
                 )
 
-        _maybe_warn_unknown_provider(out.provider_prefix(), path)
+        _maybe_warn_unknown_provider(out.provider_prefix(), path, out.instance_name)
         return out
 
     def resolved_default_llm_api_key(self) -> str:
@@ -8039,3 +8055,35 @@ def prepare_fresh_v8_config(cfg: Config) -> Config:
     cfg._source_config_version = CURRENT_CONFIG_VERSION
     cfg._loaded_v8_modeled_snapshot = copy.deepcopy(_config_to_dict(cfg))
     return cfg
+
+
+def saved_hook_fail_mode_scope(guardrail: Any, connector: str = "") -> str:
+    """Where an explicitly saved ``hook_fail_mode`` that decides ``connector`` lives.
+
+    ``"connector"`` for the connector's own saved mode, ``"global"`` for a
+    saved top-level one, ``""`` when none is saved and the policy tier decides
+    (:meth:`GuardrailConfig.effective_hook_fail_mode`). A saved mode wins over
+    ``guardrail use-pack strict``, so a hint to close an outage names
+    ``guardrail fail-mode closed`` then (GAP-0039).
+    """
+    override = (getattr(guardrail, "connectors", None) or {}).get(connector)
+    if override is not None and str(getattr(override, "hook_fail_mode", "") or "").strip():
+        return "connector"
+    value = str(getattr(guardrail, "hook_fail_mode", "") or "").strip()
+    if value and getattr(guardrail, "_hook_fail_mode_saved", True):
+        return "global"
+    return ""
+
+
+def outage_block_hint(guardrail: Any, connector: str = "") -> str:
+    """The command that makes a per-user ``connector``'s hooks block while the gateway is down.
+
+    ``guardrail fail-mode closed`` (``--connector NAME`` for the connector's
+    own save) when a saved open decides it, else the strict policy (GAP-0039).
+    """
+    scope = saved_hook_fail_mode_scope(guardrail, connector)
+    if scope == "connector":
+        return f"defenseclaw guardrail fail-mode closed --connector {connector}"
+    if scope == "global":
+        return "defenseclaw guardrail fail-mode closed"
+    return "defenseclaw guardrail use-pack strict"

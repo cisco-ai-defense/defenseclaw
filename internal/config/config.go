@@ -1165,12 +1165,21 @@ var recognizedLLMProviders = map[string]struct{}{
 // warnedPrefixes keeps one-shot-per-process warning state.
 var warnedPrefixes = map[string]struct{}{}
 
-func maybeWarnUnknownProvider(prefix, componentPath string) {
+func maybeWarnUnknownProvider(prefix, componentPath, instanceName string) {
 	if prefix == "" {
 		return
 	}
 	if _, ok := recognizedLLMProviders[prefix]; ok {
 		return
+	}
+	// "custom" with a bound instance routes through its llm_providers.custom
+	// entry, so it is not an unknown prefix (GAP-2234). Without an instance it
+	// still warns: nothing tells the gateway where to send the call.
+	if prefix == "custom" && strings.TrimSpace(instanceName) != "" {
+		return
+	}
+	if componentPath == "" {
+		componentPath = "llm"
 	}
 	key := componentPath + "\x00" + prefix
 	if _, seen := warnedPrefixes[key]; seen {
@@ -1230,6 +1239,14 @@ func (c *Config) ResolveLLM(path string) LLMConfig {
 		out.Model = override.Model
 	}
 	if override.Provider != "" {
+		// A role naming another provider and no instance of its own does
+		// not inherit the custom instance binding (GAP-2379); the CLI's
+		// Config.resolve_llm applies the same rule.
+		roleProvider := strings.ToLower(strings.TrimSpace(override.Provider))
+		if override.InstanceName == "" && roleProvider != "custom" &&
+			roleProvider != strings.ToLower(strings.TrimSpace(out.Provider)) {
+			out.InstanceName = ""
+		}
 		out.Provider = override.Provider
 	}
 	if override.APIKey != "" {
@@ -1287,7 +1304,7 @@ func (c *Config) ResolveLLM(path string) LLMConfig {
 	}
 
 	c.applyLLMInstance(&out)
-	maybeWarnUnknownProvider(out.ProviderPrefix(), path)
+	maybeWarnUnknownProvider(out.ProviderPrefix(), path, out.InstanceName)
 	return out
 }
 

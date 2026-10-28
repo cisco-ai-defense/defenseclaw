@@ -30,6 +30,7 @@ A guardrail profile is a named set of guardrail settings. You assign profiles to
 
 - The users are in a directory group or a local group on the host. Find the exact spelling: `id -Gn` on Linux, or `defenseclaw guardrail profile explain --user alice --json | jq .subject`.
 - On Windows, group profiles need the standalone enterprise install. Per-user installs have no group list.
+- Steps 1 to 3 are for a per-user install. A managed host (Linux, macOS or Windows) has no `defenseclaw guardrail` commands and no per-user `config.yaml`: put the profiles in the machine config and check them as [Deliver it to managed hosts](#deliver-it-to-managed-hosts) shows. On Windows that is `defenseclaw.exe config validate FILE` and `defenseclaw.exe enterprise windows profile-explain --user CORP\alice`, from an elevated prompt.
 
 ### Steps
 
@@ -78,7 +79,7 @@ A guardrail profile is a named set of guardrail settings. You assign profiles to
 
    `config validate` rejects an unknown profile name, an empty `match`, a malformed agent id and a forbidden key.
 
-3. Ask which profile a person gets. With no `--user`, it explains the account that runs the command.
+3. Ask which profile a person gets. With no `--user`, `guardrail profile explain` explains the account that runs the command. The managed `enterprise linux|macos|windows profile-explain` commands need `--user`.
 
    ```bash
    defenseclaw guardrail profile explain --user alice@corp.example.com --connector claudecode

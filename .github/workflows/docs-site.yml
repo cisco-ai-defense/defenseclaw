@@ -21,6 +21,7 @@ on:
       - 'internal/enterprisepolicy/claude.go'
       - 'internal/openshell/manager/box.go'
       - 'internal/config/internal/cfgtxn/cfgtxn.go'
+      - 'internal/envvars/registry.json'
       - '.github/workflows/docs-site.yml'
   pull_request:
     paths:
@@ -41,6 +42,7 @@ on:
       - 'internal/enterprisepolicy/claude.go'
       - 'internal/openshell/manager/box.go'
       - 'internal/config/internal/cfgtxn/cfgtxn.go'
+      - 'internal/envvars/registry.json'
       - '.github/workflows/docs-site.yml'
   workflow_dispatch:
 

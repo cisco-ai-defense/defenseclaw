@@ -9,7 +9,7 @@ keywords:
   - DefenseClaw scripted setup
 ---
 
-After the [install](/docs/get-started/download), DefenseClaw is on disk but not configured. `defenseclaw init` is the guided wizard. `defenseclaw quickstart` is the zero-prompt equivalent with safe defaults. Both run the same setup and print the same report. You do not need `init` before `quickstart`. For a guided first block, follow the [Quickstart](/docs/get-started/quickstart).
+After the [install](/docs/get-started/download), DefenseClaw is on disk but not configured. `defenseclaw init` is the guided wizard. `defenseclaw quickstart` is the zero-prompt equivalent with safe defaults. Both run the same setup and print the same report. You do not need `init` before `quickstart`. If `init` chose no agent and started the gateway, `quickstart --connector <name>` restarts the gateway so it loads the agent and writes its hooks. For a guided first block, follow the [Quickstart](/docs/get-started/quickstart).
 
 ## Path A: interactive (`defenseclaw init`)
 

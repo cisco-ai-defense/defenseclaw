@@ -200,7 +200,7 @@ Config generation: 42
 | Hook runtime files | FAIL | A generated hook script was edited or replaced. `defenseclaw doctor --fix` re-renders it. |
 | Orphaned hook entries `[<connector>]` | FAIL or WARN | Entries remain for a connector that is no longer configured. A missing script or credential fails the check; an existing target warns. Run `defenseclaw setup remove CONNECTOR`. |
 | Native OTLP credentials | WARN | An agent can keep an old credential after an upgrade, rollback or token rotation. Restart that agent and its background server, then run doctor again. |
-| Claude Code hooks freshness, Codex hooks freshness | WARN | `stale generated script (...)`: a hook script is from an older build, or bakes a different fail mode. The line names the command that regenerates it. |
+| Claude Code hooks freshness, Codex hooks freshness | WARN | `stale generated script (...)`: a hook script is from an older build, or bakes a different fail mode. The line names the command that regenerates it. A script edited by hand or copied from another build warns `a generated script is not the one setup rendered (...)` instead, next to the `Hook runtime files` FAIL; `defenseclaw doctor --fix` renders it again. |
 
 Real lines (paths shortened). A healthy gateway:
 
@@ -272,7 +272,7 @@ To rotate the gateway token on purpose, run `defenseclaw setup rotate-token --ye
 - **Observability.** Repeated export failures pause one destination (a circuit breaker); local history and other destinations keep working. Fix and reload the destination, or run `defenseclaw setup observability disable NAME`.
 
 
-Common failures: [Troubleshooting](/docs/get-started/upgrade). Agents: [Troubleshoot DefenseClaw](/docs/reference).
+Install and upgrade failures: [Troubleshooting](/docs/get-started/upgrade#troubleshooting). Agents: [Troubleshoot DefenseClaw](/docs/reference).
 
 ## Setup
 
@@ -333,7 +333,7 @@ defenseclaw setup redaction remove-all --yes
 
 | Command | Use it for |
 | --- | --- |
-| `defenseclaw setup trusted-paths list\|add\|remove` | Manage the directories trusted for connector-binary version probing (action-mode setups refuse binaries outside this allow-list). `list` shows built-in defaults plus operator additions with source and status; `add` validates the directory (world-writable / relative paths refused unless `--force`) and persists to `~/.defenseclaw/.env`; `remove` only touches operator-added entries. All verbs accept `--json`. |
+| `defenseclaw setup trusted-paths list\|add\|remove` | Manage the directories trusted for connector-binary version probing (action-mode setups refuse binaries outside this allow-list). `list` shows built-in defaults plus operator additions with source and status; `add` validates the directory (world-writable / relative paths refused unless `--force`) and writes it to `ai_discovery.trusted_binary_prefixes` in `~/.defenseclaw/config.yaml`; `remove` only touches operator-added entries (in `config.yaml`, or an older entry in `~/.defenseclaw/.env`). All verbs accept `--json`. |
 
 <Callout title="Safety gates are intentional">
 Commands that fetch remote content fail closed when the trust boundary is
@@ -734,8 +734,8 @@ These list/inventory verbs read across the full active roster:
 | --- | --- |
 | `defenseclaw alerts [--connector X] [--json]` | Snapshot of recent alerts (default 25). `--connector X` filters by connector; `--limit N` widens the window; `--show <n>` prints one full record. A finding row names its target, decision (`blocked`, `would block (observe mode)`, `detected in the prompt (cannot block)`), rule, scanner, ACP route or sandbox. `--json` adds `target`, `decision`, `rule`, `scanner`, `location`, `route`, `path`, `moved_to` next to the raw `details`. Detection-only findings are not alerts; the list ends with how many there were in the last 24 hours, and `defenseclaw audit export --since 24h` lists them as `scan-finding` rows. An empty list says `No alerts.` |
 | `defenseclaw alerts acknowledge` / `dismiss` | Acknowledge or dismiss alerts. The gateway records the change, so it must be running. Select them with `--id`, `--connector`, `--target`, `--since`, `--before`, or `--severity all\|CRITICAL\|HIGH\|MEDIUM\|LOW\|ERROR\|INFO`; `--dry-run` shows what would change. |
-| `defenseclaw-gateway audit export` (or `defenseclaw audit export`, same options) | JSONL export of `audit_events`, oldest first, with `structured` when present. `--limit N` returns the earliest N matches, or with `--newest` the most recent N. `--since` (inclusive) and `--until` (exclusive) take RFC3339 or a duration ago (`30m`, `2h`). `--connector` keeps one connector's rows. `--db PATH` reads another audit database, for example `~/.defenseclaw/previous/data/audit.db` after a rollback. Configuration changes are audit rows (action `config-update`). `--include-activity` also appends rows of the `activity_events` table, which holds only pre-1.0 history. |
-| `defenseclaw audit logs [--source gateway\|watchdog] [-n N] [--grep TEXT]` | Print the newest lines of `~/.defenseclaw/gateway.log` (or `watchdog.log`), the same log the TUI Logs panel shows. `-n` defaults to 50; `--grep` keeps lines that contain the text (case-insensitive). For config changes and operator actions use `defenseclaw audit export --since 1h`: they are audit rows with action `config-update` and others. |
+| `defenseclaw-gateway audit export` (or `defenseclaw audit export`, same options) | JSONL export of `audit_events`, oldest first, with `structured` when present. `--limit N` returns the earliest N matches, or with `--newest` the most recent N. `--since` (inclusive) and `--until` (exclusive) take RFC3339 or a duration ago (`30m`, `2h`). `--connector` keeps one connector's rows. `--db PATH` reads another audit database, for example `~/.defenseclaw/previous/data/audit.db` after a rollback. Configuration changes are audit rows with action `config.change.applied`; `structured` names the operation (`defenseclaw.admin.operation`, for example `config-update`) and what changed (`defenseclaw.admin.target_ref`). `--include-activity` also appends rows of the `activity_events` table, which holds only pre-1.0 history. |
+| `defenseclaw audit logs [--source gateway\|watchdog] [-n N] [--grep TEXT]` | Print the newest lines of `~/.defenseclaw/gateway.log` (or `watchdog.log`), the same log the TUI Logs panel shows. `-n` defaults to 50; `--grep` keeps lines that contain the text (case-insensitive). For config changes and operator actions use `defenseclaw audit export --since 1h`: they are audit rows with action `config.change.applied` and others. |
 | `defenseclaw-gateway audit findings [--since RFC3339] [--new-only] [--include-resolved] [--scanner NAME] [--target PATH] [--limit N]` (or `defenseclaw audit findings`, which runs it with the same options) | Report the deduplicated finding lifecycle. Active current findings are the default; `--include-resolved` adds resolved state, while `--since` selects lifecycle changes and `--new-only` narrows that window to fingerprints first observed since the timestamp. JSON reports both the total distinct count and the returned page. |
 | `tail -f ~/.defenseclaw/gateway.jsonl \| jq` | Tail an optional, explicitly configured `kind: jsonl` destination at that path. It holds only the records routed to that destination; complete local history stays in SQLite, and JSONL is not an implicit mirror. |
 
@@ -1409,8 +1409,13 @@ Setup. See [Install with an MDM](/docs/enterprise/mdm).
 | `/install`, `/upgrade`, `/repair`, `/reconcile`, `/status`, `/verify`, `/uninstall`, `/ensure` | The action |
 | `CONFIG=<file>` | Absolute path of the config. A first `/ensure` needs it and exits `1639` without it |
 | `MANIFEST=<file>` | Absolute path of a guardian target manifest. `/install` needs both `CONFIG=` and `MANIFEST=`; `/ensure` prepares a manifest from the config |
+| `BUNDLE=<file>` | With `/ensure` on an installed computer: the signed policy bundle to apply. Not with `CONFIG=` |
+| `TRUSTANCHORS=<file>` | With `/ensure`: the administrator-only bundle trust anchor file to install first. Not with `CONFIG=` |
+| `REFUSECAPABILITYLOSS=1` | With `/ensure` and `BUNDLE=`: refuse a bundle that turns off an enforced capability |
 | `ALLOWEDSIGNERS=<sha256>,<sha256>` | Accepted Authenticode signer thumbprints, comma-separated |
+| `ATTESTCLAUDEEFFECTIVEPOLICY=1` | With `/repair`: record the Claude Code attestation |
 | `JSON=1`, `NOSTART=1`, `PURGE=1` | Print JSON, stage without starting, also remove each enrolled account's DefenseClaw data and per-user binaries on uninstall |
+| `FORCE=1` | With `/uninstall`, last resort: remove the deployment without recovering a pending transaction |
 | `TIMEOUTSECONDS=<n>` | Lifecycle timeout, from 60 to 7200 seconds. Default 1800 |
 | `/quiet`, `/norestart` | Accepted and ignored |
 

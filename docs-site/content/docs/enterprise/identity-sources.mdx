@@ -351,9 +351,10 @@ sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux profile-explain -
 
 The per-user `defenseclaw guardrail profile explain` and `defenseclaw config get` commands refuse there. The configured `ai_discovery.trusted_ad_child_domains` list is in the administrator's `/etc/defenseclaw/config.yaml`.
 
-For an account of a child domain that is not listed, `subject.domain`,
-`subject.directory` and `subject.principal` are empty, and the text output
-shows the account name with no realm.
+For an account of a child domain that is not listed, `subject.directory`
+and `subject.principal` are empty, and the text output shows the account name
+with no realm. The `subject` object has no domain field: `subject.principal`
+carries the realm of an account a listed or joined domain confirms.
 
 A users assignment that names only a principal (`alice@CORP.EXAMPLE.COM`)
 matches an account only while it has that principal. Check it with the managed

@@ -1008,7 +1008,7 @@ There is no `DEFENSECLAW_GATEWAY_BIND`, `DEFENSECLAW_DATA_DIR` or `DEFENSECLAW_L
 
 ## Per-connector files
 
-`defenseclaw setup <connector>` writes these agent-side files from `config.yaml`. They are derived: change the setting in `config.yaml`, not the file. Hook scripts under `~/.defenseclaw/hooks/` carry a `# defenseclaw-derived:` header, and doctor warns `stale generated script` when one no longer matches, naming the command that regenerates it.
+`defenseclaw setup <connector>` writes these agent-side files from `config.yaml`. They are derived: change the setting in `config.yaml`, not the file. Hook scripts under `~/.defenseclaw/hooks/` carry a `# defenseclaw-derived:` header. Doctor warns `stale generated script` when a script is from an older build or bakes a different fail mode, naming the command that regenerates it. A script edited by hand, or copied from another build, fails the `Hook runtime files` row (`changed since setup`) and its freshness row warns `a generated script is not the one setup rendered`; `defenseclaw doctor --fix` renders it again.
 
 | Connector | File DefenseClaw mutates |
 | --- | --- |

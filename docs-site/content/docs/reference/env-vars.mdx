@@ -26,7 +26,7 @@ Fleet and Edge `DCLAW_*` variables marked `allow` are read by the Go or C servic
 | Managed host | What a managed standalone host does with the value |
 | --- | --- |
 | `allow` | Uses it. This includes runtime paths, credentials, hook-script values, and Fleet service variables. Restrict access to service environments containing Fleet secrets or TLS overrides. |
-| `ignore` | Treats it as unset. This covers core `DEFENSECLAW_*` security opt-outs except `DEFENSECLAW_STRICT_AVAILABILITY` (`DEFENSECLAW_FAIL_MODE` is one of them), the debug switches, most telemetry inputs, discovery probes, the Splunk bridge variables, test fixtures, `DEFENSECLAW_REPO`, `DEFENSECLAW_NO_UPDATE_CHECK`, most upgrade-internal variables, and the two deployment pins described below. |
+| `ignore` | Treats it as unset. This covers core `DEFENSECLAW_*` security opt-outs (`DEFENSECLAW_FAIL_MODE` among them; `DEFENSECLAW_STRICT_AVAILABILITY` and `DEFENSECLAW_MANAGED_TRUST_STRICT_ANCESTORS` are `tighten_only` instead), the debug switches, most telemetry inputs, discovery probes, the Splunk bridge variables, test fixtures, `DEFENSECLAW_REPO`, `DEFENSECLAW_NO_UPDATE_CHECK`, most upgrade-internal variables, and the two deployment pins described below. |
 | `tighten_only` | Uses it only when it makes the host stricter: `DEFENSECLAW_STRICT_AVAILABILITY` can only force fail-closed, `DEFENSECLAW_HOOK_MAX_BODY` can lower the hook body cap but never raise it, and `DEFENSECLAW_MANAGED_TRUST_STRICT_ANCESTORS` can only restore strict ancestor checks. `DEFENSECLAW_FAIL_MODE` is not one of them: a managed hook uses only the fail mode the administrator installed, so `DEFENSECLAW_FAIL_MODE=closed` in an agent's environment does not close an outage the administrator set to `open`. |
 
 - **`.env` follows the same rule.** The gateway and the CLI load
@@ -52,11 +52,12 @@ Fleet and Edge `DCLAW_*` variables marked `allow` are read by the Go or C servic
   either its `config.yaml` or the service environment says
   `managed_enterprise`, so unsetting or changing the variable in a shell cannot
   turn a managed host into an unmanaged one. Both pins are refused from
-  `.env`. The reverse is no escalation either: exporting
-  `DEFENSECLAW_DEPLOYMENT_MODE=managed_enterprise` in a shell only makes that
-  process's writers refuse changes (exit code `3`, `This device is managed`)
-  where the profile is standalone, the Linux default; on Windows and macOS,
-  where an unset profile is Secure Client, the writers keep writing.
+  `.env`. The reverse is no escalation either: on a per-user install (a
+  `config.yaml` in your home folder that does not itself say
+  `managed_enterprise`), a `DEFENSECLAW_DEPLOYMENT_MODE` or
+  `DEFENSECLAW_ENTERPRISE_PROFILE` exported in a shell is dropped when the
+  command starts. The writers keep writing as usual, and `defenseclaw doctor`
+  lists the variable under `Ignored environment overrides`.
   It does not enrol the device or apply an administrator's policy.
 - **Settings have a config key where one exists.** `DEFENSECLAW_REPO` is the deprecated alias of `update.source`, `DEFENSECLAW_NO_UPDATE_CHECK` has `update.check: false`, and `guardrail.judge.trace` replaces `DEFENSECLAW_JUDGE_TRACE` (which is read only on the Secure Client integration). `DEFENSECLAW_CUSTOM_PROVIDERS_PATH` names the derived `custom-providers.json`, not an input. See [Source of truth](/docs/reference/source-of-truth#environment-variables-and-env).
 

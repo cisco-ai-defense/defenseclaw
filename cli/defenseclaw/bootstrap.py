@@ -1945,6 +1945,35 @@ def gateway_failure_detail(result: subprocess.CompletedProcess, default: str) ->
     return useful[0] if useful else default
 
 
+def _running_gateway_has_no_connector(cfg: Config) -> bool:
+    """True when this account's running gateway says it booted with no connector.
+
+    That boot path writes no ``active_connector.json`` and reports
+    ``no connector configured`` on /health (sidecar.go
+    ``waitForConnectorSetup``). Any other answer, or none, keeps the
+    I-don't-know rule of :func:`_running_connector_from_state_file`.
+    """
+    try:
+        from defenseclaw.gateway import OrchestratorClient, foreign_loopback_listener, gateway_api_client_host
+
+        port = int(getattr(cfg.gateway, "api_port", 0) or 0)
+        if not port:
+            return False
+        host = gateway_api_client_host(cfg)
+        # /health takes no token: another account's gateway must not answer.
+        if foreign_loopback_listener(host, port):
+            return False
+        client = OrchestratorClient(host=host, port=port, timeout=3)
+        try:
+            health = client.health()
+        finally:
+            client.close()
+    except Exception:  # noqa: BLE001 - no answer keeps the no-restart rule.
+        return False
+    guardrail = health.get("guardrail") if isinstance(health, dict) else None
+    return isinstance(guardrail, dict) and guardrail.get("last_error") == "no connector configured"
+
+
 def _start_gateway_structured(cfg: Config) -> StepResult:
     """Start (or restart) the defenseclaw-gateway sidecar to match
     the on-disk config, returning a structured StepResult.
@@ -1994,7 +2023,13 @@ def _start_gateway_structured(cfg: Config) -> StepResult:
         )
         roster = _running_connectors_from_state_file(cfg.data_dir)
         running = None
-        if roster is not None and roster != desired_roster:
+        if roster is None and cfg.active_connectors() and _running_gateway_has_no_connector(cfg):
+            # No state file because the gateway booted with no connector
+            # (init chose none): it loads one only when it restarts, so
+            # "already running" left the agent unguarded (GAP-2342).
+            running = "no connector"
+            roster = []
+        elif roster is not None and roster != desired_roster:
             running = roster[0] if len(roster) == 1 else f"{len(roster)} connectors"
             if len(desired_roster) > 1:
                 desired = f"{len(desired_roster)} connectors"

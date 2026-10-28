@@ -52,6 +52,8 @@ If a step fails, the installer puts the previous version back, restarts it and k
 | `defenseclaw rollback` | Put back the install that the last upgrade replaced. Run it again to roll forward. |
 | `defenseclaw migrate --check` | List pending config migrations. Exit 0: can be applied. 1: cannot. 2: the config is from a newer release. |
 
+To go back to an earlier release, use `defenseclaw rollback` or `defenseclaw upgrade --version X.Y.Z`. Running an older release's installer (`install.sh` or `install.ps1` of that release) directly over a newer install is not a supported downgrade: the older installer does not know the hook entries the newer release wrote. On Windows it adds its own Claude Code hook beside them: until the repair below, Claude Code tool calls fail in the older release's hook (`unknown flag: --connector`), and `defenseclaw doctor` reports two DefenseClaw PreToolUse handlers. If that happened, run the newer release's install command again, then go back with one of the two commands above.
+
 If the `defenseclaw` command does not start, run the install command again. It repairs any install and keeps your data:
 
 <include>../../snippets/install-commands.mdx</include>

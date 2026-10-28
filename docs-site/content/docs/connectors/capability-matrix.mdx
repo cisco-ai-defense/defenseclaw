@@ -42,7 +42,7 @@ Claude Code, Codex, Cursor and Devin can. Kiro blocks a prompt only in Kiro IDE.
 
 | Field | Source |
 | --- | --- |
-| Family | `internal/gateway/connector/*.go` (whether the connector implements `RoutingConnector`) |
+| Family | `proxyConnectors` and `IsProxyConnector()` in `internal/gateway/connector/platform_support.go` (a listed connector is proxy-backed; every other connector is hook-based) |
 | Tool inspection | `_CONNECTOR_META[<id>].tool_mode` in `cli/defenseclaw/commands/cmd_setup.py` |
 | Subprocess policy | `SetupSubprocessEnforcement` call sites in `internal/gateway/connector/*.go` |
 | Block, native ask, fail-closed | `HookCapability{}` literals in `hook_only.go` and the per-connector files |
