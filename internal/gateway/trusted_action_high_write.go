@@ -307,7 +307,7 @@ func provedHighWriteFindings(
 		// A managed gateway may be unable to traverse that user's home.
 		addTarget(resolved, hostFlavor, exactProof, note)
 	}
-	for _, target := range facts.Paths {
+	judgePath := func(facts actionfacts.Facts, target actionfacts.PathFact) {
 		// A POSIX shell on a Windows host (Git Bash, the shell of Claude
 		// Code's Bash tool) writes host paths (GAP-0768).
 		if hostFlavor == actionfacts.PathFlavorWindows && target.Flavor == actionfacts.PathFlavorPOSIX && !isSandboxHookRequest(ctx) {
@@ -317,16 +317,16 @@ func provedHighWriteFindings(
 		}
 		write := target.Access == actionfacts.PathAccessWrite || target.Access == actionfacts.PathAccessAppend
 		if !write && target.Access != actionfacts.PathAccessDelete || target.Resolved == "" {
-			continue
+			return
 		}
 		// Absolute describes the operand spelling. A relative operand is
 		// equally proven when ActionFacts resolved it against the hook CWD.
 		if _, ok := activeAgentInstructionPath(target.Resolved, target.Flavor); !ok {
-			continue
+			return
 		}
 		command, found := integrityCommandByID(facts, target.CommandID)
 		if !found || command.Effect != actionfacts.EffectExecute {
-			continue
+			return
 		}
 		addTarget(target.Resolved, target.Flavor, func(ruleID string) findingProof {
 			return newActionFactsSubgraphFindingProof(ruleID, true, true)
@@ -335,6 +335,27 @@ func provedHighWriteFindings(
 		// name writes the file.
 		if write {
 			gatewayIdentity(target.Resolved, target.Flavor)
+		}
+	}
+	judgePaths := func(facts actionfacts.Facts) {
+		for _, target := range facts.Paths {
+			judgePath(facts, target)
+		}
+	}
+	judgePaths(facts)
+	// `powershell -Command "Add-Content CLAUDE.md x"` from a POSIX shell
+	// (Git Bash, Claude Code's Bash tool on Windows): the outer shell call
+	// names no path, the PowerShell body does. Its writes are judged like
+	// the shell's own (GAP-2370).
+	shellInput := request.Input
+	if shellInput.Command == "" {
+		if command, ok := trustedBashCommandInput(shellInput); ok {
+			shellInput.Command = command
+		}
+	}
+	for _, inner := range actionfacts.POSIXPowerShellCommandFacts(shellInput, facts) {
+		if inner.EnforcementEligible() {
+			judgePaths(inner)
 		}
 	}
 	// The invoking user's hook also lists writes that ActionFacts cannot

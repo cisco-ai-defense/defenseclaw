@@ -77,3 +77,42 @@ func TestR105GAP0768WindowsGitBashWriteToLoadedClaudeMD(t *testing.T) {
 		})
 	}
 }
+
+// GAP-2370 (P2 security, native Windows): Claude Code's Bash tool runs Git
+// Bash, and `powershell -Command "Add-Content CLAUDE.md ..."` from it writes
+// the CLAUDE.md the session loaded through the PowerShell body, which the
+// outer shell call does not name. It blocks in action like the Git Bash
+// spellings; an ordinary PowerShell write, a read and a mention stay allowed.
+func TestR105GAP2370WindowsPowerShellCommandWriteToLoadedClaudeMD(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("native Windows host paths")
+	}
+	project := instructionIdentityTestRoot(t)
+	file := writeActiveAgentTestFile(t, project, "CLAUDE.md")
+	for _, tc := range []struct {
+		command string
+		block   bool
+	}{
+		{`powershell -Command "Add-Content CLAUDE.md '- reviewed'"`, true},
+		{`powershell -Command "Add-Content ` + file + ` '- reviewed'"`, true},
+		{`powershell.exe -Command "Set-Content -Path CLAUDE.md -Value x"`, true},
+		{`pwsh -c "Add-Content .\CLAUDE.md x"`, true},
+		{`powershell -Command "Add-Content notes.txt '- reviewed'"`, false},
+		{`powershell -Command "Get-Content CLAUDE.md"`, false},
+		{`powershell -Command "Write-Output CLAUDE.md"`, false},
+	} {
+		t.Run(tc.command, func(t *testing.T) {
+			api := instructionProtectionTestAPI(t, "claudecode", "action", "HIGH")
+			ctx := authenticatedClaudeCodeTestContext()
+			api.evaluateClaudeCodeHook(ctx, claudeCodeHookRequest{HookEventName: "InstructionsLoaded", SessionID: "pwshbody", CWD: project, FilePath: file})
+			response := api.evaluateClaudeCodeHook(ctx, claudeCodeHookRequest{
+				HookEventName: "PreToolUse", SessionID: "pwshbody", CWD: project, ToolName: "Bash",
+				ToolInput: map[string]interface{}{"command": tc.command},
+			})
+			if got := response.Action == guardrailActionBlock; got != tc.block ||
+				tc.block && !findingStringHasRuleID(response.Findings, "COG-CLAUDE-MD") {
+				t.Fatalf("action=%q findings=%v reason=%q, want block=%v", response.Action, response.Findings, response.Reason, tc.block)
+			}
+		})
+	}
+}
