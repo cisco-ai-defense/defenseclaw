@@ -37,6 +37,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks/guardianstate"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"github.com/defenseclaw/defenseclaw/internal/hermespath"
 	"github.com/defenseclaw/defenseclaw/internal/inventory"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/unixidentity"
@@ -119,6 +120,15 @@ func TestEnterpriseHookWorkerHelperProcess(t *testing.T) {
 		return result(opts), nil
 	}
 	enterpriseHookWorkerVerifier = func(_ context.Context, opts enterprisehooks.InstallOptions) (enterprisehooks.InstallResult, error) {
+		if mode == "launchd" {
+			// Report HERMES_HOME of the account's launchd domain as the
+			// worker's Hermes check reads it.
+			value, err := hermespath.ReadLaunchdHermesHome(os.Getuid())
+			if err != nil {
+				return enterprisehooks.InstallResult{}, err
+			}
+			return enterprisehooks.InstallResult{Connector: opts.ConnectorName, AgentVersion: value}, nil
+		}
 		if mode == "drift" || mode == "fail" {
 			return enterprisehooks.InstallResult{}, errors.New("hook config drifted")
 		}
@@ -169,6 +179,37 @@ func TestEnterpriseHookWorkerHelperProcess(t *testing.T) {
 		}
 	}
 	os.Exit(enterpriseHookWorkerMain(context.Background(), os.Stdin, os.Stdout, os.Stderr))
+}
+
+// GAP-2374 (macOS): the managed worker runs as the account in the system
+// bootstrap, where launchctl getenv misses a HERMES_HOME set in the
+// account's launchd user domain and the account cannot read that domain.
+// The root guardian reads it and the worker's Hermes check uses that read.
+func TestEnterpriseHookWorkerUsesTheGuardiansLaunchdRead(t *testing.T) {
+	useEnterpriseHookWorkerHelper(t, "launchd")
+	origReads, origRead := enterpriseHookWorkerReadsLaunchd, enterpriseHookWorkerLaunchdHermesHome
+	t.Cleanup(func() { enterpriseHookWorkerReadsLaunchd, enterpriseHookWorkerLaunchdHermesHome = origReads, origRead })
+	redirect := "/Users/someone/.hermes-elsewhere"
+	var readFor []int
+	enterpriseHookWorkerReadsLaunchd = func() bool { return true }
+	enterpriseHookWorkerLaunchdHermesHome = func(account enterpriseHookWorkerAccount) *string {
+		readFor = append(readFor, account.UID)
+		return &redirect
+	}
+	account := selfWorkerAccount(t)
+	response, err := runEnterpriseHookWorker(context.Background(), account, enterpriseHookWorkerRequest{
+		Operation: enterpriseHookWorkerOpApply,
+		Targets:   []enterpriseHookWorkerTarget{workerTarget(account, 1, enterpriseHookWorkerModeVerify, "hermes", true)},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(readFor) != 1 || readFor[0] != account.UID {
+		t.Fatalf("guardian read the launchd domain for %v, want [%d]", readFor, account.UID)
+	}
+	if len(response.Targets) != 1 || response.Targets[0].Result == nil || response.Targets[0].Result.AgentVersion != redirect {
+		t.Fatalf("worker saw launchd HERMES_HOME %+v, want %q", response.Targets, redirect)
+	}
 }
 
 func useEnterpriseHookWorkerHelper(t *testing.T, mode string) {

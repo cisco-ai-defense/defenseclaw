@@ -21,6 +21,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 )
@@ -379,8 +380,49 @@ func readProcessFile(path string, limit int64) ([]byte, error) {
 	return data, nil
 }
 
+// parentLaunchd is HERMES_HOME of one account's launchd user domain as a
+// root parent read it for this process (UseParentLaunchdHermesHome).
+var parentLaunchd struct {
+	sync.Mutex
+	set   bool
+	uid   int
+	value string
+}
+
+// ReadLaunchdHermesHome returns HERMES_HOME of uid's launchd user domain on
+// macOS. A root caller reads another account's domain through launchctl
+// asuser.
+func ReadLaunchdHermesHome(uid int) (string, error) {
+	return launchdHermesHome(uid)
+}
+
+// UseParentLaunchdHermesHome makes this process use value as HERMES_HOME of
+// uid's launchd user domain. The managed guardian's worker runs as the
+// account but in the system bootstrap (a setuid child of the root daemon):
+// there launchctl getenv reads the system domain, and the account cannot
+// reach its own user domain ("Reentrancy avoided"), so the root parent
+// reads it before it starts the worker and hands it over (GAP-2374 on
+// macOS).
+func UseParentLaunchdHermesHome(uid int, value string) {
+	parentLaunchd.Lock()
+	defer parentLaunchd.Unlock()
+	parentLaunchd.set, parentLaunchd.uid, parentLaunchd.value = true, uid, value
+}
+
+func parentLaunchdHermesHome(uid int) (string, bool) {
+	parentLaunchd.Lock()
+	defer parentLaunchd.Unlock()
+	if !parentLaunchd.set || parentLaunchd.uid != uid {
+		return "", false
+	}
+	return parentLaunchd.value, true
+}
+
 // launchdHermesHome returns HERMES_HOME of uid's launchd domain.
 func launchdHermesHome(uid int) (string, error) {
+	if value, ok := parentLaunchdHermesHome(uid); ok {
+		return value, nil
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	args := []string{"getenv", "HERMES_HOME"}
