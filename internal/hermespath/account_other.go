@@ -216,20 +216,28 @@ func environmentFileEvidence(path, userHome string, pam bool) ([]homeEvidence, e
 
 // expandAccountHome resolves an environment file value: quotes are
 // removed and the account's home stands for $HOME, ${HOME}, @{HOME} and a
-// leading ~. Any other reference cannot be resolved ("").
+// leading ~. Any other reference cannot be resolved (""). Only the value
+// as written is checked for other references: a directory account's home
+// (/home/alice@corp.example) and an absolute path naming it hold an @ that
+// is no reference (GAP-2374).
 func expandAccountHome(value, userHome string) string {
 	value = strings.TrimSpace(value)
 	if len(value) >= 2 && (value[0] == '"' || value[0] == '\'') && value[len(value)-1] == value[0] {
 		value = value[1 : len(value)-1]
 	}
-	for _, reference := range []string{"${HOME}", "@{HOME}", "$HOME"} {
-		value = strings.ReplaceAll(value, reference, userHome)
-	}
 	if value == "~" || strings.HasPrefix(value, "~/") {
-		value = userHome + value[1:]
+		value = "$HOME" + value[1:]
 	}
-	if strings.ContainsAny(value, "$@`~") {
+	references := []string{"${HOME}", "@{HOME}", "$HOME"}
+	rest := value
+	for _, reference := range references {
+		rest = strings.ReplaceAll(rest, reference, "")
+	}
+	if strings.ContainsAny(rest, "$`~") || strings.Contains(rest, "@{") {
 		return ""
+	}
+	for _, reference := range references {
+		value = strings.ReplaceAll(value, reference, userHome)
 	}
 	return absoluteHome(value)
 }
