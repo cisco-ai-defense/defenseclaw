@@ -1699,10 +1699,23 @@ const (
 		"  defenseclaw_log_hook_failure copilot copilot-hook \"$1\" response \"$FAIL_MODE\"\n" +
 		"  echo \"defenseclaw: copilot hook error: $1\" >&2\n" +
 		"  exit 0\n}\n"
-	copilotToolDenial = `  case "${COPILOT_HOOK_EVENT:-}" in` + "\n" +
-		`    preToolUse) printf '%s\n' '{"permissionDecision":"deny","permissionDecisionReason":"DefenseClaw hook failed closed"}' ;;` + "\n" +
-		`    permissionRequest) printf '%s\n' '{"behavior":"deny","message":"DefenseClaw hook failed closed"}' ;;` + "\n" +
+	copilotToolDenial = copilotDenyReason +
+		`  case "${COPILOT_HOOK_EVENT:-}" in` + "\n" +
+		`    preToolUse) printf '{"permissionDecision":"deny","permissionDecisionReason":"%s"}\n' "$_dc_deny" ;;` + "\n" +
+		`    permissionRequest) printf '{"behavior":"deny","message":"%s"}\n' "$_dc_deny" ;;` + "\n" +
 		"  esac\n"
+	// copilotInstallWindowReason is the reason this release's per-user
+	// copilot-hook.sh (copilot_per_user_install_block) gives Copilot while
+	// an install or upgrade holds the account's lock.
+	copilotInstallWindowReason = "DefenseClaw is being installed or upgraded for this account; try again in a moment, or run the installer again if it has stopped."
+	// copilotDenyReason sets the reason a refreshed released copilot-hook.sh
+	// denies with: the install sentence while the lock in the hook's own data
+	// folder (HOOK_DIR/..) is held, so Copilot names the upgrade the
+	// installer's hold is for (GAP-2319); otherwise the generic one. Only the
+	// text depends on the lock: the call is denied either way.
+	copilotDenyReason = `  _dc_deny='DefenseClaw hook failed closed'` + "\n" +
+		`  if [ -n "${HOOK_DIR:-}" ] && { [ -e "${HOOK_DIR}/../.install.lock" ] || [ -L "${HOOK_DIR}/../.install.lock" ]; }; then _dc_deny='` +
+		copilotInstallWindowReason + `'; fi` + "\n"
 )
 
 func copilotClosedFailure(open string) string {
@@ -1827,11 +1840,11 @@ func closeReleasedCopilotEarlyFailures(body string) (string, error) {
 _DC_COPILOT_UPGRADE_EVENT=""
 if [ "$#" -eq 2 ] && [ "$1" = "--event" ]; then _DC_COPILOT_UPGRADE_EVENT="$2"; fi
 _dc_copilot_upgrade_early_failure() {
-  case "$_DC_COPILOT_UPGRADE_EVENT" in
-    preToolUse) printf '%s\n' '{"permissionDecision":"deny","permissionDecisionReason":"DefenseClaw hook failed closed"}' ;;
-    permissionRequest) printf '%s\n' '{"behavior":"deny","message":"DefenseClaw hook failed closed"}' ;;
+` + copilotDenyReason + `  case "$_DC_COPILOT_UPGRADE_EVENT" in
+    preToolUse) printf '{"permissionDecision":"deny","permissionDecisionReason":"%s"}\n' "$_dc_deny" ;;
+    permissionRequest) printf '{"behavior":"deny","message":"%s"}\n' "$_dc_deny" ;;
     sessionStart|sessionEnd|userPromptSubmitted|userPromptTransformed|postToolUse|agentStop|subagentStart|subagentStop|postToolUseFailure|errorOccurred|preCompact|notification) ;;
-    *) printf '%s\n' '{"permissionDecision":"deny","permissionDecisionReason":"DefenseClaw hook failed closed","behavior":"deny","message":"DefenseClaw hook failed closed"}' ;;
+    *) printf '{"permissionDecision":"deny","permissionDecisionReason":"%s","behavior":"deny","message":"%s"}\n' "$_dc_deny" "$_dc_deny" ;;
   esac
   exit 0
 }
