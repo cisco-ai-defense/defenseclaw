@@ -222,6 +222,35 @@ class TestInstanceOverlay(unittest.TestCase):
             self.assertEqual(resolved.api_key_env, "ACME_KEY")
 
 
+    def test_gap2393_custom_provider_takes_the_instance_family(self) -> None:
+        """``setup llm --provider custom --instance-name`` saves provider
+        "custom"; the resolved role uses the instance's base_provider_type
+        and is not reported as an unknown provider prefix (GAP-2393).
+        """
+        with tempfile.TemporaryDirectory() as d:
+            overlay = {
+                "providers": [
+                    {
+                        "name": "acme-bedrock-prod",
+                        "domains": ["bedrock-runtime.us-east-1.amazonaws.com"],
+                        "base_provider_type": "bedrock",
+                    }
+                ]
+            }
+            with open(os.path.join(d, "custom-providers.json"), "w", encoding="utf-8") as f:
+                json.dump(overlay, f)
+            cfg = _make_cfg(d)
+            cfg.llm.provider = "custom"
+            cfg.llm.instance_name = "acme-bedrock-prod"
+            cfg.llm.model = "anthropic.claude-haiku-4-5-20251001-v1:0"
+            cfg.save()
+            cfg2 = _load_via_env(d)
+            with self.assertNoLogs("defenseclaw.config", level="WARNING"):
+                resolved = cfg2.resolve_llm("guardrail.judge")
+            self.assertEqual(resolved.provider, "bedrock")
+            self.assertEqual(resolved.instance_name, "acme-bedrock-prod")
+
+
 class TestLLMPickerNonInteractive(unittest.TestCase):
     """Every picker enforces the non-interactive contract."""
 

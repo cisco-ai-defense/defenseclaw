@@ -344,6 +344,12 @@ func NewProviderForLLMConfig(llm *config.LLMConfig, providers *configs.Providers
 // merge and returns a “bifrostProvider“ ready for dispatch. Pulled out
 // of NewProviderForLLMConfig so NewProviderForInstance can share the
 // same merge logic.
+// customProviderType is the provider value `setup llm --provider custom
+// --instance-name <n>` saves: it is not a provider family but "use the
+// bound llm_providers.custom instance", whose base_provider_type is the
+// family (GAP-2393).
+const customProviderType = "custom"
+
 func buildProviderFromEffective(llm *config.LLMConfig, inst *configs.Provider) (LLMProvider, error) {
 	model := llm.Model
 	apiKey := llm.ResolvedAPIKey()
@@ -375,8 +381,8 @@ func buildProviderFromEffective(llm *config.LLMConfig, inst *configs.Provider) (
 		if baseURL == "" {
 			baseURL = strings.TrimRight(inst.BaseURL, "/")
 		}
-		if providerType == "" {
-			providerType = inst.BaseProviderType
+		if providerType == "" || providerType == customProviderType {
+			providerType = strings.ToLower(strings.TrimSpace(inst.BaseProviderType))
 		}
 		if tls.isZero() && inst.TLS != nil {
 			tls = tlsOverrides{
@@ -417,6 +423,9 @@ func buildProviderFromEffective(llm *config.LLMConfig, inst *configs.Provider) (
 		}
 	}
 
+	if providerType == customProviderType {
+		return nil, fmt.Errorf("gateway: provider %q needs instance_name to name an llm_providers.custom entry (defenseclaw setup provider list)", customProviderType)
+	}
 	if providerType == "" {
 		if p, _ := splitModel(model); p != "" {
 			providerType = p
