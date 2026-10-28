@@ -627,14 +627,14 @@ func newStandaloneFixture(t *testing.T, resolver unixidentity.Resolver) *standal
 	origOwner, origDirTrust, origFileTrust, origStateTrust := enterpriseHookAuthorizationOwnershipSetter, enterpriseHookAuthorizationDirTrustCheck, enterpriseHookAuthorizationFileTrustCheck, enterpriseHookGuardianStateFileTrustCheck
 	origToken, origOTLP, origRunner, origLog := enterpriseHookScopedTokenMinter, enterpriseHookScopedOTLPTokenMinter, enterpriseHookWorkerRunner, enterpriseHookWorkerLog
 	origUserToken, origUserTokenLoader, origTransport := enterpriseHookUserTokenMinter, enterpriseHookUserTokenLoader, enterpriseHookStandaloneHookTransport
-	origCheckHome := enterpriseHookCheckHome
+	origCheckHome, origAccountGone := enterpriseHookCheckHome, enterpriseHookCleanupAccountGone
 	t.Cleanup(func() {
 		cfg, enterpriseHookManifest = origCfg, origManifest
 		enterpriseHooksMutationIdentityPreflight, enterpriseHookManifestFileTrustCheck, enterpriseHookStandaloneRuntimeCheck = origPreflight, origManifestTrust, origRuntime
 		enterpriseHookAuthorizationOwnershipSetter, enterpriseHookAuthorizationDirTrustCheck, enterpriseHookAuthorizationFileTrustCheck, enterpriseHookGuardianStateFileTrustCheck = origOwner, origDirTrust, origFileTrust, origStateTrust
 		enterpriseHookScopedTokenMinter, enterpriseHookScopedOTLPTokenMinter, enterpriseHookWorkerRunner, enterpriseHookWorkerLog = origToken, origOTLP, origRunner, origLog
 		enterpriseHookUserTokenMinter, enterpriseHookUserTokenLoader, enterpriseHookStandaloneHookTransport = origUserToken, origUserTokenLoader, origTransport
-		enterpriseHookCheckHome = origCheckHome
+		enterpriseHookCheckHome, enterpriseHookCleanupAccountGone = origCheckHome, origAccountGone
 		enterprisehooks.SetStandaloneUnix(false)
 		enterprisehooks.SetStandaloneResolver(nil)
 	})
@@ -665,6 +665,12 @@ func newStandaloneFixture(t *testing.T, resolver unixidentity.Resolver) *standal
 		return "/run/defenseclaw-hook/hook.sock", 995, nil
 	}
 	enterpriseHookWorkerLog = io.Discard
+	// The fixture's accounts exist only in its resolver. The real fresh
+	// directory read (dscl on macOS) has no record of alice or bob on the
+	// test machine and would retire their pending cleanups (r105
+	// GAP-2323), so no fixture account is confirmed gone unless a test
+	// says so.
+	enterpriseHookCleanupAccountGone = func(context.Context, string) bool { return false }
 	enterprisehooks.SetStandaloneUnix(true)
 	enterprisehooks.SetStandaloneResolver(resolver)
 	enterpriseHookWorkerRunner = func(_ context.Context, account enterpriseHookWorkerAccount, request enterpriseHookWorkerRequest) (enterpriseHookWorkerResponse, error) {
