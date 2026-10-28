@@ -1027,6 +1027,8 @@ func (s *Sidecar) Run(ctx context.Context) (runErr error) {
 	defer runCancel()
 	s.setRunCancel(runCancel)
 	defer s.setRunCancel(nil)
+	// An idle gateway gives back the heap its calls freed (GAP-2013).
+	go runIdleMemoryRelease(runCtx)
 	// The endpoint inventory cannot be emitted from NewSidecar: schema v8
 	// deliberately binds its generation-owned runtime afterward. Publish the
 	// first complete connector/MCP snapshot immediately after that binding, then
