@@ -30,10 +30,13 @@ foreach ($name in @('Get-DefenseClawTargetRuntimeSkippedProfiles', 'Write-Defens
     . ([scriptblock]::Create($definition.Extent.Text))
 }
 
-function New-Plan($Skipped) {
+function New-Plan($Skipped, $Repaired = $null) {
     $plan = [ordered]@{ schema_version = 1; roots = @() }
     if ($null -ne $Skipped) {
         $plan.skipped_profiles = @($Skipped)
+    }
+    if ($null -ne $Repaired) {
+        $plan.repaired_profiles = @($Repaired)
     }
     return ($plan | ConvertTo-Json -Depth 5 | ConvertFrom-Json)
 }
@@ -84,6 +87,44 @@ try {
     $logged = [IO.File]::ReadAllText($logPath)
     if (-not $logged.Contains('[installer] target_runtime_profile_skipped: user S-1-5-21-111-222-333-1009')) {
         throw "hook-guardian log does not record the skip: $logged"
+    }
+}
+finally {
+    [IO.Directory]::Delete($logDirectory, $true)
+}
+
+# A repaired retained root is listed with its planned root and logged too.
+$repaired = [ordered]@{
+    sid = 'S-1-5-21-111-222-333-1010'
+    user_home = 'C:\Users\erin'
+    reason = 'managed Windows DACL on C:\Users\erin\.defenseclaw is missing the canonical ACE for principal S-1-3-4'
+}
+$withRoot = @{ 'S-1-5-21-111-222-333-1010' = $true }
+if (@(Get-DefenseClawTargetRuntimeSkippedProfiles -Plan (New-Plan $null @($repaired)) -RootSIDs $withRoot -Repaired).Count -ne 1) {
+    throw 'a valid repaired profile was not returned'
+}
+$rejected = $false
+try {
+    [void](Get-DefenseClawTargetRuntimeSkippedProfiles -Plan (New-Plan $null @($repaired)) -RootSIDs @{ 'S-1-5-21-1-1-1-1' = $true } -Repaired)
+}
+catch {
+    $rejected = $true
+}
+if (-not $rejected) {
+    throw 'a repaired profile without a planned root was accepted'
+}
+$logDirectory = [IO.Path]::Combine([IO.Path]::GetTempPath(), "dc-repair-smoke-$([Guid]::NewGuid().ToString('N'))")
+[void][IO.Directory]::CreateDirectory($logDirectory)
+try {
+    $logPath = [IO.Path]::Combine($logDirectory, 'hook-guardian.log')
+    $warnings = @()
+    Write-DefenseClawTargetRuntimeSkippedProfiles -Plan (New-Plan $null @($repaired)) -Layout @{ GuardianLogPath = $logPath } -WarningVariable warnings -WarningAction SilentlyContinue
+    $warningText = (@($warnings) | Microsoft.PowerShell.Core\ForEach-Object { [string]$_ }) -join "`n"
+    if (-not $warningText.Contains('target_runtime_profile_repaired: user S-1-5-21-111-222-333-1010 at C:\Users\erin')) {
+        throw "repair warning missing: $warningText"
+    }
+    if (-not ([IO.File]::ReadAllText($logPath)).Contains('[installer] target_runtime_profile_repaired: user S-1-5-21-111-222-333-1010')) {
+        throw 'hook-guardian log does not record the repair'
     }
 }
 finally {

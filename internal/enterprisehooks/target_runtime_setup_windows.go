@@ -70,7 +70,16 @@ type WindowsManagedRuntimePlan struct {
 	// manifest rows were removed before this plan bound the manifest, so the
 	// rest of the deployment proceeds; the enumerator adds them back later.
 	SkippedProfiles []WindowsManagedRuntimeSkippedProfile `json:"skipped_profiles,omitempty"`
+	// RepairedProfiles lists users whose retained .defenseclaw a fresh
+	// Install found with a drifted owner or DACL and re-stamped to the
+	// canonical descriptor. Reason says what was wrong.
+	RepairedProfiles []WindowsManagedRuntimeSkippedProfile `json:"repaired_profiles,omitempty"`
 }
+
+// errWindowsManagedRuntimeBaselineUnrepairable marks a retained runtime root
+// a fresh Install could not bring back to the canonical descriptor; the user
+// is skipped rather than failing every user.
+var errWindowsManagedRuntimeBaselineUnrepairable = errors.New("retained managed runtime root could not be repaired")
 
 // WindowsManagedRuntimeSkippedProfile is one user a fresh Install skipped.
 type WindowsManagedRuntimeSkippedProfile struct {
@@ -251,10 +260,17 @@ func planWindowsManagedRuntimeRoots(
 		)
 	}
 	roots := make([]WindowsManagedRuntimeRootPlan, 0, len(targets))
-	var skipped []WindowsManagedRuntimeSkippedProfile
+	var skipped, repaired []WindowsManagedRuntimeSkippedProfile
 	err = windowsManagedRuntimeSetupPrivilege(func() error {
 		for _, target := range targets {
-			root, inspectErr := planWindowsManagedRuntimeRoot(target)
+			root, repairedReason, inspectErr := planWindowsManagedRuntimeRootWithRepair(target, publish != nil)
+			if inspectErr == nil && repairedReason != "" {
+				repaired = append(repaired, WindowsManagedRuntimeSkippedProfile{
+					SID:      target.sid.String(),
+					UserHome: target.home,
+					Reason:   repairedReason,
+				})
+			}
 			if inspectErr == nil && publish != nil {
 				// Staging opens the folder for writing and finalize's rename
 				// opens it for writing again, so a holder that only blocks
@@ -264,7 +280,8 @@ func planWindowsManagedRuntimeRoots(
 				inspectErr = probeWindowsManagedRuntimeProfileMutable(target)
 			}
 			if inspectErr != nil {
-				if publish != nil && errors.Is(inspectErr, windows.ERROR_SHARING_VIOLATION) {
+				if publish != nil && (errors.Is(inspectErr, windows.ERROR_SHARING_VIOLATION) ||
+					errors.Is(inspectErr, errWindowsManagedRuntimeBaselineUnrepairable)) {
 					skipped = append(skipped, WindowsManagedRuntimeSkippedProfile{
 						SID:      target.sid.String(),
 						UserHome: target.home,
@@ -293,12 +310,13 @@ func planWindowsManagedRuntimeRoots(
 		}
 	}
 	plan = WindowsManagedRuntimePlan{
-		SchemaVersion:   WindowsManagedRuntimePlanSchemaVersion,
-		ManifestPath:    manifestPath,
-		ManifestSHA256:  manifestSHA256,
-		TargetCount:     windowsManagedRuntimeEnabledTargetCount(manifest),
-		Roots:           roots,
-		SkippedProfiles: skipped,
+		SchemaVersion:    WindowsManagedRuntimePlanSchemaVersion,
+		ManifestPath:     manifestPath,
+		ManifestSHA256:   manifestSHA256,
+		TargetCount:      windowsManagedRuntimeEnabledTargetCount(manifest),
+		Roots:            roots,
+		SkippedProfiles:  skipped,
+		RepairedProfiles: repaired,
 	}
 	return plan, validateWindowsManagedRuntimePlan(plan, manifest)
 }
@@ -611,12 +629,24 @@ func resolveWindowsManagedRuntimeTarget(userHome, rawSID, rawDataDir string) (wi
 }
 
 func planWindowsManagedRuntimeRoot(target windowsManagedRuntimeTarget) (WindowsManagedRuntimeRootPlan, error) {
+	root, _, err := planWindowsManagedRuntimeRootWithRepair(target, false)
+	return root, err
+}
+
+// planWindowsManagedRuntimeRootWithRepair plans one root. With repair set
+// (fresh Install only), a retained .defenseclaw that fails the canonical
+// descriptor check is re-stamped and checked again; repaired carries what was
+// wrong. A root that still fails returns errWindowsManagedRuntimeBaselineUnrepairable.
+func planWindowsManagedRuntimeRootWithRepair(
+	target windowsManagedRuntimeTarget,
+	repair bool,
+) (root WindowsManagedRuntimeRootPlan, repaired string, err error) {
 	parent, err := openWindowsManagedRuntimeProfile(target, windowsManagedRuntimeProfileRead)
 	if err != nil {
-		return WindowsManagedRuntimeRootPlan{}, err
+		return WindowsManagedRuntimeRootPlan{}, "", err
 	}
 	defer windows.CloseHandle(parent)
-	root := WindowsManagedRuntimeRootPlan{
+	root = WindowsManagedRuntimeRootPlan{
 		UserHome: target.home,
 		DataDir:  target.data,
 		SID:      target.sid.String(),
@@ -625,30 +655,98 @@ func planWindowsManagedRuntimeRoot(target windowsManagedRuntimeTarget) (WindowsM
 	if windowsManagedRuntimeRootMissing(err) {
 		root.Baseline = windowsManagedRuntimeBaselineAbsent
 	} else if err != nil {
-		return WindowsManagedRuntimeRootPlan{}, fmt.Errorf("enterprise hooks: inspect managed runtime baseline: %w", err)
+		return WindowsManagedRuntimeRootPlan{}, "", fmt.Errorf("enterprise hooks: inspect managed runtime baseline: %w", err)
 	} else {
 		defer windows.CloseHandle(final)
 		if err := validateWindowsTargetOwnedDirectoryHandle(final, target.data, target.sid); err != nil {
-			return WindowsManagedRuntimeRootPlan{}, fmt.Errorf("enterprise hooks: reject noncanonical managed runtime baseline: %w", err)
+			if !repair {
+				return WindowsManagedRuntimeRootPlan{}, "", fmt.Errorf("enterprise hooks: reject noncanonical managed runtime baseline: %w", err)
+			}
+			if repairErr := repairWindowsManagedRuntimeBaseline(parent, final, target); repairErr != nil {
+				return WindowsManagedRuntimeRootPlan{}, "", fmt.Errorf(
+					"enterprise hooks: %w for %s at %s: %v; repair failed: %v",
+					errWindowsManagedRuntimeBaselineUnrepairable, target.sid, target.data, err, repairErr,
+				)
+			}
+			repaired = boundWindowsManagedRuntimeSkipReason(err.Error())
 		}
 		identity, err := windowsManagedRuntimeHandleIdentity(final, true)
 		if err != nil {
-			return WindowsManagedRuntimeRootPlan{}, err
+			return WindowsManagedRuntimeRootPlan{}, "", err
 		}
 		root.Baseline = windowsManagedRuntimeBaselineCanonical
 		root.BaselineIdentity = identity
 	}
 	randomLeaf := make([]byte, windowsManagedRuntimeStageRandomBytes)
 	if _, err := io.ReadFull(windowsManagedRuntimeEntropy, randomLeaf); err != nil {
-		return WindowsManagedRuntimeRootPlan{}, fmt.Errorf("enterprise hooks: generate managed runtime staging leaf: %w", err)
+		return WindowsManagedRuntimeRootPlan{}, "", fmt.Errorf("enterprise hooks: generate managed runtime staging leaf: %w", err)
 	}
 	root.StagingLeaf = windowsManagedRuntimeStagePrefix + hex.EncodeToString(randomLeaf)
 	marker, err := randomWindowsManagedRuntimeMarkerSID(windowsManagedRuntimeEntropy)
 	if err != nil {
-		return WindowsManagedRuntimeRootPlan{}, err
+		return WindowsManagedRuntimeRootPlan{}, "", err
 	}
 	root.MarkerSID = marker.String()
-	return root, nil
+	return root, repaired, nil
+}
+
+// repairWindowsManagedRuntimeBaseline re-stamps the canonical target-owned
+// descriptor (the user as owner, the protected seven-entry DACL) on a retained
+// .defenseclaw, through a second handle proven to be the same directory as
+// the one planning inspected. The open does not follow reparse points, and
+// the Setup thread's backup and restore privileges let it set the owner. The
+// result is checked against the same canonical rule planning applies.
+func repairWindowsManagedRuntimeBaseline(parent, inspected windows.Handle, target windowsManagedRuntimeTarget) error {
+	handle, err := openWindowsManagedRuntimeChild(
+		parent,
+		".defenseclaw",
+		windows.READ_CONTROL|windows.WRITE_DAC|windows.WRITE_OWNER|windows.FILE_READ_ATTRIBUTES,
+		false,
+	)
+	if err != nil {
+		return fmt.Errorf("open for repair: %w", err)
+	}
+	defer windows.CloseHandle(handle)
+	var inspectedInfo, repairInfo windows.ByHandleFileInformation
+	if err := windows.GetFileInformationByHandle(inspected, &inspectedInfo); err != nil {
+		return fmt.Errorf("identify inspected root: %w", err)
+	}
+	if err := windows.GetFileInformationByHandle(handle, &repairInfo); err != nil {
+		return fmt.Errorf("identify root for repair: %w", err)
+	}
+	if repairInfo.FileAttributes&windows.FILE_ATTRIBUTE_DIRECTORY == 0 ||
+		repairInfo.FileAttributes&windows.FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+		return errors.New("retained root is not a plain directory")
+	}
+	if repairInfo.VolumeSerialNumber != inspectedInfo.VolumeSerialNumber ||
+		repairInfo.FileIndexHigh != inspectedInfo.FileIndexHigh ||
+		repairInfo.FileIndexLow != inspectedInfo.FileIndexLow {
+		return errors.New("retained root changed between inspection and repair")
+	}
+	descriptor, err := windowsTargetOwnedDirectorySecurityDescriptor(target.sid)
+	if err != nil {
+		return err
+	}
+	owner, _, err := descriptor.Owner()
+	if err != nil {
+		return err
+	}
+	dacl, _, err := descriptor.DACL()
+	if err != nil {
+		return err
+	}
+	if err := windows.SetSecurityInfo(
+		handle,
+		windows.SE_FILE_OBJECT,
+		windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION,
+		owner,
+		nil,
+		dacl,
+		nil,
+	); err != nil {
+		return fmt.Errorf("apply canonical descriptor: %w", err)
+	}
+	return validateWindowsTargetOwnedDirectoryHandle(inspected, target.data, target.sid)
 }
 
 func stageWindowsManagedRuntimeRoot(rootPlan WindowsManagedRuntimeRootPlan, journal func(WindowsManagedRuntimeClaim) error) (WindowsManagedRuntimeClaim, error) {
@@ -1476,6 +1574,9 @@ func validateWindowsManagedRuntimePlan(plan WindowsManagedRuntimePlan, manifest 
 	if err := validateWindowsManagedRuntimeSkippedProfiles(plan.SkippedProfiles, manifest); err != nil {
 		return err
 	}
+	if err := validateWindowsManagedRuntimeRepairedProfiles(plan.RepairedProfiles, plan.Roots); err != nil {
+		return err
+	}
 	if len(plan.Roots) != len(targets) || len(plan.Roots) > windowsManagedRuntimeMaxRoots {
 		return fmt.Errorf("enterprise hooks: managed runtime plan root count does not match manifest")
 	}
@@ -1531,6 +1632,31 @@ func validateWindowsManagedRuntimeSkippedProfiles(skipped []WindowsManagedRuntim
 		if _, present := inManifest[key]; present {
 			return fmt.Errorf("enterprise hooks: managed runtime plan skips profile %s that the manifest still enrolls", profile.SID)
 		}
+	}
+	return nil
+}
+
+// validateWindowsManagedRuntimeRepairedProfiles requires each repaired user to
+// be well formed, listed once, and to have a planned root.
+func validateWindowsManagedRuntimeRepairedProfiles(repaired []WindowsManagedRuntimeSkippedProfile, roots []WindowsManagedRuntimeRootPlan) error {
+	if len(repaired) > windowsManagedRuntimeMaxRoots {
+		return fmt.Errorf("enterprise hooks: managed runtime plan repairs more than %d profiles", windowsManagedRuntimeMaxRoots)
+	}
+	planned := make(map[string]struct{}, len(roots))
+	for _, root := range roots {
+		planned[strings.ToUpper(root.SID)] = struct{}{}
+	}
+	seen := make(map[string]struct{}, len(repaired))
+	for index, profile := range repaired {
+		key := strings.ToUpper(profile.SID)
+		if _, ok := planned[key]; !ok || strings.TrimSpace(profile.Reason) == "" ||
+			len(profile.Reason) > windowsManagedRuntimeSkipReasonMax {
+			return fmt.Errorf("enterprise hooks: managed runtime plan repaired profile %d is invalid", index)
+		}
+		if _, duplicate := seen[key]; duplicate {
+			return fmt.Errorf("enterprise hooks: managed runtime plan repairs profile %s twice", profile.SID)
+		}
+		seen[key] = struct{}{}
 	}
 	return nil
 }

@@ -14160,7 +14160,7 @@ function Assert-DefenseClawTargetRuntimePlan {
     )
     # skipped_profiles is optional: a fresh Install's plan lists the users it
     # left out because their profile folder stayed busy.
-    $allowedPlanProperties = $requiredPlanProperties + @('skipped_profiles')
+    $allowedPlanProperties = $requiredPlanProperties + @('skipped_profiles', 'repaired_profiles')
     foreach ($property in @($Plan.PSObject.Properties)) {
         if ([string]$property.Name -notin $allowedPlanProperties) {
             throw 'target runtime plan contains an unexpected property'
@@ -14320,33 +14320,39 @@ function Assert-DefenseClawTargetRuntimePlan {
         }
     }
     [void](Get-DefenseClawTargetRuntimeSkippedProfiles -Plan $Plan -RootSIDs $seenSID)
+    [void](Get-DefenseClawTargetRuntimeSkippedProfiles -Plan $Plan -RootSIDs $seenSID -Repaired)
     return $Plan
 }
 
 # Returns the plan's skipped profiles after checking their shape: each one has
 # exactly sid, user_home and reason, is listed once, and has no root.
+# With -Repaired, reads repaired_profiles instead: users whose retained root a
+# fresh Install re-stamped. Those must have a planned root; skipped users must
+# not.
 function Get-DefenseClawTargetRuntimeSkippedProfiles {
     param(
         [Parameter(Mandatory)]$Plan,
-        [hashtable]$RootSIDs = @{}
+        [hashtable]$RootSIDs = @{},
+        [switch]$Repaired
     )
-    $property = $Plan.PSObject.Properties['skipped_profiles']
+    $propertyName = if ($Repaired) { 'repaired_profiles' } else { 'skipped_profiles' }
+    $property = $Plan.PSObject.Properties[$propertyName]
     if ($null -eq $property -or $null -eq $property.Value) {
         return @()
     }
     if ($property.Value -isnot [Array]) {
-        throw 'target runtime plan skipped_profiles is not an array'
+        throw "target runtime plan $propertyName is not an array"
     }
     $profiles = @($property.Value)
     if ($profiles.Count -gt 128) {
-        throw 'target runtime plan skips more than 128 profiles'
+        throw "target runtime plan lists more than 128 profiles in $propertyName"
     }
     $seen = @{}
     foreach ($profile in $profiles) {
         $names = @($profile.PSObject.Properties | Microsoft.PowerShell.Core\ForEach-Object { [string]$_.Name })
         if ($names.Count -ne 3 -or
             'sid' -notin $names -or 'user_home' -notin $names -or 'reason' -notin $names) {
-            throw 'target runtime plan skipped profile has unexpected properties'
+            throw "target runtime plan $propertyName entry has unexpected properties"
         }
         $sid = [string]$profile.sid
         $userHome = [string]$profile.user_home
@@ -14355,11 +14361,20 @@ function Get-DefenseClawTargetRuntimeSkippedProfiles {
             $userHome -cnotmatch '^[A-Za-z]:\\[^:]+$' -or
             [string]::IsNullOrWhiteSpace($reason) -or
             $reason.Length -gt 1024) {
-            throw 'target runtime plan skipped profile is invalid'
+            throw "target runtime plan $propertyName entry is invalid"
         }
         $key = $sid.ToUpperInvariant()
-        if ($seen.ContainsKey($key) -or $RootSIDs.ContainsKey($key) -or $RootSIDs.ContainsKey($sid)) {
-            throw 'target runtime plan skips a profile twice or also plans its root'
+        if ($seen.ContainsKey($key)) {
+            throw "target runtime plan lists a profile twice in $propertyName"
+        }
+        if ($RootSIDs.Count -gt 0 -or -not $Repaired) {
+            $hasRoot = $RootSIDs.ContainsKey($key) -or $RootSIDs.ContainsKey($sid)
+            if ($Repaired -and -not $hasRoot) {
+                throw 'target runtime plan repairs a profile it does not plan'
+            }
+            if (-not $Repaired -and $hasRoot) {
+                throw 'target runtime plan skips a profile and also plans its root'
+            }
         }
         $seen[$key] = $true
     }
@@ -14375,12 +14390,20 @@ function Write-DefenseClawTargetRuntimeSkippedProfiles {
         [Parameter(Mandatory)]$Plan,
         [Parameter(Mandatory)][hashtable]$Layout
     )
-    $profiles = @(Get-DefenseClawTargetRuntimeSkippedProfiles -Plan $Plan)
-    foreach ($profile in $profiles) {
-        $line = (
+    $entries = @()
+    foreach ($profile in @(Get-DefenseClawTargetRuntimeSkippedProfiles -Plan $Plan)) {
+        $entries += ((
             'target_runtime_profile_skipped: user {0} at {1} was left out of this install ' +
             'and is not protected until the Guardian enrolls it after the folder is free: {2}'
-        ) -f [string]$profile.sid, [string]$profile.user_home, [string]$profile.reason
+        ) -f [string]$profile.sid, [string]$profile.user_home, [string]$profile.reason)
+    }
+    foreach ($profile in @(Get-DefenseClawTargetRuntimeSkippedProfiles -Plan $Plan -Repaired)) {
+        $entries += ((
+            'target_runtime_profile_repaired: user {0} at {1}: the retained .defenseclaw had a ' +
+            'drifted owner or DACL and was re-stamped to the canonical descriptor: {2}'
+        ) -f [string]$profile.sid, [string]$profile.user_home, [string]$profile.reason)
+    }
+    foreach ($line in $entries) {
         Microsoft.PowerShell.Utility\Write-Warning -Message $line
         try {
             $logPath = [string]$Layout.GuardianLogPath
@@ -14786,8 +14809,10 @@ function Invoke-DefenseClawTargetRuntimePreparation {
             -Path $planPath `
             -TransactionDirectory $transactionDirectory) `
         -Layout $Layout
-    if (-not $AllowSkipBusyProfiles -and @(Get-DefenseClawTargetRuntimeSkippedProfiles -Plan $plan).Count -ne 0) {
-        throw 'target runtime plan skipped a profile outside a fresh Install'
+    if (-not $AllowSkipBusyProfiles -and
+        (@(Get-DefenseClawTargetRuntimeSkippedProfiles -Plan $plan).Count -ne 0 -or
+            @(Get-DefenseClawTargetRuntimeSkippedProfiles -Plan $plan -Repaired).Count -ne 0)) {
+        throw 'target runtime plan skipped or repaired a profile outside a fresh Install'
     }
     Write-DefenseClawTargetRuntimeSkippedProfiles -Plan $plan -Layout $Layout
     if ($ValidationOnly) {

@@ -378,3 +378,58 @@ func TestWindowsManagedRuntimeFreshInstallPlanSkipsUserBlockedForWriters(t *test
 		t.Fatalf("plan = %+v, want the user skipped because staging could not open the folder", plan)
 	}
 }
+
+// A retained .defenseclaw whose DACL drifted (here: every canonical entry
+// replaced by one full-control grant) fails every fresh Install for every user
+// unless it is repaired. Upgrade/Repair planning still rejects it; a fresh
+// Install re-stamps the canonical descriptor, records the repair, and plans
+// the root as a canonical baseline.
+func TestWindowsManagedRuntimeFreshInstallPlanRepairsDriftedRetainedRoot(t *testing.T) {
+	target := currentWindowsTestSID(t)
+	home := newWindowsTargetOwnedTestHome(t, target)
+	dataDir := filepath.Join(home, ".defenseclaw")
+	if _, err := ensureWindowsTargetOwnedDirectoryTree(home, filepath.Join(dataDir, "hooks"), target); err != nil {
+		t.Fatal(err)
+	}
+	drifted, err := windows.ACLFromEntries([]windows.EXPLICIT_ACCESS{
+		windowsManagedRuntimeTestAccess(target, 0x001f01ff),
+	}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := windows.SetNamedSecurityInfo(
+		dataDir,
+		windows.SE_FILE_OBJECT,
+		windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION,
+		nil, nil, drifted, nil,
+	); err != nil {
+		t.Fatal(err)
+	}
+	manifest := windowsManagedRuntimeTestManifest(home, target)
+	manifestPath := `C:\ProgramData\DefenseClaw\etc\targets.yaml`
+
+	if _, err := PlanWindowsManagedRuntimeRoots(manifest, manifestPath, strings.Repeat("a", 64)); err == nil ||
+		!strings.Contains(err.Error(), "reject noncanonical managed runtime baseline") {
+		t.Fatalf("Upgrade/Repair plan error = %v, want the drifted root rejected", err)
+	}
+
+	published := false
+	plan, err := PlanWindowsManagedRuntimeRootsSkippingBusyProfiles(
+		manifest, manifestPath, strings.Repeat("a", 64),
+		func(Manifest) (string, error) { published = true; return strings.Repeat("b", 64), nil },
+	)
+	if err != nil {
+		t.Fatalf("fresh-install plan with a drifted retained root: %v", err)
+	}
+	if published || len(plan.SkippedProfiles) != 0 {
+		t.Fatalf("plan skipped the user instead of repairing: %+v", plan)
+	}
+	if len(plan.Roots) != 1 || plan.Roots[0].Baseline != windowsManagedRuntimeBaselineCanonical {
+		t.Fatalf("plan roots = %+v, want the repaired root as a canonical baseline", plan.Roots)
+	}
+	if len(plan.RepairedProfiles) != 1 || plan.RepairedProfiles[0].SID != target.String() ||
+		strings.TrimSpace(plan.RepairedProfiles[0].Reason) == "" {
+		t.Fatalf("repaired profiles = %+v, want the user with the drift reason", plan.RepairedProfiles)
+	}
+	assertWindowsTargetOwnedCanonicalDirectory(t, dataDir, target)
+}
