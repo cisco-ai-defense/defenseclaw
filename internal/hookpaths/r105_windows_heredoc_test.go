@@ -51,6 +51,24 @@ func TestR105WindowsQuotedHeredocIsText(t *testing.T) {
 		{"cat <<B; cat <<'A'\n$(cat ~/.ssh/id_ed25519)\nB\nhello\nA", true},
 		{"cat <<B <<'A'\n$(cat ~/.ssh/id_ed25519)\nB\nhello\nA", true},
 		{"cat <<B > x; cat <<'A' > y\necho $(cat ~/.ssh/id_rsa)\nB\nhello\nA\necho done", true},
+		// RV5-1: PowerShell has no here-documents; after the stop-parsing
+		// token --% the rest of the line is verbatim text and the next line
+		// runs.
+		{"cmd /c echo --% <<'A'\necho $(Get-Content ~/.ssh/id_ed25519)\nA", true},
+		{"cmd /c echo --% <<'A'\nWrite-Output (Get-Content ~/.ssh/id_ed25519)\nA", true},
+		{"cmd /c echo --% don't\nWrite-Output (Get-Content ~/.ssh/id_ed25519)", true},
+		{"cmd /c echo --% <<'A'\nhello\nA", false},
+		// RV5-2: a << inside ${...}, arithmetic or a subscript is not a
+		// here-document, and the bodies start after the line that ends the
+		// command.
+		{"echo ${x/<<\"A\"/}\necho $(cat ~/.ssh/id_ed25519)\nA/}", true},
+		{"echo $((1<<\"2\"))\necho $(cat ~/.ssh/id_ed25519)\n2", true},
+		{"echo $((1<<\"2\"))\necho \"$(cat ~/.ssh/id_ed25519)\"\n2", true},
+		{"((x=1<<\"2\"))\necho $(cat ~/.ssh/id_ed25519)\n2", true},
+		{"a[1<<\"2\"]=x\necho $(cat ~/.ssh/id_ed25519)\n2", true},
+		{"cat <<'A' $(echo x\necho $(cat ~/.ssh/id_ed25519) >&2)\nhello\nA", true},
+		{"echo $((1<<2)); cat > notes.txt <<'EOF'\n$(cat ~/.ssh/id_rsa)\nEOF", false},
+		{"echo ${x:-a}; cat > notes.txt <<'EOF'\n$(cat ~/.ssh/id_rsa)\nEOF", false},
 	} {
 		if got := ActionPrivateKeyRead(tc.command, cwd, home); got != tc.want {
 			t.Errorf("ActionPrivateKeyRead(%q) = %t, want %t", tc.command, got, tc.want)

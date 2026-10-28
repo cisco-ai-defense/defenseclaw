@@ -172,18 +172,29 @@ func actionWindowsLoopBindings(statement []string, loops map[string][]string) []
 // argument list of a .NET file read ([IO.File]::ReadAllText(path)) becomes
 // "get-content <args>". In the plain reading (Git Bash): $(...) and a ( that
 // starts a command. Single-quoted text, comments, literal here-strings,
-// quoted-delimiter here-documents (<<'EOF') and text after an unterminated
-// Git Bash backtick are not evaluated, so they yield nothing.
+// quoted-delimiter here-documents (<<'EOF', Git Bash reading only, at command
+// level: not inside ${...}, $((...)) or a[...]), a PowerShell stop-parsing
+// tail (--%) and text after an unterminated Git Bash backtick are not
+// evaluated, so they yield nothing. PowerShell has no here-documents: in its
+// reading a << is a parse error and nothing after it is read (RV5-1, RV5-2).
 func actionWindowsExpressionBodies(text string, plain, hereBody bool, bodies []string) []string {
 	type frame struct {
 		open              int
 		quote             byte
 		quoteHere         bool
 		reader, notSubexp bool
+		// arith is a Git Bash $(( or (( arithmetic frame: a << there
+		// is a shift, not a here-document (RV5-2).
+		arith bool
 	}
 	var stack []frame
 	var quote byte
 	var heredocs []actionHeredoc
+	// braces counts the open ${...} parameter expansions and subscript the
+	// open name[...] subscripts of the Git Bash reading: a << there is
+	// pattern or arithmetic text, not a here-document (RV5-2).
+	// arith counts the open arithmetic frames.
+	braces, subscript, arith := 0, 0, 0
 	quoteHere := false
 	if hereBody {
 		quote, quoteHere = '"', true
@@ -266,8 +277,47 @@ func actionWindowsExpressionBodies(text string, plain, hereBody bool, bodies []s
 			i += end + 3
 			continue
 		}
-		if c == '<' && i+1 < len(text) && text[i+1] == '<' && (i == 0 || text[i-1] != '<') {
+		if !plain && c == '-' && strings.HasPrefix(text[i:], "--%") &&
+			(i == 0 || strings.IndexByte(" \t", text[i-1]) >= 0) &&
+			(i+3 == len(text) || strings.IndexByte(" \t\r\n", text[i+3]) >= 0) {
+			// The PowerShell stop-parsing token: the rest of the line, up
+			// to a pipe, goes verbatim to a native program; PowerShell
+			// evaluates none of it, and the next line runs (RV5-1).
+			end := strings.IndexAny(text[i:], "\r\n|")
+			if end < 0 {
+				break
+			}
+			i += end - 1
+			continue
+		}
+		if !plain && c == '<' && i+1 < len(text) && text[i+1] == '<' {
+			// PowerShell has no here-documents: a << outside a string,
+			// a comment or a stop-parsing tail is a parse error, so
+			// PowerShell runs nothing of the command (RV5-1).
+			return bodies
+		}
+		if plain {
+			switch {
+			case c == '$' && i+1 < len(text) && text[i+1] == '{':
+				braces++
+				i++
+				continue
+			case c == '{' && braces > 0:
+				braces++
+			case c == '}' && braces > 0:
+				braces--
+			case c == '[' && i > 0 && actionShellName(text[i-1:i]):
+				subscript++
+			case c == ']' && subscript > 0:
+				subscript--
+			case c == '\n':
+				subscript = 0
+			}
+		}
+		if plain && c == '<' && i+1 < len(text) && text[i+1] == '<' && (i == 0 || text[i-1] != '<') &&
+			braces == 0 && subscript == 0 && arith == 0 {
 			if doc, after, ok := actionQuotedHeredoc(text, i+2); ok {
+				doc.level = len(stack)
 				heredocs = append(heredocs, doc)
 				if doc.quoted {
 					i = after - 1
@@ -275,7 +325,10 @@ func actionWindowsExpressionBodies(text string, plain, hereBody bool, bodies []s
 				}
 			}
 		}
-		if c == '\n' && len(heredocs) > 0 {
+		if c == '\n' && len(heredocs) > 0 && len(stack) <= heredocs[0].level {
+			// The bodies start after the line that ends the command: a
+			// newline inside a $(...) opened after the operator is still
+			// command text (cat <<'A' $(echo x<newline>...), RV5-2).
 			i = actionSkipHeredocBodies(text, i+1, heredocs) - 1
 			heredocs = nil
 			continue
@@ -287,6 +340,10 @@ func actionWindowsExpressionBodies(text string, plain, hereBody bool, bodies []s
 				prev := strings.TrimRight(text[:i], " \t")
 				f.notSubexp = !(i > 0 && text[i-1] == '$' || prev == "" ||
 					strings.IndexByte(";|&(\r\n", prev[len(prev)-1]) >= 0)
+				f.arith = !f.notSubexp && i+1 < len(text) && text[i+1] == '('
+				if f.arith {
+					arith++
+				}
 			} else {
 				f.reader = actionWindowsFileReadMethod(text[:i])
 			}
@@ -297,6 +354,9 @@ func actionWindowsExpressionBodies(text string, plain, hereBody bool, bodies []s
 			}
 			f := stack[len(stack)-1]
 			stack = stack[:len(stack)-1]
+			if f.arith {
+				arith--
+			}
 			if !f.notSubexp {
 				body := text[f.open:i]
 				if f.reader {
@@ -318,6 +378,8 @@ type actionHeredoc struct {
 	// quoted is false for an unquoted delimiter (<<EOF): its body is
 	// expanded and must stay scanned (RV4-1).
 	quoted bool
+	// level is the expression nesting of the operator.
+	level int
 }
 
 // actionQuotedHeredoc reads the delimiter word after a << operator at start
