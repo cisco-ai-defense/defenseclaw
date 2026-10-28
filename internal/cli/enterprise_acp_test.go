@@ -246,9 +246,16 @@ func TestEnterpriseACPEnrollVerifyRevokeLifecycle(t *testing.T) {
 	if err := os.WriteFile(editorFile, entry, 0o600); err != nil {
 		t.Fatal(err)
 	}
+	// The lock pins the entry as setup does; the guard refuses a lock that
+	// pins nothing, so list cannot call it done (GAP-1154).
+	entryDigest, err := acp.ClientEntrySHA256(editorFile, "zed", "kiro", doneLock)
+	if err != nil {
+		t.Fatal(err)
+	}
 	writeLock := func(profile, mode string) {
 		t.Helper()
-		lock, _ := json.Marshal(map[string]any{"version": 1, "client": map[string]any{"id": "zed", "config_path": editorFile},
+		lock, _ := json.Marshal(map[string]any{"version": 1, "client": map[string]any{"id": "zed", "config_path": editorFile,
+			"config_sha256": acp.EntryDigestPrefix + entryDigest},
 			"guard": map[string]any{"path": guardPath}, "profile": profile, "mode": mode})
 		if err := os.WriteFile(doneLock, lock, 0o600); err != nil {
 			t.Fatal(err)
