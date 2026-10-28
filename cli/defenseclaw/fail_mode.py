@@ -1518,10 +1518,14 @@ def _unix_registration_freshness(cfg: Any, connector: str) -> str | None:
     registration = _read_small_file(Path(paths[0]))
     if registration is None:
         return "registration-missing"
-    expected = str((Path(cfg.data_dir) / "hooks" / script_name).resolve())
+    hook = Path(cfg.data_dir).expanduser() / "hooks" / script_name
+    # Setup writes the data dir's own spelling; a HOME below a symlinked
+    # directory resolves elsewhere, and either names this install's hook
+    # (GAP-2371: the resolved form alone reported a fresh registration stale).
+    expected = {os.path.normpath(str(hook)), str(hook.resolve())}
     # JSON/TOML string literals escape a backslash when this helper is unit
     # tested from Windows; Unix paths use '/' and are unchanged.
-    expected_forms = {expected, expected.replace("\\", "\\\\")}
+    expected_forms = expected | {form.replace("\\", "\\\\") for form in expected}
     if not any(candidate in registration for candidate in expected_forms):
         return "registration-command-stale"
     return None
