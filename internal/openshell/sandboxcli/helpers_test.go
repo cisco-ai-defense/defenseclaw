@@ -570,7 +570,7 @@ func (d *fakeDaemon) serve(w http.ResponseWriter, r *http.Request) {
 				u.Summary = "1 file restored"
 			}
 			reply(u)
-		case verb == "workspace":
+		case verb == "workspace", verb == "disk":
 			reply(map[string]string{"status": "recorded"})
 		default:
 			fail(sandboxapi.CodeNotFound, "unknown verb")

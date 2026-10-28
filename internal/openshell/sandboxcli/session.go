@@ -2048,17 +2048,31 @@ func (s *session) watchOverlayDisk(ctx context.Context) {
 		if disk.filling() {
 			text := "⚠ " + overlayDiskFillingText(s.sb.Name, disk, true)
 			s.notice("overlay disk", text, text)
+			s.reportDisk(ctx, disk, false)
 			return
 		}
 		if !rateWarned && disk.fillsWithin(last, now.Sub(lastAt), 2*wait) {
 			rateWarned = true
 			text := "⚠ " + overlayDiskFillingText(s.sb.Name, disk, true)
 			s.notice("overlay disk filling fast", text, text)
+			s.reportDisk(ctx, disk, true)
 		}
 		if disk.known {
 			last, lastAt = disk, now
 		}
 	}
+}
+
+// reportDisk has the daemon name the disk warning just given in the
+// activity feed too, while the session runs (GAP-1140). A daemon that does
+// not take the report (an older one) leaves the warning to this terminal.
+func (s *session) reportDisk(ctx context.Context, disk overlayDisk, fast bool) {
+	if s.api == nil {
+		return
+	}
+	rctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	defer cancel()
+	_ = s.api.ReportDisk(rctx, s.sb.Name, sandboxapi.DiskReport{SizeBytes: disk.size, FreeBytes: disk.avail, Fast: fast})
 }
 
 // endCopy pulls a copy-mode sandbox's work and asks where it goes.
