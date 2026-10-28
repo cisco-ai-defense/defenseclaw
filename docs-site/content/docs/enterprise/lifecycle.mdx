@@ -558,6 +558,11 @@ to about 4 seconds, then is blocked the same way. Prompts and session, stop and 
 keep their whole budget. Lifecycle runs run at a lower CPU priority than the hooks on every OS,
 so a repair does not take the CPU the hooks need to answer in time.
 
+While a Setup, pkg or rpm run holds the gateway, the block names the run: "DefenseClaw is being
+installed or upgraded on this computer, and its gateway starts again when that is done. Try again
+in a moment." The call is still blocked. Retry when the run ends. A refusal with its own cause keeps
+its own text.
+
 The administrator's `hook_fail_mode: open` allows a call only while the hook proves the
 gateway service is stopped (no gateway took the call). A restart the hook cannot prove
 stopped blocks, and so does a hook that reaches its answer deadline without a decision. Integrity,
