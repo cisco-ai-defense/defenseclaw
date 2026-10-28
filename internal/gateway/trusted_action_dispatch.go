@@ -902,10 +902,18 @@ const (
 // run as a command line (any string of a powershell/pwsh/Invoke-Expression
 // statement, a string after a bash/sh -c flag); args marks a Start-Process
 // -ArgumentList string, which is the command line of the program it starts.
+//
+// expands marks a span whose $(...) (and Git Bash `...`) bodies run: a
+// double-quoted word or an unquoted Git Bash here-document body. heredoc
+// marks a Git Bash here-document body, whose runs (fed to a shell) and
+// cmdFeed (fed to cmd.exe) are set from its command line (checker it11
+// RV11-1).
 type cmdTextSpan struct {
-	start, end int
-	inner      string
-	runs, args bool
+	start, end       int
+	inner            string
+	runs, args       bool
+	expands, heredoc bool
+	cmdFeed          bool
 }
 
 func cmdSingleQuote(r rune, reading cmdOuterReading) bool {
@@ -967,10 +975,138 @@ func cmdQuotedWord(command string, i int, reading cmdOuterReading) (end int, inn
 	return 0, "", false
 }
 
+// cmdHeredoc is a pending Git Bash here-document of cmdTextSpans.
+type cmdHeredoc struct {
+	delim             string
+	stripTabs, quoted bool
+	level             int
+	runs, cmdFeed     bool
+}
+
+// cmdHeredocDelimiter reads the delimiter word after a Git Bash << at start
+// (quote removal as bash does it, $'EOF' and $"EOF" included). ok is false
+// for a here-string (<<<) or no word.
+func cmdHeredocDelimiter(command string, start int) (doc cmdHeredoc, end int, ok bool) {
+	j := start
+	if j < len(command) && command[j] == '<' {
+		return doc, 0, false
+	}
+	if j < len(command) && command[j] == '-' {
+		doc.stripTabs = true
+		j++
+	}
+	for j < len(command) && (command[j] == ' ' || command[j] == '\t') {
+		j++
+	}
+	var word strings.Builder
+	for j < len(command) && strings.IndexByte(" \t\r\n;|&<>()", command[j]) < 0 {
+		switch c := command[j]; c {
+		case '$':
+			if j+1 < len(command) && (command[j+1] == '\'' || command[j+1] == '"') {
+				j++
+				continue
+			}
+			word.WriteByte(c)
+			j++
+		case '\'', '"':
+			q := strings.IndexByte(command[j+1:], c)
+			if q < 0 {
+				return doc, 0, false
+			}
+			word.WriteString(command[j+1 : j+1+q])
+			doc.quoted = true
+			j += q + 2
+		case '\\':
+			doc.quoted = true
+			if j+1 < len(command) {
+				word.WriteByte(command[j+1])
+			}
+			j += 2
+		default:
+			word.WriteByte(c)
+			j++
+		}
+	}
+	doc.delim = word.String()
+	return doc, min(j, len(command)), doc.delim != ""
+}
+
+// cmdHeredocFeeds reports whether the command line around a here-document
+// operator at pos hands its body to a shell (bash <<EOF, cat <<EOF | sh) or
+// to cmd.exe (cmd <<EOF): then the body runs (over-block, never
+// under-block).
+func cmdHeredocFeeds(command string, pos int) (runs, cmdFeed bool) {
+	start := strings.LastIndexByte(command[:pos], '\n') + 1
+	end := len(command)
+	if k := strings.IndexByte(command[pos:], '\n'); k >= 0 {
+		end = pos + k
+	}
+	for _, word := range strings.FieldsFunc(command[start:end], func(r rune) bool {
+		return strings.ContainsRune(" \t\r;|&()<>", r)
+	}) {
+		if cmdShellWord(word) != "" {
+			runs = true
+		}
+		w := strings.NewReplacer("{", "", "}", "").Replace(strings.ToLower(strings.Trim(word, `"'`)))
+		if k := strings.LastIndexAny(w, `\/`); k >= 0 {
+			w = w[k+1:]
+		}
+		switch strings.TrimSuffix(w, ".exe") {
+		case "cmd", "%comspec%", "$env:comspec":
+			runs, cmdFeed = true, true
+		}
+	}
+	return runs, cmdFeed
+}
+
+// cmdHeredocBodies reads the bodies of the pending here-documents from start
+// (the line after the one that ends the command) and returns their spans and
+// the offset after the last one read. A delimiter line that is never found
+// ends the reading there: the rest stays scanned (over-block, never
+// under-block).
+func cmdHeredocBodies(command string, start int, docs []cmdHeredoc) (spans []cmdTextSpan, end int) {
+	pos := start
+	end = start
+	for _, doc := range docs {
+		bodyStart := pos
+		found := false
+		for pos < len(command) && !found {
+			lineEnd := len(command)
+			if k := strings.IndexByte(command[pos:], '\n'); k >= 0 {
+				lineEnd = pos + k
+			}
+			line := strings.TrimSuffix(command[pos:lineEnd], "\r")
+			if doc.stripTabs {
+				line = strings.TrimLeft(line, "\t")
+			}
+			if line == doc.delim {
+				found = true
+				spans = append(spans, cmdTextSpan{start: bodyStart, end: lineEnd, inner: command[bodyStart:pos],
+					expands: !doc.quoted, heredoc: true, runs: doc.runs, cmdFeed: doc.cmdFeed})
+				end = lineEnd
+			}
+			pos = lineEnd + 1
+		}
+		if !found {
+			break
+		}
+	}
+	return spans, end
+}
+
 // cmdTextSpans scans command for the parts the outer shell reads as text in
-// one reading. Spans are in order and do not overlap.
-func cmdTextSpans(command string, reading cmdOuterReading) []cmdTextSpan {
-	var spans []cmdTextSpan
+// one reading. Spans are in order and do not overlap. A Git Bash
+// here-document body at command level is a span (checker it11 RV11-1).
+// stops is true when the PowerShell reading meets a << that starts a token:
+// PowerShell cannot parse the command, so it runs none of it (as in
+// hookpaths actionWindowsExpressionBodies, RV5-1, RV6-1).
+func cmdTextSpans(command string, reading cmdOuterReading) (spans []cmdTextSpan, stops bool) {
+	// Git Bash: open ${...}, arithmetic (( )), name[...] and ( ) frames; a
+	// << inside the first three is no here-document operator (RV5-2).
+	braces, arith, subscript, parens := 0, 0, 0, 0
+	var pending []cmdHeredoc
+	// stopParsing is the end of a PowerShell --% tail: verbatim text.
+	stopParsing := -1
 	commentSeparators := " \t\r\n;|&()<>"
 	if reading == cmdReadingPowerShell {
 		commentSeparators = " \t\r\n;|&(){}"
@@ -987,6 +1123,84 @@ func cmdTextSpans(command string, reading cmdOuterReading) []cmdTextSpan {
 			reading == cmdReadingCMD && c == '^') && i+1 < n:
 			i += 2
 			continue
+		case reading == cmdReadingPowerShell && c == '$' && i+1 < n && command[i+1] == '$':
+			i += 2 // $$ is one variable: a { after it opens a script block (RV7-1).
+			continue
+		case reading == cmdReadingPowerShell && c == '$' && i+1 < n && command[i+1] == '{':
+			// A braced variable name (${a<<b}, ${a'b}) is one token up to
+			// its first unescaped } (RV6-1); unterminated: scanned on.
+			j := i + 2
+			for j < n && command[j] != '}' {
+				if command[j] == '`' {
+					j++
+				}
+				j++
+			}
+			if j < n {
+				i = j + 1
+				continue
+			}
+		case reading == cmdReadingPowerShell && c == '-' && strings.HasPrefix(command[i:], "--%") &&
+			(i == 0 || command[i-1] == ' ' || command[i-1] == '\t') &&
+			(i+3 == n || strings.IndexByte(" \t\r\n", command[i+3]) >= 0):
+			stopParsing = n
+			if k := strings.IndexAny(command[i:], "\r\n|"); k >= 0 {
+				stopParsing = i + k
+			}
+		case reading == cmdReadingPowerShell && c == '<' && i+1 < n && command[i+1] == '<' && i >= stopParsing &&
+			(i == 0 || strings.IndexByte(" \t\r\n;|&(){}", command[i-1]) >= 0):
+			return spans, true
+		case reading == cmdReadingGitBash && c == '$' && i+1 < n && command[i+1] == '{':
+			braces++
+			i += 2
+			continue
+		case reading == cmdReadingGitBash && c == '{' && braces > 0:
+			braces++
+		case reading == cmdReadingGitBash && c == '}' && braces > 0:
+			braces--
+		case reading == cmdReadingGitBash && c == '(' && i+1 < n && command[i+1] == '(':
+			arith++
+			i += 2
+			continue
+		case reading == cmdReadingGitBash && c == ')' && arith > 0 && i+1 < n && command[i+1] == ')':
+			arith--
+			i += 2
+			continue
+		case reading == cmdReadingGitBash && c == '(':
+			parens++
+		case reading == cmdReadingGitBash && c == ')':
+			parens = max(0, parens-1)
+		case reading == cmdReadingGitBash && c == '[' && i > 0 && cmdNameByte(command[i-1]):
+			subscript++
+		case reading == cmdReadingGitBash && c == ']' && subscript > 0:
+			subscript--
+		case reading == cmdReadingGitBash && c == '<' && i+1 < n && command[i+1] == '<' &&
+			(i == 0 || command[i-1] != '<') && braces == 0 && arith == 0 && subscript == 0:
+			doc, end, ok := cmdHeredocDelimiter(command, i+2)
+			if !ok {
+				i += 2
+				for i < n && command[i] == '<' {
+					i++ // a here-string (<<<) word is scanned on.
+				}
+				continue
+			}
+			doc.level = parens
+			doc.runs, doc.cmdFeed = cmdHeredocFeeds(command, i)
+			pending = append(pending, doc)
+			i = end
+			continue
+		case reading == cmdReadingGitBash && c == '\n':
+			subscript = 0
+			if len(pending) > 0 && parens <= pending[0].level {
+				// The bodies start after the line that ends the command.
+				bodies, end := cmdHeredocBodies(command, i+1, pending)
+				pending = nil
+				if len(bodies) > 0 {
+					spans = append(spans, bodies...)
+					i = end
+					continue
+				}
+			}
 		case reading == cmdReadingPowerShell && c == '<' && i+1 < n && command[i+1] == '#':
 			if end := strings.Index(command[i+2:], "#>"); end >= 0 {
 				stop := i + 2 + end + 2
@@ -1029,7 +1243,7 @@ func cmdTextSpans(command string, reading cmdOuterReading) []cmdTextSpan {
 			continue
 		case c == '"' || c == '\'' || c >= utf8.RuneSelf:
 			if end, inner, ok := cmdQuotedWord(command, i, reading); ok {
-				spans = append(spans, cmdTextSpan{start: i, end: end, inner: inner})
+				spans = append(spans, cmdTextSpan{start: i, end: end, inner: inner, expands: c == '"'})
 				i = end
 				continue
 			}
@@ -1037,7 +1251,62 @@ func cmdTextSpans(command string, reading cmdOuterReading) []cmdTextSpan {
 		i++
 	}
 	cmdMarkRunStrings(command, spans)
-	return spans
+	return spans, false
+}
+
+func cmdNameByte(c byte) bool {
+	return c == '_' || '0' <= c && c <= '9' || 'a' <= c && c <= 'z' || 'A' <= c && c <= 'Z'
+}
+
+// cmdBodyEnds lists, in order, where the outer shell of reading ends the
+// statement a cmd call is in, so a cmd /c body stops there and is not read
+// again as the rest of the command (checker it11 RV11-2): ; | and newlines
+// outside text spans and escapes, also && in PowerShell and a & that is not
+// part of a redirection in Git Bash. The cmd reading lists none: cmd's own
+// & | stay in the body.
+func cmdBodyEnds(command string, spans []cmdTextSpan, reading cmdOuterReading) []int {
+	if reading == cmdReadingCMD {
+		return nil
+	}
+	escape := byte('`')
+	if reading == cmdReadingGitBash {
+		escape = '\\'
+	}
+	var ends []int
+	k := 0
+	for i := 0; i < len(command); i++ {
+		if k < len(spans) && i == spans[k].start {
+			i = spans[k].end - 1
+			k++
+			continue
+		}
+		switch c := command[i]; {
+		case c == escape:
+			i++
+		case reading == cmdReadingPowerShell && c == '-' && strings.HasPrefix(command[i:], "--%") &&
+			(i == 0 || command[i-1] == ' ' || command[i-1] == '\t'):
+			// The stop-parsing tail goes verbatim to the program up to
+			// the line end or a pipe: its ; is cmd's text.
+			if k := strings.IndexAny(command[i:], "\r\n|"); k >= 0 {
+				i += k - 1
+			} else {
+				i = len(command)
+			}
+		case c == ';' || c == '|' || c == '\r' || c == '\n':
+			ends = append(ends, i)
+		case c == '&' && reading == cmdReadingPowerShell:
+			if i+1 < len(command) && command[i+1] == '&' {
+				ends = append(ends, i)
+			}
+		case c == '&':
+			redirect := i > 0 && (command[i-1] == '>' || command[i-1] == '<') ||
+				i+1 < len(command) && command[i+1] == '>'
+			if !redirect {
+				ends = append(ends, i)
+			}
+		}
+	}
+	return ends
 }
 
 // cmdShellWord names the shell a word starts: "ps" for PowerShell and
@@ -1096,8 +1365,10 @@ func cmdMarkRunStrings(command string, spans []cmdTextSpan) {
 	for i := 0; i < len(command); {
 		if k < len(spans) && i == spans[k].start {
 			finish(i)
-			spans[k].runs = ps || shRun
-			spans[k].args = cmdArgumentListWord(lastWord) || (lastWord == "," && k > 0 && spans[k-1].args)
+			if !spans[k].heredoc {
+				spans[k].runs = ps || shRun
+				spans[k].args = cmdArgumentListWord(lastWord) || (lastWord == "," && k > 0 && spans[k-1].args)
+			}
 			lastWord = "\x00"
 			i = spans[k].end
 			k++
@@ -1228,6 +1499,12 @@ func cmdSwitchRunBody(rest string) (string, bool) {
 			end = len(trimmed)
 		}
 		word := trimmed[:end]
+		if word == "--%" {
+			// PowerShell's stop-parsing token: the rest goes verbatim to
+			// cmd (checker it11 note K01).
+			rest = trimmed[end:]
+			continue
+		}
 		if loc := cmdRunWord.FindStringIndex(word); loc != nil {
 			after := word[loc[1]:]
 			if after == "" || after[0] == '"' || after[0] == '\'' {
@@ -1285,10 +1562,16 @@ func (r *cmdBodyReader) read(command string, depth int) {
 }
 
 func (r *cmdBodyReader) readWith(command string, reading cmdOuterReading, depth int) {
-	spans := cmdTextSpans(command, reading)
+	spans, stops := cmdTextSpans(command, reading)
+	if stops {
+		return // PowerShell runs nothing of a command it cannot parse.
+	}
 	for _, span := range spans {
 		if r.overflow {
 			return
+		}
+		if span.cmdFeed {
+			r.add(span.inner) // cmd <<EOF: cmd.exe runs the body lines.
 		}
 		if span.runs {
 			if span.args {
@@ -1299,7 +1582,7 @@ func (r *cmdBodyReader) readWith(command string, reading cmdOuterReading, depth 
 				r.read(span.inner, depth+1)
 			}
 		}
-		if reading != cmdReadingCMD && span.end-span.start >= 2 && command[span.start] == '"' {
+		if reading != cmdReadingCMD && span.expands {
 			for _, sub := range cmdSubexpressions(span.inner, reading) {
 				r.read(sub, depth+1)
 			}
@@ -1312,6 +1595,7 @@ func (r *cmdBodyReader) readWith(command string, reading cmdOuterReading, depth 
 		}
 	}
 	breaks := cmdStatementBreaks(command, spans)
+	ends := cmdBodyEnds(command, spans, reading)
 	for _, loc := range cmdProgramWord.FindAllStringIndex(command, -1) {
 		if r.overflow {
 			return
@@ -1331,6 +1615,10 @@ func (r *cmdBodyReader) readWith(command string, reading cmdOuterReading, depth 
 		if !ok {
 			r.addArgumentList(command, spans, argSpans, breaks, start, loc[1], rest)
 			continue
+		}
+		bodyStart := len(command) - len(body)
+		if k, _ := slices.BinarySearch(ends, bodyStart); k < len(ends) {
+			body = command[bodyStart:ends[k]]
 		}
 		r.add(body)
 		trimmed := strings.TrimSpace(body)
@@ -1427,13 +1715,6 @@ func cmdInvocationReadings(command string, includeCMD bool) (bodies []string, co
 	return r.bodies, !r.overflow
 }
 
-// cmdInvocationBodies is cmdInvocationReadings for a PowerShell or Git Bash
-// tool call.
-func cmdInvocationBodies(command string) []string {
-	bodies, _ := cmdInvocationReadings(command, false)
-	return bodies
-}
-
 // provenCMDSlashCStateWrite judges the body of a cmd /c or cmd /k call as
 // the cmd command it is (GAP-2408). Without /d the parser keeps cmd /c opaque,
 // because a Command Processor AutoRun entry may run first; AutoRun cannot stop
@@ -1462,8 +1743,11 @@ func provenCMDSlashCStateWrite(request trustedActionRequest) bool {
 		return false
 	}
 	includeCMD := request.Input.DialectHint == actionfacts.DialectCMD
-	const maxReadings, maxReadBytes = 64, 1 << 20
+	// The bounds count distinct bodies: a body two readings or two depths
+	// yield is judged once (RV11-2).
+	const maxReadings, maxReadBytes = 128, 1 << 20
 	pending, readings, readBytes := []string{command}, 0, 0
+	seen := map[string]bool{}
 	for depth := 0; depth < 3 && len(pending) > 0; depth++ {
 		var next []string
 		for _, outer := range pending {
@@ -1472,6 +1756,10 @@ func provenCMDSlashCStateWrite(request trustedActionRequest) bool {
 				return true
 			}
 			for _, body := range bodies {
+				if seen[body] {
+					continue
+				}
+				seen[body] = true
 				readings++
 				readBytes += len(body)
 				if readings > maxReadings || readBytes > maxReadBytes {

@@ -6,6 +6,7 @@ package gateway
 import (
 	"encoding/json"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -259,5 +260,72 @@ func TestR105WindowsCMDBodyReaderIsLinear(t *testing.T) {
 	}}
 	if !provenCMDSlashCStateWrite(request) {
 		t.Errorf("a command beyond the reader bounds is not judged a state write")
+	}
+}
+
+// TestR105WindowsCMDMentionsAndManyCalls: text that only mentions a cmd.exe
+// state write in a Git Bash here-document body stays allowed, as does an
+// ordinary command with many cmd calls and a DefenseClaw state read; a
+// here-document fed to a shell or to cmd, an unquoted body's $(...) and a
+// stop-parsing cmd call still block (checker it11 RV11-1, RV11-2, K01).
+func TestR105WindowsCMDMentionsAndManyCalls(t *testing.T) {
+	const connectorName = "r105-cmd-mentions"
+	installToolCallCorpusProfileConnector(t, connectorName, "default")
+	const home = `C:\Users\Alice`
+	resolved := map[string]string{}
+	for _, value := range []string{"C:/Users/Alice/.defenseclaw", "C:/Users/Alice/.defenseclaw/config.yaml"} {
+		resolved[value] = value
+	}
+	const state = `%USERPROFILE%\.defenseclaw\config.yaml`
+	steps := func(format string, n int, sep, tail string) string {
+		var parts []string
+		for k := range n {
+			parts = append(parts, strings.ReplaceAll(format, "N", strconv.Itoa(k)))
+		}
+		return strings.Join(parts, sep) + sep + tail
+	}
+	for _, tc := range []struct {
+		command string
+		block   bool
+	}{
+		{"git commit -m \"$(cat <<'EOF'\nfix: block cmd /c type nul > " + state + "\n\nEOF\n)\"", false},
+		{"cat > notes.md <<'EOF'\nTip: cmd /c type nul > " + state + " empties the config\nEOF", false},
+		{"cat > notes.md <<'EOF'\nrepro: cmd //c \"rmdir /s /q %USERPROFILE%\\.defenseclaw\"\nEOF", false},
+		{"cat > notes.md <<EOF\nTip: cmd /c type nul > " + state + " empties it\nEOF", false},
+		{"cat > notes.md <<-'EOF'\n\tdon't run cmd /c type nul > " + state + "\n\tEOF\necho done", false},
+		{steps("cmd /c echo stepN", 8, "; ", `Get-Content $HOME\.defenseclaw\config.yaml`), false},
+		{steps("cmd /c echo stepN", 20, "; ", `Get-Content $HOME\.defenseclaw\config.yaml`), false},
+		{steps("cmd /c ver", 12, "; ", `cmd /c dir %USERPROFILE%\.defenseclaw`), false},
+		{steps("cmd //c echo sN", 12, " && ", "cat ~/.defenseclaw/config.yaml"), false},
+		// Still a state write.
+		{"bash <<'EOF'\ncmd /c type nul > " + state + "\nEOF", true},
+		{"cat <<'EOF' | sh\ncmd /c type nul > " + state + "\nEOF", true},
+		{"cmd <<'EOF'\ntype nul > " + state + "\nEOF", true},
+		{"cat > notes.md <<EOF\n$(cmd /c type nul > " + state + ")\nEOF", true},
+		{"cat <<'EOF'\nnote\nEOF\ncmd /c type nul > " + state, true},
+		{"cat <<'EOF' \"x\nEOF\" ; cmd /c type nul > " + state + "\nEOF", true},
+		{"echo $((1<<2))\ncmd /c type nul > " + state + "\n2", true},
+		{"${x <<}\ncmd /c type nul > " + state + "\n}", true},
+		{"cat <<'EOF'\nnote\n", false},
+		{"cat <<'EOF'\ncmd /c type nul > " + state, true},
+		{steps("cmd /c echo stepN", 8, "; ", "cmd /c type nul > "+state), true},
+		{"cmd /c echo a; cmd /c \"type nul > " + state + "\"", true},
+		{"cmd --% /c type nul > " + state, true},
+		{"cmd --% /c echo a ; type nul > " + state, true},
+	} {
+		for _, tool := range []string{"Bash", "shell_command", "PowerShell"} {
+			args, _ := json.Marshal(map[string]string{"command": tc.command})
+			input := actionfacts.Input{Tool: tool, Args: args, CWD: home + `\project`, ActiveHome: home}
+			input.DialectHint = agentHookWindowsShellDialect(input)
+			findings := dispatchTrustedAction(t.Context(), trustedActionRequest{
+				Input: input, LegacyText: string(args), Connector: connectorName,
+				EnforcementCapable: true, ResolvedWriteTargets: resolved,
+			})
+			verdict := buildVerdict(findings, "tool_call")
+			if got := verdict.Action == "block"; got != tc.block {
+				t.Errorf("%s %q (dialect %q): action %q, want block=%t (findings %v)",
+					tool, tc.command, input.DialectHint, verdict.Action, tc.block, findings)
+			}
+		}
 	}
 }
