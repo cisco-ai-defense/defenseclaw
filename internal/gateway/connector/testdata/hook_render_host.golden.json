@@ -1628,15 +1628,15 @@
   "plugin/amp-plugin.ts/managed=0/fail=closed": {
     "amp-plugin.ts": {
       "mode": "-rw-------",
-      "size": 76844,
-      "sha256": "8e35a3c83a2c7485b8275585914e1c348f80f55953d8f13b9b5b1dd916c0e7d2"
+      "size": 76847,
+      "sha256": "8f07b497219f1af1966c45dfc7744890bf56485d5975e3ebf3f2991b8083a281"
     }
   },
   "plugin/amp-plugin.ts/managed=0/fail=open": {
     "amp-plugin.ts": {
       "mode": "-rw-------",
-      "size": 76844,
-      "sha256": "8e35a3c83a2c7485b8275585914e1c348f80f55953d8f13b9b5b1dd916c0e7d2"
+      "size": 76847,
+      "sha256": "8f07b497219f1af1966c45dfc7744890bf56485d5975e3ebf3f2991b8083a281"
     }
   },
   "plugin/amp-plugin.ts/managed=1/fail=closed": {
