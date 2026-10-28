@@ -57,7 +57,7 @@ def _config(data_dir: Path) -> SimpleNamespace:
 
 def _entry(connector: str, root: Path) -> dict[str, object]:
     raw_version = (
-        "1.18.10"
+        "2.1.4"
         if connector == "opencode"
         else "3000.4.25"
         if connector == "devin"

@@ -101,6 +101,10 @@ Per-user, managed standalone and Secure Client plugin variants all use the V2 en
 
 Managed standalone setup uses the administrator-owned shared plugin and the existing foreign-hook guard. Old file identities remain solely to migrate or remove installations written by an earlier DefenseClaw release.
 
+### On a managed computer
+
+Per-user setup and guardrail commands refuse on a standalone enterprise Linux or macOS host. An administrator adds `guardrail.connectors.opencode: {}` to the managed `config.yaml`, applies it through the [enterprise lifecycle](/docs/enterprise/lifecycle), and runs `enterprise policy verify`. DefenseClaw registers the V2 plugin directory in OpenCode's managed config (`/etc/opencode/opencode.json` on Linux). Set `guardrail.connectors.opencode.enabled: false` in the managed configuration to disable it. See [Machine policy](/docs/enterprise/machine-policy) for platform paths and deployment steps.
+
 ## In an OpenShell sandbox
 
 The image pin is OpenCode V2.1.4 from the official `@opencode/cli` package. Package integrity and the native binary digest are checked; Linux x64 uses the baseline binary rather than adding an AVX2 requirement. The V1 base-image package and its startup SDK-record workaround are removed. Headless runs use `run --standalone`.
@@ -116,8 +120,14 @@ The previous V1 live sandbox certification does not certify V2. The V2 image rem
 
 ## Disable
 
+For a per-user, single-connector install:
+
 ```bash
-defenseclaw guardrail disable --connector opencode
+defenseclaw guardrail disable --yes
 ```
 
-Use the existing connector teardown or uninstall controls to remove owned registrations, then restart OpenCode. No V2 hook or subscription starts when the plugin is not loaded.
+With the default gateway restart, disabling removes DefenseClaw's plugin file. This preserves your other OpenCode settings. `defenseclaw guardrail enable` reinstalls DefenseClaw's plugin. To remove the connector, run `defenseclaw setup remove opencode --yes` (add `--force` if it is the last one). If you modified the plugin, `guardrail disable` and `setup remove` refuse before saving configuration, and the gateway is left as it was; `defenseclaw doctor` reports the change. Preserve your edits, run `defenseclaw setup opencode --yes --restart` to restore the managed plugin, then retry. Restart OpenCode afterwards.
+
+On a multi-connector install, add `--connector opencode` to `guardrail disable` and `guardrail enable` to change only this agent.
+
+No V2 hook or subscription starts when the plugin is not loaded.

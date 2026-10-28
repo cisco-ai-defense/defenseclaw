@@ -888,10 +888,12 @@ function Get-InstalledAgentPrograms([object[]]$Processes = @()) {
             if ($native) { $installed[$native.ToLowerInvariant()] = "opencode" }
         }
         foreach ($name in @("opencode", "amp")) {
-            $relative = if ($name -eq "opencode") { "node_modules\@opencode\cli\bin\opencode" } else { "node_modules\@sourcegraph\amp\dist\main.js" }
+            $relatives = if ($name -eq "opencode") { @("node_modules\@opencode\cli\bin\opencode", "node_modules\opencode-ai\bin\opencode") } else { @("node_modules\@sourcegraph\amp\dist\main.js") }
             if (-not (Test-Path -LiteralPath (Join-Path $npm ($name + ".cmd")) -PathType Leaf)) { continue }
-            $entry = Resolve-AgentPath (Join-Path $npm $relative)
-            if ($entry) { $installed[$entry.ToLowerInvariant()] = $name }
+            foreach ($relative in $relatives) {
+                $entry = Resolve-AgentPath (Join-Path $npm $relative)
+                if ($entry) { $installed[$entry.ToLowerInvariant()] = $name }
+            }
         }
     }
     foreach ($process in $Processes) {
@@ -901,9 +903,11 @@ function Get-InstalledAgentPrograms([object[]]$Processes = @()) {
         if (-not $folder) { continue }
         foreach ($name in @("opencode", "amp")) {
             if (-not (Test-Path -LiteralPath (Join-Path $folder ($name + ".cmd")) -PathType Leaf)) { continue }
-            $relative = if ($name -eq "opencode") { "node_modules\@opencode\cli\bin\opencode" } else { "node_modules\@sourcegraph\amp\dist\main.js" }
-            $entry = Resolve-AgentPath (Join-Path $folder $relative)
-            if ($entry) { $installed[$entry.ToLowerInvariant()] = $name }
+            $relatives = if ($name -eq "opencode") { @("node_modules\@opencode\cli\bin\opencode", "node_modules\opencode-ai\bin\opencode") } else { @("node_modules\@sourcegraph\amp\dist\main.js") }
+            foreach ($relative in $relatives) {
+                $entry = Resolve-AgentPath (Join-Path $folder $relative)
+                if ($entry) { $installed[$entry.ToLowerInvariant()] = $name }
+            }
         }
     }
     try {

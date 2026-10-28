@@ -69,7 +69,8 @@ func renderListenerProofPlugin(t *testing.T, asset, addr, tokenPath string) []by
 const openCodeGatewayProofHarness = `
 import { pathToFileURL } from "node:url";
 const loaded = await import(pathToFileURL(process.argv[1]).href);
-const plugin = await loaded.DefenseClaw({ directory: "" });
+const { fixtureBridge } = await import(pathToFileURL("../opencodebridge/testdata/fixture.mjs"));
+const plugin = await fixtureBridge(loaded, { directory: "/work/repo" });
 try {
   await plugin["tool.execute.before"](
     { tool: "Bash", sessionID: "S", messageID: "M", callID: "C" },
