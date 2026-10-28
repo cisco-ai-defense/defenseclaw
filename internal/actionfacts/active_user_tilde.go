@@ -105,3 +105,93 @@ func ActiveUserTildeTwin(command, activeHome string) (twin string, user string, 
 	out.WriteString(command[last:])
 	return out.String(), user, true
 }
+
+var msysDrivePrefix = regexp.MustCompile(`^/(?:cygdrive/)?([A-Za-z])(?:/|$)`)
+
+// MSYSDrivePath returns the drive spelling (C:/x) of an MSYS or Cygwin
+// drive mount path (/c/x, /cygdrive/c/x), and value unchanged otherwise.
+func MSYSDrivePath(value string) string {
+	match := msysDrivePrefix.FindStringSubmatchIndex(value)
+	if match == nil {
+		return value
+	}
+	drive := strings.ToUpper(value[match[2]:match[3]])
+	rest := value[match[3]:]
+	if rest == "" {
+		rest = "/"
+	}
+	return drive + ":" + rest
+}
+
+// MSYSDrivePathTwin returns command with every word that starts with an
+// MSYS or Cygwin drive mount (/c/..., /cygdrive/c/...) spelled as the drive
+// path (C:/...), when activeHome is a Windows drive home: Git Bash, the
+// shell Claude Code and other agents run there, maps those mounts to the
+// drive for every program, so the twin names the same files (GAP-2375).
+// Only an unquoted or single-quoted literal at the start of a word is
+// respelled. ok is false when there is no such word, the home is not a
+// drive home or the command does not parse.
+func MSYSDrivePathTwin(command, activeHome string) (string, bool) {
+	home, valid := normalizeActiveHome(activeHome)
+	if !valid || !posixShellHome(strings.TrimRight(home, "/")) || strings.HasPrefix(home, "/") ||
+		!strings.Contains(command, "/") {
+		return "", false
+	}
+	file, err := syntax.NewParser(syntax.Variant(syntax.LangBash)).Parse(strings.NewReader(command), "")
+	if err != nil {
+		return "", false
+	}
+	type span struct {
+		start, end int
+		value      string
+	}
+	var spans []span
+	syntax.Walk(file, func(node syntax.Node) bool {
+		switch typed := node.(type) {
+		case *syntax.Redirect:
+			if typed.Hdoc != nil {
+				return false
+			}
+		case *syntax.Word:
+			if len(typed.Parts) == 0 {
+				return true
+			}
+			var value string
+			start := 0
+			switch part := typed.Parts[0].(type) {
+			case *syntax.Lit:
+				value, start = part.Value, int(part.Pos().Offset())
+			case *syntax.SglQuoted:
+				if part.Dollar {
+					return true
+				}
+				value, start = part.Value, int(part.Pos().Offset())+1
+			default:
+				return true
+			}
+			match := msysDrivePrefix.FindStringIndex(value)
+			if match == nil {
+				return true
+			}
+			prefix := strings.TrimSuffix(value[:match[1]], "/")
+			spans = append(spans, span{start, start + len(prefix), strings.TrimSuffix(MSYSDrivePath(prefix+"/"), "/")})
+		}
+		return true
+	})
+	if len(spans) == 0 {
+		return "", false
+	}
+	sort.Slice(spans, func(i, j int) bool { return spans[i].start < spans[j].start })
+	var out strings.Builder
+	last := 0
+	for _, item := range spans {
+		if item.start < last || item.end > len(command) || command[item.start] != '/' {
+			return "", false
+		}
+		out.WriteString(command[last:item.start])
+		out.WriteString(item.value)
+		last = item.end
+	}
+	out.WriteString(command[last:])
+	return out.String(), true
+}

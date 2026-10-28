@@ -34,3 +34,32 @@ func TestActiveUserTildeTwinSpellsTheActiveHome(t *testing.T) {
 		t.Error("a Windows home has no password-database tilde-prefix twin")
 	}
 }
+
+// GAP-2375: under a Windows drive home Git Bash maps /c/... and
+// /cygdrive/c/... to C:/...; the twin spells word-leading mounts as drive
+// paths and leaves double-quoted text, other words and POSIX homes alone.
+func TestMSYSDrivePathTwinSpellsTheDrive(t *testing.T) {
+	const home = "C:/Users/dcw"
+	for _, tc := range []struct {
+		command, twin string
+		ok            bool
+	}{
+		{"rmdir /c/Users/dcw/.defenseclaw/hooks", "rmdir C:/Users/dcw/.defenseclaw/hooks", true},
+		{"rm -rf /cygdrive/c/Users/dcw/.defenseclaw/hooks", "rm -rf C:/Users/dcw/.defenseclaw/hooks", true},
+		{"cp a.txt '/d/x y' > /c/Users/dcw/out.txt", "cp a.txt 'D:/x y' > C:/Users/dcw/out.txt", true},
+		{"cd /c && ls", "cd C: && ls", true},
+		{`echo "/c/Users/dcw/f" x/c/y /cc/d /tmp/x`, "", false},
+		{"cat <<EOF\n/c/Users/dcw/f\nEOF\n", "", false},
+	} {
+		twin, ok := MSYSDrivePathTwin(tc.command, home)
+		if ok != tc.ok || twin != tc.twin {
+			t.Errorf("%q: twin %q ok=%v, want %q ok=%v", tc.command, twin, ok, tc.twin, tc.ok)
+		}
+	}
+	if _, ok := MSYSDrivePathTwin("rmdir /c/x", "/home/dcw"); ok {
+		t.Error("a POSIX home has no MSYS drive mounts")
+	}
+	if got := MSYSDrivePath("/cygdrive/e"); got != "E:/" {
+		t.Errorf("MSYSDrivePath(/cygdrive/e) = %q", got)
+	}
+}
