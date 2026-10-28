@@ -65,6 +65,13 @@ func runProvenanceShow(cmd *cobra.Command, _ []string) error {
 // opening its audit store. Secure Client and per-user commands keep their
 // existing path (r103 GAP-0004/0128).
 func managedGatewayProvenance(cmd *cobra.Command) (version.Provenance, bool, error) {
+	ctx := context.Background()
+	if cmd != nil && cmd.Context() != nil {
+		ctx = cmd.Context()
+	}
+	if live, present, err := managedWindowsGatewayProvenance(ctx); present {
+		return live, true, err
+	}
 	layout, descriptor, err := managedStandaloneAdminDeployment()
 	if errors.Is(err, managed.ErrNoRuntimeDescriptor) {
 		return version.Provenance{}, false, nil
@@ -86,20 +93,25 @@ func managedGatewayProvenance(cmd *cobra.Command) (version.Provenance, bool, err
 	var answer struct {
 		Provenance *version.Provenance `json:"provenance"`
 	}
-	ctx := context.Background()
-	if cmd != nil {
-		ctx = cmd.Context()
-	}
 	if err := managedProvenanceHealth(ctx, layout, descriptor.ServiceUID, &answer); err != nil {
 		return version.Provenance{}, true, fmt.Errorf("cannot read the managed gateway's provenance: %w; check it with: %s", err, next)
 	}
-	if answer.Provenance == nil || answer.Provenance.ContentHash == "" || answer.Provenance.SchemaVersion <= 0 || answer.Provenance.BinaryVersion == "" {
-		return version.Provenance{}, true, fmt.Errorf("the managed gateway did not provide complete administrator provenance; check it with: %s", next)
-	}
-	if digest, err := hex.DecodeString(answer.Provenance.ContentHash); err != nil || len(digest) != 32 {
-		return version.Provenance{}, true, fmt.Errorf("the managed gateway returned invalid config provenance; check it with: %s", next)
+	if err := validManagedProvenance(answer.Provenance, next); err != nil {
+		return version.Provenance{}, true, err
 	}
 	return *answer.Provenance, true, nil
+}
+
+// validManagedProvenance fails unless p is a complete administrator
+// provenance snapshot: schema, a sha256 content hash and the binary version.
+func validManagedProvenance(p *version.Provenance, next string) error {
+	if p == nil || p.ContentHash == "" || p.SchemaVersion <= 0 || p.BinaryVersion == "" {
+		return fmt.Errorf("the managed gateway did not provide complete administrator provenance; check it with: %s", next)
+	}
+	if digest, err := hex.DecodeString(p.ContentHash); err != nil || len(digest) != 32 {
+		return fmt.Errorf("the managed gateway returned invalid config provenance; check it with: %s", next)
+	}
+	return nil
 }
 
 // The protected hook socket is the authority. Check the kernel peer on the

@@ -689,8 +689,33 @@ def _free_entry_name(servers: dict[str, Any], agent: str) -> str:
 _CHANGED, _DIRECT, _UNRECORDED_GUARD, _RESERVED_NAME = "changed", "direct", "guard", "name"
 
 
+def _pinned_agent_path(data_dir: str, client: str, agent: str) -> str:
+    """The agent executable the pair's contract lock pins ("" without a usable lock)."""
+    lock = _lock_document(_contract_lock_path(data_dir, client, agent), client, agent)
+    path_value = lock["agent"].get("path") if lock else None
+    return path_value if isinstance(path_value, str) else ""
+
+
+def _launches_file(entry: dict[str, Any], path_value: str) -> bool:
+    """Whether an editor entry's command is the file at path_value.
+
+    The editor resolves a bare command on PATH, so a PATH name, another
+    spelling of the path or a link to the file all launch it.
+    """
+    command = entry.get("command")
+    if not path_value or not isinstance(command, str) or not command.strip():
+        return False
+    found = os.path.expanduser(command) if os.path.dirname(command) else shutil.which(command)
+    if not found:
+        return False
+    try:
+        return os.path.samefile(found, path_value)
+    except (OSError, ValueError):
+        return False
+
+
 def _left_pair_entries(
-    servers: dict[str, Any], client: str, agent: str, records: EntryRecords
+    servers: dict[str, Any], client: str, agent: str, records: EntryRecords, agent_path: str = ""
 ) -> list[tuple[str, str, bool]]:
     """The pair's foreign entries: entries DefenseClaw cannot prove it wrote as they are now.
 
@@ -700,8 +725,11 @@ def _left_pair_entries(
     name), _DIRECT (it launches the agent without the guard), _UNRECORDED_GUARD
     (it starts a guard for the pair with no matching record, as releases
     through 1.0.3 wrote the reserved entry) or _RESERVED_NAME (it has the
-    pair's reserved name and nothing else of DefenseClaw's). adoptable: it
-    launches the agent directly, so acp adopt can route it through the guard.
+    pair's reserved name and nothing else of DefenseClaw's). agent_path is the
+    agent executable the pair's lock pins: an entry that starts that file
+    without the guard is _DIRECT whatever its name, arguments or spelling of
+    the path (GAP-0496). adoptable: it launches the catalog command, so acp
+    adopt can route it through the guard.
     Setup writes DefenseClaw's own entry next to them, adoption and removal
     leave them, and verify reports them.
     """
@@ -715,10 +743,11 @@ def _left_pair_entries(
         if name in owned:
             continue
         entry = value if isinstance(value, dict) else {}
-        adoptable = bool(entry) and not _entry_is_guarded(entry) and _agent_for_entry(entry) == agent
+        unguarded = bool(entry) and not _entry_is_guarded(entry)
+        adoptable = unguarded and _agent_for_entry(entry) == agent
         if name in recorded:
             why = _CHANGED
-        elif adoptable:
+        elif adoptable or (unguarded and _launches_file(entry, agent_path)):
             why = _DIRECT
         elif _carries_marker(entry, client, agent):
             why = _UNRECORDED_GUARD
@@ -784,7 +813,9 @@ def _left_entries(client: str, agent: str, data_dir: str) -> list[tuple[str, boo
     servers = _read_json_object(_client_path(client)).get("agent_servers")
     if not isinstance(servers, dict):
         return []
-    return _left_pair_entries(servers, client, agent, _owned_entry_records(data_dir))
+    return _left_pair_entries(
+        servers, client, agent, _owned_entry_records(data_dir), _pinned_agent_path(data_dir, client, agent)
+    )
 
 
 def _warn_redirected_acp_dir(redirected: bool, data_dir: str) -> None:
@@ -1040,7 +1071,9 @@ def _verify_binding(
         # DefenseClaw wrote and that changed since, one that launches the agent
         # without the guard, or a recordless guard entry under any name. Each
         # problem names its manual step.
-        left = _left_pair_entries(servers, client, agent, records) if isinstance(servers, dict) else []
+        left = _left_pair_entries(
+            servers, client, agent, records, _pinned_agent_path(data_dir, client, agent)
+        ) if isinstance(servers, dict) else []
         problems.extend(_foreign_entry_problem(item, client, agent, client_path) for item in left)
         # An entry this pair adopted that is gone from the file.
         problems.extend(

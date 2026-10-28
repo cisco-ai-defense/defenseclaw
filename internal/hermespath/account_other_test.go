@@ -220,3 +220,67 @@ func TestMacOSProcessHelper(t *testing.T) {
 	}
 	time.Sleep(time.Minute)
 }
+
+// GAP-2374: a directory account's home holds an "@" (/home/user@domain).
+// A value naming that home through $HOME, ~ or a literal path resolves; it
+// is not a reference a service cannot evaluate. Real references still
+// cannot be resolved.
+func TestExpandAccountHomeResolvesADirectoryAccountsHome(t *testing.T) {
+	home := "/home/dcad-eng1@dclab.test"
+	for value, want := range map[string]string{
+		"$HOME/.hermes":                home + "/.hermes",
+		"${HOME}/.hermes":              home + "/.hermes",
+		"@{HOME}/.hermes":              home + "/.hermes",
+		"~/.hermes":                    home + "/.hermes",
+		`"` + home + `/.hermes-other"`: home + "/.hermes-other",
+		home + "/.hermes-other":        home + "/.hermes-other",
+		"/srv/hermes":                  "/srv/hermes",
+		"$XDG_DATA_HOME/hermes":        "",
+		"@{XDG_DATA_HOME}/hermes":      "",
+		"`hermes-home`":                "",
+		"~other/.hermes":               "",
+		"relative/.hermes":             "",
+	} {
+		if got := expandAccountHome(value, home); got != want {
+			t.Errorf("expandAccountHome(%q) = %q, want %q", value, got, want)
+		}
+	}
+}
+
+// GAP-2374 (macOS): a value the root parent read for this account's
+// launchd user domain is what the account check sees, also for the worker
+// whose own getenv would read the system domain; it is never used for
+// another account.
+func TestVerifyAccountHomeUsesTheParentsLaunchdRead(t *testing.T) {
+	root := t.TempDir()
+	t.Cleanup(OverrideAccountEnvironmentForTest(filepath.Join(root, "system")))
+	t.Cleanup(func() {
+		parentLaunchd.Lock()
+		parentLaunchd.set = false
+		parentLaunchd.Unlock()
+	})
+	home := filepath.Join(root, "alice")
+	if err := os.MkdirAll(home, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	uid := os.Getuid()
+	UseParentLaunchdHermesHome(uid, filepath.Join(home, ".hermes-elsewhere"))
+	if got, err := ReadLaunchdHermesHome(uid); err != nil || got != filepath.Join(home, ".hermes-elsewhere") {
+		t.Fatalf("ReadLaunchdHermesHome = %q, %v", got, err)
+	}
+	if _, ok := parentLaunchdHermesHome(uid + 1); ok {
+		t.Fatal("the parent's read of one account was used for another")
+	}
+	if runtime.GOOS != "darwin" {
+		return // the launchd environment is evidence on macOS only
+	}
+	accountLaunchdHermesHome = launchdHermesHome
+	err := VerifyAccountHome(home, filepath.Join(home, ".hermes"), time.Time{})
+	if err == nil || !strings.Contains(err.Error(), "HERMES_HOME unproven") || !strings.Contains(err.Error(), "launchd environment") {
+		t.Fatalf("VerifyAccountHome = %v, want unproven naming the launchd environment", err)
+	}
+	UseParentLaunchdHermesHome(uid, "")
+	if err := VerifyAccountHome(home, filepath.Join(home, ".hermes"), time.Time{}); err != nil {
+		t.Fatalf("VerifyAccountHome with no launchd value = %v", err)
+	}
+}

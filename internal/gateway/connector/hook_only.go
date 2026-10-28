@@ -2894,13 +2894,19 @@ func hermesResolvedConfigPath(SetupOpts) (string, error) {
 // cannot resolve (hermespath.VerifyAccountHome), or a named profile Hermes
 // selects instead of the default one DefenseClaw set up (GAP-0499). A check
 // that passed on the default home or profile proved nothing about another
-// one Hermes runs from.
+// one Hermes runs from. The managed guardian checks the account's evidence
+// also when it verifies as the account itself (the Linux and macOS
+// verification worker runs with the account's own home), not only when it
+// acts for another account: the worker skipped it, so a persistent
+// HERMES_HOME redirect of the account passed verify, readiness and
+// reconcile (GAP-2374). A per-user check of the process's own home keeps
+// HERMES_HOME of its environment as the answer.
 func hermesVerifiedConfigPath(opts SetupOpts) (string, error) {
 	configPath, err := hermesResolvedConfigPath(opts)
 	if err != nil {
 		return "", fmt.Errorf("hermes hooks not verified: %w", err)
 	}
-	if home := activeUserHomeOverride(); HermesConfigPathOverride == "" && home != "" && (runtime.GOOS == "windows" || !isProcessUserHome(home)) {
+	if home := activeUserHomeOverride(); HermesConfigPathOverride == "" && home != "" && (runtime.GOOS == "windows" || opts.ManagedEnterprise || !isProcessUserHome(home)) {
 		hermesHome := filepath.Dir(configPath)
 		if err := hermespath.VerifyAccountHome(home, hermesHome, hermesHomeSetUpAt(opts.DataDir, hermesHome)); err != nil {
 			return "", fmt.Errorf("hermes hooks not verified: %w", err)
@@ -5992,16 +5998,6 @@ func copilotOldManagedCopyEntry(raw interface{}) bool {
 	return false
 }
 
-func appendUniqueMatcherHookGroup(raw interface{}, hookScript string, group map[string]interface{}) []interface{} {
-	list, _ := raw.([]interface{})
-	for _, item := range list {
-		if managedMatcherHookGroup(item, hookScript) {
-			return list
-		}
-	}
-	return append(list, group)
-}
-
 // removeJSONHookReferences removes DefenseClaw's handlers from an agent's
 // JSON hooks file. The file is the agent's (and the operator's), so teardown
 // for a user who never had one leaves it absent instead of writing "{}";
@@ -6360,20 +6356,6 @@ func isCopilotEventBoundShellCommand(command, hookScript string) bool {
 	command = strings.TrimSpace(command)
 	for _, event := range copilotCurrentHookEvents {
 		if command == copilotHookInvocationCommandForEvent("linux", event, hookScript) {
-			return true
-		}
-	}
-	return false
-}
-
-func managedMatcherHookGroup(raw interface{}, hookScript string) bool {
-	group, ok := raw.(map[string]interface{})
-	if !ok {
-		return false
-	}
-	hooks, _ := group["hooks"].([]interface{})
-	for _, hook := range hooks {
-		if managedHookCommandEntry(hook, hookScript) {
 			return true
 		}
 	}

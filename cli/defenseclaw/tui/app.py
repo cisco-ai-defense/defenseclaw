@@ -10729,6 +10729,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             width=width - 2 - _status_text_cells(text) - 5 if width > 0 else None,
         )
         rendered = f"{text}  [#444444]│[/]  {strip}" if strip else text
+        shortened = False
         if any(
             service.label not in strip
             for service in (status_model.gateway, status_model.watchdog, status_model.guardrail)
@@ -10741,9 +10742,20 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             narrow = render_status_with_hint(status_model, text, max(0, width - 2))
             if not _is_command_result(text) or _keeps_whole_text(narrow, text):
                 rendered = narrow
+            else:
+                # A failed command's "<command> failed (exit 2). Activity
+                # shows the output." filled the 80-column line, so Gateway,
+                # Watchdog and Guardrail went (GAP-0524). Say the same thing
+                # shorter until it fits whole beside them.
+                for shorter in _shorter_command_results(text):
+                    narrow = render_status_with_hint(status_model, shorter, max(0, width - 2))
+                    if _keeps_whole_text(narrow, shorter):
+                        rendered = narrow
+                        shortened = True
+                        break
         if self._config_error:
             rendered = f"[bold {TOKENS.accent_red}]{rich_escape(self._config_error)}[/]"
-        elif _is_command_result(text) and _status_text_fills_line(text, self.size.width):
+        elif not shortened and _is_command_result(text) and _status_text_fills_line(text, self.size.width):
             # A "Done: ..." fitted to the line lost its last cell to the "…"
             # of the cut-off health strip ("press i for readines…", GAP-2133).
             rendered = text
@@ -17080,6 +17092,26 @@ _COMMAND_RESULT_FOLLOW_S = 15.0
 
 def _is_command_result(text: object) -> bool:
     return bool(_COMMAND_RESULT_RE.match(str(text or "")))
+
+
+_FAILED_RESULT_RE = re.compile(r"^(?P<name>.+) failed \(exit (?P<code>\d+)\)\. Activity shows the output\.$")
+
+
+def _shorter_command_results(text: str) -> list[str]:
+    """Shorter ways to say a failed command result, longest first (GAP-0524).
+
+    "failed (exit N)" always stays; the pointer to Activity goes first, then
+    the end of a long command name.
+    """
+
+    match = _FAILED_RESULT_RE.match(text)
+    if not match:
+        return []
+    name, code = match["name"], match["code"]
+    tail = f" failed (exit {code})."
+    shorter = [f"{name} failed (exit {code}). See Activity.", f"{name}{tail}"]
+    shorter.extend(f"{name[:keep].rstrip()}…{tail}" for keep in range(len(name) - 1, 7, -1))
+    return shorter
 
 
 def _keeps_whole_text(rendered: str, text: str) -> bool:

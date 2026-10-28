@@ -23,6 +23,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"runtime/debug"
 	"sort"
 	"strings"
@@ -38,6 +39,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisepolicy"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"github.com/defenseclaw/defenseclaw/internal/hermespath"
 	"github.com/defenseclaw/defenseclaw/internal/inventory"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/unixidentity"
@@ -202,6 +204,11 @@ type enterpriseHookWorkerRequest struct {
 	// the cleanup fence pipes (enterprise_hooks_worker_fence_unix.go). The
 	// guardian sets it from cleanupFence.
 	CleanupFence bool `json:"cleanup_fence,omitempty"`
+	// LaunchdHermesHome is HERMES_HOME of the account's launchd user domain
+	// as the root guardian read it on macOS: the worker runs in the system
+	// bootstrap and cannot read that domain itself (GAP-2374). Unset when
+	// the guardian could not read it; the worker then reads its own domain.
+	LaunchdHermesHome *string `json:"launchd_hermes_home,omitempty"`
 	// cleanupFence is the guardian's side of those pipes; it never leaves
 	// the guardian.
 	cleanupFence *enterpriseForeignHookFenceSession
@@ -422,6 +429,9 @@ func enterpriseHookWorkerMain(ctx context.Context, stdin io.Reader, stdout, stde
 	}
 	if err := validateEnterpriseHookWorkerIdentity(request); err != nil {
 		return respond(enterpriseHookWorkerResponse{Error: err.Error()}, 4)
+	}
+	if request.LaunchdHermesHome != nil {
+		hermespath.UseParentLaunchdHermesHome(request.UID, *request.LaunchdHermesHome)
 	}
 	hardenEnterpriseHookWorkerProcess()
 	applyEnterpriseHookWorkerLimits()
@@ -1369,6 +1379,9 @@ func runEnterpriseHookWorker(
 	request.UID, request.GID = account.UID, account.GID
 	request.User, request.Home = account.User, account.Home
 	request.CleanupFence = request.cleanupFence != nil
+	if enterpriseHookWorkerReadsLaunchd() {
+		request.LaunchdHermesHome = enterpriseHookWorkerLaunchdHermesHome(account)
+	}
 	payload, err := json.Marshal(request)
 	if err != nil {
 		return enterpriseHookWorkerResponse{}, err
@@ -1524,6 +1537,25 @@ func runEnterpriseHookWorkerProcess(ctx context.Context, cmd *exec.Cmd, uid int)
 	gaveUp = true
 	enterpriseHookWorkersStuck.set(uid, true)
 	return true, nil
+// enterpriseHookWorkerReadsLaunchd says whether this guardian reads each
+// account's launchd user domain for its worker: a root guardian on macOS.
+// Replaceable in tests.
+var enterpriseHookWorkerReadsLaunchd = func() bool {
+	return runtime.GOOS == "darwin" && os.Geteuid() == 0
+}
+
+// enterpriseHookWorkerLaunchdHermesHome reads HERMES_HOME of the account's
+// launchd user domain for its worker (GAP-2374). When the domain cannot be
+// read the worker reads its own, as before. Replaceable in tests.
+var enterpriseHookWorkerLaunchdHermesHome = func(account enterpriseHookWorkerAccount) *string {
+	value, err := hermespath.ReadLaunchdHermesHome(account.UID)
+	if err != nil {
+		if enterpriseHookWorkerLog != nil {
+			fmt.Fprintf(enterpriseHookWorkerLog, "[hook-guardian] worker uid=%d: launchd environment unavailable: %v\n", account.UID, err)
+		}
+		return nil
+	}
+	return &value
 }
 
 // enterpriseHookWorkerGroupIDs resolves the account's primary and
