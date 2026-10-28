@@ -56,9 +56,9 @@ The agent appears under **Agents** with its mode. `defenseclaw doctor` passes th
 | Hooks; removal of older native telemetry | `$CODEX_HOME/config.toml` (default `~/.codex`) | `%CODEX_HOME%\config.toml` |
 | Hook program | `~/.defenseclaw/hooks/codex-hook.sh` | `%USERPROFILE%\.local\bin\defenseclaw-hook.exe` (one-line install) or `%LOCALAPPDATA%\DefenseClaw\HookRuntime\defenseclaw-hook.exe` (Setup installer) |
 | Connector credentials | `~/.defenseclaw/hooks` | `%USERPROFILE%\.defenseclaw\hooks` |
+| Proxy bypass for cloud credentials (managed Linux and macOS only) | `$CODEX_HOME/.env` (marked block; a per-user install writes none) | not written |
 
-On a managed computer these per-user files are not used. The hooks are in Codex's machine requirements file and run the administrator's hook program: `/etc/codex/requirements.toml` with `/opt/defenseclaw/bin/defenseclaw-hook` on Linux, `/etc/codex/requirements.toml` with `/opt/cisco/defenseclaw/bin/defenseclaw-hook` on macOS, and `C:\ProgramData\OpenAI\Codex\requirements.toml` with `C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw-hook.exe` on Windows.
-| Proxy bypass for cloud credentials | `$CODEX_HOME/.env` (managed, marked block) | not written |
+On a managed computer the per-user hook files above are not used. The hooks are in Codex's machine requirements file and run the administrator's hook program: `/etc/codex/requirements.toml` with `/opt/defenseclaw/bin/defenseclaw-hook` on Linux, `/etc/codex/requirements.toml` with `/opt/cisco/defenseclaw/bin/defenseclaw-hook` on macOS, and `C:\ProgramData\OpenAI\Codex\requirements.toml` with `C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw-hook.exe` on Windows.
 
 See the [Windows path reference](/docs/get-started/windows/paths-troubleshooting). Teardown restores the backup, or removes only DefenseClaw's entries.
 

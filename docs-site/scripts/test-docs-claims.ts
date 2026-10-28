@@ -1660,6 +1660,7 @@ const r105Rows: DocRow[] = [
   { gap: "GAP-2361", page: "enterprise/operations.mdx", has: ["On a managed standalone computer `/health` carries the `policy`", "`curl http://127.0.0.1:18970/health`, even under `sudo`, has no `policy` key", "sudo curl -s --unix-socket /opt/cisco/defenseclaw/run/hook.sock http://localhost/health"], lacks: ["The gateway stamps it on `/health` and `/status`"] },
   { gap: "GAP-2342", page: "get-started/first-run.mdx", has: ["You do not need `init` before `quickstart`.", "If `init` chose no agent and started the gateway, `quickstart --connector <name>` restarts the gateway so it loads the agent and writes its hooks."] },
   { gap: "GAP-0010", page: "connectors/kiro.mdx", section: "ACP guard", has: ["In enterprise managed mode an administrator enrolls each user, editor and agent with `defenseclaw-gateway enterprise acp enroll`, and the user runs the setup command it reports.", "Managed ACP is preview"], lacks: ["ACP editors are not supported in enterprise managed mode"] },
+  { gap: "GAP-2190", page: "connectors/codex.mdx", section: "Files DefenseClaw will modify", has: ["| Connector credentials | `~/.defenseclaw/hooks` | `%USERPROFILE%\\.defenseclaw\\hooks` | | Proxy bypass for cloud credentials (managed Linux and macOS only) | `$CODEX_HOME/.env` (marked block; a per-user install writes none) | not written |"] },
   { gap: "GAP-1536", page: "enterprise/mdm/intune-macos.mdx", has: ["| Upload script | Your edited copy of `defenseclaw-enterprise.sh`, with the config added |"], lacks: ["the wrapper is about"] },
 ];
 
@@ -2297,6 +2298,26 @@ describe('edge-connector IPv6 allowlist entries are written without brackets (GA
     assert.ok(source('edge-connector/tools/policy_compiler.py').includes("write the IPv6 literal without brackets"), 'policy compiler no longer refuses a bracketed IPv6 entry: re-check edge-connector pages');
     const bad = ['docs-site/content/docs/edge-connector/architecture.mdx', 'docs-site/content/docs/edge-connector/policies.mdx', 'edge-connector/README.md', 'edge-connector/INSTALL.md']
       .filter((f) => /bracketed globally scoped IPv6/.test(source(f).split(/\s+/).join(' ')));
+    assert.deepEqual(bad, []);
+  });
+});
+
+// GAP-2190: a table row placed after a paragraph renders as stray text, not a
+// row of the table above it. No page may start a table line right after prose.
+describe('no table row is detached from its table (GAP-2190)', () => {
+  it('every table line follows a blank line, another table line or an MDX comment', () => {
+    const files = execFileSync('git', ['ls-files', 'docs-site/content/docs'], { cwd: repo, encoding: 'utf8' }).split('\n').filter((f) => f.endsWith('.mdx'));
+    const bad: string[] = [];
+    for (const f of files) {
+      const lines = readFileSync(join(repo, f), 'utf8').split('\n');
+      let fence = false;
+      lines.forEach((line, i) => {
+        if (line.trimStart().startsWith('```')) fence = !fence;
+        if (fence || i === 0 || !line.trimStart().startsWith('|')) return;
+        const prev = lines[i - 1].trim();
+        if (prev && !prev.startsWith('|') && !/^\{\/\*.*\*\/\}$/.test(prev)) bad.push(`${f}:${i + 1}`);
+      });
+    }
     assert.deepEqual(bad, []);
   });
 });
