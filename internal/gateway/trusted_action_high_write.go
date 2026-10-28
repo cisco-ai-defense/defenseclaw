@@ -261,10 +261,17 @@ func provedHighWriteFindings(
 					return finding.RuleID == rule.ID
 				})
 				if index >= 0 {
-					// Existence alone never makes a finding enforceable.
+					// Existence alone never makes a finding enforceable. An
+					// authorized proof the finding already has stays: a
+					// proven mutation of DefenseClaw's own state is what
+					// observe mode blocks on (provenActiveStateMutation), and
+					// this exact target match must not replace it (GAP-2268,
+					// GAP-2298, GAP-2378: managed observe allowed the write).
 					if !alertOnly {
 						proved[index].enforcement = findingEnforcementAllowed
-						proved[index].proof = proof
+						if !proved[index].proof.authorizes(rule.ID) {
+							proved[index].proof = proof
+						}
 					}
 					if severity != rule.Severity {
 						proved[index].Severity = severity
