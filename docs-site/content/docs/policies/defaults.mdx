@@ -79,13 +79,18 @@ Without `--policy-name`, `policy edit` changes the live policy in `config.yaml`.
 ```text
 Available policies:
 
-    default [built-in]
+  * default [built-in] [active]
       Balanced security policy for standard deployments
     permissive [built-in]
       Permissive policy for development and testing
     strict [built-in]
       Maximum security policy for high-risk environments
+
+  Activate a policy: defenseclaw policy activate <name>
+  Show details:      defenseclaw policy show <name>
 ```
+
+`*` and `[active]` mark the active preset.
 
 ## Block and alert levels
 
