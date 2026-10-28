@@ -5479,17 +5479,34 @@ def test_a_rollback_makes_inherited_copies_of_the_settings_backup_private(tmp_pa
     # DACL"), so every later rollback or downgrade left two Claude Code
     # handlers. Those two files become private (same access, explicit); other
     # files in backups\ keep their permissions.
+    text = _text()
+    # Its C# here-string has its own "}" lines, so cut it up to the next function.
+    native = text[text.index("function Initialize-Native {") : text.index("function Update-UserPath(")]
     data = str(tmp_path / "data").replace("'", "''")
     script = f"""
 $ErrorActionPreference = 'Stop'
 $DataDir = '{data}'
 function Write-Warn([string]$m) {{ "WARN $m" }}
+{native}
 {_ps_functions("Set-DirectoryAcl", "Test-OwnedByCurrentUser")}
 {_ps1_function("Protect-BackupsFolder")}
 $backups = Join-Path $DataDir 'backups'
 New-Item -ItemType Directory -Path $backups -Force | Out-Null
 $names = @('claudecode-settings.before-rollback.json', 'claudecode-settings.before-rollback.witness.json', 'guardrail-profiles.json')
-foreach ($n in $names) {{ Set-Content -LiteralPath (Join-Path $backups $n) -Value '{{}}' }}
+# Elevated (the GitHub runner, an elevated console) a new file belongs to the
+# Administrators group. The installer creates its files as the user when it
+# runs elevated (SwapDefaultOwner), so the copies here are made the same way.
+Initialize-Native
+$me = [Security.Principal.WindowsIdentity]::GetCurrent().User
+$sid = New-Object byte[] $me.BinaryLength
+$me.GetBinaryForm($sid, 0)
+$previousOwner = [DefenseClawInstall.Native]::SwapDefaultOwner([DefenseClawInstall.Native]::NewOwner($sid))
+try {{
+    foreach ($n in $names) {{ Set-Content -LiteralPath (Join-Path $backups $n) -Value '{{}}' }}
+}} finally {{
+    if ($previousOwner -ne [IntPtr]::Zero) {{ [void][DefenseClawInstall.Native]::SwapDefaultOwner($previousOwner) }}
+}}
+foreach ($n in $names) {{ if (-not (Test-OwnedByCurrentUser (Join-Path $backups $n))) {{ throw "precondition: $n is not this account's own" }} }}
 foreach ($n in $names) {{ if ((Get-Acl -LiteralPath (Join-Path $backups $n)).AreAccessRulesProtected) {{ throw "precondition: $n is already private" }} }}
 Protect-BackupsFolder
 "DIR=$((Get-Acl -LiteralPath $backups).AreAccessRulesProtected)"
