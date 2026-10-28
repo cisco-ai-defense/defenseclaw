@@ -59,9 +59,9 @@ type hookRegistrationGoldenFile struct {
 var hookRegistrationGoldenSkipped = map[string]bool{}
 
 // The OpenCode user plugin is identical on both POSIX hosts. Check its
-// shared registration fixture on macOS too, where the all-connector Linux
-// golden test is skipped. The same UPDATE_GOLDEN command can regenerate
-// just this case without rewriting any other connector's fixture.
+// POSIX and Windows-rendered fixtures on macOS too, where the all-connector
+// Linux golden test is skipped. The same UPDATE_GOLDEN command regenerates
+// these cases without rewriting any other connector's fixture.
 func TestOpenCodeHookRegistrationMatchesSharedGolden(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("this case holds the POSIX user plugin")
@@ -87,22 +87,38 @@ func TestOpenCodeHookRegistrationMatchesSharedGolden(t *testing.T) {
 	}
 	matched := false
 	for i, expected := range golden.Cases {
-		if expected.Connector != "opencode" || expected.OS != "posix" {
+		if expected.Connector != "opencode" {
 			continue
 		}
 		matched = true
-		actual, ok := hookRegistrationSetupCase(t, conn, expected.Scope)
-		if !ok {
-			t.Fatal("OpenCode did not register its plugin")
-		}
-		if os.Getenv("DEFENSECLAW_UPDATE_GOLDEN") == "1" {
-			golden.Cases[i] = actual
-		} else if !reflect.DeepEqual(actual, expected) {
-			t.Fatalf("OpenCode %s registration is stale; regenerate with DEFENSECLAW_UPDATE_GOLDEN=1", expected.Scope)
-		}
+		t.Run(expected.OS+"-"+expected.Scope, func(t *testing.T) {
+			var actual hookRegistrationCase
+			var ok bool
+			if expected.OS == "posix" {
+				actual, ok = hookRegistrationSetupCase(t, conn, expected.Scope)
+			} else if expected.OS == "windows" {
+				for _, candidate := range windowsRegistrationCases(t) {
+					if candidate.Connector == "opencode" && candidate.Scope == expected.Scope {
+						actual, ok = candidate, true
+						break
+					}
+				}
+			}
+			if !ok {
+				t.Fatal("OpenCode did not register its plugin")
+			}
+			if os.Getenv("DEFENSECLAW_UPDATE_GOLDEN") == "1" {
+				golden.Cases[i] = actual
+			} else if !reflect.DeepEqual(actual, expected) {
+				t.Fatal("OpenCode registration is stale; regenerate with DEFENSECLAW_UPDATE_GOLDEN=1")
+			}
+		})
 	}
 	if !matched {
-		t.Fatal("the shared golden has no POSIX OpenCode registration")
+		t.Fatal("the shared golden has no OpenCode registration")
+	}
+	if t.Failed() {
+		return
 	}
 	if os.Getenv("DEFENSECLAW_UPDATE_GOLDEN") == "1" {
 		data, err := json.MarshalIndent(golden, "", "  ")

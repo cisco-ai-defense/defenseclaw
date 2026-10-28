@@ -190,16 +190,32 @@ try {
             # Removal with nothing installed is a no-op.
             Remove-DefenseClawStandaloneOpenCodeManagedPlugin -Layout $layout
 
-            # A v1-only deployment can be upgraded and uninstalled after the
-            # v2 index entrypoint is installed alongside its old artifact.
-            $upgraded = New-TestLayout 'plugin-v1-upgrade'
-            [void](New-Plugin $upgraded)
-            $upgradePaths = Get-DefenseClawStandaloneOpenCodePluginPaths -Layout $upgraded
-            [IO.File]::WriteAllText([string]$upgradePaths.LegacyPluginPath, '// old managed bridge')
-            Test-Accepted 'standalone tree with both managed plugin generations' $upgraded
-            Remove-DefenseClawStandaloneOpenCodeManagedPlugin -Layout $upgraded
-            if (Microsoft.PowerShell.Management\Test-Path -LiteralPath $upgradePaths.ShareDirectory) {
-                $failures.Add('the legacy managed OpenCode artifact survived uninstall')
+            # Uninstall after a V1 upgrade can reach the pre-finalization
+            # boundary with the old artifact alone or both generations. Both
+            # are accepted there and must be removed before retirement.
+            foreach ($withCurrentPlugin in @($false, $true)) {
+                $upgraded = New-TestLayout ('plugin-v1-upgrade-' + $withCurrentPlugin)
+                $upgradePaths = Get-DefenseClawStandaloneOpenCodePluginPaths -Layout $upgraded
+                [void][IO.Directory]::CreateDirectory([string]$upgradePaths.PluginDirectory)
+                if ($withCurrentPlugin) { [void](New-Plugin $upgraded) }
+                [IO.File]::WriteAllText([string]$upgradePaths.LegacyPluginPath, '// old managed bridge')
+                Test-Accepted 'standalone tree with the legacy managed plugin' $upgraded
+                try {
+                    Assert-DefenseClawInstallTreeRetirementState -Layout $upgraded -AllowUnretiredAcls
+                }
+                catch {
+                    $failures.Add("committed install-tree check refused the legacy OpenCode plugin before finalization: $($_.Exception.Message)")
+                }
+                $retiredAllowlist = Get-DefenseClawRetiredInstallTreeAllowlist `
+                    -Layout $upgraded `
+                    -RetiredRoot $upgraded.InstallRoot
+                if ([string]$upgradePaths.LegacyPluginPath -in $retiredAllowlist.files) {
+                    $failures.Add('the retired tree permits the legacy managed plugin after finalization')
+                }
+                Remove-DefenseClawStandaloneOpenCodeManagedPlugin -Layout $upgraded
+                if (Microsoft.PowerShell.Management\Test-Path -LiteralPath $upgradePaths.ShareDirectory) {
+                    $failures.Add('the legacy managed OpenCode artifact survived uninstall')
+                }
             }
 
             # GAP-0270: a 1.0.2 standalone install left lib\defenseclaw for
@@ -642,12 +658,17 @@ try {
                 Test-Refused 'symbolic link named like the socket (walk)' { Assert-DefenseClawManagedInstallTree -Layout $linkedIPC } 'reparse point'
                 Test-Refused 'symbolic link named like the socket (removal)' { Remove-DefenseClawStandaloneManagedIPCDirectory -Layout $linkedIPC } 'unexpected managed IPC content'
             }
-            $linkedPlugin = New-TestLayout 'linked-plugin'
-            $linkedDirectory = [IO.Path]::Combine($linkedPlugin.InstallRoot, 'share', 'opencode')
-            [void][IO.Directory]::CreateDirectory($linkedDirectory)
-            if (New-TestLink ([IO.Path]::Combine($linkedDirectory, 'index.js')) $target) {
-                Test-Refused 'symbolic link named like the plugin (walk)' { Assert-DefenseClawManagedInstallTree -Layout $linkedPlugin } 'reparse point'
-                Test-Refused 'symbolic link named like the plugin (removal)' { Remove-DefenseClawStandaloneOpenCodeManagedPlugin -Layout $linkedPlugin } 'not a plain file'
+            foreach ($name in @('index.js', 'defenseclaw.js')) {
+                $linkedPlugin = New-TestLayout ('linked-plugin-' + $name)
+                $linkedDirectory = [IO.Path]::Combine($linkedPlugin.InstallRoot, 'share', 'opencode')
+                [void][IO.Directory]::CreateDirectory($linkedDirectory)
+                if (New-TestLink ([IO.Path]::Combine($linkedDirectory, $name)) $target) {
+                    Test-Refused 'symbolic link named like the plugin (walk)' { Assert-DefenseClawManagedInstallTree -Layout $linkedPlugin } 'reparse point'
+                    Test-Refused 'symbolic link named like the plugin (committed check)' {
+                        Assert-DefenseClawInstallTreeRetirementState -Layout $linkedPlugin -AllowUnretiredAcls
+                    } 'reparse point'
+                    Test-Refused 'symbolic link named like the plugin (removal)' { Remove-DefenseClawStandaloneOpenCodeManagedPlugin -Layout $linkedPlugin } 'not a plain file'
+                }
             }
             if (-not [IO.File]::Exists($target)) {
                 $failures.Add('link target outside the tree was removed')

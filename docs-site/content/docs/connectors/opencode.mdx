@@ -24,8 +24,8 @@ existing v1 support remains unchanged.
 
 | Platform | Status | Notes |
 | --- | --- | --- |
-| macOS and Linux | **V1 supported; V2 preview** | The global bridge uses the V1 factory for `>=1.18.10,<1.19.0` and the V2 default plugin definition for `>=2.0.0,<2.2.0`. |
-| Native Windows x64 | **V1 supported; V2 preview** | Only direct native execution is supported. The reviewed official `@opencode/cli` V2 native package is recognized alongside V1. DefenseClaw admits the protected current-user `SST.opencode` WinGet executable or the native `opencode.exe` of the npm `opencode-ai` package. WSL is recommended by OpenCode but not required. Mixed WSL/native paths, other packages, Desktop sidecars and ARM64 are outside the contract. |
+| macOS and Linux | **Supported** | V1 is supported for `>=1.18.10,<1.19.0`. V2 is a preview for `>=2.0.0,<2.2.0`, with native validation currently limited to macOS arm64. |
+| Native Windows x64 | **Supported** | V1 supports direct native execution. V2 is a preview pending native Windows validation; the reviewed official `@opencode/cli` native package is recognized alongside V1. DefenseClaw admits the protected current-user `SST.opencode` WinGet executable or the native `opencode.exe` of the npm `opencode-ai` package. WSL is recommended by OpenCode but not required. Mixed WSL/native paths, other packages, Desktop sidecars and ARM64 are outside the contract. |
 
 ## Setup
 
@@ -88,7 +88,8 @@ them on plugin unload. The before callback detaches and deeply freezes the input
 and freezes the event before awaiting a verdict, so later hooks cannot replace
 the inspected tool or arguments. Session location and MCP identity come from
 bounded local host API calls. Invalid context fails closed, and action mode
-refuses ambiguous MCP identity. Transport outages retain the configured fail mode.
+refuses ambiguous MCP identity. See the [gateway outage table](/docs/connectors/capability-matrix#gateway-outage)
+for the behavior of each installation mode.
 
 V2 results preserve native `status`, structured `output`, `content` and metadata.
 An error is a failure. A shell result requires exit code zero for success;

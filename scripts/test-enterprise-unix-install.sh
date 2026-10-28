@@ -229,6 +229,21 @@ check() {
     exit_status_matches "$file" "$label"
 }
 
+# Previous 1.x releases may predate individual policy-view warnings. Accept
+# only warnings predicted from this host, without requiring older versions to
+# emit them. Candidate checks still require every predicted warning.
+check_previous() {
+    local argument
+    local previous_kernel_views=()
+    for argument in ${kernel_views[@]+"${kernel_views[@]}"}; do
+        case "$argument" in
+            --require-warning) previous_kernel_views+=(--allow-warning) ;;
+            *) previous_kernel_views+=("$argument") ;;
+        esac
+    done
+    check "$@" ${previous_kernel_views[@]+"${previous_kernel_views[@]}"}
+}
+
 # exit_status_matches <result-file> <label>: MDM scripts and remediation act
 # on the process exit status, not on the JSON, so the status run_lifecycle
 # kept beside the result must be 0 and equal the result's exit_code. Results
@@ -263,17 +278,17 @@ run_lifecycle() {
 }
 
 # launchd can deliver the path event from a config replacement after the next
-# step has started. Its redundant ensure is safe, but a read-only step's fixed 5s
+# step has started. Its redundant ensure is safe, but a lifecycle step's fixed 5s
 # lock wait may expire while that job holds the lifecycle lock (exit 75,
 # lifecycle_busy). Retry only this expected busy result, for at most three
 # minutes on macOS.
-retry_busy() { # step-name verb
+retry_busy() { # step-name verb [arguments...]
     [ "$kind" = pkg ] || return 0
     local deadline=$((SECONDS + 180))
     while [ "$(cat "$results/$1.rc")" = 75 ] && [ "$SECONDS" -lt "$deadline" ]; do
         "$python" -c 'import json,sys; r=json.load(open(sys.argv[1], encoding="utf-8-sig")); sys.exit(0 if any(e.get("code") == "lifecycle_busy" for e in r.get("errors", [])) else 1)' "$results/$1.json" || break
         sleep 2
-        lifecycle "$1" "$2"
+        lifecycle "$@"
     done
 }
 
@@ -649,21 +664,23 @@ upgrade_lane() {
     [ "$install_rc" -eq 0 ] || die "the package manager exited $install_rc installing $previous_version"
     # A bare install of a 1.x package enables no connector, like the fresh
     # install below; the next step applies the administrator config.
-    "$python" "$checker" "$results/01-previous-install.json" --label previous-install --platform "$platform" \
-        --action ensure --installed --version "$previous_version" --allow-warning no_connectors_enabled
+    check_previous "$results/01-previous-install.json" previous-install \
+        --action ensure --installed --version "$previous_version" --allow-warning no_connectors_enabled \
+        --allow-warning agent_install_scan_incomplete
 
     step "apply the administrator config on the previous release"
     write_admin_config
     lifecycle 02-previous-config ensure --from-package --config "$stage/config.yaml" --reason ci-upgrade-lane
-    check "$results/02-previous-config.json" previous-config --action ensure --installed --version "$previous_version" --ready \
-        --allow-warning unprivileged_user_namespaces "${policy_checks[@]}"
+    retry_busy 02-previous-config ensure --from-package --config "$stage/config.yaml" --reason ci-upgrade-lane
+    check_previous "$results/02-previous-config.json" previous-config --action ensure --installed --version "$previous_version" --ready \
+        --allow-warning hook_process_fail_open --allow-warning agent_install_scan_incomplete "${policy_checks[@]}"
     cp "$stage/config.yaml" "$results/config-before.yaml"
     step "store a protected credential on the previous release"
     seed_upgrade_secret 02-previous-secret
     lifecycle 03-previous-verify verify
     retry_busy 03-previous-verify verify
-    check "$results/03-previous-verify.json" previous-verify --action verify --installed --version "$previous_version" --ready \
-        --allow-warning unprivileged_user_namespaces
+    check_previous "$results/03-previous-verify.json" previous-verify --action verify --installed --version "$previous_version" --ready \
+        --allow-warning hook_process_fail_open --allow-warning agent_install_scan_incomplete
     lifecycle 04-previous-status status
     retry_busy 04-previous-status status
     previous_config_sha=$(sha256_of "$config")

@@ -28294,12 +28294,12 @@ function Assert-DefenseClawInstallTreeRetirementState {
         -RetiredRoot $root
     if ($AllowUnretiredAcls -and (Test-DefenseClawStandaloneProfile)) {
         # The pre-finalization check runs after commit but before managed-hook
-        # teardown. Admit only the exact OpenCode plugin still installed at
-        # that boundary; the later check and retired-tree cleanup require it
-        # to be gone.
+        # teardown. Admit only the exact current and supported V1 OpenCode
+        # artifacts still installed at that boundary; the later check and
+        # retired-tree cleanup require both to be gone.
         $plugin = Get-DefenseClawStandaloneOpenCodePluginPaths -Layout $Layout
         $allowlist.directories += @([string]$plugin.ShareDirectory, [string]$plugin.PluginDirectory)
-        $allowlist.files += [string]$plugin.PluginPath
+        $allowlist.files += @([string]$plugin.PluginPath, [string]$plugin.LegacyPluginPath)
     }
     Assert-DefenseClawManagedTreeNoReparse `
         -Root $root `
