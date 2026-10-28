@@ -110,6 +110,8 @@ The guardrail checks what your agent is about to do (a prompt, a shell command, 
   ]}
 />
 
+The picker's "never block" covers policy findings. Observe still blocks an agent that changes DefenseClaw's own files, such as a copy into `~/.defenseclaw` (rule `tamper.detector_state_write`; the permissive pack only reports it). See [Two modes](#two-modes-you-have-to-choose-between).
+
 ## Same setup, no prompts
 
 ```bash
