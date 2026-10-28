@@ -335,6 +335,15 @@ func actionQuotedHeredoc(text string, start int) (actionHeredoc, int, bool) {
 	quoted := false
 	for j < len(text) && strings.IndexByte(" \t\r\n;|&<>()", text[j]) < 0 {
 		switch c := text[j]; c {
+		case '$':
+			// $'EOF' (ANSI-C) and $"EOF" (locale) quoting: quote removal
+			// drops the $, so bash ends the body at the line EOF (RV3-1).
+			if j+1 < len(text) && (text[j+1] == '\'' || text[j+1] == '"') {
+				j++
+				continue
+			}
+			word.WriteByte(c)
+			j++
 		case '\'', '"':
 			end := strings.IndexByte(text[j+1:], c)
 			if end < 0 {
@@ -363,11 +372,14 @@ func actionQuotedHeredoc(text string, start int) (actionHeredoc, int, bool) {
 
 // actionSkipHeredocBodies returns the offset after the delimiter line of
 // each pending here-document, read in order from start (the line after the
-// operator). A body without its delimiter runs to the end of the text.
+// operator). When a delimiter line is never found (a malformed here-document
+// or a delimiter spelling this reading does not model) it returns start, so
+// the rest stays scanned: over-block, never under-block (RV3-1).
 func actionSkipHeredocBodies(text string, start int, docs []actionHeredoc) int {
 	pos := start
 	for _, doc := range docs {
-		for pos < len(text) {
+		found := false
+		for pos < len(text) && !found {
 			end := strings.IndexByte(text[pos:], '\n')
 			next := len(text)
 			line := text[pos:]
@@ -379,9 +391,10 @@ func actionSkipHeredocBodies(text string, start int, docs []actionHeredoc) int {
 				line = strings.TrimLeft(line, "\t")
 			}
 			pos = next
-			if line == doc.delim {
-				break
-			}
+			found = line == doc.delim
+		}
+		if !found {
+			return start
 		}
 	}
 	return pos

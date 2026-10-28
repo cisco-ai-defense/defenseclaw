@@ -25,9 +25,10 @@ func TestR105WindowsQuotedHeredocIsText(t *testing.T) {
 		{"cat > deploy.sh <<\\EOF\nKEY=$(cat ~/.ssh/id_ed25519)\nEOF", false},
 		{"cat > deploy.sh <<-'EOF'\n\tKEY=$(cat ~/.ssh/id_ed25519)\n\tEOF\necho done", false},
 		{"cat > deploy.sh <<E\"O\"F\r\nKEY=$(cat ~/.ssh/id_ed25519)\r\nEOF\r\n", false},
-		{"cat > notes.txt <<'EOF'\n$(cat ~/.ssh/id_rsa)", false},
 		{"cat > a <<'A' > b <<'B'\n$(cat ~/.ssh/id_rsa)\nA\n$(cat ~/.ssh/id_ed25519)\nB", false},
 		{"Write-Output \"`$(Get-Content ~/.ssh/id_ed25519)\"", false},
+		{"cat > d.sh <<$'EOF'\n$(cat ~/.ssh/id_ed25519)\nEOF", false},
+		{"cat > d.sh <<$\"EOF\"\nKEY=$(cat ~/.ssh/id_ed25519)\nEOF\necho ok", false},
 		// Still key reads.
 		{"cat > deploy.sh <<EOF\nKEY=$(cat ~/.ssh/id_ed25519)\nEOF", true},
 		{"cat > notes.txt <<'EOF'\nhello\nEOF\necho \"$(cat ~/.ssh/id_rsa)\"", true},
@@ -36,6 +37,13 @@ func TestR105WindowsQuotedHeredocIsText(t *testing.T) {
 		{"# cat <<'EOF'\necho $(cat ~/.ssh/id_rsa)\nEOF", true},
 		{"echo \"<<'EOF'\"\necho $(cat ~/.ssh/id_rsa)\nEOF", true},
 		{"cat <<< \"$(cat ~/.ssh/id_rsa)\"", true},
+		// RV3-1: ANSI-C/locale-quoted delimiters end at the unquoted word, and a
+		// delimiter line that is never found keeps the rest scanned.
+		{"cat > d.sh <<$'EOF'\nhello\nEOF\necho $(cat ~/.ssh/id_ed25519)", true},
+		{"cat > d.sh <<$'EOF'\nhello\nEOF\necho \"$(cat ~/.ssh/id_ed25519)\"", true},
+		{"cat > d.sh <<$\"EOF\"\nhello\nEOF\necho $(cat ~/.ssh/id_ed25519)", true},
+		{"cat > d.sh <<$'E\\x4fF'\nhello\nEOF\necho $(cat ~/.ssh/id_ed25519)", true},
+		{"cat > notes.txt <<'EOF'\n$(cat ~/.ssh/id_rsa)", true},
 		{"echo `date` $(cat ~/.ssh/id_rsa)", true},
 		{"Write-Output \"a`nb $(Get-Content ~/.ssh/id_ed25519)\"", true},
 	} {
