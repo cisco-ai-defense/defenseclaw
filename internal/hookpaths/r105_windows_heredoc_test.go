@@ -80,6 +80,23 @@ func TestR105WindowsQuotedHeredocIsText(t *testing.T) {
 		{"Write-Output a<<b; Write-Output (Get-Content .\\notes.txt)", false},
 		{"${a<<b} = 1; Write-Output ${a<<b}", false},
 		{"echo ${x:-a}; cat > notes.txt <<'EOF'\n$(cat ~/.ssh/id_rsa)\nEOF", false},
+		// RV7-1: $$ is one variable token, so the { after it opens a script
+		// block that ForEach-Object runs, not a braced variable name.
+		{"1 | ForEach-Object $${Write-Output (Get-Content ~/.ssh/id_ed25519)}", true},
+		{"1 | % -Process $${Write-Output (Get-Content ~/.ssh/id_ed25519)}", true},
+		{"1 | ForEach-Object $$$${Write-Output (Get-Content ~/.ssh/id_ed25519)}", true},
+		{"Write-Output $$; Write-Output $${x}; Get-ChildItem", false},
+		{"Write-Output $$${a<<b}; Write-Output (Get-Content .\\notes.txt)", false},
+		// GAP-2409: a provider-qualified braced variable reads the file.
+		{`Write-Output ${C:\Users\u\.ssh\id_ed25519}`, true},
+		{`(${C:\Users\u\.ssh\id_ed25519})`, true},
+		{`$k = ${C:\Users\u\.ssh\id_ed25519}; $k`, true},
+		{`Write-Output "${C:\Users\u\.ssh\id_ed25519}"`, true},
+		{`Write-Output ${c:/Users/u/.ssh/id_rsa}`, true},
+		{`Write-Output ${C:\Users\u\proj\notes.txt}`, false},
+		{`Write-Output ${env:USERPROFILE}; Write-Output "${env:HOME}\.ssh"`, false},
+		{`${script:k} = 1; Write-Output ${global:k}`, false},
+		{`Write-Output '${C:\Users\u\.ssh\id_ed25519}'`, false},
 	} {
 		if got := ActionPrivateKeyRead(tc.command, cwd, home); got != tc.want {
 			t.Errorf("ActionPrivateKeyRead(%q) = %t, want %t", tc.command, got, tc.want)

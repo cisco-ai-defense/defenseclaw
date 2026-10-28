@@ -234,6 +234,16 @@ func actionWindowsExpressionBodies(text string, plain, hereBody bool, bodies []s
 				stack = append(stack, frame{open: i + 2, quote: '"', quoteHere: quoteHere})
 				quote, quoteHere = 0, false
 				i++
+			case !plain && c == '$' && i+1 < len(text) && text[i+1] == '$':
+				i++
+			case !plain && c == '$' && i+1 < len(text) && text[i+1] == '{':
+				// "${C:\Users\me\.ssh\id_ed25519}" reads the file
+				// through the FileSystem provider (GAP-2409).
+				if end := actionWindowsBracedVariableEnd(text, i+2); end > 0 {
+					if body, ok := actionWindowsProviderPathRead(text[i+2 : end]); ok {
+						bodies = append(bodies, body)
+					}
+				}
 			}
 			continue
 		}
@@ -290,11 +300,23 @@ func actionWindowsExpressionBodies(text string, plain, hereBody bool, bodies []s
 			i += end - 1
 			continue
 		}
+		if !plain && c == '$' && i+1 < len(text) && text[i+1] == '$' {
+			// $$ is one variable token: a { after it opens a script
+			// block, not a braced variable name, and ForEach-Object $${...}
+			// runs that block (RV7-1).
+			i++
+			continue
+		}
 		if !plain && c == '$' && i+1 < len(text) && text[i+1] == '{' {
 			// A PowerShell braced variable name (${a<<b}, ${a'b}) is
 			// text up to its first unescaped }; nothing in it is
-			// evaluated. An unterminated one is scanned on (RV6-1).
+			// evaluated. An unterminated one is scanned on (RV6-1). A
+			// provider-qualified name (${C:\Users\me\.ssh\id_ed25519})
+			// reads that item's content (GAP-2409).
 			if end := actionWindowsBracedVariableEnd(text, i+2); end > 0 {
+				if body, ok := actionWindowsProviderPathRead(text[i+2 : end]); ok {
+					bodies = append(bodies, body)
+				}
 				i = end
 				continue
 			}
@@ -501,6 +523,35 @@ func actionWindowsBracedVariableEnd(text string, from int) int {
 		}
 	}
 	return -1
+}
+
+// actionWindowsProviderPathRead returns "get-content '<path>'" (double
+// quotes when the path has an apostrophe) for a
+// PowerShell braced variable name that is a provider path (${C:\f},
+// ${Temp:\f}, ${c:f}): PowerShell reads the variable from that drive, so a
+// FileSystem drive yields the file's content. Scope modifiers and the
+// env, variable, function and alias drives name no file.
+func actionWindowsProviderPathRead(name string) (string, bool) {
+	colon := strings.IndexByte(name, ':')
+	if colon <= 0 || colon+1 >= len(name) {
+		return "", false
+	}
+	switch strings.ToLower(name[:colon]) {
+	case "global", "local", "script", "private", "using", "workflow",
+		"env", "variable", "function", "alias":
+		return "", false
+	}
+	path := strings.ReplaceAll(strings.ReplaceAll(name, "``", "\x00"), "`", "")
+	path = strings.ReplaceAll(path, "\x00", "`")
+	switch {
+	case strings.ContainsAny(path, "\r\n"):
+		return "", false
+	case !strings.Contains(path, "'"):
+		return "get-content '" + path + "'", true
+	case !strings.ContainsAny(path, "\"$`"):
+		return "get-content \"" + path + "\"", true
+	}
+	return "", false
 }
 
 // actionPlainBacktickClosed reports whether a Git Bash backtick command
