@@ -2289,3 +2289,14 @@ describe('managed ACP wording and MDM kit size claims (GAP-0010, GAP-1536)', () 
     assert.deepEqual(bad, []);
   });
 });
+
+// GAP-2331: the edge-connector allowlist takes IPv6 literals without brackets;
+// policy_compiler.py refuses a bracketed entry, so no page or README may ask for one.
+describe('edge-connector IPv6 allowlist entries are written without brackets (GAP-2331)', () => {
+  it('compiler refuses brackets and no page or README asks for them', () => {
+    assert.ok(source('edge-connector/tools/policy_compiler.py').includes("write the IPv6 literal without brackets"), 'policy compiler no longer refuses a bracketed IPv6 entry: re-check edge-connector pages');
+    const bad = ['docs-site/content/docs/edge-connector/architecture.mdx', 'docs-site/content/docs/edge-connector/policies.mdx', 'edge-connector/README.md', 'edge-connector/INSTALL.md']
+      .filter((f) => /bracketed globally scoped IPv6/.test(source(f).split(/\s+/).join(' ')));
+    assert.deepEqual(bad, []);
+  });
+});
