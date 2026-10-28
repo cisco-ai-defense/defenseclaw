@@ -1759,8 +1759,28 @@ func addWindowsEnterpriseUserStateWarning(result *enterprisestatus.Result, repor
 			len(pathEntryKept), windowsEnterpriseBoundedLabels(pathEntryKept)))
 	}
 	if len(remaining) > 0 {
-		result.AddError("per_user_state_remaining", windowsEnterpriseUserStateRemainingMessage(len(remaining), windowsEnterpriseBoundedLabels(remaining)))
+		result.AddError("per_user_state_remaining", windowsEnterpriseUserStateRemainingMessage(
+			len(remaining), windowsEnterpriseBoundedLabels(remaining), windowsEnterprisePurgeRerunFindsAccounts(report)))
 	}
+}
+
+// windowsEnterprisePurgeManifestExists is replaceable in tests.
+var windowsEnterprisePurgeManifestExists = func(path string) bool {
+	_, err := os.Lstat(path)
+	return !errors.Is(err, os.ErrNotExist)
+}
+
+// windowsEnterprisePurgeRerunFindsAccounts reports whether a second
+// /uninstall PURGE=1 can still find the enrolled accounts a failed purge
+// left: it reads them from StateRoot's hook target manifest, which the
+// machine-state purge removes (GAP-2307). A report without a StateRoot keeps
+// the rerun advice.
+func windowsEnterprisePurgeRerunFindsAccounts(report *windowsEnterpriseInstallerReport) bool {
+	stateRoot := strings.TrimSpace(report.StateRoot)
+	if stateRoot == "" {
+		return true
+	}
+	return windowsEnterprisePurgeManifestExists(filepath.Join(stateRoot, "hook-guardian", "targets.yaml"))
 }
 
 // addWindowsEnterpriseMachineStateWarning names the machine folders outside

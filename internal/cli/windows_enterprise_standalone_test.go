@@ -4085,3 +4085,46 @@ func TestWindowsEnterpriseEnsureDeadlineFollowsSetupTimeoutSeconds(t *testing.T)
 		}
 	}
 }
+
+// GAP-2307: a purge that removed the target manifest and then failed on a
+// held per-user file must not advise a rerun that finds no account; it names
+// the folders to delete by hand. While the manifest stays, the rerun advice
+// stays.
+func TestWindowsEnterprisePurgeUserStateRemainingAfterTheManifestWentNamesTheFoldersToDelete(t *testing.T) {
+	restore := windowsEnterprisePurgeManifestExists
+	t.Cleanup(func() { windowsEnterprisePurgeManifestExists = restore })
+	stateRoot := filepath.Join(t.TempDir(), "DefenseClaw")
+	remaining := json.RawMessage(`["S-1-5-21-1-2-3-1017: C:\\Users\\u1\\.defenseclaw: RemoveAll held.log: in use"]`)
+	for _, tc := range []struct {
+		name      string
+		manifest  bool
+		stateRoot string
+		wantRerun bool
+	}{
+		{name: "manifest removed", manifest: false, stateRoot: stateRoot, wantRerun: false},
+		{name: "manifest kept", manifest: true, stateRoot: stateRoot, wantRerun: true},
+		{name: "no state root", manifest: false, stateRoot: "", wantRerun: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var asked string
+			windowsEnterprisePurgeManifestExists = func(path string) bool { asked = path; return tc.manifest }
+			result := enterprisestatus.Result{}
+			report := &windowsEnterpriseInstallerReport{StateRoot: tc.stateRoot, UserStateRemaining: remaining}
+			addWindowsEnterpriseUserStateWarning(&result, report)
+			if len(result.Errors) != 1 || result.Errors[0].Code != "per_user_state_remaining" {
+				t.Fatalf("errors = %+v", result.Errors)
+			}
+			message := result.Errors[0].Message
+			rerun := strings.Contains(message, "then run /uninstall PURGE=1 again as LocalSystem")
+			byHand := strings.Contains(message, "delete each folder named below by hand") &&
+				strings.Contains(message, "no longer finds them") &&
+				strings.Contains(message, "Do not delete a folder kept for the account's agent registrations")
+			if rerun != tc.wantRerun || byHand == tc.wantRerun || !strings.Contains(message, `.defenseclaw`) {
+				t.Fatalf("message = %q", message)
+			}
+			if tc.stateRoot != "" && asked != filepath.Join(stateRoot, "hook-guardian", "targets.yaml") {
+				t.Fatalf("manifest probe = %q", asked)
+			}
+		})
+	}
+}
