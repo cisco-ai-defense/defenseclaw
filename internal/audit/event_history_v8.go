@@ -1342,6 +1342,8 @@ func projectedCompatibilityDetails(projection observabilityredaction.Projection,
 			{"defenseclaw.scan.finding_count", "findings"},
 			{"defenseclaw.scan.severity_max", "max_severity"},
 			{"defenseclaw.scan.verdict", "verdict"},
+			// The judge model the scan ran with (GAP-2435).
+			{"gen_ai.request.model", "judge"},
 		} {
 			if value, present := payload[field.key]; present && value != nil && fmt.Sprint(value) != "" {
 				label += " " + field.name + "=" + fmt.Sprint(value)
