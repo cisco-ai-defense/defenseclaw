@@ -360,7 +360,31 @@ actually protected. See [Opt-in protection packs](/docs/reference/cli),
 
 DefenseClaw also protects its saved installer (`~/.defenseclaw/installer/` and `~/.defenseclaw/previous/installer/`): with the default and strict rule packs, an agent that writes, truncates or deletes it is blocked in every mode, like `config.yaml`. The permissive pack rates this rule HIGH and blocks only CRITICAL, so with it such a write to the saved installer or `config.yaml` is reported, not blocked, in both modes. Reading or running the saved installer stays allowed.
 
-With the balanced (default) rule pack, action mode blocks CRITICAL findings; instruction-file writes are HIGH, so they are reported, not blocked, unless `guardrail.block_at` is `HIGH` or the strict pack is used.
+With the balanced (default) rule pack, action mode blocks CRITICAL findings; instruction-file writes are HIGH, so they are reported, not blocked, unless the session loaded the file or found it at its start ([Instruction files](#instruction-files)), `guardrail.block_at` is `HIGH` or the strict pack is used.
+
+## Action-mode rule details
+
+### Protected SSH keys
+
+In action mode a plain read of the active user's `authorized_keys` is allowed: `cat`, `head`, `tail`, `less`, `ls`, `stat`, `grep`, `egrep`, `fgrep`, `wc` and `ssh-keygen -l` (list mode only), and on Windows `type`, `findstr` and `Select-String`, Git Bash included. A shell wrapper that only reports `$?` after the read does not change that. Any other use is a protected write and is blocked: a redirect, a pipe into a command that writes, an in-place flag, `ssh-keygen -R`, `tee`, or the file as a copy source. Reads through an interpreter, `diff | head` and a nested `sh -c` stay blocked. In observe mode the write raises the CRITICAL would-block alert and runs.
+
+A read of a private key under `~/.ssh` is blocked in action mode (`PATH-SSH-KEY`) whichever program prints it, not only `cat`. A key read also includes a stdin redirect (`xxd < ~/.ssh/id_ed25519`), a recursive read of the key directory (`grep -r`, `rg`, or `Get-ChildItem` piped into `Select-String`) and `python -c`, `node -e`, `perl -e` or `ruby -e` code that opens the key. A named file that is not a key (`grep -r Host ~/.ssh/config`), a `.pub` file and a listing are not key reads.
+
+### Instruction files
+
+A write to an instruction file (`CLAUDE.md`, `AGENTS.md` and similar) that the session loaded, or found at its start, proved by the file's identity, is CRITICAL. In action mode the default and strict packs block it with no change to `block_at`. The permissive pack keeps it at HIGH and reports it. Observe mode records it. A file the session created is the session's own and is not blocked, even after the agent loads it. A file known only by its name, or by existing now with no startup record, is a warning with an audit row in the default and permissive packs, and the strict pack blocks it. A file with several instruction names is judged by the rule of every name.
+
+### Database rules
+
+A comment does not hide destructive SQL from `database-destruction-protection`. DefenseClaw removes `--` and `/* */` comments before the match, and MySQL and MariaDB `#` comments, nested block comments on PostgreSQL and SQL Server, and a bare carriage return that ends a line comment. On MySQL and MariaDB a block comment ends at the first `*/` and the body of an executable comment (`/*! ... */`) is read as SQL. A form whose meaning depends on the engine, or that is unterminated or unbalanced, gives no fact and is not blocked. `snowsql` is a covered client with `psql`, `mysql`, `mariadb` and `sqlcmd`: its inline `-q` or `--query` statement is read, and so are the `-o` and `--option` options, so the usual automation form is covered. A query file (`-f`) is not inline SQL. In the shipped profiles a destructive `snowsql` statement raises the same alert-only `impact.sql_destructive_mutation` alert as the other clients.
+
+### Personal data rules
+
+The card-number rules skip digits that follow a decimal point, so a float in a JSON file is not a card. `ENT-PHONE-E164` skips the plus that starts an added line of a diff and a date after a plus. `ENT-EMAIL-BULK` alerts on an address in a URL path or query value on another host, a scheme-less URL, `host:path` and a UNC path. It skips an address in a local path (`/`, `~/`, `./`, `../`, a drive path, `file:///`), also after a redirect, a parenthesis, a glued option or a shell variable.
+
+### CodeGuard
+
+CodeGuard scans PowerShell (`.ps1`, `.psm1`), batch (`.bat`, `.cmd`), `.bash`, `.zsh`, `.mjs`, `.cjs`, `.jsx` and `.tsx` files as code, so a `.ps1` write with a path traversal is seen on the hook path. `CG-PATH-001` reads path operations. It does not fire on a relative `import`, `require` or `#include` of a sibling module or on an ellipsis in prose, and `..\temp`, `....//` and other traversal forms still fire.
 
 ## Rule files
 

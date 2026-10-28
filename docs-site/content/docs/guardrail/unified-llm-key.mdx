@@ -299,6 +299,8 @@ Both routing layers consume `DEFENSECLAW_LLM_KEY` plus the model prefix on the c
 | Skill scanner second opinion | LiteLLM (Python SDK) | `scanners.skill_scanner.llm.model` prefix |
 | MCP scanner introspection | LiteLLM | `scanners.mcp_scanner.llm.model` prefix |
 
+The scanners run on the LiteLLM 1.103 release line that DefenseClaw bundles.
+
 Local providers (`ollama/`, `vllm/`, `lm_studio/`) need no key: `keys list` never marks `DEFENSECLAW_LLM_KEY` `REQUIRED` for them and `keys check` passes without it. While the guardrail is on, the `DEFENSECLAW_LLM_KEY` row still reads `OPTIONAL` (it shows the setting exists, nothing needs it); with the guardrail off it reads `NOT_USED`. A local judge's `JUDGE_API_KEY` row reads `NOT_USED`.
 
 ## Bifrost provider catalog
@@ -482,7 +484,9 @@ defenseclaw setup llm \
 
 A later `setup llm --provider` with another provider (for example
 `anthropic` or `bedrock`) and no `--instance-name` drops the instance
-binding, so the role stops using the custom instance.
+binding, so the role stops using the custom instance. The setup wizard does the same when you pick a catalog provider, `setup guardrail --judge-provider <other>` without `--judge-instance-name` drops the judge's instance, and a role that names its own provider with no instance does not inherit the top-level instance.
+
+`provider: custom` is not a provider family. With a bound instance, the gateway, the judge and the scanners use the instance's provider family and its regional sub-block, so a keyless Bedrock instance runs the skill scanner's LLM analyzer. `llm.bedrock.inference_profile` applies to the scanners' model as well, so a model that is callable only through a profile, such as Claude Haiku 4.5, works from the scanners.
 
 The judge can point at a *different* instance than the top-level LLM
 without copy-pasting:

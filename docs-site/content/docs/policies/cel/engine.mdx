@@ -129,6 +129,8 @@ These bounds apply before connector action mapping. Exceeding an admission
 limit rejects the candidate; exceeding a runtime limit takes that owner to its
 fallback without stopping unrelated rules.
 
+`validate-pack` names only `exists()` and `all()` in a refusal, the two comprehensions it admits. A rule nested too deeply is refused with `it nests exists() and all() too deeply; flatten the check or split it into separate rules`. A rule over the static cost limit is refused with `estimated worst-case evaluation cost is above the per-rule limit` and the advice to test one list, prefer `==`, `in` or `startsWith` over `contains` or `matches` inside a nested comprehension, or split the check into separate rules.
+
 The 512-byte CEL regex limit caps its size. The static cost limit can reject a shorter pattern; check the whole rule with `defenseclaw guardrail validate-pack`.
 
 ## Runtime results
