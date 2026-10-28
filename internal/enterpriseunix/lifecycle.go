@@ -386,7 +386,13 @@ func Run(ctx context.Context, env *Env, opts Options) *enterprisestatus.Result {
 		opts:   opts,
 		result: enterprisestatus.New(opts.Action, managed.ProfileStandalone, env.GOOS, env.ProductVersion),
 	}
+	env.dirFlagsCleared = func(path, flags string) {
+		if opts.Action == ActionEnsure || opts.Action == ActionRepair {
+			l.result.Changes = append(l.result.Changes, fmt.Sprintf("cleared the macOS %s flag of %s, which stopped DefenseClaw from managing the folder", flags, path))
+		}
+	}
 	failure := l.run(ctx)
+	env.dirFlagsCleared = nil
 	// A no-op ensure and a committed change report the same observed host
 	// limits as status and verify. They do not change these kernel settings.
 	if l.result.Installed && opts.Action != ActionStatus && opts.Action != ActionVerify && opts.Action != ActionUninstall {

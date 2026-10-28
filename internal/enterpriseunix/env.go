@@ -210,6 +210,13 @@ type Env struct {
 	Lchown func(path string, uid, gid int) error
 	// OwnerOf reports a path's uid and gid without following a symlink.
 	OwnerOf func(path string) (int, int, error)
+	// clearDirFlags clears the macOS immutable and append-only flags of a
+	// folder and names the ones it found ("uchg,schg"; "" when none were
+	// set), also when clearing them failed. Tests replace it.
+	clearDirFlags func(path string) (string, error)
+	// dirFlagsCleared is told when ensureDir cleared such a flag; a
+	// lifecycle run lists it among its changes.
+	dirFlagsCleared func(path, flags string)
 	// Fchown changes the owner of an open file: the state folders the service
 	// account can write are re-owned through descriptors (settleStateModes).
 	Fchown func(f *os.File, uid, gid int) error
@@ -368,6 +375,9 @@ func (e *Env) fillDefaults() {
 	}
 	if e.Lchown == nil {
 		e.Lchown = os.Lchown
+	}
+	if e.clearDirFlags == nil {
+		e.clearDirFlags = clearBlockingFlags
 	}
 	if e.Fchown == nil {
 		e.Fchown = func(f *os.File, uid, gid int) error { return f.Chown(uid, gid) }
