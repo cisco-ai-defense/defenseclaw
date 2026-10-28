@@ -258,6 +258,7 @@ func dispatchTrustedAction(
 	if _, ok := managedHookPeerFromContext(parent); ok {
 		request.ProtectedHomeHook = true
 	}
+	request.Input.ActiveStateTreeNames = clientStateTreeNames(request.ResolvedWriteTargets)
 	var (
 		facts     actionfacts.Facts
 		analyzed  bool

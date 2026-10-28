@@ -2543,7 +2543,7 @@ func matchesActiveDefenseClawState(
 	facts actionfacts.Facts,
 	candidate actionfacts.PathFact,
 ) bool {
-	return matchesActiveDefenseClawStateInLine(facts, candidate, nil, nil)
+	return matchesActiveDefenseClawStateInLine(facts, candidate, nil, facts.ActiveStateTreeNames)
 }
 
 // matchesActiveDefenseClawStateInLine is matchesActiveDefenseClawState

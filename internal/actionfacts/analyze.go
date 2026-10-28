@@ -17,6 +17,7 @@
 package actionfacts
 
 import (
+	"maps"
 	"path"
 	"strings"
 	"unicode"
@@ -285,6 +286,7 @@ func analyze(input Input, twinCommand string, capture *redirectTargetCapture) Fa
 	facts.ActiveAgentFilesCaseInsensitiveUncertain =
 		input.ActiveAgentFilesCaseInsensitiveUncertain
 	facts.ActiveAgentFilesUncertain = input.ActiveAgentFilesUncertain
+	facts.ActiveStateTreeNames = maps.Clone(input.ActiveStateTreeNames)
 	classifyCanonicalPasswordCrackerPotfileRead(&facts)
 	facts.SensitiveEgressArtifactWrites =
 		projectSensitiveEgressArtifactWrites(input)

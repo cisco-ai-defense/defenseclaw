@@ -160,6 +160,24 @@ func activeStateTreeHasName(root, pattern string, fold bool) bool {
 	return false
 }
 
+// clientStateTreeNames keeps the hook client's state-tree name answers
+// (hookpaths.StateTreeNameKey) of a resolved target map, so every check of
+// the action's facts, the semantic owners included, reads them
+// (actionfacts.Input.ActiveStateTreeNames, GAP-2404 pod check21).
+func clientStateTreeNames(targets map[string]string) map[string]string {
+	var names map[string]string
+	for key, value := range targets {
+		if !strings.HasPrefix(key, hookpaths.StateTreeNamePrefix) {
+			continue
+		}
+		if names == nil {
+			names = map[string]string{}
+		}
+		names[key] = value
+	}
+	return names
+}
+
 // activeStateTreeHasNameFor is activeStateTreeHasName with the hook
 // client's answer (hookpaths.StateTreeHasName, read as the user) used
 // first: a managed gateway cannot read the home, so its own index counts

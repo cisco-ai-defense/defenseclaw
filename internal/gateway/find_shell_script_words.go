@@ -801,6 +801,91 @@ func findStripSiblingsStayOff(request trustedActionRequest, root string) bool {
 	return hookpaths.StateRootSiblings(root) == "0"
 }
 
+// findStripStdinFilters read their standard input and print to standard
+// output when they name no file: the sink of a find's output
+// (`... | head`, `| tail -1`, `| wc -l`, GAP-2404 pod check21).
+var findStripStdinFilters = map[string]struct{}{
+	"head": {}, "tail": {}, "wc": {}, "sort": {}, "uniq": {}, "grep": {}, "cat": {},
+}
+
+// findStripStdinFilterStaysOff reports a findStripStdinFilters command with
+// a complete argv, no wrapper, no path fact and no word that names a file
+// it would read or write: only options (and, for grep, one pattern), so it
+// creates no file the find could hand on and answers no prompt from a file.
+// sort -o/-T/--compress-program and a uniq output operand write; a word
+// with a path separator, a leading ~ or $, or a file option is refused.
+func findStripStdinFilterStaysOff(facts actionfacts.Facts, command actionfacts.CommandFact) bool {
+	program := strings.ToLower(command.Program)
+	if _, filter := findStripStdinFilters[program]; !filter || len(command.Wrappers) != 0 ||
+		command.Effect != actionfacts.EffectExecute || !command.ArgvComplete || len(command.Argv) == 0 ||
+		strings.ToLower(path.Base(command.Argv[0])) != program {
+		return false
+	}
+	for _, candidate := range facts.Paths {
+		if candidate.CommandID == command.ID {
+			return false
+		}
+	}
+	patternSeen := false
+	options := true
+	for index := 1; index < len(command.Argv); index++ {
+		word := command.Argv[index]
+		if strings.ContainsAny(word, "/\\$`~") || strings.HasPrefix(word, "@") {
+			return false
+		}
+		switch {
+		case options && word == "--":
+			options = false
+		case options && strings.HasPrefix(word, "--"):
+			name, _, _ := strings.Cut(strings.TrimPrefix(word, "--"), "=")
+			switch name {
+			case "output", "temporary-directory", "compress-program", "files0-from", "file", "random-source", "exclude-from":
+				return false
+			}
+		case options && len(word) > 1 && word[0] == '-':
+			letters := word[1:]
+			if program == "sort" && strings.ContainsAny(letters, "oT") ||
+				program == "grep" && strings.ContainsAny(letters, "f") {
+				return false
+			}
+			// -n 5, -c 10, -e PATTERN, -m 3: the value is the next word.
+			if index+1 < len(command.Argv) && findStripFilterOptionTakesValue(program, letters) {
+				index++
+				if program == "grep" && strings.HasSuffix(letters, "e") {
+					patternSeen = true
+				}
+			}
+		default:
+			// The one pattern operand of grep; any other operand is a file.
+			if program != "grep" || patternSeen {
+				return false
+			}
+			patternSeen = true
+		}
+	}
+	return true
+}
+
+// findStripFilterOptionTakesValue reports a short option cluster of a
+// findStripStdinFilters program whose last letter takes the next word.
+func findStripFilterOptionTakesValue(program, letters string) bool {
+	if letters == "" {
+		return false
+	}
+	last := letters[len(letters)-1]
+	switch program {
+	case "head", "tail":
+		return strings.IndexByte("ncs", last) >= 0 && len(letters) == 1
+	case "sort":
+		return strings.IndexByte("kt", last) >= 0
+	case "uniq":
+		return strings.IndexByte("fsw", last) >= 0
+	case "grep":
+		return strings.IndexByte("eABCm", last) >= 0
+	}
+	return false
+}
+
 func findStripRootName(root string) string {
 	name := strings.ToLower(path.Base(path.Clean(root)))
 	if name == "." || name == "/" {
@@ -830,7 +915,8 @@ func findStripFactsStayOff(facts actionfacts.Facts, except int64, rootName strin
 		if command.Effect != actionfacts.EffectExecute || !command.ArgvComplete {
 			return false
 		}
-		if _, safe := findStripSafeNeighbours[strings.ToLower(command.Program)]; !safe {
+		if _, safe := findStripSafeNeighbours[strings.ToLower(command.Program)]; !safe &&
+			!findStripStdinFilterStaysOff(facts, command) {
 			return false
 		}
 	}
