@@ -17,8 +17,8 @@ var activeUserTildeName = regexp.MustCompile(`^[A-Za-z0-9._][A-Za-z0-9._-]*$`)
 var assignmentLikePrefix = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*=`)
 
 // ActiveUserTildeTwin returns command with every tilde-prefix that names
-// the active user (~<user> or ~<user>/..., <user> the base name of the
-// POSIX activeHome) spelled as activeHome. bash expands such a prefix from
+// the active user (~<user> or ~<user>/..., <user> the base name of
+// activeHome, a POSIX or Git Bash drive home) spelled as activeHome. bash expands such a prefix from
 // the password database, not from HOME, at the start of a word and after
 // the first = of an assignment-shaped word (x=~u/f, dd of=~u/f), but not
 // inside quotes, after a backslash or in a here-document body; a prefix
@@ -31,12 +31,12 @@ var assignmentLikePrefix = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*=`)
 // (dd of=~/f) has its ~ spelled as the home too when nothing in the
 // command mentions HOME: bash expands it from HOME like a leading ~/,
 // which the other readings already resolve. ok is false when there is no such
-// prefix, the home is not a POSIX literal path or the command does not
-// parse.
+// prefix, the home is not a literal POSIX or drive path or the command
+// does not parse.
 func ActiveUserTildeTwin(command, activeHome string) (twin string, user string, ok bool) {
 	home, valid := normalizeActiveHome(activeHome)
 	home = strings.TrimRight(home, "/")
-	if !valid || !strings.HasPrefix(home, "/") || home == "" || !trustedPOSIXHomeLiteral.MatchString(home) {
+	if !valid || !posixShellHome(home) || !trustedPOSIXHomeLiteral.MatchString(home) {
 		return "", "", false
 	}
 	user = path.Base(home)

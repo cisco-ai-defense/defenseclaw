@@ -30,8 +30,9 @@ func TestActiveUserTildeTwinSpellsTheActiveHome(t *testing.T) {
 			t.Errorf("%q: twin %q user %q ok=%v, want %q ok=%v", tc.command, twin, user, ok, tc.twin, tc.ok)
 		}
 	}
-	if _, _, ok := ActiveUserTildeTwin("echo x > ~dcku/f", "C:/Users/dcku"); ok {
-		t.Error("a Windows home has no password-database tilde-prefix twin")
+	// Git Bash expands ~<user> to the user's Windows profile as well.
+	if twin, _, ok := ActiveUserTildeTwin("echo x > ~dcku/f", "C:/Users/dcku"); !ok || twin != "echo x > C:/Users/dcku/f" {
+		t.Errorf("Windows home twin %q ok=%v", twin, ok)
 	}
 }
 
