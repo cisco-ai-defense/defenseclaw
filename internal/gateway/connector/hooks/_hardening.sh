@@ -2412,7 +2412,7 @@ defenseclaw_emit_unreachable_stderr() {
     [ -z "$next" ] || reason="$next"
   fi
   if defenseclaw_should_fail_closed_on_unreachable; then
-    echo "defenseclaw: gateway unreachable, blocking ${subject} (fail mode closed): ${reason}" >&2
+    echo "defenseclaw: gateway unreachable, blocking ${subject} ($(defenseclaw_unreachable_mode_note)): ${reason}" >&2
   elif defenseclaw_per_user_outage_open; then
     if defenseclaw_first_outage_warning; then
       case "${DEFENSECLAW_HOOK_CONNECTOR:-}" in
@@ -2423,6 +2423,35 @@ defenseclaw_emit_unreachable_stderr() {
   else
     echo "defenseclaw: gateway unreachable, allowing ${subject}: ${reason}" >&2
   fi
+}
+
+# defenseclaw_unreachable_mode_note names why a call the gateway did not
+# decide was blocked, as the native hook line does (unreachableModeNote,
+# GAP-1735): "fail mode closed" for a gateway outage the mode closed (no
+# gateway took the connection, curl 7), strict availability, the install
+# window, and managed, socket and Secure Client hooks; for a per-user call the
+# gateway took and did not answer (a timeout, a dropped or cut-off answer),
+# that it is not an outage and is blocked in every fail mode, so a saved open
+# mode does not read as ignored (GAP-2279).
+defenseclaw_unreachable_mode_note() {
+  local closed='fail mode closed'
+  case "${DEFENSECLAW_MANAGED_HOOK:-0}" in
+    1|true|TRUE|yes|YES) printf '%s' "$closed"; return 0 ;;
+  esac
+  case "${DEFENSECLAW_STRICT_AVAILABILITY:-0}" in
+    1|true|TRUE|yes|YES) printf '%s' "$closed"; return 0 ;;
+  esac
+  # A refused connection (7) is an outage. Any other failure while this
+  # account's own gateway process is alive (a timeout, a dropped answer) is
+  # a call the gateway took and did not answer; with no live gateway it
+  # stays an outage the mode closed.
+  if [ "${_DC_TRANSPORT_STATUS:-}" = 7 ] || [ -n "${DEFENSECLAW_HOOK_SOCKET:-}" ] ||
+    [ "${_DC_SECURE_CLIENT_HOOK:-0}" = 1 ] || defenseclaw_install_held ||
+    ! defenseclaw_own_gateway_alive; then
+    printf '%s' "$closed"
+    return 0
+  fi
+  printf '%s' 'not a gateway outage, so it is blocked in every fail mode'
 }
 
 # defenseclaw_unreachable_notice_json prints a one-line hook result whose
