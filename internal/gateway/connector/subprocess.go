@@ -1417,6 +1417,9 @@ type HookFailModeRefresh struct {
 	Sidecar []string
 	// Scripts names the connector hook scripts whose baked open was closed.
 	Scripts []string
+	// Shims names the PATH shims whose installed outage mode was set to the
+	// mode the config gives their connector (refreshShimFailModes).
+	Shims []string
 }
 
 // RefreshHookFailModes updates legacy per-user hook records in hookDir to
@@ -1557,7 +1560,67 @@ func refreshHookFailModesLocked(hookDir string, mode func(connector string) stri
 	if named {
 		out.Scripts = append(out.Scripts, legacyHardeningScript)
 	}
+	shims, err := refreshShimFailModes(filepath.Join(filepath.Dir(hookDir), "shims"), mode)
+	if err != nil {
+		return out, err
+	}
+	out.Shims = shims
 	return out, nil
+}
+
+// shimInstalledModeRE is the outage mode a PATH shim of this release bakes
+// (peer.inc _dc_shim_transport_failure), shimOutageConnectorRE the connector
+// whose outage mode the shim asks at call time.
+var (
+	shimInstalledModeRE   = regexp.MustCompile(`( ts mode=")(open|closed)(" now="")`)
+	shimOutageConnectorRE = regexp.MustCompile(`hook-outage-mode --connector ([a-z][a-z0-9-]*) `)
+)
+
+// refreshShimFailModes sets the installed outage mode of each PATH shim in
+// shimDir to mode(connector) for the connector that installed it. A shim asks
+// the config at call time (GAP-1989), but it cannot when the account's home,
+// ~/.local, ~/.local/bin or the gateway binary is a symlink or writable by
+// others: it then follows its installed mode, which setup rendered. So a
+// `guardrail use-pack strict` or saved closed made after setup (both run this
+// refresh) applies to that case too, and a later open is followed again
+// (GAP-0038). A shim of another layout is left for the gateway to render.
+func refreshShimFailModes(shimDir string, mode func(connector string) string) ([]string, error) {
+	var changed []string
+	for _, name := range shimBinaries {
+		path := filepath.Join(shimDir, name)
+		info, err := os.Lstat(path)
+		if os.IsNotExist(err) {
+			continue
+		}
+		if err != nil {
+			return changed, fmt.Errorf("inspect shim %s: %w", name, err)
+		}
+		if !info.Mode().IsRegular() || info.Size() > hookScriptMaxBytes {
+			continue
+		}
+		body, err := readConnectorStateFile(path)
+		if err != nil {
+			return changed, fmt.Errorf("read shim %s: %w", name, err)
+		}
+		owner := shimOutageConnectorRE.FindSubmatch(body)
+		if owner == nil || len(shimInstalledModeRE.FindAll(body, -1)) != 1 {
+			continue
+		}
+		raw := strings.TrimSpace(mode(string(owner[1])))
+		if raw == "" {
+			continue
+		}
+		want := normalizeHookFailMode(raw)
+		next := shimInstalledModeRE.ReplaceAll(body, []byte("${1}"+want+"${3}"))
+		if string(next) == string(body) {
+			continue
+		}
+		if err := atomicWriteFile(path, next, info.Mode().Perm()); err != nil {
+			return changed, fmt.Errorf("refresh shim %s: %w", name, err)
+		}
+		changed = append(changed, name)
+	}
+	return changed, nil
 }
 
 // legacyHardeningScript is the shared shell helper file every released
