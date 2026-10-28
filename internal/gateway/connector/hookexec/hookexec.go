@@ -2567,6 +2567,9 @@ func unreachableDetail(opts Options, reason string) string {
 	if opts.ManagedEnterprise || opts.ManagedUnixSocket != "" {
 		return reason
 	}
+	if perUserInstallWindowNamesTheInstall(opts, reason) {
+		return perUserInstallWindowDetail
+	}
 	switch reason {
 	case "gateway unreachable":
 		return "check `defenseclaw-gateway status`, or run `defenseclaw-gateway restart`"
@@ -2578,6 +2581,22 @@ func unreachableDetail(opts Options, reason string) string {
 			"try again in a moment, or check `defenseclaw-gateway status`"
 	}
 	return reason
+}
+
+// perUserInstallWindowDetail is the stderr detail of a per-user call blocked
+// while this account's installer holds the data directory: the same cause
+// the agent is shown (perUserGatewayDownText), not "restarting or not
+// running" (GAP-2394).
+const perUserInstallWindowDetail = "DefenseClaw is being installed or upgraded for this account, and its gateway " +
+	"starts again when that is done; try again in a moment, or run the installer again if it has stopped"
+
+// perUserInstallWindowNamesTheInstall reports a per-user failure whose
+// answer names the install window (perUserGatewayDownText): this account's
+// installer holds the data directory, and the failure is neither the
+// gateway's own error answer nor a listener DefenseClaw cannot verify,
+// which keep their cause.
+func perUserInstallWindowNamesTheInstall(opts Options, reason string) bool {
+	return opts.gatewayRefusal == "" && !strings.HasPrefix(reason, foreignListenerReasonPrefix) && perUserInstallWindow(opts)
 }
 
 // perUserGatewayDownText is what a per-user hook that fails closed because
@@ -2597,7 +2616,7 @@ func perUserGatewayDownText(opts Options, reason string) string {
 	if opts.ManagedEnterprise || opts.ManagedUnixSocket != "" {
 		return ""
 	}
-	if perUserInstallWindow(opts) {
+	if perUserInstallWindowNamesTheInstall(opts, reason) {
 		return "DefenseClaw blocked this " + hookEventSubject(opts.Event) + ": DefenseClaw is being installed or " +
 			"upgraded for this account, and its gateway starts again when that is done. Try again in a moment; " +
 			"if the installer has stopped, run the installer again to finish or undo the interrupted install."
@@ -2994,7 +3013,8 @@ const unboundAntigravityBindingReason = "missing or unsupported Antigravity hook
 // hooks and hooks in fail mode open are not handled here.
 func refuseClosedUnboundHook(opts *Options, sp spec, failMode string) (int, bool) {
 	// A registration that lost its event is a broken install, never a
-	// gateway outage: outside Secure Client it is refused in every fail mode.
+	// gateway outage: outside Secure Client it is refused, except a per-user
+	// Antigravity call in a tier that opens it (perUserUnboundAntigravityOpen).
 	if opts.SecureClient {
 		return 0, false
 	}
@@ -3015,6 +3035,19 @@ func refuseClosedUnboundHook(opts *Options, sp spec, failMode string) (int, bool
 		if err == nil && antigravityNonToolInput(data, int64(len(data)) > opts.MaxBody) {
 			return 0, false
 		}
+		if perUserUnboundAntigravityOpen(*opts) {
+			// Balanced defaults (GAP-1321): in the default and permissive
+			// tiers, where this account's config opens an outage, the call
+			// runs with a warning and an audit entry, as antigravity-hook.sh
+			// does. The gateway requires the event, so it is not asked.
+			opts.FailMode = "open"
+			logHookFailure(*opts, sp, unboundAntigravityBindingReason, "response", "open", false)
+			fmt.Fprintln(opts.Stderr, "defenseclaw: DefenseClaw is not checking this Antigravity tool call: its hook is "+
+				"registered without an Antigravity event DefenseClaw reviewed, so the call runs unchecked (fail mode open). "+
+				"Run `defenseclaw setup antigravity` to register it again.")
+			fmt.Fprintln(opts.Stdout, `{"decision":"allow","reason":`+mustJSONString(unboundAntigravityOpenText)+`}`)
+			return 0, true
+		}
 		text := "DefenseClaw blocked this tool call: its DefenseClaw hook is registered without an Antigravity event DefenseClaw reviewed. " +
 			"Run `defenseclaw setup antigravity` to register it again."
 		if opts.ManagedEnterprise {
@@ -3029,6 +3062,26 @@ func refuseClosedUnboundHook(opts *Options, sp spec, failMode string) (int, bool
 		return 0, true
 	}
 	return 0, false
+}
+
+// unboundAntigravityOpenText is the reason of the allow a per-user
+// Antigravity hook gives a registration that lost its event when this
+// account's tier opens it (perUserUnboundAntigravityOpen).
+const unboundAntigravityOpenText = "DefenseClaw did not check this tool call: its DefenseClaw hook is registered without " +
+	"an Antigravity event DefenseClaw reviewed. Run `defenseclaw setup antigravity` to register it again."
+
+// perUserUnboundAntigravityOpen reports a per-user Antigravity hook (not
+// managed, not Secure Client) whose registration lost its event, outside
+// strict availability and this account's install window, whose config on
+// disk gives Antigravity the open outage mode now (the default and
+// permissive tiers). Such a call is allowed with a warning; strict,
+// a closed tier and managed hooks deny it (refuseClosedUnboundHook).
+func perUserUnboundAntigravityOpen(opts Options) bool {
+	if opts.ManagedEnterprise || opts.ManagedUnixSocket != "" || opts.SecureClient || opts.StrictAvailability ||
+		opts.OutageFailModeNow == nil || perUserInstallWindow(opts) {
+		return false
+	}
+	return normalizeFailMode(opts.OutageFailModeNow()) == "open"
 }
 
 // antigravityNonToolInput reports an Antigravity hook input that is clearly

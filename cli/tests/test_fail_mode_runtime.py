@@ -2698,3 +2698,31 @@ def test_codex_registration_matches_every_spelling_of_the_hook_path(monkeypatch,
         config.write_text(f"[hooks]\n[[hooks.PreToolUse]]\n[[hooks.PreToolUse.hooks]]\ncommand = {command}\n", encoding="utf-8")
         assert fail_mode_runtime._codex_registration_current("", str(data_dir)), command
         assert not fail_mode_runtime._codex_registration_current("", str(tmp_path / "other")), command
+
+
+def test_unix_registration_freshness_accepts_a_home_below_a_symlinked_directory(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # GAP-2371: HOME below a symlinked directory. Setup registers the hook by
+    # the data dir's own spelling; the check compared only the resolved path
+    # and reported a registration it had just written as stale.
+    real = tmp_path / "real"
+    real.mkdir()
+    link = tmp_path / "link"
+    link.symlink_to(real, target_is_directory=True)
+    cfg, home = _runtime_cfg(monkeypatch, link, {"codex": "closed"})
+    assert str(Path(cfg.data_dir)).startswith(str(link)), cfg.data_dir
+    with (
+        patch("defenseclaw.fail_mode.Path.home", return_value=home),
+        patch("defenseclaw.connector_paths.Path.home", return_value=home),
+    ):
+        registration = Path(fail_mode_runtime.connector_config_files("codex", workspace_dir="")[0])
+        registration.parent.mkdir(parents=True, exist_ok=True)
+        lexical = str(Path(cfg.data_dir) / "hooks" / "codex-hook.sh")
+        resolved = str((Path(cfg.data_dir) / "hooks" / "codex-hook.sh").resolve())
+        assert lexical != resolved
+        for command in (lexical, resolved):
+            registration.write_text(json.dumps({"command": command + " --event PreToolUse"}), encoding="utf-8")
+            assert fail_mode_runtime._unix_registration_freshness(cfg, "codex") is None, command
+        registration.write_text(json.dumps({"command": str(tmp_path / "other" / "codex-hook.sh")}), encoding="utf-8")
+        assert fail_mode_runtime._unix_registration_freshness(cfg, "codex") == "registration-command-stale"

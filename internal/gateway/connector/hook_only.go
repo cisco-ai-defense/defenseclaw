@@ -1069,6 +1069,15 @@ func (c *hookOnlyConnector) checkAgentSettings(opts SetupOpts) error {
 	if err := validateCopilotOperatorSettings(opts); err != nil {
 		return refuseForAgentConfig(fmt.Errorf("%w; fix that setting, then run: defenseclaw-gateway restart", err))
 	}
+	// An independent handler the operator put in DefenseClaw's own hook file
+	// is the operator's choice too: Setup cannot repair that event without
+	// dropping it, so it refuses before it changes anything, and a gateway
+	// start keeps every other connector (GAP-2372; it stopped them all).
+	if path := c.configPath(opts); strings.TrimSpace(path) != "" {
+		if err := copilotIndependentHandler(path, c.hookCommand(opts), c.copilotHookEvents(opts)); err != nil {
+			return refuseForAgentConfig(err)
+		}
+	}
 	return nil
 }
 
@@ -5306,20 +5315,14 @@ func patchCopilotHooksForOS(path, hookScript string, events []string, goos strin
 			return fmt.Errorf("copilot: unsupported hook event %q in resolved contract", event)
 		}
 		selected[event] = true
-		// Copilot runs every entry in an event array. An independent entry in
-		// this file must be moved before Setup can safely restore the current
-		// hook. Check all entries before writing any event back to disk.
-		if raw, present := hooks[event]; present {
-			entries, ok := raw.([]interface{})
-			if !ok {
-				entries = []interface{}{raw}
-			}
-			for _, entry := range entries {
-				if !copilotBoundEventOwnsHook(entry, hookScript) {
-					return fmt.Errorf("copilot: cannot repair event %q in %s: an independent or unrecognized handler is present; move it to another hook file in the same hooks directory, then run defenseclaw setup copilot again", event, path)
-				}
-			}
-		}
+	}
+	// Copilot runs every entry in an event array. An independent entry in
+	// this file must be moved before Setup can safely restore the current
+	// hook. Check all entries before writing any event back to disk.
+	if err := copilotIndependentHandlerIn(path, hooks, hookScript, events); err != nil {
+		return err
+	}
+	for _, event := range events {
 		hooks[event] = []interface{}{copilotHookRegistration(goos, event, hookScript)}
 	}
 	// Remove DefenseClaw's handler from events outside this contract too. An
@@ -5347,6 +5350,43 @@ func patchCopilotHooksForOS(path, hookScript string, events []string, goos strin
 // A bound event may be replaced only when every executable command in its
 // entry is a known DefenseClaw form. Do not claim a combined command or a
 // nested handler merely because it also mentions our script.
+// copilotIndependentHandler reports an entry DefenseClaw does not own on one
+// of events in the Copilot hook file at path (copilotIndependentHandlerIn).
+// A file that does not exist has none; one that cannot be read is left to
+// Setup, which reports it.
+func copilotIndependentHandler(path, hookScript string, events []string) error {
+	cfg, err := readJSONObject(path)
+	if err != nil {
+		return nil
+	}
+	hooks, _ := cfg["hooks"].(map[string]interface{})
+	return copilotIndependentHandlerIn(path, hooks, hookScript, events)
+}
+
+// copilotIndependentHandlerIn reports the first entry of events in hooks
+// that DefenseClaw does not own: Setup would drop it to restore the event.
+// The text names the move, which is the repair (setup cannot replace it).
+func copilotIndependentHandlerIn(path string, hooks map[string]interface{}, hookScript string, events []string) error {
+	for _, event := range events {
+		raw, present := hooks[event]
+		if !present {
+			continue
+		}
+		entries, ok := raw.([]interface{})
+		if !ok {
+			entries = []interface{}{raw}
+		}
+		for _, entry := range entries {
+			if !copilotBoundEventOwnsHook(entry, hookScript) {
+				return fmt.Errorf("copilot: cannot repair event %q in %s: an independent or unrecognized handler is present; "+
+					"move it to another hook file in the same hooks directory (Copilot reads every file there), "+
+					"then run: defenseclaw setup copilot --yes", event, path)
+			}
+		}
+	}
+	return nil
+}
+
 func copilotBoundEventOwnsHook(raw interface{}, hookScript string) bool {
 	if copilotLiveOperatorLookalike(raw, hookScript) {
 		return false

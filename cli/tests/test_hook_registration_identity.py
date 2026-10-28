@@ -371,3 +371,23 @@ def test_edited_copilot_handler_on_an_unexpected_event_is_repaired(tmp_path, mon
     assert cmd_status._hook_runtime_degraded_suffix(cfg, "copilot") == ""
     assert bootstrap._connector_runtime_readiness(cfg, "copilot") is None
     assert "registration-foreign" not in _fail_mode_drift(cfg, "copilot")
+
+
+@pytest.mark.parametrize("case", _COPILOT, ids=_case_id)
+def test_an_independent_copilot_handler_names_the_move_not_setup_alone(tmp_path, monkeypatch, case):
+    # GAP-2372: setup cannot repair a bound event of DefenseClaw's own
+    # Copilot file while a handler that is not DefenseClaw's is on it (the
+    # gateway refuses that connector), so the next step names the move first
+    # and no longer offers `doctor --fix`.
+    cfg, paths = _install(tmp_path, monkeypatch, case)
+    config = Path(paths[0])
+    command = "bash /opt/operator/retired-open.sh --event preToolUse"
+    _beside(cfg, case, config, command)
+
+    problems = hook_integrity.edited_hook_problems(cfg, "copilot")
+    assert problems and command in problems[0], problems
+    repair = getattr(problems[0], "repair", "")
+    assert "move a handler that is not DefenseClaw's to another file in" in repair, repair
+    assert str(config.parent) in repair and "setup copilot --yes" in repair, repair
+    assert "doctor --fix" not in repair, repair
+    _assert_every_check_fails(cfg, "copilot", monkeypatch, "registration-foreign")

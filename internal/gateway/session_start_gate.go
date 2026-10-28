@@ -380,6 +380,10 @@ func (a *APIServer) sessionStartRecordedEarlier(ctx context.Context, connectorNa
 // whose managed runtime registration could not be repaired.
 const codexStartRegistrationUnavailable = "Codex runtime registration is unavailable"
 
+// codexStartRegistrationSetupStep follows the refusal when the cause names
+// no step of its own.
+const codexStartRegistrationSetupStep = "; run: defenseclaw setup codex --yes"
+
 // codexStartRegistrationRefusal repairs a missing managed runtime
 // registration for a Codex session start and returns the refusal when it
 // cannot ("" otherwise, and for every other connector and a sandboxed
@@ -393,7 +397,9 @@ func (a *APIServer) codexStartRegistrationRefusal(ctx context.Context, connector
 		if step := registrationRepairStep(err); step != "" {
 			return codexStartRegistrationUnavailable + ": " + step
 		}
-		return codexStartRegistrationUnavailable
+		// Setup registers it again or says what stops it (GAP-1744: the
+		// refusal names a usable next step, not only the outcome).
+		return codexStartRegistrationUnavailable + codexStartRegistrationSetupStep
 	}
 	return ""
 }

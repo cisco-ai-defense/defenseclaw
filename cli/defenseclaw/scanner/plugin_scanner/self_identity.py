@@ -77,7 +77,7 @@ _BRIDGE_STANDALONE_TEMPLATE_DIGESTS = {
 _BRIDGE_TEMPLATE_DIGESTS = {
     "amp": frozenset(
         {
-            "093528bf8c1d8d85e5edf8fd3c7703316da6a3c4ed72d3fae9c9d1bb10abcf98",  # amp-plugin.ts
+            "a92e8b56534e0b559312f50a62079fc001f04ad2b16ea46120d8ab088a108d19",  # amp-plugin.ts
             _BRIDGE_STANDALONE_TEMPLATE_DIGESTS["amp"],
             "cf00f9f404c0711357f55535dd1062667d398acbf7603dfa15fa951d212b4d4b",  # amp-plugin-secure-client.ts
         }

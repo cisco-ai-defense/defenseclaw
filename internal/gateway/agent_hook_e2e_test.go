@@ -910,3 +910,35 @@ func TestHandleAgentHookRecordsAHookSideRefusal(t *testing.T) {
 		t.Fatalf("refusal report = %d %s, want a recorded block", w.Code, body)
 	}
 }
+
+// GAP-1313: a hook's report of a tool call it refused as too large carries the
+// event and session fields and no tool input. The structured tool-call gate
+// that refuses an unreadable call must not take it: the decision names
+// HOOK-PAYLOAD-TOO-LARGE (the documented rule ID), not HOOK-TOOL-CALL-UNPARSED.
+func TestHandleAgentHookRecordsAHookSideToolCallRefusalAsTooLarge(t *testing.T) {
+	for _, tc := range []struct{ connector, path string }{
+		{"claudecode", "/api/v1/claude-code/hook"},
+		{"codex", "/api/v1/codex/hook"},
+	} {
+		t.Run(tc.connector, func(t *testing.T) {
+			cfg := &config.Config{}
+			cfg.Guardrail.Mode = "action"
+			cfg.Guardrail.Connector = tc.connector
+			api := &APIServer{scannerCfg: cfg, health: NewSidecarHealth()}
+			req := httptest.NewRequest(http.MethodPost, tc.path,
+				strings.NewReader(`{"session_id":"sess-big","hook_event_name":"PreToolUse","tool_name":"Bash","cwd":"/tmp"}`))
+			req.Header.Set("Content-Type", "application/json")
+			req.Header.Set(hookexec.HookRefusalHeader, hookexec.HookRefusalPayloadTooLarge)
+			if tc.connector == "codex" {
+				setTestCodexHookBinding(req, "PreToolUse", defaultTestCodexHookContract)
+			}
+			w := httptest.NewRecorder()
+			http.HandlerFunc(api.handleAgentHook(tc.connector)).ServeHTTP(w, req)
+			body := w.Body.String()
+			if !strings.Contains(body, `"raw_action":"block"`) || !strings.Contains(body, hookPayloadTooLargeRuleID) ||
+				strings.Contains(body, hookToolCallUnparsedRuleID) {
+				t.Fatalf("refusal report = %d %s, want a block under %s only", w.Code, body, hookPayloadTooLargeRuleID)
+			}
+		})
+	}
+}

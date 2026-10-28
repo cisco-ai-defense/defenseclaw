@@ -444,9 +444,9 @@ claude_fail_closed_decision() {
     reason="DefenseClaw blocked this because its gateway is stopped. Run defenseclaw-gateway start to resume protection (defenseclaw-gateway status shows its state)."
   elif [ "$1" = "gateway unreachable" ] && next="$(defenseclaw_unreachable_next_step)" && [ -n "$next" ]; then
     reason="DefenseClaw blocked this: ${next//\`/}."
-  elif next="$(defenseclaw_gateway_error_answer "$1")"; then
+  elif next="$(defenseclaw_gateway_error_block_text "$1")"; then
     # The gateway is up and answered with an error (GAP-1744).
-    reason="DefenseClaw blocked this because its gateway answered with an error (${next}). Run defenseclaw doctor to see what to fix."
+    reason="$next"
   else
     reason="DefenseClaw blocked this because it could not reach its gateway (${1}). Run defenseclaw-gateway status to check it."
   fi
@@ -627,7 +627,7 @@ elif [ "$HTTP_CODE" -lt 200 ] 2>/dev/null || [ "$HTTP_CODE" -ge 300 ] 2>/dev/nul
   fail_response "gateway returned HTTP ${HTTP_CODE}"
 fi{{end}}
 
-{{if and (not .SecureClient) (not .Sandbox)}}defenseclaw_json_string_field "$RESULT" action >/dev/null || fail_response "invalid or ambiguous JSON response"
+{{if and (not .SecureClient) (not .Sandbox)}}defenseclaw_json_answer_valid "$RESULT" action || fail_response "invalid or ambiguous JSON response"
 {{end}}
 {{if and (not .Managed) (not .Sandbox)}}# Decode the action and its structured output together. Successful personal
 # hooks need one parser process rather than two (#1130). The fallback keeps
