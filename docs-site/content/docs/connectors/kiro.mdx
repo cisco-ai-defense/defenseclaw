@@ -139,7 +139,7 @@ Managed Windows pins each enrolled user to one of two reviewed contracts: `kiro-
 
 ## ACP guard
 
-The ACP guard is an enforcement path of its own. It vetoes prompts, output, permissions, filesystem, terminal and extension methods at the protocol boundary, whichever Kiro surface the editor launches. See the [ACP guard guide](/docs/acp-guard). It runs on every OS for per-user installs, for editors that start Kiro over ACP. ACP editors are not supported in enterprise managed mode; in enterprise managed mode, ACP editors are enrolled with `defenseclaw-gateway enterprise acp enroll`, which is preview and not yet verified live.
+The ACP guard is an enforcement path of its own. It vetoes prompts, output, permissions, filesystem, terminal and extension methods at the protocol boundary, whichever Kiro surface the editor launches. See the [ACP guard guide](/docs/acp-guard). It runs on every OS for per-user installs, for editors that start Kiro over ACP. In enterprise managed mode an administrator enrolls each user, editor and agent with `defenseclaw-gateway enterprise acp enroll`, and the user runs the setup command it reports. Managed ACP is preview: it has not passed a live round in this release ([Support matrix](/docs/support-matrix)).
 
 ```bash
 defenseclaw acp setup --client zed --agent kiro
