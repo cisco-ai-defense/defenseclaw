@@ -2057,6 +2057,41 @@ describe('connector pages have no dead in-page anchors (GAP-2291)', () => {
   });
 });
 
+// GAP-0045: the managed env-var rules name every tighten_only variable of the
+// registry, on the env-vars catalog and in the threat model's B17 row, and
+// neither calls DEFENSECLAW_FAIL_MODE tighten_only (it is ignore, GAP-0516).
+describe('managed env-var rules match the registry (GAP-0045)', () => {
+  it('lists every tighten_only variable and keeps DEFENSECLAW_FAIL_MODE ignore', () => {
+    const reg = JSON.parse(readFileSync(join(repo, 'internal/envvars/registry.json'), 'utf8'));
+    const entries: { name: string; managed?: string }[] = [];
+    const walk = (v: unknown): void => {
+      if (Array.isArray(v)) v.forEach(walk);
+      else if (v && typeof v === 'object') {
+        const o = v as Record<string, unknown>;
+        if (typeof o.name === 'string' && typeof o.managed === 'string') entries.push({ name: o.name, managed: o.managed });
+        else Object.values(o).forEach(walk);
+      }
+    };
+    walk(reg);
+    const tighten = entries.filter((e) => e.managed === 'tighten_only').map((e) => e.name).sort();
+    assert.ok(tighten.length >= 3, `parsed ${tighten}`);
+    assert.equal(entries.find((e) => e.name === 'DEFENSECLAW_FAIL_MODE')?.managed, 'ignore');
+    const catalog = page('reference/env-vars.mdx');
+    const tightenRow = catalog.split('| `tighten_only` |')[1].split('\n')[0];
+    const ignoreRow = catalog.split('| `ignore` |')[1].split('\n')[0];
+    const b17 = readFileSync(join(repo, 'docs/ENTERPRISE-THREAT-MODEL.md'), 'utf8').split('| B17 |')[1].split('\n')[0];
+    for (const name of tighten) {
+      assert.ok(tightenRow.includes('`' + name + '`'), `env-vars tighten_only row omits ${name}`);
+      assert.ok(b17.includes('`' + name + '`'), `threat model B17 omits ${name}`);
+    }
+    // The ignore row's except-list names the tighten_only security opt-outs.
+    for (const name of tighten.filter((n) => n !== 'DEFENSECLAW_HOOK_MAX_BODY')) {
+      assert.ok(ignoreRow.includes('`' + name + '`'), `env-vars ignore row except-list omits ${name}`);
+    }
+    assert.ok(!/`DEFENSECLAW_FAIL_MODE` remains `tighten_only`/.test(b17), 'B17 still calls DEFENSECLAW_FAIL_MODE tighten_only');
+  });
+});
+
 // GAP-2300: the config.generation.json row names every field the writer can
 // put in the file (cfgtxn GenerationState JSON tags).
 describe('config.generation.json fields match the writer (GAP-2300)', () => {
