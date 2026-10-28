@@ -1423,6 +1423,8 @@ describe('Known limits by lead decision (rel-1-0-4 P1 reconcile)', () => {
 // heading of the page; the row reads only that section and its subsections.
 type DocRow = { gap: string; page: string; section?: string; has?: string[]; lacks?: string[] };
 const r105Rows: DocRow[] = [
+  { gap: "GAP-2287", page: "enterprise/troubleshooting.mdx", has: ["`installed_version` is the recorded version when an administrator gave an unknown `--profile`; it is omitted for a standard account, which cannot read the deployment record."], lacks: ["because they were not checked, and `installed_version` is omitted."] },
+  { gap: "GAP-2301", page: "enterprise/configuration.mdx", section: "Where the config lives", has: ["(Administrators and SYSTEM full control; the gateway service, `NT SERVICE\\DefenseClawGateway`, can only read it)"], lacks: ["config.yaml` (Administrators only)"] },
   { gap: "GAP-1461", page: "policies/defaults.mdx", has: ["Writes to the active user's `authorized_keys` are blocked in action mode when a direct command, a file tool or a supported literal interpreter form proves the target; in observe mode the same write raises a CRITICAL would-block alert and runs."], lacks: ["Writes to the active user's `authorized_keys` are blocked when"] },
   { gap: "GAP-0044", page: "sandboxes/guide.mdx", has: ["A stop DefenseClaw makes for your organization's policy (a hook alarm, a revoked registration) does not end a MicroVM whose disk could not sync either"], lacks: ["still goes ahead and the activity feed says what may be lost"] },
   { gap: "GAP-0044", page: "reference/sandbox-cli.mdx", has: ["A stop DefenseClaw makes for your organization's policy (a hook alarm, a revoked registration) does not end a MicroVM whose disk could not sync either"], lacks: ["still goes ahead and the activity feed says what may be lost"] },
@@ -1793,5 +1795,20 @@ describe('connector pages have no dead in-page anchors (GAP-2291)', () => {
       }
     }
     assert.deepEqual(dead, []);
+  });
+});
+
+// GAP-2300: the config.generation.json row names every field the writer can
+// put in the file (cfgtxn GenerationState JSON tags).
+describe('config.generation.json fields match the writer (GAP-2300)', () => {
+  it('lists every GenerationState JSON field on enterprise/configuration.mdx', () => {
+    const src = readFileSync(join(repo, 'internal/config/internal/cfgtxn/cfgtxn.go'), 'utf8');
+    const body = src.split('type GenerationState struct {')[1].split('\n}')[0];
+    const fields = [...body.matchAll(/json:"([a-z0-9_]+)/g)].map((m) => m[1]);
+    assert.ok(fields.includes('generation_reset') && fields.length >= 10, `parsed ${fields}`);
+    const row = page('enterprise/configuration.mdx').split('| `config.generation.json` |')[1].split('| `config.yaml.lock` |')[0];
+    const missing = fields.filter((f) => !f.startsWith('transaction_') && !row.includes('`' + f + '`'));
+    assert.deepEqual(missing, []);
+    if (fields.some((f) => f.startsWith('transaction_'))) assert.ok(row.includes('`transaction_*`'), 'transaction_* fields not named');
   });
 });

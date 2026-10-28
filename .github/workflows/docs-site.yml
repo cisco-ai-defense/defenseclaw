@@ -20,6 +20,7 @@ on:
       - 'bundles/local_observability_stack/grafana/dashboards/defenseclaw-agent-360.json'
       - 'internal/enterprisepolicy/claude.go'
       - 'internal/openshell/manager/box.go'
+      - 'internal/config/internal/cfgtxn/cfgtxn.go'
       - '.github/workflows/docs-site.yml'
   pull_request:
     paths:
@@ -39,6 +40,7 @@ on:
       - 'bundles/local_observability_stack/grafana/dashboards/defenseclaw-agent-360.json'
       - 'internal/enterprisepolicy/claude.go'
       - 'internal/openshell/manager/box.go'
+      - 'internal/config/internal/cfgtxn/cfgtxn.go'
       - '.github/workflows/docs-site.yml'
   workflow_dispatch:
 
