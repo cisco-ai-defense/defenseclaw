@@ -1809,6 +1809,63 @@ namespace $nativeNamespace
             finally { LocalFree(descriptor); }
         }
 
+        [DllImport("kernel32.dll", SetLastError = true, EntryPoint = "SetFileInformationByHandle")]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool SetFileDispositionInformationByHandle(
+            IntPtr file, int informationClass, ref byte deleteFile, uint size);
+
+        // Deletes one regular, singly linked user file through a handle that
+        // did not follow a link, with every ancestor pinned. Returns false
+        // when the file (or its folder) is absent.
+        public static bool RemoveUserFileNoFollow(string path)
+        {
+            const uint DELETE = 0x00010000;
+            const uint FILE_READ_ATTRIBUTES = 0x00000080;
+            const uint FILE_SHARE_READ = 0x00000001;
+            const uint FILE_SHARE_DELETE = 0x00000004;
+            const uint OPEN_EXISTING = 3;
+            const uint FILE_FLAG_OPEN_REPARSE_POINT = 0x00200000;
+            const uint FILE_FLAG_BACKUP_SEMANTICS = 0x02000000;
+            const int FileDispositionInfo = 4;
+            using (new UninstallFilePrivilegeScope())
+            {
+                List<IntPtr> pins;
+                try { pins = PinUserFileParent(path); }
+                catch (Win32Exception error)
+                {
+                    if (error.NativeErrorCode == 2 || error.NativeErrorCode == 3)
+                        return false;
+                    throw;
+                }
+                try
+                {
+                    IntPtr handle = CreateFileW(path, DELETE | FILE_READ_ATTRIBUTES,
+                        FILE_SHARE_READ | FILE_SHARE_DELETE, IntPtr.Zero, OPEN_EXISTING,
+                        FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS,
+                        IntPtr.Zero);
+                    if (handle == new IntPtr(-1))
+                    {
+                        int error = Marshal.GetLastWin32Error();
+                        if (error == 2 || error == 3)
+                            return false;
+                        throw new Win32Exception(error, "open user file for delete failed: " + path);
+                    }
+                    try
+                    {
+                        CheckUserFileHandle(handle, path);
+                        byte deleteFile = 1;
+                        if (!SetFileDispositionInformationByHandle(handle,
+                                FileDispositionInfo, ref deleteFile, 1))
+                            throw new Win32Exception(Marshal.GetLastWin32Error(),
+                                "delete user file failed: " + path);
+                        return true;
+                    }
+                    finally { CloseHandle(handle); }
+                }
+                finally { CloseUserFilePins(pins); }
+            }
+        }
+
         public static void RemoveEmptyUserCasStateNoFollow(string path)
         {
             List<IntPtr> pins;
@@ -14894,14 +14951,37 @@ function Restore-DefenseClawTransactionConfigPreimage {
 # The guardian edits these user-owned files after Setup has opened its machine
 # transaction. Keep their exact preimages in that transaction so a failed
 # upgrade does not restore 1.0.2 with the old native exporter removed.
+# Offsets 0-1 are the agent files, 2-3 the scoped credentials and 4-5 the
+# take-back-pending markers the guardian writes in the account's data dir
+# (GAP-2023): a rolled-back upgrade must not keep the new marker beside the
+# restored credential.
 function Get-DefenseClawUserNativeOTLPTransactionPaths {
     param([Parameter(Mandatory)][string]$UserHome)
     return @(
         [IO.Path]::Combine($UserHome, '.codex', 'config.toml'),
         [IO.Path]::Combine($UserHome, '.claude', 'settings.json'),
         [IO.Path]::Combine($UserHome, '.defenseclaw', 'hooks', '.otlp-codex.token'),
-        [IO.Path]::Combine($UserHome, '.defenseclaw', 'hooks', '.otlp-claudecode.token')
+        [IO.Path]::Combine($UserHome, '.defenseclaw', 'hooks', '.otlp-claudecode.token'),
+        [IO.Path]::Combine($UserHome, '.defenseclaw', 'native-otlp-take-back-pending-codex.json'),
+        [IO.Path]::Combine($UserHome, '.defenseclaw', 'native-otlp-take-back-pending-claudecode.json')
     )
+}
+
+# Files recorded per target root. A transaction a module before GAP-2023
+# opened has four (no marker entries); this module records six. Anything else
+# is not a record this module wrote.
+function Get-DefenseClawUserNativeOTLPTransactionStride {
+    param([Parameter(Mandatory)]$Saved)
+    if ($null -eq $Saved.PSObject.Properties['roots'] -or
+        $null -eq $Saved.PSObject.Properties['files']) {
+        return 0
+    }
+    $roots = @($Saved.roots).Count
+    $files = @($Saved.files).Count
+    foreach ($stride in @(6, 4)) {
+        if ($files -eq $stride * $roots) { return $stride }
+    }
+    return 0
 }
 
 function Add-DefenseClawUserNativeOTLPTransactionSnapshot {
@@ -15033,8 +15113,8 @@ function Set-DefenseClawUserNativeOTLPTransactionPostimages {
     $property = $snapshot.PSObject.Properties['user_native_otlp_preimages']
     if ($null -eq $property) { return }
     $saved = $property.Value
-    if ($saved.schema_version -ne 1 -or
-        @($saved.files).Count -ne 4 * @($saved.roots).Count -or
+    $stride = Get-DefenseClawUserNativeOTLPTransactionStride -Saved $saved
+    if ($saved.schema_version -ne 1 -or $stride -eq 0 -or
         @($saved.state_directories).Count -ne 2 * @($saved.roots).Count) {
         throw 'invalid user native OTLP postimage target list'
     }
@@ -15043,8 +15123,10 @@ function Set-DefenseClawUserNativeOTLPTransactionPostimages {
         $userHome = [string]$saved.roots[$rootIndex].user_home
         $paths = @(Get-DefenseClawUserNativeOTLPTransactionPaths `
                 -UserHome $userHome)
+        # The markers (offsets 4-5) are DefenseClaw state, not user edits:
+        # rollback puts back their preimage without a postimage proof.
         for ($offset = 0; $offset -lt 4; $offset++) {
-            $fileIndex = 4 * $rootIndex + $offset
+            $fileIndex = $stride * $rootIndex + $offset
             $entry = $saved.files[$fileIndex]
             if (-not [bool]$entry.captured -or -not [bool]$entry.existed) {
                 continue
@@ -15109,6 +15191,50 @@ function Add-DefenseClawUserNativeOTLPRollbackLeftover {
     Write-DefenseClawLifecyclePhase -Stage ('rollback left ' + $message)
 }
 
+# A take-back-pending marker returns to its preimage: one the transaction
+# created is deleted, one it changed or deleted gets its bytes and ACL back.
+# Both steps open the file without following a link and refuse a multiply
+# linked file, so SYSTEM never deletes or writes outside the data dir.
+function Restore-DefenseClawUserNativeOTLPMarkerPreimage {
+    param(
+        [Parameter(Mandatory)]$NativeSecurity,
+        [Parameter(Mandatory)][string]$Path,
+        [Parameter(Mandatory)]$Entry,
+        [Parameter(Mandatory)][hashtable]$Layout,
+        [Parameter(Mandatory)][string]$Backup
+    )
+    $current = $NativeSecurity::CaptureUserFileNoFollowIfExists($Path)
+    if (-not [bool]$Entry.existed) {
+        if ($null -ne $current) {
+            [void]$NativeSecurity::RemoveUserFileNoFollow($Path)
+        }
+        return
+    }
+    $currentSha = if ($null -eq $current) { 'absent' } else {
+        Get-DefenseClawNuclearSHA256 -Bytes $current.Content
+    }
+    if ($currentSha -ceq [string]$Entry.sha256 -and
+        [string]$current.SecurityDescriptor -ceq [string]$Entry.security_descriptor) {
+        return
+    }
+    Assert-DefenseClawDescendant -Path $Backup `
+        -Root $Layout.StateRoot -Label 'native OTLP rollback backup' |
+        Microsoft.PowerShell.Core\Out-Null
+    Assert-DefenseClawNoReparsePath -Path $Backup
+    $bytes = [IO.File]::ReadAllBytes($Backup)
+    if ((Get-DefenseClawNuclearSHA256 -Bytes $bytes) -cne [string]$Entry.sha256) {
+        throw 'user native OTLP rollback backup digest mismatch'
+    }
+    $actualSDDL = $NativeSecurity::RestoreUserFileNoFollow(
+        $Path, $bytes, [string]$Entry.security_descriptor,
+        [IO.File]::GetCreationTimeUtc($Backup),
+        [IO.File]::GetLastWriteTimeUtc($Backup),
+        $currentSha)
+    if ($actualSDDL -cne [string]$Entry.security_descriptor) {
+        throw 'user native OTLP rollback did not restore exact ACL'
+    }
+}
+
 function Restore-DefenseClawUserNativeOTLPTransactionSnapshot {
     param(
         [Parameter(Mandatory)]$Snapshot,
@@ -15118,10 +15244,11 @@ function Restore-DefenseClawUserNativeOTLPTransactionSnapshot {
     $property = $Snapshot.PSObject.Properties['user_native_otlp_preimages']
     if ($null -eq $property) { return }
     $saved = $property.Value
+    $stride = Get-DefenseClawUserNativeOTLPTransactionStride -Saved $saved
     if ($saved.schema_version -ne 1 -or
         [string]$saved.manifest_sha256 -cnotmatch '^[0-9a-f]{64}$' -or
         @($saved.roots).Count -gt 128 -or
-        @($saved.files).Count -ne 4 * @($saved.roots).Count -or
+        $stride -eq 0 -or
         @($saved.state_directories).Count -ne
             2 * @($saved.roots).Count) {
         throw 'invalid user native OTLP rollback preimages'
@@ -15143,8 +15270,10 @@ function Restore-DefenseClawUserNativeOTLPTransactionSnapshot {
             [string]$root.sid -cnotmatch '^S-1-[0-9-]+$') {
             throw 'native OTLP rollback target root is not canonical'
         }
-        foreach ($path in @(Get-DefenseClawUserNativeOTLPTransactionPaths `
-                    -UserHome $userHome)) {
+        $paths = @(Get-DefenseClawUserNativeOTLPTransactionPaths `
+                -UserHome $userHome)
+        for ($offset = 0; $offset -lt $stride; $offset++) {
+            $path = $paths[$offset]
             $entry = $saved.files[$index]
             $capture = $entry.PSObject.Properties['captured']
             if ($null -eq $capture -or [bool]$capture.Value) {
@@ -15153,6 +15282,15 @@ function Restore-DefenseClawUserNativeOTLPTransactionSnapshot {
                         ([bool]$entry.existed -and
                             [string]$entry.sha256 -cnotmatch '^[0-9a-f]{64}$')) {
                         throw 'invalid user native OTLP rollback file record'
+                    }
+                    if ($offset -ge 4) {
+                        Restore-DefenseClawUserNativeOTLPMarkerPreimage `
+                            -NativeSecurity $nativeSecurity -Path $path `
+                            -Entry $entry -Layout $Layout `
+                            -Backup ([IO.Path]::Combine(
+                                $directory, ('native-otlp-{0:D3}.bak' -f $index)))
+                        $index++
+                        continue
                     }
                     $postimage = [string]$entry.postimage_sha256
                     $restoreThisFile = $false
@@ -15166,7 +15304,7 @@ function Restore-DefenseClawUserNativeOTLPTransactionSnapshot {
                         $restoreThisFile = -not (Microsoft.PowerShell.Management\Test-Path `
                             -LiteralPath $path -PathType Leaf)
                     }
-                    elseif ($index % 4 -lt 2) {
+                    elseif ($offset -lt 2) {
                         # Even when no transaction postimage exists, report a
                         # linked or unreadable agent path without touching it.
                         [void]$nativeSecurity::CaptureUserFileNoFollowIfExists($path)
