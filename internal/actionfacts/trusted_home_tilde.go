@@ -208,11 +208,13 @@ func rewriteTrustedPOSIXHomeTilde(source, activeHome string) (trustedPOSIXHomeRe
 // spelling (GAP-2225, GAP-2268, GAP-2298). The command is read with the
 // Bash grammar, which every POSIX command also parses under. A word that
 // reads HOME, USER or LOGNAME does not change them; a home spelling is not
-// resolved when it follows anything that can write them: an assignment of
-// the name, a for/select loop over it, ${HOME:=..}, arithmetic naming it, a
-// declaration naming it or a computed name, or a builtin that sets
-// variables by computed name or runs code (eval, source, read, printf -v,
-// ...). It returns false when there is no such target, when the command
+// resolved when it follows a statement that names them as written text: an
+// assignment of the name, a for/select loop over it, ${HOME:=..},
+// arithmetic naming it, a declaration naming it, or code or a variable
+// setter (eval, source, $CMD, read, printf -v, ...) whose words name it.
+// Code that may change them out of sight (source ./env.sh, eval "$X",
+// $CMD) does not stop the target from being judged as the active home
+// (GAP-2328). It returns false when there is no such target, when the command
 // does not parse, or when it declares a function. On a Windows home only
 // the drive paths below the home are returned (C:/Users/<u>/...): active
 // state lives below the home.
@@ -270,9 +272,9 @@ func ShellRedirectTargets(command, activeHome string) ([]string, bool) {
 					if assign.Name != nil && homeVariableName(assign.Name.Value) {
 						changed(start)
 					}
-					if assign.Naked && assign.Value != nil && projectPOSIXWord(assign.Value).Expands {
-						changed(end)
-					}
+				}
+				if literalHomeNameMention(cmd) {
+					changed(end) // declare -n ref=HOME, declare "HOME$x"
 				}
 			case *syntax.CallExpr:
 				for _, assign := range cmd.Assigns {
@@ -288,8 +290,15 @@ func ShellRedirectTargets(command, activeHome string) ([]string, bool) {
 				if len(cmd.Args) == 0 {
 					return true
 				}
+				// Code run from text, a file or an expanded program word, or
+				// a builtin that sets variables, may change HOME only out of
+				// sight; a later home spelling is still judged as the active
+				// home (if HOME did change, the shell writes below another
+				// home, which is no benign project write either). Only text
+				// that names HOME, USER or LOGNAME keeps the skip (GAP-2328).
 				program := projectPOSIXWord(cmd.Args[0])
-				if program.Expands || redirectHomeChangingBuiltin(program.Value, cmd.Args[1:]) {
+				if (program.Expands || redirectHomeChangingBuiltin(program.Value, cmd.Args[1:])) &&
+					literalHomeNameMention(cmd) {
 					changed(end)
 				}
 			}
@@ -433,6 +442,39 @@ func homeVariableName(name string) bool {
 func homeNameMention(text string) bool {
 	return strings.Contains(text, "HOME") || strings.Contains(text, "USER") ||
 		strings.Contains(text, "LOGNAME")
+}
+
+var homeNameToken = regexp.MustCompile(`(^|[^A-Za-z0-9_])(HOME|USER|LOGNAME)([^A-Za-z0-9_]|$)`)
+
+// literalHomeNameMention reports text in node that names HOME, USER or
+// LOGNAME as a whole word (HOME=/x, export HOME, eval 'USER=x',
+// declare -n r=LOGNAME). A read of the variable ($HOME, ${USER}) does not
+// write it and does not count; the operand words of an expansion
+// (${X:-HOME=/x}) do. USERNAME or HOME_DIR are other names.
+func literalHomeNameMention(node syntax.Node) bool {
+	found := false
+	syntax.Walk(node, func(inner syntax.Node) bool {
+		if found {
+			return false
+		}
+		switch typed := inner.(type) {
+		case *syntax.ParamExp:
+			if typed.Exp != nil && typed.Exp.Word != nil && literalHomeNameMention(typed.Exp.Word) {
+				found = true
+			}
+			if typed.Repl != nil && ((typed.Repl.Orig != nil && literalHomeNameMention(typed.Repl.Orig)) ||
+				(typed.Repl.With != nil && literalHomeNameMention(typed.Repl.With))) {
+				found = true
+			}
+			return false
+		case *syntax.Lit:
+			found = homeNameToken.MatchString(typed.Value)
+		case *syntax.SglQuoted:
+			found = homeNameToken.MatchString(typed.Value)
+		}
+		return !found
+	})
+	return found
 }
 
 func homeAssignmentWord(value string) bool {

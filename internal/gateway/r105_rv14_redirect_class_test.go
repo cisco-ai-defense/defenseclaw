@@ -181,3 +181,83 @@ func TestR105GitBashRedirectTargetOfWindowsHome(t *testing.T) {
 		}
 	}
 }
+
+// GAP-2328 (checker it13 RV15-1): a statement before the redirect that runs
+// code from a file, from text or from an expanded program word (source,
+// ., eval, $CMD, set -a around a source, a variable setter) may change HOME
+// only out of sight. The home-spelled target is still judged as the active
+// home: if HOME did change, the shell writes below another home, which is
+// no benign project write either. The benign twin (~/build.log) stays
+// allowed; only a statement that names HOME, USER or LOGNAME as written
+// text keeps the target unresolved.
+func TestR105CodeBeforeAHomeRedirectTargetStillJudgesIt(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX home")
+	}
+	home, cwd := r104ReviewHome(t)
+	if err := os.MkdirAll(filepath.Join(home, ".defenseclaw", "hooks"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{
+		filepath.Join(home, ".defenseclaw", "config.yaml"),
+		filepath.Join(cwd, "build.sh"),
+		filepath.Join(cwd, "env.sh"),
+		filepath.Join(cwd, "in.txt"),
+	} {
+		if err := os.WriteFile(name, []byte("x\n"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	prefixes := []string{
+		"source .venv/bin/activate && ",
+		". ./env.sh; ",
+		"cd sub && source env.sh && ",
+		"source ~/.bashrc; ",
+		"set -a; . ./env.sh; set +a; ",
+		"eval true && ",
+		`eval "$(direnv export bash)"; `,
+		"$CMD; ",
+		"read -r v < in.txt; ",
+		"printf -v v %s x; ",
+		"mapfile -t a < in.txt; ",
+		"export $VARS; ",
+		"export USERNAME=dev; ",
+		"trap 'echo done' EXIT; ",
+	}
+	programs := []string{"make", "./build.sh", `python3 -c "print('mode: observe')"`, "npm test",
+		"echo $X", "node x.js"}
+	for _, connectorName := range []string{"claudecode", "codex"} {
+		installDefaultProfileConnector(t, connectorName)
+		judge := func(command string, block bool) {
+			t.Helper()
+			input := actionfacts.Input{
+				Tool: "Bash", Command: command, CWD: cwd,
+				ActiveHome: home, DialectHint: actionfacts.DialectPOSIX,
+			}
+			findings := dispatchTrustedAction(t.Context(), trustedActionRequest{
+				Input: input, Connector: connectorName, EnforcementCapable: true,
+			})
+			if blocked := buildVerdict(findings, "tool_call").Action == "block"; blocked != block {
+				t.Errorf("%s %q: blocked=%v, want %v (%v)",
+					connectorName, command, blocked, block, FindingStrings(findings))
+			}
+		}
+		for _, prefix := range prefixes {
+			for _, program := range programs {
+				for _, spelling := range []string{"~/", "$HOME/", home + "/"} {
+					judge(prefix+program+" > "+spelling+".defenseclaw/config.yaml", true)
+					judge(prefix+program+" > "+spelling+"build.log", false)
+				}
+			}
+		}
+		// Benign work after code that may change HOME stays allowed.
+		for _, command := range []string{
+			"source .venv/bin/activate && pytest > ~/test.log",
+			". ./env.sh; make > ~/build.log",
+			`eval "$(direnv export bash)"; npm test > $HOME/npm.log`,
+			"source .venv/bin/activate && grep x ~/.defenseclaw/config.yaml > ~/out.txt",
+		} {
+			judge(command, false)
+		}
+	}
+}
