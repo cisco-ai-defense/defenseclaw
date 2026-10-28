@@ -3281,6 +3281,19 @@ _dc_gateway_post_once() {
     if [ "$_dc_post_max_time" -le 4 ] && [ "$_dc_post_remaining" -gt 2 ]; then
       _dc_post_remaining=$((_dc_post_remaining - 1))
     fi
+    # The same bound in milliseconds, for the helper (GAP-2279): the whole
+    # seconds above round the shell's own time up, so a call that spent
+    # 0.4 s reading a large body gave the helper 2 s of the 2.6 s left after
+    # the startup reserve, and was closed at 2.4 s. The helper gets the time
+    # left after that reserve, never less than the whole seconds above and
+    # never a whole second more; an older helper reads only --max-time.
+    local _dc_post_remaining_ms=$(( _dc_post_max_time * 1000 - _DC_ELAPSED_MS ))
+    if [ "$_dc_post_max_time" -le 4 ]; then
+      _dc_post_remaining_ms=$(( _dc_post_remaining_ms - 1000 ))
+    fi
+    if [ "$_dc_post_remaining_ms" -lt $(( _dc_post_remaining * 1000 )) ]; then
+      _dc_post_remaining_ms=$(( _dc_post_remaining * 1000 ))
+    fi
     # harden_env moved HOME to a private scratch directory. Use the account
     # home it retained before that move, then verify every path component.
     local _dc_agent_home="${DEFENSECLAW_AGENT_HOME:-}"
@@ -3385,7 +3398,7 @@ _dc_gateway_post_once() {
             # 126, as for a helper that cannot run: nothing was sent.
             ulimit -S -v "$_DC_HOOK_NATIVE_VMEM_LIMIT" 2>/dev/null || exit 126
           fi
-          exec "$_dc_post_bin" hook-post --api-addr "$API_ADDR" --max-time "$_dc_post_remaining" --curl-output
+          _DC_HOOK_POST_DEADLINE_MS="$_dc_post_remaining_ms" exec "$_dc_post_bin" hook-post --api-addr "$API_ADDR" --max-time "$_dc_post_remaining" --curl-output
         ) 2>/dev/null |
         defenseclaw_keep_nul_visible
       exit "${PIPESTATUS[1]}"

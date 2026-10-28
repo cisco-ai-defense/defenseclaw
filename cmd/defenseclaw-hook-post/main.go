@@ -16,6 +16,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strconv"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector/hookexec"
@@ -86,7 +87,7 @@ func run(args []string, input io.Reader, output io.Writer) error {
 	} else if request, err = hookexec.DecodePerUserPluginRequest(data); err != nil {
 		return err
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(*maxTime)*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), requestTimeout(*maxTime))
 	defer cancel()
 	response, err := hookexec.PostPerUserHook(ctx, *apiAddr, request.Path, request.Headers, []byte(request.Body))
 	if err != nil {
@@ -97,6 +98,23 @@ func run(args []string, input io.Reader, output io.Writer) error {
 	}
 	_, err = fmt.Fprintf(output, "%s\n%d", response.Body, response.Status)
 	return err
+}
+
+// hookPostDeadlineEnv is the shell hook's time left for this request in
+// milliseconds (_hardening.sh defenseclaw_gateway_post). --max-time is whole
+// seconds, which rounds the shell's own time up and cost a large tool call
+// up to most of a second of its answer budget (GAP-2279). The value counts
+// only below --max-time plus one second, so it never stretches the request
+// by a whole second; without it, --max-time alone bounds the request.
+const hookPostDeadlineEnv = "_DC_HOOK_POST_DEADLINE_MS"
+
+func requestTimeout(maxTime int) time.Duration {
+	limit := time.Duration(maxTime) * time.Second
+	ms, err := strconv.Atoi(os.Getenv(hookPostDeadlineEnv))
+	if err != nil || ms < 1 || ms >= (maxTime+1)*1000 {
+		return limit
+	}
+	return time.Duration(ms) * time.Millisecond
 }
 
 func main() {
