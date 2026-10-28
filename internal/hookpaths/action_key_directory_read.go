@@ -8,6 +8,8 @@ import (
 	"path"
 	"path/filepath"
 	"strings"
+
+	"mvdan.cc/sh/v3/syntax"
 )
 
 // actionRecursiveKeyDirectoryRead reports a content reader that walks the
@@ -221,4 +223,97 @@ func actionWindowsPipedKeyDirectoryRead(head, reader []string, cwd, home string)
 		}
 	}
 	return false
+}
+
+// actionCertainDirectoryCalls maps each call that runs only after a cd or
+// pushd to one absolute directory succeeded to that cd call: in cd /proj &&
+// grep -rn TODO . the grep runs in /proj and in no directory an earlier cd
+// named (GAP-2421). Only the statement just before && counts, so a relative
+// directory (CDPATH), cd -, a directory set by another program (source,
+// eval, a function) and a cd in a subshell or group keep every candidate.
+// A command that defines its own cd or pushd keeps them all too.
+func actionCertainDirectoryCalls(file *syntax.File, home string) map[*syntax.CallExpr]*syntax.CallExpr {
+	certain := make(map[*syntax.CallExpr]*syntax.CallExpr)
+	redefined := false
+	syntax.Walk(file, func(node syntax.Node) bool {
+		if decl, ok := node.(*syntax.FuncDecl); ok && decl.Name != nil {
+			if name := decl.Name.Value; name == "cd" || name == "pushd" {
+				redefined = true
+			}
+		}
+		return !redefined
+	})
+	if redefined {
+		return certain
+	}
+	// syntax.Walk visits an outer && before the ones inside its right side,
+	// so the innermost cd a call depends on is the one kept.
+	syntax.Walk(file, func(node syntax.Node) bool {
+		binary, ok := node.(*syntax.BinaryCmd)
+		if !ok || binary.Op != syntax.AndStmt {
+			return true
+		}
+		last := binary.X
+		for {
+			inner, ok := last.Cmd.(*syntax.BinaryCmd)
+			if !ok || inner.Op != syntax.AndStmt {
+				break
+			}
+			last = inner.Y
+		}
+		cd, ok := last.Cmd.(*syntax.CallExpr)
+		if !ok || last.Negated || last.Background || last.Coprocess || len(last.Redirs) != 0 ||
+			len(cd.Assigns) != 0 || len(cd.Args) != 2 {
+			return true
+		}
+		program, programStatic := StaticWord(cd.Args[0], home)
+		target, targetStatic := StaticWord(cd.Args[1], home)
+		if !programStatic || !targetStatic || program != "cd" && program != "pushd" || !filepath.IsAbs(target) {
+			return true
+		}
+		syntax.Walk(binary.Y, func(inner syntax.Node) bool {
+			if call, ok := inner.(*syntax.CallExpr); ok {
+				certain[call] = cd
+			}
+			return true
+		})
+		return true
+	})
+	return certain
+}
+
+// actionWindowsCertainLocation reports a location statement whose success
+// a following && statement needs to place it in next and nowhere earlier
+// (GAP-2421). cmd's cd and chdir without /d change the directory of the
+// named drive only, so they are certain only when every earlier candidate
+// is on that drive; cd - and cd + return to an earlier directory.
+func actionWindowsCertainLocation(statement []string, next string, earlier []string) bool {
+	if operand := strings.TrimSpace(statement[1]); operand == "-" || operand == "+" || strings.HasPrefix(operand, "-") {
+		return false
+	}
+	switch strings.TrimSuffix(strings.ToLower(programBase(strings.ReplaceAll(statement[0], `\`, "/"))), ".exe") {
+	case "sl", "set-location", "pushd", "push-location":
+		return true
+	case "cd", "chdir":
+		drive := actionWindowsDrive(next)
+		if drive == "" {
+			return false
+		}
+		for _, dir := range earlier {
+			if actionWindowsDrive(dir) != drive {
+				return false
+			}
+		}
+		return true
+	}
+	return false
+}
+
+// actionWindowsDrive is the lower-case drive letter of an absolute Windows
+// path (C:\x, C:/x), or "" for any other spelling.
+func actionWindowsDrive(dir string) string {
+	if len(dir) >= 3 && asciiLetter(dir[0]) && dir[1] == ':' && (dir[2] == '\\' || dir[2] == '/') {
+		return strings.ToLower(dir[:1])
+	}
+	return ""
 }
