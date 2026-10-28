@@ -349,6 +349,23 @@ holder. Stop that gateway or move it, then run `installer -pkg` again (or
 receipt). A per-user gateway on another port keeps running; the install, `status`
 and `verify` name each such account with `per_user_gateway_running`.
 
+## Scan skills, MCP servers and plugins
+
+The package installs the skill, MCP and plugin scanners. An administrator scans with the
+gateway's scanners, policy and judge:
+
+```bash
+sudo /opt/cisco/defenseclaw/bin/defenseclaw-gateway scan skill /opt/defenseclaw-scan/my-skill
+sudo /opt/cisco/defenseclaw/bin/defenseclaw-gateway scan plugin /opt/defenseclaw-scan/my-plugin
+sudo /opt/cisco/defenseclaw/bin/defenseclaw-gateway scan mcp https://mcp.example.com/mcp
+```
+
+The scan runs through the managed gateway, and only an administrator can read its token, so run
+it with `sudo`. The gateway service cannot read user folders (`/Users`, `/var/root`). Copy the folder to one that every account can read, such as
+`/opt/defenseclaw-scan`, and scan the copy. A refused scan exits `3` and says `Nothing was
+scanned`. A deployment installed from the payload archive has no scanner runtime: install the
+package to scan.
+
 ## Remove
 
 Run these as root from `/opt/cisco/defenseclaw/bin`.
@@ -364,7 +381,7 @@ Uninstall removes each user's DefenseClaw hook registrations and DefenseClaw's o
 machine-policy entries first; administrator entries stay. Use `--purge` for a clean
 image. With `--purge` it also stops each enrolled user's per-user gateway and
 removes `~/.defenseclaw`, the empty agent folders DefenseClaw created, the
-per-user binaries in `~/.local/bin` and DefenseClaw's wheels in `~/.cache/uv`. If an enrolled account had its own DefenseClaw install before the enrollment (its `~/.defenseclaw` holds `config.yaml`, `.env`, `audit.db` or `previous/`), `--purge` leaves that folder and the install's binaries exactly as they are and names the account in the result (`kept the DefenseClaw per-user data of user <name> ...` and a `per_user_state_remaining` warning). A machine uninstall never deletes or moves an account's own data. Accounts the deployment never enrolled keep their DefenseClaw files (an earlier per-user install, or hooks a former enrollment left). The purge result lists each such account on a `kept:` warning; delete those files with the account's owner. An account the machine policy covered without a per-user enrollment (not named in the enrollment manifest) keeps its `~/.defenseclaw` too: when that folder holds only the hook files and connector backups DefenseClaw wrote, the result lists those accounts on their own `kept:` warning, and an administrator can delete the folders; when it holds the account's own install, the account is named as above. The result's `kept:` line names accounts that
+per-user binaries in `~/.local/bin` and DefenseClaw's wheels in `~/.cache/uv`. If an enrolled account had its own DefenseClaw install before the enrollment (its `~/.defenseclaw` holds `config.yaml`, `.env`, `audit.db` or `previous/`), `--purge` leaves that folder and the install's binaries exactly as they are and names the account in the result (`kept the DefenseClaw per-user data of user <name> ...` and a `per_user_state_remaining` warning). A machine uninstall never deletes or moves an account's own data. The purge first moves the backups an earlier release saved for a connector it removed (`connector_backups/openhands` and `connector_backups/omnigent`) to `~/.defenseclaw-removed-connector-backups`, and stops without deleting anything if it cannot. Accounts the deployment never enrolled keep their DefenseClaw files (an earlier per-user install, or hooks a former enrollment left). The purge result lists each such account on a `kept:` warning; delete those files with the account's owner. An account the machine policy covered without a per-user enrollment (not named in the enrollment manifest) keeps its `~/.defenseclaw` too: when that folder holds only the hook files and connector backups DefenseClaw wrote, the result lists those accounts on their own `kept:` warning, and an administrator can delete the folders; when it holds the account's own install, the account is named as above. The result's `kept:` line names accounts that
 keep data. Pass `--purge` in the same run as the uninstall: uninstall deletes the
 list of enrolled accounts, so a later `--purge` is a no-op (`not_installed`). To
 clean up afterward, delete `~/.defenseclaw` by hand, or install again and run

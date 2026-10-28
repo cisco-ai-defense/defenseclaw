@@ -112,6 +112,12 @@ sudo /opt/cisco/defenseclaw/bin/defenseclaw-gateway audit export --since 2h --co
 | `audit export` | The audit records as JSONL, oldest first. `--since` and `--until` take an RFC3339 time or a duration ago (`30m`, `2h`). `--limit N` keeps the first N matching rows, or with `--newest` the N most recent. `--connector` keeps one agent's rows, and `--output` writes a file (it refuses to replace one unless you pass `--force`). An administrator can use `--db <copied-audit.db>` to read a retained database copy read-only after decommission; keep its WAL and SHM companions with it. |
 | `audit findings` | The distinct current scan findings: skill, MCP, plugin, code, AIBOM and inventory scans. Guardrail decisions are not tracked here; use `alerts` or `audit export` |
 
+`scan skill`, `scan plugin` and `scan mcp` also run as root on a managed Linux or macOS host: the
+package installs the scanners and the scan runs through the managed gateway. A folder inside
+a home or temporary folder is refused until you copy it to one the service can read. See
+[Linux](/docs/enterprise/linux#scan-skills-mcp-servers-and-plugins) and
+[macOS](/docs/enterprise/macos#scan-skills-mcp-servers-and-plugins).
+
 On managed Windows, use `defenseclaw enterprise windows status --profile standalone --json`
 from an elevated administrator prompt. The `enrollment.accounts` field lists each
 account's connectors and their enrolled, pending or failed state.
@@ -532,10 +538,15 @@ account: DefenseClaw's registration or plugin in the agent's default config; the
 modes of a user-owned `~/.defenseclaw` and its hooks folder (restored to `0700`); a
 deleted or edited hook script, and a hook runtime whose fail mode no longer matches
 the config; a missing `~/.kiro` or `~/.kiro/hooks` folder; and group or other write
-on the home folder of an enrolled user. It changes nothing else, so these stay
+on the home folder of an enrolled user; a `features.hooks` key in the user's `~/.codex/config.toml`
+under Codex machine policy (it conflicts with the pinned setting, and Codex then refuses project
+trust writes); and a native OTLP exporter in the user's `~/.codex/config.toml` or
+`~/.claude/settings.json` that carries a DefenseClaw credential. It changes nothing else, so these stay
 unprotected until the user or an administrator fixes them: a link or non-directory
 where an agent's config folder belongs, an agent config the agent cannot parse, a
 special file such as a named pipe at a config path, and files another account owns.
+
+A file event starts a guardian pass at once, and the pass watches every protected target for 300 ms, so a program that rewrites an agent's hook block over and over (Hermes was the case tested) is repaired within about 3 seconds of its first damaged write. Faster restores can still undo the repair. On macOS the guardian reads an account's launchd `HERMES_HOME` (set with `launchctl setenv`), so a Hermes home outside `~/.hermes` is protected.
 
 To find the account, read `warnings[]` in `status --json` or `verify --json`: each
 `guardian_target_user_path` and `guardian_target_failed` entry names the user, the
