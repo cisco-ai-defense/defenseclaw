@@ -5277,7 +5277,7 @@ func homeSpellingTwinRequest(request trustedActionRequest, logins ...string) (tr
 	if !known {
 		return trustedActionRequest{}, false
 	}
-	respell := func(spelling string) string { return spelling }
+	var respell func(string) string
 	rewritten, prefixes, ok := actionfacts.ActiveUserTildeTwin(command, request.Input.ActiveHome, logins...)
 	if ok {
 		home := strings.TrimRight(filepath.ToSlash(request.Input.ActiveHome), "/")
