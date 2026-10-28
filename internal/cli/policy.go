@@ -125,15 +125,20 @@ var policyValidateCmd = &cobra.Command{
 
 		if _, statErr := os.Stat(regoDir); errors.Is(statErr, fs.ErrNotExist) {
 			// An existing policy root without Rego is config-only mode, as
-			// the gateway treats it. A missing root is a failed reload.
+			// the gateway treats it, and so is no policy_dir at all. A
+			// missing configured root is a failed reload.
 			paths, err := resolvePolicyPaths()
 			if err != nil {
 				return err
 			}
 			if _, rootErr := os.Stat(paths.rootDir); rootErr != nil {
-				return fmt.Errorf("policy: compilation failed:\npolicy: read rego directory: %w", statErr)
+				if policyDirConfigured() {
+					return fmt.Errorf("policy: compilation failed:\npolicy: read rego directory: %w", statErr)
+				}
+				fmt.Println("No policy_dir is set, so the gateway loads no Rego: the admission policy is compiled from config.yaml alone.")
+			} else {
+				fmt.Printf("No Rego directory at %s: the admission policy is compiled from config.yaml alone.\n", regoDir)
 			}
-			fmt.Printf("No Rego directory at %s: the admission policy is compiled from config.yaml alone.\n", regoDir)
 		} else {
 			fmt.Fprintf(os.Stderr, "Validating Rego in %s ...\n", regoDir)
 			if _, err := policy.NewExact(regoDir); errors.Is(err, policy.ErrNoModules) {
@@ -197,7 +202,8 @@ var policyTestCmd = &cobra.Command{
 				if pathErr != nil {
 					return pathErr
 				}
-				if info, rootErr := os.Stat(paths.rootDir); rootErr == nil && info.IsDir() {
+				info, rootErr := os.Stat(paths.rootDir)
+				if (rootErr == nil && info.IsDir()) || (errors.Is(rootErr, fs.ErrNotExist) && !policyDirConfigured()) {
 					fmt.Fprintln(cmd.OutOrStdout(), noRegoTestsMessage(regoDir))
 					return nil
 				}
@@ -235,6 +241,16 @@ var policyTestCmd = &cobra.Command{
 		}
 		return nil
 	},
+}
+
+// policyDirConfigured reports a policy_dir set in config.yaml. Without one
+// the gateway loads no Rego and decides from config.yaml alone (a Windows
+// managed install clears it, config.standalonePolicyDirDefault, and ships
+// no data_dir policies folder), so validate and test take the absent
+// default folder for that config-only mode instead of failing on it
+// (GAP-2292).
+func policyDirConfigured() bool {
+	return cfg != nil && strings.TrimSpace(cfg.PolicyDir) != ""
 }
 
 // noRegoTestsMessage explains a Rego directory without unit tests.
