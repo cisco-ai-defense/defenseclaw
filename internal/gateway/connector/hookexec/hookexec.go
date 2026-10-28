@@ -531,7 +531,7 @@ func runHook(ctx context.Context, opts Options) int {
 		return failUnreachable(
 			opts,
 			sp,
-			"closed",
+			managedRuntimeFailureMode(opts, reason),
 			reason,
 		)
 	}
@@ -3211,6 +3211,28 @@ func managedPlainFailClosed(opts Options, sp spec) bool {
 		return true
 	}
 	return opts.ManagedEnterprise && opts.ExplainUnenrolledAccount && sp.connector != "copilot"
+}
+
+// ManagedEnrollmentGap reports a managed runtime failure reason that says
+// the account is not enrolled yet: absent from the protected target set, or
+// registered with no runtime the Guardian has published. Both come from
+// machine-side state, never from the account's own files.
+func ManagedEnrollmentGap(reason string) bool {
+	return reason == managedSIDUnregisteredReason || reason == managedEnrollmentPendingReason
+}
+
+// managedRuntimeFailureMode is the fail mode of a managed runtime failure.
+// A Secure Client hook (opts.SecureClient and secureClientHook) on an
+// account that is not enrolled yet (ManagedEnrollmentGap) follows its fail
+// mode, which internal/cli sets to the profile's open default (#1163) or to
+// closed under strict availability. Every other runtime failure (a missing
+// or invalid runtime the account could have changed), and every failure
+// outside Secure Client, fails closed.
+func managedRuntimeFailureMode(opts Options, reason string) string {
+	if opts.SecureClient && secureClientHook(opts) && ManagedEnrollmentGap(reason) {
+		return normalizeFailMode(opts.FailMode)
+	}
+	return "closed"
 }
 
 // managedPeerFailMode is the fail mode of a managed peer-verification

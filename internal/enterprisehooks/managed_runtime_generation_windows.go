@@ -291,8 +291,8 @@ func resolveWindowsManagedRuntimeGenerationPlatform(
 	}
 	if !opts.MachinePolicyRegistered {
 		return result, fmt.Errorf(
-			"%s: connector %s SID %s is not enrolled by the primary machine policy",
-			WindowsManagedSIDUnregisteredReason,
+			"%w: connector %s SID %s is not enrolled by the primary machine policy",
+			ErrWindowsManagedSIDUnregistered,
 			opts.Connector,
 			opts.TargetSID,
 		)

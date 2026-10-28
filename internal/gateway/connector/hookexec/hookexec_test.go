@@ -2295,6 +2295,52 @@ func TestManagedEnterpriseResolverFailureBlocksBeforeRuntimeOrGateway(t *testing
 // stderr line, so the Windows refusal of a new account leads with the wait
 // and the next step instead of "defenseclaw: blocking claude-code tool: this
 // account is not enrolled in DefenseClaw on t...".
+// A Secure Client account that is not enrolled yet (absent from the target
+// set, or registered without a published runtime) follows the hook's fail
+// mode, open by default, without contacting the gateway. Closed, strict
+// availability, any other runtime failure, and the same account outside
+// Secure Client still block.
+func TestSecureClientUnenrolledAccountFollowsFailMode(t *testing.T) {
+	events := map[string]string{
+		"codex": "PreToolUse", "claudecode": "PreToolUse",
+		"cursor": "beforeShellExecution", "copilot": "preToolUse",
+	}
+	blocked := func(r runResult) bool {
+		return r.code == blockExit || strings.Contains(r.stdout, `"deny"`) || strings.Contains(r.stdout, `"block"`)
+	}
+	for connector, event := range events {
+		for _, reason := range []string{managedSIDUnregisteredReason, managedEnrollmentPendingReason} {
+			for _, tc := range []struct {
+				name     string
+				mutate   func(*Options)
+				wantOpen bool
+			}{
+				{"open", func(*Options) {}, true},
+				{"closed", func(o *Options) { o.FailMode = "closed" }, false},
+				{"strict", func(o *Options) { o.StrictAvailability = true }, false},
+				{"not secure client", func(o *Options) { o.SecureClient = false }, false},
+				{"state invalid", func(o *Options) { o.ManagedRuntimeFailure = "enterprise_managed_runtime_state_invalid" }, false},
+			} {
+				name := connector + " " + reason + " " + tc.name
+				rt := ok(`{"action":"block"}`)
+				r := run(t, connector, rt, func(o *Options) {
+					o.Event = event
+					o.ManagedEnterprise = true
+					o.SecureClient = true
+					o.ManagedRuntimeFailure = reason
+					tc.mutate(o)
+				})
+				if rt.requests != 0 {
+					t.Fatalf("%s: a runtime failure must not contact the gateway", name)
+				}
+				if got := !blocked(r); got != tc.wantOpen {
+					t.Errorf("%s: allowed = %t, want %t; code=%d stdout=%q stderr=%q", name, got, tc.wantOpen, r.code, r.stdout, r.stderr)
+				}
+			}
+		}
+	}
+}
+
 func TestWindowsUnenrolledRefusalLeadsWithTheNextStep(t *testing.T) {
 	const lead = "DefenseClaw: this account is not enrolled yet; restart the agent in 5 minutes."
 	for _, reason := range []string{managedSIDUnregisteredReason, managedEnrollmentPendingReason} {
