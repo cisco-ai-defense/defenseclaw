@@ -158,7 +158,12 @@ def test_splunk_docs_skip_test_row_says_the_probe_runs_before_saving() -> None:
     assert "after setup" not in rows[0]
     assert "before it saves anything" in rows[0]
     assert "saves nothing" in rows[0]
-    assert "while it is stopped, setup saves the destination untested" in rows[0]
+    # The CLI sends the probe itself; the gateway only records it, so a
+    # stopped gateway means no probe, not a probe sent some other way.
+    assert "The probe runs through your gateway" not in rows[0]
+    assert "records each probe through your gateway" in rows[0]
+    assert "while it is stopped, the probe does not run" in rows[0]
+    assert "saves the destination untested" in rows[0]
 
 
 def _probe(monkeypatch, tmp_path: Path, error: Exception):
