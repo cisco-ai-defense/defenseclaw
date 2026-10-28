@@ -54,3 +54,23 @@ func TestTrimUTF8BOMRemovesOnlyOneLeadingMark(t *testing.T) {
 		}
 	}
 }
+
+// A Cursor call whose payload the hook cannot read fails closed with a deny
+// in the fields of every Cursor event, not "{}": cursor-agent 2026.10.22 ran
+// a tool call on "{}" with exit 2 (GAP-2449).
+func TestCursorCallWithAnUnreadablePayloadIsDeniedInEveryEventShape(t *testing.T) {
+	for _, stdin := range []string{"not json", "\xEF\xBB\xBF\xEF\xBB\xBF{\"hook_event_name\":\"beforeShellExecution\"}"} {
+		rt := &stubRT{status: 400, body: `{"error":"invalid JSON body","reason":"` + MalformedHookPayloadReason + `"}`}
+		result := run(t, "cursor", rt, func(o *Options) {
+			o.Event = ""
+			o.Stdin = strings.NewReader(stdin)
+		})
+		out := strings.TrimSpace(result.stdout)
+		if !strings.Contains(out, `"permission":"deny"`) || !strings.Contains(out, `"continue":false`) {
+			t.Fatalf("stdin %q: stdout = %q, want a deny for every Cursor event", stdin, out)
+		}
+		if result.code == 0 {
+			t.Fatalf("stdin %q: exit code 0, want a blocking code", stdin)
+		}
+	}
+}
