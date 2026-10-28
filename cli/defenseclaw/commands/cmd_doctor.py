@@ -8236,6 +8236,60 @@ def _codex_otel_unchecked_value(otel, product_token: str = "") -> str:
     return ""
 
 
+def _codex_otel_marked_kept(otel, api_port: int, product_token: str = "") -> list[tuple[str, str]]:
+    """Name Codex exporters that look like an earlier DefenseClaw render but are kept.
+
+    An exporter with both of DefenseClaw's markers (x-defenseclaw-source =
+    codex, x-defenseclaw-client = codex-otel/...) and a bearer, sent to a
+    loopback port other than this gateway's, with no credential this install
+    can name, is kept by setup as the operator's (the ownership rule never
+    goes by markers, GAP-1511). It is often a pre-setup copy an earlier
+    release saved and setup put back (GAP-1610), so Doctor warns with the
+    fields and the manual step (LEAD DECISION 05:36, option (b)); it never
+    fails or removes it. Returns (field, endpoint) pairs.
+    """
+    if not isinstance(otel, dict):
+        return []
+    known = [product_token] if product_token else []
+    kept = []
+    for key in sorted(otel, key=str):
+        table = otel.get(key)
+        if not isinstance(table, dict) or _otel_carries_product_credential(table, known):
+            continue
+        for kind in ("otlp-http", "otlp-grpc"):
+            exporter = table.get(kind)
+            if not isinstance(exporter, dict):
+                continue
+            raw_headers = exporter.get("headers")
+            headers = (
+                {str(k).strip().lower(): str(v).strip() for k, v in raw_headers.items() if isinstance(v, str)}
+                if isinstance(raw_headers, dict)
+                else {}
+            )
+            if headers.get("x-defenseclaw-source") != "codex" or not headers.get("x-defenseclaw-client", "").startswith(
+                "codex-otel/"
+            ):
+                continue
+            scheme, _, credential = headers.get("authorization", "").partition(" ")
+            if scheme.lower() != "bearer" or len(credential.strip()) < 8:
+                continue
+            endpoint = exporter.get("endpoint")
+            try:
+                parsed = urllib.parse.urlsplit(endpoint) if isinstance(endpoint, str) else None
+                port = parsed.port if parsed is not None else None
+            except ValueError:
+                parsed, port = None, None
+            if (
+                parsed is None
+                or (parsed.hostname or "") not in ("127.0.0.1", "localhost", "::1")
+                or port is None
+                or port == api_port
+            ):
+                continue
+            kept.append((f"otel.{key}", f"{parsed.hostname}:{port}"))
+    return kept
+
+
 def _codex_scoped_otlp_token(cfg) -> str:
     """The scoped Codex OTLP credential this install issued, or ""."""
     data_dir = str(getattr(cfg, "data_dir", "") or "")
@@ -8375,6 +8429,21 @@ def _check_codex_otel_alignment(cfg, r: _DoctorResult) -> None:
                 "so DefenseClaw kept it",
                 r=r,
                 remediation="if it is a DefenseClaw token, remove it; otherwise no action is needed",
+            )
+        marked = _codex_otel_marked_kept(otel, _gateway_api_port(cfg), _codex_scoped_otlp_token(cfg))
+        if marked:
+            fields = ", ".join(field for field, _ in marked)
+            targets = ", ".join(sorted({target for _, target in marked}))
+            _emit(
+                "warn",
+                "Codex OTel ownership",
+                f"config.toml {fields} carries DefenseClaw's x-defenseclaw-source and "
+                "x-defenseclaw-client headers and a bearer, but no credential this install "
+                "recorded, so setup keeps it as yours; Codex sends its prompt telemetry and "
+                f"that bearer to {targets}, which DefenseClaw does not serve",
+                r=r,
+                remediation=f"if you did not add it, delete the {fields} tables from {config_path} "
+                "(an earlier DefenseClaw setup or a copied config may have left them)",
             )
 
     try:
