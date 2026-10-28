@@ -13,6 +13,16 @@
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
+# The readiness probe names [ServiceProcess.ServiceControllerStatus]. Windows
+# PowerShell 5.1 loads that assembly only once a service cmdlet has run, and
+# this smoke stubs those out, so load it explicitly where it exists.
+try {
+    Add-Type -AssemblyName System.ServiceProcess -ErrorAction Stop
+}
+catch {
+    # Not available off Windows; the stub then reports a string status.
+}
+
 $modulePath = [IO.Path]::GetFullPath(
     [IO.Path]::Combine($PSScriptRoot, '..', 'DefenseClawEnterprise.psm1')
 )

@@ -2827,7 +2827,8 @@ targets:
                 [Parameter(Mandatory)][string]$GuardianServiceName,
                 [bool]$RequireBroker = $true,
                 [bool]$RequireEnumerator = $true,
-                [int]$TimeoutSeconds = 90
+                [int]$TimeoutSeconds = 90,
+                [switch]$AllowFailedTargets
             )
             $script:HarnessState.events.Add(
                 'readiness-require-broker:{0}' -f (
@@ -2847,7 +2848,8 @@ targets:
                 [Parameter(Mandatory)][string]$GatewayServiceName,
                 [Parameter(Mandatory)][string]$GuardianServiceName,
                 [string]$ExpectedManifestSHA256,
-                [int]$TimeoutSeconds = 90
+                [int]$TimeoutSeconds = 90,
+                [switch]$AllowFailedTargets
             )
             if ($script:HarnessState.service_start_modes[
                     $GatewayServiceName
