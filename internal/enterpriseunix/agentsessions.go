@@ -26,6 +26,7 @@ import (
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/enterprisepolicy"
+	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 	"github.com/defenseclaw/defenseclaw/internal/procboot"
 )
 
@@ -176,10 +177,37 @@ func (e *Env) agentSessionsStartedBefore(ctx context.Context, since time.Time, s
 			oldServer[session.UID] = true
 		}
 	}
+	all = oneProcessPerSession(all)
 	var out []agentSession
 	for _, session := range all {
 		if session.UID == 0 || session.UID == serviceUID || !session.Started.Before(since) ||
 			(agentsReadingHooksLive[session.Agent] && !session.CodexServer && !oldServer[session.UID]) {
+			continue
+		}
+		out = append(out, session)
+	}
+	return out
+}
+
+// oneProcessPerSession keeps the topmost process of each agent session: an
+// agent with a launcher (npm Codex: a node script and the native codex it
+// starts) is one session, so a warning names its launcher pid once
+// (GAP-2439). The Codex background server is restarted its own way, and an
+// unreadable process is not known to be an agent, so both stay listed as
+// they are.
+func oneProcessPerSession(sessions []agentSession) []agentSession {
+	processes := make([]enterprisestatus.SessionProcess, 0, len(sessions))
+	for _, session := range sessions {
+		if session.Unknown || session.CodexServer {
+			continue
+		}
+		processes = append(processes, enterprisestatus.SessionProcess{PID: session.PID, PPID: session.PPID,
+			User: strconv.Itoa(session.UID), Agent: session.Agent})
+	}
+	leaders := enterprisestatus.SessionLeaders(processes)
+	out := make([]agentSession, 0, len(sessions))
+	for _, session := range sessions {
+		if leader, ok := leaders[session.PID]; ok && !session.Unknown && !session.CodexServer && leader != session.PID {
 			continue
 		}
 		out = append(out, session)
