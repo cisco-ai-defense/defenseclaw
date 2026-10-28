@@ -281,6 +281,14 @@ func dispatchTrustedAction(
 	if parent == nil {
 		parent = context.Background()
 	}
+	// A ~<active user> tilde-prefix names the active home from the password
+	// database (GAP-2378): its twin with the home spelled out is judged too,
+	// and a block proven there counts, as for an absolute spelling.
+	if twin, ok := activeUserTildeTwinRequest(request); ok {
+		defer func() {
+			findings = withTwinProvenBlocks(findings, dispatchTrustedAction(parent, twin))
+		}()
+	}
 
 	facts = actionfacts.Analyze(request.Input)
 	analyzed = true
@@ -5231,6 +5239,50 @@ func trustedShellHeredocAt(
 	}
 	heredoc.delimiter = line[start:index]
 	return heredoc, true
+}
+
+// activeUserTildeTwinRequest returns request with its Bash command's
+// ~<active user> tilde-prefixes spelled as the active home
+// (actionfacts.ActiveUserTildeTwin). A hook client's resolved target for
+// the tilde spelling is kept for the spelled-out one. The twin records no
+// audit or telemetry of its own.
+func activeUserTildeTwinRequest(request trustedActionRequest) (trustedActionRequest, bool) {
+	if request.Input.DialectHint != actionfacts.DialectPOSIX && request.Input.DialectHint != "" {
+		return trustedActionRequest{}, false
+	}
+	command, known := trustedBashCommandInput(request.Input)
+	if !known {
+		return trustedActionRequest{}, false
+	}
+	rewritten, user, ok := actionfacts.ActiveUserTildeTwin(command, request.Input.ActiveHome)
+	if !ok {
+		return trustedActionRequest{}, false
+	}
+	twin := request
+	twin.record, twin.recordTelemetry = nil, nil
+	twin.Input.Command, twin.Input.Args, twin.Input.Argv = rewritten, nil, nil
+	twin.conflictSource = nil
+	if strings.Contains(request.LegacyText, command) {
+		twin.LegacyText = strings.ReplaceAll(request.LegacyText, command, rewritten)
+	} else {
+		twin.LegacyText = rewritten
+	}
+	if request.ResolvedWriteTargets != nil {
+		home := strings.TrimRight(filepath.ToSlash(request.Input.ActiveHome), "/")
+		prefix := "~" + user
+		twin.ResolvedWriteTargets = make(map[string]string, len(request.ResolvedWriteTargets))
+		for spelling, value := range request.ResolvedWriteTargets {
+			twin.ResolvedWriteTargets[spelling] = value
+		}
+		for spelling, value := range request.ResolvedWriteTargets {
+			if spelling == prefix || strings.HasPrefix(spelling, prefix+"/") {
+				if _, taken := twin.ResolvedWriteTargets[home+spelling[len(prefix):]]; !taken {
+					twin.ResolvedWriteTargets[home+spelling[len(prefix):]] = value
+				}
+			}
+		}
+	}
+	return twin, true
 }
 
 func trustedBashCommandInput(input actionfacts.Input) (string, bool) {
