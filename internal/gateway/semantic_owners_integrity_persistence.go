@@ -2910,6 +2910,10 @@ func findCommandStaysOffStateOf(home, root string) func(words []string, inEntryD
 		}
 		for index, word := range words {
 			program := findProgramName(word)
+			if _, commandString := findCommandStringPrograms[program]; commandString &&
+				(index == 0 || findCommandWrapsNext(words[index-1])) {
+				return false
+			}
 			if _, shell := findShellPrograms[program]; shell {
 				// find hands a shell's -c script to the shell, which removes
 				// its quotes and escapes, so the script is judged by the
@@ -2937,6 +2941,13 @@ func findCommandStaysOffStateOf(home, root string) func(words []string, inEntryD
 		}
 		return true
 	}
+}
+
+// findCommandWrapsNext reports a word that runs the next word as a
+// program (env, sudo, nice, ...), or an environment assignment before it.
+func findCommandWrapsNext(word string) bool {
+	_, wrapper := findScriptRefusedPrograms[findProgramName(word)]
+	return wrapper || strings.Contains(word, "=")
 }
 
 // findShellRunsAScript reports a shell word after the first that runs a

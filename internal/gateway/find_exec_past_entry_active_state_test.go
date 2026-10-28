@@ -111,6 +111,21 @@ func TestFindCleanupNamesHoldOnlyForACommandOnTheEntry(t *testing.T) {
 		{"home sh for dirname", `find ~ -name '*.zzz' -exec sh -c 'for f; do rm -rf "$(dirname "$f")"; done' _ {} +`, true, ""},
 		{"home sh for param parent", `find ~ -name '*.zzz' -exec sh -c 'for f; do rm -rf "${f%/*}"; done' _ {} +`, true, ""},
 		{"home sh unknown var", `find ~ -name '*.zzz' -exec sh -c 'rm -rf "$D"' _ {} \;`, true, ""},
+		// pod check13 R rows: a glob suffix strip, a non-POSIX shell, brace
+		// expansion and a command-string program reach past the entry.
+		{"R1 logs sh glob strip to hooks", `find ~/.defenseclaw/logs -name '*.log' -exec sh -c 'rm -rf "${1%logs*}hooks"' _ {} \;`, true, ""},
+		{"R2 logs sh glob strip to root", `find ~/.defenseclaw/logs -name '*.log' -exec sh -c 'rm -rf "${1%logs*}"' _ {} \;`, true, ""},
+		{"R3 logs sh large glob strip to home", `find ~/.defenseclaw/logs -name '*.log' -exec sh -c 'rm -rf "${1%%.*}"' _ {} \;`, true, ""},
+		{"R4 home sh glob strip to home", `find ~ -name '*.txt' -exec sh -c 'rm -rf "${1%proj2*}"' _ {} \;`, true, ""},
+		{"R5 logs sh question glob strip", `find ~/.defenseclaw/logs -name '*.log' -exec sh -c 'rm -rf "${1%l?gs*}hooks"' _ {} \;`, true, ""},
+		{"R6 logs sh for glob strip", `find ~/.defenseclaw/logs -name '*.log' -exec sh -c 'for f; do rm -rf "${f%logs*}hooks"; done' _ {} +`, true, ""},
+		{"R7 logs zsh history modifiers", `find ~/.defenseclaw/logs -name '*.log' -exec zsh -c 'rm -rf $1:h:h/hooks' _ {} \;`, true, ""},
+		{"R8 logs execdir bash brace", `find ~/.defenseclaw/logs -name '*.log' -execdir bash -c 'rm -rf {.,}./hooks' \;`, true, ""},
+		{"R9 logs execdir flock script", `find ~/.defenseclaw/logs -name '*.log' -execdir flock /tmp/zzl -c 'cd .\.; rm -rf hooks' \;`, true, ""},
+		// pod check13 B7: a variable assigned the entry names the entry.
+		{"B7 home sh assign entry", `find ~ -name '*.wav' -exec sh -c 'f="$1"; cp "$f" "${f%.wav}.mp3"' _ {} \;`, false, ""},
+		{"home grep word su", `find ~ -name '*.txt' -exec grep -l su {} +`, false, ""},
+		{"home sh assign other", `find ~ -name '*.zzz' -exec sh -c 'f="$1"; f="${f%/*}"; rm -rf "$f"' _ {} \;`, true, ""},
 	}
 	for index := range rows {
 		rows[index].command = strings.ReplaceAll(rows[index].command, "<HOME>", home)

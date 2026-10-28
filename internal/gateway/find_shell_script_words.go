@@ -25,6 +25,25 @@ var findScriptRefusedPrograms = map[string]struct{}{
 	"local": {}, "export": {}, "alias": {}, "trap": {}, "let": {}, "shift": {}, "getopts": {},
 	"env": {}, "nice": {}, "nohup": {}, "sudo": {}, "doas": {}, "su": {}, "runuser": {},
 	"timeout": {}, "stdbuf": {}, "ionice": {}, "time": {}, "chroot": {}, "xargs": {}, "parallel": {},
+	"flock": {}, "script": {}, "watch": {}, "setsid": {}, "unshare": {}, "systemd-run": {}, "sg": {},
+}
+
+// findCommandStringPrograms run a command line given as one of their own
+// words (`flock LOCK -c SCRIPT`, `script -c SCRIPT`, `su -c SCRIPT`,
+// `watch CMD`) or start the rest of their words as a new command, so a
+// find command that runs one of them is not read as staying off the state
+// (pod check13 R9).
+var findCommandStringPrograms = map[string]struct{}{
+	"flock": {}, "script": {}, "su": {}, "runuser": {}, "watch": {}, "setsid": {}, "unshare": {},
+	"systemd-run": {}, "sg": {},
+}
+
+// findPOSIXGrammarShells are the shells whose -c script the hook shell
+// grammar reads as they run it. zsh, fish, csh and tcsh expand words the
+// grammar does not model (zsh `$1:h:h`, pod check13 R7), so their scripts
+// never stay off the state here.
+var findPOSIXGrammarShells = map[string]struct{}{
+	"sh": {}, "bash": {}, "dash": {}, "ksh": {}, "mksh": {}, "ash": {},
 }
 
 // findShellInvocationStaysOff judges `sh [options] -c SCRIPT [name [args...]]`
@@ -35,6 +54,9 @@ var findScriptRefusedPrograms = map[string]struct{}{
 // after the script are plain argv words. A shell with no -c script reads
 // a file or stdin, which is not read here, so it does not stay off.
 func findShellInvocationStaysOff(words []string, home, root string, inEntryDir bool) bool {
+	if _, posix := findPOSIXGrammarShells[findProgramName(words[0])]; !posix {
+		return false
+	}
 	index := 1
 	for ; index < len(words); index++ {
 		word := words[index]
@@ -67,7 +89,9 @@ func findShellInvocationStaysOff(words []string, home, root string, inEntryDir b
 // the positionals (`for f; do`, `for f in "$@"`), a %/%% suffix strip
 // without '/' or a #/## prefix strip of one, and `$(basename ...)` of
 // those name the entry the script is handed (pod check12 N1, N2, N5, N6,
-// N10). Any other expansion, a here-document, an assignment, a function,
+// N10), and so does a variable assigned one positional (`f="$1"`, pod
+// check13 B7). Any other expansion, a here-document, any other
+// assignment, a function,
 // a case/arithmetic/test clause and the programs in
 // findScriptRefusedPrograms, findShellPrograms and findInlineInterpreters
 // do not stay off (fail closed).
@@ -141,7 +165,21 @@ func findScriptCallStaysOff(
 	inEntryDir *bool,
 ) bool {
 	if len(call.Assigns) > 0 {
-		return false
+		// Only `name="$N"` with no command binds name to the entry (pod
+		// check13 B7); any other assignment is not read here.
+		if len(call.Args) > 0 {
+			return false
+		}
+		for _, assign := range call.Assigns {
+			if assign.Append || assign.Naked || assign.Index != nil || assign.Array != nil ||
+				assign.Name == nil || !findScriptWordIsPositionals(assign.Value) {
+				return false
+			}
+		}
+		for _, assign := range call.Assigns {
+			bound[assign.Name.Value] = true
+		}
+		return true
 	}
 	if len(call.Args) == 0 {
 		return true
@@ -224,6 +262,11 @@ func findRenderScriptWord(word *syntax.Word, bound map[string]bool) (text string
 	for _, part := range word.Parts {
 		switch part := part.(type) {
 		case *syntax.Lit:
+			// The grammar keeps brace expansion in the literal: {.,}./hooks
+			// runs as ../hooks ./hooks (pod check13 R8).
+			if findLitHasBraceExpansion(part.Value) {
+				return "", false, false
+			}
 			value, hasGlob := findUnescapeUnquoted(part.Value)
 			glob = glob || hasGlob
 			out.WriteString(value)
@@ -277,15 +320,18 @@ func findRenderEntryExpansion(part syntax.WordPart, bound map[string]bool) (stri
 		if part.Exp == nil {
 			return "$1", true
 		}
-		pattern, _, ok := findRenderScriptWord(part.Exp.Word, bound)
+		pattern, glob, ok := findRenderScriptWord(part.Exp.Word, bound)
 		if !ok || strings.Contains(pattern, "..") {
 			return "", false
 		}
 		switch part.Exp.Op {
 		case syntax.RemSmallSuffix, syntax.RemLargeSuffix:
-			// ${1%/*} is the entry's directory; a suffix strip without '/'
-			// stays in the entry's own name.
-			if strings.Contains(pattern, "/") {
+			// ${1%/*} is the entry's directory; a literal suffix strip
+			// without '/' (${1%.wav}) stays in the entry's own name. A glob
+			// matches across '/', so ${1%logs*} or ${1%%.*} can cut the
+			// entry back to its directory, the state root or home (pod
+			// check13 R1-R6).
+			if glob || strings.ContainsAny(pattern, "/$") {
 				return "", false
 			}
 		case syntax.RemSmallPrefix, syntax.RemLargePrefix:
@@ -345,6 +391,29 @@ func findUnescapeUnquoted(value string) (string, bool) {
 		}
 	}
 	return out.String(), glob
+}
+
+// findLitHasBraceExpansion reports an unescaped {a,b} or {x..y} in an
+// unquoted literal, which the shell expands into other words.
+func findLitHasBraceExpansion(value string) bool {
+	open := -1
+	for index := 0; index < len(value); index++ {
+		switch value[index] {
+		case '\\':
+			index++
+		case '{':
+			open = index
+		case '}':
+			if open >= 0 {
+				inner := value[open+1 : index]
+				if strings.Contains(inner, ",") || strings.Contains(inner, "..") {
+					return true
+				}
+			}
+			open = -1
+		}
+	}
+	return false
 }
 
 // findUnescapeDoubleQuoted removes the escapes a double-quoted literal
