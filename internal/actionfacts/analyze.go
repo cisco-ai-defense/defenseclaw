@@ -247,7 +247,10 @@ func analyze(input Input, twinCommand string, capture *redirectTargetCapture) Fa
 		if parsed.status == StatusPartial &&
 			(dialect == DialectPowerShell || dialect == DialectCMD) {
 			// The same for $HOME, ~ and %USERPROFILE% under a Windows
-			// ActiveHome (GAP-0912).
+			// ActiveHome (GAP-0912). A program with no operand grammar
+			// stays partial the same way after the rewrite (type nul >
+			// %USERPROFILE%\f), so its static redirect targets keep
+			// their path facts, as for the POSIX home (GAP-2225, GAP-2408).
 			home, _ := normalizeActiveHome(input.ActiveHome)
 			if rewrite, ok := rewriteTrustedWindowsShellHome(command, home, dialect); ok {
 				// As for a POSIX home, a rewrite that only narrows the issues

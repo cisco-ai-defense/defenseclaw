@@ -1441,7 +1441,7 @@ func windowsExactCMDBuiltin(executable windowsWord, program string) bool {
 	}
 	switch program {
 	case "echo", "ver", "rem", "type", "dir", "del", "erase", "rmdir", "rd",
-		"mkdir", "md", "copy", "move":
+		"mkdir", "md", "copy", "move", "ren", "rename":
 		return true
 	default:
 		return false
@@ -2065,6 +2065,9 @@ func windowsClassifyCMD(
 	case "move":
 		windowsAddOperation(command, OperationMove)
 		windowsAddSourceDestination(command.ID, args, true, builder)
+	case "ren", "rename":
+		windowsAddOperation(command, OperationMove)
+		windowsAddCMDRename(command.ID, args, builder)
 	case "curl", "curl.exe", "wget", "wget.exe":
 		windowsClassifyWeb(command, args, false, builder)
 	case "certutil", "certutil.exe":
@@ -4269,6 +4272,42 @@ func windowsCMDPathOperand(value string) bool {
 		strings.ContainsAny(value[1:], `/\`)
 }
 
+// windowsAddCMDRename projects cmd's ren SOURCE NEWNAME: the source leaves
+// its name and NEWNAME is created beside it, as a move within the source
+// directory (GAP-2408). NEWNAME is a bare name; cmd rejects a drive or path
+// in it and renames nothing, so such a form stays partial.
+func windowsAddCMDRename(commandID int64, args []windowsWord, builder *windowsFactBuilder) {
+	var operands []windowsWord
+	for _, arg := range args {
+		if arg.expands {
+			builder.out.markPartial(IssueDynamicWord)
+			continue
+		}
+		if strings.HasPrefix(arg.value, "/") && !windowsCMDPathOperand(arg.value) {
+			continue
+		}
+		operands = append(operands, arg)
+	}
+	if len(operands) != 2 {
+		builder.out.markPartial(IssueUnknownOperandGrammar)
+		return
+	}
+	source, name := operands[0].value, operands[1].value
+	builder.addPath(commandID, PathAccessRead, source)
+	builder.addPath(commandID, PathAccessDelete, source)
+	if name == "" || strings.ContainsAny(name, `:/\`) {
+		builder.out.markPartial(IssueUnknownOperandGrammar)
+		return
+	}
+	directory := ""
+	if index := strings.LastIndexAny(source, `/\`); index >= 0 {
+		directory = source[:index+1]
+	} else if len(source) >= 2 && source[1] == ':' {
+		directory = source[:2]
+	}
+	builder.addPath(commandID, PathAccessWrite, directory+name)
+}
+
 func windowsAddSourceDestination(
 	commandID int64,
 	args []windowsWord,
@@ -4588,7 +4627,7 @@ func windowsMutatingProgram(program string) bool {
 		"set-item", "set-itemproperty", "sp", "new-itemproperty",
 		"remove-itemproperty", "rp",
 		"copy-item", "copy", "cp", "move-item", "move", "mv",
-		"rename-item", "rni",
+		"rename-item", "rni", "ren", "rename",
 		"start-process", "stop-process", "remove-process",
 		"clear-disk", "add-localgroupmember", "add-adgroupmember",
 		"register-scheduledtask",

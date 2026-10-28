@@ -824,7 +824,8 @@ func withActiveStateTargetMention(
 				return findings
 			}
 		} else if !provenStateMutationPath(facts, request) && !provenBashAggregateStateWrite(request) &&
-			!provenShellRedirectStateWrite(request) && !provenCMDBodyStateWrite(request) {
+			!provenShellRedirectStateWrite(request) && !provenCMDBodyStateWrite(request) &&
+			!provenCMDSlashCStateWrite(request) {
 			return findings
 		}
 	}
@@ -888,6 +889,55 @@ func provenBashAggregateStateWrite(request trustedActionRequest) bool {
 	twin := request
 	twin.Input = input
 	return provenStateMutationPath(actionfacts.Analyze(input), twin)
+}
+
+// cmdSlashCBody matches cmd [/d] [/q] [/s] /c BODY, the way an agent's
+// PowerShell or Git Bash call hands a cmd command line to cmd.exe.
+var cmdSlashCBody = regexp.MustCompile(`(?is)^\s*"?(?:[a-z]:[\\/](?:[^"<>|&^%!\r\n]*[\\/])?)?cmd(?:\.exe)?"?((?:\s+/[dqs])*)\s+/c\s+(.+?)\s*$`)
+
+// provenCMDSlashCStateWrite judges the body of a cmd /c call as the cmd
+// command it is (GAP-2408). Without /d the parser keeps cmd /c opaque, because
+// a Command Processor AutoRun entry may run first; AutoRun cannot stop the
+// body from running, so a body that writes, empties, moves or deletes
+// DefenseClaw state (cmd /c "type nul > %USERPROFILE%\.defenseclaw\config.yaml",
+// cmd /c ren state x) still does. Only the state-write proof reads the twin.
+func provenCMDSlashCStateWrite(request trustedActionRequest) bool {
+	home := request.Input.ActiveHome
+	switch request.Input.DialectHint {
+	case actionfacts.DialectCMD, actionfacts.DialectPowerShell:
+	case "":
+		// No grammar was picked for the call; only a Windows home has cmd.
+		if len(home) < 2 || home[1] != ':' {
+			return false
+		}
+	default:
+		return false
+	}
+	command, known := trustedBashCommandInput(request.Input)
+	if !known {
+		return false
+	}
+	for depth := 0; depth < 3; depth++ {
+		match := cmdSlashCBody.FindStringSubmatch(command)
+		if match == nil {
+			return false
+		}
+		body := match[2]
+		if len(body) >= 2 && body[0] == '"' && body[len(body)-1] == '"' {
+			// cmd /c strips the first and the last quote of the line.
+			body = body[1 : len(body)-1]
+		}
+		input := request.Input
+		input.Command, input.Args, input.Argv = body, nil, nil
+		input.DialectHint = actionfacts.DialectCMD
+		twin := request
+		twin.Input = input
+		if provenStateMutationPath(actionfacts.Analyze(input), twin) {
+			return true
+		}
+		command = body
+	}
+	return false
 }
 
 // provenShellRedirectStateWrite judges each output redirect target the
