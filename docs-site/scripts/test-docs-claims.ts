@@ -1612,6 +1612,8 @@ const r105Rows: DocRow[] = [
   { gap: "GAP-2424", page: "guardrail/index.mdx", has: ["The picker's \"never block\" covers policy findings. Observe still blocks an agent that changes DefenseClaw's own files"] },
   { gap: "GAP-2424", page: "guardrail/multi-connector.mdx", has: ["The picker's \"never block\" covers policy findings. Observe still blocks an agent that changes DefenseClaw's own files"] },
   { gap: "GAP-2424", page: "guardrail/switching-connectors.mdx", has: ["The picker's \"never block\" covers policy findings. Observe still blocks an agent that changes DefenseClaw's own files"] },
+  { gap: "GAP-2451", page: "enterprise/troubleshooting.mdx", section: "Warnings", has: ["| `agent_settings_not_restored` (exporter removed) | Windows |", "`.claude\\settings.json.defenseclaw-otlp-removed.bak` or `.codex\\config.toml.defenseclaw-otlp-removed.bak`", "Delete the copy to clear the warning.", "On Windows this code also reports an earlier per-user install's native OTLP exporter"], lacks: ["| `native_otlp_marked_removed` | Windows |"] },
+  { gap: "GAP-2451", page: "enterprise/troubleshooting.mdx", section: "Warnings", has: ["| `agent_settings_not_restored` (exporter not removed) | Windows |", "still holds the native OTLP exporter of an earlier per-user DefenseClaw install", "| `native_otlp_config_unchecked` | Linux, macOS, Windows |"], lacks: ["| `native_otlp_take_back_pending` | Windows |"] },
   { gap: "GAP-1613", page: "enterprise/sandboxes.mdx", has: ["`sandboxes are unavailable: OpenShell 0.1.3 runs no DefenseClaw sandbox:"], lacks: ["OpenShell 0.1.3 is installed, but that release is unsupported"] },
   { gap: "GAP-1619", page: "guardrail/user-and-group-policies.mdx", has: ["`defenseclaw-gateway config validate FILE`", "`enterprise macos ensure --config FILE`", "`enterprise macos profile-explain`"] },
   { gap: "GAP-1635", page: "policies/admission.mdx", has: ["`tool list` prints one table per connector", "`UPDATED` shows `-` for an entry until it is changed"] },
@@ -2191,7 +2193,7 @@ describe('config limit refusals match the configuration pages (GH #1101)', () =>
     const limits: unknown[] = [];
     const walk = (node: unknown): void => {
       if (!node || typeof node !== 'object') return;
-      const record = node as Record<string, any>;
+      const record = node as Record<string, unknown> & { block_message?: { $ref?: string; maxLength?: number } };
       if (record.block_message && typeof record.block_message === 'object') {
         const ref = String(record.block_message.$ref ?? '').replace('#/$defs/', '');
         limits.push(ref ? configSchema.$defs[ref]?.maxLength : record.block_message.maxLength);
