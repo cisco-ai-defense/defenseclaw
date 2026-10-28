@@ -290,10 +290,22 @@ func actionWindowsExpressionBodies(text string, plain, hereBody bool, bodies []s
 			i += end - 1
 			continue
 		}
-		if !plain && c == '<' && i+1 < len(text) && text[i+1] == '<' {
-			// PowerShell has no here-documents: a << outside a string,
-			// a comment or a stop-parsing tail is a parse error, so
-			// PowerShell runs nothing of the command (RV5-1).
+		if !plain && c == '$' && i+1 < len(text) && text[i+1] == '{' {
+			// A PowerShell braced variable name (${a<<b}, ${a'b}) is
+			// text up to its first unescaped }; nothing in it is
+			// evaluated. An unterminated one is scanned on (RV6-1).
+			if end := actionWindowsBracedVariableEnd(text, i+2); end > 0 {
+				i = end
+				continue
+			}
+		}
+		if !plain && c == '<' && i+1 < len(text) && text[i+1] == '<' &&
+			(i == 0 || strings.IndexByte(" \t\r\n;|&(){}", text[i-1]) >= 0) {
+			// PowerShell has no here-documents: a << that starts a token
+			// outside a string, a comment, a braced variable name or a
+			// stop-parsing tail is a parse error, so PowerShell runs
+			// nothing of the command (RV5-1). A << inside a bareword
+			// (a<<b, a#<<) is text and the scan goes on (RV6-1).
 			return bodies
 		}
 		if plain {
@@ -474,6 +486,21 @@ func actionSkipHeredocBodies(text string, start int, docs []actionHeredoc) int {
 		}
 	}
 	return pos
+}
+
+// actionWindowsBracedVariableEnd returns the index of the } that ends a
+// PowerShell braced variable name whose text starts at from (after ${), or
+// -1 when it is not terminated. A backtick escapes the next character.
+func actionWindowsBracedVariableEnd(text string, from int) int {
+	for i := from; i < len(text); i++ {
+		switch text[i] {
+		case '`':
+			i++
+		case '}':
+			return i
+		}
+	}
+	return -1
 }
 
 // actionPlainBacktickClosed reports whether a Git Bash backtick command

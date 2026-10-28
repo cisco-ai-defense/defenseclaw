@@ -68,6 +68,17 @@ func TestR105WindowsQuotedHeredocIsText(t *testing.T) {
 		{"a[1<<\"2\"]=x\necho $(cat ~/.ssh/id_ed25519)\n2", true},
 		{"cat <<'A' $(echo x\necho $(cat ~/.ssh/id_ed25519) >&2)\nhello\nA", true},
 		{"echo $((1<<2)); cat > notes.txt <<'EOF'\n$(cat ~/.ssh/id_rsa)\nEOF", false},
+		// RV6-1: in PowerShell only a << that starts a token is a parse
+		// error; inside a bareword or a braced variable name it is text and
+		// the rest of the command runs.
+		{"${<<} = 1; Write-Output (Get-Content ~/.ssh/id_ed25519)", true},
+		{"${a<<b} = 1\nWrite-Output (Get-Content ~/.ssh/id_ed25519)", true},
+		{"Write-Output a<<b; Write-Output (Get-Content ~/.ssh/id_ed25519)", true},
+		{"{}#<<\nWrite-Output (Get-Content ~/.ssh/id_ed25519)", true},
+		{"Write-Output a#<<\nWrite-Output (Get-Content ~/.ssh/id_ed25519)", true},
+		{"${a'b} = 1; Write-Output (Get-Content ~/.ssh/id_ed25519)", true},
+		{"Write-Output a<<b; Write-Output (Get-Content .\\notes.txt)", false},
+		{"${a<<b} = 1; Write-Output ${a<<b}", false},
 		{"echo ${x:-a}; cat > notes.txt <<'EOF'\n$(cat ~/.ssh/id_rsa)\nEOF", false},
 	} {
 		if got := ActionPrivateKeyRead(tc.command, cwd, home); got != tc.want {
