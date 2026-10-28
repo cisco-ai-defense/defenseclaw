@@ -310,12 +310,14 @@ func windowsCodexMachineGroups(hookContractID string) []codexHookGroup {
 	return groups
 }
 
-// windowsCodexMachineProfileGroups is the matrix opts publishes. Secure
-// Client keeps its earlier matrix (out of scope for this release).
+// windowsCodexMachineProfileGroups is the matrix opts publishes, the same
+// under every profile. Secure Client kept the earlier matrix (no compact
+// SessionStart source) while its writer picked the profile from the strict
+// host classifier and the guardian's check from the configured profile: a
+// first install wrote one matrix and refused it against the other, and the
+// hook's runtime check, which knows no profile, refused the Secure Client
+// file. Reconcile replaces that earlier group (windowsCodexOwnedHookGroup).
 func windowsCodexMachineProfileGroups(opts WindowsCodexMachineRequirementsOptions) []codexHookGroup {
-	if opts.SecureClient {
-		return codexHookGroups
-	}
 	return windowsCodexMachineGroups(opts.HookContractID)
 }
 
