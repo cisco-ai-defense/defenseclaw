@@ -20,6 +20,7 @@ DOCS = REPO / "docs-site/content/docs"
 REFERENCE = "enterprise/operate/reference.mdx"
 LIFECYCLE = "enterprise/operate/lifecycle.mdx"
 TROUBLESHOOTING = "troubleshooting/enterprise/index.mdx"
+AI_DEFENSE_KEY = "enterprise/configure/ai-defense-key.mdx"
 OPERATOR_CONTRACT = "packaging/mdm/contract/management-agent.md"
 CONTRACT_FLOOR = "### 5.3 Release floor"
 CONTACT = "contact your administrator"
@@ -173,7 +174,7 @@ def test_ai_defense_key_rotation_leaves_bundle_steps_to_the_administrator() -> N
     """rel-1-0-4:GAP-2320: under the owner hold the rotation section of a
     bundle-managed device says to contact the administrator and carries no
     signed-bundle step (anchors, sign, apply), also one the line regex misses."""
-    text = _section("enterprise/configure/ai-defense-key.mdx", "## Rotate the key")
+    text = _section(AI_DEFENSE_KEY, "## Rotate the key")
     assert "`secret_ref_mismatch`" in text
     assert "`secret_ref_unbound`" in text
     hits = [m.group(0) for m in _SIGNED_BUNDLE_RECOVERY.finditer(text)]
