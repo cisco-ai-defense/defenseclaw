@@ -63,6 +63,11 @@ const (
 	enterpriseHookWorkerOpApply          = "apply"
 	enterpriseHookWorkerOpDiscover       = "discover"
 	enterpriseHookWorkerOpForeignCleanup = "foreign_cleanup"
+	// enterpriseHookWorkerOpNativeOTLPCheck reads, as the user, the user's
+	// own Codex and Claude Code configuration and names the native OTLP
+	// exporter entries that carry a DefenseClaw credential, changing
+	// nothing (managed Unix verify, GAP-1360).
+	enterpriseHookWorkerOpNativeOTLPCheck = "native_otlp_check"
 	// enterpriseHookWorkerOpAIDiscovery runs the static AI discovery scan
 	// of the user's own home (standalone profile).
 	enterpriseHookWorkerOpAIDiscovery = "ai_discovery"
@@ -175,6 +180,10 @@ type enterpriseHookWorkerRequest struct {
 	// ForeignCleanup asks the worker to remove unapproved foreign hooks
 	// from the user's own vendor config (foreign_cleanup operation).
 	ForeignCleanup []enterpriseHookWorkerForeignCleanup `json:"foreign_cleanup,omitempty"`
+	// ProductCredentials are the digests of the product credentials the
+	// native_otlp_check operation knows an exporter by; the credentials
+	// themselves never reach a process that runs as the user.
+	ProductCredentials []connector.NativeOTLPCredentialDigest `json:"product_credentials,omitempty"`
 	// TightenHome asks the worker to remove group/other write from the
 	// user's own home before an apply, so an enrolled user cannot stop
 	// repair of their hooks by loosening their home's mode.
@@ -301,6 +310,9 @@ type enterpriseHookWorkerResponse struct {
 	Surfaces        map[string][]connector.AgentSurface          `json:"surfaces,omitempty"`
 	PrivateInstalls []enterprisehooks.PrivateAgentInstall        `json:"private_installs,omitempty"`
 	Cleanup         map[string]enterpriseHookWorkerCleanupReport `json:"cleanup,omitempty"`
+	// NativeOTLP is the native_otlp_check report per connector
+	// (user-influenced; the parent bounds it).
+	NativeOTLP map[string]enterpriseHookWorkerNativeOTLPReport `json:"native_otlp,omitempty"`
 	// Blocks are the foreign-hook blocks the user's hooks recorded since
 	// the last cleanup (user-influenced; only logged).
 	Blocks        []enterprisepolicy.BlockSummary `json:"blocks,omitempty"`
@@ -473,6 +485,8 @@ func enterpriseHookWorkerMain(ctx context.Context, stdin io.Reader, stdout, stde
 			response.BlocksError = err.Error()
 		}
 		return respond(response, 0)
+	case enterpriseHookWorkerOpNativeOTLPCheck:
+		return respond(runEnterpriseHookWorkerNativeOTLPCheck(request), 0)
 	case enterpriseHookWorkerOpAIDiscovery:
 		if request.AIDiscovery == nil {
 			return respond(enterpriseHookWorkerResponse{Error: "the ai_discovery operation needs its scan settings"}, 3)
@@ -856,10 +870,18 @@ func readEnterpriseHookWorkerHomeFile(home, path, label, remedy string) (resolve
 // in credentials; every other entry, an exporter with its own bearer
 // included, stays as the user wrote it.
 func removeManagedUserNativeOTLP(opts enterprisehooks.InstallOptions, credentials []connector.NativeOTLPCredentialDigest) error {
+	_, err := managedUserNativeOTLP(opts, credentials, true)
+	return err
+}
+
+// managedUserNativeOTLP names the entries removeManagedUserNativeOTLP
+// removes and, with apply, removes them. Without apply it changes nothing:
+// managed Unix verify reports them (GAP-1360).
+func managedUserNativeOTLP(opts enterprisehooks.InstallOptions, credentials []connector.NativeOTLPCredentialDigest, apply bool) ([]string, error) {
 	name := strings.ToLower(strings.TrimSpace(opts.ConnectorName))
 	backupName := connector.UserNativeOTLPBackupName(name)
 	if backupName == "" {
-		return fmt.Errorf("connector %q has no native OTLP exporter", opts.ConnectorName)
+		return nil, fmt.Errorf("connector %q has no native OTLP exporter", opts.ConnectorName)
 	}
 	dataDir := strings.TrimSpace(opts.DataDir)
 	if dataDir == "" {
@@ -869,25 +891,25 @@ func removeManagedUserNativeOTLP(opts enterprisehooks.InstallOptions, credential
 	label := name + " user config"
 	resolved, raw, perm, found, err := readEnterpriseHookWorkerHomeFile(opts.UserHome, path, label, "and the next repair checks it")
 	if err != nil || !found {
-		return err
+		return nil, err
 	}
 	_, backup, _, _, err := readEnterpriseHookWorkerHomeFile(opts.UserHome, filepath.Join(dataDir, backupName), name+" setup backup", "and the next repair checks it")
 	if err != nil {
-		return err
+		return nil, err
 	}
 	out, removed, err := connector.UserNativeOTLPWithout(name, raw, backup, connector.SetupOpts{DataDir: dataDir, ManagedEnterprise: true}, credentials)
 	if err != nil {
-		return fmt.Errorf("inspect %s %s for a native OTLP exporter: %w", label, path, err)
+		return nil, fmt.Errorf("inspect %s %s for a native OTLP exporter: %w", label, path, err)
 	}
-	if len(removed) == 0 {
-		return nil
+	if len(removed) == 0 || !apply {
+		return removed, nil
 	}
 	if err := configwrite.WriteFileDurable(resolved, out, perm); err != nil {
-		return fmt.Errorf("remove the native OTLP exporter from %s %s: %w", label, path, err)
+		return removed, fmt.Errorf("remove the native OTLP exporter from %s %s: %w", label, path, err)
 	}
 	fmt.Fprintf(os.Stderr, "[enterprise-hooks] %s: removed a native OTLP exporter that carried a DefenseClaw credential to a port the managed gateway does not serve (%s)\n",
 		name, strings.Join(removed, ", "))
-	return nil
+	return removed, nil
 }
 
 // blockPersonalClaudeHook replaces only an existing DefenseClaw-owned

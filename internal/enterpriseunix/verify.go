@@ -193,6 +193,10 @@ func (l *lifecycle) readOnly(ctx context.Context) int {
 			problems = append(problems, "managed Hermes hook registration: "+err.Error())
 		}
 	}
+	if strict && record != nil && !record.NoStart {
+		// The check managed Windows verify runs (GAP-1360): a warning only.
+		l.warnUserNativeOTLPExporters(ctx)
+	}
 	if machinePolicyIncomplete(r) {
 		r.MarkSecurityIncomplete(codeMachinePolicyIncomplete)
 	}
