@@ -149,6 +149,19 @@ func TestActionKeyReadAfterACertainDirectoryChange(t *testing.T) {
 		"cd ~/.ssh; cd /tmp && for x in 1 2; do grep -r . .; cd ~-; done",
 		"back() { cd ~-; }; cd ~/.ssh; cd /tmp && { back; grep -r . .; }",
 		"cd ~/.ssh; cd /tmp && { eval \"$GO\"; grep -r . .; }",
+		// RV-it2-1: a directory program split across word parts, also
+		// inside a nested shell body or a loop.
+		"cd ~/.ssh; cd /tmp && { c''d -; grep -r . .; }",
+		"cd ~/.ssh; cd /tmp && { c\\d -; grep -r . .; }",
+		"cd ~/.ssh; cd /tmp && { \"c\"d -; grep -r . .; }",
+		"cd ~/.ssh; cd /tmp && { c'd' -; grep -r . .; }",
+		"pushd ~/.ssh; pushd /tmp && { p''opd; grep -r . .; }",
+		"cd ~/.ssh; cd /tmp && bash -c 'c\"\"d -; grep -r . .'",
+		"cd ~/.ssh; cd /tmp && bash -c $'c\\x64 -; grep -r . .'",
+		"cd ~/.ssh; cd /tmp && for d in -; do c''d $d; grep -r . .; done",
+		"cd ~/.ssh; cd /tmp && for d in -; do c''d $d; cat *; done",
+		"cd ~/.ssh; cd /tmp && (c''d - && grep -r . .)",
+		"cd ~/.ssh; cd /tmp && { {cd,} -; grep -r . .; }",
 	} {
 		if !ActionPrivateKeyRead(command, cwd, home) {
 			t.Errorf("ActionPrivateKeyRead(%q) = false, want a key read", command)

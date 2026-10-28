@@ -283,7 +283,7 @@ func actionCertainDirectoryCalls(file *syntax.File, home string) map[*syntax.Cal
 		if !programStatic || !targetStatic || program != "cd" && program != "pushd" || !filepath.IsAbs(target) {
 			return true
 		}
-		if actionMayChangeDirectory(binary.Y) {
+		if actionMayChangeDirectory(binary.Y, home) {
 			return true
 		}
 		syntax.Walk(binary.Y, func(inner syntax.Node) bool {
@@ -301,12 +301,16 @@ func actionCertainDirectoryCalls(file *syntax.File, home string) map[*syntax.Cal
 // anywhere in its text, quoted shell bodies included: cd, pushd, popd,
 // Set-Location and its aliases, ~- or OLDPWD (RV26-1). Any such mention may
 // take a later reader back to an earlier directory, so it is never certain.
-func actionMayChangeDirectory(node syntax.Node) bool {
-	found := false
-	mentions := func(text string) bool {
-		inToken := func(r rune) bool {
-			return r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '_' || r == '~' || r == '-'
-		}
+// Each whole word is judged, both as the shell expands it and as its literal
+// text with quotes, backslashes and brace punctuation removed, so a program
+// split across parts (c\d, "c"d, c'd', an empty quote pair inside cd or
+// popd) or a nested body that does so (bash -c 'c""d -') still counts
+// (RV-it2-1).
+func actionMayChangeDirectory(node syntax.Node, home string) bool {
+	inToken := func(r rune) bool {
+		return r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '_' || r == '~' || r == '-'
+	}
+	mentionsText := func(text string) bool {
 		for _, token := range strings.FieldsFunc(text, func(r rune) bool { return !inToken(r) }) {
 			switch strings.ToLower(token) {
 			case "cd", "chdir", "pushd", "popd", "sl", "set-location", "push-location", "pop-location", "~-", "oldpwd":
@@ -315,18 +319,47 @@ func actionMayChangeDirectory(node syntax.Node) bool {
 		}
 		return false
 	}
+	joined := strings.NewReplacer(`'`, "", `"`, "", `\`, "", "{", "", "}", "", ",", "", "`", "")
+	mentions := func(text string) bool {
+		return mentionsText(text) || mentionsText(joined.Replace(text))
+	}
+	found := false
 	syntax.Walk(node, func(inner syntax.Node) bool {
 		switch inner := inner.(type) {
-		case *syntax.Lit:
-			found = found || mentions(inner.Value)
-		case *syntax.SglQuoted:
-			found = found || mentions(inner.Value)
+		case *syntax.Word:
+			if value, static := StaticWord(inner, home); static && mentions(value) {
+				found = true
+			} else if mentions(actionWordLiteralText(inner)) {
+				found = true
+			}
 		case *syntax.ParamExp:
 			found = found || inner.Param != nil && mentions(inner.Param.Value)
 		}
 		return !found
 	})
 	return found
+}
+
+// actionWordLiteralText is the literal text of a word with its quoting
+// taken off: the parts of c\d, "c"d and c'd' joined as cd. An expansion
+// adds nothing.
+func actionWordLiteralText(word *syntax.Word) string {
+	var text strings.Builder
+	var add func(parts []syntax.WordPart)
+	add = func(parts []syntax.WordPart) {
+		for _, part := range parts {
+			switch part := part.(type) {
+			case *syntax.Lit:
+				text.WriteString(part.Value)
+			case *syntax.SglQuoted:
+				text.WriteString(part.Value)
+			case *syntax.DblQuoted:
+				add(part.Parts)
+			}
+		}
+	}
+	add(word.Parts)
+	return text.String()
 }
 
 // actionWindowsCertainLocation reports a location statement whose success
