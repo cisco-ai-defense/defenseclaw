@@ -22,8 +22,11 @@ import (
 // GAP-1832): an edit of its file whose diff has one empty hunk.
 func copilotNoChangePermission(t *testing.T, session, cwd, path string) string {
 	t.Helper()
-	diff := "\ndiff --git a" + path + " b" + path + "\nindex 0000000..0000000 100644\n--- a" + path +
-		"\n+++ b" + path + "\n@@ -0,0 +0,0 @@\n\n"
+	// Copilot names the file in git form with one leading slash on every OS
+	// (a/C:/Users/... on Windows, a/home/... on Linux).
+	g := "/" + strings.TrimPrefix(filepath.ToSlash(path), "/")
+	diff := "\ndiff --git a" + g + " b" + g + "\nindex 0000000..0000000 100644\n--- a" + g +
+		"\n+++ b" + g + "\n@@ -0,0 +0,0 @@\n\n"
 	body, err := json.Marshal(map[string]any{"hookName": "permissionRequest", "sessionId": session, "timestamp": 1793162766166,
 		"cwd": cwd, "toolName": "edit", "toolInput": map[string]any{"file_path": path, "diff": diff}, "permissionSuggestions": []any{}})
 	if err != nil {
