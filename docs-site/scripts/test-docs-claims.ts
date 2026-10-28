@@ -1650,6 +1650,7 @@ const r105Rows: DocRow[] = [
   { gap: "GAP-1883", page: "get-started/windows/install-lifecycle.mdx", section: "Upgrade", has: ["running an older release's `install.ps1` over a newer install is not a supported downgrade", "use `defenseclaw rollback` or `defenseclaw upgrade --version X.Y.Z`"] },
   { gap: "GAP-2391", page: "reference/cli.mdx", has: ["they are audit rows with action `config.change.applied` and others."], lacks: ["they are audit rows with action `config-update` and others."] },
   { gap: "GAP-2262", page: "guardrail/unified-llm-key.mdx", section: "Undo", has: ["defenseclaw setup guardrail --non-interactive --detection-strategy regex_only", "Without `--non-interactive` the command starts the full setup wizard"], lacks: ["and run `defenseclaw setup guardrail --detection-strategy regex_only` to turn the judge off."] },
+  { gap: "GAP-1921", page: "reference/fail-modes.mdx", has: ["`config validate`, `config set` and `guardrail fail-mode` accept only `open` or `closed`, in lower case; any other value (`OPEN`, `banana`) is refused.", "The `--fail-mode` flag of `defenseclaw init`, `quickstart` and `setup <connector>` takes either case and saves it in lower case."], lacks: ["`config validate` and the writers accept only `open` or `closed`"] },
   { gap: "GAP-2392", page: "tui.mdx", section: "Panels", has: ["The quick-action row at the end of Overview lists both as `[G] Gateway` and `[z] AI Discovery`", "The hint line above the status line is not a key list on Overview"], lacks: ["The key row shows both actions at 80 columns."] },
   { gap: "GAP-2239", page: "policies/defaults.mdx", section: "What `setup guardrail` actually writes", has: ["If `config.yaml` already has an entry for the connector under `guardrail.connectors` (`defenseclaw setup claude-code` or an `init` that picked several agents writes one), the command saves `mode` and `rule_pack` in that entry instead of at the top level. The setup summary and `defenseclaw guardrail status` show the values the connector runs with; `defenseclaw config show --section guardrail` shows where they are saved."] },
   { gap: "GAP-2224", page: "stories/cursor-secret-exfil.mdx", has: ["✓ cursor gateway outage=open (failClosed=true)", "This is the output in a terminal. Piped to another command or saved to a file, the same lines start with `OK` and `i` instead of the check mark and the info sign."] },
@@ -2129,6 +2130,17 @@ describe('Undo turns the judge off without the wizard (GAP-2262)', () => {
     const py = source('cli/defenseclaw/commands/cmd_setup.py');
     assert.ok(py.includes('elif detection_strategy == "regex_only":\n                gc.judge.enabled = False'), 'setup guardrail --detection-strategy regex_only no longer turns the judge off: re-check unified-llm-key.mdx Undo');
     assert.ok(py.includes('@click.option("--non-interactive", is_flag=True, help="Use flags instead of prompts")'), 'setup guardrail lost --non-interactive: re-check unified-llm-key.mdx Undo');
+  });
+});
+
+// GAP-1921: the CLI flags take OPEN (click Choice, case_sensitive=False) and
+// save the lower-case choice; guardrail fail-mode, config set and validate refuse it.
+describe('fail-mode case rules match fail-modes.mdx (GAP-1921)', () => {
+  it('init, quickstart and setup flags ignore case; guardrail fail-mode does not', () => {
+    for (const f of ['cli/defenseclaw/commands/cmd_init.py', 'cli/defenseclaw/commands/cmd_quickstart.py', 'cli/defenseclaw/commands/cmd_setup.py']) {
+      assert.ok(/"--fail-mode",\s*type=click\.Choice\(\["open", "closed"\], case_sensitive=False\)/.test(source(f)), `${f} --fail-mode case rule changed: re-check reference/fail-modes.mdx`);
+    }
+    assert.ok(source('cli/defenseclaw/commands/cmd_guardrail.py').includes('@click.argument("mode", required=False, type=click.Choice(["open", "closed"]))'), 'guardrail fail-mode now ignores case: re-check reference/fail-modes.mdx');
   });
 });
 
