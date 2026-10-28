@@ -1477,10 +1477,10 @@ func (b *windowsFactBuilder) addPath(commandID int64, access PathAccess, value s
 	if value == "" {
 		return
 	}
-	if access == PathAccessRead && windowsNullDevice(value) {
-		// Reading the NUL device reads nothing and names no file, so it
-		// leaves the facts complete: type nul > f is the write of f that
-		// echo x > f is (GAP-2408).
+	if access == PathAccessRead && windowsNullDeviceOperand(value) {
+		// Reading the null device (type nul, copy nul f) reads nothing:
+		// it is no path and leaves the command exact, so its redirect or
+		// copy target keeps its write proof (GAP-2408).
 		return
 	}
 	canonical, ok := windowsCanonicalPathFactValue(value)
@@ -4272,6 +4272,16 @@ func windowsCMDPathOperand(value string) bool {
 		strings.ContainsAny(value[1:], `/\`)
 }
 
+// windowsNullDeviceOperand reports a cmd or PowerShell operand that names
+// the Win32 null device: nul or nul: in any case, or \\.\nul.
+func windowsNullDeviceOperand(value string) bool {
+	switch strings.ToLower(strings.ReplaceAll(value, "/", `\`)) {
+	case "nul", "nul:", `\\.\nul`:
+		return true
+	}
+	return false
+}
+
 // windowsAddCMDRename projects cmd's ren SOURCE NEWNAME: the source leaves
 // its name and NEWNAME is created beside it, as a move within the source
 // directory (GAP-2408). NEWNAME is a bare name; cmd rejects a drive or path
@@ -5526,11 +5536,4 @@ func windowsEndpoint(word windowsWord) (string, string, int64, bool) {
 		return "", "", 0, false
 	}
 	return scheme, host, port, true
-}
-
-// windowsNullDevice reports the NUL device spelled as cmd and PowerShell
-// accept it as a source (nul, NUL:, \\.\nul).
-func windowsNullDevice(value string) bool {
-	value = strings.TrimSuffix(strings.ToLower(strings.ReplaceAll(value, "/", `\`)), ":")
-	return value == "nul" || value == `\\.\nul`
 }

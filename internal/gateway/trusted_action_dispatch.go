@@ -824,8 +824,7 @@ func withActiveStateTargetMention(
 				return findings
 			}
 		} else if !provenStateMutationPath(facts, request) && !provenBashAggregateStateWrite(request) &&
-			!provenShellRedirectStateWrite(request) && !provenCMDBodyStateWrite(request) &&
-			!provenCMDSlashCStateWrite(request) {
+			!provenShellRedirectStateWrite(request) && !provenCMDSlashCStateWrite(request) {
 			return findings
 		}
 	}
@@ -991,30 +990,6 @@ func provenShellRedirectStateWrite(request trustedActionRequest) bool {
 		}
 	}
 	return false
-}
-
-// provenCMDBodyStateWrite judges the body of a sole cmd /c "<body>" call
-// (soleCMDInvocation) under a Windows home as the cmd command it is. Git
-// Bash and PowerShell pass the quoted body to cmd, which expands
-// %USERPROFILE% and opens the redirect target, but the outer reading has
-// no facts for it, so cmd /c "echo x > %USERPROFILE%\.defenseclaw\
-// config.yaml" and cmd /c "type nul > ..." were ALLOW (GAP-2408).
-func provenCMDBodyStateWrite(request trustedActionRequest) bool {
-	command, known := trustedBashCommandInput(request.Input)
-	if !known || !soleCMDInvocation(command) {
-		return false
-	}
-	input := request.Input
-	input.Command = command
-	body, ok := trustedCMDBody(input)
-	if !ok {
-		return false
-	}
-	input.Command, input.Args, input.Argv = body, nil, nil
-	input.DialectHint = actionfacts.DialectCMD
-	twin := request
-	twin.Input = input
-	return provenStateMutationPath(actionfacts.Analyze(input), twin)
 }
 
 // ActionFacts' executing mutation role plus the physical active target
