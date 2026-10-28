@@ -225,9 +225,10 @@ func ActionPrivateKeyRead(command, cwd, home string) bool {
 				if !piped {
 					pipeHead = statement
 				}
+				reader := actionWindowsUngroupedStatement(statement)
 				for _, dir := range dirs[certain:] {
-					if actionPrivateKeyReadWords(statement, dir, home, keyReadWindows, 0) ||
-						piped && actionWindowsPipedKeyDirectoryRead(pipeHead, statement, dir, home) {
+					if actionPrivateKeyReadWords(reader, dir, home, keyReadWindows, 0) ||
+						piped && actionWindowsPipedKeyDirectoryRead(pipeHead, reader, dir, home) {
 						return true
 					}
 				}
@@ -249,7 +250,10 @@ func ActionPrivateKeyRead(command, cwd, home string) bool {
 						certain = 0
 					}
 				case len(statement) > 0 && actionWindowsLocationProgram(statement[0]),
-					separator != "&&" && separator != "|":
+					separator != "&&" && separator != "|",
+					actionWindowsStatementNamesLocation(statement):
+					// (cd - && ..., (Set-Location -), (popd: a location
+					// change inside parentheses or a block (RV26-1).
 					certain = 0
 				}
 				start = i + 1

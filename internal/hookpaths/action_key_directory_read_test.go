@@ -115,6 +115,8 @@ func TestActionKeyReadAfterACertainDirectoryChange(t *testing.T) {
 		"cd ~/.ssh && cd " + cwd + " && grep -rn TODO . | head",
 		"pushd ~/.ssh && pushd " + cwd + " && rg TODO",
 		"cd ~/.ssh && ls && cd " + cwd + " && grep -rn TODO .",
+		"cd ~/.ssh && cd " + cwd + " && { ls; grep -rn TODO .; }",
+		"cd ~/.ssh && cd " + cwd + " && (make test; grep -rn TODO .)",
 	} {
 		if ActionPrivateKeyRead(command, cwd, home) {
 			t.Errorf("ActionPrivateKeyRead(%q) = true, want no key read", command)
@@ -133,6 +135,20 @@ func TestActionKeyReadAfterACertainDirectoryChange(t *testing.T) {
 		"cd ~/.ssh && cd " + cwd + " && cd .. && grep -r . .ssh",
 		"cd ~/.ssh && ! cd " + cwd + " && grep -r . .",
 		"cd " + cwd + " && (cd ~/.ssh && grep -r . .)",
+		// RV26-1: a later step that goes back to an earlier directory.
+		"cd ~/.ssh; cd /tmp && { cd -; grep -r . .; }",
+		"cd ~/.ssh; cd /tmp && (cd -; grep -r . .)",
+		"pushd ~/.ssh; cd /tmp && { popd; grep -r . .; }",
+		"cd ~/.ssh; cd /tmp && { cd ~-; grep -r . .; }",
+		"cd ~/.ssh; cd /tmp && { cd \"$OLDPWD\"; grep -r . .; }",
+		"cd ~/.ssh && cd /tmp && if cd -; then grep -r . .; fi",
+		"cd ~/.ssh && cd /tmp && for x in 1; do cd -; grep -r . .; done",
+		"cd ~/.ssh; cd /tmp && { CDPATH=" + home + " cd .ssh; grep -r . .; }",
+		"cd ~/.ssh; cd /tmp && { cd - >/dev/null; grep -r . .; }",
+		"cd ~/.ssh; cd /tmp && (cd - && grep -r . .)",
+		"cd ~/.ssh; cd /tmp && for x in 1 2; do grep -r . .; cd ~-; done",
+		"back() { cd ~-; }; cd ~/.ssh; cd /tmp && { back; grep -r . .; }",
+		"cd ~/.ssh; cd /tmp && { eval \"$GO\"; grep -r . .; }",
 	} {
 		if !ActionPrivateKeyRead(command, cwd, home) {
 			t.Errorf("ActionPrivateKeyRead(%q) = false, want a key read", command)
@@ -158,6 +174,12 @@ func TestActionWindowsKeyReadAfterACertainLocationChange(t *testing.T) {
 		"cd ~/.ssh && cd - && grep -r . .",
 		// cmd's cd without /d keeps the current drive.
 		`cd C:\Users\u\.ssh && cd D:\proj && grep -r . .`,
+		// RV26-1: a location change inside parentheses.
+		"cd ~/.ssh; cd /c/tmp && (cd - && grep -r . .)",
+		"cd ~/.ssh; cd /c/tmp && ( cd - && grep -r . . )",
+		"pushd ~/.ssh; cd /c/tmp && (popd && grep -r . .)",
+		"pushd ~/.ssh; cd /c/tmp; (grep -r . .)",
+		`cd ~\.ssh; Set-Location C:\tmp && (Set-Location -) && Get-ChildItem -Recurse . | Select-String PRIVATE`,
 	} {
 		if !ActionPrivateKeyRead(command, cwd, home) {
 			t.Errorf("ActionPrivateKeyRead(%q) = false, want a key read", command)

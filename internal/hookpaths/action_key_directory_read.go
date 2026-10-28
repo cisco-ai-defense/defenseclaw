@@ -231,19 +231,31 @@ func actionWindowsPipedKeyDirectoryRead(head, reader []string, cwd, home string)
 // named (GAP-2421). Only the statement just before && counts, so a relative
 // directory (CDPATH), cd -, a directory set by another program (source,
 // eval, a function) and a cd in a subshell or group keep every candidate.
-// A command that defines its own cd or pushd keeps them all too.
+// A right side that may change the directory again (cd -, popd, cd ~-,
+// cd "$OLDPWD", a nested shell that does so) keeps every candidate for all
+// its calls (RV26-1), and a command with a function, an alias, a trap, eval
+// or source keeps them all.
 func actionCertainDirectoryCalls(file *syntax.File, home string) map[*syntax.CallExpr]*syntax.CallExpr {
 	certain := make(map[*syntax.CallExpr]*syntax.CallExpr)
-	redefined := false
+	opaque := false
 	syntax.Walk(file, func(node syntax.Node) bool {
-		if decl, ok := node.(*syntax.FuncDecl); ok && decl.Name != nil {
-			if name := decl.Name.Value; name == "cd" || name == "pushd" {
-				redefined = true
+		switch node := node.(type) {
+		case *syntax.FuncDecl:
+			opaque = true
+		case *syntax.CallExpr:
+			if len(node.Args) == 0 {
+				break
 			}
+			program, static := StaticWord(node.Args[0], home)
+			switch program {
+			case "eval", "source", ".", "trap", "alias", "builtin", "command":
+				opaque = true
+			}
+			opaque = opaque || !static
 		}
-		return !redefined
+		return !opaque
 	})
-	if redefined {
+	if opaque {
 		return certain
 	}
 	// syntax.Walk visits an outer && before the ones inside its right side,
@@ -271,6 +283,9 @@ func actionCertainDirectoryCalls(file *syntax.File, home string) map[*syntax.Cal
 		if !programStatic || !targetStatic || program != "cd" && program != "pushd" || !filepath.IsAbs(target) {
 			return true
 		}
+		if actionMayChangeDirectory(binary.Y) {
+			return true
+		}
 		syntax.Walk(binary.Y, func(inner syntax.Node) bool {
 			if call, ok := inner.(*syntax.CallExpr); ok {
 				certain[call] = cd
@@ -280,6 +295,38 @@ func actionCertainDirectoryCalls(file *syntax.File, home string) map[*syntax.Cal
 		return true
 	})
 	return certain
+}
+
+// actionMayChangeDirectory reports a command that names a directory change
+// anywhere in its text, quoted shell bodies included: cd, pushd, popd,
+// Set-Location and its aliases, ~- or OLDPWD (RV26-1). Any such mention may
+// take a later reader back to an earlier directory, so it is never certain.
+func actionMayChangeDirectory(node syntax.Node) bool {
+	found := false
+	mentions := func(text string) bool {
+		inToken := func(r rune) bool {
+			return r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '_' || r == '~' || r == '-'
+		}
+		for _, token := range strings.FieldsFunc(text, func(r rune) bool { return !inToken(r) }) {
+			switch strings.ToLower(token) {
+			case "cd", "chdir", "pushd", "popd", "sl", "set-location", "push-location", "pop-location", "~-", "oldpwd":
+				return true
+			}
+		}
+		return false
+	}
+	syntax.Walk(node, func(inner syntax.Node) bool {
+		switch inner := inner.(type) {
+		case *syntax.Lit:
+			found = found || mentions(inner.Value)
+		case *syntax.SglQuoted:
+			found = found || mentions(inner.Value)
+		case *syntax.ParamExp:
+			found = found || inner.Param != nil && mentions(inner.Param.Value)
+		}
+		return !found
+	})
+	return found
 }
 
 // actionWindowsCertainLocation reports a location statement whose success
@@ -307,6 +354,41 @@ func actionWindowsCertainLocation(statement []string, next string, earlier []str
 		return true
 	}
 	return false
+}
+
+// actionWindowsStatementNamesLocation reports a flat Windows statement with
+// a location program in any word, a leading ( { or & taken off: ( cd -,
+// (Set-Location -), (popd (RV26-1).
+func actionWindowsStatementNamesLocation(statement []string) bool {
+	for _, word := range statement {
+		if actionWindowsLocationProgram(strings.TrimLeft(word, "({&")) {
+			return true
+		}
+	}
+	return false
+}
+
+// actionWindowsUngroupedStatement is a flat Windows statement without the
+// grouping around it: (grep -r . .) reads as grep -r . . (RV26-1).
+func actionWindowsUngroupedStatement(statement []string) []string {
+	if len(statement) == 0 {
+		return statement
+	}
+	words := append([]string(nil), statement...)
+	if first := strings.TrimLeft(words[0], "({"); first == "" {
+		words = words[1:]
+	} else {
+		words[0] = first
+	}
+	if len(words) == 0 {
+		return words
+	}
+	if last := strings.TrimRight(words[len(words)-1], ")}"); last == "" {
+		words = words[:len(words)-1]
+	} else {
+		words[len(words)-1] = last
+	}
+	return words
 }
 
 // actionWindowsDrive is the lower-case drive letter of an absolute Windows
