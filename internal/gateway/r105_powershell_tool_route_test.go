@@ -94,6 +94,18 @@ func TestR105PowerShellToolRouteMatchesBash(t *testing.T) {
 		{"GAP-1473 git commit message tilde path", `git commit -m 'Document ~/.ssh/authorized_keys'`, false},
 		{"ctl git status", `git status`, false},
 		{"ctl Get-ChildItem src", `Get-ChildItem .\src -Recurse -Filter *.go`, false},
+		{"GAP-2397 grouped key read", `(Get-Content ~\.ssh\id_ed25519)`, true},
+		{"GAP-2397 Write-Output grouped key read", `Write-Output (Get-Content ~\.ssh\id_ed25519)`, true},
+		{"GAP-2397 Write-Host gc", `Write-Host (gc ~/.ssh/id_ed25519)`, true},
+		{"GAP-2397 subexpression in a string", `"$(Get-Content $HOME\.ssh\id_ed25519)"`, true},
+		{"GAP-2397 assignment", `$k = Get-Content ~/.ssh/id_ed25519; $k`, true},
+		{"GAP-2397 .NET ReadAllText", `[IO.File]::ReadAllText("$HOME\.ssh\id_ed25519")`, true},
+		{"GAP-2397 Write-Output grouped cat", `Write-Output (cat ~/.ssh/id_ed25519)`, true},
+		{"GAP-1780 Git Bash for loop over the key glob", `for f in ~/.ssh/id_*; do cat "$f"; done`, true},
+		{"GAP-2397 ctl grouped notes", `Write-Output (Get-Content .\notes.txt)`, false},
+		{"GAP-2397 ctl single-quoted grouped key text", `Write-Output '(Get-Content ~\.ssh\id_ed25519)'`, false},
+		{"GAP-2397 ctl .NET read project file", `[IO.File]::ReadAllText("$HOME\project\notes.txt")`, false},
+		{"GAP-1780 ctl for loop over project files", `for f in *.txt; do cat "$f"; done`, false},
 	}
 	for _, tool := range []string{"Bash", "PowerShell", "shell", "shell_command", "exec_command"} {
 		for _, tc := range rows {

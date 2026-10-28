@@ -184,50 +184,7 @@ func ActionPrivateKeyRead(command, cwd, home string) bool {
 		return false
 	}
 	if actionWindowsHome(home) {
-		// The PowerShell reading or the plain one (GAP-1500 refix 2).
-		for _, grammar := range []actionWindowsGrammar{0, actionWindowsPlainGrammar} {
-			scan := actionWindowsScan(command, grammar)
-			if !scan.ok {
-				// An unreadable command: each piece between separators is
-				// read on its own, so a key read the misread quote hides is
-				// still found (GAP-1779).
-				for _, piece := range strings.FieldsFunc(command, func(r rune) bool {
-					return strings.ContainsRune(";|&\r\n", r)
-				}) {
-					if actionPrivateKeyReadWords(strings.Fields(piece), cwd, home, keyReadWindows, 0) {
-						return true
-					}
-				}
-				continue
-			}
-			// A reader after a directory change reads relative to it, in
-			// any spelling of the drive (cd /c/Users/me && head .ssh/id_rsa,
-			// GAP-1823). The previous directories stay candidates: cmd's cd
-			// without /d does not switch the drive.
-			words, start, dirs := scan.words, 0, []string{cwd}
-			for i := 0; i <= len(words); i++ {
-				if i < len(words) {
-					switch words[i] {
-					case ";", "&", "&&", "|", "||":
-					default:
-						continue
-					}
-				}
-				statement := words[start:i]
-				for _, dir := range dirs {
-					if actionPrivateKeyReadWords(statement, dir, home, keyReadWindows, 0) {
-						return true
-					}
-				}
-				if len(statement) == 2 && actionWindowsLocationProgram(statement[0]) && len(dirs) < 8 {
-					if next, ok := actionWindowsPath(statement[1], dirs[len(dirs)-1], home); ok {
-						dirs = append(dirs, next)
-					}
-				}
-				start = i + 1
-			}
-		}
-		return false
+		return actionWindowsPrivateKeyRead(command, cwd, home)
 	}
 	file, ok := parseShell(command)
 	if !ok {
@@ -820,11 +777,21 @@ func actionPrivateKeyGlob(value, cwd, home string, mode keyReadMode) bool {
 		if !actionWindowsHome(pattern) {
 			pattern = strings.TrimRight(strings.ReplaceAll(cwd, `\`, "/"), "/") + "/" + pattern
 		}
-		pattern = strings.ToLower(path.Clean(pattern))
+		native := path.Clean(pattern)
+		pattern = strings.ToLower(native)
 		root := strings.ToLower(path.Clean(strings.ReplaceAll(home, `\`, "/")))
 		for _, name := range actionPrivateKeyNames {
 			if actionKeyPatternMatch(pattern, root+"/.ssh/"+name, true) {
 				return true
+			}
+		}
+		// On the Windows host itself the pattern is expanded and each match
+		// resolved through junctions and symlinks, as on POSIX (GAP-1780).
+		if runtime.GOOS == "windows" {
+			for _, match := range actionBoundedGlob(filepath.FromSlash(native), true) {
+				if actionPrivateReadPath(match, cwd, home) {
+					return true
+				}
 			}
 		}
 		return false
