@@ -125,3 +125,40 @@ func TestDevinProjectHooksSetupAndTeardownKeepABOMAndTheComments(t *testing.T) {
 		}
 	}
 }
+
+// GAP-2314: the documented fallback. A project hooks.v1.json that the
+// in-place edit cannot reproduce (here a duplicate top-level key) is written
+// back as JSON like a user file: its comments and BOM are removed, and the
+// result still carries DefenseClaw's hooks.
+func TestDevinProjectHooksThatCannotBeSplicedAreWrittenBackAsJSON(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, ".devin", "hooks.v1.json")
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	original := "\xEF\xBB\xBF// note\n{\n  \"PostToolUse\": [],\n  \"PostToolUse\": [],\n}\n"
+	if err := os.WriteFile(path, []byte(original), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	script := "/home/u/.defenseclaw/hooks/devin-hook.sh"
+	if err := patchDevinHooks(path, script); err != nil {
+		t.Fatal(err)
+	}
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(got)
+	if strings.HasPrefix(text, "\xEF\xBB\xBF") || strings.Contains(text, "// note") {
+		t.Fatalf("fallback kept the BOM or a comment:\n%s", text)
+	}
+	cfg, err := readDevinJSONObject(path)
+	if err != nil {
+		t.Fatalf("result does not parse: %v\n%s", err, text)
+	}
+	for _, event := range devinHookEvents {
+		if !devinHookGroupReferences(lastDevinGroup(cfg[event]), script) {
+			t.Fatalf("%s lacks the DefenseClaw hook:\n%s", event, text)
+		}
+	}
+}
