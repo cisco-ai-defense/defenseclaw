@@ -1670,6 +1670,8 @@ const r105Rows: DocRow[] = [
   // pod docs it2 (2026-10-28)
   { gap: "GAP-2257", page: "connectors/codex.mdx", section: "Setup", has: ["On a terminal it still asks: `Select mode (1, 2) [2]:` with the current mode as the default (Enter keeps it)", "`Codex is already configured; re-apply its hooks (mode=action)? [Y/n]:`", "`Add LLM judge on top of rule scanning? [y/N]:`", "`--yes` skips the questions and keeps the current mode"] },
   // pod docs it3 (2026-10-28)
+  { gap: "GAP-2264", page: "hitl.mdx", has: ["Outside Manual mode Claude Code cannot ask, so the call is blocked and its row shows `decision=blocked` in the list and `blocked` on the `Decision` line of `--show`."], lacks: ["Outside Manual mode, the decision is `block`."] },
+  { gap: "GAP-2264", page: "stories/hitl-approvals.mdx", has: ["Outside Manual mode Claude Code cannot ask, so the call is blocked and its row shows `decision=blocked` in the list and `blocked` on the `Decision` line of `--show`."], lacks: ["Outside Manual mode, the decision is `block`."] },
   { gap: "GAP-2334", page: "enterprise/mdm/linux-config-management.mdx", section: "Check health", has: ["| Kit detection script | `packaging/mdm/linux/detect.sh --require-healthy` (exit `1`, or `unhealthy` with `--format value`, when `verify` reports a problem or `security_complete` is `false`: a host whose `verify` passes with incomplete security still fails it, and the message says which) |"], lacks: ["| Kit detection script | `packaging/mdm/linux/detect.sh --require-healthy` |"] },
 ];
 
@@ -2063,6 +2065,14 @@ describe('kit detect.sh health gate matches the Linux Check health row (GAP-2334
   it('fails on a verify problem and on incomplete security', () => {
     const detect = source('packaging/mdm/linux/detect.sh');
     assert.ok(detect.includes('dc_json_true "$verify" ok || dc_report 0 unhealthy') && detect.includes('dc_json_true "$verify" security_complete || dc_report 0 unhealthy "verify reported incomplete security'), 'detect.sh --require-healthy gate changed: re-check enterprise/mdm/linux-config-management.mdx Check health');
+  });
+});
+
+// GAP-2264: a hook block shows as "blocked" in defenseclaw alerts; the HITL pages quote that word.
+describe('alerts decision label for a hook block matches the HITL pages (GAP-2264)', () => {
+  it('labels a hook block "blocked"', () => {
+    const py = source('cli/defenseclaw/commands/cmd_alerts.py');
+    assert.ok(py.includes('if action == "block":') && py.includes('else "blocked"'), 'alerts no longer labels a hook block "blocked": re-check hitl.mdx and stories/hitl-approvals.mdx Check it worked');
   });
 });
 
