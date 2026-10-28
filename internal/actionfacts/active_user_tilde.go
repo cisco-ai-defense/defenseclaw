@@ -6,61 +6,96 @@ package actionfacts
 import (
 	"path"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 
 	"mvdan.cc/sh/v3/syntax"
 )
 
-var activeUserTildeName = regexp.MustCompile(`^[A-Za-z0-9._][A-Za-z0-9._-]*$`)
+// activeUserTildeName is a login name bash can read as a tilde-prefix:
+// passwd-legal characters, '@' included for directory (AD/sssd) logins
+// such as user@domain (GAP-2378).
+var activeUserTildeName = regexp.MustCompile(`^[A-Za-z0-9._][A-Za-z0-9._@+-]*$`)
 
 var assignmentLikePrefix = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*=`)
 
 // ActiveUserTildeTwin returns command with every tilde-prefix that names
 // the active user (~<user> or ~<user>/..., <user> the base name of
-// activeHome, a POSIX or Git Bash drive home) spelled as activeHome. bash expands such a prefix from
-// the password database, not from HOME, at the start of a word and after
-// the first = of an assignment-shaped word (x=~u/f, dd of=~u/f), but not
-// inside quotes, after a backslash or in a here-document body; a prefix
-// with a quoted character is no tilde-prefix. As for /home/$USER
-// (userHomeRewriteWord, GAP-2269), the user named by the home's base name
-// is taken to be the active user: if it is another user, the word names
-// that user's home, so the twin errs only toward a path under the active
-// home. The twin is exact for every other word, so a check that holds on
-// it holds for the command (GAP-2378). An assignment-shaped argument
-// (dd of=~/f) has its ~ spelled as the home too when nothing in the
-// command mentions HOME: bash expands it from HOME like a leading ~/,
-// which the other readings already resolve. ok is false when there is no such
-// prefix, the home is not a literal POSIX or drive path or the command
-// does not parse.
-func ActiveUserTildeTwin(command, activeHome string) (twin string, user string, ok bool) {
+// activeHome, a POSIX or Git Bash drive home, or one of logins, the
+// active account's login names from the OS identity) spelled as
+// activeHome. bash expands such a prefix from the password database, not
+// from HOME, at the start of a word and after the first = of an
+// assignment-shaped word (x=~u/f, dd of=~u/f), but not inside quotes,
+// after a backslash or in a here-document body; a prefix with a quoted
+// character is no tilde-prefix. A login can differ from the home's base
+// name (sssd /home/%d/%u) and carry '@' (user@domain); directory logins
+// resolve case-insensitively, so the name is matched without case. As for
+// /home/$USER (userHomeRewriteWord, GAP-2269), the user named by the
+// home's base name is taken to be the active user: if it is another user,
+// the word names that user's home, so the twin errs only toward a path
+// under the active home. The twin is exact for every other word, so a
+// check that holds on it holds for the command (GAP-2378). An
+// assignment-shaped argument (dd of=~/f) has its ~ spelled as the home too
+// when nothing in the command mentions HOME: bash expands it from HOME
+// like a leading ~/, which the other readings already resolve. prefixes
+// are the ~<user> spellings that were respelled. ok is false when there is
+// no such prefix, the home is not a literal POSIX or drive path or the
+// command does not parse.
+func ActiveUserTildeTwin(command, activeHome string, logins ...string) (twin string, prefixes []string, ok bool) {
 	home, valid := normalizeActiveHome(activeHome)
 	home = strings.TrimRight(home, "/")
-	if !valid || !posixShellHome(home) || !trustedPOSIXHomeLiteral.MatchString(home) {
-		return "", "", false
+	if !valid || !posixShellHome(home) || !trustedPOSIXHomeLiteral.MatchString(home) ||
+		!strings.Contains(command, "~") {
+		return "", nil, false
 	}
-	user = path.Base(home)
-	prefix := "~" + user
-	if !activeUserTildeName.MatchString(user) || !strings.Contains(command, "~") {
-		return "", "", false
+	var names []string
+	for _, name := range append([]string{path.Base(home)}, logins...) {
+		if activeUserTildeName.MatchString(name) {
+			names = append(names, name)
+		}
+	}
+	activeName := func(name string) bool {
+		for _, candidate := range names {
+			if strings.EqualFold(name, candidate) {
+				return true
+			}
+		}
+		return false
 	}
 	homeFree := !strings.Contains(command, "HOME")
 	file, err := syntax.NewParser(syntax.Variant(syntax.LangBash)).Parse(strings.NewReader(command), "")
 	if err != nil {
-		return "", "", false
+		return "", nil, false
 	}
 	type span struct{ offset, length int }
 	var spans []span
-	at := func(word *syntax.Word, lit *syntax.Lit, index int, tilde string) {
+	at := func(word *syntax.Word, lit *syntax.Lit, index int, assignment bool) {
 		rest := lit.Value[index:]
-		if !strings.HasPrefix(rest, tilde) {
+		if !strings.HasPrefix(rest, "~") {
 			return
 		}
-		after := rest[len(tilde):]
-		if after == "" && len(word.Parts) != 1 || after != "" && after[0] != '/' {
+		end := strings.IndexByte(rest, '/')
+		if end < 0 {
+			if len(word.Parts) != 1 {
+				return
+			}
+			end = len(rest)
+		}
+		name := rest[1:end]
+		switch {
+		case name == "":
+			if !assignment || !homeFree {
+				return
+			}
+		case activeName(name):
+			if !slices.Contains(prefixes, rest[:end]) {
+				prefixes = append(prefixes, rest[:end])
+			}
+		default:
 			return
 		}
-		spans = append(spans, span{int(lit.Pos().Offset()) + index, len(tilde)})
+		spans = append(spans, span{int(lit.Pos().Offset()) + index, end})
 	}
 	syntax.Walk(file, func(node syntax.Node) bool {
 		switch typed := node.(type) {
@@ -77,18 +112,15 @@ func ActiveUserTildeTwin(command, activeHome string) (twin string, user string, 
 			if !isLit {
 				return true
 			}
-			at(typed, lit, 0, prefix)
+			at(typed, lit, 0, false)
 			if match := assignmentLikePrefix.FindString(lit.Value); match != "" {
-				at(typed, lit, len(match), prefix)
-				if homeFree {
-					at(typed, lit, len(match), "~")
-				}
+				at(typed, lit, len(match), true)
 			}
 		}
 		return true
 	})
 	if len(spans) == 0 {
-		return "", "", false
+		return "", nil, false
 	}
 	sort.Slice(spans, func(i, j int) bool { return spans[i].offset < spans[j].offset })
 	var out strings.Builder
@@ -96,14 +128,14 @@ func ActiveUserTildeTwin(command, activeHome string) (twin string, user string, 
 	for _, item := range spans {
 		end := item.offset + item.length
 		if item.offset < last || end > len(command) || command[item.offset] != '~' {
-			return "", "", false
+			return "", nil, false
 		}
 		out.WriteString(command[last:item.offset])
 		out.WriteString(home)
 		last = end
 	}
 	out.WriteString(command[last:])
-	return out.String(), user, true
+	return out.String(), prefixes, true
 }
 
 var msysDrivePrefix = regexp.MustCompile(`^/(?:cygdrive/)?([A-Za-z])(?:/|$)`)

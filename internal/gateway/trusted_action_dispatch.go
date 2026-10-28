@@ -24,12 +24,14 @@ import (
 	"io"
 	"net/netip"
 	"os"
+	osuser "os/user"
 	"path"
 	"path/filepath"
 	"regexp"
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail/semantic"
@@ -285,7 +287,7 @@ func dispatchTrustedAction(
 	// database (GAP-2378), and under a Windows home an MSYS drive mount
 	// (/c/...) names the drive path (GAP-2375): the twin with that spelling
 	// is judged too, and a block proven there counts, as for the plain one.
-	if twin, ok := homeSpellingTwinRequest(request); ok {
+	if twin, ok := homeSpellingTwinRequest(request, trustedActiveLogins(parent, request.Input.ActiveHome)...); ok {
 		defer func() {
 			findings = withTwinProvenBlocks(findings, dispatchTrustedAction(parent, twin))
 		}()
@@ -5243,12 +5245,12 @@ func trustedShellHeredocAt(
 }
 
 // homeSpellingTwinRequest returns request with its Bash command's
-// ~<active user> tilde-prefixes spelled as the active home
-// (actionfacts.ActiveUserTildeTwin) or, under a Windows home, its MSYS
+// ~<active user> tilde-prefixes (the home's base name or one of logins)
+// spelled as the active home (actionfacts.ActiveUserTildeTwin) or, under a Windows home, its MSYS
 // drive mounts spelled as drive paths (actionfacts.MSYSDrivePathTwin). A
 // hook client's resolved target for the original spelling is kept for the
 // new one. The twin records no audit or telemetry of its own.
-func homeSpellingTwinRequest(request trustedActionRequest) (trustedActionRequest, bool) {
+func homeSpellingTwinRequest(request trustedActionRequest, logins ...string) (trustedActionRequest, bool) {
 	if request.Input.DialectHint != actionfacts.DialectPOSIX && request.Input.DialectHint != "" {
 		return trustedActionRequest{}, false
 	}
@@ -5257,13 +5259,14 @@ func homeSpellingTwinRequest(request trustedActionRequest) (trustedActionRequest
 		return trustedActionRequest{}, false
 	}
 	respell := func(spelling string) string { return spelling }
-	rewritten, user, ok := actionfacts.ActiveUserTildeTwin(command, request.Input.ActiveHome)
+	rewritten, prefixes, ok := actionfacts.ActiveUserTildeTwin(command, request.Input.ActiveHome, logins...)
 	if ok {
 		home := strings.TrimRight(filepath.ToSlash(request.Input.ActiveHome), "/")
-		prefix := "~" + user
 		respell = func(spelling string) string {
-			if spelling == prefix || strings.HasPrefix(spelling, prefix+"/") {
-				return home + spelling[len(prefix):]
+			for _, prefix := range prefixes {
+				if spelling == prefix || strings.HasPrefix(spelling, prefix+"/") {
+					return home + spelling[len(prefix):]
+				}
 			}
 			return spelling
 		}
@@ -6790,6 +6793,49 @@ func trustedActiveHome(ctx context.Context) string {
 	}
 	return trustedSameHostHome()
 }
+
+// trustedActiveLogins names the login of the account whose home is
+// activeHome, from the same trusted identity trustedActiveHome reads (the
+// kernel-verified managed hook peer, the per-user credential's account, or
+// the account this gateway runs as), so a ~<login> tilde-prefix is read
+// as that home even when the login is not the home's base name or holds
+// '@' (AD user@domain, GAP-2378). A Windows DOMAIN\user name gives user.
+// nil when the request's home is not that account's home.
+func trustedActiveLogins(ctx context.Context, activeHome string) []string {
+	if ctx == nil || activeHome == "" || isSandboxHookRequest(ctx) {
+		return nil
+	}
+	if filepath.Clean(trustedActiveHome(ctx)) != filepath.Clean(activeHome) {
+		return nil
+	}
+	var name string
+	if peer, ok := managedHookPeerFromContext(ctx); ok {
+		name = peer.Name
+	} else if serviceAccountGatewayFromContext(ctx) {
+		if identity, _ := ctx.Value(verifiedUserScopedIdentityContextKey{}).(string); identity != "" {
+			name = userScopedIdentityName(identity)
+		}
+	} else {
+		name = trustedSameHostLogin()
+	}
+	if index := strings.LastIndexByte(name, '\\'); index >= 0 {
+		name = name[index+1:]
+	}
+	if name = strings.TrimSpace(name); name == "" {
+		return nil
+	}
+	return []string{name}
+}
+
+// trustedSameHostLogin is the login name of the account this gateway runs
+// as, looked up once.
+var trustedSameHostLogin = sync.OnceValue(func() string {
+	account, err := osuser.Current()
+	if err != nil {
+		return ""
+	}
+	return account.Username
+})
 
 // unresolvedCallerHome stands in for a standalone caller whose home cannot
 // be resolved (a directory lookup that failed, a home of "/", or an
