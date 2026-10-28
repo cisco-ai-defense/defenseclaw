@@ -54,6 +54,7 @@ readonly DC_LINUX_PACKAGE=defenseclaw-enterprise
 # dc_stage_parent); it holds the credential rotation journal (rotation/).
 DC_KIT_STATE=/var/lib/defenseclaw-mdm
 DC_STAGE=""
+DC_TRUST_ACL=""   # the ACL entry dc_trusted_path refused, for messages (set -u: read before any check ran)
 
 dc_platform() {
     case "$(uname -s)" in
@@ -309,6 +310,10 @@ if [ -n "$DC_STAGING_DIR" ]; then
         /*) ;;
         *) dc_fail_result "$DC_EXIT_INVALID" mdm_invalid_arguments "--staging-dir must be an absolute path" ;;
     esac
+    if [ ! -e "$DC_STAGING_DIR" ] && [ ! -L "$DC_STAGING_DIR" ]; then
+        # GAP-2453: name a missing folder, as the wrapper does (GAP-0030).
+        dc_fail_result "$DC_EXIT_FAILURE" mdm_staging_untrusted "the staging folder $DC_STAGING_DIR does not exist; name the --staging-dir folder the wrapper runs used, or leave out --staging-dir"
+    fi
     if [ ! -d "$DC_STAGING_DIR" ] || ! dc_trusted_path "$DC_STAGING_DIR"; then
         dc_fail_result "$DC_EXIT_FAILURE" mdm_staging_untrusted "the staging folder $DC_STAGING_DIR is not a root-owned directory that only root can write$DC_TRUST_ACL"
     fi

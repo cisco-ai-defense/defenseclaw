@@ -4130,16 +4130,31 @@ def test_unix_uninstall_refuses_an_untrusted_or_relative_staging_dir(tmp_path: P
     lines = text.splitlines()
     assert lines[31].startswith("# Usage: uninstall.sh")
     check = text.split('[ "$(id -u)" = 0 ] ||', 1)[1].split("\nfi\n", 1)[0].split("\n", 1)[1] + "\nfi\n"
-    for value, trusted, code in (("relative/dir", "0", "mdm_invalid_arguments"), (str(tmp_path), "1", "mdm_staging_untrusted")):
+    # GAP-2453: take the top-level DC_TRUST_ACL initialization from the script
+    # itself (set -u), not from the harness, so a missing folder or a file (the
+    # [ ! -d ] branch, where dc_trusted_path never ran) still reaches dc_fail_result.
+    init = "\n".join(line for line in lines if line.startswith("DC_TRUST_ACL="))
+    (tmp_path / "file").write_text("x\n", encoding="utf-8")
+    cases = (
+        ("relative/dir", "0", 2, "mdm_invalid_arguments", "absolute path"),
+        (str(tmp_path), "1", 1, "mdm_staging_untrusted", "only root can write"),
+        (str(tmp_path / "missing"), "0", 1, "mdm_staging_untrusted", "does not exist"),
+        (str(tmp_path / "file"), "0", 1, "mdm_staging_untrusted", "only root can write"),
+    )
+    for value, trusted, rc, code, words in cases:
         script = f"""set -eu
-DC_EXIT_INVALID=2 DC_EXIT_FAILURE=1 DC_STAGING_DIR='{value}' DC_TRUST_ACL=""
-dc_fail_result() {{ echo "$2"; exit "$1"; }}
-dc_trusted_path() {{ return {trusted}; }}
+DC_EXIT_INVALID=2 DC_EXIT_FAILURE=1 DC_STAGING_DIR='{value}'
+{init}
+dc_fail_result() {{ echo "$2|$3"; exit "$1"; }}
+dc_trusted_path() {{ DC_TRUST_ACL=""; return {trusted}; }}
 {check}
 echo passed
 """
         result = subprocess.run(["sh", "-c", script], capture_output=True, text=True, timeout=30)
-        assert result.stdout.strip() == code, (value, result.stdout, result.stderr)
+        got_code, _, message = result.stdout.strip().partition("|")
+        assert (result.returncode, got_code) == (rc, code), (value, result.stdout, result.stderr)
+        named = code == "mdm_invalid_arguments" or value in message
+        assert words in message and named and result.stderr == "", (value, result.stdout, result.stderr)
 
 
 # GAP-1850: two first kit runs at once race on creating the state folders.
