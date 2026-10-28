@@ -10,25 +10,11 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
-	"regexp"
 	"strings"
 	"testing"
-)
 
-// prefilterAnchorsIn reports whether text holds one of set's anchors.
-func prefilterAnchorsIn(set ruleAnchorSet, text string) bool {
-	folded := ruleFoldCanonical(text)
-	for _, anchor := range set.anchors {
-		haystack := text
-		if anchor.fold {
-			haystack = folded
-		}
-		if strings.Contains(haystack, anchor.text) {
-			return true
-		}
-	}
-	return false
-}
+	"github.com/defenseclaw/defenseclaw/internal/rxprefilter"
+)
 
 func prefilterCorpus(t *testing.T) string {
 	t.Helper()
@@ -78,15 +64,14 @@ func TestRulePrefilterAnchorsAreInEveryMatchOfTheBuiltInRules(t *testing.T) {
 				continue
 			}
 			rules++
-			set := ruleAnchorsFor(rule.Pattern)
-			if !set.ok {
+			if !rxprefilter.HasRequiredLiterals(rule.Pattern) {
 				continue
 			}
 			anchored++
 			for _, loc := range rule.Pattern.FindAllStringIndex(corpus, -1) {
 				matched++
-				if m := corpus[loc[0]:loc[1]]; !prefilterAnchorsIn(set, m) {
-					t.Errorf("rule %s matched %q but holds none of its anchors %+v", rule.ID, m, set.anchors)
+				if m := corpus[loc[0]:loc[1]]; !rxprefilter.RequiredLiteralsIn(rule.Pattern, m) {
+					t.Errorf("rule %s matched %q, which misses a literal the prefilter requires", rule.ID, m)
 				}
 			}
 		}
@@ -94,47 +79,6 @@ func TestRulePrefilterAnchorsAreInEveryMatchOfTheBuiltInRules(t *testing.T) {
 	t.Logf("rules=%d anchored=%d matches checked=%d", rules, anchored, matched)
 	if anchored*2 < rules {
 		t.Fatalf("only %d of %d rules have anchors", anchored, rules)
-	}
-}
-
-func TestRulePrefilterDerivesOnlyRequiredLiterals(t *testing.T) {
-	filler := strings.Repeat("echo line benign filler for heredoc payload size\n", 200)
-	cases := []struct {
-		pattern string
-		text    string
-		match   bool
-	}{
-		{`(?i)secret_key\s*=`, "ſECRET_KEY =", true},
-		{`(?i)(?:api[_-]?key|token)\s*[=:]`, "my ToKeN: x", true},
-		{`(?i)(?:foo)?bar`, "BAR", true},
-		{`(?i)(?:foo)?bar`, "foo", false},
-		{`a{0,3}zz`, "zz", true},
-		{`(?:x|[0-9])+done`, "7done", true},
-		{`[0-9]{3}-[0-9]{4}`, "555-1234", true},
-		{`(?i)\bdd\s+if=`, "DD IF=/dev/zero", true},
-		{`(?i)(?:^|\n)[^\n]*ssn[^\n]*,`, "id,SSN,name", true},
-		{`(?i)\x{212a}elvin`, "kelvin", true},
-		{`(?s)begin.*end`, "begin\nend", true},
-	}
-	for _, tc := range cases {
-		re := regexp.MustCompile(tc.pattern)
-		for _, text := range []string{tc.text, filler + tc.text + filler} {
-			if got := re.MatchString(text); got != tc.match {
-				t.Fatalf("%q on %q: regexp says %v, case wants %v", tc.pattern, tc.text, got, tc.match)
-			}
-			scan := newRulePrefilterText(text)
-			if tc.match && !scan.mayMatch(re) {
-				t.Errorf("prefilter skipped %q on a text it matches (%q)", tc.pattern, tc.text)
-			}
-			rule := PatternRule{ID: "test", Pattern: re}
-			if got := firstAcceptedRuleMatchIn(rule, scan) != nil; got != tc.match {
-				t.Errorf("firstAcceptedRuleMatchIn(%q) = %v, want %v", tc.pattern, got, tc.match)
-			}
-		}
-	}
-	// A class-only pattern has no anchor: it always runs.
-	if set := ruleAnchorsFor(regexp.MustCompile(`[0-9]{3}[a-z]{4}`)); set.ok {
-		t.Fatalf("a class-only pattern got anchors %+v", set.anchors)
 	}
 }
 
@@ -147,7 +91,7 @@ func TestRulePrefilterSkipsMostRulesForALargeBenignHeredoc(t *testing.T) {
 		sb.WriteString("echo line benign filler for heredoc payload size\n")
 	}
 	sb.WriteString("EOF2\n")
-	scan := newRulePrefilterText(sb.String())
+	scan := rxprefilter.NewText(sb.String())
 	generation := mustCompileRulePackGeneration(defaultRuleCategories())
 	rules, run := 0, 0
 	for _, cat := range generation.categories {
@@ -157,9 +101,9 @@ func TestRulePrefilterSkipsMostRulesForALargeBenignHeredoc(t *testing.T) {
 				continue
 			}
 			rules++
-			if scan.mayMatch(rule.Pattern) {
+			if scan.MayMatch(rule.Pattern) {
 				run++
-				t.Logf("runs %s expression=%t anchors=%+v", rule.ID, rule.Expression != "", ruleAnchorsFor(rule.Pattern).anchors)
+				t.Logf("still runs: %s", rule.ID)
 			}
 		}
 	}

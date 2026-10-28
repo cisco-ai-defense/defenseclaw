@@ -29,6 +29,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail/semantic"
+	"github.com/defenseclaw/defenseclaw/internal/rxprefilter"
 )
 
 // PatternRule is a single detection rule with a compiled regex, severity,
@@ -1053,8 +1054,8 @@ func scanRuleCategoriesWithOptions(
 	}
 
 	// Scan raw text first. Rules whose required literals are absent are
-	// skipped without running their regex (rule_prefilter.go).
-	rawScan := newRulePrefilterText(text)
+	// skipped without running their regex (rxprefilter).
+	rawScan := rxprefilter.NewText(text)
 	for categoryIndex := range generation.categories {
 		cat := &generation.categories[categoryIndex]
 		categoryAllowed := options.allowsCategory(cat.Name)
@@ -1102,7 +1103,7 @@ func scanRuleCategoriesWithOptions(
 	// Scan normalized text to catch shell obfuscation
 	normalized := normalizeShell(text)
 	if normalized != text {
-		normalizedScan := newRulePrefilterText(normalized)
+		normalizedScan := rxprefilter.NewText(normalized)
 		for categoryIndex := range generation.categories {
 			cat := &generation.categories[categoryIndex]
 			categoryAllowed := options.allowsCategory(cat.Name)
