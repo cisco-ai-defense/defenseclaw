@@ -148,3 +148,76 @@ func TestClaudeCodePerUserSetupTakesBackTheFailModeCarrier(t *testing.T) {
 		})
 	}
 }
+
+// GAP-2388: a rollback to 1.0.3 starts its gateway, whose setup writes its
+// native telemetry block back (protocols, service name, resource attributes);
+// the roll forward must take back exactly those renders, like the carrier, and
+// keep a value the user set.
+func TestClaudeCodePerUserSetupTakesBackAnEarlierReleaseTelemetryRenderAfterARollbackPair(t *testing.T) {
+	dir := t.TempDir()
+	settingsPath := filepath.Join(dir, "claude", "settings.json")
+	if err := os.MkdirAll(filepath.Dir(settingsPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	previous := ClaudeCodeSettingsPathOverride
+	ClaudeCodeSettingsPathOverride = settingsPath
+	t.Cleanup(func() { ClaudeCodeSettingsPathOverride = previous })
+	c := NewClaudeCodeConnector()
+	opts := SetupOpts{DataDir: dir, APIAddr: "127.0.0.1:18970", HookFailMode: "open"}
+	if err := c.Setup(context.Background(), opts); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(settingsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var settings map[string]interface{}
+	if err := json.Unmarshal(data, &settings); err != nil {
+		t.Fatal(err)
+	}
+	env, _ := settings["env"].(map[string]interface{})
+	if env == nil {
+		env = map[string]interface{}{}
+		settings["env"] = env
+	}
+	earlier := map[string]string{
+		"DEFENSECLAW_FAIL_MODE":               "open",
+		"OTEL_EXPORTER_OTLP_PROTOCOL":         "http/json",
+		"OTEL_EXPORTER_OTLP_LOGS_PROTOCOL":    "http/json",
+		"OTEL_EXPORTER_OTLP_METRICS_PROTOCOL": "http/json",
+		"OTEL_SERVICE_NAME":                   "claudecode",
+		"OTEL_RESOURCE_ATTRIBUTES":            "defenseclaw.connector=claudecode,service.name=claudecode",
+	}
+	for key, value := range earlier {
+		env[key] = value
+	}
+	env["OTEL_EXPORTER_OTLP_TRACES_PROTOCOL"] = "grpc" // the user's own value
+	if data, err = json.Marshal(settings); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(settingsPath, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for run := 1; run <= 2; run++ {
+		if err := c.Setup(context.Background(), opts); err != nil {
+			t.Fatalf("setup run %d: %v", run, err)
+		}
+		data, err := os.ReadFile(settingsPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var got map[string]interface{}
+		if err := json.Unmarshal(data, &got); err != nil {
+			t.Fatal(err)
+		}
+		gotEnv, _ := got["env"].(map[string]interface{})
+		for key := range earlier {
+			if value, present := gotEnv[key]; present {
+				t.Errorf("run %d: %s=%v an earlier release wrote back stays, want it taken back", run, key, value)
+			}
+		}
+		if gotEnv["OTEL_EXPORTER_OTLP_TRACES_PROTOCOL"] != "grpc" {
+			t.Errorf("run %d: the user's own traces protocol was changed: %v", run, gotEnv["OTEL_EXPORTER_OTLP_TRACES_PROTOCOL"])
+		}
+	}
+}

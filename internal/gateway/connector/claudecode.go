@@ -2078,15 +2078,13 @@ func (c *ClaudeCodeConnector) patchClaudeCodeOtelEnv(opts SetupOpts) error {
 					currentString, isString := current.(string)
 					remove = present && isString && currentString == previousValue
 				}
-				// A per-user setup took the fail-mode carrier away; an earlier
-				// release run since (a rollback to 1.0.3 and its gateway start)
-				// wrote it back with the saved mode, and a roll forward kept it
-				// as the user's (GAP-2388). That value is the earlier release's
-				// render, not the user's; a different value stays.
-				if wasAbsent && present && key == "DEFENSECLAW_FAIL_MODE" &&
-					!opts.ManagedEnterprise && !opts.SecureClientHookDelivery {
-					currentString, _ := current.(string)
-					remove = currentString == claudeCodeEarlierReleaseFailMode(opts)
+				// A per-user setup took these keys away; an earlier release run
+				// since (a rollback to 1.0.3 and its gateway start) wrote them
+				// back, and a roll forward kept them as the user's (GAP-2388).
+				// A value equal to the earlier release's render is that
+				// release's, not the user's; a different value stays.
+				if wasAbsent && present && !opts.ManagedEnterprise && !opts.SecureClientHookDelivery {
+					remove = claudeCodeEnvIsEarlierReleaseRender(key, current, opts)
 				}
 				if !remove {
 					continue
@@ -2240,6 +2238,31 @@ func claudeCodeOtelValueLooksManaged(key string, value interface{}, managed stri
 	case "OTEL_RESOURCE_ATTRIBUTES":
 		return (managed != "" && got == managed) ||
 			got == "defenseclaw.connector=claudecode,service.name=claudecode"
+	default:
+		return false
+	}
+}
+
+// claudeCodeEnvIsEarlierReleaseRender reports whether value is exactly what a
+// 1.0.3 or older per-user setup wrote for key: the fail-mode carrier with the
+// saved mode, and the protocol, service name and resource attributes of its
+// native telemetry block. Endpoints and headers are not listed: a credential
+// on them is removed by the product-credential pass, and without one they are
+// the user's.
+func claudeCodeEnvIsEarlierReleaseRender(key string, value interface{}, opts SetupOpts) bool {
+	got, _ := value.(string)
+	if got == "" {
+		return false
+	}
+	if key == "DEFENSECLAW_FAIL_MODE" {
+		return got == claudeCodeEarlierReleaseFailMode(opts)
+	}
+	switch {
+	case key == "OTEL_SERVICE_NAME",
+		key == "OTEL_RESOURCE_ATTRIBUTES",
+		strings.HasPrefix(key, "OTEL_EXPORTER_OTLP_") && strings.HasSuffix(key, "_PROTOCOL"):
+		reference := claudeCodeNativeOtelReferenceEnv(opts)[key]
+		return (reference != "" && got == reference) || claudeCodeOtelValueLooksManaged(key, got, reference)
 	default:
 		return false
 	}
