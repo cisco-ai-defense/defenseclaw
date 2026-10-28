@@ -1896,8 +1896,14 @@ def _configure_llm_non_interactive(
     llm = _target_llm_block(cfg, target_path)
     if provider is not None:
         next_provider = provider.strip().lower()
-        if next_provider != (llm.provider or "").strip().lower() and base_url is None:
+        provider_changed = next_provider != (llm.provider or "").strip().lower()
+        if provider_changed and base_url is None:
             llm.base_url = ""
+        # A switch away from provider custom drops its instance binding
+        # unless --instance-name names one again, so the role cannot keep
+        # routing to the old custom instance (GAP-2235).
+        if provider_changed and next_provider != "custom" and instance_name is None:
+            llm.instance_name = ""
         llm.provider = next_provider
     elif not llm.provider:
         llm.provider = "anthropic"

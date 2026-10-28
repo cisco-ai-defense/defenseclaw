@@ -1163,12 +1163,21 @@ var recognizedLLMProviders = map[string]struct{}{
 // warnedPrefixes keeps one-shot-per-process warning state.
 var warnedPrefixes = map[string]struct{}{}
 
-func maybeWarnUnknownProvider(prefix, componentPath string) {
+func maybeWarnUnknownProvider(prefix, componentPath, instanceName string) {
 	if prefix == "" {
 		return
 	}
 	if _, ok := recognizedLLMProviders[prefix]; ok {
 		return
+	}
+	// "custom" with a bound instance routes through its llm_providers.custom
+	// entry, so it is not an unknown prefix (GAP-2234). Without an instance it
+	// still warns: nothing tells the gateway where to send the call.
+	if prefix == "custom" && strings.TrimSpace(instanceName) != "" {
+		return
+	}
+	if componentPath == "" {
+		componentPath = "llm"
 	}
 	key := componentPath + "\x00" + prefix
 	if _, seen := warnedPrefixes[key]; seen {
@@ -1284,7 +1293,7 @@ func (c *Config) ResolveLLM(path string) LLMConfig {
 		out.protectedCredentialRequired = true
 	}
 
-	maybeWarnUnknownProvider(out.ProviderPrefix(), path)
+	maybeWarnUnknownProvider(out.ProviderPrefix(), path, out.InstanceName)
 	return out
 }
 

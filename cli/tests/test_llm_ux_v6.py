@@ -409,6 +409,51 @@ class TestSetupLLMNonInteractiveFlags(unittest.TestCase):
         self.assertEqual(res.exit_code, 0, res.output)
         self.assertEqual(self.app.cfg.llm.instance_name, "acme-internal")
 
+    def test_switch_from_custom_drops_the_instance_binding(self) -> None:
+        """GAP-2235: a later non-custom provider must not keep the custom
+        instance, or the role keeps routing to it; --instance-name and
+        a re-run of the same provider keep it."""
+        base = ["llm", "--non-interactive"]
+        def run(*args: str) -> None:
+            res = self.runner.invoke(setup, [*base, *args], obj=self.app, catch_exceptions=False)
+            self.assertEqual(res.exit_code, 0, res.output)
+
+        run("--provider", "custom", "--instance-name", "acme-bedrock-prod", "--model", "heavy")
+        self.assertEqual(self.app.cfg.llm.instance_name, "acme-bedrock-prod")
+        run("--provider", "custom", "--model", "light")
+        self.assertEqual(self.app.cfg.llm.instance_name, "acme-bedrock-prod")
+        run("--provider", "anthropic", "--model", "claude-sonnet-4-5", "--api-key-env", "DEFENSECLAW_LLM_KEY")
+        self.assertEqual(self.app.cfg.llm.provider, "anthropic")
+        self.assertEqual(self.app.cfg.llm.instance_name, "")
+        run("--provider", "bedrock", "--instance-name", "acme-bedrock-prod", "--model", "m")
+        self.assertEqual(self.app.cfg.llm.instance_name, "acme-bedrock-prod")
+        run("--provider", "vertex_ai", "--model", "gemini-2.5-pro")
+        self.assertEqual(self.app.cfg.llm.instance_name, "")
+
+    def test_custom_provider_with_instance_is_not_an_unknown_prefix(self) -> None:
+        """GAP-2234: provider custom with a bound instance is documented and
+        must not log the unknown-provider warning; without an instance it
+        still warns, naming the llm block."""
+        _cfgmod._warned_llm_prefixes.clear()
+        with self.assertLogs(_cfgmod._log, level="WARNING") as logs:
+            _cfgmod._log.warning("sentinel")
+            _cfgmod._maybe_warn_unknown_provider("custom", "", "acme-bedrock-prod")
+            _cfgmod._maybe_warn_unknown_provider("custom", "", "")
+        joined = "\n".join(logs.output)
+        self.assertEqual(joined.count("unknown LLM provider prefix"), 1, joined)
+        self.assertIn("'custom' for llm", joined)
+        _cfgmod._warned_llm_prefixes.clear()
+        res = self.runner.invoke(
+            setup,
+            ["llm", "--non-interactive", "--provider", "custom", "--instance-name", "acme-internal", "--model", "heavy"],
+            obj=self.app,
+            catch_exceptions=False,
+        )
+        self.assertEqual(res.exit_code, 0, res.output)
+        self.assertNotIn("unknown LLM provider prefix", res.output)
+        with self.assertNoLogs(_cfgmod._log, level="WARNING"):
+            self.app.cfg.resolve_llm("")
+
     def test_role_judge_writes_to_guardrail_judge(self) -> None:
         """``setup llm --role judge`` writes to ``cfg.guardrail.judge.llm``
         and leaves the top-level ``cfg.llm`` block untouched.

@@ -480,6 +480,10 @@ defenseclaw setup llm \
   --non-interactive
 ```
 
+A later `setup llm --provider` with another provider (for example
+`anthropic` or `bedrock`) and no `--instance-name` drops the instance
+binding, so the role stops using the custom instance.
+
 The judge can point at a *different* instance than the top-level LLM
 without copy-pasting:
 

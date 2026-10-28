@@ -21,7 +21,7 @@ Run Claude Code under observe mode first, then switch to action mode so the bund
 
 By the end of this story, you'll have:
 
-- Claude Code wired to DefenseClaw through its [native hooks and OpenTelemetry](/docs/connectors/claudecode).
+- Claude Code wired to DefenseClaw through its [native hooks](/docs/connectors/claudecode).
 - Observe-mode alerts and audit rows from normal Claude Code use.
 - An `action` mode policy that blocks `rm -rf` against `/` and protected top-level directories with the CRITICAL `CMD-RM-RF` rule.
 - An audit row showing the block, with the rule ID for the next reviewer.
@@ -38,7 +38,7 @@ Wire Claude Code. It starts in observe mode.
 defenseclaw setup claude-code
 ```
 
-DefenseClaw registers the hook events for your Claude Code version (28 events, or 29 from 2.1.219 where `DirectoryAdded` is observation only) and receives its native OpenTelemetry logs and metrics. See the [Claude Code connector](/docs/connectors/claudecode).
+DefenseClaw registers the hook events for your Claude Code version (28 events, or 29 from 2.1.219 where `DirectoryAdded` is observation only) and records each hook call in its audit log. Host setup turns Claude Code's native OpenTelemetry export off: `~/.claude/settings.json` gets `CLAUDE_CODE_ENABLE_TELEMETRY=0` and `none` for the `OTEL_LOGS_EXPORTER`, `OTEL_METRICS_EXPORTER` and `OTEL_TRACES_EXPORTER` entries, so on a host install DefenseClaw sees Claude Code through its hooks only. Only an isolated OpenShell sandbox keeps native logs and metrics. See the [Claude Code connector](/docs/connectors/claudecode).
 
 </Step>
 

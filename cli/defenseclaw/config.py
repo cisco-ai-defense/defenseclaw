@@ -1011,9 +1011,15 @@ _OPENAI_STYLE_LLM_PROVIDERS = frozenset(
 _warned_llm_prefixes: set[tuple[str, str]] = set()
 
 
-def _maybe_warn_unknown_provider(prefix: str, component_path: str) -> None:
+def _maybe_warn_unknown_provider(prefix: str, component_path: str, instance_name: str = "") -> None:
     if not prefix or prefix in _RECOGNIZED_LLM_PROVIDERS:
         return
+    # ``provider: custom`` with a bound instance routes through its
+    # llm_providers.custom entry, so it is not an unknown prefix (GAP-2234).
+    # Without an instance it still warns: nothing tells the gateway where to go.
+    if prefix == "custom" and (instance_name or "").strip():
+        return
+    component_path = component_path or "llm"
     key = (component_path, prefix)
     if key in _warned_llm_prefixes:
         return
@@ -4429,7 +4435,7 @@ class Config:
                     out.instance_name,
                 )
 
-        _maybe_warn_unknown_provider(out.provider_prefix(), path)
+        _maybe_warn_unknown_provider(out.provider_prefix(), path, out.instance_name)
         return out
 
     def resolved_default_llm_api_key(self) -> str:
