@@ -2543,13 +2543,24 @@ func matchesActiveDefenseClawState(
 	facts actionfacts.Facts,
 	candidate actionfacts.PathFact,
 ) bool {
+	return matchesActiveDefenseClawStateInLine(facts, candidate, nil)
+}
+
+// matchesActiveDefenseClawStateInLine is matchesActiveDefenseClawState
+// with lineStaysOff judging the rest of the command line a hook child was
+// cut from (findStripDirectoriesStayOff).
+func matchesActiveDefenseClawStateInLine(
+	facts actionfacts.Facts,
+	candidate actionfacts.PathFact,
+	lineStaysOff func() bool,
+) bool {
 	relative, ok := activeHomeRelative(facts, candidate)
 	if runtime.GOOS == "linux" && candidate.Flavor == actionfacts.PathFlavorPOSIX {
 		relative, ok = exactActiveDefenseClawRelative(facts, candidate)
 	}
 	relative = strings.TrimRight(relative, "/")
 	if !ok || relative != ".defenseclaw" && !strings.HasPrefix(relative, ".defenseclaw/") {
-		return findAncestorStartChangesState(facts, candidate)
+		return findAncestorStartChangesState(facts, candidate, lineStaysOff)
 	}
 	state := strings.TrimPrefix(strings.TrimPrefix(relative, ".defenseclaw"), "/")
 	switch {
@@ -2907,7 +2918,7 @@ func findShellScriptActsOnEntryOnly(words []string) bool {
 // and a script with $(dirname ...) or ${1%/*} do not (GAP-2305). Inline
 // code and commands read from stdin (xargs, parallel) are not read here,
 // so they never stay off.
-func findCommandStaysOffStateOf(home, root string) func(words []string, inEntryDir bool) bool {
+func findCommandStaysOffStateOf(home, root string, stripDirs bool) func(words []string, inEntryDir bool) bool {
 	return func(words []string, inEntryDir bool) bool {
 		if findCommandActsOnEntryOnly(words, inEntryDir) {
 			return true
@@ -2930,7 +2941,7 @@ func findCommandStaysOffStateOf(home, root string) func(words []string, inEntryD
 				// its quotes and escapes, so the script is judged by the
 				// words the shell runs (pod check12 S1-S5, S10, S15).
 				if index == 0 {
-					return findShellInvocationStaysOff(words, home, root, inEntryDir)
+					return findShellInvocationStaysOff(words, home, root, inEntryDir, stripDirs)
 				}
 				if findShellRunsAScript(words, index) {
 					return false
@@ -3050,7 +3061,9 @@ func findReachesPastItsEntries(facts actionfacts.Facts, candidate actionfacts.Pa
 	if !ok || !strings.EqualFold(command.Program, "find") {
 		return false
 	}
-	staysOff := findCommandStaysOffStateOf(facts.ActiveHome, path.Join(path.Clean(facts.ActiveHome), ".defenseclaw"))
+	// Its entries are in the state tree, so a stripped entry name is a
+	// state folder too.
+	staysOff := findCommandStaysOffStateOf(facts.ActiveHome, path.Join(path.Clean(facts.ActiveHome), ".defenseclaw"), false)
 	argv := command.Argv
 	for index := 1; index < len(argv); index++ {
 		action := argv[index]
@@ -3133,7 +3146,7 @@ func findAttachedPathOption(word string) bool {
 // pipe into xargs rm changes it, unless the tests before the action keep
 // to names that are never protected (find ~ -name '*.tmp' -delete) or
 // -maxdepth stops above the root's entries (find ~ -maxdepth 1 -type f).
-func findAncestorStartChangesState(facts actionfacts.Facts, candidate actionfacts.PathFact) bool {
+func findAncestorStartChangesState(facts actionfacts.Facts, candidate actionfacts.PathFact, lineStaysOff func() bool) bool {
 	command, ok := integrityCommandByID(facts, candidate.CommandID)
 	if !ok || !strings.EqualFold(command.Program, "find") ||
 		candidate.Flavor != "" && candidate.Flavor != actionfacts.PathFlavorPOSIX || facts.ActiveHome == "" {
@@ -3174,7 +3187,8 @@ func findAncestorStartChangesState(facts actionfacts.Facts, candidate actionfact
 	}
 	if findDeletesOnlyNames(acted, func(pattern string, fold bool) bool {
 		return findPatternIsCleanupOnly(pattern, fold) || findPatternIsRegenerableBytecode(pattern, fold) || noStateName(pattern, fold)
-	}, findCommandActsOnEntryOnly) || findDeletesOnlyNames(acted, noStateName, findCommandStaysOffStateOf(facts.ActiveHome, root)) {
+	}, findCommandActsOnEntryOnly) || findDeletesOnlyNames(acted, noStateName,
+		findCommandStaysOffStateOf(facts.ActiveHome, root, findStripDirectoriesStayOff(facts, command, root, lineStaysOff))) {
 		return false
 	}
 	// The root is at depth `depth` below the start; its entries one deeper.

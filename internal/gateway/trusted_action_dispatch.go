@@ -853,6 +853,7 @@ func provenStateMutationPath(facts actionfacts.Facts, request trustedActionReque
 		return false
 	}
 	wholeActionProven := projected.Authoritative() && projected.EnforcementEligible()
+	lineStaysOff := findStripLineStaysOffOf(request, path.Join(path.Clean(projected.ActiveHome), ".defenseclaw"))
 	for _, candidate := range projected.Paths {
 		command, ok := integrityCommandByID(projected, candidate.CommandID)
 		if !ok {
@@ -870,7 +871,7 @@ func provenStateMutationPath(facts actionfacts.Facts, request trustedActionReque
 		}
 		if entry, ok := stateDirectoryEntryTarget(command, candidate, request); ok {
 			candidate.Resolved = entry
-			if matchesActiveDefenseClawState(projected, candidate) {
+			if matchesActiveDefenseClawStateInLine(projected, candidate, lineStaysOff) {
 				return true
 			}
 			continue
@@ -898,7 +899,7 @@ func provenStateMutationPath(facts actionfacts.Facts, request trustedActionReque
 			physical = active
 		}
 		candidate.Resolved = physical
-		if matchesActiveDefenseClawState(projected, candidate) {
+		if matchesActiveDefenseClawStateInLine(projected, candidate, lineStaysOff) {
 			return true
 		}
 	}
