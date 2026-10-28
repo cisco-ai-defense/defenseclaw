@@ -238,8 +238,20 @@ func sourceNamesItsEntries(source string) bool {
 // relative to the one before. ok is false for a -C value it cannot place.
 func gitCleanDirectory(words []string, home, cwd string) (string, bool) {
 	base := cwd
+	// --work-tree DIR (or =DIR) names the tree a clean removes from,
+	// relative to the -C directory when it comes after one.
+	workTree := ""
 	for index := 0; index < len(words) && words[index] != "clean"; index++ {
-		if words[index] != "-C" || index+1 >= len(words) {
+		word := words[index]
+		if value, ok := strings.CutPrefix(word, "--work-tree="); ok {
+			next, ok := stateHomePath(value, home, base)
+			if !ok {
+				return "", false
+			}
+			workTree = path.Clean(next)
+			continue
+		}
+		if word != "-C" && word != "--work-tree" || index+1 >= len(words) {
 			continue
 		}
 		index++
@@ -247,7 +259,14 @@ func gitCleanDirectory(words []string, home, cwd string) (string, bool) {
 		if !ok {
 			return "", false
 		}
+		if word == "--work-tree" {
+			workTree = path.Clean(next)
+			continue
+		}
 		base = path.Clean(next)
+	}
+	if workTree != "" {
+		return workTree, true
 	}
 	return base, true
 }

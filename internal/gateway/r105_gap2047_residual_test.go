@@ -104,3 +104,41 @@ func TestR105Check17RsyncOptionValuesAreNotSources(t *testing.T) {
 		r105RunStateRowsChecked(t, mode, cwd, rows, true)
 	}
 }
+
+// pod check17 GAP-2047 rows (b) and (d): a pattern or a dir/. copy through
+// a project link to the state root, and a git clean of a --work-tree,
+// remove or replace protected state like their ~/.defenseclaw spellings.
+func TestR105Check17LinkGlobsAndGitWorkTree(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX shell forms")
+	}
+	home, cwd := r105StateFixture(t)
+	if err := os.Symlink(filepath.Join(home, ".defenseclaw"), filepath.Join(cwd, "dclink")); err != nil {
+		t.Fatal(err)
+	}
+	for _, dir := range []string{"build", "proj2"} {
+		if err := os.MkdirAll(filepath.Join(cwd, dir), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	state := filepath.Join(home, ".defenseclaw")
+	rows := []r105StateRow{
+		{"glob through link root", "rm -rf dclink/*", true, ""},
+		{"glob through dot link hooks", "rm -rf ./dclink/hooks/*", true, ""},
+		{"prefix glob through link", "rm -rf dclink/instal*", true, ""},
+		{"brace through link", "rm -rf dclink/{installer,hooks}", true, ""},
+		{"cp dot into link", "cp -a /tmp/x/. dclink/", true, ""},
+		{"git work-tree option clean", "git --work-tree " + state + " clean -fdx", true, ""},
+		{"git work-tree= clean", "git --git-dir=/tmp/g.git --work-tree=" + state + " clean -fdx", true, ""},
+		{"git -C home work-tree clean", "git -C " + home + " --work-tree .defenseclaw clean -fd", true, ""},
+		// Allowed and quiet.
+		{"log glob through link", "rm -f dclink/logs/*", false, ""},
+		{"list glob through link", "ls dclink/*", false, ""},
+		{"project glob", "rm -rf build/*", false, ""},
+		{"git work-tree project clean", "git --work-tree proj2 clean -fdx", false, ""},
+		{"git work-tree state dry run", "git --work-tree " + state + " clean -n -d", false, ""},
+	}
+	for _, mode := range []string{"observe", "action"} {
+		r105RunStateRowsChecked(t, mode, cwd, rows, true)
+	}
+}
