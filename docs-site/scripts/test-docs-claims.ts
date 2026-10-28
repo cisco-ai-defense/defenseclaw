@@ -1415,6 +1415,11 @@ describe('Known limits by lead decision (rel-1-0-4 P1 reconcile)', () => {
 // heading of the page; the row reads only that section and its subsections.
 type DocRow = { gap: string; page: string; section?: string; has?: string[]; lacks?: string[] };
 const r105Rows: DocRow[] = [
+  // GH #1101 reference items (docs pod, 2026-10-28): config limits, block_message refusal, pack manifest re-pin.
+  { gap: "GH #1101 p0:GAP-0677", page: "enterprise/configuration.mdx", section: "Where the config lives", has: ["The file may be at most 4 MiB and 65,536 parsed YAML nodes.", "`configuration source exceeds the 4 MiB limit`", "`parsed YAML exceeds the 65,536-node limit`", "move rules into a [custom rule pack](#custom-rule-packs)"], lacks: ["The file is limited to 4 MiB and 65,536 YAML nodes."] },
+  { gap: "GH #1101 p0:GAP-0677", page: "enterprise/windows.mdx", section: "2. Write the config", has: ["The file may be at most 4 MiB and 65,536 YAML nodes", "([limits](/docs/enterprise/configuration#where-the-config-lives))"] },
+  { gap: "GH #1101 p0:GAP-0765", page: "enterprise/configuration.mdx", has: ["A longer one is refused with `guardrail.block_message must be a string of at most 4096 characters (it has 4097)`"] },
+  { gap: "GH #1101 p0:GAP-0777", page: "policies/rulepack-validation.mdx", has: ["Adding or editing that file changes the digest, so validate the pack again and pin the new digest"] },
   // 1.0.5 docs sync (2026-10-28): fixed 1.0.4 known issues left the page; open ones stay.
   { gap: "1.0.4 known issues fixed in 1.0.5", page: "support-matrix.mdx", section: "Known issues", lacks: ["These are bugs in 1.0.4.", "**Changing the fail mode with Setup `/ensure`:**", "hot-config-undo-closed", "**No skill, MCP or plugin scanner:**"] },
   { gap: "GAP-2329, GAP-0956, GAP-2285", page: "support-matrix.mdx", section: "Known issues", has: ["**Ordinary work blocked:**", "`alias ll=ls`", "`defenseclaw guardrail mode observe --connector NAME`"] },
@@ -2173,6 +2178,29 @@ describe('1.0.5 docs rows', () => {
       for (const phrase of row.lacks ?? []) assert.ok(!text.includes(phrase), `${row.page} still says: ${phrase}`);
     });
   }
+});
+
+// GH #1101 (p0 GAP-0677, GAP-0765): the limit messages the configuration pages quote.
+describe('config limit refusals match the configuration pages (GH #1101)', () => {
+  it('the parser and schema still word the 4 MiB, 65,536-node and block_message limits as quoted', () => {
+    const yaml = source('internal/config/yaml_v8.go');
+    assert.ok(yaml.includes('"configuration source exceeds the 4 MiB limit"') && yaml.includes('"parsed YAML exceeds the 65,536-node limit"'), 'config size/node refusal changed: re-check enterprise/configuration.mdx Where the config lives');
+    const schema = source('internal/config/schema_v8.go');
+    assert.ok(schema.includes('"a string of %s %d characters"') && schema.includes('" (it has %d)"'), 'schema length refusal changed: re-check the block_message sentence in enterprise/configuration.mdx');
+    const configSchema = JSON.parse(source('schemas/config/v8/defenseclaw-config.schema.json'));
+    const limits: unknown[] = [];
+    const walk = (node: unknown): void => {
+      if (!node || typeof node !== 'object') return;
+      const record = node as Record<string, any>;
+      if (record.block_message && typeof record.block_message === 'object') {
+        const ref = String(record.block_message.$ref ?? '').replace('#/$defs/', '');
+        limits.push(ref ? configSchema.$defs[ref]?.maxLength : record.block_message.maxLength);
+      }
+      for (const value of Object.values(record)) walk(value);
+    };
+    walk(configSchema);
+    assert.ok(limits.length > 0 && limits.every((limit) => limit === 4096), `block_message maxLength is not 4096 everywhere: ${limits.join(',')}`);
+  });
 });
 
 // GAP-2391: keys set stores config-update with target config:dotenv:<ENV>, and

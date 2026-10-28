@@ -162,7 +162,8 @@ Each key under `guardrail.connectors` turns on one agent. With none, `status` wa
 `no_connectors_enabled` and `verify` fails ([choose the agents](/docs/enterprise/configuration),
 [settings](/docs/enterprise/configuration)). Pick `gateway.api_port` before the
 first install: every user's hooks are bound to it, so changing it later means
-uninstall and install again.
+uninstall and install again. The file may be at most 4 MiB and 65,536 YAML nodes
+([limits](/docs/enterprise/configuration#where-the-config-lives)).
 
 Setup takes the config only from an absolute local path that standard users cannot
 change. Stage it in a folder you own:

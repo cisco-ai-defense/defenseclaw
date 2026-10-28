@@ -85,7 +85,7 @@ Doctor validates the pack every connector uses. It shows `FAIL` for an invalid p
 
 ## Apply a validated pack
 
-The pinned digest also covers the optional `defenseclaw-pack.json` posture file.
+The pinned digest also covers the optional `defenseclaw-pack.json` posture file. Adding or editing that file changes the digest, so validate the pack again and pin the new digest, as for a rule file ([Thresholds](/docs/policies/thresholds#rule-pack-default-posture), [custom rule packs](/docs/enterprise/configuration#custom-rule-packs)).
 
 DefenseClaw ships three rule packs: `permissive`, `default` and `strict`. A pack changes which rules run and the default block and alert levels.
 
