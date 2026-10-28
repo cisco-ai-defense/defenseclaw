@@ -119,7 +119,10 @@ func (a *APIServer) acpCallerAccountRefusal(r *http.Request) string {
 		var ok bool
 		want, ok = acpHomePrincipalUID(value, credential.UserDataDir)
 		if !ok {
-			return acpCallerAccountUnverifiedReason
+			// A managed Linux gateway runs with ProtectHome=yes and sees no
+			// home, so the owner was refused too (GAP-1151): bind the caller
+			// through the account database instead.
+			return acpHomePrincipalPeerRefusal(r, value, credential.UserDataDir)
 		}
 	default:
 		return ""
