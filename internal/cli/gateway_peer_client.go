@@ -18,7 +18,17 @@ import (
 )
 
 var perUserGatewayClientFactory = hookexec.NewPerUserGatewayHTTPClient
-var managedGatewayClientFactory = hookexec.NewManagedEnterpriseGatewayHTTPClient
+
+// managedGatewayClientFactory waits out a managed gateway that runs but is
+// not listening yet: a scan right after secret set restarted the gateway
+// failed at once with "running service has no listener yet" (GAP-2442).
+var managedGatewayClientFactory = func(timeout time.Duration, apiAddr, serviceName string) (*http.Client, error) {
+	return hookexec.NewManagedEnterpriseGatewayHTTPClientAwaitingStart(timeout, apiAddr, serviceName, managedGatewayStartBudget)
+}
+
+// managedGatewayStartBudget bounds how long a CLI command waits for a
+// starting managed gateway to listen.
+const managedGatewayStartBudget = 30 * time.Second
 
 // gatewayPeerClient is the transport for Go CLI requests to a per-user
 // gateway. The socket owner is checked after Dial, before net/http can send
