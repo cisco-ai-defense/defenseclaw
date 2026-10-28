@@ -355,7 +355,7 @@ Fleet and Edge `DCLAW_*` variables marked `allow` are read by the Go or C servic
 These variables exist for DefenseClaw's own test suites. Do not set them on a real install.
 
 <Accordions type="single">
-<Accordion title="Show the 145 test-only variables">
+<Accordion title="Show the 146 test-only variables">
 
 | Variable | What it does |
 | --- | --- |
@@ -471,6 +471,7 @@ These variables exist for DefenseClaw's own test suites. Do not set them on a re
 | `DEFENSECLAW_TEST_MARKER`<br/>Default: `unset`<br/>Values: `absolute file path`, `unset`<br/>Managed host: `ignore` | Test-only marker path used by the fake ClawHub launcher to record a single invocation.<br/>**Read by:** `cli/tests/test_cmd_skill.py` |
 | `DEFENSECLAW_TEST_PWSH`<br/>Default: `unset` (pwsh or pwsh.exe from PATH)<br/>Values: `path to a pwsh executable`, `unset`<br/>Managed host: `ignore` | Names the PowerShell 7 executable the MDM kit tests run the Intune remediation, uninstall-retry and rule-pack scripts with, when pwsh is not on PATH; the tests skip when neither exists.<br/>**Read by:** `cli/tests/test_mdm_kit.py`, `cli/tests/test_mdm_kit_remediation.py`, `cli/tests/test_intune_remediation_bundle.py`, `cli/tests/test_mdm_intune_uninstall_retry.py` |
 | `DEFENSECLAW_TEST_RESTRICTED_ENTERPRISE_STAGING`<br/>Default: `unset`<br/>Values: `1`, `unset`<br/>Managed host: `ignore` | Marker the Windows enterprise-payload restricted-environment staging test sets in a re-execed helper so the helper knows it is running inside a simulated restricted-user posture and applies the matching payload-staging path.<br/>**Read by:** `internal/cli/windows_enterprise_payload_test.go` |
+| `DEFENSECLAW_TEST_SIDECAR_HOOK_PRIORITY`<br/>Default: `unset`<br/>Values: `1`, `unset`<br/>Managed host: `ignore` | Marks the child process of the Windows gateway priority-class test (GAP-0050), so the class checks run in a child and the test binary keeps its own priority class.<br/>**Read by:** `internal/cli/sidecar_priority_windows_test.go` |
 | `DEFENSECLAW_TEST_WAIT_PROCESS_EXIT`<br/>Default: `unset`<br/>Values: `1`, `unset`<br/>Managed host: `ignore` | Activate the short-lived helper subprocess used to verify that native Windows daemon shutdown waits on the original process handle.<br/>**Read by:** `internal/daemon/proc_windows_flags_test.go` |
 | `DEFENSECLAW_TEST_WATCHDOG_WAIT_EXIT`<br/>Default: `unset`<br/>Values: `test-defined value`, `unset`<br/>Managed host: `ignore` | Selects the native watchdog original-handle wait fixture.<br/>**Read by:** `internal/cli/watchdog_pidfile_windows_test.go` |
 | `DEFENSECLAW_TEST_WATCHDOG_WAIT_READY`<br/>Default: `unset`<br/>Values: `test-defined value`, `unset`<br/>Managed host: `ignore` | Carries the readiness marker used by the native watchdog original-handle wait fixture.<br/>**Read by:** `internal/cli/watchdog_pidfile_windows_test.go` |
