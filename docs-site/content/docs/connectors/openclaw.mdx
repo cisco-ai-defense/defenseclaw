@@ -81,6 +81,8 @@ defenseclaw setup openclaw --mode action --rule-pack strict --restart
 
 Human approval needs OpenClaw 2026.3.28 or later. The OpenClaw that `install.sh` installs (2026.3.24) has no plugin approvals, so setup refuses `--human-approval` there and changes nothing. Upgrade OpenClaw first (`npm install -g openclaw@2026.3.28` or later), or set up without human approval.
 
+An earlier setup with `--human-approval` may have written an `approvals.plugin` block (`enabled: true`, `mode: session`) into `openclaw.json`. An OpenClaw before 2026.3.28 rejects it and its gateway does not start. A setup without human approval, and teardown, take that exact block back when OpenClaw lacks plugin approvals. Any other `approvals.plugin` shape stays as you wrote it.
+
 For a second-pass LLM judge, export a key and add `--detection-strategy regex_judge --judge-model <model> --judge-api-key-env DEFENSECLAW_LLM_KEY`. Latency and cost depend on the model.
 
 ### Bedrock through a VPC endpoint
@@ -174,6 +176,7 @@ OpenClaw does not run in an OpenShell sandbox. The legacy standalone sandbox tha
 - The shims inspect those six commands only. They give no syscall, filesystem or network isolation.
 - If a Bedrock endpoint resolves to a private VPC address, the proxy refuses it. Allow it with `defenseclaw guardrail allow-private-upstream <host>`.
 - OpenClaw 2026.5.12 and later load Amazon Bedrock from the external plugin `@openclaw/amazon-bedrock-provider`. Without it every model call fails with `No API provider registered for api: bedrock-converse-stream`, and setup warns. Run `openclaw plugins install @openclaw/amazon-bedrock-provider`, then `openclaw gateway restart`.
+- The install watcher disables an OpenClaw skill it blocks without naming a connector. `defenseclaw skill enable <name> --connector openclaw` re-enables the skill in OpenClaw and clears that record, so `skill info` and `skill list` stop saying disabled. Another connector-wide disable stays, and the command names it.
 - If you move OpenClaw's gateway port, run `defenseclaw setup openclaw` again.
 - OpenClaw does not run in an OpenShell sandbox. OpenShell support is pending in the [capability matrix](/docs/connectors/capability-matrix).
 

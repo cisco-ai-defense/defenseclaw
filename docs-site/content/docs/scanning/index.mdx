@@ -62,7 +62,7 @@ See [Scan an MCP server](/docs/scanning/mcp-scanner).
 
 ## Plugins
 
-Plugins go through the same admission check. Plugin scanning runs from `defenseclaw plugin scan` and from the install watcher. Settings use `admission.plugin` and the `plugin-scanner` override key. Block and allow lists work the same way as for skills.
+Plugins go through the same admission check. Plugin scanning runs from `defenseclaw plugin scan` and from the install watcher. Settings use `admission.plugin` and the `plugin-scanner` override key. Block and allow lists work the same way as for skills. `defenseclaw plugin list` and `plugin info` show what admission does with the scan, for example `warning` for a plugin the watcher admitted with a warning, not the bare severity. A plugin copied into a Claude plugin cache is listed as one disabled plugin, origin `copy, not loaded by Claude Code`.
 
 ## What it does not do
 
