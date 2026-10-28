@@ -6,6 +6,7 @@ package connector
 import (
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -48,8 +49,12 @@ func TestManagedWindowsTakeBackRemovesAMarkedCodexExporterOnAnUnservedLoopbackPo
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(removed) != 3 {
-		t.Fatalf("removed = %v, want the three exporter tables", removed)
+	// log_user_prompt goes with them: the earlier render wrote it beside
+	// the exporters (restoreCodexOtelEntries, as for a recorded credential).
+	for _, want := range []string{"config.toml otel.exporter", "config.toml otel.metrics_exporter", "config.toml otel.trace_exporter"} {
+		if !slices.Contains(removed, want) {
+			t.Fatalf("removed = %v, want %s among them", removed, want)
+		}
 	}
 	if strings.Contains(string(out), "19010") || strings.Contains(string(out), markedOrphanBearer) {
 		t.Fatalf("the exporter or its bearer stayed:\n%s", out)
