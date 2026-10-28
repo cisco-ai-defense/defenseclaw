@@ -121,7 +121,9 @@ A server on the block list prints nothing and exits 2.
 defenseclaw mcp list
 ```
 
-The Verdict column reads `clean`, `warning`, `rejected` or `scan failed`. A server whose last scan failed shows `scan failed` and a next step under the table.
+The Verdict column reads `clean`, `warning`, `rejected` or `scan failed`. A server whose last scan failed shows `scan failed` and a next step under the table. A scanned server without a block or allow entry shows what admission does with its severity: `warning` where the policy only warns (the balanced default warns on HIGH), `rejected` where the policy refuses it. A block the gateway left after a failed admission scan is named as such, with `defenseclaw mcp unblock <name>` as the way to release it.
+
+A remote URL whose hostname has no DNS answer is a scan that did not finish, not a refusal of the server. The `unverified_server` setting below decides what happens then.
 
 ## Configure the scanner
 

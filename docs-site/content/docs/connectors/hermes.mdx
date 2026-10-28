@@ -80,7 +80,9 @@ Hermes registers shell callbacks in each running process, and DefenseClaw has no
 
 `verify` and `doctor` check the exact command in Hermes's active registration and run a bounded local execution probe. A missing executable bit, a broken hook helper, or a disabled Windows launcher fails the check. The probe sends no tool event to the gateway; a real Hermes call after restarting its host is still the live confirmation that the callback is loaded.
 
-On Linux the probe runs in a PID namespace of its own, inside a user namespace unless the checking process has `CAP_SYS_ADMIN`, so nothing the hook starts outlives the probe. Where user namespaces are disabled (for example `user.max_user_namespaces=0`), the check fails closed. A fail-mode change (`--fail-mode`) and the fail-mode status do not run the probe: they check the registration, its approvals and the sealed hook, so they work on such a host.
+On Linux the probe runs in a PID namespace of its own, inside a user namespace unless the checking process has `CAP_SYS_ADMIN`, so nothing the hook starts outlives the probe. Where the host cannot create that user namespace (user namespaces disabled with `user.max_user_namespaces=0`, or a container seccomp profile that refuses them), the probe cannot run. A registration whose hook script still has the digest setup sealed stays current. Setup reports ready, and `doctor` warns `execution proof unavailable`: the sealed registration was read back without running it. An edited hook script is not current. A probe that ran and failed is a plain failure. A fail-mode change (`--fail-mode`) and the fail-mode status do not run the probe: they check the registration, its approvals and the sealed hook.
+
+Per-user setup accepts a Hermes git install that prints only its release date, for example `Hermes Agent vunknown (2026.9.24)`, when that date is a supported release.
 
 ## Files DefenseClaw will modify
 
