@@ -3597,7 +3597,7 @@ threading.Event().wait()
         '\$openCodeBin = Join-Path \$localAppData ''Microsoft\\WinGet\\Packages\\SST\.opencode_Microsoft\.Winget\.Source_8wekyb3d8bbwe''' -and
         '\$openCodePath = Join-Path \$openCodeBin ''opencode\.exe''' -and
         $agentFixtureFunction -match 'OpenCodeVersionFixture' -and
-        $agentFixtureFunction -match 'opencode 1\.18\.11' -and
+        $agentFixtureFunction -match 'opencode 2\.1\.4' -and
         $agentFixtureFunction -match "\`$openCodePath @\('--version'\) -TimeoutSeconds 30" -and
         $agentFixtureFunction -notmatch "\`$openCodePath @\('--version'\) -TimeoutSeconds [0-9]\b" -and
         $agentFixtureFunction -match 'OpenCodePath = \$openCodePath' -and
