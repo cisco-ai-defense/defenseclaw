@@ -2083,8 +2083,9 @@ func (c *ClaudeCodeConnector) patchClaudeCodeOtelEnv(opts SetupOpts) error {
 				// back, and a roll forward kept them as the user's (GAP-2388).
 				// A value equal to the earlier release's render is that
 				// release's, not the user's; a different value stays.
-				if wasAbsent && present && !opts.ManagedEnterprise && !opts.SecureClientHookDelivery {
-					remove = claudeCodeEnvIsEarlierReleaseRender(key, current, opts)
+				if wasAbsent && present && !opts.ManagedEnterprise && !opts.SecureClientHookDelivery &&
+					claudeCodeEnvIsEarlierReleaseRender(key, current, opts) {
+					remove = true
 				}
 				if !remove {
 					continue
