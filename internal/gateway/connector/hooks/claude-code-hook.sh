@@ -444,9 +444,9 @@ claude_fail_closed_decision() {
     reason="DefenseClaw blocked this because its gateway is stopped. Run defenseclaw-gateway start to resume protection (defenseclaw-gateway status shows its state)."
   elif [ "$1" = "gateway unreachable" ] && next="$(defenseclaw_unreachable_next_step)" && [ -n "$next" ]; then
     reason="DefenseClaw blocked this: ${next//\`/}."
-  elif next="$(defenseclaw_gateway_error_answer "$1")"; then
+  elif next="$(defenseclaw_gateway_error_block_text "$1")"; then
     # The gateway is up and answered with an error (GAP-1744).
-    reason="DefenseClaw blocked this because its gateway answered with an error (${next}). Run defenseclaw doctor to see what to fix."
+    reason="$next"
   else
     reason="DefenseClaw blocked this because it could not reach its gateway (${1}). Run defenseclaw-gateway status to check it."
   fi

@@ -2358,6 +2358,20 @@ defenseclaw_gateway_error_answer() {
   fi
 }
 
+# defenseclaw_gateway_error_block_text REASON prints the block text for a
+# call the gateway answered with a server error (see
+# defenseclaw_gateway_error_answer). When the gateway's error names the step
+# that repairs it ("...; run: defenseclaw setup codex --yes") that step is
+# the next step; otherwise doctor is.
+defenseclaw_gateway_error_block_text() {
+  local answer=""
+  answer="$(defenseclaw_gateway_error_answer "${1:-}")" || return 1
+  case "$answer" in
+    *"run: defenseclaw "*) printf 'DefenseClaw blocked this because its gateway answered with an error (%s).' "$answer" ;;
+    *) printf 'DefenseClaw blocked this because its gateway answered with an error (%s). Run defenseclaw doctor to see what to fix.' "$answer" ;;
+  esac
+}
+
 # defenseclaw_should_fail_closed_on_unreachable returns 0 (true) when the
 # connector's effective fail mode is closed or when strict availability is
 # enabled. A guardian-installed managed hook's FAIL_MODE is the one the
@@ -2541,6 +2555,13 @@ defenseclaw_emit_unreachable_stderr() {
     [ -z "$next" ] || reason="$next"
   fi
   if defenseclaw_should_fail_closed_on_unreachable; then
+    # The gateway is up and answered with a server error: the line names its
+    # answer, not an outage or a fail mode (GAP-1744).
+    local answer=""
+    if answer="$(defenseclaw_gateway_error_answer "$reason")"; then
+      echo "defenseclaw: blocking ${subject}: the gateway answered with an error (${answer})" >&2
+      return 0
+    fi
     echo "defenseclaw: gateway unreachable, blocking ${subject} (fail mode closed): ${reason}" >&2
   elif defenseclaw_per_user_outage_open; then
     # The Claude Code and Codex hooks show their systemMessage instead; the

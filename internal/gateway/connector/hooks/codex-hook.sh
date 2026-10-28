@@ -517,8 +517,8 @@ fail_unreachable() {
     _DC_CODEX_BLOCK_REASON="DefenseClaw blocked this because its gateway is stopped. Run defenseclaw-gateway start to resume protection (defenseclaw-gateway status shows its state)."
   elif [ "$1" = "gateway unreachable" ] && _dc_next="$(defenseclaw_unreachable_next_step)" && [ -n "$_dc_next" ]; then
     _DC_CODEX_BLOCK_REASON="DefenseClaw blocked this: ${_dc_next//\`/}."
-  elif _dc_answer="$(defenseclaw_gateway_error_answer "$1")"; then
-    _DC_CODEX_BLOCK_REASON="DefenseClaw blocked this because its gateway answered with an error (${_dc_answer}). Run defenseclaw doctor to see what to fix."
+  elif _dc_answer="$(defenseclaw_gateway_error_block_text "$1")"; then
+    _DC_CODEX_BLOCK_REASON="$_dc_answer"
   fi
 {{end}}  # A blocked Stop only keeps Codex running the turn (#1140).
   if defenseclaw_should_fail_closed_on_unreachable; then
