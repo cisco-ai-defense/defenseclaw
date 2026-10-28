@@ -40,7 +40,7 @@ defenseclaw setup kiro                # first setup defaults to observe
 defenseclaw setup kiro --mode action  # block where Kiro honors a veto
 ```
 
-A re-run without `--mode` keeps the current mode. On Windows, run the same commands in PowerShell. Restart Kiro CLI, or run `/agent swap defenseclaw`, so `/hooks` lists the hooks.
+A re-run without `--mode` keeps the current mode. On a terminal setup still asks for the mode, with the current one as the default (Enter keeps it), and whether to re-apply the hooks; in action mode it also asks whether to add the LLM judge. `--yes` skips the questions ([the questions setup asks](/docs/guardrail/switching-connectors#the-questions-setup-asks)). On Windows, run the same commands in PowerShell. Restart Kiro CLI, or run `/agent swap defenseclaw`, so `/hooks` lists the hooks.
 
 ### Check it
 

@@ -31,7 +31,7 @@ defenseclaw setup copilot  # first setup defaults to observe
 defenseclaw setup copilot --workspace /path/to/repo
 ```
 
-A re-run without `--mode` keeps the current mode. On Windows, use PowerShell and a Windows path such as `'C:\path\to\repo'`. Hooks are global by default. `--workspace` writes them into one repository instead and pins the workspace for the whole install. Setup refuses it once another connector is configured. To scope every connector to a repository, run `defenseclaw setup guardrail --workspace /path/to/repo`.
+A re-run without `--mode` keeps the current mode. On a terminal setup still asks for the mode, with the current one as the default (Enter keeps it), and whether to re-apply the hooks; in action mode it also asks whether to add the LLM judge. `--yes` skips the questions ([the questions setup asks](/docs/guardrail/switching-connectors#the-questions-setup-asks)). On Windows, use PowerShell and a Windows path such as `'C:\path\to\repo'`. Hooks are global by default. `--workspace` writes them into one repository instead and pins the workspace for the whole install. Setup refuses it once another connector is configured. To scope every connector to a repository, run `defenseclaw setup guardrail --workspace /path/to/repo`.
 
 Interactive setup asks for the mode, whether to add to or replace an existing connector roster, and whether to add an LLM judge. For scripts, pass `--yes --mode observe` (or `--mode action`).
 

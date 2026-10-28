@@ -33,7 +33,7 @@ defenseclaw setup codex                # first setup defaults to observe: record
 defenseclaw setup codex --mode action  # block on policy hits
 ```
 
-A re-run without `--mode` keeps the current mode. On Windows, run the same commands in PowerShell. Quit and reopen Codex afterwards. After upgrading from an earlier release, quit all running Codex processes and reopen them so they stop using any old exporter configuration.
+A re-run without `--mode` keeps the current mode. On a terminal it still asks: `Select mode (1, 2) [2]:` with the current mode as the default (Enter keeps it), then `Codex is already configured; re-apply its hooks (mode=action)? [Y/n]:`, and in action mode `Add LLM judge on top of rule scanning? [y/N]:` (the default is yes when the judge already covers Codex). `--yes` skips the questions and keeps the current mode; use it in scripts, because a piped run without `--yes` still waits for the answers. See [the questions setup asks](/docs/guardrail/switching-connectors#the-questions-setup-asks). On Windows, run the same commands in PowerShell. Quit and reopen Codex afterwards. After upgrading from an earlier release, quit all running Codex processes and reopen them so they stop using any old exporter configuration.
 
 Host setup removes earlier DefenseClaw native exporter blocks (only exporters that carry a DefenseClaw credential; your own exporters stay) and revokes their scoped tokens because Codex cannot verify the account behind the loopback listener. An existing Codex process can retain the old configuration. The isolated OpenShell exporter still uses the gateway's `/v1/{logs,metrics,traces}` endpoints. Do not print or copy old exporter headers.
 

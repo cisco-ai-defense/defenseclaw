@@ -1667,6 +1667,8 @@ const r105Rows: DocRow[] = [
   { gap: "GAP-1766", page: "enterprise/troubleshooting.mdx", has: ["On Linux and macOS `status` and `verify` show the same condition as `policy.applied: false` and do not warn. On Windows `status` warns `policy_not_applied` with the Setup `/repair` next step, `security_complete` is `false`, and `verify` fails (exit `1603`)."], lacks: ["computes to. The message gives both and says the gateway applies the config on its next reload. `status` and `verify` show the same condition"] },
   { gap: "GAP-1766", page: "enterprise/troubleshooting.mdx", has: ["`policy.last_reload_error` and `policy.applied: false` say the same. `verify` fails with this code (exit `1603`)."] },
   { gap: "GAP-2099", page: "support-matrix.mdx", has: ["the guardian rewrites, within seconds, the records that no longer match the live registration", "Records that still match stay byte for byte as restored."], lacks: ["the guardian and gateway rewrite them at the next check", "the running guardian rewrites them within minutes"] },
+  // pod docs it2 (2026-10-28)
+  { gap: "GAP-2257", page: "connectors/codex.mdx", section: "Setup", has: ["On a terminal it still asks: `Select mode (1, 2) [2]:` with the current mode as the default (Enter keeps it)", "`Codex is already configured; re-apply its hooks (mode=action)? [Y/n]:`", "`Add LLM judge on top of rule scanning? [y/N]:`", "`--yes` skips the questions and keeps the current mode"] },
 ];
 
 function pageSection(name: string, heading?: string): string {
@@ -1975,6 +1977,27 @@ describe('wizard fail-mode question and per-connector confirmations match the CL
     for (const name of ['hilt', 'fail-mode', 'block-message', 'enable', 'disable']) {
       const head = cli.split(`@guardrail.command("${name}"`)[1]?.split('\ndef ')[0] ?? '';
       assert.ok(head.includes('@click.option("--yes", is_flag=True, help="Skip the confirmation prompt.")'), `guardrail ${name} lost its --yes confirmation: re-check guardrail/multi-connector.mdx`);
+    }
+  });
+});
+
+// GAP-2257: a re-run of a hook connector setup keeps the mode but still asks
+// on a terminal (mode, re-apply, judge in action mode). Every page that says a
+// re-run keeps the current mode must also say it asks and that --yes skips it.
+describe('setup re-run pages say the re-run asks on a terminal (GAP-2257)', () => {
+  it('keeps the asking code the pages describe', () => {
+    const setup = source('cli/defenseclaw/commands/cmd_setup.py');
+    assert.ok(setup.includes('if interactive and not mode_from_flag:\n        normalized_mode = _prompt_connector_mode(connector, default_mode=normalized_mode)'), 're-run mode question changed: re-check the connector pages (GAP-2257)');
+    assert.ok(setup.includes('if interactive and normalized_mode == "action" and enable_judge is None and _prompt_enable_judge(connector, gc):'), 'judge question condition changed: re-check connectors/codex.mdx (GAP-2257)');
+    assert.ok(setup.includes('"  Add LLM judge on top of rule scanning?",\n        default=already,'), 'judge question text changed: re-check connectors/codex.mdx (GAP-2257)');
+  });
+  it('every keeps-the-current-mode sentence names the questions and --yes', () => {
+    const pages = ['amp', 'antigravity', 'claudecode', 'codex', 'copilot', 'cursor', 'devin', 'hermes', 'kiro', 'opencode'].map((c) => `connectors/${c}.mdx`);
+    for (const page of [...pages, 'reference/cli.mdx', 'reference/setup-commands.mdx']) {
+      const text = pageSection(page);
+      for (const m of text.matchAll(/re-run without `--mode` keeps the current mode[^\n]*/g)) {
+        assert.ok(/asks/.test(m[0]) && m[0].includes('`--yes` skips the questions'), `${page}: a re-run sentence does not say it asks on a terminal and that --yes skips it: ${m[0].slice(0, 120)}`);
+      }
     }
   });
 });
