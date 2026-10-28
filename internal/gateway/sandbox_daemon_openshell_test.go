@@ -23,6 +23,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net"
 	"net/http"
 	"os"
@@ -104,6 +105,12 @@ func newOpenShellRig(t *testing.T, goos string) *openShellRig {
 		return uid, uid != 0
 	}
 	r.o.configDir = func() (string, error) { return cfgDir, nil }
+	r.o.stopSync = func(_ context.Context, gateway string, _ io.Writer) error {
+		r.mu.Lock()
+		defer r.mu.Unlock()
+		r.commands = append(r.commands, "stop-sync "+gateway)
+		return nil
+	}
 	r.o.portPID = func(int) int { return r.pid }
 	r.o.procArgs = func(context.Context, int) (string, error) { return r.args, nil }
 	r.o.discover = func(openshell.DiscoverOptions) (*openshell.Registration, error) {
@@ -1399,5 +1406,59 @@ func TestSandboxDaemonReadyStaysInsideThePolicyAdmission(t *testing.T) {
 				t.Fatalf("%d policy views at once, past readyViewsInFlight %d (gateway admits %d)", maxInFlight, readyViewsInFlight, admit)
 			}
 		})
+	}
+}
+
+// The macOS stop of the gateway's LaunchAgent syncs the disk of every
+// MicroVM the gateway lists ready first, under the daemon's registration
+// name (GAP-0380): launchd runs no stop command, and a sandbox a raw
+// openshell client started after the daemon's count is otherwise ended
+// with what its guest had not synced. One it could not sync is recorded
+// for the feed, and the stop still goes ahead.
+func TestAMacOSGatewayStopSyncsTheRunningMicroVMsFirst(t *testing.T) {
+	r := newOpenShellRig(t, "darwin")
+	var recorded []string
+	r.o.recordUnsynced = func(names []string) { recorded = append(recorded, names...) }
+	s := setupSettings()
+	s.Operational.GatewayName = "dc-managed"
+	if !r.o.Stop(context.Background(), s) {
+		t.Fatalf("stop: %v", r.ran())
+	}
+	got := r.ran()
+	sync, kill := -1, -1
+	for i, c := range got {
+		switch {
+		case c == "stop-sync dc-managed":
+			sync = i
+		case strings.HasPrefix(c, "launchctl kill SIGTERM "):
+			kill = i
+		}
+	}
+	if sync < 0 || kill < 0 || sync > kill {
+		t.Fatalf("the stop did not sync before it ended the gateway: %v", got)
+	}
+	if len(recorded) != 0 {
+		t.Fatalf("a clean sync recorded %v", recorded)
+	}
+
+	r = newOpenShellRig(t, "darwin")
+	r.o.recordUnsynced = func(names []string) { recorded = append(recorded, names...) }
+	r.o.stopSync = func(context.Context, string, io.Writer) error {
+		return errors.Join(&openshell.UnsyncedSandboxError{Sandbox: "raw-1", Err: errors.New("exec timed out")})
+	}
+	if !r.o.Stop(context.Background(), s) {
+		t.Fatalf("a failed sync held the stop: %v", r.ran())
+	}
+	if len(recorded) != 1 || recorded[0] != "raw-1" {
+		t.Fatalf("unsynced sandbox not recorded for the feed: %v", recorded)
+	}
+
+	// Linux leaves the sync to the managed unit's ExecStop.
+	r = newOpenShellRig(t, "linux")
+	r.o.Stop(context.Background(), s)
+	for _, c := range r.ran() {
+		if strings.HasPrefix(c, "stop-sync") {
+			t.Fatalf("the Linux daemon synced itself: %v", r.ran())
+		}
 	}
 }

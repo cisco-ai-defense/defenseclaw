@@ -102,15 +102,25 @@ var sandboxDaemonStopCmd = &cobra.Command{
 	},
 }
 
-// sandboxDaemonSyncGateway is sync-sandboxes' --gateway.
-var sandboxDaemonSyncGateway string
+// sandboxDaemonSyncGateway is sync-sandboxes' --gateway, and
+// sandboxDaemonSyncManaged its --managed.
+var (
+	sandboxDaemonSyncGateway string
+	sandboxDaemonSyncManaged bool
+)
 
 // sandboxDaemonSyncCmd is the ExecStop DefenseClaw gives the OpenShell
 // gateway service of a per-user gateway on the MicroVM driver (a systemd
-// drop-in setup writes, openshell.StopSync): a stop or restart of the
-// gateway ends every MicroVM on it, so it first syncs the disk of each one
-// OpenShell lists ready, whoever started it and whoever stops the gateway
-// (GAP-0380). It runs as the account, under the user manager.
+// drop-in setup writes, openshell.StopSync) and, with --managed, the
+// managed gateway unit of a standalone managed computer
+// (defenseclaw-openshell-gateway.service, after stop-sandboxes): a stop or
+// restart of the gateway ends every MicroVM on it, so it first syncs the
+// disk of each one OpenShell lists ready, whoever started it and whoever
+// stops the gateway (GAP-0380). The managed unit's stop-sandboxes stops
+// only the sandboxes the account's daemon knows, as they were when it
+// listed them: a sandbox a raw openshell client created, or started after
+// that list, is still running when the gateway stops. It runs as the
+// account, under the user manager.
 var sandboxDaemonSyncCmd = &cobra.Command{
 	Use:          "sync-sandboxes",
 	Short:        "Sync each running MicroVM's disk before the OpenShell gateway stops (the gateway service's ExecStop)",
@@ -120,17 +130,60 @@ var sandboxDaemonSyncCmd = &cobra.Command{
 	RunE: func(cmd *cobra.Command, _ []string) error {
 		ctx, cancel := context.WithTimeout(cmd.Context(), openshell.StopSyncTimeout)
 		defer cancel()
-		err := openshell.SyncGatewaySandboxes(ctx, openshell.DiscoverOptions{Gateway: sandboxDaemonSyncGateway}, cmd.OutOrStdout())
+		opts := openshell.DiscoverOptions{Gateway: sandboxDaemonSyncGateway}
+		dataDir := config.DefaultDataPath()
+		if sandboxDaemonSyncManaged {
+			target, err := managedStopSyncTarget(ctx, runtime.GOOS, sandboxOpenShellDaemonSettings)
+			if err != nil {
+				return err
+			}
+			if opts.Gateway == "" {
+				opts.Gateway = target.gateway
+			}
+			dataDir = target.dataDir
+		}
+		err := openshell.SyncGatewaySandboxes(ctx, opts, cmd.OutOrStdout())
 		// The gateway's stop ends each one it could not sync: the next
 		// sandbox daemon's feed says what may be lost (stop_unflushed),
-		// not only this unit's journal (GAP-2081).
+		// not only this unit's journal (GAP-2081). A managed account's
+		// daemon reads its own state directory, not ~/.defenseclaw.
 		if names := openshell.UnsyncedSandboxes(err); len(names) > 0 {
-			if rerr := manager.RecordUnsyncedStops(config.DefaultDataPath(), names, time.Now()); rerr != nil {
+			if rerr := manager.RecordUnsyncedStops(dataDir, names, time.Now()); rerr != nil {
 				fmt.Fprintf(cmd.ErrOrStderr(), "could not record the unsynced stop for the sandbox feed: %v\n", rerr)
 			}
 		}
 		return err
 	},
+}
+
+// stopSyncTarget is what a managed gateway unit's stop sync dials and where
+// it notes a sandbox it could not sync.
+type stopSyncTarget struct {
+	gateway string // the registration the account's daemon uses
+	dataDir string // the account's sandbox daemon state directory
+}
+
+// managedStopSyncSettingsWait bounds the read of the managed settings in a
+// stop: a managed gateway that does not answer leaves the default name.
+const managedStopSyncSettingsWait = 5 * time.Second
+
+// managedStopSyncTarget resolves the registration the account's sandbox
+// daemon registered its managed gateway under (openshell.gateway.name of
+// the managed settings, openshell.DefaultGatewayName when unset or when the
+// managed gateway does not answer) and the daemon's state directory, whose
+// feed reads RecordUnsyncedStops' file.
+func managedStopSyncTarget(ctx context.Context, goos string, settings func(context.Context) (sandboxrelay.DaemonSettings, bool)) (stopSyncTarget, error) {
+	_, state, err := sandboxDaemonPaths(goos)
+	if err != nil {
+		return stopSyncTarget{}, err
+	}
+	t := stopSyncTarget{gateway: openshell.DefaultGatewayName, dataDir: state}
+	sctx, cancel := context.WithTimeout(ctx, managedStopSyncSettingsWait)
+	defer cancel()
+	if s, ok := settings(sctx); ok && s.Operational.GatewayName != "" {
+		t.gateway = s.Operational.GatewayName
+	}
+	return t, nil
 }
 
 // sandboxDaemonDrainCmd is what the managed lifecycle runs as the account
@@ -217,6 +270,7 @@ func drainAccountGateway(ctx context.Context, in io.Reader, out io.Writer, d san
 func init() {
 	sandboxDaemonCmd.AddCommand(sandboxDaemonStopCmd)
 	sandboxDaemonSyncCmd.Flags().StringVar(&sandboxDaemonSyncGateway, "gateway", "", "the OpenShell gateway registration (default: the openshell CLI's active one)")
+	sandboxDaemonSyncCmd.Flags().BoolVar(&sandboxDaemonSyncManaged, "managed", false, "the managed gateway unit's stop: the registration and state directory of the account's sandbox daemon")
 	sandboxDaemonCmd.AddCommand(sandboxDaemonSyncCmd)
 	sandboxDaemonCmd.AddCommand(sandboxDaemonDrainCmd)
 	rootCmd.AddCommand(sandboxDaemonCmd)
