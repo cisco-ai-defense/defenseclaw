@@ -795,7 +795,7 @@ func crontabInstallPrerequisite(facts actionfacts.Facts) bool {
 			continue
 		}
 		removeOrList := false
-		for _, argument := range command.Argv[1:] {
+		for _, argument := range argvOperands(command.Argv) {
 			switch strings.ToLower(argument) {
 			case "-l", "-r":
 				removeOrList = true
@@ -3397,8 +3397,20 @@ func findDeletesBesideItsExec(command actionfacts.CommandFact) bool {
 	return false
 }
 
+// argvOperands returns the words after the program. A partial parse can
+// keep a command's Program but withhold its Argv (PowerShell reads
+// `find ... -exec cmd {} \;` as partial with no argv, GAP-2410), so a
+// helper that walks argv[1:] behind a Program check alone would panic in
+// the hook evaluator, and a panic blocks in every fail mode.
+func argvOperands(argv []string) []string {
+	if len(argv) < 2 {
+		return nil
+	}
+	return argv[1:]
+}
+
 func findHasExecAction(argv []string) bool {
-	for _, argument := range argv[1:] {
+	for _, argument := range argvOperands(argv) {
 		switch argument {
 		case "-exec", "-execdir", "-ok", "-okdir":
 			return true
