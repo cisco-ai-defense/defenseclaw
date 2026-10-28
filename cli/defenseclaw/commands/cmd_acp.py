@@ -1123,10 +1123,11 @@ def _verify_binding(
             problems.append("client configuration path does not match")
         elif settings_usable and isinstance(client_digest, str) and client_digest.startswith(_ENTRY_DIGEST_PREFIX):
             # The lock pins the guarded entries, checked as the guard checks them (GAP-0912, GAP-0504).
-            if client_digest[len(_ENTRY_DIGEST_PREFIX):].lower() != _guard_entry_sha256(
-                servers, client, agent, lock_path.resolve()
-            ):
-                problems.append(f"the {_managed_name(agent)} entry changed after setup (the contract lock pins it)")
+            pinned_digest = client_digest[len(_ENTRY_DIGEST_PREFIX):].lower()
+            if pinned_digest != _guard_entry_sha256(servers, client, agent, lock_path.resolve()):
+                problems.append(
+                    _pinned_entry_problem(servers, names, client, agent, lock_path.resolve(), pinned_digest)
+                )
         elif settings_usable and (not isinstance(client_digest, str) or client_digest != _client_digest(client_path)):
             problems.append("client configuration digest has drifted")
     for key in ("agent", "guard"):
@@ -1199,6 +1200,35 @@ def _verify_binding(
                 f"editor entry {name!r} does not send verdicts to this gateway ({gateway_url}); re-run acp setup"
             )
     return problems
+
+
+def _pinned_entry_problem(
+    servers: dict[str, Any], names: list[str], client: str, agent: str, lock_path: Path, pinned_digest: str
+) -> str:
+    """Why the entries the contract lock pins no longer match it, naming the entries themselves (GAP-0043).
+
+    The guard pins the entries that start it with this lock (an adopted or
+    numbered entry has its own name), so the message names those, not the
+    reserved name. When the entries setup wrote are unchanged and only an
+    entry it did not write starts the guard with the lock, it says so.
+    """
+    guarded = [name for name, entry in sorted(servers.items()) if _entry_starts_lock(entry, lock_path)]
+    added = [name for name in guarded if name not in names]
+    if added and len(added) < len(guarded) and _guard_entry_sha256(
+        {name: entry for name, entry in servers.items() if name not in added}, client, agent, lock_path
+    ) == pinned_digest:
+        listed = ", ".join(repr(name) for name in added)
+        return (
+            f"editor {'entry' if len(added) == 1 else 'entries'} {listed} "
+            f"{'starts' if len(added) == 1 else 'start'} the guard with this pair's contract lock, "
+            "which pins only the entries setup wrote, so the guard refuses to start"
+        )
+    changed = [name for name in guarded if name in names] or guarded or [_managed_name(agent)]
+    listed = ", ".join(repr(name) for name in changed)
+    return (
+        f"the {listed} {'entry' if len(changed) == 1 else 'entries'} changed after setup "
+        f"(the contract lock pins {'it' if len(changed) == 1 else 'them'})"
+    )
 
 
 def _foreign_entry_problem(item: tuple[str, str, bool], client: str, agent: str, path: Path) -> str:
