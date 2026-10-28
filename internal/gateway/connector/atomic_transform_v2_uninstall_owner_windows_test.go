@@ -122,6 +122,84 @@ func TestAtomicTransformV2UninstallConvergesEnrolledOwner(t *testing.T) {
 	}
 }
 
+// GAP-2096: an elevated cleanup of an enrolled user's Claude settings that
+// finds nothing to remove keeps the file and its inherited DACL as found; it
+// converged the DACL to the protected private form on every upgrade.
+func TestAtomicTransformV2UninstallNoopKeepsTheInheritedDACL(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "profile", ".claude", "settings.json")
+	stateDir := filepath.Join(root, "state")
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(`{"hooks":{}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	target, err := windows.StringToSid("S-1-5-21-111-222-333-1017")
+	if err != nil {
+		t.Fatal(err)
+	}
+	current, err := defaultWindowsEffectiveUserSID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !windows.GetCurrentProcessToken().IsElevated() && !current.IsWellKnown(windows.WinLocalSystemSid) {
+		t.Skip("setting a synthetic enrolled owner requires an elevated token")
+	}
+	name, err := windows.UTF16PtrFromString(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	handle, err := windows.CreateFile(name, windows.READ_CONTROL|windows.WRITE_OWNER,
+		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE, nil, windows.OPEN_EXISTING,
+		windows.FILE_FLAG_OPEN_REPARSE_POINT, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	descriptor, err := windows.GetSecurityInfo(handle, windows.SE_FILE_OBJECT, windows.GROUP_SECURITY_INFORMATION)
+	if err != nil {
+		windows.CloseHandle(handle)
+		t.Fatal(err)
+	}
+	group, _, err := descriptor.Group()
+	if err != nil || group == nil {
+		windows.CloseHandle(handle)
+		t.Fatalf("read fixture group: %v", err)
+	}
+	setErr := setAtomicTransformV2PriorOwnerGroup(handle, target, group)
+	closeErr := windows.CloseHandle(handle)
+	if setErr != nil || closeErr != nil {
+		t.Fatalf("set synthetic enrolled owner: %v, close: %v", setErr, closeErr)
+	}
+	before, err := windows.GetNamedSecurityInfo(path, windows.SE_FILE_OBJECT,
+		windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if control, _, err := before.Control(); err != nil || control&windows.SE_DACL_PROTECTED != 0 ||
+		!strings.Contains(before.String(), ";ID;") {
+		t.Fatalf("fixture DACL is not the inherited form: %s (%v)", before.String(), err)
+	}
+	removed, err := TransformWindowsClaudeSettingsForUninstall(path, stateDir, target.String(),
+		func(raw []byte) ([]byte, int, error) {
+			return raw, 0, nil
+		})
+	if err != nil || removed != 0 {
+		t.Fatalf("no-op enrolled cleanup removed %d: %v", removed, err)
+	}
+	after, err := windows.GetNamedSecurityInfo(path, windows.SE_FILE_OBJECT,
+		windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.String() != before.String() {
+		t.Fatalf("no-op cleanup changed the owner or DACL: before=%s after=%s", before.String(), after.String())
+	}
+	if data, err := os.ReadFile(path); err != nil || string(data) != `{"hooks":{}}` {
+		t.Fatalf("no-op cleanup changed the settings: %q, %v", data, err)
+	}
+}
+
 func TestAtomicTransformV2UninstallRefusesWrongOwner(t *testing.T) {
 	root := t.TempDir()
 	path := filepath.Join(root, "profile", ".claude", "settings.json")
