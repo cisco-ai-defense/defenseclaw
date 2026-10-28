@@ -205,7 +205,7 @@ cmd.exe asks this whenever Ctrl+C reaches a batch file. This happens when you ru
 
 <Accordion title="The gateway is stopped, stale or owned by another process">
 
-**Fix.** Run `defenseclaw-gateway status`, then `defenseclaw-gateway start` or `restart`. DefenseClaw refuses a foreign listener or mismatched PID identity; investigate that process instead of deleting the PID file. Read `%USERPROFILE%\.defenseclaw\gateway.log` for the startup error. There is no sign-in startup entry; a hook also starts a stopped gateway on its first call. The watchdog runs only when `gateway.watchdog.enabled` is set, and is not a Windows service (`defenseclaw-gateway watchdog status`).
+**Fix.** Run `defenseclaw-gateway status`, then `defenseclaw-gateway start` or `restart`. DefenseClaw refuses a foreign listener or mismatched PID identity; investigate that process instead of deleting the PID file. Read `%USERPROFILE%\.defenseclaw\gateway.log` for the startup error. There is no sign-in startup entry; a hook also starts a stopped gateway on its first call. The watchdog is on by default (`gateway.watchdog.enabled` is `true`): starting the gateway also starts a `defenseclaw-gateway watchdog` process in your session. It is not a Windows service. Check it with `defenseclaw-gateway watchdog status`; set `gateway.watchdog.enabled` to `false` to turn it off.
 
 **Check.** `defenseclaw-gateway status` shows running.
 

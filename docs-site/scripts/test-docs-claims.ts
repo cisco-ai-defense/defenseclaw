@@ -1427,6 +1427,10 @@ const r105Rows: DocRow[] = [
   { gap: "GAP-2235", page: "guardrail/unified-llm-key.mdx", has: ["and no `--instance-name` drops the instance", "binding, so the role stops using the custom instance."] },
   { gap: "GAP-2249", page: "stories/observe-claude-code.mdx", has: ["through its [native hooks](/docs/connectors/claudecode).", "Host setup turns Claude Code's native OpenTelemetry export off", "`CLAUDE_CODE_ENABLE_TELEMETRY=0`", "DefenseClaw sees Claude Code through its hooks only. Only an isolated OpenShell sandbox keeps native logs and metrics."], lacks: ["receives its native OpenTelemetry logs and metrics", "native hooks and OpenTelemetry]"] },
   { gap: "GAP-2366", page: "reference/env-vars.mdx", has: ["`DEFENSECLAW_ENTERPRISE_PROFILE` exported in a shell is dropped when the", "command starts. The writers keep writing as usual, and `defenseclaw doctor`", "lists the variable under `Ignored environment overrides`."], lacks: ["process's writers refuse changes (exit code `3`"] },
+  { gap: "GAP-2365", page: "guardrail/switching-connectors.mdx", has: ["`Codex is already configured; re-apply its hooks (mode=action)? [Y/n]:`", "A re-run never asks Add, Replace or Cancel.", "`Configure DefenseClaw for Codex enforcement now? [Y/n]:`", "the agent's current mode when it is already set up, observe for a new one"] },
+  { gap: "GAP-2367", page: "reference/setup-commands.mdx", has: ["writes it to `ai_discovery.trusted_binary_prefixes` in `~/.defenseclaw/config.yaml`"], lacks: ["and persists to `~/.defenseclaw/.env`"] },
+  { gap: "GAP-2367", page: "reference/cli.mdx", has: ["writes it to `ai_discovery.trusted_binary_prefixes` in `~/.defenseclaw/config.yaml`"], lacks: ["and persists to `~/.defenseclaw/.env`"] },
+  { gap: "GAP-2368", page: "get-started/windows/paths-troubleshooting.mdx", has: ["The watchdog is on by default (`gateway.watchdog.enabled` is `true`)", "set `gateway.watchdog.enabled` to `false` to turn it off"], lacks: ["The watchdog runs only when `gateway.watchdog.enabled` is set"] },
   { gap: "GAP-2363", page: "guardrail/multi-connector.mdx", has: ["Setup first asks the new agent's enforcement mode, prints what it will change, and then", "ask `Proceed? [Y/n]`; Enter applies it, and `--yes` skips the question in scripts."] },
   { gap: "GAP-2354", page: "support-matrix.mdx", has: ["On a per-user install with the `default` or `permissive` rule pack the call runs", "With the `strict` rule pack, on a managed install and inside a sandbox, the call is denied."], lacks: ["(disk full, database busy), the call is denied."] },
   { gap: "GAP-2356", page: "guardrail/user-and-group-policies.mdx", section: "Before you start", has: ["Steps 1 to 3 are for a per-user install. A managed host (Linux, macOS or Windows) has no `defenseclaw guardrail` commands", "`defenseclaw.exe config validate FILE` and `defenseclaw.exe enterprise windows profile-explain --user CORP\\alice`"] },
@@ -1942,6 +1946,28 @@ describe('wizard fail-mode question and per-connector confirmations match the CL
       const head = cli.split(`@guardrail.command("${name}"`)[1]?.split('\ndef ')[0] ?? '';
       assert.ok(head.includes('@click.option("--yes", is_flag=True, help="Skip the confirmation prompt.")'), `guardrail ${name} lost its --yes confirmation: re-check guardrail/multi-connector.mdx`);
     }
+  });
+});
+
+// GAP-2365 / GAP-2367 / GAP-2368: the setup re-run question, where
+// trusted-paths writes and the watchdog default follow the code.
+describe('setup re-run question, trusted-paths store and watchdog default match the code (GAP-2365, GAP-2367, GAP-2368)', () => {
+  it('asks re-apply on a re-run and configure-now with no peer', () => {
+    const setup = source('cli/defenseclaw/commands/cmd_setup.py');
+    assert.ok(setup.includes('f"  {label} is already configured; re-apply its hooks (mode={normalized_mode})?"'), 're-run question changed: re-check guardrail/switching-connectors.mdx');
+    assert.ok(setup.includes('f"  Configure DefenseClaw for {label} {verb} now?"'), 'configure-now question changed: re-check guardrail/switching-connectors.mdx');
+    assert.ok(setup.includes('mode = gc.effective_mode(connector) if connector in _configured_connector_set(gc) else "observe"'), 'mode default changed: re-check guardrail/switching-connectors.mdx');
+  });
+  it('writes trusted-paths additions to config.yaml', () => {
+    const setup = source('cli/defenseclaw/commands/cmd_setup.py');
+    assert.ok(setup.includes('Add a directory to ai_discovery.trusted_binary_prefixes in config.yaml.'), 'trusted-paths store changed: re-check reference/setup-commands.mdx and reference/cli.mdx');
+    for (const page of ['reference/setup-commands.mdx', 'reference/cli.mdx']) {
+      assert.ok(!pageSection(page).includes('and persists to `~/.defenseclaw/.env`'), `${page} sends trusted-paths add to .env`);
+    }
+  });
+  it('turns the watchdog on by default and starts it with the gateway', () => {
+    assert.ok(source('internal/config/config.go').includes('viper.SetDefault("gateway.watchdog.enabled", true)'), 'watchdog default changed: re-check get-started/windows/paths-troubleshooting.mdx');
+    assert.ok(source('internal/cli/daemon.go').includes('func startConfiguredWatchdog('), 'gateway start no longer starts the watchdog: re-check get-started/windows/paths-troubleshooting.mdx');
   });
 });
 

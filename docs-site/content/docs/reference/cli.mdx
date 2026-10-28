@@ -333,7 +333,7 @@ defenseclaw setup redaction remove-all --yes
 
 | Command | Use it for |
 | --- | --- |
-| `defenseclaw setup trusted-paths list\|add\|remove` | Manage the directories trusted for connector-binary version probing (action-mode setups refuse binaries outside this allow-list). `list` shows built-in defaults plus operator additions with source and status; `add` validates the directory (world-writable / relative paths refused unless `--force`) and persists to `~/.defenseclaw/.env`; `remove` only touches operator-added entries. All verbs accept `--json`. |
+| `defenseclaw setup trusted-paths list\|add\|remove` | Manage the directories trusted for connector-binary version probing (action-mode setups refuse binaries outside this allow-list). `list` shows built-in defaults plus operator additions with source and status; `add` validates the directory (world-writable / relative paths refused unless `--force`) and writes it to `ai_discovery.trusted_binary_prefixes` in `~/.defenseclaw/config.yaml`; `remove` only touches operator-added entries (in `config.yaml`, or an older entry in `~/.defenseclaw/.env`). All verbs accept `--json`. |
 
 <Callout title="Safety gates are intentional">
 Commands that fetch remote content fail closed when the trust boundary is

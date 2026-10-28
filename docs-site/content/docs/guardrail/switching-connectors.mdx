@@ -50,12 +50,15 @@ answered with a number:
   Select mode (1, 2) [1]:
 ```
 
-Type `1` (observe) or `2` (action), or press Enter for the default. Letters are
+Type `1` (observe) or `2` (action), or press Enter for the default in brackets: the agent's current mode when it is already set up, observe for a new one. Letters are
 rejected here. Passing `--mode observe` or `--mode action` answers this question,
 so setup does not ask it.
 
-If another connector is already wired (here, `claudecode`), setup prints what it
-will change and then asks how to combine them:
+Setup then prints what it will change and asks one more question. Which one depends on what is already set up:
+
+- **The agent is already guarded (a re-run):** `Codex is already configured; re-apply its hooks (mode=action)? [Y/n]:`. Enter or `y` rewrites its hooks in the mode you chose; `n` prints `Aborted — no changes made.` A re-run never asks Add, Replace or Cancel.
+- **No other agent is guarded:** `Configure DefenseClaw for Codex enforcement now? [Y/n]:` (`observability` in observe mode). `n` makes no changes.
+- **Another agent is guarded (here, `claudecode`):** setup asks how to combine them:
 
 ```text
   DefenseClaw is already configured for: claudecode
@@ -70,7 +73,7 @@ Type `a` to keep both active. Type `r` only when you want DefenseClaw to tear
 down the previous connector's agent-side files before wiring the new one. `c`
 makes no changes.
 
-If you chose action mode, setup then offers the LLM judge:
+`--yes` answers these questions with their defaults. If you chose action mode, setup then offers the LLM judge:
 
 ```text
   Add LLM judge on top of rule scanning? [y/N]:
