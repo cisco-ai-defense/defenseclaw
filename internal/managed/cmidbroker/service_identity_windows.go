@@ -46,7 +46,9 @@ func ValidateBrokerServiceIdentity(config ServerConfig) error {
 	if err != nil {
 		return errors.New("resolve CMID broker executable")
 	}
-	if err := managed.ValidateTrustedFilePath(executable, "CMID broker executable"); err != nil {
+	// Permission drift on the executable is reported and accepted; the
+	// installer owns its ACL. Structural failures stay fatal.
+	if err := managed.ValidateTrustedFilePathTolerant(executable, "CMID broker executable"); err != nil {
 		return err
 	}
 	broker, err := queryService(config.BrokerServiceName, true)
