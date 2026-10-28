@@ -11186,7 +11186,8 @@ function Start-DefenseClawTransactionServices {
             -GatewayServiceName $GatewayServiceName `
             -GuardianServiceName $GuardianServiceName `
             -RequireBroker:([bool]$broker.existed) `
-            -RequireEnumerator:$enumeratorShouldRun
+            -RequireEnumerator:$enumeratorShouldRun `
+            -AllowFailedTargets
     }
     if ([bool]$guardian.running) {
         # Guardian remains live while all exact boot policies are restored.
@@ -16842,7 +16843,11 @@ function Get-DefenseClawGuardianReadinessProbe {
         [Parameter(Mandatory)][hashtable]$Layout,
         [Parameter(Mandatory)][string]$GatewayServiceName,
         [Parameter(Mandatory)][string]$GuardianServiceName,
-        [switch]$LiveVerify
+        [switch]$LiveVerify,
+        # Rollback and recovery only, as in Wait-DefenseClawFreshGuardianReconcile:
+        # a complete reconcile whose only problem is failed targets is the
+        # deployment being restored.
+        [switch]$AllowFailedTargets
     )
     $service = Microsoft.PowerShell.Management\Get-Service -Name $GuardianServiceName -ErrorAction SilentlyContinue
     if ($null -eq $service -or
@@ -16860,6 +16865,17 @@ function Get-DefenseClawGuardianReadinessProbe {
         -Capture `
         -AllowFailure
     $ready = [int]$probe.exit_code -eq 0
+    if (-not $ready -and $AllowFailedTargets -and -not $LiveVerify) {
+        $report = Get-DefenseClawGuardianStatusReport `
+            -Layout $Layout `
+            -GatewayServiceName $GatewayServiceName
+        if (Test-DefenseClawGuardianReportCompletedWithFailedTargets -Report $report) {
+            return [pscustomobject][ordered]@{
+                ready = $true
+                diagnostic = 'guardian has failed targets; accepted while restoring the prior deployment'
+            }
+        }
+    }
     return [pscustomobject][ordered]@{
         ready = $ready
         diagnostic = if ($ready) {
@@ -16877,13 +16893,15 @@ function Test-DefenseClawGuardianReady {
         [Parameter(Mandatory)][hashtable]$Layout,
         [Parameter(Mandatory)][string]$GatewayServiceName,
         [Parameter(Mandatory)][string]$GuardianServiceName,
-        [switch]$LiveVerify
+        [switch]$LiveVerify,
+        [switch]$AllowFailedTargets
     )
     $readiness = Get-DefenseClawGuardianReadinessProbe `
         -Layout $Layout `
         -GatewayServiceName $GatewayServiceName `
         -GuardianServiceName $GuardianServiceName `
-        -LiveVerify:$LiveVerify
+        -LiveVerify:$LiveVerify `
+        -AllowFailedTargets:$AllowFailedTargets
     return [bool]$readiness.ready
 }
 
@@ -16894,7 +16912,9 @@ function Wait-DefenseClawEnterpriseReadiness {
         [Parameter(Mandatory)][string]$GuardianServiceName,
         [bool]$RequireBroker = $true,
         [bool]$RequireEnumerator = $true,
-        [int]$TimeoutSeconds = 90
+        [int]$TimeoutSeconds = 90,
+        # Rollback and recovery only; see Get-DefenseClawGuardianReadinessProbe.
+        [switch]$AllowFailedTargets
     )
     $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
     $brokerReady = $false
@@ -16917,7 +16937,8 @@ function Wait-DefenseClawEnterpriseReadiness {
             $guardianReady = Test-DefenseClawGuardianReady `
                 -Layout $Layout `
                 -GatewayServiceName $GatewayServiceName `
-                -GuardianServiceName $GuardianServiceName
+                -GuardianServiceName $GuardianServiceName `
+                -AllowFailedTargets:$AllowFailedTargets
         }
         $enumerator = Microsoft.PowerShell.Management\Get-Service `
             -Name $enumeratorServiceName `

@@ -24,7 +24,8 @@ if (@($parseErrors).Count -ne 0) {
 foreach ($name in @(
         'Test-DefenseClawGuardianCoverageReport',
         'Test-DefenseClawGuardianReportCompletedWithFailedTargets',
-        'Get-DefenseClawGuardianGeneration'
+        'Get-DefenseClawGuardianGeneration',
+        'Get-DefenseClawGuardianReadinessProbe'
     )) {
     $definition = $ast.Find({
             param($node)
@@ -33,7 +34,11 @@ foreach ($name in @(
     if ($null -eq $definition) {
         throw "module does not define $name"
     }
-    . ([scriptblock]::Create($definition.Extent.Text))
+    # The module calls Get-Service module-qualified so it cannot be shadowed;
+    # point the readiness probe at the stub below so the smoke also runs where
+    # that cmdlet does not exist.
+    $text = $definition.Extent.Text.Replace('Microsoft.PowerShell.Management\Get-Service', 'Get-DefenseClawSmokeService')
+    . ([scriptblock]::Create($text))
 }
 
 $startedAfter = [DateTime]::Parse('2026-10-29T00:00:00Z').ToUniversalTime()
@@ -77,5 +82,27 @@ Assert-Result (Test-Coverage (New-Report -Failures 1)) $false 'degraded reconcil
 Assert-Result (Test-Coverage (New-Report -Failures 1) -Digest ('a' * 64) -Allow) $false 'degraded reconcile on the activation lane'
 Assert-Result (Test-Coverage (New-Report -Failures 1 -Rows 2) -Allow) $false 'incomplete degraded reconcile'
 Assert-Result (Test-Coverage (New-Report -Failures 1 -WithState $false) -Allow) $false 'not-ok report without state'
+
+# The readiness wait that follows uses `enterprise hooks status`, which exits
+# non-zero for a degraded Guardian. The same rollback-only allowance applies.
+$script:StatusReport = New-Report -Failures 1
+function Get-DefenseClawSmokeService { param($Name, $ErrorAction) [pscustomobject]@{ Status = 'Running' } }
+function Invoke-DefenseClawGatewayCommand { param($Layout, $GatewayServiceName, $Arguments, [switch]$Capture, [switch]$AllowFailure) [pscustomobject]@{ exit_code = 1; output = @() } }
+function Get-DefenseClawGuardianStatusReport { param($Layout, $GatewayServiceName) $script:StatusReport }
+function Get-DefenseClawGuardianVerificationFailureDiagnostic { param($Probe) 'guardian not ready' }
+$probeArgs = @{ Layout = @{ ManifestPath = 'C:\targets.yaml' }; GatewayServiceName = 'gw'; GuardianServiceName = 'guardian' }
+if (-not [bool](Get-DefenseClawGuardianReadinessProbe @probeArgs -AllowFailedTargets).ready) {
+    throw 'rollback readiness rejected a complete degraded reconcile'
+}
+if ([bool](Get-DefenseClawGuardianReadinessProbe @probeArgs).ready) {
+    throw 'readiness accepted a degraded Guardian without -AllowFailedTargets'
+}
+if ([bool](Get-DefenseClawGuardianReadinessProbe @probeArgs -AllowFailedTargets -LiveVerify).ready) {
+    throw 'live verification accepted a degraded Guardian'
+}
+$script:StatusReport = New-Report -Failures 1 -Rows 2
+if ([bool](Get-DefenseClawGuardianReadinessProbe @probeArgs -AllowFailedTargets).ready) {
+    throw 'rollback readiness accepted an incomplete reconcile'
+}
 
 'degraded guardian rollback smoke passed'
