@@ -169,6 +169,21 @@ def test_no_public_page_carries_a_signed_bundle_procedure() -> None:
     assert not hits, hits
 
 
+def test_ai_defense_key_rotation_leaves_bundle_steps_to_the_administrator() -> None:
+    """rel-1-0-4:GAP-2320: under the owner hold the rotation section of a
+    bundle-managed device says to contact the administrator and carries no
+    signed-bundle step (anchors, sign, apply), also one the line regex misses."""
+    text = _section("enterprise/configure/ai-defense-key.mdx", "## Rotate the key")
+    assert "`secret_ref_mismatch`" in text
+    assert "`secret_ref_unbound`" in text
+    hits = [m.group(0) for m in _SIGNED_BUNDLE_RECOVERY.finditer(text)]
+    hits += [m.group(0) for m in _BUNDLE_PROCEDURE.finditer(text)]
+    assert not hits, hits
+    assert "trust anchors" not in text
+    assert "The new bundle" not in text
+    assert f"{CONTACT}: `secret set` alone cannot change it" in text
+
+
 def test_operator_contract_states_the_floor_without_a_procedure() -> None:
     section = _contract_section(CONTRACT_FLOOR)
     assert "```" not in section
