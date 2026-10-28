@@ -21,7 +21,8 @@ func TestWindowsCMDBodyRedirectToActiveStateBlocks(t *testing.T) {
 	state := "C:/Users/Alice/.defenseclaw/config.yaml"
 	// The hook client's resolved target map, as a native Windows hook sends
 	// it; this host cannot open a Windows path.
-	resolved := map[string]string{state: state}
+	hook := "C:/Users/Alice/.defenseclaw/hooks/x.cmd"
+	resolved := map[string]string{state: state, hook: hook}
 	rows := []struct {
 		command string
 		block   bool
@@ -32,6 +33,10 @@ func TestWindowsCMDBodyRedirectToActiveStateBlocks(t *testing.T) {
 		{`cmd /c "echo x > %USERPROFILE%\.defenseclaw\config.yaml"`, true},
 		{`cmd /c "echo x > C:\Users\Alice\.defenseclaw\config.yaml"`, true},
 		{`cmd /c "type a.txt & type nul > %USERPROFILE%\.defenseclaw\config.yaml"`, true},
+		// Git Bash spells cmd's switches //d and //c.
+		{`cmd //c "type nul > %USERPROFILE%\.defenseclaw\hooks\x.cmd"`, true},
+		{`cmd //d //c "echo x > %USERPROFILE%\.defenseclaw\config.yaml"`, true},
+		{`cmd //c "type nul > notes.txt"`, false},
 		{`cmd /c "type nul > notes.txt"`, false},
 		{`cmd /c "type a.txt"`, false},
 		{`cmd /c "type nul > %USERPROFILE%\proj\empty.txt"`, false},
