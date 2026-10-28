@@ -378,6 +378,11 @@ func (c *CodexConnector) checkAgentSettings(opts SetupOpts) error {
 		return nil
 	}
 	path := codexConfigPath()
+	// The config writer refuses a Codex home through a link on Windows; say so
+	// before Setup moves the hooks from an earlier home (GAP-2339).
+	if err := codexHomeLinkRefusal(filepath.Dir(path)); err != nil {
+		return err
+	}
 	// Match the writer's boundary: an OSS account may keep its dotfiles on a
 	// user-owned volume, while an enterprise per-user home binding is confined.
 	if home := activeUserHomeOverride(); home != "" && runtime.GOOS != "windows" {
