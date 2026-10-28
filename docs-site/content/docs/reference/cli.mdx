@@ -883,6 +883,8 @@ On a managed standalone device the three policy verbs are refused with exit
 
 The sidecar is the Go binary; the Python CLI does not own a `gateway` group. Most operators never run these directly: `defenseclaw setup *` commands restart a running sidecar for you, and the sidecar applies a valid change to `config.yaml` by itself, with no restart, unless the change touches a [restart-required key](#restart-required-keys). Running `defenseclaw-gateway` with no arguments starts the sidecar in the foreground.
 
+On a managed Windows computer `status`, `audit findings` and `connector list-backups` have no per-user gateway to read and exit `1`, and the managed help hides `start`, `stop`, `restart` and `watchdog`, which are not for a managed computer; see [Managed devices](#managed-devices-and-exit-code-3).
+
 | Command | Use it for |
 | --- | --- |
 | `defenseclaw-gateway start` | Start the sidecar as a background daemon. |
@@ -1140,7 +1142,7 @@ notice and exits `3`; an administrator checks the device with
 `guardrail ...` writers are also refused on a managed standalone device.
 For example, `guardrail block-at` prints `This device is managed: change
 config.yaml in the admin config (MDM or management plane), not on the device`
-and exits `3`. `policy activate` is refused there too. Where the Python CLI is
+and exits `3`. `policy activate` is refused there too (the Windows package has no `policy activate`; see below). Where the Python CLI is
 installed, `config get`, `config show`, `config validate` and `status` still
 work.
 
@@ -1153,10 +1155,18 @@ The administrator runs it by its packaged path, as root
 (`/opt/defenseclaw/bin` on Linux, `/opt/cisco/defenseclaw/bin` on macOS).
 
 Windows has no sandbox-only command. There `defenseclaw.exe` is the
-administrator's command. It answers `setup`, `doctor`, `upgrade` and
-`rollback` with a note that the computer is managed, refuses `config set`,
-`config unset` and the `block`, `allow` and `unblock` writers with exit `3`,
-and has no `guardrail` group. A standard account's
+administrator's command: the gateway binary, not the Python CLI. It answers
+`setup`, `doctor`, `upgrade` and `rollback` with a note that the computer is
+managed and exits `1`. `config set` prints `This device is managed: change config.yaml in the admin config (MDM or management plane); config set did not change it`
+(`config unset` says `config unset`) and exits `3`; the `block`, `allow` and
+`unblock` writers are refused with exit `3` too. It has no `guardrail` group,
+no `version` command (run `defenseclaw.exe --version`) and no `policy activate`
+or `policy edit`: these return an unknown-command error and exit `2`. Its
+`policy` group has `digest`, `evaluate`, `reload`, `show`, `test` and `validate`.
+Commands that read a per-user gateway, such as `status`, `audit findings` and
+`connector list-backups`, exit `1` with `this computer's DefenseClaw is managed by your organization`, say the command has no per-user deployment to check and
+name the administrator's `enterprise windows status --profile standalone`,
+also from an elevated prompt; `audit export` works there. A standard account's
 `enterprise windows status` or `verify` only says that it needs an elevated
 prompt. The administrator runs `defenseclaw.exe enterprise ...` from an
 elevated PowerShell.
