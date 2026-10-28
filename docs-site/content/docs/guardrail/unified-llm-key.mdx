@@ -299,7 +299,7 @@ Both routing layers consume `DEFENSECLAW_LLM_KEY` plus the model prefix on the c
 | Skill scanner second opinion | LiteLLM (Python SDK) | `scanners.skill_scanner.llm.model` prefix |
 | MCP scanner introspection | LiteLLM | `scanners.mcp_scanner.llm.model` prefix |
 
-Local providers (`ollama/`, `vllm/`, `lm_studio/`) need no key — `keys list` correctly classifies them as `NOT_USED` even when the feature is on.
+Local providers (`ollama/`, `vllm/`, `lm_studio/`) need no key: `keys list` never marks `DEFENSECLAW_LLM_KEY` `REQUIRED` for them and `keys check` passes without it. While the guardrail is on, the `DEFENSECLAW_LLM_KEY` row still reads `OPTIONAL` (it shows the setting exists, nothing needs it); with the guardrail off it reads `NOT_USED`. A local judge's `JUDGE_API_KEY` row reads `NOT_USED`.
 
 ## Bifrost provider catalog
 

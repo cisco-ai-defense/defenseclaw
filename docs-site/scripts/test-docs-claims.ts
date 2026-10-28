@@ -1423,6 +1423,9 @@ describe('Known limits by lead decision (rel-1-0-4 P1 reconcile)', () => {
 // heading of the page; the row reads only that section and its subsections.
 type DocRow = { gap: string; page: string; section?: string; has?: string[]; lacks?: string[] };
 const r105Rows: DocRow[] = [
+  { gap: "GAP-2354", page: "support-matrix.mdx", has: ["On a per-user install with the `default` or `permissive` rule pack the call runs", "With the `strict` rule pack, on a managed install and inside a sandbox, the call is denied."], lacks: ["(disk full, database busy), the call is denied."] },
+  { gap: "GAP-2332", page: "scanning/index.mdx", has: ["A skill whose worst finding is MEDIUM, LOW or INFO is installed with the `warning` verdict"], lacks: ["warn on MEDIUM, and allow the rest"] },
+  { gap: "GAP-2353", page: "guardrail/unified-llm-key.mdx", has: ["While the guardrail is on, the `DEFENSECLAW_LLM_KEY` row still reads `OPTIONAL`", "A local judge's `JUDGE_API_KEY` row reads `NOT_USED`."], lacks: ["correctly classifies them as `NOT_USED` even when the feature is on"] },
   { gap: "GAP-0515", page: "connectors/hermes.mdx", has: ["On Windows, where Hermes has no guard, an administrator's `open` lets the call run during an outage: the user's `hook-failures.jsonl` gets a line with `fail_mode` `open` and `outcome` `fail_open`.", "through the [foreign-hook guard](/docs/enterprise/foreign-hook-guard) while `foreign_hooks` is `remove`"], lacks: ["(service not running, unusable answer, call too large to inspect)", "The administrator-owned hook is stricter"] },
   { gap: "GAP-2350", page: "enterprise/troubleshooting.mdx", has: ["| `security_incomplete` | Linux, macOS, Windows |", "security_complete is false because of:"], lacks: ["| `security_incomplete` | Windows |"] },
   { gap: "GAP-1696", page: "enterprise/troubleshooting.mdx", section: "`security_complete` is `false` on Windows", has: ["`security_incomplete` lists the reasons and names the actionable causes even next to `hook_process_fail_open`"], lacks: ["on 1.0.3 or a host without Claude Code or Codex"] },
@@ -1846,6 +1849,21 @@ describe('doctor hook freshness wording matches cmd_doctor.py (GAP-2351)', () =>
     const doctor = source('cli/defenseclaw/commands/cmd_doctor.py');
     for (const s of ['stale generated script (', 'a generated script is not the one setup rendered', "run 'defenseclaw doctor --fix' to render the scripts again"]) assert.ok(doctor.includes(s), `cmd_doctor.py no longer prints: ${s}`);
     for (const name of ['reference/configuration.mdx', 'reference/cli.mdx', 'guardrail/index.mdx']) assert.ok(page(name).includes('a generated script is not the one setup rendered'), `${name} lacks the hand-edit wording`);
+  });
+});
+
+// GAP-2354 / GAP-2332 / GAP-2353: the three sentences follow the code that
+// decides them; a change there re-opens the page.
+describe('audit-failure tiers, admission defaults and local-provider keys match the code (GAP-2354, GAP-2332, GAP-2353)', () => {
+  it('keeps the per-user degraded allow, the warning verdict below HIGH and OPTIONAL for an enabled guardrail', () => {
+    const hook = source('internal/gateway/agent_hook.go');
+    assert.ok(hook.includes('DefenseClaw audit is degraded: this call was allowed, but its audit record could not be written.'), 'agent_hook.go no longer prints the degraded-audit message');
+    assert.match(hook, /!managed\.IsManagedEnterprise\(cfg\.DeploymentMode\) &&\s*cfg\.HookPolicyTierForConnector\(connectorName\) != config\.HookPolicyTierStrict &&\s*!sandboxHookForConnector/, 'the audit-failure allow is no longer per-user non-strict outside sandboxes: re-check support-matrix.mdx');
+    const adm = source('internal/policy/admission.go');
+    assert.ok(adm.includes('"MEDIUM": actionWarn, "LOW": actionWarn, "INFO": actionWarn,'), 'builtin admission changed for MEDIUM/LOW/INFO: re-check scanning/index.mdx');
+    assert.ok(source('cli/defenseclaw/enforce/admission.py').includes('"MEDIUM": (_WARN, False), "LOW": (_WARN, False), "INFO": (_WARN, False),'), 'Python builtin admission changed: re-check scanning/index.mdx');
+    const cred = source('cli/defenseclaw/credentials.py');
+    assert.match(cred, /def _defenseclaw_llm_key[\s\S]*?getattr\(gc, "enabled", False\):\s*return Requirement\.OPTIONAL/, 'DEFENSECLAW_LLM_KEY is no longer OPTIONAL with the guardrail on: re-check unified-llm-key.mdx');
   });
 });
 

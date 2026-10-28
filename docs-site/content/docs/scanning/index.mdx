@@ -39,7 +39,7 @@ DefenseClaw scans every skill, MCP server and plugin before an agent can use it.
 </Flow>
 
 - **When it runs.** The gateway's install watcher checks a skill, plugin or MCP server when it appears in a watched folder or when an agent adds it. A rescan runs every 60 minutes and whenever the asset or the scanner settings change. The CLI runs the same check on demand.
-- **What a verdict does.** The defaults quarantine CRITICAL and HIGH skills, warn on MEDIUM, and allow the rest. A rejected skill or plugin moves to a quarantine folder and is disabled. A rejected MCP server stays where it is and its tool calls are refused.
+- **What a verdict does.** The defaults quarantine CRITICAL and HIGH skills. A skill whose worst finding is MEDIUM, LOW or INFO is installed with the `warning` verdict and queued for review; only a scan with no findings is `clean`. A rejected skill or plugin moves to a quarantine folder and is disabled. A rejected MCP server stays where it is and its tool calls are refused.
 - **When the scanner fails.** A scan that errors or cannot run counts as rejected. Admission fails closed.
 - **Blocked tool calls.** Agent hooks refuse a denied skill, plugin or MCP tool even if the install watcher never saw it.
 - **A judge reads what the rules flag.** Both scanners use the LLM judge when a model and key are set (`DEFENSECLAW_LLM_KEY`). Set one up; the rules alone miss most malicious assets.
