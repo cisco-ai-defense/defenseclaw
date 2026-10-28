@@ -611,24 +611,49 @@ func embeddedShellScriptHomeRewrites(args []*syntax.Word, activeHome string) map
 // unresolved because it does not start with "/", so every check that reads
 // the resolved path saw no path at all (GAP-2304, GAP-2122 Windows leg).
 // The path resolves to itself, cleaned, as an absolute ~ operand does on
-// Linux and macOS. Other paths are left as they are.
+// Linux and macOS. A relative operand resolves against the working
+// directory (C:\Users\x\.defenseclaw\hooks after cd ~/.defenseclaw/hooks,
+// read in slash form), as the POSIX resolver joins it with a "/" working
+// directory on Linux and macOS (T6D16: cd ~/.defenseclaw/hooks && find
+// -exec cat {} \; -delete). Only a result in the trusted home is
+// resolved; other paths are left as they are.
 func resolveTrustedDriveHomePaths(facts *Facts) {
 	if facts == nil || !DriveSlashPath(facts.ActiveHome) {
 		return
 	}
 	home := strings.TrimRight(path.Clean(facts.ActiveHome), "/")
+	inHome := func(cleaned string) bool {
+		return strings.EqualFold(cleaned, home) || strings.HasPrefix(strings.ToLower(cleaned), strings.ToLower(home)+"/")
+	}
+	cwd := strings.ReplaceAll(facts.CWD, `\`, "/")
+	if !DriveSlashPath(cwd) || !inHome(path.Clean(cwd)) {
+		cwd = ""
+	}
 	for index := range facts.Paths {
 		fact := &facts.Paths[index]
-		if fact.Flavor != PathFlavorPOSIX || fact.Resolved != "" || !DriveSlashPath(fact.Value) ||
+		if fact.Flavor != PathFlavorPOSIX || fact.Resolved != "" || fact.Value == "" ||
 			strings.ContainsAny(fact.Value, "*?[{$`") {
 			continue
 		}
-		cleaned := path.Clean(fact.Value)
-		if !strings.EqualFold(cleaned, home) && !strings.HasPrefix(strings.ToLower(cleaned), strings.ToLower(home)+"/") {
+		cleaned := ""
+		switch {
+		case DriveSlashPath(fact.Value):
+			cleaned = path.Clean(fact.Value)
+		case cwd != "" && posixRelativeOperand(fact.Value):
+			cleaned = path.Join(path.Clean(cwd), fact.Value)
+		}
+		if cleaned == "" || !inHome(cleaned) {
 			continue
 		}
 		fact.Resolved = cleaned
 	}
+}
+
+// posixRelativeOperand reports a plain relative POSIX operand ("." or
+// "hooks/x"): no root, home, drive, Windows separator or option spelling.
+func posixRelativeOperand(value string) bool {
+	return value != "" && !strings.HasPrefix(value, "/") && !strings.HasPrefix(value, "~") &&
+		!strings.HasPrefix(value, "-") && !strings.ContainsAny(value, `\:`)
 }
 
 // DriveSlashPath reports a drive-letter path in slash form
