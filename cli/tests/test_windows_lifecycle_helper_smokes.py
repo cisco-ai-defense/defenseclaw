@@ -6,6 +6,7 @@
 - A failed service start names SCM's exit codes, including the dependency's.
 - A rollback accepts a restored guardian whose fresh reconcile has failed
   targets, and nothing else that is not ok.
+- A fresh Install's skipped busy profiles are validated and recorded.
 """
 
 from __future__ import annotations
@@ -22,6 +23,7 @@ TESTS = ROOT / "packaging" / "windows" / "tests"
 SMOKES = {
     "enterprise-service-start-diagnostics-smoke.ps1": "service start diagnostics smoke passed",
     "enterprise-degraded-guardian-rollback-smoke.ps1": "degraded guardian rollback smoke passed",
+    "enterprise-target-runtime-skip-smoke.ps1": "target runtime skip smoke passed",
 }
 
 

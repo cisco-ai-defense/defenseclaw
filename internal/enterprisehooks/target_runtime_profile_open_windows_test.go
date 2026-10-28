@@ -265,3 +265,92 @@ func TestWindowsManagedRuntimeProfileReadModeAsksForNoWriteAccess(t *testing.T) 
 		t.Fatalf("read-mode open requested 0x%x, want 0x%x", requested, read)
 	}
 }
+
+func TestWindowsManagedRuntimePlanSkipsProfileStillBusyAfterRetries(t *testing.T) {
+	sid := currentWindowsTestSID(t)
+	home := newWindowsManagedRuntimeBAOwnedProfile(t, sid)
+	shortenWindowsManagedRuntimeProfileRetry(t, 3, nil)
+	holdWindowsTestDirectory(t, home, windows.GENERIC_READ|windows.DELETE,
+		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE)
+	manifest := windowsManagedRuntimeTestManifest(home, sid)
+	manifestPath := `C:\ProgramData\DefenseClaw\etc\targets.yaml`
+
+	// Without the skip, a busy profile still fails the whole plan.
+	if _, err := PlanWindowsManagedRuntimeRoots(manifest, manifestPath, strings.Repeat("a", 64)); !errors.Is(err, windows.ERROR_SHARING_VIOLATION) {
+		t.Fatalf("plan without skipping: error = %v, want a sharing violation", err)
+	}
+
+	resetWindowsManagedRuntimeProfileRetrySpent()
+	var published *Manifest
+	plan, err := PlanWindowsManagedRuntimeRootsSkippingBusyProfiles(
+		manifest, manifestPath, strings.Repeat("a", 64),
+		func(reduced Manifest) (string, error) {
+			published = &reduced
+			return strings.Repeat("b", 64), nil
+		},
+	)
+	if err != nil {
+		t.Fatalf("plan skipping busy profiles: %v", err)
+	}
+	if published == nil || len(published.Targets) != 0 {
+		t.Fatalf("published manifest = %+v, want every row of the busy user removed", published)
+	}
+	if plan.ManifestSHA256 != strings.Repeat("b", 64) || plan.TargetCount != 0 || len(plan.Roots) != 0 {
+		t.Fatalf("plan = %+v, want it bound to the reduced manifest with no roots", plan)
+	}
+	if len(plan.SkippedProfiles) != 1 {
+		t.Fatalf("skipped profiles = %+v, want one", plan.SkippedProfiles)
+	}
+	skipped := plan.SkippedProfiles[0]
+	if skipped.SID != sid.String() || skipped.UserHome != home ||
+		!strings.Contains(skipped.Reason, "another process has the folder open") {
+		t.Fatalf("skipped profile = %+v, want the user, folder and cause", skipped)
+	}
+}
+
+func TestWindowsManagedRuntimePlanSkipKeepsOtherErrorsFatal(t *testing.T) {
+	sid := currentWindowsTestSID(t)
+	home := newWindowsManagedRuntimeBAOwnedProfile(t, sid)
+	shortenWindowsManagedRuntimeProfileRetry(t, 3, nil)
+	windowsManagedRuntimeProfileCreateFile = func(*uint16, uint32, uint32, *windows.SecurityAttributes, uint32, uint32, windows.Handle) (windows.Handle, error) {
+		return windows.InvalidHandle, windows.ERROR_ACCESS_DENIED
+	}
+	published := false
+	_, err := PlanWindowsManagedRuntimeRootsSkippingBusyProfiles(
+		windowsManagedRuntimeTestManifest(home, sid),
+		`C:\ProgramData\DefenseClaw\etc\targets.yaml`,
+		strings.Repeat("a", 64),
+		func(Manifest) (string, error) { published = true; return strings.Repeat("b", 64), nil },
+	)
+	if !errors.Is(err, windows.ERROR_ACCESS_DENIED) {
+		t.Fatalf("error = %v, want access denied to stay fatal", err)
+	}
+	if published {
+		t.Fatal("the manifest was rewritten for a non-busy failure")
+	}
+}
+
+func TestWindowsManagedRuntimeSkippedProfilesValidation(t *testing.T) {
+	sid := currentWindowsTestSID(t)
+	other := "S-1-5-21-111-222-333-1009"
+	manifest := windowsManagedRuntimeTestManifest(`C:\Users\carol`, sid)
+	ok := WindowsManagedRuntimeSkippedProfile{SID: other, UserHome: `C:\Users\dave`, Reason: "sharing violation"}
+	if err := validateWindowsManagedRuntimeSkippedProfiles([]WindowsManagedRuntimeSkippedProfile{ok}, manifest); err != nil {
+		t.Fatalf("valid skipped profile rejected: %v", err)
+	}
+	for name, bad := range map[string][]WindowsManagedRuntimeSkippedProfile{
+		"still enrolled": {{SID: sid.String(), UserHome: `C:\Users\carol`, Reason: "busy"}},
+		"duplicate":      {ok, ok},
+		"empty reason":   {{SID: other, UserHome: `C:\Users\dave`, Reason: " "}},
+		"relative home":  {{SID: other, UserHome: `Users\dave`, Reason: "busy"}},
+		"invalid SID":    {{SID: "not-a-sid", UserHome: `C:\Users\dave`, Reason: "busy"}},
+		"long reason":    {{SID: other, UserHome: `C:\Users\dave`, Reason: strings.Repeat("x", windowsManagedRuntimeSkipReasonMax+1)}},
+	} {
+		if err := validateWindowsManagedRuntimeSkippedProfiles(bad, manifest); err == nil {
+			t.Fatalf("%s: invalid skipped profile accepted", name)
+		}
+	}
+	if got := boundWindowsManagedRuntimeSkipReason("a\r\nb\x00c"); got != "a  b c" {
+		t.Fatalf("bounded reason = %q, want control characters folded", got)
+	}
+}

@@ -65,7 +65,21 @@ type WindowsManagedRuntimePlan struct {
 	ManifestSHA256 string                          `json:"manifest_sha256"`
 	TargetCount    int                             `json:"target_count"`
 	Roots          []WindowsManagedRuntimeRootPlan `json:"roots"`
+	// SkippedProfiles lists users a fresh Install left out because another
+	// process still held their profile folder after the retry window. Their
+	// manifest rows were removed before this plan bound the manifest, so the
+	// rest of the deployment proceeds; the enumerator adds them back later.
+	SkippedProfiles []WindowsManagedRuntimeSkippedProfile `json:"skipped_profiles,omitempty"`
 }
+
+// WindowsManagedRuntimeSkippedProfile is one user a fresh Install skipped.
+type WindowsManagedRuntimeSkippedProfile struct {
+	SID      string `json:"sid"`
+	UserHome string `json:"user_home"`
+	Reason   string `json:"reason"`
+}
+
+const windowsManagedRuntimeSkipReasonMax = 1024
 
 type WindowsManagedRuntimeRootPlan struct {
 	UserHome         string `json:"user_home"`
@@ -177,6 +191,37 @@ func PlanWindowsManagedRuntimeRoots(
 	manifestPath string,
 	manifestSHA256 string,
 ) (WindowsManagedRuntimePlan, error) {
+	return planWindowsManagedRuntimeRoots(manifest, manifestPath, manifestSHA256, nil)
+}
+
+// PlanWindowsManagedRuntimeRootsSkippingBusyProfiles plans like
+// PlanWindowsManagedRuntimeRoots, for a fresh Install, but leaves out a user
+// whose profile folder another process still holds open after the retry
+// window, instead of failing the install for every user. All of that user's
+// manifest rows are removed, publish writes the reduced manifest and returns
+// its digest, and the plan binds the reduced manifest, so the Guardian never
+// expects a runtime the installer did not create. The skipped users are
+// recorded in the plan with the reason. The enumerator adds them back on its
+// next pass, and the Guardian enrolls them once their folder is free; until
+// then they are not protected.
+func PlanWindowsManagedRuntimeRootsSkippingBusyProfiles(
+	manifest Manifest,
+	manifestPath string,
+	manifestSHA256 string,
+	publish func(Manifest) (string, error),
+) (WindowsManagedRuntimePlan, error) {
+	if publish == nil {
+		return WindowsManagedRuntimePlan{}, fmt.Errorf("enterprise hooks: skipping busy profiles requires a manifest publisher")
+	}
+	return planWindowsManagedRuntimeRoots(manifest, manifestPath, manifestSHA256, publish)
+}
+
+func planWindowsManagedRuntimeRoots(
+	manifest Manifest,
+	manifestPath string,
+	manifestSHA256 string,
+	publish func(Manifest) (string, error),
+) (WindowsManagedRuntimePlan, error) {
 	var plan WindowsManagedRuntimePlan
 	if err := windowsManagedRuntimeSetupAuthorize(); err != nil {
 		return plan, err
@@ -196,40 +241,98 @@ func PlanWindowsManagedRuntimeRoots(
 	if len(targets) > windowsManagedRuntimeMaxRoots {
 		return plan, fmt.Errorf("enterprise hooks: managed runtime plan has %d roots, maximum is %d", len(targets), windowsManagedRuntimeMaxRoots)
 	}
-	targetCount := 0
-	for _, row := range manifest.Targets {
-		if row.IsEnabled() {
-			targetCount++
-		}
-	}
-	if targetCount > windowsManagedRuntimeMaxRoots*3 {
+	if count := windowsManagedRuntimeEnabledTargetCount(manifest); count > windowsManagedRuntimeMaxRoots*3 {
 		return plan, fmt.Errorf(
 			"enterprise hooks: managed runtime plan has %d targets, maximum is %d",
-			targetCount,
+			count,
 			windowsManagedRuntimeMaxRoots*3,
 		)
 	}
-	plan = WindowsManagedRuntimePlan{
-		SchemaVersion:  WindowsManagedRuntimePlanSchemaVersion,
-		ManifestPath:   manifestPath,
-		ManifestSHA256: manifestSHA256,
-		TargetCount:    targetCount,
-		Roots:          make([]WindowsManagedRuntimeRootPlan, 0, len(targets)),
-	}
+	roots := make([]WindowsManagedRuntimeRootPlan, 0, len(targets))
+	var skipped []WindowsManagedRuntimeSkippedProfile
 	err = windowsManagedRuntimeSetupPrivilege(func() error {
 		for _, target := range targets {
 			root, inspectErr := planWindowsManagedRuntimeRoot(target)
 			if inspectErr != nil {
+				if publish != nil && errors.Is(inspectErr, windows.ERROR_SHARING_VIOLATION) {
+					skipped = append(skipped, WindowsManagedRuntimeSkippedProfile{
+						SID:      target.sid.String(),
+						UserHome: target.home,
+						Reason:   boundWindowsManagedRuntimeSkipReason(inspectErr.Error()),
+					})
+					continue
+				}
 				return inspectErr
 			}
-			plan.Roots = append(plan.Roots, root)
+			roots = append(roots, root)
 		}
 		return nil
 	})
 	if err != nil {
 		return WindowsManagedRuntimePlan{}, err
 	}
+	if len(skipped) != 0 {
+		manifest = withoutWindowsManagedRuntimeSkippedProfiles(manifest, skipped)
+		digest, publishErr := publish(manifest)
+		if publishErr != nil {
+			return WindowsManagedRuntimePlan{}, fmt.Errorf("enterprise hooks: publish manifest without skipped busy profiles: %w", publishErr)
+		}
+		manifestSHA256 = strings.ToLower(strings.TrimSpace(digest))
+		if !validWindowsManagedRuntimeDigest(manifestSHA256) {
+			return WindowsManagedRuntimePlan{}, fmt.Errorf("enterprise hooks: published manifest digest is invalid")
+		}
+	}
+	plan = WindowsManagedRuntimePlan{
+		SchemaVersion:   WindowsManagedRuntimePlanSchemaVersion,
+		ManifestPath:    manifestPath,
+		ManifestSHA256:  manifestSHA256,
+		TargetCount:     windowsManagedRuntimeEnabledTargetCount(manifest),
+		Roots:           roots,
+		SkippedProfiles: skipped,
+	}
 	return plan, validateWindowsManagedRuntimePlan(plan, manifest)
+}
+
+func windowsManagedRuntimeEnabledTargetCount(manifest Manifest) int {
+	count := 0
+	for _, row := range manifest.Targets {
+		if row.IsEnabled() {
+			count++
+		}
+	}
+	return count
+}
+
+// withoutWindowsManagedRuntimeSkippedProfiles drops every row, enabled or
+// not, for a skipped user, so no connector of theirs is enrolled without the
+// runtime the installer would have created.
+func withoutWindowsManagedRuntimeSkippedProfiles(manifest Manifest, skipped []WindowsManagedRuntimeSkippedProfile) Manifest {
+	drop := make(map[string]struct{}, len(skipped))
+	for _, profile := range skipped {
+		drop[strings.ToUpper(profile.SID)] = struct{}{}
+	}
+	reduced := manifest
+	reduced.Targets = make([]ManifestTarget, 0, len(manifest.Targets))
+	for _, row := range manifest.Targets {
+		if _, ok := drop[strings.ToUpper(strings.TrimSpace(row.SID))]; ok {
+			continue
+		}
+		reduced.Targets = append(reduced.Targets, row)
+	}
+	return reduced
+}
+
+func boundWindowsManagedRuntimeSkipReason(reason string) string {
+	reason = strings.Map(func(r rune) rune {
+		if r < 0x20 || r == 0x7f {
+			return ' '
+		}
+		return r
+	}, reason)
+	if len(reason) > windowsManagedRuntimeSkipReasonMax {
+		reason = reason[:windowsManagedRuntimeSkipReasonMax]
+	}
+	return reason
 }
 
 // StageWindowsManagedRuntimeRoots creates only random staging leaves. It never
@@ -1350,6 +1453,9 @@ func validateWindowsManagedRuntimePlan(plan WindowsManagedRuntimePlan, manifest 
 	if plan.TargetCount != targetCount || targetCount > windowsManagedRuntimeMaxRoots*3 {
 		return fmt.Errorf("enterprise hooks: managed runtime plan target count does not match manifest")
 	}
+	if err := validateWindowsManagedRuntimeSkippedProfiles(plan.SkippedProfiles, manifest); err != nil {
+		return err
+	}
 	if len(plan.Roots) != len(targets) || len(plan.Roots) > windowsManagedRuntimeMaxRoots {
 		return fmt.Errorf("enterprise hooks: managed runtime plan root count does not match manifest")
 	}
@@ -1375,6 +1481,36 @@ func validateWindowsManagedRuntimePlan(plan WindowsManagedRuntimePlan, manifest 
 			return fmt.Errorf("enterprise hooks: managed runtime plan root %d has invalid or duplicate marker SID", index)
 		}
 		seenMarker[strings.ToUpper(root.MarkerSID)] = true
+	}
+	return nil
+}
+
+// validateWindowsManagedRuntimeSkippedProfiles requires each skipped user to
+// be well formed, listed once, and absent from the manifest the plan binds.
+func validateWindowsManagedRuntimeSkippedProfiles(skipped []WindowsManagedRuntimeSkippedProfile, manifest Manifest) error {
+	if len(skipped) > windowsManagedRuntimeMaxRoots {
+		return fmt.Errorf("enterprise hooks: managed runtime plan skips more than %d profiles", windowsManagedRuntimeMaxRoots)
+	}
+	inManifest := make(map[string]struct{}, len(manifest.Targets))
+	for _, row := range manifest.Targets {
+		inManifest[strings.ToUpper(strings.TrimSpace(row.SID))] = struct{}{}
+	}
+	seen := make(map[string]struct{}, len(skipped))
+	for index, profile := range skipped {
+		sid, err := windows.StringToSid(profile.SID)
+		if err != nil || sid.String() != profile.SID ||
+			!filepath.IsAbs(profile.UserHome) || filepath.Clean(profile.UserHome) != profile.UserHome ||
+			strings.TrimSpace(profile.Reason) == "" || len(profile.Reason) > windowsManagedRuntimeSkipReasonMax {
+			return fmt.Errorf("enterprise hooks: managed runtime plan skipped profile %d is invalid", index)
+		}
+		key := strings.ToUpper(profile.SID)
+		if _, duplicate := seen[key]; duplicate {
+			return fmt.Errorf("enterprise hooks: managed runtime plan skips profile %s twice", profile.SID)
+		}
+		seen[key] = struct{}{}
+		if _, present := inManifest[key]; present {
+			return fmt.Errorf("enterprise hooks: managed runtime plan skips profile %s that the manifest still enrolls", profile.SID)
+		}
 	}
 	return nil
 }

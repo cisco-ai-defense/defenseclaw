@@ -14150,19 +14150,22 @@ function Assert-DefenseClawTargetRuntimePlan {
         [Parameter(Mandatory)]$Plan,
         [Parameter(Mandatory)][hashtable]$Layout
     )
-    $allowedPlanProperties = @(
+    $requiredPlanProperties = @(
         'schema_version',
         'manifest_path',
         'manifest_sha256',
         'target_count',
         'roots'
     )
+    # skipped_profiles is optional: a fresh Install's plan lists the users it
+    # left out because their profile folder stayed busy.
+    $allowedPlanProperties = $requiredPlanProperties + @('skipped_profiles')
     foreach ($property in @($Plan.PSObject.Properties)) {
         if ([string]$property.Name -notin $allowedPlanProperties) {
             throw 'target runtime plan contains an unexpected property'
         }
     }
-    foreach ($required in $allowedPlanProperties) {
+    foreach ($required in $requiredPlanProperties) {
         if ($null -eq $Plan.PSObject.Properties[$required]) {
             throw "target runtime plan is missing $required"
         }
@@ -14315,7 +14318,85 @@ function Assert-DefenseClawTargetRuntimePlan {
             throw 'target runtime absent baseline unexpectedly has an identity'
         }
     }
+    [void](Get-DefenseClawTargetRuntimeSkippedProfiles -Plan $Plan -RootSIDs $seenSID)
     return $Plan
+}
+
+# Returns the plan's skipped profiles after checking their shape: each one has
+# exactly sid, user_home and reason, is listed once, and has no root.
+function Get-DefenseClawTargetRuntimeSkippedProfiles {
+    param(
+        [Parameter(Mandatory)]$Plan,
+        [hashtable]$RootSIDs = @{}
+    )
+    $property = $Plan.PSObject.Properties['skipped_profiles']
+    if ($null -eq $property -or $null -eq $property.Value) {
+        return @()
+    }
+    if ($property.Value -isnot [Array]) {
+        throw 'target runtime plan skipped_profiles is not an array'
+    }
+    $profiles = @($property.Value)
+    if ($profiles.Count -gt 128) {
+        throw 'target runtime plan skips more than 128 profiles'
+    }
+    $seen = @{}
+    foreach ($profile in $profiles) {
+        $names = @($profile.PSObject.Properties | Microsoft.PowerShell.Core\ForEach-Object { [string]$_.Name })
+        if ($names.Count -ne 3 -or
+            'sid' -notin $names -or 'user_home' -notin $names -or 'reason' -notin $names) {
+            throw 'target runtime plan skipped profile has unexpected properties'
+        }
+        $sid = [string]$profile.sid
+        $userHome = [string]$profile.user_home
+        $reason = [string]$profile.reason
+        if ($sid -cnotmatch '^S-\d-\d+(?:-\d+)+$' -or
+            $userHome -cnotmatch '^[A-Za-z]:\\[^:]+$' -or
+            [string]::IsNullOrWhiteSpace($reason) -or
+            $reason.Length -gt 1024) {
+            throw 'target runtime plan skipped profile is invalid'
+        }
+        $key = $sid.ToUpperInvariant()
+        if ($seen.ContainsKey($key) -or $RootSIDs.ContainsKey($key) -or $RootSIDs.ContainsKey($sid)) {
+            throw 'target runtime plan skips a profile twice or also plans its root'
+        }
+        $seen[$key] = $true
+    }
+    return $profiles
+}
+
+# A fresh Install continues without a user whose profile folder another
+# process kept open past the retry window. Record each one where support finds
+# it: as a warning in the installer output (and so the AVC lifecycle log), and
+# in the hook-guardian log that DART collects. The log append is best effort.
+function Write-DefenseClawTargetRuntimeSkippedProfiles {
+    param(
+        [Parameter(Mandatory)]$Plan,
+        [Parameter(Mandatory)][hashtable]$Layout
+    )
+    $profiles = @(Get-DefenseClawTargetRuntimeSkippedProfiles -Plan $Plan)
+    foreach ($profile in $profiles) {
+        $line = (
+            'target_runtime_profile_skipped: user {0} at {1} was left out of this install ' +
+            'and is not protected until the Guardian enrolls it after the folder is free: {2}'
+        ) -f [string]$profile.sid, [string]$profile.user_home, [string]$profile.reason
+        Microsoft.PowerShell.Utility\Write-Warning -Message $line
+        try {
+            $logPath = [string]$Layout.GuardianLogPath
+            if (-not [string]::IsNullOrWhiteSpace($logPath) -and
+                (Microsoft.PowerShell.Management\Test-Path -LiteralPath ([IO.Path]::GetDirectoryName($logPath)) -PathType Container)) {
+                [IO.File]::AppendAllText(
+                    $logPath,
+                    ('{0} [installer] {1}{2}' -f [DateTime]::UtcNow.ToString('yyyy-MM-ddTHH:mm:ssZ'), $line, [Environment]::NewLine)
+                )
+            }
+        }
+        catch {
+            Microsoft.PowerShell.Utility\Write-Warning -Message (
+                "target_runtime_profile_skipped: could not record the skip in the hook-guardian log: $($_.Exception.Message)"
+            )
+        }
+    }
 }
 
 function Assert-DefenseClawTargetRuntimeReport {
@@ -14678,11 +14759,15 @@ function Invoke-DefenseClawTargetRuntimePreparation {
     $planProbe = Invoke-DefenseClawGatewayCommand `
         -Layout $Layout `
         -GatewayServiceName $GatewayServiceName `
-        -Arguments @(
+        -Arguments (@(
             'enterprise', 'windows', 'target-runtime', 'plan',
             '--manifest', [string]$Layout.ManifestPath,
             '--output', $planPath
-        ) `
+        ) + $(if ($ValidationOnly) { @() } else {
+                # Only a fresh Install creates roots, so only it may leave a
+                # busy profile out instead of failing every user.
+                @('--skip-busy-profiles')
+            })) `
         -Capture `
         -AllowFailure
     if ([int]$planProbe.exit_code -ne 0) {
@@ -14695,6 +14780,10 @@ function Invoke-DefenseClawTargetRuntimePreparation {
             -Path $planPath `
             -TransactionDirectory $transactionDirectory) `
         -Layout $Layout
+    if ($ValidationOnly -and @(Get-DefenseClawTargetRuntimeSkippedProfiles -Plan $plan).Count -ne 0) {
+        throw 'Upgrade/Repair target runtime plan unexpectedly skipped a profile'
+    }
+    Write-DefenseClawTargetRuntimeSkippedProfiles -Plan $plan -Layout $Layout
     if ($ValidationOnly) {
         if (@($plan.roots |
                 Microsoft.PowerShell.Core\Where-Object {
