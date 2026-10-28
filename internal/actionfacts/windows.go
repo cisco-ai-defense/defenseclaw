@@ -1477,6 +1477,12 @@ func (b *windowsFactBuilder) addPath(commandID int64, access PathAccess, value s
 	if value == "" {
 		return
 	}
+	if access == PathAccessRead && windowsNullDevice(value) {
+		// Reading the NUL device reads nothing and names no file, so it
+		// leaves the facts complete: type nul > f is the write of f that
+		// echo x > f is (GAP-2408).
+		return
+	}
 	canonical, ok := windowsCanonicalPathFactValue(value)
 	if !ok {
 		b.out.markPartial(IssueUnknownOperandGrammar)
@@ -5481,4 +5487,11 @@ func windowsEndpoint(word windowsWord) (string, string, int64, bool) {
 		return "", "", 0, false
 	}
 	return scheme, host, port, true
+}
+
+// windowsNullDevice reports the NUL device spelled as cmd and PowerShell
+// accept it as a source (nul, NUL:, \\.\nul).
+func windowsNullDevice(value string) bool {
+	value = strings.TrimSuffix(strings.ToLower(strings.ReplaceAll(value, "/", `\`)), ":")
+	return value == "nul" || value == `\\.\nul`
 }
