@@ -413,26 +413,38 @@ func bareHomeWord(word *syntax.Word) (string, bool) {
 
 // plainHomeRewriteWord reports a home-anchored word the rewrite writes back
 // unquoted as ActiveHome plus its path. A quoted part ("$HOME/.x/y",
-// "$HOME"/.x) reads the same unquoted only when the path holds no blank,
-// pattern or other shell character, so only such a path is taken
-// (GAP-2047).
+// "$HOME"/.x) reads the same unquoted only when its text holds no blank,
+// pattern or other shell character, so only such a part is taken
+// (GAP-2047). The unquoted text beside it is written back as it stands,
+// so a brace after the quotes (`"$HOME/.defenseclaw/"{installer,hooks}`)
+// still expands as the shell expands it (GAP-2047 pod check19).
 func plainHomeRewriteWord(word *syntax.Word) bool {
-	suffix, ok := homeAnchoredLiteralWord(word)
-	if !ok {
+	if _, ok := homeAnchoredLiteralWord(word); !ok {
 		return false
 	}
-	quoted := false
 	for _, part := range word.Parts {
-		switch part.(type) {
+		switch typed := part.(type) {
 		case *syntax.Lit, *syntax.ParamExp:
-		case *syntax.DblQuoted, *syntax.SglQuoted:
-			quoted = true
+		case *syntax.SglQuoted:
+			if !trustedPOSIXQuotedHomeText.MatchString(typed.Value) {
+				return false
+			}
+		case *syntax.DblQuoted:
+			for _, inner := range typed.Parts {
+				if literal, ok := inner.(*syntax.Lit); ok && !trustedPOSIXQuotedHomeText.MatchString(literal.Value) {
+					return false
+				}
+			}
 		default:
 			return false
 		}
 	}
-	return !quoted || trustedPOSIXHomeLiteral.MatchString(suffix)
+	return true
 }
+
+// trustedPOSIXQuotedHomeText is quoted path text that reads the same
+// unquoted (trustedPOSIXHomeLiteral without its leading slash).
+var trustedPOSIXQuotedHomeText = regexp.MustCompile(`^[A-Za-z0-9._@+/-]*$`)
 
 // homeGlobRewriteWord reports an unquoted $HOME or ${HOME} followed by
 // plain literal text that holds a pathname pattern (`$HOME/.defenseclaw/*`)
