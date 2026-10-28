@@ -22084,6 +22084,21 @@ function Invoke-DefenseClawManagedHooksTeardownCommand {
             throw 'managed-hook teardown rollback did not restore and verify the exact pre-teardown enrollment'
         }
     }
+    elseif ($Action -ceq 'check') {
+        # GAP-0571: the read-only check changes nothing, so it attests the
+        # installed targets and never that the binary may go.
+        $safeToRemove = $report.PSObject.Properties['safe_to_remove_binary']
+        if ($null -eq $safeToRemove -or
+            $safeToRemove.Value -isnot [bool] -or
+            [bool]$safeToRemove.Value) {
+            throw 'managed-hook teardown check prematurely attested safe_to_remove_binary'
+        }
+        if ($counts.verified_installed_count -ne $counts.target_count) {
+            throw 'managed-hook teardown check did not verify every installed target'
+        }
+        # Nothing is journaled before the commit: there is no journal to check.
+        return $report
+    }
     else {
         $finalized = $report.PSObject.Properties['finalization_completed']
         $safeToRemove = $report.PSObject.Properties['safe_to_remove_binary']

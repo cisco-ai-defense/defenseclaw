@@ -58,6 +58,7 @@ try {
             $script:HookCommitPhase = ''
             $script:HookCommitCapable = $true
             $realProbe = ${function:Test-DefenseClawManagedHooksCommittedTeardownSupported}
+            $realTeardownCommand = ${function:Invoke-DefenseClawManagedHooksTeardownCommand}
             function script:Test-DefenseClawManagedHooksCommittedTeardownSupported {
                 param($Layout, $GatewayServiceName)
                 $script:HookCommitEvents.Add('capabilities')
@@ -381,6 +382,65 @@ try {
                 if ($got -isnot [bool] -or $got -ne $case.want) {
                     $failures.Add("capability probe, $($case.name): $got, want $($case.want)")
                 }
+            }
+            # GAP-0571: the wrapper accepts the helper's real check report
+            # (verified installed, binary not released) and nothing that
+            # claims more. Before the fix a good check report fell into the
+            # finalize rules and refused every healthy uninstall.
+            Microsoft.PowerShell.Management\Set-Item -Path function:script:Invoke-DefenseClawManagedHooksTeardownCommand -Value $realTeardownCommand
+            function script:Invoke-DefenseClawGatewayCommand {
+                param($Layout, $GatewayServiceName, [string[]]$Arguments, [switch]$Capture,
+                    [switch]$AllowFailure, [int]$TimeoutSeconds)
+                if (($Arguments -join ' ') -cne 'enterprise windows teardown-managed-hooks check --json') {
+                    throw "unexpected helper call: $($Arguments -join ' ')"
+                }
+                return $script:ProbeAnswer
+            }
+            $checkLayout = @{
+                ManifestPath = 'C:\ProgramData\DefenseClaw\hook-guardian\targets.yaml'
+                ManagedHooksTeardownJournalPath = 'C:\ProgramData\DefenseClaw\install\managed-hooks-teardown.json'
+                ManagedHookContractCleanupReceiptPath = 'C:\ProgramData\DefenseClaw\install\contract-cleanup.json'
+                PurgeScopeSHA256 = ('a' * 64)
+            }
+            $checkReport = {
+                param([bool]$SafeToRemove, [int]$VerifiedInstalled)
+                [ordered]@{
+                    schema_version = 4; action = 'check'; ok = $true
+                    manifest_path = $checkLayout.ManifestPath
+                    journal_path = $checkLayout.ManagedHooksTeardownJournalPath
+                    target_count = 1; enrollment_target_count = 0; succeeded_count = 1
+                    verified_clean_count = 0; verified_installed_count = $VerifiedInstalled; failed_count = 0
+                    surviving_owned_path_references = 0; collected_generation_count = 0
+                    rollback_ready = $false; safe_to_remove_binary = $SafeToRemove
+                    results = @(@{ connector = 'codex'; sid = 'S-1-5-21-111-222-333-1001'; ok = $true })
+                } | Microsoft.PowerShell.Utility\ConvertTo-Json -Compress -Depth 4
+            }
+            foreach ($case in @(
+                @{ name = 'a healthy deployment'; report = (& $checkReport $false 1); want = $true },
+                @{ name = 'a check that releases the binary'; report = (& $checkReport $true 1); want = $false },
+                @{ name = 'a check that verified no target'; report = (& $checkReport $false 0); want = $false }
+            )) {
+                $script:ProbeAnswer = [pscustomobject]@{ exit_code = 0; output = @($case.report) }
+                $accepted = $true
+                try {
+                    [void](Invoke-DefenseClawManagedHooksTeardownCommand -Layout $checkLayout `
+                        -GatewayServiceName DefenseClawGateway -GuardianServiceName DefenseClawHookGuardian -Action check)
+                }
+                catch {
+                    $accepted = $false
+                    $checkError = $_.Exception.Message
+                }
+                if ($accepted -ne $case.want) {
+                    $failures.Add("check report, $($case.name): accepted=$accepted, want $($case.want) ($checkError)")
+                }
+            }
+            function script:Invoke-DefenseClawGatewayCommand {
+                param($Layout, $GatewayServiceName, [string[]]$Arguments, [switch]$Capture,
+                    [switch]$AllowFailure, [int]$TimeoutSeconds)
+                if (($Arguments -join ' ') -cne 'enterprise windows teardown-managed-hooks capabilities --json') {
+                    throw "unexpected helper call: $($Arguments -join ' ')"
+                }
+                return $script:ProbeAnswer
             }
             # GAP-0571: the precommit_check capability, same rules. A helper
             # without it (every helper before this fix) gets no check.
