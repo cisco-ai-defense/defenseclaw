@@ -2033,6 +2033,37 @@ func actionSSHKeygenListsOnly(args []*syntax.Word, home string) bool {
 	return list
 }
 
+// actionSSHKeygenListsOnlyWords is actionSSHKeygenListsOnly for the words of
+// a Windows reading: -l with only -v, -q, -f FILE and -E HASH lists keys.
+func actionSSHKeygenListsOnlyWords(args []string) bool {
+	list := false
+	for index := 0; index < len(args); index++ {
+		word := args[index]
+		if len(word) < 2 || word[0] != '-' || word[1] == '-' {
+			return false
+		}
+		flags := word[1:]
+		for at := 0; at < len(flags); at++ {
+			switch flags[at] {
+			case 'l':
+				list = true
+			case 'v', 'q':
+			case 'f', 'E':
+				if at == len(flags)-1 {
+					index++
+					if index >= len(args) {
+						return false
+					}
+				}
+				at = len(flags)
+			default:
+				return false
+			}
+		}
+	}
+	return list
+}
+
 func actionLessWritesFile(option string) bool {
 	if option == "-o" || option == "-O" ||
 		strings.HasPrefix(option, "-o") && !strings.HasPrefix(option, "--") ||
@@ -2756,8 +2787,13 @@ func actionKnownReadOnlyWindowsStatement(words []string) bool {
 	switch program {
 	case "cat", "get-content", "get-childitem", "resolve-path", "test-path", "head", "tail", "dir", "ls", "stat", "cd", "pushd", "popd", "set-location", "push-location", "pop-location",
 		// cmd type, and the search and select filters, only read (GAP-2168).
-		"type", "findstr", "select-string", "sls", "select-object", "select":
+		"type", "findstr", "select-string", "sls", "select-object", "select",
+		// Git Bash search and count programs read their operands as on a
+		// POSIX home (actionKnownReadOnlyShell, GAP-2168 Windows leg).
+		"grep", "egrep", "fgrep", "wc":
 		return true
+	case "ssh-keygen":
+		return actionSSHKeygenListsOnlyWords(words[1:])
 	case "less":
 		for _, option := range words[1:] {
 			if actionLessWritesFile(option) {
