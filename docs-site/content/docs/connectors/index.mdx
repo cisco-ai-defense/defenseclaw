@@ -29,7 +29,7 @@ Connectors are the adapter layer between agent frameworks and DefenseClaw. They 
 | --- | --- | --- | --- | --- |
 | [Claude Code](/docs/connectors/claudecode) | Hook | Prompts and tool calls | `PreToolUse` | Linux, macOS, Windows |
 | [Codex](/docs/connectors/codex) | Hook | Prompts and tool calls | No | Linux, macOS, Windows |
-| [GitHub Copilot CLI](/docs/connectors/copilot) | Hook | Tool calls | `preToolUse` | Linux, macOS, Windows |
+| [GitHub Copilot CLI](/docs/connectors/copilot) | Hook | Tool calls | No: a confirmation blocks | Linux, macOS, Windows |
 | [Cursor](/docs/connectors/cursor) | Hook | Prompts and tool calls | No | Linux, macOS, Windows |
 | [Devin](/docs/connectors/devin) | Hook | Prompts and tool calls | No | Linux, macOS, Windows |
 | [Antigravity](/docs/connectors/antigravity) | Hook | `PreToolUse` | `PreToolUse` | Linux, macOS, Windows |
@@ -40,7 +40,7 @@ Connectors are the adapter layer between agent frameworks and DefenseClaw. They 
 | [OpenClaw](/docs/connectors/openclaw) | Proxy | Requests, responses, tool calls | `before_tool_call` | Linux, macOS |
 | [ZeptoClaw](/docs/connectors/zeptoclaw) | Proxy | Requests, responses, tool calls | No | Linux, macOS |
 
-Where an agent cannot ask, a confirm verdict becomes an alert with the original action kept. You can review it in audit or the TUI, but you cannot resume the call. The [capability matrix](/docs/connectors/capability-matrix) has the full per-connector detail, and [Human approval](/docs/guardrail) has the per-event matrix.
+Where an agent cannot ask, a confirm verdict becomes an alert with the original action kept; Copilot CLI blocks it instead. You can review it in audit or the TUI, but you cannot resume the call. The [capability matrix](/docs/connectors/capability-matrix) has the full per-connector detail, and [Human approval](/docs/guardrail) has the per-event matrix.
 
 One gateway can serve several hook connectors, each with its own posture under `guardrail.connectors.<name>`. Choose **Add**, not Replace, when you run a second `setup <connector>`. Proxy connectors own the traffic plane and cannot be combined this way. See [Multi-connector](/docs/guardrail/multi-connector).
 

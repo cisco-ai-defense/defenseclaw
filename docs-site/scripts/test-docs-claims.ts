@@ -1423,6 +1423,8 @@ describe('Known limits by lead decision (rel-1-0-4 P1 reconcile)', () => {
 // heading of the page; the row reads only that section and its subsections.
 type DocRow = { gap: string; page: string; section?: string; has?: string[]; lacks?: string[] };
 const r105Rows: DocRow[] = [
+  { gap: "GAP-1519", page: "connectors/index.mdx", section: "Pick yours", has: ["| [GitHub Copilot CLI](/docs/connectors/copilot) | Hook | Tool calls | No: a confirmation blocks |", "Where an agent cannot ask, a confirm verdict becomes an alert with the original action kept; Copilot CLI blocks it instead."], lacks: ["| Tool calls | `preToolUse` |"] },
+  { gap: "GAP-1537", page: "enterprise/mdm/intune-linux.mdx", has: ["The wrapper itself makes up to three attempts on exit `75` (busy): the first run and two retries, 10 seconds apart."], lacks: ["retries exit `75` (busy) up to three times"] },
   { gap: "GAP-2242", page: "sandboxes/network.mdx", has: ["for example `pack open (sha256:…), network allowlist (balanced), approvals triage`"], lacks: ["for example `profile balanced, pack open`"] },
   { gap: "GAP-2360", page: "guardrail/index.mdx", has: ["| **Select hook fail mode** *(asked only when this run turns the guardrail on or switches between observe and action;", "`defenseclaw init` already turns the guardrail on, so a later run that keeps the mode does not ask it."], lacks: ["asked on first setup or when the mode changes", "there is no hook fail mode question"] },
   { gap: "GAP-2235", page: "guardrail/unified-llm-key.mdx", has: ["and no `--instance-name` drops the instance", "binding, so the role stops using the custom instance."] },
@@ -2063,6 +2065,41 @@ describe('edge-connector setup prompts and sudo refusal match the CLI (GAP-2221)
     assert.ok(py.includes('subprocess.run(["sudo", "install", "-d", "-m", "700", str(svc_env_path.parent)], check=True)'), 'service env is no longer written through sudo: re-check edge-connector/install.mdx');
     assert.ok(py.includes('f"Could not provision {name} in {svc_env_path}; Edge setup is incomplete"'), 'sudo refusal text changed: re-check edge-connector/install.mdx');
     assert.ok(py.indexOf('Edge setup is incomplete') < py.indexOf('_enable_fleet_config(ctx.obj.cfg.data_dir)'), 'Fleet is enabled before the service env is written: re-check "Fleet stays off" in edge-connector/install.mdx');
+  });
+});
+
+// GAP-1519: the "Can ask you first" column of the connectors table follows
+// capability-matrix.json (canAskNative and askEvents) for every connector.
+describe('connectors table ask column matches the capability data (GAP-1519)', () => {
+  it('says No exactly where canAskNative is false and names every ask event otherwise', () => {
+    const matrix = JSON.parse(readFileSync(join(site, 'data/capability-matrix.json'), 'utf8')) as { connectors: { id: string; hooks?: { canAskNative?: boolean; askEvents?: string[] } }[] };
+    const byId = new Map(matrix.connectors.map((c) => [c.id, c.hooks ?? {}]));
+    const table = readFileSync(join(site, 'content/docs/connectors/index.mdx'), 'utf8').split('## Pick yours')[1]?.split('\n## ')[0] ?? '';
+    const rows = table.split('\n').filter((line) => /^\| \[[^\]]+\]\(\/docs\/connectors\/[a-z]+\)/.test(line));
+    assert.ok(rows.length >= 10, 'connectors/index.mdx Pick yours table not found');
+    for (const row of rows) {
+      const id = /\/docs\/connectors\/([a-z]+)\)/.exec(row)![1];
+      const hooks = byId.get(id);
+      assert.ok(hooks, `${id}: not in capability-matrix.json`);
+      const ask = row.split('|')[4].trim();
+      if (hooks.canAskNative) {
+        assert.ok(!ask.startsWith('No'), `${id}: canAskNative true but the table says ${ask}`);
+        for (const event of hooks.askEvents ?? []) assert.ok(ask.includes('`' + event + '`'), `${id}: ask event ${event} missing from the table`);
+      } else {
+        assert.ok(ask.startsWith('No'), `${id}: canAskNative false but the table says ${ask} (GAP-1519)`);
+      }
+    }
+  });
+});
+
+// GAP-1537: the Linux MDM wrapper makes at most three attempts (two retries,
+// 10 s apart) on busy; intune-linux.mdx says so.
+describe('Linux MDM wrapper busy retries match intune-linux.mdx (GAP-1537)', () => {
+  it('retries busy twice, 10 seconds apart', () => {
+    const sh = source('packaging/mdm/linux/defenseclaw-enterprise.sh');
+    const fn = sh.split('dc_run_lifecycle_retry() {')[1]?.split('\n}')[0] ?? '';
+    assert.ok(fn.includes('attempt=1') && fn.includes('[ "$attempt" -ge 3 ]') && fn.includes('retry $attempt of 2') && fn.includes('sleep 10'), 'dc_run_lifecycle_retry changed: re-check intune-linux.mdx Execution retries');
+    assert.equal((sh.match(/dc_busy_output "\$output" && \[ "\$attempt" -lt 3 \]/g) ?? []).length, 2, 'package busy retry loops changed: re-check intune-linux.mdx Execution retries');
   });
 });
 
