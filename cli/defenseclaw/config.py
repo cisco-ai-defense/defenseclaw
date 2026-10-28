@@ -4382,6 +4382,16 @@ class Config:
         if override.model:
             out.model = override.model
         if override.provider:
+            # A role naming another provider and no instance of its own does
+            # not inherit the custom instance binding (GAP-2379); Go ResolveLLM
+            # applies the same rule.
+            role_provider = override.provider.strip().lower()
+            if (
+                not override.instance_name
+                and role_provider != "custom"
+                and role_provider != (out.provider or "").strip().lower()
+            ):
+                out.instance_name = ""
             out.provider = override.provider
         if override.api_key:
             out.api_key = override.api_key

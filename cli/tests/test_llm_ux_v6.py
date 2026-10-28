@@ -430,6 +430,43 @@ class TestSetupLLMNonInteractiveFlags(unittest.TestCase):
         run("--provider", "vertex_ai", "--model", "gemini-2.5-pro")
         self.assertEqual(self.app.cfg.llm.instance_name, "")
 
+    def test_judge_provider_switch_drops_the_custom_instance(self) -> None:
+        """GAP-2379: setup guardrail --judge-provider <other> without
+        --judge-instance-name drops the judge's custom instance;
+        --judge-instance-name keeps one."""
+        def run(*args: str) -> None:
+            res = self.runner.invoke(
+                setup,
+                ["guardrail", "--non-interactive", "--connector", "openclaw", *args, "--no-restart"],
+                obj=self.app,
+                catch_exceptions=False,
+            )
+            self.assertEqual(res.exit_code, 0, res.output)
+
+        judge = self.app.cfg.guardrail.judge.llm
+        judge.provider, judge.instance_name, judge.model = "custom", "acme-bedrock-prod", "heavy"
+        run("--judge-provider", "anthropic", "--judge-model", "claude-sonnet-4-5")
+        judge = self.app.cfg.guardrail.judge.llm
+        self.assertEqual(judge.provider, "anthropic")
+        self.assertEqual(judge.instance_name, "")
+        run("--judge-provider", "bedrock", "--judge-instance-name", "acme-bedrock-prod", "--judge-model", "m")
+        self.assertEqual(self.app.cfg.guardrail.judge.llm.instance_name, "acme-bedrock-prod")
+        run("--judge-provider", "bedrock", "--judge-model", "m2")
+        self.assertEqual(self.app.cfg.guardrail.judge.llm.instance_name, "acme-bedrock-prod")
+
+    def test_role_with_its_own_provider_does_not_inherit_the_custom_instance(self) -> None:
+        """GAP-2379: a role override that names another provider and no
+        instance does not inherit the top-level custom instance."""
+        llm = self.app.cfg.llm
+        llm.provider, llm.instance_name, llm.model = "custom", "acme-bedrock-prod", "heavy"
+        judge = self.app.cfg.guardrail.judge.llm
+        judge.provider, judge.model, judge.instance_name = "anthropic", "claude-sonnet-4-5", ""
+        self.assertEqual(self.app.cfg.resolve_llm("guardrail.judge").instance_name, "")
+        judge.provider = "custom"
+        self.assertEqual(self.app.cfg.resolve_llm("guardrail.judge").instance_name, "acme-bedrock-prod")
+        judge.provider = ""
+        self.assertEqual(self.app.cfg.resolve_llm("guardrail.judge").instance_name, "acme-bedrock-prod")
+
     def test_custom_provider_with_instance_is_not_an_unknown_prefix(self) -> None:
         """GAP-2234: provider custom with a bound instance is documented and
         must not log the unknown-provider warning; without an instance it
@@ -1022,6 +1059,30 @@ class TestLocalModelListing(unittest.TestCase):
             "http://127.0.0.1:11434",
         )
 
+
+    def test_interactive_switch_from_custom_drops_the_instance(self) -> None:
+        """GAP-2379: the setup llm wizard drops the custom instance when a
+        catalog provider replaces provider custom."""
+        with tempfile.TemporaryDirectory() as data_dir:
+            cfg = _make_cfg(data_dir)
+            cfg.llm.provider = "custom"
+            cfg.llm.model = "heavy"
+            cfg.llm.instance_name = "acme-bedrock-prod"
+            with (
+                mock.patch.object(_llm_picker, "pick_provider", return_value="ollama"),
+                mock.patch.object(_llm_picker, "list_custom_instances", return_value=[]),
+                mock.patch.object(
+                    _llm_picker,
+                    "pick_local_runtime",
+                    return_value=("qwen3.5:9b-mlx", "http://127.0.0.1:11434"),
+                ),
+                mock.patch.object(_llm_picker, "summary_panel"),
+                mock.patch.object(cmd_setup.click, "prompt", side_effect=[30, 2]),
+            ):
+                cmd_setup._configure_llm(cfg, data_dir)
+
+        self.assertEqual(cfg.llm.provider, "ollama")
+        self.assertEqual(cfg.llm.instance_name, "")
 
     def test_bedrock_instance_role_is_asked_before_and_skips_the_key(self) -> None:
         with tempfile.TemporaryDirectory() as data_dir:

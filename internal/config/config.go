@@ -1237,6 +1237,14 @@ func (c *Config) ResolveLLM(path string) LLMConfig {
 		out.Model = override.Model
 	}
 	if override.Provider != "" {
+		// A role naming another provider and no instance of its own does
+		// not inherit the custom instance binding (GAP-2379); the CLI's
+		// Config.resolve_llm applies the same rule.
+		roleProvider := strings.ToLower(strings.TrimSpace(override.Provider))
+		if override.InstanceName == "" && roleProvider != "custom" &&
+			roleProvider != strings.ToLower(strings.TrimSpace(out.Provider)) {
+			out.InstanceName = ""
+		}
 		out.Provider = override.Provider
 	}
 	if override.APIKey != "" {

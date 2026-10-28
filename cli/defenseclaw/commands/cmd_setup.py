@@ -1712,6 +1712,10 @@ def _configure_llm(
         flag_value=None,
         non_interactive=False,
     )
+    if llm.provider != previous_provider and llm.provider != "custom" and llm.provider in _WIZARD_LLM_PROVIDERS:
+        # A catalog provider replacing provider custom drops its instance
+        # binding, as setup llm --provider does (GAP-2379, GAP-2235).
+        llm.instance_name = ""
     current_model = (llm.model or "") if llm.provider == previous_provider else ""
     if llm.provider in _LOCAL_LLM_WIZARD_PROVIDERS:
         # Local runtimes: no API key. Ask for the endpoint first so we
@@ -7430,7 +7434,16 @@ def setup_guardrail(
             gc.judge.api_base = ""
             gc.judge.api_key_env = ""
         if judge_provider is not None:
-            gc.judge.llm.provider = judge_provider.strip().lower()
+            next_judge_provider = judge_provider.strip().lower()
+            # A switch away from provider custom drops the judge's instance
+            # binding unless --judge-instance-name names one (GAP-2379, as GAP-2235).
+            if (
+                next_judge_provider != (gc.judge.llm.provider or "").strip().lower()
+                and next_judge_provider != "custom"
+                and judge_instance_name is None
+            ):
+                gc.judge.llm.instance_name = ""
+            gc.judge.llm.provider = next_judge_provider
         if judge_region is not None:
             gc.judge.llm.region = judge_region.strip()
         if judge_instance_name is not None:

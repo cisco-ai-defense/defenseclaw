@@ -32,3 +32,26 @@ func TestCustomProviderWithInstanceIsNotAnUnknownPrefix(t *testing.T) {
 		t.Fatalf("custom without an instance must warn once naming llm, got %q", got)
 	}
 }
+
+// GAP-2379: a role override that names another provider and no instance
+// does not inherit the top-level custom instance (the overlay would route
+// the role to it); provider custom or no provider still inherits it.
+func TestRoleWithItsOwnProviderDoesNotInheritTheCustomInstance(t *testing.T) {
+	c := &Config{LLM: LLMConfig{Provider: "custom", Model: "heavy", InstanceName: "acme-bedrock-prod"}}
+	c.Guardrail.Judge.LLM = LLMConfig{Provider: "anthropic", Model: "claude-sonnet-4-5"}
+	if got := c.ResolveLLM("guardrail.judge").InstanceName; got != "" {
+		t.Fatalf("anthropic judge inherited instance %q", got)
+	}
+	c.Guardrail.Judge.LLM.Provider = "custom"
+	if got := c.ResolveLLM("guardrail.judge").InstanceName; got != "acme-bedrock-prod" {
+		t.Fatalf("custom judge: got %q, want the inherited instance", got)
+	}
+	c.Guardrail.Judge.LLM.Provider = ""
+	if got := c.ResolveLLM("guardrail.judge").InstanceName; got != "acme-bedrock-prod" {
+		t.Fatalf("judge without a provider: got %q, want the inherited instance", got)
+	}
+	c.Guardrail.Judge.LLM = LLMConfig{Provider: "bedrock", Model: "m", InstanceName: "acme-other"}
+	if got := c.ResolveLLM("guardrail.judge").InstanceName; got != "acme-other" {
+		t.Fatalf("judge with its own instance: got %q", got)
+	}
+}
