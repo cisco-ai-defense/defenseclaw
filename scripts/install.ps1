@@ -3981,24 +3981,31 @@ function Save-Live([string]$Slot) {
 function New-HooksBridge([string]$From) {
     $bridge = Join-Path $DataDir "hooks"
     if ((Test-Path -LiteralPath $bridge) -or -not (Test-Path -LiteralPath $From -PathType Container)) { return }
+    # Built under another name, marker first, and renamed into place, so a
+    # hooks\ without the marker is never left for Restore-LiveTree to trip on
+    # (GAP-2425). The name is .failed-*, machinery to every released installer.
+    $building = Join-Path $DataDir ".failed-hooks-bridge"
     try {
+        Remove-Tree $building
         # It inherits the data folder's permissions, as the hooks\ it stands in
         # for does; the linked files keep their own (GAP-2426).
-        New-Item -ItemType Directory -Path $bridge -ErrorAction Stop | Out-Null
-        Set-Content -LiteralPath (Join-Path $bridge ".rollback-hooks-bridge") -Value "" -Encoding Ascii -ErrorAction Stop
+        New-Item -ItemType Directory -Path $building -ErrorAction Stop | Out-Null
+        Set-Content -LiteralPath (Join-Path $building ".rollback-hooks-bridge") -Value "" -Encoding Ascii -ErrorAction Stop
         foreach ($file in @(Get-ChildItem -LiteralPath $From -Force -File -ErrorAction Stop)) {
             if ($file.Attributes -band [IO.FileAttributes]::ReparsePoint) { continue }
-            New-Item -ItemType HardLink -Path (Join-Path $bridge $file.Name) -Value $file.FullName -ErrorAction Stop | Out-Null
+            New-Item -ItemType HardLink -Path (Join-Path $building $file.Name) -Value $file.FullName -ErrorAction Stop | Out-Null
         }
+        Move-Path $building $bridge 0
     } catch {
         # Best effort: without it the calls are refused with the older text.
-        Invoke-Quietly { Remove-HooksBridge }
+        Invoke-Quietly { Remove-Tree $building }
     }
 }
 
 function Remove-HooksBridge {
     $bridge = Join-Path $DataDir "hooks"
     if (Test-Path -LiteralPath (Join-Path $bridge ".rollback-hooks-bridge")) { Remove-Tree $bridge }
+    Remove-Tree (Join-Path $DataDir ".failed-hooks-bridge")
 }
 
 function Restore-Live([string]$Slot) {

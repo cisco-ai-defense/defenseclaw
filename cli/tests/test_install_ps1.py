@@ -8391,6 +8391,13 @@ Write-Output "HASHES=$($script:hashes)"
     assert "$plan.Schema -notin @(1, 2)" in restore and "$planSchema = [int]$plan.Schema" in restore
 
 
+def _not_data() -> str:
+    # The installer's own list of data-dir names that are machinery.
+    match = re.search(r"^\$NotData = @\(.*?\)$", _text(), re.M | re.S)
+    assert match is not None
+    return match.group(0)
+
+
 @pytest.mark.skipif(POWERSHELL is None, reason="PowerShell is not installed")
 @pytest.mark.allow_subprocess
 @pytest.mark.parametrize("back", ["restore-live-tree", "move-live-to"])
@@ -8417,7 +8424,7 @@ $ErrorActionPreference = 'Stop'
 $DataDir = '{data}'
 $Venv = Join-Path $DataDir '.venv'
 $InstallerDir = Join-Path $DataDir 'installer'
-$NotData = @('.venv', 'previous', 'installer', 'logs', '.install.lock', 'backups', '.rollback-hold')
+{_not_data()}
 function Copy-BinDir([string]$To) {{ }}
 function Save-ExternalConfig([string]$Slot) {{ }}
 {chr(10).join(_ps1_function(name) for name in names)}
@@ -8427,6 +8434,7 @@ if ($IsWindows -or $PSVersionTable.PSEdition -ne 'Core') {{
     $want = (Get-Acl -LiteralPath '{hold / "data" / "hooks"}').GetSecurityDescriptorSddlForm('Access')
     Write-Output ("ACL_SAME=" + ((Get-Acl -LiteralPath $bridge).GetSecurityDescriptorSddlForm('Access') -eq $want))
 }}
+Write-Output ("BUILDING_LEFT=" + (Test-Path -LiteralPath (Join-Path $DataDir '.failed-hooks-bridge')))
 Write-Output ("BRIDGE_TOKEN=" + [IO.File]::ReadAllText((Join-Path $bridge '.hook-claudecode.token')))
 Write-Output ("BRIDGE_CFG=" + [IO.File]::ReadAllText((Join-Path $bridge '.hookcfg')))
 Write-Output ("CONFIG_LIVE=" + (Test-Path -LiteralPath (Join-Path $DataDir 'config.yaml')))
@@ -8439,6 +8447,7 @@ Write-Output ("HOLD_TOKEN=" + [IO.File]::ReadAllText('{hold / "data" / "hooks" /
     assert completed.returncode == 0, out
     assert "BRIDGE_TOKEN=new-token" in out and "BRIDGE_CFG=closed" in out, out
     assert "CONFIG_LIVE=False" in out and "MARKER_LEFT=False" in out and "HOLD_TOKEN=new-token" in out, out
+    assert "BUILDING_LEFT=False" in out, out
     if os.name == "nt":
         # The bridge has the access rules of the hooks\\ it stands in for:
         # both inherit the data folder's.
@@ -8454,3 +8463,61 @@ Write-Output ("HOLD_TOKEN=" + [IO.File]::ReadAllText('{hold / "data" / "hooks" /
         # An undo moves only real data back into the slot, never the bridge.
         assert not (data / "hooks").exists()
         assert (other / "data" / "hooks" / ".hook-claudecode.token").read_text(encoding="ascii") == "old-token"
+
+
+@pytest.mark.skipif(POWERSHELL is None, reason="PowerShell is not installed")
+@pytest.mark.allow_subprocess
+@pytest.mark.parametrize("stop", ["marker-write-fails", "killed-before-rename"])
+def test_a_rollback_bridge_that_stops_half_built_never_blocks_the_swap_back(tmp_path: Path, stop: str) -> None:
+    # GAP-2425: New-HooksBridge made hooks\ before its marker, so a stop in
+    # between (a failed marker write, a killed run) left an unmarked hooks\
+    # that Remove-HooksBridge does not take, and Restore-LiveTree then refused
+    # with "already exists". The bridge is built under another name, marker
+    # first, and only a whole one is renamed into place.
+    data, hold, other = tmp_path / "data", tmp_path / "data" / ".rollback-hold", tmp_path / "data" / "previous"
+    (data / "hooks").mkdir(parents=True)
+    (data / "hooks" / ".hook-claudecode.token").write_text("new-token", encoding="ascii")
+    (data / "config.yaml").write_text("new", encoding="ascii")
+    (other / "data" / "hooks").mkdir(parents=True)
+    (other / "data" / "hooks" / ".hook-claudecode.token").write_text("old-token", encoding="ascii")
+    (other / "data" / "config.yaml").write_text("old", encoding="ascii")
+    names = ("Save-Live", "New-HooksBridge", "Remove-HooksBridge", "Restore-LiveTree", "Get-DataEntries",
+             "Move-Path", "Remove-Tree", "Invoke-Quietly")
+    if stop == "marker-write-fails":
+        fault = (
+            "function Set-Content {{ param([string]$LiteralPath, $Value, $Encoding, $ErrorAction)\n"
+            "    if ($LiteralPath -like '*.rollback-hooks-bridge') {{ throw 'disk full' }}\n"
+            "    Microsoft.PowerShell.Management\\Set-Content -LiteralPath $LiteralPath -Value $Value }}\n"
+            "Save-Live '{hold}'\n"
+        ).format(hold=hold)
+    else:
+        # A run killed while it built the bridge leaves only what it built
+        # under the building name.
+        fault = (
+            "Save-Live '{hold}'\n"
+            "Remove-HooksBridge\n"
+            "New-Item -ItemType Directory -Path (Join-Path $DataDir '.failed-hooks-bridge') | Out-Null\n"
+        ).format(hold=hold)
+    script = f"""
+$ErrorActionPreference = 'Stop'
+$DataDir = '{data}'
+$Venv = Join-Path $DataDir '.venv'
+$InstallerDir = Join-Path $DataDir 'installer'
+{_not_data()}
+function Copy-BinDir([string]$To) {{ }}
+function Save-ExternalConfig([string]$Slot) {{ }}
+{chr(10).join(_ps1_function(name) for name in names)}
+{fault}
+Write-Output ("DATA_ENTRIES=" + ((Get-DataEntries | ForEach-Object Name) -join ','))
+Restore-LiveTree '{other}'
+Write-Output 'SWAPPED_BACK'
+"""
+    completed = _run_powershell(script)
+    out = completed.stdout + completed.stderr
+    assert completed.returncode == 0, out
+    assert "SWAPPED_BACK" in out and "already exists" not in out, out
+    assert re.search(r"DATA_ENTRIES=(.*)", out).group(1).strip() == "", out
+    assert (data / "hooks" / ".hook-claudecode.token").read_text(encoding="ascii") == "old-token"
+    assert (data / "config.yaml").read_text(encoding="ascii") == "old"
+    assert not (data / ".failed-hooks-bridge").exists()
+    assert (hold / "data" / "hooks" / ".hook-claudecode.token").read_text(encoding="ascii") == "new-token"
