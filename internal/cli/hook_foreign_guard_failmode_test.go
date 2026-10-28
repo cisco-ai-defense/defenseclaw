@@ -231,3 +231,41 @@ func TestForeignHookCheckDeniesAGuardedConnectorDuringAGatewayOutage(t *testing.
 		}
 	}
 }
+
+// GAP-2405: when the guard's session exchange fails because the hook socket
+// directory is not owned by root or the gateway account, the standalone
+// Hermes hook (and the plugins) say so, in the words of the managed shell
+// hooks, not that the gateway was unavailable.
+func TestForeignHookCheckNamesAnUntrustedHookSocketDirectory(t *testing.T) {
+	untrusted := fmt.Errorf("enterprise managed gateway peer unverified: %w: hook socket directory /opt/cisco/defenseclaw/run is not owned by root or the gateway service account", hookexec.ErrManagedHookSocketDirectoryUntrusted)
+	connectors := map[string]string{"opencode": "tool.execute.before"}
+	if runtime.GOOS != "windows" {
+		connectors["hermes"] = "pre_tool_call"
+	}
+	for connector, event := range connectors {
+		fixture := newPortableForeignGuardFixture(t, config.ForeignHooksRemove)
+		fixture.guard(connector)
+		fixture.process = "agent-process"
+		hookForeignGuardExchange = func(string, string, time.Time, time.Time, enterprisepolicy.SessionExchange) (enterprisepolicy.GuardDecision, error) {
+			return enterprisepolicy.GuardDecision{}, untrusted
+		}
+		var out bytes.Buffer
+		if code := runForeignHookCheck(connector, strings.NewReader(`{"hook_event_name":"`+event+`","session_id":"s-1"}`), &out); code != 0 {
+			t.Fatalf("%s: the check always exits 0, got %d", connector, code)
+		}
+		var result foreignHookCheckResult
+		if err := json.Unmarshal(out.Bytes(), &result); err != nil {
+			t.Fatalf("%s: %v: %q", connector, err, out.String())
+		}
+		const named = "hook socket directory is not owned by root or the gateway account"
+		if !result.Deny || !strings.Contains(result.Reason, named) || strings.Contains(result.Reason, "hook record") {
+			t.Fatalf("%s: an untrusted socket directory must deny and name it: %+v", connector, result)
+		}
+		if connector == "hermes" {
+			if result.HookOutput == nil || result.HookOutput.Action != "block" || !strings.Contains(result.HookOutput.Message, named) ||
+				strings.Contains(result.HookOutput.Message, hookexec.ManagedHookSocketDirectoryUntrustedReason) {
+				t.Fatalf("hermes: the block object must name the directory: %+v", result.HookOutput)
+			}
+		}
+	}
+}

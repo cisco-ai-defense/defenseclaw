@@ -21,6 +21,12 @@ func TestHostHookGivesTheHelperTheMillisecondsLeft(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("shell hooks are not used on Windows")
 	}
+	// The millisecond budget needs EPOCHREALTIME, a clock only from bash 5
+	// on; with an older bash (macOS /bin/bash 3.2) _hardening.sh keeps the
+	// whole-second --max-time, so there is nothing to measure (GAP-2401).
+	if err := exec.Command("bash", "-c", `[ -n "${EPOCHREALTIME:-}" ]`).Run(); err != nil {
+		t.Skip("the bash under test has no EPOCHREALTIME (bash before 5): the hook keeps whole seconds")
+	}
 	hardening, err := hookFS.ReadFile("hooks/_hardening.sh")
 	if err != nil {
 		t.Fatal(err)

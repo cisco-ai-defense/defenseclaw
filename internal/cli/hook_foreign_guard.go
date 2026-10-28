@@ -473,6 +473,11 @@ func evaluateHookForeignGuard(name, hookBinary string, policy enterprisepolicy.P
 			// The gateway took the exchange of a tool call but gave no
 			// answer within the hook's answer budget.
 			reason = hookexec.ManagedGatewayNoAnswerReason
+		} else if hookexec.ManagedHookSocketDirectoryUntrusted(err) {
+			// The hook socket directory is not owned by root or the
+			// gateway account: name it, as the managed shell hooks do
+			// (GAP-2405), not that the session record is unavailable.
+			reason = hookexec.ManagedHookSocketDirectoryUntrustedReason
 		} else if hookexec.ManagedGatewayPortHeld(err) {
 			// The gateway service runs but another process answers on its
 			// port: say so, not that the session record is unavailable
