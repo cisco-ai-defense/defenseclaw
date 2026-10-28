@@ -1453,16 +1453,22 @@ func actionWindowsTargetMention(command, cwd, home string, depth int, stateOnly 
 	}
 	effectiveCWD := cwd
 	var directoryStack []string
+	// A long command repeats its words (a heredoc body, a generated
+	// script): each distinct candidate is checked once per scan and
+	// directory, because its answer depends only on the candidate, that
+	// directory, the home and the scan kind (GAP-2279: on Windows each
+	// check is a chain of file-system calls, about 1 ms).
+	answers := map[actionWindowsMention]bool{}
 	for _, statement := range actionWindowsResolvedStatements(words, cwd, home) {
 		for _, word := range statement {
-			if actionWindowsWordMentionsTarget(word, effectiveCWD, home, stateOnly) {
+			if actionWindowsWordMentionsTarget(word, effectiveCWD, home, stateOnly, answers) {
 				return true
 			}
 		}
 		actionWindowsAdvanceDirectory(statement, home, &effectiveCWD, &directoryStack)
 	}
 	for _, word := range words {
-		if actionWindowsWordMentionsTarget(word, cwd, home, stateOnly) {
+		if actionWindowsWordMentionsTarget(word, cwd, home, stateOnly, answers) {
 			return true
 		}
 	}
@@ -1520,8 +1526,21 @@ func actionKnownReadOnlyWindowsStatement(words []string) bool {
 	return false
 }
 
-func actionWindowsWordMentionsTarget(word, cwd, home string, stateOnly bool) bool {
-	check := func(candidate string) bool {
+// actionWindowsMention is one candidate of a Windows target scan placed in
+// one directory.
+type actionWindowsMention struct{ candidate, cwd string }
+
+// actionWindowsCandidateChecks counts the candidate checks of Windows target
+// scans, so a test can prove a long command checks each distinct candidate
+// once (GAP-2279).
+var actionWindowsCandidateChecks atomic.Int64
+
+// actionWindowsWordMentionsTarget reports a word that names a protected
+// target (or, with stateOnly, the active state). answers keeps the answer of
+// every candidate the scan already checked in cwd; nil checks each again.
+func actionWindowsWordMentionsTarget(word, cwd, home string, stateOnly bool, answers map[actionWindowsMention]bool) bool {
+	checkCandidate := func(candidate string) bool {
+		actionWindowsCandidateChecks.Add(1)
 		candidate = strings.ReplaceAll(candidate, "`", "")
 		if strings.ContainsAny(candidate, "*?[]") {
 			return !stateOnly && (actionWindowsProtectedGlobReach(candidate, cwd, home) ||
@@ -1555,6 +1574,18 @@ func actionWindowsWordMentionsTarget(word, cwd, home string, stateOnly bool) boo
 		}
 		protected, _ := actionWindowsProtected(candidate, cwd, home, false)
 		return protected
+	}
+	check := func(candidate string) bool {
+		if answers == nil {
+			return checkCandidate(candidate)
+		}
+		key := actionWindowsMention{candidate: candidate, cwd: cwd}
+		found, seen := answers[key]
+		if !seen {
+			found = checkCandidate(candidate)
+			answers[key] = found
+		}
+		return found
 	}
 	if check(word) {
 		return true
