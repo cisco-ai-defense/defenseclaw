@@ -686,6 +686,28 @@ func (o *commandUserOps) Stop(ctx context.Context, a SandboxAccount, scope StopS
 	return nil
 }
 
+// gatewayStopSyncer is a SandboxUserOps that can have the account sync its
+// running MicroVMs before the macOS lifecycle boots its gateway agent out.
+type gatewayStopSyncer interface {
+	syncBeforeGatewayStop(ctx context.Context, a SandboxAccount)
+}
+
+// syncBeforeGatewayStop has the account sync the disk of every MicroVM its
+// running OpenShell gateway lists ready before the macOS bootout of the
+// gateway's LaunchAgent ends them (GAP-0380): the drain checked none ran,
+// but a raw openshell client can start one before the bootout. It runs once
+// the drain holds (drainAccount). It is the
+// sync the Linux unit's second ExecStop runs (sandbox-daemon sync-sandboxes
+// --managed, which notes one it could not sync for the account's feed);
+// like that ExecStop's leading "-", a failed sync does not hold the stop.
+func (o *commandUserOps) syncBeforeGatewayStop(ctx context.Context, a SandboxAccount) {
+	if !o.unitRunning(ctx, a, userUnitGatewayService, labelOpenShellGateway) {
+		return
+	}
+	_, _ = o.runAs(ctx, a, openshell.StopSyncTimeout+15*time.Second,
+		filepath.Join(o.env.Layout.BinDir, binGateway), "sandbox-daemon", "sync-sandboxes", "--managed")
+}
+
 // daemonKillWait bounds how long a stop with StopKill waits for systemd to
 // see the killed daemon go; daemonKillPoll paces the look. Variables for
 // tests.
@@ -1146,6 +1168,14 @@ func (l *lifecycle) drainAccount(ctx context.Context, ops SandboxUserOps, a Sand
 	done, err := ops.Drain(ctx, a)
 	if err != nil {
 		return nil, &drainHeld{err: err}
+	}
+	// Every change that stops the gateway runs under this drain (a stop, a
+	// switch, a LaunchAgent reload or label migration). launchd gives the
+	// gateway agent no stop command, so on macOS the account syncs its
+	// running MicroVMs here, before the bootout ends them (GAP-0380); on
+	// Linux the gateway unit's second ExecStop does it.
+	if s, ok := ops.(gatewayStopSyncer); ok && l.env.GOOS == "darwin" {
+		s.syncBeforeGatewayStop(ctx, a)
 	}
 	return func() {
 		if err := done(); err != nil {

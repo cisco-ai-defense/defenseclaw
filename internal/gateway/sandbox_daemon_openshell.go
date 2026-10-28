@@ -22,6 +22,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"os"
@@ -161,6 +162,14 @@ type accountOpenShell struct {
 	// pid and the command line.
 	hostProcs func(ctx context.Context) (string, error)
 
+	// stopSync syncs the disk of every MicroVM the OpenShell gateway
+	// registered as gateway lists ready and says on out which it synced
+	// (openshell.SyncGatewaySandboxes), and recordUnsynced notes the ones it
+	// could not for the sandbox feed (manager.RecordUnsyncedStops). The
+	// macOS stop runs them: launchd gives the LaunchAgent no stop command.
+	stopSync       func(ctx context.Context, gateway string, out io.Writer) error
+	recordUnsynced func(names []string)
+
 	// installed is the release this process installed or found intact.
 	mu        sync.Mutex
 	installed string
@@ -188,8 +197,11 @@ func newAccountOpenShell(goos string, uid int, home string, logf func(string, ..
 		readRendered: openshell.ReadRenderedGateway,
 		configDir:    openshell.UserConfigDir,
 		discover:     openshell.Discover,
-		portPID:      loopbackPortPID,
-		procArgs:     processArgs,
+		stopSync: func(ctx context.Context, gateway string, out io.Writer) error {
+			return openshell.SyncGatewaySandboxes(ctx, openshell.DiscoverOptions{Gateway: gateway}, out)
+		},
+		portPID:  loopbackPortPID,
+		procArgs: processArgs,
 		accountProcs: func(ctx context.Context) (string, error) {
 			return runServiceCommand(ctx, "/bin/ps", []string{"-ww", "-u", strconv.Itoa(uid), "-o", "pid=,args="}, nil)
 		},
@@ -765,6 +777,7 @@ func (o *accountOpenShell) Stop(ctx context.Context, s sandboxrelay.DaemonSettin
 		if _, perr := o.run(ctx, daemonLaunchctl, []string{"print", target}, nil); perr != nil {
 			return false
 		}
+		o.syncBeforeStop(ctx, s)
 		out, err = o.run(ctx, daemonLaunchctl, []string{"kill", "SIGTERM", target}, nil)
 	default:
 		return false
@@ -775,6 +788,36 @@ func (o *accountOpenShell) Stop(ctx context.Context, s sandboxrelay.DaemonSettin
 	}
 	o.logf("stopped your OpenShell gateway: no sandbox of yours runs")
 	return true
+}
+
+// syncBeforeStop syncs the disk of every MicroVM the account's gateway lists
+// ready right before the macOS stop of its LaunchAgent (GAP-0380). The
+// daemon counted none a moment ago, but a raw openshell client can start one
+// in between, and the gateway's stop ends it with what its guest had not
+// synced. On Linux the managed unit's second ExecStop does this
+// (sandbox-daemon sync-sandboxes --managed); launchd runs no stop command.
+// A sandbox it could not sync is noted for the feed (stop_unflushed); the
+// stop goes ahead either way, as on Linux.
+func (o *accountOpenShell) syncBeforeStop(ctx context.Context, s sandboxrelay.DaemonSettings) {
+	if o.stopSync == nil {
+		return
+	}
+	sctx, cancel := context.WithTimeout(ctx, openshell.StopSyncTimeout)
+	defer cancel()
+	var out bytes.Buffer
+	err := o.stopSync(sctx, gatewayRegistrationName(s), &out)
+	for _, line := range strings.Split(strings.TrimSpace(out.String()), "\n") {
+		if line != "" {
+			o.logf("%s", line)
+		}
+	}
+	names := openshell.UnsyncedSandboxes(err)
+	switch {
+	case len(names) > 0 && o.recordUnsynced != nil:
+		o.recordUnsynced(names)
+	case err != nil && len(names) == 0:
+		o.logf("sync the MicroVMs before the OpenShell gateway stops: %v", err)
+	}
 }
 
 // startUnit starts the account's OpenShell gateway unit.
