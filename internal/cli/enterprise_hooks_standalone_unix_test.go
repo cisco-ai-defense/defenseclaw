@@ -1527,6 +1527,7 @@ func TestStandaloneReconcileMachinePolicyRowsAvoidPerUserInstall(t *testing.T) {
 }
 
 func TestStandaloneReconcileManagedCodexFeatureChangeQueuesRepair(t *testing.T) {
+	pinEnterpriseHookWatchSkipsAccountHomes(t, false)
 	uid, gid := os.Getuid(), os.Getgid()
 	resolver := standaloneTestResolver{accounts: map[string]unixidentity.Account{}}
 	f := newStandaloneFixture(t, resolver)
@@ -2165,5 +2166,54 @@ func TestStaleEligibleAccountsDoNotOverrideAnExclusion(t *testing.T) {
 				enterpriseHookReconcileRow{User: "bob@corp.example", UserHome: "/home/bob@corp.example", Connector: "codex", OK: true, UID: bobUID})
 			check("a stale row", run)
 		})
+	}
+}
+
+func pinEnterpriseHookWatchSkipsAccountHomes(t *testing.T, skip bool) {
+	t.Helper()
+	previous := enterpriseHookWatchSkipsAccountHomes
+	t.Cleanup(func() { enterpriseHookWatchSkipsAccountHomes = previous })
+	enterpriseHookWatchSkipsAccountHomes = func() bool { return skip }
+}
+
+// On macOS the guardian's kqueue watch opens every entry of a watched
+// folder, and an open of a privacy-protected entry of a home blocks for good
+// (GAP-2454): the home itself is never watched there, the Codex config
+// folder below it still is.
+func TestStandaloneReconcileMacOSLeavesTheAccountHomeOutOfTheWatchSet(t *testing.T) {
+	pinEnterpriseHookWatchSkipsAccountHomes(t, true)
+	uid, gid := os.Getuid(), os.Getgid()
+	resolver := standaloneTestResolver{accounts: map[string]unixidentity.Account{}}
+	f := newStandaloneFixture(t, resolver)
+	alice := f.home(t, "alice", 0o700)
+	resolver.accounts["alice"] = unixidentity.Account{Name: "alice", UID: uid, GID: gid, Home: alice, Shell: "/bin/bash"}
+	f.writeManifest(t, enterprisehooks.ManifestTarget{User: "alice", Connector: "codex"})
+	configDir := filepath.Join(alice, ".codex")
+	if err := os.MkdirAll(configDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	configPath := filepath.Join(configDir, "config.toml")
+	if err := os.WriteFile(configPath, []byte("model = 'gpt-5'\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	previousSet, previousCovered := enterpriseHookStandaloneMachinePolicySet, enterpriseHookStandaloneMachinePolicyCovered
+	t.Cleanup(func() {
+		enterpriseHookStandaloneMachinePolicySet, enterpriseHookStandaloneMachinePolicyCovered = previousSet, previousCovered
+	})
+	enterpriseHookStandaloneMachinePolicySet = func() map[string]struct{} { return map[string]struct{}{"codex": {}} }
+	enterpriseHookStandaloneMachinePolicyCovered = func(name string) (bool, error) { return name == "codex", nil }
+	run, err := runEnterpriseHookReconcileOnce(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	requireLedgerOrStateTrust(t, run.StateErr)
+	if len(run.Rows) != 1 || !run.Rows[0].OK {
+		t.Fatalf("managed Codex row not covered: %+v", run.Rows)
+	}
+	if slices.Contains(run.WatchDirs, alice) {
+		t.Fatalf("the account home %s is in the macOS watch set: %v", alice, run.WatchDirs)
+	}
+	if !slices.Contains(run.WatchDirs, configDir) || !slices.Contains(run.WatchSharedFiles, configPath) {
+		t.Fatalf("the Codex config folder below the home is no longer watched: dirs=%v shared=%v", run.WatchDirs, run.WatchSharedFiles)
 	}
 }

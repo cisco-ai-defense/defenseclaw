@@ -1034,6 +1034,7 @@ func runEnterpriseHookReconcileOnceStandaloneUnix(ctx context.Context) (enterpri
 	run.Pending = pending
 	run.Repairs = repairs
 	run.StateErr = stateErr
+	dropEnterpriseHookAccountHomeWatchDirs(watchDirs, manifest.Targets, jobs)
 	run.WatchDirs = sortedEnterpriseHookWatchDirs(watchDirs)
 	run.WatchExclusiveFiles = sortedEnterpriseHookWatchDirs(exclusiveFiles)
 	run.WatchSharedFiles = sortedEnterpriseHookWatchDirs(sharedFiles)
@@ -1383,5 +1384,37 @@ func writeEnterpriseHookGuardianRepairs(dataDir string, repaired []enterpriseHoo
 	path := filepath.Join(dataDir, hookGuardianRepairsFile)
 	if err := writeEnterpriseHookProtectedFile(path, append(data, '\n')); err != nil {
 		fmt.Fprintf(enterpriseHookWorkerLog, "[hook-guardian] warn: record repaired targets: %v\n", err)
+	}
+}
+
+// enterpriseHookWatchSkipsAccountHomes says whether the guardian leaves the
+// home folder of an enrolled account itself out of its watch set. On macOS
+// fsnotify's kqueue backend opens every entry of a watched folder, and an
+// open of a privacy-protected entry of a home (~/.Trash, ~/Movies) can block
+// for good: the guardian then stopped reconciling and re-publishing its
+// ledger a minute after any restart, so verify failed (GAP-2454). The
+// folders below the home stay watched; a change of a file directly in a home
+// is taken by the interval pass. Replaceable in tests.
+var enterpriseHookWatchSkipsAccountHomes = func() bool { return runtime.GOOS == "darwin" }
+
+// dropEnterpriseHookAccountHomeWatchDirs removes the home folder of every
+// enrolled account and dispatched job from watchDirs where
+// enterpriseHookWatchSkipsAccountHomes says so.
+func dropEnterpriseHookAccountHomeWatchDirs(watchDirs map[string]struct{}, targets []enterprisehooks.ManifestTarget, jobs map[int]*enterpriseHookWorkerJob) {
+	if len(watchDirs) == 0 || !enterpriseHookWatchSkipsAccountHomes() {
+		return
+	}
+	drop := func(home string) {
+		if home = strings.TrimSpace(home); home != "" {
+			delete(watchDirs, filepath.Clean(home))
+		}
+	}
+	for _, target := range targets {
+		drop(target.UserHome)
+	}
+	for _, job := range jobs {
+		if job != nil {
+			drop(job.Account.Home)
+		}
 	}
 }
