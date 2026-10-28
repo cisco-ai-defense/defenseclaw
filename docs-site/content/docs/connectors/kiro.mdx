@@ -179,6 +179,6 @@ For a per-user, single-connector install:
 defenseclaw guardrail disable --yes
 ```
 
-With the default gateway restart, disabling removes DefenseClaw's hook registrations from Kiro's hook and agent files and preserves your other Kiro settings. `defenseclaw guardrail enable` restores DefenseClaw's hooks. To remove the connector, run `defenseclaw setup remove kiro --yes` (add `--force` if it is the last one). On Linux and macOS, `kiro-hook.sh` stays as an inert stub until Kiro restarts.
+With the default gateway restart, disabling removes DefenseClaw's hook registrations from Kiro's hook and agent files and preserves your other Kiro settings. `defenseclaw guardrail enable` restores DefenseClaw's hooks. Enable runs setup again, so with a kiro-cli below 2.27.1 (one an earlier release enrolled) it is refused and Kiro stays unprotected until you update Kiro CLI; `guardrail disable` warns about this before it removes the hooks. To remove the connector, run `defenseclaw setup remove kiro --yes` (add `--force` if it is the last one). On Linux and macOS, `kiro-hook.sh` stays as an inert stub until Kiro restarts.
 
 On a multi-connector install, add `--connector kiro` to `guardrail disable` and `guardrail enable` to change only this agent.
