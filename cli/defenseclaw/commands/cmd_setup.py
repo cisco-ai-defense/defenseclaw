@@ -5475,10 +5475,6 @@ _CONNECTOR_CHANGE_SURFACES: dict[str, tuple[str, ...]] = {
             "Existing ~/.cursor/plugins/local plugins and user/project "
             ".cursor/.claude/.codex agents are inventoried read-only"
         ),
-        (
-            "~/.defenseclaw/hooks/cursor-hook.ps1 on Windows; "
-            "~/.defenseclaw/hooks/cursor-hook.sh on non-Windows"
-        ),
     ),
     "devin": (
         "<workspace>/.devin/hooks.v1.json project hooks",
@@ -5493,7 +5489,6 @@ _CONNECTOR_CHANGE_SURFACES: dict[str, tuple[str, ...]] = {
         "~/.copilot/mcp-config.json MCP entries; optional workspace .github/mcp.json with --workspace",
         "~/.copilot/skills and ~/.copilot/agents install surfaces; optional workspace surfaces with --workspace",
         "Native OTLP env vars are documented for the process env; shell rc files are not mutated",
-        "~/.defenseclaw/hooks/copilot-hook.sh",
     ),
     "antigravity": (
         (
@@ -5552,6 +5547,26 @@ _CONNECTOR_CHANGE_SURFACES: dict[str, tuple[str, ...]] = {
 }
 
 
+# The hook files setup writes for a connector, per host OS (Windows, other).
+# On native Windows Cursor and Copilot register a PowerShell adapter and setup
+# also writes the shell script (HookScriptNames in
+# internal/gateway/connector/hook_only.go); Devin calls the native hook binary.
+_CONNECTOR_HOOK_SCRIPT_SURFACES: dict[str, tuple[str, str]] = {
+    "cursor": (
+        "~/.defenseclaw/hooks/cursor-hook.ps1 (the hook Cursor runs on Windows) and cursor-hook.sh",
+        "~/.defenseclaw/hooks/cursor-hook.sh",
+    ),
+    "copilot": (
+        "~/.defenseclaw/hooks/copilot-hook.ps1 (the hook Copilot runs on Windows) and copilot-hook.sh",
+        "~/.defenseclaw/hooks/copilot-hook.sh",
+    ),
+    "devin": (
+        "the protected native defenseclaw-hook.exe boundary on Windows",
+        "~/.defenseclaw/hooks/devin-hook.sh on non-Windows",
+    ),
+}
+
+
 def _print_connector_mutation_notice(
     connector: str, *, switching_from: str | None = None, native_export_expected: bool = False
 ) -> None:
@@ -5571,13 +5586,9 @@ def _print_connector_mutation_notice(
     surfaces = _CONNECTOR_CHANGE_SURFACES.get(connector, ())
     if native_export_expected and connector in {"codex", "claudecode"}:
         surfaces = (*surfaces, "managed native OTel exporter configuration and scoped credential")
-    if connector == "devin":
-        hook_surface = (
-            "the protected native defenseclaw-hook.exe boundary on Windows"
-            if platform_support.host_os() == "windows"
-            else "~/.defenseclaw/hooks/devin-hook.sh on non-Windows"
-        )
-        surfaces = (*surfaces, hook_surface)
+    if connector in _CONNECTOR_HOOK_SCRIPT_SURFACES:
+        windows_hook, other_hook = _CONNECTOR_HOOK_SCRIPT_SURFACES[connector]
+        surfaces = (*surfaces, windows_hook if platform_support.host_os() == "windows" else other_hook)
     for surface in surfaces:
         click.echo(f"    - {surface}")
     click.echo(

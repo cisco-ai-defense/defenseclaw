@@ -1423,6 +1423,27 @@ describe('Known limits by lead decision (rel-1-0-4 P1 reconcile)', () => {
 // heading of the page; the row reads only that section and its subsections.
 type DocRow = { gap: string; page: string; section?: string; has?: string[]; lacks?: string[] };
 const r105Rows: DocRow[] = [
+  { gap: "GAP-2240", page: "policies/defaults.mdx", has: ["Available policies: * default [built-in] [active] Balanced security policy", "Activate a policy: defenseclaw policy activate <name> Show details: defenseclaw policy show <name>", "`*` and `[active]` mark the active preset."], lacks: ["Available policies: default [built-in]"] },
+  { gap: "GAP-2247", page: "scanning/mcp-scanner.mdx", has: ["| `analyzers` | unset, read back as `auto` | The analyzers to run. Unset (`config get` prints `auto`) and `[]` both mean YARA, plus the LLM judge when it is ready. |"], lacks: ["| `analyzers` | `[]` (auto) |"] },
+  { gap: "GAP-2293", page: "reference/cli.mdx", section: "Managed devices and exit code 3", has: ["`config set` prints `This device is managed: change config.yaml in the admin config (MDM or management plane); config set did not change it`", "no `version` command (run `defenseclaw.exe --version`) and no `policy activate`", "`connector list-backups`, exit `1` with `this computer's DefenseClaw is managed by your organization`", "(the Windows package has no `policy activate`; see below)"], lacks: ["`rollback` with a note that the computer is managed, refuses `config set`,"] },
+  { gap: "GAP-2293", page: "reference/cli.mdx", section: "Gateway daemon", has: ["On a managed Windows computer `status`, `audit findings` and `connector list-backups` have no per-user gateway to read and exit `1`"] },
+  { gap: "GAP-2287", page: "enterprise/troubleshooting.mdx", has: ["`installed_version` is the recorded version when an administrator gave an unknown `--profile`; it is omitted for a standard account, which cannot read the deployment record."], lacks: ["because they were not checked, and `installed_version` is omitted."] },
+  { gap: "GAP-2300", page: "enterprise/configuration.mdx", section: "Files next to the config", has: ["on Windows an `ensure` that repairs a missing record keeps the proven count and says `(recovered config generation)` in `reason` instead"] },
+  { gap: "GAP-2301", page: "enterprise/configuration.mdx", section: "Where the config lives", has: ["(Administrators and SYSTEM full control; the gateway service, `NT SERVICE\\DefenseClawGateway`, can only read it)"], lacks: ["config.yaml` (Administrators only)"] },
+  { gap: "GAP-1461", page: "policies/defaults.mdx", has: ["Writes to the active user's `authorized_keys` are blocked in action mode when a direct command, a file tool or a supported literal interpreter form proves the target; in observe mode the same write raises a CRITICAL would-block alert and runs."], lacks: ["Writes to the active user's `authorized_keys` are blocked when"] },
+  { gap: "GAP-0044", page: "sandboxes/guide.mdx", has: ["A stop DefenseClaw makes for your organization's policy (a hook alarm, a revoked registration) does not end a MicroVM whose disk could not sync either"], lacks: ["still goes ahead and the activity feed says what may be lost"] },
+  { gap: "GAP-0044", page: "reference/sandbox-cli.mdx", has: ["A stop DefenseClaw makes for your organization's policy (a hook alarm, a revoked registration) does not end a MicroVM whose disk could not sync either"], lacks: ["still goes ahead and the activity feed says what may be lost"] },
+  { gap: "GAP-2192", page: "enterprise/identity-entra-id.mdx", has: ['<Callout type="warn" title="Not part of the release certification">', "Active Directory is the certified identity stack. The Entra setups below were last verified live in October 2026"], lacks: ["1.0.4 certification", "certified identity stack in 1.0.4"] },
+  { gap: "GAP-2192", page: "enterprise/identity-okta.mdx", has: ['<Callout type="warn" title="Not part of the release certification">', "Active Directory is the certified identity stack. The Okta lab is retired"], lacks: ["1.0.4 certification", "certified identity stack in 1.0.4"] },
+  { gap: "GAP-2192", page: "enterprise/identity-sources.mdx", has: ["Active Directory is the certified identity stack; the Okta and Entra parts were last verified live in October 2026."], lacks: ["certified in 1.0.4"] },
+  { gap: "GAP-2158", page: "guardrail/unified-llm-key.mdx", has: ["## The `keys` subcommands"], lacks: ["All four `keys` subcommands"] },
+  { gap: "GAP-2309", page: "connectors/opencode.mdx", has: ["a managed standalone OpenCode plugin stays closed and blocks the outage even when the administrator selects open", "Under Secure Client an administrator can choose outage-only open; on a managed standalone host OpenCode blocks the outage under either mode."], lacks: ["On managed hosts, an administrator may select open for a classified outage only", "A managed administrator can choose outage-only open."] },
+  { gap: "GAP-2314", page: "connectors/devin.mdx", has: ["In the project `hooks.v1.json` it edits only DefenseClaw's events and keeps your comments, formatting and other hook lists byte for byte.", "The project `hooks.v1.json` keeps its comments and formatting: setup edits only DefenseClaw's events in place."], lacks: ["Modified hook files are written as JSON, so comments and formatting are removed", "but writes a changed file back as JSON, so comments and formatting are removed"] },
+  { gap: "GAP-0826", page: "reference/fail-modes.mdx", section: "Refusals that ignore the fail mode", has: ["so they block in every fail mode on a managed standalone computer:", "Secure Client hooks are different for a refused credential: an HTTP 401 or 403 follows the effective fail mode"], lacks: ["so they block in every fail mode on a managed computer:"] },
+  { gap: "GAP-0826", page: "connectors/capability-matrix.mdx", has: ["a refused credential (outside Secure Client, where an HTTP 401 or 403 follows the effective fail mode)"], lacks: ["an invalid managed runtime, a refused credential, and,"] },
+  { gap: "GAP-2315", page: "ai-discovery.mdx", section: "Before you start", has: ["On a managed (standalone enterprise) Linux or macOS computer every command in it refuses, for enrolled users and for root alike", "`sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux discovery`", "run `defenseclaw.exe enterprise windows discovery` from an elevated prompt"] },
+  { gap: "GAP-2215", page: "ai-discovery.mdx", section: "AIBOM (AI Bill of Materials)", has: ["With `--json` one connector prints one JSON object; several print a JSON array with one object per connector, each naming its `connector`.", "with several connectors each array element has this shape"], lacks: ["and merges them into a single document"] },
+  { gap: "GAP-2317", page: "support-matrix.mdx", section: "Known issues", has: ["**A saved fail mode is not used in 1.0.4:** on a 1.0.4 per-user install", "From 1.0.5 an explicit saved `open` or `closed` wins over the policy tier again, as [Fail modes](/docs/reference/fail-modes) says"], lacks: ["on a per-user install the outage behavior follows the policy tier, as [Fail modes](/docs/reference/fail-modes) says"] },
   { gap: "GAP-1821", page: "support-matrix.mdx", section: "Known issues", has: ["**Claude Code settings can keep a variable from 1.0.2 or 1.0.3**. After an upgrade from 1.0.2 or 1.0.3 to 1.0.4", "The upgrade to 1.0.5 removes it."], lacks: ["keep a variable from 1.0.2**. After an upgrade from 1.0.2, the"] },
   { gap: "GAP-0012", page: "support-matrix.mdx", section: "Upgrade and policy limits", has: ["If that sync fails (a frozen guest, for one), the stop is held and the guest keeps running", "`defenseclaw sandbox stop NAME --discard-unsynced` stops it anyway and loses what it wrote since its last sync; the activity feed then shows `stop_unflushed`"], lacks: ["The stop requests a disk sync, but changes made after the last successful sync may be lost."] },
   { gap: "GAP-0012", page: "sandboxes/guide.mdx", section: "A MicroVM stop is held because its disk could not sync", has: ["To stop it anyway, run `defenseclaw sandbox stop NAME --discard-unsynced`", "the activity feed shows `stop_unflushed`"] },
@@ -1571,7 +1592,10 @@ const r105Rows: DocRow[] = [
   { gap: "GAP-1693", page: "reference/sandbox-cli.mdx", has: ["can reach your account's request limit"] },
   { gap: "GAP-1552", page: "enterprise/sandboxes.mdx", has: ["a run first waits up to 10 seconds for your sandbox policy"] },
   { gap: "GAP-0701", page: "sandboxes/guide.mdx", has: ["offers the next free port and writes it as `openshell.ingress_port` or `openshell.egress_port`"] },
-  { gap: "GAP-0831", page: "support-matrix.mdx", section: "Upgrade and policy limits", has: ["it cannot cut that guest off below OpenShell's own network broker", "adds none back (approvals included)"] },
+  { gap: "GAP-0831", page: "support-matrix.mdx", section: "Upgrade and policy limits", has: ["adds none back (approvals included)", "withdrawing those rules does not contain the guest's old OpenShell network broker, which passes a connection it cannot inspect straight to the host (NVIDIA/OpenShell#4494), so treat the guest's network as open until it restarts", "Restart it once DefenseClaw has withdrawn its rules: save the work you need, then run `defenseclaw sandbox stop NAME` and `defenseclaw sandbox start NAME`"], lacks: ["it cannot cut that guest off below OpenShell's own network broker"] },
+  { gap: "GAP-0831", page: "sandboxes/guide.mdx", section: "A guest from OpenShell 0.1.3 or older keeps its network after its rules are withdrawn", has: ["passes a connection it cannot inspect straight to the host", "This is an OpenShell 0.1.3 limit (NVIDIA/OpenShell#4494)", "**Fix:** restart the sandbox after DefenseClaw has withdrawn its rules"] },
+  { gap: "GAP-0454", page: "support-matrix.mdx", section: "Sandboxes", has: ["DefenseClaw's lock covers only DefenseClaw commands, and OpenShell has no admission barrier that raw clients honor", "Do not start raw `openshell` sandboxes until the DefenseClaw command finishes."] },
+  { gap: "GAP-0454", page: "sandboxes/guide.mdx", section: "A raw `openshell` sandbox stops a restart or rollback", has: ["Starting a sandbox with raw `openshell` while DefenseClaw changes, restarts or rolls back the gateway is unsupported", "A sandbox started after the last check cannot be seen, and the restart ends it."] },
   { gap: "GAP-1173, GAP-1188", page: "enterprise/mdm/intune-linux.mdx", has: ["the script first writes what it replaces to a root-only journal"] },
   { gap: "GAP-1584, GAP-1616", page: "enterprise/mdm/index.mdx", has: ["including the rotation journal and the staging folders of wrapper runs that were killed", "`--purge` also removes the wrapper's empty state folder `/var/db/defenseclaw-mdm`", "every ensure exits `mdm_secret_failed`"] },
   { gap: "GAP-0727", page: "enterprise/lifecycle.mdx", has: ["`--purge` leaves that folder and the install's binaries exactly as they are"], lacks: ["to a new `~/.defenseclaw-backup-<UTC time>` folder"] },
@@ -1696,6 +1720,40 @@ describe('edge connector variables and the registry (GAP-1639)', () => {
   });
 });
 
+// GAP-1461: the observe/action split of the authorized_keys sentence is the
+// shipped rule severity (CRITICAL in every pack) under the mode mapping.
+describe('authorized_keys writes block in action mode and alert in observe (GAP-1461)', () => {
+  it('rates persistence.ssh_authorized_keys_command CRITICAL in every pack', () => {
+    for (const pack of ['default', 'permissive', 'strict']) {
+      const yaml = source(`policies/guardrail/${pack}/rules/commands.yaml`);
+      const rule = yaml.split('- id: persistence.ssh_authorized_keys_command\n')[1]?.split(/\n {2}- id: /)[0] ?? '';
+      assert.ok(rule, `${pack}: no persistence.ssh_authorized_keys_command rule`);
+      assert.match(rule, /^ {4}severity: CRITICAL$/m, `${pack}: not CRITICAL (GAP-1461 sentence)`);
+    }
+  });
+});
+
+// GAP-0044: a policy (emergency) stop of a MicroVM whose disk sync failed
+// contains it and leaves it running; the pages say so.
+describe('policy stop of an unsynced MicroVM contains it (GAP-0044)', () => {
+  it('matches lifecycle.go: an emergency stop with a failed flush returns containedStopRefusal', () => {
+    const go = source('internal/openshell/manager/lifecycle.go');
+    assert.match(go, /if why, ok := emergencyStop\(ctx\); ok \{\n\t+return containedStopRefusal\(name, flushErr, m\.containUnsynced\(ctx, b, why\)\)/, 'GAP-0044: emergency stop branch changed; re-check the pages');
+  });
+});
+
+// GAP-2193: each Entra page callout appears once.
+describe('identity-entra-id callouts appear once (GAP-2193)', () => {
+  it('has one "A per-user config belongs to the user" callout', () => {
+    const text = page('enterprise/identity-entra-id.mdx');
+    assert.equal(text.split('<Callout type="warn" title="A per-user config belongs to the user">').length - 1, 1);
+  });
+  it('has each callout title once', () => {
+    const titles = [...page('enterprise/identity-entra-id.mdx').matchAll(/<Callout[^>]*title="([^"]+)"/g)].map((m) => m[1]);
+    assert.deepEqual(titles.filter((t, i) => titles.indexOf(t) !== i), []);
+  });
+});
+
 describe('1.0.5 docs rows', () => {
   for (const row of r105Rows) {
     it(`${row.gap}: ${row.page}${row.section ? ` "${row.section}"` : ''}`, () => {
@@ -1736,5 +1794,63 @@ describe('saved installer protection matches the rule packs (GAP-1922)', () => {
     for (const row of ['{"append installer", ', '{"delete previous installer", ', '{"read installer", ', '{"run saved installer help", ']) {
       assert.ok(goTest.includes(row), `Go test lost row ${row}`);
     }
+  });
+});
+
+// GAP-2289: the setup guardrail connector list matches the CLI's choices per
+// OS: the proxy connectors are refused on native Windows (platform_support.py).
+describe('setup guardrail --connector choices match the CLI (GAP-2289)', () => {
+  it('lists the hook connectors everywhere and openclaw/zeptoclaw only on Linux and macOS', () => {
+    const setup = source('cli/defenseclaw/commands/cmd_setup.py');
+    const fallback = setup.split('_CONNECTOR_NAMES_FALLBACK = [')[1]?.split(']')[0] ?? '';
+    const names = [...fallback.matchAll(/"([a-z]+)"/g)].map((m) => m[1]).sort();
+    assert.match(setup, /type=_PlatformConnectorChoice\(_CONNECTOR_NAMES, case_sensitive=False\)/);
+    const support = source('cli/defenseclaw/platform_support.py');
+    const windows = support.split('WINDOWS_CONNECTOR_SUPPORT')[1] ?? '';
+    const refused = [...windows.matchAll(/"([a-z]+)": ConnectorPlatformSupport\(\s*UNSUPPORTED,/g)].map((m) => m[1]).sort();
+    assert.deepEqual(refused, ['openclaw', 'zeptoclaw']);
+    const hooks = names.filter((n) => !refused.includes(n));
+    const text = page('guardrail/index.mdx');
+    const row = text.split('**Which agent framework are you using?**')[1]?.split('| **Enable guardrail?**')[0] ?? '';
+    const listed = row.split('; on Linux and macOS also')[0];
+    assert.deepEqual([...listed.matchAll(/`([a-z]+)`/g)].map((m) => m[1]).filter((n) => n !== 'connector' && n !== 'agent').sort(), hooks.sort());
+    assert.ok(row.includes('on Linux and macOS also `openclaw` and `zeptoclaw`. Native Windows refuses those two'), 'connector row lost the per-OS split');
+    assert.ok(text.includes('amp or kiro; on Linux and macOS also openclaw or zeptoclaw (native Windows refuses those two: they need the guardrail proxy)'), 'flag table lost the per-OS split');
+    assert.ok(!text.includes('`kiro`, `openclaw`, `zeptoclaw`.'), 'old unqualified list is back');
+  });
+});
+
+// GAP-2291: an in-page link on a connector page points at a heading of that page.
+describe('connector pages have no dead in-page anchors (GAP-2291)', () => {
+  it('resolves every [text](#anchor) link to a heading on the same page', () => {
+    const dir = join(site, 'content/docs/connectors');
+    const dead: string[] = [];
+    for (const file of docsPages(dir)) {
+      const raw = readFileSync(file, 'utf8');
+      const ids = new Set<string>();
+      for (const m of raw.matchAll(/^#{1,6} (.+?)\s*$/gm)) {
+        const custom = m[1].match(/\[#([a-z0-9-]+)\]$/);
+        ids.add(custom ? custom[1] : anchor(m[1].replace(/`/g, '')));
+      }
+      for (const m of raw.matchAll(/\]\(#([a-z0-9-]+)\)/g)) {
+        if (!ids.has(m[1])) dead.push(`${file.split('/content/docs/')[1]}#${m[1]}`);
+      }
+    }
+    assert.deepEqual(dead, []);
+  });
+});
+
+// GAP-2300: the config.generation.json row names every field the writer can
+// put in the file (cfgtxn GenerationState JSON tags).
+describe('config.generation.json fields match the writer (GAP-2300)', () => {
+  it('lists every GenerationState JSON field on enterprise/configuration.mdx', () => {
+    const src = readFileSync(join(repo, 'internal/config/internal/cfgtxn/cfgtxn.go'), 'utf8');
+    const body = src.split('type GenerationState struct {')[1].split('\n}')[0];
+    const fields = [...body.matchAll(/json:"([a-z0-9_]+)/g)].map((m) => m[1]);
+    assert.ok(fields.includes('generation_reset') && fields.length >= 10, `parsed ${fields}`);
+    const row = page('enterprise/configuration.mdx').split('| `config.generation.json` |')[1].split('| `config.yaml.lock` |')[0];
+    const missing = fields.filter((f) => !f.startsWith('transaction_') && !row.includes('`' + f + '`'));
+    assert.deepEqual(missing, []);
+    if (fields.some((f) => f.startsWith('transaction_'))) assert.ok(row.includes('`transaction_*`'), 'transaction_* fields not named');
   });
 });

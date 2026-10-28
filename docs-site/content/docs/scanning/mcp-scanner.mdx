@@ -156,7 +156,7 @@ scanners:
 
 | Key | Default | What it does |
 | --- | --- | --- |
-| `analyzers` | `[]` (auto) | The analyzers to run. `[]` means YARA, plus the LLM judge when it is ready. |
+| `analyzers` | unset, read back as `auto` | The analyzers to run. Unset (`config get` prints `auto`) and `[]` both mean YARA, plus the LLM judge when it is ready. |
 | `judge_source` | `inherit` | `inherit` uses the top-level `llm:` block. `override` uses `scanners.mcp_scanner.llm`. |
 | `llm` | empty | The scanner's own judge settings. It must be empty with `inherit` and needs a `model` with `override`. |
 | `scan_prompts`, `scan_resources`, `scan_instructions` | `false` | Also scan the server's prompts, resources and instructions on every scan. |

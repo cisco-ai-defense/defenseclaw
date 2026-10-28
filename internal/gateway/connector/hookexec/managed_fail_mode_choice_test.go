@@ -630,3 +630,41 @@ func TestStandaloneManagedAuthRetryKeepsAnsweredErrorClosed(t *testing.T) {
 		}
 	}
 }
+
+// GAP-0826: the "refusals that ignore the fail mode" list in
+// reference/fail-modes.mdx is a managed standalone rule. A Secure Client hook
+// keeps its effective fail mode for an authentication refusal (HTTP 401 or
+// 403): open lets the call run and logs fail_open, closed blocks. A
+// standalone hook blocks the same refusal in open.
+func TestSecureClientAuthRefusalFollowsTheEffectiveFailMode(t *testing.T) {
+	original := hookAuthRetryDelay
+	hookAuthRetryDelay = time.Millisecond
+	t.Cleanup(func() { hookAuthRetryDelay = original })
+	for _, status := range []int{http.StatusUnauthorized, http.StatusForbidden} {
+		refuse := func() *stubRT {
+			return &stubRT{onRequest: func(_ *stubRT, _ *http.Request) (*http.Response, error) {
+				return &http.Response{StatusCode: status, Body: io.NopCloser(strings.NewReader(`{"error":"unauthorized"}`)), Header: make(http.Header)}, nil
+			}}
+		}
+		for _, tc := range []struct {
+			name         string
+			secureClient bool
+			mode         string
+			wantBlocked  bool
+		}{
+			{"secure client open", true, "open", false},
+			{"secure client closed", true, "closed", true},
+			{"standalone open", false, "open", true},
+		} {
+			result := run(t, "codex", refuse(), func(o *Options) {
+				managedCodex(o)
+				o.SecureClient = tc.secureClient
+				o.ExplainUnenrolledAccount = !tc.secureClient
+				o.FailMode = tc.mode
+			})
+			if got := blocked(result); got != tc.wantBlocked {
+				t.Fatalf("HTTP %d, %s: blocked=%v, want %v: code=%d stdout=%q stderr=%q", status, tc.name, got, tc.wantBlocked, result.code, result.stdout, result.stderr)
+			}
+		}
+	}
+}

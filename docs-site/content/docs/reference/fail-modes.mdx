@@ -54,7 +54,7 @@ The guardrail mode does not change the outage mode: observe and action mode fail
 
 ### Refusals that ignore the fail mode
 
-These are not an outage, so they block in every fail mode on a managed computer:
+These are not an outage, so they block in every fail mode on a managed standalone computer:
 
 - The administrator-owned runtime is missing or fails its checks (the runtime descriptor on Linux and macOS, the runtime generation on Windows).
 - Another program answers in place of the gateway service.
@@ -62,6 +62,8 @@ These are not an outage, so they block in every fail mode on a managed computer:
 - The call does not match the event or hook contract the hook was registered for (Codex, GitHub Copilot CLI).
 - The account is not enrolled.
 - A foreign hook the guard finds.
+
+Secure Client hooks are different for a refused credential: an HTTP 401 or 403 follows the effective fail mode, so under `open` (also their default when no fail mode is set) the call runs and is logged as `fail_open`, and under `closed` it is blocked.
 
 On a managed standalone host with `foreign_hooks: remove`, the foreign-hook guard applies to GitHub Copilot CLI, Cursor, Devin, OpenCode and Amp on every OS, and to Hermes on Linux and macOS. Each gateway-backed guarded call requires a current gateway answer. Windows Amp checks its session record locally and is rendered closed for gateway failures. If the gateway is stopped or gives no answer in time, a guarded call blocks even under administrator `open`. An earlier online allow does not authorize a later call during an outage. This keeps the 1.0.3 limit (GAP-0352). See [Foreign hook guard](/docs/enterprise/foreign-hook-guard).
 

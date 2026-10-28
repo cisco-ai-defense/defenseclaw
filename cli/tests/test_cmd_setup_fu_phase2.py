@@ -139,6 +139,35 @@ def _click_result_reaches_marker(result, marker: str) -> bool:
 
 
 @pytest.mark.parametrize(
+    ("connector", "host_os", "expected_hook", "other_hook"),
+    (
+        ("copilot", "windows", "hooks/copilot-hook.ps1 (the hook Copilot runs on Windows)", "on non-Windows"),
+        ("copilot", "linux", "hooks/copilot-hook.sh", "copilot-hook.ps1"),
+        ("copilot", "darwin", "hooks/copilot-hook.sh", "copilot-hook.ps1"),
+        ("cursor", "windows", "hooks/cursor-hook.ps1 (the hook Cursor runs on Windows)", "on non-Windows"),
+        ("cursor", "linux", "hooks/cursor-hook.sh", "cursor-hook.ps1"),
+    ),
+)
+def test_mutation_notice_names_the_hook_file_this_os_registers(
+    connector: str,
+    host_os: str,
+    expected_hook: str,
+    other_hook: str,
+) -> None:
+    """GAP-2280: setup copilot on native Windows named only copilot-hook.sh, not the .ps1 Copilot runs there."""
+    runner = CliRunner()
+    with (
+        patch("defenseclaw.commands.cmd_setup.platform_support.host_os", return_value=host_os),
+        runner.isolation() as (stdout, _stderr, _input),
+    ):
+        cmd_setup._print_connector_mutation_notice(connector)
+
+    notice = stdout.getvalue().decode()
+    assert expected_hook in notice
+    assert other_hook not in notice
+
+
+@pytest.mark.parametrize(
     ("host_os", "expected_hook", "other_hook"),
     (
         ("windows", "protected native defenseclaw-hook.exe boundary on Windows", "devin-hook.sh"),
