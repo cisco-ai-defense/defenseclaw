@@ -1655,6 +1655,9 @@ const r105Rows: DocRow[] = [
   { gap: "GAP-2224", page: "stories/cursor-secret-exfil.mdx", has: ["✓ cursor gateway outage=open (failClosed=true)", "This is the output in a terminal. Piped to another command or saved to a file, the same lines start with `OK` and `i` instead of the check mark and the info sign."] },
   { gap: "GAP-2349", page: "tui.mdx", section: "Panels", has: ["The one exception is Sandboxes: there `P`, `R` and `A` are the", "On Sandboxes, press `p` for"] },
   { gap: "GAP-2228", page: "tui.mdx", has: ["generation and policy digest as its own segment, right after the gateway:", "The active policy and mode are a separate segment further along the line"], lacks: ["example `policy strict · action · gen 10 · 8b19ede82344`", "ends with the policy the running"] },
+  { gap: "GAP-2345", page: "get-started/first-run.mdx", section: "Path A: interactive (`defenseclaw init`)", has: ["1. **Select active connector(s)**: every installed hook connector is pre-selected", "2. **Scanner mode** (`local`, `remote` or `both`, default `local`).", "3. **Select connector(s) for action enforcement**", "**Select action connector(s) for LLM judge**", "5. **Start gateway after setup?** (default yes), then **Run targeted readiness checks?** (default yes)."], lacks: ["pre-selects every installed hook connector and configures them all in `observe` mode. It then shows one checklist"] },
+  { gap: "GAP-2223", page: "connectors/codex.mdx", has: ["A per-user install writes no `.env` block", "On a managed Linux or macOS computer, setup keeps a marked block in `$CODEX_HOME/.env`"], lacks: ["On Linux and macOS, setup keeps a marked block in `$CODEX_HOME/.env`"] },
+  { gap: "GAP-2361", page: "enterprise/operations.mdx", has: ["On a managed standalone computer `/health` carries the `policy`", "`curl http://127.0.0.1:18970/health`, even under `sudo`, has no `policy` key", "sudo curl -s --unix-socket /opt/cisco/defenseclaw/run/hook.sock http://localhost/health"], lacks: ["The gateway stamps it on `/health` and `/status`"] },
   { gap: "GAP-2342", page: "get-started/first-run.mdx", has: ["You do not need `init` before `quickstart`.", "If `init` chose no agent and started the gateway, `quickstart --connector <name>` restarts the gateway so it loads the agent and writes its hooks."] },
 ];
 
@@ -2236,5 +2239,32 @@ describe('config.generation.json fields match the writer (GAP-2300)', () => {
     const missing = fields.filter((f) => !f.startsWith('transaction_') && !row.includes('`' + f + '`'));
     assert.deepEqual(missing, []);
     if (fields.some((f) => f.startsWith('transaction_'))) assert.ok(row.includes('`transaction_*`'), 'transaction_* fields not named');
+  });
+});
+
+// GAP-2345 / GAP-2223 / GAP-2361: the code behind the first-run prompt list,
+// the per-user Codex .env sentence and the managed /health socket paths.
+describe('first-run prompts, Codex .env block scope and managed hook sockets match the code (GAP-2345, GAP-2223, GAP-2361)', () => {
+  it('asks the five first-run prompts the page lists, in that order', () => {
+    const init = source('cli/defenseclaw/commands/cmd_init.py');
+    const wizard = init.split('ux.section("DefenseClaw First-Run Setup")')[1]?.split('\ndef ')[0] ?? '';
+    const order = ['_prompt_connector_selection(', '"  " + ux.bold("Scanner mode")', '_prompt_action_connectors(', 'if action_set:\n        shared_fail, shared_human, shared_sev = _prompt_action_policy(', 'judge_hook_connectors = _prompt_first_run_judge_connectors(', '"  " + ux.bold("Start gateway after setup?")', '"  " + ux.bold("Run targeted readiness checks?")'];
+    let at = -1;
+    for (const needle of order) {
+      const next = wizard.indexOf(needle, at + 1);
+      assert.ok(next > at, `first-run prompt moved or renamed: ${needle}: re-check get-started/first-run.mdx Path A`);
+      at = next;
+    }
+    for (const title of ['title = "Select active connector(s). Detected connectors are pre-selected."', 'title="Select connector(s) for action enforcement."', '"  " + ux.bold("Require human approval for risky actions?")', 'title="Select action connector(s) for LLM judge."']) {
+      assert.ok(init.includes(title), `first-run prompt renamed: ${title}: re-check get-started/first-run.mdx Path A`);
+    }
+  });
+  it('writes the Codex .env block only on a managed install', () => {
+    const codex = source('internal/gateway/connector/codex.go');
+    assert.match(codex, /if opts\.ManagedEnterprise \{\n(?:\t+\/\/[^\n]*\n)*\t+if err := ensureCodexDotEnvProxyBypass\(opts\)/, 'Codex .env block no longer managed-only: re-check connectors/codex.mdx');
+  });
+  it('names the managed hook socket paths', () => {
+    const layout = source('internal/managed/standalone_layout.go');
+    assert.ok(layout.includes('HookSocketPath:  "/run/defenseclaw-hook/hook.sock"') && layout.includes('HookSocketPath:  root + "/run/hook.sock"'), 'hook socket path changed: re-check enterprise/operations.mdx');
   });
 });

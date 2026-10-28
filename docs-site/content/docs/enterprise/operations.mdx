@@ -300,8 +300,8 @@ of files. Two numbers identify it:
   and the policy assets it names (rule packs, Rego modules, signature packs,
   scanner policies). Secret values and the `ai_discovery.home_dirs` list the
   enumerator fills in are left out, and a path under `data_dir` is written as
-  `${data_dir}`. The gateway stamps it on `/health` and `/status`
-  (`policy.effective_digest`) and on its decision events.
+  `${data_dir}`. The gateway stamps it on `/status` and on the administrator's
+  `/health` (`policy.effective_digest`), and on its decision events.
 
 On every OS every lifecycle result carries both in the `policy` object:
 
@@ -352,7 +352,24 @@ What the lifecycle does with it:
   lifecycle result has no `policy` object.
 
 The gateway reports the same digest, with its own policy generation, on `/health`
-and `/status`:
+and `/status`. On a managed standalone computer `/health` carries the `policy`
+object only for an administrator: root or the gateway's own account on the hook
+socket (Linux and macOS), or a request with the gateway token. A plain
+`curl http://127.0.0.1:18970/health`, even under `sudo`, has no `policy` key, and
+neither has the hook socket's answer to a standard account. As root, read it from
+the hook socket:
+
+```bash title="Linux"
+sudo curl -s --unix-socket /run/defenseclaw-hook/hook.sock http://localhost/health
+```
+
+```bash title="macOS"
+sudo curl -s --unix-socket /opt/cisco/defenseclaw/run/hook.sock http://localhost/health
+```
+
+or read `/status` (it needs the gateway token), or the `policy:` line of
+`enterprise linux|macos|windows status`. See
+[The policy object](/docs/reference/gateway-api#the-policy-object).
 
 ```json title="/health (policy)"
 "policy": {
