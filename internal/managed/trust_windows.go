@@ -368,6 +368,11 @@ func ValidateTrustedRulePackTree(dir, label, serviceAccount string) error {
 	})
 }
 
+// UnreadableServiceFolder returns cause unchanged on Windows: the service
+// read checks there (ValidateServiceCanReadTree) name the folder and the
+// access the service account lacks.
+func UnreadableServiceFolder(_, _ string, cause error) error { return cause }
+
 // ValidateTrustedServiceRuntimeTree checks a managed policy folder and
 // everything in it as ValidateTrustedRulePackTree checks a rule pack: the
 // folder check alone (and the readability check of
