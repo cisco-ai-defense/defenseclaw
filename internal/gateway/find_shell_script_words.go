@@ -255,7 +255,11 @@ func findScriptCallStaysOff(
 		return false
 	}
 	args := make([]string, 0, len(call.Args))
-	for _, word := range call.Args {
+	for index, word := range call.Args {
+		if findEntryDirectoryOperand(name, call.Args, index, bound) {
+			args = append(args, "$1")
+			continue
+		}
 		if !judge(word) {
 			return false
 		}
@@ -314,6 +318,16 @@ func findPositionalName(name string) bool {
 // with an entry expansion written as "$1", and whether an unquoted glob
 // is in it. ok is false for a word that is not read here.
 func findRenderScriptWord(word *syntax.Word, bound map[string]bool) (text string, glob bool, ok bool) {
+	text, glob, ok = findRenderScriptWordMarked(word, bound)
+	if !ok || !findSuffixStripsStayInName(text) {
+		return "", false, false
+	}
+	return strings.ReplaceAll(text, findStripMark, ""), glob, true
+}
+
+// findRenderScriptWordMarked is findRenderScriptWord with each %/%% suffix
+// strip still followed by findStripMark and the strips not checked.
+func findRenderScriptWordMarked(word *syntax.Word, bound map[string]bool) (text string, glob bool, ok bool) {
 	if word == nil {
 		return "", false, false
 	}
@@ -358,11 +372,81 @@ func findRenderScriptWord(word *syntax.Word, bound map[string]bool) (text string
 			out.WriteString(value)
 		}
 	}
-	text = out.String()
-	if !findSuffixStripsStayInName(text) {
-		return "", false, false
+	return out.String(), glob, true
+}
+
+// findEntryDirectoryOperand reports a script word that is only a literal
+// suffix strip of the entry ("${1%.zip}"), which names a sibling of the
+// entry or, when the strip is the whole name (a file named .zip), the
+// entry's directory, given where that directory only receives new files:
+// the -d folder of an unzip that never overwrites (no -o, -f or -u; with
+// no terminal unzip answers its replace prompt with none) or a mkdir
+// operand. `find ~ -name "*.zip" -exec sh -c 'unzip -d "${1%.zip}" "$1"' _
+// {} \;` is ordinary work (GAP-2404); a strip at the end of a word that
+// is removed or moved (`rm -rf "${1%h.txt}"`) is still not read (pod
+// check14 row 29).
+func findEntryDirectoryOperand(name string, words []*syntax.Word, index int, bound map[string]bool) bool {
+	text, glob, ok := findRenderScriptWordMarked(words[index], bound)
+	if !ok || glob || text != "$1"+findStripMark {
+		return false
 	}
-	return strings.ReplaceAll(text, findStripMark, ""), glob, true
+	switch name {
+	case "mkdir":
+		return true
+	case "unzip":
+		if index < 2 {
+			return false
+		}
+		for _, word := range words[1:] {
+			option, _, ok := findRenderScriptWordMarked(word, bound)
+			if !ok {
+				return false
+			}
+			if strings.HasPrefix(option, "-") {
+				switch option {
+				case "-d", "-q", "-qq", "-n":
+				default:
+					return false
+				}
+			}
+		}
+		previous, _, ok := findRenderScriptWordMarked(words[index-1], bound)
+		return ok && previous == "-d"
+	}
+	return false
+}
+
+// findShellOnlyParses reports a POSIX-grammar shell at words[index] that
+// reads its script without running it: a -n (noexec) option, and no -c
+// script source other than its operands' text, no -i, no -o option name and
+// no +option that could turn noexec off; nothing before it sets the
+// environment (`env`, NAME=value). `find ~ -name "*.sh" -exec timeout 5
+// bash -n {} \;` only syntax-checks the scripts it finds (GAP-2404).
+func findShellOnlyParses(words []string, index int) bool {
+	if _, posix := findPOSIXGrammarShells[findProgramName(words[index])]; !posix {
+		return false
+	}
+	for _, word := range words[:index] {
+		if strings.Contains(word, "=") || findProgramName(word) == "env" {
+			return false
+		}
+	}
+	noexec := false
+	options := true
+	for _, word := range words[index+1:] {
+		if strings.HasPrefix(word, "+") || strings.HasPrefix(word, "--") {
+			return false
+		}
+		if options && findPlainOption(word) {
+			if strings.ContainsAny(word, "ioc") {
+				return false
+			}
+			noexec = noexec || strings.ContainsRune(word, 'n')
+			continue
+		}
+		options = false
+	}
+	return noexec
 }
 
 // findRenderEntryExpansion renders a parameter or command substitution

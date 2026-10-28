@@ -109,6 +109,16 @@ func handedEntriesOf(words []string, inEntryDir bool) HandedEntries {
 	}
 	var only bool
 	switch program {
+	case "timeout", "nice":
+		// `timeout 5 PROGRAM ...`, `nice -n 5 PROGRAM ...` run PROGRAM with
+		// the same words: it is judged (GAP-2404).
+		if rest, ok := runnerProgramWords(program, args); ok {
+			return handedEntriesOf(rest, inEntryDir)
+		}
+		return mayChange
+	case "sh", "bash", "dash", "ksh", "mksh", "ash":
+		// `bash -n {}` reads the script and runs none of it (GAP-2404).
+		only = shellOnlyParses(args)
 	case "uniq":
 		only = len(handedOperands(args, "fsw")) <= 1
 	case "xxd":
@@ -133,6 +143,67 @@ func handedEntriesOf(words []string, inEntryDir bool) HandedEntries {
 		return HandedEntries{}
 	}
 	return mayChange
+}
+
+// runnerProgramWords returns the program words a timeout or nice runs:
+// after its options (and their values) and, for timeout, the duration. ok
+// is false for an option it does not know.
+func runnerProgramWords(program string, args []string) ([]string, bool) {
+	index := 0
+loop:
+	for index < len(args) && strings.HasPrefix(args[index], "-") && args[index] != "-" {
+		arg := args[index]
+		switch {
+		case arg == "--":
+			index++
+			break loop
+		case program == "timeout" && (arg == "--preserve-status" || arg == "--foreground" ||
+			arg == "-v" || arg == "--verbose" || strings.HasPrefix(arg, "--signal=") ||
+			strings.HasPrefix(arg, "--kill-after=") || len(arg) > 2 && (arg[:2] == "-s" || arg[:2] == "-k")):
+		case program == "timeout" && (arg == "-s" || arg == "-k"):
+			index++
+		case program == "nice" && arg == "-n":
+			index++
+		case program == "nice" && (strings.HasPrefix(arg, "--adjustment=") ||
+			len(arg) > 2 && arg[:2] == "-n" || strings.Trim(arg[1:], "0123456789") == ""):
+		default:
+			return nil, false
+		}
+		index++
+	}
+	if program == "timeout" {
+		if index >= len(args) {
+			return nil, false
+		}
+		index++ // the duration
+	}
+	if index >= len(args) {
+		return nil, false
+	}
+	return args[index:], true
+}
+
+// shellOnlyParses reports the arguments of a POSIX shell that reads its
+// script without running it: a -n (noexec) option among its leading
+// single-letter options, none of -c, -i or -o, and no +option or long
+// option that could turn noexec off or run code.
+func shellOnlyParses(args []string) bool {
+	noexec, options := false, true
+	for _, arg := range args {
+		if strings.HasPrefix(arg, "+") || strings.HasPrefix(arg, "--") {
+			return false
+		}
+		if options && len(arg) > 1 && arg[0] == '-' {
+			letters := arg[1:]
+			if strings.Trim(letters, "abefhkmnpstuvxBCEHPT") != "" || strings.ContainsAny(letters, "ci") {
+				return false
+			}
+			noexec = noexec || strings.ContainsRune(letters, 'n')
+			continue
+		}
+		options = false
+	}
+	return noexec
 }
 
 // handedOperands are the words that are not options or option values;

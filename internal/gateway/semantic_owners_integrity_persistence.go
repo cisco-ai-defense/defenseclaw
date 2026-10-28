@@ -2921,6 +2921,10 @@ func findCommandStaysOffStateOf(home, root string) func(words []string, inEntryD
 				findWordMayRunAsProgram(words, index) {
 				return false
 			}
+			if _, shell := findShellPrograms[program]; shell && findShellOnlyParses(words, index) {
+				// `bash -n {}` reads the script without running it.
+				continue
+			}
 			if _, shell := findShellPrograms[program]; shell {
 				// find hands a shell's -c script to the shell, which removes
 				// its quotes and escapes, so the script is judged by the
