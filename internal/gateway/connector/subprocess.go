@@ -1557,7 +1557,11 @@ func refreshHookFailModesLocked(hookDir string, mode func(connector string) stri
 	if err != nil {
 		return out, err
 	}
-	if named {
+	kept, err := keepListenerCheckInLegacyHardening(hookDir)
+	if err != nil {
+		return out, err
+	}
+	if named || kept {
 		out.Scripts = append(out.Scripts, legacyHardeningScript)
 	}
 	shims, err := refreshShimFailModes(filepath.Join(filepath.Dir(hookDir), "shims"), mode)
@@ -1707,6 +1711,94 @@ if declare -F defenseclaw_unreachable_next_step >/dev/null 2>&1 && ! declare -F 
   }
 fi
 `
+}
+
+// legacyListenerCheckFunc is the pre-send listener check every 1.0.2 and
+// 1.0.3 per-user hook script calls from _hardening.sh.
+const legacyListenerCheckFunc = "defenseclaw_api_listener_foreign"
+
+// legacyListenerCheckMarker opens the block keepListenerCheckInLegacyHardening
+// appends.
+const legacyListenerCheckMarker = "# defenseclaw-legacy-listener-check-v1"
+
+// keepListenerCheckInLegacyHardening gives a released _hardening.sh without
+// defenseclaw_api_listener_foreign that function back while a hook script in
+// the same folder still calls it (GAP-1532). The 1.0.4 helper dropped it, and
+// a 1.0.2 or 1.0.3 gateway never replaces a newer helper, so going back from
+// 1.0.4 to 1.0.2 or 1.0.3 leaves those scripts with the 1.0.4 helper. An
+// upgrade from there leaves both in place until the new gateway starts, and
+// every call in that window printed "defenseclaw_api_listener_foreign:
+// command not found" before its answer. The block defines the function as
+// this release's helper does (send nothing while this account's gateway is
+// stopped and the listener is not proven its own) from the two checks the
+// 1.0.4 helper still has. Only the missing function is added: decisions, fail
+// modes and texts stay the same. The gateway of this release writes its own
+// _hardening.sh when it starts, which drops the block. Remove with the 1.0.2
+// and 1.0.3 upgrade paths.
+func keepListenerCheckInLegacyHardening(hookDir string) (bool, error) {
+	path := filepath.Join(hookDir, legacyHardeningScript)
+	info, err := os.Lstat(path)
+	if os.IsNotExist(err) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("inspect hook %s: %w", legacyHardeningScript, err)
+	}
+	if !info.Mode().IsRegular() || info.Size() > hookScriptMaxBytes {
+		return false, nil
+	}
+	body, err := readConnectorStateFile(path)
+	if err != nil {
+		return false, fmt.Errorf("read hook %s: %w", legacyHardeningScript, err)
+	}
+	text := string(body)
+	if strings.Contains(text, legacyListenerCheckFunc+"()") ||
+		!strings.Contains(text, "defenseclaw_own_gateway_stopped()") ||
+		!strings.Contains(text, "defenseclaw_api_listener_unproven()") ||
+		!hookScriptInFolderCalls(hookDir, legacyListenerCheckFunc) {
+		return false, nil
+	}
+	if !strings.HasSuffix(text, "\n") {
+		text += "\n"
+	}
+	text += legacyListenerCheckMarker + ` (GAP-1532): written by the upgrade's fail-mode refresh;
+# the new gateway replaces this file when it starts.
+if ! declare -F ` + legacyListenerCheckFunc + ` >/dev/null 2>&1; then
+  ` + legacyListenerCheckFunc + `() {
+    defenseclaw_own_gateway_stopped || return 1
+    local rc=0
+    defenseclaw_api_listener_unproven "${1:-}" || rc=$?
+    [ "$rc" = 0 ]
+  }
+fi
+`
+	if err := atomicWriteFile(path, []byte(text), info.Mode().Perm()); err != nil {
+		return false, fmt.Errorf("update hook %s: %w", legacyHardeningScript, err)
+	}
+	return true, nil
+}
+
+// hookScriptInFolderCalls reports whether a shell hook script in hookDir
+// (not the helper itself) names fn.
+func hookScriptInFolderCalls(hookDir, fn string) bool {
+	entries, err := os.ReadDir(hookDir)
+	if err != nil {
+		return false
+	}
+	for _, entry := range entries {
+		name := entry.Name()
+		if name == legacyHardeningScript || !strings.HasSuffix(name, ".sh") || !entry.Type().IsRegular() {
+			continue
+		}
+		info, err := entry.Info()
+		if err != nil || info.Size() > hookScriptMaxBytes {
+			continue
+		}
+		if body, err := readConnectorStateFile(filepath.Join(hookDir, name)); err == nil && strings.Contains(string(body), fn) {
+			return true
+		}
+	}
+	return false
 }
 
 // connectorHookAdapters are the Windows PowerShell adapters a per-user Cursor

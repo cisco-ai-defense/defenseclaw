@@ -3150,7 +3150,9 @@ func copilotFailClosed(opts Options, sp spec, layer, reason string) (int, bool) 
 	if reason == managedUIDUnregisteredReason {
 		text = "DefenseClaw: " + unixUnenrolledAccountExplanation
 	}
-	if reason == managedGatewayNotRunningReason || reason == managedGatewayPortHeldReason ||
+	if install := managedInstallWindowText(opts, "transport", reason); install != "" {
+		text = install
+	} else if reason == managedGatewayNotRunningReason || reason == managedGatewayPortHeldReason ||
 		reason == managedGatewayRestartingReason {
 		// Say the service is stopped and who starts it, that it is
 		// restarting, or that another program holds its port
@@ -3480,7 +3482,7 @@ func ManagedTransportFailureText(event, reason string) (string, bool) {
 // connector's native block body where it has one. The exit codes are the
 // connector's usual fail-closed ones.
 func failManagedStandaloneClosed(opts Options, sp spec, result failResult, layer, reason string) int {
-	text := managedStandaloneFailClosedText(opts.Event, layer, reason)
+	text := managedFailClosedText(opts, layer, reason)
 	if sp.connector == "claudecode" {
 		return emitManagedClaudeBlock(opts, text)
 	}
@@ -3546,6 +3548,52 @@ func emitManagedClaudeBlock(opts Options, reason string) int {
 // managedRuntimeHomeMissingReason is the refusal of a managed hook whose
 // account has no DefenseClaw folder (troubleshooting.mdx).
 const managedRuntimeHomeMissingReason = "enterprise_managed_runtime_home_missing"
+
+// managedFailClosedText is the fail-closed text of a managed hook:
+// managedInstallWindowText while the enterprise lifecycle holds the
+// gateway, else managedStandaloneFailClosedText.
+func managedFailClosedText(opts Options, layer, reason string) string {
+	if text := managedInstallWindowText(opts, layer, reason); text != "" {
+		return text
+	}
+	return managedStandaloneFailClosedText(opts.Event, layer, reason)
+}
+
+// managedInstallWindowText is what a managed hook says when the gateway is
+// stopped, restarting or silent while an enterprise lifecycle run (a package
+// install or upgrade, ensure, repair or rollback: managedLifecycleActive)
+// holds it: that DefenseClaw is being installed or upgraded and to try again,
+// as the per-user install window says (perUserGatewayDownText). It said "the
+// gateway is not available" or "is restarting to apply a change", which did
+// not name the upgrade (GAP-2173). "" for any other failure: a refusal
+// with its own cause (another program on the port, SELinux, a sandboxed
+// agent, a missing DefenseClaw folder) keeps its text.
+func managedInstallWindowText(opts Options, layer, reason string) string {
+	if layer != "transport" || !managedOutageShapedReason(reason) || !managedLifecycleActive(opts) {
+		return ""
+	}
+	return "DefenseClaw blocked this " + hookEventSubject(opts.Event) + ": DefenseClaw is being installed or " +
+		"upgraded on this computer, and its gateway starts again when that is done. Try again in a moment; " +
+		"if this continues, contact your administrator."
+}
+
+// managedOutageShapedReason reports a transport failure reason that a
+// stopped, restarting or silent gateway gives: the managed outage codes, and
+// the plain transport errors (no enterprise_ code) that
+// managedStandaloneFailClosedText calls "not available". A refusal with its
+// own cause (an unregistered account, another program on the port, SELinux,
+// a sandboxed agent, a missing DefenseClaw folder, a bad hook input) is not.
+func managedOutageShapedReason(reason string) bool {
+	switch reason {
+	case managedGatewayNotRunningReason, managedGatewayRestartingReason, managedGatewayNoAnswerReason,
+		managedGatewayPeerUnverifiedReason:
+		return true
+	case MalformedHookPayloadReason, managedHermesEventConflictReason, missingNativeAskReason,
+		unboundAntigravityBindingReason:
+		return false
+	}
+	return reason != "" && !strings.HasPrefix(reason, "enterprise_")
+}
 
 // managedStandaloneFailClosedText is what a standalone managed hook (Unix or
 // Windows, managedPlainFailClosed) says when it fails closed: that DefenseClaw blocked the prompt or tool
