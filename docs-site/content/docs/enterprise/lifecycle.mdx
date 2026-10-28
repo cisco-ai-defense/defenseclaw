@@ -721,9 +721,11 @@ the binaries, so stage the payload again and run its `ensure --payload <dir> --c
   exists and its parent folder still holds other entries, the hooks and `~/.defenseclaw` went with
   it. The uninstall warns (`per_user_hooks_remaining`) with the home and goes on. A home that does
   not answer, or whose parent folder is missing or empty (the mount point of an unmounted volume),
-  is not available rather than gone. For an account that still exists, the uninstall then stops
-  (`uninstall_incomplete`), keeps the binaries, the deployment record and the services, and names
-  the home: mount it and run the uninstall again. A per-domain home layout (SSSD
+  is not available rather than gone. For an account that still exists, the uninstall refuses
+  before it changes anything (`uninstall_precheck_refused`): the services, the machine policy and
+  the hooks and Claude Code blockers of every other user stay. It names the home: mount it and run
+  the uninstall again. A home that goes away while the uninstall runs stops it later
+  (`uninstall_incomplete`), with the binaries, the deployment record and the services kept. A per-domain home layout (SSSD
   `fallback_homedir = /home/%d/%u`) looks the same when the only account of a domain had its home
   folder deleted: recreate that folder as a folder the account owns, then run the uninstall again.
   Removing the account does not end the stop while a `targets.yaml` row names it (see Manifest rows).

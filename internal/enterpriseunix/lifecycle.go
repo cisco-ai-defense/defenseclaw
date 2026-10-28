@@ -4208,8 +4208,9 @@ func (l *lifecycle) refuseUnresolvedPerUserRows(ctx context.Context) bool {
 	env, r := l.env, l.result
 	out, commandErr := env.runGatewayCLI(ctx, "enterprise", "hooks", "remove-all", "--manifest", env.Layout.ManifestPath, "--json", "--check")
 	var report struct {
-		OK     bool     `json:"ok"`
-		Failed []string `json:"failed"`
+		OK      bool     `json:"ok"`
+		Pending []string `json:"pending"`
+		Failed  []string `json:"failed"`
 	}
 	parseErr := json.Unmarshal(out.Stdout, &report)
 	refused := false
@@ -4223,8 +4224,22 @@ func (l *lifecycle) refuseUnresolvedPerUserRows(ctx context.Context) bool {
 				connector, user, reason, env.Layout.ManifestPath, l.uninstallCommand()))
 			refused = true
 		}
+		// A live account whose home is not available (an unmounted
+		// volume) stops the removal below after it has already removed
+		// what protects the other users (their hooks and Claude Code
+		// blockers) and stopped the services (GAP-2358). It refuses here,
+		// before anything changes. A pending entry with a reason (a home
+		// that is gone, a removed account) still only warns.
+		for _, entry := range report.Pending {
+			user, connector, reason, ok := cutPerUserEntry(entry)
+			if !ok || reason != "" {
+				continue
+			}
+			r.AddError(codePerUserHooks, homeNotAvailableMessage(connector, user, "`"+l.uninstallCommand()+"`"))
+			refused = true
+		}
 	}
-	if commandErr == nil && parseErr == nil && report.OK && len(report.Failed) == 0 {
+	if commandErr == nil && parseErr == nil && report.OK && !refused {
 		return false
 	}
 	if !refused {
@@ -4238,6 +4253,13 @@ func (l *lifecycle) refuseUnresolvedPerUserRows(ctx context.Context) bool {
 	}
 	r.AddError(codeUninstallPrecheck, "nothing was changed: every service is still running and the machine policy is in place; fix the hook-removal precheck and rerun `"+l.uninstallCommand()+"`")
 	return true
+}
+
+// homeNotAvailableMessage is the error for a live account whose home is not
+// available, so DefenseClaw's connector registrations in it may remain and
+// call the hook binary; rerun is the quoted uninstall command.
+func homeNotAvailableMessage(connector, user, rerun string) string {
+	return fmt.Sprintf("DefenseClaw's %s hooks for user %s were not removed because that account's home is not available, so a DefenseClaw registration may remain in it and call the hook binary; make that home available (mount its volume) and rerun %s; if that home folder was deleted, recreate it as a folder the account owns and rerun %s", connector, user, rerun, rerun)
 }
 
 // cutPerUserEntry splits a remove-all entry "user/connector: reason". The
@@ -4321,7 +4343,7 @@ func (l *lifecycle) removePerUserRegistrations(ctx context.Context) bool {
 		// as registrations: the binaries, the deployment record and the
 		// services stay, and a rerun once the home is back removes them
 		// (GAP-0443; lead decision 2026-10-26 18:57).
-		r.AddError(codePerUserHooks, fmt.Sprintf("DefenseClaw's %s hooks for user %s were not removed because that account's home is not available, so a DefenseClaw registration may remain in it and call the hook binary; make that home available (mount its volume) and rerun %s; if that home folder was deleted, recreate it as a folder the account owns and rerun %s", connector, user, rerun, rerun))
+		r.AddError(codePerUserHooks, homeNotAvailableMessage(connector, user, rerun))
 		left = true
 	}
 	for _, entry := range report.StateFailed {
