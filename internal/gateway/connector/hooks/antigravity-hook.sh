@@ -7,7 +7,12 @@
 set -euo pipefail
 
 HOOK_EVENT="${1:-}"
-# A failure before the helpers load (a hook path that does not resolve, a
+{{if and (not .Managed) (not .Sandbox)}}# _DC_UNBOUND_TOOL_INPUT is this hook's own marker for a registration that
+# lost its event, set only below: a value inherited from the agent's
+# environment must never skip the gateway for a bound call (GAP-1321).
+unset -v _DC_UNBOUND_TOOL_INPUT
+_DC_UNBOUND_TOOL_INPUT=0
+{{end}}# A failure before the helpers load (a hook path that does not resolve, a
 # missing or broken _hardening.sh, a set -e error) still answers: in fail
 # mode closed PreToolUse gets Antigravity's deny, which needs no helper. Other
 # events and fail mode open keep the exit status. The installed mode decides

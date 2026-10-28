@@ -62,3 +62,21 @@ func TestPerUserAntigravityUnboundToolCallFollowsTheTier(t *testing.T) {
 		})
 	}
 }
+
+// GAP-1321 (review R20-F1): the unbound marker is the hook's own state. A
+// bound PreToolUse call whose environment carries _DC_UNBOUND_TOOL_INPUT=1
+// still asks the gateway, in every tier, and never gets the unbound answer.
+func TestPerUserAntigravityBoundCallIgnoresAnInheritedUnboundMarker(t *testing.T) {
+	for _, mode := range []string{"open", "closed"} {
+		t.Run(mode, func(t *testing.T) {
+			run := runHookForColdStart(t, NewAntigravityConnector(), "antigravity-hook.sh", []string{"PreToolUse"}, nil,
+				"DC_COLD_OUTAGE_MODE="+mode, "_DC_UNBOUND_TOOL_INPUT=1")
+			if got := strings.TrimSpace(readColdStartCapture(t, run.capDir, "count")); got != "1" {
+				t.Fatalf("the gateway was asked %q times, want 1\nstdout=%q stderr=%q", got, run.stdout, run.stderr)
+			}
+			if strings.Contains(run.stdout, "registered without an Antigravity event") || strings.Contains(run.stderr, "registered without") {
+				t.Fatalf("a bound call got the unbound answer: stdout=%q stderr=%q", run.stdout, run.stderr)
+			}
+		})
+	}
+}
