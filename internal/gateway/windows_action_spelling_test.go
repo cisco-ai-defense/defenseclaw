@@ -131,7 +131,9 @@ func TestR104ActionClassWindowsProtectedSpellings(t *testing.T) {
 		{"GAP-0789 PowerShell private read last", `Write-Output done; Get-Content "$env:USERPROFILE\.ssh\id_ed25519"`, actionfacts.DialectPowerShell, true},
 		{"GAP-0789 CMD private read first", `type %USERPROFILE%\.ssh\id_ed25519 & echo done`, actionfacts.DialectCMD, true},
 		{"Windows public key read", `Get-Content $HOME\.ssh\authorized_keys`, actionfacts.DialectPowerShell, false},
-		{"CMD public key read outside read-only list", `type %USERPROFILE%\.ssh\authorized_keys`, actionfacts.DialectCMD, true},
+		// cmd type only reads (owner decision 2, GAP-2168); the append twin blocks.
+		{"CMD public key read", `type %USERPROFILE%\.ssh\authorized_keys`, actionfacts.DialectCMD, false},
+		{"CMD public key append", `type marker.pub >> %USERPROFILE%\.ssh\authorized_keys`, actionfacts.DialectCMD, true},
 		{"ordinary archive glob", `Compress-Archive -Path .\docs\* -DestinationPath .\out\docs.zip`, actionfacts.DialectPowerShell, false},
 		{"ordinary fd duplication", `Get-ChildItem .\src 2>&1 > .\logs\list.log`, actionfacts.DialectPowerShell, false},
 		{"ordinary assigned target", `$dst = ".\out\variable.txt"; Set-Content $dst ready`, actionfacts.DialectPowerShell, false},
