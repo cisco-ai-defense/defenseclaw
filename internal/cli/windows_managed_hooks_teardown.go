@@ -217,6 +217,12 @@ const windowsManagedHooksNotLocalSystemReason = "the uninstall did not run as Lo
 // the purge does not fail on it (GAP-2231).
 const windowsManagedHooksSignedOutPathEntryReason = "only its user Path entry for .local\\bin stays: the account is signed out, so its registry hive is not loaded"
 
+// windowsManagedHooksKeptForRegistrationsReason marks, in user_state_remaining,
+// the DefenseClaw folder of an account whose agent registrations stay (it
+// had no active session, or their removal failed): its connector_backups
+// restore them, so the purge keeps it on purpose.
+const windowsManagedHooksKeptForRegistrationsReason = "kept: the account's agent registrations were not all removed, and its connector_backups restore them"
+
 // windowsManagedHooksUserBinariesReason is the user_state_remaining reason of
 // a failed per-user binaries purge.
 func windowsManagedHooksUserBinariesReason(err error) string {
@@ -321,7 +327,7 @@ func windowsManagedHooksStandaloneUserState(
 		case identityErr != nil:
 			reason = windowsManagedHooksNotLocalSystemReason
 		case keepsRegistrations(sid):
-			reason = "kept: the account's agent registrations were not all removed, and its connector_backups restore them"
+			reason = windowsManagedHooksKeptForRegistrationsReason
 		default:
 			err := windowsManagedHooksStandaloneUserStatePurger(home, sid, target.DataDir)
 			var binaries []string

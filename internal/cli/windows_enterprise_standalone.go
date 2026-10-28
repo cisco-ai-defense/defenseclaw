@@ -1735,10 +1735,14 @@ func addWindowsEnterpriseUserStateWarning(result *enterprisestatus.Result, repor
 	for _, entry := range windowsEnterpriseReportStrings(report.UserStatePurged) {
 		result.Changes = append(result.Changes, windowsEnterprisePurgedUserStateChange(entry))
 	}
-	var notLocalSystem, pathEntryKept, remaining []string
+	var notLocalSystem, pathEntryKept, keptForRegistrations, remaining []string
 	for _, entry := range windowsEnterpriseReportStrings(report.UserStateRemaining) {
 		if account, found := strings.CutSuffix(entry, ": "+windowsManagedHooksNotLocalSystemReason); found {
 			notLocalSystem = append(notLocalSystem, account)
+			continue
+		}
+		if account, found := strings.CutSuffix(entry, ": "+windowsManagedHooksKeptForRegistrationsReason); found {
+			keptForRegistrations = append(keptForRegistrations, account)
 			continue
 		}
 		if account, found := strings.CutSuffix(entry, ": "+windowsManagedHooksSignedOutPathEntryReason); found {
@@ -1767,6 +1771,21 @@ func addWindowsEnterpriseUserStateWarning(result *enterprisestatus.Result, repor
 				"a signed-out account's registry hive is not loaded, so its Path cannot be changed. The entry names a folder that no longer exists and runs nothing; "+
 				"to remove it, delete it from that account's Path once it signs in. Accounts: %s",
 			len(pathEntryKept), windowsEnterpriseBoundedLabels(pathEntryKept)))
+	}
+	if len(keptForRegistrations) > 0 {
+		// Kept on purpose: the registrations that stay (named in
+		// user_registrations_pending or user_registrations_failed, which
+		// decide whether the purge fails) need the folder's connector_backups
+		// to be put back. A decommission with signed-out or disconnected
+		// users failed 1603 and blamed an open file (GAP-2231).
+		result.AddWarning("per_user_state_remaining", fmt.Sprintf(
+			"--purge removed the machine deployment but kept the DefenseClaw folder %%USERPROFILE%%\\.defenseclaw of %d enrolled account(s) whose agent registrations stay: "+
+				"its connector_backups restore those registrations, and its per-user hook tokens are accepted by nothing any more. "+
+				"To remove them too, %s. Accounts: %s",
+			len(keptForRegistrations),
+			windowsEnterpriseLocalSystemRemedy("/uninstall PURGE=1"),
+			windowsEnterpriseBoundedLabels(keptForRegistrations),
+		))
 	}
 	if len(remaining) > 0 {
 		result.AddError("per_user_state_remaining", windowsEnterpriseUserStateRemainingMessage(
@@ -2082,9 +2101,11 @@ func addWindowsEnterpriseUserRegistrationWarnings(result *enterprisestatus.Resul
 		// warning says so and names the remedy, so it is not also reported
 		// as a failed removal (GAP-1568).
 		var attempted []string
+		notLocalSystem := false
 		for _, failure := range failed {
 			if strings.HasPrefix(failure, windowsManagedHooksRegistrationsNotRemovedPrefix) {
 				reason = "this uninstall did not run as LocalSystem"
+				notLocalSystem = true
 				continue
 			}
 			attempted = append(attempted, failure)
@@ -2097,7 +2118,12 @@ func addWindowsEnterpriseUserRegistrationWarnings(result *enterprisestatus.Resul
 			windowsEnterpriseLocalSystemRemedy("/uninstall"),
 			windowsEnterpriseBoundedLabels(windowsEnterpriseRegistrationsByAccount(pending)),
 		)
-		if purge {
+		// A purge that did not run as LocalSystem removed none of them and
+		// fails (GAP-0075, GAP-1111). The registrations of accounts that had
+		// no active session are the documented Windows limit: no process can
+		// act as such an account, so a decommission with signed-out or
+		// disconnected users finishes with this warning (GAP-2231).
+		if purge && notLocalSystem {
 			result.AddError("user_registrations_pending", message)
 		} else {
 			result.AddWarning("user_registrations_pending", message)
