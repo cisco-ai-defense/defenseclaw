@@ -759,8 +759,9 @@ the binaries, so stage the payload again and run its `ensure --payload <dir> --c
   included), whether or not the account is signed in, plus the DefenseClaw files of a per-user
   install from `%USERPROFILE%\.local\bin` and, once that folder is empty, the folder and its entry
   in the account's user `Path`. A signed-out account's `Path` cannot be changed, so it keeps that
-  entry. The `per_user_state_remaining` warning names each folder it could not remove, with the
-  reason.
+  entry. An account whose agent registrations stay (it had no active, connected session) keeps
+  its `.defenseclaw`, whose `connector_backups` restore them; the purge still finishes. The
+  `per_user_state_remaining` warning names each folder it could not remove, with the reason.
 
 ### After an uninstall
 

@@ -551,6 +551,16 @@ func verifyWindowsClaudeUserRuntimeReadOnly(
 	if connector.HookContractLockDrifted(lock, current) {
 		return lock, fmt.Errorf("enterprise hooks: managed Claude hook contract drift detected")
 	}
+	// A deleted or edited claude-code-hook.sh is repaired at the guardian's
+	// next pass, as the shared scripts are (GAP-2227).
+	if err := connector.VerifyManagedConnectorHookScriptDigests(
+		setup,
+		conn,
+		lock,
+		targetSID.String(),
+	); err != nil {
+		return lock, fmt.Errorf("enterprise hooks: managed Claude hook runtime is invalid: %w", err)
+	}
 	if strings.TrimSpace(lock.HookFailMode) != strings.TrimSpace(current.HookFailMode) {
 		return lock, fmt.Errorf(
 			"enterprise hooks: managed Claude fail mode %q does not match configured mode %q",

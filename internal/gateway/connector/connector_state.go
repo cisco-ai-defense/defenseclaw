@@ -1862,6 +1862,60 @@ func VerifyManagedSharedHookScriptDigests(dataDir, expectedOwnerSID string) erro
 	return nil
 }
 
+// VerifyManagedConnectorHookScriptDigests checks, without following a link,
+// that each per-user hook script of conn the contract lock entry recorded
+// (claude-code-hook.sh, for example) is still in opts.DataDir/hooks with the
+// recorded bytes. A recorded script that is missing or edited is an error, so
+// the guardian's verify reports the drift and its repair rewrites the script:
+// the drift check ignores script digests, and the managed Windows verify
+// checked only the shared inspect-* scripts, so a deleted
+// claude-code-hook.sh stayed missing until another runtime file drifted
+// (GAP-2227). A script the lock does not record (a lock an earlier release
+// wrote) is not checked.
+func VerifyManagedConnectorHookScriptDigests(
+	opts SetupOpts,
+	conn Connector,
+	entry HookContractLockEntry,
+	expectedOwnerSID string,
+) error {
+	if conn == nil || strings.TrimSpace(opts.DataDir) == "" || len(entry.HookScriptDigests) == 0 {
+		return nil
+	}
+	if runtime.GOOS == "windows" && strings.TrimSpace(expectedOwnerSID) == "" {
+		return errors.New("managed connector hook script target SID is empty")
+	}
+	shared := map[string]bool{}
+	for _, name := range append(append([]string{}, genericHookScripts...), hookHelperScripts...) {
+		shared[name] = true
+	}
+	for _, path := range hookScriptPathsForConnector(opts, conn) {
+		name := filepath.Base(path)
+		if shared[name] {
+			continue
+		}
+		want, ok := entry.HookScriptDigests[name]
+		if !ok {
+			continue
+		}
+		got, exists, err := stableManagedArtifactDigestForOwner(
+			path,
+			"managed connector hook script "+name,
+			managedHookRuntimeArtifactMaxBytes,
+			expectedOwnerSID,
+		)
+		if err != nil {
+			return fmt.Errorf("verify managed connector hook script %s: %w", path, err)
+		}
+		if !exists {
+			return fmt.Errorf("managed connector hook script is missing: %s", path)
+		}
+		if got != want {
+			return fmt.Errorf("managed connector hook script digest mismatch: %s", path)
+		}
+	}
+	return nil
+}
+
 func pathInsideConnectorDataDir(dataDir, path string) bool {
 	base, err := filepath.Abs(dataDir)
 	if err != nil {

@@ -650,3 +650,33 @@ def test_windows_docs_say_how_to_leave_bundle_mode() -> None:
     windows = (DOCS / "enterprise/windows.mdx").read_text(encoding="utf-8")
     assert "\n## Remove\n" in windows
     assert "\n### Run Setup as LocalSystem\n" in windows
+def _table_cells(line: str) -> int:
+    """Count the cells GFM sees in a table row (code spans and escaped pipes do not split)."""
+    seps = 0
+    in_code = False
+    for i, ch in enumerate(line):
+        if ch == "`":
+            in_code = not in_code
+        elif ch == "|" and not in_code and (i == 0 or line[i - 1] != "\\"):
+            seps += 1
+    return seps - 1 if line.strip().endswith("|") else seps
+
+
+def test_docs_table_rows_have_no_cells_beyond_the_header() -> None:
+    # GFM drops every cell past the header's count, so text after an extra "|"
+    # never renders (the Windows machine_policy_incomplete sentence did this).
+    wide = []
+    for page in sorted(DOCS.rglob("*.mdx")):
+        header = None
+        fenced = False
+        for number, line in enumerate(page.read_text(encoding="utf-8").splitlines(), 1):
+            if line.lstrip().startswith("```"):
+                fenced = not fenced
+            if fenced or not line.startswith("|"):
+                header = None
+                continue
+            if header is None:
+                header = _table_cells(line)
+            elif _table_cells(line) > header:
+                wide.append(f"{page.relative_to(DOCS)}:{number}")
+    assert wide == []

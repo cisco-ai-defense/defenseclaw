@@ -396,6 +396,9 @@ func pruneWindowsStandalonePerUserEnrollments(manifest enterprisehooks.Manifest,
 // registration; replaceable in tests.
 var enterpriseHookWindowsUserCleanupAttempt enterpriseHookUserCleanupAttempt = attemptWindowsStandaloneUserCleanup
 
+// enterpriseHookWindowsRevokeHookPathDotdirGrant is replaceable in tests.
+var enterpriseHookWindowsRevokeHookPathDotdirGrant = enterprisehooks.RevokeGatewayInventoryReadOnHookPathDotdirs
+
 // enterpriseHookWindowsRequireTargetSession and
 // enterpriseHookWindowsUserCleanupIdentity are replaceable in tests.
 var (
@@ -486,6 +489,11 @@ func attemptWindowsStandaloneUserCleanup(
 		}
 		return enterpriseHookUserCleanupFailed, err
 	}
+	// The enumerator's read grant on a dotdir on this connector's hook path
+	// (~\.config for OpenCode and Amp) makes the removal's exact DACL check
+	// refuse it; take it off first, as the uninstall does (GAP-2380). The
+	// removal still reports whatever stays wrong.
+	revokeErr := enterpriseHookWindowsRevokeHookPathDotdirGrant(home, entry.Connector)
 	err := enterpriseHooksRemoveManagedPolicy(ctx, enterprisehooks.InstallOptions{
 		ConnectorName: strings.ToLower(strings.TrimSpace(entry.Connector)),
 		UserHome:      home,
@@ -500,7 +508,7 @@ func attemptWindowsStandaloneUserCleanup(
 		// The user signed out between the session check and the removal.
 		return enterpriseHookUserCleanupPending, nil
 	default:
-		return enterpriseHookUserCleanupFailed, err
+		return enterpriseHookUserCleanupFailed, errors.Join(err, revokeErr)
 	}
 }
 
