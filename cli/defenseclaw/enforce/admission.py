@@ -79,6 +79,14 @@ _SHORTHANDS = {
 }
 
 
+def action_blocks(action: SeverityAction) -> bool:
+    """Whether an admission action refuses the asset (Go
+    ``CompiledAction.blocks``, admission.rego ``_should_reject``): install
+    block, runtime disable or file quarantine. A quarantine alone is a
+    refusal, never a warning (GAP-1442)."""
+    return action.install == "block" or action.runtime == "disable" or action.file == "quarantine"
+
+
 def triple_shorthand(triple: Any) -> str:
     """The shorthand a config ``{install, file, runtime}`` triple spells, or
     "" when it matches none. ``allow`` shares ``warn``'s triple, so it reads
@@ -318,6 +326,102 @@ def _legacy_balanced_default_mcp(adm: Any) -> bool:
     }
 
 
+#: The keys :func:`_legacy_balanced_default_mcp` (and Go
+#: legacyBalancedDefaultMCP) read.
+_LEGACY_DEFAULT_MCP_INPUTS = (
+    ("admission", "defaults", "scan_on_install"),
+    ("admission", "defaults", "allow_list_bypass_scan"),
+    ("admission", "defaults", "actions"),
+    ("admission", "mcp", "actions"),
+)
+
+
+def _write_touches(path: tuple, key: tuple) -> bool:
+    """Whether a write at *path* sets or unsets *key* (one is a prefix of the other)."""
+    n = min(len(path), len(key))
+    return tuple(path[:n]) == tuple(key[:n])
+
+
+def _rule_inputs(document: Any) -> dict[tuple, Any]:
+    """The values :func:`_legacy_balanced_default_mcp` reads, by key: the
+    two flags and each defaults and MCP severity, as compiled."""
+    from defenseclaw.config import _merge_admission
+
+    adm = _merge_admission(document.get("admission") if isinstance(document, dict) else None)
+    out: dict[tuple, Any] = {
+        ("admission", "defaults", "scan_on_install"): adm.defaults.scan_on_install,
+        ("admission", "defaults", "allow_list_bypass_scan"): adm.defaults.allow_list_bypass_scan,
+    }
+    for name, holder in (("defaults", adm.defaults), ("mcp", adm.mcp)):
+        for sev, action in _compile_action_map(holder.actions).items():
+            out[("admission", name, "actions", sev.lower())] = action
+    return out
+
+
+def legacy_default_mcp_pins(before: Any, after: Any, paths: list[tuple]) -> dict[tuple, Any]:
+    """The ``admission.mcp.actions`` a config write adds so the pre-1.0.4
+    default MCP compatibility covers only an untouched preset (GAP-1488).
+
+    *before* and *after* are config.yaml, parsed, before and after a write
+    that decided the key *paths*. A key the compatibility rule reads whose
+    value the write changed is decided too, whoever wrote it. When *before*
+    is the old default preset and the write decides such a key, each MCP
+    HIGH, MEDIUM and LOW the write did not decide keeps its translated
+    ``warn`` as an explicit ``admission.mcp.actions.<severity>``. One it
+    decided (its own MCP key, or the defaults key MCP inherits it from)
+    compiles as written, in Go and in Python, never as warn. A write that
+    leaves the old preset's shape, from that preset or from any other block,
+    gets its inherited MCP HIGH written under MCP, so what it wrote compiles
+    as written too. Empty when the write needs nothing."""
+    from defenseclaw.config import _merge_admission
+
+    def legacy(document: Any) -> bool:
+        return isinstance(document, dict) and _legacy_balanced_default_mcp(_merge_admission(document.get("admission")))
+
+    old, new = _rule_inputs(before), _rule_inputs(after)
+    paths = [tuple(path) for path in paths] + [key for key in {**old, **new} if old.get(key) != new.get(key)]
+    if not any(_write_touches(path, key) for path in paths for key in _LEGACY_DEFAULT_MCP_INPUTS):
+        return {}
+    pins: dict[tuple, Any] = {}
+    if legacy(before):
+        written = {str(sev).lower() for sev in before["admission"]["mcp"]["actions"]}
+        for severity in ("high", "medium", "low"):
+            own = ("admission", "mcp", "actions", severity)
+            inherited = ("admission", "defaults", "actions", severity)
+            decided = any(_write_touches(path, own) for path in paths) or (
+                severity not in written and any(_write_touches(path, inherited) for path in paths)
+            )
+            if not decided:
+                pins[own] = "warn"
+    if not pins and legacy(after):
+        # The write decided all three with the preset's own values, or it
+        # turned another block into the preset's shape. Either way that is
+        # what was chosen: name the HIGH that MCP inherits under MCP, so
+        # both compilers compile what was written.
+        defaults = after["admission"]["defaults"]["actions"]
+        pins[("admission", "mcp", "actions", "high")] = _inherited_high(defaults)
+    return pins
+
+
+def _inherited_high(defaults_actions: Any) -> Any:
+    """The ``admission.defaults.actions`` HIGH entry, whatever its key case."""
+    return next(value for sev, value in defaults_actions.items() if str(sev).lower() == "high")
+
+
+def pin_explicit_legacy_shape(adm: Any) -> None:
+    """Make an admission block chosen now compile as written (GAP-1488).
+
+    Only a 1.0.0-1.0.3 config can hold the pre-1.0.4 default preset's
+    shape without having chosen it in this release, so both compilers read
+    that shape as the untouched upgraded preset. A block a 1.0.4 command
+    chooses with that shape (``policy activate`` of a named policy with the
+    old default actions) gets the HIGH that MCP inherits from
+    ``admission.defaults`` written under ``admission.mcp.actions`` too. That
+    changes no action, and the block is no longer the preset's shape."""
+    if _legacy_balanced_default_mcp(adm):
+        adm.mcp.actions["high"] = _inherited_high(adm.defaults.actions)
+
+
 def compile_admission(cfg: Any, target_type: str) -> CompiledAdmission:
     """Compile ``admission:`` for one asset type, as the gateway does (Go
     ``policy.CompileAdmission``). Each field and severity resolves, first
@@ -436,8 +540,13 @@ def evaluate_admission(
     action_entry: Any | None = None,
     include_quarantine: bool = False,
     allow_first_party: bool = True,
+    content_path: str = "",
 ) -> AdmissionDecision:
     """Evaluate admission for a target from config.yaml.
+
+    ``content_path`` is where the asset's bytes are when they are not yet
+    at ``source_path`` (an install decides its staged copy before it is
+    swapped in); path rules always use ``source_path``.
 
     ``config`` defaults to ``pe.cfg``; ``asset_policy`` to its
     ``asset_policy``. Operator block entries always win. Operator allow
@@ -528,7 +637,7 @@ def evaluate_admission(
             any(path_has_components(source_path, marker) for marker in fp_constraints)
             if configured else _matches_provenance(fp_constraints, source_path)
         )
-        if path_matches and (legacy or _own_first_party_content(target_type, name, source_path)):
+        if path_matches and (legacy or _own_first_party_content(target_type, name, content_path or source_path)):
             return _done(AdmissionDecision(
                 "allowed", f"{target_type} '{name}' is on the allow list — scan skipped", source="policy-allow",
             ))
@@ -552,12 +661,21 @@ def evaluate_admission(
         return _done(AdmissionDecision("clean", "scan clean", action=_WARN, source="scan-clean"))
 
     detail = f"{finding_count} {'finding' if finding_count == 1 else 'findings'}, max {severity}"
-    if action.install == "block" or action.runtime == "disable":
+    if action_blocks(action):
         return _done(AdmissionDecision("rejected", detail, action=action, source="scan-rejected"))
     if allow:
         return _done(AdmissionDecision("allowed", detail, action=action, source="scan-allowed"))
     source = "scan-judge-warning" if judge_only else "scan-warning"
     return _done(AdmissionDecision("warning", detail, action=action, source=source))
+
+
+def _meta_judge_missed_threat(rule: str) -> bool:
+    """A meta-judge missed threat (META-LLM-<N>), Go ``metaJudgeMissedThreat``.
+
+    GAP-2107: the number is the model's own count, so every missed threat
+    counts, not only META-LLM-001. The ids the scanner writes do not.
+    """
+    return rule.startswith("META-LLM-") and rule not in ("META-LLM-CORR", "META-LLM-FP-ADVISORY", "META-LLM-UNKNOWN")
 
 
 def _judge_only_plugin_high(cfg: Any, policy: CompiledAdmission, target_type: str, connector: str,
@@ -579,7 +697,7 @@ def _judge_only_plugin_high(cfg: Any, policy: CompiledAdmission, target_type: st
     for f in findings:
         rank, rule = _severity_rank(str(getattr(f, "severity", ""))), str(getattr(f, "rule_id", "") or "")
         judge = (rule.startswith("LLM-") and rule != "LLM-SCAN-ERROR") or rule.startswith("META-LLM-")
-        if rank == 4 and (rule.startswith("LLM-OB-") or rule == "META-LLM-001"):
+        if rank == 4 and (rule.startswith("LLM-OB-") or _meta_judge_missed_threat(rule)):
             judge_high = True
         elif rank == 0 or rank >= 4 or (rank == 3 and not judge and rule != "SCAN-LLM-NO-SOURCE"):
             return False

@@ -65,11 +65,18 @@ const (
 	hookCallerInFlight = 32
 	// hookGlobalInFlightPerProc and hookGlobalInFlightMin bound the requests
 	// the gateway holds at once for all callers together: 16 per processor,
-	// at least 32. A processor serves about 3 hooks a second, so a full
-	// gateway answers its last admitted request in about 5 s, inside the
-	// shortest hook deadline (10 s).
+	// at least four callers' in-flight caps (128). A caller's share of it is a
+	// quarter, so on a small host the minimum is what lets one account hold
+	// its full hookCallerInFlight: 10 calls a second for the 3.5 s answer
+	// budget. With a minimum of 32 a host of two processors let one account
+	// hold 8, so an ordinary 10 calls a second whose answers took over 0.8 s
+	// under CPU load (five agent TUIs starting beside two busy agents) were
+	// refused 429 and blocked as a gateway no-answer (GAP-1790). A request
+	// that waits for its caller's run slot uses no CPU and is dropped when its
+	// hook gives up, so holding it costs nothing the answer budget does not
+	// already bound.
 	hookGlobalInFlightPerProc = 16
-	hookGlobalInFlightMin     = 32
+	hookGlobalInFlightMin     = 4 * hookCallerInFlight
 	// hookCallerIdle is how long an idle caller's budget is kept.
 	hookCallerIdle = 5 * time.Minute
 	// hookCallerLogInterval paces the refusal log line per caller.
@@ -231,18 +238,39 @@ func hookCallerBudgetKey(identity, path string) string {
 	return identity
 }
 
+// hookCallerSandboxRead is the budget of an account's read-only sandbox
+// requests (GET under the sandbox policy class: status, sandboxes, packs,
+// current policy). They are an operator's CLI and TUI reads, not policy
+// writes or hook traffic: in the sandbox policy class's 20-request burst
+// about nine back-to-back "defenseclaw sandbox pack list" calls were refused
+// for 20 s (GAP-1693). Reads take the ordinary caller limits under their own
+// key, so they neither wait on nor use up the policy writes' or the host
+// hooks' budgets.
+const hookCallerSandboxRead = "|sandbox-read"
+
+// hookCallerAdmissionKey is hookCallerBudgetKey with the method: a read of
+// the sandbox policy class gets the read budget.
+func hookCallerAdmissionKey(identity, method, path string) string {
+	key := hookCallerBudgetKey(identity, path)
+	if method == http.MethodGet && strings.HasSuffix(key, "|"+sandboxBudgetPolicy) {
+		return identity + hookCallerSandboxRead
+	}
+	return key
+}
+
 // admitHookCaller applies the per-caller limits to one request for path and
 // waits for one of the caller's run slots. It returns the request to serve,
 // which carries the slot, and the release function to defer; the release
 // function is nil after answering 429 or when the client went away while it
-// waited.
+// waited; hookCallerLeft reports the second.
 func (a *APIServer) admitHookCaller(w http.ResponseWriter, r *http.Request, identity, route string) (*http.Request, func()) {
-	release, run, refusal, logNow := a.hookCallerLimits.acquire(hookCallerBudgetKey(identity, r.URL.Path))
+	release, run, refusal, logNow := a.hookCallerLimits.acquire(hookCallerAdmissionKey(identity, r.Method, r.URL.Path))
 	if refusal == "" {
 		if r.Context().Err() != nil {
-			// The client left before it had a slot: nothing to serve.
+			// The client left before it had a slot: nothing to serve. The
+			// caller audits a managed call it would have served (GAP-0286).
 			release()
-			return r, nil
+			return withHookCallerLeft(r), nil
 		}
 		// Advertise the receipt protocol as soon as a managed hook is
 		// admitted. Waiting for this caller's run slot can exceed the native
@@ -265,7 +293,7 @@ func (a *APIServer) admitHookCaller(w http.ResponseWriter, r *http.Request, iden
 			}
 		case <-r.Context().Done():
 			release()
-			return r, nil
+			return withHookCallerLeft(r), nil
 		}
 	}
 	if logNow {

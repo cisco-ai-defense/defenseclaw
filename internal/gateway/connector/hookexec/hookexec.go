@@ -281,9 +281,16 @@ type Options struct {
 	// perUserOutage is set on a per-user hook for a failure that is a gateway
 	// outage (withPerUserOutage): this account's gateway refused or dropped
 	// the connection, gave no connection within the restart budget, or could
-	// not be started. Only such a failure takes OutageFailMode; an answer the
+	// not be started. Only such a failure asks OutageFailModeNow; an answer the
 	// gateway gave, a stalled answer and every local failure stay closed.
 	perUserOutage bool
+	// The already bounded input is retained for failure-only audit correlation
+	// and session warning deduplication. It is never written to the audit log.
+	failurePayload []byte
+	// oversizedReview marks a balanced per-user call whose bounded prefix was
+	// sent to the gateway (OversizeUninspectedField). Only its answered allow
+	// gets the size warning.
+	oversizedReview bool
 	// answerBy is the answer deadline of a tool call (answerDeadline);
 	// doRequest sets it, and the request then asks for progress reports.
 	answerBy time.Time
@@ -314,14 +321,10 @@ type Options struct {
 	// closed independently. Only "open" opens: empty or any other value is
 	// "closed" (owner rule: hooks fail closed unless the operator chose open).
 	FailMode string
-	// OutageFailMode is a per-user hook's gateway-outage mode, the one Setup
-	// recorded in hooks/.hookcfg from the connector's policy tier
-	// (config.HookOutageFailMode): "open" lets a call through with a warning
-	// and a hook-failures.jsonl row when this account's gateway is not
-	// running, "closed" (or empty) blocks it. It applies only to a failure
-	// withPerUserOutage marked; FailMode governs every other failure.
-	// Managed and Secure Client hooks ignore it.
-	OutageFailMode string
+	// OutageFailModeNow returns the outage mode the hook's own config on disk
+	// gives this connector at call time. A nil callback keeps the outage
+	// closed. No mode written at setup time may override this decision.
+	OutageFailModeNow func() string
 
 	// Home is DEFENSECLAW_HOME (default ~/.defenseclaw). If it does not exist
 	// or contains a .disabled file the hook is a no-op (exit 0).
@@ -479,16 +482,13 @@ func runHook(ctx context.Context, opts Options) int {
 		sp = copilotVSCodeLocalSpec
 	}
 	if !ok {
-		if reason, removed := removedConnectorReason(opts.Connector); removed {
-			// until 1.1: a Windows hook an older release registered for a
-			// removed connector runs this launcher, not a script; it
-			// blocks the way the script's stub does.
-			if strings.EqualFold(strings.TrimSpace(opts.Connector), "openhands") {
-				body, _ := json.Marshal(map[string]string{"decision": "deny", "reason": reason})
-				fmt.Fprintln(opts.Stdout, string(body))
-			}
-			fmt.Fprintln(opts.Stderr, reason)
-			return blockExit
+		if removedConnector(opts.Connector) {
+			// until 1.1: a Windows hook an older release registered for
+			// OpenHands or OmniGent runs this launcher. DefenseClaw no
+			// longer guards them, so it lets the call run and says so; the
+			// gateway teardown removes the registration.
+			fmt.Fprintln(opts.Stderr, removedConnectorNotice)
+			return 0
 		}
 		// Unknown connector is a wiring bug, not a policy decision. Fail loud
 		// so it surfaces in tests / setup rather than silently disabling the
@@ -573,6 +573,7 @@ func runHook(ctx context.Context, opts Options) int {
 	}
 
 	payload, overflow, err := readCapped(opts.Stdin, opts.MaxBody)
+	opts.failurePayload = payload
 	// The agent may take its time writing the payload: an install that
 	// started meanwhile closes this call.
 	failMode = closeDuringInstall(&opts, failMode)
@@ -582,7 +583,7 @@ func runHook(ctx context.Context, opts Options) int {
 	}
 	if overflow {
 		opts.Event = managedHermesPrefixEvent(opts, sp, payload)
-		return handleOversized(opts, sp, failMode, payload)
+		return handleOversized(ctx, opts, sp, failMode, payload, startedAt)
 	}
 	if strings.EqualFold(strings.TrimSpace(opts.Connector), "codex") {
 		event, bindingErr := validateCodexInvocationBinding(
@@ -1204,6 +1205,17 @@ func doRequest(ctx context.Context, opts Options, sp spec, failMode string, payl
 	}
 
 	code := sp.decide(opts, body)
+	if opts.oversizedReview && validUniqueGatewayResponse(body) {
+		var verdict struct {
+			Action string `json:"action"`
+		}
+		if json.Unmarshal(body, &verdict) == nil && (verdict.Action == "allow" || verdict.Action == "alert") {
+			quiet := opts
+			quiet.Stderr = io.Discard
+			logHookFailure(quiet, sp, "stdin body exceeded cap; oversize, command not inspected", "transport", "open", false)
+			fmt.Fprintf(opts.Stderr, "defenseclaw: warning: %s hook payload exceeded the bounded inspection cap (oversize, command not inspected); gateway allowed this call and recorded its verdict\n", sp.connector)
+		}
+	}
 	if delivery != nil && resp.StatusCode == http.StatusOK && readErr == nil {
 		opts.answerWatch.setDeliveryReceipt(func(answered, localBlock bool) {
 			// finish calls this only after it writes the answer to the agent.
@@ -1459,7 +1471,9 @@ func (f *hookRequestFacts) set(header http.Header, opts Options, payload []byte)
 }
 
 func setHookRequestFacts(header http.Header, opts Options, payload []byte) {
-	if opts.ManagedEnterprise && !opts.SecureClient && runtime.GOOS != "windows" {
+	startupEvent := hookpaths.IsSessionStartEvent(opts.Event)
+	if opts.ManagedEnterprise && !opts.SecureClient &&
+		(runtime.GOOS != "windows" || startupEvent) {
 		// The surface and bound event are the ones this call sends the
 		// gateway (HookDialectHeader, X-DefenseClaw-Copilot-Event), so the
 		// evidence reads the body in the dialect the gateway judges.
@@ -1712,6 +1726,12 @@ func (sp spec) decide(opts Options, body []byte) int {
 		return 0
 
 	case styleHookEcho:
+		if sp.connector == "copilot" && (action == "allow" || action == "alert") {
+			var ids []string
+			if json.Unmarshal(fields["rule_ids"], &ids) == nil && slices.Contains(ids, "HOOK-TOOL-CALL-UNPARSED") && reason != "" {
+				fmt.Fprintln(opts.Stderr, "defenseclaw: "+reason)
+			}
+		}
 		if output != "" {
 			fmt.Fprintln(opts.Stdout, output)
 		} else if sp.dialect == copilotVSCodeLocalSurface && (action == "block" || action == "confirm") {
@@ -2164,11 +2184,31 @@ func handleUnavailableHome(opts Options, sp spec, failMode, reason string) int {
 
 // handleOversized mirrors the per-connector oversized-payload branch. prefix
 // is the start of the payload the hook read before it stopped at its cap.
-func handleOversized(opts Options, sp spec, failMode string, prefix []byte) int {
+func handleOversized(ctx context.Context, opts Options, sp spec, failMode string, prefix []byte, startedAt time.Time) int {
 	failMode = closeDuringInstall(&opts, failMode)
-	// An input the hook cannot fully read is a local parse failure, never
-	// an outage. Outside Secure Client it closes even if a per-user hook
-	// had an explicit open outage preference.
+	// The bounded read has inspected no more than MaxBody+1 bytes. A balanced
+	// per-user hook asks the gateway to judge the metadata and content prefix.
+	// Only a gateway allow permits the call; a transport outage follows the
+	// existing per-user outage rule in sendToGateway.
+	if !opts.ManagedEnterprise && !opts.SecureClient && !opts.StrictAvailability &&
+		opts.OutageFailModeNow != nil && normalizeFailMode(opts.OutageFailModeNow()) == "open" && !perUserInstallWindow(opts) {
+		// A prefix the reducer cannot turn into one request (a duplicated
+		// key) keeps the closed oversize answer below. Every review is marked
+		// uninspected (OversizeUninspectedField): the gateway warns and
+		// audits it in observe mode and blocks it in action mode.
+		bound := opts.Event
+		if sp.connector == "copilot" || sp.connector == "antigravity" {
+			bound = "" // their bodies carry no event; the request header binds it
+		}
+		if review := oversizedReviewPayload(prefix, bound); review != nil {
+			if strings.TrimSpace(opts.Event) == "" {
+				opts.Event = resolveHookEvent("", review)
+			}
+			opts.oversizedReview = true
+			return sendToGateway(ctx, opts, sp, failMode, review, startedAt)
+		}
+	}
+	// All managed and strict hooks keep their closed local-failure behavior.
 	failMode = managedNonOutageMode(&opts, failMode)
 	if !opts.SecureClient {
 		failMode, opts.FailMode = "closed", "closed"
@@ -2230,8 +2270,7 @@ func emitFailOpenAllow(opts Options, sp spec, reason string) int {
 }
 
 // withPerUserOutage marks opts for a per-user failure that is a gateway
-// outage, so failUnreachable answers it with the hook's OutageFailMode
-// (perUserOutageMode).
+// outage, so failUnreachable answers it with the runtime config's mode.
 func withPerUserOutage(opts Options) Options {
 	opts.perUserOutage = !opts.ManagedEnterprise && opts.ManagedUnixSocket == "" && !opts.SecureClient
 	return opts
@@ -2253,18 +2292,21 @@ func perUserOutageError(opts Options, err error) bool {
 	return gatewayRestartShaped(err)
 }
 
-// perUserOutageMode is the fail mode of a per-user failure: OutageFailMode
-// for a gateway outage withPerUserOutage marked (open in the default and
-// permissive policy tiers, config.HookOutageFailMode), failMode for every
-// other failure. Strict availability and this account's install window
-// close the outage too (closeDuringInstall runs first).
+// perUserOutageMode is the fail mode of a per-user failure: the config on
+// disk (OutageFailModeNow) decides a classified gateway outage, and failMode
+// governs every other failure.
+// Strict availability and this account's install window close the outage
+// too (closeDuringInstall runs first).
 func perUserOutageMode(opts *Options, failMode string) string {
-	if !opts.perUserOutage || opts.StrictAvailability || perUserInstallWindow(*opts) ||
-		normalizeFailMode(opts.OutageFailMode) != "open" {
+	if !opts.perUserOutage {
 		return failMode
 	}
-	opts.FailMode = "open"
-	return "open"
+	mode := "closed"
+	if !opts.StrictAvailability && !perUserInstallWindow(*opts) && opts.OutageFailModeNow != nil {
+		mode = normalizeFailMode(opts.OutageFailModeNow())
+	}
+	opts.FailMode = mode
+	return mode
 }
 
 func failUnreachable(opts Options, sp spec, failMode, reason string) int {
@@ -2314,12 +2356,20 @@ func failUnreachable(opts Options, sp spec, failMode, reason string) int {
 		}
 		return emitHookResult(opts, sp, sp.unreachableStrict)
 	}
-	if text := perUserOutageOpenText(opts, reason); text != "" && opts.perUserOutage {
-		fmt.Fprintf(opts.Stderr, "defenseclaw: %s\n", text)
-	} else {
-		fmt.Fprintf(opts.Stderr, "defenseclaw: %s: %s\n", unreachableLead(opts, sp, reason, "allowing"), unreachableDetail(opts, reason))
+	showWarning := true
+	if opts.perUserOutage {
+		showWarning = firstOutageWarning(opts)
 	}
-	if notice := perUserGatewayDownNotice(opts, sp, reason); notice != "" {
+	if text := perUserOutageOpenText(opts, reason); text != "" && opts.perUserOutage {
+		if showWarning && perUserGatewayDownNotice(opts, sp, reason) == "" {
+			fmt.Fprintf(opts.Stderr, "defenseclaw: %s\n", text)
+		}
+	} else {
+		if showWarning {
+			fmt.Fprintf(opts.Stderr, "defenseclaw: %s: %s\n", unreachableLead(opts, sp, reason, "allowing"), unreachableDetail(opts, reason))
+		}
+	}
+	if notice := perUserGatewayDownNotice(opts, sp, reason); notice != "" && showWarning {
 		fmt.Fprintln(opts.Stdout, notice)
 		return 0
 	}
@@ -2338,8 +2388,7 @@ func perUserInstallWindow(opts Options) bool {
 	if opts.ManagedEnterprise || opts.ManagedUnixSocket != "" || opts.SecureClient || strings.TrimSpace(opts.Home) == "" {
 		return false
 	}
-	_, err := os.Lstat(filepath.Join(opts.Home, installLockName))
-	return !errors.Is(err, os.ErrNotExist)
+	return installLockHeld(opts.Home)
 }
 
 // Copilot ignores a failed hook process. During a per-user install every
@@ -2812,15 +2861,19 @@ var installLockLstat = os.Lstat
 // installLockHeld reports whether the installer holds the per-user data
 // directory home: its .install.lock exists, as any file type (a symlink
 // marker too, so changing its type cannot open a hook during install or
-// upgrade), or it cannot be read for any reason but its absence. A lock
-// whose state cannot be verified is held (GAP-0862).
+// upgrade), or it cannot be read for any reason but its absence, and it is
+// not stale (installLockStale: its installer is proven gone). A lock whose
+// state cannot be verified is held (GAP-0862).
 func installLockHeld(home string) bool {
 	return installLockHeldBy(installLockLstat, home)
 }
 
 func installLockHeldBy(lstat func(string) (fs.FileInfo, error), home string) bool {
-	_, err := lstat(filepath.Join(home, ".install.lock"))
-	return err == nil || !errors.Is(err, fs.ErrNotExist)
+	info, err := lstat(filepath.Join(home, ".install.lock"))
+	if err != nil {
+		return !errors.Is(err, fs.ErrNotExist)
+	}
+	return !installLockStale(lstat, home, info)
 }
 
 // InstallLockHeld is installLockHeld for the hook command, which answers
@@ -4064,18 +4117,18 @@ func compactField(m map[string]json.RawMessage, field string) string {
 	return buf.String()
 }
 
-// removedConnectorReason is the block reason of a hook for a connector 1.0.4
-// removed (until 1.1), or false.
-func removedConnectorReason(connector string) (string, bool) {
-	switch strings.ToLower(strings.TrimSpace(connector)) {
-	case "openhands":
-		return "DefenseClaw blocked this call: OpenHands support was removed in DefenseClaw 1.0.4. " +
-			"To use OpenHands without DefenseClaw, remove every DefenseClaw hook from your OpenHands hooks.json, then restart OpenHands.", true
-	case "omnigent":
-		return "DefenseClaw blocked this call: OmniGent support was removed in DefenseClaw 1.0.4. " +
-			"To use OmniGent without DefenseClaw, remove DefenseClaw's policy from your OmniGent config.yaml, then restart OmniGent.", true
+// removedConnectorNotice is connector.RemovedConnectorNotice (this package
+// cannot import connector).
+const removedConnectorNotice = "OpenHands/OmniGent support was removed in 1.0.5; DefenseClaw no longer guards it."
+
+// removedConnector reports whether a hook names OpenHands or OmniGent, which
+// DefenseClaw no longer guards (until 1.1; connector.IsRemovedConnector).
+func removedConnector(name string) bool {
+	switch strings.ToLower(strings.TrimSpace(name)) {
+	case "openhands", "open-hands", "open_hands", "omnigent":
+		return true
 	}
-	return "", false
+	return false
 }
 
 // decodeDecision pulls the `decision` string from an already-compact JSON

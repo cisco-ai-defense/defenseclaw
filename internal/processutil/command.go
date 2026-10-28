@@ -64,6 +64,13 @@ func RunTree(cmd *exec.Cmd) error {
 // command left nothing running.
 var ErrNotContained = errors.New("processutil: could not establish that the command left nothing running")
 
+// ErrContainmentUnavailable reports, together with ErrNotContained, that the
+// command never ran because this host refused the namespaces containment
+// needs: a container seccomp profile or a sandbox that refuses user
+// namespaces, not only user.max_user_namespaces=0 (GAP-1945). A command that
+// ran and failed never carries it.
+var ErrContainmentUnavailable = errors.New("processutil: this host refuses the namespaces containment needs")
+
 // RunContained is RunTree for a command whose success counts only when
 // nothing it started outlives it. A Hermes hook that Verify probed could
 // start a child in a session of its own (setsid), out of the process group

@@ -116,7 +116,8 @@ func (s *ClawShieldVulnScanner) Scan(ctx context.Context, target string) (*ScanR
 	start := time.Now()
 	result := &ScanResult{Scanner: s.Name(), Target: target, Timestamp: start}
 
-	files, err := csCollectTextFiles(target)
+	strict := completeScanRequired(ctx)
+	files, err := csCollectTextFiles(target, strict)
 	if err != nil {
 		return nil, fmt.Errorf("scanner: clawshield-vuln: %w", err)
 	}
@@ -124,6 +125,9 @@ func (s *ClawShieldVulnScanner) Scan(ctx context.Context, target string) (*ScanR
 	for _, f := range files {
 		content, err := os.ReadFile(f)
 		if err != nil {
+			if strict {
+				return nil, fmt.Errorf("scanner: clawshield-vuln: %w", incompleteScan(f, err))
+			}
 			continue
 		}
 		result.Findings = append(result.Findings, csVulnScanContent(content, f)...)

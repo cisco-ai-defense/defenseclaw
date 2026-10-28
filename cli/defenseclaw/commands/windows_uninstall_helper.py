@@ -37,9 +37,12 @@ _ALLOWED_BINARIES = {
     "uvx.exe",
     "uvw.exe",
 }
-# A copy of an owned binary that a source install renamed aside while it ran
-# (install_publish; GAP-1929).
-_RETIRED_COPY_RE = re.compile(r"\.(?P<name>.+)\.source-install-old-[0-9a-f]+", re.IGNORECASE)
+# A copy of an owned binary that a source install (install_publish; GAP-1929)
+# or install.ps1 (<name>.old-<yyyyMMddTHHmmssfff>; GAP-1760) renamed aside
+# while it ran.
+_RETIRED_COPY_RE = re.compile(
+    r"\.(?P<name>.+)\.source-install-old-[0-9a-f]+|(?P<aside>.+)\.old-[0-9]{8}T[0-9]{9}", re.IGNORECASE
+)
 _OWNERSHIP_MARKERS = {"config.yaml", "audit.db", ".env", "policies", "quarantine", ".venv"}
 _LAUNCHER_UNWIND_GRACE_SECONDS = 1.0
 # scripts/install.ps1 holds this folder in the data dir while it installs; it
@@ -193,7 +196,9 @@ def _validate_plan(plan: dict[str, object]) -> tuple[str, str, list[str]]:
         target = _norm(str(raw))
         name = os.path.basename(target).lower()
         retired = _RETIRED_COPY_RE.fullmatch(name)
-        owned = name in _ALLOWED_BINARIES or (retired is not None and retired.group("name") in _ALLOWED_BINARIES)
+        owned = name in _ALLOWED_BINARIES or (
+            retired is not None and (retired.group("name") or retired.group("aside")) in _ALLOWED_BINARIES
+        )
         if not owned or os.path.dirname(target) != install_root:
             raise ValueError(f"binary target is not product-owned: {raw}")
         if os.path.lexists(target) and _is_reparse(target):

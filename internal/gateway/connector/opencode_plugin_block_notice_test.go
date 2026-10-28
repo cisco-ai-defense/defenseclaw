@@ -60,7 +60,7 @@ func TestOpenCodePluginKeepsDefenseClawReasons(t *testing.T) {
 	server := openCodeStubGateway(t, `{"action":"block","mode":"action","hook_output":{"decision":"deny","reason":"DefenseClaw blocked the command under policy."}}`)
 	lines := runOpenCodePluginHarness(t, openCodePluginTestData(t, server), 1)
 	if len(lines) != 2 || lines[0] != "block:DefenseClaw blocked the command under policy." ||
-		lines[1] != `toasts:[{"message":"DefenseClaw blocked the command under policy.","variant":"error"}]` {
+		lines[1] != `toasts:[{"title":"DefenseClaw","message":"DefenseClaw blocked the command under policy.","variant":"error","duration":15000}]` {
 		t.Fatalf("harness output = %q", lines)
 	}
 }

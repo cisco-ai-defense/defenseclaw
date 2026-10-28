@@ -1538,6 +1538,7 @@ func finalizeWindowsManagedHooksTeardown(
 				TargetSID:      target.SID,
 				DataDir:        target.DataDir,
 				HookExecutable: journal.HookBinary,
+				Retired:        true,
 			},
 		)
 		if err != nil {

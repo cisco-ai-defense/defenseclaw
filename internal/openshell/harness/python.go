@@ -52,6 +52,8 @@ type uvTool struct {
 	harness string
 	// dist is the PyPI distribution.
 	dist string
+	// extras are the distribution's pinned optional provider dependencies.
+	extras []string
 	// commands are entry points linked into /usr/local/bin; the first is
 	// the harness command.
 	commands []string
@@ -80,6 +82,10 @@ func (u uvTool) networkBinaries() string {
 // installSteps renders the Dockerfile RUN step for version.
 func (u uvTool) installSteps(displayName, version string) []InstallStep {
 	root := u.root()
+	distribution := u.dist
+	if len(u.extras) > 0 {
+		distribution += "[" + strings.Join(u.extras, ",") + "]"
+	}
 	var links strings.Builder
 	for _, cmd := range u.commands {
 		links.WriteString(`ln -sfn "$root/bin/` + cmd + `" /usr/local/bin/` + cmd + `; `)
@@ -90,7 +96,7 @@ func (u uvTool) installSteps(displayName, version string) []InstallStep {
 		`UV_PYTHON_BIN_DIR="$root/python/bin" UV_CACHE_DIR=/tmp/defenseclaw-uv-cache UV_PYTHON_PREFERENCE=only-managed UV_LINK_MODE=copy; ` +
 		`uv python install ` + shellQuote(pythonHarnessVersion) + `; ` +
 		`uv tool install --python ` + shellQuote(pythonHarnessVersion) + ` --exclude-newer ` + shellQuote(pythonExcludeNewer) + ` ` +
-		shellQuote(u.dist+"=="+version) + `; ` +
+		shellQuote(distribution+"=="+version) + `; ` +
 		links.String() +
 		`rm -rf /tmp/defenseclaw-uv-cache; ` +
 		`chown -R root:root "$root"; chmod -R go-w "$root"; ` +

@@ -3,8 +3,8 @@
 Scripts and examples that let a Linux host read Okta users and groups through the
 Okta LDAP Interface and SSSD, so DefenseClaw can pick a guardrail profile by Okta
 group. The step-by-step guide is in the docs:
-[Use Okta users on Linux](https://cisco-ai-defense.github.io/defenseclaw/docs/enterprise/identity/okta/)
-(source: `docs-site/content/docs/enterprise/identity/okta.mdx`).
+[Use Okta users on Linux](https://cisco-ai-defense.github.io/defenseclaw/docs/enterprise/identity-okta/)
+(source: `docs-site/content/docs/enterprise/identity-okta.mdx`).
 
 DefenseClaw never calls Okta. It sees an Okta user the way it sees any other SSSD
 account: the OS answers who the user is and which groups the user is in.

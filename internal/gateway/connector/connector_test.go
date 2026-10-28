@@ -1226,7 +1226,7 @@ func TestOpenClaw_Uninstall_RemovesAllDefenseClawLoadPaths(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := uninstallOpenClawExtension(ocHome); err != nil {
+	if err := uninstallOpenClawExtension(ocHome, false); err != nil {
 		t.Fatalf("uninstallOpenClawExtension: %v", err)
 	}
 
@@ -1308,6 +1308,122 @@ func TestOpenClaw_Setup_HILTEnablesPluginApprovalForwarding(t *testing.T) {
 	}
 	if targets, _ := pluginApprovals["targets"].([]interface{}); len(targets) != 1 {
 		t.Fatalf("approvals.plugin.targets clobbered: %v", pluginApprovals["targets"])
+	}
+}
+
+// GAP-1956: OpenClaw 2026.3.24 (the install.sh pin) rejects approvals.plugin,
+// so human approval on it is refused before openclaw.json is touched. The
+// refusal precedes the extension-bundle check, so it needs no bundle.
+func TestOpenClaw_Setup_HILTRefusedOnOpenClawWithoutPluginApprovals(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("OpenClaw requires the guardrail proxy and is intentionally unsupported by the native Windows hook-only build")
+	}
+	dir := t.TempDir()
+	ocHome := filepath.Join(dir, "openclaw-home")
+	if err := os.MkdirAll(ocHome, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	configPath := filepath.Join(ocHome, "openclaw.json")
+	before := []byte(`{"gateway":{"mode":"local"}}`)
+	if err := os.WriteFile(configPath, before, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	OpenClawHomeOverride = ocHome
+	defer func() { OpenClawHomeOverride = "" }()
+
+	c := NewOpenClawConnector()
+	opts := SetupOpts{DataDir: dir, ProxyAddr: "127.0.0.1:4000", APIAddr: "127.0.0.1:18970",
+		HILTEnabled: true, AgentVersion: "OpenClaw 2026.3.24 (cff6dc9)"}
+	err := c.Setup(context.Background(), opts)
+	if err == nil || !strings.Contains(err.Error(), "2026.3.28") || !strings.Contains(err.Error(), "2026.3.24") {
+		t.Fatalf("Setup err = %v, want the human approval refusal naming both versions", err)
+	}
+	after, _ := os.ReadFile(configPath)
+	if string(after) != string(before) {
+		t.Fatalf("openclaw.json changed by a refused setup: %s", after)
+	}
+	if _, err := os.Stat(filepath.Join(ocHome, "extensions", "defenseclaw")); !os.IsNotExist(err) {
+		t.Fatalf("extension written by a refused setup: %v", err)
+	}
+	for _, v := range []string{"OpenClaw 2026.3.28 (abc1234)", "2026.6.8", ""} {
+		if OpenClawLacksPluginApprovals(v) {
+			t.Fatalf("OpenClawLacksPluginApprovals(%q) = true", v)
+		}
+	}
+	if !OpenClawLacksPluginApprovals("2026.3.24") {
+		t.Fatal("OpenClawLacksPluginApprovals(2026.3.24) = false")
+	}
+}
+
+// GAP-2109: an approvals.plugin block an earlier setup --human-approval wrote
+// keeps an OpenClaw without plugin approvals from starting. Setup without
+// human approval and teardown take it back out on such an OpenClaw, and keep
+// every other approvals setting and any block of another shape.
+func TestOpenClaw_SetupAndTeardownDropTheRejectedPluginApprovalsBlock(t *testing.T) {
+	requireOpenClawExtensionBundle(t)
+
+	const written = `{"approvals":{"exec":{"enabled":true},"plugin":{"enabled":true,"mode":"session"}},"gateway":{"mode":"local"}}`
+	readApprovals := func(t *testing.T, path string) map[string]interface{} {
+		t.Helper()
+		var cfg map[string]interface{}
+		data, _ := os.ReadFile(path)
+		if err := json.Unmarshal(data, &cfg); err != nil {
+			t.Fatalf("openclaw.json not valid JSON: %v (%s)", err, data)
+		}
+		approvals, _ := cfg["approvals"].(map[string]interface{})
+		return approvals
+	}
+	for _, tc := range []struct {
+		name, version, config string
+		wantPlugin            bool
+	}{
+		{"old OpenClaw drops the written block", "OpenClaw 2026.3.24 (cff6dc9)", written, false},
+		{"plugin approvals supported keeps it", "OpenClaw 2026.6.8 (844f405)", written, true},
+		{"unknown version keeps it", "", written, true},
+		{"another shape is the operator's", "OpenClaw 2026.3.24 (cff6dc9)",
+			`{"approvals":{"exec":{"enabled":true},"plugin":{"enabled":true,"mode":"session","agentFilter":["main"]}}}`, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			ocHome := filepath.Join(dir, "openclaw-home")
+			if err := os.MkdirAll(ocHome, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			configPath := filepath.Join(ocHome, "openclaw.json")
+			if err := os.WriteFile(configPath, []byte(tc.config), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			OpenClawHomeOverride = ocHome
+			defer func() { OpenClawHomeOverride = "" }()
+
+			c := NewOpenClawConnector()
+			opts := SetupOpts{DataDir: dir, ProxyAddr: "127.0.0.1:4000", APIAddr: "127.0.0.1:18970", AgentVersion: tc.version}
+			if err := c.Setup(context.Background(), opts); err != nil {
+				t.Fatalf("Setup: %v", err)
+			}
+			approvals := readApprovals(t, configPath)
+			if _, ok := approvals["plugin"]; ok != tc.wantPlugin {
+				t.Fatalf("after Setup approvals.plugin present = %v, want %v (%v)", ok, tc.wantPlugin, approvals)
+			}
+			if _, ok := approvals["exec"]; !ok {
+				t.Fatalf("Setup dropped the operator's approvals.exec: %v", approvals)
+			}
+
+			// Teardown after an earlier release wrote it again.
+			if err := os.WriteFile(configPath, []byte(tc.config), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if err := c.Teardown(context.Background(), opts); err != nil {
+				t.Fatalf("Teardown: %v", err)
+			}
+			approvals = readApprovals(t, configPath)
+			if _, ok := approvals["plugin"]; ok != tc.wantPlugin {
+				t.Fatalf("after Teardown approvals.plugin present = %v, want %v (%v)", ok, tc.wantPlugin, approvals)
+			}
+			if _, ok := approvals["exec"]; !ok {
+				t.Fatalf("Teardown dropped the operator's approvals.exec: %v", approvals)
+			}
+		})
 	}
 }
 
@@ -2613,7 +2729,9 @@ func TestVerifyClaudeCodeHookMatrixRejectsAsyncAliasesOnEnforcingEvents(t *testi
 		t.Fatal(err)
 	}
 	baseHooks := base["hooks"].(map[string]interface{})
-	baseHandler := baseHooks["PreToolUse"].([]interface{})[0].(map[string]interface{})["hooks"].([]interface{})[0].(map[string]interface{})
+	// The base invocation is that of an event Setup writes unchanged; on
+	// Windows PreToolUse may differ from it (claudeCodeHandlerInvocation).
+	baseHandler := baseHooks["Stop"].([]interface{})[0].(map[string]interface{})["hooks"].([]interface{})[0].(map[string]interface{})
 	expectedCommand := baseHandler["command"].(string)
 	var expectedArgs []string
 	if rawArgs, exists := baseHandler["args"].([]interface{}); exists {
@@ -2675,10 +2793,12 @@ func TestVerifyClaudeCodeHookMatrixRejectsMalformedUnexpectedEvent(t *testing.T)
 		t.Fatal(err)
 	}
 	hooks := settings["hooks"].(map[string]interface{})
-	preToolHandler := hooks["PreToolUse"].([]interface{})[0].(map[string]interface{})["hooks"].([]interface{})[0].(map[string]interface{})
-	expectedCommand := preToolHandler["command"].(string)
+	// The base invocation is that of an event Setup writes unchanged; on
+	// Windows PreToolUse may differ from it (claudeCodeHandlerInvocation).
+	baseHandler := hooks["Stop"].([]interface{})[0].(map[string]interface{})["hooks"].([]interface{})[0].(map[string]interface{})
+	expectedCommand := baseHandler["command"].(string)
 	var expectedArgs []string
-	if rawArgs, exists := preToolHandler["args"].([]interface{}); exists {
+	if rawArgs, exists := baseHandler["args"].([]interface{}); exists {
 		for _, rawArg := range rawArgs {
 			expectedArgs = append(expectedArgs, rawArg.(string))
 		}
@@ -7546,7 +7666,9 @@ func runHookAndCaptureNativeTransport(t *testing.T, scriptPath string, extraEnv 
 	go func() { _ = server.Serve(listener) }()
 	t.Cleanup(func() { _ = server.Close() })
 
-	home := t.TempDir()
+	// The installed hook path, not an inherited HOME, selects the native
+	// helper. Put this fixture's helper beside the rendered hook data tree.
+	home := filepath.Dir(filepath.Dir(scriptPath))
 	installNativeGatewayForHookTest(t, home)
 	binary := filepath.Join(home, ".local", "bin", "defenseclaw-gateway")
 	realBinary := binary + ".real"
@@ -7559,6 +7681,7 @@ func runHookAndCaptureNativeTransport(t *testing.T, scriptPath string, extraEnv 
 	if err := os.WriteFile(binary, []byte(wrapper), 0o700); err != nil {
 		t.Fatal(err)
 	}
+	linkGatewayBinaryToHookDirForTest(t, filepath.Dir(scriptPath), binary)
 	dataDir := filepath.Join(home, ".defenseclaw")
 	if err := os.Mkdir(dataDir, 0o700); err != nil {
 		t.Fatal(err)
@@ -8440,27 +8563,6 @@ func TestApplyClaudeCodeManagedOtelEnvMigratesPercentEncodedNativeOTLPBearer(t *
 	}
 }
 
-func TestClaudeCodeOtelHeadersAreDefenseClawOnlyRecognizesScopedBearers(t *testing.T) {
-	scopedToken := strings.Repeat("a", 64)
-	for _, headers := range []string{
-		"authorization=Bearer " + scopedToken + ",x-defenseclaw-client=claudecode-otel/1.0,x-defenseclaw-source=claudecode",
-		"authorization=Bearer%20" + scopedToken + ",x-defenseclaw-client=claudecode-otel%2F1.0,x-defenseclaw-source=claudecode",
-	} {
-		if !claudeCodeOtelHeadersAreDefenseClawOnly(headers) {
-			t.Errorf("DefenseClaw-only Claude headers were not recognized")
-		}
-	}
-	for _, headers := range []string{
-		"authorization=Bearer operator-token,x-defenseclaw-source=claudecode",
-		"authorization=Bearer " + scopedToken + ",x-operator-trace=keep,x-defenseclaw-source=claudecode",
-		"authorization=Bearer " + scopedToken + ",x-defenseclaw-client=claudecode-otel/1.0",
-	} {
-		if claudeCodeOtelHeadersAreDefenseClawOnly(headers) {
-			t.Errorf("operator or incomplete Claude headers were claimed as DefenseClaw-only")
-		}
-	}
-}
-
 func TestClaudeCode_Setup_ContentCaptureDefaultsOffAndTeardownRestores(t *testing.T) {
 
 	dir := t.TempDir()
@@ -8613,8 +8715,15 @@ func TestClaudeCode_TeardownCleansDefenseClawOtelFromContaminatedPristineEnv(t *
 		sandboxNativeOTLP: true,
 	}
 	oldManaged := buildClaudeCodeOtelEnv(oldOpts)
+	// The older registration's scoped token is still in its sidecar, so the
+	// install can name the stale header's credential. Markers and the token
+	// shape alone are no proof (GAP-1511).
+	oldSidecarToken, err := EnsureOTLPPathToken(dir, OTLPScopeClaude)
+	if err != nil {
+		t.Fatal(err)
+	}
 	oldDefenseClawHeaders := "x-defenseclaw-client=claudecode-otel%2F0.9," +
-		"x-defenseclaw-source=claudecode,x-defenseclaw-token=" + strings.Repeat("c", 64)
+		"x-defenseclaw-source=claudecode,x-defenseclaw-token=" + oldSidecarToken
 	operatorMixedHeaders := "x-defenseclaw-source=claudecode,x-operator-trace=keep"
 	pristine := map[string]interface{}{
 		"autoUpdatesChannel": "latest",
@@ -9046,8 +9155,8 @@ func TestClaudeCode_Setup_PreservesNonOtelEnvKeys(t *testing.T) {
 	if env["CLAUDE_CODE_ENABLE_TELEMETRY"] != "0" {
 		t.Errorf("OTel keys not merged in alongside operator keys (got CLAUDE_CODE_ENABLE_TELEMETRY=%v)", env["CLAUDE_CODE_ENABLE_TELEMETRY"])
 	}
-	if env["DEFENSECLAW_FAIL_MODE"] != "closed" {
-		t.Errorf("DEFENSECLAW_FAIL_MODE not merged: got %v", env["DEFENSECLAW_FAIL_MODE"])
+	if _, present := env["DEFENSECLAW_FAIL_MODE"]; present {
+		t.Errorf("per-user setup wrote DEFENSECLAW_FAIL_MODE, which no hook reads: %v", env["DEFENSECLAW_FAIL_MODE"])
 	}
 }
 
@@ -9960,7 +10069,7 @@ func TestHookScript_FailMode_RespectedOnResponseFailure(t *testing.T) {
 		t.Fatalf("writeHookScriptsCommonWithFailMode: %v", err)
 	}
 	dcHome := t.TempDir()
-	installNativeGatewayForHookTest(t, dcHome)
+	installNativeGatewayForHookTest(t, dcHome, dir)
 	// This account's gateway is running, so a 401 means its token drifted.
 	if err := os.WriteFile(filepath.Join(dcHome, "gateway.pid"), []byte(fmt.Sprintf(`{"pid":%d}`, os.Getpid())), 0o600); err != nil {
 		t.Fatal(err)
@@ -10025,7 +10134,7 @@ func TestHookScript_401WithoutOwnGateway_NamesAnotherListener(t *testing.T) {
 		t.Fatalf("writeHookScriptsCommonWithFailMode: %v", err)
 	}
 	dcHome := t.TempDir()
-	installNativeGatewayForHookTest(t, dcHome)
+	installNativeGatewayForHookTest(t, dcHome, dir)
 	cmd := exec.Command("bash", filepath.Join(dir, "claude-code-hook.sh"))
 	cmd.Stdin = strings.NewReader(`{"hook_event_name":"test"}`)
 	cmd.Env = append(os.Environ(), "HOME="+dcHome, "DEFENSECLAW_HOME="+dcHome)
@@ -10037,8 +10146,8 @@ func TestHookScript_401WithoutOwnGateway_NamesAnotherListener(t *testing.T) {
 	}
 }
 
-// TestHookScript_EnvFailModeIsNotRead covers inherited environment and legacy
-// configured-open values: neither can reopen a per-user hook.
+// TestHookScript_EnvFailModeIsNotRead covers inherited environment and render
+// modes: neither can change the current config's outage decision.
 func TestHookScript_EnvFailModeIsNotRead(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("shell scripts not supported on windows")
@@ -10053,18 +10162,19 @@ func TestHookScript_EnvFailModeIsNotRead(t *testing.T) {
 		{NewClaudeCodeConnector(), "claude-code-hook.sh", nil, `{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"ls"}}`},
 	} {
 		for _, tc := range []struct {
-			installed, env string
-			wantBlock      bool
+			installed, env, tier string
+			wantBlock            bool
 		}{
-			{"closed", "open", true},
-			{"closed", "OPEN", true},
+			{"closed", "open", "strict", true},
+			{"closed", "OPEN", "strict", true},
 			// Installed outage open (the default and permissive tiers): the
 			// environment cannot close it either; the outage runs the call.
-			{"open", "closed", false},
-			{"open", "Closed", false},
-			{"open", " CLOSED ", false},
-			{"open", "", false},
-			{"closed", "", true},
+			{"open", "closed", "default", false},
+			{"open", "Closed", "default", false},
+			{"open", " CLOSED ", "default", false},
+			{"open", "", "default", false},
+			{"closed", "", "default", false},
+			{"open", "open", "strict", true},
 		} {
 			t.Run(agent.conn.Name()+"/"+tc.installed+"/env="+tc.env, func(t *testing.T) {
 				home := t.TempDir()
@@ -10072,6 +10182,11 @@ func TestHookScript_EnvFailModeIsNotRead(t *testing.T) {
 				opts := SetupOpts{DataDir: home, APIAddr: "127.0.0.1:1", APIToken: "scoped-test-token", HookFailMode: tc.installed}
 				if err := WriteHookScriptsForConnectorObjectWithOpts(hookDir, opts, agent.conn); err != nil {
 					t.Fatal(err)
+				}
+				// The config the outage-open hook reads gives the open tier.
+				installOutageOpenRuntimeForHookTest(t, home, home)
+				if tc.tier == "strict" {
+					writeOutageTierConfig(t, home, outageStrictTierConfig)
 				}
 				cmd := exec.Command("bash", append([]string{filepath.Join(hookDir, agent.script)}, agent.args...)...)
 				cmd.Stdin = strings.NewReader(agent.payload)
@@ -10402,7 +10517,7 @@ func TestCodexHookScriptBindsEventWithoutJQOrPython(t *testing.T) {
 	scriptPath := filepath.Join(dir, "codex-hook.sh")
 	bakeHookPathForTest(t, scriptPath, toolDir)
 	home := t.TempDir()
-	installNativeGatewayForHookTest(t, home)
+	installNativeGatewayForHookTest(t, home, dir)
 
 	runStdout := ""
 	run := func(input string) (int, string) {
@@ -10603,7 +10718,7 @@ func TestCodexHookScript_StructuredBlock_ExitsZeroNotTwo(t *testing.T) {
 		t.Fatalf("WriteHookScriptsForConnectorObjectWithOpts: %v", err)
 	}
 	dcHome := t.TempDir()
-	installNativeGatewayForHookTest(t, dcHome)
+	installNativeGatewayForHookTest(t, dcHome, dir)
 
 	cmd := exec.Command(
 		"bash",
@@ -10675,7 +10790,7 @@ func TestClaudeCodeHookScript_SuppressesCursorCompatibilityImport(t *testing.T) 
 
 	dir := t.TempDir()
 	dcHome := t.TempDir()
-	installNativeGatewayForHookTest(t, dcHome)
+	installNativeGatewayForHookTest(t, dcHome, dir)
 	if err := WriteHookScriptsForConnectorObjectWithOpts(dir, SetupOpts{APIAddr: addr, APIToken: "claude-token"}, &ClaudeCodeConnector{}); err != nil {
 		t.Fatalf("write Claude Code hook: %v", err)
 	}
@@ -10795,7 +10910,7 @@ func TestClaudeCodeHookScript_StructuredBlock_ExitsZeroNotTwo(t *testing.T) {
 		t.Fatalf("WriteHookScriptsForConnectorObjectWithOpts: %v", err)
 	}
 	dcHome := t.TempDir()
-	installNativeGatewayForHookTest(t, dcHome)
+	installNativeGatewayForHookTest(t, dcHome, dir)
 
 	cmd := exec.Command("bash", filepath.Join(dir, "claude-code-hook.sh"))
 	cmd.Stdin = strings.NewReader(`{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"cat /etc/shadow"}}`)
@@ -10857,7 +10972,7 @@ func TestClaudeCodeHookScript_NoStructuredOutput_FallsBackToExitTwo(t *testing.T
 		t.Fatalf("WriteHookScriptsForConnectorObjectWithOpts: %v", err)
 	}
 	dcHome := t.TempDir()
-	installNativeGatewayForHookTest(t, dcHome)
+	installNativeGatewayForHookTest(t, dcHome, dir)
 
 	cmd := exec.Command("bash", filepath.Join(dir, "claude-code-hook.sh"))
 	cmd.Stdin = strings.NewReader(`{"hook_event_name":"PreToolUse"}`)
@@ -10913,7 +11028,7 @@ func TestCodexHookScript_NoStructuredOutput_EmitsInlineBlockJSON(t *testing.T) {
 		t.Fatalf("WriteHookScriptsForConnectorObjectWithOpts: %v", err)
 	}
 	dcHome := t.TempDir()
-	installNativeGatewayForHookTest(t, dcHome)
+	installNativeGatewayForHookTest(t, dcHome, dir)
 
 	cmd := exec.Command(
 		"bash",
@@ -10981,7 +11096,7 @@ func TestPatchOpenClawConfig_Concurrent(t *testing.T) {
 		wg.Add(1)
 		go func(idx int) {
 			defer wg.Done()
-			errs[idx] = patchOpenClawConfig(configPath, "/tmp/ext-"+strings.Repeat("x", idx), false)
+			errs[idx] = patchOpenClawConfig(configPath, "/tmp/ext-"+strings.Repeat("x", idx), false, false)
 		}(i)
 	}
 	wg.Wait()
@@ -12371,5 +12486,53 @@ func skipManagedWindowsCodexHostSetup(t *testing.T) {
 	t.Helper()
 	if runtime.GOOS == "windows" {
 		t.Skip("managed Windows Codex hooks are machine policy that the requirements installer writes; host Setup refuses them")
+	}
+}
+
+func TestClaudeCodeWatchPathsForUnverifiedHomeKeepProjectEntries(t *testing.T) {
+	project := t.TempDir()
+	command := filepath.Join(project, ".claude", "commands", "review.md")
+	if err := os.MkdirAll(filepath.Dir(command), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(command, []byte("# review\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// The gateway's own working directory must never be watched in place of
+	// an unknown user directory.
+	gatewayCWD := t.TempDir()
+	for _, dir := range []string{"commands", "agents", filepath.Join("skills", "s")} {
+		if err := os.MkdirAll(filepath.Join(gatewayCWD, dir), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, file := range []string{filepath.Join("commands", "x.md"), filepath.Join("agents", "a.md"), filepath.Join("skills", "s", "SKILL.md")} {
+		if err := os.WriteFile(filepath.Join(gatewayCWD, file), []byte("x\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Chdir(gatewayCWD)
+	for _, home := range []string{"", "relative/home", string(filepath.Separator), string(filepath.Separator) + string(filepath.Separator)} {
+		t.Run(home, func(t *testing.T) {
+			paths := ClaudeCodeWatchPathsForHome(project, home)
+			for _, want := range []string{
+				filepath.Join(project, ".mcp.json"),
+				filepath.Join(project, ".claude", "settings.local.json"),
+				filepath.Join(project, ".claude", "settings.json"),
+				command,
+			} {
+				if !slices.Contains(paths, want) {
+					t.Fatalf("project watch path %s missing: %v", want, paths)
+				}
+			}
+			for _, path := range paths {
+				if !strings.HasPrefix(path, project+string(filepath.Separator)) {
+					t.Fatalf("watch path %s is outside the project: %v", path, paths)
+				}
+			}
+		})
+	}
+	if paths := ClaudeCodeWatchPathsForHome("", ""); paths == nil || len(paths) != 0 {
+		t.Fatalf("no project and no home = %#v, want an empty list", paths)
 	}
 }

@@ -20,7 +20,7 @@
 
 .DESCRIPTION
       powershell -File scripts\test-install-lifecycle.ps1 -Assets DIR [-PreviousAssets DIR]
-          [-Lanes "fresh fleet-opt-in setup-import files-in-use failure-drill policy upgrade-previous shim upgrade-0.8.3"]
+          [-Lanes "fresh fleet-opt-in setup-import files-in-use failure-drill failure-drill-exit3 policy upgrade-previous shim upgrade-0.8.3"]
           [-CodexExe PATH] [-Root DIR] [-Keep]
 
     upgrade-previous and shim need -PreviousAssets (an older 1.x release); the
@@ -717,13 +717,13 @@ function Test-FilesInUse {
 # undone. Exit 3 alone does not prove that a connector is guarded: a gateway
 # that reports 3 without running must also be undone. The drill gateway
 # hands every other command to the real one, so the staged config check passes.
-function Test-FailureDrill {
-    Enter-Lane failure-drill
+# New-FailureDrill: in a lane with a running $Target install, build release
+# assets whose gateway refuses to start (exit DC_DRILL_START_EXIT, default 1)
+# and passes every other command to the real gateway. Returns the assets
+# directory, or "" when the install or the gateway did not come up.
+function New-FailureDrill {
     Check ((Install-Candidate $Assets) -eq 0) "install of $Target failed"
-    if (-not (Initialize-Gateway)) { return }
-    $gateway = Join-Path $Bin "defenseclaw-gateway.exe"
-    $goodGateway = Get-Sha256 $gateway
-    $config = Get-Sha256 (Join-Path $DcHome "config.yaml")
+    if (-not (Initialize-Gateway)) { return "" }
     $source = Join-Path $Lane "DrillGateway.cs"
     $realGateway = Join-Path $Lane "real-gateway.exe"
     # The command line after the program name goes to the real gateway as is.
@@ -749,6 +749,18 @@ public static class DrillGateway {
             "Add-Type -Path '$source' -OutputAssembly '$(Join-Path $Zip "defenseclaw-gateway.exe")' -OutputType ConsoleApplication")
         Check ($built -eq 0) "could not build the drill gateway"
     }
+    return $drill
+}
+
+# The two failure drills run as two lanes (each about half of the 13 to 20
+# minutes they took together on a hosted runner).
+function Test-FailureDrill {
+    Enter-Lane failure-drill
+    $gateway = Join-Path $Bin "defenseclaw-gateway.exe"
+    $drill = New-FailureDrill
+    if (-not $drill) { return }
+    $goodGateway = Get-Sha256 $gateway
+    $config = Get-Sha256 (Join-Path $DcHome "config.yaml")
 
     Write-Log "an install whose gateway does not start is undone"
     Check ((Install-Candidate $drill) -eq 1) "an install whose gateway does not start must exit 1"
@@ -760,6 +772,15 @@ public static class DrillGateway {
     Check (@(Get-ChildItem -LiteralPath $DcHome -Directory -Force -Filter ".failed-*").Count -eq 1) "the failed install was not kept in .failed-*"
     Check (-not (Test-Path -LiteralPath (Join-Path $DcHome ".repair"))) "the repair slot was left behind"
     Check ((Invoke-Exe $gateway @("start")) -eq 0) "the restored gateway did not start for the next upgrade"
+    Assert-Healthy
+}
+
+function Test-FailureDrillExit3 {
+    Enter-Lane failure-drill-exit3
+    $gateway = Join-Path $Bin "defenseclaw-gateway.exe"
+    $drill = New-FailureDrill
+    if (-not $drill) { return }
+    $goodGateway = Get-Sha256 $gateway
     Assert-Healthy
 
     Write-Log "exit 3 without a running gateway cannot certify the new version"
@@ -929,6 +950,7 @@ try {
             "files-in-use" { Invoke-Lane $lane { Test-FilesInUse } }
             "setup-import" { Invoke-Lane $lane { Test-SetupImport } }
             "failure-drill" { Invoke-Lane $lane { Test-FailureDrill } }
+            "failure-drill-exit3" { Invoke-Lane $lane { Test-FailureDrillExit3 } }
             "policy" { Invoke-Lane $lane { Test-Policy } }
             { $_ -like "upgrade-0.*" } { Invoke-Lane $lane { Test-UpgradeLegacy $lane.Substring(8) } }
             default { throw "unknown lane: $lane" }

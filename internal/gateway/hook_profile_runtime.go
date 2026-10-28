@@ -123,7 +123,9 @@ func decodeClaudeCodeRequestForContext(ctx context.Context, rawBody []byte, payl
 	req.NewCWD = hookCWDForContext(ctx, req.NewCWD)
 	req.OldCWD = hookCWDForContext(ctx, req.OldCWD)
 	req.sandboxView, _ = sandboxHookView(ctx)
-	return req
+	// A failed check renders its answer from this request too: a managed
+	// gateway watches the verified caller's home, never its own (GAP-0472).
+	return req.withWatchHome(ctx)
 }
 
 func decodeCodexRequestFromBytes(rawBody []byte, payload map[string]interface{}) codexHookRequest {

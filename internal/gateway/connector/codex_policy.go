@@ -82,6 +82,14 @@ var codexAppServerCommand = func(ctx context.Context, executable string) *exec.C
 	return newCodexAppServerCommand(ctx, executable)
 }
 
+// codexAppServerAfterStart runs once the app-server has started; tests use
+// it to let a fixture exit before the first request.
+var codexAppServerAfterStart = func() {}
+
+// codexAppServerExitWait bounds the wait, after a request could not be
+// written, for the app-server's output to close.
+const codexAppServerExitWait = 2 * time.Second
+
 // errCodexAppServerNoAnswer marks a Codex app-server that closed its output
 // before it answered: it exited at startup and said nothing about the policy.
 var errCodexAppServerNoAnswer = errors.New("the Codex app-server exited before answering")
@@ -254,7 +262,7 @@ func validateCodexPolicyExecutable(opts SetupOpts) (string, error) {
 		return "", fmt.Errorf("selected Codex executable does not match protected evidence: %s", executable)
 	}
 	if strings.TrimSpace(opts.AgentVersion) != strings.TrimSpace(expectedVersion) {
-		return "", errors.New("selected Codex executable evidence is bound to a different agent version")
+		return "", fmt.Errorf("selected Codex executable evidence is bound to a different agent version (%w)", ErrCodexExecutableChanged)
 	}
 
 	info, err := os.Lstat(executable)
@@ -275,10 +283,17 @@ func validateCodexPolicyExecutable(opts SetupOpts) (string, error) {
 		return "", fmt.Errorf("selected Codex executable changed during validation: %s", executable)
 	}
 	if digest != expectedDigest {
-		return "", fmt.Errorf("selected Codex executable digest does not match protected evidence: %s", executable)
+		return "", fmt.Errorf("selected Codex executable digest does not match protected evidence: %s (%w)", executable, ErrCodexExecutableChanged)
 	}
 	return executable, nil
 }
+
+// ErrCodexExecutableChanged marks Codex executable evidence that no longer
+// matches the executable setup sealed: Codex updated itself (or was
+// replaced) since setup. The gateway does not run an executable it did not
+// admit, so the next step is setup again, which admits the new version; the
+// error says so instead of only "run doctor" (GAP-1884).
+var ErrCodexExecutableChanged = errors.New("the Codex executable changed since setup (a Codex update does this); run: defenseclaw setup codex --yes")
 
 func sameCodexExecutablePath(left, right string) bool {
 	left = filepath.Clean(strings.TrimSpace(left))
@@ -418,9 +433,24 @@ func inspectCodexPolicyWithAppServer(parent context.Context, executable, codexHo
 		_ = stdin.Close()
 		cleanup()
 	}()
+	codexAppServerAfterStart()
 
 	events := make(chan codexRPCEvent, 3)
 	go decodeCodexRPC(stdout, events)
+
+	// A request the app-server never read (a broken pipe: it exited at
+	// startup, for example because its runtime is not on PATH) is the same
+	// as a closed response stream. It names the program and what it said,
+	// not a write error with the wrong next step (GAP-0620).
+	sendFailed := func(request string, err error) error {
+		closed, stop := context.WithTimeout(ctx, codexAppServerExitWait)
+		defer stop()
+		if _, waitErr := waitCodexRPC(closed, events, 1); errors.Is(waitErr, errCodexAppServerNoAnswer) {
+			return withCodexStderr(fmt.Errorf("%s app-server exited before it read %s: %w (%w)",
+				executable, request, err, errCodexAppServerNoAnswer), stderr.String())
+		}
+		return fmt.Errorf("send %s: %w", request, err)
+	}
 
 	encoder := json.NewEncoder(stdin)
 	if err := encoder.Encode(map[string]any{
@@ -434,20 +464,20 @@ func inspectCodexPolicyWithAppServer(parent context.Context, executable, codexHo
 			},
 		},
 	}); err != nil {
-		return policy, fmt.Errorf("send initialize: %w", err)
+		return policy, sendFailed("initialize", err)
 	}
 	if _, err := waitCodexRPC(ctx, events, 1); err != nil {
 		return policy, withCodexStderr(err, stderr.String())
 	}
 	if err := encoder.Encode(map[string]any{"method": "initialized"}); err != nil {
-		return policy, fmt.Errorf("send initialized: %w", err)
+		return policy, sendFailed("initialized", err)
 	}
 	if err := encoder.Encode(map[string]any{
 		"method": "configRequirements/read",
 		"id":     2,
 		"params": map[string]any{},
 	}); err != nil {
-		return policy, fmt.Errorf("send configRequirements/read: %w", err)
+		return policy, sendFailed("configRequirements/read", err)
 	}
 	envelope, err := waitCodexRPC(ctx, events, 2)
 	if err != nil {

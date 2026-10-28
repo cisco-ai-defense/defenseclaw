@@ -47,7 +47,6 @@ func TestR104ActionProtectedMentionIndependentOfOperandRole(t *testing.T) {
 		"cat " + target,
 		"cat " + target + " | head -n 1",
 		"echo '$HOME/.ssh/authorized_keys'",
-		"echo \\$HOME/.ssh/authorized_keys",
 		"stat " + target,
 		"cd " + filepath.Join(home, ".ssh"),
 		"pushd " + filepath.Join(home, ".ssh"),
@@ -62,6 +61,18 @@ func TestR104ActionProtectedMentionIndependentOfOperandRole(t *testing.T) {
 				t.Fatalf("decision = %q, want allow", got)
 			}
 		})
+	}
+	// A POSIX shell keeps an escaped dollar literal. A Windows home selects
+	// the PowerShell grammar, where a backslash is a path separator and
+	// $HOME still expands, so there the same text names the protected file
+	// like any echo of it. The single-quoted literal above is allowed on both.
+	escaped := "echo \\$HOME/.ssh/authorized_keys"
+	wantEscaped := ""
+	if actionWindowsHome(home) {
+		wantEscaped = "protected-target"
+	}
+	if got := ActionCommandDecision(escaped, cwd, home); got != wantEscaped {
+		t.Errorf("escaped dollar %q decision = %q, want %q", escaped, got, wantEscaped)
 	}
 	if runtime.GOOS != "windows" {
 		for _, command := range []string{

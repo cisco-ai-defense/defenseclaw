@@ -14,6 +14,7 @@ import (
 	"bytes"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -62,5 +63,50 @@ func TestPerUserInstallLockClosesNativeHookFailures(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+// The carry keeps the fix/r104-oss-outage-open identity rule
+// (installLockStale): the lock is stale only when its installer is proven
+// gone, and no clock is read. The live owner is another running process
+// (this test's parent): a lock naming the reader's own pid is a reused pid.
+func TestPerUserInstallLockIsBoundedByItsOwnerNotItsAge(t *testing.T) {
+	live := strconv.Itoa(os.Getppid())
+	for _, tc := range []struct {
+		name, pid string
+		age       time.Duration
+		held      bool
+	}{
+		{"new lock without pid", "", 0, true},
+		{"dead owner", "99999999", 0, false},
+		{"live owner", live, 0, true},
+		{"aged live owner", live, 11 * time.Minute, true},
+		{"aged lock without pid", "", 11 * time.Minute, true},
+		{"pid reused by the reader", strconv.Itoa(os.Getpid()), 0, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			home := t.TempDir()
+			lock := filepath.Join(home, ".install.lock")
+			if err := os.Mkdir(lock, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if tc.pid != "" {
+				if err := os.WriteFile(filepath.Join(lock, "pid"), []byte(tc.pid+"\n"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if tc.age != 0 {
+				then := time.Now().Add(-tc.age)
+				if err := os.Chtimes(lock, then, then); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if got := InstallLockHeld(home); got != tc.held {
+				t.Fatalf("held=%v, want %v", got, tc.held)
+			}
+			if got := perUserInstallWindow(Options{Home: home}); got != tc.held {
+				t.Fatalf("native Copilot install window=%v, want %v", got, tc.held)
+			}
+		})
 	}
 }

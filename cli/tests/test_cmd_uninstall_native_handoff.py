@@ -1092,8 +1092,8 @@ def test_command_without_native_state_uses_existing_generic_path() -> None:
 # leftovers reach the user on success and on a restart-required exit, and the
 # agent configs outside a data folder Setup deletes are read before it runs.
 _SETUP_NOTES = (
-    "OmniGent support was removed in DefenseClaw 1.0.4. Left for you to remove by hand:\r\n"
-    "  - C:\\Users\\u\\corp\\omnigent.yaml: OmniGent still imports DefenseClaw's policy module from here; "
+    "OpenHands/OmniGent support was removed in 1.0.5; DefenseClaw no longer guards it.\r\n"
+    "  - C:\\Users\\u\\corp\\omnigent.yaml: still names DefenseClaw's OmniGent entries DefenseClaw's policy module from here; "
     "it denies every request. To remove: remove defenseclaw_omnigent_policy from policy_modules.\r\n"
     "  - {stub}: the stub that blocks every OmniGent call. "
     "To remove: delete it once nothing above runs it.\r\n"
@@ -1140,10 +1140,10 @@ def test_native_setup_removed_connector_leftovers_are_shown(
                 cmd_uninstall._dispatch_native_windows_uninstall(wipe_data=wipe_data, dry_run=False, yes=True)
             assert raised.value.code == returncode
     out = capsys.readouterr().out
-    assert out.count("OmniGent support was removed in DefenseClaw 1.0.4. Left for you to remove by hand:") == 1
-    assert "C:\\Users\\u\\corp\\omnigent.yaml: OmniGent still imports" in out
+    assert out.count("OpenHands/OmniGent support was removed in 1.0.5; DefenseClaw no longer guards it.") == 1
+    assert "C:\\Users\\u\\corp\\omnigent.yaml: still names DefenseClaw's OmniGent entries" in out
     # The config the deleted backup record named, read before Setup ran.
-    assert f"  - {config}: OmniGent still imports" in out
+    assert f"  - {config}: still names DefenseClaw's OmniGent entries" in out
     stub_line = f"  - {stub}: the stub"
     if wipe_data:
         assert stub_line not in out

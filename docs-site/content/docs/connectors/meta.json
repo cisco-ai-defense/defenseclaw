@@ -1,7 +1,21 @@
 {
   "title": "Connectors",
   "pages": [
-    "(hook-connectors)",
-    "(proxy-connectors)"
+    "capability-matrix",
+    "compatibility",
+    "---Agents---",
+    "claudecode",
+    "codex",
+    "openclaw",
+    "openclaw-integration",
+    "cursor",
+    "hermes",
+    "opencode",
+    "amp",
+    "copilot",
+    "antigravity",
+    "devin",
+    "kiro",
+    "zeptoclaw"
   ]
 }

@@ -378,6 +378,11 @@ func (c *CodexConnector) checkAgentSettings(opts SetupOpts) error {
 		return nil
 	}
 	path := codexConfigPath()
+	// The config writer refuses a Codex home through a link on Windows; say so
+	// before Setup moves the hooks from an earlier home (GAP-2339).
+	if err := codexHomeLinkRefusal(filepath.Dir(path)); err != nil {
+		return err
+	}
 	// Match the writer's boundary: an OSS account may keep its dotfiles on a
 	// user-owned volume, while an enterprise per-user home binding is confined.
 	if home := activeUserHomeOverride(); home != "" && runtime.GOOS != "windows" {
@@ -405,7 +410,7 @@ func (c *CodexConnector) checkAgentSettings(opts SetupOpts) error {
 	}
 	cfg := map[string]interface{}{}
 	if err := parseCodexTOML(data, &cfg); err != nil {
-		return refuseForAgentConfig(fmt.Errorf("Codex config %s does not parse (%v); fix the file, then run: defenseclaw-gateway restart", path, err)) //nolint:staticcheck // Preserve the product or platform name in this operator diagnostic.
+		return refuseForAgentConfig(fmt.Errorf("Codex config %s does not parse (%v); fix the file, then run: defenseclaw-gateway restart", codexTOMLErrorLocation(path, err), err)) //nolint:staticcheck // Preserve the product or platform name in this operator diagnostic.
 	}
 	if raw, exists := cfg["hooks"]; exists {
 		if _, ok := raw.(map[string]interface{}); !ok {

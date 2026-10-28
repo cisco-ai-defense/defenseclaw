@@ -1,0 +1,538 @@
+// Copyright 2026 Cisco Systems, Inc. and its affiliates
+// SPDX-License-Identifier: Apache-2.0
+
+package hookpaths
+
+import (
+	"encoding/base64"
+	"encoding/json"
+	"os"
+	"path/filepath"
+	"runtime"
+	"slices"
+	"strings"
+)
+
+// InstructionFileNames are the agent instruction and identity files that the
+// cognitive-file rules (COG-*) protect. Protection follows the file, not one
+// spelling of its name (GAP-0869): a symlink, a hard link, a case variant on a
+// case-insensitive volume and a Windows short or stream name all write it.
+var InstructionFileNames = [...]string{
+	"AGENTS.md", "CLAUDE.md", "SOUL.md", "IDENTITY.md",
+	"MEMORY.md", "TOOLS.md", "openclaw.json", "gateway.json",
+}
+
+// InstructionIdentityKey carries the hook client's file-identity check of a
+// call's write targets: the paths of the existing instruction files they
+// write, under their own names or other names (GAP-1065), separated by NUL.
+// A gateway that cannot read the user's files (ProtectHome) judges the call
+// from it. A missing instruction-named file has no identity fact.
+const InstructionIdentityKey = "\x00instruction-identity"
+
+// FileIdentitiesKey carries the file identities (FileIdentity) of a call's
+// existing write targets, comma separated. LoadedIdentityPrefix keys the
+// identity of the instruction file an InstructionsLoaded event names. The
+// hook client reads both as the user, so a gateway that cannot read the
+// user's files (ProtectHome) still knows a write under any name to a file
+// the session loaded as a write to that file (GAP-1064).
+const (
+	FileIdentitiesKey    = "\x00file-identities"
+	LoadedIdentityPrefix = "\x00loaded-identity:"
+	StartupFilesKey      = "\x00startup-instructions"
+	WriteIdentityPrefix  = "\x00write-identity:"
+)
+
+// ReachedInstructionsKey carries the hook client's first sighting of the
+// directories a call reaches, read as the user before the call runs: each
+// directory's file system identity ("" when it is missing) and the
+// instruction files it holds. A gateway that cannot read the user's files
+// (ProtectHome) adds the directories its session had not reached yet to the
+// session's snapshot with them, so a file the session creates in a
+// directory it reached later stays the session's own (GAP-1363). On a
+// SessionStart it carries the start directories' identities.
+const ReachedInstructionsKey = "\x00reached-instructions"
+
+// MaxReachedDirectories bounds the directories one call's sighting adds;
+// the rest keep the call-time proof.
+const MaxReachedDirectories = 160
+
+type reachedInstructions struct {
+	Directories map[string]string `json:"d"`
+	Files       map[string]string `json:"f"`
+	// Plain lists the directories that are directories themselves, not a
+	// link, junction or another reparse point. A gateway that cannot read
+	// the user's files binds a directory the session created to its
+	// identity only from these (ReachedPlainDirectories).
+	Plain []string `json:"p,omitempty"`
+}
+
+// reachedEvidence is the ReachedInstructionsKey value for directories, or
+// "" when they hold more instruction files than a snapshot does. The
+// directory a linked one reaches is read as well, while there is room, so a
+// gateway that cannot read the user's files learns the identity of a
+// directory the session created when the session reaches it through a link.
+func reachedEvidence(directories []string) string {
+	sighting := reachedInstructions{Directories: make(map[string]string)}
+	var read []string
+	add := func(directory string) {
+		if !filepath.IsAbs(directory) || len(directory) > MaxWriteTargetPathBytes {
+			return
+		}
+		directory = filepath.Clean(directory)
+		if _, seen := sighting.Directories[directory]; seen || len(read) == MaxReachedDirectories {
+			return
+		}
+		sighting.Directories[directory] = DirectoryIdentity(directory)
+		read = append(read, directory)
+		if info, err := os.Lstat(directory); err == nil && info.IsDir() &&
+			info.Mode()&(os.ModeSymlink|os.ModeIrregular) == 0 {
+			sighting.Plain = append(sighting.Plain, directory)
+		}
+	}
+	for _, directory := range directories {
+		add(directory)
+	}
+	for _, directory := range slices.Clone(read) {
+		if sighting.Directories[directory] == "" {
+			continue
+		}
+		if real, err := filepath.EvalSymlinks(directory); err == nil && filepath.IsAbs(real) {
+			add(real)
+		}
+	}
+	sighting.Files = InstructionFilesIn(read)
+	if len(read) == 0 || sighting.Files == nil {
+		return ""
+	}
+	encoded, err := json.Marshal(sighting)
+	if err != nil {
+		return ""
+	}
+	return string(encoded)
+}
+
+// ReachedInstructions decodes the ReachedInstructionsKey sighting: the
+// directories the client read, with their identities, and the instruction
+// files they held. Every file is in a listed directory.
+func ReachedInstructions(targets map[string]string) (directories, files map[string]string, ok bool) {
+	sighting, ok := decodeReached(targets)
+	if !ok {
+		return nil, nil, false
+	}
+	return sighting.Directories, sighting.Files, true
+}
+
+// ReachedPlainDirectories are the directories of the ReachedInstructionsKey
+// sighting that existed and were directories themselves, with their
+// identities: not a link, junction or another reparse point.
+func ReachedPlainDirectories(targets map[string]string) map[string]string {
+	sighting, ok := decodeReached(targets)
+	if !ok {
+		return nil
+	}
+	plain := make(map[string]string)
+	for _, directory := range sighting.Plain {
+		if identity := sighting.Directories[directory]; identity != "" {
+			plain[directory] = identity
+		}
+	}
+	return plain
+}
+
+func decodeReached(targets map[string]string) (reachedInstructions, bool) {
+	raw, present := targets[ReachedInstructionsKey]
+	if !present || len(raw) > maxEncodedTargets {
+		return reachedInstructions{}, false
+	}
+	var sighting reachedInstructions
+	if json.Unmarshal([]byte(raw), &sighting) != nil || len(sighting.Directories) == 0 ||
+		len(sighting.Directories) > MaxReachedDirectories || sighting.Files == nil ||
+		len(sighting.Files) > maxStartupInstructionFiles || len(sighting.Plain) > len(sighting.Directories) {
+		return reachedInstructions{}, false
+	}
+	for directory, identity := range sighting.Directories {
+		if !filepath.IsAbs(directory) || len(directory) > MaxWriteTargetPathBytes ||
+			filepath.Clean(directory) != directory || identity != "" && !validFileIdentity(identity) {
+			return reachedInstructions{}, false
+		}
+	}
+	for file, identity := range sighting.Files {
+		if !filepath.IsAbs(file) || len(file) > MaxWriteTargetPathBytes ||
+			filepath.Clean(file) != file || !validFileIdentity(identity) {
+			return reachedInstructions{}, false
+		}
+		if _, named := InstructionFileName(filepath.Base(file), instructionNameFold()); !named {
+			return reachedInstructions{}, false
+		}
+		if _, listed := sighting.Directories[filepath.Dir(file)]; !listed {
+			return reachedInstructions{}, false
+		}
+	}
+	return sighting, true
+}
+
+// DirectoryIdentity is the identity of the directory path reaches,
+// following links. It is empty when the directory is missing.
+func DirectoryIdentity(path string) string {
+	info, err := os.Stat(path)
+	if err != nil || !info.IsDir() {
+		return ""
+	}
+	return directoryIdentityForPath(path, info)
+}
+
+const maxStartupInstructionFiles = 256
+
+// IsSessionStartEvent covers the lifecycle spellings sent by the built-in
+// connectors. A reset starts a fresh instruction-file snapshot as well.
+func IsSessionStartEvent(event string) bool {
+	compact := strings.ToLower(strings.NewReplacer("_", "", "-", "").Replace(strings.TrimSpace(event)))
+	switch compact {
+	case "sessionstart", "onsessionstart", "onsessionreset", "sessioncreated":
+		return true
+	}
+	return false
+}
+
+// StartupInstructionFiles captures existing instruction file identities
+// before the agent can create another one. A missing file has no entry.
+func StartupInstructionFiles(cwd, home string) map[string]string {
+	if !filepath.IsAbs(cwd) {
+		return nil
+	}
+	return InstructionFilesIn(instructionDirectories(cwd, home))
+}
+
+// StartupDirectories are the directories StartupInstructionFiles reads.
+func StartupDirectories(cwd, home string) []string {
+	return instructionDirectories(cwd, home)
+}
+
+// InstructionFilesIn captures the identities of the existing instruction
+// files in directories. A missing file has no entry; nil means more files
+// than a snapshot holds.
+func InstructionFilesIn(directories []string) map[string]string {
+	files := make(map[string]string)
+	for _, directory := range directories {
+		if !filepath.IsAbs(directory) {
+			continue
+		}
+		for _, name := range InstructionFileNames {
+			candidate := filepath.Join(directory, name)
+			if identity := FileIdentity(candidate); identity != "" {
+				files[candidate] = identity
+				if len(files) > maxStartupInstructionFiles {
+					return nil
+				}
+			}
+		}
+	}
+	return files
+}
+
+// StartupFiles decodes the bounded startup identity snapshot from a hook.
+// An empty map still proves the files were absent at session start.
+func StartupFiles(targets map[string]string) (map[string]string, bool) {
+	raw, present := targets[StartupFilesKey]
+	if !present || len(raw) > maxEncodedTargets {
+		return nil, false
+	}
+	var files map[string]string
+	if json.Unmarshal([]byte(raw), &files) != nil || files == nil ||
+		len(files) > maxStartupInstructionFiles {
+		return nil, false
+	}
+	for file, identity := range files {
+		if !filepath.IsAbs(file) || len(file) > MaxWriteTargetPathBytes ||
+			filepath.Clean(file) != file || !validFileIdentity(identity) {
+			return nil, false
+		}
+		if _, named := InstructionFileName(filepath.Base(file), instructionNameFold()); !named {
+			return nil, false
+		}
+	}
+	return files, true
+}
+
+// maxFileIdentityBytes bounds one FileIdentity value.
+const maxFileIdentityBytes = 64
+
+// InstructionIdentities returns the instruction files of a decoded map's
+// InstructionIdentityKey.
+func InstructionIdentities(targets map[string]string) []string {
+	if value := targets[InstructionIdentityKey]; value != "" {
+		return strings.Split(value, "\x00")
+	}
+	return nil
+}
+
+// FileIdentities returns the write-target identities of a decoded map's
+// FileIdentitiesKey.
+func FileIdentities(targets map[string]string) []string {
+	if value := targets[FileIdentitiesKey]; value != "" {
+		return strings.Split(value, ",")
+	}
+	return nil
+}
+
+// FileIdentity is the identity of the regular file that path reaches,
+// following symlinks. It is empty when the file is missing or not regular.
+func FileIdentity(path string) string {
+	info, err := os.Stat(path)
+	if err != nil || !info.Mode().IsRegular() {
+		return ""
+	}
+	return fileIdentityForPath(path, info)
+}
+
+func validFileIdentity(identity string) bool {
+	if identity == "" || len(identity) > maxFileIdentityBytes {
+		return false
+	}
+	for _, c := range []byte(identity) {
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') && c != ':' {
+			return false
+		}
+	}
+	return true
+}
+
+// clientIdentityFact reports a key of the identity evidence above, which is
+// for the cognitive-file proof only.
+func clientIdentityFact(key string) bool {
+	return key == InstructionIdentityKey || key == FileIdentitiesKey ||
+		key == StartupFilesKey || key == ReachedInstructionsKey || strings.HasPrefix(key, WriteIdentityPrefix) ||
+		strings.HasPrefix(key, LoadedIdentityPrefix)
+}
+
+// instructionLoadEvidence is the client evidence of an InstructionsLoaded
+// event: the identity of the instruction file it names.
+func instructionLoadEvidence(envelope map[string]json.RawMessage) string {
+	var event, path string
+	if json.Unmarshal(envelope["hook_event_name"], &event) != nil || event != "InstructionsLoaded" ||
+		json.Unmarshal(envelope["file_path"], &path) != nil ||
+		!filepath.IsAbs(path) || len(path) > MaxWriteTargetPathBytes {
+		return ""
+	}
+	if _, named := InstructionFileName(filepath.Base(path), instructionNameFold()); !named {
+		return ""
+	}
+	identity := FileIdentity(path)
+	if identity == "" {
+		return ""
+	}
+	encoded, err := json.Marshal(map[string]string{LoadedIdentityPrefix + path: identity})
+	if err != nil {
+		return ""
+	}
+	return base64.RawURLEncoding.EncodeToString(encoded)
+}
+
+// InstructionFileName returns the protected name that base spells: exactly,
+// or without case when foldCase (Windows, where the file system ignores it).
+func InstructionFileName(base string, foldCase bool) (string, bool) {
+	for _, name := range InstructionFileNames {
+		if base == name || foldCase && strings.EqualFold(base, name) {
+			return name, true
+		}
+	}
+	return "", false
+}
+
+func instructionNameFold() bool { return runtime.GOOS == "windows" }
+
+// InstructionFiles are the protected instruction files of one call, each
+// identified once by its file identity: the instruction names in the places
+// agents load them from (instructionDirectories) and the instruction files
+// the session loaded (the gateway's load provenance). A symlinked
+// instruction file is identified by the file it reaches, so a write to that
+// physical file is a write to the instruction file (GAP-0971). Any other
+// file is ordinary, however many links it has: a link count proves nothing,
+// and pnpm and uv stores hard-link package files.
+type InstructionFiles struct {
+	cwd, home string
+	loaded    []string
+	files     []instructionFile
+	built     bool
+}
+
+type instructionFile struct {
+	path string
+	info os.FileInfo
+}
+
+// NewInstructionFiles returns the instruction files of a call in cwd for the
+// user's home. loaded are the paths the session loaded; only those with an
+// instruction name count. The files are identified on first use.
+func NewInstructionFiles(cwd, home string, loaded []string) *InstructionFiles {
+	return &InstructionFiles{cwd: cwd, home: home, loaded: loaded}
+}
+
+func (f *InstructionFiles) identify() {
+	if f.built {
+		return
+	}
+	f.built = true
+	seen := map[string]bool{}
+	add := func(path string) {
+		if seen[path] {
+			return
+		}
+		seen[path] = true
+		if info, err := os.Stat(path); err == nil && info.Mode().IsRegular() {
+			f.files = append(f.files, instructionFile{path: path, info: info})
+		}
+	}
+	for _, path := range f.loaded {
+		if _, named := InstructionFileName(filepath.Base(path), instructionNameFold()); named && filepath.IsAbs(path) {
+			add(filepath.Clean(path))
+		}
+	}
+	for _, directory := range instructionDirectories(f.cwd, f.home) {
+		for _, name := range InstructionFileNames {
+			add(filepath.Join(directory, name))
+		}
+	}
+}
+
+// Identities reports the existing instruction files a write target names,
+// by file identity, whether through its own name or an alias: every one of
+// them, so a write to one file with two instruction names (CLAUDE.md and
+// SOUL.md hard-linked) is judged by both names' rules (GAP-1127). A missing
+// target never supplies an identity fact to the gateway.
+func (f *InstructionFiles) Identities(path string) []string {
+	if f == nil || !filepath.IsAbs(path) {
+		return nil
+	}
+	path = filepath.Clean(path)
+	real := path
+	if resolved, err := filepath.EvalSymlinks(path); err == nil {
+		real = resolved
+	}
+	info, err := os.Stat(real)
+	if err != nil || !info.Mode().IsRegular() {
+		return nil
+	}
+	f.identify()
+	var files []string
+	for _, file := range f.files {
+		if os.SameFile(info, file.info) {
+			files = append(files, file.path)
+		}
+	}
+	return files
+}
+
+// Aliases reports the protected instruction files that an existing write
+// target is under another name: a symlink or hard link to one of the call's
+// instruction files (whatever the link is named), the physical file a
+// symlinked one reaches, a path through a symlinked or case-variant
+// directory, or a case, short-name or stream variant of one. Only the call's
+// instruction files count: an instruction-named file in no load location
+// that the session did not load is ordinary, and so is every other name of
+// it. A missing file, one that is not regular and an instruction file named
+// as the call names it report nothing: the name rules judge the last. Every
+// other instruction name of the same file is reported (GAP-1127).
+func (f *InstructionFiles) Aliases(path string) []string {
+	if f == nil || !filepath.IsAbs(path) {
+		return nil
+	}
+	path = filepath.Clean(path)
+	return slices.DeleteFunc(f.Identities(path), func(instruction string) bool {
+		return instruction == path || instructionNameFold() && strings.EqualFold(instruction, path)
+	})
+}
+
+// Located returns the spelling of path that names it in the directory of a
+// file the session loaded or in a load location (instructionDirectories),
+// when path, spelled as an instruction file name, reaches that directory
+// through another spelling: a symlinked or case-variant one. It is empty
+// for any other path. The file itself need not exist. The gateway checks the
+// spelling first (instructionLoadLocation) and judges the returned spelling
+// the same way; this is the file-system check for the rest.
+func (f *InstructionFiles) Located(path string) string {
+	if f == nil || !filepath.IsAbs(path) {
+		return ""
+	}
+	path = filepath.Clean(path)
+	name, named := InstructionFileName(filepath.Base(path), instructionNameFold())
+	if !named {
+		return ""
+	}
+	directory, err := os.Stat(filepath.Dir(path))
+	if err != nil || !directory.IsDir() {
+		return ""
+	}
+	sameDirectory := func(candidate string) bool {
+		info, err := os.Stat(candidate)
+		return err == nil && os.SameFile(info, directory)
+	}
+	for _, loaded := range f.loaded {
+		if loadedName, named := InstructionFileName(filepath.Base(loaded), instructionNameFold()); named &&
+			loadedName == name && filepath.IsAbs(loaded) && sameDirectory(filepath.Dir(filepath.Clean(loaded))) {
+			return filepath.Clean(loaded)
+		}
+	}
+	for _, candidate := range instructionDirectories(f.cwd, f.home) {
+		if sameDirectory(candidate) {
+			return filepath.Join(candidate, name)
+		}
+	}
+	return ""
+}
+
+// InstructionHomeFolders are the home-relative folders, slash separated,
+// that agents load global instruction files from.
+var InstructionHomeFolders = [...]string{
+	"", ".claude", ".codex", ".openclaw", ".openclaw/workspace",
+	".config", ".config/amp", ".config/opencode",
+}
+
+// InstructionHomeVariables name the agents' configured homes, which hold
+// their global instruction files.
+var InstructionHomeVariables = [...]string{"CLAUDE_CONFIG_DIR", "CODEX_HOME"}
+
+// instructionDirectories are the places agents load instruction files from:
+// the working directory and its parents with their .claude folders, the home
+// and agent folders, and the agents' configured homes (CLAUDE_CONFIG_DIR,
+// CODEX_HOME) of the calling process.
+func instructionDirectories(cwd, home string) []string {
+	directories := InstructionDirectories(cwd, home)
+	for _, variable := range InstructionHomeVariables {
+		if value := os.Getenv(variable); filepath.IsAbs(value) &&
+			!slices.Contains(directories, filepath.Clean(value)) {
+			directories = append(directories, filepath.Clean(value))
+		}
+	}
+	return directories
+}
+
+// InstructionDirectories are the places of instructionDirectories that do
+// not depend on the calling process's environment: the working directory
+// and its parents with their .claude folders, and the home and agent
+// folders. A gateway judging another process's snapshot claims only these.
+func InstructionDirectories(cwd, home string) []string {
+	var directories []string
+	add := func(directory string) {
+		if filepath.IsAbs(directory) && !slices.Contains(directories, directory) {
+			directories = append(directories, directory)
+		}
+	}
+	if filepath.IsAbs(cwd) {
+		for current, steps := filepath.Clean(cwd), 0; steps < 64; steps++ {
+			add(current)
+			add(filepath.Join(current, ".claude"))
+			parent := filepath.Dir(current)
+			if parent == current {
+				break
+			}
+			current = parent
+		}
+	}
+	if filepath.IsAbs(home) {
+		for _, sub := range InstructionHomeFolders {
+			add(filepath.Join(home, filepath.FromSlash(sub)))
+		}
+	}
+	return directories
+}

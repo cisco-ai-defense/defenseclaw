@@ -82,6 +82,61 @@ func TestStopManagedSandboxes(t *testing.T) {
 	}
 }
 
+// unsyncedStopper answers each stop of a name in unsynced with
+// sandboxapi.CodeUnsynced (its MicroVM's disk could not be synced) as many
+// times as it says, then stops it.
+type unsyncedStopper struct {
+	fakeSandboxStopper
+	unsynced map[string]int
+	tries    map[string]int
+}
+
+func (f *unsyncedStopper) Stop(ctx context.Context, name string) (*sandboxapi.Sandbox, error) {
+	f.tries[name]++
+	if sandboxapi.DiscardUnsynced(ctx) {
+		return nil, errors.New("stop-sandboxes accepted the loss of what a MicroVM has not synced")
+	}
+	if f.unsynced[name] != 0 {
+		f.unsynced[name]--
+		return nil, &sandboxapi.Error{Code: sandboxapi.CodeUnsynced, Message: "sandbox " + name + " was not stopped: its MicroVM's disk could not be synced first"}
+	}
+	return f.fakeSandboxStopper.Stop(ctx, name)
+}
+
+// GAP-0998: at a sign-out the gateway unit's ExecStop asked the daemon to
+// stop the account's sandboxes, the daemon refused the stop of a MicroVM
+// whose disk it could not sync (it never stops one then), and systemd went
+// on to stop the gateway, which ended the VM with no word of what was
+// lost. stop-sandboxes now tries such a stop again (it syncs first) while
+// the gateway unit's stop timeout leaves time, never accepting the loss
+// itself, and names a MicroVM still unsynced with what it may lose.
+func TestStopSandboxesTriesAnUnsyncedMicroVMAgainAndNamesWhatItMayLose(t *testing.T) {
+	pause, budget := stopUnsyncedPause, stopUnsyncedBudget
+	t.Cleanup(func() { stopUnsyncedPause, stopUnsyncedBudget = pause, budget })
+	stopUnsyncedPause, stopUnsyncedBudget = time.Millisecond, time.Second
+	list := []sandboxapi.Sandbox{{Name: "vm", Phase: "ready", Driver: "vm"}, {Name: "dk", Phase: "ready"}}
+
+	f := &unsyncedStopper{fakeSandboxStopper: fakeSandboxStopper{list: list}, unsynced: map[string]int{"vm": 2}, tries: map[string]int{}}
+	var out bytes.Buffer
+	if err := stopManagedSandboxes(context.Background(), f, &out); err != nil {
+		t.Fatalf("a MicroVM whose sync worked on a later try: %v", err)
+	}
+	if f.tries["vm"] != 3 || !slices.Equal(f.stopped, []string{"dk", "vm"}) || !strings.Contains(out.String(), "stopped sandbox vm") {
+		t.Fatalf("tries %v, stopped %v, out %q", f.tries, f.stopped, out.String())
+	}
+
+	f = &unsyncedStopper{fakeSandboxStopper: fakeSandboxStopper{list: list}, unsynced: map[string]int{"vm": 1 << 30}, tries: map[string]int{}}
+	out.Reset()
+	err := stopManagedSandboxes(context.Background(), f, &out)
+	if err == nil || !strings.Contains(err.Error(), "sandbox vm keeps running: its MicroVM's disk could not be synced, so DefenseClaw did not stop it") ||
+		!strings.Contains(err.Error(), "what its guest wrote since its last sync may be lost") {
+		t.Fatalf("a MicroVM that never syncs: %v", err)
+	}
+	if f.tries["vm"] < 2 || slices.Contains(f.stopped, "vm") || !slices.Equal(f.stopped, []string{"dk"}) {
+		t.Fatalf("tries %v, stopped %v", f.tries, f.stopped)
+	}
+}
+
 func TestSandboxDaemonExitedOnItsOwn(t *testing.T) {
 	env := func(kv map[string]string) func(string) string { return func(k string) string { return kv[k] } }
 	if !sandboxDaemonExitedOnItsOwn(env(map[string]string{"INVOCATION_ID": "x"})) {

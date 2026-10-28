@@ -111,12 +111,10 @@ _CREATED_DIRS_RECORD = "watcher-created-dirs.json"
 _CREATED_DIRS_RECORD_MAX_BYTES = 1 << 20
 _WIN_SYNCHRONIZE = 0x00100000
 _WIN_PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
-# until 1.1: removed connectors whose older-release state uninstall still
-# tears down (connector_backups markers, the hook script their stub replaces,
-# and active_connector.json names). In an uninstall the teardown also removes
-# their entries from the agent configs, the stub and OmniGent's import path
-# (_REMOVED_CONNECTOR_UNINSTALL_ENV); uninstall lists what is left.
-_REMOVED_CONNECTOR_UNINSTALL_ENV = "DEFENSECLAW_REMOVED_CONNECTOR_UNINSTALL"
+# until 1.1: OpenHands and OmniGent, whose older-release state uninstall still
+# tears down (connector_backups markers, their hook script or policy module,
+# and active_connector.json names). The teardown removes what DefenseClaw wrote
+# for them, by identity; uninstall lists what is left.
 _REMOVED_CONNECTOR_BACKUP_MARKERS: dict[str, tuple[str, ...]] = {
     "omnigent": (
         os.path.join("connector_backups", "omnigent", "config.json"),
@@ -1692,12 +1690,16 @@ def _owned_binary_targets(platform_name: str) -> tuple[str, tuple[str, ...]]:
 
 # install_publish renames a running binary aside to this name when `make all`
 # replaces it; a copy still mapped then stays until a later rebuild prunes it.
-_RETIRED_COPY_RE = re.compile(r"\.(?P<name>.+)\.source-install-old-[0-9a-f]+", re.IGNORECASE)
+# install.ps1 renames a running one aside to <name>.old-<yyyyMMddTHHmmssfff>
+# when an upgrade or its restore replaces it under hook traffic (GAP-1760).
+_RETIRED_COPY_RE = re.compile(
+    r"\.(?P<name>.+)\.source-install-old-[0-9a-f]+|(?P<aside>.+)\.old-[0-9]{8}T[0-9]{9}", re.IGNORECASE
+)
 
 
 def _is_retired_source_install_copy(name: str, owned: tuple[str, ...] | set[str]) -> bool:
     match = _RETIRED_COPY_RE.fullmatch(name)
-    return bool(match) and match.group("name").lower() in {item.lower() for item in owned}
+    return bool(match) and (match.group("name") or match.group("aside")).lower() in {item.lower() for item in owned}
 
 
 def _retired_source_install_copies(install_root: str, names: tuple[str, ...]) -> tuple[str, ...]:
@@ -1843,7 +1845,7 @@ _DATA_REMOVED_LEFTOVER_NOTE = (
     "  DefenseClaw's data folder is removed by this uninstall, so a hook or policy listed above "
     "names a file that no longer exists, and the agent fails on it: remove it from the agent's config."
 )
-_LEFTOVER_HEADER = re.compile(r"^\S.* support was removed in DefenseClaw 1\.0\.4\. Left for you to remove by hand:$")
+_LEFTOVER_HEADER = re.compile(r"^OpenHands/OmniGent support was removed in 1\.0\.5; DefenseClaw no longer guards it\.$")
 
 
 def _removed_connector_leftover_lines(
@@ -1875,11 +1877,10 @@ def _print_removed_connector_leftovers(
     found: list | None = None,
     moved: dict[str, str] | None = None,
 ) -> None:
-    """until 1.1: list what the removed OpenHands/OmniGent teardown left, with the steps.
+    """until 1.1: list what the OpenHands/OmniGent teardown could not remove, with the steps.
 
-    The teardown only replaces DefenseClaw's hook script with a stub that
-    blocks every call and revokes the tokens; the agent's own config still
-    names it. Every uninstall form prints this. What a data folder removal
+    The teardown removes what DefenseClaw wrote for them and blocks nothing;
+    this is information. Every uninstall form prints it. What a data folder removal
     takes away (*data_removed*) is not listed; the backups it keeps are, at
     the place they moved to (*moved*).
     """
@@ -2261,6 +2262,7 @@ def _execute_plan(plan: UninstallPlan) -> ExecutionResult:
     if plan.remove_data_dir and plan.data_dir:
         # Before the data dir (and the registry naming them) goes.
         _remove_mcp_writer_backups(plan.data_dir)
+        _remove_unregistered_mcp_writer_backups()
         _remove_legacy_codex_candidate()
     if plan.remove_plugin and "openclaw" in plan.connectors:
         # Plugin removal is OpenClaw-specific. For other connectors the
@@ -2515,6 +2517,44 @@ def _remove_mcp_writer_backups(data_dir: str) -> None:
             ux.warn(f"could not remove the MCP config backup {expected}: {exc}")
             continue
         ux.ok(f"removed {expected}")
+
+
+def _remove_unregistered_mcp_writer_backups() -> None:
+    """Remove the MCP writer's backups the registry no longer names (GAP-1636).
+
+    An install upgraded from an earlier release can keep a
+    ``.defenseclaw-<name>.bak`` copy beside an agent config whose registry
+    entry it never had or already dropped, so ``uninstall --all`` left
+    ``~/.codex/.defenseclaw-config.toml.bak`` with DefenseClaw's hook entries.
+    The name is the writer's own marker: only a regular file at exactly the
+    name the writer gives one of the user-scope configs DefenseClaw edits is
+    removed.
+    """
+    from defenseclaw.connector_paths import KNOWN_CONNECTORS, _managed_mcp_backup_path, mcp_source_locations
+
+    seen: set[str] = set()
+    for connector in KNOWN_CONNECTORS:
+        try:
+            locations = mcp_source_locations(connector)
+        except Exception:  # noqa: BLE001 - a connector whose paths do not resolve has no backup to find
+            continue
+        for location in locations:
+            if not os.path.isabs(location):
+                continue
+            backup = os.path.abspath(_managed_mcp_backup_path(location))
+            if backup in seen:
+                continue
+            seen.add(backup)
+            try:
+                if not stat.S_ISREG(os.lstat(backup).st_mode):
+                    continue
+                os.unlink(backup)
+            except FileNotFoundError:
+                continue
+            except OSError as exc:
+                ux.warn(f"could not remove the MCP config backup {backup}: {exc}")
+                continue
+            ux.ok(f"removed {backup}")
 
 
 def _remove_legacy_codex_candidate() -> None:
@@ -3270,6 +3310,12 @@ def _listed_sandboxes(gateway_path: str) -> tuple[list, str]:
         return [], f"`sandbox list` could not run: {exc.strerror or exc}"
     if proc.returncode == _SANDBOX_UNSUPPORTED_EXIT:
         return [], ""
+    if proc.returncode != 0 and _sandboxes_off(proc.stdout) and _off_teardown_deletes_no_sandbox(gateway_path):
+        # Sandboxes are off and the teardown, which asks OpenShell itself
+        # while they are off, finds no sandbox to delete: none runs, and
+        # nothing holds work (GAP-0765). One OpenShell still has keeps the
+        # unknown answer below.
+        return [], ""
     if proc.returncode != 0:
         lines = [
             line.strip().removeprefix("✗").strip().removeprefix("Error:").strip()
@@ -3285,6 +3331,49 @@ def _listed_sandboxes(gateway_path: str) -> tuple[list, str]:
     if not isinstance(rows, list):
         return [], "`sandbox list` printed no sandbox list"
     return [row for row in rows if isinstance(row, dict) and row.get("name")], ""
+
+
+def _sandboxes_off(stdout: str) -> bool:
+    """Whether ``sandbox list --output json`` said sandboxes are off.
+
+    While they are off the gateway answers ``{"enabled": false,
+    "available": false, "reason": ...}`` and exits 1 (GAP-1817).
+    """
+    try:
+        answer = json.loads(stdout or "")
+    except ValueError:
+        return False
+    return isinstance(answer, dict) and answer.get("enabled") is False and answer.get("available") is False
+
+
+# The dry run's "sandboxes" row when it deletes none ("sandboxes         none"),
+# and its line when it has nothing to tear down at all.
+_TEARDOWN_NO_SANDBOX = re.compile(r"^\s*sandboxes\s+none\s*$", re.MULTILINE)
+_TEARDOWN_NOTHING = "nothing to tear down"
+
+
+def _off_teardown_deletes_no_sandbox(gateway_path: str) -> bool:
+    """Whether ``sandbox teardown --dry-run`` names no sandbox to delete.
+
+    With sandboxes off no daemon lists the sandboxes, and the teardown asks
+    OpenShell's gateway directly for those of this data directory: a dry run
+    that names none is the answer the list could not give. A dry run that
+    fails or names one keeps the list unknown.
+    """
+    if not _gateway_supports_sandbox_teardown(gateway_path):
+        return False
+    try:
+        proc = subprocess.run(
+            [gateway_path, "sandbox", "teardown", "--dry-run"],
+            capture_output=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=_SANDBOX_LIST_TIMEOUT_SECONDS,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    out = proc.stdout or ""
+    return proc.returncode == 0 and (_TEARDOWN_NOTHING in out or bool(_TEARDOWN_NO_SANDBOX.search(out)))
 
 
 def _live_mounted_sandboxes(rows: list) -> tuple[str, ...]:
@@ -3645,8 +3734,6 @@ def _run_gateway_connector_teardown(
             encoding="utf-8",
             errors="replace",
             timeout=_CONNECTOR_COMMAND_TIMEOUT_S,
-            # until 1.1: so a removed connector's policy does not outlive DefenseClaw.
-            env={**os.environ, _REMOVED_CONNECTOR_UNINSTALL_ENV: "1"},
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
         ux.warn(f"gateway connector teardown failed to launch: {exc}")

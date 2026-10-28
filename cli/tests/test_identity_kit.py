@@ -769,14 +769,14 @@ def test_himmelblau_configure_preserves_existing_allowlist(tmp_path: Path) -> No
 
 
 def test_entra_mac_bridge_guide_requires_intune_schedule() -> None:
-    guide = (ROOT / "docs-site/content/docs/enterprise/identity/reference.mdx").read_text()
+    guide = (ROOT / "docs-site/content/docs/enterprise/identity-entra-id.mdx").read_text()
     bridge = (ENTRA.parent / "macos-entra-group-bridge.sh").read_text()
     assert "Script frequency" in guide and "Max number of times to retry if script fails" in guide
     assert "runs this script again later" not in bridge
 
 
 def test_entra_ssh_apply_example_grants_previewed_group() -> None:
-    doc = (ROOT / "docs-site/content/docs/enterprise/identity/reference.mdx").read_text()
+    doc = (ROOT / "docs-site/content/docs/enterprise/identity-entra-id.mdx").read_text()
     # Read the first command block under the SSH heading.
     commands = doc.split("### Azure VMs with Entra SSH sign-in", 1)[1].split(chr(96) * 3 + "bash", 1)[1]
     commands = commands.split(chr(96) * 3, 1)[0].splitlines()
@@ -1165,7 +1165,7 @@ def test_kit_does_not_say_an_empty_connector_entry_is_dropped() -> None:
     guides = ROOT / "docs-site" / "content" / "docs" / "enterprise"
     paths = sorted(path for directory in KIT_DIRS for path in directory.glob("*.example.yaml"))
     assert len(paths) >= 3
-    for path in [*paths, guides / "identity" / "okta.mdx", guides / "identity" / "entra-id.mdx"]:
+    for path in [*paths, guides / "identity-okta.mdx", guides / "identity-entra-id.mdx"]:
         text = " ".join(path.read_text(encoding="utf-8").replace("#", " ").split())
         assert not re.search(r"\{\}`? is dropped", text), path.relative_to(ROOT)
 

@@ -56,6 +56,11 @@ import (
 // token the guardian impersonates.
 var enterpriseHookWatchSessionSettle = 5 * time.Second
 
+// enterpriseHookAccountChangeSettle is the delay between a change of the
+// local account database and the reconcile it triggers, so a useradd
+// followed by usermod or passwd runs one pass (GAP-2108).
+var enterpriseHookAccountChangeSettle = time.Second
+
 // enterpriseHookWatchDebounceMaxWait bounds how long filesystem events can
 // postpone the pass they armed. Every event re-armed the debounce with no
 // limit, so writes faster than the debounce held the pass back until the
@@ -837,7 +842,7 @@ func enterpriseHookVerifyOrRepairTarget(
 	}
 	result, verifyErr := enterpriseHookReconcileVerifier(ctx, opts)
 	if verifyErr == nil {
-		return result, false, nil
+		return enterpriseHookRetryNativeOTLPTakeBack(ctx, target, opts, result), false, nil
 	}
 	return enterpriseHookRepairAfterVerifyFailure(ctx, target, opts, verifyErr)
 }
@@ -1912,8 +1917,13 @@ func runEnterpriseHooksReadiness(cmd *cobra.Command, _ []string) error {
 func runEnterpriseHooksVerifyWithScope(cmd *cobra.Command, registrationOnly bool) error {
 	var run enterpriseHookVerifyRun
 	var err error
+	var notes *enterpriseHookNoteSet
+	defer enterpriseHookVerifyRunScope()()
 	if registrationOnly {
+		notes = &enterpriseHookNoteSet{}
+		enterpriseHookReadinessNotes.Store(notes)
 		run, err = runEnterpriseHookRegistrationOnce(cmd.Context())
+		enterpriseHookReadinessNotes.Store(nil)
 	} else {
 		run, err = runEnterpriseHookVerifyOnce(cmd.Context())
 	}
@@ -1941,17 +1951,17 @@ func runEnterpriseHooksVerifyWithScope(cmd *cobra.Command, registrationOnly bool
 		if run.AuthorizationErr != nil {
 			payload["authorization_error"] = run.AuthorizationErr.Error()
 		}
+		if warnings := enterpriseHookVerifyWarnings(run, notes); len(warnings) != 0 {
+			payload["warnings"] = warnings
+		}
 		if len(run.Excused) != 0 {
-			warnings := make([]string, 0, len(run.Excused))
 			// The excused targets by SID and connector, so a caller that waits
 			// for the guardian (a signed bundle's hook proof) treats them as
 			// verify does instead of waiting for a sign-in (review loop 2).
 			excused := make([]map[string]string, 0, len(run.Excused))
 			for _, row := range run.Excused {
-				warnings = append(warnings, enterpriseHookTargetLabel(row)+": "+row.Error+enterpriseHookVerifyExcusedNote(run, row))
 				excused = append(excused, map[string]string{"sid": row.SID, "connector": row.Connector})
 			}
-			payload["warnings"] = warnings
 			payload["excused"] = excused
 		}
 		if err := json.NewEncoder(cmd.OutOrStdout()).Encode(payload); err != nil {
@@ -1979,6 +1989,9 @@ func runEnterpriseHooksVerifyWithScope(cmd *cobra.Command, registrationOnly bool
 		} else {
 			fmt.Fprintf(cmd.ErrOrStderr(), "  %s %s: %s\n", Style("✗", "fg=red", "bold"), enterpriseHookTargetLabel(row), row.Error)
 		}
+	}
+	for _, note := range notes.list() {
+		fmt.Fprintf(cmd.OutOrStdout(), "  %s %s\n", Style("•", "fg=yellow", "bold"), note)
 	}
 	if run.AuthorizationErr != nil {
 		fmt.Fprintf(cmd.ErrOrStderr(), "  %s protected authorization: %s\n", Style("✗", "fg=red", "bold"), run.AuthorizationErr)
@@ -2869,9 +2882,11 @@ func runEnterpriseHookReconcileOnce(ctx context.Context) (enterpriseHookReconcil
 					row.UserHome = result.UserHome
 					row.Connector = result.Connector
 					row.Result = &result
+					result.AgentConfig = enterpriseHookAgentConfigNotice(result)
 					if result.AgentConfig != "" {
 						// A Hermes or Devin config put back or recreated
-						// (GAP-0588).
+						// (GAP-0588), or a native OTLP exporter the managed
+						// install could not take back (GAP-1839).
 						notices = append(notices, enterpriseHookGuardianNotice{User: firstNonEmptyString(row.User, row.SID), Connector: row.Connector, AgentConfig: result.AgentConfig})
 					}
 					recheck = recheckWindow > 0 && previousProtection.PreviouslyProtected && !repaired
@@ -3035,6 +3050,8 @@ func runEnterpriseHooksWatch(cmd *cobra.Command, _ []string) error {
 	if enterpriseHookWatchDebounce <= 0 {
 		return fmt.Errorf("enterprise hooks watch: --debounce must be positive")
 	}
+	enterpriseHookGuardianWatching.Store(true)
+	defer enterpriseHookGuardianWatching.Store(false)
 	standaloneConfigFingerprint := enterpriseHookStandaloneConfigFingerprint()
 	startEnterpriseHookQuarantineRemovals(cmd.Context(), cmd.ErrOrStderr())
 	fsw, err := fsnotify.NewWatcher()
@@ -3290,6 +3307,9 @@ func runEnterpriseHooksWatch(cmd *cobra.Command, _ []string) error {
 	// Windows standalone: restore the managed OpenCode plugin as soon as its
 	// attributes change, without waiting for the interval pass.
 	enterpriseHookStandalonePlatformWatch(cmd.Context(), cmd.ErrOrStderr())
+	// A local account created or changed (useradd, usermod) gets its
+	// identity record within seconds, before its first hook (GAP-2108).
+	accountChanges := enterpriseHookAccountDatabaseChanges(cmd.Context())
 
 	for {
 		select {
@@ -3443,6 +3463,20 @@ func runEnterpriseHooksWatch(cmd *cobra.Command, _ []string) error {
 			debouncePending = true
 			if debounceReason == "" {
 				debounceReason = "session sign-in"
+			}
+		case <-accountChanges:
+			// The local account database changed: the next pass lists
+			// the new account and spools its identity record, which the
+			// gateway (not root) needs to confirm an unnamed gid on an
+			// sss-first host; at the interval tick its first hook could
+			// come first and be refused (GAP-2108).
+			if !debouncePending {
+				debounceArmedAt = time.Now()
+			}
+			resetEnterpriseHookWatchTimer(debounce, enterpriseHookAccountChangeSettle)
+			debouncePending = true
+			if debounceReason == "" {
+				debounceReason = "account database change"
 			}
 		case <-ticker.C:
 			if enterpriseHookStandaloneConfigChanged(standaloneConfigFingerprint, cmd.ErrOrStderr()) {

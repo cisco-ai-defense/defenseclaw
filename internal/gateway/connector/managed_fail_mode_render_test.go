@@ -98,7 +98,7 @@ func TestManagedShellHooksIgnoreTheEnvironmentFailMode(t *testing.T) {
 		"devin-hook.sh", "hermes-hook.sh", "kiro-hook.sh",
 	} {
 		for _, managed := range []bool{true, false} {
-			scripts, err := renderHookScripts("127.0.0.1:18970", "closed", ".token", []string{name}, managed, strings.TrimSuffix(name, "-hook.sh"), true, "", "", false, false)
+			scripts, err := renderHookScripts("127.0.0.1:18970", "closed", ".token", []string{name}, managed, strings.TrimSuffix(name, "-hook.sh"), true, "", "", false, false, "")
 			if err != nil {
 				t.Fatalf("render %s: %v", name, err)
 			}

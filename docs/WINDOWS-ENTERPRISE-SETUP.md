@@ -5,7 +5,7 @@ delivery artifact for Cisco Secure Client and endpoint-management testing. It
 is unrelated to the retired per-user `DefenseClawSetup-x64.exe` (per-user
 Windows installs now use `install.ps1`). This page describes the Secure Client
 flavor; for the standalone profile deployed by Intune or another MDM, see the
-docs-site [Windows standalone deployment](https://cisco-ai-defense.github.io/defenseclaw/docs/enterprise/install/windows/)
+docs-site [Windows standalone deployment](https://cisco-ai-defense.github.io/defenseclaw/docs/enterprise/windows/)
 page. That profile has its own Setup,
 `DefenseClawSetup-Enterprise-Standalone-x64.exe`, summarized under
 [Standalone Setup](#standalone-setup) at the end of this page.
@@ -145,7 +145,7 @@ standalone profile, which any MDM can deploy without Cisco Secure Client. Each
 release publishes it with
 `DefenseClawSetup-Enterprise-Standalone-x64.payload-manifest.json`, the
 SHA-256 digest of every embedded file. To deploy it, see the docs-site
-[Windows](https://cisco-ai-defense.github.io/defenseclaw/docs/enterprise/install/windows/)
+[Windows](https://cisco-ai-defense.github.io/defenseclaw/docs/enterprise/windows/)
 and [Install with an MDM](https://cisco-ai-defense.github.io/defenseclaw/docs/enterprise/mdm/)
 pages.
 

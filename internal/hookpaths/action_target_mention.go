@@ -13,41 +13,55 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"slices"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"syscall"
+	"time"
+	"unicode"
 	"unicode/utf16"
+	"unicode/utf8"
 
+	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
 	"mvdan.cc/sh/v3/syntax"
 )
 
 // ActionStateTargetMention applies the same independent target scan to the
 // active DefenseClaw security state, without attributing it to SSH keys.
 func ActionStateTargetMention(command, cwd, home string) bool {
-	return actionProtectedTargetMentionDepth(command, cwd, home, 0, true, nil)
+	return actionProtectedTargetMentionDepth(command, cwd, home, 0, true, nil, "")
 }
 
 // actionProtectedTargetMentionDepth is independent of a program's operand
 // roles. A resolved protected path in a writable command is enough for the
 // action decision; commands with no such path continue through the existing
 // proof. globs carries the hook client's pattern answers (actionGlobs).
-func actionProtectedTargetMentionDepth(command, cwd, home string, depth int, stateOnly bool, globs *actionGlobs) bool {
+func actionProtectedTargetMentionDepth(command, cwd, home string, depth int, stateOnly bool, globs *actionGlobs, dialect actionfacts.Dialect) bool {
 	if command == "" || home == "" || len(command) > MaxPayloadBytes || depth >= 8 {
 		return false
 	}
-	if actionWindowsHome(home) {
-		return actionWindowsTargetMention(command, cwd, home, depth, stateOnly)
+	if depth == 0 {
+		globs = globs.forCommand(command)
 	}
-	if !filepath.IsAbs(cwd) && (!actionPosixWindowsHome(home) || !path.IsAbs(cwd)) {
+	nativePOSIX := actionWindowsHome(home) && dialect == actionfacts.DialectPOSIX
+	if actionWindowsHome(home) && !nativePOSIX {
+		return actionWindowsTargetMention(command, cwd, home, depth, stateOnly, dialect)
+	}
+	if !filepath.IsAbs(cwd) && !nativePOSIX && (!actionPosixWindowsHome(home) || !path.IsAbs(cwd)) {
 		return false
 	}
 	file, parsed := parseShell(command)
+	if parsed && nativePOSIX && !stateOnly && actionWindowsLiteralHereDocumentTarget(file, home) {
+		return true
+	}
 	if depth == 0 && parsed && actionKnownReadOnlyShell(file, home) {
 		return false
 	}
 	var nestedBodies []*syntax.Word
 	if parsed {
 		var nestedFound bool
-		nestedBodies, nestedFound = actionPosixNestedShellMention(file, cwd, home, depth, stateOnly, globs)
+		nestedBodies, nestedFound = actionPosixNestedShellMention(file, cwd, home, depth, stateOnly, globs, dialect)
 		if nestedFound {
 			return true
 		}
@@ -66,6 +80,32 @@ func actionProtectedTargetMentionDepth(command, cwd, home string, depth int, sta
 			} else {
 				value = filepath.Join(home, value[2:])
 			}
+		}
+		if nativePOSIX {
+			// The POSIX parser has already expanded HOME and unquoted tildes.
+			// Native $home and %USERPROFILE% expansion would turn POSIX
+			// literals into protected Windows paths.
+			if strings.ContainsAny(value, "$%`") || !tilde &&
+				(value == "~" || strings.HasPrefix(value, "~/")) {
+				return false
+			}
+			if strings.ContainsAny(value, "*?[]") {
+				return !stateOnly && actionWindowsProtectedGlobReach(value, base, home)
+			}
+			resolved, ok := actionWindowsPath(value, base, home)
+			if !ok {
+				return false
+			}
+			root, ok := actionWindowsPath(home, base, home)
+			if !ok {
+				return false
+			}
+			if stateOnly {
+				return strings.HasPrefix(resolved, root+"/") &&
+					actionProtectedStateRelative(strings.TrimPrefix(resolved, root+"/"))
+			}
+			protected, _ := actionWindowsProtected(value, base, home, false)
+			return resolved == root+"/.ssh" || protected
 		}
 		if strings.ContainsAny(value, "*?[]") {
 			if stateOnly {
@@ -163,7 +203,7 @@ func actionProtectedTargetMentionDepth(command, cwd, home string, depth int, sta
 			return true
 		}
 	}
-	text := actionMaskLiteralMetacharacters(command)
+	text := actionBlankPatchBodies(command, actionMaskLiteralMetacharacters(command))
 	if parsed && actionLiteralArgumentProgramsOnly(file, home) {
 		text = actionMarkLiteralTildes(text)
 	}
@@ -183,6 +223,106 @@ func actionProtectedTargetMentionDepth(command, cwd, home string, depth int, sta
 		}
 	}
 	return false
+}
+
+// actionBlankPatchBodies blanks, in the text scan, the content lines of the
+// patch envelopes apply_patch calls read: those calls write only the files
+// their headers name, which stay (GAP-0781, GAP-1106). text is command with
+// its literal metacharacters masked, line for line.
+func actionBlankPatchBodies(command, text string) string {
+	if !strings.Contains(command, patchBeginMarker) {
+		return text
+	}
+	fed := patchFedLines(command)
+	lines := strings.Split(text, "\n")
+	if fed == nil || len(lines) != len(fed) {
+		return text
+	}
+	commandLines := strings.Split(command, "\n")
+	for i, line := range commandLines {
+		if !fed[i] && patchCommandResolutionChange(line) {
+			// Another apply_patch may run and read the body as a script.
+			return text
+		}
+	}
+	for i, line := range commandLines {
+		if fed[i] && !strings.HasPrefix(strings.TrimSpace(line), "***") {
+			lines[i] = strings.Repeat(" ", len(lines[i]))
+		}
+	}
+	return strings.Join(lines, "\n")
+}
+
+// patchResolutionChanges match shell text that may change the program an
+// apply_patch word runs: a PATH (zsh path) assignment, export or unset, the
+// PowerShell Env:PATH drive, or a sourced, evaluated or aliased definition.
+// Envelope lines (headers such as "*** Add File: PATH.md") and text that only
+// mentions or reads PATH change nothing (round n review).
+var patchResolutionChanges = []*regexp.Regexp{
+	regexp.MustCompile(`(?i)(^|[^a-z0-9_-])path\s*(\+?=|\[)`),
+	regexp.MustCompile(`(?i)(^|[^a-z0-9_-])(export|unset|declare|typeset|readonly|local|setenv|env)\b.*\bpath\b`),
+	regexp.MustCompile(`(?i)env:\\?path\b|setenvironmentvariable|\b(iex|invoke-expression)\b`),
+	regexp.MustCompile(`(^|[\s;&|(])(source|eval|\.)(\s|$)|\b(alias|functions|hash|enable)\b`),
+}
+
+func patchCommandResolutionChange(line string) bool {
+	for _, change := range patchResolutionChanges {
+		if change.MatchString(line) {
+			return true
+		}
+	}
+	return false
+}
+
+// A POSIX here-document passes its literal body through unchanged, including
+// backslashes in an absolute Windows path. The ordinary POSIX text scan treats
+// those backslashes as escapes, so inspect literal bodies separately.
+func actionWindowsLiteralHereDocumentTarget(file *syntax.File, home string) bool {
+	var targets []string
+	for _, target := range ProtectedAuthorizedKeysPaths(home) {
+		targets = append(targets, strings.ToLower(strings.ReplaceAll(target, "\\", "/")))
+	}
+	found := false
+	syntax.Walk(file, func(node syntax.Node) bool {
+		redirect, ok := node.(*syntax.Redirect)
+		if !ok || redirect.Hdoc == nil || redirect.Op != syntax.Hdoc && redirect.Op != syntax.DashHdoc {
+			return true
+		}
+		for _, part := range redirect.Hdoc.Parts {
+			literal, ok := part.(*syntax.Lit)
+			if !ok {
+				continue
+			}
+			body := strings.ToLower(strings.ReplaceAll(literal.Value, "\\", "/"))
+			for _, target := range targets {
+				for start := 0; start < len(body); {
+					index := strings.Index(body[start:], target)
+					if index < 0 {
+						break
+					}
+					index += start
+					end := index + len(target)
+					before, _ := utf8.DecodeLastRuneInString(body[:index])
+					after, _ := utf8.DecodeRuneInString(body[end:])
+					singleQuoted := before == '\'' && after == '\''
+					if (index == 0 || actionWindowsHereDocDelimiter(before) || singleQuoted) &&
+						(end == len(body) || actionWindowsHereDocDelimiter(after) || singleQuoted) {
+						found = true
+						return false
+					}
+					start = index + 1
+				}
+			}
+		}
+		return true
+	})
+	return found
+}
+
+func actionWindowsHereDocDelimiter(value rune) bool {
+	// Windows filenames may contain punctuation and Unicode. Only whitespace
+	// and characters forbidden in a filename delimit an unquoted path here.
+	return unicode.IsSpace(value) || strings.ContainsRune("\"<>|?*", value)
 }
 
 // The text scan finds paths in payloads another program interprets (inline
@@ -625,7 +765,9 @@ func actionProtectedFileGlobReach(pattern, cwd string, protected protectedFiles,
 	if _, err := filepath.Match(pattern, ""); err != nil || globs.full() {
 		return false
 	}
-	candidates, complete, unseen := actionExpandGlob(pattern, literal, actionGlobViewHidden(cwd, home))
+	hidden := actionGlobViewHidden(cwd, home)
+	dots := sync.OnceValue(func() bool { return globs.dotNames() || actionShellProfileMayDotglob(home) })
+	candidates, complete, unseen := actionExpandGlob(pattern, literal, hidden, dots)
 	for _, candidate := range candidates {
 		if protectedReachPath(candidate, protected, ssh) {
 			globs.note(pattern, "1")
@@ -636,24 +778,35 @@ func actionProtectedFileGlobReach(pattern, cwd string, protected protectedFiles,
 		globs.note(pattern, "0")
 		return false
 	}
-	if answer := globs.answer(pattern); unseen && answer != "" {
-		// Only a walk this process could not see defers to the client;
-		// past a bound the fallback below decides.
-		return answer == "1"
-	}
-	base := filepath.Base(pattern)
-	if unseen && !strings.ContainsAny(filepath.Dir(pattern), "*?[") && !actionGlobHasLiteral(base) {
-		// Only the last component is a pattern, in a directory this
-		// process cannot read, and it names nothing (git add *): no
-		// directory alias can be selected, so it stays ordinary.
-		return false
-	}
-	for _, name := range append([]string{".ssh"}, AuthorizedKeysFiles[:]...) {
-		if actionGlobNameMatch(base, name) {
-			return true
+	if hidden && unseen {
+		if answer := globs.answer(pattern); answer != "" {
+			// A walk this process could not see defers to the client,
+			// which expanded the pattern as the user.
+			return answer == "1"
+		}
+		if !globs.fromClient() {
+			// No client evidence at all (an older hook client): the
+			// name fallback of round m.
+			base := filepath.Base(pattern)
+			if !strings.ContainsAny(filepath.Dir(pattern), "*?[") && !actionGlobHasLiteral(base) {
+				// Only the last component is a pattern, in a directory
+				// this process cannot read, and it names nothing (git
+				// add *): no directory alias can be selected.
+				return false
+			}
+			for _, name := range append([]string{".ssh"}, AuthorizedKeysFiles[:]...) {
+				if actionGlobNameMatch(base, name) {
+					return true
+				}
+			}
+			return false
 		}
 	}
-	return false
+	// The walk (this one, or the client's that sent no answer) stopped at
+	// a bound or at a directory it could not read, so an alias of any name
+	// may be among the names it did not see: the pattern is unproved,
+	// never an allow (GAP-1481).
+	return true
 }
 
 // actionGlobs carries the hook client's pathname-pattern answers through
@@ -662,6 +815,68 @@ func actionProtectedFileGlobReach(pattern, cwd string, protected protectedFiles,
 type actionGlobs struct {
 	facts  map[string]string
 	record map[string]string
+	// dots is set when the command may make * and ? match a leading dot
+	// (actionCommandMayDotglob).
+	dots bool
+}
+
+// forCommand returns the scan state of one command, sharing the client's
+// facts and record.
+func (g *actionGlobs) forCommand(command string) *actionGlobs {
+	var scan actionGlobs
+	if g != nil {
+		scan = *g
+	}
+	scan.dots = actionCommandMayDotglob(command)
+	return &scan
+}
+
+func (g *actionGlobs) dotNames() bool { return g != nil && g.dots }
+
+// actionDotglobSetting matches, once lowercased without underscores, a
+// shell setting that lets * and ? match a leading dot: bash dotglob or a
+// GLOBIGNORE, zsh GLOB_DOTS or a (D) qualifier, or a startup file
+// (BASH_ENV) that may set one.
+var (
+	actionDotglobSetting   = regexp.MustCompile(`dotglob|globdots|globignore|bashenv`)
+	actionDotglobQualifier = regexp.MustCompile(`[*?\]]\([^()]*D[^()]*\)`)
+)
+
+func actionCommandMayDotglob(command string) bool {
+	return actionDotglobSetting.MatchString(strings.ReplaceAll(strings.ToLower(command), "_", "")) ||
+		actionDotglobQualifier.MatchString(command)
+}
+
+// actionShellProfileMayDotglob reports a startup file of the user's or the
+// system's shell, or an inherited BASHOPTS or GLOBIGNORE, that may set
+// dotglob, or a home this process cannot read.
+func actionShellProfileMayDotglob(home string) bool {
+	if _, err := os.Stat(home); err != nil || strings.Contains(os.Getenv("BASHOPTS"), "dotglob") || os.Getenv("GLOBIGNORE") != "" {
+		return true
+	}
+	files := []string{"/etc/profile", "/etc/bashrc", "/etc/bash.bashrc", "/etc/zshenv", "/etc/zsh/zshenv",
+		"/etc/zprofile", "/etc/zsh/zprofile", "/etc/zshrc", "/etc/zsh/zshrc", "/etc/zlogin", "/etc/zsh/zlogin"}
+	if profiles, err := filepath.Glob("/etc/profile.d/*.sh"); err == nil {
+		files = append(files, profiles...)
+	}
+	for _, name := range []string{".bashrc", ".bash_profile", ".bash_login", ".bash_aliases", ".profile", ".zshenv", ".zprofile", ".zshrc", ".zlogin"} {
+		files = append(files, filepath.Join(home, name))
+	}
+	for _, name := range files {
+		file, err := os.Open(name)
+		if errors.Is(err, fs.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return true
+		}
+		data, err := io.ReadAll(io.LimitReader(file, 1<<20))
+		_ = file.Close()
+		if err != nil || actionDotglobSetting.MatchString(strings.ReplaceAll(strings.ToLower(string(data)), "_", "")) {
+			return true
+		}
+	}
+	return false
 }
 
 // maxGlobFacts bounds the patterns the hook client expands for one call. A
@@ -683,6 +898,10 @@ func (g *actionGlobs) note(pattern, answer string) {
 	}
 }
 
+// fromClient reports a scan that carries the hook client's evidence, so a
+// pattern it sent no answer for is one its own walk could not prove.
+func (g *actionGlobs) fromClient() bool { return g != nil && g.facts != nil }
+
 func (g *actionGlobs) answer(pattern string) string {
 	if g == nil || g.facts == nil {
 		return ""
@@ -694,7 +913,7 @@ func (g *actionGlobs) answer(pattern string) string {
 // target scan of command checks, and returns the answers for the gateway.
 func actionGlobFacts(command, cwd, home string) map[string]string {
 	globs := &actionGlobs{record: map[string]string{}}
-	actionProtectedTargetMentionDepth(command, cwd, home, 0, false, globs)
+	actionProtectedTargetMentionDepth(command, cwd, home, 0, false, globs, "")
 	return globs.record
 }
 
@@ -708,12 +927,17 @@ const (
 // literal component is joined without a lookup, so a final file that does
 // not exist yet is still a candidate; literal is a prefix of pattern taken
 // as written (the cwd of a relative word). complete is false when a bound
-// is exceeded or a directory cannot be read; unseen tells the latter.
+// is exceeded or a directory cannot be read; unseen tells the latter. The
+// walk keeps every match it found before or beside a directory it could not
+// read or past a bound, so such a directory never hides a match (GAP-1481).
 //
 // hidden is set when the process cannot see the request's cwd or home
 // (systemd ProtectHome on a managed gateway): a directory missing from
 // that view is not proof the user's shell finds no match (GAP-1460).
-func actionExpandGlob(pattern, literal string, hidden bool) (candidates []string, complete, unseen bool) {
+//
+// A component that starts with * or ? does not match a name with a leading
+// dot, as in the shell, unless dots reports a setting that changes that.
+func actionExpandGlob(pattern, literal string, hidden bool, dots func() bool) (candidates []string, complete, unseen bool) {
 	separator := string(filepath.Separator)
 	start := filepath.VolumeName(pattern) + separator
 	rest := strings.TrimPrefix(pattern, start)
@@ -722,6 +946,7 @@ func actionExpandGlob(pattern, literal string, hidden bool) (candidates []string
 	}
 	paths := []string{start}
 	reads := 0
+	complete = true
 	for _, component := range strings.Split(rest, separator) {
 		if component == "" {
 			continue
@@ -734,8 +959,9 @@ func actionExpandGlob(pattern, literal string, hidden bool) (candidates []string
 		}
 		var next []string
 		for _, dir := range paths {
-			if reads++; reads > actionGlobMaxReads {
-				return nil, false, false
+			if reads++; reads > actionGlobMaxReads || len(next) >= actionGlobMaxNames {
+				complete = false
+				break
 			}
 			directory, err := os.Open(dir)
 			if err != nil {
@@ -744,7 +970,9 @@ func actionExpandGlob(pattern, literal string, hidden bool) (candidates []string
 				}
 				// Permission denied, or a home this process cannot see:
 				// the user's shell may still expand the pattern there.
-				return nil, false, true
+				// The siblings are still read.
+				complete, unseen = false, true
+				continue
 			}
 			names, err := directory.Readdirnames(actionGlobMaxNames + 1)
 			_ = directory.Close()
@@ -754,23 +982,20 @@ func actionExpandGlob(pattern, literal string, hidden bool) (candidates []string
 				continue
 			}
 			if err != nil && err != io.EOF || len(names) > actionGlobMaxNames {
-				return nil, false, false
+				complete = false
 			}
 			for _, name := range names {
-				if actionGlobNameMatch(component, name) {
+				if actionGlobNameMatch(component, name) && !actionGlobSkipsDotName(component, name, dots) {
 					next = append(next, filepath.Join(dir, name))
 				}
 			}
-			if len(next) > actionGlobMaxNames {
-				return nil, false, false
-			}
 		}
 		if len(next) == 0 {
-			return nil, true, false
+			return nil, complete, unseen
 		}
 		paths = next
 	}
-	return paths, true, false
+	return paths, complete, unseen
 }
 
 // actionGlobNotDirectory reports that a listing failed because dir, or the
@@ -818,6 +1043,13 @@ func actionGlobViewHidden(cwd, home string) bool {
 	return false
 }
 
+// actionGlobSkipsDotName reports a leading-dot name that the shell's * or ?
+// does not match. A bracket stays a match: the walk keeps the doubt.
+func actionGlobSkipsDotName(component, name string, dots func() bool) bool {
+	return runtime.GOOS != "windows" && strings.HasPrefix(name, ".") &&
+		(strings.HasPrefix(component, "*") || strings.HasPrefix(component, "?")) && !dots()
+}
+
 // actionGlobNameMatch matches one name component; names compare without case
 // on macOS and Windows, whose file systems usually ignore it.
 func actionGlobNameMatch(pattern, name string) bool {
@@ -841,20 +1073,29 @@ func actionProtectedStateRelative(relative string) bool {
 		return false
 	}
 	state := strings.TrimPrefix(relative, ".defenseclaw/")
-	switch state {
-	case ".env", "config.yaml", "confidence_policy.yaml", "guardrail_runtime.json",
-		"device.key", "picked_connector", "custom-providers.json", "audit.db",
-		"audit.db-wal", "audit.db-shm", "judge.db", "judge.db-wal",
-		"judge.db-shm", "judge_bodies.db", "judge_bodies.db-wal", "judge_bodies.db-shm":
+	if slices.Contains(activeStateFiles, state) {
 		return true
 	}
-	for _, prefix := range []string{"cache/", "policies/", "quarantine/", "receipts/", "registries/"} {
-		if strings.HasPrefix(state, prefix) && len(state) > len(prefix) {
+	for _, tree := range activeStateTrees {
+		if strings.HasPrefix(state, tree+"/") && len(state) > len(tree)+1 {
 			return true
 		}
 	}
 	return false
 }
+
+// activeStateFiles and activeStateTrees are the active security state under
+// .defenseclaw. The trees are listed in the order the identity index visits
+// them: hooks and policies first, the large scan cache last.
+var (
+	activeStateFiles = []string{
+		".env", "config.yaml", "confidence_policy.yaml", "guardrail_runtime.json",
+		"device.key", "picked_connector", "custom-providers.json", "audit.db",
+		"audit.db-wal", "audit.db-shm", "judge.db", "judge.db-wal",
+		"judge.db-shm", "judge_bodies.db", "judge_bodies.db-wal", "judge_bodies.db-shm",
+	}
+	activeStateTrees = []string{"hooks", "policies", "registries", "receipts", "quarantine", "cache"}
+)
 
 func actionProtectedStatePath(value, home string) bool {
 	resolved, ok := ResolveWriteTarget(value)
@@ -866,12 +1107,135 @@ func actionProtectedStatePath(value, home string) bool {
 		return false
 	}
 	relative, err := filepath.Rel(activeHome, resolved)
-	return err == nil && actionProtectedStateRelative(filepath.ToSlash(relative))
+	if err == nil && actionProtectedStateRelative(filepath.ToSlash(relative)) {
+		return true
+	}
+	_, same := ResolveActiveStateHardlinkTarget(resolved, home)
+	return same
+}
+
+// ResolveActiveStateHardlinkTarget maps an existing write target back to an
+// active DefenseClaw state file with the same file identity. Ordinary aliases
+// have one link and avoid the index; a multiply linked target is compared
+// with the bounded, shared index of the active state files.
+func ResolveActiveStateHardlinkTarget(value, home string) (string, bool) {
+	resolved, ok := ResolveWriteTarget(value)
+	if !ok {
+		return "", false
+	}
+	info, err := os.Stat(resolved)
+	if err != nil || !info.Mode().IsRegular() || linkCount(resolved, info) < 2 {
+		return "", false
+	}
+	activeRoot, ok := ResolveWriteTarget(filepath.Join(home, ".defenseclaw"))
+	if !ok {
+		return "", false
+	}
+	for _, file := range activeStateIdentities(activeRoot) {
+		if !os.SameFile(info, file.info) {
+			continue
+		}
+		// The index can be up to activeStateIndexTTL old: confirm the name
+		// still holds this file before mapping the alias to it.
+		path := filepath.Join(activeRoot, filepath.FromSlash(file.relative))
+		if current, err := os.Stat(path); err == nil && os.SameFile(info, current) {
+			return filepath.Join(home, ".defenseclaw", filepath.FromSlash(file.relative)), true
+		}
+	}
+	return "", false
+}
+
+// The identity index of one active state tree is built at most once per
+// activeStateIndexTTL and shared by every operand and request in that time,
+// so a command naming many ordinary hard links costs one bounded walk. The
+// walk stops after activeStateIndexEntries entries or activeStateIndexBudget,
+// well inside every hook deadline; a file it did not reach is not mapped (no
+// block), which never refuses ordinary work.
+var (
+	activeStateIndexEntries = 4096
+	activeStateIndexBudget  = 250 * time.Millisecond
+	activeStateIndexTTL     = 2 * time.Second
+	activeStateIndexWalks   atomic.Int64
+	activeStateIndex        struct {
+		sync.Mutex
+		byRoot map[string]activeStateIdentityIndex
+	}
+)
+
+type activeStateIdentity struct {
+	relative string
+	info     os.FileInfo
+}
+
+type activeStateIdentityIndex struct {
+	built time.Time
+	files []activeStateIdentity
+}
+
+func activeStateIdentities(activeRoot string) []activeStateIdentity {
+	activeStateIndex.Lock()
+	defer activeStateIndex.Unlock()
+	now := time.Now()
+	if index, ok := activeStateIndex.byRoot[activeRoot]; ok && now.Sub(index.built) < activeStateIndexTTL {
+		return index.files
+	}
+	for root, index := range activeStateIndex.byRoot {
+		if now.Sub(index.built) >= activeStateIndexTTL {
+			delete(activeStateIndex.byRoot, root)
+		}
+	}
+	if activeStateIndex.byRoot == nil {
+		activeStateIndex.byRoot = make(map[string]activeStateIdentityIndex)
+	}
+	files := walkActiveStateIdentities(activeRoot, now.Add(activeStateIndexBudget))
+	activeStateIndex.byRoot[activeRoot] = activeStateIdentityIndex{built: now, files: files}
+	return files
+}
+
+func walkActiveStateIdentities(activeRoot string, deadline time.Time) []activeStateIdentity {
+	activeStateIndexWalks.Add(1)
+	var files []activeStateIdentity
+	visited := 0
+	exhausted := func() bool {
+		visited++
+		return visited > activeStateIndexEntries || time.Now().After(deadline)
+	}
+	add := func(path, relative string) {
+		if info, err := os.Stat(path); err == nil && info.Mode().IsRegular() {
+			files = append(files, activeStateIdentity{relative: relative, info: info})
+		}
+	}
+	for _, name := range activeStateFiles {
+		if exhausted() {
+			return files
+		}
+		add(filepath.Join(activeRoot, name), name)
+	}
+	for _, tree := range activeStateTrees {
+		stopped := false
+		_ = filepath.WalkDir(filepath.Join(activeRoot, tree), func(path string, entry fs.DirEntry, walkErr error) error {
+			if exhausted() {
+				stopped = true
+				return fs.SkipAll
+			}
+			if walkErr != nil || entry.IsDir() {
+				return nil
+			}
+			if relative, err := filepath.Rel(activeRoot, path); err == nil {
+				add(path, filepath.ToSlash(relative))
+			}
+			return nil
+		})
+		if stopped {
+			break
+		}
+	}
+	return files
 }
 
 // actionPosixNestedShellMention scans each static shell -c or env -S body as
 // its own command. bodies are the words it scanned without a match.
-func actionPosixNestedShellMention(file *syntax.File, cwd, home string, depth int, stateOnly bool, globs *actionGlobs) (bodies []*syntax.Word, found bool) {
+func actionPosixNestedShellMention(file *syntax.File, cwd, home string, depth int, stateOnly bool, globs *actionGlobs, dialect actionfacts.Dialect) (bodies []*syntax.Word, found bool) {
 	if depth+1 >= 8 {
 		return nil, false
 	}
@@ -896,7 +1260,7 @@ func actionPosixNestedShellMention(file *syntax.File, cwd, home string, depth in
 						continue
 					}
 					if child, childStatic := StaticWord(call.Args[j+1], home); childStatic {
-						if actionProtectedTargetMentionDepth(child, cwd, home, depth+1, stateOnly, globs) {
+						if actionProtectedTargetMentionDepth(child, cwd, home, depth+1, stateOnly, globs, dialect) {
 							found = true
 							return false
 						}
@@ -909,17 +1273,18 @@ func actionPosixNestedShellMention(file *syntax.File, cwd, home string, depth in
 			}
 			for j := i + 1; j+1 < len(call.Args); j++ {
 				option, static := StaticWord(call.Args[j], home)
-				if !static || !strings.HasPrefix(option, "-") {
+				if !static || !strings.HasPrefix(option, "-") && !strings.HasPrefix(option, "+") {
 					break
 				}
-				if option == "-o" {
-					j++ // This option consumes the next shell setting.
+				switch option {
+				case "-o", "+o", "-O", "+O", "--rcfile", "--init-file":
+					j++ // This option consumes the next word (bash -O dotglob -c).
 					continue
 				}
 				if option == "-c" || len(option) > 2 && !strings.HasPrefix(option, "--") &&
 					!strings.ContainsAny(option, "=/") && strings.Contains(option[1:], "c") {
 					if child, static := StaticWord(call.Args[j+1], home); static {
-						if actionProtectedTargetMentionDepth(child, cwd, home, depth+1, stateOnly, globs) {
+						if actionProtectedTargetMentionDepth(child, cwd, home, depth+1, stateOnly, globs, dialect) {
 							found = true
 						} else {
 							bodies = append(bodies, call.Args[j+1])
@@ -1056,13 +1421,20 @@ func actionLessWritesFile(option string) bool {
 		(strings.HasPrefix("--log-file", option) || strings.HasPrefix(option, "--log-file"))
 }
 
-func actionWindowsTargetMention(command, cwd, home string, depth int, stateOnly bool) bool {
+func actionWindowsTargetMention(command, cwd, home string, depth int, stateOnly bool, dialect actionfacts.Dialect) bool {
 	if depth >= 8 || len(command) > MaxPayloadBytes {
 		return false
 	}
+	if dialect == actionfacts.DialectPowerShell {
+		command = actionPowerShellCode(command)
+	}
 	// The argument to PowerShell -Command is parsed again by the child shell.
 	// Quotes that are literal in the outer command do not stop expansion there.
-	rawWords, rawOK := actionWindowsWords(command)
+	rawCommand := command
+	if dialect == actionfacts.DialectPowerShell {
+		rawCommand = actionPowerShellChildDollars(command)
+	}
+	rawWords, _, rawOK := actionWindowsWords(rawCommand)
 	if rawOK {
 		for i := 0; i+2 < len(rawWords); i++ {
 			program := strings.TrimSuffix(strings.ToLower(programBase(rawWords[i])), ".exe")
@@ -1072,7 +1444,7 @@ func actionWindowsTargetMention(command, cwd, home string, depth int, stateOnly 
 						break
 					}
 					if (rawWords[j] == "-S" || rawWords[j] == "--split-string") &&
-						actionWindowsTargetMention(rawWords[j+1], cwd, home, depth+1, stateOnly) {
+						actionWindowsTargetMention(rawWords[j+1], cwd, home, depth+1, stateOnly, dialect) {
 						return true
 					}
 				}
@@ -1085,7 +1457,7 @@ func actionWindowsTargetMention(command, cwd, home string, depth int, stateOnly 
 					break
 				}
 				if strings.EqualFold(rawWords[j], "-command") || strings.EqualFold(rawWords[j], "-c") {
-					if actionWindowsTargetMention(rawWords[j+1], cwd, home, depth+1, stateOnly) {
+					if actionWindowsTargetMention(rawWords[j+1], cwd, home, depth+1, stateOnly, actionfacts.DialectPowerShell) {
 						return true
 					}
 					break
@@ -1093,23 +1465,9 @@ func actionWindowsTargetMention(command, cwd, home string, depth int, stateOnly 
 			}
 		}
 	}
-	// PowerShell does not expand variables inside single quoted literals.
-	// Preserve the literal pathname there while keeping its dollar sign from
-	// being mistaken for a resolvable home variable.
-	var normalized strings.Builder
-	normalized.Grow(len(command))
-	singleQuoted := false
-	for i := 0; i < len(command); i++ {
-		if command[i] == '\'' {
-			singleQuoted = !singleQuoted
-		}
-		if singleQuoted && command[i] == '$' {
-			normalized.WriteByte('@')
-		} else {
-			normalized.WriteByte(command[i])
-		}
-	}
-	words, ok := actionWindowsWords(normalized.String())
+	// Literal dollars do not expand in PowerShell single quotes or after a
+	// backtick. The raw child-command pass above sees each nested body first.
+	words, _, ok := actionWindowsWords(actionWindowsLiteralDollars(command, string(dialect)))
 	if !ok || len(words) == 0 || depth == 0 && actionKnownReadOnlyWindows(words) {
 		return false
 	}
@@ -1125,7 +1483,7 @@ func actionWindowsTargetMention(command, cwd, home string, depth int, stateOnly 
 		for j := range letters {
 			letters[j] = uint16(encoded[2*j]) | uint16(encoded[2*j+1])<<8
 		}
-		if actionWindowsTargetMention(string(utf16.Decode(letters)), cwd, home, depth+1, stateOnly) {
+		if actionWindowsTargetMention(string(utf16.Decode(letters)), cwd, home, depth+1, stateOnly, actionfacts.DialectPowerShell) {
 			return true
 		}
 	}
@@ -1145,6 +1503,45 @@ func actionWindowsTargetMention(command, cwd, home string, depth int, stateOnly 
 		}
 	}
 	return false
+}
+
+// A backtick-dollar in the outer PowerShell command passes a dollar to a
+// quoted child command. The child shell then expands it. Inside an outer
+// single-quoted argument the backtick itself is passed through, so keep it.
+func actionPowerShellChildDollars(command string) string {
+	var child strings.Builder
+	child.Grow(len(command))
+	var quote byte
+	for i := 0; i < len(command); i++ {
+		c := command[i]
+		if c == '`' && quote != '\'' && i+1 < len(command) {
+			next := command[i+1]
+			if next == '$' || next == '`' {
+				child.WriteByte(next)
+			} else {
+				child.WriteByte(c)
+				child.WriteByte(next)
+			}
+			i++
+			continue
+		}
+		if c == '\'' && quote == 0 {
+			quote = '\''
+		} else if c == '\'' && quote == '\'' {
+			if i+1 < len(command) && command[i+1] == '\'' {
+				child.WriteString("''")
+				i++
+				continue
+			}
+			quote = 0
+		} else if c == '"' && quote == 0 {
+			quote = '"'
+		} else if c == '"' && quote == '"' {
+			quote = 0
+		}
+		child.WriteByte(c)
+	}
+	return child.String()
 }
 
 func actionKnownReadOnlyWindows(words []string) bool {
@@ -1218,8 +1615,15 @@ func actionWindowsWordMentionsTarget(word, cwd, home string, stateOnly bool) boo
 			return false
 		}
 		if stateOnly {
-			return strings.HasPrefix(resolved, root+"/") &&
-				actionProtectedStateRelative(strings.TrimPrefix(resolved, root+"/"))
+			if strings.HasPrefix(resolved, root+"/") &&
+				actionProtectedStateRelative(strings.TrimPrefix(resolved, root+"/")) {
+				return true
+			}
+			if runtime.GOOS == "windows" {
+				_, same := ResolveActiveStateHardlinkTarget(filepath.FromSlash(resolved), home)
+				return same
+			}
+			return false
 		}
 		if resolved == root+"/.ssh" {
 			return true

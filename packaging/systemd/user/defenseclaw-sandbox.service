@@ -19,7 +19,7 @@
 
 [Unit]
 Description=DefenseClaw sandbox daemon
-Documentation=https://cisco-ai-defense.github.io/defenseclaw/docs/enterprise/runtime/sandboxes/
+Documentation=https://cisco-ai-defense.github.io/defenseclaw/docs/enterprise/sandboxes/
 Requires=defenseclaw-sandbox.socket
 After=defenseclaw-sandbox.socket
 StartLimitIntervalSec=120

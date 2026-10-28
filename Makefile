@@ -1396,7 +1396,7 @@ dist-cli: _bundle-data _stage-extension-fingerprint dist-fleet-assets
 dist-fleet-assets:
 	@mkdir -p $(DIST_DIR)
 	tar -czf "$(DIST_DIR)/defenseclaw-fleet-assets.tar.gz" -C . \
-		edge-connector docs-site/content/docs/reference/edge-connector/policies.mdx \
+		edge-connector docs-site/content/docs/edge-connector/policies.mdx \
 		bundles/local_observability_stack/docker-compose.fleet.yml \
 		bundles/local_observability_stack/prometheus/examples/fleet.yml \
 		bundles/local_observability_stack/grafana/dashboards/defenseclaw-fleet.json

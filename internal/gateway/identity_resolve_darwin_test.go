@@ -64,3 +64,45 @@ func TestResolvePeerDirectoryFactsKeepsGroupsUnderSpool(t *testing.T) {
 		t.Fatalf("facts = %+v, err = %v; want the account groups under the record's directory facts", facts, err)
 	}
 }
+
+// TestResolvePeerDirectoryFactsComposesThePlatformSSOLink is GAP-1611: the
+// darwin resolver lays the local node and Platform SSO link answers onto the
+// account's own facts. A linked account waits for its guardian record
+// (directory unknown), an unlinked one is local, and a failed link listing
+// keeps it local with its UPN pending (GAP-1612).
+func TestResolvePeerDirectoryFactsComposesThePlatformSSOLink(t *testing.T) {
+	current, err := osuser.Current()
+	if err != nil {
+		t.Skipf("current user: %v", err)
+	}
+	prevLocal, prevLink, prevValidate := darwinLocalNodeAccount, darwinPlatformSSOLink, validateManagedGuardianAuthorization
+	prevOffline, prevNamed := openDirectoryOffline, primaryGroupNamed
+	t.Cleanup(func() {
+		darwinLocalNodeAccount, darwinPlatformSSOLink, validateManagedGuardianAuthorization = prevLocal, prevLink, prevValidate
+		openDirectoryOffline, primaryGroupNamed = prevOffline, prevNamed
+		setIdentitySpoolDir("")
+	})
+	validateManagedGuardianAuthorization = func(string, string) error { return nil }
+	openDirectoryOffline = func() bool { return false }
+	primaryGroupNamed = func(string) bool { return true }
+	darwinLocalNodeAccount = func(string, string) bool { return true }
+	setIdentitySpoolDir(t.TempDir())
+	for _, tc := range []struct {
+		link      platformSSOLink
+		directory useridentity.Directory
+		pending   bool
+	}{
+		{ssoLinked, "", false},
+		{ssoUnlinked, useridentity.DirectoryLocal, false},
+		{ssoLinkUnknown, useridentity.DirectoryLocal, true},
+	} {
+		darwinPlatformSSOLink = func(string) platformSSOLink { return tc.link }
+		facts, err := resolvePeerDirectoryFacts(current.Uid)
+		if err != nil || facts.Directory != tc.directory || facts.UPNPending != tc.pending {
+			t.Errorf("link %d: facts = %+v, err = %v; want directory %q, UPN pending %v", tc.link, facts, err, tc.directory, tc.pending)
+		}
+		if waits := awaitingSpoolUPN(facts); waits != (tc.directory == "" || tc.pending) {
+			t.Errorf("link %d: awaitingSpoolUPN = %v", tc.link, waits)
+		}
+	}
+}

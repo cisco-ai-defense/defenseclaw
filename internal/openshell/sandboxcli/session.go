@@ -1600,6 +1600,13 @@ func (s *session) finish(ctx context.Context, stopped bool) error {
 		}
 		sb, err := s.api.Stop(ctx, name)
 		if err != nil {
+			if sandboxapi.IsCode(err, sandboxapi.CodeUnsynced) {
+				// Its disk could not be synced: it keeps running, and the
+				// user's own stop says what is lost and asks (GAP-0902).
+				s.stopFailed = true
+				a.warn(apiError(err).Error())
+				return nil
+			}
 			if sandboxapi.IsCode(err, sandboxapi.CodeConflict) {
 				// OpenShell's error state: nothing runs in it (GAP-0333).
 				a.warn("could not stop " + name + ": " + apiError(err).Error())
@@ -1994,27 +2001,55 @@ func fullDiskKeepText(name string) string {
 }
 
 // overlayDiskEvery paces the session's look at its MicroVM's own disk
-// (watchOverlayDisk); tests shorten it.
-var overlayDiskEvery = 2 * time.Minute
+// (watchOverlayDisk) when it is larger than smallOverlayBytes, and
+// smallOverlayDiskEvery when it is not, and the first look; tests shorten
+// them.
+var (
+	overlayDiskEvery      = 2 * time.Minute
+	smallOverlayDiskEvery = 15 * time.Second
+)
+
+// smallOverlayBytes is the size up to which a MicroVM's own disk is looked at
+// every smallOverlayDiskEvery: an agent writing 50 MiB a second filled a
+// 2 GiB one between two looks two minutes apart (GAP-1140).
+const smallOverlayBytes = 4 << 30
 
 // watchOverlayDisk looks at the own disk of the session's copy-mode
-// MicroVM every overlayDiskEvery and says once, while the session runs,
-// that it is full or filling: a write that fails there said nothing before
-// the end of the session (#1148). A look that does not answer is tried
-// again at the next tick.
+// MicroVM and says once, while the session runs, that it is full or
+// filling: a write that fails there said nothing before the end of the
+// session (#1148). It looks soon after the start, then every
+// smallOverlayDiskEvery on a disk of up to smallOverlayBytes and every
+// overlayDiskEvery on a larger one, and warns before the 90% mark too when,
+// at the rate it filled since the last look, it would be full before the
+// look after next (GAP-1140). A look that does not answer is tried again
+// at the next tick.
 func (s *session) watchOverlayDisk(ctx context.Context) {
-	t := time.NewTicker(overlayDiskEvery)
-	defer t.Stop()
+	wait := smallOverlayDiskEvery
+	var last overlayDisk
+	var lastAt time.Time
 	for {
+		timer := time.NewTimer(wait)
 		select {
 		case <-ctx.Done():
+			timer.Stop()
 			return
-		case <-t.C:
+		case <-timer.C:
 		}
-		if disk := s.app.overlayDiskOf(ctx, s.cli, s.sb.Name); disk.filling() {
+		disk := s.app.overlayDiskOf(ctx, s.cli, s.sb.Name)
+		now := time.Now()
+		if disk.known {
+			wait = overlayDiskEvery
+			if disk.size <= smallOverlayBytes {
+				wait = smallOverlayDiskEvery
+			}
+		}
+		if disk.filling() || disk.fillsWithin(last, now.Sub(lastAt), 2*wait) {
 			text := "⚠ " + overlayDiskFillingText(s.sb.Name, disk, true)
 			s.notice("overlay disk", text, text)
 			return
+		}
+		if disk.known {
+			last, lastAt = disk, now
 		}
 	}
 }

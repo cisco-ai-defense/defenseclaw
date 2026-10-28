@@ -216,6 +216,11 @@ func TestStandaloneForeignCleanupCoversMachinePolicyOnlyUsers(t *testing.T) {
 	// not enroll per user are leftovers of an earlier route.
 	leftovers := []string{}
 	for _, target := range requests[0].Targets {
+		if target.Mode == enterpriseHookWorkerModeUnblockPersonalClaude {
+			// Claude Code is not machine policy here: the blocker an
+			// earlier pass may have written goes (GAP-1829).
+			continue
+		}
 		if target.Mode != enterpriseHookWorkerModeRemoveLeftover || target.Options.UserHome != "/home/alice" {
 			t.Fatalf("leftover target %+v", target)
 		}

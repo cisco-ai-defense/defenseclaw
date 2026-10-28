@@ -148,6 +148,11 @@ func PerUserPostOutage(err error) bool {
 	return gatewayRestartShaped(err)
 }
 
+// perUserHookMaxBody is the largest body the per-user transports (the shell
+// hooks' defenseclaw-hook-post and the OpenCode and Amp plugins' native
+// helper) send; a bounded oversize review stays under it.
+const perUserHookMaxBody = 900 << 10
+
 func PostPerUserHook(ctx context.Context, apiAddr, path string, headers map[string]string, body []byte) (PerUserHookReply, error) {
 	client, err := NewPerUserGatewayHTTPClient(30*time.Second, apiAddr)
 	if err != nil {
@@ -179,7 +184,7 @@ func postPluginHook(ctx context.Context, client *http.Client, apiAddr, path stri
 	default:
 		return PerUserHookReply{}, fmt.Errorf("unsupported per-user plugin hook path")
 	}
-	if len(body) > 900*1024 {
+	if len(body) > perUserHookMaxBody {
 		return PerUserHookReply{}, fmt.Errorf("per-user plugin hook body is too large")
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "http://"+apiAddr+path, bytes.NewReader(body))

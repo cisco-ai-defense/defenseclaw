@@ -25,7 +25,7 @@ from defenseclaw.models import Event
 
 from tests.helpers import cleanup_app, make_app_context
 
-PAGE = Path(__file__).resolve().parents[2] / "docs-site/content/docs/how-to/guardrail/ask-before-risky-calls.mdx"
+PAGE = Path(__file__).resolve().parents[2] / "docs-site/content/docs/hitl.mdx"
 RULE = {
     "defenseclaw.finding.rule_id": "C2-WEBHOOK-SITE",
     "defenseclaw.finding.title": "webhook.site (known exfil)",

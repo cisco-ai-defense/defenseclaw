@@ -4,7 +4,6 @@
 package cli
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -179,16 +178,9 @@ func configSchemaProblem(err error) (string, bool) {
 	if schemaErr.Keyword == "pattern" && (strings.HasSuffix(field, ".block_at") || strings.HasSuffix(field, ".alert_at")) {
 		return fmt.Sprintf("%s: %s must be one of CRITICAL, HIGH, MEDIUM, LOW", where, field), true
 	}
-	if schemaErr.Keyword != "enum" || !strings.HasPrefix(schemaErr.Expected, "one of ") {
+	names, ok := schemaErr.EnumChoices()
+	if !ok {
 		return "", false
-	}
-	var choices []any
-	if json.Unmarshal([]byte(strings.TrimPrefix(schemaErr.Expected, "one of ")), &choices) != nil || len(choices) == 0 {
-		return "", false
-	}
-	names := make([]string, len(choices))
-	for i, choice := range choices {
-		names[i] = fmt.Sprint(choice)
 	}
 	is := "is not an allowed value"
 	if schemaErr.Value != "" {

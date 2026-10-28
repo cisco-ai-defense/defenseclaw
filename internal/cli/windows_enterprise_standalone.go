@@ -699,8 +699,47 @@ func runWindowsEnterpriseStandaloneAction(
 	if (action == "status" || action == "verify") && report.Installed {
 		appendWindowsEnterpriseStatusAdvisories(ctx, result, report)
 	}
+	if action == "status" || action == "verify" || action == "repair" {
+		settleWindowsEnterpriseHotConfigClosure(ctx, result, action)
+	}
 	addWindowsEnterpriseNothingInstalledError(result, report, action)
 	return finishWindowsEnterpriseStandalone(cmd, opts, result, windowsEnterpriseFailureCodeFor(result))
+}
+
+// settleWindowsEnterpriseHotConfigClosure handles the closure a config change
+// whose undo was not proven leaves: every standalone hook answers "the
+// DefenseClaw gateway is not available" until it is released. A clean
+// elevated repair or verify releases it once the gateway proves the installed
+// config's policy, as ensure does. Otherwise status warns and verify fails,
+// so no result reads healthy while every enrolled user is locked out
+// (GAP-1599).
+func settleWindowsEnterpriseHotConfigClosure(ctx context.Context, result *enterprisestatus.Result, action string) {
+	if !result.Installed {
+		return
+	}
+	if held, err := windowsEnterpriseHotConfigHooksHeld(); err != nil || !held {
+		return
+	}
+	reason := ""
+	if action != "status" && windowsEnterpriseIsElevated() && len(result.Errors) == 0 {
+		err := windowsEnterpriseReleaseHotConfigClosureIfProven(ctx, result)
+		if held, heldErr := windowsEnterpriseHotConfigHooksHeld(); err == nil && heldErr == nil && !held {
+			result.Changes = append(result.Changes, "released the standalone hook closure a failed config undo left; the gateway proves the installed config's policy")
+			result.Noop, result.NoopReason = false, ""
+			return
+		}
+		if err != nil {
+			reason = " (" + windowsEnterpriseBoundedDiagnostic(err.Error()) + ")"
+		}
+	}
+	message := "every standalone hook is forced closed since a config change could not prove its undo, so agents are told the DefenseClaw gateway is not available" + reason +
+		". Next step: from an elevated PowerShell prompt run DefenseClawSetup-Enterprise-Standalone-x64.exe /repair JSON=1; it releases the closure once the gateway proves the installed config"
+	if action == "status" {
+		result.SecurityComplete = false
+		result.AddWarning("hook_closure_held", message)
+		return
+	}
+	result.AddError("hook_closure_held", message)
 }
 
 // appendWindowsEnterpriseStatusAdvisories adds the advisories status and
@@ -755,19 +794,34 @@ var windowsEnterprisePolicyDigest = func(ctx context.Context) ([]byte, error) {
 // machine registration. An elevated lifecycle can inherit ProgramFiles from
 // a caller, so the path used for a subprocess must not use that environment.
 func windowsEnterpriseInstalledAdminCLI() (string, error) {
+	return windowsEnterpriseInstalledAdminImage("defenseclaw.exe", "CLI")
+}
+
+// windowsEnterpriseInstalledAdminGateway resolves the installed gateway
+// image the same way. enterprise hooks readiness proves the guardian's
+// protected authorization only when it runs from
+// <InstallRoot>\bin\defenseclaw-gateway.exe, as Setup runs it: run from
+// defenseclaw.exe it reported authorization_error, so every hook proof of a
+// hot config change, of its undo and of a held closure's release failed
+// closed whatever was enrolled (GAP-1719).
+func windowsEnterpriseInstalledAdminGateway() (string, error) {
+	return windowsEnterpriseInstalledAdminImage("defenseclaw-gateway.exe", "gateway")
+}
+
+func windowsEnterpriseInstalledAdminImage(image, label string) (string, error) {
 	programFiles, err := windowsEnterpriseProgramFilesResolver()
 	if err != nil {
-		return "", fmt.Errorf("resolve trusted Program Files for installed CLI: %w", err)
+		return "", fmt.Errorf("resolve trusted Program Files for installed %s: %w", label, err)
 	}
-	installedCLI := filepath.Join(programFiles, "Cisco", "DefenseClaw", "bin", "defenseclaw.exe")
+	installed := filepath.Join(programFiles, "Cisco", "DefenseClaw", "bin", image)
 	// An elevated lifecycle runs this image with the service pins. Check
 	// that only SYSTEM, Administrators and TrustedInstaller can replace it
 	// or any folder above it (Program Files\Cisco included), and that its
 	// folders are not links, before any process is created (GAP-1493).
-	if err := windowsEnterpriseInstalledCLICustody(installedCLI, "installed DefenseClaw CLI"); err != nil {
-		return "", fmt.Errorf("refuse to run the installed CLI: %w", err)
+	if err := windowsEnterpriseInstalledCLICustody(installed, "installed DefenseClaw "+label); err != nil {
+		return "", fmt.Errorf("refuse to run the installed %s: %w", label, err)
 	}
-	return installedCLI, nil
+	return installed, nil
 }
 
 // windowsEnterpriseInstalledCLICustody validates the installed CLI file and
@@ -831,7 +885,9 @@ func applyWindowsEnterprisePolicyAs(ctx context.Context, result *enterprisestatu
 			// CLI the custody check refused to run (GAP-0594).
 			cause := "the installed CLI reported no effective policy digest"
 			if err != nil {
-				cause = err.Error()
+				// A custody refusal names the account and the icacls
+				// command that clears it, as the folder case does (GAP-0594).
+				cause = windowsEnterpriseNamePrincipals(err.Error())
 			}
 			message := "the effective policy the gateway enforces could not be checked: " + cause
 			if result.Action == "verify" {
@@ -841,12 +897,49 @@ func applyWindowsEnterprisePolicyAs(ctx context.Context, result *enterprisestatu
 			}
 		}
 	}
+	if state != nil && !state.Applied {
+		// The gateway reports another digest or a reload error: the
+		// installed policy is not the one it enforces, so nothing certifies
+		// security_complete, and status and verify name it (GAP-1329).
+		result.SecurityComplete = false
+		if !change {
+			appendWindowsEnterprisePolicyNotApplied(result, state)
+		}
+	}
 	if state == nil || !state.Applied || !change || len(result.Errors) != 0 {
 		return
 	}
 	if err := writeWindowsEnterprisePolicyState(state); err != nil {
 		result.AddWarning("policy_state_unrecorded", "could not record "+enterprisestatus.PolicyStateFileName+": "+err.Error())
 	}
+}
+
+// appendWindowsEnterprisePolicyNotApplied reports, for a read (status,
+// verify), a policy the running gateway has not applied. A reload error the
+// report already warned about (policy_reload_rejected) fails verify; another
+// digest is a policy_not_applied warning on status and an error on verify.
+func appendWindowsEnterprisePolicyNotApplied(result *enterprisestatus.Result, state *enterprisestatus.PolicyState) {
+	if state.LastReloadError != "" {
+		if result.Action != "verify" {
+			return
+		}
+		for index, message := range result.Warnings {
+			if message.Code == "policy_reload_rejected" {
+				result.Warnings = append(result.Warnings[:index], result.Warnings[index+1:]...)
+				result.AddError(message.Code, message.Message)
+				return
+			}
+		}
+		return
+	}
+	message := fmt.Sprintf(
+		"the gateway enforces effective policy %s but the installed config computes to %s; it applies the config on its next reload. If this stays, run DefenseClawSetup-Enterprise-Standalone-x64.exe /repair JSON=1 from an elevated prompt",
+		shortPolicyDigest(state.GatewayReportedDigest), shortPolicyDigest(state.EffectiveDigest))
+	if result.Action == "verify" {
+		result.AddError("policy_not_applied", message)
+		return
+	}
+	result.AddWarning("policy_not_applied", message)
 }
 
 // writeWindowsEnterprisePolicyState records the applied policy in
@@ -1368,6 +1461,9 @@ func applyWindowsEnterpriseInstallerReport(
 		enrollment, err := readWindowsEnterpriseStandaloneEnrollment()
 		if err == nil {
 			result.Enrollment = enrollment
+			if result.Action == "status" || result.Action == "verify" || result.Action == "ensure" {
+				appendWindowsClaudeUserSettingsWarnings(result, enrollment.Accounts)
+			}
 		}
 		aiDefense, err := readWindowsEnterpriseStandaloneAIDefense()
 		if err == nil && aiDefense {
@@ -2570,6 +2666,17 @@ func windowsEnterpriseFailureCodeFor(result *enterprisestatus.Result) int {
 			return enterprisestatus.WindowsExitBusy
 		case "bundle_apply_failed", "bundle_policy_not_adopted", "bundle_post_verify_failed", "bundle_targets_refresh_failed":
 			return enterprisestatus.WindowsExitBusy
+		case "hook_calls_running", "hook_in_use":
+			// The lifecycle deferred before it changed anything, while hook
+			// calls of the installed release still run (GAP-1124) or another
+			// program holds the installed hook open (GAP-2001).
+			return enterprisestatus.WindowsExitBusy
+		case "scanner_runtime_unavailable":
+			if strings.HasSuffix(message.Message, windowsScannerPrepareRetryNotice) {
+				// A prepare that hit its bound is finished by a retry of the
+				// same command (GAP-1687).
+				return enterprisestatus.WindowsExitBusy
+			}
 		case "invalid_arguments":
 			return enterprisestatus.WindowsExitInvalidArgs
 		case "elevation_required":
@@ -3444,9 +3551,13 @@ func runWindowsEnterpriseStandaloneEnsureOnce(
 				code = windowsEnterpriseFailureCodeFor(result)
 			}
 		}
-		if err := windowsEnterpriseReleaseHotConfigClosureIfProven(ctx, result, code); err != nil {
-			result.AddError("hook_closure_release_failed", "standalone hooks remain closed after the unproven config undo: "+
-				windowsEnterpriseBoundedDiagnostic(err.Error())+"; rerun ensure after repairing the gateway")
+		// Every exit passes windowsEnterpriseFailureCodeFor, which is nonzero
+		// even for a clean run, so the closure is settled on the error list
+		// as repair and verify settle it: released once the gateway proves
+		// the installed config, otherwise named (GAP-2087).
+		errorsBefore := len(result.Errors)
+		settleWindowsEnterpriseHotConfigClosure(ctx, result, "ensure")
+		if len(result.Errors) != errorsBefore {
 			code = windowsEnterpriseFailureCodeFor(result)
 		}
 		return finishWindowsEnterpriseStandalone(cmd, opts, result, code)
@@ -3844,8 +3955,11 @@ func runWindowsEnterpriseStandaloneEnsureOnce(
 	return false, finishEnsure(windowsEnterpriseFailureCodeFor(result))
 }
 
-func windowsEnterpriseReleaseHotConfigClosureIfProven(ctx context.Context, result *enterprisestatus.Result, code int) error {
-	if code != 0 || !result.OK || !result.Installed {
+func windowsEnterpriseReleaseHotConfigClosureIfProven(ctx context.Context, result *enterprisestatus.Result) error {
+	// Finish sets result.OK only after this runs, and no exit code is final
+	// before it either, so the error list is the verdict: gating on OK
+	// (GAP-1599) or on the failure code (GAP-2087) kept every closure.
+	if len(result.Errors) != 0 || !result.Installed {
 		return nil
 	}
 	// A failed hot-config undo left this administrator-owned closure across
@@ -4287,11 +4401,47 @@ func compareWindowsEnterpriseVersions(left, right string) int {
 		return 1
 	case rPre == "":
 		return -1
-	case lPre < rPre:
-		return -1
 	default:
+		return compareWindowsEnterprisePrerelease(lPre, rPre)
+	}
+}
+
+// compareWindowsEnterprisePrerelease orders two prerelease strings as semver
+// does: dot-separated identifiers left to right, numeric ones as numbers and
+// below alphanumeric ones, a shorter list first when it is a prefix. Compared
+// as text, rc.4 was newer than rc.10 and ensure refused that upgrade as a
+// downgrade (GAP-1516).
+func compareWindowsEnterprisePrerelease(left, right string) int {
+	l, r := strings.Split(left, "."), strings.Split(right, ".")
+	for i := 0; i < len(l) && i < len(r); i++ {
+		ln, lErr := strconv.ParseUint(l[i], 10, 64)
+		rn, rErr := strconv.ParseUint(r[i], 10, 64)
+		switch {
+		case lErr == nil && rErr == nil:
+			if ln != rn {
+				if ln < rn {
+					return -1
+				}
+				return 1
+			}
+		case lErr == nil:
+			return -1
+		case rErr == nil:
+			return 1
+		case l[i] != r[i]:
+			if l[i] < r[i] {
+				return -1
+			}
+			return 1
+		}
+	}
+	switch {
+	case len(l) < len(r):
+		return -1
+	case len(l) > len(r):
 		return 1
 	}
+	return 0
 }
 
 func parseWindowsEnterpriseVersion(value string) ([]int, string, bool) {

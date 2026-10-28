@@ -33,6 +33,13 @@ func TestWindowsClaudeCodePreToolUseGuardBlocksAMissingLauncherAndSuitsCursor(t 
 			`C:\Users\dcw-std1\AppData\Local\Programs\DefenseClaw\bin\defenseclaw-hook.exe`},
 		{`C:\Users\Jane Doe\AppData\Local\DefenseClaw\HookRuntime\defenseclaw-hook.exe`,
 			`C:\Users\Jane Doe\AppData\Local\Programs\DefenseClaw\bin\defenseclaw-hook.exe`},
+		// The one-line install runs its gateway as the guard (GAP-1011
+		// round 2): the direct launcher let a tool call of a turn that
+		// began before the launcher went missing run uninspected.
+		{`C:\Users\dcw-std1\.local\bin\defenseclaw-hook.exe`,
+			`C:\Users\dcw-std1\.local\bin\defenseclaw-gateway.exe`},
+		{`C:\Users\Jane Doe\.local\bin\defenseclaw-hook.exe`,
+			`C:\Users\Jane Doe\.local\bin\defenseclaw-gateway.exe`},
 	} {
 		t.Run(tc.launcher, func(t *testing.T) {
 			pinClaudeCodePreToolGuard(t, tc.guard)
@@ -186,6 +193,63 @@ func TestClaudeCodeLauncherGuardArgvStartsOnlyTheClaudeHookOfADefenseClawLaunche
 		}
 		if view := claudeCodeExecView(edited); !reflect.DeepEqual(view, edited) {
 			t.Errorf("%s: an edited guard got the exec view %#v", name, view)
+		}
+	}
+}
+
+// The one-line install has no separate installed hook, so its PreToolUse
+// handler ran the launcher directly: when antivirus removed the launcher after
+// a turn's prompt was checked, the next tool call's start failed, which Claude
+// Code treats as non-blocking, and the call ran uninspected (GAP-1011 round
+// 2). Its guard is the gateway beside the launcher; any other layout keeps the
+// exec form.
+func TestClaudeCodePreToolGuardOfAOneLineInstallIsTheGatewayBesideTheLauncher(t *testing.T) {
+	dir := t.TempDir()
+	bin := filepath.Join(dir, ".local", "bin")
+	launcher := filepath.Join(bin, "defenseclaw-hook.exe")
+	gateway := filepath.Join(bin, "defenseclaw-gateway.exe")
+	onlyHook := filepath.Join(dir, "only-hook", "defenseclaw-hook.exe")
+	gatewayDir := filepath.Join(dir, "gateway-dir", "defenseclaw-hook.exe")
+	other := filepath.Join(bin, "other.exe")
+	for _, path := range []string{launcher, gateway, onlyHook, gatewayDir, other} {
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte("MZ"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.Mkdir(filepath.Join(filepath.Dir(gatewayDir), "defenseclaw-gateway.exe"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct{ name, launcher, want string }{
+		{"one-line install", launcher, gateway},
+		{"no gateway beside the launcher", onlyHook, ""},
+		{"gateway is a directory", gatewayDir, ""},
+		{"launcher is not the hook", other, ""},
+		{"relative launcher", "defenseclaw-hook.exe", ""},
+		{"launcher cmd.exe cannot quote", filepath.Join(bin, "a%b", "defenseclaw-hook.exe"), ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := claudeCodeGatewayPreToolGuardFor(tc.launcher); got != tc.want {
+				t.Fatalf("= %q, want %q", got, tc.want)
+			}
+			// Without a packaged install the resolver Setup uses picks it too.
+			if got := claudeCodePreToolGuardExecutable(tc.launcher); got != tc.want {
+				t.Fatalf("PreToolUse guard = %q, want %q", got, tc.want)
+			}
+		})
+	}
+	// Only the hook and the gateway answer the launcher-guard argv.
+	for path, want := range map[string]bool{
+		gateway: true, launcher: true,
+		filepath.Join(bin, "defenseclaw-acp.exe"): false,
+		filepath.Join(bin, "defenseclaw.exe"):     false,
+		"defenseclaw-gateway.exe":                 false,
+		`C:\Windows\System32\cmd.exe`:             false,
+	} {
+		if got := claudeCodePreToolGuardProgram(path); got != want {
+			t.Fatalf("claudeCodePreToolGuardProgram(%q) = %v, want %v", path, got, want)
 		}
 	}
 }

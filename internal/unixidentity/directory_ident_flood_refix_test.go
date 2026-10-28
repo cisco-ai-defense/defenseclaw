@@ -86,3 +86,39 @@ func isSharedUID(err error) bool {
 	var shared *SharedUIDError
 	return errors.As(err, &shared)
 }
+
+// GAP-0677, the group half: on an sss-first host (RHEL's "group: sss
+// files") the gateway, which is not root, cannot show that SSSD's miss of a
+// local account's unnamed primary gid is definitive, so the gid stayed
+// unconfirmed after the guardian had recorded that root-only proof for the
+// account, and an assignment by that gid refused the account's hooks while
+// explain placed it. The recorded proof now covers the account's group
+// misses as it covers its uid; without it, and with SSSD offline, the gid
+// stays unconfirmed.
+func TestRecordedSSSDMissConfirmsTheLocalAccountsUnnamedGid(t *testing.T) {
+	const uid = 49261
+	line := "p0677:x:49261:49262::/home/p0677:/bin/bash\n"
+	accountHost(t, line, "local-team:x:7000:p0677\n", "passwd: sss files\ngroup: sss files\n")
+	sssdConfiguredHost(t)
+	startFakeSSSD(t, nil)
+	previousEUID, previousOnline := sssdEUID, sssdDomainsOnline
+	t.Cleanup(func() { sssdEUID, sssdDomainsOnline = previousEUID, previousOnline })
+	sssdEUID, sssdDomainsOnline = func() int { return 1001 }, sssctlDomainsOnline
+	r := newFakeNSS(&fakeRun{results: map[string]commandResult{
+		"passwd 49261":          {stdout: []byte(line)},
+		"-s files passwd 49261": {stdout: []byte(line)},
+	}})
+	facts, err := r.DirectoryFactsForRecordedUnsharedUID(uid, time.Now())
+	if err != nil || !slices.Contains(facts.Groups, "49262") || !slices.Contains(facts.Groups, "local-team") {
+		t.Fatalf("recorded lookup = %+v, %v; want the local account with groups local-team and 49262", facts, err)
+	}
+	if len(facts.UnconfirmedGroups) != 0 {
+		t.Fatalf("recorded lookup left %v unconfirmed; the guardian's root-only SSSD proof covers the account's group misses", facts.UnconfirmedGroups)
+	}
+	// Control: SSSD offline is not covered by the recorded proof.
+	sssdDomainsOnline = func(context.Context) error { return errors.New("SSSD domain offline") }
+	sssdEUID = func() int { return 0 }
+	if facts, err := r.DirectoryFactsForRecordedUnsharedUID(uid, time.Now()); err == nil && len(facts.UnconfirmedGroups) == 0 {
+		t.Fatalf("offline SSSD facts = %+v; the gid must stay unconfirmed (or the lookup fail) while SSSD is offline", facts)
+	}
+}

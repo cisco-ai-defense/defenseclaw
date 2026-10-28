@@ -35,6 +35,7 @@ import re
 import stat
 import subprocess
 import sys
+import threading
 import urllib.parse
 from collections.abc import Callable, Mapping
 from contextlib import contextmanager
@@ -79,6 +80,7 @@ from defenseclaw.file_permissions import (
     MAX_DOTENV_BYTES,
     dotenv_key_is_process_control,
     dotenv_key_is_valid,
+    namespace_hides_owner,
     read_regular_file_no_follow,
     tracked_host_owner_uid,
 )
@@ -769,6 +771,12 @@ def _managed_config_trust_problem(path: str) -> str | None:
         owner_uid = tracked_host_owner_uid(current, info) if hasattr(info, "st_uid") else None
         if owner_uid is None:
             return f"{current}: cannot inspect path owner"
+        if owner_uid == -1 and namespace_hides_owner(info):
+            # Unknown, not another account: a sandbox hides it (GAP-1395).
+            return (
+                f"{current}: its owner cannot be checked inside this sandbox (a user namespace hides it); "
+                "run the command outside the sandbox"
+            )
         if owner_uid != 0:
             return f"{current}: owner uid {owner_uid} is not trusted; expected root/admin uid 0"
 
@@ -2260,7 +2268,7 @@ class JudgeConfig:
 class WebhookConfig:
     # Mirrors ``internal/config.WebhookConfig`` (notifier webhook, not an
     # audit sink). See the published webhook guide:
-    # https://cisco-ai-defense.github.io/defenseclaw/docs/how-to/observability/set-up-webhook-alerts/
+    # https://cisco-ai-defense.github.io/defenseclaw/docs/observability/webhooks/
     #
     # ``name`` is the CLI-visible identifier used by
     # ``defenseclaw setup webhook {enable,disable,remove,show,test}``.
@@ -2561,7 +2569,9 @@ class GuardrailConfig:
     # ``DEFENSECLAW_STRICT_AVAILABILITY=1`` additionally forces transport and
     # missing-token failures closed. Mirrors ``GuardrailConfig.HookFailMode``
     # in internal/config/config.go.
-    hook_fail_mode: str = "closed"
+    # An empty constructor value means no operator choice. __post_init__ keeps
+    # the historical public value while recording whether a choice was made.
+    hook_fail_mode: str = ""
     # ``llm_role`` is the operator's answer to "should DefenseClaw's
     # LLM be used only as a judge, or also as the agent's upstream?".
     # One of:
@@ -2651,6 +2661,18 @@ class GuardrailConfig:
             return pc.hilt
         return self.hilt
 
+    def __post_init__(self) -> None:
+        supplied = bool(self.hook_fail_mode.strip())
+        if not supplied:
+            object.__setattr__(self, "hook_fail_mode", "closed")
+        object.__setattr__(self, "_hook_fail_mode_saved", supplied)
+        object.__setattr__(self, "_hook_fail_mode_track", True)
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        object.__setattr__(self, name, value)
+        if name == "hook_fail_mode" and getattr(self, "_hook_fail_mode_track", False):
+            object.__setattr__(self, "_hook_fail_mode_saved", bool(str(value or "").strip()))
+
     def effective_hook_fail_mode(self, connector: str = "") -> str:
         """Resolve hook failure behavior for this deployment profile.
 
@@ -2663,11 +2685,10 @@ class GuardrailConfig:
           mode; an explicit value always wins (the administrator's config
           sets it), and an unset one is open under Secure Client (#1163) and
           closed on the standalone profile;
-        - a per-user host reports its gateway-outage mode, which follows the
-          connector's policy tier (Go ``config.HookOutageFailMode``, owner
-          decision 2026-10-23): ``closed`` for a strict rule pack, ``open``
-          for default (balanced) and permissive. A saved per-user
-          ``hook_fail_mode`` does not change it, and every failure that is
+        - a per-user host reports its gateway-outage mode: an explicitly saved
+          ``hook_fail_mode`` wins; otherwise the connector's policy tier
+          (Go ``config.HookOutageFailMode``, owner decision 2026-10-23) is
+          ``closed`` for strict and ``open`` for default and permissive. Every failure that is
           not an outage (an answer the gateway gave, a malformed or partial
           one, a missing token, the install window) blocks in every tier.
         """
@@ -2675,21 +2696,33 @@ class GuardrailConfig:
         cfg = owner() if callable(owner) else None
         owned = cfg is not None and getattr(cfg, "guardrail", None) is self
         standalone = owned and cfg.managed_outside_secure_client()
+        if owned:
+            application = cfg.application_protection
+            if application.enabled and connector_paths.normalize(connector) not in cfg.active_connectors():
+                override = application._connector_override(connector)
+                overlay = override.guardrail if override is not None else application.guardrail
+                if overlay.hook_fail_mode.strip():
+                    return _normalize_hook_fail_mode(overlay.hook_fail_mode)
+        pc = self._connector_override(connector)
+        if pc is not None and pc.hook_fail_mode.strip():
+            return _normalize_hook_fail_mode(pc.hook_fail_mode)
+        if getattr(self, "_hook_fail_mode_saved", False) and self.hook_fail_mode.strip():
+            return _normalize_hook_fail_mode(self.hook_fail_mode)
         if standalone or self.secure_client_hook_fail_modes():
-            if owned:
-                application = cfg.application_protection
-                if application.enabled and connector_paths.normalize(connector) not in cfg.active_connectors():
-                    override = application._connector_override(connector)
-                    overlay = override.guardrail if override is not None else application.guardrail
-                    if overlay.hook_fail_mode.strip():
-                        return _normalize_hook_fail_mode(overlay.hook_fail_mode)
-            pc = self._connector_override(connector)
-            if pc is not None and pc.hook_fail_mode.strip():
-                return _normalize_hook_fail_mode(pc.hook_fail_mode)
-            if self.hook_fail_mode.strip():
-                return _normalize_hook_fail_mode(self.hook_fail_mode)
             return "closed" if standalone else "open"
         return "closed" if self.hook_policy_tier(connector) == "strict" else "open"
+
+    def effective_hook_outage_fail_mode(self, connector: str = "") -> str:
+        """What ``connector``'s hooks do while the gateway is down.
+
+        Mirrors Go ``Config.EffectiveHookOutageFailModeForConnector``: the
+        mode the current hooks, the OpenCode/Amp plugins and the shell helper
+        decide at call time, and the one Doctor, Status and the fail-mode
+        setter's runtime check read for them (GAP-1354, GAP-1730).
+        :meth:`effective_hook_fail_mode` already resolves it (a managed mode,
+        an explicit saved mode, else the connector's policy tier).
+        """
+        return self.effective_hook_fail_mode(connector)
 
     def hook_policy_tier(self, connector: str = "") -> str:
         """The connector's policy tier: its rule pack's posture (strict, default or permissive).
@@ -2950,7 +2983,8 @@ def _go_quote(value: Any) -> str:
 
 
 def _sandbox_enum_error(field_name: str, value: Any, *allowed: str) -> str | None:
-    if value in (None, "") or value in allowed:
+    # Any letter case, as the Go loader folds it (GAP-0691, #1226).
+    if value in (None, "") or (isinstance(value, str) and value.lower() in allowed):
         return None
     return f"{field_name} {_go_quote(value)} must be one of {', '.join(allowed)}"
 
@@ -4442,6 +4476,17 @@ class Config:
             return
         _existing_document_for_save(path, current)
 
+    def decide(self, *paths: str) -> None:
+        """Name config keys the next :meth:`save` writes as the caller's
+        decision, also when the value written equals the one on disk.
+
+        A save over the pre-1.0.4 default preset keeps its balanced MCP
+        compatibility only for the MCP severities no decided or changed key
+        covers (GAP-1488, ``config_writer._keep_chosen_admission``), so an
+        explicit quarantine is never compiled as a warning.
+        """
+        self.__dict__.setdefault("_decided_paths", []).extend(paths)
+
     def save(self, *, actor: str | None = None, reason: str = "") -> Any:
         """Persist this :class:`Config` through the single config writer.
 
@@ -4498,6 +4543,7 @@ class Config:
         from defenseclaw import config_writer
 
         dataclass_data = _config_to_dict(self)
+        decided = self.__dict__.pop("_decided_paths", [])
 
         def mutate(current: bytes, source_name: str) -> tuple[bytes, list[str]]:
             merged = self._merged_document(path, dataclass_data, current)
@@ -4514,7 +4560,14 @@ class Config:
             reason or "config save",
             path=path,
             verify=verify,
+            decided=decided,
         )
+        # The admission pins the writer added (GAP-1488) go into this Config
+        # too, so it reads as the file it wrote.
+        for parts, value in result.pins.items():
+            self.admission.mcp.actions[parts[-1]] = value
+            written = dataclass_data.setdefault("admission", {}).setdefault("mcp", {}).setdefault("actions", {})
+            written[parts[-1]] = value
         if self._source_config_version == 0:
             self._source_config_version = CURRENT_CONFIG_VERSION
         self._loaded_v8_modeled_snapshot = copy.deepcopy(dataclass_data)
@@ -4557,7 +4610,7 @@ class Config:
         # Load already moved a retired connector ID in memory; apply the same
         # rename to the on-disk document so any save persists it.
         legacy_connector.migrate_raw_config(existing, path)
-        _drop_retired_connector_settings(existing)
+        _drop_retired_connector_settings(existing, path)
         merged = _merge_v8_modeled_changes(
             existing,
             dataclass_data,
@@ -4802,6 +4855,11 @@ def _config_to_dict(cfg: Config) -> dict[str, Any]:
         scanners.get("skill_scanner", {}).pop("virustotal_api_key", None)
     _strip_empty_llm(scanners, "plugin_llm")
     guardrail = d.get("guardrail") or {}
+    # The public in-memory default remains "closed" for existing callers,
+    # but an unset document must stay unset in the modeled save baseline.
+    # Otherwise choosing "closed" in setup looks unchanged and is omitted.
+    if isinstance(guardrail, dict) and not getattr(cfg.guardrail, "_hook_fail_mode_saved", False):
+        guardrail.pop("hook_fail_mode", None)
     if isinstance(guardrail, dict) and not guardrail.get("allow_private_upstreams"):
         guardrail.pop("allow_private_upstreams", None)
     _strip_unset_levels(guardrail)
@@ -6194,7 +6252,7 @@ def _merge_guardrail(raw: dict[str, Any] | None, data_dir: str) -> GuardrailConf
         if isinstance(private_upstreams_raw, list | tuple)
         else []
     )
-    return GuardrailConfig(
+    merged = GuardrailConfig(
         enabled=raw.get("enabled", False),
         mode=raw.get("mode", "observe"),
         scanner_mode=raw.get("scanner_mode", "both"),
@@ -6229,6 +6287,10 @@ def _merge_guardrail(raw: dict[str, Any] | None, data_dir: str) -> GuardrailConf
         profile_assignments=_merge_guardrail_profile_assignments(raw.get("profile_assignments")),
         default_profile=str(raw.get("default_profile", "") or "").strip(),
     )
+    # The historical raw default is "closed"; keep presence for the OSS
+    # outage resolver without changing that public config value.
+    merged._hook_fail_mode_saved = bool(str(raw.get("hook_fail_mode", "") or "").strip())
+    return merged
 
 
 def _merge_guardrail_connectors(
@@ -7289,7 +7351,13 @@ def _is_retired_connector_name(name: Any) -> bool:
     return isinstance(name, str) and name.strip().lower() in _RETIRED_CONNECTOR_NAMES
 
 
-def _drop_retired_connector_settings(raw: dict[str, Any]) -> None:
+# Set once _drop_retired_connector_settings has warned in this process.
+_retired_settings_warned = threading.Event()
+
+
+def _drop_retired_connector_settings(
+    raw: dict[str, Any], source: str | os.PathLike[str] | None = None, *, emit_warning: bool = True
+) -> None:
     """Until 1.1, accept old rosters and discard removed connector settings.
 
     Only connector fields are touched (mirrors ``dropRetiredConnectorSettings``
@@ -7401,10 +7469,16 @@ def _drop_retired_connector_settings(raw: dict[str, Any]) -> None:
     if isinstance(claw, dict) and _is_retired_connector_name(claw.get("mode")):
         claw["mode"] = ""
         changed = True
-    if changed:
-        logging.warning(
-            "until 1.1: removed OpenHands/OmniGent connector settings from loaded config; "
-            "run defenseclaw migrate"
+    if changed and emit_warning and not _retired_settings_warned.is_set():
+        # Once per process, through this module's logger: the root logger's
+        # implicit basicConfig printed a raw "WARNING:root:" line into the
+        # installer's output, and that line repeated the installers' one
+        # removal notice (GAP-2043). It names the file, which is what to fix.
+        _retired_settings_warned.set()
+        _log.warning(
+            "%s still names OpenHands/OmniGent, which DefenseClaw no longer supports; "
+            "they are ignored. Delete them from that file.",
+            os.fspath(source) if source else "config.yaml",
         )
 
 
@@ -7450,7 +7524,7 @@ def load(
     # is normalized or checked for duplicates. The Go loader applies the same
     # rule; `defenseclaw migrate` persists it (see migrations.py).
     legacy_connector.migrate_raw_config(raw, cfg_file)
-    _drop_retired_connector_settings(raw)
+    _drop_retired_connector_settings(raw, cfg_file)
     if without_guardrail_profiles:
         raw = _without_guardrail_profiles(raw)
 

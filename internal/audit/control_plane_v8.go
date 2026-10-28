@@ -123,21 +123,22 @@ type controlPlaneV8Family uint8
 // content. Content fields remain unmodified until the unified runtime applies
 // the route-selected projection independently for each destination.
 type controlPlaneV8Evidence struct {
-	actorRef        observability.Optional[string]
-	operation       observability.Optional[string]
-	principalRef    observability.Optional[string]
-	origin          observability.Optional[string]
-	targetRef       observability.Optional[string]
-	beforeSummary   observability.Optional[string]
-	afterSummary    observability.Optional[string]
-	beforeState     observability.Optional[string]
-	afterState      observability.Optional[string]
-	diff            observability.Optional[string]
-	reason          observability.Optional[string]
-	reasonDetail    observability.Optional[string]
-	revision        observability.Optional[string]
-	currentRevision observability.Optional[string]
-	changeCount     observability.Optional[int64]
+	actorRef         observability.Optional[string]
+	operation        observability.Optional[string]
+	principalRef     observability.Optional[string]
+	origin           observability.Optional[string]
+	targetRef        observability.Optional[string]
+	targetTypeDetail observability.Optional[string]
+	beforeSummary    observability.Optional[string]
+	afterSummary     observability.Optional[string]
+	beforeState      observability.Optional[string]
+	afterState       observability.Optional[string]
+	diff             observability.Optional[string]
+	reason           observability.Optional[string]
+	reasonDetail     observability.Optional[string]
+	revision         observability.Optional[string]
+	currentRevision  observability.Optional[string]
+	changeCount      observability.Optional[int64]
 	// bundle and receipt are the policy bundle fields of a
 	// config.change.applied or config.bundle.receipt record.
 	bundle  policyBundleV8Fields
@@ -368,6 +369,7 @@ func buildControlPlaneV8Record(
 			DefenseClawAdminPrincipalRef: principal, ConditionAdminPrincipalKnown: principalKnown,
 			DefenseClawAdminActorRef: actorRef, DefenseClawAdminOrigin: origin,
 			DefenseClawAdminTargetRef:            targetRef,
+			DefenseClawAdminTargetTypeDetail:     evidence.targetTypeDetail,
 			DefenseClawAdminBeforeSummary:        evidence.beforeSummary,
 			DefenseClawAdminAfterSummary:         evidence.afterSummary,
 			DefenseClawAdminBeforeState:          evidence.beforeState,
@@ -395,6 +397,7 @@ func buildControlPlaneV8Record(
 			DefenseClawAdminPrincipalRef: principal, ConditionAdminPrincipalKnown: principalKnown,
 			DefenseClawAdminActorRef: actorRef, DefenseClawAdminOrigin: origin,
 			DefenseClawAdminTargetRef:              targetRef,
+			DefenseClawAdminTargetTypeDetail:       evidence.targetTypeDetail,
 			DefenseClawAdminAfterSummary:           evidence.afterSummary,
 			DefenseClawAdminAfterState:             evidence.afterState,
 			DefenseClawAdminReason:                 evidence.reason,
@@ -422,18 +425,19 @@ func buildControlPlaneV8Record(
 			Outcome: observability.OutcomeApplied, DefenseClawAdminOperation: event.Action,
 			DefenseClawAdminPrincipalRef: principal, ConditionAdminPrincipalKnown: principalKnown,
 			DefenseClawAdminActorRef: actorRef, DefenseClawAdminOrigin: origin,
-			DefenseClawAdminTargetRef:       targetRef,
-			DefenseClawAdminBeforeSummary:   evidence.beforeSummary,
-			DefenseClawAdminAfterSummary:    evidence.afterSummary,
-			DefenseClawAdminBeforeState:     evidence.beforeState,
-			DefenseClawAdminAfterState:      evidence.afterState,
-			DefenseClawAdminDiff:            evidence.diff,
-			DefenseClawAdminReason:          evidence.reason,
-			DefenseClawAdminReasonDetail:    evidence.reasonDetail,
-			DefenseClawAdminRevision:        evidence.revision,
-			DefenseClawAdminCurrentRevision: evidence.currentRevision,
-			DefenseClawAdminChangeCount:     evidence.changeCount,
-			MandatoryControlPlaneMutation:   true,
+			DefenseClawAdminTargetRef:        targetRef,
+			DefenseClawAdminTargetTypeDetail: evidence.targetTypeDetail,
+			DefenseClawAdminBeforeSummary:    evidence.beforeSummary,
+			DefenseClawAdminAfterSummary:     evidence.afterSummary,
+			DefenseClawAdminBeforeState:      evidence.beforeState,
+			DefenseClawAdminAfterState:       evidence.afterState,
+			DefenseClawAdminDiff:             evidence.diff,
+			DefenseClawAdminReason:           evidence.reason,
+			DefenseClawAdminReasonDetail:     evidence.reasonDetail,
+			DefenseClawAdminRevision:         evidence.revision,
+			DefenseClawAdminCurrentRevision:  evidence.currentRevision,
+			DefenseClawAdminChangeCount:      evidence.changeCount,
+			MandatoryControlPlaneMutation:    true,
 		})
 	case controlPlaneV8FamilyAuthenticationFailed:
 		record, err = builder.BuildLogAuthenticationFailed(observability.LogAuthenticationFailedInput{
@@ -442,6 +446,7 @@ func buildControlPlaneV8Record(
 			DefenseClawAdminPrincipalRef: principal, ConditionAdminPrincipalKnown: principalKnown,
 			DefenseClawAdminActorRef: actorRef, DefenseClawAdminOrigin: origin,
 			DefenseClawAdminTargetRef: targetRef, DefenseClawAdminReason: evidence.reason,
+			DefenseClawAdminTargetTypeDetail:      evidence.targetTypeDetail,
 			MandatoryProtectedBoundaryAuthFailure: true,
 		})
 	case controlPlaneV8FamilyApprovalResolved:
@@ -707,23 +712,24 @@ func controlPlaneV8ActivityEvidence(input ActivityInput) (controlPlaneV8Evidence
 		receipt = &fields
 	}
 	return controlPlaneV8Evidence{
-		operation:       optionalControlPlaneV8Identifier(input.Operation),
-		bundle:          policyBundleV8FieldsFor(input.Bundle),
-		receipt:         receipt,
-		change:          change,
-		actorRef:        optionalControlPlaneV8Actor(input.Actor),
-		principalRef:    optionalControlPlaneV8Identifier(input.Principal),
-		targetRef:       optionalControlPlaneV8Target(activityTargetReference(input.TargetType, input.TargetID)),
-		beforeSummary:   controlPlaneV8StateSummary(input.Before),
-		afterSummary:    controlPlaneV8StateSummary(input.After),
-		beforeState:     beforeState,
-		afterState:      afterState,
-		diff:            diff,
-		reason:          optionalControlPlaneV8Reason(input.Reason),
-		reasonDetail:    optionalControlPlaneV8ReasonDetail(input.Reason),
-		revision:        optionalControlPlaneV8Revision(input.VersionTo),
-		currentRevision: optionalControlPlaneV8Revision(input.VersionFrom),
-		changeCount:     observability.Present(int64(len(input.Diff))),
+		operation:        optionalControlPlaneV8Identifier(input.Operation),
+		bundle:           policyBundleV8FieldsFor(input.Bundle),
+		receipt:          receipt,
+		change:           change,
+		actorRef:         optionalControlPlaneV8Actor(input.Actor),
+		principalRef:     optionalControlPlaneV8Identifier(input.Principal),
+		targetRef:        optionalControlPlaneV8Target(activityTargetReference(activityMetricTargetType(input.TargetType), input.TargetID)),
+		targetTypeDetail: activityTargetTypeEvidence(input.TargetType),
+		beforeSummary:    controlPlaneV8StateSummary(input.Before),
+		afterSummary:     controlPlaneV8StateSummary(input.After),
+		beforeState:      beforeState,
+		afterState:       afterState,
+		diff:             diff,
+		reason:           optionalControlPlaneV8Reason(input.Reason),
+		reasonDetail:     optionalControlPlaneV8ReasonDetail(input.Reason),
+		revision:         optionalControlPlaneV8Revision(input.VersionTo),
+		currentRevision:  optionalControlPlaneV8Revision(input.VersionFrom),
+		changeCount:      observability.Present(int64(len(input.Diff))),
 	}, nil
 }
 
@@ -748,6 +754,16 @@ func controlPlaneV8JSONEvidence(value any) (observability.Optional[string], erro
 		}
 	}
 	return observability.Present(string(encoded)), nil
+}
+
+// activityTargetTypeEvidence keeps source categories out of identifier fields:
+// identifiers are preserved by redaction profiles, while evidence is transformed.
+func activityTargetTypeEvidence(value string) observability.Optional[string] {
+	value = strings.TrimSpace(value)
+	if value == "" || len(value) > 256 || !utf8.ValidString(value) {
+		return observability.Absent[string]()
+	}
+	return observability.Present(value)
 }
 
 func activityTargetReference(targetType, targetID string) string {
@@ -829,7 +845,8 @@ func buildConfigChangeV8Record(
 			DefenseClawAdminOperation: operation, DefenseClawAdminPrincipalRef: principal,
 			ConditionAdminPrincipalKnown: principalKnown, DefenseClawAdminActorRef: actorRef,
 			DefenseClawAdminOrigin: origin, DefenseClawAdminTargetRef: targetRef,
-			DefenseClawAdminAfterSummary: evidence.afterSummary, DefenseClawAdminAfterState: evidence.afterState,
+			DefenseClawAdminTargetTypeDetail: evidence.targetTypeDetail,
+			DefenseClawAdminAfterSummary:     evidence.afterSummary, DefenseClawAdminAfterState: evidence.afterState,
 			DefenseClawAdminReason:    evidence.reason,
 			DefenseClawConfigChangeID: change.id, DefenseClawTrustAnchorsSha256: change.sha256,
 			DefenseClawTrustAnchorsPreviousSha256: change.previous,
@@ -847,7 +864,8 @@ func buildConfigChangeV8Record(
 			DefenseClawAdminOperation: operation, DefenseClawAdminPrincipalRef: principal,
 			ConditionAdminPrincipalKnown: principalKnown, DefenseClawAdminActorRef: actorRef,
 			DefenseClawAdminOrigin: origin, DefenseClawAdminTargetRef: targetRef,
-			DefenseClawAdminAfterSummary: evidence.afterSummary, DefenseClawAdminAfterState: evidence.afterState,
+			DefenseClawAdminTargetTypeDetail: evidence.targetTypeDetail,
+			DefenseClawAdminAfterSummary:     evidence.afterSummary, DefenseClawAdminAfterState: evidence.afterState,
 			DefenseClawAdminReason:    evidence.reason,
 			DefenseClawConfigChangeID: change.id, DefenseClawSecretName: name, DefenseClawSecretAction: change.secretAction,
 			MandatoryControlPlaneMutation: true,
@@ -859,7 +877,8 @@ func buildConfigChangeV8Record(
 			DefenseClawAdminOperation: operation, DefenseClawAdminPrincipalRef: principal,
 			ConditionAdminPrincipalKnown: principalKnown, DefenseClawAdminActorRef: actorRef,
 			DefenseClawAdminOrigin: origin, DefenseClawAdminTargetRef: targetRef,
-			DefenseClawAdminAfterSummary: evidence.afterSummary, DefenseClawAdminAfterState: evidence.afterState,
+			DefenseClawAdminTargetTypeDetail: evidence.targetTypeDetail,
+			DefenseClawAdminAfterSummary:     evidence.afterSummary, DefenseClawAdminAfterState: evidence.afterState,
 			DefenseClawAdminReason:    evidence.reason,
 			DefenseClawConfigChangeID: change.id, DefenseClawSecretName: change.secretName,
 			DefenseClawSecretAction: change.secretAction, DefenseClawConfigChangeReasonCode: code,

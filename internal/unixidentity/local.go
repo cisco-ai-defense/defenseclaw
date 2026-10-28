@@ -19,6 +19,8 @@ import (
 	"errors"
 	"io"
 	"strings"
+
+	"github.com/defenseclaw/defenseclaw/internal/useridentity"
 )
 
 // Local accounts and directory configuration.
@@ -82,6 +84,41 @@ func MobileAccounts(ctx context.Context) (map[string]string, error) {
 		ctx = context.Background()
 	}
 	return platformMobileAccounts(ctx)
+}
+
+// PlatformSSOAccounts returns the names of the accounts of the macOS local
+// directory node that are registered with Platform SSO: their
+// AltSecurityIdentities holds a PlatformSSO:<login UPN> link, as the
+// guardian reads it (useridentity.ParseMacOSDirectoryFacts). Such an account
+// is held by the local node and is no mobile copy, but it is the identity
+// provider's account, and only the guardian's record names its UPN
+// (GAP-0532). Linux has none.
+func PlatformSSOAccounts(ctx context.Context) (map[string]bool, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return platformSSOLinkedAccounts(ctx)
+}
+
+// parseDSCLPlatformSSOAccounts parses `dscl . -list /Users
+// AltSecurityIdentities` rows ("name  PlatformSSO:alice@corp.example ...",
+// every value of the attribute on the account's line) into the names whose
+// values hold a PlatformSSO: link with a login UPN.
+func parseDSCLPlatformSSOAccounts(output string) map[string]bool {
+	out := map[string]bool{}
+	for _, line := range strings.Split(output, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) < 2 || validName(fields[0]) != nil {
+			continue
+		}
+		for _, value := range fields[1:] {
+			if rest, ok := strings.CutPrefix(value, "PlatformSSO:"); ok && useridentity.NormalizeUPN(rest) != "" {
+				out[fields[0]] = true
+				break
+			}
+		}
+	}
+	return out
 }
 
 // parseDSCLOriginalNodes parses `dscl . -list /Users OriginalNodeName` rows

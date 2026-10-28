@@ -11,8 +11,9 @@
 package connector
 
 // What a connector's DefenseClaw hook does with a call it cannot check
-// because the gateway is not running, is still restarting or gives no answer
-// in time (a gateway outage).
+// because no gateway takes it: the gateway is not running or still restarting
+// (a gateway outage). A gateway that takes the call and gives no answer in
+// time is not an outage and blocks.
 const (
 	OutageBlocks = "blocks"
 	OutageRuns   = "runs"
@@ -54,13 +55,6 @@ type HookOutage struct {
 	// not the Secure Client profile (shellHookSecureClientProfile), so
 	// templateData.ManagedOutageClosed renders it closed on every OS.
 	ManagedPluginOutageClosedEveryOS bool
-	// GuardCheckedAtLoad: the in-agent plugin asks the foreign-hook guard
-	// once when the agent loads it and keeps a block it gets then for the
-	// life of the agent process (the agent loads plugins once). Where the
-	// guard blocks an outage (enterprisepolicy.GuardBlocksOutage), an agent
-	// started during the outage keeps blocking its tool calls after the
-	// gateway is back, until it restarts.
-	GuardCheckedAtLoad bool
 }
 
 // managedUnixOutageClosed names the connectors whose per-user-route hooks a
@@ -78,12 +72,6 @@ var strictAvailabilityExceptions = map[string]string{
 	// TestPerUserCopilotHookFailModeIsTheInstalledOne.)
 	"amp": StrictAvailabilityNotRead,
 }
-
-// guardCheckedAtLoadPlugins are the plugins that run the foreign-hook check
-// at load and hold its block for the process: amp-plugin.ts (startupGuard),
-// opencode-plugin.js and the machine-policy OpenCode plugin
-// (defenseclawStartupGuard).
-var guardCheckedAtLoadPlugins = map[string]bool{"amp": true, "opencode": true}
 
 // managedOutageProbeSocket marks a managed standalone Linux or macOS render
 // (managedStandaloneRender) for ConnectorHookOutage; nothing is written.
@@ -114,7 +102,6 @@ func ConnectorHookOutage(conn Connector) HookOutage {
 		ManagedOpenUnixPerUserRoute:      managedOpen,
 		SecureClientClosed:               hookOutage(conn, SetupOpts{ManagedEnterprise: true, SecureClientHookDelivery: true, HookFailMode: "closed"}),
 		StrictAvailability:               strict,
-		GuardCheckedAtLoad:               guardCheckedAtLoadPlugins[name],
 		ManagedPluginOutageClosedEveryOS: managedUnixOutageClosed[name] && isPluginArtifactConnector(conn),
 	}
 }

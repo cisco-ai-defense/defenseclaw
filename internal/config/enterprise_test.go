@@ -18,6 +18,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 
@@ -585,6 +586,88 @@ func TestStandaloneLayoutImplicitRulePackExists(t *testing.T) {
 	}
 	if secureClient.Guardrail.RulePackDir != implicit {
 		t.Fatalf("secure client rule_pack_dir = %q, want %q", secureClient.Guardrail.RulePackDir, implicit)
+	}
+}
+
+// GAP-1694: an unreferenced, world-writable rule pack folder under
+// <policy_dir>/guardrail loads nothing and is not checked; a referenced pack
+// below it, the Rego and every other policy_dir file still are.
+func TestPolicyTreeChecksOnlyReferencedRulePacks(t *testing.T) {
+	root := t.TempDir()
+	for _, dir := range []string{"rego", "guardrail/default", "guardrail/x", "guardrail/used/rules"} {
+		if err := os.MkdirAll(filepath.Join(root, dir), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, file := range []string{"rego/guardrail.rego", "guardrail/x/rules.yaml", "guardrail/used/rules/a.yaml", "data.json"} {
+		if err := os.WriteFile(filepath.Join(root, file), []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var checked []string
+	untrusted := map[string]bool{}
+	fake := func(path, _, _ string) error {
+		rel, _ := filepath.Rel(root, path)
+		checked = append(checked, rel)
+		if untrusted[filepath.ToSlash(rel)] {
+			return fmt.Errorf("%s: group/other writable permissions 0777 are not trusted", path)
+		}
+		return nil
+	}
+	checks := policyTreeChecks{dir: fake, tree: fake, file: fake}
+	used := []string{filepath.Join(root, "guardrail", "used")}
+	untrusted["guardrail/x"] = true
+	if err := validatePolicyTree(root, "policy_dir", "", used, checks); err != nil {
+		t.Fatalf("an unreferenced writable pack folder was refused: %v", err)
+	}
+	for _, rel := range checked {
+		if strings.HasPrefix(filepath.ToSlash(rel), "guardrail/x") || strings.HasPrefix(filepath.ToSlash(rel), "guardrail/default") {
+			t.Fatalf("the unreferenced pack %s was checked: %v", rel, checked)
+		}
+	}
+	for _, want := range []string{".", "rego", "guardrail", "guardrail/used", "data.json"} {
+		if !slices.Contains(checked, filepath.FromSlash(want)) {
+			t.Fatalf("%s was not checked: %v", want, checked)
+		}
+	}
+	for _, bad := range []string{"guardrail/used", "rego", "data.json"} {
+		untrusted = map[string]bool{bad: true}
+		if err := validatePolicyTree(root, "policy_dir", "", used, checks); err == nil {
+			t.Fatalf("a writable %s was accepted", bad)
+		}
+	}
+}
+
+// GAP-1003: with guardrail.rule_pack naming the pack, the implicit
+// rule_pack_dir loads nothing, so it must not depend on whether the account
+// can stat the root-only policy_dir pack: root (absent) and a standard user
+// (permission denied) resolve the same value, and so the same digest.
+func TestStandaloneRulePackDefaultIgnoresAccountAccessWhenAPackIsNamed(t *testing.T) {
+	for _, goos := range []string{"linux", "darwin"} {
+		layout, err := managed.StandaloneLayoutFor(goos)
+		if err != nil {
+			t.Fatal(err)
+		}
+		vendor := layout.VendorPolicyDir + "/guardrail/default"
+		got := map[string]string{}
+		for name, probe := range map[string]error{"root": fs.ErrNotExist, "standard user": fs.ErrPermission, "present": nil} {
+			cfg := Config{
+				DeploymentMode: "managed_enterprise",
+				ConfigFilePath: layout.ConfigPath,
+				DataDir:        layout.DataDir,
+				PolicyDir:      layout.PolicyDir,
+				Enterprise:     EnterpriseConfig{Profile: managed.ProfileStandalone},
+			}
+			cfg.Guardrail.RulePack = "custom"
+			cfg.Guardrail.RulePackDir = layout.DataDir + "/policies/guardrail/default"
+			standaloneRulePackDefaultWithExists(&cfg, layout.DataDir, goos, func(string) (bool, error) { return probe == nil, probe })
+			got[name] = cfg.Guardrail.RulePackDir
+		}
+		for name, dir := range got {
+			if dir != vendor {
+				t.Fatalf("%s %s: rule_pack_dir = %q, want %q for every caller (all: %v)", goos, name, dir, vendor, got)
+			}
+		}
 	}
 }
 

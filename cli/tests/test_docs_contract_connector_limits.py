@@ -16,7 +16,7 @@ DOCS = ROOT / "docs-site/content/docs"
     ("page", "facts", "obsolete"),
     [
         (
-            "reference/apis/capability-matrix.mdx",
+            "connectors/capability-matrix.mdx",
             ("administrator explicitly selects `open`", "Hermes hooks block delivery failures"),
             ("every connector's hook fails closed, also in observe mode",),
         ),
@@ -26,17 +26,17 @@ DOCS = ROOT / "docs-site/content/docs"
             ("`--workspace` only adds",),
         ),
         (
-            "reference/connectors/amp.mdx",
+            "connectors/amp.mdx",
             ("workspace for the whole DefenseClaw install", "peer connectors"),
             (),
         ),
         (
-            "reference/connectors/copilot.mdx",
+            "connectors/copilot.mdx",
             ("`ownership`, `owned_entries` and `foreign_entries`", "enterprise policy show --connector copilot"),
             ("The Copilot status row lists both settings", "status says why"),
         ),
         (
-            "reference/scanning/ai-discovery.mdx",
+            "ai-discovery.mdx",
             (
                 "defenseclaw agent components show ai",
                 "defenseclaw agent components history ai",
@@ -80,9 +80,9 @@ def test_connector_set_up_starts_with_init_on_a_new_install(monkeypatch):
     checked = 0
     for page in pages:
         text = page.read_text(encoding="utf-8")
-        if "## Set up\n" not in text:
+        if "## Setup\n" not in text:
             continue
-        section = " ".join(text.split("## Set up\n", 1)[1].split("\n## ", 1)[0].split())
+        section = " ".join(text.split("## Setup\n", 1)[1].split("\n## ", 1)[0].split())
         name = section.split("defenseclaw setup ", 1)[1].split()[0].strip("`")
         assert name in choices, (page.name, name)
         assert section.index(f"`defenseclaw init --connector {name}`") < section.index(f"defenseclaw setup {name} "), page.name
@@ -92,7 +92,7 @@ def test_connector_set_up_starts_with_init_on_a_new_install(monkeypatch):
 
 
 def test_hermes_luna_limit_names_the_observed_provider_route() -> None:
-    rows = (DOCS / "reference/connectors/hermes.mdx").read_text(encoding="utf-8").splitlines()
+    rows = (DOCS / "connectors/hermes.mdx").read_text(encoding="utf-8").splitlines()
     row = next(line for line in rows if line.startswith("| Model limit |"))
     for fact in ("Bedrock-Mantle", "gpt-5.6-luna", "validation_error", "model not supported on this route"):
         assert fact in row

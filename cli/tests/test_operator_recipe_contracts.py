@@ -10,7 +10,7 @@ import pytest
     ("page", "required"),
     [
         ("connectors/openclaw.mdx", "setup remove openclaw --yes --force"),
-        ("how-to/policies/write-a-custom-rule.mdx", "redacted.secret.id-"),
+        ("policies/cel/index.mdx", "redacted.secret.id-"),
     ],
 )
 def test_operator_recipe_accounts_for_removal_guards_and_redaction(page, required):

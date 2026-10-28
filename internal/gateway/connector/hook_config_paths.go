@@ -345,6 +345,11 @@ func openCodeManagedPluginPresent(conn Connector, opts SetupOpts) (bool, error) 
 		markers = append(markers,
 			[]byte(`const DC_PER_USER_NATIVE_POST = "1";`),
 			[]byte(`execFileSync(binary, ["hook-post", "--api-addr", DC_API_ADDR]`),
+			// A Windows owner/DACL check that hard-codes C:\Windows is repaired,
+			// and so is one that calls a cmdlet a planted PSModulePath module
+			// could answer for.
+			[]byte(`execFileSync(DC_WINDOWS_POWERSHELL, [`),
+			[]byte(windowsHelperACLCheckMarker),
 		)
 		// A plugin that posts through ~/.local/bin on a Setup install fails
 		// closed on every call (GAP-1847); it is repaired.
@@ -530,6 +535,11 @@ func (c *hookOnlyConnector) renderedHookEntriesPresent(opts SetupOpts, document 
 			want[event] = copilotHookRegistration(runtime.GOOS, event, hookCommand)
 		}
 		return hookEventEntriesMatch(hooks, want, func(event string, entry interface{}) bool {
+			if event == "preToolUse" && !pluginSecureClientProfile(opts) && opts.HookFailMode != "open" {
+				// Any extra pre-tool command can override the closed verdict.
+				// Preserve an unowned command, but never certify it as closed.
+				return true
+			}
 			if _, registered := want[event]; registered {
 				// defenseclaw.json is DefenseClaw's file; Setup leaves only
 				// its render on a bound event (patchCopilotHooksForOS).

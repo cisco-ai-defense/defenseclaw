@@ -16,7 +16,7 @@ func TestRemovedConnectorNotesNameOpenHands(t *testing.T) {
 	recordRemovedConnectorLeftovers("openhands", []byte(
 		`{"connector":"openhands","action":"teardown","ok":true,"leftovers":[{"path":"C:\\Users\\u\\.openhands\\hooks.json","what":"w","step":"s"}]}`+"\n"))
 	got := removedConnectorNotesText()
-	want := "OpenHands support was removed in DefenseClaw 1.0.4. Left for you to remove by hand:\r\n" +
+	want := "OpenHands/OmniGent support was removed in 1.0.5; DefenseClaw no longer guards it.\r\n" +
 		`  - C:\Users\u\.openhands\hooks.json: w. To remove: s.` + "\r\n"
 	if got != want {
 		t.Fatalf("notes = %q, want %q", got, want)

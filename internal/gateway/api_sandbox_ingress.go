@@ -602,10 +602,7 @@ func (a *APIServer) newSandboxIngressHandler(st *sandboxIngressState) http.Handl
 	h = CorrelationMiddleware(reg)(h)
 	h = sandboxRequestIDMiddleware(h)
 	h = inboundTraceContextMiddleware(h)
-	h = a.sandboxIngressAuthenticate(st, h)
-	// until 1.1: a removed connector's hook route blocks every call before
-	// the binding check (retired_connector_hook.go).
-	return retiredConnectorHookFirst(h)
+	return a.sandboxIngressAuthenticate(st, h)
 }
 
 // sandboxIngressMux registers the only handlers the ingress serves and

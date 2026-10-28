@@ -5,8 +5,11 @@ package gateway
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"io"
+	"path/filepath"
+	"runtime"
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
@@ -99,12 +102,22 @@ func hookUniqueJSONValue(decoder *json.Decoder, depth int, parentKey string, cop
 	}
 }
 
+func copilotManagedPatchEvidence(ctx context.Context) map[string]string {
+	if runtime.GOOS == "windows" || isSandboxHookRequest(ctx) {
+		return nil
+	}
+	if _, managed := managedHookPeerFromContext(ctx); !managed {
+		return nil
+	}
+	return resolvedWritesFromContext(ctx)
+}
+
 // copilotWriteCallUnproven refuses a structured write when its projected
 // arguments do not prove every target. ActionFacts applies the same bounded
 // over-limit reduction used by the policy path. A spelling resembling a
 // known write tool but not recognized by the parser is an unknown alias,
 // never a read-only tool by default.
-func copilotWriteCallUnproven(name string, args json.RawMessage, cwd, home string) bool {
+func copilotWriteCallUnproven(name string, args json.RawMessage, cwd, home string, evidence map[string]string) bool {
 	name = strings.TrimSpace(name)
 	if copilotWriteAlias(name) && !copilotKnownWriteSpelling(name) {
 		return true
@@ -115,7 +128,11 @@ func copilotWriteCallUnproven(name string, args json.RawMessage, cwd, home strin
 	}
 	if actionfacts.ApplyPatchTool(tool) {
 		targets, known := hookpaths.ApplyPatchWriteTargets(tool, args, "", cwd, home)
-		return !known || len(targets) == 0
+		if known {
+			return len(targets) == 0
+		}
+		_, proved := copilotClientProvedPatchTargets(tool, args, cwd, home, evidence)
+		return !proved
 	}
 	input := actionfacts.Input{Tool: tool, Args: args, CWD: cwd, ActiveHome: home}
 	// Copilot CLI includes a display-only description on edit and a file
@@ -139,6 +156,29 @@ func copilotWriteCallUnproven(name string, args json.RawMessage, cwd, home strin
 		}
 	}
 	return true
+}
+
+// The managed Unix gateway may not traverse an enrolled user's private home.
+// Its native hook can resolve that user's project paths and attest the complete
+// patch. Bind that evidence to every target of the gateway's own patch parse:
+// the same parse, without the filesystem walk, that the hook ran to key the
+// evidence, so an absolute, home-form or relative directive is proven alike.
+func copilotClientProvedPatchTargets(tool string, args json.RawMessage, cwd, home string, evidence map[string]string) ([]string, bool) {
+	if !filepath.IsAbs(cwd) || evidence[hookpaths.CWDKey] != cwd ||
+		evidence[hookpaths.PatchCompleteKey] != "1" || evidence[hookpaths.TruncatedKey] != "" ||
+		evidence[hookpaths.UnprovenReasonKey] != "" {
+		return nil, false
+	}
+	targets, parsed := hookpaths.ApplyPatchLexicalTargets(tool, args, cwd, home)
+	if !parsed || len(targets) == 0 {
+		return nil, false
+	}
+	for _, target := range targets {
+		if !filepath.IsAbs(target) || !filepath.IsAbs(evidence[hookpaths.OperandPath(target, cwd)]) {
+			return nil, false
+		}
+	}
+	return targets, true
 }
 
 func copilotKnownWriteSpelling(name string) bool {

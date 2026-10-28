@@ -440,9 +440,15 @@ func validGatewaySessionRecord(record SessionRecord, key SessionKey, kind string
 	return record.Session == key.Session
 }
 
+// SessionRecordUnavailableReason is the denial of an exchange the session
+// store could not apply (a record read or write that failed, the account's
+// removal lock that could not be taken, or an allow it could not give within
+// the hold). The gateway applies a clean scan's exchange again on it.
+const SessionRecordUnavailableReason = "enterprise_foreign_hook_blocked: DefenseClaw cannot verify this agent session's hook record. Remove any unapproved hook and restart the agent."
+
 func sessionUnavailableDecision(decision GuardDecision) GuardDecision {
 	decision.Deny = true
-	decision.Reason = "enterprise_foreign_hook_blocked: DefenseClaw cannot verify this agent session's hook record. Remove any unapproved hook and restart the agent."
+	decision.Reason = SessionRecordUnavailableReason
 	return decision
 }
 
@@ -484,6 +490,10 @@ func pendingRemovalDecision(decision GuardDecision, connector string) GuardDecis
 
 // sessionBlockNote ends every denial the session state applies to.
 const sessionBlockNote = "The agent can keep running a hook it loaded when the session started, even after the file changes, so DefenseClaw blocks tool calls for the rest of this session: after removing the hook, restart the agent."
+
+// sessionHookGoneNote ends a session denial once the hook that blocked the
+// session is gone from its file.
+const sessionHookGoneNote = "DefenseClaw blocks this session's tool calls until you restart the agent."
 
 // sessionIncompleteNote ends a denial for a session whose start scan stopped
 // on a budget.
@@ -535,6 +545,17 @@ func stickySessionDecision(decision GuardDecision, connector string, record Sess
 		}
 		cause = fmt.Sprintf("When this agent session started, the %s file %s %s (digest sha256:%s). %s",
 			scope, record.Path, what, record.Digest, foreignHookAdvice(connector, record.Reason))
+		if !decision.Deny && !decision.Incomplete && !hasBlockableFindings(decision) {
+			// This call's scan is clean: the hook was removed (by the
+			// guardian's migration, the user or an administrator) or
+			// approved since, and only the agent process that loaded it
+			// is left. Restarting is the one fix (GAP-1540, LEAD DECISION
+			// 03:34). The scan cannot tell removed from approved, so the
+			// message names both (review RV-2).
+			cause = fmt.Sprintf("When this agent session started, the %s file %s %s (digest sha256:%s). This call's check no longer finds it (it was removed or approved), but this agent loaded it.",
+				scope, record.Path, what, record.Digest)
+			note = sessionHookGoneNote
+		}
 	}
 	decision.Deny = true
 	decision.Reason = fmt.Sprintf(

@@ -364,6 +364,18 @@ function Exit-Wrapper {
         }
     }
     $json = ConvertTo-DefenseClawResultJson -Action $script:ResultAction -ExitCode $ExitCode -Code $Code -Message $Message
+    # The result names the installed deployment, so a refused run does not
+    # read as "not installed" (GAP-2093). An installation the marker does not
+    # prove stays "not evaluated" (installed false).
+    try {
+        $installedNow = Get-DefenseClawInstalledDeployment
+        $installedVersion = [string]$installedNow.Version
+        if ($null -ne $installedNow -and $installedVersion -match '^[0-9A-Za-z][0-9A-Za-z.+-]*$') {
+            $usedVersion = $(if ($SetupPath) { '' } else { $installedVersion })
+            $json = $json.Replace('"product_version":"","installed":false,',
+                ('"product_version":"' + $usedVersion + '","installed":true,"installed_version":"' + $installedVersion + '",'))
+        }
+    } catch { }
     [Console]::Out.WriteLine($json)
     Write-WrapperLog -Message "result $json"
     Remove-WrapperStaging
@@ -759,6 +771,18 @@ function Get-WrapperSecretErrorCode {
     }
 }
 
+function Get-WrapperSecretErrorMessage {
+    # errors[0].message of a failed `enterprise secret set|remove --json`
+    # (the CLI's refusal and its next step), or ''.
+    param($Run)
+    try {
+        $document = ([string]$Run.StdOut).Trim() | ConvertFrom-Json -ErrorAction Stop
+        return [string]@($document.errors)[0].message
+    } catch {
+        return ''
+    }
+}
+
 function Set-WrapperSecret {
     # Stores the staged credential with the installed CLI. Returns $null when
     # it is stored, else the failure (Code is the CLI's errors[0].code).
@@ -772,9 +796,16 @@ function Set-WrapperSecret {
         return [pscustomobject]@{ Code = ''; Message = "storing credential '$SecretName' failed: $($_.Exception.Message)" }
     }
     if ($run.ExitCode -ne 0) {
+        # The CLI writes its refusal to stdout (--json); stderr is often empty.
+        $code = Get-WrapperSecretErrorCode -Run $run
         $detail = ([string]$run.StdErr).Trim()
+        if (-not $detail) {
+            $detail = (Get-WrapperSecretErrorMessage -Run $run).Trim()
+            if ($detail -and $code) { $detail = "${code}: $detail" }
+        }
+        if (-not $detail) { $detail = 'the CLI returned no error message' }
         if ($detail.Length -gt 1024) { $detail = $detail.Substring(0, 1024) }
-        return [pscustomobject]@{ Code = (Get-WrapperSecretErrorCode -Run $run)
+        return [pscustomobject]@{ Code = $code
             Message = "storing credential '$SecretName' failed (exit $($run.ExitCode)): $detail" }
     }
     Write-WrapperLog -Message "stored credential $SecretName"

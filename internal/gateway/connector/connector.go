@@ -89,7 +89,12 @@ type SetupOpts struct {
 	// loopback /otlp/<connector>/<token>/v1/<signal> namespace. It must never
 	// be reused as a general API or hook bearer.
 	OTLPPathToken string
-	Interactive   bool
+	// GatewayToken is the install's gateway master credential. Setup never
+	// writes it into an agent config; it is known here only so that an OTLP
+	// route that carries it counts as DefenseClaw's and is removed, never kept
+	// as an operator collector (GAP-0035).
+	GatewayToken string
+	Interactive  bool
 	// ManagedEnterprise marks hook scripts installed by the privileged
 	// enterprise guardian. Managed scripts ignore user-controlled home and
 	// disable-sentinel overrides and derive their data directory from the
@@ -98,6 +103,10 @@ type SetupOpts struct {
 	// sandboxNativeOTLP selects the isolated OpenShell artifact renderer. It
 	// cannot be set by a host setup caller or a configuration file.
 	sandboxNativeOTLP bool
+	// knownCredentials are further product credentials the native OTLP
+	// residue check knows (UserNativeOTLPWithout recovers them from the
+	// configuration it judges by their digests). Never set by a caller.
+	knownCredentials []string
 	// ManagedHookSocket is the standalone gateway's peer-authorized unix
 	// hook socket (from the root-owned runtime descriptor). When set on a
 	// unix host, in-agent plugins (OpenCode, Amp) and connector shell hooks

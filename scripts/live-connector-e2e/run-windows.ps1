@@ -6855,9 +6855,23 @@ function Get-ClaudeCodeLauncherGuardExecView([object]$Handler) {
         return $Handler
     }
     $guardArgs = @($argsProperty.Value)
-    if ($guardArgs.Count -lt 8 -or @($guardArgs | Where-Object { $_ -isnot [string] }).Count -gt 0) {
+    if (@($guardArgs | Where-Object { $_ -isnot [string] }).Count -gt 0) { return $Handler }
+    # The PreToolUse guard (GAP-1011): the installed full hook of a packaged
+    # install, or the one-line install's gateway, started with launcher-guard.
+    if ($guardArgs.Count -eq 5 -and $guardArgs[0] -ceq 'launcher-guard' -and $guardArgs[2] -ceq 'hook' -and
+        $guardArgs[3] -ceq '--connector' -and $guardArgs[4] -ceq 'claudecode') {
+        $program = [string]$commandProperty.Value
+        $launcher = [string]$guardArgs[1]
+        $programName = [IO.Path]::GetFileName($program)
+        if ([IO.Path]::IsPathRooted($program) -and [IO.Path]::IsPathRooted($launcher) -and
+            ($programName -ieq 'defenseclaw-hook.exe' -or $programName -ieq 'defenseclaw-gateway.exe') -and
+            [IO.Path]::GetFileName($launcher) -ieq 'defenseclaw-hook.exe' -and
+            -not [string]::Equals($program, $launcher, [StringComparison]::OrdinalIgnoreCase)) {
+            return [pscustomobject]@{ command = $launcher; args = @('hook', '--connector', 'claudecode') }
+        }
         return $Handler
     }
+    if ($guardArgs.Count -lt 8) { return $Handler }
     $systemRoot = [string]$env:SystemRoot
     if ([string]::IsNullOrWhiteSpace($systemRoot) -or -not [IO.Path]::IsPathRooted($systemRoot)) {
         $systemRoot = 'C:\Windows'

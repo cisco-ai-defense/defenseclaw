@@ -122,7 +122,8 @@ When `cosign` is installed and the assets carry `checksums.txt.bundle`, the
 `fresh` lane also checks that the installer verified the release signature.
 The PowerShell script takes `-Assets`, `-PreviousAssets` and `-Lanes`. Its
 lanes are `fresh`, `setup-import` (replacing a synthetic 0.8.x Setup install),
-`files-in-use`, `failure-drill`, `policy` (the `DisableSelfUpdate` refusal;
+`files-in-use`, `failure-drill` and `failure-drill-exit3` (an upgrade whose
+gateway refuses to start, or exits 3 without running, is undone), `policy` (the `DisableSelfUpdate` refusal;
 needs an elevated shell), and `upgrade-previous` and `shim`, which need
 `-PreviousAssets`. `upgrade-0.X.Y` (0.8.0-0.8.3) needs `-CodexExe`, a Codex CLI
 `codex.exe`: 0.x sets up the codex connector, and DefenseClaw on Windows runs

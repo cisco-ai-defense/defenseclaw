@@ -42,6 +42,9 @@ type fakeSandboxController struct {
 	explain   sandboxapi.ExplainRequest
 	undo      sandboxapi.UndoRequest
 	accept    sandboxapi.AcceptRequest
+	// discarded is, for every stop, whether its user accepted the loss of
+	// what a MicroVM has not synced.
+	discarded []bool
 	lines     int
 	err       error
 	feed      chan sandboxapi.ActivityEvent
@@ -85,8 +88,8 @@ func (f *fakeSandboxController) Delete(_ context.Context, name string, _ sandbox
 	return answer(f, "delete "+name, &sandboxapi.DeleteResponse{Name: name, Deleted: true})
 }
 
-func (f *fakeSandboxController) Stop(_ context.Context, name string) (*sandboxapi.Sandbox, error) {
-	return answer(f, "stop "+name, &sandboxapi.Sandbox{Name: name, Phase: "stopped"})
+func (f *fakeSandboxController) Stop(ctx context.Context, name string) (*sandboxapi.Sandbox, error) {
+	return answer(f, "stop "+name, &sandboxapi.Sandbox{Name: name, Phase: "stopped"}, func() { f.discarded = append(f.discarded, sandboxapi.DiscardUnsynced(ctx)) })
 }
 
 func (f *fakeSandboxController) Start(_ context.Context, name string, _ sandboxapi.StartRequest) (*sandboxapi.Sandbox, error) {
@@ -508,5 +511,25 @@ func eventuallyTrue(t *testing.T, cond func() bool) {
 			t.Fatal("condition not reached")
 		}
 		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+// GAP-0902: a stop goes ahead after a failed MicroVM sync only when its
+// user accepted the loss, and only the stop request's discard_unsynced says
+// so: a plain or empty stop does not, and a body with a field the route
+// does not know is refused before it reaches the controller.
+func TestSandboxAPIStopCarriesOnlyTheUsersAcceptedLoss(t *testing.T) {
+	ctl := &fakeSandboxController{}
+	_, h := sandboxTestAPI(t, ctl, true)
+	for _, body := range []string{"", `{}`, `{"discard_unsynced":false}`, `{"discard_unsynced":true}`} {
+		if w := serve(h, sandboxRequest(http.MethodPost, sandboxapi.PathSandboxes+"/box/stop", body)); w.Code != http.StatusOK {
+			t.Fatalf("stop %q = %d %s", body, w.Code, w.Body.String())
+		}
+	}
+	if w := serve(h, sandboxRequest(http.MethodPost, sandboxapi.PathSandboxes+"/box/stop", `{"discard":true}`)); w.Code != http.StatusBadRequest {
+		t.Fatalf("stop with an unknown field = %d", w.Code)
+	}
+	if want := []bool{false, false, false, true}; len(ctl.discarded) != len(want) || ctl.discarded[0] || ctl.discarded[1] || ctl.discarded[2] || !ctl.discarded[3] {
+		t.Fatalf("accepted loss per stop = %v, want %v", ctl.discarded, want)
 	}
 }

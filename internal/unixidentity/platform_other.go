@@ -66,3 +66,7 @@ func platformOpenDirectoryNodeStates(context.Context) (string, error) {
 func platformMobileAccounts(context.Context) (map[string]string, error) {
 	return nil, errors.New("unixidentity: no local directory node on this platform")
 }
+
+func platformSSOLinkedAccounts(context.Context) (map[string]bool, error) {
+	return nil, errors.New("unixidentity: no local directory node on this platform")
+}

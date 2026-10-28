@@ -20,6 +20,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -121,7 +122,7 @@ func (s *CodeGuardScanner) ScanContentWithProvenance(filename, content string) C
 			if len(r.extensions) > 0 && !extMatch(ext, r.extensions) {
 				continue
 			}
-			if r.pattern.MatchString(line) {
+			if r.matches(line) {
 				ln := lineNum + 1
 				findings = append(findings, Finding{
 					ID:                  r.id,
@@ -165,9 +166,10 @@ func (s *CodeGuardScanner) Scan(ctx context.Context, target string) (*ScanResult
 		return nil, scanErr
 	}
 
+	strict := completeScanRequired(ctx)
 	var files []string
 	if info.IsDir() {
-		files, err = collectCodeFiles(target)
+		files, err = collectCodeFiles(target, strict)
 		if err != nil {
 			scanErr = fmt.Errorf("scanner: codeguard: walk %s: %w", target, err)
 			return nil, scanErr
@@ -180,6 +182,10 @@ func (s *CodeGuardScanner) Scan(ctx context.Context, target string) (*ScanResult
 	for _, f := range files {
 		findings, err := scanFileWithRules(f, rules)
 		if err != nil {
+			// An over-long line is a content limit, not an unread file.
+			if strict && !errors.Is(err, bufio.ErrTooLong) {
+				return nil, fmt.Errorf("scanner: codeguard: %w", incompleteScan(f, err))
+			}
 			continue
 		}
 		result.Findings = append(result.Findings, findings...)
@@ -201,7 +207,9 @@ func IsCodeFile(ext string) bool {
 	return codeExtensions[ext]
 }
 
-func collectCodeFiles(root string) ([]string, error) {
+// collectCodeFiles skips an unreadable directory or entry unless strict, when
+// it fails with ErrIncompleteScan.
+func collectCodeFiles(root string, strict bool) ([]string, error) {
 	// Avarice F-2952: a malicious skill or plugin tree can place a
 	// symlink with a code-extension name pointed at a readable
 	// file outside the scan root (e.g. `attacker.py -> /etc/passwd`).
@@ -214,6 +222,9 @@ func collectCodeFiles(root string) ([]string, error) {
 	var files []string
 	err := filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
+			if strict {
+				return incompleteScan(path, err)
+			}
 			return nil
 		}
 		if d.IsDir() {
@@ -228,6 +239,9 @@ func collectCodeFiles(root string) ([]string, error) {
 		}
 		info, lerr := os.Lstat(path)
 		if lerr != nil {
+			if strict {
+				return incompleteScan(path, lerr)
+			}
 			return nil
 		}
 		if info.Mode()&os.ModeSymlink != 0 {
@@ -262,6 +276,38 @@ type rule struct {
 	remediation string
 	extensions  []string
 	provenance  codeGuardFindingProvenance
+	// view, when set, is the part of a line the pattern reads: a built-in
+	// rule drops text that only mentions what it looks for (GAP-1226,
+	// GAP-1227).
+	view func(line string) string
+}
+
+// matches reports whether the rule fires on line.
+func (r rule) matches(line string) bool {
+	if r.view != nil {
+		line = r.view(line)
+	}
+	return r.pattern.MatchString(line)
+}
+
+// pathTraversalModuleSpecifier is the quoted module path of an import,
+// require or include statement. The author wrote that path into the
+// program; it is not a path built from input, so it is not a traversal.
+var pathTraversalModuleSpecifier = regexp.MustCompile(`^\s*(?:import|export)\b[^"'` + "`" + `]*\bfrom\s*(?:"[^"$]*"|'[^']*')|^\s*import\s*(?:"[^"$]*"|'[^']*')|\bimport\s*\(\s*(?:"[^"$]*"|'[^']*')|\b(?:require|require_relative|require_once|include|include_once)\s*\(?\s*(?:"[^"$]*"|'[^']*')|^\s*#\s*include\s*(?:"[^"$]*"|'[^']*')|@import\s+(?:url\(\s*)?(?:"[^"$]*"|'[^']*')`)
+
+// pathTraversalProse is a "..." ellipsis that no path separator follows:
+// prose ("Loading...", "days...") and an ellipsis before a string escape
+// ("Loading...\n", JSON text such as Claude's own onboarding template). An
+// ellipsis before "/" or "\" ("....//", "..././", "...\\") and every
+// two-dot form ("..\temp", "..\notes") stay path traversal (GAP-1935).
+var pathTraversalProse = regexp.MustCompile(`\.{3,}(?:\\[nrt"']|[^./\\]|$)`)
+
+// pathTraversalView is the part of a line CG-PATH-001 reads: what the code
+// does with a path, not an import of a sibling module or prose (GAP-1226,
+// GAP-1227).
+func pathTraversalView(line string) string {
+	line = pathTraversalModuleSpecifier.ReplaceAllString(line, " ")
+	return pathTraversalProse.ReplaceAllString(line, " ")
 }
 
 var builtinRules = codeOwnedBuiltinRules([]rule{
@@ -340,6 +386,7 @@ var builtinRules = codeOwnedBuiltinRules([]rule{
 		title:       "Potential path traversal",
 		pattern:     regexp.MustCompile(`(?i)(\.\.\/|\.\.\\|path\.join\(.*\.\.|os\.path\.join\(.*\.\.|filepath\.Join\(.*\.\.)`),
 		remediation: "Canonicalize paths and validate against an allowed root directory",
+		view:        pathTraversalView,
 	},
 })
 
@@ -385,7 +432,7 @@ func scanFileWithRules(path string, rules []rule) ([]Finding, error) {
 			if len(r.extensions) > 0 && !extMatch(ext, r.extensions) {
 				continue
 			}
-			if r.pattern.MatchString(line) {
+			if r.matches(line) {
 				ln := lineNum
 				findings = append(findings, Finding{
 					ID:                  r.id,

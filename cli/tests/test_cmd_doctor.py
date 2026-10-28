@@ -1448,6 +1448,33 @@ class DoctorHookReachabilityTests(unittest.TestCase):
             self.assertEqual(result.warned, 0, result.checks)
             self.assertIn("reachable", result.checks[0]["detail"])
 
+    def test_antigravity_hooks_disabled_entry_fails(self):
+        # GAP-0538: "enabled": false on the key, the PreToolUse matcher group
+        # or its handler turns the guard off; doctor must not pass it.
+        for where in ("key", "group", "handler"):
+            with self.subTest(where=where), tempfile.TemporaryDirectory() as tmp:
+                home = os.path.join(tmp, "home")
+                hook_path = os.path.join(home, ".gemini", "config", "hooks.json")
+                os.makedirs(os.path.dirname(hook_path), exist_ok=True)
+                script_path = os.path.join(tmp, ".defenseclaw", "hooks", "antigravity-hook.sh")
+                payload = self._antigravity_hooks_payload(script_path)
+                registration = payload["defenseclaw-antigravity-pretooluse"]
+                if where == "key":
+                    registration["enabled"] = False
+                elif where == "group":
+                    registration["PreToolUse"][0]["enabled"] = False
+                else:
+                    registration["PreToolUse"][0]["hooks"][0]["enabled"] = False
+                with open(hook_path, "w", encoding="utf-8") as fh:
+                    json.dump(payload, fh)
+                cfg = self._cfg(tmp, "antigravity")
+                with patch.dict(os.environ, isolated_home_env(home), clear=False):
+                    result = _DoctorResult()
+                    _check_antigravity_hooks(cfg, result, platform_name="posix")
+                self.assertEqual(result.passed, 0, result.checks)
+                self.assertEqual(result.failed, 1, result.checks)
+                self.assertIn("disabled", result.checks[0]["detail"])
+
     def test_antigravity_hooks_ignore_undocumented_legacy_path_residue(self):
         # Undocumented residue is ignored; only the documented global hook
         # file is authoritative for this check.
@@ -2406,6 +2433,37 @@ class DoctorGeneratedHookFreshnessTests(unittest.TestCase):
         self.assertEqual([c for c in clean.checks if c["label"] == "Codex hooks of another install"], [])
 
     @unittest.skipIf(os.name == "nt", "POSIX hook paths in a TOML basic string")
+    def test_codex_hooks_under_a_custom_data_dir_count_as_registered(self):
+        # GAP-1882: DEFENSECLAW_HOME=~/dchome setup registers
+        # ~/dchome/hooks/codex-hook.sh; doctor looked for "defenseclaw" in the
+        # hook table and failed "DefenseClaw hooks are missing".
+        from defenseclaw.commands import cmd_doctor
+
+        with tempfile.TemporaryDirectory() as tmp:
+            own_home = os.path.join(tmp, "home", "dchome")
+            cfg = self._make_cfg(own_home)
+            self._write_hook(own_home, "codex-hook.sh", "#!/bin/sh\n# defenseclaw-managed-hook v6\n")
+            own = os.path.join(own_home, "hooks", "codex-hook.sh")
+            config_toml = os.path.join(tmp, "codex", "config.toml")
+            os.makedirs(os.path.dirname(config_toml))
+            lines = []
+            for event in ("PreToolUse", "PermissionRequest"):
+                lines += [
+                    f"[[hooks.{event}]]",
+                    f"[[hooks.{event}.hooks]]",
+                    'type = "command"',
+                    f'command = "{own} --event {event} --hook-contract codex-hooks-v4"',
+                    "timeout = 30",
+                ]
+            with open(config_toml, "w", encoding="utf-8") as fh:
+                fh.write("\n".join(lines) + "\n")
+            result = _DoctorResult()
+            cmd_doctor._check_codex_hooks(cfg, result, platform_name="posix", config_path=config_toml)
+        rows = [c for c in result.checks if c["label"] == "Codex hooks"]
+        self.assertTrue(rows, result.checks)
+        self.assertNotIn("DefenseClaw hooks are missing", " ".join(c["detail"] for c in rows))
+
+    @unittest.skipIf(os.name == "nt", "POSIX hook paths in a TOML basic string")
     def test_codex_hook_check_warns_when_notify_is_not_defenseclaw(self):
         # GAP-1248: a renamed notify program left Codex launching a missing
         # program on every turn while doctor said the hooks were healthy.
@@ -3117,14 +3175,14 @@ class DoctorFixDryRunTests(unittest.TestCase):
         # post-repair health counts. The policy-changing repair is visible but
         # explicitly requires selection on the real run.
         self.assertEqual(result.checks, [])
-        self.assertEqual(len(result.repairs), 23)
+        self.assertEqual(len(result.repairs), 24)
         self.assertEqual(
             {record["state"] for record in result.repairs},
             {"applicable", "noop", "requires_confirmation"},
         )
         self.assertEqual(result.repair_summary.planned, 8)
         self.assertEqual(result.repair_summary.requires_confirmation, 1)
-        self.assertEqual(result.repair_summary.noop, 14)
+        self.assertEqual(result.repair_summary.noop, 15)
         # Doctor must NEVER offer connector teardown from --fix (D7).
         self.assertNotIn(
             "connector residue",
@@ -3211,10 +3269,10 @@ class DoctorFixDryRunTests(unittest.TestCase):
             )
 
         self.assertEqual(result.checks, [])
-        self.assertEqual(len(result.repairs), 23)
+        self.assertEqual(len(result.repairs), 24)
         self.assertEqual(result.repair_summary.applied, 8)
         self.assertEqual(result.repair_summary.manual, 1)
-        self.assertEqual(result.repair_summary.noop, 14)
+        self.assertEqual(result.repair_summary.noop, 15)
         self.assertEqual(fix_plugin_reg.call_count, 1)
         self.assertTrue(fix_plugin_reg.call_args.kwargs["plan_only"])
         self.assertNotIn(

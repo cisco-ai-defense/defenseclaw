@@ -956,6 +956,7 @@ func (a *APIServer) safeApplyAgentHookToolChains(
 			}
 		}
 	}()
+	hookStageForTest(ctx, "chain")
 	return a.applyAgentHookToolChains(
 		ctx,
 		profile,
@@ -2407,7 +2408,9 @@ func committedAgentHookChainPanicBlock(
 	switch strings.ToLower(strings.TrimSpace(req.ConnectorName)) {
 	case "claudecode":
 		next.HookOutput = claudeCodeOutput(
-			claudeCodeHookRequest{HookEventName: req.HookEventName, PermissionMode: payloadString(req.Payload, "permission_mode")},
+			// Recovery has no verified caller home. Never send the gateway
+			// service account's watch paths to a managed agent.
+			claudeCodeHookRequest{HookEventName: req.HookEventName, PermissionMode: payloadString(req.Payload, "permission_mode"), managedWatch: true, watchHome: unresolvedCallerHome},
 			next.Action,
 			next.RawAction,
 			next.Reason,

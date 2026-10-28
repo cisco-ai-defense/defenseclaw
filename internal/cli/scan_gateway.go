@@ -106,6 +106,9 @@ func runGatewayScan(cmd *cobra.Command, kind, target string) error {
 		}
 		target = absolute
 	}
+	if err := managedScanUnavailable(kind); err != nil {
+		return err
+	}
 	base, token, err := scanGatewayEndpoint()
 	if err != nil {
 		return fmt.Errorf("scan %s: %w", kind, err)

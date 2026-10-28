@@ -140,14 +140,10 @@ class FirstRunOptions:
     cisco_endpoint: str = ""
     cisco_api_key: str = ""
     cisco_api_key_env: str = "CISCO_AI_DEFENSE_API_KEY"
-    # hook_fail_mode controls what generated hooks (codex-hook,
-    # claude-code-hook, inspect-*) do when delivery, authentication,
-    # or a gateway response fails. Empty string means "leave the
-    # current cfg.guardrail.hook_fail_mode untouched" so callers
-    # who don't care don't accidentally clobber an operator's
-    # earlier choice. Transport failures and invalid responses
-    # follow the same effective value. DEFENSECLAW_STRICT_AVAILABILITY=1
-    # additionally forces transport and missing-token failures closed.
+    # hook_fail_mode is the saved choice for a classified gateway outage.
+    # Empty means preserve the current operator choice. A reached gateway's
+    # bad answer and authentication failures remain closed on OSS installs;
+    # DEFENSECLAW_STRICT_AVAILABILITY=1 also closes transport failures.
     hook_fail_mode: str = ""
     # human_approval is the operator's HITL (Human-In-the-Loop)
     # toggle. ``None`` means "leave whatever was loaded alone" —
@@ -1571,6 +1567,9 @@ def _apply_first_run_choices(
     desired = (options.hook_fail_mode or "").strip().lower()
     if desired:
         cfg.guardrail.hook_fail_mode = "closed" if desired == "closed" else "open"
+        selected = _first_run_selected_connector_override(cfg, connector)
+        if selected is not None and (selected.hook_fail_mode or "").strip():
+            selected.hook_fail_mode = cfg.guardrail.hook_fail_mode
 
     # Human-In-the-Loop (HITL). ``None`` is the no-op sentinel so
     # init/quickstart reruns don't clobber an operator who already
@@ -1638,11 +1637,10 @@ def _apply_first_run_llm_choices(cfg: Config, options: FirstRunOptions) -> None:
 
 
 def pin_cursor_posture(gc, primary: str = "") -> None:
-    """Pin Cursor's fail mode to its guardrail mode and turn approvals off.
+    """Turn off approvals for Cursor without inventing a saved fail mode.
 
-    Cursor's hook contract ties failures to the mode (action fails closed)
-    and has no native approval prompt; ``setup cursor`` already forces both,
-    and doctor fails any other persisted combination.
+    Cursor has no native approval prompt. Its outage mode follows the policy
+    tier unless the user explicitly chose a fail mode.
     """
     from defenseclaw.config import HILTConfig
 
@@ -1650,15 +1648,12 @@ def pin_cursor_posture(gc, primary: str = "") -> None:
     key = next((k for k in connectors if _normalize_connector(str(k)) == "cursor"), "")
     if not key and _normalize_connector(primary or gc.connector or "") != "cursor":
         return
-    fail_mode = "closed" if gc.effective_mode("cursor").strip().lower() == "action" else "open"
     hilt = gc.effective_hilt("cursor")
     if key:
         pc = connectors[key]
-        pc.hook_fail_mode = fail_mode
         if hilt.enabled:
             pc.hilt = HILTConfig(enabled=False, min_severity=hilt.min_severity or "HIGH")
     else:
-        gc.hook_fail_mode = fail_mode
         gc.hilt.enabled = False
 
 

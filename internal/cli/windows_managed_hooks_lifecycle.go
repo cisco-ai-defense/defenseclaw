@@ -467,17 +467,21 @@ func runWindowsManagedHooksLifecycleWithStagedRetire(
 	case "retire":
 		journal, err := readWindowsManagedHooksLifecycleJournal(ctx.journalPath)
 		if errors.Is(err, os.ErrNotExist) {
-			if err := validateWindowsManagedHooksLifecycleRetirement(
-				pendingExists,
-				nil,
-			); err != nil {
+			skipped, collected, err := retireAbsentWindowsManagedHooksLifecycleJournal(ctx, pendingExists, stagedRetire)
+			if err != nil {
 				return fail(err)
 			}
+			report.RetireSkipped, report.Collected = skipped, collected
 			report.Phase = "absent"
 			break
 		}
 		if err != nil {
 			return fail(err)
+		}
+		if stagedRetire {
+			if err := windowsStagedRetireMutationIdentityPreflight(); err != nil {
+				return fail(fmt.Errorf("staged managed-hook retirement: %w", err))
+			}
 		}
 		if err := validateWindowsManagedHooksLifecycleJournal(journal, identity); err != nil {
 			return fail(err)
@@ -523,6 +527,72 @@ func runWindowsManagedHooksLifecycleWithStagedRetire(
 	}
 	report.OK = true
 	return report, nil
+}
+
+// retireAbsentWindowsManagedHooksLifecycleJournal is a retire with no
+// journal. Run by the replacement (staged) gateway, it is the check an
+// upgrade or repair with no committed journal runs before it opens its
+// transaction: the classification the retire after its commit applies, over
+// the current targets, with nothing deleted or repaired. A bundle that
+// classification refuses (unsupported schema, malformed JSON) stops the
+// lifecycle before anything changed, instead of after its commit with a
+// journal left behind and 1603 (GAP-0822). It changes nothing, so an elevated
+// administrator runs it as LocalSystem does. An installed gateway's retire
+// with no journal has nothing to do.
+func retireAbsentWindowsManagedHooksLifecycleJournal(
+	ctx windowsManagedHooksLifecycleContext,
+	pendingExists bool,
+	staged bool,
+) ([]string, int, error) {
+	if err := validateWindowsManagedHooksLifecycleRetirement(pendingExists, nil); err != nil {
+		return nil, 0, err
+	}
+	if !staged {
+		return nil, 0, nil
+	}
+	var skipped []string
+	for _, target := range ctx.targets {
+		err := windowsManagedHooksLifecycleGenerationClassify(
+			enterprisehooks.WindowsManagedRuntimeGenerationGCOptions{
+				Connector:      target.Connector,
+				TargetSID:      target.SID,
+				DataDir:        target.DataDir,
+				HookExecutable: ctx.opts.HookBinary,
+			},
+		)
+		if err == nil {
+			continue
+		}
+		account := windowsManagedHooksLifecycleAccountSuffix(target.SID)
+		if errors.Is(err, enterprisehooks.ErrWindowsManagedRuntimeGenerationDirectoryUntrusted) {
+			// The retire after the commit repairs or reports this folder,
+			// as it did before this check existed.
+			skipped = append(skipped, boundedEnterpriseHookUserCleanupText(fmt.Sprintf(
+				"%s generations of SID %s%s: %v", target.Connector, target.SID, account, err,
+			)))
+			continue
+		}
+		if !errors.Is(err, enterprisehooks.ErrWindowsManagedRuntimeBundleRefused) {
+			// Not a bundle the new release refuses: Setup warns and the
+			// retire after the commit classifies, as before this check
+			// existed (GAP-1910).
+			return nil, 0, fmt.Errorf("%s generations of SID %s%s: %w", target.Connector, target.SID, account, err)
+		}
+		return nil, 0, fmt.Errorf(
+			"classify %s managed runtime generations for SID %s%s: %w",
+			target.Connector, target.SID, account, err,
+		)
+	}
+	return skipped, 0, nil
+}
+
+// windowsManagedHooksLifecycleAccountSuffix is " (DOMAIN\user)" for a SID
+// that resolves to an account name, and empty otherwise.
+func windowsManagedHooksLifecycleAccountSuffix(sid string) string {
+	if label := enterpriseHookWindowsAccountLabel(enterpriseHookReconcileRow{SID: sid}); label != sid {
+		return " (" + strings.TrimSuffix(label, " ("+sid+")") + ")"
+	}
+	return ""
 }
 
 func validateWindowsManagedHooksLifecycleRetirement(
@@ -933,7 +1003,11 @@ func retireCommittedWindowsManagedHooksLifecycle(
 	return report, nil
 }
 
-var windowsManagedHooksLifecycleGenerationGC = enterprisehooks.GarbageCollectWindowsManagedRuntimeGenerations
+var (
+	windowsManagedHooksLifecycleGenerationGC       = enterprisehooks.GarbageCollectWindowsManagedRuntimeGenerations
+	windowsManagedHooksLifecycleGenerationClassify = enterprisehooks.ClassifyWindowsManagedRuntimeGenerations
+	windowsStagedRetireMutationIdentityPreflight   = enterpriseHooksNativeMutationIdentityPreflight
+)
 
 func finalizeRetireCommittedWindowsManagedHooksLifecycle(
 	journal windowsManagedHooksLifecycleJournal,
@@ -2125,10 +2199,7 @@ func garbageCollectWindowsManagedHooksLifecycleGenerations(
 		)
 		removed += count
 		if err != nil {
-			account := ""
-			if label := enterpriseHookWindowsAccountLabel(enterpriseHookReconcileRow{SID: target.sid}); label != target.sid {
-				account = " (" + strings.TrimSuffix(label, " ("+target.sid+")") + ")"
-			}
+			account := windowsManagedHooksLifecycleAccountSuffix(target.sid)
 			if errors.Is(err, enterprisehooks.ErrWindowsManagedRuntimeGenerationDirectoryUntrusted) {
 				skipped = append(skipped, boundedEnterpriseHookUserCleanupText(fmt.Sprintf(
 					"%s generations of SID %s%s: %v",

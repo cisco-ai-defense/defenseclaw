@@ -1,0 +1,59 @@
+---
+title: Policy creator
+description: Build a DefenseClaw policy section by section. Live OPA-WASM evaluation in the browser, copy-pasteable YAML on the way out.
+keywords:
+  - DefenseClaw policy
+  - policy generator
+  - OPA WASM
+  - regex tester
+  - guardrail rule pack
+  - suppressions
+---
+
+<Callout title="Shell examples">
+The shell examples require Bash. On native Windows, use Git Bash or WSL; PowerShell uses different continuation and environment-variable syntax.
+</Callout>
+
+import PolicyCreator from "@/components/policy-creator";
+
+The creator builds a complete policy (admission preset, rule pack, suppressions, judges, webhooks) and exports it as YAML plus one install script. Quick Start asks six questions; Playground edits every section. Both share one draft.
+
+<Callout type="info" title="Nothing is uploaded">
+Evaluation runs in your browser with compiled copies of the bundled Rego (admission and guardrail). Your draft and test inputs never leave the page; saved progress lives in `localStorage`.
+</Callout>
+
+## Build a policy
+
+<PolicyCreator />
+
+## How the Quick Start works
+
+1. Pick a posture (Permissive, Balanced or Strict), choose what to block, how aggressive to be, and where alerts go.
+2. On Review, run the canned scenarios in Live Test. They use the selected policy mode; observe mode reports `alert` for the bundled CRITICAL guardrail cases.
+3. Open in Playground to fine-tune, then download the install script. A share link holds the whole policy in its URL fragment; treat it like the YAML.
+
+### Install the policy
+
+The script writes the policy files and runs `defenseclaw policy activate`. That copies admission and levels into `config.yaml`. The rule pack is not enforced until you validate and switch to it:
+
+```bash
+defenseclaw policy activate my-policy
+defenseclaw guardrail validate-pack ~/.defenseclaw/policies/guardrail/my-policy
+defenseclaw guardrail use-pack my-policy
+```
+
+To try the script first in a throwaway home, see [verify a policy locally](/docs/policies/verify-locally).
+
+## Limits to know about
+
+- Live Test evaluates only the admission and guardrail Rego. It does not run ActionFacts parsing, CEL, regex, YARA or bounded chains.
+- Firewall and audit choices are planning notes. They are left out of the export and `policy activate` does not apply them.
+- The HITL choice stays in the policy file. Turn it on with `defenseclaw guardrail hilt on --min-severity MEDIUM`.
+- Playground's keep host mode choice omits `guardrail.mode`, so activation keeps the host's mode.
+- Browser regex checks use V8; the gateway uses Go RE2. Final validation happens on the host.
+- Admission first-party entries need an exact asset name and at least one `source_path_contains` path pin ([admission](/docs/policies/admission)).
+
+## Next
+
+- [Guardrail profiles reference](/docs/guardrail/user-and-group-policies)
+- [Tune the LLM judge](/docs/policies/suppression-cookbook)
