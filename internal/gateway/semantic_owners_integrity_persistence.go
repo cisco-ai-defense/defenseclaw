@@ -190,6 +190,14 @@ func activeStateMutationOwner() semanticOwner {
 					hasOperation(command, actionfacts.OperationMove) {
 				return true
 			}
+			// A find that hands what it finds to a program that may
+			// change it (sh -c, sudo/env wrappers, truncate, cp, ...)
+			// changes the state it starts from (GAP-2122).
+			if command.Effect == actionfacts.EffectExecute &&
+				candidate.Access == actionfacts.PathAccessWrite &&
+				(findHandsEntriesToWriter(command) || findCopiesOutTo(command, candidate)) {
+				return true
+			}
 			// A chmod that gives group or other write to state hands it
 			// to another account (GAP-2077); tightening is not a change.
 			if command.Effect == actionfacts.EffectExecute &&
@@ -198,7 +206,9 @@ func activeStateMutationOwner() semanticOwner {
 				return true
 			}
 		}
-		return false
+		// A pattern, brace list, rsync or git clean that the shell or the
+		// program expands onto the state (GAP-2047).
+		return globbedStateMutation(facts)
 	}
 	return owner
 }
@@ -2539,22 +2549,17 @@ func matchesActiveDefenseClawState(
 	}
 	relative = strings.TrimRight(relative, "/")
 	if !ok || relative != ".defenseclaw" && !strings.HasPrefix(relative, ".defenseclaw/") {
-		return false
+		return findAncestorStartChangesState(facts, candidate)
 	}
 	state := strings.TrimPrefix(strings.TrimPrefix(relative, ".defenseclaw"), "/")
-	switch state {
+	switch {
 	// The state root and the protected trees themselves: removing,
 	// moving or replacing one removes every file in it (GAP-1774). Removing
 	// hooks/ turns protection off; removing installer/ breaks rollback.
 	// Any other access is judged by the file it reaches (GAP-2045).
-	case "", "cache", "hooks", "installer", "policies", "previous",
-		"previous/installer", "quarantine", "receipts", "registries":
+	case state == "", state == "previous/installer", slices.Contains(activeStateTreeNames, state):
 		return stateTreeEntryChanged(facts, candidate, state)
-	case ".env", "config.yaml", "confidence_policy.yaml",
-		"guardrail_runtime.json", "device.key", "picked_connector",
-		"custom-providers.json", "audit.db", "audit.db-wal",
-		"audit.db-shm", "judge.db", "judge.db-wal", "judge.db-shm",
-		"judge_bodies.db", "judge_bodies.db-wal", "judge_bodies.db-shm":
+	case slices.Contains(activeStateFileNames, state):
 		return true
 	}
 	// installer/ and previous/installer/ hold the saved installer the
@@ -2575,7 +2580,7 @@ func matchesActiveDefenseClawState(
 			return true
 		}
 	}
-	return false
+	return findReachesPastItsEntries(facts, candidate)
 }
 
 // stateTreeEntryChanged judges an operand that names the state root or a
@@ -2605,19 +2610,45 @@ func stateTreeEntryChanged(
 		// hooks/ makes every hook fail closed (GAP-2077). Tightening
 		// modes and chown/chgrp are judged by the file reached.
 		return strings.EqualFold(command.Program, "chmod") && chmodAddsGroupOrOtherWrite(command)
+	case actionfacts.PathAccessRead:
+		// What a find prints into xargs rm (or another writer) is removed
+		// or changed as if find had acted after its last test (GAP-2122).
+		if findPipedToWriter(facts, command) {
+			acted := command
+			acted.Argv = append(append([]string(nil), command.Argv...), "-delete")
+			return !findDeletesOnlyUnprotectedNames(acted, state)
+		}
 	case actionfacts.PathAccessWrite:
-		if !hasAnyOperation(command, actionfacts.OperationCopy, actionfacts.OperationMove) {
+		if findHandsEntriesToWriter(command) {
+			// The same order-aware cleanup exemption as -delete.
+			return !findDeletesOnlyUnprotectedNames(command, state)
+		}
+		if findCopiesOutTo(command, candidate) {
+			// A copy-out onto a tree name lands in it.
+			return true
+		}
+		// A link named after a tree replaces it, or lands in it when it is
+		// a directory (GAP-1774: `ln -sfn X ~/.defenseclaw/hooks`).
+		link := strings.EqualFold(command.Program, "ln")
+		if !link && !hasAnyOperation(command, actionfacts.OperationCopy, actionfacts.OperationMove) {
 			return false
 		}
 		if state != "" {
 			return true
 		}
 		destination := strings.TrimRight(strings.ReplaceAll(exactSemanticPathValue(candidate), `\`, "/"), "/")
+		var sources []string
+		if link {
+			// A link into the root is named after what it points at.
+			sources = actionfacts.LinkTargets(command.Argv)
+		}
 		for _, source := range facts.Paths {
-			if source.CommandID != candidate.CommandID || source.Access == actionfacts.PathAccessWrite {
-				continue
+			if !link && source.CommandID == candidate.CommandID && source.Access != actionfacts.PathAccessWrite {
+				sources = append(sources, exactSemanticPathValue(source))
 			}
-			base := path.Base(strings.TrimRight(strings.ReplaceAll(exactSemanticPathValue(source), `\`, "/"), "/"))
+		}
+		for _, source := range sources {
+			base := path.Base(strings.TrimRight(strings.ReplaceAll(source, `\`, "/"), "/"))
 			if base == "." || base == ".." || base == "/" || destination == "" {
 				continue
 			}
@@ -2645,7 +2676,21 @@ func stateTreeEntryChanged(
 // because each can still reach config.yaml, a hook, a rule pack file or the
 // saved installer.
 func findDeletesOnlyUnprotectedNames(command actionfacts.CommandFact, state string) bool {
-	if state != "" || !strings.EqualFold(command.Program, "find") || len(command.Argv) < 2 {
+	if state != "" {
+		return false
+	}
+	return findDeletesOnlyNames(command, findPatternIsCleanupOnly, findCommandActsOnEntryOnly)
+}
+
+// findDeletesOnlyNames is findDeletesOnlyUnprotectedNames with the name
+// test judged by cleanup and each -exec/-execdir/-ok/-okdir command by
+// command (GAP-2305).
+func findDeletesOnlyNames(
+	command actionfacts.CommandFact,
+	cleanup func(pattern string, fold bool) bool,
+	commandOK func(words []string, inEntryDir bool) bool,
+) bool {
+	if !strings.EqualFold(command.Program, "find") || len(command.Argv) < 2 {
 		return false
 	}
 	named, acted := false, false
@@ -2660,7 +2705,7 @@ func findDeletesOnlyUnprotectedNames(command actionfacts.CommandFact, state stri
 				return false
 			}
 			index++
-			if !findPatternIsCleanupOnly(command.Argv[index], argument == "-iname") {
+			if !cleanup(command.Argv[index], argument == "-iname") {
 				return false
 			}
 			named = named || !acted
@@ -2676,10 +2721,18 @@ func findDeletesOnlyUnprotectedNames(command actionfacts.CommandFact, state stri
 			acted = true
 			// The command of the action ends at ';' or '+'; its words are
 			// not find tests.
-			for index+1 < len(command.Argv) && command.Argv[index+1] != ";" && command.Argv[index+1] != "+" {
-				index++
+			end := index + 1
+			for end < len(command.Argv) && command.Argv[end] != ";" && command.Argv[end] != "+" {
+				end++
 			}
-			index++
+			// The names only bound what the command is handed: a command
+			// that reaches past the entry (`-execdir rm -rf ../hooks`,
+			// `rm -rf {}/..`, a shell script, another operand) can change
+			// any state file (GAP-2305).
+			if !commandOK(command.Argv[index+1:end], argument == "-execdir" || argument == "-okdir") {
+				return false
+			}
+			index = end
 		default:
 			// Every other primary is skipped with its arguments, so an
 			// argument is never read as a test (`-fprintf -name '*.log'`
@@ -2706,6 +2759,312 @@ func findDeletesOnlyUnprotectedNames(command actionfacts.CommandFact, state stri
 		}
 	}
 	return named && acted
+}
+
+// findCommandActsOnEntryOnly reports an -exec/-execdir/-ok/-okdir command
+// that reaches only the entry find hands it (GAP-2305): a program that only
+// reads or copies out what it is handed (a copy-out output is judged on its
+// own), or rm, unlink, rmdir, shred, gzip, bzip2 or xz with only plain
+// options and the entry itself ({}, or ./{} where -execdir runs it).
+// {} inside a longer word, any other operand and a shell or wrapper reach
+// past the entry.
+func findCommandActsOnEntryOnly(words []string, inEntryDir bool) bool {
+	if len(words) == 0 {
+		return false
+	}
+	argv := append(append([]string{"find", "-exec"}, words...), ";")
+	if !actionfacts.FindHandedEntries(argv).MayChange {
+		return true
+	}
+	program := findProgramName(words[0])
+	if _, shell := findShellPrograms[program]; shell {
+		return findShellScriptActsOnEntryOnly(words)
+	}
+	if program == "mv" {
+		return findMoveActsOnEntryOnly(words[1:], inEntryDir)
+	}
+	if _, entryOnly := findEntryOnlyChangers[program]; !entryOnly {
+		return false
+	}
+	entries := 0
+	for _, word := range words[1:] {
+		switch {
+		case word == "{}" || inEntryDir && word == "./{}":
+			entries++
+		case findPlainOption(word):
+		default:
+			return false
+		}
+	}
+	return entries > 0
+}
+
+// findMoveActsOnEntryOnly reads `mv [options] {} /absolute/dest`: the
+// entry moves out to one literal absolute destination, which the move
+// facts judge on its own (log rotation out of the state root).
+func findMoveActsOnEntryOnly(args []string, inEntryDir bool) bool {
+	var operands []string
+	for _, word := range args {
+		switch {
+		case findPlainOption(word):
+			if strings.HasPrefix(word, "-t") || strings.HasPrefix(word, "--t") {
+				return false
+			}
+		default:
+			operands = append(operands, word)
+		}
+	}
+	if len(operands) != 2 || operands[0] != "{}" && (!inEntryDir || operands[0] != "./{}") {
+		return false
+	}
+	destination := operands[1]
+	// The move facts judge the destination of a {} source only, so for
+	// ./{} the destination itself must stay off the state root
+	// (`-execdir mv ./{} ~/.defenseclaw/config.yaml`, GAP-2305).
+	if operands[0] == "./{}" && strings.Contains(strings.ToLower(destination), ".defenseclaw") {
+		return false
+	}
+	return strings.HasPrefix(destination, "/") && !strings.ContainsAny(destination, "{}$`*?[~\\") &&
+		!strings.Contains("/"+destination+"/", "/../")
+}
+
+// findEntryOnlyChangers remove or compress exactly the operands they are
+// given, so with only plain options and {} they change only the entry.
+var findEntryOnlyChangers = map[string]struct{}{
+	"rm": {}, "unlink": {}, "rmdir": {}, "shred": {}, "gzip": {}, "bzip2": {}, "xz": {},
+}
+
+// findShellPrograms run a script; findInlineInterpreters run code given on
+// their command line.
+var (
+	findShellPrograms = map[string]struct{}{
+		"sh": {}, "bash": {}, "dash": {}, "zsh": {}, "ksh": {}, "mksh": {}, "ash": {}, "fish": {}, "csh": {}, "tcsh": {},
+	}
+	findInlineInterpreters = map[string]struct{}{
+		"perl": {}, "ruby": {}, "node": {}, "php": {}, "python": {}, "python3": {}, "pwsh": {}, "osascript": {},
+		// awk's system() and print > file run what its program says
+		// (pod check12 S6); busybox runs any applet, a shell included.
+		"awk": {}, "gawk": {}, "mawk": {}, "nawk": {}, "busybox": {}, "lua": {}, "tclsh": {}, "expect": {},
+		"deno": {}, "bun": {},
+	}
+)
+
+func findProgramName(word string) string {
+	return strings.ToLower(word[strings.LastIndex(word, "/")+1:])
+}
+
+// findPlainOption is an option word with no path, value or expansion in it
+// (-f, -rf, --force, -9, --).
+func findPlainOption(word string) bool {
+	return len(word) > 1 && word[0] == '-' && !strings.ContainsAny(word, "/={}$`~*?[\\'\";&|<>() ")
+}
+
+// findShellScriptActsOnEntryOnly reads `sh -c 'rm -f "$1"' _ {}`: a script
+// that is one simple command of an entry-only changer with plain options
+// and only "$1" or "$@" as operands, handed only {}. Any other script
+// (a $(dirname ...), ${1%/*}, a redirect, a second command) may reach past
+// the entry.
+func findShellScriptActsOnEntryOnly(words []string) bool {
+	if len(words) < 5 || words[1] != "-c" || strings.Contains(words[3], "{}") {
+		return false
+	}
+	for _, word := range words[4:] {
+		if word != "{}" {
+			return false
+		}
+	}
+	fields := strings.Fields(words[2])
+	if len(fields) < 2 {
+		return false
+	}
+	if _, entryOnly := findEntryOnlyChangers[findProgramName(fields[0])]; !entryOnly ||
+		strings.ContainsAny(fields[0], "$`\\'\";&|<>(){}*?[~=") {
+		return false
+	}
+	operands := 0
+	for _, field := range fields[1:] {
+		switch field {
+		case `"$1"`, `"$@"`, "$1", "$@":
+			operands++
+		default:
+			if !findPlainOption(field) {
+				return false
+			}
+		}
+	}
+	return operands > 0
+}
+
+// findCommandStaysOffStateOf judges an -exec/-execdir/-ok/-okdir command
+// that is handed only entries outside the state (its name test matches no
+// state name, or it runs from an unprotected state subtree such as logs/):
+// it stays off the state when it acts on the entry only or when none of
+// its words can reach the state on its own (findWordReachesState). So
+// normal work with plain words and {}.ext stays allowed (`-execdir git
+// pull`, `-execdir make clean`, `ffmpeg -i {} {}.mp3`, `bash -c 'wc -l
+// "$1"' _ {}`, pod check11), and `-execdir rm -rf .defenseclaw`, `rm {}
+// ~/.defenseclaw/config.yaml`, `rm -rf {}/..`, `-execdir rm -rf ../hooks`
+// and a script with $(dirname ...) or ${1%/*} do not (GAP-2305). Inline
+// code and commands read from stdin (xargs, parallel) are not read here,
+// so they never stay off.
+func findCommandStaysOffStateOf(home, root string) func(words []string, inEntryDir bool) bool {
+	return func(words []string, inEntryDir bool) bool {
+		if findCommandActsOnEntryOnly(words, inEntryDir) {
+			return true
+		}
+		if len(words) == 0 {
+			return false
+		}
+		for index, word := range words {
+			program := findProgramName(word)
+			if _, commandString := findCommandStringPrograms[program]; commandString &&
+				findWordMayRunAsProgram(words, index) {
+				return false
+			}
+			if _, shell := findShellPrograms[program]; shell {
+				// find hands a shell's -c script to the shell, which removes
+				// its quotes and escapes, so the script is judged by the
+				// words the shell runs (pod check12 S1-S5, S10, S15).
+				if index == 0 {
+					return findShellInvocationStaysOff(words, home, root, inEntryDir)
+				}
+				if findShellRunsAScript(words, index) {
+					return false
+				}
+			}
+			if findSedRunsOrWrites(words[index:]) {
+				return false
+			}
+			pythonModule := strings.HasPrefix(program, "python") && index+1 < len(words) && words[index+1] == "-m"
+			if _, inline := findInlineInterpreters[program]; inline && !pythonModule {
+				return false
+			}
+			if program == "xargs" || program == "parallel" {
+				return false
+			}
+			if findWordReachesState(word, home, root, inEntryDir) {
+				return false
+			}
+		}
+		return true
+	}
+}
+
+// findShellRunsAScript reports a shell word after the first that runs a
+// script: a runner stands before it (`env sh -c`, `sudo bash x.sh`,
+// `nice -n 5 bash x.sh`) or a -c option follows it.
+func findShellRunsAScript(words []string, index int) bool {
+	if findWordMayRunAsProgram(words, index) {
+		return true
+	}
+	for _, word := range words[index+1:] {
+		if findPlainOption(word) && !strings.HasPrefix(word, "--") && strings.ContainsRune(word, 'c') {
+			return true
+		}
+	}
+	return false
+}
+
+// findWordReachesState reports a command word, or a rendered word of a
+// shell script (findShellScriptStaysOff), that can name DefenseClaw state on its own: the
+// state root name, {} followed by '/', a '..' component, '.', a command or
+// parameter substitution, dirname, a dot-name glob, another user's home or
+// an unknown variable, a path that is the state root, inside it or above
+// it, and (where the command runs in the find's working directory, which
+// may be the root) a relative path that starts with a state name.
+func findWordReachesState(word, home, root string, inEntryDir bool) bool {
+	if strings.Contains(strings.ToLower(word), ".defenseclaw") || strings.Contains(word, "{}/") ||
+		strings.Contains(word, "$(") || strings.Contains(word, "${") || strings.Contains(word, "`") {
+		return true
+	}
+	lowerRoot := strings.ToLower(path.Clean(root))
+	tokens := strings.FieldsFunc(word, func(r rune) bool {
+		return r == ' ' || r == '\t' || r == '\n' || strings.ContainsRune("\"';&|<>()=,", r)
+	})
+	for _, token := range tokens {
+		if findProgramName(token) == "dirname" || token == "." || token == "./" ||
+			strings.HasPrefix(token, ".") && strings.ContainsAny(token, "*?[") {
+			return true
+		}
+		for _, part := range strings.Split(token, "/") {
+			if part == ".." {
+				return true
+			}
+		}
+		resolved := token
+		switch {
+		case token == "~" || strings.HasPrefix(token, "~/"):
+			if home == "" {
+				return true
+			}
+			resolved = home + token[1:]
+		case token == "$HOME" || strings.HasPrefix(token, "$HOME/"):
+			if home == "" {
+				return true
+			}
+			resolved = home + strings.TrimPrefix(token, "$HOME")
+		case strings.HasPrefix(token, "~"):
+			return true
+		case strings.HasPrefix(token, "$"):
+			// "$1", "$@" and "$1.utf8" are the entry a script is handed.
+			if len(token) < 2 || !strings.ContainsRune("0123456789@*#", rune(token[1])) {
+				return true
+			}
+			continue
+		}
+		if strings.HasPrefix(resolved, "/") {
+			clean := strings.ToLower(path.Clean(resolved))
+			if clean == "/" || clean == lowerRoot || strings.HasPrefix(clean, lowerRoot+"/") ||
+				strings.HasPrefix(lowerRoot, clean+"/") {
+				return true
+			}
+			continue
+		}
+		if inEntryDir {
+			continue
+		}
+		first := strings.ToLower(strings.SplitN(strings.TrimPrefix(token, "./"), "/", 2)[0])
+		for _, name := range protectedStateNameSamples {
+			if first == strings.ToLower(name) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// findReachesPastItsEntries reports a written find starting point whose
+// -exec/-execdir/-ok/-okdir command may change more than the entry it is
+// handed: from anywhere in the state tree, logs/ included,
+// `-execdir rm -rf ../hooks` or a shell script reaches the protected
+// trees beside it (GAP-2305).
+func findReachesPastItsEntries(facts actionfacts.Facts, candidate actionfacts.PathFact) bool {
+	if candidate.Access != actionfacts.PathAccessWrite {
+		return false
+	}
+	command, ok := integrityCommandByID(facts, candidate.CommandID)
+	if !ok || !strings.EqualFold(command.Program, "find") {
+		return false
+	}
+	staysOff := findCommandStaysOffStateOf(facts.ActiveHome, path.Join(path.Clean(facts.ActiveHome), ".defenseclaw"))
+	argv := command.Argv
+	for index := 1; index < len(argv); index++ {
+		action := argv[index]
+		switch action {
+		case "-exec", "-execdir", "-ok", "-okdir":
+		default:
+			continue
+		}
+		end := index + 1
+		for end < len(argv) && argv[end] != ";" && argv[end] != "+" {
+			end++
+		}
+		if !staysOff(argv[index+1:end], action == "-execdir" || action == "-okdir") {
+			return true
+		}
+		index = end
+	}
+	return false
 }
 
 // findExpressionStart returns the index of the first expression word of a
@@ -2761,6 +3120,302 @@ func findAttachedPathOption(word string) bool {
 	at := strings.IndexByte(word, 'f')
 	return len(word) > 2 && word[0] == '-' && at > 0 && at < len(word)-1 &&
 		strings.Trim(word[1:at], "EHLPXdsx") == ""
+}
+
+// findAncestorStartChangesState judges a find starting point that contains
+// the active state root (find ~, find /home, find /, or '.' in such a
+// working directory; GAP-2267): it reaches the state tree as a start at
+// the root does, so -delete, an embedded rm, a hand-off to a writer or a
+// pipe into xargs rm changes it, unless the tests before the action keep
+// to names that are never protected (find ~ -name '*.tmp' -delete) or
+// -maxdepth stops above the root's entries (find ~ -maxdepth 1 -type f).
+func findAncestorStartChangesState(facts actionfacts.Facts, candidate actionfacts.PathFact) bool {
+	command, ok := integrityCommandByID(facts, candidate.CommandID)
+	if !ok || !strings.EqualFold(command.Program, "find") ||
+		candidate.Flavor != "" && candidate.Flavor != actionfacts.PathFlavorPOSIX || facts.ActiveHome == "" {
+		return false
+	}
+	acted := command
+	switch candidate.Access {
+	case actionfacts.PathAccessDelete:
+	case actionfacts.PathAccessWrite:
+		if !findHandsEntriesToWriter(command) {
+			return false
+		}
+	case actionfacts.PathAccessRead:
+		if !findPipedToWriter(facts, command) {
+			return false
+		}
+		acted.Argv = append(append([]string(nil), command.Argv...), "-delete")
+	default:
+		return false
+	}
+	start := path.Clean(exactSemanticPathValue(candidate))
+	root := path.Join(path.Clean(facts.ActiveHome), ".defenseclaw")
+	prefix := strings.TrimRight(start, "/") + "/"
+	if !path.IsAbs(start) || !strings.HasPrefix(root, prefix) {
+		return false
+	}
+	// Above the root a find also reaches every other file of the
+	// account, so a name test that matches no protected state name, in
+	// the sample list or in the account's real state tree (`find ~ -name
+	// .DS_Store -exec rm {} +`, `-name '*.py'`), keeps it out of the
+	// state tree.
+	// Cleanup and bytecode names also match state entries (logs, the saved
+	// venv's bytecode), so the command must act on the entry alone; a name
+	// that matches no state entry needs only a command that cannot reach the
+	// state on its own (GAP-2305).
+	noStateName := func(pattern string, fold bool) bool {
+		return findPatternMatchesNoStateName(pattern, fold) && !activeStateTreeHasName(root, pattern, fold)
+	}
+	if findDeletesOnlyNames(acted, func(pattern string, fold bool) bool {
+		return findPatternIsCleanupOnly(pattern, fold) || findPatternIsRegenerableBytecode(pattern, fold) || noStateName(pattern, fold)
+	}, findCommandActsOnEntryOnly) || findDeletesOnlyNames(acted, noStateName, findCommandStaysOffStateOf(facts.ActiveHome, root)) {
+		return false
+	}
+	// The root is at depth `depth` below the start; its entries one deeper.
+	depth := strings.Count(strings.TrimPrefix(root, prefix), "/") + 1
+	if maxDepth, ok := findMaxDepth(command.Argv); ok &&
+		(maxDepth < depth || maxDepth == depth && findTypeSkipsDirectories(command.Argv)) {
+		return false
+	}
+	return true
+}
+
+// findPatternMatchesNoStateName reports a -name/-iname pattern that
+// matches no DefenseClaw state file or tree name (and not .defenseclaw).
+func findPatternMatchesNoStateName(pattern string, fold bool) bool {
+	if pattern == "" || strings.Contains(pattern, "/") {
+		return false
+	}
+	if fold {
+		pattern = strings.ToLower(pattern)
+	}
+	for _, name := range append([]string{".defenseclaw"}, protectedStateNameSamples...) {
+		if fold {
+			name = strings.ToLower(name)
+		}
+		if matched, err := path.Match(pattern, name); err != nil || matched {
+			return false
+		}
+	}
+	return true
+}
+
+// findMaxDepth returns the -maxdepth (BSD -depth n is not a limit) of a
+// find argv.
+func findMaxDepth(argv []string) (int, bool) {
+	for index := findExpressionStart(argv); index+1 < len(argv); index++ {
+		if strings.EqualFold(argv[index], "-maxdepth") {
+			value, err := strconv.Atoi(argv[index+1])
+			return value, err == nil && value >= 0
+		}
+	}
+	return 0, false
+}
+
+// findTypeSkipsDirectories reports a find whose expression is one AND
+// chain with a -type test that excludes directories (-type f, -type l,
+// GNU -type f,l).
+func findTypeSkipsDirectories(argv []string) bool {
+	skips := false
+	for index := findExpressionStart(argv); index < len(argv); index++ {
+		switch strings.ToLower(argv[index]) {
+		case "-o", "-or", "!", "-not", ",":
+			return false
+		case "-type":
+			if index+1 < len(argv) && !strings.Contains(argv[index+1], "d") {
+				skips = true
+			}
+		}
+	}
+	return skips
+}
+
+// findHandsEntriesToWriter reports a find whose -exec/-execdir/-ok/-okdir
+// program may change the entries it is handed (GAP-2122): its starting
+// points carry a written path fact with no proven operation.
+func findHandsEntriesToWriter(command actionfacts.CommandFact) bool {
+	return strings.EqualFold(command.Program, "find") &&
+		actionfacts.FindEmbeddedCommandMayChange(command.Argv)
+}
+
+// findCopiesOutTo reports a written candidate that is the output of a
+// find's copy-out (-exec cp {} DEST, tar -cf ARCHIVE {}, ...): the found
+// entries are only read and the output is written (pod check8).
+func findCopiesOutTo(command actionfacts.CommandFact, candidate actionfacts.PathFact) bool {
+	if !strings.EqualFold(command.Program, "find") || candidate.Access != actionfacts.PathAccessWrite {
+		return false
+	}
+	for _, output := range actionfacts.FindHandedEntries(command.Argv).Outputs {
+		if output == candidate.Value {
+			return true
+		}
+	}
+	return false
+}
+
+// provenPartialFindHandOff proves a state change by a find that hands what
+// it finds to a program that may write or remove it (sh -c, a sudo or env
+// wrapper, truncate, cp, ...; GAP-2122). The embedded program is not read,
+// so the action stays partial, but the starting points are exact: the
+// shell expands them before find runs. The cleanup exemption of -delete
+// still applies (stateTreeEntryChanged).
+func provenPartialFindHandOff(
+	facts actionfacts.Facts,
+	projected actionfacts.CommandFact,
+	candidate actionfacts.PathFact,
+) bool {
+	handsOff := candidate.Access == actionfacts.PathAccessWrite &&
+		(findHandsEntriesToWriter(projected) || findCopiesOutTo(projected, candidate)) ||
+		candidate.Access == actionfacts.PathAccessRead && findPipedToWriter(facts, projected) ||
+		candidate.Access == actionfacts.PathAccessDelete && findDeletesBesideItsExec(projected) ||
+		// The program of a find -exec or an xargs, read on its own words,
+		// changes a path it names itself (GAP-2304).
+		actionfacts.IsEmbeddedProgramCommand(projected) && stateCommandMutatesPath(projected, candidate)
+	if !handsOff {
+		return false
+	}
+	original, ok := integrityCommandByID(facts, projected.ID)
+	return ok && original.Effect == actionfacts.EffectExecute && !original.ControlFlowUncertain
+}
+
+// findPipedToWriter reports a find with no -exec of its own whose output a
+// later xargs of its pipeline (through pass-through stages such as tee,
+// and behind a wrapper such as sudo) hands to a program that may change
+// it, or copies it into DefenseClaw state
+// (`find ~/.defenseclaw/hooks | xargs rm -f`, GAP-2122).
+func findPipedToWriter(facts actionfacts.Facts, command actionfacts.CommandFact) bool {
+	if !strings.EqualFold(command.Program, "find") || command.PipelineID == 0 ||
+		findHasExecAction(command.Argv) {
+		return false
+	}
+	for _, other := range facts.Commands {
+		if other.ID <= command.ID || !strings.EqualFold(other.Program, "xargs") ||
+			!commandInPipeline(facts, other, command.PipelineID) {
+			continue
+		}
+		handed := xargsHandedEntries(other.Argv)
+		if handed.MayChange {
+			return true
+		}
+		for _, output := range handed.Outputs {
+			if handOffOutputInState(facts, output) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// commandInPipeline reports a command of the pipeline, or one a wrapper
+// of the pipeline runs (`find ... | sudo xargs rm`: the xargs is the
+// child of the sudo stage).
+func commandInPipeline(facts actionfacts.Facts, command actionfacts.CommandFact, pipeline int64) bool {
+	for depth := 0; depth < 8; depth++ {
+		if command.PipelineID == pipeline {
+			return true
+		}
+		parent, ok := integrityCommandByID(facts, command.ParentCommandID)
+		if command.ParentCommandID == 0 || !ok {
+			return false
+		}
+		command = parent
+	}
+	return false
+}
+
+// handOffOutputInState reports a copy-out output (relative to the hook's
+// working directory) inside the active DefenseClaw state.
+func handOffOutputInState(facts actionfacts.Facts, output string) bool {
+	if !path.IsAbs(output) {
+		if facts.CWD == "" {
+			return true
+		}
+		output = path.Join(facts.CWD, output)
+	}
+	output = path.Clean(output)
+	candidate := actionfacts.PathFact{
+		Access: actionfacts.PathAccessWrite, Flavor: actionfacts.PathFlavorPOSIX,
+		Value: output, Normalized: output, Absolute: true, Resolved: output,
+	}
+	for _, relative := range []func(actionfacts.Facts, actionfacts.PathFact) (string, bool){
+		activeHomeRelative, exactActiveDefenseClawRelative,
+	} {
+		if value, ok := relative(facts, candidate); ok {
+			value = strings.TrimRight(value, "/")
+			if value == ".defenseclaw" || strings.HasPrefix(value, ".defenseclaw/") {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// findDeletesBesideItsExec reports a find with its own -delete action and
+// an -exec/-execdir/-ok/-okdir command (pod check9, GAP-2122). The command
+// keeps the find partial (a reader, a copy-out, sh -c, ...), but the
+// -delete is find's own and removes every entry that reaches it:
+// `find ~/.defenseclaw/hooks -type f -exec cat {} \; -delete` empties
+// hooks/ whatever cat does. Its delete facts are exact, so the state owner
+// judges them with the same order-aware cleanup exemption
+// (`-name '*.log' -exec cat {} \; -delete` stays log cleanup).
+func findDeletesBesideItsExec(command actionfacts.CommandFact) bool {
+	if !strings.EqualFold(command.Program, "find") || !findHasExecAction(command.Argv) {
+		return false
+	}
+	for index := findExpressionStart(command.Argv); index < len(command.Argv); index++ {
+		switch strings.ToLower(command.Argv[index]) {
+		case "-delete":
+			return true
+		case "-exec", "-execdir", "-ok", "-okdir":
+			// The words of the command are not find primaries.
+			for index+1 < len(command.Argv) && command.Argv[index+1] != ";" && command.Argv[index+1] != "+" {
+				index++
+			}
+			index++
+		}
+	}
+	return false
+}
+
+func findHasExecAction(argv []string) bool {
+	for _, argument := range argv[1:] {
+		switch argument {
+		case "-exec", "-execdir", "-ok", "-okdir":
+			return true
+		}
+	}
+	return false
+}
+
+// xargsHandedEntries reads what the program of an xargs argv does with the
+// names it is handed. With no program xargs runs echo; an option it does
+// not know may hide the program, so it counts as a change.
+func xargsHandedEntries(argv []string) actionfacts.HandedEntries {
+	start, replace, known := actionfacts.XargsProgram(argv)
+	if !known {
+		return actionfacts.HandedEntries{MayChange: true}
+	}
+	if start >= len(argv) {
+		return actionfacts.HandedEntries{}
+	}
+	return actionfacts.XargsHandedEntries(argv[start:], replace)
+}
+
+// factsHaveFindHandOff reports a find that hands what it finds to a
+// program that may change it. Such a find can name the state root or a
+// protected tree with no file under it, which the state mention scan does
+// not count, so the proof below decides (GAP-2122).
+func factsHaveFindHandOff(facts actionfacts.Facts) bool {
+	for _, command := range facts.Commands {
+		if findHandsEntriesToWriter(command) || findPipedToWriter(facts, command) || findDeletesBesideItsExec(command) ||
+			actionfacts.IsEmbeddedProgramCommand(command) ||
+			strings.EqualFold(command.Program, "find") && len(actionfacts.FindHandedEntries(command.Argv).Outputs) != 0 {
+			return true
+		}
+	}
+	return false
 }
 
 // findPrimaryArity is the number of arguments each GNU/BSD find primary

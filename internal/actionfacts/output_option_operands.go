@@ -269,3 +269,107 @@ func UnknownOutputOptionTargets(argv []string) []string {
 	}
 	return targets
 }
+
+// xxd reads INFILE and writes OUTFILE: `xxd INFILE OUTFILE` (and `xxd -r
+// INFILE OUTFILE`) truncates and rewrites the second operand, so `xxd
+// /dev/null FILE` empties FILE (GAP-2302). A single operand is only read.
+func classifyXxdOperands(out *parseOutput, command *CommandFact) {
+	positionals, ok := xxdPositionals(command.Argv[1:])
+	if !ok {
+		out.markPartial(IssueUnknownOperandGrammar)
+	}
+	if len(positionals) > 0 && positionals[0] != "-" {
+		addOperation(command, OperationRead)
+		appendCommandPath(out, command, PathAccessRead, positionals[0])
+	}
+	if len(positionals) > 1 && positionals[1] != "-" {
+		addOperation(command, OperationWrite)
+		appendCommandPath(out, command, PathAccessWrite, positionals[1])
+	}
+	if len(positionals) > 2 {
+		// xxd refuses more than two operands; if an option value was
+		// read as an operand, the last word is still the one xxd writes
+		// (fail closed).
+		out.markPartial(IssueUnknownOperandGrammar)
+		if last := positionals[len(positionals)-1]; last != "-" {
+			addOperation(command, OperationWrite)
+			appendCommandPath(out, command, PathAccessWrite, last)
+		}
+	}
+}
+
+// xxdLongRest maps an xxd value option letter to the rest of its long
+// spelling. xxd matches options by prefix (xxd.c): after the letter, a word
+// that goes on with that rest (`-cols`, `-colsX`, `-length`, `-skip`,
+// `-namex`) takes the next word as its value, any other text is the value
+// attached (`-c8`, `-l64`, `-s+16`), and a bare letter takes the next word
+// (GAP-2302 pod check10).
+var xxdLongRest = map[byte][]string{
+	'c': {"ols"}, 'g': {"roupsize"}, 'l': {"en"}, 'o': {"ffset"},
+	's': {"eek", "kip"}, 'n': {"ame"},
+}
+
+// xxdOptionTakesNextWord reports an xxd option word whose value is the
+// next word.
+func xxdOptionTakesNextWord(arg string) bool {
+	option := arg[1:]
+	if strings.HasPrefix(arg, "--") && len(arg) > 2 {
+		option = arg[2:]
+	}
+	if option == "" {
+		return false
+	}
+	if option[0] == 'R' {
+		// -R takes the next word; -R with more text is a usage error.
+		return true
+	}
+	rests, takes := xxdLongRest[option[0]]
+	if !takes {
+		return false
+	}
+	rest := option[1:]
+	if rest == "" {
+		return true
+	}
+	for _, long := range rests {
+		if strings.HasPrefix(rest, long) {
+			return true
+		}
+	}
+	return false
+}
+
+// xxdPositionals returns the INFILE and OUTFILE operands of xxd's
+// arguments (options and their values removed). ok is false when an
+// option is missing its value.
+func xxdPositionals(args []string) (positionals []string, ok bool) {
+	ok = true
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		if len(positionals) == 0 && arg == "--" {
+			return append(positionals, args[i+1:]...), ok
+		}
+		if len(positionals) == 0 && strings.HasPrefix(arg, "-") && arg != "-" {
+			if xxdOptionTakesNextWord(arg) {
+				// The value may itself start with '-' (`-s -16`).
+				if i+1 >= len(args) {
+					return positionals, false
+				}
+				i++
+			}
+			// Any other dash word is a flag or an option with its value
+			// attached (-c8, -s+16).
+			continue
+		}
+		positionals = append(positionals, arg)
+	}
+	return positionals, ok
+}
+
+// xxdWritesOutput reports xxd arguments with an OUTFILE operand (or a
+// grammar that cannot be read), so a find or xargs that hands entries to
+// such an xxd may change what it names (GAP-2302).
+func xxdWritesOutput(args []string) bool {
+	positionals, ok := xxdPositionals(args)
+	return !ok || len(positionals) > 1
+}

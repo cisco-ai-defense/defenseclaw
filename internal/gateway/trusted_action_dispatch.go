@@ -804,21 +804,27 @@ func withActiveStateTargetMention(
 	facts actionfacts.Facts,
 	findings []RuleFinding,
 ) []RuleFinding {
-	command, known := trustedBashCommandInput(request.Input)
-	if !known {
-		return findings
-	}
-	if !hookpaths.ActionStateTargetMention(command, request.Input.CWD, request.Input.ActiveHome) {
-		// Behind ProtectHome the gateway cannot open the user's home, so the
-		// mention scan cannot place a home target. A redirect target the
-		// shell opens is still proven against the hook client's resolved
-		// target map (GAP-2328: $CMD; echo $X > ~/.defenseclaw/config.yaml).
-		if !request.ProtectedHomeHook || !provenShellRedirectStateWrite(request) {
+	// A pattern, brace list, rsync or git clean that expands onto the
+	// state names no path fact, so it is proved from the shell words
+	// (GAP-2047).
+	if !globbedStateMutation(facts) {
+		command, known := trustedBashCommandInput(request.Input)
+		if !known {
 			return findings
 		}
-	} else if !provenStateMutationPath(facts, request) && !provenBashAggregateStateWrite(request) &&
-		!provenShellRedirectStateWrite(request) {
-		return findings
+		if !hookpaths.ActionStateTargetMention(command, request.Input.CWD, request.Input.ActiveHome) &&
+			!factsHaveFindHandOff(facts) {
+			// Behind ProtectHome the gateway cannot open the user's home, so the
+			// mention scan cannot place a home target. A redirect target the
+			// shell opens is still proven against the hook client's resolved
+			// target map (GAP-2328: $CMD; echo $X > ~/.defenseclaw/config.yaml).
+			if !request.ProtectedHomeHook || !provenShellRedirectStateWrite(request) {
+				return findings
+			}
+		} else if !provenStateMutationPath(facts, request) && !provenBashAggregateStateWrite(request) &&
+			!provenShellRedirectStateWrite(request) {
+			return findings
+		}
 	}
 	const ruleID = "tamper.detector_state_write"
 	_, rule, ok := trustedActionCatalogRule(generation, ruleID)
@@ -954,6 +960,9 @@ func provenStateMutationPath(facts actionfacts.Facts, request trustedActionReque
 		provenMutation := wholeActionProven && stateCommandMutatesPath(command, candidate)
 		if !provenMutation {
 			provenMutation = provenPartialStateRedirect(facts, command, candidate)
+		}
+		if !provenMutation {
+			provenMutation = provenPartialFindHandOff(facts, command, candidate)
 		}
 		if !provenMutation {
 			continue

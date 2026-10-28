@@ -229,7 +229,7 @@ func analyze(input Input, twinCommand string, capture *redirectTargetCapture) Fa
 			home, _ := normalizeActiveHome(input.ActiveHome)
 			if rewrite, ok := rewriteTrustedPOSIXHomeTilde(command, home); ok {
 				if resolved := parse(rewrite.source); resolved.status == StatusComplete ||
-					issuesNarrowed(resolved, parsed) {
+					issuesNarrowed(resolved, parsed) || findRewriteKeepsOnlyEmbeddedPartial(resolved) {
 					parsed = resolved
 					// A Windows drive home (GAP-0912) keeps its rewritten
 					// spelling: the POSIX parse cannot resolve a drive path,
@@ -2249,4 +2249,39 @@ func issuesNarrowed(resolved, original parseOutput) bool {
 		return false
 	}
 	return dropped
+// findRewriteKeepsOnlyEmbeddedPartial reports a home rewrite whose parse is
+// find commands, alone or piped into xargs, left partial only by the
+// command find or xargs runs (GAP-2122). The shell expands the starting
+// points before find runs, so they are exact even though that command is
+// not read, and the rewrite gives the "~" and $HOME spellings the facts of
+// the absolute spelling.
+func findRewriteKeepsOnlyEmbeddedPartial(resolved parseOutput) bool {
+	if resolved.status != StatusPartial || len(resolved.commands) == 0 {
+		return false
+	}
+	for _, issue := range resolved.issues {
+		if issue != IssueUnsupportedConstruct && issue != IssueUnknownOperandGrammar {
+			return false
+		}
+	}
+	finds := 0
+	for _, command := range resolved.commands {
+		if IsEmbeddedProgramCommand(command) {
+			// The program of a find or xargs, read on its own words and
+			// complete (GAP-2304).
+			continue
+		}
+		switch command.Program {
+		case "find":
+			finds++
+		case "xargs",
+			// pass-through stages between find and xargs and the
+			// wrappers of an xargs (pod check8)
+			"tee", "cat", "grep", "sort", "head", "tail",
+			"sudo", "doas", "env", "nice", "nohup", "command", "stdbuf", "ionice":
+		default:
+			return false
+		}
+	}
+	return finds != 0
 }

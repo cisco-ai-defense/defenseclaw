@@ -93,6 +93,9 @@ func rewriteTrustedPOSIXHomeTilde(source, activeHome string) (trustedPOSIXHomeRe
 		}
 		return true
 	}
+	// scripts holds the rewritten -c script of a shell that a find -exec
+	// or an xargs runs (GAP-2304).
+	scripts := map[*syntax.Word]string{}
 	var collect func(*syntax.Stmt, bool) bool
 	collect = func(stmt *syntax.Stmt, compound bool) bool {
 		if stmt.Negated || stmt.Background || stmt.Coprocess {
@@ -115,6 +118,9 @@ func rewriteTrustedPOSIXHomeTilde(source, activeHome string) (trustedPOSIXHomeRe
 				}
 			}
 			words = append(words, cmd.Args[1:]...)
+			for word, script := range embeddedShellScriptHomeRewrites(cmd.Args, activeHome) {
+				scripts[word] = script
+			}
 			return collectRedirects(stmt)
 		case nil:
 			// A command-less redirect (`> ~/f`) is the ":" builtin with that
@@ -142,6 +148,16 @@ func rewriteTrustedPOSIXHomeTilde(source, activeHome string) (trustedPOSIXHomeRe
 	last := 0
 	rewrite := trustedPOSIXHomeRewrite{tildeOperands: map[string]string{}}
 	for _, word := range words {
+		if script, ok := scripts[word]; ok {
+			start, end := int(word.Pos().Offset()), int(word.End().Offset())
+			if start < last || end > len(source) {
+				return trustedPOSIXHomeRewrite{}, false
+			}
+			out.WriteString(source[last:start])
+			out.WriteString("'" + script + "'")
+			last = end
+			continue
+		}
 		if prefix, ok := findOptionHomeWord(word); ok {
 			// `-f$HOME/...`: the -f path of BSD find, attached (GAP-2135).
 			suffix, _ := homeAnchoredLiteralWord(&syntax.Word{Parts: word.Parts[1:]})
@@ -155,6 +171,19 @@ func rewriteTrustedPOSIXHomeTilde(source, activeHome string) (trustedPOSIXHomeRe
 			continue
 		}
 		if suffix, user := userHomeRewriteWord(word, activeHome); user {
+			start, end := int(word.Pos().Offset()), int(word.End().Offset())
+			if start < last || end > len(source) {
+				return trustedPOSIXHomeRewrite{}, false
+			}
+			out.WriteString(source[last:start])
+			out.WriteString(activeHome + suffix)
+			last = end
+			rewrite.tildeOperands[activeHome+suffix] = source[start:end]
+			continue
+		}
+		if suffix, ok := bareHomeWord(word); ok {
+			// `find $HOME -type f -delete`, `"$HOME"/`: the home itself, as
+			// a lone ~ is (GAP-2267).
 			start, end := int(word.Pos().Offset()), int(word.End().Offset())
 			if start < last || end > len(source) {
 				return trustedPOSIXHomeRewrite{}, false
@@ -836,6 +865,9 @@ func staticHomeRewriteWord(word *syntax.Word) bool {
 	if plainHomeRewriteWord(word) {
 		return true
 	}
+	if _, ok := bareHomeWord(word); ok {
+		return true
+	}
 	if _, ok := findOptionHomeWord(word); ok {
 		return true
 	}
@@ -869,6 +901,49 @@ func findOptionHomeWord(word *syntax.Word) (string, bool) {
 }
 
 var findAttachedPathOption = regexp.MustCompile(`^-[EHLPXdsx]*f$`)
+
+// bareHomeWord reports a word that is the home directory itself through a
+// plain HOME parameter: $HOME, ${HOME}, "$HOME", "${HOME}", each optionally
+// followed by one "/" inside or outside the quotes. It returns that "/" or
+// "". homeAnchoredLiteralWord needs a path below the home, so these words
+// were never rewritten and a find from $HOME was not judged as one from ~
+// (GAP-2267).
+func bareHomeWord(word *syntax.Word) (string, bool) {
+	if word == nil || len(word.Parts) == 0 || len(word.Parts) > 2 {
+		return "", false
+	}
+	slash := func(part syntax.WordPart) bool {
+		literal, ok := part.(*syntax.Lit)
+		return ok && literal.Value == "/"
+	}
+	suffix := ""
+	if len(word.Parts) == 2 {
+		if !slash(word.Parts[1]) {
+			return "", false
+		}
+		suffix = "/"
+	}
+	switch first := word.Parts[0].(type) {
+	case *syntax.ParamExp:
+		if !plainHomeParameter(first) {
+			return "", false
+		}
+	case *syntax.DblQuoted:
+		if first.Dollar || len(first.Parts) == 0 || len(first.Parts) > 2 ||
+			!plainHomeParameter(first.Parts[0]) {
+			return "", false
+		}
+		if len(first.Parts) == 2 {
+			if suffix != "" || !slash(first.Parts[1]) {
+				return "", false
+			}
+			suffix = "/"
+		}
+	default:
+		return "", false
+	}
+	return suffix, true
+}
 
 func plainHomeRewriteWord(word *syntax.Word) bool {
 	if _, ok := homeAnchoredLiteralWord(word); !ok {
@@ -1029,4 +1104,56 @@ func respellTrustedPOSIXHomeTilde(facts *Facts, commandIDs map[int64]struct{}, t
 		path.Normalized = spelling
 		path.Absolute = false
 	}
+}
+
+// embeddedShellScriptHomeRewrites rewrites the single-quoted -c script of a
+// POSIX shell that a find -exec/-execdir/-ok/-okdir or an xargs runs
+// (`find /tmp -maxdepth 0 -exec sh -c 'rm -rf ~/.defenseclaw/hooks' \;`).
+// That shell expands its own "~" to the HOME it inherits, which the outer
+// rewrite proves unchanged, so the script gets the same rewrite as a
+// top-level command (GAP-2304). A script that does not rewrite, or whose
+// rewrite holds a single quote, is left as it is.
+func embeddedShellScriptHomeRewrites(args []*syntax.Word, activeHome string) map[*syntax.Word]string {
+	if len(args) < 4 {
+		return nil
+	}
+	program, ok := firstLiteral(args[0])
+	if !ok || len(args[0].Parts) != 1 {
+		return nil
+	}
+	switch path.Base(program.Value) {
+	case "find", "xargs":
+	default:
+		return nil
+	}
+	var rewrites map[*syntax.Word]string
+	for index := 3; index < len(args); index++ {
+		option, optionOK := firstLiteral(args[index-1])
+		shell, shellOK := firstLiteral(args[index-2])
+		if !optionOK || !shellOK || len(args[index-1].Parts) != 1 || len(args[index-2].Parts) != 1 ||
+			option.Value != "-c" {
+			continue
+		}
+		switch path.Base(shell.Value) {
+		case "sh", "bash", "dash", "ksh", "mksh", "ash":
+		default:
+			continue
+		}
+		if len(args[index].Parts) != 1 {
+			continue
+		}
+		quoted, isQuoted := args[index].Parts[0].(*syntax.SglQuoted)
+		if !isQuoted || quoted.Dollar || !strings.Contains(quoted.Value, "~") {
+			continue
+		}
+		rewrite, rewritten := rewriteTrustedPOSIXHomeTilde(quoted.Value, activeHome)
+		if !rewritten || strings.Contains(rewrite.source, "'") {
+			continue
+		}
+		if rewrites == nil {
+			rewrites = map[*syntax.Word]string{}
+		}
+		rewrites[args[index]] = rewrite.source
+	}
+	return rewrites
 }
