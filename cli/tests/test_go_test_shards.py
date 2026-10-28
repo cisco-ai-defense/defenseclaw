@@ -127,3 +127,24 @@ def test_package_mode_splits_a_slow_package_and_covers_every_package_once(tmp_pa
         "TestLightB",
         "TestUnrecorded",
     ]
+
+
+def test_windows_connector_shards_count_the_operator_collector_matrix() -> None:
+    # GAP-2199: TestClaudeMarkedOperatorCollectorKeepsBytes runs 126 full
+    # Claude Setup/Teardown subtests (231 s on a native Windows preflight
+    # host). Unrecorded, it weighed the 0.18 s "*" default, so the balancer
+    # put it beside a full 288 s shard and the connector package hit its
+    # 660 s Go timeout on the hosted runner (a slow run, not a blocked write).
+    import json
+    import statistics
+
+    root = Path(__file__).resolve().parents[2]
+    timings = json.loads((root / "scripts/test-timings/go-windows.json").read_text(encoding="utf-8"))
+    tests = timings["tests"]["internal/gateway/connector"]
+    files = discover_test_files(root / "internal/gateway/connector")
+    shards = partition_test_files(files, 16, tests)
+    measured = dict(tests, TestClaudeMarkedOperatorCollectorKeepsBytes=231.3)
+    default = tests["*"]
+    weights = [sum(float(measured.get(name, default)) for name in shard) for shard in shards]
+    holder = next(i for i, shard in enumerate(shards) if "TestClaudeMarkedOperatorCollectorKeepsBytes" in shard)
+    assert weights[holder] <= 1.25 * statistics.median(weights), (holder, weights)

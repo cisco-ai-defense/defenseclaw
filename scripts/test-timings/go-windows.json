@@ -298,6 +298,7 @@
    "TestClaudeManagedContractUsesWinningManagedSource": 2.6,
    "TestClaudeManagedDropinsDeepMerge": 2.0,
    "TestClaudeManagedHookPolicyVerificationRequiresCanonicalDocument": 4.4,
+   "TestClaudeMarkedOperatorCollectorKeepsBytes": 231.3,
    "TestClaudeNativeOTLPCleanupKeepsChangedAuthorization": 7.1,
    "TestClaudePolicyHelperIsExplicitlyUninspectable": 2.2,
    "TestClaudeReleasedMarkerlessProductBearerUpgrade": 128.8,
