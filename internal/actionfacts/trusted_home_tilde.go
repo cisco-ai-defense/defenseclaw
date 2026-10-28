@@ -442,10 +442,30 @@ func homeGlobRewriteWord(word *syntax.Word) (string, bool) {
 	if word == nil || len(word.Parts) < 2 {
 		return "", false
 	}
-	if parameter, ok := word.Parts[0].(*syntax.ParamExp); !ok || !plainHomeParameter(parameter) {
+	var suffix strings.Builder
+	switch first := word.Parts[0].(type) {
+	case *syntax.ParamExp:
+		if !plainHomeParameter(first) {
+			return "", false
+		}
+	case *syntax.DblQuoted:
+		// `"$HOME/.defenseclaw/"*`, `"$HOME"/.defenseclaw/*`: HOME and
+		// plain path text inside the quotes read the same unquoted, and
+		// the pattern stays outside them (pod check17 row c).
+		if first.Dollar || len(first.Parts) == 0 || len(first.Parts) > 2 ||
+			!plainHomeParameter(first.Parts[0]) {
+			return "", false
+		}
+		if len(first.Parts) == 2 {
+			literal, ok := first.Parts[1].(*syntax.Lit)
+			if !ok || !trustedPOSIXHomeLiteral.MatchString(literal.Value) {
+				return "", false
+			}
+			suffix.WriteString(literal.Value)
+		}
+	default:
 		return "", false
 	}
-	var suffix strings.Builder
 	for _, part := range word.Parts[1:] {
 		literal, ok := part.(*syntax.Lit)
 		if !ok {

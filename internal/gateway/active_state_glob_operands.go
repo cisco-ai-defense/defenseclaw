@@ -208,7 +208,7 @@ func rsyncStateOperands(words []string) (operands, options []string) {
 			}
 		case strings.HasPrefix(word, "-") && word != "-":
 			options = append(options, word)
-			if strings.ContainsAny(word[len(word)-1:], "efTBM") {
+			if rsyncShortValueIsNextWord(word) {
 				index++
 			}
 		default:
@@ -216,6 +216,21 @@ func rsyncStateOperands(words []string) (operands, options []string) {
 		}
 	}
 	return operands, options
+}
+
+// rsyncShortValueIsNextWord reads a short option cluster left to right:
+// at its first letter that takes a value (e f T B M @) the rest of the word
+// is that value (`-T/tmp/te`, `-aT/tmp/te`, `-essh-te`), and only when the
+// letter ends the word is the value the next word (`-e ssh`, `-aT /tmp`).
+// Reading only the last character made an attached value that happens to
+// end in one of those letters swallow the real source (pod check18).
+func rsyncShortValueIsNextWord(word string) bool {
+	for index := 1; index < len(word); index++ {
+		if strings.IndexByte("efTBM@", word[index]) >= 0 {
+			return index == len(word)-1
+		}
+	}
+	return false
 }
 
 // rsyncDeletes reports an rsync option that removes files: --del, --delete,
@@ -235,38 +250,40 @@ func sourceNamesItsEntries(source string) bool {
 
 // gitCleanDirectory returns the directory a git clean starts from: the
 // working directory, or the -C directories before the subcommand, each
-// relative to the one before. ok is false for a -C value it cannot place.
+// relative to the one before. A --work-tree DIR (or =DIR) names the tree a
+// clean removes from; git keeps that value as written and resolves a
+// relative one against the directory it ends in after every -C, wherever
+// the option stands (`git --work-tree=. -C ~/.defenseclaw clean`, pod
+// check18). ok is false for a value it cannot place.
 func gitCleanDirectory(words []string, home, cwd string) (string, bool) {
 	base := cwd
-	// --work-tree DIR (or =DIR) names the tree a clean removes from,
-	// relative to the -C directory when it comes after one.
-	workTree := ""
+	workTree, hasWorkTree := "", false
 	for index := 0; index < len(words) && words[index] != "clean"; index++ {
 		word := words[index]
 		if value, ok := strings.CutPrefix(word, "--work-tree="); ok {
-			next, ok := stateHomePath(value, home, base)
-			if !ok {
-				return "", false
-			}
-			workTree = path.Clean(next)
+			workTree, hasWorkTree = value, true
 			continue
 		}
 		if word != "-C" && word != "--work-tree" || index+1 >= len(words) {
 			continue
 		}
 		index++
+		if word == "--work-tree" {
+			workTree, hasWorkTree = words[index], true
+			continue
+		}
 		next, ok := stateHomePath(words[index], home, base)
 		if !ok {
 			return "", false
 		}
-		if word == "--work-tree" {
-			workTree = path.Clean(next)
-			continue
-		}
 		base = path.Clean(next)
 	}
-	if workTree != "" {
-		return workTree, true
+	if hasWorkTree {
+		next, ok := stateHomePath(workTree, home, base)
+		if !ok {
+			return "", false
+		}
+		return path.Clean(next), true
 	}
 	return base, true
 }

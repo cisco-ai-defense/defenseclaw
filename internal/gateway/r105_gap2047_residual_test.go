@@ -142,3 +142,43 @@ func TestR105Check17LinkGlobsAndGitWorkTree(t *testing.T) {
 		r105RunStateRowsChecked(t, mode, cwd, rows, true)
 	}
 }
+
+// pod check18 (regressions of d46bd27b42 and d9e567b34a, and GAP-2047 row
+// c): a short rsync option with an attached value (`-T/tmp/te`,
+// `-aT/tmp/te`, `-essh-te`) does not take the next word, a relative
+// --work-tree is resolved after every -C, and a double-quoted $HOME prefix
+// before an unquoted pattern names the state like ~ does. Each removes or replaces protected state, so
+// it blocks in every mode, both connectors; the same forms on project paths
+// stay quiet.
+func TestR105Check18AttachedRsyncValuesWorkTreeAfterCAndQuotedHomeGlobs(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX shell forms")
+	}
+	_, cwd := r105StateFixture(t)
+	for _, dir := range []string{"out", "proj2", "backup"} {
+		if err := os.MkdirAll(filepath.Join(cwd, dir), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	rows := []r105StateRow{
+		{"rsync attached -T into hooks", "rsync -a -T/tmp/te /tmp/x/ ~/.defenseclaw/hooks/", true, ""},
+		{"rsync clustered -aT into root", "rsync -aT/tmp/te /tmp/x/ ~/.defenseclaw/", true, ""},
+		{"rsync attached -e into hooks", "rsync -a -essh-te /tmp/x/ ~/.defenseclaw/hooks/", true, ""},
+		{"rsync clustered -ae then value word into root", "rsync -ae ssh /tmp/x/ ~/.defenseclaw/", true, ""},
+		{"git relative work-tree before -C", "git --work-tree=. -C ~/.defenseclaw clean -fdx", true, ""},
+		{"git git-dir and relative work-tree before -C", "git --git-dir=/tmp/g/.git --work-tree=. -C ~/.defenseclaw clean -fdx", true, ""},
+		{"git work-tree word before -C", "git --work-tree hooks -C ~/.defenseclaw clean -fdx", true, ""},
+		{"quoted $HOME prefix glob root", `rm -rf "$HOME/.defenseclaw/"*`, true, ""},
+		{"quoted $HOME then glob root", `rm -rf "$HOME"/.defenseclaw/*`, true, ""},
+		{"quoted ${HOME} prefix glob hooks", `rm -rf "${HOME}/.defenseclaw/hooks/"*`, true, ""},
+		// Allowed and quiet.
+		{"rsync attached -T into backup", "rsync -a -T/tmp/te /tmp/x/ backup/", false, ""},
+		{"rsync attached -e dir into root", "rsync -a -essh out ~/.defenseclaw/", false, ""},
+		{"git relative work-tree project", "git --work-tree=. -C proj2 clean -fdx", false, ""},
+		{"quoted $HOME cache glob", `rm -rf "$HOME/.cache/"*`, false, ""},
+		{"quoted $HOME log glob", `rm -f "$HOME/.defenseclaw/logs/"*.log`, false, ""},
+	}
+	for _, mode := range []string{"observe", "action"} {
+		r105RunStateRowsChecked(t, mode, cwd, rows, true)
+	}
+}
