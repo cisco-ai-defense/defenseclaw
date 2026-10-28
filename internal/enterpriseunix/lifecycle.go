@@ -4201,8 +4201,8 @@ func (l *lifecycle) recordPackageResult(failure int) {
 }
 
 // refuseUnresolvedPerUserRows asks `enterprise hooks remove-all --check`,
-// before any service stops or policy goes, whether every manifest row can be
-// removed. A failed command or incomplete report also refuses the uninstall:
+// before any service stops or policy goes, whether every manifest row and
+// every pending guardian cleanup can be removed. A failed command or incomplete report also refuses the uninstall:
 // manifest parse and trust errors have no per-row failures to report.
 func (l *lifecycle) refuseUnresolvedPerUserRows(ctx context.Context) bool {
 	env, r := l.env, l.result
@@ -4220,7 +4220,9 @@ func (l *lifecycle) refuseUnresolvedPerUserRows(ctx context.Context) bool {
 			if !ok {
 				continue
 			}
-			r.AddError(codePerUserHooks, fmt.Sprintf("the %s manifest row of user %s cannot be removed: %s; fix or remove that row in %s and rerun `%s`",
+			// The check also names the guardian's pending cleanups of
+			// accounts the manifest no longer names (GAP-2377).
+			r.AddError(codePerUserHooks, fmt.Sprintf("the %s hooks of user %s cannot be removed: %s; fix or remove that row in %s (for a pending guardian cleanup of an account the manifest no longer names, fix that account's home to an existing directory it owns, or remove the account) and rerun `%s`",
 				connector, user, reason, env.Layout.ManifestPath, l.uninstallCommand()))
 			refused = true
 		}

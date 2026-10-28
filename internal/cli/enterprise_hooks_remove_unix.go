@@ -17,6 +17,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -164,7 +165,9 @@ func removeAllEnterpriseHookTargets(cmd *cobra.Command) (enterpriseHooksRemoveAl
 	if enterpriseHooksRemoveAllCheck {
 		// uninstall asks before it stops a service or removes the machine
 		// policy, so a row it cannot resolve leaves the deployment intact
-		// (GAP-1101).
+		// (GAP-1101). The guardian's pending cleanups are checked too
+		// (GAP-2377).
+		checkEnterpriseHookPendingCleanups(&report, jobs, enterprisehooks.StandaloneResolver(), enterpriseHookRehomedRowCleanups(rows)...)
 		sort.Strings(report.Pending)
 		sort.Strings(report.Failed)
 		report.OK = len(report.Failed) == 0
@@ -661,6 +664,51 @@ func runEnterpriseHookPendingCleanupsWith(cmd *cobra.Command, report *enterprise
 	return skip
 }
 
+// checkEnterpriseHookPendingCleanups is the --check side of
+// runEnterpriseHookPendingCleanupsWith: it reads the guardian's pending
+// cleanups (and the cleanups of re-homed manifest rows) and reports, without
+// running a worker, each one the real remove-all would leave pending or
+// failed. Without it a pending cleanup of an account the manifest no longer
+// names, whose home is not available, passed the uninstall precheck; the
+// real run then stopped on it after the services had stopped, the machine
+// policy had gone and the other users' Claude Code blockers had been
+// removed (GAP-2377). A cleanup the worker would run is left to the real run.
+func checkEnterpriseHookPendingCleanups(report *enterpriseHooksRemoveAllReport, jobs map[int]*enterpriseHookWorkerJob, resolver unixidentity.Resolver, rehomed ...enterpriseHookUserCleanup) {
+	var pending []enterpriseHookUserCleanup
+	if cfg != nil {
+		loaded, err := loadEnterpriseHookUserCleanups(cfg.DataDir)
+		if err != nil {
+			report.Failed = append(report.Failed, "pending per-user cleanups: "+boundedString(err.Error(), 256))
+		} else {
+			pending = loaded
+		}
+	}
+	key := func(entry enterpriseHookUserCleanup) string {
+		return fmt.Sprintf("%d\x00%s\x00%s", entry.UID, strings.ToLower(strings.TrimSpace(entry.Connector)), filepath.Clean(strings.TrimSpace(entry.UserHome)))
+	}
+	seen := map[string]bool{}
+	skip := map[int]string{}
+	check := func(entry enterpriseHookUserCleanup) {
+		if seen[key(entry)] {
+			return
+		}
+		seen[key(entry)] = true
+		account, _, outcome, err := planEnterpriseHookStandaloneUnixCleanup(io.Discard, entry, resolver)
+		if account != nil || (outcome == enterpriseHookUserCleanupDone && err == nil) {
+			return // the worker runs it, or nothing is left to remove
+		}
+		addEnterpriseHookRemoveAllCleanupOutcome(report, skip, entry, outcome, err)
+	}
+	for _, entry := range pending {
+		if !enterpriseHookPendingCleanupCoveredByJob(jobs[entry.UID], strings.ToLower(strings.TrimSpace(entry.Connector)), entry, resolver) {
+			check(entry)
+		}
+	}
+	for _, entry := range rehomed {
+		check(entry)
+	}
+}
+
 // dropEnterpriseHookFinishedCleanups removes the ledger rows of the cleanups
 // remove-all just finished, under the reconcile lock. Without it the
 // guardian's ledger kept a done cleanup pending, with its old error, until
@@ -699,9 +747,16 @@ var enterpriseHookFinishedCleanupLockWait = 20 * time.Second
 // account's state must stay. It reports whether the cleanup is done, so its
 // ledger row can go.
 func finishEnterpriseHookRemoveAllCleanup(cmd *cobra.Command, report *enterpriseHooksRemoveAllReport, skip map[int]string, entry enterpriseHookUserCleanup, resolver unixidentity.Resolver) bool {
+	outcome, err := attemptEnterpriseHookStandaloneUnixCleanup(cmd.Context(), enterpriseHookWorkerLog, entry, resolver)
+	return addEnterpriseHookRemoveAllCleanupOutcome(report, skip, entry, outcome, err)
+}
+
+// addEnterpriseHookRemoveAllCleanupOutcome adds the outcome of one per-user
+// cleanup to report, and to skip the reason the account's state must stay.
+// It reports whether the cleanup is done.
+func addEnterpriseHookRemoveAllCleanupOutcome(report *enterpriseHooksRemoveAllReport, skip map[int]string, entry enterpriseHookUserCleanup, outcome enterpriseHookUserCleanupOutcome, err error) bool {
 	name := strings.ToLower(strings.TrimSpace(entry.Connector))
 	label := strings.TrimSpace(entry.User) + "/" + name
-	outcome, err := attemptEnterpriseHookStandaloneUnixCleanup(cmd.Context(), enterpriseHookWorkerLog, entry, resolver)
 	var kept *enterpriseHookCleanupHomeKeptError
 	var oldKept *enterpriseHookCleanupOldHomeKeptError
 	switch {
