@@ -5,8 +5,12 @@ every wrapper and removal script in `packaging/mdm`. They also print one
 lifecycle-result document (`lifecycle-result.schema.json`) whose `exit_code`
 field matches the process exit code. The lifecycle prints the document when
 it runs with `--json` (Linux, macOS, the installed Windows CLI) or `JSON=1`
-(Setup); the kit's scripts always ask for it. The detection and Remediations
-scripts print one line instead (see `detection.md`).
+(Setup); the kit's scripts always ask for it. From 1.0.5 an argument error
+of a lifecycle verb (an unknown flag, a malformed value, a stray argument, a
+`--lock-wait` out of range) prints it too when `--json` is on the command
+line, with `invalid_arguments` (`management-agent.md` section 2.3). The
+detection and Remediations scripts print one line instead (see
+`detection.md`).
 
 ## Windows (MSI-compatible)
 

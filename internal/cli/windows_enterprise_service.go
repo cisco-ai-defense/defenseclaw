@@ -369,15 +369,6 @@ func newWindowsEnterpriseLifecycleCommand(action string) *cobra.Command {
 	// exit 1639 and the refused anchor install recorded (GAP-0608). Only
 	// ensure shows them in its help.
 	if windowsEnterpriseMutationAction(action) {
-		if action == "ensure" {
-			cmd.SetFlagErrorFunc(windowsAnchorsArgumentRefusal)
-			cmd.Args = func(c *cobra.Command, args []string) error {
-				if err := strayArgumentError(c, args); err != nil {
-					return windowsAnchorsArgumentRefusal(c, err)
-				}
-				return nil
-			}
-		}
 		flags.StringVar(&opts.bundlePath, "bundle", "",
 			"standalone: apply this signed policy bundle (.dcbundle file); the bundle carries the config, so not with --config")
 		flags.BoolVar(&opts.refuseCapabilityLoss, "refuse-capability-loss", false, "refuse a bundle that disables a currently enforced capability")
@@ -416,6 +407,24 @@ func newWindowsEnterpriseLifecycleCommand(action string) *cobra.Command {
 		"standalone: SHA-256 thumbprint of an accepted Authenticode signer certificate (repeatable)")
 	flags.StringVar(&opts.productVersion, "product-version", "",
 		"standalone: version recorded for this deployment (default: this CLI's version)")
+	// GAP-2448: with --json an argument error (an unknown flag, a malformed
+	// value; on ensure also a stray argument) prints one lifecycle result
+	// with invalid_arguments, exit 1639. ensure records a refused anchor
+	// install (windowsAnchorsArgumentRefusal); the other verbs keep their own
+	// positional-argument handling (usageArgsExemptGroups).
+	flagError := lifecycleFlagError
+	if action == "ensure" {
+		flagError = windowsAnchorsArgumentRefusal
+		cmd.Args = func(c *cobra.Command, args []string) error {
+			if err := strayArgumentError(c, args); err != nil {
+				return lifecycleArgumentError(c, action, opts.jsonOutput, flagError(c, err))
+			}
+			return nil
+		}
+	}
+	cmd.SetFlagErrorFunc(func(c *cobra.Command, err error) error {
+		return lifecycleArgumentError(c, action, opts.jsonOutput, flagError(c, err))
+	})
 	if action == "status" || action == "verify" {
 		// Status and verify only read the deployment. The install,
 		// upgrade, uninstall and certification inputs stay accepted but
