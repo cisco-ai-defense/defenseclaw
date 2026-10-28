@@ -168,6 +168,12 @@ func (l *lifecycle) readOnly(ctx context.Context) int {
 			"; the deployment keeps running as it was. Fix that, then apply the package with `"+env.lifecycleCommand(ActionEnsure)+" --from-package`")
 	}
 	strict := l.opts.Action == ActionVerify
+	if strict && pending == nil {
+		// The enumerator may have just rewritten the manifest (a fresh install
+		// enrolls every eligible account): verify the guardian reconcile of it,
+		// not the seconds before it (GAP-2176).
+		l.awaitGuardianManifestReconcile(ctx)
+	}
 	problems := l.verifyInstalled(ctx, record, strict)
 	l.warnLowDiskSpace()
 	dropInProblems, dropIns := l.unitDropIns(ctx, record)
