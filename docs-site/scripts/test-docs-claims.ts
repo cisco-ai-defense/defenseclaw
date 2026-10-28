@@ -1437,6 +1437,9 @@ const r105Rows: DocRow[] = [
   { gap: "GAP-0515", page: "enterprise/foreign-hook-guard.mdx", section: "Which connectors it covers", has: ["| Hermes | On Linux and macOS, unless `foreign_hooks: allow` |", "The Windows Hermes registration does not run the guard."] },
   { gap: "GAP-0515", page: "reference/fail-modes.mdx", has: ["the guard checks the session of Copilot calls on every OS and of Hermes calls on Linux and macOS with the gateway", "and to Hermes on Linux and macOS"], lacks: ["Amp and Hermes need the gateway's session record"] },
   { gap: "GAP-2330", page: "reference/index.mdx", has: ["Map each `fail` and `warn` check by its label or message. The table below has the common ones; for any other row, run the `Next step:` line doctor prints under it"], lacks: ["to an entry on [Troubleshooting](/docs/get-started/upgrade) by its label"] },
+  { gap: "GAP-2359", page: "guardrail/index.mdx", has: ["guardrail.detection_strategy: regex_only", "so the setup summary and `guardrail status` show the strategy that runs: `regex_only`."], lacks: ["guardrail.detection_strategy: regex_judge"] },
+  { gap: "GAP-2337", page: "enterprise/rollout.mdx", section: "Step 1: Choose the agents", has: ["A key that names no DefenseClaw connector (a", "stop with `config_invalid` and name the key; Windows Setup refuses it the same way."] },
+  { gap: "GAP-2338", page: "enterprise/identity-sources.mdx", has: ["and `subject.principal` are empty, and the text output shows the account name", "The `subject` object has no domain field"], lacks: ["`subject.domain`"] },
   { gap: "GAP-2333", page: "connectors/capability-matrix.mdx", has: ["| Family | `proxyConnectors` and `IsProxyConnector()` in `internal/gateway/connector/platform_support.go`"], lacks: ["RoutingConnector"] },
   { gap: "GAP-2240", page: "policies/defaults.mdx", has: ["Available policies: * default [built-in] [active] Balanced security policy", "Activate a policy: defenseclaw policy activate <name> Show details: defenseclaw policy show <name>", "`*` and `[active]` mark the active preset."], lacks: ["Available policies: default [built-in]"] },
   { gap: "GAP-2247", page: "scanning/mcp-scanner.mdx", has: ["| `analyzers` | unset, read back as `auto` | The analyzers to run. Unset (`config get` prints `auto`) and `[]` both mean YARA, plus the LLM judge when it is ready. |"], lacks: ["| `analyzers` | `[]` (auto) |"] },
@@ -1874,6 +1877,32 @@ describe('audit-failure tiers, admission defaults and local-provider keys match 
     assert.ok(py.includes('out[sev] = _SHORTHANDS["warn"] if rank >= review else _SHORTHANDS["allow"]'), 'Python scanner gate no longer allows below review_queue_min: re-check scanning/index.mdx');
     const cred = source('cli/defenseclaw/credentials.py');
     assert.match(cred, /def _defenseclaw_llm_key[\s\S]*?getattr\(gc, "enabled", False\):\s*return Requirement\.OPTIONAL/, 'DEFENSECLAW_LLM_KEY is no longer OPTIONAL with the guardrail on: re-check unified-llm-key.mdx');
+  });
+});
+
+// GAP-2359: the setup summary prints the strategy that runs (judge off ->
+// regex_only, GAP-1647), not the saved default; the page's summary matches.
+describe('setup summary shows the effective detection strategy (GAP-2359)', () => {
+  it('prints _effective_detection_strategy, which reads the guardrail status value', () => {
+    const setup = source('cli/defenseclaw/commands/cmd_setup.py');
+    assert.ok(setup.includes('("guardrail.detection_strategy", _effective_detection_strategy(gc, gc.connector)),'), 'summary no longer prints the effective strategy: re-check guardrail/index.mdx');
+    assert.ok(setup.includes('return _scan_value(gc, connector)'), 'effective strategy no longer comes from the status value');
+  });
+});
+
+// GAP-2338 class: every `subject.<field>` a page names is a key the
+// profile-explain subject object has (guardrail_profile.go).
+describe('profile-explain subject fields exist (GAP-2338)', () => {
+  it('names only keys of the subject map', () => {
+    const go = source('internal/gateway/guardrail_profile.go');
+    const block = go.split('out["subject"] = map[string]any{')[1]?.split('\n\t\t}')[0] ?? '';
+    const keys = new Set([...block.matchAll(/"([a-z_]+)":/g)].map((m) => m[1]));
+    assert.ok(keys.has('principal') && keys.has('directory'), 'subject map not found in guardrail_profile.go');
+    for (const name of ['enterprise/identity-sources.mdx', 'enterprise/identity-and-authentication.mdx']) {
+      for (const m of page(name).matchAll(/`subject\.([a-z_]+)/g)) {
+        assert.ok(keys.has(m[1]), `${name} names subject.${m[1]}, which profile-explain does not print`);
+      }
+    }
   });
 });
 

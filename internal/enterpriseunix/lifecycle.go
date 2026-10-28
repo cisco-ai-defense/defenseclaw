@@ -1372,6 +1372,9 @@ func (l *lifecycle) buildPlan(ctx context.Context, record *Deployment, account A
 	if err != nil {
 		return nil, &codedError{code: codeConfig, err: err}
 	}
+	if err := refuseUnknownGuardrailConnectors(validated.Loaded, l.opts.ConfigFile, env.Layout.ConfigPath); err != nil {
+		return nil, &codedError{code: codeConfig, err: err}
+	}
 	if record == nil {
 		// The service group exists only now: packs staged before the first
 		// install get it (GAP-0501).

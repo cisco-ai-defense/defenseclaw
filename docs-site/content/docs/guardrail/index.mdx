@@ -100,7 +100,7 @@ The guardrail checks what your agent is about to do (a prompt, a shell command, 
     { type: "dim", text: "  guardrail.connector:           Claude Code (claudecode)" },
     { type: "dim", text: "  guardrail.mode:                observe" },
     { type: "dim", text: "  guardrail.port:                4040" },
-    { type: "dim", text: "  guardrail.detection_strategy:  regex_judge" },
+    { type: "dim", text: "  guardrail.detection_strategy:  regex_only" },
     { type: "dim", text: "  guardrail.rule_pack:           default" },
     { type: "dim", text: "  guardrail.hilt.enabled:        false" },
     { type: "spacer" },
@@ -122,7 +122,7 @@ defenseclaw setup guardrail \
   --restart
 ```
 
-`--non-interactive` (aliases `--accept-defaults` and `--yes`) skips every prompt; missing flags fall back to the wizard defaults. The judge stays off until you pass `--judge-model`. The saved detection strategy defaults to `regex_judge`, but with the judge off only the regex lane runs.
+`--non-interactive` (aliases `--accept-defaults` and `--yes`) skips every prompt; missing flags fall back to the wizard defaults. The judge stays off until you pass `--judge-model`. The saved detection strategy defaults to `regex_judge`, but with the judge off only the regex lane runs, so the setup summary and `guardrail status` show the strategy that runs: `regex_only`.
 
 ## Prompt-flag mapping
 
