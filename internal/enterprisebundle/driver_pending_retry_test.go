@@ -197,6 +197,85 @@ func TestDriverGenerationOwnerOfBytesTwoBundlesRender(t *testing.T) {
 	}
 }
 
+// A higher bundle C that renders the bytes a pending B committed, delivered
+// while the gateway is down, takes B's commit over: it records its own
+// generation for the same bytes (the Windows hot path cannot run without a
+// healthy gateway), stays applied through the outage, confirms once the
+// gateway reports it, and B settles superseded. A retry of B itself, a lower
+// bundle and a bundle with other bytes are not a takeover (GAP-1187).
+func TestDriverHigherBundleWithIdenticalBytesTakesAPendingCommitOverDuringAnOutage(t *testing.T) {
+	for _, pendingState := range []string{enterprisebundle.StateStaged, enterprisebundle.StateApplied} {
+		t.Run(pendingState, func(t *testing.T) {
+			r := newPendingRun(t, pendingState)
+			retry, err := r.d.Prepare(t.Context(), r.bBundle, nil)
+			if err != nil || retry.Receipt == nil {
+				t.Fatalf("retry prepare: %+v, %v", retry, err)
+			}
+			if owner, err := r.d.PendingCommitTakenOver(retry.Receipt, r.b.Config); err != nil || owner != nil {
+				t.Fatalf("a retry of the pending bundle is a takeover: %+v, %v", owner, err)
+			}
+			other := r.f.variant(t, settingsOnly(t, "observe"), func(in *enterprisebundle.ComposeInput) { in.Version, in.ChangeSummary = 7, "other" })
+			o, err := r.d.Prepare(t.Context(), other, nil)
+			if err != nil || o.Receipt == nil || bytes.Equal(o.Config, r.b.Config) {
+				t.Fatalf("setup other: %+v, %v", o, err)
+			}
+			if owner, err := r.d.PendingCommitTakenOver(o.Receipt, r.b.Config); err != nil || owner != nil {
+				t.Fatalf("a bundle with other bytes is a takeover: %+v, %v", owner, err)
+			}
+			bump := r.f.variant(t, settingsOnly(t, "action"), func(in *enterprisebundle.ComposeInput) { in.Version, in.ChangeSummary = 8, "bump" })
+			c, err := r.d.Prepare(t.Context(), bump, nil)
+			if err != nil || c.Receipt == nil || !bytes.Equal(c.Config, r.b.Config) {
+				t.Fatalf("setup: %+v, %v", c, err)
+			}
+			owner, err := r.d.PendingCommitTakenOver(c.Receipt, c.Config)
+			if err != nil || owner == nil || owner.ReceiptID != r.b.Receipt.ReceiptID {
+				t.Fatalf("takeover owner = %+v, %v; want the pending B", owner, err)
+			}
+			// The Windows takeover: the same bytes recorded as C's generation,
+			// with the gateway still down.
+			opt, ok := enterprisebundle.GenerationOptions(c.Receipt)
+			if !ok {
+				t.Fatal("C has no generation options")
+			}
+			opt.ExpectSHA256 = c.ConfigSHA256
+			if _, err := configwrite.ReplaceDocument(t.Context(), r.d.ConfigPath, c.Config, opt); err != nil {
+				t.Fatal(err)
+			}
+			if owner, err := r.d.PendingCommitTakenOver(c.Receipt, c.Config); err != nil || owner != nil {
+				t.Fatalf("C still takes over after its own commit: %+v, %v", owner, err)
+			}
+			if _, err := r.d.Finish(c, c.ConfigSHA256, nil, enterprisebundle.GatewayPolicy{}, false, nil); enterprisebundle.CodeOf(err) != enterprisebundle.CodeNotConfirmed {
+				t.Fatalf("finish during the outage = %v, want not_confirmed", err)
+			}
+			if c.Receipt.State != enterprisebundle.StateApplied || c.Receipt.RolledBack {
+				t.Fatalf("C during the outage = %+v, want applied", c.Receipt)
+			}
+			cPolicy := enforcing(c.Receipt.ExpectedDigest)
+			generation, err := configwrite.ReadGenerationState(r.d.ConfigPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			cPolicy.Generation, cPolicy.BundleID, cPolicy.BundleVersion = generation.Generation, c.Receipt.BundleID, c.Receipt.Version
+			report, toRollBack, err := r.d.SettleRun(c.Config, &cPolicy)
+			if err != nil || len(toRollBack) != 0 || !slices.Contains(report.Completed, c.Receipt.ReceiptID) {
+				t.Fatalf("settle after the gateway returned: report=%+v rollback=%+v error=%v", report, toRollBack, err)
+			}
+			if state, err := r.d.Store.LoadState(); err != nil || state.Current == nil || state.Current.Version != c.Receipt.Version {
+				t.Fatalf("current after settle: %+v, %v", state, err)
+			}
+			receipts, err := r.d.Store.Receipts()
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, rc := range receipts {
+				if rc.ReceiptID == r.b.Receipt.ReceiptID && (rc.State != enterprisebundle.StateFailed || rc.ErrorCode != enterprisebundle.CodeSuperseded || rc.RolledBack) {
+					t.Fatalf("B after C took its commit over = %+v", rc)
+				}
+			}
+		})
+	}
+}
+
 // A pending bundle B whose rendered bytes a higher bundle C committed during
 // the outage (GAP-1187) settles superseded once C confirms: B is never
 // failed not_confirmed and never named for a rollback, because C's config is
