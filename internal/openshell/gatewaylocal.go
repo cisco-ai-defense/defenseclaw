@@ -35,7 +35,8 @@ import (
 // The package gateway of an account that never ran NVIDIA's installer (the
 // package was installed machine-wide by someone else) has a stopped
 // service and no registration. The installer starts the service, waits for
-// the client certificates the gateway writes on its first start, and
+// the client certificates the gateway writes on its first start (Linux; a
+// Homebrew install has them from the formula's post-install step), and
 // registers it; the doctor's service fix does the same (registerLocal), or
 // the registration's wait for a healthy gateway could never succeed.
 
@@ -168,6 +169,27 @@ func (r *doctorRun) noHomebrewPKI(dir string) error {
 			r.Gateway.BrewCommand() + " postinstall " + GatewayFormula + "`), then `" + r.addCommandLine() + "`"
 	}
 	return fmt.Errorf("the Homebrew install of OpenShell has no client certificates in %s, so the gateway cannot be registered; %s", dir, next)
+}
+
+// homebrewPKIFix is the registration fix of a Homebrew install whose
+// prefix holds no client certificates in dir: the post-install step of the
+// GatewayFormula formula writes them (run again as the owner of the prefix,
+// then the gateway is started when stopped and registered), or, without
+// that formula, its install. Neither a gateway start nor a registration
+// writes them (GAP-0319, GAP-2457).
+func (r *doctorRun) homebrewPKIFix(dir, add string) *Fix {
+	summary := "the Homebrew install of OpenShell has no client certificates in " + dir +
+		" (the post-install step of the " + GatewayFormula + " formula writes them, not the gateway start)"
+	if r.service == nil || !r.service.Installed {
+		return &Fix{Summary: summary + ": install OpenShell from that formula", Command: installOpenShellCommand}
+	}
+	command := r.Gateway.BrewCommand() + " postinstall " + GatewayFormula
+	then := "register the gateway"
+	if !r.service.Active {
+		command += " && " + r.startCommand().String()
+		then = "start and register the gateway"
+	}
+	return &Fix{Summary: summary + ": run that step again as the owner of the Homebrew prefix, then " + then, Command: command + " && " + add}
 }
 
 // clientBundle reports that dir holds the client certificates a local
