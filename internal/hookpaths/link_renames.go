@@ -1,9 +1,12 @@
 package hookpaths
 
 import (
+	"errors"
+	"os"
 	"path/filepath"
 	"slices"
 	"strings"
+	"syscall"
 
 	"mvdan.cc/sh/v3/syntax"
 )
@@ -127,9 +130,17 @@ func (op renameOp) destinations(source string) []string {
 
 func pathsOverlap(a, b string) bool {
 	a, b = filepath.Clean(a), filepath.Clean(b)
-	_, under := cutPathPrefix(a, b)
-	_, over := cutPathPrefix(b, a)
-	return under || over
+	return pathAtOrUnder(a, b) || pathAtOrUnder(b, a)
+}
+
+// pathAtOrUnder is cutPathPrefix that also reads a root (/, C:\) as the
+// parent of every path on it.
+func pathAtOrUnder(path, prefix string) bool {
+	if prefix != "" && os.IsPathSeparator(prefix[len(prefix)-1]) {
+		return len(path) >= len(prefix) && samePathName(path[:len(prefix)], prefix)
+	}
+	_, under := cutPathPrefix(path, prefix)
+	return under
 }
 
 // followRenames gives every link a static mv moves its new name, with the
@@ -173,8 +184,24 @@ func (l *shellLinks) followRenames(ops []renameOp) bool {
 // name its target reaches through the other links and the disk, lies
 // strictly inside the working directory, with no .. step and away from SSH
 // and DefenseClaw state. Such a link stays an ordinary project link when it
-// is renamed or a nested shell changes directory (GAP-2532, GAP-2533).
+// is renamed (GAP-2532).
 func (l shellLinks) aliasesInProject(cwd, home string) bool {
+	return l.aliasesReach(cwd, home, true)
+}
+
+// aliasesAwayFromState reports that no link the command makes, nor any
+// name its target reaches, can overlap SSH or DefenseClaw state: a target
+// that holds the home directory (/, .., ~) overlaps it. Such links stay
+// known when a nested shell or a wrapper changes directory (GAP-2533).
+func (l shellLinks) aliasesAwayFromState(cwd, home string) bool {
+	return l.aliasesReach(cwd, home, false)
+}
+
+// aliasesReach is aliasesInProject when inProject is set, and
+// aliasesAwayFromState otherwise. A name that goes through an existing
+// file that is not a directory names nothing and is skipped (GAP-2532:
+// ln -s README.md docs.md also names docs.md/README.md).
+func (l shellLinks) aliasesReach(cwd, home string, inProject bool) bool {
 	if cwd == "" || home == "" || !filepath.IsAbs(cwd) {
 		return false
 	}
@@ -194,14 +221,20 @@ func (l shellLinks) aliasesInProject(cwd, home string) bool {
 	reach := Links{links: l}
 	for _, alias := range l.aliases {
 		for _, form := range append([]string{alias.target}, reach.AliasTargets(alias.target, false)...) {
-			if hasDotDotStep(form) {
+			if inProject && hasDotDotStep(form) {
 				return false
 			}
 			resolved, ok := ResolveWriteTarget(form)
+			if !ok && !inProject {
+				resolved, ok = resolveMissingDotDot(form)
+			}
 			if !ok {
+				if throughFile(form) {
+					continue
+				}
 				return false
 			}
-			if rest, under := cutPathPrefix(resolved, root); !under || rest == "" {
+			if rest, under := cutPathPrefix(resolved, root); inProject && (!under || rest == "") {
 				return false
 			}
 			for _, path := range sensitive {
@@ -242,4 +275,207 @@ func findExecCommands(command, program string, args []*syntax.Word, words []stri
 		i = end
 	}
 	return children
+}
+
+// throughFile reports a path whose nearest existing parent is not a
+// directory: no file can be written there.
+func throughFile(path string) bool {
+	if hasDotDotStep(path) || !filepath.IsAbs(path) {
+		return false
+	}
+	path = filepath.Clean(path)
+	for dir := filepath.Dir(path); dir != path; path, dir = dir, filepath.Dir(dir) {
+		if info, err := os.Stat(dir); err == nil {
+			return !info.IsDir()
+		} else if !os.IsNotExist(err) && !errors.Is(err, syscall.ENOTDIR) {
+			return false
+		}
+	}
+	return false
+}
+
+// wrapperChangesDirectory reports env -C DIR, sudo -D DIR and find
+// -execdir or -okdir: the child runs in another directory (GAP-2533).
+func wrapperChangesDirectory(program string, words []string, static []bool) bool {
+	switch program {
+	case "find", "gfind":
+		for i, word := range words {
+			if static[i] && (word == "-execdir" || word == "-okdir") {
+				return true
+			}
+		}
+	case "env", "sudo":
+		// Options before the child program; env and sudo options that
+		// take a value skip it.
+		valued := map[string][]string{"env": {"-u", "-S"}, "sudo": {"-u", "-g", "-h", "-p", "-C", "-r", "-t", "-U", "-T", "-R"}}[program]
+		short, long := map[string]string{"env": "C", "sudo": "D"}[program], "--chdir"
+		for i := 1; i < len(words); i++ {
+			word := words[i]
+			switch {
+			case !static[i]:
+				return true
+			case word == "--":
+				return false
+			case word == long || strings.HasPrefix(word, long+"="):
+				return true
+			case strings.HasPrefix(word, "--"):
+				continue
+			case strings.HasPrefix(word, "-") && len(word) > 1:
+				if strings.Contains(word[1:], short) {
+					return true
+				}
+				if slices.Contains(valued, word) {
+					i++
+				}
+			case program == "env" && strings.Contains(word, "="):
+				continue
+			default:
+				return false
+			}
+		}
+	}
+	return false
+}
+
+// findMove is a find call whose only action is -exec mv {} DEST \; and
+// whose only name test is one -name PATTERN: each match keeps its base
+// name, which matches pattern, under dest when dir is set, or becomes dest.
+type findMove struct {
+	pattern, dest string
+	dir           bool
+}
+
+// parseFindMove reads find PATH... [-type T] [-maxdepth N] [-mindepth N]
+// -name PATTERN -exec mv [OPTIONS] {} DEST \; with every word static and
+// DEST free of {}. Any other find call is not read as a move.
+func parseFindMove(program string, words []string, static []bool, cwd string) (findMove, bool) {
+	var move findMove
+	if program != "find" && program != "gfind" || slices.Contains(static, false) {
+		return move, false
+	}
+	i := 1
+	for i < len(words) && !strings.HasPrefix(words[i], "-") && words[i] != "(" && words[i] != "!" {
+		i++
+	}
+	exec := false
+	for ; i < len(words); i++ {
+		switch words[i] {
+		case "-name":
+			if move.pattern != "" || i+1 >= len(words) {
+				return move, false
+			}
+			i++
+			move.pattern = words[i]
+			if _, err := filepath.Match(move.pattern, ""); err != nil || move.pattern == "" {
+				return move, false
+			}
+		case "-type", "-maxdepth", "-mindepth":
+			if i+1 >= len(words) {
+				return move, false
+			}
+			i++
+		case "-exec":
+			end := i + 1
+			for end < len(words) && words[end] != ";" {
+				end++
+			}
+			if exec || end != len(words)-1 || end-i < 2 {
+				return move, false
+			}
+			child := words[i+1 : end]
+			if base := programBase(child[0]); base != "mv" && base != "gmv" {
+				return move, false
+			}
+			op, ok := parseRename(child[1:], cwd)
+			if !ok || len(op.sources) != 1 || op.sources[0] != "{}" {
+				return move, false
+			}
+			dest := op.targetDir
+			move.dir = dest != ""
+			if dest == "" {
+				dest = op.dest
+				move.dir = !op.noTargetDir && strings.HasSuffix(dest, "/")
+				if info, err := os.Stat(absolutePath(dest, cwd)); !op.noTargetDir && err == nil && info.IsDir() {
+					move.dir = true
+				}
+			}
+			if dest == "" || strings.Contains(dest, "{}") || hasDotDotStep(dest) {
+				return move, false
+			}
+			move.dest = filepath.Clean(absolutePath(dest, cwd))
+			exec = true
+			i = end
+		default:
+			return move, false
+		}
+	}
+	return move, exec && move.pattern != ""
+}
+
+// findMovesClear reports that no find -exec mv can move a link or a
+// directory holding one (no name of a link matches the pattern), and that
+// no moved match can land on or above a link name or target. The
+// destination is checked against both the written and the resolved names.
+func (l shellLinks) findMovesClear(moves []findMove) bool {
+	for _, move := range moves {
+		dests := []string{move.dest}
+		if resolved, ok := ResolveWriteTarget(move.dest); ok {
+			dests = append(dests, resolved)
+		} else {
+			return false
+		}
+		for _, alias := range l.aliases {
+			for _, part := range strings.Split(filepath.ToSlash(filepath.Clean(alias.name)), "/") {
+				if matched, _ := filepath.Match(move.pattern, part); matched {
+					return false
+				}
+			}
+			paths := []string{filepath.Clean(alias.name), filepath.Clean(alias.target)}
+			for _, path := range paths[:2] {
+				if resolved, ok := ResolveWriteTarget(path); ok {
+					paths = append(paths, resolved)
+				}
+			}
+			for _, dest := range dests {
+				for _, path := range paths {
+					if !move.dir {
+						if pathsOverlap(dest, path) {
+							return false
+						}
+						continue
+					}
+					rest, under := cutPathPrefix(path, dest)
+					if !under || rest == "" {
+						continue
+					}
+					first := strings.SplitN(filepath.ToSlash(rest), "/", 2)[0]
+					if matched, err := filepath.Match(move.pattern, first); err != nil || matched {
+						return false
+					}
+				}
+			}
+		}
+	}
+	return true
+}
+
+// resolveMissingDotDot resolves a name whose .. steps follow names that do
+// not exist on disk (lib/../shared for ln -s ../shared lib, where lib is
+// the new link): no disk link can sit there, so .. is read lexically. A
+// name the command links there is read through its aliases instead.
+func resolveMissingDotDot(path string) (string, bool) {
+	if !filepath.IsAbs(path) || !hasDotDotStep(path) {
+		return "", false
+	}
+	parts := strings.Split(filepath.ToSlash(path), "/")
+	for i, part := range parts {
+		if part != ".." || i == 0 {
+			continue
+		}
+		before := filepath.FromSlash(strings.Join(parts[:i], "/"))
+		if _, err := os.Lstat(before); !os.IsNotExist(err) {
+			return "", false
+		}
+	}
+	return ResolveWriteTarget(filepath.Clean(path))
 }

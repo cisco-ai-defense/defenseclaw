@@ -1532,6 +1532,8 @@ type shellLinks struct {
 	// that only a wrapper or a nested shell runs (GAP-2532, GAP-2533).
 	renameOps  []renameOp
 	wrappedCds bool
+	// findMoves are the find -exec mv calls read as moves (GAP-2533).
+	findMoves []findMove
 }
 
 // merge adds the links a nested literal shell body makes.
@@ -1698,6 +1700,7 @@ func commandLinks(command, cwd, home string, facts map[string]string, record, ne
 	renames, cds, wrappedCds := false, false, false
 	var copyScopes []string
 	var renameOps []renameOp
+	var findMoves []findMove
 	boundPrograms := actionBoundProgramWords(file, home)
 	// A literal shell -c body is read in this directory only when nothing in
 	// the command changes directory first.
@@ -1840,6 +1843,7 @@ func commandLinks(command, cwd, home string, facts map[string]string, record, ne
 			wrappedCds = wrappedCds || inner.wrappedCds
 			copyScopes = append(copyScopes, inner.copyScopes...)
 			renameOps = append(renameOps, inner.renameOps...)
+			findMoves = append(findMoves, inner.findMoves...)
 		default:
 			// A wrapper (sudo, env, xargs, find -exec, sh -c) may run one.
 			text := command[start.Offset():call.End().Offset()]
@@ -1856,16 +1860,26 @@ func commandLinks(command, cwd, home string, facts map[string]string, record, ne
 				}
 			}
 			renames = renames || tactics.RunsProgram(text, renamePrograms...)
-			if tactics.RunsProgram(text, cdPrograms...) {
+			// env -C DIR, sudo -D DIR and find -execdir run their child in
+			// another directory, like a cd in a nested shell (GAP-2533).
+			if tactics.RunsProgram(text, cdPrograms...) || wrapperChangesDirectory(program, words, static) {
 				cds, wrappedCds = true, true
 			}
 			// find -exec runs its child argv, which the wrapper reading
-			// above does not see (GAP-2533).
+			// above does not see (GAP-2533). A find -exec mv into a fixed
+			// project directory is read as a move.
+			move, moveRead := parseFindMove(program, words, static, cwd)
 			for _, child := range findExecCommands(command, program, args, words, static) {
 				if tactics.RunsProgram(child, linkPrograms...) {
 					links.unknown(true)
 				}
-				renames = renames || tactics.RunsProgram(child, renamePrograms...)
+				if tactics.RunsProgram(child, renamePrograms...) {
+					if moveRead {
+						findMoves = append(findMoves, move)
+					} else {
+						renames = true
+					}
+				}
 				if tactics.RunsProgram(child, cdPrograms...) {
 					cds, wrappedCds = true, true
 				}
@@ -1875,7 +1889,7 @@ func commandLinks(command, cwd, home string, facts map[string]string, record, ne
 	})
 	if nested {
 		links.renames, links.cds, links.copyScopes = renames, cds, copyScopes
-		links.renameOps, links.wrappedCds = renameOps, wrappedCds
+		links.renameOps, links.wrappedCds, links.findMoves = renameOps, wrappedCds, findMoves
 		return links
 	}
 	if len(links.aliases) > 0 {
@@ -1888,16 +1902,19 @@ func commandLinks(command, cwd, home string, facts map[string]string, record, ne
 		// static mv read in the starting directory and every link is an
 		// ordinary project link (GAP-2532). A directory change that only a
 		// nested shell or a wrapper runs is not placed by the statement
-		// walk, so it needs the same project links (GAP-2533).
+		// walk, so a link that may reach SSH or DefenseClaw state is opaque
+		// after it (GAP-2533); a link to a system tool or a sibling
+		// directory stays known, as with a plain cd.
 		stable := true
+		moves := len(renameOps) > 0 || len(findMoves) > 0
 		switch {
-		case renames || len(renameOps) > 0 && cds:
+		case renames || moves && cds:
 			stable = false
-		case len(renameOps) > 0:
-			stable = links.followRenames(renameOps) && links.aliasesInProject(cwd, home)
+		case moves:
+			stable = links.followRenames(renameOps) && links.findMovesClear(findMoves) && links.aliasesAwayFromState(cwd, home)
 		}
 		if stable && wrappedCds {
-			stable = links.aliasesInProject(cwd, home)
+			stable = links.aliasesAwayFromState(cwd, home)
 		}
 		if !stable || cds && links.relative && linkCall == nil && !linkDirsKnown {
 			links.unknown(true)
@@ -1909,7 +1926,7 @@ func commandLinks(command, cwd, home string, facts map[string]string, record, ne
 		links.globalOpaque = true
 	}
 	links.renames, links.cds, links.copyScopes = renames, cds, copyScopes
-	links.renameOps, links.wrappedCds = renameOps, wrappedCds
+	links.renameOps, links.wrappedCds, links.findMoves = renameOps, wrappedCds, findMoves
 	return links
 }
 

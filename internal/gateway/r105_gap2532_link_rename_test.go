@@ -25,10 +25,15 @@ func TestR105LinkRenameAndNestedCd(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	for _, name := range []string{filepath.Join(home, ".defenseclaw", "config.yaml"), filepath.Join(home, ".ssh", "authorized_keys"), filepath.Join(cwd, "a.txt"), filepath.Join(cwd, "src", "a.txt")} {
+	for _, name := range []string{filepath.Join(home, ".defenseclaw", "config.yaml"), filepath.Join(home, ".ssh", "authorized_keys"), filepath.Join(cwd, "a.txt"), filepath.Join(cwd, "src", "a.txt"), filepath.Join(cwd, "README.md")} {
 		if err := os.WriteFile(name, []byte("x\n"), 0o600); err != nil {
 			t.Fatal(err)
 		}
+	}
+	// A link on disk to SSH state that a find -exec mv can move onto the
+	// target of a new link.
+	if err := os.Symlink(filepath.Join(home, ".ssh", "authorized_keys"), filepath.Join(cwd, "keys.orig")); err != nil {
+		t.Fatal(err)
 	}
 	t.Setenv("HOME", home)
 	rows := []struct {
@@ -60,6 +65,37 @@ func TestR105LinkRenameAndNestedCd(t *testing.T) {
 		{`ln -s ~/.defenseclaw/config.yaml c; find . -name c -exec mv {} d \;; echo x > d`, true},
 		{`ln -s ~/.defenseclaw/config.yaml c; sh -c "find . -name c -exec mv {} d \;"; echo x > d`, true},
 		{`ln -s ~/.defenseclaw/config.yaml c; find . -name c -execdir mv {} d +; echo x > d`, true},
+		// GAP-2532 (RV-c2-2): a link to an existing project file, or to a
+		// path outside the project, next to an unrelated mv.
+		{`ln -s src/a.txt alias.txt; mv c.txt d.txt`, false},
+		{`ln -s src/a.txt alias.txt; mv a.txt b.txt; cat alias.txt`, false},
+		{`ln -s README.md docs.md; mv a.txt e.txt; ls`, false},
+		{`ln -sf /usr/bin/python3 py; mv a.txt b.txt`, false},
+		{`ln -sf ../src/main.go link.go; mv a.txt b.txt`, false},
+		{`ln -sr build/out bin; mv bin bin2; ls`, false},
+		// A moved relative link whose target reaches state from its new
+		// directory, a moved directory holding one, a link to the home.
+		{`ln -s ../../.defenseclaw c; mkdir sub; mv c sub/; echo x > sub/c/config.yaml`, true},
+		{`mkdir -p a sub; ln -s ../../../.defenseclaw a/c; mv a sub/; echo x > sub/a/c/config.yaml`, true},
+		{`ln -s .. up; mv a.txt b.txt; echo key >> up/.ssh/authorized_keys`, true},
+		// GAP-2533 (RV-c2-1): a nested cd next to a link outside the
+		// project, a find -exec mv into a project directory.
+		{`ln -sf /usr/bin/python3 py; bash -c "cd src && ls"`, false},
+		{`ln -s ../shared lib; sh -c "cd src && make"`, false},
+		{`ln -sf /usr/bin/python3 .venv/bin/python; bash -c "cd src && python3 -m pytest" > test.log`, false},
+		{`ln -sf /usr/bin/node node; nohup sh -c "cd build && npm run dev" > dev.log 2>&1 &`, false},
+		{`ln -s /etc/hosts hosts.txt; sh -c "cd src && git status"`, false},
+		{`ln -s build/out bin; find . -name "*.orig" -exec mv {} build/ \;`, false},
+		{`ln -sf /usr/lib/libfoo.so libfoo.so; find . -name Makefile -execdir make \;`, false},
+		// Twins: env -C and find -execdir change directory; a link to the
+		// home or above it; a find -exec mv onto a link target or of the
+		// link itself.
+		{`ln -s ~/.defenseclaw c; env -C c sh -c "echo x > config.yaml"`, true},
+		{`ln -s ~/.defenseclaw c; find c -maxdepth 0 -execdir sh -c "echo x > c/config.yaml" \;`, true},
+		{`ln -s .. up; sh -c "cd up && echo key >> .ssh/authorized_keys"`, true},
+		{`ln -s ~ h; sh -c "cd h && echo x > .defenseclaw/config.yaml"`, true},
+		{`ln -s build/keys.orig k; find . -name "*.orig" -exec mv {} build/ \;; echo key >> k`, true},
+		{`ln -s ~/.ssh s; find . -name "s" -exec mv {} build/ \;; echo key >> build/s/authorized_keys`, true},
 	}
 	for _, connectorName := range []string{"claudecode", "codex"} {
 		installDefaultProfileConnector(t, connectorName)
