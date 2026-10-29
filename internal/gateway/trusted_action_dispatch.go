@@ -37,6 +37,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/guardrail/semantic"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail/semanticpb"
 	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
+	"github.com/defenseclaw/defenseclaw/internal/sensor/tactics"
 	"github.com/defenseclaw/defenseclaw/internal/shellparse"
 	"mvdan.cc/sh/v3/expand"
 	"mvdan.cc/sh/v3/pattern"
@@ -5846,13 +5847,10 @@ func bashReadingRequest(request trustedActionRequest, command, rewritten string)
 }
 
 // wrapperUnwrapTwinRequest returns the request for
-// actionfacts.WrapperUnwrapTwin of a POSIX Bash call. A ProtectHome
-// gateway (managed hook peer) has no reading: the hook client map lists
-// only the targets the client read from the wrapped call.
+// actionfacts.WrapperUnwrapTwin of a POSIX Bash call. Behind ProtectHome
+// (managed hook peer) the hook client map lists the targets of the same
+// reading (hookpaths), so the wrapped call is judged there too (GAP-2563).
 func wrapperUnwrapTwinRequest(request trustedActionRequest) (trustedActionRequest, bool) {
-	if request.ProtectedHomeHook {
-		return trustedActionRequest{}, false
-	}
 	if request.Input.DialectHint != actionfacts.DialectPOSIX && request.Input.DialectHint != "" {
 		return trustedActionRequest{}, false
 	}
@@ -5862,6 +5860,15 @@ func wrapperUnwrapTwinRequest(request trustedActionRequest) (trustedActionReques
 	}
 	rewritten, ok := actionfacts.WrapperUnwrapTwin(command)
 	if !ok || rewritten == command {
+		return trustedActionRequest{}, false
+	}
+	// The hook client reads a link made by a wrapper that moves the
+	// directory (env -C DIR ln ...) with its cautious unknown-link reading,
+	// which the map carries; judged here, the "( cd DIR && ln ... )" twin
+	// would turn that caution into a block of every benign link there.
+	// Behind ProtectHome such a twin is left to the client reading.
+	if request.ProtectedHomeHook && strings.Count(rewritten, "( cd ") > strings.Count(command, "( cd ") &&
+		tactics.RunsProgram(rewritten, "ln", "gln", "link", "glink") {
 		return trustedActionRequest{}, false
 	}
 	return bashReadingRequest(request, command, rewritten), true

@@ -542,7 +542,7 @@ func wrapperChildIndex(name string, value func(int) (string, bool), count, index
 			case arg == "--":
 				next++
 				return true
-			case slices.Contains(switches, arg):
+			case slices.Contains(switches, arg), clusteredSwitches(arg, switches):
 				next++
 			case slices.Contains(valued, arg):
 				if _, static := value(next + 1); !static {
@@ -608,13 +608,14 @@ func wrapperChildIndex(name string, value func(int) (string, bool), count, index
 		known = static && (child == "command" || child == "exec")
 	case "sudo":
 		before := next
-		known = options([]string{"-E", "-H", "-n", "-P", "-S", "-b", "-k", "-i", "-s", "--preserve-env",
-			"--set-home", "--non-interactive", "--stdin", "--background", "--login", "--shell"},
+		known = options(sudoSwitches,
 			[]string{"-u", "-g", "-p", "-C", "-T", "-h"},
 			[]string{"--user=", "--group=", "--prompt=", "--preserve-env=", "--host="}, true)
 		for at := before; at < next; at++ {
 			// sudo -i starts the command in the target user home.
-			if arg, _ := value(at); arg == "-i" || arg == "--login" {
+			// (also as a letter of a switch cluster: sudo -Ei).
+			if arg, _ := value(at); arg == "-i" || arg == "--login" ||
+				clusteredSwitches(arg, sudoSwitches) && strings.ContainsRune(arg[1:], 'i') {
 				run.DirUnknown = true
 			}
 		}
@@ -649,6 +650,27 @@ func wrapperChildIndex(name string, value func(int) (string, bool), count, index
 		return 0, false
 	}
 	return next, true
+}
+
+// sudoSwitches are the sudo options that take no value.
+var sudoSwitches = []string{"-E", "-H", "-n", "-P", "-S", "-b", "-k", "-i", "-s", "--preserve-env",
+	"--set-home", "--non-interactive", "--stdin", "--background", "--login", "--shell"}
+
+// clusteredSwitches reports whether arg is a cluster of two or more
+// single-letter switches, each in switches (setsid -fw, caffeinate -di,
+// flock -xn): the program reads it as those switches one by one. A
+// cluster with any other letter (an option that takes a value) is not
+// read.
+func clusteredSwitches(arg string, switches []string) bool {
+	if len(arg) < 3 || arg[0] != '-' || arg[1] == '-' {
+		return false
+	}
+	for _, letter := range arg[1:] {
+		if !slices.Contains(switches, "-"+string(letter)) {
+			return false
+		}
+	}
+	return true
 }
 
 // envOptions reads the options and NAME=value words of env from next on.
