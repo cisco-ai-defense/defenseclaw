@@ -6538,6 +6538,7 @@ def test_a_rollback_is_done_only_once_its_gateway_runs_and_is_proven(tmp_path: P
         "function Get-InstalledVersion { return '1.0.4' }\n"
         "function Assert-NoLoadedPluginAgents { }\n"
         "function Assert-NoActiveConnectorRecovery { }\nfunction Confirm-Step { return $true }\n"
+        "function Select-UpdatedAgents([string]$Data) { }\n"
         "function Test-HookRollbackRestoreAvailable { return $false }\nfunction Wait-VenvFree { }\n"
         "function Test-RollbackData { return $false }\nfunction Get-GatewayProcess { return $true }\n"
         "function Stop-Gateway { return $true }\nfunction Stop-Watchdog { }\nfunction Assert-GatewayQuiescent { }\n"
