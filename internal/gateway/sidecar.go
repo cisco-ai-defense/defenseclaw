@@ -4667,7 +4667,7 @@ func (s *Sidecar) runGuardrail(ctx context.Context) error {
 		return refuseUnverified(fmt.Errorf("%w: connector %s agent version %q is not covered by a known hook contract: %s (set DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT=1 only for exploratory testing)", ErrHookContractAdmission, conn.Name(), agentVersion, contractResolution.Reason))
 	}
 	if !guardianManagedLifecycle && contractResolution.Status == connector.HookCompatibilityUnversioned && actionMode && envvars.Getenv("DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT") != "1" {
-		return refuseUnverified(fmt.Errorf("%w: connector %s agent version %q is not verified against a known hook contract: %s (set DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT=1 only for exploratory testing)", ErrHookContractAdmission, conn.Name(), agentVersion, contractResolution.Reason))
+		return refuseUnverified(unversionedAgentAdmissionError(s.currentConfig().DataDir, conn.Name(), agentVersion, contractResolution.Reason))
 	}
 	if contractResolution.UntestedVersion {
 		fmt.Fprintf(os.Stderr, "[guardrail] connector %s agent version %q: %s\n", conn.Name(), agentVersion, contractResolution.Reason)
@@ -6328,9 +6328,16 @@ func (s *Sidecar) setupConnectorsIsolatedTransaction(ctx context.Context, conns 
 				}
 				rollbackErr := rollbackMultiConnectorPublication(context.WithoutCancel(ctx), transaction)
 				failed := fmt.Errorf("connector %s refresh failed: %w", registration.conn.Name(), err)
-				if !errors.Is(err, connector.ErrSetupRefusedUnchanged) {
+				switch {
+				case errors.Is(err, connector.ErrSetupRefusedUnchanged):
 					// A Setup refusal (a known-broken agent, an unsupported
 					// profile topology) names its own next step.
+				case errors.As(err, new(agentVersionUnread)):
+					// Discovery could not read the agent's version, so no
+					// open agent is the cause: the refusal names the cause
+					// and its fix (GAP-1167, GAP-2479).
+					failed = fmt.Errorf("%w, then run: defenseclaw upgrade", failed)
+				default:
 					failed = fmt.Errorf("%w; close the agent holding its settings, then run: defenseclaw upgrade", failed)
 				}
 				if rollbackErr != nil {
@@ -6888,7 +6895,7 @@ func (s *Sidecar) setupOneConnector(ctx context.Context, conn connector.Connecto
 	if contractResolution.Status == connector.HookCompatibilityUnversioned &&
 		actionMode &&
 		envvars.Getenv("DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT") != "1" {
-		return markUnverified(fmt.Errorf("%w: connector %s agent version %q is not verified against a known hook contract: %s (set DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT=1 only for exploratory testing)", ErrHookContractAdmission, conn.Name(), opts.AgentVersion, contractResolution.Reason))
+		return markUnverified(unversionedAgentAdmissionError(s.currentConfig().DataDir, conn.Name(), opts.AgentVersion, contractResolution.Reason))
 	}
 	if previous := previousLock; previous.Connector != "" {
 		current := connector.NewHookContractLockEntry(opts, conn, version.Current().BinaryVersion)
@@ -7958,6 +7965,40 @@ func (s *Sidecar) saveSingleConnectorReadyState(
 // installed hook surface for this error — the existing registration is still
 // the last verified contract.
 var ErrHookContractAdmission = errors.New("hook contract admission failed")
+
+// agentVersionUnread marks a refusal of an unversioned agent whose binary
+// discovery found but whose version it could not read; its text is the cause.
+// The next step is the cause's own, never closing an agent that is not the
+// problem (GAP-1167, GAP-2479).
+type agentVersionUnread string
+
+func (e agentVersionUnread) Error() string { return string(e) }
+
+// unversionedAgentAdmissionError is the action-mode refusal of an agent with
+// no probed version. When discovery recorded why it has no version, the
+// refusal quotes it and names the fix for that cause; the admission rule is
+// unchanged.
+func unversionedAgentAdmissionError(dataDir, name, agentVersion, reason string) error {
+	probe, cause := connector.CachedAgentVersionProbeError(dataDir, name)
+	if probe == "" {
+		return fmt.Errorf("%w: connector %s agent version %q is not verified against a known hook contract: %s (set DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT=1 only for exploratory testing)", ErrHookContractAdmission, name, agentVersion, reason)
+	}
+	var why agentVersionUnread
+	var next string
+	switch cause {
+	case connector.AgentVersionProbeDidNotRun:
+		why, next = "the agent did not run when discovery read its version", "make it run from this account, for example by putting its runtime on PATH"
+	case connector.AgentVersionProbeTimedOut:
+		why, next = "the agent did not answer its version probe in time", "start it once from this account so its first start finishes (a cold disk or a busy host makes it slow)"
+	case connector.AgentVersionProbeUntrustedPath:
+		why, next = "discovery did not run the agent because its install path is not trusted", "install it where only administrators or this account can write, or put that install first on PATH"
+	case connector.AgentVersionProbeNotProbed:
+		why, next = "discovery has not read the agent's version yet", "check that it starts from this account"
+	default:
+		why, next = "discovery could not read the agent's version", "check that it starts from this account and prints its version"
+	}
+	return fmt.Errorf("%w: connector %s agent version %q is not verified against a known hook contract: %w (%s); %s", ErrHookContractAdmission, name, agentVersion, why, probe, next)
+}
 
 // GuardrailAgentSettingsRefused is the guardrail health detail that maps each
 // connector the agent's own settings refused (connector.ErrAgentConfigRefusal)
