@@ -864,8 +864,12 @@ func withActiveStateTargetMention(
 		// Behind ProtectHome the gateway cannot open the user's home, so the
 		// mention scan cannot place a home target. A redirect target the
 		// shell opens is still proven against the hook client's resolved
-		// target map (GAP-2328: $CMD; echo $X > ~/.defenseclaw/config.yaml).
-		if !request.ProtectedHomeHook || !provenShellRedirectStateWrite(request) {
+		// target map (GAP-2328: $CMD; echo $X > ~/.defenseclaw/config.yaml),
+		// and so is a proven writer or delete whose operand the client
+		// followed into the state tree through a link the gateway cannot
+		// read (GAP-2549: rm /dev/shm/x/y/config.yaml, y -> ~/.defenseclaw).
+		if !request.ProtectedHomeHook ||
+			!provenShellRedirectStateWrite(request) && !provenStateMutationPath(facts, request) {
 			return findings
 		}
 	} else if !provenStateMutationPath(facts, request) && !provenBashAggregateStateWrite(request) &&
@@ -1035,9 +1039,23 @@ func provenStateMutationPath(facts actionfacts.Facts, request trustedActionReque
 			continue
 		}
 		if entry, ok := stateDirectoryEntryTarget(command, candidate, request); ok {
+			spellings := []string{candidate.Resolved, candidate.Value, candidate.Normalized}
 			candidate.Resolved = entry
 			if matchesActiveDefenseClawState(projected, candidate) {
 				return true
+			}
+			if request.ProtectedHomeHook && candidate.Access == actionfacts.PathAccessDelete {
+				// The gateway cannot follow the directory through a link
+				// the user can make; the hook placed the entry as the user
+				// and lists it only when it is in the state tree (GAP-2549).
+				for _, spelling := range spellings {
+					if placed := request.ResolvedWriteTargets[spelling]; filepath.IsAbs(placed) {
+						candidate.Resolved = placed
+						if matchesActiveDefenseClawState(projected, candidate) {
+							return true
+						}
+					}
+				}
 			}
 			continue
 		}

@@ -1035,6 +1035,39 @@ func ResolveConnector(connector, surface, event string, payload []byte) string {
 		}
 		add(path, false, false)
 	}
+	// A delete removes the final name, so only its directory is followed.
+	// Behind ProtectHome, PrivateTmp and PrivateDevices a managed gateway
+	// cannot follow that directory through a disk link or a link the command
+	// makes, so a delete whose entry lands in the DefenseClaw state tree is
+	// listed with that entry (GAP-2549). Removing a link itself names the
+	// link, not what it reaches, and is not listed.
+	for _, candidate := range facts.Paths {
+		if candidate.Access != actionfacts.PathAccessDelete || strings.HasSuffix(candidate.Value, "/") {
+			continue
+		}
+		path := candidate.Resolved
+		if path == "" {
+			path = candidate.Normalized
+		}
+		if !filepath.IsAbs(path) || strings.ContainsAny(path, "*?[]$`") {
+			continue
+		}
+		path = filepath.Clean(path)
+		if _, listed := targets[path]; listed || len(path) > MaxWriteTargetPathBytes || len(targets)-1 >= MaxWriteTargets {
+			continue
+		}
+		entry, inState := links.stateEntry(path, home, protected)
+		if !inState {
+			continue
+		}
+		cost := len(jsonString(path)) + 1 + len(jsonString(entry)) + 1
+		if size+cost > maxEncodedTargets {
+			truncated = true
+			continue
+		}
+		size += cost
+		targets[path] = entry
+	}
 	// An apply_patch edit names its files in the patch envelope, not in a
 	// redirect. Unknown targets make the map incomplete.
 	patchTargets, patchKnown := ApplyPatchWriteTargets(tool, args, "", cwd, home)
@@ -3673,6 +3706,34 @@ func (l shellLinks) stateTarget(path, home string, protected protectedFiles) (st
 		return protected.has(name) || inState(name)
 	})
 	return resolved, ok && inState(resolved)
+}
+
+// stateEntry is the name in the DefenseClaw state tree of home that a
+// delete of path removes: its directory followed through the command links
+// and the disk links on the way (rm e/y/config.yaml after ln -s /dev/shm/x
+// e, with /dev/shm/x/y -> ~/.defenseclaw), its final name kept. ok is false
+// when the entry is not in the state tree or is path itself.
+func (l shellLinks) stateEntry(path, home string, protected protectedFiles) (string, bool) {
+	if home == "" {
+		return "", false
+	}
+	state := filepath.Join(home, ".defenseclaw")
+	dir := filepath.Dir(path)
+	parent, ok := "", false
+	if len(l.aliases) > 0 {
+		parent, ok = l.stateTarget(dir, home, protected)
+	}
+	if !ok {
+		parent, ok = ResolveWriteTarget(dir)
+	}
+	if !ok {
+		return "", false
+	}
+	entry := filepath.Join(parent, filepath.Base(path))
+	if _, under := cutPathPrefix(entry, state); !under || entry == path {
+		return "", false
+	}
+	return entry, true
 }
 
 // resolveUntil is resolve with the stop test: the walk returns the first
