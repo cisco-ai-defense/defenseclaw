@@ -5061,6 +5061,7 @@ function Get-StaleAgentEvidence([string]$Data) {
     # swapped, failed to start DefenseClaw 1.0.4, rewrote the Claude Code
     # settings on the way and was undone with the hooks unverified
     # (GAP-2299). Found here, before anything changes, it is a plain refusal.
+    # A fresh setup selection of the new program is not stale (GAP-2513).
     $lock = Join-Path $Data "hook_contract_lock.json"
     if (-not (Test-Path -LiteralPath $lock -PathType Leaf)) { return @() }
     try { $doc = [IO.File]::ReadAllText($lock) | ConvertFrom-Json } catch { return @() }
@@ -5076,14 +5077,44 @@ function Get-StaleAgentEvidence([string]$Data) {
         $version = ([string](Get-Field $entry "raw_agent_version")) -replace '^codex-cli\s+', ''
         $label = if ($version) { "Codex $version" } else { "Codex" }
         if (-not (Test-Path -LiteralPath $exe -PathType Leaf)) {
-            $found += "$label, which DefenseClaw set up before the upgrade, is no longer at $exe"
+            if (-not (Test-FreshAgentSelection $Data $name)) { $found += "$label, which DefenseClaw set up before the upgrade, is no longer at $exe" }
             continue
         }
         $have = ""
         try { $have = (Get-FileHash -LiteralPath $exe -Algorithm SHA256 -ErrorAction Stop).Hash.ToLowerInvariant() } catch { continue }
-        if ($have -ne $want) { $found += "Codex was updated after DefenseClaw set up $label ($exe changed)" }
+        if ($have -ne $want -and -not (Test-FreshAgentSelection $Data $name)) { $found += "Codex was updated after DefenseClaw set up $label ($exe changed)" }
     }
     return $found
+}
+
+function Test-FreshAgentSelection([string]$Data, [string]$Name) {
+    # Whether the data of the older install holds a setup selection of $Name
+    # that has not expired and still names the program on disk (GAP-2513).
+    # Its gateway seals that selection at its next start.
+    $path = Join-Path $Data "agent_selection.json"
+    if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { return $false }
+    try { $doc = [IO.File]::ReadAllText($path) | ConvertFrom-Json } catch { return $false }
+    $selection = Get-Field (Get-Field $doc "selections") $Name
+    if (-not $selection -or [string](Get-Field $selection "source") -ne "setup-selected") { return $false }
+    $exe = [string](Get-Field $selection "executable")
+    $want = ([string](Get-Field $selection "sha256")).ToLowerInvariant()
+    $expires = [datetime]::MinValue
+    if (-not [datetime]::TryParse([string](Get-Field $selection "expires_at"), [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::AdjustToUniversal, [ref]$expires)) { return $false }
+    if ($expires -le [datetime]::UtcNow.AddMinutes(5) -or -not $exe -or -not (Test-Path -LiteralPath $exe -PathType Leaf)) { return $false }
+    try { return (Get-FileHash -LiteralPath $exe -Algorithm SHA256 -ErrorAction Stop).Hash.ToLowerInvariant() -eq $want } catch { return $false }
+}
+
+function Select-UpdatedAgents([string]$Data) {
+    # An agent that updated itself since the older release set it up (Codex
+    # runs npm install -g from its "Update now" prompt) gets the selection
+    # that 'defenseclaw setup codex' records, written by the CLI of this
+    # install into the data of the older one; its gateway seals it at its
+    # next start (GAP-2513). Best effort: Get-StaleAgentEvidence names what
+    # is left. The CLI entry sets up its output streams, so a warning prints
+    # on a cp1252 console without a Python traceback.
+    $cli = Join-Path $Venv "Scripts\defenseclaw.exe"
+    if (-not (Test-Path -LiteralPath $cli -PathType Leaf)) { return }
+    [void](Invoke-Native $cli @("migrate", "--reselect-updated-agents", "--data-dir", $Data))
 }
 
 function Invoke-Rollback {
@@ -5108,8 +5139,6 @@ function Invoke-Rollback {
     Assert-NoActiveConnectorRecovery "Rollback to $backTo"
     if (-not $rollForward) {
         Assert-NoActiveConnectorRecovery "Rollback to $backTo" (Join-Path $Previous "data")
-    }
-    if (-not $rollForward) {
         $stale = @(Get-StaleAgentEvidence (Join-Path $Previous "data"))
         if ($stale.Count -and $backTo -match '^(?:0\.8\.10|1\.0\.[0-3])$') {
             # Releases before 1.0.4 skip a connector whose setup fails and
@@ -5118,6 +5147,16 @@ function Invoke-Rollback {
             Write-Warn ("$($stale -join '; '). DefenseClaw $backTo starts without Codex hooks until you run " +
                 "'defenseclaw setup codex' after the rollback")
         } elseif ($stale.Count) {
+            # Select the updated program for the older release, as its setup
+            # would, then check again (GAP-2513).
+            Select-UpdatedAgents (Join-Path $Previous "data")
+            $updated = $stale
+            $stale = @(Get-StaleAgentEvidence (Join-Path $Previous "data"))
+            if (-not $stale.Count) {
+                Write-Warn ("$($updated -join '; '). DefenseClaw $backTo gets the updated program, as 'defenseclaw setup codex' would give it")
+            }
+        }
+        if ($stale.Count -and $backTo -notmatch '^(?:0\.8\.10|1\.0\.[0-3])$') {
             Die ("$($stale -join '; '). DefenseClaw $backTo does not start with an agent program it did not set up, so the rollback would stop " +
                 "half-way. Nothing was changed. Put that version back and run 'defenseclaw rollback' again, or stay on DefenseClaw $currentLabel")
         }

@@ -42,6 +42,7 @@ OpenClaw, never against the other adapters — calling
 from __future__ import annotations
 
 import base64
+import codecs
 import contextlib
 import errno
 import glob
@@ -63,13 +64,15 @@ from pathlib import Path
 
 import click
 
+from defenseclaw import codex_toml, legacy_connector, ux
 from defenseclaw import config as config_module
-from defenseclaw import legacy_connector, ux
 
 # Imported here, not where it is used: by then the data removal has deleted
 # the virtual environment this CLI runs from (GAP-1397).
 from defenseclaw.bootstrap import remove_own_api_port_claims
 from defenseclaw.commands import windows_native_uninstall, windows_uninstall_helper
+from defenseclaw.commands.cmd_doctor import _codex_otel_marked_kept
+from defenseclaw.connector_paths import claude_settings_paths, codex_home
 from defenseclaw.file_lock import tui_lock_held
 
 # Connectors whose teardown the Python CLI knows how to perform locally
@@ -379,10 +382,245 @@ def uninstall_cmd(
         raise SystemExit(1)
 
     _execute_plan(plan)
+    _remove_marked_native_otel_left()
     if plan.connectors:
         # The plan said so; the end says it again, once it is true (GAP-0255).
         ux.warn("Close any agent session still open: it runs without DefenseClaw's hooks now.")
     _render_kept_and_next_steps(plan)
+
+
+_NATIVE_OTEL_READ_LIMIT = 1024 * 1024
+
+
+def _read_agent_config(path: str) -> bytes:
+    """Read one agent config for the post-uninstall OTel check, or b"" (bounded)."""
+    try:
+        with open(path, "rb") as stream:
+            raw = stream.read(_NATIVE_OTEL_READ_LIMIT + 1)
+    except OSError:
+        return b""
+    return b"" if len(raw) > _NATIVE_OTEL_READ_LIMIT else raw
+
+
+def _marked_claude_otel_headers(env) -> list[str]:
+    """Claude Code OTLP header keys that carry both DefenseClaw markers and a bearer.
+
+    Mirror of cmd_doctor._codex_otel_marked_kept for the Claude Code env
+    block: x-defenseclaw-source = claudecode, x-defenseclaw-client =
+    claudecode-otel/..., and an authorization bearer.
+    """
+    if not isinstance(env, dict):
+        return []
+    fields = []
+    for key in sorted(env, key=str):
+        value = env.get(key)
+        if not (
+            isinstance(key, str)
+            and key.startswith("OTEL_EXPORTER_OTLP_")
+            and key.endswith("_HEADERS")
+            and isinstance(value, str)
+        ):
+            continue
+        headers = {}
+        for item in value.split(","):
+            name, sep, header_value = item.partition("=")
+            if sep:
+                headers[name.strip().lower()] = header_value.strip()
+        scheme, _, credential = headers.get("authorization", "").partition(" ")
+        if (
+            headers.get("x-defenseclaw-source") == "claudecode"
+            and headers.get("x-defenseclaw-client", "").startswith("claudecode-otel/")
+            and scheme.lower() == "bearer"
+            and len(credential.strip()) >= 8
+        ):
+            fields.append(key)
+    return fields
+
+
+def _paired_claude_otel_endpoints(env, headers: list[str]) -> list[tuple[str, str]]:
+    """The OTEL_EXPORTER_OTLP_*_ENDPOINT keys that pair with the marked header keys.
+
+    OTEL_EXPORTER_OTLP_<SIGNAL>_HEADERS pairs with OTEL_EXPORTER_OTLP_<SIGNAL>_ENDPOINT
+    (and the signal-less HEADERS with ENDPOINT). Returns (key, host:port) for each
+    paired endpoint that is set and points at this machine (where the DefenseClaw
+    gateway served it); a remote collector endpoint is the user's and is kept.
+    """
+    from urllib.parse import urlsplit
+
+    pairs = []
+    for header_key in headers:
+        key = header_key[: -len("HEADERS")] + "ENDPOINT"
+        value = env.get(key)
+        if not isinstance(value, str) or not value.strip():
+            continue
+        try:
+            parsed = urlsplit(value.strip())
+            host, port = parsed.hostname or "", parsed.port
+        except ValueError:
+            continue
+        if host not in ("127.0.0.1", "localhost", "::1"):
+            continue
+        # hostname:port, never the netloc: it may carry userinfo.
+        pairs.append((key, f"{host}:{port}" if port else host))
+    return pairs
+
+
+_TOML_TABLE_HEADER = re.compile(r"^\s*\[(?!\[)\s*([^\[\]]+?)\s*\]\s*(?:#.*)?$")
+_TOML_KEY_PART = re.compile(r"\"(?:[^\"\\]|\\.)*\"|'[^']*'|[^.]+")
+
+
+def _toml_header_path(inner: str) -> list[str]:
+    """The dotted key of a [table] header, each part stripped of spaces and quotes."""
+    return [part.strip().strip("\"'") for part in _TOML_KEY_PART.findall(inner) if part.strip()]
+
+
+def _codex_config_without_otel_keys(raw: bytes, keys: set[str]) -> bytes | None:
+    """config.toml without the [otel.<key>] tables of the given otel keys, or None.
+
+    Text-level, so every other line (comments, order, quoting) stays byte for
+    byte. None when the result does not parse to the same document minus
+    exactly those otel keys (an inline table or another layout): then nothing
+    is written and the caller names the manual step instead.
+    """
+    try:
+        before = codex_toml.loads(raw)
+        text = raw.decode("utf-8-sig")
+    except (UnicodeError, TypeError, ValueError):
+        return None
+    kept: list[str] = []
+    dropping = False
+    for line in text.splitlines(keepends=True):
+        match = _TOML_TABLE_HEADER.match(line)
+        if match:
+            path = _toml_header_path(match.group(1))
+            dropping = len(path) >= 2 and path[0] == "otel" and path[1] in keys
+        elif line.lstrip().startswith("[["):
+            dropping = False
+        if not dropping:
+            kept.append(line)
+    data = "".join(kept).encode("utf-8")
+    try:
+        after = codex_toml.loads(data)
+    except (UnicodeError, TypeError, ValueError):
+        return None
+    expected = dict(before)
+    otel = {key: value for key, value in (expected.get("otel") or {}).items() if key not in keys}
+    if otel or "otel" in after:
+        expected["otel"] = otel
+    else:
+        expected.pop("otel", None)
+    if after != expected:
+        return None
+    return (codecs.BOM_UTF8 if raw.startswith(codecs.BOM_UTF8) else b"") + data
+
+
+def _replace_agent_config(path: str, original: bytes, data: bytes) -> bool:
+    """Write data over path atomically if it still holds original; False if not done.
+
+    A link is never replaced (the write would swap the link for a file), and a
+    file the agent changed since it was read is left alone.
+    """
+    try:
+        if os.path.islink(path) or _read_agent_config(path) != original:
+            return False
+        mode = stat.S_IMODE(os.stat(path).st_mode)
+        fd, temp = tempfile.mkstemp(prefix=".defenseclaw-otel-", dir=os.path.dirname(path) or ".")
+        try:
+            with os.fdopen(fd, "wb") as stream:
+                stream.write(data)
+            if os.name != "nt":
+                os.chmod(temp, mode)
+            os.replace(temp, path)
+        except BaseException:
+            with contextlib.suppress(OSError):
+                os.unlink(temp)
+            raise
+    except OSError:
+        return False
+    return True
+
+
+def _remove_marked_native_otel_left() -> None:
+    """Remove the agent OTel entries DefenseClaw wrote that the teardown left (GAP-2517).
+
+    Teardown removes every exporter whose credential DefenseClaw can name. One
+    an earlier DefenseClaw setup wrote with a bearer no install recorded (a
+    pre-setup copy put back, say) stayed, and kept sending telemetry and that
+    bearer to a gateway port nothing serves after uninstall. Uninstall stops
+    the gateway, so it removes what DefenseClaw identifies by its own markers
+    (LEAD 03:45 ruling, option 1): a Codex [otel] exporter or a Claude Code
+    OTLP *_HEADERS key with x-defenseclaw-source, x-defenseclaw-client and a
+    bearer, plus the paired *_ENDPOINT key at this machine. Anything without
+    the markers is kept. When the file cannot be changed safely (a link, an
+    unusual layout, a file the agent holds or changed) it is left as is and
+    uninstall names the manual step.
+    """
+    removed: list[str] = []
+    left: list[tuple[str, str]] = []
+    codex_config = os.path.join(codex_home(), "config.toml")
+    raw = _read_agent_config(codex_config)
+    try:
+        document = codex_toml.loads(raw) if raw else {}
+    except (UnicodeError, TypeError, ValueError):
+        document = {}
+    otel = document.get("otel") if isinstance(document, dict) else None
+    marked = _codex_otel_marked_kept(otel, 0)
+    if marked:
+        fields = ", ".join(field for field, _ in marked)
+        targets = ", ".join(sorted({target for _, target in marked}))
+        data = _codex_config_without_otel_keys(raw, {field.split(".", 1)[1] for field, _ in marked})
+        if data is not None and _replace_agent_config(codex_config, raw, data):
+            removed.append(
+                f"{codex_config}: removed {fields}, the DefenseClaw-marked exporters to {targets} "
+                "(nothing serves that port now)"
+            )
+        else:
+            left.append(
+                (
+                    f"{codex_config}: {fields} carry DefenseClaw's x-defenseclaw-source and "
+                    f"x-defenseclaw-client headers and a bearer, and could not be removed safely; "
+                    f"Codex still sends its telemetry and that bearer to {targets}, which DefenseClaw no longer serves",
+                    f"delete the {fields} tables from {codex_config}",
+                )
+            )
+    claude_settings = claude_settings_paths()[0]
+    raw = _read_agent_config(claude_settings)
+    try:
+        settings = json.loads(raw.decode("utf-8-sig")) if raw else {}
+    except (UnicodeError, ValueError):
+        settings = {}
+    env = settings.get("env") if isinstance(settings, dict) else None
+    headers = _marked_claude_otel_headers(env)
+    if headers:
+        # Each marked *_HEADERS key pairs with its *_ENDPOINT key: removing the
+        # headers alone leaves Claude Code exporting to the dead port.
+        endpoints = _paired_claude_otel_endpoints(env, headers)
+        targets = ", ".join(sorted({target for _, target in endpoints}))
+        keys = headers + [key for key, _ in endpoints]
+        sends = f" to {targets}" if targets else ""
+        new_settings = dict(settings)
+        new_settings["env"] = {key: value for key, value in env.items() if key not in keys}
+        bom = codecs.BOM_UTF8 if raw.startswith(codecs.BOM_UTF8) else b""
+        data = bom + (json.dumps(new_settings, indent=2, ensure_ascii=False) + "\n").encode("utf-8")
+        if _replace_agent_config(claude_settings, raw, data):
+            removed.append(
+                f"{claude_settings}: removed env {', '.join(keys)}, the DefenseClaw-marked OTLP entries{sends} "
+                "(nothing serves that port now)"
+            )
+        else:
+            left.append(
+                (
+                    f"{claude_settings}: env {', '.join(headers)} carry DefenseClaw's x-defenseclaw-source and "
+                    f"x-defenseclaw-client headers and a bearer, and could not be removed safely; "
+                    f"Claude Code still sends its telemetry and that bearer{sends}",
+                    f"delete {', '.join(keys)} from the env block of {claude_settings}",
+                )
+            )
+    for line in removed:
+        ux.ok(line)
+    for detail, step in left:
+        ux.warn(detail)
+        ux.echo(f"    {step}")
 
 
 def _render_kept_and_next_steps(plan: UninstallPlan) -> None:
@@ -547,6 +785,7 @@ def _dispatch_native_windows_uninstall(
     if outcome.returncode == 0:
         ux.ok("Native Windows uninstall completed.")
         _relay_native_setup_removed_connector_leftovers(outcome.stdout, left_before, data_dir, wipe_data=wipe_data)
+        _remove_marked_native_otel_left()
         if binaries:
             _remove_script_install_after_native_setup(request.platform_name)
         return True
