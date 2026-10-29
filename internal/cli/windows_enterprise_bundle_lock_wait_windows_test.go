@@ -73,6 +73,46 @@ func TestWindowsBundleApplyLockWaitTakesTheReleasedLock(t *testing.T) {
 	}
 }
 
+// GAP-2438: a run that waited for bundle.lock while Setup /uninstall PURGE=1
+// held it reads the deployment record again and refuses not_managed before
+// it creates or runs anything; the uninstall then finishes. A run that did
+// not wait, and one whose deployment is still installed, are unchanged.
+func TestWindowsBundleApplyLockWaitRefusesAfterAnUninstall(t *testing.T) {
+	saved := windowsBundleDeploymentInstalled
+	t.Cleanup(func() { windowsBundleDeploymentInstalled = saved })
+	installed := false
+	windowsBundleDeploymentInstalled = func() bool { return installed }
+	// opts.bundle stays nil: the run refused before it took the store
+	// (no directory prepared, no anchors staged, no ensure).
+	opts, out, done, err := prepareWithHeldBundleLock(t, 30*time.Second, 300*time.Millisecond)
+	if !done || opts.bundle != nil || !strings.Contains(out, `"not_managed"`) ||
+		!strings.Contains(out, "uninstalled while this run waited for the policy bundle lock") {
+		t.Fatalf("waited out an uninstall: done=%v err=%v exit=%d out=%s", done, err, commandExitCode(err), out)
+	}
+	// Still installed after the wait: the run goes on.
+	installed = true
+	if opts, out, done, err := prepareWithHeldBundleLock(t, 30*time.Second, 300*time.Millisecond); done || err != nil || opts.bundle == nil {
+		t.Fatalf("waited, still installed: done=%v err=%v out=%s", done, err, out)
+	}
+	// No wait (the lock was free): the record is not read again.
+	installed = false
+	e := newBundleCLIEnv(t)
+	e.writeAnchors(t, map[string]any{"k1": e.edKey.Public()})
+	signed := filepath.Join(e.dir, "v5.dcbundle")
+	if out, code := runBundle(t, e.signArgs("--out", signed, "--key", filepath.Join(e.dir, "key.pem"), "--key-id", "k1")...); code != 0 {
+		t.Fatalf("sign exit %d: %s", code, out)
+	}
+	stubWindowsBundleHost(t)
+	cmd, buf := windowsBundleCommand()
+	free := &windowsEnterpriseLifecycleOptions{bundlePath: signed, trustAnchors: e.anchors,
+		profile: managed.ProfileStandalone, jsonOutput: true, installedBeforeRun: true, bundleLockWait: 30 * time.Second}
+	done, err = prepareWindowsEnterpriseBundle(context.Background(), cmd, "ensure", free)
+	cleanupPreparedWindowsBundle(t, free)
+	if done || err != nil || free.bundle == nil {
+		t.Fatalf("free lock: done=%v err=%v out=%s", done, err, buf.String())
+	}
+}
+
 // A4: a wait that expires is lifecycle_busy 1618 and names the wait.
 func TestWindowsBundleApplyLockWaitExpiresBusy(t *testing.T) {
 	_, out, done, err := prepareWithHeldBundleLock(t, 300*time.Millisecond, 0)

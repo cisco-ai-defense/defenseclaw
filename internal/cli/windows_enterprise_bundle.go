@@ -108,6 +108,9 @@ var (
 	windowsBundleSyncMarker             = syncWindowsBundleMarker
 	// windowsBundleReadAnchors reads and checks an anchor file once.
 	windowsBundleReadAnchors = enterprisebundle.ReadAnchorsFile
+	// windowsBundleDeploymentInstalled reads the deployment record again
+	// after a run waited for bundle.lock (GAP-2438).
+	windowsBundleDeploymentInstalled = windowsEnterpriseStandaloneInstalled
 )
 
 func init() {
@@ -872,13 +875,30 @@ func prepareWindowsEnterpriseBundle(ctx context.Context, cmd *cobra.Command, act
 		}
 		return refuse(code, message)
 	}
-	unlock, err := lockWindowsBundleStoreWithin(ctx, layout.LifecycleDir, opts.bundleLockWait)
+	// A run that finds bundle.lock held and waits for it (--lock-wait) may
+	// wait out an uninstall: Setup /uninstall PURGE=1 holds bundle.lock until
+	// its state purge. Such a run reads the deployment record again once it
+	// has the lock and refuses before it creates or runs anything, so the
+	// uninstall finishes (GAP-2438: the apply ran an ensure transaction
+	// against the removed deployment, 1639, and kept the uninstall from
+	// retiring its teardown journal, 1603).
+	unlock, err := lockWindowsBundleStore(layout.LifecycleDir)
+	waited := false
+	if err != nil && opts.bundleLockWait > 0 && errors.Is(err, errWindowsBundleStoreBusy) {
+		waited = true
+		unlock, err = lockWindowsBundleStoreWithin(ctx, layout.LifecycleDir, opts.bundleLockWait)
+	}
 	if err != nil {
 		if errors.Is(err, errWindowsBundleStoreBusy) {
 			return refuseAnchors("lifecycle_busy", err.Error())
 		}
 		failure := enterprisebundle.StateWriteError("cannot prepare the policy bundle lock", err)
 		return refuseAnchors(string(failure.Code), failure.Detail)
+	}
+	if waited && !windowsBundleDeploymentInstalled() {
+		unlock()
+		return refuseAnchors(string(enterprisebundle.CodeNotManaged), "DefenseClaw enterprise was uninstalled while this run waited for "+
+			"the policy bundle lock; nothing was changed. Install it first with /ensure CONFIG=<config.yaml>, then deliver policy bundles")
 	}
 	run = &windowsBundleRun{ctx: ctx, layout: layout, driver: driver, unlock: unlock, stderr: cmd.ErrOrStderr()}
 	opts.bundle = run
