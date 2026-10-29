@@ -4,8 +4,11 @@
 package cli
 
 import (
+	"fmt"
 	"regexp"
 	"strings"
+
+	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 )
 
 // enterpriseHookSignedOutUntrustedFolderPattern is the whole error a
@@ -73,4 +76,51 @@ func enterpriseHookSignedOutUntrustedFolder(row enterpriseHookReconcileRow, data
 		}
 	}
 	return "", false
+}
+
+// enterpriseHookSignedOutUntrustedFolderVerifyRow reports a live verify row
+// of a managed standalone Windows deferred target that fails only on the
+// owner or permissions of its own DefenseClaw folder or hooks folder
+// (enterpriseHookSignedOutUntrustedFolder) while its account is signed out
+// now, and that the guardian last recorded as protected. It returns the
+// sign-in wait the row reports. The guardian classifies the same failure as
+// a sign-in wait when it sees it; a folder that changed after the guardian
+// last verified the target failed Setup readiness 1603 and then its rollback
+// for every user (GAP-2516: the Codex and Copilot rows of the signed-out
+// account). The protected records are compared with it as protected, as for
+// a signed-out Hermes home. A row the guardian recorded failed or never
+// recorded, a connected account, Secure Client, and any other failure are
+// unchanged; a session that cannot be queried is never taken as a sign-out.
+func enterpriseHookSignedOutUntrustedFolderVerifyRow(
+	target enterprisehooks.ManifestTarget,
+	row enterpriseHookReconcileRow,
+	liveErr error,
+	recorded map[string]enterpriseHookReconcileRow,
+) (string, bool) {
+	if liveErr == nil || !enterpriseHookHermesSignedOutApplies() || !target.IsDeferred() {
+		return "", false
+	}
+	key := enterpriseHookProtectedTargetKey(row)
+	if last, known := recorded[key]; key == "" || !known || !last.OK {
+		return "", false
+	}
+	folder, untrusted := enterpriseHookSignedOutUntrustedFolder(enterpriseHookReconcileRow{
+		Error: fmt.Sprintf("enterprise hooks: protected target requires repair but its exact active Windows "+
+			"session is unavailable (verification: %v)", liveErr),
+	}, target.DataDir)
+	if !untrusted {
+		return "", false
+	}
+	available, err := enterpriseHookReconcileSessionAvailable(target)
+	signedOut := err == nil && !available
+	if err != nil && enterpriseHookSessionCheckNotLocalSystem(err) {
+		noSession, listErr := enterpriseHookTargetHasNoSession(target)
+		signedOut = listErr == nil && noSession
+	}
+	if !signedOut {
+		return "", false
+	}
+	return fmt.Sprintf("%s: %s: %s; its exact active Windows session is unavailable, so the guardian repairs it at "+
+		"the account's next sign-in (verification: %v)",
+		enterpriseHookAwaitingSignInPrefix, enterpriseHookAwaitingSignInUntrustedFolder, folder, liveErr), true
 }

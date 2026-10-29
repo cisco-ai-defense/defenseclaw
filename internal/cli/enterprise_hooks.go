@@ -1738,7 +1738,8 @@ type enterpriseHookVerifyRun struct {
 	// sign-in to the error of the guardian row that records the wait.
 	AwaitingSignIn map[string]string
 	// RecordedProtected names the excused signed-out Hermes rows
-	// (enterpriseHookHermesSignedOutRow) the guardian last recorded as
+	// (enterpriseHookHermesSignedOutRow) and own-folder rows
+	// (enterpriseHookSignedOutUntrustedFolderVerifyRow) the guardian last recorded as
 	// protected; the protected records are compared with them as protected.
 	RecordedProtected map[string]bool
 	AuthorizationErr  error
@@ -2343,6 +2344,24 @@ func runEnterpriseHookVerifyAttemptWithScope(ctx context.Context, registrationOn
 				}
 				run.RecordedProtected[enterpriseHookProtectedTargetKey(row)] = true
 			}
+			run.Rows = append(run.Rows, row)
+			continue
+		}
+		if waiting, ok := enterpriseHookSignedOutUntrustedFolderVerifyRow(target, row, targetErr, recorded); ok {
+			// Changed after the guardian last proved it, while its account
+			// is signed out: pending until that account signs in, compared
+			// with the protected records as the guardian last recorded it.
+			row.OK, row.Pending, row.Result, row.Error = false, false, nil, targetErr.Error()
+			run.Failures++
+			run.Excused = append(run.Excused, row)
+			if run.AwaitingSignIn == nil {
+				run.AwaitingSignIn = map[string]string{}
+			}
+			run.AwaitingSignIn[enterpriseHookProtectedTargetKey(row)] = waiting
+			if run.RecordedProtected == nil {
+				run.RecordedProtected = map[string]bool{}
+			}
+			run.RecordedProtected[enterpriseHookProtectedTargetKey(row)] = true
 			run.Rows = append(run.Rows, row)
 			continue
 		}
