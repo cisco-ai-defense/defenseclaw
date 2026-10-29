@@ -200,6 +200,11 @@ $script:DefenseClawQuarantinedRoots = @()
 $script:DefenseClawRecoveryGatewayCandidate = $null
 $script:DefenseClawRecoveryGatewayRuns = @()
 $script:DefenseClawRecoveryGatewayRefusal = $null
+# Standalone uninstall: the bundle.lock handle an uninstall holds while it
+# removes StateRoot (Enter-DefenseClawBundleStoreLock, GAP-2438). Set here so
+# every purge entry, also the recovery purge outside
+# Invoke-DefenseClawEnterpriseLifecycle, reads it under strict mode (GAP-2490).
+$script:DefenseClawPurgeBundleLock = $null
 # Standalone: the installed gateway's error when this run removed a committed
 # managed-hook lifecycle journal it could not retire (GAP-1322). Reset per
 # lifecycle run.
