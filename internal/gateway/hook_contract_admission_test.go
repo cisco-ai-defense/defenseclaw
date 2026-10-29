@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -285,5 +286,176 @@ func TestRunActiveGuardrailReportsReleaseCausedRefusalAsFailure(t *testing.T) {
 	}
 	if details := s.health.Snapshot().Guardrail.Details; details[GuardrailHookContractAdmissionRefused] != nil {
 		t.Fatalf("admission detail = %#v, want none so start fails and an upgrade rolls back", details)
+	}
+}
+
+// An upgrade refreshes an active connector whose agent binary discovery found
+// but whose version it could not read: discovery records no version and why.
+// The refusal is unchanged (the start still fails and the upgrade rolls back),
+// but it names that cause and the fix for it instead of telling the user to
+// close an agent that cannot be open (GAP-1167). Each cause gets its own next
+// step: only an agent that ran and failed is told to fix its runtime on PATH
+// (GAP-2479).
+func TestRefreshOfAnAgentThatDidNotRunNamesTheCauseNotAnOpenAgent(t *testing.T) {
+	const runtimeHint = "putting its runtime on PATH"
+	longTimeout := strings.Repeat("/opt/dc-agents/bin/claude-untrusted: binary path is not in a trusted install prefix; ", 6) + "/opt/dc-agents/bin/claude: version probe timed out"
+	for name, tc := range map[string]struct {
+		probeError string
+		want       []string
+		unwanted   []string
+	}{
+		"agent did not run": {
+			probeError: "/opt/dc-agents/bin/claude: version probe exited 127: /usr/bin/env: ‘node’: No such file or directory",
+			want:       []string{"the agent did not run when discovery read its version", "version probe exited 127", "No such file or directory", runtimeHint},
+		},
+		"probe timed out": {
+			probeError: "/opt/dc-agents/bin/claude: version probe timed out",
+			want:       []string{"did not answer its version probe in time", "version probe timed out", "start it once from this account"},
+			unwanted:   []string{runtimeHint, "the agent did not run"},
+		},
+		"timeout recorded past the quoted length": {
+			probeError: longTimeout,
+			want:       []string{"did not answer its version probe in time", "start it once from this account"},
+			unwanted:   []string{runtimeHint, "is not trusted"},
+		},
+		"untrusted install path": {
+			probeError: "/home/u/open/claude: binary path is not in a trusted install prefix",
+			want:       []string{"its install path is not trusted", "not in a trusted install prefix", "only administrators or this account can write"},
+			unwanted:   []string{runtimeHint, "the agent did not run"},
+		},
+		"not probed": {
+			probeError: "version not probed: not being set up",
+			want:       []string{"has not read the agent's version yet", "version not probed", "check that it starts from this account"},
+			unwanted:   []string{runtimeHint, "the agent did not run"},
+		},
+		"other unreadable version": {
+			probeError: "/opt/dc-agents/bin/claude: version metadata is unavailable",
+			want:       []string{"could not read the agent's version", "version metadata is unavailable", "prints its version"},
+			unwanted:   []string{runtimeHint, "the agent did not run"},
+		},
+		"no recorded probe err": {},
+	} {
+		t.Run(name, func(t *testing.T) {
+			s := admissionSidecar(t)
+			raw, err := json.Marshal(map[string]any{
+				"agents": map[string]any{"claudecode": map[string]any{
+					"version": "", "binary_path": "/opt/dc-agents/bin/claude", "installed": false, "error": tc.probeError,
+				}},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(s.cfg.DataDir, "agent_discovery.json"), raw, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if err := connector.SaveActiveConnectors(s.cfg.DataDir, []string{"claudecode"}); err != nil {
+				t.Fatal(err)
+			}
+
+			conn := &bootStubConnector{stubConnector: stubConnector{name: "claudecode"}}
+			_, err = s.setupConnectorsIsolatedTransaction(
+				context.Background(), []connector.Connector{conn},
+				"tok", "127.0.0.1:0", "127.0.0.1:0", "master", guardrail.NewRulePackCache(),
+			)
+			if err == nil || !errors.Is(err, ErrHookContractAdmission) || conn.setupCalls != 0 {
+				t.Fatalf("refresh error = %v, setupCalls = %d; want the unversioned agent refused before setup", err, conn.setupCalls)
+			}
+			message := err.Error()
+			if tc.probeError == "" {
+				if errors.As(err, new(agentVersionUnread)) || !strings.Contains(message, "close the agent holding its settings") {
+					t.Fatalf("refresh error = %q, want the unchanged message", message)
+				}
+				return
+			}
+			if !errors.As(err, new(agentVersionUnread)) {
+				t.Fatalf("refresh error = %q, want it marked as an agent whose version discovery could not read", message)
+			}
+			for _, want := range append([]string{"is not verified against a known hook contract", "then run: defenseclaw upgrade"}, tc.want...) {
+				if !strings.Contains(message, want) {
+					t.Fatalf("refresh error = %q, want %q", message, want)
+				}
+			}
+			for _, unwanted := range append([]string{"close the agent holding its settings", "DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT"}, tc.unwanted...) {
+				if strings.Contains(message, unwanted) {
+					t.Fatalf("refresh error = %q, must not say %q", message, unwanted)
+				}
+			}
+		})
+	}
+}
+
+// An upgrade refreshes an active connector and fails for a cause no open
+// agent explains: the enrolled agent is not on the PATH of the account, or
+// it answers a setup probe (Codex configRequirements/read) too slowly on
+// every call. The refusal is unchanged (the start still fails and the
+// upgrade rolls back), but it names that cause and its own fix, never
+// closing the agent or the drift env. A setup failure an open agent can
+// explain keeps the close-the-agent step (GAP-2520).
+func TestRefreshOfAnAbsentOrSlowAgentDoesNotSayCloseIt(t *testing.T) {
+	const closeIt = "close the agent holding its settings"
+	slowRead := fmt.Errorf("inspect effective Codex managed requirements: /opt/dc-agents/bin/codex configRequirements/read: timed out waiting for response 1: %w (%w)", context.DeadlineExceeded, connector.ErrAgentVersionProbeTimeout)
+	for name, tc := range map[string]struct {
+		notFound bool
+		setupErr error
+		want     []string
+		unwanted []string
+	}{
+		"agent not on PATH": {
+			notFound: true,
+			want:     []string{"discovery did not find the agent on the PATH of this account", "put the agent back on the PATH of this account", "defenseclaw setup remove claudecode"},
+			unwanted: []string{closeIt, "DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT", "agent version not probed"},
+		},
+		"slow agent on every call": {
+			setupErr: slowRead,
+			want:     []string{"configRequirements/read", "the agent answered too slowly", "start it once from this account"},
+			unwanted: []string{closeIt},
+		},
+		"settings write an open agent can block": {
+			setupErr: errors.New("write /Users/u/.claude/settings.json: resource busy"),
+			want:     []string{closeIt},
+			unwanted: []string{"answered too slowly"},
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			s := admissionSidecar(t)
+			if tc.notFound {
+				raw, err := json.Marshal(map[string]any{
+					"agents": map[string]any{"claudecode": map[string]any{
+						"version": "", "binary_path": "", "installed": false, "error": "",
+					}},
+				})
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(s.cfg.DataDir, "agent_discovery.json"), raw, 0o600); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				stageAdmissionFixture(t, s.cfg.DataDir)
+			}
+			if err := connector.SaveActiveConnectors(s.cfg.DataDir, []string{"claudecode"}); err != nil {
+				t.Fatal(err)
+			}
+
+			conn := &bootStubConnector{stubConnector: stubConnector{name: "claudecode"}, setupErr: tc.setupErr}
+			_, err := s.setupConnectorsIsolatedTransaction(
+				context.Background(), []connector.Connector{conn},
+				"tok", "127.0.0.1:0", "127.0.0.1:0", "master", guardrail.NewRulePackCache(),
+			)
+			if err == nil {
+				t.Fatal("refresh succeeded, want the refresh of the active connector refused")
+			}
+			message := err.Error()
+			for _, want := range append([]string{"connector claudecode refresh failed", "then run: defenseclaw upgrade"}, tc.want...) {
+				if !strings.Contains(message, want) {
+					t.Fatalf("refresh error = %q, want %q", message, want)
+				}
+			}
+			for _, unwanted := range tc.unwanted {
+				if strings.Contains(message, unwanted) {
+					t.Fatalf("refresh error = %q, must not say %q", message, unwanted)
+				}
+			}
+		})
 	}
 }

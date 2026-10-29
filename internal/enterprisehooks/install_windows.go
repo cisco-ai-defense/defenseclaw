@@ -382,7 +382,7 @@ func verifyWindowsClaudeManagedResult(ctx context.Context, opts InstallOptions) 
 	if err != nil {
 		return InstallResult{}, err
 	}
-	otlpReport, err := windowsManagedUserNativeOTLPCheck(conn.Name(), home, dataDir, targetSID)
+	otlpReport, err := windowsManagedUserNativeOTLPCheck(conn.Name(), home, dataDir, targetSID, setupOpts.APIAddr, setupOpts.ProxyAddr)
 	if err != nil {
 		return InstallResult{}, err
 	}
@@ -2066,7 +2066,7 @@ func validateWindowsEnterpriseHome(raw, rawSID string) (string, *windows.SID, er
 	info, err := os.Lstat(home)
 	if errors.Is(err, os.ErrNotExist) {
 		// Name the cause, not the raw Win32 lookup error (GAP-1940).
-		return "", nil, fmt.Errorf("enterprise hooks: user home %s no longer exists: the account was deleted or its profile folder removed; run Setup /ensure again (%w)", home, os.ErrNotExist)
+		return "", nil, fmt.Errorf("enterprise hooks: user home %s no longer exists: the account was deleted or its profile folder removed; Setup /repair or /ensure prunes its rows, and the hook enumerator drops them at its next pass (%w)", home, os.ErrNotExist)
 	}
 	if err != nil {
 		return "", nil, fmt.Errorf("enterprise hooks: inspect user home %s: %w", home, err)

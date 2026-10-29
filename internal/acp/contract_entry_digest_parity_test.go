@@ -62,3 +62,26 @@ func TestClientEntrySHA256PinsTheEntriesThatStartTheLock(t *testing.T) {
 		t.Fatalf("only the adopted entry starts the lock: digest = %s, want %s", got, want)
 	}
 }
+
+// TestPinnedEntriesLabelNamesTheEntriesTheLockPins pins GAP-0043: the
+// changed-entry refusal names the entries that start the guard with the lock
+// (an adopted entry has its own name), and the reserved name only when no
+// entry starts the lock.
+func TestPinnedEntriesLabelNamesTheEntriesTheLockPins(t *testing.T) {
+	const lock = "/l/zed-opencode.contract-lock.json"
+	const guarded = `{"command":"/opt/dc/defenseclaw-acp","args":["--client","zed","--contract-lock","/l/zed-opencode.contract-lock.json","--","/o","acp"]}`
+	path := filepath.Join(t.TempDir(), "settings.json")
+	for _, tc := range []struct{ settings, want string }{
+		{`{"agent_servers":{"My OpenCode":` + guarded + `}}`, `My OpenCode entry`},
+		{`{"agent_servers":{"My OpenCode":` + guarded + `,"My OpenCode stale":` + guarded + `}}`, `My OpenCode, My OpenCode stale entries`},
+		{`{"agent_servers":{"DefenseClaw · Opencode":{"command":"/o","args":["acp"]}}}`, `DefenseClaw · Opencode entry`},
+		{`{"agent_servers":{}}`, `DefenseClaw · Opencode entry`},
+	} {
+		if err := os.WriteFile(path, []byte(tc.settings), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if got, _ := pinnedEntriesLabel(path, "zed", "opencode", lock); got != tc.want {
+			t.Fatalf("pinnedEntriesLabel(%s) = %q, want %q", tc.settings, got, tc.want)
+		}
+	}
+}

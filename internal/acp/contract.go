@@ -70,37 +70,9 @@ var editorOwnedEntryKeys = map[string]map[string]bool{
 // entries (an adopted one next to the reserved one) are pinned together, as
 // one JSON object by name.
 func ClientEntrySHA256(path, clientID, agentID, lockPath string) (string, error) {
-	body, err := safefile.ReadRegularFileBounded(path, maxClientConfigBytes)
+	pinned, _, err := pinnedClientEntries(path, clientID, agentID, lockPath)
 	if err != nil {
 		return "", err
-	}
-	decoder := json.NewDecoder(bytes.NewReader(jsonc.Strip(bytes.TrimPrefix(body, []byte("\xef\xbb\xbf")))))
-	decoder.UseNumber()
-	var document map[string]any
-	if err := decoder.Decode(&document); err != nil {
-		return "", err
-	}
-	servers, _ := document["agent_servers"].(map[string]any)
-	guarded := map[string]any{}
-	for name, entry := range servers {
-		if lockPath != "" && entryStartsLock(entry, lockPath) {
-			guarded[name] = withoutEditorOwnedKeys(clientID, entry)
-		}
-	}
-	var pinned any
-	switch len(guarded) {
-	case 0:
-		entry, ok := servers[ManagedEntryName(agentID)]
-		if !ok {
-			return "", fmt.Errorf("%s has no %s entry", path, ManagedEntryName(agentID))
-		}
-		pinned = withoutEditorOwnedKeys(clientID, entry)
-	case 1:
-		for _, entry := range guarded {
-			pinned = entry
-		}
-	default:
-		pinned = guarded
 	}
 	canonical, err := json.Marshal(pinned)
 	if err != nil {
@@ -108,6 +80,58 @@ func ClientEntrySHA256(path, clientID, agentID, lockPath string) (string, error)
 	}
 	digest := sha256.Sum256(canonical)
 	return hex.EncodeToString(digest[:]), nil
+}
+
+// pinnedClientEntries is the value ClientEntrySHA256 digests and the names of
+// the entries in it, sorted.
+func pinnedClientEntries(path, clientID, agentID, lockPath string) (any, []string, error) {
+	body, err := safefile.ReadRegularFileBounded(path, maxClientConfigBytes)
+	if err != nil {
+		return nil, nil, err
+	}
+	decoder := json.NewDecoder(bytes.NewReader(jsonc.Strip(bytes.TrimPrefix(body, []byte("\xef\xbb\xbf")))))
+	decoder.UseNumber()
+	var document map[string]any
+	if err := decoder.Decode(&document); err != nil {
+		return nil, nil, err
+	}
+	servers, _ := document["agent_servers"].(map[string]any)
+	guarded := map[string]any{}
+	names := []string{}
+	for name, entry := range servers {
+		if lockPath != "" && entryStartsLock(entry, lockPath) {
+			guarded[name] = withoutEditorOwnedKeys(clientID, entry)
+			names = append(names, name)
+		}
+	}
+	sort.Strings(names)
+	switch len(guarded) {
+	case 0:
+		entry, ok := servers[ManagedEntryName(agentID)]
+		if !ok {
+			return nil, nil, fmt.Errorf("%s has no %s entry", path, ManagedEntryName(agentID))
+		}
+		return withoutEditorOwnedKeys(clientID, entry), []string{ManagedEntryName(agentID)}, nil
+	case 1:
+		return guarded[names[0]], names, nil
+	default:
+		return guarded, names, nil
+	}
+}
+
+// pinnedEntriesLabel names the entries the contract lock pins, for a refusal:
+// an adopted or numbered entry has its own name, not the reserved one
+// (GAP-0043). It falls back to the reserved name when the file cannot be read.
+// The second value is the pronoun for the label: it or them.
+func pinnedEntriesLabel(path, clientID, agentID, lockPath string) (string, string) {
+	_, names, err := pinnedClientEntries(path, clientID, agentID, lockPath)
+	if err != nil || len(names) == 0 {
+		return ManagedEntryName(agentID) + " entry", "it"
+	}
+	if len(names) == 1 {
+		return names[0] + " entry", "it"
+	}
+	return strings.Join(names, ", ") + " entries", "them"
 }
 
 // RecordedEntrySHA256 is the digest the per-user CLI keeps in its record of
@@ -356,8 +380,13 @@ func ValidateRuntimeContract(path, clientID, agentID, profile string, mode Mode,
 		if pinned, entry := strings.CutPrefix(item.expected, EntryDigestPrefix); entry && item.label == "client configuration" && !secureClientHost() {
 			observed, digestErr := ClientEntrySHA256(item.path, clientID, agentID, path)
 			if digestErr != nil || !strings.EqualFold(observed, pinned) {
-				return fmt.Errorf("the %s entry in the editor settings file %s changed after setup (the contract lock pins it), "+
-					"so it must be set up again", ManagedEntryName(agentID), clientConfigPath)
+				label, pronoun := pinnedEntriesLabel(item.path, clientID, agentID, path)
+				subject := "it"
+				if pronoun == "them" {
+					subject = "they"
+				}
+				return fmt.Errorf("the %s in the editor settings file %s changed after setup (the contract lock pins %s), "+
+					"so %s must be set up again", label, clientConfigPath, pronoun, subject)
 			}
 			continue
 		}
@@ -384,6 +413,25 @@ func ValidateRuntimeContract(path, clientID, agentID, profile string, mode Mode,
 		}
 	}
 	return nil
+}
+
+// ClientConfigMatchesLock reports whether the editor settings file still
+// matches what the contract lock at lockPath pins, by the rule the guard
+// applies at start (ValidateRuntimeContract): the guarded entries for an
+// entry-pinned lock, the whole file otherwise. enterprise acp list and verify
+// said setup was done while the guard refused the entry because the agent it
+// starts had been changed in the entry (GAP-1154).
+func ClientConfigMatchesLock(lock RuntimeContractLock, lockPath, clientID, agentID string) bool {
+	path, err := filepath.Abs(lock.Client.ConfigPath)
+	if err != nil || strings.TrimSpace(lock.Client.ConfigSHA256) == "" {
+		return false
+	}
+	if pinned, entry := strings.CutPrefix(lock.Client.ConfigSHA256, EntryDigestPrefix); entry && !secureClientHost() {
+		observed, digestErr := ClientEntrySHA256(path, clientID, agentID, lockPath)
+		return digestErr == nil && strings.EqualFold(observed, pinned)
+	}
+	observed, digestErr := fileSHA256(path)
+	return digestErr == nil && strings.EqualFold(observed, lock.Client.ConfigSHA256)
 }
 
 // SecureClientHost reports a Secure Client install, whose guard keeps the

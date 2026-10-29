@@ -1069,6 +1069,15 @@ func (c *hookOnlyConnector) checkAgentSettings(opts SetupOpts) error {
 	if err := validateCopilotOperatorSettings(opts); err != nil {
 		return refuseForAgentConfig(fmt.Errorf("%w; fix that setting, then run: defenseclaw-gateway restart", err))
 	}
+	// An independent handler the operator put in DefenseClaw's own hook file
+	// is the operator's choice too: Setup cannot repair that event without
+	// dropping it, so it refuses before it changes anything, and a gateway
+	// start keeps every other connector (GAP-2372; it stopped them all).
+	if path := c.configPath(opts); strings.TrimSpace(path) != "" {
+		if err := copilotIndependentHandler(path, c.hookCommand(opts), c.copilotHookEvents(opts)); err != nil {
+			return refuseForAgentConfig(err)
+		}
+	}
 	return nil
 }
 
@@ -1869,6 +1878,10 @@ func (c *hookOnlyConnector) teardown(ctx context.Context, opts SetupOpts, hermes
 		if err := removeCursorHookArtifacts(opts); err != nil {
 			errs = append(errs, fmt.Sprintf("remove Cursor hook artifacts: %v", err))
 		}
+	} else if c.name == "antigravity" {
+		if err := removeAntigravityHookScript(opts, c.scriptName); err != nil {
+			errs = append(errs, fmt.Sprintf("remove the Antigravity hook script: %v", err))
+		}
 	} else if err := writeDisabledHookTombstone(opts, c.scriptName, c.name); err != nil {
 		errs = append(errs, fmt.Sprintf("disabled hook tombstone: %v", err))
 	}
@@ -2103,6 +2116,30 @@ func hermesHomeHoldsOwnedEntries(configPath, hookScript, command string) (hooks,
 		}
 	}
 	return hooks, approvals, nil
+}
+
+// removeAntigravityHookScript removes the hook script teardown leaves no use
+// for (GAP-2335). Antigravity blocks only on the decision a hook prints: a
+// hook command that cannot start gives no decision, and Antigravity runs the
+// call, which is what the exit-0 tombstone did too. So a running Antigravity
+// that still calls the removed path keeps working without a stub. A file without the DefenseClaw marker, or one teardown
+// cannot remove, gets the disabled tombstone as before, so a foreign or
+// locked file is never left forwarding stale payloads.
+func removeAntigravityHookScript(opts SetupOpts, scriptName string) error {
+	path := filepath.Join(opts.DataDir, "hooks", scriptName)
+	if _, err := os.Lstat(path); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		return writeDisabledHookTombstone(opts, scriptName, "antigravity")
+	}
+	if !scriptHasMarker(path) {
+		return writeDisabledHookTombstone(opts, scriptName, "antigravity")
+	}
+	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return writeDisabledHookTombstone(opts, scriptName, "antigravity")
+	}
+	return nil
 }
 
 // removeCursorHookArtifacts removes only files that still carry the
@@ -2885,13 +2922,19 @@ func hermesResolvedConfigPath(SetupOpts) (string, error) {
 // cannot resolve (hermespath.VerifyAccountHome), or a named profile Hermes
 // selects instead of the default one DefenseClaw set up (GAP-0499). A check
 // that passed on the default home or profile proved nothing about another
-// one Hermes runs from.
+// one Hermes runs from. The managed guardian checks the account's evidence
+// also when it verifies as the account itself (the Linux and macOS
+// verification worker runs with the account's own home), not only when it
+// acts for another account: the worker skipped it, so a persistent
+// HERMES_HOME redirect of the account passed verify, readiness and
+// reconcile (GAP-2374). A per-user check of the process's own home keeps
+// HERMES_HOME of its environment as the answer.
 func hermesVerifiedConfigPath(opts SetupOpts) (string, error) {
 	configPath, err := hermesResolvedConfigPath(opts)
 	if err != nil {
 		return "", fmt.Errorf("hermes hooks not verified: %w", err)
 	}
-	if home := activeUserHomeOverride(); HermesConfigPathOverride == "" && home != "" && (runtime.GOOS == "windows" || !isProcessUserHome(home)) {
+	if home := activeUserHomeOverride(); HermesConfigPathOverride == "" && home != "" && (runtime.GOOS == "windows" || opts.ManagedEnterprise || !isProcessUserHome(home)) {
 		hermesHome := filepath.Dir(configPath)
 		if err := hermespath.VerifyAccountHome(home, hermesHome, hermesHomeSetUpAt(opts.DataDir, hermesHome)); err != nil {
 			return "", fmt.Errorf("hermes hooks not verified: %w", err)
@@ -5306,20 +5349,14 @@ func patchCopilotHooksForOS(path, hookScript string, events []string, goos strin
 			return fmt.Errorf("copilot: unsupported hook event %q in resolved contract", event)
 		}
 		selected[event] = true
-		// Copilot runs every entry in an event array. An independent entry in
-		// this file must be moved before Setup can safely restore the current
-		// hook. Check all entries before writing any event back to disk.
-		if raw, present := hooks[event]; present {
-			entries, ok := raw.([]interface{})
-			if !ok {
-				entries = []interface{}{raw}
-			}
-			for _, entry := range entries {
-				if !copilotBoundEventOwnsHook(entry, hookScript) {
-					return fmt.Errorf("copilot: cannot repair event %q in %s: an independent or unrecognized handler is present; move it to another hook file in the same hooks directory, then run defenseclaw setup copilot again", event, path)
-				}
-			}
-		}
+	}
+	// Copilot runs every entry in an event array. An independent entry in
+	// this file must be moved before Setup can safely restore the current
+	// hook. Check all entries before writing any event back to disk.
+	if err := copilotIndependentHandlerIn(path, hooks, hookScript, events); err != nil {
+		return err
+	}
+	for _, event := range events {
 		hooks[event] = []interface{}{copilotHookRegistration(goos, event, hookScript)}
 	}
 	// Remove DefenseClaw's handler from events outside this contract too. An
@@ -5347,6 +5384,43 @@ func patchCopilotHooksForOS(path, hookScript string, events []string, goos strin
 // A bound event may be replaced only when every executable command in its
 // entry is a known DefenseClaw form. Do not claim a combined command or a
 // nested handler merely because it also mentions our script.
+// copilotIndependentHandler reports an entry DefenseClaw does not own on one
+// of events in the Copilot hook file at path (copilotIndependentHandlerIn).
+// A file that does not exist has none; one that cannot be read is left to
+// Setup, which reports it.
+func copilotIndependentHandler(path, hookScript string, events []string) error {
+	cfg, err := readJSONObject(path)
+	if err != nil {
+		return nil
+	}
+	hooks, _ := cfg["hooks"].(map[string]interface{})
+	return copilotIndependentHandlerIn(path, hooks, hookScript, events)
+}
+
+// copilotIndependentHandlerIn reports the first entry of events in hooks
+// that DefenseClaw does not own: Setup would drop it to restore the event.
+// The text names the move, which is the repair (setup cannot replace it).
+func copilotIndependentHandlerIn(path string, hooks map[string]interface{}, hookScript string, events []string) error {
+	for _, event := range events {
+		raw, present := hooks[event]
+		if !present {
+			continue
+		}
+		entries, ok := raw.([]interface{})
+		if !ok {
+			entries = []interface{}{raw}
+		}
+		for _, entry := range entries {
+			if !copilotBoundEventOwnsHook(entry, hookScript) {
+				return fmt.Errorf("copilot: cannot repair event %q in %s: an independent or unrecognized handler is present; "+
+					"move it to another hook file in the same hooks directory (Copilot reads every file there), "+
+					"then run: defenseclaw setup copilot --yes", event, path)
+			}
+		}
+	}
+	return nil
+}
+
 func copilotBoundEventOwnsHook(raw interface{}, hookScript string) bool {
 	if copilotLiveOperatorLookalike(raw, hookScript) {
 		return false
@@ -5952,16 +6026,6 @@ func copilotOldManagedCopyEntry(raw interface{}) bool {
 	return false
 }
 
-func appendUniqueMatcherHookGroup(raw interface{}, hookScript string, group map[string]interface{}) []interface{} {
-	list, _ := raw.([]interface{})
-	for _, item := range list {
-		if managedMatcherHookGroup(item, hookScript) {
-			return list
-		}
-	}
-	return append(list, group)
-}
-
 // removeJSONHookReferences removes DefenseClaw's handlers from an agent's
 // JSON hooks file. The file is the agent's (and the operator's), so teardown
 // for a user who never had one leaves it absent instead of writing "{}";
@@ -6320,20 +6384,6 @@ func isCopilotEventBoundShellCommand(command, hookScript string) bool {
 	command = strings.TrimSpace(command)
 	for _, event := range copilotCurrentHookEvents {
 		if command == copilotHookInvocationCommandForEvent("linux", event, hookScript) {
-			return true
-		}
-	}
-	return false
-}
-
-func managedMatcherHookGroup(raw interface{}, hookScript string) bool {
-	group, ok := raw.(map[string]interface{})
-	if !ok {
-		return false
-	}
-	hooks, _ := group["hooks"].([]interface{})
-	for _, hook := range hooks {
-		if managedHookCommandEntry(hook, hookScript) {
 			return true
 		}
 	}

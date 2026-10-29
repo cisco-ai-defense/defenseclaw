@@ -99,12 +99,14 @@ DefenseClaw's own state, agent hook registrations, and files that run code
 
 | Computer | Sees | Enforces |
 | --- | --- | --- |
-| Linux host, open-source | Hook rules on command text and read paths (for example `PATH-SSH-KEY` and `PATH-AWS-CREDS`) | Hook rules in action mode |
+| Linux host, open-source | Hook rules on command text and read paths (for example `PATH-SSH-KEY` and `PATH-AWS-CREDS`) | Hook rules in action mode: an SSH private key read is denied, other credential reads alert (see below) |
 | Linux host, managed | The same, plus Plane C file events and the Tetragon `observe` policy | Hook rules; the kernel controls deny opens of SSH private keys by an enrolled agent's descendants when enforcement is on. Cloud credentials and provider keys are observed only, because the agent's own sign-in reads them |
 | Linux sandbox | Environment variable names in discovery | By construction: the real model key never enters the sandbox (OpenShell swaps a placeholder on the provider's endpoint), the home directory does not exist there, and `.env` files read as empty |
 | macOS host | Hook rules; managed Endpoint Security events | Hook rules |
 | macOS sandbox | Hook rules | By construction, as on Linux: the copy holds back secret files |
 | Windows | Hook rules; the Security log when audited | Hook rules |
+
+With the default rule pack, the hook rules deny a read of an SSH private key (`PATH-SSH-KEY`, for example `cat ~/.ssh/id_rsa`), also in action mode. A plain local read of another credential file, for example `cat ~/.aws/credentials` (`PATH-AWS-CREDS`), is a `MEDIUM` alert and the command goes ahead: agents and their tools read these files to sign in. The agent shows `DefenseClaw observed a MEDIUM ... finding: rule PATH-AWS-CREDS`, and the alert is in `defenseclaw alerts`.
 
 ### Persistence
 
@@ -183,7 +185,7 @@ The layers divide the work so that two of them never make the same decision:
    two controls; hooks keep everything that needs intent.
 2. **The kernel mode never exceeds the guardrail mode.** A connector in
    guardrail observe mode does not block on a policy verdict; it reports
-   "would block"; hook failures still follow the effective hook fail mode. The kernel controls do not deny for that connector either:
+   "would block"; hook failures still follow the effective hook fail mode. One exception: an agent that changes DefenseClaw's own files, such as a copy into `~/.defenseclaw`, is blocked in every mode (rule `tamper.detector_state_write`; the permissive pack only reports it). The kernel controls do not deny for that connector either:
    they stay in monitor mode and status says `kernel_enforce_guardrail_observe`.
 3. **The kernel never denies what the hook path needs.** The controls cover
    SSH private keys and shell and autostart writes. They never cover the hook

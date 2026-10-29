@@ -386,7 +386,13 @@ func Run(ctx context.Context, env *Env, opts Options) *enterprisestatus.Result {
 		opts:   opts,
 		result: enterprisestatus.New(opts.Action, managed.ProfileStandalone, env.GOOS, env.ProductVersion),
 	}
+	env.dirFlagsCleared = func(path, flags string) {
+		if opts.Action == ActionEnsure || opts.Action == ActionRepair {
+			l.result.Changes = append(l.result.Changes, fmt.Sprintf("cleared the macOS %s flag of %s, which stopped DefenseClaw from managing the folder", flags, path))
+		}
+	}
 	failure := l.run(ctx)
+	env.dirFlagsCleared = nil
 	// A no-op ensure and a committed change report the same observed host
 	// limits as status and verify. They do not change these kernel settings.
 	if l.result.Installed && opts.Action != ActionStatus && opts.Action != ActionVerify && opts.Action != ActionUninstall {
@@ -1370,6 +1376,9 @@ func (l *lifecycle) buildPlan(ctx context.Context, record *Deployment, account A
 	}
 	validated, err := env.validateConfigSource(raw, l.opts.ConfigFile)
 	if err != nil {
+		return nil, &codedError{code: codeConfig, err: err}
+	}
+	if err := refuseUnknownGuardrailConnectors(validated.Loaded, l.opts.ConfigFile, env.Layout.ConfigPath); err != nil {
 		return nil, &codedError{code: codeConfig, err: err}
 	}
 	if record == nil {
@@ -4201,15 +4210,16 @@ func (l *lifecycle) recordPackageResult(failure int) {
 }
 
 // refuseUnresolvedPerUserRows asks `enterprise hooks remove-all --check`,
-// before any service stops or policy goes, whether every manifest row can be
-// removed. A failed command or incomplete report also refuses the uninstall:
+// before any service stops or policy goes, whether every manifest row and
+// every pending guardian cleanup can be removed. A failed command or incomplete report also refuses the uninstall:
 // manifest parse and trust errors have no per-row failures to report.
 func (l *lifecycle) refuseUnresolvedPerUserRows(ctx context.Context) bool {
 	env, r := l.env, l.result
 	out, commandErr := env.runGatewayCLI(ctx, "enterprise", "hooks", "remove-all", "--manifest", env.Layout.ManifestPath, "--json", "--check")
 	var report struct {
-		OK     bool     `json:"ok"`
-		Failed []string `json:"failed"`
+		OK      bool     `json:"ok"`
+		Pending []string `json:"pending"`
+		Failed  []string `json:"failed"`
 	}
 	parseErr := json.Unmarshal(out.Stdout, &report)
 	refused := false
@@ -4219,12 +4229,28 @@ func (l *lifecycle) refuseUnresolvedPerUserRows(ctx context.Context) bool {
 			if !ok {
 				continue
 			}
-			r.AddError(codePerUserHooks, fmt.Sprintf("the %s manifest row of user %s cannot be removed: %s; fix or remove that row in %s and rerun `%s`",
+			// The check also names the guardian's pending cleanups of
+			// accounts the manifest no longer names (GAP-2377).
+			r.AddError(codePerUserHooks, fmt.Sprintf("the %s hooks of user %s cannot be removed: %s; fix or remove that row in %s (for a pending guardian cleanup of an account the manifest no longer names, fix that account's home to an existing directory it owns, or remove the account) and rerun `%s`",
 				connector, user, reason, env.Layout.ManifestPath, l.uninstallCommand()))
 			refused = true
 		}
+		// A live account whose home is not available (an unmounted
+		// volume) stops the removal below after it has already removed
+		// what protects the other users (their hooks and Claude Code
+		// blockers) and stopped the services (GAP-2358). It refuses here,
+		// before anything changes. A pending entry with a reason (a home
+		// that is gone, a removed account) still only warns.
+		for _, entry := range report.Pending {
+			user, connector, reason, ok := cutPerUserEntry(entry)
+			if !ok || reason != "" {
+				continue
+			}
+			r.AddError(codePerUserHooks, homeNotAvailableMessage(connector, user, "`"+l.uninstallCommand()+"`"))
+			refused = true
+		}
 	}
-	if commandErr == nil && parseErr == nil && report.OK && len(report.Failed) == 0 {
+	if commandErr == nil && parseErr == nil && report.OK && !refused {
 		return false
 	}
 	if !refused {
@@ -4238,6 +4264,13 @@ func (l *lifecycle) refuseUnresolvedPerUserRows(ctx context.Context) bool {
 	}
 	r.AddError(codeUninstallPrecheck, "nothing was changed: every service is still running and the machine policy is in place; fix the hook-removal precheck and rerun `"+l.uninstallCommand()+"`")
 	return true
+}
+
+// homeNotAvailableMessage is the error for a live account whose home is not
+// available, so DefenseClaw's connector registrations in it may remain and
+// call the hook binary; rerun is the quoted uninstall command.
+func homeNotAvailableMessage(connector, user, rerun string) string {
+	return fmt.Sprintf("DefenseClaw's %s hooks for user %s were not removed because that account's home is not available, so a DefenseClaw registration may remain in it and call the hook binary; make that home available (mount its volume, or move its folder back to the recorded home if it was moved aside) and rerun %s; if that home folder was deleted, recreate it as a folder the account owns and rerun %s", connector, user, rerun, rerun)
 }
 
 // cutPerUserEntry splits a remove-all entry "user/connector: reason". The
@@ -4321,7 +4354,7 @@ func (l *lifecycle) removePerUserRegistrations(ctx context.Context) bool {
 		// as registrations: the binaries, the deployment record and the
 		// services stay, and a rerun once the home is back removes them
 		// (GAP-0443; lead decision 2026-10-26 18:57).
-		r.AddError(codePerUserHooks, fmt.Sprintf("DefenseClaw's %s hooks for user %s were not removed because that account's home is not available, so a DefenseClaw registration may remain in it and call the hook binary; make that home available (mount its volume) and rerun %s; if that home folder was deleted, recreate it as a folder the account owns and rerun %s", connector, user, rerun, rerun))
+		r.AddError(codePerUserHooks, homeNotAvailableMessage(connector, user, rerun))
 		left = true
 	}
 	for _, entry := range report.StateFailed {

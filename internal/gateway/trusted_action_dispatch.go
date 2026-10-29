@@ -24,12 +24,14 @@ import (
 	"io"
 	"net/netip"
 	"os"
+	osuser "os/user"
 	"path"
 	"path/filepath"
 	"regexp"
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"unicode/utf8"
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
@@ -259,6 +261,7 @@ func dispatchTrustedAction(
 	if _, ok := managedHookPeerFromContext(parent); ok {
 		request.ProtectedHomeHook = true
 	}
+	request.Input.ActiveStateTreeNames = clientStateTreeNames(request.ResolvedWriteTargets)
 	var (
 		facts     actionfacts.Facts
 		analyzed  bool
@@ -281,6 +284,43 @@ func dispatchTrustedAction(
 	}
 	if parent == nil {
 		parent = context.Background()
+	}
+	// A ~<active user> tilde-prefix names the active home from the password
+	// database (GAP-2378), and under a Windows home an MSYS drive mount
+	// (/c/...) names the drive path (GAP-2375): the twin with that spelling
+	// is judged too, and a block proven there counts, as for the plain one.
+	if twin, ok := homeSpellingTwinRequest(request, trustedActiveLogins(parent, request.Input.ActiveHome)...); ok {
+		defer func() {
+			findings = withTwinProvenBlocks(findings, dispatchTrustedAction(parent, twin))
+		}()
+	}
+	// A cp, mv, install, ln, dd or tee call with a runtime-expanded operand word has
+	// a partial argv that ties no path to the call, so a literal destination
+	// went unjudged (cp a.txt ~/.defenseclaw/config.yaml $(true), GAP-2477).
+	// Each reading with static operands is one way the call can run, and a
+	// block proven on one counts.
+	for _, twin := range dynamicOperandTwinRequests(request) {
+		defer func() {
+			findings = withTwinProvenBlocks(findings, dispatchTrustedAction(parent, twin))
+		}()
+	}
+	// A pathname pattern under ~/.defenseclaw names the state files it
+	// matches when the shell runs the call (cp a.txt ~/.defenseclaw/conf*.yaml,
+	// GAP-2496); the reading with the matches is judged, and only its block
+	// counts.
+	if twin, ok := stateGlobTwinRequest(request); ok {
+		defer func() {
+			findings = withTwinProvenBlocks(findings, dispatchTrustedAction(parent, twin))
+		}()
+	}
+	// A file writer run through nohup, nice, time, timeout, env NAME=value,
+	// command, sudo or exec (or after a word that may expand to nothing)
+	// writes what the plain call writes (GAP-2512); the plain reading is
+	// judged, and only its block counts.
+	if twin, ok := wrapperUnwrapTwinRequest(request); ok {
+		defer func() {
+			findings = withTwinProvenBlocks(findings, dispatchTrustedAction(parent, twin))
+		}()
 	}
 
 	facts = actionfacts.Analyze(request.Input)
@@ -796,24 +836,49 @@ func withActiveStateTargetMention(
 	facts actionfacts.Facts,
 	findings []RuleFinding,
 ) []RuleFinding {
-	command, known := trustedBashCommandInput(request.Input)
-	if !known {
+	// A pattern, brace list, rsync or git clean that expands onto the
+	// state names no path fact, so it is proved from the shell words
+	// (GAP-2047); so is an archive extraction into it (GAP-2415).
+	// A bash here-string, which the POSIX parse rejects, is judged by its
+	// POSIX twin alone (GAP-2047 row a): a read through one names state but
+	// changes none.
+	hereStringMutates, hereStringJudged := hereStringStateMutation(facts, request)
+	if hereStringJudged && !hereStringMutates {
 		return findings
 	}
-	proven := false
-	if hookpaths.ActionStateTargetMention(command, request.Input.CWD, request.Input.ActiveHome) {
-		proven = provenStateMutationPath(facts, request) || provenBashAggregateStateWrite(request) ||
-			provenShellRedirectStateWrite(request) || provenCMDSlashCStateWrite(request) ||
-			provenPowerShellStateWrite(request)
-	} else if strings.Contains(strings.ToLower(command), ".defenseclaw") {
-		// The mention scan places files below the state directory; a cmd /c
-		// body that removes or moves the directory itself (cmd /c rd /s /q
-		// %USERPROFILE%\.defenseclaw) names none, while the cmd twin proves
-		// the mutation of the state root (checker it9 RV9-2 X02, X07).
-		proven = provenCMDSlashCStateWrite(request) || provenPowerShellStateWrite(request)
-	}
-	if !proven {
-		return findings
+	// A write through a link the command makes to active state is proven by
+	// the link reading: the mention scan and the whole-action proof do not
+	// follow the new link (GAP-2522), nor read sed -i --follow-symlinks
+	// (GAP-2529).
+	if !hereStringMutates && !globbedStateMutation(facts) && !globbedStateMutationThroughLink(facts, request) &&
+		!archiveExtractsIntoState(facts, request) && !provenLinkedStateWrite(facts, request) &&
+		!provenFollowedInPlaceStateWrite(facts, request) {
+		command, known := trustedBashCommandInput(request.Input)
+		if !known {
+			return findings
+		}
+		if !hookpaths.ActionStateTargetMention(command, request.Input.CWD, request.Input.ActiveHome) &&
+			!factsHaveFindHandOff(facts) && !stateOperandThroughLink(facts, request) {
+			// Behind ProtectHome the gateway cannot open the user's home, so the
+			// mention scan cannot place a home target. A redirect target the
+			// shell opens is still proven against the hook client's resolved
+			// target map (GAP-2328: $CMD; echo $X > ~/.defenseclaw/config.yaml).
+			if !request.ProtectedHomeHook || !provenShellRedirectStateWrite(request) {
+				// The mention scan places files below the state directory; a
+				// cmd /c body that removes or moves the directory itself (cmd
+				// /c rd /s /q %USERPROFILE%\.defenseclaw) names none, while the
+				// cmd twin (or the PowerShell reading, GAP-2414) proves the mutation of
+				// the state root (classifier-ps checker it9 RV9-2 X02, X07).
+				if !strings.Contains(strings.ToLower(command), ".defenseclaw") ||
+					!provenCMDSlashCStateWrite(request) && !provenPowerShellStateWrite(request) {
+					return findings
+				}
+			}
+		} else if !provenStateMutationPath(facts, request) && !provenBashAggregateStateWrite(request) &&
+			!provenShellRedirectStateWrite(request) && !provenCMDSlashCStateWrite(request) &&
+			!provenPowerShellStateWrite(request) {
+			return findings
+		}
 	}
 	const ruleID = "tamper.detector_state_write"
 	_, rule, ok := trustedActionCatalogRule(generation, ruleID)
@@ -2860,6 +2925,7 @@ func provenStateMutationPath(facts actionfacts.Facts, request trustedActionReque
 		return false
 	}
 	wholeActionProven := projected.Authoritative() && projected.EnforcementEligible()
+	lineStaysOff := findStripLineStaysOffOf(request, path.Join(path.Clean(projected.ActiveHome), ".defenseclaw"))
 	for _, candidate := range projected.Paths {
 		command, ok := integrityCommandByID(projected, candidate.CommandID)
 		if !ok {
@@ -2870,11 +2936,14 @@ func provenStateMutationPath(facts actionfacts.Facts, request trustedActionReque
 			provenMutation = provenPartialStateRedirect(facts, command, candidate)
 		}
 		if !provenMutation {
+			provenMutation = provenPartialFindHandOff(facts, command, candidate)
+		}
+		if !provenMutation {
 			continue
 		}
 		if entry, ok := stateDirectoryEntryTarget(command, candidate, request); ok {
 			candidate.Resolved = entry
-			if matchesActiveDefenseClawState(projected, candidate) {
+			if matchesActiveDefenseClawStateInLine(projected, candidate, lineStaysOff, request.ResolvedWriteTargets) {
 				return true
 			}
 			continue
@@ -2889,8 +2958,16 @@ func provenStateMutationPath(facts actionfacts.Facts, request trustedActionReque
 		if physical == "" && !request.SkipLocalFilesystemResolution {
 			if request.ProtectedHomeHook {
 				// Only an OS-proved alias is safe to resolve here when the
-				// authenticated hook supplied no target-map entry.
+				// authenticated hook supplied no target-map entry. The home
+				// itself is the peer's home from the account database: a
+				// find that starts there (`yes | find ~ ...`, which the
+				// client lists no target for) is judged from it (GAP-2404
+				// pod ip21, managed RHEL).
 				physical, _ = hookpaths.ResolveActiveStateHardlinkTarget(candidate.Resolved, projected.ActiveHome)
+				if physical == "" && path.IsAbs(candidate.Resolved) &&
+					path.Clean(candidate.Resolved) == path.Clean(projected.ActiveHome) {
+					physical = path.Clean(candidate.Resolved)
+				}
 			} else {
 				physical, _ = hookpaths.ResolveWriteTarget(candidate.Resolved)
 			}
@@ -2901,8 +2978,363 @@ func provenStateMutationPath(facts actionfacts.Facts, request trustedActionReque
 		if active, same := hookpaths.ResolveActiveStateHardlinkTarget(physical, projected.ActiveHome); same {
 			physical = active
 		}
+		if candidate.Flavor == actionfacts.PathFlavorPOSIX {
+			physical = filepath.ToSlash(physical)
+		}
 		candidate.Resolved = physical
-		if matchesActiveDefenseClawState(projected, candidate) {
+		if matchesActiveDefenseClawStateInLine(projected, candidate, lineStaysOff, request.ResolvedWriteTargets) {
+			return true
+		}
+	}
+	return false
+}
+
+// stateLinkResolver resolves a path through links: the hook's resolved
+// write targets first, then the local filesystem when the hook allows it.
+func stateLinkResolver(request trustedActionRequest) func(string) (string, bool) {
+	return func(value string) (string, bool) {
+		if physical, found := request.ResolvedWriteTargets[value]; found {
+			return physical, true
+		}
+		if request.SkipLocalFilesystemResolution || request.ProtectedHomeHook {
+			return "", false
+		}
+		return hookpaths.ResolveWriteTarget(value)
+	}
+}
+
+// stateRootOf returns the physical state root and a test for a path in it.
+func stateRootOf(home string, resolve func(string) (string, bool)) (string, func(string) bool) {
+	root, ok := resolve(filepath.Join(home, ".defenseclaw"))
+	if !ok {
+		root = filepath.Join(home, ".defenseclaw")
+	}
+	return root, func(value string) bool {
+		return value == root || strings.HasPrefix(value, root+string(filepath.Separator))
+	}
+}
+
+// globbedStateMutationThroughLink is globbedStateMutation for operands
+// spelled through a link to the state (`rm -rf dclink/*`, `rm -rf
+// ./dclink/hooks/*`, `cp -a /tmp/x/. dclink/` with dclink ->
+// ~/.defenseclaw; pod check17 GAP-2047): the static directory part of each
+// word (up to the first pattern component; the parent of a plain word, the
+// word itself when it ends in / or /.) is resolved, and a word whose
+// directory is physically in the state is judged by its ~/.defenseclaw
+// spelling.
+func globbedStateMutationThroughLink(facts actionfacts.Facts, request trustedActionRequest) bool {
+	home := strings.TrimRight(facts.ActiveHome, "/")
+	if !strings.HasPrefix(home, "/") {
+		return false
+	}
+	resolve := stateLinkResolver(request)
+	root, inState := stateRootOf(home, resolve)
+	for _, command := range facts.Commands {
+		if command.Effect == actionfacts.EffectPreview || command.Dialect != actionfacts.DialectPOSIX {
+			continue
+		}
+		words, ok := stateOperandWords(command)
+		if !ok {
+			continue
+		}
+		rewritten, changed := slices.Clone(words), false
+		for index, word := range words {
+			if spelled, ok := stateWordThroughLink(word, home, facts.CWD, root, resolve, inState); ok {
+				rewritten[index], changed = spelled, true
+			}
+		}
+		if changed && globbedStateCommandMutates(command, rewritten, home, facts.CWD) {
+			return true
+		}
+	}
+	return false
+}
+
+// stateWordThroughLink returns word spelled under ~/.defenseclaw when its
+// static directory part is physically in the state but not spelled there.
+func stateWordThroughLink(
+	word, home, cwd, root string,
+	resolve func(string) (string, bool),
+	inState func(string) bool,
+) (string, bool) {
+	if word == "" || strings.HasPrefix(word, "-") {
+		return "", false
+	}
+	full, ok := stateHomePath(word, home, cwd)
+	if !ok {
+		return "", false
+	}
+	components := strings.Split(full, "/")
+	split := len(components) - 1
+	if strings.HasSuffix(full, "/") || strings.HasSuffix(full, "/.") {
+		split = len(components)
+	}
+	for index, component := range components {
+		if stateWordExpands(component) {
+			split = min(split, index)
+			break
+		}
+	}
+	directory := path.Clean("/" + strings.Join(components[:split], "/"))
+	if directory == "/" || directory == home {
+		return "", false
+	}
+	spelledRoot := home + "/.defenseclaw"
+	if directory == spelledRoot || strings.HasPrefix(directory, spelledRoot+"/") {
+		return "", false
+	}
+	physical, ok := resolve(directory)
+	if !ok || !inState(physical) {
+		return "", false
+	}
+	rest := strings.Join(components[split:], "/")
+	spelled := spelledRoot + strings.TrimPrefix(physical, root)
+	if rest != "" {
+		spelled += "/" + rest
+	} else if strings.HasSuffix(word, "/") {
+		spelled += "/"
+	}
+	return spelled, true
+}
+
+// stateOperandThroughLink reports a changing operand spelled outside the
+// state whose place is in it: a project symlink to the state root as a
+// parent (`rm -rf dclink/installer`), or as the operand itself when a
+// trailing separator makes the kernel follow it (`rm -rf dclink/`). Such a
+// call names no state path, so the mention check alone let it through
+// (GAP-2047); provenStateMutationPath then judges it on the physical
+// target, as it does every other operand.
+func stateOperandThroughLink(facts actionfacts.Facts, request trustedActionRequest) bool {
+	home := facts.ActiveHome
+	if !filepath.IsAbs(home) {
+		return false
+	}
+	resolve := stateLinkResolver(request)
+	_, inState := stateRootOf(home, resolve)
+	for _, candidate := range facts.Paths {
+		switch candidate.Access {
+		case actionfacts.PathAccessDelete, actionfacts.PathAccessWrite,
+			actionfacts.PathAccessAppend, actionfacts.PathAccessMetadata:
+		default:
+			continue
+		}
+		value := candidate.Resolved
+		if !filepath.IsAbs(value) || inState(value) {
+			continue
+		}
+		target := filepath.Dir(value)
+		if strings.HasSuffix(candidate.Value, "/") || strings.HasSuffix(candidate.Value, "/.") {
+			target = value
+		}
+		if physical, ok := resolve(target); ok && inState(physical) {
+			return true
+		}
+	}
+	return false
+}
+
+// provenLinkedStateWrite reports a command whose writer, proven for its
+// own command, writes through a link that an earlier part of the same
+// command makes to active DefenseClaw state: ln -s ~/.defenseclaw hc;
+// cp a.txt hc/config.yaml, plain or behind a prefix wrapper (GAP-2522).
+// The analysis marks such an action partial (a new link makes later
+// targets unknown), so the whole-action proof never holds for it; the
+// link reading here is the proof. A write that only may run (after &&)
+// counts, as the ~/.ssh alias does.
+func provenLinkedStateWrite(facts actionfacts.Facts, request trustedActionRequest) bool {
+	if request.Input.DialectHint != actionfacts.DialectPOSIX && request.Input.DialectHint != "" {
+		return false
+	}
+	text, known := trustedBashCommandInput(request.Input)
+	if !known || !strings.Contains(text, "ln") && !strings.Contains(text, "link") && !strings.Contains(text, "cp") {
+		return false
+	}
+	projected := facts.EnforcementProjection()
+	if projected.ActiveHome == "" {
+		return false
+	}
+	var links *hookpaths.Links
+	for _, candidate := range projected.Paths {
+		command, ok := integrityCommandByID(projected, candidate.CommandID)
+		if !ok || !stateCommandMutatesPath(command, candidate) {
+			continue
+		}
+		if links == nil {
+			made := hookpaths.CommandLinks(request.Input.Tool, text, request.Input.CWD, projected.ActiveHome)
+			links = &made
+		}
+		if linkedActiveStateWrite(projected, command, candidate, *links) {
+			return true
+		}
+	}
+	if links == nil {
+		made := hookpaths.CommandLinks(request.Input.Tool, text, request.Input.CWD, projected.ActiveHome)
+		links = &made
+	}
+	return links.HasAliases() && placedLinkedStateWrite(request, text, projected.ActiveHome, *links)
+}
+
+// placedLinkedStateWrite reads each top-level statement in the directory
+// it runs in, so a write after a cd through a link the command makes is
+// placed where the shell places it (cd ~ && ln -s .defenseclaw hc && cp
+// project/a.txt hc/config.yaml), and an in-place editor operand (sed -i,
+// perl -i) through a linked directory is the write it is on the state file
+// itself (ln -s ~/.defenseclaw hc; sed -i s/a/b/ hc/config.yaml, GAP-2522).
+// An in-place editor replaces the directory entry, so only a link to one of
+// its directories is followed. The statements are the ones the link reading
+// placed; a command whose directory changes it cannot place is read whole
+// in its own directory.
+func placedLinkedStateWrite(request trustedActionRequest, text, home string, links hookpaths.Links) bool {
+	statements, placed := hookpaths.TopLevelStatements(text, request.Input.CWD, home)
+	if !placed || len(statements) == 0 {
+		statements = []hookpaths.PlacedStatement{{Command: text, Dir: request.Input.CWD}}
+	}
+	for _, statement := range statements {
+		input := request.Input
+		input.Args, input.Argv, input.Command, input.CWD = nil, nil, statement.Command, statement.Dir
+		projected := actionfacts.Analyze(input).EnforcementProjection()
+		if projected.ActiveHome == "" {
+			continue
+		}
+		if statement.Dir != request.Input.CWD {
+			for _, candidate := range projected.Paths {
+				command, ok := integrityCommandByID(projected, candidate.CommandID)
+				if ok && stateCommandMutatesPath(command, candidate) &&
+					linkedActiveStateWrite(projected, command, candidate, links) {
+					return true
+				}
+			}
+		}
+		for _, operand := range hookpaths.InPlaceEditOperands(statement.Command, statement.Dir, home) {
+			for _, target := range links.AliasTargets(operand, true) {
+				written := actionfacts.PathFact{
+					Access: actionfacts.PathAccessWrite, Flavor: actionfacts.PathFlavorPOSIX,
+					Value: target, Normalized: target, Absolute: true, Resolved: target,
+				}
+				if matchesActiveDefenseClawState(projected, written) {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
+// provenFollowedInPlaceStateWrite reports sed -i --follow-symlinks (gsed
+// too, the option abbreviated or not) whose operand is active DefenseClaw
+// state, directly, through an existing link or through a link the same
+// command makes: GNU sed then rewrites the file the link names instead of
+// replacing the link (GAP-2529). The facts leave --follow-symlinks and a
+// clustered -i (-si, -Ei) partial, so no path proof holds for them. Without
+// --follow-symlinks sed -i and perl -i replace the directory entry: the
+// entry itself is judged (the operand name, its parent read through links),
+// never the file a final link names, so an edit of a link to state stays an
+// ordinary write (GAP-2531).
+func provenFollowedInPlaceStateWrite(facts actionfacts.Facts, request trustedActionRequest) bool {
+	if request.Input.DialectHint != actionfacts.DialectPOSIX && request.Input.DialectHint != "" {
+		return false
+	}
+	text, known := trustedBashCommandInput(request.Input)
+	if !known || !strings.Contains(text, "sed") && !strings.Contains(text, "perl") {
+		return false
+	}
+	home := facts.EnforcementProjection().ActiveHome
+	if home == "" {
+		return false
+	}
+	statements, placed := hookpaths.TopLevelStatements(text, request.Input.CWD, home)
+	if !placed || len(statements) == 0 {
+		statements = []hookpaths.PlacedStatement{{Command: text, Dir: request.Input.CWD}}
+	}
+	links := hookpaths.CommandLinks(request.Input.Tool, text, request.Input.CWD, home)
+	for _, statement := range statements {
+		operands := hookpaths.FollowedInPlaceEditOperands(statement.Command, statement.Dir, home)
+		entries := hookpaths.InPlaceEditOperands(statement.Command, statement.Dir, home)
+		if len(operands) == 0 && len(entries) == 0 {
+			continue
+		}
+		input := request.Input
+		input.Args, input.Argv, input.Command, input.CWD = nil, nil, statement.Command, statement.Dir
+		projected := actionfacts.Analyze(input).EnforcementProjection()
+		if projected.ActiveHome == "" {
+			continue
+		}
+		for _, operand := range operands {
+			targets := append([]string{operand}, links.AliasTargets(operand, false)...)
+			if physical, found := request.ResolvedWriteTargets[operand]; found {
+				targets = append(targets, physical)
+			} else if !request.SkipLocalFilesystemResolution && !request.ProtectedHomeHook {
+				if physical, ok := hookpaths.ResolveWriteTarget(operand); ok {
+					targets = append(targets, physical)
+				}
+			}
+			for _, target := range targets {
+				if active, same := hookpaths.ResolveActiveStateHardlinkTarget(target, projected.ActiveHome); same {
+					target = active
+				}
+				written := actionfacts.PathFact{
+					Access: actionfacts.PathAccessWrite, Flavor: actionfacts.PathFlavorPOSIX,
+					Value: target, Normalized: target, Absolute: true, Resolved: target,
+				}
+				if matchesActiveDefenseClawState(projected, written) {
+					return true
+				}
+			}
+		}
+		for _, entry := range entries {
+			if slices.Contains(operands, entry) {
+				continue
+			}
+			targets := append([]string{entry}, links.AliasTargets(entry, true)...)
+			if !request.SkipLocalFilesystemResolution && !request.ProtectedHomeHook {
+				if parent, ok := hookpaths.ResolveWriteTarget(filepath.Dir(entry)); ok {
+					targets = append(targets, filepath.Join(parent, filepath.Base(entry)))
+				}
+			}
+			for _, target := range targets {
+				written := actionfacts.PathFact{
+					Access: actionfacts.PathAccessWrite, Flavor: actionfacts.PathFlavorPOSIX,
+					Value: target, Normalized: target, Absolute: true, Resolved: target,
+				}
+				if matchesActiveDefenseClawState(projected, written) {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
+// linkedActiveStateWrite reports a write operand that reaches active
+// state through a link the same command makes: ln -s ~/.defenseclaw hc;
+// cp a.txt hc/config.yaml writes ~/.defenseclaw/config.yaml, plain or
+// behind a prefix wrapper, as the ~/.ssh alias reaches authorized_keys
+// (GAP-1521, GAP-2522). The link does not exist when the hook runs, so
+// the name is followed through the links of the same command only. ln,
+// a delete or a move acts on the final name: only a link to one of its
+// directories is followed.
+func linkedActiveStateWrite(
+	projected actionfacts.Facts,
+	command actionfacts.CommandFact,
+	candidate actionfacts.PathFact,
+	links hookpaths.Links,
+) bool {
+	value := candidate.Resolved
+	if value == "" {
+		value = candidate.Normalized
+	}
+	if !filepath.IsAbs(value) {
+		return false
+	}
+	// ln, a delete and a move replace or remove the final name itself.
+	entry := candidate.Access == actionfacts.PathAccessDelete ||
+		slices.Contains([]string{"ln", "link", "gln", "glink"}, filepath.Base(command.Program)) ||
+		candidate.Access == actionfacts.PathAccessWrite && hasOperation(command, actionfacts.OperationMove) &&
+			!hasAnyOperation(command, actionfacts.OperationWrite, actionfacts.OperationAppend, actionfacts.OperationCopy)
+	for _, target := range links.AliasTargets(value, entry) {
+		linked := candidate
+		linked.Resolved = target
+		if matchesActiveDefenseClawState(projected, linked) {
 			return true
 		}
 	}
@@ -2945,6 +3377,11 @@ func stateDirectoryEntryTarget(
 	entry := filepath.Join(parent, filepath.Base(value))
 	if info, err := os.Stat(entry); err == nil && info.IsDir() && (moveDestination || windows) {
 		return "", false
+	}
+	if candidate.Flavor == actionfacts.PathFlavorPOSIX {
+		// A Git Bash operand on Windows keeps its slash spelling, so the
+		// state checks read the entry the way they read the operand.
+		entry = filepath.ToSlash(entry)
 	}
 	return entry, true
 }
@@ -3119,8 +3556,27 @@ func appendJSONStrings(texts []string, raw json.RawMessage) []string {
 // withTwinProvenBlocks returns findings, the finalized findings of a
 // redirect-target action, with each finding of twin, the same lanes judged on
 // its static-target twin, that may block there in place of the finding of the
-// same rule or owner that may not.
+// same rule or owner that may not, or that may block on a stronger proof: an
+// authorized proof over an unauthorized one, and a proven mutation of
+// DefenseClaw's own state (the observe-mode self-protection block,
+// provenActiveStateMutation) over any other. A weaker finding the original
+// spelling raised (a ~<login> path the gateway cannot place, GAP-2378) must
+// not hide the twin's proof.
 func withTwinProvenBlocks(findings, twin []RuleFinding) []RuleFinding {
+	strength := func(finding RuleFinding) int {
+		switch {
+		case !finding.contributesToEnforcement():
+			return 0
+		case !finding.proof.authorizes(finding.RuleID):
+			return 1
+		case finding.proof.kind == findingProofActionFactsSemantic ||
+			finding.proof.kind == findingProofActionFactsSubgraph ||
+			finding.proof.kind == findingProofActiveStateMutation:
+			return 3
+		default:
+			return 2
+		}
+	}
 	for _, proven := range twin {
 		if !proven.contributesToEnforcement() {
 			continue
@@ -3132,7 +3588,7 @@ func withTwinProvenBlocks(findings, twin []RuleFinding) []RuleFinding {
 		switch {
 		case index < 0:
 			findings = append(findings, proven)
-		case !findings[index].contributesToEnforcement():
+		case strength(proven) > strength(findings[index]):
 			findings[index] = proven
 		}
 	}
@@ -7191,6 +7647,147 @@ func trustedShellHeredocAt(
 	return heredoc, true
 }
 
+// homeSpellingTwinRequest returns request with its Bash command's
+// ~<active user> tilde-prefixes (the home's base name or one of logins)
+// spelled as the active home (actionfacts.ActiveUserTildeTwin) or, under a Windows home, its MSYS
+// drive mounts spelled as drive paths (actionfacts.MSYSDrivePathTwin). A
+// hook client's resolved target for the original spelling is kept for the
+// new one. The twin records no audit or telemetry of its own.
+func homeSpellingTwinRequest(request trustedActionRequest, logins ...string) (trustedActionRequest, bool) {
+	if request.Input.DialectHint != actionfacts.DialectPOSIX && request.Input.DialectHint != "" {
+		return trustedActionRequest{}, false
+	}
+	command, known := trustedBashCommandInput(request.Input)
+	if !known {
+		return trustedActionRequest{}, false
+	}
+	var respell func(string) string
+	rewritten, prefixes, ok := actionfacts.ActiveUserTildeTwin(command, request.Input.ActiveHome, logins...)
+	if ok {
+		home := strings.TrimRight(filepath.ToSlash(request.Input.ActiveHome), "/")
+		respell = func(spelling string) string {
+			for _, prefix := range prefixes {
+				if spelling == prefix || strings.HasPrefix(spelling, prefix+"/") {
+					return home + spelling[len(prefix):]
+				}
+			}
+			return spelling
+		}
+	} else if rewritten, ok = actionfacts.MSYSDrivePathTwin(command, request.Input.ActiveHome); ok {
+		respell = actionfacts.MSYSDrivePath
+	} else {
+		return trustedActionRequest{}, false
+	}
+	twin := request
+	twin.record, twin.recordTelemetry = nil, nil
+	twin.Input.Command, twin.Input.Args, twin.Input.Argv = rewritten, nil, nil
+	twin.conflictSource = nil
+	if strings.Contains(request.LegacyText, command) {
+		twin.LegacyText = strings.ReplaceAll(request.LegacyText, command, rewritten)
+	} else {
+		twin.LegacyText = rewritten
+	}
+	if request.ResolvedWriteTargets != nil {
+		twin.ResolvedWriteTargets = make(map[string]string, len(request.ResolvedWriteTargets))
+		for spelling, value := range request.ResolvedWriteTargets {
+			twin.ResolvedWriteTargets[spelling] = value
+		}
+		for spelling, value := range request.ResolvedWriteTargets {
+			if respelled := respell(spelling); respelled != spelling {
+				if _, taken := twin.ResolvedWriteTargets[respelled]; !taken {
+					twin.ResolvedWriteTargets[respelled] = value
+				}
+			}
+		}
+	}
+	return twin, true
+}
+
+// dynamicOperandTwinRequests returns the request for each reading of
+// actionfacts.DynamicOperandTwins of a POSIX Bash call. Behind ProtectHome
+// the targets of a reading are not in the hook client map, which was walked
+// for the call as written, and an unlisted write target is judged as a
+// possible keys-file write, so a reading there would block benign project
+// copies; that gateway keeps the client map judgment.
+func dynamicOperandTwinRequests(request trustedActionRequest) []trustedActionRequest {
+	if request.ProtectedHomeHook {
+		return nil
+	}
+	if request.Input.DialectHint != actionfacts.DialectPOSIX && request.Input.DialectHint != "" {
+		return nil
+	}
+	command, known := trustedBashCommandInput(request.Input)
+	if !known {
+		return nil
+	}
+	var twins []trustedActionRequest
+	for _, rewritten := range actionfacts.DynamicOperandTwins(command, request.Input.ActiveHome) {
+		if rewritten != command {
+			twins = append(twins, bashReadingRequest(request, command, rewritten))
+		}
+	}
+	return twins
+}
+
+// bashReadingRequest returns request with its Bash command replaced by
+// another reading of it; the reading records nothing of its own.
+func bashReadingRequest(request trustedActionRequest, command, rewritten string) trustedActionRequest {
+	twin := request
+	twin.record, twin.recordTelemetry = nil, nil
+	twin.Input.Command, twin.Input.Args, twin.Input.Argv = rewritten, nil, nil
+	twin.conflictSource = nil
+	if strings.Contains(request.LegacyText, command) {
+		twin.LegacyText = strings.ReplaceAll(request.LegacyText, command, rewritten)
+	} else {
+		twin.LegacyText = rewritten
+	}
+	return twin
+}
+
+// wrapperUnwrapTwinRequest returns the request for
+// actionfacts.WrapperUnwrapTwin of a POSIX Bash call. A ProtectHome
+// gateway (managed hook peer) has no reading: the hook client map lists
+// only the targets the client read from the wrapped call.
+func wrapperUnwrapTwinRequest(request trustedActionRequest) (trustedActionRequest, bool) {
+	if request.ProtectedHomeHook {
+		return trustedActionRequest{}, false
+	}
+	if request.Input.DialectHint != actionfacts.DialectPOSIX && request.Input.DialectHint != "" {
+		return trustedActionRequest{}, false
+	}
+	command, known := trustedBashCommandInput(request.Input)
+	if !known {
+		return trustedActionRequest{}, false
+	}
+	rewritten, ok := actionfacts.WrapperUnwrapTwin(command)
+	if !ok || rewritten == command {
+		return trustedActionRequest{}, false
+	}
+	return bashReadingRequest(request, command, rewritten), true
+}
+
+// stateGlobTwinRequest returns the request for actionfacts.StateGlobTwin of
+// a POSIX Bash call. The gateway expands the pattern on its own host, so a
+// gateway that may not read the user home (ProtectHome, or a request that
+// skips local resolution) has no reading.
+func stateGlobTwinRequest(request trustedActionRequest) (trustedActionRequest, bool) {
+	if request.ProtectedHomeHook || request.SkipLocalFilesystemResolution {
+		return trustedActionRequest{}, false
+	}
+	if request.Input.DialectHint != actionfacts.DialectPOSIX && request.Input.DialectHint != "" {
+		return trustedActionRequest{}, false
+	}
+	command, known := trustedBashCommandInput(request.Input)
+	if !known {
+		return trustedActionRequest{}, false
+	}
+	rewritten, ok := actionfacts.StateGlobTwin(command, request.Input.ActiveHome)
+	if !ok || rewritten == command {
+		return trustedActionRequest{}, false
+	}
+	return bashReadingRequest(request, command, rewritten), true
+}
+
 func trustedBashCommandInput(input actionfacts.Input) (string, bool) {
 	if !trustedBashExecutionTool(input.Tool) && !trustedPowerShellExecutionTool(input.Tool) {
 		return "", false
@@ -8698,6 +9295,49 @@ func trustedActiveHome(ctx context.Context) string {
 	}
 	return trustedSameHostHome()
 }
+
+// trustedActiveLogins names the login of the account whose home is
+// activeHome, from the same trusted identity trustedActiveHome reads (the
+// kernel-verified managed hook peer, the per-user credential's account, or
+// the account this gateway runs as), so a ~<login> tilde-prefix is read
+// as that home even when the login is not the home's base name or holds
+// '@' (AD user@domain, GAP-2378). A Windows DOMAIN\user name gives user.
+// nil when the request's home is not that account's home.
+func trustedActiveLogins(ctx context.Context, activeHome string) []string {
+	if ctx == nil || activeHome == "" || isSandboxHookRequest(ctx) {
+		return nil
+	}
+	if filepath.Clean(trustedActiveHome(ctx)) != filepath.Clean(activeHome) {
+		return nil
+	}
+	var name string
+	if peer, ok := managedHookPeerFromContext(ctx); ok {
+		name = peer.Name
+	} else if serviceAccountGatewayFromContext(ctx) {
+		if identity, _ := ctx.Value(verifiedUserScopedIdentityContextKey{}).(string); identity != "" {
+			name = userScopedIdentityName(identity)
+		}
+	} else {
+		name = trustedSameHostLogin()
+	}
+	if index := strings.LastIndexByte(name, '\\'); index >= 0 {
+		name = name[index+1:]
+	}
+	if name = strings.TrimSpace(name); name == "" {
+		return nil
+	}
+	return []string{name}
+}
+
+// trustedSameHostLogin is the login name of the account this gateway runs
+// as, looked up once.
+var trustedSameHostLogin = sync.OnceValue(func() string {
+	account, err := osuser.Current()
+	if err != nil {
+		return ""
+	}
+	return account.Username
+})
 
 // unresolvedCallerHome stands in for a standalone caller whose home cannot
 // be resolved (a directory lookup that failed, a home of "/", or an

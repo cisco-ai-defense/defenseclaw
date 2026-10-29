@@ -609,6 +609,16 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 		// Other callers keep the ordinary response contract.
 		ctx, cancelCompletion := agentHookCompletionContext(r.Context())
 		defer cancelCompletion()
+		// The call's event-history rows and correlation observations commit
+		// together, with its audit row (audit.CallWriteBatch): one commit
+		// instead of one per row (GAP-1303, GAP-1791, GAP-0614). What the call
+		// writes after its verdict commits when the handler returns.
+		ctx = audit.WithCallWriteBatch(ctx, a.store)
+		defer func() {
+			closeCtx, cancelClose := agentHookPersistenceContext(ctx)
+			defer cancelClose()
+			audit.CloseCallWrites(closeCtx)
+		}()
 		ctx, correlatedReq, correlationErr := a.correlateHookOccurrence(ctx, profile, req, b)
 		if correlationErr != nil {
 			// Correlation persistence is fail-closed for the cross-call join IDs,
@@ -827,9 +837,12 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 		// An unparsed call is answered without evaluation. Its block stands
 		// at once; any other answer (the observe allow of an unreadable
 		// Copilot call) is given only after the live require-sandbox gate,
-		// which refuses a host run whatever the call.
+		// which refuses a host run whatever the call. A hook's report of a
+		// call it refused as too large has no tool input by design: it is
+		// recorded under HOOK-PAYLOAD-TOO-LARGE (safeEvaluateHook), not as
+		// an unreadable call (GAP-1313).
 		var unparsedAnswer *agentHookResponse
-		if !gated && req.ToolCallUnparsed &&
+		if !gated && req.ToolCallUnparsed && !hookSideRefusal(ctx) &&
 			toolRoute == connector.ToolEventRouteStructuredAction {
 			a.recordParserUncertaintyMetricV8(ctx, req.ConnectorName, 1)
 			answer := a.unparsedStructuredHookResponse(ctx, profile, req)
@@ -1349,7 +1362,14 @@ func (a *APIServer) finalizeAgentHookAnswer(
 					return
 				}
 			}
-			auditErr = a.logConnectorHookAuditEnvelope(ctx, env)
+			// The rows the call queued commit with its audit row, and the
+			// verdict waits for that commit, as it waited for its row alone.
+			auditCtx, auditOutcome := audit.WithCallWriteOutcome(ctx)
+			auditErr = a.logConnectorHookAuditEnvelope(auditCtx, env)
+			audit.FlushCallWrites(ctx)
+			if auditErr == nil {
+				auditErr = auditOutcome.Err()
+			}
 			result.AuditPersisted = auditErr == nil
 		})
 		// A call backed by a pending occurrence (w3-g3-obs; only a
@@ -1442,8 +1462,11 @@ func (a *APIServer) finalizeAgentHookAnswer(
 			}
 		}
 		if !result.DecisionSettled {
-			decision := a.emitHookDecisionObservabilityV8(ctx, req, resp, env, panicked)
-			result.DecisionSettled = decision.settled()
+			decisionCtx, decisionOutcome := audit.WithCallWriteOutcome(ctx)
+			decision := a.emitHookDecisionObservabilityV8(decisionCtx, req, resp, env, panicked)
+			// The hook_decision record is committed before the answer.
+			audit.FlushCallWrites(ctx)
+			result.DecisionSettled = decision.settled() && decisionOutcome.Err() == nil
 			if decision == hookDecisionLogUnbuildable && req.pendingOccurrenceID != "" {
 				fmt.Fprintf(os.Stderr, "[gateway] hook_decision record cannot be built connector=%s event=%s; the connector audit row keeps the decision\n",
 					connectorName, req.HookEventName)

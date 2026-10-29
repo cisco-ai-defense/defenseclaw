@@ -39,6 +39,10 @@ func DirectoryFactsFunc(ctx context.Context) func(uid int) (useridentity.Directo
 	}
 }
 
+// platformLoginShell has nothing to add on Linux: getent, nslcd and
+// /etc/passwd give every account its shell.
+func platformLoginShell(context.Context, commandRunner, string) string { return "" }
+
 // platformMobileAccounts finds none on Linux, whose directory accounts are
 // never copied into /etc/passwd.
 func platformMobileAccounts(context.Context) (map[string]string, error) {
@@ -136,6 +140,9 @@ func platformLocalAccountRecord(context.Context, string) (LocalAccountRecord, bo
 // current.
 func platformAccountRecordGone(context.Context, string) bool { return false }
 
+// platformAccountUIDGone is false for the same reason.
+func platformAccountUIDGone(context.Context, string, int) bool { return false }
+
 // platformLocalGroups reads /etc/group, the files backend itself.
 func platformLocalGroups(context.Context) (map[string]int, error) {
 	data, err := readSmallFile(localGroupPath, 16<<20)
@@ -171,6 +178,11 @@ func readSmallFile(path string, limit int64) ([]byte, error) {
 	}
 	return data, nil
 }
+
+// ProcessLookupsOutliveDeletion is false on Linux: NSS answers each lookup
+// from the account databases (nscd and SSSD caches are invalidated on a
+// change), so a found answer means the account exists.
+const ProcessLookupsOutliveDeletion = false
 
 // DefaultUIDRange reads UID_MIN/UID_MAX from /etc/login.defs, falling back
 // to the shadow-utils defaults.

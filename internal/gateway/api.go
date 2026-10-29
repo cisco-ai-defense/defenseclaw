@@ -3150,7 +3150,7 @@ func (a *APIServer) handleSkillScan(w http.ResponseWriter, r *http.Request) {
 
 	if a.logger != nil {
 		_ = a.logger.LogActionCtx(r.Context(), string(audit.ActionAPISkillScan), req.Target, fmt.Sprintf("findings=%d max=%s", len(result.Findings), result.MaxSeverity()))
-		_ = a.logger.LogScanWithCorrelation(r.Context(), result, "", ScanCorrelationFromContext(r.Context()))
+		_ = a.logger.LogScanWithCorrelation(r.Context(), result, "", scanCorrelationWithJudge(r.Context(), result))
 	}
 
 	a.writeJSON(w, http.StatusOK, withScannerSettings(cfg, "skill", scanAPIResponseEnvelope(result)))
@@ -3330,7 +3330,7 @@ func (a *APIServer) handlePluginScan(w http.ResponseWriter, r *http.Request) {
 
 	if a.logger != nil {
 		_ = a.logger.LogActionCtx(r.Context(), string(audit.ActionAPIPluginScan), req.Target, fmt.Sprintf("findings=%d max=%s", len(result.Findings), result.MaxSeverity()))
-		_ = a.logger.LogScanWithCorrelation(r.Context(), result, "", ScanCorrelationFromContext(r.Context()))
+		_ = a.logger.LogScanWithCorrelation(r.Context(), result, "", scanCorrelationWithJudge(r.Context(), result))
 	}
 
 	a.writeJSON(w, http.StatusOK, scanAPIResponseEnvelope(result))
@@ -4976,4 +4976,15 @@ func connectorProxyBindsByName(name string) bool {
 		return true
 	}
 	return proxyShouldBindForConnector(conn, nil)
+}
+
+// scanCorrelationWithJudge is ScanCorrelationFromContext plus the LLM judge
+// model the skill or plugin scan ran with, so its audit rows say the judge
+// ran, as the install watcher rows do (GAP-0575, GAP-2435).
+func scanCorrelationWithJudge(ctx context.Context, result *scanner.ScanResult) audit.ScanCorrelation {
+	correlation := ScanCorrelationFromContext(ctx)
+	if result != nil {
+		correlation.JudgeModel = result.JudgeModel
+	}
+	return correlation
 }

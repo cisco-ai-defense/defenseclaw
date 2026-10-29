@@ -295,11 +295,17 @@ func (g *sessionStartGate) await(ctx context.Context, key string, wait, arrival 
 			continue
 		default:
 		}
+		// Waiting for another call's start verdict uses no gateway CPU
+		// either: the slot is given up for it and taken back after (GAP-0050).
+		resume := waitWithoutHookRunSlot(ctx)
 		select {
 		case <-entry.done:
+			resume()
 		case <-timer.C:
+			resume()
 			return sessionStartPendingReason, true
 		case <-ctx.Done():
+			resume()
 			return sessionStartPendingReason, true
 		}
 	}
@@ -380,6 +386,10 @@ func (a *APIServer) sessionStartRecordedEarlier(ctx context.Context, connectorNa
 // whose managed runtime registration could not be repaired.
 const codexStartRegistrationUnavailable = "Codex runtime registration is unavailable"
 
+// codexStartRegistrationSetupStep follows the refusal when the cause names
+// no step of its own.
+const codexStartRegistrationSetupStep = "; run: defenseclaw setup codex --yes"
+
 // codexStartRegistrationRefusal repairs a missing managed runtime
 // registration for a Codex session start and returns the refusal when it
 // cannot ("" otherwise, and for every other connector and a sandboxed
@@ -389,11 +399,25 @@ func (a *APIServer) codexStartRegistrationRefusal(ctx context.Context, connector
 		return ""
 	}
 	if err := a.ensureHookRegistration(ctx, connectorName); err != nil {
+		if a.perUserInstallWindowHeld() {
+			// An install or upgrade of this account holds the hook files
+			// (the hook config lock, the fail-mode hold) until it stops
+			// this gateway: the repair cannot run, and the installer writes
+			// the registration. Blocking the session for it denied every
+			// benign call until the gateway stopped and told the user to run
+			// setup mid-upgrade (GAP-2455). The call is decided as at any
+			// other time in the window (installWindowStrict); the next
+			// gateway judges the session start again.
+			fmt.Fprintf(os.Stderr, "[gateway] Codex SessionStart registration check left to the running install or upgrade: %v\n", err)
+			return ""
+		}
 		fmt.Fprintf(os.Stderr, "[gateway] Codex SessionStart registration recovery failed: %v\n", err)
 		if step := registrationRepairStep(err); step != "" {
 			return codexStartRegistrationUnavailable + ": " + step
 		}
-		return codexStartRegistrationUnavailable
+		// Setup registers it again or says what stops it (GAP-1744: the
+		// refusal names a usable next step, not only the outcome).
+		return codexStartRegistrationUnavailable + codexStartRegistrationSetupStep
 	}
 	return ""
 }

@@ -3972,6 +3972,20 @@ def test_identity_dashboard_counts_acp_only_agents_and_sessions() -> None:
         assert "guardrail[.]evaluation[.]completed" in expression, title
 
 
+def test_identity_assurance_panels_count_acp_only_users() -> None:
+    # GAP-1019: the guardrail.evaluation.completed rows of an ACP-only
+    # session carry the verified assurance, so every query of the assurance
+    # panels (numerator, denominator, each leg) reads them too.
+    dashboard = _dashboard("defenseclaw-identity.json")
+    acp_aware = 'event_name=~"hook_decision|tool[.]invocation[.].*|guardrail[.]evaluation[.]completed"'
+    for title in ("Verified principal share", "Verified vs claimed identity"):
+        for target in _panel(dashboard, title)["targets"]:
+            expression = target["expr"]
+            filters = expression.count("| event_name=~")
+            assert filters, title
+            assert expression.count(acp_aware) == filters, title
+
+
 def test_verified_principal_share_is_zero_for_claimed_only_activity() -> None:
     dashboard = _dashboard("defenseclaw-identity.json")
     expression = _panel(dashboard, "Verified principal share")["targets"][0]["expr"]

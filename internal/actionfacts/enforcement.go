@@ -16,7 +16,10 @@
 
 package actionfacts
 
-import "strings"
+import (
+	"maps"
+	"strings"
+)
 
 // EnforcementProjection returns an independent view containing only commands
 // and effects that are statically proven to execute.
@@ -37,6 +40,7 @@ func (f Facts) EnforcementProjection() Facts {
 		ActiveAgentFilesCaseInsensitive:          cloneSlice(f.ActiveAgentFilesCaseInsensitive),
 		ActiveAgentFilesCaseInsensitiveUncertain: f.ActiveAgentFilesCaseInsensitiveUncertain,
 		ActiveAgentFilesUncertain:                f.ActiveAgentFilesUncertain,
+		ActiveStateTreeNames:                     maps.Clone(f.ActiveStateTreeNames),
 		CloudIAMPrincipalOperations: append(
 			[]CloudIAMPrincipalOperationFact(nil),
 			f.CloudIAMPrincipalOperations...,

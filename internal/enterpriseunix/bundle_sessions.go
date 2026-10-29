@@ -211,7 +211,8 @@ func (e *Env) bundleLinuxProcesses(ctx context.Context, aliases map[string]strin
 		if account, err := user.LookupId(who); err == nil {
 			who = account.Username
 		}
-		out = append(out, enterprisestatus.SessionProcess{PID: pid, User: who, Agent: connector,
+		ppid, _ := strconv.Atoi(fields[1])
+		out = append(out, enterprisestatus.SessionProcess{PID: pid, PPID: ppid, User: who, Agent: connector,
 			StartedAt: time.Unix(boot, 0).Add(time.Duration(ticks) * time.Second / 100)})
 	}
 	return out, nil

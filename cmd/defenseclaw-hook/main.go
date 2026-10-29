@@ -32,7 +32,9 @@ import (
 
 	// Its init raises a Windows hook process to above-normal priority
 	// before the CLI packages initialize (GAP-0155).
-	_ "github.com/defenseclaw/defenseclaw/cmd/defenseclaw-hook/internal/hookpriority"
+	_ "github.com/defenseclaw/defenseclaw/cmd/internal/hookpriority"
+	// Its init keeps the collector off until main starts (GAP-0050).
+	"github.com/defenseclaw/defenseclaw/cmd/internal/initgc"
 	"github.com/defenseclaw/defenseclaw/internal/cli"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 )
@@ -44,6 +46,7 @@ var (
 )
 
 func main() {
+	initgc.Restore()
 	// Identity inspection must not depend on mutable per-user hook state. Setup
 	// invokes this exact mode before signing and after installation so archived
 	// hook bytes are bound to the payload manifest's source commit.

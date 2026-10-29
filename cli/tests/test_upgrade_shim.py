@@ -85,6 +85,8 @@ def home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 def execs(monkeypatch: pytest.MonkeyPatch) -> list[list[str]]:
     calls: list[list[str]] = []
     monkeypatch.setattr(upgrade_shim.os, "execv", lambda path, argv: calls.append(list(argv)))
+    # A downgrade waits for the older installer (rel-1-0-4:GAP-2503).
+    monkeypatch.setattr(upgrade_shim, "_wait_for_installer", lambda argv: calls.append(list(argv)) or 0)
     monkeypatch.setattr(upgrade_shim.os, "chdir", lambda path: None)
     monkeypatch.setattr(upgrade_shim.os, "name", "posix")
     return calls
@@ -957,6 +959,72 @@ def test_downgrade_stops_with_the_unset_command_when_the_key_cannot_be_set_aside
     err = capsys.readouterr().err
     assert "defenseclaw config unset openshell.trusted_ca_bundle" in err
     assert "Nothing was changed." in err
+
+
+@pytest.mark.parametrize("running", [True, False])
+def test_a_downgrade_drops_the_hook_helper_this_release_left_and_restarts_the_gateway(
+    home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, running: bool
+) -> None:
+    # rel-1-0-4:GAP-2503: the 1.0.2 installer kept the 1.0.5 hooks/_hardening.sh
+    # (a 1.0.2 gateway keeps a helper with a newer schema line), and its
+    # native commands are not in the 1.0.2 binaries: every hook call was
+    # refused until the helper was removed and the gateway restarted. The shim
+    # waits for the older installer, then does that when the helper is the
+    # one the replaced install (previous/) has.
+    monkeypatch.setattr("defenseclaw.__version__", "1.0.5")
+    monkeypatch.setenv(upgrade_shim.LOCAL_DIR_ENV, str(_release_dir(tmp_path, "1.0.2")))
+    monkeypatch.setenv("HOME", str(home.parent))
+    monkeypatch.setattr(upgrade_shim.os, "name", "posix")
+    newer = b"#!/bin/bash\n# defenseclaw-managed-hook v10\n"
+    calls: list[list[str]] = []
+
+    def installer(argv: list[str]) -> int:
+        calls.append(list(argv))
+        for root in (home, home / "previous" / "data"):
+            (root / "hooks").mkdir(parents=True, exist_ok=True)
+            (root / "hooks" / "_hardening.sh").write_bytes(newer)
+        (home / "previous" / "VERSION").write_text("1.0.5\n", encoding="utf-8")
+        pid = os.getpid() if running else 2**22 + 7
+        (home / "gateway.pid").write_text(json.dumps({"pid": pid}), encoding="utf-8")
+        return 0
+
+    restarts: list[list[str]] = []
+    monkeypatch.setattr(upgrade_shim, "_wait_for_installer", installer)
+    monkeypatch.setattr(upgrade_shim.subprocess, "call", lambda argv, **kw: restarts.append(list(argv)) or 0)
+    monkeypatch.setattr(upgrade_shim.os, "execv", lambda path, argv: pytest.fail("a downgrade must wait for its installer"))
+
+    assert upgrade_shim.run(["upgrade", "--version", "1.0.2", "--yes"]) == 0
+
+    assert len(calls) == 1 and calls[0][-1] != "--rollback"
+    assert not (home / "hooks" / "_hardening.sh").exists()
+    assert (home / "previous" / "data" / "hooks" / "_hardening.sh").read_bytes() == newer
+    gateway = str(home.parent / ".local" / "bin" / "defenseclaw-gateway")
+    assert restarts == ([[gateway, "restart"]] if running else [])
+
+
+@pytest.mark.parametrize("case", ["other-helper", "previous-not-newer", "installer-failed"])
+def test_a_downgrade_keeps_a_hook_helper_it_did_not_leave(
+    home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, case: str
+) -> None:
+    monkeypatch.setattr("defenseclaw.__version__", "1.0.5")
+    monkeypatch.setenv(upgrade_shim.LOCAL_DIR_ENV, str(_release_dir(tmp_path, "1.0.2")))
+    monkeypatch.setattr(upgrade_shim.os, "name", "posix")
+    live = b"#!/bin/bash\n# defenseclaw-managed-hook v8\n" if case == "other-helper" else b"v10\n"
+
+    def installer(argv: list[str]) -> int:
+        (home / "hooks").mkdir(parents=True, exist_ok=True)
+        (home / "hooks" / "_hardening.sh").write_bytes(live)
+        (home / "previous" / "data" / "hooks").mkdir(parents=True, exist_ok=True)
+        (home / "previous" / "data" / "hooks" / "_hardening.sh").write_bytes(b"v10\n")
+        (home / "previous" / "VERSION").write_text("1.0.4\n" if case == "previous-not-newer" else "1.0.5\n", encoding="utf-8")
+        return 1 if case == "installer-failed" else 0
+
+    monkeypatch.setattr(upgrade_shim, "_wait_for_installer", installer)
+    monkeypatch.setattr(upgrade_shim.subprocess, "call", lambda argv, **kw: pytest.fail("nothing to restart"))
+
+    assert upgrade_shim.run(["upgrade", "--version", "1.0.2", "--yes"]) == (1 if case == "installer-failed" else 0)
+
+    assert (home / "hooks" / "_hardening.sh").read_bytes() == live
 
 
 # ── GAP-1067: rollback runs only the saved installer the install recorded ───

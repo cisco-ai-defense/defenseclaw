@@ -113,6 +113,9 @@ echo "==> locked site-packages (uv.lock, windows cp313)"
 uv pip sync --quiet --target "${SITE}" --python-version "${PYTHON_TARGET}" --python-platform windows \
     --only-binary :all: --require-hashes "${WORK}/requirements.txt"
 
+echo "==> tiktoken rank files with their published bytes (GAP-2395)"
+python3 -I "${REPO_ROOT}/scripts/normalize_tiktoken_ranks.py" "${SITE}"
+
 echo "==> YARA-X compatibility adapter"
 SOURCE_DATE_EPOCH="$(git -C "${REPO_ROOT}" log -1 --format=%ct)" \
     uv build --quiet --wheel "${REPO_ROOT}/packages/yara-python-compat" --out-dir "${WORK}/yara-compat"

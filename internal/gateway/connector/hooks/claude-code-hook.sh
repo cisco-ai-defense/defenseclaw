@@ -444,9 +444,9 @@ claude_fail_closed_decision() {
     reason="DefenseClaw blocked this because its gateway is stopped. Run defenseclaw-gateway start to resume protection (defenseclaw-gateway status shows its state)."
   elif [ "$1" = "gateway unreachable" ] && next="$(defenseclaw_unreachable_next_step)" && [ -n "$next" ]; then
     reason="DefenseClaw blocked this: ${next//\`/}."
-  elif next="$(defenseclaw_gateway_error_answer "$1")"; then
+  elif next="$(defenseclaw_gateway_error_block_text "$1")"; then
     # The gateway is up and answered with an error (GAP-1744).
-    reason="DefenseClaw blocked this because its gateway answered with an error (${next}). Run defenseclaw doctor to see what to fix."
+    reason="$next"
   else
     reason="DefenseClaw blocked this because it could not reach its gateway (${1}). Run defenseclaw-gateway status to check it."
   fi
@@ -461,12 +461,19 @@ claude_fail_closed_decision() {
         '{hookSpecificOutput:{hookEventName:"PermissionRequest",decision:{behavior:"deny",message:$r}}}')" || return 1 ;;
     UserPromptSubmit|UserPromptExpansion)
       out="$(_dc_jq -cn --arg r "$reason" '{decision:"block",reason:$r}')" || return 1 ;;
+    SessionStart)
+      # Claude Code cannot block a session start: an exit 2 there only shows
+      # the hook's whole command line, guard clause included, as a hook error
+      # (GAP-0006). Say instead, as the native hook does on Windows, that
+      # this session's prompts and tool calls are blocked and why.
+      out="$(_dc_jq -cn --arg m "DefenseClaw is blocking prompts and tool calls in this session${reason#DefenseClaw blocked this}" \
+        '{systemMessage:$m}')" || return 1 ;;
     *) return 1 ;;
   esac
   # Without jq or python3 the fallback reader cannot build this object and
   # prints "null": that is no decision, so the caller's exit 2 blocks instead.
   case "$out" in
-    "{"*deny*|"{"*block*) printf '%s\n' "$out" ;;
+    "{"*deny*|"{"*block*|"{"*systemMessage*) printf '%s\n' "$out" ;;
     *) return 1 ;;
   esac
 }
@@ -493,6 +500,12 @@ claude_fail_closed_decision() {
       printf '%s\n' "$blocked"
       exit 0
     }
+    # A subagent start cannot be blocked either and has nothing to show: an
+    # exit 2 would only print the hook command line (GAP-0006; the native
+    # hook exits 0 there too, GAP-0203). The failure is in hook-failures.jsonl.
+    case "$(printf '%s' "$PAYLOAD" | _dc_jq -r '.hook_event_name // empty' 2>/dev/null)" in
+      SubagentStart) exit 0 ;;
+    esac
 {{end}}    exit 2
   fi
 {{if not .Sandbox}}  # Claude Code does not show stderr of a hook that exits 0: say on screen
@@ -627,7 +640,7 @@ elif [ "$HTTP_CODE" -lt 200 ] 2>/dev/null || [ "$HTTP_CODE" -ge 300 ] 2>/dev/nul
   fail_response "gateway returned HTTP ${HTTP_CODE}"
 fi{{end}}
 
-{{if and (not .SecureClient) (not .Sandbox)}}defenseclaw_json_string_field "$RESULT" action >/dev/null || fail_response "invalid or ambiguous JSON response"
+{{if and (not .SecureClient) (not .Sandbox)}}defenseclaw_json_answer_valid "$RESULT" action || fail_response "invalid or ambiguous JSON response"
 {{end}}
 {{if and (not .Managed) (not .Sandbox)}}# Decode the action and its structured output together. Successful personal
 # hooks need one parser process rather than two (#1130). The fallback keeps

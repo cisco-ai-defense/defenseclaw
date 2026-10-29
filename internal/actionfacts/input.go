@@ -875,7 +875,7 @@ func extractJSONObject(
 			continue
 		}
 		value := object[key]
-		if patchSchema && isPatchInputField(key) {
+		if patchSchema && (isPatchInputField(key) || isPatchEnvelopeField(key, value)) {
 			text, ok := value.(string)
 			if !ok {
 				out.mergeProblem(StatusInvalid, IssueInvalidJSON)

@@ -19,6 +19,9 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/useridentity"
 )
 
+// ProcessLookupsOutliveDeletion: no such cache is known here.
+const ProcessLookupsOutliveDeletion = false
+
 // DefaultUIDRange is a conservative default for other Unix systems.
 func DefaultUIDRange() (int, int) { return 1000, 60000 }
 
@@ -58,6 +61,9 @@ func platformLocalAccountRecord(context.Context, string) (LocalAccountRecord, bo
 // current.
 func platformAccountRecordGone(context.Context, string) bool { return false }
 
+// platformAccountUIDGone is false for the same reason.
+func platformAccountUIDGone(context.Context, string, int) bool { return false }
+
 func platformLocalGroups(context.Context) (map[string]int, error) {
 	return nil, errors.New("unixidentity: no local group reader on this platform")
 }
@@ -67,6 +73,10 @@ func platformDirectoryConfigured() bool { return true }
 func platformOpenDirectoryNodeStates(context.Context) (string, error) {
 	return "", errors.New("unixidentity: no Open Directory on this platform")
 }
+
+// platformLoginShell has nothing to add on other platforms: the account
+// resolver gives the shell it knows.
+func platformLoginShell(context.Context, commandRunner, string) string { return "" }
 
 func platformMobileAccounts(context.Context) (map[string]string, error) {
 	return nil, errors.New("unixidentity: no local directory node on this platform")

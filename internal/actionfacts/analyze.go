@@ -17,6 +17,7 @@
 package actionfacts
 
 import (
+	"maps"
 	"path"
 	"slices"
 	"strings"
@@ -229,7 +230,9 @@ func analyze(input Input, twinCommand string, capture *redirectTargetCapture) Fa
 			home, _ := normalizeActiveHome(input.ActiveHome)
 			if rewrite, ok := rewriteTrustedPOSIXHomeTilde(command, home); ok {
 				if resolved := parse(rewrite.source); resolved.status == StatusComplete ||
-					issuesNarrowed(resolved, parsed) {
+					issuesNarrowed(resolved, parsed) || findRewriteKeepsOnlyEmbeddedPartial(resolved) ||
+					rewrite.homeGlobs && rewriteKeepsOnlyStaticGlobs(resolved) ||
+					rewrite.optionHomeValues && rewriteKeepsOnlyOperandGrammar(resolved) {
 					parsed = resolved
 					// A Windows drive home (GAP-0912) keeps its rewritten
 					// spelling: the POSIX parse cannot resolve a drive path,
@@ -252,8 +255,11 @@ func analyze(input Input, twinCommand string, capture *redirectTargetCapture) Fa
 			// their path facts, as for the POSIX home (GAP-2225, GAP-2408).
 			home, _ := normalizeActiveHome(input.ActiveHome)
 			if rewrite, ok := rewriteTrustedWindowsShellHome(command, home, dialect); ok {
-				if resolved := parse(rewrite); resolved.status == StatusComplete ||
-					issuesNarrowed(resolved, parsed) {
+				// As for a POSIX home, a rewrite that only narrows the issues
+				// is kept: a redirect to a home path in a command list the
+				// classifier reads only in part (type a.txt & type nul >
+				// %USERPROFILE%\f) keeps its exact target (GAP-2408).
+				if resolved := parse(rewrite); resolved.status == StatusComplete || issuesNarrowed(resolved, parsed) {
 					parsed = resolved
 				}
 			}
@@ -282,6 +288,7 @@ func analyze(input Input, twinCommand string, capture *redirectTargetCapture) Fa
 		activeHome,
 	)
 	respellTrustedPOSIXHomeTilde(&facts, homeRewrittenCommands, homeTildeOperands)
+	resolveTrustedDriveHomePaths(&facts)
 	facts.ActiveAgentFiles = cloneSlice(activeAgentFiles)
 	facts.ActiveAgentFilesCaseInsensitive = cloneSlice(
 		activeAgentFilesCaseInsensitive,
@@ -289,6 +296,7 @@ func analyze(input Input, twinCommand string, capture *redirectTargetCapture) Fa
 	facts.ActiveAgentFilesCaseInsensitiveUncertain =
 		input.ActiveAgentFilesCaseInsensitiveUncertain
 	facts.ActiveAgentFilesUncertain = input.ActiveAgentFilesUncertain
+	facts.ActiveStateTreeNames = maps.Clone(input.ActiveStateTreeNames)
 	classifyCanonicalPasswordCrackerPotfileRead(&facts)
 	facts.SensitiveEgressArtifactWrites =
 		projectSensitiveEgressArtifactWrites(input)
@@ -2253,4 +2261,98 @@ func issuesNarrowed(resolved, original parseOutput) bool {
 		return false
 	}
 	return dropped
+}
+
+// rewriteKeepsOnlyStaticGlobs reports a home rewrite whose parse is left
+// partial only by static pathname patterns: `rm -rf $HOME/.defenseclaw/*`
+// then has the facts of `rm -rf <home>/.defenseclaw/*`, whose pattern the
+// owners read from StaticGlob, while the HOME spelling had no static
+// spelling at all (GAP-2047).
+func rewriteKeepsOnlyStaticGlobs(resolved parseOutput) bool {
+	if resolved.status != StatusPartial || len(resolved.commands) == 0 {
+		return false
+	}
+	// A pattern operand is a dynamic word, and the command reading it
+	// an unsupported construct, exactly as for the absolute spelling.
+	for _, issue := range resolved.issues {
+		if issue != IssueDynamicWord && issue != IssueUnsupportedConstruct {
+			return false
+		}
+	}
+	globs := 0
+	for _, command := range resolved.commands {
+		for _, argument := range command.Arguments {
+			if !argument.Expands {
+				continue
+			}
+			if argument.StaticGlob == "" {
+				return false
+			}
+			globs++
+		}
+	}
+	return globs != 0
+}
+
+// rewriteKeepsOnlyOperandGrammar reports a home rewrite of a long option's
+// attached $HOME value (`git --work-tree=$HOME/.defenseclaw clean -fdx`)
+// whose parse is left partial only because the program's operand grammar
+// is not modelled, with no dynamic or expanding word. The absolute
+// spelling parses the same way and keeps its argv, so the $HOME spelling
+// gets the same words (GAP-2047 row d); before, the value had no static
+// spelling and no state check could read it.
+func rewriteKeepsOnlyOperandGrammar(resolved parseOutput) bool {
+	if resolved.status != StatusPartial || len(resolved.commands) == 0 {
+		return false
+	}
+	for _, issue := range resolved.issues {
+		if issue != IssueUnknownOperandGrammar {
+			return false
+		}
+	}
+	for _, command := range resolved.commands {
+		for _, argument := range command.Arguments {
+			if argument.Expands {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// findRewriteKeepsOnlyEmbeddedPartial reports a home rewrite whose parse is
+// find commands, alone or piped into xargs, left partial only by the
+// command find or xargs runs (GAP-2122). The shell expands the starting
+// points before find runs, so they are exact even though that command is
+// not read, and the rewrite gives the "~" and $HOME spellings the facts of
+// the absolute spelling.
+func findRewriteKeepsOnlyEmbeddedPartial(resolved parseOutput) bool {
+	if resolved.status != StatusPartial || len(resolved.commands) == 0 {
+		return false
+	}
+	for _, issue := range resolved.issues {
+		if issue != IssueUnsupportedConstruct && issue != IssueUnknownOperandGrammar {
+			return false
+		}
+	}
+	finds := 0
+	for _, command := range resolved.commands {
+		if IsEmbeddedProgramCommand(command) {
+			// The program of a find or xargs, read on its own words and
+			// complete (GAP-2304).
+			continue
+		}
+		switch command.Program {
+		case "find":
+			finds++
+		case "xargs",
+			// pass-through stages between find and xargs and the
+			// wrappers of an xargs (pod check8)
+			"tee", "cat", "grep", "sort", "head", "tail",
+			"sudo", "doas", "env", "nice", "nohup", "command", "stdbuf", "ionice":
+		default:
+			return false
+		}
+	}
+	return finds != 0
 }

@@ -46,9 +46,8 @@ async def test_config_editor_and_palette_labels_fit_with_health_at_80_columns(tm
 
 def test_short_action_labels_fit_whole_with_health_at_80_columns():
     # GAP-1361: the help drawer, Setup and Inventory labels were cut too.
-    from rich.text import Text
-
     from defenseclaw.tui.widgets.status_strip import ServiceStatus, StatusModel, render_status_with_hint
+    from rich.text import Text
 
     model = StatusModel(
         gateway=ServiceStatus("Gateway", "running"),
@@ -102,3 +101,31 @@ async def test_command_result_keeps_essential_health_at_80_columns(tmp_path):
             status = screen_text(app).splitlines()[-1]
             assert text in status, status
             assert all(name in status for name in ("Gateway", "Watchdog", "Guardrail")), status
+
+
+async def test_failed_command_result_keeps_essential_health_at_80_columns(tmp_path):
+    # GAP-0524 (T6-EARLY4): after a failed palette command the footer read
+    # "config get no.such.key failed (exit 2). Activity shows the output.  │ …":
+    # Gateway, Watchdog and Guardrail were gone.
+    app = _app_with_applied_policy(tmp_path)
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        for name, shown in (
+            ("config get no.such.key", "config get no.such.key failed (exit 2)."),
+            ("setup observability add splunk-hec --name a-very-long-destination", "failed (exit 2)."),
+        ):
+            app._report_command_result(name, 2)  # noqa: SLF001
+            await pilot.pause()
+            status = screen_text(app).splitlines()[-1]
+            assert shown in status, status
+            assert all(n in status for n in ("Gateway", "Watchdog", "Guardrail")), status
+        # The full result text stays in the model the palette and tests read.
+        assert app.status_text.endswith("failed (exit 2). Activity shows the output."), app.status_text
+    (tmp_path / "wide").mkdir()
+    wide = _app_with_applied_policy(tmp_path / "wide")
+    async with wide.run_test(size=(160, 24)) as pilot:
+        await pilot.pause()
+        wide._report_command_result("config get no.such.key", 2)  # noqa: SLF001
+        await pilot.pause()
+        status = screen_text(wide).splitlines()[-1]
+        assert "config get no.such.key failed (exit 2). Activity shows the output." in status, status

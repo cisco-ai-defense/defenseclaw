@@ -39,7 +39,7 @@ DefenseClaw scans every skill, MCP server and plugin before an agent can use it.
 </Flow>
 
 - **When it runs.** The gateway's install watcher checks a skill, plugin or MCP server when it appears in a watched folder or when an agent adds it. A rescan runs every 60 minutes and whenever the asset or the scanner settings change. The CLI runs the same check on demand.
-- **What a verdict does.** The defaults quarantine CRITICAL and HIGH skills, warn on MEDIUM, and allow the rest. A rejected skill or plugin moves to a quarantine folder and is disabled. A rejected MCP server stays where it is and its tool calls are refused.
+- **What a verdict does.** The defaults quarantine CRITICAL and HIGH skills, warn on MEDIUM and queue it for review, and allow LOW and INFO. The skill scanner settings `fail_on_severity` (HIGH) and `review_queue_min` (MEDIUM) set these lines; `defenseclaw config get admission.skill` shows the actions in force. Plugins and MCP servers have their own defaults: `defenseclaw config get admission.plugin` and `admission.mcp`. A rejected skill or plugin moves to a quarantine folder and is disabled. A rejected MCP server stays where it is and its tool calls are refused.
 - **When the scanner fails.** A scan that errors or cannot run counts as rejected. Admission fails closed.
 - **Blocked tool calls.** Agent hooks refuse a denied skill, plugin or MCP tool even if the install watcher never saw it.
 - **A judge reads what the rules flag.** Both scanners use the LLM judge when a model and key are set (`DEFENSECLAW_LLM_KEY`). Set one up; the rules alone miss most malicious assets.
@@ -62,7 +62,7 @@ See [Scan an MCP server](/docs/scanning/mcp-scanner).
 
 ## Plugins
 
-Plugins go through the same admission check. Plugin scanning runs from `defenseclaw plugin scan` and from the install watcher. Settings use `admission.plugin` and the `plugin-scanner` override key. Block and allow lists work the same way as for skills.
+Plugins go through the same admission check. Plugin scanning runs from `defenseclaw plugin scan` and from the install watcher. Settings use `admission.plugin` and the `plugin-scanner` override key. Block and allow lists work the same way as for skills. `defenseclaw plugin list` and `plugin info` show what admission does with the scan, for example `warning` for a plugin the watcher admitted with a warning, not the bare severity. A plugin copied into a Claude plugin cache is listed as one disabled plugin, origin `copy, not loaded by Claude Code`.
 
 ## What it does not do
 

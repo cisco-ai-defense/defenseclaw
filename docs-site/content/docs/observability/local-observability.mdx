@@ -98,7 +98,7 @@ Subcommands: `up`, `down`, `reset`, `status`, `logs`, `url`, `env`. `up` takes:
 | Flag | What it does |
 | --- | --- |
 | `--endpoint` | OTLP endpoint written to `config.yaml`. Default `127.0.0.1:4317`. |
-| `--signals` | Subset of `traces,metrics,logs`. All three are needed for full dashboard coverage. |
+| `--signals` | Subset of `traces,metrics,logs`. All three are needed for full dashboard coverage. `up` checks the list first: an unknown name stops it with a usage error before it touches the running stack. |
 | `--service-name` | Sets `observability.resource.attributes.service.name`. Default `defenseclaw`. |
 | `--no-config` | Start containers without editing `config.yaml`. |
 | `--password` / `--no-password` | Require the generated Grafana `admin` login, or allow anonymous read-only (Viewer) access on the loopback bind: dashboards show, nothing can be edited, and anonymous access is never Admin. New stacks default to a password; an anonymous stack keeps anonymous access, read-only, until you pass `--password`. |
@@ -136,7 +136,7 @@ The name `local-observability` selects the `local-observability-v1` metric proje
 
 Every signal carries `host.name` from the operating system. To tell computers with the same name apart, add `--environment <name>` to `setup observability add`; it sets `observability.resource.attributes.deployment.environment.name`.
 
-If `up` finds a container name that belongs to another copy of the stack, it stops and names the other stack. A port held by a foreign process also stops it; edits to the stack's `docker-compose.yml` are overwritten on the next refresh.
+If `up` finds a container name that belongs to another copy of the stack, it stops and names the other stack. A port held by a foreign process also stops it: `up` names the port and says nothing was started; `status` reads a listener of another process as `not running (port held by another process)`; edits to the stack's `docker-compose.yml` are overwritten on the next refresh.
 
 ### Keep the destination name
 

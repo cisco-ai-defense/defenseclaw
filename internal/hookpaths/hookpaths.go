@@ -11,15 +11,18 @@ import (
 	"io/fs"
 	"maps"
 	"os"
+	osuser "os/user"
 	"path/filepath"
 	"regexp"
 	"runtime"
 	"slices"
 	"strings"
+	"sync"
 	"unicode"
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
 	"github.com/defenseclaw/defenseclaw/internal/copilotargs"
+	"github.com/defenseclaw/defenseclaw/internal/rxprefilter"
 	"github.com/defenseclaw/defenseclaw/internal/sensor/tactics"
 	"github.com/defenseclaw/defenseclaw/internal/shellparse"
 	"mvdan.cc/sh/v3/expand"
@@ -40,6 +43,20 @@ const TruncatedKey = "\x00truncated"
 // directive was parsed and each target was resolved in the user's filesystem
 // view. The gateway may be unable to repeat that walk under ProtectHome.
 const PatchCompleteKey = "\x00patch-complete"
+
+// ActionDecisionKey carries the user's hook reading of a shell command:
+// ProtectedTargetDecision when the command's concrete write operands, walked
+// as the user (actionConcreteProtectedWrite), reach a protected file. Only
+// concrete writes count, not the wider target-mention scan, so a read
+// through a link to the keys file stays allowed. A managed gateway behind
+// ProtectHome cannot repeat that walk of the user's links (a variable or
+// ${f:-default} write target, a tar -C directory link), so it reads this
+// fact as a per-user gateway reads its own walk (GAP-2514, GAP-2515). It is
+// positive evidence only: no value can make a call less restricted.
+const ActionDecisionKey = "\x00action-decision"
+
+// ProtectedTargetDecision is the only ActionDecisionKey value.
+const ProtectedTargetDecision = "protected-target"
 
 // SourceLinkFactPrefix identifies a copy source inspected by the user-side hook.
 const SourceLinkFactPrefix = "\x00source-link:"
@@ -380,6 +397,20 @@ func resolveWritePath(path string, linkDepth int) (string, bool) {
 	return resolved, ok
 }
 
+// windowsMountPointLink reports a Windows directory junction (mount point).
+// Go reports a junction as os.ModeIrregular, not os.ModeSymlink, yet a write
+// through it lands in the junction target, so the walk follows it like a
+// link (GAP-1515: with sshlink -> ~\.ssh, sshlink\authorized_keys looked
+// like a project file). An irregular entry that names no target stays a
+// plain component.
+func windowsMountPointLink(candidate string, info os.FileInfo) bool {
+	if runtime.GOOS != "windows" || info.Mode()&os.ModeIrregular == 0 {
+		return false
+	}
+	_, err := os.Readlink(candidate)
+	return err == nil
+}
+
 // walkWritePath resolves both ordinary operands and raw symlink targets. base
 // is the already-resolved directory containing a relative target. When collect
 // is true, forms includes every traversed name and link hop for opaque-scope
@@ -438,7 +469,7 @@ func walkWritePath(base, path string, linkDepth int, collect, patchTarget bool) 
 				return "", nil, linkDepth, false
 			}
 			unknown := os.IsNotExist(err)
-			if err == nil && info.Mode()&os.ModeSymlink != 0 {
+			if err == nil && (info.Mode()&os.ModeSymlink != 0 || windowsMountPointLink(candidate, info)) {
 				// The cwd proc link is interpreted by the process opening the
 				// operand. Resolving it in the hook would prove a different path.
 				if ProcCWDWriteOperand(candidate) {
@@ -620,6 +651,20 @@ func (files protectedFiles) target(resolved string) (string, bool) {
 func Resolve(payload []byte) string {
 	return ResolveConnector("", "", "", payload)
 }
+
+// clientLogin is the login name of the user this hook runs as (a Windows
+// DOMAIN\user gives user), looked up once.
+var clientLogin = sync.OnceValue(func() string {
+	account, err := osuser.Current()
+	if err != nil {
+		return ""
+	}
+	name := account.Username
+	if index := strings.LastIndexByte(name, '\\'); index >= 0 {
+		name = name[index+1:]
+	}
+	return name
+})
 
 // ResolveConnector is Resolve for a hook body of connector, read as the
 // gateway's profile for that connector reads it. surface and event are the
@@ -816,6 +861,7 @@ func ResolveConnector(connector, surface, event string, payload []byte) string {
 	opaqueFacts := map[string]string{}
 	var globFacts map[string]string
 	var unprovenReason string
+	var protectedDecision bool
 	// identities is the file-identity evidence for InstructionIdentityKey:
 	// every existing instruction file a write target names.
 	// fileIdentities are the write targets' own identities (FileIdentitiesKey).
@@ -847,8 +893,19 @@ func ResolveConnector(connector, surface, event string, payload []byte) string {
 		for _, key := range []string{"command", "cmd"} {
 			var command string
 			if json.Unmarshal(toolArgs[key], &command) == nil && command != "" {
+				// A ~<login> tilde-prefix names this user's home from the
+				// password database. The gateway judges that spelling as the
+				// home (actionfacts.ActiveUserTildeTwin) and, behind
+				// ProtectHome, reads its targets from this map, so the map
+				// describes the command with the home spelled out (GAP-2378).
+				if twin, _, isTwin := actionfacts.ActiveUserTildeTwin(command, home, clientLogin()); isTwin {
+					command = twin
+				}
 				if !isApplyPatchToolName(tool) && unprovenReason == "" {
 					unprovenReason = ActionCommandAuditReason(command, cwd, home)
+				}
+				if !isApplyPatchToolName(tool) && !protectedDecision {
+					protectedDecision = actionConcreteProtectedWrite(command, cwd, home)
 				}
 				fallback := input
 				fallback.Tool, fallback.Args, fallback.Command = "Bash", nil, command
@@ -866,6 +923,19 @@ func ResolveConnector(connector, surface, event string, payload []byte) string {
 				boundedOperands, _ := BoundedShellWriteOperands(command, cwd, home)
 				literalOperands = append(literalOperands, boundedOperands...)
 				literalOperands = append(literalOperands, QuotedDynamicCopyDestinations(command, cwd, home)...)
+				// A find that unzips each archive into its stripped name
+				// reaches the state only when an archive's name strips to
+				// it; the gateway may not be able to list the home
+				// (GAP-2404 pod check20).
+				if strings.Contains(command, "%") {
+					root := filepath.Join(home, ".defenseclaw")
+					sourceFacts[StateRootSiblingsPrefix+root] = StateRootSiblings(root)
+				}
+				// A home find's name tests are judged against the state
+				// tree, which such a gateway cannot read either.
+				for key, value := range stateTreeNameFacts(fallbackFacts, home) {
+					sourceFacts[key] = value
+				}
 				directoryOperands, directoryUnknown = ShellDirectoryWriteOperands(command, cwd, home, sourceFacts, true, false)
 				truncated = truncated || directoryUnknown
 				truncated = truncated || !parsed
@@ -1039,6 +1109,15 @@ func ResolveConnector(connector, surface, event string, payload []byte) string {
 			size += entry
 		}
 	}
+	if protectedDecision {
+		entry := len(jsonString(ActionDecisionKey)) + 1 + len(jsonString(ProtectedTargetDecision)) + 1
+		if size+entry > maxEncodedTargets || len(targets) >= MaxWriteTargets+2 {
+			truncated = true
+		} else {
+			targets[ActionDecisionKey] = ProtectedTargetDecision
+			size += entry
+		}
+	}
 	identity := strings.Join(identities, "\x00")
 	if unprovenReason != "" {
 		entry := len(jsonString(UnprovenReasonKey)) + 1 + len(jsonString(unprovenReason)) + 1
@@ -1172,7 +1251,11 @@ func copilotCall(envelope map[string]json.RawMessage, surface, event string) (js
 		value = nil
 	}
 	if local {
-		return toolRaw, copilotargs.LocalToolArgs(tool, value), toolConflict, argsConflict
+		name, args := copilotargs.LocalCall(tool, value)
+		if name != tool {
+			toolRaw, _ = json.Marshal(name)
+		}
+		return toolRaw, args, toolConflict, argsConflict
 	}
 	if nativePermission {
 		projected := copilotargs.PermissionToolArgs(tool, value)
@@ -1356,6 +1439,7 @@ func Decode(value string) (map[string]string, bool) {
 	if json.Unmarshal(data, &targets) != nil || len(targets) > 2*MaxWriteTargets+6 ||
 		(targets[TruncatedKey] != "" && targets[TruncatedKey] != "1") ||
 		(targets[PatchCompleteKey] != "" && targets[PatchCompleteKey] != "1") ||
+		(targets[ActionDecisionKey] != "" && targets[ActionDecisionKey] != ProtectedTargetDecision) ||
 		(targets[UnprovenReasonKey] != "" && UnprovenWriteTitle(targets[UnprovenReasonKey]) == "") {
 		return nil, false
 	}
@@ -1406,6 +1490,17 @@ func Decode(value string) (map[string]string, bool) {
 		if strings.HasPrefix(key, GlobFactPrefix) && (value != "0" && value != "1" ||
 			!filepath.IsAbs(strings.TrimPrefix(key, GlobFactPrefix))) {
 			return nil, false
+		}
+		if strings.HasPrefix(key, StateRootSiblingsPrefix) && (value != "0" && value != "1" ||
+			!filepath.IsAbs(strings.TrimPrefix(key, StateRootSiblingsPrefix))) {
+			return nil, false
+		}
+		if strings.HasPrefix(key, StateTreeNamePrefix) {
+			root, test, cut := strings.Cut(strings.TrimPrefix(key, StateTreeNamePrefix), "\x00")
+			if !cut || !filepath.IsAbs(root) || test == "" || test[0] != 'i' && test[0] != 'c' ||
+				value != "0" && value != "1" {
+				return nil, false
+			}
 		}
 	}
 	return targets, true
@@ -1622,6 +1717,15 @@ func commandLinksWithFacts(command, cwd, home string, facts map[string]string, r
 		if static[0] {
 			program = programBase(words[0])
 		}
+		// A static prefix wrapper (nohup, nice, env NAME=value, sudo -u)
+		// runs its child argv in this directory: the child is read as the
+		// plain call, so nohup ln -sf a ~/.local/bin/tool is the plain ln
+		// (RV-p3i3-1). A wrapper that moves the directory or changes which
+		// program the child word names keeps the wrapper reading below.
+		if index, wrapped := plainWrappedChild(words, static); wrapped {
+			args, words, static, start = args[index:], words[index:], static[index:], args[index].Pos()
+			program = programBase(words[0])
+		}
 		// busybox ln and toybox ln are ln (GAP-1521).
 		for slices.Contains(multicallPrograms, program) && len(args) > 1 {
 			args, words, static, start = args[1:], words[1:], static[1:], args[1].Pos()
@@ -1747,7 +1851,41 @@ func commandLinksWithFacts(command, cwd, home string, facts map[string]string, r
 // false when any cd, pushd or popd is elsewhere or dynamic, so the link scope
 // keeps its conservative reading.
 func topLevelLinkDirectories(file *syntax.File, cwd, home string) (dirs map[*syntax.CallExpr]string, known bool) {
-	var statements []*syntax.Stmt
+	statements, placed, known := topLevelStatementDirectories(file, cwd, home)
+	if !known {
+		return nil, false
+	}
+	dirs = make(map[*syntax.CallExpr]string)
+	for i, stmt := range statements {
+		call, ok := stmt.Cmd.(*syntax.CallExpr)
+		if !ok || len(call.Args) == 0 {
+			continue
+		}
+		program, _ := StaticWord(call.Args[0], home)
+		if slices.Contains(linkPrograms, programBase(program)) {
+			dirs[call] = placed[i]
+			continue
+		}
+		values := make([]string, len(call.Args))
+		literal := make([]bool, len(call.Args))
+		for j, arg := range call.Args {
+			values[j], literal[j] = StaticWord(arg, home)
+		}
+		if index, wrapped := plainWrappedChild(values, literal); wrapped &&
+			slices.Contains(linkPrograms, programBase(values[index])) {
+			dirs[call] = placed[i]
+		}
+	}
+	return dirs, true
+}
+
+// topLevelStatementDirectories lists the top-level statements of a ; / && /
+// || list other than its cd statements, each with the directory it runs in,
+// read lexically from cwd through the static cd statements before it
+// (GAP-1742). known is false when any cd, pushd or popd is elsewhere or
+// dynamic, or a top-level program word is not static.
+func topLevelStatementDirectories(file *syntax.File, cwd, home string) (statements []*syntax.Stmt, dirs []string, known bool) {
+	var all []*syntax.Stmt
 	var flatten func(*syntax.Stmt)
 	flatten = func(stmt *syntax.Stmt) {
 		if pair, ok := stmt.Cmd.(*syntax.BinaryCmd); ok && len(stmt.Redirs) == 0 && !stmt.Background && !stmt.Negated &&
@@ -1756,13 +1894,13 @@ func topLevelLinkDirectories(file *syntax.File, cwd, home string) (dirs map[*syn
 			flatten(pair.Y)
 			return
 		}
-		statements = append(statements, stmt)
+		all = append(all, stmt)
 	}
 	for _, stmt := range file.Stmts {
 		flatten(stmt)
 	}
 	topLevel := make(map[*syntax.CallExpr]bool)
-	for _, stmt := range statements {
+	for _, stmt := range all {
 		if call, ok := stmt.Cmd.(*syntax.CallExpr); ok && !stmt.Background {
 			topLevel[call] = true
 		}
@@ -1779,35 +1917,77 @@ func topLevelLinkDirectories(file *syntax.File, cwd, home string) (dirs map[*syn
 		return true
 	})
 	if !known {
-		return nil, false
+		return nil, nil, false
 	}
-	dirs = make(map[*syntax.CallExpr]string)
 	dir := cwd
-	for _, stmt := range statements {
+	for _, stmt := range all {
 		call, ok := stmt.Cmd.(*syntax.CallExpr)
 		if !ok || len(call.Args) == 0 {
+			statements, dirs = append(statements, stmt), append(dirs, dir)
 			continue
 		}
 		program, static := StaticWord(call.Args[0], home)
 		if !static {
-			return nil, false
+			return nil, nil, false
 		}
 		if slices.Contains(cdPrograms, programBase(program)) {
 			if programBase(program) != "cd" || len(call.Args) != 2 || len(call.Assigns) != 0 {
-				return nil, false
+				return nil, nil, false
 			}
 			target, static := StaticWord(call.Args[1], home)
 			if !static || target == "" || strings.HasPrefix(target, "-") || !filepath.IsAbs(dir) {
-				return nil, false
+				return nil, nil, false
 			}
 			dir = OperandPath(target, dir)
 			continue
 		}
-		if slices.Contains(linkPrograms, programBase(program)) {
-			dirs[call] = dir
-		}
+		statements, dirs = append(statements, stmt), append(dirs, dir)
 	}
-	return dirs, true
+	return statements, dirs, true
+}
+
+// PlacedStatement is one top-level statement of a shell command and the
+// directory it runs in.
+type PlacedStatement struct {
+	Command string
+	Dir     string
+}
+
+// TopLevelStatements splits a ; / && / || list into its statements other
+// than its static cd statements, each with the directory it runs in: cd ~ &&
+// ln -s .defenseclaw hc && cp a.txt hc/config.yaml runs the ln and the cp in
+// ~ (GAP-2522). ok is false when the command does not parse, or a directory
+// change is elsewhere or dynamic.
+func TopLevelStatements(command, cwd, home string) ([]PlacedStatement, bool) {
+	file, parsed := parseShell(command)
+	if !parsed {
+		return nil, false
+	}
+	statements, dirs, known := topLevelStatementDirectories(file, cwd, home)
+	if !known {
+		return nil, false
+	}
+	out := make([]PlacedStatement, 0, len(statements))
+	for i, stmt := range statements {
+		start, end := int(stmt.Pos().Offset()), int(stmt.End().Offset())
+		if start < 0 || end > len(command) || start >= end {
+			return nil, false
+		}
+		out = append(out, PlacedStatement{Command: command[start:end], Dir: dirs[i]})
+	}
+	return out, true
+}
+
+// plainWrappedChild returns the index of the program word that a chain of
+// static prefix wrappers at words[0] runs with the same directory and the
+// same program resolution, as a static word.
+func plainWrappedChild(words []string, static []bool) (int, bool) {
+	run, ok := actionfacts.StaticPrefixWrapperChild(words, static)
+	if !ok || run.Dir != "" || run.DirUnknown || run.ChangesResolution ||
+		run.Index >= len(words) || !static[run.Index] || words[run.Index] == "" {
+		return 0, false
+	}
+	return run.Index, true
 }
 
 // staticChangedDirectoryLink handles one ordered cd/link/write chain. The
@@ -1895,7 +2075,8 @@ var dataPrograms = []string{"echo", "printf", "grep", "egrep", "fgrep", "rg", "a
 // interpreter may read the text from an argument, a here-document, a pipe or
 // a file the command writes, under any name or wrapper.
 func opaqueLinkText(file *syntax.File, command, home string) bool {
-	if !opaqueLink.MatchString(command) {
+	// Skip the automaton over a long command without its literals (GAP-2279).
+	if !rxprefilter.MayMatch(opaqueLink, command) || !opaqueLink.MatchString(command) {
 		return false
 	}
 	for _, stmt := range file.Stmts {
@@ -2170,6 +2351,49 @@ func (l Links) Target(path string) (string, bool) {
 		return path, true
 	}
 	return l.links.resolve(path, l.protected)
+}
+
+// HasAliases reports that the command makes at least one link whose name
+// and target were both read.
+func (l Links) HasAliases() bool {
+	return len(l.links.aliases) > 0
+}
+
+// AliasTargets returns the names path reaches through the links the
+// command creates, read lexically (the links do not exist yet when the
+// hook runs): ln -s ~/.defenseclaw hc makes <cwd>/hc/config.yaml name
+// ~/.defenseclaw/config.yaml (GAP-2522). With entry set, path names a
+// directory entry that is removed or replaced (rm, a move), so a link
+// named path itself is not followed; a link to one of its directories is.
+func (l Links) AliasTargets(path string, entry bool) []string {
+	if len(l.links.aliases) == 0 || path == "" {
+		return nil
+	}
+	var out []string
+	seen := map[string]bool{filepath.Clean(path): true}
+	queue := []string{filepath.Clean(path)}
+	for first := true; len(queue) > 0 && len(out) < maxLinkAliasSteps; first = false {
+		name := queue[0]
+		queue = queue[1:]
+		for _, alias := range l.links.aliases {
+			rest, under := cutPathPrefix(name, alias.name)
+			if !under || first && entry && rest == "" {
+				continue
+			}
+			next := alias.target
+			if rest != "" {
+				next += string(filepath.Separator) + rest
+			}
+			next = filepath.Clean(next)
+			if seen[next] {
+				continue
+			}
+			seen[next] = true
+			out = append(out, next)
+			queue = append(queue, next)
+		}
+	}
+	return out
 }
 
 // copyLinkOptions reports a cp call with a static link option, and one with
@@ -2760,10 +2984,52 @@ func archiveDestination(program string, args []string, static []bool, cwd string
 	return filepath.Clean(destination)
 }
 
+// tarLongOptions are the tar long options tarDestination scopes. An
+// abbreviation must name exactly one of them; any other option, such as one
+// that runs a program (--to-command, --use-compress-program,
+// --checkpoint-action, --info-script), writes another file (--index-file,
+// --listed-incremental), renames members (--transform) or keeps existing
+// links (--keep-directory-symlink), is an unknown destination (GAP-2445).
+var tarLongOptions = append([]string{
+	"directory", "dir", "cd", "one-top-level", "file", "strip-components", "exclude",
+	"exclude-from", "files-from", "warning", "owner", "group", "mode", "mtime",
+	"blocking-factor", "record-size", "format", "label", "newer", "after-date",
+	"newer-mtime", "exclude-tag", "exclude-tag-all", "exclude-tag-under",
+	"totals", "occurrence", "checkpoint",
+}, tarLongFlags...)
+
+// tarLongFlags are tar long options without a value that do not move the
+// extraction destination.
+var tarLongFlags = []string{
+	"zstd", "absolute-names", "get", "extract", "list", "create",
+	"overwrite", "overwrite-dir", "no-overwrite-dir", "keep-old-files", "skip-old-files",
+	"keep-newer-files", "unlink-first", "recursive-unlink", "no-same-owner", "same-owner",
+	"no-same-permissions", "same-permissions", "preserve-permissions", "numeric-owner",
+	"touch", "verbose", "gzip", "gunzip", "ungzip", "bzip2", "xz", "lzip", "lzma", "lzop",
+	"auto-compress", "no-auto-compress", "wildcards", "no-wildcards", "wildcards-match-slash",
+	"no-wildcards-match-slash", "anchored", "no-anchored", "ignore-case", "no-ignore-case",
+	"ignore-zeros", "ignore-failed-read", "sparse", "show-transformed-names",
+	"delay-directory-restore", "no-delay-directory-restore", "no-recursion", "recursion",
+	"null", "no-null", "unquote", "no-unquote", "full-time", "utc", "exclude-vcs",
+	"exclude-vcs-ignores", "exclude-backups", "exclude-caches", "exclude-caches-all",
+	"exclude-caches-under", "check-links", "read-full-records", "verify", "same-order",
+	"preserve-order", "seek", "no-seek", "force-local", "xattrs", "no-xattrs", "acls",
+	"no-acls", "selinux", "no-selinux",
+}
+
 // tarDestination reads destination-bearing tar options in short clusters,
 // old-style option words, and unique long-option abbreviations. Ambiguity
 // leaves the archive scope global.
 func tarDestination(args []string, static []bool, cwd string) (string, bool) {
+	destination, _, _, ok := tarScan(args, static, cwd)
+	return destination, ok
+}
+
+// tarScan is tarDestination with the member operands and whether the call
+// extracts (an x in an option cluster, --extract or --get).
+func tarScan(args []string, static []bool, cwd string) (string, []string, bool, bool) {
+	var members []string
+	extract := false
 	destination := cwd
 	changed := false
 	consume := func(value string) bool {
@@ -2776,7 +3042,7 @@ func tarDestination(args []string, static []bool, cwd string) (string, bool) {
 	options := true
 	for i := 0; i < len(args); i++ {
 		if !static[i] {
-			return "", false
+			return "", nil, false, false
 		}
 		arg := args[i]
 		if arg == "--" {
@@ -2784,52 +3050,59 @@ func tarDestination(args []string, static []bool, cwd string) (string, bool) {
 			continue
 		}
 		if !options {
+			members = append(members, arg)
 			continue
 		}
 		if strings.HasPrefix(arg, "--") {
 			name, value, joined := strings.Cut(arg[2:], "=")
-			option, unique := longOption(name, []string{
-				"directory", "dir", "cd", "one-top-level", "file", "strip-components",
-				"exclude", "zstd", "absolute-names", "get", "extract", "list", "create",
-			})
+			option, unique := longOption(name, tarLongOptions)
 			if !unique {
-				return "", false
+				return "", nil, false, false
+			}
+			if option == "extract" || option == "get" {
+				extract = true
 			}
 			switch option {
 			case "directory", "dir", "cd":
 				if !joined {
 					i++
 					if i >= len(args) || !static[i] {
-						return "", false
+						return "", nil, false, false
 					}
 					value = args[i]
 				}
 				if !consume(value) {
-					return "", false
+					return "", nil, false, false
 				}
 			case "one-top-level":
 				if joined && !consume(value) {
-					return "", false
+					return "", nil, false, false
 				}
-			case "file", "strip-components", "exclude":
+			case "file", "strip-components", "exclude", "exclude-from", "files-from", "warning",
+				"owner", "group", "mode", "mtime", "blocking-factor", "record-size", "format", "label",
+				"newer", "after-date", "newer-mtime", "exclude-tag", "exclude-tag-all", "exclude-tag-under":
 				if !joined {
 					i++
 					if i >= len(args) || !static[i] || args[i] == "" {
-						return "", false
+						return "", nil, false, false
 					}
 				}
-			case "zstd", "absolute-names", "get", "extract", "list", "create":
-				if joined {
-					return "", false
-				}
+			case "totals", "occurrence", "checkpoint":
+				// An optional value is only ever joined (--totals=SIGNAL).
 			default:
-				// A future or unknown destination option cannot be scoped safely.
-				return "", false
+				if !slices.Contains(tarLongFlags, option) {
+					// A future or unknown destination option cannot be scoped safely.
+					return "", nil, false, false
+				}
+				if joined {
+					return "", nil, false, false
+				}
 			}
 			continue
 		}
 		oldStyle := i == 0 && !strings.HasPrefix(arg, "-")
 		if !oldStyle && !strings.HasPrefix(arg, "-") {
+			members = append(members, arg)
 			continue
 		}
 		cluster := strings.TrimPrefix(arg, "-")
@@ -2840,34 +3113,43 @@ func tarDestination(args []string, static []bool, cwd string) (string, bool) {
 				if oldStyle || value == "" {
 					i++
 					if i >= len(args) || !static[i] {
-						return "", false
+						return "", nil, false, false
 					}
 					value = args[i]
 				}
 				if !consume(value) {
-					return "", false
+					return "", nil, false, false
 				}
 				if !oldStyle {
 					j = len(cluster)
 				}
-			case 'f':
+			case 'f', 'T', 'X', 'b', 'N', 'V', 'H', 'K', 'L':
+				// The archive, a member list or exclude file, the blocking
+				// factor, a date, a label, a format, a starting member or a tape
+				// length: one value, never the destination.
 				if oldStyle || j+1 == len(cluster) {
 					i++
 					if i >= len(args) || !static[i] {
-						return "", false
+						return "", nil, false, false
 					}
 				}
 				if !oldStyle {
 					j = len(cluster)
 				}
-			case 'a', 'x', 'z', 'j', 'J', 'v', 'O', 't', 'c', 'P', 'p', 'h', 'k', 'm', 'w', 'U':
+			case 'x':
+				extract = true
+			case 'a', 'z', 'j', 'J', 'v', 'O', 't', 'c', 'P', 'p', 'h', 'k', 'm', 'w', 'U',
+				'o', 'S', 'B', 'l', 'r', 'u', 'i', 'n':
 			default:
-				// Unknown short options may consume a path.
-				return "", false
+				// Unknown short options may consume a path. -W is GNU --verify,
+				// but bsdtar (macOS /usr/bin/tar, Windows tar.exe) reads
+				// -W NAME=VALUE as --NAME=VALUE, so -W directory=DIR moves the
+				// destination (GAP-2445).
+				return "", nil, false, false
 			}
 		}
 	}
-	return destination, true
+	return destination, members, extract, true
 }
 
 // opaqueProgram is a Windows program that creates links from operands this

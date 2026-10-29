@@ -212,12 +212,8 @@ bundle signed before 1.0.4 names the key without its value, so `secret set`
 refuses it with `secret_ref_unbound`. After an upgrade from 1.0.2 or 1.0.3
 the confirmed bundle keeps enforcing, but every delivery of it is refused
 until a bundle signed for 1.0.4 is in place. To rotate the key on a device
-that applies signed policy bundles, contact your administrator.
-
-The new bundle must verify with the trust anchors installed on the device. If
-the signing key changes too, first install the new anchors and apply a bundle
-the new signing key signs for the current API key, then rotate the API key
-with a newer bundle.
+that applies signed policy bundles, contact your administrator: `secret set`
+alone cannot change it.
 
 ## Remove the key
 

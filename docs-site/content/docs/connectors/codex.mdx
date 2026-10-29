@@ -12,7 +12,7 @@ import { ConnectorSupport } from '@/components/support-matrix';
 
 DefenseClaw writes hooks into Codex's `config.toml`. Codex talks to `api.openai.com` or the ChatGPT backend directly, and DefenseClaw observes host activity through Codex's hooks. This is a hook connector: no proxy is involved.
 
-Host setup removes native OpenTelemetry exporters installed by earlier releases: Codex cannot verify which local account holds a stopped gateway's TCP port. Isolated OpenShell images retain native telemetry and also use Codex's [native OpenTelemetry exporter](https://learn.chatgpt.com/docs/config-file/config-advanced#observability-and-telemetry). On an ordinary host install, per-user and standalone enterprise installs do not register a notify bridge or a native exporter; only Secure Client does. Codex in an OpenShell sandbox (`defenseclaw sandbox run codex`) is the other exception: the sandbox image installs `codex-notify.sh` and sets `notify` in its managed config.
+Host setup removes native OpenTelemetry exporters installed by earlier releases when they carry a credential this install recorded (its Codex OTLP token or gateway token): Codex cannot verify which local account holds a stopped gateway's TCP port. An exporter whose credential this install never recorded stays, even with `x-defenseclaw-*` headers, because DefenseClaw cannot tell it from your own collector. That includes an exporter that was already in `config.toml` before the first DefenseClaw setup, for example from an older install removed without cleanup: setup saved it as yours and puts it back when it removes its own. If `~/.codex/config.toml` still has `[otel.exporter]`, `[otel.metrics_exporter]` or `[otel.trace_exporter]` tables that point at `127.0.0.1` with `x-defenseclaw-source = 'codex'` and you did not add them, delete those tables by hand. Isolated OpenShell images retain native telemetry and also use Codex's [native OpenTelemetry exporter](https://learn.chatgpt.com/docs/config-file/config-advanced#observability-and-telemetry). On an ordinary host install, per-user and standalone enterprise installs do not register a notify bridge or a native exporter; only Secure Client does. Codex in an OpenShell sandbox (`defenseclaw sandbox run codex`) is the other exception: the sandbox image installs `codex-notify.sh` and sets `notify` in its managed config.
 
 On a per-user install, an explicitly saved `guardrail.hook_fail_mode` takes precedence over the selected tier. See the [gateway outage table](/docs/connectors/capability-matrix#gateway-outage) and [Fail modes](/docs/reference/fail-modes).
 ## Platform support
@@ -33,13 +33,17 @@ defenseclaw setup codex                # first setup defaults to observe: record
 defenseclaw setup codex --mode action  # block on policy hits
 ```
 
-A re-run without `--mode` keeps the current mode. On Windows, run the same commands in PowerShell. Quit and reopen Codex afterwards. After upgrading from an earlier release, quit all running Codex processes and reopen them so they stop using any old exporter configuration.
+A re-run without `--mode` keeps the current mode. On a terminal it still asks: `Select mode (1, 2) [2]:` with the current mode as the default (Enter keeps it), then `Codex is already configured; re-apply its hooks (mode=action)? [Y/n]:`, and in action mode `Add LLM judge on top of rule scanning? [y/N]:` (the default is yes when the judge already covers Codex). `--yes` skips the questions and keeps the current mode; use it in scripts, because a piped run without `--yes` still waits for the answers. See [the questions setup asks](/docs/guardrail/switching-connectors#the-questions-setup-asks). On Windows, run the same commands in PowerShell. Quit and reopen Codex afterwards. After upgrading from an earlier release, quit all running Codex processes and reopen them so they stop using any old exporter configuration.
 
 Host setup removes earlier DefenseClaw native exporter blocks (only exporters that carry a DefenseClaw credential; your own exporters stay) and revokes their scoped tokens because Codex cannot verify the account behind the loopback listener. An existing Codex process can retain the old configuration. The isolated OpenShell exporter still uses the gateway's `/v1/{logs,metrics,traces}` endpoints. Do not print or copy old exporter headers.
 
 Redaction follows the v8 bucket and profile policy: edit `observability.destinations[].routes[].selector.buckets` and `observability.redaction_profiles`, then follow [Redaction](/docs/observability/redaction). The alias options are in the [quick-alias reference](/docs/guardrail/aliases).
 
 On native Windows, DefenseClaw writes each event and contract into `%CODEX_HOME%\config.toml` and marks the hooks trusted there, because Codex on Windows does not read hooks from `managed_config.toml`. The registered command runs system Windows PowerShell with `-EncodedCommand`, which starts `defenseclaw-hook.exe` synchronously with inherited handles and the bound `--event` and `--hook-contract`. No POSIX shell or WSL is involved. On managed Windows, the enumerator enrolls Codex installed with npm, the official `install.ps1` at its default location, or WinGet. A relocated `CODEX_HOME`, or another folder that discovery finds but cannot enroll, is reported as `agent_unprotected` ([Enrollment](/docs/enterprise/enrollment)). Managed enrollment publishes hooks in `%ProgramData%\OpenAI\Codex\requirements.toml`. The per-user `managed_config.toml` is read only to clean up older registrations.
+
+On Windows, setup refuses a Codex home that goes through a symbolic link or junction, before it changes anything. The default `%USERPROFILE%\.codex` counts. The message names the folder and the fix: make it a real folder, or set `CODEX_HOME` to the real folder. Then run `defenseclaw setup codex` again. The gateway keeps running.
+
+If setup finds a syntax error in your `config.toml`, the refusal names the file, line and column. Setup keeps each line ending of the lines it does not render, and keeps your comments after the hooks it renders again.
 
 ### Check it
 
@@ -56,9 +60,9 @@ The agent appears under **Agents** with its mode. `defenseclaw doctor` passes th
 | Hooks; removal of older native telemetry | `$CODEX_HOME/config.toml` (default `~/.codex`) | `%CODEX_HOME%\config.toml` |
 | Hook program | `~/.defenseclaw/hooks/codex-hook.sh` | `%USERPROFILE%\.local\bin\defenseclaw-hook.exe` (one-line install) or `%LOCALAPPDATA%\DefenseClaw\HookRuntime\defenseclaw-hook.exe` (Setup installer) |
 | Connector credentials | `~/.defenseclaw/hooks` | `%USERPROFILE%\.defenseclaw\hooks` |
+| Proxy bypass for cloud credentials (managed Linux and macOS only) | `$CODEX_HOME/.env` (marked block; a per-user install writes none) | not written |
 
-On a managed computer these per-user files are not used. The hooks are in Codex's machine requirements file and run the administrator's hook program: `/etc/codex/requirements.toml` with `/opt/defenseclaw/bin/defenseclaw-hook` on Linux, `/etc/codex/requirements.toml` with `/opt/cisco/defenseclaw/bin/defenseclaw-hook` on macOS, and `C:\ProgramData\OpenAI\Codex\requirements.toml` with `C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw-hook.exe` on Windows.
-| Proxy bypass for cloud credentials | `$CODEX_HOME/.env` (managed, marked block) | not written |
+On a managed computer the per-user hook files above are not used. The hooks are in Codex's machine requirements file and run the administrator's hook program: `/etc/codex/requirements.toml` with `/opt/defenseclaw/bin/defenseclaw-hook` on Linux, `/etc/codex/requirements.toml` with `/opt/cisco/defenseclaw/bin/defenseclaw-hook` on macOS, and `C:\ProgramData\OpenAI\Codex\requirements.toml` with `C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw-hook.exe` on Windows.
 
 See the [Windows path reference](/docs/get-started/windows/paths-troubleshooting). Teardown restores the backup, or removes only DefenseClaw's entries.
 
@@ -190,11 +194,13 @@ Secure Client and the OpenShell sandbox use a notify bridge. Per-user and standa
 
 **Behind an HTTP proxy.** Hooks reach the gateway on 127.0.0.1 and ignore proxy variables. Host setup does not install a native exporter.
 
-On Linux and macOS, setup keeps a marked block in `$CODEX_HOME/.env` (default `~/.codex/.env`), which Codex loads when it starts. The block appends `127.0.0.1,localhost,::1` and the cloud instance-metadata addresses (`169.254.169.254,169.254.170.2,fd00:ec2::254`) to the `NO_PROXY` and `no_proxy` values you already have. Loopback traffic and AWS credential lookups then skip your proxy, and everything else still uses it. Codex sessions started before setup keep the old environment until you restart them. Uninstall and `defenseclaw guardrail disable --connector codex` remove only that block, and the file too if setup created it.
+A per-user install writes no `.env` block: host Codex sends DefenseClaw no native telemetry, and its hooks ignore proxy variables. With a proxy variable set, setup's next steps and `doctor` still print the `NO_PROXY` line below.
+
+On a managed Linux or macOS computer, setup keeps a marked block in `$CODEX_HOME/.env` (default `~/.codex/.env`), which Codex loads when it starts. The block appends `127.0.0.1,localhost,::1` and the cloud instance-metadata addresses (`169.254.169.254,169.254.170.2,fd00:ec2::254`) to the `NO_PROXY` and `no_proxy` values you already have. Loopback traffic and AWS credential lookups then skip your proxy, and everything else still uses it. Codex sessions started before setup keep the old environment until you restart them. Uninstall and `defenseclaw guardrail disable --connector codex` remove only that block, and the file too if setup created it; on a per-user install they also remove a block an earlier release wrote.
 
 Codex applies the lines of `.env` in order, so a later `NO_PROXY=...` line of your own replaces the block's value. Write it as `NO_PROXY="${NO_PROXY},.corp.example.com"` to keep the loopback. When a proxy variable is set and the loopback is not covered, or the block is older and lacks the metadata addresses, `defenseclaw doctor` warns on the **Codex telemetry proxy** row. The warning names the line number and gives a one-line fix. A block without the metadata addresses is refreshed by the next Codex setup or `defenseclaw-gateway restart`.
 
-On Windows there is no block. Set it once for your account with `setx NO_PROXY 127.0.0.1,localhost,::1` and open a new terminal before you start Codex. On Linux and macOS without the block, `doctor` suggests:
+On Windows there is no block. Set it once for your account with `setx NO_PROXY 127.0.0.1,localhost,::1` and open a new terminal before you start Codex. On Linux and macOS without the block (every per-user install), `doctor` suggests:
 
 ```bash
 export NO_PROXY="${NO_PROXY:+$NO_PROXY,}127.0.0.1,localhost,::1" no_proxy="${no_proxy:+$no_proxy,}127.0.0.1,localhost,::1"
@@ -239,6 +245,8 @@ export NO_PROXY="${NO_PROXY:+$NO_PROXY,}127.0.0.1,localhost,::1" no_proxy="${no_
 | `doctor` warns about rejected OTLP attempts after an upgrade | The daemon keeps the old telemetry credential. Run `codex app-server daemon restart`. The **Native OTLP credentials** row clears 24 hours after the last refused attempt. |
 | First prompt of a new session recorded twice | Codex 0.156 starts a second internal session during the first turn, with its own session id. It fires `SessionStart`, `UserPromptSubmit` and `Stop` for the same prompt. Two rows differ in `defenseclaw.session.root.id`. Count prompts by session and turn id. |
 | Connections to OpenAI when the gateway starts (Windows) | Each gateway start or restart with the Codex connector enabled runs Codex's app-server once to read its effective requirements. It connects to OpenAI (for example chatgpt.com) and can reach your model provider. |
+| A Codex session start is refused with `Codex runtime registration is unavailable` | The gateway is running and answered with an error (HTTP 503). It could not repair Codex's hook registration. This is not an outage. The text names the setup step: `defenseclaw setup codex --yes`. If the Codex executable changed since setup (a Codex update does this), it says so. Run the step. |
+| `doctor` warns on **Codex OTel ownership** | `config.toml` holds an `[otel]` exporter that carries DefenseClaw's `x-defenseclaw-source` and `x-defenseclaw-client` headers and a bearer this install never recorded. Setup keeps it as yours. Codex sends prompt telemetry and that bearer to a loopback port DefenseClaw does not serve. If you did not add it, delete the named tables. Doctor never removes it. |
 | Hooks fail after a Codex update (Windows) | Setup records the Codex executable's path and SHA-256. An update changes it, so doctor fails the **Hook contract** and **Codex hooks** rows with `policy-blocked: selected Codex executable no longer matches protected Setup evidence`. Run `defenseclaw setup codex --yes`. |
 
 ## Disable

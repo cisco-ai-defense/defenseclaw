@@ -85,6 +85,105 @@ func TestR105GAP2135FindAttachedHomePath(t *testing.T) {
 	}
 }
 
+// GAP-2122 (pod check7): a find that hands what it finds to a program that
+// may change it gives its starting points a written path fact, with the
+// trusted home resolved, while readers and mode changes add none.
+func TestR105GAP2122FindHandsEntriesToWriter(t *testing.T) {
+	for _, tc := range []struct {
+		command string
+		write   bool
+	}{
+		{`find ~/.defenseclaw/hooks -exec sh -c 'rm -f "$1"' _ {} \;`, true},
+		{"find ~/.defenseclaw/hooks -type f -exec truncate -s 0 {} +", true},
+		{"find $HOME/.defenseclaw/hooks -exec sudo rm -f {} +", true},
+		{"find ~/.defenseclaw/hooks -exec env rm -f {} +", true},
+		{`find ~/.defenseclaw/hooks -type f -exec cp /dev/null {} \;`, true},
+		{"find ~/.defenseclaw/hooks -type f -exec ls -l {} +", false},
+		{"find ~/.defenseclaw/hooks -type f -exec sha256sum {} +", false},
+		{"find ~/.defenseclaw/hooks -exec chmod 700 {} +", false},
+		// pod check8: readers and copy-outs read the found entries.
+		{`find ~/.defenseclaw/hooks -type f -exec jq . {} \;`, false},
+		{`find ~/.defenseclaw/hooks -type f -exec awk 'END{print NR}' {} +`, false},
+		{"find ~/.defenseclaw/hooks -type f -exec sort {} +", false},
+		{`find ~/.defenseclaw/hooks -type f -exec sed -n 1p {} \;`, false},
+		{`find ~/.defenseclaw/hooks -type f -exec cp {} /tmp/out/ \;`, false},
+		{`find ~/.defenseclaw/hooks -type f -exec sort -o {} {} \;`, true},
+		{`find ~/.defenseclaw/hooks -type f -exec sed -i -n 1p {} \;`, true},
+		{`find ~/.defenseclaw/hooks -type f -exec cp /tmp/x {} \;`, true},
+	} {
+		facts := Analyze(Input{Tool: "Bash", Command: tc.command, CWD: "/home/u/p", ActiveHome: "/home/u"})
+		if got := hasPathFact(facts, PathAccessWrite, "/home/u/.defenseclaw/hooks"); got != tc.write {
+			t.Errorf("%q: written start point %t, want %t: %+v", tc.command, got, tc.write, facts.Paths)
+		}
+		if !hasPathFact(facts, PathAccessRead, "/home/u/.defenseclaw/hooks") {
+			t.Errorf("%q: the home start point is not resolved: %+v (%+v)", tc.command, facts.Paths, facts.Parse)
+		}
+	}
+	// find piped into xargs keeps its resolved starting point.
+	facts := Analyze(Input{Tool: "Bash", Command: "find ~/.defenseclaw/hooks -type f | xargs rm -f", CWD: "/home/u/p", ActiveHome: "/home/u"})
+	if !hasPathFact(facts, PathAccessRead, "/home/u/.defenseclaw/hooks") {
+		t.Errorf("find | xargs: the home start point is not resolved: %+v (%+v)", facts.Paths, facts.Parse)
+	}
+}
+
+// pod check8: what a find -exec or xargs program does with the names it
+// is handed.
+func TestFindHandedEntriesReadsCopyOuts(t *testing.T) {
+	for _, tc := range []struct {
+		words     []string
+		mayChange bool
+		outputs   []string
+	}{
+		{[]string{"jq", ".", "{}"}, false, nil},
+		{[]string{"uniq", "{}"}, false, nil},
+		{[]string{"uniq", "{}", "{}"}, true, nil},
+		{[]string{"sort", "-k", "2", "{}"}, false, nil},
+		{[]string{"sort", "-no", "/tmp/x", "{}"}, true, nil},
+		{[]string{"sort", "--output=/tmp/x", "{}"}, true, nil},
+		{[]string{"sed", "-n", "/a/,/b/p", "{}"}, false, nil},
+		{[]string{"sed", "-ni", "1p", "{}"}, true, nil},
+		{[]string{"sed", "s/a/b/w /tmp/x", "{}"}, true, nil},
+		{[]string{"sed", "1e id", "{}"}, true, nil},
+		{[]string{"awk", "-F:", "{print $1}", "{}"}, false, nil},
+		{[]string{"awk", "-f", "p.awk", "{}"}, true, nil},
+		{[]string{"awk", `{print | "sh"}`, "{}"}, true, nil},
+		{[]string{"python3", "-m", "json.tool", "{}"}, false, nil},
+		{[]string{"python3", "-m", "json.tool", "{}", "/tmp/o.json"}, false, []string{"/tmp/o.json"}},
+		{[]string{"python3", "-c", "import os", "{}"}, true, nil},
+		{[]string{"cp", "{}", "/tmp/b/"}, false, []string{"/tmp/b/"}},
+		{[]string{"cp", "-t", "/tmp/b", "{}"}, false, []string{"/tmp/b"}},
+		{[]string{"cp", "--target-directory={}", "/tmp/x"}, true, nil},
+		{[]string{"cp", "/dev/null", "{}"}, true, nil},
+		{[]string{"cp", "{}", "{}.bak"}, true, nil},
+		{[]string{"cp", "{}", "$HOME/x"}, true, nil},
+		{[]string{"rsync", "-a", "{}", "/tmp/b/"}, false, []string{"/tmp/b/"}},
+		{[]string{"rsync", "--remove-source-files", "{}", "/tmp/b/"}, true, nil},
+		{[]string{"tar", "-czf", "/tmp/a.tgz", "{}"}, false, []string{"/tmp/a.tgz"}},
+		{[]string{"tar", "cf", "-", "{}"}, false, nil},
+		{[]string{"tar", "-xf", "{}"}, true, nil},
+		{[]string{"tar", "--remove-files", "-cf", "/tmp/a.tar", "{}"}, true, nil},
+		{[]string{"zip", "-r", "/tmp/a.zip", "{}"}, false, []string{"/tmp/a.zip"}},
+		{[]string{"zip", "-m", "/tmp/a.zip", "{}"}, true, nil},
+	} {
+		got := handedEntriesOf(tc.words, false)
+		if got.MayChange != tc.mayChange || !slices.Equal(got.Outputs, tc.outputs) {
+			t.Errorf("%q: %+v, want mayChange=%t outputs=%q", tc.words, got, tc.mayChange, tc.outputs)
+		}
+	}
+	if got := handedEntriesOf([]string{"cp", "{}", "backup"}, true); !got.MayChange {
+		t.Errorf("-execdir cp {} backup writes beside the entry: %+v", got)
+	}
+	if got := XargsHandedEntries([]string{"cp", "-t", "/tmp/b"}, ""); got.MayChange || !slices.Equal(got.Outputs, []string{"/tmp/b"}) {
+		t.Errorf("xargs cp -t /tmp/b: %+v", got)
+	}
+	if got := XargsHandedEntries([]string{"cp", "/tmp/x"}, ""); !got.MayChange {
+		t.Errorf("xargs cp /tmp/x: the handed name is the destination: %+v", got)
+	}
+	if got := XargsHandedEntries([]string{"mv", "%", "/tmp/"}, "%"); !got.MayChange {
+		t.Errorf("xargs -I %% mv: %+v", got)
+	}
+}
+
 func hasPathFact(facts Facts, access PathAccess, resolved string) bool {
 	for _, path := range facts.Paths {
 		if path.Access == access && path.Resolved == resolved {

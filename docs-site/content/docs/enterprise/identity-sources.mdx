@@ -351,9 +351,10 @@ sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux profile-explain -
 
 The per-user `defenseclaw guardrail profile explain` and `defenseclaw config get` commands refuse there. The configured `ai_discovery.trusted_ad_child_domains` list is in the administrator's `/etc/defenseclaw/config.yaml`.
 
-For an account of a child domain that is not listed, `subject.domain`,
-`subject.directory` and `subject.principal` are empty, and the text output
-shows the account name with no realm.
+For an account of a child domain that is not listed, `subject.directory`
+and `subject.principal` are empty, and the text output shows the account name
+with no realm. The `subject` object has no domain field: `subject.principal`
+carries the realm of an account a listed or joined domain confirms.
 
 A users assignment that names only a principal (`alice@CORP.EXAMPLE.COM`)
 matches an account only while it has that principal. Check it with the managed
@@ -362,6 +363,12 @@ is the principal the gateway attributed, and is empty when no joined domain
 confirms the account's SID. Add the uid to the assignment when the account must
 match while SSSD does not answer; a short account name also matches a local or
 LDAP account of that name.
+
+`profile-explain` also names a sandbox refusal that a hook call does not make: `refused_paths`
+lists `sandbox`, with `sandbox_refused_reason` and a warning. The profile decision itself does not change.
+On a managed host, a refusal with no verified ID (for example `--user` of a name no account holds)
+points to `defenseclaw-gateway enterprise <os> profile-explain --user <user>`; the per-user
+`defenseclaw guardrail profile` commands exit `2` there.
 
 ### Windows
 
@@ -383,6 +390,17 @@ After the sign-in the enumerator records the new groups, which drops the
 account's old directory facts: the next hook request, a few seconds later at most,
 uses the new profile, and `profile-explain` shows the same one.
 
+Windows groups are known only while the user has a desktop session (console
+or Remote Desktop); an SSH, scheduled-task or `runas` session does not count.
+For a user who is signed out, or who has not signed in at the desktop on this
+computer yet, `profile-explain --user` shows `group_count` `0` and `groups`
+`null`: the groups are unknown, not empty. When a `groups` assignment exists,
+the answer says so: `match` is `default_lookup_failed`, `unproven_facts` lists
+`groups:unknown`, `refused` is `true`, and a warning names the cause (no active
+desktop session, or no identity record yet). With no `groups` assignment
+nothing depends on the groups, so there is no warning. To check a group
+assignment, explain the user while they are signed in at the desktop.
+
 ### macOS
 
 | What the OS knows | Where DefenseClaw reads it | Assurance |
@@ -392,7 +410,7 @@ uses the new profile, and `profile-explain` shows the same one.
 | Kerberos principal and AD mobile account | `dscl /Search` `AuthenticationAuthority`. Standalone enterprise only | Verified |
 | AD domain | `dsconfigad -show`. Standalone enterprise only | Verified |
 | Device SSO provider (Entra or Okta) | `app-sso platform -s` (JSON on macOS 15, a property list on older releases): Microsoft Company Portal for Entra ID, an Okta Verify bundle for Okta. Standalone enterprise only | Verified |
-| The user's Platform SSO login | `AltSecurityIdentities` of the account record (`PlatformSSO:<upn>`), which Platform SSO writes when it links or creates the account. Local users can read this directory attribute; only privileged code can write it. The product trusts the controlled write, not the secrecy of the value. It is the account's UPN and principal; accounts that never registered stay `local`. Standalone enterprise only | Verified |
+| The user's Platform SSO login | `AltSecurityIdentities` of the account record (`PlatformSSO:<upn>`), which Platform SSO writes when it links or creates the account. Local users can read this directory attribute; only privileged code can write it. The product trusts the controlled write, not the secrecy of the value. It is the account's UPN and principal; accounts that never registered stay `local`. When the listing fails or is slow, the account stays `local`, and only a UPN or `DOMAIN\name` entry waits for the guardian's record; a bare name does not select it. Standalone enterprise only | Verified |
 | Entra or Okta groups through Platform SSO | None reach the macOS group database (macOS 15.8, Company Portal, live) | None |
 | Kerberos principal of the session | The default principal of the default `API:` cache, from `/usr/bin/klist --json` at most once per 5 minutes, or of a `FILE:` cache named by `KRB5CCNAME` or `krb5.conf` | Claimed |
 | SSH session | `SSH_CONNECTION` | Claimed |

@@ -15,6 +15,7 @@ package unixidentity
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -71,6 +72,13 @@ func platformOpenDirectoryNodeStates(ctx context.Context) (string, error) {
 	}
 	return string(result.stdout), nil
 }
+
+// ProcessLookupsOutliveDeletion is true on macOS: a long-running process's
+// getpwuid (os/user) keeps answering with a local account that was deleted
+// after the process first looked it up, while a new process and dscl find
+// none (GAP-1864). A found answer there is no proof that the account still
+// exists.
+const ProcessLookupsOutliveDeletion = true
 
 // DefaultUIDRange is the interactive-account uid range. macOS local
 // accounts start at 501; directory accounts often use large uids.
@@ -189,6 +197,38 @@ func platformAccountRecordGone(ctx context.Context, name string) bool {
 	}
 	result, err := runTrustedCommand(ctx, darwinDSCL, []string{"/Search", "-read", "/Users/" + name, "UniqueID"})
 	return dsclRecordNotFound(result, err) && !OpenDirectoryOffline(ctx)
+}
+
+// platformAccountUIDGone asks Open Directory in fresh dscl processes, across
+// the search policy, whether name still holds uid (dsclAccountUIDGone).
+func platformAccountUIDGone(ctx context.Context, name string, uid int) bool {
+	if err := validateTrustedTool(darwinDSCL); err != nil {
+		return false
+	}
+	return dsclAccountUIDGone(uid,
+		func() (commandResult, error) {
+			return runTrustedCommand(ctx, darwinDSCL, []string{"/Search", "-read", "/Users/" + name, "UniqueID"})
+		},
+		func() (commandResult, error) {
+			return runTrustedCommand(ctx, darwinDSCL, []string{"/Search", "-search", "/Users", "UniqueID", strconv.Itoa(uid)})
+		},
+		func() bool { return OpenDirectoryOffline(ctx) })
+}
+
+// platformLoginShell reads the UserShell of the account through the Open
+// Directory search node, so a local, mobile or directory account answers.
+// Any user may read it.
+func platformLoginShell(ctx context.Context, runner commandRunner, name string) string {
+	if err := validateTrustedTool(darwinDSCL); err != nil {
+		return ""
+	}
+	ctx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	result, err := runner(ctx, darwinDSCL, []string{"/Search", "-read", "/Users/" + name, "UserShell"})
+	if err != nil || result.exitCode != 0 {
+		return ""
+	}
+	return strings.TrimSpace(parseDSCLRead(string(result.stdout))["UserShell"])
 }
 
 // platformMobileAccounts lists the local node's mobile accounts with the

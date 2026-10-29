@@ -61,7 +61,12 @@ from contextlib import contextmanager
 import click
 
 from defenseclaw import ux
-from defenseclaw.config import _assert_config_write_allowed, config_path_for_data_dir
+from defenseclaw.config import (
+    _assert_config_write_allowed,
+    config_path_for_data_dir,
+    outage_block_hint,
+    saved_hook_fail_mode_scope,
+)
 from defenseclaw.config_writer import ConfigWriteError
 from defenseclaw.connector_contracts import has_native_approval_prompt, normalize_connector
 from defenseclaw.context import AppContext, pass_ctx
@@ -311,6 +316,49 @@ def _refuse_unverified_plugin_teardown(app: AppContext, connectors: list[str]) -
             raise SystemExit(1)
 
 
+def _warn_setup_refuses_reenable(app: AppContext, names: list[str]) -> None:
+    """Say before a disable when enable could not undo it (GAP-2340).
+
+    ``guardrail enable`` runs connector setup again in the connector's saved
+    mode. When setup refuses the installed agent now (for example a kiro-cli
+    below its hook floor that an earlier release enrolled), a disable cannot
+    be undone until the agent is updated, and the agent stays unprotected
+    meanwhile. This only warns: the disable itself is unchanged.
+    """
+    if not names:
+        return
+    from defenseclaw import policy_catalog
+    from defenseclaw.commands.cmd_setup import _check_connector_version_supported_for_setup
+
+    gc = app.cfg.guardrail
+    multi = bool(getattr(gc, "connectors", None))
+    for name in names:
+        scope_record: dict[str, object] = {}
+        try:
+            supported = _check_connector_version_supported_for_setup(
+                name,
+                mode=policy_catalog.mode_label(gc.effective_mode(name)),
+                emit=False,
+                data_dir=app.cfg.data_dir,
+                _allow_prompt=False,
+                _refusal_scope=scope_record,
+            )
+        except Exception:  # noqa: BLE001 - a failed probe must not change the disable
+            continue
+        if supported:
+            continue
+        label = _connector_label(name)
+        reason = str(scope_record.get("reason") or "").strip().rstrip(".")
+        enable = f"defenseclaw guardrail enable{f' --connector {name}' if multi else ''}"
+        ux.warn(
+            f"{label}: setup refuses this agent at its installed version"
+            f"{f' ({reason})' if reason else ''}, so after this disable '{enable}' "
+            f"and 'defenseclaw setup {name}' are refused and {label} stays unprotected "
+            "until you update it.",
+            indent="  ",
+        )
+
+
 def _toggle_connector_guardrail(
     app: AppContext, requested: str, *, enable: bool, restart: bool, yes: bool
 ) -> None:
@@ -367,6 +415,7 @@ def _toggle_connector_guardrail(
     if not enable:
         _preflight_config_write(app)
         _refuse_unverified_plugin_teardown(app, [key])
+        _warn_setup_refuses_reenable(app, [key])
 
     # Disabling the last remaining enabled connector is effectively a global
     # disable — warn so the operator can use the clearer command.
@@ -1041,12 +1090,16 @@ def status_cmd(app: AppContext, connector_flag: str | None, as_json: bool = Fals
                 )
                 deployment = str(getattr(app.cfg, "deployment_mode", "") or "")
                 managed_host = deployment.strip().lower() == "managed_enterprise"
-                fix = (
-                    f"set closed with defenseclaw guardrail fail-mode closed{scope}"
-                    if managed_host
-                    else "block them with the strict policy: defenseclaw guardrail use-pack strict"
-                    + (f" --connector {name}" if scope else "")
-                )
+                saved_scope = saved_hook_fail_mode_scope(gc, name)
+                if managed_host:
+                    fix = f"set closed with defenseclaw guardrail fail-mode closed{scope}"
+                elif saved_scope:
+                    # A saved open wins over the strict policy (GAP-0039).
+                    fix = "your saved fail mode keeps them open; block them with " + outage_block_hint(gc, name)
+                else:
+                    fix = "block them with the strict policy: defenseclaw guardrail use-pack strict" + (
+                        f" --connector {name}" if scope else ""
+                    )
                 posture_rows.append(
                     f"{_connector_label(name)} ({name}) {where} with fail mode open: while the gateway "
                     f"is down its hooks allow calls that policy blocks; {fix}"
@@ -1209,6 +1262,7 @@ def disable_cmd(
     _already_off = [name for name in _actives if _disabled_on_its_own(gc, name)]
     _torn_down = [name for name in _actives if name not in _already_off]
     _refuse_unverified_plugin_teardown(app, _torn_down)
+    _warn_setup_refuses_reenable(app, _torn_down)
 
     click.echo()
     if len(_actives) > 1 or _already_off:

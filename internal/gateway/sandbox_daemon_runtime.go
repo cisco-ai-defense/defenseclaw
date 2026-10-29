@@ -320,7 +320,13 @@ func NewSandboxDaemon(opts SandboxDaemonOptions) (*SandboxDaemon, error) {
 		home: accountHome(uid), openShell: opts.openShell,
 	}
 	if d.openShell == nil {
-		d.openShell = newAccountOpenShell(runtime.GOOS, uid, d.home, opts.Logf)
+		ao := newAccountOpenShell(runtime.GOOS, uid, d.home, opts.Logf)
+		ao.recordUnsynced = func(names []string) {
+			if err := manager.RecordUnsyncedStops(opts.StateDir, names, time.Now()); err != nil && opts.Logf != nil {
+				opts.Logf("could not record the unsynced stop for the sandbox feed: %v", err)
+			}
+		}
+		d.openShell = ao
 	}
 	d.settingsAt.Store(time.Now().UnixNano())
 	// The registrations file is the user's own. Until the managed gateway

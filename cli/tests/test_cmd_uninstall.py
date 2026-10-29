@@ -361,6 +361,7 @@ class WindowsOwnedCleanupTests(unittest.TestCase):
                 "defenseclaw-gateway.exe",
                 "defenseclaw-acp.exe",
                 "defenseclaw-hook.exe",
+                "defenseclaw-hook-guard.exe",
                 "skill-scanner.cmd",
                 "mcp-scanner.cmd",
                 "defenseclaw-hook-state.json",
@@ -2077,6 +2078,81 @@ class RemoveDataDirTests(unittest.TestCase):
                 cmd_uninstall._remove_data_dir(str(data_dir), preserve_entries=(".venv",))
 
             self.assertTrue(outside.is_dir())
+
+    def test_concurrent_remover_of_the_same_trees_is_not_a_failure(self):
+        # GAP-2355: two uninstalls of one account at once (two terminals)
+        # each failed with ENOENT on what the other one had just deleted, and
+        # the data stayed for a third run. What another remover took is gone.
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp) / ".defenseclaw"
+            for name in ("previous", ".failed-20261028T022310"):
+                deep = data_dir / name / "venv" / "lib" / "site-packages" / "pkg" / "sub"
+                deep.mkdir(parents=True)
+                for index in range(5):
+                    (deep / f"m{index}.py").write_text("x", encoding="utf-8")
+            (data_dir / "receipts").write_text("r", encoding="utf-8")
+            (data_dir / "config.yaml").write_text("config", encoding="utf-8")
+            real_unlink = os.unlink
+            raced: list[str] = []
+
+            def other_uninstall_takes_it_first(path, *args, **kwargs):
+                # The other run deletes these files a moment before this run
+                # does: the file is gone and this run's unlink reports ENOENT.
+                name = os.path.basename(os.fspath(path))
+                real_unlink(path, *args, **kwargs)
+                if name in ("m0.py", "m3.py", "receipts"):
+                    raced.append(name)
+                    raise FileNotFoundError(errno.ENOENT, "No such file or directory", os.fspath(path))
+
+            with (
+                patch.object(cmd_uninstall.os, "unlink", side_effect=other_uninstall_takes_it_first),
+                contextlib.redirect_stdout(io.StringIO()),
+            ):
+                cmd_uninstall._remove_data_dir(str(data_dir))
+
+            self.assertTrue(raced)
+            self.assertFalse(data_dir.exists())
+
+    def test_data_dir_another_remover_took_last_is_removed(self):
+        # GAP-2355: the other run's final rmdir won the race.
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp) / ".defenseclaw"
+            data_dir.mkdir()
+            (data_dir / "config.yaml").write_text("config", encoding="utf-8")
+            real_rmdir = os.rmdir
+
+            def other_removed_it(path, *args, **kwargs):
+                if os.fspath(path) == str(data_dir):
+                    real_rmdir(path)
+                    raise FileNotFoundError(errno.ENOENT, "No such file or directory", os.fspath(path))
+                return real_rmdir(path, *args, **kwargs)
+
+            out = io.StringIO()
+            with patch.object(cmd_uninstall.os, "rmdir", side_effect=other_removed_it), contextlib.redirect_stdout(out):
+                cmd_uninstall._remove_data_dir(str(data_dir))
+
+            self.assertFalse(data_dir.exists())
+            self.assertIn("removed", out.getvalue())
+
+    def test_a_real_removal_error_still_fails_the_data_phase(self):
+        # GAP-2355 keeps every other error: only "already gone" is success.
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp) / ".defenseclaw"
+            (data_dir / "previous" / "venv").mkdir(parents=True)
+            (data_dir / "previous" / "venv" / "locked.so").write_text("x", encoding="utf-8")
+            (data_dir / "config.yaml").write_text("config", encoding="utf-8")
+            real_unlink = os.unlink
+
+            def denied(path, *args, **kwargs):
+                if os.path.basename(os.fspath(path)) == "locked.so":
+                    raise PermissionError(errno.EACCES, "Permission denied", os.fspath(path))
+                return real_unlink(path, *args, **kwargs)
+
+            with patch.object(cmd_uninstall.os, "unlink", side_effect=denied), self.assertRaises(OSError) as raised:
+                cmd_uninstall._remove_data_dir(str(data_dir))
+
+            self.assertIn("Permission denied", str(raised.exception))
+            self.assertTrue((data_dir / "config.yaml").is_file())
 
     def test_partial_failure_retains_identity_marker_for_safe_retry(self):
         with tempfile.TemporaryDirectory() as tmp:

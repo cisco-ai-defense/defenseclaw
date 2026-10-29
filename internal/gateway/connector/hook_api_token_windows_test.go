@@ -838,3 +838,39 @@ func setHookAPITokenWindowsUntrustedDACL(t *testing.T, path string, mask windows
 		t.Fatalf("set untrusted ancestor DACL: %v", err)
 	}
 }
+
+// A token the gateway or `defenseclaw setup` mints (first setup, a re-added
+// connector, a damaged credential replaced) is private on its own: a protected
+// DACL, not entries inherited from the hooks folder. `defenseclaw setup
+// rotate-token` refuses an inheritable credential (GAP-2207).
+func TestEnsureHookAPITokenWindowsMintsAProtectedDACL(t *testing.T) {
+	dataDir := testenv.PrivateTempDir(t)
+	if _, err := EnsureHookAPIToken(dataDir, "opencode"); err != nil {
+		t.Fatalf("EnsureHookAPIToken: %v", err)
+	}
+	tokenPath, err := HookAPITokenFilePath(dataDir, "opencode")
+	if err != nil {
+		t.Fatal(err)
+	}
+	descriptor, err := windows.GetNamedSecurityInfo(
+		tokenPath,
+		windows.SE_FILE_OBJECT,
+		windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION,
+	)
+	if err != nil {
+		t.Fatalf("read minted hook token security descriptor: %v", err)
+	}
+	control, _, err := descriptor.Control()
+	if err != nil {
+		t.Fatalf("read minted hook token DACL control: %v", err)
+	}
+	if control&windows.SE_DACL_PROTECTED == 0 {
+		t.Fatalf("minted hook token DACL is inheritable: %s", descriptor.String())
+	}
+	if _, err := os.Lstat(tokenPath + ".tmp"); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("mint left a stage behind: %v", err)
+	}
+	if loaded, err := LoadHookAPIToken(dataDir, "opencode"); err != nil || loaded == "" {
+		t.Fatalf("LoadHookAPIToken after mint = %q, %v", loaded, err)
+	}
+}

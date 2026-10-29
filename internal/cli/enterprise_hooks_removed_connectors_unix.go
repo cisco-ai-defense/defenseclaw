@@ -34,6 +34,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 )
 
@@ -204,4 +205,24 @@ func writeRemovedConnectorsLogged(dataDir string, logged map[string]string) {
 	if werr != nil || cerr != nil || os.Chmod(name, 0o600) != nil || os.Rename(name, path) != nil {
 		_ = os.Remove(name)
 	}
+}
+
+// withoutRemovedConnectorTargets drops the OpenHands and OmniGent rows from
+// the targets of a guardian pass. A 1.0.2-1.0.4 enumerator enrolled them, and
+// until the 1.0.5 enumerator rewrites the manifest (its next cycle, about a
+// minute after a package upgrade) the guardian read them as enrolled: it
+// verified each with a registry that no longer has the connector, failed it
+// with "unknown connector", and the postinstall of the upgrade failed on
+// guardian_target_failed (GAP-2504). Not enrolled, a row the guardian
+// protected is due for its per-user cleanup, which the job teardown
+// completes (GAP-1915): the same path as a rewritten manifest.
+func withoutRemovedConnectorTargets(targets []enterprisehooks.ManifestTarget) []enterprisehooks.ManifestTarget {
+	kept := make([]enterprisehooks.ManifestTarget, 0, len(targets))
+	for _, target := range targets {
+		if connector.IsRemovedConnector(strings.ToLower(strings.TrimSpace(target.Connector))) {
+			continue
+		}
+		kept = append(kept, target)
+	}
+	return kept
 }

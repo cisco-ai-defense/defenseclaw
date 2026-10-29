@@ -806,7 +806,7 @@ class StartGatewayStructuredDriftTests(unittest.TestCase):
         with open(os.path.join(self.data_dir, "gateway.pid"), "w", encoding="utf-8") as fh:
             fh.write(json.dumps({"pid": os.getpid()}))
 
-    def _patch_subprocess(self, recorder: list, returncode: int = 0):
+    def _patch_subprocess(self, recorder: list, returncode: int = 0, no_connector_gateway: bool = False):
         """Return a context manager that intercepts ``subprocess.run`` and
         ``shutil.which`` calls inside ``_start_gateway_structured``.
 
@@ -842,6 +842,12 @@ class StartGatewayStructuredDriftTests(unittest.TestCase):
             patch(
                 "defenseclaw.bootstrap._pid_looks_like_gateway",
                 return_value=True,
+            )
+        )
+        stack.enter_context(
+            patch(
+                "defenseclaw.bootstrap._running_gateway_has_no_connector",
+                return_value=no_connector_gateway,
             )
         )
         return stack
@@ -926,6 +932,71 @@ class StartGatewayStructuredDriftTests(unittest.TestCase):
             [],
             "missing active_connector.json must NEVER trigger a restart; legacy 'already running' behavior wins",
         )
+
+    def test_gateway_booted_with_no_connector_is_restarted_for_the_new_one(self):
+        from defenseclaw.bootstrap import _start_gateway_structured
+
+        # GAP-2342: init chose no connector and started the gateway (no
+        # active_connector.json); quickstart --connector claudecode then said
+        # "already running" and Claude Code stayed unguarded until a restart.
+        self.cfg.guardrail.connector = "claudecode"
+        self.cfg.claw.mode = "claudecode"
+        self._write_pid_file()
+
+        recorder: list = []
+        with self._patch_subprocess(recorder, no_connector_gateway=True):
+            result = _start_gateway_structured(self.cfg)
+
+        self.assertEqual(result.status, "pass")
+        self.assertEqual(result.detail, "restarted (was no connector, now claudecode)")
+        self.assertEqual([c[1] for c in recorder], ["restart"])
+
+    def test_no_connector_gateway_and_no_connector_configured_is_left_running(self):
+        from defenseclaw.bootstrap import _start_gateway_structured
+
+        self.cfg.guardrail.connector = ""
+        self.cfg.claw.mode = ""
+        self.cfg.guardrail.connectors = {}
+        self._write_pid_file()
+        if self.cfg.active_connectors():
+            self.skipTest("this config floors to a connector")
+
+        recorder: list = []
+        with self._patch_subprocess(recorder, no_connector_gateway=True):
+            result = _start_gateway_structured(self.cfg)
+
+        self.assertEqual((result.detail, recorder), ("already running", []))
+
+    def test_running_gateway_has_no_connector_reads_the_health_answer(self):
+        from unittest.mock import patch
+
+        from defenseclaw import bootstrap
+
+        self.cfg.gateway.api_port = 18970
+        answers = {
+            "no connector": {"guardrail": {"state": "disabled", "last_error": "no connector configured"}},
+            "guarding": {"guardrail": {"state": "running", "last_error": ""}},
+            "disabled": {"guardrail": {"state": "disabled", "last_error": "guardrail disabled"}},
+            "no guardrail": {},
+        }
+        for name, health in answers.items():
+            with (
+                patch("defenseclaw.gateway.foreign_loopback_listener", return_value=""),
+                patch("defenseclaw.gateway.OrchestratorClient.health", return_value=health),
+            ):
+                self.assertEqual(bootstrap._running_gateway_has_no_connector(self.cfg), name == "no connector", name)
+        # Another account's listener on the port never answers for this one.
+        with (
+            patch("defenseclaw.gateway.foreign_loopback_listener", return_value="uid 1001"),
+            patch("defenseclaw.gateway.OrchestratorClient.health", return_value=answers["no connector"]),
+        ):
+            self.assertFalse(bootstrap._running_gateway_has_no_connector(self.cfg))
+        # No answer keeps the no-restart rule.
+        with (
+            patch("defenseclaw.gateway.foreign_loopback_listener", return_value=""),
+            patch("defenseclaw.gateway.OrchestratorClient.health", side_effect=OSError("refused")),
+        ):
+            self.assertFalse(bootstrap._running_gateway_has_no_connector(self.cfg))
 
     def test_removed_connector_restart_names_the_dropped_connector(self):
         from defenseclaw.bootstrap import _start_gateway_structured

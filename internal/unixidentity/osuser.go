@@ -66,6 +66,22 @@ func accountFromUser(u *user.User) (Account, error) {
 	return Account{Name: u.Username, UID: uid, GID: gid, Gecos: u.Name, Home: u.HomeDir}, nil
 }
 
+// LoginShell returns the login shell the platform directory gives the
+// account name, or "" when it gives none or cannot be read. A resolver
+// whose Account has no Shell uses it: os/user has no shell field, so on
+// macOS every account came back with an empty Shell and the enrollment
+// skip of a nologin or false login shell never applied there (GAP-2483).
+// Linux accounts carry their shell from getent, nslcd or /etc/passwd.
+func LoginShell(ctx context.Context, name string) string {
+	if validName(name) != nil {
+		return ""
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return platformLoginShell(ctx, runTrustedCommand, name)
+}
+
 // LookupUser resolves by name.
 func (r *OSUserResolver) LookupUser(name string) (Account, error) {
 	if err := validName(name); err != nil {

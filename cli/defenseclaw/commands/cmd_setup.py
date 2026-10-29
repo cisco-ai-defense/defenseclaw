@@ -91,6 +91,8 @@ from defenseclaw.config import (
     enable_user_runtime_planes,
     locked_config_yaml,
     locked_file_update,
+    outage_block_hint,
+    saved_hook_fail_mode_scope,
 )
 from defenseclaw.config import (
     load as load_config,
@@ -156,6 +158,21 @@ from defenseclaw.scanner import settings as scanner_settings
 _supports_terminal_redraw = terminal_checkbox.supports_terminal_redraw
 _checkbox_key_name = terminal_checkbox.checkbox_key_name
 _render_checkbox_menu = terminal_checkbox.render_checkbox_menu
+
+# --workspace help (GAP-2471): setup without the flag keeps a claw.workspace_dir
+# pin that is a folder (GAP-0201), so the default is the pin when one is set.
+_WORKSPACE_OPTION_HELP = (
+    "Opt into workspace-scoped config for this setup. Defaults to the claw.workspace_dir "
+    "pin when one is set (it must be a folder), else global/user config. "
+    '--workspace "" selects global/user config.'
+)
+
+# GAP-2474: setup antigravity refuses --workspace (DefenseClaw owns only the
+# global hooks file), so its help names the refusal instead of the pin text.
+_ANTIGRAVITY_WORKSPACE_OPTION_HELP = (
+    "Not supported for Antigravity: setup antigravity refuses --workspace, because "
+    "DefenseClaw owns only the global ~/.gemini/config/hooks.json."
+)
 
 # Key used to stash the pre-invocation config.yaml mtime in the Click
 # context so the post-invocation hook can tell whether a `setup`
@@ -1710,6 +1727,10 @@ def _configure_llm(
         flag_value=None,
         non_interactive=False,
     )
+    if llm.provider != previous_provider and llm.provider != "custom" and llm.provider in _WIZARD_LLM_PROVIDERS:
+        # A catalog provider replacing provider custom drops its instance
+        # binding, as setup llm --provider does (GAP-2379, GAP-2235).
+        llm.instance_name = ""
     current_model = (llm.model or "") if llm.provider == previous_provider else ""
     if llm.provider in _LOCAL_LLM_WIZARD_PROVIDERS:
         # Local runtimes: no API key. Ask for the endpoint first so we
@@ -1896,8 +1917,14 @@ def _configure_llm_non_interactive(
     llm = _target_llm_block(cfg, target_path)
     if provider is not None:
         next_provider = provider.strip().lower()
-        if next_provider != (llm.provider or "").strip().lower() and base_url is None:
+        provider_changed = next_provider != (llm.provider or "").strip().lower()
+        if provider_changed and base_url is None:
             llm.base_url = ""
+        # A switch away from provider custom drops its instance binding
+        # unless --instance-name names one again, so the role cannot keep
+        # routing to the old custom instance (GAP-2235).
+        if provider_changed and next_provider != "custom" and instance_name is None:
+            llm.instance_name = ""
         llm.provider = next_provider
     elif not llm.provider:
         llm.provider = "anthropic"
@@ -7045,7 +7072,7 @@ def _resolve_judge_hook_gate(
     "--workspace-dir",
     "workspace_dir",
     default=None,
-    help="Opt into workspace-scoped connector config. Defaults to global/user config.",
+    help=_WORKSPACE_OPTION_HELP,
 )
 @click.option(
     "--restart/--no-restart", default=True, help="Restart gateway and the active connector after setup (default: on)"
@@ -7422,7 +7449,16 @@ def setup_guardrail(
             gc.judge.api_base = ""
             gc.judge.api_key_env = ""
         if judge_provider is not None:
-            gc.judge.llm.provider = judge_provider.strip().lower()
+            next_judge_provider = judge_provider.strip().lower()
+            # A switch away from provider custom drops the judge's instance
+            # binding unless --judge-instance-name names one (GAP-2379, as GAP-2235).
+            if (
+                next_judge_provider != (gc.judge.llm.provider or "").strip().lower()
+                and next_judge_provider != "custom"
+                and judge_instance_name is None
+            ):
+                gc.judge.llm.instance_name = ""
+            gc.judge.llm.provider = next_judge_provider
         if judge_region is not None:
             gc.judge.llm.region = judge_region.strip()
         if judge_instance_name is not None:
@@ -7779,11 +7815,13 @@ def setup_guardrail(
         rows = [
             ("guardrail.connector", f"{connector_label} ({gc.connector})"),
             ("scope", scope_val),
-            ("guardrail.mode", gc.mode),
+            # The values this connector runs with: a guardrail.connectors entry
+            # wins over the top-level keys, as guardrail status shows (GAP-2239).
+            ("guardrail.mode", gc.effective_mode(gc.connector)),
             ("guardrail.port", str(gc.port)),
             *_legacy_guardrail_llm_rows(gc),
             ("guardrail.detection_strategy", _effective_detection_strategy(gc, gc.connector)),
-            ("guardrail.rule_pack", gc.effective_rule_pack() or "default"),
+            ("guardrail.rule_pack", gc.effective_rule_pack(gc.connector) or "default"),
         ]
         if gc.api_base:
             rows.append(("guardrail.api_base", gc.api_base[:60] + "..." if len(gc.api_base) > 60 else gc.api_base))
@@ -7791,8 +7829,9 @@ def setup_guardrail(
             truncated = gc.block_message[:60] + "..." if len(gc.block_message) > 60 else gc.block_message
             rows.append(("guardrail.block_message", truncated))
         rows.append(("guardrail.hook_fail_mode", _guardrail_summary_hook_fail_mode(app.cfg, gc.connector)))
-        rows.append(("guardrail.hilt.enabled", str(bool(gc.hilt.enabled)).lower()))
-        rows.append(("guardrail.hilt.min_severity", gc.hilt.min_severity or "HIGH"))
+        hilt = gc.effective_hilt(gc.connector)
+        rows.append(("guardrail.hilt.enabled", str(bool(hilt.enabled)).lower()))
+        rows.append(("guardrail.hilt.min_severity", hilt.min_severity or "HIGH"))
     if gc.judge.enabled:
         rows.append(("guardrail.judge.enabled", "true"))
         # GAP-2056: show the judge LLM in use (guardrail.judge.llm layered on
@@ -10502,26 +10541,77 @@ def _resolve_connector_workspace(workspace_dir: str | None) -> str:
         return workspace
 
 
-def _configure_connector_workspace(cfg, workspace_dir: str | None = None) -> str:
-    """Persist an explicit workspace, or clear it for global/user scope.
+def _workspace_peer_move_refusal(setup_slug: str, peers: list[str], requested: str, current: str) -> str:
+    """Refusal text for a --workspace that would move configured peers.
 
-    Setup without ``--workspace`` selects global scope. A workspace pinned
-    earlier (``config set claw.workspace_dir`` or an earlier ``--workspace``)
-    is then cleared, and setup says so and names the flag that keeps it
-    (GAP-0201): before, the pin vanished without a word.
+    Setup without --workspace keeps the current pin (GAP-0201), so with a
+    pin set that is not "user-global hooks": name the pin it keeps and the
+    explicit global choice instead (GAP-2472).
     """
-    workspace = _resolve_connector_workspace(workspace_dir)
+    head = (
+        f"--workspace pins one workspace for the whole install, so it would also move "
+        f"{', '.join(peers)} to {requested}, and their hooks would stop guarding "
+        "other folders. No changes made. "
+    )
+    scope_all = f"'defenseclaw setup guardrail --workspace {requested}' to scope every connector to that folder."
+    if current:
+        return head + (
+            f"Run 'defenseclaw setup {setup_slug}' without --workspace to keep the current pin "
+            f"{current}, 'defenseclaw setup {setup_slug} --workspace \"\"' (or "
+            "'defenseclaw config unset claw.workspace_dir', then setup again) to return every "
+            f"connector to user-global hooks, or {scope_all}"
+        )
+    return head + (
+        f"Run 'defenseclaw setup {setup_slug}' without --workspace to keep user-global hooks, or {scope_all}"
+    )
+
+
+def _setup_workspace_for_check(cfg, workspace_dir: str | None) -> str | None:
+    """The workspace setup will use, for the agent-settings precheck.
+
+    Setup without --workspace keeps a pin that is still a folder
+    (GAP-0201), so the precheck reads that workspace's files too.
+    """
+    if workspace_dir is not None:
+        return workspace_dir
+    try:
+        kept = _resolve_connector_workspace(str(getattr(cfg.claw, "workspace_dir", "") or ""))
+    except AttributeError:
+        return None
+    return kept if kept and os.path.isdir(kept) else None
+
+
+def _configure_connector_workspace(cfg, workspace_dir: str | None = None) -> str:
+    """Persist an explicit workspace, keep a valid earlier pin, or clear it.
+
+    ``--workspace <dir>`` pins *dir*; ``--workspace ""`` selects global scope.
+    Setup without ``--workspace`` keeps a workspace pinned earlier
+    (``config set claw.workspace_dir`` or an earlier ``--workspace``), so the
+    documented pre-set survives setup and the connector writes its workspace
+    copy (GAP-0201). A pin that is no longer a folder is cleared with a
+    warning, because hooks cannot be scoped to it.
+    """
     try:
         previous = str(getattr(cfg.claw, "workspace_dir", "") or "").strip()
-        cfg.claw.workspace_dir = workspace
     except AttributeError:
-        return workspace
-    if previous and not workspace:
+        return _resolve_connector_workspace(workspace_dir)
+    if workspace_dir is None and previous:
+        kept = _resolve_connector_workspace(previous)
+        if os.path.isdir(kept):
+            cfg.claw.workspace_dir = kept
+            ux.ok(
+                f"Keeping workspace pin {kept} (claw.workspace_dir). To return to global scope: "
+                "defenseclaw config unset claw.workspace_dir, then run setup again."
+            )
+            return kept
+        cfg.claw.workspace_dir = ""
         ux.warn(
-            f"Workspace pin {previous} cleared: setup without --workspace selects global scope. "
-            f"To keep it, pass --workspace {previous} (with more than one connector: "
-            f"defenseclaw setup guardrail --workspace {previous})."
+            f"Workspace pin {previous} cleared: it is not a folder, so setup selects global scope. "
+            "To pin a workspace, pass --workspace <folder>."
         )
+        return ""
+    workspace = _resolve_connector_workspace(workspace_dir)
+    cfg.claw.workspace_dir = workspace
     return workspace
 
 
@@ -10833,7 +10923,9 @@ def _apply_hook_connector_setup(
     if connector == "opencode":
         _preflight_opencode_plugin_folder()
 
-    if refusal := _agent_settings_refusal(app.cfg, connector, workspace_dir=workspace_dir, will_restart=restart):
+    if refusal := _agent_settings_refusal(
+        app.cfg, connector, workspace_dir=_setup_workspace_for_check(app.cfg, workspace_dir), will_restart=restart
+    ):
         ux.echo(f"  ✗ {refusal}", err=True)
         return False
 
@@ -11051,12 +11143,16 @@ def _apply_hook_connector_setup(
         and connector not in {"cursor", "hermes", "copilot", "antigravity"}
         and gc.effective_hook_fail_mode(connector) == "open"
     ):
-        if _batch_summary is not None:
+        if _batch_summary is not None and saved_hook_fail_mode_scope(gc, connector):
+            # A saved open wins over the strict policy (GAP-0039).
+            _batch_summary.setdefault("fail_open_saved", {})[connector] = outage_block_hint(gc, connector)
+        elif _batch_summary is not None:
             _batch_summary.setdefault("fail_open", []).append(connector)
         else:
+            why = "your saved fail mode" if saved_hook_fail_mode_scope(gc, connector) else "default policy"
             ux.echo(
                 f"  ⚠ {connector} hooks let tool calls run with a warning while the gateway is not "
-                "running (default policy). To block them: defenseclaw guardrail use-pack strict"
+                f"running ({why}). To block them: {outage_block_hint(gc, connector)}"
             )
     if connector == "cursor":
         if hilt:
@@ -11269,6 +11365,11 @@ def _echo_batch_setup_summary(applied: list[str], summary: dict[str, Any], *, re
         ux.echo(
             f"  ⚠ While the gateway is not running, {', '.join(fail_open)} hooks let tool calls run "
             "with a warning (default policy). To block them: defenseclaw guardrail use-pack strict"
+        )
+    for name, hint in (summary.get("fail_open_saved") or {}).items():
+        ux.echo(
+            f"  ⚠ While the gateway is not running, {name} hooks let tool calls run with a warning "
+            f"(your saved fail mode). To block them: {hint}"
         )
     if not restart:
         if "codex" in applied:
@@ -11746,12 +11847,12 @@ def _setup_observability_alias(
         if peers:
             setup_slug = "claude-code" if connector == "claudecode" else connector
             raise click.ClickException(
-                f"--workspace pins one workspace for the whole install, so it would also move "
-                f"{', '.join(peers)} to {requested_workspace}, and their hooks would stop guarding "
-                "other folders. No changes made. Run 'defenseclaw setup "
-                f"{setup_slug}' without --workspace to keep user-global hooks, or "
-                f"'defenseclaw setup guardrail --workspace {requested_workspace}' to scope every "
-                "connector to that folder."
+                _workspace_peer_move_refusal(
+                    setup_slug,
+                    peers,
+                    requested_workspace,
+                    _setup_workspace_for_check(app.cfg, None) or "",
+                )
             )
 
     # GAP-2426: a guarded proxy connector (OpenClaw/ZeptoClaw) cannot run next
@@ -12895,7 +12996,7 @@ def _hook_guardrail_options(fn):
     "--workspace-dir",
     "workspace_dir",
     default=None,
-    help="Opt into workspace-scoped config for this setup. Defaults to global/user config.",
+    help=_WORKSPACE_OPTION_HELP,
 )
 @click.option(
     "--replace",
@@ -13037,7 +13138,7 @@ def setup_codex(
     "--workspace-dir",
     "workspace_dir",
     default=None,
-    help="Opt into workspace-scoped config for this setup. Defaults to global/user config.",
+    help=_WORKSPACE_OPTION_HELP,
 )
 @click.option(
     "--replace",
@@ -13855,7 +13956,7 @@ def _make_observability_setup_command(connector: str) -> click.Command:
         "--workspace-dir",
         "workspace_dir",
         default=None,
-        help="Opt into workspace-scoped config for this setup. Defaults to global/user config.",
+        help=_ANTIGRAVITY_WORKSPACE_OPTION_HELP if connector == "antigravity" else _WORKSPACE_OPTION_HELP,
     )
     @click.option(
         "--replace",
@@ -18471,7 +18572,10 @@ def setup_splunk(
     _print_splunk_status(app)
     print_redaction_status_hint(app.cfg)
     click.echo()
-    _print_splunk_next_steps(did_o11y, did_logs, did_enterprise)
+    _print_splunk_next_steps(
+        did_o11y, did_logs, did_enterprise,
+        local_splunk_free=_local_splunk_license_is_free(app.local_splunk_license_group),
+    )
 
     if app.logger:
         parts: list[str] = []
@@ -18624,7 +18728,10 @@ def _interactive_splunk_setup(
     _print_splunk_status(app)
     print_redaction_status_hint(app.cfg)
     click.echo()
-    _print_splunk_next_steps(did_o11y, did_logs, did_enterprise)
+    _print_splunk_next_steps(
+        did_o11y, did_logs, did_enterprise,
+        local_splunk_free=_local_splunk_license_is_free(app.local_splunk_license_group),
+    )
 
     if app.logger:
         parts = []
@@ -18860,8 +18967,21 @@ def _setup_logs(
         aws_region=aws_region,
         refresh_bundle=refresh_bundle,
     )
-    click.echo("  Local Splunk configured (Free mode from day 1)")
+    click.echo(_local_splunk_configured_line(app.local_splunk_license_group))
     return True
+
+
+def _local_splunk_license_is_free(license_group: object) -> bool:
+    """Splunk Free has no Web login; every other licence asks for one (GAP-1398, GAP-1750)."""
+    return str(license_group or "").strip().lower() == "free"
+
+
+def _local_splunk_configured_line(license_group: str) -> str:
+    if _local_splunk_license_is_free(license_group):
+        return "  Local Splunk configured (Free mode from day 1)"
+    if license_group:
+        return f"  Local Splunk configured (license: {license_group})"
+    return "  Local Splunk configured"
 
 
 def _setup_enterprise(
@@ -19076,6 +19196,8 @@ def _apply_logs_config(
             refresh_bundle=refresh_bundle,
             gateway_token_env=gateway_token_env,
         )
+        # Native Windows local Splunk always runs the Free licence.
+        app.local_splunk_license_group = "Free"
         return
 
     # Prove an unrecorded legacy sink belongs to this exact bridge before the
@@ -19097,6 +19219,7 @@ def _apply_logs_config(
     )
     if not contract:
         raise SystemExit(1)
+    app.local_splunk_license_group = str(contract.get("license_group", "") or "")
 
     hec_url = contract.get("hec_url", _SPLUNK_LOCAL_HEC_DEFAULTS["hec_endpoint"])
     hec_token = contract.get("hec_token", "")
@@ -19856,7 +19979,7 @@ def _bootstrap_bridge(
         click.echo("  Local Splunk is ready")
         web_url = contract.get("splunk_web_url", "http://127.0.0.1:8000")
         click.echo(f"    Web UI: {web_url}")
-        free = str(contract.get("license_group", "")).lower() == "free"
+        free = _local_splunk_license_is_free(contract.get("license_group", ""))
         if free:
             click.echo("    License: Free")
         click.echo()
@@ -20513,15 +20636,21 @@ def _print_splunk_status(app: AppContext) -> None:
         click.echo()
 
 
-def _print_splunk_next_steps(did_o11y: bool, did_logs: bool, did_enterprise: bool = False) -> None:
+def _print_splunk_next_steps(
+    did_o11y: bool, did_logs: bool, did_enterprise: bool = False, *, local_splunk_free: bool = True,
+) -> None:
     click.echo("  Next steps:")
     click.echo("    1. Start (or restart) the DefenseClaw sidecar:")
     click.echo("       defenseclaw-gateway restart")
     if did_logs:
-        # Local Splunk runs in Free mode on every OS: no Web login (GAP-1398).
         click.echo("    2. Open local Splunk Web at http://127.0.0.1:8000")
-        click.echo("       Web authentication is disabled in Splunk Free mode.")
-        click.echo("       To view the HEC/runtime secrets explicitly: defenseclaw setup splunk --show-credentials")
+        if local_splunk_free:
+            # Splunk Free has no Web login (GAP-1398).
+            click.echo("       Web authentication is disabled in Splunk Free mode.")
+            click.echo("       To view the HEC/runtime secrets explicitly: defenseclaw setup splunk --show-credentials")
+        else:
+            # Any other licence asks for the admin login (GAP-2422, same rule as the ready block).
+            click.echo("       Log in as admin; show the password with: defenseclaw setup splunk --show-credentials")
         click.echo("    3. Validate data in local Splunk")
     if did_enterprise:
         step = "3" if did_logs else "2"
@@ -20593,7 +20722,11 @@ def _show_splunk_credentials(data_dir: str) -> None:
         click.echo("  Splunk Web Credentials")
         ux.echo("  ──────────────────────")
         click.echo("    URL:       http://127.0.0.1:8000")
-        click.echo("    Web auth:  disabled in Splunk Free mode; these apply only if Splunk asks for a login")
+        # Same rule as the bridge (bridge_runs_in_free_mode): only SPLUNK_LICENSE_URI=Free has no Web login (GAP-2423).
+        if values.get("SPLUNK_LICENSE_URI", "") == "Free":
+            click.echo("    Web auth:  disabled in Splunk Free mode; these apply only if Splunk asks for a login")
+        else:
+            click.echo("    Web auth:  required (this local Splunk does not run the Free licence); log in with these")
         click.echo("    Username:  admin")
         click.echo(f"    Password:  {password}")
     click.echo()
@@ -20638,6 +20771,12 @@ def setup_routing(app: AppContext, enable: bool, disable: bool, status: bool, ye
     if status or (not enable and not disable):
         _print_routing_status(app)
         return
+
+    if enable and _routing_unsupported_on_host():
+        # Routing only applies to OpenClaw and ZeptoClaw proxy traffic, and
+        # DefenseClaw runs no guardrail proxy on native Windows (rel-1-0-4
+        # GAP-2260). --disable still works, to turn off a copied config.
+        raise click.ClickException(_ROUTING_UNSUPPORTED_ON_WINDOWS)
 
     if enable:
         app.cfg.routing.enabled = True
@@ -20738,10 +20877,29 @@ def setup_routing(app: AppContext, enable: bool, disable: bool, status: bool, ye
         )
 
 
+_ROUTING_UNSUPPORTED_ON_WINDOWS = (
+    "Semantic routing is not supported on native Windows: it routes OpenClaw and "
+    "ZeptoClaw proxy traffic, and DefenseClaw runs no guardrail proxy on Windows."
+)
+
+
+def _routing_unsupported_on_host() -> bool:
+    """Native Windows runs hook connectors only, so routing has no traffic."""
+    return os.name == "nt"
+
+
 def _print_routing_status(app: AppContext) -> None:
     click.echo()
     click.echo("  Semantic Router Status")
     ux.echo("  ══════════════════════")
+    if _routing_unsupported_on_host():
+        configured = "enabled" if app.cfg.routing.enabled else "disabled"
+        click.echo(f"    Configured: {configured}")
+        click.echo(f"    {_ROUTING_UNSUPPORTED_ON_WINDOWS}")
+        if app.cfg.routing.enabled:
+            click.echo("    Turn it off with: defenseclaw setup routing --disable")
+        click.echo()
+        return
     if not app.cfg.routing.enabled:
         click.echo("    Configured: disabled")
         click.echo()

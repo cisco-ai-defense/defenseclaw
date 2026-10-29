@@ -57,6 +57,11 @@ func applyWindowsEnterpriseGuardianTargetGaps(
 		if !row.OK {
 			result.SecurityComplete = false
 			switch {
+			case enterpriseHookEarlierMatrixRow(row):
+				reason = fmt.Sprintf(
+					"%s for %s runs the hooks an earlier DefenseClaw release registered: it is guarded, but a hook "+
+						"spawn error or timeout does not block until the guardian upgrades them in that account's own "+
+						"Windows session at its next connect", connector, account)
 			case enterpriseHookAwaitingSignInError(row):
 				reason = fmt.Sprintf(
 					"the hook guardian's last pass could not verify %s for %s, and it repairs it only in that account's "+

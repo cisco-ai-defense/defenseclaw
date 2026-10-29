@@ -126,7 +126,9 @@ $SetupHookState = Join-Path $env:LOCALAPPDATA "DefenseClaw\HookRuntime\hook-runt
 # once Setup is replaced (Publish-SetupLauncherTrampoline).
 $SetupDelegatedHooks = Join-Path $env:LOCALAPPDATA "DefenseClaw\HookRuntime\delegated"
 # Real files in BinDir. Connector hooks record these paths, so they never move.
-$ManagedBinaries = @("defenseclaw-gateway.exe", "defenseclaw-hook.exe", "defenseclaw-acp.exe")
+# defenseclaw-hook-guard.exe is the Claude Code PreToolUse guard, a small
+# GUI-subsystem program, so a tool call never opens a console window (GAP-2467).
+$ManagedBinaries = @("defenseclaw-gateway.exe", "defenseclaw-hook.exe", "defenseclaw-hook-guard.exe", "defenseclaw-acp.exe")
 # .cmd shims in BinDir for console scripts in the venv; the gateway runs them by name.
 $ManagedShims = @("defenseclaw", "skill-scanner", "mcp-scanner")
 # Git Bash does not run a .cmd file by its bare name, so `defenseclaw` there
@@ -147,10 +149,12 @@ $ManagedFiles = $ManagedBinaries + @($ManagedShims | ForEach-Object { "$_.cmd" }
 # which Install-New replaces with $CliLauncher. These must go.
 $DeveloperFiles = @("litellm.exe", "skill-scanner.exe", "skill-scanner-api.exe",
     "skill-scanner-pre-commit.exe", "mcp-scanner.exe", "mcp-scanner-api.exe", ".defenseclaw-source-root")
-# Data-dir entries that are install machinery, not user data.
+# Data-dir entries that are install machinery, not user data. A
+# `<name>.dc-removed-<hex>` folder is one an uninstall's after-exit cleanup
+# renamed and is still deleting (1.0.2 on): never data (GAP-2499).
 $NotData = @(".venv", ".venv.busy", ".uv", "previous", "previous.new", ".repair", ".staging", ".failed-*",
     "installer", "logs", ".install.lock", "backups", ".rollback-hold", ".rollback-hold.done",
-    ".lifecycle-txn.json", ".lifecycle-txn.json.new", ".lifecycle-closer")
+    ".lifecycle-txn.json", ".lifecycle-txn.json.new", ".lifecycle-closer", "*.dc-removed-*")
 # Connectors supported on Windows (cli/defenseclaw/platform_support.py).
 $ConnectorChoices = @("codex", "claudecode", "hermes", "cursor", "devin", "copilot", "antigravity",
     "opencode", "amp", "kiro", "none")
@@ -1869,8 +1873,22 @@ function Clear-StagedRelease {
 }
 
 function Get-TreeSize([string]$Path) {
+    # A folder can go while it is walked (an uninstall's after-exit cleanup
+    # deletes its renamed .uv in the background), and Get-ChildItem -Recurse
+    # then stops the install with "The system cannot find the file specified"
+    # despite -ErrorAction (GAP-2499). Each folder is listed on its own; one
+    # that went counts as empty. Links are not followed.
     $size = [long]0
-    foreach ($file in @(Get-ChildItem -LiteralPath $Path -Recurse -Force -File -ErrorAction SilentlyContinue)) { $size += $file.Length }
+    $dirs = New-Object System.Collections.Generic.Stack[string]
+    $dirs.Push($Path)
+    while ($dirs.Count) {
+        $items = @()
+        try { $items = @(Get-ChildItem -LiteralPath $dirs.Pop() -Force -ErrorAction SilentlyContinue) } catch { continue }
+        foreach ($item in $items) {
+            if (-not $item.PSIsContainer) { $size += $item.Length }
+            elseif (-not ($item.Attributes -band [IO.FileAttributes]::ReparsePoint)) { $dirs.Push($item.FullName) }
+        }
+    }
     return $size
 }
 
@@ -2184,6 +2202,77 @@ function Assert-BinDirRestored([string]$From, [string]$GuardSHA256 = "") {
     if ($wrong.Count) { throw "$BinDir does not hold the saved copy of $($wrong -join ', ')" }
 }
 
+# The Windows LiteLLM wheel ships the tiktoken rank files with CRLF line ends,
+# so their SHA-256 never matches the hash tiktoken expects: tiktoken deletes
+# each one and downloads it again on the first import, and offline that
+# import fails (GAP-2441; the managed runtime build does the same, GAP-2395).
+# A rank file whose CRLF form is the only difference goes back to its
+# published bytes, through a new file so the uv cache it is linked to stays
+# as it was, and the wheel RECORD says so. Any other mismatch is left alone.
+$TiktokenRanksPy = @'
+import base64, hashlib, os, re, sys
+from pathlib import Path
+
+site = Path(sys.argv[1])
+folder = site / "litellm" / "litellm_core_utils" / "tokenizers"
+source = site / "tiktoken_ext" / "openai_public.py"
+if not folder.is_dir() or not source.is_file():
+    sys.exit(0)
+expected = set(re.findall(r"expected_hash\s*=\s*[\"\x27]([0-9a-f]{64})[\"\x27]", source.read_text(encoding="utf-8")))
+if not expected:
+    sys.exit(0)
+
+
+def replace(path, data):
+    fresh = path.with_name(path.name + ".defenseclaw-new")
+    fresh.write_bytes(data)
+    os.replace(fresh, path)
+
+
+fixed, unknown = {}, []
+for path in sorted(folder.iterdir()):
+    if not path.is_file() or not re.fullmatch(r"[0-9a-f]{40}", path.name):
+        continue
+    data = path.read_bytes()
+    if hashlib.sha256(data).hexdigest() in expected:
+        continue
+    lf = data.replace(b"\r\n", b"\n")
+    if hashlib.sha256(lf).hexdigest() not in expected:
+        unknown.append(path.name)
+        continue
+    replace(path, lf)
+    fixed["litellm/litellm_core_utils/tokenizers/" + path.name] = lf
+for record in site.glob("litellm-*.dist-info/RECORD") if fixed else []:
+    lines = record.read_bytes().decode("utf-8").splitlines(keepends=True)
+    for index, line in enumerate(lines):
+        name = line.split(",", 1)[0]
+        if name in fixed:
+            data = fixed[name]
+            digest = base64.urlsafe_b64encode(hashlib.sha256(data).digest()).rstrip(b"=").decode("ascii")
+            ending = "\r\n" if line.endswith("\r\n") else "\n"
+            lines[index] = f"{name},sha256={digest},{len(data)}{ending}"
+    replace(record, "".join(lines).encode("utf-8"))
+print(len(fixed))
+if unknown:
+    print("tiktoken rank files that match no expected hash: " + ", ".join(unknown), file=sys.stderr)
+    sys.exit(3)
+'@
+
+function Repair-TiktokenRanks([string]$Python, [string]$Where) {
+    $site = Join-Path (Split-Path -Parent (Split-Path -Parent $Python)) "Lib\site-packages"
+    $code = Join-Path ([IO.Path]::GetTempPath()) "defenseclaw-tiktoken-ranks-$PID.py"
+    try {
+        [IO.File]::WriteAllText($code, $TiktokenRanksPy)
+        if ((Invoke-Native $Python @("-I", $code, $site) -Quiet) -ne 0) {
+            Write-Warn "Could not restore the published tiktoken rank files in $Where; the first token count downloads them again"
+        }
+    } catch {
+        Write-Warn "Could not restore the published tiktoken rank files in ${Where}: $($_.Exception.Message)"
+    } finally {
+        Remove-Item -LiteralPath $code -Force -ErrorAction SilentlyContinue
+    }
+}
+
 # $Where names the environment in the progress lines: the installer builds
 # a staging one to check the release, then the final one (GAP-1727).
 function New-Venv([string]$Path, [string]$Where) {
@@ -2201,6 +2290,7 @@ function New-Venv([string]$Path, [string]$Where) {
         "-r", (Join-Path $Staging $Requirements))
     Write-Info "Installing the Python packages into $Where"
     if (-not (Invoke-UvPipInstall $lockArgs)) { return $false }
+    Repair-TiktokenRanks $python $Where
     Write-Info "Installing the DefenseClaw package into $Where and compiling it"
     return (Invoke-UvPipInstall @("pip", "install", "--quiet", "--compile-bytecode", "--python", $python, "--no-deps", (Join-Path $Staging $Wheel)))
 }
@@ -3406,6 +3496,30 @@ function Protect-BinDir {
     }
 }
 
+function Save-HelperRecoveryCopy {
+    # A 1.0.2 or 1.0.3 install.ps1 rolls forward with its own binary list and
+    # leaves defenseclaw-hook-guard.exe out, while the Claude Code PreToolUse
+    # entry this release wrote names it (GAP-2525). Their swap keeps installer\
+    # as one folder, so keep a copy there with the digests of the gateway and
+    # the guard; the gateway puts a missing guard back when it starts. Best
+    # effort: without the copy only that roll-forward case is not repaired.
+    $guard = Join-Path $BinDir "defenseclaw-hook-guard.exe"
+    $gateway = Join-Path $BinDir "defenseclaw-gateway.exe"
+    if (-not (Test-Path -LiteralPath $guard -PathType Leaf) -or -not (Test-Path -LiteralPath $gateway -PathType Leaf)) { return }
+    try {
+        New-Item -ItemType Directory -Path $InstallerDir -Force | Out-Null
+        Install-File $guard (Join-Path $InstallerDir "defenseclaw-hook-guard.exe")
+        $lines = foreach ($name in @("defenseclaw-gateway.exe", "defenseclaw-hook-guard.exe")) {
+            "$((Get-Sha256 (Join-Path $BinDir $name)).ToLowerInvariant())  $name"
+        }
+        $record = Join-Path $InstallerDir "binaries.sha256"
+        [IO.File]::WriteAllText("$record.new", (($lines -join "`n") + "`n"), (New-Object Text.UTF8Encoding $false))
+        Publish-File "$record.new" $record
+    } catch {
+        Write-Warn "Could not keep a recovery copy of defenseclaw-hook-guard.exe in $InstallerDir ($($_.Exception.Message))"
+    }
+}
+
 function Install-New {
     Write-Info "Installing DefenseClaw $Ver"
     Write-Info "Building the final Python environment in $Venv (the checked packages come from the uv cache)"
@@ -3429,6 +3543,7 @@ function Install-New {
         $staged = Join-Path $Staging "bin\$name"
         if (Test-Path -LiteralPath $staged) { Install-File $staged (Join-Path $BinDir $name) }
     }
+    Save-HelperRecoveryCopy
     foreach ($name in $ManagedShims) {
         $target = Join-Path $Venv "Scripts\$name.exe"
         if (Test-Path -LiteralPath $target) { Write-Shim $name $target }
@@ -3517,7 +3632,9 @@ function Restart-Old([switch]$KeepStopped) {
         $gateway = if ($Setup) { Join-Path $Setup.Root "bin\defenseclaw-gateway.exe" } else { Join-Path $BinDir "defenseclaw-gateway.exe" }
         $gatewayCommand = "& '" + $gateway.Replace("'", "''") + "' start"
         Write-Warn "The previous install is restored with its gateway kept stopped to preserve its hook registration"
-        Write-Info "Fix the startup error above (close the agent if its settings are in use), then run: $gatewayCommand"
+        # The gateway names the cause and its next step; a guess here
+        # contradicted it (GAP-2478).
+        Write-Info "Fix the startup error shown above, then run: $gatewayCommand"
         return
     }
     if ($Run.OldGatewayDown) {
@@ -3984,9 +4101,47 @@ function Save-Live([string]$Slot) {
     Copy-BinDir (Join-Path $Slot "bin")
     New-Item -ItemType Directory -Path (Join-Path $Slot "data") -Force | Out-Null
     foreach ($entry in Get-DataEntries) { Move-Path $entry.FullName (Join-Path $Slot "data\$($entry.Name)") }
+    New-HooksBridge (Join-Path $Slot "data\hooks")
     if (Test-Path -LiteralPath $Venv) { Move-Path $Venv (Join-Path $Slot "venv") 60 }
     if (Test-Path -LiteralPath $InstallerDir) { Move-Path $InstallerDir (Join-Path $Slot "installer") }
     Save-ExternalConfig $Slot
+}
+
+# While a rollback swaps the data folders (Save-Live, then the programs, then
+# Restore-LiveTree, several seconds on Windows), hooks\ is gone, and every agent
+# hook call, of either release, answered "missing gateway token ... not found"
+# instead of naming the install (GAP-2420). A bridge hooks\ of hard links to the
+# set-aside files keeps the state those calls saw a moment before (gateway
+# stopped, install lock held) until the other install's hooks\ moves in. It is
+# never data: Restore-LiveTree and Move-LiveTo remove it before they move.
+function New-HooksBridge([string]$From) {
+    $bridge = Join-Path $DataDir "hooks"
+    if ((Test-Path -LiteralPath $bridge) -or -not (Test-Path -LiteralPath $From -PathType Container)) { return }
+    # Built under another name, marker first, and renamed into place, so a
+    # hooks\ without the marker is never left for Restore-LiveTree to trip on
+    # (GAP-2425). The name is .failed-*, machinery to every released installer.
+    $building = Join-Path $DataDir ".failed-hooks-bridge"
+    try {
+        Remove-Tree $building
+        # It inherits the data folder's permissions, as the hooks\ it stands in
+        # for does; the linked files keep their own (GAP-2426).
+        New-Item -ItemType Directory -Path $building -ErrorAction Stop | Out-Null
+        Set-Content -LiteralPath (Join-Path $building ".rollback-hooks-bridge") -Value "" -Encoding Ascii -ErrorAction Stop
+        foreach ($file in @(Get-ChildItem -LiteralPath $From -Force -File -ErrorAction Stop)) {
+            if ($file.Attributes -band [IO.FileAttributes]::ReparsePoint) { continue }
+            New-Item -ItemType HardLink -Path (Join-Path $building $file.Name) -Value $file.FullName -ErrorAction Stop | Out-Null
+        }
+        Move-Path $building $bridge 0
+    } catch {
+        # Best effort: without it the calls are refused with the older text.
+        Invoke-Quietly { Remove-Tree $building }
+    }
+}
+
+function Remove-HooksBridge {
+    $bridge = Join-Path $DataDir "hooks"
+    if (Test-Path -LiteralPath (Join-Path $bridge ".rollback-hooks-bridge")) { Remove-Tree $bridge }
+    Remove-Tree (Join-Path $DataDir ".failed-hooks-bridge")
 }
 
 function Restore-Live([string]$Slot) {
@@ -3999,7 +4154,9 @@ function Restore-Live([string]$Slot) {
 function Restore-LiveTree([string]$Slot) {
     # Move $Slot's data, venv and installer back into place. Alone it undoes a
     # Save-Live that failed part-way: that one only copied the binaries.
-    foreach ($entry in @(Get-ChildItem -LiteralPath (Join-Path $Slot "data") -Force -ErrorAction SilentlyContinue)) {
+    # hooks\ first, right after its bridge goes (GAP-2420).
+    Remove-HooksBridge
+    foreach ($entry in @(Get-ChildItem -LiteralPath (Join-Path $Slot "data") -Force -ErrorAction SilentlyContinue | Sort-Object { $_.Name -ne "hooks" })) {
         Move-Path $entry.FullName (Join-Path $DataDir $entry.Name)
     }
     if ((Test-Path -LiteralPath (Join-Path $Slot "venv")) -and -not (Test-Path -LiteralPath $Venv)) { Move-Path (Join-Path $Slot "venv") $Venv 60 }
@@ -4011,6 +4168,7 @@ function Restore-LiveTree([string]$Slot) {
 function Move-LiveTo([string]$Slot) {
     # Move what Restore-Live brought in from $Slot back into it. Only valid
     # while the install it replaced is set aside in full elsewhere.
+    Remove-HooksBridge
     New-Item -ItemType Directory -Path (Join-Path $Slot "data") -Force | Out-Null
     foreach ($entry in Get-DataEntries) { Move-Path $entry.FullName (Join-Path $Slot "data\$($entry.Name)") }
     if (Test-Path -LiteralPath $Venv) { Move-Path $Venv (Join-Path $Slot "venv") 60 }
@@ -4103,7 +4261,7 @@ function Resume-InterruptedRun {
                 $gatewayCommand = "& '" + $gateway.Replace("'", "''") + "' start"
                 $Run.OldGatewayDown = $wasRunning
                 Write-Warn "The previous install is restored with its gateway kept stopped to preserve its hook registration"
-                Write-Info "Resolve the earlier startup error (close the agent if its settings are in use), then run: $gatewayCommand"
+                Write-Info "Fix the startup error the earlier install reported (its install log has it), then run: $gatewayCommand"
             } elseif ($wasRunning) {
                 Start-RecoveredGateway "restored"
             }
@@ -4748,15 +4906,32 @@ function Protect-BackupsFolder {
     # inheritable DACL"), the handler stayed in the 1.0.5 form and the older
     # release added its own beside it (GAP-1891). The inherited entries become
     # explicit ones: the same access, no longer inherited. Best effort.
+    # The gateway also refuses its own earlier settings copy and witness when
+    # they inherit their permissions: the gateway writes them private, but a
+    # profile restore or a plain file copy brings them back inherited, and
+    # every later rollback or downgrade then left two handlers (GAP-2050,
+    # GAP-1883). The conversion replaces both files; only this account's own
+    # regular files are made private here.
     $backups = Join-Path $DataDir "backups"
     try {
         if (-not (Test-Path -LiteralPath $backups -PathType Container)) { return }
         if ((Get-Item -LiteralPath $backups -Force).Attributes -band [IO.FileAttributes]::ReparsePoint) { return }
         $acl = Get-Acl -LiteralPath $backups
-        if ($acl.AreAccessRulesProtected) { return }
-        $acl.SetAccessRuleProtection($true, $true)
-        Set-DirectoryAcl $backups $acl
-    } catch { Write-Warn "Could not make $backups private: $($_.Exception.Message)" }
+        if (-not $acl.AreAccessRulesProtected) {
+            $acl.SetAccessRuleProtection($true, $true)
+            Set-DirectoryAcl $backups $acl
+        }
+    } catch { Write-Warn "Could not make $backups private: $($_.Exception.Message)"; return }
+    foreach ($file in @(Get-ChildItem -LiteralPath $backups -File -Force -Filter "claudecode-settings.before-rollback*.json" -ErrorAction SilentlyContinue)) {
+        try {
+            if ($file.Attributes -band [IO.FileAttributes]::ReparsePoint) { continue }
+            if (-not (Test-OwnedByCurrentUser $file.FullName)) { continue }
+            $fileAcl = if ($file.PSObject.Methods["GetAccessControl"]) { $file.GetAccessControl("Access") } else { [IO.FileSystemAclExtensions]::GetAccessControl($file, "Access") }
+            if ($fileAcl.AreAccessRulesProtected) { continue }
+            $fileAcl.SetAccessRuleProtection($true, $true)
+            if ($file.PSObject.Methods["SetAccessControl"]) { $file.SetAccessControl($fileAcl) } else { [IO.FileSystemAclExtensions]::SetAccessControl($file, $fileAcl) }
+        } catch { Write-Warn "Could not make $($file.FullName) private: $($_.Exception.Message)" }
+    }
 }
 
 function Convert-HooksForRollback([string]$From, [string]$BackTo) {
@@ -4927,6 +5102,7 @@ function Get-StaleAgentEvidence([string]$Data) {
     # swapped, failed to start DefenseClaw 1.0.4, rewrote the Claude Code
     # settings on the way and was undone with the hooks unverified
     # (GAP-2299). Found here, before anything changes, it is a plain refusal.
+    # A fresh setup selection of the new program is not stale (GAP-2513).
     $lock = Join-Path $Data "hook_contract_lock.json"
     if (-not (Test-Path -LiteralPath $lock -PathType Leaf)) { return @() }
     try { $doc = [IO.File]::ReadAllText($lock) | ConvertFrom-Json } catch { return @() }
@@ -4942,14 +5118,44 @@ function Get-StaleAgentEvidence([string]$Data) {
         $version = ([string](Get-Field $entry "raw_agent_version")) -replace '^codex-cli\s+', ''
         $label = if ($version) { "Codex $version" } else { "Codex" }
         if (-not (Test-Path -LiteralPath $exe -PathType Leaf)) {
-            $found += "$label, which DefenseClaw set up before the upgrade, is no longer at $exe"
+            if (-not (Test-FreshAgentSelection $Data $name)) { $found += "$label, which DefenseClaw set up before the upgrade, is no longer at $exe" }
             continue
         }
         $have = ""
         try { $have = (Get-FileHash -LiteralPath $exe -Algorithm SHA256 -ErrorAction Stop).Hash.ToLowerInvariant() } catch { continue }
-        if ($have -ne $want) { $found += "Codex was updated after DefenseClaw set up $label ($exe changed)" }
+        if ($have -ne $want -and -not (Test-FreshAgentSelection $Data $name)) { $found += "Codex was updated after DefenseClaw set up $label ($exe changed)" }
     }
     return $found
+}
+
+function Test-FreshAgentSelection([string]$Data, [string]$Name) {
+    # Whether the data of the older install holds a setup selection of $Name
+    # that has not expired and still names the program on disk (GAP-2513).
+    # Its gateway seals that selection at its next start.
+    $path = Join-Path $Data "agent_selection.json"
+    if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { return $false }
+    try { $doc = [IO.File]::ReadAllText($path) | ConvertFrom-Json } catch { return $false }
+    $selection = Get-Field (Get-Field $doc "selections") $Name
+    if (-not $selection -or [string](Get-Field $selection "source") -ne "setup-selected") { return $false }
+    $exe = [string](Get-Field $selection "executable")
+    $want = ([string](Get-Field $selection "sha256")).ToLowerInvariant()
+    $expires = [datetime]::MinValue
+    if (-not [datetime]::TryParse([string](Get-Field $selection "expires_at"), [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::AdjustToUniversal, [ref]$expires)) { return $false }
+    if ($expires -le [datetime]::UtcNow.AddMinutes(5) -or -not $exe -or -not (Test-Path -LiteralPath $exe -PathType Leaf)) { return $false }
+    try { return (Get-FileHash -LiteralPath $exe -Algorithm SHA256 -ErrorAction Stop).Hash.ToLowerInvariant() -eq $want } catch { return $false }
+}
+
+function Select-UpdatedAgents([string]$Data) {
+    # An agent that updated itself since the older release set it up (Codex
+    # runs npm install -g from its "Update now" prompt) gets the selection
+    # that 'defenseclaw setup codex' records, written by the CLI of this
+    # install into the data of the older one; its gateway seals it at its
+    # next start (GAP-2513). Best effort: Get-StaleAgentEvidence names what
+    # is left. The CLI entry sets up its output streams, so a warning prints
+    # on a cp1252 console without a Python traceback.
+    $cli = Join-Path $Venv "Scripts\defenseclaw.exe"
+    if (-not (Test-Path -LiteralPath $cli -PathType Leaf)) { return }
+    [void](Invoke-Native $cli @("migrate", "--reselect-updated-agents", "--data-dir", $Data))
 }
 
 function Invoke-Rollback {
@@ -4974,8 +5180,6 @@ function Invoke-Rollback {
     Assert-NoActiveConnectorRecovery "Rollback to $backTo"
     if (-not $rollForward) {
         Assert-NoActiveConnectorRecovery "Rollback to $backTo" (Join-Path $Previous "data")
-    }
-    if (-not $rollForward) {
         $stale = @(Get-StaleAgentEvidence (Join-Path $Previous "data"))
         if ($stale.Count -and $backTo -match '^(?:0\.8\.10|1\.0\.[0-3])$') {
             # Releases before 1.0.4 skip a connector whose setup fails and
@@ -4984,6 +5188,16 @@ function Invoke-Rollback {
             Write-Warn ("$($stale -join '; '). DefenseClaw $backTo starts without Codex hooks until you run " +
                 "'defenseclaw setup codex' after the rollback")
         } elseif ($stale.Count) {
+            # Select the updated program for the older release, as its setup
+            # would, then check again (GAP-2513).
+            Select-UpdatedAgents (Join-Path $Previous "data")
+            $updated = $stale
+            $stale = @(Get-StaleAgentEvidence (Join-Path $Previous "data"))
+            if (-not $stale.Count) {
+                Write-Warn ("$($updated -join '; '). DefenseClaw $backTo gets the updated program, as 'defenseclaw setup codex' would give it")
+            }
+        }
+        if ($stale.Count -and $backTo -notmatch '^(?:0\.8\.10|1\.0\.[0-3])$') {
             Die ("$($stale -join '; '). DefenseClaw $backTo does not start with an agent program it did not set up, so the rollback would stop " +
                 "half-way. Nothing was changed. Put that version back and run 'defenseclaw rollback' again, or stay on DefenseClaw $currentLabel")
         }

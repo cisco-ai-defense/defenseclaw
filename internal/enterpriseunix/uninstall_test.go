@@ -318,7 +318,7 @@ func TestUninstallRefusesUnresolvedRowsBeforeStoppingAnything(t *testing.T) {
 			refused := h.run(Options{Action: ActionUninstall, Purge: true})
 			requireError(t, refused, codePerUserHooks)
 			requireError(t, refused, codeUninstallPrecheck)
-			if got := messagesOf(refused.Errors, codePerUserHooks); !strings.Contains(got, "claudecode manifest row of user /Users/gone cannot be removed") {
+			if got := messagesOf(refused.Errors, codePerUserHooks); !strings.Contains(got, "claudecode hooks of user /Users/gone cannot be removed") {
 				t.Fatalf("the refusal does not name the row: %s", got)
 			}
 			for _, call := range h.services.calls[before:] {

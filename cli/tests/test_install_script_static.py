@@ -2646,6 +2646,49 @@ def test_rollback_and_upgrade_prune_hook_entries_of_connectors_no_longer_configu
     assert 'prune_orphaned_hooks "${BIN_DIR}/defenseclaw-gateway"' in swap  # an upgrade heals a host already hit
 
 
+def test_a_rollback_to_an_older_release_drops_the_hook_helper_the_newer_install_left(tmp_path: Path) -> None:
+    # rel-1-0-4:GAP-2503: after a downgrade to 1.0.2 the data of 1.0.2 held
+    # the 1.0.5 hooks/_hardening.sh, which a 1.0.2 gateway keeps (its schema
+    # line is newer) and whose native commands the 1.0.2 binaries lack: after
+    # the rollback every hook call was refused until the helper was removed.
+    # The rollback drops the restored helper when it is the one of the
+    # install it leaves, so the older gateway writes its own when it starts.
+    home = tmp_path / "dc"
+    left = tmp_path / "previous" / "data"
+
+    def run(live: bytes | None, theirs: bytes | None) -> Path:
+        for root, body in ((home, live), (left, theirs)):
+            helper = root / "hooks" / "_hardening.sh"
+            helper.parent.mkdir(parents=True, exist_ok=True)
+            helper.unlink(missing_ok=True)
+            if body is not None:
+                helper.write_bytes(body)
+        script = tmp_path / "drop.sh"
+        script.write_text(
+            "set -euo pipefail\nwarn() { echo \"warn: $*\"; }\n"
+            + "has() { command -v \"$1\" >/dev/null 2>&1; }\n"
+            + _install_sh_functions("sha256_of", "drop_newer_hook_helper")
+            + f"DEFENSECLAW_HOME=\"{home}\"\ndrop_newer_hook_helper \"{left}\"\n",
+            encoding="utf-8",
+        )
+        proc = _run([str(script)], tmp_path)
+        assert proc.returncode == 0, proc.stderr
+        assert "warn:" not in proc.stdout
+        return home / "hooks" / "_hardening.sh"
+
+    newer = b"#!/bin/bash\n# defenseclaw-managed-hook v10\n"
+    older = b"#!/bin/bash\n# defenseclaw-managed-hook v8\n"
+    assert not run(newer, newer).exists()
+    assert run(older, newer).read_bytes() == older
+    assert run(newer, None).read_bytes() == newer
+    text = INSTALL_SH.read_text(encoding="utf-8")
+    rollback = text[text.index("if [[ \"${ROLLBACK}\" == true ]]; then") : text.index("# ── Stage: nothing live changes")]
+    drop = rollback.index("drop_newer_hook_helper \"${PREVIOUS}/data\"")
+    # After the swap brought the older data back, before its gateway starts.
+    assert rollback.index("swap_with_previous || swapped=$?") < drop < rollback.index("start_gateway || rollback_rc=$?")
+    assert "version_lt \"${back_to}\" \"${current}\"" in rollback[drop - 200 : drop]
+
+
 def test_hook_fail_modes_are_set_from_the_config_around_the_gateway_stop(tmp_path: Path) -> None:
     # An earlier release's hooks can hold or bake an open nobody chose, which
     # they follow while the gateway is down for the swap. The staged gateway
@@ -3287,6 +3330,35 @@ def test_a_restored_gateway_that_needs_attention_is_not_reported_down(tmp_path: 
     assert out.returncode == 0, out.stderr
     assert "its gateway runs, but a connector needs attention" in out.stdout
     assert "did not start again" not in out.stdout
+
+
+def test_a_restore_kept_stopped_points_at_the_gateway_cause_not_a_guess(tmp_path: Path) -> None:
+    # GAP-2478: after a rollback the installer added "close the agent if its
+    # settings are in use" to every startup refusal, also when the gateway had
+    # just said the cause was a failed agent version probe.
+    script = tmp_path / "restart.sh"
+    script.write_text(
+        'set -euo pipefail\ninfo() { echo "info: $*"; }\nwarn() { echo "warn: $*"; }\n'
+        + _install_sh_functions("restart_old")
+        + f'BIN_DIR="{tmp_path}/bin" WAS_RUNNING=true DEFENSECLAW_HOME="{tmp_path}"\nrestart_old true\necho "note=$RESTORED_NOTE"\n',
+        encoding="utf-8",
+    )
+
+    out = _run([str(script)], tmp_path)
+
+    assert out.returncode == 0, out.stderr
+    assert "info: Fix the startup error shown above, then run: " in out.stdout, out.stdout
+    assert "close the agent" not in out.stdout, out.stdout
+    assert "note=Your previous install is back, with its gateway kept stopped" in out.stdout
+
+
+def test_the_windows_kept_stopped_restore_does_not_guess_the_startup_cause() -> None:
+    # GAP-2478 (install.ps1 twin): both kept-stopped messages defer to the
+    # gateway's own cause and next step.
+    text = (ROOT / "scripts" / "install.ps1").read_text(encoding="utf-8")
+    assert "if its settings are in use" not in text
+    assert text.count("Fix the startup error shown above, then run: $gatewayCommand") == 1
+    assert "Fix the startup error the earlier install reported (its install log has it), then run: $gatewayCommand" in text
 
 
 # ── 1.0.4 (T8 smoke review loop round 3 of the Hermes/upgrade class) ────────

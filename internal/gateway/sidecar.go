@@ -1027,6 +1027,8 @@ func (s *Sidecar) Run(ctx context.Context) (runErr error) {
 	defer runCancel()
 	s.setRunCancel(runCancel)
 	defer s.setRunCancel(nil)
+	// An idle gateway gives back the heap its calls freed (GAP-2013).
+	go runIdleMemoryRelease(runCtx)
 	// The endpoint inventory cannot be emitted from NewSidecar: schema v8
 	// deliberately binds its generation-owned runtime afterward. Publish the
 	// first complete connector/MCP snapshot immediately after that binding, then
@@ -4665,7 +4667,7 @@ func (s *Sidecar) runGuardrail(ctx context.Context) error {
 		return refuseUnverified(fmt.Errorf("%w: connector %s agent version %q is not covered by a known hook contract: %s (set DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT=1 only for exploratory testing)", ErrHookContractAdmission, conn.Name(), agentVersion, contractResolution.Reason))
 	}
 	if !guardianManagedLifecycle && contractResolution.Status == connector.HookCompatibilityUnversioned && actionMode && envvars.Getenv("DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT") != "1" {
-		return refuseUnverified(fmt.Errorf("%w: connector %s agent version %q is not verified against a known hook contract: %s (set DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT=1 only for exploratory testing)", ErrHookContractAdmission, conn.Name(), agentVersion, contractResolution.Reason))
+		return refuseUnverified(unversionedAgentAdmissionError(s.currentConfig().DataDir, conn.Name(), agentVersion, contractResolution.Reason))
 	}
 	if contractResolution.UntestedVersion {
 		fmt.Fprintf(os.Stderr, "[guardrail] connector %s agent version %q: %s\n", conn.Name(), agentVersion, contractResolution.Reason)
@@ -6292,6 +6294,32 @@ func (s *Sidecar) setupConnectorsIsolatedTransaction(ctx context.Context, conns 
 			}
 			err = s.setupOneConnector(ctx, registration.conn, registration.opts, masterKey, cache)
 		}
+		// An agent that has its settings file open (Claude Code writes
+		// settings.json while it runs) makes a Windows open or replace fail
+		// with a sharing violation for a moment. Setup reads the file again
+		// on every run, so it is tried again for a bounded time instead of
+		// failing the start: an upgrade rolled back on it (GAP-2524).
+		for busySince := time.Now(); err != nil && connectorSettingsBusy(err) && ctx.Err() == nil &&
+			time.Since(busySince) < connectorSettingsBusyBudget; {
+			fmt.Fprintf(os.Stderr, "[guardrail] connector %s: %v; its settings are in use, retrying\n",
+				registration.conn.Name(), err)
+			if transaction.publishSetupProgress {
+				s.health.SetGuardrail(StateStarting, "", map[string]interface{}{
+					"setup_connector": registration.conn.Name(),
+					"setup_step":      index + 1,
+					"setup_total":     len(registrations),
+					"setup_busy":      true,
+				})
+			}
+			select {
+			case <-ctx.Done():
+			case <-time.After(connectorSettingsBusyDelay):
+			}
+			if ctx.Err() != nil {
+				break
+			}
+			err = s.setupOneConnector(ctx, registration.conn, registration.opts, masterKey, cache)
+		}
 		if errors.Is(err, connector.ErrAgentConfigRefusal) {
 			// The agent's own settings refuse the hooks, for example after
 			// `codex features disable hooks`. Setup changed nothing, so the
@@ -6329,7 +6357,7 @@ func (s *Sidecar) setupConnectorsIsolatedTransaction(ctx context.Context, conns 
 				if !errors.Is(err, connector.ErrSetupRefusedUnchanged) {
 					// A Setup refusal (a known-broken agent, an unsupported
 					// profile topology) names its own next step.
-					failed = fmt.Errorf("%w; close the agent holding its settings, then run: defenseclaw upgrade", failed)
+					failed = fmt.Errorf("%w%s", failed, refreshRefusalNextStep(err))
 				}
 				if rollbackErr != nil {
 					failed = fmt.Errorf("%w; connector setup rollback incomplete: %v", failed, rollbackErr)
@@ -6424,6 +6452,19 @@ func (s *Sidecar) setupConnectorsIsolatedTransaction(ctx context.Context, conns 
 // connectorProbeTimeoutAttempts bounds setup attempts for a connector whose
 // agent probe ran out of time (GAP-1714).
 const connectorProbeTimeoutAttempts = 3
+
+// connectorSettingsBusy reports a transient Windows sharing or lock
+// violation on a file Setup reads or replaces (connector.FileBusyError;
+// always false off Windows). Tests replace it.
+var connectorSettingsBusy = connector.FileBusyError
+
+// connectorSettingsBusyBudget and connectorSettingsBusyDelay bound the
+// retries of a connector setup whose agent holds its settings file open
+// (GAP-2524). The budget stays inside the installer readiness wait.
+var (
+	connectorSettingsBusyBudget = 5 * time.Second
+	connectorSettingsBusyDelay  = 250 * time.Millisecond
+)
 
 // connectorsNotStarted lists the configured connectors that did not come up.
 func connectorsNotStarted(conns []connector.Connector, succeeded []string) []string {
@@ -6886,7 +6927,7 @@ func (s *Sidecar) setupOneConnector(ctx context.Context, conn connector.Connecto
 	if contractResolution.Status == connector.HookCompatibilityUnversioned &&
 		actionMode &&
 		envvars.Getenv("DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT") != "1" {
-		return markUnverified(fmt.Errorf("%w: connector %s agent version %q is not verified against a known hook contract: %s (set DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT=1 only for exploratory testing)", ErrHookContractAdmission, conn.Name(), opts.AgentVersion, contractResolution.Reason))
+		return markUnverified(unversionedAgentAdmissionError(s.currentConfig().DataDir, conn.Name(), opts.AgentVersion, contractResolution.Reason))
 	}
 	if previous := previousLock; previous.Connector != "" {
 		current := connector.NewHookContractLockEntry(opts, conn, version.Current().BinaryVersion)
@@ -7895,7 +7936,7 @@ func (s *Sidecar) failGuardrailWithRollback(ctx context.Context, opts connector.
 	fmt.Fprintf(os.Stderr, "[guardrail] connector %s %s failed: %v\n", conn.Name(), surface, err)
 	previouslyActive := !opts.ManagedEnterprise && len(authority) > 0 && len(authority[0].applied) > 0 && authority[0].applied[0].previouslyActive
 	if previouslyActive && !errors.Is(err, connector.ErrSetupRefusedUnchanged) {
-		err = fmt.Errorf("%w; close the agent holding its settings, then run: defenseclaw upgrade", err)
+		err = fmt.Errorf("%w%s", err, refreshRefusalNextStep(err))
 	}
 	if !previouslyActive && !errors.Is(err, connector.ErrSetupRefusedUnchanged) {
 		recordAndRollbackFailedConnectorSetup(conn, opts, ctx)
@@ -7956,6 +7997,63 @@ func (s *Sidecar) saveSingleConnectorReadyState(
 // installed hook surface for this error — the existing registration is still
 // the last verified contract.
 var ErrHookContractAdmission = errors.New("hook contract admission failed")
+
+// agentVersionUnread marks a refusal of an unversioned agent whose binary
+// discovery found but whose version it could not read; its text is the cause.
+// The next step is the cause's own, never closing an agent that is not the
+// problem (GAP-1167, GAP-2479).
+type agentVersionUnread string
+
+func (e agentVersionUnread) Error() string { return string(e) }
+
+// unversionedAgentAdmissionError is the action-mode refusal of an agent with
+// no probed version. When discovery recorded why it has no version, the
+// refusal quotes it and names the fix for that cause; the admission rule is
+// unchanged.
+func unversionedAgentAdmissionError(dataDir, name, agentVersion, reason string) error {
+	probe, cause := connector.CachedAgentVersionProbeError(dataDir, name)
+	if probe == "" && connector.CachedAgentNotFound(dataDir, name) {
+		// The connector is enrolled but discovery found no agent binary for
+		// this account, so there is no version to read and no open agent to
+		// close. The fix is the agent or the connector, never the drift env
+		// (GAP-2520).
+		return fmt.Errorf("%w: connector %s agent version %q is not verified against a known hook contract: %w; put the agent back on the PATH of this account, or remove the connector (defenseclaw setup remove %s)", ErrHookContractAdmission, name, agentVersion, agentVersionUnread("discovery did not find the agent on the PATH of this account"), name)
+	}
+	if probe == "" {
+		return fmt.Errorf("%w: connector %s agent version %q is not verified against a known hook contract: %s (set DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT=1 only for exploratory testing)", ErrHookContractAdmission, name, agentVersion, reason)
+	}
+	var why agentVersionUnread
+	var next string
+	switch cause {
+	case connector.AgentVersionProbeDidNotRun:
+		why, next = "the agent did not run when discovery read its version", "make it run from this account, for example by putting its runtime on PATH"
+	case connector.AgentVersionProbeTimedOut:
+		why, next = "the agent did not answer its version probe in time", "start it once from this account so its first start finishes (a cold disk or a busy host makes it slow)"
+	case connector.AgentVersionProbeUntrustedPath:
+		why, next = "discovery did not run the agent because its install path is not trusted", "install it where only administrators or this account can write, or put that install first on PATH"
+	case connector.AgentVersionProbeNotProbed:
+		why, next = "discovery has not read the agent's version yet", "check that it starts from this account"
+	default:
+		why, next = "discovery could not read the agent's version", "check that it starts from this account and prints its version"
+	}
+	return fmt.Errorf("%w: connector %s agent version %q is not verified against a known hook contract: %w (%s); %s", ErrHookContractAdmission, name, agentVersion, why, probe, next)
+}
+
+// refreshRefusalNextStep is the next step a failed refresh of an active
+// connector names. Only a cause an open agent can explain tells the user to
+// close it. An agent discovery could not find or read names its own fix
+// (GAP-1167, GAP-2479, GAP-2520), and an agent that answered a setup probe
+// too slowly is started once first (GAP-2520).
+func refreshRefusalNextStep(err error) string {
+	switch {
+	case errors.As(err, new(agentVersionUnread)):
+		return ", then run: defenseclaw upgrade"
+	case errors.Is(err, connector.ErrAgentVersionProbeTimeout):
+		return "; the agent answered too slowly (a cold first start or a busy host): start it once from this account and let it finish, then run: defenseclaw upgrade"
+	default:
+		return "; close the agent holding its settings, then run: defenseclaw upgrade"
+	}
+}
 
 // GuardrailAgentSettingsRefused is the guardrail health detail that maps each
 // connector the agent's own settings refused (connector.ErrAgentConfigRefusal)
@@ -8045,6 +8143,11 @@ func hookContractDriftAdmission(name string, previous, current connector.HookCon
 		}
 		fmt.Fprintf(os.Stderr, "[guardrail] connector %s hook contract %s (written by %s) is now %s in DefenseClaw %s; agent version %q is unchanged, refreshing the lock\n",
 			name, previous.ContractID, writer, current.ContractID, current.DefenseClawVersion, current.RawAgentVersion)
+		return nil
+	}
+	if connector.HookContractAgentUpdateAdmitted(previous, current) && current.CompatibilityStatus == connector.HookCompatibilityNotGated {
+		fmt.Fprintf(os.Stderr, "[guardrail] WARNING: connector %s agent version changed from %q to %q; its hooks are not version-gated, refreshing the lock\n",
+			name, previous.RawAgentVersion, current.RawAgentVersion)
 		return nil
 	}
 	if connector.HookContractAgentUpdateAdmitted(previous, current) {

@@ -83,7 +83,7 @@ func runUnixLifecycle(cmd *cobra.Command, platform, action string, opts *unixLif
 		return withExitCode(fmt.Errorf("`enterprise %s` manages %s hosts; this host is %s", platform, goos, enterpriseunix.CurrentGOOS()), enterprisestatus.UnixExitInvalidArgs)
 	}
 	if err := checkLockWait(cmd, opts.lockWait); err != nil {
-		return err
+		return lifecycleArgumentError(cmd, action, opts.json, err)
 	}
 	env, err := newUnixLifecycleEnv(goos)
 	if err != nil {

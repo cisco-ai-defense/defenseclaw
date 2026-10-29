@@ -677,7 +677,7 @@ read; have the user run `codex app-server daemon restart` or start Codex with
 | Status, read-only | `/opt/defenseclaw/bin/defenseclaw-gateway enterprise linux status --json` |
 | The package's own result | `/var/lib/defenseclaw-enterprise/last-package-result.json` |
 | Installed package | `dpkg-query -W -f='${Status} ${Version}' defenseclaw-enterprise` or `rpm -q defenseclaw-enterprise` |
-| Kit detection script | `packaging/mdm/linux/detect.sh --require-healthy` |
+| Kit detection script | `packaging/mdm/linux/detect.sh --require-healthy` (exit `1`, or `unhealthy` with `--format value`, when `verify` reports a problem or `security_complete` is `false`: a host whose `verify` passes with incomplete security still fails it, and the message says which) |
 
 The deployment also runs `verify` daily through `defenseclaw-enterprise-verify.timer`
 ([Detection](/docs/enterprise/mdm#detection),

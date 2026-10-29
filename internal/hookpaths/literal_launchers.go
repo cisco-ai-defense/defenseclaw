@@ -313,6 +313,9 @@ func directLiteralProgramOperands(words []string, stmt *syntax.Stmt, cwd, home s
 		}
 		return add(names)
 	case program == "cp" || program == "gcp":
+		if len(words) < 3 {
+			return nil // A cp with no destination writes nothing (GAP-2528).
+		}
 		for _, option := range words[1:] {
 			if option == "--recursive" || strings.HasPrefix(option, "-") && !strings.HasPrefix(option, "--") &&
 				(strings.ContainsAny(option, "rR")) {
@@ -373,6 +376,28 @@ func directLiteralProgramOperands(words []string, stmt *syntax.Stmt, cwd, home s
 			if protectedReachPath(target, newProtectedFiles(home), filepath.Join(home, ".ssh")) {
 				return []string{target}
 			}
+		}
+		// An extraction whose -C directory reaches ~/.ssh writes each
+		// member there, through any link to it (GAP-2515): a member that
+		// reaches a protected file is the write, and an extraction that
+		// names no member, or a pattern, writes members the archive
+		// chooses into the keys directory.
+		if destination, members, extract, ok := tarScan(words[1:], makeStatic(len(words)-1), cwd); ok && extract &&
+			OperandPath(destination, cwd) != cwd &&
+			protectedReachPath(OperandPath(destination, cwd), newProtectedFiles(home), filepath.Join(home, ".ssh")) {
+			destination = OperandPath(destination, cwd)
+			if len(members) == 0 {
+				return []string{destination}
+			}
+			var targets []string
+			for _, name := range members {
+				target := OperandPath(name, destination)
+				if strings.ContainsAny(name, "*?[") ||
+					protectedReachPath(target, newProtectedFiles(home), filepath.Join(home, ".ssh")) {
+					targets = append(targets, target)
+				}
+			}
+			return targets
 		}
 	}
 	return nil

@@ -1165,12 +1165,21 @@ var recognizedLLMProviders = map[string]struct{}{
 // warnedPrefixes keeps one-shot-per-process warning state.
 var warnedPrefixes = map[string]struct{}{}
 
-func maybeWarnUnknownProvider(prefix, componentPath string) {
+func maybeWarnUnknownProvider(prefix, componentPath, instanceName string) {
 	if prefix == "" {
 		return
 	}
 	if _, ok := recognizedLLMProviders[prefix]; ok {
 		return
+	}
+	// "custom" with a bound instance routes through its llm_providers.custom
+	// entry, so it is not an unknown prefix (GAP-2234). Without an instance it
+	// still warns: nothing tells the gateway where to send the call.
+	if prefix == "custom" && strings.TrimSpace(instanceName) != "" {
+		return
+	}
+	if componentPath == "" {
+		componentPath = "llm"
 	}
 	key := componentPath + "\x00" + prefix
 	if _, seen := warnedPrefixes[key]; seen {
@@ -1230,6 +1239,14 @@ func (c *Config) ResolveLLM(path string) LLMConfig {
 		out.Model = override.Model
 	}
 	if override.Provider != "" {
+		// A role naming another provider and no instance of its own does
+		// not inherit the custom instance binding (GAP-2379); the CLI's
+		// Config.resolve_llm applies the same rule.
+		roleProvider := strings.ToLower(strings.TrimSpace(override.Provider))
+		if override.InstanceName == "" && roleProvider != "custom" &&
+			roleProvider != strings.ToLower(strings.TrimSpace(out.Provider)) {
+			out.InstanceName = ""
+		}
 		out.Provider = override.Provider
 	}
 	if override.APIKey != "" {
@@ -1286,8 +1303,52 @@ func (c *Config) ResolveLLM(path string) LLMConfig {
 		out.protectedCredentialRequired = true
 	}
 
-	maybeWarnUnknownProvider(out.ProviderPrefix(), path)
+	c.applyLLMInstance(&out)
+	maybeWarnUnknownProvider(out.ProviderPrefix(), path, out.InstanceName)
 	return out
+}
+
+// applyLLMInstance fills the blanks of a resolved role from the
+// llm_providers.custom entry its instance_name binds, as the gateway
+// provider merge and the Python resolver (_apply_instance_overlay) do:
+// provider "custom" (what `setup llm --provider custom --instance-name`
+// saves) or no provider takes the instance's base_provider_type, and an
+// unset base_url or bedrock/vertex/azure sub-block comes from the
+// instance. Explicit role values win. Every Go caller of ResolveLLM,
+// the watcher and hook scanners included, so sees the instance's family
+// and routing instead of "custom/<model>" (GAP-2396). An instance_name
+// that names no entry is left as is (the gateway reports it).
+func (c *Config) applyLLMInstance(out *LLMConfig) {
+	name := strings.ToLower(strings.TrimSpace(out.InstanceName))
+	if name == "" {
+		return
+	}
+	for i := range c.LLMProviders.Custom {
+		inst := &c.LLMProviders.Custom[i]
+		if strings.ToLower(strings.TrimSpace(inst.Name)) != name {
+			continue
+		}
+		provider := strings.ToLower(strings.TrimSpace(out.Provider))
+		if base := strings.ToLower(strings.TrimSpace(inst.BaseProviderType)); base != "" && (provider == "" || provider == "custom") {
+			out.Provider = base
+		}
+		if strings.TrimSpace(out.BaseURL) == "" && strings.TrimSpace(inst.BaseURL) != "" {
+			out.BaseURL = inst.BaseURL
+		}
+		if out.Bedrock == nil && inst.Bedrock != nil {
+			b := *inst.Bedrock
+			out.Bedrock = &b
+		}
+		if out.Vertex == nil && inst.Vertex != nil {
+			v := *inst.Vertex
+			out.Vertex = &v
+		}
+		if out.Azure == nil && inst.Azure != nil {
+			a := *inst.Azure
+			out.Azure = &a
+		}
+		return
+	}
 }
 
 type FirewallConfig struct {

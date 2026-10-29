@@ -177,6 +177,11 @@ type windowsEnterpriseInstallerReport struct {
 	CanonicalInstallRootAbsent    *bool  `json:"canonical_install_root_absent"`
 	InstallRootRetirementDeferred string `json:"install_root_retirement_deferred"`
 	RetiredInstallRoot            string `json:"retired_install_root"`
+	// MdmRotationJournalKept names the MDM kit's credential rotation
+	// journal an uninstall that removed the deployment kept (a plain
+	// uninstall) or left (a purge that found a journal it must not remove),
+	// with the next step (GAP-1913).
+	MdmRotationJournalKept string `json:"mdm_rotation_journal_kept"`
 
 	// probeFailed marks a failure document that reports no deployment
 	// state at all (no installed field and no pending transaction): the
@@ -651,9 +656,14 @@ func runWindowsEnterpriseStandaloneAction(
 			result.Noop = true
 			result.NoopReason = "not_installed"
 			result.Inspection.Local = "disabled"
+			if opts != nil && opts.purge {
+				addWindowsEnterpriseLeftoverUserStateWarning(result, false)
+			}
 			return finishWindowsEnterpriseStandalone(cmd, opts, result, 0)
 		}
 	}
+	// Read before the recovery removes the tombstone with StateRoot.
+	recoverUserStatePurge := action == "recover" && windowsEnterpriseTombstoneUserStatePurge()
 	// Repair without CONFIG= on a bundle-mode device keeps the confirmed
 	// bundle config, not an edit made outside the lifecycle (GAP-0114). The
 	// restore comes before anything else this run changes: when it fails,
@@ -668,8 +678,10 @@ func runWindowsEnterpriseStandaloneAction(
 		}
 	}
 	hookRuntimeRepaired := ""
+	claudeDropInRepaired := ""
 	if action == "repair" && windowsEnterpriseIsElevated() {
 		hookRuntimeRepaired = repairWindowsEnterpriseHookRuntimeAccess()
+		claudeDropInRepaired = repairWindowsEnterpriseClaudeDropIn()
 	}
 	configReplaced := ""
 	if action == "repair" || action == "upgrade" {
@@ -690,6 +702,9 @@ func runWindowsEnterpriseStandaloneAction(
 	bundleRestore.apply(result)
 	if hookRuntimeRepaired != "" {
 		result.Changes = append(result.Changes, hookRuntimeRepaired)
+	}
+	if claudeDropInRepaired != "" {
+		result.Changes = append(result.Changes, claudeDropInRepaired)
 	}
 	if configReplaced != "" {
 		result.Changes = append(result.Changes, configReplaced)
@@ -729,6 +744,11 @@ func runWindowsEnterpriseStandaloneAction(
 		report = windowsEnterpriseFailureWithDeploymentState(ctx, cmd, opts, script, report)
 	}
 	applyWindowsEnterpriseInstallerReport(result, opts, report, run)
+	if recoverUserStatePurge && report.OK && !report.Installed && !report.TransactionPending && windowsEnterpriseStandaloneStateRootGone() {
+		// The killed PURGE=1 that ran the per-user purge took its result
+		// with it; the recovery that finishes it names what stays.
+		addWindowsEnterpriseLeftoverUserStateWarning(result, true)
+	}
 	applyWindowsEnterprisePolicy(ctx, result)
 	if action == "status" && report.Installed && len(unsettledBundles) > 0 {
 		// A receipt no live apply owns: a plain ensure settles it (GAP-0028,
@@ -1522,6 +1542,7 @@ func applyWindowsEnterpriseInstallerReport(
 		if result.Action == "status" || result.Action == "verify" {
 			applyWindowsEnterpriseHookRuntimeAccess(result)
 			applyWindowsEnterpriseGuardianTargets(result)
+			applyWindowsEnterpriseUserCleanupFailures(result)
 		}
 		applyWindowsEnterpriseDiscoveryHomeDirs(result)
 		applyWindowsEnterpriseStatusV2(result)
@@ -1577,12 +1598,18 @@ func applyWindowsEnterpriseInstallerReport(
 		result.AddError(code, message)
 	}
 	addWindowsEnterpriseSelfUninstallCleanup(result, report)
+	addWindowsEnterpriseMdmRotationJournalKept(result, report)
 	if !report.OK && len(result.Errors) == 0 {
 		code := "not_ready"
 		if !report.Installed {
 			code = "not_installed"
 		}
 		result.AddError(code, windowsEnterpriseNotHealthyMessage(result.Services, run.ExitCode))
+	}
+	if report.Installed && (result.Action == "status" || result.Action == "verify") {
+		// After the not_ready fallback, so a stopped guardian is still
+		// named next to the drop-in drift it leaves unrepaired.
+		applyWindowsEnterpriseClaudeDropInDrift(result)
 	}
 	if lifecycle && !report.OK && len(result.Errors) > firstError {
 		configPath := ""
@@ -1680,6 +1707,20 @@ func addWindowsEnterpriseSelfUninstallCleanup(result *enterprisestatus.Result, r
 	}
 }
 
+// addWindowsEnterpriseMdmRotationJournalKept names, as a warning, the MDM
+// kit's credential rotation journal an uninstall kept or left: an entry can
+// hold a copy of an earlier credential, so the administrator who reads only
+// the JSON result (an MDM, a script) learns it is still there and what
+// removes it (GAP-1913).
+func addWindowsEnterpriseMdmRotationJournalKept(result *enterprisestatus.Result, report *windowsEnterpriseInstallerReport) {
+	if report == nil || result.Action != "uninstall" {
+		return
+	}
+	if note := strings.TrimSpace(report.MdmRotationJournalKept); note != "" {
+		result.AddWarning("mdm_rotation_journal_kept", windowsEnterpriseBoundedDiagnostic(note))
+	}
+}
+
 // windowsEnterpriseNoStartGuardianIssues are what the guardian status says
 // of a deployment whose guardian has never run.
 var windowsEnterpriseNoStartGuardianIssues = map[string]bool{
@@ -1728,10 +1769,14 @@ func addWindowsEnterpriseUserStateWarning(result *enterprisestatus.Result, repor
 	for _, entry := range windowsEnterpriseReportStrings(report.UserStatePurged) {
 		result.Changes = append(result.Changes, windowsEnterprisePurgedUserStateChange(entry))
 	}
-	var notLocalSystem, pathEntryKept, remaining []string
+	var notLocalSystem, pathEntryKept, keptForRegistrations, remaining []string
 	for _, entry := range windowsEnterpriseReportStrings(report.UserStateRemaining) {
 		if account, found := strings.CutSuffix(entry, ": "+windowsManagedHooksNotLocalSystemReason); found {
 			notLocalSystem = append(notLocalSystem, account)
+			continue
+		}
+		if account, found := strings.CutSuffix(entry, ": "+windowsManagedHooksKeptForRegistrationsReason); found {
+			keptForRegistrations = append(keptForRegistrations, account)
 			continue
 		}
 		if account, found := strings.CutSuffix(entry, ": "+windowsManagedHooksSignedOutPathEntryReason); found {
@@ -1760,6 +1805,21 @@ func addWindowsEnterpriseUserStateWarning(result *enterprisestatus.Result, repor
 				"a signed-out account's registry hive is not loaded, so its Path cannot be changed. The entry names a folder that no longer exists and runs nothing; "+
 				"to remove it, delete it from that account's Path once it signs in. Accounts: %s",
 			len(pathEntryKept), windowsEnterpriseBoundedLabels(pathEntryKept)))
+	}
+	if len(keptForRegistrations) > 0 {
+		// Kept on purpose: the registrations that stay (named in
+		// user_registrations_pending or user_registrations_failed, which
+		// decide whether the purge fails) need the folder's connector_backups
+		// to be put back. A decommission with signed-out or disconnected
+		// users failed 1603 and blamed an open file (GAP-2231).
+		result.AddWarning("per_user_state_remaining", fmt.Sprintf(
+			"--purge removed the machine deployment but kept the DefenseClaw folder %%USERPROFILE%%\\.defenseclaw of %d enrolled account(s) whose agent registrations stay: "+
+				"its connector_backups restore those registrations, and its per-user hook tokens are accepted by nothing any more. "+
+				"To remove them too, %s. Accounts: %s",
+			len(keptForRegistrations),
+			windowsEnterpriseLocalSystemRemedy("/uninstall PURGE=1"),
+			windowsEnterpriseBoundedLabels(keptForRegistrations),
+		))
 	}
 	if len(remaining) > 0 {
 		result.AddError("per_user_state_remaining", windowsEnterpriseUserStateRemainingMessage(
@@ -2075,9 +2135,11 @@ func addWindowsEnterpriseUserRegistrationWarnings(result *enterprisestatus.Resul
 		// warning says so and names the remedy, so it is not also reported
 		// as a failed removal (GAP-1568).
 		var attempted []string
+		notLocalSystem := false
 		for _, failure := range failed {
 			if strings.HasPrefix(failure, windowsManagedHooksRegistrationsNotRemovedPrefix) {
 				reason = "this uninstall did not run as LocalSystem"
+				notLocalSystem = true
 				continue
 			}
 			attempted = append(attempted, failure)
@@ -2090,7 +2152,12 @@ func addWindowsEnterpriseUserRegistrationWarnings(result *enterprisestatus.Resul
 			windowsEnterpriseLocalSystemRemedy("/uninstall"),
 			windowsEnterpriseBoundedLabels(windowsEnterpriseRegistrationsByAccount(pending)),
 		)
-		if purge {
+		// A purge that did not run as LocalSystem removed none of them and
+		// fails (GAP-0075, GAP-1111). The registrations of accounts that had
+		// no active session are the documented Windows limit: no process can
+		// act as such an account, so a decommission with signed-out or
+		// disconnected users finishes with this warning (GAP-2231).
+		if purge && notLocalSystem {
 			result.AddError("user_registrations_pending", message)
 		} else {
 			result.AddWarning("user_registrations_pending", message)
@@ -3326,7 +3393,9 @@ func readWindowsEnterpriseStandaloneEnrollmentAt(manifestPath, runtimeDir string
 	if state, exists, err := loadEnterpriseHookGuardianState(runtimeDir); err == nil && exists {
 		enrollment.Pending = state.PendingCount
 		for _, row := range state.Results {
-			if enterpriseHookAwaitingSignInError(row) {
+			// A row the earlier release's hooks still guard is enrolled
+			// with an older hook matrix, not pending (GAP-2463).
+			if enterpriseHookAwaitingSignInError(row) && !enterpriseHookEarlierMatrixRow(row) {
 				enrollment.Pending++
 			}
 		}
@@ -3896,6 +3965,9 @@ func runWindowsEnterpriseStandaloneEnsureOnce(
 		}
 		actionOpts = *windowsEnterpriseRepairRecordingOptions("repair", &actionOpts)
 		if repaired := repairWindowsEnterpriseHookRuntimeAccess(); repaired != "" {
+			result.Changes = append(result.Changes, repaired)
+		}
+		if repaired := repairWindowsEnterpriseClaudeDropIn(); repaired != "" {
 			result.Changes = append(result.Changes, repaired)
 		}
 	}

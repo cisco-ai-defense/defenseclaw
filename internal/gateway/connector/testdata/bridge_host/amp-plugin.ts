@@ -245,7 +245,7 @@ function stringID(value: unknown): string {
 
 
 // Command and target fields the bounded review of an oversized call keeps
-// verbatim at any depth (Bash "command" or "cmd", argv arrays, patches,
+// verbatim at any depth (a shell "command" or "cmd", argv arrays, patches,
 // scripts and every path or target form); other strings keep an 8 KiB head.
 // Every value of the call's arguments (tool_input) is kept the same way,
 // whatever its key (an MCP server may act on any argument, and the gateway

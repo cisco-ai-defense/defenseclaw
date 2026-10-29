@@ -265,9 +265,15 @@ type Store struct {
 	// plannerStatsComplete is set once this process has checked that every
 	// planner statistics target of the history has its statistics.
 	plannerStatsComplete atomic.Bool
+	// plannerStatsNext is the target a full ANALYZE pass that yielded to
+	// the hooks goes on from (RefreshPlannerStatistics).
+	plannerStatsNext atomic.Int64
 	// observationGroup groups concurrent correlation observation writes
 	// into one transaction (CorrelationRepository.RecordObservations).
 	observationGroup writeGroup
+	// callGroup groups the flushes of concurrent hook calls' write batches
+	// into one transaction (CallWriteBatch).
+	callGroup writeGroup
 
 	sqliteBusyMu       sync.RWMutex
 	sqliteBusyObserver SQLiteBusyObservabilityV8
@@ -2047,6 +2053,48 @@ func (s *Store) trimUnreadAuditIndexes() error {
 		statement := "DROP INDEX IF EXISTS " + index.name
 		if s.secureClientSchema {
 			statement = index.create
+		}
+		if _, err := s.db.Exec(statement); err != nil {
+			return fmt.Errorf("audit: index %s: %w", index.name, err)
+		}
+	}
+	return s.indexRetentionCandidates()
+}
+
+// retentionCandidateIndexes serve a retention batch that otherwise read its
+// whole table. The pending-operation batch looks for operations that ended
+// (status other than active) before the cutoff; no index leads with status or
+// the update time, so each batch scanned correlation_pending_operations. A
+// session's open operations stay active, so a store of a busy host holds tens
+// of thousands of them: on a managed RHEL store with 70,000 active operations
+// and a cold page cache the scan took 3.6 s inside the retention transaction,
+// which holds the store's writer, and the hooks queued behind the gateway's
+// first retention run after a start were closed as a gateway no-answer
+// (GAP-1790). The partial index holds only the ended operations, in the
+// batch's order, so the batch reads at most its own rows.
+//
+// Like the unread indexes, this is applied after the migrations without
+// moving the schema version: an older binary opened on the store after a
+// rollback keeps maintaining the index and does not read it. A Secure Client
+// store keeps main's schema, so the index is dropped there.
+var retentionCandidateIndexes = []struct{ name, table, create string }{
+	{"idx_correlation_pending_retention", "correlation_pending_operations", `CREATE INDEX IF NOT EXISTS idx_correlation_pending_retention
+		ON correlation_pending_operations(updated_time_unix_nano, connector_instance_id, operation_id, operation_type)
+		WHERE status<>'active'`},
+}
+
+func (s *Store) indexRetentionCandidates() error {
+	for _, index := range retentionCandidateIndexes {
+		// A partial schema without the table: the later readiness checks
+		// report what is missing.
+		if present, err := tableExists(s.db, index.table); err != nil {
+			return err
+		} else if !present {
+			continue
+		}
+		statement := index.create
+		if s.secureClientSchema {
+			statement = "DROP INDEX IF EXISTS " + index.name
 		}
 		if _, err := s.db.Exec(statement); err != nil {
 			return fmt.Errorf("audit: index %s: %w", index.name, err)

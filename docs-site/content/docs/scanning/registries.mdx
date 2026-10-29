@@ -29,7 +29,7 @@ Guided example with synthetic data. In the demo, an on-demand sync checks the so
     },
     'smithery': {
       type: 'kind',
-      description: 'smithery.ai public MCP catalog. URL optional; --content typically mcp.',
+      description: 'smithery.ai public MCP catalog. URL optional; --content typically mcp. Hosted servers become streamable-http entries (at most 25 server records per sync). A fetch with no usable entries warns, and the sync is partial with the skip reasons.',
     },
     'http_yaml': {
       type: 'kind',

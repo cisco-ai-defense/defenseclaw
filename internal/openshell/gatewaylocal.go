@@ -35,7 +35,8 @@ import (
 // The package gateway of an account that never ran NVIDIA's installer (the
 // package was installed machine-wide by someone else) has a stopped
 // service and no registration. The installer starts the service, waits for
-// the client certificates the gateway writes on its first start, and
+// the client certificates the gateway writes on its first start (Linux; a
+// Homebrew install has them from the formula's post-install step), and
 // registers it; the doctor's service fix does the same (registerLocal), or
 // the registration's wait for a healthy gateway could never succeed.
 
@@ -123,21 +124,27 @@ func (r *doctorRun) addCommandLine() string {
 
 // registerLocal registers the package gateway once it has written its
 // client certificates (canRegisterLocal), after its service started. A
-// personal Homebrew writes them under its prefix, not the registration's
-// config directory (GAP-0319).
+// Homebrew install keeps them under its prefix, not the registration
+// config directory, and writes them when OpenShell is installed (the
+// post-install step of the formula), not when the service starts: there
+// is nothing to wait for (GAP-0319).
 func (r *doctorRun) registerLocal(ctx context.Context) error {
 	dir, err := r.configDir()
 	if err != nil {
 		return err
 	}
 	mtls := filepath.Join(dir, gatewaysSubdir, DefaultGatewayName, mtlsSubdir)
-	if brewTLS := r.localRegistrationTLSDir(); brewTLS != "" {
+	brewTLS := r.localRegistrationTLSDir()
+	if brewTLS != "" {
 		mtls = brewTLS
 	}
 	wait := r.Gateway.RestartWait
 	waitCtx, cancel := context.WithTimeout(ctx, wait)
 	defer cancel()
 	for !clientBundle(mtls) {
+		if brewTLS != "" {
+			return r.noHomebrewPKI(mtls)
+		}
 		if sleepContext(waitCtx, time.Second) != nil {
 			return fmt.Errorf("the gateway started, but wrote no client certificates to %s within %s, so it cannot be registered; %s",
 				mtls, wait, r.gatewayLogHint())
@@ -150,15 +157,86 @@ func (r *doctorRun) registerLocal(ctx context.Context) error {
 	return nil
 }
 
+// noHomebrewPKI is the refusal of a registration under a Homebrew install
+// without the client certificates: the post-install step of the
+// GatewayFormula formula writes them. With that formula installed, its
+// post-install step is run again; with the openshell formula of another
+// tap, which writes none, that one is removed first (GAP-2507); without
+// either, the formula is installed.
+func (r *doctorRun) noHomebrewPKI(dir string) error {
+	next := "install OpenShell from the " + GatewayFormula + " formula, whose post-install step writes them: `" + installOpenShellCommand + "`"
+	if tap := otherFormulaTap(r.brewPrefix()); tap != "" {
+		next = r.otherFormulaStep(tap) + ": `" + r.replaceOtherFormulaCommand() + "`"
+	} else if r.service != nil && r.service.Installed {
+		next = "run the post-install step of the " + GatewayFormula + " formula again as the owner of the Homebrew prefix (`" +
+			r.Gateway.BrewCommand() + " postinstall " + GatewayFormula + "`), then `" + r.addCommandLine() + "`"
+	}
+	return fmt.Errorf("the Homebrew install of OpenShell has no client certificates in %s, so the gateway cannot be registered; %s", dir, next)
+}
+
+// otherFormulaStep says why the openshell formula of tap is replaced and
+// by whom: `defenseclaw sandbox setup --install-openshell` keeps the
+// supported CLI it finds, so it installs the GatewayFormula formula only
+// once that one is removed, and NVIDIA's installer runs Homebrew as the
+// account that runs it (GAP-2507).
+func (r *doctorRun) otherFormulaStep(tap string) string {
+	return "this OpenShell is the openshell formula of " + tap + ", which writes none and runs no gateway service, and `" +
+		installOpenShellCommand + "` keeps an OpenShell it finds: as the owner of the Homebrew prefix, remove that formula, then install OpenShell from the " +
+		GatewayFormula + " formula"
+}
+
+// replaceOtherFormulaCommand removes the openshell formula of another tap
+// and installs GatewayFormula's with NVIDIA's installer.
+func (r *doctorRun) replaceOtherFormulaCommand() string {
+	return r.Gateway.BrewCommand() + " uninstall openshell && " + installOpenShellCommand
+}
+
+// homebrewPKIFix is the registration fix of a Homebrew install whose
+// prefix holds no client certificates in dir: the post-install step of the
+// GatewayFormula formula writes them (run again as the owner of the prefix,
+// then the gateway is started when stopped and registered), or, without
+// that formula, its install, after the removal of the openshell formula of
+// another tap (GAP-2507). Neither a gateway start nor a registration
+// writes them (GAP-0319, GAP-2457).
+func (r *doctorRun) homebrewPKIFix(dir, add string) *Fix {
+	summary := "the Homebrew install of OpenShell has no client certificates in " + dir +
+		" (the post-install step of the " + GatewayFormula + " formula writes them, not the gateway start)"
+	if tap := otherFormulaTap(r.brewPrefix()); tap != "" {
+		return &Fix{Summary: summary + "; " + r.otherFormulaStep(tap), Command: r.replaceOtherFormulaCommand()}
+	}
+	if r.service == nil || !r.service.Installed {
+		return &Fix{Summary: summary + ": install OpenShell from that formula", Command: installOpenShellCommand}
+	}
+	command := r.Gateway.BrewCommand() + " postinstall " + GatewayFormula
+	then := "register the gateway"
+	if !r.service.Active {
+		command += " && " + r.startCommand().String()
+		then = "start and register the gateway"
+	}
+	return &Fix{Summary: summary + ": run that step again as the owner of the Homebrew prefix, then " + then, Command: command + " && " + add}
+}
+
 // clientBundle reports that dir holds the client certificates a local
-// registration takes.
+// registration takes: ca.crt with the client pair beside it (the mtls
+// folder of a registration) or in client/ (the PKI that
+// `openshell-gateway generate-certs` writes, which the Homebrew formula
+// keeps in var/openshell/tls, GAP-0319).
 func clientBundle(dir string) bool {
-	for _, name := range []string{"ca.crt", "tls.crt", "tls.key"} {
-		if info, err := os.Stat(filepath.Join(dir, name)); err != nil || !info.Mode().IsRegular() {
-			return false
+	if !regularFileAt(filepath.Join(dir, "ca.crt")) {
+		return false
+	}
+	for _, pair := range []string{dir, filepath.Join(dir, "client")} {
+		if regularFileAt(filepath.Join(pair, "tls.crt")) && regularFileAt(filepath.Join(pair, "tls.key")) {
+			return true
 		}
 	}
-	return true
+	return false
+}
+
+// regularFileAt reports that path names a regular file (symlinks followed).
+func regularFileAt(path string) bool {
+	info, err := os.Stat(path)
+	return err == nil && info.Mode().IsRegular()
 }
 
 func (r *doctorRun) gatewayLogHint() string {

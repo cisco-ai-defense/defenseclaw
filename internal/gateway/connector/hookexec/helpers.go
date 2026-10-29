@@ -17,6 +17,7 @@
 package hookexec
 
 import (
+	"bytes"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
@@ -114,6 +115,23 @@ func pruneOutageWarningMarkers(dir string, before time.Time) {
 	}
 }
 
+// utf8BOM is the UTF-8 byte order mark. A Windows PowerShell (.NET
+// Framework) host whose console input code page is UTF-8 (65001) writes it
+// ahead of everything it sends to a redirected child stdin:
+// Process.StandardInput encodes with Console.InputEncoding, whose UTF-8 form
+// has a preamble. cursor-agent 2026.10.22 sets that code page for its hooks,
+// so the Windows Cursor adapter handed the hook "\xEF\xBB\xBF{...}" and the
+// gateway refused every call as invalid JSON (GAP-2449). JSON text never
+// starts with one, and RFC 8259 section 8.1 lets a parser ignore it.
+var utf8BOM = []byte{0xEF, 0xBB, 0xBF}
+
+// TrimUTF8BOM returns payload without one leading UTF-8 byte order mark: the
+// hook payload any connector's wrapper delivers, before it is parsed or
+// forwarded.
+func TrimUTF8BOM(payload []byte) []byte {
+	return bytes.TrimPrefix(payload, utf8BOM)
+}
+
 // readCapped reads up to max bytes from r. It returns overflow=true (and the
 // first max bytes, which no caller hands on as the payload) when the input
 // exceeds max, mirroring
@@ -128,6 +146,7 @@ func readCapped(r io.Reader, max int64) (payload []byte, overflow bool, err erro
 	if err != nil {
 		return nil, false, err
 	}
+	data = TrimUTF8BOM(data)
 	if int64(len(data)) > max {
 		// The prefix the cap kept: callers read only its leading fields.
 		return data[:max], true, nil

@@ -2650,8 +2650,10 @@ func TestCodexSessionEndDeadlineCancelsBlockingTransport(t *testing.T) {
 }
 
 // gatewayNoAnswerReason is the per-user denial text for a deadline with no answer.
+// gatewayNoAnswerReason is the no-answer text of a per-user hook in strict
+// availability, which says fail mode closed (unreachableModeNote).
 func gatewayNoAnswerReason(event string) string {
-	return mustJSONString(perUserGatewayDownText(Options{Event: event}, perUserGatewayNoAnswerReason))
+	return mustJSONString(perUserGatewayDownText(Options{Event: event, StrictAvailability: true}, perUserGatewayNoAnswerReason))
 }
 
 func TestCodexFailClosedUsesEventSpecificControlSchema(t *testing.T) {

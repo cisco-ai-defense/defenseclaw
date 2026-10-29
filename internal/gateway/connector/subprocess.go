@@ -1417,6 +1417,9 @@ type HookFailModeRefresh struct {
 	Sidecar []string
 	// Scripts names the connector hook scripts whose baked open was closed.
 	Scripts []string
+	// Shims names the PATH shims whose installed outage mode was set to the
+	// mode the config gives their connector (refreshShimFailModes).
+	Shims []string
 }
 
 // RefreshHookFailModes updates legacy per-user hook records in hookDir to
@@ -1500,6 +1503,12 @@ func refreshHookFailModesLocked(hookDir string, mode func(connector string) stri
 			// .hookcfg.openhands of the removed OpenHands (GAP-0610).
 			continue
 		}
+		if hookRuntimeRecordUnread(name) {
+			// Nothing reads it, and the earlier release does not write it
+			// again when its gateway starts: closed here, the record came
+			// back with a rollback and stayed (GAP-2481). Left byte for byte.
+			continue
+		}
 		want := mode(name)
 		if want == "" {
 			continue
@@ -1554,10 +1563,74 @@ func refreshHookFailModesLocked(hookDir string, mode func(connector string) stri
 	if err != nil {
 		return out, err
 	}
-	if named {
+	kept, err := keepListenerCheckInLegacyHardening(hookDir)
+	if err != nil {
+		return out, err
+	}
+	if named || kept {
 		out.Scripts = append(out.Scripts, legacyHardeningScript)
 	}
+	shims, err := refreshShimFailModes(filepath.Join(filepath.Dir(hookDir), "shims"), mode)
+	if err != nil {
+		return out, err
+	}
+	out.Shims = shims
 	return out, nil
+}
+
+// shimInstalledModeRE is the outage mode a PATH shim of this release bakes
+// (peer.inc _dc_shim_transport_failure), shimOutageConnectorRE the connector
+// whose outage mode the shim asks at call time.
+var (
+	shimInstalledModeRE   = regexp.MustCompile(`( ts mode=")(open|closed)(" now="")`)
+	shimOutageConnectorRE = regexp.MustCompile(`hook-outage-mode --connector ([a-z][a-z0-9-]*) `)
+)
+
+// refreshShimFailModes sets the installed outage mode of each PATH shim in
+// shimDir to mode(connector) for the connector that installed it. A shim asks
+// the config at call time (GAP-1989), but it cannot when the account's home,
+// ~/.local, ~/.local/bin or the gateway binary is a symlink or writable by
+// others: it then follows its installed mode, which setup rendered. So a
+// `guardrail use-pack strict` or saved closed made after setup (both run this
+// refresh) applies to that case too, and a later open is followed again
+// (GAP-0038). A shim of another layout is left for the gateway to render.
+func refreshShimFailModes(shimDir string, mode func(connector string) string) ([]string, error) {
+	var changed []string
+	for _, name := range shimBinaries {
+		path := filepath.Join(shimDir, name)
+		info, err := os.Lstat(path)
+		if os.IsNotExist(err) {
+			continue
+		}
+		if err != nil {
+			return changed, fmt.Errorf("inspect shim %s: %w", name, err)
+		}
+		if !info.Mode().IsRegular() || info.Size() > hookScriptMaxBytes {
+			continue
+		}
+		body, err := readConnectorStateFile(path)
+		if err != nil {
+			return changed, fmt.Errorf("read shim %s: %w", name, err)
+		}
+		owner := shimOutageConnectorRE.FindSubmatch(body)
+		if owner == nil || len(shimInstalledModeRE.FindAll(body, -1)) != 1 {
+			continue
+		}
+		raw := strings.TrimSpace(mode(string(owner[1])))
+		if raw == "" {
+			continue
+		}
+		want := normalizeHookFailMode(raw)
+		next := shimInstalledModeRE.ReplaceAll(body, []byte("${1}"+want+"${3}"))
+		if string(next) == string(body) {
+			continue
+		}
+		if err := atomicWriteFile(path, next, info.Mode().Perm()); err != nil {
+			return changed, fmt.Errorf("refresh shim %s: %w", name, err)
+		}
+		changed = append(changed, name)
+	}
+	return changed, nil
 }
 
 // legacyHardeningScript is the shared shell helper file every released
@@ -1644,6 +1717,104 @@ if declare -F defenseclaw_unreachable_next_step >/dev/null 2>&1 && ! declare -F 
   }
 fi
 `
+}
+
+// legacyListenerCheckFunc is the pre-send listener check every 1.0.2 and
+// 1.0.3 per-user hook script calls from _hardening.sh.
+const legacyListenerCheckFunc = "defenseclaw_api_listener_foreign"
+
+// legacyListenerCheckMarker opens the block keepListenerCheckInLegacyHardening
+// appends.
+const legacyListenerCheckMarker = "# defenseclaw-legacy-listener-check-v1"
+
+// keepListenerCheckInLegacyHardening gives a released _hardening.sh without
+// defenseclaw_api_listener_foreign that function back while a hook script in
+// the same folder still calls it (GAP-1532). The 1.0.4 helper dropped it, and
+// a 1.0.2 or 1.0.3 gateway never replaces a newer helper, so going back from
+// 1.0.4 to 1.0.2 or 1.0.3 leaves those scripts with the 1.0.4 helper. An
+// upgrade from there leaves both in place until the new gateway starts, and
+// every call in that window printed "defenseclaw_api_listener_foreign:
+// command not found" before its answer. The block defines the function as
+// this release's helper does (send nothing while this account's gateway is
+// stopped and the listener is not proven its own) from the two checks the
+// 1.0.4 helper still has. Only the missing function is added: decisions, fail
+// modes and texts stay the same. The gateway of this release writes its own
+// _hardening.sh when it starts, which drops the block. Remove with the 1.0.2
+// and 1.0.3 upgrade paths.
+func keepListenerCheckInLegacyHardening(hookDir string) (bool, error) {
+	path := filepath.Join(hookDir, legacyHardeningScript)
+	info, err := os.Lstat(path)
+	if os.IsNotExist(err) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("inspect hook %s: %w", legacyHardeningScript, err)
+	}
+	if !info.Mode().IsRegular() || info.Size() > hookScriptMaxBytes {
+		return false, nil
+	}
+	body, err := readConnectorStateFile(path)
+	if err != nil {
+		return false, fmt.Errorf("read hook %s: %w", legacyHardeningScript, err)
+	}
+	text := string(body)
+	if strings.Contains(text, legacyListenerCheckFunc+"()") ||
+		!strings.Contains(text, "defenseclaw_own_gateway_stopped()") ||
+		!strings.Contains(text, "defenseclaw_api_listener_unproven()") ||
+		!hookScriptInFolderCalls(hookDir, legacyListenerCheckFunc) {
+		return false, nil
+	}
+	if !strings.HasSuffix(text, "\n") {
+		text += "\n"
+	}
+	text += legacyListenerCheckMarker + ` (GAP-1532): written by the upgrade's fail-mode refresh;
+# the new gateway replaces this file when it starts.
+if ! declare -F ` + legacyListenerCheckFunc + ` >/dev/null 2>&1; then
+  ` + legacyListenerCheckFunc + `() {
+    defenseclaw_own_gateway_stopped || return 1
+    local rc=0
+    defenseclaw_api_listener_unproven "${1:-}" || rc=$?
+    [ "$rc" = 0 ]
+  }
+fi
+`
+	if err := atomicWriteFile(path, []byte(text), info.Mode().Perm()); err != nil {
+		return false, fmt.Errorf("update hook %s: %w", legacyHardeningScript, err)
+	}
+	return true, nil
+}
+
+// hookScriptInFolderCalls reports whether a shell hook script in hookDir
+// (not the helper itself) names fn.
+func hookScriptInFolderCalls(hookDir, fn string) bool {
+	entries, err := os.ReadDir(hookDir)
+	if err != nil {
+		return false
+	}
+	for _, entry := range entries {
+		name := entry.Name()
+		if name == legacyHardeningScript || !strings.HasSuffix(name, ".sh") || !entry.Type().IsRegular() {
+			continue
+		}
+		info, err := entry.Info()
+		if err != nil || info.Size() > hookScriptMaxBytes {
+			continue
+		}
+		if body, err := readConnectorStateFile(filepath.Join(hookDir, name)); err == nil && strings.Contains(string(body), fn) {
+			return true
+		}
+	}
+	return false
+}
+
+// hookRuntimeRecordUnread reports a per-user connector whose hooks read no
+// hooks/.hookcfg entry or flat record in any release this one rolls back to
+// or upgrades from: the OpenCode plugin carries its own outage mode (1.0.2
+// and 1.0.3 bake the saved mode, 1.0.4 the config's outage mode, this
+// release reads the config at call time), and its Setup removes the record
+// (GAP-0635). RefreshHookFailModes leaves such a record as it is.
+func hookRuntimeRecordUnread(name string) bool {
+	return name == "opencode"
 }
 
 // connectorHookAdapters are the Windows PowerShell adapters a per-user Cursor
@@ -1735,10 +1906,23 @@ const (
 		"  defenseclaw_log_hook_failure copilot copilot-hook \"$1\" response \"$FAIL_MODE\"\n" +
 		"  echo \"defenseclaw: copilot hook error: $1\" >&2\n" +
 		"  exit 0\n}\n"
-	copilotToolDenial = `  case "${COPILOT_HOOK_EVENT:-}" in` + "\n" +
-		`    preToolUse) printf '%s\n' '{"permissionDecision":"deny","permissionDecisionReason":"DefenseClaw hook failed closed"}' ;;` + "\n" +
-		`    permissionRequest) printf '%s\n' '{"behavior":"deny","message":"DefenseClaw hook failed closed"}' ;;` + "\n" +
+	copilotToolDenial = copilotDenyReason +
+		`  case "${COPILOT_HOOK_EVENT:-}" in` + "\n" +
+		`    preToolUse) printf '{"permissionDecision":"deny","permissionDecisionReason":"%s"}\n' "$_dc_deny" ;;` + "\n" +
+		`    permissionRequest) printf '{"behavior":"deny","message":"%s"}\n' "$_dc_deny" ;;` + "\n" +
 		"  esac\n"
+	// copilotInstallWindowReason is the reason this release's per-user
+	// copilot-hook.sh (copilot_per_user_install_block) gives Copilot while
+	// an install or upgrade holds the account's lock.
+	copilotInstallWindowReason = "DefenseClaw is being installed or upgraded for this account; try again in a moment, or run the installer again if it has stopped."
+	// copilotDenyReason sets the reason a refreshed released copilot-hook.sh
+	// denies with: the install sentence while the lock in the hook's own data
+	// folder (HOOK_DIR/..) is held, so Copilot names the upgrade the
+	// installer's hold is for (GAP-2319); otherwise the generic one. Only the
+	// text depends on the lock: the call is denied either way.
+	copilotDenyReason = `  _dc_deny='DefenseClaw hook failed closed'` + "\n" +
+		`  if [ -n "${HOOK_DIR:-}" ] && { [ -e "${HOOK_DIR}/../.install.lock" ] || [ -L "${HOOK_DIR}/../.install.lock" ]; }; then _dc_deny='` +
+		copilotInstallWindowReason + `'; fi` + "\n"
 )
 
 func copilotClosedFailure(open string) string {
@@ -1880,11 +2064,11 @@ _DC_COPILOT_UPGRADE_EVENT=""
 if [ "$#" -eq 2 ] && [ "$1" = "--event" ]; then _DC_COPILOT_UPGRADE_EVENT="$2"; fi
 _dc_copilot_upgrade_early_failure() {
   _DC_COPILOT_UPGRADE_EARLY=0
-  case "$_DC_COPILOT_UPGRADE_EVENT" in
-    preToolUse) printf '%s\n' '{"permissionDecision":"deny","permissionDecisionReason":"DefenseClaw hook failed closed"}' ;;
-    permissionRequest) printf '%s\n' '{"behavior":"deny","message":"DefenseClaw hook failed closed"}' ;;
+` + copilotDenyReason + `  case "$_DC_COPILOT_UPGRADE_EVENT" in
+    preToolUse) printf '{"permissionDecision":"deny","permissionDecisionReason":"%s"}\n' "$_dc_deny" ;;
+    permissionRequest) printf '{"behavior":"deny","message":"%s"}\n' "$_dc_deny" ;;
     sessionStart|sessionEnd|userPromptSubmitted|userPromptTransformed|postToolUse|agentStop|subagentStart|subagentStop|postToolUseFailure|errorOccurred|preCompact|notification) ;;
-    *) printf '%s\n' '{"permissionDecision":"deny","permissionDecisionReason":"DefenseClaw hook failed closed","behavior":"deny","message":"DefenseClaw hook failed closed"}' ;;
+    *) printf '{"permissionDecision":"deny","permissionDecisionReason":"%s","behavior":"deny","message":"%s"}\n' "$_dc_deny" "$_dc_deny" ;;
   esac
   exit 0
 }

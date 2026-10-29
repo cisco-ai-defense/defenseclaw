@@ -89,7 +89,7 @@ defenseclaw keys check
 </Tabs>
 
 - `--value-stdin` reads the first line of standard input and never echoes it. `--value V` puts the secret in the process listing; keep it for throwaway values.
-- `keys set` and `keys remove` record a `config-update` audit event with target `dotenv:<ENV>` and only the before and after presence; the value is never logged. With the gateway stopped, the change is saved and the command warns that the audit event was not recorded.
+- `keys set` and `keys remove` record a configuration-change audit event (`audit export` action `config.change.applied`, `structured` `defenseclaw.admin.operation=config-update` and `defenseclaw.admin.target_ref=config:dotenv:<ENV>`) with only the before and after presence; the value is never logged. With the gateway stopped, the change is saved and the command warns that the audit event was not recorded.
 - `keys remove` works for any name in `.env`, including names outside the registry, and leaves a value exported in your shell alone.
 - `keys set DEFENSECLAW_GATEWAY_TOKEN` reports that it manages gateway authentication (the name is case-insensitive on Windows). The running gateway keeps the token it loaded at start. CLI audit events still use that token, but other CLI calls to the gateway send the saved one and get HTTP 401 until the gateway restarts. Until then `defenseclaw doctor` reports `[FAIL] Gateway authentication  —  local token rejected (HTTP 401) — run 'defenseclaw doctor --fix' to reconcile the running gateway`. To clear the 401, run `defenseclaw-gateway restart`, or run `defenseclaw doctor --fix`, which asks before it restarts the gateway (`--yes` skips the prompt). For a coordinated gateway and connector rotation use `defenseclaw setup rotate-token --yes`.
 
@@ -180,7 +180,7 @@ Fixes for the gateway, the keys it needs and the destinations it exports to.
 
 ### `gateway did not answer`
 
-**Cause.** The gateway runs but is frozen. Neither a hook nor the watchdog restarts it.
+**Cause.** The gateway runs but is frozen. Neither a hook nor the watchdog restarts it. A per-user hook blocks the call in every fail mode, a saved `open` included, and its line says `(not a gateway outage, so it is blocked in every fail mode)`.
 
 **Fix.** `defenseclaw-gateway restart`.
 

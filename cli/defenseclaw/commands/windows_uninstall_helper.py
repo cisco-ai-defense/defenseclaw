@@ -28,6 +28,8 @@ _ALLOWED_BINARIES = {
     "defenseclaw-gateway.exe",
     "defenseclaw-acp.exe",
     "defenseclaw-hook.exe",
+    # The one-line install's Claude Code PreToolUse guard (GAP-2467).
+    "defenseclaw-hook-guard.exe",
     "skill-scanner.cmd",
     "mcp-scanner.cmd",
     "defenseclaw-hook-state.json",

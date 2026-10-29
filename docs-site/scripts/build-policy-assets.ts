@@ -600,8 +600,9 @@ function buildScenarios(): Scenario[] {
       id: 'guardrail-medium-completion',
       title: 'MEDIUM guardrail finding (completion)',
       domain: 'guardrail',
-      description: 'MEDIUM finding on completion. Default preset (alert threshold MEDIUM): alert. Strict: block. A policy whose alert threshold is raised to HIGH or above allows it.',
+      description: 'MEDIUM finding on completion. Default preset (alert threshold MEDIUM): alert. Strict: block. Permissive, or a policy whose alert threshold is raised to HIGH or above, allows it.',
       expectedVerdict: 'alert',
+      expectedByPreset: { strict: 'block', permissive: 'allow' },
       input: {
         direction: 'completion',
         model: 'gpt-4o-mini',

@@ -221,7 +221,13 @@ func (a *APIServer) evaluateCodexHookForProfile(
 	req codexHookRequest,
 	profile connector.HookProfile,
 ) codexHookResponse {
-	startup := a.applyInstructionStartup(ctx, "codex", req.SessionID, req.HookEventName, req.Source, req.CWD)
+	callCWD := req.CWD
+	if req.HookEventName == "PreToolUse" || req.HookEventName == "PermissionRequest" {
+		callCWD = codexToolCallCWD(ctx, req)
+	}
+	// The snapshot takes the folder the call runs in, not only the session
+	// folder, before the call is judged (GAP-1388).
+	startup := a.applyInstructionStartup(ctx, "codex", req.SessionID, req.HookEventName, req.Source, callCWD)
 	ctx = a.withInstructionStartup(ctx, "codex", req.SessionID, startup)
 	mode := sandboxHookMode(ctx, "codex", a.codexMode(ctx))
 	// Sandbox hooks are always judged, and enforced (see evaluateAgentHook).
@@ -275,12 +281,7 @@ func (a *APIServer) evaluateCodexHookForProfile(
 	case "PreToolUse", "PermissionRequest":
 		toolName := codexToolName(req)
 		toolArgs := codexToolArgs(req)
-		toolCWD := req.CWD
-		if codexShellExecutionTool(toolName) {
-			if workdir, ok := req.ToolInput["workdir"].(string); ok && workdir != "" {
-				toolCWD = agentHookTrustedActionCWD(ctx, req.CWD, workdir)
-			}
-		}
+		toolCWD := callCWD
 		actionTool, resourceIdentity := trustedToolActionFromContext(
 			ctx, "codex", toolName, toolName,
 		)
@@ -849,6 +850,23 @@ func reasonOrDefault(reason string) string {
 
 func normalizeCodexAction(action string) string {
 	return normalizedGuardrailAction(action)
+}
+
+// codexToolCallCWD is the folder a Codex tool call runs in: a shell call
+// runs in its workdir, from tool_input or, since the Codex hook leaves it
+// out, from the call in the session rollout (codexTranscriptCallWorkdir).
+func codexToolCallCWD(ctx context.Context, req codexHookRequest) string {
+	if !codexShellExecutionTool(codexToolName(req)) {
+		return req.CWD
+	}
+	workdir, _ := req.ToolInput["workdir"].(string)
+	if workdir == "" {
+		workdir = codexTranscriptCallWorkdir(ctx, req)
+	}
+	if workdir == "" {
+		return req.CWD
+	}
+	return agentHookTrustedActionCWD(ctx, req.CWD, workdir)
 }
 
 func codexToolName(req codexHookRequest) string {
@@ -2538,7 +2556,7 @@ func codexReaderTargetWithType(
 func codexCatInputs(argv []string) (codexStaticReaderInputs, bool) {
 	var inputs codexStaticReaderInputs
 	options := true
-	for _, arg := range argv[1:] {
+	for _, arg := range argvOperands(argv) {
 		if options && arg == "--" {
 			options = false
 			continue

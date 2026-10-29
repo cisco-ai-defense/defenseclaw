@@ -233,6 +233,10 @@ func newHookSessionFactsCmd() *cobra.Command {
 // followed by the rest, so Run reads exactly what the agent wrote.
 func armHookAnswerWatchdog(connectorName, event, failMode, surface string, managed bool, startedAt time.Time, exit func(int)) (io.Reader, *hookexec.AnswerWatchdog) {
 	payload, _ := io.ReadAll(io.LimitReader(os.Stdin, hookexec.DefaultMaxBody+1))
+	// A Windows PowerShell wrapper can put a UTF-8 byte order mark ahead of
+	// the JSON (GAP-2449): every reader after this one sees the payload
+	// without it.
+	payload = hookexec.TrimUTF8BOM(payload)
 	stdin := io.MultiReader(bytes.NewReader(payload), os.Stdin)
 	opts := hookexec.Options{
 		Connector:         connectorName,

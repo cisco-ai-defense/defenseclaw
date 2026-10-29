@@ -53,6 +53,7 @@ Platform and software requirements are at the end of the page ([Requirements and
 - **One entry point.** Type `defenseclaw sandbox …`. The Python CLI checks the
   command line, then replaces itself with `defenseclaw-gateway sandbox …` with
   your arguments as typed.
+- **Errors.** A sandbox command that the gateway's request limit refuses is worded as a burst of sandbox commands: nothing was changed, run it again in a few seconds. Only that limit is worded so; "too many activity streams are open" keeps its words. A request whose connection was refused is sent again, up to three tries 100 ms apart (a create is never sent twice once it reached the daemon). A daemon that still cannot be reached is named in plain words: nothing accepted the connection on its port, it did not answer in time, the program on its port could not be proven to be this account's daemon, or the connection failed before it answered.
 - **Platforms.** Linux and macOS only. On Windows every command stops with exit
   status 3. `setup`, `run`, `image build` and `enable` also stop with status 3
   under WSL2 and as root. On an Intel Mac every command except `teardown` stops
@@ -231,7 +232,7 @@ prints the result (so `ok` is `false` exactly when it exits `1`). The JSON holds
 to install OpenShell), `openshell_upgrade` (setup would offer to upgrade a
 supported OpenShell older than 0.1.5 in place) and `openshell_install_version`
 (the release setup installs), then every check with its id, title, status,
-detail and fix, the OpenShell and Docker versions found, and the compute driver;
+detail and fix, the OpenShell and Docker versions found, and the compute driver. When a burst of sandbox commands hit the request limit while doctor read the organization policy, that row warns and asks you to run doctor again; it does not report a failed policy;
 the TUI's Setup wizard reads these fields. When sandboxes are on
 (`openshell.enabled: true`), `defenseclaw doctor` shows the same checks in its
 Sandbox section; otherwise that section is one skipped row.
@@ -938,7 +939,8 @@ harness to your terminal, or a login shell in the project folder with
 
 - **Options.** The harness gets the options its `run` was given after `--`
   first, then the ones you pass now, and the banner shows the run's Model and
-  Secret lines.
+  Secret lines. `--shell` shows the saved Model line too, but passes no harness
+  options to the shell.
 - **The end.** Both kinds of session end the same way as a `run` session,
   with the summary and the keep-or-undo question (a `--shell` session exits
   `0`).
@@ -1555,7 +1557,11 @@ changed since its last pull read it (the pull, the session's end or the
 is not started. That pull is made again, with its changes and review
 measured anew (`fix-tests's copy has not changed since its last pull at
 14:03; using that pull instead of starting it`). On a Mac this saves booting
-the MicroVM.
+the MicroVM. If a session started the sandbox while that pull ran, the pull ends with
+`<name> keeps running: another command started it during this pull` and the
+command that stops it.
+
+**One pull at a time.** Two pulls of one sandbox run one after the other, on Linux and macOS. The second prints `another pull of <name> is running; waiting for it to end…`, then pulls. After 10 minutes it fails and names the other pull.
 
 ```bash
 defenseclaw sandbox pull fix-tests
@@ -1785,7 +1791,8 @@ asks the same decider the egress proxy uses.
 - On an unmanaged computer, without `--sandbox`, `--pack`, `--profile` and
   `--harness` resolve the policy a run in this folder would get, with
   `config.yaml` (or the defaults) and the folder's repository policy. No daemon
-  is needed, so CI can check a pack.
+  is needed, so CI can check a pack. Unblocks (`sandbox unblock`, `--always`
+  included) are left out: use `--sandbox` to see them.
 - On a managed computer, without `--sandbox`, the daemon tests your own policy for
   a new run in this folder. `--harness` selects the agent. `--pack` and
   `--profile` are refused, and with `--sandbox` omit all three

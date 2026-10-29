@@ -259,7 +259,7 @@ func installWindowsClaudeManagedResultSecure(ctx context.Context, opts InstallOp
 		// account's own settings (GAP-0836) before hardening re-applies the
 		// managed data directory DACL the atomic edit replaced.
 		if err := connector.WithUserHomeDir(home, func() error {
-			removeWindowsManagedUserNativeOTLPAsTarget(conn.Name(), targetSID, home, setup.DataDir)
+			removeWindowsManagedUserNativeOTLPAsTarget(conn.Name(), targetSID, home, setup.DataDir, setup.APIAddr, setup.ProxyAddr)
 			return nil
 		}); err != nil {
 			return fail(err)
@@ -550,6 +550,16 @@ func verifyWindowsClaudeUserRuntimeReadOnly(
 	current.Locations.HookConfigPaths = []string{policyPath}
 	if connector.HookContractLockDrifted(lock, current) {
 		return lock, fmt.Errorf("enterprise hooks: managed Claude hook contract drift detected")
+	}
+	// A deleted or edited claude-code-hook.sh is repaired at the guardian's
+	// next pass, as the shared scripts are (GAP-2227).
+	if err := connector.VerifyManagedConnectorHookScriptDigests(
+		setup,
+		conn,
+		lock,
+		targetSID.String(),
+	); err != nil {
+		return lock, fmt.Errorf("enterprise hooks: managed Claude hook runtime is invalid: %w", err)
 	}
 	if strings.TrimSpace(lock.HookFailMode) != strings.TrimSpace(current.HookFailMode) {
 		return lock, fmt.Errorf(

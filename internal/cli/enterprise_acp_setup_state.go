@@ -95,6 +95,11 @@ func enterpriseACPSetupState(dataDir, home, client, agent, profile, mode string)
 	if len(want) > 0 {
 		return false, "the editor entry in " + configPath + " is not a managed DefenseClaw entry"
 	}
+	if !acp.ClientConfigMatchesLock(lock, lockPath, client, agent) {
+		// The guard refuses an entry whose pinned parts changed after setup,
+		// the agent it starts among them (GAP-1154).
+		return false, "the editor entry in " + configPath + " changed after setup, so its contract lock no longer matches it"
+	}
 	if mode != "" && lock.Mode != mode {
 		return false, fmt.Sprintf("the editor entry is set up for %s mode, but profile %s is in %s mode", lock.Mode, profile, mode)
 	}

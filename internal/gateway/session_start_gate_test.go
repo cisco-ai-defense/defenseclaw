@@ -240,3 +240,82 @@ func TestClaudeToolCallHeldBySessionStartInFlight(t *testing.T) {
 		t.Fatalf("PostToolUse was held: %v", findings)
 	}
 }
+
+// GAP-2455: while an install or upgrade of the account holds its data
+// directory, the hook config lock and the fail-mode hold make the Codex
+// registration repair fail. That is no reason to block the session: its
+// calls are decided as at any other time in the window. Without the install
+// (control) the failed repair still blocks the session.
+func TestCodexSessionStartDuringAnInstallDoesNotBlockTheSession(t *testing.T) {
+	for _, install := range []bool{true, false} {
+		name := "install window"
+		if !install {
+			name = "no install (control)"
+		}
+		t.Run(name, func(t *testing.T) {
+			h := newSessionStartGateHarness(t)
+			if install {
+				holdInstallLock(t, h.api.scannerCfg.DataDir)
+			}
+			startDone := make(chan int, 1)
+			go func() { code, _ := h.post("SessionStart", "upgrade-session", nil); startDone <- code }()
+			<-h.started
+			h.repair <- errHookRepairSuppressed
+			code := <-startDone
+			action, findings := h.toolCall("upgrade-session")
+			if install {
+				if code != http.StatusOK || action == guardrailActionBlock {
+					t.Fatalf("SessionStart status %d, tool call action=%q findings=%v; want the ordinary call decided as usual", code, action, findings)
+				}
+				return
+			}
+			if code != http.StatusServiceUnavailable || action != guardrailActionBlock || !slices.Contains(findings, "SESSION-START-BLOCKED") {
+				t.Fatalf("control: SessionStart status %d, tool call action=%q findings=%v", code, action, findings)
+			}
+		})
+	}
+}
+
+// A call waiting for its session's start to arrive uses no gateway CPU, so it
+// gives up its caller's run slot for that wait and takes it back after. A
+// 60-way parallel Read burst of sessions this process has not seen otherwise
+// queued one arrival wait (1 s) after another behind the caller's few run
+// slots and ran past the managed hooks' 3.5 s answer budget (GAP-0050).
+func TestSessionStartArrivalWaitDoesNotHoldCallerRunSlot(t *testing.T) {
+	run := make(chan struct{}, 1)
+	run <- struct{}{}
+	slot := &hookRunSlot{run: run, held: true}
+	ctx := context.WithValue(t.Context(), hookRunSlotContextKey{}, slot)
+	gate := &sessionStartGate{}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		if reason, refused := gate.await(ctx, "claudecode\x00uid:1\x00unseen", 5*time.Second, 800*time.Millisecond,
+			func(context.Context) (bool, string) { return false, "" }); refused {
+			t.Errorf("await refused an allowed missing start: %q", reason)
+		}
+	}()
+	freed := false
+	for deadline := time.Now().Add(600 * time.Millisecond); time.Now().Before(deadline); time.Sleep(5 * time.Millisecond) {
+		select {
+		case run <- struct{}{}:
+			// Another request of the caller runs while this one waits.
+			<-run
+			freed = true
+		default:
+		}
+		if freed {
+			break
+		}
+	}
+	if !freed {
+		t.Fatal("the arrival wait kept the caller's run slot")
+	}
+	<-done
+	slot.mu.Lock()
+	held := slot.held
+	slot.mu.Unlock()
+	if !held || len(run) != 1 {
+		t.Fatalf("after the wait the request holds its slot = %v (tokens %d), want true (1)", held, len(run))
+	}
+}

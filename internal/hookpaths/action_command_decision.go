@@ -11,6 +11,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync/atomic"
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
 	"mvdan.cc/sh/v3/syntax"
@@ -206,10 +207,48 @@ func ActionPrivateKeyRead(command, cwd, home string) bool {
 	// A literal for loop binds its variable to each item, patterns
 	// included (for f in ~/.ssh/id_*; do cat "$f"; done, GAP-1780).
 	loops := make(map[string][]string)
+	// A reader fed by a static stdin redirect (xxd < ~/.ssh/id_ed25519)
+	// reads the file as if it were an operand (GAP-0281).
+	stdin := make(map[*syntax.CallExpr][]string)
+	// A reader after a directory change reads relative to it (cd ~/.ssh &&
+	// grep -r . ., RV22-1). The previous directories stay candidates, as on
+	// a Windows home: the change may fail or sit in a subshell.
+	dirs := []string{cwd}
+	// A call that runs only after cd <absolute dir> succeeded reads in that
+	// directory or a later one, not in the earlier candidates (cd ~/.ssh &&
+	// cd /proj && grep -rn TODO ., GAP-2421). cdAt is where each cd call
+	// put its directory in dirs.
+	certain := actionCertainDirectoryCalls(file, home)
+	cdAt := make(map[*syntax.CallExpr]int)
+	readAt := func(call *syntax.CallExpr, words []string) bool {
+		candidates := dirs
+		if at, ok := cdAt[certain[call]]; ok {
+			candidates = dirs[at:]
+		}
+		for _, dir := range candidates {
+			if actionPrivateKeyReadWords(words, dir, home, mode, 0) {
+				return true
+			}
+		}
+		return false
+	}
 	found := false
 	syntax.Walk(file, func(node syntax.Node) bool {
 		if found {
 			return false
+		}
+		if stmt, ok := node.(*syntax.Stmt); ok {
+			if call, ok := stmt.Cmd.(*syntax.CallExpr); ok {
+				for _, redirect := range stmt.Redirs {
+					if redirect.Word == nil || redirect.Op != syntax.RdrIn && redirect.Op != syntax.RdrInOut {
+						continue
+					}
+					if value, known := wordValue(redirect.Word); known {
+						stdin[call] = append(stdin[call], value)
+					}
+				}
+			}
+			return true
 		}
 		if loop, ok := node.(*syntax.ForClause); ok {
 			if iter, ok := loop.Loop.(*syntax.WordIter); ok && iter.Name != nil {
@@ -236,14 +275,28 @@ func ActionPrivateKeyRead(command, cwd, home string) bool {
 				bound = i
 			}
 		}
+		if sources := stdin[call]; len(sources) != 0 {
+			if base := programBase(words[0]); base != "cp" && base != "gcp" {
+				words = append(words, sources...)
+			}
+		}
 		if bound < 0 {
-			found = actionPrivateKeyReadWords(words, cwd, home, mode, 0)
+			found = readAt(call, words)
+			if base := programBase(words[0]); (base == "cd" || base == "pushd") && len(dirs) < 8 {
+				switch {
+				case len(words) == 1:
+					dirs = append(dirs, home)
+				case len(words) == 2 && words[1] != "" && words[1] != "-":
+					cdAt[call] = len(dirs)
+					dirs = append(dirs, OperandPath(words[1], dirs[len(dirs)-1]))
+				}
+			}
 			return !found
 		}
 		name := actionSoleParameter(call.Args[bound])
 		for _, item := range loops[name] {
 			words[bound] = item
-			if actionPrivateKeyReadWords(words, cwd, home, mode, 0) {
+			if readAt(call, words) {
 				found = true
 				break
 			}
@@ -395,15 +448,29 @@ func actionPrivateKeyReadWords(words []string, cwd, home string, mode keyReadMod
 		}
 		return false
 	}
+	// A Windows statement the word splitter cannot structure (a Bash heredoc
+	// read through cat) carries every word of its body as an operand. Each
+	// distinct operand is checked once: its answer depends only on the value,
+	// cwd and home, and on Windows a check is a chain of file-system calls
+	// (GAP-2279).
+	answers := map[string]bool{}
 	readPath := func(value string) bool {
+		found, seen := answers[value]
+		if seen {
+			return found
+		}
 		if actionPrivateKeyGlob(value, cwd, home, mode) {
+			answers[value] = true
 			return true
 		}
 		if windows {
-			protected, _ := actionWindowsProtected(value, cwd, home, true)
-			return protected
+			found, _ = actionWindowsProtected(value, cwd, home, true)
+		} else {
+			found = actionPrivateReadPath(value, cwd, home)
 		}
-		return actionPrivateReadPath(value, cwd, home)
+		actionPrivateReadChecks.Add(1)
+		answers[value] = found
+		return found
 	}
 	if program == "cp" || program == "gcp" {
 		copy := cpOperands(words[1:], makeStatic(len(words)-1))
@@ -417,8 +484,21 @@ func actionPrivateKeyReadWords(words []string, cwd, home string, mode keyReadMod
 		}
 		return false
 	}
+	if kind := actionInterpreterKind(words[0]); kind != "" {
+		code, ok := actionInterpreterInlineCode(words, 0)
+		return ok && actionInterpreterReadsPrivateKey(code, kind)
+	}
+	if actionRecursiveKeyDirectoryRead(words, cwd, home, windows) {
+		return true
+	}
 	switch program {
-	case "cat", "head", "tail", "type", "get-content", "gc", "base64":
+	case "cat", "head", "tail", "type", "get-content", "gc", "base64",
+		// Every program that prints its operand's content reads the key as
+		// cat does (GAP-0281).
+		"less", "more", "most", "view", "grep", "egrep", "fgrep", "zgrep", "rg",
+		"xxd", "od", "hexdump", "hd", "strings", "cut", "nl", "tac", "rev",
+		"sort", "uniq", "fold", "fmt", "pr", "paste", "diff", "comm",
+		"awk", "gawk", "mawk", "nawk", "findstr", "select-string", "sls", "format-hex", "fhx":
 		for _, arg := range words[1:] {
 			if readPath(arg) {
 				return true
@@ -1528,3 +1608,8 @@ func actionWrappedDecision(program string, words []string, cwd, home string, dep
 	}
 	return actionWordsDecision(words[index:], cwd, home, depth+1)
 }
+
+// actionPrivateReadChecks counts the operand checks of the private-key read
+// scan, so a test can prove a long command checks each distinct operand
+// once (GAP-2279).
+var actionPrivateReadChecks atomic.Int64

@@ -103,6 +103,20 @@ type SetupOpts struct {
 	// sandboxNativeOTLP selects the isolated OpenShell artifact renderer. It
 	// cannot be set by a host setup caller or a configuration file.
 	sandboxNativeOTLP bool
+	// knownCredentials are further product credentials the native OTLP
+	// residue check knows (UserNativeOTLPWithout recovers them from the
+	// configuration it judges by their digests). Never set by a caller.
+	knownCredentials []string
+	// ManagedMarkedOrphanExporters is set by the managed Windows native OTLP
+	// take-back and Verify only (never host setup): an exporter in the
+	// account's own agent config with the exact shape a pre-1.0.4 per-user
+	// render wrote (both x-defenseclaw markers, a loopback port
+	// ManagedServedAddrs does not name) is the product's (GAP-0836,
+	// native_otlp_marked_orphan.go).
+	ManagedMarkedOrphanExporters bool
+	// ManagedServedAddrs are the host:port addresses the managed gateway
+	// serves (API, guardrail proxy).
+	ManagedServedAddrs []string
 	// ManagedHookSocket is the standalone gateway's peer-authorized unix
 	// hook socket (from the root-owned runtime descriptor). When set on a
 	// unix host, in-agent plugins (OpenCode, Amp) and connector shell hooks

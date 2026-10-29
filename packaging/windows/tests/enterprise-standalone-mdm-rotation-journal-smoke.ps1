@@ -37,10 +37,18 @@ try {
         if (-not [IO.Directory]::Exists($root)) {
             $failures.Add('an uninstall without purge removed the kit state folder')
         }
+        if (-not [string]::IsNullOrEmpty((Get-DefenseClawMdmRotationJournalKept))) {
+            $failures.Add('a removed journal was reported as kept')
+        }
         [void][IO.Directory]::CreateDirectory([IO.Path]::Combine($journal, 'foreign'))
         Remove-DefenseClawMdmRotationJournal -StateDirectory $root -WarningAction SilentlyContinue
         if (-not [IO.Directory]::Exists([IO.Path]::Combine($journal, 'foreign'))) {
             $failures.Add('a journal holding a folder was not left as it is')
+        }
+        # GAP-1913: the journal left is named for the result, with the step.
+        $kept = Get-DefenseClawMdmRotationJournalKept
+        if ($kept -notlike "*$journal*" -or $kept -notlike '*holds foreign*' -or $kept -notlike '*remove it by hand*') {
+            $failures.Add("the journal left as it is was not named for the result: '$kept'")
         }
         [IO.Directory]::Delete($journal, $true)
         Remove-DefenseClawMdmRotationJournal -StateDirectory $root -Purge -WarningAction SilentlyContinue
@@ -52,6 +60,31 @@ try {
 }
 finally {
     Microsoft.PowerShell.Management\Remove-Item -LiteralPath $root -Recurse -Force -ErrorAction SilentlyContinue
+}
+
+# GAP-1913: Setup and the CLI read the note into mdm_rotation_journal_kept,
+# and the module names it for a plain uninstall too.
+$installer = [IO.File]::ReadAllText([IO.Path]::GetFullPath(
+    (Microsoft.PowerShell.Management\Join-Path $PSScriptRoot '..\install-enterprise.ps1')))
+if ($installer -notlike '*DefenseClawEnterprise\Get-DefenseClawMdmRotationJournalKept*' -or
+    $installer -notlike '*-Name mdm_rotation_journal_kept*') {
+    $failures.Add('install-enterprise.ps1 does not put a kept journal into the result')
+}
+$moduleText = [IO.File]::ReadAllText($modulePath)
+if ($moduleText -notlike '*$script:DefenseClawMdmRotationJournalKept = (*kept the MDM kit credential rotation journal*') {
+    $failures.Add('a plain uninstall does not record the journal it keeps')
+}
+# A standalone uninstall sets $Purge itself (it removes StateRoot), so only the
+# requested purge (the per-user flag) may remove the journal (GAP-1913 live
+# red: a plain Setup /uninstall tried to remove it).
+$purgePattern = (@(
+        '$purgeRequested = if (Test-DefenseClawStandaloneProfile) {',
+        '[bool]$script:DefenseClawUninstallPurgeUserState',
+        'if ($purgeRequested) {',
+        'Remove-DefenseClawMdmRotationJournal -Purge'
+    ) | Microsoft.PowerShell.Core\ForEach-Object { [regex]::Escape($_) }) -join '[\s\S]*?'
+if ($moduleText -notmatch $purgePattern) {
+    $failures.Add('a plain standalone uninstall would remove the journal: the journal purge does not follow the requested purge')
 }
 
 if ($failures.Count -gt 0) {

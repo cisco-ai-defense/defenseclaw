@@ -1618,6 +1618,55 @@ def test_write_kept_uv_cache_runs_under_strict_mode(tmp_path: Path, cache: str) 
     assert any("download cache" in line for line in lines) == (cache == "one-file")
 
 
+
+@pytest.mark.skipif(POWERSHELL is None, reason="PowerShell is not installed")
+@pytest.mark.allow_subprocess
+def test_sizing_the_data_folder_while_an_uninstall_cleanup_deletes_a_tree_never_stops_the_install(tmp_path: Path) -> None:
+    # GAP-2499: install.ps1 started while a 1.0.2+ uninstall's after-exit
+    # cmd.exe was deleting .uv.dc-removed-<hex> stopped at "Preparing" with
+    # "The system cannot find the file specified" from Get-ChildItem -Recurse
+    # in Get-TreeSize (-ErrorAction does not catch the enumerator's error).
+    # The renamed tree is not data, and a folder that goes mid-walk counts as
+    # empty. The mock Get-ChildItem throws that error for a folder named gone,
+    # and for a recursive listing of any tree that holds one.
+    data = tmp_path / "data"
+    (data / "policies" / "gone").mkdir(parents=True)
+    (data / "policies" / "gone" / "x.bin").write_bytes(b"x" * 300)
+    (data / "policies" / "keep.rego").write_bytes(b"k" * 1000)
+    (data / "config.yaml").write_bytes(b"c" * 24)
+    (data / ".uv.dc-removed-52d721f3" / "python").mkdir(parents=True)
+    (data / ".uv.dc-removed-52d721f3" / "python" / "python.exe").write_bytes(b"p" * 5000)
+    tree = _text()[_text().index("function Get-TreeSize(") :]
+    tree = tree[: tree.index("\n}\n") + 3]
+    script = f"""
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
+$DataDir = '{data}'
+{_not_data()}
+function Get-ChildItem {{
+    param([string]$LiteralPath, [switch]$Recurse, [switch]$Force, [switch]$File, $ErrorAction)
+    $gone = @(Microsoft.PowerShell.Management\\Get-ChildItem -LiteralPath $LiteralPath -Recurse -Force -Directory -ErrorAction SilentlyContinue | Where-Object Name -eq 'gone')
+    if ((Split-Path -Leaf $LiteralPath) -eq 'gone' -or ($Recurse -and $gone.Count)) {{
+        throw [IO.FileNotFoundException]::new('The system cannot find the file specified')
+    }}
+    Microsoft.PowerShell.Management\\Get-ChildItem -LiteralPath $LiteralPath -Recurse:$Recurse -Force:$Force -File:$File -ErrorAction SilentlyContinue
+}}
+{_ps1_function("Get-DataEntries")}
+{tree}
+{_ps1_function("Get-DataSize")}
+'ENTRIES=' + ((Get-DataEntries | ForEach-Object Name | Sort-Object) -join ',')
+try {{ 'SIZE=' + (Get-DataSize) }} catch {{ 'THROW=' + $_.Exception.Message }}
+'MISSING=' + (Get-TreeSize (Join-Path $DataDir 'absent'))
+'FILE=' + (Get-TreeSize (Join-Path $DataDir 'config.yaml'))
+"""
+    completed = _run_powershell(script)
+    out = completed.stdout + completed.stderr
+    assert completed.returncode == 0, out
+    assert "ENTRIES=config.yaml,policies" in out, out
+    assert "SIZE=1024" in out, out
+    assert "MISSING=0" in out and "FILE=24" in out, out
+
+
 def test_a_failed_first_install_names_the_kept_uv_cache_and_a_full_disk() -> None:
     # GAP-1883: the space refusal and a staging failure kept the uv cache
     # silently, and a disk that filled at the binary copy showed only the
@@ -5470,6 +5519,57 @@ def test_a_rollback_makes_the_backups_folder_private_before_the_hook_conversion(
     assert f"SET {backups}" in out and "PROTECTION=True,True" in out, out
 
 
+@pytest.mark.skipif(sys.platform != "win32" or POWERSHELL is None, reason="native Windows PowerShell required")
+def test_a_rollback_makes_inherited_copies_of_the_settings_backup_private(tmp_path: Path) -> None:
+    # GAP-2050 / GAP-1883: a settings copy and witness from an earlier
+    # conversion that came back with inherited permissions (a profile restore,
+    # a plain file copy) made prepare-rollback refuse ("keep a copy of the
+    # settings: bound private compare-and-swap object has an inheritable
+    # DACL"), so every later rollback or downgrade left two Claude Code
+    # handlers. Those two files become private (same access, explicit); other
+    # files in backups\ keep their permissions.
+    text = _text()
+    # Its C# here-string has its own "}" lines, so cut it up to the next function.
+    native = text[text.index("function Initialize-Native {") : text.index("function Update-UserPath(")]
+    data = str(tmp_path / "data").replace("'", "''")
+    script = f"""
+$ErrorActionPreference = 'Stop'
+$DataDir = '{data}'
+function Write-Warn([string]$m) {{ "WARN $m" }}
+{native}
+{_ps_functions("Set-DirectoryAcl", "Test-OwnedByCurrentUser")}
+{_ps1_function("Protect-BackupsFolder")}
+$backups = Join-Path $DataDir 'backups'
+New-Item -ItemType Directory -Path $backups -Force | Out-Null
+$names = @('claudecode-settings.before-rollback.json', 'claudecode-settings.before-rollback.witness.json', 'guardrail-profiles.json')
+# Elevated (the GitHub runner, an elevated console) a new file belongs to the
+# Administrators group. The installer creates its files as the user when it
+# runs elevated (SwapDefaultOwner), so the copies here are made the same way.
+Initialize-Native
+$me = [Security.Principal.WindowsIdentity]::GetCurrent().User
+$sid = New-Object byte[] $me.BinaryLength
+$me.GetBinaryForm($sid, 0)
+$previousOwner = [DefenseClawInstall.Native]::SwapDefaultOwner([DefenseClawInstall.Native]::NewOwner($sid))
+try {{
+    foreach ($n in $names) {{ Set-Content -LiteralPath (Join-Path $backups $n) -Value '{{}}' }}
+}} finally {{
+    if ($previousOwner -ne [IntPtr]::Zero) {{ [void][DefenseClawInstall.Native]::SwapDefaultOwner($previousOwner) }}
+}}
+foreach ($n in $names) {{ if (-not (Test-OwnedByCurrentUser (Join-Path $backups $n))) {{ throw "precondition: $n is not this account's own" }} }}
+foreach ($n in $names) {{ if ((Get-Acl -LiteralPath (Join-Path $backups $n)).AreAccessRulesProtected) {{ throw "precondition: $n is already private" }} }}
+Protect-BackupsFolder
+"DIR=$((Get-Acl -LiteralPath $backups).AreAccessRulesProtected)"
+foreach ($n in $names) {{ "$n=$((Get-Acl -LiteralPath (Join-Path $backups $n)).AreAccessRulesProtected)" }}
+"""
+    result = _run_powershell(script)
+    out = result.stdout + result.stderr
+    assert result.returncode == 0 and "WARN" not in out, out
+    assert "DIR=True" in out, out
+    assert "claudecode-settings.before-rollback.json=True" in out, out
+    assert "claudecode-settings.before-rollback.witness.json=True" in out, out
+    assert "guardrail-profiles.json=False" in out, out
+
+
 @pytest.mark.skipif(POWERSHELL is None, reason="PowerShell is not installed")
 def test_uv_runs_below_normal_priority_so_hook_calls_keep_their_budget(tmp_path: Path) -> None:
     # GAP-1150: while uv built and byte-compiled the environment on every
@@ -5655,7 +5755,9 @@ try {{ Publish-PreviousSlot (Join-Path $DataDir 'previous.new') }} catch {{ "THR
 
 
 @pytest.mark.skipif(POWERSHELL is None, reason="PowerShell is not installed")
-@pytest.mark.parametrize("case", ["updated", "same", "missing", "no-lock", "not-setup-selected"])
+@pytest.mark.parametrize(
+    "case", ["updated", "same", "missing", "no-lock", "not-setup-selected", "updated-selection-fresh", "updated-selection-expired"]
+)
 def test_a_rollback_refuses_before_any_change_when_codex_changed_since_the_older_setup(tmp_path: Path, case: str) -> None:
     # GAP-2299: after a Codex update (0.160.0 -> 0.164.0) and setup codex on
     # 1.0.5, 'defenseclaw rollback' swapped to 1.0.4, whose gateway does not
@@ -5668,8 +5770,19 @@ def test_a_rollback_refuses_before_any_change_when_codex_changed_since_the_older
     exe = tmp_path / "codex.exe"
     exe.write_bytes(b"codex 0.160.0")
     recorded = hashlib.sha256(b"codex 0.160.0").hexdigest()
-    if case == "updated":
+    if case.startswith("updated"):
         exe.write_bytes(b"codex 0.164.0")
+    if case.startswith("updated-selection"):
+        # GAP-2513: the rollback selected the updated program for the older
+        # release, as its setup would; only a fresh selection counts.
+        expires = "2000-01-01T00:00:00Z" if case.endswith("expired") else "2999-01-01T00:00:00Z"
+        selection = {
+            "source": "setup-selected",
+            "executable": str(exe),
+            "sha256": hashlib.sha256(b"codex 0.164.0").hexdigest(),
+            "expires_at": expires,
+        }
+        (data / "agent_selection.json").write_text(json.dumps({"selections": {"codex": selection}}), encoding="utf-8")
     if case == "missing":
         exe.unlink()
     source = "setup-selected" if case != "not-setup-selected" else ""
@@ -5695,6 +5808,7 @@ def test_a_rollback_refuses_before_any_change_when_codex_changed_since_the_older
 $ErrorActionPreference = 'Stop'
 {_ps1_function("Get-Field")}
 {_ps1_function("Get-StaleAgentEvidence")}
+{_ps1_function("Test-FreshAgentSelection")}
 @(Get-StaleAgentEvidence '{data}') | ForEach-Object {{ "STALE $_" }}
 'OK'
 """
@@ -5702,7 +5816,7 @@ $ErrorActionPreference = 'Stop'
     out = result.stdout + result.stderr
     assert result.returncode == 0 and "OK" in out, out
     stale = re.findall(r"STALE (.*)", out)
-    if case == "updated":
+    if case in ("updated", "updated-selection-expired"):
         assert stale == [f"Codex was updated after DefenseClaw set up Codex 0.160.0 ({exe} changed)"], out
     elif case == "missing":
         assert stale == [f"Codex 0.160.0, which DefenseClaw set up before the upgrade, is no longer at {exe}"], out
@@ -5737,7 +5851,7 @@ def _restore_case_functions() -> str:
         "Restore-Slot", "Invoke-Quietly", "Convert-HooksForRestore", "Test-Version", "Get-NativeOutput",
         "Read-Text", "Restore-ExternalConfig", "Undo-HookFirst", "Undo-Snapshot",
         "Install-HookFirst", "Save-HookCloser", "Clear-StagedRelease", "Resume-InterruptedRun", "Publish-PreviousSlot",
-        "Remove-Hold", "Restore-Live", "Restore-LiveTree", "Move-LiveTo", "Set-RecoveryPending",
+        "Remove-Hold", "Restore-Live", "Restore-LiveTree", "Move-LiveTo", "Remove-HooksBridge", "Set-RecoveryPending",
     )
     return "\n".join(_ps1_function(name) for name in names)
 
@@ -6759,6 +6873,7 @@ def test_a_rollback_is_done_only_once_its_gateway_runs_and_is_proven(tmp_path: P
         "function Get-InstalledVersion { return '1.0.4' }\n"
         "function Assert-NoLoadedPluginAgents { }\n"
         "function Assert-NoActiveConnectorRecovery { }\nfunction Confirm-Step { return $true }\n"
+        "function Select-UpdatedAgents([string]$Data) { }\n"
         "function Test-HookRollbackRestoreAvailable { return $false }\nfunction Wait-VenvFree { }\n"
         "function Test-RollbackData { return $false }\nfunction Get-GatewayProcess { return $true }\n"
         "function Stop-Gateway { return $true }\nfunction Stop-Watchdog { }\nfunction Assert-GatewayQuiescent { }\n"
@@ -6826,8 +6941,9 @@ def test_a_codex_update_refuses_only_a_rollback_whose_gateway_would_not_start(tm
         "function Remove-LifecycleManifest { $script:removed++ }\n"
         "function Start-Gateway { return 0 }\nfunction Wait-LifecycleProof { return @() }\n"
         "function Undo-Rollback { param($Reason) Write-Host \"undo: $Reason\"; return 1 }\n"
-        + _ps1_function("Get-Field") + _ps1_function("Get-StaleAgentEvidence") + _ps1_function("Read-Text")
-        + _ps1_function("Test-Version") + _ps1_function("Invoke-Rollback")
+        + "function Select-UpdatedAgents([string]$Data) { }\n"
+        + _ps1_function("Get-Field") + _ps1_function("Get-StaleAgentEvidence") + _ps1_function("Test-FreshAgentSelection")
+        + _ps1_function("Read-Text") + _ps1_function("Test-Version") + _ps1_function("Invoke-Rollback")
         + "\ntry { $rc = Invoke-Rollback } catch { Write-Host \"refused: $($_.Exception.Message)\"; $rc = 'refused' }\n"
         + "Write-Host \"rc: $rc stops: $script:stops removed: $script:removed\"\n",
         encoding="utf-8",
@@ -8387,3 +8503,216 @@ Write-Output "HASHES=$($script:hashes)"
     assert hashes <= 8, out
     restore = _ps1_function("Restore-Slot")
     assert "$plan.Schema -notin @(1, 2)" in restore and "$planSchema = [int]$plan.Schema" in restore
+
+
+def _not_data() -> str:
+    # The installer's own list of data-dir names that are machinery.
+    match = re.search(r"^\$NotData = @\(.*?\)$", _text(), re.M | re.S)
+    assert match is not None
+    return match.group(0)
+
+
+@pytest.mark.skipif(POWERSHELL is None, reason="PowerShell is not installed")
+@pytest.mark.allow_subprocess
+@pytest.mark.parametrize("back", ["restore-live-tree", "move-live-to"])
+def test_a_rollback_swap_keeps_the_hook_credentials_readable_until_the_other_install_moves_in(
+    tmp_path: Path, back: str
+) -> None:
+    # GAP-2420: Save-Live moved hooks\ aside with the rest of the data, so for
+    # the seconds until Restore-LiveTree brought the other install's hooks\
+    # in, every hook call of either release answered "missing gateway token"
+    # instead of naming the install. The bridge is hard links to the set-aside
+    # files, never data: neither direction of the swap takes it along.
+    data, hold, other = tmp_path / "data", tmp_path / "data" / ".rollback-hold", tmp_path / "data" / "previous"
+    (data / "hooks").mkdir(parents=True)
+    (data / "hooks" / ".hook-claudecode.token").write_text("new-token", encoding="ascii")
+    (data / "hooks" / ".hookcfg").write_text("closed", encoding="ascii")
+    (data / "config.yaml").write_text("new", encoding="ascii")
+    (other / "data" / "hooks").mkdir(parents=True)
+    (other / "data" / "hooks" / ".hook-claudecode.token").write_text("old-token", encoding="ascii")
+    (other / "data" / "config.yaml").write_text("old", encoding="ascii")
+    names = ("Save-Live", "New-HooksBridge", "Remove-HooksBridge", "Restore-LiveTree", "Move-LiveTo", "Get-DataEntries",
+             "Move-Path", "Remove-Tree", "Invoke-Quietly")
+    script = f"""
+$ErrorActionPreference = 'Stop'
+$DataDir = '{data}'
+$Venv = Join-Path $DataDir '.venv'
+$InstallerDir = Join-Path $DataDir 'installer'
+{_not_data()}
+function Copy-BinDir([string]$To) {{ }}
+function Save-ExternalConfig([string]$Slot) {{ }}
+{chr(10).join(_ps1_function(name) for name in names)}
+Save-Live '{hold}'
+$bridge = Join-Path $DataDir 'hooks'
+if ($IsWindows -or $PSVersionTable.PSEdition -ne 'Core') {{
+    $want = (Get-Acl -LiteralPath '{hold / "data" / "hooks"}').GetSecurityDescriptorSddlForm('Access')
+    Write-Output ("ACL_SAME=" + ((Get-Acl -LiteralPath $bridge).GetSecurityDescriptorSddlForm('Access') -eq $want))
+}}
+Write-Output ("BUILDING_LEFT=" + (Test-Path -LiteralPath (Join-Path $DataDir '.failed-hooks-bridge')))
+Write-Output ("BRIDGE_TOKEN=" + [IO.File]::ReadAllText((Join-Path $bridge '.hook-claudecode.token')))
+Write-Output ("BRIDGE_CFG=" + [IO.File]::ReadAllText((Join-Path $bridge '.hookcfg')))
+Write-Output ("CONFIG_LIVE=" + (Test-Path -LiteralPath (Join-Path $DataDir 'config.yaml')))
+if ('{back}' -eq 'restore-live-tree') {{ Restore-LiveTree '{other}' }} else {{ Move-LiveTo '{other}' }}
+Write-Output ("MARKER_LEFT=" + (Test-Path -LiteralPath (Join-Path $bridge '.rollback-hooks-bridge')))
+Write-Output ("HOLD_TOKEN=" + [IO.File]::ReadAllText('{hold / "data" / "hooks" / ".hook-claudecode.token"}'))
+"""
+    completed = _run_powershell(script)
+    out = completed.stdout + completed.stderr
+    assert completed.returncode == 0, out
+    assert "BRIDGE_TOKEN=new-token" in out and "BRIDGE_CFG=closed" in out, out
+    assert "CONFIG_LIVE=False" in out and "MARKER_LEFT=False" in out and "HOLD_TOKEN=new-token" in out, out
+    assert "BUILDING_LEFT=False" in out, out
+    if os.name == "nt":
+        # The bridge has the access rules of the hooks\\ it stands in for:
+        # both inherit the data folder's.
+        assert "ACL_SAME=True" in out, out
+    # GAP-2426: no ACL call that writes nothing (an unchanged Get-Acl object).
+    bridge = _ps1_function("New-HooksBridge")
+    assert "Set-DirectoryAcl" not in bridge and "Get-Acl" not in bridge, bridge
+    if back == "restore-live-tree":
+        # The other install's hooks\ is live, whole; the bridge went first.
+        assert (data / "hooks" / ".hook-claudecode.token").read_text(encoding="ascii") == "old-token"
+        assert (data / "config.yaml").read_text(encoding="ascii") == "old"
+    else:
+        # An undo moves only real data back into the slot, never the bridge.
+        assert not (data / "hooks").exists()
+        assert (other / "data" / "hooks" / ".hook-claudecode.token").read_text(encoding="ascii") == "old-token"
+
+
+@pytest.mark.skipif(POWERSHELL is None, reason="PowerShell is not installed")
+@pytest.mark.allow_subprocess
+@pytest.mark.parametrize("stop", ["marker-write-fails", "killed-before-rename"])
+def test_a_rollback_bridge_that_stops_half_built_never_blocks_the_swap_back(tmp_path: Path, stop: str) -> None:
+    # GAP-2425: New-HooksBridge made hooks\ before its marker, so a stop in
+    # between (a failed marker write, a killed run) left an unmarked hooks\
+    # that Remove-HooksBridge does not take, and Restore-LiveTree then refused
+    # with "already exists". The bridge is built under another name, marker
+    # first, and only a whole one is renamed into place.
+    data, hold, other = tmp_path / "data", tmp_path / "data" / ".rollback-hold", tmp_path / "data" / "previous"
+    (data / "hooks").mkdir(parents=True)
+    (data / "hooks" / ".hook-claudecode.token").write_text("new-token", encoding="ascii")
+    (data / "config.yaml").write_text("new", encoding="ascii")
+    (other / "data" / "hooks").mkdir(parents=True)
+    (other / "data" / "hooks" / ".hook-claudecode.token").write_text("old-token", encoding="ascii")
+    (other / "data" / "config.yaml").write_text("old", encoding="ascii")
+    names = ("Save-Live", "New-HooksBridge", "Remove-HooksBridge", "Restore-LiveTree", "Get-DataEntries",
+             "Move-Path", "Remove-Tree", "Invoke-Quietly")
+    if stop == "marker-write-fails":
+        fault = (
+            "function Set-Content {{ param([string]$LiteralPath, $Value, $Encoding, $ErrorAction)\n"
+            "    if ($LiteralPath -like '*.rollback-hooks-bridge') {{ throw 'disk full' }}\n"
+            "    Microsoft.PowerShell.Management\\Set-Content -LiteralPath $LiteralPath -Value $Value }}\n"
+            "Save-Live '{hold}'\n"
+        ).format(hold=hold)
+    else:
+        # A run killed while it built the bridge leaves only what it built
+        # under the building name.
+        fault = (
+            "Save-Live '{hold}'\n"
+            "Remove-HooksBridge\n"
+            "New-Item -ItemType Directory -Path (Join-Path $DataDir '.failed-hooks-bridge') | Out-Null\n"
+        ).format(hold=hold)
+    script = f"""
+$ErrorActionPreference = 'Stop'
+$DataDir = '{data}'
+$Venv = Join-Path $DataDir '.venv'
+$InstallerDir = Join-Path $DataDir 'installer'
+{_not_data()}
+function Copy-BinDir([string]$To) {{ }}
+function Save-ExternalConfig([string]$Slot) {{ }}
+{chr(10).join(_ps1_function(name) for name in names)}
+{fault}
+Write-Output ("DATA_ENTRIES=" + ((Get-DataEntries | ForEach-Object Name) -join ','))
+Restore-LiveTree '{other}'
+Write-Output 'SWAPPED_BACK'
+"""
+    completed = _run_powershell(script)
+    out = completed.stdout + completed.stderr
+    assert completed.returncode == 0, out
+    assert "SWAPPED_BACK" in out and "already exists" not in out, out
+    assert re.search(r"DATA_ENTRIES=(.*)", out).group(1).strip() == "", out
+    assert (data / "hooks" / ".hook-claudecode.token").read_text(encoding="ascii") == "old-token"
+    assert (data / "config.yaml").read_text(encoding="ascii") == "old"
+    assert not (data / ".failed-hooks-bridge").exists()
+    assert (hold / "data" / "hooks" / ".hook-claudecode.token").read_text(encoding="ascii") == "new-token"
+
+
+def _tiktoken_site(root: Path, rank: bytes, expected: bytes) -> tuple[Path, Path, str]:
+    site = root / "Lib" / "site-packages"
+    tokenizers = site / "litellm" / "litellm_core_utils" / "tokenizers"
+    tokenizers.mkdir(parents=True)
+    (site / "tiktoken_ext").mkdir()
+    (site / "tiktoken_ext" / "openai_public.py").write_text(
+        f"def cl100k_base():\n    load(\"x\", expected_hash=\"{hashlib.sha256(expected).hexdigest()}\")\n",
+        encoding="utf-8",
+    )
+    name = "9b5ad71b2ce5302211f9c61530b329a4922fc6a4"
+    (tokenizers / name).write_bytes(rank)
+    record = site / "litellm-1.103.10.dist-info" / "RECORD"
+    record.parent.mkdir()
+    record.write_bytes(
+        f"litellm/__init__.py,sha256=abc,1\r\nlitellm/litellm_core_utils/tokenizers/{name},sha256=old,{len(rank)}\r\n".encode()
+    )
+    return site, tokenizers / name, f"litellm/litellm_core_utils/tokenizers/{name}"
+
+
+def test_the_windows_venv_gets_the_published_tiktoken_rank_files_so_the_first_import_needs_no_download(
+    tmp_path: Path,
+) -> None:
+    # GAP-2441 (the per-user twin of the managed GAP-2395): the Windows
+    # LiteLLM wheel ships the tiktoken rank files with CRLF line ends, their
+    # SHA-256 never matches, and tiktoken downloads them again on the first
+    # import (offline it fails). New-Venv puts back the published bytes, in
+    # a new file, so the uv cache entry the venv file is linked to keeps its own.
+    import base64
+
+    code = re.search(r"^\$TiktokenRanksPy = @\x27\n(.*?)\n\x27@$", _text(), re.M | re.S)
+    assert code
+    script = tmp_path / "ranks.py"
+    script.write_text(code.group(1), encoding="utf-8")
+    published = b"IQ== 0\nIg== 1\n"
+    site, rank, member = _tiktoken_site(tmp_path / "venv", published.replace(b"\n", b"\r\n"), published)
+    cache = tmp_path / "uv-cache-entry"
+    os.link(rank, cache)
+    done = subprocess.run([sys.executable, "-I", str(script), str(site)], capture_output=True, text=True)
+    assert done.returncode == 0 and done.stdout.strip() == "1", done.stdout + done.stderr
+    assert rank.read_bytes() == published
+    assert cache.read_bytes() == published.replace(b"\n", b"\r\n")
+    digest = base64.urlsafe_b64encode(hashlib.sha256(published).digest()).rstrip(b"=").decode()
+    record = (site / "litellm-1.103.10.dist-info" / "RECORD").read_bytes().decode()
+    assert f"{member},sha256={digest},{len(published)}\r\n" in record
+    assert record.startswith("litellm/__init__.py,sha256=abc,1\r\n")
+    assert not list(site.rglob("*.defenseclaw-new"))
+    again = subprocess.run([sys.executable, "-I", str(script), str(site)], capture_output=True, text=True)
+    assert again.returncode == 0 and again.stdout.strip() == "0"
+
+    # A rank file that differs in more than its line ends is not touched.
+    other, foreign, _ = _tiktoken_site(tmp_path / "other", b"something else\r\n", published)
+    refused = subprocess.run([sys.executable, "-I", str(script), str(other)], capture_output=True, text=True)
+    assert refused.returncode == 3 and "match no expected hash" in refused.stderr
+    assert foreign.read_bytes() == b"something else\r\n"
+
+    venv = _ps1_function("New-Venv")
+    assert (
+        venv.index("Invoke-UvPipInstall $lockArgs")
+        < venv.index("Repair-TiktokenRanks $python $Where")
+        < venv.index("Installing the DefenseClaw package")
+    )
+    repair = _ps1_function("Repair-TiktokenRanks")
+    assert "Invoke-Native $Python @(\"-I\", $code, $site) -Quiet" in repair and "Write-Warn" in repair
+
+
+def test_an_install_keeps_a_recorded_hook_guard_copy_an_older_roll_forward_cannot_drop() -> None:
+    # GAP-2525: a 1.0.2 or 1.0.3 install.ps1 roll-forward restores only its own
+    # binaries, so defenseclaw-hook-guard.exe went missing while the Claude Code
+    # PreToolUse entry names it. installer moves back as one folder: the install
+    # keeps the guard there with the digests the gateway checks before it puts
+    # the guard back at start (internal/cli/per_user_helper_restore.go).
+    body = _ps1_function("Save-HelperRecoveryCopy")
+    assert 'Install-File $guard (Join-Path $InstallerDir "defenseclaw-hook-guard.exe")' in body
+    assert 'Join-Path $InstallerDir "binaries.sha256"' in body
+    assert '@("defenseclaw-gateway.exe", "defenseclaw-hook-guard.exe")' in body
+    assert "Publish-File" in body and "catch" in body
+    install_new = _ps1_function("Install-New")
+    loop = install_new.index("foreach ($name in $ManagedBinaries)")
+    assert loop < install_new.index("Save-HelperRecoveryCopy") < install_new.index("Write-HookState")

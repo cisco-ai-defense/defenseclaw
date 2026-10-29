@@ -78,6 +78,8 @@ if [ "$1" = hook-post ]; then
         i=$((i + 1))
       done
     fi
+    # The installer lets go of its lock while the request waits (GAP-2443).
+    [ "${DC_COLD_RELEASE_INSTALL_LOCK:-0}" != 1 ] || rmdir "$DEFENSECLAW_HOME/.install.lock"
     exit "${DC_COLD_FIRST_RC:-7}"
   fi
   printf '%s\n%s\n' '{"action":"allow","codex_output":{"decision":"allow"}}' '200'
@@ -462,14 +464,16 @@ func TestShellHookDoesNotColdStartAStoppedGateway(t *testing.T) {
 // A frozen or hung gateway keeps its listener, so the request times out
 // (native post exit 28) while gateway.pid names a live process. The line says so once,
 // with the next step, instead of "gateway unreachable ...: gateway
-// unreachable" (GAP-1204).
+// unreachable" (GAP-1204). The call is no outage, so it is blocked in every
+// fail mode and the line says that, not "fail mode closed", which read as a
+// saved open mode ignored (GAP-2279, as the native line since GAP-1735).
 func TestShellHookNamesTheNextStepForAHungGateway(t *testing.T) {
 	alive := func(dataDir string) {
 		_ = os.WriteFile(filepath.Join(dataDir, "gateway.pid"), []byte(strconv.Itoa(os.Getpid())+"\n"), 0o600)
 	}
 	run := runHookForColdStart(t, NewClaudeCodeConnector(), "claude-code-hook.sh", nil, alive,
 		"DEFENSECLAW_FAIL_MODE=closed", "DC_COLD_FIRST_RC=28")
-	want := "defenseclaw: gateway unreachable, blocking claude-code tool (fail mode closed): " +
+	want := "defenseclaw: gateway unreachable, blocking claude-code tool (not a gateway outage, so it is blocked in every fail mode): " +
 		"the gateway is running but did not answer; check `defenseclaw-gateway status`, or run `defenseclaw-gateway restart`"
 	if got := strings.TrimSpace(run.stderr); got != want {
 		t.Fatalf("stderr = %q\nwant %q", got, want)
@@ -488,6 +492,44 @@ func TestShellHookNamesTheNextStepForAHungGateway(t *testing.T) {
 		"DEFENSECLAW_FAIL_MODE=open", "DC_COLD_FIRST_RC=28")
 	if reason := failClosedDenyReason(t, open); !strings.Contains(reason, "the gateway is running but did not answer") {
 		t.Errorf("per-user open request yielded %q, want a closed deny naming the hung gateway", reason)
+	}
+	if got := strings.TrimSpace(open.stderr); got != want {
+		t.Errorf("per-user open stderr = %q\nwant %q (a saved open mode must not read as closed)", got, want)
+	}
+
+	// An outage a closed mode blocks (no gateway took the connection) keeps
+	// "fail mode closed".
+	down := runHookForColdStart(t, NewClaudeCodeConnector(), "claude-code-hook.sh", nil, nil,
+		"DEFENSECLAW_FAIL_MODE=closed", "DEFENSECLAW_GATEWAY_AUTOSTART=0", "DC_COLD_FAILS=1000")
+	if !strings.Contains(down.stderr, "blocking claude-code tool (fail mode closed): ") {
+		t.Errorf("outage stderr = %q, want the fail mode closed line", down.stderr)
+	}
+}
+
+// GAP-2443: a call that found this account being installed is closed for
+// the install. When the installer lets go of its lock before the request
+// times out (the new gateway runs, its API does not answer yet), the answer
+// still names the install, not a hung gateway.
+func TestShellHookNamesTheInstallWhenTheLockGoesDuringTheCall(t *testing.T) {
+	installing := func(dataDir string) {
+		_ = os.Mkdir(filepath.Join(dataDir, ".install.lock"), 0o700)
+		_ = os.WriteFile(filepath.Join(dataDir, "gateway.pid"), []byte(strconv.Itoa(os.Getpid())+"\n"), 0o600)
+	}
+	for _, failMode := range []string{"open", "closed"} {
+		t.Run(failMode, func(t *testing.T) {
+			run := runHookForColdStart(t, NewClaudeCodeConnector(), "claude-code-hook.sh", nil, installing,
+				"DEFENSECLAW_FAIL_MODE="+failMode, "DC_COLD_FIRST_RC=28", "DC_COLD_RELEASE_INSTALL_LOCK=1")
+			if _, err := os.Stat(filepath.Join(run.dataDir, ".install.lock")); !os.IsNotExist(err) {
+				t.Fatalf("install lock still present (%v): the stub did not let go of it during the request", err)
+			}
+			if strings.Contains(run.stderr, "running but did not answer") || !strings.Contains(run.stderr, "is being installed or upgraded for this account") {
+				t.Fatalf("stderr = %q, want the install named", run.stderr)
+			}
+			reason := failClosedDenyReason(t, run)
+			if strings.Contains(reason, "running but did not answer") || !strings.Contains(reason, "is being installed or upgraded for this account") {
+				t.Fatalf("deny reason = %q, want the install named", reason)
+			}
+		})
 	}
 }
 

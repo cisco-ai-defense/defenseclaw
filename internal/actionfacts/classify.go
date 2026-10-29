@@ -55,6 +55,12 @@ func FilesystemFormatterProgram(program string) bool {
 }
 
 func classifyOutput(out *parseOutput) {
+	classifyOutputAt(out, 0)
+}
+
+// classifyOutputAt classifies out; wrapperDepth bounds the programs of a
+// find or xargs that classifyEmbeddedPrograms reads on their own.
+func classifyOutputAt(out *parseOutput, wrapperDepth int) {
 	if out == nil {
 		return
 	}
@@ -80,6 +86,7 @@ func classifyOutput(out *parseOutput) {
 			return
 		}
 	}
+	classifyEmbeddedPrograms(out, wrapperDepth)
 
 	allowPreview := out.status == StatusComplete
 	requiredPreviewPaths := 0
@@ -381,6 +388,8 @@ func classifyCommand(out *parseOutput, command *CommandFact) {
 		}
 	case "uniq":
 		classifyUniqOutputOperand(out, command)
+	case "xxd":
+		classifyXxdOperands(out, command)
 	case "getcap":
 		classifyGetcap(out, command)
 	case "where", "where.exe":
@@ -571,8 +580,12 @@ func classifyCommand(out *parseOutput, command *CommandFact) {
 		}
 	case "chmod", "chown", "chgrp":
 		classifyPOSIXPermissionChange(out, command, program)
+	case "ln":
+		classifyPOSIXLink(out, command)
 	case "install":
 		classifyPOSIXInstall(out, command)
+	case "rsync":
+		classifyRsync(out, command)
 	case "setfacl":
 		classifySetfacl(out, command)
 	case "setcap":
@@ -2875,6 +2888,13 @@ func classifySearchPaths(out *parseOutput, command *CommandFact, program string)
 		}
 	case "find":
 		startingPaths := findStartingPaths(command.Argv)
+		if len(startingPaths) == 0 && findSearchesDefaultStart(command.Argv) ||
+			findFirstWordIsGNUPrimary(command.Argv) {
+			// GNU find and bfs search '.' when no starting point is
+			// given (GAP-2267); BSD find refuses to run. A first word
+			// such as -follow is a GNU primary and a BSD -f path.
+			startingPaths = append(startingPaths, ".")
+		}
 		for _, operand := range startingPaths {
 			appendPath(out, command.ID, PathAccessRead, operand)
 		}
@@ -2901,6 +2921,24 @@ func classifySearchPaths(out *parseOutput, command *CommandFact, program string)
 			addOperation(command, OperationExecute)
 			if !embedded.exact {
 				out.markPartial(IssueUnsupportedConstruct)
+				// Any other embedded program but a reader or a mode or
+				// owner change (sh -c, sudo/env wrappers, truncate, cp,
+				// sed -i, ...) is handed the found entries and may write
+				// or remove them, so the starting points are written
+				// paths with no proven operation (GAP-2122): owners that
+				// guard a tree can judge them; the find stays partial.
+				// A copy-out (cp/rsync to a destination, tar -c or zip
+				// into an archive, json.tool into a file) only reads the
+				// found entries and writes its output (pod check8).
+				handed := FindHandedEntries(command.Argv)
+				if handed.MayChange {
+					for _, operand := range startingPaths {
+						appendPath(out, command.ID, PathAccessWrite, operand)
+					}
+				}
+				for _, output := range handed.Outputs {
+					appendPath(out, command.ID, PathAccessWrite, output)
+				}
 			}
 		}
 		classifyFindOutputOperands(out, command)
@@ -3070,6 +3108,33 @@ func searchPatternOptions(argv []string) (bool, []string) {
 		}
 	}
 	return false, files
+}
+
+// findSearchesDefaultStart reports a find argv that, with no starting
+// point, searches the working directory: anything but --help and
+// --version.
+func findSearchesDefaultStart(argv []string) bool {
+	for _, argument := range argv[1:] {
+		switch argument {
+		case "--help", "-help", "--version", "-version":
+			return false
+		}
+	}
+	return true
+}
+
+// findFirstWordIsGNUPrimary reports a find whose first argument is a GNU
+// primary that BSD getopt reads as an attached -f path (`find -follow
+// -delete`: GNU searches '.', BSD searches "ollow").
+func findFirstWordIsGNUPrimary(argv []string) bool {
+	if len(argv) < 2 {
+		return false
+	}
+	switch argv[1] {
+	case "-follow", "-false", "-fls", "-fprint", "-fprint0", "-fprintf", "-fstype":
+		return true
+	}
+	return false
 }
 
 func findStartingPaths(argv []string) []string {
@@ -3579,16 +3644,16 @@ func classifyPOSIXPermissionChange(
 		"-c", "--changes", "-f", "--silent", "--quiet", "-v", "--verbose",
 		"--no-preserve-root", "--preserve-root", "-R", "--recursive",
 	)
-	switch program {
-	case "chown":
+	// -H -L -P -h choose how symlinks are followed; chmod has them on
+	// BSD/macOS (and GNU coreutils 9.x), chown and chgrp everywhere
+	// (GAP-2077: `chmod -h 777 ~/.defenseclaw/hooks` lost its target).
+	if program == "chown" {
 		values["--from"] = struct{}{}
-		fallthrough
-	case "chgrp":
-		for option := range exactOptionSet(
-			"-H", "-L", "-P", "-h", "--dereference", "--no-dereference",
-		) {
-			flags[option] = struct{}{}
-		}
+	}
+	for option := range exactOptionSet(
+		"-H", "-L", "-P", "-h", "--dereference", "--no-dereference",
+	) {
+		flags[option] = struct{}{}
 	}
 
 	parsed := parseOwnedPOSIXOptions(
@@ -3669,6 +3734,83 @@ func classifyPOSIXInstall(out *parseOutput, command *CommandFact) {
 		addOperation(command, OperationPermissionChange)
 		appendCommandPath(out, command, PathAccessMetadata, destination)
 	}
+}
+
+// classifyRsync records the local destination of rsync (the last operand)
+// as a write and each local source as a read (GAP-2496: rsync a.txt
+// ~/.defenseclaw/hooks/x.sh tied no path to the call). A remote operand
+// (host:path, rsync://) is not a local path. --remove-source-files also
+// deletes the sources; a dry run or a listing writes nothing.
+func classifyRsync(out *parseOutput, command *CommandFact) {
+	if !requireCommandDialect(out, command, DialectPOSIX, DialectArgv) {
+		return
+	}
+	parsed := parseOwnedPOSIXOptions(
+		command.Argv,
+		exactOptionSet(
+			"-e", "--rsh", "-f", "--filter", "-T", "--temp-dir", "-B", "--block-size",
+			"--rsync-path", "--exclude", "--include", "--exclude-from", "--include-from",
+			"--files-from", "--compare-dest", "--copy-dest", "--link-dest", "--backup-dir",
+			"--suffix", "--chmod", "--chown", "--log-file", "--password-file",
+			"--partial-dir", "--max-size", "--min-size", "--bwlimit", "--timeout",
+			"--port", "--out-format", "--info", "--debug", "--max-delete",
+			"--modify-window", "--compress-level", "--skip-compress", "--usermap",
+			"--groupmap", "--iconv", "--contimeout", "--address",
+		),
+		exactOptionSet(
+			"-a", "-v", "-z", "-r", "-l", "-p", "-t", "-g", "-o", "-D", "-h", "-P",
+			"-u", "-c", "-x", "-H", "-A", "-X", "-S", "-W", "-q", "-i", "-R", "-L",
+			"-k", "-K", "-E", "-m", "-C", "-b", "-I", "-O", "-J", "-U", "-N", "-d",
+			"--archive", "--verbose", "--compress", "--recursive", "--progress",
+			"--partial", "--delete", "--delete-after", "--delete-before",
+			"--delete-during", "--delete-delay", "--delete-excluded", "--human-readable",
+			"--update", "--checksum", "--links", "--perms", "--times", "--group",
+			"--owner", "--devices", "--specials", "--hard-links", "--acls", "--xattrs",
+			"--sparse", "--whole-file", "--quiet", "--itemize-changes", "--relative",
+			"--copy-links", "--stats", "--mkpath", "--inplace", "--append",
+			"--append-verify", "--existing", "--ignore-existing",
+			"--remove-source-files", "--force", "--prune-empty-dirs", "--no-motd",
+			"--safe-links", "--numeric-ids", "--omit-dir-times", "--size-only",
+			"--ignore-times", "--one-file-system", "--backup", "--dirs",
+			"--keep-dirlinks", "--copy-dirlinks", "--executability", "--cvs-exclude",
+		),
+		exactOptionSet("--help", "--version", "-n", "--dry-run", "--list-only"),
+	)
+	if parsed.preview {
+		command.Effect = EffectPreview
+		return
+	}
+	if !parsed.complete {
+		out.markPartial(IssueUnknownOperandGrammar)
+	}
+	if len(parsed.positionals) < 2 {
+		out.markPartial(IssueUnknownOperandGrammar)
+		return
+	}
+	_, removeSources := parsed.seen["--remove-source-files"]
+	addOperation(command, OperationCopy)
+	for _, source := range parsed.positionals[:len(parsed.positionals)-1] {
+		if rsyncRemoteOperand(source) {
+			continue
+		}
+		appendCommandPath(out, command, PathAccessRead, source)
+		if removeSources {
+			addOperation(command, OperationDelete)
+			appendCommandPath(out, command, PathAccessDelete, source)
+		}
+	}
+	if destination := parsed.positionals[len(parsed.positionals)-1]; !rsyncRemoteOperand(destination) {
+		appendCommandPath(out, command, PathAccessWrite, destination)
+	}
+}
+
+// rsyncRemoteOperand reports host:path, host::module and rsync:// operands.
+func rsyncRemoteOperand(operand string) bool {
+	if strings.HasPrefix(operand, "rsync://") {
+		return true
+	}
+	colon := strings.IndexByte(operand, ':')
+	return colon > 0 && !strings.Contains(operand[:colon], "/")
 }
 
 func dangerousInstallMode(mode string) bool {
@@ -4410,7 +4552,7 @@ func copyMoveShortFlags(flags string, move bool) bool {
 	if flags == "" {
 		return false
 	}
-	allowed := "abdfHilnprRuvx"
+	allowed := "abdfHilnprRsuvx"
 	if move {
 		allowed = "bfinTuv"
 	}

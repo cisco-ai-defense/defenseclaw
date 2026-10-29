@@ -45,11 +45,18 @@ arrow keys, Page Up/Page Down or End to reach lower metrics such as Agents.
 ![DefenseClaw TUI Overview panel: the tab bar, hook call, block, finding and guardrail cards, the connector scope, services and enforcement summaries, and the Restart Gateway, Run Doctor and Scan AI Agents buttons](/images/tui/overview.png)
 
 On Overview, press `G` to start or restart the gateway and `z` to enable or run
-AI Discovery. The key row shows both actions at 80 columns.
+AI Discovery. The quick-action row at the end of Overview lists both as
+`[G] Gateway` and `[z] AI Discovery` (at 80x24, scroll down to it). The hint
+line above the status line is not a key list on Overview: it shows the most
+urgent notice, for example `500 recent critical/high alert events need review.
+Press 2 for Alerts.`, and a rotating tip when there is none; press `?` for
+every key.
 
 Switch panels with the number/letter key shown, from any panel (only an open
 Setup form or a `/` search box types digits and letters), or cycle with `Tab` /
-`Shift+Tab`. Press `Ctrl+P` to fuzzy-jump to any panel by name. At 80 columns, the tab strip keeps every panel's key on screen and spells out
+`Shift+Tab`. The one exception is Sandboxes: there `P`, `R` and `A` are the
+panel's own pull, review and always-approve keys. On Sandboxes, press `p` for
+Policies, and `Tab` or `Ctrl+P` to reach Registries or Activity. Press `Ctrl+P` to fuzzy-jump to any panel by name. At 80 columns, the tab strip keeps every panel's key on screen and spells out
 the current panel (for example, `1 Overview`); other tabs may show only their
 keys. The title below the strip names the current panel. Wider terminals add
 short or full names to other tabs as room allows. Unread counts stay visible
@@ -155,15 +162,17 @@ file format.
 
 ### Config generation and policy digest
 
-The status line at the bottom of every panel ends with the policy the running
-gateway applies. With the guardrail off it reads:
+The status line at the bottom of every panel shows the applied config
+generation and policy digest as its own segment, right after the gateway:
 
 ```text
-● guardrail off · gen 10 · 8b19ede82344
+Ready.  │  ● Gateway (up 2m)  │  ● gen 10 · 8b19ede82344  │  ● Watchdog  │  ● Guardrail (action)  │ …
 ```
 
-With the guardrail on, the first part is the active policy and mode, for
-example `policy strict · action · gen 10 · 8b19ede82344`. `gen` is the
+The active policy and mode are a separate segment further along the line, for
+example `● policy strict · action` (`● guardrail off` with the guardrail off);
+a narrow terminal cuts the end of the line to `…`, so that segment may not
+show at 80 columns. `gen` is the
 applied config generation counter from `config.generation.json`, reported as
 `policy.config_generation` by the gateway. It survives a gateway restart;
 when the counter is unknown or zero, the footer shows only the digest. The hex
@@ -342,6 +351,8 @@ and help beside the table:
 | `S` | Review the changes and save |
 | `r` | Revert unsaved changes (`R` opens Registries) |
 | `w` | Back to the task list |
+
+The **Admission Defaults** section has one row, **Allow List Bypass** (`admission.defaults.allow_list_bypass_scan`). On, the default, a first-party allow-list entry installs without a scan; off, it is scanned. An unset key shows `true`, the value it inherits.
 
 Keys the TUI can't save show as read-only rows; their hint says where to change
 them (in `config.yaml`, or with `defenseclaw setup <connector>` for connector

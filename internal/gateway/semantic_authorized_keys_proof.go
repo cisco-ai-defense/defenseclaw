@@ -1213,6 +1213,13 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 	if decision != "" {
 		return true
 	}
+	if request.ProtectedHomeHook && clientTargets[hookpaths.ActionDecisionKey] == hookpaths.ProtectedTargetDecision {
+		// Behind ProtectHome the walk above cannot follow the user's links;
+		// the user's hook ran the same decision on the same command and
+		// found a protected target, as a per-user gateway does (GAP-2514,
+		// GAP-2515).
+		return true
+	}
 	if hookpaths.DynamicCopyProtectedBasename(input.Command, facts.ActiveHome) {
 		return true
 	}
@@ -1287,6 +1294,21 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 		for _, operand := range directoryOperands {
 			if writeTarget(operand.Path, operand.Safe, false) {
 				return true
+			}
+		}
+		if cannotResolveLocally {
+			// A managed gateway cannot place a command operand or an output
+			// option in the user's home (install and dd of= destinations,
+			// find -fprint, git config -f, gawk -i inplace, uniq and sort -o
+			// outputs), so a write through an existing link to the keys
+			// file was never judged. The user's hook lists every write
+			// operand it found with the file it reaches; one that reaches a
+			// protected file is a write to it, as a per-user gateway decides
+			// from its own walk (GAP-2428). Facts keys start with NUL.
+			for operand, resolved := range clientTargets {
+				if !strings.HasPrefix(operand, "\x00") && isProtected(resolved) {
+					return true
+				}
 			}
 		}
 	}
