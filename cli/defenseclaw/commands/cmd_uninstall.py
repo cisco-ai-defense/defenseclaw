@@ -1668,6 +1668,8 @@ def _owned_binary_targets(platform_name: str) -> tuple[str, tuple[str, ...]]:
             "defenseclaw-gateway.exe",
             "defenseclaw-acp.exe",
             "defenseclaw-hook.exe",
+            # The Claude Code PreToolUse guard of the one-line install (GAP-2467).
+            "defenseclaw-hook-guard.exe",
             "skill-scanner.cmd",
             "mcp-scanner.cmd",
             # Written by install.ps1: binds defenseclaw-hook.exe to the data dir.
@@ -2887,6 +2889,7 @@ def _validate_plan(plan: UninstallPlan) -> None:
                 "defenseclaw-gateway.exe",
                 "defenseclaw-acp.exe",
                 "defenseclaw-hook.exe",
+                "defenseclaw-hook-guard.exe",
                 "skill-scanner.cmd",
                 "mcp-scanner.cmd",
                 "defenseclaw-hook-state.json",

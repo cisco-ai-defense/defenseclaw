@@ -2518,7 +2518,9 @@ restart_old() {
         printf -v gateway_command '%q' "${BIN_DIR}/defenseclaw-gateway"
         RESTORED_NOTE="Your previous install is back, with its gateway kept stopped to preserve its hook registration."
         warn "${RESTORED_NOTE}"
-        info "Resolve the startup error (close the agent if its settings are in use), then run: ${gateway_command} start"
+        # The gateway names the cause and its next step ("The gateway stopped:"
+        # above); a guess here contradicted it (GAP-2478).
+        info "Fix the startup error shown above, then run: ${gateway_command} start"
         return 0
     fi
     if [[ "${WAS_RUNNING}" == true ]]; then

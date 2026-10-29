@@ -33,15 +33,21 @@ func TestWindowsClaudeCodePreToolUseGuardBlocksAMissingLauncherAndSuitsCursor(t 
 			`C:\Users\dcw-std1\AppData\Local\Programs\DefenseClaw\bin\defenseclaw-hook.exe`},
 		{`C:\Users\Jane Doe\AppData\Local\DefenseClaw\HookRuntime\defenseclaw-hook.exe`,
 			`C:\Users\Jane Doe\AppData\Local\Programs\DefenseClaw\bin\defenseclaw-hook.exe`},
-		// The one-line install runs its gateway as the guard (GAP-1011
-		// round 2): the direct launcher let a tool call of a turn that
-		// began before the launcher went missing run uninspected.
+		// The one-line install runs its GUI-subsystem guard beside the
+		// launcher (GAP-1011 round 2, GAP-2467): the direct launcher let a
+		// tool call of a turn that began before the launcher went missing
+		// run uninspected.
+		{`C:\Users\dcw-std1\.local\bin\defenseclaw-hook.exe`,
+			`C:\Users\dcw-std1\.local\bin\defenseclaw-hook-guard.exe`},
+		{`C:\Users\Jane Doe\.local\bin\defenseclaw-hook.exe`,
+			`C:\Users\Jane Doe\.local\bin\defenseclaw-hook-guard.exe`},
+		// A repository build has no guard file and runs its gateway.
 		{`C:\Users\dcw-std1\.local\bin\defenseclaw-hook.exe`,
 			`C:\Users\dcw-std1\.local\bin\defenseclaw-gateway.exe`},
 		{`C:\Users\Jane Doe\.local\bin\defenseclaw-hook.exe`,
 			`C:\Users\Jane Doe\.local\bin\defenseclaw-gateway.exe`},
 	} {
-		t.Run(tc.launcher, func(t *testing.T) {
+		t.Run(tc.guard, func(t *testing.T) {
 			pinClaudeCodePreToolGuard(t, tc.guard)
 			hooks, guardCommand, guardArgs := renderedWindowsPerUserClaudeHooks(t, tc.launcher)
 			hookArgs := []string{"hook", "--connector", "claudecode"}
@@ -201,17 +207,26 @@ func TestClaudeCodeLauncherGuardArgvStartsOnlyTheClaudeHookOfADefenseClawLaunche
 // handler ran the launcher directly: when antivirus removed the launcher after
 // a turn's prompt was checked, the next tool call's start failed, which Claude
 // Code treats as non-blocking, and the call ran uninspected (GAP-1011 round
-// 2). Its guard is the gateway beside the launcher; any other layout keeps the
-// exec form.
-func TestClaudeCodePreToolGuardOfAOneLineInstallIsTheGatewayBesideTheLauncher(t *testing.T) {
+// 2). Its guard was then the gateway beside the launcher, a console program:
+// Claude Code started it without a console as a session ended, Windows gave it
+// a console of its own and Windows Terminal opened a window that stayed with
+// error 0x800700e8 (GAP-2467). The guard is now defenseclaw-hook-guard.exe, the
+// hook built as its own GUI-subsystem file; only a layout without it (a
+// repository build) runs the gateway, and any other layout keeps the exec form.
+func TestClaudeCodePreToolGuardOfAOneLineInstallIsTheGUIGuardBesideTheLauncher(t *testing.T) {
 	dir := t.TempDir()
 	bin := filepath.Join(dir, ".local", "bin")
 	launcher := filepath.Join(bin, "defenseclaw-hook.exe")
+	guard := filepath.Join(bin, "defenseclaw-hook-guard.exe")
 	gateway := filepath.Join(bin, "defenseclaw-gateway.exe")
+	repoBuild := filepath.Join(dir, "repo-build", "defenseclaw-hook.exe")
+	repoGateway := filepath.Join(dir, "repo-build", "defenseclaw-gateway.exe")
 	onlyHook := filepath.Join(dir, "only-hook", "defenseclaw-hook.exe")
+	guardDir := filepath.Join(dir, "guard-dir", "defenseclaw-hook.exe")
+	guardDirGateway := filepath.Join(dir, "guard-dir", "defenseclaw-gateway.exe")
 	gatewayDir := filepath.Join(dir, "gateway-dir", "defenseclaw-hook.exe")
 	other := filepath.Join(bin, "other.exe")
-	for _, path := range []string{launcher, gateway, onlyHook, gatewayDir, other} {
+	for _, path := range []string{launcher, guard, gateway, repoBuild, repoGateway, onlyHook, guardDir, guardDirGateway, gatewayDir, other} {
 		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 			t.Fatal(err)
 		}
@@ -219,19 +234,26 @@ func TestClaudeCodePreToolGuardOfAOneLineInstallIsTheGatewayBesideTheLauncher(t 
 			t.Fatal(err)
 		}
 	}
-	if err := os.Mkdir(filepath.Join(filepath.Dir(gatewayDir), "defenseclaw-gateway.exe"), 0o700); err != nil {
-		t.Fatal(err)
+	for _, path := range []string{
+		filepath.Join(filepath.Dir(guardDir), "defenseclaw-hook-guard.exe"),
+		filepath.Join(filepath.Dir(gatewayDir), "defenseclaw-gateway.exe"),
+	} {
+		if err := os.Mkdir(path, 0o700); err != nil {
+			t.Fatal(err)
+		}
 	}
 	for _, tc := range []struct{ name, launcher, want string }{
-		{"one-line install", launcher, gateway},
-		{"no gateway beside the launcher", onlyHook, ""},
+		{"one-line install", launcher, guard},
+		{"repository build without the guard file", repoBuild, repoGateway},
+		{"guard is a directory", guardDir, guardDirGateway},
+		{"no guard program beside the launcher", onlyHook, ""},
 		{"gateway is a directory", gatewayDir, ""},
 		{"launcher is not the hook", other, ""},
 		{"relative launcher", "defenseclaw-hook.exe", ""},
 		{"launcher cmd.exe cannot quote", filepath.Join(bin, "a%b", "defenseclaw-hook.exe"), ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := claudeCodeGatewayPreToolGuardFor(tc.launcher); got != tc.want {
+			if got := claudeCodeOneLinePreToolGuardFor(tc.launcher); got != tc.want {
 				t.Fatalf("= %q, want %q", got, tc.want)
 			}
 			// Without a packaged install the resolver Setup uses picks it too.
@@ -240,16 +262,45 @@ func TestClaudeCodePreToolGuardOfAOneLineInstallIsTheGatewayBesideTheLauncher(t 
 			}
 		})
 	}
-	// Only the hook and the gateway answer the launcher-guard argv.
+	// Only the hook, the guard and the gateway answer the launcher-guard argv.
 	for path, want := range map[string]bool{
-		gateway: true, launcher: true,
+		guard: true, gateway: true, launcher: true,
 		filepath.Join(bin, "defenseclaw-acp.exe"): false,
 		filepath.Join(bin, "defenseclaw.exe"):     false,
+		"defenseclaw-hook-guard.exe":              false,
 		"defenseclaw-gateway.exe":                 false,
 		`C:\Windows\System32\cmd.exe`:             false,
 	} {
 		if got := claudeCodePreToolGuardProgram(path); got != want {
 			t.Fatalf("claudeCodePreToolGuardProgram(%q) = %v, want %v", path, got, want)
 		}
+	}
+}
+
+// A one-line install upgraded from a 1.0.5 release candidate still has the
+// console gateway as its PreToolUse guard. That handler fails verification
+// once the GUI guard is there, so Setup rewrites it to the guard, and until
+// then it still reads as the launcher it runs (GAP-2467).
+func TestClaudeCodeGatewayPreToolGuardIsRewrittenToTheGUIGuard(t *testing.T) {
+	launcher := `C:\Users\dcw-std1\.local\bin\defenseclaw-hook.exe`
+	guard := `C:\Users\dcw-std1\.local\bin\defenseclaw-hook-guard.exe`
+	gateway := `C:\Users\dcw-std1\.local\bin\defenseclaw-gateway.exe`
+	pinClaudeCodePreToolGuard(t, guard)
+	hooks, guardCommand, guardArgs := renderedWindowsPerUserClaudeHooks(t, launcher)
+	if err := verifyClaudeCodeHookGroups(hooks, guardCommand, guardArgs, "", hookGroups); err != nil {
+		t.Fatalf("Setup's own hooks fail its verification: %v", err)
+	}
+	handler := claudeHandlersOf(t, hooks, "PreToolUse")[0]
+	if handler["command"] != guard {
+		t.Fatalf("PreToolUse command = %v, want the GUI guard %s", handler["command"], guard)
+	}
+	handler["command"] = gateway
+	view := claudeCodeExecView(handler).(map[string]interface{})
+	if view["command"] != launcher {
+		t.Fatalf("the gateway guard does not read as its launcher: %#v", view)
+	}
+	if err := verifyClaudeCodeHookGroups(hooks, guardCommand, guardArgs, "", hookGroups); err == nil ||
+		!strings.Contains(err.Error(), "PreToolUse") {
+		t.Fatalf("the console gateway PreToolUse guard passed verification beside the GUI guard (err %v)", err)
 	}
 }

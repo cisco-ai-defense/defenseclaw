@@ -62,3 +62,71 @@ func TestManagedRefusalNamesTheUpgradeDuringALifecycleRun(t *testing.T) {
 		t.Fatalf("Secure Client hook: %q", got)
 	}
 }
+
+// GAP-2462 (GAP-2459): a managed hook whose runtime state a Setup or
+// package run is rewriting (the 1.0.3 Codex registration still in place
+// while the new runtime generation is written) refused with "DefenseClaw is
+// not set up correctly on this computer. Contact your administrator." for 72
+// s of a Windows Setup /ensure. Inside the run it names the upgrade; outside
+// the run, and for a refusal with a cause of its own, it keeps its text.
+func TestManagedRuntimeStateRefusalNamesTheUpgradeDuringALifecycleRun(t *testing.T) {
+	previous := managedLifecycleHeld
+	t.Cleanup(func() { managedLifecycleHeld = previous })
+	held := true
+	var sawService string
+	managedLifecycleHeld = func(opts Options) bool { sawService = opts.ManagedGatewayServiceName; return held }
+	opts := Options{ManagedEnterprise: true, Event: "PreToolUse"}
+	const upgrade = "DefenseClaw is being installed or upgraded on this computer"
+	const generic = "DefenseClaw is not set up correctly on this computer"
+
+	runtimeState := []string{
+		"enterprise_managed_runtime_state_invalid", "enterprise_managed_runtime_descriptor_missing",
+		"enterprise_managed_hook_socket_missing", "enterprise_machine_policy_summary_untrusted",
+	}
+	for _, reason := range runtimeState {
+		if got := managedStandaloneFailClosedText(opts.Event, "transport", reason); !strings.Contains(got, generic) {
+			t.Fatalf("%s outside the run is no longer the generic refusal: %q", reason, got)
+		}
+		sawService = ""
+		got := managedFailClosedText(opts, "transport", reason)
+		if !strings.Contains(got, upgrade) || strings.Contains(got, generic) ||
+			!strings.HasPrefix(got, "DefenseClaw blocked this tool call: ") {
+			t.Fatalf("%s during a lifecycle run: %q", reason, got)
+		}
+		// The refusal resolved no service: the Windows marker is read on the
+		// standalone gateway service.
+		if sawService != "DefenseClawGateway" {
+			t.Fatalf("%s: lifecycle marker read on service %q", reason, sawService)
+		}
+	}
+	// A refusal with a cause of its own keeps its text in the run.
+	for _, reason := range []string{managedRuntimeHomeMissingReason, "enterprise_managed_runtime_disable_sentinel_forbidden",
+		managedSIDUnregisteredReason, managedEnrollmentPendingReason} {
+		if got := managedFailClosedText(opts, "transport", reason); strings.Contains(got, upgrade) {
+			t.Fatalf("%s took the upgrade text: %q", reason, got)
+		}
+	}
+	// A resolved service name is kept.
+	named := opts
+	named.ManagedGatewayServiceName = "OtherGateway"
+	_ = managedFailClosedText(named, "transport", runtimeState[0])
+	if sawService != "OtherGateway" {
+		t.Fatalf("resolved service replaced: %q", sawService)
+	}
+	// Outside a run, and on Secure Client, the generic refusal is unchanged.
+	held = false
+	for _, reason := range runtimeState {
+		if got := managedFailClosedText(opts, "transport", reason); got != managedStandaloneFailClosedText(opts.Event, "transport", reason) {
+			t.Fatalf("%s outside a lifecycle run: %q", reason, got)
+		}
+	}
+	held = true
+	sc := Options{ManagedEnterprise: true, SecureClient: true, Event: "PreToolUse"}
+	if got := managedFailClosedText(sc, "transport", runtimeState[0]); strings.Contains(got, upgrade) {
+		t.Fatalf("Secure Client hook: %q", got)
+	}
+	// Only the transport layer.
+	if got := managedFailClosedText(opts, "response", runtimeState[0]); strings.Contains(got, upgrade) {
+		t.Fatalf("response layer: %q", got)
+	}
+}
