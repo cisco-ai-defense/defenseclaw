@@ -70,6 +70,20 @@ def test_managed_hook_docs_distinguish_outages_from_refusals() -> None:
 
 
 
+def test_managed_hook_docs_name_the_measured_burst_capacity() -> None:
+    """A busy managed gateway blocks a tool call only at the end of the
+    answer budget, and the docs give the measured burst capacity per vCPU
+    (owner ruling 3, GAP-0050)."""
+    timing = (
+        _flat("enterprise/operate/reference.mdx")
+        .split("### Gateway restarts and hook timing", 1)[1].split("### ", 1)[0]
+    )
+    assert "never before it" in timing
+    assert "8 vCPUs" in timing and "60 tool calls at once" in timing
+    assert "per vCPU" in timing and "observe mode" in timing
+    assert "`enterprise_managed_gateway_no_answer`" in timing
+
+
 def test_managed_outage_open_docs_name_rate_limits_and_the_guard_session_check() -> None:
     """Rate limits block after the resends; a guarded call needs a current
     gateway answer even when the administrator selects open (decision 16)."""
