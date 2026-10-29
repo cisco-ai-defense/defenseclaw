@@ -131,6 +131,31 @@ func TestR105WindowsPowerShellStateWriteSpellings(t *testing.T) {
 		{`powershell -Command "Get-Content $HOME\.defenseclaw\config.yaml"`, false},
 		{`pwsh -NoProfile -c "Set-Content notes.txt x; Get-Content $HOME\.defenseclaw\config.yaml"`, false},
 		{psManySteps, false},
+		// An abbreviated or unknown parameter keeps the proof, and an
+		// Invoke-Expression or Start-Process powershell string body is read
+		// like a -Command body (checker it15 RV15-2).
+		{`Rename-Item $HOME\.defenseclaw\config.yaml c.bak -ErrorA Stop`, true},
+		{`Rename-Item $HOME\.defenseclaw\config.yaml c.bak -Verb`, true},
+		{`Rename-Item $HOME\.defenseclaw\config.yaml c.bak -Fo`, true},
+		{`Rename-Item $HOME\.defenseclaw\config.yaml c.bak -Zz 1`, true},
+		{`Clear-Content $HOME\.defenseclaw\config.yaml -ErrorAct 0`, true},
+		{`Set-Content $HOME\.defenseclaw\config.yaml x -Verb`, true},
+		{`Remove-Item $HOME\.defenseclaw\config.yaml -Verb`, true},
+		{`Move-Item -Pa $HOME\.defenseclaw\config.yaml -Dest $HOME\c.bak`, true},
+		{`Invoke-Expression 'Clear-Content $HOME\.defenseclaw\config.yaml'`, true},
+		{`iex "Clear-Content $HOME\.defenseclaw\config.yaml"`, true},
+		{`Invoke-Expression -Command 'Remove-Item $HOME\.defenseclaw\config.yaml'`, true},
+		{`Start-Process powershell -ArgumentList '-c','Clear-Content $HOME\.defenseclaw\config.yaml' -Wait`, true},
+		{`Start-Process -Wait -FilePath pwsh.exe -ArgumentList '-NoProfile -Command Clear-Content $HOME\.defenseclaw\config.yaml'`, true},
+		{`Rename-Item notes.txt notes2.txt -ErrorA Stop`, false},
+		{`Clear-Content notes.txt -Verb`, false},
+		{`Rename-Item notes.txt notes2.txt -Zz 1`, false},
+		{`Clear-Content $HOME\.defenseclaw\config.yaml -WhatI`, false},
+		{`Get-Content $HOME\.defenseclaw\config.yaml -Ta 5`, false},
+		{`Invoke-Expression 'Get-Content $HOME\.defenseclaw\config.yaml'`, false},
+		{`iex "defenseclaw status"`, false},
+		{`Start-Process powershell -ArgumentList '-c','Get-Content $HOME\.defenseclaw\config.yaml' -Wait`, false},
+		{`Start-Process notepad -ArgumentList $HOME\.defenseclaw\config.yaml`, false},
 	} {
 		for _, tool := range []string{"Bash", "shell_command", "PowerShell"} {
 			args, _ := json.Marshal(map[string]string{"command": tc.command})
@@ -180,6 +205,52 @@ func TestR105WindowsPowerShellStateReaderIsLinear(t *testing.T) {
 			}
 			if verdict := buildVerdict(findings, "tool_call"); verdict.Action != "block" {
 				t.Errorf("unit %q tail %q: action %q, want block", unit, tail, verdict.Action)
+			}
+		}
+	}
+}
+
+// TestR105WindowsPowerShellBalancedNestingIsLinear: balanced nested
+// subexpressions in strings and many powershell -c bodies share one reading
+// budget, so the state write after them is judged within the hook budget
+// (checker it15 RV15-1: 2.4 KB took 956 ms, 53 KB 14 s).
+func TestR105WindowsPowerShellBalancedNestingIsLinear(t *testing.T) {
+	const connectorName = "r105-ps-state-nesting"
+	installToolCallCorpusProfileConnector(t, connectorName, "default")
+	const home = `C:\Users\Alice`
+	resolved := map[string]string{}
+	for _, value := range []string{"C:/Users/Alice/.defenseclaw", "C:/Users/Alice/.defenseclaw/config.yaml"} {
+		resolved[value] = value
+	}
+	const state = `$HOME\.defenseclaw\config.yaml`
+	nested := func(n int, inner string) string {
+		return strings.Repeat(`"$(`, n) + inner + strings.Repeat(`)"`, n)
+	}
+	body := `powershell -c '` + nested(200, "Get-Content "+state) + `'; `
+	for _, tc := range []struct {
+		name, command string
+	}{
+		{"T1c-400", nested(400, "Clear-Content "+state)},
+		{"T1d-1500", nested(1500, "Clear-Content "+state)},
+		{"T2s-20x200-read-then-clear", strings.Repeat(body, 20) + "Clear-Content " + state},
+		{"T2w-50x200-then-clear", strings.Repeat(body, 50) + "Clear-Content " + state},
+	} {
+		for _, tool := range []string{"Bash", "shell_command", "PowerShell"} {
+			args, _ := json.Marshal(map[string]string{"command": tc.command})
+			input := actionfacts.Input{Tool: tool, Args: args, CWD: home + `\project`, ActiveHome: home}
+			input.DialectHint = agentHookWindowsShellDialect(input)
+			start := time.Now()
+			findings := dispatchTrustedAction(t.Context(), trustedActionRequest{
+				Input: input, LegacyText: string(args), Connector: connectorName,
+				EnforcementCapable: true, ResolvedWriteTargets: resolved,
+			})
+			took := time.Since(start)
+			t.Logf("%s %s: %d bytes in %s", tc.name, tool, len(tc.command), took)
+			if took > 2*time.Second {
+				t.Errorf("%s %s: %d bytes judged in %s", tc.name, tool, len(tc.command), took)
+			}
+			if verdict := buildVerdict(findings, "tool_call"); verdict.Action != "block" {
+				t.Errorf("%s %s: action %q, want block", tc.name, tool, verdict.Action)
 			}
 		}
 	}
