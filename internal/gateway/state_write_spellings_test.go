@@ -143,3 +143,25 @@ func TestStatePatternReadsOnlyTheHomeStateTree(t *testing.T) {
 	}
 }
 
+// local HOME=v was applied to the caller with no function scope, also at
+// the top level, where bash refuses local and leaves HOME as it was, and
+// after the function returned, when the caller HOME is back (RV-pod2-2,
+// GAP-2476).
+func TestLocalHomeCountsOnlyInItsFunctionBody(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX shell spellings")
+	}
+	judgeHomeStateWriteRows(t, []homeStateWriteRow{
+		{"local HOME=/tmp/x; cp a.txt ~/.defenseclaw/config.yaml", true},
+		{"local HOME=/tmp/x 2>/dev/null; cp a.txt ~/.defenseclaw/config.yaml", true},
+		{"f(){ local HOME=/tmp/x; }; f; cp a.txt ~/.defenseclaw/config.yaml", true},
+		{"f(){ local HOME=/tmp/x; true; }; f; f; cp a.txt ~/.defenseclaw/hooks/x.sh", true},
+		{"f(){ if true; then local HOME=/tmp/x; fi; }; f; cp a.txt ~/.defenseclaw/config.yaml", true},
+		{"f(){ local HOME=$HOME/.defenseclaw; cp a.txt ~/config.yaml; }; f", true},
+		{"g(){ cp a.txt ~/config.yaml; }; f(){ local HOME=$HOME/.defenseclaw; g; }; f", true},
+		{"f(){ HOME=$HOME/.defenseclaw; }; f; cp a.txt ~/config.yaml", true},
+		{"f(){ local HOME=$HOME/.defenseclaw; true; }; f; cp a.txt ~/config.yaml", false},
+		{"f(){ local HOME=/tmp/fakehome; cp a.txt ~/out.txt; }; f", false},
+	})
+}
+
