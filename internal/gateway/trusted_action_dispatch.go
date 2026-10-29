@@ -294,6 +294,34 @@ func dispatchTrustedAction(
 			findings = withTwinProvenBlocks(findings, dispatchTrustedAction(parent, twin))
 		}()
 	}
+	// A cp, mv, install, ln, dd or tee call with a runtime-expanded operand word has
+	// a partial argv that ties no path to the call, so a literal destination
+	// went unjudged (cp a.txt ~/.defenseclaw/config.yaml $(true), GAP-2477).
+	// Each reading with static operands is one way the call can run, and a
+	// block proven on one counts.
+	for _, twin := range dynamicOperandTwinRequests(request) {
+		defer func() {
+			findings = withTwinProvenBlocks(findings, dispatchTrustedAction(parent, twin))
+		}()
+	}
+	// A pathname pattern under ~/.defenseclaw names the state files it
+	// matches when the shell runs the call (cp a.txt ~/.defenseclaw/conf*.yaml,
+	// GAP-2496); the reading with the matches is judged, and only its block
+	// counts.
+	if twin, ok := stateGlobTwinRequest(request); ok {
+		defer func() {
+			findings = withTwinProvenBlocks(findings, dispatchTrustedAction(parent, twin))
+		}()
+	}
+	// A file writer run through nohup, nice, time, timeout, env NAME=value,
+	// command, sudo or exec (or after a word that may expand to nothing)
+	// writes what the plain call writes (GAP-2512); the plain reading is
+	// judged, and only its block counts.
+	if twin, ok := wrapperUnwrapTwinRequest(request); ok {
+		defer func() {
+			findings = withTwinProvenBlocks(findings, dispatchTrustedAction(parent, twin))
+		}()
+	}
 
 	facts = actionfacts.Analyze(request.Input)
 	analyzed = true
@@ -818,8 +846,11 @@ func withActiveStateTargetMention(
 	if hereStringJudged && !hereStringMutates {
 		return findings
 	}
+	// A write through a link the command makes to active state is proven by
+	// the link reading: the mention scan and the whole-action proof do not
+	// follow the new link (GAP-2522).
 	if !hereStringMutates && !globbedStateMutation(facts) && !globbedStateMutationThroughLink(facts, request) &&
-		!archiveExtractsIntoState(facts, request) {
+		!archiveExtractsIntoState(facts, request) && !provenLinkedStateWrite(facts, request) {
 		command, known := trustedBashCommandInput(request.Input)
 		if !known {
 			return findings
@@ -2080,6 +2111,79 @@ func stateOperandThroughLink(facts actionfacts.Facts, request trustedActionReque
 			target = value
 		}
 		if physical, ok := resolve(target); ok && inState(physical) {
+			return true
+		}
+	}
+	return false
+}
+
+// provenLinkedStateWrite reports a command whose writer, proven for its
+// own command, writes through a link that an earlier part of the same
+// command makes to active DefenseClaw state: ln -s ~/.defenseclaw hc;
+// cp a.txt hc/config.yaml, plain or behind a prefix wrapper (GAP-2522).
+// The analysis marks such an action partial (a new link makes later
+// targets unknown), so the whole-action proof never holds for it; the
+// link reading here is the proof. A write that only may run (after &&)
+// counts, as the ~/.ssh alias does.
+func provenLinkedStateWrite(facts actionfacts.Facts, request trustedActionRequest) bool {
+	if request.Input.DialectHint != actionfacts.DialectPOSIX && request.Input.DialectHint != "" {
+		return false
+	}
+	text, known := trustedBashCommandInput(request.Input)
+	if !known || !strings.Contains(text, "ln") && !strings.Contains(text, "link") && !strings.Contains(text, "cp") {
+		return false
+	}
+	projected := facts.EnforcementProjection()
+	if projected.ActiveHome == "" {
+		return false
+	}
+	var links *hookpaths.Links
+	for _, candidate := range projected.Paths {
+		command, ok := integrityCommandByID(projected, candidate.CommandID)
+		if !ok || !stateCommandMutatesPath(command, candidate) {
+			continue
+		}
+		if links == nil {
+			made := hookpaths.CommandLinks(request.Input.Tool, text, request.Input.CWD, projected.ActiveHome)
+			links = &made
+		}
+		if linkedActiveStateWrite(projected, command, candidate, *links) {
+			return true
+		}
+	}
+	return false
+}
+
+// linkedActiveStateWrite reports a write operand that reaches active
+// state through a link the same command makes: ln -s ~/.defenseclaw hc;
+// cp a.txt hc/config.yaml writes ~/.defenseclaw/config.yaml, plain or
+// behind a prefix wrapper, as the ~/.ssh alias reaches authorized_keys
+// (GAP-1521, GAP-2522). The link does not exist when the hook runs, so
+// the name is followed through the links of the same command only. ln,
+// a delete or a move acts on the final name: only a link to one of its
+// directories is followed.
+func linkedActiveStateWrite(
+	projected actionfacts.Facts,
+	command actionfacts.CommandFact,
+	candidate actionfacts.PathFact,
+	links hookpaths.Links,
+) bool {
+	value := candidate.Resolved
+	if value == "" {
+		value = candidate.Normalized
+	}
+	if !filepath.IsAbs(value) {
+		return false
+	}
+	// ln, a delete and a move replace or remove the final name itself.
+	entry := candidate.Access == actionfacts.PathAccessDelete ||
+		slices.Contains([]string{"ln", "link", "gln", "glink"}, filepath.Base(command.Program)) ||
+		candidate.Access == actionfacts.PathAccessWrite && hasOperation(command, actionfacts.OperationMove) &&
+			!hasAnyOperation(command, actionfacts.OperationWrite, actionfacts.OperationAppend, actionfacts.OperationCopy)
+	for _, target := range links.AliasTargets(value, entry) {
+		linked := candidate
+		linked.Resolved = target
+		if matchesActiveDefenseClawState(projected, linked) {
 			return true
 		}
 	}
@@ -6446,6 +6550,91 @@ func homeSpellingTwinRequest(request trustedActionRequest, logins ...string) (tr
 		}
 	}
 	return twin, true
+}
+
+// dynamicOperandTwinRequests returns the request for each reading of
+// actionfacts.DynamicOperandTwins of a POSIX Bash call. Behind ProtectHome
+// the targets of a reading are not in the hook client map, which was walked
+// for the call as written, and an unlisted write target is judged as a
+// possible keys-file write, so a reading there would block benign project
+// copies; that gateway keeps the client map judgment.
+func dynamicOperandTwinRequests(request trustedActionRequest) []trustedActionRequest {
+	if request.ProtectedHomeHook {
+		return nil
+	}
+	if request.Input.DialectHint != actionfacts.DialectPOSIX && request.Input.DialectHint != "" {
+		return nil
+	}
+	command, known := trustedBashCommandInput(request.Input)
+	if !known {
+		return nil
+	}
+	var twins []trustedActionRequest
+	for _, rewritten := range actionfacts.DynamicOperandTwins(command, request.Input.ActiveHome) {
+		if rewritten != command {
+			twins = append(twins, bashReadingRequest(request, command, rewritten))
+		}
+	}
+	return twins
+}
+
+// bashReadingRequest returns request with its Bash command replaced by
+// another reading of it; the reading records nothing of its own.
+func bashReadingRequest(request trustedActionRequest, command, rewritten string) trustedActionRequest {
+	twin := request
+	twin.record, twin.recordTelemetry = nil, nil
+	twin.Input.Command, twin.Input.Args, twin.Input.Argv = rewritten, nil, nil
+	twin.conflictSource = nil
+	if strings.Contains(request.LegacyText, command) {
+		twin.LegacyText = strings.ReplaceAll(request.LegacyText, command, rewritten)
+	} else {
+		twin.LegacyText = rewritten
+	}
+	return twin
+}
+
+// wrapperUnwrapTwinRequest returns the request for
+// actionfacts.WrapperUnwrapTwin of a POSIX Bash call. A ProtectHome
+// gateway (managed hook peer) has no reading: the hook client map lists
+// only the targets the client read from the wrapped call.
+func wrapperUnwrapTwinRequest(request trustedActionRequest) (trustedActionRequest, bool) {
+	if request.ProtectedHomeHook {
+		return trustedActionRequest{}, false
+	}
+	if request.Input.DialectHint != actionfacts.DialectPOSIX && request.Input.DialectHint != "" {
+		return trustedActionRequest{}, false
+	}
+	command, known := trustedBashCommandInput(request.Input)
+	if !known {
+		return trustedActionRequest{}, false
+	}
+	rewritten, ok := actionfacts.WrapperUnwrapTwin(command)
+	if !ok || rewritten == command {
+		return trustedActionRequest{}, false
+	}
+	return bashReadingRequest(request, command, rewritten), true
+}
+
+// stateGlobTwinRequest returns the request for actionfacts.StateGlobTwin of
+// a POSIX Bash call. The gateway expands the pattern on its own host, so a
+// gateway that may not read the user home (ProtectHome, or a request that
+// skips local resolution) has no reading.
+func stateGlobTwinRequest(request trustedActionRequest) (trustedActionRequest, bool) {
+	if request.ProtectedHomeHook || request.SkipLocalFilesystemResolution {
+		return trustedActionRequest{}, false
+	}
+	if request.Input.DialectHint != actionfacts.DialectPOSIX && request.Input.DialectHint != "" {
+		return trustedActionRequest{}, false
+	}
+	command, known := trustedBashCommandInput(request.Input)
+	if !known {
+		return trustedActionRequest{}, false
+	}
+	rewritten, ok := actionfacts.StateGlobTwin(command, request.Input.ActiveHome)
+	if !ok || rewritten == command {
+		return trustedActionRequest{}, false
+	}
+	return bashReadingRequest(request, command, rewritten), true
 }
 
 func trustedBashCommandInput(input actionfacts.Input) (string, bool) {

@@ -192,7 +192,15 @@ func TestResolveLinkCreatedInCommand(t *testing.T) {
 		// link files make the write targets unknown (GAP-1521).
 		{"busybox ln ~/.ssh/autho\"\"rized_keys n1.txt && echo k >> n1.txt", "n1.txt", keys},
 		{"toybox ln -s ~/.ssh/authorized_keys n1.txt; echo k >> n1.txt", "n1.txt", keys},
-		{"sudo busybox ln ~/.ssh/authorized_keys n1.txt; echo k >> n1.txt", "n1.txt", ""},
+		// A static prefix wrapper runs its child here: the link it makes is
+		// read as the plain one, so the write reaches the keys file
+		// (RV-p3i3-1). A wrapper that moves the directory or the program
+		// resolution keeps the link unknown.
+		{"sudo busybox ln ~/.ssh/authorized_keys n1.txt; echo k >> n1.txt", "n1.txt", keys},
+		{"nohup ln -s ~/.ssh/authorized_keys n1.txt; echo k >> n1.txt", "n1.txt", keys},
+		{"sudo -i ln -s ~/.ssh/authorized_keys n1.txt; echo k >> n1.txt", "n1.txt", ""},
+		{"env PATH=/tmp/bin ln -s ~/.ssh/authorized_keys n1.txt; echo k >> n1.txt", "n1.txt", ""},
+		{"env -C sub ln -s ~/.ssh/authorized_keys n1.txt; echo k >> sub/n1.txt", "sub/n1.txt", ""},
 		{"rsync -a --link-dest=$HOME/.ssh $HOME/.ssh/ d/; echo k >> d/autho\"\"rized_keys", "d/authorized_keys", ""},
 		{"rsync -aH ~/.ssh/ d/; echo k >> d/authorized_keys", "d/authorized_keys", ""},
 		{"ls ~/.ssh/authorized_keys | cpio -pdl d; echo k >> d/n1.txt", "d/n1.txt", ""},
