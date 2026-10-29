@@ -36,12 +36,12 @@ func DirectoryFactsFunc(ctx context.Context) func(uid int) (useridentity.Directo
 	}
 }
 
-// platformMobileAccounts finds none on Linux, whose directory accounts are
-// never copied into /etc/passwd.
 // platformLoginShell has nothing to add on Linux: getent, nslcd and
 // /etc/passwd give every account its shell.
 func platformLoginShell(context.Context, commandRunner, string) string { return "" }
 
+// platformMobileAccounts finds none on Linux, whose directory accounts are
+// never copied into /etc/passwd.
 func platformMobileAccounts(context.Context) (map[string]string, error) {
 	return map[string]string{}, nil
 }

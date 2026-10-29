@@ -58,6 +58,8 @@ func platformOpenDirectoryNodeStates(context.Context) (string, error) {
 	return "", errors.New("unixidentity: no Open Directory on this platform")
 }
 
+// platformLoginShell has nothing to add on other platforms: the account
+// resolver gives the shell it knows.
 func platformLoginShell(context.Context, commandRunner, string) string { return "" }
 
 func platformMobileAccounts(context.Context) (map[string]string, error) {

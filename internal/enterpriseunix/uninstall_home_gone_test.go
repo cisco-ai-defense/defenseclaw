@@ -39,7 +39,7 @@ func TestUninstallKeepsTheDeploymentForAPerUserHomeThatIsNotAvailable(t *testing
 			// binaries and the deployment record stay so a rerun finishes.
 			got := messagesOf(done.Errors, codePerUserHooks)
 			if !strings.Contains(got, "hermes hooks for user sample-user were not removed because that account's home is not available, so a DefenseClaw registration may remain in it") ||
-				!strings.Contains(got, "make that home available (mount its volume) and rerun") {
+				!strings.Contains(got, "make that home available (mount its volume, or move its folder back to the recorded home if it was moved aside) and rerun") {
 				t.Fatalf("the uninstall does not name the registration that may remain and the next step: %q", got)
 			}
 			// GAP-2134: an empty parent is also a deleted home of a
@@ -94,7 +94,7 @@ func TestUninstallRefusesBeforeAnyChangeForAPerUserHomeThatIsNotAvailable(t *tes
 			requireError(t, refused, codeUninstallPrecheck)
 			got := messagesOf(refused.Errors, codePerUserHooks)
 			if !strings.Contains(got, "hermes hooks for user sample-user were not removed because that account's home is not available, so a DefenseClaw registration may remain in it") ||
-				!strings.Contains(got, "make that home available (mount its volume) and rerun") {
+				!strings.Contains(got, "make that home available (mount its volume, or move its folder back to the recorded home if it was moved aside) and rerun") {
 				t.Fatalf("the refusal does not name the home that is not available and the next step: %q", got)
 			}
 			if strings.Contains(got, "gone-user") {

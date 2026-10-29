@@ -4267,7 +4267,7 @@ func (l *lifecycle) refuseUnresolvedPerUserRows(ctx context.Context) bool {
 // available, so DefenseClaw's connector registrations in it may remain and
 // call the hook binary; rerun is the quoted uninstall command.
 func homeNotAvailableMessage(connector, user, rerun string) string {
-	return fmt.Sprintf("DefenseClaw's %s hooks for user %s were not removed because that account's home is not available, so a DefenseClaw registration may remain in it and call the hook binary; make that home available (mount its volume) and rerun %s; if that home folder was deleted, recreate it as a folder the account owns and rerun %s", connector, user, rerun, rerun)
+	return fmt.Sprintf("DefenseClaw's %s hooks for user %s were not removed because that account's home is not available, so a DefenseClaw registration may remain in it and call the hook binary; make that home available (mount its volume, or move its folder back to the recorded home if it was moved aside) and rerun %s; if that home folder was deleted, recreate it as a folder the account owns and rerun %s", connector, user, rerun, rerun)
 }
 
 // cutPerUserEntry splits a remove-all entry "user/connector: reason". The
