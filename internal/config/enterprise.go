@@ -1831,7 +1831,7 @@ func validatePolicyTree(root, label, serviceAccount string, referenced []string,
 	}
 	entries, err := os.ReadDir(root)
 	if err != nil {
-		return err
+		return managed.UnreadableServiceFolder(root, label, err)
 	}
 	for _, entry := range entries {
 		path := filepath.Join(root, entry.Name())
@@ -1852,7 +1852,9 @@ func validatePolicyTree(root, label, serviceAccount string, referenced []string,
 		}
 		packs, err := os.ReadDir(path)
 		if err != nil {
-			return err
+			// A guardrail folder made under umask 077 is 0700 and the
+			// gateway service account cannot list it (GAP-2432).
+			return managed.UnreadableServiceFolder(path, label, err)
 		}
 		for _, pack := range packs {
 			packPath := filepath.Join(path, pack.Name())

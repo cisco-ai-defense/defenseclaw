@@ -2437,6 +2437,8 @@ groups:
     requirement_level: required
   - ref: defenseclaw.security.severity
     requirement_level: required
+  - ref: gen_ai.request.model
+    requirement_level: recommended
   x-defenseclaw:
     legacy_bindings:
     - source: internal/scanner.Finding and internal/gatewaylog.ScanFindingPayload
@@ -2505,6 +2507,8 @@ groups:
   - ref: defenseclaw.scan.scanner
     requirement_level: required
   - ref: defenseclaw.scan.phase
+    requirement_level: recommended
+  - ref: gen_ai.request.model
     requirement_level: recommended
 - id: body.network.egress
   type: body_group
