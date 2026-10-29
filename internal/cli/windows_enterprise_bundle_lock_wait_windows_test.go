@@ -126,6 +126,9 @@ func TestWindowsBundleApplyLockWaitRefusesAfterAnUninstall(t *testing.T) {
 
 // A4: a wait that expires is lifecycle_busy 1618 and names the wait.
 func TestWindowsBundleApplyLockWaitExpiresBusy(t *testing.T) {
+	saved := windowsBundleDeploymentInstalled
+	t.Cleanup(func() { windowsBundleDeploymentInstalled = saved })
+	windowsBundleDeploymentInstalled = func() bool { return true }
 	_, out, done, err := prepareWithHeldBundleLock(t, 300*time.Millisecond, 0)
 	if !done || commandExitCode(err) != enterprisestatus.WindowsExitBusy || !strings.Contains(out, `"lifecycle_busy"`) ||
 		!strings.Contains(out, "still held after --lock-wait 300ms") {
