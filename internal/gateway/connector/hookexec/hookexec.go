@@ -2594,16 +2594,16 @@ const perUserNotOutageNote = "not a gateway outage, so it is blocked in every fa
 // hooks). An outage the mode closed, strict availability, this account's
 // install window and managed, socket and Secure Client hooks keep "fail mode
 // closed".
-//
-// Every other per-user failure that is not an outage (opts.perUserOutage
-// unset: a call the gateway took and did not answer, a listener DefenseClaw
-// cannot verify) is blocked in every fail mode too and says so (GAP-1735).
+// A listener DefenseClaw cannot verify is no outage either and says so too
+// (GAP-1735); a refused connection keeps "fail mode closed" even when the
+// outage was not classified (cold start skipped).
 func unreachableModeNote(opts Options, reason string) string {
-	if opts.ManagedEnterprise || opts.ManagedUnixSocket != "" || opts.SecureClient || opts.perUserOutage ||
-		opts.StrictAvailability || perUserInstallWindow(opts) {
-		return "fail mode closed"
+	notOutage := reason == perUserGatewayNoAnswerReason || strings.HasPrefix(reason, foreignListenerReasonPrefix)
+	if notOutage && !opts.perUserOutage && !opts.ManagedEnterprise && opts.ManagedUnixSocket == "" &&
+		!opts.SecureClient && !opts.StrictAvailability && !perUserInstallWindow(opts) {
+		return perUserNotOutageNote
 	}
-	return perUserNotOutageNote
+	return "fail mode closed"
 }
 
 // unreachableDetail is the text after the colon of the unreachable line. The

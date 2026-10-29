@@ -23,7 +23,7 @@ func TestUnreachableModeNoteSaysWhyANonOutageBlocks(t *testing.T) {
 		{"strict availability", Options{StrictAvailability: true, Home: home}, "fail mode closed"},
 		{"managed", Options{ManagedEnterprise: true, Home: home}, "fail mode closed"},
 	} {
-		if got := unreachableModeNote(tc.opts, ""); got != tc.want {
+		if got := unreachableModeNote(tc.opts, perUserGatewayNoAnswerReason); got != tc.want {
 			t.Fatalf("%s: %q, want %q", tc.name, got, tc.want)
 		}
 	}
