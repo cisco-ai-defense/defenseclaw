@@ -17,6 +17,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"github.com/defenseclaw/defenseclaw/internal/unixidentity"
 )
 
 // until 1.1 (GAP-1845): a managed Linux/macOS account a 1.0.4 standalone
@@ -286,5 +287,75 @@ func TestManagedUnixGuardianLogsAKeptCopyOnTheFirstJobOnly(t *testing.T) {
 	removeRetiredConnectorsForAccount(context.Background(), request)
 	if !strings.Contains(log.String(), token) {
 		t.Errorf("a new leftover is not logged:\n%s", log.String())
+	}
+}
+
+// GAP-2504: a managed macOS pkg upgrade from 1.0.3 with OmniGent and
+// OpenHands rows enrolled failed its first run. Until the 1.0.5 enumerator
+// rewrote the manifest, the guardian verified those rows with a registry
+// that no longer has them; the real worker fails each with "unknown
+// connector", and the postinstall failed on guardian_target_failed. The
+// rows are not enrolled targets: no install or verify target is sent for
+// them, the pass fails nothing, and the other rows are reconciled as usual.
+func TestManagedUnixGuardianPassSkipsTheRowsOfRemovedConnectors(t *testing.T) {
+	accounts := standaloneTestResolver{accounts: map[string]unixidentity.Account{}}
+	f := newStandaloneFixture(t, accounts)
+	alice, bob := f.home(t, "alice", 0o700), f.home(t, "bob", 0o700)
+	accounts.accounts["alice"] = unixidentity.Account{Name: "alice", UID: 5001, GID: 5001, Home: alice, Shell: "/bin/bash"}
+	accounts.accounts["bob"] = unixidentity.Account{Name: "bob", UID: 5002, GID: 5002, Home: bob, Shell: "/bin/bash"}
+	previousCheck, previousSet := enterpriseHookCheckHome, enterpriseHookStandaloneMachinePolicySet
+	t.Cleanup(func() { enterpriseHookCheckHome, enterpriseHookStandaloneMachinePolicySet = previousCheck, previousSet })
+	enterpriseHookCheckHome = func(string, int) enterprisehooks.HomeCheck {
+		return enterprisehooks.HomeCheck{State: enterprisehooks.HomeAvailable, Inode: 7}
+	}
+	enterpriseHookStandaloneMachinePolicySet = func() map[string]struct{} { return map[string]struct{}{} }
+	runner := enterpriseHookWorkerRunner
+	var sent []string
+	enterpriseHookWorkerRunner = func(ctx context.Context, account enterpriseHookWorkerAccount, request enterpriseHookWorkerRequest) (enterpriseHookWorkerResponse, error) {
+		response, err := runner(ctx, account, request)
+		for i, target := range request.Targets {
+			name := target.Options.ConnectorName
+			sent = append(sent, name+"@"+target.Mode)
+			if connector.IsRemovedConnector(name) && target.Mode != enterpriseHookWorkerModeRemove && target.Mode != enterpriseHookWorkerModeRemoveLeftover {
+				// What the real worker answers: the registry no longer
+				// resolves the name.
+				response.Targets[i] = enterpriseHookWorkerTargetResult{Index: target.Index, Error: "enterprise hooks: unknown connector \"" + name + "\""}
+			}
+		}
+		return response, err
+	}
+	f.writeManifest(t,
+		enterprisehooks.ManifestTarget{User: "alice", Connector: "hermes"},
+		enterprisehooks.ManifestTarget{User: "alice", Connector: "omnigent"},
+		enterprisehooks.ManifestTarget{User: "bob", Connector: "openhands"},
+	)
+	f.writeLedger(t, protectedRow("alice", alice, "hermes"), protectedRow("alice", alice, "omnigent"), protectedRow("bob", bob, "openhands"))
+	run, err := runEnterpriseHookReconcileOnce(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if run.Failures != 0 {
+		t.Errorf("the pass failed %d targets; rows = %+v", run.Failures, run.Rows)
+	}
+	for _, row := range run.Rows {
+		if connector.IsRemovedConnector(row.Connector) {
+			t.Errorf("the pass reconciled a removed connector row: %+v", row)
+		}
+	}
+	for _, target := range run.Targets {
+		if connector.IsRemovedConnector(target.Connector) {
+			t.Errorf("the pass counts a removed connector row as enrolled: %+v", target)
+		}
+	}
+	hermes := false
+	for _, entry := range sent {
+		name, mode, _ := strings.Cut(entry, "@")
+		if connector.IsRemovedConnector(name) && mode != enterpriseHookWorkerModeRemove && mode != enterpriseHookWorkerModeRemoveLeftover {
+			t.Errorf("the pass sent %s as an enrolled target", entry)
+		}
+		hermes = hermes || entry == "hermes@"+enterpriseHookWorkerModeVerifyOrRepair
+	}
+	if !hermes {
+		t.Errorf("alice hermes was not reconciled; sent %v", sent)
 	}
 }
