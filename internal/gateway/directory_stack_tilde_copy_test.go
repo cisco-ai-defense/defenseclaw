@@ -47,6 +47,9 @@ func TestDirectoryStackTildeCopyIsNotAKeysWrite(t *testing.T) {
 		// directory the stack word names, so it stays a possible link copy.
 		{"pushd src && cp -r ~1/src src-copy", true},
 		{"pushd ~/.ssh && pushd /tmp && cp ~1/id_ed25519 /tmp/k", true},
+		{"pushd ~/.ssh; dirs -c; ls ~1", false},
+		{"pushd ~/.ssh; dirs -v", false},
+		{"pushd ~/.ssh; dirs -c; cat id_ed25519", true},
 		{"pushd ~/.ssh && pushd /tmp && cp a.txt ~1/authorized_keys", true},
 		{"pushd src && cp a.txt ~/.ssh/authorized_keys", true},
 		{"pushd ~/.defenseclaw && pushd /tmp && cp a.txt ~1/config.yaml", true},

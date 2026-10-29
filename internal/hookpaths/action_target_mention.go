@@ -822,7 +822,7 @@ func actionLiteralArgumentProgramsOnly(file *syntax.File, home string) bool {
 		switch programBase(program) {
 		case "echo", "printf", "grep", "egrep", "fgrep", "rg", "cat", "head", "tail", "less", "more",
 			"wc", "ls", "dir", "stat", "file", "sort", "uniq", "cut", "tr", "diff", "cmp", "cd",
-			"pushd", "popd", "pwd", "true", "false", "test", "[", "basename", "dirname",
+			"pushd", "popd", "dirs", "pwd", "true", "false", "test", "[", "basename", "dirname",
 			// File writers take their operands as written: a quoted "~/" is
 			// a directory named "~" below the cwd, not the home (round l).
 			"cp", "mv", "touch", "mkdir", "rm", "ln", "install", "tee", "dd":
@@ -1917,6 +1917,8 @@ func actionKnownReadOnlyShell(file *syntax.File, home string) bool {
 			if len(call.Args) > 3 {
 				safe = false
 			}
+		case "dirs":
+			// dirs prints or clears the directory stack (GAP-2552).
 		case "less":
 			for _, arg := range call.Args[1:] {
 				option, known := StaticWord(arg, home)
