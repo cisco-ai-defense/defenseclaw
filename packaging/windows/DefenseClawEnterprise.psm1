@@ -4871,9 +4871,147 @@ function Start-DefenseClawService {
     param([Parameter(Mandatory)][string]$Name)
     $service = Microsoft.PowerShell.Management\Get-Service -Name $Name -ErrorAction Stop
     if ($service.Status -ne [ServiceProcess.ServiceControllerStatus]::Running) {
-        Microsoft.PowerShell.Management\Start-Service -Name $Name -ErrorAction Stop
-        $service.WaitForStatus([ServiceProcess.ServiceControllerStatus]::Running, [TimeSpan]::FromSeconds(60))
+        try {
+            Microsoft.PowerShell.Management\Start-Service -Name $Name -ErrorAction Stop
+            $service.WaitForStatus([ServiceProcess.ServiceControllerStatus]::Running, [TimeSpan]::FromSeconds(60))
+        }
+        catch {
+            # Start-Service only says "Cannot start service X". Name SCM's exit
+            # codes, and each dependency's, so a failed rollback or install says
+            # why (for example the gateway's 1068 because the broker exited 1066).
+            $original = $_
+            $message = $null
+            try {
+                $message = Get-DefenseClawServiceStartFailureMessage `
+                    -Name $Name `
+                    -Service $service `
+                    -Cause $original.Exception.Message `
+                    -StartError (Get-DefenseClawWin32ErrorCode -Exception $original.Exception)
+            }
+            catch {
+                $message = $null
+            }
+            if ([string]::IsNullOrWhiteSpace($message)) {
+                throw $original
+            }
+            throw $message
+        }
     }
+}
+
+# The Win32 error StartService returned (for example 1068 when a dependency
+# failed), from the first Win32Exception in the exception chain. sc.exe queryex
+# can still show the service's previous exit code then, because it never ran.
+function Get-DefenseClawWin32ErrorCode {
+    param($Exception)
+    $current = $Exception
+    for ($depth = 0; $null -ne $current -and $depth -lt 8; $depth++) {
+        if ($current -is [ComponentModel.Win32Exception]) {
+            return [int64]$current.NativeErrorCode
+        }
+        $current = $current.InnerException
+    }
+    return $null
+}
+
+function Get-DefenseClawServiceStartFailureMessage {
+    param(
+        [Parameter(Mandatory)][string]$Name,
+        $Service,
+        [AllowEmptyString()][string]$Cause = '',
+        $StartError = $null
+    )
+    $message = "service $Name failed to start: "
+    if ($null -ne $StartError) {
+        $description = ''
+        try {
+            $description = ([ComponentModel.Win32Exception]::new([int]$StartError)).Message
+        }
+        catch {
+            $description = ''
+        }
+        $message += "START_ERROR=$StartError"
+        if (-not [string]::IsNullOrWhiteSpace($description)) {
+            $message += " ($description)"
+        }
+        $message += ' '
+    }
+    $message += (Get-DefenseClawServiceExitCodes -Name $Name -IncludeState)
+    $dependencies = @()
+    try {
+        if ($null -ne $Service) {
+            $dependencies = @($Service.ServicesDependedOn | Microsoft.PowerShell.Core\ForEach-Object {
+                    [string]$_.ServiceName
+                })
+        }
+    }
+    catch {
+        $dependencies = @()
+    }
+    foreach ($dependency in $dependencies) {
+        if ([string]::IsNullOrWhiteSpace($dependency)) {
+            continue
+        }
+        $message += " [dependency ${dependency}: " +
+            (Get-DefenseClawServiceExitCodes -Name $dependency -IncludeState) + ']'
+    }
+    if (-not [string]::IsNullOrWhiteSpace($Cause)) {
+        $message += " ($Cause)"
+    }
+    return $message
+}
+
+# Reads STATE, WIN32_EXIT_CODE and SERVICE_EXIT_CODE from sc.exe queryex. Only
+# used to explain a failure, so it never throws.
+function Get-DefenseClawServiceExitCodes {
+    param(
+        [Parameter(Mandatory)][string]$Name,
+        [switch]$IncludeState
+    )
+    try {
+        $output = Invoke-DefenseClawNative `
+            -File $script:ScExe `
+            -Arguments @('queryex', $Name) `
+            -Capture
+        $text = ($output | Microsoft.PowerShell.Utility\Out-String)
+    }
+    catch {
+        return "exit codes unavailable (sc.exe queryex failed: $($_.Exception.Message))"
+    }
+    $state = 'unknown'
+    if ($text -match 'STATE\s*:\s*\d+\s+(\S+)') {
+        $state = $Matches[1]
+    }
+    $parts = @()
+    if ($IncludeState) {
+        $parts += "STATE=$state"
+    }
+    if ($text -match 'WIN32_EXIT_CODE\s*:\s*(\d+)') {
+        $code = [int64]$Matches[1]
+        $description = ''
+        try {
+            $description = ([ComponentModel.Win32Exception]::new([int]$code)).Message
+        }
+        catch {
+            $description = ''
+        }
+        if ([string]::IsNullOrWhiteSpace($description)) {
+            $parts += "WIN32_EXIT_CODE=$code"
+        }
+        else {
+            $parts += "WIN32_EXIT_CODE=$code ($description)"
+        }
+    }
+    else {
+        $parts += 'WIN32_EXIT_CODE=unknown'
+    }
+    if ($text -match 'SERVICE_EXIT_CODE\s*:\s*(\d+)') {
+        $parts += "SERVICE_EXIT_CODE=$($Matches[1])"
+    }
+    else {
+        $parts += 'SERVICE_EXIT_CODE=unknown'
+    }
+    return ($parts -join ' ')
 }
 
 function Remove-DefenseClawService {
@@ -10990,7 +11128,8 @@ function Start-DefenseClawTransactionServices {
         [void](Wait-DefenseClawFreshGuardianReconcile `
             -Layout $Layout `
             -GatewayServiceName $GatewayServiceName `
-            -GuardianServiceName $GuardianServiceName)
+            -GuardianServiceName $GuardianServiceName `
+            -AllowFailedTargets)
     }
     if ([bool]$gateway.running) {
         Set-DefenseClawServiceStartMode `
@@ -11047,7 +11186,8 @@ function Start-DefenseClawTransactionServices {
             -GatewayServiceName $GatewayServiceName `
             -GuardianServiceName $GuardianServiceName `
             -RequireBroker:([bool]$broker.existed) `
-            -RequireEnumerator:$enumeratorShouldRun
+            -RequireEnumerator:$enumeratorShouldRun `
+            -AllowFailedTargets
     }
     if ([bool]$guardian.running) {
         # Guardian remains live while all exact boot policies are restored.
@@ -12867,6 +13007,7 @@ function Assert-DefenseClawManagedHooksTeardownSchema6Journal {
         'gateway_service_name',
         'targets',
         'pending_targets',
+        'failed_targets',
         'claude_target_sids',
         'claude',
         'codex_policy_active',
@@ -13033,6 +13174,13 @@ function Assert-DefenseClawManagedHooksTeardownSchema6Journal {
         -PropertyName 'pending_targets' `
         -Label 'schema-6 managed-hook teardown journal' `
         -Optional
+    # Targets a degraded Guardian reported as failed. Teardown treats them as
+    # possibly wired, so they still get the full cleanup.
+    $failedArray = Get-DefenseClawManagedHooksTeardownJsonArray `
+        -Object $Journal `
+        -PropertyName 'failed_targets' `
+        -Label 'schema-6 managed-hook teardown journal' `
+        -Optional
     if ($targetArray.count -ne [Convert]::ToInt64(
             $activation.target_count
         )) {
@@ -13118,6 +13266,50 @@ function Assert-DefenseClawManagedHooksTeardownSchema6Journal {
     if ([string]$Journal.activation_state -cne 'activated' -and
         $pendingArray.count -ne 0) {
         throw 'schema-6 never-activated journal contains pending target evidence'
+    }
+
+    $failedTargetsByKey = @{}
+    $previousFailed = $null
+    foreach ($failed in @($failedArray.values)) {
+        $validated = Assert-DefenseClawManagedHooksTeardownSchema6Target `
+            -Target $failed
+        if ($null -ne $previousFailed) {
+            $connectorOrder = [string]::CompareOrdinal(
+                [string]$previousFailed.connector,
+                [string]$validated.connector
+            )
+            $sidOrder = [string]::CompareOrdinal(
+                [string]$previousFailed.sid,
+                [string]$validated.sid
+            )
+            if ($connectorOrder -gt 0 -or
+                ($connectorOrder -eq 0 -and $sidOrder -ge 0)) {
+                throw 'schema-6 failed teardown targets are not in canonical order'
+            }
+        }
+        $key = (
+            $validated.connector + [char]0 +
+            $validated.sid.ToUpperInvariant()
+        )
+        if (-not $targetsByKey.ContainsKey($key) -or
+            $pendingTargetsByKey.ContainsKey($key) -or
+            $failedTargetsByKey.ContainsKey($key)) {
+            throw 'schema-6 managed-hook teardown journal has an invalid failed target binding'
+        }
+        $manifestTarget = $targetsByKey[$key]
+        if ($manifestTarget.connector -cne $validated.connector -or
+            $manifestTarget.sid -cne $validated.sid -or
+            $manifestTarget.data_dir -cne $validated.data_dir -or
+            $manifestTarget.agent_version -cne $validated.agent_version -or
+            $manifestTarget.deferred -ne $validated.deferred) {
+            throw 'schema-6 managed-hook teardown failed target changed from the manifest target'
+        }
+        $failedTargetsByKey[$key] = $true
+        $previousFailed = $validated
+    }
+    if ([string]$Journal.activation_state -cne 'activated' -and
+        $failedArray.count -ne 0) {
+        throw 'schema-6 never-activated journal contains failed target evidence'
     }
 
     return $phase
@@ -13959,19 +14151,22 @@ function Assert-DefenseClawTargetRuntimePlan {
         [Parameter(Mandatory)]$Plan,
         [Parameter(Mandatory)][hashtable]$Layout
     )
-    $allowedPlanProperties = @(
+    $requiredPlanProperties = @(
         'schema_version',
         'manifest_path',
         'manifest_sha256',
         'target_count',
         'roots'
     )
+    # skipped_profiles is optional: a fresh Install's plan lists the users it
+    # left out because their profile folder stayed busy.
+    $allowedPlanProperties = $requiredPlanProperties + @('skipped_profiles', 'repaired_profiles')
     foreach ($property in @($Plan.PSObject.Properties)) {
         if ([string]$property.Name -notin $allowedPlanProperties) {
             throw 'target runtime plan contains an unexpected property'
         }
     }
-    foreach ($required in $allowedPlanProperties) {
+    foreach ($required in $requiredPlanProperties) {
         if ($null -eq $Plan.PSObject.Properties[$required]) {
             throw "target runtime plan is missing $required"
         }
@@ -14124,7 +14319,108 @@ function Assert-DefenseClawTargetRuntimePlan {
             throw 'target runtime absent baseline unexpectedly has an identity'
         }
     }
+    [void](Get-DefenseClawTargetRuntimeSkippedProfiles -Plan $Plan -RootSIDs $seenSID)
+    [void](Get-DefenseClawTargetRuntimeSkippedProfiles -Plan $Plan -RootSIDs $seenSID -Repaired)
     return $Plan
+}
+
+# Returns the plan's skipped profiles after checking their shape: each one has
+# exactly sid, user_home and reason, is listed once, and has no root.
+# With -Repaired, reads repaired_profiles instead: users whose retained root a
+# fresh Install re-stamped. Those must have a planned root; skipped users must
+# not.
+function Get-DefenseClawTargetRuntimeSkippedProfiles {
+    param(
+        [Parameter(Mandatory)]$Plan,
+        [hashtable]$RootSIDs = @{},
+        [switch]$Repaired
+    )
+    $propertyName = if ($Repaired) { 'repaired_profiles' } else { 'skipped_profiles' }
+    $property = $Plan.PSObject.Properties[$propertyName]
+    if ($null -eq $property -or $null -eq $property.Value) {
+        return @()
+    }
+    if ($property.Value -isnot [Array]) {
+        throw "target runtime plan $propertyName is not an array"
+    }
+    $profiles = @($property.Value)
+    if ($profiles.Count -gt 128) {
+        throw "target runtime plan lists more than 128 profiles in $propertyName"
+    }
+    $seen = @{}
+    foreach ($profile in $profiles) {
+        $names = @($profile.PSObject.Properties | Microsoft.PowerShell.Core\ForEach-Object { [string]$_.Name })
+        if ($names.Count -ne 3 -or
+            'sid' -notin $names -or 'user_home' -notin $names -or 'reason' -notin $names) {
+            throw "target runtime plan $propertyName entry has unexpected properties"
+        }
+        $sid = [string]$profile.sid
+        $userHome = [string]$profile.user_home
+        $reason = [string]$profile.reason
+        if ($sid -cnotmatch '^S-\d-\d+(?:-\d+)+$' -or
+            $userHome -cnotmatch '^[A-Za-z]:\\[^:]+$' -or
+            [string]::IsNullOrWhiteSpace($reason) -or
+            $reason.Length -gt 1024) {
+            throw "target runtime plan $propertyName entry is invalid"
+        }
+        $key = $sid.ToUpperInvariant()
+        if ($seen.ContainsKey($key)) {
+            throw "target runtime plan lists a profile twice in $propertyName"
+        }
+        if ($RootSIDs.Count -gt 0 -or -not $Repaired) {
+            $hasRoot = $RootSIDs.ContainsKey($key) -or $RootSIDs.ContainsKey($sid)
+            if ($Repaired -and -not $hasRoot) {
+                throw 'target runtime plan repairs a profile it does not plan'
+            }
+            if (-not $Repaired -and $hasRoot) {
+                throw 'target runtime plan skips a profile and also plans its root'
+            }
+        }
+        $seen[$key] = $true
+    }
+    return $profiles
+}
+
+# A fresh Install continues without a user whose profile folder another
+# process kept open past the retry window. Record each one where support finds
+# it: as a warning in the installer output (and so the AVC lifecycle log), and
+# in the hook-guardian log that DART collects. The log append is best effort.
+function Write-DefenseClawTargetRuntimeSkippedProfiles {
+    param(
+        [Parameter(Mandatory)]$Plan,
+        [Parameter(Mandatory)][hashtable]$Layout
+    )
+    $entries = @()
+    foreach ($profile in @(Get-DefenseClawTargetRuntimeSkippedProfiles -Plan $Plan)) {
+        $entries += ((
+            'target_runtime_profile_skipped: user {0} at {1} was left out of this install ' +
+            'and is not protected until the Guardian enrolls it after the folder is free: {2}'
+        ) -f [string]$profile.sid, [string]$profile.user_home, [string]$profile.reason)
+    }
+    foreach ($profile in @(Get-DefenseClawTargetRuntimeSkippedProfiles -Plan $Plan -Repaired)) {
+        $entries += ((
+            'target_runtime_profile_repaired: user {0} at {1}: the retained .defenseclaw had a ' +
+            'drifted owner or DACL and was re-stamped to the canonical descriptor: {2}'
+        ) -f [string]$profile.sid, [string]$profile.user_home, [string]$profile.reason)
+    }
+    foreach ($line in $entries) {
+        Microsoft.PowerShell.Utility\Write-Warning -Message $line
+        try {
+            $logPath = [string]$Layout.GuardianLogPath
+            if (-not [string]::IsNullOrWhiteSpace($logPath) -and
+                (Microsoft.PowerShell.Management\Test-Path -LiteralPath ([IO.Path]::GetDirectoryName($logPath)) -PathType Container)) {
+                [IO.File]::AppendAllText(
+                    $logPath,
+                    ('{0} [installer] {1}{2}' -f [DateTime]::UtcNow.ToString('yyyy-MM-ddTHH:mm:ssZ'), $line, [Environment]::NewLine)
+                )
+            }
+        }
+        catch {
+            Microsoft.PowerShell.Utility\Write-Warning -Message (
+                "target_runtime_profile_skipped: could not record the skip in the hook-guardian log: $($_.Exception.Message)"
+            )
+        }
+    }
 }
 
 function Assert-DefenseClawTargetRuntimeReport {
@@ -14476,8 +14772,17 @@ function Invoke-DefenseClawTargetRuntimePreparation {
         [Parameter(Mandatory)][hashtable]$Layout,
         [Parameter(Mandatory)][string]$GatewayServiceName,
         [Parameter(Mandatory)][string]$GuardianServiceName,
-        [switch]$ValidationOnly
+        [switch]$ValidationOnly,
+        # Fresh Install only (no installed deployment): leave out a user whose
+        # profile folder stays busy instead of failing every user. On an
+        # Install over a live deployment, or a deferred Repair, that user may
+        # already be enrolled, and dropping them from targets.yaml would revoke
+        # protection they have.
+        [switch]$AllowSkipBusyProfiles
     )
+    if ($ValidationOnly -and $AllowSkipBusyProfiles) {
+        throw 'target runtime validation cannot skip busy profiles'
+    }
     $transactionDirectory = [IO.Path]::GetDirectoryName($SnapshotPath)
     $planPath = New-DefenseClawTargetRuntimeExchangeFile `
         -Path (Microsoft.PowerShell.Management\Join-Path `
@@ -14487,11 +14792,11 @@ function Invoke-DefenseClawTargetRuntimePreparation {
     $planProbe = Invoke-DefenseClawGatewayCommand `
         -Layout $Layout `
         -GatewayServiceName $GatewayServiceName `
-        -Arguments @(
+        -Arguments (@(
             'enterprise', 'windows', 'target-runtime', 'plan',
             '--manifest', [string]$Layout.ManifestPath,
             '--output', $planPath
-        ) `
+        ) + $(if ($AllowSkipBusyProfiles) { @('--skip-busy-profiles') } else { @() })) `
         -Capture `
         -AllowFailure
     if ([int]$planProbe.exit_code -ne 0) {
@@ -14504,6 +14809,12 @@ function Invoke-DefenseClawTargetRuntimePreparation {
             -Path $planPath `
             -TransactionDirectory $transactionDirectory) `
         -Layout $Layout
+    if (-not $AllowSkipBusyProfiles -and
+        (@(Get-DefenseClawTargetRuntimeSkippedProfiles -Plan $plan).Count -ne 0 -or
+            @(Get-DefenseClawTargetRuntimeSkippedProfiles -Plan $plan -Repaired).Count -ne 0)) {
+        throw 'target runtime plan skipped or repaired a profile outside a fresh Install'
+    }
+    Write-DefenseClawTargetRuntimeSkippedProfiles -Plan $plan -Layout $Layout
     if ($ValidationOnly) {
         if (@($plan.roots |
                 Microsoft.PowerShell.Core\Where-Object {
@@ -16562,7 +16873,11 @@ function Get-DefenseClawGuardianReadinessProbe {
         [Parameter(Mandatory)][hashtable]$Layout,
         [Parameter(Mandatory)][string]$GatewayServiceName,
         [Parameter(Mandatory)][string]$GuardianServiceName,
-        [switch]$LiveVerify
+        [switch]$LiveVerify,
+        # Rollback and recovery only, as in Wait-DefenseClawFreshGuardianReconcile:
+        # a complete reconcile whose only problem is failed targets is the
+        # deployment being restored.
+        [switch]$AllowFailedTargets
     )
     $service = Microsoft.PowerShell.Management\Get-Service -Name $GuardianServiceName -ErrorAction SilentlyContinue
     if ($null -eq $service -or
@@ -16580,6 +16895,17 @@ function Get-DefenseClawGuardianReadinessProbe {
         -Capture `
         -AllowFailure
     $ready = [int]$probe.exit_code -eq 0
+    if (-not $ready -and $AllowFailedTargets -and -not $LiveVerify) {
+        $report = Get-DefenseClawGuardianStatusReport `
+            -Layout $Layout `
+            -GatewayServiceName $GatewayServiceName
+        if (Test-DefenseClawGuardianReportCompletedWithFailedTargets -Report $report) {
+            return [pscustomobject][ordered]@{
+                ready = $true
+                diagnostic = 'guardian has failed targets; accepted while restoring the prior deployment'
+            }
+        }
+    }
     return [pscustomobject][ordered]@{
         ready = $ready
         diagnostic = if ($ready) {
@@ -16597,13 +16923,15 @@ function Test-DefenseClawGuardianReady {
         [Parameter(Mandatory)][hashtable]$Layout,
         [Parameter(Mandatory)][string]$GatewayServiceName,
         [Parameter(Mandatory)][string]$GuardianServiceName,
-        [switch]$LiveVerify
+        [switch]$LiveVerify,
+        [switch]$AllowFailedTargets
     )
     $readiness = Get-DefenseClawGuardianReadinessProbe `
         -Layout $Layout `
         -GatewayServiceName $GatewayServiceName `
         -GuardianServiceName $GuardianServiceName `
-        -LiveVerify:$LiveVerify
+        -LiveVerify:$LiveVerify `
+        -AllowFailedTargets:$AllowFailedTargets
     return [bool]$readiness.ready
 }
 
@@ -16614,7 +16942,9 @@ function Wait-DefenseClawEnterpriseReadiness {
         [Parameter(Mandatory)][string]$GuardianServiceName,
         [bool]$RequireBroker = $true,
         [bool]$RequireEnumerator = $true,
-        [int]$TimeoutSeconds = 90
+        [int]$TimeoutSeconds = 90,
+        # Rollback and recovery only; see Get-DefenseClawGuardianReadinessProbe.
+        [switch]$AllowFailedTargets
     )
     $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
     $brokerReady = $false
@@ -16637,7 +16967,8 @@ function Wait-DefenseClawEnterpriseReadiness {
             $guardianReady = Test-DefenseClawGuardianReady `
                 -Layout $Layout `
                 -GatewayServiceName $GatewayServiceName `
-                -GuardianServiceName $GuardianServiceName
+                -GuardianServiceName $GuardianServiceName `
+                -AllowFailedTargets:$AllowFailedTargets
         }
         $enumerator = Microsoft.PowerShell.Management\Get-Service `
             -Name $enumeratorServiceName `
@@ -18246,7 +18577,8 @@ function Test-DefenseClawGuardianCoverageReport {
         [AllowEmptyString()][string]$PriorStateIdentity,
         [AllowEmptyString()][string]$CurrentStateIdentity,
         [AllowEmptyString()][string]$ExpectedManifestSHA256,
-        [Parameter(Mandatory)][DateTime]$StartedAfter
+        [Parameter(Mandatory)][DateTime]$StartedAfter,
+        [switch]$AllowFailedTargets
     )
     $reject = {
         param([string]$Reason)
@@ -18257,9 +18589,13 @@ function Test-DefenseClawGuardianCoverageReport {
             reason = $Reason
         }
     }
-    if ($null -eq $Report -or
+    $degradedAccepted = $AllowFailedTargets -and
+        [string]::IsNullOrWhiteSpace($ExpectedManifestSHA256) -and
+        (Test-DefenseClawGuardianReportCompletedWithFailedTargets -Report $Report)
+    if (-not $degradedAccepted -and
+        ($null -eq $Report -or
         $null -eq $Report.PSObject.Properties['ok'] -or
-        -not [bool]$Report.ok) {
+        -not [bool]$Report.ok)) {
         $issues = [Collections.Generic.List[string]]::new()
         if ($null -ne $Report -and
             $null -ne $Report.PSObject.Properties['errors']) {
@@ -18366,13 +18702,52 @@ function Test-DefenseClawGuardianCoverageReport {
     }
 }
 
+# True when the report's state is a complete reconcile in which some targets
+# failed: every enrolled target has exactly one row and the counts add up. A
+# rollback restores the deployment that was there before, so a guardian that
+# was degraded before the transaction may be degraded after it. Anything else
+# that makes the report not ok (no state, an incomplete or inconsistent
+# reconcile) is still rejected.
+function Test-DefenseClawGuardianReportCompletedWithFailedTargets {
+    param($Report)
+    if ($null -eq $Report -or $null -eq $Report.PSObject.Properties['state'] -or
+        $null -eq $Report.state) {
+        return $false
+    }
+    $state = $Report.state
+    foreach ($name in @('target_count', 'success_count', 'failure_count', 'results')) {
+        if ($null -eq $state.PSObject.Properties[$name]) {
+            return $false
+        }
+    }
+    try {
+        $pending = 0
+        if ($null -ne $state.PSObject.Properties['pending_count'] -and $null -ne $state.pending_count) {
+            $pending = [Convert]::ToInt64($state.pending_count)
+        }
+        $targets = [Convert]::ToInt64($state.target_count)
+        $successes = [Convert]::ToInt64($state.success_count)
+        $failures = [Convert]::ToInt64($state.failure_count)
+    }
+    catch {
+        return $false
+    }
+    return ($failures -gt 0 -and
+        $successes -ge 0 -and $pending -ge 0 -and
+        $successes + $failures + $pending -eq $targets -and
+        @($state.results).Count -eq $targets)
+}
+
 function Wait-DefenseClawFreshGuardianReconcile {
     param(
         [Parameter(Mandatory)][hashtable]$Layout,
         [Parameter(Mandatory)][string]$GatewayServiceName,
         [Parameter(Mandatory)][string]$GuardianServiceName,
         [string]$ExpectedManifestSHA256,
-        [int]$TimeoutSeconds = 90
+        [int]$TimeoutSeconds = 90,
+        # Rollback and recovery only: a fresh, complete reconcile with failed
+        # targets is the deployment being restored, not a new failure.
+        [switch]$AllowFailedTargets
     )
     if (-not [string]::IsNullOrWhiteSpace($ExpectedManifestSHA256) -and
         $ExpectedManifestSHA256 -cnotmatch '^[0-9a-f]{64}$') {
@@ -18407,7 +18782,8 @@ function Wait-DefenseClawFreshGuardianReconcile {
             -PriorStateIdentity $priorStateIdentity `
             -CurrentStateIdentity $currentStateIdentity `
             -ExpectedManifestSHA256 $ExpectedManifestSHA256 `
-            -StartedAfter $startedAfter
+            -StartedAfter $startedAfter `
+            -AllowFailedTargets:$AllowFailedTargets
         if ([bool]$coverage.ok) {
             return [string]$coverage.generation
         }
@@ -23454,7 +23830,11 @@ function Invoke-DefenseClawInstallLikeLifecycle {
             -Layout $Layout `
             -GatewayServiceName $GatewayServiceName `
             -GuardianServiceName $GuardianServiceName `
-            -ValidationOnly:($targetRuntimePreparationMode -ceq 'validate')
+            -ValidationOnly:($targetRuntimePreparationMode -ceq 'validate') `
+            -AllowSkipBusyProfiles:(
+                $Action -eq 'Install' -and -not $reconcileInstall -and
+                $targetRuntimePreparationMode -ceq 'prepare'
+            )
         $expectedGuardianManifestSHA256 = [string]$targetRuntimePlan.manifest_sha256
         if ($expectedGuardianManifestSHA256 -cnotmatch '^[0-9a-f]{64}$') {
             throw 'target runtime plan did not bind an exact manifest SHA-256'

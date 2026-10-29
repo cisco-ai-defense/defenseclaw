@@ -30,10 +30,11 @@ const (
 )
 
 type windowsTargetRuntimeOptions struct {
-	manifest string
-	request  string
-	claims   string
-	output   string
+	manifest         string
+	skipBusyProfiles bool
+	request          string
+	claims           string
+	output           string
 }
 
 var (
@@ -41,6 +42,7 @@ var (
 	windowsTargetRuntimeRequestTrust  = managed.ValidateTrustedFilePath
 	windowsTargetRuntimeAdminValidate = enterprisehooks.ValidateWindowsManagedRuntimeAdminFile
 	windowsTargetRuntimeManifestLoad  = enterprisehooks.LoadManifest
+	windowsTargetRuntimeManifestWrite = enterprisehooks.WriteTargetsManifestAtomic
 )
 
 func newWindowsTargetRuntimeCommand() *cobra.Command {
@@ -65,6 +67,8 @@ func newWindowsTargetRuntimeCommand() *cobra.Command {
 		flags.StringVar(&opts.output, "output", "", "pre-created protected AdminFile report path")
 		if action == "plan" {
 			flags.StringVar(&opts.manifest, "manifest", "", "protected targets.yaml")
+			flags.BoolVar(&opts.skipBusyProfiles, "skip-busy-profiles", false,
+				"fresh Install only: leave out users whose profile folder stays busy, removing them from targets.yaml")
 		} else {
 			flags.StringVar(&opts.request, "request", "", "protected target-runtime plan JSON")
 			if action == "finalize" || action == "cleanup" {
@@ -99,7 +103,19 @@ func runWindowsTargetRuntimeAction(cmd *cobra.Command, action string, opts *wind
 		if err != nil {
 			return err
 		}
-		plan, err := enterprisehooks.PlanWindowsManagedRuntimeRoots(manifest, manifestPath, digest)
+		var plan enterprisehooks.WindowsManagedRuntimePlan
+		if opts.skipBusyProfiles {
+			plan, err = enterprisehooks.PlanWindowsManagedRuntimeRootsSkippingBusyProfiles(
+				manifest,
+				manifestPath,
+				digest,
+				func(reduced enterprisehooks.Manifest) (string, error) {
+					return publishWindowsTargetRuntimeManifest(manifestPath, reduced)
+				},
+			)
+		} else {
+			plan, err = enterprisehooks.PlanWindowsManagedRuntimeRoots(manifest, manifestPath, digest)
+		}
 		if err != nil {
 			return err
 		}
@@ -182,6 +198,24 @@ func runWindowsTargetRuntimeAction(cmd *cobra.Command, action string, opts *wind
 		return windowsTargetRuntimePublicMutationError(action, err)
 	}
 	return nil
+}
+
+// publishWindowsTargetRuntimeManifest writes the manifest without the skipped
+// users through the same protected writer the enumerator uses, then re-reads
+// it under the target-runtime trust checks and returns the digest of the
+// exact bytes now on disk.
+func publishWindowsTargetRuntimeManifest(path string, reduced enterprisehooks.Manifest) (string, error) {
+	if _, err := windowsTargetRuntimeManifestWrite(path, reduced); err != nil {
+		return "", err
+	}
+	published, digest, err := loadWindowsTargetRuntimeManifest(path)
+	if err != nil {
+		return "", err
+	}
+	if len(published.Targets) != len(reduced.Targets) {
+		return "", errors.New("published target-runtime manifest does not match the reduced target set")
+	}
+	return digest, nil
 }
 
 func loadWindowsTargetRuntimeManifest(path string) (enterprisehooks.Manifest, string, error) {

@@ -670,7 +670,7 @@ func TestValidateWindowsManagedHooksGuardianActivationBindsDeferredPendingSubset
 		PendingCount: 1,
 		Results:      []enterpriseHookReconcileRow{active, pending},
 	}
-	pendingTargets, err := validateWindowsManagedHooksGuardianActivation(
+	pendingTargets, failedTargets, err := validateWindowsManagedHooksGuardianActivation(
 		activation,
 		authorization,
 		state,
@@ -683,11 +683,14 @@ func TestValidateWindowsManagedHooksGuardianActivationBindsDeferredPendingSubset
 	if len(pendingTargets) != 1 || pendingTargets[0] != ctx.targets[1] {
 		t.Fatalf("pending targets = %+v", pendingTargets)
 	}
+	if len(failedTargets) != 0 {
+		t.Fatalf("failed targets = %+v, want none for a healthy Guardian", failedTargets)
+	}
 
 	unauthorized := ctx
 	unauthorized.targets = append([]windowsManagedHooksTeardownTarget(nil), ctx.targets...)
 	unauthorized.targets[1].Deferred = false
-	if _, err := validateWindowsManagedHooksGuardianActivation(
+	if _, _, err := validateWindowsManagedHooksGuardianActivation(
 		activation,
 		authorization,
 		state,
@@ -707,7 +710,7 @@ func TestValidateWindowsManagedHooksGuardianActivationBindsDeferredPendingSubset
 		SID:       pending.SID,
 		OK:        true,
 	})
-	if _, err := validateWindowsManagedHooksGuardianActivation(
+	if _, _, err := validateWindowsManagedHooksGuardianActivation(
 		tamperedActivation,
 		authorization,
 		state,
@@ -724,7 +727,7 @@ func TestValidateWindowsManagedHooksGuardianActivationBindsDeferredPendingSubset
 		UserHome:  `C:\Users\bob`,
 		DataDir:   ctx.targets[1].DataDir,
 	}
-	if _, err := validateWindowsManagedHooksGuardianActivation(
+	if _, _, err := validateWindowsManagedHooksGuardianActivation(
 		activation,
 		authorization,
 		tamperedState,

@@ -27,7 +27,7 @@ func TestWindowsManagedRuntimeMissingChildProbeUsesValidSynchronousOpen(t *testi
 		t.Fatal(err)
 	}
 	err = windowsManagedRuntimeSetupPrivilege(func() error {
-		parent, err := openWindowsManagedRuntimeProfile(targetInfo)
+		parent, err := openWindowsManagedRuntimeProfile(targetInfo, windowsManagedRuntimeProfileRead)
 		if err != nil {
 			return err
 		}
@@ -277,7 +277,7 @@ func TestWindowsManagedRuntimeFinalizeRecoversMarkerOwnerAfterHandleRename(t *te
 		t.Fatal(err)
 	}
 	err = windowsManagedRuntimeSetupPrivilege(func() error {
-		parent, err := openWindowsManagedRuntimeProfile(targetInfo)
+		parent, err := openWindowsManagedRuntimeProfile(targetInfo, windowsManagedRuntimeProfileMutate)
 		if err != nil {
 			return err
 		}
@@ -1082,7 +1082,7 @@ func TestWindowsManagedRuntimeCleanupAuthenticatesUnjournaledMarkerStage(t *test
 		t.Fatal(err)
 	}
 	err = windowsManagedRuntimeSetupPrivilege(func() error {
-		parent, err := openWindowsManagedRuntimeProfile(targetInfo)
+		parent, err := openWindowsManagedRuntimeProfile(targetInfo, windowsManagedRuntimeProfileMutate)
 		if err != nil {
 			return err
 		}

@@ -2827,7 +2827,8 @@ targets:
                 [Parameter(Mandatory)][string]$GuardianServiceName,
                 [bool]$RequireBroker = $true,
                 [bool]$RequireEnumerator = $true,
-                [int]$TimeoutSeconds = 90
+                [int]$TimeoutSeconds = 90,
+                [switch]$AllowFailedTargets
             )
             $script:HarnessState.events.Add(
                 'readiness-require-broker:{0}' -f (
@@ -2847,7 +2848,8 @@ targets:
                 [Parameter(Mandatory)][string]$GatewayServiceName,
                 [Parameter(Mandatory)][string]$GuardianServiceName,
                 [string]$ExpectedManifestSHA256,
-                [int]$TimeoutSeconds = 90
+                [int]$TimeoutSeconds = 90,
+                [switch]$AllowFailedTargets
             )
             if ($script:HarnessState.service_start_modes[
                     $GatewayServiceName
@@ -3779,7 +3781,10 @@ targets:
             $outputPath = ''
             switch ($action) {
                 'plan' {
-                    if ($Arguments.Count -ne 8 -or
+                    # A fresh Install also passes --skip-busy-profiles last.
+                    if (($Arguments.Count -ne 8 -and
+                            -not ($Arguments.Count -eq 9 -and
+                                [string]$Arguments[8] -ceq '--skip-busy-profiles')) -or
                         [string]$Arguments[4] -cne '--manifest' -or
                         [string]$Arguments[6] -cne '--output') {
                         throw 'target-runtime plan mock received unexpected arguments'
