@@ -49,6 +49,10 @@ func globbedStateMutation(facts actionfacts.Facts) bool {
 		if command.Effect == actionfacts.EffectPreview || command.Dialect != actionfacts.DialectPOSIX {
 			continue
 		}
+		// An unquoted -name/-path glob leaves find with no facts (GAP-2498).
+		if findGlobStateMutation(facts, command, dirs[index]) {
+			return true
+		}
 		words, ok := stateOperandWords(command)
 		if !ok {
 			continue
