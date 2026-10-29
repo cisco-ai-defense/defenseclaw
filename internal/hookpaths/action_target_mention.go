@@ -1607,6 +1607,19 @@ func actionProtectedStatePath(value, home string) bool {
 	if err == nil && actionProtectedStateRelative(filepath.ToSlash(relative)) {
 		return true
 	}
+	// The entry itself is state even when it is a link the user made to a
+	// file elsewhere: a move or rename onto it replaces the state entry.
+	// Its directory is followed and its name kept, so mv a.txt /ext/y/
+	// config.yaml with y -> ~/.defenseclaw names the entry when config.yaml
+	// links out of the tree, as it does when config.yaml is a file (GAP-2560).
+	if name := filepath.Base(value); name != "." && name != ".." && name != string(filepath.Separator) {
+		if parent, ok := ResolveWriteTarget(filepath.Dir(value)); ok {
+			relative, err := filepath.Rel(activeHome, filepath.Join(parent, name))
+			if err == nil && actionProtectedStateRelative(filepath.ToSlash(relative)) {
+				return true
+			}
+		}
+	}
 	_, same := ResolveActiveStateHardlinkTarget(resolved, home)
 	return same
 }
