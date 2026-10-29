@@ -18,7 +18,8 @@ import (
 // script walk their own directories from where the parent runs, so a cd
 // inside the script moves them (and never the outer shell), and a chain of
 // relative cds after ; is bounded instead of doubling the directory set per
-// cd (14 of them took 93 s per hook call).
+// cd (14 of them took 93 s per hook call). A wrapper call with a glob
+// operand (`sudo rm -rf hooks/*`) is judged as the program it runs.
 func TestR105GAP2485NestedScriptCdAndChainCost(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("POSIX shell forms")
@@ -43,7 +44,15 @@ func TestR105GAP2485NestedScriptCdAndChainCost(t *testing.T) {
 		{"cd chain then state", strings.Join(append(chain, "rm -rf ~/.defenseclaw/hooks"), "; "), true, ""},
 		{"cd chain then cd state", strings.Join(append(chain, "cd ~/.defenseclaw", "rm -rf hooks/*"), "; "), true, ""},
 		{"state cd then cd chain", strings.Join(append([]string{"cd ~/.defenseclaw"}, append(chain, "rm -rf hooks/*")...), "; "), true, ""},
+		{"N5 sudo after cd", "cd ~/.defenseclaw && sudo rm -rf hooks/*", true, ""},
+		{"N10 env after cd", "cd ~/.defenseclaw && env rm -rf hooks/*", true, ""},
+		{"N13 nohup background", "cd ~/.defenseclaw && nohup rm -rf hooks/* &", true, ""},
+		{"N19 timeout after cd", "cd ~/.defenseclaw && timeout 5 rm -rf hooks/*", true, ""},
+		{"sudo -u after cd", "cd ~/.defenseclaw && sudo -u root rm -rf instal*", true, ""},
 		// Allowed and quiet.
+		{"sudo project cleanup", "cd ~/proj2 && sudo rm -rf build/*", false, ""},
+		{"sudo state log cleanup", "cd ~/.defenseclaw/logs && sudo rm -f *.log", false, ""},
+		{"timeout project cleanup", "timeout 5 rm -rf build/*", false, ""},
 		{"nested cd does not move the outer shell", "sh -c \"cd ~/.defenseclaw\"; rm -rf hooks/*", false, ""},
 		{"nested project cleanup", "sh -c \"cd ~/proj2; rm -rf build/*\"", false, ""},
 		{"monorepo cd chain", strings.Join(benignChain, "; "), false, ""},
