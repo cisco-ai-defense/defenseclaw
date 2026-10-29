@@ -2144,6 +2144,10 @@ func actionWindowsTargetMentionAs(command, cwd, home string, depth int, stateOnl
 	// Quotes that are literal in the outer command do not stop expansion there.
 	raw := actionWindowsScan(command, grammar)
 	rawWords, rawOK := raw.words, raw.ok
+	// printBodies are pwsh/powershell -Command bodies read on their own
+	// below that only print or run a read-only git command: their quoted ~
+	// is text there, as in the same body on its own (GAP-1473 RV18-1).
+	var printBodies map[string]bool
 	if rawOK && actionWindowsInvokedTextMention(rawWords, cwd, home, depth, stateOnly) {
 		return true
 	}
@@ -2175,8 +2179,15 @@ func actionWindowsTargetMentionAs(command, cwd, home string, depth int, stateOnl
 					break
 				}
 				if strings.EqualFold(rawWords[j], "-command") || strings.EqualFold(rawWords[j], "-c") {
-					if actionWindowsTargetMention(rawWords[j+1], cwd, home, depth+1, stateOnly, actionfacts.DialectPowerShell) {
+					body := rawWords[j+1]
+					if actionWindowsTargetMention(body, cwd, home, depth+1, stateOnly, actionfacts.DialectPowerShell) {
 						return true
+					}
+					if actionWindowsPrintOnlyCommandBody(body, cwd, home) {
+						if printBodies == nil {
+							printBodies = make(map[string]bool)
+						}
+						printBodies[body] = true
 					}
 					break
 				}
@@ -2235,18 +2246,29 @@ func actionWindowsTargetMentionAs(command, cwd, home string, depth int, stateOnl
 	var directoryStack []string
 	for _, span := range actionWindowsResolvedSpans(words, cwd, home) {
 		for j, word := range span.words {
-			if !skip[span.start+j] && mentions(word, effectiveCWD) {
+			if !skip[span.start+j] && !printBodies[word] && mentions(word, effectiveCWD) {
 				return true
 			}
 		}
 		actionWindowsAdvanceDirectory(span.words, home, &effectiveCWD, &directoryStack)
 	}
 	for i, word := range words {
-		if !skip[i] && mentions(word, cwd) {
+		if !skip[i] && !printBodies[word] && mentions(word, cwd) {
 			return true
 		}
 	}
 	return false
+}
+
+// actionWindowsPrintOnlyCommandBody reports a pwsh/powershell -Command body
+// that only prints or runs a read-only git command in both readings: as
+// shell words (actionPowerShellPrintOnlyBody: no redirect, assignment,
+// function or substitution) and as PowerShell statements
+// (actionWindowsReadingWritesNothing: no subexpression or script block).
+// Any writer body keeps the whole-text reading of its outer word.
+func actionWindowsPrintOnlyCommandBody(body, cwd, home string) bool {
+	return actionPowerShellPrintOnlyBody(body, home) &&
+		actionWindowsReadingWritesNothing(body, cwd, home, 0, actionfacts.DialectPowerShell)
 }
 
 // actionWindowsPOSIXShellMention reads the script that a POSIX shell (Git
