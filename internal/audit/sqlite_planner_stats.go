@@ -91,6 +91,16 @@ func (s *Store) RefreshPlannerStatistics(ctx context.Context) (bool, error) {
 		// 1.0.3 or 1.0.4). Without one SQLite prefers it over the selective
 		// analyzed index (the GAP-0233 misplan), so the first complete pass
 		// of a process takes the statistics of just those targets.
+		//
+		// The same state follows a first pass that yielded part way and a
+		// gateway restart (rpm upgrade, reboot): the history tables already
+		// have statistics, so last > 0, and the targets after the one it
+		// yielded at have none. These passes yield to a waiting write too,
+		// and the next pass lists what is still missing: on a multi-gigabyte
+		// store from 1.0.2 a pass that kept the connection left the hooks of
+		// the rest of the ~100 s unanswered (GAP-2505). The hooks' ledger
+		// lookups plan the same seeks with partial statistics
+		// (TestHookLedgerLookupsSeekTheFullKeyWithoutPlannerStatistics).
 		if s.plannerStatsComplete.Load() {
 			return false, nil
 		}
@@ -101,9 +111,10 @@ func (s *Store) RefreshPlannerStatistics(ctx context.Context) (bool, error) {
 			if s.walPressure.Load() {
 				return false, nil
 			}
-			// An index without statistics misplans the hooks' lookups
-			// (GAP-0233): taking them does not yield.
-			if err := s.analyzeOne(ctx, target, false); err != nil {
+			if err := s.analyzeOne(ctx, target, true); err != nil {
+				if errors.Is(err, errPlannerStatsYielded) {
+					return false, nil
+				}
 				return false, err
 			}
 		}

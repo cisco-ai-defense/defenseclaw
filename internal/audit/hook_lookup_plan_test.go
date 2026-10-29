@@ -5,6 +5,7 @@ package audit
 
 import (
 	"database/sql"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -30,6 +31,61 @@ func TestHookLedgerLookupsSeekTheFullKeyWithoutPlannerStatistics(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	assertHookLedgerLookupPlans(t, store, "no statistics")
+
+	// A first pass that yielded part way (and a restart) leaves statistics
+	// for the indexes before the one it yielded at: here the unique keys of
+	// the identifier ledger, which describe the connector prefix as every
+	// row, and none for idx_correlation_identifiers_event. The lookups keep
+	// their seeks, so the passes that finish the statistics may yield too
+	// (RV-ha8-2505).
+	if _, err := store.db.Exec(`ANALYZE sqlite_schema`); err != nil {
+		t.Fatal(err)
+	}
+	indexes, err := store.db.Query(`SELECT name FROM sqlite_schema WHERE type='index' AND tbl_name='correlation_identifiers' AND name<>'idx_correlation_identifiers_event'`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var names []string
+	for indexes.Next() {
+		var name string
+		if err := indexes.Scan(&name); err != nil {
+			t.Fatal(err)
+		}
+		names = append(names, name)
+	}
+	if err := indexes.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if len(names) == 0 {
+		t.Fatal("fixture: correlation_identifiers has no other index")
+	}
+	const ledgerRows = 1000000
+	for _, name := range names {
+		var columns int
+		if err := store.db.QueryRow(`SELECT COUNT(*) FROM pragma_index_info(?)`, name).Scan(&columns); err != nil {
+			t.Fatal(err)
+		}
+		stat := []string{strconv.Itoa(ledgerRows), strconv.Itoa(ledgerRows)}
+		for i := 1; i < columns; i++ {
+			rows := ledgerRows
+			for j := 0; j < i; j++ {
+				rows /= 100
+			}
+			stat = append(stat, strconv.Itoa(max(rows, 1)))
+		}
+		if _, err := store.db.Exec(`INSERT INTO sqlite_stat1(tbl, idx, stat) VALUES ('correlation_identifiers', ?, ?)`, name, strings.Join(stat, " ")); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := store.db.Exec(`ANALYZE sqlite_schema`); err != nil {
+		t.Fatal(err)
+	}
+	assertHookLedgerLookupPlans(t, store, "partial statistics")
+}
+
+func assertHookLedgerLookupPlans(t *testing.T, store *Store, state string) {
+	t.Helper()
 	plan := func(query string, args ...any) []string {
 		t.Helper()
 		rows, err := store.db.Query(`EXPLAIN QUERY PLAN `+query, args...)
@@ -73,17 +129,17 @@ func TestHookLedgerLookupsSeekTheFullKeyWithoutPlannerStatistics(t *testing.T) {
 					continue
 				}
 				if !strings.Contains(line, "connector_instance_id=? AND namespace=? AND identifier_kind=? AND value_digest=?") {
-					t.Fatalf("identifier match (mirror %v, %q) does not seek the full key: %q", mirror != nil, tail, lines)
+					t.Fatalf("%s: identifier match (mirror %v, %q) does not seek the full key: %q", state, mirror != nil, tail, lines)
 				}
 				seeks++
 			}
 			if seeks != len(identifiers) {
-				t.Fatalf("identifier match (mirror %v, %q) seeks %d identifiers, want %d: %q", mirror != nil, tail, seeks, len(identifiers), lines)
+				t.Fatalf("%s: identifier match (mirror %v, %q) seeks %d identifiers, want %d: %q", state, mirror != nil, tail, seeks, len(identifiers), lines)
 			}
 		}
 	}
 	lines := plan(toolChainSessionDigestSQL, "event", string(connector))
 	if len(lines) == 0 || !strings.Contains(lines[0], "idx_correlation_identifiers_event (semantic_event_id=?)") {
-		t.Fatalf("tool-chain session lookup does not seek the event's identifiers: %q", lines)
+		t.Fatalf("%s: tool-chain session lookup does not seek the event's identifiers: %q", state, lines)
 	}
 }
