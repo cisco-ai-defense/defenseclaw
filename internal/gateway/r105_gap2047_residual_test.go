@@ -31,9 +31,9 @@ func TestR105GAP2047ResidualStateOperands(t *testing.T) {
 		}
 	}
 	rows := []r105StateRow{
-		{"xargs here-string installer", "xargs rm -rf <<< ~/.defenseclaw/installer", true, "classifier seam GAP-2047: actionfacts parses POSIX sh, where <<< is a syntax error, so an xargs here-string gives no facts (needs the bash here-string grammar)"},
-		{"xargs here-string config", "xargs rm -f <<< ~/.defenseclaw/config.yaml", true, "classifier seam GAP-2047: actionfacts parses POSIX sh, where <<< is a syntax error, so an xargs here-string gives no facts (needs the bash here-string grammar)"},
-		{"xargs here-string quoted $HOME hooks", `xargs rm -rf <<< "$HOME/.defenseclaw/hooks"`, true, "classifier seam GAP-2047: actionfacts parses POSIX sh, where <<< is a syntax error, so an xargs here-string gives no facts (needs the bash here-string grammar)"},
+		{"xargs here-string installer", "xargs rm -rf <<< ~/.defenseclaw/installer", true, ""},
+		{"xargs here-string config", "xargs rm -f <<< ~/.defenseclaw/config.yaml", true, ""},
+		{"xargs here-string quoted $HOME hooks", `xargs rm -rf <<< "$HOME/.defenseclaw/hooks"`, true, ""},
 		{"symlinked root trailing slash", "rm -rf dclink/", true, ""},
 		{"symlinked root tree", "rm -rf dclink/installer", true, ""},
 		{"symlinked root config", "rm -f dclink/config.yaml", true, ""},
@@ -53,8 +53,8 @@ func TestR105GAP2047ResidualStateOperands(t *testing.T) {
 		{"git -C hooks clean", "git -C ~/.defenseclaw/hooks clean -fd", true, ""},
 		{"git -C home clean state", "git -C ~ clean -fdx .defenseclaw", true, ""},
 		// Allowed and quiet.
-		{"xargs here-string project", "xargs rm -f <<< build/a.o", false, "classifier seam GAP-2047: actionfacts parses POSIX sh, where <<< is a syntax error, so an xargs here-string gives no facts (needs the bash here-string grammar)"},
-		{"xargs here-string read", "xargs cat <<< ~/.defenseclaw/config.yaml", false, "classifier seam GAP-2047: actionfacts parses POSIX sh, where <<< is a syntax error, so an xargs here-string gives no facts (needs the bash here-string grammar)"},
+		{"xargs here-string project", "xargs rm -f <<< build/a.o", false, ""},
+		{"xargs here-string read", "xargs cat <<< ~/.defenseclaw/config.yaml", false, "parser-uncertainty shadow lane: an invalid POSIX parse keeps a detection-only catalog match; the allow is asserted in TestR105GAP2047HereStringPipeTwin"},
 		{"symlinked root link only", "rm -f dclink", false, ""},
 		{"symlinked root list", "ls -la dclink/", false, ""},
 		{"symlinked root log cleanup", "rm -f dclink/logs/gateway.log", false, ""},

@@ -799,7 +799,14 @@ func withActiveStateTargetMention(
 	// A pattern, brace list, rsync or git clean that expands onto the
 	// state names no path fact, so it is proved from the shell words
 	// (GAP-2047); so is an archive extraction into it (GAP-2415).
-	if !globbedStateMutation(facts) && !globbedStateMutationThroughLink(facts, request) &&
+	// A bash here-string, which the POSIX parse rejects, is judged by its
+	// POSIX twin alone (GAP-2047 row a): a read through one names state but
+	// changes none.
+	hereStringMutates, hereStringJudged := hereStringStateMutation(facts, request)
+	if hereStringJudged && !hereStringMutates {
+		return findings
+	}
+	if !hereStringMutates && !globbedStateMutation(facts) && !globbedStateMutationThroughLink(facts, request) &&
 		!archiveExtractsIntoState(facts, request) {
 		command, known := trustedBashCommandInput(request.Input)
 		if !known || !hookpaths.ActionStateTargetMention(command, request.Input.CWD, request.Input.ActiveHome) &&
