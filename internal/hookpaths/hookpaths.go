@@ -1534,6 +1534,8 @@ type shellLinks struct {
 	wrappedCds bool
 	// findMoves are the find -exec mv calls read as moves (GAP-2533).
 	findMoves []findMove
+	// linkTexts are the source texts of the link calls (RV-c4-1).
+	linkTexts []string
 }
 
 // merge adds the links a nested literal shell body makes.
@@ -1545,6 +1547,7 @@ func (l *shellLinks) merge(inner shellLinks) {
 	l.globalOpaque = l.globalOpaque || inner.globalOpaque
 	l.opaqueScopes = append(l.opaqueScopes, inner.opaqueScopes...)
 	l.copyDestinations = append(l.copyDestinations, inner.copyDestinations...)
+	l.linkTexts = append(l.linkTexts, inner.linkTexts...)
 }
 
 // literalShellBody returns the body of a POSIX shell called as sh -c BODY with
@@ -1760,6 +1763,7 @@ func commandLinks(command, cwd, home string, facts map[string]string, record, ne
 			if call == linkCall {
 				workingDirectory = linkCWD
 			}
+			links.linkTexts = append(links.linkTexts, command[call.Pos().Offset():call.End().Offset()])
 			if slices.Contains(static, false) || !links.add(program, words[1:], workingDirectory) {
 				links.unknown(true)
 			}
@@ -1784,6 +1788,7 @@ func commandLinks(command, cwd, home string, facts map[string]string, record, ne
 			}
 			switch {
 			case option:
+				links.linkTexts = append(links.linkTexts, command[call.Pos().Offset():call.End().Offset()])
 				if slices.Contains(static, false) || !links.add(program, words[1:], cwd) {
 					links.unknown(true)
 				}
@@ -1911,10 +1916,12 @@ func commandLinks(command, cwd, home string, facts map[string]string, record, ne
 		case renames || moves && cds:
 			stable = false
 		case moves:
-			stable = links.followRenames(renameOps) && links.findMovesClear(findMoves) && links.aliasesAwayFromState(cwd, home)
+			stable = links.followRenames(renameOps) && links.findMovesClear(findMoves, home) && links.aliasesAwayFromState(cwd, home)
 		}
-		if stable && wrappedCds {
-			stable = links.aliasesAwayFromState(cwd, home)
+		// A nested cd or a find -exec mv may also go below a linked
+		// directory through a disk link to state (RV-c4-1).
+		if stable && (wrappedCds || len(findMoves) > 0) {
+			stable = links.aliasesAwayFromState(cwd, home) && links.linkedTreesClear(command, cwd, home)
 		}
 		if !stable || cds && links.relative && linkCall == nil && !linkDirsKnown {
 			links.unknown(true)

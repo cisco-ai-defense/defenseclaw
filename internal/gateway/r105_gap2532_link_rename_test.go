@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
@@ -13,7 +14,8 @@ import (
 // TestR105LinkRenameAndNestedCd: a static mv next to an ordinary project
 // link is ordinary work (GAP-2532); a link to SSH or DefenseClaw state
 // stays opaque when a nested shell changes directory or find -exec renames
-// it (GAP-2533).
+// it (GAP-2533), also through a disk link below a linked outside directory
+// (RV-c4-1).
 func TestR105LinkRenameAndNestedCd(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("posix shell rows")
@@ -35,6 +37,22 @@ func TestR105LinkRenameAndNestedCd(t *testing.T) {
 	if err := os.Symlink(filepath.Join(home, ".ssh", "authorized_keys"), filepath.Join(cwd, "keys.orig")); err != nil {
 		t.Fatal(err)
 	}
+	// RV-c4-1: a directory outside the project with disk links to SSH and
+	// DefenseClaw state, and a clean one.
+	ext, clean := t.TempDir(), t.TempDir()
+	if err := os.Symlink(filepath.Join(home, ".ssh"), filepath.Join(ext, "x")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(home, ".defenseclaw"), filepath.Join(ext, "y")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(clean, "lib"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(clean, "lib"), filepath.Join(clean, "current")); err != nil {
+		t.Fatal(err)
+	}
+	place := strings.NewReplacer("{E}", ext, "{C}", clean)
 	t.Setenv("HOME", home)
 	rows := []struct {
 		command string
@@ -96,6 +114,22 @@ func TestR105LinkRenameAndNestedCd(t *testing.T) {
 		{`ln -s ~ h; sh -c "cd h && echo x > .defenseclaw/config.yaml"`, true},
 		{`ln -s build/keys.orig k; find . -name "*.orig" -exec mv {} build/ \;; echo key >> k`, true},
 		{`ln -s ~/.ssh s; find . -name "s" -exec mv {} build/ \;; echo key >> build/s/authorized_keys`, true},
+		// RV-c4-1: a nested cd, env -C, find -execdir or find -exec mv below a
+		// linked outside directory, through its disk link to state.
+		{`ln -s {E} e; bash -c "cd e/x && echo k >> authorized_keys"`, true},
+		{`ln -s {E} e; bash -c "cd e && cd x && echo k >> authorized_keys"`, true},
+		{`ln -s {E} e; sh -c "cd e/x; echo k >> authorized_keys"`, true},
+		{`ln -s {E} e; bash -c "cd e/y && echo z > config.yaml"`, true},
+		{`ln -s {E} e; find . -name authorized_keys -exec mv {} e/x/ \;`, true},
+		{`ln -s {E} e; find . -name "*.txt" -exec mv {} e/x/ \;`, true},
+		{`ln -s {E} e; find e/x -maxdepth 0 -execdir sh -c "echo k >> x/authorized_keys" \;`, true},
+		{`ln -s {E} e; find e/ -name x -exec mv {} build/ \;; echo k >> build/x/authorized_keys`, true},
+		// Benign: the nested cd does not go through the link, or the linked
+		// directory holds no disk link to state.
+		{`ln -s {E} ext; bash -c "cd src && ls"`, false},
+		{`ln -s {C} sdk; sh -c "cd sdk/current && ls"`, false},
+		{`ln -s {C} sdk; bash -c "cd sdk && ls lib"`, false},
+		{`ln -s {C} sdk; find . -name "*.orig" -exec mv {} sdk/lib/ \;`, false},
 	}
 	for _, connectorName := range []string{"claudecode", "codex"} {
 		installDefaultProfileConnector(t, connectorName)
@@ -109,7 +143,7 @@ func TestR105LinkRenameAndNestedCd(t *testing.T) {
 					}
 				}()
 				findings = dispatchTrustedAction(t.Context(), trustedActionRequest{
-					Input:              actionfacts.Input{Tool: "Bash", Command: row.command, CWD: cwd, ActiveHome: home},
+					Input:              actionfacts.Input{Tool: "Bash", Command: place.Replace(row.command), CWD: cwd, ActiveHome: home},
 					Connector:          connectorName,
 					EnforcementCapable: true,
 				})

@@ -2,6 +2,7 @@ package hookpaths
 
 import (
 	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"slices"
@@ -180,52 +181,27 @@ func (l *shellLinks) followRenames(ops []renameOp) bool {
 	return true
 }
 
-// aliasesInProject reports that every link the command makes, and every
-// name its target reaches through the other links and the disk, lies
-// strictly inside the working directory, with no .. step and away from SSH
-// and DefenseClaw state. Such a link stays an ordinary project link when it
-// is renamed (GAP-2532).
-func (l shellLinks) aliasesInProject(cwd, home string) bool {
-	return l.aliasesReach(cwd, home, true)
-}
-
 // aliasesAwayFromState reports that no link the command makes, nor any
-// name its target reaches, can overlap SSH or DefenseClaw state: a target
-// that holds the home directory (/, .., ~) overlaps it. Such links stay
-// known when a nested shell or a wrapper changes directory (GAP-2533).
+// name its target reaches through the other links and the disk, can
+// overlap SSH or DefenseClaw state: a target that holds the home directory
+// (/, .., ~) overlaps it. Such links stay known when a nested shell or a
+// wrapper changes directory (GAP-2533) or a static mv renames (GAP-2532).
+// A name that goes through an existing file that is not a directory names
+// nothing and is skipped (ln -s README.md docs.md also names
+// docs.md/README.md).
 func (l shellLinks) aliasesAwayFromState(cwd, home string) bool {
-	return l.aliasesReach(cwd, home, false)
-}
-
-// aliasesReach is aliasesInProject when inProject is set, and
-// aliasesAwayFromState otherwise. A name that goes through an existing
-// file that is not a directory names nothing and is skipped (GAP-2532:
-// ln -s README.md docs.md also names docs.md/README.md).
-func (l shellLinks) aliasesReach(cwd, home string, inProject bool) bool {
 	if cwd == "" || home == "" || !filepath.IsAbs(cwd) {
 		return false
 	}
-	root, ok := ResolveWriteTarget(cwd)
-	if !ok {
+	if _, ok := ResolveWriteTarget(cwd); !ok {
 		return false
 	}
-	ssh := filepath.Join(home, ".ssh")
-	var sensitive []string
-	for _, path := range append([]string{ssh, filepath.Join(home, ".defenseclaw")}, ProtectedAuthorizedKeysPaths(home)...) {
-		sensitive = append(sensitive, filepath.Clean(path))
-		if resolved, ok := ResolveWriteTarget(path); ok {
-			sensitive = append(sensitive, resolved)
-		}
-	}
-	protected := newProtectedFiles(home)
+	state := newStateReach(home)
 	reach := Links{links: l}
 	for _, alias := range l.aliases {
 		for _, form := range append([]string{alias.target}, reach.AliasTargets(alias.target, false)...) {
-			if inProject && hasDotDotStep(form) {
-				return false
-			}
 			resolved, ok := ResolveWriteTarget(form)
-			if !ok && !inProject {
+			if !ok {
 				resolved, ok = resolveMissingDotDot(form)
 			}
 			if !ok {
@@ -234,17 +210,180 @@ func (l shellLinks) aliasesReach(cwd, home string, inProject bool) bool {
 				}
 				return false
 			}
-			if rest, under := cutPathPrefix(resolved, root); inProject && (!under || rest == "") {
+			if state.hits(resolved) {
 				return false
 			}
-			for _, path := range sensitive {
-				if pathsOverlap(resolved, path) {
-					return false
+		}
+	}
+	return true
+}
+
+// stateReach tests resolved paths against SSH and DefenseClaw state: the
+// state paths and their resolved forms, the authorized-keys files and the
+// DefenseClaw state files.
+type stateReach struct {
+	home, ssh string
+	sensitive []string
+	protected protectedFiles
+}
+
+func newStateReach(home string) stateReach {
+	state := stateReach{home: home, ssh: filepath.Join(home, ".ssh"), protected: newProtectedFiles(home)}
+	for _, path := range append([]string{state.ssh, filepath.Join(home, ".defenseclaw")}, ProtectedAuthorizedKeysPaths(home)...) {
+		state.sensitive = append(state.sensitive, filepath.Clean(path))
+		if resolved, ok := ResolveWriteTarget(path); ok {
+			state.sensitive = append(state.sensitive, resolved)
+		}
+	}
+	return state
+}
+
+// hits reports a resolved path that is state, lies in it or holds it.
+func (s stateReach) hits(resolved string) bool {
+	for _, path := range s.sensitive {
+		if pathsOverlap(resolved, path) {
+			return true
+		}
+	}
+	return s.inState(resolved)
+}
+
+func (s stateReach) inState(resolved string) bool {
+	return protectedReachPath(resolved, s.protected, s.ssh) || actionProtectedStatePath(resolved, s.home)
+}
+
+// movedMatchHits reports that a match of pattern moved into the resolved
+// directory dir can land on or in state.
+func (s stateReach) movedMatchHits(dir, pattern string) bool {
+	for _, path := range s.sensitive {
+		if pathAtOrUnder(dir, path) {
+			return true
+		}
+		rest, under := cutPathPrefix(path, dir)
+		if !under || rest == "" {
+			continue
+		}
+		first := strings.SplitN(filepath.ToSlash(rest), "/", 2)[0]
+		if matched, err := filepath.Match(pattern, first); err != nil || matched {
+			return true
+		}
+	}
+	return s.inState(dir)
+}
+
+// maxLinkedTreeEntries bounds the walk of the directories the links name;
+// a larger tree is read as one that may hold a link to state.
+const maxLinkedTreeEntries = 20000
+
+// linkedTreesClear reports that a directory change in a nested shell or a
+// wrapper, or a find -exec mv, cannot reach SSH or DefenseClaw state through
+// a disk link below a directory a link of the command names (RV-c4-1). The
+// statement walk does not place those directory changes, so the disk links
+// under the link are checked instead: the walk runs only when a command
+// word outside the link calls may name a link, and finds no disk link
+// that reaches state. A plain cd resolves such disk links itself.
+func (l shellLinks) linkedTreesClear(command, cwd, home string) bool {
+	state := newStateReach(home)
+	reach := Links{links: l}
+	var dirs []string
+	for _, alias := range l.aliases {
+		for _, form := range append([]string{alias.target}, reach.AliasTargets(alias.target, false)...) {
+			resolved, ok := ResolveWriteTarget(form)
+			if !ok {
+				resolved, ok = resolveMissingDotDot(form)
+			}
+			if !ok {
+				if throughFile(form) {
+					continue
 				}
-			}
-			if protectedReachPath(resolved, protected, ssh) || actionProtectedStatePath(resolved, home) {
 				return false
 			}
+			if info, err := os.Stat(resolved); err == nil && info.IsDir() {
+				dirs = append(dirs, resolved)
+			}
+		}
+	}
+	if len(dirs) == 0 || !l.mayEnterLink(command, cwd) {
+		return true
+	}
+	return treesAwayFromState(dirs, state)
+}
+
+// mayEnterLink reports that a word of command other than the link calls
+// names a link (its base name), may expand or match one, makes find follow
+// links, or is a dangling disk link in cwd that may name a new link.
+func (l shellLinks) mayEnterLink(command, cwd string) bool {
+	if strings.ContainsAny(command, "$`*?[{\\") {
+		return true
+	}
+	words := commandTokens(command)
+	for _, text := range l.linkTexts {
+		for _, word := range commandTokens(text) {
+			if i := slices.Index(words, word); i >= 0 {
+				words = slices.Delete(words, i, i+1)
+			}
+		}
+	}
+	names := make(map[string]bool)
+	for _, alias := range l.aliases {
+		names[filepath.Base(alias.name)] = true
+	}
+	for _, word := range words {
+		if names[word] || word == "-L" || word == "-follow" {
+			return true
+		}
+		path := absolutePath(word, cwd)
+		if info, err := os.Lstat(path); err == nil && info.Mode()&os.ModeSymlink != 0 {
+			if _, err := filepath.EvalSymlinks(path); err != nil {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// commandTokens splits command text into path components and words.
+func commandTokens(text string) []string {
+	return strings.FieldsFunc(text, func(r rune) bool {
+		return strings.ContainsRune(" \t\n\r/\"';&|()<>=,", r)
+	})
+}
+
+// treesAwayFromState walks dirs and the directories their disk links reach,
+// and reports that no disk link reaches state.
+func treesAwayFromState(dirs []string, state stateReach) bool {
+	seen := make(map[string]bool)
+	queue := slices.Clone(dirs)
+	entries := 0
+	for len(queue) > 0 {
+		dir := queue[0]
+		queue = queue[1:]
+		if seen[dir] {
+			continue
+		}
+		seen[dir] = true
+		clear := true
+		err := filepath.WalkDir(dir, func(path string, entry fs.DirEntry, err error) error {
+			entries++
+			if err != nil || entries > maxLinkedTreeEntries {
+				clear = false
+				return filepath.SkipAll
+			}
+			if entry.Type()&fs.ModeSymlink == 0 {
+				return nil
+			}
+			resolved, ok := ResolveWriteTarget(path)
+			if !ok || state.hits(resolved) {
+				clear = false
+				return filepath.SkipAll
+			}
+			if info, err := os.Stat(resolved); err == nil && info.IsDir() {
+				queue = append(queue, resolved)
+			}
+			return nil
+		})
+		if err != nil || !clear {
+			return false
 		}
 	}
 	return true
@@ -415,14 +554,22 @@ func parseFindMove(program string, words []string, static []bool, cwd string) (f
 // findMovesClear reports that no find -exec mv can move a link or a
 // directory holding one (no name of a link matches the pattern), and that
 // no moved match can land on or above a link name or target. The
-// destination is checked against both the written and the resolved names.
-func (l shellLinks) findMovesClear(moves []findMove) bool {
+// destination is checked against both the written and the resolved names,
+// read through the links of the command.
+func (l shellLinks) findMovesClear(moves []findMove, home string) bool {
+	state := newStateReach(home)
+	reach := Links{links: l}
 	for _, move := range moves {
-		dests := []string{move.dest}
-		if resolved, ok := ResolveWriteTarget(move.dest); ok {
-			dests = append(dests, resolved)
-		} else {
-			return false
+		// The destination is read through the links of the command, as the
+		// plain write is (RV-c4-1): a match moved into a link that reaches
+		// state is a state write.
+		var dests []string
+		for _, form := range append([]string{move.dest}, reach.AliasTargets(move.dest, false)...) {
+			resolved, ok := ResolveWriteTarget(form)
+			if !ok || move.dir && state.movedMatchHits(resolved, move.pattern) || !move.dir && state.hits(resolved) {
+				return false
+			}
+			dests = append(dests, filepath.Clean(form), resolved)
 		}
 		for _, alias := range l.aliases {
 			for _, part := range strings.Split(filepath.ToSlash(filepath.Clean(alias.name)), "/") {
