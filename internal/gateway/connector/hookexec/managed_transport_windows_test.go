@@ -337,6 +337,43 @@ func TestManagedGatewayPortListeningSeesIPv6Listener(t *testing.T) {
 	}
 }
 
+// A running service with no IPv4 listener has not bound its port yet, even
+// when another process listens on the port over IPv6 only: the hook dials
+// tcp4, so that is a peer failure the restart loop may retry, never an
+// outage an open fail mode lets through.
+func TestRunningManagedGatewayServiceNeedsAnIPv4Listener(t *testing.T) {
+	managedTransportTestMu.Lock()
+	defer managedTransportTestMu.Unlock()
+
+	listener := listenManagedTransportTest(t)
+	defer listener.Close()
+	bytesRead := acceptManagedTransportBytes(t, listener)
+	addr := listener.Addr().String()
+	running := func(string) (uint32, error) { return 202, nil }
+	restoreManagedTransportSeams(t, running, func(net.Conn) (uint32, error) { return 202, nil })
+	previousListening, previousIPv4 := managedEnterpriseListening, managedEnterpriseListeningIPv4
+	t.Cleanup(func() { managedEnterpriseListening, managedEnterpriseListeningIPv4 = previousListening, previousIPv4 })
+	managedEnterpriseListening = func(string) (bool, bool) { return true, true }
+	managedEnterpriseListeningIPv4 = func(string) (bool, bool) { return false, true }
+
+	client, err := managedEnterpriseHTTPClient(time.Second, addr, "DefenseClawGateway")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = client.Post("http://"+addr+"/api/v1/hook", "application/json", strings.NewReader(`{"secret":"must-not-leak"}`))
+	if err == nil || !errors.Is(err, errManagedGatewayPeerUnverified) || !errors.Is(err, errGatewayNotConnected) {
+		t.Fatalf("err = %v, want a peer failure for a service without an IPv4 listener", err)
+	}
+	open := Options{ManagedEnterprise: true, SecureClient: true, FailMode: "open"}
+	if ManagedOutageFailsOpen(open, err) {
+		t.Fatalf("an open fail mode let a running service without an IPv4 listener through: %v", err)
+	}
+	_ = listener.Close()
+	if got := <-bytesRead; len(got) != 0 {
+		t.Fatalf("the listener received %d request bytes: %q", len(got), got)
+	}
+}
+
 // A stopped gateway service is an outage only when nothing listens on its
 // port: another process on the port, or a listen table that cannot be read,
 // is an integrity failure that no fail mode lets through.

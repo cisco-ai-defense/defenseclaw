@@ -34,6 +34,7 @@ var (
 	managedEnterpriseQueryServicePID = queryManagedGatewayServicePID
 	managedEnterpriseConnectedPID    = connectedManagedGatewayPID
 	managedEnterpriseListening       = managedGatewayPortListening
+	managedEnterpriseListeningIPv4   = managedGatewayIPv4PortListening
 	managedEnterpriseDialContext     = (&net.Dialer{Timeout: 2 * time.Second}).DialContext
 )
 
@@ -110,7 +111,9 @@ func managedEnterpriseHTTPClient(
 				// connect to such a port only after about 2 seconds of SYN
 				// retries, so one try could take most of a restart budget:
 				// read the listen table instead, and try again shortly.
-				if listening, known := managedEnterpriseListening(canonicalAddr); known && !listening {
+				// Only an IPv4 listener counts here: the hook dials tcp4, and
+				// an IPv6-only listener would turn this into a refused dial.
+				if listening, known := managedEnterpriseListeningIPv4(canonicalAddr); known && !listening {
 					// The service has a PID, so its absence is not proven. The
 					// restart loop may retry, but open must not allow this call.
 					return nil, fmt.Errorf("%w: %w: running service has no listener on %s yet",
@@ -320,27 +323,50 @@ func connectedManagedGatewayPIDForEndpoints(client, server managedIPv4Endpoint) 
 // binding. known is false when either table cannot be read, and the hook
 // then dials as before.
 func managedGatewayPortListening(address string) (listening, known bool) {
-	host, rawPort, err := net.SplitHostPort(address)
-	if err != nil {
-		return false, false
+	listening, known = managedGatewayIPv4PortListening(address)
+	if !known || listening {
+		return listening, known
 	}
-	port, err := strconv.Atoi(rawPort)
-	if err != nil {
-		return false, false
-	}
-	ip := net.ParseIP(host).To4()
-	if ip == nil {
-		return false, false
-	}
-	rows, err := readTCP4OwnerPIDTable()
-	if err != nil {
+	_, port, ok := managedGatewayIPv4Address(address)
+	if !ok {
 		return false, false
 	}
 	rows6, err := readTCP6OwnerPIDTable()
 	if err != nil {
 		return false, false
 	}
-	return tcpTableListensOn(rows, [4]byte(ip), uint16(port)) || tcp6TableListensOn(rows6, uint16(port)), true
+	return tcp6TableListensOn(rows6, port), true
+}
+
+// managedGatewayIPv4PortListening reports whether any process listens on
+// the IPv4 address of address (or on every IPv4 address) and its port: the
+// endpoint the hook dials. known is false when the table cannot be read.
+func managedGatewayIPv4PortListening(address string) (listening, known bool) {
+	ip, port, ok := managedGatewayIPv4Address(address)
+	if !ok {
+		return false, false
+	}
+	rows, err := readTCP4OwnerPIDTable()
+	if err != nil {
+		return false, false
+	}
+	return tcpTableListensOn(rows, ip, port), true
+}
+
+func managedGatewayIPv4Address(address string) ([4]byte, uint16, bool) {
+	host, rawPort, err := net.SplitHostPort(address)
+	if err != nil {
+		return [4]byte{}, 0, false
+	}
+	port, err := strconv.Atoi(rawPort)
+	if err != nil || port < 1 || port > 65535 {
+		return [4]byte{}, 0, false
+	}
+	ip := net.ParseIP(host).To4()
+	if ip == nil {
+		return [4]byte{}, 0, false
+	}
+	return [4]byte(ip), uint16(port), true
 }
 
 // tcp6TableListensOn reports an IPv6 LISTEN row on port at any address.
