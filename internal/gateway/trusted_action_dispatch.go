@@ -812,15 +812,22 @@ func withActiveStateTargetMention(
 	if hereStringJudged && !hereStringMutates && !xargsMutates {
 		return findings
 	}
-	if !hereStringMutates && !xargsMutates && !globbedStateMutation(facts) && !globbedStateMutationThroughLink(facts, request) &&
+	// A managed call whose cwd the gateway cannot see is also judged for
+	// links in the directory the hook client walked its words from
+	// (GAP-2569).
+	linkFacts, linkRequest, placed := managedLinkWalkView(request)
+	throughLink := func(check func(actionfacts.Facts, trustedActionRequest) bool) bool {
+		return check(facts, request) || placed && check(linkFacts, linkRequest)
+	}
+	if !hereStringMutates && !xargsMutates && !globbedStateMutation(facts) && !throughLink(globbedStateMutationThroughLink) &&
 		!findGlobTwinStateMutation(facts, request) &&
 		!archiveExtractsIntoState(facts, request) {
 		command, known := trustedBashCommandInput(request.Input)
 		if !known || !hookpaths.ActionStateTargetMention(command, request.Input.CWD, request.Input.ActiveHome) &&
-			!factsHaveFindHandOff(facts) && !stateOperandThroughLink(facts, request) {
+			!factsHaveFindHandOff(facts) && !throughLink(stateOperandThroughLink) {
 			return findings
 		}
-		if !provenStateMutationPath(facts, request) {
+		if !throughLink(provenStateMutationPath) {
 			return findings
 		}
 	}
@@ -938,6 +945,10 @@ func provenStateCandidateMatches(
 				path.Clean(candidate.Resolved) == path.Clean(projected.ActiveHome) {
 				physical = path.Clean(candidate.Resolved)
 			}
+			if physical == "" {
+				// A link-walk spelling the client walked (GAP-2569).
+				physical, _ = hookpaths.WalkFactTarget(request.ResolvedWriteTargets, candidate.Resolved)
+			}
 		} else {
 			physical, _ = hookpaths.ResolveWriteTarget(candidate.Resolved)
 		}
@@ -994,6 +1005,30 @@ func walkParent(value string) string {
 	return value[:index]
 }
 
+// managedLinkWalkView is a managed hook call placed in the directory the
+// hook client keyed its link-walk facts in (hookpaths.WalkFactPrefix): the
+// client's cwd, or the directory a static cd placed a simple command in
+// (evidenceCWD). A gateway behind ProtectHome receives no cwd of its own, so
+// a relative link spelling (`git -C dclink clean -fdx`) could not be placed
+// (GAP-2569). ok is false when the gateway knows the cwd or the client's is
+// not a plain directory in the caller's home.
+func managedLinkWalkView(request trustedActionRequest) (actionfacts.Facts, trustedActionRequest, bool) {
+	if !request.ProtectedHomeHook || filepath.IsAbs(request.Input.CWD) {
+		return actionfacts.Facts{}, request, false
+	}
+	cwd, home := request.evidenceCWD, request.Input.ActiveHome
+	if !filepath.IsAbs(cwd) {
+		cwd = request.ResolvedWriteTargets[hookpaths.CWDKey]
+	}
+	if !filepath.IsAbs(cwd) || !filepath.IsAbs(home) || hasParentElement(cwd) || strings.ContainsRune(cwd, 0) ||
+		projectRootKey(cwd) != projectRootKey(home) && !insideHome(home, cwd) {
+		return actionfacts.Facts{}, request, false
+	}
+	placed := request
+	placed.Input.CWD = filepath.Clean(cwd)
+	return actionfacts.Analyze(placed.Input), placed, true
+}
+
 // stateLinkResolver resolves a path through links: the hook's resolved
 // write targets first, then the local filesystem when the hook allows it.
 func stateLinkResolver(request trustedActionRequest) func(string) (string, bool) {
@@ -1001,8 +1036,14 @@ func stateLinkResolver(request trustedActionRequest) func(string) (string, bool)
 		if physical, found := request.ResolvedWriteTargets[value]; found {
 			return physical, true
 		}
-		if request.SkipLocalFilesystemResolution || request.ProtectedHomeHook {
+		if request.SkipLocalFilesystemResolution {
 			return "", false
+		}
+		if request.ProtectedHomeHook {
+			// A managed gateway may not read the user's home: the hook
+			// client's walk of the command's words places a link spelling
+			// (GAP-2569).
+			return hookpaths.WalkFactTarget(request.ResolvedWriteTargets, value)
 		}
 		return hookpaths.ResolveWriteTarget(value)
 	}
@@ -1239,7 +1280,14 @@ func stateDirectoryEntryTarget(
 		// before the `..` after it.
 		parentSpelling = walkParent(value)
 	}
-	parent, ok := hookpaths.ResolveWriteTarget(parentSpelling)
+	parent, ok := "", false
+	if request.ProtectedHomeHook {
+		// The client walked the parent as the user (GAP-2569).
+		parent, ok = hookpaths.WalkFactTarget(request.ResolvedWriteTargets, filepath.ToSlash(parentSpelling))
+	}
+	if !ok {
+		parent, ok = hookpaths.ResolveWriteTarget(parentSpelling)
+	}
 	if !ok {
 		return "", false
 	}

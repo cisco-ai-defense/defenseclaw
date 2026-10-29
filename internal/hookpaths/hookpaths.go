@@ -762,7 +762,7 @@ func ResolveConnector(connector, surface, event string, payload []byte) string {
 	}
 	var safeRedirects []RedirectOccurrence
 	opaqueFacts := map[string]string{}
-	var globFacts map[string]string
+	var globFacts, walkFacts map[string]string
 	var unprovenReason string
 	// identities is the file-identity evidence for InstructionIdentityKey:
 	// every existing instruction file a write target names.
@@ -837,6 +837,9 @@ func ResolveConnector(connector, surface, event string, payload []byte) string {
 					links = commandLinksWithFacts(command, cwd, home, sourceFacts, true)
 					safeRedirects = SafeShellRedirectOccurrencesWithFacts(command, cwd, home, sourceFacts)
 					globFacts = actionGlobFacts(command, cwd, home)
+					// Where each link-walk spelling of the command lies, for a
+					// gateway that cannot walk the home itself (GAP-2569).
+					walkFacts = LinkWalkFacts(command, cwd, home)
 					// An unresolved program word alone does not make a
 					// concrete write operand or its link walk incomplete.
 					truncated = truncated || links.opaque
@@ -974,7 +977,7 @@ func ResolveConnector(connector, surface, event string, payload []byte) string {
 	}
 	// A fact that does not fit is omitted; the gateway reads a missing fact
 	// as unknown, so the map need not be marked truncated for it.
-	for _, extra := range []map[string]string{opaqueFacts, globFacts} {
+	for _, extra := range []map[string]string{opaqueFacts, globFacts, walkFacts} {
 		for _, key := range slices.Sorted(maps.Keys(extra)) {
 			entry := len(jsonString(key)) + 1 + len(jsonString(extra[key])) + 1
 			if len(targets)-1 >= MaxWriteTargets || size+entry > maxEncodedTargets {
@@ -1266,6 +1269,10 @@ func Decode(value string) (map[string]string, bool) {
 			return nil, false
 		}
 		if strings.HasPrefix(key, DirectoryFactPrefix) && value != "?" && !filepath.IsAbs(value) {
+			return nil, false
+		}
+		if strings.HasPrefix(key, WalkFactPrefix) &&
+			(!strings.HasPrefix(strings.TrimPrefix(key, WalkFactPrefix), "/") || !strings.HasPrefix(value, "/")) {
 			return nil, false
 		}
 		if strings.HasPrefix(key, SourceLinkFactPrefix) && (value != "0" && value != "1" && value != "?") {
