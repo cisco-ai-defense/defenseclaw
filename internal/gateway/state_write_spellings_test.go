@@ -200,6 +200,30 @@ func TestWrappedFileWriterWritesWhatThePlainCallWrites(t *testing.T) {
 	})
 }
 
+// A static prefix wrapper that runs its child in the caller directory
+// (nohup, env NAME=value) made a wrapped ln an unreadable link, so its
+// destination counted as a possible keys write: nohup ln -sf $(pwd)/a.txt
+// ~/.local/bin/tool blocked while the plain ln is allowed (checker p3i3
+// RV-p3i3-1, GAP-2496). The wrapped ln reads like the plain ln.
+func TestWrappedLinkReadsLikeThePlainLink(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX shell spellings")
+	}
+	judgeHomeStateWriteRows(t, []homeStateWriteRow{
+		{"nohup ln -sf $(pwd)/a.txt ~/.local/bin/tool", false},
+		{"env A=1 ln -s $(pwd)/a.txt ~/.local/bin/tool", false},
+		{"nohup ln -sf ~/project/a.txt ~/.local/bin/tool", false},
+		{"nohup ln -sf $PWD/a.txt ~/.local/bin/tool", false},
+		{"nohup ln -sf `pwd`/a.txt ~/.local/bin/tool", false},
+		{"nohup ln -s $(pwd)/a.txt ~/.local/bin/tool", false},
+		{"ln -sf $(pwd)/a.txt ~/.local/bin/tool", false},
+		{"nohup ln -sf a.txt ~/.defenseclaw/config.yaml", true},
+		{"env A=1 ln -sfn /tmp/x ~/.defenseclaw/hooks", true},
+		{"nohup ln -s ~/.ssh/authorized_keys k; cp a.txt k", true},
+		{"env PATH=/tmp/bin ln -s ~/.ssh/authorized_keys k; cp a.txt k", true},
+	})
+}
+
 // A file writer run through setsid, stdbuf, ionice, taskset, chrt, doas,
 // flock FILE, caffeinate, sudo -i or -s, env -C DIR or builtin command
 // tied no write to the call, while it writes what the plain call writes
