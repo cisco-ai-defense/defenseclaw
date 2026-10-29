@@ -87,10 +87,11 @@ SANDBOX_BUTTON_BAR_MIN_WIDTH = 100
 # stopping it would lose work (sandboxcli.ExitStopKept, #1144).
 SANDBOX_STOP_KEPT_EXIT = 5
 
-# The words of a stop held because the MicroVM's disk sync failed
-# (sandboxapi.UnsyncedStopHeldText, GAP-1163); `sandbox stop NAME --yes`
-# accepts the loss shortly after such a hold (GAP-1594).
-UNSYNCED_STOP_HELD_TEXT = "could not sync its MicroVM's disk before the stop"
+# The words of a stop the daemon refused because the MicroVM's disk could
+# not be synced first (sandboxapi.CodeUnsynced, GAP-0902). On this terminal
+# `sandbox stop` asks itself whether to stop it anyway; without an answer it
+# keeps the sandbox running and exits SANDBOX_STOP_KEPT_EXIT.
+UNSYNCED_STOP_TEXT = "disk could not be synced first"
 
 
 def _run_teeing_stderr(argv: list[str], cwd: str, sink: list[str]) -> int:
@@ -135,6 +136,15 @@ def sandbox_stop_kept_text(name: str) -> str:
         f"so its work that was not pulled would be lost. Free some space in it (defenseclaw sandbox exec {name} "
         f"-- df -h /), pull its work (P), then stop it; delete it (d) to give that work up."
     )
+
+def sandbox_stop_unsynced_text(name: str) -> str:
+    """Why ``sandbox stop`` kept ``name`` running: its MicroVM disk could not be synced first."""
+    return (
+        f"{name} keeps running: its MicroVM's disk could not be synced first, so a stop now would lose what it "
+        f"wrote since its last sync. Save the work you need (pull it with P), then stop it again; "
+        f"defenseclaw sandbox stop {name} --discard-unsynced stops it anyway, losing that."
+    )
+
 
 # Buttons of the panel's control bar, mapped to the key they press.
 SANDBOX_BUTTON_KEYS: dict[str, str] = {
@@ -1179,27 +1189,18 @@ class SandboxPanelMixin:
             SandboxLaunch(("sandbox", "stop", name), os.getcwd(), f"sandbox stop {name}"), stderr_sink=said
         )
         if code == SANDBOX_STOP_KEPT_EXIT:
-            # #1144: the command line kept a copy-mode MicroVM with a full
-            # disk running, because stopping it would lose its unpulled work.
-            message = sandbox_stop_kept_text(name)
+            if UNSYNCED_STOP_TEXT in " ".join("".join(said).split()):
+                # GAP-1595: the MicroVM's disk could not be synced first, and
+                # the command line's own question (asked in this terminal)
+                # was not answered with a yes: it keeps running.
+                message = sandbox_stop_unsynced_text(name)
+            else:
+                # #1144: the command line kept a copy-mode MicroVM with a full
+                # disk running, because stopping it would lose its unpulled work.
+                message = sandbox_stop_kept_text(name)
             self._set_status(message)  # type: ignore[attr-defined]
             self.notify_toast("warn", message)  # type: ignore[attr-defined]
             return
-        if code and UNSYNCED_STOP_HELD_TEXT in " ".join("".join(said).split()):
-            # GAP-1595: the stop was held because the MicroVM's disk sync
-            # failed. Offer what the refusal names, `stop --yes`, here.
-            accepted = await self._confirm(
-                f"Stop {name} anyway?",
-                "It keeps what reached its disk; what was not synced may be lost.",
-                MenuAction("stop_unsynced", "Stop anyway", variant="warning"),
-                cancel_first=True,
-            )
-            if not accepted:
-                self._set_status(f"{name} keeps running.")  # type: ignore[attr-defined]
-                return
-            self._run_sandbox_terminal(
-                SandboxLaunch(("sandbox", "stop", name, "--yes"), os.getcwd(), f"sandbox stop {name} --yes")
-            )
 
     async def _sandbox_delete(self, name: str) -> bool:
         """Delete ``name`` through the command line, which asks; whether it is gone.

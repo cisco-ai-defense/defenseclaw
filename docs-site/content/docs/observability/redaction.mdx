@@ -168,7 +168,8 @@ defenseclaw setup redaction destination send splunk-production \
   --profile sensitive --yes
 defenseclaw setup redaction destination inherit splunk-production --yes
 
-# Ordered routes
+# Ordered routes (move needs at least two routes on the destination;
+# position 2 is outside a one-route list and exits 2)
 defenseclaw setup redaction route add splunk-production critical-findings \
   --position 1 --signal logs --bucket security.finding \
   --min-severity HIGH --route-action send --profile strict --yes

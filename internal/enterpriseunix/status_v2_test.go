@@ -98,7 +98,7 @@ func TestStatusV2BlocksLinuxAndMacOS(t *testing.T) {
 				// Honest values: what the hook renderer resolves (GAP-0037),
 				// whatever the resolver answers on this branch.
 				for name, state := range r.Connectors {
-					if want := enterprisehooks.ManagedHookFailMode(cfg, name); state.EffectiveHookFailMode != want {
+					if want := enterprisehooks.ManagedStatusHookFailMode(cfg, name, goos, state.ManagedHook != nil && *state.ManagedHook); state.EffectiveHookFailMode != want {
 						t.Fatalf("%s: %s effective_hook_fail_mode %q, the renderer resolves %q", action, name, state.EffectiveHookFailMode, want)
 					}
 					if want := cfg.EffectiveGuardrailModeForConnector(name); state.EffectiveMode != want {
@@ -158,8 +158,15 @@ func TestStatusAndVerifyDoNotCertifyManagedHermesSessionHome(t *testing.T) {
 				if got := r.Connectors["hermes"].HooksInstalled; got != enterprisestatus.HooksInstalledUnknown {
 					t.Fatalf("%s certified Hermes hooks from a persistent-home receipt: %q", action, got)
 				}
-				if r.CoverageComplete || r.SecurityComplete {
-					t.Fatalf("%s certified universal Hermes coverage: coverage=%t security=%t", action, r.CoverageComplete, r.SecurityComplete)
+				// The enabled hooks are installed, so coverage_complete is
+				// true; the documented limit keeps security_complete false
+				// and its warning, and the result names it (GAP-1861).
+				if !r.CoverageComplete || r.SecurityComplete {
+					t.Fatalf("%s: coverage=%t security=%t; want coverage true (hooks installed) and security false (session-only home)", action, r.CoverageComplete, r.SecurityComplete)
+				}
+				if why := messagesOf(r.Warnings, enterprisestatus.CodeSecurityIncomplete); !strings.Contains(why, "security_complete is false because of: ") ||
+					!strings.Contains(why, enterprisestatus.CodeStatusDetailUnavailable) || !strings.Contains(why, "coverage_complete is true") {
+					t.Fatalf("%s did not name why security_complete is false: %q", action, why)
 				}
 				messages := messagesOf(r.Warnings, enterprisestatus.CodeStatusDetailUnavailable) +
 					messagesOf(r.Errors, enterprisestatus.CodeStatusDetailUnavailable)
@@ -178,9 +185,12 @@ func TestStatusAndVerifyDoNotCertifyManagedHermesSessionHome(t *testing.T) {
 			// A no-op ensure describes the same managed deployment without
 			// status-v2 blocks. It must not certify coverage that verify rejects.
 			ensure := h.run(Options{Action: ActionEnsure})
-			if ensure.CoverageComplete || ensure.SecurityComplete || ensure.Connectors != nil {
+			if ensure.SecurityComplete || ensure.Connectors != nil {
 				t.Fatalf("ensure certified Hermes or changed its result shape: coverage=%t security=%t connectors=%+v",
 					ensure.CoverageComplete, ensure.SecurityComplete, ensure.Connectors)
+			}
+			if why := messagesOf(ensure.Warnings, enterprisestatus.CodeSecurityIncomplete); !strings.Contains(why, enterprisestatus.CodeStatusDetailUnavailable) {
+				t.Fatalf("the ensure result did not name why security_complete is false: %q", why)
 			}
 			if message := messagesOf(ensure.Warnings, enterprisestatus.CodeStatusDetailUnavailable); !strings.Contains(message, "session-only HERMES_HOME") {
 				t.Fatalf("ensure did not name the unobservable home: %q", message)
@@ -379,8 +389,9 @@ func TestVerifyLeavesAGuardianRecordedHermesFailureToItsTarget(t *testing.T) {
 			if r.ExitCode != 0 || !r.OK {
 				t.Fatalf("one account's own Hermes failure failed host verify: errors=%+v", r.Errors)
 			}
-			if r.CoverageComplete || r.SecurityComplete {
-				t.Fatalf("verify certified Hermes coverage: coverage=%t security=%t", r.CoverageComplete, r.SecurityComplete)
+			if !r.CoverageComplete || r.SecurityComplete {
+				t.Fatalf("coverage=%t security=%t; want coverage true and security false for one account's guardian-recorded Hermes failure, as for every connector and on Windows (GAP-1975)",
+					r.CoverageComplete, r.SecurityComplete)
 			}
 			if msg := messagesOf(r.Warnings, enterprisestatus.CodeStatusDetailUnavailable); !strings.Contains(msg, "NOT COVERED for user bob") {
 				t.Fatalf("verify did not report Bob's Hermes NOT COVERED: %q", msg)
@@ -642,5 +653,70 @@ func TestOpenShellCapabilityAsksTheDockerEngine(t *testing.T) {
 	l.noteOpenShellCapability(context.Background(), docker, true, rows, nil)
 	if l.result.OpenShell != nil {
 		t.Fatal("ensure carries the openshell block")
+	}
+}
+
+// GAP-1975: a Hermes target the guardian failed is reported like a failed
+// target of every other connector and like Windows: a guardian_target_failed
+// warning and security_complete false. It does not make coverage_complete
+// false on Linux and macOS only.
+func TestStatusReportsAGuardianFailedHermesTargetLikeEveryConnector(t *testing.T) {
+	for _, goos := range []string{"linux", "darwin"} {
+		t.Run(goos, func(t *testing.T) {
+			h := newTestHost(t, goos)
+			file, home := "linux-standalone.yaml", "/home/alice"
+			if goos == "darwin" {
+				file, home = "macos-standalone.yaml", "/Users/alice"
+			}
+			raw := strings.Replace(string(readSampleConfig(t, file)), "    claudecode: {}", "    claudecode: {}\n    hermes: {}", 1)
+			requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0"), ConfigFile: writeTempConfig(t, []byte(raw))}))
+			writeHostFile(t, h, h.env.Layout.ManifestPath, "version: 1\ntargets:\n"+
+				"  - user: alice\n    uid: 1001\n    user_home: "+home+"\n    connector: hermes\n    agent_version: 0.21.0\n")
+			writeFreshLedger(t, h)
+			state, err := json.Marshal(map[string]any{"results": []map[string]any{{
+				"user": "alice", "user_home": home, "connector": "hermes", "ok": false, "error": "enterprise hooks: write hermes config: operation not permitted",
+			}}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(h.env.P(filepath.Join(h.env.Layout.DataDir, guardianStateFile)), state, 0o640); err != nil {
+				t.Fatal(err)
+			}
+			r := h.run(Options{Action: ActionStatus})
+			contracttest.Compile(t).ValidateValue(t, "lifecycle-result.schema.json", r)
+			if failed := messagesOf(r.Warnings, codeGuardianTargetFailed); !strings.Contains(failed, "hermes") {
+				t.Fatalf("status did not name the failed Hermes target: %q (warnings %+v)", failed, r.Warnings)
+			}
+			if !r.CoverageComplete || r.SecurityComplete {
+				t.Fatalf("coverage=%t security=%t; want coverage true and security false for a guardian-failed Hermes target, as for every connector and on Windows",
+					r.CoverageComplete, r.SecurityComplete)
+			}
+			if why := messagesOf(r.Warnings, enterprisestatus.CodeSecurityIncomplete); !strings.Contains(why, codeGuardianTargetFailed) || !strings.Contains(why, "coverage_complete is true") {
+				t.Fatalf("status did not name guardian_target_failed for security_complete: %q", why)
+			}
+
+			// Verify reads the same failed target the same way: it fails on
+			// the target, security_complete is false and coverage_complete
+			// follows the installed hooks (GAP-1975, verify half).
+			h.env.ReportLaunchCoverage = func(context.Context, managed.LaunchCoverageReport) error { return nil }
+			readiness := "defenseclaw-gateway enterprise hooks readiness --manifest " + h.env.Layout.ManifestPath + " --json"
+			h.runner.replies = map[string]fakeReply{readiness: {
+				result: CommandResult{Stdout: []byte(`{"ok":false,"scope":"machine_hook_registration","hermes_session_coverage":"not_covered","results":[` +
+					`{"connector":"hermes","user":"alice","user_home":"` + home + `","uid":1001,"ok":false,"error":"hook not registered"}]}`), ExitCode: 1},
+				err: errors.New("readiness exited 1"),
+			}}
+			v := h.run(Options{Action: ActionVerify})
+			contracttest.Compile(t).ValidateValue(t, "lifecycle-result.schema.json", v)
+			if v.ExitCode == 0 || v.OK {
+				t.Fatalf("verify passed a guardian-failed Hermes target: errors=%+v", v.Errors)
+			}
+			if failed := messagesOf(v.Errors, codeVerify); !strings.Contains(failed, "hermes for user alice is not protected") {
+				t.Fatalf("verify did not fail on the guardian-failed Hermes target: errors=%+v", v.Errors)
+			}
+			if !v.CoverageComplete || v.SecurityComplete {
+				t.Fatalf("verify coverage=%t security=%t; want coverage true and security false for a guardian-failed Hermes target, as for every connector and on Windows",
+					v.CoverageComplete, v.SecurityComplete)
+			}
+		})
 	}
 }

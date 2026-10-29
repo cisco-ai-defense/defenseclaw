@@ -668,14 +668,14 @@ func newStandaloneFixture(t *testing.T, resolver unixidentity.Resolver) *standal
 	origOwner, origDirTrust, origFileTrust, origStateTrust := enterpriseHookAuthorizationOwnershipSetter, enterpriseHookAuthorizationDirTrustCheck, enterpriseHookAuthorizationFileTrustCheck, enterpriseHookGuardianStateFileTrustCheck
 	origToken, origOTLP, origRunner, origLog := enterpriseHookScopedTokenMinter, enterpriseHookScopedOTLPTokenMinter, enterpriseHookWorkerRunner, enterpriseHookWorkerLog
 	origUserToken, origUserTokenLoader, origTransport := enterpriseHookUserTokenMinter, enterpriseHookUserTokenLoader, enterpriseHookStandaloneHookTransport
-	origCheckHome := enterpriseHookCheckHome
+	origCheckHome, origAccountGone := enterpriseHookCheckHome, enterpriseHookCleanupAccountGone
 	t.Cleanup(func() {
 		cfg, enterpriseHookManifest = origCfg, origManifest
 		enterpriseHooksMutationIdentityPreflight, enterpriseHookManifestFileTrustCheck, enterpriseHookStandaloneRuntimeCheck = origPreflight, origManifestTrust, origRuntime
 		enterpriseHookAuthorizationOwnershipSetter, enterpriseHookAuthorizationDirTrustCheck, enterpriseHookAuthorizationFileTrustCheck, enterpriseHookGuardianStateFileTrustCheck = origOwner, origDirTrust, origFileTrust, origStateTrust
 		enterpriseHookScopedTokenMinter, enterpriseHookScopedOTLPTokenMinter, enterpriseHookWorkerRunner, enterpriseHookWorkerLog = origToken, origOTLP, origRunner, origLog
 		enterpriseHookUserTokenMinter, enterpriseHookUserTokenLoader, enterpriseHookStandaloneHookTransport = origUserToken, origUserTokenLoader, origTransport
-		enterpriseHookCheckHome = origCheckHome
+		enterpriseHookCheckHome, enterpriseHookCleanupAccountGone = origCheckHome, origAccountGone
 		enterprisehooks.SetStandaloneUnix(false)
 		enterprisehooks.SetStandaloneResolver(nil)
 	})
@@ -706,6 +706,12 @@ func newStandaloneFixture(t *testing.T, resolver unixidentity.Resolver) *standal
 		return "/run/defenseclaw-hook/hook.sock", 995, nil
 	}
 	enterpriseHookWorkerLog = io.Discard
+	// The fixture's accounts exist only in its resolver. The real fresh
+	// directory read (dscl on macOS) has no record of alice or bob on the
+	// test machine and would retire their pending cleanups (r105
+	// GAP-2323), so no fixture account is confirmed gone unless a test
+	// says so.
+	enterpriseHookCleanupAccountGone = func(context.Context, string) bool { return false }
 	enterprisehooks.SetStandaloneUnix(true)
 	enterprisehooks.SetStandaloneResolver(resolver)
 	enterpriseHookWorkerRunner = func(_ context.Context, account enterpriseHookWorkerAccount, request enterpriseHookWorkerRequest) (enterpriseHookWorkerResponse, error) {
@@ -1359,6 +1365,11 @@ func TestStandaloneVerifyRefusesUnattestableHermesHome(t *testing.T) {
 	if row := run.Rows[1]; row.OK || !row.Pending || row.Error != "" {
 		t.Fatalf("recorded unavailable home must remain pending: %+v", row)
 	}
+	// The refusal is the only failure: the guardian records that prove the
+	// registration are not also reported as stale or mismatched (GAP-1703).
+	if run.AuthorizationErr != nil {
+		t.Fatalf("a fully hooked Hermes set was also refused as a record mismatch: %v", run.AuthorizationErr)
+	}
 	// Setup and the guardian prove the registered persistent home without
 	// claiming that a later shell cannot select a different HERMES_HOME.
 	registration, err := runEnterpriseHookRegistrationAttempt(context.Background())
@@ -1563,6 +1574,7 @@ func TestStandaloneReconcileMachinePolicyRowsAvoidPerUserInstall(t *testing.T) {
 }
 
 func TestStandaloneReconcileManagedCodexFeatureChangeQueuesRepair(t *testing.T) {
+	pinEnterpriseHookWatchSkipsAccountHomes(t, false)
 	uid, gid := os.Getuid(), os.Getgid()
 	resolver := standaloneTestResolver{accounts: map[string]unixidentity.Account{}}
 	f := newStandaloneFixture(t, resolver)
@@ -1603,6 +1615,102 @@ func TestStandaloneReconcileManagedCodexFeatureChangeQueuesRepair(t *testing.T) 
 	}
 	if !found {
 		t.Fatal("managed Codex row did not queue user-owned feature repair")
+	}
+}
+
+// Machine policy pins Codex hooks for every user, so a managed macOS
+// enumerator enrolls an account only for its per-user connector (Hermes) and
+// lists no Codex row. The account's own `codex features disable hooks` must
+// still be undone, or Codex refuses every project trust write (GAP-0791).
+func TestStandaloneReconcileRemovesTheCodexFeatureKeyForAnAccountWithoutACodexRow(t *testing.T) {
+	uid, gid := os.Getuid(), os.Getgid()
+	resolver := standaloneTestResolver{accounts: map[string]unixidentity.Account{}}
+	f := newStandaloneFixture(t, resolver)
+	alice := f.home(t, "alice", 0o700)
+	resolver.accounts["alice"] = unixidentity.Account{Name: "alice", UID: uid, GID: gid, Home: alice, Shell: "/bin/bash"}
+	f.writeManifest(t, enterprisehooks.ManifestTarget{User: "alice", Connector: "amp"})
+	configDir := filepath.Join(alice, ".codex")
+	configPath := filepath.Join(configDir, "config.toml")
+	previousSet, previousCovered := enterpriseHookStandaloneMachinePolicySet, enterpriseHookStandaloneMachinePolicyCovered
+	t.Cleanup(func() {
+		enterpriseHookStandaloneMachinePolicySet, enterpriseHookStandaloneMachinePolicyCovered = previousSet, previousCovered
+	})
+	enterpriseHookStandaloneMachinePolicySet = func() map[string]struct{} { return map[string]struct{}{"codex": {}} }
+	covered := true
+	enterpriseHookStandaloneMachinePolicyCovered = func(name string) (bool, error) { return name == "codex" && covered, nil }
+	codexRepairs := func() int {
+		n := 0
+		for _, request := range f.requests {
+			for _, target := range request.Targets {
+				if target.Mode == "repair_managed_codex_feature" {
+					if target.Options.ConnectorName != "codex" || target.Options.UserHome != alice || target.Options.OwnerUID != uid {
+						t.Fatalf("codex feature repair names the wrong account: %+v", target)
+					}
+					n++
+				}
+			}
+		}
+		return n
+	}
+
+	run, err := runEnterpriseHookReconcileOnce(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	requireLedgerOrStateTrust(t, run.StateErr)
+	if len(run.Rows) != 1 || run.Rows[0].Connector != "amp" || !run.Rows[0].OK {
+		t.Fatalf("the repair must add no row and keep the per-user row: %+v", run.Rows)
+	}
+	if got := codexRepairs(); got != 1 {
+		t.Fatalf("codex feature repairs queued = %d, want 1 for the enrolled account", got)
+	}
+	if !slices.Contains(run.WatchDirs, configDir) || !slices.Contains(run.WatchSharedFiles, configPath) {
+		t.Fatalf("a later codex features disable hooks will not start a pass: dirs=%v shared=%v", run.WatchDirs, run.WatchSharedFiles)
+	}
+
+	// Machine policy that does not pin Codex hooks: the key is the user's.
+	f.requests = nil
+	covered = false
+	if _, err := runEnterpriseHookReconcileOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if got := codexRepairs(); got != 0 {
+		t.Fatalf("codex feature repair queued without covered Codex machine policy: %d", got)
+	}
+}
+
+// An account the manifest also enrolls for Codex gets the repair once.
+func TestStandaloneReconcileQueuesTheCodexFeatureRepairOncePerAccount(t *testing.T) {
+	uid, gid := os.Getuid(), os.Getgid()
+	resolver := standaloneTestResolver{accounts: map[string]unixidentity.Account{}}
+	f := newStandaloneFixture(t, resolver)
+	alice := f.home(t, "alice", 0o700)
+	resolver.accounts["alice"] = unixidentity.Account{Name: "alice", UID: uid, GID: gid, Home: alice, Shell: "/bin/bash"}
+	f.writeManifest(t,
+		enterprisehooks.ManifestTarget{User: "alice", Connector: "codex"},
+		enterprisehooks.ManifestTarget{User: "alice", Connector: "amp"},
+	)
+	previousSet, previousCovered := enterpriseHookStandaloneMachinePolicySet, enterpriseHookStandaloneMachinePolicyCovered
+	t.Cleanup(func() {
+		enterpriseHookStandaloneMachinePolicySet, enterpriseHookStandaloneMachinePolicyCovered = previousSet, previousCovered
+	})
+	enterpriseHookStandaloneMachinePolicySet = func() map[string]struct{} { return map[string]struct{}{"codex": {}} }
+	enterpriseHookStandaloneMachinePolicyCovered = func(name string) (bool, error) { return name == "codex", nil }
+	run, err := runEnterpriseHookReconcileOnce(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	requireLedgerOrStateTrust(t, run.StateErr)
+	n := 0
+	for _, request := range f.requests {
+		for _, target := range request.Targets {
+			if target.Mode == "repair_managed_codex_feature" {
+				n++
+			}
+		}
+	}
+	if n != 1 || len(run.Rows) != 2 {
+		t.Fatalf("codex feature repairs = %d (want 1), rows = %+v", n, run.Rows)
 	}
 }
 
@@ -2201,5 +2309,54 @@ func TestStaleEligibleAccountsDoNotOverrideAnExclusion(t *testing.T) {
 				enterpriseHookReconcileRow{User: "bob@corp.example", UserHome: "/home/bob@corp.example", Connector: "codex", OK: true, UID: bobUID})
 			check("a stale row", run)
 		})
+	}
+}
+
+func pinEnterpriseHookWatchSkipsAccountHomes(t *testing.T, skip bool) {
+	t.Helper()
+	previous := enterpriseHookWatchSkipsAccountHomes
+	t.Cleanup(func() { enterpriseHookWatchSkipsAccountHomes = previous })
+	enterpriseHookWatchSkipsAccountHomes = func() bool { return skip }
+}
+
+// On macOS the guardian's kqueue watch opens every entry of a watched
+// folder, and an open of a privacy-protected entry of a home blocks for good
+// (GAP-2454): the home itself is never watched there, the Codex config
+// folder below it still is.
+func TestStandaloneReconcileMacOSLeavesTheAccountHomeOutOfTheWatchSet(t *testing.T) {
+	pinEnterpriseHookWatchSkipsAccountHomes(t, true)
+	uid, gid := os.Getuid(), os.Getgid()
+	resolver := standaloneTestResolver{accounts: map[string]unixidentity.Account{}}
+	f := newStandaloneFixture(t, resolver)
+	alice := f.home(t, "alice", 0o700)
+	resolver.accounts["alice"] = unixidentity.Account{Name: "alice", UID: uid, GID: gid, Home: alice, Shell: "/bin/bash"}
+	f.writeManifest(t, enterprisehooks.ManifestTarget{User: "alice", Connector: "codex"})
+	configDir := filepath.Join(alice, ".codex")
+	if err := os.MkdirAll(configDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	configPath := filepath.Join(configDir, "config.toml")
+	if err := os.WriteFile(configPath, []byte("model = 'gpt-5'\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	previousSet, previousCovered := enterpriseHookStandaloneMachinePolicySet, enterpriseHookStandaloneMachinePolicyCovered
+	t.Cleanup(func() {
+		enterpriseHookStandaloneMachinePolicySet, enterpriseHookStandaloneMachinePolicyCovered = previousSet, previousCovered
+	})
+	enterpriseHookStandaloneMachinePolicySet = func() map[string]struct{} { return map[string]struct{}{"codex": {}} }
+	enterpriseHookStandaloneMachinePolicyCovered = func(name string) (bool, error) { return name == "codex", nil }
+	run, err := runEnterpriseHookReconcileOnce(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	requireLedgerOrStateTrust(t, run.StateErr)
+	if len(run.Rows) != 1 || !run.Rows[0].OK {
+		t.Fatalf("managed Codex row not covered: %+v", run.Rows)
+	}
+	if slices.Contains(run.WatchDirs, alice) {
+		t.Fatalf("the account home %s is in the macOS watch set: %v", alice, run.WatchDirs)
+	}
+	if !slices.Contains(run.WatchDirs, configDir) || !slices.Contains(run.WatchSharedFiles, configPath) {
+		t.Fatalf("the Codex config folder below the home is no longer watched: dirs=%v shared=%v", run.WatchDirs, run.WatchSharedFiles)
 	}
 }

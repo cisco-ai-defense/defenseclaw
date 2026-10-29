@@ -30,7 +30,7 @@ A local destination from DefenseClaw 1.0.3 or earlier has no record, so it count
 - For `--enterprise`: a HEC URL, a HEC token, and an index created ahead of time.
 - For `--o11y`: your realm (for example `us1`) and an access token.
 
-The local Splunk bridge works only with an x86_64 Docker engine. On an ARM64 Docker engine, use `--enterprise` with an existing Splunk HTTP Event Collector (HEC) endpoint. See [Known limits in 1.0.4](/docs/support-matrix).
+The local Splunk bridge works only with an x86_64 Docker engine. On an ARM64 Docker engine, use `--enterprise` with an existing Splunk HTTP Event Collector (HEC) endpoint. See [Known limits](/docs/support-matrix#local-splunk).
 
 ## Flags
 
@@ -74,7 +74,7 @@ The local Splunk bridge works only with an x86_64 Docker engine. On an ARM64 Doc
 
    Setup exits nonzero if Docker is missing, its daemon is stopped, a required port is busy, or the image registry cannot resolve the pinned tag. Fix the reported prerequisite and run the command again.
 
-   Setup starts Splunk in Free mode, installs the **DefenseClaw Local Mode** app, and adds a `splunk_hec` destination for index `defenseclaw_local`. Open [http://localhost:8000](http://localhost:8000). The HEC token stays hidden unless you pass `--show-credentials`.
+   Setup starts Splunk in Free mode, installs the **DefenseClaw Local Mode** app, and adds a `splunk_hec` destination for index `defenseclaw_local`. Open [http://localhost:8000](http://localhost:8000). In Splunk Free mode Splunk Web opens as admin with no login. With any other license, log in as admin; `defenseclaw setup splunk --show-credentials` shows the password, the HEC token and the container's runtime secret. They stay hidden otherwise.
 
    Setup reports ready only after the installed app, Web UI and HEC are available. If startup fails, repair the reported local stack problem and run the setup command again.
 
@@ -85,7 +85,7 @@ The local Splunk bridge works only with an x86_64 Docker engine. On an ARM64 Doc
 1. **License.** Without `--accept-splunk-license` the CLI prompts. Use `--non-interactive` in CI.
 2. **Docker preflight.** Docker must be running, and ports 8000 (Splunk Web) and 8088 (HEC) must be free. A leftover local Splunk from an interrupted setup does not count as a conflict: setup restarts it.
 3. **Container.** Starts the stock `splunk/splunk:10.2.0` image in Free mode, mounts the bundled `defenseclaw_local_mode` app, and waits for Splunk Web and HEC to answer.
-4. **Destination.** Writes a logs-capable `splunk_hec` destination to `https://127.0.0.1:8088/services/collector/event` (HEC over TLS), index `defenseclaw_local`, sourcetype `defenseclaw:json`. The private-network opt-in applies only to this local destination. The token is kept under `DEFENSECLAW_LOCAL_SPLUNK_HEC_TOKEN` in `~/.defenseclaw/.env`.
+4. **Destination.** Writes a logs-capable `splunk_hec` destination to `https://127.0.0.1:8088/services/collector/event` (HEC over TLS), index `defenseclaw_local`, sourcetype `defenseclaw:json`. The private-network opt-in applies only to this local destination. The token is kept under `DEFENSECLAW_LOCAL_SPLUNK_HEC_TOKEN` in `~/.defenseclaw/.env`. DefenseClaw sends the token and audit batches only to this account's own Splunk listener on `127.0.0.1:8088`. A listener owned by another account gets nothing, and the readiness probe sends no token. An upgrade from 1.0.2 or 1.0.3 records a local sink that an earlier setup created, so the same rule covers it.
 
 Splunk Web is at [http://127.0.0.1:8000](http://127.0.0.1:8000), and the app appears as **DefenseClaw Local Mode**. The HEC token and the bootstrap secret stay hidden unless you pass `--show-credentials`; keep them out of diagnostics and support output.
 
@@ -158,7 +158,7 @@ index=defenseclaw_local sourcetype=defenseclaw:json bucket="enforcement.action" 
        Redaction:   unredacted (none)
    ```
 
-   The sample is from a run with `--skip-test`. Without it, setup sends one probe event and stops if HEC does not return 200. Use `--skip-test` behind a VPN.
+   The sample is from a run with `--skip-test`. Without `--skip-test`, setup sends one probe to HEC before it saves anything. If the host name does not resolve, the connection or TLS handshake fails, or HEC does not answer 200, setup stops with exit 1 and saves nothing. `--skip-test` saves the destination without the probe. If the gateway is not running, setup cannot record the probe, so it saves the destination untested and says so; start the gateway, then run `defenseclaw observability destination test <name>`. Use `--skip-test` behind a VPN.
 
 2. Use sourcetype `_json`, or `defenseclaw:json` if you also install a `props.conf` stanza with `KV_MODE = json` and `SHOULD_LINEMERGE = false`. Do not add `| spath` to searches on these sourcetypes; it doubles multivalue fields.
 

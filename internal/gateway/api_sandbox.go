@@ -55,6 +55,8 @@ type SandboxController interface {
 	Destinations(ctx context.Context, name string) (*sandboxapi.Destinations, error)
 	// ReportWorkspace records a copy-mode workspace step the CLI ran.
 	ReportWorkspace(ctx context.Context, name string, report sandboxapi.WorkspaceReport) error
+	// ReportDisk names in the feed a filling MicroVM disk a session found.
+	ReportDisk(ctx context.Context, name string, report sandboxapi.DiskReport) error
 	// Discover runs the AI discovery of a ready sandbox now.
 	Discover(ctx context.Context, name string) (*sandboxapi.DiscoveryResult, error)
 	// Processes returns a sandbox's process tree (empty while it is off).
@@ -166,9 +168,14 @@ func (a *APIServer) sandboxAPIHandler() http.Handler {
 		name := r.PathValue("name")
 		switch r.PathValue("verb") {
 		case "stop":
-			var req struct{}
+			var req sandboxapi.StopRequest
 			if err := decodeSandboxBody(r, &req, true); err != nil {
 				return nil, err
+			}
+			if req.DiscardUnsynced {
+				// The user accepted the loss of what the MicroVM has not
+				// synced: only then does a stop go ahead after a failed sync.
+				ctx = sandboxapi.WithDiscardUnsynced(ctx)
 			}
 			return c.Stop(ctx, name)
 		case "start":
@@ -201,6 +208,15 @@ func (a *APIServer) sandboxAPIHandler() http.Handler {
 				return nil, err
 			}
 			if err := c.ReportWorkspace(ctx, name, req); err != nil {
+				return nil, err
+			}
+			return map[string]string{"status": "recorded"}, nil
+		case "disk":
+			var req sandboxapi.DiskReport
+			if err := decodeSandboxBody(r, &req, false); err != nil {
+				return nil, err
+			}
+			if err := c.ReportDisk(ctx, name, req); err != nil {
 				return nil, err
 			}
 			return map[string]string{"status": "recorded"}, nil

@@ -83,7 +83,12 @@ sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise secret set --name ai-de
 The command stores the key, then runs `ensure` with reason `secret`, which
 restarts the gateway so it reads the key. The apply path unit would also
 pick up the change. The output starts with `✓ secret set: done` and
-`- stored credential ai-defense-api-key`, followed by the apply steps.
+`- stored credential ai-defense-api-key`, followed by the apply steps. On most
+Linux hosts it starts with `! secret set: done with N warnings` and the
+warning lines instead (for example `hook_process_fail_open`,
+`unprivileged_user_namespaces`, `unprivileged_ptrace`), then
+`- stored credential ai-defense-api-key`. The warnings are the host's normal
+status, not a failed store.
 
   </Tab>
   <Tab value="macOS">
@@ -95,8 +100,14 @@ unset AID_KEY
 ```
 
 The command stores the key, then runs `ensure` with reason `secret`, which
-restarts the gateway so it reads the key. The output starts with
-`✓ secret set: done` and `- stored credential ai-defense-api-key`.
+restarts the gateway so it reads the key. On a host whose status has
+warnings the output starts with `! secret set: done with N warnings` and the
+warning lines (for example `openshell_prerequisite_missing`,
+`hook_process_fail_open`, `security_incomplete`), then
+`- stored credential ai-defense-api-key`; on a host without warnings it starts
+with `✓ secret set: done` and `- stored credential ai-defense-api-key`. The
+warnings are the host's normal status, not a failed store, and
+`secret remove` prints the same header.
 
   </Tab>
   <Tab value="Windows">
@@ -195,40 +206,19 @@ The file is replaced atomically and the gateway restarts, as above. Revoke
 the old key in AI Defense after `secret status` shows the new digest.
 
 A device that applies signed policy bundles keeps the key the confirmed
-bundle signs: from 1.0.4 each bundle binds the value of every credential it
-names (`bundle sign --secret-file ai-defense-api-key=<file>`), and
-`secret set` refuses another value with `secret_ref_mismatch`. To rotate the
-key there, sign a new bundle version with the new key, store the key with
-that bundle, then apply it:
-
-```bash
-sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise secret set --name ai-defense-api-key --from-file <key file> --bundle <new>.dcbundle
-sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise bundle apply --bundle <new>.dcbundle
-```
-
-On macOS the gateway is `/opt/cisco/defenseclaw/bin/defenseclaw-gateway`; on Windows run
-`defenseclaw.exe enterprise secret set` with `--bundle` from an elevated prompt, then
-`defenseclaw.exe enterprise windows ensure --profile standalone --bundle <new>.dcbundle`.
-
-A bundle signed before 1.0.4 names the key without its value, so `secret set`
-and the apply refuse it with `secret_ref_unbound`: sign the bundle again with
-`--secret-file` for the key stored now. While such a bundle is confirmed,
-`secret set --bundle` also refuses to replace a stored key, because a failed
-apply could not put the old key back: apply the re-signed bundle first, then
-rotate the key with a newer one. After an upgrade from 1.0.2 or 1.0.3 the confirmed bundle keeps
-enforcing, but every delivery of it is refused until the re-signed bundle is
-applied, and 1.0.2 and 1.0.3 refuse the re-signed bundle. Sign it with
-`--min-product-version 1.0.4` and deliver it together with the 1.0.4 package.
-
-The new bundle must verify with the trust anchors installed on the device. If
-the signing key changes too, first install the new anchors and apply a bundle
-the new signing key signs for the current API key, then rotate the API key
-with a newer bundle.
+bundle binds: from 1.0.4 each bundle binds the value of every credential it
+names, and `secret set` refuses another value with `secret_ref_mismatch`. A
+bundle signed before 1.0.4 names the key without its value, so `secret set`
+refuses it with `secret_ref_unbound`. After an upgrade from 1.0.2 or 1.0.3
+the confirmed bundle keeps enforcing, but every delivery of it is refused
+until a bundle signed for 1.0.4 is in place. To rotate the key on a device
+that applies signed policy bundles, contact your administrator: `secret set`
+alone cannot change it.
 
 ## Remove the key
 
 Removal refuses a key that enabled AI Defense inspection still references
-(`enterprise.inspection.ai_defense.credential`). A reference under disabled inspection does not prevent removal.
+(`enterprise.inspection.ai_defense.credential`). A reference under disabled inspection does not prevent removal: a disabled AI Defense reference alone never blocks it.
 Disable inspection and remove its reference before deleting the stored key:
 
 1. In the config you deploy, set `enabled: false` under
@@ -250,6 +240,8 @@ with `the installed config still references credential ai-defense-api-key`, and
 nothing is removed. On Linux and macOS a successful removal prints
 `- removed credential ai-defense-api-key`, or
 `- credential ai-defense-api-key was not stored; nothing to remove`.
+When the host has status warnings it first prints `! secret remove: done with N warnings`
+(or `! secret remove: nothing to do (up_to_date), N warnings`) and the warning lines.
 On Windows, removal reads the installed config to check for references.
 If it cannot read that config, it refuses and leaves the credential in place;
 restore config access, then run the command again.

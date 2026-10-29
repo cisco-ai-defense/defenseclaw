@@ -165,6 +165,12 @@ func loadCompilerFile(base, marker, path string) (string, error) {
 			return "", err
 		}
 	}
+	// A payload or package without the compiler file has no compiler: the
+	// caller names the Fleet cause and the route. A raw lstat error did
+	// (GAP-0722).
+	if _, err := os.Lstat(path); errors.Is(err, os.ErrNotExist) {
+		return "", nil
+	}
 	if err := checkPayloadPathMode(path, false, false); err != nil {
 		return "", err
 	}

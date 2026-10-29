@@ -20,6 +20,8 @@ on:
       - 'bundles/local_observability_stack/grafana/dashboards/defenseclaw-agent-360.json'
       - 'internal/enterprisepolicy/claude.go'
       - 'internal/openshell/manager/box.go'
+      - 'internal/config/internal/cfgtxn/cfgtxn.go'
+      - 'internal/envvars/registry.json'
       - '.github/workflows/docs-site.yml'
   pull_request:
     paths:
@@ -39,6 +41,8 @@ on:
       - 'bundles/local_observability_stack/grafana/dashboards/defenseclaw-agent-360.json'
       - 'internal/enterprisepolicy/claude.go'
       - 'internal/openshell/manager/box.go'
+      - 'internal/config/internal/cfgtxn/cfgtxn.go'
+      - 'internal/envvars/registry.json'
       - '.github/workflows/docs-site.yml'
   workflow_dispatch:
 
@@ -67,6 +71,7 @@ jobs:
   build:
     name: Build static export
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     defaults:
       run:
         working-directory: docs-site
@@ -126,6 +131,11 @@ jobs:
 
       - name: Unit tests (support matrix)
         run: npm run test:support-matrix
+
+      - name: Unit tests (docs page checks, Python)
+        # docs-site/scripts/test_*.py read the enterprise, identity and policy
+        # pages; run them so they guard the pages (GAP-0011).
+        run: npm run test:docs-py
 
       - name: Unit tests (docs claims)
         # Page text that must match the product (the Intune packager's
@@ -201,6 +211,7 @@ jobs:
     name: Deploy to GitHub Pages
     needs: build
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     if: ${{ github.event_name == 'push' || github.event_name == 'workflow_dispatch' }}
     # Job-scoped privileged permissions: only the deploy job ever uses
     # them, and it never runs PR code (guarded by the `if` above).

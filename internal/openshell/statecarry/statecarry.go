@@ -90,6 +90,11 @@ type Result struct {
 	Sandboxes []string
 }
 
+// legacyGuestStep is what Summary adds for a kept sandbox: after a roll
+// forward a retained guest can still run the older release's supervisor, and
+// a healthy gateway alone does not let it connect (GAP-1161).
+const legacyGuestStep = "; if `defenseclaw sandbox connect NAME` then says legacy sandbox running, save or pull its work, then run `defenseclaw sandbox stop NAME` and `defenseclaw sandbox start NAME`"
+
 // Summary is the installer's line for a carried setup.
 func (r Result) Summary() string {
 	if !r.Carried {
@@ -100,10 +105,10 @@ func (r Result) Summary() string {
 		return "Kept the sandbox setup (the openshell settings and the sandbox state)"
 	case 1:
 		return "Kept the sandbox setup (the openshell settings and the state of sandbox " + r.Sandboxes[0] +
-			"): it stays managed, and its hooks work again once the gateway is up"
+			"): it stays managed, and its hooks work again once the gateway is up" + legacyGuestStep
 	default:
 		return fmt.Sprintf("Kept the sandbox setup (the openshell settings and the state of %d sandboxes: %s): "+
-			"they stay managed, and their hooks work again once the gateway is up",
+			"they stay managed, and their hooks work again once the gateway is up"+legacyGuestStep,
 			len(r.Sandboxes), strings.Join(r.Sandboxes, ", "))
 	}
 }

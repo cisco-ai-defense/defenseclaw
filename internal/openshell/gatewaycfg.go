@@ -22,6 +22,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"maps"
 	"net"
@@ -242,6 +243,31 @@ type GatewayConfigurator struct {
 	// which overrides the rendered file, so Read reports it in place of the
 	// file's (GAP-0254).
 	AccountVM *VMIdentity
+	// StopSync is the ExecStop of the systemd gateway service that syncs
+	// each running MicroVM before the gateway stops (EnsureStopSync): setup
+	// gives it, and every restart makes sure the service has it first, so a
+	// gateway set up before it existed gets it too (GAP-1927). nil: none.
+	StopSync *StopSync
+	// StopSyncWritten hears of a stop sync a restart wrote, which teardown
+	// removes (the setup receipt).
+	StopSyncWritten func(*GatewayApplyResult)
+	// SyncSandboxes syncs each running MicroVM right before a restart of a
+	// service without the stop sync, the Homebrew launchd service's for one,
+	// which launchd then stops at once (GAP-1928, GAP-2003; default
+	// SyncGatewaySandboxes on Discover).
+	SyncSandboxes func(context.Context, io.Writer) error
+	// LaunchAgentsDir is the account's LaunchAgents folder, where `brew
+	// services start` puts the gateway service's plist (default
+	// ~/Library/LaunchAgents; macOS only).
+	LaunchAgentsDir string
+	// Out hears which MicroVMs a sync before a restart synced or could not
+	// (default: nowhere).
+	Out io.Writer
+	// restartStopSync is the stop sync the last restart wrote.
+	restartStopSync *GatewayApplyResult
+	// rollingBack marks Rollback's restart, whose stop sync Rollback
+	// removes again (StopSyncWritten hears of it only when it stays).
+	rollingBack bool
 }
 
 // managedHost reports whether the gateway belongs to a managed host.
@@ -1637,8 +1663,17 @@ func (g *GatewayConfigurator) Rollback(ctx context.Context, res *GatewayApplyRes
 		return err
 	}
 	defer unlock()
+	// The stop sync is removed last, after the restart onto the restored
+	// files, which it syncs the MicroVMs of (with one that restart gave the
+	// service: restartStopSync); alone, a daemon-reload undoes it with no
+	// restart (GAP-0380).
+	all := res
+	res, stopSync := splitStopSync(all)
+	if len(res.Files) == 0 {
+		return g.restore(ctx, stopSync)
+	}
 	if g.NoService(ctx) {
-		if err := g.restore(ctx, res); err != nil {
+		if err := g.restore(ctx, all); err != nil {
 			return err
 		}
 		return ErrNoGatewayService
@@ -1649,7 +1684,7 @@ func (g *GatewayConfigurator) Rollback(ctx context.Context, res *GatewayApplyRes
 		svc, err := g.ServiceState(ctx)
 		switch {
 		case err == nil && svc.Installed && !svc.Active:
-			if err := g.restore(ctx, res); err != nil {
+			if err := g.restore(ctx, all); err != nil {
 				return err
 			}
 			g.clearRestartPending()
@@ -1661,7 +1696,7 @@ func (g *GatewayConfigurator) Rollback(ctx context.Context, res *GatewayApplyRes
 			// failed and stopped the per-user uninstall half done
 			// (GAP-0369). The files go back; the service loads them when it
 			// next starts.
-			if err := g.restore(ctx, res); err != nil {
+			if err := g.restore(ctx, all); err != nil {
 				return err
 			}
 			g.clearRestartPending()
@@ -1699,7 +1734,22 @@ func (g *GatewayConfigurator) Rollback(ctx context.Context, res *GatewayApplyRes
 		pending.putBack(g)
 		return fmt.Errorf("%w (the rollback was aborted: the active gateway files were kept and the gateway was not restarted)", err)
 	}
-	return g.restart(ctx)
+	// A stop sync this restart writes goes again right after it, so it is
+	// reported (and recorded for teardown) only when it stays (GAP-2004).
+	g.rollingBack = true
+	err = g.restart(ctx)
+	g.rollingBack = false
+	written := g.restartStopSync
+	if err == nil {
+		if written != nil {
+			stopSync.Files = append(stopSync.Files, written.Files...)
+		}
+		err = g.restore(ctx, stopSync)
+	}
+	if err != nil && written != nil && g.StopSyncWritten != nil {
+		g.StopSyncWritten(written)
+	}
+	return err
 }
 
 // restartMark is the pending-restart mark as it was before a rollback
@@ -1953,11 +2003,27 @@ func (g *GatewayConfigurator) Restart(ctx context.Context) error {
 	return g.restart(ctx)
 }
 
-// restart restarts the gateway service and waits until it is healthy.
+// restart restarts the gateway service and waits until it is healthy,
+// with each running MicroVM's disk synced before it ends (syncBeforeRestart).
+// On macOS launchd stops the gateway right after that sync and Homebrew
+// starts it again (stopLaunchdGateway), so no slow brew run sits between
+// the sync and the stop (GAP-2003).
 func (g *GatewayConfigurator) restart(ctx context.Context) error {
+	g.syncBeforeRestart(ctx)
 	c := g.restartCommand()
+	job := g.stopLaunchdGateway(ctx)
+	if job != nil {
+		c = serviceCommand{g.BrewCommand(), []string{"services", "start", GatewayFormula}}
+	}
 	if out, err := g.Runner.Output(ctx, Command{Name: c.name, Args: c.args, Timeout: 2 * time.Minute}); err != nil {
-		return fmt.Errorf("%w: %v: %s", errRestartCommand, err, strings.TrimSpace(string(out)))
+		if job == nil {
+			return fmt.Errorf("%w: %v: %s", errRestartCommand, err, strings.TrimSpace(string(out)))
+		}
+		if aerr := g.startLaunchdGatewayAgain(ctx, job); aerr != nil {
+			return fmt.Errorf("%w: %v: %s; launchd did not start the gateway again either (%v): run `brew services start %s` in a terminal of this account's login session",
+				errRestartCommand, err, strings.TrimSpace(string(out)), aerr, GatewayFormula)
+		}
+		fmt.Fprintf(g.out(), "`brew services start %s` failed (%v); launchd started the gateway again from %s\n", GatewayFormula, err, job.plist)
 	}
 	if err := g.VerifyGateway(ctx); err != nil {
 		missing := g.ServiceDockerGroupMissing

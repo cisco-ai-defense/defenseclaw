@@ -933,3 +933,119 @@ func TestRefreshHookFailModesLeavesRetiredConnectorsUntouched(t *testing.T) {
 		t.Fatalf("shared sidecar after refresh: %+v", state)
 	}
 }
+
+// A managed shared inspect hook opens on an outage only for what the
+// protected JSON sidecar records open: the guardian writes a connector's JSON
+// entry and its flat file together, so a flat open the JSON does not record
+// (a per-user install's leftover, a torn-down connector) was chosen by no
+// current policy and closes the hook. Before, such a record opened the hook
+// whenever every JSON entry was open or the JSON had none (GAP-0449).
+func TestManagedSharedHookIgnoresAFlatOpenTheProtectedSidecarDoesNotRecord(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell hooks are not used on Windows")
+	}
+	bash, err := exec.LookPath("bash")
+	if err != nil {
+		t.Skip("bash is not installed")
+	}
+	helper, err := hookFS.ReadFile("hooks/_hardening.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	const addr = "127.0.0.1:18970"
+	const staleCodex = "DEFENSECLAW_CONNECTOR=codex\nDEFENSECLAW_FAIL_MODE=open\nFAIL_MODE_SOURCE=config\n"
+	const staleLegacy = "DEFENSECLAW_CONNECTOR=\nDEFENSECLAW_FAIL_MODE=open\n"
+	for _, test := range []struct {
+		name string
+		// guardian are the modes the managed writer records (JSON + flat).
+		guardian []string
+		// bareJSON writes the managed sidecar a torn-down connector leaves:
+		// managed_enterprise and no fail_modes.
+		bareJSON bool
+		stale    map[string]string
+		want     string
+	}{
+		{name: "leftover flat open beside a sidecar with no entries", bareJSON: true, stale: map[string]string{"codex": staleCodex}, want: "closed"},
+		{name: "leftover flat open beside a guardian open", guardian: []string{"claudecode", "open"}, stale: map[string]string{"codex": staleCodex}, want: "closed"},
+		{name: "leftover flat legacy open beside guardian opens", guardian: []string{"codex", "open", "claudecode", "open"}, stale: map[string]string{"legacy": staleLegacy}, want: "closed"},
+		{name: "guardian open on two connectors", guardian: []string{"codex", "open", "claudecode", "open"}, want: "open"},
+		{name: "guardian open on one connector", guardian: []string{"codex", "open"}, want: "open"},
+	} {
+		for _, tools := range readerToolSets(t) {
+			t.Run(test.name+"/"+tools.name, func(t *testing.T) {
+				want := test.want
+				hookDir := t.TempDir()
+				if err := os.WriteFile(filepath.Join(hookDir, "_hardening.sh"), helper, 0o600); err != nil {
+					t.Fatal(err)
+				}
+				if test.bareJSON {
+					bare := `{"version": 2, "gateway_addr": "` + addr + `", "managed_enterprise": true}` + "\n"
+					if err := os.WriteFile(filepath.Join(hookDir, hookConfigSidecarName), []byte(bare), 0o600); err != nil {
+						t.Fatal(err)
+					}
+				}
+				for i := 0; i+1 < len(test.guardian); i += 2 {
+					if err := writeHookConfigSidecar(hookDir, addr, test.guardian[i], test.guardian[i+1], true); err != nil {
+						t.Fatal(err)
+					}
+				}
+				for name, body := range test.stale {
+					if err := os.WriteFile(filepath.Join(hookDir, hookConfigSidecarName+"."+name), []byte(body), 0o600); err != nil {
+						t.Fatal(err)
+					}
+				}
+				if noParserReadsJSONClosed(t, hookDir, tools.json) {
+					want = "closed"
+				}
+				cmd := exec.Command(bash, "-c", `. "$1/_hardening.sh"; c="$(defenseclaw_shared_runtime_connector "$1")"; defenseclaw_shared_runtime_fail_mode "$1" "$c"`, "test", hookDir)
+				cmd.Env = []string{"PATH=" + tools.path, "HOME=" + t.TempDir(), "DEFENSECLAW_MANAGED_HOOK=1", "DEFENSECLAW_CONNECTOR=codex"}
+				out, err := cmd.Output()
+				if err != nil {
+					t.Fatalf("reader: %v", err)
+				}
+				if got := string(out); got != want {
+					t.Fatalf("fail mode %q, want %q", got, want)
+				}
+			})
+		}
+	}
+}
+
+// GAP-2481: the upgrade's refresh closed .hookcfg.opencode and the opencode
+// entry of hooks/.hookcfg in the install it replaced. No OpenCode plugin reads
+// either, and 1.0.2 does not write them again when its gateway starts, so a
+// rollback to 1.0.2 brought them back closed and they stayed. They are left
+// byte for byte; the hook connectors beside them are refreshed.
+func TestRefreshHookFailModesLeavesTheOpenCodeRecordAsItIs(t *testing.T) {
+	hookDir := t.TempDir()
+	shared := `{"version":2,"gateway_addr":"127.0.0.1:18970","fail_modes":{"codex":"open","opencode":"open"}}` + "\n"
+	files := map[string]string{
+		hookConfigSidecarName:               shared,
+		hookConfigSidecarName + ".opencode": "DEFENSECLAW_CONNECTOR=opencode\nDEFENSECLAW_FAIL_MODE=open\n",
+		hookConfigSidecarName + ".codex":    "DEFENSECLAW_CONNECTOR=codex\nDEFENSECLAW_FAIL_MODE=open\n",
+	}
+	for name, body := range files {
+		if err := os.WriteFile(filepath.Join(hookDir, name), []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	refreshed, err := RefreshHookFailModes(hookDir, func(string) string { return "closed" })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(refreshed.Sidecar, []string{"codex"}) {
+		t.Fatalf("refreshed %+v, want codex only", refreshed)
+	}
+	name := hookConfigSidecarName + ".opencode"
+	if body, _ := os.ReadFile(filepath.Join(hookDir, name)); string(body) != files[name] {
+		t.Fatalf("%s rewritten: %q", name, body)
+	}
+	state := readHookConfigSidecarForTest(t, hookDir)
+	if state.FailModes["opencode"] != "open" || state.FailModeSources["opencode"] != "" ||
+		state.FailModes["codex"] != "closed" || state.FailModeSources["codex"] != HookFailModeSourceConfig {
+		t.Fatalf("shared sidecar after refresh: %+v", state)
+	}
+	if flat := readFlatHookRecordForTest(t, hookDir, "codex"); flatRecordValueForTest([]byte(flat), "DEFENSECLAW_FAIL_MODE") != "closed" {
+		t.Fatalf("codex flat record %q, want closed", flat)
+	}
+}

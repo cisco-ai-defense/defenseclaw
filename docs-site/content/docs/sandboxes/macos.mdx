@@ -38,7 +38,7 @@ Install and configure OpenShell sandboxes on an Apple-silicon Mac. Each sandbox 
 | Apple silicon | Intel Macs are refused. Under Rosetta, install the arm64 build of DefenseClaw. |
 | DefenseClaw | Installed, with the daemon running ([quickstart](/docs/get-started/quickstart)). Run as your own user. |
 | Homebrew | Your account must be able to write to Homebrew's folders. OpenShell installs from the `nvidia/openshell` formula, without `sudo`. |
-| Xcode or Command Line Tools | Current for your macOS release. Homebrew may build from source. |
+| Xcode or Command Line Tools | Current for your macOS release. Homebrew may build from source. They include Git 2.29 or newer, which a copy-mode run uses to copy your project and the pre-session snapshot of a git repository uses; a MicroVM mounts no host folders, so every run on a Mac works on a copy and the row fails without git; `defenseclaw sandbox doctor` checks it (**Host Git**). |
 | `e2fsprogs` | Setup offers to install it with Homebrew. |
 | Docker Desktop, running | Start it once on your own account first. It asks for Rosetta, local-network access and an administrator password. |
 | Disk | At least 12 GiB free in the VM volume (22 GiB recommended). The first image build downloads about 3 GB. |

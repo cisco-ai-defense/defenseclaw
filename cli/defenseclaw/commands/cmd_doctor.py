@@ -36,6 +36,7 @@ import os
 import posixpath
 import queue
 import re
+import secrets
 import select
 import shlex
 import shutil
@@ -2233,7 +2234,13 @@ def _check_hilt_support(
         return
 
     if connector == "openclaw":
-        _emit("pass", "Human approval", f"OpenClaw prompts supported at {min_sev}+", r=r)
+        _emit(
+            "pass",
+            "Human approval",
+            f"OpenClaw prompts supported at {min_sev}+ (Control UI and chat channels that "
+            "forward /approve; openclaw tui and local chat do not show them)",
+            r=r,
+        )
     elif connector == "claudecode":
         _emit("pass", "Human approval", f"Claude Code PreToolUse ask supported at {min_sev}+", r=r)
     elif connector == "copilot":
@@ -2799,6 +2806,693 @@ def _check_private_file_exposure(cfg, r: _DoctorResult) -> None:
         reason_code="private-files-exposed" if exposed else "private-files-unverified",
         remediation="; ".join(steps),
     )
+
+
+# The install-lock rule of the per-user OpenCode and Amp plugins
+# (installLockState) and doctor. Both plugins hold back a healthy gateway's
+# answer while an install may be running, so a lock a killed installer left
+# blocked them for good. An interrupted install keeps its lock on purpose,
+# next to one of these records, until the installer runs again.
+_INSTALL_RECOVERY_RECORDS = ("previous.new", ".repair", ".rollback-hold", ".lifecycle-txn.json")
+# The owner record install.sh and install.ps1 write beside the lock's pid:
+# the installer's process identity (hookexec InstallLockIdentityName).
+_INSTALL_LOCK_IDENTITY_NAME = "proc-start"
+# A takeover claim in a lock (install.sh take_lock, install.ps1): its pid,
+# then its process identity. Doctor claims a stale lock the same way before
+# it removes it, so it and an installer never both take one.
+_INSTALL_LOCK_CLAIM_PREFIX = "claim-"
+
+
+def _process_ended(pid: int) -> bool:
+    """A process that has exited but keeps its pid: a zombie its parent has not reaped.
+
+    It keeps its start (_process_identity) and still answers a signal, but
+    it runs nothing, so its install lock is no lock (hookexec
+    procidentity.Ended). Windows (pid_alive) reads the exit code of a
+    process object a handle keeps. False when the system does not say.
+    """
+    if sys.platform.startswith("linux"):
+        try:
+            with open(f"/proc/{pid}/stat", encoding="utf-8", errors="replace") as handle:
+                line = handle.read()
+        except OSError:
+            return False
+        end = line.rfind(")")
+        fields = line[end + 1 :].split()
+        return end >= 0 and bool(fields) and fields[0] in ("Z", "X", "x")
+    if sys.platform == "darwin":
+        try:
+            out = subprocess.run(
+                ["/bin/ps", "-o", "stat=", "-p", str(pid)],
+                capture_output=True,
+                text=True,
+                timeout=5,
+                check=False,
+                env={"LC_ALL": "C", "PATH": "/usr/bin:/bin"},
+            )
+        except (OSError, subprocess.SubprocessError):
+            return False
+        return out.returncode == 0 and out.stdout.strip().startswith("Z")
+    return False
+
+
+def _pid_running(pid: int) -> bool:
+    from defenseclaw.process_liveness import pid_alive
+
+    return pid_alive(pid) and not _process_ended(pid)
+
+
+def _process_identity(pid: int) -> str | None:
+    """Process pid as install.sh and install.ps1 record their own in a lock.
+
+    What the system keeps of the process's creation, which no clock step
+    moves (hookexec procidentity): on Linux "<boot_id> <starttime>" (field
+    22 of /proc/<pid>/stat), on macOS its creation second as
+    ``LC_ALL=C TZ=UTC ps -o lstart=`` prints it, on Windows its creation
+    FILETIME in decimal. None when the system does not say.
+    """
+    if sys.platform.startswith("linux"):
+        try:
+            with open("/proc/sys/kernel/random/boot_id", encoding="ascii") as handle:
+                boot = handle.read().strip()
+            with open(f"/proc/{pid}/stat", encoding="utf-8", errors="replace") as handle:
+                line = handle.read()
+        except OSError:
+            return None
+        end = line.rfind(")")
+        fields = line[end + 1 :].split()
+        if end < 0 or len(fields) < 20 or not fields[19].isdigit() or not re.fullmatch(r"[0-9a-f-]+", boot):
+            return None
+        return f"{boot} {fields[19]}"
+    if sys.platform == "darwin":
+        try:
+            out = subprocess.run(
+                ["/bin/ps", "-o", "lstart=", "-p", str(pid)],
+                capture_output=True,
+                text=True,
+                timeout=5,
+                check=False,
+                env={"LC_ALL": "C", "TZ": "UTC", "PATH": "/usr/bin:/bin"},
+            )
+        except (OSError, subprocess.SubprocessError):
+            return None
+        fields = out.stdout.split()
+        return " ".join(fields) if out.returncode == 0 and len(fields) == 5 else None
+    if os.name == "nt":  # pragma: no cover - Windows only
+        import ctypes
+        from ctypes import wintypes
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.OpenProcess.restype = wintypes.HANDLE
+        kernel32.OpenProcess.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
+        kernel32.GetProcessTimes.argtypes = (wintypes.HANDLE,) + (ctypes.POINTER(wintypes.FILETIME),) * 4
+        kernel32.CloseHandle.argtypes = (wintypes.HANDLE,)
+        handle = kernel32.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
+        if not handle:
+            return None
+        try:
+            times = [wintypes.FILETIME() for _ in range(4)]
+            if not kernel32.GetProcessTimes(handle, *(ctypes.byref(item) for item in times)):
+                return None
+            ticks = (times[0].dwHighDateTime << 32) | times[0].dwLowDateTime
+            return str(ticks) if ticks else None
+        finally:
+            kernel32.CloseHandle(handle)
+    return None
+
+
+# How much later than its pid file was written a record-less lock's process
+# may have started and still be its installer (every release writes the pid
+# right after it makes the folder; times have a coarse resolution): hookexec
+# installLockLegacySlack, install.sh lock_owner_live.
+_INSTALL_LOCK_LEGACY_SLACK = 2.0
+
+
+def _process_started(pid: int) -> float | None:
+    """The epoch second process pid started (hookexec procidentity.StartTime), or None.
+
+    Linux: boot time (btime of /proc/stat) plus field 22 of /proc/<pid>/stat
+    in clock ticks; macOS: its creation second (_process_identity); Windows:
+    its creation FILETIME (_process_identity).
+    """
+    if sys.platform.startswith("linux"):
+        try:
+            with open("/proc/stat", encoding="ascii", errors="replace") as handle:
+                btime = next((line.split()[1] for line in handle if line.startswith("btime ")), "")
+            with open(f"/proc/{pid}/stat", encoding="utf-8", errors="replace") as handle:
+                line = handle.read()
+            hz = os.sysconf("SC_CLK_TCK")
+        except (OSError, ValueError, IndexError):
+            return None
+        end = line.rfind(")")
+        fields = line[end + 1 :].split()
+        if end < 0 or len(fields) < 20 or not fields[19].isdigit() or not btime.isdigit() or hz <= 0:
+            return None
+        return int(btime) + int(fields[19]) / hz
+    identity = _process_identity(pid)
+    if identity is None:
+        return None
+    if sys.platform == "darwin":
+        try:
+            started = datetime.strptime(identity, "%a %b %d %H:%M:%S %Y")
+        except ValueError:
+            return None
+        return started.replace(tzinfo=timezone.utc).timestamp()
+    if os.name == "nt" and identity.isdigit():  # pragma: no cover - Windows only
+        return (int(identity) - 116_444_736_000_000_000) / 10_000_000
+    return None
+
+
+def _legacy_install_lock_pid_reused(lock: str, pid: int, held: _HeldInstallLock | None = None) -> bool:
+    """A lock without a proc-start record (1.0.2-1.0.4) whose pid a later process got.
+
+    Its pid names a process that started more than the slack after the pid
+    file was written, so the installer that wrote it is gone and the lock is
+    stale (lead decision 2026-10-26 13:58, GAP-1465 and GAP-2057; the rule of
+    hookexec legacyInstallLockPIDReused and install.sh lock_owner_live). The
+    pid file's time, not the folder's: doctor's own takeover claim
+    (_claim_install_lock) changes the folder before it checks again. A live
+    installer started before its lock. A time that cannot be read keeps the
+    lock.
+    """
+    try:
+        if held is not None and held.dir_fd is not None:
+            info = os.stat("pid", dir_fd=held.dir_fd, follow_symlinks=False)
+        else:
+            info = os.lstat(os.path.join(lock, "pid"))
+    except OSError:
+        return False
+    started = _process_started(pid)
+    return started is not None and started > info.st_mtime + _INSTALL_LOCK_LEGACY_SLACK
+
+
+def _install_lock_file(lock: str, name: str, limit: int, held: _HeldInstallLock | None = None) -> tuple[str, str]:
+    """("absent" | "valid" | "invalid" | "unreadable", text) of a small owner file in the lock.
+
+    "invalid" is anything but a regular file of at most limit bytes. With
+    held (_open_install_lock), the file is read in that very folder: through
+    its descriptor on POSIX, by a path the held folder pins on Windows.
+    """
+    dir_fd = held.dir_fd if held is not None else None
+    path = os.path.join(lock, name)
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_BINARY", 0)
+    try:
+        info = os.stat(name, dir_fd=dir_fd, follow_symlinks=False) if dir_fd is not None else os.lstat(path)
+        if not stat.S_ISREG(info.st_mode) or info.st_size > limit:
+            return ("invalid", "")
+        fd = os.open(name, flags, dir_fd=dir_fd) if dir_fd is not None else os.open(path, flags)
+        try:
+            data = os.read(fd, limit + 1)
+        finally:
+            os.close(fd)
+    except FileNotFoundError:
+        return ("absent", "")
+    except OSError as exc:
+        return ("invalid", "") if exc.errno == errno.ELOOP else ("unreadable", "")
+    if len(data) > limit:
+        return ("invalid", "")
+    return ("valid", data.decode("ascii", errors="replace").strip())
+
+
+def _install_lock_state(folder: str, held: _HeldInstallLock | None = None) -> tuple[str, str]:
+    """("none" | "stale" | "recovery" | "held", detail) of the lock in folder.
+
+    The one rule of every per-user hook (hookexec installLockStale). It reads
+    no clock but the lock's own time: the installer is gone when the lock
+    is a folder and its pid names no process or one that has ended (a
+    zombie), or doctor's own (no reader writes a lock), or another process
+    than its proc-start record names (a reused pid), or, for a lock without
+    a proc-start record (1.0.2-1.0.4), a process that started after its pid
+    file was written (_legacy_install_lock_pid_reused). Such a lock is
+    "stale", or "recovery" when an interrupted-install record sits beside it
+    (hookexec InstallRecoveryPending: the next installer run finishes or
+    undoes that install, so doctor --fix leaves it). A live installer keeps
+    its lock ("held") for as long as it runs, records or not; so do a lock
+    without a valid pid, a record-less lock whose pid names a process that
+    started before its pid file was written and an owner whose identity or
+    start cannot be read. With held, the owner files are read in the folder
+    doctor holds open, whatever the path names now (_fix_stale_install_lock).
+    """
+    lock = os.path.join(folder, ".install.lock")
+    if held is None:
+        try:
+            info = os.lstat(lock)
+        except FileNotFoundError:
+            return ("none", "")
+        except OSError as exc:
+            return ("held", f"{lock} cannot be inspected ({exc.strerror or exc})")
+        if not stat.S_ISDIR(info.st_mode):
+            return ("held", f"{lock} is not a folder")
+    recovery = ""
+    for record in _INSTALL_RECOVERY_RECORDS:
+        path = os.path.join(folder, record)
+        try:
+            os.lstat(path)
+        except FileNotFoundError:
+            continue
+        except OSError:
+            return ("held", f"{path} cannot be inspected")
+        recovery = path
+        break
+
+    def gone(detail: str) -> tuple[str, str]:
+        if recovery:
+            return ("recovery", f"{lock} is kept by an interrupted install ({recovery}); its installer is gone")
+        return ("stale", detail)
+
+    pid_file = os.path.join(lock, "pid")
+    pid_state, text = _install_lock_file(lock, "pid", 64, held)
+    if pid_state == "invalid":
+        return ("held", f"{pid_file} is not a pid file")
+    if pid_state == "unreadable":
+        return ("held", f"{pid_file} cannot be read")
+    pid = int(text) if re.fullmatch(r"[1-9][0-9]{0,9}", text) else 0
+    if not pid or pid > 2_147_483_647:
+        return (
+            "held",
+            f"{lock} names no installer pid yet; if no install is running, run the installer again to clear it",
+        )
+    if pid == os.getpid():
+        return gone(f"{lock} names pid {pid}, this process; its installer is gone")
+    if not _pid_running(pid):
+        return gone(f"{lock} names installer pid {pid}, which is no longer running")
+    record_state, record = _install_lock_file(lock, _INSTALL_LOCK_IDENTITY_NAME, 128, held)
+    if record_state == "valid" and record:
+        current = _process_identity(pid)
+        if current is not None and current != record:
+            return gone(
+                f"{lock} names pid {pid}, another process than the installer that wrote it; its installer is gone"
+            )
+    elif record_state == "absent" and _legacy_install_lock_pid_reused(lock, pid, held):
+        return gone(f"{lock} names pid {pid}, a process that started after the lock was made; its installer is gone")
+    return ("held", f"an installer (pid {pid}) holds {lock}")
+
+
+def _install_lock_folders(cfg) -> list[str]:
+    """The data directory and the installer's home, the folders the plugins check."""
+    home = os.environ.get("DEFENSECLAW_HOME") or os.path.join(os.path.expanduser("~"), ".defenseclaw")
+    folders: list[str] = []
+    for folder in (_configured_gateway_data_dir(cfg), home):
+        if not folder:
+            continue
+        folder = os.path.abspath(folder)
+        if any(_same_install_folder(folder, seen) for seen in folders):
+            continue
+        folders.append(folder)
+    return folders
+
+
+def _same_install_folder(left: str, right: str) -> bool:
+    try:
+        return os.path.samefile(left, right)
+    except OSError:
+        return os.path.normcase(os.path.normpath(left)) == os.path.normcase(os.path.normpath(right))
+
+
+def _check_install_lock(cfg, r: _DoctorResult) -> None:
+    """WARN on an install lock that is still there (oss-outage-open round h).
+
+    Hooks close outages, and OpenCode and Amp in the strict tier hold answered
+    calls, while an install may be running; a stale lock (its installer
+    proven gone) is no lock to them and is removed by
+    doctor.install.stale-lock.clear. The lock of an interrupted install whose
+    installer is gone holds no tool call either (GAP-1024): calls follow the
+    outage rule, the strict tier blocks them, and no hook or watchdog starts
+    the gateway until the installer runs again (GAP-2082, GAP-2092).
+    """
+    if _doctor_managed(cfg):
+        return
+    for folder in _install_lock_folders(cfg):
+        state, detail = _install_lock_state(folder)
+        if state == "none":
+            continue
+        if state == "stale":
+            _emit(
+                "warn",
+                "Install lock",
+                f"{detail}; hooks ignore it, so it holds no tool call",
+                r=r,
+                check_id="doctor.install.lock",
+                reason_code="install-lock-stale",
+                remediation="defenseclaw doctor --fix --yes (removes the install lock the stopped installer left)",
+            )
+        elif state == "recovery":
+            _emit(
+                "warn",
+                "Install lock",
+                f"{detail}; hooks hold no tool call for it (the strict tier blocks them), "
+                "and no hook starts the gateway until the installer runs again",
+                r=r,
+                check_id="doctor.install.lock",
+                reason_code="install-lock-interrupted-install",
+                remediation="run the DefenseClaw installer again to finish or undo the interrupted install",
+            )
+        else:
+            _emit(
+                "warn",
+                "Install lock",
+                f"{detail}; hooks hold tool calls until the install is done",
+                r=r,
+                check_id="doctor.install.lock",
+                reason_code="install-lock-held",
+                remediation="wait for the installer to finish; if it has stopped, run the installer again",
+            )
+
+
+@dataclass
+class _HeldInstallLock:
+    """An install lock folder doctor holds open (_open_install_lock).
+
+    identity is the folder's file identity: (st_dev, st_ino) on POSIX, the
+    volume serial and file index on Windows.
+    """
+
+    identity: tuple[int, int]
+    dir_fd: int | None = None
+    handle: int | None = None
+
+
+def _open_install_lock(lock: str, *, pin: bool = False) -> _HeldInstallLock | None:
+    """Hold the lock folder itself open, or None when lock is no plain folder.
+
+    On POSIX a descriptor of the folder (no link followed): doctor reads and
+    removes the owner files through it, so it never touches a folder an
+    installer put at the path since, and the open folder keeps its inode, so
+    no new folder gets its identity while doctor holds it. On Windows a
+    handle; with pin it shares no delete access, so no other process can
+    remove or rename the folder (an installer's takeover fails, and the
+    folder stays at its path) until doctor closes it, and the handle removes
+    exactly that folder (_remove_held_install_lock). Raises OSError when the
+    folder cannot be opened.
+    """
+    if os.name != "nt":
+        flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
+        try:
+            dir_fd = os.open(lock, flags)
+        except (FileNotFoundError, NotADirectoryError):
+            return None
+        except OSError as exc:
+            if exc.errno == errno.ELOOP:
+                return None
+            raise
+        info = os.fstat(dir_fd)
+        return _HeldInstallLock(identity=(info.st_dev, info.st_ino), dir_fd=dir_fd)
+    import ctypes  # pragma: no cover - Windows only
+    from ctypes import wintypes
+
+    class _ByHandleFileInformation(ctypes.Structure):
+        _fields_ = [
+            ("dwFileAttributes", wintypes.DWORD),
+            ("ftCreationTime", wintypes.FILETIME),
+            ("ftLastAccessTime", wintypes.FILETIME),
+            ("ftLastWriteTime", wintypes.FILETIME),
+            ("dwVolumeSerialNumber", wintypes.DWORD),
+            ("nFileSizeHigh", wintypes.DWORD),
+            ("nFileSizeLow", wintypes.DWORD),
+            ("nNumberOfLinks", wintypes.DWORD),
+            ("nFileIndexHigh", wintypes.DWORD),
+            ("nFileIndexLow", wintypes.DWORD),
+        ]
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.CreateFileW.restype = wintypes.HANDLE
+    kernel32.CreateFileW.argtypes = (
+        wintypes.LPCWSTR,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.LPVOID,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.HANDLE,
+    )
+    kernel32.GetFileInformationByHandle.argtypes = (wintypes.HANDLE, ctypes.POINTER(_ByHandleFileInformation))
+    kernel32.CloseHandle.argtypes = (wintypes.HANDLE,)
+    # FILE_READ_ATTRIBUTES, plus DELETE to remove it by this handle; share
+    # read and write, and delete only when not pinned.
+    access = 0x80 | (0x00010000 if pin else 0)
+    share = 0x1 | 0x2 | (0 if pin else 0x4)
+    # OPEN_EXISTING; FILE_FLAG_BACKUP_SEMANTICS (a folder), FILE_FLAG_OPEN_REPARSE_POINT (no link followed).
+    handle = kernel32.CreateFileW(lock, access, share, None, 3, 0x02000000 | 0x00200000, None)
+    if handle in (None, ctypes.c_void_p(-1).value):
+        code = ctypes.get_last_error()
+        if code in (2, 3):  # ERROR_FILE_NOT_FOUND, ERROR_PATH_NOT_FOUND
+            return None
+        raise ctypes.WinError(code)
+    info = _ByHandleFileInformation()
+    if not kernel32.GetFileInformationByHandle(handle, ctypes.byref(info)):
+        code = ctypes.get_last_error()
+        kernel32.CloseHandle(handle)
+        raise ctypes.WinError(code)
+    # FILE_ATTRIBUTE_DIRECTORY, and no FILE_ATTRIBUTE_REPARSE_POINT (a junction or link).
+    if not info.dwFileAttributes & 0x10 or info.dwFileAttributes & 0x400:
+        kernel32.CloseHandle(handle)
+        return None
+    identity = (int(info.dwVolumeSerialNumber), (int(info.nFileIndexHigh) << 32) | int(info.nFileIndexLow))
+    return _HeldInstallLock(identity=identity, handle=int(handle))
+
+
+def _close_install_lock(held: _HeldInstallLock) -> None:
+    if held.dir_fd is not None:
+        os.close(held.dir_fd)
+        held.dir_fd = None
+    if held.handle is not None:  # pragma: no cover - Windows only
+        import ctypes
+        from ctypes import wintypes
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.CloseHandle.argtypes = (wintypes.HANDLE,)
+        kernel32.CloseHandle(held.handle)
+        held.handle = None
+
+
+def _install_lock_entries(lock: str, held: _HeldInstallLock) -> list[str]:
+    return sorted(os.listdir(held.dir_fd if held.dir_fd is not None else lock))
+
+
+def _install_lock_owner(lock: str, held: _HeldInstallLock, claim: str = "") -> tuple:
+    """What the held lock records of its owner: its entries and owner files.
+
+    A stale decision holds only for this record and the folder's identity:
+    an installer that took the lock over since, in place or by a new folder,
+    or that claimed it to, changes one of them (_fix_stale_install_lock).
+    Doctor's own claim is not part of it.
+    """
+    return (
+        held.identity,
+        tuple(name for name in _install_lock_entries(lock, held) if name != claim),
+        tuple(_install_lock_file(lock, name, 128, held) for name in ("pid", "started", _INSTALL_LOCK_IDENTITY_NAME)),
+    )
+
+
+def _claim_install_lock(lock: str, held: _HeldInstallLock) -> str:
+    """Put doctor's takeover claim in the held lock (install.sh take_lock); its name.
+
+    The claim is written apart and put in place by one rename, so a reader
+    never sees half of it. Raises OSError when it cannot be written.
+    """
+    claim = f"{_INSTALL_LOCK_CLAIM_PREFIX}{os.getpid()}-{secrets.token_hex(4)}"
+    body = f"{os.getpid()}\n{_process_identity(os.getpid()) or ''}\n".encode("ascii", errors="replace")
+    part = "." + claim
+    dir_fd = held.dir_fd
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_BINARY", 0)
+    if dir_fd is not None:
+        fd = os.open(part, flags, 0o600, dir_fd=dir_fd)
+    else:
+        fd = os.open(os.path.join(lock, part), flags, 0o600)
+    try:
+        os.write(fd, body)
+    finally:
+        os.close(fd)
+    if dir_fd is not None:
+        os.rename(part, claim, src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
+    else:
+        os.rename(os.path.join(lock, part), os.path.join(lock, claim))
+    return claim
+
+
+def _unclaim_install_lock(lock: str, held: _HeldInstallLock, claim: str) -> None:
+    for name in (claim, "." + claim):
+        try:
+            if held.dir_fd is not None:
+                os.unlink(name, dir_fd=held.dir_fd)
+            else:
+                os.unlink(os.path.join(lock, name))
+        except OSError:
+            continue
+
+
+def _install_lock_claimed(lock: str, held: _HeldInstallLock, claim: str) -> bool:
+    """Another run's live takeover claim is in the held lock (install.sh lock_claim_live).
+
+    A claim whose pid names no other running process is none; one whose
+    identity cannot be read holds.
+    """
+    for name in _install_lock_entries(lock, held):
+        if not name.startswith(_INSTALL_LOCK_CLAIM_PREFIX) or name == claim:
+            continue
+        state, text = _install_lock_file(lock, name, 128, held)
+        if state != "valid":
+            continue
+        lines = text.splitlines()
+        pid_text = lines[0].strip() if lines else ""
+        if not re.fullmatch(r"[1-9][0-9]{0,9}", pid_text):
+            continue
+        pid = int(pid_text)
+        if pid == os.getpid() or pid > 2_147_483_647 or not _pid_running(pid):
+            continue
+        recorded = lines[1].strip() if len(lines) > 1 else ""
+        current = _process_identity(pid) if recorded else None
+        if not recorded or current is None or current == recorded:
+            return True
+    return False
+
+
+def _stale_install_lock(folder: str) -> tuple | None:
+    """The owner record (_install_lock_owner) of the stale lock in folder, or None."""
+    lock = os.path.join(folder, ".install.lock")
+    try:
+        held = _open_install_lock(lock)
+    except OSError:
+        return None
+    if held is None:
+        return None
+    try:
+        if _install_lock_state(folder, held)[0] != "stale":
+            return None
+        return _install_lock_owner(lock, held)
+    except OSError:
+        return None
+    finally:
+        _close_install_lock(held)
+
+
+def _remove_held_install_lock(lock: str, held: _HeldInstallLock, names: tuple[str, ...], claim: str) -> str:
+    """Remove the held lock folder and its owner files: "removed", "changed" or why not.
+
+    Only the entries doctor checked (names) go, its pid first, so a hook
+    reads the lock as held (no installer pid yet), never as missing, until
+    the folder itself goes; doctor's claim (claim) goes last. A file an
+    installer put there since stays, and so does the folder then. A lock
+    with a folder inside is left whole. On POSIX the files go through the
+    descriptor, and the folder goes only while the path still names it; on
+    Windows the pinned handle removes it.
+    """
+    dir_fd = held.dir_fd
+    for name in names:
+        if dir_fd is not None:
+            info = os.stat(name, dir_fd=dir_fd, follow_symlinks=False)
+        else:
+            info = os.lstat(os.path.join(lock, name))
+        if stat.S_ISDIR(info.st_mode):
+            return f"{lock} holds a folder ({name}); it was left in place"
+    for name in [*sorted(names, key=lambda item: item != "pid"), claim]:
+        try:
+            if dir_fd is not None:
+                os.unlink(name, dir_fd=dir_fd)
+            else:
+                os.unlink(os.path.join(lock, name))
+        except FileNotFoundError:
+            continue
+    if dir_fd is not None:
+        try:
+            info = os.lstat(lock)
+        except FileNotFoundError:
+            return "removed"
+        # The descriptor keeps this folder's inode: another identity at the
+        # path is a lock an installer took since, which stays.
+        if (info.st_dev, info.st_ino) != held.identity:
+            return "changed"
+        try:
+            os.rmdir(lock)
+        except FileNotFoundError:
+            return "removed"
+        except OSError as exc:
+            if exc.errno in (errno.ENOTEMPTY, errno.EEXIST):
+                return "changed"
+            raise
+        return "removed"
+    import ctypes  # pragma: no cover - Windows only
+    from ctypes import wintypes
+
+    class _FileDispositionInfo(ctypes.Structure):
+        _fields_ = [("DeleteFile", wintypes.BOOLEAN)]
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.SetFileInformationByHandle.argtypes = (wintypes.HANDLE, ctypes.c_int, wintypes.LPVOID, wintypes.DWORD)
+    disposition = _FileDispositionInfo(True)
+    # FileDispositionInfo: the folder goes when doctor closes the handle.
+    if not kernel32.SetFileInformationByHandle(held.handle, 4, ctypes.byref(disposition), ctypes.sizeof(disposition)):
+        code = ctypes.get_last_error()
+        if code == 145:  # ERROR_DIR_NOT_EMPTY
+            return "changed"
+        raise ctypes.WinError(code)
+    return "removed"
+
+
+def _fix_stale_install_lock(cfg, *, assume_yes: bool, plan_only: bool = False) -> tuple[str, str]:
+    """Remove an install lock whose installer is proven gone (_install_lock_state).
+
+    The stale decision is bound to the lock it was made on: the folder's
+    file identity and its owner record (_install_lock_owner). After the
+    prompt doctor holds the folder open, puts its takeover claim in it
+    (_claim_install_lock, as install.sh and install.ps1 do before they take
+    a lock over), and removes it only when both are unchanged, no other
+    run's claim there is live and its installer is still gone; a lock an
+    installer took over or claimed meanwhile, in place or by a new folder,
+    stays where it is. An installer that claims it later sees doctor's
+    claim and waits. The canonical lock is never moved away, so no hook sees
+    a running install without it.
+    """
+    if _doctor_managed(cfg):
+        return ("skip", "the installation owns its install lock")
+    stale = [(folder, owner) for folder in _install_lock_folders(cfg) if (owner := _stale_install_lock(folder))]
+    if not stale:
+        return ("skip", "no install lock is left by an installer that is gone")
+    names = ", ".join(os.path.join(folder, ".install.lock") for folder, _ in stale)
+    if plan_only:
+        return ("plan", f"remove {names}, left by an installer that is no longer running")
+    if not assume_yes and not click.confirm(
+        f"    Remove {names}, left by an installer that is no longer running?", default=True
+    ):
+        return ("skip", "declined by user")
+    removed: list[str] = []
+    changed: list[str] = []
+    for folder, owner in stale:
+        lock = os.path.join(folder, ".install.lock")
+        try:
+            held = _open_install_lock(lock, pin=True)
+        except OSError as exc:
+            return ("fail", f"could not open {lock}: {exc}")
+        if held is None:
+            changed.append(lock)
+            continue
+        claim = ""
+        outcome = "changed"
+        try:
+            claim = _claim_install_lock(lock, held)
+            if (
+                _install_lock_owner(lock, held, claim) == owner
+                and not _install_lock_claimed(lock, held, claim)
+                and _install_lock_state(folder, held)[0] == "stale"
+            ):
+                outcome = _remove_held_install_lock(lock, held, owner[1], claim)
+        except OSError as exc:
+            outcome = f"could not remove {lock}: {exc}"
+        finally:
+            if claim and outcome != "removed":
+                _unclaim_install_lock(lock, held, claim)
+            _close_install_lock(held)
+        if outcome == "removed":
+            removed.append(lock)
+        elif outcome == "changed":
+            changed.append(lock)
+        else:
+            return ("fail", outcome)
+    if changed:
+        left = ", ".join(changed)
+        detail = f"{left} changed since the check (an installer took it over or removed it); it was left in place"
+        return ("pass", f"removed {', '.join(removed)}; {detail}") if removed else ("skip", detail)
+    return ("pass", f"removed {names}, left by an installer that is no longer running")
 
 
 def _private_state_files(cfg, data_dir: str) -> tuple[str, ...]:
@@ -5209,10 +5903,15 @@ def _trusted_gateway_listener(
     *,
     evidence: GatewayEvidence | None = None,
     platform_name: str | None = None,
+    api_port: int | None = None,
 ) -> _GatewayTrust:
-    """Prove an exact local API target before sending a master token."""
+    """Prove an exact local API target before sending a master token.
+
+    *api_port* names the running gateway's own listener when a saved port
+    edit has not been applied yet; the proof is the same.
+    """
     host = _gateway_api_host(cfg)
-    api_port = _gateway_api_port(cfg)
+    api_port = api_port if api_port is not None and 1 <= api_port <= 65_535 else _gateway_api_port(cfg)
     if not api_port:
         return _GatewayTrust("unavailable", "configured API port is invalid")
 
@@ -6360,6 +7059,13 @@ _HERMES_PROBE_UNIX_CONTAINMENT = (
 # The supervisor's exit code when it cannot establish that nothing is left;
 # any other code is the probe's own (124 when Doctor ended it).
 _HERMES_PROBE_NOT_CONTAINED = 125
+# The supervisor's exit code when the kernel or a seccomp filter refused the
+# probe's user/PID namespace, so the registered command never ran (GAP-1945:
+# a container seccomp profile, not only the two sysctls). A probe that ran
+# never ends with it: the supervisor returns it only before the namespace,
+# and reports a hook's own exit 123 as 1.
+_HERMES_PROBE_NAMESPACE_REFUSED = 123
+_HERMES_PROOF_NAMESPACE_REFUSED = "this host refuses the user namespace the probe needs (a seccomp profile or sandbox)"
 _HERMES_PROBE_SUPERVISOR = r"""
 import ctypes, os, select, signal, subprocess, sys, time
 
@@ -6447,7 +7153,9 @@ def namespace(libc, flags, ready, mapped, argv):
     if libc.prctl(PR_SET_PDEATHSIG, signal.SIGKILL, 0, 0, 0) != 0:
         return 125
     if libc.unshare(flags) != 0:
-        return 125
+        # EPERM (a seccomp profile, a sandbox) or ENOSPC/EUSERS (limits):
+        # this host refuses the namespace. Anything else fails closed.
+        return 123 if ctypes.get_errno() in (1, 28, 87) else 125
     os.write(ready, b"u")
     if os.read(mapped, 1) != b"m":
         return 125
@@ -6523,6 +7231,8 @@ def main():
             write_maps(pid, caps)
         except OSError:
             contained = False
+    # Ended by a signal (not by the end() below for a refused namespace).
+    signalled = state["ended"]
     if contained:
         os.write(mapped_w, b"m")
     else:
@@ -6532,11 +7242,16 @@ def main():
         code = status(os.waitpid(pid, 0)[1])
     except ChildProcessError:
         code = 125
-    if not reap_all(budget) or not contained:
+    reaped = reap_all(budget)
+    if reaped and not contained and code == 123 and not signalled:
+        return 123
+    if not reaped or not contained:
         return 125
     if state["ended"]:
         return 124
-    return code
+    # The hook ran: its own 123 is a plain failure, never a refused
+    # namespace (GAP-1945).
+    return 1 if code == 123 else code
 
 
 sys.exit(main())
@@ -7093,8 +7808,12 @@ def _check_codex_hooks(
         try:
             with open(config_path, "rb") as stream:
                 document = codex_toml.loads(stream.read(1024 * 1024 + 1))
-            hooks = document.get("hooks", {})
-            wired = isinstance(hooks, dict) and "defenseclaw" in str(hooks).lower()
+            # The hook command runs a script in this data directory's hooks
+            # folder, wherever DEFENSECLAW_HOME puts it: a custom home has no
+            # "defenseclaw" in its path (GAP-1882).
+            from defenseclaw.hook_integrity import registers_defenseclaw_hooks
+
+            wired = registers_defenseclaw_hooks(cfg, "codex", config_path)
         except (OSError, UnicodeError, ValueError):
             wired = False
         if not wired:
@@ -7532,6 +8251,60 @@ def _codex_otel_unchecked_value(otel, product_token: str = "") -> str:
     return ""
 
 
+def _codex_otel_marked_kept(otel, api_port: int, product_token: str = "") -> list[tuple[str, str]]:
+    """Name Codex exporters that look like an earlier DefenseClaw render but are kept.
+
+    An exporter with both of DefenseClaw's markers (x-defenseclaw-source =
+    codex, x-defenseclaw-client = codex-otel/...) and a bearer, sent to a
+    loopback port other than this gateway's, with no credential this install
+    can name, is kept by setup as the operator's (the ownership rule never
+    goes by markers, GAP-1511). It is often a pre-setup copy an earlier
+    release saved and setup put back (GAP-1610), so Doctor warns with the
+    fields and the manual step (LEAD DECISION 05:36, option (b)); it never
+    fails or removes it. Returns (field, endpoint) pairs.
+    """
+    if not isinstance(otel, dict):
+        return []
+    known = [product_token] if product_token else []
+    kept = []
+    for key in sorted(otel, key=str):
+        table = otel.get(key)
+        if not isinstance(table, dict) or _otel_carries_product_credential(table, known):
+            continue
+        for kind in ("otlp-http", "otlp-grpc"):
+            exporter = table.get(kind)
+            if not isinstance(exporter, dict):
+                continue
+            raw_headers = exporter.get("headers")
+            headers = (
+                {str(k).strip().lower(): str(v).strip() for k, v in raw_headers.items() if isinstance(v, str)}
+                if isinstance(raw_headers, dict)
+                else {}
+            )
+            if headers.get("x-defenseclaw-source") != "codex" or not headers.get("x-defenseclaw-client", "").startswith(
+                "codex-otel/"
+            ):
+                continue
+            scheme, _, credential = headers.get("authorization", "").partition(" ")
+            if scheme.lower() != "bearer" or len(credential.strip()) < 8:
+                continue
+            endpoint = exporter.get("endpoint")
+            try:
+                parsed = urllib.parse.urlsplit(endpoint) if isinstance(endpoint, str) else None
+                port = parsed.port if parsed is not None else None
+            except ValueError:
+                parsed, port = None, None
+            if (
+                parsed is None
+                or (parsed.hostname or "") not in ("127.0.0.1", "localhost", "::1")
+                or port is None
+                or port == api_port
+            ):
+                continue
+            kept.append((f"otel.{key}", f"{parsed.hostname}:{port}"))
+    return kept
+
+
 def _codex_scoped_otlp_token(cfg) -> str:
     """The scoped Codex OTLP credential this install issued, or ""."""
     data_dir = str(getattr(cfg, "data_dir", "") or "")
@@ -7671,6 +8444,21 @@ def _check_codex_otel_alignment(cfg, r: _DoctorResult) -> None:
                 "so DefenseClaw kept it",
                 r=r,
                 remediation="if it is a DefenseClaw token, remove it; otherwise no action is needed",
+            )
+        marked = _codex_otel_marked_kept(otel, _gateway_api_port(cfg), _codex_scoped_otlp_token(cfg))
+        if marked:
+            fields = ", ".join(field for field, _ in marked)
+            targets = ", ".join(sorted({target for _, target in marked}))
+            _emit(
+                "warn",
+                "Codex OTel ownership",
+                f"config.toml {fields} carries DefenseClaw's x-defenseclaw-source and "
+                "x-defenseclaw-client headers and a bearer, but no credential this install "
+                "recorded, so setup keeps it as yours; Codex sends its prompt telemetry and "
+                f"that bearer to {targets}, which DefenseClaw does not serve",
+                r=r,
+                remediation=f"if you did not add it, delete the {fields} tables from {config_path} "
+                "(an earlier DefenseClaw setup or a copied config may have left them)",
             )
 
     try:
@@ -7888,6 +8676,23 @@ def _check_hermes_hooks(
             install_root=install_root,
             search_path=search_path,
             pathext=pathext,
+        )
+        return
+    from defenseclaw.doctor_hooks import unix_hermes_hook_problem
+
+    script = os.path.join(getattr(cfg, "data_dir", "") or "", "hooks", "hermes-hook.sh")
+    # A missing registration and the approvals are _check_hook_health's
+    # (hook_integrity names each unapproved event); this checks the event
+    # matrix, matchers, timeouts and command of one that is there (GAP-0339).
+    state, problem = (
+        unix_hermes_hook_problem(selected_config, script, check_approvals=False)
+        if os.path.isfile(selected_config) else ("", "")
+    )
+    if state:
+        _emit(
+            "fail", _HERMES_HOOKS_LABEL,
+            f"{problem}; a Hermes tool call can run unchecked", r=r,
+            remediation="run 'defenseclaw setup hermes --yes' to re-register the hooks",
         )
         return
     _check_hook_health(cfg, "hermes", r)
@@ -9125,10 +9930,10 @@ def _hermes_python_argv_verdict(args, name) -> bool | None:
     return None if hermes_python or "/hermes_cli/" in lowered or "/hermes-agent/" in lowered else False
 
 
-def _hermes_proc_argv(pid: str) -> tuple[str, ...] | None:
+def _hermes_proc_argv(pid: str, proc_root: str = "/proc") -> tuple[str, ...] | None:
     """Read the complete argv when procps splits a multiline ``-c`` value."""
     try:
-        with open(f"/proc/{pid}/cmdline", "rb") as stream:
+        with open(f"{proc_root}/{pid}/cmdline", "rb") as stream:
             data = stream.read()
     except OSError:
         return None
@@ -9155,9 +9960,12 @@ def _hermes_host_running() -> bool | None:
             check=False,
         )
     except (FileNotFoundError, subprocess.SubprocessError, OSError):
-        return None
+        return _hermes_host_running_from_proc()
     if proc.returncode != 0:
-        return None
+        # ps fails where /proc hides its system files (hidepid=2,subset=pid
+        # has no /proc/stat): this account's own processes are still there
+        # (GAP-0015).
+        return _hermes_host_running_from_proc()
     uid = str(os.getuid())
     own = {str(os.getpid()), str(os.getppid())}
     wrapped = False
@@ -9173,6 +9981,48 @@ def _hermes_host_running() -> bool | None:
             complete = _hermes_proc_argv(fields[0])
             if complete:
                 verdict = _hermes_argv_verdict(complete)
+        if verdict is True:
+            return True
+        if verdict is None:
+            wrapped = True
+    return None if wrapped else False
+
+
+def _hermes_host_running_from_proc(proc_root: str = "/proc") -> bool | None:
+    """:func:`_hermes_host_running` from /proc when ps cannot list processes.
+
+    Reads each process's real uid from ``status`` and its argv from
+    ``cmdline``; only processes of this account count. A /proc that cannot be
+    listed, or that does not show this process itself, leaves it unknown.
+    """
+    try:
+        entries = os.listdir(proc_root)
+    except OSError:
+        return None
+    me = str(os.getpid())
+    if me not in entries:
+        return None
+    uid = str(os.getuid())
+    own = {me, str(os.getppid())}
+    wrapped = False
+    for pid in entries:
+        if not pid.isdigit() or pid in own:
+            continue
+        try:
+            with open(f"{proc_root}/{pid}/status", encoding="utf-8", errors="replace") as stream:
+                status = stream.read()
+        except OSError:
+            continue
+        real = next(
+            (line.split()[1] for line in status.splitlines() if line.startswith("Uid:") and len(line.split()) > 1),
+            None,
+        )
+        if real != uid:
+            continue
+        argv = _hermes_proc_argv(pid, proc_root)
+        if not argv:
+            continue
+        verdict = _hermes_argv_verdict(list(argv))
         if verdict is True:
             return True
         if verdict is None:
@@ -9585,9 +10435,21 @@ def _check_hook_health(cfg, connector: str, r: _DoctorResult) -> None:
                 _check_opencode_later_plugins(cfg, path, r)
             elif connector == "hermes":
                 problem = _hermes_registered_execution_problem(cfg, path)
-                if problem:
+                refused = problem == _HERMES_PROOF_NAMESPACE_REFUSED
+                if problem and not refused:
                     _emit("fail", label, problem, r=r,
                           remediation="run 'defenseclaw setup hermes --yes --restart', then rerun 'defenseclaw doctor'")
+                    return
+                if unavailable := (problem if refused else _hermes_execution_proof_unavailable()):
+                    _emit(
+                        "warn",
+                        label,
+                        f"registered at {path}; {_HERMES_PROOF_UNAVAILABLE}: {unavailable}, so the "
+                        "registered hook is read back without running it",
+                        r=r,
+                        remediation="enable unprivileged user namespaces (sysctl user.max_user_namespaces, "
+                        "or the container seccomp profile) for the execution proof",
+                    )
                     return
                 if r.list_processes and _hermes_host_running() is False:
                     _emit(
@@ -9642,8 +10504,63 @@ def _check_hook_health(cfg, connector: str, r: _DoctorResult) -> None:
     )
 
 
+def _hermes_execution_proof_unavailable() -> str:
+    """Why this host cannot run the contained Hermes probe, or "" (GAP-1525).
+
+    On Linux an account without CAP_SYS_ADMIN needs an unprivileged user
+    namespace for the probe's PID namespace; ``user.max_user_namespaces=0`` (or
+    ``kernel.unprivileged_userns_clone=0``) refuses it. The gateway reads the
+    sealed registration back without running it there
+    (hermesExecutionContainmentUnavailable), and doctor says so as a warning,
+    not as a registration that is gone.
+    """
+    if not sys.platform.startswith("linux") or os.geteuid() == 0:
+        return ""
+    for path, name in (
+        ("/proc/sys/user/max_user_namespaces", "user.max_user_namespaces"),
+        ("/proc/sys/kernel/unprivileged_userns_clone", "kernel.unprivileged_userns_clone"),
+    ):
+        try:
+            with open(path, encoding="ascii") as handle:
+                value = handle.read().strip()
+        except OSError:
+            continue
+        if value == "0":
+            return f"unprivileged user namespaces are disabled ({name}=0)"
+    return ""
+
+
 def _hermes_registered_execution_problem(cfg, config_path: str) -> str:
     """Read Hermes' active matrix and execute its sealed command as a bounded probe."""
+    problem = _hermes_registration_problem(cfg, config_path)
+    if problem:
+        return problem
+    if _hermes_execution_proof_unavailable():
+        # The caller reports the unavailable proof as a warning.
+        return ""
+    expected = os.path.normpath(os.path.join(str(getattr(cfg, "data_dir", "") or ""), "hooks", "hermes-hook.sh"))
+    probe_argv = [expected, "--defenseclaw-execution-probe"]
+    if sys.platform == "darwin":
+        probe_argv.append("--forkless")
+    returncode, stdout = _run_hermes_execution_probe(probe_argv)
+    if returncode == _HERMES_PROBE_NAMESPACE_REFUSED and _HERMES_PROBE_UNIX_CONTAINMENT == "pidns":
+        # The probe never ran; the sealed registration was read back above.
+        return _HERMES_PROOF_NAMESPACE_REFUSED
+    if returncode is None:
+        return "Hermes registered hook execution probe could not run"
+    if returncode != 0 or stdout != _HERMES_EXECUTION_PROBE_RESPONSE:
+        return f"Hermes registered hook execution probe failed (exit {returncode})"
+    return ""
+
+
+def _hermes_registration_problem(cfg, config_path: str) -> str:
+    """Read Hermes' active matrix, approvals and sealed hook without running it.
+
+    The fail-mode status uses this alone: whether the registration is this
+    install's sealed hook does not depend on whether this host can run the
+    contained execution probe (a Linux host without unprivileged user
+    namespaces cannot). Doctor adds the probe.
+    """
     from defenseclaw.doctor_hooks import _HERMES_REQUIRED_HOOKS, _InspectionError, _read_config
     from defenseclaw.hook_integrity import _locked_hook_scripts
 
@@ -9741,14 +10658,6 @@ def _hermes_registered_execution_problem(cfg, config_path: str) -> str:
     for event in _HERMES_REQUIRED_HOOKS:
         if event not in approved:
             return f"Hermes hook approval for {event} is missing at {allowlist_path}"
-    probe_argv = [expected, "--defenseclaw-execution-probe"]
-    if sys.platform == "darwin":
-        probe_argv.append("--forkless")
-    returncode, stdout = _run_hermes_execution_probe(probe_argv)
-    if returncode is None:
-        return "Hermes registered hook execution probe could not run"
-    if returncode != 0 or stdout != _HERMES_EXECUTION_PROBE_RESPONSE:
-        return f"Hermes registered hook execution probe failed (exit {returncode})"
     return ""
 
 
@@ -9902,6 +10811,11 @@ class ConnectorSetupReadiness:
         return self.ready
 
 
+# The Hermes hooks row where this host cannot run the contained execution
+# proof (GAP-1525): the sealed registration is current, so it is a warning
+# that the proof did not run, and setup is ready (GAP-1994).
+_HERMES_PROOF_UNAVAILABLE = "execution proof unavailable"
+
 _SETUP_READINESS_PRIMARY_LABELS = {
     "codex": "Codex hooks",
     "claudecode": "Claude Code hooks",
@@ -9970,7 +10884,7 @@ def connector_setup_readiness(cfg, connector: str) -> ConnectorSetupReadiness:
     if not upstream_fail_open(cfg, name):
         lock_mode_target = str(fail_mode.get("desired") or configured_mode)
     if name == "cursor":
-        configured_mode = "closed" if _doctor_effective_guardrail_mode(cfg.guardrail, "cursor") == "action" else "open"
+        configured_mode = _cursor_lock_fail_mode(cfg)
         lock_mode_target = configured_mode
     if lock_mode != lock_mode_target:
         effective = str(fail_mode.get("effective") or "unknown")
@@ -9986,7 +10900,16 @@ def connector_setup_readiness(cfg, connector: str) -> ConnectorSetupReadiness:
     from defenseclaw.fail_mode import rendered_fail_mode, report_renders_fail_mode
 
     rendered = rendered_fail_mode(fail_mode)
-    if report_renders_fail_mode(fail_mode) and rendered != lock_mode_target:
+    # A current OSS OpenCode bridge asks the installed runtime config when a
+    # proven outage occurs. It has no install-time outage mode to render.
+    # The Doctor hook/contract checks below still validate its exact plugin
+    # bytes and custody receipt before Setup can report ready.
+    call_time_opencode = (
+        name == "opencode"
+        and str(getattr(cfg, "deployment_mode", "") or "").strip().lower()
+        not in {"managed_enterprise", "secure_client"}
+    )
+    if report_renders_fail_mode(fail_mode) and rendered != lock_mode_target and not call_time_opencode:
         return ConnectorSetupReadiness(
             False,
             name,
@@ -10015,6 +10938,8 @@ def connector_setup_readiness(cfg, connector: str) -> ConnectorSetupReadiness:
         for row in rows:
             status = str(row.get("status") or "")
             detail = str(row.get("detail") or "")
+            if status == "warn" and name == "hermes" and label == primary_label and _HERMES_PROOF_UNAVAILABLE in detail:
+                continue
             if status != "pass":
                 return ConnectorSetupReadiness(
                     False,
@@ -10633,6 +11558,24 @@ def _guardrail_proxy_intentionally_closed(cfg) -> str:
             parts.append(f"{connector} (mode=observe)")
     prefix = "enforced" if all(mode == "action" for mode in modes.values()) else "native-driven"
     return f"{prefix} for {', '.join(parts)} — proxy port intentionally closed"
+
+
+def _cursor_lock_fail_mode(cfg) -> str:
+    """The fail mode Cursor's hook contract lock records.
+
+    A per-user lock records the outage mode its config gives (Go
+    connector.OutageHookFailMode): a saved choice, else the policy tier. No
+    setup or mode switch writes a Cursor fail mode any more (owner decision
+    2026-10-23), so the guardrail mode no longer predicts it. A managed lock
+    keeps its guardrail-mode reading.
+    """
+    gc = cfg.guardrail
+    if str(getattr(cfg, "deployment_mode", "") or "").strip().lower() != "managed_enterprise":
+        resolver = getattr(gc, "effective_hook_fail_mode", None)
+        mode = resolver("cursor") if callable(resolver) else None
+        if isinstance(mode, str) and mode.strip().lower() in ("open", "closed"):
+            return mode.strip().lower()
+    return "closed" if _doctor_effective_guardrail_mode(gc, "cursor") == "action" else "open"
 
 
 def _doctor_effective_guardrail_mode(gc, connector: str) -> str:
@@ -13350,6 +14293,7 @@ def doctor(
     _check_inventory_storage(cfg, r)
     _check_device_identity(cfg, r)
     _check_private_file_exposure(cfg, r)
+    _check_install_lock(cfg, r)
 
     # S6.5 — surface the active connector + its configured paths
     # before any scanner runs. Operators routinely point doctor at a
@@ -14468,6 +15412,16 @@ def _doctor_repair_specs() -> tuple[RepairSpec, ...]:
             _fix_private_state_files,
             (),
             ("make device.key, its provenance files and audit.db readable by this account only",),
+            False,
+            False,
+        ),
+        (
+            "doctor.install.stale-lock.clear",
+            "install lock left by a stopped installer",
+            "safe",
+            _fix_stale_install_lock,
+            (),
+            ("remove an .install.lock whose installer is no longer running and that no interrupted install keeps",),
             False,
             False,
         ),
@@ -15746,10 +16700,8 @@ def _check_connector_inventory(
                     f"provenance={fail_mode['provenance']}"
                 )
                 desired = fail_mode.get("desired")
-                # A DEFENSECLAW_FAIL_MODE=closed in doctor's own environment
-                # makes the effective mode closed, but the agent that runs an
-                # open-rendered hook may not have it, so the rendered mode is
-                # checked on its own.
+                # Check the installed render against the desired policy;
+                # neither doctor's nor the agent's environment changes it.
                 rendered_open = desired == "closed" and rendered == "open"
                 # A hook or plugin that records its mode but has none that
                 # can be read (missing, or a value no installer writes) does
@@ -16237,9 +17189,7 @@ def _check_hook_contract_lock(
             f" `defenseclaw setup {connector}` or the next gateway start refreshes the lock"
         )
     if connector == "cursor":
-        expected_cursor_fail_mode = (
-            "closed" if _doctor_effective_guardrail_mode(cfg.guardrail, "cursor") == "action" else "open"
-        )
+        expected_cursor_fail_mode = _cursor_lock_fail_mode(cfg)
         detail += " priority_conflict_detection=unavailable none_inferred=true"
         if str(entry.get("hook_fail_mode") or "") != expected_cursor_fail_mode:
             _emit("fail", "Hook contract", detail + f" expected_hook_fail_mode={expected_cursor_fail_mode}", r=r)
@@ -16639,40 +17589,21 @@ def _check_connector_residue(cfg, active: str, r: _DoctorResult) -> None:
 
 
 def _check_removed_connector_cleanup(cfg, r: _DoctorResult) -> None:
-    """until 1.1: what the removed OpenHands or OmniGent teardown left for the user.
+    """until 1.1: one information row when OpenHands or OmniGent left something on this host.
 
-    The teardown only replaces DefenseClaw's hook script with a stub that
-    blocks every call and revokes the tokens (``defenseclaw.removed_connectors``).
-    Each thing left is listed with the step to remove it; a host with none
-    prints no row.
+    DefenseClaw no longer guards either agent, and the gateway teardown
+    removes what an older setup wrote for them (``defenseclaw.removed_connectors``).
+    What it could not remove is information, never a failure. A host with
+    nothing left prints no row.
     """
-    from defenseclaw.removed_connectors import SCRIPT_GONE_WHAT, STUB_UNUSABLE_WHAT, leftovers
+    from defenseclaw.removed_connectors import NOTICE, leftovers
 
     workspace = cfg.connector_workspace_dir() if hasattr(cfg, "connector_workspace_dir") else ""
-    for left in leftovers(str(getattr(cfg, "data_dir", "") or ""), workspace=workspace):
-        steps = "; ".join(f"{item.path}: {item.what} (to remove: {item.step})" for item in left.items)
-        pending_publication = any("interrupted publication" in item.what for item in left.items)
-        remediation = f"do each step above; until then {left.label} is blocked by DefenseClaw's stub"
-        if pending_publication:
-            remediation = (
-                "rerun connector teardown to recover the interrupted publication; "
-                "preserve its receipt and saved copies if recovery fails"
-            )
-        # A registration whose script is gone, or a stub the agent may not
-        # run or load, does not block: an upgrade that left one is not
-        # finished (GAP-0833 class).
-        unblocked = any(item.what in (SCRIPT_GONE_WHAT, STUB_UNUSABLE_WHAT) for item in left.items)
-        if not pending_publication and unblocked:
-            remediation = (
-                f"run defenseclaw-gateway connector teardown --connector {left.connector}, then do each step above"
-            )
-        _emit(
-            "fail" if unblocked else "warn",
-            f"Removed connector [{left.label}]",
-            f"removed in DefenseClaw 1.0.4; left for you to remove by hand: {steps}",
-            r=r,
-            remediation=remediation,
-        )
+    found = leftovers(str(getattr(cfg, "data_dir", "") or ""), workspace=workspace)
+    if not found:
+        return
+    steps = "; ".join(f"{item.path}: {item.what} (to remove: {item.step})" for left in found for item in left.items)
+    _emit("skip", "Removed connectors", f"{NOTICE} Left on this host: {steps}", r=r)
 
 
 def _check_orphaned_hook_entries(cfg, active: str, r: _DoctorResult) -> None:

@@ -532,6 +532,24 @@ def test_only_a_0x_import_selects_the_windows_agents(data_dir: Path, recorded: l
     assert calls == [str(data_dir)]
 
 
+def test_every_upgrade_seals_the_windows_hook_credentials(data_dir: Path, recorded: list[str], monkeypatch) -> None:
+    # GAP-2207: 1.0.2 left .hook-amp/.hook-opencode/... tokens with an
+    # inherited DACL; after a 1.0.2 -> 1.0.5 upgrade setup rotate-token
+    # refused them, because only a 0.x import sealed them. A check changes
+    # nothing.
+    calls: list[str] = []
+    monkeypatch.setattr(migrations, "_seal_windows_hook_credentials", calls.append)
+    _write_config(data_dir, f"config_version: {migrations._FIRST_V8_CONFIG_VERSION}\n")
+
+    migrate(str(data_dir), from_version="1.0.2", check=True)
+    assert calls == []
+    migrate(str(data_dir), from_version="1.0.2")
+    migrate(str(data_dir), from_version="1.0.4")
+    migrate(str(data_dir))
+
+    assert calls == [str(data_dir)] * 3
+
+
 def test_a_0x_import_with_a_v8_config_selects_the_windows_agents(
     data_dir: Path, recorded: list[str], monkeypatch
 ) -> None:
@@ -708,6 +726,24 @@ def test_cli_rejects_a_from_version_that_is_not_a_release(data_dir: Path, v8_tar
     assert "not a release version" in result.output
     ok = CliRunner().invoke(migrate_cmd, ["--data-dir", str(data_dir), "--check", "--from-version", "1.0.1.dev3"])
     assert ok.exit_code == 0, ok.output
+
+
+def test_cli_check_omits_unchanged_version_range(data_dir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        migrations,
+        "migrate",
+        lambda *_args, **_kwargs: migrations.MigrateResult(
+            from_config_version=9,
+            to_config_version=9,
+            applied=["update renamed and removed connectors"],
+            changed=True,
+        ),
+    )
+    result = CliRunner().invoke(migrate_cmd, ["--data-dir", str(data_dir), "--check"])
+    assert result.exit_code == 0, result.output
+    assert "1 migration step(s) pending (config_version 9):" in result.output
+    assert "9 -> 9" not in result.output
+    assert "update renamed and removed connectors" in result.output
 
 
 # GAP-0163: a legacy custom-providers.json next to a config_version 9 file.

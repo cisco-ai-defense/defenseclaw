@@ -98,7 +98,7 @@ Wrap the direct launches:
 defenseclaw setup acp
 ```
 
-This runs setup for each pair and points your entry at the guard, keeping its key and `env` without adding a duplicate picker entry. Later `acp setup` updates that same entry when its profile or mode changes, and `acp verify` checks every guarded entry for the pair. If the reserved `DefenseClaw · <Agent>` name is taken by an entry DefenseClaw has no record of writing (an unrelated command, or an entry from DefenseClaw 1.0.3 or earlier), setup leaves it and writes its own entry next to it as `DefenseClaw · <Agent> (2)`, and removal leaves it too. `acp verify` fails until you delete that entry in the editor settings and run setup again. It starts in observe mode; add `--activate` for action mode. Remove a client-registry entry in the editor once the guarded entry exists, or the agent can still start without the guard.
+This runs setup for each pair and points your entry at the guard, keeping its key and `env` without adding a duplicate picker entry. Later `acp setup` updates that same entry when its profile or mode changes, and `acp verify` checks every guarded entry for the pair. If the reserved `DefenseClaw · <Agent>` name is taken by an entry DefenseClaw has no record of writing (an unrelated command, or an entry from DefenseClaw 1.0.3 or earlier), setup leaves it and writes its own entry next to it as `DefenseClaw · <Agent> (2)`, and removal leaves it too. `acp verify` fails until you delete that entry in the editor settings and run setup again. It starts in observe mode; add `--activate` for action mode. Remove a client-registry entry in the editor once the guarded entry exists, or the agent can still start without the guard. On Windows, an entry that starts the agent through its npm `.cmd` launcher (for example `opencode.cmd`) is adopted like any other direct entry.
 
 ## Several guarded agents in one editor
 
@@ -133,7 +133,7 @@ The sample shows a binding with a missing contract lock. After a good setup the 
 defenseclaw acp remove --client zed --agent kiro
 ```
 
-This removes the entry and the contract lock for that pair.
+This removes the entry and the contract lock for that pair. It also takes out the `acp.profiles` entries that `acp setup --profile` wrote, once no pair uses them.
 
 ## Managed computers
 
@@ -161,6 +161,8 @@ Protocol version: ACP `schema-v1.21.0`.
 | --- | --- |
 | Blocked prompt (action mode) | The turn ends with the reason as an agent message, for example "DefenseClaw policy blocked this action (rule SEC-AWS-KEY: AWS access key). Do not retry it in another form." The next prompt runs. |
 | Blocked agent output | The turn ends and the guard cancels it in the agent. The message says the agent may already have run the step. |
+| A check fails after the prompt reached the agent | The editor is told the agent may already have run tool actions and asks you to inspect the results before retrying. A prompt refused before it was forwarded keeps the "not delivered" wording. A refusal with a specific cause (ACP switched off, a rejected credential, the gateway's own refusal) keeps that cause. |
+| Observe mode, the gateway refuses the frame in every mode | The guard refuses it too. This covers an account holder the gateway could not confirm. An ordinary policy finding in observe mode is still only recorded. |
 | Gateway does not answer (one retry) | Only that step is refused: "DefenseClaw could not check this step because the gateway did not answer". The session stays open. |
 | Gateway rejects the credential | "the gateway did not accept this editor's ACP credential: your administrator may have revoked your access" |
 | ACP checking switched off centrally | "your administrator switched ACP checking off" |
@@ -168,7 +170,7 @@ Protocol version: ACP `schema-v1.21.0`.
 | Guard cannot start | The editor shows the reason (Zed: under **Failed to Launch**). |
 | Agent silent for 60 seconds after a prompt | The guard says the agent may be waiting for first-run questions in a terminal. |
 
-A profile's `fail_mode: closed` makes an observe-mode guard refuse a step it could not check, once the gateway has answered that session. `fail_mode: open` lets such a step through. Hook fail modes are separate; per-user hooks default to closed.
+A profile's `fail_mode: closed` makes an observe-mode guard refuse a step it could not check, once the gateway has answered that session. `fail_mode: open` lets such a step through. Hook fail modes are separate ([gateway outage table](/docs/connectors/capability-matrix#gateway-outage)).
 
 If the central profile mode and the mode the entry was set up for differ, the guard stops the session and names both modes and the setup command to run. Zed keeps one guard for every thread of an agent, so after such an end the guard answers with the same message until you run the command.
 
@@ -245,7 +247,7 @@ Setup and adopt also record a SHA-256 digest of each editor entry they write, in
 
 ## Supported agents
 
-`defenseclaw acp catalog` prints the list. Only agents with their own ACP mode are guarded. Other connectors are guarded through their [hooks](/docs/connectors).
+On a per-user install `defenseclaw acp catalog` prints the list. On a managed computer it is refused (exit 2); the administrator's `defenseclaw-gateway enterprise acp` commands are in [Managed computers](#managed-computers). Only agents with their own ACP mode are guarded. Other connectors are guarded through their [hooks](/docs/connectors).
 
 | Agent | Entry point | Status |
 | --- | --- | --- |
@@ -271,13 +273,13 @@ Zed is tested. JetBrains is cataloged. A cataloged entry point matches the vendo
 | Command | What it does |
 | --- | --- |
 | `defenseclaw acp catalog` | Prints the compiled client and agent catalog as JSON. |
-| `defenseclaw acp setup --client C --agent A` | Writes the guarded entry, token and contract lock. Flags: `--profile`, `--activate`, `--guard-binary`, `--agent-binary`, `--json`. |
+| `defenseclaw acp setup --client C --agent A` | Writes the guarded entry, token and contract lock. Flags: `--profile`, `--activate`, `--guard-binary`, `--agent-binary`, `--json`. `--profile NAME` uses that profile, or creates it when config.yaml does not define it; the last line then ends with `new profile NAME`. |
 | `defenseclaw acp status` | Guard state and each binding's health, profile and mode. `--json` adds where each profile came from. |
-| `defenseclaw acp verify` | Checks the contract lock against what is configured. |
+| `defenseclaw acp verify` | Checks the contract lock against what is configured. It reports a binding healthy only when the guard would start it: the lock version and protocol pins match, and the agent executable is the pinned file, not a link to another. It also fails on a direct entry that starts the pinned agent file without the guard, whatever its name. |
 | `defenseclaw acp detect` | Lists guarded, unguarded and foreign agent entries in each editor. |
 | `defenseclaw acp adopt` (also `defenseclaw setup acp`) | Points existing unguarded entries at the guard. Flags: `--client`, `--activate`. |
 | `defenseclaw acp refresh --from-sha256 DIGEST` | Re-pins a new guard in locks that pinned the old one. The installer runs it on upgrade. |
-| `defenseclaw acp remove --client C --agent A` | Removes the entry and reclaims the contract lock. |
+| `defenseclaw acp remove --client C --agent A` | Removes the entry, reclaims the contract lock and takes out the profiles setup wrote for that pair. |
 
 ### Gateway routes
 

@@ -216,6 +216,11 @@ func TestStandaloneForeignCleanupCoversMachinePolicyOnlyUsers(t *testing.T) {
 	// not enroll per user are leftovers of an earlier route.
 	leftovers := []string{}
 	for _, target := range requests[0].Targets {
+		if target.Mode == enterpriseHookWorkerModeUnblockPersonalClaude {
+			// Claude Code is not machine policy here: the blocker an
+			// earlier pass may have written goes (GAP-1829).
+			continue
+		}
 		if target.Mode != enterpriseHookWorkerModeRemoveLeftover || target.Options.UserHome != "/home/alice" {
 			t.Fatalf("leftover target %+v", target)
 		}
@@ -364,6 +369,11 @@ func TestRemoveAllGroupsManifestTargetsPerAccount(t *testing.T) {
 	enterprisehooks.SetStandaloneResolver(standaloneTestResolver{accounts: accounts})
 	uid := func(value int) *int { return &value }
 	missingHome := filepath.Join(ownHome, "gone")
+	// A home is gone only from a parent that still holds other entries: an
+	// empty parent can be an unmounted volume (GAP-0443).
+	if err := os.Mkdir(filepath.Join(ownHome, "other"), 0o700); err != nil {
+		t.Fatal(err)
+	}
 	manifest := enterprisehooks.Manifest{Version: 1, Targets: []enterprisehooks.ManifestTarget{
 		{User: "alice", UserHome: "/home/alice", UID: uid(41001), GID: uid(41001), Connector: "codex"},
 		{User: "alice", UserHome: "/home/alice", UID: uid(41001), GID: uid(41001), Connector: "devin", DataDir: "/home/alice/.dc"},

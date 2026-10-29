@@ -53,6 +53,8 @@ Take a 30-second inventory of the AI on a machine.
 
 `agent discover` and `aibom scan` need no gateway. `agent usage`, `agent ide-plugins` and the TUI panel read the gateway's continuous scan, so start the gateway and turn it on first.
 
+This tour is for a per-user install. On a managed (standalone enterprise) Linux or macOS computer every command in it refuses, for enrolled users and for root alike, with `This computer is managed` and a pointer to `defenseclaw sandbox status` and `defenseclaw sandbox policy explain`. There the administrator turns discovery on with `ai_discovery.enabled: true` in the managed config and reads the inventory as root with `sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux discovery` and `enterprise linux ide-plugins` (on a Mac `sudo /opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise macos discovery`). On a managed Windows computer run `defenseclaw.exe enterprise windows discovery` from an elevated prompt. See [Per-user scans in standalone enterprise](#per-user-scans-in-standalone-enterprise).
+
 ### Steps
 
 1. List the agents that are installed.
@@ -79,7 +81,7 @@ Take a 30-second inventory of the AI on a machine.
    defenseclaw agent discovery status
    ```
 
-   A fresh install has discovery off. `enable` also turns on runtime planes A and B.
+   A fresh install has discovery off. `enable` also turns on runtime planes A and B. It lists the changes, says it will restart the gateway, and asks `Proceed? [Y/n]`; press Enter to continue. In a script or scheduled task, use `defenseclaw agent discovery enable --restart --scan --yes` to skip the prompt.
 
 3. Read the inventory.
 
@@ -123,6 +125,8 @@ Take a 30-second inventory of the AI on a machine.
 ```bash
 defenseclaw agent discovery disable
 ```
+`disable` asks `Proceed? [Y/n]` before saving the change and restarting the gateway. In a script or scheduled task, use `defenseclaw agent discovery disable --yes` to skip the prompt. A stopped gateway is not started; discovery stays off when it next starts.
+
 
 ## Where discovery data goes
 
@@ -354,6 +358,8 @@ the companion managed endpoint inventory. No restart needed.
 ```bash
 defenseclaw agent discovery disable
 ```
+
+It asks `Proceed? [Y/n]`; `--yes` skips the question. `defenseclaw agent discovery disable` turns off AI discovery and the runtime planes that `enable` turned on. The selected planes are kept for the next `enable`.
 
 Sets `ai_discovery.enabled` to `false` and stops the scanner. Your other `ai_discovery.*` settings stay in the file, so `enable` brings the same configuration back. Existing audit events are preserved.
   </Tab>
@@ -885,7 +891,7 @@ defenseclaw aibom scan --json
 For OpenClaw, `aibom scan` calls the live `openclaw` binary in parallel for each category (skills, plugins, MCP, agents+config, models, memory) and merges the results. For non-OpenClaw connectors it falls back to filesystem inventory.
 
 <Callout type="info">
-On a multi-connector install, a default `aibom scan` **fans out**: it produces one BOM section per active connector and merges them into a single document, mirroring the rest of the read/inventory commands. Pass `--connector <name>` to scope the BOM to a single connector.
+On a multi-connector install, a default `aibom scan` **fans out**: it produces one BOM per active connector, mirroring the rest of the read/inventory commands. With `--json` one connector prints one JSON object; several print a JSON array with one object per connector, each naming its `connector`. Pass `--connector <name>` to get a single object for one connector.
 </Callout>
 
 In the human output, a count of `0` means the category was read and is empty.
@@ -904,7 +910,9 @@ generation, and DefenseClaw version. The `content_hash` is the SHA-256 of the ac
 policy inputs; it is **not** a hash of an individual inventory item or of the
 complete BOM:
 
-```json title="defenseclaw aibom scan --json (excerpt)"
+The excerpt shows one connector's object (`--connector`, or an install with one active connector); with several connectors each array element has this shape:
+
+```json title="defenseclaw aibom scan --connector claudecode --json (excerpt)"
 {
   "provenance": {
     "schema_version": 7,

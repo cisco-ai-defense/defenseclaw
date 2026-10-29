@@ -327,6 +327,50 @@ $failures = & $module {
             Microsoft.PowerShell.Management\Remove-Item -LiteralPath $scratch -Recurse -Force -ErrorAction SilentlyContinue
         }
 
+        # 8. GAP-1497: the snapshot recorded a stopped gateway (an
+        #    administrator stopped DefenseClawGateway; it stays Automatic)
+        #    next to a running Enumerator. Recovery restores exactly that:
+        #    the Enumerator runs again, the gateway is not started, and
+        #    nothing refuses, so the transaction does not stay pending.
+        Reset-TestState
+        $script:DefenseClawRecoveryActivationDeferrable = $false
+        $savedCoverageWait = ${function:Wait-DefenseClawFreshGuardianReconcile}
+        try {
+            function Wait-DefenseClawFreshGuardianReconcile {
+                param($Layout, $GatewayServiceName, $GuardianServiceName)
+                $script:TestCalls.Add('wait:coverage')
+            }
+            $stoppedGatewayServices = @(
+                [pscustomobject]@{ name = $gateway; existed = $true; running = $false; start_mode = 2 },
+                [pscustomobject]@{ name = $guardian; existed = $true; running = $true; start_mode = 2 },
+                [pscustomobject]@{ name = $enumerator; existed = $true; running = $true; start_mode = 2 }
+            )
+            try {
+                Start-DefenseClawTransactionServices `
+                    -Services $stoppedGatewayServices `
+                    -Layout $layout `
+                    -ServicesQuiescedAt ([DateTime]::UtcNow.ToString('o')) `
+                    -TrustInProcessQuiescence `
+                    -GatewayServiceName $gateway `
+                    -GuardianServiceName $guardian
+                $calls = @($script:TestCalls)
+                if ($calls -notcontains "start:$enumerator") {
+                    $failures.Add("stopped-gateway recovery did not restart the recorded Enumerator: $($calls -join ', ')")
+                }
+                if ($calls -contains "start:$gateway") {
+                    $failures.Add("stopped-gateway recovery started the recorded stopped gateway: $($calls -join ', ')")
+                }
+            }
+            catch {
+                $failures.Add("stopped-gateway recovery refused: $($_.Exception.Message)")
+            }
+        }
+        finally {
+            Microsoft.PowerShell.Management\Set-Item `
+                -Path function:Wait-DefenseClawFreshGuardianReconcile `
+                -Value $savedCoverageWait
+        }
+
         # 7. The production call sites opt in only for Upgrade, Repair and
         #    Uninstall, and check the Repair next step.
         $tokens = $null

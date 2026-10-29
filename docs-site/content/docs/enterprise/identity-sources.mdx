@@ -18,7 +18,7 @@ registrations**. It reads what the operating system already knows about the
 account that is running the agent, and it says how far each fact can be
 trusted.
 
-This page is the reference for what is read, where, and how much to trust it. Active Directory is the identity stack certified in 1.0.4; the Okta and Entra parts were last verified live in October 2026.
+This page is the reference for what is read, where, and how much to trust it. Active Directory is the certified identity stack; the Okta and Entra parts were last verified live in October 2026.
 For the supported identity types and the checks, see
 [Identity and authentication](/docs/enterprise/identity-and-authentication).
 
@@ -129,14 +129,7 @@ names the qualified group the host knows. An answer with a group that is only a
 number (a directory that did not answer for it) is kept 2 minutes instead of
 15, and the next request after that waits for a fresh lookup.
 
-On a qualified-name SSSD Active Directory host with one joined domain, a bare
-`users` entry keeps matching that domain's account after an upgrade from
-1.0.3. With more than one joined Active Directory domain or a configured
-trusted child, the same entry can refer to several accounts. DefenseClaw
-refuses a request when that ambiguity could change its profile. Profile
-explain, status, verify and doctor name the qualified principal to write for
-accounts the guardian has resolved. Use that principal or the uid to select
-one account. Managed macOS hooks ask Open Directory for current group membership on every
+On a qualified-name SSSD Active Directory host with one joined domain, a bare `users` entry keeps matching that domain's account after an upgrade from 1.0.3. With more than one joined Active Directory domain or a configured trusted child, the same entry selects the account of that name in each of those domains. In the default and permissive policy tiers it still matches, and profile explain, status, verify and doctor warn and name every account it selects. The strict policy tier refuses a request when that ambiguity could change its profile. To select one account, write the qualified principal the warning shows, or the uid. Managed macOS hooks ask Open Directory for current group membership on every
 call; a failed lookup cannot reuse an earlier secondary group to select a
 more relaxed profile.
 
@@ -221,7 +214,7 @@ decides the domain of an SSSD account from its uid, not from its name:
   uid, SID or agent assignment applies when no assignment depends on those
   missing facts (see
   [Only verified facts select a profile](/docs/guardrail/user-and-group-policies#only-verified-facts-select-a-profile)).
-  Meanwhile `profile-explain --user` (by name or uid) shows the profile the
+  Meanwhile `enterprise <os> profile-explain --user` (by name or uid) shows the profile the
   hooks apply from those kept facts, with a warning that names their age.
   After a domain controller outage, SSSD goes back online on its own
   schedule: it retries the domain after `offline_timeout` (60 seconds by
@@ -358,9 +351,10 @@ sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux profile-explain -
 
 The per-user `defenseclaw guardrail profile explain` and `defenseclaw config get` commands refuse there. The configured `ai_discovery.trusted_ad_child_domains` list is in the administrator's `/etc/defenseclaw/config.yaml`.
 
-For an account of a child domain that is not listed, `subject.domain`,
-`subject.directory` and `subject.principal` are empty, and the text output
-shows the account name with no realm.
+For an account of a child domain that is not listed, `subject.directory`
+and `subject.principal` are empty, and the text output shows the account name
+with no realm. The `subject` object has no domain field: `subject.principal`
+carries the realm of an account a listed or joined domain confirms.
 
 A users assignment that names only a principal (`alice@CORP.EXAMPLE.COM`)
 matches an account only while it has that principal. Check it with the managed
@@ -369,6 +363,12 @@ is the principal the gateway attributed, and is empty when no joined domain
 confirms the account's SID. Add the uid to the assignment when the account must
 match while SSSD does not answer; a short account name also matches a local or
 LDAP account of that name.
+
+`profile-explain` also names a sandbox refusal that a hook call does not make: `refused_paths`
+lists `sandbox`, with `sandbox_refused_reason` and a warning. The profile decision itself does not change.
+On a managed host, a refusal with no verified ID (for example `--user` of a name no account holds)
+points to `defenseclaw-gateway enterprise <os> profile-explain --user <user>`; the per-user
+`defenseclaw guardrail profile` commands exit `2` there.
 
 ### Windows
 
@@ -399,7 +399,7 @@ uses the new profile, and `profile-explain` shows the same one.
 | Kerberos principal and AD mobile account | `dscl /Search` `AuthenticationAuthority`. Standalone enterprise only | Verified |
 | AD domain | `dsconfigad -show`. Standalone enterprise only | Verified |
 | Device SSO provider (Entra or Okta) | `app-sso platform -s` (JSON on macOS 15, a property list on older releases): Microsoft Company Portal for Entra ID, an Okta Verify bundle for Okta. Standalone enterprise only | Verified |
-| The user's Platform SSO login | `AltSecurityIdentities` of the account record (`PlatformSSO:<upn>`), which Platform SSO writes when it links or creates the account. Local users can read this directory attribute; only privileged code can write it. The product trusts the controlled write, not the secrecy of the value. It is the account's UPN and principal; accounts that never registered stay `local`. Standalone enterprise only | Verified |
+| The user's Platform SSO login | `AltSecurityIdentities` of the account record (`PlatformSSO:<upn>`), which Platform SSO writes when it links or creates the account. Local users can read this directory attribute; only privileged code can write it. The product trusts the controlled write, not the secrecy of the value. It is the account's UPN and principal; accounts that never registered stay `local`. When the listing fails or is slow, the account stays `local`, and only a UPN or `DOMAIN\name` entry waits for the guardian's record; a bare name does not select it. Standalone enterprise only | Verified |
 | Entra or Okta groups through Platform SSO | None reach the macOS group database (macOS 15.8, Company Portal, live) | None |
 | Kerberos principal of the session | The default principal of the default `API:` cache, from `/usr/bin/klist --json` at most once per 5 minutes, or of a `FILE:` cache named by `KRB5CCNAME` or `krb5.conf` | Claimed |
 | SSH session | `SSH_CONNECTION` | Claimed |

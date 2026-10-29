@@ -34,7 +34,7 @@ Preset-file keys are in the first column. `skill_actions`, `scanner_overrides` a
 | `skill_actions.critical` | quarantine + disable + block | quarantine + disable + block | quarantine + disable + block |
 | `skill_actions.high` | none + enable + none | quarantine + disable + block | quarantine + disable + block |
 | `skill_actions.medium` | none + enable + none | none + enable + none | quarantine + disable + block |
-| `scanner_overrides.mcp` | none | HIGH, MEDIUM and LOW findings warn and the server runs | MEDIUM blocks and quarantines; LOW disables at runtime |
+| `scanner_overrides.mcp` | none | HIGH, MEDIUM and LOW install and run (CRITICAL follows `skill_actions.critical`) | MEDIUM blocks and quarantines; LOW disables at runtime |
 | `scanner_overrides.plugin` | none | HIGH blocks and quarantines; MEDIUM installs and runs | HIGH blocks and quarantines; MEDIUM installs and runs |
 | `guardrail.block_threshold` | `4` (CRITICAL) | `4` (CRITICAL) | `2` (MEDIUM) |
 | `guardrail.alert_threshold` | `3` (HIGH) | `2` (MEDIUM) | `1` (LOW) |
@@ -79,13 +79,18 @@ Without `--policy-name`, `policy edit` changes the live policy in `config.yaml`.
 ```text
 Available policies:
 
-    default [built-in]
+  * default [built-in] [active]
       Balanced security policy for standard deployments
     permissive [built-in]
       Permissive policy for development and testing
     strict [built-in]
       Maximum security policy for high-risk environments
+
+  Activate a policy: defenseclaw policy activate <name>
+  Show details:      defenseclaw policy show <name>
 ```
+
+`*` and `[active]` mark the active preset.
 
 ## Block and alert levels
 
@@ -111,7 +116,7 @@ All three have the same eight rule files (`c2`, `cognitive`, `commands`, `enterp
 
 `CMD-PIPE-CURL` (`curl ... | bash`) is off in `default` and `permissive` and on in `strict`.
 
-In `default` and `permissive`, a world-writable `chmod` and a Windows Run-key addition produce HIGH alerts and do not block. Writes to the active user's `authorized_keys` are blocked when a direct command, a file tool or a supported literal interpreter form proves the target. Computed interpreter paths are outside that proof. A symlink in the gateway's local filesystem is resolved for write targets; sandbox filesystems are evaluated without local symlink resolution.
+In `default` and `permissive`, a world-writable `chmod` and a Windows Run-key addition produce HIGH alerts and do not block. Writes to the active user's `authorized_keys` are blocked in action mode when a direct command, a file tool or a supported literal interpreter form proves the target; in observe mode the same write raises a CRITICAL would-block alert and runs. A plain read of `authorized_keys` (`grep`, `wc`, `ssh-keygen -l`) is allowed; a redirect, a pipe into a writer or an in-place flag makes the use a write. A write to an instruction file the session loaded is CRITICAL: the default and strict packs block it in action mode and the permissive pack reports it ([details](/docs/policies/deterministic-detection#instruction-files)). Computed interpreter paths are outside that proof. A symlink in the gateway's local filesystem is resolved for write targets; sandbox filesystems are evaluated without local symlink resolution.
 
 **Known limit.** The rule reads the text of the command. A write made by a program the command starts (a nested shell, a generated script, a build tool, a tool option that runs another command) is not visible in that text, so it is not caught when it goes through an already existing link to the protected file. Rely on the OpenShell sandbox and file permissions for containment.
 
@@ -137,6 +142,8 @@ observability: {}
 
 A built-in pack is a name, not a path. `block_at` and `alert_at` stay unset, so the pack's levels apply. `observability: {}` means no optional destination; the local SQLite history still records every log, unredacted. A destination with no redaction policy receives everything under profile `none`.
 
+If `config.yaml` already has an entry for the connector under `guardrail.connectors` (`defenseclaw setup claude-code` or an `init` that picked several agents writes one), the command saves `mode` and `rule_pack` in that entry instead of at the top level. The setup summary and `defenseclaw guardrail status` show the values the connector runs with; `defenseclaw config show --section guardrail` shows where they are saved.
+
 ## Tuning by risk tolerance
 
 ### Block risky plugins at install
@@ -161,7 +168,7 @@ To change a named preset instead, add `--policy-name default`. The first edit of
 | Knob | Default | Notes |
 | --- | --- | --- |
 | `observability.local` SQLite history | always present | Local durability for collected logs |
-| `guardrail.hook_fail_mode` | `closed` on managed installs | A per-user install follows its rule pack when the gateway is down: open with a warning in `default` and `permissive`, closed in `strict` ([fail modes](/docs/reference/fail-modes)) |
+| `guardrail.hook_fail_mode` | `closed` on managed installs | A per-user install with no saved mode follows its rule pack when the gateway is down: open with a warning in `default` and `permissive`, closed in `strict` ([fail modes](/docs/reference/fail-modes)) |
 | `guardrail.judge.enabled` | `false` | Turn on with `--judge-model` or the setup prompt |
 | `guardrail.hilt.enabled` | `false` | `min_severity` is `HIGH`; the config key is spelled `hilt` |
 | `guardrail.judge.timeout` | `30s` | Judge latency budget |

@@ -307,6 +307,16 @@ func patchDevinHooks(path, hookScript string, ownedHookScripts ...string) error 
 		}
 		hooks[event] = replaceManagedDevinHooks(hooks[event], ownedHookScripts, entry)
 	}
+	if strings.EqualFold(filepath.Base(path), "hooks.v1.json") {
+		// The project file is the operator's: keep its comments and foreign
+		// hook lists byte for byte, and edit only DefenseClaw's events
+		// (GAP-0192).
+		if data, err := safefile.ReadRegularFileBounded(path, devinConfigReadLimit); err == nil && len(bytes.TrimSpace(data)) > 0 {
+			if spliced, ok := spliceDevinProjectHooks(data, devinHookEvents, cfg); ok {
+				return atomicWriteFile(path, spliced, 0o600)
+			}
+		}
+	}
 	return writeJSONObject(path, cfg)
 }
 
@@ -377,6 +387,15 @@ func removeDevinHookReferences(path string, hookScripts ...string) error {
 	}
 	if !strings.EqualFold(filepath.Base(path), "hooks.v1.json") && len(hooks) == 0 {
 		delete(cfg, "hooks")
+	}
+	if strings.EqualFold(filepath.Base(path), "hooks.v1.json") {
+		// Teardown keeps the operator's comments and other events, like
+		// Setup (GAP-0192, GAP-1944).
+		if data, err := safefile.ReadRegularFileBounded(path, devinConfigReadLimit); err == nil && len(bytes.TrimSpace(data)) > 0 {
+			if spliced, ok := spliceDevinProjectHooks(data, devinHookEvents, cfg); ok {
+				return atomicWriteFile(path, spliced, 0o600)
+			}
+		}
 	}
 	return writeJSONObject(path, cfg)
 }

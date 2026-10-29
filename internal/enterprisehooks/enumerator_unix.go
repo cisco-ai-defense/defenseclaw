@@ -26,6 +26,7 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+	"time"
 
 	"gopkg.in/yaml.v3"
 
@@ -50,6 +51,10 @@ var unixNologinShells = map[string]struct{}{
 	"/bin/false": {}, "/usr/bin/false": {}, "/sbin/false": {},
 }
 
+// unixLoginShell gives the login shell of an account whose resolver left
+// Account.Shell empty (macOS os/user, GAP-2483). Tests replace it.
+var unixLoginShell = unixidentity.LoginShell
+
 // UnixEnumeratorState is persisted between cycles (root-only) so revocation
 // needs several definitive misses.
 type UnixEnumeratorState struct {
@@ -65,6 +70,33 @@ type UnixEnumeratorState struct {
 	// managed ACP enrollments, keyed by principal (uid:N).
 	ACPMisses  map[string]int    `json:"acp_misses,omitempty"`
 	ACPSources map[string]string `json:"acp_sources,omitempty"`
+	// DiscoveryDeferred names the accounts the last cycle did not inspect:
+	// "budget" when the cycle's discovery budget ran out before them,
+	// "failed" when their discovery failed or timed out. The next cycle
+	// inspects the "budget" accounts first and the "failed" ones last, so
+	// accounts that stall cannot keep the same later accounts uninspected
+	// cycle after cycle (GAP-1586).
+	DiscoveryDeferred map[string]string `json:"discovery_deferred,omitempty"`
+}
+
+const (
+	unixDiscoveryDeferredBudget = "budget"
+	unixDiscoveryDeferredFailed = "failed"
+)
+
+// unixDiscoveryRank orders an account for discovery from the last cycle's
+// DiscoveryDeferred: not reached first, then the rest, then failed.
+func unixDiscoveryRank(state *UnixEnumeratorState, name string) int {
+	if state == nil {
+		return 1
+	}
+	switch state.DiscoveryDeferred[name] {
+	case unixDiscoveryDeferredBudget:
+		return 0
+	case unixDiscoveryDeferredFailed:
+		return 2
+	}
+	return 1
 }
 
 const (
@@ -140,6 +172,14 @@ type UnixEnumerateOptions struct {
 	// likewise replaces DiscoverStatic.
 	DiscoverSurfaces       UnixDiscoverSurfacesFunc
 	DiscoverStaticSurfaces UnixDiscoverSurfacesFunc
+	// DiscoveryBudget, when positive, bounds the time one cycle spends in
+	// the discovery functions above, all accounts together, so the cycle
+	// publishes its records within their freshness window
+	// (UnprotectedAgentsMaxAge) however many workers stall. A discovery
+	// still running when the budget ends is stopped, and an account not
+	// reached by then is reported as not inspected this cycle, as for a
+	// failed discovery.
+	DiscoveryBudget time.Duration
 	// MachineVersion reads root-owned machine-scoped metadata.
 	MachineVersion func(connector string) string
 	// OutsideDiscovery finds a connector's CLI in an administrator prefix
@@ -276,6 +316,13 @@ func EnumerateUnix(ctx context.Context, cfg *config.Config, registry *connector.
 	}
 	if opts.State.Sources == nil {
 		opts.State.Sources = map[string]string{}
+	}
+	if opts.DiscoveryBudget > 0 {
+		deadline := time.Now().Add(opts.DiscoveryBudget)
+		opts.Discover = budgetedUnixDiscover(opts.Discover, deadline)
+		opts.DiscoverStatic = budgetedUnixDiscover(opts.DiscoverStatic, deadline)
+		opts.DiscoverSurfaces = budgetedUnixDiscoverSurfaces(opts.DiscoverSurfaces, deadline)
+		opts.DiscoverStaticSurfaces = budgetedUnixDiscoverSurfaces(opts.DiscoverStaticSurfaces, deadline)
 	}
 	enrollment := cfg.Enterprise.Enrollment
 	connectors := EffectiveUnixHookConnectors(cfg, registry)
@@ -428,6 +475,17 @@ func EnumerateUnix(ctx context.Context, cfg *config.Config, registry *connector.
 		}
 	}
 	sort.Slice(candidates, func(i, j int) bool { return candidates[i].account.Name < candidates[j].account.Name })
+	sort.SliceStable(candidates, func(i, j int) bool {
+		return unixDiscoveryRank(opts.State, candidates[i].account.Name) < unixDiscoveryRank(opts.State, candidates[j].account.Name)
+	})
+	deferred := map[string]string{}
+	noteDiscoveryError := func(name string, err error) {
+		if errors.Is(err, errUnixDiscoveryBudgetSpent) {
+			deferred[name] = unixDiscoveryDeferredBudget
+		} else {
+			deferred[name] = unixDiscoveryDeferredFailed
+		}
+	}
 	report.Candidates = len(candidates)
 	// A directory account that resolved this cycle shows the directory is
 	// answering, which is what makes another directory account's "no such
@@ -514,9 +572,15 @@ func EnumerateUnix(ctx context.Context, cfg *config.Config, registry *connector.
 				continue
 			}
 		}
-		if _, nologin := unixNologinShells[filepath.Clean(account.Shell)]; nologin && !explicitlyIncluded && !authoredTarget {
-			skip("non-interactive login shell " + account.Shell)
-			continue
+		if !explicitlyIncluded && !authoredTarget {
+			shell := strings.TrimSpace(account.Shell)
+			if shell == "" {
+				shell = unixLoginShell(ctx, name)
+			}
+			if _, nologin := unixNologinShells[filepath.Clean(shell)]; nologin && shell != "" {
+				skip("non-interactive login shell " + shell)
+				continue
+			}
 		}
 		if !authoredTarget {
 			if ok, transientErr, counted, reason := groupFilterAllows(opts.Resolver, account, enrollment); !ok {
@@ -589,6 +653,7 @@ func EnumerateUnix(ctx context.Context, cfg *config.Config, registry *connector.
 			found, err := opts.DiscoverSurfaces(ctx, account, all)
 			if err != nil {
 				discoveryFailed = true
+				noteDiscoveryError(name, err)
 				logfSafely(opts.Logger, name, fmt.Sprintf("version discovery failed; keeping known rows: %v", err))
 			}
 			versions, reasons, surfaces = found.Versions, found.Reasons, found.Surfaces
@@ -600,6 +665,7 @@ func EnumerateUnix(ctx context.Context, cfg *config.Config, registry *connector.
 			versions, reasons, err = opts.Discover(ctx, account, all)
 			if err != nil {
 				discoveryFailed = true
+				noteDiscoveryError(name, err)
 				logfSafely(opts.Logger, name, fmt.Sprintf("version discovery failed; keeping known rows: %v", err))
 			}
 		}
@@ -869,6 +935,10 @@ func EnumerateUnix(ctx context.Context, cfg *config.Config, registry *connector.
 		}
 		delete(opts.State.Misses, key)
 		report.Revoked++
+	}
+	opts.State.DiscoveryDeferred = nil
+	if len(deferred) > 0 {
+		opts.State.DiscoveryDeferred = deferred
 	}
 	for key := range opts.State.Misses {
 		if _, known := previous[key]; !known {
@@ -1392,6 +1462,40 @@ func unixSurfaceOnlyRefusals(account unixidentity.Account, conn, cliVersion stri
 	return out, !admittedInstall
 }
 
+// errUnixDiscoveryBudgetSpent is the discovery error of an account a cycle
+// did not reach within UnixEnumerateOptions.DiscoveryBudget.
+var errUnixDiscoveryBudgetSpent = errors.New("not inspected this cycle: the cycle's discovery time ran out on earlier accounts")
+
+// budgetedUnixDiscoverSurfaces runs discover only before deadline, and stops
+// it at deadline.
+func budgetedUnixDiscoverSurfaces(discover UnixDiscoverSurfacesFunc, deadline time.Time) UnixDiscoverSurfacesFunc {
+	if discover == nil {
+		return nil
+	}
+	return func(ctx context.Context, account unixidentity.Account, connectors []string) (UnixDiscovery, error) {
+		if !time.Now().Before(deadline) {
+			return UnixDiscovery{}, errUnixDiscoveryBudgetSpent
+		}
+		ctx, cancel := context.WithDeadline(ctx, deadline)
+		defer cancel()
+		return discover(ctx, account, connectors)
+	}
+}
+
+func budgetedUnixDiscover(discover UnixDiscoverFunc, deadline time.Time) UnixDiscoverFunc {
+	if discover == nil {
+		return nil
+	}
+	surfaces := budgetedUnixDiscoverSurfaces(func(ctx context.Context, account unixidentity.Account, connectors []string) (UnixDiscovery, error) {
+		versions, reasons, err := discover(ctx, account, connectors)
+		return UnixDiscovery{Versions: versions, Reasons: reasons}, err
+	}, deadline)
+	return func(ctx context.Context, account unixidentity.Account, connectors []string) (map[string]string, map[string]string, error) {
+		found, err := surfaces(ctx, account, connectors)
+		return found.Versions, found.Reasons, err
+	}
+}
+
 // unixUntrustedHomeAgents reports the agents an eligible user without rows
 // can run from a home the enumerator does not enroll because it is
 // untrusted (group/other writable, a symlink, owned by another account, or
@@ -1833,6 +1937,14 @@ func LoadUnixEnumeratorState(path string) *UnixEnumeratorState {
 				state.ACPSources = map[string]string{}
 			}
 			state.ACPSources[principal] = source
+		}
+	}
+	for user, why := range parsed.DiscoveryDeferred {
+		if user != "" && (why == unixDiscoveryDeferredBudget || why == unixDiscoveryDeferredFailed) {
+			if state.DiscoveryDeferred == nil {
+				state.DiscoveryDeferred = map[string]string{}
+			}
+			state.DiscoveryDeferred[user] = why
 		}
 	}
 	return state

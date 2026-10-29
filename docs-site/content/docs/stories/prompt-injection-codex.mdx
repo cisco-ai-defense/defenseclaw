@@ -27,7 +27,7 @@ DefenseClaw scans Codex at three points: `UserPromptSubmit` for prompts, `PreToo
 defenseclaw setup codex --yes --mode action --restart
 ```
 
-Setup also wires Codex's native OpenTelemetry. On an ordinary host install, per-user and standalone enterprise installs do not register a notify bridge; only Secure Client does. An OpenShell sandbox registers its own ([Codex reference](/docs/connectors/codex#in-an-openshell-sandbox)).
+Host setup does not wire Codex's native OpenTelemetry; only an isolated OpenShell sandbox uses it. On an ordinary host install, per-user and standalone enterprise installs do not register a notify bridge; only Secure Client does. An OpenShell sandbox registers its own ([Codex reference](/docs/connectors/codex#in-an-openshell-sandbox)).
 
 </Step>
 

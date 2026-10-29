@@ -35,6 +35,7 @@ import re
 import stat
 import subprocess
 import sys
+import threading
 import urllib.parse
 from collections.abc import Callable, Mapping
 from contextlib import contextmanager
@@ -1010,9 +1011,15 @@ _OPENAI_STYLE_LLM_PROVIDERS = frozenset(
 _warned_llm_prefixes: set[tuple[str, str]] = set()
 
 
-def _maybe_warn_unknown_provider(prefix: str, component_path: str) -> None:
+def _maybe_warn_unknown_provider(prefix: str, component_path: str, instance_name: str = "") -> None:
     if not prefix or prefix in _RECOGNIZED_LLM_PROVIDERS:
         return
+    # ``provider: custom`` with a bound instance routes through its
+    # llm_providers.custom entry, so it is not an unknown prefix (GAP-2234).
+    # Without an instance it still warns: nothing tells the gateway where to go.
+    if prefix == "custom" and (instance_name or "").strip():
+        return
+    component_path = component_path or "llm"
     key = (component_path, prefix)
     if key in _warned_llm_prefixes:
         return
@@ -2568,7 +2575,9 @@ class GuardrailConfig:
     # ``DEFENSECLAW_STRICT_AVAILABILITY=1`` additionally forces transport and
     # missing-token failures closed. Mirrors ``GuardrailConfig.HookFailMode``
     # in internal/config/config.go.
-    hook_fail_mode: str = "closed"
+    # An empty constructor value means no operator choice. __post_init__ keeps
+    # the historical public value while recording whether a choice was made.
+    hook_fail_mode: str = ""
     # ``llm_role`` is the operator's answer to "should DefenseClaw's
     # LLM be used only as a judge, or also as the agent's upstream?".
     # One of:
@@ -2658,6 +2667,18 @@ class GuardrailConfig:
             return pc.hilt
         return self.hilt
 
+    def __post_init__(self) -> None:
+        supplied = bool(self.hook_fail_mode.strip())
+        if not supplied:
+            object.__setattr__(self, "hook_fail_mode", "closed")
+        object.__setattr__(self, "_hook_fail_mode_saved", supplied)
+        object.__setattr__(self, "_hook_fail_mode_track", True)
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        object.__setattr__(self, name, value)
+        if name == "hook_fail_mode" and getattr(self, "_hook_fail_mode_track", False):
+            object.__setattr__(self, "_hook_fail_mode_saved", bool(str(value or "").strip()))
+
     def effective_hook_fail_mode(self, connector: str = "") -> str:
         """Resolve hook failure behavior for this deployment profile.
 
@@ -2670,11 +2691,10 @@ class GuardrailConfig:
           mode; an explicit value always wins (the administrator's config
           sets it), and an unset one is open under Secure Client (#1163) and
           closed on the standalone profile;
-        - a per-user host reports its gateway-outage mode, which follows the
-          connector's policy tier (Go ``config.HookOutageFailMode``, owner
-          decision 2026-10-23): ``closed`` for a strict rule pack, ``open``
-          for default (balanced) and permissive. A saved per-user
-          ``hook_fail_mode`` does not change it, and every failure that is
+        - a per-user host reports its gateway-outage mode: an explicitly saved
+          ``hook_fail_mode`` wins; otherwise the connector's policy tier
+          (Go ``config.HookOutageFailMode``, owner decision 2026-10-23) is
+          ``closed`` for strict and ``open`` for default and permissive. Every failure that is
           not an outage (an answer the gateway gave, a malformed or partial
           one, a missing token, the install window) blocks in every tier.
         """
@@ -2682,21 +2702,33 @@ class GuardrailConfig:
         cfg = owner() if callable(owner) else None
         owned = cfg is not None and getattr(cfg, "guardrail", None) is self
         standalone = owned and cfg.managed_outside_secure_client()
+        if owned:
+            application = cfg.application_protection
+            if application.enabled and connector_paths.normalize(connector) not in cfg.active_connectors():
+                override = application._connector_override(connector)
+                overlay = override.guardrail if override is not None else application.guardrail
+                if overlay.hook_fail_mode.strip():
+                    return _normalize_hook_fail_mode(overlay.hook_fail_mode)
+        pc = self._connector_override(connector)
+        if pc is not None and pc.hook_fail_mode.strip():
+            return _normalize_hook_fail_mode(pc.hook_fail_mode)
+        if getattr(self, "_hook_fail_mode_saved", False) and self.hook_fail_mode.strip():
+            return _normalize_hook_fail_mode(self.hook_fail_mode)
         if standalone or self.secure_client_hook_fail_modes():
-            if owned:
-                application = cfg.application_protection
-                if application.enabled and connector_paths.normalize(connector) not in cfg.active_connectors():
-                    override = application._connector_override(connector)
-                    overlay = override.guardrail if override is not None else application.guardrail
-                    if overlay.hook_fail_mode.strip():
-                        return _normalize_hook_fail_mode(overlay.hook_fail_mode)
-            pc = self._connector_override(connector)
-            if pc is not None and pc.hook_fail_mode.strip():
-                return _normalize_hook_fail_mode(pc.hook_fail_mode)
-            if self.hook_fail_mode.strip():
-                return _normalize_hook_fail_mode(self.hook_fail_mode)
             return "closed" if standalone else "open"
         return "closed" if self.hook_policy_tier(connector) == "strict" else "open"
+
+    def effective_hook_outage_fail_mode(self, connector: str = "") -> str:
+        """What ``connector``'s hooks do while the gateway is down.
+
+        Mirrors Go ``Config.EffectiveHookOutageFailModeForConnector``: the
+        mode the current hooks, the OpenCode/Amp plugins and the shell helper
+        decide at call time, and the one Doctor, Status and the fail-mode
+        setter's runtime check read for them (GAP-1354, GAP-1730).
+        :meth:`effective_hook_fail_mode` already resolves it (a managed mode,
+        an explicit saved mode, else the connector's policy tier).
+        """
+        return self.effective_hook_fail_mode(connector)
 
     def hook_policy_tier(self, connector: str = "") -> str:
         """The connector's policy tier: its rule pack's posture (strict, default or permissive).
@@ -2957,7 +2989,8 @@ def _go_quote(value: Any) -> str:
 
 
 def _sandbox_enum_error(field_name: str, value: Any, *allowed: str) -> str | None:
-    if value in (None, "") or value in allowed:
+    # Any letter case, as the Go loader folds it (GAP-0691, #1226).
+    if value in (None, "") or (isinstance(value, str) and value.lower() in allowed):
         return None
     return f"{field_name} {_go_quote(value)} must be one of {', '.join(allowed)}"
 
@@ -4350,6 +4383,16 @@ class Config:
         if override.model:
             out.model = override.model
         if override.provider:
+            # A role naming another provider and no instance of its own does
+            # not inherit the custom instance binding (GAP-2379); Go ResolveLLM
+            # applies the same rule.
+            role_provider = override.provider.strip().lower()
+            if (
+                not override.instance_name
+                and role_provider != "custom"
+                and role_provider != (out.provider or "").strip().lower()
+            ):
+                out.instance_name = ""
             out.provider = override.provider
         if override.api_key:
             out.api_key = override.api_key
@@ -4403,7 +4446,7 @@ class Config:
                     out.instance_name,
                 )
 
-        _maybe_warn_unknown_provider(out.provider_prefix(), path)
+        _maybe_warn_unknown_provider(out.provider_prefix(), path, out.instance_name)
         return out
 
     def resolved_default_llm_api_key(self) -> str:
@@ -4448,6 +4491,17 @@ class Config:
         except FileNotFoundError:
             return
         _existing_document_for_save(path, current)
+
+    def decide(self, *paths: str) -> None:
+        """Name config keys the next :meth:`save` writes as the caller's
+        decision, also when the value written equals the one on disk.
+
+        A save over the pre-1.0.4 default preset keeps its balanced MCP
+        compatibility only for the MCP severities no decided or changed key
+        covers (GAP-1488, ``config_writer._keep_chosen_admission``), so an
+        explicit quarantine is never compiled as a warning.
+        """
+        self.__dict__.setdefault("_decided_paths", []).extend(paths)
 
     def save(self, *, actor: str | None = None, reason: str = "") -> Any:
         """Persist this :class:`Config` through the single config writer.
@@ -4505,6 +4559,7 @@ class Config:
         from defenseclaw import config_writer
 
         dataclass_data = _config_to_dict(self)
+        decided = self.__dict__.pop("_decided_paths", [])
 
         def mutate(current: bytes, source_name: str) -> tuple[bytes, list[str]]:
             merged = self._merged_document(path, dataclass_data, current)
@@ -4521,7 +4576,14 @@ class Config:
             reason or "config save",
             path=path,
             verify=verify,
+            decided=decided,
         )
+        # The admission pins the writer added (GAP-1488) go into this Config
+        # too, so it reads as the file it wrote.
+        for parts, value in result.pins.items():
+            self.admission.mcp.actions[parts[-1]] = value
+            written = dataclass_data.setdefault("admission", {}).setdefault("mcp", {}).setdefault("actions", {})
+            written[parts[-1]] = value
         if self._source_config_version == 0:
             self._source_config_version = CURRENT_CONFIG_VERSION
         self._loaded_v8_modeled_snapshot = copy.deepcopy(dataclass_data)
@@ -4564,7 +4626,7 @@ class Config:
         # Load already moved a retired connector ID in memory; apply the same
         # rename to the on-disk document so any save persists it.
         legacy_connector.migrate_raw_config(existing, path)
-        _drop_retired_connector_settings(existing)
+        _drop_retired_connector_settings(existing, path)
         merged = _merge_v8_modeled_changes(
             existing,
             dataclass_data,
@@ -4809,6 +4871,11 @@ def _config_to_dict(cfg: Config) -> dict[str, Any]:
         scanners.get("skill_scanner", {}).pop("virustotal_api_key", None)
     _strip_empty_llm(scanners, "plugin_llm")
     guardrail = d.get("guardrail") or {}
+    # The public in-memory default remains "closed" for existing callers,
+    # but an unset document must stay unset in the modeled save baseline.
+    # Otherwise choosing "closed" in setup looks unchanged and is omitted.
+    if isinstance(guardrail, dict) and not getattr(cfg.guardrail, "_hook_fail_mode_saved", False):
+        guardrail.pop("hook_fail_mode", None)
     if isinstance(guardrail, dict) and not guardrail.get("allow_private_upstreams"):
         guardrail.pop("allow_private_upstreams", None)
     _strip_unset_levels(guardrail)
@@ -6201,7 +6268,7 @@ def _merge_guardrail(raw: dict[str, Any] | None, data_dir: str) -> GuardrailConf
         if isinstance(private_upstreams_raw, list | tuple)
         else []
     )
-    return GuardrailConfig(
+    merged = GuardrailConfig(
         enabled=raw.get("enabled", False),
         mode=raw.get("mode", "observe"),
         scanner_mode=raw.get("scanner_mode", "both"),
@@ -6236,6 +6303,10 @@ def _merge_guardrail(raw: dict[str, Any] | None, data_dir: str) -> GuardrailConf
         profile_assignments=_merge_guardrail_profile_assignments(raw.get("profile_assignments")),
         default_profile=str(raw.get("default_profile", "") or "").strip(),
     )
+    # The historical raw default is "closed"; keep presence for the OSS
+    # outage resolver without changing that public config value.
+    merged._hook_fail_mode_saved = bool(str(raw.get("hook_fail_mode", "") or "").strip())
+    return merged
 
 
 def _merge_guardrail_connectors(
@@ -7113,7 +7184,9 @@ def _apply_instance_overlay(out: LLMConfig, data_dir: str, providers: list[dict[
             break
     if entry is None:
         return
-    if not out.provider:
+    # provider "custom" is what ``setup llm --provider custom --instance-name``
+    # saves: the bound instance's base_provider_type is the family (GAP-2393).
+    if not out.provider or out.provider.strip().lower() == "custom":
         bp = entry.get("base_provider_type") or entry.get("provider") or ""
         if isinstance(bp, str) and bp:
             out.provider = bp.strip().lower()
@@ -7296,7 +7369,13 @@ def _is_retired_connector_name(name: Any) -> bool:
     return isinstance(name, str) and name.strip().lower() in _RETIRED_CONNECTOR_NAMES
 
 
-def _drop_retired_connector_settings(raw: dict[str, Any]) -> None:
+# Set once _drop_retired_connector_settings has warned in this process.
+_retired_settings_warned = threading.Event()
+
+
+def _drop_retired_connector_settings(
+    raw: dict[str, Any], source: str | os.PathLike[str] | None = None, *, emit_warning: bool = True
+) -> None:
     """Until 1.1, accept old rosters and discard removed connector settings.
 
     Only connector fields are touched (mirrors ``dropRetiredConnectorSettings``
@@ -7408,10 +7487,16 @@ def _drop_retired_connector_settings(raw: dict[str, Any]) -> None:
     if isinstance(claw, dict) and _is_retired_connector_name(claw.get("mode")):
         claw["mode"] = ""
         changed = True
-    if changed:
-        logging.warning(
-            "until 1.1: removed OpenHands/OmniGent connector settings from loaded config; "
-            "run defenseclaw migrate"
+    if changed and emit_warning and not _retired_settings_warned.is_set():
+        # Once per process, through this module's logger: the root logger's
+        # implicit basicConfig printed a raw "WARNING:root:" line into the
+        # installer's output, and that line repeated the installers' one
+        # removal notice (GAP-2043). It names the file, which is what to fix.
+        _retired_settings_warned.set()
+        _log.warning(
+            "%s still names OpenHands/OmniGent, which DefenseClaw no longer supports; "
+            "they are ignored. Delete them from that file.",
+            os.fspath(source) if source else "config.yaml",
         )
 
 
@@ -7457,7 +7542,7 @@ def load(
     # is normalized or checked for duplicates. The Go loader applies the same
     # rule; `defenseclaw migrate` persists it (see migrations.py).
     legacy_connector.migrate_raw_config(raw, cfg_file)
-    _drop_retired_connector_settings(raw)
+    _drop_retired_connector_settings(raw, cfg_file)
     if without_guardrail_profiles:
         raw = _without_guardrail_profiles(raw)
 
@@ -7970,3 +8055,35 @@ def prepare_fresh_v8_config(cfg: Config) -> Config:
     cfg._source_config_version = CURRENT_CONFIG_VERSION
     cfg._loaded_v8_modeled_snapshot = copy.deepcopy(_config_to_dict(cfg))
     return cfg
+
+
+def saved_hook_fail_mode_scope(guardrail: Any, connector: str = "") -> str:
+    """Where an explicitly saved ``hook_fail_mode`` that decides ``connector`` lives.
+
+    ``"connector"`` for the connector's own saved mode, ``"global"`` for a
+    saved top-level one, ``""`` when none is saved and the policy tier decides
+    (:meth:`GuardrailConfig.effective_hook_fail_mode`). A saved mode wins over
+    ``guardrail use-pack strict``, so a hint to close an outage names
+    ``guardrail fail-mode closed`` then (GAP-0039).
+    """
+    override = (getattr(guardrail, "connectors", None) or {}).get(connector)
+    if override is not None and str(getattr(override, "hook_fail_mode", "") or "").strip():
+        return "connector"
+    value = str(getattr(guardrail, "hook_fail_mode", "") or "").strip()
+    if value and getattr(guardrail, "_hook_fail_mode_saved", True):
+        return "global"
+    return ""
+
+
+def outage_block_hint(guardrail: Any, connector: str = "") -> str:
+    """The command that makes a per-user ``connector``'s hooks block while the gateway is down.
+
+    ``guardrail fail-mode closed`` (``--connector NAME`` for the connector's
+    own save) when a saved open decides it, else the strict policy (GAP-0039).
+    """
+    scope = saved_hook_fail_mode_scope(guardrail, connector)
+    if scope == "connector":
+        return f"defenseclaw guardrail fail-mode closed --connector {connector}"
+    if scope == "global":
+        return "defenseclaw guardrail fail-mode closed"
+    return "defenseclaw guardrail use-pack strict"

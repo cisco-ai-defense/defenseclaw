@@ -538,7 +538,15 @@ func TestClaudeCodeUserSettingsReadPathKeepsWindowsBehavior(t *testing.T) {
 	}
 }
 
-func TestCheckAgentSettingsAllowsLinkedWindowsCodexHome(t *testing.T) {
+// GAP-2402 (GAP-2339): on Windows the Codex config writer never writes
+// through a symbolic link or junction, so the precheck refuses a default Codex
+// home that is a link before Setup changes anything, names the folder and the
+// fix, and leaves the linked settings as they were. defenseclaw setup passes
+// the default home as CODEX_HOME, so that case gets the same fix as CODEX_HOME
+// unset ("make it a real folder"), never "unset CODEX_HOME" to the same link.
+// The native settings reader still reads through the link (the read path this
+// test first covered, d663e83d8c); only the write is refused, earlier.
+func TestCheckAgentSettingsRefusesLinkedWindowsCodexHomeBeforeAnyChange(t *testing.T) {
 	if runtime.GOOS != "windows" {
 		t.Skip("Windows resolves the linked parent through its native path rules")
 	}
@@ -551,15 +559,62 @@ func TestCheckAgentSettingsAllowsLinkedWindowsCodexHome(t *testing.T) {
 		}
 	}
 	t.Setenv("USERPROFILE", home)
-	if err := os.Symlink(outside, filepath.Join(home, ".codex")); err != nil {
+	linked := filepath.Join(home, ".codex")
+	if err := os.Symlink(outside, linked); err != nil {
 		t.Skipf("directory symlinks are unavailable: %v", err)
 	}
-	path := filepath.Join(home, ".codex", "config.toml")
-	if err := os.WriteFile(filepath.Join(outside, "config.toml"), []byte("model = \"gpt-5\"\n"), 0o600); err != nil {
+	path := filepath.Join(linked, "config.toml")
+	body := []byte("model = \"gpt-5\"\n")
+	if err := os.WriteFile(filepath.Join(outside, "config.toml"), body, 0o600); err != nil {
 		t.Fatal(err)
 	}
 	pointCodexConfig(t, path)
-	if err := CheckAgentSettings(NewCodexConnector(), SetupOpts{DataDir: filepath.Join(home, ".defenseclaw")}); err != nil {
-		t.Fatalf("Windows Codex precheck refused readable settings through linked home: %v", err)
+	if got, err := userOwnedSettingsReadPath(path); err != nil || got == "" {
+		t.Fatalf("Windows settings read path through linked home = %q, %v; want readable", got, err)
+	}
+	for _, codexHome := range []string{"", linked, strings.ToUpper(linked) + `\`} {
+		t.Setenv("CODEX_HOME", codexHome)
+		err := CheckAgentSettings(NewCodexConnector(), SetupOpts{DataDir: filepath.Join(home, ".defenseclaw")})
+		if !errors.Is(err, ErrAgentConfigRefusal) || !errors.Is(err, ErrSetupRefusedUnchanged) {
+			t.Fatalf("CODEX_HOME=%q: Windows Codex precheck through linked home = %v; want an agent-settings refusal before any change", codexHome, err)
+		}
+		for _, want := range []string{linked, "symbolic link or junction", "make " + linked + " a real folder", "then run: defenseclaw setup codex"} {
+			if !strings.Contains(err.Error(), want) {
+				t.Fatalf("CODEX_HOME=%q: refusal %q does not name %q", codexHome, err, want)
+			}
+		}
+		for _, wrong := range []string{"defenseclaw upgrade", "unset it"} {
+			if strings.Contains(err.Error(), wrong) {
+				t.Fatalf("CODEX_HOME=%q: refusal %q points at %q", codexHome, err, wrong)
+			}
+		}
+	}
+	if got, readErr := os.ReadFile(filepath.Join(outside, "config.toml")); readErr != nil || !bytes.Equal(got, body) {
+		t.Fatalf("linked config.toml changed by the precheck: %q, %v", got, readErr)
+	}
+}
+
+// GAP-0615: a refusal of a Codex config.toml that does not parse names the
+// file with the line and column of the error (file:line:col), not only the
+// parser's message.
+func TestCheckAgentSettingsNamesCodexSyntaxErrorLineAndColumn(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.toml")
+	body := "model = \"gpt-5\"\n\n[otel]\nenvironment = \"dev\"\n[broken\n"
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	pointCodexConfig(t, path)
+	err := CheckAgentSettings(NewCodexConnector(), SetupOpts{DataDir: t.TempDir()})
+	if !errors.Is(err, ErrAgentConfigRefusal) {
+		t.Fatalf("CheckAgentSettings = %v; want a refusal", err)
+	}
+	if !strings.Contains(err.Error(), path+":5:") || !strings.Contains(err.Error(), "line 5, column ") {
+		t.Fatalf("refusal does not name %s:5:<col> (line 5 holds the broken table): %v", path, err)
+	}
+	var cfg map[string]interface{}
+	parseErr := ParseCodexTOML(append([]byte{0xef, 0xbb, 0xbf}, body...), &cfg)
+	var decode *toml.DecodeError
+	if !errors.As(parseErr, &decode) || !strings.HasPrefix(parseErr.Error(), "line 5, column ") {
+		t.Fatalf("ParseCodexTOML(BOM + broken table) = %v; want line 5 and an unwrappable parser error", parseErr)
 	}
 }

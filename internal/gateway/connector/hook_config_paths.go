@@ -345,6 +345,11 @@ func openCodeManagedPluginPresent(conn Connector, opts SetupOpts) (bool, error) 
 		markers = append(markers,
 			[]byte(`const DC_PER_USER_NATIVE_POST = "1";`),
 			[]byte(`execFileSync(binary, ["hook-post", "--api-addr", DC_API_ADDR]`),
+			// A Windows owner/DACL check that hard-codes C:\Windows is repaired,
+			// and so is one that calls a cmdlet a planted PSModulePath module
+			// could answer for.
+			[]byte(`execFileSync(DC_WINDOWS_POWERSHELL, [`),
+			[]byte(windowsHelperACLCheckMarker),
 		)
 		// A plugin that posts through ~/.local/bin on a Setup install fails
 		// closed on every call (GAP-1847); it is repaired.
@@ -530,6 +535,11 @@ func (c *hookOnlyConnector) renderedHookEntriesPresent(opts SetupOpts, document 
 			want[event] = copilotHookRegistration(runtime.GOOS, event, hookCommand)
 		}
 		return hookEventEntriesMatch(hooks, want, func(event string, entry interface{}) bool {
+			if event == "preToolUse" && !pluginSecureClientProfile(opts) && opts.HookFailMode != "open" {
+				// Any extra pre-tool command can override the closed verdict.
+				// Preserve an unowned command, but never certify it as closed.
+				return true
+			}
 			if _, registered := want[event]; registered {
 				// defenseclaw.json is DefenseClaw's file; Setup leaves only
 				// its render on a bound event (patchCopilotHooksForOS).
@@ -547,6 +557,58 @@ func (c *hookOnlyConnector) renderedHookEntriesPresent(opts SetupOpts, document 
 		return true
 	}
 	return false
+}
+
+// HookRegistrationLacksOnlyFailClosed reports a Hermes registration that
+// holds exactly the entries this release renders except the fail_closed
+// setting of its pre_tool_call entry: the matrix an earlier release wrote
+// before Setup added fail_closed (rel-1-0-5 GAP-2463). Those hooks still run
+// on every event and still block through the hook's answer; only a spawn
+// error or timeout of pre_tool_call does not block. It is false for every
+// other connector, for a render without fail_closed, and for any other
+// difference (an edited, missing or extra DefenseClaw entry).
+func HookRegistrationLacksOnlyFailClosed(conn Connector, opts SetupOpts) (bool, error) {
+	hookOnly, ok := conn.(*hookOnlyConnector)
+	if !ok || hookOnly.name != "hermes" {
+		return false, nil
+	}
+	paths := HookConfigPathsForConnector(conn, opts)
+	if len(paths) == 0 {
+		return false, nil
+	}
+	command := hermesConfiguredHookCommand(hookOnly.hookCommand(opts), opts.HookExecutable)
+	recognized := hermesRecognizedHookCommands(command)
+	want := make(map[string]interface{}, len(hermesRequiredHooks))
+	relaxed := false
+	for _, spec := range hermesRequiredHooks {
+		entry := hermesHookEntry(command, spec.event, spec.matcher, opts)
+		if _, set := entry["fail_closed"]; set {
+			delete(entry, "fail_closed")
+			relaxed = true
+		}
+		want[spec.event] = entry
+	}
+	if !relaxed {
+		return false, nil
+	}
+	for _, path := range paths {
+		decoded, err := decodeHookConfigFile(path)
+		if err != nil {
+			return false, err
+		}
+		document, _ := decoded.(map[string]interface{})
+		if document == nil {
+			return false, nil
+		}
+		hooks, _ := document["hooks"].(map[string]interface{})
+		if !hookEventEntriesMatch(hooks, want, func(_ string, entry interface{}) bool {
+			command, _ := hermesHookEntryCommand(entry)
+			return hermesReplaceableHookCommand(command, recognized)
+		}) {
+			return false, nil
+		}
+	}
+	return true, nil
 }
 
 // hookEventEntriesMatch checks an agent's event -> handler-list hook map

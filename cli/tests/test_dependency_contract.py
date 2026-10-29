@@ -29,10 +29,7 @@ from packaging.requirements import Requirement
 from packaging.specifiers import SpecifierSet
 from packaging.version import Version
 
-try:
-    import tomllib
-except ModuleNotFoundError:  # pragma: no cover - Python 3.10 compatibility
-    import tomli as tomllib
+import tomllib
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 PYPROJECT = REPO_ROOT / "pyproject.toml"
@@ -42,7 +39,7 @@ RUNTIME_CONTRACT = {
     "rich": (">=14.2,<15", None),
     "textual": (">=8.2.8,<9", None),
     "pygments": (">=2.20,<3", None),
-    "litellm": (">=1.91.5,<1.92.0", None),
+    "litellm": (">=1.103.10,<1.104.0", None),
     "importlib-metadata": (">=8.7.1,<8.8", None),
 }
 
@@ -61,15 +58,10 @@ WHEEL_SECURITY_FLOOR_CONTRACT = {
     "fastapi": (">=0.137.1,<0.138", None),
 }
 
-TOMLI_COMPATIBILITY_CONTRACT = (">=2.0.1", 'python_version < "3.11"')
-
 # CVE-2026-112906/112907/112913/112914/112937/112940 are fixed in filelock
-# 4.2.1, and every fixed release requires Python >=3.11. Python 3.10 stays
-# below 4.1, which added three of them (see the wheel contract in ci.yml).
-FILELOCK_SECURITY_CONTRACT = {
-    'python_version >= "3.11"': ">=4.2.1",
-    'python_version < "3.11"': "<4.1",
-}
+# 4.2.1, and every fixed release requires Python >=3.11: 1.0.5 dropped
+# Python 3.10 so no supported wheel installs a vulnerable filelock (GAP-1715).
+FILELOCK_SECURITY_FLOOR = ">=4.2.1"
 
 SKILL_SCANNER_VERSION = "2.2.1"
 # 2.2.1 ships only platform wheels (each bundles a CEL helper): no
@@ -82,6 +74,13 @@ SKILL_SCANNER_WHEELS = {
     "win_amd64": "d1bf7bb295f314627c7f6a58d9debba05dce72e9251d65aaad48ca77736e8655",
 }
 MCP_SCANNER_VERSION = "4.3.0"
+LITELLM_PLATFORM_WHEELS = (
+    "macosx_11_0_arm64",
+    "macosx_10_12_x86_64",
+    "manylinux_2_28_aarch64",
+    "manylinux_2_28_x86_64",
+    "win_amd64",
+)
 MCP_SCANNER_SHA256 = "ea1a30d6bc282f2b4081bc4eced4287a20326891588624d5b2e07b388710b812"
 TEXTUAL_LOCKED_VERSION = "8.2.8"
 MAGIKA_MINIMUM_VERSION = Version("1.0.2")
@@ -149,14 +148,19 @@ def test_dependency_repair_cannot_lower_security_floors() -> None:
         requirements = _requirements(requirement_set)
         assert Version("1.83.7") not in requirements["litellm"].specifier
         assert Version("1.91.4") not in requirements["litellm"].specifier
-        assert Version("1.91.5") in requirements["litellm"].specifier
-        assert Version("1.92.0") not in requirements["litellm"].specifier
+        # GHSA-g5ff-637f-6q2m (fixed 1.95.0) and CVE-2026-114612 (affected
+        # on the 1.100-1.104 lines before their fixes): GAP-2306.
+        assert Version("1.91.5") not in requirements["litellm"].specifier
+        assert Version("1.94.3") not in requirements["litellm"].specifier
+        assert Version("1.104.0") not in requirements["litellm"].specifier
+        assert Version("1.103.0") not in requirements["litellm"].specifier
+        assert Version("1.103.10") in requirements["litellm"].specifier
         assert Version("8.5.0") not in requirements["importlib-metadata"].specifier
         assert Version("8.7.1") in requirements["importlib-metadata"].specifier
         assert Version("8.8.0") not in requirements["importlib-metadata"].specifier
 
 
-@pytest.mark.parametrize("python_version", ["3.10", "3.11", "3.12", "3.13"])
+@pytest.mark.parametrize("python_version", ["3.11", "3.12", "3.13"])
 def test_wheel_security_floors_are_unmarked_on_every_supported_python_line(
     python_version: str,
 ) -> None:
@@ -166,53 +170,31 @@ def test_wheel_security_floors_are_unmarked_on_every_supported_python_line(
     _assert_requirement_contract(direct, WHEEL_SECURITY_FLOOR_CONTRACT)
 
 
-def test_python_310_toml_parser_dependency_is_source_and_lock_metadata() -> None:
+def test_python_310_is_not_supported_and_needs_no_backports() -> None:
+    # GAP-1715: no fixed filelock supports Python 3.10, so the wheel requires
+    # 3.11 and carries neither the 3.10 filelock pin nor the tomli backport.
     document = tomllib.loads(PYPROJECT.read_text(encoding="utf-8"))
+    supported = SpecifierSet(document["project"]["requires-python"])
+    assert Version("3.10.14") not in supported and Version("3.11.0") in supported
     direct = _requirements(document["project"]["dependencies"])
-    _assert_requirement_contract(
-        direct,
-        {"tomli": TOMLI_COMPATIBILITY_CONTRACT},
-    )
-
-    lock = tomllib.loads(UV_LOCK.read_text(encoding="utf-8"))
-    project = next(package for package in lock["package"] if package["name"] == "defenseclaw")
-    locked = next(
-        requirement
-        for requirement in project["metadata"]["requires-dist"]
-        if requirement["name"] == "tomli"
-    )
-    assert locked["specifier"] == TOMLI_COMPATIBILITY_CONTRACT[0]
-    marker = Marker(locked["marker"])
-    assert marker.evaluate(
-        {"python_version": "3.10", "python_full_version": "3.10.14"}
-    )
-    assert not marker.evaluate(
-        {"python_version": "3.11", "python_full_version": "3.11.0"}
-    )
+    assert "tomli" not in direct
 
 
-def test_filelock_floor_is_marked_per_python_line_in_source_and_lock() -> None:
+def test_filelock_floor_is_unmarked_in_source_and_lock() -> None:
     document = tomllib.loads(PYPROJECT.read_text(encoding="utf-8"))
-    direct = {
-        str(requirement.marker): str(requirement.specifier)
+    pins = [
+        requirement
         for requirement in map(Requirement, document["project"]["dependencies"])
         if requirement.name == "filelock"
-    }
-    assert direct == FILELOCK_SECURITY_CONTRACT
+    ]
+    assert [(str(pin.specifier), pin.marker) for pin in pins] == [(FILELOCK_SECURITY_FLOOR, None)]
 
     lock = tomllib.loads(UV_LOCK.read_text(encoding="utf-8"))
     project = next(package for package in lock["package"] if package["name"] == "defenseclaw")
-    python_310 = {"python_version": "3.10", "python_full_version": "3.10.14"}
-    python_311 = {"python_version": "3.11", "python_full_version": "3.11.0"}
-    locked = {}
-    for dependency in project["dependencies"]:
-        if dependency["name"] == "filelock":
-            marker = Marker(dependency["marker"])
-            line = "3.10" if marker.evaluate(python_310) else "3.11+"
-            assert marker.evaluate(python_311) == (line == "3.11+")
-            locked[line] = Version(dependency["version"])
-    assert locked["3.10"] < Version("4.1")
-    assert locked["3.11+"] >= Version("4.2.1")
+    edges = [dependency for dependency in project["dependencies"] if dependency["name"] == "filelock"]
+    assert len(edges) == 1 and "marker" not in edges[0]
+    versions = [Version(package["version"]) for package in lock["package"] if package["name"] == "filelock"]
+    assert versions and min(versions) >= Version("4.2.1")
 
 
 def test_dev_graph_does_not_force_incompatible_snapshot_metadata() -> None:
@@ -250,15 +232,19 @@ def test_lock_records_the_same_runtime_and_security_contracts() -> None:
     assert locked["cisco-ai-skill-scanner"] == SKILL_SCANNER_VERSION
     assert locked["cisco-ai-mcp-scanner"] == MCP_SCANNER_VERSION
     assert locked["textual"] == TEXTUAL_LOCKED_VERSION
-    assert Version(locked["litellm"]) >= Version("1.91.5")
+    assert Version(locked["litellm"]) >= Version("1.103.10")
     assert Version(locked["importlib-metadata"]) >= Version("8.7.1")
     assert Version(locked["rich"]) in Requirement("rich>=14.2,<15").specifier
 
+    # LiteLLM ships abi3 platform wheels since 1.95: every platform the
+    # installers support must have a locked binary wheel (no sdist build).
     litellm = next(package for package in lock["package"] if package["name"] == "litellm")
-    assert any(
-        wheel["url"].endswith(f"litellm-{litellm['version']}-py3-none-any.whl")
-        for wheel in litellm["wheels"]
-    )
+    for platform_tag in LITELLM_PLATFORM_WHEELS:
+        assert any(
+            wheel["url"].endswith(f"litellm-{litellm['version']}-cp310-abi3-{platform_tag}.whl")
+            and wheel.get("hash", "").startswith("sha256:")
+            for wheel in litellm["wheels"]
+        ), platform_tag
 
 
 def test_windows_python_313_dependency_lock_has_supported_onnxruntime_wheel() -> None:
@@ -312,7 +298,7 @@ def test_scanner_metadata_intersection_is_satisfiable() -> None:
     # Authoritative Requires-Dist fields from the shipped scanner wheels:
     # skill scanner 2.2.1: rich>=14.0,<15, textual>=7.0,<9, litellm>=1.89.7,<2;
     # Textual 8.2.8: rich>=14.2; MCP scanner 4.3.0: litellm>=1.77.0;
-    # project policy: Textual>=8.2.8,<9, Rich>=14.2,<15, LiteLLM>=1.91.5,<1.92.
+    # project policy: Textual>=8.2.8,<9, Rich>=14.2,<15, LiteLLM>=1.103.10,<1.104.
     # MCP scanner 4.8.x pins litellm==1.93.0 (CVE-2026-84377), so 4.3.0 stays.
     intersections = {
         "rich": [Requirement("rich<15,>=14.0"), Requirement("rich>=14.2"), Requirement("rich>=14.2,<15")],
@@ -320,7 +306,7 @@ def test_scanner_metadata_intersection_is_satisfiable() -> None:
         "litellm": [
             Requirement("litellm<2,>=1.89.7"),
             Requirement("litellm>=1.77.0"),
-            Requirement("litellm>=1.91.5,<1.92.0"),
+            Requirement("litellm>=1.103.10,<1.104.0"),
         ],
         "importlib-metadata": [
             Requirement("importlib-metadata>=8.7.1,<8.8"),
@@ -329,7 +315,7 @@ def test_scanner_metadata_intersection_is_satisfiable() -> None:
     witnesses = {
         "rich": Version("14.3.4"),
         "textual": Version(TEXTUAL_LOCKED_VERSION),
-        "litellm": Version("1.91.5"),
+        "litellm": Version("1.103.10"),
         "importlib-metadata": Version("8.7.1"),
     }
     for name, requirements in intersections.items():
@@ -488,10 +474,7 @@ def test_fresh_wheel_metadata_contains_complete_runtime_contract(tmp_path: Path)
     wheel_requirements = _requirements(metadata.get_all("Requires-Dist", []))
     _assert_requirement_contract(wheel_requirements, RUNTIME_CONTRACT)
     _assert_requirement_contract(wheel_requirements, WHEEL_SECURITY_FLOOR_CONTRACT)
-    _assert_requirement_contract(
-        wheel_requirements,
-        {"tomli": TOMLI_COMPATIBILITY_CONTRACT},
-    )
+    assert "tomli" not in wheel_requirements
     assert MAGIKA_MINIMUM_VERSION in wheel_requirements["magika"].specifier
     assert Version("1.0.1") not in wheel_requirements["magika"].specifier
     _assert_skill_scanner_wheels(metadata.get_all("Requires-Dist", []))

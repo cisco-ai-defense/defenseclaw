@@ -15,7 +15,7 @@ If the router is down, times out or returns an unknown model name, routing falls
 
 ## Prerequisites
 
-- OpenClaw or ZeptoClaw is configured in proxy mode. Native Windows is not supported.
+- OpenClaw or ZeptoClaw is configured in proxy mode. Native Windows is not supported: there `defenseclaw setup routing` says so and refuses `--enable`, and `--disable` still turns off a routing block copied from another machine.
 - For the managed router, Docker runs Linux containers on macOS or Linux. A remote router needs no Docker.
 - Each backend has an OpenAI-compatible Chat Completions endpoint. `base_url` is the origin, for example `https://api.openai.com`, without `/v1/chat/completions`.
 - Provider keys are in the environment or `~/.defenseclaw/.env`, never in `config.yaml`.

@@ -13,6 +13,7 @@ import { ConnectorSupport } from '@/components/support-matrix';
 
 DefenseClaw installs hooks for Kiro IDE and Kiro CLI under one Kiro connector. First-run and `defenseclaw setup kiro` activate it whether you have Kiro IDE, Kiro CLI or both, so DefenseClaw shows one Kiro row. This is a hook connector: Kiro talks to its model provider directly and no proxy is involved.
 
+On a per-user install, an explicitly saved `guardrail.hook_fail_mode` takes precedence over the selected tier. See the [gateway outage table](/docs/connectors/capability-matrix#gateway-outage) and [Fail modes](/docs/reference/fail-modes).
 ## Platform support
 
 <ConnectorSupport id="kiro" />
@@ -39,7 +40,7 @@ defenseclaw setup kiro                # first setup defaults to observe
 defenseclaw setup kiro --mode action  # block where Kiro honors a veto
 ```
 
-A re-run without `--mode` keeps the current mode. On Windows, run the same commands in PowerShell. Restart Kiro CLI, or run `/agent swap defenseclaw`, so `/hooks` lists the hooks.
+A re-run without `--mode` keeps the current mode. On a terminal setup still asks for the mode, with the current one as the default (Enter keeps it), and whether to re-apply the hooks; in action mode it also asks whether to add the LLM judge. `--yes` skips the questions ([the questions setup asks](/docs/guardrail/switching-connectors#the-questions-setup-asks)). On Windows, run the same commands in PowerShell. Restart Kiro CLI, or run `/agent swap defenseclaw`, so `/hooks` lists the hooks.
 
 ### Check it
 
@@ -89,7 +90,7 @@ The surface is resolved per request from the hook config that invoked the hook, 
 
 ### Which Kiro builds read the global hook file
 
-Kiro documents a global scope, `~/.kiro/hooks/`, merged with the project's `.kiro/hooks/`, for Kiro IDE 1.0.182 and later and for `kiro-cli --v3`. Older IDE builds read only `<workspace>/.kiro/hooks/*.json`, so DefenseClaw does not count them as protected: update Kiro IDE to 1.0.182 or later ([Supported versions](#supported-versions)). `defenseclaw setup kiro --workspace <project>` also writes a workspace copy; setup without `--workspace` selects global scope and clears a previously set `claw.workspace_dir`.
+Kiro documents a global scope, `~/.kiro/hooks/`, merged with the project's `.kiro/hooks/`, for Kiro IDE 1.0.182 and later and for `kiro-cli --v3`. Older IDE builds read only `<workspace>/.kiro/hooks/*.json`, so DefenseClaw does not count them as protected: update Kiro IDE to 1.0.182 or later ([Supported versions](#supported-versions)). `defenseclaw setup kiro --workspace <project>` also writes a workspace copy; a `claw.workspace_dir` set before setup (`defenseclaw config set claw.workspace_dir <project>`) is kept by setup without `--workspace` and also gets the workspace copy. Setup clears a pin that is not a folder and warns. To return to global scope, run `defenseclaw config unset claw.workspace_dir` and then setup again.
 
 `defenseclaw doctor`'s `Connector scope [kiro]` check passes when the global file holds DefenseClaw's hooks. Doctor reads the IDE's version from `resources/app/product.json` without starting it. It warns (`kiro_ide_below_global_hooks_floor`) below 1.0.182, or (`kiro_ide_version_unknown`) when `product.json` names no version, and fails (`kiro_hooks_not_workspace_scoped`) only when neither the global registration nor a workspace copy exists.
 
@@ -101,19 +102,19 @@ Kiro documents a global scope, `~/.kiro/hooks/`, merged with the project's `.kir
 
 ### Fail mode
 
-Fail closed while the hook runs: yes. When the gateway cannot give a usable answer, the hook blocks the events that support a block response unless `guardrail.hook_fail_mode` is `open`. The default is `closed`. A hook that fails closed exits 2, the only non-zero status Kiro treats as a block. Kiro CLI 2.x was measured running the tool when a hook had not answered within its timeout. Standalone status and verify warn `hook_process_fail_open` and set `security_complete: false` while Kiro is enabled. Settings and edge cases are in [Fail modes](/docs/reference/fail-modes). What a gateway outage does to a Kiro call is in the [gateway outage table](/docs/connectors/capability-matrix#gateway-outage).
+Fail closed while the hook runs: yes. On a per-user install with no saved mode, a gateway that is not running follows the policy tier: the default and permissive policies let the call run with one warning, and the strict policy blocks it ([gateway outage table](/docs/connectors/capability-matrix#gateway-outage)). Every other failure, an error or unusable answer included, blocks the events that support a block response. On a managed host the administrator's `guardrail.hook_fail_mode` decides an outage, and the default is `closed` ([gateway outage table](/docs/connectors/capability-matrix#gateway-outage)). A hook that fails closed exits 2, the only non-zero status Kiro treats as a block. Kiro CLI 2.x was measured running the tool when a hook had not answered within its timeout. Standalone status and verify warn `hook_process_fail_open` and set `security_complete: false` while Kiro is enabled. Settings and edge cases are in [Fail modes](/docs/reference/fail-modes). What a gateway outage does to a Kiro call is in the [gateway outage table](/docs/connectors/capability-matrix#gateway-outage).
 
 ## Hook capabilities
 
 <HookEventsList connector="kiro" />
 
-No entry in `hook_contracts.json`: per-user installs are not version-gated.
+Kiro has no entry in `hook_contracts.json`. Per-user setup checks kiro-cli instead: it needs 2.27.1 or later (`KiroCLIHookFloor`), because before 2.27.1 a non-interactive `kiro-cli chat --v3` run loads no hooks. Setup refuses an older kiro-cli in observe and action mode, before it changes anything, when no supported Kiro IDE is installed ([Kiro](/docs/connectors/kiro)).
 
 ## Native Windows
 
 Both hook configs hold the system `cmd.exe /d /c`, which runs system Windows PowerShell with `-EncodedCommand`, then `exit $LASTEXITCODE` on a second line. The script starts `defenseclaw-hook.exe hook --connector kiro --hook-surface v3` (the `.kiro/hooks` config) or `defenseclaw-hook.exe hook --connector kiro` (the CLI 2.x agent) with .NET `Process.Start`, passes stderr through, waits and exits with its status. The binary forwards the surface to the gateway and answers like the bash hook: no stdout, and exit 2 with the reason on stderr for a block. Under Constrained Language mode (WDAC or AppLocker) the script runs the binary with the call operator and pipes to `Out-Host`.
 
-Kiro proceeds past any exit status other than 0 and 2, so a block has to reach Kiro as exit 2. It does in every way Kiro can start the command. `pwsh -Command` or `powershell -Command` (Kiro CLI 2.24 starts every hook as `"pwsh" -Command "<command>"`) report a native exit other than 0 as 1 unless the command exits with it, which the second line does. `cmd.exe /c` stops reading at the line break and never runs the second line. A hook that fails closed (administrator-managed, or fail mode `closed` from the sidecar or `--fail-mode`) also exits 2 when it fails inside DefenseClaw: a usage error, an invalid flag value or an unreachable gateway. With fail mode `open` those failures exit 1 and Kiro goes ahead with a warning.
+Kiro proceeds past any exit status other than 0 and 2, so a block has to reach Kiro as exit 2. It does in every way Kiro can start the command. `pwsh -Command` or `powershell -Command` (Kiro CLI 2.24 starts every hook as `"pwsh" -Command "<command>"`) report a native exit other than 0 as 1 unless the command exits with it, which the second line does. `cmd.exe /c` stops reading at the line break and never runs the second line. A hook also exits 2 when it fails inside DefenseClaw, for a usage error or an invalid flag value, in every fail mode. A gateway that is not running follows the [gateway outage table](/docs/connectors/capability-matrix#gateway-outage); a call it blocks exits 2.
 
 ## Enterprise (standalone profile)
 
@@ -138,7 +139,7 @@ Managed Windows pins each enrolled user to one of two reviewed contracts: `kiro-
 
 ## ACP guard
 
-The ACP guard is an enforcement path of its own. It vetoes prompts, output, permissions, filesystem, terminal and extension methods at the protocol boundary, whichever Kiro surface the editor launches. See the [ACP guard guide](/docs/acp-guard). It runs on every OS for per-user installs, for editors that start Kiro over ACP. ACP editors are not supported in enterprise managed mode; in enterprise managed mode, ACP editors are enrolled with `defenseclaw-gateway enterprise acp enroll`, which is preview and not yet verified live.
+The ACP guard is an enforcement path of its own. It vetoes prompts, output, permissions, filesystem, terminal and extension methods at the protocol boundary, whichever Kiro surface the editor launches. See the [ACP guard guide](/docs/acp-guard). It runs on every OS for per-user installs, for editors that start Kiro over ACP. In enterprise managed mode an administrator enrolls each user, editor and agent with `defenseclaw-gateway enterprise acp enroll`, and the user runs the setup command it reports. Managed ACP is preview: it has not passed a live round in this release ([Support matrix](/docs/support-matrix)).
 
 ```bash
 defenseclaw acp setup --client zed --agent kiro
@@ -178,6 +179,6 @@ For a per-user, single-connector install:
 defenseclaw guardrail disable --yes
 ```
 
-With the default gateway restart, disabling removes DefenseClaw's hook registrations from Kiro's hook and agent files and preserves your other Kiro settings. `defenseclaw guardrail enable` restores DefenseClaw's hooks. To remove the connector, run `defenseclaw setup remove kiro --yes` (add `--force` if it is the last one). On Linux and macOS, `kiro-hook.sh` stays as an inert stub until Kiro restarts.
+With the default gateway restart, disabling removes DefenseClaw's hook registrations from Kiro's hook and agent files and preserves your other Kiro settings. `defenseclaw guardrail enable` restores DefenseClaw's hooks. Enable runs setup again, so with a kiro-cli below 2.27.1 (one an earlier release enrolled) it is refused and Kiro stays unprotected until you update Kiro CLI; `guardrail disable` warns about this before it removes the hooks. To remove the connector, run `defenseclaw setup remove kiro --yes` (add `--force` if it is the last one). On Linux and macOS, `kiro-hook.sh` stays as an inert stub until Kiro restarts.
 
 On a multi-connector install, add `--connector kiro` to `guardrail disable` and `guardrail enable` to change only this agent.

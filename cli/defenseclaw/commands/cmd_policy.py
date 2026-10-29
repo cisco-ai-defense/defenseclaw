@@ -1036,6 +1036,11 @@ def _admission_from_policy(data: dict, skipped: list[str] | None = None):  # noq
     # admission.skill.actions the scanner gate would decide skills instead.
     for sev, action in adm.defaults.actions.items():
         adm.skill.actions.setdefault(sev, action)
+    # They are an explicit choice for MCP as well, also when they equal the
+    # pre-1.0.4 default preset's (GAP-1488).
+    from defenseclaw.enforce.admission import pin_explicit_legacy_shape
+
+    pin_explicit_legacy_shape(adm)
     return adm
 
 
@@ -1142,6 +1147,8 @@ def _activate_policy(app: AppContext, name: str) -> tuple[str, list[str]]:
     if not secure_client:
         try:
             app.cfg.admission = _admission_from_policy(data, first_party_notes)
+            # An activation chooses the whole admission block (GAP-1488).
+            app.cfg.decide("admission")
             _apply_policy_guardrail(app.cfg, data)
         except (TypeError, ValueError) as exc:
             raise click.ClickException(f"invalid policy {name!r}: {exc}") from exc
@@ -1510,6 +1517,7 @@ def _edit_live_actions(
         # the gate covers every severity, so the edit is also the skill's own.
         app.cfg.admission.skill.actions[severity] = dict(value) if isinstance(value, dict) else value
         updated.append(f"admission.skill.actions.{severity}")
+    app.cfg.decide(*updated)
     app.cfg.save()
     ux.ok(f"Updated {' and '.join(updated)}: {', '.join(changed)}")
     _reload_after_edit(app, "live", synced=True, reload_gateway=reload_gateway)
@@ -1585,6 +1593,7 @@ def edit_scanner(app: AppContext, scanner_type: str, severity: str, runtime: str
                 click.echo(f"No override found for {scanner_type}/{severity.upper()}.")
                 return
             del actions[severity]
+            app.cfg.decide(f"admission.{scanner_type}.actions.{severity}")
             app.cfg.save()
             ux.ok(f"Removed admission.{scanner_type}.actions.{severity}.")
             _reload_after_edit(app, "live", synced=True, reload_gateway=reload_gateway)

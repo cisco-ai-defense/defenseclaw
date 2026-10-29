@@ -1864,14 +1864,15 @@ func TestAPIServerHookPostureUsesPublishedRuntimeConfig(t *testing.T) {
 	}
 	for _, row := range rows {
 		name, _ := row["connector"].(string)
-		// hook_fail_mode is the hooks' outage mode: the default tier's open.
-		if row["policy_mode"] != "action" || row["hook_fail_mode"] != "open" || row["enabled"] != true {
-			t.Fatalf("%s published posture = %#v, want action/open/enabled", name, row)
+		// The published explicit closed choice overrides the default tier.
+		if row["policy_mode"] != "action" || row["hook_fail_mode"] != "closed" || row["enabled"] != true {
+			t.Fatalf("%s published posture = %#v, want action/closed/enabled", name, row)
 		}
 	}
 	if boot.EffectiveGuardrailModeForConnector("codex") != "observe" ||
 		boot.Guardrail.HookFailMode != "open" || boot.Guardrail.Connectors["codex"].HookFailMode != "open" ||
-		boot.EffectiveHookFailModeForConnector("codex") != "closed" {
+		boot.EffectiveHookFailModeForConnector("codex") != "closed" ||
+		boot.EffectiveHookOutageFailModeForConnector("codex") != "open" {
 		t.Fatal("API posture read mutated the immutable boot snapshot")
 	}
 }
@@ -1943,9 +1944,9 @@ func TestConnectorSetChangeIsHotOffSecureClient(t *testing.T) {
 	}
 }
 
-// A legacy per-user open-to-closed edit cannot change the already-closed
-// runtime or the set of connectors that setup must install.
-func TestLegacyPerUserOpenEditDoesNotChangeConnectorSetup(t *testing.T) {
+// A saved per-user open-to-closed edit changes the next outage decision and
+// refreshes registration state without changing which connectors are active.
+func TestPerUserSavedOutageModeEditRefreshesConnectorSetup(t *testing.T) {
 	oldCfg := config.DefaultConfig()
 	oldCfg.Guardrail.Enabled = true
 	oldCfg.Guardrail.Connector = "codex"
@@ -1954,10 +1955,10 @@ func TestLegacyPerUserOpenEditDoesNotChangeConnectorSetup(t *testing.T) {
 	oldCfg.Guardrail.HookFailMode = "open"
 	newCfg := cloneConfig(oldCfg)
 	newCfg.Guardrail.HookFailMode = "closed"
-	if oldCfg.EffectiveHookFailModeForConnector("codex") != "closed" ||
-		newCfg.EffectiveHookFailModeForConnector("codex") != "closed" ||
-		connectorSetChanged(oldCfg, newCfg) || hookPolicyNeedsSetup(oldCfg, newCfg) {
-		t.Fatal("legacy per-user open edit changed effective setup posture")
+	if oldCfg.EffectiveHookOutageFailModeForConnector("codex") != "open" ||
+		newCfg.EffectiveHookOutageFailModeForConnector("codex") != "closed" ||
+		connectorSetChanged(oldCfg, newCfg) || !hookPolicyNeedsSetup(oldCfg, newCfg) {
+		t.Fatal("saved per-user outage edit missed the call-time mode or registration refresh")
 	}
 }
 

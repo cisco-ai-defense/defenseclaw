@@ -107,6 +107,8 @@ value in `Authorization`, `X-DefenseClaw-Token`, `X-DC-Auth`, or an OTLP path
 token) gets 401 on every authenticated route of this API, before any other
 check. Those credentials are valid only on the [hook ingress](#hook-ingress).
 
+Refusals from the authentication, rate-limit and CSRF checks carry a JSON `{"error": ...}` body and `Content-Type: application/json`.
+
 ### CSRF protection
 
 Every non-`GET`/`HEAD` request also requires `X-DefenseClaw-Client` (any
@@ -121,7 +123,9 @@ non-local browser origin.
 
 All ordinary mutations also reject a non-local `Origin`; cross-site requests
 are rejected when `Sec-Fetch-Site` identifies them. A shared middleware caps
-ordinary POST, PUT, and PATCH bodies at 1 MiB. Exact authenticated OTLP-HTTP
+ordinary POST, PUT, and PATCH bodies at 1 MiB; a per-user hook sends at most
+900 KiB (921,600 bytes) of a hook call, and treats a larger call as oversized
+input (see Fail modes). Exact authenticated OTLP-HTTP
 ingest routes use a separate 64 MiB receiver limit so exporter batches can
 follow the protocol's recommended bound without increasing the limit for the
 rest of the API.
@@ -147,6 +151,8 @@ X-DefenseClaw-Client: cli
 - `user_scoped_credentials.key_ids`: non-secret SHA-256 fingerprints of the per-machine keys the current per-user credentials derive from (the current key, plus a staged or retiring one during rotation). They let the lifecycle check a rotation; they are not the key IDs the listener proof takes, which are the SHA-256 of one user's hook credential.
 
 Profile warnings name configured groups and `DOMAIN\user` selectors, so `/health` gives only counts, `profile_assignment_warning_count` and on the standalone profile `profile_warning_count`, each present only when not zero; `/status` lists the warnings. On Linux and macOS managed installs the hook socket also answers `GET /health` with the same document without peer authorization (root alone also gets `profile_assignment_warnings`, `profile_warnings` and the uids of accounts whose directory lookups fail, which `enterprise linux|macos status` and `verify` read); every other path there keeps peer authorization. This is accepted so every health consumer works without a credential (residual R33 in the enterprise threat model).
+
+While a write to the local event history is failing, the health details carry `event_history_failure`. `event_history_last_failure_at` is the time of the last failed write; once writes recover, it is dated from the recovery of that failure episode, not from its start.
 
 When `openshell.enabled` is `true`, `/health` includes a `sandbox` subsystem:
 
@@ -179,7 +185,7 @@ With `openshell.enabled: false` the subsystem is absent.
     "enabled": true,
     "hook_enforcement": true,
     "enforcement_surface": "agent_lifecycle_hooks",
-    "telemetry": ["hooks", "otel", "notify"],
+    "telemetry": ["hooks"],
     "proxy_intercept": false
   },
   "connector_modes": [
@@ -192,7 +198,7 @@ With `openshell.enabled: false` the subsystem is absent.
       "enabled": true,
       "hook_enforcement": true,
       "enforcement_surface": "agent_lifecycle_hooks",
-      "telemetry": ["hooks", "otel", "notify"],
+      "telemetry": ["hooks"],
       "proxy_intercept": false
     },
     {
@@ -204,7 +210,7 @@ With `openshell.enabled: false` the subsystem is absent.
       "enabled": true,
       "hook_enforcement": false,
       "enforcement_surface": "agent_lifecycle_hooks",
-      "telemetry": ["hooks", "otel"],
+      "telemetry": ["hooks"],
       "proxy_intercept": false
     }
   ]
@@ -221,7 +227,7 @@ With `openshell.enabled: false` the subsystem is absent.
   report the effective `observe`/`action` posture; `hook_fail_mode` is the
   effective hook fail mode; `enabled` is the connector's effective guardrail
   enablement; `hook_enforcement` is true for a non-proxy connector in action
-  mode; `enforcement_surface` identifies the proxy or lifecycle-hook path; `telemetry` lists reported wiring channels; and
+  mode; `enforcement_surface` identifies the proxy or lifecycle-hook path; `telemetry` lists the channels the install registers for the connector, which on a host install is `["hooks"]` for every connector (native agent OTel exporters run only inside OpenShell sandboxes); and
   `proxy_intercept` is true only for proxy connectors. `mode`,
   `enforcement_surface`, and `proxy_intercept` are derived from the
   connector's declared LLM traffic mode, through the same predicate the
@@ -234,6 +240,16 @@ With `openshell.enabled: false` the subsystem is absent.
 
 `/health` and `/status` carry a `policy` object that identifies the policy the
 gateway is enforcing. It is omitted on a Secure Client device.
+
+On a managed standalone computer `/health` gives the object only to an
+administrator: root or the gateway's own account on the hook socket (Linux and
+macOS), or a request with the gateway token. A plain
+`curl http://127.0.0.1:18970/health`, even under `sudo`, has no `policy` key,
+and neither has the hook socket's answer to an ordinary account. Read it from
+the hook socket as root
+(`sudo curl -s --unix-socket /run/defenseclaw-hook/hook.sock http://localhost/health`
+on Linux), from `/status` (which needs the gateway token), or as the `policy:`
+line of `enterprise linux|macos|windows status`.
 
 ```json title="GET /health (policy object)"
 {

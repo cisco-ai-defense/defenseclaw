@@ -63,10 +63,10 @@ from defenseclaw import ux
     type=click.Choice(["open", "closed"], case_sensitive=False),
     default=None,
     help=(
-        "Saved as guardrail.hook_fail_mode. Per-user hooks do not read it: while the "
-        "gateway is not running they follow the policy tier (default and permissive let "
-        "calls run with a warning, strict blocks them: `defenseclaw guardrail use-pack strict`), "
-        "and every other hook failure blocks. "
+        "Saves your choice for a gateway outage as guardrail.hook_fail_mode; it wins "
+        "over the policy tier. Omitted, nothing is saved and outages follow the policy tier "
+        "(default and permissive let calls run with a warning, strict blocks them: "
+        "`defenseclaw guardrail use-pack strict`). Every other hook failure blocks. "
         "DEFENSECLAW_STRICT_AVAILABILITY=1 additionally forces transport and "
         "missing-token failures closed."
     ),

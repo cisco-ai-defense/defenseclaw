@@ -145,7 +145,7 @@ type codexHookResponse struct {
 	RuleIDs      []string `json:"rule_ids,omitempty"`
 	// RedactionEnabled carries the cloud-controlled per-inspection
 	// redaction directive back through the unified dispatch so
-	// finalizeAgentHook can honor it on the hook_decision event +
+	// finalizeAgentHookAnswer can honor it on the hook_decision event +
 	// audit row. Never serialized on the hook response wire.
 	RedactionEnabled     *bool  `json:"-"`
 	SourceReason         string `json:"-"`
@@ -221,6 +221,8 @@ func (a *APIServer) evaluateCodexHookForProfile(
 	req codexHookRequest,
 	profile connector.HookProfile,
 ) codexHookResponse {
+	startup := a.applyInstructionStartup(ctx, "codex", req.SessionID, req.HookEventName, req.Source, req.CWD)
+	ctx = a.withInstructionStartup(ctx, "codex", req.SessionID, startup)
 	mode := sandboxHookMode(ctx, "codex", a.codexMode(ctx))
 	// Sandbox hooks are always judged, and enforced (see evaluateAgentHook).
 	if a.scannerCfg != nil && !sandboxHookForConnector(ctx, "codex") && !a.codexEnabled() {
@@ -349,8 +351,17 @@ func (a *APIServer) evaluateCodexHookForProfile(
 	rawAction := normalizeCodexAction(verdict.Action)
 	rawActionBeforeAssets := rawAction
 	action := rawAction
-	wouldBlock := rawAction == "block" && mode != "action"
-	if mode != "action" && rawAction == "block" {
+	stateMutation := a.provenActiveStateMutation(ctx, verdict)
+	effectiveMode := mode
+	if stateMutation {
+		effectiveMode = "action"
+	}
+	if capable, _ := mapHookActionForProfile("block", effectiveMode, req.HookEventName,
+		profile.Capabilities, profile, nil); capable != "block" {
+		stateMutation = false
+	}
+	wouldBlock := rawAction == "block" && mode != "action" && !stateMutation
+	if mode != "action" && rawAction == "block" && !stateMutation {
 		action = "allow"
 	}
 	if mode != "action" && (rawAction == "alert" || rawAction == "confirm") {
@@ -369,7 +380,7 @@ func (a *APIServer) evaluateCodexHookForProfile(
 		if mergedAction == "block" {
 			capable, capableWouldBlock := mapHookActionForProfile(
 				"block",
-				mode,
+				effectiveMode,
 				req.HookEventName,
 				caps,
 				profile,
@@ -2527,7 +2538,7 @@ func codexReaderTargetWithType(
 func codexCatInputs(argv []string) (codexStaticReaderInputs, bool) {
 	var inputs codexStaticReaderInputs
 	options := true
-	for _, arg := range argv[1:] {
+	for _, arg := range argvOperands(argv) {
 		if options && arg == "--" {
 			options = false
 			continue

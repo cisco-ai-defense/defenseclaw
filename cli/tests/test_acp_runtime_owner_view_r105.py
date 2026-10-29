@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import json
 import os
-import pwd
 import shlex
 from pathlib import Path
 
@@ -24,6 +23,7 @@ from tests.helpers import cleanup_app
 from tests.test_acp_verify_guard_parity_r105 import _setup
 
 pytestmark = pytest.mark.skipif(os.name == "nt", reason="root and account homes are POSIX")
+pwd = pytest.importorskip("pwd")
 
 
 def _as_root_checking(monkeypatch, tmp_path: Path, user_home: Path) -> None:

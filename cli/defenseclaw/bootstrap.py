@@ -140,14 +140,10 @@ class FirstRunOptions:
     cisco_endpoint: str = ""
     cisco_api_key: str = ""
     cisco_api_key_env: str = "CISCO_AI_DEFENSE_API_KEY"
-    # hook_fail_mode controls what generated hooks (codex-hook,
-    # claude-code-hook, inspect-*) do when delivery, authentication,
-    # or a gateway response fails. Empty string means "leave the
-    # current cfg.guardrail.hook_fail_mode untouched" so callers
-    # who don't care don't accidentally clobber an operator's
-    # earlier choice. Transport failures and invalid responses
-    # follow the same effective value. DEFENSECLAW_STRICT_AVAILABILITY=1
-    # additionally forces transport and missing-token failures closed.
+    # hook_fail_mode is the saved choice for a classified gateway outage.
+    # Empty means preserve the current operator choice. A reached gateway's
+    # bad answer and authentication failures remain closed on OSS installs;
+    # DEFENSECLAW_STRICT_AVAILABILITY=1 also closes transport failures.
     hook_fail_mode: str = ""
     # human_approval is the operator's HITL (Human-In-the-Loop)
     # toggle. ``None`` means "leave whatever was loaded alone" —
@@ -1571,6 +1567,9 @@ def _apply_first_run_choices(
     desired = (options.hook_fail_mode or "").strip().lower()
     if desired:
         cfg.guardrail.hook_fail_mode = "closed" if desired == "closed" else "open"
+        selected = _first_run_selected_connector_override(cfg, connector)
+        if selected is not None and (selected.hook_fail_mode or "").strip():
+            selected.hook_fail_mode = cfg.guardrail.hook_fail_mode
 
     # Human-In-the-Loop (HITL). ``None`` is the no-op sentinel so
     # init/quickstart reruns don't clobber an operator who already
@@ -1638,11 +1637,10 @@ def _apply_first_run_llm_choices(cfg: Config, options: FirstRunOptions) -> None:
 
 
 def pin_cursor_posture(gc, primary: str = "") -> None:
-    """Pin Cursor's fail mode to its guardrail mode and turn approvals off.
+    """Turn off approvals for Cursor without inventing a saved fail mode.
 
-    Cursor's hook contract ties failures to the mode (action fails closed)
-    and has no native approval prompt; ``setup cursor`` already forces both,
-    and doctor fails any other persisted combination.
+    Cursor has no native approval prompt. Its outage mode follows the policy
+    tier unless the user explicitly chose a fail mode.
     """
     from defenseclaw.config import HILTConfig
 
@@ -1650,15 +1648,12 @@ def pin_cursor_posture(gc, primary: str = "") -> None:
     key = next((k for k in connectors if _normalize_connector(str(k)) == "cursor"), "")
     if not key and _normalize_connector(primary or gc.connector or "") != "cursor":
         return
-    fail_mode = "closed" if gc.effective_mode("cursor").strip().lower() == "action" else "open"
     hilt = gc.effective_hilt("cursor")
     if key:
         pc = connectors[key]
-        pc.hook_fail_mode = fail_mode
         if hilt.enabled:
             pc.hilt = HILTConfig(enabled=False, min_severity=hilt.min_severity or "HIGH")
     else:
-        gc.hook_fail_mode = fail_mode
         gc.hilt.enabled = False
 
 
@@ -1950,6 +1945,35 @@ def gateway_failure_detail(result: subprocess.CompletedProcess, default: str) ->
     return useful[0] if useful else default
 
 
+def _running_gateway_has_no_connector(cfg: Config) -> bool:
+    """True when this account's running gateway says it booted with no connector.
+
+    That boot path writes no ``active_connector.json`` and reports
+    ``no connector configured`` on /health (sidecar.go
+    ``waitForConnectorSetup``). Any other answer, or none, keeps the
+    I-don't-know rule of :func:`_running_connector_from_state_file`.
+    """
+    try:
+        from defenseclaw.gateway import OrchestratorClient, foreign_loopback_listener, gateway_api_client_host
+
+        port = int(getattr(cfg.gateway, "api_port", 0) or 0)
+        if not port:
+            return False
+        host = gateway_api_client_host(cfg)
+        # /health takes no token: another account's gateway must not answer.
+        if foreign_loopback_listener(host, port):
+            return False
+        client = OrchestratorClient(host=host, port=port, timeout=3)
+        try:
+            health = client.health()
+        finally:
+            client.close()
+    except Exception:  # noqa: BLE001 - no answer keeps the no-restart rule.
+        return False
+    guardrail = health.get("guardrail") if isinstance(health, dict) else None
+    return isinstance(guardrail, dict) and guardrail.get("last_error") == "no connector configured"
+
+
 def _start_gateway_structured(cfg: Config) -> StepResult:
     """Start (or restart) the defenseclaw-gateway sidecar to match
     the on-disk config, returning a structured StepResult.
@@ -1999,7 +2023,13 @@ def _start_gateway_structured(cfg: Config) -> StepResult:
         )
         roster = _running_connectors_from_state_file(cfg.data_dir)
         running = None
-        if roster is not None and roster != desired_roster:
+        if roster is None and cfg.active_connectors() and _running_gateway_has_no_connector(cfg):
+            # No state file because the gateway booted with no connector
+            # (init chose none): it loads one only when it restarts, so
+            # "already running" left the agent unguarded (GAP-2342).
+            running = "no connector"
+            roster = []
+        elif roster is not None and roster != desired_roster:
             running = roster[0] if len(roster) == 1 else f"{len(roster)} connectors"
             if len(desired_roster) > 1:
                 desired = f"{len(desired_roster)} connectors"

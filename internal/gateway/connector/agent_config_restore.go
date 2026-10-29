@@ -370,13 +370,32 @@ const (
 	// DefenseClaw saw settings of the account in it that it could not put
 	// back; reported until the account has settings in the file again.
 	AgentConfigSettingsLost = "settings_lost"
+	// AgentConfigNativeOTLPTakeBackPending: the Codex or Claude Code config
+	// of the account keeps a native OTLP exporter an earlier per-user install
+	// wrote, which the managed install could not remove
+	// (NativeOTLPTakeBackPending, GAP-1839).
+	AgentConfigNativeOTLPTakeBackPending = "native_otlp_take_back_pending"
+	// AgentConfigNativeOTLPUnchecked (Codex, Claude Code on standalone
+	// Windows): a configuration the account's agent reads reaches, through
+	// a link or outside the profile, a file the account does not own, so
+	// the guardian could not check it for an earlier per-user native OTLP
+	// exporter (GAP-0929). Its hooks are in place: a warning, not a failed
+	// row.
+	AgentConfigNativeOTLPUnchecked = "native_otlp_unchecked"
+	// AgentConfigNativeOTLPMarkedRemoved (Codex, Claude Code on standalone
+	// Windows): the managed install removed an exporter of an earlier
+	// per-user install that only its DefenseClaw markers and an unserved
+	// loopback port proved, and kept a copy of the file (GAP-0836). Reported
+	// while the copy is there.
+	AgentConfigNativeOTLPMarkedRemoved = "native_otlp_marked_removed"
 )
 
 // ValidAgentConfigStatus reports whether code is one AgentConfigStatus
 // returns ("" included).
 func ValidAgentConfigStatus(code string) bool {
 	switch code {
-	case "", AgentConfigRestoredLastGood, AgentConfigRestoredPristine, AgentConfigRecreatedHooksOnly, AgentConfigSettingsLost:
+	case "", AgentConfigRestoredLastGood, AgentConfigRestoredPristine, AgentConfigRecreatedHooksOnly, AgentConfigSettingsLost,
+		AgentConfigNativeOTLPUnchecked, AgentConfigNativeOTLPTakeBackPending, AgentConfigNativeOTLPMarkedRemoved:
 		return true
 	}
 	return false
@@ -430,6 +449,25 @@ func AgentConfigStatus(connectorName string, opts SetupOpts, since time.Time, re
 	return status
 }
 
+// nativeOTLPConfigFiles names, per connector, the agent configuration an
+// AgentConfigNativeOTLPUnchecked notice is about.
+var nativeOTLPConfigFiles = map[string]string{"codex": "a Codex config.toml", "claudecode": "a Claude Code settings.json"}
+
+// nativeOTLPUncheckedNotice words AgentConfigNativeOTLPUnchecked for the
+// administrator's status and verify (warning native_otlp_config_unchecked):
+// which configuration of which account the guardian could not check, and
+// the remedy, never its path or values.
+func nativeOTLPUncheckedNotice(connectorName, user string) (string, bool) {
+	file, ok := nativeOTLPConfigFiles[connectorName]
+	if !ok {
+		return "", false
+	}
+	return fmt.Sprintf("%s for user %s: %s that the agent reads reaches a file the account does not own, through a link or "+
+		"outside the profile, so DefenseClaw cannot check it for a native OTLP exporter from an earlier per-user install, "+
+		"and repair leaves it as it is (it revokes that install's DefenseClaw credential): replace it with the account's "+
+		"own file, or remove the link, and the next repair checks it", connectorName, user, file), true
+}
+
 // agentConfigFiles names, per connector, the agent config a notice is about.
 var agentConfigFiles = map[string]string{"hermes": "Hermes config.yaml", "devin": "Devin config.json"}
 
@@ -439,6 +477,15 @@ var agentConfigFiles = map[string]string{"hermes": "Hermes config.yaml", "devin"
 // AgentConfigStatus code). False for a code or connector it does not word,
 // which the per-user side may have written: only the known ones are.
 func AgentConfigNotice(connectorName, user, code string) (string, bool) {
+	if code == AgentConfigNativeOTLPTakeBackPending {
+		return nativeOTLPTakeBackPendingNotice(connectorName, user)
+	}
+	if code == AgentConfigNativeOTLPUnchecked {
+		return nativeOTLPUncheckedNotice(connectorName, user)
+	}
+	if code == AgentConfigNativeOTLPMarkedRemoved {
+		return nativeOTLPMarkedRemovedNotice(connectorName, user)
+	}
 	file, ok := agentConfigFiles[connectorName]
 	if !ok {
 		return "", false
@@ -457,4 +504,36 @@ func AgentConfigNotice(connectorName, user, code string) (string, bool) {
 		return "", false
 	}
 	return fmt.Sprintf("%s for user %s: the %s %s", connectorName, user, file, what), true
+}
+
+// nativeOTLPMarkedRemovedNotice words AgentConfigNativeOTLPMarkedRemoved.
+func nativeOTLPMarkedRemovedNotice(connectorName, user string) (string, bool) {
+	var file, what string
+	switch connectorName {
+	case "codex":
+		file, what = `.codex\config.toml`, "[otel] exporter tables"
+	case "claudecode":
+		file, what = `.claude\settings.json`, "OTEL_* env entries"
+	default:
+		return "", false
+	}
+	return fmt.Sprintf("%s for user %s: the managed install removed the %s of an earlier per-user DefenseClaw install from the account's %s "+
+		"(a 127.0.0.1 endpoint on a port the managed gateway does not serve, with DefenseClaw's x-defenseclaw-source and x-defenseclaw-client headers), "+
+		"so the agent no longer sends prompt telemetry to a port another account could hold; a copy of the file as it was is beside it (%s%s): "+
+		"if that exporter was the account's own collector, put it back from the copy; delete the copy to clear this notice",
+		connectorName, user, what, file, file, NativeOTLPMarkedOrphanBackupSuffix), true
+}
+
+// nativeOTLPTakeBackPendingNotice words AgentConfigNativeOTLPTakeBackPending.
+func nativeOTLPTakeBackPendingNotice(connectorName, user string) (string, bool) {
+	var file, step string
+	switch connectorName {
+	case "codex":
+		file, step = `.codex\config.toml`, "the [otel] exporter tables an earlier DefenseClaw setup wrote (a 127.0.0.1 endpoint with a DefenseClaw bearer)"
+	case "claudecode":
+		file, step = `.claude\settings.json`, "the OTEL_* entries and CLAUDE_CODE_ENABLE_TELEMETRY an earlier DefenseClaw setup wrote in its env block"
+	default:
+		return "", false
+	}
+	return fmt.Sprintf("%s for user %s: the account's %s still holds the native OTLP exporter of an earlier per-user DefenseClaw install, which the managed install could not remove (it could not read or write that file as the account, for example on a network share while the account was signed out); its DefenseClaw credential is revoked, but the agent may still send prompt telemetry to a port no DefenseClaw process holds: as that user, remove %s, then run repair (or the next ensure), which checks again and clears this warning", connectorName, user, file, step), true
 }

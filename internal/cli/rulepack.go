@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"regexp"
 	"sort"
 	"strings"
@@ -31,6 +32,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail"
+	"github.com/defenseclaw/defenseclaw/policies"
 )
 
 const rulePackWireVersion = 1
@@ -135,7 +137,19 @@ func init() {
 }
 
 func runRulePackValidate(cmd *cobra.Command, _ []string) error {
-	rp, err := guardrail.LoadRulePack(rulePackValidateDir)
+	dir := rulePackValidateDir
+	if dir == "" && !rulePackSecureClient() {
+		// Without --dir the shipped default pack is validated, the rules
+		// the gateway loads out of the box, not only the compiled-in
+		// judges and suppressions (GAP-1661).
+		shipped, cleanup, err := shippedDefaultRulePackDir()
+		if err != nil {
+			return fmt.Errorf("the embedded default rule pack could not be read: %w", err)
+		}
+		defer cleanup()
+		dir = shipped
+	}
+	rp, err := guardrail.LoadRulePack(dir)
 	if err != nil {
 		diagnostic := rulePackDiagnostic(err)
 		response := rulePackWireResponse{
@@ -334,6 +348,44 @@ func safeRulePackWireText(value string, limit int, fallback string) string {
 		}
 	}
 	return value
+}
+
+// shippedDefaultRulePackDir writes the embedded default rule pack
+// (policies/guardrail/default) to a private temporary folder and returns it
+// with its cleanup.
+func shippedDefaultRulePackDir() (string, func(), error) {
+	files, err := policyassets.Files()
+	if err != nil {
+		return "", nil, err
+	}
+	root, err := os.MkdirTemp("", "defenseclaw-rulepack-")
+	if err != nil {
+		return "", nil, err
+	}
+	cleanup := func() { _ = os.RemoveAll(root) }
+	const prefix = "guardrail/default/"
+	written := 0
+	for _, file := range files {
+		rel, ok := strings.CutPrefix(file.Path, prefix)
+		if !ok || rel == "" {
+			continue
+		}
+		target := filepath.Join(root, filepath.FromSlash(rel))
+		if err := os.MkdirAll(filepath.Dir(target), 0o700); err != nil {
+			cleanup()
+			return "", nil, err
+		}
+		if err := os.WriteFile(target, file.Data, 0o600); err != nil {
+			cleanup()
+			return "", nil, err
+		}
+		written++
+	}
+	if written == 0 {
+		cleanup()
+		return "", nil, errors.New("no embedded default rule pack files")
+	}
+	return root, cleanup, nil
 }
 
 // rulePackSecureClient checks the config source without starting the gateway.

@@ -534,6 +534,19 @@ func copilotProfileDecode(payload map[string]interface{}) HookProfileRequest {
 		CWD:           hookFirstString(payload, "cwd"),
 		ToolName:      hookFirstString(payload, "toolName"),
 	}
+	if calls, present := payload["toolCalls"]; present {
+		// The first call names the request; the gateway judges every call
+		// of a parallel envelope (copilotargs.NativeCalls).
+		native, ok := copilotargs.NativeCalls(calls)
+		if !ok || req.ToolName != "" || payload["toolArgs"] != nil || payload["toolInput"] != nil {
+			req.ToolCallUnparsed = true
+			return req
+		}
+		req.ToolName = native[0].Name
+		req.ToolArgsAuthoritative = true
+		req.ToolArgs = native[0].Args
+		return req
+	}
 	args, present := payload["toolArgs"]
 	if !present {
 		if hookFirstString(payload, "hookName") == "permissionRequest" {
@@ -1056,6 +1069,15 @@ func (c *hookOnlyConnector) checkAgentSettings(opts SetupOpts) error {
 	if err := validateCopilotOperatorSettings(opts); err != nil {
 		return refuseForAgentConfig(fmt.Errorf("%w; fix that setting, then run: defenseclaw-gateway restart", err))
 	}
+	// An independent handler the operator put in DefenseClaw's own hook file
+	// is the operator's choice too: Setup cannot repair that event without
+	// dropping it, so it refuses before it changes anything, and a gateway
+	// start keeps every other connector (GAP-2372; it stopped them all).
+	if path := c.configPath(opts); strings.TrimSpace(path) != "" {
+		if err := copilotIndependentHandler(path, c.hookCommand(opts), c.copilotHookEvents(opts)); err != nil {
+			return refuseForAgentConfig(err)
+		}
+	}
 	return nil
 }
 
@@ -1428,16 +1450,6 @@ func managedPluginInstallMarker(opts SetupOpts) string {
 	return filepath.Clean(marker)
 }
 
-// pluginOutageFailMode is the outage mode a per-user in-agent plugin bakes
-// (OutageHookFailMode): open in the default and permissive tiers, closed in
-// strict. Managed and Secure Client plugins bake "" and keep FailMode.
-func pluginOutageFailMode(opts SetupOpts) string {
-	if !perUserOutageRender(opts) {
-		return ""
-	}
-	return normalizeHookFailMode(opts.HookFailMode)
-}
-
 // renderPluginArtifact is shared by Setup and standalone verification so
 // verification compares the agent's executable plugin with the bytes Setup
 // would install for the current options.
@@ -1458,21 +1470,21 @@ func (c *hookOnlyConnector) renderPluginArtifact(opts SetupOpts) ([]byte, error)
 	failMode := setupHookFailMode(opts)
 	hookSocket, serviceUID := managedPluginHookSocket(opts)
 	rendered, err := renderTemplate(string(tmpl), templateData{
-		APIAddr:            opts.APIAddr,
-		TokenFileJS:        javaScriptStringContent(tokenPath),
-		NativePostBinaryJS: javaScriptStringContent(secureClientPluginNativePostBinary(opts)),
-		GatewayBinaryJS:    javaScriptStringContent(perUserPluginGatewayBinary(opts)),
-		HookSocketJS:       javaScriptStringContent(hookSocket),
-		ServiceUID:         serviceUID,
-		ForeignHookGuardJS: javaScriptStringContent(managedPluginForeignHookGuard(opts)),
-		InstallMarkerJS:    javaScriptStringContent(managedPluginInstallMarker(opts)),
-		LifecycleMarkerJS:  javaScriptStringContent(managedPluginLifecycleMarker(opts)),
-		ListenerProofJS:    managedPluginListenerProofJS(opts),
-		FailMode:           failMode,
-		OutageFailMode:     pluginOutageFailMode(opts),
-		Managed:            opts.ManagedEnterprise,
-		SecureClient:       shellHookSecureClientProfile(opts),
-		ConnectorName:      c.name,
+		APIAddr:             opts.APIAddr,
+		TokenFileJS:         javaScriptStringContent(tokenPath),
+		NativePostBinaryJS:  javaScriptStringContent(secureClientPluginNativePostBinary(opts)),
+		GatewayBinaryJS:     javaScriptStringContent(perUserPluginGatewayBinary(opts)),
+		HookSocketJS:        javaScriptStringContent(hookSocket),
+		ServiceUID:          serviceUID,
+		ForeignHookGuardJS:  javaScriptStringContent(managedPluginForeignHookGuard(opts)),
+		InstallMarkerJS:     javaScriptStringContent(managedPluginInstallMarker(opts)),
+		LifecycleMarkerJS:   javaScriptStringContent(managedPluginLifecycleMarker(opts)),
+		ListenerProofJS:     managedPluginListenerProofJS(opts),
+		WindowsPowerShellJS: javaScriptStringContent(windowsSystemPowerShellExe()),
+		FailMode:            failMode,
+		Managed:             opts.ManagedEnterprise,
+		SecureClient:        shellHookSecureClientProfile(opts),
+		ConnectorName:       c.name,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("%s render plugin template: %w", c.name, err)
@@ -1489,14 +1501,35 @@ func (c *hookOnlyConnector) renderPluginArtifact(opts SetupOpts) ([]byte, error)
 // ~/.local/bin gateway install.sh and install.ps1 put there; managed and
 // Secure Client plugins never use it.
 func perUserPluginGatewayBinary(opts SetupOpts) string {
-	if runtime.GOOS != "windows" || opts.ManagedEnterprise || pluginSecureClientProfile(opts) {
+	if opts.ManagedEnterprise || pluginSecureClientProfile(opts) {
 		return ""
+	}
+	if runtime.GOOS != "windows" {
+		return perUserPluginUnixGatewayBinary(userHomeDir(), defenseclawGatewayBinary())
 	}
 	launcher := canonicalNativeWindowsHookBinary()
 	if launcher == "" || !sameWindowsInstallPath(defenseclawHookBinary(), launcher) {
 		return ""
 	}
 	return canonicalNativeWindowsInstalledGatewayBinary()
+}
+
+// perUserPluginUnixGatewayBinary is the gateway a per-user OpenCode or Amp
+// plugin on Linux or macOS runs for hook-post: the gateway that renders the
+// plugin, the one the install uses, when it is not the ~/.local/bin gateway
+// the .gateway-helper record names (an install in another supported folder,
+// GAP-1881; the Windows Setup leg is GAP-1847). Empty keeps the record. The
+// plugin checks the folder, its parent and the binary belong to this account
+// and no other account can write them before it runs it.
+func perUserPluginUnixGatewayBinary(home, gateway string) string {
+	gateway = filepath.Clean(strings.TrimSpace(gateway))
+	if !filepath.IsAbs(gateway) || filepath.Base(gateway) != "defenseclaw-gateway" {
+		return ""
+	}
+	if home = strings.TrimSpace(home); home != "" && gateway == filepath.Join(filepath.Clean(home), ".local", "bin", "defenseclaw-gateway") {
+		return ""
+	}
+	return gateway
 }
 
 func secureClientPluginNativePostBinary(opts SetupOpts) string {
@@ -1557,6 +1590,11 @@ func ManagedPluginArtifactDrift(conn Connector, opts SetupOpts) (string, error) 
 // sidecar. The managed-file backup lets Teardown restore a prior file only
 // when it is unchanged since Setup.
 func (c *hookOnlyConnector) setupPluginArtifact(opts SetupOpts) error {
+	if !opts.ManagedEnterprise {
+		if err := writePerUserGatewayHelperRecord(filepath.Join(opts.DataDir, "hooks")); err != nil {
+			return fmt.Errorf("%s install helper record: %w", c.name, err)
+		}
+	}
 	renderedBody, err := c.renderPluginArtifact(opts)
 	if err != nil {
 		return err
@@ -1840,6 +1878,10 @@ func (c *hookOnlyConnector) teardown(ctx context.Context, opts SetupOpts, hermes
 		if err := removeCursorHookArtifacts(opts); err != nil {
 			errs = append(errs, fmt.Sprintf("remove Cursor hook artifacts: %v", err))
 		}
+	} else if c.name == "antigravity" {
+		if err := removeAntigravityHookScript(opts, c.scriptName); err != nil {
+			errs = append(errs, fmt.Sprintf("remove the Antigravity hook script: %v", err))
+		}
 	} else if err := writeDisabledHookTombstone(opts, c.scriptName, c.name); err != nil {
 		errs = append(errs, fmt.Sprintf("disabled hook tombstone: %v", err))
 	}
@@ -2044,7 +2086,7 @@ func (c *hookOnlyConnector) removeHermesHomeEntries(opts SetupOpts, configPath s
 		}
 	}
 	if approvals {
-		if err := removeHermesOwnedApprovals(filepath.Join(filepath.Dir(configPath), hermesAllowlistFileName), command, nil); err != nil {
+		if err := removeHermesOwnedApprovals(filepath.Join(filepath.Dir(configPath), hermesAllowlistFileName), command, nil, managedStandaloneRender(opts)); err != nil {
 			return fmt.Errorf("remove shell hook approvals: %w", err)
 		}
 	}
@@ -2074,6 +2116,30 @@ func hermesHomeHoldsOwnedEntries(configPath, hookScript, command string) (hooks,
 		}
 	}
 	return hooks, approvals, nil
+}
+
+// removeAntigravityHookScript removes the hook script teardown leaves no use
+// for (GAP-2335). Antigravity blocks only on the decision a hook prints: a
+// hook command that cannot start gives no decision, and Antigravity runs the
+// call, which is what the exit-0 tombstone did too. So a running Antigravity
+// that still calls the removed path keeps working without a stub. A file without the DefenseClaw marker, or one teardown
+// cannot remove, gets the disabled tombstone as before, so a foreign or
+// locked file is never left forwarding stale payloads.
+func removeAntigravityHookScript(opts SetupOpts, scriptName string) error {
+	path := filepath.Join(opts.DataDir, "hooks", scriptName)
+	if _, err := os.Lstat(path); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		return writeDisabledHookTombstone(opts, scriptName, "antigravity")
+	}
+	if !scriptHasMarker(path) {
+		return writeDisabledHookTombstone(opts, scriptName, "antigravity")
+	}
+	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return writeDisabledHookTombstone(opts, scriptName, "antigravity")
+	}
+	return nil
 }
 
 // removeCursorHookArtifacts removes only files that still carry the
@@ -4197,6 +4263,7 @@ func teardownHermesAllowlist(opts SetupOpts, configPath, command string) error {
 	if err := validateHermesWindowsConfigPath(configPath); err != nil {
 		return err
 	}
+	retireManagedConsent := managedStandaloneRender(opts)
 	logicalName := hermesAllowlistLogicalName
 	path := filepath.Join(filepath.Dir(configPath), hermesAllowlistFileName)
 	backup, backupErr := loadManagedFileBackupForTransform(opts.DataDir, "hermes", logicalName, path)
@@ -4206,7 +4273,7 @@ func teardownHermesAllowlist(opts SetupOpts, configPath, command string) error {
 	// Approvals that carry DefenseClaw's ownership marker are DefenseClaw's
 	// even in the copy Setup captured (a file put back from an earlier
 	// enrollment holds them), so that copy is restored only without them.
-	if backup == nil || !hermesAllowlistHoldsOwnedApprovals(backup.PristineBytes) {
+	if !retireManagedConsent && (backup == nil || !hermesAllowlistHoldsOwnedApprovals(backup.PristineBytes)) {
 		restored, err := restoreManagedFileBackupIfUnchanged(opts.DataDir, "hermes", logicalName, path)
 		if err != nil {
 			return err
@@ -4227,7 +4294,7 @@ func teardownHermesAllowlist(opts SetupOpts, configPath, command string) error {
 			return err
 		}
 	}
-	if err := removeHermesOwnedApprovals(path, command, backup); err != nil {
+	if err := removeHermesOwnedApprovals(path, command, backup, retireManagedConsent); err != nil {
 		return err
 	}
 	discardManagedFileBackup(opts.DataDir, "hermes", logicalName)
@@ -4237,7 +4304,9 @@ func teardownHermesAllowlist(opts SetupOpts, configPath, command string) error {
 // removeHermesOwnedApprovals removes DefenseClaw's approvals of command
 // from the Hermes allowlist at path. The approvals the copy Setup captured
 // (backup) held go back as Hermes wrote them.
-func removeHermesOwnedApprovals(path, command string, backup *managedFileBackup) error {
+// retireManagedConsent (a standalone managed uninstall) also removes the
+// consent for the exact hook a supported upgrade retained (GAP-0366).
+func removeHermesOwnedApprovals(path, command string, backup *managedFileBackup, retireManagedConsent bool) error {
 	document, err := readHermesAllowlist(path)
 	if err != nil {
 		return err
@@ -4275,6 +4344,13 @@ func removeHermesOwnedApprovals(path, command string, backup *managedFileBackup)
 		owned, _ := entry[hermesAllowlistOwnerField].(bool)
 		_, requiredEvent := events[event]
 		pair := event + "\x00" + entryCommand
+		if retireManagedConsent && requiredEvent && entryCommand == command &&
+			(owned || hermesConsentForCommand(entry, command)) {
+			// A standalone uninstall removes the product, including consent for
+			// its exact hook retained by a supported upgrade. Restoring that
+			// consent would leave a registration pointing into removed state.
+			continue
+		}
 		if owned && requiredEvent && !pristinePairs[pair] {
 			if entryCommand != command {
 				return fmt.Errorf("Hermes allowlist entry %s has a tampered DefenseClaw command; refusing non-exact cleanup", event) //nolint:staticcheck // Preserve the product or platform name in this operator diagnostic.
@@ -5273,20 +5349,14 @@ func patchCopilotHooksForOS(path, hookScript string, events []string, goos strin
 			return fmt.Errorf("copilot: unsupported hook event %q in resolved contract", event)
 		}
 		selected[event] = true
-		// Copilot runs every entry in an event array. An independent entry in
-		// this file must be moved before Setup can safely restore the current
-		// hook. Check all entries before writing any event back to disk.
-		if raw, present := hooks[event]; present {
-			entries, ok := raw.([]interface{})
-			if !ok {
-				entries = []interface{}{raw}
-			}
-			for _, entry := range entries {
-				if !copilotBoundEventOwnsHook(entry, hookScript) {
-					return fmt.Errorf("copilot: cannot repair event %q in %s: an independent or unrecognized handler is present; move it to another hook file in the same hooks directory, then run defenseclaw setup copilot again", event, path)
-				}
-			}
-		}
+	}
+	// Copilot runs every entry in an event array. An independent entry in
+	// this file must be moved before Setup can safely restore the current
+	// hook. Check all entries before writing any event back to disk.
+	if err := copilotIndependentHandlerIn(path, hooks, hookScript, events); err != nil {
+		return err
+	}
+	for _, event := range events {
 		hooks[event] = []interface{}{copilotHookRegistration(goos, event, hookScript)}
 	}
 	// Remove DefenseClaw's handler from events outside this contract too. An
@@ -5314,6 +5384,43 @@ func patchCopilotHooksForOS(path, hookScript string, events []string, goos strin
 // A bound event may be replaced only when every executable command in its
 // entry is a known DefenseClaw form. Do not claim a combined command or a
 // nested handler merely because it also mentions our script.
+// copilotIndependentHandler reports an entry DefenseClaw does not own on one
+// of events in the Copilot hook file at path (copilotIndependentHandlerIn).
+// A file that does not exist has none; one that cannot be read is left to
+// Setup, which reports it.
+func copilotIndependentHandler(path, hookScript string, events []string) error {
+	cfg, err := readJSONObject(path)
+	if err != nil {
+		return nil
+	}
+	hooks, _ := cfg["hooks"].(map[string]interface{})
+	return copilotIndependentHandlerIn(path, hooks, hookScript, events)
+}
+
+// copilotIndependentHandlerIn reports the first entry of events in hooks
+// that DefenseClaw does not own: Setup would drop it to restore the event.
+// The text names the move, which is the repair (setup cannot replace it).
+func copilotIndependentHandlerIn(path string, hooks map[string]interface{}, hookScript string, events []string) error {
+	for _, event := range events {
+		raw, present := hooks[event]
+		if !present {
+			continue
+		}
+		entries, ok := raw.([]interface{})
+		if !ok {
+			entries = []interface{}{raw}
+		}
+		for _, entry := range entries {
+			if !copilotBoundEventOwnsHook(entry, hookScript) {
+				return fmt.Errorf("copilot: cannot repair event %q in %s: an independent or unrecognized handler is present; "+
+					"move it to another hook file in the same hooks directory (Copilot reads every file there), "+
+					"then run: defenseclaw setup copilot --yes", event, path)
+			}
+		}
+	}
+	return nil
+}
+
 func copilotBoundEventOwnsHook(raw interface{}, hookScript string) bool {
 	if copilotLiveOperatorLookalike(raw, hookScript) {
 		return false
@@ -6224,6 +6331,9 @@ func managedHookCommandEntry(raw interface{}, hookScript string) bool {
 			}
 		}
 		if isCopilotShellHookScript(hookScript) && isCopilotEventBoundShellCommand(command, hookScript) {
+			return true
+		}
+		if isCopilotShellHookScript(hookScript) && copilotManagedShellCommand(command, hookScript) {
 			return true
 		}
 	}

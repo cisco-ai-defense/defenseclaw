@@ -86,7 +86,9 @@ func TestSharedInspectHookHomeUnavailableReadsTheInstalledMode(t *testing.T) {
 						if err == nil {
 							t.Fatalf("per-user hook allowed a missing home:\n%s", output)
 						}
-						if !strings.Contains(string(output), "hook home unavailable") {
+						// A missing DEFENSECLAW_HOME keeps the installed folder and
+						// reaches the (absent) gateway, which closes (GAP-1256).
+						if home == "disabled" && !strings.Contains(string(output), "hook home unavailable") {
 							t.Fatalf("the block did not come from the unavailable-home exit:\n%s", output)
 						}
 						if home == "missing" {

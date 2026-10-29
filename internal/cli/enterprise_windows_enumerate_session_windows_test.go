@@ -134,3 +134,61 @@ func TestEnterpriseWindowsEnumerateIntervalRunsACycleOnSignIn(t *testing.T) {
 		t.Fatalf("two sign-ins armed %d extra windows, want 0", extra)
 	}
 }
+
+// A profile walk that outlasted its share of a cycle and then finished runs
+// one extra cycle at once, so the account is not left NOT COVERED until the
+// next interval tick (GAP-2002).
+func TestEnterpriseWindowsEnumerateIntervalRunsACycleWhenASlowProfileScanFinishes(t *testing.T) {
+	manifest := filepath.Join(t.TempDir(), "targets.yaml")
+	previousConfig := enterpriseWindowsEnumerateConfigLoader
+	previousEnumerator := enterpriseWindowsEnumerateProfileEnumerator
+	previousWriter := enterpriseWindowsEnumerateManifestWriter
+	previousLate := enterpriseWindowsEnumeratePrivateWalkLate
+	t.Cleanup(func() {
+		enterpriseWindowsEnumerateConfigLoader = previousConfig
+		enterpriseWindowsEnumerateProfileEnumerator = previousEnumerator
+		enterpriseWindowsEnumerateManifestWriter = previousWriter
+		enterpriseWindowsEnumeratePrivateWalkLate = previousLate
+	})
+	late := make(chan struct{}, 1)
+	enterpriseWindowsEnumeratePrivateWalkLate = func() <-chan struct{} { return late }
+	enterpriseWindowsEnumerateConfigLoader = func() (*config.Config, error) {
+		return &config.Config{DeploymentMode: managed.DeploymentModeManagedEnterprise}, nil
+	}
+	var cycles atomic.Int32
+	started := make(chan int32, 8)
+	enterpriseWindowsEnumerateProfileEnumerator = func(context.Context, *config.Config, enterprisehooks.EnumerateOptions) (enterprisehooks.Manifest, error) {
+		started <- cycles.Add(1)
+		return enterprisehooks.Manifest{Version: 1, Targets: []enterprisehooks.ManifestTarget{}}, nil
+	}
+	enterpriseWindowsEnumerateManifestWriter = func(string, enterprisehooks.Manifest) (bool, error) { return false, nil }
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		done <- runEnterpriseWindowsEnumerateInterval(ctx, new(bytes.Buffer), &enterpriseWindowsEnumerateOptions{
+			manifestPath: manifest,
+			interval:     time.Hour,
+			initialDelay: time.Millisecond,
+		}, manifest)
+	}()
+	if n := <-started; n != 1 {
+		t.Fatalf("first cycle = %d, want the initial cycle", n)
+	}
+	late <- struct{}{}
+	select {
+	case n := <-started:
+		if n != 2 {
+			t.Fatalf("cycle after the slow scan finished = %d, want 2", n)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("a finished slow profile scan did not run a cycle before the interval tick")
+	}
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatalf("interval loop: %v", err)
+	}
+	if got := cycles.Load(); got != 2 {
+		t.Fatalf("cycles = %d, want 2", got)
+	}
+}

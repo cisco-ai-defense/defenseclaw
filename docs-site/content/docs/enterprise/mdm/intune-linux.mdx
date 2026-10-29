@@ -106,7 +106,7 @@ In the Intune admin center: **Devices** > **Manage devices** > **Configuration**
 | --- | --- |
 | Execution context | **Root**. The Intune daemon still needs authorization for `com.microsoft.intune.actions.ConfigureDevice` (polkit rule below) |
 | Execution frequency | **Every 1 day**. With `DC_SOURCE_URL` set, every run downloads the artifact before it compares versions |
-| Execution retries | **No retries**. The wrapper itself retries exit `75` (busy) up to three times, 10 seconds apart. Intune may count a cached retry inside its frequency window as successful without rerunning the script |
+| Execution retries | **No retries**. The wrapper itself makes up to three attempts on exit `75` (busy): the first run and two retries, 10 seconds apart. Intune may count a cached retry inside its frequency window as successful without rerunning the script |
 | Execution script | Your edited copy of `defenseclaw-enterprise.sh` |
 
 Assign it to device groups. A busy package manager, for example during unattended
@@ -175,6 +175,8 @@ sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise secret status
 ```
 
 Delete the source file afterwards. Storing the key re-runs `ensure`, which applies it.
+
+When you deliver a credential with a bundle, the script first writes what it replaces to a root-only journal (`/var/lib/defenseclaw-mdm/rotation` on Linux, `/var/db/defenseclaw-mdm/rotation` on macOS). If the bundle does not apply, it puts the earlier value back, or removes a credential it added. If the run is stopped before it finishes, the next ensure does that before it changes anything. The new value stays only when the gateway reports that a bundle confirmed since uses it. If the gateway refuses the put-back for another reason, the journal entry stays, the wrapper log says why, and the script rotates no other credential until it is resolved.
 
 ## Change the config, upgrade and roll back
 

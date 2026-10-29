@@ -7,6 +7,7 @@ package connector
 
 import (
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -19,18 +20,106 @@ import (
 const openCodeOutageHarness = `
 import { pathToFileURL } from "node:url";
 const toasts = [];
+const durations = [];
+let attempts = 0;
 const href = pathToFileURL(process.argv[1]).href;
-const plugin = await (await import(href)).DefenseClaw({ directory: "", client: { tui: { showToast: async (arg) => { toasts.push(arg && arg.body ? arg.body.message : ""); return true; } } } });
+const plugin = await (await import(href)).DefenseClaw({ directory: "", client: { tui: { showToast: async (arg) => {
+  attempts++;
+  if (process.env.DC_TOAST_FAIL_FIRST === "1" && attempts === 1) return { error: { message: "TUI unavailable" } };
+  toasts.push(arg && arg.body ? arg.body.message : "");
+  durations.push(arg && arg.body ? arg.body.duration : 0);
+  return { data: true };
+} } } });
 await plugin.config({ plugin_origins: [{ spec: href }], mcp: {} });
 let verdict = "allow";
 try {
   await plugin["tool.execute.before"]({ tool: "bash", sessionID: "S", messageID: "M", callID: "C" }, { args: { command: "echo marker" } });
+  if (process.env.DC_TWO_CALLS === "1") {
+    await plugin["tool.execute.before"]({ tool: "bash", sessionID: "S", messageID: "M", callID: "C2" }, { args: { command: "echo marker" } });
+  }
 } catch (error) {
   verdict = "block:" + String(error && error.message || error);
 }
+
+
 await new Promise((resolve) => setTimeout(resolve, 50));
-console.log(JSON.stringify({ verdict, notices: toasts }));
+console.log(JSON.stringify({ verdict, notices: toasts, durations, attempts }));
 `
+
+func TestOpenCodeOutageToastOncePerSessionAndAuditEveryCall(t *testing.T) {
+	nodeForTest(t)
+	home := t.TempDir()
+	binDir := filepath.Join(home, ".local", "bin")
+	if err := os.MkdirAll(binDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	fake := "#!/bin/sh\nif [ \"$1\" = hook-post ]; then echo 'defenseclaw-hook-post: dial tcp 127.0.0.1:1: connectex: refused' >&2; exit 7; fi\nif [ \"$1\" = hook-outage-mode ]; then printf 'open\\n'; exit 0; fi\nexit 1\n"
+	if err := os.WriteFile(filepath.Join(binDir, "defenseclaw-gateway"), []byte(fake), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	dataDir := filepath.Join(home, ".defenseclaw")
+	writeOutageTierConfig(t, dataDir, outageDefaultTierConfig)
+	token := filepath.Join(dataDir, "hooks", ".hook-opencode.token")
+	if err := os.MkdirAll(filepath.Dir(token), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(token, []byte(strings.Repeat("a", 64)+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(filepath.Dir(token), ".gateway-helper"), []byte(filepath.Join(binDir, "defenseclaw-gateway")+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	body := renderPluginAssetForTest(t, "opencode-plugin.js", templateData{APIAddr: freeLoopbackAddrForOutageTest(t),
+		TokenFileJS: javaScriptStringContent(token), FailMode: "closed"})
+	path := filepath.Join(home, "defenseclaw.mjs")
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, failFirst := range []bool{false, true} {
+		t.Run(map[bool]string{false: "delivered", true: "retry rejected toast"}[failFirst], func(t *testing.T) {
+			cmd := exec.Command(nodeForTest(t), "--input-type=module", "-e", openCodeOutageHarness, path)
+			cmd.Env = append(sanitizedTestEnv(), "HOME="+home, "DC_TWO_CALLS=1", "DEFENSECLAW_GATEWAY_AUTOSTART=0")
+			if failFirst {
+				cmd.Env = append(cmd.Env, "DC_TOAST_FAIL_FIRST=1")
+			}
+			// The helper's refused-connection diagnostics stay out of the
+			// agent's terminal: the one warning is all the user sees (GAP-1314).
+			var stderr strings.Builder
+			cmd.Stderr = &stderr
+			out, err := cmd.Output()
+			if err != nil {
+				t.Fatalf("node: %v\n%s", err, out)
+			}
+			if strings.Contains(stderr.String(), "defenseclaw-hook-post") {
+				t.Fatalf("the helper's diagnostics reached the agent's terminal:\n%s", stderr.String())
+			}
+			var result struct {
+				Verdict   string   `json:"verdict"`
+				Notices   []string `json:"notices"`
+				Durations []int    `json:"durations"`
+				Attempts  int      `json:"attempts"`
+			}
+			if err := json.Unmarshal(out, &result); err != nil {
+				t.Fatalf("harness output %q: %v", out, err)
+			}
+			wantAttempts := 1
+			if failFirst {
+				wantAttempts = 2
+			}
+			if result.Verdict != "allow" || len(result.Notices) != 1 || result.Attempts != wantAttempts ||
+				len(result.Durations) != 1 || result.Durations[0] != 15000 ||
+				!strings.Contains(result.Notices[0], "defenseclaw-gateway start") {
+				t.Fatalf("one visible warning for two unchecked calls: %+v", result)
+			}
+			if rows := hookFailureRecords(t, dataDir); len(rows) != 2 || rows[0]["call_id"] != "C" || rows[1]["call_id"] != "C2" {
+				t.Fatalf("two correlated audit rows: %+v", rows)
+			}
+			if err := os.Remove(filepath.Join(dataDir, "logs", "hook-failures.jsonl")); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
 
 const ampOutageHarness = `
 import { pathToFileURL } from "node:url";
@@ -45,11 +134,205 @@ const amp = {
   on: (event, handler) => { handlers.set(event, handler); return { unsubscribe() {} }; },
 };
 (await import(pathToFileURL(process.argv[1]).href)).default(amp);
-const ctx = { thread: { agent: async () => ({ definition: { kind: "builtin-agent", mode: "medium" } }) }, ui: { confirm: async () => true, notify: async (message) => { notices.push(message); } } };
+const ctx = { thread: { id: "S", agent: async () => ({ definition: { kind: "builtin-agent", mode: "medium" } }),
+  append: async messages => { notices.push(...messages.map(message => message.content)); } },
+  ui: { confirm: async () => true, notify: async (message) => { notices.push(message); } } };
 const call = await handlers.get("tool.call")({ thread: { id: "S" }, toolUseID: "C", tool: "Bash", input: { command: "echo marker" } }, ctx);
 const verdict = call.action === "allow" ? "allow" : "block:" + (call.message || call.action);
 console.log(JSON.stringify({ verdict, notices }));
 `
+
+const ampBackgroundOutageHarness = `
+import { pathToFileURL } from "node:url";
+globalThis.Bun = { file: () => ({ slice: () => ({ text: async () => "a".repeat(64) + "\n" }) }) };
+const handlers = new Map();
+const notices = [];
+const appended = [];
+const amp = {
+  system: { workspaceRoot: "", executor: { kind: "local" }, user: {} },
+  helpers: { filePathFromURI: value => value, isPluginUINotAvailableError: () => false },
+  activeThread: { current: { id: "OTHER" } },
+  ui: { notify: async message => { notices.push(message); } },
+  on: (event, handler) => { handlers.set(event, handler); return { unsubscribe() {} }; },
+};
+(await import(pathToFileURL(process.argv[1]).href)).default(amp);
+const ctx = {
+  thread: { id: "S", agent: async () => ({ definition: { kind: "builtin-agent", mode: "medium" } }),
+    append: async messages => { appended.push(...messages); } },
+  ui: { confirm: async () => true, notify: async message => { notices.push(message); } },
+};
+const event = { thread: { id: "S" }, toolUseID: "C", tool: "Bash", input: { command: "echo marker" } };
+const call = await handlers.get("tool.call")(event, ctx);
+const result = await handlers.get("tool.result")({ ...event, output: "marker", status: "success", error: "" }, ctx);
+console.log(JSON.stringify({ call, result: result ?? null, notices, appended }));
+`
+
+func TestAmpBackgroundOutageWarnsAffectedThreadForCallAndResult(t *testing.T) {
+	nodeForTest(t)
+	home := t.TempDir()
+	binDir := filepath.Join(home, ".local", "bin")
+	if err := os.MkdirAll(binDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	fake := "#!/bin/sh\nif [ \"$1\" = hook-post ]; then exit 7; fi\nif [ \"$1\" = hook-outage-mode ]; then printf 'open\\n'; exit 0; fi\nexit 1\n"
+	if err := os.WriteFile(filepath.Join(binDir, "defenseclaw-gateway"), []byte(fake), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	dataDir := filepath.Join(home, ".defenseclaw")
+	writeOutageTierConfig(t, dataDir, outageDefaultTierConfig)
+	token := filepath.Join(dataDir, "hooks", ".hook-amp.token")
+	if err := os.MkdirAll(filepath.Dir(token), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(token, []byte(strings.Repeat("a", 64)+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	body := renderPluginAssetForTest(t, "amp-plugin.ts", templateData{APIAddr: freeLoopbackAddrForOutageTest(t),
+		TokenFileJS: javaScriptStringContent(token), FailMode: "closed"})
+	path := filepath.Join(home, "defenseclaw.mts")
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command(nodeForTest(t), "--input-type=module", "-e", ampBackgroundOutageHarness, path)
+	cmd.Env = append(sanitizedTestEnv(), "HOME="+home, "DEFENSECLAW_GATEWAY_AUTOSTART=0")
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("node: %v\n%s", err, out)
+	}
+	var result struct {
+		Call struct {
+			Action string `json:"action"`
+		} `json:"call"`
+		Result   any      `json:"result"`
+		Notices  []string `json:"notices"`
+		Appended []struct {
+			Type    string `json:"type"`
+			Content string `json:"content"`
+		} `json:"appended"`
+	}
+	if err := json.Unmarshal(out, &result); err != nil {
+		t.Fatalf("harness output %q: %v", out, err)
+	}
+	if result.Call.Action != "allow" || result.Result != nil || len(result.Notices) != 1 || len(result.Appended) != 0 {
+		t.Fatalf("unchecked background call/result lacked one UI warning or injected a model turn: %+v", result)
+	}
+	if !strings.Contains(result.Notices[0], "fail mode open for an outage") ||
+		!strings.Contains(result.Notices[0], "defenseclaw-gateway start") {
+		t.Fatalf("background warning missing cause or recovery step: %+v", result.Notices)
+	}
+	if rows := hookFailureRecords(t, dataDir); len(rows) != 2 {
+		t.Fatalf("background call/result audit rows = %+v, want two", rows)
+	}
+}
+
+// Every command and target key of an oversized plugin call reaches the
+// gateway's bounded review, before or after a long value (Amp Bash "cmd",
+// OpenCode "command", a write's file path after its content), and every
+// review is marked uninspected.
+func TestPerUserPluginOversizedProtectedPrefixGetsGatewayBlock(t *testing.T) {
+	nodeForTest(t)
+	const pad = `"x".repeat(1100000)`
+	// Loop round 2: context fields that use up the context-head budget, and
+	// command values that together exceed the whole-value budget.
+	const notes = `...Object.fromEntries(Array.from({ length: 40 }, (_, i) => ["note" + i, "z".repeat(9000)])), `
+	const overBudget = `patch: "q".repeat(600000), diff: "r".repeat(400000), `
+	for _, plugin := range []struct {
+		asset, name, connector, harness, input string
+		// targetCut: the review cannot keep the target whole. Every review
+		// is marked oversize_command_not_inspected (loop round 2 review of
+		// 06bb83dd: a review never carries the file text whole).
+		targetCut bool
+	}{
+		{"opencode-plugin.js", "defenseclaw.mjs", "opencode", openCodeOutageHarness, `command: "cat /home/user/.ssh/authorized_keys " + ` + pad, true},
+		{"opencode-plugin.js", "defenseclaw.mjs", "opencode", openCodeOutageHarness, `description: ` + pad + `, command: "cat /home/user/.ssh/authorized_keys"`, false},
+		{"opencode-plugin.js", "defenseclaw.mjs", "opencode", openCodeOutageHarness, `content: ` + pad + `, filePath: "/home/user/.ssh/authorized_keys"`, false},
+		{"opencode-plugin.js", "defenseclaw.mjs", "opencode", openCodeOutageHarness, `description: ` + pad + `, ` + notes + `command: "cat /home/user/.ssh/authorized_keys"`, false},
+		{"opencode-plugin.js", "defenseclaw.mjs", "opencode", openCodeOutageHarness, overBudget + notes + `command: "cat /home/user/.ssh/authorized_keys"`, true},
+		{"amp-plugin.ts", "defenseclaw.mts", "amp", ampOutageHarness, `command: "cat /home/user/.ssh/authorized_keys " + ` + pad, true},
+		{"amp-plugin.ts", "defenseclaw.mts", "amp", ampOutageHarness, `cmd: "cat /home/user/.ssh/authorized_keys", description: ` + pad, false},
+		{"amp-plugin.ts", "defenseclaw.mts", "amp", ampOutageHarness, `content: ` + pad + `, path: "/home/user/.ssh/authorized_keys"`, false},
+		{"amp-plugin.ts", "defenseclaw.mts", "amp", ampOutageHarness, `description: ` + pad + `, ` + notes + `cmd: "cat /home/user/.ssh/authorized_keys"`, false},
+		{"amp-plugin.ts", "defenseclaw.mts", "amp", ampOutageHarness, overBudget + notes + `cmd: "cat /home/user/.ssh/authorized_keys"`, true},
+		// Loop round 1 review of 06bb83dd: any argument key, past a head or
+		// after notes that spent the head budget, is kept whole.
+		{"opencode-plugin.js", "defenseclaw.mjs", "opencode", openCodeOutageHarness, `content: ` + pad + `, location: "a".repeat(20000) + "/home/user/.ssh/authorized_keys"`, false},
+		{"opencode-plugin.js", "defenseclaw.mjs", "opencode", openCodeOutageHarness, `content: ` + pad + `, ` + notes + `location: "/home/user/.ssh/authorized_keys"`, false},
+		{"amp-plugin.ts", "defenseclaw.mts", "amp", ampOutageHarness, `content: ` + pad + `, location: "a".repeat(20000) + "/home/user/.ssh/authorized_keys"`, false},
+		{"amp-plugin.ts", "defenseclaw.mts", "amp", ampOutageHarness, `content: ` + pad + `, ` + notes + `location: "/home/user/.ssh/authorized_keys"`, false},
+		// A review over the native helper's 900 KiB body cap failed closed.
+		{"opencode-plugin.js", "defenseclaw.mjs", "opencode", openCodeOutageHarness, `content: ` + pad + `, command: "a".repeat(905000) + " cat /home/user/.ssh/authorized_keys"`, true},
+		{"amp-plugin.ts", "defenseclaw.mts", "amp", ampOutageHarness, `content: ` + pad + `, command: "a".repeat(905000) + " cat /home/user/.ssh/authorized_keys"`, true},
+	} {
+		name := strings.SplitN(plugin.input, ":", 2)[0]
+		if strings.HasPrefix(plugin.input, overBudget) {
+			name = "over budget"
+		} else if strings.Contains(plugin.input, "note") {
+			name += " then notes"
+		}
+		if strings.Contains(plugin.input, "location:") {
+			name += " then a long location"
+		}
+		if strings.Contains(plugin.input, "905000") {
+			name += " over the transport cap"
+		}
+		t.Run(plugin.connector+" "+name, func(t *testing.T) {
+			var request []byte
+			// The gateway (action mode) blocks a request that names the
+			// protected target or is marked uninspected.
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				request, _ = io.ReadAll(r.Body)
+				w.Header().Set("Content-Type", "application/json")
+				if !strings.Contains(string(request), "/home/user/.ssh/authorized_keys") &&
+					!strings.Contains(string(request), `"oversize_command_not_inspected":true`) {
+					_, _ = io.WriteString(w, `{"action":"allow","raw_action":"allow","mode":"action","hook_output":{"decision":"allow"}}`)
+					return
+				}
+				_, _ = io.WriteString(w, `{"action":"block","mode":"action","hook_output":{"decision":"deny","reason":"protected target"}}`)
+			}))
+			t.Cleanup(server.Close)
+			home := t.TempDir()
+			installNativeGatewayForHookTest(t, home)
+			dataDir := filepath.Join(home, ".defenseclaw")
+			token := filepath.Join(dataDir, "hooks", ".hook-"+plugin.connector+".token")
+			if err := os.MkdirAll(filepath.Dir(token), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(token, []byte(strings.Repeat("a", 64)+"\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			// The plugin reads its tier at call time from this data directory's
+			// config (fix/r104-oss-outage-open); the bounded review is the
+			// default tier's answer to an oversized call.
+			writeOutageTierConfig(t, dataDir, outageDefaultTierConfig)
+			body := renderPluginAssetForTest(t, plugin.asset, templateData{
+				APIAddr: strings.TrimPrefix(server.URL, "http://"), TokenFileJS: javaScriptStringContent(token),
+				FailMode: "closed",
+			})
+			path := filepath.Join(home, plugin.name)
+			if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			harness := strings.ReplaceAll(plugin.harness, `command: "echo marker"`, plugin.input)
+			cmd := exec.Command(nodeForTest(t), "--input-type=module", "-e", harness, path)
+			cmd.Env = append(sanitizedTestEnv(), "HOME="+home, "DEFENSECLAW_GATEWAY_AUTOSTART=0")
+			out, err := cmd.Output()
+			if err != nil {
+				t.Fatalf("node: %v\n%s", err, out)
+			}
+			var result struct {
+				Verdict string `json:"verdict"`
+			}
+			if err := json.Unmarshal([]byte(strings.TrimSpace(string(out))), &result); err != nil {
+				t.Fatal(err)
+			}
+			marked := strings.Contains(string(request), `"oversize_command_not_inspected":true`)
+			if !strings.HasPrefix(result.Verdict, "block:") || !strings.Contains(string(request), `"bounded_prefix_review":true`) || !marked ||
+				!plugin.targetCut && !strings.Contains(string(request), "/home/user/.ssh/authorized_keys") {
+				t.Fatalf("gateway block=%q marked=%v request=%.300q", result.Verdict, marked, request)
+			}
+		})
+	}
+}
 
 // oss-outage-open for the in-agent plugins: a per-user OpenCode or Amp plugin
 // in the default or permissive tier lets a tool call run with one warning and
@@ -83,13 +366,17 @@ func TestPerUserPluginOutageOpenOnlyForAnOutage(t *testing.T) {
 		{"opencode-plugin.js", "defenseclaw.mjs", "opencode", openCodeOutageHarness},
 		{"amp-plugin.ts", "defenseclaw.mts", "amp", ampOutageHarness},
 	} {
-		for _, tier := range []struct{ name, mode string }{{"default or permissive", "open"}, {"strict", "closed"}} {
+		for _, tier := range []struct{ name, mode, config string }{
+			{"default or permissive", "open", outageDefaultTierConfig},
+			{"strict", "closed", outageStrictTierConfig},
+		} {
 			for _, sc := range scenarios {
 				t.Run(plugin.connector+"/"+tier.name+"/"+sc.name, func(t *testing.T) {
 					t.Parallel()
 					home := t.TempDir()
 					installNativeGatewayForHookTest(t, home)
 					dataDir := filepath.Join(home, ".defenseclaw")
+					writeOutageTierConfig(t, dataDir, tier.config)
 					token := filepath.Join(dataDir, "hooks", ".hook-"+plugin.connector+".token")
 					if err := os.MkdirAll(filepath.Dir(token), 0o700); err != nil {
 						t.Fatal(err)
@@ -111,13 +398,13 @@ func TestPerUserPluginOutageOpenOnlyForAnOutage(t *testing.T) {
 						}
 					}
 					body := renderPluginAssetForTest(t, plugin.asset, templateData{APIAddr: addr, TokenFileJS: javaScriptStringContent(token),
-						FailMode: "closed", OutageFailMode: tier.mode})
+						FailMode: "closed"})
 					path := filepath.Join(home, plugin.name)
 					if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
 						t.Fatal(err)
 					}
 					cmd := exec.Command(nodeForTest(t), "--input-type=module", "-e", plugin.harness, path)
-					cmd.Env = append(sanitizedTestEnv(), "HOME="+home)
+					cmd.Env = append(sanitizedTestEnv(), "HOME="+home, "DEFENSECLAW_GATEWAY_AUTOSTART=0")
 					out, err := cmd.Output()
 					if err != nil {
 						t.Fatalf("node: %v\n%s", err, out)
@@ -154,6 +441,140 @@ func TestPerUserPluginOutageOpenOnlyForAnOutage(t *testing.T) {
 					}
 				})
 			}
+		}
+	}
+}
+
+// The current runtime config decides a plugin's outage, even when the last
+// render recorded a different tier. A strict pack or a config this release
+// cannot read closes it; the default pack opens it with one warning and one
+// audit row.
+func TestPerUserPluginOutageFollowsTheConfigNow(t *testing.T) {
+	nodeForTest(t)
+	for _, plugin := range []struct{ asset, name, connector, harness string }{
+		{"opencode-plugin.js", "defenseclaw.mjs", "opencode", openCodeOutageHarness},
+		{"amp-plugin.ts", "defenseclaw.mts", "amp", ampOutageHarness},
+	} {
+		for _, tc := range []struct {
+			name, config string
+			opens        bool
+		}{
+			{"default pack after a strict render", outageDefaultTierConfig, true},
+			{"strict pack", outageStrictTierConfig, false},
+			{"strict pack for this connector", outageDefaultTierConfig + "  connectors:\n    " + plugin.connector + ":\n      rule_pack: strict\n", false},
+			{"no config", "", false},
+			{"config this release cannot read", "config_version: 9\nguardrail: [\n", false},
+		} {
+			t.Run(plugin.connector+"/"+tc.name, func(t *testing.T) {
+				t.Parallel()
+				home := t.TempDir()
+				installNativeGatewayForHookTest(t, home)
+				dataDir := filepath.Join(home, ".defenseclaw")
+				token := filepath.Join(dataDir, "hooks", ".hook-"+plugin.connector+".token")
+				if err := os.MkdirAll(filepath.Dir(token), 0o700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(token, []byte(strings.Repeat("a", 64)+"\n"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				writeOutageTierConfig(t, dataDir, tc.config)
+				// A strict render can remain installed when the gateway is stopped.
+				body := renderPluginAssetForTest(t, plugin.asset, templateData{APIAddr: freeLoopbackAddrForOutageTest(t),
+					TokenFileJS: javaScriptStringContent(token), FailMode: "closed"})
+				path := filepath.Join(home, plugin.name)
+				if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				cmd := exec.Command(nodeForTest(t), "--input-type=module", "-e", plugin.harness, path)
+				cmd.Env = append(sanitizedTestEnv(), "HOME="+home, "DEFENSECLAW_GATEWAY_AUTOSTART=0")
+				out, err := cmd.Output()
+				if err != nil {
+					t.Fatalf("node: %v\n%s", err, out)
+				}
+				var result struct {
+					Verdict string   `json:"verdict"`
+					Notices []string `json:"notices"`
+				}
+				if err := json.Unmarshal([]byte(strings.TrimSpace(string(out))), &result); err != nil {
+					t.Fatalf("harness output %q: %v", out, err)
+				}
+				if (result.Verdict == "allow") != tc.opens {
+					t.Fatalf("verdict %q, want run=%v", result.Verdict, tc.opens)
+				}
+				rows := hookFailureRecords(t, dataDir)
+				if tc.opens {
+					if len(rows) != 1 || rows[0]["fail_mode"] != "open" || rows[0]["category"] != "transport" || len(result.Notices) != 1 ||
+						!strings.Contains(result.Notices[0], "fail mode open for an outage") {
+						t.Fatalf("open outage rows=%+v notices=%q, want one audit row and one warning", rows, result.Notices)
+					}
+				} else {
+					// A blocked call may be recorded closed (GAP-1236), never as run.
+					for _, row := range rows {
+						if row["outcome"] != "fail_closed" {
+							t.Fatalf("a closed outage wrote fail-open rows %+v", rows)
+						}
+					}
+				}
+			})
+		}
+	}
+}
+
+func TestPerUserPluginOversizedPayloadUsesInstalledTier(t *testing.T) {
+	nodeForTest(t)
+	for _, plugin := range []struct{ asset, name, connector, harness string }{
+		{"opencode-plugin.js", "defenseclaw.mjs", "opencode", openCodeOutageHarness},
+		{"amp-plugin.ts", "defenseclaw.mts", "amp", ampOutageHarness},
+	} {
+		// The tier is the config's rule pack, read at call time
+		// (fix/r104-oss-outage-open), not a mode baked into the render.
+		for _, tier := range []struct{ name, mode, config string }{
+			{"balanced", "open", outageDefaultTierConfig}, {"strict", "closed", outageStrictTierConfig},
+		} {
+			t.Run(plugin.connector+"/"+tier.name, func(t *testing.T) {
+				home := t.TempDir()
+				installNativeGatewayForHookTest(t, home)
+				dataDir := filepath.Join(home, ".defenseclaw")
+				token := filepath.Join(dataDir, "hooks", ".hook-"+plugin.connector+".token")
+				if err := os.MkdirAll(filepath.Dir(token), 0o700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(token, []byte(strings.Repeat("a", 64)+"\n"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				writeOutageTierConfig(t, dataDir, tier.config)
+				body := renderPluginAssetForTest(t, plugin.asset, templateData{
+					APIAddr: "127.0.0.1:1", TokenFileJS: javaScriptStringContent(token),
+					FailMode: "closed",
+				})
+				path := filepath.Join(home, plugin.name)
+				if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				harness := strings.ReplaceAll(plugin.harness, `command: "echo marker"`, `description: "x".repeat(1100000), command: "echo marker"`)
+				cmd := exec.Command(nodeForTest(t), "--input-type=module", "-e", harness, path)
+				cmd.Env = append(sanitizedTestEnv(), "HOME="+home, "DEFENSECLAW_GATEWAY_AUTOSTART=0")
+				out, err := cmd.Output()
+				if err != nil {
+					t.Fatalf("node: %v\n%s", err, out)
+				}
+				var result struct {
+					Verdict string   `json:"verdict"`
+					Notices []string `json:"notices"`
+				}
+				if err := json.Unmarshal([]byte(strings.TrimSpace(string(out))), &result); err != nil {
+					t.Fatalf("harness output %q: %v", out, err)
+				}
+				rows := hookFailureRecords(t, dataDir)
+				if tier.mode == "open" {
+					if result.Verdict != "allow" || len(rows) != 1 || rows[0]["outcome"] != "fail_open" ||
+						!strings.Contains(strings.Join(result.Notices, "\n"), "fail mode open for an outage") {
+						t.Fatalf("balanced verdict=%q notices=%q rows=%+v", result.Verdict, result.Notices, rows)
+					}
+				} else if !strings.HasPrefix(result.Verdict, "block:") || len(rows) != 0 {
+					t.Fatalf("strict verdict=%q rows=%+v", result.Verdict, rows)
+				}
+			})
 		}
 	}
 }

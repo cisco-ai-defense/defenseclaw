@@ -8,6 +8,7 @@ package gateway
 
 import (
 	"errors"
+	"os"
 	"strings"
 	"syscall"
 )
@@ -27,3 +28,6 @@ func isAPIPortHeldByAnotherAccount(err error) bool {
 	}
 	return strings.Contains(strings.ToLower(err.Error()), "forbidden by its access permissions")
 }
+
+// fileOwnedByRoot is false on Windows, which has no launchd job definition.
+func fileOwnedByRoot(os.FileInfo) bool { return false }

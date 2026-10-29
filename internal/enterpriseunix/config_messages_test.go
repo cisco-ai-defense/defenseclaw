@@ -66,6 +66,33 @@ func TestManagedConfigModeNamesOnlyInstalledChoices(t *testing.T) {
 	}
 }
 
+// GAP-2213: a per-connector enum whose schema allows "" (unset, inherit the
+// global value) names only the values an administrator can type.
+func TestManagedConfigEnumLeavesOutTheUnsetChoice(t *testing.T) {
+	h := newTestHost(t, "linux")
+	dir := t.TempDir()
+	path := filepath.Join(dir, "connector-fail-mode.yaml")
+	raw := string(DefaultConfig(h.env.Layout))
+	raw = strings.Replace(raw, "guardrail:\n", "guardrail:\n  connectors:\n    codex:\n      hook_fail_mode: OPEN\n", 1)
+	if err := os.WriteFile(path, []byte(raw), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	r := h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0"), ConfigFile: path})
+	requireError(t, r, codeConfig)
+	got := r.Errors[0].Message
+	if !strings.Contains(got, `guardrail.connectors.codex.hook_fail_mode is "OPEN"; allowed values: open, closed.`) ||
+		strings.Contains(got, "allowed values: ,") {
+		t.Fatalf("connector hook_fail_mode error = %q", got)
+	}
+	// GAP-2226: config validate on a managed host (PlainConfigRefusal) words
+	// enterprise.openshell.install the same way.
+	install := &config.V8SchemaError{Path: "$.enterprise.openshell.install", Keyword: "enum", Expected: `one of ["","prerequisite","setup"]`, Value: "bogusmode"}
+	got, ok := h.env.PlainConfigRefusal(install, "/tmp/admin.yaml", nil)
+	if !ok || !strings.Contains(got, "allowed values: prerequisite, setup.") || strings.Contains(got, "allowed values: ,") {
+		t.Fatalf("openshell install error = %q", got)
+	}
+}
+
 // GAP-1948, GAP-1944: a bad enum value and an unstored credential are
 // reported in plain words, with the value, the line and the fix, and
 // without the validator's rule id, JSONPath or YAML node type.

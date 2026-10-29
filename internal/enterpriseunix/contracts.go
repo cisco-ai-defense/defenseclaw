@@ -186,11 +186,13 @@ func (l *lifecycle) describeHookContracts(ctx context.Context) {
 	for _, message := range failed {
 		r.AddWarning(codeGuardianTargetFailed, message)
 	}
-	r.SecurityComplete = false
+	if len(failed) > 0 {
+		r.MarkSecurityIncomplete(codeGuardianTargetFailed)
+	}
 	if len(unverified) > 0 {
 		// An enrolled agent with no hook contract has no DefenseClaw hook at
 		// all, so the deployment does not cover it (GAP-0151).
-		r.CoverageComplete = false
+		r.MarkCoverageIncomplete(codeHookContractUnverified)
 	}
 }
 
@@ -220,7 +222,7 @@ func (l *lifecycle) requireProtectedTargets(code int) int {
 			l.env.lifecycleCommand(ActionReconcile)+"` (the guardian also retries every minute) and `"+l.env.lifecycleCommand(ActionVerify)+"`")
 	}
 	if len(failed) > 0 {
-		r.SecurityComplete = false
+		r.MarkSecurityIncomplete(codeGuardianTargetFailed)
 	}
 	return code
 }
@@ -395,7 +397,7 @@ func (l *lifecycle) guardianTargetFailedSince(since time.Time) bool {
 const codeAgentUnprotected = enterprisehooks.UnprotectedCodeAgentUnprotected
 
 // reportInstallScanPending reports a missing or stale unprotected-agents
-// record as one NOT COVERED warning, verify included (GAP-1430). Only that
+// record, or one an earlier install wrote, as one NOT COVERED warning, verify included (GAP-1430). Only that
 // condition is a warning: every other check, and every agent a stale record
 // names, keeps its own verdict.
 func (l *lifecycle) reportInstallScanPending(age string) {
@@ -404,7 +406,7 @@ func (l *lifecycle) reportInstallScanPending(age string) {
 		remedy = "sudo launchctl kickstart -k system/" + labelEnumerator
 	}
 	l.result.AddWarning(enterprisehooks.UnprotectedCodeInstallScanIncomplete, enterprisehooks.UnprotectedAgentsScanPending(age, remedy))
-	l.result.CoverageComplete, l.result.SecurityComplete = false, false
+	l.result.MarkCoverageIncomplete(enterprisehooks.UnprotectedCodeInstallScanIncomplete)
 }
 
 // describeUnprotectedAgents reports the agents the enumerator found
@@ -428,7 +430,7 @@ func (l *lifecycle) describeUnprotectedAgents() {
 		} else {
 			r.AddWarning(enterprisehooks.UnprotectedCodeInstallScanIncomplete, message)
 		}
-		r.CoverageComplete, r.SecurityComplete = false, false
+		r.MarkCoverageIncomplete(enterprisehooks.UnprotectedCodeInstallScanIncomplete)
 		return
 	}
 	agents, err := enterprisehooks.ParseUnprotectedAgents(data)
@@ -439,7 +441,7 @@ func (l *lifecycle) describeUnprotectedAgents() {
 		} else {
 			r.AddWarning(enterprisehooks.UnprotectedCodeInstallScanIncomplete, message)
 		}
-		r.CoverageComplete, r.SecurityComplete = false, false
+		r.MarkCoverageIncomplete(enterprisehooks.UnprotectedCodeInstallScanIncomplete)
 		return
 	}
 	info, err := os.Stat(env.P(enterprisehooks.UnprotectedAgentsPath(env.Layout.ManifestPath)))
@@ -450,9 +452,13 @@ func (l *lifecycle) describeUnprotectedAgents() {
 		} else {
 			r.AddWarning(enterprisehooks.UnprotectedCodeInstallScanIncomplete, message)
 		}
-		r.CoverageComplete, r.SecurityComplete = false, false
+		r.MarkCoverageIncomplete(enterprisehooks.UnprotectedCodeInstallScanIncomplete)
 	} else if now := time.Now(); enterprisehooks.UnprotectedAgentsRecordStale(info.ModTime(), now) {
 		l.reportInstallScanPending(enterprisehooks.UnprotectedAgentsRecordAge(info.ModTime(), now))
+	} else if written := enterprisehooks.UnprotectedAgentsRecordGeneration(data); written != enterprisehooks.UnprotectedAgentsGeneration() {
+		// A recent record of the previous install is not this install's
+		// scan (GAP-1454): pending until the current enumerator publishes.
+		l.reportInstallScanPending(enterprisehooks.UnprotectedAgentsRecordFromEarlierInstall(written))
 	}
 	for _, agent := range agents {
 		if agent.Code == enterprisehooks.UnprotectedCodeHookContractUnverified ||
@@ -462,7 +468,7 @@ func (l *lifecycle) describeUnprotectedAgents() {
 			// No contract, an incomplete install scan, a headless CLI path
 			// without hooks, or an IDE that cannot read global hooks: the
 			// deployment does not cover it (GAP-0151).
-			r.CoverageComplete = false
+			r.MarkCoverageIncomplete(agent.Code)
 		}
 		if l.opts.Action == ActionVerify && (agent.Refusal == enterprisehooks.RefusalMissing ||
 			agent.Code == enterprisehooks.UnprotectedCodeKiroCLIBelowHookFloor ||
@@ -484,8 +490,8 @@ func (l *lifecycle) describeUnprotectedAgents() {
 			}
 		}
 	}
-	if len(agents) > 0 {
-		r.SecurityComplete = false
+	for _, agent := range agents {
+		r.MarkSecurityIncomplete(agent.Code)
 	}
 }
 
@@ -521,7 +527,9 @@ func (l *lifecycle) describeGuardianCleanups() {
 		if account == "" {
 			account = strings.TrimSpace(entry.UserHome)
 		}
-		if home := strings.TrimSpace(entry.UserHome); home != "" {
+		// A home that does not answer a bounded lookup keeps the cleanup
+		// reported as pending (GAP-1751).
+		if home := strings.TrimSpace(entry.UserHome); home != "" && env.homeAnswers(env.P(home)) {
 			if _, err := os.Lstat(env.P(home)); errors.Is(err, os.ErrNotExist) {
 				// The account may have moved. Keep the guardian's current-home
 				// failure visible instead of calling a missing recorded home
@@ -566,6 +574,11 @@ func (l *lifecycle) describeUnavailableEnrolledHomes() {
 		if home == "" || (target.Enabled != nil && !*target.Enabled) {
 			continue
 		}
+		// A home that does not answer a bounded lookup is not looked up in
+		// this process; describeUnansweredHomes names it (GAP-1751).
+		if !env.homeAnswers(env.P(home)) {
+			continue
+		}
 		if _, err := os.Lstat(env.P(home)); !errors.Is(err, os.ErrNotExist) {
 			continue
 		}
@@ -583,6 +596,19 @@ func (l *lifecycle) describeUnavailableEnrolledHomes() {
 		r.AddWarning(codeEnrolledHomeUnavailable, fmt.Sprintf(
 			"user %s: home is unavailable; enrollment for %s is retained and retried on the next hook enumerator pass",
 			account, strings.Join(names, ", ")))
+	}
+}
+
+// describeUnansweredHomes names each home whose bounded lookup did not
+// answer in this status or verify run. Nothing in it was read: the
+// DefenseClaw files, sandboxes and agent settings there are not confirmed,
+// so security_complete is false (GAP-1751).
+func (l *lifecycle) describeUnansweredHomes() {
+	for _, home := range l.env.unansweredHomes() {
+		l.result.MarkSecurityIncomplete(codeEnrolledHomeUnavailable)
+		l.result.AddWarning(codeEnrolledHomeUnavailable, fmt.Sprintf(
+			"home %s did not answer a lookup within %s (a stalled home mount?), so the DefenseClaw files, sandboxes and agent settings in it are not checked in this run; enrollment is retained",
+			boundedGuardianReason(home), enterprisestatus.LaunchPathLookupTimeout()))
 	}
 }
 
@@ -648,15 +674,28 @@ var userHomePathRefusalPatterns = []*regexp.Regexp{
 	regexp.MustCompile(`^inspect [a-z][a-z ]* /.+: lstat (/.+): (?:permission denied|not a directory)$`),
 }
 
+// userHomePathRefusalWrapper is the per-user worker's wrapper around the
+// bootstrap of a connector's missing hook config (enterprisehooks
+// installer.go: "bootstrap missing hook config for <connector>: enterprise
+// hooks: <refusal>"). The refusal inside it is classified as if it were not
+// wrapped: a folder the account made unreadable stops the bootstrap's lstat
+// before the strict validate step would (Antigravity ~/.gemini, GAP-0051).
+// The first group is the wrapped refusal.
+var userHomePathRefusalWrapper = regexp.MustCompile(`^bootstrap missing hook config for [a-z][a-z0-9_-]*: enterprise hooks: (.+)$`)
+
 // userHomePathRefusal reports whether reason is one of those refusals for a
-// path strictly inside home, the target account's own home. The match is on
-// the whole reason, because other guardian errors can quote text from a
-// user's own files. A refusal of the home itself or of a path outside it,
-// and every other error, stays a guardian_target_failed.
+// path strictly inside home, the target account's own home, bare or inside
+// userHomePathRefusalWrapper. The match is on the whole reason, because
+// other guardian errors can quote text from a user's own files. A refusal of
+// the home itself or of a path outside it, and every other error, stays a
+// guardian_target_failed.
 func userHomePathRefusal(reason, home string) bool {
 	home = filepath.Clean(strings.TrimSpace(home))
 	if !filepath.IsAbs(home) || home == "/" {
 		return false
+	}
+	if match := userHomePathRefusalWrapper.FindStringSubmatch(reason); match != nil {
+		reason = match[1]
 	}
 	for _, pattern := range userHomePathRefusalPatterns {
 		if match := pattern.FindStringSubmatch(reason); match != nil {

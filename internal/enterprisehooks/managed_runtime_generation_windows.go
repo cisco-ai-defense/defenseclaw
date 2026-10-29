@@ -49,6 +49,16 @@ var (
 	windowsManagedRuntimeSelectorLockRetry                   = 50 * time.Millisecond
 	windowsManagedRuntimeSelectorMutationAuthorize           = requireWindowsEnterpriseAdministrator
 	windowsManagedRuntimeSelectorVerifyAuthorize             = requireWindowsEnterpriseAdministrator
+	// A guardian repair of a per-user connector gives <data dir> and
+	// <data dir>\hooks the owner-private setup DACL for the length of the
+	// connector's setup (relaxWindowsStandalonePerUserDirectory), about a
+	// third of a second live. A hook resolving meanwhile waits up to this
+	// long for the canonical DACL to return (GAP-1502).
+	windowsManagedRuntimeSetupRelaxWait = 2 * time.Second
+	windowsManagedRuntimeSetupRelaxPoll = 25 * time.Millisecond
+	// windowsManagedRuntimeResolveSelectorRead runs after each first selector
+	// read of a resolve attempt; a seam for the publication race test.
+	windowsManagedRuntimeResolveSelectorRead = func() {}
 )
 
 type windowsManagedRuntimeSelector struct {
@@ -318,6 +328,7 @@ func resolveWindowsManagedRuntimeGenerationPlatform(
 				ErrWindowsManagedRuntimeGenerationPending,
 			)
 		}
+		windowsManagedRuntimeResolveSelectorRead()
 		entry, ok := windowsManagedRuntimeSelectorTargetForSID(selector, opts.TargetSID)
 		if !ok {
 			return result, fmt.Errorf(
@@ -328,11 +339,17 @@ func resolveWindowsManagedRuntimeGenerationPlatform(
 		if err := validateWindowsManagedRuntimeSelectorTargetAgainstResolve(entry, opts); err != nil {
 			return result, err
 		}
-		if err := validateWindowsManagedRuntimeGenerationRoots(opts.DataDir, target); err != nil {
+		if err := settledWindowsManagedRuntimeGenerationRoots(opts.DataDir, target); err != nil {
 			return result, err
 		}
 		bundle, _, _, err := loadWindowsManagedRuntimeBundle(entry, target)
 		if err != nil {
+			// A reconcile that published a new generation retires the
+			// bundle this attempt's selector named. Only a selector that
+			// changed since that read makes a missing bundle a retry.
+			if errors.Is(err, os.ErrNotExist) && windowsManagedRuntimeSelectorChangedSince(opts.Connector, first) {
+				continue
+			}
 			return result, err
 		}
 		if err := validateWindowsManagedRuntimeBundleAgainstSelector(bundle, entry); err != nil {
@@ -1028,6 +1045,60 @@ func discardWindowsManagedRuntimeGenerationPublicationPlatform(
 func garbageCollectWindowsManagedRuntimeGenerationsPlatform(
 	opts WindowsManagedRuntimeGenerationGCOptions,
 ) (int, error) {
+	return collectWindowsManagedRuntimeGenerations(opts, false)
+}
+
+// ClassifyWindowsManagedRuntimeGenerations applies to every bundle of the
+// target the classification GC applies before it deletes, and changes
+// nothing: no bundle is deleted and no folder permission is repaired. A
+// folder in the guardian's exact setup shape, which GC would first repair, is
+// read as it is (GAP-1818); a folder GC cannot trust is reported as
+// ErrWindowsManagedRuntimeGenerationDirectoryUntrusted and left to the retire
+// that collects. Setup runs it with the replacement gateway before an upgrade
+// or repair opens its transaction, so a bundle the new release refuses stops
+// the lifecycle with nothing changed (GAP-0822).
+func ClassifyWindowsManagedRuntimeGenerations(opts WindowsManagedRuntimeGenerationGCOptions) error {
+	_, err := collectWindowsManagedRuntimeGenerations(opts, true)
+	return err
+}
+
+// windowsManagedRuntimeGenerationGCMinAge bounds the time between a
+// guardian's prepare, which writes a bundle outside the selector lock, and the
+// commit that selects it. GC leaves an unselected bundle younger than this:
+// deleting it in between failed that guardian publication for the interval
+// (GAP-1768). An old unselected bundle is inert and goes on a later GC.
+var windowsManagedRuntimeGenerationGCMinAge = 10 * time.Minute
+
+func windowsManagedRuntimeBundleYoung(dataDir, connectorName, generationID string) bool {
+	path, err := windowsManagedRuntimeBundlePath(dataDir, connectorName, generationID)
+	if err != nil {
+		return false
+	}
+	info, err := os.Lstat(path)
+	return err == nil && time.Since(info.ModTime()) < windowsManagedRuntimeGenerationGCMinAge
+}
+
+// ErrWindowsManagedRuntimeBundleRefused marks a classification that refused a
+// bundle itself (malformed, unsupported, over the candidate limit). Every
+// other error of the same loop (an absent selected folder, a selector that
+// cannot be read or locked) is not about a bundle, so the pre-transaction
+// check must not stop a lifecycle with the damaged-bundle remedy for it
+// (GAP-1910).
+var ErrWindowsManagedRuntimeBundleRefused = errors.New("enterprise hooks: managed runtime bundle refused")
+
+// windowsManagedRuntimeBundleRefusal keeps the refusal's text and adds the
+// sentinel to its chain.
+type windowsManagedRuntimeBundleRefusal struct{ err error }
+
+func (r windowsManagedRuntimeBundleRefusal) Error() string { return r.err.Error() }
+func (r windowsManagedRuntimeBundleRefusal) Unwrap() []error {
+	return []error{ErrWindowsManagedRuntimeBundleRefused, r.err}
+}
+
+func collectWindowsManagedRuntimeGenerations(
+	opts WindowsManagedRuntimeGenerationGCOptions,
+	classifyOnly bool,
+) (int, error) {
 	removed := 0
 	snapshotOpts := WindowsManagedRuntimeSelectorSnapshotOptions{
 		Connector:      opts.Connector,
@@ -1061,6 +1132,9 @@ func garbageCollectWindowsManagedRuntimeGenerationsPlatform(
 	// folder, and its selected generation with it, away. The guardian adopts
 	// it in the account's session.
 	accountCreated := false
+	// relaxed is a classification over a root left in the guardian's exact
+	// setup shape: it reads, never repairs (GAP-1818).
+	relaxed := false
 	if err := validateWindowsUserPathElement(
 		validated.DataDir,
 		target,
@@ -1068,10 +1142,15 @@ func garbageCollectWindowsManagedRuntimeGenerationsPlatform(
 		true,
 		true,
 	); err != nil {
-		if !windowsEnterpriseStandaloneDeferredDataDirAccountCreated(validated.DataDir, target) {
+		switch {
+		case windowsEnterpriseStandaloneDeferredDataDirAccountCreated(validated.DataDir, target):
+			accountCreated = true
+		case !classifyOnly && recoverStaleWindowsSetupRelaxedDataDir(validated.DataDir, target):
+		case classifyOnly && windowsManagedRuntimeDirSetupRelaxedPlain(validated.DataDir, target):
+			relaxed = true
+		default:
 			return 0, fmt.Errorf("%w: %w", ErrWindowsManagedRuntimeGenerationDirectoryUntrusted, err)
 		}
-		accountCreated = true
 	}
 	err = withWindowsManagedRuntimeSelectorTransaction(validated.Connector, func() error {
 		selector, _, exists, err := readWindowsManagedRuntimeSelector(validated.Connector, true)
@@ -1104,7 +1183,7 @@ func garbageCollectWindowsManagedRuntimeGenerationsPlatform(
 			true,
 			true,
 			true,
-		); err != nil {
+		); err != nil && (!relaxed || !windowsManagedRuntimeDirSetupRelaxedPlain(validated.DataDir, target)) {
 			return fmt.Errorf("%w: %w", ErrWindowsManagedRuntimeGenerationDirectoryUntrusted, err)
 		}
 
@@ -1120,12 +1199,30 @@ func garbageCollectWindowsManagedRuntimeGenerationsPlatform(
 		} else if err != nil {
 			return err
 		}
-		if err := validateWindowsManagedRuntimeGenerationRoots(validated.DataDir, target); err != nil {
+		if err := validateWindowsManagedRuntimeGenerationRoots(validated.DataDir, target); err != nil && classifyOnly {
+			// The retire after the commit restores a root a stopped
+			// guardian left in its setup shape and then classifies its
+			// bundles, so a bundle it refuses failed an upgrade that had
+			// already committed (GAP-0822). The classification before the
+			// transaction reads those folders as they are (LocalSystem
+			// holds full control in that shape) and refuses the same
+			// bundles; it repairs nothing. Any other shape stays untrusted
+			// and is left to that retire (GAP-1818).
+			if !windowsManagedRuntimeRootsCanonicalOrSetupRelaxed(validated.DataDir, target) {
+				return fmt.Errorf("%w: %w", ErrWindowsManagedRuntimeGenerationDirectoryUntrusted, err)
+			}
+			relaxed = true
+		} else if err != nil {
 			// A guardian stopped between relaxing the hooks directory for a
 			// connector setup and hardening it again leaves the relaxed
 			// owner-private DACL behind. Restore the canonical DACL instead
 			// of refusing every lifecycle retire for this user; any other
 			// shape stays refused.
+			if windowsManagedRuntimeDirSetupRelaxed(hookDir, target) && !windowsSetupRelaxIsStale(hookDir, target) {
+				// A running guardian's own setup relax: skip the account
+				// rather than harden it under that setup (GAP-1765).
+				return fmt.Errorf("%w: %w", ErrWindowsManagedRuntimeGenerationDirectoryUntrusted, err)
+			}
 			recovered, recoverErr := windowsRecoverSetupRelaxedHookDirectory(validated.DataDir, target)
 			if recoverErr != nil || !recovered {
 				return errors.Join(err, recoverErr)
@@ -1137,6 +1234,11 @@ func garbageCollectWindowsManagedRuntimeGenerationsPlatform(
 
 		entries, err := os.ReadDir(hookDir)
 		if err != nil {
+			if relaxed {
+				// An elevated administrator cannot list the setup shape;
+				// the retire after the commit classifies it, as before.
+				return fmt.Errorf("%w: %w", ErrWindowsManagedRuntimeGenerationDirectoryUntrusted, err)
+			}
 			return err
 		}
 		// Classify every bundle of this target before deleting any. One
@@ -1157,7 +1259,7 @@ func garbageCollectWindowsManagedRuntimeGenerationsPlatform(
 			}
 			candidates++
 			if candidates > windowsManagedRuntimeGenerationGCMaxCandidates {
-				return errors.New("enterprise hooks: managed runtime generation GC candidate limit exceeded")
+				return windowsManagedRuntimeBundleRefusal{errors.New("enterprise hooks: managed runtime generation GC candidate limit exceeded")}
 			}
 			// The selected bundle is classified with the rules this GC will
 			// apply once a later publication unselects it, so a retire before
@@ -1170,12 +1272,21 @@ func garbageCollectWindowsManagedRuntimeGenerationsPlatform(
 				generationID,
 			)
 			if err != nil {
-				return err
+				return windowsManagedRuntimeBundleRefusal{err}
 			}
 			if generationID == selectedGenerationID {
 				continue
 			}
+			if !opts.Retired && windowsManagedRuntimeBundleYoung(validated.DataDir, validated.Connector, generationID) {
+				// Prepared outside the selector lock and possibly about to
+				// be selected: a later GC collects it (GAP-1768). An
+				// uninstall finalize has no later GC (GAP-1986).
+				continue
+			}
 			collect = append(collect, collectable{entry: entry, data: data})
+		}
+		if classifyOnly {
+			return nil
 		}
 		for _, bundle := range collect {
 			if err := deleteWindowsManagedRuntimeBundle(bundle.entry, target, bundle.data); err != nil {
@@ -1712,6 +1823,168 @@ func validateWindowsManagedRuntimeGenerationRoots(dataDir string, target *window
 		}
 	}
 	return nil
+}
+
+// settledWindowsManagedRuntimeGenerationRoots is the hook-side root check.
+// The guardian relaxes <data dir> (Hermes) and <data dir>\hooks to the exact
+// owner-private setup DACL while it runs a per-user connector's setup or
+// teardown, then hardens them again. Every managed hook of that account
+// resolving in that window was refused as "not set up correctly" (GAP-1502).
+// Only that exact target-owned shape waits, at most
+// windowsManagedRuntimeSetupRelaxWait, and the check then runs once more; any
+// other DACL, and a relaxed one that does not return, fails as before.
+func settledWindowsManagedRuntimeGenerationRoots(dataDir string, target *windows.SID) error {
+	err := validateWindowsManagedRuntimeGenerationRoots(dataDir, target)
+	if err == nil || !windowsManagedRuntimeRootsSetupRelaxed(dataDir, target) {
+		return err
+	}
+	deadline := time.Now().Add(windowsManagedRuntimeSetupRelaxWait)
+	for windowsManagedRuntimeRootsSetupRelaxed(dataDir, target) && time.Now().Before(deadline) {
+		time.Sleep(windowsManagedRuntimeSetupRelaxPoll)
+	}
+	err = validateWindowsManagedRuntimeGenerationRoots(dataDir, target)
+	if err != nil && windowsManagedRuntimeRootsSetupRelaxedByLiveGuardian(dataDir, target) {
+		// A Hermes repair of the running guardian can hold that shape past
+		// the wait (GAP-1528). It is the guardian's own shape on folders the
+		// account owns, and the bundle the selector names is still checked
+		// against its protected digest, so the other enrolled routes are not
+		// refused for it. A relax no running guardian made stays refused
+		// until a lifecycle restores it (GAP-1765), as does any other DACL.
+		return nil
+	}
+	return err
+}
+
+// windowsManagedRuntimeRootsSetupRelaxedByLiveGuardian reports whether every
+// relaxed root (<data dir>, <data dir>\hooks) is in the guardian's exact setup
+// shape and was relaxed by the guardian that runs now.
+func windowsManagedRuntimeRootsSetupRelaxedByLiveGuardian(dataDir string, target *windows.SID) bool {
+	relaxed := false
+	for _, path := range []string{dataDir, filepath.Join(dataDir, "hooks")} {
+		if windowsManagedRuntimeDirSetupRelaxed(path, target) {
+			if !windowsSetupRelaxByLiveGuardian(path, target) {
+				return false
+			}
+			relaxed = true
+			continue
+		}
+		// Every root not in the setup shape must be canonical.
+		if validateWindowsUserPathElement(path, target, true, true, true) != nil {
+			return false
+		}
+	}
+	return relaxed
+}
+
+// recoverStaleWindowsSetupRelaxedDataDir reports whether dataDir validates
+// after a guardian setup relax of it ended. The exact target-owned setup
+// shape is waited out as the hook side does (GAP-1502); one that stays is a
+// guardian stopped before it hardened the folder again, and LocalSystem
+// restores the canonical DACL (GAP-1334). Any other DACL stays refused.
+func recoverStaleWindowsSetupRelaxedDataDir(dataDir string, target *windows.SID) bool {
+	if !windowsManagedRuntimeDirSetupRelaxed(dataDir, target) {
+		return false
+	}
+	deadline := time.Now().Add(windowsManagedRuntimeSetupRelaxWait)
+	for windowsManagedRuntimeDirSetupRelaxed(dataDir, target) && time.Now().Before(deadline) {
+		time.Sleep(windowsManagedRuntimeSetupRelaxPoll)
+	}
+	if windowsManagedRuntimeDirSetupRelaxed(dataDir, target) {
+		// A running guardian may be in the middle of its own Hermes setup
+		// of this folder, which can last past the wait (GAP-1528):
+		// hardening it under that setup fails it. Only a relax older than
+		// the running guardian is stale (GAP-1765).
+		if !windowsSetupRelaxIsStale(dataDir, target) {
+			return false
+		}
+		if _, err := windowsRecoverSetupRelaxedDataDirectory(dataDir, target); err != nil {
+			return false
+		}
+	}
+	return validateWindowsUserPathElement(dataDir, target, true, true, true) == nil
+}
+
+// windowsSetupRelaxIsStale reports whether the setup relax on path was left
+// by a setup that no longer runs: no live setup relax record exists for the
+// account (GAP-1985). A seam for tests.
+var windowsSetupRelaxIsStale = func(path string, target *windows.SID) bool {
+	return !windowsSetupRelaxInProgress(target)
+}
+
+// windowsSetupRelaxByLiveGuardian reports, only on positive proof, that the
+// setup relax on path belongs to a connector setup that runs now: a live
+// setup relax record for the account (GAP-1985). The folder's change time is
+// no proof: it moves whenever an entry inside the folder changes. A seam for
+// tests.
+var windowsSetupRelaxByLiveGuardian = func(path string, target *windows.SID) bool {
+	return windowsSetupRelaxInProgress(target)
+}
+
+// windowsManagedRuntimeRootsSetupRelaxed reports whether <data dir> or its
+// hooks child is a plain directory owned by target whose DACL is exactly the
+// guardian's setup shape (windowsSetupRelaxedDirectorySDDL).
+func windowsManagedRuntimeRootsSetupRelaxed(dataDir string, target *windows.SID) bool {
+	for _, path := range []string{dataDir, filepath.Join(dataDir, "hooks")} {
+		if windowsManagedRuntimeDirSetupRelaxed(path, target) {
+			return true
+		}
+	}
+	return false
+}
+
+// windowsManagedRuntimeDirSetupRelaxedPlain is windowsManagedRuntimeDirSetupRelaxed
+// on a path with no reparse point on it or above it.
+func windowsManagedRuntimeDirSetupRelaxedPlain(path string, target *windows.SID) bool {
+	return winpath.RejectReparseChain(path) == nil && windowsManagedRuntimeDirSetupRelaxed(path, target)
+}
+
+// windowsManagedRuntimeRootsCanonicalOrSetupRelaxed reports whether each of
+// <data dir> and <data dir>\hooks is canonical or in the guardian's exact
+// target-owned setup shape, at least one of them relaxed (GAP-1818).
+func windowsManagedRuntimeRootsCanonicalOrSetupRelaxed(dataDir string, target *windows.SID) bool {
+	relaxed := false
+	for _, path := range []string{dataDir, filepath.Join(dataDir, "hooks")} {
+		if windowsManagedRuntimeDirSetupRelaxedPlain(path, target) {
+			relaxed = true
+			continue
+		}
+		if validateWindowsUserPathElement(path, target, true, true, true) != nil {
+			return false
+		}
+	}
+	return relaxed
+}
+
+func windowsManagedRuntimeDirSetupRelaxed(path string, target *windows.SID) bool {
+	if target == nil {
+		return false
+	}
+	info, err := os.Lstat(path)
+	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		return false
+	}
+	extended, err := winpath.Extended(path)
+	if err != nil {
+		return false
+	}
+	sd, err := windows.GetNamedSecurityInfo(extended, windows.SE_FILE_OBJECT,
+		windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION)
+	if err != nil {
+		return false
+	}
+	owner, _, err := sd.Owner()
+	if err != nil || owner == nil || !owner.Equals(target) {
+		return false
+	}
+	relaxed, err := windowsSetupRelaxedDirectoryDACL(sd)
+	return err == nil && relaxed
+}
+
+// windowsManagedRuntimeSelectorChangedSince reports whether the connector's
+// protected selector now differs from the bytes first read.
+func windowsManagedRuntimeSelectorChangedSince(connectorName string, first []byte) bool {
+	_, current, exists, err := readWindowsManagedRuntimeSelector(connectorName, true)
+	return err == nil && exists && !bytes.Equal(first, current)
 }
 
 func newWindowsManagedRuntimeGenerationID() (string, error) {

@@ -26,6 +26,7 @@ import (
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/enterprisepolicy"
+	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 	"github.com/defenseclaw/defenseclaw/internal/procboot"
 )
 
@@ -82,6 +83,10 @@ var scriptHosts = map[string]bool{"node": true, "nodejs": true, "bun": true, "de
 // agentModuleNames are agents launched through a script host's -c or -m argument.
 var agentModuleNames = map[string]string{"hermes_cli": "hermes"}
 
+// packageRunnerTitles are the package runners whose process title names the
+// runner first.
+var packageRunnerTitles = map[string]bool{"npm": true, "npx": true, "pnpm": true, "pnpx": true, "yarn": true, "bunx": true}
+
 func isScriptHost(name string) bool {
 	return scriptHosts[name] || strings.HasPrefix(name, "python3.")
 }
@@ -96,6 +101,13 @@ func agentCLIOf(argv []string) string {
 	}
 	// Node can replace its argv area with a short process title padded by
 	// spaces. Claude Code does this during an interactive npm session.
+	// npm exec and npx replace their argv with one title, "npm exec <package>
+	// <arguments>". That process is the package runner, not the agent: an MCP
+	// server it runs for Claude Code ends in a project path that may be named
+	// claude (GAP-1273). An agent the runner starts is its own process.
+	if title := strings.Fields(argv[0]); len(argv) == 1 && len(title) > 1 && packageRunnerTitles[filepath.Base(title[0])] {
+		return ""
+	}
 	name := strings.TrimSpace(filepath.Base(argv[0]))
 	if agentCLINames[name] {
 		return name
@@ -165,10 +177,37 @@ func (e *Env) agentSessionsStartedBefore(ctx context.Context, since time.Time, s
 			oldServer[session.UID] = true
 		}
 	}
+	all = oneProcessPerSession(all)
 	var out []agentSession
 	for _, session := range all {
 		if session.UID == 0 || session.UID == serviceUID || !session.Started.Before(since) ||
 			(agentsReadingHooksLive[session.Agent] && !session.CodexServer && !oldServer[session.UID]) {
+			continue
+		}
+		out = append(out, session)
+	}
+	return out
+}
+
+// oneProcessPerSession keeps the topmost process of each agent session: an
+// agent with a launcher (npm Codex: a node script and the native codex it
+// starts) is one session, so a warning names its launcher pid once
+// (GAP-2439). The Codex background server is restarted its own way, and an
+// unreadable process is not known to be an agent, so both stay listed as
+// they are.
+func oneProcessPerSession(sessions []agentSession) []agentSession {
+	processes := make([]enterprisestatus.SessionProcess, 0, len(sessions))
+	for _, session := range sessions {
+		if session.Unknown || session.CodexServer {
+			continue
+		}
+		processes = append(processes, enterprisestatus.SessionProcess{PID: session.PID, PPID: session.PPID,
+			User: strconv.Itoa(session.UID), Agent: session.Agent})
+	}
+	leaders := enterprisestatus.SessionLeaders(processes)
+	out := make([]agentSession, 0, len(sessions))
+	for _, session := range sessions {
+		if leader, ok := leaders[session.PID]; ok && !session.Unknown && !session.CodexServer && leader != session.PID {
 			continue
 		}
 		out = append(out, session)
@@ -461,7 +500,7 @@ func (l *lifecycle) warnUnknownAgentSessions(sessions []agentSession) {
 	l.warnAgentSessions(sessions, func(labels string) string {
 		return fmt.Sprintf("restart status unknown: the arguments of %s could not be read, so DefenseClaw cannot tell whether these are agents that started before hooks were installed, enabled or put back and run without DefenseClaw; ask that these sessions be restarted", labels)
 	})
-	l.result.SecurityComplete = false
+	l.result.MarkSecurityIncomplete(codeAgentSessionsRestart)
 }
 
 // warnAgentSessions adds one agent_sessions_restart_required warning per

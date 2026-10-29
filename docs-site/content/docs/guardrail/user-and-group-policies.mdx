@@ -30,6 +30,7 @@ A guardrail profile is a named set of guardrail settings. You assign profiles to
 
 - The users are in a directory group or a local group on the host. Find the exact spelling: `id -Gn` on Linux, or `defenseclaw guardrail profile explain --user alice --json | jq .subject`.
 - On Windows, group profiles need the standalone enterprise install. Per-user installs have no group list.
+- Steps 1 to 3 are for a per-user install. A managed host (Linux, macOS or Windows) has no `defenseclaw guardrail` commands and no per-user `config.yaml`: put the profiles in the machine config and check them as [Deliver it to managed hosts](#deliver-it-to-managed-hosts) shows. On Windows that is `defenseclaw.exe config validate FILE` and `defenseclaw.exe enterprise windows profile-explain --user CORP\alice`, from an elevated prompt.
 
 ### Steps
 
@@ -78,7 +79,7 @@ A guardrail profile is a named set of guardrail settings. You assign profiles to
 
    `config validate` rejects an unknown profile name, an empty `match`, a malformed agent id and a forbidden key.
 
-3. Ask which profile a person gets. With no `--user`, it explains the account that runs the command.
+3. Ask which profile a person gets. With no `--user`, `guardrail profile explain` explains the account that runs the command. The managed `enterprise linux|macos|windows profile-explain` commands need `--user`.
 
    ```bash
    defenseclaw guardrail profile explain --user alice@corp.example.com --connector claudecode
@@ -104,7 +105,7 @@ A guardrail profile is a named set of guardrail settings. You assign profiles to
 ### Good to know
 
 - Set a strict `default_profile` for accounts no assignment selects. While a directory lookup fails, a request whose assignment needs the missing fact is refused (`default_lookup_failed`) and names that fact.
-- On a per-user install the user owns `config.yaml` and can change their own profile. On a managed host the profile lives in the machine config.
+- On a per-user install the user owns `config.yaml` and can change their own profile. On a managed host the profile lives in the machine config: the administrator checks the file with `defenseclaw-gateway config validate FILE`, applies it with `defenseclaw-gateway enterprise linux ensure --config FILE` (`enterprise macos ensure --config FILE` on macOS), and checks one account with `defenseclaw-gateway enterprise linux profile-explain --user USER --connector CONNECTOR` (`enterprise macos profile-explain` on macOS), as root by the packaged path.
 
 ### Undo
 
@@ -127,7 +128,7 @@ guardrail:
       mode: action
       block_at: MEDIUM
       alert_at: LOW
-      hilt: {enabled: true, min_severity: HIGH}
+      hilt: {enabled: true, min_severity: LOW}   # asks below block_at; at or above it the call blocks
       rule_pack: strict
       connectors:
         codex: {mode: observe}   # but Codex only observes for this profile
@@ -171,7 +172,7 @@ defenseclaw guardrail profile explain --user alice@corp.example.com --connector 
 | Key | Meaning |
 | --- | --- |
 | `description` | Free text for operators. |
-| `mode` | `observe` records policy findings without enforcing them; hook fail mode and proxy availability still apply. `action` enforces the thresholds. A profile's own `mode` (or its `connectors.<agent>.mode`) applies inside the person's managed sandboxes too, so an `observe` profile alerts there with "would block" as on the host. A sandbox whose profile sets no mode enforces, whatever `guardrail.mode` says. |
+| `mode` | `observe` records policy findings without enforcing them; hook fail mode and proxy availability still apply. One exception: an agent that changes DefenseClaw's own files, such as a copy into `~/.defenseclaw`, is blocked in every mode (rule `tamper.detector_state_write`; the permissive pack only reports it). `action` enforces the thresholds. A profile's own `mode` (or its `connectors.<agent>.mode`) applies inside the person's managed sandboxes too, so an `observe` profile alerts there with "would block" as on the host. A sandbox whose profile sets no mode enforces, whatever `guardrail.mode` says. |
 | `block_at`, `alert_at` | `CRITICAL`, `HIGH`, `MEDIUM` or `LOW`. These effective thresholds apply to tool calls, prompts, responses and proxy decisions. When unset, the selected rule pack supplies the levels (a `strict` pack blocks MEDIUM and above by default). A profile with `block_at: CRITICAL` can therefore turn a MEDIUM prompt finding from a strict-pack block into an alert, according to its effective `alert_at`. Secure Client rejects profiles and keeps its existing content thresholds. A plain regex rule that only matches text an inert command prints (`echo marker`) is recorded on a tool call but does not block; a rule meant to block a command needs an `expression` over the parsed command ([CEL rules](/docs/policies/cel/authoring)). |
 | `hilt` | `enabled` and `min_severity` (`LOW`, `MEDIUM`, `HIGH` or `CRITICAL`, in any case, like `block_at`) for [human approval](/docs/guardrail). |
 | `rule_pack` | A rule pack for this profile: `default`, `strict`, `permissive` or a `guardrail.custom_packs` name. When a custom pack's directory does not load as the gateway starts (it is created a moment later, for example by the MDM that delivers it), the profile scans with the base rule set and the gateway retries the pack every 30 seconds; `explain` says so meanwhile. A reload refuses a pack that does not load. |
@@ -261,7 +262,13 @@ How the keys combine:
   timed out, a group name no provider confirms, a UPN the guardian has not
   written yet, a Windows group name whose SID lookup is pending, a uid more
   than one account holds, or a pre-1.0.4 `agents` entry the upgrade did not
-  bind), the request is refused with the missing fact named. `profile explain`
+  bind), the request is refused with the missing fact named. A refused hook
+  call gets the event's own denial where the agent's hook can deny it
+  (Claude Code `PostToolBatch` included). An
+  event the hook can only observe (Antigravity `PostToolUse`, Cursor's
+  after-the-fact events) is allowed and audited `would_block`, not enforced,
+  and a stop, session-end or idle event gets the agent's plain allow, so the
+  agent is never asked to start another turn. `profile explain`
   shows `refused`, `refused_reason`, `unproven_facts` and the candidate profiles
   (`default_lookup_failed`). A fact no assignment needs does not make the
   decision uncertain. An account is recognized by its SID (SSSD or
@@ -292,9 +299,11 @@ How the keys combine:
   instead. On a qualified-name SSSD Active Directory host with one joined
   domain, a bare entry keeps matching that account after a 1.0.3 upgrade.
   With multiple joined Active Directory domains or a configured trusted
-  child, the entry is ambiguous: affected requests are refused when that
-  assignment could change the profile. Write the qualified principal shown
-  by explain, status, verify or doctor, or the uid, to select one account.
+  child, the entry selects the account of that name in each domain: the
+  default and permissive policy tiers match it and explain, status, verify
+  and doctor warn and name every account; the strict policy tier refuses
+  affected requests when the assignment could change the profile. Write the
+  qualified principal the warning shows, or the uid, to select one account.
 - **`DOMAIN\user` names the verified account domain.** The domain part is the
   NetBIOS name (or DNS name) the directory confirms for the account: winbind,
   also with `use default domain = yes` where accounts have bare names; SSSD

@@ -14,6 +14,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -159,5 +160,31 @@ func TestPerUserLinuxPostsToSameAccountDualStackListener(t *testing.T) {
 	reply, err := PostPerUserHook(context.Background(), addr, "/api/v1/opencode/hook", nil, []byte(`{"tool_input":"ordinary edit"}`))
 	if err != nil || reply.Status != http.StatusOK {
 		t.Fatalf("same-account dual-stack POST: reply=%+v err=%v", reply, err)
+	}
+}
+
+// Under load the TCP handshake can complete before the gateway process
+// accepts the socket. The pre-accept row has no gateway owner yet; wait for
+// the same connected tuple to acquire the listener's uid before sending.
+func TestPerUserPostWaitsForSameAccountAccept(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	var received atomic.Int32
+	go func() {
+		time.Sleep(350 * time.Millisecond)
+		_ = http.Serve(listener, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			received.Add(1)
+			_, _ = w.Write([]byte(`{"action":"allow"}`))
+		}))
+	}()
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	reply, err := PostPerUserHook(ctx, listener.Addr().String(), "/api/v1/claude-code/hook",
+		map[string]string{"Authorization": "Bearer example"}, []byte(`{"command":"echo ok"}`))
+	if err != nil || reply.Status != http.StatusOK || received.Load() != 1 {
+		t.Fatalf("same-account delayed accept: reply=%+v requests=%d error=%v", reply, received.Load(), err)
 	}
 }

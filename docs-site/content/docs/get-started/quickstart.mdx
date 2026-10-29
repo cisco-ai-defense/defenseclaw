@@ -35,7 +35,9 @@ The installer asks which agent to guard: type `claudecode`. Requirements and opt
 defenseclaw init --connector claudecode
 ```
 
-Press Enter through the prompts. Claude Code starts in **observe** mode: DefenseClaw records policy findings without enforcing them. With the default fail mode `closed`, its hook denies supported events when the gateway is unreachable. At **Select connector(s) for action enforcement**, leave the box unchecked. `init` starts the gateway and prints a first-run report. This sample comes from `defenseclaw quickstart --skip-gateway`, which prints the same report, so its Sidecar row says not started where yours says started:
+On an install that already guards other agents, `init --connector claudecode` keeps only Claude Code. To add an agent there, use `defenseclaw setup <agent>` instead.
+
+Press Enter through the prompts. Claude Code starts in **observe** mode: DefenseClaw records policy findings without enforcing them. In the default policy its hook lets a call run with one warning while the gateway is not running; a running hook blocks every other failure it detects. At **Select connector(s) for action enforcement**, leave the box unchecked. `init` starts the gateway and prints a first-run report. This sample comes from `defenseclaw quickstart --skip-gateway`, which prints the same report, so its Sidecar row says not started where yours says started:
 
 <include>../../snippets/first-run-report.mdx</include>
 
@@ -53,7 +55,7 @@ Quit and reopen Claude Code so it loads the hooks, ask it to list the files in t
 defenseclaw guardrail mode action --connector claudecode
 ```
 
-This switches only Claude Code to **action** mode, which enforces the rules. The running gateway applies it without a restart. The hook fail mode is `closed` on a new install: if the gateway is down, tool calls are blocked ([fail modes](/docs/reference/fail-modes)).
+This switches only Claude Code to **action** mode, which enforces the rules. The running gateway applies it without a restart. The mode does not change what an outage does: in the default policy a tool call runs with a warning while the gateway is not running, and `defenseclaw guardrail use-pack strict` blocks it. A mode you saved with `defenseclaw guardrail fail-mode` wins over the policy: with a saved `open` the call still runs under strict, and `defenseclaw guardrail fail-mode closed` (add `--connector <name>` when the mode was saved for one agent) blocks it ([fail modes](/docs/reference/fail-modes)).
 
 </Step>
 
@@ -284,7 +286,7 @@ Reply with:
 If it did not block:
 
 - The agent was open before `init`: quit and reopen it.
-- `defenseclaw doctor` shows a failing hook or gateway row: see [Troubleshooting](/docs/get-started/upgrade#troubleshooting).
+- `defenseclaw doctor` shows a failing hook or gateway row: run the `Next step:` line it prints under that row ([Read the rows](/docs/reference/cli#read-the-rows)).
 - Still in observe mode: run `defenseclaw guardrail status`.
 
 ## Next

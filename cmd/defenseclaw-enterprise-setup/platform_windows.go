@@ -20,6 +20,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"sort"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -708,11 +709,41 @@ func cleanupEnterpriseSetupStage(stageRoot, programData string) error {
 	}
 	for name := range allowed {
 		path := filepath.Join(cleanStage, name)
-		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+		if err := removeEnterpriseSetupStageEntry(path); err != nil && !errors.Is(err, os.ErrNotExist) {
 			return err
 		}
 	}
-	return os.Remove(cleanStage)
+	return removeEnterpriseSetupStageEntry(cleanStage)
+}
+
+// enterpriseSetupStageRemoveWait bounds how long cleanup waits for a staged
+// file another process still holds. Tests lower it.
+var enterpriseSetupStageRemoveWait = 10 * time.Second
+
+// removeEnterpriseSetupStageFile is the removal cleanup makes. Tests
+// replace it.
+var removeEnterpriseSetupStageFile = os.Remove
+
+// removeEnterpriseSetupStageEntry removes one staged file or the empty
+// stage folder. Right after the lifecycle child exits, Windows can still
+// hold its image (defenseclaw.exe) for a moment, and an antivirus scan of a
+// new file opens it without delete sharing: the removal then fails with a
+// sharing violation or access denied although nothing is wrong. A refused
+// /ensure (exit 1639) became exit 1603 that way on a hosted runner. The
+// removal is retried until enterpriseSetupStageRemoveWait; a file still held
+// then fails the cleanup as before.
+func removeEnterpriseSetupStageEntry(path string) error {
+	deadline := time.Now().Add(enterpriseSetupStageRemoveWait)
+	delay := 25 * time.Millisecond
+	for {
+		err := removeEnterpriseSetupStageFile(path)
+		retryable := errors.Is(err, windows.ERROR_SHARING_VIOLATION) || errors.Is(err, windows.ERROR_ACCESS_DENIED)
+		if err == nil || !retryable || !time.Now().Add(delay).Before(deadline) {
+			return err
+		}
+		time.Sleep(delay)
+		delay = min(2*delay, 500*time.Millisecond)
+	}
 }
 
 // cleanupStaleEnterpriseSetupStage removes a renamed stale staging folder.
@@ -863,8 +894,34 @@ func enterpriseLifecycleArguments(stageRoot string, opts enterpriseSetupOptions)
 				arguments = append(arguments, "--refuse-capability-loss")
 			}
 		}
+		if opts.Action == "ensure" {
+			if seconds := enterpriseEnsureChildTimeoutSeconds(opts.LifecycleTimeout); seconds > 0 {
+				arguments = append(arguments, "--timeout-seconds", strconv.Itoa(seconds))
+			}
+		}
 	}
 	return arguments
+}
+
+// enterpriseEnsureChildTimeoutSeconds is the ensure deadline Setup hands
+// its CLI child: TIMEOUTSECONDS less a tenth of it (at most two minutes),
+// so the child ends with its own lifecycle_timeout and service start-mode
+// restore before Setup stops its process tree (GAP-2265: the child kept a
+// fixed 12 minutes and an upgrade on a busy host failed with most of the
+// 30-minute default left). Zero (no limit known) keeps the child's default.
+func enterpriseEnsureChildTimeoutSeconds(limit time.Duration) int {
+	if limit <= 0 {
+		return 0
+	}
+	margin := limit / 10
+	if margin > 2*time.Minute {
+		margin = 2 * time.Minute
+	}
+	seconds := int((limit - margin) / time.Second)
+	if seconds < 60 {
+		seconds = 60
+	}
+	return seconds
 }
 
 func trustedEnterpriseSetupEnvironment(stageRoot string) ([]string, error) {

@@ -1099,6 +1099,14 @@ class PoliciesPanelModel:
         connector = self.connector_of(row)
         return connector if connector and self.multi_connector else ""
 
+    def approval_targets(self, row: object) -> tuple[Any, ...]:
+        """Postures changed by the approval command, including broad writes."""
+        if self.command_connector(row):
+            return (row,)
+        if self.multi_connector:
+            return tuple(target for target in self.postures if self.connector_of(target))
+        return self.postures
+
     def scope_levels(self, row: object | None) -> tuple[str, str]:
         """``(blocks at, alerts at)`` for the scope's tool calls.
 

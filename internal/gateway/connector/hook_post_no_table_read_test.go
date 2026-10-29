@@ -36,7 +36,7 @@ const classifierStub = `defenseclaw_api_listener_unproven() { echo "classify $1"
 `
 
 type postFixture struct {
-	dir, hardening, home, bin, marker string
+	dir, hardening, home, bin, marker, hookDir string
 }
 
 func newPostFixture(t *testing.T) postFixture {
@@ -57,6 +57,9 @@ func newPostFixture(t *testing.T) postFixture {
 	if err := os.MkdirAll(f.bin, 0o700); err != nil {
 		t.Fatal(err)
 	}
+	// The hook's .gateway-helper record names this account's gateway
+	// folder (GAP-1755).
+	f.hookDir = writeShellPostRecordForTest(t, f.home)
 	return f
 }
 
@@ -75,7 +78,7 @@ func (f postFixture) run(t *testing.T, script string, env ...string) (string, st
 	t.Helper()
 	_ = os.Remove(f.marker)
 	cmd := exec.Command("bash", "-c", script, "bash", f.hardening, f.home)
-	cmd.Env = append(os.Environ(), append([]string{"HOME=" + f.home, "DC_TEST_MARKER=" + f.marker}, env...)...)
+	cmd.Env = append(os.Environ(), append([]string{"HOME=" + f.home, "HOOK_DIR=" + f.hookDir, "DC_TEST_MARKER=" + f.marker}, env...)...)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("bash: %v\n%s", err, out)

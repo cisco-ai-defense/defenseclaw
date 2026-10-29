@@ -57,23 +57,41 @@ def _run(cfg, args: list[str]):
 
 
 def test_the_persisted_fail_mode_example_is_the_command_output(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    # The page's own setup: Claude Code in the default policy tier and Codex in
-    # the strict one (oss-outage-open); the saved hook_fail_mode does not
-    # change what a per-user hook does.
-    cfg, _home = _runtime_cfg(monkeypatch, tmp_path, {"claudecode": "", "codex": "open"})
+    # The page's own setup: unset Claude Code in the default tier and unset
+    # Codex in strict. A separate test covers an explicit saved choice.
+    cfg, _home = _runtime_cfg(monkeypatch, tmp_path, {"claudecode": "", "codex": ""})
+    cfg.guardrail.hook_fail_mode = ""
     cfg.guardrail.connectors["codex"].rule_pack = "strict"
     assert _lines(_run(cfg, [])) == _page_example()
 
 
-def test_a_per_user_value_the_tier_does_not_give_is_refused_as_the_page_says(
+def test_a_per_user_explicit_closed_choice_wins_over_the_default_tier(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     cfg, _home = _runtime_cfg(monkeypatch, tmp_path, {"claudecode": "", "codex": ""})
-    app = AppContext()
-    app.cfg = cfg
-    app.logger = MagicMock()
-    result = CliRunner().invoke(cmd_guardrail.fail_mode_cmd, ["closed", "--connector", "codex", "--yes"], obj=app)
-    assert result.exit_code == 1, result.output
-    assert "use-pack strict" in result.output
+    output = _run(cfg, ["closed", "--connector", "codex", "--yes"])
+    assert cfg.guardrail.effective_hook_fail_mode("codex") == "closed"
+    assert "gateway outage will now BLOCK" in output
     page = " ".join(PAGE.read_text(encoding="utf-8").split())
-    assert "Another value changes nothing, explains the rule and exits 1." in page
+    assert "An explicit saved `closed` or `open` wins over the policy tier" in page
+
+
+def test_global_closed_choice_is_saved_when_the_default_was_unset(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    cfg, _home = _runtime_cfg(monkeypatch, tmp_path, {"claudecode": "", "codex": ""})
+    cfg.guardrail.hook_fail_mode = ""
+    _run(cfg, ["closed", "--yes"])
+    assert cfg.guardrail.hook_fail_mode == "closed"
+    assert cfg.guardrail._hook_fail_mode_saved
+    cfg.save.assert_called_once()
+
+
+def test_scoped_open_choice_is_saved_even_when_strict_inherits_global_open(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    cfg, _home = _runtime_cfg(monkeypatch, tmp_path, {"claudecode": "", "codex": ""})
+    cfg.guardrail.connectors["codex"].rule_pack = "strict"
+    _run(cfg, ["open", "--connector", "codex", "--yes"])
+    assert cfg.guardrail.connectors["codex"].hook_fail_mode == "open"
+    cfg.save.assert_called_once()

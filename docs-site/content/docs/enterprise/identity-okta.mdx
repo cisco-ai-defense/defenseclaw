@@ -18,8 +18,8 @@ This applies to per-user installs and the standalone enterprise profile on Linux
 
 ## What was tested
 
-<Callout type="warn" title="Not part of the 1.0.4 certification">
-Active Directory is the certified identity stack in 1.0.4. The Okta lab is retired, so this page describes the last verified behaviour (October 2026, RHEL 9.8, one okta.com org, SSSD 2.9.8 with the `ldap_use_ppolicy` backport, Claude Code, per-user and standalone enterprise installs). Ubuntu, Debian, SLES, RHEL 10, other Okta domains and macOS or Windows with Okta were not tested.
+<Callout type="warn" title="Not part of the release certification">
+Active Directory is the certified identity stack. The Okta lab is retired, so this page describes the last verified behaviour (October 2026, RHEL 9.8, one okta.com org, SSSD 2.9.8 with the `ldap_use_ppolicy` backport, Claude Code, per-user and standalone enterprise installs). Ubuntu, Debian, SLES, RHEL 10, other Okta domains and macOS or Windows with Okta were not tested.
 </Callout>
 
 ## Requirements
@@ -191,7 +191,7 @@ defenseclaw guardrail profile explain --user alice --connector claudecode
 sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux profile-explain --user alice --connector claudecode
 ```
 
-A match of `group` with the group name shows the assignment worked. `default` means no assignment matched. `default_lookup_failed` means an identity fact was not confirmed. When an assignment needs it, the request is refused and names that fact; otherwise the proven or default profile applies. Run `profile-explain --user` for the decision and reason.
+A match of `group` with the group name shows the assignment worked. `default` means no assignment matched. `default_lookup_failed` means an identity fact was not confirmed. When an assignment needs it, the request is refused and names that fact; otherwise the proven or default profile applies. Run `enterprise linux profile-explain --user` for the decision and reason.
 
 </Step>
 

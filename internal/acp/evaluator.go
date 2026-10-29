@@ -176,6 +176,10 @@ type Verdict struct {
 	// refuses it after one said "closed" (observeRefuses, owner decision
 	// 2026-10-20).
 	FailMode string `json:"fail_mode,omitempty"`
+	// Enforced marks a block the gateway enforces in every mode (identity
+	// uncertainty): an observe-mode guard refuses the frame too instead of
+	// passing it on as a would-block (GAP-2103).
+	Enforced bool `json:"enforced,omitempty"`
 }
 
 type Evaluator interface {

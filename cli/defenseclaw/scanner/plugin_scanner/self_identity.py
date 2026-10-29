@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import ntpath
 import os
 import stat
 import sys
@@ -70,20 +71,20 @@ _BRIDGE_PUBLICATION_SCHEMA = {
 # bridge_host), and the copy the Secure Client profile renders
 # (internal/gateway/connector/hooks/*-secure-client.*), which its release pins.
 _BRIDGE_STANDALONE_TEMPLATE_DIGESTS = {
-    "amp": "492c8ef226d7724c86b7b7d50e5b9605f405529a3c43c2f4844fc49864125eb5",
-    "opencode": "b42cf5c034eb76631acf5d33231e6087763405822d35feb6aa5e1b37f3c5f914",
+    "amp": "3817393ed8e0db74efcc13ab47f47852f7131f53879e4aab8a6b2030a102036d",
+    "opencode": "13c489876a3fc4796f4f8f2feccb68861a32d7d511986da2fac4546114128bb0",
 }
 _BRIDGE_TEMPLATE_DIGESTS = {
     "amp": frozenset(
         {
-            "c41c17ed0bdf9fb8dac02fb81ab11a089bea2aa56af58c8cfaff8d60a2102fe8",  # amp-plugin.ts
+            "a92e8b56534e0b559312f50a62079fc001f04ad2b16ea46120d8ab088a108d19",  # amp-plugin.ts
             _BRIDGE_STANDALONE_TEMPLATE_DIGESTS["amp"],
             "cf00f9f404c0711357f55535dd1062667d398acbf7603dfa15fa951d212b4d4b",  # amp-plugin-secure-client.ts
         }
     ),
     "opencode": frozenset(
         {
-            "af07c63dda6c4d67f8281d41dfd1a0927979b13c4ec2b605b8f93ac6164b0749",  # opencode-plugin.js
+            "b3146c794b30052b07cc0887bb263d99d209e541d6100fa0908e384732815e68",  # opencode-plugin.js
             _BRIDGE_STANDALONE_TEMPLATE_DIGESTS["opencode"],
             "72ee5dcb51e28d153714e63401233ace81c17519e8970675d08a19d5730a5ab3",  # opencode-plugin-secure-client.js
         }
@@ -164,6 +165,12 @@ _BRIDGE_DYNAMIC_LINES = {
             "proof",
         ),
         (
+            b'const DC_WINDOWS_POWERSHELL: string = "',
+            b'"\n',
+            b'const DC_WINDOWS_POWERSHELL: string = "{{.WindowsPowerShellJS}}"\n',
+            "powershell",
+        ),
+        (
             b'const DC_GATEWAY_BINARY: string = "',
             b'"\n',
             b'const DC_GATEWAY_BINARY: string = "{{.GatewayBinaryJS}}"\n',
@@ -232,26 +239,17 @@ _BRIDGE_DYNAMIC_LINES = {
             "proof",
         ),
         (
+            b'const DC_WINDOWS_POWERSHELL = "',
+            b'";\n',
+            b'const DC_WINDOWS_POWERSHELL = "{{.WindowsPowerShellJS}}";\n',
+            "powershell",
+        ),
+        (
             b'const DC_GATEWAY_BINARY = "',
             b'";\n',
             b'const DC_GATEWAY_BINARY = "{{.GatewayBinaryJS}}";\n',
             "gateway",
         ),
-    ),
-}
-# A per-user bridge's gateway-outage mode line (Go pluginOutageFailMode):
-# present once in a per-user render, absent from managed and Secure Client
-# ones; its value is open or closed.
-_BRIDGE_OUTAGE_MODE_LINES = {
-    "amp": (
-        b'const DC_OUTAGE_FAIL_MODE: string = "',
-        b'"\n',
-        b'const DC_OUTAGE_FAIL_MODE: string = "{{.OutageFailMode}}"\n',
-    ),
-    "opencode": (
-        b'const DC_OUTAGE_FAIL_MODE = "',
-        b'";\n',
-        b'const DC_OUTAGE_FAIL_MODE = "{{.OutageFailMode}}";\n',
     ),
 }
 _LOWER_HEX = frozenset("0123456789abcdef")
@@ -493,6 +491,24 @@ def _valid_bridge_managed_path(kind: str, value: bytes) -> bool:
     return info.st_uid == 0 and not info.st_mode & 0o022
 
 
+def _valid_bridge_powershell(value: bytes) -> bool:
+    """Setup renders the system Windows PowerShell it resolved with
+    GetSystemDirectoryW; a bridge naming any other executable is not ours."""
+
+    from defenseclaw.doctor_hooks import _windows_system_powershell_path
+
+    expected = _windows_system_powershell_path()
+    try:
+        rendered = json.loads('"' + value.decode("utf-8", errors="strict") + '"')
+    except (UnicodeError, json.JSONDecodeError):
+        return False
+    return (
+        bool(expected)
+        and isinstance(rendered, str)
+        and ntpath.normcase(rendered) == ntpath.normcase(expected)
+    )
+
+
 def _valid_bridge_gateway_binary(value: bytes) -> bool:
     """Accept the gateway binary a per-user bridge runs (Go
     perUserPluginGatewayBinary): unset (the ~/.local/bin gateway) or the
@@ -532,6 +548,8 @@ def _valid_bridge_dynamic_value(
         return value in {b"", b"1"}
     if kind == "mode":
         return value in {b"open", b"closed"}
+    if kind == "powershell":
+        return _valid_bridge_powershell(value)
     if kind in {"socket", "guard", "marker", "native", "lifecycle"}:
         return _valid_bridge_managed_path(kind, value)
     if kind == "gateway":
@@ -570,7 +588,7 @@ def _matches_immutable_bridge_template(
             for index, line in enumerate(lines)
             if line.startswith(prefix) and line.endswith(suffix)
         ]
-        if not matches and kind in {"native", "proof", "mode", "lifecycle", "gateway"}:
+        if not matches and kind in {"native", "proof", "mode", "lifecycle", "powershell", "gateway"}:
             # Current and Secure Client templates have distinct fields, each
             # still covered by its exact pinned digest.
             continue
@@ -598,14 +616,7 @@ def _matches_immutable_bridge_template(
         required_lifecycle = b""
     if dynamic_values.get("lifecycle", b"") != required_lifecycle:
         return False
-    prefix, suffix, canonical = _BRIDGE_OUTAGE_MODE_LINES[connector]
-    outage = [index for index, line in enumerate(lines) if line.startswith(prefix) and line.endswith(suffix)]
-    if len(outage) > 1:
-        return False
-    if outage:
-        if lines[outage[0]][len(prefix) : -len(suffix)] not in {b"open", b"closed"}:
-            return False
-        lines[outage[0]] = canonical
+
     def standalone_socket_matches(digest: str) -> bool:
         if digest != _BRIDGE_STANDALONE_TEMPLATE_DIGESTS[connector]:
             return True

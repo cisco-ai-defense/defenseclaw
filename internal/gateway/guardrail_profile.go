@@ -1806,7 +1806,15 @@ func (a *APIServer) handleGuardrailProfileResolve(w http.ResponseWriter, r *http
 		agent = ""
 	}
 	scans := set.requestScanScopes(r.Context(), connectorName)
-	decision := set.matchAgent(subject, source, connectorName, scans, profilePathAny, agent, nil)
+	explained, legacy := agent, profileAgentLegacy(nil)
+	if source != "" && subject != nil {
+		// A 1.0.3 agent identity is explained as the agent's current one,
+		// with its binding, as the hook decides it (GAP-0019).
+		explained, legacy = set.explainAgent(agent, subject.UserID, connectorName)
+	}
+	decision, refusedOn, sandboxRefused := set.explainOnRequestPaths(connectorName, func(path profilePath) profileDecision {
+		return set.matchAgent(subject, source, connectorName, scans, path, explained, legacy)
+	})
 	out["profile"] = decision.Name
 	out["digest"] = decision.Digest
 	out["match"] = decision.Match
@@ -1827,6 +1835,14 @@ func (a *APIServer) handleGuardrailProfileResolve(w http.ResponseWriter, r *http
 	if decision.Refused != "" {
 		out["refused"] = true
 		out["refused_reason"] = decision.Refused
+		if len(refusedOn) > 0 {
+			out["refused_paths"] = refusedOn
+		}
+	}
+	if sandboxRefused != "" {
+		out["refused_paths"] = []string{"sandbox"}
+		out["sandbox_refused_reason"] = sandboxRefused
+		warnings = append(warnings, sandboxRefusedWarning(connectorName, sandboxRefused))
 	}
 	if len(decision.Candidates) > 0 {
 		// An administrator view: the profiles that may apply, and the
@@ -1846,7 +1862,7 @@ func (a *APIServer) handleGuardrailProfileResolve(w http.ResponseWriter, r *http
 		warnings = append(warnings, fmt.Sprintf("agent %q is not verified against a host identity record by profile-explain; confirm it with agent identities before relying on this answer", agent))
 	}
 	if source == profileSubjectLookup {
-		if view, warning := explainCacheView(set, subject, decision, connectorName, agent, time.Now()); view != nil {
+		if view, warning := explainCacheViewOf(set, subject, decision, connectorName, explained, legacy, time.Now()); view != nil {
 			out["cache"] = view
 			if warning != "" {
 				warnings = append(warnings, warning)

@@ -110,13 +110,16 @@ func TestVerifyAndEnsureFailNonExecutableRegisteredHermesHook(t *testing.T) {
 				t.Fatal(err)
 			}
 			requireOK(t, h.run(Options{Action: ActionVerify}))
-			if err := os.Chmod(h.env.P(script), 0o600); err != nil {
-				t.Fatal(err)
-			}
-			for _, action := range []string{ActionVerify, ActionEnsure} {
-				result := h.run(Options{Action: action})
-				if result.OK || !strings.Contains(messagesOf(result.Errors, codeVerify), "registered Hermes hook is not executable") || result.SecurityComplete {
-					t.Fatalf("%s accepted non-executable registered hook: ok=%v complete=%v errors=%v warnings=%v", action, result.OK, result.SecurityComplete, result.Errors, result.Warnings)
+			// 0100 (GAP-1484): owner execute without read runs nothing.
+			for _, mode := range []os.FileMode{0o600, 0o100} {
+				if err := os.Chmod(h.env.P(script), mode); err != nil {
+					t.Fatal(err)
+				}
+				for _, action := range []string{ActionVerify, ActionEnsure} {
+					result := h.run(Options{Action: action})
+					if result.OK || !strings.Contains(messagesOf(result.Errors, codeVerify), "registered Hermes hook is not executable") || result.SecurityComplete {
+						t.Fatalf("%s accepted a registered hook with mode %#o: ok=%v complete=%v errors=%v warnings=%v", action, mode, result.OK, result.SecurityComplete, result.Errors, result.Warnings)
+					}
 				}
 			}
 			if err := os.Chmod(h.env.P(script), 0o700); err != nil {

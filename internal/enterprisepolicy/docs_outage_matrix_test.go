@@ -5,6 +5,7 @@ package enterprisepolicy
 
 import (
 	"encoding/json"
+	"errors"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -56,9 +57,6 @@ type documentedOutage struct {
 	// allow, where only the hook decides.
 	ManagedOpen        string `json:"managedOpen"`
 	ManagedOpenNoGuard string `json:"managedOpenNoGuard"`
-	// HeldUntilRestart: where the guard blocks the outage, an agent that
-	// started during it keeps blocking until it restarts.
-	HeldUntilRestart   bool   `json:"heldUntilRestart"`
 	SecureClientClosed string `json:"secureClientClosed"`
 	StrictAvailability string `json:"strictAvailability"`
 }
@@ -115,13 +113,12 @@ func codeOutage(t *testing.T, conn connector.Connector) documentedOutage {
 			noGuard = managedOpenPerUserRouteBlocksLM
 		}
 	}
-	managedOpen, guardBlocksSomewhere := managedOpenWithDefaultGuard(t, conn.Name(), noGuard)
+	managedOpen := managedOpenWithDefaultGuard(t, conn.Name(), noGuard)
 	return documentedOutage{
 		PerUserClosed:      outage.PerUserClosed,
 		PerUserOpen:        outage.PerUserOpen,
 		ManagedOpen:        managedOpen,
 		ManagedOpenNoGuard: noGuard,
-		HeldUntilRestart:   outage.GuardCheckedAtLoad && guardBlocksSomewhere,
 		SecureClientClosed: outage.SecureClientClosed,
 		StrictAvailability: outage.StrictAvailability,
 	}
@@ -130,39 +127,36 @@ func codeOutage(t *testing.T, conn connector.Connector) documentedOutage {
 // managedOpenWithDefaultGuard is the managed open cell under the default
 // machine policy: on each OS the call blocks where the foreign-hook guard
 // blocks the outage (GuardBlocksOutage) and otherwise does what the hook
-// does (noGuard, the cell for foreign_hooks report or allow). It also
-// reports whether the guard blocks the outage on any OS.
-func managedOpenWithDefaultGuard(t *testing.T, name, noGuard string) (string, bool) {
+// does (noGuard, the cell for foreign_hooks report or allow).
+func managedOpenWithDefaultGuard(t *testing.T, name, noGuard string) string {
 	t.Helper()
 	policy := config.EnterpriseMachinePolicyConfig{}.PolicyFor(name)
 	preserve := policy
 	preserve.ManagedHooksOnly = config.ManagedHooksOnlyPreserve
 	guard, guardPreserve := map[string]bool{}, map[string]bool{}
-	somewhere := false
 	for _, goos := range outageTableOSes {
 		guard[goos] = GuardBlocksOutage(name, goos, policy)
 		guardPreserve[goos] = GuardBlocksOutage(name, goos, preserve)
-		somewhere = somewhere || guard[goos]
 	}
 	all := func(m map[string]bool) bool { return m["linux"] && m["darwin"] && m["windows"] }
 	none := func(m map[string]bool) bool { return !m["linux"] && !m["darwin"] && !m["windows"] }
 	switch {
 	case all(guard):
-		return managedOpenBlocks, somewhere
+		return managedOpenBlocks
 	case guard["linux"] && guard["darwin"] && !guard["windows"]:
 		// Windows does what the hook does: every no-guard value but blocks
 		// lets a Windows outage call run.
 		if noGuard == managedOpenBlocks {
-			return managedOpenBlocks, somewhere
+			return managedOpenBlocks
 		}
-		return managedOpenBlocksLinuxMacOS, somewhere
+		return managedOpenBlocksLinuxMacOS
 	case none(guard) && all(guardPreserve) && noGuard == managedOpenRuns:
-		return managedOpenRunsBlocksWithHooksOnlyPreserve, somewhere
+		return managedOpenRunsBlocksWithHooksOnlyPreserve
 	case none(guard) && none(guardPreserve):
-		return noGuard, somewhere
+		return noGuard
 	}
 	t.Errorf("%s: no table value for a guard that blocks an outage on %v (%v with managed_hooks_only preserve) over %q; add one", name, guard, guardPreserve, noGuard)
-	return "", somewhere
+	return ""
 }
 
 func TestDocsCapabilityMatrixOutageMatchesTheHooks(t *testing.T) {
@@ -279,9 +273,18 @@ var sentenceBreak = regexp.MustCompile(`(?:[.!?])\s+|\s\|\s|\n\s*\n`)
 func pinnedOutageSentence(rel, sentence string) bool {
 	switch rel {
 	case "connectors/antigravity.mdx":
-		return strings.HasPrefix(sentence, "With the default fail mode `closed`, when the gateway is unreachable the running hook denies `PreToolUse`")
+		// The two 1.0.5 per-user/managed outage sentences of the Antigravity verdict
+		// mapping are pinned by test-docs-claims.ts as well (train T2).
+		return strings.HasPrefix(sentence, "With the default fail mode `closed`, when the gateway is unreachable the running hook denies `PreToolUse`") ||
+			strings.HasPrefix(sentence, "When the gateway is not running, a per-user install in the default or permissive policy lets `PreToolUse` run with one warning") ||
+			strings.HasPrefix(sentence, "On a managed host the administrator's fail mode decides an outage: `closed`, the default, denies it")
 	case "connectors/cursor.mdx":
 		return strings.HasPrefix(sentence, "The administrator's resolved fail mode decides what the running hook does on a gateway outage")
+	case "connectors/hermes.mdx":
+		// The managed-standalone Windows row of the Hermes outage table
+		// (docs e9847430bd, GAP-0515, verified on dc-fc-r104-sa-ewin1) is
+		// pinned by test-docs-claims.ts (train T7).
+		return strings.HasPrefix(sentence, "On Windows, where Hermes has no guard, an administrator's `open` lets the call run during an outage")
 	}
 	return false
 }
@@ -332,5 +335,40 @@ func TestOutageBehaviourIsStatedOnlyInTheCapabilityMatrix(t *testing.T) {
 		if !linked[page] {
 			t.Errorf("%s does not link to the gateway outage table (%s)", page, outageTableLink)
 		}
+	}
+}
+
+// The OpenCode and Amp plugins render closed on a managed standalone host
+// (only Secure Client renders the administrator mode), so a page that says
+// an administrator may pick open for an outage must scope it to Secure
+// Client (GAP-2309).
+func TestPluginPagesScopeAdministratorOutageOpenToSecureClient(t *testing.T) {
+	docs := filepath.Join(repoRoot(), "docs-site", "content", "docs")
+	read := 0
+	// The reference/connectors pages exist only in the newer docs layout;
+	// a layout without them is checked on the pages it has.
+	for _, rel := range []string{
+		"connectors/opencode.mdx", "connectors/amp.mdx",
+		"reference/connectors/opencode.mdx", "reference/connectors/amp.mdx",
+	} {
+		data, err := os.ReadFile(filepath.Join(docs, filepath.FromSlash(rel)))
+		if errors.Is(err, fs.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		read++
+		for _, sentence := range sentenceBreak.Split(string(data), -1) {
+			low := strings.ToLower(strings.Join(strings.Fields(sentence), " "))
+			if strings.Contains(low, "administrator") && strings.Contains(low, "outage") &&
+				regexp.MustCompile(`\b(?:select|choose|pick)s?\b[^.]*\bopen\b`).MatchString(low) &&
+				!strings.Contains(low, "secure client") {
+				t.Errorf("%s offers administrator outage open without scoping it to Secure Client: %.240q", rel, sentence)
+			}
+		}
+	}
+	if read == 0 {
+		t.Fatal("no OpenCode or Amp connector page found")
 	}
 }

@@ -26,6 +26,7 @@ import (
 	"os/user"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"syscall"
@@ -147,6 +148,11 @@ func enterpriseHookCheckWorkerCapabilities(status string) error {
 	}
 	return errors.New("enterprise hooks: process capabilities are unavailable")
 }
+
+// enterpriseHookFilesystemPassGroupReuse is how old a worker group list a
+// pass armed by a file change may reuse: about the default one-minute interval
+// pass, which always resolves them again.
+var enterpriseHookFilesystemPassGroupReuse = 90 * time.Second
 
 // lockEnterpriseHookReconcile takes the exclusive reconcile lock inside the
 // root-owned authorization directory so the watcher and a manual
@@ -528,6 +534,23 @@ func enterpriseHookWorkerPathWithin(home, path string) bool {
 		!strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }
 
+// enterpriseHookRecheckTouches reports whether the running pass's trigger
+// paths name a file in one of dirs (an account's home, a target's watched
+// folders), so that account's pass gets the recheck window.
+func enterpriseHookRecheckTouches(dirs ...string) bool {
+	if enterpriseHookReconcileRecheckAll {
+		return true
+	}
+	for _, path := range enterpriseHookReconcileRecheckPaths {
+		for _, dir := range dirs {
+			if dir != "" && enterpriseHookWorkerPathWithin(filepath.Clean(dir), path) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // enterpriseHookStandaloneOutcome is one row's worker disposition.
 type enterpriseHookStandaloneOutcome struct {
 	ok       bool
@@ -592,6 +615,17 @@ func dispatchEnterpriseHookStandaloneJobs(
 	return outcomes
 }
 
+// watchEnterpriseHookManagedCodexConfig makes a change of the account's Codex
+// user config start a pass, so a conflicting features.hooks key is removed
+// soon after the user writes it.
+func watchEnterpriseHookManagedCodexConfig(home string, watchDirs, sharedFiles map[string]struct{}) {
+	configDir := filepath.Join(home, ".codex")
+	watchDirs[home] = struct{}{}
+	watchDirs[configDir] = struct{}{}
+	sharedFiles[configDir] = struct{}{} // Creation after enrollment is a repair signal.
+	sharedFiles[filepath.Join(configDir, "config.toml")] = struct{}{}
+}
+
 // enterpriseHookStandaloneSlot tracks one dispatched manifest row.
 type enterpriseHookStandaloneSlot struct {
 	key     string
@@ -604,6 +638,20 @@ type enterpriseHookStandaloneSlot struct {
 	// credentialID fingerprints the hook credential rendered for the
 	// target (connector.UserScopedCredentialKeyID).
 	credentialID string
+}
+
+// enterpriseHookStandaloneProductCredentialDigests are the digests of the
+// product credentials an exporter in an account's own agent configuration
+// may carry: the gateway token (replaceable in tests). The foreign cleanup
+// hands them to its as-the-user worker (GAP-2376).
+var enterpriseHookStandaloneProductCredentialDigests = func() []connector.NativeOTLPCredentialDigest {
+	if cfg == nil {
+		return nil
+	}
+	if digest, ok := connector.NativeOTLPCredentialDigestOf(cfg.Gateway.ResolvedToken()); ok {
+		return []connector.NativeOTLPCredentialDigest{digest}
+	}
+	return nil
 }
 
 // runEnterpriseHookReconcileOnceStandaloneUnix is the standalone Unix
@@ -633,7 +681,14 @@ func runEnterpriseHookReconcileOnceStandaloneUnix(ctx context.Context) (enterpri
 	hookSocket, serviceUID, transportErr := enterpriseHookStandaloneHookTransport()
 	resolver := enterprisehooks.StandaloneResolver()
 	if caching, ok := resolver.(*unixidentity.CachingResolver); ok {
-		caching.Reset()
+		if enterpriseHookReconcileRecheckWindow > 0 {
+			// A pass a file change armed reuses the workers' recent group
+			// lists (ResetKeepingGroupIDs); interval, startup and retry
+			// passes ask the directory for everything again.
+			caching.ResetKeepingGroupIDs(enterpriseHookFilesystemPassGroupReuse)
+		} else {
+			caching.Reset()
+		}
 	}
 	registry := newEnterpriseHooksConnectorRegistry()
 	bindings := loadEnterpriseHookUnixBindings()
@@ -654,12 +709,18 @@ func runEnterpriseHookReconcileOnceStandaloneUnix(ctx context.Context) (enterpri
 	jobs := map[int]*enterpriseHookWorkerJob{}
 	slots := map[int]enterpriseHookStandaloneSlot{}
 	var machineWorkerRows []int
+	// codexFeatureRepair: accounts whose job already removes a conflicting
+	// user features.hooks key (a machine-policy Codex row queued it).
+	codexFeatureRepair := map[int]bool{}
 	watchDirs := map[string]struct{}{}
 	exclusiveFiles := map[string]struct{}{}
 	sharedFiles := map[string]struct{}{}
 	// ownedByRow is each dispatched target's exclusive-writer files, which
 	// the pass records the fingerprints of for status (GAP-0044).
 	ownedByRow := map[int][]string{}
+	// recheckAccounts are the accounts this pass's filesystem events named
+	// (enterpriseHookRecheckTouches): only their jobs get the recheck window.
+	recheckAccounts := map[int]bool{}
 	for _, target := range manifest.Targets {
 		if !target.IsEnabled() {
 			continue
@@ -770,11 +831,8 @@ func runEnterpriseHookReconcileOnceStandaloneUnix(ctx context.Context) (enterpri
 					mode := enterpriseHookWorkerModeBlockPersonalClaude
 					if strings.EqualFold(row.Connector, "codex") {
 						mode = enterpriseHookWorkerModeRepairManagedCodexFeature
-						configDir := filepath.Join(account.Home, ".codex")
-						watchDirs[account.Home] = struct{}{}
-						watchDirs[configDir] = struct{}{}
-						sharedFiles[configDir] = struct{}{} // Creation after enrollment is a repair signal.
-						sharedFiles[filepath.Join(configDir, "config.toml")] = struct{}{}
+						watchEnterpriseHookManagedCodexConfig(account.Home, watchDirs, sharedFiles)
+						codexFeatureRepair[account.UID] = true
 					}
 					job.Request.Targets = append(job.Request.Targets, enterpriseHookWorkerTarget{Index: index,
 						Mode: mode,
@@ -880,6 +938,9 @@ func runEnterpriseHookReconcileOnceStandaloneUnix(ctx context.Context) (enterpri
 			job = &enterpriseHookWorkerJob{Account: account, Request: enterpriseHookWorkerRequest{Operation: enterpriseHookWorkerOpApply, Standalone: true}}
 			jobs[account.UID] = job
 		}
+		if dirs, watchErr := enterprisehooks.WatchDirs(opts); watchErr == nil && enterpriseHookRecheckTouches(dirs...) {
+			recheckAccounts[account.UID] = true
+		}
 		job.Request.TightenHome = job.Request.TightenHome || tightenHome
 		job.Request.Targets = append(job.Request.Targets, enterpriseHookWorkerTarget{
 			Index:               index,
@@ -889,7 +950,58 @@ func runEnterpriseHookReconcileOnceStandaloneUnix(ctx context.Context) (enterpri
 		})
 	}
 
+	// Machine policy pins Codex hooks on for every user, so the enumerator
+	// need not list a Codex row for an account it enrolls for another
+	// connector (a managed macOS account enrolled only for Hermes). Its own
+	// `codex features disable hooks` still writes features.hooks=false, and
+	// Codex then refuses every project trust write. Remove that key, as the
+	// user, for every account this pass dispatches, as the Codex row does
+	// (GAP-0791). Its outcome changes no row: hooks stay pinned on either way.
+	var codexFeatureOnly []int
+	if _, published := machinePolicy["codex"]; published {
+		if covered, err := enterpriseHookStandaloneMachinePolicyCovered("codex"); err == nil && covered {
+			uids := make([]int, 0, len(jobs))
+			for uid := range jobs {
+				uids = append(uids, uid)
+			}
+			slices.Sort(uids)
+			for _, uid := range uids {
+				job := jobs[uid]
+				account := job.Account
+				if codexFeatureRepair[account.UID] {
+					continue
+				}
+				codexFeatureRepair[account.UID] = true
+				index := len(manifest.Targets) + len(codexFeatureOnly)
+				codexFeatureOnly = append(codexFeatureOnly, index)
+				watchEnterpriseHookManagedCodexConfig(account.Home, watchDirs, sharedFiles)
+				job.Request.Targets = append(job.Request.Targets, enterpriseHookWorkerTarget{Index: index,
+					Mode: enterpriseHookWorkerModeRepairManagedCodexFeature,
+					Options: enterpriseHookWorkerOptionsFrom(enterprisehooks.InstallOptions{
+						ConnectorName: "codex", UserHome: account.Home, OwnerUID: account.UID, OwnerGID: account.GID,
+					})})
+			}
+		}
+	}
+
+	// Every job of an account the events named gets the window, whichever
+	// target created it: a job a machine-policy Claude Code or Codex row
+	// created first had none, so the account's Hermes was checked once
+	// (GAP-1825 review R4-1).
+	if window := int(enterpriseHookReconcileRecheckWindow / time.Millisecond); window > 0 {
+		for uid, job := range jobs {
+			if recheckAccounts[uid] || enterpriseHookRecheckTouches(job.Account.Home) {
+				job.Request.RecheckMillis = window
+			}
+		}
+	}
 	outcomes := dispatchEnterpriseHookStandaloneJobs(ctx, jobs)
+	for _, index := range codexFeatureOnly {
+		if outcome := outcomes[index]; !outcome.ok && !outcome.pending {
+			fmt.Fprintf(enterpriseHookWorkerLog, "[hook-guardian] warn: codex: the user features.hooks preference was not removed: %s\n",
+				firstNonEmpty(outcome.err, errEnterpriseHookWorkerNoResult.Error()))
+		}
+	}
 	for _, index := range machineWorkerRows {
 		row := rows[index]
 		outcome, ok := outcomes[index]
@@ -988,6 +1100,7 @@ func runEnterpriseHookReconcileOnceStandaloneUnix(ctx context.Context) (enterpri
 	run.Pending = pending
 	run.Repairs = repairs
 	run.StateErr = stateErr
+	dropEnterpriseHookAccountHomeWatchDirs(watchDirs, manifest.Targets, jobs)
 	run.WatchDirs = sortedEnterpriseHookWatchDirs(watchDirs)
 	run.WatchExclusiveFiles = sortedEnterpriseHookWatchDirs(exclusiveFiles)
 	run.WatchSharedFiles = sortedEnterpriseHookWatchDirs(sharedFiles)
@@ -1278,17 +1391,19 @@ func standaloneHookTransportFromDescriptor(descriptor *managed.RuntimeDescriptor
 
 // enterpriseHookStandaloneMachinePolicySet names the connectors the
 // lifecycle published through vendor machine policy, from the root-owned
-// runtime descriptor. Replaced in tests.
+// runtime descriptor. It is nil when the descriptor cannot be read (for
+// example mid-upgrade): the published set is then unknown, not empty
+// (GAP-1889). Replaced in tests.
 var enterpriseHookStandaloneMachinePolicySet = func() map[string]struct{} {
-	out := map[string]struct{}{}
 	layout, err := managed.StandaloneLayoutFor(runtime.GOOS)
 	if err != nil {
-		return out
+		return nil
 	}
 	descriptor, err := managed.LoadRuntimeDescriptor(layout.DescriptorPath)
 	if err != nil {
-		return out
+		return nil
 	}
+	out := map[string]struct{}{}
 	for _, name := range descriptor.MachinePolicyConnectors {
 		out[strings.ToLower(strings.TrimSpace(name))] = struct{}{}
 	}
@@ -1335,5 +1450,37 @@ func writeEnterpriseHookGuardianRepairs(dataDir string, repaired []enterpriseHoo
 	path := filepath.Join(dataDir, hookGuardianRepairsFile)
 	if err := writeEnterpriseHookProtectedFile(path, append(data, '\n')); err != nil {
 		fmt.Fprintf(enterpriseHookWorkerLog, "[hook-guardian] warn: record repaired targets: %v\n", err)
+	}
+}
+
+// enterpriseHookWatchSkipsAccountHomes says whether the guardian leaves the
+// home folder of an enrolled account itself out of its watch set. On macOS
+// fsnotify's kqueue backend opens every entry of a watched folder, and an
+// open of a privacy-protected entry of a home (~/.Trash, ~/Movies) can block
+// for good: the guardian then stopped reconciling and re-publishing its
+// ledger a minute after any restart, so verify failed (GAP-2454). The
+// folders below the home stay watched; a change of a file directly in a home
+// is taken by the interval pass. Replaceable in tests.
+var enterpriseHookWatchSkipsAccountHomes = func() bool { return runtime.GOOS == "darwin" }
+
+// dropEnterpriseHookAccountHomeWatchDirs removes the home folder of every
+// enrolled account and dispatched job from watchDirs where
+// enterpriseHookWatchSkipsAccountHomes says so.
+func dropEnterpriseHookAccountHomeWatchDirs(watchDirs map[string]struct{}, targets []enterprisehooks.ManifestTarget, jobs map[int]*enterpriseHookWorkerJob) {
+	if len(watchDirs) == 0 || !enterpriseHookWatchSkipsAccountHomes() {
+		return
+	}
+	drop := func(home string) {
+		if home = strings.TrimSpace(home); home != "" {
+			delete(watchDirs, filepath.Clean(home))
+		}
+	}
+	for _, target := range targets {
+		drop(target.UserHome)
+	}
+	for _, job := range jobs {
+		if job != nil {
+			drop(job.Account.Home)
+		}
 	}
 }

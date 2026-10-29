@@ -376,6 +376,55 @@ func powerShellCommandPreservesNext(command CommandFact) bool {
 // exactPowerShellCommandBody accepts only startup switches whose argument
 // boundaries are fixed. PowerShell joins words after -Command with spaces;
 // -EncodedCommand is one UTF-16LE script, with no trailing arguments.
+// PowerShellCommandBodyActions returns the complete analysis of the exact
+// -Command or -EncodedCommand body of each static top-level pwsh or
+// powershell call of a partial action, such as `pwsh -Command "<body>"`
+// without -NoProfile (a profile runs before the body) or the same call with a
+// runtime-expanded redirect target. facts must be Analyze(input).
+//
+// The body runs as written whatever made the whole action partial: a profile
+// only runs commands before it, an outer redirect only takes its output, and a
+// list is judged as if every member runs. A caller may count a match on a
+// body only for a rule whose proof reads the body's own commands and the data
+// flow between them; a non-match proves nothing about the action.
+func PowerShellCommandBodyActions(input Input, facts Facts) (bodies []Facts) {
+	defer func() {
+		if recover() != nil {
+			bodies = nil
+		}
+	}()
+	if facts.Parse.Status != StatusPartial {
+		return nil
+	}
+	for _, outer := range facts.Commands {
+		if outer.ParentCommandID != 0 {
+			continue
+		}
+		switch strings.ToLower(outer.Program) {
+		case "pwsh", "pwsh.exe", "powershell", "powershell.exe":
+		default:
+			continue
+		}
+		if !staticCertainPOSIXOrPowerShellProcess(outer) {
+			continue
+		}
+		body, ok := exactPowerShellCommandBody(outer.Argv)
+		if !ok {
+			continue
+		}
+		inner := input
+		inner.Args, inner.Argv = nil, nil
+		inner.Tool = "powershell"
+		inner.Command = body
+		inner.DialectHint = DialectPowerShell
+		parsed := Analyze(inner)
+		if parsed.Authoritative() && parsed.Parse.Status == StatusComplete {
+			bodies = append(bodies, parsed)
+		}
+	}
+	return bodies
+}
+
 func exactPowerShellCommandBody(argv []string) (string, bool) {
 	if len(argv) < 3 {
 		return "", false

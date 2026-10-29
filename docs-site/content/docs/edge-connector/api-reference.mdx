@@ -89,16 +89,28 @@ Returns all registered devices with an aggregate fleet summary.
       "flags": 0,
       "denied_total": 42,
       "allowed_total": 18305,
-      "flash_writes": 1200
+      "warned_total": 7,
+      "escalated_total": 1,
+      "flash_writes": 1200,
+      "last_uptime": 86400,
+      "boot_counter": 3,
+      "prev_denied": 0,
+      "prev_allowed": 0,
+      "prev_warned": 0,
+      "prev_escalated": 0,
+      "boot_epoch": 3
     }
   ],
+  "limit": 10000,
+  "offset": 0,
   "summary": {
     "total": 150,
     "online": 142,
     "offline": 5,
     "degraded": 2,
     "lockdown": 1
-  }
+  },
+  "total": 150
 }
 ```
 
@@ -234,7 +246,16 @@ Returns the full device record for a specific device. The `{id}` is the 64-bit c
   "flags": 0,
   "denied_total": 42,
   "allowed_total": 18305,
-  "flash_writes": 1200
+  "warned_total": 7,
+  "escalated_total": 1,
+  "flash_writes": 1200,
+  "last_uptime": 86400,
+  "boot_counter": 3,
+  "prev_denied": 0,
+  "prev_allowed": 0,
+  "prev_warned": 0,
+  "prev_escalated": 0,
+  "boot_epoch": 3
 }
 ```
 

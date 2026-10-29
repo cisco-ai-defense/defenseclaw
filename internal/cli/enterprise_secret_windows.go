@@ -107,6 +107,9 @@ func init() {
 	// Every verb prints its --json failure document for a flag error,
 	// status too (mgmt-agent-api GAP-0029).
 	enterpriseSecretArgumentRefusal = func(cmd *cobra.Command, action string, opts *enterpriseSecretOptions, err error) error {
+		if ev, ok := secretChangeEvent(action, opts.name, false, "invalid_arguments", err, false); ok {
+			recordWindowsChangeRefusal(cmd, ev)
+		}
 		return reportWindowsSecretFailure(cmd, action, opts, err, opts.json || secretArgsRequestJSON(secretRawArgs()))
 	}
 	enterpriseSecretCmd.AddCommand(&cobra.Command{
@@ -187,7 +190,15 @@ func runEnterpriseSecret(cmd *cobra.Command, action string, opts *enterpriseSecr
 		})
 	}
 	if change.noop {
+		if action == "remove" {
+			fmt.Fprintf(cmd.OutOrStdout(), "credential %s was not stored; nothing to remove\n", opts.name)
+			return nil
+		}
 		fmt.Fprintf(cmd.OutOrStdout(), "credential %s already holds this value; gateway restart not needed\n", opts.name)
+		return nil
+	}
+	if action == "remove" && !change.changed {
+		fmt.Fprintf(cmd.OutOrStdout(), "credential %s was not stored; nothing to remove; gateway restarted: %v\n", opts.name, change.restarted)
 		return nil
 	}
 	fmt.Fprintf(cmd.OutOrStdout(), "credential %s %s; gateway restarted: %v\n", opts.name, windowsSecretChanged(action), change.restarted)
@@ -428,8 +439,14 @@ func changeWindowsSecret(cmd *cobra.Command, action string, opts *enterpriseSecr
 		}
 	}
 	store.close()
-	// The gateway reads credentials when it starts; apply the change now.
-	restarted, err := windowsSecretRestartGateway(recovery.arm)
+	// The gateway reads credentials when it starts; apply the change now. An
+	// identical value or an absent credential needs no restart once the
+	// running gateway started after that credential last changed: it loaded
+	// exactly what is stored (GAP-0712, GAP-1690).
+	restarted := false
+	if !unchanged || !windowsSecretGatewayStartedAfter(windowsSecretLastChange(layout, opts.name, action)) {
+		restarted, err = windowsSecretRestartGateway(recovery.arm)
+	}
 	if err != nil {
 		// A refused SCM stop did not stop this service. A concurrent
 		// administrator stop is not this command's restart to recover.
@@ -447,6 +464,51 @@ func changeWindowsSecret(cmd *cobra.Command, action string, opts *enterpriseSecr
 	}
 	change.restarted, change.noop, change.changed = restarted, unchanged && !restarted, !unchanged
 	return change, nil
+}
+
+// windowsSecretLastChange is when credential name last changed in the
+// store: its file's last write for a stored value, the store folder's for an
+// absent one (a removal writes the folder), and the folder that holds the
+// store when no store folder exists (nothing was ever stored, or removing
+// the store folder wrote its parent): every remove of an absent credential
+// on a computer with no credentials restarted the gateway (GAP-1690). The
+// zero time when unknown.
+func windowsSecretLastChange(layout managed.StandaloneLayout, name, action string) time.Time {
+	path := layout.SecretsDir
+	if action == "set" {
+		path = filepath.Join(layout.SecretsDir, name)
+	}
+	info, err := os.Lstat(path)
+	if errors.Is(err, os.ErrNotExist) && action != "set" {
+		info, err = os.Lstat(filepath.Dir(filepath.Clean(layout.SecretsDir)))
+	}
+	if err != nil {
+		return time.Time{}
+	}
+	return info.ModTime()
+}
+
+// windowsSecretGatewayStartedAfter reports whether the running gateway
+// process was created after changedAt; false when that cannot be shown. A
+// seam for tests.
+var windowsSecretGatewayStartedAfter = func(changedAt time.Time) bool {
+	if changedAt.IsZero() {
+		return false
+	}
+	pid := windowsStandaloneGatewayPID()
+	if pid == 0 {
+		return false
+	}
+	process, err := windows.OpenProcess(windows.PROCESS_QUERY_LIMITED_INFORMATION, false, pid)
+	if err != nil {
+		return false
+	}
+	defer func() { _ = windows.CloseHandle(process) }()
+	var created, exited, kernel, user windows.Filetime
+	if err := windows.GetProcessTimes(process, &created, &exited, &kernel, &user); err != nil {
+		return false
+	}
+	return time.Unix(0, created.Nanoseconds()).After(changedAt)
 }
 
 func windowsSecretAbsentRead(err error) bool {
@@ -549,16 +611,44 @@ func readWindowsSecretInstalledConfig(layout managed.StandaloneLayout, allowAbse
 		return nil, secretFailed(string(enterprisebundle.CodeStateInvalid), windowsSecretExitFailure,
 			fmt.Errorf("cannot trust the installed config %s (%v); nothing was removed", layout.ConfigPath, err))
 	}
-	raw, err := os.ReadFile(layout.ConfigPath)
+	raw, err := readWindowsSecretConfigAsCaller(layout.ConfigPath)
 	if err != nil {
 		return nil, secretFailed(string(enterprisebundle.CodeStateInvalid), windowsSecretExitFailure,
 			fmt.Errorf("cannot read the installed config %s (%v); nothing was removed: restore read access to the config and run it again", layout.ConfigPath, err))
+	}
+	// The gateway reads the config as its service account when it starts
+	// again after the change: a config that account cannot read would leave
+	// it stopped with the credential gone (GAP-0750).
+	if err := managed.ValidateServiceCanReadTree(layout.ConfigPath, "installed config", layout.ServiceUser); err != nil && !managed.IsServiceAccountUnresolved(err) {
+		return nil, secretFailed(string(enterprisebundle.CodeStateInvalid), windowsSecretExitFailure,
+			fmt.Errorf("the gateway could not start on the installed config after this change (%v); nothing was removed", err))
 	}
 	if _, err := config.LoadRuntimeV8InspectionCandidateFromBytes(layout.ConfigPath, raw); err != nil {
 		return nil, secretFailed(string(enterprisebundle.CodeStateInvalid), windowsSecretExitFailure,
 			fmt.Errorf("cannot load the installed config %s (%v); nothing was removed", layout.ConfigPath, err))
 	}
 	return raw, nil
+}
+
+// readWindowsSecretConfigAsCaller reads the installed config with the
+// caller's own access check. os.ReadFile opens with backup semantics, so an
+// elevated caller whose token had SeBackupPrivilege enabled read a config
+// whose DACL denies Administrators, removed the credential, and the gateway
+// then failed to start (GAP-0750, TST-30694).
+func readWindowsSecretConfigAsCaller(path string) ([]byte, error) {
+	name, err := windows.UTF16PtrFromString(path)
+	if err != nil {
+		return nil, err
+	}
+	handle, err := windows.CreateFile(name, windows.GENERIC_READ,
+		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE,
+		nil, windows.OPEN_EXISTING, windows.FILE_ATTRIBUTE_NORMAL, 0)
+	if err != nil {
+		return nil, &os.PathError{Op: "open", Path: path, Err: err}
+	}
+	file := os.NewFile(uintptr(handle), path)
+	defer file.Close()
+	return io.ReadAll(io.LimitReader(file, windowsEnterpriseHotConfigMaxBytes+1))
 }
 
 func removeWindowsSecret(store *windowsSecretStore, name string) error {
@@ -879,27 +969,98 @@ func writeWindowsSecret(store *windowsSecretStore, name string, value []byte) er
 	if err != nil || gateway == nil {
 		return fmt.Errorf("resolve the gateway service SID (%s): %v", windowsSecretGatewayAccount, err)
 	}
+	// GAP-2430: keep the stored credential under a second name until the
+	// new value passes the gateway trust check below. A failed check put the
+	// new file away and the previous credential went with it, while the
+	// result said change_failed. The extra name is a hard link: the same
+	// file, bytes and protected DACL, so putting it back changes nothing.
+	kept, keepErr := keepWindowsSecret(store, name)
+	dropKept := kept != ""
+	defer func() {
+		if dropKept {
+			_ = os.Remove(kept)
+		}
+	}()
 	final, err := storeWindowsSecret(store, name, value, gateway)
 	if err != nil {
 		return err
 	}
-	// Prove the gateway's reader accepts the stored credential. This runs
-	// with the administrator's token, so it checks the path, owner and ACL
-	// shape; the gateway's own rights come from the reader ACEs above
-	// (pinned by TestWindowsSecretStoreUsesTheGatewayReaderDACL).
+	verifyErr := windowsSecretTrustCheck(name, store.dir)
+	if verifyErr == nil {
+		return nil
+	}
+	if kept != "" {
+		if err := restoreWindowsSecret(kept, final); err != nil {
+			// Never drop the only copy of the previous value: leave it
+			// under its kept name and say how to put it back.
+			dropKept = false
+			return fmt.Errorf("the new credential failed the gateway trust check, and the previous credential could not be put back (%v); it is kept as %s: rename it to %s, or run secret set again: %w", err, kept, name, verifyErr)
+		}
+		return fmt.Errorf("the new credential failed the gateway trust check; the previous credential is kept unchanged: %w", verifyErr)
+	}
+	_ = os.Remove(final)
+	if keepErr != nil {
+		return fmt.Errorf("the new credential failed the gateway trust check and was removed; the previous credential could not be kept (%v): %w", keepErr, verifyErr)
+	}
+	return fmt.Errorf("the new credential failed the gateway trust check and was removed: %w", verifyErr)
+}
+
+// keepWindowsSecret gives the stored credential name a second, hidden name
+// in the pinned store (a hard link), so writeWindowsSecret can put it back.
+// "" and no error when nothing is stored.
+func keepWindowsSecret(store *windowsSecretStore, name string) (string, error) {
+	final := filepath.Join(store.dir, name)
+	info, err := os.Lstat(final)
+	if errors.Is(err, os.ErrNotExist) {
+		return "", nil
+	}
+	if err != nil {
+		return "", err
+	}
+	if !info.Mode().IsRegular() {
+		return "", fmt.Errorf("%s is not a regular file", final)
+	}
+	suffix := make([]byte, 8)
+	if _, err := rand.Read(suffix); err != nil {
+		return "", err
+	}
+	kept := filepath.Join(store.dir, "."+name+".kept-"+hex.EncodeToString(suffix))
+	if err := os.Link(final, kept); err != nil {
+		return "", err
+	}
+	return kept, nil
+}
+
+// restoreWindowsSecret puts the kept previous credential back over final.
+// Another process that holds final open (an EDR or backup agent reading it,
+// a concurrent re-ACL) makes the replace fail with access denied for a
+// moment, so it retries for about two seconds before it gives up.
+func restoreWindowsSecret(kept, final string) error {
+	var err error
+	for attempt := 0; attempt < 20; attempt++ {
+		if err = os.Rename(kept, final); err == nil {
+			return nil
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	return err
+}
+
+// windowsSecretTrustCheck proves the gateway reader accepts the stored
+// credential. It runs with the administrator token, so it checks the path,
+// owner and ACL shape; the gateway rights come from the reader ACEs
+// (pinned by TestWindowsSecretStoreUsesTheGatewayReaderDACL). A seam for
+// tests.
+var windowsSecretTrustCheck = func(name, dir string) error {
 	previous, had := os.LookupEnv(managed.WindowsServiceAccountEnv)
 	_ = os.Setenv(managed.WindowsServiceAccountEnv, windowsSecretGatewayAccount)
-	_, _, verifyErr := managed.ResolveServiceCredential(name, store.dir)
+	_, _, err := managed.ResolveServiceCredential(name, dir)
 	if had {
 		_ = os.Setenv(managed.WindowsServiceAccountEnv, previous)
 	} else {
 		_ = os.Unsetenv(managed.WindowsServiceAccountEnv)
 	}
-	if verifyErr != nil {
-		_ = os.Remove(final)
-		return fmt.Errorf("the stored credential failed the gateway's trust check and was removed: %w", verifyErr)
-	}
-	return nil
+	return err
 }
 
 // storeWindowsSecret writes value to name in the pinned store atomically,

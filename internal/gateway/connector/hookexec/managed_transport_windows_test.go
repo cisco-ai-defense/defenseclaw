@@ -362,3 +362,101 @@ func TestStoppedManagedGatewayServiceWithAPortListenerIsNotAnOutage(t *testing.T
 		t.Fatalf("the listener received %d request bytes: %q", len(got), got)
 	}
 }
+
+// GAP-2442: an administrator command right after secret set restarted the
+// gateway found the service running with no listener yet and failed at once.
+// The awaiting client looks again until the listener is there, sends the
+// request once, and still fails after its budget; the hook client keeps
+// failing at once.
+func TestManagedEnterpriseClientAwaitingStartWaitsForTheListener(t *testing.T) {
+	managedTransportTestMu.Lock()
+	defer managedTransportTestMu.Unlock()
+
+	listener := listenManagedTransportTest(t)
+	defer listener.Close()
+	requests := make(chan string, 4)
+	go func() {
+		for {
+			conn, err := listener.Accept()
+			if err != nil {
+				return
+			}
+			_ = conn.SetDeadline(time.Now().Add(2 * time.Second))
+			buffer := make([]byte, 4096)
+			n, _ := conn.Read(buffer)
+			requests <- string(buffer[:n])
+			_, _ = io.WriteString(conn, "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}")
+			_ = conn.Close()
+		}
+	}()
+	restoreManagedTransportSeams(t,
+		func(string) (uint32, error) { return 404, nil },
+		func(net.Conn) (uint32, error) { return 404, nil },
+	)
+	oldListening, oldPoll := managedEnterpriseListening, managedGatewayStartPoll
+	t.Cleanup(func() {
+		managedTransportTestMu.Lock()
+		defer managedTransportTestMu.Unlock()
+		managedEnterpriseListening, managedGatewayStartPoll = oldListening, oldPoll
+	})
+	managedGatewayStartPoll = 20 * time.Millisecond
+	looks := 0
+	listenAfter := 4
+	managedEnterpriseListening = func(string) (bool, bool) {
+		looks++
+		return looks > listenAfter, true
+	}
+	post := func(client *http.Client) error {
+		response, err := client.Post("http://"+listener.Addr().String()+"/v1/skill/scan", "application/json", strings.NewReader(`{"target":"x"}`))
+		if err == nil {
+			_ = response.Body.Close()
+		}
+		return err
+	}
+
+	hook, err := managedEnterpriseHTTPClient(time.Second, listener.Addr().String(), "DefenseClawGateway")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := post(hook); !errors.Is(err, errGatewayNotConnected) || looks != 1 {
+		t.Fatalf("hook client: %v after %d looks, want one look and errGatewayNotConnected", err, looks)
+	}
+
+	looks = 0
+	cli, err := NewManagedEnterpriseGatewayHTTPClientAwaitingStart(5*time.Second, listener.Addr().String(), "DefenseClawGateway", 2*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := post(cli); err != nil {
+		t.Fatalf("awaiting client: %v after %d looks, want the request answered once the listener is up", err, looks)
+	}
+	if looks != listenAfter+1 {
+		t.Fatalf("awaiting client looked %d times, want %d", looks, listenAfter+1)
+	}
+	select {
+	case got := <-requests:
+		if !strings.Contains(got, "POST /v1/skill/scan") {
+			t.Fatalf("request %q", got)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("the gateway got no request")
+	}
+	select {
+	case got := <-requests:
+		t.Fatalf("the request was sent twice: %q", got)
+	default:
+	}
+
+	looks, listenAfter = 0, 1<<30
+	short, err := NewManagedEnterpriseGatewayHTTPClientAwaitingStart(5*time.Second, listener.Addr().String(), "DefenseClawGateway", 150*time.Millisecond)
+	if err != nil {
+		t.Fatal(err)
+	}
+	started := time.Now()
+	if err := post(short); !errors.Is(err, errGatewayNotConnected) {
+		t.Fatalf("awaiting client past its budget: %v, want errGatewayNotConnected", err)
+	}
+	if elapsed := time.Since(started); elapsed > 2*time.Second || looks < 2 {
+		t.Fatalf("awaiting client past its budget took %v and %d looks", elapsed, looks)
+	}
+}

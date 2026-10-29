@@ -94,21 +94,21 @@ def test_statuses_follow_the_config(config) -> None:
 
 
 def test_fail_mode_status_is_the_effective_value_per_connector(config) -> None:
-    # GAP-0152: the status is each connector's effective value. A per-user
-    # connector follows its policy tier; under Secure Client an unset global
-    # is open.
+    # GAP-0152: the status is each connector's effective value. A saved
+    # per-user choice wins before the tier; Secure Client keeps its default.
     from defenseclaw.config import PerConnectorGuardrailConfig
 
     config.guardrail.enabled = True
     config.guardrail.hook_fail_mode = "closed"
     config.guardrail.connectors = {"claudecode": PerConnectorGuardrailConfig()}
 
-    assert _status(SetupWizard.GUARDRAIL_ACTIONS, config).text == "fail open"
+    assert _status(SetupWizard.GUARDRAIL_ACTIONS, config).text == "fail closed"
     config.guardrail.connectors["claudecode"].rule_pack = "strict"
     assert _status(SetupWizard.GUARDRAIL_ACTIONS, config).text == "fail closed"
     config.guardrail.connectors["claudecode"].rule_pack = ""
-    config.guardrail._secure_client = True
     config.guardrail.hook_fail_mode = ""
+    assert _status(SetupWizard.GUARDRAIL_ACTIONS, config).text == "fail open"
+    config.guardrail._secure_client = True
     assert _status(SetupWizard.GUARDRAIL_ACTIONS, config).text == "fail open"
     config.guardrail.connectors["codex"] = PerConnectorGuardrailConfig(hook_fail_mode="closed")
     assert _status(SetupWizard.GUARDRAIL_ACTIONS, config).text == "fail closed, 1 open"

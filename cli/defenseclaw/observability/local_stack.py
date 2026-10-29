@@ -88,6 +88,7 @@ SERVICE_CONTAINERS: dict[str, str] = {
     "defenseclaw-grafana": "grafana",
 }
 SERVICES = frozenset(SERVICE_CONTAINERS.values())
+GRAFANA_CONTAINER = "defenseclaw-grafana"
 PROJECT_VOLUMES = frozenset({"prometheus-data", "loki-data", "tempo-data", "grafana-data"})
 
 HTTP_PROBES: tuple[tuple[str, str], ...] = (
@@ -1284,9 +1285,30 @@ class LocalStackController:
         if not secure_publish:
             raise LocalStackError("effective Grafana Compose config is unsafe: loopback port 3000 publish is missing")
 
+    def _require_owned_grafana_listener(self) -> None:
+        """Refuse to send the admin credential unless this stack's Grafana runs.
+
+        GAP-0981: while this Compose project's own Grafana container runs,
+        Docker holds 127.0.0.1:3000 for it. Before that (a stopped stack, or a
+        container that is restarting) another account can listen on the port
+        and would receive the Basic credential. The check refuses to send; it
+        is a retryable LocalStackError, never a block of anything else.
+        """
+
+        if GRAFANA_CONTAINER not in self.verify_container_ownership():
+            raise LocalStackError("this stack's Grafana container does not exist; the admin credential was not sent")
+        result = self.runner.run(
+            [self.docker_path, "inspect", "--format", "{{.State.Status}}", GRAFANA_CONTAINER],
+            timeout=8,
+            env=self.environment,
+        )
+        if result.returncode != 0 or result.stdout.strip() != "running":
+            raise LocalStackError("this stack's Grafana container is not running; the admin credential was not sent")
+
     def _verify_grafana_authentication(self, password: str) -> None:
         """Prove anonymous access is denied and the managed login works."""
 
+        self._require_owned_grafana_listener()
         url = "http://127.0.0.1:3000/api/search?type=dash-db"
         anonymous = urllib.request.Request(url, method="GET")
         try:

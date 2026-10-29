@@ -38,6 +38,9 @@ _VERSION_RE = re.compile(r"(?i)(?:^|[^0-9])v?([0-9]+)(?:\.([0-9]+))?(?:\.([0-9]+
 # gitBuildReleaseDateRE.
 _GIT_BUILD_RE = re.compile(r"(?i)(?:^|[^a-z0-9])v?git[.+-]?[0-9a-f]{7,40}(?:[^a-z0-9]|$)")
 _GIT_BUILD_RELEASE_DATE_RE = re.compile(r"\(([0-9]{4}\.[0-9]{1,2}\.[0-9]{1,2})(?:\.[0-9]+)?\)")
+# A Hermes git install prints only the release date it is on, in this exact
+# vendor form; mirrors Go hermesGitReleaseRE (GAP-0232, GAP-2052).
+_HERMES_GIT_RELEASE_RE = re.compile(r"^Hermes Agent vunknown \(([0-9]{4}\.[0-9]{1,2}\.[0-9]{1,2})\)$")
 _CONTRACT_PLATFORMS = frozenset({"darwin", "linux", "windows"})
 _PLATFORM_OVERRIDE_FIELDS = frozenset(
     {
@@ -820,7 +823,7 @@ def _contract_matches_agent_version(
     normalized_version: str,
 ) -> bool:
     if contract.exact_agent_versions and _exact_agent_version_match(
-        raw_version, contract.exact_agent_versions
+        raw_version, contract.exact_agent_versions, connector=contract.connector
     ):
         return True
     # Empty min/max would otherwise accept any normalized version.
@@ -869,7 +872,7 @@ def _known_broken_match(
     for entry in KNOWN_BROKEN_VERSIONS.get(name, ()):
         if entry["warn_only"] != warn_only:
             continue
-        if (entry["exact"] and _exact_agent_version_match(raw, (entry["exact"],))) or (
+        if (entry["exact"] and _exact_agent_version_match(raw, (entry["exact"],), connector=name)) or (
             not entry["exact"]
             and _version_in_range(normalized, entry["min_inclusive"], entry["max_exclusive"])
         ):
@@ -877,7 +880,12 @@ def _known_broken_match(
     return None, ""
 
 
-def _exact_agent_version_match(raw: str, expected: tuple[str, ...]) -> bool:
+def _exact_agent_version_match(raw: str, expected: tuple[str, ...], *, connector: str = "") -> bool:
+    # A Hermes git install matches only a pinned release date, never an
+    # arbitrary version substring (mirrors Go exactAgentVersionMatch).
+    hermes_git = _HERMES_GIT_RELEASE_RE.match(raw.strip()) if connector == "hermes" else None
+    if hermes_git is not None:
+        raw = hermes_git.group(1)
     fields = raw.strip().split()
     if not fields or len(fields) > 2:
         return False
@@ -941,6 +949,77 @@ def openclaw_needs_interception_advisory(raw_version: str | None) -> bool:
     if not normalized:
         return False
     return compare_agent_versions(normalized, OPENCLAW_TRANSPORT_ADVISORY_SINCE) >= 0
+
+
+# First OpenClaw release with plugin approvals (the requireApproval result of
+# before_tool_call and the approvals.plugin config block). Older releases
+# reject approvals.plugin, so their gateway no longer starts (GAP-1956).
+OPENCLAW_PLUGIN_APPROVALS_SINCE = "2026.3.28"
+
+
+# Where OpenClaw shows a plugin approval request: the Control UI and chat
+# channels that forward /approve. openclaw tui and local openclaw chat do not
+# show it, so a confirm verdict asked there is denied when the request times
+# out (GAP-1958).
+OPENCLAW_APPROVAL_SURFACES = (
+    "OpenClaw shows DefenseClaw approval requests in its Control UI (openclaw dashboard) "
+    "and on chat channels that forward /approve; openclaw tui and local openclaw chat do "
+    "not show them, so a call that needs approval there is denied when the request times out"
+)
+
+# First OpenClaw release that no longer bundles the Amazon Bedrock provider:
+# from it, Bedrock models need the external plugin (GAP-1959).
+OPENCLAW_EXTERNAL_BEDROCK_SINCE = "2026.5.12"
+OPENCLAW_BEDROCK_PLUGIN_ID = "amazon-bedrock"
+OPENCLAW_BEDROCK_PLUGIN_PACKAGE = "@openclaw/amazon-bedrock-provider"
+
+
+def openclaw_bedrock_plugin_missing(raw_version: str | None, openclaw_config: Any) -> bool:
+    """Return True when OpenClaw needs the Bedrock provider plugin it lacks.
+
+    True only for a known OpenClaw version from
+    OPENCLAW_EXTERNAL_BEDROCK_SINCE whose openclaw.json names an Amazon
+    Bedrock model (the amazon-bedrock provider or the bedrock-converse-stream
+    API) while plugins.entries has no enabled amazon-bedrock plugin, or
+    plugins.allow / plugins.deny keep it from loading. OpenClaw's model calls
+    then fail with "No API provider registered for api:
+    bedrock-converse-stream". Setup only warns.
+    """
+
+    normalized = normalize_agent_version(raw_version or "")
+    if not normalized or compare_agent_versions(normalized, OPENCLAW_EXTERNAL_BEDROCK_SINCE) < 0:
+        return False
+    if not isinstance(openclaw_config, dict):
+        return False
+    chunks = []
+    models = openclaw_config.get("models")
+    if isinstance(models, dict) and models.get("providers") is not None:
+        chunks.append(json.dumps(models.get("providers")))
+    if openclaw_config.get("agents") is not None:
+        chunks.append(json.dumps(openclaw_config.get("agents")))
+    text = "\n".join(chunks)
+    if "bedrock-converse-stream" not in text and f'"{OPENCLAW_BEDROCK_PLUGIN_ID}' not in text:
+        return False
+    plugins = openclaw_config.get("plugins")
+    plugins = plugins if isinstance(plugins, dict) else {}
+    entries = plugins.get("entries")
+    entry = entries.get(OPENCLAW_BEDROCK_PLUGIN_ID) if isinstance(entries, dict) else None
+    if not isinstance(entry, dict) or entry.get("enabled") is False:
+        return True
+    allow = plugins.get("allow")
+    if isinstance(allow, list) and OPENCLAW_BEDROCK_PLUGIN_ID not in allow:
+        return True
+    deny = plugins.get("deny")
+    return isinstance(deny, list) and OPENCLAW_BEDROCK_PLUGIN_ID in deny
+
+
+def openclaw_lacks_plugin_approvals(raw_version: str | None) -> bool:
+    """Return True for a known OpenClaw version older than plugin approvals."""
+
+    normalized = normalize_agent_version(raw_version or "")
+    if not normalized:
+        return False
+    return compare_agent_versions(normalized, OPENCLAW_PLUGIN_APPROVALS_SINCE) < 0
 
 
 def _version_tuple(value: str) -> tuple[int, int, int]:

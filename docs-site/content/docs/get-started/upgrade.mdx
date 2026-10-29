@@ -12,7 +12,7 @@ keywords:
   - renamed and removed connectors
 ---
 
-`defenseclaw upgrade` installs the latest release and keeps your configuration, audit data, device key and agent setup. 1.0.4 supports upgrades from 1.0.3, 1.0.2 and 0.8.10. For 0.8.x, see [Upgrading from 0.x to 1.0](/docs/get-started/upgrade#upgrading-from-0x-to-10).
+`defenseclaw upgrade` installs the latest release and keeps your configuration, audit data, device key and agent setup. 1.0.5 upgrades any 1.0 release and is tested from 1.0.4, 1.0.3 and 1.0.2. An upgrade from 0.8.8, 0.8.9 or 0.8.10 still runs, but it is a legacy path that is no longer tested; see [Upgrading from 0.x to 1.0](/docs/get-started/upgrade#upgrading-from-0x-to-10).
 
 ## Upgrade
 
@@ -27,7 +27,23 @@ The command downloads the latest release's installer (`install.sh` on macOS and 
 3. Stops the gateway, keeps the current install in `~/.defenseclaw/previous`, swaps in the new version and runs `defenseclaw migrate`.
 4. Starts the gateway and waits for it to report healthy.
 
-An upgrade refreshes the installed hooks. Per-user hooks take the outage mode of their policy tier (the default and permissive policies let a call run with a warning while the gateway is down, strict blocks it) whatever an earlier config or registration saved, and fail closed for every other failure; restart running agents so they discard old hook and native telemetry settings already loaded in memory. Managed standalone hooks default closed and honor an administrator's explicit outage-only `open`; Secure Client keeps its managed fail mode.
+An upgrade refreshes the installed hooks. Per-user hooks honor an explicitly saved outage mode; when it is unset, the default and permissive policies let a classified gateway outage run with a warning and strict blocks it. Every other failure blocks; restart running agents so they discard old hook and native telemetry settings already loaded in memory. 1.0.0–1.0.3 setup also saved `open` on its own for an observe-mode Cursor, and those releases did not record whether the user chose it. The upgrade keeps that saved `open`, so strict does not close it, and names it with the `defenseclaw config unset` command that lets the policy tier decide. Managed standalone hooks default closed and honor an administrator's explicit outage-only `open`; Secure Client keeps its managed fail mode.
+
+While an install or upgrade of your account runs, DefenseClaw refuses every agent call that gets no answer from the gateway. The window lasts as long as the installer holds its install lock (`.install.lock` in `~/.defenseclaw`); in practice it is the time the gateway is stopped for the swap. It holds in every policy tier, with a saved `open` too: an install or upgrade is not a gateway outage, so the default policy's warning-and-run does not apply to a call that gets no answer. The strict policy tier also refuses calls the running gateway could answer. The agent shows this message (`tool call` reads `prompt`, `tool result` or `request` for other events):
+
+```text
+DefenseClaw blocked this tool call: DefenseClaw is being installed or upgraded for this account, and its gateway starts again when that is done. Try again in a moment; if the installer has stopped, run the installer again to finish or undo the interrupted install.
+```
+
+For a few seconds while the installer swaps the hooks, a hook from the release you upgrade from (1.0.4 or earlier) can show its own generic text instead, for example that the gateway is unreachable, that a gateway cold start failed, or that you should run `defenseclaw-gateway restart`. That text comes from the older release and cannot change; you do not need to restart anything, wait for the installer to finish and retry. How long the window lasts depends on the machine. The installer waits up to 3 minutes for a slow gateway start, and the window ends when the installer exits, also if it fails. Calls the gateway answers before the stop or after the start are not affected. Retry the step after the installer prints `Installed DefenseClaw`, or check with `defenseclaw-gateway status`. If the installer was killed, its lock counts only while the process that made it still runs; once that process is gone, calls follow the normal outage rule again, and you run the installer again to finish or undo the change.
+
+An upgrade from 1.0.3 or an earlier 1.0 release prints this line once, after `Upgraded from`, when your configuration saves no hook fail mode for an active connector and its policy tier now lets a gateway outage run:
+
+```text
+Gateway outages now let calls run with a warning (the default and permissive policies). Run `defenseclaw guardrail fail-mode closed` to keep blocking them.
+```
+
+Releases before 1.0.4 blocked those calls. The line is not printed when a fail mode is saved (globally or for a connector), in the strict tier, or on a managed install. How the saved mode and the policy tier combine is in [Fail modes](/docs/reference/fail-modes).
 
 End every running agent session before upgrading. Quit OpenCode and Amp
 processes completely, then start a new agent process after the installer
@@ -50,6 +66,10 @@ If a step fails, the installer puts the previous version back, restarts it and k
 | `defenseclaw rollback` | Put back the install that the last upgrade replaced. Run it again to roll forward. |
 | `defenseclaw migrate --check` | List pending config migrations. Exit 0: can be applied. 1: cannot. 2: the config is from a newer release. |
 
+To go back to an earlier release, use `defenseclaw rollback` or `defenseclaw upgrade --version X.Y.Z`. Running an older release's installer (`install.sh` or `install.ps1` of that release) directly over a newer install is not a supported downgrade: the older installer does not know the hook entries the newer release wrote. On Windows it adds its own Claude Code hook beside them: until the repair below, Claude Code tool calls fail in the older release's hook (`unknown flag: --connector`), and `defenseclaw doctor` reports two DefenseClaw PreToolUse handlers. If that happened, run the newer release's install command again, then go back with one of the two commands above.
+
+Going from 1.0.4 straight to 1.0.2 on macOS or Linux, with either command or with the 1.0.2 installer, leaves a hook helper that 1.0.2 cannot use, so every agent hook call prints an error. See [`defenseclaw_api_listener_foreign: command not found` after going back to 1.0.2](#defenseclaw_api_listener_foreign-command-not-found-after-going-back-to-102-macos-and-linux). From 1.0.5 on, going back to 1.0.2 is clean.
+
 If the `defenseclaw` command does not start, run the install command again. It repairs any install and keeps your data:
 
 <include>../../snippets/install-commands.mdx</include>
@@ -58,7 +78,9 @@ If the `defenseclaw` command does not start, run the install command again. It r
 A running OpenShell sandbox keeps running, but its hooks fail closed while the gateway is stopped (usually under a minute). Upgrade between sessions, or let the agent retry afterwards.
 </Callout>
 
-For a legacy MicroVM guest, save accessible work before upgrading. If it is ready afterward, keep the guest: run `defenseclaw sandbox stop NAME` and `defenseclaw sandbox start NAME`. See [Known limits in 1.0.4](/docs/support-matrix#upgrade-and-policy-limits) for completed or failed guests and data-loss risks.
+An upgrade from 1.0.3 or earlier refuses, and changes nothing, while that release's gateway runs a sandbox. Those sessions keep the network broker of the OpenShell release they started with, which DefenseClaw cannot contain. The installer names each one with the command that ends it: `defenseclaw sandbox stop NAME`, or `defenseclaw sandbox delete NAME` for a completed or failed MicroVM, which deletes its work. Save the work you need, end them, then run the upgrade again. When the gateway is not running the installer cannot ask it, so end your sandboxes before you upgrade.
+
+For a legacy MicroVM guest, save accessible work before upgrading. If it is ready afterward, keep the guest: run `defenseclaw sandbox stop NAME` and `defenseclaw sandbox start NAME`. See [Known limits](/docs/support-matrix#upgrade-and-policy-limits) for completed or failed guests and data-loss risks.
 
 ## Update notices
 
@@ -90,7 +112,7 @@ The mirror must serve the paths GitHub serves: `releases/latest` (a redirect to 
 
 ## Upgrading from 0.x to 1.0
 
-1.x replaces the 0.x upgrade system. Every path below keeps your configuration and data. The 0.8.10 release is the supported bridge: a 0.8.8, 0.8.9 or 0.8.10 install finds the 1.x release through its own `defenseclaw upgrade`.
+1.x replaces the 0.x upgrade system. Every path below keeps your configuration and data. The 0.8.10 release is the bridge: a 0.8.8, 0.8.9 or 0.8.10 install finds the 1.x release through its own `defenseclaw upgrade`. This is a legacy path that is no longer tested. On Windows, the 0.8.10 Claude Code hook can let tool calls run without a check while the upgrade runs, and the upgrade does not check that every hook an agent registered was replaced: end every agent session before you upgrade from 0.8.x and start new ones afterwards.
 
 ### Which command to run
 
@@ -129,18 +151,31 @@ defenseclaw rollback
 
 Rollback swaps the live install with the one the last upgrade replaced: programs, Python environment, configuration and data as they were at upgrade time. Anything written since moves into `~/.defenseclaw/previous` and returns when you roll forward. One previous install is kept, and rollback needs no network.
 
+A previous install that never ran `defenseclaw init` has no configuration, and what rollback does then depends on the gateway:
+
+- If the gateway is running, rollback must start the previous gateway, which refuses with `no config.yaml exists yet`. Rollback then undoes itself and exits 1; the current install stays, with its gateway. The installer also says the previous install's files are in `~/.defenseclaw/previous/data` and to fix the cause and run rollback again. There is nothing to fix there: stay on the current install, or stop the gateway with `defenseclaw-gateway stop` and roll back as below.
+- If the gateway is stopped, rollback completes and exits 0, and the previous install runs with no `config.yaml`. Run `defenseclaw init` to set it up, or run `defenseclaw rollback` again to roll forward to your current install and its configuration.
+
 - Between releases from 1.0.1 on, rollback also carries your sandbox setup: sandbox records, hook bindings and harness images. A release before 1.0.1 cannot take over that setup.
 - After rolling forward again, a retained sandbox can still run the older release's supervisor even when the restored gateway is healthy. If `sandbox connect NAME` says `legacy sandbox running`, save or pull accessible work first, then run `defenseclaw sandbox stop NAME`, `defenseclaw sandbox start NAME` and `defenseclaw sandbox connect NAME`. A MicroVM stop requests a disk sync; if the sync fails, changes since its last successful sync may be lost. Keep the gateway running until you have saved work you need.
 - Each install shows only its own audit events. Read the other install's with `~/.defenseclaw/previous/bin/defenseclaw-gateway audit export --db ~/.defenseclaw/previous/data/audit.db`.
-- Rollback restarts the restored gateway if the current gateway is running or the saved install records that it was running, and waits up to 3 minutes. If both were stopped, the restored gateway stays stopped; start it with `defenseclaw-gateway start` when you are ready to resume agent work. This also applies when rolling back to 0.8.x and rolling forward again. If a required restart does not start or, on Windows, cannot be proven, rollback exits `1` and the installer undoes the rollback. On Windows, it tries to restart and prove the install it started from. If recovery remains pending, the installer keeps the lifecycle record and install lock. On Windows, when recovery is unfinished, the gateway is down and a hooks directory exists, the installer tries to close installed hooks. If hook closure succeeds, they block tool calls until the gateway runs again. If the gateway is running or no hooks directory exists, the installer does not force hooks closed. If the installer warns that hooks could not be closed, they follow the configured outage fail mode, so a hook configured open may allow tool calls. Stop agent activity, fix the reported cause and run the recovery command the installer prints. Then retry `defenseclaw rollback`.
+- Rollback restarts the restored gateway if the current gateway is running or the saved install records that it was running, and waits up to 3 minutes. If both were stopped, the restored gateway stays stopped; start it with `defenseclaw-gateway start` when you are ready to resume agent work. This also applies when rolling back to 0.8.x and rolling forward again. If a required restart does not start or, on Windows, cannot be proven, rollback exits `1` and the installer undoes the rollback. On Windows that exit code is the installer's: from a desktop terminal, `defenseclaw rollback` exits `0` as soon as the installer window opens, so read the result in that window or its log (`%USERPROFILE%\.defenseclaw\logs\install-<time>.log`), then check `defenseclaw --version` and `defenseclaw doctor`. On Windows, it tries to restart and prove the install it started from. If recovery remains pending, the installer keeps the lifecycle record and install lock. On Windows, when recovery is unfinished, the gateway is down and a hooks directory exists, the installer tries to close installed hooks. If hook closure succeeds, they block tool calls until the gateway runs again. If the gateway is running or no hooks directory exists, the installer does not force hooks closed. If the installer warns that hooks could not be closed, they follow the configured outage fail mode, so a hook configured open may allow tool calls. Stop agent activity, fix the reported cause and run the recovery command the installer prints. Then retry `defenseclaw rollback`.
 - On Linux and macOS, an incomplete restore leaves an unfinished snapshot or rollback hold; run the same install command again to put the previous install back. The installer does not force hooks closed during that pending recovery. Existing hooks that run while the gateway stays down follow their configured outage mode: in `closed` they block calls they receive, and in `open` they may allow them. Stop agent activity until recovery finishes.
 - If undoing the rollback also fails, either installer can report the rollback target installed with its gateway down and agent hooks not guarded. Windows then attempts the hook closure above if its conditions are met. Stop agent activity and follow the recovery command the installer prints.
 - If an upgrade or rollback is interrupted, run the same command again. The installer first restores the install it was replacing.
 - Rolling back to 0.8.x, and the Windows 0.8.7-0.8.10 Setup case, are covered in [Roll back to 0.8.x](/docs/get-started/upgrade#roll-back-to-08x).
 - Running the installer again for the build you have is a repair: it keeps the rollback copy you have. Installing another build of the same version, such as the next release candidate, works like an upgrade: the installer says before the swap that it keeps the installed build in `~/.defenseclaw/previous`, and rollback returns to that build.
+- On Windows, `defenseclaw rollback` to a release that checks the Codex program it set up (1.0.4 and later) is refused before anything changes when Codex was updated after DefenseClaw set it up, or is no longer where it was. The refusal names Codex and the file, then says: `DefenseClaw <version> does not start with an agent program it did not set up, so the rollback would stop half-way. Nothing was changed. Put that version back and run 'defenseclaw rollback' again, or stay on DefenseClaw <current>`. A rollback to 1.0.0-1.0.3 or 0.8.10 completes with a warning instead: that release starts without Codex hooks until you run `defenseclaw setup codex` after the rollback.
+- On Windows, when the previous install's folder belongs to another account and cannot be removed or set aside, the new rollback copy is kept in `.failed-kept-previous-<time>-new` (or the older one in `.failed-kept-previous-<time>`). The summary then replaces `Undo with: defenseclaw rollback` with the steps to undo: an administrator removes `previous`, you rename the kept folder to `previous`, then run `defenseclaw rollback`. Remove the kept folder when you no longer need it.
 - Before it runs the saved installer, rollback checks it against the SHA-256 the install recorded in `~/.defenseclaw/receipts/installer.sha256`. If the installer was changed after the install, rollback stops and changes nothing. `defenseclaw upgrade --version <your version> --yes` saves a verified copy again.
 
 ### Roll back to 0.8.x
+
+On a managed Linux or macOS computer with bundle trust anchors, a rollback must
+also meet the confirmed bundle's `min_product_version`. See [Roll
+back](/docs/enterprise/lifecycle#roll-back) and the [release floor
+limits](/docs/enterprise/lifecycle#release-floor-limits), including
+packages older than 1.0.4 and Windows Setup.
 
 `defenseclaw rollback` restores the version 8 `config.yaml` saved when the upgrade started, with `data.json` and the block and allow entries in `audit.db`. Policy edits you made after the upgrade stay in `~/.defenseclaw/previous` and return when you roll forward. 0.8.x has no rollback command. To return to 1.x, run the command the rollback prints, or run the install command again:
 
@@ -180,7 +215,7 @@ Every upgrade brings the Rego modules in `~/.defenseclaw/policies/rego` (`admiss
 
 Fixes for installer messages and failed upgrades on macOS, Linux and Windows.
 
-- [Known limits in 1.0.4](/docs/support-matrix): Claude Code's typed shell, Codex, Copilot CLI, Antigravity, the local Splunk bridge, Linux sign-out, upgrade and policy limits, and the known issues fixed in 1.0.5.
+- [Known limits](/docs/support-matrix): Claude Code's typed shell, Codex, Copilot CLI, Antigravity, the local Splunk bridge, managed Linux and macOS scans, scanners on macOS, Linux sign-out, identity, upgrade and policy limits, agent messages that are not from DefenseClaw, and sandboxes.
 
 ### `defenseclaw: command not found`
 
@@ -214,13 +249,37 @@ Fixes for installer messages and failed upgrades on macOS, Linux and Windows.
 
 **Check.** The report says `status=ready`.
 
+### `DefenseClaw blocked this tool call: DefenseClaw is being installed or upgraded for this account`
+
+**Cause.** An install or upgrade of your account holds its install lock. While it runs, agent calls that get no answer from the gateway are refused in every policy tier, and in the strict tier every call is.
+
+**Fix.** Wait for the installer to print `Installed DefenseClaw`, then try again. If the installer window is gone or the installer was stopped, run the install command again to finish or undo the change.
+
+**Check.** The agent call runs, and `defenseclaw-gateway status` shows the gateway running.
+
 ### `Another DefenseClaw install is running`
 
-**Cause.** An install or upgrade holds the lock. A stale lock from a crashed run is cleared automatically.
+**Cause.** An install or upgrade holds the lock (`.install.lock` in `~/.defenseclaw`). A lock is stale only when the process that made it is gone, or when its process id now belongs to another process; the next install clears a stale lock. A lock whose process still runs is never cleared, however long it has run. `defenseclaw doctor` lists the lock, and `defenseclaw doctor --fix` removes a stale one.
 
 **Fix.** Wait for it to finish, then run the command again.
 
 **Check.** The command proceeds.
+
+### `Another DefenseClaw install or doctor run is taking over the install lock`
+
+**Cause.** Another installer, or `defenseclaw doctor --fix`, is taking over the same stale lock. Only one of them may do it, and this one waited 10 seconds for the other to finish.
+
+**Fix.** Let the other run finish, then run the command again.
+
+**Check.** The command proceeds, or reports `Another DefenseClaw install is running` while the other install runs.
+
+### `Previous hook calls did not finish within 30 seconds before stopping the gateway` (Windows)
+
+**Cause.** After it replaces the hook program, the installer waits for every agent call that started with the old one. One of them ran longer than 30 seconds, or its start time could not be read (`Cannot prove that previous hook calls finished before stopping the gateway`). Nothing was left half-done: the installer restores the previous install.
+
+**Fix.** Close the agents, then run the install command again.
+
+**Check.** The installer gets past the hook swap and prints `Installed DefenseClaw`.
 
 ### `Could not copy <file> (...)` (Windows)
 
@@ -262,6 +321,21 @@ Fixes for installer messages and failed upgrades on macOS, Linux and Windows.
 
 **Check.** `defenseclaw migrate --check` exits 0.
 
+### `defenseclaw_api_listener_foreign: command not found` after going back to 1.0.2 (macOS and Linux)
+
+**Cause.** You went from 1.0.4 straight to 1.0.2. 1.0.2 keeps the newer hook helper `~/.defenseclaw/hooks/_hardening.sh` that 1.0.4 wrote, and that helper lacks a function the 1.0.2 hooks call. Each agent hook call then prints `~/.defenseclaw/hooks/<agent>-hook.sh: line <n>: defenseclaw_api_listener_foreign: command not found`. The gateway still checks the call.
+
+**Fix.** On 1.0.2, remove the helper and restart the gateway, which writes 1.0.2's own:
+
+```bash
+rm ~/.defenseclaw/hooks/_hardening.sh
+defenseclaw-gateway restart
+```
+
+Or go from 1.0.4 to 1.0.5 first, then back to 1.0.2: the 1.0.5 helper keeps that function.
+
+**Check.** The next agent tool call prints no `command not found` line.
+
 ### `The running gateway did not stop`
 
 **Cause.** The old gateway ignored the stop. Nothing was changed.
@@ -288,13 +362,13 @@ Fixes for installer messages and failed upgrades on macOS, Linux and Windows.
 
 ## Renamed and removed connectors
 
-Windsurf became [Devin](/docs/connectors/devin), and Gemini CLI, OpenHands and OmniGent were removed in 1.0.4. The upgrade handles Windsurf for you.
+Windsurf became [Devin](/docs/connectors/devin), and Gemini CLI, OpenHands and OmniGent were removed. The upgrade handles Windsurf for you, and removes what DefenseClaw wrote for OpenHands and OmniGent: DefenseClaw no longer guards them.
 
-This applies if you used Windsurf, Gemini CLI, OpenHands or OmniGent before 1.0.4.
+This applies if you used Windsurf, Gemini CLI, OpenHands or OmniGent before 1.0.5.
 
 - **Windsurf is now Devin.** The upgrade moves your `windsurf` settings to the [`devin` connector](/docs/connectors/devin) and replaces the old hooks. You do nothing.
 - **Gemini CLI was removed.** Use [Antigravity](/docs/connectors/antigravity). Remove DefenseClaw's hooks from Gemini CLI's settings once.
-- **OpenHands and OmniGent were removed in 1.0.4.** The `config_version` 9 migration drops their entries from `config.yaml`, including a telemetry destination whose every route selected only these connectors (`defenseclaw migrate` saves that), and records them in `migration-v9.json`; the upgrade accepts a `config.yaml` that still lists them. The first gateway start after the upgrade (and `defenseclaw uninstall`, and Windows Setup) does two things for each of them, and nothing else: it replaces the hook script an older DefenseClaw wrote (OpenHands' `~/.defenseclaw/hooks/openhands-hook.sh`, OmniGent's policy module `~/.defenseclaw/hooks/defenseclaw_omnigent_policy.py`) with a stub that blocks every call and says that support was removed in 1.0.4 and how to remove the hook, and it revokes DefenseClaw's tokens for them once only the stub is left at that path. Only a file with DefenseClaw's marker is replaced, including a stub an older teardown left that allowed every call. DefenseClaw publishes a copy of the stub over the path in one step and never writes into the old file. On Windows, an OpenHands hook that runs `defenseclaw-hook` blocks the same way. If you edited OmniGent's policy module after setup, its bytes are saved first, to `~/.defenseclaw/connector_backups/omnigent/defenseclaw_omnigent_policy.py.edited-<hash>`, and the stub replaces it only once they are saved. The OpenHands hook token is kept: an old OpenHands hook, or a copy of it under another name in `~/.defenseclaw/hooks`, that finds no token lets every call run in fail mode open, and with it the hook reaches the gateway, which blocks the call. Nothing in 1.0.4 accepts that token. Delete `~/.defenseclaw/hooks/.hook-openhands.token` only once no `hooks.json` runs `openhands-hook.sh` or a copy of it. If that path holds a link, a file without DefenseClaw's marker in its first lines, or a script with a second name (a hard link), DefenseClaw changes nothing there and keeps the tokens, so an old hook still reaches the gateway, which blocks the call. The gateway start, `doctor` and `status` name the file with the step: copy back any needed bytes from `connector_backups` before deleting a linked name there; delete its other names (`find / -xdev -samefile <file>` lists them; `fsutil hardlink list <file>` on Windows), or delete the file or move it out of `~/.defenseclaw/hooks` if it is not DefenseClaw's. Then run `defenseclaw-gateway connector teardown --connector openhands` (or `omnigent`). The gateway still answers the old hook routes (`/api/v1/openhands/hook`, `/api/v1/omnigent/hook`) on its API, its hook socket and its sandbox ingress, and they block every call, with or without a token. An OmniGent process that loaded the old policy module before the upgrade is blocked until you restart it. It doesn't change your agent's config files (`~/.openhands/hooks.json`, a workspace `.openhands/hooks.json`, `~/.omnigent/config.yaml`, the file `OMNIGENT_CONFIG` or `OMNIGENT_CONFIG_HOME` selects), OmniGent's `defenseclaw_omnigent.pth` file, the backups DefenseClaw saved before its setup, or any other connector's files. An uninstall goes further, because DefenseClaw then goes away: `defenseclaw uninstall` (every form) and Windows Setup `/uninstall` also remove DefenseClaw's entries from those config files (OpenHands hooks that run `openhands-hook.sh` or `defenseclaw-hook --connector openhands`; `defenseclaw_omnigent_policy` in `policy_modules` and every policy that calls it), then the stub and DefenseClaw's line in `defenseclaw_omnigent.pth`, so a removed DefenseClaw does not keep blocking OpenHands or OmniGent. Your other entries stay. A file it cannot parse keeps its entries and the stub, and is listed with the step. `defenseclaw status`, `defenseclaw doctor`, `defenseclaw uninstall`, `defenseclaw-gateway connector teardown --connector openhands` (or `omnigent`) and Windows Setup list what is left, each with the step to remove it. A 1.0.3 OpenHands upgrade leaves its entries in `hooks.json` for manual removal, even when that file still has the bytes setup wrote. The cleanup does not edit agent config files that may also hold your hooks. The deny stub and retired gateway route block calls through those entries. Running teardown again does not remove the entries or clear the Cleanup row while they remain. OpenHands: remove every hook whose command runs `openhands-hook.sh` (or `defenseclaw-hook --connector openhands`) from `hooks.json`, then restart OpenHands. OmniGent: remove `defenseclaw_omnigent_policy` from `policy_modules` and the `defenseclaw_guardrail` policy from `config.yaml`. Then remove DefenseClaw's line (its hook folder, `~/.defenseclaw/hooks`) from `defenseclaw_omnigent.pth` and keep the other lines; delete the file only if that was its only line. Restart OmniGent. Then delete the stub, `.hookcfg.openhands` and `~/.defenseclaw/connector_backups/<connector>` (the backups hold the files as they were before DefenseClaw's setup, `pristine_bytes` in base64, if you want them back). `defenseclaw uninstall --all` and Windows Setup `/uninstall DELETEUSERDATA=1` keep them: before they remove the data folder, they move that folder to `~/.defenseclaw-removed-connector-backups/<connector>` and list it there. Until you do these steps (or uninstall DefenseClaw), OpenHands and OmniGent are blocked. Your other connectors start either way. The upgrade accepts a `config.yaml` that still lists them next to another connector. If OpenHands or OmniGent is the only connector it lists, the upgrade stops before it changes anything, because the new gateway would have no connector to start: with the DefenseClaw you have now, run `defenseclaw setup remove openhands --yes --force` (or `omnigent`), or set up another connector, then upgrade again.
+- **OpenHands and OmniGent are no longer supported.** 1.0.4 removed their setup, and 1.0.5 also removes what an older DefenseClaw wrote for them: DefenseClaw no longer guards either agent and never blocks it. The `config_version` 9 migration drops their entries from `config.yaml`, including a telemetry destination whose every route selected only these connectors (`defenseclaw migrate` saves that), and records them in `migration-v9.json`. On the first gateway start after the upgrade, during `defenseclaw upgrade` and the installers, in `defenseclaw uninstall` and in Windows Setup, DefenseClaw removes only what it wrote, by identity: its hooks in OpenHands' `hooks.json` (`~/.openhands/hooks.json` or a workspace `.openhands/hooks.json`; every hook whose command runs `openhands-hook.sh`, a copy or hard link of DefenseClaw's hook script, or `defenseclaw-hook --connector openhands`), `defenseclaw_omnigent_policy` in OmniGent's `policy_modules` and every policy that calls it (in `~/.omnigent/config.yaml` or the file `OMNIGENT_CONFIG` or `OMNIGENT_CONFIG_HOME` selects), its line in `defenseclaw_omnigent.pth`, its hook script or policy module in `~/.defenseclaw/hooks` (including the stub 1.0.4 wrote there), its tokens, `.hookcfg.<connector>`, its setup receipts in `~/.defenseclaw/connector_backups/<connector>` and its entry in the hook contract lock. Your own hooks, policies and import-path lines stay, and so does any other connector's file. None of these steps fails an upgrade, repair, ensure or uninstall. They print one line, `OpenHands/OmniGent support was removed in 1.0.5; DefenseClaw no longer guards it.`, and `defenseclaw status` and `defenseclaw doctor` show it as one information row (never a failure) while something is left that DefenseClaw could not remove, such as a `hooks.json` it cannot parse or an edited policy module 1.0.4 saved in `connector_backups`, each with the step to remove it by hand. `defenseclaw uninstall --all` and Windows Setup `/uninstall DELETEUSERDATA=1` move anything left in `connector_backups/<connector>` to `~/.defenseclaw-removed-connector-backups/<connector>` before they remove the data folder. Restart OmniGent after the upgrade if it was running: a process that loaded the old policy module keeps it until then. A rollback to a release before 1.0.5 puts back the OpenHands `hooks.json` entries and OmniGent settings the teardown changed, as long as each file is still what the teardown left; the originals are kept in `removed_connectors_rollback.json` in the data folder. Managed installs have no rollback and record nothing. A `config.yaml` that still lists either agent prints one note per command that names the file and says they are ignored. The upgrade accepts a `config.yaml` that still lists them next to another connector. If OpenHands or OmniGent is the only connector it lists, the upgrade stops before it changes anything, because the new gateway would have no connector to start: with the DefenseClaw you have now, run `defenseclaw setup remove openhands --yes --force` (or `omnigent`), or set up another connector, then upgrade again.
 
 
 <Accordions type="multiple">

@@ -87,6 +87,9 @@ func TestR104ExistingProtectedLinkWriters(t *testing.T) {
 	for _, command := range []string{
 		`python3 -c 'open("report.txt","a").write("marker")'`,
 		`for f in safe; do echo marker >> "$f"; done`,
+		// GAP-1535: a function the command never calls never runs.
+		`f() { echo marker >> alias; }; echo ok`,
+		`f() { echo marker >> ~/.ssh/authorized_keys; }; echo ok`,
 	} {
 		input := actionfacts.Input{Tool: "Bash", Command: command, CWD: cwd, ActiveHome: home,
 			DialectHint: actionfacts.DialectPOSIX}
@@ -95,13 +98,13 @@ func TestR104ExistingProtectedLinkWriters(t *testing.T) {
 		}
 	}
 	for _, command := range []string{
-		`f() { echo marker >> alias; }; echo ok`,
-		`f() { echo marker >> ~/.ssh/authorized_keys; }; echo ok`,
+		`f() { echo marker >> alias; }; echo ok; f`,
+		`f() { echo marker >> ~/.ssh/authorized_keys; }; export -f f; bash -c f`,
 	} {
 		input := actionfacts.Input{Tool: "Bash", Command: command, CWD: cwd, ActiveHome: home,
 			DialectHint: actionfacts.DialectPOSIX}
 		if !trustedExistingAuthorizedKeysSymlinkWrite(trustedActionRequest{Input: input}, actionfacts.Analyze(input)) {
-			t.Fatalf("protected target in an inert definition was missed: %q", command)
+			t.Fatalf("protected target in a called definition was missed: %q", command)
 		}
 	}
 }
@@ -243,7 +246,7 @@ func TestR104OrdinaryChainedRedirectInManagedMode(t *testing.T) {
 		blocked bool
 	}{
 		{`cd ./sub && ln -s ../a b && echo marker > out.txt`, false},
-		{`cd sub && ln -s ../a b && echo marker > out.txt`, true},
+		{`cd sub && ln -s ../a b && echo marker > out.txt`, false}, // GAP-1742
 		{`cd sub && ln -s ../../.ssh/authorized_keys b && echo marker > b`, true},
 	} {
 		input := actionfacts.Input{Tool: "Bash", Command: tc.command, CWD: project, ActiveHome: home,

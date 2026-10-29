@@ -23,6 +23,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net"
 	"net/http"
 	"os"
@@ -104,6 +105,12 @@ func newOpenShellRig(t *testing.T, goos string) *openShellRig {
 		return uid, uid != 0
 	}
 	r.o.configDir = func() (string, error) { return cfgDir, nil }
+	r.o.stopSync = func(_ context.Context, gateway string, _ io.Writer) error {
+		r.mu.Lock()
+		defer r.mu.Unlock()
+		r.commands = append(r.commands, "stop-sync "+gateway)
+		return nil
+	}
 	r.o.portPID = func(int) int { return r.pid }
 	r.o.procArgs = func(context.Context, int) (string, error) { return r.args, nil }
 	r.o.discover = func(openshell.DiscoverOptions) (*openshell.Registration, error) {
@@ -754,6 +761,102 @@ func TestSandboxDaemonReadyRespectsAllowedHarnessesBeforeInstall(t *testing.T) {
 	}
 }
 
+// GAP-0812: sandbox.allowed and the agent allowlist let codex through, but
+// the organization's pack refuses its run (a fatal posture violation): the
+// ready installs nothing and says why, and status does not call codex
+// allowed.
+func TestSandboxDaemonReadyRefusesAPackForbiddenRunBeforeInstall(t *testing.T) {
+	f := newSandboxDaemonFixture(t, func(o *SandboxDaemonOptions) {
+		o.Settings.Operational.Harnesses = []string{"codex"}
+	})
+	f.relay.explain = func(sandboxrelay.ExplainRequest) (sandboxapi.ManagedExplain, error) {
+		return sandboxapi.ManagedExplain{Allowed: true, Posture: &sandboxapi.ManagedPosture{Pack: "team", Violations: []sandboxapi.Violation{
+			{Key: "harness", Fatal: true, Admin: true, Constraint: "harness.allowed", Message: "codex is not an allowed harness of pack team"}}}}, nil
+	}
+	f.run(t)
+	client := sandboxapi.NewUnixClient(f.socket)
+	_, err := client.Ready(context.Background(), sandboxapi.ReadyRequest{Harness: "codex"})
+	if !sandboxapi.IsCode(err, sandboxapi.CodeAdminViolation) || !strings.Contains(err.Error(), "codex is not an allowed harness of pack team") ||
+		f.os.prepared.Load() != 0 {
+		t.Fatalf("pack-forbidden ready = %v (prepared %d)", err, f.os.prepared.Load())
+	}
+	st, err := client.Status(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.Managed == nil || !slices.Contains(st.Managed.DeniedHarnesses, "codex") {
+		t.Fatalf("status after a pack-forbidden view: %+v", st.Managed)
+	}
+}
+
+// GAP-1551: the ready judges the agent under the run's own pack, as the
+// create does: an organization pack the run names (--pack) that allows the
+// agent readies, though the default pack leaves the agent out; a run with
+// no pack is judged under the default one.
+func TestSandboxDaemonReadyJudgesTheRunsPack(t *testing.T) {
+	f := newSandboxDaemonFixture(t, func(o *SandboxDaemonOptions) {
+		o.Settings.Operational.Harnesses = []string{"codex"}
+	})
+	f.relay.explain = func(req sandboxrelay.ExplainRequest) (sandboxapi.ManagedExplain, error) {
+		if req.Flags != nil && req.Flags.Pack == "codex-pack" {
+			return sandboxapi.ManagedExplain{Allowed: true, Posture: &sandboxapi.ManagedPosture{Pack: "codex-pack"}}, nil
+		}
+		return sandboxapi.ManagedExplain{Allowed: true, Posture: &sandboxapi.ManagedPosture{Pack: "team", Violations: []sandboxapi.Violation{
+			{Key: "harness", Fatal: true, Admin: true, Constraint: "harness.allowed", Message: "codex is not an allowed harness of pack team"}}}}, nil
+	}
+	f.run(t)
+	client := sandboxapi.NewUnixClient(f.socket)
+	if _, err := client.Ready(context.Background(), sandboxapi.ReadyRequest{Harness: "codex"}); !sandboxapi.IsCode(err, sandboxapi.CodeAdminViolation) ||
+		f.os.prepared.Load() != 0 {
+		t.Fatalf("ready under the default pack = %v (prepared %d)", err, f.os.prepared.Load())
+	}
+	if _, err := client.Ready(context.Background(), sandboxapi.ReadyRequest{Harness: "codex", Pack: "codex-pack"}); err != nil ||
+		f.os.prepared.Load() != 1 {
+		t.Fatalf("ready under the run's pack that allows codex = %v (prepared %d)", err, f.os.prepared.Load())
+	}
+}
+
+// GAP-0820: with a cold directory cache the first views answer the
+// provisional default profile, which allows sandboxes; the settled view
+// denies the caller's group. The ready waits for the settled view, as the
+// create's resolve does, and installs nothing.
+func TestSandboxDaemonReadyWaitsForASettledProfileBeforeInstall(t *testing.T) {
+	prev := readyProvisionalPoll
+	readyProvisionalPoll = 10 * time.Millisecond
+	t.Cleanup(func() { readyProvisionalPoll = prev })
+	for _, tc := range []struct {
+		name         string
+		settled      bool
+		wantDenied   bool
+		wantPrepared int64
+	}{
+		{"denied once settled", false, true, 0},
+		{"allowed once settled", true, false, 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newSandboxDaemonFixture(t, func(o *SandboxDaemonOptions) {
+				o.Settings.Operational.Harnesses = []string{"codex"}
+			})
+			var mu sync.Mutex
+			asks := 0
+			f.relay.explain = func(sandboxrelay.ExplainRequest) (sandboxapi.ManagedExplain, error) {
+				mu.Lock()
+				defer mu.Unlock()
+				asks++
+				if asks <= 2 {
+					return sandboxapi.ManagedExplain{Allowed: true, Provisional: true, Match: "default_lookup_failed"}, nil
+				}
+				return sandboxapi.ManagedExplain{Allowed: tc.settled, Match: "group"}, nil
+			}
+			f.run(t)
+			_, err := sandboxapi.NewUnixClient(f.socket).Ready(context.Background(), sandboxapi.ReadyRequest{Harness: "codex"})
+			if sandboxapi.IsCode(err, sandboxapi.CodeAdminViolation) != tc.wantDenied || f.os.prepared.Load() != tc.wantPrepared {
+				t.Fatalf("ready after a provisional view = %v (prepared %d, %d asks)", err, f.os.prepared.Load(), asks)
+			}
+		})
+	}
+}
+
 // A CLI of DefenseClaw 1.0.3 or older readies with an empty object (or no
 // body) and does not say which agent it will run. The daemon asks about its
 // own agent first and readies when the policy allows any agent a create may
@@ -1303,5 +1406,59 @@ func TestSandboxDaemonReadyStaysInsideThePolicyAdmission(t *testing.T) {
 				t.Fatalf("%d policy views at once, past readyViewsInFlight %d (gateway admits %d)", maxInFlight, readyViewsInFlight, admit)
 			}
 		})
+	}
+}
+
+// The macOS stop of the gateway's LaunchAgent syncs the disk of every
+// MicroVM the gateway lists ready first, under the daemon's registration
+// name (GAP-0380): launchd runs no stop command, and a sandbox a raw
+// openshell client started after the daemon's count is otherwise ended
+// with what its guest had not synced. One it could not sync is recorded
+// for the feed, and the stop still goes ahead.
+func TestAMacOSGatewayStopSyncsTheRunningMicroVMsFirst(t *testing.T) {
+	r := newOpenShellRig(t, "darwin")
+	var recorded []string
+	r.o.recordUnsynced = func(names []string) { recorded = append(recorded, names...) }
+	s := setupSettings()
+	s.Operational.GatewayName = "dc-managed"
+	if !r.o.Stop(context.Background(), s) {
+		t.Fatalf("stop: %v", r.ran())
+	}
+	got := r.ran()
+	sync, kill := -1, -1
+	for i, c := range got {
+		switch {
+		case c == "stop-sync dc-managed":
+			sync = i
+		case strings.HasPrefix(c, "launchctl kill SIGTERM "):
+			kill = i
+		}
+	}
+	if sync < 0 || kill < 0 || sync > kill {
+		t.Fatalf("the stop did not sync before it ended the gateway: %v", got)
+	}
+	if len(recorded) != 0 {
+		t.Fatalf("a clean sync recorded %v", recorded)
+	}
+
+	r = newOpenShellRig(t, "darwin")
+	r.o.recordUnsynced = func(names []string) { recorded = append(recorded, names...) }
+	r.o.stopSync = func(context.Context, string, io.Writer) error {
+		return errors.Join(&openshell.UnsyncedSandboxError{Sandbox: "raw-1", Err: errors.New("exec timed out")})
+	}
+	if !r.o.Stop(context.Background(), s) {
+		t.Fatalf("a failed sync held the stop: %v", r.ran())
+	}
+	if len(recorded) != 1 || recorded[0] != "raw-1" {
+		t.Fatalf("unsynced sandbox not recorded for the feed: %v", recorded)
+	}
+
+	// Linux leaves the sync to the managed unit's ExecStop.
+	r = newOpenShellRig(t, "linux")
+	r.o.Stop(context.Background(), s)
+	for _, c := range r.ran() {
+		if strings.HasPrefix(c, "stop-sync") {
+			t.Fatalf("the Linux daemon synced itself: %v", r.ran())
+		}
 	}
 }

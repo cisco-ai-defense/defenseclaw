@@ -406,58 +406,6 @@ class TestPatchOpenclawConfig(unittest.TestCase):
             # Should succeed without error regardless of empty model_name
             self.assertIsNotNone(result)
 
-    def test_enables_plugin_approvals_when_requested(self):
-        with tempfile.TemporaryDirectory() as tmpdir:
-            path = self._make_openclaw_json(tmpdir)
-
-            patch_openclaw_config(
-                path,
-                "claude-opus",
-                4000,
-                "sk-dc-test",
-                "",
-                enable_plugin_approvals=True,
-            )
-
-            with open(path) as f:
-                cfg = json.load(f)
-
-            self.assertTrue(cfg["approvals"]["plugin"]["enabled"])
-            self.assertEqual(cfg["approvals"]["plugin"]["mode"], "session")
-
-    def test_preserves_existing_plugin_approval_routing(self):
-        with tempfile.TemporaryDirectory() as tmpdir:
-            path = self._make_openclaw_json(tmpdir)
-            with open(path) as f:
-                cfg = json.load(f)
-            cfg["approvals"] = {
-                "plugin": {
-                    "mode": "both",
-                    "targets": [{"channel": "slack", "to": "#secops"}],
-                }
-            }
-            with open(path, "w") as f:
-                json.dump(cfg, f)
-
-            patch_openclaw_config(
-                path,
-                "claude-opus",
-                4000,
-                "sk-dc-test",
-                "",
-                enable_plugin_approvals=True,
-            )
-
-            with open(path) as f:
-                cfg = json.load(f)
-
-            self.assertTrue(cfg["approvals"]["plugin"]["enabled"])
-            self.assertEqual(cfg["approvals"]["plugin"]["mode"], "both")
-            self.assertEqual(
-                cfg["approvals"]["plugin"]["targets"],
-                [{"channel": "slack", "to": "#secops"}],
-            )
-
 
 class TestRestoreOpenclawConfig(unittest.TestCase):
     def test_removes_plugin_and_legacy_providers(self):

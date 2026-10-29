@@ -26,15 +26,15 @@ package main
 
 import (
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
 
 	// Its init raises a Windows hook process to above-normal priority
 	// before the CLI packages initialize (GAP-0155).
-	_ "github.com/defenseclaw/defenseclaw/cmd/defenseclaw-hook/internal/hookpriority"
+	_ "github.com/defenseclaw/defenseclaw/cmd/internal/hookpriority"
+	// Its init keeps the collector off until main starts (GAP-0050).
+	"github.com/defenseclaw/defenseclaw/cmd/internal/initgc"
 	"github.com/defenseclaw/defenseclaw/internal/cli"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 )
@@ -46,6 +46,7 @@ var (
 )
 
 func main() {
+	initgc.Restore()
 	// Identity inspection must not depend on mutable per-user hook state. Setup
 	// invokes this exact mode before signing and after installation so archived
 	// hook bytes are bound to the payload manifest's source commit.
@@ -67,7 +68,7 @@ func main() {
 	// installer-state checks below: the launcher it starts applies them, and
 	// a missing launcher must block whatever that state says.
 	if launcher, hookArgs, ok := connector.ClaudeCodeLauncherGuardArgv(os.Args[1:]); ok {
-		os.Exit(runLauncherGuard(launcher, hookArgs, os.Stdin, os.Stdout, os.Stderr))
+		os.Exit(connector.RunClaudeCodeLauncherGuard(launcher, hookArgs, os.Stdin, os.Stdout, os.Stderr))
 	}
 	// The stable Windows launcher survives uninstall because agent clients may
 	// cache its absolute command for the lifetime of their process. Disabled,
@@ -91,27 +92,6 @@ func main() {
 	os.Exit(cli.Execute())
 }
 
-// runLauncherGuard runs launcher with hookArgs and passes its stdin, stdout,
-// stderr and exit code through, as the cmd.exe guard of the other Claude Code
-// events does. When the launcher is missing or cannot start it prints the
-// guard sentence and exits 2, which Claude Code treats as a block; a direct
-// start of a missing launcher was a non-blocking error that let the tool call
-// run unchecked.
-func runLauncherGuard(launcher string, hookArgs []string, stdin io.Reader, stdout, stderr io.Writer) int {
-	command := exec.Command(launcher, hookArgs...)
-	command.Stdin, command.Stdout, command.Stderr = stdin, stdout, stderr
-	err := command.Run()
-	if err == nil {
-		return 0
-	}
-	var exitErr *exec.ExitError
-	if errors.As(err, &exitErr) && exitErr.ExitCode() >= 0 {
-		return exitErr.ExitCode()
-	}
-	fmt.Fprintln(stderr, connector.ClaudeCodeLauncherMissingMessage)
-	return 2
-}
-
 // nonHookInvocationExit answers a start without a hook subcommand. Cursor
 // imports the hooks in ~/.claude/settings.json (its third-party hooks, on by
 // default) and runs only each handler's command, without the handler's args.
@@ -123,74 +103,11 @@ func runLauncherGuard(launcher string, hookArgs []string, stdin io.Reader, stdou
 // DefenseClaw hooks, when set up, decide its events. Any other start without
 // a subcommand is still refused with exit 2.
 func nonHookInvocationExit(args []string, stdin *os.File, stderr io.Writer) int {
-	if len(args) == 0 && stdinIsPiped(stdin) && isCursorEvent(stdin) {
+	if len(args) == 0 && connector.StdinIsPiped(stdin) && connector.IsCursorHookEvent(stdin) {
 		return 0
 	}
 	fmt.Fprintln(stderr, "defenseclaw-hook: expected hook, hook-post or notify subcommand")
 	return 2
-}
-
-// stdinIsPiped is false for a console or terminal, where a person who typed
-// the command would otherwise wait on a read.
-func stdinIsPiped(stdin *os.File) bool {
-	if stdin == nil {
-		return false
-	}
-	info, err := stdin.Stat()
-	return err == nil && info.Mode()&os.ModeCharDevice == 0
-}
-
-// isCursorEvent reports whether r holds one JSON object with a top-level
-// cursor_version string, the marker of every Cursor hook event (the same
-// marker hookexec reads for an imported Claude Code call). The object is read
-// as a stream, value by value, so a large tool input is not held whole.
-func isCursorEvent(r io.Reader) bool {
-	decoder := json.NewDecoder(r)
-	if token, err := decoder.Token(); err != nil || token != json.Delim('{') {
-		return false
-	}
-	found := false
-	for decoder.More() {
-		token, err := decoder.Token()
-		if err != nil {
-			return false
-		}
-		if key, _ := token.(string); key == "cursor_version" {
-			var value string
-			if decoder.Decode(&value) != nil {
-				return false
-			}
-			found = found || value != ""
-			continue
-		}
-		if !skipJSONValue(decoder) {
-			return false
-		}
-	}
-	if token, err := decoder.Token(); err != nil || token != json.Delim('}') {
-		return false
-	}
-	return found
-}
-
-// skipJSONValue reads one JSON value token by token.
-func skipJSONValue(decoder *json.Decoder) bool {
-	depth := 0
-	for {
-		token, err := decoder.Token()
-		if err != nil {
-			return false
-		}
-		switch token {
-		case json.Delim('{'), json.Delim('['):
-			depth++
-		case json.Delim('}'), json.Delim(']'):
-			depth--
-		}
-		if depth == 0 {
-			return true
-		}
-	}
 }
 
 func isHookEntrypoint(args []string) bool {

@@ -4,7 +4,8 @@ project_name: defenseclaw
 
 # The Linux package's preinstall refuses a downgrade before any file is
 # replaced: it compares the deployed release with this build's version, which
-# is stamped into the copy nfpm packages (packaging/linux/preinstall.sh).
+# is stamped into the copy nfpm packages (packaging/linux/preinstall.sh), with
+# the legacy sandbox guard (scripts/stamp-package-script.sh).
 #
 # The archives copy each file's mode from the checkout, so a checkout made
 # under umask 0002 shipped group-writable scripts and docs; dropping the
@@ -12,7 +13,7 @@ project_name: defenseclaw
 # checkout has (GAP-0108). The nfpm entries pin their own modes.
 before:
   hooks:
-    - sh -c 'mkdir -p build/packaging/linux && sed "s|@DC_PKG_VERSION@|{{ .Version }}|" packaging/linux/preinstall.sh >build/packaging/linux/preinstall.sh'
+    - sh -c 'mkdir -p build/packaging/linux && sh scripts/stamp-package-script.sh "{{ .Version }}" packaging/linux/preinstall.sh build/packaging/linux/preinstall.sh'
     - chmod -R go-w packaging edge-connector LICENSE NOTICE THIRD_PARTY_LICENSES.txt README.md CHANGELOG.md
 
 builds:
@@ -97,6 +98,28 @@ builds:
     hooks:
       post:
         - cmd: go run ./internal/tools/windowsresources -target {{ .Os }}_{{ .Arch }} -executable "{{ .Path }}" -component hook -version {{ .Version }} -icon macos/DefenseClawMac/DefenseClawMac/Assets.xcassets/AppIcon.appiconset/icon_256.png
+          output: true
+
+  # The one-line install's Claude Code PreToolUse guard: a small
+  # GUI-subsystem program of its own, so the guard is not the launcher it
+  # checks for and never gets a console window (GAP-2467).
+  - id: defenseclaw-hook-guard
+    main: ./cmd/defenseclaw-hook-guard
+    binary: defenseclaw-hook-guard
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - windows
+    goarch:
+      - amd64
+    flags:
+      - -trimpath
+      - -buildvcs=false
+    ldflags:
+      - -s -w -buildid=defenseclaw-hook-guard-{{.Commit}}-{{.Os}}-{{.Arch}} -H=windowsgui -X main.version={{.Version}} -X main.commit={{.Commit}} -X main.date={{.Date}}
+    hooks:
+      post:
+        - cmd: go run ./internal/tools/windowsresources -target {{ .Os }}_{{ .Arch }} -executable "{{ .Path }}" -component hook-guard -version {{ .Version }} -icon macos/DefenseClawMac/DefenseClawMac/Assets.xcassets/AppIcon.appiconset/icon_256.png
           output: true
 
   - id: defenseclaw-acp-posix
@@ -185,6 +208,30 @@ builds:
     ldflags:
       - -s -w -buildid=defenseclaw-sensor-helper-{{.Commit}}-{{.Os}}-{{.Arch}} -X main.version={{.Version}} -X main.commit={{.Commit}}
 
+  # The scanner runtime launcher of the managed Linux and macOS packages:
+  # it runs skill-scanner, the MCP scan and the plugin scanner from the
+  # Python tree the package installs at <install root>/scanner-runtime
+  # (packaging/unix/build-scanner-runtime.sh, GAP-1527).
+  - id: defenseclaw-scanners-posix
+    main: ./cmd/defenseclaw-scanners
+    binary: defenseclaw-scanners
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+    goarch:
+      - amd64
+      - arm64
+    ignore:
+      - goos: darwin
+        goarch: amd64
+    flags:
+      - -trimpath
+      - -buildvcs=false
+    ldflags:
+      - -s -w -buildid=defenseclaw-scanners-{{.Commit}}-{{.Os}}-{{.Arch}}
+
 # Release asset names are flat and permanent: installers fetch
 # defenseclaw-<version>-<os>-<arch>.{tar.gz,zip} by name.
 archives:
@@ -249,6 +296,7 @@ archives:
     ids:
       - defenseclaw-windows-amd64
       - defenseclaw-hook
+      - defenseclaw-hook-guard
       - defenseclaw-acp-windows-amd64
     formats:
       - zip
@@ -284,6 +332,7 @@ nfpms:
       - defenseclaw-hook-posix
       - defenseclaw-sensor-helper-posix
       - defenseclaw-acp-posix
+      - defenseclaw-scanners-posix
     formats:
       - deb
       - rpm
@@ -450,6 +499,19 @@ nfpms:
         packager: deb
         file_info:
           mode: 0644
+          owner: root
+          group: root
+      # The scanner runtime defenseclaw-scanners runs (GAP-1527): CPython and
+      # the locked scanner packages, built per architecture before
+      # GoReleaser runs (packaging/unix/build-scanner-runtime.sh --target
+      # linux-<arch> --out-dir scanner-runtime/linux-<arch>). The
+      # package manager installs it root-owned with the modes the build set
+      # (0755 folders and programs, 0644 files); the gateway checks that
+      # before every scan.
+      - src: scanner-runtime/linux-{{ .Arch }}/
+        dst: /opt/defenseclaw/scanner-runtime
+        type: tree
+        file_info:
           owner: root
           group: root
       # An rpm owns only the directories it lists, so without this entry an

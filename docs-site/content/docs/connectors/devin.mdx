@@ -25,6 +25,7 @@ Use `devin` for both Devin CLI and Devin Desktop.
 | Devin Desktop before 3.9.19, legacy **Cascade** agent | **No; turned off under the standalone enterprise profile** | Devin Desktop 3.9.19 [removed Cascade](https://docs.devin.ai/desktop/changelog). Cascade used a separate hook contract DefenseClaw does not inspect. See [Cascade on older builds](#cascade-on-older-builds). |
 | Cloud Devin sessions | **No** | Cloud execution does not run local hooks. |
 
+On a per-user install, an explicitly saved `guardrail.hook_fail_mode` takes precedence over the selected tier. See the [gateway outage table](/docs/connectors/capability-matrix#gateway-outage) and [Fail modes](/docs/reference/fail-modes).
 ## Platform support
 
 <ConnectorSupport id="devin" />
@@ -43,7 +44,7 @@ defenseclaw setup devin --mode observe
 defenseclaw setup devin --mode action
 ```
 
-A first setup without `--mode` defaults to observe; a re-run without `--mode` keeps the current mode.
+A first setup without `--mode` defaults to observe; a re-run without `--mode` keeps the current mode. On a terminal a re-run still asks for the mode, with the current one as the default (Enter keeps it), and whether to re-apply the hooks; in action mode it also asks whether to add the LLM judge. `--yes` skips the questions ([the questions setup asks](/docs/guardrail/switching-connectors#the-questions-setup-asks)).
 
 On Windows, run the same commands in PowerShell. Review observed events before you use action mode. Restart open Devin CLI sessions and reopen Devin Desktop tabs afterwards.
 
@@ -71,7 +72,7 @@ DefenseClaw manages only documented Devin hook locations. CLI and Devin Local re
 | MCP | Canonical user and project `mcp_config.json`. Higher-precedence compatibility files are read, not rewritten. |
 | Skills and rules | `.devin` and `.agents` roots, including `AGENT.md`, `AGENTS.md` and `AGENTS.local.md`, plus the pre-rename Devin Desktop rule and skill locations the vendor still loads. `defenseclaw skill quarantine` and `restore` can move a flagged skill. Traversal does not follow links. |
 
-Setup accepts JSONC and keeps foreign hook groups and settings. Modified hook files are written as JSON, so comments and formatting are removed; the pre-edit backup keeps the original bytes. Devin also loads hooks from `.claude/` settings for compatibility, and DefenseClaw does not claim or modify those. DefenseClaw does not install Devin plugins or register hooks through them. The `devin acp` entry point is cataloged for the shared [ACP guard](/docs/acp-guard) but has not completed official-client testing. Cloud execution, proxy transport, native OTLP, sandboxing, egress control and managed higher-layer policy are outside this connector.
+Setup accepts JSONC and keeps foreign hook groups and settings. A changed user hook file is written back as JSON, so its comments and formatting are removed; in a project `.devin/hooks.v1.json` setup and teardown edit only DefenseClaw's entries, so your comments, formatting and a UTF-8 BOM stay. If setup cannot edit the project file in place, for example when it has a duplicate top-level key, it writes it back as JSON too, so its comments, formatting and BOM are removed. The pre-edit backup keeps the original bytes. Devin also loads hooks from `.claude/` settings for compatibility, and DefenseClaw does not claim or modify those. DefenseClaw does not install Devin plugins or register hooks through them. The `devin acp` entry point is cataloged for the shared [ACP guard](/docs/acp-guard) but has not completed official-client testing. Cloud execution, proxy transport, native OTLP, sandboxing, egress control and managed higher-layer policy are outside this connector.
 
 In a standalone enterprise deployment on Linux and macOS, each hook runs `defenseclaw-hook hook --connector devin --enterprise-managed`. Windows uses the installed hook binary through the per-user route. What a classified gateway outage does is in the [gateway outage table](/docs/connectors/capability-matrix#gateway-outage). With `foreign_hooks: remove` (the default), a guarded call during that outage requires fresh, trusted records for the agent process and its session; a missing, blocked or stale record blocks. See [Foreign-hook guard](/docs/enterprise/foreign-hook-guard) and [Machine policy](/docs/enterprise/machine-policy).
 
@@ -129,7 +130,7 @@ Devin has no native resumable ask. A `confirm` finding stays in audit and cannot
 
 ### Fail mode
 
-Fail closed: yes. When the gateway cannot give a usable answer, the hook blocks the events that support a block response unless `guardrail.hook_fail_mode` is `open`. The default is `closed`. In a standalone enterprise deployment each hook follows the administrator's fail mode: `closed` unless `hook_fail_mode` (global or for Devin) is `open`. Devin itself blocks only on exit `2`; every other hook error fails open on its side. Settings and edge cases are in [Fail modes](/docs/reference/fail-modes). What a gateway outage does to a Devin call is in the [gateway outage table](/docs/connectors/capability-matrix#gateway-outage).
+Can fail closed: yes. On a per-user install with no saved mode, a gateway that is not running follows the policy tier: the default and permissive policies let the call run with one warning, and the strict policy blocks it ([gateway outage table](/docs/connectors/capability-matrix#gateway-outage)). Every other failure, an error or unusable answer included, blocks the events that support a block response. In a standalone enterprise deployment each hook follows the administrator's fail mode: `closed` unless `hook_fail_mode` (global or for Devin) is `open`. Devin itself blocks only on exit `2`; every other hook error fails open on its side. Settings and edge cases are in [Fail modes](/docs/reference/fail-modes). What a gateway outage does to a Devin call is in the [gateway outage table](/docs/connectors/capability-matrix#gateway-outage).
 
 ## Hook capabilities
 
@@ -164,7 +165,7 @@ Devin documents `session_id` and a per-turn `prompt_id` but no per-tool invocati
 | Project hooks (pinned workspace only) | `<workspace>/.devin/hooks.v1.json` | same |
 | Hook program | `~/.defenseclaw/hooks` | `%USERPROFILE%\.local\bin\defenseclaw-hook.exe` (one-line install) or `%LOCALAPPDATA%\DefenseClaw\HookRuntime\defenseclaw-hook.exe` (Setup installer) |
 
-Setup reads JSONC and keeps other hooks and settings in those files, but writes a changed file back as JSON, so comments and formatting are removed. The pre-edit backup keeps the original bytes.
+Setup reads JSONC and keeps other hooks and settings in those files. It writes a changed user file back as JSON, so comments and formatting are removed there. In a project `.devin/hooks.v1.json` setup and teardown edit only DefenseClaw's event entries: your comments, formatting, other events and a UTF-8 BOM stay. If setup cannot edit the project file in place, for example when it has a duplicate top-level key, it writes it back as JSON too, so its comments, formatting and BOM are removed. The pre-edit backup keeps the original bytes.
 
 `defenseclaw setup remove devin --yes` removes DefenseClaw's Devin hook entries and, after the gateway restart verifies removal, revokes `hooks/.hook-devin.token` and removes an empty `connector_backups/devin` folder. The `hooks/devin-hook.sh` path remains as a blocking tombstone for Devin processes that cached it; restart Devin after removal. Devin's own `%APPDATA%/devin` or `~/.config/devin` directory and a credential lock file may remain. `--no-restart` defers hook and credential teardown until the next gateway start.
 

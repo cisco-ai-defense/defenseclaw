@@ -8,7 +8,7 @@ keywords:
   - dashboard catalog
 ---
 
-DefenseClaw provisions 19 Grafana dashboards into a **DefenseClaw** folder. Start the stack with [Run Grafana locally](/docs/observability/local-observability); the links on this page assume `localhost:3000`.
+DefenseClaw provisions 18 Grafana dashboards into a **DefenseClaw** folder, or 19 from a source checkout (editable install), which also seeds the optional Fleet dashboard. The IoT Fleet board is the 19th: it is not in the installed package and is added with the separate Fleet assets ([Fleet dashboard](/docs/edge-connector/api-reference#prometheus-metrics)). Start the stack with [Run Grafana locally](/docs/observability/local-observability); the links on this page assume `localhost:3000`.
 
 ## Complete inventory
 
@@ -32,7 +32,6 @@ DefenseClaw provisions 19 Grafana dashboards into a **DefenseClaw** folder. Star
 | **DefenseClaw — Proxy & LLM Guard** (`defenseclaw-traffic`) | What happens on proxy and router deployments? Empty unless proxy mode is active. | Prometheus, Loki, Tempo |
 | **DefenseClaw — Sandboxes** (`defenseclaw-sandboxes`) | What are OpenShell sandboxes doing, reaching and being refused? See [Sandboxes board](#sandboxes-board). | Prometheus, Loki |
 | **DefenseClaw — Runtime & Reliability** (`defenseclaw-runtime`) | Is the process, database, exporter or destination delivery unhealthy? | Prometheus, Loki |
-| **DefenseClaw IoT Fleet** (`defenseclaw-fleet`) | Which edge devices are online and receiving verdicts? Empty until the [authenticated Fleet scrape](/docs/edge-connector/install) is set up. | Prometheus |
 
 ## Kernel controls and your Tetragon policies
 
@@ -179,4 +178,6 @@ If rare events (a single block or finding) read `0` in Prometheus panels, counte
 
 ## Source of truth and upgrades
 
-The local stack ships these JSON files in `bundles/local_observability_stack/grafana/dashboards/`. `up` refreshes them on every start; pass `--no-refresh-config` to keep your edits. Edits made in the Grafana UI are not written back to disk, so copy a changed board out with **Dashboard → JSON Model**.
+The optional **DefenseClaw IoT Fleet** (`defenseclaw-fleet`) dashboard ships in the separate `defenseclaw-fleet-assets.tar.gz` release asset, alongside the authenticated Fleet scrape templates. See [Install the Edge Connector](/docs/edge-connector/install) for Fleet setup. The core wheel excludes these optional Fleet assets. A source checkout (editable install) seeds the Fleet dashboard from `bundles/` along with the other 18.
+
+The dashboard sources live in `bundles/local_observability_stack/grafana/dashboards/`. `up` refreshes the installed dashboards on every start; pass `--no-refresh-config` to keep your edits. Edits made in the Grafana UI are not written back to disk, so copy a changed board out with **Dashboard → JSON Model**.

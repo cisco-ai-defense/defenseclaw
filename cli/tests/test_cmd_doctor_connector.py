@@ -352,8 +352,9 @@ class TestCodexOtelAlignment(unittest.TestCase):
         # Review of 70603235: an operator collector with its own 64-hex bearer,
         # with or without stale DefenseClaw markers, an operator's sha256
         # resource attribute or a hex route segment is not a DefenseClaw
-        # credential. Doctor passes it with no ownership warning (the gateway
-        # keeps it). Only a value encoded past the decode budget (a 2,403-byte
+        # credential. Doctor passes it (the gateway keeps it); one with both
+        # markers and a bearer to an unserved loopback port gets the GAP-1610
+        # warning with the manual step. Only a value encoded past the decode budget (a 2,403-byte
         # value of 1,200 nested %25 escapes, a third percent layer, a Basic
         # password encoded again, a value over 64 KiB) is named in a warning,
         # after bounded work. The sidecar's token is never in these values.
@@ -381,7 +382,11 @@ class TestCodexOtelAlignment(unittest.TestCase):
                 "marked_retired_port_hex_bearer",
                 "[otel.exporter.otlp-http]\nendpoint = 'http://127.0.0.1:19081/v1/logs'\n"
                 f"[otel.exporter.otlp-http.headers]\nAuthorization = 'Bearer {operator_hex}'\n" + markers,
-                "",
+                # Kept (no known credential), but named: both markers and a
+                # bearer to an unserved loopback port is the shape an earlier
+                # release's saved copy brings back (GAP-1610, LEAD DECISION
+                # 05:36 option (b)).
+                "otel.exporter",
             ),
             (
                 "marked_hex_route_basic",
@@ -429,6 +434,9 @@ class TestCodexOtelAlignment(unittest.TestCase):
                     self.assertEqual(len(ownership), 1, result.checks)
                     self.assertEqual(ownership[0]["status"], "warn")
                     self.assertIn(field, ownership[0]["detail"])
+                    if name == "marked_retired_port_hex_bearer":
+                        self.assertIn("x-defenseclaw-source and x-defenseclaw-client", ownership[0]["detail"])
+                        continue
                     self.assertIn("too deeply", ownership[0]["detail"])
 
     def test_codex_credential_in_any_otel_value_fails(self) -> None:

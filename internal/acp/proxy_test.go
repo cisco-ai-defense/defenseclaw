@@ -592,32 +592,43 @@ func TestCopyFramesActionOutageAfterDeliveredPromptNamesPossibleToolEffect(t *te
 	}
 }
 
-type refusingAfterPromptEvaluator struct{}
+type turnDriftEvaluator struct {
+	err           error
+	aggregateOnly bool
+}
 
-func (refusingAfterPromptEvaluator) Evaluate(_ context.Context, in Evaluation) (Verdict, error) {
-	if in.Direction == AgentToClient && in.Method == "session/update" {
-		return Verdict{}, &GatewayRefusedError{Status: 400, Message: "invalid ACP evaluation body"}
+func (e turnDriftEvaluator) Evaluate(_ context.Context, in Evaluation) (Verdict, error) {
+	if in.Direction == AgentToClient && in.Method == "session/update" && (!e.aggregateOnly || in.Aggregate) {
+		return Verdict{}, e.err
 	}
 	return Verdict{Action: "allow"}, nil
 }
 
-// A specific refusal after a delivered prompt keeps its cause and adds the
-// post-delivery warning (GAP-1546); a Secure Client host keeps the wording
-// of main (GAP-1560).
-func TestCopyFramesRefusalAfterDeliveredPromptKeepsItsCause(t *testing.T) {
+// A binding or mode change after a prompt reached the agent must complete
+// the editor's pending turn with the cause, including at the aggregate check.
+func TestCopyFramesMidTurnDriftCompletesEditorPrompt(t *testing.T) {
 	for _, tc := range []struct {
-		name      string
-		peerFixes bool
-		want      []string
-		forbid    []string
+		name          string
+		err           error
+		wantErr       error
+		want          string
+		mode          Mode
+		aggregateOnly bool
 	}{
-		{name: "gateway refusal", peerFixes: true, want: []string{"refused to check it", "invalid ACP evaluation body", "may have run", "before retrying"}},
-		{name: "secure client", peerFixes: false, want: []string{"did not answer"}, forbid: []string{"may have run"}},
+		{name: "binding on update", err: &BindingRefusedError{Code: RefusalProfileChanged, Profile: "next", Mode: "action"}, wantErr: ErrBindingRefused, want: "from ACP profile current to next"},
+		{name: "binding on completed turn", err: &BindingRefusedError{Code: RefusalProfileChanged, Profile: "next", Mode: "action"}, wantErr: ErrBindingRefused, want: "from ACP profile current to next", aggregateOnly: true},
+		{name: "managed observe binding on update", err: &BindingRefusedError{Code: RefusalProfileChanged, Profile: "next", Mode: "action"}, wantErr: ErrBindingRefused, want: "from ACP profile current to next", mode: ModeObserve},
+		{name: "mode on update", err: ErrModeMismatch, wantErr: ErrModeMismatch, want: "profile current is in observe mode"},
+		{name: "mode on completed turn", err: ErrModeMismatch, wantErr: ErrModeMismatch, want: "profile current is in observe mode", aggregateOnly: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			state := &proxyState{pendingClient: map[string]string{}, pendingAgent: map[string]string{}, peerProtocolFixes: tc.peerFixes}
+			state := &proxyState{pendingClient: map[string]string{}, pendingAgent: map[string]string{}, peerProtocolFixes: true}
 			var agentInput, clientOutput bytes.Buffer
-			opts := ProxyOptions{Mode: ModeAction, Evaluator: refusingAfterPromptEvaluator{}, Stderr: io.Discard}
+			mode := tc.mode
+			if mode == "" {
+				mode = ModeAction
+			}
+			opts := ProxyOptions{Mode: mode, Managed: true, Profile: "current", ClientID: "zed", AgentID: "hermes", Evaluator: turnDriftEvaluator{err: tc.err, aggregateOnly: tc.aggregateOnly}, Stderr: io.Discard}
 			prompt := `{"jsonrpc":"2.0","id":7,"method":"session/prompt","params":{"sessionId":"s","prompt":[{"type":"text","text":"run a terminal command"}]}}` + "\n"
 			if err := copyFrames(context.Background(), opts, state, ClientToAgent, strings.NewReader(prompt), &agentInput, &clientOutput); err != nil {
 				t.Fatal(err)
@@ -628,19 +639,14 @@ func TestCopyFramesRefusalAfterDeliveredPromptKeepsItsCause(t *testing.T) {
 			agentInput.Reset()
 			updates := `{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s","update":{"sessionUpdate":"tool_call_update","toolCallId":"terminal-1","status":"completed","content":[{"type":"text","text":"command exited 0"}]}}}` + "\n" +
 				`{"jsonrpc":"2.0","id":7,"result":{"stopReason":"end_turn"}}` + "\n"
-			if err := copyFrames(context.Background(), opts, state, AgentToClient, strings.NewReader(updates), &clientOutput, &agentInput); err != nil {
-				t.Fatal(err)
+			err := copyFrames(context.Background(), opts, state, AgentToClient, strings.NewReader(updates), &clientOutput, &agentInput)
+			if !errors.Is(err, tc.wantErr) {
+				t.Fatalf("session error = %v, want %v", err, tc.wantErr)
 			}
-			text, _ := blockedTurn(t, clientOutput.Bytes(), "7")
-			for _, want := range tc.want {
-				if !strings.Contains(text, want) {
-					t.Fatalf("refusal %q lacks %q", text, want)
-				}
-			}
-			for _, forbid := range tc.forbid {
-				if strings.Contains(text, forbid) {
-					t.Fatalf("refusal %q has %q", text, forbid)
-				}
+			text, stop := blockedTurn(t, clientOutput.Bytes(), "7")
+			if stop != "end_turn" || !strings.Contains(text, tc.want) || !strings.Contains(text, "Tool actions may have run") ||
+				!strings.Contains(text, "before retrying") || strings.Contains(clientOutput.String(), "command exited 0") {
+				t.Fatalf("editor turn = %q / %q, want cause and possible-tool-effect warning", text, stop)
 			}
 		})
 	}
@@ -890,6 +896,194 @@ func TestCopyFramesRejectedCredentialNamesTheRevocation(t *testing.T) {
 				t.Fatalf("a new thread was not told: %s", client.String())
 			}
 		}
+	}
+}
+
+// markedFrameEvaluator fails the check of every agent frame that carries
+// the text fail-here, and allows everything else.
+type markedFrameEvaluator struct{ err error }
+
+func (e markedFrameEvaluator) Evaluate(_ context.Context, in Evaluation) (Verdict, error) {
+	if in.Direction == AgentToClient && bytes.Contains(in.Payload, []byte("fail-here")) {
+		return Verdict{}, e.err
+	}
+	return Verdict{Action: "allow"}, nil
+}
+
+// guardEndedTurns maps each prompt ID the guard answered in out to the
+// session of the DefenseClaw message just before that answer ("" when the
+// answer is a JSON-RPC error). Answers the agent wrote are not included.
+func guardEndedTurns(t *testing.T, out []byte) map[string]string {
+	t.Helper()
+	turns := map[string]string{}
+	chunkSession, chunk := "", false
+	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		if line == "" {
+			continue
+		}
+		var frame struct {
+			ID     json.RawMessage `json:"id"`
+			Method string          `json:"method"`
+			Error  json.RawMessage `json:"error"`
+			Params struct {
+				SessionID string `json:"sessionId"`
+				Update    struct {
+					SessionUpdate string `json:"sessionUpdate"`
+				} `json:"update"`
+			} `json:"params"`
+		}
+		if err := json.Unmarshal([]byte(line), &frame); err != nil {
+			t.Fatalf("editor frame is not JSON: %q", line)
+		}
+		switch {
+		case frame.Method == "session/update" && frame.Params.Update.SessionUpdate == "agent_message_chunk":
+			chunkSession, chunk = frame.Params.SessionID, true
+			continue
+		case frame.Method == "" && chunk:
+			turns[string(frame.ID)] = chunkSession
+		case frame.Method == "" && len(frame.Error) > 0:
+			turns[string(frame.ID)] = ""
+		}
+		chunk = false
+	}
+	return turns
+}
+
+// Observe mode lets the editor run two prompts at once (Zed keeps one guard
+// for every thread). A check that fails on one turn's frame must end that
+// turn, with its own prompt ID and session, and never the other turn: the
+// guard's active prompt names only the latest one.
+func TestCopyFramesObserveFailureEndsOnlyTheFailingFramesTurn(t *testing.T) {
+	binding := &BindingRefusedError{Code: RefusalProfileChanged, Profile: "next", Mode: "action"}
+	outage := errors.New("gateway did not answer")
+	update := func(session, text string) string {
+		sid := ""
+		if session != "" {
+			sid = `"sessionId":"` + session + `",`
+		}
+		return `{"jsonrpc":"2.0","method":"session/update","params":{` + sid + `"update":{"sessionUpdate":"tool_call_update","toolCallId":"t","status":"completed","content":[{"type":"text","text":"` + text + `"}]}}}` + "\n"
+	}
+	answer := func(id, text string) string {
+		return `{"jsonrpc":"2.0","id":` + id + `,"result":{"stopReason":"end_turn","_meta":{"note":"` + text + `"}}}` + "\n"
+	}
+	for _, tc := range []struct {
+		name    string
+		err     error
+		agent   string            // the agent frames, one of them marked fail-here
+		wantErr error             // nil: the session continues
+		want    map[string]string // prompt ID -> session of the turns the guard ended
+		later   string            // agent output that must still reach the editor
+	}{
+		{name: "binding on the earlier turn's update", err: binding, wantErr: ErrBindingRefused,
+			agent: update("a", "fail-here"), want: map[string]string{"1": "a"}},
+		{name: "mode drift on the earlier turn's update", err: ErrModeMismatch, wantErr: ErrModeMismatch,
+			agent: update("a", "fail-here"), want: map[string]string{"1": "a"}},
+		{name: "binding on the earlier turn's own answer", err: binding, wantErr: ErrBindingRefused,
+			agent: answer("1", "fail-here"), want: map[string]string{"1": "a"}},
+		{name: "binding on the earlier turn's permission request", err: binding, wantErr: ErrBindingRefused,
+			agent: `{"jsonrpc":"2.0","id":"perm-1","method":"session/request_permission","params":{"sessionId":"a","note":"fail-here","toolCall":{"toolCallId":"t"},"options":[]}}` + "\n",
+			want:  map[string]string{"1": "a"}},
+		{name: "binding on the later turn after the earlier finished", err: binding, wantErr: ErrBindingRefused,
+			agent: answer("1", "done") + update("b", "fail-here"), want: map[string]string{"2": "b"}},
+		{name: "binding on an update of a finished turn", err: binding, wantErr: ErrBindingRefused,
+			agent: answer("1", "done") + update("a", "fail-here"), want: map[string]string{}},
+		{name: "binding on an update without a session", err: binding, wantErr: ErrBindingRefused,
+			agent: update("", "fail-here"), want: map[string]string{}},
+		{name: "managed outage on the earlier turn's update", err: outage,
+			agent: update("a", "fail-here") + update("b", "later-b") + answer("2", "later-b-done"),
+			want:  map[string]string{"1": "a"}, later: "later-b-done"},
+		{name: "managed outage on the earlier turn's own answer", err: outage,
+			agent: answer("1", "fail-here") + update("b", "later-b") + answer("2", "later-b-done"),
+			want:  map[string]string{"1": "a"}, later: "later-b-done"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			state := &proxyState{pendingClient: map[string]string{}, pendingAgent: map[string]string{}, peerProtocolFixes: true}
+			var agentInput, clientOutput bytes.Buffer
+			opts := ProxyOptions{Mode: ModeObserve, Managed: true, Profile: "current", ClientID: "zed", AgentID: "hermes",
+				Evaluator: markedFrameEvaluator{err: tc.err}, Stderr: io.Discard}
+			prompts := `{"jsonrpc":"2.0","id":1,"method":"session/prompt","params":{"sessionId":"a","prompt":[{"type":"text","text":"first"}]}}` + "\n" +
+				`{"jsonrpc":"2.0","id":2,"method":"session/prompt","params":{"sessionId":"b","prompt":[{"type":"text","text":"second"}]}}` + "\n"
+			if err := copyFrames(context.Background(), opts, state, ClientToAgent, strings.NewReader(prompts), &agentInput, &clientOutput); err != nil {
+				t.Fatal(err)
+			}
+			if strings.Count(agentInput.String(), `"method":"session/prompt"`) != 2 || clientOutput.Len() != 0 {
+				t.Fatalf("both prompts were not delivered: agent %q, editor %q", agentInput.String(), clientOutput.String())
+			}
+			agentInput.Reset()
+			err := copyFrames(context.Background(), opts, state, AgentToClient, strings.NewReader(tc.agent), &clientOutput, &agentInput)
+			if tc.wantErr == nil && err != nil || tc.wantErr != nil && !errors.Is(err, tc.wantErr) {
+				t.Fatalf("session error = %v, want %v", err, tc.wantErr)
+			}
+			got := guardEndedTurns(t, clientOutput.Bytes())
+			if len(got) != len(tc.want) {
+				t.Fatalf("guard ended turns %v, want %v; editor saw %q", got, tc.want, clientOutput.String())
+			}
+			for id, session := range tc.want {
+				if s, ok := got[id]; !ok || s != session {
+					t.Fatalf("guard ended turns %v, want %v; editor saw %q", got, tc.want, clientOutput.String())
+				}
+			}
+			if strings.Contains(agentInput.String(), `"sessionId":"b"`) {
+				t.Fatalf("guard cancelled the other turn: %q", agentInput.String())
+			}
+			if tc.later != "" && !strings.Contains(clientOutput.String(), tc.later) {
+				t.Fatalf("the other turn's output was dropped: %q", clientOutput.String())
+			}
+		})
+	}
+}
+
+type refusingAfterPromptEvaluator struct{}
+
+func (refusingAfterPromptEvaluator) Evaluate(_ context.Context, in Evaluation) (Verdict, error) {
+	if in.Direction == AgentToClient && in.Method == "session/update" {
+		return Verdict{}, &GatewayRefusedError{Status: 400, Message: "invalid ACP evaluation body"}
+	}
+	return Verdict{Action: "allow"}, nil
+}
+
+// A specific refusal after a delivered prompt keeps its cause and adds the
+// post-delivery warning (GAP-1546); a Secure Client host keeps the wording
+// of main (GAP-1560).
+func TestCopyFramesRefusalAfterDeliveredPromptKeepsItsCause(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		peerFixes bool
+		want      []string
+		forbid    []string
+	}{
+		{name: "gateway refusal", peerFixes: true, want: []string{"refused to check it", "invalid ACP evaluation body", "may have run", "before retrying"}},
+		{name: "secure client", peerFixes: false, want: []string{"did not answer"}, forbid: []string{"may have run"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			state := &proxyState{pendingClient: map[string]string{}, pendingAgent: map[string]string{}, peerProtocolFixes: tc.peerFixes}
+			var agentInput, clientOutput bytes.Buffer
+			opts := ProxyOptions{Mode: ModeAction, Evaluator: refusingAfterPromptEvaluator{}, Stderr: io.Discard}
+			prompt := `{"jsonrpc":"2.0","id":7,"method":"session/prompt","params":{"sessionId":"s","prompt":[{"type":"text","text":"run a terminal command"}]}}` + "\n"
+			if err := copyFrames(context.Background(), opts, state, ClientToAgent, strings.NewReader(prompt), &agentInput, &clientOutput); err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(agentInput.String(), `"method":"session/prompt"`) {
+				t.Fatalf("prompt was not delivered to agent: %q", agentInput.String())
+			}
+			agentInput.Reset()
+			updates := `{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s","update":{"sessionUpdate":"tool_call_update","toolCallId":"terminal-1","status":"completed","content":[{"type":"text","text":"command exited 0"}]}}}` + "\n" +
+				`{"jsonrpc":"2.0","id":7,"result":{"stopReason":"end_turn"}}` + "\n"
+			if err := copyFrames(context.Background(), opts, state, AgentToClient, strings.NewReader(updates), &clientOutput, &agentInput); err != nil {
+				t.Fatal(err)
+			}
+			text, _ := blockedTurn(t, clientOutput.Bytes(), "7")
+			for _, want := range tc.want {
+				if !strings.Contains(text, want) {
+					t.Fatalf("refusal %q lacks %q", text, want)
+				}
+			}
+			for _, forbid := range tc.forbid {
+				if strings.Contains(text, forbid) {
+					t.Fatalf("refusal %q has %q", text, forbid)
+				}
+			}
+		})
 	}
 }
 

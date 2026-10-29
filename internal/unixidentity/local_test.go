@@ -45,6 +45,14 @@ func TestParseLocalPasswdAndDSCL(t *testing.T) {
 	if len(nodes) != 2 || nodes["ent-bob"] != "/Active Directory/DCLAB/dclab.test" || nodes["ent-ldap"] != "/LDAPv3/ldap.example.test" {
 		t.Fatalf("parseDSCLOriginalNodes = %v", nodes)
 	}
+	// GAP-0532: a local node account linked to Platform SSO is the identity
+	// provider's account; a Kerberos or malformed link is no such link.
+	linked := parseDSCLPlatformSSOAccounts("alice  PlatformSSO:alice@corp.example\n" +
+		"bob Kerberos:bob@LKDC:SHA1.1 PlatformSSO:Bob@Corp.Example\ncarol Kerberos:carol@LKDC:SHA1.2\n" +
+		"dave PlatformSSO:\neve PlatformSSO:not-a-upn\nbroken\n")
+	if len(linked) != 2 || !linked["alice"] || !linked["bob"] {
+		t.Fatalf("parseDSCLPlatformSSOAccounts = %v", linked)
+	}
 	groups := parseLocalGroups("wheel:x:10:root\n+nisgroup:::\ndc-sbx-contractors:x:2501:ent-hank\nbroken\nwheel:x:11:\n")
 	if len(groups) != 2 || groups["wheel"] != 10 || groups["dc-sbx-contractors"] != 2501 {
 		t.Fatalf("parseLocalGroups = %v", groups)

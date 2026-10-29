@@ -59,7 +59,7 @@ func TestPerUserPluginsPostThroughTheRenderedInstallGateway(t *testing.T) {
 					t.Fatal(err)
 				}
 				data := templateData{APIAddr: strings.TrimPrefix(server.URL, "http://"),
-					TokenFileJS: javaScriptStringContent(token), FailMode: "closed", OutageFailMode: "open"}
+					TokenFileJS: javaScriptStringContent(token), FailMode: "closed"}
 				if rendered {
 					data.GatewayBinaryJS = javaScriptStringContent(gateway)
 				}

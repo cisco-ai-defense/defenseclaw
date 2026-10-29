@@ -45,8 +45,8 @@
     "/usr/local/lib/defenseclaw/hooks/_hardening.sh": {
       "mode": "-rw-r--r--",
       "owner": "root",
-      "size": 140890,
-      "sha256": "ed7fb884542d74a56f336cdaf27d6069a87719d5fa2797831c3021345d4261f6"
+      "size": 171090,
+      "sha256": "f95d6315f54da5788acecfe79e5ea6a55211683e60e66259048e76a4f718791f"
     },
     "/usr/local/lib/defenseclaw/hooks/_sandbox.sh": {
       "mode": "-rw-r--r--",
@@ -57,32 +57,32 @@
     "/usr/local/lib/defenseclaw/hooks/hermes-hook.sh": {
       "mode": "-rwxr-xr-x",
       "owner": "root",
-      "size": 8222,
-      "sha256": "2a96f682539dd34797243603d054f784021d03066deec63ee055533bed845dfa"
+      "size": 8240,
+      "sha256": "eb1ab79cf5ec022b95db71d26de8feba6501a7162a2d0716c4feec507e22ceda"
     },
     "/usr/local/lib/defenseclaw/hooks/inspect-request.sh": {
       "mode": "-rwxr-xr-x",
       "owner": "root",
-      "size": 7145,
-      "sha256": "dd281de8c81e63e18a44b2f30c7c2c1228405e2cf6757432e2c21b31fc57ebaf"
+      "size": 7172,
+      "sha256": "de16a9b2043b969ff910f2fb21d3c82ce6e421b11cae3000260740da735ffbc3"
     },
     "/usr/local/lib/defenseclaw/hooks/inspect-response.sh": {
       "mode": "-rwxr-xr-x",
       "owner": "root",
-      "size": 6336,
-      "sha256": "3e59885df356f8c73321f1d4a775b3bfc90cdd6f08714b37e59909254b4a92fa"
+      "size": 6363,
+      "sha256": "b016f2cbbb05ee7a80d508a5d4f6d892365b7bba36ededba6d7bbfe78adf5969"
     },
     "/usr/local/lib/defenseclaw/hooks/inspect-tool-response.sh": {
       "mode": "-rwxr-xr-x",
       "owner": "root",
-      "size": 6764,
-      "sha256": "a2de3ae9108cf7d16c687586319f1dd9308abfbbe00ca7fc746faed92721a0b4"
+      "size": 6950,
+      "sha256": "429ad2d3b466fa5826d4c5e82a0e52fc2209b0a234e5b888e43430e665a55142"
     },
     "/usr/local/lib/defenseclaw/hooks/inspect-tool.sh": {
       "mode": "-rwxr-xr-x",
       "owner": "root",
-      "size": 7113,
-      "sha256": "4299bbba2bab1235378ef693524c199cf7dad21126b81a7853d19668a569dd1b"
+      "size": 7296,
+      "sha256": "752728322946cff089a74421c8664db99ba47ec2447ec7543388b8646aa22db9"
     }
   }
 }

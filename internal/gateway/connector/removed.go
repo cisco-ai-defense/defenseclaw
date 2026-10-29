@@ -16,72 +16,33 @@
 
 package connector
 
-// until 1.1: DefenseClaw 1.0.4 removed the OpenHands and OmniGent connectors
-// (#1182). A host an older release set up still runs their hook script or
-// imports their policy module. The teardown of these teardown-only
-// connectors does exactly two things:
+// until 1.1 (the last release that upgrades a 1.0.2 to 1.0.4 host):
+// DefenseClaw no longer supports OpenHands or OmniGent. A host an older
+// release set up may still have what that setup wrote for them. The teardown
+// of these teardown-only connectors removes exactly that, by identity (what
+// DefenseClaw wrote is DefenseClaw's, the rule uninstall uses for every
+// connector), and nothing else:
 //
-//  1. It replaces the hook script an older release wrote for the connector
-//     (OpenHands' openhands-hook.sh, OmniGent's policy module), proven by its
-//     DefenseClaw marker, with a static deny stub. A stub an older teardown
-//     left that allowed every call is replaced the same way. The stub blocks
-//     every call and says that support was removed in 1.0.4 and how to
-//     remove the hook. A copy of the stub is published over the path
-//     through an identity-bound, recoverable compare-and-swap
-//     (removedOnlyConnector.replaceScript), so the path names the whole old
-//     script or the whole stub, never part of each. The old file itself is
-//     never written: a write into a live hook that fails part way could
-//     leave, under every name of it, a script that runs to exit 0 (an
-//     allow). A script or module with more than one name (a hard link) is
-//     left whole with its tokens, since the swap would change this name only.
-//     An OmniGent module whose bytes are not the ones the older setup
-//     recorded it wrote (its backup record's post-setup hash) was edited:
-//     its exact bytes are saved first, synced and read back, under
-//     connector_backups/omnigent/ (removedOnlyConnector.keepEdited), and the
-//     stub replaces it only once they are; the older teardown kept such a
-//     module. The OpenHands script never had that record, so its marked bytes
-//     are saved before any in-place write too.
-//     A script that is gone while an agent config still runs or imports it
-//     (an old hook OpenHands would run, then let the call through on the
-//     missing file's error) gets the stub too (restoreStubForRegistration).
-//     A stub the agent cannot run or load, or that another account may
-//     change (its mode drifted, or another account owns it), is put right
-//     (repairStub).
-//     The hook contract lock entry of the connector records the stub's
-//     digest as its script's, or no digest when the script is gone
-//     (sealStub), so the lock seals exactly what is at the path; a lock or
-//     entry that is gone is written again for the stub, with every agent
-//     config that runs it, and read back.
-//  2. It revokes the DefenseClaw tokens issued for the connector, but only
-//     once nothing but the stub is left at the script path. An old hook that
-//     may still run (a file with more than one name, a hard link; a link,
-//     or a file DefenseClaw cannot prove it wrote) keeps its tokens:
-//     without them the old hook allows every call in fail mode open, with
-//     them it reaches the retired gateway route, which blocks every call
-//     whatever the token. The teardown then fails with the step that
-//     resolves it by hand (removedOnlyConnector.hookLeft), and the next
-//     start tries again. The OpenHands hook token is never revoked
-//     (removedOnlyConnector.keepHookToken): a 1.0.0 to 1.0.3 OpenHands hook
-//     reads it from the folder the script is in and, when it finds none,
-//     lets every call run in fail mode open before it contacts the gateway.
-//     A copy of the script under another name in the hooks folder reads the
-//     same token, and no check can prove that no hooks.json (in the home or
-//     in any workspace) runs such a copy. Nothing in 1.0.4 accepts the token
-//     (the gateway loads hook tokens only for the connectors it ships), and
-//     the retired route blocks whatever the token, so keeping it only keeps
-//     old hooks blocking. An OmniGent module that finds no token blocks, so
-//     its token goes.
+//   - its entries in the agent configs: OpenHands hooks whose command runs
+//     DefenseClaw's hook script by its path (<data>/hooks/openhands-hook.sh or
+//     a hook script path the lock entry records), any file that carries
+//     DefenseClaw's OpenHands hook marker (such as a hard link or copy of it),
+//     or the native launcher's OpenHands connector. A name alone is not
+//     identity: an operator's own openhands-hook.sh elsewhere stays; OmniGent's policy_modules entry and the
+//     policies whose handler is in DefenseClaw's policy module. Every other
+//     entry of the file stays;
+//   - once no agent config runs or imports it: the hook script or policy
+//     module under <data>/hooks when it carries DefenseClaw's marker (any
+//     release, including the 1.0.4 stub), DefenseClaw's line in OmniGent's
+//     import-path file, the setup receipts under connector_backups/<name> and
+//     the connector's hook contract lock entry;
+//   - its tokens and its .hookcfg record.
 //
-// Nothing else is touched: agent config files (hooks.json, config.yaml),
-// import paths (.pth), runtime records (.hookcfg), backups, every other
-// entry of the hook contract lock and every other connector's files stay as
-// they are. An uninstall then also removes DefenseClaw's entries from the
-// agent configs, the stub and OmniGent's import-path line
-// (removed_uninstall.go), so a removed DefenseClaw does not keep blocking.
-// RemovedConnectorLeftovers lists what is left, with the steps to remove it
-// by hand; status, doctor and every uninstall form show that list. The
-// gateway keeps the old hook routes, which block every call
-// (gateway/retired_connector_hook.go). Delete this file in 1.1.
+// Nothing blocks: DefenseClaw no longer guards these agents. Teardown and
+// VerifyClean never fail on what is left (an upgrade, ensure, repair or
+// uninstall must not stop on a leftover reference); RemovedConnectorLeftovers
+// lists it as information, under RemovedConnectorNotice, for status, doctor,
+// uninstall and the installers.
 
 import (
 	"bytes"
@@ -100,13 +61,16 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+// RemovedConnectorNotice is the one line every surface prints for a host an
+// older release set up for OpenHands or OmniGent.
+const RemovedConnectorNotice = "OpenHands/OmniGent support was removed in 1.0.5; DefenseClaw no longer guards it."
+
 const (
 	removedOpenHandsID         = "openhands"
 	removedOpenHandsHookScript = "openhands-hook.sh"
 	removedOmnigentID          = "omnigent"
 	removedOmnigentModuleName  = "defenseclaw_omnigent_policy"
 	removedOmnigentPolicyKey   = "defenseclaw_guardrail"
-	removedOmnigentPthName     = "defenseclaw_omnigent.pth"
 	// removedScriptReadLimit bounds the read of a hook script: anything
 	// larger is not one DefenseClaw wrote.
 	removedScriptReadLimit = 1 << 20
@@ -114,93 +78,9 @@ const (
 	removedMarkerLines = 3
 )
 
-// removedConfigReadLimit bounds the read of an agent config, the same for
-// every check, the uninstall's cleaning and its verification; a larger one
-// cannot be checked: it is listed for a check by hand and fails an uninstall
-// (removed_uninstall.go). A var for tests.
+// removedConfigReadLimit bounds the read of an agent config; a larger one is
+// listed for a check by hand. A var for tests.
 var removedConfigReadLimit = 256 << 20
-
-// RemovedConnectorForHookPath returns the removed connector whose gateway
-// hook route path is: the route every 0.8.10 to 1.0.3 OpenHands hook and
-// OmniGent policy module posts to. until 1.1.
-func RemovedConnectorForHookPath(path string) (string, bool) {
-	switch path {
-	case "/api/v1/" + removedOpenHandsID + "/hook":
-		return removedOpenHandsID, true
-	case "/api/v1/" + removedOmnigentID + "/hook":
-		return removedOmnigentID, true
-	}
-	return "", false
-}
-
-// RemovedConnectorDenyReason is the reason DefenseClaw gives when it blocks
-// a call of a removed connector: the stub's, and the retired gateway
-// route's. until 1.1.
-func RemovedConnectorDenyReason(name string) (string, bool) {
-	c, ok := removedConnectorFor(name)
-	if !ok {
-		return "", false
-	}
-	if c.name == removedOmnigentID {
-		return removedOmnigentDenyReason, true
-	}
-	return removedOpenHandsDenyReason, true
-}
-
-// removedOpenHandsDenyReason is the reason the OpenHands stub gives with every
-// block. It holds no $, !, backslash or single quote, so every shell prints it
-// as it is.
-const removedOpenHandsDenyReason = "DefenseClaw blocked this call: OpenHands support was removed in DefenseClaw 1.0.4. " +
-	"To use OpenHands without DefenseClaw, remove every hook that runs " + removedOpenHandsHookScript +
-	" from your OpenHands hooks.json (~/.openhands/hooks.json, or .openhands/hooks.json in a workspace), then restart OpenHands."
-
-// removedOpenHandsTombstone is the hook script an OpenHands teardown leaves.
-// OpenHands blocks a call on exit status 2 and shows the deny reason.
-// A direct run uses sh -p, which ignores startup files and imported functions.
-// An older hooks.json may instead run `bash script`, which ignores the shebang
-// and imports functions before reading this file. In that case a Bash keyword
-// starts a privileged Bash by absolute path. The parent script ends with the
-// child's status; no imported exit, echo or command function can change it.
-const removedOpenHandsTombstone = "#!/bin/sh -p\n" +
-	"# defenseclaw-managed-hook v0 (disabled tombstone)\n" +
-	"# OpenHands support was removed in DefenseClaw 1.0.4. This hook blocks every\n" +
-	"# call. Remove the hooks that run it from your OpenHands hooks.json.\n" +
-	"removed_deny() {\n" +
-	"    echo '{\"decision\":\"deny\",\"reason\":\"" + removedOpenHandsDenyReason + "\"}'\n" +
-	"    exit 2\n" +
-	"}\n" +
-	"case ${BASH_VERSION-} in\n" +
-	"    ?*) case $- in\n" +
-	"            *p*) removed_deny ;;\n" +
-	"            *) /bin/bash -p \"$0\" \"$@\" ;;\n" +
-	"        esac ;;\n" +
-	"    *) removed_deny ;;\n" +
-	"esac\n"
-
-// removedOmnigentDenyReason is the reason the OmniGent stub gives.
-const removedOmnigentDenyReason = "DefenseClaw blocked this action: OmniGent support was removed in DefenseClaw 1.0.4. " +
-	"To use OmniGent without DefenseClaw, remove " + removedOmnigentModuleName + " from policy_modules and the " +
-	removedOmnigentPolicyKey + " policy from your OmniGent config.yaml, then restart OmniGent."
-
-// removedOmnigentTombstone is the policy module an OmniGent teardown leaves.
-// OmniGent imports it in process, so it is Python with no import: it denies
-// every request with the reason.
-const removedOmnigentTombstone = "# defenseclaw-managed-policy v0 (disabled tombstone)\n" +
-	"\"\"\"OmniGent support was removed in DefenseClaw 1.0.4.\n\n" +
-	"This policy module denies every OmniGent request. Remove " + removedOmnigentModuleName + " from\n" +
-	"policy_modules and the " + removedOmnigentPolicyKey + " policy from your OmniGent config.yaml,\n" +
-	"then restart OmniGent.\n\"\"\"\n\n" +
-	"_REASON = \"" + removedOmnigentDenyReason + "\"\n\n\n" +
-	"def defenseclaw_policy(event):\n" +
-	"    return {\"result\": \"DENY\", \"reason\": _REASON}\n\n\n" +
-	"POLICY_REGISTRY = [\n" +
-	"    {\n" +
-	"        \"handler\": \"" + removedOmnigentModuleName + ".defenseclaw_policy\",\n" +
-	"        \"kind\": \"callable\",\n" +
-	"        \"name\": \"DefenseClaw Guardrail (removed)\",\n" +
-	"        \"description\": \"Deny every request: DefenseClaw 1.0.4 removed OmniGent support.\",\n" +
-	"    }\n" +
-	"]\n"
 
 // removedOnlyConnector is the teardown-only connector of a removed connector.
 type removedOnlyConnector struct {
@@ -208,16 +88,11 @@ type removedOnlyConnector struct {
 	// script is the hook script or policy module an older setup wrote under
 	// <data>/hooks; marker starts one of its first lines.
 	script, marker string
-	tombstone      string
-	mode           os.FileMode
 	configStep     string
-	// keepHookToken keeps the hook API token at teardown: an old hook of the
-	// connector that finds no token lets the call run (fail mode open), and
-	// copies of its script read the same token (see the file comment).
-	keepHookToken bool
-	// editLogical names the backup record of the script whose post-setup
-	// hash proves the script unedited (keepEdited); "" when there is none.
-	editLogical string
+	// rollbackDir is the data folder whose removedRollbackFile keeps what
+	// the teardown changed outside it, for a rollback (GAP-2136); empty in
+	// managed mode, which has no rollback command.
+	rollbackDir string
 }
 
 // removedOpenHandsLauncherFlag is how a Windows hooks.json command names the
@@ -229,14 +104,12 @@ var (
 	removedOpenHands = removedOnlyConnector{
 		name: removedOpenHandsID, label: "OpenHands",
 		script: removedOpenHandsHookScript, marker: "# defenseclaw-managed-hook v",
-		tombstone: removedOpenHandsTombstone, mode: 0o700,
-		keepHookToken: true,
-		configStep:    "remove every hook whose command runs " + removedOpenHandsHookScript + " (or defenseclaw-hook --connector openhands) from this file, then restart OpenHands",
+		configStep: "remove every hook whose command runs " + removedOpenHandsHookScript +
+			" (or defenseclaw-hook --connector openhands) from this file, then restart OpenHands",
 	}
 	removedOmnigent = removedOnlyConnector{
 		name: removedOmnigentID, label: "OmniGent",
 		script: removedOmnigentModuleName + ".py", marker: "# defenseclaw-managed-policy v",
-		tombstone: removedOmnigentTombstone, mode: 0o600, editLogical: "module",
 		configStep: "remove " + removedOmnigentModuleName + " from policy_modules and the " + removedOmnigentPolicyKey +
 			" policy (handler " + removedOmnigentModuleName + ".defenseclaw_policy) from this file, then restart OmniGent",
 	}
@@ -262,8 +135,7 @@ func removedConnectorFor(name string) (removedOnlyConnector, bool) {
 	return removedOnlyConnector{}, false
 }
 
-// IsRemovedConnector reports whether name is a connector 1.0.4 removed
-// (OpenHands, OmniGent). until 1.1.
+// IsRemovedConnector reports whether name is OpenHands or OmniGent.
 func IsRemovedConnector(name string) bool {
 	_, ok := removedConnectorFor(name)
 	return ok
@@ -272,7 +144,7 @@ func IsRemovedConnector(name string) bool {
 func (c removedOnlyConnector) Name() string { return c.name }
 
 func (c removedOnlyConnector) Description() string {
-	return c.label + " connector was removed in DefenseClaw 1.0.4; teardown only"
+	return c.label + " is no longer supported; teardown only"
 }
 
 func (c removedOnlyConnector) ToolInspectionMode() ToolInspectionMode { return ToolModePreExecution }
@@ -280,7 +152,7 @@ func (c removedOnlyConnector) ToolInspectionMode() ToolInspectionMode { return T
 func (c removedOnlyConnector) SubprocessPolicy() SubprocessPolicy { return SubprocessNone }
 
 func (c removedOnlyConnector) Setup(context.Context, SetupOpts) error {
-	return fmt.Errorf("connector %q was removed in DefenseClaw 1.0.4; choose a supported connector", c.name)
+	return fmt.Errorf("connector %q is no longer supported; choose a supported connector", c.name)
 }
 
 func (c removedOnlyConnector) Authenticate(*http.Request) bool { return false }
@@ -295,70 +167,107 @@ func (c removedOnlyConnector) scriptPath(dataDir string) string {
 	return filepath.Join(dataDir, "hooks", c.script)
 }
 
-// removedScriptState is what is at a removed connector's script path.
-type removedScriptState int
+// Teardown removes what an older setup wrote for the connector (see the file
+// comment). It never fails: what it cannot remove stays and is listed by
+// RemovedConnectorLeftovers.
+func (c removedOnlyConnector) Teardown(_ context.Context, opts SetupOpts) error {
+	if strings.TrimSpace(opts.DataDir) == "" {
+		return nil
+	}
+	defer RemoveIdleFileLockSentinels()
+	// The config paths come from the setup receipts and the lock entry, so
+	// they are read before either goes.
+	configs := c.configPaths(opts)
+	names := c.namesFor(opts)
+	if !opts.ManagedEnterprise {
+		c.rollbackDir = opts.DataDir
+	}
+	for _, path := range configs {
+		_ = c.removeEntries(path, names, opts.DataDir)
+	}
+	hooks := filepath.Join(opts.DataDir, "hooks")
+	_ = RemoveHookAPIToken(opts.DataDir, c.name)
+	token := filepath.Join(hooks, otlpPathTokenFileName(OTLPPathTokenScope(c.name)))
+	for _, path := range []string{token, token + ".tmp"} {
+		_ = removeOwnedOTLPPathTokenFile(path)
+	}
+	_ = removeRegularFile(filepath.Join(hooks, hookConfigSidecarName+"."+c.name))
+	if len(c.liveRegistrations(configs, names)) > 0 {
+		// A valid config still runs or imports the script in a form this
+		// cleanup does not remove: the script, receipts and lock entry stay
+		// for it, and the leftover list names the file.
+		return nil
+	}
+	if c.name == removedOmnigentID {
+		_ = removeOmnigentImportPath(opts.DataDir, c.rollbackDir)
+		pycache, _ := filepath.Glob(filepath.Join(hooks, "__pycache__", removedOmnigentModuleName+".*.pyc"))
+		for _, path := range pycache {
+			_ = removeRegularFile(path)
+		}
+	}
+	if c.ownsScript(c.scriptPath(opts.DataDir)) {
+		_ = removeRegularFile(c.scriptPath(opts.DataDir))
+	}
+	c.removeReceipts(opts.DataDir)
+	_ = ClearHookContractLockEntryForMode(opts.DataDir, c.name, opts.ManagedEnterprise)
+	return nil
+}
 
-const (
-	removedScriptAbsent removedScriptState = iota
-	// removedScriptStub is the deny stub this release writes.
-	removedScriptStub
-	// removedScriptOwned is a script an older release wrote (its marker is
-	// there): the working hook or an older stub. Teardown replaces it.
-	removedScriptOwned
-	// removedScriptForeign is anything else: no marker, a link, a folder,
-	// another kind of file. Teardown never changes it.
-	removedScriptForeign
-)
+// VerifyClean never fails: nothing a removed connector leaves guards or
+// blocks anything, and RemovedConnectorLeftovers lists it.
+func (c removedOnlyConnector) VerifyClean(SetupOpts) error { return nil }
 
-// scriptStateAndLinks is what is at path and, for a regular file, how many
-// names (hard links) it has and its bytes.
-func (c removedOnlyConnector) scriptStateAndLinks(path string) (removedScriptState, uint32, []byte, os.FileInfo, error) {
+// removeRegularFile removes path when it is a regular file (never a link or a
+// folder).
+func removeRegularFile(path string) error {
 	info, err := os.Lstat(path)
-	if errors.Is(err, os.ErrNotExist) {
-		return removedScriptAbsent, 0, nil, nil, nil
+	if err != nil || !info.Mode().IsRegular() {
+		return nil
 	}
-	if err != nil {
-		return 0, 0, nil, nil, err
+	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
 	}
-	if !info.Mode().IsRegular() || info.Size() > removedScriptReadLimit {
-		return removedScriptForeign, 0, nil, nil, nil
-	}
-	file, err := os.OpenFile(path, os.O_RDONLY|otlpOpenNoFollow(), 0)
-	if err != nil {
-		return 0, 0, nil, nil, err
-	}
-	defer file.Close()
-	opened, err := file.Stat()
-	if err != nil {
-		return 0, 0, nil, nil, fmt.Errorf("stat opened %s: %w", path, err)
-	}
-	if !opened.Mode().IsRegular() || !os.SameFile(info, opened) {
-		return 0, 0, nil, nil, fmt.Errorf("%s changed while it was opened: %w", path, errAtomicTransformConflict)
-	}
-	links, err := atomicTransformBoundLinkCountPlatform(file)
-	if err != nil {
-		return 0, 0, nil, nil, err
-	}
-	data, err := io.ReadAll(io.LimitReader(file, removedScriptReadLimit+1))
-	if err != nil {
-		return 0, 0, nil, nil, err
-	}
-	return c.classifyScript(data), links, data, opened, nil
+	return nil
 }
 
-func (c removedOnlyConnector) classifyScript(data []byte) removedScriptState {
-	switch {
-	case c.isStub(data):
-		return removedScriptStub
-	case len(data) <= removedScriptReadLimit && removedHasMarker(data, c.marker):
-		return removedScriptOwned
+// removeReceipts removes the setup receipts (connector_backups/<name>/*.json)
+// and DefenseClaw's own recovery records there, then the folder when nothing
+// else is in it. Anything else (a copy 1.0.4 saved of an edited module) stays
+// and is listed.
+func (c removedOnlyConnector) removeReceipts(dataDir string) {
+	dir := filepath.Join(dataDir, "connector_backups", c.name)
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return
 	}
-	return removedScriptForeign
+	for _, entry := range entries {
+		name := entry.Name()
+		if strings.HasSuffix(name, ".json") || strings.HasPrefix(name, ".defenseclaw-cas-") {
+			_ = removeRegularFile(filepath.Join(dir, name))
+		}
+	}
+	_ = os.Remove(dir)
 }
 
-// isStub reports whether data is the stub.
-func (c removedOnlyConnector) isStub(data []byte) bool {
-	return bytes.Equal(data, []byte(c.tombstone))
+// ownsScript reports whether path is a regular file of DefenseClaw's: its
+// marker is in its first lines.
+func (c removedOnlyConnector) ownsScript(path string) bool {
+	data, ok := readMarkedCandidate(path)
+	return ok && removedHasMarker(data, c.marker)
+}
+
+// readMarkedCandidate reads a regular file (through links, as the agent
+// does) up to removedScriptReadLimit; false for anything else.
+func readMarkedCandidate(path string) ([]byte, bool) {
+	info, err := os.Stat(path)
+	if err != nil || !info.Mode().IsRegular() || info.Size() > removedScriptReadLimit {
+		return nil, false
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, false
+	}
+	return data, true
 }
 
 // removedHasMarker reports whether one of the first lines of data starts with
@@ -376,518 +285,223 @@ func removedHasMarker(data []byte, marker string) bool {
 	return false
 }
 
-// Teardown replaces the script with the deny stub and revokes the tokens; see
-// the file comment.
-func (c removedOnlyConnector) Teardown(_ context.Context, opts SetupOpts) error {
+// namesFor returns the identity rule for one host's agent configs: whether
+// one config text (a command, a module name) is DefenseClaw's. For OpenHands
+// a command is DefenseClaw's only when it runs DefenseClaw's hook script by
+// its path (ownedHookPaths), runs a file that carries DefenseClaw's
+// OpenHands hook marker, or names the native launcher's OpenHands
+// connector. The script name alone is not identity: an operator's own
+// ~/scripts/openhands-hook.sh or my-openhands-hook.sh stays (GAP-1842). For
+// OmniGent the text names DefenseClaw's policy module.
+func (c removedOnlyConnector) namesFor(opts SetupOpts) func(string) bool {
+	if c.name == removedOmnigentID {
+		return func(text string) bool { return strings.Contains(strings.ToLower(text), removedOmnigentModuleName) }
+	}
+	paths := c.ownedHookPaths(opts)
+	return func(text string) bool {
+		return removedOpenHandsLauncherFlag.MatchString(text) || removedRunsPath(text, paths) || removedRunsMarkedHook(text)
+	}
+}
+
+// ownedHookPaths are the paths an older setup wrote the hook script to, as
+// a command names them: <data>/hooks/<script> and the hook script paths of
+// that name the lock entry records, each also as ~/... when under the home.
+func (c removedOnlyConnector) ownedHookPaths(opts SetupOpts) []string {
 	if strings.TrimSpace(opts.DataDir) == "" {
-		return fmt.Errorf("%s teardown: empty data directory", c.name)
-	}
-	// Windows lock files stay after their lock: the idle one the seal of the
-	// hook contract lock used goes when the teardown ends, so it changes
-	// nothing else in the data directory.
-	defer RemoveIdleFileLockSentinels()
-	// Validate every later token removal before changing the script. An
-	// invalid path (including a directory or link at a legacy .tmp name)
-	// leaves the prior installation intact for a retry after manual repair.
-	if err := c.preflightTokens(opts.DataDir); err != nil {
-		return fmt.Errorf("%s teardown: %w; nothing was changed", c.name, err)
-	}
-	// The stub is the security commit point: once it is in place, a later
-	// token I/O failure must roll forward on retry. Restoring an old hook
-	// after some tokens were revoked could let it fail open. Backup receipts
-	// stay intact, and neither the vendor config nor import path is changed.
-	if err := c.replaceScript(opts.DataDir); err != nil {
-		return fmt.Errorf("%s teardown: %w; its tokens were kept, the retired gateway route blocks every call, and the next start tries again", c.name, err)
-	}
-	if err := c.restoreStubForRegistration(opts); err != nil {
-		return fmt.Errorf("%s teardown: %w; the next start tries again", c.name, err)
-	}
-	if err := c.repairStub(opts.DataDir); err != nil {
-		return fmt.Errorf("%s teardown: %w; its tokens were kept, and the next start tries again", c.name, err)
-	}
-	if err := c.hookLeft(opts); err != nil {
-		return fmt.Errorf("%s teardown: %w; its tokens were kept, and the retired gateway route blocks every call", c.name, err)
-	}
-	if err := c.sealStub(opts); err != nil {
-		return fmt.Errorf("%s teardown: %w; the stub that blocks every call is in place, and the next start tries again", c.name, err)
-	}
-	if err := c.revokeTokens(opts.DataDir); err != nil {
-		return fmt.Errorf("%s teardown: %w; the deny stub and backup receipts were kept, and the next start retries token revocation", c.name, err)
-	}
-	return nil
-}
-
-func (c removedOnlyConnector) preflightTokens(dataDir string) error {
-	if !c.keepHookToken {
-		path := c.hookTokenPath(dataDir)
-		if path == "" {
-			return fmt.Errorf("resolve the %s hook token path", c.name)
-		}
-		for _, candidate := range []string{path, path + ".tmp"} {
-			if _, err := os.Lstat(candidate); errors.Is(err, os.ErrNotExist) {
-				continue
-			} else if err != nil {
-				return fmt.Errorf("inspect hook token %s: %w", candidate, err)
-			}
-			if err := validateHookAPITokenLocation(dataDir, candidate); err != nil {
-				return fmt.Errorf("hook token %s is not safe to revoke: %w", candidate, err)
-			}
-			if err := checkOwnedOTLPPathTokenFile(candidate); err != nil {
-				return fmt.Errorf("hook token %s is not safe to revoke: %w", candidate, err)
-			}
-		}
-	}
-	for _, path := range []string{c.otlpTokenPath(dataDir), c.otlpTokenPath(dataDir) + ".tmp"} {
-		if err := checkOwnedOTLPPathTokenFile(path); err != nil {
-			return fmt.Errorf("OTLP token %s is not safe to revoke: %w", path, err)
-		}
-	}
-	return nil
-}
-
-// replaceScript replaces a script an older release wrote with the deny stub
-// through an identity-bound compare-and-swap (publishVerifiedStub) whose
-// recovery intent survives an interrupted run, so the path names the whole
-// old script or the whole stub, never part of each. It never writes into the
-// old file: a write into a live hook that fails part way (a full disk, an
-// I/O error) can leave part of the stub over the old bytes, a script that may
-// run to exit 0 (an allow) under every name of the file. A file with more
-// than one name (a hard link) is left whole: the swap would give this name
-// the stub and leave the old hook under the others, so its tokens stay and
-// hookLeft fails the teardown with the step until those names are gone.
-func (c removedOnlyConnector) replaceScript(dataDir string) error {
-	path := c.scriptPath(dataDir)
-	// The CAS may have detached the verified script before a process stopped.
-	// In that state the path is absent, but its old bytes and the staged stub
-	// are still protected by the recovery intent. Reconcile it before deciding
-	// that there is no script left to replace or revoking any tokens.
-	receipt, stateDir, err := c.pendingStubPublication(dataDir)
-	if err != nil {
-		return fmt.Errorf("inspect interrupted stub publication for %s: %w", path, err)
-	}
-	if receipt != "" {
-		if err := recoverAtomicTransformWithStateDir(path, stateDir); err != nil {
-			return fmt.Errorf("recover interrupted stub publication for %s: %w", path, err)
-		}
-	}
-	state, _, data, original, err := c.scriptStateAndLinks(path)
-	if err != nil {
-		return fmt.Errorf("read %s: %w; nothing was changed", path, err)
-	}
-	if state != removedScriptOwned {
 		return nil
 	}
-	// The bytes are saved first when they may be the user's edit; a save
-	// that fails leaves the script as it is. The save may replace one of
-	// the script's names (a hard link at the saved copy's name, keepEdited),
-	// so the names are counted after it, and what is at the path then (an
-	// edit made after the first read) is saved too.
-	keep := func(old []byte, live os.FileInfo) error { return c.keepEdited(dataDir, path, live, old) }
-	if err := keep(data, nil); err != nil {
-		return fmt.Errorf("%w; nothing was changed", err)
-	}
-	state, links, now, verified, err := c.scriptStateAndLinks(path)
-	if err != nil {
-		return fmt.Errorf("read %s again: %w; nothing was changed", path, err)
-	}
-	if verified == nil || !os.SameFile(original, verified) {
-		// Another file took the path (or none is left) while the first
-		// bytes were saved: it is the operator's, so nothing replaces it
-		// and the tokens stay; the next run reads it afresh.
-		return fmt.Errorf("%s was replaced while the teardown read it; nothing was changed, and the next run checks it again", path)
-	}
-	if state != removedScriptOwned || links > 1 {
-		// hookLeft says what is left and the step that finishes it.
-		return nil
-	}
-	if !bytes.Equal(now, data) {
-		if err := keep(now, verified); err != nil {
-			return fmt.Errorf("%w; nothing was changed", err)
-		}
-	}
-	if err := c.publishVerifiedStub(dataDir, path, verified, keep); err != nil {
-		return fmt.Errorf("publish the stub that blocks every call over %s: %w; the path still names one whole file, the old script or the stub", path, err)
-	}
-	return nil
-}
-
-// pendingStubPublication reads the exact CAS recovery namespace used to
-// publish this connector's stub. It never creates a backup directory during
-// a no-op teardown or a read-only verification.
-func (c removedOnlyConnector) pendingStubPublication(dataDir string) (string, string, error) {
-	path := c.scriptPath(dataDir)
-	stateDir := removedStubRecoveryDir(path, filepath.Join(dataDir, "connector_backups", c.name))
-	info, err := os.Lstat(stateDir)
-	if errors.Is(err, os.ErrNotExist) {
-		return "", stateDir, nil
-	}
-	if err != nil {
-		return "", stateDir, err
-	}
-	if !info.IsDir() {
-		return "", stateDir, fmt.Errorf("recovery directory %s is not a directory", stateDir)
-	}
-	loaded, err := loadAtomicTransformIntentWithStates(path, stateDir)
-	if err != nil {
-		return "", stateDir, err
-	}
-	if loaded.exists {
-		return loaded.path, stateDir, nil
-	}
-	return "", stateDir, nil
-}
-
-// removedStubPublish is the compare-and-swap publication of the stub;
-// tests replace it to fail.
-var removedStubPublish = removedStubTransform
-
-// publishVerifiedStub binds the publication to the file the second read of
-// replaceScript verified. The compare-and-swap engine retains a raced
-// replacement for recovery instead of renaming over it, and refuses a file
-// that gained another name (a hard link) since that read.
-func (c removedOnlyConnector) publishVerifiedStub(
-	dataDir, path string, verified os.FileInfo,
-	keep func([]byte, os.FileInfo) error,
-) error {
-	// keepEdited has already made this folder private when it needed a saved
-	// copy; an unedited OmniGent module has its setup receipt here instead.
-	// The CAS recovery intent lives in this same folder.
-	stateDir := filepath.Join(dataDir, "connector_backups", c.name)
-	return removedStubPublish(path, stateDir, c.mode, func(current []byte, exists bool) (atomicTransformResult, error) {
-		if !exists {
-			return atomicTransformResult{}, fmt.Errorf("%s became absent before stub publication", path)
-		}
-		named, err := os.Lstat(path)
-		if err != nil {
-			return atomicTransformResult{}, fmt.Errorf("inspect %s before stub publication: %w", path, err)
-		}
-		if !named.Mode().IsRegular() || !os.SameFile(named, verified) {
-			return atomicTransformResult{}, fmt.Errorf("%s changed identity before stub publication: %w", path, errAtomicTransformConflict)
-		}
-		_, links, observed, opened, err := c.scriptStateAndLinks(path)
-		if err != nil || opened == nil || !os.SameFile(opened, verified) || !bytes.Equal(observed, current) {
-			return atomicTransformResult{}, fmt.Errorf("%s changed while the stub was staged: %w", path, errAtomicTransformConflict)
-		}
-		if links > 1 {
-			return atomicTransformResult{}, fmt.Errorf("%s has %d names (hard links); refusing to replace it. To finish: %s",
-				path, links, c.hardLinkStep(path))
-		}
-		state := c.classifyScript(current)
-		if state == removedScriptOwned {
-			if err := keep(current, named); err != nil {
-				return atomicTransformResult{}, err
+	paths := []string{c.scriptPath(removedAbsolute(opts.DataDir))}
+	if entry, err := LoadHookContractLockEntryForMode(opts.DataDir, c.name, opts.ManagedEnterprise); err == nil {
+		for _, path := range entry.Locations.HookScriptPaths {
+			if filepath.Base(path) == c.script {
+				paths = append(paths, removedAbsolute(path))
 			}
-		} else if state != removedScriptStub {
-			return atomicTransformResult{}, fmt.Errorf("%s became foreign before stub publication", path)
 		}
-		return atomicTransformResult{Data: []byte(c.tombstone), Perm: c.mode, Force: true}, nil
-	})
+	}
+	home := homePath()
+	for _, path := range paths {
+		if rel, err := filepath.Rel(home, path); home != "" && err == nil && rel != ".." &&
+			!strings.HasPrefix(rel, ".."+string(filepath.Separator)) && !filepath.IsAbs(rel) {
+			paths = append(paths, "~/"+filepath.ToSlash(rel))
+		}
+	}
+	return uniqueNonEmptyStrings(paths)
 }
 
-// removedEditedInfix names the saved copy of a marked script:
-// connector_backups/<connector>/<script>.edited-<first 16 hex digits of its
-// SHA-256>, with -2, -3, ... on a collision. The name does not end in .py or
-// .sh, so nothing imports or runs it by its name.
-const removedEditedInfix = ".edited-"
+// removedWordEdge are the bytes that may stand next to a path in a command.
+const removedWordEdge = " \t\r\n\"'`=;&|()"
 
-// removedKeepEditedWrite publishes a new saved copy without replacing an
-// existing file; tests replace it to fail.
-var removedKeepEditedWrite = atomicCreateFileNoFollow
+// removedRunsPath reports whether a command names one of paths whole: the
+// bare path (which may hold spaces, as an older setup wrote it) or the path
+// in quotes, never a longer name that ends with it.
+func removedRunsPath(command string, paths []string) bool {
+	fold := func(text string) string {
+		if runtime.GOOS == "windows" {
+			return strings.ToLower(strings.ReplaceAll(text, `\`, "/"))
+		}
+		return text
+	}
+	text := fold(command)
+	for _, path := range paths {
+		word := fold(path)
+		for from := 0; word != "" && from < len(text); {
+			i := strings.Index(text[from:], word)
+			if i < 0 {
+				break
+			}
+			start, end := from+i, from+i+len(word)
+			if (start == 0 || strings.IndexByte(removedWordEdge, text[start-1]) >= 0) &&
+				(end == len(text) || strings.IndexByte(removedWordEdge, text[end]) >= 0) {
+				return true
+			}
+			from = start + 1
+		}
+	}
+	return false
+}
 
-// keepEdited saves the exact bytes of the script at path before the teardown
-// replaces them, when they may be the user's edit: the connector records the
-// hash of what its setup wrote (editLogical), and data is not that. A record
-// for another file, or none, proves nothing, so data is saved then too. The
-// copy is written to a temporary file, synced, published without replacement
-// (the folder synced) and read back; an error means it is not saved, and the
-// caller must not replace the script. The same bytes are saved once. OpenHands
-// has no post-setup hash, so every marked hook is saved before a write.
-//
-// live is the file data was read from (nil: the file at path now). A copy
-// counts as saved only when it is a file of its own (removedSavedCopy): a
-// name of the live file (a hard link), a link to it, or a file that another
-// name or other accounts can change is no copy, since a later change of the
-// live file would reach it too. Such a name is left in place and a new
-// numbered copy is made instead; a link or folder at the hash-derived name
-// stops the save for manual recovery.
-func (c removedOnlyConnector) keepEdited(dataDir, path string, live os.FileInfo, data []byte) error {
-	if c.editLogical != "" {
-		record, err := loadManagedFileBackupPath(managedFileBackupPath(dataDir, c.name, c.editLogical))
-		if err == nil && record.Connector == c.name && record.LogicalName == c.editLogical &&
-			sameManagedTargetPath(record.Path, path) && record.PostSHA256 == sha256Hex(data) {
-			return nil
-		}
-	}
-	if live == nil {
-		var err error
-		if live, err = os.Lstat(path); err != nil {
-			return fmt.Errorf("save the edited %s before replacing it: %w", path, err)
-		}
-	}
-	base := c.editedCopyPath(dataDir, data)
-	if err := ensureManagedBackupDirRestricted(filepath.Dir(base)); err != nil {
-		return fmt.Errorf("save the edited %s before replacing it: %w", path, err)
-	}
-	for i := 0; i < 1000; i++ {
-		saved := base
-		if i > 0 {
-			saved = fmt.Sprintf("%s-%d", base, i+1)
-		}
-		if removedSavedCopy(saved, live, data) == nil {
-			return nil
-		}
-		info, err := os.Lstat(saved)
-		switch {
-		case err == nil && !info.Mode().IsRegular():
-			return fmt.Errorf("save the edited %s: %s is not a regular file; move it out of the way, then run %s",
-				path, saved, c.teardownCommand())
-		case err == nil:
-			// It may contain an operator's later edit. Never replace it.
+// removedRunsMarkedHook reports whether a command runs a file (an absolute
+// or ~ path among its words) that holds DefenseClaw's OpenHands hook: its
+// hook marker in its first lines and the OpenHands name. A hard link or copy
+// of openhands-hook.sh under any name is DefenseClaw's hook.
+func removedRunsMarkedHook(command string) bool {
+	for _, word := range strings.Fields(command) {
+		word = strings.Trim(word, `"';,`)
+		if !filepath.IsAbs(word) && !strings.HasPrefix(word, "~/") {
 			continue
-		case err != nil && !errors.Is(err, os.ErrNotExist):
-			return fmt.Errorf("inspect saved copy %s before replacing %s: %w", saved, path, err)
 		}
-		if err := removedKeepEditedWrite(saved, data, 0o600); errors.Is(err, os.ErrExist) {
-			continue
-		} else if err != nil {
-			return fmt.Errorf("save the edited %s to %s before replacing it: %w; move %s out of the way, then run %s",
-				path, saved, err, saved, c.teardownCommand())
-		}
-		if err := removedSavedCopy(saved, live, data); err != nil {
-			return fmt.Errorf("save the edited %s: %s is not a copy of its own that reads back as it: %w", path, saved, err)
-		}
-		return nil
-	}
-	return fmt.Errorf("save the edited %s: all saved-copy names beginning %s are occupied; move one out of the way, then run %s",
-		path, base, c.teardownCommand())
-}
-
-// removedSavedCopy returns nil when saved is a copy of data of its own: a
-// regular file (never a link) with one name, not the live file, that only
-// its owner can read and change (removedSavedCopyPrivate), holding exactly
-// data. It reads through one handle and checks that handle is the file
-// named saved.
-func removedSavedCopy(saved string, live os.FileInfo, data []byte) error {
-	named, err := os.Lstat(saved)
-	if err != nil {
-		return err
-	}
-	if !named.Mode().IsRegular() {
-		return fmt.Errorf("%s is not a regular file", saved)
-	}
-	file, err := os.OpenFile(saved, os.O_RDONLY|otlpOpenNoFollow(), 0)
-	if err != nil {
-		return err
-	}
-	defer file.Close()
-	opened, err := file.Stat()
-	if err != nil {
-		return err
-	}
-	if !opened.Mode().IsRegular() || !os.SameFile(named, opened) {
-		return fmt.Errorf("%s changed while it was read", saved)
-	}
-	if live != nil && os.SameFile(opened, live) {
-		return fmt.Errorf("%s is another name (a hard link) of the module itself", saved)
-	}
-	links, err := atomicTransformBoundLinkCountPlatform(file)
-	if err != nil {
-		return err
-	}
-	if links != 1 {
-		return fmt.Errorf("%s has %d names (hard links)", saved, links)
-	}
-	if err := removedSavedCopyPrivate(file, opened); err != nil {
-		return fmt.Errorf("%s: %w", saved, err)
-	}
-	got, err := io.ReadAll(io.LimitReader(file, int64(len(data))+1))
-	if err != nil {
-		return err
-	}
-	if !bytes.Equal(got, data) {
-		return fmt.Errorf("%s does not hold the same bytes", saved)
-	}
-	return nil
-}
-
-func (c removedOnlyConnector) editedCopyPath(dataDir string, data []byte) string {
-	return filepath.Join(dataDir, "connector_backups", c.name, c.script+removedEditedInfix+sha256Hex(data)[:16])
-}
-
-// editedCopies lists the saved copies of a marked script (keepEdited).
-func (c removedOnlyConnector) editedCopies(dataDir string) []string {
-	matches, _ := filepath.Glob(filepath.Join(dataDir, "connector_backups", c.name, c.script+removedEditedInfix+"*"))
-	return matches
-}
-
-// hookLeft returns why an old hook may still run at the script path, or why
-// a registration of it may not block, with the step that resolves it by
-// hand; nil when the path holds the stub (under every name), or nothing and
-// no agent config runs or imports it. While it fails, the tokens stay and
-// VerifyClean fails.
-func (c removedOnlyConnector) hookLeft(opts SetupOpts) error {
-	path := c.scriptPath(opts.DataDir)
-	if receipt, _, err := c.pendingStubPublication(opts.DataDir); err != nil {
-		return fmt.Errorf("inspect interrupted stub publication for %s: %w", path, err)
-	} else if receipt != "" {
-		return fmt.Errorf("interrupted stub publication for %s is still pending; run %s before removing saved copies or tokens", path, c.teardownCommand())
-	}
-	state, links, _, _, err := c.scriptStateAndLinks(path)
-	switch {
-	case err != nil:
-		return fmt.Errorf("read %s: %w", path, err)
-	case state == removedScriptStub:
-		if why := c.stubUnusable(path); why != nil {
-			return fmt.Errorf("%s holds the stub, but %v, so %s may not %s it and let its calls through. To finish: run %s, which puts it right",
-				path, why, c.label, c.stubUse(), c.teardownCommand())
-		}
-		return nil
-	case state == removedScriptAbsent:
-		if removedDataDirGone(opts.DataDir) {
-			// DefenseClaw is uninstalled from this data directory (a deferred
-			// uninstall verify): nothing of it is left to block, and a config
-			// that still names the script is a leftover the uninstall lists.
-			return nil
-		}
-		if config, live := c.registrationRunsScript(opts); live {
-			return fmt.Errorf("%s is gone, but %s still runs or imports it (or cannot be checked), so %s does not block its calls. To finish: run %s, which writes the stub that blocks every call, or %s",
-				path, config, c.label, c.teardownCommand(), c.configStep)
-		}
-		return nil
-	case state == removedScriptOwned && links > 1:
-		return fmt.Errorf("%s is the hook script an older DefenseClaw wrote and has %d names (hard links), so it was left whole: the stub renamed over this name would leave the old hook under the others. To finish: %s",
-			path, links, c.hardLinkStep(path))
-	case state == removedScriptOwned:
-		return fmt.Errorf("%s is still the hook script an older DefenseClaw wrote", path)
-	}
-	return fmt.Errorf("%s was not changed: DefenseClaw cannot prove it wrote it (a link, no DefenseClaw marker in its first %d lines, or not a regular file), and it may still run the old hook. To finish: %s",
-		path, removedMarkerLines, c.foreignStep())
-}
-
-// removedDataDirGone reports whether the data directory itself is gone.
-func removedDataDirGone(dataDir string) bool {
-	if strings.TrimSpace(dataDir) == "" {
-		return false
-	}
-	_, err := os.Lstat(dataDir)
-	return errors.Is(err, os.ErrNotExist)
-}
-
-// hardLinkStep is the manual step for a script with more than one name.
-func (c removedOnlyConnector) hardLinkStep(path string) string {
-	list := "find / -xdev -samefile " + path + " lists them"
-	if runtime.GOOS == "windows" {
-		list = "fsutil hardlink list " + path + " lists them"
-	}
-	return "copy back what you need from connector_backups before deleting any linked name there; " +
-		"delete every other name of this file (" + list + "), then run " + c.teardownCommand() +
-		", which writes the stub and revokes the tokens"
-}
-
-// foreignStep is the manual step for a script path DefenseClaw cannot prove
-// it wrote.
-func (c removedOnlyConnector) foreignStep() string {
-	return "if it is not yours, delete it; if it is, move it out of DefenseClaw's hooks folder; then run " +
-		c.teardownCommand() + ", which revokes the tokens"
-}
-
-func (c removedOnlyConnector) teardownCommand() string {
-	return "defenseclaw-gateway connector teardown --connector " + c.name
-}
-
-func (c removedOnlyConnector) otlpTokenPath(dataDir string) string {
-	return filepath.Join(dataDir, "hooks", otlpPathTokenFileName(OTLPPathTokenScope(c.name)))
-}
-
-// revokeTokens removes the connector's hook API and OTLP tokens, except a
-// hook token it keeps (keepHookToken). Nothing in 1.0.4 accepts them.
-func (c removedOnlyConnector) revokeTokens(dataDir string) error {
-	var errs []error
-	if !c.keepHookToken && c.hookTokenPresent(dataDir) {
-		if err := RemoveHookAPIToken(dataDir, c.name); err != nil {
-			errs = append(errs, fmt.Errorf("%s teardown: revoke the hook token: %w", c.name, err))
-		}
-	}
-	token := c.otlpTokenPath(dataDir)
-	for _, path := range []string{token, token + ".tmp"} {
-		if err := removeOwnedOTLPPathTokenFile(path); err != nil {
-			errs = append(errs, fmt.Errorf("%s teardown: revoke %s: %w", c.name, path, err))
-		}
-	}
-	return errors.Join(errs...)
-}
-
-// hookTokenPresent reports whether the hook token or its temporary file may
-// be there (true when the path cannot be built or read).
-func (c removedOnlyConnector) hookTokenPresent(dataDir string) bool {
-	path, err := HookAPITokenFilePath(dataDir, c.name)
-	if err != nil {
-		return true
-	}
-	for _, candidate := range []string{path, path + ".tmp"} {
-		if _, err := os.Lstat(candidate); !errors.Is(err, os.ErrNotExist) {
+		data, ok := readMarkedCandidate(removedAbsolute(word))
+		if ok && removedHasMarker(data, removedOpenHands.marker) && bytes.Contains(bytes.ToLower(data), []byte("openhands")) {
 			return true
 		}
 	}
 	return false
 }
 
-// tokenPaths are the tokens teardown revokes.
-func (c removedOnlyConnector) tokenPaths(dataDir string) []string {
-	var paths []string
-	if path := c.hookTokenPath(dataDir); path != "" && !c.keepHookToken {
-		paths = append(paths, path)
+// configNames reports whether an agent config still names DefenseClaw's
+// entries, in its bytes or its decoded values (JSON for hooks.json, YAML for
+// config.yaml). The error says why a file that does not name them could not
+// be checked: too large, or not JSON or YAML.
+func (c removedOnlyConnector) configNames(data []byte, names func(string) bool) (bool, error) {
+	if names(string(data)) {
+		return true, nil
 	}
-	return append(paths, c.otlpTokenPath(dataDir))
-}
-
-// keptTokenPath is the hook token teardown keeps (keepHookToken), or "".
-func (c removedOnlyConnector) keptTokenPath(dataDir string) string {
-	if !c.keepHookToken {
-		return ""
+	if len(data) > removedConfigReadLimit {
+		return false, fmt.Errorf("it is larger than %d MiB", removedConfigReadLimit>>20)
 	}
-	return c.hookTokenPath(dataDir)
-}
-
-func (c removedOnlyConnector) hookTokenPath(dataDir string) string {
-	path, err := HookAPITokenFilePath(dataDir, c.name)
+	doc, err := c.decode(data)
 	if err != nil {
-		return ""
+		return false, err
 	}
-	return path
+	return removedValueNames(doc, names), nil
 }
 
-// keptTokenWhat and keptTokenStep describe the hook token teardown keeps.
-func (c removedOnlyConnector) keptTokenWhat() string {
-	return "the " + c.label + " hook token, which DefenseClaw keeps: an old " + c.label + " hook (" + c.script +
-		" or a copy of it in this folder) that finds no token lets every call run in fail mode open; with it, the hook reaches the gateway, which blocks every call. Nothing in DefenseClaw 1.0.4 accepts it"
+// decode parses an agent config (nil for an empty one).
+func (c removedOnlyConnector) decode(data []byte) (any, error) {
+	body := bytes.TrimPrefix(data, []byte("\xef\xbb\xbf"))
+	if len(bytes.TrimSpace(body)) == 0 {
+		return nil, nil
+	}
+	var doc any
+	if c.name == removedOpenHandsID {
+		if err := json.Unmarshal(body, &doc); err != nil {
+			return nil, fmt.Errorf("it is not JSON: %w", err)
+		}
+	} else if err := yaml.Unmarshal(body, &doc); err != nil {
+		return nil, fmt.Errorf("it is not YAML: %w", err)
+	}
+	return doc, nil
 }
 
-func (c removedOnlyConnector) keptTokenStep() string {
-	return "delete it only once no " + c.label + " hooks.json, in your home or in any workspace, runs " + c.script +
-		" or a copy of it, and " + c.label + " was restarted"
+// removeEntries removes DefenseClaw's entries from one agent config. A file
+// that cannot be read or parsed is left as it is (the agent cannot load it
+// either); the file keeps its mode and, where the platform allows, its owner.
+// A file the setup made (its receipt says it did not exist before) and that
+// holds nothing else goes, so no empty "{}" config is left behind.
+func (c removedOnlyConnector) removeEntries(path string, names func(string) bool, dataDir string) error {
+	data, err := readRemovedConfig(path)
+	if err != nil || len(data) > removedConfigReadLimit {
+		return err
+	}
+	if named, _ := c.configNames(data, names); !named {
+		return nil
+	}
+	var updated []byte
+	var changed bool
+	if c.name == removedOmnigentID {
+		updated, changed, err = removedOmnigentConfigWithout(data)
+	} else {
+		updated, changed, err = removedOpenHandsConfigWithout(data, names)
+	}
+	if err != nil || !changed {
+		return err
+	}
+	if removedEmptyConfig(updated) && c.setupMadeConfig(dataDir, path) {
+		if info, err := os.Lstat(path); err == nil {
+			recordRemovedRollback(c.rollbackDir, c.name, path, data, info.Mode(), nil)
+		}
+		return removeRegularFile(path)
+	}
+	// The agent reads its config through links; the file it reads is the
+	// one changed.
+	target, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		return err
+	}
+	info, err := os.Stat(target)
+	if err != nil {
+		return err
+	}
+	recordRemovedRollback(c.rollbackDir, c.name, target, data, info.Mode(), updated)
+	if err := atomicWriteFile(target, updated, info.Mode().Perm()); err != nil {
+		return err
+	}
+	return removedKeepOwner(target, info)
 }
 
-// VerifyClean fails while an old hook may still run at the script path
-// (hookLeft) or a token is still there: what Teardown changes. What it
-// leaves is listed by RemovedConnectorLeftovers, not reported here.
-func (c removedOnlyConnector) VerifyClean(opts SetupOpts) error {
-	if err := c.hookLeft(opts); err != nil {
-		return fmt.Errorf("%s cleanup incomplete: %w", c.name, err)
+// removedEmptyConfig reports whether a rewritten agent config holds nothing:
+// an empty mapping with no comment.
+func removedEmptyConfig(data []byte) bool {
+	return strings.TrimSpace(string(data)) == "{}"
+}
+
+// setupMadeConfig reports whether the setup receipt names path as a file
+// that did not exist before the setup, and path is still a regular file (not
+// a link someone put there since).
+func (c removedOnlyConnector) setupMadeConfig(dataDir, path string) bool {
+	if strings.TrimSpace(dataDir) == "" {
+		return false
 	}
-	if err := c.stubSealed(opts); err != nil {
-		return fmt.Errorf("%s cleanup incomplete: %w", c.name, err)
+	b, err := loadManagedFileBackupPath(managedFileBackupPath(dataDir, c.name, "config"))
+	if err != nil || b.Existed || b.Connector != c.name || !sameManagedTargetPath(b.Path, path) {
+		return false
 	}
-	for _, token := range c.tokenPaths(opts.DataDir) {
-		if _, err := os.Lstat(token); err == nil {
-			return fmt.Errorf("%s cleanup incomplete: token %s is still there", c.name, token)
+	info, err := os.Lstat(path)
+	return err == nil && info.Mode().IsRegular()
+}
+
+// liveRegistrations are the valid agent configs that still run or import the
+// script after removeEntries.
+func (c removedOnlyConnector) liveRegistrations(configs []string, names func(string) bool) []string {
+	var live []string
+	for _, path := range configs {
+		data, err := readRemovedConfig(path)
+		if err != nil || len(data) > removedConfigReadLimit {
+			continue
+		}
+		doc, err := c.decode(data)
+		if err != nil {
+			continue
+		}
+		if removedValueNames(doc, names) {
+			live = append(live, path)
 		}
 	}
-	return nil
+	return live
 }
 
-// RemovedLeftover is one thing a removed connector's teardown leaves for the
-// user: what it is and how to remove it by hand.
+// RemovedLeftover is one thing a removed connector's teardown left on the
+// host: what it is and how to remove it by hand. Information only.
 type RemovedLeftover struct {
 	Path string `json:"path"`
 	What string `json:"what"`
@@ -895,8 +509,7 @@ type RemovedLeftover struct {
 }
 
 // RemovedConnectorLeftovers lists what is left of a removed connector on this
-// host, with the manual steps; false when name is not a removed connector.
-// It only reads.
+// host; false when name is not a removed connector. It only reads.
 func RemovedConnectorLeftovers(name string, opts SetupOpts) ([]RemovedLeftover, bool) {
 	c, ok := removedConnectorFor(name)
 	if !ok {
@@ -910,6 +523,7 @@ func (c removedOnlyConnector) leftovers(opts SetupOpts) []RemovedLeftover {
 	add := func(path, what, step string) {
 		out = append(out, RemovedLeftover{Path: path, What: what, Step: step})
 	}
+	names := c.namesFor(opts)
 	for _, path := range c.configPaths(opts) {
 		data, err := readRemovedConfig(path)
 		if errors.Is(err, os.ErrNotExist) {
@@ -919,396 +533,70 @@ func (c removedOnlyConnector) leftovers(opts SetupOpts) []RemovedLeftover {
 			add(path, fmt.Sprintf("could not be read (%v)", err), "check it by hand: "+c.configStep)
 			continue
 		}
-		names, checkErr := c.configNames(data)
+		named, checkErr := c.configNames(data, names)
 		switch {
-		case names:
-			add(path, c.configWhat(), c.configStep)
+		case named:
+			add(path, "still names DefenseClaw's "+c.label+" entries, which DefenseClaw could not remove", c.configStep)
 		case checkErr != nil:
-			add(path, fmt.Sprintf("could not be checked (%v), so it may still name DefenseClaw's hook", checkErr), "check it by hand: "+c.configStep)
+			add(path, fmt.Sprintf("could not be checked (%v)", checkErr), "check it by hand: "+c.configStep)
 		}
 	}
 	if strings.TrimSpace(opts.DataDir) == "" {
 		return out
 	}
+	hooks := filepath.Join(opts.DataDir, "hooks")
 	if c.name == removedOmnigentID {
-		if pth := managedFileBackupTargetPath(opts.DataDir, c.name, "pth", ""); pth != "" {
-			if item, ok := removedPthLeftover(pth, filepath.Join(opts.DataDir, "hooks")); ok {
-				out = append(out, item)
-			}
-		} else if item, ok := removedLostPthLeftover(opts.DataDir); ok {
-			out = append(out, item)
+		if pth := managedFileBackupTargetPath(opts.DataDir, c.name, "pth", ""); pth != "" && removedPthHasLine(pth, hooks) {
+			add(pth, "adds DefenseClaw's hook folder to OmniGent's Python import path",
+				"remove only the line "+hooks+" from this file (delete the file when that was its only line)")
 		}
 	}
-	script := c.scriptPath(opts.DataDir)
-	publicationReceipt, publicationStateDir, publicationErr := c.pendingStubPublication(opts.DataDir)
-	if publicationErr != nil {
-		add(publicationStateDir, fmt.Sprintf("could not inspect interrupted stub publication (%v)", publicationErr),
-			"rerun "+c.teardownCommand()+"; do not delete saved copies or tokens until recovery succeeds")
-	} else if publicationReceipt != "" {
-		add(publicationReceipt, "interrupted publication of the stub that blocks every call; cleanup is incomplete",
-			"rerun "+c.teardownCommand()+" before deleting saved copies or tokens; keep this receipt if recovery fails")
+	if script := c.scriptPath(opts.DataDir); c.ownsScript(script) {
+		add(script, "DefenseClaw's old "+c.label+" "+c.scriptKind(), "delete it once nothing above runs it")
 	}
-	state, links, _, _, err := c.scriptStateAndLinks(script)
-	tokenStep := c.teardownCommand()
-	switch {
-	case err != nil:
-		add(script, fmt.Sprintf("could not be read (%v)", err), "delete it once nothing above runs it")
-	case state == removedScriptStub && c.stubUnusable(script) != nil:
-		add(script, RemovedStubUnusableWhat, c.teardownCommand()+", which puts it right")
-	case state == removedScriptStub:
-		add(script, "the stub that blocks every "+c.label+" call", "delete it once nothing above runs it")
-	case state == removedScriptOwned && links > 1:
-		add(script, fmt.Sprintf("still the hook script an older DefenseClaw wrote, with %d names (hard links); teardown leaves it and its tokens, so every name still reaches the gateway, which blocks every call", links),
-			c.hardLinkStep(script))
-		tokenStep = "follow the step for " + script + " first"
-	case state == removedScriptOwned:
-		add(script, "still the hook script an older DefenseClaw wrote", c.teardownCommand())
-	case state == removedScriptForeign:
-		add(script, "not changed: DefenseClaw cannot prove it wrote it (a link, no DefenseClaw marker in its first lines, or not a regular file); teardown keeps its tokens, so an old hook here still reaches the gateway, which blocks every call",
-			c.foreignStep())
-		tokenStep = "follow the step for " + script + " first"
-	case state == removedScriptAbsent:
-		if _, live := c.registrationRunsScript(opts); live {
-			add(script, RemovedScriptGoneWhat, c.teardownCommand()+", which writes the stub that blocks every call; or "+c.configStep)
+	if path, err := HookAPITokenFilePath(opts.DataDir, c.name); err == nil {
+		if _, err := os.Lstat(path); err == nil {
+			add(path, "a DefenseClaw token for "+c.label+"; nothing accepts it", "delete it")
 		}
 	}
-	if c.name == removedOpenHandsID {
-		record := filepath.Join(opts.DataDir, "hooks", hookConfigSidecarName+"."+c.name)
-		if _, err := os.Lstat(record); err == nil {
-			add(record, "the runtime settings of the removed hook; DefenseClaw no longer reads it", "delete it")
-		}
+	if path := filepath.Join(hooks, otlpPathTokenFileName(OTLPPathTokenScope(c.name))); fileExists(path) {
+		add(path, "a DefenseClaw token for "+c.label+"; nothing accepts it", "delete it")
+	}
+	if path := filepath.Join(hooks, hookConfigSidecarName+"."+c.name); fileExists(path) {
+		add(path, "DefenseClaw's old "+c.label+" hook settings; nothing reads them", "delete it")
 	}
 	backups := filepath.Join(opts.DataDir, "connector_backups", c.name)
-	if _, err := os.Lstat(backups); err == nil {
-		step := "copy back what you need, then delete this folder"
-		if publicationReceipt != "" || publicationErr != nil {
-			step = "do not delete this folder until " + c.teardownCommand() + " has recovered the interrupted publication"
-		}
-		add(backups, "the copies of your files DefenseClaw saved before its setup changed them (pristine_bytes, base64)",
-			step)
-	}
-	for _, saved := range c.editedCopies(opts.DataDir) {
-		what := "your edited " + c.script
-		if c.name == removedOpenHandsID {
-			what = "the prior " + c.script + " (including any edits)"
-		}
-		add(saved, what+", as it was when the teardown replaced it with the stub that blocks every call",
-			"copy back what you need (not into DefenseClaw's hooks folder), then delete it")
-	}
-	if kept := c.keptTokenPath(opts.DataDir); kept != "" {
-		if _, err := os.Lstat(kept); err == nil {
-			add(kept, c.keptTokenWhat(), c.keptTokenStep())
-		}
-	}
-	for _, token := range c.tokenPaths(opts.DataDir) {
-		if _, err := os.Lstat(token); err == nil {
-			add(token, "a DefenseClaw token for the removed connector", tokenStep)
-		}
+	if fileExists(backups) {
+		add(backups, "files DefenseClaw saved when it set up "+c.label, "copy back what you need, then delete this folder")
 	}
 	return out
 }
 
-// RemovedScriptGoneWhat describes a removed connector's script that is gone
-// while an agent config still runs or imports it: that agent does not block
-// its calls. doctor fails on it (removed_connectors.SCRIPT_GONE_WHAT).
-const RemovedScriptGoneWhat = "gone, while an agent config above still runs or imports it, so DefenseClaw does not block those calls"
-
-// RemovedStubUnusableWhat describes a removed connector's stub that the agent
-// may not run or load, or that another account may change (stubUnusable):
-// that agent may let its calls through. doctor fails on it
-// (removed_connectors.STUB_UNUSABLE_WHAT).
-const RemovedStubUnusableWhat = "the stub, but with a mode or owner that may keep the agent from running or loading it, so DefenseClaw may not block those calls"
-
-// stubUse is what the agent does with the stub: runs the OpenHands hook,
-// imports the OmniGent module.
-func (c removedOnlyConnector) stubUse() string {
+func (c removedOnlyConnector) scriptKind() string {
 	if c.name == removedOmnigentID {
-		return "load"
+		return "policy module"
 	}
-	return "run"
+	return "hook script"
 }
 
-// stubUnusable says why the agent may not run or load the stub at path, or
-// another account may change it (nil when neither, and always on Windows,
-// where no mode bit or owner check applies; removedStubMetadataRefusal): its
-// owner cannot read it, an OpenHands stub is not executable by its owner (the
-// hook then fails to start, and OpenHands lets the call through), others may
-// write it, or another account than the hooks folder's owner owns it.
-func (c removedOnlyConnector) stubUnusable(path string) error {
-	info, err := os.Lstat(path)
-	if err != nil {
-		return err
-	}
-	folder, err := os.Stat(filepath.Dir(path))
-	if err != nil {
-		return err
-	}
-	return removedStubMetadataRefusal(info, folder, c.mode)
+func fileExists(path string) bool {
+	_, err := os.Lstat(path)
+	return err == nil
 }
 
-// repairStub puts right a stub the agent may not run or load (stubUnusable).
-// A stub with one name is replaced by a fresh one of its own, with the mode,
-// renamed over the path. A stub with more names gets the mode through the
-// file itself, so every name gets it; one that another account owns is left,
-// with the step.
-func (c removedOnlyConnector) repairStub(dataDir string) error {
-	path := c.scriptPath(dataDir)
-	state, links, _, _, err := c.scriptStateAndLinks(path)
-	if err != nil || state != removedScriptStub || c.stubUnusable(path) == nil {
-		return nil // hookLeft reports anything else
+// FormatRemovedLeftovers renders leftovers as the lines status, uninstall and
+// teardown print: RemovedConnectorNotice, then one line for each item ("" for
+// none).
+func FormatRemovedLeftovers(_ string, leftovers []RemovedLeftover) string {
+	if len(leftovers) == 0 {
+		return ""
 	}
-	if links <= 1 {
-		if err := atomicReplaceFileNoFollow(path, []byte(c.tombstone), c.mode); err != nil {
-			return fmt.Errorf("put right the stub at %s, which %s may not %s: %w", path, c.label, c.stubUse(), err)
-		}
-		return nil
+	var b strings.Builder
+	b.WriteString(RemovedConnectorNotice + "\n")
+	for _, item := range leftovers {
+		fmt.Fprintf(&b, "  - %s: %s. To remove: %s.\n", item.Path, item.What, item.Step)
 	}
-	file, err := os.OpenFile(path, os.O_RDONLY|otlpOpenNoFollow(), 0)
-	if err != nil {
-		return fmt.Errorf("open the stub at %s: %w", path, err)
-	}
-	defer file.Close()
-	info, err := file.Stat()
-	if err != nil {
-		return err
-	}
-	folder, err := os.Stat(filepath.Dir(path))
-	if err != nil {
-		return err
-	}
-	data, err := io.ReadAll(io.LimitReader(file, removedScriptReadLimit+1))
-	if err != nil {
-		return err
-	}
-	if !info.Mode().IsRegular() || !c.isStub(data) {
-		return fmt.Errorf("%s changed while it was read", path)
-	}
-	if err := removedInPlaceRefusal(info, folder); err != nil {
-		return fmt.Errorf("the stub at %s has %d names (hard links) and %v, so its mode cannot be put right. To finish: %s",
-			path, links, err, c.hardLinkStep(path))
-	}
-	if err := file.Chmod(c.mode); err != nil {
-		return fmt.Errorf("set the mode of the stub at %s: %w", path, err)
-	}
-	return nil
-}
-
-func (c removedOnlyConnector) configWhat() string {
-	if c.name == removedOmnigentID {
-		return "OmniGent still imports DefenseClaw's policy module from here; it denies every request"
-	}
-	return "OpenHands still runs DefenseClaw's hook from here; it blocks every call"
-}
-
-// configNames reports whether an agent config still runs or imports the
-// script. It checks the bytes and the decoded values (JSON for hooks.json,
-// YAML for config.yaml), so a name written with escapes is found too. The
-// error says why a file that does not name it could not be checked: too
-// large, or not JSON or YAML.
-func (c removedOnlyConnector) configNames(data []byte) (bool, error) {
-	return c.configNamesWith(data, c.textNames)
-}
-
-// configNamesWith is configNames with names deciding what names the script.
-func (c removedOnlyConnector) configNamesWith(data []byte, names func(string) bool) (bool, error) {
-	if names(string(data)) {
-		return true, nil
-	}
-	if len(data) > removedConfigReadLimit {
-		return false, fmt.Errorf("it is larger than %d MiB", removedConfigReadLimit>>20)
-	}
-	body := bytes.TrimPrefix(data, []byte("\xef\xbb\xbf"))
-	if len(bytes.TrimSpace(body)) == 0 {
-		return false, nil
-	}
-	var doc any
-	if c.name == removedOpenHandsID {
-		if err := json.Unmarshal(body, &doc); err != nil {
-			return false, fmt.Errorf("it is not JSON: %w", err)
-		}
-	} else if err := yaml.Unmarshal(body, &doc); err != nil {
-		return false, fmt.Errorf("it is not YAML: %w", err)
-	}
-	return removedValueNames(doc, names), nil
-}
-
-// scriptNames reports whether one config text runs or imports the script
-// file itself: OpenHands' hook script, OmniGent's policy module. A Windows
-// registration of the native launcher (--connector openhands) needs no
-// script: the launcher reaches the retired route, which blocks every call.
-func (c removedOnlyConnector) scriptNames(text string) bool {
-	lower := strings.ToLower(text)
-	if c.name == removedOmnigentID {
-		return strings.Contains(lower, removedOmnigentModuleName)
-	}
-	return strings.Contains(lower, removedOpenHandsHookScript)
-}
-
-// registrationRunsScript returns the first agent config that still runs or
-// imports the script, or one that could not be read or checked (it may), and
-// true; "", false when none does.
-func (c removedOnlyConnector) registrationRunsScript(opts SetupOpts) (string, bool) {
-	live := c.liveRegistrations(opts)
-	if len(live) == 0 {
-		return "", false
-	}
-	return live[0], true
-}
-
-// liveRegistrations are the agent configs that still run or import the
-// script, or that could not be read or checked (they may).
-func (c removedOnlyConnector) liveRegistrations(opts SetupOpts) []string {
-	var live []string
-	for _, path := range c.configPaths(opts) {
-		data, err := readRemovedConfig(path)
-		if errors.Is(err, os.ErrNotExist) {
-			continue
-		}
-		if err != nil {
-			live = append(live, path)
-			continue
-		}
-		if names, checkErr := c.configNamesWith(data, c.scriptNames); names || checkErr != nil {
-			live = append(live, path)
-		}
-	}
-	return live
-}
-
-// restoreStubForRegistration writes the stub at the script path when the
-// script is gone but an agent config still runs or imports it. OpenHands lets
-// a call through when its hook command fails to start, and OmniGent cannot
-// load a policy module that is not there: without the stub the registration
-// a 1.0.3 setup left stopped blocking. The hooks folder must be a folder (never
-// a link); it is created when it is gone.
-func (c removedOnlyConnector) restoreStubForRegistration(opts SetupOpts) error {
-	path := c.scriptPath(opts.DataDir)
-	state, _, _, _, err := c.scriptStateAndLinks(path)
-	if err != nil || state != removedScriptAbsent {
-		return nil // replaceScript and hookLeft report what is there
-	}
-	config, live := c.registrationRunsScript(opts)
-	if !live {
-		return nil
-	}
-	hooks := filepath.Dir(path)
-	if info, err := os.Lstat(hooks); errors.Is(err, os.ErrNotExist) {
-		if err := os.MkdirAll(hooks, 0o700); err != nil {
-			return fmt.Errorf("%s is gone and %s still runs or imports it; create %s for the stub that blocks every call: %w", path, config, hooks, err)
-		}
-	} else if err != nil {
-		return fmt.Errorf("inspect %s: %w", hooks, err)
-	} else if !info.IsDir() {
-		return fmt.Errorf("%s is gone and %s still runs or imports it, but %s is not a folder, so the stub that blocks every call cannot be written. To finish: %s",
-			path, config, hooks, c.configStep)
-	}
-	if err := atomicReplaceFileNoFollow(path, []byte(c.tombstone), c.mode); err != nil {
-		return fmt.Errorf("%s is gone and %s still runs or imports it; write the stub that blocks every call there: %w", path, config, err)
-	}
-	return nil
-}
-
-// stubDigest is the hook contract lock digest of what is at the script path:
-// the stub's, or "" when nothing is there. ok is false for anything else.
-func (c removedOnlyConnector) stubDigest(dataDir string) (digest string, ok bool, err error) {
-	state, _, data, _, err := c.scriptStateAndLinks(c.scriptPath(dataDir))
-	switch {
-	case err != nil:
-		return "", false, err
-	case state == removedScriptAbsent:
-		return "", true, nil
-	case state == removedScriptStub:
-		return "sha256:" + sha256Hex(data), true, nil
-	}
-	return "", false, nil
-}
-
-// sealStub records in the connector's hook contract lock entry what is at
-// its script path once hookLeft passed: the stub's digest, or no digest when
-// nothing is there. The entry an older setup wrote sealed the old hook, so
-// the lock named a hook that was no longer there. A stub that an agent config
-// still runs is sealed in an entry of its own even when the lock or the entry
-// is gone, with every such config, and the seal is read back (stubSealed).
-func (c removedOnlyConnector) sealStub(opts SetupOpts) error {
-	digest, ok, err := c.stubDigest(opts.DataDir)
-	if err != nil {
-		return fmt.Errorf("read %s: %w", c.scriptPath(opts.DataDir), err)
-	}
-	if !ok {
-		return fmt.Errorf("%s does not hold the stub that blocks every call", c.scriptPath(opts.DataDir))
-	}
-	var configs []string
-	if digest != "" {
-		configs = c.liveRegistrations(opts)
-	}
-	if err := sealRemovedConnectorScript(opts.DataDir, c.name, c.script, digest, configs, opts.ManagedEnterprise); err != nil {
-		return fmt.Errorf("seal %s in the hook contract lock: %w", c.script, err)
-	}
-	if err := c.stubSealed(opts); err != nil {
-		return fmt.Errorf("seal %s in the hook contract lock: %w", c.script, err)
-	}
-	return nil
-}
-
-// stubSealed fails while the connector's hook contract lock entry does not
-// record what sealStub would: the stub's digest for its script and every agent
-// config that still runs it (with such a config, no lock or no entry seals
-// nothing), or no digest when nothing is at the path.
-func (c removedOnlyConnector) stubSealed(opts SetupOpts) error {
-	digest, ok, err := c.stubDigest(opts.DataDir)
-	if err != nil || !ok {
-		return nil // hookLeft reports it
-	}
-	entry, err := removedConnectorLockEntry(opts.DataDir, c.name, opts.ManagedEnterprise)
-	if err != nil {
-		return fmt.Errorf("read the hook contract lock: %w", err)
-	}
-	if entry == nil {
-		if digest == "" {
-			return nil
-		}
-		if live := c.liveRegistrations(opts); len(live) > 0 {
-			return fmt.Errorf("the hook contract lock has no %s entry that seals the stub at %s, which %s runs; run %s", c.name, c.scriptPath(opts.DataDir), live[0], c.teardownCommand())
-		}
-		return nil
-	}
-	recorded, has := entry.HookScriptDigests[c.script]
-	switch {
-	case digest == "" && has:
-		return fmt.Errorf("the hook contract lock still seals %s (%s), which is gone; run %s", c.script, recorded, c.teardownCommand())
-	case digest != "" && recorded != digest:
-		return fmt.Errorf("the hook contract lock seals %s as %q, not the stub at %s; run %s", c.script, recorded, c.scriptPath(opts.DataDir), c.teardownCommand())
-	}
-	if digest != "" {
-		for _, config := range c.liveRegistrations(opts) {
-			if !removedLockNamesConfig(*entry, config) {
-				return fmt.Errorf("the hook contract lock entry of %s does not name %s, which runs the stub; run %s", c.name, config, c.teardownCommand())
-			}
-		}
-	}
-	return nil
-}
-
-// removedLockNamesConfig reports whether a lock entry names config among its
-// hook config paths.
-func removedLockNamesConfig(entry HookContractLockEntry, config string) bool {
-	for _, path := range entry.Locations.HookConfigPaths {
-		if sameManagedTargetPath(removedAbsolute(path), config) {
-			return true
-		}
-	}
-	return false
-}
-
-// textNames reports whether one config text (a command, a module name)
-// names the script: OpenHands' hook script or the native launcher's
-// OpenHands connector, OmniGent's policy module.
-func (c removedOnlyConnector) textNames(text string) bool {
-	lower := strings.ToLower(text)
-	if c.name == removedOmnigentID {
-		return strings.Contains(lower, removedOmnigentModuleName)
-	}
-	return strings.Contains(lower, removedOpenHandsHookScript) || removedOpenHandsLauncherFlag.MatchString(text)
+	return b.String()
 }
 
 // removedValueNames reports whether a string or key anywhere in a decoded
@@ -1339,67 +627,11 @@ func removedValueNames(value any, names func(string) bool) bool {
 	return false
 }
 
-// removedLostPthLeftover lists OmniGent's import-path file when an older
-// setup's record of where it wrote it (connector_backups/omnigent/pth.json) is
-// gone but its other records are there: every such setup wrote the file. Its
-// path is in the site-packages of OmniGent's Python, which only that Python
-// can tell; an uninstall (SYSTEM or root on a managed host) never runs the
-// user's interpreter to ask, so the step says how to find it.
-func removedLostPthLeftover(dataDir string) (RemovedLeftover, bool) {
-	for _, logical := range []string{"config", "module"} {
-		if _, err := os.Lstat(managedFileBackupPath(dataDir, removedOmnigentID, logical)); err == nil {
-			hooks := filepath.Join(dataDir, "hooks")
-			return RemovedLeftover{
-				Path: removedOmnigentPthName,
-				What: "DefenseClaw's record of where it wrote OmniGent's import-path file is gone, so the file may still add DefenseClaw's hook folder to OmniGent's Python import path",
-				Step: "in the folder that OmniGent's Python prints for python -c \"import sysconfig; print(sysconfig.get_paths()['purelib'])\", remove only the line " +
-					hooks + " from " + removedOmnigentPthName + " (delete the file when that was its only line)",
-			}, true
-		}
-	}
-	return RemovedLeftover{}, false
-}
-
-// removedPthLeftover lists OmniGent's import-path file when it still holds
-// DefenseClaw's line (the hook folder), with a step that takes out only that
-// line when the file holds other import paths too.
-func removedPthLeftover(pth, hooks string) (RemovedLeftover, bool) {
-	data, err := readRemovedConfig(pth)
-	if errors.Is(err, os.ErrNotExist) {
-		return RemovedLeftover{}, false
-	}
-	lineStep := "remove only the line " + hooks + " (DefenseClaw's hook folder) from this file, and keep every other line, once no OmniGent config.yaml names " + removedOmnigentModuleName
-	if err != nil || len(data) > removedConfigReadLimit {
-		if err == nil {
-			err = fmt.Errorf("it is larger than %d MiB", removedConfigReadLimit>>20)
-		}
-		return RemovedLeftover{Path: pth, What: fmt.Sprintf("could not be read (%v)", err), Step: "check it by hand: " + lineStep}, true
-	}
-	own, other := false, false
-	for _, line := range strings.Split(string(bytes.TrimPrefix(data, []byte("\xef\xbb\xbf"))), "\n") {
-		line = strings.TrimSpace(line)
-		switch {
-		case line == "" || strings.HasPrefix(line, "#"):
-		case sameManagedTargetPath(line, hooks):
-			own = true
-		default:
-			other = true
-		}
-	}
-	switch {
-	case !own:
-		return RemovedLeftover{}, false
-	case other:
-		return RemovedLeftover{Path: pth, What: "adds DefenseClaw's hook folder to OmniGent's Python import path; it holds other import paths too", Step: lineStep}, true
-	}
-	return RemovedLeftover{Path: pth, What: "adds DefenseClaw's hook folder to OmniGent's Python import path; it holds nothing else",
-		Step: "delete this file once no OmniGent config.yaml names " + removedOmnigentModuleName}, true
-}
-
 // configPaths are the agent config files an older setup may have changed:
 // the one its backup record names, the ones the hook contract lock names,
-// the explicit config home and the agent's default (both), and for OmniGent
-// the files OMNIGENT_CONFIG and OMNIGENT_CONFIG_HOME select.
+// the explicit config home and the agent's default (both), for OpenHands the
+// pinned workspace's, and for OmniGent the files OMNIGENT_CONFIG and
+// OMNIGENT_CONFIG_HOME select.
 func (c removedOnlyConnector) configPaths(opts SetupOpts) []string {
 	file, defaultDir := "hooks.json", ".openhands"
 	if c.name == removedOmnigentID {
@@ -1420,16 +652,14 @@ func (c removedOnlyConnector) configPaths(opts SetupOpts) []string {
 			}
 		}
 	}
-	// The agent may read its default config as well as the explicit one.
 	if home := strings.TrimSpace(opts.ConfigHome); home != "" {
 		paths = append(paths, filepath.Join(removedAbsolute(home), file))
 	}
 	paths = append(paths, homePath(defaultDir, file))
 	if c.name == removedOpenHandsID {
-		// A 1.0.x setup with a pinned workspace (claw.workspace_dir, or the
-		// one its lock entry records) wrote the repo-local
-		// <workspace>/.openhands/hooks.json instead of the home one, unless
-		// the workspace was inside the data directory.
+		// A 1.0.x setup with a pinned workspace wrote the repo-local
+		// <workspace>/.openhands/hooks.json, unless the workspace was inside
+		// the data directory.
 		for _, root := range workspaces {
 			if root = removedAbsolute(root); root != "" && workspaceRootOutsideDataDir(root, opts.DataDir) {
 				paths = append(paths, filepath.Join(root, defaultDir, file))
@@ -1495,20 +725,242 @@ func readRemovedConfig(path string) ([]byte, error) {
 	return io.ReadAll(io.LimitReader(file, int64(removedConfigReadLimit)+1))
 }
 
-// FormatRemovedLeftovers renders leftovers as the lines status, uninstall and
-// teardown print ("" for none).
-func FormatRemovedLeftovers(name string, leftovers []RemovedLeftover) string {
-	if len(leftovers) == 0 {
-		return ""
+// removedOmnigentConfigWithout returns an OmniGent config.yaml without
+// DefenseClaw's entries: the policy module in policy_modules and every policy
+// whose handler is in that module. A key left empty by that goes too.
+// Comments and every other entry stay.
+func removedOmnigentConfigWithout(data []byte) ([]byte, bool, error) {
+	var document yaml.Node
+	if err := yaml.Unmarshal(data, &document); err != nil {
+		return nil, false, err
 	}
-	label := name
-	if c, ok := removedConnectorFor(name); ok {
-		label = c.label
+	if len(document.Content) != 1 || document.Content[0].Kind != yaml.MappingNode {
+		return nil, false, errors.New("not a YAML mapping")
 	}
-	var b strings.Builder
-	fmt.Fprintf(&b, "%s support was removed in DefenseClaw 1.0.4. Left for you to remove by hand:\n", label)
-	for _, item := range leftovers {
-		fmt.Fprintf(&b, "  - %s: %s. To remove: %s.\n", item.Path, item.What, item.Step)
+	ownedModule := func(node *yaml.Node) bool {
+		return node.Kind == yaml.ScalarNode && strings.TrimSpace(node.Value) == removedOmnigentModuleName
 	}
-	return b.String()
+	ownedPolicy := func(node *yaml.Node) bool {
+		if node.Kind != yaml.MappingNode {
+			return false
+		}
+		for i := 0; i+1 < len(node.Content); i += 2 {
+			if node.Content[i].Value == "handler" && node.Content[i+1].Kind == yaml.ScalarNode &&
+				strings.HasPrefix(strings.TrimSpace(node.Content[i+1].Value), removedOmnigentModuleName+".") {
+				return true
+			}
+		}
+		return false
+	}
+	keep := func(items []*yaml.Node, owned func(*yaml.Node) bool) ([]*yaml.Node, bool) {
+		kept := make([]*yaml.Node, 0, len(items))
+		removed := false
+		for _, item := range items {
+			if owned(item) {
+				removed = true
+				continue
+			}
+			kept = append(kept, item)
+		}
+		return kept, removed
+	}
+	root := document.Content[0]
+	changed := false
+	for i := 0; i+1 < len(root.Content); i += 2 {
+		value := root.Content[i+1]
+		removed, drop := false, false
+		switch root.Content[i].Value {
+		case "policy_modules":
+			switch value.Kind {
+			case yaml.ScalarNode:
+				drop = ownedModule(value)
+			case yaml.SequenceNode:
+				value.Content, removed = keep(value.Content, ownedModule)
+				drop = removed && len(value.Content) == 0
+			}
+		case "policies":
+			switch value.Kind {
+			case yaml.MappingNode:
+				kept := make([]*yaml.Node, 0, len(value.Content))
+				for j := 0; j+1 < len(value.Content); j += 2 {
+					if ownedPolicy(value.Content[j+1]) {
+						removed = true
+						continue
+					}
+					kept = append(kept, value.Content[j], value.Content[j+1])
+				}
+				value.Content = kept
+				drop = removed && len(kept) == 0
+			case yaml.SequenceNode:
+				value.Content, removed = keep(value.Content, ownedPolicy)
+				drop = removed && len(value.Content) == 0
+			}
+		}
+		changed = changed || removed || drop
+		if drop {
+			root.Content = append(root.Content[:i], root.Content[i+2:]...)
+			i -= 2
+		}
+	}
+	if !changed {
+		return nil, false, nil
+	}
+	out, err := yaml.Marshal(&document)
+	if err != nil {
+		return nil, false, err
+	}
+	return out, true, nil
+}
+
+// removedOpenHandsConfigWithout returns an OpenHands hooks.json without
+// DefenseClaw's hooks: every handler whose command names is true for, with
+// every matcher group and event list left empty by that. Every other hook
+// stays.
+func removedOpenHandsConfigWithout(data []byte, names func(string) bool) ([]byte, bool, error) {
+	decoder := json.NewDecoder(bytes.NewReader(bytes.TrimPrefix(data, []byte("\xef\xbb\xbf"))))
+	decoder.UseNumber()
+	var document any
+	if err := decoder.Decode(&document); err != nil {
+		return nil, false, err
+	}
+	pruned, changed, drop := removedPruneHooks(document, names)
+	if !changed {
+		return nil, false, nil
+	}
+	if drop || pruned == nil {
+		pruned = map[string]any{}
+	}
+	out, err := json.MarshalIndent(pruned, "", "  ")
+	if err != nil {
+		return nil, false, err
+	}
+	return append(out, '\n'), true, nil
+}
+
+// removedPruneHooks removes DefenseClaw's hooks from a decoded hooks.json
+// value; drop means the value itself goes from its parent (a handler of
+// DefenseClaw's, a command string of DefenseClaw's in a list, or a matcher
+// group whose hooks all went and that holds nothing but its matcher).
+func removedPruneHooks(value any, names func(string) bool) (out any, changed, drop bool) {
+	switch v := value.(type) {
+	case map[string]any:
+		if command, ok := v["command"].(string); ok && names(command) {
+			return nil, true, true
+		}
+		pruned := make(map[string]any, len(v))
+		for key, child := range v {
+			next, childChanged, childDrop := removedPruneHooks(child, names)
+			if childDrop {
+				changed = true
+				continue
+			}
+			if childChanged {
+				changed = true
+				if list, ok := next.([]any); ok && len(list) == 0 {
+					continue // emptied by the removal
+				}
+			}
+			pruned[key] = next
+		}
+		if !changed {
+			return v, false, false
+		}
+		if _, had := v["hooks"]; had {
+			if _, kept := pruned["hooks"]; !kept {
+				for key := range pruned {
+					if key != "matcher" {
+						// The operator's own fields stay, with no hooks.
+						pruned["hooks"] = []any{}
+						return pruned, true, false
+					}
+				}
+				return nil, true, true
+			}
+		}
+		return pruned, true, false
+	case []any:
+		pruned := make([]any, 0, len(v))
+		for _, item := range v {
+			if text, ok := item.(string); ok && names(text) {
+				changed = true
+				continue
+			}
+			next, itemChanged, itemDrop := removedPruneHooks(item, names)
+			if itemDrop {
+				changed = true
+				continue
+			}
+			changed = changed || itemChanged
+			pruned = append(pruned, next)
+		}
+		if !changed {
+			return v, false, false
+		}
+		return pruned, true, false
+	}
+	return value, false, false
+}
+
+// removedPthHasLine reports whether OmniGent's import-path file holds
+// DefenseClaw's line (its hooks folder).
+func removedPthHasLine(pth, hooks string) bool {
+	data, err := readRemovedConfig(pth)
+	if err != nil || len(data) > removedConfigReadLimit {
+		return false
+	}
+	for _, line := range strings.Split(string(bytes.TrimPrefix(data, []byte("\xef\xbb\xbf"))), "\n") {
+		if line = strings.TrimSpace(line); line != "" && !strings.HasPrefix(line, "#") && sameManagedTargetPath(line, hooks) {
+			return true
+		}
+	}
+	return false
+}
+
+// removeOmnigentImportPath removes DefenseClaw's line (its hooks folder) from
+// the import-path file an older OmniGent setup wrote, and the file when
+// nothing else is in it. A file that is not a regular file or cannot be read
+// is left (and listed). rollbackDir keeps what it changed for a rollback.
+func removeOmnigentImportPath(dataDir, rollbackDir string) error {
+	pth := managedFileBackupTargetPath(dataDir, removedOmnigentID, "pth", "")
+	if pth == "" {
+		return nil
+	}
+	info, err := os.Lstat(pth)
+	if err != nil || !info.Mode().IsRegular() {
+		return nil
+	}
+	data, err := readRemovedConfig(pth)
+	if err != nil || len(data) > removedConfigReadLimit {
+		return nil
+	}
+	hooks := filepath.Join(dataDir, "hooks")
+	var kept []string
+	own, other := false, false
+	for _, line := range strings.Split(string(bytes.TrimPrefix(data, []byte("\xef\xbb\xbf"))), "\n") {
+		trimmed := strings.TrimSpace(line)
+		switch {
+		case trimmed != "" && !strings.HasPrefix(trimmed, "#") && sameManagedTargetPath(trimmed, hooks):
+			own = true
+			continue
+		case trimmed != "" && !strings.HasPrefix(trimmed, "#"):
+			other = true
+		}
+		kept = append(kept, line)
+	}
+	switch {
+	case !own:
+		return nil
+	case !other:
+		recordRemovedRollback(rollbackDir, removedOmnigentID, pth, data, info.Mode(), nil)
+		if err := os.Remove(pth); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("remove the import-path file %s: %w", pth, err)
+		}
+		return nil
+	}
+	updated := []byte(strings.Join(kept, "\n"))
+	recordRemovedRollback(rollbackDir, removedOmnigentID, pth, data, info.Mode(), updated)
+	if err := atomicWriteFile(pth, updated, info.Mode().Perm()); err != nil {
+		return fmt.Errorf("remove DefenseClaw's line from the import-path file %s: %w", pth, err)
+	}
+	return removedKeepOwner(pth, info)
 }

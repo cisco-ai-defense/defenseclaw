@@ -635,6 +635,16 @@ if [ "$platform" = linux ]; then
     esac
     echo "expected policy-view warnings: ${kernel_views[*]:-none}"
 fi
+# The previous release reports what its version reports: 1.0.3 the kernel's
+# open policy-view routes on its config steps only; 1.0.4 those routes from
+# its package install on, and on its config steps the hook residual
+# (hook_process_fail_open) and a first install scan still running
+# (agent_install_scan_incomplete), as the new release's ensure does. So its
+# steps allow them; the new release's steps require the kernel views
+# (kernel_views).
+previous_views=(--allow-warning hook_process_fail_open --allow-warning agent_install_scan_incomplete)
+[ "$platform" != linux ] ||
+    previous_views+=(--allow-warning unprivileged_user_namespaces --allow-warning unprivileged_ptrace)
 echo "package: $package"
 echo "version: $version"
 
@@ -650,20 +660,24 @@ upgrade_lane() {
     # A bare install of a 1.x package enables no connector, like the fresh
     # install below; the next step applies the administrator config.
     "$python" "$checker" "$results/01-previous-install.json" --label previous-install --platform "$platform" \
-        --action ensure --installed --version "$previous_version" --allow-warning no_connectors_enabled
+        --action ensure --installed --version "$previous_version" --allow-warning no_connectors_enabled \
+        ${previous_views[@]+"${previous_views[@]}"}
 
     step "apply the administrator config on the previous release"
     write_admin_config
-    lifecycle 02-previous-config ensure --from-package --config "$stage/config.yaml" --reason ci-upgrade-lane
+    # On macOS the previous package's config write fires the launchd path job
+    # (ensure --reason path) right after its install, as the install lane's
+    # ensure-config step finds: wait for it instead of failing lifecycle_busy.
+    lifecycle 02-previous-config ensure --from-package --config "$stage/config.yaml" --reason ci-upgrade-lane --lock-wait 2m
     check "$results/02-previous-config.json" previous-config --action ensure --installed --version "$previous_version" --ready \
-        --allow-warning unprivileged_user_namespaces "${policy_checks[@]}"
+        "${policy_checks[@]}" ${previous_views[@]+"${previous_views[@]}"}
     cp "$stage/config.yaml" "$results/config-before.yaml"
     step "store a protected credential on the previous release"
     seed_upgrade_secret 02-previous-secret
     lifecycle 03-previous-verify verify
     retry_busy 03-previous-verify verify
     check "$results/03-previous-verify.json" previous-verify --action verify --installed --version "$previous_version" --ready \
-        --allow-warning unprivileged_user_namespaces
+        ${previous_views[@]+"${previous_views[@]}"}
     lifecycle 04-previous-status status
     retry_busy 04-previous-status status
     previous_config_sha=$(sha256_of "$config")
@@ -688,10 +702,17 @@ upgrade_lane() {
     # it after it saved this result.
     held=()
     [ "$platform" != linux ] || held=(--held-service defenseclaw-enterprise-apply.path)
+    # The new release reports the restored previous install truthfully
+    # (GAP-1412): its hook residual (hook_process_fail_open), a previous
+    # release's connectors without a trusted policy-view digest
+    # (machine_policy_incomplete), its first install scan after the restart
+    # (agent_install_scan_incomplete, T2 run 40440985412); the host's own
+    # policy-view sysctls are required where the host has them (kernel_views).
     "$python" "$checker" "$results/05-upgrade-fault.json" --label upgrade-fault --platform "$platform" \
         --action ensure --expect-error lifecycle_test_fault --ready ${held[@]+"${held[@]}"} \
         --allow-warning lifecycle_test_fault --allow-warning rolled_back ${kernel_views[@]+"${kernel_views[@]}"} \
-        --allow-warning machine_policy_incomplete --allow-warning hook_process_fail_open
+        --allow-warning machine_policy_incomplete --allow-warning hook_process_fail_open \
+        --allow-warning agent_install_scan_incomplete
     services_running
     if [ "$platform" = linux ]; then
         systemctl is-active --quiet defenseclaw-enterprise-apply.path ||

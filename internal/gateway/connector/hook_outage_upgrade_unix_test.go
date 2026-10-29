@@ -14,6 +14,7 @@ package connector
 
 import (
 	"bytes"
+	"encoding/json"
 	"fmt"
 	"net"
 	"os"
@@ -98,12 +99,10 @@ func runOutageToolCall(t *testing.T, home, dataDir string, call outageToolCall) 
 }
 
 // The per-user hooks of agents without a fail-closed hook contract of their
-// own, and Cursor, follow the outage mode of their policy tier
-// (oss-outage-open, owner decision 2026-10-23): with the gateway down, an
-// unset or strict (closed) mode blocks the tool call and the default or
-// permissive (open) mode lets it run, in observe and action mode alike.
-// Before r104 W3 G3-upg the Copilot and Antigravity renders were lowered to
-// open for an unset mode, which they no longer are.
+// own, and Cursor, follow the outage mode of their current policy tier
+// (oss-outage-open, owner decision 2026-10-23): with the gateway down, the
+// strict tier blocks the tool call and the default or permissive tier lets it
+// run, in observe and action mode alike. The rendered mode does not decide.
 func TestPerUserHooksBlockAToolCallWhileTheGatewayIsDown(t *testing.T) {
 	requireShellHookToolsForTest(t)
 	addr := closedLoopbackAddrForTest(t)
@@ -134,13 +133,17 @@ func TestPerUserHooksBlockAToolCallWhileTheGatewayIsDown(t *testing.T) {
 			if err := WriteHookScriptsForConnectorObjectWithOpts(filepath.Join(dataDir, "hooks"), opts, conn); err != nil {
 				t.Fatal(err)
 			}
+			// The config the outage-open hook reads gives the open tier.
+			installOutageOpenRuntimeForHookTest(t, home, dataDir)
+			if test.block {
+				writeOutageTierConfig(t, dataDir, outageStrictTierConfig)
+			}
 			blocked, detail := runOutageToolCall(t, home, dataDir, outageToolCalls[test.connector])
 			if blocked != test.block {
 				t.Fatalf("blocked = %v, want %v: %s", blocked, test.block, detail)
 			}
-			// What the hook does is what its sidecar entry records, with the
-			// config as its source: the native hook and the shared shell
-			// readers follow the same mode.
+			// The setup sidecar keeps the rendered metadata; the hook reads
+			// the current config at call time for the outage decision.
 			want := "open"
 			if test.block {
 				want = "closed"
@@ -214,4 +217,155 @@ func TestRefreshMakesReleasedHooksBlockWhileTheGatewayIsDown(t *testing.T) {
 			}
 		}
 	}
+}
+
+// TestRefreshClosesReleasedCopilotEarlyFailures: a released per-user
+// copilot-hook.sh refreshed before the old gateway stops denies a tool call
+// whose helper or token is missing, not only a gateway failure (GAP-0345).
+func TestRefreshClosesReleasedCopilotEarlyFailures(t *testing.T) {
+	requireShellHookToolsForTest(t)
+	for _, release := range []string{"0.8.10", "1.0.0", "1.0.3"} {
+		for _, mode := range []string{"closed", "open"} {
+			t.Run(release+"/"+mode, func(t *testing.T) {
+				home := t.TempDir()
+				dataDir := filepath.Join(home, ".defenseclaw")
+				hookDir := filepath.Join(dataDir, "hooks")
+				if err := os.MkdirAll(hookDir, 0o700); err != nil {
+					t.Fatal(err)
+				}
+				for _, name := range []string{"_hardening.sh", "copilot-hook.sh"} {
+					body, err := os.ReadFile(filepath.Join("testdata", "released-hooks", release, name))
+					if err != nil {
+						t.Fatal(err)
+					}
+					if err := os.WriteFile(filepath.Join(hookDir, name), body, 0o700); err != nil {
+						t.Fatal(err)
+					}
+				}
+				if _, err := RefreshHookFailModes(hookDir, func(string) string { return mode }); err != nil {
+					t.Fatal(err)
+				}
+				hook := filepath.Join(hookDir, "copilot-hook.sh")
+				helper, err := os.ReadFile(filepath.Join(hookDir, "_hardening.sh"))
+				if err != nil {
+					t.Fatal(err)
+				}
+				for _, event := range []string{"preToolUse", "permissionRequest"} {
+					if err := os.Remove(filepath.Join(hookDir, "_hardening.sh")); err != nil {
+						t.Fatal(err)
+					}
+					out, code := runReleasedCopilotEarlyFailure(t, hook, home, dataDir, event)
+					if code != 0 || !copilotEarlyDenial(out, event) {
+						t.Fatalf("missing helper %s: exit %d stdout=%q", event, code, out)
+					}
+					if err := os.WriteFile(filepath.Join(hookDir, "_hardening.sh"), helper, 0o700); err != nil {
+						t.Fatal(err)
+					}
+					out, code = runReleasedCopilotEarlyFailure(t, hook, home, dataDir, event)
+					if code != 0 || !copilotEarlyDenial(out, event) {
+						t.Fatalf("missing token %s: exit %d stdout=%q", event, code, out)
+					}
+				}
+				// A second refresh leaves the closed script as it is.
+				before, _ := os.ReadFile(hook)
+				if _, err := RefreshHookFailModes(hookDir, func(string) string { return mode }); err != nil {
+					t.Fatal(err)
+				}
+				if after, _ := os.ReadFile(hook); !bytes.Equal(before, after) {
+					t.Fatal("a second refresh changed the closed Copilot hook")
+				}
+			})
+		}
+	}
+}
+
+// TestRefreshLeavesADisabledCopilotTombstoneAsItIs: a torn-down Copilot
+// leaves the v0 tombstone, which forwards nothing and has no failure path to
+// close. The refresh the upgrade runs stopped on it with "unrecognized
+// released hook layout", so the per-user upgrade failed (GAP-2282).
+func TestRefreshLeavesADisabledCopilotTombstoneAsItIs(t *testing.T) {
+	for _, body := range []string{disabledHookTombstone("copilot"), failedSetupHookPlaceholder("copilot")} {
+		for _, mode := range []string{"closed", "open"} {
+			hookDir := filepath.Join(t.TempDir(), ".defenseclaw", "hooks")
+			if err := os.MkdirAll(hookDir, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			hook := filepath.Join(hookDir, "copilot-hook.sh")
+			if err := os.WriteFile(hook, []byte(body), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := RefreshHookFailModes(hookDir, func(string) string { return mode }); err != nil {
+				t.Fatalf("%s: refresh of the tombstone failed: %v", mode, err)
+			}
+			if after, _ := os.ReadFile(hook); string(after) != body {
+				t.Fatalf("%s: the refresh changed the tombstone:\n%s", mode, after)
+			}
+		}
+	}
+}
+
+// TestRefreshedReleasedCopilotHookDeniesAnEarlyExitOfStatusZero: an early
+// exit of status 0 is a failure too. macOS /bin/bash 3.2 runs the EXIT trap
+// with $? 0 when the sourced helper is missing, so a trap that tested the
+// status let the tool run there (GAP-2141); a helper that exits 0 while it
+// is sourced gives the same status on every bash.
+func TestRefreshedReleasedCopilotHookDeniesAnEarlyExitOfStatusZero(t *testing.T) {
+	requireShellHookToolsForTest(t)
+	for _, release := range []string{"0.8.10", "1.0.0", "1.0.3"} {
+		for _, mode := range []string{"closed", "open"} {
+			t.Run(release+"/"+mode, func(t *testing.T) {
+				home := t.TempDir()
+				dataDir := filepath.Join(home, ".defenseclaw")
+				hookDir := filepath.Join(dataDir, "hooks")
+				if err := os.MkdirAll(hookDir, 0o700); err != nil {
+					t.Fatal(err)
+				}
+				for _, name := range []string{"_hardening.sh", "copilot-hook.sh"} {
+					body, err := os.ReadFile(filepath.Join("testdata", "released-hooks", release, name))
+					if err != nil {
+						t.Fatal(err)
+					}
+					if err := os.WriteFile(filepath.Join(hookDir, name), body, 0o700); err != nil {
+						t.Fatal(err)
+					}
+				}
+				if _, err := RefreshHookFailModes(hookDir, func(string) string { return mode }); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(hookDir, "_hardening.sh"), []byte("exit 0\n"), 0o700); err != nil {
+					t.Fatal(err)
+				}
+				hook := filepath.Join(hookDir, "copilot-hook.sh")
+				for _, event := range []string{"preToolUse", "permissionRequest"} {
+					out, code := runReleasedCopilotEarlyFailure(t, hook, home, dataDir, event)
+					if code != 0 || !copilotEarlyDenial(out, event) {
+						t.Fatalf("helper exit 0 %s: exit %d stdout=%q", event, code, out)
+					}
+				}
+			})
+		}
+	}
+}
+
+// copilotEarlyDenial reports one JSON object on stdout that denies event
+// with Copilot's native field for it: two objects are not an answer Copilot
+// reads.
+func copilotEarlyDenial(out, event string) bool {
+	var answer map[string]any
+	if err := json.Unmarshal([]byte(strings.TrimSpace(out)), &answer); err != nil {
+		return false
+	}
+	if event == "permissionRequest" {
+		return answer["behavior"] == "deny"
+	}
+	return answer["permissionDecision"] == "deny"
+}
+
+func runReleasedCopilotEarlyFailure(t *testing.T, hook, home, dataDir, event string) (string, int) {
+	t.Helper()
+	cmd := exec.Command("bash", hook, "--event", event)
+	cmd.Stdin = strings.NewReader(`{"sessionId":"s","toolName":"bash","toolArgs":{"command":"echo ok"}}`)
+	cmd.Env = append(sanitizedTestEnv(), "HOME="+home, "DEFENSECLAW_HOME="+dataDir)
+	out, err := cmd.Output()
+	return string(out), exitCodeOf(err)
 }

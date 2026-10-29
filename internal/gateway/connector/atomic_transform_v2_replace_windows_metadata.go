@@ -15,6 +15,7 @@ import (
 	"io"
 	"os"
 	"runtime"
+	"slices"
 	"sort"
 	"strings"
 	"syscall"
@@ -169,6 +170,78 @@ func atomicTransformV2WindowsDACLIsReplaceNormalization(target, old string) (boo
 		}
 	}
 	return true, nil
+}
+
+// atomicTransformV2WindowsDACLIsInheritedReplaceMerge recognizes the other
+// ReplaceFileW result seen on Windows: an Old DACL that is only inherited (an
+// enrolled user's settings.json that inherits its profile folder's DACL, which
+// the convergence leaves as found, GAP-2096) is published as the private Stage
+// file's own explicit full-access ACEs followed by exactly Old's inherited
+// ACEs. The explicit ACEs in front may only be full access for SYSTEM, the
+// current user or a principal Old already grants full access (the enrolled
+// owner); Old's ACEs must follow in order and unchanged. Anything else stays
+// foreign. The repair then puts Old's DACL back, which drops the Stage ACEs
+// and keeps the inheritance.
+func atomicTransformV2WindowsDACLIsInheritedReplaceMerge(target, old string) (bool, error) {
+	targetPrefix, targetACEs, err := atomicTransformV2WindowsDACLParts(target)
+	if err != nil {
+		return false, err
+	}
+	oldPrefix, oldACEs, err := atomicTransformV2WindowsDACLParts(old)
+	if err != nil {
+		return false, err
+	}
+	if oldPrefix != "D:" || targetPrefix != "D:" || len(oldACEs) == 0 || len(targetACEs) <= len(oldACEs) {
+		return false, nil
+	}
+	extra := len(targetACEs) - len(oldACEs)
+	for index, ace := range oldACEs {
+		if !atomicTransformV2WindowsACEInherited(ace) || targetACEs[extra+index] != ace {
+			return false, nil
+		}
+	}
+	trusted := make([]*windows.SID, 0, len(oldACEs)+2)
+	if system, err := windows.CreateWellKnownSid(windows.WinLocalSystemSid); err == nil {
+		trusted = append(trusted, system)
+	}
+	if user, err := windowsEffectiveUserSID(); err == nil && user != nil {
+		trusted = append(trusted, user)
+	}
+	for _, ace := range oldACEs {
+		if trustee, ok := strings.CutPrefix(ace, "(A;ID;FA;;;"); ok {
+			if sid, err := windows.StringToSid(strings.TrimSuffix(trustee, ")")); err == nil {
+				trusted = append(trusted, sid)
+			}
+		}
+	}
+	for _, ace := range targetACEs[:extra] {
+		trustee, ok := strings.CutPrefix(ace, "(A;;FA;;;")
+		if !ok || !strings.HasSuffix(trustee, ")") {
+			return false, nil
+		}
+		sid, err := windows.StringToSid(strings.TrimSuffix(trustee, ")"))
+		if err != nil {
+			return false, nil
+		}
+		if !slices.ContainsFunc(trusted, sid.Equals) {
+			return false, nil
+		}
+	}
+	return true, nil
+}
+
+// atomicTransformV2WindowsACEInherited reports whether an SDDL ACE string
+// carries the ID (inherited) flag.
+func atomicTransformV2WindowsACEInherited(ace string) bool {
+	first := strings.IndexByte(ace, ';')
+	if first < 0 {
+		return false
+	}
+	second := strings.IndexByte(ace[first+1:], ';')
+	if second < 0 {
+		return false
+	}
+	return strings.Contains(ace[first+1:first+1+second], "ID")
 }
 
 func atomicTransformV2WindowsDACLParts(sddl string) (string, []string, error) {

@@ -222,6 +222,35 @@ class TestInstanceOverlay(unittest.TestCase):
             self.assertEqual(resolved.api_key_env, "ACME_KEY")
 
 
+    def test_gap2393_custom_provider_takes_the_instance_family(self) -> None:
+        """``setup llm --provider custom --instance-name`` saves provider
+        "custom"; the resolved role uses the instance's base_provider_type
+        and is not reported as an unknown provider prefix (GAP-2393).
+        """
+        with tempfile.TemporaryDirectory() as d:
+            overlay = {
+                "providers": [
+                    {
+                        "name": "acme-bedrock-prod",
+                        "domains": ["bedrock-runtime.us-east-1.amazonaws.com"],
+                        "base_provider_type": "bedrock",
+                    }
+                ]
+            }
+            with open(os.path.join(d, "custom-providers.json"), "w", encoding="utf-8") as f:
+                json.dump(overlay, f)
+            cfg = _make_cfg(d)
+            cfg.llm.provider = "custom"
+            cfg.llm.instance_name = "acme-bedrock-prod"
+            cfg.llm.model = "anthropic.claude-haiku-4-5-20251001-v1:0"
+            cfg.save()
+            cfg2 = _load_via_env(d)
+            with self.assertNoLogs("defenseclaw.config", level="WARNING"):
+                resolved = cfg2.resolve_llm("guardrail.judge")
+            self.assertEqual(resolved.provider, "bedrock")
+            self.assertEqual(resolved.instance_name, "acme-bedrock-prod")
+
+
 class TestLLMPickerNonInteractive(unittest.TestCase):
     """Every picker enforces the non-interactive contract."""
 
@@ -408,6 +437,88 @@ class TestSetupLLMNonInteractiveFlags(unittest.TestCase):
         )
         self.assertEqual(res.exit_code, 0, res.output)
         self.assertEqual(self.app.cfg.llm.instance_name, "acme-internal")
+
+    def test_switch_from_custom_drops_the_instance_binding(self) -> None:
+        """GAP-2235: a later non-custom provider must not keep the custom
+        instance, or the role keeps routing to it; --instance-name and
+        a re-run of the same provider keep it."""
+        base = ["llm", "--non-interactive"]
+        def run(*args: str) -> None:
+            res = self.runner.invoke(setup, [*base, *args], obj=self.app, catch_exceptions=False)
+            self.assertEqual(res.exit_code, 0, res.output)
+
+        run("--provider", "custom", "--instance-name", "acme-bedrock-prod", "--model", "heavy")
+        self.assertEqual(self.app.cfg.llm.instance_name, "acme-bedrock-prod")
+        run("--provider", "custom", "--model", "light")
+        self.assertEqual(self.app.cfg.llm.instance_name, "acme-bedrock-prod")
+        run("--provider", "anthropic", "--model", "claude-sonnet-4-5", "--api-key-env", "DEFENSECLAW_LLM_KEY")
+        self.assertEqual(self.app.cfg.llm.provider, "anthropic")
+        self.assertEqual(self.app.cfg.llm.instance_name, "")
+        run("--provider", "bedrock", "--instance-name", "acme-bedrock-prod", "--model", "m")
+        self.assertEqual(self.app.cfg.llm.instance_name, "acme-bedrock-prod")
+        run("--provider", "vertex_ai", "--model", "gemini-2.5-pro")
+        self.assertEqual(self.app.cfg.llm.instance_name, "")
+
+    def test_judge_provider_switch_drops_the_custom_instance(self) -> None:
+        """GAP-2379: setup guardrail --judge-provider <other> without
+        --judge-instance-name drops the judge's custom instance;
+        --judge-instance-name keeps one."""
+        def run(*args: str) -> None:
+            res = self.runner.invoke(
+                setup,
+                ["guardrail", "--non-interactive", "--connector", "openclaw", *args, "--no-restart"],
+                obj=self.app,
+                catch_exceptions=False,
+            )
+            self.assertEqual(res.exit_code, 0, res.output)
+
+        judge = self.app.cfg.guardrail.judge.llm
+        judge.provider, judge.instance_name, judge.model = "custom", "acme-bedrock-prod", "heavy"
+        run("--judge-provider", "anthropic", "--judge-model", "claude-sonnet-4-5")
+        judge = self.app.cfg.guardrail.judge.llm
+        self.assertEqual(judge.provider, "anthropic")
+        self.assertEqual(judge.instance_name, "")
+        run("--judge-provider", "bedrock", "--judge-instance-name", "acme-bedrock-prod", "--judge-model", "m")
+        self.assertEqual(self.app.cfg.guardrail.judge.llm.instance_name, "acme-bedrock-prod")
+        run("--judge-provider", "bedrock", "--judge-model", "m2")
+        self.assertEqual(self.app.cfg.guardrail.judge.llm.instance_name, "acme-bedrock-prod")
+
+    def test_role_with_its_own_provider_does_not_inherit_the_custom_instance(self) -> None:
+        """GAP-2379: a role override that names another provider and no
+        instance does not inherit the top-level custom instance."""
+        llm = self.app.cfg.llm
+        llm.provider, llm.instance_name, llm.model = "custom", "acme-bedrock-prod", "heavy"
+        judge = self.app.cfg.guardrail.judge.llm
+        judge.provider, judge.model, judge.instance_name = "anthropic", "claude-sonnet-4-5", ""
+        self.assertEqual(self.app.cfg.resolve_llm("guardrail.judge").instance_name, "")
+        judge.provider = "custom"
+        self.assertEqual(self.app.cfg.resolve_llm("guardrail.judge").instance_name, "acme-bedrock-prod")
+        judge.provider = ""
+        self.assertEqual(self.app.cfg.resolve_llm("guardrail.judge").instance_name, "acme-bedrock-prod")
+
+    def test_custom_provider_with_instance_is_not_an_unknown_prefix(self) -> None:
+        """GAP-2234: provider custom with a bound instance is documented and
+        must not log the unknown-provider warning; without an instance it
+        still warns, naming the llm block."""
+        _cfgmod._warned_llm_prefixes.clear()
+        with self.assertLogs(_cfgmod._log, level="WARNING") as logs:
+            _cfgmod._log.warning("sentinel")
+            _cfgmod._maybe_warn_unknown_provider("custom", "", "acme-bedrock-prod")
+            _cfgmod._maybe_warn_unknown_provider("custom", "", "")
+        joined = "\n".join(logs.output)
+        self.assertEqual(joined.count("unknown LLM provider prefix"), 1, joined)
+        self.assertIn("'custom' for llm", joined)
+        _cfgmod._warned_llm_prefixes.clear()
+        res = self.runner.invoke(
+            setup,
+            ["llm", "--non-interactive", "--provider", "custom", "--instance-name", "acme-internal", "--model", "heavy"],
+            obj=self.app,
+            catch_exceptions=False,
+        )
+        self.assertEqual(res.exit_code, 0, res.output)
+        self.assertNotIn("unknown LLM provider prefix", res.output)
+        with self.assertNoLogs(_cfgmod._log, level="WARNING"):
+            self.app.cfg.resolve_llm("")
 
     def test_role_judge_writes_to_guardrail_judge(self) -> None:
         """``setup llm --role judge`` writes to ``cfg.guardrail.judge.llm``
@@ -977,6 +1088,30 @@ class TestLocalModelListing(unittest.TestCase):
             "http://127.0.0.1:11434",
         )
 
+
+    def test_interactive_switch_from_custom_drops_the_instance(self) -> None:
+        """GAP-2379: the setup llm wizard drops the custom instance when a
+        catalog provider replaces provider custom."""
+        with tempfile.TemporaryDirectory() as data_dir:
+            cfg = _make_cfg(data_dir)
+            cfg.llm.provider = "custom"
+            cfg.llm.model = "heavy"
+            cfg.llm.instance_name = "acme-bedrock-prod"
+            with (
+                mock.patch.object(_llm_picker, "pick_provider", return_value="ollama"),
+                mock.patch.object(_llm_picker, "list_custom_instances", return_value=[]),
+                mock.patch.object(
+                    _llm_picker,
+                    "pick_local_runtime",
+                    return_value=("qwen3.5:9b-mlx", "http://127.0.0.1:11434"),
+                ),
+                mock.patch.object(_llm_picker, "summary_panel"),
+                mock.patch.object(cmd_setup.click, "prompt", side_effect=[30, 2]),
+            ):
+                cmd_setup._configure_llm(cfg, data_dir)
+
+        self.assertEqual(cfg.llm.provider, "ollama")
+        self.assertEqual(cfg.llm.instance_name, "")
 
     def test_bedrock_instance_role_is_asked_before_and_skips_the_key(self) -> None:
         with tempfile.TemporaryDirectory() as data_dir:

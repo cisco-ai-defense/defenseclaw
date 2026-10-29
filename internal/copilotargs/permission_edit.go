@@ -62,7 +62,9 @@ func permissionEditDiff(path, diff string) (string, string, bool) {
 		return "", "", false
 	}
 	diff = strings.TrimLeft(diff, "\n")
-	diff = strings.TrimSuffix(diff, "\n")
+	// Native Copilot diffs may end with more than one bare separator newline;
+	// blank content lines still carry their '+' prefix and remain intact.
+	diff = strings.TrimRight(diff, "\n")
 	lines := strings.Split(diff, "\n")
 	if len(lines) < 5 {
 		return "", "", false
@@ -76,16 +78,30 @@ func permissionEditDiff(path, diff string) (string, string, bool) {
 		return "", "", false
 	}
 	i := 1
+	created := false
+	if lines[i] == "create file mode 100644" || lines[i] == "create file mode 100755" ||
+		lines[i] == "new file mode 100644" || lines[i] == "new file mode 100755" {
+		created = true
+		i++
+	}
+	if i >= len(lines) {
+		return "", "", false
+	}
 	if strings.HasPrefix(lines[i], "index ") {
 		i++
 	}
-	if i+2 >= len(lines) || lines[i] != "--- "+aPath || lines[i+1] != "+++ "+bPath {
+	oldPath := aPath
+	if created {
+		oldPath = "a/dev/null"
+	}
+	if i+2 >= len(lines) || lines[i] != "--- "+oldPath || lines[i+1] != "+++ "+bPath {
 		return "", "", false
 	}
 	i += 2
 	var oldLines, newLines []string
 	var oldExpected, newExpected, oldSeen, newSeen int
 	seenHunk, changed := false, false
+	hunks, bodyLines := 0, 0
 	for ; i < len(lines); i++ {
 		line := lines[i]
 		if strings.HasPrefix(line, "@@ ") {
@@ -106,11 +122,13 @@ func permissionEditDiff(path, diff string) (string, string, bool) {
 				return "", "", false
 			}
 			oldSeen, newSeen, seenHunk = 0, 0, true
+			hunks++
 			continue
 		}
 		if !seenHunk {
 			return "", "", false
 		}
+		bodyLines++
 		switch {
 		case strings.HasPrefix(line, "-"):
 			oldSeen++
@@ -132,7 +150,13 @@ func permissionEditDiff(path, diff string) (string, string, bool) {
 			return "", "", false
 		}
 	}
-	if !seenHunk || !changed || oldSeen != oldExpected || newSeen != newExpected {
+	// Copilot CLI asks an edit that changes no line (an apply_patch of
+	// context lines only) with one empty "@@ -0,0 +0,0 @@" hunk. It still
+	// names its one file: it is that file's edit with no text, judged as a
+	// write to it like any edit, never an unread call (GAP-1832).
+	noChange := hunks == 1 && bodyLines == 0 && oldExpected == 0 && newExpected == 0 && !created
+	if !seenHunk || !changed && !noChange || oldSeen != oldExpected || newSeen != newExpected ||
+		created && len(oldLines) != 0 {
 		return "", "", false
 	}
 	return strings.Join(oldLines, "\n"), strings.Join(newLines, "\n"), true

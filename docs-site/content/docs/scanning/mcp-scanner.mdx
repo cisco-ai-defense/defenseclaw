@@ -61,7 +61,7 @@ Each server is scanned independently and findings are tagged with the connector 
 
 ### Before you start
 
-These `defenseclaw mcp` steps are for a per-user installation. On managed Linux and macOS, the standard user's `defenseclaw` launcher offers only `sandbox` commands. Add the server through the connector's MCP configuration so the gateway's install watcher scans it; an administrator can inspect a remote URL first with `defenseclaw-gateway scan mcp https://mcp.example.com/mcp` from a privileged prompt. Local stdio servers are scanned after their connector configuration is installed. On managed Windows, use the administrator's `defenseclaw.exe scan mcp` command for a remote URL.
+These `defenseclaw mcp` steps are for a per-user installation. On managed Linux and macOS, the standard user's `defenseclaw` launcher offers only `sandbox` commands, so users add the server through the connector's MCP configuration, for example `claude mcp add`. An administrator scans a remote server with the managed gateway: `sudo /opt/defenseclaw/bin/defenseclaw-gateway scan mcp URL` on Linux or `sudo /opt/cisco/defenseclaw/bin/defenseclaw-gateway scan mcp URL` on macOS (see [Known limits](/docs/support-matrix#managed-linux-and-macos-scans)). On managed Windows, use the administrator's `defenseclaw.exe scan mcp` command for a remote URL.
 
 - A judge: `defenseclaw setup llm` and `defenseclaw keys set DEFENSECLAW_LLM_KEY`. Without one the scan runs YARA signatures only and prints `LLM analyzer skipped`.
 - A configured connector (`defenseclaw setup <connector>`). DefenseClaw reads each connector's MCP config.
@@ -121,7 +121,9 @@ A server on the block list prints nothing and exits 2.
 defenseclaw mcp list
 ```
 
-The Verdict column reads `clean`, `warning`, `rejected` or `scan failed`. A server whose last scan failed shows `scan failed` and a next step under the table.
+The Verdict column reads `clean`, `warning`, `rejected` or `scan failed`. A server whose last scan failed shows `scan failed` and a next step under the table. A scanned server without a block or allow entry shows what admission does with its severity: `warning` where the policy only warns (the balanced default warns on HIGH), `rejected` where the policy refuses it. A block the gateway left after a failed admission scan is named as such, with `defenseclaw mcp unblock <name>` as the way to release it.
+
+A remote URL whose hostname has no DNS answer is a scan that did not finish, not a refusal of the server. The `unverified_server` setting below decides what happens then.
 
 ## Configure the scanner
 
@@ -156,7 +158,7 @@ scanners:
 
 | Key | Default | What it does |
 | --- | --- | --- |
-| `analyzers` | `[]` (auto) | The analyzers to run. `[]` means YARA, plus the LLM judge when it is ready. |
+| `analyzers` | unset, read back as `auto` | The analyzers to run. Unset (`config get` prints `auto`) and `[]` both mean YARA, plus the LLM judge when it is ready. |
 | `judge_source` | `inherit` | `inherit` uses the top-level `llm:` block. `override` uses `scanners.mcp_scanner.llm`. |
 | `llm` | empty | The scanner's own judge settings. It must be empty with `inherit` and needs a `model` with `override`. |
 | `scan_prompts`, `scan_resources`, `scan_instructions` | `false` | Also scan the server's prompts, resources and instructions on every scan. |
@@ -270,7 +272,7 @@ Until a judge works, automatic selection runs YARA alone, so the server is still
 
 DefenseClaw pins `cisco-ai-mcp-scanner` **4.3.0**, which needs Python 3.11 or newer (`defenseclaw doctor` shows `Scanner: mcp-scanner` with the installed version and warns when it differs from the pin). The package is the PyPI wheel, pinned by URL and hash in `pyproject.toml`.
 
-It stays on 4.3.0 on purpose. Later mcp-scanner releases pin LiteLLM to one exact version with a known vulnerability, CVE-2026-84377: every 4.8.x release (4.8.5 included) pins `litellm==1.93.0`, which is fixed only in 1.93.2. DefenseClaw requires LiteLLM 1.91.5 or newer on the 1.91 line, and 4.3.0 is the newest mcp-scanner whose metadata allows it. DefenseClaw moves to 4.8.x when upstream publishes a release that relaxes the LiteLLM pin. Do not upgrade the scanner or LiteLLM by hand; the [supported repair path](/docs/get-started/download) restores the pinned set. The skill scanner has its own pin, above.
+It stays on 4.3.0 on purpose. Later mcp-scanner releases pin LiteLLM to one exact version with a known vulnerability, CVE-2026-84377: every 4.8.x release (4.8.5 included) pins `litellm==1.93.0`, which is fixed only in 1.93.2. DefenseClaw requires LiteLLM 1.103.10 or newer on the 1.103 line, and 4.3.0 is the newest mcp-scanner whose metadata allows it. DefenseClaw moves to 4.8.x when upstream publishes a release that relaxes the LiteLLM pin. Do not upgrade the scanner or LiteLLM by hand; the [supported repair path](/docs/get-started/download) restores the pinned set. The skill scanner has its own pin, above.
 
 ## Continuous protection
 
@@ -428,12 +430,9 @@ Scanner processes run under the gateway's process-tree supervisor. How it ends t
 
 ## Availability and recovery
 
-`cisco-ai-mcp-scanner` is declared only when the runtime interpreter is Python
-3.11 or newer. DefenseClaw itself also supports Python 3.10, so a Python 3.10
-runtime—including a POSIX release install on a host where 3.10 is the selected
-interpreter—legitimately omits MCP scanning, and `defenseclaw doctor` reports
-`skill and MCP scanning need Python 3.11+`. Use Python 3.11 or newer when this
-feature is required.
+`cisco-ai-mcp-scanner` is declared for Python 3.11 and newer. DefenseClaw
+itself needs Python 3.11 to 3.13 (the package refuses Python 3.10), so every
+supported runtime includes MCP scanning.
 
 On Python 3.11 or newer, an absent SDK means the environment is incomplete. Do
 not patch a managed virtual environment with `pip`; use the

@@ -13,6 +13,8 @@ keywords:
 
 The current schema is `config_version: 9`. `defenseclaw config reference --format json-schema` prints the schema of every section with allowed values, and `defenseclaw config validate` checks a file. A version 8 file (written by 0.8.5 to 0.8.10) is migrated in memory when the gateway loads it; see [Migrate to config version 9](/docs/reference/migrate-v9).
 
+A refusal of an enumerated key lists only the values you can type: `guardrail.hook_fail_mode` lists `open` and `closed`, not an empty entry. `guardrail.connector` and `claw.mode` take the spellings `claude-code` and `claude_code`, in any letter case, and are read as `claudecode`. Words in the OpenShell settings (for example `enterprise.openshell.install`) mean the same in any letter case. On a managed standalone Linux or macOS host, `defenseclaw-gateway config validate` refuses a required sandbox pack that `ensure` refuses.
+
 <Callout title="Windows layouts depend on the installer">
 The Windows Setup package uses an embedded runtime and `defenseclaw-hook.exe`, without a `.venv`. The supported per-user `install.ps1` route manages a private `.venv` and generates hook scripts under the data home. See [Windows paths](/docs/get-started/windows/paths-troubleshooting) before locating or editing Windows state.
 </Callout>
@@ -72,7 +74,7 @@ The trees below describe the per-user shell installers, including native Windows
   </Folder>
 </Files>
 
-`config.yaml`, `config.generation.json`, `audit.db` and `device.key` are created by `defenseclaw init` or `quickstart`, and the hook scripts by setting up an agent. Only `config.yaml` is policy; the hook scripts are derived from it. `installer/` is the installer that performed the current install (`defenseclaw rollback` uses it); its `binaries.sha256` lists the SHA-256 of each installed binary as it runs (`cd ~/.local/bin && shasum -a 256 -c ~/.defenseclaw/installer/binaries.sha256`). On macOS these differ from the binaries in the release archive, which the installer checks against `checksums.txt` and then signs ad hoc for this Mac. `previous/` is the install the last upgrade replaced. On Linux, `~/.local/bin` also holds `defenseclaw-sensor-helper` for the opt-in sandbox kernel feed. When the installer installs `uv` for you, `uv` and `uvx` are in `~/.local/bin` too.
+`config.yaml`, `config.generation.json`, `audit.db` and `device.key` are created by `defenseclaw init` or `quickstart`, and the hook scripts by setting up an agent. Only `config.yaml` is policy; the hook scripts are derived from it. `installer/` is the installer that performed the current install (`defenseclaw rollback` uses it); on macOS and Linux its `binaries.sha256` lists the SHA-256 of each installed binary as it runs (`cd ~/.local/bin && shasum -a 256 -c ~/.defenseclaw/installer/binaries.sha256`); on Windows `installer\` holds only `install.ps1`. On macOS these differ from the binaries in the release archive, which the installer checks against `checksums.txt` and then signs ad hoc for this Mac. `previous/` is the install the last upgrade replaced. On Linux, `~/.local/bin` also holds `defenseclaw-sensor-helper` for the opt-in sandbox kernel feed. When the installer installs `uv` for you, `uv` and `uvx` are in `~/.local/bin` too.
 
 On macOS and Linux the installer does not change `PATH`. If `~/.local/bin` is not on it, the installer prints the line to add to your shell profile.
 
@@ -441,7 +443,7 @@ Defaults from the loader. Omitted keys take these values.
 
 | Key | Default | What it does |
 | --- | --- | --- |
-| `data_dir` | `~/.defenseclaw` | The data directory. `DEFENSECLAW_HOME` relocates it. Restart required. |
+| `data_dir` | `~/.defenseclaw` | The data directory. `DEFENSECLAW_HOME` relocates it. Restart required. `defenseclaw config set data_dir` seeds the rule packs and Rego policies under the new directory (packs already there are kept), and the CLI resolves the omitted paths below under it as the gateway does. |
 | `audit_db`, `judge_bodies_db` | `<data_dir>/audit.db`, `<data_dir>/judge_bodies.db` | The audit store and the retained judge bodies. |
 | `quarantine_dir`, `plugin_dir`, `policy_dir` | `<data_dir>/quarantine`, `plugins`, `policies` | Quarantined files, connector plugins, policy assets. |
 | `environment` | detected (`macos`, `windows`, `linux`, ...) | Stamped on every record. Restart required. |
@@ -449,7 +451,7 @@ Defaults from the loader. Omitted keys take these values.
 | `deployment_mode` | empty | `managed_enterprise` on a managed device. Restart required. |
 | `claw.mode` | `openclaw` | The primary connector. With several active it names the first; the OTel attribute `defenseclaw.claw.mode` is set only while a single connector is active. |
 | `claw.home_dir`, `claw.config_file` | `~/.openclaw`, `~/.openclaw/openclaw.json` | Where the OpenClaw install is looked up. |
-| `claw.workspace_dir` | empty | Set by `setup <connector> --workspace`; scopes hooks to one folder ([Per-connector files](#per-connector-files)). |
+| `claw.workspace_dir` | empty | Set by `setup <connector> --workspace` or `config set`; scopes hooks to one folder, and setup without `--workspace` keeps it ([Per-connector files](#per-connector-files)). |
 | `gateway.host`, `gateway.port` | `127.0.0.1`, `18789` | The upstream agent gateway (OpenClaw and ZeptoClaw fleet link). |
 | `gateway.fleet_mode` | `auto` | `auto`, `enabled` or `disabled`: when to dial `host:port` ([OpenClaw fleet link](#openclaw-fleet-link)). |
 | `gateway.token_env` | `DEFENSECLAW_GATEWAY_TOKEN` | The variable that holds the sidecar API token ([Keys](/docs/reference/keys)). |
@@ -543,12 +545,14 @@ defenseclaw config get guardrail.block_at --effective
 ```
 
 ```text
-HIGH
 (source: config:guardrail.block_at)
+HIGH
 ```
 
-When nothing sets the threshold, the same command prints the pack's level and
-names the pack, for example `(source: pack-default:default)`.
+The source line comes first and goes to standard error, so `$(...)` or a pipe
+gets only the value. When nothing sets the threshold, the same command prints
+the pack's level and names the pack, for example
+`(source: pack-default:default)`.
 
 ### Admission
 
@@ -990,7 +994,7 @@ llm_providers:
   ollama_ports: [11434]
 ```
 
-An entry carries only the sub-block (`bedrock`, `vertex` or `azure`) matching its `base_provider_type`; `defenseclaw doctor` warns about family mismatches and unknown `auth_mode` values. Auth modes are the same as on `setup llm` (`api_key` / `iam_credentials` / `profile` / `instance_role` for Bedrock; `service_account` / `adc` / `workload_identity` for Vertex; `api_key` / `managed_identity` for Azure). Other keys an entry accepts are `profile_id` (an OpenClaw auth-profile ID) and `extra_headers`. `ollama_ports` lists extra loopback ports to treat as Ollama.
+An entry carries only the sub-block (`bedrock`, `vertex` or `azure`) matching its `base_provider_type`. An unknown `auth_mode` makes the file invalid: `defenseclaw config validate` exits `1` naming the field and the allowed values (for example `llm_providers.custom[0].bedrock.auth_mode is "bogus_mode"; allowed values: api_key, iam_credentials, profile, instance_role.`), `defenseclaw doctor` shows it as a failed **Config validation** row, and the gateway does not load the file (a reload or start fails and a running gateway keeps its previous configuration). A sub-block from another family is accepted and ignored; once a config write has rendered `custom-providers.json`, `defenseclaw doctor` warns about it in the **Custom-provider overlay** row (`overlay sub-block family does not match base_provider_type`). Auth modes are the same as on `setup llm` (`api_key` / `iam_credentials` / `profile` / `instance_role` for Bedrock; `service_account` / `adc` / `workload_identity` for Vertex; `api_key` / `managed_identity` for Azure). Other keys an entry accepts are `profile_id` (an OpenClaw auth-profile ID) and `extra_headers`. `ollama_ports` lists extra loopback ports to treat as Ollama.
 
 The `domains` array drives the gateway's URL → instance lookup: when an inbound request URL (set on `X-DC-Target-URL` by fetch-interceptor agents, or recorded in the connector snapshot for native binaries) matches one of the listed hosts, the resolver applies this entry's TLS, `base_url` and sub-block posture. An entry that declares `base_url` should also list the matching host in `domains`.
 
@@ -1006,7 +1010,7 @@ There is no `DEFENSECLAW_GATEWAY_BIND`, `DEFENSECLAW_DATA_DIR` or `DEFENSECLAW_L
 
 ## Per-connector files
 
-`defenseclaw setup <connector>` writes these agent-side files from `config.yaml`. They are derived: change the setting in `config.yaml`, not the file. Hook scripts under `~/.defenseclaw/hooks/` carry a `# defenseclaw-derived:` header, and doctor warns `stale generated script` when one no longer matches, naming the command that regenerates it.
+`defenseclaw setup <connector>` writes these agent-side files from `config.yaml`. They are derived: change the setting in `config.yaml`, not the file. Hook scripts under `~/.defenseclaw/hooks/` carry a `# defenseclaw-derived:` header. Doctor warns `stale generated script` when a script is from an older build or bakes a different fail mode, naming the command that regenerates it. A script edited by hand, or copied from another build, fails the `Hook runtime files` row (`changed since setup`) and its freshness row warns `a generated script is not the one setup rendered`; `defenseclaw doctor --fix` renders it again.
 
 | Connector | File DefenseClaw mutates |
 | --- | --- |
@@ -1018,14 +1022,14 @@ There is no `DEFENSECLAW_GATEWAY_BIND`, `DEFENSECLAW_DATA_DIR` or `DEFENSECLAW_L
 | Devin (Devin CLI and Devin Desktop's Devin Local) | `~/.config/devin/config.json` or `<workspace>/.devin/hooks.v1.json` |
 | GitHub Copilot CLI | `~/.copilot/hooks/defenseclaw.json` by default; `<workspace>/.github/hooks/defenseclaw.json` with `--workspace` |
 | Antigravity | `~/.gemini/config/hooks.json`; Google documents no configuration-home environment override, and DefenseClaw owns only this global registration. Antigravity also discovers `<workspace>/.agents/hooks.json`, which DefenseClaw does not patch to avoid duplicate ownership. |
-| Hermes | `~/.hermes/config.yaml` |
+| Hermes | `~/.hermes/config.yaml` on macOS/Linux or `%LOCALAPPDATA%\hermes\config.yaml` on native Windows (`$HERMES_HOME/config.yaml` when `HERMES_HOME` is set) |
 | Kiro | `~/.kiro/hooks/defenseclaw.json` (Kiro IDE and `kiro-cli --v3`), `~/.kiro/agents/defenseclaw.json` (Kiro CLI 2.x) and `~/.kiro/settings/cli.json`; a workspace copy under `<workspace>/.kiro/hooks/` with `--workspace` |
 | OpenCode | `~/.config/opencode/plugins/defenseclaw.js` (managed bridge plugin — written whole, not patched; removed on teardown) |
 | Amp | `~/.config/amp/plugins/defenseclaw.ts` on macOS/Linux or `%USERPROFILE%\.config\amp\plugins\defenseclaw.ts` on native Windows (managed system policy plugin) |
 
 Before the first mutation, a backup record is stored at `~/.defenseclaw/connector_backups/<connector>/<logical-name>.json`. It binds the connector, logical name and absolute target path, and holds the pristine bytes, permissions, pristine hash and post-setup hash. Teardown (or `--disable`) restores the pristine bytes only when the current file still matches the recorded identity; if it drifted, teardown removes only DefenseClaw-owned entries and keeps unrelated edits.
 
-Hook connectors default to global scope. `claw.workspace_dir` is empty unless you pass `--workspace`; GitHub Copilot CLI then uses it for `.github/hooks/defenseclaw.json` and workspace-local component discovery. Re-run `defenseclaw setup <connector>` without `--workspace` to return to global scope. The workspace is one value for the whole install, so `setup <connector> --workspace` refuses while other connectors are configured; use `defenseclaw setup guardrail --workspace <dir>` to scope every connector to one folder.
+Hook connectors default to global scope. `claw.workspace_dir` is empty unless you pass `--workspace` or set it with `config set`; GitHub Copilot CLI then uses it for `.github/hooks/defenseclaw.json` and workspace-local component discovery. Setup without `--workspace` keeps a pin that is still a folder (it clears one that is not, with a warning). To return to global scope, run `defenseclaw config unset claw.workspace_dir`, then `defenseclaw setup <connector>` again. The workspace is one value for the whole install, so `setup <connector> --workspace` refuses while other connectors are configured; use `defenseclaw setup guardrail --workspace <dir>` to scope every connector to one folder.
 
 Every hook setup writes the resolved path contract to `~/.defenseclaw/hook_contract_lock.json`. Its `locations` block records the pinned workspace, hook config file, generated script, and the MCP, skills, rules, plugins and agents surfaces DefenseClaw scans. `defenseclaw doctor` compares the lock against the files the active SDK can load.
 

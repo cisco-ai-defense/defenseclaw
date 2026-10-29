@@ -236,6 +236,15 @@ func atomicTransformFileV2Locked(
 		if snapshot.exists && !result.Remove && !semanticNoop && snapshot.canonicalEAMetadataDigest == "" {
 			return fmt.Errorf("existing config contains unsupported kernel extended attributes; original config was not replaced")
 		}
+		if semanticNoop {
+			// Nothing is replaced, so nothing can inherit the existing
+			// protection: a SYSTEM cleanup that finds nothing to remove
+			// leaves the enrolled user's file and its DACL as found
+			// (GAP-2096: it turned the inherited DACL of every profile's
+			// .claude\settings.json into a protected private one, dropping
+			// the gateway's inherited inventory read).
+			return nil
+		}
 		convergeProtection := !options.preserveExistingProtection
 		if options.expectedOwner != nil && !convergeProtection {
 			currentSID, sidErr := windowsEffectiveUserSID()
@@ -258,9 +267,6 @@ func atomicTransformFileV2Locked(
 				// protection rather than the unsafe predecessor.
 				continue
 			}
-		}
-		if semanticNoop {
-			return nil
 		}
 
 		txn, err := beginAtomicTransformV2(inputPath, path, stateDir, snapshot, result, writePerm, options)

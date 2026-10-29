@@ -223,6 +223,20 @@ func TestPluginListenerProofKeepsTheCredentialFromAnImpostor(t *testing.T) {
 	}
 }
 
+// Per-user setup places the scoped token in the runtime's hooks directory.
+// That baked path also anchors the native helper lookup.
+func writePerUserPluginPeerTokenForTest(t *testing.T, root, connector, credential string) string {
+	t.Helper()
+	path := filepath.Join(root, ".defenseclaw", "hooks", ".hook-"+connector+".token")
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(credential+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
 // The per-user plugin must consult the native account check before posting a
 // bearer or an event. A stopped gateway lets a peer bind the same port; a
 // failed check must keep that peer from seeing either value.
@@ -246,10 +260,8 @@ func TestPerUserPluginsCheckPeerBeforeSending(t *testing.T) {
 			if err := os.WriteFile(binary, []byte("#!/bin/sh\nprintf '%s\\n' \"$*\" > \"$DC_PEER_MARKER\"\nexit 1\n"), 0o700); err != nil {
 				t.Fatal(err)
 			}
-			tokenPath := filepath.Join(root, ".hook-"+tc.connector+".token")
-			if err := os.WriteFile(tokenPath, []byte(credential+"\n"), 0o600); err != nil {
-				t.Fatal(err)
-			}
+			tokenPath := writePerUserPluginPeerTokenForTest(t, root, tc.connector, credential)
+			recordGatewayHelperForTest(t, filepath.Dir(tokenPath), binary)
 			recorder := &listenerProofRecorder{}
 			impostor := newImpostorListener(t, recorder)
 			addr := strings.TrimPrefix(impostor.URL, "http://")
@@ -279,7 +291,7 @@ func TestPerUserPluginsCheckPeerBeforeSending(t *testing.T) {
 				t.Fatalf("unproven peer received a request: %+v", got)
 			}
 			if data, err := os.ReadFile(marker); err != nil || string(data) != "hook-post --api-addr "+addr+"\n" {
-				t.Fatalf("native post was not invoked for %s: %q, %v", addr, data, err)
+				t.Fatalf("native post was not invoked for %s: %q, %v; plugin output=%q", addr, data, err, output)
 			}
 			openPlugin := filepath.Join(testenv.PrivateTempDir(t), name)
 			openBody := renderPluginAssetForTest(t, tc.asset, templateData{
@@ -324,10 +336,7 @@ func TestPerUserPluginsDoNotPostAfterTheCheckedListenerChanges(t *testing.T) {
 			if err := os.WriteFile(binary, []byte("#!/bin/sh\n[ \"$1\" = hook-verify-peer ] && exit 0\nexit 1\n"), 0o700); err != nil {
 				t.Fatal(err)
 			}
-			tokenPath := filepath.Join(root, ".hook-"+tc.connector+".token")
-			if err := os.WriteFile(tokenPath, []byte(strings.Repeat("a", 64)+"\n"), 0o600); err != nil {
-				t.Fatal(err)
-			}
+			tokenPath := writePerUserPluginPeerTokenForTest(t, root, tc.connector, strings.Repeat("a", 64))
 			recorder := &listenerProofRecorder{}
 			peer := newImpostorListener(t, recorder)
 			addr := strings.TrimPrefix(peer.URL, "http://")
@@ -386,10 +395,7 @@ func TestPerUserPluginsRejectSymlinkedNativePostBinary(t *testing.T) {
 				t.Fatal(err)
 			}
 			credential := strings.Repeat("a", 64)
-			tokenPath := filepath.Join(root, ".hook-"+tc.connector+".token")
-			if err := os.WriteFile(tokenPath, []byte(credential+"\n"), 0o600); err != nil {
-				t.Fatal(err)
-			}
+			tokenPath := writePerUserPluginPeerTokenForTest(t, root, tc.connector, credential)
 			harness, name := openCodeListenerProofHarness, "opencode-plugin.mjs"
 			if tc.connector == "amp" {
 				harness, name = ampListenerProofHarness, "amp-plugin.mts"

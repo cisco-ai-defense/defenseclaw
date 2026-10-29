@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -31,6 +32,11 @@ func withPrivateInstallWalkBound(t *testing.T, bound int) {
 // not finish says so; it never reports the account clean.
 func TestDiscoverUnixPrivateInstallsFindCopiesAtAnyDepth(t *testing.T) {
 	old := func(t *testing.T, dir string) { npmCopy(t, dir, "@anthropic-ai/claude-code", "2.0.77", "cli.js") }
+	// pnpm keeps its dlx installs in the platform's cache folder.
+	dlxCache := ".cache"
+	if runtime.GOOS == "darwin" {
+		dlxCache = "Library/Caches"
+	}
 	cases := []struct {
 		name  string
 		bound int
@@ -101,6 +107,32 @@ func TestDiscoverUnixPrivateInstallsFindCopiesAtAnyDepth(t *testing.T) {
 				old(t, claudePackage(filepath.Join(home, "src", "proj"), false))
 			},
 			want: []string{"claudecode 2.0.77 /src/proj/node_modules/@anthropic-ai/claude-code"},
+		},
+		{
+			name:  "tool caches, package stores and .git folders do not use the bound",
+			bound: 64,
+			build: func(t *testing.T, home string) {
+				trees := []string{".cache/uv", "go/pkg/mod", ".rustup/toolchains", ".npm/_cacache", "src/proj/.git/objects"}
+				if runtime.GOOS == "darwin" {
+					trees = append(trees, "Library/Caches/Homebrew", "Library/Developer/Xcode", "library/caches/Yarn")
+				}
+				for _, tree := range trees {
+					for i := 0; i < 80; i++ {
+						if err := os.MkdirAll(filepath.Join(home, filepath.FromSlash(tree), fmt.Sprintf("d%02d", i)), 0o755); err != nil {
+							t.Fatal(err)
+						}
+					}
+				}
+				old(t, claudePackage(filepath.Join(home, "src", "proj"), false))
+			},
+			want: []string{"claudecode 2.0.77 /src/proj/node_modules/@anthropic-ai/claude-code"},
+		},
+		{
+			name: "pnpm dlx copies in the cache folder are still found",
+			build: func(t *testing.T, home string) {
+				npmCopy(t, filepath.Join(home, filepath.FromSlash(dlxCache), "pnpm", "dlx", "abc123", "1761500000-42", "node_modules", "@openai", "codex"), "@openai/codex", "0.0.1", "bin/codex.js")
+			},
+			want: []string{"codex 0.0.1 /" + dlxCache + "/pnpm/dlx/abc123/1761500000-42/node_modules/@openai/codex"},
 		},
 		{
 			name:  "a home over the walk bound is incomplete, and what was found is kept",

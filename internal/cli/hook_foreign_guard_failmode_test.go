@@ -197,6 +197,11 @@ func TestForeignHookCheckDeniesAGuardedConnectorDuringAGatewayOutage(t *testing.
 		if !result.Deny || !strings.Contains(result.Reason, hookexec.ManagedGatewayNotRunningReason) {
 			t.Fatalf("%s: a stopped gateway must deny with the not-running reason: %+v", connector, result)
 		}
+		// Loop round 2 review of 06bb83dd (GAP-1180): the plugins retry their
+		// load-time check only on this structured flag, never on reason text.
+		if !result.Retryable {
+			t.Fatalf("%s: a stopped gateway with a clean scan must be a retryable denial: %+v", connector, result)
+		}
 		if connector == "hermes" {
 			if result.HookOutput == nil || result.HookOutput.Action != "block" || !strings.HasSuffix(result.HookOutput.Message, "("+hookexec.ManagedGatewayNotRunningReason+")") {
 				t.Fatalf("hermes: the outage denial must carry the Hermes block object: %+v", result.HookOutput)
@@ -223,6 +228,44 @@ func TestForeignHookCheckDeniesAGuardedConnectorDuringAGatewayOutage(t *testing.
 		}
 		if result, raw := check(t, connector, event); result.Deny || raw != `{"deny":false}` || exchanged != 0 {
 			t.Fatalf("%s: a host without the standalone summary must allow without an exchange: %q (%d)", connector, raw, exchanged)
+		}
+	}
+}
+
+// GAP-2405: when the guard's session exchange fails because the hook socket
+// directory is not owned by root or the gateway account, the standalone
+// Hermes hook (and the plugins) say so, in the words of the managed shell
+// hooks, not that the gateway was unavailable.
+func TestForeignHookCheckNamesAnUntrustedHookSocketDirectory(t *testing.T) {
+	untrusted := fmt.Errorf("enterprise managed gateway peer unverified: %w: hook socket directory /opt/cisco/defenseclaw/run is not owned by root or the gateway service account", hookexec.ErrManagedHookSocketDirectoryUntrusted)
+	connectors := map[string]string{"opencode": "tool.execute.before"}
+	if runtime.GOOS != "windows" {
+		connectors["hermes"] = "pre_tool_call"
+	}
+	for connector, event := range connectors {
+		fixture := newPortableForeignGuardFixture(t, config.ForeignHooksRemove)
+		fixture.guard(connector)
+		fixture.process = "agent-process"
+		hookForeignGuardExchange = func(string, string, time.Time, time.Time, enterprisepolicy.SessionExchange) (enterprisepolicy.GuardDecision, error) {
+			return enterprisepolicy.GuardDecision{}, untrusted
+		}
+		var out bytes.Buffer
+		if code := runForeignHookCheck(connector, strings.NewReader(`{"hook_event_name":"`+event+`","session_id":"s-1"}`), &out); code != 0 {
+			t.Fatalf("%s: the check always exits 0, got %d", connector, code)
+		}
+		var result foreignHookCheckResult
+		if err := json.Unmarshal(out.Bytes(), &result); err != nil {
+			t.Fatalf("%s: %v: %q", connector, err, out.String())
+		}
+		const named = "hook socket directory is not owned by root or the gateway account"
+		if !result.Deny || !strings.Contains(result.Reason, named) || strings.Contains(result.Reason, "hook record") {
+			t.Fatalf("%s: an untrusted socket directory must deny and name it: %+v", connector, result)
+		}
+		if connector == "hermes" {
+			if result.HookOutput == nil || result.HookOutput.Action != "block" || !strings.Contains(result.HookOutput.Message, named) ||
+				strings.Contains(result.HookOutput.Message, hookexec.ManagedHookSocketDirectoryUntrustedReason) {
+				t.Fatalf("hermes: the block object must name the directory: %+v", result.HookOutput)
+			}
 		}
 	}
 }

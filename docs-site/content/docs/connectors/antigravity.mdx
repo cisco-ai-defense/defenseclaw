@@ -14,6 +14,7 @@ DefenseClaw registers five hook handlers in Antigravity's global `hooks.json`. T
 
 Google's [install page](https://antigravity.google/docs/cli/install) documents native `agy` clients for Windows, macOS and Linux, and its [CLI releases](https://github.com/google-antigravity/antigravity-cli/releases) list the current version. DefenseClaw's hook contract covers `agy` `>=1.1.8` ([compatibility](/docs/connectors/compatibility)).
 
+On a per-user install, an explicitly saved `guardrail.hook_fail_mode` takes precedence over the selected tier. See the [gateway outage table](/docs/connectors/capability-matrix#gateway-outage) and [Fail modes](/docs/reference/fail-modes).
 ## Platform support
 
 <ConnectorSupport id="antigravity" />
@@ -41,7 +42,7 @@ defenseclaw setup antigravity                 # first setup defaults to observe
 defenseclaw setup antigravity --mode action   # deny or ask at PreToolUse
 ```
 
-A re-run without `--mode` keeps the current mode. On Windows, run the same commands in PowerShell. Sign-in still goes through Windows Credential Manager or Google's browser flow.
+A re-run without `--mode` keeps the current mode. On a terminal setup still asks for the mode, with the current one as the default (Enter keeps it), and whether to re-apply the hooks; in action mode it also asks whether to add the LLM judge. `--yes` skips the questions ([the questions setup asks](/docs/guardrail/switching-connectors#the-questions-setup-asks)). On Windows, run the same commands in PowerShell. Sign-in still goes through Windows Credential Manager or Google's browser flow.
 
 ### Check it
 
@@ -72,11 +73,11 @@ Setup backs up `hooks.json` and keeps unrelated hooks. It writes only the global
 
 - In action mode `PreToolUse` can deny a tool call or ask you first, using Antigravity's own `decision` field. The ask always prompts, even when you chose "Always Allow" before.
 - `PreInvocation` and `PostInvocation` can only add context. `PostToolUse` only observes. `Stop` is always allowed.
-- Observe mode records policy findings without blocking on those findings. By default the running hook denies `PreToolUse` when the gateway is unreachable ([gateway outage table](/docs/connectors/capability-matrix#gateway-outage)).
+- Observe mode records policy findings without blocking on those findings. With no saved mode, when the gateway is not running, the default and permissive policies let the call run with one warning and strict denies `PreToolUse`; every other hook failure denies it ([gateway outage table](/docs/connectors/capability-matrix#gateway-outage)).
 
 ### Verdict mapping
 
-`observe` records policy findings without blocking on those findings. With the default fail mode `closed`, when the gateway is unreachable the running hook denies `PreToolUse`. `action` may deny or ask on policy findings only at `PreToolUse`. The [official hooks documentation](https://antigravity.google/docs/hooks) defines `PreToolUse` as a synchronous pre-execution hook whose stdout carries one of `allow`, `deny`, `ask` or `force_ask` in `decision`. DefenseClaw sends `{ "decision": "deny", "reason": "policy denied" }` for a hard block and `{ "decision": "force_ask", "reason": "operator confirmation required" }` for native confirmation. This synchronous `PreToolUse` decision is the only hard-blocking claim for the connector.
+`observe` records policy findings without blocking on those findings. When the gateway is not running, a per-user install in the default or permissive policy lets `PreToolUse` run with one warning, and the strict policy and a managed install in the default fail mode `closed` deny it ([gateway outage table](/docs/connectors/capability-matrix#gateway-outage)). `action` may deny or ask on policy findings only at `PreToolUse`. The [official hooks documentation](https://antigravity.google/docs/hooks) defines `PreToolUse` as a synchronous pre-execution hook whose stdout carries one of `allow`, `deny`, `ask` or `force_ask` in `decision`. DefenseClaw sends `{ "decision": "deny", "reason": "policy denied" }` for a hard block and `{ "decision": "force_ask", "reason": "operator confirmation required" }` for native confirmation. This synchronous `PreToolUse` decision is the only hard-blocking claim for the connector.
 
 ### Native ask
 
@@ -84,7 +85,7 @@ Only `PreToolUse` supports native ask. DefenseClaw sends `force_ask`, which alwa
 
 ### Fail mode
 
-Antigravity does not document non-zero hook exit status as enforcement, so DefenseClaw does not advertise connector-wide fail-closed support. In fail mode `closed`, the default, a gateway, authentication or decoding failure denies `PreToolUse` with `decision: "deny"`; with `open` it gets the event's no-op answer. Antigravity itself may run a call when the hook times out or cannot start. A T7 stopped-hook drill blocked in its tested build, but that is not a vendor timeout-deny contract. Standalone status and verify warn `hook_process_fail_open` and set `security_complete: false` while Antigravity is enabled. Under Secure Client the hook stays open. Other events keep their documented non-blocking shapes. DefenseClaw does not claim it can override Antigravity's own permission bypass.
+Antigravity does not document non-zero hook exit status as enforcement, so DefenseClaw does not advertise connector-wide fail-closed support. A gateway that is not running follows the policy tier on a per-user install, as above. Every other failure, an authentication or decoding failure or an unusable answer, denies `PreToolUse` with `decision: "deny"`. On a managed host the administrator's fail mode decides an outage: `closed`, the default, denies it, and `open` gives the event's no-op answer. Antigravity itself may run a call when the hook times out or cannot start. A T7 stopped-hook drill blocked in its tested build, but that is not a vendor timeout-deny contract. Standalone status and verify warn `hook_process_fail_open` and set `security_complete: false` while Antigravity is enabled. Under Secure Client the hook stays open. Other events keep their documented non-blocking shapes. DefenseClaw does not claim it can override Antigravity's own permission bypass.
 
 ## Official lifecycle schema
 
@@ -109,7 +110,9 @@ DefenseClaw's hook contract covers `agy` `>=1.1.8`. Google's [changelog](https:/
 
 ### Hook schema
 
-All handlers are synchronous with a 30-second timeout. The event name is not in Antigravity's stdin, so DefenseClaw binds each registration to a trusted `--event` argument and forwards it to the gateway in a local header, without rewriting the stdin captured for audit.
+All handlers are synchronous with a 30-second timeout. The event name is not in Antigravity's stdin, so DefenseClaw binds each registration to a trusted event argument (on Linux and macOS a positional argument, `antigravity-hook.sh PreToolUse`; on Windows the native hook's `--event`) and forwards it to the gateway in a local header, without rewriting the stdin captured for audit.
+
+A registration that lost its event argument (an older or hand-edited `hooks.json`) cannot be sent to the gateway, which requires the event. On a per-user install in the default or permissive policy the call runs with a warning and a `hook-failures.jsonl` row; the strict policy, the install window and a managed install deny it. Either way the fix is `defenseclaw setup antigravity`, and a running gateway rewrites the registration on its own.
 
 | Event | Registration shape | Stdin beyond common metadata | DefenseClaw stdout |
 | --- | --- | --- | --- |
@@ -173,11 +176,11 @@ DefenseClaw builds an Antigravity overlay image. Nothing on your host changes.
 
 ## Limits
 
-- Only the synchronous `PreToolUse` decision is a hard block. Antigravity does not document a non-zero hook exit as enforcement, so there is no connector-wide fail-closed. In fail mode `closed`, the default, a gateway failure denies `PreToolUse`; Antigravity itself still runs a call when the hook times out or cannot start.
+- Only the synchronous `PreToolUse` decision is a hard block. Antigravity does not document a non-zero hook exit as enforcement, so there is no connector-wide fail-closed. See the [gateway outage table](/docs/connectors/capability-matrix#gateway-outage) for per-user and managed outage behavior. Every other gateway failure denies `PreToolUse`. Antigravity itself still runs a call when the hook times out or cannot start.
 - DefenseClaw cannot override Antigravity's own permission bypass.
 - Windows ARM64 is not supported.
 - Enterprise, managed, Team, ProgramData, cloud-dashboard, MDM and organization policy surfaces are outside this connector and unverified.
-- Antigravity can run a tool when its pre-tool hook times out or cannot start, even in fail mode `closed`. This is an Antigravity limit. See [Known limits in 1.0.4](/docs/support-matrix#antigravity).
+- Antigravity can run a tool when its pre-tool hook times out or cannot start, even in fail mode `closed`. This is an Antigravity limit. See [Known limits](/docs/support-matrix#antigravity).
 
 ## Disable
 
@@ -188,5 +191,7 @@ defenseclaw guardrail disable --yes
 ```
 
 With the default gateway restart, disabling removes DefenseClaw's hook registrations from Antigravity's global file and preserves your other Antigravity settings. `defenseclaw guardrail enable` restores DefenseClaw's hooks. To remove the connector, run `defenseclaw setup remove antigravity --yes` (add `--force` if it is the last one).
+
+`guardrail disable` and `setup remove antigravity` also remove `~/.defenseclaw/hooks/antigravity-hook.sh`. A running Antigravity that still calls that path cannot start the hook, gets no decision and runs the call; restart Antigravity to stop those calls.
 
 On a multi-connector install, add `--connector antigravity` to `guardrail disable` and `guardrail enable` to change only this agent.

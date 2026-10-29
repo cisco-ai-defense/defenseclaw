@@ -60,6 +60,41 @@ func oldHookFailMode(t *testing.T, home, connector string) string {
 	return state.FailModes[connector]
 }
 
+func TestRefreshFailModesUsesConfiguredDataDirectoryWithoutInstallerOverride(t *testing.T) {
+	home := t.TempDir()
+	dataDir := t.TempDir()
+	isolateHookEnvForTest(t, home)
+	configPath := filepath.Join(home, "config.yaml")
+	configBody := "config_version: 9\ndata_dir: " + dataDir + "\nobservability: {}\nguardrail:\n  mode: action\n  rule_pack: strict\n"
+	if err := os.WriteFile(configPath, []byte(configBody), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	writeHookSidecarForTest(t, home, `{"version":2,"gateway_addr":"127.0.0.1:18970","fail_modes":{"codex":"open"}}`)
+	writeHookSidecarForTest(t, dataDir, `{"version":2,"gateway_addr":"127.0.0.1:18970","fail_modes":{"codex":"open"}}`)
+	previousCfg, previousDir, previousJSON := cfg, connectorFlagDataDir, connectorFlagJSON
+	t.Cleanup(func() { cfg, connectorFlagDataDir, connectorFlagJSON = previousCfg, previousDir, previousJSON })
+	connectorFlagDataDir, connectorFlagJSON = "", true
+	var out bytes.Buffer
+	connectorRefreshFailModesCmd.SetOut(&out)
+	t.Cleanup(func() { connectorRefreshFailModesCmd.SetOut(nil) })
+	if err := runConnectorRefreshFailModes(connectorRefreshFailModesCmd, nil); err != nil {
+		t.Fatal(err)
+	}
+	var result refreshFailModesResult
+	if err := json.Unmarshal(out.Bytes(), &result); err != nil {
+		t.Fatalf("refresh output %q: %v", out.String(), err)
+	}
+	if result.Config != "loaded" || !reflect.DeepEqual(result.Refreshed, []string{"codex"}) {
+		t.Fatalf("refresh %+v", result)
+	}
+	if got := oldHookFailMode(t, dataDir, "codex"); got != "closed" {
+		t.Fatalf("configured data dir hook mode = %q, want closed", got)
+	}
+	if got := oldHookFailMode(t, home, "codex"); got != "open" {
+		t.Fatalf("default home hook mode = %q, want untouched open", got)
+	}
+}
+
 func isolateHookEnvForTest(t *testing.T, home string) {
 	t.Helper()
 	t.Setenv("DEFENSECLAW_HOME", home)
@@ -126,16 +161,17 @@ func TestRefreshFailModesClosesAnExternalConfigsOpen(t *testing.T) {
 // (lowered because its vendor hook surface cannot fail closed) without a
 // source. The native hook does not trust that open; the refresh writes the
 // outage mode of the policy tier with its config source (oss-outage-open):
-// open for the default tier, also when a saved per-user value says something
-// else, closed for strict. Every other native hook failure stays closed.
+// open for the default tier, closed for strict, and a saved value, open or
+// closed, wins over either (BALANCED-DEFAULTS owner decision 2026-10-23).
+// Every other native hook failure stays closed.
 func TestRefreshFailModesWritesThePolicyTiersOutageMode(t *testing.T) {
 	for _, test := range []struct {
 		name, config, want string
 	}{
 		{name: "default tier", config: "config_version: 9\nobservability: {}\nguardrail:\n  mode: observe\n", want: "open"},
-		{name: "default tier, saved closed", config: "config_version: 9\nobservability: {}\nguardrail:\n  mode: action\n  connectors:\n    copilot:\n      hook_fail_mode: closed\n", want: "open"},
+		{name: "default tier, saved closed", config: "config_version: 9\nobservability: {}\nguardrail:\n  mode: action\n  connectors:\n    copilot:\n      hook_fail_mode: closed\n", want: "closed"},
 		{name: "strict tier", config: "config_version: 9\nobservability: {}\nguardrail:\n  mode: observe\n  rule_pack: strict\n", want: "closed"},
-		{name: "strict tier, saved open", config: "config_version: 9\nobservability: {}\nguardrail:\n  mode: observe\n  rule_pack: strict\n  connectors:\n    copilot:\n      hook_fail_mode: open\n", want: "closed"},
+		{name: "strict tier, saved open", config: "config_version: 9\nobservability: {}\nguardrail:\n  mode: observe\n  rule_pack: strict\n  connectors:\n    copilot:\n      hook_fail_mode: open\n", want: "open"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			home := t.TempDir()
@@ -145,17 +181,14 @@ func TestRefreshFailModesWritesThePolicyTiersOutageMode(t *testing.T) {
 			}
 			// What the earlier render recorded for Copilot: open, no source.
 			writeHookSidecarForTest(t, home, `{"version":2,"gateway_addr":"127.0.0.1:18970","fail_modes":{"copilot":"open"}}`)
-			if got := buildHookOptions("copilot", "preToolUse", "", ""); got.FailMode != "closed" || got.OutageFailMode != "closed" {
-				t.Fatalf("before the refresh the native hook fails %q, outage %q, want closed for both", got.FailMode, got.OutageFailMode)
-			}
 			if result := runRefreshFailModesForTest(t, home); result.Config != "loaded" || !reflect.DeepEqual(result.Refreshed, []string{"copilot"}) {
 				t.Fatalf("refresh %+v", result)
 			}
 			if got := oldHookFailMode(t, home, "copilot"); got != test.want {
 				t.Fatalf("refreshed copilot mode %q, want %q", got, test.want)
 			}
-			if got := buildHookOptions("copilot", "preToolUse", "", ""); got.FailMode != "closed" || got.OutageFailMode != test.want {
-				t.Fatalf("the native hook fails %q, outage %q, want closed and %q", got.FailMode, got.OutageFailMode, test.want)
+			if got := hookOutageFailModeNow("copilot", filepath.Join(home, "hooks")); got != test.want {
+				t.Fatalf("the native hook's call-time outage mode is %q, want %q", got, test.want)
 			}
 		})
 	}
@@ -163,8 +196,9 @@ func TestRefreshFailModesWritesThePolicyTiersOutageMode(t *testing.T) {
 
 // Cursor: a 1.0.x refresh recorded its observe mode open whatever the
 // config said. The refresh now writes the policy tier's outage mode in
-// observe and action mode alike; a 0.8.x document the release cannot load
-// yet is closed until the migrated config renders the hooks.
+// observe and action mode alike, and a saved value wins over the tier; a
+// 0.8.x document the release cannot load yet is closed until the migrated
+// config renders the hooks.
 func TestRefreshFailModesGivesCursorThePolicyTiersOutageMode(t *testing.T) {
 	const v9 = "config_version: 9\nobservability: {}\nguardrail:\n"
 	const v7 = "config_version: 7\nguardrail:\n"
@@ -172,7 +206,7 @@ func TestRefreshFailModesGivesCursorThePolicyTiersOutageMode(t *testing.T) {
 		name, config, read, want string
 	}{
 		{"1.0.x observe, default tier", v9 + "  mode: observe\n", "loaded", "open"},
-		{"1.0.x action, default tier, cursor closed", v9 + "  mode: action\n  connectors:\n    cursor:\n      hook_fail_mode: closed\n", "loaded", "open"},
+		{"1.0.x action, default tier, cursor closed", v9 + "  mode: action\n  connectors:\n    cursor:\n      hook_fail_mode: closed\n", "loaded", "closed"},
 		{"1.0.x action, strict tier", v9 + "  mode: action\n  rule_pack: strict\n", "loaded", "closed"},
 		{"0.8.x observe, unset", v7 + "  mode: observe\n", "document", "closed"},
 		{"0.8.x observe, cursor open", v7 + "  mode: observe\n  connectors:\n    cursor:\n      hook_fail_mode: open\n", "document", "closed"},
@@ -192,8 +226,10 @@ func TestRefreshFailModesGivesCursorThePolicyTiersOutageMode(t *testing.T) {
 			if got := oldHookFailMode(t, home, "cursor"); got != test.want {
 				t.Fatalf("the old cursor hook reads %q, want %q", got, test.want)
 			}
-			if got := buildHookOptions("cursor", "beforeShellExecution", "", ""); got.FailMode != "closed" || got.OutageFailMode != test.want {
-				t.Fatalf("the new cursor hook fails %q, outage %q, want closed and %q", got.FailMode, got.OutageFailMode, test.want)
+			if test.read == "loaded" {
+				if got := hookOutageFailModeNow("cursor", filepath.Join(home, "hooks")); got != test.want {
+					t.Fatalf("the new cursor hook's call-time outage mode is %q, want %q", got, test.want)
+				}
 			}
 		})
 	}

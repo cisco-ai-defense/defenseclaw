@@ -5,6 +5,7 @@ package connector
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -61,11 +62,14 @@ func editCodexOwnedTOMLWith(raw []byte, desired map[string]interface{}, narrowOt
 	}
 	narrow := len(removedOtel) > 0
 	keepOtelBytes = keepOtelBytes || narrow
+	// Lines DefenseClaw renders take the file's line ending; every line it
+	// keeps keeps its own, so an operator table saved with other endings
+	// than the rest of the file comes back byte for byte (GAP-1993).
 	newline := "\n"
 	if bytes.Contains(raw, []byte("\r\n")) {
 		newline = "\r\n"
-		raw = bytes.ReplaceAll(raw, []byte("\r\n"), []byte("\n"))
 	}
+	rendered := func(b []byte) string { return strings.ReplaceAll(string(b), "\n", newline) }
 	root := map[string]interface{}{}
 	if value, ok := desired["notify"]; ok {
 		root["notify"] = value
@@ -96,9 +100,9 @@ func editCodexOwnedTOMLWith(raw []byte, desired map[string]interface{}, narrowOt
 			return
 		}
 		if out.Len() != 0 && !strings.HasSuffix(out.String(), "\n") {
-			out.WriteByte('\n')
+			out.WriteString(newline)
 		}
-		out.Write(rootBytes)
+		out.WriteString(rendered(rootBytes))
 		rootWritten = true
 	}
 	var syntax tomlEditSyntax
@@ -108,8 +112,9 @@ func editCodexOwnedTOMLWith(raw []byte, desired map[string]interface{}, narrowOt
 	// quoted one, which Codex refuses to load (p0 GAP-1300).
 	sectionPath := []string(nil)
 	skipValue := false
-	// Comments and blank lines at the end of a dropped [otel] subtable
-	// belong to the table after it; hold them until that table is kept.
+	// Comments and blank lines at the end of a dropped [otel] subtable, or of
+	// the [hooks] / [otel] tables DefenseClaw renders again, belong to the
+	// table after it; hold them until that table is kept (GAP-0032).
 	pending := ""
 	for _, line := range lines {
 		inMultiline, inArray := syntax.multiline != 0, syntax.arrayDepth != 0
@@ -128,10 +133,8 @@ func editCodexOwnedTOMLWith(raw []byte, desired map[string]interface{}, narrowOt
 				section = sectionPath[0]
 			}
 		}
-		if section == "hooks" || section == "otel" && !keepOtelBytes {
-			continue
-		}
-		dropped := narrow && section == "otel" && (len(sectionPath) > 1 && removedOtel[sectionPath[1]] || len(sectionPath) == 1 && !hasDesiredOtel)
+		rerendered := section == "hooks" || section == "otel" && !keepOtelBytes
+		dropped := rerendered || narrow && section == "otel" && (len(sectionPath) > 1 && removedOtel[sectionPath[1]] || len(sectionPath) == 1 && !hasDesiredOtel)
 		if dropped {
 			if !inMultiline && !inArray && trimmed == "" {
 				pending += line
@@ -193,12 +196,11 @@ func editCodexOwnedTOMLWith(raw []byte, desired map[string]interface{}, narrowOt
 	writeRoot()
 	if len(sectionBytes) != 0 {
 		if out.Len() != 0 && !strings.HasSuffix(out.String(), "\n") {
-			out.WriteByte('\n')
+			out.WriteString(newline)
 		}
-		out.Write(sectionBytes)
+		out.WriteString(rendered(sectionBytes))
 	}
-	result := strings.ReplaceAll(out.String(), "\n", newline)
-	return append(bom, []byte(result)...), nil
+	return append(bom, []byte(out.String())...), nil
 }
 
 // RemoveCodexManagedHookFeature removes a user preference for the hooks
@@ -227,7 +229,6 @@ func RemoveCodexManagedHookFeature(raw []byte) ([]byte, error) {
 	newline := "\n"
 	if bytes.Contains(raw, []byte("\r\n")) {
 		newline = "\r\n"
-		raw = bytes.ReplaceAll(raw, []byte("\r\n"), []byte("\n"))
 	}
 	var syntax tomlEditSyntax
 	section := []string(nil)
@@ -267,12 +268,12 @@ func RemoveCodexManagedHookFeature(raw []byte) ([]byte, error) {
 				return nil, fmt.Errorf("render remaining Codex features: %w", err)
 			}
 			if out.Len() != 0 && !strings.HasSuffix(out.String(), "\n") {
-				out.WriteByte('\n')
+				out.WriteString(newline)
 			}
-			out.Write(encoded)
+			out.WriteString(strings.ReplaceAll(string(encoded), "\n", newline))
 		}
 	}
-	result := []byte(strings.ReplaceAll(out.String(), "\n", newline))
+	result := []byte(out.String())
 	var checked map[string]interface{}
 	if err := toml.Unmarshal(result, &checked); err != nil {
 		return nil, fmt.Errorf("codex user config after removing features.hooks: %w", err)
@@ -409,9 +410,40 @@ func (s *tomlEditSyntax) visible(line string) string {
 }
 
 // ParseCodexTOML accepts the UTF-8 BOM emitted by Windows PowerShell 5.1.
-// Keep the original bytes for writers so they can preserve the BOM.
+// Keep the original bytes for writers so they can preserve the BOM. A syntax
+// error names its line and column (codexTOMLSyntaxError, GAP-0615), so every
+// refusal that quotes it points at the place to fix.
 func ParseCodexTOML(raw []byte, target interface{}) error {
-	return toml.Unmarshal(bytes.TrimPrefix(raw, []byte{0xef, 0xbb, 0xbf}), target)
+	err := toml.Unmarshal(bytes.TrimPrefix(raw, []byte{0xef, 0xbb, 0xbf}), target)
+	var decode *toml.DecodeError
+	if errors.As(err, &decode) {
+		line, column := decode.Position()
+		return &codexTOMLSyntaxError{Line: line, Column: column, err: err}
+	}
+	return err
+}
+
+// codexTOMLSyntaxError is a Codex config.toml syntax error with the 1-based
+// line and column the parser stopped at. It unwraps to the parser's error.
+type codexTOMLSyntaxError struct {
+	Line, Column int
+	err          error
+}
+
+func (e *codexTOMLSyntaxError) Error() string {
+	return fmt.Sprintf("line %d, column %d: %v", e.Line, e.Column, e.err)
+}
+
+func (e *codexTOMLSyntaxError) Unwrap() error { return e.err }
+
+// codexTOMLErrorLocation is path, followed by :line:column when err is a
+// syntax error ParseCodexTOML reported, the file:line:col form editors open.
+func codexTOMLErrorLocation(path string, err error) string {
+	var syntax *codexTOMLSyntaxError
+	if errors.As(err, &syntax) {
+		return fmt.Sprintf("%s:%d:%d", path, syntax.Line, syntax.Column)
+	}
+	return path
 }
 
 func parseCodexTOML(raw []byte, target interface{}) error { return ParseCodexTOML(raw, target) }

@@ -33,6 +33,9 @@ var (
 	}
 	windowsEnterpriseTargetImpersonation    = withWindowsEnterpriseTargetImpersonation
 	windowsEnterpriseConnectorCertification = certifyWindowsEnterpriseConnector
+	// windowsConnectorSupportedOnHost is the native Windows certification
+	// table; tests of the generic lifecycle replace it for a fixture name.
+	windowsConnectorSupportedOnHost = connector.ConnectorSupportedOnHostOS
 )
 
 func platformInstall(ctx context.Context, opts InstallOptions) (InstallResult, bool, error) {
@@ -379,7 +382,8 @@ func verifyWindowsClaudeManagedResult(ctx context.Context, opts InstallOptions) 
 	if err != nil {
 		return InstallResult{}, err
 	}
-	if err := windowsManagedUserNativeOTLPAbsent(conn.Name(), home, dataDir, targetSID); err != nil {
+	otlpReport, err := windowsManagedUserNativeOTLPCheck(conn.Name(), home, dataDir, targetSID, setupOpts.APIAddr, setupOpts.ProxyAddr)
+	if err != nil {
 		return InstallResult{}, err
 	}
 	lockUpdatedAt, entryUpdatedAt, err := connector.ManagedHookContractTimestamps(
@@ -419,6 +423,7 @@ func verifyWindowsClaudeManagedResult(ctx context.Context, opts InstallOptions) 
 		HookScripts:     sortedUnique(hookScripts),
 		AgentVersion:    lock.RawAgentVersion,
 		HookContractID:  lock.ContractID,
+		AgentConfig:     otlpReport,
 	}, nil
 }
 
@@ -460,7 +465,7 @@ func resolveWindowsGenericManagedTarget(opts InstallOptions) (windowsGenericMana
 	// until its release matrix is certified. This enterprise-only lifecycle is
 	// separately gated by the concrete built-in registry and the protected
 	// machine-policy implementation below.
-	if name != "cursor" && !connector.ConnectorSupportedOnHostOS(conn.Name()) {
+	if name != "cursor" && !windowsConnectorSupportedOnHost(conn.Name()) {
 		support := connector.ConnectorSupportOnHostOS(conn.Name())
 		return windowsGenericManagedTarget{}, fmt.Errorf("enterprise hooks: connector %q is not supported on native Windows: %s", conn.Name(), support.Reason)
 	}
@@ -700,6 +705,9 @@ func installWindowsGenericManagedResult(ctx context.Context, opts InstallOptions
 					}
 				}()
 			}
+			// The setup relax record goes once the folders are hardened or
+			// restored (this defer runs after the restore below, GAP-1985).
+			defer clearWindowsSetupRelaxMarkerAsService(target.conn.Name(), target.sid)
 			relaxed, err := relaxWindowsStandalonePerUserFootprintForSetupAsService(target, configPaths, footprint)
 			// Hardening below only runs when the setup succeeds. A failed setup
 			// must not leave the relaxed directories owner-private.
@@ -1776,6 +1784,8 @@ func teardownWindowsGenericManagedTarget(
 	name := target.conn.Name()
 	_, perUser := windowsStandalonePerUserConnector(name)
 	if perUser {
+		// Runs after the restore below (GAP-1985).
+		defer clearWindowsSetupRelaxMarkerAsService(name, target.sid)
 		relaxed, err := relaxWindowsStandalonePerUserFootprintForSetupAsService(target, configPaths, footprint)
 		defer func() {
 			restore := windowsRelaxedPathsToRestoreAfterTeardown(target.dataDir, relaxed, teardownErr == nil)
@@ -2056,7 +2066,7 @@ func validateWindowsEnterpriseHome(raw, rawSID string) (string, *windows.SID, er
 	info, err := os.Lstat(home)
 	if errors.Is(err, os.ErrNotExist) {
 		// Name the cause, not the raw Win32 lookup error (GAP-1940).
-		return "", nil, fmt.Errorf("enterprise hooks: user home %s no longer exists: the account was deleted or its profile folder removed; run Setup /ensure again (%w)", home, os.ErrNotExist)
+		return "", nil, fmt.Errorf("enterprise hooks: user home %s no longer exists: the account was deleted or its profile folder removed; Setup /repair or /ensure prunes its rows, and the hook enumerator drops them at its next pass (%w)", home, os.ErrNotExist)
 	}
 	if err != nil {
 		return "", nil, fmt.Errorf("enterprise hooks: inspect user home %s: %w", home, err)

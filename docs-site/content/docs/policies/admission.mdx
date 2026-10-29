@@ -211,9 +211,21 @@ only when no shorthand fits.
 
 In a triple, `install` is `block`, `allow` or `none`; `file` is `none` or
 `quarantine`; `runtime` is `disable` or `enable`. A finding is `rejected`
-whenever `install` is `block` or `runtime` is `disable`. `warn` and `allow` do
+whenever `install` is `block`, `file` is `quarantine` or `runtime` is
+`disable`, so a file quarantine alone is never a warning. `warn` and `allow` do
 the same thing to the asset; they differ only in the verdict they record. A
 severity that no layer covers fails closed, as a block.
+
+A rejected verdict is always a refusal. `skill install` and `plugin install`
+scan and decide the new copy in a private staging folder before it is
+installed. A refused or quarantined copy never replaces what is installed:
+with `--force`, the skill or plugin that was there stays as it was. The
+install fails, with or without `--action`, and also when the quarantine move
+or the gateway disable fails. When you change the admission
+actions, the watcher's next rescan decides the installed skills, plugins and
+MCP servers again and applies the new verdict, so tightening a severity to
+`quarantine` or `block` refuses an unchanged asset that was admitted with a
+warning.
 
 Quarantine moves the files of a skill or plugin into DefenseClaw's quarantine
 area. An MCP server has no files to move, so for MCP `block` and `quarantine`
@@ -718,7 +730,7 @@ delete_file  block    connector  destructive                               2026-
 read_file    allow    global     vetted                                    2026-10-06 18:19
 ```
 
-- Without `--connector`, a block or allow covers every connector. With
+- Without `--connector`, a block or allow covers every connector: `tool allow` names each guarded connector it covers (`covers connector=claudecode, connector=codex, ...`), and `tool list` prints one table per connector, where `UPDATED` shows `-` for an entry until it is changed. The sample above is from a host that guards only Claude Code. With
   `--connector`, it covers that one. `skill allow` and `plugin allow` on an
   installed copy write a rule scoped to the connector that has the copy and
   pinned to its path. `skill allow` on a quarantined copy pins the rule to the
@@ -829,7 +841,7 @@ On a managed standalone device the admin config is the only source. Every
 writer refuses, and the attempt is recorded in the audit log:
 
 ```text
-Error: This device is managed: add it to asset_policy in the admin config (MDM or management plane)
+This device is managed: the asset_policy block and allow lists are set in the admin config (MDM or management plane)
 ```
 
 The CLI exits with code 3, and `defenseclaw config set` refuses with the

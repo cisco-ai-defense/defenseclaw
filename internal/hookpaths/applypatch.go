@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/sensor/tactics"
+	"mvdan.cc/sh/v3/syntax"
 )
 
 const (
@@ -40,6 +41,163 @@ var patchTargetDirectives = []string{
 // caller must then treat the protected file as a possible target. There is
 // no bound on the number of targets.
 func ApplyPatchWriteTargets(tool string, args json.RawMessage, command, cwd, home string) (targets []string, ok bool) {
+	return applyPatchTargets(tool, args, command, cwd, home, true)
+}
+
+// ApplyPatchLexicalTargets lists the same targets as ApplyPatchWriteTargets
+// for an apply_patch tool call, placed in cwd and home but not resolved on
+// this host's filesystem. A managed gateway that cannot traverse a user's
+// private home binds these names to the user-side hook's resolved evidence.
+// Absolute, home-form and relative directives are all listed.
+func ApplyPatchLexicalTargets(tool string, args json.RawMessage, cwd, home string) ([]string, bool) {
+	if !isApplyPatchToolName(tool) {
+		return nil, false
+	}
+	return applyPatchTargets(tool, args, "", cwd, home, false)
+}
+
+// ApplyPatchNamesProtectedTarget is the protected-target check of an
+// apply_patch call whose payload could not be proven (GAP-1461). It reads
+// every directive line without the envelope parse, places each path lexically
+// in cwd and home, and reports one that is a protected authorized-keys file of
+// home, by name or through the target the user-side hook resolved for it
+// (resolved, keyed like the hook evidence). It only adds a finding to an
+// unparsed call and never proves a call ordinary.
+func ApplyPatchNamesProtectedTarget(tool string, args json.RawMessage, cwd, home string, resolved map[string]string) bool {
+	if !isApplyPatchToolName(tool) || len(args) == 0 {
+		return false
+	}
+	var fields map[string]json.RawMessage
+	if json.Unmarshal(args, &fields) != nil {
+		fields = map[string]json.RawMessage{"patch": args}
+	}
+	protectedPaths := ProtectedAuthorizedKeysPaths(home)
+	protected := func(path string) bool {
+		for _, candidate := range protectedPaths {
+			if path != "" && samePathName(filepath.Clean(path), candidate) {
+				return true
+			}
+		}
+		return false
+	}
+	names := func(path string) bool {
+		paths, _ := patchTargetPaths(path, cwd, home, false)
+		for _, target := range paths {
+			if protected(target) || protected(resolved[OperandPath(target, cwd)]) {
+				return true
+			}
+		}
+		return false
+	}
+	for _, key := range []string{"command", "cmd", "patch", "patchText", "patch_text", "input"} {
+		for _, line := range strings.Split(patchTextField(fields[key]), "\n") {
+			line = strings.TrimSpace(line)
+			for _, directive := range patchTargetDirectives {
+				if strings.HasPrefix(line, directive) && names(strings.TrimSpace(line[len(directive):])) {
+					return true
+				}
+			}
+		}
+	}
+	for _, key := range []string{"path", "file_path", "filePath"} {
+		var path string
+		if json.Unmarshal(fields[key], &path) == nil && names(path) {
+			return true
+		}
+	}
+	return false
+}
+
+// ApplyPatchLexicalCommandTargets lists the directive targets of the
+// envelopes an apply_patch tool call or a shell command supplies, placed in
+// cwd and home but not resolved on this host. A managed gateway that cannot
+// traverse the user's home binds them to the user-side hook's evidence
+// (GAP-1106).
+func ApplyPatchLexicalCommandTargets(tool string, args json.RawMessage, command, cwd, home string) ([]string, bool) {
+	return applyPatchTargets(tool, args, command, cwd, home, false)
+}
+
+// PatchCallNamesProtectedTarget is the protected-target check of a call that
+// may run apply_patch with targets that could not be read. It reports a call
+// whose text names the SSH directory or an authorized-keys file anywhere, or
+// whose directive lines name a protected file directly or through the
+// target the user-side hook resolved (resolved, keyed like the hook
+// evidence). A call with no protected-named word is never the SSH rule
+// (TGT-0194).
+func PatchCallNamesProtectedTarget(tool string, args json.RawMessage, command, cwd, home string, resolved map[string]string) bool {
+	if ApplyPatchNamesProtectedTarget("apply_patch", args, cwd, home, resolved) ||
+		command != "" && ApplyPatchNamesProtectedTarget("apply_patch", jsonStringRaw(command), cwd, home, resolved) {
+		return true
+	}
+	texts := []string{command, string(args)}
+	for _, text := range texts {
+		if patchTextNamesSSH.MatchString(text) {
+			return true
+		}
+	}
+	return false
+}
+
+// patchShellCommandBody returns the script of a command that is exactly one
+// static shell -c call (bash -lc '...'), with no redirect or assignment.
+func patchShellCommandBody(command string) (string, bool) {
+	file, ok := parseShell(command)
+	if !ok || len(file.Stmts) != 1 {
+		return "", false
+	}
+	stmt := file.Stmts[0]
+	call, ok := stmt.Cmd.(*syntax.CallExpr)
+	if !ok || len(stmt.Redirs) != 0 || len(call.Assigns) != 0 || stmt.Background || stmt.Negated || len(call.Args) < 3 {
+		return "", false
+	}
+	words := make([]string, len(call.Args))
+	for i, arg := range call.Args {
+		value, known := StaticWord(arg, "")
+		if !known {
+			return "", false
+		}
+		words[i] = value
+	}
+	switch programBase(words[0]) {
+	case "bash", "sh", "zsh", "dash", "ksh":
+	default:
+		return "", false
+	}
+	index, ok := shellCommandBodyIndex(words)
+	if !ok || index != len(words)-1 {
+		return "", false
+	}
+	return words[index], true
+}
+
+// ApplyPatchToolWithoutText reports an apply_patch tool call whose arguments
+// carry no patch text and no path.
+func ApplyPatchToolWithoutText(tool string, args json.RawMessage) bool {
+	if !isApplyPatchToolName(tool) {
+		return false
+	}
+	var fields map[string]json.RawMessage
+	if len(args) != 0 && json.Unmarshal(args, &fields) != nil {
+		return false
+	}
+	for _, key := range []string{"command", "cmd", "patch", "patchText", "patch_text", "input", "path", "file_path", "filePath"} {
+		if patchTextField(fields[key]) != "" {
+			return false
+		}
+	}
+	return true
+}
+
+// patchTextNamesSSH matches an authorized-keys name or a .ssh path component
+// in raw call text (JSON escapes included).
+var patchTextNamesSSH = regexp.MustCompile(`(?i)authorized_keys|(?:^|[^A-Za-z0-9_.-])\.ssh(?:$|[^A-Za-z0-9_.-])`)
+
+func jsonStringRaw(value string) json.RawMessage {
+	encoded, _ := json.Marshal(value)
+	return encoded
+}
+
+func applyPatchTargets(tool string, args json.RawMessage, command, cwd, home string, resolve bool) (targets []string, ok bool) {
 	var fields map[string]json.RawMessage
 	if len(args) != 0 {
 		_ = json.Unmarshal(args, &fields)
@@ -59,9 +217,34 @@ func ApplyPatchWriteTargets(tool string, args json.RawMessage, command, cwd, hom
 			continue
 		}
 		if !patchTool {
-			known, calls := patchShellInvocationsKnown(text)
+			known, calls, _ := patchShellInvocationsKnown(text)
 			if !known {
-				return nil, false
+				// bash -lc '<script>': the envelope is in the script the
+				// child shell runs (GAP-0781).
+				if body, ok := patchShellCommandBody(text); ok {
+					text = body
+					known, calls, _ = patchShellInvocationsKnown(text)
+				}
+			}
+			if !known {
+				// apply_patch < FILE, cat FILE | apply_patch: the targets are
+				// the directives of the staged file (classifier refix 1).
+				inline, _, parsed := patchEnvelopePaths(text)
+				if !parsed {
+					return nil, false
+				}
+				staged, read := patchStagedTargets(text, cwd, home, inline)
+				if !read {
+					return nil, false
+				}
+				for _, path := range staged {
+					resolved, known := patchTargetPaths(path, cwd, home, resolve)
+					if !known {
+						return nil, false
+					}
+					targets = append(targets, resolved...)
+				}
+				calls = 1 // the staged and the inline envelopes are edits
 			}
 			if calls == 0 {
 				// An envelope stored as command data is not an edit.
@@ -74,7 +257,7 @@ func ApplyPatchWriteTargets(tool string, args json.RawMessage, command, cwd, hom
 		}
 		found = found || envelopes > 0
 		for _, path := range paths {
-			resolved, known := patchTargetPaths(path, cwd, home)
+			resolved, known := patchTargetPaths(path, cwd, home, resolve)
 			if !known {
 				return nil, false
 			}
@@ -87,7 +270,7 @@ func ApplyPatchWriteTargets(tool string, args json.RawMessage, command, cwd, hom
 			if json.Unmarshal(fields[key], &path) != nil || path == "" {
 				continue
 			}
-			resolved, known := patchTargetPaths(path, cwd, home)
+			resolved, known := patchTargetPaths(path, cwd, home, resolve)
 			if !known {
 				return nil, false
 			}
@@ -203,6 +386,7 @@ var (
 
 // patchShellInvocationsKnown reports whether every apply_patch that a shell
 // text may run reads an envelope in that text, and how many calls are bound.
+// fedBody marks the body lines of the envelopes bound to a call.
 // Lines of an envelope body are
 // patch data, not shell, while the quote or here-document that feeds the
 // envelope is still open. That state is tracked from the top of the text: it
@@ -212,12 +396,14 @@ var (
 // is not a patch line, or any doubt about the state makes the rest of the
 // text shell, so an apply_patch in it counts as a call of its own, and the
 // envelope binds no call.
-func patchShellInvocationsKnown(text string) (bool, int) {
+func patchShellInvocationsKnown(text string) (known bool, calls int, fedBody []bool) {
 	lines := strings.Split(text, "\n")
 	bound := make([]int, len(lines))
 	body := make([]bool, len(lines))
+	fedBody = make([]bool, len(lines))
 	inert := make([]bool, len(lines))
-	known, cursor := true, 0
+	known = true
+	cursor := 0
 	for start := 0; start < len(lines); start++ {
 		begin := strings.Index(lines[start], patchBeginMarker)
 		if begin < 0 || strings.TrimSpace(lines[start][begin+len(patchBeginMarker):]) != "" {
@@ -265,25 +451,31 @@ func patchShellInvocationsKnown(text string) (bool, int) {
 		if direct == nil {
 			direct = patchPipedHeredoc.FindStringIndex(opener)
 		}
+		fed = false
 		if direct != nil && !strings.Contains(opener[direct[1]:], "<") && !strings.Contains(close, "<") {
 			bound[inputLine]++
+			fed = true
 		} else if patchPrinter.MatchString(opener) {
 			pipeLine := end
 			if patchPipeCall.MatchString(close) && !strings.Contains(close, "<") {
 				bound[pipeLine]++
+				fed = true
 			} else if end+1 < len(lines) {
 				// A pipe on the next line must continue the quoted printer.
 				next := strings.TrimSpace(lines[end+1])
 				if strings.HasPrefix(next, "'") || strings.HasPrefix(next, "\"") {
-					if patchPipeCall.MatchString(next) {
+					if patchPipeCall.MatchString(next) && !strings.Contains(next, "<") {
 						bound[end+1]++
+						fed = true
 					}
 				}
 			}
 		}
+		for i := start + 1; fed && i < end; i++ {
+			fedBody[i] = true
+		}
 		start = end
 	}
-	calls := 0
 	for i, line := range lines {
 		if inert[i] ||
 			!body[i] && !invokesApplyPatch(line) && bound[i] == 0 && !strings.ContainsAny(line, ";|&") {
@@ -292,10 +484,26 @@ func patchShellInvocationsKnown(text string) (bool, int) {
 		count := len(patchProgramWord.FindAllString(line, -1))
 		calls += count
 		if count > bound[i] {
-			return false, calls
+			return false, calls, nil
 		}
 	}
-	return true, calls
+	return true, calls, fedBody
+}
+
+// patchFedLines marks the lines inside every envelope in a shell text that
+// an apply_patch call reads: the "***" headers and the added, removed and
+// context lines. apply_patch writes only the files its headers name, so a
+// path in the other lines is file content (GAP-0781). It is nil when any
+// apply_patch in the text has an unknown input.
+func patchFedLines(text string) []bool {
+	known, calls, fedBody := patchShellInvocationsKnown(text)
+	if !known || calls == 0 {
+		return nil
+	}
+	if _, _, parsed := patchEnvelopePaths(text); !parsed {
+		return nil
+	}
+	return fedBody
 }
 
 // patchFeed is the quote, here-document or PowerShell here-string that carries
@@ -419,19 +627,48 @@ func plainShellText(text string) bool {
 }
 
 // shellNesting reports an escape, a line continuation, a here-document or
-// here-string, a command or parameter substitution, a PowerShell block comment
-// or a stop-parsing token, in sh or PowerShell. Quotes inside or after those
-// do not follow the plain quote rules of openQuote.
+// here-string, a command or parameter substitution, an ANSI-C $'...' quote,
+// a PowerShell block comment or a stop-parsing token, in sh or PowerShell.
+// Quotes inside or after those do not follow the plain quote rules of
+// openQuote. Text in single quotes is literal in both shells, so it is not
+// read: printf 'a\n' before an apply_patch heredoc is plain (GAP-0781).
 func shellNesting(text string) bool {
+	text = withoutSingleQuoted(text)
 	if strings.ContainsAny(text, "\\`") {
 		return true
 	}
-	for _, token := range []string{"<<", "<#", "@'", `@"`, "$(", "${", "--%"} {
+	for _, token := range []string{"<<", "<#", "@'", `@"`, "$(", "${", "$'", "--%"} {
 		if strings.Contains(text, token) {
 			return true
 		}
 	}
 	return false
+}
+
+// withoutSingleQuoted drops the text between single quotes that are not
+// inside double quotes, keeping the quotes. A double-quoted part stays,
+// since the shell expands it.
+func withoutSingleQuoted(text string) string {
+	var out strings.Builder
+	var quote byte
+	for i := 0; i < len(text); i++ {
+		c := text[i]
+		switch {
+		case quote == '\'':
+			if c != '\'' {
+				continue
+			}
+			quote = 0
+		case quote == '"':
+			if c == '"' {
+				quote = 0
+			}
+		case c == '\'' || c == '"':
+			quote = c
+		}
+		out.WriteByte(c)
+	}
+	return out.String()
 }
 
 // openQuote returns the quote character still open at the end of text, which
@@ -472,7 +709,7 @@ func invokesApplyPatch(text string) bool {
 // patchTargetPaths makes a directive path absolute. apply_patch does not
 // expand ~ or variables, but a shell or PowerShell wrapper may, so a home
 // form yields both the home path and the literal path under cwd.
-func patchTargetPaths(path, cwd, home string) ([]string, bool) {
+func patchTargetPaths(path, cwd, home string, resolve bool) ([]string, bool) {
 	if len(path) >= 2 && (path[0] == '"' || path[0] == '\'') && path[len(path)-1] == path[0] {
 		path = path[1 : len(path)-1]
 	}
@@ -501,9 +738,11 @@ func patchTargetPaths(path, cwd, home string) ([]string, bool) {
 		}
 	}
 	paths = append(paths, filepath.Clean(literal))
-	for _, candidate := range paths {
-		if _, known := ResolvePatchWriteTarget(candidate); !known {
-			return nil, false
+	if resolve {
+		for _, candidate := range paths {
+			if _, known := ResolvePatchWriteTarget(candidate); !known {
+				return nil, false
+			}
 		}
 	}
 	return paths, true

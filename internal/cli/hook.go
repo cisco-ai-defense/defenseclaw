@@ -233,6 +233,10 @@ func newHookSessionFactsCmd() *cobra.Command {
 // followed by the rest, so Run reads exactly what the agent wrote.
 func armHookAnswerWatchdog(connectorName, event, failMode, surface string, managed bool, startedAt time.Time, exit func(int)) (io.Reader, *hookexec.AnswerWatchdog) {
 	payload, _ := io.ReadAll(io.LimitReader(os.Stdin, hookexec.DefaultMaxBody+1))
+	// A Windows PowerShell wrapper can put a UTF-8 byte order mark ahead of
+	// the JSON (GAP-2449): every reader after this one sees the payload
+	// without it.
+	payload = hookexec.TrimUTF8BOM(payload)
 	stdin := io.MultiReader(bytes.NewReader(payload), os.Stdin)
 	opts := hookexec.Options{
 		Connector:         connectorName,
@@ -602,14 +606,12 @@ func buildHookOptionsForRuntime(connector, event, apiAddr, _ string, enterpriseM
 		apiAddr = fmt.Sprintf("127.0.0.1:%d", config.DefaultGatewayAPIPort)
 	}
 
-	// Per-user native hooks fail closed for every failure but a gateway
-	// outage. Their outage mode is the one Setup recorded for the connector
-	// in hooks/.hookcfg from its policy tier (config.HookOutageFailMode); an
-	// older registration flag or the environment cannot open them. Managed
-	// hooks take their mode from protected administrator state below.
-	outageFailMode := "closed"
-	if !enterpriseManaged {
-		outageFailMode = perUserHookOutageFailMode(filepath.Join(hookDir, ".hookcfg"), connector)
+	// Per-user native hooks decide a classified outage from their runtime
+	// config at call time. Only the installed runtime's protected hook home
+	// can open one; an agent-chosen home remains closed.
+	var outageFailModeNow func() string
+	if !enterpriseManaged && trustedNativeState {
+		outageFailModeNow = func() string { return hookOutageFailModeNow(connector, hookDir) }
 	}
 	token := os.Getenv("DEFENSECLAW_GATEWAY_TOKEN")
 	if trustedNativeState {
@@ -623,7 +625,7 @@ func buildHookOptionsForRuntime(connector, event, apiAddr, _ string, enterpriseM
 		Event:                     event,
 		APIAddr:                   apiAddr,
 		FailMode:                  "closed",
-		OutageFailMode:            outageFailMode,
+		OutageFailModeNow:         outageFailModeNow,
 		Home:                      home,
 		HookDir:                   hookDir,
 		Token:                     token,
@@ -745,40 +747,6 @@ func readHookSidecar(path string) map[string]string {
 		}
 	}
 	return out
-}
-
-// perUserHookOutageFailMode is connector's outage mode in the per-user hook
-// sidecar at path: "open" only when the sidecar is a regular, bounded v2+
-// JSON document of a per-user install whose fail_modes entry for the
-// connector is "open" with the config source (Setup's record of
-// config.HookOutageFailMode). Anything else (no entry, another value, no
-// source, a managed or malformed sidecar, a link) is "closed".
-func perUserHookOutageFailMode(path, connector string) string {
-	name := strings.ToLower(strings.TrimSpace(connector))
-	if name == "" {
-		return "closed"
-	}
-	info, err := os.Lstat(path)
-	if err != nil || !info.Mode().IsRegular() || info.Size() > hookConfigMaxBytes {
-		return "closed"
-	}
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return "closed"
-	}
-	var state struct {
-		Version   int               `json:"version"`
-		FailModes map[string]string `json:"fail_modes"`
-		Sources   map[string]string `json:"fail_mode_sources"`
-		Managed   bool              `json:"managed_enterprise"`
-	}
-	if json.Unmarshal(data, &state) != nil || state.Version < 2 || state.Managed {
-		return "closed"
-	}
-	if state.FailModes[name] == "open" && state.Sources[name] == gwconnector.HookFailModeSourceConfig {
-		return "open"
-	}
-	return "closed"
 }
 
 // hookConfigMaxBytes bounds the config.yaml read of readHookConfigDocument.

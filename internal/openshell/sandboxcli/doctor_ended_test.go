@@ -120,11 +120,9 @@ func TestDoctorAdviceForALingeringFailedMicroVM(t *testing.T) {
 			if tc.lingering {
 				for _, want := range []string{
 					"save or sync any accessible guest work first",
-					"`defenseclaw sandbox start failed --end-vm`",
-					"what the VM has not written to its disk is lost",
-					"`openshell sandbox start failed`",
-					"`openshell sandbox stop failed`",
-					"only if OpenShell refuses that path or still reports the VM running",
+					"fails with Conflict and leaves it starting",
+					"keep it while you need what it holds",
+					"`defenseclaw sandbox delete failed`",
 					"deletes it and its work",
 				} {
 					if !strings.Contains(c.Fix.Summary, want) {
@@ -171,8 +169,8 @@ func TestStopOfAnEndedMicroVMSaysHowToStopIt(t *testing.T) {
 		{"completed", "completed", "", openshell.SupportedMin,
 			"⚠ box is completed: OpenShell does not stop it, so its MicroVM may still run, and DefenseClaw stops, restarts and upgrades no OpenShell gateway under it, " +
 				"nor moves this account to another OpenShell setup, until OpenShell reports it stopped: save or sync any accessible guest work first; nothing in OpenShell writes this MicroVM's disk back or stops it: " +
-				"its VM still runs what its workload left running, and its start ends that VM with no flush first, so what the VM has not written to its disk is lost: " +
-				"`defenseclaw sandbox start box --end-vm` ends the VM that way, then `defenseclaw sandbox stop box` once it is ready; for a raw OpenShell sandbox, `openshell sandbox start box` ends its VM the same way, then `openshell sandbox stop box` (raw OpenShell sandbox) once it is ready; only if OpenShell refuses that path or still reports the VM running, `openshell sandbox delete box` deletes it and its work"},
+				"on OpenShell 0.1.5 its start (`defenseclaw sandbox start box --end-vm` or `openshell sandbox start box` too) fails with Conflict and leaves it starting, " +
+				"so keep it while you need what it holds (it keeps the OpenShell gateway); only then `defenseclaw sandbox delete box` (DefenseClaw sandbox) or `openshell sandbox delete box` (raw OpenShell sandbox), which deletes it and its work"},
 		{"failed", "error", "MainProcessFailed: Canonical main process exited with status 1", openshell.SupportedMin,
 			"⚠ box is in OpenShell's error state (MainProcessFailed: Canonical main process exited with status 1): OpenShell does not stop it, so its MicroVM may still run"},
 		{"completed, old gateway", "completed", "", "0.1.3",

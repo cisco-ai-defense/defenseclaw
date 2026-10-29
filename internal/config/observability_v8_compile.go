@@ -472,6 +472,7 @@ func compileObservabilityV8Destination(
 		return ObservabilityV8EffectiveDestination{}, 0, err
 	}
 	result.Transport = transport
+	result.localStack = source.Kind == ObservabilityV8DestinationSplunkHEC && source.LocalStack != nil
 	if err := validateObservabilityV8SignalOverrides(result.Transport.SignalOverrides, result.SelectedSignals, path+".signal_overrides"); err != nil {
 		return ObservabilityV8EffectiveDestination{}, 0, err
 	}

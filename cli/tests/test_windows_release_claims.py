@@ -193,21 +193,40 @@ def test_release_builds_only_the_four_supported_targets_with_flat_names() -> Non
         "defenseclaw-windows-amd64",
         "defenseclaw-hook-post",
         "defenseclaw-hook",
+        # The one-line install's GUI-subsystem Claude Code PreToolUse guard (GAP-2467).
+        "defenseclaw-hook-guard",
         "defenseclaw-acp-posix",
         "defenseclaw-acp-windows-amd64",
         "defenseclaw-hook-posix",
         "defenseclaw-sensor-helper-posix",
+        # The managed Linux and macOS packages' scanner launcher (GAP-1527);
+        # no archive carries it (the payload archive has no scanners).
+        "defenseclaw-scanners-posix",
     }
     assert builds["defenseclaw"]["binary"] == "defenseclaw-gateway"
     assert builds["defenseclaw-windows-amd64"]["binary"] == "defenseclaw-gateway"
     assert builds["defenseclaw-hook-post"]["binary"] == "defenseclaw-hook-post"
-    for posix in ("defenseclaw", "defenseclaw-hook-post", "defenseclaw-acp-posix", "defenseclaw-hook-posix", "defenseclaw-sensor-helper-posix"):
+    for posix in (
+        "defenseclaw",
+        "defenseclaw-hook-post",
+        "defenseclaw-acp-posix",
+        "defenseclaw-hook-posix",
+        "defenseclaw-sensor-helper-posix",
+        "defenseclaw-scanners-posix",
+    ):
         assert builds[posix]["goos"] == ["linux", "darwin"]
         assert builds[posix]["goarch"] == ["amd64", "arm64"]
         assert {"goos": "darwin", "goarch": "amd64"} in builds[posix]["ignore"]
-    for windows in ("defenseclaw-windows-amd64", "defenseclaw-hook", "defenseclaw-acp-windows-amd64"):
+    for windows in ("defenseclaw-windows-amd64", "defenseclaw-hook", "defenseclaw-hook-guard", "defenseclaw-acp-windows-amd64"):
         assert builds[windows]["goos"] == ["windows"]
         assert builds[windows]["goarch"] == ["amd64"]
+    # The guard is a small GUI-subsystem program of its own: never a console
+    # program, never the launcher it checks for.
+    assert builds["defenseclaw-hook-guard"]["main"] == "./cmd/defenseclaw-hook-guard"
+    assert builds["defenseclaw-hook-guard"]["binary"] == "defenseclaw-hook-guard"
+    for windows_gui in ("defenseclaw-hook", "defenseclaw-hook-guard"):
+        assert "-H=windowsgui" in builds[windows_gui]["ldflags"][0]
+    assert "-buildid=defenseclaw-hook-guard-" in builds["defenseclaw-hook-guard"]["ldflags"][0]
 
     archives = {archive["id"]: archive for archive in release["archives"]}
     flat_name = "{{ .ProjectName }}-{{ .Version }}-{{ .Os }}-{{ .Arch }}"
@@ -228,6 +247,7 @@ def test_release_builds_only_the_four_supported_targets_with_flat_names() -> Non
     assert archives["windows-amd64"]["ids"] == [
         "defenseclaw-windows-amd64",
         "defenseclaw-hook",
+        "defenseclaw-hook-guard",
         "defenseclaw-acp-windows-amd64",
     ]
     assert archives["windows-amd64"]["formats"] == ["zip"]

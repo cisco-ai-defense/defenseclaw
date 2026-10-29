@@ -57,7 +57,8 @@ func trustedStrictInstallWindowReason(reason string) bool {
 // .install.lock install.sh and install.ps1 keep in the directory
 // DEFENSECLAW_HOME names, or in this gateway's data_dir, read as the hooks
 // read it (hookexec.InstallLockHeld: any file type, and a lock that cannot be
-// read counts as held).
+// read counts as held), or an interrupted install there whose recovery waits
+// for the next installer run (hookexec.InstallRecoveryPending, GAP-2082).
 func (a *APIServer) perUserInstallWindowHeld() bool {
 	if a == nil || a.scannerCfg == nil {
 		return false
@@ -67,7 +68,7 @@ func (a *APIServer) perUserInstallWindowHeld() bool {
 		return false
 	}
 	for _, dir := range []string{cfg.DataDir, config.DefaultDataPath()} {
-		if strings.TrimSpace(dir) != "" && hookexec.InstallLockHeld(dir) {
+		if strings.TrimSpace(dir) != "" && (hookexec.InstallLockHeld(dir) || hookexec.InstallRecoveryPending(dir)) {
 			return true
 		}
 	}

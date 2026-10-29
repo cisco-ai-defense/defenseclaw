@@ -74,7 +74,7 @@ func TestR104ReviewFixDecisions(t *testing.T) {
 	}{
 		{"called function writer", `f() { python3 -c 'open("alias","a").write("marker")'; }; f`, true},
 		{"nested called function writer", `f() { python3 -c 'open("alias","a").write("marker")'; }; g() { f; }; g`, true},
-		{"uncalled function protected mention", `f() { python3 -c 'open("alias","a").write("marker")'; }; echo ok`, true},
+		{"uncalled function protected mention", `f() { python3 -c 'open("alias","a").write("marker")'; }; echo ok`, false}, // GAP-1535
 		{"dormant caller protected mention", `f() { python3 -c 'open("alias","a").write("marker")'; }; g() { f; }; echo ok`, true},
 		{"function argument protected mention", `f() { python3 -c 'open("alias","a").write("marker")'; }; echo f`, true},
 		{"literal writer in reachable caller", `f() { python3 -c 'open("alias","a").write("marker")'; }; g() { f; }; g`, true},
@@ -100,8 +100,10 @@ func TestR104ReviewFixDecisions(t *testing.T) {
 		{"bound pattern redirect", `printf -v f %s 'ali*'; echo marker >> $f`, true},
 		{"bound pattern loop", `for f in 'ali*'; do echo marker >> $f; done`, true},
 		{"quoted bound pattern", `printf -v f %s 'ali*'; echo marker >> "$f"`, false},
-		{"search-path cd writes the link", `cd sub && ln -s ../authorized_keys b && echo marker > b`, true},
-		{"search-path cd writes another file", `cd sub && ln -s ../a b && echo marker > out.txt`, true},
+		// GAP-1742: a link after a top-level cd is judged by its operands; an
+		// unexported CDPATH is a documented limit of the pre-tool check.
+		{"search-path cd writes the link", `cd sub && ln -s ../authorized_keys b && echo marker > b`, false},
+		{"search-path cd writes another file", `cd sub && ln -s ../a b && echo marker > out.txt`, false},
 		{"explicit cd writes the link", `cd ./sub && ln -s ../authorized_keys b && echo marker > b`, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

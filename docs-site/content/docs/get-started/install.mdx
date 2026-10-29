@@ -78,7 +78,7 @@ Source builds are for developing DefenseClaw, not for upgrading a release instal
 
 | Requirement | Version |
 | --- | --- |
-| Python | 3.10-3.13 |
+| Python | 3.11-3.13 |
 | Go | 1.26.4 or newer |
 | Git | To clone and identify the checkout |
 | GNU Make and a POSIX shell | The documented workflow |
@@ -120,7 +120,7 @@ A source build reports the checked-in source version; do not present it as a pub
 
 ### Build from source on Windows
 
-Run the same workflow in Git Bash (Git for Windows) with GNU Make, Go, `uv` and Python 3.10-3.13 from python.org.
+Run the same workflow in Git Bash (Git for Windows) with GNU Make, Go, `uv` and Python 3.11-3.13 from python.org.
 
 - Clone with `git -c core.autocrlf=false clone ...` so shell scripts keep LF line endings.
 - `make all` uses the first of `python3`, `python` and `py -3` that runs, which skips the Microsoft Store `python3` alias. When none runs, the build stops with "no working Python 3 interpreter".
@@ -143,6 +143,8 @@ defenseclaw version
 
   OK All components in sync.
 ```
+
+In a terminal the rows use check marks (`✓ All components in sync.`, and doctor rows start with `✓`, `⚠`, `✗` or `-`); piped to another command, as above, they use text (`OK All components in sync.`, `[PASS]`, `[WARN]`, `[FAIL]`, `[SKIP]`).
 
 If you ran the plain install command, run `defenseclaw init --connector <agent>` before `defenseclaw doctor`. Before init, doctor shows one row and exits 1:
 

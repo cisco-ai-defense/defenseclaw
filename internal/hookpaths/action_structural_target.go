@@ -7,6 +7,7 @@ import (
 	"path"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strings"
 
 	"mvdan.cc/sh/v3/syntax"
@@ -58,6 +59,9 @@ func actionPosixAdvanceDirectory(call *syntax.CallExpr, values actionValues, hom
 	if actionPosixWindowsHome(home) {
 		*cwd = actionPosixWindowsPath(destination, *cwd, home)
 		return
+	}
+	if runtime.GOOS == "windows" && actionWindowsHome(home) {
+		destination = actionMSYSDrivePath(destination) // Git Bash cd /c/... (GAP-0781 RV8-1)
 	}
 	if resolved, ok := ResolveWriteTarget(OperandPath(destination, *cwd)); ok {
 		*cwd = resolved

@@ -67,6 +67,8 @@ defenseclaw guardrail enable
 
 OpenClaw and ZeptoClaw route model traffic through the guardrail, so for them `guardrail enable` needs `guardrail.model` and otherwise stops with `Cannot enable: guardrail.model is not set.` Run the agent's `defenseclaw setup openclaw` or `defenseclaw setup zeptoclaw` command again instead.
 
+`defenseclaw guardrail enable --connector <name>` runs setup's check of the agent's settings and of the shared `hooks/.hookcfg` before it saves, and exits `1` with `Nothing was changed` when one refuses. If the gateway cannot set the agent up, the agent stays disabled: `guardrail.connectors.<name>.enabled` is false again, the message says so, and the same command can be run after you fix the error.
+
 After `setup guardrail --disable`, `defenseclaw guardrail enable --connector codex` changes nothing: it says the guardrail is off for every agent, names `defenseclaw guardrail enable` and exits `1`. If you also turned Codex off on its own, it names both steps: `defenseclaw guardrail enable`, then `defenseclaw guardrail enable --connector codex`, because the global enable keeps that agent off. To bring back only one agent, run `defenseclaw guardrail enable`, then `defenseclaw guardrail disable --connector <name>` for each agent to keep off. `enable --connector codex` brings back an agent you turned off with `guardrail disable --connector codex`.
 
 ## Remove everything

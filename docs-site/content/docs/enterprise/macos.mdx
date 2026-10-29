@@ -66,7 +66,7 @@ home `/var/empty`). Everything else runs as root.
 
 | Label | Runs as | What it does |
 | --- | --- | --- |
-| `com.cisco.defenseclaw.gateway` | `_defenseclaw` | Policy engine and hook API. Binds `127.0.0.1:18970` and `run/hook.sock` |
+| `com.cisco.defenseclaw.gateway` | `_defenseclaw` | Policy engine and hook API. Serves `127.0.0.1:18970`, which launchd holds for it, and binds `run/hook.sock` |
 | `com.cisco.defenseclaw.hook-guardian` | root | Always running. Reconciles each user's hooks every minute through a worker that runs as that user, which also runs the user's AI Discovery scan. Every 5 seconds it checks the hook binary and Claude Code's `90-defenseclaw.json` drop-in; if either is gone or changed it logs `tamper:` and starts `com.cisco.defenseclaw.apply`, whose `ensure` puts them back |
 | `com.cisco.defenseclaw.hook-enumerator` | root | Rewrites the target manifest every five minutes (in `auto` enrollment mode) |
 | `com.cisco.defenseclaw.sensor-helper` | root | Answers the gateway's fixed AI Discovery requests |
@@ -75,7 +75,7 @@ home `/var/empty`). Everything else runs as root.
 
 <Flow
   direction="TB"
-  caption="macOS. launchd starts the gateway as _defenseclaw, and the gateway opens 127.0.0.1:18970 and run/hook.sock itself. Only _defenseclaw can write the run directory, inside the root-owned install tree, so a user cannot create a look-alike socket. The hook sends nothing until it has checked that root or _defenseclaw owns the socket, and the gateway learns the caller's uid from the kernel."
+  caption="macOS. launchd opens 127.0.0.1:18970 when it loads the gateway and keeps it open while the gateway restarts, so a client or agent exporter that connects mid-restart waits for the real gateway. launchd starts the gateway as _defenseclaw, and the gateway opens run/hook.sock itself. Only _defenseclaw can write the run directory, inside the root-owned install tree, so a user cannot create a look-alike socket. The hook sends nothing until it has checked that root or _defenseclaw owns the socket, and the gateway learns the caller's uid from the kernel."
 >
   <Zone id="m0" label="Z0 · Admin and OS (root)" tone="trusted">
     <Node id="ld" kind="generic">{`launchd\nstarts the daemons`}</Node>
@@ -143,7 +143,10 @@ on the unsigned pkg; the checks above are what protect it.
 
 ### 2. Stage the config
 
-The lifecycle requires `config_version: 9`, `deployment_mode: managed_enterprise`,
+Write the config as `config_version: 9`. `ensure` also takes a `config_version: 8`
+file: it migrates it to 9, keeps `config.yaml.v8.bak` and `migration-v9.json`, and
+warns `config_version_8`. It refuses any other version with `config_invalid`.
+The lifecycle requires `deployment_mode: managed_enterprise`,
 `enterprise.profile: standalone` and `data_dir: /opt/cisco/defenseclaw/runtime`. If
 you set `gateway.api_bind` or `gateway.api_port`, they must be `127.0.0.1` and
 `18970`.
@@ -349,6 +352,23 @@ holder. Stop that gateway or move it, then run `installer -pkg` again (or
 receipt). A per-user gateway on another port keeps running; the install, `status`
 and `verify` name each such account with `per_user_gateway_running`.
 
+## Scan skills, MCP servers and plugins
+
+The package installs the skill, MCP and plugin scanners. An administrator scans with the
+gateway's scanners, policy and judge:
+
+```bash
+sudo /opt/cisco/defenseclaw/bin/defenseclaw-gateway scan skill /opt/defenseclaw-scan/my-skill
+sudo /opt/cisco/defenseclaw/bin/defenseclaw-gateway scan plugin /opt/defenseclaw-scan/my-plugin
+sudo /opt/cisco/defenseclaw/bin/defenseclaw-gateway scan mcp https://mcp.example.com/mcp
+```
+
+The scan runs through the managed gateway, and only an administrator can read its token, so run
+it with `sudo`. The gateway service cannot read user folders (`/Users`, `/var/root`). Copy the folder to one that every account can read, such as
+`/opt/defenseclaw-scan`, and scan the copy. A refused scan exits `3` and says `Nothing was
+scanned`. A deployment installed from the payload archive has no scanner runtime: install the
+package to scan.
+
 ## Remove
 
 Run these as root from `/opt/cisco/defenseclaw/bin`.
@@ -364,15 +384,15 @@ Uninstall removes each user's DefenseClaw hook registrations and DefenseClaw's o
 machine-policy entries first; administrator entries stay. Use `--purge` for a clean
 image. With `--purge` it also stops each enrolled user's per-user gateway and
 removes `~/.defenseclaw`, the empty agent folders DefenseClaw created, the
-per-user binaries in `~/.local/bin` and DefenseClaw's wheels in `~/.cache/uv`; a
-user's own DefenseClaw install from before enrollment is first moved to
-`~/.defenseclaw-backup-<UTC time>`. The result's `kept:` line names accounts that
+per-user binaries in `~/.local/bin` and DefenseClaw's wheels in `~/.cache/uv`. If an enrolled account had its own DefenseClaw install before the enrollment (its `~/.defenseclaw` holds `config.yaml`, `.env`, `audit.db` or `previous/`), `--purge` leaves that folder and the install's binaries exactly as they are and names the account in the result (`kept the DefenseClaw per-user data of user <name> ...` and a `per_user_state_remaining` warning). A machine uninstall never deletes or moves an account's own data. The purge first moves the backups an earlier release saved for a connector it removed (`connector_backups/openhands` and `connector_backups/omnigent`) to `~/.defenseclaw-removed-connector-backups`, and stops without deleting anything if it cannot. Accounts the deployment never enrolled keep their DefenseClaw files (an earlier per-user install, or hooks a former enrollment left). The purge result lists each such account on a `kept:` warning; delete those files with the account's owner. An account the machine policy covered without a per-user enrollment (not named in the enrollment manifest) keeps its `~/.defenseclaw` too: when that folder holds only the hook files and connector backups DefenseClaw wrote, the result lists those accounts on their own `kept:` warning, and an administrator can delete the folders; when it holds the account's own install, the account is named as above. The result's `kept:` line names accounts that
 keep data. Pass `--purge` in the same run as the uninstall: uninstall deletes the
 list of enrolled accounts, so a later `--purge` is a no-op (`not_installed`). To
 clean up afterward, delete `~/.defenseclaw` by hand, or install again and run
-`uninstall --purge`. If macOS denies deleting the `_defenseclaw` account (it can,
-from a remote shell), the uninstall still completes with a `service_account`
-warning carrying the two `dscl` commands to delete it.
+`uninstall --purge`. macOS lets only a process with Full Disk Access delete the
+`_defenseclaw` account. Run from an ssh session or an MDM agent without it, the
+delete is refused (`eDSPermissionError`) and the uninstall still completes with a
+`service_account` warning carrying the two `dscl` commands; run them from a
+Terminal or MDM script that has Full Disk Access (or grant it with a PPPC profile).
 
 A pkg has no uninstaller, so the lifecycle removes the binaries itself. The
 root-owned `lifecycle/lifecycle.lock` remains so waiting runs share one lock. For a
@@ -463,7 +483,7 @@ The code requirement needs a signed build. On an unsigned test build, grant Full
 Disk Access to that path by hand in System Settings, then restart the helper with
 `sudo launchctl kickstart -k system/com.cisco.defenseclaw.sensor-helper`. A config
 that carries `enterprise.tetragon` is accepted and ignored on macOS;
-`enterprise macos status` reports `tetragon_not_applicable`.
+`enterprise macos status --json` and `enterprise macos verify` report `tetragon_not_applicable`; plain `status` does not print it.
 
 ## Machine policy
 

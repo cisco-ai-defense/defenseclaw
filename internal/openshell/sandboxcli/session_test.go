@@ -640,6 +640,32 @@ func TestTheSummaryDoesNotApproveARefusalUnderNetworkDeny(t *testing.T) {
 	lacks(t, ta.output(), "approved since")
 }
 
+// GAP-2447 (#1134): in a strict session (network.mode deny) a refused side
+// request on the model host is a side request outside the model channel,
+// which keeps working, in the live line and in the summary; never a block of
+// the model provider or the network being off.
+func TestAModelHostSideRequestIsNoBlockOfTheModelProvider(t *testing.T) {
+	ta := newTestApp(t, "")
+	stderr := liveErr(ta)
+	noChanges(ta)
+	ta.daemon.createNetwork = "deny"
+	const model = "bedrock-runtime.us-east-1.amazonaws.com"
+	ta.daemon.live = []sandboxapi.ActivityEvent{
+		{Seq: 1, Kind: sandboxapi.ActivityEgressBlocked, Sandbox: sbName, Host: model, Port: 8443,
+			Source: sandboxapi.SourceOpenShell, Reason: sandboxapi.ReasonModelHostSide},
+		{Seq: 2, Kind: sandboxapi.ActivityEgressBlocked, Sandbox: sbName, Host: "github.com", Port: 443,
+			Source: sandboxapi.SourceOpenShell, Reason: "transparent_tcp_policy_denied"},
+	}
+	ta.term.during = func() {
+		waitFor(t, "the refusals", func() bool { return strings.Contains(stderr.String(), "github.com") })
+	}
+	ta.ok(t, ta.Run(bg, RunOptions{Harness: "claude"}))
+	want := "⚠ " + model + ":8443: a side request outside the model channel was refused; model calls are unaffected (no OpenShell rule allows it)"
+	has(t, stderr.String(), want)
+	has(t, ta.output(), want, "✗ DefenseClaw blocked github.com:443: the network is off for this sandbox (network.mode deny)", " · 1 site blocked")
+	lacks(t, ta.output(), "DefenseClaw blocked "+model, model+":8443: the network is off", "2 sites blocked")
+}
+
 // Manual R2-2: while the daemon does not answer, the run says so (the hooks
 // fail closed meanwhile), then, as soon as it answers, that it is back, and
 // the summary keeps the outage.
@@ -791,8 +817,8 @@ func TestSessionEndNamesRuntimeAndOtherGateway(t *testing.T) {
 		{name: "MicroVM", sandboxDriver: "vm",
 			want: []string{"MicroVM stopped under the session", "its gateway restarted"}, absent: []string{"Docker", "container stopped", "likely took over"}},
 		{name: "failed MicroVM main process", sandboxDriver: "vm", phaseReason: "MainProcessFailed: Canonical main process exited with status 1",
-			want:   []string{"MicroVM stopped under the session", "sandbox start " + sbName + " --end-vm", "what the VM has not written to its disk is lost", "sandbox delete " + sbName + "`", "deletes it and its work"},
-			absent: []string{"which keep the sandbox and its work"}},
+			want:   []string{"MicroVM stopped under the session", "fails with Conflict and leaves it starting", "sandbox delete " + sbName + "`", "deletes it and its work"},
+			absent: []string{"which keep the sandbox and its work", "--end-vm` ends"}},
 		{name: "failed MicroVM process exited", sandboxDriver: "vm", phaseReason: "ProcessExited: VM process exited with status 1",
 			want:   []string{"MicroVM stopped under the session", "last successful disk sync"},
 			absent: []string{"which keep the sandbox and its work", "container stopped"}},

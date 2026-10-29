@@ -5,8 +5,12 @@ every wrapper and removal script in `packaging/mdm`. They also print one
 lifecycle-result document (`lifecycle-result.schema.json`) whose `exit_code`
 field matches the process exit code. The lifecycle prints the document when
 it runs with `--json` (Linux, macOS, the installed Windows CLI) or `JSON=1`
-(Setup); the kit's scripts always ask for it. The detection and Remediations
-scripts print one line instead (see `detection.md`).
+(Setup); the kit's scripts always ask for it. From 1.0.5 an argument error
+of a lifecycle verb (an unknown flag, a malformed value, a stray argument, a
+`--lock-wait` out of range) prints it too when `--json` is on the command
+line, with `invalid_arguments` (`management-agent.md` section 2.3). The
+detection and Remediations scripts print one line instead (see
+`detection.md`).
 
 ## Windows (MSI-compatible)
 
@@ -89,7 +93,11 @@ evaluated". Run the `status` action to inspect the host.
 
 Every other code (for example `config_invalid`, `lifecycle_busy`,
 `rolled_back`, `profile_conflict`, `downgrade_refused`) comes from the
-lifecycle itself.
+lifecycle itself, except `sandboxes_running`: the macOS package refused to
+install while a sandbox daemon of DefenseClaw 1.0.3 or older runs a sandbox
+(the Linux packages refuse the same way, with the reason on stderr). The
+message names each user, sandbox and the command that user runs to end it;
+install again once they are gone.
 
 A signed policy bundle (`--bundle-file`, `-BundlePath`, Setup `BUNDLE=`) uses
 the same exit codes. Its refusals (`signature_invalid`, `version_not_newer`,

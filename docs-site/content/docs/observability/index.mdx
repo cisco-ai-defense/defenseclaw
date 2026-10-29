@@ -204,7 +204,20 @@ defenseclaw observability destination test engineering
 
 {/* needs-live-capture: destination test output against a reachable collector */}
 
-Add `--write-probe` to send one marked, content-free record. The test connects from your shell, while the gateway delivers through the proxy it was started with. If the test passes but `defenseclaw doctor` reports `delivery_failed`, look for `export failed` lines in the gateway log.
+`--write-probe` is not supported for OTLP: it would create ordinary logs,
+traces or metrics. The handshake checks connectivity and does not prove delivery
+from the gateway.
+
+To check delivery, use an event in a bucket the destination receives. A clean
+agent call may record nothing in `security.finding` or `enforcement.action`, so
+with the step 2 filter it may send nothing. Check before you add the filter, or
+pick an event in one of the filter's buckets: run step 3 with its bucket and
+confirm `engineering` shows `send`. Then find its event ID in the local audit
+log, and that ID at the collector or its destination.
+
+The test connects from your shell, while the gateway delivers through the proxy
+it was started with. If the test passes but `defenseclaw doctor` reports
+`delivery_failed`, look for `export failed` lines in the gateway log.
 
 ### Undo
 
@@ -411,7 +424,7 @@ These are the targets of the bundled alert rules. Keep connector IDs, trace IDs 
 
 1. Run `defenseclaw observability plan`. Confirm the destination is enabled and selects the signals and buckets you expect.
 2. Check `defenseclaw status`, the gateway log and collector logs. For a remote destination, check DNS, TLS, credentials and the network.
-3. Run `defenseclaw observability destination test <name>`, with `--write-probe` for one marked write. The test connects directly from your shell. The gateway delivers through the proxy it started with (`HTTPS_PROXY` and `NO_PROXY`, or the enterprise proxy). If the test passes but `doctor` shows `delivery_failed`, find `[observability] <name> ... export failed` lines in the gateway log; each says whether the connection was direct or through a proxy. If it used a proxy, restart the gateway from a shell with the right proxy settings.
+3. Run `defenseclaw observability destination test <name>`. Add `--write-probe` only where supported; OTLP supports the handshake only. To prove gateway delivery, match a local audit event ID at the destination. The test connects directly from your shell. The gateway delivers through the proxy it started with (`HTTPS_PROXY` and `NO_PROXY`, or the enterprise proxy). If the test passes but `doctor` shows `delivery_failed`, find `[observability] <name> ... export failed` lines in the gateway log; each says whether the connection was direct or through a proxy. If it used a proxy, restart the gateway from a shell with the right proxy settings.
 4. Inspect the destination's queue, retry, drop and circuit telemetry. Repair and reload it, or run `defenseclaw setup observability disable <name>`.
 
 ### Runbook: audit sink
@@ -420,5 +433,5 @@ The alert keeps the historical `audit.sink` metric name. The target is a named d
 
 1. Find the `sink_kind` and destination name, then its delivered, dropped, retry and circuit telemetry.
 2. Check its credential, endpoint, `network_safety`, `send` and `routes` without printing secrets.
-3. Run `defenseclaw observability destination test <name>`; use `--write-probe` only for an approved write.
+3. Run `defenseclaw observability destination test <name>`; use `--write-probe` only for a supported, approved write. OTLP supports the handshake only.
 4. Confirm local SQLite is healthy. Repair or disable only the failing destination. Do not remove local retention or widen routing to clear the alert.

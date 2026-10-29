@@ -14,6 +14,7 @@ package enterpriseunix
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -424,6 +425,10 @@ func (l *lifecycle) describeMacOSAgents(ctx context.Context) {
 			if job.base == labelOpenShellGateway && job.state.State != "running" {
 				if status, err := l.env.sandboxOps().Status(ctx, a); err == nil {
 					running = status.Running
+				} else if errors.Is(err, errHomeNotAnswering) {
+					// Not inspected is reported, not read as idle (GAP-1751).
+					l.result.MarkSecurityIncomplete(codeSandboxUserState)
+					l.result.AddWarning(codeSandboxUserState, fmt.Sprintf("the sandbox state of %s (uid %d) is not confirmed: %v", a.Name, a.UID, err))
 				}
 				break
 			}
@@ -447,7 +452,7 @@ func (l *lifecycle) describeMacOSAgents(ctx context.Context) {
 				}
 				message := fmt.Sprintf("LaunchAgent %s of %s (uid %d) in %s failed: %s; %s", job.label, a.Name, a.UID, job.domain, why, next)
 				l.result.Services = append(l.result.Services, enterprisestatus.Service{Name: "sandbox " + a.Name + " " + job.domain + "/" + job.label, Kind: sandboxRowKind, State: "failed: " + why})
-				l.result.SecurityComplete = false
+				l.result.MarkSecurityIncomplete(codeSandboxUserState)
 				if l.opts.Action == ActionEnsure && l.opts.FromPackage {
 					l.result.AddWarning(codeSandboxUserState, message)
 				} else {

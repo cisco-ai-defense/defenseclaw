@@ -42,7 +42,7 @@ A policy is what turns a finding into an action. DefenseClaw checks each prompt,
 
 ## What it does not do
 
-- A level alone does not block in observe mode. Blocking needs action mode; see [the guardrail](/docs/guardrail).
+- A level alone does not block in observe mode. Blocking needs action mode; see [the guardrail](/docs/guardrail). One exception: an agent that changes DefenseClaw's own files, such as a copy into `~/.defenseclaw`, is blocked in every mode (rule `tamper.detector_state_write`; the permissive pack only reports it).
 - A custom CEL rule cannot grant itself blocking power. A block needs complete facts and a connector that can stop the call before it runs.
 - The correlator never stops the request that completes a pattern.
 

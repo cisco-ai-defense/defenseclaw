@@ -55,3 +55,47 @@ func TestPermissionEditArgsRequiresOneCompleteDeclaredDiff(t *testing.T) {
 		t.Fatalf("extra target became trusted: %s", got)
 	}
 }
+
+func TestPermissionEditArgsNativeCreatedFileDiff(t *testing.T) {
+	for _, path := range []string{"/home/alice/project/README.md", `C:\Users\alice\project\README.md`} {
+		gitPath := strings.TrimPrefix(strings.ReplaceAll(path, `\`, "/"), "/")
+		diff := "\ndiff --git a/" + gitPath + " b/" + gitPath +
+			"\ncreate file mode 100644\nindex 0000000..0000000\n--- a/dev/null\n+++ b/" + gitPath +
+			"\n@@ -1,0 +1,2 @@\n+first\n+second\n"
+		got := PermissionEditArgs("edit", map[string]any{"file_path": path, "diff": diff})
+		if len(got) == 0 || !strings.Contains(string(got), `"new_str":"first\nsecond"`) {
+			t.Fatalf("native create diff %q projected=%s", path, got)
+		}
+		if bad := PermissionEditArgs("edit", map[string]any{"file_path": path,
+			"diff": strings.Replace(diff, "+++ b/"+gitPath, "+++ b/other.txt", 1)}); len(bad) != 0 {
+			t.Fatalf("mismatched created file projected=%s", bad)
+		}
+	}
+}
+
+// Copilot CLI 1.0.105 asks an apply_patch of context lines only as an edit
+// whose diff has one empty hunk (managed AD RHEL, GAP-1832: the callback was
+// HOOK-TOOL-CALL-UNPARSED and blocked in action mode). It projects onto an
+// edit of the declared file with no text; any body line, a second hunk, a
+// non-empty count or a created file stays unproven.
+func TestPermissionEditArgsNoChangeDiffNamesItsFile(t *testing.T) {
+	const path = "/home/dcad-r103-eng1@dclab.test/pah-proj/b.txt"
+	head := "\ndiff --git a" + path + " b" + path + "\nindex 0000000..0000000 100644\n--- a" + path + "\n+++ b" + path + "\n"
+	live := head + "@@ -0,0 +0,0 @@\n\n"
+	got := PermissionEditArgs("edit", map[string]any{"file_path": path, "diff": live})
+	if string(got) != `{"new_str":"","old_str":"","path":"`+path+`"}` {
+		t.Fatalf("no-change diff projected=%s", got)
+	}
+	for name, diff := range map[string]string{
+		"body line":       head + "@@ -0,0 +0,0 @@\n hidden\n",
+		"second hunk":     head + "@@ -0,0 +0,0 @@\n@@ -0,0 +0,0 @@\n",
+		"non-empty count": head + "@@ -1 +1 @@\n",
+		"created file": "\ndiff --git a" + path + " b" + path + "\nnew file mode 100644\nindex 0000000..0000000\n--- a/dev/null\n+++ b" + path +
+			"\n@@ -0,0 +0,0 @@\n",
+		"other file": strings.Replace(live, "+++ b"+path, "+++ b/home/dcad-r103-eng1@dclab.test/.ssh/authorized_keys", 1),
+	} {
+		if got := PermissionEditArgs("edit", map[string]any{"file_path": path, "diff": diff}); len(got) != 0 {
+			t.Fatalf("%s: projected=%s", name, got)
+		}
+	}
+}

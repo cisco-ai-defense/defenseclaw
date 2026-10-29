@@ -89,7 +89,7 @@ defenseclaw keys check
 </Tabs>
 
 - `--value-stdin` reads the first line of standard input and never echoes it. `--value V` puts the secret in the process listing; keep it for throwaway values.
-- `keys set` and `keys remove` record a `config-update` audit event with target `dotenv:<ENV>` and only the before and after presence; the value is never logged. With the gateway stopped, the change is saved and the command warns that the audit event was not recorded.
+- `keys set` and `keys remove` record a configuration-change audit event (`audit export` action `config.change.applied`, `structured` `defenseclaw.admin.operation=config-update` and `defenseclaw.admin.target_ref=config:dotenv:<ENV>`) with only the before and after presence; the value is never logged. With the gateway stopped, the change is saved and the command warns that the audit event was not recorded.
 - `keys remove` works for any name in `.env`, including names outside the registry, and leaves a value exported in your shell alone.
 - `keys set DEFENSECLAW_GATEWAY_TOKEN` reports that it manages gateway authentication (the name is case-insensitive on Windows). The running gateway keeps the token it loaded at start. CLI audit events still use that token, but other CLI calls to the gateway send the saved one and get HTTP 401 until the gateway restarts. Until then `defenseclaw doctor` reports `[FAIL] Gateway authentication  —  local token rejected (HTTP 401) — run 'defenseclaw doctor --fix' to reconcile the running gateway`. To clear the 401, run `defenseclaw-gateway restart`, or run `defenseclaw doctor --fix`, which asks before it restarts the gateway (`--yes` skips the prompt). For a coordinated gateway and connector rotation use `defenseclaw setup rotate-token --yes`.
 
@@ -168,9 +168,11 @@ See also [LLM providers](/docs/guardrail/unified-llm-key) and [Environment varia
 
 Fixes for the gateway, the keys it needs and the destinations it exports to.
 
-### Tool calls blocked with `gateway restarting or not running`
+### Tool calls blocked while the gateway is stopped
 
-**Cause.** The gateway is stopped, and the hook is fail-closed. This holds in observe mode too.
+**You see.** The agent says `DefenseClaw blocked this because its gateway is stopped`. The shell hook prints `defenseclaw: gateway unreachable, blocking <agent> tool (fail mode closed)`; the native Windows hook gives `gateway restarting or not running`.
+
+**Cause.** The gateway is stopped and this hook blocks during an outage: under the strict policy, a saved `closed`, or a managed install, in observe and action mode. Under the default and permissive policies a per-user call runs with one warning instead ([gateway outage table](/docs/connectors/capability-matrix#gateway-outage)).
 
 **Fix.** `defenseclaw-gateway status`, then `defenseclaw-gateway start`. A hook does not start a stopped gateway after `defenseclaw-gateway stop`, during an upgrade, for 60 seconds after a failed start, or with `DEFENSECLAW_GATEWAY_AUTOSTART=0`. Read `~/.defenseclaw/gateway.log` for the start error.
 
@@ -178,7 +180,7 @@ Fixes for the gateway, the keys it needs and the destinations it exports to.
 
 ### `gateway did not answer`
 
-**Cause.** The gateway runs but is frozen. Neither a hook nor the watchdog restarts it.
+**Cause.** The gateway runs but is frozen. Neither a hook nor the watchdog restarts it. A per-user hook blocks the call in every fail mode, a saved `open` included, and its line says `(not a gateway outage, so it is blocked in every fail mode)`.
 
 **Fix.** `defenseclaw-gateway restart`.
 
@@ -198,7 +200,7 @@ Fixes for the gateway, the keys it needs and the destinations it exports to.
 
 **Fix.** The message names the command, for example `chmod go-w <file>`. Run it as the file's owner.
 
-**Check.** `defenseclaw doctor` shows `Config validation` as `[PASS]`.
+**Check.** `defenseclaw doctor` shows `Config file` (`canonical schema valid`) as `[PASS]` on every OS. `Config validation` appears only as a failure or warning.
 
 ### `Config validation` fails after an edit
 
@@ -214,7 +216,7 @@ Fixes for the gateway, the keys it needs and the destinations it exports to.
 
 **Fix.** `defenseclaw doctor --fix` (previews with `--dry-run`). It never prints the token.
 
-**Check.** `Gateway authentication` is `[PASS]`.
+**Check.** `Gateway authentication` is `[PASS]`. On Windows doctor shows `Gateway token env`, `Gateway token drift` and `Gateway PID identity` instead.
 
 ### `the LLM judge is off`
 

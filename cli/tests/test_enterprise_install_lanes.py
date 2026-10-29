@@ -31,8 +31,14 @@ CHECKER = SCRIPTS / "check_enterprise_lifecycle_result.py"
 RESULT_CHECKER_TEST = SCRIPTS / "test_check_enterprise_lifecycle_result.py"
 UNIX_LANE = SCRIPTS / "test-enterprise-unix-install.sh"
 POSTINSTALL_RESULT_TEST = ROOT / "packaging/linux/tests/test_postinstall_result.sh"
-# CI selects Python modules that name the changed file's basename.
+SANDBOX_HOLD_TEST = ROOT / "packaging/linux/tests/test_upgrade_holds_legacy_sandbox_daemons.sh"
+# CI selects Python modules that name the changed file's basename: the hold
+# lives in preinstall.sh and the macOS package's build script (GAP-1809).
 POSTINSTALL = ROOT / "packaging/linux/postinstall.sh"
+PREINSTALL = ROOT / "packaging/linux/preinstall.sh"
+MACOS_PKG_BUILD = ROOT / "scripts/build-macos-enterprise-pkg.sh"
+MACOS_TEST_RUNNER = ROOT / "packaging/macos/tests/run_tests.sh"
+MACOS_SANDBOX_HOLD_TEST = ROOT / "packaging/macos/tests/test_enterprise_pkg_sandbox_hold.sh"
 
 
 def test_hook_process_warning_keeps_install_lanes_honest(tmp_path: Path) -> None:
@@ -188,6 +194,32 @@ def test_postinstall_failure_contract_runs_in_ci() -> None:
     assert result.returncode == 0, result.stdout + result.stderr
 
 
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="the hold reads /proc")
+def test_upgrade_holds_legacy_sandbox_daemons_runs_in_ci() -> None:
+    """GAP-0868 and GAP-1553: the package's hold of a pre-1.0.4 sandbox
+    daemon runs in CI, not only in gate scripts (GAP-1596)."""
+    result = subprocess.run(
+        ["sh", str(SANDBOX_HOLD_TEST)],
+        cwd=ROOT, capture_output=True, text=True, timeout=120, check=False,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="the stand-in ps reads /proc")
+def test_macos_pkg_sandbox_hold_runs_in_ci() -> None:
+    """GAP-1554 and RB1-1: the macOS package's hold of a pre-1.0.4 sandbox
+    daemon (in build-macos-enterprise-pkg.sh) runs in CI too; its test is
+    written to run on Linux (GAP-1809)."""
+    assert PREINSTALL.is_file() and MACOS_PKG_BUILD.is_file()
+    result = subprocess.run(
+        ["bash", str(MACOS_TEST_RUNNER), str(MACOS_SANDBOX_HOLD_TEST)],
+        cwd=ROOT, capture_output=True, text=True, timeout=180, check=False,
+    )
+    output = result.stdout + result.stderr
+    assert result.returncode == 0, output
+    assert "skip" not in output, output
+
+
 def test_checker_accepts_a_matching_result(tmp_path: Path) -> None:
     result = _check(
         tmp_path,
@@ -281,6 +313,38 @@ def test_checker_upgrade_gate_options(tmp_path: Path) -> None:
     assert _check(tmp_path, upgraded, *FULL, "--policy-applied", "--config-generation-above", "1").returncode == 0
     result = _check(tmp_path, _result(), *FULL, "--policy-applied")
     assert "  - the result reports no policy" in result.stderr.splitlines(), result.stderr
+
+
+def test_the_rollback_drill_accepts_the_warnings_of_the_restored_release(tmp_path: Path) -> None:
+    # GAP-1412: the pinned UBI 1.0.3 -> 1.0.4 lane stopped at 05-upgrade-fault
+    # although the rollback worked: the new release reported the restored
+    # 1.0.3 install's hook residual, its connectors without a trusted
+    # policy-view digest and the host's ptrace sysctl, and the drill's
+    # allow list named none of them. Its own checker call is run here.
+    lines = UNIX_LANE.read_text(encoding="utf-8").splitlines()
+    start = next(i for i, line in enumerate(lines) if '"$checker" "$results/05-upgrade-fault.json"' in line)
+    call = lines[start]
+    while lines[start].rstrip().endswith("\\"):
+        start += 1
+        call += " " + lines[start]
+    words = shlex.split(call.replace("\\", " "))
+    words = words[words.index('$results/05-upgrade-fault.json') + 1:]
+    # The host's own policy-view warnings are required, not allowed, by
+    # ${kernel_views[@]} (empty on a host without them, as here).
+    words = [w for w in words if not w.startswith("${held") and not w.startswith("${kernel_views")]
+    words = ["linux" if w == "$platform" else w for w in words]
+    drill = _result(
+        ok=False, exit_code=1, installed_version="1.0.3", security_complete=False,
+        errors=[{"code": "lifecycle_test_fault", "message": "fault"}],
+        warnings=[{"code": code, "message": code} for code in (
+            "lifecycle_test_fault", "rolled_back", "machine_policy_incomplete", "machine_policy_incomplete",
+            "hook_process_fail_open", "hook_process_fail_open")],
+    )
+    result = _check(tmp_path, drill, *words)
+    assert result.returncode == 0, (words, result.stderr)
+    # A warning the restored release does not report still fails the drill.
+    other = dict(drill, warnings=[*drill["warnings"], {"code": "guardian_target_failed", "message": "x"}])
+    assert "unexpected warning guardian_target_failed" in _check(tmp_path, other, *words).stderr
 
 
 def test_upgrade_config_check_requires_a_v9_source_and_every_value_kept(tmp_path: Path) -> None:

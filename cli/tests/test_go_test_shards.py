@@ -9,6 +9,7 @@ import pytest
 from scripts.go_test_shards import (
     check_exact_cover,
     discover_test_files,
+    match_test_files,
     partition_packages,
     partition_test_files,
     regex_names,
@@ -127,3 +128,43 @@ def test_package_mode_splits_a_slow_package_and_covers_every_package_once(tmp_pa
         "TestLightB",
         "TestUnrecorded",
     ]
+
+
+def test_windows_connector_shards_count_the_operator_collector_matrix() -> None:
+    # GAP-2199: TestClaudeMarkedOperatorCollectorKeepsBytes runs 126 full
+    # Claude Setup/Teardown subtests (231 s on a native Windows preflight
+    # host). Unrecorded, it weighed the 0.18 s "*" default, so the balancer
+    # put it beside a full 288 s shard and the connector package hit its
+    # 660 s Go timeout on the hosted runner (a slow run, not a blocked write).
+    import json
+    import statistics
+
+    root = Path(__file__).resolve().parents[2]
+    timings = json.loads((root / "scripts/test-timings/go-windows.json").read_text(encoding="utf-8"))
+    tests = timings["tests"]["internal/gateway/connector"]
+    files = discover_test_files(root / "internal/gateway/connector")
+    shards = partition_test_files(files, 16, tests)
+    measured = dict(tests, TestClaudeMarkedOperatorCollectorKeepsBytes=231.3)
+    default = tests["*"]
+    weights = [sum(float(measured.get(name, default)) for name in shard) for shard in shards]
+    holder = next(i for i, shard in enumerate(shards) if "TestClaudeMarkedOperatorCollectorKeepsBytes" in shard)
+    assert weights[holder] <= 1.25 * statistics.median(weights), (holder, weights)
+
+
+def test_match_keeps_the_tests_a_run_pattern_selects_and_still_covers_them(tmp_path: Path) -> None:
+    # The CI connector matrix shards only the connector tests its -run
+    # pattern selects; every selected test is in exactly one part.
+    (tmp_path / "a_test.go").write_text(
+        "package sample\nfunc TestHookOne(t *testing.T) {}\nfunc TestPlain(t *testing.T) {}\n", encoding="utf-8"
+    )
+    (tmp_path / "b_test.go").write_text("package sample\nfunc TestOther(t *testing.T) {}\n", encoding="utf-8")
+    (tmp_path / "c_test.go").write_text(
+        "package sample\nfunc TestSetupTwo(t *testing.T) {}\nfunc TestModeThree(t *testing.T) {}\n", encoding="utf-8"
+    )
+
+    files = match_test_files(discover_test_files(tmp_path), "Hook|Setup|Mode")
+    assert [names for _, names in files] == [("TestHookOne",), ("TestModeThree", "TestSetupTwo")]
+    shards = partition_test_files(files, 2)
+    assert check_exact_cover(shards, ["TestHookOne", "TestModeThree", "TestSetupTwo"]) == []
+    with pytest.raises(ValueError):
+        match_test_files(files, "Hook/sub")

@@ -273,6 +273,12 @@ func TestTetragonReadinessChecks(t *testing.T) {
 			in.Intent.ObserveCLI = []string{"codex"}
 		}, []want{{checkAgents, checkFail, "no agent seen for dcr-std1; no enrolled user has a row for codex"},
 			{checkConnectorsAction, checkWarn, "codex is in observe mode"}}},
+		// GAP-1965: a user who runs only a shared install outside the home
+		// (an npm prefix in /opt) is told where the helper looks.
+		{"no agent names where agents are seen", "observe", "enforce", func(in *tetragonInputs, _ *tetragonProbes) {
+			in.State.UIDs = []kernelpolicy.UIDStatus{{UID: 1001, User: "dcr-std1", Connectors: []string{"claudecode"},
+				State: kernelpolicy.UIDInactive, Reason: kernelpolicy.ReasonNoAnchors}}
+		}, []want{{checkAgents, checkFail, "or enroll a user who runs one; an agent counts when it is installed in the user's home (for example ~/.local/bin/claude), in /usr/local/bin, /usr/bin or /home/linuxbrew/.linuxbrew/bin, or in the bin folder of a prefix listed in enterprise.enrollment.agent_prefixes, on a path only root or that user can change; a shared install anywhere else, or on a path other accounts can write, is not seen"}}},
 		{"approval missing", "observe", "enforce", func(in *tetragonInputs, _ *tetragonProbes) { *in = withUsers(*in) },
 			[]want{{checkApproval, checkInfo, "not approved yet"}, {checkBurnIn, checkInfo, "1 of 3"},
 				{checkConnectorsAction, checkPass, "claudecode"}}},
@@ -693,6 +699,12 @@ func TestPlaneCFromHealth(t *testing.T) {
 	for body, says := range map[string]string{
 		`{"api":{"state":"running"}}`:                    "no ai_runtime section",
 		`{"ai_runtime":{"details":{"planes":{"a":{}}}}}`: "has not reported Plane C yet",
+		// GAP-1964: a starting AI runtime lists the configured planes until
+		// its first poll; that is "not reported yet", not a /health that
+		// does not parse.
+		`{"ai_runtime":{"state":"starting","details":{"planes":["a","b","c"],"poll_interval_s":30}}}`: "has not reported Plane C yet",
+		`{"ai_runtime":{"state":"starting","details":{}}}`:                                            "has not reported Plane C yet",
+		`{"ai_runtime":{"details":{"planes":"c"}}}`:                                                   "does not parse",
 		`not json`: "does not parse",
 	} {
 		if got := planeCFromHealth([]byte(body)); got.Read || !strings.Contains(got.Err, says) {

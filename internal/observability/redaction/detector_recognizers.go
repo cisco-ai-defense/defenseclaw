@@ -451,18 +451,20 @@ func recognizeConnectionStrings(input string) ([]candidate, error) {
 	result := []candidate{}
 	uriRanges := uriRE.FindAllStringIndex(input, -1)
 	for _, uri := range uriRanges {
-		uriValue := input[uri[0]:uri[1]]
-		parsed, ok := parseHierarchicalURI(uriValue)
+		uriValue, parsed, ok := parseMatchedURI(input[uri[0]:uri[1]])
 		if !ok && containsEligibleRawQuery(uriValue) {
 			return nil, detectorError(FailureValidator)
 		}
-		if !ok || !supportedConnectionScheme(parsed.scheme) {
+		if !supportedConnectionScheme(parsed.scheme) {
 			continue
 		}
 		if parsed.passwordStart >= 0 && parsed.passwordEnd > parsed.passwordStart {
 			result = append(result, candidate{start: uri[0] + parsed.passwordStart, end: uri[0] + parsed.passwordEnd, accepted: true})
 		}
-		queryMatches, err := queryCandidates(input[uri[0]:uri[1]], uri[0], parsed)
+		if !ok {
+			continue
+		}
+		queryMatches, err := queryCandidates(uriValue, uri[0], parsed)
 		if err != nil {
 			return nil, err
 		}
@@ -706,13 +708,9 @@ func validBase64Alphabet(value string) bool {
 func recognizeURLQueries(input string) ([]candidate, error) {
 	result := []candidate{}
 	for _, uri := range uriRE.FindAllStringIndex(input, -1) {
-		uriValue := input[uri[0]:uri[1]]
-		parsed, ok := parseHierarchicalURI(uriValue)
+		uriValue, parsed, ok := parseMatchedURI(input[uri[0]:uri[1]])
 		if !ok && containsEligibleRawQuery(uriValue) {
 			return nil, detectorError(FailureValidator)
-		}
-		if !ok {
-			continue
 		}
 		if (parsed.scheme == "http" || parsed.scheme == "https") && parsed.passwordEnd > parsed.passwordStart {
 			result = append(result, candidate{
@@ -720,6 +718,9 @@ func recognizeURLQueries(input string) ([]candidate, error) {
 				end:      uri[0] + parsed.passwordEnd,
 				accepted: true,
 			})
+		}
+		if !ok {
+			continue
 		}
 		queryMatches, err := queryCandidates(uriValue, uri[0], parsed)
 		if err != nil {
@@ -957,10 +958,37 @@ type parsedURI struct {
 	queryStart, queryEnd       int
 }
 
+func parseMatchedURI(value string) (string, parsedURI, bool) {
+	parsed, ok := parseHierarchicalURI(value)
+	if ok {
+		return value, parsed, true
+	}
+	original := parsed
+	// The URI scanner includes sentence punctuation. Retry without a
+	// trailing punctuation run, keeping offsets relative to the original text.
+	trimmed := strings.TrimRight(value, ".,;:!?)]}`")
+	if trimmed != value {
+		parsed, ok = parseHierarchicalURI(trimmed)
+		if ok {
+			return trimmed, parsed, true
+		}
+		// An IPv6 authority can end in a structural ']' immediately before
+		// the sentence punctuation. Keep that byte in the original span.
+		if len(trimmed) < len(value) && value[len(trimmed)] == ']' {
+			withBracket := value[:len(trimmed)+1]
+			parsed, ok = parseHierarchicalURI(withBracket)
+			if ok {
+				return withBracket, parsed, true
+			}
+		}
+	}
+	return value, original, false
+}
+
 func parseHierarchicalURI(value string) (parsedURI, bool) {
 	result := parsedURI{passwordStart: -1, passwordEnd: -1, queryStart: -1, queryEnd: -1}
 	colon := strings.IndexByte(value, ':')
-	if colon <= 0 || colon+2 >= len(value) || value[colon+1:colon+3] != "//" || !allASCII(value) {
+	if colon <= 0 || colon+2 >= len(value) || value[colon+1:colon+3] != "//" {
 		return result, false
 	}
 	result.scheme = strings.ToLower(value[:colon])
@@ -984,8 +1012,10 @@ func parseHierarchicalURI(value string) (parsedURI, bool) {
 			result.passwordEnd = authorityStart + at
 		}
 	}
-	if !validURIHostPart(hostpart) {
-		return parsedURI{}, false
+	// Keep the userinfo span when the matched URI has an invalid host or a
+	// non-ASCII suffix. A malformed authority must not expose its password.
+	if !allASCII(value) || !validURIHostPart(hostpart) {
+		return result, false
 	}
 	fragment := len(value)
 	if hash := strings.IndexByte(value[authorityEnd:], '#'); hash >= 0 {
@@ -996,7 +1026,7 @@ func parseHierarchicalURI(value string) (parsedURI, bool) {
 		result.queryEnd = fragment
 	}
 	if !validPercentEscapes(value) {
-		return parsedURI{}, false
+		return result, false
 	}
 	return result, true
 }

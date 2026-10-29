@@ -39,18 +39,50 @@ func partialAllowGateway(t *testing.T, drop bool) string {
 	return addr
 }
 
+// incompleteOrNoAnswerBlockReason reports a block stderr that names an
+// incomplete gateway answer or the answer watchdog's no-answer outcome. Under
+// CPU contention the watchdog can fire before the response-status goroutine
+// runs, so both closed reasons are valid in that scheduling race; the direct
+// read-error cases pin the incomplete-response reason. A per-user hook names
+// the watchdog outcome "did not answer in time"; a managed hook outside the
+// standalone profile names it by its code, managedGatewayNoAnswerReason
+// (GAP-2276: Windows CI pk0 lost that race and the managed row rejected it).
+func incompleteOrNoAnswerBlockReason(stderr string) bool {
+	return strings.Contains(stderr, "incomplete gateway response") ||
+		strings.Contains(stderr, "did not answer in time") ||
+		strings.Contains(stderr, managedGatewayNoAnswerReason)
+}
+
+// GAP-2276: the watchdog outcome of every row TestAPartialGatewayBodyIsNotADecision
+// runs (per-user codex and claudecode, managed codex) is a reason that test
+// accepts. A gateway that never answers forces the watchdog branch that the
+// partial-body test reaches only when the scheduler loses the race.
+func TestEveryRowsWatchdogOutcomeIsAnAcceptedClosedReason(t *testing.T) {
+	shortAnswerBudget(t, 300*time.Millisecond)
+	for _, row := range []struct {
+		name, connector string
+		mutate          func(*Options)
+	}{
+		{"per-user codex closed", "codex", func(o *Options) { o.FailMode = "closed" }},
+		{"per-user claudecode not set", "claudecode", func(o *Options) { o.FailMode = "" }},
+		{"per-user claudecode open", "claudecode", func(o *Options) { o.FailMode = "open" }},
+		{"managed codex", "codex", managedCodex},
+	} {
+		result, elapsed := runAgainstGateway(t, row.connector, hungGateway(t), row.mutate)
+		if elapsed > time.Second || !blocked(result) || !incompleteOrNoAnswerBlockReason(result.stderr) {
+			t.Fatalf("%s: after %s code=%d stdout=%q stderr=%q, want a no-answer block the partial-body test accepts",
+				row.name, elapsed, result.code, result.stdout, result.stderr)
+		}
+	}
+}
+
 // B-40 (B-01 merge review item 1): a gateway that sent its headers and a
 // complete-looking allow, then stalled or dropped the connection before the
 // body it declared, has not decided. Once HTTP 200 arrived, an incomplete
 // answer is not a gateway outage and cannot use an open outage preference.
 func TestAPartialGatewayBodyIsNotADecision(t *testing.T) {
 	shortAnswerBudget(t, 300*time.Millisecond)
-	// Under CPU contention the watchdog can fire before the response-status
-	// goroutine runs. Both closed reasons are valid in that scheduling race;
-	// the direct read-error case below pins the incomplete-response reason.
-	closedReason := func(stderr string) bool {
-		return strings.Contains(stderr, "incomplete gateway response") || strings.Contains(stderr, "did not answer in time")
-	}
+	closedReason := incompleteOrNoAnswerBlockReason
 	for _, test := range []struct {
 		name string
 		drop bool

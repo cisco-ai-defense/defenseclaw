@@ -623,3 +623,76 @@ def test_sandbox_docs_name_the_openshell_release_setup_installs() -> None:
         ):
             for found in re.finditer(pattern, text):
                 assert found.group(1) == pinned, (page, found.group(0))
+
+
+def test_windows_docs_say_how_to_leave_bundle_mode() -> None:
+    # GAP-2261: managed Windows had no documented way back to a local admin
+    # config. A current signed bundle keeps bundle mode on without the anchor
+    # file, so the documented way is uninstall without purge, then ensure.
+    source = (ROOT / "internal/cli/windows_enterprise_bundle.go").read_text(encoding="utf-8")
+    mode = source.split("func windowsBundleMode(", 1)[1].split("\n}\n", 1)[0]
+    assert "state.Current != nil" in mode
+    lifecycle = _flat("enterprise/lifecycle.mdx")
+    section = lifecycle.split("**Leave bundle mode on Windows.**", 1)[1].split("A change is applied by the apply trigger", 1)[0]
+    for phrase in (
+        "`/repair`, a new `CONFIG=` and moving the anchor file away do not turn bundle mode off",
+        "Stop delivering bundles",
+        "`/uninstall JSON=1`, without `PURGE=1`",
+        "removes the trust anchors, the bundle state",
+        "`user_registrations_pending`",
+        "A user who is signed out, or whose session is disconnected, keeps an inert registration",
+        "needs no `/repair`",
+        "except the Claude Code registration of the account running Setup, which is removed",
+        "`/ensure CONFIG=<file> JSON=1`",
+        "a signed-out user at their next sign-in",
+    ):
+        assert phrase in section, phrase
+    windows = (DOCS / "enterprise/windows.mdx").read_text(encoding="utf-8")
+    assert "\n## Remove\n" in windows
+    assert "\n### Run Setup as LocalSystem\n" in windows
+
+
+def _table_cells(line: str) -> int:
+    """Count the cells GFM sees in a table row (code spans and escaped pipes do not split)."""
+    seps = 0
+    in_code = False
+    for i, ch in enumerate(line):
+        if ch == "`":
+            in_code = not in_code
+        elif ch == "|" and not in_code and (i == 0 or line[i - 1] != "\\"):
+            seps += 1
+    return seps - 1 if line.strip().endswith("|") else seps
+
+
+def test_docs_table_rows_have_no_cells_beyond_the_header() -> None:
+    # GFM drops every cell past the header's count, so text after an extra "|"
+    # never renders (the Windows machine_policy_incomplete sentence did this).
+    wide = []
+    for page in sorted(DOCS.rglob("*.mdx")):
+        header = None
+        fenced = False
+        for number, line in enumerate(page.read_text(encoding="utf-8").splitlines(), 1):
+            if line.lstrip().startswith("```"):
+                fenced = not fenced
+            if fenced or not line.startswith("|"):
+                header = None
+                continue
+            if header is None:
+                header = _table_cells(line)
+            elif _table_cells(line) > header:
+                wide.append(f"{page.relative_to(DOCS)}:{number}")
+    assert wide == []
+
+
+def test_windows_rollback_docs_name_the_hermes_fail_closed_limit_of_older_releases() -> None:
+    """GAP-2120: 1.0.4 and later write fail_closed on the Hermes pre_tool_call
+    hook; 1.0.0-1.0.3 read that hook as foreign, so a signed-out Hermes user
+    fails the older /verify after an /upgrade rollback until they sign in."""
+    hook_only = (ROOT / "internal/gateway/connector/hook_only.go").read_text(encoding="utf-8")
+    if 'entry["fail_closed"] = true' not in hook_only:
+        pytest.skip("Setup no longer writes the Hermes fail_closed key")
+    roll_back = _flat("enterprise/lifecycle.mdx").split("## Roll back", 1)[1].split(" ## ", 1)[0]
+    assert "Windows rollback to 1.0.0–1.0.3 with Hermes users" in roll_back
+    bullet = roll_back.split("Windows rollback to 1.0.0–1.0.3 with Hermes users", 1)[1].split("- **", 1)[0]
+    for phrase in ("fail_closed: true", "pre_tool_call", "signed out", "1603", "signs in", "uninstall the newer release"):
+        assert phrase in bullet, phrase

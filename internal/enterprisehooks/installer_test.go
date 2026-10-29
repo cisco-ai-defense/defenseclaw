@@ -127,6 +127,7 @@ func TestPrepareHookContractUsesManagedLockAndRuntimeReadersUnderSecureClient(t 
 	// the authenticated gateway service, including observe/drift-override cases.
 	t.Setenv(connector.WindowsGatewayServiceNameEnv, "DefenseClawGateway-Test")
 	setStandaloneProfileForTest(t, false)
+	useSecureClientHookDelivery(t)
 	const oversizedManagedArtifact = int64(4<<20 + 1)
 	conn := connector.NewClaudeCodeConnector()
 	newOpts := func(dataDir string) connector.SetupOpts {

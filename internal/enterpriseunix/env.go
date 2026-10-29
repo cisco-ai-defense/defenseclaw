@@ -25,6 +25,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/enterprisebundle"
@@ -210,6 +211,13 @@ type Env struct {
 	Lchown func(path string, uid, gid int) error
 	// OwnerOf reports a path's uid and gid without following a symlink.
 	OwnerOf func(path string) (int, int, error)
+	// clearDirFlags clears the macOS immutable and append-only flags of a
+	// folder and names the ones it found ("uchg,schg"; "" when none were
+	// set), also when clearing them failed. Tests replace it.
+	clearDirFlags func(path string) (string, error)
+	// dirFlagsCleared is told when ensureDir cleared such a flag; a
+	// lifecycle run lists it among its changes.
+	dirFlagsCleared func(path, flags string)
 	// Fchown changes the owner of an open file: the state folders the service
 	// account can write are re-owned through descriptors (settleStateModes).
 	Fchown func(f *os.File, uid, gid int) error
@@ -258,6 +266,15 @@ type Env struct {
 	// installs, which tags the macOS LaunchAgent labels (launchAgentLabel);
 	// "" outside a plan, where the installed gateway is read.
 	agentDigest string
+	// boundedHomeLookups is set by status and verify: an account's home is
+	// looked up in a bounded child before it is opened in this process, so a
+	// home on a stalled mount cannot keep them from answering (GAP-1751).
+	boundedHomeLookups bool
+	// homeLookups holds each home's bounded lookup answer for this run.
+	homeLookups struct {
+		sync.Mutex
+		answered map[string]bool
+	}
 
 	// ProductVersion is the version of the running lifecycle binary.
 	ProductVersion string
@@ -368,6 +385,9 @@ func (e *Env) fillDefaults() {
 	}
 	if e.Lchown == nil {
 		e.Lchown = os.Lchown
+	}
+	if e.clearDirFlags == nil {
+		e.clearDirFlags = clearBlockingFlags
 	}
 	if e.Fchown == nil {
 		e.Fchown = func(f *os.File, uid, gid int) error { return f.Chown(uid, gid) }

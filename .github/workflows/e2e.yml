@@ -33,6 +33,10 @@ jobs:
     # job further down the file. Mirrors the guard already in
     # `full-live` below — we just forgot to clone it onto `core`.
     if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
+    # GAP-1110 known limit (owner BALANCED-DEFAULTS.md rule 6): the real
+    # splunk/splunk:10.2.0 image is linux/amd64 only. On this ARM64 E2E
+    # runner, compose cannot start Splunk until a prepared X64 E2E runner
+    # is available. Keep the real Splunk search assertions in this job.
     runs-on: [self-hosted, Linux, ARM64, e2e]
     timeout-minutes: 30
     env:
@@ -712,6 +716,9 @@ jobs:
     # phases cannot cancel or corrupt each other on the same runner.
     needs: core
     if: ${{ always() && (github.event_name == 'schedule' || (needs.core.result == 'success' && (github.event_name == 'workflow_dispatch' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)))) }}
+    # GAP-1110 known limit (owner BALANCED-DEFAULTS.md rule 6): the real
+    # splunk/splunk:10.2.0 image is linux/amd64 only. This ARM64 job also
+    # needs a prepared X64 E2E runner before its real Splunk checks can run.
     runs-on: [self-hosted, Linux, ARM64, e2e]
     timeout-minutes: 45
     env:
