@@ -192,6 +192,29 @@ func LocalActionTool(toolName string) string {
 	return toolName
 }
 
+// LocalCall is the tool name and arguments the VS Code Local dialect judges
+// for a body's tool_name and tool_input: LocalToolArgs of the call, except
+// for an apply_patch call. The Copilot CLI runs the PascalCase hooks of the
+// Local hook file too and names its apply_patch tool Edit there, with the
+// patch text itself as tool_input (Copilot CLI 1.0.91, GAP-2497). That call
+// is the apply_patch call its own preToolUse names, so it is judged as one:
+// {"patch": text}, like the CLI dialect's (CLIToolArgs). Any other string
+// input keeps its native value and stays unread.
+func LocalCall(toolName string, input any) (string, json.RawMessage) {
+	if text, ok := input.(string); ok {
+		switch strings.TrimSpace(toolName) {
+		case "Edit", "apply_patch":
+			if patch, ok := PatchText("apply_patch", []byte(text)); ok {
+				args, err := marshal(map[string]string{"patch": patch})
+				if err == nil {
+					return "apply_patch", args
+				}
+			}
+		}
+	}
+	return toolName, LocalToolArgs(toolName, input)
+}
+
 // LocalToolArgs projects a known tool's arguments onto canonical names. An
 // unknown tool, an unknown argument name, or a non-string judged value keeps
 // the native object, so ActionFacts sees the shape it cannot prove instead of

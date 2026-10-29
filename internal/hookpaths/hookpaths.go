@@ -1104,7 +1104,11 @@ func copilotCall(envelope map[string]json.RawMessage, surface, event string) (js
 		value = nil
 	}
 	if local {
-		return toolRaw, copilotargs.LocalToolArgs(tool, value), toolConflict, argsConflict
+		name, args := copilotargs.LocalCall(tool, value)
+		if name != tool {
+			toolRaw, _ = json.Marshal(name)
+		}
+		return toolRaw, args, toolConflict, argsConflict
 	}
 	if nativePermission {
 		projected := copilotargs.PermissionToolArgs(tool, value)
