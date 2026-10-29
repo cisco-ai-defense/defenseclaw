@@ -1247,6 +1247,47 @@ const cmdUnknownReceiver = "\x00unknown-receiver"
 // (GAP-2536 checker it4).
 const cmdPathAssignment = "\x00path-assignment"
 
+// cmdReservedMark prefixes a reserved word that opens or closes a compound
+// command (cmdCompoundReserved) among the cmdRedefines command words.
+const cmdReservedMark = "\x00reserved:"
+
+// cmdCompoundReserved are the reserved words, read before a statement's
+// command word, that open (+1) or close (-1) a compound command whose
+// output can still go on to a pipe (done | bash, } | bash; GAP-2547).
+var cmdCompoundReserved = map[string]int{
+	"{": 1, "if": 1, "while": 1, "until": 1,
+	"}": -1, "fi": -1, "done": -1, "esac": -1,
+}
+
+// cmdCompoundShape returns how many compound commands the Git Bash text
+// opens less the ones it closes (for, case and select count as command
+// words), and whether a statement of it starts with a closer (or the text
+// with a ) ), so the output of what it closes goes on to the rest of the
+// line (GAP-2547).
+func cmdCompoundShape(text string) (delta int, closes bool) {
+	var words []string
+	cmdScanReceiverWords(text, 0, 0, false, -1, &words)
+	for _, w := range words {
+		switch w {
+		case "for", "case", "select":
+			delta++
+		}
+		if r, ok := strings.CutPrefix(w, cmdReservedMark); ok {
+			delta += cmdCompoundReserved[r]
+			closes = closes || cmdCompoundReserved[r] < 0
+		}
+	}
+	return delta, closes || strings.HasPrefix(strings.TrimLeft(text, " \t"), ")")
+}
+
+// cmdLineContinues reports a Git Bash line that ends in a pipe or list
+// operator (|, |&, ||, &&): the command goes on on the next line, after any
+// here-document bodies (GAP-2547).
+func cmdLineContinues(line string) bool {
+	t := strings.TrimRight(line, " \t\r")
+	return strings.HasSuffix(t, "|") || strings.HasSuffix(t, "|&") || strings.HasSuffix(t, "&&")
+}
+
 // cmdExpansionInertCommands never run an argument or hand standard input to
 // one, so an expansion among their arguments (cd "$REPO", echo "$X") names
 // no receiver. A path to one of them may be any program.
@@ -1363,6 +1404,11 @@ func cmdScanReceiverWords(line string, i int, closer byte, trust bool, op int, c
 			k, _ := cmdStatementCommand(stmt)
 			if cmdAssignsPath(stmt, k) {
 				*commandWords = append(*commandWords, cmdPathAssignment)
+			}
+			for _, w := range stmt[:k] {
+				if cmdCompoundReserved[w] != 0 {
+					*commandWords = append(*commandWords, cmdReservedMark+w)
+				}
 			}
 			for ; k < len(stmt); k++ {
 				w := strings.ReplaceAll(stmt[k], `\`, "")
@@ -1788,6 +1834,58 @@ func cmdTextSpansRead(command string, reading cmdOuterReading, trust bool) (span
 	// quoted spans of that line with a << inside (GAP-2539).
 	lineStart := 0
 	var lineQuoted []int
+	// feedBudget bounds the receiver reads (cmdHeredocFeeds, cmdCompoundShape)
+	// of one command: each costs its text, and a command needing more is
+	// read as feeding every body to a shell and cmd (over-read, never
+	// under-read; linear in the command, GAP-2539 checker it6).
+	feedBudget := 8*len(command) + 1<<16
+	feeds := func(text string, op int) (runs, cmdFeed bool) {
+		if feedBudget -= len(text) + 1; feedBudget < 0 {
+			return true, true
+		}
+		return cmdHeredocFeeds(text, op, trust)
+	}
+	shape := func(text string) (int, bool) {
+		if feedBudget -= len(text) + 1; feedBudget < 0 {
+			return 1, true
+		}
+		return cmdCompoundShape(text)
+	}
+	// awaiting are the here-document bodies whose command goes on after
+	// them (GAP-2547): the line of << ended in a pipe or list operator
+	// (cat <<EOF |, reading), or the body is inside a ( ), $( ) or compound
+	// command that a later line closes and pipes on (( cat <<EOF .. ) | bash,
+	// } | bash, done | bash). The lines that continue the command, and the
+	// lines that close a construct, are read as the bodies' receivers too.
+	// compound counts the compound commands open at lineStart; physStart is
+	// the start of the current physical line and skipNL the newline that
+	// ends the last body read.
+	type awaitingDoc struct {
+		span    int
+		reading bool
+	}
+	var awaiting []awaitingDoc
+	compound, physStart, skipNL := 0, 0, -1
+	awaitLine := func(text string) {
+		if len(awaiting) == 0 {
+			return
+		}
+		_, closes := shape(text)
+		read, runs, cmdFeed := false, false, false
+		for k := range awaiting {
+			a := &awaiting[k]
+			if !a.reading && !closes {
+				continue
+			}
+			if !read {
+				runs, cmdFeed = feeds(text, -1)
+				read = true
+			}
+			spans[a.span].runs = spans[a.span].runs || runs
+			spans[a.span].cmdFeed = spans[a.span].cmdFeed || cmdFeed
+			a.reading = cmdLineContinues(text)
+		}
+	}
 	argvQuoted := func(end int) {
 		for _, k := range lineQuoted {
 			span := spans[k]
@@ -1797,7 +1895,7 @@ func cmdTextSpansRead(command string, reading cmdOuterReading, trust bool) (span
 					break
 				}
 				op := span.start + 1 + from + at
-				if runs, cmdFeed := cmdHeredocFeeds(command[lineStart:end], op-lineStart, trust); runs || cmdFeed {
+				if runs, cmdFeed := feeds(command[lineStart:end], op-lineStart); runs || cmdFeed {
 					spans[k].argvRuns = true
 					break
 				}
@@ -1882,6 +1980,10 @@ func cmdTextSpansRead(command string, reading cmdOuterReading, trust bool) (span
 			continue
 		case reading == cmdReadingGitBash && c == '\n':
 			subscript = 0
+			if i != skipNL {
+				awaitLine(command[physStart:i])
+			}
+			physStart = i + 1
 			if parens == 0 {
 				argvQuoted(i)
 			}
@@ -1890,17 +1992,33 @@ func cmdTextSpansRead(command string, reading cmdOuterReading, trust bool) (span
 				// the bodies start after it.
 				for k := range pending {
 					doc := &pending[k]
-					doc.runs, doc.cmdFeed = cmdHeredocFeeds(command[doc.lineStart:i], doc.op-doc.lineStart, trust)
+					doc.runs, doc.cmdFeed = feeds(command[doc.lineStart:i], doc.op-doc.lineStart)
 				}
 				bodies, end := cmdHeredocBodies(command, i+1, pending)
+				for k := range bodies {
+					awaiting = append(awaiting, awaitingDoc{span: len(spans) + k,
+						reading: cmdLineContinues(command[pending[k].lineStart:i])})
+				}
 				pending = nil
 				if len(bodies) > 0 {
 					spans = append(spans, bodies...)
-					i = end
+					i, skipNL, physStart = end, end, end+1
 					continue
 				}
 			}
 			if parens == 0 {
+				delta, _ := shape(command[lineStart:i])
+				if compound = max(0, compound+delta); compound == 0 {
+					// The command is complete: a body waits only for the
+					// next line of a pipe or list it continues.
+					kept := awaiting[:0]
+					for _, a := range awaiting {
+						if a.reading {
+							kept = append(kept, a)
+						}
+					}
+					awaiting = kept
+				}
 				lineStart = i + 1
 			}
 		case reading == cmdReadingPowerShell && c == '<' && i+1 < n && command[i+1] == '#':
@@ -1961,6 +2079,9 @@ func cmdTextSpansRead(command string, reading cmdOuterReading, trust bool) (span
 			}
 		}
 		i++
+	}
+	if reading == cmdReadingGitBash && physStart < n {
+		awaitLine(command[physStart:n])
 	}
 	argvQuoted(n)
 	cmdMarkRunStrings(command, spans)

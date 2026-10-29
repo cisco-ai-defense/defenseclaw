@@ -263,6 +263,52 @@ func TestR105WindowsCMDBodyReaderIsLinear(t *testing.T) {
 	}
 }
 
+// TestR105WindowsCMDHeredocReceiverReadIsLinear: the here-document receiver
+// reads of one Git Bash command stay linear (checker it6 of GAP-2539: one
+// read of the whole line per double-quoted << span took 2 m 48 s for 58 KB of
+// echo "<<";), and a command beyond their bounds over-reads: the state write
+// still blocks and an ordinary command still runs.
+func TestR105WindowsCMDHeredocReceiverReadIsLinear(t *testing.T) {
+	const connectorName = "r105-cmd-heredoc-linear"
+	installToolCallCorpusProfileConnector(t, connectorName, "default")
+	const home = `C:\Users\Alice`
+	resolved := map[string]string{}
+	for _, value := range []string{"C:/Users/Alice/.defenseclaw", "C:/Users/Alice/.defenseclaw/config.yaml"} {
+		resolved[value] = value
+	}
+	const state = `%USERPROFILE%\.defenseclaw\config.yaml`
+	const size = 64 << 10
+	for _, tc := range []struct {
+		unit, tail string
+		block      bool
+	}{
+		{"echo \"<<\"; ", "cmd /c type nul > " + state, true},
+		{"echo \"<<\"; ", "git status", false},
+		{"echo \"$(cat <<'A'\nx\nA\n)\"; ", "cmd /c type nul > " + state, true},
+		{"cat <<'A' <<'A' ", "\nx\nA\ny\nA\ngit status", false},
+		{"{ cat <<'A'\nx\nA\n", "} | cmd /c type nul > " + state, true},
+		{"cat >> notes.md <<'A'\nsome note\nA\n", "git status", false},
+	} {
+		command := strings.Repeat(tc.unit, size/len(tc.unit)) + tc.tail
+		args, _ := json.Marshal(map[string]string{"command": command})
+		input := actionfacts.Input{Tool: "Bash", Args: args, CWD: home + `\project`, ActiveHome: home}
+		input.DialectHint = agentHookWindowsShellDialect(input)
+		start := time.Now()
+		findings := dispatchTrustedAction(t.Context(), trustedActionRequest{
+			Input: input, LegacyText: string(args), Connector: connectorName,
+			EnforcementCapable: true, ResolvedWriteTargets: resolved,
+		})
+		took := time.Since(start)
+		verdict := buildVerdict(findings, "tool_call")
+		if got := verdict.Action == "block"; got != tc.block {
+			t.Errorf("unit %q tail %q: action %q, want block=%t", tc.unit, tc.tail, verdict.Action, tc.block)
+		}
+		if took > 2*time.Second {
+			t.Errorf("unit %q: %d bytes read in %s", tc.unit, len(command), took)
+		}
+	}
+}
+
 // TestR105WindowsCMDMentionsAndManyCalls: text that only mentions a cmd.exe
 // state write in a Git Bash here-document body stays allowed, as does an
 // ordinary command with many cmd calls and a DefenseClaw state read; a
@@ -507,6 +553,24 @@ func TestR105WindowsCMDHeredocSearchArgument(t *testing.T) {
 		{"MSG=$(cat <<'EOF'" + body + "\n)", false},
 		{"echo \"$(cat <<'EOF'" + body + "\n)\" > notes.md", false},
 		{"grep -c cmd notes.md \"$(cat <<'EOF'" + body + "\n)\"", false},
+		// GAP-2547 rows: the command goes on after the body (a pipe or list
+		// the << line left open, or a ( ), $( ), { } or loop closed and piped
+		// on by a later line), so those lines are receivers too; a later
+		// separate statement, a text consumer after the pipe and a closer
+		// that pipes to a file keep the body text.
+		{"cat <<'EOF' |" + run + "\nbash", true},
+		{"( cat <<'EOF'" + run + "\n) | bash", true},
+		{"{ cat <<'EOF'" + run + "\n} | bash", true},
+		{"cat <<'EOF' |" + cmdBody + "\ncmd", true},
+		{"echo $(cat <<'EOF'" + run + "\n) | bash", true},
+		{"cat <<'EOF' |" + run + "\ngrep -v x |\nbash", true},
+		{"while true; do\n  cat <<'EOF'" + run + "\ndone | bash", true},
+		{"if true; then\n  { cat <<'EOF'" + run + "\n  } | sh; fi", true},
+		{"cat <<'EOF' |" + body + "\ngrep -c cmd", false},
+		{"{ cat <<'EOF'" + body + "\n} | grep -c cmd", false},
+		{"( cat <<'EOF'" + body + "\n) > notes.md", false},
+		{"if true; then\n  cat > notes.md <<'EOF'" + body + "\n  bash build.sh\nfi", false},
+		{"cat > notes.md <<'EOF'" + body + "\nbash build.sh", false},
 	} {
 		for _, tool := range []string{"Bash", "shell_command", "PowerShell"} {
 			args, _ := json.Marshal(map[string]string{"command": tc.command})
