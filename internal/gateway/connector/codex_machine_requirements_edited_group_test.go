@@ -389,7 +389,8 @@ func TestWindowsCodexUninstallTakesTheEarlierSessionStartShape(t *testing.T) {
 				if err != nil {
 					t.Fatalf("%s: %v", removal.name, err)
 				}
-				if strings.Contains(string(cleaned), "EncodedCommand") {
+				// The 1.0.4 bridge and the direct cmd.exe form (GAP-1908).
+				if strings.Contains(string(cleaned), "EncodedCommand") || strings.Contains(string(cleaned), " /d /v:off /c ") {
 					t.Errorf("%s: a DefenseClaw group survived the removal:\n%s", removal.name, cleaned)
 				}
 				if leftovers, err := windowsCodexRequirementsHoldOwnedLeftovers(cleaned, current); err != nil || leftovers {

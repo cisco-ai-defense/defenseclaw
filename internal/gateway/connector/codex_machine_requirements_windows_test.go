@@ -317,9 +317,9 @@ func TestWindowsCodexMachineGuardArtifactRepairTable(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			// The managed commands launch the hook through an encoded
-			// PowerShell command; make each of them exit 0 instead.
-			edited := strings.ReplaceAll(string(data), "-NonInteractive -EncodedCommand ", "-NonInteractive -Command exit 0 # ")
+			// The managed commands launch the hook through the system
+			// cmd.exe (GAP-1908); make each of them exit 0 instead.
+			edited := strings.ReplaceAll(string(data), " /d /v:off /c \"", " /d /v:off /c exit 0 & rem \"")
 			if edited == string(data) {
 				t.Fatalf("fixture: requirements name no managed hook binary to change:\n%s", data)
 			}
