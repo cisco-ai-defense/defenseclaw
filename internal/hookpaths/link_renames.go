@@ -4,6 +4,7 @@ import (
 	"errors"
 	"io/fs"
 	"os"
+	"os/user"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -375,8 +376,8 @@ const maxEnterBases = 64
 // from cwd and from the directories earlier words name, so cd d2 && cd r/x
 // is read too. The walk this starts only blocks when a linked tree holds a
 // disk link to state.
-// A word that starts with ~ or ~/ is read from home; ~user, ~+ and any
-// other tilde word may name the link (RV-c6-1).
+// A word that starts with ~ is also read from the home it names (RV-c6-1,
+// tildeWordPath); a tilde word that names no known home may name the link.
 func (l shellLinks) mayEnterLink(command, cwd, home string) bool {
 	if strings.ContainsAny(command, "$`*?[{\\") {
 		return true
@@ -389,13 +390,17 @@ func (l shellLinks) mayEnterLink(command, cwd, home string) bool {
 			}
 		}
 	}
-	for i, word := range words {
-		switch {
-		case home != "" && (word == "~" || strings.HasPrefix(word, "~/")):
-			words[i] = filepath.Join(home, word[1:])
-		case strings.HasPrefix(word, "~"):
+	// commandWords drops quotes, so a ~ word is read both as written (a
+	// quoted '~/r' is a directory named ~ under cwd, RV-c7-1) and expanded.
+	for _, word := range words {
+		if !strings.HasPrefix(word, "~") {
+			continue
+		}
+		expanded, ok := tildeWordPath(word, cwd, home)
+		if !ok {
 			return true
 		}
+		words = append(words, expanded)
 	}
 	names := make(map[string]bool)
 	for _, alias := range l.aliases {
@@ -434,6 +439,32 @@ func (l shellLinks) mayEnterLink(command, cwd, home string) bool {
 		}
 	}
 	return false
+}
+
+// tildeWordPath expands a leading tilde of word the way the shell does: ~
+// and ~/ from home, ~+ from cwd, ~user from the user database (RV-c7-2).
+// ok is false for ~- (the old directory is not known), a user that is not
+// found, or an empty home.
+func tildeWordPath(word, cwd, home string) (path string, ok bool) {
+	name, rest, _ := strings.Cut(word[1:], "/")
+	dir := home
+	switch name {
+	case "":
+	case "+":
+		dir = cwd
+	case "-":
+		return "", false
+	default:
+		account, err := user.Lookup(name)
+		if err != nil {
+			return "", false
+		}
+		dir = account.HomeDir
+	}
+	if dir == "" {
+		return "", false
+	}
+	return filepath.Join(dir, rest), true
 }
 
 // commandWords splits command text into words; a word may be a path.

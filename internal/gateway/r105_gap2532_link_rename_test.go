@@ -3,6 +3,7 @@ package gateway
 import (
 	"fmt"
 	"os"
+	"os/user"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -15,7 +16,8 @@ import (
 // link is ordinary work (GAP-2532); a link to SSH or DefenseClaw state
 // stays opaque when a nested shell changes directory or find -exec renames
 // it (GAP-2533), also through a disk link below a linked outside directory
-// (RV-c4-1), also when the nested cd spells it from ~ (RV-c6-1).
+// (RV-c4-1), also when the nested cd spells it from ~ (RV-c6-1), and a
+// quoted ~/ word stays a path from cwd (RV-c7-1).
 func TestR105LinkRenameAndNestedCd(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("posix shell rows")
@@ -65,6 +67,14 @@ func TestR105LinkRenameAndNestedCd(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	// RV-c7-1: a project directory literally named "~" with a disk link
+	// r -> ../e; a quoted ~/r word names it from cwd, not from home.
+	if err := os.MkdirAll(filepath.Join(cwd, "~"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("../e", filepath.Join(cwd, "~", "r")); err != nil {
+		t.Fatal(err)
+	}
 	// RV-c5-2: an outside directory larger than the linked-tree walk bound.
 	big := t.TempDir()
 	for i := range 20005 {
@@ -72,7 +82,12 @@ func TestR105LinkRenameAndNestedCd(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	place := strings.NewReplacer("{E}", ext, "{C}", clean, "{BIG}", big)
+	// RV-c7-2: ~user is that user's home from the user database.
+	userName := ""
+	if current, err := user.Current(); err == nil && current.HomeDir != "" && !strings.ContainsAny(current.Username, `\ `) {
+		userName = current.Username
+	}
+	place := strings.NewReplacer("{E}", ext, "{C}", clean, "{BIG}", big, "{U}", userName)
 	t.Setenv("HOME", home)
 	rows := []struct {
 		command string
@@ -159,6 +174,16 @@ func TestR105LinkRenameAndNestedCd(t *testing.T) {
 		{`ln -s {E} e; sh -c "cd ~/project/d2/r && cd x && echo k >> authorized_keys"`, true},
 		{`ln -s {E} e; find ~/project/d2/r/x -maxdepth 0 -execdir sh -c "echo k >> x/authorized_keys" ';'`, true},
 		{`ln -s {E} e; bash -c "cd ~+/d2/r/x && echo k >> authorized_keys"`, true},
+		// RV-c7-1: a quoted ~/ word is a directory named ~ under cwd; the
+		// plain cd form too.
+		{`ln -s {E} e; bash -c "cd '~/r/x' && echo k >> authorized_keys"`, true},
+		{`ln -s {E} e; bash -c 'cd "~/r/x" && echo k >> authorized_keys'`, true},
+		{`ln -s {E} e; sh -c "cd '~/r' && cd x && echo k >> authorized_keys"`, true},
+		{`ln -s {E} e; bash -c "cd '~/r/y' && echo z > config.yaml"`, true},
+		{`ln -s {E} e; find '~/r/x' -maxdepth 0 -execdir sh -c "echo k >> x/authorized_keys" ';'`, true},
+		{`ln -s {E} e; bash -c "pushd '~/r/x'; echo k >> authorized_keys"`, true},
+		{`ln -s {E} e; cd '~/r/x' && echo k >> authorized_keys`, true},
+		{`ln -s {E} e; cd "~/r/x" && echo k >> authorized_keys`, true},
 		// Benign: the nested cd does not go through the link, or the linked
 		// directory holds no disk link to state.
 		{`ln -s {E} ext; bash -c "cd src && ls"`, false},
@@ -171,10 +196,17 @@ func TestR105LinkRenameAndNestedCd(t *testing.T) {
 		// tree beside it.
 		{`ln -s {BIG} big; find . -name "*.tmp" -exec mv {} build/ \;`, false},
 		{`ln -s {BIG} big; bash -c "cd src && ls"`, false},
+		// RV-c7-2: a nested cd ~user beside a large linked tree.
+		{`ln -s {BIG} big; bash -c "cd ~{U} && ls"`, false},
+		{`ln -s {BIG} big; bash -c "cd ~{U}/ && ls"`, false},
+		{`ln -s {C} sdk; bash -c "cd ~{U} && ls"`, false},
 	}
 	for _, connectorName := range []string{"claudecode", "codex"} {
 		installDefaultProfileConnector(t, connectorName)
 		for _, row := range rows {
+			if userName == "" && strings.Contains(row.command, "{U}") {
+				continue
+			}
 			var findings []RuleFinding
 			panicked := ""
 			func() {
