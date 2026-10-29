@@ -1047,7 +1047,7 @@ func TestValidateWindowsManagedHooksGuardianActivationBindsDeferredPendingSubset
 		PendingCount: 1,
 		Results:      []enterpriseHookReconcileRow{active, pending},
 	}
-	pendingTargets, err := validateWindowsManagedHooksGuardianActivation(
+	pendingTargets, failedTargets, err := validateWindowsManagedHooksGuardianActivation(
 		activation,
 		authorization,
 		state,
@@ -1060,11 +1060,14 @@ func TestValidateWindowsManagedHooksGuardianActivationBindsDeferredPendingSubset
 	if len(pendingTargets) != 1 || pendingTargets[0] != ctx.targets[1] {
 		t.Fatalf("pending targets = %+v", pendingTargets)
 	}
+	if len(failedTargets) != 0 {
+		t.Fatalf("failed targets = %+v, want none for a healthy Guardian", failedTargets)
+	}
 
 	unauthorized := ctx
 	unauthorized.targets = append([]windowsManagedHooksTeardownTarget(nil), ctx.targets...)
 	unauthorized.targets[1].Deferred = false
-	if _, err := validateWindowsManagedHooksGuardianActivation(
+	if _, _, err := validateWindowsManagedHooksGuardianActivation(
 		activation,
 		authorization,
 		state,
@@ -1084,7 +1087,7 @@ func TestValidateWindowsManagedHooksGuardianActivationBindsDeferredPendingSubset
 		SID:       pending.SID,
 		OK:        true,
 	})
-	if _, err := validateWindowsManagedHooksGuardianActivation(
+	if _, _, err := validateWindowsManagedHooksGuardianActivation(
 		tamperedActivation,
 		authorization,
 		state,
@@ -1101,7 +1104,7 @@ func TestValidateWindowsManagedHooksGuardianActivationBindsDeferredPendingSubset
 		UserHome:  `C:\Users\bob`,
 		DataDir:   ctx.targets[1].DataDir,
 	}
-	if _, err := validateWindowsManagedHooksGuardianActivation(
+	if _, _, err := validateWindowsManagedHooksGuardianActivation(
 		activation,
 		authorization,
 		tamperedState,
@@ -1387,7 +1390,7 @@ func TestReadWindowsManagedHooksLifecycleCursorTargetsRestoresAChangedAdapter(t 
 // selector the guardian could not read) is still refused, and the refusal
 // names the row and the guardian's own error so the operator knows what to
 // repair before the uninstall commits.
-func TestWindowsManagedHooksGuardianRefusalNamesTheFailedRow(t *testing.T) {
+func TestWindowsManagedHooksGuardianFailedRowIsAcceptedAndAnAmbiguousOneNamed(t *testing.T) {
 	manifestSHA256 := strings.Repeat("a", 64)
 	ctx := windowsManagedHooksLifecycleContext{
 		manifestPath: `C:\ProgramData\DefenseClaw\hook-guardian\targets.yaml`,
@@ -1435,14 +1438,26 @@ func TestWindowsManagedHooksGuardianRefusalNamesTheFailedRow(t *testing.T) {
 		FailureCount: 1,
 		Results:      results,
 	}
-	_, err := validateWindowsManagedHooksGuardianActivation(activation, authorization, state, ctx, manifestSHA256)
+	// A failed row with its reconcile error is a valid disposition: teardown
+	// records it as possibly wired instead of refusing.
+	_, failed, err := validateWindowsManagedHooksGuardianActivation(activation, authorization, state, ctx, manifestSHA256)
+	if err != nil {
+		t.Fatalf("a failed guardian row with its error was refused: %v", err)
+	}
+	if len(failed) != 1 || failed[0].Connector != "codex" || failed[0].SID != "S-1-5-21-111-222-333-1001" {
+		t.Fatalf("failed targets = %+v, want the codex row", failed)
+	}
+
+	// A failed row with no error is ambiguous, and the refusal names it.
+	state.Results[1].Error = ""
+	_, _, err = validateWindowsManagedHooksGuardianActivation(activation, authorization, state, ctx, manifestSHA256)
 	if err == nil {
-		t.Fatal("a failed guardian row was accepted for teardown")
+		t.Fatal("a failed guardian row with no error was accepted for teardown")
 	}
 	for _, want := range []string{
 		"ambiguous target disposition",
 		"codex target S-1-5-21-111-222-333-1001",
-		"managed runtime selector targets are not strictly sorted",
+		"no error recorded",
 	} {
 		if !strings.Contains(err.Error(), want) {
 			t.Fatalf("refusal %q does not name %q", err, want)
