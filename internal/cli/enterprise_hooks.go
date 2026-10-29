@@ -626,6 +626,10 @@ var (
 	// release whose hook-contract lock a target still carries. Tests
 	// replace it.
 	enterpriseHookReconcileTargetRelease = enterprisehooks.WindowsProtectedTargetFromOtherRelease
+	// enterpriseHookReconcileTargetEarlierMatrix reports a target whose
+	// agent config still holds an earlier release's hook matrix (GAP-2463).
+	// Tests replace it.
+	enterpriseHookReconcileTargetEarlierMatrix = enterprisehooks.WindowsProtectedTargetRunsEarlierHookMatrix
 	// enterpriseHookReconcileTargetFailModeChange returns the hook fail mode
 	// a target's lock records and the one the config asks for. Tests
 	// replace it.
@@ -675,7 +679,28 @@ const (
 	enterpriseHookAwaitingSignInFailOpen   = "its hooks keep hook fail mode open"
 	// A signed-out account's Hermes home is unobservable (GAP-1433).
 	enterpriseHookAwaitingSignInHermesHome = "its Hermes home cannot be read while the account is signed out"
+	// An earlier release's hook matrix, which lacks only the fail_closed
+	// setting this release adds, still runs for it (GAP-2463).
+	enterpriseHookAwaitingSignInEarlierMatrix = "its earlier release's hooks still run"
 )
+
+// enterpriseHookEarlierMatrixRow reports a guardian row that waits for its
+// account's next connect while the hooks an earlier release registered still
+// guard it (enterpriseHookAwaitingSignInEarlierMatrix). Status reports it as
+// enrolled with an older hook matrix, not as pending (GAP-2463).
+func enterpriseHookEarlierMatrixRow(row enterpriseHookReconcileRow) bool {
+	return enterpriseHookAwaitingSignInError(row) &&
+		strings.HasPrefix(
+			strings.TrimPrefix(strings.TrimSpace(row.Error), enterpriseHookAwaitingSignInPrefix+": "),
+			enterpriseHookAwaitingSignInEarlierMatrix,
+		)
+}
+
+// enterpriseHookEarlierMatrixState is the guarded-but-not-fail-closed state
+// of such a row, for status and verify.
+const enterpriseHookEarlierMatrixState = "enrolled with the hook matrix of an earlier DefenseClaw release " +
+	"(upgrade pending at the account's next connect): guarded, but a hook spawn error or timeout does not " +
+	"block until the guardian upgrades it in the account's own Windows session"
 
 // enterpriseHookAwaitingSignInCause words, for status and verify, why a
 // guardian row that waits for its account's next sign-in (its error) is not
@@ -686,6 +711,8 @@ func enterpriseHookAwaitingSignInCause(guardianErr string) string {
 	case strings.HasPrefix(cause, enterpriseHookAwaitingSignInFailClosed):
 		return "its hooks still fail closed, and the guardian renders hook fail mode open in the account's own " +
 			"Windows session at its next sign-in"
+	case strings.HasPrefix(cause, enterpriseHookAwaitingSignInEarlierMatrix):
+		return enterpriseHookEarlierMatrixState
 	case strings.HasPrefix(cause, enterpriseHookAwaitingSignInHermesHome):
 		return "Hermes NOT COVERED: the account is signed out, so its registry hive and the HERMES_HOME it selects " +
 			"cannot be read; its installed hook is unchanged, and the guardian verifies it again at the account's next sign-in"
@@ -756,6 +783,17 @@ func enterpriseHookVerifyOrRepairTarget(
 				)
 			}
 			if written, other, releaseErr := enterpriseHookReconcileTargetRelease(opts); releaseErr == nil && other {
+				// The earlier release's hooks may still run unchanged: then
+				// the account is guarded, only not fail-closed, until its
+				// next connect (GAP-2463).
+				if earlier, matrixErr := enterpriseHookReconcileTargetEarlierMatrix(opts); matrixErr == nil && earlier {
+					return enterprisehooks.InstallResult{}, false, fmt.Errorf(
+						"%w: %s: DefenseClaw %s registered them without fail_closed, and this release's hooks "+
+							"install only in the account's own Windows session; its exact active Windows session is "+
+							"unavailable, so the guardian upgrades them at the account's next connect (verification: %v)",
+						errEnterpriseHookAwaitingSignIn, enterpriseHookAwaitingSignInEarlierMatrix, written, verifyErr,
+					)
+				}
 				return enterprisehooks.InstallResult{}, false, fmt.Errorf(
 					"%w: DefenseClaw %s protected it, and this release's hooks install only in the account's own "+
 						"Windows session; its exact active Windows session is unavailable, so the guardian repairs "+
@@ -958,7 +996,7 @@ func enterpriseHookEnrollmentFromRows(rows []enterpriseHookReconcileRow) []enter
 		}
 		state := "failed"
 		switch {
-		case row.OK:
+		case row.OK, enterpriseHookEarlierMatrixRow(row):
 			state = "enrolled"
 		case row.Pending, enterpriseHookAwaitingSignInError(row):
 			state = "pending"
@@ -1303,6 +1341,10 @@ func enterpriseHookGuardianFailureIssue(row enterpriseHookReconcileRow) string {
 	if enterpriseHookAwaitingSignInRow(row) {
 		if account == "" {
 			account = enterpriseHookTargetLabel(row)
+		}
+		if enterpriseHookEarlierMatrixRow(row) {
+			return fmt.Sprintf("%s for %s is %s",
+				strings.TrimSpace(row.Connector), account, enterpriseHookEarlierMatrixState)
 		}
 		return fmt.Sprintf("%s for %s is pending until that account signs in: %s",
 			strings.TrimSpace(row.Connector), account, enterpriseHookAwaitingSignInCause(row.Error))
