@@ -1208,7 +1208,18 @@ func respellTrustedPOSIXHomeTilde(facts *Facts, commandIDs map[int64]struct{}, t
 			continue
 		}
 		spelling, ok := tildeOperands[path.Value]
-		if !ok || path.Resolved != path.Value {
+		if !ok {
+			continue
+		}
+		if path.Resolved == "" && DriveSlashPath(path.Value) {
+			// Git Bash on Windows: the trusted home is a drive path
+			// (C:/Users/x) that the POSIX resolver leaves unresolved. It is
+			// the home the shell expands ~ to, so the operand resolves to
+			// it, as on Linux and macOS (GAP-2304, GAP-2122 Windows leg).
+			path.Resolved = path.Value
+			continue
+		}
+		if path.Resolved != path.Value {
 			continue
 		}
 		path.Value = spelling
@@ -1293,4 +1304,40 @@ func quotedOptionHomeRewrite(word *syntax.Word, activeHome string) (quotedOption
 		return quotedOptionHome{}, false
 	}
 	return quotedOptionHome{key: key, path: path, suffix: suffix}, true
+}
+
+// resolveTrustedDriveHomePaths resolves the POSIX path facts that name the
+// trusted home or a path in it in drive-letter slash form
+// ("C:/Users/x/.defenseclaw/hooks"). That is the spelling ~ and $HOME take
+// in a Git Bash parse on Windows, and the POSIX resolver leaves it
+// unresolved because it does not start with "/", so every check that reads
+// the resolved path saw no path at all (GAP-2304, GAP-2122 Windows leg).
+// The path resolves to itself, cleaned, as an absolute ~ operand does on
+// Linux and macOS. Other paths are left as they are.
+func resolveTrustedDriveHomePaths(facts *Facts) {
+	if facts == nil || !DriveSlashPath(facts.ActiveHome) {
+		return
+	}
+	home := strings.TrimRight(path.Clean(facts.ActiveHome), "/")
+	for index := range facts.Paths {
+		fact := &facts.Paths[index]
+		if fact.Flavor != PathFlavorPOSIX || fact.Resolved != "" || !DriveSlashPath(fact.Value) ||
+			strings.ContainsAny(fact.Value, "*?[{$`") {
+			continue
+		}
+		cleaned := path.Clean(fact.Value)
+		if !strings.EqualFold(cleaned, home) && !strings.HasPrefix(strings.ToLower(cleaned), strings.ToLower(home)+"/") {
+			continue
+		}
+		fact.Resolved = cleaned
+	}
+}
+
+// DriveSlashPath reports a drive-letter path in slash form
+// ("C:/Users/x/..."): the trusted Windows home, and the paths in it, as a
+// Git Bash parse spells them. It is an absolute POSIX path for that shell
+// (GAP-2304, GAP-2122 Windows leg).
+func DriveSlashPath(value string) bool {
+	return len(value) >= 3 && value[1] == ':' && value[2] == '/' &&
+		(value[0] >= 'A' && value[0] <= 'Z' || value[0] >= 'a' && value[0] <= 'z')
 }

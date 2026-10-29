@@ -260,6 +260,7 @@ func dispatchTrustedAction(
 	if _, ok := managedHookPeerFromContext(parent); ok {
 		request.ProtectedHomeHook = true
 	}
+	request.Input.ActiveStateTreeNames = clientStateTreeNames(request.ResolvedWriteTargets)
 	var (
 		facts     actionfacts.Facts
 		analyzed  bool
@@ -808,8 +809,9 @@ func withActiveStateTargetMention(
 ) []RuleFinding {
 	// A pattern, brace list, rsync or git clean that expands onto the
 	// state names no path fact, so it is proved from the shell words
-	// (GAP-2047).
-	if !globbedStateMutation(facts) && !globbedStateMutationThroughLink(facts, request) {
+	// (GAP-2047); so is an archive extraction into it (GAP-2415).
+	if !globbedStateMutation(facts) && !globbedStateMutationThroughLink(facts, request) &&
+		!archiveExtractsIntoState(facts, request) {
 		command, known := trustedBashCommandInput(request.Input)
 		if !known {
 			return findings
@@ -1021,7 +1023,7 @@ func provenStateMutationPath(facts actionfacts.Facts, request trustedActionReque
 		}
 		if entry, ok := stateDirectoryEntryTarget(command, candidate, request); ok {
 			candidate.Resolved = entry
-			if matchesActiveDefenseClawStateInLine(projected, candidate, lineStaysOff) {
+			if matchesActiveDefenseClawStateInLine(projected, candidate, lineStaysOff, request.ResolvedWriteTargets) {
 				return true
 			}
 			continue
@@ -1036,8 +1038,16 @@ func provenStateMutationPath(facts actionfacts.Facts, request trustedActionReque
 		if physical == "" && !request.SkipLocalFilesystemResolution {
 			if request.ProtectedHomeHook {
 				// Only an OS-proved alias is safe to resolve here when the
-				// authenticated hook supplied no target-map entry.
+				// authenticated hook supplied no target-map entry. The home
+				// itself is the peer's home from the account database: a
+				// find that starts there (`yes | find ~ ...`, which the
+				// client lists no target for) is judged from it (GAP-2404
+				// pod ip21, managed RHEL).
 				physical, _ = hookpaths.ResolveActiveStateHardlinkTarget(candidate.Resolved, projected.ActiveHome)
+				if physical == "" && path.IsAbs(candidate.Resolved) &&
+					path.Clean(candidate.Resolved) == path.Clean(projected.ActiveHome) {
+					physical = path.Clean(candidate.Resolved)
+				}
 			} else {
 				physical, _ = hookpaths.ResolveWriteTarget(candidate.Resolved)
 			}
@@ -1048,8 +1058,11 @@ func provenStateMutationPath(facts actionfacts.Facts, request trustedActionReque
 		if active, same := hookpaths.ResolveActiveStateHardlinkTarget(physical, projected.ActiveHome); same {
 			physical = active
 		}
+		if candidate.Flavor == actionfacts.PathFlavorPOSIX {
+			physical = filepath.ToSlash(physical)
+		}
 		candidate.Resolved = physical
-		if matchesActiveDefenseClawStateInLine(projected, candidate, lineStaysOff) {
+		if matchesActiveDefenseClawStateInLine(projected, candidate, lineStaysOff, request.ResolvedWriteTargets) {
 			return true
 		}
 	}
@@ -1236,6 +1249,11 @@ func stateDirectoryEntryTarget(
 	entry := filepath.Join(parent, filepath.Base(value))
 	if info, err := os.Stat(entry); err == nil && info.IsDir() && (moveDestination || windows) {
 		return "", false
+	}
+	if candidate.Flavor == actionfacts.PathFlavorPOSIX {
+		// A Git Bash operand on Windows keeps its slash spelling, so the
+		// state checks read the entry the way they read the operand.
+		entry = filepath.ToSlash(entry)
 	}
 	return entry, true
 }

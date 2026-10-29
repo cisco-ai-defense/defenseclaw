@@ -2543,7 +2543,7 @@ func matchesActiveDefenseClawState(
 	facts actionfacts.Facts,
 	candidate actionfacts.PathFact,
 ) bool {
-	return matchesActiveDefenseClawStateInLine(facts, candidate, nil)
+	return matchesActiveDefenseClawStateInLine(facts, candidate, nil, facts.ActiveStateTreeNames)
 }
 
 // matchesActiveDefenseClawStateInLine is matchesActiveDefenseClawState
@@ -2553,6 +2553,7 @@ func matchesActiveDefenseClawStateInLine(
 	facts actionfacts.Facts,
 	candidate actionfacts.PathFact,
 	lineStaysOff func() bool,
+	clientTargets map[string]string,
 ) bool {
 	relative, ok := activeHomeRelative(facts, candidate)
 	if runtime.GOOS == "linux" && candidate.Flavor == actionfacts.PathFlavorPOSIX {
@@ -2560,7 +2561,7 @@ func matchesActiveDefenseClawStateInLine(
 	}
 	relative = strings.TrimRight(relative, "/")
 	if !ok || relative != ".defenseclaw" && !strings.HasPrefix(relative, ".defenseclaw/") {
-		return findAncestorStartChangesState(facts, candidate, lineStaysOff)
+		return findAncestorStartChangesState(facts, candidate, lineStaysOff, clientTargets)
 	}
 	state := strings.TrimPrefix(strings.TrimPrefix(relative, ".defenseclaw"), "/")
 	switch {
@@ -3146,7 +3147,7 @@ func findAttachedPathOption(word string) bool {
 // pipe into xargs rm changes it, unless the tests before the action keep
 // to names that are never protected (find ~ -name '*.tmp' -delete) or
 // -maxdepth stops above the root's entries (find ~ -maxdepth 1 -type f).
-func findAncestorStartChangesState(facts actionfacts.Facts, candidate actionfacts.PathFact, lineStaysOff func() bool) bool {
+func findAncestorStartChangesState(facts actionfacts.Facts, candidate actionfacts.PathFact, lineStaysOff func() bool, clientTargets map[string]string) bool {
 	command, ok := integrityCommandByID(facts, candidate.CommandID)
 	if !ok || !strings.EqualFold(command.Program, "find") ||
 		candidate.Flavor != "" && candidate.Flavor != actionfacts.PathFlavorPOSIX || facts.ActiveHome == "" {
@@ -3170,7 +3171,7 @@ func findAncestorStartChangesState(facts actionfacts.Facts, candidate actionfact
 	start := path.Clean(exactSemanticPathValue(candidate))
 	root := path.Join(path.Clean(facts.ActiveHome), ".defenseclaw")
 	prefix := strings.TrimRight(start, "/") + "/"
-	if !path.IsAbs(start) || !strings.HasPrefix(root, prefix) {
+	if !path.IsAbs(start) && !actionfacts.DriveSlashPath(start) || !strings.HasPrefix(root, prefix) {
 		return false
 	}
 	// Above the root a find also reaches every other file of the
@@ -3183,7 +3184,7 @@ func findAncestorStartChangesState(facts actionfacts.Facts, candidate actionfact
 	// that matches no state entry needs only a command that cannot reach the
 	// state on its own (GAP-2305).
 	noStateName := func(pattern string, fold bool) bool {
-		return findPatternMatchesNoStateName(pattern, fold) && !activeStateTreeHasName(root, pattern, fold)
+		return findPatternMatchesNoStateName(pattern, fold) && !activeStateTreeHasNameFor(clientTargets, root, pattern, fold)
 	}
 	if findDeletesOnlyNames(acted, func(pattern string, fold bool) bool {
 		return findPatternIsCleanupOnly(pattern, fold) || findPatternIsRegenerableBytecode(pattern, fold) || noStateName(pattern, fold)

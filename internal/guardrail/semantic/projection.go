@@ -446,7 +446,10 @@ func validResolvedPath(flavor actionfacts.PathFlavor, value string) bool {
 	}
 	switch flavor {
 	case actionfacts.PathFlavorPOSIX:
-		return strings.HasPrefix(value, "/") && path.Clean(value) == value
+		// A Git Bash parse on Windows resolves ~ and $HOME to the drive
+		// home in slash form (C:/Users/x), an absolute POSIX path for
+		// that shell (GAP-2304, GAP-2122 Windows leg).
+		return (strings.HasPrefix(value, "/") || actionfacts.DriveSlashPath(value)) && path.Clean(value) == value
 	case actionfacts.PathFlavorWindows:
 		return validWindowsResolvedPath(value)
 	case actionfacts.PathFlavorDevice:

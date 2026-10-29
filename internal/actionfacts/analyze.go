@@ -17,6 +17,7 @@
 package actionfacts
 
 import (
+	"maps"
 	"path"
 	"slices"
 	"strings"
@@ -286,6 +287,7 @@ func analyze(input Input, twinCommand string, capture *redirectTargetCapture) Fa
 		activeHome,
 	)
 	respellTrustedPOSIXHomeTilde(&facts, homeRewrittenCommands, homeTildeOperands)
+	resolveTrustedDriveHomePaths(&facts)
 	facts.ActiveAgentFiles = cloneSlice(activeAgentFiles)
 	facts.ActiveAgentFilesCaseInsensitive = cloneSlice(
 		activeAgentFilesCaseInsensitive,
@@ -293,6 +295,7 @@ func analyze(input Input, twinCommand string, capture *redirectTargetCapture) Fa
 	facts.ActiveAgentFilesCaseInsensitiveUncertain =
 		input.ActiveAgentFilesCaseInsensitiveUncertain
 	facts.ActiveAgentFilesUncertain = input.ActiveAgentFilesUncertain
+	facts.ActiveStateTreeNames = maps.Clone(input.ActiveStateTreeNames)
 	classifyCanonicalPasswordCrackerPotfileRead(&facts)
 	facts.SensitiveEgressArtifactWrites =
 		projectSensitiveEgressArtifactWrites(input)
