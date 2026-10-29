@@ -1175,11 +1175,14 @@ func windowsHotConfigDroppedTargets(before, now enterprisehooks.Manifest) []ente
 	return dropped
 }
 
-// windowsHotConfigTargetLabels names each target as "user (SID) connector".
+// windowsHotConfigTargetLabels names each target as "user (SID) connector",
+// looking the account up when the target carries only its SID, as the other
+// Windows notices do (GAP-2571, GAP-2290 class); "an account (SID)" only when
+// the SID does not resolve.
 func windowsHotConfigTargetLabels(targets []enterprisehooks.ManifestTarget) []string {
 	labels := make([]string, 0, len(targets))
 	for _, target := range targets {
-		user := strings.TrimSpace(target.User)
+		user := enterpriseHookWindowsAccountName(target.User, target.SID)
 		if user == "" {
 			user = "an account"
 		}
