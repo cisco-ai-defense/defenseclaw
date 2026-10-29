@@ -11,6 +11,8 @@
 package cli
 
 import (
+	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"runtime"
@@ -227,7 +229,9 @@ func newUnixLifecycleCommand(platform, action, summary string) *cobra.Command {
 		Use:          action,
 		Short:        summary,
 		SilenceUsage: true,
-		Args:         lifecycleNoArgs,
+		Args: func(cmd *cobra.Command, args []string) error {
+			return lifecycleArgumentError(cmd, action, opts.json, lifecycleNoArgs(cmd, args))
+		},
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			return runUnixLifecycle(cmd, platform, action, opts)
 		},
@@ -245,7 +249,9 @@ func newUnixLifecycleCommand(platform, action, summary string) *cobra.Command {
 	}
 	// An unknown flag or a malformed value fails before RunE; the documented
 	// exit code for it is invalid arguments, not cobra's generic 1.
-	cmd.SetFlagErrorFunc(lifecycleFlagError)
+	cmd.SetFlagErrorFunc(func(c *cobra.Command, err error) error {
+		return lifecycleArgumentError(c, action, opts.json, lifecycleFlagError(c, err))
+	})
 	flags := cmd.Flags()
 	switch action {
 	case "install", "upgrade", "repair", "ensure":
@@ -306,6 +312,39 @@ func lifecycleFlagError(c *cobra.Command, err error) error {
 		return invalidLifecycleArguments(err)
 	}
 	return invalidLifecycleArguments(&delegatedUsageError{msg: usageMessage(c, err), err: err})
+}
+
+// lifecycleArgumentError reports an argument error of a lifecycle verb (an
+// unknown flag, a malformed value, a stray argument, a --lock-wait out of
+// range) with its invalid-arguments exit code. With --json, also when the
+// parse stopped before it, stdout gets one lifecycle result whose only error
+// is invalid_arguments, so an agent never classifies the failure by the exit
+// code alone (GAP-2448). Linux and macOS keep the usage line on stderr for
+// the MDM kit log; Windows prints the document only, as its other lifecycle
+// failures do.
+func lifecycleArgumentError(cmd *cobra.Command, action string, asJSON bool, err error) error {
+	if err == nil || (!asJSON && !secretArgsRequestJSON(secretRawArgs())) {
+		return err
+	}
+	message := err.Error()
+	var usage *delegatedUsageError
+	if errors.As(err, &usage) && usage.err != nil {
+		message = usage.err.Error()
+	}
+	profile := managed.ProfileStandalone
+	if secureClientHost() {
+		profile = managed.ProfileSecureClient
+	}
+	result := enterprisestatus.New(action, profile, runtime.GOOS, "")
+	result.AddError("invalid_arguments", message)
+	result.Finish(runtime.GOOS, commandExitCode(err))
+	data, mErr := json.MarshalIndent(result, "", "  ")
+	if mErr != nil {
+		return err
+	}
+	fmt.Fprintln(cmd.OutOrStdout(), string(data))
+	silenceJSONReportedError(cmd, runtime.GOOS == "windows", err)
+	return err
 }
 
 func newEnterpriseSecretCommand(action, summary string) *cobra.Command {

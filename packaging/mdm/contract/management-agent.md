@@ -234,11 +234,24 @@ stderr, and the exit code is the only signal.
 
 | Case | Exit |
 |---|---|
-| Unknown flag, malformed value or stray argument on a lifecycle verb | 2 / 1639 |
-| `--lock-wait` outside 0 to 15m: every Linux and macOS verb but `bundle anchors install` and `bundle apply` | 2 / 1639 |
+| Builds before 1.0.5: an unknown flag, malformed value or stray argument on a lifecycle verb | 2 / 1639 |
+| Builds before 1.0.5: `--lock-wait` outside 0 to 15m on a Linux or macOS lifecycle verb | 2 |
+| Builds before 1.0.5: `--version --json` (the flag is `--version-json`) | 2 |
 | Builds before 1.0.4: every `bundle apply` argument error (below) | 2 / 1639 |
-| `--version --json` (the flag is `--version-json`) | 2 |
 | Windows `secret set` / `remove` / `status` on a build without `management_contract`: every failure (5, 1639, 1603), and `--lock-wait` on set or remove (an unknown flag there, exit 1) | 5 / 1639 / 1603 / 1 |
+| Any build: an argument error without `--json` on the command line (`--json=false` included) | 2 / 1639 |
+
+From 1.0.5, with `--json` anywhere on the command line (also after the bad
+argument, where the parse stopped), an argument error of a lifecycle verb
+prints one `lifecycle-result.schema.json` document whose only error is
+`invalid_arguments`, `ok` false and `exit_code` 2 (Linux, macOS) or 1639
+(Windows): an unknown flag, a malformed value, a stray argument (Windows:
+on `ensure`; the other Windows verbs ignore positional arguments) and, on
+Linux and macOS, a `--lock-wait` outside 0 to 15m. `product_version` is
+empty and `installed` false: the run stopped before it read the deployment,
+so read `status --json` for that. On Linux and macOS the usage line still
+goes to stderr. `--version --json` (in either order, nothing else on the
+command line) prints the `--version-json` document, exit 0.
 
 `bundle verify`, `bundle anchors install` and `bundle apply` print JSON for
 their own argument errors (`errors[0].code` `invalid_arguments`, exit 2 /
@@ -1499,8 +1512,9 @@ the read-only commands answer (section 4).
 
 ## 8. Known limits
 
-- Some failures print no JSON (section 2.3); the agent classifies them by the
-  exit code.
+- Some failures print no JSON (section 2.3): failures of builds before 1.0.5
+  and argument errors without `--json`; the agent classifies them by the exit
+  code.
 - The credential value is normalised differently on Windows and on Linux and
   macOS (2.5), and Windows refuses a `secret set` before the deployment is
   installed while Linux and macOS store it (4.7).

@@ -22,7 +22,8 @@ import (
 // The bundle verify prediction and the Windows hot config path agree on
 // every class of bundle config change: a policy-only change and an
 // enrollment list or connector set change apply in the running gateway; a
-// start-only key restarts the gateway alone; a Codex protection change runs
+// start-only key, and a connector set change that moves the primary
+// connector, restart the gateway alone; a Codex protection change runs
 // the full transaction; a Fleet change is refused before any write.
 func TestWindowsBundleRestartPredictionMatchesTheHotPath(t *testing.T) {
 	const base = "config_version: 9\nguardrail:\n  block_at: MEDIUM\n  hook_self_heal_debounce_ms: 500\n  connectors:\n    claudecode:\n      enabled: true\n"
@@ -35,9 +36,10 @@ func TestWindowsBundleRestartPredictionMatchesTheHotPath(t *testing.T) {
 		{"enrollment list only", "config_version: 9\nenterprise:\n  enrollment:\n    exclude_users:\n      - alice\n" + base[len("config_version: 9\n"):],
 			"config_version: 9\nenterprise:\n  enrollment:\n    exclude_users: []\n" + base[len("config_version: 9\n"):], bundleRestartNotRequired, ""},
 		{"connector added", base, base + "    opencode:\n      enabled: true\n", bundleRestartNotRequired, ""},
-		// A connector that sorts before the unset guardrail.connector's
-		// first key moves the primary connector the gateway holds until a
-		// restart (GAP-1498).
+		// GAP-1498: with no guardrail.connector the primary connector of the
+		// gateway is the first connectors key in sorted order, read only at
+		// start; a connector added before claudecode moves it, so the gateway
+		// alone restarts.
 		{"connector added before the primary", base, base + "    amp:\n      enabled: true\n", bundleRestartRequired, restartReasonSettings},
 		{"start-only key", base, "config_version: 9\nguardrail:\n  block_at: MEDIUM\n  hook_self_heal_debounce_ms: 600\n  connectors:\n    claudecode:\n      enabled: true\n", bundleRestartRequired, restartReasonSettings},
 		{"Codex protection on", base, base + "    codex:\n      enabled: true\n", bundleRestartRequired, restartReasonCodexMachinePolicy},
