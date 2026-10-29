@@ -313,7 +313,8 @@ func TestR105WindowsCMDHeredocReceiverReadIsLinear(t *testing.T) {
 // TestR105WindowsCMDHeredocDelimiterSearchIsLinear: finding the delimiter
 // lines of many here-documents stays linear in the command when the code
 // read for redefinitions has the bodies blanked, or a delimiter never comes
-// (GAP-2557: 1 MiB of { cat <<A .. } | state write took ~60 s). The time
+// (GAP-2557: 1 MiB of { cat <<A .. } | state write took ~60 s), and when
+// every line of a { } re-read each body waiting for it to close. The time
 // for 256 KB must stay near 16x the best time for 16 KB (quadratic is
 // 256x), and the decision is the same at both sizes.
 func TestR105WindowsCMDHeredocDelimiterSearchIsLinear(t *testing.T) {
@@ -358,6 +359,9 @@ func TestR105WindowsCMDHeredocDelimiterSearchIsLinear(t *testing.T) {
 	}{
 		{"brace docs, state write", func(size int) string {
 			return "{\n" + strings.Repeat("cat <<'A'\nx\nA\n", size/14) + "} | " + write
+		}, true},
+		{"nested brace docs, state write", func(size int) string {
+			return "{\n" + strings.Repeat("{ cat <<'A'\nx\nA\n}\n", size/18) + "} | " + write
 		}, true},
 		{"brace docs, benign", func(size int) string {
 			return "{\n" + strings.Repeat("cat <<'A'\nx\nA\n", size/14) + "} | grep -c x\ngit status"

@@ -1894,30 +1894,62 @@ func cmdTextSpansRead(command string, reading cmdOuterReading, trust bool) (span
 	// compound counts the compound commands open at lineStart; physStart is
 	// the start of the current physical line and skipNL the newline that
 	// ends the last body read.
-	type awaitingDoc struct {
-		span    int
-		reading bool
+	//
+	// The bodies still reading a pipe or list (open) all read every line
+	// with a word and stop together; the others (closing) read only the
+	// lines that close a construct. Each group logs its reads once and a
+	// body takes the reads logged after it joined when the group lets it
+	// go, so a line costs the same for one body or many (GAP-2557: a
+	// { } of many bodies read every line once per body).
+	type awaitRead struct{ runs, cmdFeed bool }
+	type awaitGroup struct {
+		span, join []int
+		log        []awaitRead
 	}
-	var awaiting []awaitingDoc
+	var open, closing awaitGroup
+	release := func(g *awaitGroup) {
+		if len(g.span) == 0 {
+			g.log = g.log[:0]
+			return
+		}
+		runs, cmdFeed := make([]bool, len(g.log)+1), make([]bool, len(g.log)+1)
+		for e := len(g.log) - 1; e >= 0; e-- {
+			runs[e], cmdFeed[e] = runs[e+1] || g.log[e].runs, cmdFeed[e+1] || g.log[e].cmdFeed
+		}
+		for k, at := range g.span {
+			spans[at].runs = spans[at].runs || runs[g.join[k]]
+			spans[at].cmdFeed = spans[at].cmdFeed || cmdFeed[g.join[k]]
+		}
+		g.span, g.join, g.log = g.span[:0], g.join[:0], g.log[:0]
+	}
+	await := func(g *awaitGroup, span int) {
+		g.span = append(g.span, span)
+		g.join = append(g.join, len(g.log))
+	}
 	compound, physStart, skipNL := 0, 0, -1
 	awaitLine := func(text string) {
-		if len(awaiting) == 0 || !cmdLineHasWord(text) {
+		if len(open.span) == 0 && len(closing.span) == 0 || !cmdLineHasWord(text) {
 			return
 		}
 		_, closes := shape(text)
-		read, runs, cmdFeed := false, false, false
-		for k := range awaiting {
-			a := &awaiting[k]
-			if !a.reading && !closes {
-				continue
+		if len(open.span) == 0 && (!closes || len(closing.span) == 0) {
+			return
+		}
+		runs, cmdFeed := feeds(text, -1)
+		if closes && len(closing.span) > 0 {
+			closing.log = append(closing.log, awaitRead{runs, cmdFeed})
+		}
+		if len(open.span) > 0 {
+			open.log = append(open.log, awaitRead{runs, cmdFeed})
+			if !cmdLineContinues(text) {
+				// The pipe or list ends here: the bodies now wait only
+				// for a line that closes a construct.
+				moved := slices.Clone(open.span)
+				release(&open)
+				for _, at := range moved {
+					await(&closing, at)
+				}
 			}
-			if !read {
-				runs, cmdFeed = feeds(text, -1)
-				read = true
-			}
-			spans[a.span].runs = spans[a.span].runs || runs
-			spans[a.span].cmdFeed = spans[a.span].cmdFeed || cmdFeed
-			a.reading = cmdLineContinues(text)
 		}
 	}
 	argvQuoted := func(end int) {
@@ -2036,7 +2068,11 @@ func cmdTextSpansRead(command string, reading cmdOuterReading, trust bool) (span
 					if pending[k].lineStart != readFrom {
 						readFrom, continues = pending[k].lineStart, cmdLineContinues(command[pending[k].lineStart:i])
 					}
-					awaiting = append(awaiting, awaitingDoc{span: len(spans) + k, reading: continues})
+					if continues {
+						await(&open, len(spans)+k)
+					} else {
+						await(&closing, len(spans)+k)
+					}
 				}
 				pending = nil
 				if len(bodies) > 0 {
@@ -2050,13 +2086,7 @@ func cmdTextSpansRead(command string, reading cmdOuterReading, trust bool) (span
 				if compound = max(0, compound+delta); compound == 0 {
 					// The command is complete: a body waits only for the
 					// next line of a pipe or list it continues.
-					kept := awaiting[:0]
-					for _, a := range awaiting {
-						if a.reading {
-							kept = append(kept, a)
-						}
-					}
-					awaiting = kept
+					release(&closing)
 				}
 				lineStart = i + 1
 			}
@@ -2122,6 +2152,8 @@ func cmdTextSpansRead(command string, reading cmdOuterReading, trust bool) (span
 	if reading == cmdReadingGitBash && physStart < n {
 		awaitLine(command[physStart:n])
 	}
+	release(&open)
+	release(&closing)
 	argvQuoted(n)
 	cmdMarkRunStrings(command, spans)
 	return spans, false
