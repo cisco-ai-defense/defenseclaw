@@ -1101,18 +1101,33 @@ func provenLinkedStateWrite(facts actionfacts.Facts, request trustedActionReques
 		return false
 	}
 	var links *hookpaths.Links
-	for _, candidate := range projected.Paths {
-		command, ok := integrityCommandByID(projected, candidate.CommandID)
-		if !ok || !stateCommandMutatesPath(command, candidate) {
-			continue
+	linkedWrite := func(projected actionfacts.Facts) bool {
+		for _, candidate := range projected.Paths {
+			command, ok := integrityCommandByID(projected, candidate.CommandID)
+			if !ok || !stateCommandMutatesPath(command, candidate) {
+				continue
+			}
+			if links == nil {
+				made := hookpaths.CommandLinks(request.Input.Tool, text, request.Input.CWD, projected.ActiveHome)
+				links = &made
+			}
+			if linkedActiveStateWrite(projected, command, candidate, *links, request.Input.CWD) {
+				return true
+			}
 		}
-		if links == nil {
-			made := hookpaths.CommandLinks(request.Input.Tool, text, request.Input.CWD, projected.ActiveHome)
-			links = &made
-		}
-		if linkedActiveStateWrite(projected, command, candidate, *links, request.Input.CWD) {
-			return true
-		}
+		return false
+	}
+	if linkedWrite(projected) {
+		return true
+	}
+	// The analysis leaves ~/ and $HOME/ operands dynamic, so a write under
+	// the home through a link the command makes (ln -s ~/.defenseclaw/hooks
+	// ~/hk; cp a.txt ~/hk/x.sh, or the link made in a subshell after cd ~)
+	// has no writer path here; the home-spelled twin places it as the
+	// literal home spelling does (GAP-2555). It only adds this block.
+	// CommandLinks reads the original text, which expands ~ itself.
+	if twin, ok := actionfacts.HomeSpelledTwin(request.Input); ok && linkedWrite(twin.EnforcementProjection()) {
+		return true
 	}
 	if links == nil {
 		made := hookpaths.CommandLinks(request.Input.Tool, text, request.Input.CWD, projected.ActiveHome)

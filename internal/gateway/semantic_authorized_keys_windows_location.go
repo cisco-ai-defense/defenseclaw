@@ -12,6 +12,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
 	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
+	"github.com/defenseclaw/defenseclaw/internal/shellparse"
 	"mvdan.cc/sh/v3/syntax"
 )
 
@@ -191,7 +192,7 @@ func trustedWindowsPOSIXLocationWrite(input actionfacts.Input) bool {
 	if input.DialectHint != "" && input.DialectHint != actionfacts.DialectPOSIX {
 		return false
 	}
-	file, err := syntax.NewParser(syntax.Variant(syntax.LangBash)).Parse(strings.NewReader(input.Command), "")
+	file, err := syntax.NewParser(syntax.Variant(syntax.LangBash)).Parse(shellparse.Reader(input.Command), "")
 	if err != nil || len(file.Stmts) == 0 || len(file.Stmts) > 16 {
 		return false
 	}
