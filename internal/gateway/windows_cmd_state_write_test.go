@@ -452,6 +452,31 @@ func TestR105WindowsCMDHeredocSearchArgument(t *testing.T) {
 		{"grep -n \"$PAT\" <<'EOF'" + body, false},
 		{"cat <<'EOF' > \"$OUT\"" + body, false},
 		{"arr=(); grep -c cmd <<'EOF'" + body, false},
+		// GAP-2536 checker it4 rows: a shell named by an expansion behind a
+		// launcher, a redefinition through an expansion command word on an
+		// earlier line and a PATH assignment still hand the body to a
+		// shell; an expansion that is only an argument of a consumer or of
+		// a command that runs no argument, and a substitution that holds
+		// the here-document, stay text.
+		{"env \"$BASH\" -s <<'EOF'" + run, true},
+		{"command \"$BASH\" -s <<'EOF'" + run, true},
+		{"exec \"$BASH\" -s <<'EOF'" + run, true},
+		{"nice $0 -s <<'EOF'" + run, true},
+		{"timeout 5 \"$BASH\" -s <<'EOF'" + run, true},
+		{"cat <<'EOF' | env \"$BASH\"" + run, true},
+		{"cat <<'EOF' | xargs -0 \"$BASH\" -c" + run, true},
+		{"env \"$(cat shell.txt)\" -s <<'EOF'" + run, true},
+		{"E=eval; $E 'grep() { bash; }'\ngrep x <<'EOF'" + run, true},
+		{"$'alias' grep=bash\ngrep x <<'EOF'" + run, true},
+		{"ln -s \"$BASH\" grep; PATH=.:$PATH; grep x <<'EOF'" + run, true},
+		{"export PATH=.:$PATH\ngrep x <<'EOF'" + run, true},
+		{"cd \"$REPO\" && git commit -F - <<'EOF'" + body, false},
+		{"mkdir -p \"$D\" && cat > \"$D/notes.md\" <<'EOF'" + body, false},
+		{"git commit -m \"$(cat <<'EOF'" + body + "\n)\"", false},
+		{"grep -n \"$X\" notes.md && cat > out.md <<'EOF'" + body, false},
+		{"[ -n \"$X\" ] && grep -n cmd <<'EOF'" + body, false},
+		{"echo \"$HOME\"; grep -c cmd <<'EOF'" + body, false},
+		{"\"$PYTHON\" - <<'EOF'\nprint('hi')\nEOF", false},
 	} {
 		for _, tool := range []string{"Bash", "shell_command", "PowerShell"} {
 			args, _ := json.Marshal(map[string]string{"command": tc.command})

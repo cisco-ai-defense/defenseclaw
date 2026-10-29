@@ -1187,10 +1187,11 @@ func cmdHeredocFeeds(command string, pos int, trust bool) (runs, cmdFeed bool) {
 	if k := strings.IndexByte(command[pos:], '\n'); k >= 0 {
 		end = pos + k
 	}
-	for _, word := range cmdLineReceiverWords(command[start:end], trust) {
+	for _, word := range cmdLineReceiverWords(command[start:end], pos-start, trust) {
 		if word == cmdUnknownReceiver {
-			// "$BASH" -s <<EOF, $0 <<EOF: the program is not known, so the
-			// body is read as a shell's and as cmd's (GAP-2536).
+			// "$BASH" -s <<EOF, $0 <<EOF, env "$BASH" -s <<EOF: the program
+			// is not known, so the body is read as a shell's and as cmd's
+			// (GAP-2536).
 			return true, true
 		}
 		if cmdShellWord(word) != "" {
@@ -1228,10 +1229,25 @@ var cmdRedefiningCommands = map[string]bool{
 	"eval": true, "source": true, "trap": true, ".": true,
 }
 
-// cmdUnknownReceiver marks a statement whose command word is an expansion
-// ($BASH, "$0", ${SHELL:-sh}, $(...)): the program it runs is not known
-// (GAP-2536).
+// cmdUnknownReceiver marks a statement that can run a program named by an
+// expansion ($BASH, "$0", ${SHELL:-sh}, $(...)) as its command word or
+// through a launcher (env "$BASH" -s): the program it runs is not known
+// (GAP-2536). Among cmdRedefines command words it marks an expansion.
 const cmdUnknownReceiver = "\x00unknown-receiver"
+
+// cmdPathAssignment marks a statement that assigns PATH (PATH=.:$PATH,
+// export PATH=...): a consumer name may then run another program
+// (GAP-2536 checker it4).
+const cmdPathAssignment = "\x00path-assignment"
+
+// cmdExpansionInertCommands never run an argument or hand standard input to
+// one, so an expansion among their arguments (cd "$REPO", echo "$X") names
+// no receiver. A path to one of them may be any program.
+var cmdExpansionInertCommands = map[string]bool{
+	"cd": true, "pushd": true, "echo": true, "printf": true, "test": true, "[": true, "[[": true,
+	"mkdir": true, "ls": true, "rm": true, "cp": true, "mv": true, "touch": true, "export": true,
+	"true": true, "false": true, ":": true,
+}
 
 // cmdRedefines reports whether the Git Bash command, with the text spans of
 // its untrusted reading, redefines a command (cmdRedefinesCommand,
@@ -1248,9 +1264,12 @@ func cmdRedefines(command string, spans []cmdTextSpan) bool {
 		}
 	}
 	var words []string
-	cmdScanReceiverWords(cmdCodeOutsideText(command, prose), 0, 0, false, &words)
+	cmdScanReceiverWords(cmdCodeOutsideText(command, prose), 0, 0, false, -1, &words)
 	for _, w := range words {
-		if cmdRedefiningCommands[w] {
+		// An expansion command word can be any of them ($E 'grep() { bash; }'
+		// after E=eval, $'alias' grep=bash), and a PATH assignment changes
+		// which program a consumer name runs (GAP-2536 checker it4).
+		if cmdRedefiningCommands[w] || w == cmdUnknownReceiver || w == cmdPathAssignment {
 			return true
 		}
 	}
@@ -1290,9 +1309,12 @@ var cmdHeredocTextConsumers = map[string]bool{
 // substitutions, quoted or not), less redirect targets, except the
 // arguments of a statement whose command word (past reserved words and time
 // options) is a bare known text consumer (grep cmd <<EOF). It over-reads,
-// never under-reads: with trust false every word counts.
-func cmdLineReceiverWords(line string, trust bool) []string {
-	words, _ := cmdScanReceiverWords(line, 0, 0, trust, nil)
+// never under-reads: with trust false every word counts. op is the offset of
+// the here-document operator in line (-1 for none): a substitution that
+// holds it (git commit -m "$(cat <<EOF) is where the body goes, not an
+// expansion naming the outer program.
+func cmdLineReceiverWords(line string, op int, trust bool) []string {
+	words, _ := cmdScanReceiverWords(line, 0, 0, trust, op, nil)
 	return words
 }
 
@@ -1300,39 +1322,49 @@ func cmdLineReceiverWords(line string, trust bool) []string {
 // backtick, 0 for the end of the line) and returns the receiver words and
 // the offset of the closer. An unquoted newline ends a statement. A non-nil
 // commandWords gets the command word of every statement with backslashes
-// dropped, and the word after builtin or command (cmdRedefines).
-func cmdScanReceiverWords(line string, i int, closer byte, trust bool, commandWords *[]string) (words []string, end int) {
+// dropped, and the word after builtin or command, followed by
+// cmdUnknownReceiver when it is an expansion, and cmdPathAssignment for a
+// statement that assigns PATH (cmdRedefines).
+func cmdScanReceiverWords(line string, i int, closer byte, trust bool, op int, commandWords *[]string) (words []string, end int) {
 	var stmt []string
+	var stmtExp []bool // stmtExp[k]: stmt[k] holds an expansion
 	var word strings.Builder
-	inWord, redirect, depth := false, false, 0
+	inWord, wordExp, redirect, depth := false, false, false, 0
 	flush := func() {
 		if !inWord {
 			return
 		}
-		w := word.String()
+		w, exp := word.String(), wordExp
 		word.Reset()
-		inWord = false
+		inWord, wordExp = false, false
 		if redirect {
 			redirect = false
 			return
 		}
 		stmt = append(stmt, w)
+		stmtExp = append(stmtExp, exp)
 	}
 	finish := func() {
 		flush()
 		redirect = false
 		if commandWords != nil {
 			k, _ := cmdStatementCommand(stmt)
+			if cmdAssignsPath(stmt, k) {
+				*commandWords = append(*commandWords, cmdPathAssignment)
+			}
 			for ; k < len(stmt); k++ {
 				w := strings.ReplaceAll(stmt[k], `\`, "")
 				*commandWords = append(*commandWords, w)
+				if stmtExp[k] || strings.HasPrefix(stmt[k], "$") {
+					*commandWords = append(*commandWords, cmdUnknownReceiver)
+				}
 				if w != "builtin" && w != "command" && !strings.HasPrefix(w, "-") {
 					break
 				}
 			}
 		}
-		words = append(words, cmdStatementReceiverWords(stmt, trust)...)
-		stmt = stmt[:0]
+		words = append(words, cmdStatementReceiverWords(stmt, stmtExp, trust)...)
+		stmt, stmtExp = stmt[:0], stmtExp[:0]
 	}
 	// nested reads a command substitution: its statements are commands of
 	// their own, and no consumer in them is trusted: a consumer printing
@@ -1340,10 +1372,15 @@ func cmdScanReceiverWords(line string, i int, closer byte, trust bool, commandWo
 	// ("$(grep -m1 bash /etc/shells)" <<EOF, checker it2). The outer word
 	// only gets a marker, so it never reads as a consumer name.
 	nested := func(j int, cl byte) int {
-		inner, e := cmdScanReceiverWords(line, j, cl, false, commandWords)
+		inner, e := cmdScanReceiverWords(line, j, cl, false, op, commandWords)
 		words = append(words, inner...)
 		word.WriteString("$()")
 		inWord = true
+		// Its output is an expansion, unless it holds the here-document
+		// operator: git commit -m "$(cat <<EOF hands the body to cat.
+		if op < j || op > e {
+			wordExp = true
+		}
 		return e
 	}
 	var quote byte
@@ -1371,6 +1408,7 @@ func cmdScanReceiverWords(line string, i int, closer byte, trust bool, commandWo
 				i = nested(i+1, '`')
 			default:
 				word.WriteByte(c)
+				wordExp = wordExp || c == '$'
 			}
 			continue
 		}
@@ -1449,6 +1487,8 @@ func cmdScanReceiverWords(line string, i int, closer byte, trust bool, commandWo
 		default:
 			word.WriteByte(c)
 			inWord = true
+			// $( is read by the ( case.
+			wordExp = wordExp || c == '$' && (i+1 >= len(line) || line[i+1] != '(')
 		}
 	}
 	finish()
@@ -1482,18 +1522,63 @@ func cmdStatementCommand(stmt []string) (k int, assigned bool) {
 // cmdStatementReceiverWords returns the words of one statement that can
 // name a receiver: none when its command word is a bare known text consumer
 // (no assignment before it, trust on), every word otherwise, plus
-// cmdUnknownReceiver when the command word is an expansion.
-func cmdStatementReceiverWords(stmt []string, trust bool) []string {
+// cmdUnknownReceiver when it can run a program named by an expansion
+// (cmdExpansionReceiver).
+func cmdStatementReceiverWords(stmt []string, exp []bool, trust bool) []string {
 	k, assigned := cmdStatementCommand(stmt)
 	if k < len(stmt) && trust && !assigned && cmdTextConsumerStatement(stmt[k:]) {
 		// PATH=... grep runs another program: never a trusted consumer.
 		return nil
 	}
 	words := cmdSplitQuotedWords(stmt)
-	if k < len(stmt) && strings.HasPrefix(stmt[k], "$") {
+	if k < len(stmt) && cmdExpansionReceiver(stmt, exp, k) {
 		words = append(words[:len(words):len(words)], cmdUnknownReceiver)
 	}
 	return words
+}
+
+// cmdExpansionReceiver reports whether the statement with command word k
+// can run a program named by an expansion: the command word itself
+// ("$BASH" -s, $0) or, unless the command word runs no argument
+// (cmdExpansionInertCommands), any later word: env "$BASH" -s, nice $0 -s,
+// timeout 5 "$BASH", xargs -0 "$BASH" -c (GAP-2536 checker it4). Launchers
+// are not listed, so an unknown one over-reads, never under-reads.
+func cmdExpansionReceiver(stmt []string, exp []bool, k int) bool {
+	if exp[k] || strings.HasPrefix(stmt[k], "$") {
+		return true
+	}
+	if cmdExpansionInertCommands[stmt[k]] {
+		return false
+	}
+	for _, e := range exp[k+1:] {
+		if e {
+			return true
+		}
+	}
+	return false
+}
+
+// cmdAssignsPath reports whether the statement with command word k assigns
+// PATH: before the command word (PATH=.:$PATH; or PATH=... grep) or as an
+// argument of export, declare, typeset, local or readonly.
+func cmdAssignsPath(stmt []string, k int) bool {
+	path := func(w string) bool { return strings.HasPrefix(w, "PATH=") || strings.HasPrefix(w, "PATH+=") }
+	for _, w := range stmt[:k] {
+		if path(w) {
+			return true
+		}
+	}
+	if k < len(stmt) {
+		switch stmt[k] {
+		case "export", "declare", "typeset", "local", "readonly":
+			for _, w := range stmt[k+1:] {
+				if path(w) {
+					return true
+				}
+			}
+		}
+	}
+	return false
 }
 
 // cmdSplitQuotedWords returns words plus the pieces of every word that
