@@ -295,11 +295,17 @@ func (g *sessionStartGate) await(ctx context.Context, key string, wait, arrival 
 			continue
 		default:
 		}
+		// Waiting for another call's start verdict uses no gateway CPU
+		// either: the slot is given up for it and taken back after (GAP-0050).
+		resume := waitWithoutHookRunSlot(ctx)
 		select {
 		case <-entry.done:
+			resume()
 		case <-timer.C:
+			resume()
 			return sessionStartPendingReason, true
 		case <-ctx.Done():
+			resume()
 			return sessionStartPendingReason, true
 		}
 	}

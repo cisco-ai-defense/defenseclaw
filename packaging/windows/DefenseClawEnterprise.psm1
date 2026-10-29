@@ -200,6 +200,11 @@ $script:DefenseClawQuarantinedRoots = @()
 $script:DefenseClawRecoveryGatewayCandidate = $null
 $script:DefenseClawRecoveryGatewayRuns = @()
 $script:DefenseClawRecoveryGatewayRefusal = $null
+# Standalone uninstall: the bundle.lock handle an uninstall holds while it
+# removes StateRoot (Enter-DefenseClawBundleStoreLock, GAP-2438). Set here so
+# every purge entry, also the recovery purge outside
+# Invoke-DefenseClawEnterpriseLifecycle, reads it under strict mode (GAP-2490).
+$script:DefenseClawPurgeBundleLock = $null
 # Standalone: the installed gateway's error when this run removed a committed
 # managed-hook lifecycle journal it could not retire (GAP-1322). Reset per
 # lifecycle run.
@@ -9045,29 +9050,66 @@ function Get-DefenseClawGuardianStateIdentity {
     $path = Microsoft.PowerShell.Management\Join-Path `
         $Layout.RuntimeDirectory `
         'hook_guardian_state.json'
-    if (-not (Microsoft.PowerShell.Management\Test-Path `
-            -LiteralPath $path `
-            -PathType Leaf)) {
-        return $null
-    }
     # The wait polls this file while the guardian that writes it restarts
     # and may replace it: absent for one read means no identity yet, never
-    # a failed transaction (GAP-1849). A reparse point or a path outside
-    # the runtime folder still throws.
-    try {
-        [void](Assert-DefenseClawDescendant `
-            -Path $path `
-            -Root $Layout.RuntimeDirectory `
-            -Label 'hook guardian state')
-        Assert-DefenseClawNoReparsePath -Path $path
-        return Get-DefenseClawFileIdentity -Path $path
-    }
-    catch {
-        if (-not (Microsoft.PowerShell.Management\Test-Path -LiteralPath $path)) {
+    # a failed transaction (GAP-1849). The guardian publishes it with
+    # ReplaceFile, whose name can be missing for a moment and back before
+    # the next check (seen live: Get-Item fails between two successful
+    # existence checks), so a failed read is read again; a read that keeps
+    # failing because the file is not found is the same race and means no
+    # identity yet (GAP-2501). A reparse point, a path outside the runtime
+    # folder or any other error that persists still throws.
+    $lastError = $null
+    for ($attempt = 1; $attempt -le 3; $attempt++) {
+        if (-not (Microsoft.PowerShell.Management\Test-Path `
+                -LiteralPath $path `
+                -PathType Leaf)) {
             return $null
         }
-        throw
+        try {
+            [void](Assert-DefenseClawDescendant `
+                -Path $path `
+                -Root $Layout.RuntimeDirectory `
+                -Label 'hook guardian state')
+            Assert-DefenseClawNoReparsePath -Path $path
+            return Get-DefenseClawFileIdentity -Path $path
+        }
+        catch {
+            if (-not (Microsoft.PowerShell.Management\Test-Path -LiteralPath $path)) {
+                return $null
+            }
+            $lastError = $_
+        }
+        Microsoft.PowerShell.Utility\Start-Sleep -Milliseconds 50
     }
+    if (Test-DefenseClawPathVanishedError -ErrorRecord $lastError) {
+        return $null
+    }
+    throw $lastError
+}
+
+function Test-DefenseClawPathVanishedError {
+    param([Parameter(Mandatory)][Management.Automation.ErrorRecord]$ErrorRecord)
+    # True when the error says the path was not there: the item, file or
+    # folder was not found (Get-Item reports a file replaced under it as
+    # IOException "Could not find item"), or a managed path check met it
+    # missing.
+    $exception = $ErrorRecord.Exception
+    while ($null -ne $exception) {
+        if ($exception -is [Management.Automation.ItemNotFoundException] -or
+            $exception -is [IO.FileNotFoundException] -or
+            $exception -is [IO.DirectoryNotFoundException]) {
+            return $true
+        }
+        $message = [string]$exception.Message
+        if ($message.StartsWith('Could not find item ', [StringComparison]::Ordinal) -or
+            $message.StartsWith('managed path is missing: ', [StringComparison]::Ordinal) -or
+            $message.StartsWith('required path is missing: ', [StringComparison]::Ordinal)) {
+            return $true
+        }
+        $exception = $exception.InnerException
+    }
+    return $false
 }
 
 function Wait-DefenseClawServiceFailureRestartQuiescence {

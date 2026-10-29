@@ -66,11 +66,11 @@ func TestCodexExplicitSetupMovesRememberedRoot(t *testing.T) {
 	if err := c.Setup(context.Background(), opts); err != nil {
 		t.Fatal(err)
 	}
-	// Windows registers the native hook launcher through an encoded
-	// PowerShell command instead of hooks/codex-hook.sh.
+	// Windows registers the native hook launcher (through the system
+	// cmd.exe, GAP-1908) instead of hooks/codex-hook.sh.
 	hookMarker := []byte("codex-hook")
 	if runtime.GOOS == "windows" {
-		hookMarker = []byte("-EncodedCommand")
+		hookMarker = []byte("hook --connector codex --event ")
 	}
 	for _, root := range []struct {
 		path     string
@@ -292,7 +292,7 @@ func testCodexExplicitSetupRestoresCopiedHomeRoot(t *testing.T, oldHomeState str
 		if err != nil {
 			t.Fatal(err)
 		}
-		if got, want := bytes.Count(config, []byte("-EncodedCommand")), 2*len(groups); got != want {
+		if got, want := bytes.Count(config, []byte("hook --connector codex --event ")), 2*len(groups); got != want {
 			t.Fatalf("copied-home repair registered %d native hook commands, want %d", got, want)
 		}
 	}
@@ -334,7 +334,7 @@ func testCodexExplicitSetupRestoresCopiedHomeRoot(t *testing.T, oldHomeState str
 	}
 	hookMarker := []byte("codex-hook")
 	if runtime.GOOS == "windows" {
-		hookMarker = []byte("-EncodedCommand")
+		hookMarker = []byte("hook --connector codex --event ")
 	}
 	forwardPrevious, err := os.ReadFile(configPath)
 	if err != nil {

@@ -275,3 +275,47 @@ func TestCodexSessionStartDuringAnInstallDoesNotBlockTheSession(t *testing.T) {
 		})
 	}
 }
+
+// A call waiting for its session's start to arrive uses no gateway CPU, so it
+// gives up its caller's run slot for that wait and takes it back after. A
+// 60-way parallel Read burst of sessions this process has not seen otherwise
+// queued one arrival wait (1 s) after another behind the caller's few run
+// slots and ran past the managed hooks' 3.5 s answer budget (GAP-0050).
+func TestSessionStartArrivalWaitDoesNotHoldCallerRunSlot(t *testing.T) {
+	run := make(chan struct{}, 1)
+	run <- struct{}{}
+	slot := &hookRunSlot{run: run, held: true}
+	ctx := context.WithValue(t.Context(), hookRunSlotContextKey{}, slot)
+	gate := &sessionStartGate{}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		if reason, refused := gate.await(ctx, "claudecode\x00uid:1\x00unseen", 5*time.Second, 800*time.Millisecond,
+			func(context.Context) (bool, string) { return false, "" }); refused {
+			t.Errorf("await refused an allowed missing start: %q", reason)
+		}
+	}()
+	freed := false
+	for deadline := time.Now().Add(600 * time.Millisecond); time.Now().Before(deadline); time.Sleep(5 * time.Millisecond) {
+		select {
+		case run <- struct{}{}:
+			// Another request of the caller runs while this one waits.
+			<-run
+			freed = true
+		default:
+		}
+		if freed {
+			break
+		}
+	}
+	if !freed {
+		t.Fatal("the arrival wait kept the caller's run slot")
+	}
+	<-done
+	slot.mu.Lock()
+	held := slot.held
+	slot.mu.Unlock()
+	if !held || len(run) != 1 {
+		t.Fatalf("after the wait the request holds its slot = %v (tokens %d), want true (1)", held, len(run))
+	}
+}

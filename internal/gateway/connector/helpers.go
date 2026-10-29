@@ -34,6 +34,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 	"unicode/utf16"
 
 	"github.com/defenseclaw/defenseclaw/internal/pathidentity"
@@ -891,6 +892,88 @@ func windowsNativePowerShellHookCommandForBoundEvent(connector, event, contractI
 	return windowsSystemPowerShellExe() + " -NoLogo -NoProfile -NonInteractive -EncodedCommand " + powershellEncodedCommand(script)
 }
 
+// windowsCodexHookCommandForBinaryEvent is the per-user Codex command for
+// one event: the direct cmd.exe start of the launcher
+// (windowsCmdDirectHookCommand), or, for a launcher path that form cannot
+// carry, the encoded system PowerShell bridge
+// (windowsNativePowerShellHookCommandForCodexEvent). Releases up to 1.0.4
+// registered the bridge for every path; it stays owned for repair and
+// teardown (nativeHookExactCommands) while those releases are upgrade
+// sources.
+func windowsCodexHookCommandForBinaryEvent(event, contractID, hookBinary string) string {
+	if command, ok := windowsCmdDirectHookCommand(hookBinary, nativeHookBridgeArguments("codex", event, contractID, nil)); ok {
+		return command
+	}
+	return windowsNativePowerShellHookCommandForCodexEvent(event, contractID, hookBinary)
+}
+
+// windowsCmdDirectHookCommand renders a hook command that starts the
+// GUI-subsystem launcher through the system cmd.exe, with no PowerShell:
+//
+//	<system>\cmd.exe /d /v:off /c "<launcher>" <arguments>
+//
+// Codex runs a hook command through the account's shell (PowerShell
+// -Command in current releases, %COMSPEC% /C before), so the encoded
+// PowerShell bridge started a second Windows PowerShell on every call.
+// Under load that start alone took 2 to 5 s, and the hook counts it against
+// its answer budget, so benign calls were blocked as unanswered (GAP-1908,
+// GAP-1489, GAP-1150, GAP-0050). cmd.exe /c waits for a GUI-subsystem
+// program, hands it the agent's standard handles and exits with its status.
+// The line runs the same under PowerShell 5.1 and 7, under cmd.exe (which
+// keeps the quotes of a single quoted program path) and when started
+// directly. /d skips AutoRun commands and /v:off delayed expansion.
+//
+// It is used only when the cmd.exe path is made of letters, digits and
+// \ : . _ - ~, the launcher path of those and spaces, and every argument of
+// letters, digits and . _ -: neither shell can expand, split or redirect
+// anything in it (no % ! ^ & | < > ( ) @ $ ` ' or quote). Any other path
+// keeps the PowerShell bridge.
+func windowsCmdDirectHookCommand(hookBinary string, arguments []string) (string, bool) {
+	cmdExe := windowsSystemCmdExe()
+	if !windowsCmdDirectPath(cmdExe, false) || !windowsCmdDirectPath(hookBinary, true) {
+		return "", false
+	}
+	for _, argument := range arguments {
+		if !windowsCmdDirectToken(argument) {
+			return "", false
+		}
+	}
+	return cmdExe + ` /d /v:off /c "` + hookBinary + `" ` + strings.Join(arguments, " "), true
+}
+
+// windowsCmdDirectPath reports an absolute drive path (X:\...) that
+// windowsCmdDirectHookCommand can carry; spaces only when it is quoted.
+func windowsCmdDirectPath(candidate string, quoted bool) bool {
+	if len(candidate) < 4 || candidate[1] != ':' || candidate[2] != '\\' ||
+		!(candidate[0] >= 'A' && candidate[0] <= 'Z' || candidate[0] >= 'a' && candidate[0] <= 'z') ||
+		strings.HasSuffix(candidate, `\`) || strings.Contains(candidate, `\\`) {
+		return false
+	}
+	for _, r := range candidate[3:] {
+		switch {
+		case unicode.IsLetter(r), unicode.IsDigit(r), strings.ContainsRune(`\._-~`, r):
+		case r == ' ' && quoted:
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+// windowsCmdDirectToken reports one bare hook argument (a flag, connector,
+// event or contract) that windowsCmdDirectHookCommand can carry unquoted.
+func windowsCmdDirectToken(argument string) bool {
+	if argument == "" {
+		return false
+	}
+	for _, r := range argument {
+		if !(r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || strings.ContainsRune("._-", r)) {
+			return false
+		}
+	}
+	return true
+}
+
 // windowsGuardedPowerShellHookCommand is
 // windowsNativePowerShellHookCommandForBoundEvent with guard run before the
 // launcher starts (CopilotRemovedDeploymentGuardPowerShell).
@@ -1261,6 +1344,8 @@ func nativeHookExactCommands(hookBinaries []string) map[string]struct{} {
 	codexContracts := builtinHookContracts["codex"]
 	var key strings.Builder
 	key.WriteString(windowsSystemPowerShellExe())
+	key.WriteString("\x00s")
+	key.WriteString(windowsSystemCmdExe())
 	for _, hookBinary := range hookBinaries {
 		key.WriteString("\x00b")
 		key.WriteString(hookBinary)
@@ -1298,6 +1383,7 @@ func nativeHookExactCommands(hookBinaries []string) map[string]struct{} {
 		for _, contract := range codexContracts {
 			for _, event := range contract.Events {
 				add(windowsNativePowerShellHookCommandForCodexEvent(event, contract.ContractID, hookBinary))
+				add(windowsCodexHookCommandForBinaryEvent(event, contract.ContractID, hookBinary))
 			}
 		}
 	}

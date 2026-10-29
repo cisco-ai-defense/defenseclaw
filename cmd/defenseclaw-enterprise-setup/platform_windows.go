@@ -230,6 +230,13 @@ func executeEnterpriseSetup(
 				return 0, err
 			}
 		}
+		// Refuse an upgrade on saturated processors before staging: it
+		// could not finish within TIMEOUTSECONDS (GAP-2265).
+		if deployment, err := standaloneSetupDeployment(); err == nil {
+			if err := requireEnterpriseSetupHostCapacity(opts.Action, deployment, payload.Manifest.Version); err != nil {
+				return 0, err
+			}
+		}
 	}
 	stageRoot, cleanup, err := stageEnterprisePayload(payload)
 	if err != nil {
