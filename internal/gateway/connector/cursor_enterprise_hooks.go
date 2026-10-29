@@ -333,9 +333,12 @@ func verifyWindowsCursorEnterpriseHooks(existing []byte, adapterPath, failMode s
 				continue
 			}
 			owned++
-			// A migration or presence read also accepts failClosed true,
-			// which 1.0.4 wrote for every mode. A closed policy still
-			// requires true, so a flag turned off reads as drift.
+			// until 1.1: a migration or presence read also accepts
+			// failClosed true, which 1.0.4 wrote for every mode, so an
+			// upgrade from 1.0.4 rewrites that file instead of refusing it.
+			// Remove once upgrades from 1.0.4 are no longer supported. A
+			// closed policy still requires true, so a flag turned off reads
+			// as drift.
 			if !isExactWindowsCursorEnterpriseHookEntry(raw, entryCommand, failMode,
 				allowPrevious || allowRetired) {
 				return 0, fmt.Errorf("cursor hooks event %q has a drifted DefenseClaw entry", event)
