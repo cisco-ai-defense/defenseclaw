@@ -964,11 +964,14 @@ func TestCodexSetupRepairsLegacyNonWaitingPowerShellCommand(t *testing.T) {
 	const event = "PreToolUse"
 	const contractID = "codex-hooks-v4"
 	setHookBinaryOverride(t, hookBinary)
-	current := windowsNativePowerShellHookCommandForCodexEvent(event, contractID, hookBinary)
+	// GAP-1908: setup repairs every earlier form to the direct cmd.exe start.
+	current := windowsCodexHookCommandForBinaryEvent(event, contractID, hookBinary)
+	bridge := windowsNativePowerShellHookCommandForCodexEvent(event, contractID, hookBinary)
 	legacyCommands := []struct {
 		name    string
 		command string
 	}{
+		{name: "1.0.4 awaited bridge", command: bridge},
 		{name: "non-waiting", command: legacyWindowsNativePowerShellHookCommandForBinary("codex", hookBinary)},
 		{name: "unqualified-start-process", command: legacyUnqualifiedWindowsNativePowerShellHookCommandForBinary("codex", hookBinary)},
 		{name: "start-process", command: legacyStartProcessWindowsNativePowerShellHookCommand("codex", hookBinary)},
@@ -1024,9 +1027,13 @@ func TestCodexSetupRepairsLegacyNonWaitingPowerShellCommand(t *testing.T) {
 			}
 		})
 	}
-	// The repaired command awaits the launcher on the handle it started it
-	// with; $LASTEXITCODE is read only after Out-Host has awaited it.
-	decoded := decodePowerShellEncodedCommandForTest(t, current)
+	if want := windowsSystemCmdExe() + ` /d /v:off /c "` + hookBinary + `" hook --connector codex --event ` + event + ` --hook-contract ` + contractID; current != want {
+		t.Fatalf("repaired command = %q, want %q", current, want)
+	}
+	// The 1.0.4 bridge (still rendered for a path the direct form cannot
+	// carry) awaits the launcher on the handle it started it with;
+	// $LASTEXITCODE is read only after Out-Host has awaited it.
+	decoded := decodePowerShellEncodedCommandForTest(t, bridge)
 	if want := windowsAwaitedHookScriptForTest(hookBinary, "hook", "--connector", "codex", "--event", event, "--hook-contract", contractID); decoded != want {
 		t.Fatalf("repaired command = %s\nwant %s", decoded, want)
 	}
@@ -2074,14 +2081,15 @@ func TestBuildCodexHooksTableUsesSupportedTrustFlow(t *testing.T) {
 					windowsCommand,
 				)
 			}
-			decoded := decodePowerShellEncodedCommandForTest(t, windowsCommand)
-			if !windowsBridgeBindsArgumentForTest(decoded, "--event", group.eventType) ||
-				!windowsBridgeBindsArgumentForTest(decoded, "--hook-contract", contract.ContractID) {
+			// GAP-1908: the launcher starts through the system cmd.exe and
+			// the command binds the event and contract.
+			if !strings.HasPrefix(windowsCommand, windowsSystemCmdExe()+` /d /v:off /c "`) ||
+				!strings.HasSuffix(windowsCommand, " hook --connector codex --event "+group.eventType+" --hook-contract "+contract.ContractID) {
 				t.Errorf(
-					"event %s command did not bind event and contract %s: %s",
+					"event %s command did not bind event and contract %s through cmd.exe: %s",
 					group.eventType,
 					contract.ContractID,
-					decoded,
+					windowsCommand,
 				)
 			}
 		}
@@ -2559,7 +2567,7 @@ func TestWindowsNativeConfigMatrix(t *testing.T) {
 				groups := hooks["PreToolUse"].([]interface{})
 				handlers := groups[0].(map[string]interface{})["hooks"].([]interface{})
 				command := handlers[0].(map[string]interface{})["command_windows"].(string)
-				wantCommand := windowsNativePowerShellHookCommandForCodexEvent(
+				wantCommand := windowsCodexHookCommandForBinaryEvent(
 					"PreToolUse",
 					"codex-hooks-v4",
 					defenseclawHookBinary(),
@@ -2567,9 +2575,7 @@ func TestWindowsNativeConfigMatrix(t *testing.T) {
 				if command != wantCommand {
 					t.Errorf("Codex PreToolUse command_windows = %q, want %q", command, wantCommand)
 				}
-				decoded := decodePowerShellEncodedCommandForTest(t, command)
-				if !windowsBridgeBindsArgumentForTest(decoded, "--event", "PreToolUse") ||
-					!windowsBridgeBindsArgumentForTest(decoded, "--hook-contract", "codex-hooks-v4") {
+				if !strings.HasSuffix(command, " hook --connector codex --event PreToolUse --hook-contract codex-hooks-v4") {
 					t.Errorf("config missing event-bound native command_windows for %s:\n%s", connectorName, text)
 				}
 			case "copilot":
