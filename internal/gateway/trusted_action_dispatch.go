@@ -843,7 +843,8 @@ func withActiveStateTargetMention(
 		// mention scan cannot place a home target. A redirect target the
 		// shell opens is still proven against the hook client's resolved
 		// target map (GAP-2328: $CMD; echo $X > ~/.defenseclaw/config.yaml).
-		if !request.ProtectedHomeHook || !provenShellRedirectStateWrite(request) {
+		if (!request.ProtectedHomeHook || !provenShellRedirectStateWrite(request)) &&
+			!provenLinkedStateMutationPath(facts, request) {
 			return findings
 		}
 	} else if !provenStateMutationPath(facts, request) && !provenBashAggregateStateWrite(request) &&
@@ -995,9 +996,51 @@ func provenCMDBodyStateWrite(request trustedActionRequest) bool {
 // hook's resolved target map is preferred; a managed call can use only an
 // OS-proved active-state hard link when that map has no entry.
 func provenStateMutationPath(facts actionfacts.Facts, request trustedActionRequest) bool {
+	return provenStateMutationPathVia(facts, request, false)
+}
+
+// provenLinkedStateMutationPath is provenStateMutationPath for the operands
+// the command's own links lead into active state alone. The mention scan
+// reads the names the command spells; ln -s ~/.defenseclaw hc; cp a.txt
+// hc/config.yaml spells none, yet cp writes the state file, as the same
+// alias of ~/.ssh writes authorized_keys (GAP-2522).
+func provenLinkedStateMutationPath(facts actionfacts.Facts, request trustedActionRequest) bool {
+	return provenStateMutationPathVia(facts, request, true)
+}
+
+func provenStateMutationPathVia(facts actionfacts.Facts, request trustedActionRequest, linkedOnly bool) bool {
 	projected := facts.EnforcementProjection()
 	if projected.ActiveHome == "" {
 		return false
+	}
+	// The links the command creates are read once, on the local file
+	// system, as the per-user hook's Resolve reads them. Behind ProtectHome
+	// and in a sandbox the gateway cannot walk the user's names.
+	// A link the command creates is what leaves the whole action short of
+	// proof, so when every link operation of it was read (Links.Known), the
+	// static writer itself proves its write through the link. The link
+	// command's own name and an entry an operand removes or replaces are
+	// not followed (stateDirectoryEntryOperand).
+	var commandLinks *hookpaths.Links
+	linkedState := func(command actionfacts.CommandFact, candidate actionfacts.PathFact, mutationProven bool) (actionfacts.PathFact, bool) {
+		if request.SkipLocalFilesystemResolution || request.ProtectedHomeHook || !filepath.IsAbs(candidate.Resolved) {
+			return candidate, false
+		}
+		if commandLinks == nil {
+			text, _ := trustedBashCommandInput(request.Input)
+			links := hookpaths.CommandLinks("Bash", text, request.Input.CWD, projected.ActiveHome)
+			commandLinks = &links
+		}
+		if !mutationProven && !commandLinks.Known() {
+			return candidate, false
+		}
+		followFinal := !stateDirectoryEntryOperand(command, candidate) && !stateLinkCommand(command)
+		state, ok := commandLinks.StateTarget(candidate.Resolved, projected.ActiveHome, followFinal)
+		if !ok {
+			return candidate, false
+		}
+		candidate.Resolved = state
+		return candidate, true
 	}
 	wholeActionProven := projected.Authoritative() && projected.EnforcementEligible()
 	for _, candidate := range projected.Paths {
@@ -1009,7 +1052,12 @@ func provenStateMutationPath(facts actionfacts.Facts, request trustedActionReque
 		if !provenMutation {
 			provenMutation = provenPartialStateRedirect(facts, command, candidate)
 		}
-		if !provenMutation {
+		if provenMutation || stateCommandMutatesPath(command, candidate) {
+			if linked, ok := linkedState(command, candidate, provenMutation); ok && matchesActiveDefenseClawState(projected, linked) {
+				return true
+			}
+		}
+		if !provenMutation || linkedOnly {
 			continue
 		}
 		if entry, ok := stateDirectoryEntryTarget(command, candidate, request); ok {
@@ -1063,19 +1111,14 @@ func stateDirectoryEntryTarget(
 	candidate actionfacts.PathFact,
 	request trustedActionRequest,
 ) (string, bool) {
-	moveDestination := candidate.Access == actionfacts.PathAccessWrite &&
-		hasOperation(command, actionfacts.OperationMove)
-	if candidate.Access != actionfacts.PathAccessDelete && !moveDestination ||
-		request.SkipLocalFilesystemResolution ||
-		hasAnyOperation(command, actionfacts.OperationWrite, actionfacts.OperationAppend,
-			actionfacts.OperationCopy) {
+	if request.SkipLocalFilesystemResolution || !stateDirectoryEntryOperand(command, candidate) {
 		return "", false
 	}
+	moveDestination := candidate.Access == actionfacts.PathAccessWrite &&
+		hasOperation(command, actionfacts.OperationMove)
 	windows := candidate.Flavor == actionfacts.PathFlavorWindows
 	value := candidate.Resolved
-	if !filepath.IsAbs(value) || strings.HasSuffix(candidate.Value, "/") ||
-		strings.HasSuffix(candidate.Value, "/.") ||
-		windows && (strings.HasSuffix(candidate.Value, `\`) || strings.HasSuffix(candidate.Value, `\.`)) {
+	if !filepath.IsAbs(value) {
 		return "", false
 	}
 	parent, ok := hookpaths.ResolveWriteTarget(filepath.Dir(value))
@@ -1087,6 +1130,40 @@ func stateDirectoryEntryTarget(
 		return "", false
 	}
 	return entry, true
+}
+
+// stateDirectoryEntryOperand reports an operand that removes or replaces
+// its directory entry (stateDirectoryEntryTarget): its final name is not
+// followed, unless a trailing separator makes the kernel follow it.
+func stateDirectoryEntryOperand(command actionfacts.CommandFact, candidate actionfacts.PathFact) bool {
+	moveDestination := candidate.Access == actionfacts.PathAccessWrite &&
+		hasOperation(command, actionfacts.OperationMove)
+	if candidate.Access != actionfacts.PathAccessDelete && !moveDestination ||
+		hasAnyOperation(command, actionfacts.OperationWrite, actionfacts.OperationAppend,
+			actionfacts.OperationCopy) {
+		return false
+	}
+	windows := candidate.Flavor == actionfacts.PathFlavorWindows
+	return !strings.HasSuffix(candidate.Value, "/") && !strings.HasSuffix(candidate.Value, "/.") &&
+		(!windows || !strings.HasSuffix(candidate.Value, `\`) && !strings.HasSuffix(candidate.Value, `\.`))
+}
+
+// stateLinkCommand reports a command that creates a link (ln, link, the
+// multicall busybox ln): its link name is made, not written through.
+func stateLinkCommand(command actionfacts.CommandFact) bool {
+	words := append([]string{command.Program}, command.Argv...)
+	for _, word := range words {
+		switch filepath.Base(word) {
+		case "ln", "gln", "link", "glink":
+			return true
+		case "busybox", "toybox":
+			continue
+		}
+		if word != command.Program {
+			return false
+		}
+	}
+	return false
 }
 
 func provenPartialStateRedirect(

@@ -2243,6 +2243,77 @@ func (l Links) Known() bool {
 	return l.links.known && !l.links.opaque
 }
 
+// StateTarget maps an absolute write operand through the links the command
+// creates to the active DefenseClaw state it reaches, as Target maps it to
+// an authorized-keys file: after ln -s ~/.defenseclaw hc, the operand
+// hc/config.yaml names ~/.defenseclaw/config.yaml (GAP-1521, GAP-2522). The
+// result is the name under home/.defenseclaw (the root and its trees too, so
+// the caller judges which entries are state); ok is false when no name the
+// operand may denote is under it. followFinal is false for an operand that
+// acts on the directory entry itself (rm, unlink, a move destination): its
+// own final link is replaced, not followed, so only its parents are.
+func (l Links) StateTarget(path, home string, followFinal bool) (string, bool) {
+	if len(l.links.aliases) == 0 || home == "" || !filepath.IsAbs(path) {
+		return "", false
+	}
+	activeHome, ok := ResolveWriteTarget(home)
+	if !ok {
+		return "", false
+	}
+	under := func(name string) (string, bool) {
+		resolved, ok := ResolveWriteTarget(name)
+		if !ok {
+			return "", false
+		}
+		relative, err := filepath.Rel(activeHome, resolved)
+		if err != nil {
+			return "", false
+		}
+		relative = filepath.ToSlash(relative)
+		if relative != ".defenseclaw" && !strings.HasPrefix(relative, ".defenseclaw/") {
+			return "", false
+		}
+		return filepath.Join(home, filepath.FromSlash(relative)), true
+	}
+	seen := map[string]bool{path: true}
+	queue := []string{path}
+	for steps := 0; len(queue) > 0; {
+		name := queue[0]
+		queue = queue[1:]
+		forms := []string{name}
+		if dir, ok := resolveWritePath(filepath.Dir(name), 0); ok {
+			forms = append(forms, filepath.Join(dir, filepath.Base(name)))
+		}
+		if full, ok := resolveWritePath(name, 0); ok && followFinal {
+			forms = append(forms, full)
+		}
+		for _, form := range forms {
+			for _, alias := range l.links.aliases {
+				rest, isUnder := cutPathPrefix(form, alias.name)
+				if !isUnder || rest == "" && !followFinal {
+					continue
+				}
+				next := alias.target
+				if rest != "" {
+					next += string(filepath.Separator) + rest
+				}
+				if seen[next] {
+					continue
+				}
+				seen[next] = true
+				if steps++; steps > maxLinkAliasSteps {
+					return "", false
+				}
+				if state, ok := under(next); ok {
+					return state, true
+				}
+				queue = append(queue, next)
+			}
+		}
+	}
+	return "", false
+}
+
 // Target maps an absolute write operand through the links the command
 // creates as Resolve does: a name that reaches one of the user's
 // authorized-keys files maps to that file. ok is false when one of the names
