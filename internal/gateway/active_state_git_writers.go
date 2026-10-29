@@ -189,8 +189,16 @@ func gitWorkTreeStateWrite(words []string, home, cwd string) bool {
 	}
 	tree, root := stateDirectoryOf(base, home, cwd)
 	onState := tree || root
+	// Above the state root only a work tree the call names (-C,
+	// --work-tree) counts: whether the directory a session or a cd
+	// leaves the call in (the home, /tmp) is a git work tree at all is not
+	// proven by the command, so `git stash -u` or `cd /tmp && git clean
+	// -fdx` from a home session stays allowed (pod check26, BALANCED rule 1).
+	named := slices.ContainsFunc(words[:sub], func(word string) bool {
+		return word == "-C" || word == "--work-tree" || strings.HasPrefix(word, "--work-tree=")
+	})
 	stateRoot := strings.TrimRight(home, "/") + "/.defenseclaw"
-	above := base == "/" || strings.HasPrefix(stateRoot, strings.TrimRight(base, "/")+"/")
+	above := named && (base == "/" || strings.HasPrefix(stateRoot, strings.TrimRight(base, "/")+"/"))
 	stashUntracked := gitShortOption(args, byte(117)) || gitShortOption(args, byte(97)) ||
 		gitLongOption(args, "--include-untracked", "--all")
 	switch name {

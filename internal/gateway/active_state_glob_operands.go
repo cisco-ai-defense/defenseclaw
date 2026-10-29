@@ -44,7 +44,8 @@ func globbedStateMutation(facts actionfacts.Facts) bool {
 	if !strings.HasPrefix(home, "/") {
 		return false
 	}
-	for _, command := range facts.Commands {
+	dirs := posixCommandDirectories(facts, home)
+	for index, command := range facts.Commands {
 		if command.Effect == actionfacts.EffectPreview || command.Dialect != actionfacts.DialectPOSIX {
 			continue
 		}
@@ -52,7 +53,9 @@ func globbedStateMutation(facts actionfacts.Facts) bool {
 		if !ok {
 			continue
 		}
-		if globbedStateCommandMutates(command, words, home, facts.CWD) {
+		// A relative operand names a path in the directory the command
+		// runs in, after any earlier cd (pod check26).
+		if globbedStateCommandMutates(command, words, home, dirs[index]) {
 			return true
 		}
 	}
