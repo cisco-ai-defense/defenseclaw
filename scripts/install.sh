@@ -1460,6 +1460,11 @@ if [[ "${ROLLBACK}" == true ]]; then
     if [[ ${rollback_rc} -eq 1 ]]; then
         undo_rollback "The gateway of DefenseClaw ${back_to} did not start"
     fi
+    # rel-1-0-4:GAP-2546: done only once the restored older gateway answers
+    # its hooks, not just its health check.
+    if [[ "${restart}" == true ]] && version_lt "${back_to}" "${VERSION}" && ! wait_audit_unlocked 180; then
+        warn "The gateway of DefenseClaw ${back_to}, restarted by this rollback, is still busy with its audit database: until it finishes, its hooks can refuse tool calls as \"the gateway is running but did not answer\" (fail closed). Check it with: defenseclaw-gateway status"
+    fi
     ok "Now running DefenseClaw ${back_to}."
     forward="defenseclaw rollback"
     if version_lt "${back_to}" 1.0.0; then
@@ -2532,7 +2537,14 @@ restart_old() {
     if [[ "${WAS_RUNNING}" == true ]]; then
         local rc=0
         start_gateway >/dev/null 2>&1 || rc=$?
-        [[ ${rc} -ne 0 ]] || return 0
+        if [[ ${rc} -eq 0 ]]; then
+            # rel-1-0-4:GAP-2546: an older restored gateway answers its hooks
+            # only once its start-up work on the audit database is done.
+            if [[ -n "${PREV_VERSION:-}" ]] && version_lt "${PREV_VERSION}" "${VERSION}" && ! wait_audit_unlocked 180; then
+                warn "The restored gateway is still busy with its audit database: until it finishes, its hooks can refuse tool calls (fail closed). Check it with: defenseclaw-gateway status"
+            fi
+            return 0
+        fi
         if [[ ${rc} -eq 3 ]]; then
             # It runs, but does not guard every connector (GAP-0878).
             RESTORED_NOTE="Your previous install is back and its gateway runs, but a connector needs attention before it is guarded again."
@@ -2557,6 +2569,37 @@ reset_audit_journal_mode() {
     local db="${DEFENSECLAW_HOME}/audit.db"
     [[ -f "${db}" && -x "${VENV}/bin/python" ]] || return 0
     "${VENV}/bin/python" -c "${AUDIT_JOURNAL_PY}" "${db}" >/dev/null 2>&1 || true
+}
+
+# rel-1-0-4:GAP-2546: a gateway older than this release takes its audit
+# query-planner statistics (ANALYZE) as it starts and holds the audit
+# database's write lock for up to a minute on a large store, while its
+# health check already answers. Before 1.0.5 (GAP-1021) a hook call waits on
+# that lock past its budget, so the first calls after "Now running" were
+# refused as "the gateway is running but did not answer" (fail closed).
+# wait_audit_unlocked BOUND waits, at most BOUND seconds, until the lock is
+# free twice in a row; it returns 1 when the lock is still held at the bound.
+AUDIT_LOCK_FREE_PY="import sqlite3,sys;c=sqlite3.connect(sys.argv[1],timeout=0.5,isolation_level=None);c.execute('begin immediate');c.execute('rollback');c.close()"
+
+wait_audit_unlocked() {
+    local db="${DEFENSECLAW_HOME}/audit.db" bound="${1:-120}" deadline free=0 said=""
+    [[ -f "${db}" && -x "${VENV}/bin/python" ]] || return 0
+    deadline=$((SECONDS + bound))
+    while [[ -n "$(gateway_pid || true)" ]]; do
+        if "${VENV}/bin/python" -I -c "${AUDIT_LOCK_FREE_PY}" "${db}" >/dev/null 2>&1; then
+            free=$((free + 1))
+            [[ ${free} -lt 2 ]] || return 0
+        else
+            free=0
+            if [[ -z "${said}" ]]; then
+                info "Waiting up to ${bound} seconds for the gateway to finish its start-up work on the audit database (its hooks answer once it is done)"
+                said=1
+            fi
+        fi
+        [[ ${SECONDS} -lt ${deadline} ]] || return 1
+        sleep 1
+    done
+    return 0
 }
 
 start_gateway() {
