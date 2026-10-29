@@ -184,7 +184,10 @@ func ActionPrivateKeyRead(command, cwd, home string) bool {
 		return false
 	}
 	if actionWindowsHome(home) {
-		return actionWindowsPrivateKeyRead(command, cwd, home)
+		return actionWindowsPrivateKeyRead(command, cwd, home) || actionLiteralIndirectPrivateKeyRead(command, cwd, home)
+	}
+	if actionLiteralIndirectPrivateKeyRead(command, cwd, home) {
+		return true
 	}
 	file, ok := parseShell(command)
 	if !ok {
