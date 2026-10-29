@@ -361,6 +361,7 @@ func TestR105WindowsCMDHeredocSearchArgument(t *testing.T) {
 	const body = "\nTip: cmd /c type nul > " + state + " empties the config\nEOF"
 	const run = "\ncmd /c type nul > " + state + "\nEOF"
 	const cmdBody = "\ntype nul > " + state + "\nEOF"
+	const enableBody = "\nTo enable the guard again: cmd /c type nul > " + state + " empties the config\nEOF"
 	for _, tc := range []struct {
 		command string
 		block   bool
@@ -405,6 +406,26 @@ func TestR105WindowsCMDHeredocSearchArgument(t *testing.T) {
 		{"cat <<'EOF' | grep -c sh | wc -l" + body, false},
 		{"time -p grep -c bash <<'EOF'" + body, false},
 		{"! grep -q cmd <<'EOF'" + body, false},
+		// Checker it2 rows: a consumer inside a substitution can print the
+		// program name, so it is never trusted; a quoted word is split as
+		// the whole-line read split it; prose in a body or a quoted word
+		// redefines nothing.
+		{"\"$(grep -m1 bash /etc/shells)\" <<'EOF'" + run, true},
+		{"`grep -m1 bash /etc/shells` <<'EOF'" + run, true},
+		{"$(cat /etc/shells | grep -m1 bash) <<'EOF'" + run, true},
+		{"cat <<'EOF' | $(grep -m1 sh /etc/shells)" + run, true},
+		{"cat <<'EOF' | \"$(rg -m1 bash /etc/shells)\"" + run, true},
+		{"\"$(grep -m1 cmd x.txt)\" <<'EOF'" + cmdBody, true},
+		{"eval 'bash -s' <<'EOF'" + run, true},
+		{"eval 'grep() { bash; }'; grep x <<'EOF'" + run, true},
+		{"cat <<'EOF' | eval \"sh -s\"" + run, true},
+		{"grep -n cmd <<'EOF'" + enableBody, false},
+		{"grep -n cmd <<'EOF'" + "\nIn main() the line cmd /c type nul > " + state + " empties the config\nEOF", false},
+		{"grep -n cmd <<'EOF'" + "\nThe config hash changes when cmd /c type nul > " + state + " empties the config\nEOF", false},
+		{"gh pr create --title cmd --body-file - <<'EOF'" + enableBody, false},
+		{"cat <<'EOF' | grep -c bash" + enableBody, false},
+		{"gh pr create --title \"$(git log -1 --format=%s)\" --body-file - <<'EOF'" + body, false},
+		{"gh pr create --title \"enable main() hash\" --body-file - <<'EOF'" + body, false},
 	} {
 		for _, tool := range []string{"Bash", "shell_command", "PowerShell"} {
 			args, _ := json.Marshal(map[string]string{"command": tc.command})

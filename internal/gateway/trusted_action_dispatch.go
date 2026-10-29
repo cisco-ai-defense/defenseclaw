@@ -1178,16 +1178,16 @@ func cmdHeredocDelimiter(command string, start int) (doc cmdHeredoc, end int, ok
 // cmdHeredocFeeds reports whether the command line around a here-document
 // operator at pos hands its body to a shell (bash <<EOF, cat <<EOF | sh) or
 // to cmd.exe (cmd <<EOF): then the body runs (over-block, never
-// under-block). Every word of the line counts except the arguments of a
-// known text consumer (grep cmd <<EOF, cat <<EOF | rg bash): they name text
-// the consumer reads, not a receiver (GAP-2530).
-func cmdHeredocFeeds(command string, pos int) (runs, cmdFeed bool) {
+// under-block). Every word of the line counts except, with trust on, the
+// arguments of a known text consumer (grep cmd <<EOF, cat <<EOF | rg bash):
+// they name text the consumer reads, not a receiver (GAP-2530).
+func cmdHeredocFeeds(command string, pos int, trust bool) (runs, cmdFeed bool) {
 	start := strings.LastIndexByte(command[:pos], '\n') + 1
 	end := len(command)
 	if k := strings.IndexByte(command[pos:], '\n'); k >= 0 {
 		end = pos + k
 	}
-	for _, word := range cmdLineReceiverWords(command[start:end], !cmdRedefinesCommand.MatchString(command)) {
+	for _, word := range cmdLineReceiverWords(command[start:end], trust) {
 		if cmdShellWord(word) != "" {
 			runs = true
 		}
@@ -1205,10 +1205,30 @@ func cmdHeredocFeeds(command string, pos int) (runs, cmdFeed bool) {
 
 var cmdAssignmentWord = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*(\[[^]]*\])?\+?=`)
 
-// cmdRedefinesCommand matches a command that can make a text consumer's name
-// run something else (a function or alias definition, hash -p, enable):
-// then no consumer is trusted and every word counts.
-var cmdRedefinesCommand = regexp.MustCompile(`(^|[\s;&|(){}])(function|alias|unalias|hash|enable)([\s;&|]|$)|[A-Za-z0-9_.:+-]\s*\(\s*\)`)
+// cmdRedefinesCommand matches code that can make a text consumer's name run
+// something else (a function or alias definition, hash -p, enable) or that
+// runs a string or file in the current shell (eval, source, ., trap): then
+// no consumer is trusted and every word counts. It is matched on the code
+// outside here-document bodies, quoted words and comments
+// (cmdCodeOutsideText): prose in a body or a title is no definition
+// (GAP-2530 checker it2).
+var cmdRedefinesCommand = regexp.MustCompile(`(^|[\s;&|(){}])(function|alias|unalias|hash|enable|eval|source|trap|\.)([\s;&|]|$)|[A-Za-z0-9_.:+-]\s*\(\s*\)`)
+
+// cmdCodeOutsideText returns command with the text spans of one reading
+// (here-document bodies, quoted words, comments) blanked. A quoted word
+// that runs in the current shell needs eval, source, . or trap outside it;
+// a command substitution runs in a subshell.
+func cmdCodeOutsideText(command string, spans []cmdTextSpan) string {
+	b := []byte(command)
+	for _, span := range spans {
+		for k := max(0, span.start); k < min(span.end, len(b)); k++ {
+			if b[k] != '\n' {
+				b[k] = ' '
+			}
+		}
+	}
+	return string(b)
+}
 
 // cmdHeredocTextConsumers read standard input as text and never run it, so a
 // shell or cmd word among their arguments is a pattern or a title, not a
@@ -1260,10 +1280,12 @@ func cmdScanReceiverWords(line string, i int, closer byte, trust bool) (words []
 		stmt = stmt[:0]
 	}
 	// nested reads a command substitution: its statements are commands of
-	// their own; the outer word only gets a marker, so it never reads as a
-	// consumer name.
+	// their own, and no consumer in them is trusted: a consumer printing
+	// its argument is how a substitution yields a program name
+	// ("$(grep -m1 bash /etc/shells)" <<EOF, checker it2). The outer word
+	// only gets a marker, so it never reads as a consumer name.
 	nested := func(j int, cl byte) int {
-		inner, e := cmdScanReceiverWords(line, j, cl, trust)
+		inner, e := cmdScanReceiverWords(line, j, cl, false)
 		words = append(words, inner...)
 		word.WriteString("$()")
 		inWord = true
@@ -1404,7 +1426,26 @@ scan:
 	if trust && k < len(stmt) && cmdTextConsumerStatement(stmt[k:]) {
 		return nil
 	}
-	return stmt
+	return cmdSplitQuotedWords(stmt)
+}
+
+// cmdSplitQuotedWords returns words plus the pieces of every word that
+// holds a blank or an operator (a quoted word): eval 'bash -s' <<EOF hands
+// the body to bash as the whole-line split read it (over-read, never
+// under-read; GAP-2530 checker it2).
+func cmdSplitQuotedWords(words []string) []string {
+	out := words
+	for _, w := range words {
+		if strings.ContainsAny(w, " \t\r;|&()<>{}") {
+			if len(out) == len(words) {
+				out = append([]string(nil), words...)
+			}
+			out = append(out, strings.FieldsFunc(w, func(r rune) bool {
+				return strings.ContainsRune(" \t\r;|&()<>{}", r)
+			})...)
+		}
+	}
+	return out
 }
 
 // cmdTextConsumerStatement reports whether args (command word first) runs
@@ -1476,6 +1517,21 @@ func cmdHeredocBodies(command string, start int, docs []cmdHeredoc) (spans []cmd
 // PowerShell cannot parse the command, so it runs none of it (as in
 // hookpaths actionWindowsExpressionBodies, RV5-1, RV6-1).
 func cmdTextSpans(command string, reading cmdOuterReading) (spans []cmdTextSpan, stops bool) {
+	// A here-document receiver trusts a text consumer only when the code
+	// outside the text spans redefines no command (GAP-2530 checker it2):
+	// span offsets do not depend on trust, so the untrusted reading finds
+	// the spans first.
+	spans, stops = cmdTextSpansRead(command, reading, false)
+	if reading != cmdReadingGitBash || stops || !strings.Contains(command, "<<") ||
+		cmdRedefinesCommand.MatchString(cmdCodeOutsideText(command, spans)) {
+		return spans, stops
+	}
+	return cmdTextSpansRead(command, reading, true)
+}
+
+// cmdTextSpansRead is cmdTextSpans with the here-document consumer trust
+// of cmdHeredocFeeds.
+func cmdTextSpansRead(command string, reading cmdOuterReading, trust bool) (spans []cmdTextSpan, stops bool) {
 	// Git Bash: open ${...}, arithmetic (( )), name[...] and ( ) frames; a
 	// << inside the first three is no here-document operator (RV5-2).
 	braces, arith, subscript, parens := 0, 0, 0, 0
@@ -1563,7 +1619,7 @@ func cmdTextSpans(command string, reading cmdOuterReading) (spans []cmdTextSpan,
 				continue
 			}
 			doc.level = parens
-			doc.runs, doc.cmdFeed = cmdHeredocFeeds(command, i)
+			doc.runs, doc.cmdFeed = cmdHeredocFeeds(command, i, trust)
 			pending = append(pending, doc)
 			i = end
 			continue
