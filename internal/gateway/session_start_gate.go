@@ -393,6 +393,18 @@ func (a *APIServer) codexStartRegistrationRefusal(ctx context.Context, connector
 		return ""
 	}
 	if err := a.ensureHookRegistration(ctx, connectorName); err != nil {
+		if a.perUserInstallWindowHeld() {
+			// An install or upgrade of this account holds the hook files
+			// (the hook config lock, the fail-mode hold) until it stops
+			// this gateway: the repair cannot run, and the installer writes
+			// the registration. Blocking the session for it denied every
+			// benign call until the gateway stopped and told the user to run
+			// setup mid-upgrade (GAP-2455). The call is decided as at any
+			// other time in the window (installWindowStrict); the next
+			// gateway judges the session start again.
+			fmt.Fprintf(os.Stderr, "[gateway] Codex SessionStart registration check left to the running install or upgrade: %v\n", err)
+			return ""
+		}
 		fmt.Fprintf(os.Stderr, "[gateway] Codex SessionStart registration recovery failed: %v\n", err)
 		if step := registrationRepairStep(err); step != "" {
 			return codexStartRegistrationUnavailable + ": " + step

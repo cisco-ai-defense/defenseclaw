@@ -282,6 +282,10 @@ type Options struct {
 	// answeredErrorStatus records an HTTP refusal seen before a retry. A
 	// failed retry cannot turn that answered error into an outage allow.
 	answeredErrorStatus int
+	// installWindowSeen is set once a look at this account's .install.lock
+	// for this call found it held. The answer rendered from it with no home
+	// (the watchdog's prepared answer) still names the install (GAP-2440).
+	installWindowSeen bool
 	// managedOutageOpen is set on a standalone hook outside Secure Client
 	// for a failure that ManagedOutageFailsOpen lets through (the gateway is
 	// not running, was still restarting, or gave no answer). Only such a
@@ -2150,6 +2154,13 @@ func handleMissingToken(opts Options, sp spec, failMode, tokenFile string) int {
 		failMode = "closed"
 		opts.FailMode = "closed"
 	}
+	if perUserInstallWindow(opts) {
+		// The installer sets the hooks folder, and the token in it, aside
+		// while it swaps the install: the call is closed and its answer
+		// names the install, as every other answer in that window does
+		// (GAP-2440).
+		return failUnreachable(opts, sp, "closed", reason)
+	}
 	if closes && failClosedStopEvent(opts, sp) {
 		return allowFailClosedStop(opts, sp, reason, "transport")
 	}
@@ -2414,9 +2425,16 @@ const installLockName = ".install.lock"
 
 // perUserInstallWindow reports a per-user hook (not managed, not Secure
 // Client) running while an install or upgrade of this account's DefenseClaw
-// holds installLockName.
+// holds installLockName, or for which a look already found it held
+// (installWindowSeen).
 func perUserInstallWindow(opts Options) bool {
-	if opts.ManagedEnterprise || opts.ManagedUnixSocket != "" || opts.SecureClient || strings.TrimSpace(opts.Home) == "" {
+	if opts.ManagedEnterprise || opts.ManagedUnixSocket != "" || opts.SecureClient {
+		return false
+	}
+	if opts.installWindowSeen {
+		return true
+	}
+	if strings.TrimSpace(opts.Home) == "" {
 		return false
 	}
 	return installLockHeld(opts.Home)
@@ -2908,8 +2926,12 @@ func failResponse(opts Options, sp spec, failMode, reason string) int {
 // it as well (GAP-0893, GAP-0894, GAP-0916, GAP-1074, GAP-1075). It returns
 // the fail mode to answer with.
 func closeDuringInstall(opts *Options, failMode string) string {
-	if !perUserInstallInProgress(*opts) && !managedLifecycleActive(*opts) {
+	perUser := perUserInstallInProgress(*opts)
+	if !perUser && !managedLifecycleActive(*opts) {
 		return failMode
+	}
+	if perUser {
+		opts.installWindowSeen = true
 	}
 	opts.FailMode = "closed"
 	opts.StrictAvailability = true
