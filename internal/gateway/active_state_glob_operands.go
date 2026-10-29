@@ -149,7 +149,16 @@ func globbedStateCommandMutates(command actionfacts.CommandFact, words []string,
 				return true
 			}
 		}
+	case "install":
+		return installStateTarget(words, home, cwd)
+	case "sort":
+		return sortStateOutput(words, home, cwd)
 	case "git":
+		// A work tree on the state rewritten by another subcommand, or the
+		// home work tree losing its untracked files (GAP-2485).
+		if gitWorkTreeStateWrite(words, home, cwd) {
+			return true
+		}
 		index := slices.Index(operands, "clean")
 		if index < 0 || !slices.ContainsFunc(options, gitCleanForces) ||
 			slices.ContainsFunc(options, gitCleanDryRun) {
