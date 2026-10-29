@@ -116,6 +116,7 @@ func TestWindowsCodexVersionFallbackStillRequiresProtectedMachineRuntime(t *test
 func TestWindowsEnumerationUsesPresenceWithoutAgentVersion(t *testing.T) {
 	// The Secure Client profile of a verified install (GAP-0606).
 	setStandaloneProfileForTest(t, false)
+	stubMachineWinGet(t, nil)
 	for _, agent := range []string{"codex", "claudecode", "cursor"} {
 		t.Run(agent, func(t *testing.T) {
 			home := t.TempDir()
@@ -135,6 +136,36 @@ func TestWindowsEnumerationUsesPresenceWithoutAgentVersion(t *testing.T) {
 			row := ManifestTarget{UserHome: home, SID: "S-1-5-21-1-2-3-1001", Connector: agent}
 			if !applyPreviousRowState(&row, nil, nil) || row.AgentVersion != "" || row.Enabled == nil || !*row.Enabled {
 				t.Fatalf("presence fallback row=%+v", row)
+			}
+		})
+	}
+}
+
+func TestSecureClientEnumerationKeepsTheVersionOfAWinGetInstall(t *testing.T) {
+	// The Secure Client profile of a verified install (GAP-0606). The
+	// installer records a WinGet Claude Code or Codex version; the
+	// enumerator's next pass must read the same version, not erase it. A
+	// row whose package is gone still loses its recorded version (#1163).
+	setStandaloneProfileForTest(t, false)
+	const installed, removed = "S-1-5-21-1-2-3-1001", "S-1-5-21-1-2-3-1002"
+	stubMachineWinGet(t, nil)
+	stubUserWinGet(t, map[string]map[string]string{
+		installed: {"Anthropic.ClaudeCode": "2.1.233", "OpenAI.Codex": "0.151.0"},
+	})
+	enabled := true
+	for agent, version := range map[string]string{"claudecode": "2.1.233", "codex": "0.151.0"} {
+		t.Run(agent, func(t *testing.T) {
+			home := t.TempDir()
+			for sid, want := range map[string]string{installed: version, removed: ""} {
+				previous := map[string]ManifestTarget{
+					previousManifestKey(sid, agent): {
+						UserHome: home, SID: sid, Connector: agent, AgentVersion: version, Enabled: &enabled,
+					},
+				}
+				row := ManifestTarget{UserHome: home, SID: sid, Connector: agent}
+				if !applyPreviousRowState(&row, previous, nil) || row.AgentVersion != want {
+					t.Fatalf("Secure Client row %s = %+v, want agent_version %q", sid, row, want)
+				}
 			}
 		})
 	}
