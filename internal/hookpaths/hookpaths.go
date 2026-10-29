@@ -2226,6 +2226,43 @@ func (l Links) Target(path string) (string, bool) {
 	return l.links.resolve(path, l.protected)
 }
 
+// AliasTargets returns the names path reaches through the links the
+// command creates, read lexically (the links do not exist yet when the
+// hook runs): ln -s ~/.defenseclaw hc makes <cwd>/hc/config.yaml name
+// ~/.defenseclaw/config.yaml (GAP-2522). With entry set, path names a
+// directory entry that is removed or replaced (rm, a move), so a link
+// named path itself is not followed; a link to one of its directories is.
+func (l Links) AliasTargets(path string, entry bool) []string {
+	if len(l.links.aliases) == 0 || path == "" {
+		return nil
+	}
+	var out []string
+	seen := map[string]bool{filepath.Clean(path): true}
+	queue := []string{filepath.Clean(path)}
+	for first := true; len(queue) > 0 && len(out) < maxLinkAliasSteps; first = false {
+		name := queue[0]
+		queue = queue[1:]
+		for _, alias := range l.links.aliases {
+			rest, under := cutPathPrefix(name, alias.name)
+			if !under || first && entry && rest == "" {
+				continue
+			}
+			next := alias.target
+			if rest != "" {
+				next += string(filepath.Separator) + rest
+			}
+			next = filepath.Clean(next)
+			if seen[next] {
+				continue
+			}
+			seen[next] = true
+			out = append(out, next)
+			queue = append(queue, next)
+		}
+	}
+	return out
+}
+
 // copyLinkOptions reports a cp call with a static link option, and one with
 // a word that is not static and may expand to an option.
 func copyLinkOptions(args []*syntax.Word, words []string, static []bool) (option, dynamic bool) {
