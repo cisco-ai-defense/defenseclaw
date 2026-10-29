@@ -179,38 +179,44 @@ func activeStateMutationOwner() semanticOwner {
 		matchesSafeDefenseClawStateCandidate,
 	)
 	owner.prerequisite = func(facts actionfacts.Facts) bool {
-		for _, candidate := range facts.Paths {
-			command, ok := integrityCommandByID(facts, candidate.CommandID)
-			if !ok || !matchesActiveDefenseClawState(facts, candidate) {
-				continue
-			}
-			if integrityCommandMutatesPath(command, candidate) ||
-				command.Effect == actionfacts.EffectExecute &&
-					candidate.Access == actionfacts.PathAccessDelete &&
-					hasOperation(command, actionfacts.OperationMove) {
-				return true
-			}
-			// A find that hands what it finds to a program that may
-			// change it (sh -c, sudo/env wrappers, truncate, cp, ...)
-			// changes the state it starts from (GAP-2122).
-			if command.Effect == actionfacts.EffectExecute &&
-				candidate.Access == actionfacts.PathAccessWrite &&
-				(findHandsEntriesToWriter(command) || findCopiesOutTo(command, candidate)) {
-				return true
-			}
-			// A chmod that gives group or other write to state hands it
-			// to another account (GAP-2077); tightening is not a change.
-			if command.Effect == actionfacts.EffectExecute &&
-				candidate.Access == actionfacts.PathAccessMetadata &&
-				strings.EqualFold(command.Program, "chmod") && chmodAddsGroupOrOtherWrite(command) {
-				return true
-			}
-		}
 		// A pattern, brace list, rsync or git clean that the shell or the
 		// program expands onto the state (GAP-2047).
-		return globbedStateMutation(facts)
+		return activeStatePathsMutate(facts) || globbedStateMutation(facts)
 	}
 	return owner
+}
+
+// activeStatePathsMutate reports a path fact of facts that mutates the
+// active DefenseClaw state.
+func activeStatePathsMutate(facts actionfacts.Facts) bool {
+	for _, candidate := range facts.Paths {
+		command, ok := integrityCommandByID(facts, candidate.CommandID)
+		if !ok || !matchesActiveDefenseClawState(facts, candidate) {
+			continue
+		}
+		if integrityCommandMutatesPath(command, candidate) ||
+			command.Effect == actionfacts.EffectExecute &&
+				candidate.Access == actionfacts.PathAccessDelete &&
+				hasOperation(command, actionfacts.OperationMove) {
+			return true
+		}
+		// A find that hands what it finds to a program that may
+		// change it (sh -c, sudo/env wrappers, truncate, cp, ...)
+		// changes the state it starts from (GAP-2122).
+		if command.Effect == actionfacts.EffectExecute &&
+			candidate.Access == actionfacts.PathAccessWrite &&
+			(findHandsEntriesToWriter(command) || findCopiesOutTo(command, candidate)) {
+			return true
+		}
+		// A chmod that gives group or other write to state hands it
+		// to another account (GAP-2077); tightening is not a change.
+		if command.Effect == actionfacts.EffectExecute &&
+			candidate.Access == actionfacts.PathAccessMetadata &&
+			strings.EqualFold(command.Program, "chmod") && chmodAddsGroupOrOtherWrite(command) {
+			return true
+		}
+	}
+	return false
 }
 
 // The dispatcher integrates these aliases only after the command-specific
