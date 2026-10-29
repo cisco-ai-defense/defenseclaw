@@ -12,12 +12,14 @@ import (
 // standalone Windows guardian (1.0.2 and this release) records for a
 // protected target whose account is signed out and whose verification failed
 // on the owner or permissions of the account's DefenseClaw folder (data) or
-// its hooks folder (hook). Keep it equal to $script:SignedOutUntrustedFolderPattern
+// its hooks folder (hook), or, for connectors with managed runtime
+// generations (Codex, Copilot), on either folder through the runtime
+// generation check (no group 1, GAP-2516). Keep it equal to $script:SignedOutUntrustedFolderPattern
 // in packaging/windows/DefenseClawEnterprise.psm1 (a contract test compares
 // them).
 var enterpriseHookSignedOutUntrustedFolderPattern = regexp.MustCompile(
 	`^enterprise hooks: protected target requires repair but its exact active Windows session is unavailable ` +
-		`\(verification: enterprise hooks: managed (data|hook) directory verification failed: enterprise hooks: (?:` +
+		`\(verification: enterprise hooks: (?:managed (data|hook) directory verification failed|managed runtime generation directory is untrusted): enterprise hooks: (?:` +
 		`managed Windows DACL on (.+) has \d+ ACEs, expected \d+|` +
 		`managed Windows DACL is not protected on (.+)|` +
 		`managed Windows DACL on (.+) contains unexpected or duplicate ACE for principal S-[0-9-]+ \(mask 0x[0-9a-f]+, inheritance 0x[0-9a-f]+\)|` +
@@ -54,12 +56,20 @@ func enterpriseHookSignedOutUntrustedFolder(row enterpriseHookReconcileRow, data
 			break
 		}
 	}
-	expected := dataDir
-	if match[1] == "hook" {
-		expected += `\hooks`
+	folder = strings.TrimRight(strings.ReplaceAll(folder, "/", `\`), `\`)
+	candidates := []string{dataDir}
+	switch match[1] {
+	case "hook":
+		candidates = []string{dataDir + `\hooks`}
+	case "":
+		// The runtime generation check of a Codex or Copilot target reads
+		// both folders.
+		candidates = append(candidates, dataDir+`\hooks`)
 	}
-	if !strings.EqualFold(strings.TrimRight(strings.ReplaceAll(folder, "/", `\`), `\`), expected) {
-		return "", false
+	for _, expected := range candidates {
+		if strings.EqualFold(folder, expected) {
+			return expected, true
+		}
 	}
-	return expected, true
+	return "", false
 }

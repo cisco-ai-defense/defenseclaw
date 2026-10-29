@@ -235,11 +235,12 @@ $script:DefenseClawSignedOutUntrustedFolders = @()
 # The whole error a guardian (1.0.2 and this release) records for a protected
 # Windows target whose account is signed out and whose verification failed on
 # the owner or permissions of the account's DefenseClaw folder (data) or its
-# hooks folder (hook). Keep it equal to
+# hooks folder (hook), or on either folder through the runtime generation
+# check of a Codex or Copilot target (no group 1, GAP-2516). Keep it equal to
 # enterpriseHookSignedOutUntrustedFolderPattern in the gateway.
 $script:SignedOutUntrustedFolderPattern = [regex]::new(
     '^enterprise hooks: protected target requires repair but its exact active Windows session is unavailable ' +
-    '\(verification: enterprise hooks: managed (data|hook) directory verification failed: enterprise hooks: (?:' +
+    '\(verification: enterprise hooks: (?:managed (data|hook) directory verification failed|managed runtime generation directory is untrusted): enterprise hooks: (?:' +
     'managed Windows DACL on (.+) has \d+ ACEs, expected \d+|' +
     'managed Windows DACL is not protected on (.+)|' +
     'managed Windows DACL on (.+) contains unexpected or duplicate ACE for principal S-[0-9-]+ \(mask 0x[0-9a-f]+, inheritance 0x[0-9a-f]+\)|' +
@@ -24877,17 +24878,22 @@ function Get-DefenseClawSignedOutUntrustedFolder {
             break
         }
     }
-    $expected = $profileHome + '\.defenseclaw'
+    $dataDir = $profileHome + '\.defenseclaw'
+    $candidates = @($dataDir)
     if ($found.Groups[1].Value -ceq 'hook') {
-        $expected += '\hooks'
+        $candidates = @($dataDir + '\hooks')
+    } elseif (-not $found.Groups[1].Success) {
+        # The runtime generation check of a Codex or Copilot target reads both
+        # folders (GAP-2516).
+        $candidates += $dataDir + '\hooks'
     }
-    if (-not [string]::Equals(
-            $folder.Replace('/', '\').TrimEnd('\'),
-            $expected,
-            [StringComparison]::OrdinalIgnoreCase)) {
-        return ''
+    $folder = $folder.Replace('/', '\').TrimEnd('\')
+    foreach ($expected in $candidates) {
+        if ([string]::Equals($folder, $expected, [StringComparison]::OrdinalIgnoreCase)) {
+            return $expected
+        }
     }
-    return $expected
+    return ''
 }
 
 function Get-DefenseClawStandaloneManifestAdoption {

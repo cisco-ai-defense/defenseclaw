@@ -833,6 +833,14 @@ def test_signed_out_untrusted_folder_is_classified_alike() -> None:
     found = re.fullmatch(go, live)
     assert found and found.group(1) == "hook" and found.group(2) == "C:\\Users\\r103gb13-u1\\.defenseclaw\\hooks"
     assert not re.fullmatch(go, live + "; more")
+    # GAP-2516: the Codex and Copilot rows of the same account fail the
+    # runtime generation check on the same folder.
+    generation = live.replace(
+        "managed hook directory verification failed", "managed runtime generation directory is untrusted"
+    )
+    found = re.fullmatch(go, generation)
+    assert found and found.group(1) is None and found.group(2) == "C:\\Users\\r103gb13-u1\\.defenseclaw\\hooks"
+    assert "-not $found.Groups[1].Success" in _function_body(module, "Get-DefenseClawSignedOutUntrustedFolder")
 
     adoption = _function_body(module, "Get-DefenseClawStandaloneManifestAdoption")
     assert "Get-DefenseClawSignedOutUntrustedFolder -Row $row" in adoption

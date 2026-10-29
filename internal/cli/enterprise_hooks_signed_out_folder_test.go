@@ -23,6 +23,7 @@ func TestEnterpriseHookSignedOutUntrustedFolder(t *testing.T) {
 		unavail   = "enterprise hooks: protected target requires repair but its exact active Windows session is unavailable (verification: "
 		hookCheck = "enterprise hooks: managed hook directory verification failed: "
 		dataCheck = "enterprise hooks: managed data directory verification failed: "
+		genCheck  = "enterprise hooks: managed runtime generation directory is untrusted: "
 	)
 	// The error the live T2 cell recorded (TST-2076).
 	live := unavail + hookCheck + `enterprise hooks: managed Windows DACL on C:\Users\r103gb13-u1\.defenseclaw\hooks has 8 ACEs, expected 7)`
@@ -43,6 +44,19 @@ func TestEnterpriseHookSignedOutUntrustedFolder(t *testing.T) {
 		{name: "unreadable DACL", row: enterpriseHookReconcileRow{Error: unavail + dataCheck +
 			`enterprise hooks: null or unreadable Windows DACL on C:\Users\r103gb13-u1\.defenseclaw)`}, folder: dataDir},
 
+		// GAP-2516 green upg2-g1: the Codex and Copilot rows of the same
+		// signed-out account fail the runtime generation check on the same
+		// hooks folder.
+		{name: "runtime generation hooks folder", row: enterpriseHookReconcileRow{Error: unavail + genCheck +
+			`enterprise hooks: managed Windows DACL is not protected on C:\Users\r103gb13-u1\.defenseclaw\hooks)`}, folder: dataDir + `\hooks`},
+		{name: "runtime generation data folder", row: enterpriseHookReconcileRow{Error: unavail + genCheck +
+			`enterprise hooks: owner SID S-1-5-32-545 does not match target SID S-1-5-21-1-2-3-1123 on C:\Users\r103gb13-u1\.defenseclaw)`}, folder: dataDir},
+		{name: "runtime generation below hooks", row: enterpriseHookReconcileRow{Error: unavail + genCheck +
+			`enterprise hooks: managed Windows DACL is not protected on C:\Users\r103gb13-u1\.defenseclaw\hooks\codex)`}},
+		{name: "runtime generation another account", row: enterpriseHookReconcileRow{Error: unavail + genCheck +
+			`enterprise hooks: managed Windows DACL is not protected on C:\Users\other\.defenseclaw\hooks)`}},
+		{name: "runtime generation other cause", row: enterpriseHookReconcileRow{Error: unavail + genCheck +
+			`enterprise hooks: symlinks, junctions, and reparse points are not allowed: C:\Users\r103gb13-u1\.defenseclaw\hooks)`}},
 		{name: "connected account", row: enterpriseHookReconcileRow{Error: hookCheck +
 			`enterprise hooks: managed Windows DACL on C:\Users\r103gb13-u1\.defenseclaw\hooks has 8 ACEs, expected 7`}},
 		{name: "another account's folder", row: enterpriseHookReconcileRow{Error: unavail + hookCheck +
