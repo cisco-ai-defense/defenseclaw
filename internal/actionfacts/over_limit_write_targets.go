@@ -257,7 +257,7 @@ func (r *overLimitArgsReducer) reduceString(key, text string) (string, bool) {
 	if len(text) <= maxScalarBytes {
 		return text, true
 	}
-	if r.patchTool && isPatchInputField(key) {
+	if r.patchTool && (isPatchInputField(key) || isPatchEnvelopeField(key, text)) {
 		return compactPatchEnvelope(text)
 	}
 	if _, ok := overLimitTextKeys[key]; ok {
