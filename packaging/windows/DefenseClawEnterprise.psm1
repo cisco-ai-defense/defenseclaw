@@ -4198,7 +4198,7 @@ function Get-DefenseClawRawDescriptorFindings {
         }
         $sid = $ace.SecurityIdentifier.Value
         $mask = [int64](ConvertTo-DefenseClawMappedFileRights -Rights $ace.AccessMask) -band 0xffffffffL
-        $inheritOnly = ($ace.AceFlags -band [Security.AccessControl.AceFlags]::InheritOnly) -ne 0
+        $inheritOnly = ([int]$ace.AceFlags -band [int][Security.AccessControl.AceFlags]::InheritOnly) -ne 0
         if ($inheritOnly -and $sid -in @('S-1-3-0', 'S-1-3-1')) {
             continue
         }
@@ -5086,7 +5086,7 @@ function Enter-DefenseClawLifecycleLock {
     # A hardening or cleanup script, or a backup restore, can leave the lock
     # ReadOnly, Hidden or System; the ReadWrite open below would then fail with
     # access denied that no retry can fix. Clear them on the exact leaf.
-    Clear-DefenseClawRestrictiveFileAttributes -Path $path
+    [void](Clear-DefenseClawRestrictiveFileAttributes -Path $path)
     # The lock holds no data, so repair runs before the verdict: an inherited,
     # re-owned or extra-entry descriptor (a crash between creation and the
     # first stamp, an icacls reset, a takeown) is re-stamped to the canonical
@@ -5139,7 +5139,7 @@ function Enter-DefenseClawLifecycleLock {
                 throw
             }
             $attributeRetried = $true
-            Clear-DefenseClawRestrictiveFileAttributes -Path $path
+            [void](Clear-DefenseClawRestrictiveFileAttributes -Path $path)
         }
     } while ([DateTime]::UtcNow -lt $deadline)
     throw "another DefenseClaw enterprise lifecycle mutation holds the protected file lock for more than $TimeoutSeconds seconds"

@@ -47,7 +47,10 @@ func TestLoadOTLPPathTokenWindowsRejectsUntrustedWriteDACL(t *testing.T) {
 	}
 }
 
-func TestLoadOTLPPathTokenWindowsRejectsWritableAncestor(t *testing.T) {
+// A write grant on a folder above the data directory is drift on a folder
+// DefenseClaw doesn't own: the token keeps working (and can still be minted)
+// and the drift is logged instead of turning off telemetry for that user.
+func TestLoadOTLPPathTokenWindowsAcceptsWritableAncestor(t *testing.T) {
 	for _, tc := range []struct {
 		name string
 		mask windows.ACCESS_MASK
@@ -63,7 +66,8 @@ func TestLoadOTLPPathTokenWindowsRejectsWritableAncestor(t *testing.T) {
 			if err := os.MkdirAll(dataDir, 0o700); err != nil {
 				t.Fatalf("create token data path: %v", err)
 			}
-			if _, err := EnsureOTLPPathToken(dataDir, OTLPScopeCodex); err != nil {
+			seeded, err := EnsureOTLPPathToken(dataDir, OTLPScopeCodex)
+			if err != nil {
 				t.Fatalf("seed token: %v", err)
 			}
 			tokenPath, err := OTLPPathTokenFilePath(dataDir, OTLPScopeCodex)
@@ -72,20 +76,17 @@ func TestLoadOTLPPathTokenWindowsRejectsWritableAncestor(t *testing.T) {
 			}
 			setOTLPTokenWindowsDACL(t, ancestor, tc.mask, true)
 
-			if token, err := EnsureOTLPPathToken(dataDir, OTLPScopeCodex); err == nil {
-				t.Fatalf("EnsureOTLPPathToken accepted an Everyone-writable ancestor; token=%q", token)
+			if token, err := EnsureOTLPPathToken(dataDir, OTLPScopeCodex); err != nil || token != seeded {
+				t.Fatalf("EnsureOTLPPathToken = %q, %v; want the seeded token", token, err)
 			}
-			if token, err := LoadOTLPPathToken(dataDir, OTLPScopeCodex); err == nil {
-				t.Fatalf("LoadOTLPPathToken accepted an Everyone-writable ancestor; token=%q", token)
+			if token, err := LoadOTLPPathToken(dataDir, OTLPScopeCodex); err != nil || token != seeded {
+				t.Fatalf("LoadOTLPPathToken = %q, %v; want the seeded token", token, err)
 			}
 			if err := os.Remove(tokenPath); err != nil {
 				t.Fatalf("remove seeded token: %v", err)
 			}
-			if token, err := EnsureOTLPPathToken(dataDir, OTLPScopeCodex); err == nil {
-				t.Fatalf("EnsureOTLPPathToken minted beneath an Everyone-writable ancestor; token=%q", token)
-			}
-			if _, err := os.Lstat(tokenPath); !os.IsNotExist(err) {
-				t.Fatalf("rejected first provisioning left a token at %s: %v", tokenPath, err)
+			if token, err := EnsureOTLPPathToken(dataDir, OTLPScopeCodex); err != nil || token == "" {
+				t.Fatalf("EnsureOTLPPathToken after removal = %q, %v; want a new token", token, err)
 			}
 		})
 	}
