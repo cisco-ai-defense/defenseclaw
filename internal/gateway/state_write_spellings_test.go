@@ -19,6 +19,7 @@ package gateway
 import (
 	"runtime"
 	"testing"
+	"time"
 )
 
 // A HOME value the walk could not read (export HOME=$(echo $HOME), HOME=$X,
@@ -112,3 +113,33 @@ func TestLinkRsyncAndPatternStateWrites(t *testing.T) {
 		{"ls ~/.defenseclaw/conf*.yaml", false},
 	})
 }
+
+// The pattern reading listed every directory a wildcard above the home
+// could reach: ls /*/*/*/*/*/.defenseclaw/x took 27 s and more, past the
+// hook answer budget, so one extra word turned a blocked command into the
+// fail-mode answer (RV-pod2-1, GAP-2496). Only the active home
+// .defenseclaw tree is read now, and a pattern that spells that name with
+// wildcards is read too.
+func TestStatePatternReadsOnlyTheHomeStateTree(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX shell spellings")
+	}
+	start := time.Now()
+	judgeHomeStateWriteRows(t, []homeStateWriteRow{
+		{"cp a.txt ~/.defenseclaw/config.yaml; ls /*/*/*/*/*/.defenseclaw/x", true},
+		{"cp a.txt ~/.defenseclaw/config.yaml; ls /*/*/*/*/*/*/*/.defenseclaw/x", true},
+		{"cp a.txt ~/.def*/config.yaml", true},
+		{"cp a.txt ~/.defensecla[w]/config.yaml", true},
+		{"ln -sf a.txt ~/.def*/config.yaml", true},
+		{"cp a.txt HOMEDIR/.defenseclaw/c?nfig.yaml", true},
+		{"ls /*/*/*/*/*/.defenseclaw/x", false},
+		{"ls /*/*/*/*/*/*/*/.defenseclaw/x", false},
+		{"ls ~/.def*/conf*.yaml", false},
+		{"cp a.txt ~/.def*/nomatch.yaml", false},
+		{"cp ~/.def*/config.yaml ~/project/backup.yaml", false},
+	})
+	if elapsed := time.Since(start); elapsed > 30*time.Second {
+		t.Fatalf("44 pattern rows took %s; the reading must not walk past the home", elapsed)
+	}
+}
+
