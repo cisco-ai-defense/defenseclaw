@@ -4411,7 +4411,7 @@ func trustedBashFallbackActions(
 	}
 	file, err := syntax.NewParser(
 		syntax.Variant(syntax.LangBash),
-	).Parse(strings.NewReader(command), "")
+	).Parse(shellparse.Reader(command), "")
 	if err != nil {
 		// macOS generic shell boundaries may execute zsh syntax that mvdan's
 		// Bash grammar cannot represent. The input is still a valid, trusted
