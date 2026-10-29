@@ -682,7 +682,10 @@ Exit 0.
   bundle enabled or changed its connector keeps the hooks it loaded, or none:
   its tool calls are **not enforced** until it restarts, although the apply
   is `confirmed`. The live scan in `bundle.sessions_restart_required` (also in
-  `bundle status`, 4.5) counts them. The apply result then warns
+  `bundle status`, 4.5) counts them: one per agent session, not per process
+  (a launcher and the agent process it starts, such as the node script and
+  the native binary of an npm Codex, are one session, listed by the launcher
+  pid). The apply result then warns
   `sessions_need_restart` (`sessions_scan_unknown` when the scan could not
   run) and reports `coverage_complete` and `security_complete` false;
   `bundle status` warns with the same codes. After
