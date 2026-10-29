@@ -211,3 +211,41 @@ func TestR105GAP2047HomeSpelledLongOptionValue(t *testing.T) {
 		r105RunStateRowsChecked(t, mode, cwd, rows, true)
 	}
 }
+
+// GAP-2047 (pod check25 row) and GAP-2484: the value of git clean -e is a
+// pattern git keeps, and a word with no static spelling ($X) can expand to
+// nothing, so neither narrows what the call removes. A state operand or a
+// state work tree beside one is still removed: block in every mode, both
+// connectors. The same forms on project paths and log cleanup stay quiet.
+func TestR105GAP2484DynamicWordAndGitCleanExcludeValue(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX shell forms")
+	}
+	home, cwd := r105StateFixture(t)
+	for _, dir := range []string{filepath.Join(home, "proj2"), filepath.Join(cwd, "build")} {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	rows := []r105StateRow{
+		{"git work-tree clean -e value", "git --work-tree ~/.defenseclaw clean -fdx -e keep", true, ""},
+		{"git work-tree=$HOME clean -e value", "git --work-tree=$HOME/.defenseclaw clean -fdx -e keep", true, ""},
+		{"git -C state clean -e value", "git -C ~/.defenseclaw clean -fdx -e keep", true, ""},
+		{"git -C state clean clustered e value", "git -C ~/.defenseclaw clean -fdxe keep", true, ""},
+		{"rm state tree then dynamic word", "rm -rf ~/.defenseclaw/hooks $X", true, ""},
+		{"rm config then dynamic word", "rm -f ~/.defenseclaw/config.yaml ${X}", true, ""},
+		{"git work-tree clean dynamic word", "git --work-tree ~/.defenseclaw clean -fdx $X", true, ""},
+		{"git work-tree=<home> clean dynamic word", "git --work-tree=" + home + "/.defenseclaw clean -fdx $X", true, ""},
+		{"git work-tree=<home> clean -e value", "git --work-tree=" + home + "/.defenseclaw clean -fdx -e keep", true, ""},
+		// Allowed and quiet.
+		{"rm project dir then dynamic word", "rm -rf build $X", false, ""},
+		{"rm state log then dynamic word", "rm -f ~/.defenseclaw/logs/gateway.log $X", false, ""},
+		{"git project clean dynamic flags", "git clean -fdx $FLAGS", false, ""},
+		{"git project clean -e value", "git --work-tree=$HOME/proj2 clean -fdx -e keep", false, ""},
+		{"git state clean of logs with -e value", "git -C ~/.defenseclaw clean -fdx -e keep logs/", false, ""},
+		{"git state dry run -e value", "git -C ~/.defenseclaw clean -n -e keep", false, ""},
+	}
+	for _, mode := range []string{"observe", "action"} {
+		r105RunStateRowsChecked(t, mode, cwd, rows, true)
+	}
+}
