@@ -32,7 +32,7 @@ relative or environment-expanded `CONFIG=` or `MANIFEST=` path, an unknown prope
 `/install` without `CONFIG=` and `MANIFEST=`, or `TIMEOUTSECONDS` out of range) and for a
 config or manifest file that a non-administrator can change. A token that is not elevated
 exits `1603`. With `JSON=1` the standalone Setup prints the same schema-version-2 document
-as the lifecycle, with `invalid_arguments` in `errors[].code`. On Windows, an option `defenseclaw.exe` does not know (a misspelled flag) exits `1` with `unknown flag` before the lifecycle runs; fix the command line.
+as the lifecycle, with `invalid_arguments` in `errors[].code`. On Windows, an option `defenseclaw.exe` does not know (a misspelled flag) on a lifecycle verb also exits `1639`, with `unknown flag` (1.0.4 and earlier exit `1`); fix the command line.
 
 ## Lifecycle error codes
 

@@ -57,7 +57,7 @@ shell.
 | A check failed | `1` | `1603` |
 | Invalid arguments | `2` | `1639` |
 
-On Windows, an option `defenseclaw.exe` does not know (a misspelled flag such as `--bogus`) stops before the lifecycle runs: it prints `unknown flag` and exits `1`, not `1639`. Arguments the lifecycle reads and rejects, such as `--profile bogus`, exit `1639`.
+On Windows, an option `defenseclaw.exe` does not know (a misspelled flag such as `--bogus`) exits `1639`, like an argument the lifecycle rejects (`--profile bogus`). It prints `unknown flag` and the usage, or with `--json` one result whose only error is `invalid_arguments`. 1.0.4 and earlier exit `1` for an unknown flag.
 
 On Linux and macOS, `verify` skips its checks and exits `75` with `lifecycle_busy` while another lifecycle run is in progress; run it again. On Windows it fails (`1603`) while another run's transaction is pending. `verify` also runs on a schedule: daily on Linux (`defenseclaw-enterprise-verify.timer`) and macOS (`com.cisco.defenseclaw.verify`), and from your MDM on Windows (for example `detect.ps1 -RequireHealthy`).
 
