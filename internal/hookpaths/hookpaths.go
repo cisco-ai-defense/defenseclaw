@@ -1730,9 +1730,9 @@ func movedOntoLinkEntries(facts actionfacts.Facts) map[string]bool {
 }
 
 // PlainMoveDestinations lists, from the facts alone, the absolute move
-// destinations of a plain mv (no write, append or copy operation in the
-// same command, no trailing separator) that no other writer of the action
-// names.
+// destinations of a plain mv (complete argv, no write, append or copy
+// operation in the same command, no trailing separator) that no other
+// writer of the action names.
 func PlainMoveDestinations(facts actionfacts.Facts) map[string]bool {
 	moved := map[string]bool{}
 	written := map[string]bool{}
@@ -1756,7 +1756,11 @@ func PlainMoveDestinations(facts actionfacts.Facts) map[string]bool {
 			plainMove = false
 			for _, command := range facts.Commands {
 				if command.ID == candidate.CommandID {
-					plainMove = slices.Contains(command.Operations, actionfacts.OperationMove) &&
+					// A runtime-expanded word (mv $SRC c) can change the
+					// operands and options, so only a complete argv is a
+					// plain move (GAP-2477 K03).
+					plainMove = command.ArgvComplete &&
+						slices.Contains(command.Operations, actionfacts.OperationMove) &&
 						!slices.Contains(command.Operations, actionfacts.OperationWrite) &&
 						!slices.Contains(command.Operations, actionfacts.OperationAppend) &&
 						!slices.Contains(command.Operations, actionfacts.OperationCopy)

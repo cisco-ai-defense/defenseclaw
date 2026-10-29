@@ -1632,11 +1632,13 @@ func actionProtectedStatePath(value, home string) bool {
 	// Its directory is followed and its name kept, so mv a.txt /ext/y/
 	// config.yaml with y -> ~/.defenseclaw names the entry when config.yaml
 	// links out of the tree, as it does when config.yaml is a file (GAP-2560).
-	if name := filepath.Base(value); name != "." && name != ".." && name != string(filepath.Separator) {
-		if parent, ok := ResolveWriteTarget(filepath.Dir(value)); ok {
-			relative, err := filepath.Rel(activeHome, filepath.Join(parent, name))
-			if err == nil && actionProtectedStateRelative(filepath.ToSlash(relative)) {
-				return true
+	if actionStateEntryMayDiffer(value) {
+		if name := filepath.Base(value); name != "." && name != ".." && name != string(filepath.Separator) {
+			if parent, ok := ResolveWriteTarget(filepath.Dir(value)); ok {
+				relative, err := filepath.Rel(activeHome, filepath.Join(parent, name))
+				if err == nil && actionProtectedStateRelative(filepath.ToSlash(relative)) {
+					return true
+				}
 			}
 		}
 	}
@@ -3128,4 +3130,20 @@ func actionSpelledWindowsTarget(value string, tilde bool, base, home string, sta
 	}
 	protected, _ := actionWindowsProtected(value, base, home, false)
 	return resolved == root+"/.ssh" || protected
+}
+
+// actionStateEntryMayDiffer reports that the entry reading of value (its
+// directory followed, its name kept) can name another file than its full
+// walk: only when the last name is itself a link. An absolute value whose
+// last name is missing or not a link costs one Lstat, not a second walk
+// (GAP-2279 answer budget); a relative value is always read.
+func actionStateEntryMayDiffer(value string) bool {
+	if !filepath.IsAbs(value) {
+		return true
+	}
+	info, err := os.Lstat(value)
+	if err != nil {
+		return !os.IsNotExist(err)
+	}
+	return info.Mode()&os.ModeSymlink != 0
 }
