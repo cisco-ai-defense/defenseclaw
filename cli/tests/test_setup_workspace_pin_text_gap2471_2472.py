@@ -23,6 +23,8 @@ def test_every_setup_workspace_option_names_the_pin_as_the_default():
     names = {name for name, _ in found}
     assert {"guardrail", "codex", "claude-code", "kiro"} <= names, names
     for name, text in found:
+        if name == "antigravity":
+            continue  # refuses --workspace; its own help (GAP-2474)
         assert "Defaults to the claw.workspace_dir pin when one is set" in text, (name, text)
         assert '--workspace "" selects global/user config' in text, (name, text)
 

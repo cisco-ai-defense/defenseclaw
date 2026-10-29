@@ -165,6 +165,13 @@ _WORKSPACE_OPTION_HELP = (
     '--workspace "" selects global/user config.'
 )
 
+# GAP-2474: setup antigravity refuses --workspace (DefenseClaw owns only the
+# global hooks file), so its help names the refusal instead of the pin text.
+_ANTIGRAVITY_WORKSPACE_OPTION_HELP = (
+    "Not supported for Antigravity: setup antigravity refuses --workspace, because "
+    "DefenseClaw owns only the global ~/.gemini/config/hooks.json."
+)
+
 # Key used to stash the pre-invocation config.yaml mtime in the Click
 # context so the post-invocation hook can tell whether a `setup`
 # subcommand actually mutated config on disk. Using ``ctx.meta``
@@ -13902,7 +13909,7 @@ def _make_observability_setup_command(connector: str) -> click.Command:
         "--workspace-dir",
         "workspace_dir",
         default=None,
-        help=_WORKSPACE_OPTION_HELP,
+        help=_ANTIGRAVITY_WORKSPACE_OPTION_HELP if connector == "antigravity" else _WORKSPACE_OPTION_HELP,
     )
     @click.option(
         "--replace",
