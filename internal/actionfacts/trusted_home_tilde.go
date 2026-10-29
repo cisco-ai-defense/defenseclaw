@@ -5,7 +5,6 @@ package actionfacts
 
 import (
 	"bytes"
-	"regexp"
 	"sort"
 	"strings"
 
@@ -16,7 +15,7 @@ import (
 // written unquoted into a POSIX shell word: no whitespace, quoting,
 // expansion, glob or tilde characters. A Windows drive home (C:/Users/alice)
 // qualifies too, as in posixShellHome (GAP-0912).
-var trustedPOSIXHomeLiteral = regexp.MustCompile(`^(?:[A-Za-z]:)?/[A-Za-z0-9._@+/-]*$`)
+var trustedPOSIXHomeLiteral = lazyMustCompile(`^(?:[A-Za-z]:)?/[A-Za-z0-9._@+/-]*$`)
 
 // trustedPOSIXHomeRewrite has home-anchored operands replaced by ActiveHome.
 type trustedPOSIXHomeRewrite struct {

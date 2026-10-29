@@ -4,7 +4,6 @@
 package actionfacts
 
 import (
-	"regexp"
 	"strings"
 )
 
@@ -15,7 +14,7 @@ import (
 // (C:/Users/Zoë); none of those quote or expand in PowerShell or cmd. An
 // ASCII-only class left $HOME and ~ partial under such a home while the
 // literal spelling was judged (GAP-1205).
-var trustedWindowsHomeLiteral = regexp.MustCompile(`^[A-Za-z]:/[\p{L}\p{M}\p{N}._+ /-]*$`)
+var trustedWindowsHomeLiteral = lazyMustCompile(`^[A-Za-z]:/[\p{L}\p{M}\p{N}._+ /-]*$`)
 
 // windowsShellHomeAnchors are the spellings of the caller's home a PowerShell
 // or cmd word may start with, lower-cased. PowerShell's $HOME is a constant

@@ -9,7 +9,6 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
-	"regexp"
 	"strings"
 	"unicode/utf8"
 )
@@ -17,16 +16,16 @@ import (
 const sqlServerConnectionDigestDomain = "defenseclaw/actionfacts/sql-server-connection/v1"
 
 var (
-	sqlServerXPEnablePattern = regexp.MustCompile(
+	sqlServerXPEnablePattern = lazyMustCompile(
 		`(?is)^\s*(?:exec(?:ute)?\s+)?(?:(?:master\.)?dbo\.)?sp_configure\s+N?'xp_cmdshell'\s*,\s*1\s*;?\s*(?:reconfigure(?:\s+with\s+override)?\s*;?\s*)?$`,
 	)
-	sqlServerXPAdvancedEnablePattern = regexp.MustCompile(
+	sqlServerXPAdvancedEnablePattern = lazyMustCompile(
 		`(?is)^\s*(?:exec(?:ute)?\s+)?(?:(?:master\.)?dbo\.)?sp_configure\s+N?'show advanced options'\s*,\s*1\s*;\s*reconfigure(?:\s+with\s+override)?\s*;\s*(?:exec(?:ute)?\s+)?(?:(?:master\.)?dbo\.)?sp_configure\s+N?'xp_cmdshell'\s*,\s*1\s*;?\s*(?:reconfigure(?:\s+with\s+override)?\s*;?\s*)?$`,
 	)
-	sqlServerXPDisablePattern = regexp.MustCompile(
+	sqlServerXPDisablePattern = lazyMustCompile(
 		`(?is)^\s*(?:exec(?:ute)?\s+)?(?:(?:master\.)?dbo\.)?sp_configure\s+N?'xp_cmdshell'\s*,\s*0\s*;?\s*(?:reconfigure(?:\s+with\s+override)?\s*;?\s*)?$`,
 	)
-	sqlServerXPInvokePattern = regexp.MustCompile(
+	sqlServerXPInvokePattern = lazyMustCompile(
 		`(?is)^\s*exec(?:ute)?\s+(?:(?:master\.)?dbo\.)?xp_cmdshell\s+N?'(?:''|[^'])*[^'\s](?:''|[^'])*'\s*(?:,\s*no_output)?\s*;?\s*$`,
 	)
 )

@@ -4,7 +4,6 @@
 package actionfacts
 
 import (
-	"regexp"
 	"strings"
 )
 
@@ -12,7 +11,7 @@ import (
 // closed-schema write containing a literal unrestricted passwordless grant.
 type POSIXUnrestrictedSudoersGrantWriteFact struct{}
 
-var exactUnrestrictedSudoersGrantLine = regexp.MustCompile(
+var exactUnrestrictedSudoersGrantLine = lazyMustCompile(
 	`^(%?[A-Za-z_][A-Za-z0-9_.-]*|ALL)[\t ]+ALL[\t ]*=[\t ]*\([\t ]*ALL(?:[\t ]*:[\t ]*ALL)?[\t ]*\)[\t ]+NOPASSWD[\t ]*:[\t ]*ALL[\t ]*$`,
 )
 

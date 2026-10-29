@@ -7,19 +7,18 @@ import (
 	"bytes"
 	"encoding/json"
 	"path"
-	"regexp"
 	"strconv"
 	"strings"
 )
 
 const kubernetesCronJobDomain = "defenseclaw/actionfacts/kubernetes-cronjob/v1"
 
-var kubernetesCronJobJSONPatchPath = regexp.MustCompile(
+var kubernetesCronJobJSONPatchPath = lazyMustCompile(
 	`^/spec/jobTemplate/spec/template/spec/containers/([0-9]+)/` +
 		`(securityContext|volumeMounts)$`,
 )
 
-var kubernetesDNSLabelPattern = regexp.MustCompile(
+var kubernetesDNSLabelPattern = lazyMustCompile(
 	`^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$`,
 )
 
