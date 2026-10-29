@@ -35893,6 +35893,13 @@ function Invoke-DefenseClawForcedUninstallPreparation {
             return $preparation
         }
         Assert-DefenseClawNoReparsePath -Path $preparation.state_root
+        # The bundle.lock this uninstall holds (GAP-2438) is an open handle
+        # inside StateRoot, and Windows refuses to move a folder with an open
+        # file under it: the printed FORCE=1 failed 1603 'Access to the path
+        # ... is denied' every time (GAP-2506). Release it first, as the
+        # StateRoot removal does; every bundle run waits for lifecycle.lock,
+        # which this run still holds.
+        Exit-DefenseClawPurgeBundleLock
         $moved = $preparation.state_root + '.forced-uninstall-' + [DateTime]::UtcNow.ToString('yyyyMMddTHHmmssZ')
         [IO.Directory]::Move($preparation.state_root, $moved)
         $preparation.moved_state_root = $moved

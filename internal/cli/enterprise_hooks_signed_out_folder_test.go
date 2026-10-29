@@ -4,6 +4,9 @@
 package cli
 
 import (
+	"context"
+	"errors"
+	"strings"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
@@ -67,5 +70,94 @@ func TestEnterpriseHookSignedOutUntrustedFolder(t *testing.T) {
 	}
 	if _, ok := enterpriseHookSignedOutUntrustedFolder(enterpriseHookReconcileRow{Error: live}, ""); ok {
 		t.Fatal("a target without a DefenseClaw folder matched")
+	}
+}
+
+// GAP-2516: a managed Windows Setup /upgrade over a signed-out account whose
+// hooks folder lost its protected DACL failed 1603, and so did its rollback,
+// which left the gateway and the hook enumerator stopped and disabled for
+// every user: the guardian failed the target, and only the account's own
+// Windows session can reset the folder. That exact failure (#1105, GAP-0211)
+// now waits for the account's next sign-in, naming the folder; every other
+// failure of a signed-out account stays a failure.
+func TestEnterpriseHookVerifyOrRepairTargetLeavesASignedOutUntrustedFolderToTheNextSignIn(t *testing.T) {
+	previousVerifier, previousInstaller := enterpriseHookReconcileVerifier, enterpriseHookReconcileInstaller
+	previousSession, previousRelease := enterpriseHookReconcileSessionAvailable, enterpriseHookReconcileTargetRelease
+	previousSecureClient, previousChange := enterpriseHookReconcileSecureClient, enterpriseHookReconcileTargetFailModeChange
+	previousDeferred := enterpriseHookReconcileDeferredSessionAvailable
+	t.Cleanup(func() {
+		enterpriseHookReconcileVerifier, enterpriseHookReconcileInstaller = previousVerifier, previousInstaller
+		enterpriseHookReconcileSessionAvailable, enterpriseHookReconcileTargetRelease = previousSession, previousRelease
+		enterpriseHookReconcileSecureClient, enterpriseHookReconcileTargetFailModeChange = previousSecureClient, previousChange
+		enterpriseHookReconcileDeferredSessionAvailable = previousDeferred
+	})
+	secureClient := false
+	enterpriseHookReconcileSecureClient = func() bool { return secureClient }
+	enterpriseHookReconcileDeferredSessionAvailable = func(enterprisehooks.ManifestTarget) (bool, error) { return true, nil }
+	// This release wrote the lock and the fail mode did not change.
+	enterpriseHookReconcileTargetRelease = func(enterprisehooks.InstallOptions) (string, bool, error) { return "", false, nil }
+	enterpriseHookReconcileTargetFailModeChange = func(enterprisehooks.InstallOptions) (string, string, error) { return "", "", nil }
+	signedIn := false
+	enterpriseHookReconcileSessionAvailable = func(enterprisehooks.ManifestTarget) (bool, error) { return signedIn, nil }
+	const (
+		dataDir = `C:\Users\dcw-disp1\.defenseclaw`
+		hookDir = `enterprise hooks: managed hook directory verification failed: enterprise hooks: `
+	)
+	// The guardian's verification error of the live cell (TST-43664).
+	live := errors.New(hookDir + `managed Windows DACL is not protected on C:\Users\dcw-disp1\.defenseclaw\hooks`)
+	verifyErr := live
+	enterpriseHookReconcileVerifier = func(context.Context, enterprisehooks.InstallOptions) (enterprisehooks.InstallResult, error) {
+		return enterprisehooks.InstallResult{}, verifyErr
+	}
+	installs := 0
+	enterpriseHookReconcileInstaller = func(_ context.Context, opts enterprisehooks.InstallOptions) (enterprisehooks.InstallResult, error) {
+		installs++
+		return enterprisehooks.InstallResult{Connector: opts.ConnectorName}, nil
+	}
+	target := enterprisehooks.ManifestTarget{SID: "S-1-5-21-1-2-3-1002", Connector: "claudecode", Deferred: true, DataDir: dataDir}
+	run := func(target enterprisehooks.ManifestTarget) (bool, error) {
+		_, repaired, err := enterpriseHookVerifyOrRepairTarget(context.Background(), target,
+			enterprisehooks.InstallOptions{ConnectorName: target.Connector}, true)
+		return repaired, err
+	}
+
+	_, err := run(target)
+	if err == nil || !errors.Is(err, errEnterpriseHookAwaitingSignIn) || installs != 0 ||
+		!strings.Contains(err.Error(), dataDir+`\hooks`) {
+		t.Fatalf("signed-out untrusted hooks folder: err=%v installs=%d, want the sign-in wait naming the folder", err, installs)
+	}
+	row := enterpriseHookReconcileRow{SID: target.SID, Connector: target.Connector, Error: err.Error()}
+	if !enterpriseHookAwaitingSignInError(row) || enterpriseHookEarlierMatrixRow(row) {
+		t.Fatalf("the guardian row %q is not a plain sign-in wait", row.Error)
+	}
+	if cause := enterpriseHookAwaitingSignInCause(err.Error()); !strings.Contains(cause, dataDir+`\hooks are not the ones`) ||
+		!strings.Contains(cause, "Inspect that folder") || strings.Contains(cause, "earlier DefenseClaw release") {
+		t.Fatalf("status cause = %q, want the folder and the next step", cause)
+	}
+
+	// The account signs in: the guardian repairs the target in its session.
+	signedIn = true
+	if repaired, err := run(target); err != nil || !repaired || installs != 1 {
+		t.Fatalf("signed in: repaired=%v err=%v installs=%d, want a repair", repaired, err, installs)
+	}
+	signedIn = false
+
+	// Every other failure of a signed-out account stays a failure.
+	for name, tc := range map[string]struct {
+		target enterprisehooks.ManifestTarget
+		err    error
+		sc     bool
+	}{
+		"another account's folder": {target, errors.New(hookDir + `managed Windows DACL is not protected on C:\Users\other\.defenseclaw\hooks`), false},
+		"a runtime file": {target, errors.New(`enterprise hooks: required managed runtime verification failed for ` +
+			dataDir + `\hooks\.hookcfg: enterprise hooks: managed Windows DACL on ` + dataDir + `\hooks\.hookcfg has 8 ACEs, expected 7`), false},
+		"a junction":    {target, errors.New(hookDir + `symlinks, junctions, and reparse points are not allowed: ` + dataDir + `\hooks`), false},
+		"not deferred":  {enterprisehooks.ManifestTarget{SID: target.SID, Connector: target.Connector, DataDir: dataDir}, live, false},
+		"Secure Client": {target, live, true},
+	} {
+		verifyErr, secureClient = tc.err, tc.sc
+		if _, err := run(tc.target); err == nil || errors.Is(err, errEnterpriseHookAwaitingSignIn) {
+			t.Fatalf("%s: err=%v, want the signed-out repair failure", name, err)
+		}
 	}
 }

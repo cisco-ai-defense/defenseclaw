@@ -817,6 +817,10 @@ const (
 	// An earlier release's hook matrix, which lacks only the fail_closed
 	// setting this release adds, still runs for it (GAP-2463).
 	enterpriseHookAwaitingSignInEarlierMatrix = "its earlier release's hooks still run"
+	// The owner or permissions of a signed-out account's own DefenseClaw
+	// folder or hooks folder changed (#1105, GAP-0211, GAP-2516); the
+	// folder follows after ": ".
+	enterpriseHookAwaitingSignInUntrustedFolder = "the owner or permissions of its DefenseClaw folder are not the ones DefenseClaw set"
 )
 
 // enterpriseHookEarlierMatrixRow reports a guardian row that waits for its
@@ -848,6 +852,14 @@ func enterpriseHookAwaitingSignInCause(guardianErr string) string {
 			"Windows session at its next sign-in"
 	case strings.HasPrefix(cause, enterpriseHookAwaitingSignInEarlierMatrix):
 		return enterpriseHookEarlierMatrixState
+	case strings.HasPrefix(cause, enterpriseHookAwaitingSignInUntrustedFolder+": "):
+		folder := strings.TrimPrefix(cause, enterpriseHookAwaitingSignInUntrustedFolder+": ")
+		if end := strings.Index(folder, "; "); end >= 0 {
+			folder = folder[:end]
+		}
+		return "the owner or permissions of its DefenseClaw folder " + folder + " are not the ones DefenseClaw set, " +
+			"and the guardian resets them only in the account's own Windows session, at its next sign-in; it is not " +
+			"protected until then. Inspect that folder, or remove the account with its profile if it no longer uses DefenseClaw"
 	case strings.HasPrefix(cause, enterpriseHookAwaitingSignInHermesHome):
 		return "Hermes NOT COVERED: the account is signed out, so its registry hive and the HERMES_HOME it selects " +
 			"cannot be read; its installed hook is unchanged, and the guardian verifies it again at the account's next sign-in"
@@ -955,6 +967,30 @@ func enterpriseHookRepairAfterVerifyFailure(
 						"it at the account's next sign-in (verification: %v)",
 					errEnterpriseHookAwaitingSignIn, written, verifyErr,
 				)
+			}
+			// A signed-out account whose only failure is the owner or
+			// permissions of its own DefenseClaw folder or hooks folder
+			// (#1105, GAP-0211) waits for its next sign-in too: only its own
+			// Windows session can reset them. As a failure it failed every
+			// Setup run and then that run's rollback, which left the gateway
+			// and the hook enumerator stopped and disabled for every user
+			// (GAP-2516). Status reports it pending and names the folder;
+			// any other drift stays a failure.
+			if !enterpriseHookReconcileSecureClient() {
+				dataDir := strings.TrimSpace(target.DataDir)
+				if dataDir == "" {
+					dataDir = strings.TrimSpace(opts.DataDir)
+				}
+				if folder, untrusted := enterpriseHookSignedOutUntrustedFolder(enterpriseHookReconcileRow{
+					Error: fmt.Sprintf("enterprise hooks: protected target requires repair but its exact active Windows "+
+						"session is unavailable (verification: %v)", verifyErr),
+				}, dataDir); untrusted {
+					return enterprisehooks.InstallResult{}, false, fmt.Errorf(
+						"%w: %s: %s; its exact active Windows session is unavailable, so the guardian repairs it at "+
+							"the account's next sign-in (verification: %v)",
+						errEnterpriseHookAwaitingSignIn, enterpriseHookAwaitingSignInUntrustedFolder, folder, verifyErr,
+					)
+				}
 			}
 			if enterpriseHookReconcileSecureClient() {
 				if available, pendingErr := enterpriseHookReconcileDeferredSessionAvailable(target); pendingErr == nil && !available {

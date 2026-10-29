@@ -279,7 +279,11 @@ gpg --dearmor < defenseclaw-enterprise-release-key.asc > defenseclaw-enterprise-
   need 7.4 or later. Setup, `detect.ps1`, `uninstall.ps1` and the Intune scripts
   do not need it to start.
 - **Time.** Setup gives the lifecycle 30 minutes by default (`TIMEOUTSECONDS=60`
-  to `7200`). Allow at least that long in your MDM.
+  to `7200`). Allow at least that long in your MDM. On Windows, a standalone Setup
+  run stopped at `TIMEOUTSECONDS` then runs its own recovery for up to 10 more
+  minutes, so allow `TIMEOUTSECONDS` plus 10 minutes (40 minutes by default). An
+  MDM that ends Setup sooner can stop that recovery and leave `verify` failing
+  until the next `/ensure` or `/repair`.
 - **One run at a time.** A second run while one holds the lifecycle lock, or
   while dpkg, rpm or the macOS installer is busy, exits `1618` (Windows) or `75`
   (Linux, macOS). Retry later. On Windows, a Setup that would upgrade the

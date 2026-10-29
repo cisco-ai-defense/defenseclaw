@@ -81,6 +81,50 @@ try {
             $after.Dispose()
         }
         Microsoft.PowerShell.Management\Remove-Item -LiteralPath $path -Force
+
+        # GAP-2506: the printed FORCE=1 moves StateRoot aside while this run
+        # holds bundle.lock inside it; Windows refuses to move a folder with
+        # an open file under it, so the preparation releases the lock first.
+        function Assert-DefenseClawOwnedServiceOrAbsent { }
+        function Get-DefenseClawEnumeratorServiceName { param($GuardianServiceName) 'DefenseClawPodTestEnumerator' }
+        function Get-DefenseClawSensorHelperImage { param($Layout, $GatewayServiceName) '' }
+        function Test-DefenseClawServiceExists { param($Name) $false }
+        $stateRoot = Microsoft.PowerShell.Management\Join-Path $root 'state'
+        $installState = Microsoft.PowerShell.Management\Join-Path $stateRoot 'install'
+        [void](Microsoft.PowerShell.Management\New-Item -ItemType Directory -Path $installState)
+        [IO.File]::WriteAllBytes((Microsoft.PowerShell.Management\Join-Path $installState 'bundle.lock'), [byte[]]@(0))
+        $forcedLayout = @{
+            StateRoot = $stateRoot
+            InstallStateDirectory = $installState
+            GatewayPath = 'C:\missing\defenseclaw-gateway.exe'
+            ManifestPath = 'C:\missing\manifest.json'
+            SensorHelperServiceName = 'DefenseClawPodTestSensorHelper'
+            SensorHelperPath = 'C:\missing\defenseclaw-sensor-helper.exe'
+        }
+        $script:DefenseClawPurgeBundleLock = Enter-DefenseClawBundleStoreLock -Layout $forcedLayout -TimeoutSeconds 2
+        if ($null -eq $script:DefenseClawPurgeBundleLock) {
+            $failures.Add('the forced uninstall fixture could not take bundle.lock')
+        }
+        $preparation = $null
+        try {
+            $preparation = Invoke-DefenseClawForcedUninstallPreparation `
+                -Layout $forcedLayout `
+                -GatewayServiceName 'DefenseClawPodTestGateway' `
+                -GuardianServiceName 'DefenseClawPodTestGuardian'
+        }
+        catch {
+            $failures.Add("the forced uninstall could not move StateRoot aside while it held bundle.lock: $($_.Exception.Message)")
+        }
+        if ($null -ne $preparation) {
+            $moved = [string]$preparation.moved_state_root
+            if ([string]::IsNullOrEmpty($moved) -or -not [IO.Directory]::Exists($moved) -or [IO.Directory]::Exists($stateRoot)) {
+                $failures.Add("StateRoot was not moved aside: moved='$moved'")
+            }
+        }
+        if ($null -ne $script:DefenseClawPurgeBundleLock) {
+            $failures.Add('the forced uninstall kept bundle.lock after it moved StateRoot aside')
+        }
+        Exit-DefenseClawPurgeBundleLock
         return , $failures
     } $root
 }
