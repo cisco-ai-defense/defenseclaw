@@ -5868,11 +5868,20 @@ func trustedActionLimitFindings(enforcementCapable bool) []RuleFinding {
 }
 
 // trustedActionCommandTooDeep reports whether the call's command (the
-// command input, or the top-level command argument of any tool) nests past
+// command input, or the top-level command argument of any tool but
+// apply_patch) nests past
 // shellparse.MaxNestingDepth. Every shell reader of the gateway, the hook
 // proofs and actionfacts recurse per nesting level; such a command
 // overflowed the Windows gateway's stack (GAP-2537).
 func trustedActionCommandTooDeep(input actionfacts.Input) bool {
+	// The command of an apply_patch call is a patch envelope: file text,
+	// not shell. Its targets are read from the envelope, and every shell
+	// reader parses through shellparse.Reader, so a patch of ordinary text
+	// with many unclosed (, { or [ (ANSI colour escapes) is judged by its
+	// targets, not by the shell bound (GAP-2561).
+	if actionfacts.ApplyPatchTool(input.Tool) {
+		return false
+	}
 	if shellparse.TooDeep(input.Command) {
 		return true
 	}

@@ -60,3 +60,76 @@ func TestResolveConnectorBoundsDeepNesting(t *testing.T) {
 		t.Errorf("8-level subshell: incomplete evidence %v", targets)
 	}
 }
+
+// The nesting bound measures the shell command only. A managed Write or Edit
+// of an ordinary file whose text has many unclosed (, { or [ (an ANSI colour
+// escape ESC[31m is one) is not shell: it keeps its target and complete
+// evidence, so the managed gateway does not fail it closed (RV-p4-1 of
+// GAP-2556, BALANCED-DEFAULTS).
+func TestResolveConnectorDeepTextBodyIsNotShell(t *testing.T) {
+	home := t.TempDir()
+	target := home + "/project/ordinary/log.txt"
+	colored := strings.Repeat("\x1b[31mERROR\x1b[0m build step failed\n", 600)
+	for _, row := range []struct {
+		name string
+		tool string
+		args map[string]any
+	}{
+		{"W1 colored Write", "Write", map[string]any{"file_path": target, "content": colored}},
+		{"W2 Write of (", "Write", map[string]any{"file_path": target, "content": strings.Repeat("(", 600)}},
+		{"W4 relative Write", "Write", map[string]any{"file_path": "project/ordinary/log.txt", "content": strings.Repeat("(", 600)}},
+		{"E1 colored Edit", "Edit", map[string]any{"file_path": target, "old_string": "x", "new_string": colored}},
+	} {
+		payload, err := json.Marshal(map[string]any{"tool_name": row.tool, "cwd": home, "tool_input": row.args})
+		if err != nil {
+			t.Fatal(err)
+		}
+		targets, ok := Decode(ResolveConnector("claudecode", "", "PreToolUse", payload))
+		if !ok || targets[TruncatedKey] == "1" {
+			t.Errorf("%s: targets %v, want complete evidence", row.name, targets)
+		}
+	}
+}
+
+// The command of a Codex apply_patch call is a patch envelope. A patch that
+// adds ordinary text with more than shellparse.MaxNestingDepth unclosed (, {
+// or [ (ANSI colour escapes) keeps complete evidence and its targets, as the
+// same patch under input does (GAP-2561, the RV-p4-1 class).
+func TestResolveConnectorDeepPatchBodyIsNotShell(t *testing.T) {
+	defer debug.SetMaxStack(debug.SetMaxStack(64 << 20))
+	home := t.TempDir()
+	cwd := home + "/project"
+	target := cwd + "/testdata/log.golden"
+	patch := func(path, body string) string {
+		return "*** Begin Patch\n*** Add File: " + path + "\n" + body + "*** End Patch\n"
+	}
+	colored := strings.Repeat("+\x1b[31mERROR\x1b[0m build step failed\n", 600)
+	for _, row := range []struct {
+		name, key, body, path string
+	}{
+		{"H01 colored command", "command", colored, target},
+		{"H02 colored input", "input", colored, target},
+		{"P02 600 (", "command", strings.Repeat("+(\n", 600), target},
+		{"P07 520 [", "command", "+" + strings.Repeat("[", 520) + "\n", target},
+		{"K1 colored key patch", "command", colored, home + "/.ssh/authorized_keys"},
+	} {
+		payload, err := json.Marshal(map[string]any{"tool_name": "apply_patch", "cwd": cwd,
+			"tool_input": map[string]any{row.key: patch(row.path, row.body)}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		targets, ok := Decode(ResolveConnector("codex", "", "PreToolUse", payload))
+		if !ok || targets[TruncatedKey] == "1" {
+			t.Errorf("%s: targets %v, want complete evidence", row.name, targets)
+		}
+		if _, listed := targets[row.path]; !listed {
+			t.Errorf("%s: targets %v, want %s", row.name, targets, row.path)
+		}
+	}
+	// A deep shell command is still past the bound.
+	payload, _ := json.Marshal(map[string]any{"tool_name": "Bash", "cwd": cwd,
+		"tool_input": map[string]any{"command": "cat ~/a.txt\n" + strings.Repeat("(", 180<<10)}})
+	if targets, _ := Decode(ResolveConnector("codex", "", "PreToolUse", payload)); targets[TruncatedKey] != "1" {
+		t.Errorf("deep Bash: targets %v, want incomplete evidence", targets)
+	}
+}

@@ -133,7 +133,11 @@ func analyze(input Input, twinCommand string, capture *redirectTargetCapture) Fa
 	}
 
 	if command != "" {
-		if issue := validateCommandText(command); issue != "" {
+		validate := validateCommandText
+		if isApplyPatchTool(input.Tool) {
+			validate = validatePatchToolCommandText
+		}
+		if issue := validate(command); issue != "" {
 			if issue == IssueInputLimit {
 				base.markLimit(issue)
 			} else {
@@ -2193,9 +2197,21 @@ func validScalar(value string, max int) bool {
 }
 
 func validateCommandText(value string) IssueCode {
-	if len(value) > maxCommandBytes || shellparse.TooDeep(value) {
+	if shellparse.TooDeep(value) {
 		// Past the reading bounds; a nesting this deep never reaches the
 		// recursive shell parsers (GAP-2537).
+		return IssueInputLimit
+	}
+	return validatePatchToolCommandText(value)
+}
+
+// validatePatchToolCommandText validates the command text of an apply_patch
+// call. That text is a patch envelope (file content), so the shell nesting
+// bound does not make it over-limit: a patch adding ordinary text with many
+// unclosed (, { or [ (ANSI colour escapes) is read by its targets, and every
+// shell reader still parses it through shellparse.Reader (GAP-2561).
+func validatePatchToolCommandText(value string) IssueCode {
+	if len(value) > maxCommandBytes {
 		return IssueInputLimit
 	}
 	if !utf8.ValidString(value) {
