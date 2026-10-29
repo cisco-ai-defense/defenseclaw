@@ -9707,7 +9707,9 @@ function Set-DefenseClawSecureClientInstallMarker {
         [Parameter(Mandatory)][hashtable]$Layout,
         [Parameter(Mandatory)][string]$GatewayServiceSID
     )
-    if (-not ($Layout.Contains('BrokerEnabled') -and [bool]$Layout['BrokerEnabled'])) {
+    # A Secure Client layout carries no BrokerEnabled key (an absent key is
+    # its broker deployment); only standalone layouts set it, to false.
+    if (-not (Test-DefenseClawLayoutBrokerEnabled -Layout $Layout)) {
         return
     }
     # The install root itself has the canonical Administrators owner. Profile

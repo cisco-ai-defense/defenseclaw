@@ -118,7 +118,7 @@ func windowsCursorPreRetirementHooks(t *testing.T, base []byte, command string, 
 		}
 	}
 	hooks["afterAgentThought"] = append(append([]interface{}{}, foreign...),
-		windowsCursorEnterpriseHookEntry(command))
+		windowsCursorEnterpriseHookEntry(command, "closed"))
 	body, err := encodeCursorHooksJSON(cfg)
 	if err != nil {
 		t.Fatal(err)
@@ -224,7 +224,7 @@ func TestWindowsCursorEnterpriseRetiredEventStillRejectsBadOwnedEntries(t *testi
 	if err != nil {
 		t.Fatal(err)
 	}
-	duplicate := windowsCursorPreRetirementHooks(t, nil, "", windowsCursorEnterpriseHookEntry(current))
+	duplicate := windowsCursorPreRetirementHooks(t, nil, "", windowsCursorEnterpriseHookEntry(current, "closed"))
 	if err := VerifyWindowsCursorEnterpriseHooksForMigration(duplicate, testWindowsCursorAdapter, "closed"); err == nil {
 		t.Fatal("migration verifier accepted two DefenseClaw afterAgentThought entries")
 	}

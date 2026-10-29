@@ -979,9 +979,9 @@ func loadPreviousManifestForEnumeration(path string, logf EnumerationLogger) map
 //     enabled prior row stays enabled with its recorded
 //     AgentVersion.
 //   - Newly-discovered (SID, Connector): consult
-//     `discoverWindowsAgentVersion` to see whether this user's
-//     profile contains a supported per-user install of the
-//     connector's CLI.
+//     `windowsSecureClientAgentVersionExplain` to see whether this
+//     user's profile contains a supported install of the connector's
+//     CLI.
 //   - If a version is discoverable: emit the row with
 //     `Enabled: true`, `Deferred: false`, `AgentVersion: <found>`.
 //     This is the auto-authorize path — parity with macOS
@@ -1003,7 +1003,7 @@ func applyPreviousRowState(row *ManifestTarget, previous map[string]ManifestTarg
 		return false
 	}
 	key := previousManifestKey(row.SID, row.Connector)
-	version, reason := windowsAgentVersionExplain(row.UserHome, row.Connector)
+	version, reason := windowsSecureClientAgentVersionExplain(row.UserHome, row.SID, row.Connector)
 	if version == "" && row.Connector == "copilot" {
 		if copilot := windowsSecureClientCopilotVersion(row.UserHome, row.SID); copilot != "" {
 			version, reason = copilot, ""

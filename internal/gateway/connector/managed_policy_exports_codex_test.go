@@ -55,7 +55,7 @@ func TestManagedCodexUnversionedMatrixMatchesTheBoundContract(t *testing.T) {
 // compact source, so a compact-source SessionStart never ran the hook while
 // every command bound the v4 contract. The installer writes, verifies and
 // removes the compact group, replaces the older one on upgrade, and Secure
-// Client keeps its matrix.
+// Client uses the same matrix.
 func TestWindowsCodexMachineRequirementsCoverCompactSessionStart(t *testing.T) {
 	opts := testWindowsCodexMachineOptions()
 	opts.HookContractID = ResolveHookContract("codex", "").Contract.ContractID
@@ -127,9 +127,24 @@ func TestWindowsCodexMachineRequirementsCoverCompactSessionStart(t *testing.T) {
 		}
 	}
 
+	// Secure Client publishes the same matrix: its earlier file (the legacy
+	// group above) is replaced on its next reconcile, and a check with or
+	// without the profile accepts the result.
 	secureClient := opts
 	secureClient.SecureClient = true
-	if groups := windowsCodexMachineLayout(secureClient).groups; groups[0].matcher != "startup|resume|clear" {
+	if groups := windowsCodexMachineLayout(secureClient).groups; groups[0].matcher != "startup|resume|clear|compact" {
 		t.Fatalf("Secure Client SessionStart matcher = %q", groups[0].matcher)
+	}
+	scUpgraded, changed, err := reconcileWindowsCodexRequirements(old, secureClient, true)
+	if err != nil || !changed {
+		t.Fatalf("Secure Client upgrade: changed=%v err=%v", changed, err)
+	}
+	if groups := sessionStart(scUpgraded); len(groups) != 1 || groups[0].(map[string]interface{})["matcher"] != "startup|resume|clear|compact" {
+		t.Fatalf("Secure Client upgraded SessionStart groups = %v", groups)
+	}
+	for _, verifier := range []WindowsCodexMachineRequirementsOptions{opts, secureClient} {
+		if err := verifyWindowsCodexRequirementsBytes(scUpgraded, verifier); err != nil {
+			t.Fatalf("verify the Secure Client file (SecureClient=%v): %v", verifier.SecureClient, err)
+		}
 	}
 }
