@@ -5706,7 +5706,9 @@ try {{ Publish-PreviousSlot (Join-Path $DataDir 'previous.new') }} catch {{ "THR
 
 
 @pytest.mark.skipif(POWERSHELL is None, reason="PowerShell is not installed")
-@pytest.mark.parametrize("case", ["updated", "same", "missing", "no-lock", "not-setup-selected"])
+@pytest.mark.parametrize(
+    "case", ["updated", "same", "missing", "no-lock", "not-setup-selected", "updated-selection-fresh", "updated-selection-expired"]
+)
 def test_a_rollback_refuses_before_any_change_when_codex_changed_since_the_older_setup(tmp_path: Path, case: str) -> None:
     # GAP-2299: after a Codex update (0.160.0 -> 0.164.0) and setup codex on
     # 1.0.5, 'defenseclaw rollback' swapped to 1.0.4, whose gateway does not
@@ -5719,8 +5721,19 @@ def test_a_rollback_refuses_before_any_change_when_codex_changed_since_the_older
     exe = tmp_path / "codex.exe"
     exe.write_bytes(b"codex 0.160.0")
     recorded = hashlib.sha256(b"codex 0.160.0").hexdigest()
-    if case == "updated":
+    if case.startswith("updated"):
         exe.write_bytes(b"codex 0.164.0")
+    if case.startswith("updated-selection"):
+        # GAP-2513: the rollback selected the updated program for the older
+        # release, as its setup would; only a fresh selection counts.
+        expires = "2000-01-01T00:00:00Z" if case.endswith("expired") else "2999-01-01T00:00:00Z"
+        selection = {
+            "source": "setup-selected",
+            "executable": str(exe),
+            "sha256": hashlib.sha256(b"codex 0.164.0").hexdigest(),
+            "expires_at": expires,
+        }
+        (data / "agent_selection.json").write_text(json.dumps({"selections": {"codex": selection}}), encoding="utf-8")
     if case == "missing":
         exe.unlink()
     source = "setup-selected" if case != "not-setup-selected" else ""
@@ -5746,6 +5759,7 @@ def test_a_rollback_refuses_before_any_change_when_codex_changed_since_the_older
 $ErrorActionPreference = 'Stop'
 {_ps1_function("Get-Field")}
 {_ps1_function("Get-StaleAgentEvidence")}
+{_ps1_function("Test-FreshAgentSelection")}
 @(Get-StaleAgentEvidence '{data}') | ForEach-Object {{ "STALE $_" }}
 'OK'
 """
@@ -5753,7 +5767,7 @@ $ErrorActionPreference = 'Stop'
     out = result.stdout + result.stderr
     assert result.returncode == 0 and "OK" in out, out
     stale = re.findall(r"STALE (.*)", out)
-    if case == "updated":
+    if case in ("updated", "updated-selection-expired"):
         assert stale == [f"Codex was updated after DefenseClaw set up Codex 0.160.0 ({exe} changed)"], out
     elif case == "missing":
         assert stale == [f"Codex 0.160.0, which DefenseClaw set up before the upgrade, is no longer at {exe}"], out
@@ -6878,8 +6892,9 @@ def test_a_codex_update_refuses_only_a_rollback_whose_gateway_would_not_start(tm
         "function Remove-LifecycleManifest { $script:removed++ }\n"
         "function Start-Gateway { return 0 }\nfunction Wait-LifecycleProof { return @() }\n"
         "function Undo-Rollback { param($Reason) Write-Host \"undo: $Reason\"; return 1 }\n"
-        + _ps1_function("Get-Field") + _ps1_function("Get-StaleAgentEvidence") + _ps1_function("Read-Text")
-        + _ps1_function("Test-Version") + _ps1_function("Invoke-Rollback")
+        + "function Select-UpdatedAgents([string]$Data) { }\n"
+        + _ps1_function("Get-Field") + _ps1_function("Get-StaleAgentEvidence") + _ps1_function("Test-FreshAgentSelection")
+        + _ps1_function("Read-Text") + _ps1_function("Test-Version") + _ps1_function("Invoke-Rollback")
         + "\ntry { $rc = Invoke-Rollback } catch { Write-Host \"refused: $($_.Exception.Message)\"; $rc = 'refused' }\n"
         + "Write-Host \"rc: $rc stops: $script:stops removed: $script:removed\"\n",
         encoding="utf-8",

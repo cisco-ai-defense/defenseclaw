@@ -5110,10 +5110,11 @@ function Select-UpdatedAgents([string]$Data) {
     # that 'defenseclaw setup codex' records, written by the CLI of this
     # install into the data of the older one; its gateway seals it at its
     # next start (GAP-2513). Best effort: Get-StaleAgentEvidence names what
-    # is left.
-    $python = Join-Path $Venv "Scripts\python.exe"
-    if (-not (Test-Path -LiteralPath $python -PathType Leaf)) { return }
-    [void](Invoke-Native $python @("-c", "import sys; from defenseclaw import migrations; migrations.reselect_updated_windows_agents(sys.argv[1])", $Data))
+    # is left. The CLI entry sets up its output streams, so a warning prints
+    # on a cp1252 console without a Python traceback.
+    $cli = Join-Path $Venv "Scripts\defenseclaw.exe"
+    if (-not (Test-Path -LiteralPath $cli -PathType Leaf)) { return }
+    [void](Invoke-Native $cli @("migrate", "--reselect-updated-agents", "--data-dir", $Data))
 }
 
 function Invoke-Rollback {

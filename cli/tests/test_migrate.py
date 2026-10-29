@@ -997,3 +997,55 @@ def test_every_upgrade_checks_the_windows_agents_setup_selected(
 
     assert selected == [str(data_dir)]
     assert reselected == [str(data_dir), str(data_dir)]
+
+
+def test_the_rollback_reselect_entry_prints_its_warning_on_a_cp1252_console(data_dir: Path, monkeypatch) -> None:
+    # GAP-2513 review: install.ps1 -Rollback ran the reselect through
+    # 'python -c', which skips the CLI's console stream setup, so its
+    # warning glyph raised UnicodeEncodeError on a cp1252 stream and a
+    # traceback printed in the middle of a successful rollback. The installer
+    # now runs 'defenseclaw migrate --reselect-updated-agents'.
+    import io
+    import sys
+
+    from defenseclaw import main as main_module
+    from defenseclaw import ux
+
+    seen: list[str] = []
+
+    def reselect(path: str) -> None:
+        seen.append(path)
+        ux.warn("codex changed since DefenseClaw set it up (an agent update does this)", indent="    ")
+
+    monkeypatch.setattr(migrations, "reselect_updated_windows_agents", reselect)
+    monkeypatch.setattr(ux, "_configured_unicode_output", None)
+    monkeypatch.setattr(ux, "_configured_unicode_error_output", None)
+    monkeypatch.setenv("COLUMNS", "120")
+    out = io.TextIOWrapper(io.BytesIO(), encoding="cp1252", errors="strict")
+    err = io.TextIOWrapper(io.BytesIO(), encoding="cp1252", errors="strict")
+    monkeypatch.setattr(sys, "stdout", out)
+    monkeypatch.setattr(sys, "stderr", err)
+    monkeypatch.setattr(
+        sys, "argv", ["defenseclaw", "migrate", "--reselect-updated-agents", "--data-dir", str(data_dir)]
+    )
+
+    with pytest.raises(SystemExit) as exited:
+        main_module.main()
+
+    out.flush()
+    err.flush()
+    printed = out.buffer.getvalue().decode("utf-8") + err.buffer.getvalue().decode("utf-8")
+    assert exited.value.code in (0, None), printed
+    assert seen == [str(data_dir)]
+    assert "codex changed since DefenseClaw set it up" in printed
+    assert "Traceback" not in printed
+    assert not (data_dir / "config.yaml").exists()
+
+
+def test_the_rollback_selects_updated_agents_through_the_cli_entry() -> None:
+    # GAP-2513 review: not 'python -c', which has no console stream setup.
+    script = (Path(__file__).resolve().parents[2] / "scripts" / "install.ps1").read_text(encoding="utf-8")
+    body = script[script.index("function Select-UpdatedAgents") :]
+    body = body[: body.index("\n}\n")]
+    assert '@("migrate", "--reselect-updated-agents", "--data-dir", $Data)' in body
+    assert '"-c"' not in body

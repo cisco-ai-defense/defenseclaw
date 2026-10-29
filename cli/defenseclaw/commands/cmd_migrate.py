@@ -77,9 +77,19 @@ def _validate_from_version(_ctx, _param, value):
 @click.option("--openclaw-home", default=None, type=click.Path(file_okay=False), help="OpenClaw home directory.")
 @click.option("--gateway-binary", default=None, type=click.Path(dir_okay=False), help="Gateway used by --check.")
 @click.option("--json", "as_json", is_flag=True, help="Print the result as JSON.")
-def migrate_cmd(check, from_version, data_dir, openclaw_home, gateway_binary, as_json) -> None:
+# install.ps1 -Rollback only: select again, in the older install's data, an
+# agent that updated itself since its setup (GAP-2513). Through this entry,
+# not 'python -c', so its warning gets the CLI's console stream setup.
+@click.option("--reselect-updated-agents", "reselect_only", is_flag=True, hidden=True)
+def migrate_cmd(check, from_version, data_dir, openclaw_home, gateway_binary, as_json, reselect_only) -> None:
     """Bring config and data to this version's schema."""
     from defenseclaw.migrations import ConfigTooNewError, MigrationError, display_step_name, migrate
+
+    if reselect_only:
+        from defenseclaw.migrations import reselect_updated_windows_agents
+
+        reselect_updated_windows_agents(data_dir or _default_data_dir())
+        return
 
     # A --from-version newer than this release is warned about where it is
     # read: a 0.x config without a cursor (migrations._warn_from_version_newer).
