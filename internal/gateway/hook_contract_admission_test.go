@@ -287,3 +287,62 @@ func TestRunActiveGuardrailReportsReleaseCausedRefusalAsFailure(t *testing.T) {
 		t.Fatalf("admission detail = %#v, want none so start fails and an upgrade rolls back", details)
 	}
 }
+
+// An upgrade refreshes an active connector whose agent binary is on PATH but
+// does not run (a node script with no node on PATH): discovery records no
+// version and why. The refusal is unchanged (the start still fails and the
+// upgrade rolls back), but it names the cause and the fix instead of telling
+// the user to close an agent that cannot be open (GAP-1167).
+func TestRefreshOfAnAgentThatDidNotRunNamesTheCauseNotAnOpenAgent(t *testing.T) {
+	for name, probeError := range map[string]string{
+		"agent did not run":     "/opt/dc-agents/bin/claude: version probe exited 127: /usr/bin/env: ‘node’: No such file or directory",
+		"no recorded probe err": "",
+	} {
+		t.Run(name, func(t *testing.T) {
+			s := admissionSidecar(t)
+			raw, err := json.Marshal(map[string]any{
+				"agents": map[string]any{"claudecode": map[string]any{
+					"version": "", "binary_path": "/opt/dc-agents/bin/claude", "installed": false, "error": probeError,
+				}},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(s.cfg.DataDir, "agent_discovery.json"), raw, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if err := connector.SaveActiveConnectors(s.cfg.DataDir, []string{"claudecode"}); err != nil {
+				t.Fatal(err)
+			}
+
+			conn := &bootStubConnector{stubConnector: stubConnector{name: "claudecode"}}
+			_, err = s.setupConnectorsIsolatedTransaction(
+				context.Background(), []connector.Connector{conn},
+				"tok", "127.0.0.1:0", "127.0.0.1:0", "master", guardrail.NewRulePackCache(),
+			)
+			if err == nil || !errors.Is(err, ErrHookContractAdmission) || conn.setupCalls != 0 {
+				t.Fatalf("refresh error = %v, setupCalls = %d; want the unversioned agent refused before setup", err, conn.setupCalls)
+			}
+			message := err.Error()
+			if probeError == "" {
+				if errors.Is(err, errAgentDidNotRun) || !strings.Contains(message, "close the agent holding its settings") {
+					t.Fatalf("refresh error = %q, want the unchanged message", message)
+				}
+				return
+			}
+			if !errors.Is(err, errAgentDidNotRun) {
+				t.Fatalf("refresh error = %q, want it marked as an agent that did not run", message)
+			}
+			for _, want := range []string{"version probe exited 127", "No such file or directory", "putting its runtime on PATH", "then run: defenseclaw upgrade"} {
+				if !strings.Contains(message, want) {
+					t.Fatalf("refresh error = %q, want %q", message, want)
+				}
+			}
+			for _, unwanted := range []string{"close the agent holding its settings", "DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT"} {
+				if strings.Contains(message, unwanted) {
+					t.Fatalf("refresh error = %q, must not say %q", message, unwanted)
+				}
+			}
+		})
+	}
+}

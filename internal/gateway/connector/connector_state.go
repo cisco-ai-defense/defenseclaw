@@ -33,6 +33,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 )
 
 const activeConnectorFile = "active_connector.json"
@@ -2589,6 +2590,33 @@ type cachedAgentSignal struct {
 	Version    string `json:"version"`
 	BinaryPath string `json:"binary_path"`
 	Installed  *bool  `json:"installed"`
+	Error      string `json:"error"`
+}
+
+// agentVersionProbeErrorMaxBytes bounds the discovery error a refusal quotes.
+const agentVersionProbeErrorMaxBytes = 400
+
+// CachedAgentVersionProbeError returns what the last agent discovery recorded
+// when it found the connector's agent binary but could not read its version
+// because the binary did not run (for example a node script with no node on
+// PATH: "version probe exited 127: /usr/bin/env: node: No such file or
+// directory"). A refusal of the unversioned agent then names that cause
+// instead of an agent "holding its settings" (GAP-1167). It returns "" when
+// the cache has a version, records no binary, or records no error.
+func CachedAgentVersionProbeError(dataDir, connectorName string) string {
+	signal, ok := loadCachedAgentSignal(dataDir, connectorName)
+	if !ok || strings.TrimSpace(signal.Version) != "" || strings.TrimSpace(signal.BinaryPath) == "" {
+		return ""
+	}
+	detail := strings.Join(strings.Fields(signal.Error), " ")
+	if len(detail) <= agentVersionProbeErrorMaxBytes {
+		return detail
+	}
+	cut := agentVersionProbeErrorMaxBytes
+	for cut > 0 && !utf8.RuneStart(detail[cut]) {
+		cut--
+	}
+	return detail[:cut] + "..."
 }
 
 // CachedAgentNotFound reports whether the last agent discovery recorded in
