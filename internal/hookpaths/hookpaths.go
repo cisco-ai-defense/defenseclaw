@@ -2061,8 +2061,8 @@ func topLevelLinkDirectories(file *syntax.File, cwd, home string) (dirs map[*syn
 	}
 	dirs = make(map[*syntax.CallExpr]string)
 	for i, stmt := range statements {
-		// Every other call starts in its directory; a wrapper that moves
-		// the directory (env -C) moves it from there.
+		// Every call starts in its directory; a wrapper that moves the
+		// directory (env -C) moves it from there.
 		if call, ok := stmt.Cmd.(*syntax.CallExpr); ok && len(call.Args) > 0 {
 			dirs[call] = placed[i]
 		}
@@ -2078,10 +2078,14 @@ func topLevelLinkDirectories(file *syntax.File, cwd, home string) (dirs map[*syn
 // any cd, pushd or popd is elsewhere or dynamic, or a top-level program word
 // is not static.
 func topLevelStatementDirectories(file *syntax.File, cwd, home string) (statements []*syntax.Stmt, dirs []string, known bool) {
-	// all holds the flattened statements; enter and leave count the
-	// subshells that start or end at an index of all.
-	var all []*syntax.Stmt
-	enter, leave := map[int]int{}, map[int]int{}
+	// An enter or leave entry opens or closes a subshell: ( cd src && ln -s
+	// ../a.txt b ) runs its list from the directory it starts in, and its cd
+	// statements do not move the statements after it (GAP-2550).
+	type entry struct {
+		stmt         *syntax.Stmt
+		enter, leave bool
+	}
+	var all []entry
 	var flatten func(*syntax.Stmt)
 	flatten = func(stmt *syntax.Stmt) {
 		plain := len(stmt.Redirs) == 0 && !stmt.Background && !stmt.Negated
@@ -2091,22 +2095,25 @@ func topLevelStatementDirectories(file *syntax.File, cwd, home string) (statemen
 			flatten(pair.Y)
 			return
 		}
-		if subshell, ok := stmt.Cmd.(*syntax.Subshell); ok && plain {
-			enter[len(all)]++
-			for _, inner := range subshell.Stmts {
+		if sub, ok := stmt.Cmd.(*syntax.Subshell); ok && plain {
+			all = append(all, entry{enter: true})
+			for _, inner := range sub.Stmts {
 				flatten(inner)
 			}
-			leave[len(all)]++
+			all = append(all, entry{leave: true})
 			return
 		}
-		all = append(all, stmt)
+		all = append(all, entry{stmt: stmt})
 	}
 	for _, stmt := range file.Stmts {
 		flatten(stmt)
 	}
 	topLevel := make(map[*syntax.CallExpr]bool)
-	for _, stmt := range all {
-		if call, ok := stmt.Cmd.(*syntax.CallExpr); ok && !stmt.Background {
+	for _, e := range all {
+		if e.stmt == nil {
+			continue
+		}
+		if call, ok := e.stmt.Cmd.(*syntax.CallExpr); ok && !e.stmt.Background {
 			topLevel[call] = true
 		}
 	}
@@ -2125,14 +2132,17 @@ func topLevelStatementDirectories(file *syntax.File, cwd, home string) (statemen
 		return nil, nil, false
 	}
 	dir := cwd
-	var saved []string
-	for index, stmt := range all {
-		for n := leave[index]; n > 0; n-- {
-			dir, saved = saved[len(saved)-1], saved[:len(saved)-1]
+	var outer []string
+	for _, e := range all {
+		switch {
+		case e.enter:
+			outer = append(outer, dir)
+			continue
+		case e.leave:
+			dir, outer = outer[len(outer)-1], outer[:len(outer)-1]
+			continue
 		}
-		for n := enter[index]; n > 0; n-- {
-			saved = append(saved, dir)
-		}
+		stmt := e.stmt
 		call, ok := stmt.Cmd.(*syntax.CallExpr)
 		if !ok || len(call.Args) == 0 {
 			statements, dirs = append(statements, stmt), append(dirs, dir)
@@ -3875,7 +3885,17 @@ func (l shellLinks) resolveUntil(path string, protected protectedFiles, stop fun
 				}
 				linked, ok := target(next)
 				if !ok {
-					return "", false
+					// A target that climbs out of a directory missing now
+					// (cd src && ln -s ../a.txt b before src exists) reads
+					// through it as a plain directory (GAP-2550).
+					collapsed, plain := l.collapseMissingDirectories(next)
+					if !plain {
+						return "", false
+					}
+					if linked, ok = target(collapsed); !ok {
+						return "", false
+					}
+					next = collapsed
 				}
 				if stop(linked) {
 					return linked, true
@@ -3885,6 +3905,64 @@ func (l shellLinks) resolveUntil(path string, protected protectedFiles, stop fun
 		}
 	}
 	return resolved, true
+}
+
+// collapseMissingDirectories removes each "name/.." pair of an absolute link
+// target whose name is a directory missing when the hook runs. The link the
+// command makes lives in that directory, so the directory exists before the
+// link does; when no link the command makes names it or a directory above it
+// and no link operation of the command is unreadable, it is a plain
+// directory and its ".." is the directory above it: cd src && ln -s ../a.txt
+// b names <cwd>/a.txt whether src exists yet or not (GAP-2550). Any other
+// ".." keeps the physical walk. ok is false when nothing was removed.
+func (l shellLinks) collapseMissingDirectories(path string) (string, bool) {
+	if !l.known || l.opaque || !filepath.IsAbs(path) {
+		return "", false
+	}
+	volume := filepath.VolumeName(path)
+	separator := string(filepath.Separator)
+	join := func(parts []string) string {
+		return volume + separator + strings.Join(parts, separator)
+	}
+	var kept []string
+	changed := false
+	for _, part := range strings.Split(filepath.ToSlash(strings.TrimPrefix(path, volume)), "/") {
+		switch part {
+		case "", ".":
+			continue
+		case "..":
+			if n := len(kept); n > 0 && kept[n-1] != ".." && l.missingPlainDirectory(join(kept)) {
+				kept, changed = kept[:n-1], true
+				continue
+			}
+		}
+		kept = append(kept, part)
+	}
+	if !changed {
+		return "", false
+	}
+	return join(kept), true
+}
+
+// missingPlainDirectory reports a directory that does not exist when the
+// hook runs and that no link the command makes names, itself or through a
+// directory above it.
+func (l shellLinks) missingPlainDirectory(dir string) bool {
+	resolved, ok := resolveWritePath(dir, 0)
+	if !ok {
+		return false
+	}
+	if _, err := os.Lstat(resolved); !os.IsNotExist(err) {
+		return false
+	}
+	for _, alias := range l.aliases {
+		for _, form := range []string{dir, resolved} {
+			if _, under := cutPathPrefix(form, alias.name); under {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 // cutPathPrefix returns the rest of path under prefix. Names compare without
