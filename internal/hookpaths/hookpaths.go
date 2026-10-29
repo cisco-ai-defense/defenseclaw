@@ -1520,6 +1520,11 @@ type shellLinks struct {
 	globalOpaque     bool
 	opaqueScopes     []opaqueScope
 	copyDestinations []string
+	// renames, cds and copyScopes are the facts of the command that decide
+	// at the end whether its links stay known; a caller reading a nested
+	// literal shell body carries them out to its own links (GAP-2526).
+	renames, cds bool
+	copyScopes   []string
 }
 
 // merge adds the links a nested literal shell body makes.
@@ -1800,7 +1805,14 @@ func commandLinksWithFacts(command, cwd, home string, facts map[string]string, r
 			// in the same directory: read the body as that command, so its
 			// links are known (or opaque) exactly as they would be written
 			// plain (GAP-2526).
-			links.merge(commandLinksWithFacts(literalShellBody(program, words, static), cwd, home, facts, record))
+			// Renames and link-copying archives in the body also act on
+			// links made outside it (a top-level link renamed by sh -c
+			// "mv c d"), so they count as facts of this command too.
+			inner := commandLinksWithFacts(literalShellBody(program, words, static), cwd, home, facts, record)
+			links.merge(inner)
+			renames = renames || inner.renames
+			cds = cds || inner.cds
+			copyScopes = append(copyScopes, inner.copyScopes...)
 		default:
 			// A wrapper (sudo, env, xargs, find -exec, sh -c) may run one.
 			text := command[start.Offset():call.End().Offset()]
@@ -1834,6 +1846,7 @@ func commandLinksWithFacts(command, cwd, home string, facts map[string]string, r
 	if cds && len(links.opaqueScopes) > 0 {
 		links.globalOpaque = true
 	}
+	links.renames, links.cds, links.copyScopes = renames, cds, copyScopes
 	return links
 }
 

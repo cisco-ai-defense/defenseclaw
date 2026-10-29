@@ -55,6 +55,13 @@ func TestR105ShellBodyLinkReadsAsThePlainLink(t *testing.T) {
 		{`sh -c "ln -s ~/.defenseclaw/config.yaml c && cp a.txt c"`, true},
 		{`ln -s ~/.ssh/authorized_keys k && sh -c "echo x >> k"`, true},
 		{`cp a.txt ~/.defenseclaw/config.yaml; cp`, true},
+		// RV-c1-1: a link made outside the body and renamed inside it is
+		// still the protected target under its new name.
+		{`ln -s ~/.defenseclaw/config.yaml c; sh -c "mv c d"; echo x > d`, true},
+		{`ln -s ~/.defenseclaw/config.yaml c; bash -c "rename c d c"; echo x > d`, true},
+		{`ln -s ~/.defenseclaw/config.yaml c; sh -c "mv c d; echo x > d"`, true},
+		{`ln -s ~/.defenseclaw/config.yaml c; sh -c "mv -f c d"; cp a.txt d`, true},
+		{`ln -s ~/.defenseclaw c; sh -c "mv c d"; echo x > d/config.yaml`, true},
 	}
 	for _, connectorName := range []string{"claudecode", "codex"} {
 		installDefaultProfileConnector(t, connectorName)
