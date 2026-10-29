@@ -8,6 +8,7 @@ import (
 	"bytes"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"io/fs"
 	"maps"
 	"os"
@@ -69,6 +70,14 @@ const SourceLinkFactPrefix = "\x00source-link:"
 // in place of its incomplete walk. A name lexically inside a scope stays
 // opaque, and a missing fact leaves the operand unknown.
 const OpaqueScopeFactPrefix = "\x00opaque-scope:"
+
+// ReplacedLinkFactPrefix keys a write operand that a plain move replaces:
+// an existing link to a file (or a dangling one) that mv renames over, so
+// the file the link names is not written and the map entry of the operand
+// is the link entry itself (movedOntoLinkEntries, GAP-2558). "1" is the
+// only value. A gateway that cannot walk the user home reads it only for an
+// operand its own facts place as such a move destination.
+const ReplacedLinkFactPrefix = "\x00replaced-link:"
 
 // GlobFactPrefix keys the hook client's expansion of one pathname pattern
 // that the action target scan checks, by the absolute pattern. "0" means the
@@ -932,6 +941,12 @@ func ResolveConnector(connector, surface, event string, payload []byte) string {
 			}
 		}
 	}
+	// A move onto an existing link to a file replaces the link: those
+	// entries are described as the entry itself (GAP-2558).
+	var replacedLinks map[string]bool
+	if links.known && !links.opaque && len(links.aliases) == 0 {
+		replacedLinks = movedOntoLinkEntries(facts)
+	}
 	targets := map[string]string{CWDKey: cwd}
 	// The fixed part counts the truncation marker, so setting it never
 	// exceeds the budget.
@@ -983,7 +998,15 @@ func ResolveConnector(connector, surface, event string, payload []byte) string {
 				opaqueFacts[OpaqueScopeFactPrefix+resolutionPath] = fact
 			}
 		}
-		if ok && aliasKnown && !protected.has(resolved) {
+		entryOnly := false
+		if replacedLinks[path] {
+			// mv replaces the link entry: only its directory is followed,
+			// the file the link names is not written (GAP-2558).
+			if parent, parentOK := ResolveWriteTarget(filepath.Dir(path)); parentOK {
+				resolved, ok, entryOnly = filepath.Join(parent, filepath.Base(path)), true, true
+			}
+		}
+		if ok && aliasKnown && !entryOnly && !protected.has(resolved) {
 			// Only the directory is followed: a link that is the final name
 			// may be replaced, not followed (sed -i on the link).
 			if state, inState := links.stateTarget(filepath.Dir(resolutionPath), home, protected); inState {
@@ -1000,7 +1023,14 @@ func ResolveConnector(connector, surface, event string, payload []byte) string {
 		}
 		size += entry
 		targets[path] = resolved
-		if resolved != "" {
+		if entryOnly {
+			key := ReplacedLinkFactPrefix + path
+			if cost := len(jsonString(key)) + 1 + len(jsonString("1")) + 1; size+cost <= maxEncodedTargets {
+				targets[key] = "1"
+				size += cost
+			}
+		}
+		if resolved != "" && !entryOnly {
 			// Protection follows the file: a symlink, a hard link, a case or
 			// short-name variant of an instruction file, and the physical
 			// file a symlinked one reaches (GAP-0869, GAP-0971).
@@ -1501,6 +1531,10 @@ func Decode(value string) (map[string]string, bool) {
 			!filepath.IsAbs(strings.TrimPrefix(key, OpaqueScopeFactPrefix))) {
 			return nil, false
 		}
+		if strings.HasPrefix(key, ReplacedLinkFactPrefix) && (value != "1" ||
+			!filepath.IsAbs(strings.TrimPrefix(key, ReplacedLinkFactPrefix))) {
+			return nil, false
+		}
 		if strings.HasPrefix(key, GlobFactPrefix) && (value != "0" && value != "1" ||
 			!filepath.IsAbs(strings.TrimPrefix(key, GlobFactPrefix))) {
 			return nil, false
@@ -1530,6 +1564,81 @@ func pathFactIsRedirect(candidate actionfacts.PathFact, commands []actionfacts.C
 		}
 	}
 	return false
+}
+
+// movedOntoLinkEntries lists the destinations of a plain move (mv, with
+// no write, append or copy in the same command) that are an existing
+// symbolic link to a file or a dangling one: rename(2) replaces the link
+// entry and leaves the file it names untouched, so mv a.txt c with c a
+// user link to ~/.defenseclaw/config.yaml writes c, not the state file
+// (GAP-2558). A managed gateway behind ProtectHome judges the move from
+// the client map, which otherwise followed the final link. A destination
+// that another writer of the command also names (cp, a redirect), a
+// trailing separator, a link to a directory (the move lands inside it) or
+// a link whose target cannot be read is not listed.
+func movedOntoLinkEntries(facts actionfacts.Facts) map[string]bool {
+	var out map[string]bool
+	for path := range PlainMoveDestinations(facts) {
+		info, err := os.Lstat(path)
+		if err != nil || info.Mode()&os.ModeSymlink == 0 {
+			continue
+		}
+		if target, err := os.Stat(path); err == nil && target.IsDir() || err != nil && !errors.Is(err, fs.ErrNotExist) {
+			continue
+		}
+		if out == nil {
+			out = map[string]bool{}
+		}
+		out[path] = true
+	}
+	return out
+}
+
+// PlainMoveDestinations lists, from the facts alone, the absolute move
+// destinations of a plain mv (no write, append or copy operation in the
+// same command, no trailing separator) that no other writer of the action
+// names.
+func PlainMoveDestinations(facts actionfacts.Facts) map[string]bool {
+	moved := map[string]bool{}
+	written := map[string]bool{}
+	for _, candidate := range facts.Paths {
+		if candidate.Access != actionfacts.PathAccessWrite && candidate.Access != actionfacts.PathAccessAppend {
+			continue
+		}
+		path := candidate.Resolved
+		if path == "" {
+			path = candidate.Normalized
+		}
+		if !filepath.IsAbs(path) {
+			continue
+		}
+		path = filepath.Clean(path)
+		value := filepath.ToSlash(candidate.Value)
+		plainMove := candidate.Access == actionfacts.PathAccessWrite &&
+			!strings.HasSuffix(value, "/") && !strings.HasSuffix(value, "/.") &&
+			!pathFactIsRedirect(candidate, facts.Commands)
+		if plainMove {
+			plainMove = false
+			for _, command := range facts.Commands {
+				if command.ID == candidate.CommandID {
+					plainMove = slices.Contains(command.Operations, actionfacts.OperationMove) &&
+						!slices.Contains(command.Operations, actionfacts.OperationWrite) &&
+						!slices.Contains(command.Operations, actionfacts.OperationAppend) &&
+						!slices.Contains(command.Operations, actionfacts.OperationCopy)
+					break
+				}
+			}
+		}
+		if plainMove {
+			moved[path] = true
+		} else {
+			written[path] = true
+		}
+	}
+	for path := range written {
+		delete(moved, path)
+	}
+	return moved
 }
 
 // Programs that create a link from their operands: ln and link always, cp

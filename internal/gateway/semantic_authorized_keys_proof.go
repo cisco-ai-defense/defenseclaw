@@ -1033,8 +1033,23 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 		// An incomplete map keeps its marker and the client's cwd, so an
 		// operand the client omitted is placed and denied as it is for Codex.
 		var scoped map[string]string
+		// A plain move onto an existing link to a file replaces the link:
+		// the client described that entry, which decides it (GAP-2558).
+		var plainMoves map[string]bool
 		for operand, resolved := range request.ResolvedWriteTargets {
 			directoryFact := strings.HasPrefix(operand, hookpaths.DirectoryFactPrefix)
+			if resolved != "" && !directoryFact && request.ResolvedWriteTargets[hookpaths.ReplacedLinkFactPrefix+operand] == "1" {
+				if plainMoves == nil {
+					plainMoves = hookpaths.PlainMoveDestinations(facts)
+				}
+				if plainMoves[operand] {
+					if scoped == nil {
+						scoped = make(map[string]string)
+					}
+					scoped[operand] = resolved
+					continue
+				}
+			}
 			if strings.HasPrefix(operand, "/proc/self/cwd/") ||
 				strings.HasPrefix(operand, hookpaths.SourceLinkFactPrefix) ||
 				directoryFact && (changedDirectory ||
