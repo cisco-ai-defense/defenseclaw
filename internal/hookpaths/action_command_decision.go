@@ -99,6 +99,9 @@ func actionConcreteProtectedWriteOn(command, cwd, home string, windowsHome bool)
 	if command == "" || home == "" || actionWindowsHome(home) && !windowsHome || !filepath.IsAbs(cwd) {
 		return false
 	}
+	if !windowsHome && actionMoveProtectedEntry(command, cwd, home) {
+		return true
+	}
 	protected := newProtectedFiles(home)
 	ssh := filepath.Join(home, ".ssh")
 	writes, _, _ := ShellWriteOperands(command, cwd, home)
