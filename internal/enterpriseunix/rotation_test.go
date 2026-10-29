@@ -463,3 +463,25 @@ func TestRotateCredentialsWithoutAKeyIsANoop(t *testing.T) {
 		t.Fatalf("rotation without a key: noop=%v reason=%q", r.Noop, r.NoopReason)
 	}
 }
+
+// GAP-2504: until the 1.0.5 enumerator rewrites targets.yaml after an
+// upgrade from 1.0.3, it still lists the OmniGent/OpenHands rows the guardian
+// skips. The roster check skips them too, so verify does not report the
+// attestation of the guardian as short of those rows.
+func TestRosterProblemSkipsTheRowsOfRemovedConnectors(t *testing.T) {
+	manifest := enterprisehooks.Manifest{Targets: []enterprisehooks.ManifestTarget{
+		{User: "alice", Connector: "omnigent"},
+		{User: "alice", Connector: "hermes"},
+		{User: "bob", Connector: "openhands"},
+	}}
+	attestation := enterprisehooks.CredentialAttestation{Targets: []enterprisehooks.CredentialAttestationTarget{
+		{User: "alice", Connector: "hermes", UID: -1},
+	}}
+	if problem := rosterProblem(manifest, attestation); problem != "" {
+		t.Fatalf("rosterProblem = %q, want none", problem)
+	}
+	manifest.Targets = append(manifest.Targets, enterprisehooks.ManifestTarget{User: "bob", Connector: "codex"})
+	if problem := rosterProblem(manifest, attestation); problem == "" {
+		t.Fatal("a missing codex row was not reported")
+	}
+}
