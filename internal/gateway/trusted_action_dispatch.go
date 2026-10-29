@@ -838,7 +838,11 @@ func withActiveStateTargetMention(
 	if !known {
 		return findings
 	}
-	if !hookpaths.ActionStateTargetMention(command, request.Input.CWD, request.Input.ActiveHome) {
+	if provenLinkedStateWrite(facts, request) {
+		// A write through a link the command makes to active state: the
+		// mention scan and the whole-action proof do not follow the new
+		// link (GAP-2522).
+	} else if !hookpaths.ActionStateTargetMention(command, request.Input.CWD, request.Input.ActiveHome) {
 		// Behind ProtectHome the gateway cannot open the user's home, so the
 		// mention scan cannot place a home target. A redirect target the
 		// shell opens is still proven against the hook client's resolved
@@ -1043,6 +1047,79 @@ func provenStateMutationPath(facts actionfacts.Facts, request trustedActionReque
 		}
 		candidate.Resolved = physical
 		if matchesActiveDefenseClawState(projected, candidate) {
+			return true
+		}
+	}
+	return false
+}
+
+// provenLinkedStateWrite reports a command whose writer, proven for its
+// own command, writes through a link that an earlier part of the same
+// command makes to active DefenseClaw state: ln -s ~/.defenseclaw hc;
+// cp a.txt hc/config.yaml, plain or behind a prefix wrapper (GAP-2522).
+// The analysis marks such an action partial (a new link makes later
+// targets unknown), so the whole-action proof never holds for it; the
+// link reading here is the proof. A write that only may run (after &&)
+// counts, as the ~/.ssh alias does.
+func provenLinkedStateWrite(facts actionfacts.Facts, request trustedActionRequest) bool {
+	if request.Input.DialectHint != actionfacts.DialectPOSIX && request.Input.DialectHint != "" {
+		return false
+	}
+	text, known := trustedBashCommandInput(request.Input)
+	if !known || !strings.Contains(text, "ln") && !strings.Contains(text, "link") && !strings.Contains(text, "cp") {
+		return false
+	}
+	projected := facts.EnforcementProjection()
+	if projected.ActiveHome == "" {
+		return false
+	}
+	var links *hookpaths.Links
+	for _, candidate := range projected.Paths {
+		command, ok := integrityCommandByID(projected, candidate.CommandID)
+		if !ok || !stateCommandMutatesPath(command, candidate) {
+			continue
+		}
+		if links == nil {
+			made := hookpaths.CommandLinks(request.Input.Tool, text, request.Input.CWD, projected.ActiveHome)
+			links = &made
+		}
+		if linkedActiveStateWrite(projected, command, candidate, *links) {
+			return true
+		}
+	}
+	return false
+}
+
+// linkedActiveStateWrite reports a write operand that reaches active
+// state through a link the same command makes: ln -s ~/.defenseclaw hc;
+// cp a.txt hc/config.yaml writes ~/.defenseclaw/config.yaml, plain or
+// behind a prefix wrapper, as the ~/.ssh alias reaches authorized_keys
+// (GAP-1521, GAP-2522). The link does not exist when the hook runs, so
+// the name is followed through the links of the same command only. ln,
+// a delete or a move acts on the final name: only a link to one of its
+// directories is followed.
+func linkedActiveStateWrite(
+	projected actionfacts.Facts,
+	command actionfacts.CommandFact,
+	candidate actionfacts.PathFact,
+	links hookpaths.Links,
+) bool {
+	value := candidate.Resolved
+	if value == "" {
+		value = candidate.Normalized
+	}
+	if !filepath.IsAbs(value) {
+		return false
+	}
+	// ln, a delete and a move replace or remove the final name itself.
+	entry := candidate.Access == actionfacts.PathAccessDelete ||
+		slices.Contains([]string{"ln", "link", "gln", "glink"}, filepath.Base(command.Program)) ||
+		candidate.Access == actionfacts.PathAccessWrite && hasOperation(command, actionfacts.OperationMove) &&
+			!hasAnyOperation(command, actionfacts.OperationWrite, actionfacts.OperationAppend, actionfacts.OperationCopy)
+	for _, target := range links.AliasTargets(value, entry) {
+		linked := candidate
+		linked.Resolved = target
+		if matchesActiveDefenseClawState(projected, linked) {
 			return true
 		}
 	}

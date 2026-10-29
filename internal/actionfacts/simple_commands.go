@@ -675,19 +675,31 @@ func uniqueSimpleStates(states []simpleShellState) []simpleShellState {
 //
 // local HOME=v counts only in a function body, until the body ends: bash
 // refuses local outside a function (HOME is unchanged), and the caller
-// HOME is back once the function returns (RV-pod2-2).
+// HOME is back once the function returns (RV-pod2-2). declare and typeset
+// without -g in a function body are local too; export, readonly and
+// declare -g there set the caller HOME (checker p3i3 D01-D21).
 func updateSimpleDeclVariables(state *simpleShellState, decl *syntax.DeclClause, scope string) {
 	if decl == nil || decl.Variant == nil {
 		return
 	}
 	vars := state.vars
+	local := false
 	switch decl.Variant.Value {
-	case "export", "readonly", "declare", "typeset":
+	case "export", "readonly":
+	case "declare", "typeset":
+		// In a function body declare and typeset make the name local
+		// unless -g is given (bash, ksh); at the top level they set it.
+		local = simpleFunctionBodyScope(scope) != "" && !simpleDeclGlobal(decl)
 	case "local":
-		body := simpleFunctionBodyScope(scope)
-		if body == "" {
+		if simpleFunctionBodyScope(scope) == "" {
 			return
 		}
+		local = true
+	default:
+		return
+	}
+	if local {
+		body := simpleFunctionBodyScope(scope)
 		declaresHome := slices.ContainsFunc(decl.Args, func(assign *syntax.Assign) bool {
 			return assign != nil && assign.Name != nil && assign.Name.Value == "HOME"
 		})
@@ -695,8 +707,6 @@ func updateSimpleDeclVariables(state *simpleShellState, decl *syntax.DeclClause,
 			home, known := vars["HOME"]
 			state.homeLocals = append(state.homeLocals, simpleHomeLocal{scope: body, home: home, known: known})
 		}
-	default:
-		return
 	}
 	known := true
 	for _, assign := range decl.Args {
@@ -724,6 +734,20 @@ func updateSimpleDeclVariables(state *simpleShellState, decl *syntax.DeclClause,
 		}
 		updateSimpleVariables(vars, []*syntax.Assign{assign})
 	}
+}
+
+// simpleDeclGlobal reports a static -g option word of a declaration.
+func simpleDeclGlobal(decl *syntax.DeclClause) bool {
+	for _, assign := range decl.Args {
+		if assign == nil || assign.Name != nil || assign.Value == nil {
+			continue
+		}
+		option := projectPOSIXWord(assign.Value)
+		if !option.Expands && strings.HasPrefix(option.Value, "-") && strings.ContainsRune(option.Value[1:], 103) {
+			return true
+		}
+	}
+	return false
 }
 
 // simpleScopeStates returns the states of scope: its own, or copies of

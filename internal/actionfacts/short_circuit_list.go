@@ -629,6 +629,11 @@ func simpleExportedFunctionNames(decl *syntax.DeclClause) ([]string, bool) {
 			values = append(values, arg.Name.Value)
 			continue
 		}
+		if arg.Name != nil {
+			// NAME=value sets a variable; it exports no function (export
+			// HOME=v in a function body, GAP-2476).
+			continue
+		}
 		if arg.Name == nil && arg.Value != nil {
 			value, known := simpleStaticWord(arg.Value, nil)
 			if !known {
@@ -659,9 +664,8 @@ func simpleExportedFunctionNames(decl *syntax.DeclClause) ([]string, bool) {
 				exportAttribute = true
 			} else if flag == 'n' {
 				unexport = true
-			} else if !strings.ContainsRune("np", flag) {
-				return nil, false
 			}
+			// Another attribute (-g, -r, -p, ...) exports no function.
 		}
 		index++
 	}
