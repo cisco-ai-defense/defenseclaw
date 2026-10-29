@@ -264,3 +264,33 @@ func TestExecRunnersWriteWhatThePlainCallWrites(t *testing.T) {
 	})
 }
 
+// export, declare and typeset of HOME in a function body went unread when
+// the action also defined a function (the exported-function reading
+// refused an assignment word), and declare or typeset without -g there
+// set the caller HOME, while bash makes it local to the body (checker
+// p3i3 D01-D04c, D12, D18, D21, GAP-2476).
+func TestHomeDeclarationInAFunctionBody(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX shell spellings")
+	}
+	judgeHomeStateWriteRows(t, []homeStateWriteRow{
+		{"f(){ declare HOME=/tmp/x; }; f; cp a.txt ~/.defenseclaw/config.yaml", true},
+		{"f(){ typeset HOME=/tmp/x; }; f; cp a.txt ~/.defenseclaw/config.yaml", true},
+		{"f(){ declare -x HOME=/tmp/x; }; f; cp a.txt ~/.defenseclaw/config.yaml", true},
+		{"f(){ declare -r HOME=/tmp/x; }; f; cp a.txt ~/.defenseclaw/config.yaml", true},
+		{"f(){ declare HOME=/tmp/x; }; f; cp a.txt ~/.defenseclaw/hooks/x.sh", true},
+		{"f(){ typeset -x HOME=/tmp/x; }; f; mv a.txt ~/.defenseclaw/config.yaml", true},
+		{"f(){ declare HOME=$HOME/.defenseclaw; cp a.txt ~/config.yaml; }; f", true},
+		{"f(){ export HOME=$HOME/.defenseclaw; cp a.txt ~/config.yaml; }; f", true},
+		{"f(){ declare -g HOME=$HOME/.defenseclaw; }; f; cp a.txt ~/config.yaml", true},
+		{"f(){ export HOME=$HOME/.defenseclaw; }; f; cp a.txt ~/config.yaml", true},
+		{"f(){ readonly HOME=$HOME/.defenseclaw; }; f; cp a.txt ~/config.yaml", true},
+		{"declare HOME=$HOME/.defenseclaw; cp a.txt ~/config.yaml", true},
+		{"f(){ export HOME=/tmp/x; cp a.txt ~/.defenseclaw/config.yaml; }; f", false},
+		{"f(){ declare -g HOME=/tmp/x; }; f; cp a.txt ~/.defenseclaw/config.yaml", false},
+		{"f(){ declare HOME=/tmp/x; cp a.txt ~/.defenseclaw/config.yaml; }; f", false},
+		{"declare HOME=/tmp/x; cp a.txt ~/out.txt", false},
+		{"f(){ declare -x HOME=$(mktemp -d); cp a.txt ~/out.txt; }; f", false},
+		{"f(){ export FOO=1; cp a.txt ~/project/out.txt; }; f", false},
+	})
+}
