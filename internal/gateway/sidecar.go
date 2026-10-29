@@ -8002,13 +8002,16 @@ func unversionedAgentAdmissionError(dataDir, name, agentVersion, reason string) 
 // connector names. Only a cause an open agent can explain tells the user to
 // close it. An agent discovery could not find or read names its own fix
 // (GAP-1167, GAP-2479, GAP-2520), and an agent that answered a setup probe
-// too slowly is started once first (GAP-2520).
+// too slowly is started once first (GAP-2520). An agent installed where
+// another account can write is reinstalled, not closed (GAP-2479).
 func refreshRefusalNextStep(err error) string {
 	switch {
 	case errors.As(err, new(agentVersionUnread)):
 		return ", then run: defenseclaw upgrade"
 	case errors.Is(err, connector.ErrAgentVersionProbeTimeout):
 		return "; the agent answered too slowly (a cold first start or a busy host): start it once from this account and let it finish, then run: defenseclaw upgrade"
+	case errors.Is(err, connector.ErrAgentInstallNotTrusted):
+		return "; the agent is installed where another account can write: install it where only administrators or this account can write, or remove that write access, then run: defenseclaw upgrade"
 	default:
 		return "; close the agent holding its settings, then run: defenseclaw upgrade"
 	}

@@ -273,10 +273,10 @@ func validateCodexPolicyExecutable(opts SetupOpts) (string, error) {
 		return "", fmt.Errorf("selected Codex executable is not a regular non-link file: %s", executable)
 	}
 	if err := hookAPIValidateDirectory(filepath.Dir(executable)); err != nil {
-		return "", fmt.Errorf("validate selected Codex executable ancestry: %w", err)
+		return "", agentInstallNotTrusted(fmt.Errorf("validate selected Codex executable ancestry: %w", err))
 	}
 	if err := hookAPIValidateOwner(executable, info); err != nil {
-		return "", fmt.Errorf("validate selected Codex executable ACL: %w", err)
+		return "", agentInstallNotTrusted(fmt.Errorf("validate selected Codex executable ACL: %w", err))
 	}
 	stablePath, digest, ok := setupSelectedAgentExecutableEvidence(executable)
 	if !ok || !sameCodexExecutablePath(stablePath, executable) {

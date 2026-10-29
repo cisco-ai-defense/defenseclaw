@@ -394,6 +394,7 @@ func TestRefreshOfAnAgentThatDidNotRunNamesTheCauseNotAnOpenAgent(t *testing.T) 
 func TestRefreshOfAnAbsentOrSlowAgentDoesNotSayCloseIt(t *testing.T) {
 	const closeIt = "close the agent holding its settings"
 	slowRead := fmt.Errorf("inspect effective Codex managed requirements: /opt/dc-agents/bin/codex configRequirements/read: timed out waiting for response 1: %w (%w)", context.DeadlineExceeded, connector.ErrAgentVersionProbeTimeout)
+	untrustedInstall := fmt.Errorf("validate selected Codex executable ancestry: untrusted Windows principal S-1-1-0 has write-like access mask 0x1301bf on C:\\Users\\u\\AppData\\Roaming\\npm (%w)", connector.ErrAgentInstallNotTrusted)
 	for name, tc := range map[string]struct {
 		notFound bool
 		setupErr error
@@ -409,6 +410,13 @@ func TestRefreshOfAnAbsentOrSlowAgentDoesNotSayCloseIt(t *testing.T) {
 			setupErr: slowRead,
 			want:     []string{"configRequirements/read", "the agent answered too slowly", "start it once from this account"},
 			unwanted: []string{closeIt},
+		},
+		// GAP-2479: Windows per-user Codex in an npm tree another account
+		// can write; the step is the install, not closing the agent.
+		"agent installed where another account can write": {
+			setupErr: fmt.Errorf("inspect effective Codex managed requirements: %w", untrustedInstall),
+			want:     []string{"untrusted Windows principal S-1-1-0", "install it where only administrators or this account can write"},
+			unwanted: []string{closeIt, "answered too slowly", "runtime on PATH"},
 		},
 		"settings write an open agent can block": {
 			setupErr: errors.New("write /Users/u/.claude/settings.json: resource busy"),
