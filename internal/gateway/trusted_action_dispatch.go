@@ -838,10 +838,10 @@ func withActiveStateTargetMention(
 	if !known {
 		return findings
 	}
-	if provenLinkedStateWrite(facts, request) {
+	if provenLinkedStateWrite(facts, request) || provenFollowedInPlaceStateWrite(facts, request) {
 		// A write through a link the command makes to active state: the
 		// mention scan and the whole-action proof do not follow the new
-		// link (GAP-2522).
+		// link (GAP-2522), nor read sed -i --follow-symlinks (GAP-2529).
 	} else if !hookpaths.ActionStateTargetMention(command, request.Input.CWD, request.Input.ActiveHome) {
 		// Behind ProtectHome the gateway cannot open the user's home, so the
 		// mention scan cannot place a home target. A redirect target the
@@ -1127,6 +1127,67 @@ func placedLinkedStateWrite(request trustedActionRequest, text, home string, lin
 		}
 		for _, operand := range hookpaths.InPlaceEditOperands(statement.Command, statement.Dir, home) {
 			for _, target := range links.AliasTargets(operand, true) {
+				written := actionfacts.PathFact{
+					Access: actionfacts.PathAccessWrite, Flavor: actionfacts.PathFlavorPOSIX,
+					Value: target, Normalized: target, Absolute: true, Resolved: target,
+				}
+				if matchesActiveDefenseClawState(projected, written) {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
+// provenFollowedInPlaceStateWrite reports sed -i --follow-symlinks (gsed
+// too) whose operand is active DefenseClaw state, directly, through an
+// existing link or through a link the same command makes: GNU sed then
+// rewrites the file the link names instead of replacing the link
+// (GAP-2529). The facts leave --follow-symlinks partial, so no path proof
+// holds for it. Without --follow-symlinks sed replaces a link entry and the
+// state file is untouched, which the GAP-2522 entry reading keeps.
+func provenFollowedInPlaceStateWrite(facts actionfacts.Facts, request trustedActionRequest) bool {
+	if request.Input.DialectHint != actionfacts.DialectPOSIX && request.Input.DialectHint != "" {
+		return false
+	}
+	text, known := trustedBashCommandInput(request.Input)
+	if !known || !strings.Contains(text, "--follow-symlinks") {
+		return false
+	}
+	home := facts.EnforcementProjection().ActiveHome
+	if home == "" {
+		return false
+	}
+	statements, placed := hookpaths.TopLevelStatements(text, request.Input.CWD, home)
+	if !placed || len(statements) == 0 {
+		statements = []hookpaths.PlacedStatement{{Command: text, Dir: request.Input.CWD}}
+	}
+	links := hookpaths.CommandLinks(request.Input.Tool, text, request.Input.CWD, home)
+	for _, statement := range statements {
+		operands := hookpaths.FollowedInPlaceEditOperands(statement.Command, statement.Dir, home)
+		if len(operands) == 0 {
+			continue
+		}
+		input := request.Input
+		input.Args, input.Argv, input.Command, input.CWD = nil, nil, statement.Command, statement.Dir
+		projected := actionfacts.Analyze(input).EnforcementProjection()
+		if projected.ActiveHome == "" {
+			continue
+		}
+		for _, operand := range operands {
+			targets := append([]string{operand}, links.AliasTargets(operand, false)...)
+			if physical, found := request.ResolvedWriteTargets[operand]; found {
+				targets = append(targets, physical)
+			} else if !request.SkipLocalFilesystemResolution && !request.ProtectedHomeHook {
+				if physical, ok := hookpaths.ResolveWriteTarget(operand); ok {
+					targets = append(targets, physical)
+				}
+			}
+			for _, target := range targets {
+				if active, same := hookpaths.ResolveActiveStateHardlinkTarget(target, projected.ActiveHome); same {
+					target = active
+				}
 				written := actionfacts.PathFact{
 					Access: actionfacts.PathAccessWrite, Flavor: actionfacts.PathFlavorPOSIX,
 					Value: target, Normalized: target, Absolute: true, Resolved: target,

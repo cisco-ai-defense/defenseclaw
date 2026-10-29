@@ -225,7 +225,19 @@ func sedFollowsInPlaceLinks(words []string) bool {
 // parent directory. The editor replaces the directory entry; a caller that
 // follows the name through a link the same command makes to a directory
 // reads the file the edit replaces (GAP-2522).
-func InPlaceEditOperands(command, cwd, home string) (operands []string) {
+func InPlaceEditOperands(command, cwd, home string) []string {
+	return inPlaceEditOperands(command, cwd, home, false)
+}
+
+// FollowedInPlaceEditOperands lists the files a sed -i --follow-symlinks
+// (or gsed) call of the command edits, as absolute paths read in cwd. GNU
+// sed then rewrites the file a link names instead of replacing the link,
+// so a caller follows the operand name itself (GAP-2529).
+func FollowedInPlaceEditOperands(command, cwd, home string) []string {
+	return inPlaceEditOperands(command, cwd, home, true)
+}
+
+func inPlaceEditOperands(command, cwd, home string, followedOnly bool) (operands []string) {
 	file, ok := parseShell(command)
 	if !ok || !filepath.IsAbs(cwd) {
 		return nil
@@ -249,9 +261,13 @@ func InPlaceEditOperands(command, cwd, home string) (operands []string) {
 		var files []string
 		switch programBase(words[0]) {
 		case "sed", "gsed":
-			files = sedInPlaceFiles(words)
+			if !followedOnly || sedFollowsInPlaceLinks(words) {
+				files = sedInPlaceFiles(words)
+			}
 		case "perl":
-			files = perlInPlaceFiles(words)
+			if !followedOnly {
+				files = perlInPlaceFiles(words)
+			}
 		}
 		for _, name := range files {
 			if name != "" && !strings.ContainsAny(name, "\x00\r\n") {

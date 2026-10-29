@@ -94,3 +94,72 @@ func TestWriteThroughCommandLinkToActiveStateBlocks(t *testing.T) {
 		}
 	}
 }
+
+// GNU sed -i --follow-symlinks rewrites the file a link names, so the
+// operand is followed: directly, through an existing link, or through a
+// link the same command makes (GAP-2529). Plain sed -i on a link replaces
+// the link and leaves the state file alone.
+func TestSedFollowSymlinksToActiveStateBlocks(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX link forms")
+	}
+	home := t.TempDir()
+	cwd := filepath.Join(home, "project")
+	for _, dir := range []string{filepath.Join(home, ".defenseclaw", "hooks"), filepath.Join(cwd, "src")} {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, name := range []string{filepath.Join(home, ".defenseclaw", "config.yaml"),
+		filepath.Join(home, ".defenseclaw", "hooks", "x.sh"), filepath.Join(cwd, "a.txt"),
+		filepath.Join(cwd, "src", "n.txt")} {
+		if err := os.WriteFile(name, []byte("x\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.Symlink(filepath.Join(home, ".defenseclaw", "config.yaml"), filepath.Join(cwd, "oldcfg")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(cwd, "a.txt"), filepath.Join(cwd, "alink")); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", home)
+	rows := []struct {
+		command string
+		block   bool
+	}{
+		{"sed -i --follow-symlinks s/a/b/ ~/.defenseclaw/config.yaml", true},
+		{"sed -i --follow-symlinks s/a/b/ oldcfg", true},
+		{"ln -s ~/.defenseclaw/hooks/x.sh h; sed --follow-symlinks -i s/a/b/ h", true},
+		{"cd ~ && ln -s .defenseclaw/config.yaml c && sed -i --follow-symlinks s/a/b/ c", true},
+		{"ln -s ~/.defenseclaw/config.yaml cfg; sed -i --follow-symlinks s/a/b/ cfg", true},
+		{"ln -s ~/.defenseclaw hc; gsed -i --follow-symlinks s/a/b/ hc/config.yaml", true},
+		{"sed -i s/a/b/ ~/.defenseclaw/config.yaml", true},
+		{"ln -s ~/.defenseclaw/config.yaml c; truncate -s0 c", true},
+		// Controls: sed without --follow-symlinks replaces the link.
+		{"ln -s ~/.defenseclaw/config.yaml c; sed -i s/a/b/ c", false},
+		{"sed -i s/a/b/ oldcfg", false},
+		// Benign twins on project files.
+		{"sed -i --follow-symlinks s/a/b/ a.txt", false},
+		{"sed -i --follow-symlinks s/a/b/ alink", false},
+		{"ln -s src/n.txt n; sed -i --follow-symlinks s/a/b/ n", false},
+		{"ln -s src s; sed --follow-symlinks -i s/a/b/ s/n.txt", false},
+		{"sed --follow-symlinks -n 1p ~/.defenseclaw/config.yaml", false},
+	}
+	for _, connector := range []string{"claudecode", "codex"} {
+		installDefaultProfileConnector(t, connector)
+		for _, hint := range []actionfacts.Dialect{"", actionfacts.DialectPOSIX} {
+			for _, row := range rows {
+				input := actionfacts.Input{Tool: "Bash", Command: row.command, CWD: cwd, ActiveHome: home, DialectHint: hint}
+				findings := dispatchTrustedAction(t.Context(), trustedActionRequest{Input: input, Connector: connector, EnforcementCapable: true})
+				if blocked := buildVerdict(findings, "tool_call").Action == "block"; blocked != row.block {
+					ids := ""
+					for _, finding := range findings {
+						ids += finding.RuleID + " "
+					}
+					t.Errorf("%s hint=%q %q: block=%v, want %v (%s)", connector, hint, row.command, blocked, row.block, ids)
+				}
+			}
+		}
+	}
+}
