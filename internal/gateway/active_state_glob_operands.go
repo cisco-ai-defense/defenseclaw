@@ -49,18 +49,15 @@ func globbedStateMutation(facts actionfacts.Facts) bool {
 		if command.Effect == actionfacts.EffectPreview || command.Dialect != actionfacts.DialectPOSIX {
 			continue
 		}
-		// An unquoted -name/-path glob leaves find with no facts (GAP-2498).
-		if findGlobStateMutation(facts, command, dirs[index]) {
-			return true
-		}
 		words, ok := stateOperandWords(command)
-		if !ok {
-			continue
-		}
-		// A relative operand names a path in the directory the command
-		// runs in, after any earlier cd (pod check26).
-		if globbedStateCommandMutates(command, words, home, dirs[index]) {
-			return true
+		// A relative operand names a path in a directory the command may
+		// run in, after any earlier cd (pod check26, check27).
+		for _, dir := range dirs[index] {
+			// An unquoted -name/-path glob leaves find with no facts (GAP-2498).
+			if findGlobStateMutation(facts, command, dir) ||
+				ok && globbedStateCommandMutates(command, words, home, dir) {
+				return true
+			}
 		}
 	}
 	return false
@@ -77,6 +74,10 @@ func stateOperandWords(command actionfacts.CommandFact) ([]string, bool) {
 		value := argument.Value
 		if value == "" {
 			value = argument.StaticGlob
+		}
+		if value == "" {
+			// `$HOME/.defenseclaw`, `--work-tree="$HOME"` (pod check27).
+			value = argument.HomeSpelling()
 		}
 		words = append(words, value)
 	}
