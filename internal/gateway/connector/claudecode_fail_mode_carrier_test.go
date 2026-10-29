@@ -38,7 +38,12 @@ func TestClaudeCodePerUserSetupTakesBackTheFailModeCarrier(t *testing.T) {
 		// one this setup wrote (carrier recorded absent); the 1.0.3 gateway put
 		// the saved mode back.
 		{name: "an earlier release wrote back the saved mode", absent: true, current: "open"},
-		{name: "a different value after the absence stays", absent: true, current: "closed", want: "closed"},
+		// GAP-2460: a rollback to 1.0.4 (or 1.0.2) writes closed back under a
+		// saved open; the roll forward takes that back too.
+		{name: "an earlier release wrote back closed under a saved open", absent: true, current: "closed"},
+		{name: "an earlier release wrote back open under a saved closed", absent: true, current: "open",
+			opts: func(o SetupOpts) SetupOpts { o.HookFailMode = "closed"; return o }},
+		{name: "a value no release writes after the absence stays", absent: true, current: "CLOSED", want: "CLOSED"},
 		{name: "managed install keeps the administrator's mode",
 			opts: func(o SetupOpts) SetupOpts { o.ManagedEnterprise = true; o.HookFailMode = "open"; return o },
 			want: "open"},

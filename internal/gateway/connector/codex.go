@@ -1547,6 +1547,12 @@ type codexConfigBackup struct {
 	// [otel] block.
 	HadOtelBlock bool            `json:"had_otel_block"`
 	OriginalOtel json.RawMessage `json:"original_otel,omitempty"`
+	// OperatorOtel records the [otel] entries the last per-user Setup left,
+	// all of them the operator values once its own entries are gone. A
+	// rollback starts an older release that writes its whole [otel] table
+	// over them; the roll forward takes that render out and puts these back
+	// (GAP-2461).
+	OperatorOtel json.RawMessage `json:"operator_otel,omitempty"`
 	// HadNotify / OriginalNotify back up the operator's pristine
 	// notify = [...] entry.
 	HadNotify      bool            `json:"had_notify"`
@@ -1722,6 +1728,7 @@ func (c *CodexConnector) patchCodexConfig(opts SetupOpts, hookScript string) err
 	var transformed []byte
 	var backupToSave codexConfigBackup
 	adoptedNotify := false
+	otelRecordChanged := false
 	render := func(raw []byte) error {
 		cfg := map[string]interface{}{}
 		if len(raw) > 0 {
@@ -1866,7 +1873,21 @@ func (c *CodexConnector) patchCodexConfig(opts SetupOpts, hookScript string) err
 					return fmt.Errorf("load original Codex OTel config: %w", err)
 				}
 			}
+			// An older release that a rollback started wrote its whole [otel]
+			// table, with its own exporter, over the operator entries (GAP-2461).
+			earlierReleaseTable := codexOtelBlockLooksManaged(cfg["otel"], opts)
 			restoreCodexOtelEntries(cfg, original, opts)
+			if earlierReleaseTable {
+				putBackCodexOperatorOtel(cfg, original.OperatorOtel, opts)
+			}
+			otelRecordChanged = false
+			if record, changed := codexOperatorOtelRecord(cfg, original.OperatorOtel, opts); changed {
+				if backupExists && !adoptedNotify {
+					backupToSave = original
+				}
+				backupToSave.OperatorOtel = record
+				otelRecordChanged = true
+			}
 		}
 
 		// Codex hands its notify program the turn record (prompt, reply and
@@ -2011,7 +2032,7 @@ func (c *CodexConnector) patchCodexConfig(opts SetupOpts, hookScript string) err
 		if err := verifyTrustedCodexHookMatrix(persistedHooks, configPath, hooksDir, opts); err != nil {
 			return fmt.Errorf("verify persisted trusted DefenseClaw Codex hooks: %w", err)
 		}
-		if !backupExists || adoptedNotify {
+		if !backupExists || adoptedNotify || otelRecordChanged {
 			if err := c.saveConfigBackup(opts.DataDir, backupToSave); err != nil {
 				return fmt.Errorf("save codex config backup: %w", err)
 			}
@@ -4519,6 +4540,68 @@ func restoreCodexOtelEntries(cfg map[string]interface{}, backup codexConfigBacku
 	} else {
 		cfg["otel"] = current
 	}
+}
+
+// putBackCodexOperatorOtel puts the recorded operator [otel] entries back
+// after restoreCodexOtelEntries took the render of an older release out of the
+// table. A recorded entry the table no longer has comes back; an entry it
+// still has (an operator value, also one set while the older release ran)
+// stays as it is, and a recorded entry that carries a product credential
+// never comes back.
+func putBackCodexOperatorOtel(cfg map[string]interface{}, record json.RawMessage, opts SetupOpts) {
+	if len(record) == 0 {
+		return
+	}
+	var saved map[string]interface{}
+	if err := json.Unmarshal(record, &saved); err != nil || len(saved) == 0 {
+		return
+	}
+	dropCodexOtelCredentials(saved, otlpKnownProductTokens(opts, OTLPScopeCodex))
+	current, ok := cfg["otel"].(map[string]interface{})
+	if _, exists := cfg["otel"]; exists && !ok {
+		return
+	}
+	if current == nil {
+		current = map[string]interface{}{}
+	}
+	for key, value := range saved {
+		if _, exists := current[key]; !exists {
+			current[key] = value
+		}
+	}
+	if len(current) > 0 {
+		cfg["otel"] = current
+	}
+}
+
+// codexOperatorOtelRecord returns the record of the [otel] entries cfg holds
+// after Setup removed its own, and whether it differs from stored. No [otel]
+// table records nothing, so an operator who removes the table later does not
+// get it back.
+func codexOperatorOtelRecord(cfg map[string]interface{}, stored json.RawMessage, opts SetupOpts) (json.RawMessage, bool) {
+	var kept map[string]interface{}
+	if current, ok := cfg["otel"].(map[string]interface{}); ok && len(current) > 0 {
+		kept = maps.Clone(current)
+		dropCodexOtelCredentials(kept, otlpKnownProductTokens(opts, OTLPScopeCodex))
+	}
+	var previous map[string]interface{}
+	if len(stored) > 0 && json.Unmarshal(stored, &previous) != nil {
+		previous = nil
+	}
+	if len(kept) == 0 && len(previous) == 0 {
+		return nil, len(stored) > 0
+	}
+	if len(kept) > 0 && len(previous) > 0 && codexValueMatches(kept, previous) {
+		return stored, false
+	}
+	if len(kept) == 0 {
+		return nil, true
+	}
+	raw, err := json.Marshal(kept)
+	if err != nil {
+		return stored, false
+	}
+	return raw, true
 }
 
 // dropCodexOtelCredentials deletes every [otel] entry whose value carries a
