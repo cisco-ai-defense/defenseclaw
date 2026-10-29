@@ -1141,18 +1141,21 @@ func placedLinkedStateWrite(request trustedActionRequest, text, home string, lin
 }
 
 // provenFollowedInPlaceStateWrite reports sed -i --follow-symlinks (gsed
-// too) whose operand is active DefenseClaw state, directly, through an
-// existing link or through a link the same command makes: GNU sed then
-// rewrites the file the link names instead of replacing the link
-// (GAP-2529). The facts leave --follow-symlinks partial, so no path proof
-// holds for it. Without --follow-symlinks sed replaces a link entry and the
-// state file is untouched, which the GAP-2522 entry reading keeps.
+// too, the option abbreviated or not) whose operand is active DefenseClaw
+// state, directly, through an existing link or through a link the same
+// command makes: GNU sed then rewrites the file the link names instead of
+// replacing the link (GAP-2529). The facts leave --follow-symlinks and a
+// clustered -i (-si, -Ei) partial, so no path proof holds for them. Without
+// --follow-symlinks sed -i and perl -i replace the directory entry: the
+// entry itself is judged (the operand name, its parent read through links),
+// never the file a final link names, so an edit of a link to state stays an
+// ordinary write (GAP-2531).
 func provenFollowedInPlaceStateWrite(facts actionfacts.Facts, request trustedActionRequest) bool {
 	if request.Input.DialectHint != actionfacts.DialectPOSIX && request.Input.DialectHint != "" {
 		return false
 	}
 	text, known := trustedBashCommandInput(request.Input)
-	if !known || !strings.Contains(text, "--follow-symlinks") {
+	if !known || !strings.Contains(text, "sed") && !strings.Contains(text, "perl") {
 		return false
 	}
 	home := facts.EnforcementProjection().ActiveHome
@@ -1166,7 +1169,8 @@ func provenFollowedInPlaceStateWrite(facts actionfacts.Facts, request trustedAct
 	links := hookpaths.CommandLinks(request.Input.Tool, text, request.Input.CWD, home)
 	for _, statement := range statements {
 		operands := hookpaths.FollowedInPlaceEditOperands(statement.Command, statement.Dir, home)
-		if len(operands) == 0 {
+		entries := hookpaths.InPlaceEditOperands(statement.Command, statement.Dir, home)
+		if len(operands) == 0 && len(entries) == 0 {
 			continue
 		}
 		input := request.Input
@@ -1188,6 +1192,26 @@ func provenFollowedInPlaceStateWrite(facts actionfacts.Facts, request trustedAct
 				if active, same := hookpaths.ResolveActiveStateHardlinkTarget(target, projected.ActiveHome); same {
 					target = active
 				}
+				written := actionfacts.PathFact{
+					Access: actionfacts.PathAccessWrite, Flavor: actionfacts.PathFlavorPOSIX,
+					Value: target, Normalized: target, Absolute: true, Resolved: target,
+				}
+				if matchesActiveDefenseClawState(projected, written) {
+					return true
+				}
+			}
+		}
+		for _, entry := range entries {
+			if slices.Contains(operands, entry) {
+				continue
+			}
+			targets := append([]string{entry}, links.AliasTargets(entry, true)...)
+			if !request.SkipLocalFilesystemResolution && !request.ProtectedHomeHook {
+				if parent, ok := hookpaths.ResolveWriteTarget(filepath.Dir(entry)); ok {
+					targets = append(targets, filepath.Join(parent, filepath.Base(entry)))
+				}
+			}
+			for _, target := range targets {
 				written := actionfacts.PathFact{
 					Access: actionfacts.PathAccessWrite, Flavor: actionfacts.PathFlavorPOSIX,
 					Value: target, Normalized: target, Absolute: true, Resolved: target,

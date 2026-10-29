@@ -213,11 +213,44 @@ func rawParent(path string) string {
 
 func sedFollowsInPlaceLinks(words []string) bool {
 	for _, word := range words[1:] {
-		if word == "--follow-symlinks" {
+		if word == "--" {
+			break
+		}
+		if sedLongOption(word) == "follow-symlinks" {
 			return true
 		}
 	}
 	return false
+}
+
+// sedLongOptions are the GNU sed long options; getopt_long takes any
+// unambiguous prefix of one (--fo is --follow-symlinks, --f is ambiguous).
+var sedLongOptions = []string{
+	"binary", "debug", "expression", "file", "follow-symlinks", "help", "in-place",
+	"line-length", "null-data", "posix", "quiet", "regexp-extended", "sandbox",
+	"separate", "silent", "unbuffered", "version", "zero-terminated",
+}
+
+// sedLongOption names the long option a --word spells, exactly or as an
+// unambiguous prefix, and "" for anything else (GAP-2529).
+func sedLongOption(word string) string {
+	if !strings.HasPrefix(word, "--") || len(word) < 3 {
+		return ""
+	}
+	name, _, _ := strings.Cut(word[2:], "=")
+	match := ""
+	for _, option := range sedLongOptions {
+		if option == name {
+			return option
+		}
+		if strings.HasPrefix(option, name) {
+			if match != "" {
+				return ""
+			}
+			match = option
+		}
+	}
+	return match
 }
 
 // InPlaceEditOperands lists the files a sed -i or perl -i call of the
@@ -322,25 +355,59 @@ func perlInPlaceFiles(words []string) []string {
 }
 
 func sedInPlaceFiles(words []string) []string {
-	inPlace, script := false, false
+	inPlace, script, options := false, false, true
 	var files []string
+	operand := func(word string) {
+		if !script {
+			script = true
+			return
+		}
+		files = append(files, word)
+	}
 	for i := 1; i < len(words); i++ {
 		word := words[i]
 		switch {
-		case word == "-i" || word == "--in-place" || strings.HasPrefix(word, "--in-place=") ||
-			strings.HasPrefix(word, "-i") && len(word) > 2:
-			inPlace = true
-		case word == "-e" || word == "--expression":
-			i++
-			script = true
-		case strings.HasPrefix(word, "-e") && len(word) > 2 || strings.HasPrefix(word, "--expression="):
-			script = true
-		case strings.HasPrefix(word, "-"):
+		case !options || !strings.HasPrefix(word, "-"):
+			operand(word)
+		case word == "-":
 			continue
-		case !script:
-			script = true
+		case word == "--":
+			options = false
+		case strings.HasPrefix(word, "--"):
+			_, _, valued := strings.Cut(word, "=")
+			switch sedLongOption(word) {
+			case "in-place":
+				inPlace = true
+			case "expression", "file":
+				script = true
+				if !valued {
+					i++
+				}
+			case "line-length":
+				if !valued {
+					i++
+				}
+			}
 		default:
-			files = append(files, word)
+			// A short option cluster (-si, -Ei, -ni): -i takes the rest of
+			// the word as its backup suffix; -e, -f and -l take the rest or
+			// the next word as their value (GAP-2529, GAP-2531).
+		cluster:
+			for j := 1; j < len(word); j++ {
+				switch word[j] {
+				case 'i':
+					inPlace = true
+					break cluster
+				case 'e', 'f', 'l':
+					if word[j] != 'l' {
+						script = true
+					}
+					if j == len(word)-1 {
+						i++
+					}
+					break cluster
+				}
+			}
 		}
 	}
 	if !inPlace {
