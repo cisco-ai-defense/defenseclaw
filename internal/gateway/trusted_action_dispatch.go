@@ -1298,10 +1298,15 @@ func cmdLineHasWord(line string) bool {
 	return strings.Trim(cmdLineCode(line), " \t\r") != ""
 }
 
-// cmdLineCode returns a Git Bash line up to its comment: a # that starts a
-// word outside quotes.
+// cmdLineCode returns Git Bash text with its comments removed: a # that
+// starts a word outside quotes, up to the end of its physical line. The
+// logical line of a here-document inside ( ) or $( ) spans several physical
+// lines, so a comment on an earlier one hides nothing after its newline
+// (GAP-2547 checker it8 Y01, Y05, Y06).
 func cmdLineCode(line string) string {
+	var b strings.Builder
 	var quote byte
+	from := 0
 	for i := 0; i < len(line); i++ {
 		switch c := line[i]; {
 		case c == '\\' && quote != '\'':
@@ -1313,10 +1318,20 @@ func cmdLineCode(line string) string {
 		case c == '\'' || c == '"':
 			quote = c
 		case c == '#' && (i == 0 || strings.IndexByte(" \t\r\n;|&()<>", line[i-1]) >= 0):
-			return line[:i]
+			b.WriteString(line[from:i])
+			j := strings.IndexByte(line[i:], '\n')
+			if j < 0 {
+				return b.String()
+			}
+			i += j
+			from = i
 		}
 	}
-	return line
+	if from == 0 {
+		return line
+	}
+	b.WriteString(line[from:])
+	return b.String()
 }
 
 // cmdExpansionInertCommands never run an argument or hand standard input to

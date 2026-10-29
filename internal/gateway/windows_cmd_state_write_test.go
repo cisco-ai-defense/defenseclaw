@@ -665,6 +665,12 @@ func TestR105WindowsCMDHeredocSearchArgument(t *testing.T) {
 		{"cat > notes.md <<'EOF'" + body + "\n# build\nbash build.sh", false},
 		{"cat <<'EOF' | # count" + body + "\n\n# the matches\ngrep -c cmd", false},
 		{"echo \"a | #b\" > notes.md\nbash build.sh", false},
+		// GAP-2547 checker it8: a comment ends at its newline, so a comment
+		// line before the << line inside ( ) or $( ) hides nothing after it.
+		{"( # c\ncat <<'EOF' |" + run + "\nbash\n)", true},
+		{"x=$( # c\ncat <<'EOF' |" + run + "\nbash\n)", true},
+		{"(\n# c\ncat <<'EOF' |" + run + "\nbash\n)", true},
+		{"( # c\ncat <<'EOF'" + body + "\n) > notes.md", false},
 	} {
 		for _, tool := range []string{"Bash", "shell_command", "PowerShell"} {
 			args, _ := json.Marshal(map[string]string{"command": tc.command})
