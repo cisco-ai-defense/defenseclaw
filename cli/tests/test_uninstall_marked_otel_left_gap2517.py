@@ -1,11 +1,14 @@
-"""GAP-2517: uninstall names the agent OTel entries it keeps that carry DefenseClaw's markers."""
+"""GAP-2517: uninstall removes the agent OTel entries that carry DefenseClaw's markers and keeps the rest."""
 
 from __future__ import annotations
 
 import json
+import os
 from types import SimpleNamespace
 
+import pytest
 from click.testing import CliRunner
+from defenseclaw import codex_toml
 from defenseclaw.commands import cmd_uninstall
 
 BEARER = "0123456789abcdef" * 4
@@ -64,37 +67,59 @@ def _run_uninstall(monkeypatch) -> str:
     return result.output
 
 
-def test_uninstall_names_the_marked_otel_entries_it_kept_gap2517(tmp_path, monkeypatch):
+def test_uninstall_removes_the_marked_otel_entries_and_keeps_the_rest_gap2517(tmp_path, monkeypatch):
     codex_config, claude_settings = _homes(
         tmp_path,
         monkeypatch,
-        MARKED_CODEX,
+        MARKED_CODEX + "\n[otel.metrics_exporter.otlp-http]\nendpoint = \x27http://127.0.0.1:4318/v1/metrics\x27\n",
         {
+            "OTEL_EXPORTER_OTLP_ENDPOINT": "http://127.0.0.1:19010",
             "OTEL_EXPORTER_OTLP_HEADERS": MARKED_HEADERS,
+            "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT": "http://user:pw@127.0.0.1:19010/v1/logs",
             "OTEL_EXPORTER_OTLP_LOGS_HEADERS": MARKED_HEADERS,
-            "OTEL_LOGS_EXPORTER": "none",
+            "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT": "http://127.0.0.1:4318/v1/metrics",
+            "OTEL_EXPORTER_OTLP_METRICS_HEADERS": "x-tenant=metrics",
+            "OTEL_LOGS_EXPORTER": "otlp",
         },
     )
     out = _run_uninstall(monkeypatch)
-    assert codex_config in out
-    assert "otel.exporter" in out
-    assert "127.0.0.1:19020" in out
-    assert claude_settings in out
-    assert "OTEL_EXPORTER_OTLP_HEADERS, OTEL_EXPORTER_OTLP_LOGS_HEADERS" in out
-    assert "if you did not add them, delete" in out
+    flat = " ".join(out.split())
+    codex = codex_toml.loads(open(codex_config, "rb").read())
+    assert codex["model"] == "gpt-5"
+    assert codex["otel"] == {
+        "environment": "windows",
+        "metrics_exporter": {"otlp-http": {"endpoint": "http://127.0.0.1:4318/v1/metrics"}},
+    }
+    env = json.loads(open(claude_settings, encoding="utf-8").read())["env"]
+    # The unmarked metrics pair and the unrelated key are the user\x27s and stay.
+    assert env == {
+        "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT": "http://127.0.0.1:4318/v1/metrics",
+        "OTEL_EXPORTER_OTLP_METRICS_HEADERS": "x-tenant=metrics",
+        "OTEL_LOGS_EXPORTER": "otlp",
+    }
+    assert f"{codex_config}: removed otel.exporter" in flat
+    assert (
+        f"{claude_settings}: removed env OTEL_EXPORTER_OTLP_HEADERS, OTEL_EXPORTER_OTLP_LOGS_HEADERS, "
+        "OTEL_EXPORTER_OTLP_ENDPOINT, OTEL_EXPORTER_OTLP_LOGS_ENDPOINT"
+    ) in flat
+    assert "127.0.0.1:19010" in flat and "127.0.0.1:19020" in flat
+    assert "user:pw" not in out
+    assert "METRICS" not in out
     assert BEARER not in out
 
 
-def test_uninstall_says_nothing_about_an_operator_collector_gap2517(tmp_path, monkeypatch):
-    _homes(
+def test_uninstall_keeps_an_operator_collector_byte_for_byte_gap2517(tmp_path, monkeypatch):
+    codex_config, claude_settings = _homes(
         tmp_path,
         monkeypatch,
         OPERATOR_CODEX,
         {"OTEL_EXPORTER_OTLP_HEADERS": f"authorization=Bearer {BEARER},x-tenant=logs"},
     )
+    before = (open(codex_config, "rb").read(), open(claude_settings, "rb").read())
     out = _run_uninstall(monkeypatch)
+    assert (open(codex_config, "rb").read(), open(claude_settings, "rb").read()) == before
+    assert "removed" not in out
     assert "x-defenseclaw-source" not in out
-    assert "delete" not in out
 
 
 def test_uninstall_without_agent_configs_says_nothing_gap2517(tmp_path, monkeypatch):
@@ -102,29 +127,36 @@ def test_uninstall_without_agent_configs_says_nothing_gap2517(tmp_path, monkeypa
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "no-claude"))
     out = _run_uninstall(monkeypatch)
     assert "x-defenseclaw-source" not in out
+    assert "removed" not in out
 
 
-def test_uninstall_names_the_endpoint_keys_paired_with_the_marked_headers_gap2517(tmp_path, monkeypatch):
-    _, claude_settings = _homes(
-        tmp_path,
-        monkeypatch,
-        "",
-        {
-            "OTEL_EXPORTER_OTLP_ENDPOINT": "http://127.0.0.1:19010",
-            "OTEL_EXPORTER_OTLP_HEADERS": MARKED_HEADERS,
-            "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT": "http://127.0.0.1:19010/v1/logs",
-            "OTEL_EXPORTER_OTLP_LOGS_HEADERS": MARKED_HEADERS,
-            "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT": "http://127.0.0.1:4318/v1/metrics",
-            "OTEL_EXPORTER_OTLP_METRICS_HEADERS": "x-tenant=metrics",
-        },
+def test_uninstall_keeps_an_inline_codex_exporter_it_cannot_cut_and_names_the_step_gap2517(tmp_path, monkeypatch):
+    inline = (
+        "[otel]\nexporter = { otlp-http = { endpoint = \x27http://127.0.0.1:19020/v1/logs\x27, headers = { "
+        f"authorization = \x27Bearer {BEARER}\x27, x-defenseclaw-client = \x27codex-otel/1.0\x27, "
+        "x-defenseclaw-source = \x27codex\x27 } } }\n"
     )
+    codex_config, _ = _homes(tmp_path, monkeypatch, inline, {})
     out = _run_uninstall(monkeypatch)
     flat = " ".join(out.split())
-    assert "Claude Code still sends its telemetry and that bearer to 127.0.0.1:19010" in flat
-    assert (
-        "delete OTEL_EXPORTER_OTLP_HEADERS, OTEL_EXPORTER_OTLP_LOGS_HEADERS, "
-        "OTEL_EXPORTER_OTLP_ENDPOINT, OTEL_EXPORTER_OTLP_LOGS_ENDPOINT from the env block of " + claude_settings
-    ) in flat
-    # The unmarked metrics pair is the user's and is not named.
-    assert "METRICS" not in out
+    assert open(codex_config, encoding="utf-8").read() == inline
+    assert "could not be removed safely" in flat
+    assert f"delete the otel.exporter tables from {codex_config}" in flat
     assert BEARER not in out
+
+
+def test_uninstall_does_not_replace_a_linked_claude_settings_file_gap2517(tmp_path, monkeypatch):
+    if not hasattr(os, "symlink"):
+        pytest.skip("no symlinks")
+    _, claude_settings = _homes(tmp_path, monkeypatch, "", {"OTEL_EXPORTER_OTLP_HEADERS": MARKED_HEADERS})
+    real = tmp_path / "real-settings.json"
+    os.replace(claude_settings, real)
+    try:
+        os.symlink(real, claude_settings)
+    except OSError:
+        pytest.skip("symlink not permitted")
+    before = real.read_bytes()
+    out = _run_uninstall(monkeypatch)
+    assert os.path.islink(claude_settings)
+    assert real.read_bytes() == before
+    assert "could not be removed safely" in " ".join(out.split())
