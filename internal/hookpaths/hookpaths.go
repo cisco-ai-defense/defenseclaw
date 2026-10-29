@@ -1807,7 +1807,41 @@ func commandLinksWithFacts(command, cwd, home string, facts map[string]string, r
 // false when any cd, pushd or popd is elsewhere or dynamic, so the link scope
 // keeps its conservative reading.
 func topLevelLinkDirectories(file *syntax.File, cwd, home string) (dirs map[*syntax.CallExpr]string, known bool) {
-	var statements []*syntax.Stmt
+	statements, placed, known := topLevelStatementDirectories(file, cwd, home)
+	if !known {
+		return nil, false
+	}
+	dirs = make(map[*syntax.CallExpr]string)
+	for i, stmt := range statements {
+		call, ok := stmt.Cmd.(*syntax.CallExpr)
+		if !ok || len(call.Args) == 0 {
+			continue
+		}
+		program, _ := StaticWord(call.Args[0], home)
+		if slices.Contains(linkPrograms, programBase(program)) {
+			dirs[call] = placed[i]
+			continue
+		}
+		values := make([]string, len(call.Args))
+		literal := make([]bool, len(call.Args))
+		for j, arg := range call.Args {
+			values[j], literal[j] = StaticWord(arg, home)
+		}
+		if index, wrapped := plainWrappedChild(values, literal); wrapped &&
+			slices.Contains(linkPrograms, programBase(values[index])) {
+			dirs[call] = placed[i]
+		}
+	}
+	return dirs, true
+}
+
+// topLevelStatementDirectories lists the top-level statements of a ; / && /
+// || list other than its cd statements, each with the directory it runs in,
+// read lexically from cwd through the static cd statements before it
+// (GAP-1742). known is false when any cd, pushd or popd is elsewhere or
+// dynamic, or a top-level program word is not static.
+func topLevelStatementDirectories(file *syntax.File, cwd, home string) (statements []*syntax.Stmt, dirs []string, known bool) {
+	var all []*syntax.Stmt
 	var flatten func(*syntax.Stmt)
 	flatten = func(stmt *syntax.Stmt) {
 		if pair, ok := stmt.Cmd.(*syntax.BinaryCmd); ok && len(stmt.Redirs) == 0 && !stmt.Background && !stmt.Negated &&
@@ -1816,13 +1850,13 @@ func topLevelLinkDirectories(file *syntax.File, cwd, home string) (dirs map[*syn
 			flatten(pair.Y)
 			return
 		}
-		statements = append(statements, stmt)
+		all = append(all, stmt)
 	}
 	for _, stmt := range file.Stmts {
 		flatten(stmt)
 	}
 	topLevel := make(map[*syntax.CallExpr]bool)
-	for _, stmt := range statements {
+	for _, stmt := range all {
 		if call, ok := stmt.Cmd.(*syntax.CallExpr); ok && !stmt.Background {
 			topLevel[call] = true
 		}
@@ -1839,45 +1873,65 @@ func topLevelLinkDirectories(file *syntax.File, cwd, home string) (dirs map[*syn
 		return true
 	})
 	if !known {
-		return nil, false
+		return nil, nil, false
 	}
-	dirs = make(map[*syntax.CallExpr]string)
 	dir := cwd
-	for _, stmt := range statements {
+	for _, stmt := range all {
 		call, ok := stmt.Cmd.(*syntax.CallExpr)
 		if !ok || len(call.Args) == 0 {
+			statements, dirs = append(statements, stmt), append(dirs, dir)
 			continue
 		}
 		program, static := StaticWord(call.Args[0], home)
 		if !static {
-			return nil, false
+			return nil, nil, false
 		}
 		if slices.Contains(cdPrograms, programBase(program)) {
 			if programBase(program) != "cd" || len(call.Args) != 2 || len(call.Assigns) != 0 {
-				return nil, false
+				return nil, nil, false
 			}
 			target, static := StaticWord(call.Args[1], home)
 			if !static || target == "" || strings.HasPrefix(target, "-") || !filepath.IsAbs(dir) {
-				return nil, false
+				return nil, nil, false
 			}
 			dir = OperandPath(target, dir)
 			continue
 		}
-		if slices.Contains(linkPrograms, programBase(program)) {
-			dirs[call] = dir
-			continue
-		}
-		values := make([]string, len(call.Args))
-		literal := make([]bool, len(call.Args))
-		for i, arg := range call.Args {
-			values[i], literal[i] = StaticWord(arg, home)
-		}
-		if index, wrapped := plainWrappedChild(values, literal); wrapped &&
-			slices.Contains(linkPrograms, programBase(values[index])) {
-			dirs[call] = dir
-		}
+		statements, dirs = append(statements, stmt), append(dirs, dir)
 	}
-	return dirs, true
+	return statements, dirs, true
+}
+
+// PlacedStatement is one top-level statement of a shell command and the
+// directory it runs in.
+type PlacedStatement struct {
+	Command string
+	Dir     string
+}
+
+// TopLevelStatements splits a ; / && / || list into its statements other
+// than its static cd statements, each with the directory it runs in: cd ~ &&
+// ln -s .defenseclaw hc && cp a.txt hc/config.yaml runs the ln and the cp in
+// ~ (GAP-2522). ok is false when the command does not parse, or a directory
+// change is elsewhere or dynamic.
+func TopLevelStatements(command, cwd, home string) ([]PlacedStatement, bool) {
+	file, parsed := parseShell(command)
+	if !parsed {
+		return nil, false
+	}
+	statements, dirs, known := topLevelStatementDirectories(file, cwd, home)
+	if !known {
+		return nil, false
+	}
+	out := make([]PlacedStatement, 0, len(statements))
+	for i, stmt := range statements {
+		start, end := int(stmt.Pos().Offset()), int(stmt.End().Offset())
+		if start < 0 || end > len(command) || start >= end {
+			return nil, false
+		}
+		out = append(out, PlacedStatement{Command: command[start:end], Dir: dirs[i]})
+	}
+	return out, true
 }
 
 // plainWrappedChild returns the index of the program word that a chain of
@@ -2252,6 +2306,12 @@ func (l Links) Target(path string) (string, bool) {
 		return path, true
 	}
 	return l.links.resolve(path, l.protected)
+}
+
+// HasAliases reports that the command makes at least one link whose name
+// and target were both read.
+func (l Links) HasAliases() bool {
+	return len(l.links.aliases) > 0
 }
 
 // AliasTargets returns the names path reaches through the links the
