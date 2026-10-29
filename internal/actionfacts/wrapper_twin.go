@@ -191,18 +191,43 @@ func wrapperDirWord(dir string) string {
 // for every other word.
 func wrapperHomeDirWord(args []*syntax.Word, at int) (string, bool) {
 	if at > 0 {
-		if option := projectPOSIXWord(args[at-1]); !option.Expands && (option.Value == "-C" || option.Value == "--chdir") {
+		if option := projectPOSIXWord(args[at-1]); !option.Expands && (option.Value == "-C" || option.Value == "--chdir" ||
+			envFlagClusterBefore(option.Value, 'C')) {
 			if rest, home := homeSpelledDir(args[at], ""); home {
 				return homeDirSentinel + rest, true
 			}
 		}
 	}
-	for _, option := range []string{"--chdir=", "-C"} {
+	options := []string{"--chdir=", "-C"}
+	if len(args[at].Parts) > 0 {
+		// A bundled -iC"$HOME" names the home as -C"$HOME" does.
+		if lit, isLit := args[at].Parts[0].(*syntax.Lit); isLit && envFlagClusterBefore(lit.Value, 'C') {
+			options = append(options, lit.Value)
+		}
+	}
+	for _, option := range options {
 		if rest, home := homeSpelledDir(args[at], option); home {
 			return option + homeDirSentinel + rest, true
 		}
 	}
 	return "", false
+}
+
+// envFlagClusterBefore reports a bundled env short-option word such as
+// -iC or -0vu: one or more value-less env flags (-i, -0, -v) followed by
+// option last, so the next word (or the rest of the word) is its value.
+// GNU env reads env -iC DIR as env -i -C DIR (GAP-2519, checker r10i2
+// RV-r10-3).
+func envFlagClusterBefore(word string, option byte) bool {
+	if len(word) < 3 || word[0] != '-' || word[1] == '-' || word[len(word)-1] != option {
+		return false
+	}
+	for _, flag := range word[1 : len(word)-1] {
+		if flag != 'i' && flag != '0' && flag != 'v' {
+			return false
+		}
+	}
+	return true
 }
 
 // homeSpelledDir returns the static rest of word after option (the literal
@@ -671,6 +696,36 @@ func envOptions(value func(int) (string, bool), next *int, run *PrefixWrapperRun
 			*next++
 		case strings.HasPrefix(arg, "-C") && len(arg) > 2:
 			if !chdir(arg[2:]) {
+				return false
+			}
+			*next++
+		case arg == "-v" || arg == "--debug":
+			*next++
+		case len(arg) > 2 && arg[0] == '-' && arg[1] != '-':
+			// A bundle of short options (-iC DIR, -i0, -vu NAME): the
+			// value-less flags, then at most one -u or -C that takes the
+			// rest of the word or the next word; -S and any other letter
+			// end the reading.
+			at := 1
+			for at < len(arg) && (arg[at] == 'i' || arg[at] == '0' || arg[at] == 'v') {
+				at++
+			}
+			if at == len(arg) {
+				*next++
+				continue
+			}
+			if at == 1 || arg[at] != 'u' && arg[at] != 'C' {
+				return false
+			}
+			option, rest := arg[at], arg[at+1:]
+			if rest == "" {
+				var static bool
+				if rest, static = value(*next + 1); !static {
+					return false
+				}
+				*next++
+			}
+			if option == 'C' && !chdir(rest) {
 				return false
 			}
 			*next++
