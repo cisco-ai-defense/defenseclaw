@@ -2186,9 +2186,11 @@ func topLevelLinkDirectories(file *syntax.File, cwd, home string) (dirs map[*syn
 // || list other than its cd statements, each with the directory it runs in,
 // read lexically from cwd through the static cd statements before it
 // (GAP-1742). The statements of a plain ( ... ) subshell are listed in its
-// place, and its cd statements end with it (GAP-2551). known is false when
-// any cd, pushd or popd is elsewhere or dynamic, or a top-level program word
-// is not static.
+// place, and its cd statements end with it (GAP-2551). A top-level pushd of
+// one static directory that CDPATH cannot move (absolute, ~, . or ..) moves
+// as cd does and keeps the directory it left for a bare popd (GAP-2562). known is false when any cd, pushd or popd is
+// elsewhere or dynamic, a pushd or popd takes another form, a popd has no
+// pushd to return to, or a top-level program word is not static.
 func topLevelStatementDirectories(file *syntax.File, cwd, home string) (statements []*syntax.Stmt, dirs []string, known bool) {
 	// An enter or leave entry opens or closes a subshell: ( cd src && ln -s
 	// ../a.txt b ) runs its list from the directory it starts in, and its cd
@@ -2244,14 +2246,22 @@ func topLevelStatementDirectories(file *syntax.File, cwd, home string) (statemen
 		return nil, nil, false
 	}
 	dir := cwd
-	var outer []string
+	// stack is the pushd directory stack; a subshell starts with a copy
+	// of it and its changes end with it.
+	type frame struct {
+		dir   string
+		stack []string
+	}
+	var stack []string
+	var outer []frame
 	for _, e := range all {
 		switch {
 		case e.enter:
-			outer = append(outer, dir)
+			outer = append(outer, frame{dir: dir, stack: slices.Clone(stack)})
 			continue
 		case e.leave:
-			dir, outer = outer[len(outer)-1], outer[:len(outer)-1]
+			last := outer[len(outer)-1]
+			dir, stack, outer = last.dir, last.stack, outer[:len(outer)-1]
 			continue
 		}
 		stmt := e.stmt
@@ -2264,13 +2274,35 @@ func topLevelStatementDirectories(file *syntax.File, cwd, home string) (statemen
 		if !static {
 			return nil, nil, false
 		}
-		if slices.Contains(cdPrograms, programBase(program)) {
-			if programBase(program) != "cd" || len(call.Args) != 2 || len(call.Assigns) != 0 {
+		if base := programBase(program); slices.Contains(cdPrograms, base) {
+			if len(call.Assigns) != 0 || !filepath.IsAbs(dir) {
+				return nil, nil, false
+			}
+			if base == "popd" {
+				// A bare popd returns to the directory the last pushd
+				// left; any other form, or nothing to return to, is
+				// not read.
+				if len(call.Args) != 1 || len(stack) == 0 {
+					return nil, nil, false
+				}
+				dir, stack = stack[len(stack)-1], stack[:len(stack)-1]
+				continue
+			}
+			if len(call.Args) != 2 {
 				return nil, nil, false
 			}
 			target, static := StaticWord(call.Args[1], home)
-			if !static || target == "" || strings.HasPrefix(target, "-") || !filepath.IsAbs(dir) {
+			if !static || target == "" || strings.HasPrefix(target, "-") || base == "pushd" && strings.HasPrefix(target, "+") {
 				return nil, nil, false
+			}
+			if base == "pushd" {
+				// pushd keeps the conservative reading for a bare
+				// relative name, which an unexported CDPATH may move
+				// (TestR104Loop3SearchPathCDKeepsLinkScopeOpaque).
+				if !pushdBypassesCDPath(target) {
+					return nil, nil, false
+				}
+				stack = append(stack, dir)
 			}
 			dir = OperandPath(target, dir)
 			continue
@@ -2278,6 +2310,13 @@ func topLevelStatementDirectories(file *syntax.File, cwd, home string) (statemen
 		statements, dirs = append(statements, stmt), append(dirs, dir)
 	}
 	return statements, dirs, true
+}
+
+// pushdBypassesCDPath reports a pushd operand that Bash never looks up in
+// CDPATH: an absolute or home path, or one that starts with . or ..
+func pushdBypassesCDPath(target string) bool {
+	return filepath.IsAbs(target) || target == "~" || strings.HasPrefix(target, "~/") ||
+		target == "." || target == ".." || strings.HasPrefix(target, "./") || strings.HasPrefix(target, "../")
 }
 
 // PlacedStatement is one top-level statement of a shell command and the
