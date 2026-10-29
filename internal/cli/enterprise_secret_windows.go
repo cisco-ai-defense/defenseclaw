@@ -969,27 +969,98 @@ func writeWindowsSecret(store *windowsSecretStore, name string, value []byte) er
 	if err != nil || gateway == nil {
 		return fmt.Errorf("resolve the gateway service SID (%s): %v", windowsSecretGatewayAccount, err)
 	}
+	// GAP-2430: keep the stored credential under a second name until the
+	// new value passes the gateway trust check below. A failed check put the
+	// new file away and the previous credential went with it, while the
+	// result said change_failed. The extra name is a hard link: the same
+	// file, bytes and protected DACL, so putting it back changes nothing.
+	kept, keepErr := keepWindowsSecret(store, name)
+	dropKept := kept != ""
+	defer func() {
+		if dropKept {
+			_ = os.Remove(kept)
+		}
+	}()
 	final, err := storeWindowsSecret(store, name, value, gateway)
 	if err != nil {
 		return err
 	}
-	// Prove the gateway's reader accepts the stored credential. This runs
-	// with the administrator's token, so it checks the path, owner and ACL
-	// shape; the gateway's own rights come from the reader ACEs above
-	// (pinned by TestWindowsSecretStoreUsesTheGatewayReaderDACL).
+	verifyErr := windowsSecretTrustCheck(name, store.dir)
+	if verifyErr == nil {
+		return nil
+	}
+	if kept != "" {
+		if err := restoreWindowsSecret(kept, final); err != nil {
+			// Never drop the only copy of the previous value: leave it
+			// under its kept name and say how to put it back.
+			dropKept = false
+			return fmt.Errorf("the new credential failed the gateway trust check, and the previous credential could not be put back (%v); it is kept as %s: rename it to %s, or run secret set again: %w", err, kept, name, verifyErr)
+		}
+		return fmt.Errorf("the new credential failed the gateway trust check; the previous credential is kept unchanged: %w", verifyErr)
+	}
+	_ = os.Remove(final)
+	if keepErr != nil {
+		return fmt.Errorf("the new credential failed the gateway trust check and was removed; the previous credential could not be kept (%v): %w", keepErr, verifyErr)
+	}
+	return fmt.Errorf("the new credential failed the gateway trust check and was removed: %w", verifyErr)
+}
+
+// keepWindowsSecret gives the stored credential name a second, hidden name
+// in the pinned store (a hard link), so writeWindowsSecret can put it back.
+// "" and no error when nothing is stored.
+func keepWindowsSecret(store *windowsSecretStore, name string) (string, error) {
+	final := filepath.Join(store.dir, name)
+	info, err := os.Lstat(final)
+	if errors.Is(err, os.ErrNotExist) {
+		return "", nil
+	}
+	if err != nil {
+		return "", err
+	}
+	if !info.Mode().IsRegular() {
+		return "", fmt.Errorf("%s is not a regular file", final)
+	}
+	suffix := make([]byte, 8)
+	if _, err := rand.Read(suffix); err != nil {
+		return "", err
+	}
+	kept := filepath.Join(store.dir, "."+name+".kept-"+hex.EncodeToString(suffix))
+	if err := os.Link(final, kept); err != nil {
+		return "", err
+	}
+	return kept, nil
+}
+
+// restoreWindowsSecret puts the kept previous credential back over final.
+// Another process that holds final open (an EDR or backup agent reading it,
+// a concurrent re-ACL) makes the replace fail with access denied for a
+// moment, so it retries for about two seconds before it gives up.
+func restoreWindowsSecret(kept, final string) error {
+	var err error
+	for attempt := 0; attempt < 20; attempt++ {
+		if err = os.Rename(kept, final); err == nil {
+			return nil
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	return err
+}
+
+// windowsSecretTrustCheck proves the gateway reader accepts the stored
+// credential. It runs with the administrator token, so it checks the path,
+// owner and ACL shape; the gateway rights come from the reader ACEs
+// (pinned by TestWindowsSecretStoreUsesTheGatewayReaderDACL). A seam for
+// tests.
+var windowsSecretTrustCheck = func(name, dir string) error {
 	previous, had := os.LookupEnv(managed.WindowsServiceAccountEnv)
 	_ = os.Setenv(managed.WindowsServiceAccountEnv, windowsSecretGatewayAccount)
-	_, _, verifyErr := managed.ResolveServiceCredential(name, store.dir)
+	_, _, err := managed.ResolveServiceCredential(name, dir)
 	if had {
 		_ = os.Setenv(managed.WindowsServiceAccountEnv, previous)
 	} else {
 		_ = os.Unsetenv(managed.WindowsServiceAccountEnv)
 	}
-	if verifyErr != nil {
-		_ = os.Remove(final)
-		return fmt.Errorf("the stored credential failed the gateway's trust check and was removed: %w", verifyErr)
-	}
-	return nil
+	return err
 }
 
 // storeWindowsSecret writes value to name in the pinned store atomically,
