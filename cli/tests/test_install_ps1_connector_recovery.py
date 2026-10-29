@@ -31,6 +31,41 @@ WINDOWS_POWERSHELL = pytest.mark.skipif(
 )
 
 
+def _managed_computer() -> str | None:
+    """Name the enterprise refusal Invoke-Install gives on this computer, if any.
+
+    install.ps1 refuses a per-user install where an enterprise turned
+    self-update off or a managed deployment is installed. Those are the
+    refusals the installer must give there, so the preflight cases below that
+    run Invoke-Install can only run on a computer without them (GAP-2572).
+    """
+    if os.name != "nt":
+        return None
+    import winreg
+
+    def value(path: str, name: str) -> object | None:
+        try:
+            with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, path, 0, winreg.KEY_READ | winreg.KEY_WOW64_64KEY) as key:
+                return winreg.QueryValueEx(key, name)[0] if name else True
+        except FileNotFoundError:
+            return None
+        except OSError as exc:
+            return f"unreadable ({exc})"
+
+    policy = value(r"SOFTWARE\Policies\Cisco\DefenseClaw", "DisableSelfUpdate")
+    if policy not in (None, 0):
+        return "DefenseClaw self-update is disabled by enterprise policy on this computer"
+    if value(r"SOFTWARE\Cisco\DefenseClaw\Enterprise", "") is not None:
+        return "a managed DefenseClaw enterprise deployment is installed on this computer"
+    return None
+
+
+PER_USER_INSTALL_HOST = pytest.mark.skipif(
+    _managed_computer() is not None,
+    reason=f"Invoke-Install refuses a per-user install here by design: {_managed_computer()}",
+)
+
+
 def _function(name: str) -> str:
     source = INSTALLER.read_text(encoding="utf-8")
     match = re.search(rf"^function {re.escape(name)}[ (]", source, re.M)
@@ -1229,6 +1264,7 @@ def _local_assets(assets: Path, target: str) -> Path:
 
 
 @WINDOWS_POWERSHELL
+@PER_USER_INSTALL_HOST
 @pytest.mark.allow_subprocess
 @pytest.mark.parametrize("case", ["verified", "missing", "mismatched", "tampered", "pending", "newer_target"])
 def test_current_stamped_controller_verifies_explicit_older_local_assets_before_downgrade(tmp_path, case) -> None:
@@ -1274,6 +1310,7 @@ if ($script:gatewayChecks -ne {1 if case == 'verified' else 0} -or
 
 
 @WINDOWS_POWERSHELL
+@PER_USER_INSTALL_HOST
 @pytest.mark.allow_subprocess
 @pytest.mark.parametrize("phase", ["early", "watchdog"])
 def test_forward_upgrade_refuses_active_recovery_before_a_snapshot_can_copy_it(tmp_path, phase) -> None:
@@ -1361,6 +1398,7 @@ try {{
 
 
 @WINDOWS_POWERSHELL
+@PER_USER_INSTALL_HOST
 @pytest.mark.allow_subprocess
 @pytest.mark.parametrize("installed", ["1.0.1", "1.0.2"])
 def test_clean_forward_install_and_active_same_version_repair_pass_preflight(tmp_path, installed) -> None:
@@ -1420,11 +1458,12 @@ def test_setup_cleanup_archives_opaque_receipts_with_file_identity_and_private_a
 Clear-SetupDataDir {_literal(failed)}
 $keep = @(Get-ChildItem -LiteralPath (Join-Path $DataDir 'backups') -Directory)[0].FullName
 $acl = (New-Object IO.DirectoryInfo $keep).GetAccessControl()
-$expected = @([Security.Principal.WindowsIdentity]::GetCurrent().User.Value, 'S-1-5-18')
+# As LocalSystem the user is S-1-5-18 itself: one rule then (GAP-2572).
+$expected = @([Security.Principal.WindowsIdentity]::GetCurrent().User.Value, 'S-1-5-18' | Select-Object -Unique)
 if (-not $acl.AreAccessRulesProtected) {{ throw 'Recovery archive inherits its DACL' }}
 if ($acl.GetOwner([Security.Principal.SecurityIdentifier]).Value -ne $expected[0]) {{ throw 'Wrong recovery archive owner' }}
 $rules = @($acl.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier]))
-if ($rules.Count -ne 2) {{ throw 'Unexpected recovery archive access rules' }}
+if ($rules.Count -ne $expected.Count) {{ throw 'Unexpected recovery archive access rules' }}
 foreach ($rule in $rules) {{
     if ($expected -notcontains $rule.IdentityReference.Value -or $rule.AccessControlType -ne 'Allow') {{
         throw 'Recovery archive grants unexpected access'

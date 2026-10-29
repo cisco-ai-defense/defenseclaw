@@ -115,3 +115,28 @@ func replaceFileWith(
 	}
 	return err
 }
+
+// ReplaceFileAtomically renames source over destination in one step, so a
+// reader that opens destination meanwhile finds the old file or the new one,
+// never no file. ReplaceFile (ReplaceFileW) moves an existing destination
+// aside while it merges metadata, and for that moment the name is missing: a
+// policy file another file names (Cursor's hooks.json names the machine
+// adapter) must not go missing (GAP-2572). The rename uses POSIX semantics,
+// so readers that share deletion (Cursor, Codex) keep reading; the new file
+// keeps its own access list, so a caller sets the protection of source first.
+// A volume without POSIX-semantics renames falls back to ReplaceFile. Busy
+// errors are retried as for ReplaceFile.
+func ReplaceFileAtomically(source, destination string) error {
+	return replaceFileWith(source, destination, replaceFileAtomicallyOnce, time.Sleep)
+}
+
+func replaceFileAtomicallyOnce(source, destination string) error {
+	err := renameReplace(source, destination, windows.FileRenameInfoEx,
+		fileRenameReplaceIfExists|fileRenamePOSIXSemantics)
+	if errors.Is(err, windows.ERROR_INVALID_PARAMETER) ||
+		errors.Is(err, windows.ERROR_NOT_SUPPORTED) ||
+		errors.Is(err, windows.ERROR_INVALID_FUNCTION) {
+		return replaceFileOnce(source, destination)
+	}
+	return err
+}
