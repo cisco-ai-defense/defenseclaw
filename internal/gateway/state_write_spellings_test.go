@@ -199,3 +199,44 @@ func TestWrappedFileWriterWritesWhatThePlainCallWrites(t *testing.T) {
 		{"nohup cp ~/.defenseclaw/config.yaml ~/project/backup.yaml", false},
 	})
 }
+
+// A file writer run through setsid, stdbuf, ionice, taskset, chrt, doas,
+// flock FILE, caffeinate, sudo -i or -s, env -C DIR or builtin command
+// tied no write to the call, while it writes what the plain call writes
+// (GAP-2519, checker p3i3 X01-X06, X17, X25-X27, X32).
+func TestExecRunnersWriteWhatThePlainCallWrites(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX shell spellings")
+	}
+	judgeHomeStateWriteRows(t, []homeStateWriteRow{
+		{"setsid cp a.txt ~/.defenseclaw/config.yaml", true},
+		{"setsid -f cp a.txt ~/.defenseclaw/config.yaml", true},
+		{"stdbuf -o0 cp a.txt ~/.defenseclaw/config.yaml", true},
+		{"stdbuf -o L tee ~/.defenseclaw/config.yaml < a.txt", true},
+		{"ionice -c3 cp a.txt ~/.defenseclaw/config.yaml", true},
+		{"ionice -c 2 -n 7 mv a.txt ~/.defenseclaw/config.yaml", true},
+		{"taskset -c 0 cp a.txt ~/.defenseclaw/config.yaml", true},
+		{"taskset 0x1 install a.txt ~/.defenseclaw/hooks/x.sh", true},
+		{"chrt -b 0 cp a.txt ~/.defenseclaw/config.yaml", true},
+		{"doas cp a.txt ~/.defenseclaw/config.yaml", true},
+		{"doas -u root cp a.txt ~/.defenseclaw/config.yaml", true},
+		{"flock /tmp/zzl cp a.txt ~/.defenseclaw/config.yaml", true},
+		{"flock -w 5 /tmp/zzl cp a.txt ~/.defenseclaw/config.yaml", true},
+		{"caffeinate -i cp a.txt ~/.defenseclaw/config.yaml", true},
+		{"sudo -i cp a.txt ~/.defenseclaw/config.yaml", true},
+		{"sudo -s cp a.txt ~/.defenseclaw/config.yaml", true},
+		{"env --chdir=/ cp a.txt ~/.defenseclaw/config.yaml", true},
+		{"env -C / cp HOMEDIR/project/a.txt HOMEDIR/.defenseclaw/config.yaml", true},
+		{"env -C HOMEDIR cp project/a.txt .defenseclaw/config.yaml", true},
+		{"builtin command cp a.txt ~/.defenseclaw/config.yaml", true},
+		{"setsid nohup cp a.txt ~/.ssh/authorized_keys", true},
+		{"setsid cp a.txt b.txt", false},
+		{"stdbuf -oL tee out.log < a.txt", false},
+		{"flock /tmp/zzl make --version", false},
+		{"ionice -c3 cp a.txt ~/project/backup.txt", false},
+		{"env -C /tmp cp HOMEDIR/project/a.txt .defenseclaw-notes.txt", false},
+		{"env -C /tmp cp HOMEDIR/project/a.txt .defenseclaw/config.yaml", false},
+		{"taskset -c 0 cp ~/.defenseclaw/config.yaml ~/project/backup.yaml", false},
+	})
+}
+
