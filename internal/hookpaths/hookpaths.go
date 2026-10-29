@@ -906,6 +906,27 @@ func ResolveConnector(connector, surface, event string, payload []byte) string {
 				directoryOperands, directoryUnknown = ShellDirectoryWriteOperands(command, cwd, home, sourceFacts, true, false)
 				truncated = truncated || directoryUnknown
 				truncated = truncated || !parsed
+				// A runner or env prefix (setsid, stdbuf, flock FILE,
+				// caffeinate, sudo -i, env -iC DIR, ...) runs the call it
+				// wraps. The gateway judges that call through
+				// actionfacts.WrapperUnwrapTwin, but behind ProtectHome it
+				// reads the wrapped call's targets only from this map, so the
+				// map also lists the targets of that reading (GAP-2563).
+				if !isApplyPatchToolName(tool) {
+					if twin, isTwin := actionfacts.WrapperUnwrapTwin(command); isTwin && twin != command {
+						twinInput := fallback
+						twinInput.Command = twin
+						twinFacts := actionfacts.Analyze(twinInput)
+						facts.Paths = append(facts.Paths, twinFacts.Paths...)
+						truncated = truncated || twinFacts.Parse.Status == actionfacts.StatusLimitExceeded
+						twinOperands, _, _ := ShellWriteOperands(twin, cwd, home)
+						operands = append(operands, twinOperands...)
+						literalOperands = append(literalOperands, LiteralWriteOperands(twin, cwd, home)...)
+						twinDirectories, twinUnknown := ShellDirectoryWriteOperands(twin, cwd, home, sourceFacts, true, false)
+						directoryOperands = append(directoryOperands, twinDirectories...)
+						truncated = truncated || twinUnknown
+					}
+				}
 				// A link the command creates can make a later write a write
 				// to a protected file (GAP-1505). The command of an
 				// apply_patch tool is a patch envelope, not shell.
