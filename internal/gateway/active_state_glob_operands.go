@@ -184,6 +184,11 @@ func globbedStateCommandMutates(command actionfacts.CommandFact, words []string,
 		if tree || root && deletes {
 			return true
 		}
+		// A file of the state named as the destination (`rsync a.txt
+		// ~/.defenseclaw/config.yaml`, GAP-2573) is overwritten.
+		if !root && statePatternReaches(destination, home, cwd) {
+			return true
+		}
 		if !root {
 			return false
 		}

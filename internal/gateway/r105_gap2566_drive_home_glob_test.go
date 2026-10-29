@@ -62,3 +62,34 @@ func TestR105GAP2566DriveHomeGlobbedStateMutation(t *testing.T) {
 		}
 	}
 }
+
+// GAP-2573 (rsync rows): on a Windows drive home the tilde destination of
+// rsync expands to C:/Users/x/.defenseclaw/..., which the remote check read
+// as host:path, so an rsync into the hooks tree was allowed while the
+// /c/Users/x spelling blocked.
+func TestR105GAP2573DriveHomeRsyncIntoState(t *testing.T) {
+	const home = "C:/Users/dcw-std1"
+	rows := []struct {
+		id, command string
+		want        bool
+	}{
+		{"KN03", "rsync a.txt ~/.defenseclaw/hooks/x.sh", true},
+		{"KN04", "rsync -a src/ ~/.defenseclaw/hooks/", true},
+		{"KP14c", "rsync a.txt ~/.defenseclaw/config.yaml", true},
+		{"msys", "rsync a.txt /c/Users/dcw-std1/.defenseclaw/hooks/x.sh", true},
+		{"rsync into logs", "rsync -a src/ ~/.defenseclaw/logs/", false},
+		{"rsync into root by name", "rsync -a ~/proj/out ~/.defenseclaw/", false},
+		{"rsync project", "rsync -a src/ ~/proj2/", false},
+		{"rsync state out", "rsync -a ~/.defenseclaw/ /tmp/backup/", false},
+		{"rsync remote", "rsync -a src/ host:~/.defenseclaw/hooks/", false},
+		{"rsync other drive", "rsync -a src/ D:/backup/", false},
+	}
+	for _, row := range rows {
+		facts := actionfacts.Analyze(actionfacts.Input{
+			Tool: "Bash", Command: row.command, CWD: home + "/proj2", ActiveHome: home,
+		})
+		if got := globbedStateMutation(facts); got != row.want {
+			t.Errorf("%s %q: globbedStateMutation = %v, want %v", row.id, row.command, got, row.want)
+		}
+	}
+}
