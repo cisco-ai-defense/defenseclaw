@@ -587,3 +587,67 @@ func TestWindowsHomeCdThenRelativeStateWrite(t *testing.T) {
 		}
 	}
 }
+
+// A copy after a static cd runs in the directory the cd names. The link
+// reading looked for its sources in the starting directory, where a
+// missing source counts as a possible link on Linux, and after the cd that
+// made every later write unknown: cd ~ && cp -r project project-bak and the
+// env -C ~ twin of it were blocked as SSH key writes (GAP-2551). A copy that
+// keeps a real link to the keys file still makes the write through it a key
+// write.
+func TestHomeCdRecursiveCopyReadsSourcesInTheNewDirectory(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX shell spellings")
+	}
+	home := t.TempDir()
+	cwd := filepath.Join(home, "project")
+	for _, dir := range []string{filepath.Join(home, ".defenseclaw", "hooks"), filepath.Join(home, ".ssh"), filepath.Join(cwd, "src"), filepath.Join(home, "linked")} {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, name := range []string{filepath.Join(home, ".defenseclaw", "config.yaml"), filepath.Join(home, ".ssh", "authorized_keys"), filepath.Join(cwd, "a.txt"), filepath.Join(cwd, "src", "m.go")} {
+		if err := os.WriteFile(name, []byte("x\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.Symlink(filepath.Join(home, ".ssh", "authorized_keys"), filepath.Join(home, "linked", "lnk")); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", home)
+	rows := []homeStateWriteRow{
+		{"cd ~ && cp -r project project-bak", false},
+		{"cd ~ && rsync -a project/ project-copy/", false},
+		{`cd "$HOME" && cp -r project project-bak`, false},
+		{`( cd "$HOME" && cp -r project project-bak )`, false},
+		{"cd .. && cp -r project project-bak", false},
+		{"cd " + home + " && cp -r project project-bak", false},
+		{"cd ~ && cp -a project project-bak", false},
+		{"cd ~ && cp -r project/src project-src", false},
+		{"env -C ~ cp -r project project-bak", false},
+		{"env -C ~ rsync -a project/ project-copy/", false},
+		{"env -C ~ cp -a project project-bak", false},
+		{"env -C ~ cp -R project/src project/src2", false},
+		{`env -C "$HOME" cp -r project project-bak`, false},
+		{"env -C ~ rsync -a project/a.txt project/b.txt", false},
+		{"env -C .. cp -r project project-bak", false},
+		{"cd ~ && cp project/a.txt .ssh/authorized_keys", true},
+		{"cd ~ && cp -r project/a.txt .defenseclaw/config.yaml", true},
+		{"cd ~ && cp -a linked linked-bak && echo k >> linked-bak/lnk", true},
+		{"env -C ~ cp -a linked linked-bak && echo k >> ~/linked-bak/lnk", true},
+	}
+	for _, connectorName := range []string{"claudecode", "codex"} {
+		installDefaultProfileConnector(t, connectorName)
+		for _, hint := range []actionfacts.Dialect{"", actionfacts.DialectPOSIX} {
+			for _, row := range rows {
+				input := actionfacts.Input{Tool: "Bash", Command: row.command, CWD: cwd, ActiveHome: home, DialectHint: hint}
+				findings := dispatchTrustedAction(t.Context(), trustedActionRequest{
+					Input: input, Connector: connectorName, EnforcementCapable: true,
+				})
+				if blocked := buildVerdict(findings, "tool_call").Action == "block"; blocked != row.block {
+					t.Errorf("%s hint=%q %q: block=%v, want %v %v", connectorName, hint, row.command, blocked, row.block, FindingStrings(findings))
+				}
+			}
+		}
+	}
+}

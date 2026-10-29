@@ -1654,6 +1654,23 @@ func commandLinksWithFacts(command, cwd, home string, facts map[string]string, r
 			args, words, static, start = args[index:], words[index:], static[index:], args[index].Pos()
 			program = programBase(words[0])
 		}
+		// A static wrapper that only moves the directory (env -C DIR,
+		// env --chdir DIR) runs a copy or archive child there (GAP-2551).
+		movedDir := ""
+		if run, ok := actionfacts.StaticPrefixWrapperChild(words, static); ok && run.Dir != "" && !run.DirUnknown &&
+			!run.ChangesResolution && run.Index < len(words) && static[run.Index] && words[run.Index] != "" &&
+			(slices.Contains(copyPrograms, programBase(words[run.Index])) || slices.Contains(archivePrograms, programBase(words[run.Index]))) {
+			movedDir = run.Dir
+			args, words, static, start = args[run.Index:], words[run.Index:], static[run.Index:], args[run.Index].Pos()
+			program = programBase(words[0])
+		}
+		callDir := cwd
+		if placed, ok := linkDirs[call]; ok {
+			callDir = placed
+		}
+		if movedDir != "" {
+			callDir = OperandPath(movedDir, callDir)
+		}
 		// busybox ln and toybox ln are ln (GAP-1521).
 		for slices.Contains(multicallPrograms, program) && len(args) > 1 {
 			args, words, static, start = args[1:], words[1:], static[1:], args[1].Pos()
@@ -1682,46 +1699,53 @@ func commandLinksWithFacts(command, cwd, home string, facts map[string]string, r
 				links.unknown(true)
 			}
 		case slices.Contains(copyPrograms, program):
+			// A copy after static top-level cd statements runs in the
+			// directory they name: its sources are read there, not in the
+			// starting directory, where a missing source read as a possible
+			// link and made cd ~ && cp -r project project-bak a key write
+			// (GAP-2551).
+			dir := callDir
 			if len(args) == 3 && !static[1] && static[2] &&
 				quotedDynamicCopySource(args[1]) && words[2] != "" && !strings.HasPrefix(words[2], "-") {
 				// A quoted source is one argv word. If it expands to an option,
 				// cp has no source and cannot write its fixed destination.
-				links.copyDestinations = append(links.copyDestinations, OperandPath(words[2], cwd))
+				links.copyDestinations = append(links.copyDestinations, OperandPath(words[2], dir))
 				return true
 			}
-			destination := cpDestination(words[1:], static[1:], cwd)
+			destination := cpDestination(words[1:], static[1:], dir)
 			if destination != "" {
 				links.copyDestinations = append(links.copyDestinations, destination)
 			}
 			option, dynamic := copyLinkOptions(args[1:], words[1:], static[1:])
 			if copyPreservesLinks(words[1:], static[1:]) {
 				copyScopes = append(copyScopes, destination)
-				if cpDiskSymlink(words[1:], static[1:], cwd, home, facts, record) {
+				if cpDiskSymlink(words[1:], static[1:], dir, home, facts, record) {
 					links.unknownCopyIn(destination)
 				}
 			}
 			switch {
 			case option:
-				if slices.Contains(static, false) || !links.add(program, words[1:], cwd) {
+				if slices.Contains(static, false) || !links.add(program, words[1:], dir) {
 					links.unknown(true)
 				}
 			case dynamic:
 				// A word that is not static may expand to a link option.
 				links.unknown(false)
-				copyScopes = append(copyScopes, cpDestination(words[1:], static[1:], cwd))
+				copyScopes = append(copyScopes, cpDestination(words[1:], static[1:], dir))
 			}
 		case slices.Contains(archivePrograms, program):
+			dir := callDir // As for a copy (GAP-2551).
 			if slices.Contains(static[1:], false) {
 				// An option supplied at runtime may select extraction.
-				links.unknownIn(archiveDestination(program, words[1:], static[1:], cwd))
+				links.unknownIn(archiveDestination(program, words[1:], static[1:], dir))
 			}
 			if archiveMayLink(program, words[1:], static[1:]) {
-				links.unknownIn(archiveDestination(program, words[1:], static[1:], cwd))
+				links.unknownIn(archiveDestination(program, words[1:], static[1:], dir))
 			}
 			if archiveCopiesLinks(program, words[1:], static[1:]) {
-				destination := archiveDestination(program, words[1:], static[1:], cwd)
+				destination := archiveDestination(program, words[1:], static[1:], dir)
 				copyScopes = append(copyScopes, destination)
-				if archiveCopiesDiskSymlink(program, words[1:], static[1:], cwd, home, facts, record) {
+				if archiveCopiesDiskSymlink(program, words[1:], static[1:], dir, home, facts, record) {
 					links.unknownIn(destination)
 				}
 			}
@@ -1772,20 +1796,34 @@ func commandLinksWithFacts(command, cwd, home string, facts map[string]string, r
 	return links
 }
 
-// topLevelLinkDirectories places the link calls of a command whose
-// directory changes are all static top-level cd statements in a ; / && / ||
-// list (cd build && ln ../a.txt b1): each link call runs in the directory the
-// cd statements before it name, read lexically from cwd (GAP-1742). known is
-// false when any cd, pushd or popd is elsewhere or dynamic, so the link scope
-// keeps its conservative reading.
+// topLevelLinkDirectories places the link, copy and archive calls of a
+// command whose directory changes are all static top-level cd statements in
+// a ; / && / || list (cd build && ln ../a.txt b1, cd ~ && cp -r a b): each
+// call runs in the directory the cd statements before it name, read
+// lexically from cwd (GAP-1742, GAP-2551). A plain ( ... ) subshell is read
+// the same way, and its cd statements end with it. known is false when any
+// cd, pushd or popd is elsewhere or dynamic, so the link scope keeps its
+// conservative reading.
 func topLevelLinkDirectories(file *syntax.File, cwd, home string) (dirs map[*syntax.CallExpr]string, known bool) {
+	// statements holds the flattened statements; a nil entry at an index in
+	// enter or leave marks where a subshell starts or ends.
 	var statements []*syntax.Stmt
+	enter, leave := map[int]int{}, map[int]int{}
 	var flatten func(*syntax.Stmt)
 	flatten = func(stmt *syntax.Stmt) {
-		if pair, ok := stmt.Cmd.(*syntax.BinaryCmd); ok && len(stmt.Redirs) == 0 && !stmt.Background && !stmt.Negated &&
+		plain := len(stmt.Redirs) == 0 && !stmt.Background && !stmt.Negated
+		if pair, ok := stmt.Cmd.(*syntax.BinaryCmd); ok && plain &&
 			(pair.Op == syntax.AndStmt || pair.Op == syntax.OrStmt) {
 			flatten(pair.X)
 			flatten(pair.Y)
+			return
+		}
+		if subshell, ok := stmt.Cmd.(*syntax.Subshell); ok && plain {
+			enter[len(statements)]++
+			for _, inner := range subshell.Stmts {
+				flatten(inner)
+			}
+			leave[len(statements)]++
 			return
 		}
 		statements = append(statements, stmt)
@@ -1815,7 +1853,14 @@ func topLevelLinkDirectories(file *syntax.File, cwd, home string) (dirs map[*syn
 	}
 	dirs = make(map[*syntax.CallExpr]string)
 	dir := cwd
-	for _, stmt := range statements {
+	var saved []string
+	for index, stmt := range statements {
+		for n := leave[index]; n > 0; n-- {
+			dir, saved = saved[len(saved)-1], saved[:len(saved)-1]
+		}
+		for n := enter[index]; n > 0; n-- {
+			saved = append(saved, dir)
+		}
 		call, ok := stmt.Cmd.(*syntax.CallExpr)
 		if !ok || len(call.Args) == 0 {
 			continue
@@ -1835,19 +1880,9 @@ func topLevelLinkDirectories(file *syntax.File, cwd, home string) (dirs map[*syn
 			dir = OperandPath(target, dir)
 			continue
 		}
-		if slices.Contains(linkPrograms, programBase(program)) {
-			dirs[call] = dir
-			continue
-		}
-		values := make([]string, len(call.Args))
-		literal := make([]bool, len(call.Args))
-		for i, arg := range call.Args {
-			values[i], literal[i] = StaticWord(arg, home)
-		}
-		if index, wrapped := plainWrappedChild(values, literal); wrapped &&
-			slices.Contains(linkPrograms, programBase(values[index])) {
-			dirs[call] = dir
-		}
+		// Every other call starts in dir; a wrapper that moves the
+		// directory (env -C) moves it from there.
+		dirs[call] = dir
 	}
 	return dirs, true
 }
