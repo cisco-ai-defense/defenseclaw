@@ -364,3 +364,38 @@ func TestAssignedEnvChdirAndFlockStringWriteWhatThePlainCallWrites(t *testing.T)
 		{`flock /tmp/zzl -c "cp a.txt b.txt"`, false},
 	})
 }
+
+// A named runner (setsid, flock FILE, stdbuf, ionice, caffeinate, doas,
+// env -C) before sh -c STRING runs the shell with the argv the caller
+// expanded, so the line writes what sh -c STRING writes (GAP-2519); and a
+// wrapper with options before a writer with an extra word that may expand
+// to nothing writes what the plain call writes (GAP-2477).
+func TestRunnersBeforeAShellStringWriteWhatTheStringWrites(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX shell spellings")
+	}
+	judgeHomeStateWriteRows(t, []homeStateWriteRow{
+		{`setsid sh -c "cp a.txt ~/.defenseclaw/config.yaml"`, true},
+		{`setsid -f bash -c "cp a.txt ~/.defenseclaw/hooks/x.sh"`, true},
+		{`flock /tmp/zzl sh -c "cp a.txt ~/.defenseclaw/config.yaml"`, true},
+		{`flock -n /tmp/zzl bash -c "cp a.txt ~/.defenseclaw/config.yaml"`, true},
+		{`stdbuf -o0 bash -lc "cp a.txt ~/.defenseclaw/config.yaml"`, true},
+		{`ionice -c3 sh -c "cp a.txt ~/.defenseclaw/config.yaml"`, true},
+		{`caffeinate -i sh -c "cp a.txt ~/.defenseclaw/config.yaml"`, true},
+		{`doas -u root sh -c "cp a.txt HOMEDIR/.defenseclaw/config.yaml"`, true},
+		{`env -C HOMEDIR sh -c "cp project/a.txt .defenseclaw/config.yaml"`, true},
+		{`A=1 setsid nice -n 5 sh -c "tee ~/.defenseclaw/config.yaml < a.txt"`, true},
+		{"$(true) cp a.txt ~/.defenseclaw/config.yaml", true},
+		{"sudo -u root cp a.txt ~/.defenseclaw/config.yaml $(true)", true},
+		{"env -i cp a.txt ~/.defenseclaw/config.yaml $(true)", true},
+		{"command -p cp a.txt ~/.defenseclaw/config.yaml $(true)", true},
+		{"nohup cp a.txt ~/.defenseclaw/config.yaml $(true)", true},
+		{`setsid sh -c "npm --version"`, false},
+		{`flock /tmp/zzl sh -c "make --version"`, false},
+		{`flock /tmp/zzl bash -c "cp a.txt b.txt"`, false},
+		{`stdbuf -oL bash -c "tee build.log < a.txt"`, false},
+		{`env -C /tmp sh -c "cp HOMEDIR/project/a.txt .defenseclaw/config.yaml"`, false},
+		{"sudo -u root cp a.txt b.txt $(true)", false},
+		{"env -i cp a.txt b.txt $(true)", false},
+	})
+}
