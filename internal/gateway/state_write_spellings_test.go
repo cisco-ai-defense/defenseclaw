@@ -294,3 +294,73 @@ func TestHomeDeclarationInAFunctionBody(t *testing.T) {
 		{"f(){ export FOO=1; cp a.txt ~/project/out.txt; }; f", false},
 	})
 }
+
+// A link the command itself makes to DefenseClaw state (the ~/.defenseclaw
+// directory, hooks/ or a state file) is an alias of that state: a later
+// write through the link name writes the state, plain or behind a static
+// prefix wrapper, as the ~/.ssh alias does (GAP-1521). The wrapped forms
+// blocked only through the cautious unknown-link reading before 67815d9314
+// (checker pod4 RV-pod4-1, GAP-2496); the plain forms never blocked
+// (GAP-2522).
+func TestWriteThroughALinkToStateIsAStateWrite(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX shell spellings")
+	}
+	judgeHomeStateWriteRows(t, []homeStateWriteRow{
+		{"ln -s ~/.defenseclaw hc; cp a.txt hc/config.yaml", true},
+		{"nohup ln -s ~/.defenseclaw hc; cp a.txt hc/config.yaml", true},
+		{"env A=1 ln -s ~/.defenseclaw hc; cp a.txt hc/config.yaml", true},
+		{"sudo ln -s ~/.defenseclaw hc; cp a.txt hc/config.yaml", true},
+		{"ln -s ~/.defenseclaw/hooks hh; cp a.txt hh/x.sh", true},
+		{"nohup ln -s ~/.defenseclaw/hooks hh; cp a.txt hh/x.sh", true},
+		{"ln -s ~/.defenseclaw/config.yaml c; cp a.txt c", true},
+		{"nohup ln -s ~/.defenseclaw/config.yaml c; cp a.txt c", true},
+		{"ln -s ~/.defenseclaw hc && echo x > hc/config.yaml", true},
+		{"nohup ln -s ~/.defenseclaw hc && echo x > hc/config.yaml", true},
+		{"busybox ln -s ~/.defenseclaw hc; cp a.txt hc/config.yaml", true},
+		{"sudo busybox ln -s ~/.defenseclaw hc; cp a.txt hc/config.yaml", true},
+		{"setsid ln -s ~/.defenseclaw hc; cp a.txt hc/config.yaml", true},
+		{"nohup ln -s ~/.defenseclaw hc; tee hc/config.yaml < a.txt", true},
+		{"time ln -s ~/.defenseclaw hc; cp a.txt hc/config.yaml", true},
+		{"nice ln -s ~/.defenseclaw hc; cp a.txt hc/config.yaml", true},
+		{"ln -s HOMEDIR/.defenseclaw hc; mv a.txt hc/config.yaml", true},
+		{"ln -sfn ~/.defenseclaw/hooks hh && cp a.txt hh/", true},
+		{"ln -s ~/.ssh sd; cp a.txt sd/authorized_keys", true},
+		{"nohup ln -s ~/.ssh sd; cp a.txt sd/authorized_keys", true},
+		{"ln -s HOMEDIR/.defenseclaw hc; rm hc/config.yaml", true},
+		{"ln -s ~/.defenseclaw hc; ln -sf HOMEDIR/project/a.txt hc/config.yaml", true},
+		{"ln -s ~/.defenseclaw/config.yaml cfg-link", false},
+		{"nohup ln -s ~/.defenseclaw/config.yaml cfg-link", false},
+		{"sudo ln -sf ~/.defenseclaw/config.yaml cfg-link", false},
+		{"ln -s ~/.defenseclaw/config.yaml c; rm c", false},
+		{"ln -s ~/.defenseclaw hc; rm hc", false},
+		{"ln -s ~/.defenseclaw hc; cat hc/config.yaml", false},
+		{"ln -s ~/.defenseclaw hc; cp hc/config.yaml backup.yaml", false},
+		{"nohup ln -s ~/.defenseclaw hc; ls hc/", false},
+		{"ln -s HOMEDIR/project/src s; cp a.txt s/x.txt", false},
+		{"ln -sf $(pwd)/a.txt ~/.local/bin/tool", false},
+		{"nohup ln -sf $(pwd)/a.txt ~/.local/bin/tool", false},
+	})
+}
+
+// env -C behind an assignment word, a flock FILE -c STRING and an env -C
+// call before a later wrapped state write were read as nothing (checker
+// pod4 Q03, R06, R01, R26, GAP-2519).
+func TestAssignedEnvChdirAndFlockStringWriteWhatThePlainCallWrites(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX shell spellings")
+	}
+	judgeHomeStateWriteRows(t, []homeStateWriteRow{
+		{"A=1 env -C / cp HOMEDIR/project/a.txt ~/.defenseclaw/config.yaml", true},
+		{"A=1 env -C / cp HOMEDIR/project/a.txt HOMEDIR/.defenseclaw/config.yaml", true},
+		{"A=1 B=2 env -C HOMEDIR cp project/a.txt .defenseclaw/config.yaml", true},
+		{"A=1 env -C / cp a.txt b.txt; nohup cp a.txt ~/.defenseclaw/config.yaml", true},
+		{`flock /tmp/zzl -c "cp a.txt ~/.defenseclaw/config.yaml"`, true},
+		{`flock -w 5 /tmp/zzl -c "cp a.txt ~/.defenseclaw/hooks/x.sh"`, true},
+		{`flock /tmp/zzl --command "cp a.txt ~/.defenseclaw/config.yaml"`, true},
+		{"A=1 env -C / cp a.txt b.txt", false},
+		{"A=1 env -C /tmp cp HOMEDIR/project/a.txt .defenseclaw/config.yaml", false},
+		{`flock /tmp/zzl -c "make --version"`, false},
+		{`flock /tmp/zzl -c "cp a.txt b.txt"`, false},
+	})
+}

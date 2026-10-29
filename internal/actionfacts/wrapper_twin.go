@@ -75,6 +75,11 @@ func WrapperUnwrapTwin(command string) (twin string, ok bool) {
 				}
 			}
 		case *syntax.CallExpr:
+			if command, ok := flockShellString(typed.Args); ok {
+				// flock FILE -c STRING runs sh -c STRING under the lock.
+				replace(typed.Args[0].Pos(), typed.Args[command].Pos(), "sh -c ")
+				return true
+			}
 			run, writer := wrappedWriterRun(typed.Args)
 			if !writer || run.Index == 0 {
 				return true
@@ -83,7 +88,17 @@ func WrapperUnwrapTwin(command string) (twin string, ok bool) {
 				replace(typed.Args[0].Pos(), typed.Args[run.Index].Pos(), "")
 				return true
 			}
-			replace(typed.Args[0].Pos(), typed.Args[run.Index].Pos(), "( cd "+posixSingleQuoted(run.Dir)+" && ")
+			// A=1 env -C dir cp ... is ( cd dir && A=1 cp ... ): the
+			// assignments stay in the child environment, and the subshell
+			// opens before them so the twin parses.
+			open := typed.Args[0].Pos()
+			if len(typed.Assigns) > 0 {
+				open = typed.Assigns[0].Pos()
+				replace(open, open, "( cd "+posixSingleQuoted(run.Dir)+" && ")
+				replace(typed.Args[0].Pos(), typed.Args[run.Index].Pos(), "")
+			} else {
+				replace(open, typed.Args[run.Index].Pos(), "( cd "+posixSingleQuoted(run.Dir)+" && ")
+			}
 			replace(typed.End(), typed.End(), " )")
 		}
 		return true
@@ -200,6 +215,42 @@ func wrappedWriterRun(args []*syntax.Word) (PrefixWrapperRun, bool) {
 		index = next
 	}
 	return PrefixWrapperRun{}, false
+}
+
+// flockShellString returns the index of the STRING word of a
+// flock FILE -c STRING (or --command STRING) call run after static prefix
+// wrappers that keep the directory: flock runs sh -c STRING under the
+// lock, so the call writes what sh -c STRING writes (GAP-2519).
+func flockShellString(args []*syntax.Word) (int, bool) {
+	value := func(at int) (string, bool) {
+		if at >= len(args) {
+			return "", false
+		}
+		word := projectPOSIXWord(args[at])
+		return word.Value, !word.Expands
+	}
+	var run PrefixWrapperRun
+	index := 0
+	for depth := 0; index < len(args) && depth < 8; depth++ {
+		word, static := value(index)
+		if !static || word == "" {
+			return 0, false
+		}
+		name := wrapperProgramName(word)
+		next, known := wrapperChildIndex(name, value, len(args), index, &run)
+		if !known || run.Dir != "" || run.DirUnknown {
+			return 0, false
+		}
+		if name == "flock" {
+			option, static := value(next)
+			if static && (option == "-c" || option == "--command") && next+2 == len(args) {
+				return next + 1, true
+			}
+			return 0, false
+		}
+		index = next
+	}
+	return 0, false
 }
 
 // wrapperChildIndex returns the index of the word a prefix wrapper at
