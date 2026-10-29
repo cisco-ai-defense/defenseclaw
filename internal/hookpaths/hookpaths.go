@@ -1522,6 +1522,34 @@ type shellLinks struct {
 	copyDestinations []string
 }
 
+// merge adds the links a nested literal shell body makes.
+func (l *shellLinks) merge(inner shellLinks) {
+	l.aliases = append(l.aliases, inner.aliases...)
+	l.known = l.known && inner.known
+	l.opaque = l.opaque || inner.opaque
+	l.relative = l.relative || inner.relative
+	l.globalOpaque = l.globalOpaque || inner.globalOpaque
+	l.opaqueScopes = append(l.opaqueScopes, inner.opaqueScopes...)
+	l.copyDestinations = append(l.copyDestinations, inner.copyDestinations...)
+}
+
+// literalShellBody returns the body of a POSIX shell called as sh -c BODY with
+// only fixed options, every word static and no positional words after the
+// body, when the body itself parses. Anything else returns "".
+func literalShellBody(program string, words []string, static []bool) string {
+	if !posixShellProgram(program) || slices.Contains(static, false) {
+		return ""
+	}
+	body, ok := shellCommandBodyIndex(words)
+	if !ok || body != len(words)-1 {
+		return ""
+	}
+	if _, parsed := parseShell(words[body]); !parsed {
+		return ""
+	}
+	return words[body]
+}
+
 // unknown marks the links unknown, and opaque when a link may be created.
 func (l *shellLinks) unknown(opaque bool) {
 	l.known = false
@@ -1651,6 +1679,9 @@ func commandLinksWithFacts(command, cwd, home string, facts map[string]string, r
 	renames, cds := false, false
 	var copyScopes []string
 	boundPrograms := actionBoundProgramWords(file, home)
+	// A literal shell -c body is read in this directory only when nothing in
+	// the command changes directory first.
+	changesDirectory := tactics.RunsProgram(command, cdPrograms...)
 	syntax.Walk(file, func(node syntax.Node) bool {
 		call, isCall := node.(*syntax.CallExpr)
 		if !isCall || len(call.Args) == 0 {
@@ -1764,6 +1795,12 @@ func commandLinksWithFacts(command, cwd, home string, facts map[string]string, r
 			renames = true
 		case slices.Contains(cdPrograms, program):
 			cds = true
+		case !changesDirectory && literalShellBody(program, words, static) != "":
+			// sh -c "ln -s build/out bin" makes the link the plain ln makes,
+			// in the same directory: read the body as that command, so its
+			// links are known (or opaque) exactly as they would be written
+			// plain (GAP-2526).
+			links.merge(commandLinksWithFacts(literalShellBody(program, words, static), cwd, home, facts, record))
 		default:
 			// A wrapper (sudo, env, xargs, find -exec, sh -c) may run one.
 			text := command[start.Offset():call.End().Offset()]
