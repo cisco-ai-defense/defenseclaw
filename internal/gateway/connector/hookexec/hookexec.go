@@ -3299,7 +3299,7 @@ func failForeignHookBlocked(opts Options, sp spec, reason string) int {
 	case "codex":
 		return emitCodexBlock(opts, reason)
 	case "cursor":
-		fmt.Fprintln(opts.Stdout, cursorFallbackOutput(opts.Event, true, reason))
+		fmt.Fprintln(opts.Stdout, cursorClosedOutput(opts, reason))
 		return sp.unreachableStrict.exit
 	case "antigravity":
 		if strings.TrimSpace(opts.Event) == "PreToolUse" {
@@ -3545,7 +3545,7 @@ func failManagedStandaloneClosed(opts Options, sp spec, result failResult, layer
 		}
 		return emitCodexBlock(opts, text)
 	case "cursor":
-		fmt.Fprintln(opts.Stdout, cursorFallbackOutput(opts.Event, true, text))
+		fmt.Fprintln(opts.Stdout, cursorClosedOutput(opts, text))
 		return result.exit
 	case "devin":
 		fmt.Fprintln(opts.Stdout, devinBlockText(text))
@@ -3829,11 +3829,11 @@ func emitHookResult(opts Options, sp spec, result failResult) int {
 		return emitCodexBlock(opts, reason)
 	}
 	if sp.connector == "cursor" {
-		fmt.Fprintln(opts.Stdout, cursorFallbackOutput(
-			opts.Event,
-			result.closed || result.exit != 0,
-			result.body,
-		))
+		if result.closed || result.exit != 0 {
+			fmt.Fprintln(opts.Stdout, cursorClosedOutput(opts, result.body))
+		} else {
+			fmt.Fprintln(opts.Stdout, cursorFallbackOutput(opts.Event, false, result.body))
+		}
 		return result.exit
 	}
 	if sp.dialect == copilotVSCodeLocalSurface {
