@@ -731,14 +731,17 @@ the binaries, so stage the payload again and run its `ensure --payload <dir> --c
   uninstall again. Back up `~/.defenseclaw/foreign-hooks-backup` first if a user wants their own
   moved-aside hooks back.
 - **A user's own install from before the enrollment (Linux and macOS).** If an enrolled account had its own DefenseClaw install before the enrollment (its `~/.defenseclaw` holds `config.yaml`, `.env`, `audit.db` or `previous/`), `--purge` leaves that folder and the install's binaries exactly as they are and names the account in the result (`kept the DefenseClaw per-user data of user <name> ...` and a `per_user_state_remaining` warning). A machine uninstall never deletes or moves an account's own data. No `~/.defenseclaw-backup-*` folder is made.
-- **A user whose home is gone (Linux and macOS).** When an enrolled user's home folder no longer
-  exists and its parent folder still holds other entries, the hooks and `~/.defenseclaw` went with
+- **A user whose home is gone (Linux and macOS).** When an enrolled user's home folder was
+  deleted and its parent folder still holds other entries, the hooks and `~/.defenseclaw` went with
   it. The uninstall warns (`per_user_hooks_remaining`) with the home and goes on. A home that does
-  not answer, or whose parent folder is missing or empty (the mount point of an unmounted volume),
-  is not available rather than gone. For an account that still exists, the uninstall refuses
+  not answer, or whose parent folder is missing, empty (the mount point of an unmounted volume) or
+  cannot be read, is not available rather than gone. So is a home moved or renamed aside: its
+  parent folder still holds another folder the account owns (for example after
+  `mv /home/<user> /home/.<user>-away`, or `/Users/<user>` on macOS), and that folder keeps the
+  agent configs with DefenseClaw's hook entries. For an account that still exists, the uninstall refuses
   before it changes anything (`uninstall_precheck_refused`): the services, the machine policy and
-  the hooks and Claude Code blockers of every other user stay. It names the home: mount it and run
-  the uninstall again. A home that goes away while the uninstall runs stops it later
+  the hooks and Claude Code blockers of every other user stay. It names the home: mount it, or move it
+  back to its home path, and run the uninstall again. A home that goes away while the uninstall runs stops it later
   (`uninstall_incomplete`), with the binaries, the deployment record and the services kept. A per-domain home layout (SSSD
   `fallback_homedir = /home/%d/%u`) looks the same when the only account of a domain had its home
   folder deleted: recreate that folder as a folder the account owns, then run the uninstall again.
