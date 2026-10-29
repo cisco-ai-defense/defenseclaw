@@ -99,12 +99,14 @@ DefenseClaw's own state, agent hook registrations, and files that run code
 
 | Computer | Sees | Enforces |
 | --- | --- | --- |
-| Linux host, open-source | Hook rules on command text and read paths (for example `PATH-SSH-KEY` and `PATH-AWS-CREDS`) | Hook rules in action mode |
+| Linux host, open-source | Hook rules on command text and read paths (for example `PATH-SSH-KEY` and `PATH-AWS-CREDS`) | Hook rules in action mode: an SSH private key read is denied, other credential reads alert (see below) |
 | Linux host, managed | The same, plus Plane C file events and the Tetragon `observe` policy | Hook rules; the kernel controls deny opens of SSH private keys by an enrolled agent's descendants when enforcement is on. Cloud credentials and provider keys are observed only, because the agent's own sign-in reads them |
 | Linux sandbox | Environment variable names in discovery | By construction: the real model key never enters the sandbox (OpenShell swaps a placeholder on the provider's endpoint), the home directory does not exist there, and `.env` files read as empty |
 | macOS host | Hook rules; managed Endpoint Security events | Hook rules |
 | macOS sandbox | Hook rules | By construction, as on Linux: the copy holds back secret files |
 | Windows | Hook rules; the Security log when audited | Hook rules |
+
+With the default rule pack, the hook rules deny a read of an SSH private key (`PATH-SSH-KEY`, for example `cat ~/.ssh/id_rsa`), also in action mode. A plain local read of another credential file, for example `cat ~/.aws/credentials` (`PATH-AWS-CREDS`), is a `MEDIUM` alert and the command goes ahead: agents and their tools read these files to sign in. The agent shows `DefenseClaw observed a MEDIUM ... finding: rule PATH-AWS-CREDS`, and the alert is in `defenseclaw alerts`.
 
 ### Persistence
 

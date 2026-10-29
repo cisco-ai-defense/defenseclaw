@@ -1432,7 +1432,13 @@ const r105Rows: DocRow[] = [
   // GAP-2494 (docs pod, 2026-10-29, live managed RHEL rc.9): Linux and macOS ensure check the size first and word it themselves.
   { gap: "GAP-2494", page: "enterprise/configuration.mdx", section: "Where the config lives", has: ["On Linux and macOS, ensure refuses it as `config_invalid` (exit `1`) with `config exceeds 4194304 bytes`, or with `<file> line <n>: parsed YAML exceeds the 65,536-node limit`."], lacks: ["refuse it with the same message"] },
   { gap: "GH #1101 p0:GAP-0677", page: "enterprise/windows.mdx", section: "2. Write the config", has: ["The file may be at most 4 MiB and 65,536 YAML nodes", "([limits](/docs/enterprise/configuration#where-the-config-lives))"] },
-  { gap: "GH #1101 p0:GAP-0765", page: "enterprise/configuration.mdx", has: ["A longer one is refused with `guardrail.block_message must be a string of at most 4096 characters (it has 4097)`"] },
+  { gap: "GH #1101 p0:GAP-0765", page: "enterprise/configuration.mdx", has: ["On Linux and macOS, ensure prints `guardrail.block_message must be a string of at most 4096 characters (it has 4097)`."] },
+  // GAP-2500 (docs pod, 2026-10-29, live managed Windows rc.9): Windows words the block_message limit as the schema error.
+  { gap: "GAP-2500", page: "enterprise/configuration.mdx", has: ["On Windows, `enterprise windows ensure` refuses it as `invalid_arguments` (exit `1639`) at `$.guardrail.block_message` with `configuration violates the maxLength constraint; expected a string of at most 4096 characters (it has 4097)`."], lacks: ["A longer one is refused with `guardrail.block_message must be"] },
+  // GAP-2502 (docs pod, 2026-10-29, live OSS RHEL rc.9 action mode): a local credential read alerts; only an SSH private key read is denied.
+  { gap: "GAP-2502", page: "segmentation.mdx", section: "Credential files", has: ["| Hook rules in action mode: an SSH private key read is denied, other credential reads alert (see below) |", "A plain local read of another credential file, for example `cat ~/.aws/credentials` (`PATH-AWS-CREDS`), is a `MEDIUM` alert and the command goes ahead"], lacks: ["`PATH-AWS-CREDS`) | Hook rules in action mode |"] },
+  // GAP-2491 (docs pod, 2026-10-29, live managed RHEL rc.9 -> 1.0.3 dnf downgrade, 1.4 GB audit.db): hooks deny for minutes after the rollback.
+  { gap: "GAP-2491", page: "enterprise/lifecycle.mdx", section: "Roll back", has: ["**Rollback to 1.0.3 with a large audit store (Linux):**", "On RHEL with a 1.4 GB store this lasted 3.5 to 7.5 minutes after `dnf downgrade` finished.", "Roll back while agents are idle"] },
   { gap: "GH #1101 p0:GAP-0777", page: "policies/rulepack-validation.mdx", has: ["Adding or editing that file changes the digest, so validate the pack again and pin the new digest"] },
   // 1.0.5 docs sync (2026-10-28): fixed 1.0.4 known issues left the page; open ones stay.
   { gap: "1.0.4 known issues fixed in 1.0.5", page: "support-matrix.mdx", section: "Known issues", lacks: ["These are bugs in 1.0.4.", "**Changing the fail mode with Setup `/ensure`:**", "hot-config-undo-closed", "**No skill, MCP or plugin scanner:**"] },
@@ -2220,6 +2226,13 @@ describe('policy test leaves unblocks out without --sandbox (GAP-2495)', () => {
   });
 });
 
+describe('a local credential read alerts, an SSH private key read is denied (GAP-2502)', () => {
+  it('the gateway still makes a plain credential-path read an alert', () => {
+    const disp = source('internal/gateway/trusted_action_context_disposition.go');
+    assert.ok(disp.includes('// A local read of a credential path is MEDIUM: alert, do not') && disp.includes('finding.enforcement = findingEnforcementAlertOnly') && disp.includes('trustedActionActiveSSHPrivateKeyContentRead(findingFacts)'), 'credential-read disposition changed: re-check segmentation.mdx Credential files (GAP-2502)');
+  });
+});
+
 describe('config limit refusals match the configuration pages (GH #1101)', () => {
   it('the parser and schema still word the 4 MiB, 65,536-node and block_message limits as quoted', () => {
     const yaml = source('internal/config/yaml_v8.go');
@@ -2233,6 +2246,8 @@ describe('config limit refusals match the configuration pages (GH #1101)', () =>
     assert.ok(source('internal/enterpriseunix/config.go').includes('return nil, fmt.Errorf("config exceeds %d bytes", config.ObservabilityV8MaxSourceBytes)') && source('internal/config/observability_v8_types.go').includes('ObservabilityV8MaxSourceBytes = 4 * 1024 * 1024'), 'Linux/macOS config size refusal changed: re-check the Linux and macOS sentence in enterprise/configuration.mdx Where the config lives (GAP-2494)');
     const schema = source('internal/config/schema_v8.go');
     assert.ok(schema.includes('"a string of %s %d characters"') && schema.includes('" (it has %d)"'), 'schema length refusal changed: re-check the block_message sentence in enterprise/configuration.mdx');
+    // GAP-2500: Linux/macOS word it <path> must be <expected>; Windows gives the schema summary.
+    assert.ok(source('internal/enterpriseunix/config_messages.go').includes('reason = "must be " + schemaErr.Expected') && schema.includes('Summary:       "configuration violates the " + keyword + " constraint",'), 'block_message refusal wording changed: re-check the Linux/macOS and Windows sentences in enterprise/configuration.mdx (GAP-2500)');
     const configSchema = JSON.parse(source('schemas/config/v8/defenseclaw-config.schema.json'));
     const limits: unknown[] = [];
     const walk = (node: unknown): void => {
