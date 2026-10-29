@@ -102,3 +102,29 @@ def test_uninstall_without_agent_configs_says_nothing_gap2517(tmp_path, monkeypa
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "no-claude"))
     out = _run_uninstall(monkeypatch)
     assert "x-defenseclaw-source" not in out
+
+
+def test_uninstall_names_the_endpoint_keys_paired_with_the_marked_headers_gap2517(tmp_path, monkeypatch):
+    _, claude_settings = _homes(
+        tmp_path,
+        monkeypatch,
+        "",
+        {
+            "OTEL_EXPORTER_OTLP_ENDPOINT": "http://127.0.0.1:19010",
+            "OTEL_EXPORTER_OTLP_HEADERS": MARKED_HEADERS,
+            "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT": "http://127.0.0.1:19010/v1/logs",
+            "OTEL_EXPORTER_OTLP_LOGS_HEADERS": MARKED_HEADERS,
+            "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT": "http://127.0.0.1:4318/v1/metrics",
+            "OTEL_EXPORTER_OTLP_METRICS_HEADERS": "x-tenant=metrics",
+        },
+    )
+    out = _run_uninstall(monkeypatch)
+    flat = " ".join(out.split())
+    assert "Claude Code still sends its telemetry and that bearer to 127.0.0.1:19010" in flat
+    assert (
+        "delete OTEL_EXPORTER_OTLP_HEADERS, OTEL_EXPORTER_OTLP_LOGS_HEADERS, "
+        "OTEL_EXPORTER_OTLP_ENDPOINT, OTEL_EXPORTER_OTLP_LOGS_ENDPOINT from the env block of " + claude_settings
+    ) in flat
+    # The unmarked metrics pair is the user's and is not named.
+    assert "METRICS" not in out
+    assert BEARER not in out

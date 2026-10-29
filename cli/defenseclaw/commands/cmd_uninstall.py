@@ -434,6 +434,29 @@ def _marked_claude_otel_headers(env) -> list[str]:
     return fields
 
 
+def _paired_claude_otel_endpoints(env, headers: list[str]) -> list[tuple[str, str]]:
+    """The OTEL_EXPORTER_OTLP_*_ENDPOINT keys that pair with the marked header keys.
+
+    OTEL_EXPORTER_OTLP_<SIGNAL>_HEADERS pairs with OTEL_EXPORTER_OTLP_<SIGNAL>_ENDPOINT
+    (and the signal-less HEADERS with ENDPOINT). Returns (key, host:port) for each
+    paired endpoint that is set, so the manual step names every line to delete.
+    """
+    from urllib.parse import urlsplit
+
+    pairs = []
+    for header_key in headers:
+        key = header_key[: -len("HEADERS")] + "ENDPOINT"
+        value = env.get(key)
+        if not isinstance(value, str) or not value.strip():
+            continue
+        try:
+            target = urlsplit(value.strip()).netloc
+        except ValueError:
+            target = ""
+        pairs.append((key, target or value.strip()))
+    return pairs
+
+
 def _warn_marked_native_otel_left() -> None:
     """Name the agent OTel entries uninstall kept that still carry DefenseClaw's markers.
 
@@ -479,11 +502,17 @@ def _warn_marked_native_otel_left() -> None:
     headers = _marked_claude_otel_headers(env)
     if headers:
         keys = ", ".join(headers)
+        # Each marked *_HEADERS key pairs with its *_ENDPOINT key: deleting the
+        # headers alone leaves Claude Code exporting to the dead port.
+        endpoints = _paired_claude_otel_endpoints(env, headers)
+        targets = ", ".join(sorted({target for _, target in endpoints}))
+        sends = f"; Claude Code still sends its telemetry and that bearer to {targets}" if targets else ""
+        delete = ", ".join(headers + [key for key, _ in endpoints])
         lines.append(
             (
                 f"{claude_settings}: env {keys} carry DefenseClaw's x-defenseclaw-source and x-defenseclaw-client "
-                "headers and a bearer no DefenseClaw install recorded, so uninstall kept them as yours",
-                f"if you did not add them, delete {keys} from the env block of {claude_settings}",
+                f"headers and a bearer no DefenseClaw install recorded, so uninstall kept them as yours{sends}",
+                f"if you did not add them, delete {delete} from the env block of {claude_settings}",
             )
         )
     for detail, step in lines:
