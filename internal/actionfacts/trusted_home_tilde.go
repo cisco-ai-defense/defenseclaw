@@ -277,10 +277,10 @@ func rewriteTrustedPOSIXHomeTilde(source, activeHome string) (trustedPOSIXHomeRe
 		return trustedPOSIXHomeRewrite{}, false
 	}
 	out.WriteString(source[last:])
-	// A separate HOME, USER or LOGNAME mention can change what the rewritten
-	// operands name.
-	if strings.Contains(out.String(), "HOME") || strings.Contains(out.String(), "USER") ||
-		strings.Contains(out.String(), "LOGNAME") {
+	// A separate HOME, USER or LOGNAME mention outside a comment can change
+	// what the rewritten operands name (GAP-2473).
+	if scan := withoutShellComments(out.String(), syntax.LangPOSIX); strings.Contains(scan, "HOME") ||
+		strings.Contains(scan, "USER") || strings.Contains(scan, "LOGNAME") {
 		return trustedPOSIXHomeRewrite{}, false
 	}
 	rewrite.source = out.String()

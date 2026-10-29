@@ -90,10 +90,80 @@ func TestWindowsGitBashDDOptionStateTargetHookBlocks(t *testing.T) {
 		{name: "tilde", command: "dd if=a.txt of=~/.defenseclaw/config.yaml", block: true},
 		{name: "drive", command: "dd if=a.txt of=" + forward + "/.defenseclaw/config.yaml", block: true},
 		{name: "msys", command: "dd if=a.txt of=" + msys + "/.defenseclaw/config.yaml", block: true},
+		{name: "profile", command: "dd if=a.txt of=$USERPROFILE/.defenseclaw/config.yaml", block: true},
+		{name: "quoted-msys", command: "dd if=a.txt of='" + msys + "/.defenseclaw/config.yaml'", block: true},
+		{name: "profile-project", command: "dd if=a.txt of=$USERPROFILE/project-b.img"},
 		{name: "project", command: "dd if=a.txt of=$HOME/project-b.img"},
 		{name: "plain", command: "dd if=a.txt of=b.img"},
 	}
 	for _, mode := range []string{"action", "observe"} {
 		r105RunStateRows(t, mode, cwd, rows)
+	}
+}
+
+// GAP-2468: under Git Bash on a Windows home, $USERPROFILE spells the home
+// and a quoted MSYS mount (of='/c/...', "of=/c/...", "/c/...") names the
+// drive, so state writes through them block as the $HOME and unquoted
+// spellings do; the same spellings into the project stay allowed.
+func TestWindowsGitBashProfileAndQuotedMountStateWritesBlock(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("native Windows home")
+	}
+	home := t.TempDir()
+	cwd := filepath.Join(home, "project")
+	for _, dir := range []string{filepath.Join(home, ".defenseclaw", "hooks"), cwd} {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, name := range []string{filepath.Join(home, ".defenseclaw", "config.yaml"), filepath.Join(cwd, "a.txt")} {
+		if err := os.WriteFile(name, []byte("x\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	forward := filepath.ToSlash(home)
+	msys := "/" + strings.ToLower(forward[:1]) + forward[2:]
+	block := []string{
+		"dd if=a.txt 'of='" + msys + "/.defenseclaw/config.yaml",
+		"dd if=a.txt of='" + msys + "/.defenseclaw/config.yaml'",
+		`dd if=a.txt "of=` + msys + `/.defenseclaw/config.yaml"`,
+		`dd if=a.txt of="` + msys + `/.defenseclaw/config.yaml"`,
+		`cp a.txt "` + msys + `/.defenseclaw/config.yaml"`,
+		"dd if=a.txt 'of=" + msys + "/.defenseclaw/config.yaml'",
+		"dd if=a.txt of=$USERPROFILE/.defenseclaw/config.yaml",
+		"cp a.txt $USERPROFILE/.defenseclaw/config.yaml",
+		`echo x > "$USERPROFILE/.defenseclaw/config.yaml"`,
+		"rm -rf ${USERPROFILE}/.defenseclaw/hooks",
+	}
+	allow := []string{
+		"make PREFIX=" + msys + "/project/out install",
+		"dd if=a.txt of='" + msys + "/project/b.img'",
+		`cp a.txt "` + msys + `/project/c.txt"`,
+		"grep -r x --exclude=" + msys + "/.defenseclaw/config.yaml .",
+		"dd if=$USERPROFILE/.defenseclaw/config.yaml of=copy.yaml",
+		"dd if=a.txt of=$USERPROFILE/project/b.img",
+		`cp a.txt "$USERPROFILE/project/d.txt"`,
+	}
+	for _, connectorName := range []string{"claudecode", "codex"} {
+		installDefaultProfileConnector(t, connectorName)
+		for _, hint := range []actionfacts.Dialect{"", actionfacts.DialectPOSIX} {
+			for _, rows := range []struct {
+				commands []string
+				want     bool
+			}{{block, true}, {allow, false}} {
+				for _, command := range rows.commands {
+					input := actionfacts.Input{Tool: "Bash", Command: command, CWD: cwd, ActiveHome: home, DialectHint: hint}
+					findings := dispatchTrustedAction(t.Context(), trustedActionRequest{
+						Input: input, Connector: connectorName, EnforcementCapable: true,
+					})
+					if blocked := buildVerdict(findings, "tool_call").Action == "block"; blocked != rows.want {
+						t.Errorf("%s hint=%q %q: blocked=%v, want %v (%v)",
+							connectorName, hint, command, blocked, rows.want, FindingStrings(findings))
+					}
+				}
+			}
+		}
 	}
 }
