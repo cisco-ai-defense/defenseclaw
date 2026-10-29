@@ -399,3 +399,44 @@ func TestRunnersBeforeAShellStringWriteWhatTheStringWrites(t *testing.T) {
 		{"env -i cp a.txt b.txt $(true)", false},
 	})
 }
+
+func TestShellOptionsBeforeTheStringWriteWhatTheStringWrites(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX shell spellings")
+	}
+	judgeHomeStateWriteRows(t, []homeStateWriteRow{
+		{`sh -c -- "cp a.txt ~/.defenseclaw/config.yaml"`, true},
+		{`sh -c - "cp a.txt ~/.defenseclaw/config.yaml"`, true},
+		{`bash --norc -c "cp a.txt ~/.defenseclaw/config.yaml"`, true},
+		{`bash --noprofile -c "cp a.txt ~/.defenseclaw/hooks/x.sh"`, true},
+		{`bash --login -c "cp a.txt ~/.defenseclaw/config.yaml"`, true},
+		{`bash --posix -c "cp a.txt ~/.defenseclaw/config.yaml"`, true},
+		{`bash -euo pipefail -c "cp a.txt ~/.defenseclaw/config.yaml"`, true},
+		{`bash -c -x "cp a.txt ~/.defenseclaw/config.yaml"`, true},
+		{`bash --rcfile /dev/null -c "tee ~/.defenseclaw/config.yaml < a.txt"`, true},
+		{`setsid bash --norc -c "cp a.txt ~/.defenseclaw/config.yaml"`, true},
+		{`setsid sh -c -- "cp a.txt ~/.defenseclaw/config.yaml"`, true},
+		{`A=1 bash --noprofile --norc -c "cp a.txt ~/.defenseclaw/config.yaml"`, true},
+		{`env -C HOMEDIR bash --norc -c "cp project/a.txt .defenseclaw/config.yaml"`, true},
+		{`bash --norc -c "make --version"`, false},
+		{`sh -c -- "cp a.txt b.txt"`, false},
+		{`bash -euo pipefail -c "npm --version"`, false},
+		{`bash --login -c "cat ~/.defenseclaw/config.yaml"`, false},
+		{`bash -- script.sh`, false},
+		{`bash -n --norc -c "cp a.txt ~/.defenseclaw/config.yaml"`, false},
+		{`bash -o noexec -c -- "cp a.txt ~/.defenseclaw/config.yaml"`, false},
+	})
+}
+
+func TestBareCopyReadsAsNoWrite(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX shell spellings")
+	}
+	judgeHomeStateWriteRows(t, []homeStateWriteRow{
+		{"cp", false},
+		{"ls; cp", false},
+		{`sh -c "cp"`, false},
+		{"cp; cp a.txt ~/.defenseclaw/config.yaml", true},
+		{"cp a.txt ~/.defenseclaw/config.yaml; cp", true},
+	})
+}

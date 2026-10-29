@@ -81,7 +81,18 @@ func WrapperUnwrapTwin(command string) (twin string, ok bool) {
 				return true
 			}
 			run, writer := wrappedWriterRun(typed.Args)
-			if !writer || run.Index == 0 {
+			if !writer {
+				return true
+			}
+			// A shell started with other options before its STRING
+			// (bash --norc -c, sh -c -- STRING, bash -euo pipefail -c)
+			// runs what sh -c STRING runs (GAP-2527).
+			text, shell := shellOptionsString(typed.Args, run.Index)
+			if run.Dir == "" && shell {
+				replace(typed.Args[0].Pos(), typed.Args[text].Pos(), "sh -c ")
+				return true
+			}
+			if run.Index == 0 {
 				return true
 			}
 			if run.Dir == "" {
@@ -98,6 +109,9 @@ func WrapperUnwrapTwin(command string) (twin string, ok bool) {
 				replace(typed.Args[0].Pos(), typed.Args[run.Index].Pos(), "")
 			} else {
 				replace(open, typed.Args[run.Index].Pos(), "( cd "+posixSingleQuoted(run.Dir)+" && ")
+			}
+			if shell {
+				replace(typed.Args[run.Index].Pos(), typed.Args[text].Pos(), "sh -c ")
 			}
 			replace(typed.End(), typed.End(), " )")
 		}
@@ -222,6 +236,83 @@ func wrappedWriterRun(args []*syntax.Word) (PrefixWrapperRun, bool) {
 // wrappedShellPrograms are the shells whose wrapped call is read as the
 // plain call, so the plain reading of a -c STRING applies.
 var wrappedShellPrograms = map[string]bool{"sh": true, "bash": true, "dash": true, "ksh": true, "zsh": true}
+
+// shellOptionsString returns the index of the STRING a POSIX shell at
+// args[at] runs when options other than the one -c stand before it: long
+// startup options (--norc, --noprofile, --login, --posix, --rcfile FILE),
+// short option clusters with their -o/-O values, and the -- or - that ends
+// the options after -c. ok is false for the plain SHELL -c STRING, for a
+// script or stdin shell, and for a word that is not static.
+func shellOptionsString(args []*syntax.Word, at int) (int, bool) {
+	static := func(i int) (string, bool) {
+		if i >= len(args) {
+			return "", false
+		}
+		word := projectPOSIXWord(args[i])
+		return word.Value, !word.Expands
+	}
+	if name, ok := static(at); !ok || !wrappedShellPrograms[wrapperProgramName(name)] {
+		return 0, false
+	}
+	command := false
+	for i := at + 1; i < len(args); i++ {
+		word, ok := static(i)
+		if !ok {
+			return 0, false
+		}
+		switch {
+		case word == "--" || word == "-":
+			if !command || i+1 >= len(args) {
+				return 0, false
+			}
+			return i + 1, true
+		case word == "--rcfile" || word == "--init-file":
+			i++
+			if _, ok := static(i); !ok {
+				return 0, false
+			}
+		case strings.HasPrefix(word, "--"):
+			switch word {
+			case "--login", "--noprofile", "--norc", "--posix", "--noediting", "--restricted", "--verbose":
+			default:
+				return 0, false
+			}
+		case len(word) > 1 && (word[0] == '-' || word[0] == '+'):
+			values := 0
+			for _, flag := range word[1:] {
+				switch {
+				case flag == 'c':
+					if word[0] != '-' {
+						return 0, false
+					}
+					command = true
+				case flag == 'n':
+					return 0, false // -n reads the STRING and runs nothing.
+				case flag == 'o' || flag == 'O':
+					values++
+				case flag >= 'a' && flag <= 'z' || flag >= 'A' && flag <= 'Z':
+				default:
+					return 0, false
+				}
+			}
+			for ; values > 0; values-- {
+				i++
+				if value, ok := static(i); !ok || value == "noexec" {
+					return 0, false
+				}
+			}
+		default:
+			if !command {
+				return 0, false
+			}
+			if first, _ := static(at + 1); i == at+2 && first == "-c" {
+				return 0, false
+			}
+			return i, true
+		}
+	}
+	return 0, false
+}
 
 // flockShellString returns the index of the STRING word of a
 // flock FILE -c STRING (or --command STRING) call run after static prefix
