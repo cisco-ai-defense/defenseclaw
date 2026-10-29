@@ -237,19 +237,26 @@ func windowsManagedUserNativeOTLPResidue(
 	return found, notOwned, unchecked
 }
 
-// keepWindowsNativeOTLPCopy writes data (the configuration as read) beside
-// final with connector.NativeOTLPMarkedOrphanBackupSuffix, never over an
-// existing file, and returns its path. It runs as the account.
-func keepWindowsNativeOTLPCopy(final string, data []byte) (string, error) {
-	path := final + connector.NativeOTLPMarkedOrphanBackupSuffix
+// keepWindowsNativeOTLPCopy keeps data (the configuration as read) beside
+// final with connector.NativeOTLPMarkedOrphanBackupSuffix and returns its
+// path. It never writes over an existing file: a numbered copy that already
+// holds exactly data (an earlier take-back the edit refused) is reused, and
+// created reports whether this call wrote the file. It runs as the account.
+func keepWindowsNativeOTLPCopy(final string, data []byte) (path string, created bool, err error) {
+	path = final + connector.NativeOTLPMarkedOrphanBackupSuffix
 	for attempt := 0; ; attempt++ {
 		file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
-		if errors.Is(err, os.ErrExist) && attempt < 8 {
-			path = fmt.Sprintf("%s.%d%s", final, attempt+1, connector.NativeOTLPMarkedOrphanBackupSuffix)
-			continue
+		if errors.Is(err, os.ErrExist) {
+			if windowsNativeOTLPCopyHolds(path, data) {
+				return path, false, nil
+			}
+			if attempt < 8 {
+				path = fmt.Sprintf("%s.%d%s", final, attempt+1, connector.NativeOTLPMarkedOrphanBackupSuffix)
+				continue
+			}
 		}
 		if err != nil {
-			return "", err
+			return "", false, err
 		}
 		_, err = file.Write(data)
 		if closeErr := file.Close(); err == nil {
@@ -257,11 +264,36 @@ func keepWindowsNativeOTLPCopy(final string, data []byte) (string, error) {
 		}
 		if err != nil {
 			_ = os.Remove(path)
-			return "", err
+			return "", false, err
 		}
-		return path, nil
+		return path, true, nil
 	}
 }
+
+// windowsNativeOTLPCopyHolds reports whether path is a regular file (not a
+// link) that holds exactly data.
+func windowsNativeOTLPCopyHolds(path string, data []byte) bool {
+	info, err := os.Lstat(path)
+	if err != nil || !info.Mode().IsRegular() || info.Size() != int64(len(data)) {
+		return false
+	}
+	held, err := os.ReadFile(path)
+	return err == nil && string(held) == string(data)
+}
+
+// discardWindowsNativeOTLPCopy removes the copy this take-back wrote when the
+// edit it was kept for was refused and the configuration still holds exactly
+// what was copied, so a refusal that repeats every guardian cycle leaves no
+// new copy each time (GAP-2568).
+func discardWindowsNativeOTLPCopy(copyPath, final string, data []byte) {
+	if windowsNativeOTLPCopyHolds(final, data) {
+		_ = os.Remove(copyPath)
+	}
+}
+
+// windowsRemoveUserNativeOTLPAt is the edit of one configuration
+// (replaceable in tests).
+var windowsRemoveUserNativeOTLPAt = connector.RemoveUserNativeOTLPAt
 
 // windowsNativeOTLPUncheckable is the warning for a configuration the check
 // could not read. A path error keeps only its cause: the warning names the
@@ -704,20 +736,23 @@ func removeWindowsManagedUserNativeOTLPAsTarget(connectorName string, sid *windo
 			kept = append(kept, found.label+" is on a network share")
 			continue
 		}
-		copyPath := ""
+		copyPath, copyCreated := "", false
 		if found.marked {
 			// Only its markers and port prove this exporter, so the file is
 			// kept as it was before it is edited (GAP-0836).
-			path, err := keepWindowsNativeOTLPCopy(found.final, found.data)
+			path, created, err := keepWindowsNativeOTLPCopy(found.final, found.data)
 			if err != nil {
 				windowsNativeOTLPWarn(fmt.Sprintf("enterprise hooks: %s: keep a copy of %s before removing its native OTLP exporter: %v",
 					connectorName, found.label, err))
 				kept = append(kept, found.label+" could not be copied before the edit")
 				continue
 			}
-			copyPath = path
+			copyPath, copyCreated = path, created
 		}
-		if _, err := connector.RemoveUserNativeOTLPAt(connectorName, found.final, opts); err != nil {
+		if _, err := windowsRemoveUserNativeOTLPAt(connectorName, found.final, opts); err != nil {
+			if copyCreated {
+				discardWindowsNativeOTLPCopy(copyPath, found.final, found.data)
+			}
 			windowsNativeOTLPWarn(fmt.Sprintf("enterprise hooks: remove %s native OTLP exporter from an earlier per-user install (%s): %v",
 				connectorName, found.label, err))
 			kept = append(kept, found.label+" could not be edited")
