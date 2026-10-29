@@ -4,7 +4,6 @@
 package gateway
 
 import (
-	"context"
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
@@ -30,37 +29,37 @@ func hereStringStateMutation(facts actionfacts.Facts, request trustedActionReque
 	if !known || len(command) > maxHereStringTwinBytes || !strings.Contains(command, "<<<") {
 		return false, false
 	}
-	twin, ok := hereStringPipeTwin(command)
-	if !ok {
-		return false, false
-	}
-	twinRequest := request
-	twinRequest.Input.Tool, twinRequest.Input.Command = "Bash", twin
-	twinRequest.Input.Args, twinRequest.Input.Argv = nil, nil
-	if actionfacts.Analyze(twinRequest.Input).Parse.Status == actionfacts.StatusInvalid {
-		return false, false
-	}
-	// The twin is judged by the whole dispatcher, the way its POSIX
-	// spelling is judged when typed; it holds no here-string.
-	twinRequest.LegacyText = twin
-	twinRequest.conflictSource = nil
-	twinRequest.record, twinRequest.recordTelemetry = nil, nil
-	for _, finding := range dispatchTrustedAction(context.Background(), twinRequest) {
-		if finding.RuleID == "tamper.detector_state_write" && finding.contributesToEnforcement() {
+	// The twins are judged by the whole dispatcher, the way their POSIX
+	// spelling is judged when typed; they hold no here-string. The split
+	// twin is what xargs makes of a fixed word (pod check30), the word twin
+	// keeps the word whole; both are judged.
+	seen := map[string]bool{}
+	for _, split := range []bool{true, false} {
+		twin, ok := hereStringPipeTwin(command, facts.ActiveHome, split)
+		if !ok || seen[twin] {
+			continue
+		}
+		seen[twin] = true
+		twinMutates, twinJudged := stateTwinMutates(request, twin)
+		if twinMutates {
 			return true, true
 		}
+		judged = judged || twinJudged
 	}
-	return false, true
+	return false, judged
 }
 
 // hereStringPipeTwin rewrites every `CMD <<< WORD` statement of a bash
 // command as `printf '%s\n' WORD | CMD`, keeping CMD's other redirections.
-func hereStringPipeTwin(command string) (string, bool) {
+// With split, an xargs reader of a fixed word is judged as the call it
+// makes with the word's line split the way xargs splits it
+// (xargsStaticCallTwin).
+func hereStringPipeTwin(command, home string, split bool) (string, bool) {
 	file, err := syntax.NewParser(syntax.Variant(syntax.LangBash)).Parse(strings.NewReader(command), "")
 	if err != nil {
 		return "", false
 	}
-	changed, refused := false, false
+	changed, refused, homeFixed := false, false, split && xargsHomeFixed(command)
 	syntax.Walk(file, func(node syntax.Node) bool {
 		stmt, ok := node.(*syntax.Stmt)
 		if !ok || refused {
@@ -89,6 +88,12 @@ func hereStringPipeTwin(command string) (string, bool) {
 		// xargs runs its program with the here-string word as arguments:
 		// judge that call itself (`xargs rm -rf <<< X` is `rm -rf X`).
 		if call, ok := stmt.Cmd.(*syntax.CallExpr); ok {
+			if value, static := xargsStaticValue(word, home); homeFixed && static {
+				if direct, ok := xargsStaticCallTwin(call, value+"\n", home); ok {
+					stmt.Cmd, stmt.Redirs, changed = direct, rest, true
+					return true
+				}
+			}
 			if direct, ok := xargsCallTwin(call, []*syntax.Word{word}); ok {
 				stmt.Cmd, stmt.Redirs, changed = direct, rest, true
 				return true

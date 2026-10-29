@@ -28,35 +28,54 @@ func xargsStaticInputStateMutation(facts actionfacts.Facts, request trustedActio
 		!strings.Contains(command, "|") {
 		return false
 	}
-	twin, ok := xargsStaticInputTwin(command)
-	if !ok {
-		return false
-	}
-	twinRequest := request
-	twinRequest.Input.Tool, twinRequest.Input.Command = "Bash", twin
-	twinRequest.Input.Args, twinRequest.Input.Argv = nil, nil
-	if actionfacts.Analyze(twinRequest.Input).Parse.Status == actionfacts.StatusInvalid {
-		return false
-	}
-	twinRequest.LegacyText = twin
-	twinRequest.conflictSource = nil
-	twinRequest.record, twinRequest.recordTelemetry = nil, nil
-	for _, finding := range dispatchTrustedAction(context.Background(), twinRequest) {
-		if finding.RuleID == "tamper.detector_state_write" && finding.contributesToEnforcement() {
+	// Both twins are judged (pod check30): the split twin is what xargs
+	// makes of fixed words, the word twin keeps each printed word whole.
+	seen := map[string]bool{}
+	for _, split := range []bool{true, false} {
+		twin, ok := xargsStaticInputTwin(command, facts.ActiveHome, split)
+		if !ok || seen[twin] {
+			continue
+		}
+		seen[twin] = true
+		if mutates, _ := stateTwinMutates(request, twin); mutates {
 			return true
 		}
 	}
 	return false
 }
 
+// stateTwinMutates judges twin, a rewritten spelling of the action, through
+// the whole dispatcher: mutates when it gets an enforcing state tamper
+// finding; judged is false when the twin does not parse.
+func stateTwinMutates(request trustedActionRequest, twin string) (mutates, judged bool) {
+	twinRequest := request
+	twinRequest.Input.Tool, twinRequest.Input.Command = "Bash", twin
+	twinRequest.Input.Args, twinRequest.Input.Argv = nil, nil
+	if actionfacts.Analyze(twinRequest.Input).Parse.Status == actionfacts.StatusInvalid {
+		return false, false
+	}
+	twinRequest.LegacyText = twin
+	twinRequest.conflictSource = nil
+	twinRequest.record, twinRequest.recordTelemetry = nil, nil
+	for _, finding := range dispatchTrustedAction(context.Background(), twinRequest) {
+		if finding.RuleID == "tamper.detector_state_write" && finding.contributesToEnforcement() {
+			return true, true
+		}
+	}
+	return false, true
+}
+
 // xargsStaticInputTwin rewrites every `printf|echo WORDS | xargs ...` pipe
 // of command as the call xargs makes with WORDS; false when there is none.
-func xargsStaticInputTwin(command string) (string, bool) {
+// With split, when every word is fixed, the printed text is split the way
+// xargs splits it (xargsStaticCallTwin); otherwise each word is one item
+// (xargsCallTwin).
+func xargsStaticInputTwin(command, home string, split bool) (string, bool) {
 	file, err := syntax.NewParser(syntax.Variant(syntax.LangBash)).Parse(strings.NewReader(command), "")
 	if err != nil {
 		return "", false
 	}
-	changed := false
+	changed, homeFixed := false, split && xargsHomeFixed(command)
 	syntax.Walk(file, func(node syntax.Node) bool {
 		stmt, ok := node.(*syntax.Stmt)
 		if !ok {
@@ -74,13 +93,20 @@ func xargsStaticInputTwin(command string) (string, bool) {
 		if !ok {
 			return true
 		}
-		words, ok := staticPrintedWords(producer)
-		if !ok {
-			return true
+		var direct syntax.Command
+		if homeFixed {
+			if input, ok := staticPrintedText(producer, home); ok {
+				direct, _ = xargsStaticCallTwin(reader, input, home)
+			}
 		}
-		direct, ok := xargsCallTwin(reader, words)
-		if !ok {
-			return true
+		if direct == nil {
+			words, ok := staticPrintedWords(producer)
+			if !ok {
+				return true
+			}
+			if direct, ok = xargsCallTwin(reader, words); !ok {
+				return true
+			}
 		}
 		stmt.Cmd = direct
 		stmt.Redirs = append(stmt.Redirs, pipe.Y.Redirs...)
