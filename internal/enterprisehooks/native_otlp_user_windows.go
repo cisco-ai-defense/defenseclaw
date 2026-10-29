@@ -111,7 +111,7 @@ func windowsManagedUserNativeOTLPCheck(connectorName, home, dataDir string, sid 
 		return "", nil
 	}
 	opts := windowsManagedNativeOTLPOpts(dataDir, served)
-	var residue, onShare []string
+	var residue, onShare, foreign []string
 	founds, notOwned, _ := windowsManagedUserNativeOTLPResidue(connectorName, sid, home, dataDir, readWindowsAccountConfig, false, served...)
 	report := ""
 	if notOwned {
@@ -120,6 +120,10 @@ func windowsManagedUserNativeOTLPCheck(connectorName, home, dataDir string, sid 
 	for _, found := range founds {
 		if windowsShareFinalPath(found.final) {
 			onShare = append(onShare, found.label)
+			continue
+		}
+		if found.foreign {
+			foreign = append(foreign, found.label)
 			continue
 		}
 		for _, name := range found.names {
@@ -131,6 +135,9 @@ func windowsManagedUserNativeOTLPCheck(connectorName, home, dataDir string, sid 
 			"enterprise hooks: %s keeps a native OTLP exporter from an earlier per-user install in %s on a network share, "+
 				"which repair cannot edit durably; remove the exporter there by hand (its DefenseClaw credential is revoked)",
 			connectorName, strings.Join(onShare, ", ")))
+	}
+	if len(foreign) > 0 {
+		windowsNativeOTLPWarn(windowsNativeOTLPForeignOwnedWarning(connectorName, strings.Join(foreign, ", ")))
 	}
 	credential, err := connector.UserNativeOTLPCredentialResidue(connectorName, opts)
 	if err != nil {
@@ -156,6 +163,9 @@ type windowsNativeOTLPFound struct {
 	names        []string
 	marked       bool
 	data         []byte
+	// foreign reports a file another account owns: the edit as the account
+	// refuses it, so repair cannot remove the exporter (GAP-2568).
+	foreign bool
 }
 
 // windowsManagedNativeOTLPOpts are the SetupOpts every managed native OTLP
@@ -231,7 +241,8 @@ func windowsManagedUserNativeOTLPResidue(
 		}
 		if len(names) > 0 {
 			found = append(found, windowsNativeOTLPFound{label: config.label, final: final, names: names,
-				marked: connector.UserNativeOTLPMarkedOrphanIn(connectorName, data, opts), data: data})
+				marked: connector.UserNativeOTLPMarkedOrphanIn(connectorName, data, opts), data: data,
+				foreign: windowsNativeOTLPForeignOwned(final, sid)})
 		}
 	}
 	return found, notOwned, unchecked
@@ -294,6 +305,27 @@ func discardWindowsNativeOTLPCopy(copyPath, final string, data []byte) {
 // windowsRemoveUserNativeOTLPAt is the edit of one configuration
 // (replaceable in tests).
 var windowsRemoveUserNativeOTLPAt = connector.RemoveUserNativeOTLPAt
+
+// windowsNativeOTLPForeignOwned reports whether another account than sid owns
+// the file at final. An owner that cannot be read is not reported, so the
+// edit decides as before.
+func windowsNativeOTLPForeignOwned(final string, sid *windows.SID) bool {
+	if sid == nil {
+		return false
+	}
+	owner, err := windowsPathOwner(final)
+	return err == nil && owner != nil && !owner.Equals(sid)
+}
+
+// windowsNativeOTLPForeignOwnedWarning is the warning for an exporter in a
+// file another account owns. It names sources, never paths or values.
+func windowsNativeOTLPForeignOwnedWarning(connectorName, labels string) string {
+	return fmt.Sprintf(
+		"enterprise hooks: %s keeps a native OTLP exporter from an earlier per-user install in %s, a file another account owns, "+
+			"which repair cannot edit as the account (its DefenseClaw credential is revoked); remove the exporter there, "+
+			"or give the account ownership of the file, and the next repair removes it",
+		connectorName, labels)
+}
 
 // windowsNativeOTLPUncheckable is the warning for a configuration the check
 // could not read. A path error keeps only its cause: the warning names the
@@ -734,6 +766,13 @@ func removeWindowsManagedUserNativeOTLPAsTarget(connectorName string, sid *windo
 				"enterprise hooks: %s: %s on a network share keeps a native OTLP exporter from an earlier per-user install; "+
 					"repair cannot edit a share durably, so remove the exporter there by hand", connectorName, found.label))
 			kept = append(kept, found.label+" is on a network share")
+			continue
+		}
+		if found.foreign {
+			// The edit as the account refuses a file another account owns,
+			// so nothing is copied or tried until the ownership changes.
+			windowsNativeOTLPWarn(windowsNativeOTLPForeignOwnedWarning(connectorName, found.label))
+			kept = append(kept, found.label+" is owned by another account")
 			continue
 		}
 		copyPath, copyCreated := "", false
