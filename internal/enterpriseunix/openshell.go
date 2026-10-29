@@ -86,6 +86,9 @@ const (
 	codeSandboxGroups         = "sandbox_user_groups"
 	codeSandboxPending        = "sandbox_pending_restart"
 	codeSandboxUserState      = "sandbox_user_state"
+	// codeLegacySandbox: a legacy sandbox runs unprotected for an account
+	// (describeLegacySandboxes).
+	codeLegacySandbox = "sandbox_legacy_unprotected"
 	// codeDriverFallback: the MicroVM driver can't run on the host, users
 	// get the docker fallback (or the fallback itself lacks something).
 	codeDriverFallback = "openshell_driver_fallback"

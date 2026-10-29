@@ -72,7 +72,13 @@ def test_ai_runtime_activity_counts_distinct_required_finding_ids() -> None:
 
     searches = (
         ("Agent activity with no hook decision", "runtime_hook_seen", "runtime_tactic", "stats count"),
-        ("Would-block by control (monitor mode)", "runtime_kernel_outcome", "runtime_kernel_control", "timechart"),
+        # Each native hit (its control and target) once (GAP-1400).
+        (
+            "Would-block by control (monitor mode)",
+            "runtime_kernel_outcome",
+            "runtime_kernel_control runtime_kernel_target",
+            "timechart",
+        ),
     )
     for title, filter_field, distinct_field, aggregation in searches:
         query = _ai_runtime_query(title)

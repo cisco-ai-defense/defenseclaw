@@ -36,6 +36,10 @@ import (
 )
 
 type claudeCodeHookRequest struct {
+	watchHome            string
+	managedWatch         bool
+	reportedCWD          string                 // cwd as sent, before hookCWDForContext; names watch paths only (GAP-0066)
+	reportedNewCWD       string                 // new_cwd as sent, same use
 	HookEventName        string                 `json:"hook_event_name"`
 	SessionID            string                 `json:"session_id,omitempty"`
 	TurnID               string                 `json:"turn_id,omitempty"`
@@ -108,7 +112,7 @@ type claudeCodeHookResponse struct {
 	RuleIDs []string `json:"rule_ids,omitempty"`
 	// RedactionEnabled carries the cloud-controlled per-inspection
 	// redaction directive back through the unified dispatch so
-	// finalizeAgentHook can honor it on the hook_decision event +
+	// finalizeAgentHookAnswer can honor it on the hook_decision event +
 	// audit row. Never serialized on the hook response wire.
 	RedactionEnabled     *bool  `json:"-"`
 	SourceReason         string `json:"-"`
@@ -133,6 +137,7 @@ type claudeCodeHookResponse struct {
 // value so downstream tooling and the audit envelope receive them.
 
 func (a *APIServer) evaluateClaudeCodeHook(ctx context.Context, req claudeCodeHookRequest) claudeCodeHookResponse {
+	req = req.withWatchHome(ctx)
 	// Keep authenticated lifecycle state current even while inspection is
 	// disabled so a live same-session re-enable cannot lose active-file authority.
 	activeAgentContext := a.applyClaudeCodeActiveAgentContext(ctx, req)
@@ -328,6 +333,46 @@ func (a *APIServer) evaluateClaudeCodeHook(ctx context.Context, req claudeCodeHo
 	return resp
 }
 
+func (req claudeCodeHookRequest) withWatchHome(ctx context.Context) claudeCodeHookRequest {
+	if managedCallerWatchContext(ctx) {
+		req.watchHome = trustedActiveHome(ctx)
+		req.managedWatch = true
+	}
+	return req
+}
+
+// managedWatchRoot is the project a managed caller's Claude Code watches when
+// the gateway service account cannot resolve it (sanitizeHookCWD returns ""
+// for a directory in another user's home on Linux and macOS). The reported
+// directory is kept lexically only inside the verified caller's home, as the
+// unified pipeline's managedWatchCWD does. It names watch paths only; policy
+// reads still use the resolved CWD (GAP-0066).
+func (req claudeCodeHookRequest) managedWatchRoot() string {
+	if !req.managedWatch || req.sandboxView != nil || req.watchHome == "" || req.watchHome == unresolvedCallerHome {
+		return ""
+	}
+	cwd := req.reportedNewCWD
+	if cwd == "" {
+		cwd = req.reportedCWD
+	}
+	if !insideHome(req.watchHome, cwd) {
+		return ""
+	}
+	return filepath.Clean(cwd)
+}
+
+// managedCallerWatchContext reports a request served on behalf of another
+// account: a call on the managed hook socket (the verified peer; that
+// server's base context carries no service-account mark) or a call to a
+// service-account gateway's TCP API. Its watch paths come from the verified
+// caller, never from the gateway's own environment (GAP-0066).
+func managedCallerWatchContext(ctx context.Context) bool {
+	if _, ok := managedHookPeerFromContext(ctx); ok {
+		return true
+	}
+	return serviceAccountGatewayFromContext(ctx)
+}
+
 // dispatchClaudeCodeHookNotification fires a user-session OS toast
 // for any non-allow verdict the hook produced. Routing is:
 //
@@ -433,7 +478,7 @@ func (a *APIServer) claudeCodeEnabled() bool {
 	if cfg.Guardrail.HasConnector("claudecode") {
 		return true
 	}
-	return strings.EqualFold(strings.TrimSpace(cfg.Guardrail.Connector), "claudecode")
+	return cfg.Guardrail.NamesConnector("claudecode")
 }
 
 func (a *APIServer) claudeCodeMode(ctx context.Context) string {
@@ -555,8 +600,13 @@ func claudeCodeOutput(req claudeCodeHookRequest, action, rawAction, reason, addi
 		}
 	}
 	watchRoot := strings.TrimSpace(req.NewCWD)
-	if watchRoot == "" {
+	// A managed caller's new_cwd the service cannot resolve still names
+	// the new project; it does not fall back to the old one (GAP-0066).
+	if watchRoot == "" && (!req.managedWatch || req.reportedNewCWD == "") {
 		watchRoot = req.CWD
+	}
+	if watchRoot == "" {
+		watchRoot = req.managedWatchRoot()
 	}
 	if event == "SessionStart" {
 		output := map[string]interface{}{
@@ -569,7 +619,12 @@ func claudeCodeOutput(req claudeCodeHookRequest, action, rawAction, reason, addi
 		return map[string]interface{}{"hookSpecificOutput": output}
 	}
 	if event == "CwdChanged" || event == "FileChanged" {
-		out := map[string]interface{}{"watchPaths": claudeCodeWatchPathsForRequest(req, watchRoot)}
+		// Claude Code reads watchPaths of these events only inside
+		// hookSpecificOutput; a top-level key is ignored (GAP-2288).
+		out := map[string]interface{}{"hookSpecificOutput": map[string]interface{}{
+			"hookEventName": event,
+			"watchPaths":    claudeCodeWatchPathsForRequest(req, watchRoot),
+		}}
 		if additional != "" {
 			out["systemMessage"] = additional
 		}
@@ -585,8 +640,6 @@ func claudeCodeOutput(req claudeCodeHookRequest, action, rawAction, reason, addi
 			"hookEventName":     event,
 			"additionalContext": additional,
 		}}
-	case "CwdChanged":
-		return map[string]interface{}{"watchPaths": []string{}}
 	default:
 		return map[string]interface{}{"systemMessage": additional}
 	}

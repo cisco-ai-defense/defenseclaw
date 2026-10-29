@@ -36,17 +36,9 @@ import (
 // profile, whatever the profile granted. A missing path is skipped;
 // per-path failures are returned.
 func RevokeGatewayInventoryReadForManifest(manifest Manifest) error {
-	names := []string{productionGatewayServiceName}
-	if discovered, err := discoverGatewayServiceName(); err == nil && discovered != productionGatewayServiceName {
-		names = append(names, discovered)
-	}
-	sids := make([]*windows.SID, 0, len(names))
-	for _, name := range names {
-		sid, err := windows.StringToSid(managed.WindowsServiceSIDString(name))
-		if err != nil {
-			return fmt.Errorf("enterprise hooks: gateway service SID for %s: %w", name, err)
-		}
-		sids = append(sids, sid)
+	sids, err := gatewayInventoryServiceSIDs()
+	if err != nil {
+		return err
 	}
 	seen := map[string]struct{}{}
 	var failures []error
@@ -85,6 +77,65 @@ func RevokeGatewayInventoryReadForManifest(manifest Manifest) error {
 			case err != nil:
 				failures = append(failures, fmt.Errorf("%s: %w", filepath.Join(home, dir), err))
 			}
+		}
+	}
+	return errors.Join(failures...)
+}
+
+// gatewayInventoryServiceSIDs are the service SIDs the inventory grant is
+// given to: the production gateway service and a discovered scoped one.
+func gatewayInventoryServiceSIDs() ([]*windows.SID, error) {
+	names := []string{productionGatewayServiceName}
+	if discovered, err := discoverGatewayServiceName(); err == nil && discovered != productionGatewayServiceName {
+		names = append(names, discovered)
+	}
+	sids := make([]*windows.SID, 0, len(names))
+	for _, name := range names {
+		sid, err := windows.StringToSid(managed.WindowsServiceSIDString(name))
+		if err != nil {
+			return nil, fmt.Errorf("enterprise hooks: gateway service SID for %s: %w", name, err)
+		}
+		sids = append(sids, sid)
+	}
+	return sids, nil
+}
+
+// RevokeGatewayInventoryReadOnHookPathDotdirs removes the gateway service's
+// inventory grant from the dotdirs of home that are on connectorName's
+// managed hook path (inventoryDACLGuardianOwnedDotdirs: ~\.config for Amp
+// and OpenCode, ~\.kiro, ~\.gemini). The enumerator grants such a dotdir once
+// no enrolled connector's hook path runs through it, for example right after
+// OpenCode is disabled, and the per-user cleanup that then removes the
+// OpenCode plugin checks that dotdir at its exact protected DACL on the way:
+// it refused it on every guardian pass, so the plugin stayed (GAP-2380). The
+// cleanup runs this first, as the uninstall runs
+// RevokeGatewayInventoryReadForManifest (GAP-1765). A missing dotdir, or one
+// reached through a link, is left alone.
+func RevokeGatewayInventoryReadOnHookPathDotdirs(home, connectorName string) error {
+	home = filepath.Clean(strings.TrimSpace(home))
+	name := strings.ToLower(strings.TrimSpace(connectorName))
+	if !filepath.IsAbs(home) || name == "" {
+		return nil
+	}
+	var dotdirs []string
+	for dotdir, names := range inventoryDACLGuardianOwnedDotdirs {
+		for _, owner := range names {
+			if owner == name {
+				dotdirs = append(dotdirs, dotdir)
+			}
+		}
+	}
+	if len(dotdirs) == 0 {
+		return nil
+	}
+	sids, err := gatewayInventoryServiceSIDs()
+	if err != nil {
+		return err
+	}
+	var failures []error
+	for _, dotdir := range dotdirs {
+		if err := revokeInventoryACEs(home, dotdir, sids); err != nil && !errors.Is(err, errInventoryDACLLink) {
+			failures = append(failures, fmt.Errorf("%s: %w", filepath.Join(home, dotdir), err))
 		}
 	}
 	return errors.Join(failures...)

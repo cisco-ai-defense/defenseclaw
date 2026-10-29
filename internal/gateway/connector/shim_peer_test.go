@@ -28,7 +28,7 @@ func TestPathShimsPeerFailureFollowsInstalledTier(t *testing.T) {
 		t.Run(mode, func(t *testing.T) {
 			root := t.TempDir()
 			dataDir := filepath.Join(root, "data")
-			if err := SetupSubprocessEnforcement(SubprocessShims, SetupOpts{DataDir: dataDir, APIAddr: "127.0.0.1:1", HookFailMode: mode}); err != nil {
+			if err := SetupSubprocessEnforcement(SubprocessShims, SetupOpts{DataDir: dataDir, APIAddr: "127.0.0.1:1", HookFailMode: mode}, "openclaw"); err != nil {
 				t.Fatal(err)
 			}
 			home := filepath.Join(root, "home")
@@ -95,7 +95,7 @@ func TestPathShimsDoNotOpenNonOutageNativeFailures(t *testing.T) {
 		t.Run(response.name, func(t *testing.T) {
 			root := t.TempDir()
 			dataDir := filepath.Join(root, "data")
-			if err := SetupSubprocessEnforcement(SubprocessShims, SetupOpts{DataDir: dataDir, HookFailMode: "open"}); err != nil {
+			if err := SetupSubprocessEnforcement(SubprocessShims, SetupOpts{DataDir: dataDir, HookFailMode: "open"}, "openclaw"); err != nil {
 				t.Fatal(err)
 			}
 			home := filepath.Join(root, "home")

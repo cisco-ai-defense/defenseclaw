@@ -682,6 +682,91 @@ func TestWindowsManagedHooksLifecycleCollectOutsideATransaction(t *testing.T) {
 	}
 }
 
+// GAP-0822: an upgrade with no committed journal ran the replacement
+// gateway's generation classification only after its commit, so a bundle it
+// refuses (malformed JSON) failed the upgrade after it committed, with a
+// journal left and 1603. The staged retire Setup now runs before the
+// transaction classifies the current targets the same way and fails there,
+// with nothing deleted. It changes nothing, so it neither collects nor asks
+// for LocalSystem: an elevated administrator's Setup /ensure or /repair runs
+// it too (refix round 1). A folder the retire would first repair is left to
+// that retire. The installed gateway's retire with no journal does nothing.
+func TestWindowsManagedHooksStagedRetireWithNoJournalClassifiesBeforeTheTransaction(t *testing.T) {
+	originalGC := windowsManagedHooksLifecycleGenerationGC
+	originalClassify := windowsManagedHooksLifecycleGenerationClassify
+	originalIdentity := windowsStagedRetireMutationIdentityPreflight
+	t.Cleanup(func() {
+		windowsManagedHooksLifecycleGenerationGC = originalGC
+		windowsManagedHooksLifecycleGenerationClassify = originalClassify
+		windowsStagedRetireMutationIdentityPreflight = originalIdentity
+	})
+
+	const sid = "S-1-5-21-111-222-333-1017"
+	ctx := windowsManagedHooksLifecycleContext{
+		journalPath: filepath.Join(t.TempDir(), windowsManagedHooksLifecycleJournalFile),
+		targets: []windowsManagedHooksTeardownTarget{
+			{Connector: "opencode", SID: sid, DataDir: `C:\Users\std1\.defenseclaw`},
+		},
+	}
+	ctx.opts.HookBinary = `C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw-hook.exe`
+	gcCalls, identityCalls := 0, 0
+	windowsManagedHooksLifecycleGenerationGC = func(
+		opts enterprisehooks.WindowsManagedRuntimeGenerationGCOptions,
+	) (int, error) {
+		gcCalls++
+		return 1, nil
+	}
+	windowsStagedRetireMutationIdentityPreflight = func() error {
+		identityCalls++
+		return errors.New("managed enterprise hook mutations require the LocalSystem guardian on native Windows")
+	}
+	classifyErr := errors.Join(enterprisehooks.ErrWindowsManagedRuntimeBundleRefused,
+		errors.New("enterprise hooks: decode managed runtime bundle: unexpected EOF"))
+	var classified []enterprisehooks.WindowsManagedRuntimeGenerationGCOptions
+	windowsManagedHooksLifecycleGenerationClassify = func(
+		opts enterprisehooks.WindowsManagedRuntimeGenerationGCOptions,
+	) error {
+		classified = append(classified, opts)
+		return classifyErr
+	}
+	if _, _, err := retireAbsentWindowsManagedHooksLifecycleJournal(ctx, false, false); err != nil || len(classified) != 0 {
+		t.Fatalf("installed retire with no journal: err=%v classify calls=%d, want nothing done", err, len(classified))
+	}
+	_, _, err := retireAbsentWindowsManagedHooksLifecycleJournal(ctx, false, true)
+	if err == nil || len(classified) != 1 ||
+		!strings.HasPrefix(err.Error(), "classify opencode managed runtime generations for SID "+sid) ||
+		!strings.Contains(err.Error(), "decode managed runtime bundle") {
+		t.Fatalf("staged retire with no journal: err=%v classify calls=%d, want the bundle refusal before the transaction", err, len(classified))
+	}
+	if got := classified[0]; got.Connector != "opencode" || got.TargetSID != sid ||
+		got.DataDir != ctx.targets[0].DataDir || got.HookExecutable != ctx.opts.HookBinary {
+		t.Fatalf("classified options = %+v", got)
+	}
+
+	// GAP-1910: an error of the same loop that is not a bundle refusal (a
+	// deleted hooks folder, a busy selector lock) carries no classify
+	// prefix, so Setup warns and continues instead of naming a damaged bundle.
+	classifyErr = errors.New("enterprise hooks: selected managed runtime generation directory is absent: file does not exist")
+	if _, _, err := retireAbsentWindowsManagedHooksLifecycleJournal(ctx, false, true); err == nil ||
+		strings.HasPrefix(err.Error(), "classify ") || !strings.Contains(err.Error(), sid) {
+		t.Fatalf("staged retire over a deleted hooks folder: err=%v, want an unprefixed error naming the SID", err)
+	}
+
+	classifyErr = fmt.Errorf("%w: access denied", enterprisehooks.ErrWindowsManagedRuntimeGenerationDirectoryUntrusted)
+	skipped, collected, err := retireAbsentWindowsManagedHooksLifecycleJournal(ctx, false, true)
+	if err != nil || collected != 0 || len(skipped) != 1 || !strings.Contains(skipped[0], sid) {
+		t.Fatalf("staged retire over a folder the retire repairs: skipped=%v collected=%d err=%v, want it left to that retire", skipped, collected, err)
+	}
+
+	classifyErr = nil
+	if skipped, collected, err := retireAbsentWindowsManagedHooksLifecycleJournal(ctx, false, true); err != nil || collected != 0 || len(skipped) != 0 {
+		t.Fatalf("staged retire over healthy bundles: skipped=%v collected=%d err=%v", skipped, collected, err)
+	}
+	if gcCalls != 0 || identityCalls != 0 {
+		t.Fatalf("staged retire with no journal deleted (gc calls=%d) or asked for LocalSystem (identity calls=%d)", gcCalls, identityCalls)
+	}
+}
+
 func TestRenameWindowsManagedHooksLifecycleRecoveryHandleIsDurableAndNoReplace(t *testing.T) {
 	root := t.TempDir()
 	sourcePath := filepath.Join(root, "legacy-journal.json")
@@ -1295,5 +1380,72 @@ func TestReadWindowsManagedHooksLifecycleCursorTargetsRestoresAChangedAdapter(t 
 				t.Fatalf("targets=%v active=%t err=%v", targets, active, err)
 			}
 		})
+	}
+}
+
+// GAP-0571: a failed, non-waiting guardian row (here the Codex runtime
+// selector the guardian could not read) is still refused, and the refusal
+// names the row and the guardian's own error so the operator knows what to
+// repair before the uninstall commits.
+func TestWindowsManagedHooksGuardianRefusalNamesTheFailedRow(t *testing.T) {
+	manifestSHA256 := strings.Repeat("a", 64)
+	ctx := windowsManagedHooksLifecycleContext{
+		manifestPath: `C:\ProgramData\DefenseClaw\hook-guardian\targets.yaml`,
+		targets: []windowsManagedHooksTeardownTarget{
+			{Connector: "claudecode", SID: "S-1-5-21-111-222-333-1001"},
+			{Connector: "codex", SID: "S-1-5-21-111-222-333-1001"},
+		},
+	}
+	protected := []enterpriseHookReconcileRow{
+		{Connector: "claudecode", SID: "S-1-5-21-111-222-333-1001", OK: true},
+	}
+	results := []enterpriseHookReconcileRow{
+		protected[0],
+		{
+			Connector: "codex",
+			SID:       "S-1-5-21-111-222-333-1001",
+			Error:     "codex runtime selector: enterprise hooks: managed runtime selector targets are not strictly sorted",
+		},
+	}
+	activation := enterpriseHookGuardianActivation{
+		Version:          enterpriseHookGuardianActivationVersion,
+		UpdatedAt:        "2026-08-24T00:00:00Z",
+		ReconcileID:      strings.Repeat("f", 32),
+		Manifest:         ctx.manifestPath,
+		ManifestSHA256:   manifestSHA256,
+		TargetCount:      2,
+		SuccessCount:     1,
+		FailureCount:     1,
+		ProtectedTargets: protected,
+	}
+	authorization := enterpriseHookGuardianAuthorization{
+		Version:          1,
+		UpdatedAt:        activation.UpdatedAt,
+		TargetCount:      2,
+		SuccessCount:     1,
+		FailureCount:     1,
+		ProtectedTargets: protected,
+	}
+	state := enterpriseHookGuardianState{
+		Version:      1,
+		UpdatedAt:    activation.UpdatedAt,
+		Manifest:     ctx.manifestPath,
+		TargetCount:  2,
+		SuccessCount: 1,
+		FailureCount: 1,
+		Results:      results,
+	}
+	_, err := validateWindowsManagedHooksGuardianActivation(activation, authorization, state, ctx, manifestSHA256)
+	if err == nil {
+		t.Fatal("a failed guardian row was accepted for teardown")
+	}
+	for _, want := range []string{
+		"ambiguous target disposition",
+		"codex target S-1-5-21-111-222-333-1001",
+		"managed runtime selector targets are not strictly sorted",
+	} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("refusal %q does not name %q", err, want)
+		}
 	}
 }

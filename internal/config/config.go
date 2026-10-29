@@ -19,7 +19,9 @@ package config
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
+	"io/fs"
 	"log"
 	"net"
 	"net/url"
@@ -1163,12 +1165,21 @@ var recognizedLLMProviders = map[string]struct{}{
 // warnedPrefixes keeps one-shot-per-process warning state.
 var warnedPrefixes = map[string]struct{}{}
 
-func maybeWarnUnknownProvider(prefix, componentPath string) {
+func maybeWarnUnknownProvider(prefix, componentPath, instanceName string) {
 	if prefix == "" {
 		return
 	}
 	if _, ok := recognizedLLMProviders[prefix]; ok {
 		return
+	}
+	// "custom" with a bound instance routes through its llm_providers.custom
+	// entry, so it is not an unknown prefix (GAP-2234). Without an instance it
+	// still warns: nothing tells the gateway where to send the call.
+	if prefix == "custom" && strings.TrimSpace(instanceName) != "" {
+		return
+	}
+	if componentPath == "" {
+		componentPath = "llm"
 	}
 	key := componentPath + "\x00" + prefix
 	if _, seen := warnedPrefixes[key]; seen {
@@ -1228,6 +1239,14 @@ func (c *Config) ResolveLLM(path string) LLMConfig {
 		out.Model = override.Model
 	}
 	if override.Provider != "" {
+		// A role naming another provider and no instance of its own does
+		// not inherit the custom instance binding (GAP-2379); the CLI's
+		// Config.resolve_llm applies the same rule.
+		roleProvider := strings.ToLower(strings.TrimSpace(override.Provider))
+		if override.InstanceName == "" && roleProvider != "custom" &&
+			roleProvider != strings.ToLower(strings.TrimSpace(out.Provider)) {
+			out.InstanceName = ""
+		}
 		out.Provider = override.Provider
 	}
 	if override.APIKey != "" {
@@ -1284,8 +1303,52 @@ func (c *Config) ResolveLLM(path string) LLMConfig {
 		out.protectedCredentialRequired = true
 	}
 
-	maybeWarnUnknownProvider(out.ProviderPrefix(), path)
+	c.applyLLMInstance(&out)
+	maybeWarnUnknownProvider(out.ProviderPrefix(), path, out.InstanceName)
 	return out
+}
+
+// applyLLMInstance fills the blanks of a resolved role from the
+// llm_providers.custom entry its instance_name binds, as the gateway
+// provider merge and the Python resolver (_apply_instance_overlay) do:
+// provider "custom" (what `setup llm --provider custom --instance-name`
+// saves) or no provider takes the instance's base_provider_type, and an
+// unset base_url or bedrock/vertex/azure sub-block comes from the
+// instance. Explicit role values win. Every Go caller of ResolveLLM,
+// the watcher and hook scanners included, so sees the instance's family
+// and routing instead of "custom/<model>" (GAP-2396). An instance_name
+// that names no entry is left as is (the gateway reports it).
+func (c *Config) applyLLMInstance(out *LLMConfig) {
+	name := strings.ToLower(strings.TrimSpace(out.InstanceName))
+	if name == "" {
+		return
+	}
+	for i := range c.LLMProviders.Custom {
+		inst := &c.LLMProviders.Custom[i]
+		if strings.ToLower(strings.TrimSpace(inst.Name)) != name {
+			continue
+		}
+		provider := strings.ToLower(strings.TrimSpace(out.Provider))
+		if base := strings.ToLower(strings.TrimSpace(inst.BaseProviderType)); base != "" && (provider == "" || provider == "custom") {
+			out.Provider = base
+		}
+		if strings.TrimSpace(out.BaseURL) == "" && strings.TrimSpace(inst.BaseURL) != "" {
+			out.BaseURL = inst.BaseURL
+		}
+		if out.Bedrock == nil && inst.Bedrock != nil {
+			b := *inst.Bedrock
+			out.Bedrock = &b
+		}
+		if out.Vertex == nil && inst.Vertex != nil {
+			v := *inst.Vertex
+			out.Vertex = &v
+		}
+		if out.Azure == nil && inst.Azure != nil {
+			a := *inst.Azure
+			out.Azure = &a
+		}
+		return
+	}
 }
 
 type FirewallConfig struct {
@@ -1926,6 +1989,23 @@ func normalizeConnectorKey(name string) string {
 	}
 }
 
+// canonicalizeConnectorSelection folds guardrail.connector and claw.mode
+// to their registry names (trim, lowercase, claude-code/claude_code ->
+// claudecode) once, right after load. activeConnector, the hook gates and
+// the CLI already read the folded name; this makes every other reader of the
+// loaded config read it too: the single-connector boot
+// (configuredConnectorName -> resolveActiveConnector), the API connector
+// label, the watcher and the enterprise enumerators. Before, a primary that
+// `config set` accepts as claude-code failed the boot with "not found in
+// registry" and its hooks failed open (GAP-2007, GAP-1971, GAP-1972).
+func canonicalizeConnectorSelection(cfg *Config) {
+	if cfg == nil {
+		return
+	}
+	cfg.Guardrail.Connector = normalizeConnectorKey(cfg.Guardrail.Connector)
+	cfg.Claw.Mode = ClawMode(normalizeConnectorKey(string(cfg.Claw.Mode)))
+}
+
 // connectorOverride returns the per-connector override block for the
 // named connector, if one is configured. It is the single internal
 // lookup point shared by every Effective*(connector) resolver: an empty
@@ -1968,6 +2048,21 @@ func (g *GuardrailConfig) connectorOverride(connector string) (PerConnectorGuard
 func (g *GuardrailConfig) HasConnector(connector string) bool {
 	_, ok := g.connectorOverride(connector)
 	return ok
+}
+
+// NamesConnector reports whether guardrail.connector selects the named
+// connector. It folds case and the aliases (claude-code, claude_code ->
+// claudecode) the same way activeConnector does when it installs the
+// connector's hooks, so a primary written as an alias is evaluated by the
+// hook gates instead of answered allow without a scan (GAP-1971, GAP-1972).
+// The CLI roster prune (cmd_guardrail.roster_entry_is_redundant) reads the
+// same fold through connector_paths.normalize.
+func (g *GuardrailConfig) NamesConnector(connector string) bool {
+	if g == nil {
+		return false
+	}
+	primary := normalizeConnectorKey(g.Connector)
+	return primary != "" && primary == normalizeConnectorKey(connector)
 }
 
 // EffectiveMode returns the guardrail mode for the named connector:
@@ -2789,6 +2884,17 @@ func applyRuntimeV8DataDirDefaultsForPlatform(candidate *Config, document *V8YAM
 		candidate.Guardrail.RulePackDir = join(dataDir, "policies", "guardrail", "default")
 		if candidate.StandaloneEnterprise() {
 			standaloneRulePackDefault(candidate, dataDir, goos)
+		} else if policyDir := strings.TrimSpace(candidate.PolicyDir); policyDir != "" &&
+			join(policyDir) != join(dataDir, "policies") {
+			// The implicit default pack is the default preset under the
+			// policy_dir config.yaml names, where the CLI seeds and reads
+			// it and where a named "default" resolves (GAP-2126). A file
+			// from before that whose policy_dir has no such folder keeps
+			// the data_dir pack it started with.
+			policyPack := join(policyDir, "guardrail", "default")
+			if _, err := os.Stat(policyPack); err == nil || !errors.Is(err, fs.ErrNotExist) {
+				candidate.Guardrail.RulePackDir = policyPack
+			}
 		}
 	}
 	if !has("openshell", "pack_dir") {
@@ -2937,6 +3043,7 @@ func loadConfigSourceCheckedWithLayout(
 	// key is normalized or checked for duplicates.
 	migrateLegacyConnectorIDs(&cfg)
 	dropRetiredConnectorSettings(&cfg)
+	canonicalizeConnectorSelection(&cfg)
 
 	if err := checkRuntimeConfigVersion(cfg.ConfigVersion, resolvesToSecureClient(&cfg, pinnedDeploymentMode)); err != nil {
 		return nil, err
@@ -3444,6 +3551,12 @@ func ValidateManagedEnterpriseListenerBindings(cfg *Config) error {
 		return fmt.Errorf(
 			"config: managed_enterprise gateway API must bind to exact canonical 127.0.0.1, got %q",
 			apiBind,
+		)
+	}
+	if cfg.StandaloneEnterprise() && effectiveAPIPort(cfg.Gateway.APIPort) != DefaultGatewayAPIPort {
+		return fmt.Errorf(
+			"config: managed_enterprise standalone gateway.api_port must be %d: the service socket owns that listener",
+			DefaultGatewayAPIPort,
 		)
 	}
 

@@ -13,7 +13,7 @@
 
 [Unit]
 Description=DefenseClaw Gateway (managed enterprise)
-Documentation=https://cisco-ai-defense.github.io/defenseclaw/docs/enterprise/install/linux/
+Documentation=https://cisco-ai-defense.github.io/defenseclaw/docs/enterprise/linux/
 Wants=network-online.target defenseclaw-sensor-helper.service
 After=network-online.target defenseclaw-sensor-helper.service
 Requires=defenseclaw-gateway-api.socket defenseclaw-gateway-hook.socket

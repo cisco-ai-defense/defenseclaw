@@ -549,7 +549,7 @@ def test_plain_error_names_the_key_without_the_validator_internals():
 
     # The CLI reference quotes this message for a rejected `config set`.
     shown = f"Error: config.yaml was not changed: {config_writer.plain_error(block_at)}\n"
-    assert shown in _reference_page("commands/cli.mdx")
+    assert shown in _reference_page("cli.mdx")
 
 
 @pytest.mark.parametrize("relative", ["proxy-root-ca.pem", "./proxy-root-ca.pem", "certs/root.pem", "../root.pem"])
@@ -634,7 +634,7 @@ def test_an_enterprise_openshell_change_needs_a_restart_and_the_sandbox_floor_st
 
 def test_source_of_truth_page_lists_every_restart_required_key():
     """The page names each key config set reports as restart-required, not a shorter list."""
-    page = _reference_page("configuration/source-of-truth.mdx")
+    page = _reference_page("source-of-truth.mdx")
     section = page.split("Most keys apply with no restart.", 1)[1].split("`config set` says so", 1)[0]
     missing = [
         key

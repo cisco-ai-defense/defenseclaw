@@ -13,7 +13,9 @@
 package enterprisehooks
 
 import (
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -124,4 +126,35 @@ func BoundedLstat(path string, timeout time.Duration) (os.FileInfo, error) {
 		return answer.info, answer.err
 	}
 	return nil, &os.PathError{Op: "lstat", Path: clean, Err: syscall.ETIMEDOUT}
+}
+
+type unixEntriesResult struct {
+	has bool
+	err error
+}
+
+// BoundedDirHasEntries reports whether the directory at path holds at least
+// one entry, with a deadline. A directory that does not answer returns an
+// error that PendingTargetError recognizes (ETIMEDOUT).
+func BoundedDirHasEntries(path string, timeout time.Duration) (bool, error) {
+	clean := filepath.Clean(path)
+	result, ok := boundedUnixHomeProbe("entries\x00"+clean, timeout, func() any {
+		dir, err := os.Open(clean)
+		if err != nil {
+			return unixEntriesResult{err: err}
+		}
+		defer dir.Close()
+		names, err := dir.Readdirnames(1)
+		if len(names) > 0 {
+			return unixEntriesResult{has: true}
+		}
+		if errors.Is(err, io.EOF) {
+			return unixEntriesResult{}
+		}
+		return unixEntriesResult{err: err}
+	})
+	if answer, answered := result.(unixEntriesResult); ok && answered {
+		return answer.has, answer.err
+	}
+	return false, &os.PathError{Op: "readdir", Path: clean, Err: syscall.ETIMEDOUT}
 }

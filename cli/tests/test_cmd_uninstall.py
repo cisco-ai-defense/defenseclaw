@@ -1544,7 +1544,7 @@ class RemovedConnectorLeftoversTests(unittest.TestCase):
                     if flags.get("remove_binaries"):
                         self.assertTrue(calls.get("binaries") or calls.get("deferred"))
                     text = "\n".join(calls.get("echo", []))
-                    self.assertIn("OpenHands support was removed in DefenseClaw 1.0.4. Left for you to remove by hand:", text)
+                    self.assertIn("OpenHands/OmniGent support was removed in 1.0.5; DefenseClaw no longer guards it.", text)
                     self.assertIn(f"  - {config}: ", text)
                     script_listed = os.path.join(data_dir, "hooks", "openhands-hook.sh") in text
                     self.assertEqual(script_listed, not flags.get("remove_data_dir"))
@@ -1580,7 +1580,7 @@ class RemovedConnectorLeftoversTests(unittest.TestCase):
             calls = self._run(plan)
             self.assertNotIn("error", calls)
             report = "\n".join(calls.get("echo", []))
-            self.assertIn("OmniGent support was removed in DefenseClaw 1.0.4. Left for you to remove by hand:", report)
+            self.assertIn("OpenHands/OmniGent support was removed in 1.0.5; DefenseClaw no longer guards it.", report)
             for path in (config, module, pth, backup_dir):
                 self.assertIn(path, report)
             self.assertIn("remove defenseclaw_omnigent_policy from policy_modules", report)
@@ -1651,9 +1651,9 @@ class RemovedConnectorBackupsKeptTests(unittest.TestCase):
             backups = os.path.join(data_dir, "connector_backups", "omnigent")
             # What the gateway's removed-connector teardown prints (removed.go FormatRemovedLeftovers).
             teardown_stdout = (
-                "OmniGent support was removed in DefenseClaw 1.0.4. Left for you to remove by hand:\n"
-                f"  - {backups}: the copies of your files DefenseClaw saved before its setup changed them "
-                "(pristine_bytes, base64). To remove: copy back what you need, then delete this folder.\n"
+                "OpenHands/OmniGent support was removed in 1.0.5; DefenseClaw no longer guards it.\n"
+                f"  - {backups}: files DefenseClaw saved when it set up OmniGent. "
+                "To remove: copy back what you need, then delete this folder.\n"
             )
             plan = cmd_uninstall.UninstallPlan(
                 data_dir=data_dir, connectors=("omnigent",), stop_gateway=True, remove_data_dir=True, gateway_path="gw"
@@ -1667,17 +1667,13 @@ class RemovedConnectorBackupsKeptTests(unittest.TestCase):
                     self.assertEqual(fh.read(), body, rel)
             self.assertFalse(os.path.lexists(os.path.join(root, "codex")))
             text = "\n".join(echoed)
-            self.assertIn(f"  - {os.path.join(root, 'omnigent')}: the copies of your files", text)
-            self.assertIn(os.path.join(root, "omnigent", "defenseclaw_omnigent_policy.py.edited-0123"), text)
+            self.assertIn(f"  - {os.path.join(root, 'omnigent')}: files DefenseClaw saved", text)
             # The config only the moved record names is still listed.
             self.assertIn(os.path.join(home, "oc", "config.yaml"), text)
             # Every path the uninstall tells the user about is still there.
-            # defenseclaw_omnigent.pth (no pth record here) is a file name to look
-            # for in OmniGent's site-packages, not a path.
             named = re.findall(r"^\s*(?:·\s*)?- (\S.*?): ", text, flags=re.MULTILINE)
             self.assertTrue(named)
-            self.assertIn("defenseclaw_omnigent.pth", named)
-            for path in (p for p in named if p != "defenseclaw_omnigent.pth"):
+            for path in named:
                 self.assertTrue(os.path.lexists(path), f"the uninstall names {path}, which it removed:\n{text}")
 
     def test_a_backup_that_cannot_move_stops_the_uninstall_before_any_removal(self):
@@ -1855,6 +1851,39 @@ class MCPWriterBackupRemovalTests(unittest.TestCase):
             self.assertTrue(config.exists())
             self.assertIn(str(backup), buf.getvalue())
 
+    def test_full_uninstall_removes_unregistered_mcp_writer_backups(self):
+        # GAP-1636: after a 1.0.3 -> 1.0.4 upgrade uninstall --all left
+        # ~/.codex/.defenseclaw-config.toml.bak (with DefenseClaw hook entries)
+        # because no registry entry named it. The writer's own name beside a
+        # config DefenseClaw edits is removed; other files stay.
+        with tempfile.TemporaryDirectory() as tmp:
+            env = {"HOME": tmp, "USERPROFILE": tmp}
+            drop = {k: "" for k in ("CODEX_HOME", "CLAUDE_CONFIG_DIR", "COPILOT_HOME", "OPENCODE_CONFIG_DIR")}
+            with patch.dict(os.environ, {**env, **drop}):
+                for key in drop:
+                    os.environ.pop(key, None)
+                codex = Path(tmp) / ".codex"
+                codex.mkdir()
+                (codex / "config.toml").write_text("[mcp_servers]\n")
+                backup = codex / ".defenseclaw-config.toml.bak"
+                backup.write_text('[hooks]\ncommand = "defenseclaw"\n')
+                other = codex / ".other-config.toml.bak"
+                other.write_text("mine")
+                link_target = Path(tmp) / "elsewhere"
+                link_target.write_text("not ours")
+                claude_backup = Path(tmp) / ".defenseclaw-claude.json.bak"
+                claude_backup.symlink_to(link_target)
+
+                with capture_click_output() as buf:
+                    cmd_uninstall._remove_unregistered_mcp_writer_backups()
+
+                self.assertFalse(backup.exists())
+                self.assertIn(str(backup), buf.getvalue())
+                self.assertTrue((codex / "config.toml").exists())
+                self.assertTrue(other.exists())
+                # Only a regular file is removed, never a link at that name.
+                self.assertTrue(claude_backup.is_symlink() and link_target.exists())
+
     def test_full_uninstall_removes_only_empty_legacy_codex_candidate(self):
         with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {"HOME": tmp, "USERPROFILE": tmp}):
             codex = Path(tmp) / ".codex"
@@ -1876,10 +1905,9 @@ class MCPWriterBackupRemovalTests(unittest.TestCase):
 
 
 class GatewayTeardownOutputTests(unittest.TestCase):
-    def test_gateway_teardown_marks_the_uninstall_for_removed_connectors(self):
-        # Review fixes (uninstall lifecycle round b): the gateway removes a
-        # removed connector's agent-config entries, stub and import path only
-        # in an uninstall, so a removed DefenseClaw does not keep blocking.
+    def test_gateway_teardown_needs_no_uninstall_flag_for_removed_connectors(self):
+        # 1.0.5: every OpenHands/OmniGent teardown removes what DefenseClaw
+        # wrote, so the uninstall no longer marks it.
         completed = type("Completed", (), {"returncode": 0, "stdout": "", "stderr": ""})()
         with (
             patch("shutil.which", return_value="defenseclaw-gateway"),
@@ -1889,7 +1917,7 @@ class GatewayTeardownOutputTests(unittest.TestCase):
             self.assertTrue(cmd_uninstall._run_gateway_connector_teardown("omnigent"))
         teardown = run_mock.call_args_list[0]
         self.assertIn("teardown", teardown.args[0])
-        self.assertEqual(teardown.kwargs["env"]["DEFENSECLAW_REMOVED_CONNECTOR_UNINSTALL"], "1")
+        self.assertNotIn("env", teardown.kwargs)
 
     def test_gateway_teardown_uses_utf8_and_preserves_checkmark(self):
         completed = type(
@@ -2049,6 +2077,81 @@ class RemoveDataDirTests(unittest.TestCase):
                 cmd_uninstall._remove_data_dir(str(data_dir), preserve_entries=(".venv",))
 
             self.assertTrue(outside.is_dir())
+
+    def test_concurrent_remover_of_the_same_trees_is_not_a_failure(self):
+        # GAP-2355: two uninstalls of one account at once (two terminals)
+        # each failed with ENOENT on what the other one had just deleted, and
+        # the data stayed for a third run. What another remover took is gone.
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp) / ".defenseclaw"
+            for name in ("previous", ".failed-20261028T022310"):
+                deep = data_dir / name / "venv" / "lib" / "site-packages" / "pkg" / "sub"
+                deep.mkdir(parents=True)
+                for index in range(5):
+                    (deep / f"m{index}.py").write_text("x", encoding="utf-8")
+            (data_dir / "receipts").write_text("r", encoding="utf-8")
+            (data_dir / "config.yaml").write_text("config", encoding="utf-8")
+            real_unlink = os.unlink
+            raced: list[str] = []
+
+            def other_uninstall_takes_it_first(path, *args, **kwargs):
+                # The other run deletes these files a moment before this run
+                # does: the file is gone and this run's unlink reports ENOENT.
+                name = os.path.basename(os.fspath(path))
+                real_unlink(path, *args, **kwargs)
+                if name in ("m0.py", "m3.py", "receipts"):
+                    raced.append(name)
+                    raise FileNotFoundError(errno.ENOENT, "No such file or directory", os.fspath(path))
+
+            with (
+                patch.object(cmd_uninstall.os, "unlink", side_effect=other_uninstall_takes_it_first),
+                contextlib.redirect_stdout(io.StringIO()),
+            ):
+                cmd_uninstall._remove_data_dir(str(data_dir))
+
+            self.assertTrue(raced)
+            self.assertFalse(data_dir.exists())
+
+    def test_data_dir_another_remover_took_last_is_removed(self):
+        # GAP-2355: the other run's final rmdir won the race.
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp) / ".defenseclaw"
+            data_dir.mkdir()
+            (data_dir / "config.yaml").write_text("config", encoding="utf-8")
+            real_rmdir = os.rmdir
+
+            def other_removed_it(path, *args, **kwargs):
+                if os.fspath(path) == str(data_dir):
+                    real_rmdir(path)
+                    raise FileNotFoundError(errno.ENOENT, "No such file or directory", os.fspath(path))
+                return real_rmdir(path, *args, **kwargs)
+
+            out = io.StringIO()
+            with patch.object(cmd_uninstall.os, "rmdir", side_effect=other_removed_it), contextlib.redirect_stdout(out):
+                cmd_uninstall._remove_data_dir(str(data_dir))
+
+            self.assertFalse(data_dir.exists())
+            self.assertIn("removed", out.getvalue())
+
+    def test_a_real_removal_error_still_fails_the_data_phase(self):
+        # GAP-2355 keeps every other error: only "already gone" is success.
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp) / ".defenseclaw"
+            (data_dir / "previous" / "venv").mkdir(parents=True)
+            (data_dir / "previous" / "venv" / "locked.so").write_text("x", encoding="utf-8")
+            (data_dir / "config.yaml").write_text("config", encoding="utf-8")
+            real_unlink = os.unlink
+
+            def denied(path, *args, **kwargs):
+                if os.path.basename(os.fspath(path)) == "locked.so":
+                    raise PermissionError(errno.EACCES, "Permission denied", os.fspath(path))
+                return real_unlink(path, *args, **kwargs)
+
+            with patch.object(cmd_uninstall.os, "unlink", side_effect=denied), self.assertRaises(OSError) as raised:
+                cmd_uninstall._remove_data_dir(str(data_dir))
+
+            self.assertIn("Permission denied", str(raised.exception))
+            self.assertTrue((data_dir / "config.yaml").is_file())
 
     def test_partial_failure_retains_identity_marker_for_safe_retry(self):
         with tempfile.TemporaryDirectory() as tmp:

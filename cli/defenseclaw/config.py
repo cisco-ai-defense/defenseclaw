@@ -35,6 +35,7 @@ import re
 import stat
 import subprocess
 import sys
+import threading
 import urllib.parse
 from collections.abc import Callable, Mapping
 from contextlib import contextmanager
@@ -79,6 +80,7 @@ from defenseclaw.file_permissions import (
     MAX_DOTENV_BYTES,
     dotenv_key_is_process_control,
     dotenv_key_is_valid,
+    namespace_hides_owner,
     read_regular_file_no_follow,
     tracked_host_owner_uid,
 )
@@ -769,6 +771,12 @@ def _managed_config_trust_problem(path: str) -> str | None:
         owner_uid = tracked_host_owner_uid(current, info) if hasattr(info, "st_uid") else None
         if owner_uid is None:
             return f"{current}: cannot inspect path owner"
+        if owner_uid == -1 and namespace_hides_owner(info):
+            # Unknown, not another account: a sandbox hides it (GAP-1395).
+            return (
+                f"{current}: its owner cannot be checked inside this sandbox (a user namespace hides it); "
+                "run the command outside the sandbox"
+            )
         if owner_uid != 0:
             return f"{current}: owner uid {owner_uid} is not trusted; expected root/admin uid 0"
 
@@ -1003,9 +1011,15 @@ _OPENAI_STYLE_LLM_PROVIDERS = frozenset(
 _warned_llm_prefixes: set[tuple[str, str]] = set()
 
 
-def _maybe_warn_unknown_provider(prefix: str, component_path: str) -> None:
+def _maybe_warn_unknown_provider(prefix: str, component_path: str, instance_name: str = "") -> None:
     if not prefix or prefix in _RECOGNIZED_LLM_PROVIDERS:
         return
+    # ``provider: custom`` with a bound instance routes through its
+    # llm_providers.custom entry, so it is not an unknown prefix (GAP-2234).
+    # Without an instance it still warns: nothing tells the gateway where to go.
+    if prefix == "custom" and (instance_name or "").strip():
+        return
+    component_path = component_path or "llm"
     key = (component_path, prefix)
     if key in _warned_llm_prefixes:
         return
@@ -2260,7 +2274,7 @@ class JudgeConfig:
 class WebhookConfig:
     # Mirrors ``internal/config.WebhookConfig`` (notifier webhook, not an
     # audit sink). See the published webhook guide:
-    # https://cisco-ai-defense.github.io/defenseclaw/docs/how-to/observability/set-up-webhook-alerts/
+    # https://cisco-ai-defense.github.io/defenseclaw/docs/observability/webhooks/
     #
     # ``name`` is the CLI-visible identifier used by
     # ``defenseclaw setup webhook {enable,disable,remove,show,test}``.
@@ -2704,6 +2718,18 @@ class GuardrailConfig:
             return "closed" if standalone else "open"
         return "closed" if self.hook_policy_tier(connector) == "strict" else "open"
 
+    def effective_hook_outage_fail_mode(self, connector: str = "") -> str:
+        """What ``connector``'s hooks do while the gateway is down.
+
+        Mirrors Go ``Config.EffectiveHookOutageFailModeForConnector``: the
+        mode the current hooks, the OpenCode/Amp plugins and the shell helper
+        decide at call time, and the one Doctor, Status and the fail-mode
+        setter's runtime check read for them (GAP-1354, GAP-1730).
+        :meth:`effective_hook_fail_mode` already resolves it (a managed mode,
+        an explicit saved mode, else the connector's policy tier).
+        """
+        return self.effective_hook_fail_mode(connector)
+
     def hook_policy_tier(self, connector: str = "") -> str:
         """The connector's policy tier: its rule pack's posture (strict, default or permissive).
 
@@ -2963,7 +2989,8 @@ def _go_quote(value: Any) -> str:
 
 
 def _sandbox_enum_error(field_name: str, value: Any, *allowed: str) -> str | None:
-    if value in (None, "") or value in allowed:
+    # Any letter case, as the Go loader folds it (GAP-0691, #1226).
+    if value in (None, "") or (isinstance(value, str) and value.lower() in allowed):
         return None
     return f"{field_name} {_go_quote(value)} must be one of {', '.join(allowed)}"
 
@@ -4356,6 +4383,16 @@ class Config:
         if override.model:
             out.model = override.model
         if override.provider:
+            # A role naming another provider and no instance of its own does
+            # not inherit the custom instance binding (GAP-2379); Go ResolveLLM
+            # applies the same rule.
+            role_provider = override.provider.strip().lower()
+            if (
+                not override.instance_name
+                and role_provider != "custom"
+                and role_provider != (out.provider or "").strip().lower()
+            ):
+                out.instance_name = ""
             out.provider = override.provider
         if override.api_key:
             out.api_key = override.api_key
@@ -4409,7 +4446,7 @@ class Config:
                     out.instance_name,
                 )
 
-        _maybe_warn_unknown_provider(out.provider_prefix(), path)
+        _maybe_warn_unknown_provider(out.provider_prefix(), path, out.instance_name)
         return out
 
     def resolved_default_llm_api_key(self) -> str:
@@ -4589,7 +4626,7 @@ class Config:
         # Load already moved a retired connector ID in memory; apply the same
         # rename to the on-disk document so any save persists it.
         legacy_connector.migrate_raw_config(existing, path)
-        _drop_retired_connector_settings(existing)
+        _drop_retired_connector_settings(existing, path)
         merged = _merge_v8_modeled_changes(
             existing,
             dataclass_data,
@@ -7147,7 +7184,9 @@ def _apply_instance_overlay(out: LLMConfig, data_dir: str, providers: list[dict[
             break
     if entry is None:
         return
-    if not out.provider:
+    # provider "custom" is what ``setup llm --provider custom --instance-name``
+    # saves: the bound instance's base_provider_type is the family (GAP-2393).
+    if not out.provider or out.provider.strip().lower() == "custom":
         bp = entry.get("base_provider_type") or entry.get("provider") or ""
         if isinstance(bp, str) and bp:
             out.provider = bp.strip().lower()
@@ -7330,7 +7369,13 @@ def _is_retired_connector_name(name: Any) -> bool:
     return isinstance(name, str) and name.strip().lower() in _RETIRED_CONNECTOR_NAMES
 
 
-def _drop_retired_connector_settings(raw: dict[str, Any]) -> None:
+# Set once _drop_retired_connector_settings has warned in this process.
+_retired_settings_warned = threading.Event()
+
+
+def _drop_retired_connector_settings(
+    raw: dict[str, Any], source: str | os.PathLike[str] | None = None, *, emit_warning: bool = True
+) -> None:
     """Until 1.1, accept old rosters and discard removed connector settings.
 
     Only connector fields are touched (mirrors ``dropRetiredConnectorSettings``
@@ -7442,10 +7487,16 @@ def _drop_retired_connector_settings(raw: dict[str, Any]) -> None:
     if isinstance(claw, dict) and _is_retired_connector_name(claw.get("mode")):
         claw["mode"] = ""
         changed = True
-    if changed:
-        logging.warning(
-            "until 1.1: removed OpenHands/OmniGent connector settings from loaded config; "
-            "run defenseclaw migrate"
+    if changed and emit_warning and not _retired_settings_warned.is_set():
+        # Once per process, through this module's logger: the root logger's
+        # implicit basicConfig printed a raw "WARNING:root:" line into the
+        # installer's output, and that line repeated the installers' one
+        # removal notice (GAP-2043). It names the file, which is what to fix.
+        _retired_settings_warned.set()
+        _log.warning(
+            "%s still names OpenHands/OmniGent, which DefenseClaw no longer supports; "
+            "they are ignored. Delete them from that file.",
+            os.fspath(source) if source else "config.yaml",
         )
 
 
@@ -7491,7 +7542,7 @@ def load(
     # is normalized or checked for duplicates. The Go loader applies the same
     # rule; `defenseclaw migrate` persists it (see migrations.py).
     legacy_connector.migrate_raw_config(raw, cfg_file)
-    _drop_retired_connector_settings(raw)
+    _drop_retired_connector_settings(raw, cfg_file)
     if without_guardrail_profiles:
         raw = _without_guardrail_profiles(raw)
 
@@ -7499,6 +7550,11 @@ def load(
     ss_raw = scanners_raw.get("skill_scanner", {})
     gw_raw = raw.get("gateway", {})
     source_config_version = _exact_config_version(raw.get("config_version"))
+    # config.yaml stays in the install home; the stores and folders the file
+    # leaves out are under the data_dir it names, as the gateway resolves them
+    # (GAP-2126: the CLI seeded and read <home>/policies after config set
+    # data_dir while the gateway read <data_dir>/policies).
+    data_dir = _configured_data_dir(raw, data_dir)
     audit_db = _audit_database_path(raw, data_dir)
 
     cfg = Config(
@@ -7669,6 +7725,15 @@ def _exact_config_version(value: Any) -> int:
     if isinstance(value, str) and value.strip().isdigit():
         return int(value.strip())
     return 0
+
+
+def _configured_data_dir(raw: dict[str, Any], home: str) -> str:
+    """The data_dir config.yaml sets (``~/`` expanded, made absolute like the
+    Go compiler), else ``home``: the folder the omitted paths are under."""
+    configured = raw.get("data_dir")
+    if not isinstance(configured, str) or not configured.strip():
+        return home
+    return os.path.abspath(os.path.normpath(_expand_store_home(configured.strip())))
 
 
 def _audit_database_path(raw: dict[str, Any], data_dir: str) -> str:
@@ -7990,3 +8055,35 @@ def prepare_fresh_v8_config(cfg: Config) -> Config:
     cfg._source_config_version = CURRENT_CONFIG_VERSION
     cfg._loaded_v8_modeled_snapshot = copy.deepcopy(_config_to_dict(cfg))
     return cfg
+
+
+def saved_hook_fail_mode_scope(guardrail: Any, connector: str = "") -> str:
+    """Where an explicitly saved ``hook_fail_mode`` that decides ``connector`` lives.
+
+    ``"connector"`` for the connector's own saved mode, ``"global"`` for a
+    saved top-level one, ``""`` when none is saved and the policy tier decides
+    (:meth:`GuardrailConfig.effective_hook_fail_mode`). A saved mode wins over
+    ``guardrail use-pack strict``, so a hint to close an outage names
+    ``guardrail fail-mode closed`` then (GAP-0039).
+    """
+    override = (getattr(guardrail, "connectors", None) or {}).get(connector)
+    if override is not None and str(getattr(override, "hook_fail_mode", "") or "").strip():
+        return "connector"
+    value = str(getattr(guardrail, "hook_fail_mode", "") or "").strip()
+    if value and getattr(guardrail, "_hook_fail_mode_saved", True):
+        return "global"
+    return ""
+
+
+def outage_block_hint(guardrail: Any, connector: str = "") -> str:
+    """The command that makes a per-user ``connector``'s hooks block while the gateway is down.
+
+    ``guardrail fail-mode closed`` (``--connector NAME`` for the connector's
+    own save) when a saved open decides it, else the strict policy (GAP-0039).
+    """
+    scope = saved_hook_fail_mode_scope(guardrail, connector)
+    if scope == "connector":
+        return f"defenseclaw guardrail fail-mode closed --connector {connector}"
+    if scope == "global":
+        return "defenseclaw guardrail fail-mode closed"
+    return "defenseclaw guardrail use-pack strict"

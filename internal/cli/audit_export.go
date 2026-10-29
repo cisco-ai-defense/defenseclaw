@@ -105,7 +105,7 @@ func openManagedAuditStoreReadOnly(path string) (*audit.Store, error) {
 // keeps the help of main (issue #1092, GAP-0270).
 const auditExportLongIntro = `Write one JSON object per line. Each audit row is validated against
 schemas/audit-event.json before it is written. Configuration changes and
-operator actions are audit rows too (action config-update and others).
+operator actions are audit rows too (action config.change.applied and others).
 --include-activity appends the rows of the activity_events table, which
 holds only history from releases before 1.0, validated against
 activity-event.json.
@@ -475,7 +475,7 @@ FROM audit_events` + where + ` ORDER BY ` + window.orderBy(hasExactTime)
 // since 1.0 operator changes are audit rows in the export itself, and
 // activity_events holds only history from older databases.
 const activityHistoryNote = "note: --include-activity added no rows. Configuration changes and operator " +
-	"actions are already audit rows in this export (action config-update and others); " +
+	"actions are already audit rows in this export (action config.change.applied and others); " +
 	"activity_events holds only history from releases before 1.0."
 
 // appendActivityLines appends the activity_events rows and notes on stderr

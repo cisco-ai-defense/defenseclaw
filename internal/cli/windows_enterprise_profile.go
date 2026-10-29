@@ -125,6 +125,14 @@ func resolveWindowsEnterpriseLifecycleProfile(action string, opts *windowsEnterp
 		return windowsEnterpriseInvalidArguments("--profile must be %s or %s", managed.ProfileSecureClient, managed.ProfileStandalone)
 	}
 	if path := strings.TrimSpace(opts.configPath); path != "" {
+		// A relative --config is the caller's mistake, refused as invalid
+		// arguments before anything opens it, as on Linux; it was a 1603
+		// preflight failure for a file looked up in the current folder
+		// (GAP-1674). Secure Client keeps its arguments.
+		if !filepath.IsAbs(path) && (requested == managed.ProfileStandalone ||
+			(requested == "" && windowsEnterpriseStandaloneRecordedOnly(opts))) {
+			return windowsEnterpriseInvalidArguments("--config must be an absolute path, got %s", path)
+		}
 		configured, err := readWindowsEnterpriseConfigProfile(path)
 		var content windowsEnterpriseConfigContentError
 		var unreadable windowsEnterpriseConfigReadError

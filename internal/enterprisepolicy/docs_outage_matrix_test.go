@@ -5,6 +5,7 @@ package enterprisepolicy
 
 import (
 	"encoding/json"
+	"errors"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -31,7 +32,7 @@ import (
 // Every other page links to the table instead of restating it
 // (TestOutageBehaviourIsStatedOnlyInTheCapabilityMatrix).
 
-const outageTableLink = "/docs/reference/apis/capability-matrix#gateway-outage"
+const outageTableLink = "/docs/connectors/capability-matrix#gateway-outage"
 
 // Values of the table's managed open columns.
 const (
@@ -266,6 +267,28 @@ var outcomeWord = regexp.MustCompile(`(?i)\b(?:block|blocks|blocked|run|runs|all
 
 var sentenceBreak = regexp.MustCompile(`(?:[.!?])\s+|\s\|\s|\n\s*\n`)
 
+// pinnedOutageSentence reports the connector-page sentences that came from the 1.0.4
+// reference pages when the docs went back to the 1.0.3 layout. Each one is checked against
+// the hook source by docs-site/scripts/test-docs-claims.ts, so it cannot drift from the code.
+func pinnedOutageSentence(rel, sentence string) bool {
+	switch rel {
+	case "connectors/antigravity.mdx":
+		// The two 1.0.5 per-user/managed outage sentences of the Antigravity verdict
+		// mapping are pinned by test-docs-claims.ts as well (train T2).
+		return strings.HasPrefix(sentence, "With the default fail mode `closed`, when the gateway is unreachable the running hook denies `PreToolUse`") ||
+			strings.HasPrefix(sentence, "When the gateway is not running, a per-user install in the default or permissive policy lets `PreToolUse` run with one warning") ||
+			strings.HasPrefix(sentence, "On a managed host the administrator's fail mode decides an outage: `closed`, the default, denies it")
+	case "connectors/cursor.mdx":
+		return strings.HasPrefix(sentence, "The administrator's resolved fail mode decides what the running hook does on a gateway outage")
+	case "connectors/hermes.mdx":
+		// The managed-standalone Windows row of the Hermes outage table
+		// (docs e9847430bd, GAP-0515, verified on dc-fc-r104-sa-ewin1) is
+		// pinned by test-docs-claims.ts (train T7).
+		return strings.HasPrefix(sentence, "On Windows, where Hermes has no guard, an administrator's `open` lets the call run during an outage")
+	}
+	return false
+}
+
 func TestOutageBehaviourIsStatedOnlyInTheCapabilityMatrix(t *testing.T) {
 	restatement := newOutageRestatement(t)
 	docs := filepath.Join(repoRoot(), "docs-site", "content", "docs")
@@ -287,9 +310,13 @@ func TestOutageBehaviourIsStatedOnlyInTheCapabilityMatrix(t *testing.T) {
 		if strings.Contains(text, outageTableLink) {
 			linked[rel] = true
 		}
-		connectorPage := strings.HasPrefix(rel, "connectors/") && rel != "connectors/index.mdx"
+		// The table page itself (connectors/capability-matrix.mdx) is not a connector page.
+		connectorPage := strings.HasPrefix(rel, "connectors/") && rel != "connectors/index.mdx" && rel != "connectors/capability-matrix.mdx"
 		for _, sentence := range sentenceBreak.Split(text, -1) {
 			sentence = strings.Join(strings.Fields(sentence), " ")
+			if pinnedOutageSentence(rel, sentence) {
+				continue
+			}
 			if restatement.match(sentence, connectorPage) {
 				t.Errorf("%s restates a connector's outage behaviour; link to %s instead: %.240q", rel, outageTableLink, sentence)
 			}
@@ -301,12 +328,47 @@ func TestOutageBehaviourIsStatedOnlyInTheCapabilityMatrix(t *testing.T) {
 	}
 	// The pages that describe fail modes and outages point at the table.
 	for _, page := range []string{
-		"reference/configuration/fail-modes.mdx", "enterprise/plan/threat-model.mdx",
-		"enterprise/configure/machine-policy.mdx", "enterprise/configure/foreign-hook-guard.mdx",
+		"reference/fail-modes.mdx", "enterprise/threat-model.mdx",
+		"enterprise/machine-policy.mdx", "enterprise/foreign-hook-guard.mdx",
 		"connectors/amp.mdx", "connectors/copilot.mdx", "connectors/hermes.mdx", "connectors/opencode.mdx",
 	} {
 		if !linked[page] {
 			t.Errorf("%s does not link to the gateway outage table (%s)", page, outageTableLink)
 		}
+	}
+}
+
+// The OpenCode and Amp plugins render closed on a managed standalone host
+// (only Secure Client renders the administrator mode), so a page that says
+// an administrator may pick open for an outage must scope it to Secure
+// Client (GAP-2309).
+func TestPluginPagesScopeAdministratorOutageOpenToSecureClient(t *testing.T) {
+	docs := filepath.Join(repoRoot(), "docs-site", "content", "docs")
+	read := 0
+	// The reference/connectors pages exist only in the newer docs layout;
+	// a layout without them is checked on the pages it has.
+	for _, rel := range []string{
+		"connectors/opencode.mdx", "connectors/amp.mdx",
+		"reference/connectors/opencode.mdx", "reference/connectors/amp.mdx",
+	} {
+		data, err := os.ReadFile(filepath.Join(docs, filepath.FromSlash(rel)))
+		if errors.Is(err, fs.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		read++
+		for _, sentence := range sentenceBreak.Split(string(data), -1) {
+			low := strings.ToLower(strings.Join(strings.Fields(sentence), " "))
+			if strings.Contains(low, "administrator") && strings.Contains(low, "outage") &&
+				regexp.MustCompile(`\b(?:select|choose|pick)s?\b[^.]*\bopen\b`).MatchString(low) &&
+				!strings.Contains(low, "secure client") {
+				t.Errorf("%s offers administrator outage open without scoping it to Secure Client: %.240q", rel, sentence)
+			}
+		}
+	}
+	if read == 0 {
+		t.Fatal("no OpenCode or Amp connector page found")
 	}
 }

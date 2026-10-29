@@ -65,11 +65,18 @@ const (
 	hookCallerInFlight = 32
 	// hookGlobalInFlightPerProc and hookGlobalInFlightMin bound the requests
 	// the gateway holds at once for all callers together: 16 per processor,
-	// at least 32. A processor serves about 3 hooks a second, so a full
-	// gateway answers its last admitted request in about 5 s, inside the
-	// shortest hook deadline (10 s).
+	// at least four callers' in-flight caps (128). A caller's share of it is a
+	// quarter, so on a small host the minimum is what lets one account hold
+	// its full hookCallerInFlight: 10 calls a second for the 3.5 s answer
+	// budget. With a minimum of 32 a host of two processors let one account
+	// hold 8, so an ordinary 10 calls a second whose answers took over 0.8 s
+	// under CPU load (five agent TUIs starting beside two busy agents) were
+	// refused 429 and blocked as a gateway no-answer (GAP-1790). A request
+	// that waits for its caller's run slot uses no CPU and is dropped when its
+	// hook gives up, so holding it costs nothing the answer budget does not
+	// already bound.
 	hookGlobalInFlightPerProc = 16
-	hookGlobalInFlightMin     = 32
+	hookGlobalInFlightMin     = 4 * hookCallerInFlight
 	// hookCallerIdle is how long an idle caller's budget is kept.
 	hookCallerIdle = 5 * time.Minute
 	// hookCallerLogInterval paces the refusal log line per caller.
@@ -231,18 +238,39 @@ func hookCallerBudgetKey(identity, path string) string {
 	return identity
 }
 
+// hookCallerSandboxRead is the budget of an account's read-only sandbox
+// requests (GET under the sandbox policy class: status, sandboxes, packs,
+// current policy). They are an operator's CLI and TUI reads, not policy
+// writes or hook traffic: in the sandbox policy class's 20-request burst
+// about nine back-to-back "defenseclaw sandbox pack list" calls were refused
+// for 20 s (GAP-1693). Reads take the ordinary caller limits under their own
+// key, so they neither wait on nor use up the policy writes' or the host
+// hooks' budgets.
+const hookCallerSandboxRead = "|sandbox-read"
+
+// hookCallerAdmissionKey is hookCallerBudgetKey with the method: a read of
+// the sandbox policy class gets the read budget.
+func hookCallerAdmissionKey(identity, method, path string) string {
+	key := hookCallerBudgetKey(identity, path)
+	if method == http.MethodGet && strings.HasSuffix(key, "|"+sandboxBudgetPolicy) {
+		return identity + hookCallerSandboxRead
+	}
+	return key
+}
+
 // admitHookCaller applies the per-caller limits to one request for path and
 // waits for one of the caller's run slots. It returns the request to serve,
 // which carries the slot, and the release function to defer; the release
 // function is nil after answering 429 or when the client went away while it
-// waited.
+// waited; hookCallerLeft reports the second.
 func (a *APIServer) admitHookCaller(w http.ResponseWriter, r *http.Request, identity, route string) (*http.Request, func()) {
-	release, run, refusal, logNow := a.hookCallerLimits.acquire(hookCallerBudgetKey(identity, r.URL.Path))
+	release, run, refusal, logNow := a.hookCallerLimits.acquire(hookCallerAdmissionKey(identity, r.Method, r.URL.Path))
 	if refusal == "" {
 		if r.Context().Err() != nil {
-			// The client left before it had a slot: nothing to serve.
+			// The client left before it had a slot: nothing to serve. The
+			// caller audits a managed call it would have served (GAP-0286).
 			release()
-			return r, nil
+			return withHookCallerLeft(r), nil
 		}
 		// Advertise the receipt protocol as soon as a managed hook is
 		// admitted. Waiting for this caller's run slot can exceed the native
@@ -265,7 +293,7 @@ func (a *APIServer) admitHookCaller(w http.ResponseWriter, r *http.Request, iden
 			}
 		case <-r.Context().Done():
 			release()
-			return r, nil
+			return withHookCallerLeft(r), nil
 		}
 	}
 	if logNow {
@@ -311,24 +339,19 @@ func yieldHookRunSlot(ctx context.Context) (resume func()) {
 	// The hook bounds its wait for a local decision; this one waits on a
 	// remote scanner, so it reports progress first (hook_progress.go).
 	reportHookProgress(ctx)
-	return pauseHookRunSlot(ctx)
+	return waitWithoutHookRunSlot(ctx)
 }
 
-// pauseHookRunSlot frees the caller's run slot while this request waits for
-// an external answer. The request still counts toward its in-flight limits.
-// The caller resumes the slot before doing more gateway work.
-func pauseHookRunSlot(ctx context.Context) (resume func()) {
-	slot, _ := ctx.Value(hookRunSlotContextKey{}).(*hookRunSlot)
+// waitWithoutHookRunSlot frees the caller's run slot while the request waits
+// on something that uses no gateway CPU (a remote scanner, a session start
+// that has not arrived yet, GAP-1822). Unlike pauseHookRunSlot, resume takes
+// a slot back before the request goes on, and gives up when the request has
+// ended.
+func waitWithoutHookRunSlot(ctx context.Context) (resume func()) {
+	slot := giveUpHookRunSlot(ctx)
 	if slot == nil {
 		return func() {}
 	}
-	slot.mu.Lock()
-	defer slot.mu.Unlock()
-	if !slot.held {
-		return func() {}
-	}
-	<-slot.run
-	slot.held = false
 	return func() {
 		select {
 		case slot.run <- struct{}{}:
@@ -344,6 +367,39 @@ func pauseHookRunSlot(ctx context.Context) (resume func()) {
 		}
 		slot.held = true
 	}
+}
+
+// pauseHookRunSlot frees the caller's run slot once the request has offered
+// its answer to the hook. The request still counts toward its in-flight
+// limits, and the returned resume does not take a slot back: what is left
+// (waiting for the delivery receipt, then writing the call's audit rows) is
+// not answer work, and the audit writes queue on the store's single writer
+// anyway. Taking a run slot back for it made a caller's next hook wait behind
+// this call's audit writes: on a host of two or three processors a caller
+// has one slot, and with a cold page cache on a large audit store those
+// writes took long enough that a 10 calls a second load of one account
+// queued every new hook past the answer budget, and the hooks blocked them
+// as a gateway no-answer (GAP-1790).
+func pauseHookRunSlot(ctx context.Context) (resume func()) {
+	giveUpHookRunSlot(ctx)
+	return func() {}
+}
+
+// giveUpHookRunSlot returns the run slot the request on ctx holds and
+// reports that slot, or nil when the request holds none.
+func giveUpHookRunSlot(ctx context.Context) *hookRunSlot {
+	slot, _ := ctx.Value(hookRunSlotContextKey{}).(*hookRunSlot)
+	if slot == nil {
+		return nil
+	}
+	slot.mu.Lock()
+	defer slot.mu.Unlock()
+	if !slot.held {
+		return nil
+	}
+	<-slot.run
+	slot.held = false
+	return slot
 }
 
 // end gives back the slot when the request is done.

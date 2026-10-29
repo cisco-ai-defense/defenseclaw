@@ -5,6 +5,7 @@ package gateway
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"slices"
@@ -246,16 +247,33 @@ func (g *sessionStartGate) await(ctx context.Context, key string, wait, arrival 
 				g.arrivals[key] = arrived
 			}
 			g.mu.Unlock()
+			// The wait uses no gateway CPU: the call gives up its caller's
+			// run slot for it, so unseen sessions of one account do not
+			// queue behind each other's windows (GAP-1822).
+			resume := waitWithoutHookRunSlot(ctx)
 			window := time.NewTimer(min(arrival, wait))
+			timedOut := false
 			select {
 			case <-arrived:
 			case <-window.C:
-				g.judgeMissingStart(ctx, key, startCheck)
+				timedOut = true
 			case <-ctx.Done():
 				window.Stop()
+				resume()
 				return sessionStartPendingReason, true
 			}
 			window.Stop()
+			resume()
+			// A request that ended while it waited to take its run slot
+			// back is not judged: a start check (or a Codex registration
+			// repair) run with a done context would record a sticky
+			// start block for a live session.
+			if ctx.Err() != nil {
+				return sessionStartPendingReason, true
+			}
+			if timedOut {
+				g.judgeMissingStart(ctx, key, startCheck)
+			}
 			arrival = 0
 			continue
 		}
@@ -312,6 +330,13 @@ func (g *sessionStartGate) judgeMissingStart(ctx context.Context, key string, st
 // sessionStartArrival is how long a call of a session whose start the gate
 // has not seen waits for it: only where a start verdict can block, in action
 // mode (sessionStartVerdictBlocks), for a connector that sends a start.
+//
+// A session whose start an earlier gateway process recorded (its saved
+// instruction record knows its startup) will not send that start again: it
+// was running when this gateway started or upgraded. Waiting for it would
+// only delay the call by the whole window (GAP-1459), so its start is judged
+// in its place at once, as a start that does not arrive is (GAP-1448), and
+// the call goes on with that verdict.
 func (a *APIServer) sessionStartArrival(ctx context.Context, profile connector.HookProfile, connectorName string) time.Duration {
 	if sandboxHookMode(ctx, connectorName, a.agentHookMode(ctx, connectorName)) != "action" ||
 		!slices.ContainsFunc(profile.SupportedEvents, func(event string) bool {
@@ -319,12 +344,45 @@ func (a *APIServer) sessionStartArrival(ctx context.Context, profile connector.H
 		}) {
 		return 0
 	}
+	sessionID := strings.TrimSpace(SessionIDFromContext(ctx))
+	if key := sessionStartGateKey(ctx, connectorName, sessionID); key != "" &&
+		!a.sessionStartGate.known(key) && a.sessionStartRecordedEarlier(ctx, connectorName, sessionID) {
+		a.sessionStartGate.judgeMissingStart(ctx, key, a.sessionStartCheck(connectorName))
+	}
 	return sessionStartArrivalWait
+}
+
+// known reports a session whose start this process has seen, judged or is
+// judging.
+func (g *sessionStartGate) known(key string) bool {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	_, seen := g.started[key]
+	return seen || g.entries[key] != nil
+}
+
+// sessionStartRecordedEarlier reports a session whose saved instruction
+// record holds a startup an earlier gateway process recorded.
+func (a *APIServer) sessionStartRecordedEarlier(ctx context.Context, connectorName, sessionID string) bool {
+	dir := a.instructionLoadDir()
+	if dir == "" {
+		return false
+	}
+	key, ok := instructionStartupKey(ctx, connectorName, sessionID)
+	if !ok {
+		return false
+	}
+	record, ok := readInstructionLoadRecord(instructionLoadRecordPath(dir, key), key)
+	return ok && record.StartupKnown
 }
 
 // codexStartRegistrationUnavailable is the start verdict of a Codex session
 // whose managed runtime registration could not be repaired.
 const codexStartRegistrationUnavailable = "Codex runtime registration is unavailable"
+
+// codexStartRegistrationSetupStep follows the refusal when the cause names
+// no step of its own.
+const codexStartRegistrationSetupStep = "; run: defenseclaw setup codex --yes"
 
 // codexStartRegistrationRefusal repairs a missing managed runtime
 // registration for a Codex session start and returns the refusal when it
@@ -348,9 +406,31 @@ func (a *APIServer) codexStartRegistrationRefusal(ctx context.Context, connector
 			return ""
 		}
 		fmt.Fprintf(os.Stderr, "[gateway] Codex SessionStart registration recovery failed: %v\n", err)
-		return codexStartRegistrationUnavailable
+		if step := registrationRepairStep(err); step != "" {
+			return codexStartRegistrationUnavailable + ": " + step
+		}
+		// Setup registers it again or says what stops it (GAP-1744: the
+		// refusal names a usable next step, not only the outcome).
+		return codexStartRegistrationUnavailable + codexStartRegistrationSetupStep
 	}
 	return ""
+}
+
+// registrationRepairStep is the text of the error in err's chain that names
+// the command the user runs to repair the registration ("...; run:
+// defenseclaw setup codex --yes", connector.ErrCodexExecutableChanged after
+// a Codex self-update, GAP-1884), so the refusal and the 503 body name the
+// step instead of only "run doctor". The innermost such error is taken: it
+// is the cause, without the wrapping detail (paths, digests). Any other
+// error gives "".
+func registrationRepairStep(err error) string {
+	step := ""
+	for ; err != nil; err = errors.Unwrap(err) {
+		if text := err.Error(); strings.Contains(text, "run: defenseclaw ") {
+			step = text
+		}
+	}
+	return step
 }
 
 // sessionStartCheck judges, for a call, the start of its session that did

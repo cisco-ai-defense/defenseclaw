@@ -45,6 +45,8 @@ keys.log
 bin/
 dist/
 build/
+# The managed Linux and macOS scanner runtime trees (packaging/unix/build-scanner-runtime.sh)
+/scanner-runtime/
 coverage.out
 cover.out
 *.coverprofile

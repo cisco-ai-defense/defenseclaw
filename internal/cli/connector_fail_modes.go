@@ -123,13 +123,23 @@ func runConnectorRefreshFailModes(cmd *cobra.Command, _ []string) error {
 		return json.NewEncoder(cmd.OutOrStdout()).Encode(map[string]any{
 			"action": "refresh-fail-modes", "ok": true, "config": read,
 			"refreshed": nonNilStrings(result.Sidecar), "scripts": nonNilStrings(result.Scripts),
+			"shims": nonNilStrings(result.Shims),
 		})
 	}
 	printHookFailModeRefresh(cmd, result, read)
 	if len(result.Scripts) > 0 {
 		fmt.Fprintf(cmd.OutOrStdout(), "Hooks closed until the gateway starts: %s\n", strings.Join(result.Scripts, ", "))
 	}
+	printShimFailModeRefresh(cmd, result)
 	return nil
+}
+
+// printShimFailModeRefresh names the PATH shims whose installed outage mode
+// the refresh set from the config.
+func printShimFailModeRefresh(cmd *cobra.Command, result connector.HookFailModeRefresh) {
+	if len(result.Shims) > 0 {
+		fmt.Fprintf(cmd.OutOrStdout(), "PATH shims set from the config: %s\n", strings.Join(result.Shims, ", "))
+	}
 }
 
 // holdConnectorFailModes is refresh-fail-modes --hold-until-exit: the
@@ -155,6 +165,7 @@ func holdConnectorFailModes(cmd *cobra.Command, hookDir string, mode func(string
 	if len(result.Scripts) > 0 {
 		fmt.Fprintf(out, "Hooks closed until the gateway starts: %s\n", strings.Join(result.Scripts, ", "))
 	}
+	printShimFailModeRefresh(cmd, result)
 	return nil
 }
 

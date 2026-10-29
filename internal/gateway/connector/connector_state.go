@@ -1065,102 +1065,6 @@ func ManagedHookContractTimestamps(
 	return lock.UpdatedAt, entry.UpdatedAt, nil
 }
 
-// sealRemovedConnectorScript records digest as the digest of script in the
-// hook contract lock entry of connectorName, a connector 1.0.4 removed: the
-// deny stub its teardown left at that path, run by the agent configs listed
-// in configs, which the entry then names among its hook config paths; ""
-// removes the script's digest (nothing is there). A stub that an agent config
-// still runs is sealed even when the lock or the entry is gone: the entry is
-// written again with only the stub and its configs. Nothing else in the lock
-// changes. An entry that already records it writes nothing; with no lock or
-// no entry, a digest "" or no config writes nothing either. until 1.1.
-func sealRemovedConnectorScript(dataDir, connectorName, script, digest string, configs []string, managedEnterprise bool) error {
-	if strings.TrimSpace(dataDir) == "" || !IsRemovedConnector(connectorName) {
-		return nil
-	}
-	connectorName = normalizeConnectorName(connectorName)
-	path := filepath.Join(dataDir, hookContractLockFile)
-	create := digest != "" && len(configs) > 0
-	if _, err := os.Lstat(path); errors.Is(err, os.ErrNotExist) && !create {
-		return nil
-	}
-	return withFileLockMode(path, managedEnterprise, func() error {
-		lock, err := loadHookContractLockForUpdate(dataDir, managedEnterprise)
-		if err != nil {
-			return fmt.Errorf("load hook contract lock: %w", err)
-		}
-		if lock.Connectors == nil {
-			lock.Connectors = map[string]HookContractLockEntry{}
-		}
-		entry, ok := lock.Connectors[connectorName]
-		if !ok {
-			if !create {
-				return nil
-			}
-			entry = HookContractLockEntry{Connector: connectorName}
-		}
-		recorded, has := entry.HookScriptDigests[script]
-		var missing []string
-		if digest != "" {
-			for _, config := range configs {
-				if !removedLockNamesConfig(entry, config) {
-					missing = append(missing, filepath.ToSlash(config))
-				}
-			}
-		}
-		if ok && len(missing) == 0 && ((digest == "" && !has) || (digest != "" && recorded == digest)) {
-			return nil
-		}
-		entry.HookScriptDigests = cloneHookScriptDigests(entry.HookScriptDigests)
-		if digest == "" {
-			delete(entry.HookScriptDigests, script)
-			if len(entry.HookScriptDigests) == 0 {
-				entry.HookScriptDigests = nil
-			}
-		} else {
-			if entry.HookScriptDigests == nil {
-				entry.HookScriptDigests = map[string]string{}
-			}
-			entry.HookScriptDigests[script] = digest
-		}
-		if len(missing) > 0 {
-			entry.Locations.HookConfigPaths = append(append([]string(nil), entry.Locations.HookConfigPaths...), missing...)
-		}
-		previousTimes := []string{lock.UpdatedAt}
-		for _, peer := range lock.Connectors {
-			previousTimes = append(previousTimes, peer.UpdatedAt)
-		}
-		entry.UpdatedAt = nextHookContractTimestamp(time.Now(), previousTimes...)
-		lock.UpdatedAt = entry.UpdatedAt
-		lock.Connectors[connectorName] = entry
-		body, err := json.MarshalIndent(lock, "", "  ")
-		if err != nil {
-			return err
-		}
-		return hookRuntimeFileWriter(managedEnterprise)(path, append(body, '\n'), 0o600)
-	})
-}
-
-// removedConnectorLockEntry returns the hook contract lock entry of a
-// removed connector, or nil when there is no lock or no entry. until 1.1.
-func removedConnectorLockEntry(dataDir, connectorName string, managedEnterprise bool) (*HookContractLockEntry, error) {
-	if strings.TrimSpace(dataDir) == "" {
-		return nil, nil
-	}
-	if _, err := os.Lstat(filepath.Join(dataDir, hookContractLockFile)); errors.Is(err, os.ErrNotExist) {
-		return nil, nil
-	}
-	lock, err := loadHookContractLockForUpdate(dataDir, managedEnterprise)
-	if err != nil {
-		return nil, err
-	}
-	entry, ok := lock.Connectors[normalizeConnectorName(connectorName)]
-	if !ok {
-		return nil, nil
-	}
-	return &entry, nil
-}
-
 func ClearHookContractLockEntry(dataDir, connectorName string) error {
 	return ClearHookContractLockEntryForMode(dataDir, connectorName, false)
 }
@@ -1170,14 +1074,6 @@ func ClearHookContractLockEntryForMode(
 	managedEnterprise bool,
 ) error {
 	if strings.TrimSpace(dataDir) == "" {
-		return nil
-	}
-	if IsRemovedConnector(connectorName) {
-		// until 1.1: a removed connector's teardown changes only its hook
-		// script and tokens (removed.go). Its lock entry and .hookcfg
-		// state stay, in every mode: the shared files hold the surviving
-		// connectors' entries too, and only their own writer may change
-		// them.
 		return nil
 	}
 	connectorName = normalizeConnectorName(connectorName)
@@ -1962,6 +1858,60 @@ func VerifyManagedSharedHookScriptDigests(dataDir, expectedOwnerSID string) erro
 	}
 	if !reflect.DeepEqual(lock, after) {
 		return errors.New("managed hook contract changed during shared script verification")
+	}
+	return nil
+}
+
+// VerifyManagedConnectorHookScriptDigests checks, without following a link,
+// that each per-user hook script of conn the contract lock entry recorded
+// (claude-code-hook.sh, for example) is still in opts.DataDir/hooks with the
+// recorded bytes. A recorded script that is missing or edited is an error, so
+// the guardian's verify reports the drift and its repair rewrites the script:
+// the drift check ignores script digests, and the managed Windows verify
+// checked only the shared inspect-* scripts, so a deleted
+// claude-code-hook.sh stayed missing until another runtime file drifted
+// (GAP-2227). A script the lock does not record (a lock an earlier release
+// wrote) is not checked.
+func VerifyManagedConnectorHookScriptDigests(
+	opts SetupOpts,
+	conn Connector,
+	entry HookContractLockEntry,
+	expectedOwnerSID string,
+) error {
+	if conn == nil || strings.TrimSpace(opts.DataDir) == "" || len(entry.HookScriptDigests) == 0 {
+		return nil
+	}
+	if runtime.GOOS == "windows" && strings.TrimSpace(expectedOwnerSID) == "" {
+		return errors.New("managed connector hook script target SID is empty")
+	}
+	shared := map[string]bool{}
+	for _, name := range append(append([]string{}, genericHookScripts...), hookHelperScripts...) {
+		shared[name] = true
+	}
+	for _, path := range hookScriptPathsForConnector(opts, conn) {
+		name := filepath.Base(path)
+		if shared[name] {
+			continue
+		}
+		want, ok := entry.HookScriptDigests[name]
+		if !ok {
+			continue
+		}
+		got, exists, err := stableManagedArtifactDigestForOwner(
+			path,
+			"managed connector hook script "+name,
+			managedHookRuntimeArtifactMaxBytes,
+			expectedOwnerSID,
+		)
+		if err != nil {
+			return fmt.Errorf("verify managed connector hook script %s: %w", path, err)
+		}
+		if !exists {
+			return fmt.Errorf("managed connector hook script is missing: %s", path)
+		}
+		if got != want {
+			return fmt.Errorf("managed connector hook script digest mismatch: %s", path)
+		}
 	}
 	return nil
 }

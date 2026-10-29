@@ -113,9 +113,9 @@ func TestStopWayOn(t *testing.T) {
 		del          = "`defenseclaw sandbox delete dc-x` (DefenseClaw sandbox) or `openshell sandbox delete dc-x` (raw OpenShell sandbox), which deletes it and its work"
 		oldEnded     = "save or sync any accessible guest work outside the guest first; OpenShell 0.1.3 cannot stop or start a completed or error-state MicroVM: " + del
 		unknownEnded = "save or sync any accessible guest work first; the gateway release is unknown and raw stop may not flush the guest, so save its work outside the guest before trying `openshell sandbox stop dc-x` (raw OpenShell sandbox); only if OpenShell refuses stop or still reports the VM running, " + del
-		ended        = "save or sync any accessible guest work first; nothing in OpenShell writes this MicroVM's disk back or stops it: its VM still runs what its workload left running, " +
-			"and its start ends that VM with no flush first, so what the VM has not written to its disk is lost: " +
-			"`defenseclaw sandbox start dc-x --end-vm` ends the VM that way, then `defenseclaw sandbox stop dc-x` once it is ready; for a raw OpenShell sandbox, `openshell sandbox start dc-x` ends its VM the same way, then `openshell sandbox stop dc-x` (raw OpenShell sandbox) once it is ready; only if OpenShell refuses that path or still reports the VM running, `openshell sandbox delete dc-x` deletes it and its work"
+		ended        = "save or sync any accessible guest work first; nothing in OpenShell writes this MicroVM's disk back or stops it: on OpenShell 0.1.5 " +
+			"its start (`defenseclaw sandbox start dc-x --end-vm` or `openshell sandbox start dc-x` too) fails with Conflict and leaves it starting, " +
+			"so keep it while you need what it holds (it keeps the OpenShell gateway); only then " + del
 	)
 	for _, tc := range []struct {
 		phase   openshell.SandboxPhase
@@ -180,13 +180,38 @@ func TestRawMicroVMRestartAdviceSavesWorkBeforeLegacyStop(t *testing.T) {
 	}
 }
 
+// GAP-0570: on OpenShell 0.1.5 the start of a MicroVM whose workload ended
+// while its VM still runs (`start --end-vm`, raw `openshell sandbox start`)
+// fails with Conflict ("VM sandbox is already running generation") and
+// leaves it starting, where its stop is refused too. The way on names no
+// start or stop as its recovery: it keeps the VM while its work is needed,
+// and its delete comes last.
+func TestEndedMicroVMAdviceNamesNoStartThatFails(t *testing.T) {
+	for _, said := range []string{"", "MainProcessFailed: exited 1"} {
+		phase := openshell.PhaseCompleted
+		if said != "" {
+			phase = openshell.PhaseError
+		}
+		got := openshell.StopWayOn("dc-x", phase, said, openshell.SupportedMin)
+		for _, bad := range []string{"--end-vm` ends", "`openshell sandbox start dc-x` ends", "then `defenseclaw sandbox stop dc-x` once it is ready",
+			"then `openshell sandbox stop dc-x`"} {
+			if strings.Contains(got, bad) {
+				t.Errorf("%s (%q) advises a path OpenShell 0.1.5 refuses (%q): %s", phase, said, bad, got)
+			}
+		}
+		save, keep, del := strings.Index(got, "save or sync any accessible guest work first"), strings.Index(got, "keep it while you need"),
+			strings.Index(got, "`defenseclaw sandbox delete dc-x`")
+		if save != 0 || keep < save || del < keep || !strings.Contains(got, "fails with Conflict") {
+			t.Errorf("%s (%q): save first, keep, then delete: %s", phase, said, got)
+		}
+	}
+}
+
 func TestRecoverableMicroVMRestartAdviceSavesWorkWithoutDeletion(t *testing.T) {
 	for _, tc := range []struct {
 		phase openshell.SandboxPhase
 		said  string
 	}{
-		{openshell.PhaseCompleted, ""},
-		{openshell.PhaseError, "MainProcessFailed: exited 1"},
 		{openshell.PhaseError, "ProvisioningTimedOut: window expired"},
 	} {
 		got := openshell.StopWayOn("dc-x", tc.phase, tc.said, openshell.SupportedMin)

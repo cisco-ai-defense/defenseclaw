@@ -920,7 +920,8 @@ func publishedFileProblem(Options, string) string { return "" }
 // directory's protected DACL already lets every user read it.
 func publishedDirProblem(Options, string) string { return "" }
 
-func restorePublishedDirs(Options, string) ([]string, error) { return nil, nil }
+func restorePublishedDirs(Options, string) ([]string, error)         { return nil, nil }
+func restoreWritablePublishedDirs(Options, string) ([]string, error) { return nil, nil }
 
 func restoreRecordedPolicyFileMode(Options, string, string) (bool, error) { return false, nil }
 

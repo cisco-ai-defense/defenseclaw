@@ -2,21 +2,27 @@
 title: OpenClaw
 description: Guard OpenClaw with a DefenseClaw plugin that sends model calls through the guardrail proxy and checks each tool call before it runs.
 keywords:
-  - OpenClaw connector
+  - DefenseClaw OpenClaw connector
   - OpenClaw plugin
   - before_tool_call
+  - OpenClaw transport coverage
 ---
 
-DefenseClaw ships a plugin for OpenClaw. It redirects recognized model calls through the guardrail proxy, which checks the request and the response, and asks the gateway about each tool call before it runs. This is a proxy connector.
+DefenseClaw ships a plugin for OpenClaw. It redirects recognized model calls through the guardrail proxy, which checks the request and the response, and asks the gateway about each tool call before it runs. This is a proxy connector. It is the only connector that ships a first-party plugin in this repository (`extensions/defenseclaw/`). The plugin owns the OpenClaw-side wiring. The gateway and CLI own everything else.
+
+<Video
+  src="openclaw"
+  caption="Plugin install and first guardrail on DefenseClaw 1.0.4: setup writes the DefenseClaw plugin into OpenClaw, restarts the gateway, and the first tool call is checked."
+/>
 
 ## Platform support
 
 | Platform | Status | Notes |
 | --- | --- | --- |
-| macOS and Linux | **Supported** | DefenseClaw hosts the guardrail proxy and installs the plugin. |
-| Native Windows x64 | **Unsupported** | The connector needs the guardrail proxy, which DefenseClaw does not host on Windows. |
+| macOS and Linux | **Supported** | DefenseClaw hosts the required guardrail proxy and installs the first-party plugin. Subprocess policy is shell shims on both. |
+| Native Windows x64 | **Unsupported** | DefenseClaw is hook-only on Windows, while the OpenClaw connector requires the guardrail proxy, which DefenseClaw does not host on Windows. There is no supported WSL, Docker, VM or mixed workaround. |
 
-## Set up
+## Setup
 
 On a new install, run `defenseclaw init --connector openclaw` first. Until DefenseClaw is initialized, `defenseclaw setup openclaw` stops with `DefenseClaw is not initialized — run 'defenseclaw init' first.`
 
@@ -27,7 +33,7 @@ defenseclaw setup openclaw --mode action --human-approval --rule-pack default --
 
 The proxy is in the data path in both modes. Observe records policy findings without blocking on those findings; a gateway outage still stops proxied requests. Action enforces policy. Run `defenseclaw doctor` to check the result.
 
-## Check it
+### Check it
 
 ```bash
 defenseclaw status
@@ -35,36 +41,143 @@ defenseclaw status
 
 The agent appears under **Agents** with its mode. `defenseclaw doctor` reports no failed check for it.
 
+<Video
+  src="openclaw-e2e"
+  caption="A full OpenClaw run on DefenseClaw 1.0.4: a prompt reaches the gateway, policy decides, OpenClaw asks for approval on a confirm verdict in its Control UI, the tool runs or is denied, and the audit row is written."
+/>
 
-The sequence of a model call and a tool call, with approvals, is on the [reference page](/docs/reference/connectors/openclaw#end-to-end-flow).
+The sequence of a model call and a tool call, with approvals, is on the [OpenClaw integration page](/docs/connectors/openclaw-integration#end-to-end-flow).
 
-## What it can block or ask
+#### What this command sets vs. leaves at defaults
 
-<HookEventsList connector="openclaw" />
+`defenseclaw setup openclaw` is the dedicated alias. It delegates to the shared guardrail setup and exposes the common options, not every `setup guardrail` flag ([quick-alias reference](/docs/guardrail/aliases), [full guardrail setup](/docs/guardrail)). The flags above set the connector, mode, optional HITL and optional rule pack. Everything else uses the shipped defaults ([Defaults](/docs/policies/defaults)).
 
-- The proxy can block a checked request, a checked response and a tool call.
-- OpenClaw is the connector with plugin-mediated approval. In action mode a confirm verdict on `before_tool_call` becomes OpenClaw's own approval request, which denies on timeout. You answer inside OpenClaw.
-- Only recognized model traffic is redirected. Other requests pass through unchecked.
+| Knob | Value when omitted | Flag to override |
+| --- | --- | --- |
+| Scanner backend | `local` (bundled regex packs, no key) | `--scanner-mode local\|remote\|both` |
+| Rule pack | unset, built-in baseline | `--rule-pack default\|strict\|permissive` |
+| LLM judge | off (regex-only triage) | `--judge-model <model>` plus `--judge-api-key-env` |
+| Detection strategy | `regex_judge` if the judge is on, else regex-only | `--detection-strategy regex_only\|regex_judge\|judge_first` |
+| HITL | off | `--human-approval` plus `--hilt-min-severity` |
+| HITL minimum severity | `HIGH` when `--human-approval` is on | `--hilt-min-severity low\|medium\|high\|critical` |
+| Gateway outage | `closed`: no hooks, see the [gateway outage table](/docs/connectors/capability-matrix#gateway-outage); `status`, the setup summary and `guardrail fail-mode` all show it | not configurable (`guardrail.hook_fail_mode` does not apply) |
+| Proxy port | `4000` | `--port <int>` |
+| Block message | empty (built-in copy) | `--block-message "<text>"` |
+| Redaction | v8 bucket and profile policy (`none` for fresh v8) | Edit `observability.destinations[].routes[].selector.buckets` and `observability.redaction_profiles` ([Redaction](/docs/observability/redaction)) |
 
-## Files it changes
+#### Common variations
+
+```bash
+# Pilot: nothing blocks. Run for at least a week before promoting.
+defenseclaw setup openclaw --mode observe --rule-pack permissive --restart
+
+# Action with human approval. HIGH can pause for approval, CRITICAL still blocks.
+defenseclaw setup openclaw --mode action --human-approval --hilt-min-severity high --restart
+
+# Strict: block MEDIUM and above, alert on LOW.
+defenseclaw policy activate strict
+defenseclaw setup openclaw --mode action --rule-pack strict --restart
+```
+
+Human approval needs OpenClaw 2026.3.28 or later. The OpenClaw that `install.sh` installs (2026.3.24) has no plugin approvals, so setup refuses `--human-approval` there and changes nothing. Upgrade OpenClaw first (`npm install -g openclaw@2026.3.28` or later), or set up without human approval.
+
+For a second-pass LLM judge, export a key and add `--detection-strategy regex_judge --judge-model <model> --judge-api-key-env DEFENSECLAW_LLM_KEY`. Latency and cost depend on the model.
+
+### Bedrock through a VPC endpoint
+
+When `bedrock-runtime.<region>.amazonaws.com` resolves to an AWS PrivateLink (VPC interface) endpoint, the proxy refuses the private address and every turn fails. The agent shows `DefenseClaw refused a private LLM endpoint; if you trust it, run: defenseclaw guardrail allow-private-upstream <host>`, and `defenseclaw doctor` warns with a **Private upstream** row. Allow the endpoint. The command restarts a running gateway.
+
+```bash
+defenseclaw guardrail allow-private-upstream bedrock-runtime.us-east-1.amazonaws.com
+```
+
+### OpenClaw gateway on another port
+
+`defenseclaw setup openclaw` reads the OpenClaw gateway port from `openclaw.json` (`gateway.port`). If you onboard OpenClaw on another port later, run `defenseclaw setup openclaw` again or `defenseclaw setup gateway --port <port>`.
+
+## Files DefenseClaw will modify
 
 | What | Where |
 | --- | --- |
 | Plugin allow and load entries | `~/.openclaw/openclaw.json` |
-| Plugin | `~/.openclaw/extensions/defenseclaw/` |
+| Plugin | `~/.openclaw/extensions/defenseclaw/` (`openclaw.plugin.json`, `package.json`, `dist/index.js`) |
+| Hook scripts | `~/.defenseclaw/hooks` |
 | Subprocess shims | on `PATH`, for `curl`, `wget`, `ssh`, `nc`, `pip` and `npm` |
 
-DefenseClaw backs up `openclaw.json` first. Teardown restores it, or removes only DefenseClaw's entries.
+DefenseClaw limits its OpenClaw-tree changes to `extensions/defenseclaw/` and its managed entries in `openclaw.json`. DefenseClaw backs up `openclaw.json` first. Backups are byte for byte and hash-checked. Teardown restores the file, or removes only DefenseClaw's entries when the file drifted.
+
+## Transport coverage
+
+The plugin patches `globalThis.fetch`, Node `https.request`, `http.request` and `http.get`, the global Undici dispatcher, and the Undici copy OpenClaw ships. A matching request is redirected through the guardrail proxy. Only recognized model traffic is redirected. Other requests pass through unchecked.
+
+| Transport | Redirected through the proxy when | Unclassified request |
+| --- | --- | --- |
+| `globalThis.fetch` | The destination is a known provider, or the method, path and readable body form a recognized LLM request shape. | Passes through and emits egress passthrough telemetry. |
+| `https.request` | The destination is a known provider or its path has a recognized LLM suffix. | Passes through and emits egress passthrough telemetry. |
+| `http.request` and `http.get` | Its non-safe destination has a recognized LLM path, including supported known or local-provider paths. | Passes through without guaranteed passthrough telemetry. |
+| Undici global dispatcher | Its non-safe destination is a known provider or has a recognized LLM path. | Passes through without guaranteed passthrough telemetry. |
+| Undici copy that OpenClaw ships | Same rule as the global dispatcher. OpenClaw sends model requests through an SSRF-guarded fetch that gives Undici a dispatcher of its own, which skips every layer above. | Passes through without guaranteed passthrough telemetry. |
+
+Raw sockets, custom transports and libraries that bypass every patched entry point are outside the boundary. An egress event proves the plugin observed a transport branch, not that the request was proxied and inspected.
+
+OpenClaw `>=2026.6.8` is the range that first required the Undici dispatcher layers. `defenseclaw doctor` fails the **OpenClaw interception** row when the plugin's sentinel self-test, which never leaves the host, cannot prove a rewrite onto the guardrail proxy, even if `/health` returns 200. The gateway pairs each model call OpenClaw completes with a proxy hop of its own. Doctor fails the row when the latest call took no hop, and warns when an earlier one did not but the calls after it did. Counts restart when `defenseclaw-gateway` restarts. If turns succeed while doctor says traffic is not intercepted, restart OpenClaw so the plugin reloads, then rerun doctor. Confirm a real `INCOMING REQUEST` delta in `gateway.log` only when that log can grow.
+
+## What the plugin does
+
+<Flow
+  direction="TB"
+  caption="The plugin's two checkpoints. Both listeners belong to defenseclaw-gateway. The ports shown are the defaults."
+>
+  <Node id="oc" kind="agent">OpenClaw</Node>
+  <Node id="p" kind="connector">{`DefenseClaw plugin\nloads inside OpenClaw`}</Node>
+  <Node id="proxy" kind="gateway">{`Guardrail proxy :4000\nchecks request and response`}</Node>
+  <Node id="api" kind="gateway">{`Inspect API :18970\nchecks the tool call`}</Node>
+  <Node id="llm" kind="generic">Model provider</Node>
+  <Edge from="oc" to="p" label="runs" />
+  <Edge from="p" to="proxy" label="redirects LLM calls" />
+  <Edge from="p" to="api" label="asks before tools" />
+  <Edge from="proxy" to="llm" label="forwards if allowed" />
+</Flow>
+
+The plugin hooks OpenClaw's fetch interceptor and the `before_tool_call` lifecycle. See [Components](/docs/connectors/openclaw-integration#components).
+
+## Hook capabilities
+
+<HookEventsList connector="openclaw" />
+
+Proxy connector: not gated by a hook contract version.
+
+### What it can block or ask
+
+- The proxy can block a checked request, a checked response and a tool call.
+- OpenClaw is the connector with plugin-mediated approval. In action mode a confirm verdict on `before_tool_call` becomes OpenClaw's own approval request, which denies on timeout. Answer it in the OpenClaw Control UI (`openclaw dashboard`) or with `/approve` on a chat channel that forwards approvals. `openclaw tui` and local `openclaw chat` do not show the request, so the call there is denied when it times out, and the OpenClaw gateway log says where to answer.
+- Only recognized model traffic is redirected. Other requests pass through unchecked.
+
+### Verdict mapping
+
+The gateway answers allow, alert, confirm or block. In action mode a block stops the tool and a confirm becomes OpenClaw's `requireApproval`. Allow and alert let the tool run. For model calls, the guardrail proxy checks the request before it forwards it and the response before it returns it.
+
+### Fail mode
+
+OpenClaw is a proxy connector with no hooks. While the gateway is down, requests are blocked ([gateway outage table](/docs/connectors/capability-matrix#gateway-outage)). `guardrail fail-mode` lists it as `closed (proxy-backed, no hooks ...)`. See [Fail modes](/docs/reference/fail-modes).
+
+## Subprocess policy
+
+The policy is `shims` on every platform. Setup installs PATH shims for `curl`, `wget`, `ssh`, `nc`, `pip` and `npm` that send each invocation to the gateway's tool-inspection endpoint before running the real binary. They inspect those command paths only and give no syscall, filesystem or network isolation. While the gateway is not running, the shims follow the policy: the default and permissive policies print `DefenseClaw warning: gateway peer is unverified or unavailable; running <tool> without inspection`, write a `hook-failures.jsonl` record and run the real tool; the strict policy refuses it (`DefenseClaw: gateway peer is unverified or unavailable — refusing to exec <tool>`, exit 1).
+
+OpenClaw does not run in an OpenShell sandbox. The legacy standalone sandbox that ran it as a separate Linux user was removed. A host that still carries it removes what it left by hand ([remove a retired standalone sandbox](/docs/sandboxes/first-session)). OpenShell support for OpenClaw is pending in the [capability matrix](/docs/connectors/capability-matrix).
 
 ## Limits
 
-- Raw sockets, custom transports and libraries that bypass the patched entry points are not inspected.
+- Native Windows is unsupported: the connector needs the guardrail proxy, which DefenseClaw does not host on Windows.
+- Raw sockets, custom transports and libraries that bypass every patched entry point are outside the boundary. They are not inspected.
 - The shims inspect those six commands only. They give no syscall, filesystem or network isolation.
 - If a Bedrock endpoint resolves to a private VPC address, the proxy refuses it. Allow it with `defenseclaw guardrail allow-private-upstream <host>`.
+- OpenClaw 2026.5.12 and later load Amazon Bedrock from the external plugin `@openclaw/amazon-bedrock-provider`. Without it every model call fails with `No API provider registered for api: bedrock-converse-stream`, and setup warns. Run `openclaw plugins install @openclaw/amazon-bedrock-provider`, then `openclaw gateway restart`.
 - If you move OpenClaw's gateway port, run `defenseclaw setup openclaw` again.
-- OpenClaw does not run in an OpenShell sandbox.
+- OpenClaw does not run in an OpenShell sandbox. OpenShell support is pending in the [capability matrix](/docs/connectors/capability-matrix).
 
-## Turn it off
+## Disable
 
 For a per-user, single-connector install:
 
@@ -81,7 +194,3 @@ defenseclaw setup remove openclaw --yes --force
 Turn it back on by running the Set up command again, for example `defenseclaw setup openclaw --restart`. Leaving out `--mode` keeps the mode you saved before disabling the guardrail. `defenseclaw guardrail enable` turns OpenClaw back on only when `guardrail.model` is set (`defenseclaw setup guardrail`); otherwise it stops with `Cannot enable: guardrail.model is not set.`
 
 OpenClaw is proxy-backed and cannot run next to hook connectors. While any hook connector is configured, `defenseclaw setup openclaw` refuses and changes nothing; `defenseclaw setup openclaw --replace` removes the hook connectors and sets up OpenClaw in their place.
-
-## Details
-
-Transport coverage, both sequences, correlation headers and version checks are in the [OpenClaw reference](/docs/reference/connectors/openclaw).

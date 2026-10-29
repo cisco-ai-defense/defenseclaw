@@ -481,6 +481,7 @@ interface Scenario {
   input: Record<string, unknown>;
   description: string;
   expectedVerdict: string;
+  expectedByPreset?: Partial<Record<'default' | 'strict' | 'permissive', string>>;
 }
 
 function buildScenarios(): Scenario[] {
@@ -516,6 +517,7 @@ function buildScenarios(): Scenario[] {
       domain: 'admission',
       description: 'An MCP server scan found a MEDIUM finding. Balanced warns and keeps it enabled; Strict rejects.',
       expectedVerdict: 'warning',
+      expectedByPreset: { strict: 'rejected' },
       input: {
         target_type: 'mcp',
         target_name: 'context-server',
@@ -598,8 +600,9 @@ function buildScenarios(): Scenario[] {
       id: 'guardrail-medium-completion',
       title: 'MEDIUM guardrail finding (completion)',
       domain: 'guardrail',
-      description: 'MEDIUM finding on completion. Default preset (alert threshold MEDIUM): alert. Strict: block. A policy whose alert threshold is raised to HIGH or above allows it.',
+      description: 'MEDIUM finding on completion. Default preset (alert threshold MEDIUM): alert. Strict: block. Permissive, or a policy whose alert threshold is raised to HIGH or above, allows it.',
       expectedVerdict: 'alert',
+      expectedByPreset: { strict: 'block', permissive: 'allow' },
       input: {
         direction: 'completion',
         model: 'gpt-4o-mini',

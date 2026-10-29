@@ -93,7 +93,11 @@ def _move_back(stage: str, original: str) -> None:
 class PluginEnforcer:
     def __init__(self, quarantine_dir: str) -> None:
         self.quarantine_dir = os.path.join(quarantine_dir, "plugins")
-        os.makedirs(self.quarantine_dir, exist_ok=True)
+        try:
+            os.makedirs(self.quarantine_dir, exist_ok=True)
+        except OSError:
+            # The quarantine move reports an unwritable folder (GAP-1740).
+            pass
 
     @staticmethod
     def _safe_segment(value: str) -> str | None:

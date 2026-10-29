@@ -162,6 +162,15 @@ type activeAgentContextCache struct {
 	prunedOrder  []string
 	prunedBytes  int
 	prunedLoaded bool
+	// storeRecords and storeBytes count the saved records and their size
+	// once storeCounted (the last scan of the store); the saves since then
+	// keep them current. storeSaves counts the saves, so a scan every
+	// instructionLoadRescanSaves of them also sees records others changed.
+	// All are guarded by storeMu.
+	storeRecords int
+	storeBytes   int64
+	storeCounted bool
+	storeSaves   int
 }
 
 func (cache *activeAgentContextCache) currentTime() time.Time {
@@ -736,14 +745,20 @@ func (cache *activeAgentContextCache) resetKey(key activeAgentContextKey, preser
 // own late start: what those calls recorded stands, a directory they
 // sighted keeps its first record (so a file the session created there stays
 // its own), and the start only adds the directories they had not reached.
+// A first start that says it is a new session (fresh: source "startup")
+// is also that session's own start when only its loads came before it
+// (Claude Code sends SessionStart and InstructionsLoaded at once, so a load
+// can be judged first, GAP-2130): the loads stand and the start takes the
+// snapshot.
 // Any other start is a new generation: it resets the session and takes a
 // new snapshot. That is a start the session ID already had, one that says
 // so (newGeneration: a resume, clear, compact or reset), and a start after
-// loads alone, as before.
-func (cache *activeAgentContextCache) startKey(key activeAgentContextKey, newGeneration bool, files map[string]string, dirs []string, dirIDs map[string]string) {
+// loads alone that does not say it is a new session, as before.
+func (cache *activeAgentContextCache) startKey(key activeAgentContextKey, newGeneration, fresh bool, files map[string]string, dirs []string, dirIDs map[string]string) {
 	cache.mu.Lock()
 	session, exists := cache.sessions[key]
-	late := exists && session.awaitingStart && session.startupKnown && !newGeneration
+	sighted := session.startupKnown
+	late := exists && session.awaitingStart && !newGeneration && (sighted || fresh)
 	if late {
 		session.awaitingStart = false
 		session.updatedAt = cache.currentTime()
@@ -752,6 +767,10 @@ func (cache *activeAgentContextCache) startKey(key activeAgentContextKey, newGen
 	cache.mu.Unlock()
 	if !late {
 		cache.beginKey(key)
+		cache.setStartupKey(key, files, dirs, dirIDs)
+		return
+	}
+	if !sighted {
 		cache.setStartupKey(key, files, dirs, dirIDs)
 		return
 	}

@@ -172,6 +172,9 @@ func (a batchApplier) GetDraft(ctx context.Context, sandbox, status string) (*op
 }
 
 func (a batchApplier) ApproveDraftChunks(ctx context.Context, sandbox string, approvals []openshell.DraftChunkApproval) (*openshell.ApproveAllResult, error) {
+	if err := a.m.networkWithdrawn(sandbox); err != nil {
+		return nil, err
+	}
 	gw, err := a.m.gateway(ctx)
 	if err != nil {
 		return nil, err
@@ -180,6 +183,9 @@ func (a batchApplier) ApproveDraftChunks(ctx context.Context, sandbox string, ap
 }
 
 func (a batchApplier) ApproveDraftChunk(ctx context.Context, sandbox, chunkID, reviewToken string) (*openshell.ApproveResult, error) {
+	if err := a.m.networkWithdrawn(sandbox); err != nil {
+		return nil, err
+	}
 	gw, err := a.m.gateway(ctx)
 	if err != nil {
 		return nil, err

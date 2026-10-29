@@ -496,9 +496,15 @@ def normalize_pack_path(path: str) -> str:
     return os.path.abspath(os.path.expanduser(raw))
 
 
-def _same_path(a: str, b: str) -> bool:
+def same_pack_path(a: str, b: str) -> bool:
     if not a or not b:
         return False
+    # One directory can have several spellings: a symlink, or another case
+    # on a case-insensitive volume (GAP-0476). The file system decides.
+    try:
+        return os.path.samefile(a, b)
+    except OSError:
+        pass
     try:
         return os.path.realpath(a) == os.path.realpath(b)
     except OSError:
@@ -522,7 +528,7 @@ def _preset_candidates(cfg: Any, preset: str) -> list[str]:
 def pack_name_for_path(cfg: Any, path: str) -> tuple[str, str]:
     """Return ``(name, kind)`` for a rule-pack directory."""
     for preset in RULE_PACK_PRESETS:
-        if any(_same_path(path, cand) for cand in _preset_candidates(cfg, preset)):
+        if any(same_pack_path(path, cand) for cand in _preset_candidates(cfg, preset)):
             return preset, "preset"
     if is_protected_pack_path(path):
         # protected-<scope>/<profile>: name it after the scope folder.
@@ -624,7 +630,7 @@ def discover_rule_packs(cfg: Any) -> list[RulePack]:
     entries: list[tuple[str, str, str]] = []  # (name, path, kind)
 
     def _add(name: str, path: str, kind: str) -> None:
-        if any(_same_path(path, existing) or path == existing for _, existing, _ in entries):
+        if any(same_pack_path(path, existing) or path == existing for _, existing, _ in entries):
             return
         entries.append((name, path, kind))
 
@@ -657,7 +663,7 @@ def discover_rule_packs(cfg: Any) -> list[RulePack]:
 
     out: list[RulePack] = []
     for name, path, kind in entries:
-        used_by = tuple(who for who, used in users if _same_path(used, path) or used == path)
+        used_by = tuple(who for who, used in users if same_pack_path(used, path) or used == path)
         out.append(RulePack(name=name, path=path, kind=kind, used_by=used_by))
     return out
 
@@ -1126,7 +1132,7 @@ def rule_families(pack_dir: str) -> list[RuleFamily]:
     default_dir = _bundled_default_pack_dir()
     for category, declared, enabled in _family_counts(default_dir):
         families[category] = (declared, enabled)
-    if pack_dir and not _same_path(pack_dir, default_dir):
+    if pack_dir and not same_pack_path(pack_dir, default_dir):
         for category, declared, enabled in _family_counts(pack_dir):
             if enabled:
                 families[category] = (declared, enabled)

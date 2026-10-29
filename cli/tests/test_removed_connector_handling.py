@@ -161,7 +161,9 @@ class RemovedConnectorSetupTests(unittest.TestCase):
         self.assertEqual(result.exit_code, 0, msg=result.output)
         self.assertEqual(set(gc.connectors), {"codex"})
         self.assertNotIn("not a connector this DefenseClaw build ships", result.output)
-        self.assertIn("hooks are still installed", result.output)
+        # GAP-2125: a non-primary removal is applied by the running
+        # gateway on its config reload, and the message says so.
+        self.assertIn("removes the connector's hooks when it reloads the config", result.output)
 
 
 class DeclaredPluginConnectorTests(unittest.TestCase):

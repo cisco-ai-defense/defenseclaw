@@ -2292,6 +2292,21 @@ func TestHermesSetupAdoptsConsentRecordedUnder08x(t *testing.T) {
 	if err := conn.VerifyClean(opts); err != nil {
 		t.Fatalf("VerifyClean: %v", err)
 	}
+	// A managed uninstall removes approvals of the product's own command,
+	// including consent retained in the pristine 0.8.x backup.
+	managed := opts
+	managed.ManagedEnterprise = true
+	managed.ManagedHookSocket = filepath.Join(root, "hook.sock")
+	if err := teardownHermesAllowlist(managed, configPath, command); err != nil {
+		t.Fatal(err)
+	}
+	cleaned, err := readHermesAllowlist(allowlistPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cleaned["approvals"].([]interface{})) != 0 {
+		t.Fatal("managed uninstall retained DefenseClaw hook approvals")
+	}
 }
 
 func TestHermesAllowlistTamperedOwnedCommandRefusesNonExactCleanup(t *testing.T) {
@@ -3283,7 +3298,9 @@ func assertCopilotShellBootstrapFailure(t *testing.T, body, failure string) {
 		`HOOK_BASE="$(cd -P -- "$HOOK_PARENT" 2>/dev/null && pwd)" || ` + failure,
 		`HOOK_DIR="$(cd -P -- "$HOOK_PARENT" 2>/dev/null && pwd)" || ` + failure,
 		`if [ ! -r "${HOOK_DIR}/_hardening.sh" ]; then`,
-		`if ! . "${HOOK_DIR}/_hardening.sh"; then`,
+		// Secure Client keeps its bytes; every other render sources through
+		// command . (GAP-0949).
+		map[bool]string{true: `if ! . "${HOOK_DIR}/_hardening.sh"; then`, false: `if ! command . "${HOOK_DIR}/_hardening.sh"; then`}[failure == "exit 0"],
 		`if ! defenseclaw_harden_resources; then`,
 		`if ! defenseclaw_harden_env; then`,
 	} {

@@ -27,7 +27,9 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-const observabilityV8ConfigSchemaID = "https://schemas.defenseclaw.dev/config/v8/defenseclaw-config.schema.json"
+// The schema file keeps its v8 directory; its $id names the version it
+// describes, config_version 9 (GAP-1651).
+const observabilityV8ConfigSchemaID = "https://schemas.defenseclaw.dev/config/v9/defenseclaw-config.schema.json"
 
 var (
 	observabilityV8SchemaOnce sync.Once
@@ -60,6 +62,27 @@ type V8SchemaError struct {
 	// schema's order, so a message can name them (GAP-0498).
 	Missing []string
 	Version int
+}
+
+// EnumChoices returns the values an enum violation allows, in the schema's
+// order, for a message that names them. An empty string in the enum means
+// "unset" (a per-connector key that inherits the global value), not a value
+// to type, so it is left out (GAP-2213, as config validate does for GAP-0199).
+// ok is false when the violation is not an enum or names no value.
+func (e *V8SchemaError) EnumChoices() (names []string, ok bool) {
+	if e == nil || e.Keyword != "enum" || !strings.HasPrefix(e.Expected, "one of ") {
+		return nil, false
+	}
+	var choices []any
+	if json.Unmarshal([]byte(strings.TrimPrefix(e.Expected, "one of ")), &choices) != nil {
+		return nil, false
+	}
+	for _, choice := range choices {
+		if name := fmt.Sprint(choice); name != "" {
+			names = append(names, name)
+		}
+	}
+	return names, len(names) > 0
 }
 
 func (e *V8SchemaError) Error() string {

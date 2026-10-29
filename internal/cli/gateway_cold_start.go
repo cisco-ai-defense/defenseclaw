@@ -191,9 +191,11 @@ func recordHookColdStartFailure(dataDir string, cause error) {
 
 // hookInstallInProgress reports an install or upgrade of this account's
 // DefenseClaw (install.sh or install.ps1 hold .install.lock in the data
-// directory while they run).
+// directory while they run), or an interrupted one whose recovery waits for
+// the next installer run: a start would run the half-done install
+// (hookexec.InstallRecoveryPending, GAP-2082).
 func hookInstallInProgress(dataDir string) bool {
-	return hookexec.InstallLockHeld(dataDir)
+	return hookexec.InstallLockHeld(dataDir) || hookexec.InstallRecoveryPending(dataDir)
 }
 
 // hookColdStartRefusal returns why a hook may not start the gateway now, or

@@ -7,6 +7,7 @@ package connector
 
 import (
 	"bytes"
+	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -241,4 +242,49 @@ func runInstallInFlightShellHook(t *testing.T, tc installInFlightShellCase, data
 	write(stdin)
 	err = cmd.Wait()
 	return stdout.String(), stderr.String(), err
+}
+
+// GAP-2279 / GAP-2284: the per-user transport (defenseclaw-hook-post) sends
+// at most 900 KiB, under the gateway's 1 MiB cap, but the shell hooks read up
+// to 1 MiB. A benign call between the two passed the read, was refused by the
+// helper after it and failed closed as "the gateway is running but did not
+// answer" with no gateway row, even in the balanced default. In the tier that
+// reviews an oversized call from its prefix the hook now sends the bounded
+// prefix review for such a body (as the OpenCode and Amp plugins do), and the
+// gateway's answer decides.
+func TestPerUserShellBodyOverTheTransportCapGetsTheGatewayAnswer(t *testing.T) {
+	content := strings.Repeat("echo line benign output for the heredoc test padding\n", 19000)
+	for _, item := range []struct{ name, payload string }{
+		{"write", `{"hook_event_name":"PreToolUse","tool_name":"Write","tool_input":{"file_path":"/tmp/big.js","content":` + jsonStringLiteral(content) + `}}`},
+		{"bash", `{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":` + jsonStringLiteral("cat > /tmp/big.sh <<'EOF'\n"+content+"EOF\n") + `}}`},
+	} {
+		t.Run(item.name, func(t *testing.T) {
+			if n := len(item.payload); n <= 900<<10 || n >= 1<<20 {
+				t.Fatalf("payload %d bytes, want between the transport and the read cap", n)
+			}
+			var got []byte
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				got, _ = io.ReadAll(r.Body)
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = io.WriteString(w, `{"action":"allow","mode":"observe"}`)
+			}))
+			t.Cleanup(server.Close)
+			data := t.TempDir()
+			installNativeHookPostForHookTest(t, data)
+			tc := installInFlightShellCase{"claudecode", NewClaudeCodeConnector(), hookArgvConnectorCase(t, "claudecode")}
+			tc.invoke.stdin = item.payload
+			tc.invoke.env = append(tc.invoke.env, "DEFENSECLAW_HOOK_MAX_BODY=1048576")
+			stdout, stderr, err := runInstallInFlightShellHook(t, tc, data, strings.TrimPrefix(server.URL, "http://"), nil)
+			if shellHookBlocked(err, stdout) || len(got) == 0 || len(got) > 900<<10 ||
+				!bytes.Contains(got, []byte(`"bounded_prefix_review":true`)) {
+				t.Fatalf("a 0.9-1 MiB call must reach the gateway as a bounded review and get its answer: err=%v stdout=%q stderr=%q request=%d bytes", err, stdout, stderr, len(got))
+			}
+		})
+	}
+}
+
+// jsonStringLiteral is s as a quoted JSON string.
+func jsonStringLiteral(s string) string {
+	data, _ := json.Marshal(s)
+	return string(data)
 }

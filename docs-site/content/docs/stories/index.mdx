@@ -1,0 +1,24 @@
+---
+title: Stories
+description: Step-by-step walkthroughs for common goals — block a destructive command on Claude Code, catch a prompt injection on Codex, stop a secret upload from Cursor, approve risky tool calls, run the local observability stack, and add a connector without losing audit history.
+keywords:
+  - DefenseClaw user stories
+  - DefenseClaw walkthroughs
+  - block rm -rf claude code
+  - prompt injection codex
+  - cursor secret exfiltration
+  - DefenseClaw HITL
+---
+
+Six walkthroughs. Each one starts from a goal and ends with an outcome you can check.
+
+<Cards>
+  <Card title="Stop Claude Code from deleting a critical path" href="/docs/stories/observe-claude-code" description="Watch Claude Code in observe mode, then block rm -rf against a protected path with the bundled CMD-RM-RF rule." />
+  <Card title="Catch a prompt injection on Codex" href="/docs/stories/prompt-injection-codex" description="Block a prompt injection in Codex with the bundled TRUST-IGNORE-PREVIOUS rule, then add the LLM judge for subtler cases." />
+  <Card title="Stop a secret upload from Cursor" href="/docs/stories/cursor-secret-exfil" description="Block a command that pipes a key file into curl, using Cursor's beforeShellExecution hook and a fake key." />
+  <Card title="Approve risky tool calls before they run" href="/docs/stories/hitl-approvals" description="Turn on human approval (HITL) so a confirmable HIGH-severity tool call pauses in the agent and waits for your yes or no." />
+  <Card title="Run the local observability stack" href="/docs/stories/local-observability" description="Start the bundled Grafana, Prometheus, Loki and Tempo stack, send DefenseClaw telemetry to it, and tear it down." />
+  <Card title="Add a connector without losing audit history" href="/docs/stories/switch-connectors" description="Guard a second agent next to the first, replace one with another, or remove one. Audit history is kept." />
+</Cards>
+
+Related how-to pages: [Turn on blocking](/docs/get-started/first-guardrail), [Allow a blocked call](/docs/guardrail#allow-a-blocked-call) and [Turn off the guardrail](/docs/guardrail/disabling).

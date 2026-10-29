@@ -417,12 +417,20 @@ func TestCheckpointWALIfLargeTakesTheWriterOnlyInAnIdleGap(t *testing.T) {
 	}
 }
 
+// floodWrite is one audit write of floodTheStore: when it started and how long
+// LogEvent took.
+type floodWrite struct {
+	started time.Time
+	took    time.Duration
+}
+
 // floodTheStore commits an audit row every millisecond until the returned stop
-// runs, so the store never has an idle gap.
-func floodTheStore(t *testing.T, store *Store) (stop func(), longestWrite *atomic.Int64) {
+// runs, so the store never has an idle gap. writes returns every write made.
+func floodTheStore(t *testing.T, store *Store) (stop func(), writes func() []floodWrite) {
 	t.Helper()
 	done := make(chan struct{})
-	longestWrite = new(atomic.Int64)
+	var mu sync.Mutex
+	var made []floodWrite
 	var flood sync.WaitGroup
 	flood.Add(1)
 	go func() {
@@ -438,17 +446,30 @@ func floodTheStore(t *testing.T, store *Store) (stop func(), longestWrite *atomi
 				t.Errorf("flood LogEvent: %v", err)
 				return
 			}
-			for elapsed := time.Since(started).Nanoseconds(); ; {
-				old := longestWrite.Load()
-				if elapsed <= old || longestWrite.CompareAndSwap(old, elapsed) {
-					break
-				}
-			}
+			took := time.Since(started)
+			mu.Lock()
+			made = append(made, floodWrite{started: started, took: took})
+			mu.Unlock()
 			time.Sleep(time.Millisecond)
 		}
 	}()
 	var once sync.Once
-	return func() { once.Do(func() { close(done); flood.Wait() }) }, longestWrite
+	return func() { once.Do(func() { close(done); flood.Wait() }) }, func() []floodWrite {
+		mu.Lock()
+		defer mu.Unlock()
+		return append([]floodWrite(nil), made...)
+	}
+}
+
+// longestFloodWrite is the longest of writes that started in [from, to].
+func longestFloodWrite(writes []floodWrite, from, to time.Time) time.Duration {
+	var longest time.Duration
+	for _, write := range writes {
+		if !write.started.Before(from) && !write.started.After(to) {
+			longest = max(longest, write.took)
+		}
+	}
+	return longest
 }
 
 // GAP-1303: a persistent final copy three times slower than the ordinary hold
@@ -456,6 +477,12 @@ func floodTheStore(t *testing.T, store *Store) (stop func(), longestWrite *atomi
 func TestCheckpointWALIfLargeBoundsALogOverTheLimitUnderAFlood(t *testing.T) {
 	store, cleanup := newTestStore(t)
 	defer cleanup()
+	// What an ordinary commit takes on this runner under this flood, before
+	// any WAL pass runs.
+	stopOrdinary, ordinaryWrites := floodTheStore(t, store)
+	time.Sleep(200 * time.Millisecond)
+	stopOrdinary()
+	ordinary := longestFloodWrite(ordinaryWrites(), time.Time{}, time.Now())
 	logWALGuardEvents(t, store, 200)
 	// Scale the measured frames to the production band between the emergency
 	// arm and the 256 MiB alarm without allocating a 176 MiB fixture.
@@ -471,9 +498,11 @@ func TestCheckpointWALIfLargeBoundsALogOverTheLimitUnderAFlood(t *testing.T) {
 	original := walWriterPhaseHook
 	walWriterPhaseHook = func(context.Context) { time.Sleep(slowCopy) }
 	t.Cleanup(func() { walWriterPhaseHook = original })
-	stop, longestWrite := floodTheStore(t, store)
+	stop, floodWrites := floodTheStore(t, store)
 	defer stop()
+	passStarted := time.Now()
 	pass, err := store.CheckpointWALIfLarge(context.Background(), 0, testWALWriterBudget)
+	passEnded := time.Now()
 	stop()
 	if pass.LogBytes < WALEmergencyArmBytes || pass.LogBytes >= WALHardLimitBytes {
 		t.Fatalf("measured log = %d bytes; want emergency hold armed before the %d-byte ceiling at %d bytes", pass.LogBytes, WALHardLimitBytes, WALEmergencyArmBytes)
@@ -484,8 +513,17 @@ func TestCheckpointWALIfLargeBoundsALogOverTheLimitUnderAFlood(t *testing.T) {
 	if pass.WriterHeld < slowCopy || pass.WriterHeld > time.Second {
 		t.Fatalf("emergency catch-up held the writer for %v; want the %v copy inside a fixed 1s cap", pass.WriterHeld, slowCopy)
 	}
-	if got := time.Duration(longestWrite.Load()); got >= 500*time.Millisecond {
-		t.Fatalf("hook audit write waited %v during the continuous flood; want under 500ms", got)
+	// The contract: a hook write that arrives during the pass waits for the
+	// writer hold the pass reports (inside the fixed 1s cap, checked above)
+	// plus its own commit and at most one commit queued ahead of it. A commit
+	// is the longest ordinary one measured above, never under 100ms
+	// (GAP-2407: a fixed 500ms total failed on a slow Windows runner whose
+	// commits, not the hold, took the time). A write that waits for more than
+	// one hold, or for the copy itself, still fails.
+	duringPass := longestFloodWrite(floodWrites(), passStarted, passEnded)
+	t.Logf("writer held %v; longest write during the pass %v, longest ordinary %v", pass.WriterHeld, duringPass, ordinary)
+	if allowed := pass.WriterHeld + 2*max(ordinary, 100*time.Millisecond); duringPass >= allowed {
+		t.Fatalf("hook audit write waited %v during the pass; want under %v (writer held %v, longest ordinary commit %v)", duringPass, allowed, pass.WriterHeld, ordinary)
 	}
 	if store.WALOverLimit() {
 		t.Fatal("a bounded catch-up that restarted the log left the store marked over the WAL limit")
@@ -1067,6 +1105,14 @@ func TestCheckpointWALIfLargePassThatRunsOutOfTimeKeepsThePressureAndEscalates(t
 // the writer kept the copy short of the end of the log. Catch-up takes
 // SQLite's write lock while it has the writer, and repeated passes must keep
 // the hold short, retain all writes, and restart after the flood stops.
+//
+// GAP-2124: the other writer commits at fixed points (before each pass and
+// during every copy before the catch-up) and tries to commit during every
+// copy under the writer, through a connection that does not wait for a lock.
+// A free-running flood goroutine and a 50 ms timer made the result depend on
+// the runner's disk: on Windows a flood commit could hold SQLite's lock past
+// the catch-up's lock wait (the pass then defers, as designed), and the timer
+// sat inside the measured hold.
 func TestCheckpointWALIfLargeBoundedCatchUpHoldsOffAnotherWriter(t *testing.T) {
 	store, cleanup := newTestStore(t)
 	defer cleanup()
@@ -1090,70 +1136,69 @@ func TestCheckpointWALIfLargeBoundedCatchUpHoldsOffAnotherWriter(t *testing.T) {
 		inserted.Add(1)
 		return nil
 	}
-	// The other writer floods audit.db for the whole test.
-	stop := make(chan struct{})
-	var writers sync.WaitGroup
-	writers.Add(1)
-	go func() {
-		defer writers.Done()
-		for {
-			select {
-			case <-stop:
-				return
-			default:
-			}
-			if err := insert(); err != nil {
-				t.Errorf("other writer: %v", err)
-				return
-			}
-			time.Sleep(time.Millisecond)
-		}
-	}()
-	var stopOnce sync.Once
-	stopWriters := func() {
-		stopOnce.Do(func() { close(stop) })
-		writers.Wait()
+	// Under the writer a probe connection with busy_timeout 0 tries one
+	// insert: SQLITE_BUSY means the catch-up held the other writer off, a
+	// commit means it did not.
+	probeDB, err := openSQLite(store.dbPath)
+	if err != nil {
+		t.Fatal(err)
 	}
-	defer stopWriters()
+	defer probeDB.Close()
+	probe, err := probeDB.Conn(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer probe.Close()
+	if _, err := probe.ExecContext(context.Background(), `PRAGMA busy_timeout = 0`); err != nil {
+		t.Fatal(err)
+	}
 	originalCopy, originalWriter := walCopyPhaseHook, walWriterPhaseHook
 	t.Cleanup(func() { walCopyPhaseHook, walWriterPhaseHook = originalCopy, originalWriter })
-	// It commits during every copy before the catch-up, and tries to during
-	// every copy under the writer.
+	// It commits during every copy before the catch-up, so no copy without
+	// the lock reaches the end of the log, and tries to during every copy
+	// under the writer.
+	var flooding atomic.Bool
+	flooding.Store(true)
 	walCopyPhaseHook = func(context.Context) {
+		if !flooding.Load() {
+			return
+		}
 		if err := insert(); err != nil {
 			t.Errorf("other writer during a copy: %v", err)
 		}
 	}
 	var heldOff, committed atomic.Int64
 	walWriterPhaseHook = func(context.Context) {
-		result := make(chan error, 1)
-		writers.Add(1)
-		go func() {
-			defer writers.Done()
-			err := insert()
-			if err != nil {
-				t.Errorf("other writer during the catch-up: %v", err)
-			}
-			result <- err
-		}()
-		select {
-		case <-result:
+		if !flooding.Load() {
+			return
+		}
+		_, err := probe.ExecContext(context.Background(), `INSERT INTO zz_wal_guard_other VALUES (1)`)
+		switch {
+		case err == nil:
+			inserted.Add(1)
 			committed.Add(1)
-		case <-time.After(50 * time.Millisecond):
+		case isSQLiteBusy(err):
 			heldOff.Add(1)
+		default:
+			t.Errorf("other writer during the catch-up: %v", err)
 		}
 	}
 	const passes = 4
 	for i := range passes {
 		logWALGuardEvents(t, store, 50)
+		for range 20 {
+			if err := insert(); err != nil {
+				t.Fatalf("other writer before pass %d: %v", i, err)
+			}
+		}
 		pass, err := store.CheckpointWALIfLarge(context.Background(), 0, testWALWriterBudget)
 		if err != nil || !pass.Bounded || !pass.Restarted || pass.WriterDeferred || pass.HoldCap != walEmergencyCatchUpCap || pass.WriterHeld >= 500*time.Millisecond {
 			t.Fatalf("pass %d with another writer flooding audit.db: %+v, %v; want a restart on every pass with a short observed writer hold", i, pass, err)
 		}
 	}
-	stopWriters()
-	if committed.Load() != 0 || heldOff.Load() == 0 {
-		t.Fatalf("the other writer committed %d times under the writer and was held off %d times; want no commits under the writer and at least one lock", committed.Load(), heldOff.Load())
+	flooding.Store(false)
+	if committed.Load() != 0 || heldOff.Load() < passes {
+		t.Fatalf("the other writer committed %d times under the writer and was held off %d times; want no commits under the writer and a lock on every pass", committed.Load(), heldOff.Load())
 	}
 	pass, err := store.CheckpointWALIfLarge(context.Background(), 0, testWALWriterBudget)
 	if err != nil || !pass.Restarted {

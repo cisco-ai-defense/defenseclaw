@@ -457,6 +457,9 @@ function checkWindowsHelperACL(paths: string[]): void {
 	// write grants before the bearer-bearing native helper is launched: the
 	// owner is this account, SYSTEM, Administrators (an elevated install) or
 	// TrustedInstaller, and no other principal may write the path. An
+	// OWNER RIGHTS (S-1-3-4) entry, which the DefenseClaw CLI and installer
+	// write on the data folder, grants only that trusted owner, so it is
+	// not another writer (GAP-2042). An
 	// inherit-only entry does not apply to the path itself; its children
 	// carry it. execFileSync opens the helper by this path, so every folder
 	// above a checked path, up to its volume root, must not let another
@@ -486,6 +489,7 @@ function checkWindowsHelperACL(paths: string[]): void {
 		"$ErrorActionPreference='Stop'",
 		"$current=[System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value",
 		"$trusted=@($current,'S-1-5-18','S-1-5-32-544','S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464')",
+		"$writers=$trusted+@('S-1-3-4')",
 		"$inheritOnly=[int][System.Security.AccessControl.PropagationFlags]::InheritOnly",
 		"$sid=[System.Security.Principal.SecurityIdentifier]",
 		"$count=0",
@@ -497,7 +501,7 @@ function checkWindowsHelperACL(paths: string[]): void {
 		"  if([System.IO.Directory]::Exists($p)) { $acl=[System.IO.Directory]::GetAccessControl($p) } elseif([System.IO.File]::Exists($p)) { $acl=[System.IO.File]::GetAccessControl($p) } else { throw 'missing' }",
 		"  if($trusted -notcontains $acl.GetOwner($sid).Value) { throw 'owner' }",
 		"  foreach($ace in $acl.GetAccessRules($true,$true,$sid)) {",
-		"    if($ace.AccessControlType -eq [System.Security.AccessControl.AccessControlType]::Allow -and (([int]$ace.PropagationFlags -band $inheritOnly) -eq 0) -and $trusted -notcontains $ace.IdentityReference.Value -and (([int64]$ace.FileSystemRights -band $writeMask) -ne 0)) { throw 'writable' }",
+		"    if($ace.AccessControlType -eq [System.Security.AccessControl.AccessControlType]::Allow -and (([int]$ace.PropagationFlags -band $inheritOnly) -eq 0) -and $writers -notcontains $ace.IdentityReference.Value -and (([int64]$ace.FileSystemRights -band $writeMask) -ne 0)) { throw 'writable' }",
 		"  }",
 		"  $count++",
 		"}",
@@ -526,10 +530,24 @@ async function gatewayFetch(path: string, init: RequestInit, token: string): Pro
 	if (!DC_HOOK_SOCKET) {
 		if (DC_PER_USER_NATIVE_POST) {
 			const binary = perUserHookPostBinary()
-			const output = execFileSync(binary, ["hook-post", "--api-addr", DC_API_ADDR], {
+			const post = () => execFileSync(binary, ["hook-post", "--api-addr", DC_API_ADDR], {
 				input: JSON.stringify({ path, headers: init.headers || {}, body: String(init.body || "") }),
-				timeout: DC_TIMEOUT_MS, maxBuffer: 2 * 1024 * 1024, windowsHide: true, encoding: "utf8",
+				// The helper's diagnostics (a refused connection during an outage)
+				// stay in the error the caller classifies; inherited, they reached
+				// the agent's screen over the one outage warning (GAP-1314).
+				timeout: DC_TIMEOUT_MS, maxBuffer: 2 * 1024 * 1024, windowsHide: true, encoding: "utf8", stdio: ["pipe", "pipe", "pipe"],
 			})
+			let output: string
+			try {
+				output = post()
+			} catch (error) {
+				// One more try only for a connected-peer proof that failed (exit 8:
+				// nothing was sent, GAP-1236); any other failure may come after the
+				// gateway took the call and is not sent twice (GAP-2083).
+				const failed = error as { status?: unknown; signal?: unknown } | null
+				if (!failed || failed.status !== 8 || failed.signal) throw error
+				output = post()
+			}
 			const reply = JSON.parse(output) as { status: number; body: string; retry_after?: string }
 			if (!Number.isInteger(reply.status) || reply.status < 100 || reply.status > 599 || typeof reply.body !== "string") {
 				throw new Error("invalid native gateway response")
@@ -624,7 +642,7 @@ function runForeignHookCheck(event: string, cwd: string): Promise<ForeignCheck> 
 						fail(safeError(error))
 						return
 					}
-					let verdict: { deny?: unknown, reason?: unknown, retryable?: unknown }
+					let verdict: { deny?: unknown, reason?: unknown, retryable?: unknown, warnings?: unknown }
 					try {
 						verdict = JSON.parse(String(stdout))
 					} catch {
@@ -632,7 +650,9 @@ function runForeignHookCheck(event: string, cwd: string): Promise<ForeignCheck> 
 						return
 					}
 					if (verdict && verdict.deny === false) {
-						resolve({ reason: "", retryable: false })
+						// foreign_hooks report names the unapproved hook's file and
+						// digest for the user (GAP-0697).
+						resolve({ reason: "", retryable: false, warnings: Array.isArray(verdict.warnings) ? verdict.warnings.map(String) : [] })
 						return
 					}
 					resolve({
@@ -669,7 +689,7 @@ function foreignCheckFailure(event: string, why: string): string {
 // A confirmed foreign plugin loaded with Amp stays loaded for this process,
 // so only an availability failure lets a later call retry the load-time
 // check, while this call stays closed.
-type ForeignCheck = { reason: string, retryable: boolean }
+type ForeignCheck = { reason: string, retryable: boolean, warnings?: string[] }
 
 // promptNotice sets DefenseClaw's hidden agent.start notice apart from the
 // user's prompt. Amp places the message right after the prompt text, and a
@@ -766,12 +786,24 @@ export default function defenseclawAmpPlugin(amp: PluginAPI) {
 	// running for this process even if its file is deleted later, so a block
 	// found at load holds for the whole process.
 	let startupGuard: Promise<ForeignCheck> | null = runForeignHookCheck("session.load", workspaceRoot)
+	let foreignWarned = false
 	const foreignHookCheck = async (event: string): Promise<string> => {
 		if (await managedLifecycleHeld()) return DC_MANAGED_LIFECYCLE_TEXT
 		if (!startupGuard) startupGuard = runForeignHookCheck("session.load", workspaceRoot)
 		const startup = await startupGuard
 		if (startup.retryable) startupGuard = null
-		return startup.reason || (await runForeignHookCheck(event, workspaceRoot)).reason
+		if (startup.reason) return startup.reason
+		const call = await runForeignHookCheck(event, workspaceRoot)
+		const warnings = (call.warnings && call.warnings.length ? call.warnings : startup.warnings) || []
+		if (!call.reason && !foreignWarned && warnings.length) {
+			foreignWarned = true
+			try {
+				void Promise.resolve(amp.ui.notify("DefenseClaw warning: " + warnings.join("; "))).catch(() => {})
+			} catch {
+				// A notice never changes the verdict.
+			}
+		}
+		return call.reason
 	}
 
 	async function agentFacts(threadID: string, ctx: { thread: { agent(): Promise<Agent> } }): Promise<AgentFacts> {

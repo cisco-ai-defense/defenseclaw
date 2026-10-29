@@ -163,6 +163,36 @@ _DC_TRANSPORT_STATUS=""
 _DC_CONFIG_OUTAGE_MODE=""
 _DC_OUTAGE_WARNING_THIS_CALL=""
 
+# defenseclaw_stat_into GNU_FORMAT BSD_FORMAT PATH...: one stat for every
+# PATH, output in _DC_STAT_OUT. GNU stat takes -c, BSD stat (macOS) -f. The
+# old "stat -c ... || stat -f ..." spent a failed launch on every check on
+# macOS, so one call there ran twice the programs Linux runs (GAP-1755). The
+# first try follows OSTYPE and the spelling that answered is kept for this
+# process (GNU coreutils on macOS keeps working, at one extra launch once).
+# A failed try leaves no output behind. The install check each hook carries
+# before it sources this file keeps its own spelling (it runs only while a
+# lock exists, and it must stay the same text in every hook).
+defenseclaw_stat_into() {
+  local gnu="$1" bsd="$2"
+  shift 2
+  _DC_STAT_OUT=""
+  if [ -z "${_DC_STAT_DIALECT:-}" ]; then
+    case "${OSTYPE:-}" in
+      darwin*|*bsd*) _DC_STAT_DIALECT=bsd ;;
+      *) _DC_STAT_DIALECT=gnu ;;
+    esac
+  fi
+  if [ "$_DC_STAT_DIALECT" = bsd ]; then
+    _DC_STAT_OUT="$(stat -f "$bsd" "$@" 2>/dev/null)" && return 0
+    _DC_STAT_OUT="$(stat -c "$gnu" "$@" 2>/dev/null)" || { _DC_STAT_OUT=""; return 1; }
+    _DC_STAT_DIALECT=gnu
+  else
+    _DC_STAT_OUT="$(stat -c "$gnu" "$@" 2>/dev/null)" && return 0
+    _DC_STAT_OUT="$(stat -f "$bsd" "$@" 2>/dev/null)" || { _DC_STAT_OUT=""; return 1; }
+    _DC_STAT_DIALECT=bsd
+  fi
+}
+
 # Resource limits — bound the hook so a stuck regex / hostile input
 # can't wedge the agent. Plan F16 ask: CPU 5s, virt mem 512MiB, fds 32.
 # Use ulimit -S (soft) so the hook doesn't try to exceed kernel maxima
@@ -191,6 +221,8 @@ defenseclaw_harden_env() {
   # same name, which would copy the value into the environment of every child
   # process (curl, jq, the cold-started gateway), so drop inherited ones first.
   unset -v API_TOKEN PAYLOAD CONTENT TOOL_INPUT TOOL_OUTPUT INSPECT_BODY RESPONSE RESULT OUTPUT
+  # The stat spelling is learned per process, never taken from the caller.
+  unset -v _DC_STAT_OUT _DC_STAT_DIALECT
 
   # Only a rendered managed hook may select the managed socket transport.
   # Per-user scripts clear the managed marker before sourcing this helper;
@@ -443,7 +475,7 @@ defenseclaw_shared_runtime_fail_mode() {
   local hook_dir="$1"
   local connector="${2:-}"
   local config="${hook_dir}/.hookcfg"
-  local candidate suffix recorded mode source selected="" summary="" raw="" managed_open=0 records=0
+  local candidate suffix recorded mode source selected="" summary="" raw="" managed_open=0 records=0 flat_names=""
   if defenseclaw_managed_runtime_sidecar "$config"; then
     managed_open=1
   fi
@@ -475,6 +507,7 @@ defenseclaw_shared_runtime_fail_mode() {
       return 0
     fi
     records=$((records + 1))
+    flat_names="${flat_names:+$flat_names }$suffix"
     if [ "$suffix" = "$connector" ]; then
       selected=open
     fi
@@ -540,7 +573,7 @@ defenseclaw_shared_runtime_fail_mode() {
         summary="invalid"
       # --stream sees every key as written: a path met again after its value
       # ended is a key given twice, or a second document.
-      elif ! summary="$(jq -n -r --stream --arg connector "$connector" --arg managed "$managed_open" '
+      elif ! summary="$(jq -n -r --stream --arg connector "$connector" --arg managed "$managed_open" --arg flat "$flat_names" '
         def word($source): if . == null or . == "" then "none" elif . == "open" and ($source == "config" or $managed == "1") then "open" else "closed" end;
         def text: . == null or type == "string";
         def fold: explode | map(if . == 383 then 115 elif . == 8490 then 107 else . end) | implode | ascii_downcase;
@@ -565,7 +598,7 @@ defenseclaw_shared_runtime_fail_mode() {
               (if has("fail_modes") then .fail_modes else {} end) as $modes
               | (if has("fail_mode_sources") then .fail_mode_sources else {} end) as $sources
               | .legacy_fail_mode_source as $legacy_source
-              | "\($modes | length) \(if [$modes | to_entries[] | .value == "open" and ($sources[.key] == "config" or $managed == "1")] | all then "open" else "closed" end) \(if $connector == "" then "none" else ($modes[$connector] | word($sources[$connector])) end) \(.legacy_fail_mode | word($legacy_source))"
+              | "\($modes | length) \(if [$modes | to_entries[] | .value == "open" and ($sources[.key] == "config" or $managed == "1")] | all then "open" else "closed" end) \(if $connector == "" then "none" else ($modes[$connector] | word($sources[$connector])) end) \(.legacy_fail_mode | word($legacy_source)) \(if [$flat | splits(" ") | select(length > 0) | $modes[.] == "open"] | all then "bound" else "unbound" end)"
             else "invalid" end end end' "$config" 2>/dev/null)"; then
         summary="invalid"
       fi
@@ -609,7 +642,7 @@ need(isinstance(s,dict) and all(t(v) for v in s.values()))
 g=sys.argv[3]=="1"
 w=lambda v,src:"none" if v in (None,"") else ("open" if v=="open" and (src=="config" or g) else "closed")
 c=sys.argv[2]
-print(len(m),"open" if all(v=="open" and (s.get(k)=="config" or g) for k,v in m.items()) else "closed",w(m.get(c),s.get(c)) if c else "none",w(d.get("legacy_fail_mode"),d.get("legacy_fail_mode_source")))' "$config" "$connector" "$managed_open" 2>/dev/null)" || summary="invalid"
+print(len(m),"open" if all(v=="open" and (s.get(k)=="config" or g) for k,v in m.items()) else "closed",w(m.get(c),s.get(c)) if c else "none",w(d.get("legacy_fail_mode"),d.get("legacy_fail_mode_source")),"bound" if all(m.get(n)=="open" for n in sys.argv[4].split()) else "unbound")' "$config" "$connector" "$managed_open" "$flat_names" 2>/dev/null)" || summary="invalid"
     elif [ "${DEFENSECLAW_MANAGED_HOOK:-0}" != "1" ] || [ "${_DC_SECURE_CLIENT_HOOK:-0}" != "1" ]; then
       printf closed
       return 0
@@ -619,7 +652,7 @@ print(len(m),"open" if all(v=="open" and (s.get(k)=="config" or g) for k,v in m.
       summary="invalid"
     fi
   fi
-  local json_count=0 json_all=open json_selected=none json_legacy=none
+  local json_count=0 json_all=open json_selected=none json_legacy=none json_bound=bound
   if [ -n "$summary" ]; then
     # shellcheck disable=SC2086 # four fixed words, split on purpose
     set -- $summary
@@ -627,16 +660,26 @@ print(len(m),"open" if all(v=="open" and (s.get(k)=="config" or g) for k,v in m.
     json_all="${2:-}"
     json_selected="${3:-}"
     json_legacy="${4:-}"
+    json_bound="${5:-}"
     case "$json_count" in
       ""|*[!0-9]*) printf closed; return 0 ;;
     esac
-    # Exactly the four words the parsers print, nothing more.
-    if [ "$#" -ne 4 ]; then
+    # Exactly the five words the parsers print, nothing more.
+    if [ "$#" -ne 5 ]; then
       printf closed
       return 0
     fi
   fi
   if [ "$json_all" != "open" ]; then
+    printf closed
+    return 0
+  fi
+  # The managed writer records a connector in the protected JSON and its flat
+  # file together, so a flat open the JSON does not record open is a leftover
+  # (an earlier per-user install, a torn-down connector) that no current
+  # policy chose: it never opens a managed hook (GAP-0449). Secure Client
+  # delivery keeps its flat-record reading.
+  if [ -n "$summary" ] && [ "$json_bound" != "bound" ] && [ "${_DC_SECURE_CLIENT_HOOK:-0}" != "1" ]; then
     printf closed
     return 0
   fi
@@ -665,6 +708,13 @@ print(len(m),"open" if all(v=="open" and (s.get(k)=="config" or g) for k,v in m.
       fi
     fi
     if [ "$json_legacy" = "closed" ]; then
+      printf closed
+      return 0
+    fi
+    # A flat legacy open the parsed JSON does not record open is a leftover
+    # too (GAP-0449).
+    if [ -n "$summary" ] && [ "$json_legacy" != "open" ] && [ "${_DC_SECURE_CLIENT_HOOK:-0}" != "1" ] \
+      && { [ -e "$legacy" ] || [ -L "$legacy" ]; }; then
       printf closed
       return 0
     fi
@@ -810,6 +860,23 @@ defenseclaw_inspect_tool_body() {
   fi
 }
 
+# defenseclaw_inspect_bounded_body TOOL FIELD encodes an 8 KiB head of the
+# oversized input (on stdin) as a generic inspect request with the
+# incomplete-review markers, the head the native hook's bounded review keeps
+# of a long value. The gateway marks a bounded review uninspected whatever
+# its size (observe: allow with the oversize warning; action: block), so a
+# larger prefix only costs scan time: 64 KiB or more already ran past the
+# generic endpoint's 200 ms scan budget and came back 504 with no verdict
+# (GAP-1512, GAP-1841). Escaped, 8 KiB stays far under the 1 MiB body cap.
+defenseclaw_inspect_bounded_body() {
+  local LC_ALL=C
+  local tool="$1" field="$2" input body
+  input="$(cat; printf x)" || return 1
+  input="${input%x}"
+  body="$(printf '%s' "${input:0:8192}" | defenseclaw_inspect_tool_body "$tool" "$field")" || return 1
+  printf '%s' "${body%?},\"content_truncated\":true,\"bounded_prefix_review\":true}"
+}
+
 # defenseclaw_json_string_field extracts a top-level JSON string field when
 # jq and python3 are unavailable. The whole answer is validated first: a
 # malformed sibling field cannot turn an "action":"allow" into a verdict.
@@ -931,12 +998,22 @@ defenseclaw_json_string_field() {
       exit 1
     }
   ')"; then
+    # A caller that only validates the answer reads no value: no sed for it
+    # (defenseclaw_json_answer_valid, issue #1130 / GAP-0267).
+    [ "${3:-}" = --check ] && return 0
     printf '%s' "$extracted" | sed 's/\\"/"/g; s/\\\\/\\/g; s/\\n/ /g; s/\\r/ /g; s/\\t/ /g'
     return 0
   else
     status=$?
     return "$status"
   fi
+}
+
+# defenseclaw_json_answer_valid JSON FIELD returns 0 when JSON is one valid
+# object with exactly one top-level string FIELD: the check of
+# defenseclaw_json_string_field without decoding the value.
+defenseclaw_json_answer_valid() {
+  defenseclaw_json_string_field "${1:-}" "${2:-}" --check
 }
 
 # _dc_python3_usable returns 0 when python3 is on PATH AND can be safely
@@ -1327,12 +1404,14 @@ _defenseclaw_prepare_oversized_stdin_impl() {
   bin="$root/.local/bin/defenseclaw-hook-post"
   for path in "$root" "$root/.local" "$root/.local/bin"; do
     [ -d "$path" ] && [ -O "$path" ] && [ ! -L "$path" ] || return 1
-    mode="$(stat -c %a "$path" 2>/dev/null || stat -f %Lp "$path" 2>/dev/null)" || return 1
+    defenseclaw_stat_into %a %Lp "$path" || return 1
+    mode="$_DC_STAT_OUT"
     case "$mode" in ''|*[!0-7]*) return 1 ;; esac
     [ $((8#$mode & 8#022)) -eq 0 ] || return 1
   done
   [ -f "$bin" ] && [ -x "$bin" ] && [ -O "$bin" ] && [ ! -L "$bin" ] || return 1
-  mode="$(stat -c %a "$bin" 2>/dev/null || stat -f %Lp "$bin" 2>/dev/null)" || return 1
+  defenseclaw_stat_into %a %Lp "$bin" || return 1
+  mode="$_DC_STAT_OUT"
   case "$mode" in ''|*[!0-7]*) return 1 ;; esac
   [ $((8#$mode & 8#022)) -eq 0 ] || return 1
   PAYLOAD="$(printf '%s' "$PAYLOAD" | (
@@ -1402,22 +1481,17 @@ defenseclaw_install_lock_held() {
   return 1
 }
 # defenseclaw_install_lock_stale DATA returns 0 (true) when DATA/.install.lock
-# is a folder whose installer is proven gone and no interrupted-install
-# record sits beside it: its pid names no process, or this hook's own (no
+# is a folder whose installer is proven gone (an interrupted-install record
+# beside it does not hold it, GAP-1024): its pid names no process, or this hook's own (no
 # hook writes a lock), or another process than its proc-start record names
 # (a reused pid). It reads no clock (hookexec installLockStale, the one
 # rule): a live owner keeps the lock for as long as it runs, and so do a
 # lock without a valid pid, a lock without a proc-start record whose pid
 # names a process (1.0.2, 1.0.3) and an owner whose identity cannot be read.
 defenseclaw_install_lock_stale() {
-  local data="${1:-}" lock rc pid name recorded current
+  local data="${1:-}" lock rc pid recorded current
   lock="${data}/.install.lock"
   [ -d "$lock" ] && [ ! -L "$lock" ] || return 1
-  for name in previous.new .repair .rollback-hold .lifecycle-txn.json; do
-    if [ -e "${data}/${name}" ] || [ -L "${data}/${name}" ]; then
-      return 1
-    fi
-  done
   rc=0
   pid="$(defenseclaw_install_lock_number "${lock}/pid")" || rc=$?
   [ "$rc" = 0 ] || return 1
@@ -1432,7 +1506,10 @@ defenseclaw_install_lock_stale() {
   # An installer that exited but is not reaped (a zombie) keeps its pid and
   # its start, but runs nothing.
   defenseclaw_process_ended "$pid" && return 0
-  [ -e "${lock}/proc-start" ] || [ -L "${lock}/proc-start" ] || return 1
+  if [ ! -e "${lock}/proc-start" ] && [ ! -L "${lock}/proc-start" ]; then
+    defenseclaw_process_started_after_lock "$pid" "$lock"
+    return
+  fi
   recorded="$(defenseclaw_install_lock_record "${lock}/proc-start")" || return 1
   current="$(defenseclaw_process_identity "$pid")" || return 1
   [ "$recorded" != "$current" ] && return 0
@@ -1485,6 +1562,36 @@ defenseclaw_process_ended() {
   set -- $stat
   case "${1:-}" in Z*) return 0 ;; esac
   return 1
+}
+# defenseclaw_process_started_after_lock PID LOCK returns 0 when process PID
+# started more than 2 s after LOCK was last changed: a 1.0.2/1.0.3 lock
+# without a proc-start record whose pid a later process got (GAP-1465, the
+# hookexec rule). It returns 1 when it started earlier or the system does not
+# say.
+defenseclaw_process_started_after_lock() {
+  local locked="" started="" boot="" stat="" line="" out="" IFS=' '
+  locked="$(stat -c %Y "${2:-}" 2>/dev/null || stat -f %m "${2:-}" 2>/dev/null)" || return 1
+  case "$locked" in ''|*[!0-9]*) return 1 ;; esac
+  if [ -e /proc/self/stat ]; then
+    while IFS= read -r line; do
+      case "$line" in "btime "*) boot="${line#btime }"; break ;; esac
+    done < /proc/stat
+    case "$boot" in ''|*[!0-9]*) return 1 ;; esac
+    stat="$(cat "/proc/${1:-}/stat" 2>/dev/null)" || return 1
+    case "$stat" in *[\)]*) ;; *) return 1 ;; esac
+    stat="${stat##*[\)]}"
+    set -- $stat
+    [ "$#" -ge 20 ] || return 1
+    shift 19
+    case "$1" in ''|*[!0-9]*) return 1 ;; esac
+    started=$((boot + $1 / 100))
+  else
+    [ "$(uname -s 2>/dev/null)" = Darwin ] && [ -x /bin/ps ] || return 1
+    out="$(LC_ALL=C TZ=UTC /bin/ps -o lstart= -p "${1:-}" 2>/dev/null)" || return 1
+    started="$(LC_ALL=C TZ=UTC date -j -u -f "%a %b %e %T %Y" "$out" +%s 2>/dev/null)" || return 1
+    case "$started" in ''|*[!0-9]*) return 1 ;; esac
+  fi
+  [ "$started" -gt $((locked + 2)) ]
 }
 # defenseclaw_install_lock_record FILE prints the trimmed text of a small
 # owner record (proc-start); it returns 1 when FILE is not a small regular
@@ -1665,7 +1772,19 @@ defenseclaw_native_output_agrees() {
 # inherited HOME, PATH or XDG variable can choose an executable.
 defenseclaw_gateway_binary() {
   local hook_dir="${HOOK_DIR:-}" record="" candidate="" home="" path=""
-  local modes="" mode="" count=0 extra=""
+  local modes="" mode="" count=0 extra="" want=7
+  local -a checked=()
+  # --folder proves the record and the folders only: the hook-post helper
+  # beside a gateway is checked by its caller (GAP-1755).
+  [ "${1:-}" = --folder ] && want=6
+  # --folder --set leaves the result in _DC_GATEWAY_BINARY (no command
+  # substitution) and also proves the mode of the hook-post helper beside the
+  # gateway in the same stat (_DC_HOOK_POST_MODE_OK), so the caller runs no
+  # second stat (issue #1130 / GAP-0267).
+  local set_result=0 post=""
+  [ "${1:-}" = --folder ] && [ "${2:-}" = --set ] && set_result=1
+  _DC_GATEWAY_BINARY=""
+  _DC_HOOK_POST_MODE_OK=""
   case "$hook_dir" in /*) ;; *) return 1 ;; esac
   record="${hook_dir}/.gateway-helper"
   [ -f "$record" ] && [ -O "$record" ] && [ ! -L "$record" ] || return 1
@@ -1678,18 +1797,36 @@ defenseclaw_gateway_binary() {
     *) return 1 ;;
   esac
   case "$home" in *'/../'*|*'/./'*|*'/..'|*'/.'|'') return 1 ;; esac
-  [ -f "$candidate" ] && [ -x "$candidate" ] && [ -O "$candidate" ] && [ ! -L "$candidate" ] || return 1
+  if [ "$want" = 7 ]; then
+    [ -f "$candidate" ] && [ -x "$candidate" ] && [ -O "$candidate" ] && [ ! -L "$candidate" ] || return 1
+  fi
   for path in "$hook_dir" "${hook_dir}/.." "$home" "$home/.local" "$home/.local/bin"; do
     [ -d "$path" ] && [ -O "$path" ] && [ ! -L "$path" ] || return 1
   done
-  modes="$(stat -c %a "$hook_dir" "${hook_dir}/.." "$record" "$home" "$home/.local" "$home/.local/bin" "$candidate" 2>/dev/null)" ||
-    modes="$(stat -f %Lp "$hook_dir" "${hook_dir}/.." "$record" "$home" "$home/.local" "$home/.local/bin" "$candidate" 2>/dev/null)" || return 1
+  checked=("$hook_dir" "${hook_dir}/.." "$record" "$home" "$home/.local" "$home/.local/bin")
+  [ "$want" = 6 ] || checked+=("$candidate")
+  if [ "$set_result" = 1 ]; then
+    post="${candidate%/*}/defenseclaw-hook-post"
+    if [ -f "$post" ] && [ -x "$post" ] && [ -O "$post" ] && [ ! -L "$post" ]; then
+      checked+=("$post")
+      want=7
+    else
+      post=""
+    fi
+  fi
+  defenseclaw_stat_into %a %Lp "${checked[@]}" || return 1
+  modes="$_DC_STAT_OUT"
   while IFS= read -r mode; do
     case "$mode" in ""|*[!0-7]*) return 1 ;; esac
     [ $((8#${mode} & 8#022)) -eq 0 ] || return 1
     count=$((count + 1))
   done <<< "$modes"
-  [ "$count" -eq 7 ] || return 1
+  [ "$count" -eq "$want" ] || return 1
+  if [ "$set_result" = 1 ]; then
+    _DC_GATEWAY_BINARY="$candidate"
+    _DC_HOOK_POST_MODE_OK="$post"
+    return 0
+  fi
   printf '%s' "$candidate"
 }
 
@@ -2035,6 +2172,20 @@ defenseclaw_ipv6_loopback() {
   _DC_IPV6_LOOPBACK="127.$((groups[6] & 255)).$((groups[7] >> 8)).$((groups[7] & 255))"
 }
 
+# defenseclaw_api_listener_foreign HOST:PORT is the pre-send listener check
+# the 1.0.2 and 1.0.3 hook scripts call. An upgrade writes this helper before
+# it replaces those scripts, and for that moment an old script called a
+# function this helper no longer had (GAP-1532). It answers as the old check
+# did: 0 (send nothing) while this account's gateway is stopped and the
+# listener on PORT is not proven to be its own. Kept for upgrades from 1.0.2
+# and 1.0.3; remove when those upgrade paths are retired.
+defenseclaw_api_listener_foreign() {
+  defenseclaw_own_gateway_stopped || return 1
+  local rc=0
+  defenseclaw_api_listener_unproven "${1:-}" || rc=$?
+  [ "$rc" = 0 ]
+}
+
 # defenseclaw_api_listener_unproven HOST:PORT returns 0 for a foreign or
 # unknown listener, 1 for this account's listener, and 2 for a proven free
 # port. Hooks call it only for a call that got no answer
@@ -2137,6 +2288,27 @@ defenseclaw_read_socket_table() {
   return 0
 }
 
+# defenseclaw_read_listen_rows FILE puts the LISTEN (0A) rows of FILE in
+# _DC_SOCKET_ROWS. grep reads the table once and keeps the few listening rows,
+# so a host with hundreds of thousands of TIME_WAIT rows is not walked row by
+# row in Bash, which missed the 3 s budget (GAP-1756). Without grep the
+# whole table is read (defenseclaw_read_socket_table).
+defenseclaw_read_listen_rows() {
+  local data="" IFS=$'\n' noglob=0
+  if ! command -v grep >/dev/null 2>&1; then
+    defenseclaw_read_socket_table "$1"
+    return
+  fi
+  _DC_SOCKET_ROWS=()
+  [ -r "$1" ] || return 1
+  data="$(LC_ALL=C grep -F ' 0A ' "$1" 2>/dev/null)" || [ -z "$data" ] || return 1
+  case "$-" in *f*) noglob=1 ;; esac
+  set -f
+  _DC_SOCKET_ROWS=($data)
+  [ "$noglob" = 1 ] || set +f
+  return 0
+}
+
 # defenseclaw_procfs_listener_status ADDR PORT NET UID classifies the
 # listeners that can serve one normalised loopback endpoint (127.0.0.0/8 or
 # ::1) in NET's tcp and tcp6 tables, with the return codes of
@@ -2160,8 +2332,10 @@ defenseclaw_procfs_listener_status() {
   esac
   for table in "${net}/tcp" "${net}/tcp6"; do
     [ -r "$table" ] || continue
-    defenseclaw_read_socket_table "$table" || continue
-    for row in "${_DC_SOCKET_ROWS[@]}"; do
+    defenseclaw_read_listen_rows "$table" || continue
+    # Bash 3.2 (macOS) treats "${a[@]}" of an empty array as unbound under
+    # set -u, and a table with no LISTEN row leaves none (GAP-2273).
+    for row in ${_DC_SOCKET_ROWS[@]+"${_DC_SOCKET_ROWS[@]}"}; do
       # The state column is the only " 0A " (LISTEN) a row can hold; skip
       # the TIME_WAIT and connected rows before splitting. procfs rows have
       # no glob characters, so the unquoted split cannot expand a pattern.
@@ -2232,6 +2406,41 @@ defenseclaw_response_failure_reason() {
     *)
       printf '%s' "$1"
       ;;
+  esac
+}
+
+# defenseclaw_gateway_error_answer REASON prints, for a block of a call the
+# gateway answered with a server error (REASON "gateway returned HTTP 5xx"),
+# what it said: "HTTP 503: <its error>". The gateway is up, so the block
+# must not read as an outage (GAP-1744: a Codex start refused for its runtime
+# registration). It prints nothing for any other reason.
+defenseclaw_gateway_error_answer() {
+  local code="" detail=""
+  case "${1:-}" in
+    "gateway returned HTTP 5"[0-9][0-9]) code="${1#gateway returned }" ;;
+    *) return 1 ;;
+  esac
+  detail="$(defenseclaw_json_string_field "${RESULT:-}" error 2>/dev/null)" || detail=""
+  detail="${detail//[[:cntrl:]]/ }"
+  detail="${detail:0:200}"
+  if [ -n "$detail" ]; then
+    printf '%s: %s' "$code" "$detail"
+  else
+    printf '%s' "$code"
+  fi
+}
+
+# defenseclaw_gateway_error_block_text REASON prints the block text for a
+# call the gateway answered with a server error (see
+# defenseclaw_gateway_error_answer). When the gateway's error names the step
+# that repairs it ("...; run: defenseclaw setup codex --yes") that step is
+# the next step; otherwise doctor is.
+defenseclaw_gateway_error_block_text() {
+  local answer=""
+  answer="$(defenseclaw_gateway_error_answer "${1:-}")" || return 1
+  case "$answer" in
+    *"run: defenseclaw "*) printf 'DefenseClaw blocked this because its gateway answered with an error (%s).' "$answer" ;;
+    *) printf 'DefenseClaw blocked this because its gateway answered with an error (%s). Run defenseclaw doctor to see what to fix.' "$answer" ;;
   esac
 }
 
@@ -2418,17 +2627,61 @@ defenseclaw_emit_unreachable_stderr() {
     [ -z "$next" ] || reason="$next"
   fi
   if defenseclaw_should_fail_closed_on_unreachable; then
-    echo "defenseclaw: gateway unreachable, blocking ${subject} (fail mode closed): ${reason}" >&2
-  elif defenseclaw_per_user_outage_open; then
-    if defenseclaw_first_outage_warning; then
-      case "${DEFENSECLAW_HOOK_CONNECTOR:-}" in
-        claudecode|codex) : ;; # Their systemMessage below is user-visible.
-        *) echo "defenseclaw: gateway unreachable, allowing ${subject} unchecked (fail mode open for an outage): ${reason}. If it does not start, run \`defenseclaw doctor\`." >&2 ;;
-      esac
+    # The gateway is up and answered with a server error: the line names its
+    # answer, not an outage or a fail mode (GAP-1744).
+    local answer=""
+    if answer="$(defenseclaw_gateway_error_answer "$reason")"; then
+      echo "defenseclaw: blocking ${subject}: the gateway answered with an error (${answer})" >&2
+      return 0
     fi
+    echo "defenseclaw: gateway unreachable, blocking ${subject} ($(defenseclaw_unreachable_mode_note)): ${reason}" >&2
+  elif defenseclaw_per_user_outage_open; then
+    # The Claude Code and Codex hooks show their systemMessage instead; the
+    # generic inspect hooks rendered for them print none, so they keep this
+    # line (GAP-1757). The once-per-session marker is taken only by a call
+    # that shows the warning: a call that prints nothing here (a Codex
+    # prompt, a Claude Code PostToolUse or Stop) leaves it for the next call
+    # that does (GAP-1352).
+    case "${DEFENSECLAW_HOOK_CONNECTOR:-}|${subject}" in
+      "claudecode|claude-code "*|"codex|codex "*) : ;;
+      *)
+        if defenseclaw_first_outage_warning; then
+          echo "defenseclaw: gateway unreachable, allowing ${subject} unchecked (fail mode open for an outage): ${reason}. If it does not start, run \`defenseclaw doctor\`." >&2
+        fi
+        ;;
+    esac
   else
     echo "defenseclaw: gateway unreachable, allowing ${subject}: ${reason}" >&2
   fi
+}
+
+# defenseclaw_unreachable_mode_note names why a call the gateway did not
+# decide was blocked, as the native hook line does (unreachableModeNote,
+# GAP-1735): "fail mode closed" for a gateway outage the mode closed (no
+# gateway took the connection, curl 7), strict availability, the install
+# window, and managed, socket and Secure Client hooks; for a per-user call the
+# gateway took and did not answer (a timeout, a dropped or cut-off answer),
+# that it is not an outage and is blocked in every fail mode, so a saved open
+# mode does not read as ignored (GAP-2279).
+defenseclaw_unreachable_mode_note() {
+  local closed='fail mode closed'
+  case "${DEFENSECLAW_MANAGED_HOOK:-0}" in
+    1|true|TRUE|yes|YES) printf '%s' "$closed"; return 0 ;;
+  esac
+  case "${DEFENSECLAW_STRICT_AVAILABILITY:-0}" in
+    1|true|TRUE|yes|YES) printf '%s' "$closed"; return 0 ;;
+  esac
+  # A refused connection (7) is an outage. Any other failure while this
+  # account's own gateway process is alive (a timeout, a dropped answer) is
+  # a call the gateway took and did not answer; with no live gateway it
+  # stays an outage the mode closed.
+  if [ "${_DC_TRANSPORT_STATUS:-}" = 7 ] || [ -n "${DEFENSECLAW_HOOK_SOCKET:-}" ] ||
+    [ "${_DC_SECURE_CLIENT_HOOK:-0}" = 1 ] || defenseclaw_install_held ||
+    ! defenseclaw_own_gateway_alive; then
+    printf '%s' "$closed"
+    return 0
+  fi
+  printf '%s' 'not a gateway outage, so it is blocked in every fail mode'
 }
 
 # defenseclaw_unreachable_notice_json prints a one-line hook result whose
@@ -2450,7 +2703,7 @@ defenseclaw_unreachable_notice_json() {
   elif [ -n "${_DC_GATEWAY_RESTART_WAITED:-}" ] && ! defenseclaw_own_config_invalid; then
     text='DefenseClaw is not checking this session: this account'"'"'s gateway is restarting or not running (no answer within 3 seconds). Run `defenseclaw-gateway start` to resume protection. `defenseclaw-gateway status` shows its state.'
   elif defenseclaw_own_gateway_alive; then
-    text='DefenseClaw is not checking this session: the gateway is running but did not answer. Run `defenseclaw-gateway restart` to resume protection.'
+    text='DefenseClaw is not checking this session: the gateway is running but did not answer. Run `defenseclaw-gateway restart` to resume protection. `defenseclaw-gateway status` shows its state.'
   elif defenseclaw_own_config_invalid; then
     text='DefenseClaw is not checking this session: the gateway could not start because config.yaml does not load. Run `defenseclaw config validate`, fix the file, then run `defenseclaw-gateway start`.'
   else
@@ -2630,6 +2883,10 @@ defenseclaw_missing_token_next_step() {
   esac
   local setup_name="${1:-}"
   [ "$setup_name" = "claudecode" ] && setup_name="claude-code"
+  if [ "$setup_name" = "inspect" ]; then
+    printf '%s' '; this shared inspect hook is retired; run `defenseclaw doctor` to identify the active connector and repair its hook'
+    return 0
+  fi
   [ -n "$setup_name" ] || return 0
   printf '%s' "; run \`defenseclaw setup ${setup_name}\` to restore the hook token"
 }
@@ -2651,23 +2908,18 @@ defenseclaw_missing_token_next_step() {
 # cap were never inspected). JSON carries NUL only escaped (\u0000), so no
 # real connector payload has one.
 #
-# How the usual tier reads:
-#   - `head -c cap+1` bounds the read: a producer streaming 1GB is cut off
-#     after cap+1 bytes. One call only: BSD head drains the pipe, so a second
-#     probe (`head -c 1`) would always see EOF.
-#   - bash's `read -r -d ''` takes that output with every byte but NUL intact
-#     (trailing newlines too) and returns 0 only when it stopped at a NUL, so
-#     both checks see the raw bytes. It reads a pipe one byte at a time (about
-#     0.2 s per MiB on Linux, 0.3 s on macOS bash 3.2) and starts no program.
+# How it reads: bash's `read -r -d '' -n cap+1` takes at most cap+1 bytes
+# (a producer streaming 1GB is cut off) with every byte but NUL intact
+# (trailing newlines too), and it stops at a NUL, so both checks see the raw
+# bytes. It reads a pipe one byte at a time (about 0.2 s per MiB on Linux,
+# 0.3 s on macOS bash 3.2) and starts no program: no head(1) or python3
+# (issue #1130 / GAP-0267).
 #
 # Usage:
 #   PAYLOAD="$(defenseclaw_read_stdin_capped fail_closed)" || exit 2
 #
-# Returns 0 with the body on stdout. Returns 1 (overflow or NUL) with an
-# empty stdout. If `head` is missing we read the body with a bounded
-# python3 reader (same refusals); only when both head(1) and python3 are
-# absent is the read unbounded (the cap and NUL checks still apply after
-# it), logged as a transport-category event so operators can spot it.
+# Returns 0 with the body on stdout. Returns 3 (overflow, with the first cap
+# bytes on stdout) or 4 (NUL, empty stdout).
 defenseclaw_read_stdin_capped() {
   # The caller passes the outcome its oversized-payload branch applies
   # (fail_open or fail_closed); an older caller without one logs unknown.
@@ -2676,47 +2928,9 @@ defenseclaw_read_stdin_capped() {
   case "$cap" in
     ''|*[!0-9]*) cap=1048576 ;;
   esac
-  # Tier 1 — bounded python3 read, only on a host without head(1), so
-  # python3 is not started on every hook call (issue #1130: it was one of
-  # about 15 programs each Claude Code call ran). python3 reads at most cap+1
-  # bytes and exits 4 on a NUL byte, 3 on overflow; the trailing x keeps
-  # the body's trailing newlines through the command substitution.
-  #
-  # _dc_python3_usable (not a bare `command -v python3`) is the gate:
-  # stock macOS hosts without CLT resolve /usr/bin/python3 to a launcher
-  # stub that would trigger an OS installer dialog on first invocation
-  # and return no body at all.
-  if ! command -v head >/dev/null 2>&1 && _dc_python3_usable; then
-    local _dc_body _dc_rc
-    _dc_body="$(DCHOOK_CAP="$cap" python3 -c \
-'import sys,os
-cap=int(os.environ.get("DCHOOK_CAP","1048576"))
-data=sys.stdin.buffer.read(cap+1)
-if b"\0" in data:
-    sys.exit(4)
-if len(data)>cap:
-    sys.stdout.buffer.write(data[:cap])
-    sys.exit(3)
-sys.stdout.buffer.write(data+b"x")')"
-    _dc_rc=$?
-    case "$_dc_rc" in
-      3) _dc_stdin_refused "$cap" overflow "$overflow_outcome"; printf '%s' "$_dc_body"; return 3 ;;
-      4) _dc_stdin_refused "$cap" nul "$overflow_outcome"; return 4 ;;
-    esac
-    printf '%s' "${_dc_body%x}"
-    return 0
-  fi
-  # Tier 2 — head(1), the usual reader (see above).
-  if command -v head >/dev/null 2>&1; then
-    head -c "$((cap + 1))" | _dc_read_stdin_exact "$cap" "$overflow_outcome"
-    return
-  fi
-  # Tier 3 — neither python3 nor head present (minimal container): the
-  # read is unbounded, logged so operators can spot the missing-tooling
-  # condition; the cap and NUL refusals still apply.
-  defenseclaw_log_hook_failure "${DEFENSECLAW_HOOK_CONNECTOR:-unknown}" "${DEFENSECLAW_HOOK_NAME:-unknown}" \
-    "head(1)/python3 missing; reading stdin unbounded (set DEFENSECLAW_HOOK_MAX_BODY)" \
-    transport "${FAIL_MODE:-closed}" diagnostic
+  # bash reads at most cap+1 bytes itself: no head(1) or python3 process on
+  # any host (issue #1130 / GAP-0267), and the read stays bounded when
+  # neither is installed.
   _dc_read_stdin_exact "$cap" "$overflow_outcome"
 }
 
@@ -2725,7 +2939,10 @@ sys.stdout.buffer.write(data+b"x")')"
 # ${#body} a byte count. See defenseclaw_read_stdin_capped.
 _dc_read_stdin_exact() {
   local cap="$1" outcome="$2" body="" LC_ALL=C
-  if IFS= read -r -d '' body; then
+  # -n cap+1 bounds the read (a producer streaming 1GB is cut off after
+  # cap+1 bytes). read returns 0 when it stopped at a NUL or took all cap+1
+  # bytes, and non-zero at the end of input.
+  if IFS= read -r -d '' -n "$((cap + 1))" body && [ "${#body}" -le "$cap" ]; then
     _dc_stdin_refused "$cap" nul "$outcome"
     return 4
   fi
@@ -2734,7 +2951,31 @@ _dc_read_stdin_exact() {
     printf '%s' "${body:0:cap}"
     return 3
   fi
+  _dc_stdin_over_transport "$body" "$outcome" && return 3
   printf '%s' "$body"
+}
+
+# The per-user transport (defenseclaw-hook-post, hookexec perUserHookMaxBody)
+# sends at most 900 KiB, under the gateway's 1 MiB request cap. A body
+# between that and the read cap passed the read, reached the helper whole and
+# was refused there after the read, so a benign 0.9-1 MiB call (a long Bash
+# heredoc, a large Write) failed closed as "the gateway is running but did
+# not answer" with no gateway row, even in the balanced default (GAP-2279,
+# GAP-2284). In the tier that reviews an oversized call from its prefix, the
+# shell hook now treats such a body as oversized at the transport's cap, as
+# the OpenCode and Amp plugins already do (900 KiB): it prints the body's
+# first 900 KiB and returns 0 for the caller's overflow branch (rc 3), which
+# sends the bounded prefix review for the gateway's usual verdict. Every
+# other tier keeps its read cap and path unchanged.
+_dc_stdin_over_transport() {
+  local body="$1" outcome="$2" LC_ALL=C transport_cap=921600
+  [ "${#body}" -gt "$transport_cap" ] || return 1
+  [ -n "${DEFENSECLAW_AGENT_HOME:-}" ] &&
+    [ -x "${DEFENSECLAW_AGENT_HOME}/.local/bin/defenseclaw-hook-post" ] || return 1
+  defenseclaw_per_user_oversize_open || return 1
+  _dc_stdin_refused "$transport_cap" overflow "$outcome"
+  printf '%s' "${body:0:transport_cap}"
+  return 0
 }
 
 # _dc_stdin_refused logs and reports a body defenseclaw_read_stdin_capped
@@ -2930,7 +3171,19 @@ defenseclaw_user_identity_args() {
       ;;
   esac
 
-  name="$(id -un 2>/dev/null)" || name=""
+  name=""
+  # A local account's name comes from /etc/passwd without a program (issue
+  # #1130 / GAP-0267); a directory account (SSSD, macOS) still asks id.
+  if [ "$secure_client" = 0 ] && [ -n "$uid" ] && [ -r /etc/passwd ]; then
+    local pw_name="" pw_pass="" pw_uid="" pw_rest=""
+    while IFS=: read -r pw_name pw_pass pw_uid pw_rest; do
+      if [ "$pw_uid" = "$uid" ]; then
+        name="$pw_name"
+        break
+      fi
+    done < /etc/passwd
+  fi
+  [ -n "$name" ] || name="$(id -un 2>/dev/null)" || name=""
   # SSSD fully qualified names (alice@realm) report the bare account.
   [ "$secure_client" = 1 ] || name="${name%%@*}"
   case "$name" in
@@ -3052,6 +3305,14 @@ defenseclaw_session_facts_full() {
       fresh=1
     fi
   fi
+  if [ "$fresh" = 1 ] && [ -n "$ccache" ] && [ -z "${KRB5CCNAME:-}" ]; then
+    # The default cache is in the local /tmp: the shell's own test reads it
+    # without a program, so a warm hook stays within its program budget
+    # (GAP-0267). A named cache may sit on a network mount that stalls, so it
+    # keeps the bounded find (_dc_ccache_changed).
+    if [ -e "$ccache" ] && [ "$ccache" -nt "$cache" ]; then _DC_CCACHE_CHANGED=newer; fi
+    ccache=""
+  fi
   if [ "$fresh" = 1 ] &&
     { [ -z "$ccache" ] || _dc_ccache_changed "$ccache" "$cache"; } && [ "${_DC_CCACHE_CHANGED:-same}" != newer ]; then
     # The binary would wait on a stalled cache too.
@@ -3146,8 +3407,14 @@ defenseclaw_payload_tool_gate_max_time() {
 # "al<NUL>low" read as "allow" (GAP-1008). No JSON parser here (the strict
 # validator, jq, Python) accepts an unescaped control character, so such an
 # answer now fails as malformed.
+# bash's read -d '' stops at each NUL, so the copy starts no program (issue
+# #1130 / GAP-0267); each stop is one NUL, replaced by U+0001.
 defenseclaw_keep_nul_visible() {
-  tr '\000' '\001'
+  local part="" out="" LC_ALL=C
+  while IFS= read -r -d '' part; do
+    out="${out}${part}"$'\001'
+  done
+  printf '%s' "${out}${part}"
 }
 
 # defenseclaw_gateway_post URL MAX_TIME BODY [CURL_ARGS...]
@@ -3204,6 +3471,40 @@ defenseclaw_gateway_post() {
 }
 
 # _dc_gateway_post_once makes one defenseclaw_gateway_post attempt.
+# _dc_json_escape_shell VALUE sets _DC_JSON_ESCAPED to VALUE as the inside
+# of a JSON string, with the shell's own substitutions (backslash, quote,
+# newline, carriage return, tab); a value with any other control character
+# goes through defenseclaw_json_escape. Bash 3.2 (macOS) runs ${v//x/y} in
+# time quadratic in the value (110 KB took minutes), so there a value over
+# 1 KiB goes through one sed and one awk, linear and the same encoding
+# (GAP-2274); headers stay in the shell (GAP-1755).
+_dc_json_escape_shell() {
+  local LC_ALL=C v="${1:-}"
+  if [ "${BASH_VERSINFO[0]:-0}" -lt 4 ] && [ "${#v}" -gt 1024 ]; then
+    v="$(printf '%sx' "$v" |
+      LC_ALL=C sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' -e $'s/\r/\\\\r/g' -e $'s/\t/\\\\t/g' |
+      LC_ALL=C awk 'BEGIN { ORS = "" } NR > 1 { print "\\n" } { print }')" || v=""
+    case "$v" in
+      *x) v="${v%x}" ;;
+      *) v="$(defenseclaw_json_escape "${1:-}")" ;;
+    esac
+    case "$v" in
+      *[[:cntrl:]]*) v="$(defenseclaw_json_escape "${1:-}")" ;;
+    esac
+    _DC_JSON_ESCAPED="$v"
+    return 0
+  fi
+  v="${v//\\/\\\\}"
+  v="${v//\"/\\\"}"
+  v="${v//$'\n'/\\n}"
+  v="${v//$'\r'/\\r}"
+  v="${v//$'\t'/\\t}"
+  case "$v" in
+    *[[:cntrl:]]*) v="$(defenseclaw_json_escape "${1:-}")" ;;
+  esac
+  _DC_JSON_ESCAPED="$v"
+}
+
 _dc_gateway_post_once() {
   local _dc_post_url="$1" _dc_post_max_time="$2" _dc_post_body="$3"
   local _dc_post_auth="" _dc_post_arg
@@ -3263,25 +3564,49 @@ _dc_gateway_post_once() {
     if [ "$_dc_post_max_time" -le 4 ] && [ "$_dc_post_remaining" -gt 2 ]; then
       _dc_post_remaining=$((_dc_post_remaining - 1))
     fi
-    # harden_env moved HOME to a private scratch directory. Use the account
-    # home it retained before that move, then verify every path component.
-    local _dc_agent_home="${DEFENSECLAW_AGENT_HOME:-}"
+    # The same bound in milliseconds, for the helper (GAP-2279): the whole
+    # seconds above round the shell's own time up, so a call that spent
+    # 0.4 s reading a large body gave the helper 2 s of the 2.6 s left after
+    # the startup reserve, and was closed at 2.4 s. The helper gets the time
+    # left after that reserve, never less than the whole seconds above and
+    # never a whole second more; an older helper reads only --max-time.
+    local _dc_post_remaining_ms=$(( _dc_post_max_time * 1000 - _DC_ELAPSED_MS ))
+    if [ "$_dc_post_max_time" -le 4 ]; then
+      _dc_post_remaining_ms=$(( _dc_post_remaining_ms - 1000 ))
+    fi
+    if [ "$_dc_post_remaining_ms" -lt $(( _dc_post_remaining * 1000 )) ]; then
+      _dc_post_remaining_ms=$(( _dc_post_remaining * 1000 ))
+    fi
+    # The executable that receives the bearer is the gateway setup recorded
+    # beside this hook (.gateway-helper, defenseclaw_gateway_binary, which
+    # proves the record and every folder on its path are this account's and
+    # private), never one the agent's HOME or DEFENSECLAW_AGENT_HOME names
+    # (GAP-1755), as the OpenCode and Amp plugins read it.
     local _dc_recovery_home="" _dc_recovery_path="" _dc_secure_meta="" _dc_secure_uid=""
-    local _dc_secure_path _dc_secure_mode
-    case "$_dc_agent_home" in /*) ;; *) return 1 ;; esac
-    _dc_post_bin="${_dc_agent_home}/.local/bin/defenseclaw-gateway"
+    local _dc_secure_path _dc_secure_mode _dc_post_dir
+    defenseclaw_gateway_binary --folder --set || return 1
+    _dc_post_bin="$_DC_GATEWAY_BINARY"
+    _dc_post_dir="${_dc_post_bin%/*}"
     # The small helper has the same connected-socket peer check as the full
     # CLI. An older installation without it keeps the verified CLI path.
     # A present but untrusted helper is refused below, never bypassed.
-    if [ -e "${_dc_agent_home}/.local/bin/defenseclaw-hook-post" ] ||
-       [ -L "${_dc_agent_home}/.local/bin/defenseclaw-hook-post" ]; then
-      _dc_post_bin="${_dc_agent_home}/.local/bin/defenseclaw-hook-post"
+    if [ -e "${_dc_post_dir}/defenseclaw-hook-post" ] ||
+       [ -L "${_dc_post_dir}/defenseclaw-hook-post" ]; then
+      _dc_post_bin="${_dc_post_dir}/defenseclaw-hook-post"
       _dc_legacy_post=0
+      [ -f "$_dc_post_bin" ] && [ -x "$_dc_post_bin" ] && [ -O "$_dc_post_bin" ] && [ ! -L "$_dc_post_bin" ] || return 1
+      # The folder check already proved this helper's mode in its stat.
+      if [ "${_DC_HOOK_POST_MODE_OK:-}" != "$_dc_post_bin" ]; then
+        defenseclaw_stat_into %a %Lp "$_dc_post_bin" || return 1
+        _dc_secure_mode="$_DC_STAT_OUT"
+        case "$_dc_secure_mode" in ""|*[!0-7]*) return 1 ;; esac
+        [ $((8#${_dc_secure_mode} & 8#022)) -eq 0 ] || return 1
+      fi
     else
       # An older installer's roll-forward restores its saved installer folder
       # but does not know this new binary name. That folder carries a checked
       # recovery copy, so the 10 Hz path remains fast after the roll-forward.
-      _dc_recovery_home="${DEFENSECLAW_HOME:-${_dc_agent_home}/.defenseclaw}"
+      _dc_recovery_home="${DEFENSECLAW_HOME:-${HOOK_DIR%/*}}"
       case "$_dc_recovery_home" in
         /*)
           _dc_recovery_path="${_dc_recovery_home%/}/installer/defenseclaw-hook-post"
@@ -3294,7 +3619,8 @@ _dc_gateway_post_once() {
             _dc_secure_path="${_dc_recovery_home%/}/installer"
             while [ "$_dc_secure_path" != / ]; do
               [ -d "$_dc_secure_path" ] && [ ! -L "$_dc_secure_path" ] || return 1
-              _dc_secure_meta="$(stat -c '%a:%u' "$_dc_secure_path" 2>/dev/null || stat -f '%Lp:%u' "$_dc_secure_path" 2>/dev/null)" || return 1
+              defenseclaw_stat_into '%a:%u' '%Lp:%u' "$_dc_secure_path" || return 1
+              _dc_secure_meta="$_DC_STAT_OUT"
               _dc_secure_mode="${_dc_secure_meta%%:*}"
               _dc_secure_uid="${_dc_secure_meta#*:}"
               case "$_dc_secure_mode" in ""|*[!0-7]*) return 1 ;; esac
@@ -3310,20 +3636,17 @@ _dc_gateway_post_once() {
               _dc_secure_path="${_dc_secure_path%/*}"
               [ -n "$_dc_secure_path" ] || _dc_secure_path=/
             done
+            [ -f "$_dc_post_bin" ] && [ -x "$_dc_post_bin" ] && [ -O "$_dc_post_bin" ] && [ ! -L "$_dc_post_bin" ] || return 1
+            defenseclaw_stat_into %a %Lp "$_dc_post_bin" || return 1
+            _dc_secure_mode="$_DC_STAT_OUT"
+            [ $((8#${_dc_secure_mode} & 8#022)) -eq 0 ] || return 1
           fi
           ;;
       esac
+      if [ "$_dc_legacy_post" -eq 1 ]; then
+        _dc_post_bin="$(defenseclaw_gateway_binary)" || return 1
+      fi
     fi
-    # This binary receives the bearer on stdin. A stale PID record, PATH
-    # entry, writable path, or symlink cannot select a different executable.
-    for _dc_secure_path in "$_dc_agent_home" "$_dc_agent_home/.local" "$_dc_agent_home/.local/bin"; do
-      [ -d "$_dc_secure_path" ] && [ -O "$_dc_secure_path" ] && [ ! -L "$_dc_secure_path" ] || return 1
-      _dc_secure_mode="$(stat -c %a "$_dc_secure_path" 2>/dev/null || stat -f %Lp "$_dc_secure_path" 2>/dev/null)" || return 1
-      [ $((8#${_dc_secure_mode} & 8#022)) -eq 0 ] || return 1
-    done
-    [ -f "$_dc_post_bin" ] && [ -x "$_dc_post_bin" ] && [ -O "$_dc_post_bin" ] && [ ! -L "$_dc_post_bin" ] || return 1
-    _dc_secure_mode="$(stat -c %a "$_dc_post_bin" 2>/dev/null || stat -f %Lp "$_dc_post_bin" 2>/dev/null)" || return 1
-    [ $((8#${_dc_secure_mode} & 8#022)) -eq 0 ] || return 1
     _dc_post_prefix="http://${API_ADDR}"
     _dc_post_path="${_dc_post_url:${#_dc_post_prefix}}"
     _dc_post_fields=()
@@ -3352,13 +3675,20 @@ _dc_gateway_post_once() {
       if [ "$_dc_legacy_post" -eq 1 ]; then
         # A hook can run during an upgrade before the small helper exists.
         # The existing gateway CLI accepts the original JSON envelope.
+        # The shell encodes the envelope itself: a program per field made
+        # the process count grow with the headers (GAP-1755).
         _dc_post_headers="" _dc_post_sep=""
         for ((_dc_field_index=0; _dc_field_index<${#_dc_post_fields[@]}; _dc_field_index+=2)); do
-          _dc_post_headers="${_dc_post_headers}${_dc_post_sep}\"$(defenseclaw_json_escape "${_dc_post_fields[_dc_field_index]}")\":\"$(defenseclaw_json_escape "${_dc_post_fields[_dc_field_index+1]}")\""
+          _dc_json_escape_shell "${_dc_post_fields[_dc_field_index]}"
+          _dc_post_headers="${_dc_post_headers}${_dc_post_sep}\"${_DC_JSON_ESCAPED}\":"
+          _dc_json_escape_shell "${_dc_post_fields[_dc_field_index+1]}"
+          _dc_post_headers="${_dc_post_headers}\"${_DC_JSON_ESCAPED}\""
           _dc_post_sep=,
         done
-        printf '{"path":"%s","headers":{%s},"body":"%s"}' \
-          "$(defenseclaw_json_escape "$_dc_post_path")" "$_dc_post_headers" "$(defenseclaw_json_escape "$_dc_post_body")"
+        _dc_json_escape_shell "$_dc_post_path"
+        printf '{"path":"%s","headers":{%s},' "$_DC_JSON_ESCAPED" "$_dc_post_headers"
+        _dc_json_escape_shell "$_dc_post_body"
+        printf '"body":"%s"}' "$_DC_JSON_ESCAPED"
       else
         printf '%s\0' 'DCPOST1' "$_dc_post_path" "$_dc_post_body" "${_dc_post_fields[@]+"${_dc_post_fields[@]}"}"
       fi |
@@ -3367,7 +3697,7 @@ _dc_gateway_post_once() {
             # 126, as for a helper that cannot run: nothing was sent.
             ulimit -S -v "$_DC_HOOK_NATIVE_VMEM_LIMIT" 2>/dev/null || exit 126
           fi
-          exec "$_dc_post_bin" hook-post --api-addr "$API_ADDR" --max-time "$_dc_post_remaining" --curl-output
+          _DC_HOOK_POST_DEADLINE_MS="$_dc_post_remaining_ms" exec "$_dc_post_bin" hook-post --api-addr "$API_ADDR" --max-time "$_dc_post_remaining" --curl-output
         ) 2>/dev/null |
         defenseclaw_keep_nul_visible
       exit "${PIPESTATUS[1]}"

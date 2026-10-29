@@ -14,10 +14,13 @@ package unixidentity
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/useridentity"
@@ -40,6 +43,11 @@ func DirectoryFactsFunc(ctx context.Context) func(uid int) (useridentity.Directo
 // never copied into /etc/passwd.
 func platformMobileAccounts(context.Context) (map[string]string, error) {
 	return map[string]string{}, nil
+}
+
+// platformSSOLinkedAccounts finds none on Linux, which has no Platform SSO.
+func platformSSOLinkedAccounts(context.Context) (map[string]bool, error) {
+	return map[string]bool{}, nil
 }
 
 // platformOpenDirectoryNodeStates has no Open Directory to read on Linux.
@@ -65,6 +73,56 @@ func platformLocalAccounts(context.Context) (map[string]int, error) {
 	return parseLocalPasswd(string(data)), nil
 }
 
+// platformLocalDatabaseAccounts adds the systemd-userdb drop-in records and
+// the nss-altfiles passwd files to /etc/passwd. A fresh account created as a
+// userdb record is in no /etc/passwd line, so the guardian's warm-up never
+// spooled its identity record and its first managed Codex turn was refused
+// "the account holder is unconfirmed" (GAP-0026, the userdb leg of GAP-0677).
+func platformLocalDatabaseAccounts(ctx context.Context) (map[string]int, error) {
+	out, err := platformLocalAccounts(ctx)
+	if err != nil {
+		return nil, err
+	}
+	add := func(name string, uid int) {
+		if _, dup := out[name]; !dup && validName(name) == nil && uid >= 0 {
+			out[name] = uid
+		}
+	}
+	for _, dir := range UserdbRecordDirs {
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			continue
+		}
+		for _, entry := range entries {
+			if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".user") {
+				continue
+			}
+			data, err := readSmallFile(filepath.Join(dir, entry.Name()), 1<<20)
+			if err != nil {
+				continue
+			}
+			var record struct {
+				UserName string `json:"userName"`
+				UID      *int   `json:"uid"`
+			}
+			if json.Unmarshal(data, &record) != nil || record.UID == nil {
+				continue
+			}
+			add(record.UserName, *record.UID)
+		}
+	}
+	for _, path := range AltfilesPasswdFiles {
+		data, err := readSmallFile(path, 16<<20)
+		if err != nil {
+			continue
+		}
+		for name, uid := range parseLocalPasswd(string(data)) {
+			add(name, uid)
+		}
+	}
+	return out, nil
+}
+
 func platformLocalAccountRecords(context.Context) (map[string]LocalAccountRecord, error) {
 	return nil, errors.New("unixidentity: local account records are listed only on macOS")
 }
@@ -72,6 +130,14 @@ func platformLocalAccountRecords(context.Context) (map[string]LocalAccountRecord
 func platformLocalAccountRecord(context.Context, string) (LocalAccountRecord, bool, error) {
 	return LocalAccountRecord{}, false, errors.New("unixidentity: local account records are listed only on macOS")
 }
+
+// platformAccountRecordGone is false: these lookups already run in a
+// fresh process (getent) or read the files backend, so a found account is
+// current.
+func platformAccountRecordGone(context.Context, string) bool { return false }
+
+// platformAccountUIDGone is false for the same reason.
+func platformAccountUIDGone(context.Context, string, int) bool { return false }
 
 // platformLocalGroups reads /etc/group, the files backend itself.
 func platformLocalGroups(context.Context) (map[string]int, error) {
@@ -108,6 +174,11 @@ func readSmallFile(path string, limit int64) ([]byte, error) {
 	}
 	return data, nil
 }
+
+// ProcessLookupsOutliveDeletion is false on Linux: NSS answers each lookup
+// from the account databases (nscd and SSSD caches are invalidated on a
+// change), so a found answer means the account exists.
+const ProcessLookupsOutliveDeletion = false
 
 // DefaultUIDRange reads UID_MIN/UID_MAX from /etc/login.defs, falling back
 // to the shadow-utils defaults.

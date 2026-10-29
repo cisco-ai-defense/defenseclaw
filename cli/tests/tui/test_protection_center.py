@@ -379,6 +379,52 @@ def test_native_approval_prompt_set_is_shared_with_the_cli() -> None:
     assert "will prompt for approval" in _hilt_enable_notice("claude", "HIGH")
 
 
+async def test_approval_reapply_checks_every_scope_the_command_changes() -> None:
+    from unittest.mock import AsyncMock, Mock
+
+    model = protection_model()
+    model.apply_protection(
+        [Posture("global", hilt="HIGH+"), Posture("codex"), Posture("claudecode", hilt="HIGH+")], PACKS
+    )
+    flow = SimpleNamespace(
+        policy_model=model,
+        push_screen_wait=AsyncMock(side_effect=["HIGH+", "hilt"]),
+        _set_status=Mock(),
+        _run_policy_intent=AsyncMock(),
+    )
+    await policy_panel.PolicyPanelMixin._hilt_flow(flow, "")
+    assert flow._run_policy_intent.await_args.args[0].args == hilt_intent("HIGH+").args
+
+    # An explicit connector selection remains a no-op when only another
+    # connector differs. A single-connector view runs the broad command.
+    flow._run_policy_intent.reset_mock()
+    flow.push_screen_wait = AsyncMock(return_value="HIGH+")
+    await policy_panel.PolicyPanelMixin._hilt_flow(flow, "claudecode")
+    flow._run_policy_intent.assert_not_awaited()
+    model.multi_connector = False
+    flow.push_screen_wait = AsyncMock(side_effect=["HIGH+", "hilt"])
+    await policy_panel.PolicyPanelMixin._hilt_flow(flow, "claudecode")
+    assert flow._run_policy_intent.await_args.args[0].args == hilt_intent("HIGH+").args
+
+    # Reapplying the global value can also weaken a stricter override.
+    model.multi_connector = True
+    model.apply_protection([Posture("global", hilt="HIGH+"), Posture("codex", hilt="LOW+")], PACKS)
+    assert hilt_change_modal(model, model.scope_row(""), "HIGH+").actions[0].danger
+
+    # In multi-connector mode the broad CLI writes active overrides, so an
+    # unused global default must not turn a no-op into a mutation or warning.
+    model.apply_protection([Posture("global", hilt="LOW+"), Posture("codex", hilt="HIGH+")], PACKS)
+    flow._run_policy_intent.reset_mock()
+    flow.push_screen_wait = AsyncMock(return_value="HIGH+")
+    await policy_panel.PolicyPanelMixin._hilt_flow(flow, "")
+    flow._run_policy_intent.assert_not_awaited()
+    assert not hilt_change_modal(model, model.scope_row(""), "HIGH+").actions[0].danger
+
+    model.apply_protection([Posture("global", hilt="HIGH+")], PACKS)
+    await policy_panel.PolicyPanelMixin._hilt_flow(flow, "")
+    flow._run_policy_intent.assert_not_awaited()
+
+
 # ---- opt-in packs -------------------------------------------------------------
 
 

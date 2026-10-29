@@ -19,6 +19,9 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/useridentity"
 )
 
+// ProcessLookupsOutliveDeletion: no such cache is known here.
+const ProcessLookupsOutliveDeletion = false
+
 // DefaultUIDRange is a conservative default for other Unix systems.
 func DefaultUIDRange() (int, int) { return 1000, 60000 }
 
@@ -40,6 +43,11 @@ func platformLocalAccounts(context.Context) (map[string]int, error) {
 	return nil, errors.New("unixidentity: no local account reader on this platform")
 }
 
+// platformLocalDatabaseAccounts has no other local account database here.
+func platformLocalDatabaseAccounts(ctx context.Context) (map[string]int, error) {
+	return platformLocalAccounts(ctx)
+}
+
 func platformLocalAccountRecords(context.Context) (map[string]LocalAccountRecord, error) {
 	return nil, errors.New("unixidentity: local account records are listed only on macOS")
 }
@@ -47,6 +55,14 @@ func platformLocalAccountRecords(context.Context) (map[string]LocalAccountRecord
 func platformLocalAccountRecord(context.Context, string) (LocalAccountRecord, bool, error) {
 	return LocalAccountRecord{}, false, errors.New("unixidentity: local account records are listed only on macOS")
 }
+
+// platformAccountRecordGone is false: these lookups already run in a
+// fresh process (getent) or read the files backend, so a found account is
+// current.
+func platformAccountRecordGone(context.Context, string) bool { return false }
+
+// platformAccountUIDGone is false for the same reason.
+func platformAccountUIDGone(context.Context, string, int) bool { return false }
 
 func platformLocalGroups(context.Context) (map[string]int, error) {
 	return nil, errors.New("unixidentity: no local group reader on this platform")
@@ -59,5 +75,9 @@ func platformOpenDirectoryNodeStates(context.Context) (string, error) {
 }
 
 func platformMobileAccounts(context.Context) (map[string]string, error) {
+	return nil, errors.New("unixidentity: no local directory node on this platform")
+}
+
+func platformSSOLinkedAccounts(context.Context) (map[string]bool, error) {
 	return nil, errors.New("unixidentity: no local directory node on this platform")
 }

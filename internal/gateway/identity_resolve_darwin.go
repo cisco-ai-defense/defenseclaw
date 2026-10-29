@@ -23,6 +23,10 @@ import (
 // account.
 var managedHookPeerAccountIncarnation = func(unixidentity.Account) (string, bool) { return "", false }
 
+// managedHookPeerGuardianIncarnation names nothing on macOS either
+// (managedHookPeerAccountIncarnation).
+var managedHookPeerGuardianIncarnation = func(unixidentity.Account) (string, bool) { return "", false }
+
 // resolvePeerDirectoryFacts returns a verified uid's directory facts: the
 // account's own facts from the system account database, which on macOS
 // answers through Open Directory (groups; directory local for an account of the local node), with the root
@@ -57,16 +61,21 @@ func resolvePeerDirectoryFacts(key string) (useridentity.DirectoryFacts, error) 
 	// account of the local node is local. Calling every account local let no
 	// bare users entry select an AD account without the guardian's record,
 	// once a bare name stopped selecting local accounts (GAP-0305).
-	if darwinLocalNodeAccount(account.Username, account.Uid) {
-		own.Directory = useridentity.DirectoryLocal
+	// A Platform SSO account is of the local node too, but only the
+	// guardian's record names its UPN (GAP-0532).
+	localNode := darwinLocalNodeAccount(account.Username, account.Uid)
+	link := ssoUnlinked
+	if localNode {
+		link = darwinPlatformSSOLink(account.Username)
 	}
+	own.Directory, own.UPNPending = macOSOwnDirectory(localNode, link)
 	own.AccountRecord = accountRecordToken(managedHookPeerAccountRecord(account.Username))
 	record, ok, _ := readIdentitySpoolFactsForAccount(key, account.Username, "", now)
 	var spool *enterprisehooks.IdentitySpoolRecord
 	if ok {
 		spool = &record
 	}
-	if err := openDirectoryGroupsUnavailable(spool, own.Directory == useridentity.DirectoryLocal, account.Gid, primaryGroupNamed,
+	if err := openDirectoryGroupsUnavailable(spool, localNode, account.Gid, primaryGroupNamed,
 		openDirectoryOffline, directoryUnreachable, now); err != nil {
 		return useridentity.DirectoryFacts{}, err
 	}
@@ -104,6 +113,25 @@ var darwinLocalNodeAccount = func(name, uid string) bool {
 	}
 	mobile, err := unixidentity.MobileAccounts(ctx)
 	return err == nil && mobile[name] == ""
+}
+
+// darwinPlatformSSOLink reports whether the local node's record of the
+// account links it to Platform SSO (AltSecurityIdentities
+// PlatformSSO:<login UPN>, unixidentity.PlatformSSOAccounts). A failed
+// listing is ssoLinkUnknown: the account's UPN waits for the guardian's
+// record, and its directory stays local (macOSOwnDirectory). Tests replace
+// it.
+var darwinPlatformSSOLink = func(name string) platformSSOLink {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	linked, err := unixidentity.PlatformSSOAccounts(ctx)
+	switch {
+	case err != nil:
+		return ssoLinkUnknown
+	case linked[name]:
+		return ssoLinked
+	}
+	return ssoUnlinked
 }
 
 // primaryGroupNamed reports whether Open Directory names the group gid.

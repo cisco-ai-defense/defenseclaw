@@ -39,16 +39,16 @@ sleep() {{ :; }}
 
 
 def test_tetragon_detection_names_the_mode_argument():
-    text = page("enterprise/mdm/reference.mdx")
+    text = page("enterprise/mdm/index.mdx")
     assert "--require-tetragon consume|observe|enforce" in text
     assert not re.search(r"`[^`]*detect\.sh --require-tetragon`", text)
 
 
 @pytest.mark.parametrize("path", [
-    "how-to/observability/set-up-webhook-alerts.mdx",
-    "reference/policy/cel/engine.mdx",
-    "reference/policy/cel/authoring.mdx",
-    "how-to/policies/build-a-policy-in-the-browser.mdx",
+    "observability/webhooks.mdx",
+    "policies/cel/engine.mdx",
+    "policies/cel/authoring.mdx",
+    "policies/creator.mdx",
 ])
 def test_bash_examples_disclose_the_shell_before_commands(path):
     text = page(path)
@@ -57,19 +57,21 @@ def test_bash_examples_disclose_the_shell_before_commands(path):
 
 
 @pytest.mark.parametrize("path, required, forbidden", [
-    ("reference/connectors/hermes.mdx", "whitespace can change", "keeping every byte outside"),
-    ("reference/connectors/devin.mdx", "comments and formatting are removed", "Foreign hook groups and JSONC content are kept"),
-    ("reference/policy/detection.mdx", "Go 1.26.4", "go test -timeout 30m ./internal/actionfacts ./internal/guardrail ./internal/gateway"),
-    ("reference/policy/guardrail-profiles.mdx", "`invalid_arguments`", "forbidden key fails with `config_invalid`"),
-    ("reference/connectors/kiro.mdx", "setup kiro --workspace", "set `claw.workspace_dir` to the project root before setup"),
-    ("how-to/guardrail/stop-a-secret-upload.mdx", "tilde", "recorded as CRITICAL but not blocked"),
-    ("enterprise/identity/sources.mdx", "TCP", "It never contacts an identity provider, a domain controller"),
-    ("troubleshooting/enterprise/hooks.mdx", "`doctor` is unavailable", "Where the `defenseclaw` CLI is present, doctor shows"),
-    ("enterprise/configure/reference.mdx", "outage", "does not override fail-closed gateway peer verification when the gateway is down"),
-    ("enterprise/configure/configuration.mdx", "enterprise macos verify", "`enterprise verify`"),
-    ("appendix/coverage-by-layer.mdx", "effective hook fail mode", "Open: the call runs and the failure is recorded"),
-    ("reference/commands/guardrail-setup.mdx", "defenseclaw-hook.exe", ""),
+    ("connectors/hermes.mdx", "whitespace can change", "keeping every byte outside"),
+    ("connectors/devin.mdx", "comments and formatting are removed", "Foreign hook groups and JSONC content are kept"),
+    ("policies/deterministic-detection.mdx", "Go 1.26.4", "go test -timeout 30m ./internal/actionfacts ./internal/guardrail ./internal/gateway"),
+    ("guardrail/user-and-group-policies.mdx", "`invalid_arguments`", "forbidden key fails with `config_invalid`"),
+    ("connectors/kiro.mdx", "setup kiro --workspace", "set `claw.workspace_dir` to the project root before setup"),
+    ("stories/cursor-secret-exfil.mdx", "tilde", "recorded as CRITICAL but not blocked"),
+    ("enterprise/identity-sources.mdx", "TCP", "It never contacts an identity provider, a domain controller"),
+    ("enterprise/troubleshooting.mdx", "`doctor` is unavailable", "Where the `defenseclaw` CLI is present, doctor shows"),
+    ("enterprise/configuration.mdx", "outage", "does not override fail-closed gateway peer verification when the gateway is down"),
+    ("enterprise/configuration.mdx", "enterprise macos verify", "`enterprise verify`"),
+    ("segmentation.mdx", "effective hook fail mode", "Open: the call runs and the failure is recorded"),
+    ("guardrail/index.mdx", "defenseclaw-hook.exe", ""),
     ("connectors/devin.mdx", "comments and formatting are removed", "JSONC content in those files are kept"),
+    ("connectors/antigravity.mdx", "`~/.defenseclaw/hooks/antigravity-hook.sh` stays after `guardrail disable` and `setup remove antigravity` as an inert stub that exits successfully", None),
+    ("connectors/devin.mdx", "If setup cannot edit the project file in place, for example when it has a duplicate top-level key, it writes it back as JSON too, so its comments, formatting and BOM are removed", None),
 ])
 def test_corrected_operator_claims(path, required, forbidden):
     text = " ".join(page(path).split())
@@ -79,14 +81,14 @@ def test_corrected_operator_claims(path, required, forbidden):
 
 
 def test_env_pipe_lists_only_the_shipped_exfil_rule():
-    text = page("how-to/guardrail/stop-a-secret-upload.mdx")
+    text = page("stories/cursor-secret-exfil.mdx")
     row = next(line for line in text.splitlines() if "`cat .env \\|" in line)
     assert "exfil.secret_read_and_egress_oneliner" in row
     assert "CMD-ENV-DUMP" not in row
 
 
 def test_effective_connector_example_matches_its_yaml():
-    text = page("reference/policy/thresholds.mdx")
+    text = page("policies/thresholds.mdx")
     configs = re.findall(r"```yaml[^\n]*\n(.*?)```", text, re.S)
     config = next(yaml.safe_load(c) for c in configs if "contractors:" in c)
     output = re.search(r"\$ defenseclaw config get guardrail\.connectors\.codex\.block_at --effective[^\n]*\n\(source: [^\n]+\)\n(\w+)", text)

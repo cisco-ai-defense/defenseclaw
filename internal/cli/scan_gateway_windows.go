@@ -104,4 +104,4 @@ func managedWindowsGatewayBase(layout managed.StandaloneLayout) (string, error) 
 
 // managedScanUnavailable: the managed Windows package ships the scanner
 // runtime, so every scan kind runs through the managed gateway there.
-func managedScanUnavailable(string) error { return nil }
+func managedScanUnavailable(string, string) error { return nil }

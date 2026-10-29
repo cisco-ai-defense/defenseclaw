@@ -5,10 +5,13 @@ package connector
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -45,7 +48,8 @@ func pluginInstallWindowCases(t *testing.T, asset, extension, harness string) {
 				t.Fatal(err)
 			}
 			openWindow := installWindowTierForTest(t, filepath.Dir(token))
-			data := templateData{APIAddr: "127.0.0.1:1", TokenFileJS: javaScriptStringContent(token), FailMode: "open"}
+			data := templateData{APIAddr: "127.0.0.1:1", TokenFileJS: javaScriptStringContent(token), FailMode: "open",
+				WindowsPowerShellJS: javaScriptStringContent(windowsSystemPowerShellExe())}
 			plugin := writeRenderedPlugin(t, asset, "defenseclaw."+strings.TrimPrefix(extension, "."), data)
 			// Load once before the upgrade starts. An agent keeps this module in
 			// memory when the installer replaces the plugin file on disk.
@@ -185,6 +189,7 @@ func TestAmpPluginInstallWindowBlocksFailOpen(t *testing.T) {
 			openWindow := installWindowTierForTest(t, filepath.Dir(token))
 			plugin := writeRenderedPlugin(t, "amp-plugin.ts", "defenseclaw.mts", templateData{
 				APIAddr: "127.0.0.1:1", TokenFileJS: javaScriptStringContent(token), FailMode: "open",
+				WindowsPowerShellJS: javaScriptStringContent(windowsSystemPowerShellExe()),
 			})
 			// Amp also keeps its handlers loaded for the whole agent process.
 			session := startNodeHarnessSession(t, ampInstallWindowHarness, plugin, failure)
@@ -233,24 +238,99 @@ func TestAmpPluginInstallWindowBlocksFailOpen(t *testing.T) {
 // installWindowTierForTest writes the per-user helper and its .gateway-helper
 // record beside a rendered plugin's token: it answers hook-outage-mode
 // --install-window with the default tier's "open" and every other outage
-// mode with "closed". It reports false on native Windows, where the record
-// must name the real gateway executable: there the window is closed by doubt.
+// mode with "closed". On native Windows the record must name an executable
+// <home>\.local\bin\defenseclaw-gateway.exe, so the helper there is a small
+// program built from installWindowHelperSource (GAP-1836: the Windows rows
+// assert the default tier's allow in the window, GAP-1372, not a doubt block).
 // DEFENSECLAW_HOME names an empty folder, so no lock of this account counts.
 func installWindowTierForTest(t *testing.T, hookDir string) bool {
 	t.Helper()
 	t.Setenv("DEFENSECLAW_HOME", testenv.PrivateTempDir(t))
-	if runtime.GOOS == "windows" {
-		return false
-	}
 	bin := filepath.Join(testenv.PrivateTempDir(t), ".local", "bin")
 	if err := os.MkdirAll(bin, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	helper := "#!/bin/sh\nif [ \"$1\" = hook-outage-mode ]; then\n" +
-		"  case \" $* \" in *\" --install-window \"*) printf 'open\\n' ;; *) printf 'closed\\n' ;; esac\n  exit 0\nfi\nexit 1\n"
-	if err := os.WriteFile(filepath.Join(bin, "defenseclaw-gateway"), []byte(helper), 0o700); err != nil {
-		t.Fatal(err)
+	name := "defenseclaw-gateway"
+	if runtime.GOOS == "windows" {
+		name += ".exe"
+		body, err := os.ReadFile(installWindowHelperExeForTest(t))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(bin, name), body, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	} else {
+		helper := "#!/bin/sh\nif [ \"$1\" = hook-outage-mode ]; then\n" +
+			"  case \" $* \" in *\" --install-window \"*) printf 'open\\n' ;; *) printf 'closed\\n' ;; esac\n  exit 0\nfi\nexit 1\n"
+		if err := os.WriteFile(filepath.Join(bin, name), []byte(helper), 0o700); err != nil {
+			t.Fatal(err)
+		}
 	}
-	recordGatewayHelperForTest(t, hookDir, filepath.Join(bin, "defenseclaw-gateway"))
+	recordGatewayHelperForTest(t, hookDir, filepath.Join(bin, name))
 	return true
+}
+
+// installWindowHelperSource is the Windows helper of installWindowTierForTest:
+// the shell helper's answers as a program.
+const installWindowHelperSource = `package main
+
+import (
+	"fmt"
+	"os"
+)
+
+func main() {
+	if len(os.Args) < 2 || os.Args[1] != "hook-outage-mode" {
+		os.Exit(1)
+	}
+	for _, arg := range os.Args[2:] {
+		if arg == "--install-window" {
+			fmt.Println("open")
+			return
+		}
+	}
+	fmt.Println("closed")
+}
+`
+
+var installWindowHelperExe struct {
+	once sync.Once
+	path string
+	err  error
+}
+
+// installWindowHelperExeForTest builds installWindowHelperSource once per test
+// binary, or takes the prebuilt DC_TEST_INSTALL_WINDOW_HELPER (an absolute
+// path; a native Windows run from a cross-built test binary has no go).
+func installWindowHelperExeForTest(t *testing.T) string {
+	t.Helper()
+	installWindowHelperExe.once.Do(func() {
+		if prebuilt := os.Getenv("DC_TEST_INSTALL_WINDOW_HELPER"); filepath.IsAbs(prebuilt) {
+			installWindowHelperExe.path = prebuilt
+			return
+		}
+		dir, err := os.MkdirTemp("", "defenseclaw-install-window-helper-")
+		if err != nil {
+			installWindowHelperExe.err = err
+			return
+		}
+		for name, body := range map[string]string{"go.mod": "module installwindowhelper\n\ngo 1.22\n", "main.go": installWindowHelperSource} {
+			if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o600); err != nil {
+				installWindowHelperExe.err = err
+				return
+			}
+		}
+		installWindowHelperExe.path = filepath.Join(dir, "defenseclaw-gateway.exe")
+		cmd := exec.Command("go", "build", "-o", installWindowHelperExe.path, ".")
+		cmd.Dir = dir
+		cmd.Env = append(os.Environ(), "CGO_ENABLED=0", "GOFLAGS=")
+		if output, err := cmd.CombinedOutput(); err != nil {
+			installWindowHelperExe.err = fmt.Errorf("build the install-window helper: %w: %s", err, output)
+		}
+	})
+	if installWindowHelperExe.err != nil {
+		t.Fatal(installWindowHelperExe.err)
+	}
+	return installWindowHelperExe.path
 }

@@ -728,6 +728,24 @@ def test_cli_rejects_a_from_version_that_is_not_a_release(data_dir: Path, v8_tar
     assert ok.exit_code == 0, ok.output
 
 
+def test_cli_check_omits_unchanged_version_range(data_dir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        migrations,
+        "migrate",
+        lambda *_args, **_kwargs: migrations.MigrateResult(
+            from_config_version=9,
+            to_config_version=9,
+            applied=["update renamed and removed connectors"],
+            changed=True,
+        ),
+    )
+    result = CliRunner().invoke(migrate_cmd, ["--data-dir", str(data_dir), "--check"])
+    assert result.exit_code == 0, result.output
+    assert "1 migration step(s) pending (config_version 9):" in result.output
+    assert "9 -> 9" not in result.output
+    assert "update renamed and removed connectors" in result.output
+
+
 # GAP-0163: a legacy custom-providers.json next to a config_version 9 file.
 
 

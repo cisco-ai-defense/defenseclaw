@@ -114,15 +114,19 @@ func validateAuditDBPlatformTrust(path string, info os.FileInfo, directory, stri
 	return nil
 }
 
-// macOS and some Unix installations expose a root-level system directory as a
-// root-owned symlink (for example /tmp -> /private/tmp). Permit only that
-// narrow system alias; operator-controlled symlinks at any lower level fail.
+// macOS and some Unix installations expose a system directory as a
+// root-owned symlink (for example /tmp -> /private/tmp), and an administrator
+// may move home directories the same way (/home/team -> /srv/team, a
+// documented layout: GAP-1725, GAP-2078). Permit a root-owned symlink that
+// only root can replace: at the top level, or inside a root-owned directory
+// that no group or other account can write. A symlink that its own account or
+// another account could replace still fails.
 func trustedAuditDBSystemDirectoryAlias(path string, info os.FileInfo) bool {
-	if filepath.Dir(path) != string(os.PathSeparator) {
-		return false
-	}
 	stat, ok := info.Sys().(*syscall.Stat_t)
 	if !ok || stat.Uid != 0 {
+		return false
+	}
+	if parent := filepath.Dir(path); parent != string(os.PathSeparator) && !rootOnlyDirectory(parent) {
 		return false
 	}
 	resolved, err := filepath.EvalSymlinks(path)
@@ -131,6 +135,17 @@ func trustedAuditDBSystemDirectoryAlias(path string, info os.FileInfo) bool {
 	}
 	target, err := os.Stat(resolved)
 	return err == nil && target.IsDir() && validateAuditDBPlatformTrust(resolved, target, true, false) == nil
+}
+
+// rootOnlyDirectory reports a directory that root owns and no group or other
+// account can write, so only root can replace an entry in it.
+func rootOnlyDirectory(path string) bool {
+	info, err := os.Stat(path)
+	if err != nil || !info.IsDir() {
+		return false
+	}
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	return ok && stat.Uid == 0 && info.Mode().Perm()&0o022 == 0
 }
 
 func secureAuditDBPlatformPath(string, bool) error { return nil }

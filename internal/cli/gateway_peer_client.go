@@ -20,10 +20,11 @@ import (
 var perUserGatewayClientFactory = hookexec.NewPerUserGatewayHTTPClient
 var managedGatewayClientFactory = hookexec.NewManagedEnterpriseGatewayHTTPClient
 
-// gatewayPeerClient is the transport for Go CLI requests to a per-user
-// gateway. The socket owner is checked after Dial, before net/http can send
-// a token, scan target, or telemetry fact. Managed gateways use their
-// service-specific identity checks instead of a same-account requirement.
+// gatewayPeerClient is the transport for Go CLI requests to the local
+// gateway. The owner of the connected socket is checked after Dial, before
+// net/http can send a token, scan target, or telemetry fact: this account
+// for a per-user gateway, the gateway service for a managed one. While a
+// gateway restarts another account can bind its port; it receives nothing.
 func gatewayPeerClient(c *config.Config, host string, port int, timeout time.Duration) (*http.Client, error) {
 	if c != nil && c.SecureClientIntegration() && secureClientHost() {
 		return managedGatewayClientFactory(timeout, net.JoinHostPort(host, strconv.Itoa(port)), managedServiceName(true))
@@ -31,6 +32,14 @@ func gatewayPeerClient(c *config.Config, host string, port int, timeout time.Dur
 	if _, present := managedHostWindowsStandalone(); present &&
 		(c == nil || c.StandaloneEnterprise() || managed.IsManagedEnterprise(c.DeploymentMode)) {
 		return managedGatewayClientFactory(timeout, net.JoinHostPort(host, strconv.Itoa(port)), managed.StandaloneWindowsGatewaySvc)
+	}
+	// The administrator's scan on a managed Linux or macOS computer loads no
+	// config (GAP-1234): the managed deployment record names the gateway
+	// service, which runs as its own account, not the caller's.
+	if c == nil && runtime.GOOS != "windows" {
+		if _, present := managedHostUnixRecord(nil); present {
+			return managedGatewayClientFactory(timeout, net.JoinHostPort(host, strconv.Itoa(port)), managedServiceName(false))
+		}
 	}
 	if c != nil && (c.StandaloneEnterprise() || managed.IsManagedEnterprise(c.DeploymentMode)) {
 		return managedGatewayClientFactory(timeout, net.JoinHostPort(host, strconv.Itoa(port)), managedServiceName(false))
@@ -52,13 +61,21 @@ func managedServiceName(secureClient bool) string {
 }
 
 func gatewayPeerClientForURL(c *config.Config, rawURL string, timeout time.Duration) (*http.Client, error) {
+	host, port, err := localGatewayURLEndpoint(rawURL)
+	if err != nil {
+		return nil, err
+	}
+	return gatewayPeerClient(c, host, port, timeout)
+}
+
+func localGatewayURLEndpoint(rawURL string) (string, int, error) {
 	target, err := url.Parse(rawURL)
 	if err != nil || target.Scheme != "http" || target.User != nil || target.Hostname() == "" {
-		return nil, fmt.Errorf("gateway target is not a local HTTP endpoint")
+		return "", 0, fmt.Errorf("gateway target is not a local HTTP endpoint")
 	}
 	port, err := strconv.Atoi(target.Port())
 	if err != nil || port < 1 || port > 65535 {
-		return nil, fmt.Errorf("gateway target port is invalid")
+		return "", 0, fmt.Errorf("gateway target port is invalid")
 	}
-	return gatewayPeerClient(c, target.Hostname(), port, timeout)
+	return target.Hostname(), port, nil
 }

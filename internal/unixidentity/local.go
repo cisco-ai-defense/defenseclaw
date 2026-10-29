@@ -19,6 +19,8 @@ import (
 	"errors"
 	"io"
 	"strings"
+
+	"github.com/defenseclaw/defenseclaw/internal/useridentity"
 )
 
 // Local accounts and directory configuration.
@@ -38,6 +40,28 @@ func LocalAccounts(ctx context.Context) (map[string]int, error) {
 		ctx = context.Background()
 	}
 	return platformLocalAccounts(ctx)
+}
+
+// UserdbRecordDirs are the systemd-userdb drop-in record directories that
+// nss-systemd reads on Linux (userdb(5)): <name>.user holds a JSON user
+// record and <uid>.user links to it. Tests replace it.
+var UserdbRecordDirs = []string{"/etc/userdb", "/run/userdb", "/usr/lib/userdb"}
+
+// AltfilesPasswdFiles are the passwd(5) files that nss-altfiles reads on
+// Linux. Tests replace it.
+var AltfilesPasswdFiles = []string{"/usr/lib/passwd", "/lib/passwd"}
+
+// LocalDatabaseAccounts returns the accounts of every local account
+// database NSS reads, by name: LocalAccounts, and on Linux also the
+// systemd-userdb drop-in records (UserdbRecordDirs) and the nss-altfiles
+// passwd files (AltfilesPasswdFiles). A name LocalAccounts lists keeps its
+// uid there. A drop-in record or file that cannot be read adds nothing.
+// Directory and dynamic accounts are not in it.
+func LocalDatabaseAccounts(ctx context.Context) (map[string]int, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return platformLocalDatabaseAccounts(ctx)
 }
 
 // LocalGroups returns the groups of the local group database by name (Linux
@@ -82,6 +106,41 @@ func MobileAccounts(ctx context.Context) (map[string]string, error) {
 		ctx = context.Background()
 	}
 	return platformMobileAccounts(ctx)
+}
+
+// PlatformSSOAccounts returns the names of the accounts of the macOS local
+// directory node that are registered with Platform SSO: their
+// AltSecurityIdentities holds a PlatformSSO:<login UPN> link, as the
+// guardian reads it (useridentity.ParseMacOSDirectoryFacts). Such an account
+// is held by the local node and is no mobile copy, but it is the identity
+// provider's account, and only the guardian's record names its UPN
+// (GAP-0532). Linux has none.
+func PlatformSSOAccounts(ctx context.Context) (map[string]bool, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return platformSSOLinkedAccounts(ctx)
+}
+
+// parseDSCLPlatformSSOAccounts parses `dscl . -list /Users
+// AltSecurityIdentities` rows ("name  PlatformSSO:alice@corp.example ...",
+// every value of the attribute on the account's line) into the names whose
+// values hold a PlatformSSO: link with a login UPN.
+func parseDSCLPlatformSSOAccounts(output string) map[string]bool {
+	out := map[string]bool{}
+	for _, line := range strings.Split(output, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) < 2 || validName(fields[0]) != nil {
+			continue
+		}
+		for _, value := range fields[1:] {
+			if rest, ok := strings.CutPrefix(value, "PlatformSSO:"); ok && useridentity.NormalizeUPN(rest) != "" {
+				out[fields[0]] = true
+				break
+			}
+		}
+	}
+	return out
 }
 
 // parseDSCLOriginalNodes parses `dscl . -list /Users OriginalNodeName` rows
@@ -138,6 +197,119 @@ func LocalAccountRecordByName(ctx context.Context, name string) (LocalAccountRec
 		return LocalAccountRecord{}, false, err
 	}
 	return platformLocalAccountRecord(ctx, name)
+}
+
+// AccountRecordGone reports whether a fresh directory read, in its own
+// process, has no record of the account name. On macOS a long-running
+// process keeps answering os/user lookups of a deleted account from
+// libSystem's per-process cache (the hook guardian found a deleted local
+// account minutes after `sysadminctl -deleteUser`, rel-1-0-5 GAP-0029),
+// so a "found" from such a process is confirmed here before it keeps a
+// decision open. It is true only for Open Directory's definitive "record
+// not found" while no bound directory node is offline; any other answer,
+// and every other platform (whose lookups already run in a fresh getent
+// process), is false.
+func AccountRecordGone(ctx context.Context, name string) bool {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if validName(name) != nil {
+		return false
+	}
+	return platformAccountRecordGone(ctx, name)
+}
+
+// AccountUIDGone reports whether a fresh directory read, in its own process,
+// shows that no account holds uid under name any more. It is
+// AccountRecordGone for the name, and also true when the name's record now
+// holds another uid (the account was deleted and its name given to a new
+// local account, or a network account of that name answers first) while a
+// fresh search across the search policy finds no record with uid: a check
+// of the name alone kept the deleted account's identity record for as long
+// as the process ran (GAP-1864). A record that still holds uid, a search
+// that finds uid under another name, a bound directory node that is
+// offline, and any failed or unclear answer say nothing, so it is false.
+// Every platform other than macOS is false, as for AccountRecordGone.
+func AccountUIDGone(ctx context.Context, name string, uid int) bool {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if validName(name) != nil || uid <= 0 {
+		return false
+	}
+	return platformAccountUIDGone(ctx, name, uid)
+}
+
+// dsclAccountUIDGone decides AccountUIDGone from fresh dscl answers: read
+// runs `dscl /Search -read /Users/<name> UniqueID`, search runs
+// `dscl /Search -search /Users UniqueID <uid>` (asked only when the name's
+// record holds another uid), and offline reports a bound directory node
+// that is offline. It is shared so it can be tested on every platform.
+func dsclAccountUIDGone(uid int, read, search func() (commandResult, error), offline func() bool) bool {
+	result, err := read()
+	if dsclRecordNotFound(result, err) {
+		return !offline()
+	}
+	if err != nil || result.exitCode != 0 {
+		return false
+	}
+	held, ok := dsclReadUniqueID(string(result.stdout))
+	if !ok || held == uid {
+		return false
+	}
+	found, err := search()
+	if err != nil || found.exitCode != 0 || len(strings.TrimSpace(string(found.stdout))) != 0 {
+		return false
+	}
+	return !offline()
+}
+
+// dsclReadUniqueID reads the one UniqueID value of a `dscl -read ...
+// UniqueID` answer ("UniqueID: 507", or the value on the next line). No
+// value, several values or a value that is not a uid is not ok.
+func dsclReadUniqueID(output string) (int, bool) {
+	var values []string
+	pending := false
+	for _, line := range strings.Split(output, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" {
+			continue
+		}
+		if pending && (strings.HasPrefix(line, " ") || strings.HasPrefix(line, "\t")) {
+			values = append(values, strings.Fields(trimmed)...)
+			continue
+		}
+		pending = false
+		key, value, ok := strings.Cut(trimmed, ":")
+		if !ok || key != "UniqueID" {
+			continue
+		}
+		if value = strings.TrimSpace(value); value == "" {
+			pending = true
+			continue
+		}
+		values = append(values, strings.Fields(value)...)
+	}
+	if len(values) != 1 {
+		return 0, false
+	}
+	uid, err := parseSignedDSCLID(values[0])
+	if err != nil {
+		return 0, false
+	}
+	return uid, true
+}
+
+// dsclRecordNotFoundExit is dscl's exit status for eDSRecordNotFound
+// (DS Error -14136).
+const dsclRecordNotFoundExit = 56
+
+// dsclRecordNotFound reads the result of `dscl /Search -read /Users/<name>
+// UniqueID`: only Open Directory's own "record not found" with no output
+// says the account is gone; a timeout, a run error or any other exit says
+// nothing.
+func dsclRecordNotFound(result commandResult, err error) bool {
+	return err == nil && result.exitCode == dsclRecordNotFoundExit && len(strings.TrimSpace(string(result.stdout))) == 0
 }
 
 // parseDSCLAttribute parses `dscl . -list /Users <attribute>` rows ("name

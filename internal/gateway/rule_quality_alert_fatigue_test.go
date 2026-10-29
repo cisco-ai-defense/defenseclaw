@@ -238,6 +238,21 @@ func TestAlertFatiguePIIValidationAcrossProfiles(t *testing.T) {
 				if firstAcceptedRuleMatch(rule, pan) == nil {
 					t.Errorf("%s did not match a Luhn-valid PAN", ruleID)
 				}
+				// GAP-2062: the same digits as the fraction of a float
+				// (Claude Code's ~/.claude.json performance stats) are no card.
+				for _, float := range []string{
+					`"frame_duration_ms_p99": 9.` + pan + `,`,
+					"p99=0." + pan,
+				} {
+					if firstAcceptedRuleMatch(rule, float) != nil {
+						t.Errorf("%s matched the fraction of a float: %q", ruleID, float)
+					}
+				}
+				for _, card := range []string{"card " + pan + ".", "v1." + pan[:4] + " card " + pan, "Card: ." + pan} {
+					if firstAcceptedRuleMatch(rule, card) == nil {
+						t.Errorf("%s missed a card number: %q", ruleID, card)
+					}
+				}
 			}
 
 			ibanRule := alertFatigueRule(t, profile, "ENT-IBAN")
@@ -742,6 +757,14 @@ func TestAlertFatigueLocalAndCatalogPIIAreDeduplicated(t *testing.T) {
 	}
 	if nakedVerdict := scanLocalPatterns("completion", "status="+validSSN); nakedVerdict.Action != "allow" {
 		t.Errorf("single naked SSN-shaped status value produced %s", nakedVerdict.Action)
+	}
+
+	// GAP-2062: a float whose fraction is Luhn-valid raises no local PII finding.
+	floatStat := `{"frame_duration_ms_p99": 9.` + alertFatiguePAN(t, "37", 15) + `}`
+	for _, finding := range scanLocalPatterns("completion", floatStat).Findings {
+		if strings.HasPrefix(finding, "ENT-CC-") || strings.HasPrefix(finding, "pii-data:") {
+			t.Errorf("float fraction produced card finding %q", finding)
+		}
 	}
 
 	publicTestPAN := "4111" + "1111" + "1111" + "1111"

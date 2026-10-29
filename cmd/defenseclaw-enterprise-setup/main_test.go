@@ -10,6 +10,8 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"reflect"
+	"regexp"
 	"strings"
 	"testing"
 	"testing/fstest"
@@ -532,6 +534,37 @@ func TestStandaloneSetupUsageAndErrorsSpeakTheDocumentedSyntax(t *testing.T) {
 	}
 }
 
+// GAP-2398: the unknown-property hint named 11 of the 12 properties /? lists
+// (REFUSECAPABILITYLOSS=1 was missing). It now names every one.
+func TestStandaloneSetupUnknownPropertyHintNamesEveryUsageProperty(t *testing.T) {
+	previous := enterpriseSetupStandaloneFlavor
+	t.Cleanup(func() { enterpriseSetupStandaloneFlavor = previous })
+	enterpriseSetupStandaloneFlavor = func() bool { return true }
+	var usage, stdout, stderr bytes.Buffer
+	if code := runEnterpriseSetup([]string{"/?"}, &usage, &stderr); code != 0 {
+		t.Fatalf("help exit=%d", code)
+	}
+	stderr.Reset()
+	if code := runEnterpriseSetup([]string{"/status", "BOGUS=1"}, &stdout, &stderr); code == 0 {
+		t.Fatalf("unknown property exit=%d, want a failure", code)
+	}
+	hint := stderr.String()
+	rows := regexp.MustCompile(`(?m)^  ([A-Z]+)=`).FindAllStringSubmatch(usage.String(), -1)
+	if len(rows) < 12 {
+		t.Fatalf("usage lists %d properties:\n%s", len(rows), usage.String())
+	}
+	for _, row := range rows {
+		if !regexp.MustCompile(`[(, ]` + row[1] + `=`).MatchString(hint) {
+			t.Errorf("unknown property hint lacks %s= that /? lists: %q", row[1], hint)
+		}
+	}
+	for _, want := range []string{"CONFIG=,", "REFUSECAPABILITYLOSS=1,", "TIMEOUTSECONDS=,", "ATTESTCLAUDEEFFECTIVEPOLICY=1)"} {
+		if !strings.Contains(hint, want) {
+			t.Errorf("unknown property hint lacks %q: %q", want, hint)
+		}
+	}
+}
+
 func TestEmbeddedSetupFlavorDefaultsToSecureClient(t *testing.T) {
 	// The source tree embeds only the placeholder, which is not a
 	// standalone manifest.
@@ -845,7 +878,7 @@ func TestStandaloneSetupTimeoutNamesTheRecovery(t *testing.T) {
 }
 
 func TestStandaloneSetupTimeoutReportsTheRecoveredDeployment(t *testing.T) {
-	opts := enterpriseSetupOptions{Action: "ensure", JSON: true, LifecycleTimeout: time.Minute}
+	opts := enterpriseSetupOptions{Action: "ensure", JSON: true, Config: `C:\stage\config.yaml`, LifecycleTimeout: time.Minute}
 	recovered := enterprisestatus.New("recover", "standalone", "windows", "1.0.3")
 	recovered.Installed = true
 	recovered.InstalledVersion = "1.0.3"
@@ -869,7 +902,8 @@ func TestStandaloneSetupTimeoutReportsTheRecoveredDeployment(t *testing.T) {
 			State string `json:"state"`
 		} `json:"services"`
 		Errors []struct {
-			Code string `json:"code"`
+			Code    string `json:"code"`
+			Message string `json:"message"`
 		} `json:"errors"`
 	}
 	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil || result.Action != "ensure" ||
@@ -879,5 +913,59 @@ func TestStandaloneSetupTimeoutReportsTheRecoveredDeployment(t *testing.T) {
 		result.Services[0].State != "running" || len(result.Errors) != 1 ||
 		result.Errors[0].Code != "lifecycle_timeout" || stderr.Len() != 0 {
 		t.Fatalf("timeout lost recovered deployment proof: %s (%v)", stdout.String(), err)
+	}
+	// GAP-1709: the recovered result names the same action with a longer
+	// limit, not a bare "retry".
+	if want := `as LocalSystem with a longer limit: /ensure CONFIG=C:\stage\config.yaml JSON=1 TIMEOUTSECONDS=7200`; !strings.Contains(result.Errors[0].Message, want) {
+		t.Fatalf("recovered timeout does not name the longer retry %q: %s", want, result.Errors[0].Message)
+	}
+}
+
+// GAP-2114: the recovered-timeout retry repeats the request as it was given,
+// every property it had and none it did not, with the longest limit.
+func TestStandaloneSetupRetryRepeatsTheRequestAsGiven(t *testing.T) {
+	for _, tc := range []struct {
+		args []string
+		want string
+	}{
+		{[]string{"/ensure", `CONFIG=C:\stage\config.yaml`, "JSON=1", "TIMEOUTSECONDS=60"}, `/ensure CONFIG=C:\stage\config.yaml JSON=1 TIMEOUTSECONDS=7200`},
+		{[]string{"/ensure", `BUNDLE=C:\stage\policy.dcbundle`, "REFUSECAPABILITYLOSS=1", "TIMEOUTSECONDS=60"}, `/ensure BUNDLE=C:\stage\policy.dcbundle REFUSECAPABILITYLOSS=1 TIMEOUTSECONDS=7200`},
+		{[]string{"/upgrade", "JSON=1", "TIMEOUTSECONDS=90"}, `/upgrade JSON=1 TIMEOUTSECONDS=7200`},
+		{[]string{"/upgrade", "NOSTART=1", "ALLOWEDSIGNERS=" + strings.Repeat("ab", 32), "JSON=1"}, `/upgrade NOSTART=1 ALLOWEDSIGNERS=` + strings.Repeat("ab", 32) + ` JSON=1 TIMEOUTSECONDS=7200`},
+		{[]string{"/install", `CONFIG=C:\s\config.yaml`, `MANIFEST=C:\s\targets.yaml`, "JSON=1"}, `/install CONFIG=C:\s\config.yaml MANIFEST=C:\s\targets.yaml JSON=1 TIMEOUTSECONDS=7200`},
+		{[]string{"/repair", "ATTESTCLAUDEEFFECTIVEPOLICY=1", "JSON=1"}, `/repair ATTESTCLAUDEEFFECTIVEPOLICY=1 JSON=1 TIMEOUTSECONDS=7200`},
+		{[]string{"/uninstall", "PURGE=1", "JSON=1"}, `/uninstall PURGE=1 JSON=1 TIMEOUTSECONDS=7200`},
+		{[]string{"/uninstall", "FORCE=1", "TIMEOUTSECONDS=120"}, `/uninstall FORCE=1 TIMEOUTSECONDS=7200`},
+		{[]string{"/ensure", `CONFIG=C:\Program Data\config.yaml`}, `/ensure CONFIG="C:\Program Data\config.yaml" TIMEOUTSECONDS=7200`},
+	} {
+		opts, _, err := parseStandaloneEnterpriseSetupOptions(tc.args)
+		if err != nil {
+			t.Fatalf("%v: %v", tc.args, err)
+		}
+		if got := standaloneSetupRetryCommand(opts, 7200); got != tc.want {
+			t.Fatalf("%v: retry = %q, want %q", tc.args, got, tc.want)
+		}
+		if strings.Contains(tc.want, `"`) {
+			continue
+		}
+		again, _, err := parseStandaloneEnterpriseSetupOptions(strings.Fields(tc.want))
+		if err != nil {
+			t.Fatalf("printed retry %q does not parse: %v", tc.want, err)
+		}
+		opts.LifecycleTimeout, again.LifecycleTimeout = 0, 0
+		if !reflect.DeepEqual(opts, again) {
+			t.Fatalf("printed retry %q is another request:\n got %+v\nwant %+v", tc.want, again, opts)
+		}
+	}
+	opts, _, err := parseStandaloneEnterpriseSetupOptions([]string{"/uninstall", "PURGE=1", "JSON=1", "TIMEOUTSECONDS=60"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	recovered := enterprisestatus.New("recover", "standalone", "windows", "1.0.2")
+	recovered.Installed = true
+	recovered.Finish("windows", enterpriseFailureExitCode)
+	message := standaloneEnterpriseSetupTimeoutWithRecovery(opts, context.DeadlineExceeded, recovered).Error()
+	if !strings.Contains(message, "with a longer limit: /uninstall PURGE=1 JSON=1 TIMEOUTSECONDS=7200") || strings.Contains(message, "CONFIG=") {
+		t.Fatalf("recovered uninstall timeout does not repeat PURGE=1: %s", message)
 	}
 }

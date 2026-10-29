@@ -29,7 +29,7 @@ import (
 // runtime decode), not only pass the schema: an unquoted 2024-10-21 is a YAML
 // date, which the schema accepts and the runtime decode refuses.
 func TestReferenceConfigurationExampleLoads(t *testing.T) {
-	page := filepath.Join("..", "..", "docs-site", "content", "docs", "reference", "configuration", "index.mdx")
+	page := filepath.Join("..", "..", "docs-site", "content", "docs", "reference", "configuration.mdx")
 	data, err := os.ReadFile(page)
 	if err != nil {
 		t.Skipf("docs page not available: %v", err)

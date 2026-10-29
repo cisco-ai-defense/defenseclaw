@@ -359,6 +359,21 @@ func TestGAP0756PullConnectRace(t *testing.T) {
 		ta.wantCalls(t, 1, "POST", "copybox/start")
 		has(t, ta.output(), "copybox keeps running: 1 terminal is attached to copybox", "stop it once it ends: defenseclaw sandbox stop copybox")
 	})
+	// GAP-0756: a connect 0.3 s or 1.2 s after the pull is still starting
+	// the sandbox, or has not attached its terminal yet, when the reused
+	// pull ends: the pull still says the sandbox keeps running, and why.
+	for _, phase := range []string{"starting", "ready"} {
+		t.Run("reused pull names a session that is still starting ("+phase+")", func(t *testing.T) {
+			ta := newTestApp(t, "", copySandbox("copybox"))
+			ta.copy.pull = &workspace.PullResult{Name: "copybox", Result: "r1", Effective: "r1", PulledAt: ta.Now(),
+				Changes: []workspace.TreeChange{{Path: "main.go", Status: "M", Added: 4}}, Review: workspace.ReviewReport{FilesChanged: 1, Insertions: 4}}
+			ta.ok(t, ta.Pull(bg, PullOptions{Name: "copybox", Branch: true}))
+			ta.fresh()
+			ta.copy.onApply = func() { ta.daemon.edit("copybox", func(sb *sandboxapi.Sandbox) { sb.Phase = phase }) }
+			ta.ok(t, ta.Pull(bg, PullOptions{Name: "copybox", Apply: true}))
+			has(t, ta.output(), "copybox keeps running: another command started it during this pull", "defenseclaw sandbox stop copybox")
+		})
+	}
 }
 
 // The W4b2 review's "a vanished lease hides other live sessions", the

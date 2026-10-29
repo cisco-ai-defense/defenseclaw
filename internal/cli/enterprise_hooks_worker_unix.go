@@ -23,6 +23,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"runtime/debug"
 	"sort"
 	"strings"
@@ -38,6 +39,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisepolicy"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"github.com/defenseclaw/defenseclaw/internal/hermespath"
 	"github.com/defenseclaw/defenseclaw/internal/inventory"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/unixidentity"
@@ -63,6 +65,11 @@ const (
 	enterpriseHookWorkerOpApply          = "apply"
 	enterpriseHookWorkerOpDiscover       = "discover"
 	enterpriseHookWorkerOpForeignCleanup = "foreign_cleanup"
+	// enterpriseHookWorkerOpNativeOTLPCheck reads, as the user, the user's
+	// own Codex and Claude Code configuration and names the native OTLP
+	// exporter entries that carry a DefenseClaw credential, changing
+	// nothing (managed Unix verify, GAP-1360).
+	enterpriseHookWorkerOpNativeOTLPCheck = "native_otlp_check"
 	// enterpriseHookWorkerOpAIDiscovery runs the static AI discovery scan
 	// of the user's own home (standalone profile).
 	enterpriseHookWorkerOpAIDiscovery = "ai_discovery"
@@ -79,15 +86,35 @@ const (
 	// ownership: "off" before it kept Claude Code off every route). It
 	// changes nothing unless the user's hook contract lock records such a
 	// registration.
-	enterpriseHookWorkerModeRemoveLeftover            = "remove_leftover"
-	enterpriseHookWorkerModeBlockPersonalClaude       = "block_personal_claude"
+	enterpriseHookWorkerModeRemoveLeftover      = "remove_leftover"
+	enterpriseHookWorkerModeBlockPersonalClaude = "block_personal_claude"
+	// enterpriseHookWorkerModeUnblockPersonalClaude removes the
+	// enrollment's Claude Code blocker (standalone uninstall, every
+	// account; enterprisehooks.RemovePersonalClaudeHookBlocker).
+	enterpriseHookWorkerModeUnblockPersonalClaude     = "unblock_personal_claude"
 	enterpriseHookWorkerModeRepairManagedCodexFeature = "repair_managed_codex_feature"
+	// enterpriseHookWorkerModeRemoveUserNativeOTLP removes, as the user, a
+	// native OTLP exporter in the user's own Codex or Claude Code
+	// configuration that carries a DefenseClaw credential (GAP-2376).
+	enterpriseHookWorkerModeRemoveUserNativeOTLP = "remove_user_native_otlp"
 	// enterpriseHookWorkerModePurge removes the user's DefenseClaw per-user
 	// state (standalone uninstall --purge). It runs after the request's
 	// removals and only when every one of them succeeded: the state holds
 	// the backups a failed removal needs when it is retried.
 	enterpriseHookWorkerModePurge = "purge"
 )
+
+// enterpriseHookWorkerForeignCleanupModes are the target modes a
+// foreign_cleanup worker takes: every mode the guardian's foreign cleanup
+// gives an account's job (runEnterpriseHookStandaloneForeignCleanup). A mode
+// missing here refuses the whole job, its foreign-hook removals and VS Code
+// Local files included (R3-1).
+var enterpriseHookWorkerForeignCleanupModes = map[string]bool{
+	enterpriseHookWorkerModeRemoveLeftover:        true,
+	enterpriseHookWorkerModeBlockPersonalClaude:   true,
+	enterpriseHookWorkerModeUnblockPersonalClaude: true,
+	enterpriseHookWorkerModeRemoveUserNativeOTLP:  true,
+}
 
 // enterpriseHookWorkerTimeout bounds one worker process.
 var enterpriseHookWorkerTimeout = 60 * time.Second
@@ -125,6 +152,10 @@ type enterpriseHookWorkerOptions struct {
 	HookCredentialIdentity             string `json:"hook_credential_identity,omitempty"`
 	ForeignHookGuardBinary             string `json:"foreign_hook_guard_binary,omitempty"`
 	ManagedHookBinary                  string `json:"managed_hook_binary,omitempty"`
+	// ProductCredentials are the digests of the product credentials a
+	// remove_user_native_otlp target knows an exporter by; the credentials
+	// themselves never reach a process that runs as the user.
+	ProductCredentials []connector.NativeOTLPCredentialDigest `json:"product_credentials,omitempty"`
 	// PreviousHome is the recorded home of a re-homed account whose current
 	// home a Remove cleans. Receipts copied from it act on this home's copy
 	// of the file, never on the other home (rel-1-0-3 GAP-0200).
@@ -151,10 +182,18 @@ type enterpriseHookWorkerRequest struct {
 	// ForeignCleanup asks the worker to remove unapproved foreign hooks
 	// from the user's own vendor config (foreign_cleanup operation).
 	ForeignCleanup []enterpriseHookWorkerForeignCleanup `json:"foreign_cleanup,omitempty"`
+	// ProductCredentials are the digests of the product credentials the
+	// native_otlp_check operation knows an exporter by; the credentials
+	// themselves never reach a process that runs as the user.
+	ProductCredentials []connector.NativeOTLPCredentialDigest `json:"product_credentials,omitempty"`
 	// TightenHome asks the worker to remove group/other write from the
 	// user's own home before an apply, so an enrolled user cannot stop
 	// repair of their hooks by loosening their home's mode.
 	TightenHome bool `json:"tighten_home,omitempty"`
+	// RecheckMillis keeps the verify_or_repair targets that verified under
+	// check for this long, all at the same time
+	// (recheckEnterpriseHookTargetsOverWindow).
+	RecheckMillis int `json:"recheck_ms,omitempty"`
 	// StaticDiscovery restricts the discover operation to package metadata
 	// and the presence of the agent CLIs, executing nothing: the parent
 	// asks for it in a home other users may have written to.
@@ -174,6 +213,11 @@ type enterpriseHookWorkerRequest struct {
 	// the cleanup fence pipes (enterprise_hooks_worker_fence_unix.go). The
 	// guardian sets it from cleanupFence.
 	CleanupFence bool `json:"cleanup_fence,omitempty"`
+	// LaunchdHermesHome is HERMES_HOME of the account's launchd user domain
+	// as the root guardian read it on macOS: the worker runs in the system
+	// bootstrap and cannot read that domain itself (GAP-2374). Unset when
+	// the guardian could not read it; the worker then reads its own domain.
+	LaunchdHermesHome *string `json:"launchd_hermes_home,omitempty"`
 	// cleanupFence is the guardian's side of those pipes; it never leaves
 	// the guardian.
 	cleanupFence *enterpriseForeignHookFenceSession
@@ -253,14 +297,17 @@ type enterpriseHookWorkerTargetResult struct {
 // enterpriseHookPurgeDetail is what uninstall --purge removed for one
 // account: its ~/.defenseclaw, its per-user binaries and launcher links in
 // ~/.local/bin, and whether it stopped a running per-user gateway first.
-// Backup says the data of the account's own per-user install was moved to a
-// ~/.defenseclaw-backup-<UTC time> folder before the purge.
+// Kept says ~/.defenseclaw holds the account's own per-user install, which
+// the purge left as it is (GAP-0727).
 type enterpriseHookPurgeDetail struct {
 	Data     bool `json:"data,omitempty"`
-	Backup   bool `json:"backup,omitempty"`
+	Kept     bool `json:"kept,omitempty"`
 	Binaries bool `json:"binaries,omitempty"`
 	Gateway  bool `json:"gateway,omitempty"`
 	UVCache  bool `json:"uv_cache,omitempty"`
+	// RemovedConnectorBackups names the folders the OpenHands/OmniGent
+	// backups were moved to, comma separated (GAP-2015).
+	RemovedConnectorBackups string `json:"removed_connector_backups,omitempty"`
 }
 
 type enterpriseHookWorkerResponse struct {
@@ -273,6 +320,9 @@ type enterpriseHookWorkerResponse struct {
 	Surfaces        map[string][]connector.AgentSurface          `json:"surfaces,omitempty"`
 	PrivateInstalls []enterprisehooks.PrivateAgentInstall        `json:"private_installs,omitempty"`
 	Cleanup         map[string]enterpriseHookWorkerCleanupReport `json:"cleanup,omitempty"`
+	// NativeOTLP is the native_otlp_check report per connector
+	// (user-influenced; the parent bounds it).
+	NativeOTLP map[string]enterpriseHookWorkerNativeOTLPReport `json:"native_otlp,omitempty"`
 	// Blocks are the foreign-hook blocks the user's hooks recorded since
 	// the last cleanup (user-influenced; only logged).
 	Blocks        []enterprisepolicy.BlockSummary `json:"blocks,omitempty"`
@@ -392,6 +442,9 @@ func enterpriseHookWorkerMain(ctx context.Context, stdin io.Reader, stdout, stde
 	if err := validateEnterpriseHookWorkerIdentity(request); err != nil {
 		return respond(enterpriseHookWorkerResponse{Error: err.Error()}, 4)
 	}
+	if request.LaunchdHermesHome != nil {
+		hermespath.UseParentLaunchdHermesHome(request.UID, *request.LaunchdHermesHome)
+	}
 	hardenEnterpriseHookWorkerProcess()
 	applyEnterpriseHookWorkerLimits()
 	enterprisehooks.SetStandaloneUnix(request.Standalone)
@@ -417,7 +470,7 @@ func enterpriseHookWorkerMain(ctx context.Context, stdin io.Reader, stdout, stde
 		return respond(enterpriseHookWorkerDiscoverWithin(scanCtx, request), 0)
 	case enterpriseHookWorkerOpForeignCleanup:
 		for _, target := range request.Targets {
-			if target.Mode != enterpriseHookWorkerModeRemoveLeftover && target.Mode != enterpriseHookWorkerModeBlockPersonalClaude {
+			if !enterpriseHookWorkerForeignCleanupModes[target.Mode] {
 				return respond(enterpriseHookWorkerResponse{Error: fmt.Sprintf("the foreign cleanup does not take mode %q", target.Mode)}, 3)
 			}
 		}
@@ -436,6 +489,8 @@ func enterpriseHookWorkerMain(ctx context.Context, stdin io.Reader, stdout, stde
 		}
 		if len(request.Targets) > 0 {
 			response.Targets = runEnterpriseHookWorkerApply(ctx, request).Targets
+		} else {
+			removeRetiredConnectorsForAccount(ctx, request)
 		}
 		blocks, dropped, err := enterprisepolicy.CollectForeignHookBlocks(filepath.Clean(request.Home), now)
 		response.Blocks, response.BlocksDropped = blocks, dropped
@@ -443,6 +498,8 @@ func enterpriseHookWorkerMain(ctx context.Context, stdin io.Reader, stdout, stde
 			response.BlocksError = err.Error()
 		}
 		return respond(response, 0)
+	case enterpriseHookWorkerOpNativeOTLPCheck:
+		return respond(runEnterpriseHookWorkerNativeOTLPCheck(request), 0)
 	case enterpriseHookWorkerOpAIDiscovery:
 		if request.AIDiscovery == nil {
 			return respond(enterpriseHookWorkerResponse{Error: "the ai_discovery operation needs its scan settings"}, 3)
@@ -561,11 +618,27 @@ func runEnterpriseHookWorkerApply(ctx context.Context, request enterpriseHookWor
 	// still loads, or could not be checked. The purge deletes the backups and
 	// receipts a later cleanup needs to restore those files (GAP-0632).
 	purgeBlocked := ""
+	recheckWindow := time.Duration(request.RecheckMillis) * time.Millisecond
+	var rechecks []enterpriseHookWorkerRecheck
+	var recheckedAt []time.Time
+	removeRetiredConnectorsForAccount(ctx, request)
 	for _, target := range request.Targets {
 		opts := target.Options.installOptions(registry)
 		outcome := enterpriseHookWorkerTargetResult{Index: target.Index}
+		if request.Standalone && connector.IsRemovedConnector(opts.ConnectorName) &&
+			(target.Mode == enterpriseHookWorkerModeRemove || target.Mode == enterpriseHookWorkerModeRemoveLeftover) {
+			// until 1.1: removeRetiredConnectorsForAccount above already ran
+			// this connector's teardown for the account, and the registry no
+			// longer resolves it, so its removal is done here and never keeps
+			// the purge back (GAP-1915).
+			outcome.OK = true
+			outcome.PathsReported = target.Mode == enterpriseHookWorkerModeRemove
+			results = append(results, outcome)
+			continue
+		}
 		var result enterprisehooks.InstallResult
 		var err error
+		recheck := false
 		switch target.Mode {
 		case enterpriseHookWorkerModeInstall:
 			result, err = enterpriseHookWorkerInstaller(ctx, opts)
@@ -577,6 +650,7 @@ func runEnterpriseHookWorkerApply(ctx context.Context, request enterpriseHookWor
 				break
 			}
 			result, err = enterpriseHookWorkerVerifier(ctx, opts)
+			recheck = err == nil && recheckWindow > 0
 			if err != nil {
 				result, err = enterpriseHookWorkerInstaller(ctx, opts)
 				outcome.Repaired = err == nil
@@ -637,11 +711,24 @@ func runEnterpriseHookWorkerApply(ctx context.Context, request enterpriseHookWor
 		case enterpriseHookWorkerModeBlockPersonalClaude:
 			err = blockPersonalClaudeHook(opts)
 			result = enterprisehooks.InstallResult{Connector: opts.ConnectorName, UserHome: opts.UserHome}
+		case enterpriseHookWorkerModeUnblockPersonalClaude:
+			dataDir := strings.TrimSpace(opts.DataDir)
+			if dataDir == "" {
+				dataDir = filepath.Join(opts.UserHome, ".defenseclaw")
+			}
+			outcome.Removed, err = enterprisehooks.RemovePersonalClaudeHookBlocker(dataDir)
 		case enterpriseHookWorkerModeRepairManagedCodexFeature:
 			if !request.Standalone {
 				err = errors.New("managed Codex feature repair requires the standalone guardian")
 			} else {
 				err = repairManagedCodexUserFeature(opts)
+			}
+			result = enterprisehooks.InstallResult{Connector: opts.ConnectorName, UserHome: opts.UserHome}
+		case enterpriseHookWorkerModeRemoveUserNativeOTLP:
+			if !request.Standalone {
+				err = errors.New("native OTLP exporter removal requires the standalone guardian")
+			} else {
+				err = removeManagedUserNativeOTLP(opts, target.Options.ProductCredentials)
 			}
 			result = enterprisehooks.InstallResult{Connector: opts.ConnectorName, UserHome: opts.UserHome}
 		case enterpriseHookWorkerModePurge:
@@ -655,7 +742,7 @@ func runEnterpriseHookWorkerApply(ctx context.Context, request enterpriseHookWor
 			}
 			var summary enterprisehooks.PurgeSummary
 			if summary, err = enterpriseHookWorkerPurger(ctx, opts); err == nil {
-				outcome.Purged = &enterpriseHookPurgeDetail{Data: summary.Data, Backup: summary.Backup, Binaries: summary.Binaries, Gateway: stopped, UVCache: summary.UVCache}
+				outcome.Purged = &enterpriseHookPurgeDetail{Data: summary.Data, Kept: summary.Kept, Binaries: summary.Binaries, Gateway: stopped, UVCache: summary.UVCache, RemovedConnectorBackups: strings.Join(summary.KeptRemovedConnectorBackups, ", ")}
 			}
 		default:
 			err = fmt.Errorf("unknown worker mode %q", target.Mode)
@@ -673,14 +760,47 @@ func runEnterpriseHookWorkerApply(ctx context.Context, request enterpriseHookWor
 			}
 		} else {
 			outcome.OK = true
-			if target.Mode != enterpriseHookWorkerModeRemove && target.Mode != enterpriseHookWorkerModeRemoveLeftover && target.Mode != enterpriseHookWorkerModePurge {
+			if target.Mode != enterpriseHookWorkerModeRemove && target.Mode != enterpriseHookWorkerModeRemoveLeftover &&
+				target.Mode != enterpriseHookWorkerModePurge && target.Mode != enterpriseHookWorkerModeUnblockPersonalClaude {
 				outcome.Result = &result
 				outcome.AgentConfig = result.AgentConfig
 			}
 		}
 		results = append(results, outcome)
+		if recheck {
+			rechecks = append(rechecks, enterpriseHookWorkerRecheck{result: len(results) - 1, opts: opts})
+			recheckedAt = append(recheckedAt, time.Now())
+		}
 	}
+	recheckEnterpriseHookTargetsOverWindow(ctx, recheckWindow, recheckedAt,
+		func(index int) error {
+			_, err := enterpriseHookWorkerVerifier(ctx, rechecks[index].opts)
+			return err
+		},
+		func(index int, _ error) {
+			outcome := &results[rechecks[index].result]
+			result, err := enterpriseHookWorkerInstaller(ctx, rechecks[index].opts)
+			if err != nil {
+				outcome.OK, outcome.Result, outcome.AgentConfig = false, nil, ""
+				outcome.Pending = enterprisehooks.PendingTargetError(err) &&
+					enterprisehooks.CheckUnixTargetHome(request.Home, request.UID).State == enterprisehooks.HomePending
+				if !outcome.Pending {
+					outcome.Error = err.Error()
+				}
+				return
+			}
+			outcome.Repaired = true
+			outcome.Result = &result
+			outcome.AgentConfig = result.AgentConfig
+		})
 	return enterpriseHookWorkerResponse{Targets: results}
+}
+
+// enterpriseHookWorkerRecheck is a verify_or_repair target that verified and
+// is checked again over the request's recheck window.
+type enterpriseHookWorkerRecheck struct {
+	result int
+	opts   enterprisehooks.InstallOptions
 }
 
 // repairManagedCodexUserFeature runs with the target user's uid. The machine
@@ -691,40 +811,9 @@ func repairManagedCodexUserFeature(opts enterprisehooks.InstallOptions) error {
 		return errors.New("managed Codex feature repair requires the Codex connector")
 	}
 	path := filepath.Join(opts.UserHome, ".codex", "config.toml")
-	if _, err := os.Lstat(path); errors.Is(err, os.ErrNotExist) {
-		return nil
-	} else if err != nil {
-		return fmt.Errorf("inspect Codex user config %s: %w", path, err)
-	}
-	resolved, err := filepath.EvalSymlinks(path)
-	if err != nil {
-		return fmt.Errorf("resolve Codex user config %s: %w", path, err)
-	}
-	resolvedHome, err := filepath.EvalSymlinks(opts.UserHome)
-	if err != nil {
-		return fmt.Errorf("resolve enrolled home %s for Codex user config: %w", opts.UserHome, err)
-	}
-	if !enterpriseHookWorkerPathWithin(resolvedHome, resolved) {
-		return fmt.Errorf("codex user config %s resolves outside the enrolled home; move it into the home before managed feature repair", path)
-	}
-	file, err := os.OpenFile(resolved, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
-	if err != nil {
-		return fmt.Errorf("open Codex user config %s: %w", path, err)
-	}
-	defer file.Close()
-	info, err := file.Stat()
-	if err != nil {
-		return fmt.Errorf("stat Codex user config %s: %w", path, err)
-	}
-	if !info.Mode().IsRegular() || info.Size() > 4<<20 {
-		return fmt.Errorf("codex user config %s is not a regular file of at most 4 MiB", path)
-	}
-	raw, err := io.ReadAll(io.LimitReader(file, 4<<20+1))
-	if err != nil {
-		return fmt.Errorf("read bounded Codex user config %s: %w", path, err)
-	}
-	if len(raw) > 4<<20 {
-		return fmt.Errorf("codex user config %s exceeded the 4 MiB read limit", path)
+	resolved, raw, perm, found, err := readEnterpriseHookWorkerHomeFile(opts.UserHome, path, "Codex user config", "before managed feature repair")
+	if err != nil || !found {
+		return err
 	}
 	repaired, err := connector.RemoveCodexManagedHookFeature(raw)
 	if err != nil {
@@ -733,10 +822,107 @@ func repairManagedCodexUserFeature(opts enterprisehooks.InstallOptions) error {
 	if bytes.Equal(raw, repaired) {
 		return nil
 	}
-	if err := configwrite.WriteFileDurable(resolved, repaired, info.Mode().Perm()); err != nil {
+	if err := configwrite.WriteFileDurable(resolved, repaired, perm); err != nil {
 		return fmt.Errorf("publish repaired Codex user config %s: %w", path, err)
 	}
 	return nil
+}
+
+// readEnterpriseHookWorkerHomeFile reads path, a file of the enrolled home,
+// as the user: a regular file of at most 4 MiB that resolves inside the home.
+// found is false when it does not exist. remedy ends the refusal of a file
+// that resolves outside the home.
+func readEnterpriseHookWorkerHomeFile(home, path, label, remedy string) (resolved string, raw []byte, perm os.FileMode, found bool, err error) {
+	if _, err := os.Lstat(path); errors.Is(err, os.ErrNotExist) {
+		return "", nil, 0, false, nil
+	} else if err != nil {
+		return "", nil, 0, false, fmt.Errorf("inspect %s %s: %w", label, path, err)
+	}
+	resolved, err = filepath.EvalSymlinks(path)
+	if err != nil {
+		return "", nil, 0, false, fmt.Errorf("resolve %s %s: %w", label, path, err)
+	}
+	resolvedHome, err := filepath.EvalSymlinks(home)
+	if err != nil {
+		return "", nil, 0, false, fmt.Errorf("resolve enrolled home %s for %s: %w", home, label, err)
+	}
+	if !enterpriseHookWorkerPathWithin(resolvedHome, resolved) {
+		return "", nil, 0, false, fmt.Errorf("the %s %s resolves outside the enrolled home; move it into the home %s", label, path, remedy)
+	}
+	file, err := os.OpenFile(resolved, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
+	if err != nil {
+		return "", nil, 0, false, fmt.Errorf("open %s %s: %w", label, path, err)
+	}
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil {
+		return "", nil, 0, false, fmt.Errorf("stat %s %s: %w", label, path, err)
+	}
+	if !info.Mode().IsRegular() || info.Size() > 4<<20 {
+		return "", nil, 0, false, fmt.Errorf("the %s %s is not a regular file of at most 4 MiB", label, path)
+	}
+	raw, err = io.ReadAll(io.LimitReader(file, 4<<20+1))
+	if err != nil {
+		return "", nil, 0, false, fmt.Errorf("read bounded %s %s: %w", label, path, err)
+	}
+	if len(raw) > 4<<20 {
+		return "", nil, 0, false, fmt.Errorf("the %s %s exceeded the 4 MiB read limit", label, path)
+	}
+	return resolved, raw, info.Mode().Perm(), true, nil
+}
+
+// removeManagedUserNativeOTLP runs with the target user's uid. Under the
+// managed Unix profile DefenseClaw writes no native OTLP exporter into an
+// account's own Codex or Claude Code configuration (Setup removes one; only
+// an OpenShell sandbox image carries its own). An exporter an earlier
+// install or a copied configuration left there that carries a DefenseClaw
+// credential sends it, with the agent's prompt telemetry, to whoever holds
+// its port (GAP-2376, as GAP-0836 on Windows). This removes exactly those
+// entries, known by the scoped credential in the account's data dir, the
+// values the setup backup recorded, or the digest of a product credential
+// in credentials; every other entry, an exporter with its own bearer
+// included, stays as the user wrote it.
+func removeManagedUserNativeOTLP(opts enterprisehooks.InstallOptions, credentials []connector.NativeOTLPCredentialDigest) error {
+	_, err := managedUserNativeOTLP(opts, credentials, true)
+	return err
+}
+
+// managedUserNativeOTLP names the entries removeManagedUserNativeOTLP
+// removes and, with apply, removes them. Without apply it changes nothing:
+// managed Unix verify reports them (GAP-1360).
+func managedUserNativeOTLP(opts enterprisehooks.InstallOptions, credentials []connector.NativeOTLPCredentialDigest, apply bool) ([]string, error) {
+	name := strings.ToLower(strings.TrimSpace(opts.ConnectorName))
+	backupName := connector.UserNativeOTLPBackupName(name)
+	if backupName == "" {
+		return nil, fmt.Errorf("connector %q has no native OTLP exporter", opts.ConnectorName)
+	}
+	dataDir := strings.TrimSpace(opts.DataDir)
+	if dataDir == "" {
+		dataDir = filepath.Join(opts.UserHome, ".defenseclaw")
+	}
+	path := connector.UserNativeOTLPConfigPathFor(name, opts.UserHome)
+	label := name + " user config"
+	resolved, raw, perm, found, err := readEnterpriseHookWorkerHomeFile(opts.UserHome, path, label, "and the next repair checks it")
+	if err != nil || !found {
+		return nil, err
+	}
+	_, backup, _, _, err := readEnterpriseHookWorkerHomeFile(opts.UserHome, filepath.Join(dataDir, backupName), name+" setup backup", "and the next repair checks it")
+	if err != nil {
+		return nil, err
+	}
+	out, removed, err := connector.UserNativeOTLPWithout(name, raw, backup, connector.SetupOpts{DataDir: dataDir, ManagedEnterprise: true}, credentials)
+	if err != nil {
+		return nil, fmt.Errorf("inspect %s %s for a native OTLP exporter: %w", label, path, err)
+	}
+	if len(removed) == 0 || !apply {
+		return removed, nil
+	}
+	if err := configwrite.WriteFileDurable(resolved, out, perm); err != nil {
+		return removed, fmt.Errorf("remove the native OTLP exporter from %s %s: %w", label, path, err)
+	}
+	fmt.Fprintf(os.Stderr, "[enterprise-hooks] %s: removed a native OTLP exporter that carried a DefenseClaw credential to a port the managed gateway does not serve (%s)\n",
+		name, strings.Join(removed, ", "))
+	return removed, nil
 }
 
 // blockPersonalClaudeHook replaces only an existing DefenseClaw-owned
@@ -772,11 +958,10 @@ func blockPersonalClaudeHook(opts enterprisehooks.InstallOptions) error {
 	if !bytes.Contains(body[:min(len(body), 160)], []byte("# defenseclaw-managed-hook v")) {
 		return fmt.Errorf("personal Claude Code hook %s is not DefenseClaw-owned", path)
 	}
-	const blocked = "#!/bin/sh\n# defenseclaw-managed-hook v0\necho 'defenseclaw: this computer is managed; the personal Claude Code hook cannot approve this call' >&2\nexit 2\n"
-	if string(body) == blocked {
+	if string(body) == enterprisehooks.PersonalClaudeHookBlocker {
 		return nil
 	}
-	return configwrite.WriteFileDurable(path, []byte(blocked), 0o700)
+	return configwrite.WriteFileDurable(path, []byte(enterprisehooks.PersonalClaudeHookBlocker), 0o700)
 }
 
 // enterpriseHookWorkerRemoveSetup resolves the same SetupOpts as
@@ -1216,6 +1401,9 @@ func runEnterpriseHookWorker(
 	request.UID, request.GID = account.UID, account.GID
 	request.User, request.Home = account.User, account.Home
 	request.CleanupFence = request.cleanupFence != nil
+	if enterpriseHookWorkerReadsLaunchd() {
+		request.LaunchdHermesHome = enterpriseHookWorkerLaunchdHermesHome(account)
+	}
 	payload, err := json.Marshal(request)
 	if err != nil {
 		return enterpriseHookWorkerResponse{}, err
@@ -1251,12 +1439,18 @@ func runEnterpriseHookWorker(
 		return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
 	}
 	cmd.WaitDelay = 2 * time.Second
+	if enterpriseHookWorkersStuck.has(account.UID) {
+		return enterpriseHookWorkerResponse{}, fmt.Errorf("worker for uid %d timed out: %w: its previous worker was killed but has not exited yet (a file system call in the account's home may be stuck)", account.UID, context.DeadlineExceeded)
+	}
 	stopFence, err := attachEnterpriseHookWorkerFence(ctx, cmd, request)
 	if err != nil {
 		return enterpriseHookWorkerResponse{}, err
 	}
-	runErr := cmd.Run()
+	abandoned, runErr := runEnterpriseHookWorkerProcess(ctx, cmd, account.UID)
 	stopFence()
+	if abandoned {
+		return enterpriseHookWorkerResponse{}, fmt.Errorf("worker for uid %d timed out: %w: it was killed but did not exit (a file system call in the account's home may be stuck)", account.UID, ctx.Err())
+	}
 	forwardEnterpriseHookWorkerStderr(account, stderr)
 	if ctx.Err() != nil {
 		return enterpriseHookWorkerResponse{}, fmt.Errorf("worker for uid %d timed out: %w", account.UID, ctx.Err())
@@ -1283,6 +1477,109 @@ func runEnterpriseHookWorker(
 		return response, fmt.Errorf("worker for uid %d failed: %w", account.UID, runErr)
 	}
 	return response, nil
+}
+
+// enterpriseHookWorkerWait waits for a started worker. Tests replace it to
+// stand for a worker the kernel cannot reap.
+var enterpriseHookWorkerWait = (*exec.Cmd).Wait
+
+// enterpriseHookWorkerAbandonGrace is how long a worker whose context ended
+// may take to exit after it is killed (and its output pipes are closed,
+// cmd.WaitDelay) before the caller stops waiting for it.
+var enterpriseHookWorkerAbandonGrace = 3 * time.Second
+
+// enterpriseHookWorkersStuck holds the uids whose last worker was killed but
+// has not exited. A worker blocked in an uninterruptible file system call
+// (a stalled FUSE or NFS mount in the home) cannot be reaped, and waiting
+// for it held the enumerator's cycle for good (GAP-1468, GAP-1470). The
+// caller stops waiting, the account is reported not inspected, and no new
+// worker starts for it until the stuck one exits.
+var enterpriseHookWorkersStuck = stuckEnterpriseHookWorkers{uids: map[int]bool{}}
+
+type stuckEnterpriseHookWorkers struct {
+	mu   sync.Mutex
+	uids map[int]bool
+}
+
+func (s *stuckEnterpriseHookWorkers) has(uid int) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.uids[uid]
+}
+
+func (s *stuckEnterpriseHookWorkers) set(uid int, stuck bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if stuck {
+		s.uids[uid] = true
+	} else {
+		delete(s.uids, uid)
+	}
+}
+
+// runEnterpriseHookWorkerProcess runs cmd and waits for it. Once ctx ends
+// (cmd.Cancel kills the worker's group) it waits at most
+// enterpriseHookWorkerAbandonGrace more; abandoned is true when the worker
+// still has not exited, and uid stays stuck until it does.
+func runEnterpriseHookWorkerProcess(ctx context.Context, cmd *exec.Cmd, uid int) (abandoned bool, err error) {
+	if err := cmd.Start(); err != nil {
+		return false, err
+	}
+	done := make(chan error, 1)
+	var settled sync.Mutex
+	gaveUp := false
+	go func() {
+		err := enterpriseHookWorkerWait(cmd)
+		settled.Lock()
+		if gaveUp {
+			enterpriseHookWorkersStuck.set(uid, false)
+		}
+		settled.Unlock()
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		return false, err
+	case <-ctx.Done():
+	}
+	grace := time.NewTimer(enterpriseHookWorkerAbandonGrace)
+	defer grace.Stop()
+	select {
+	case err := <-done:
+		return false, err
+	case <-grace.C:
+	}
+	settled.Lock()
+	defer settled.Unlock()
+	select {
+	case err := <-done:
+		return false, err
+	default:
+	}
+	gaveUp = true
+	enterpriseHookWorkersStuck.set(uid, true)
+	return true, nil
+}
+
+// enterpriseHookWorkerReadsLaunchd says whether this guardian reads each
+// account's launchd user domain for its worker: a root guardian on macOS.
+// Replaceable in tests.
+var enterpriseHookWorkerReadsLaunchd = func() bool {
+	return runtime.GOOS == "darwin" && os.Geteuid() == 0
+}
+
+// enterpriseHookWorkerLaunchdHermesHome reads HERMES_HOME of the account's
+// launchd user domain for its worker (GAP-2374). When the domain cannot be
+// read the worker reads its own, as before. Replaceable in tests.
+var enterpriseHookWorkerLaunchdHermesHome = func(account enterpriseHookWorkerAccount) *string {
+	value, err := hermespath.ReadLaunchdHermesHome(account.UID)
+	if err != nil {
+		if enterpriseHookWorkerLog != nil {
+			fmt.Fprintf(enterpriseHookWorkerLog, "[hook-guardian] worker uid=%d: launchd environment unavailable: %v\n", account.UID, err)
+		}
+		return nil
+	}
+	return &value
 }
 
 // enterpriseHookWorkerGroupIDs resolves the account's primary and

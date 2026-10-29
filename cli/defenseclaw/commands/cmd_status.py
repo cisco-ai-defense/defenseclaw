@@ -357,6 +357,8 @@ def status(app: AppContext, as_json: bool) -> None:
         problems = list(getattr(app, "config_problems", None) or [])
         if problems:
             payload["config_errors"] = problems
+        if not_checked := getattr(app, "config_not_checked", ""):
+            payload["config_not_checked"] = not_checked
         click.echo(json.dumps(payload, indent=2))
         if problems:
             raise SystemExit(1)
@@ -386,6 +388,8 @@ def status(app: AppContext, as_json: bool) -> None:
             ux._style(f"{len(config_problems)} problem(s), listed above", fg="yellow")
             + ux.dim(" (details: defenseclaw config validate)"),
         )
+    elif not_checked := getattr(app, "config_not_checked", ""):
+        _status_row("Config check", ux._style(f"not run: {not_checked}", fg="yellow"))
     _status_row("Audit DB", cfg.audit_db)
     _status_row("Scope", _connector_scope_text(cfg))
     _print_removed_connector_cleanup(cfg)
@@ -602,6 +606,8 @@ def status(app: AppContext, as_json: bool) -> None:
             first_hint = "Check access:   defenseclaw doctor"
         elif hung_pid:
             first_hint = "Check sidecar:  defenseclaw-gateway status (restart it if it stays this way)"
+        elif listener_reason == SANDBOX_HIDES_GATEWAY:
+            first_hint = "Check sidecar:  run defenseclaw status outside the sandbox"
         elif unconfirmed:
             first_hint = "Check sidecar:  defenseclaw doctor"
         else:
@@ -609,6 +615,13 @@ def status(app: AppContext, as_json: bool) -> None:
         hint(first_hint, "Subsystems:    defenseclaw-gateway status")
     if config_problems:
         raise SystemExit(1)
+
+
+SANDBOX_HIDES_GATEWAY = (
+    "not visible from this sandbox: this command runs inside a sandbox (a user namespace) "
+    "that hides the gateway's process and port, so it cannot tell whether the gateway runs; "
+    "run defenseclaw status outside the sandbox to check"
+)
 
 
 def _sidecar_listener_state(port: int, host: str) -> tuple[bool | None, str]:
@@ -628,7 +641,15 @@ def _sidecar_listener_state(port: int, host: str) -> tuple[bool | None, str]:
         return None, reason
 
     stopped_reason = "no gateway process or API listener; start it: defenseclaw-gateway start"
-    if sys.platform.startswith("linux") or sys.platform == "win32":
+    if sys.platform.startswith("linux"):
+        from defenseclaw.file_permissions import in_child_user_namespace
+
+        # A sandbox (another user namespace, as Codex runs its tools in)
+        # hides the host's gateway process and its listener (GAP-2206).
+        if in_child_user_namespace():
+            return None, SANDBOX_HIDES_GATEWAY
+        return False, stopped_reason
+    if sys.platform == "win32":
         return False, stopped_reason
 
     target = host.strip("[]")
@@ -711,16 +732,13 @@ def _status_refused_detail(cfg, client, public) -> str:
 
 
 def _print_removed_connector_cleanup(cfg) -> None:
-    """until 1.1: name a removed connector that left things to remove by hand."""
-    from defenseclaw.removed_connectors import leftovers
+    """until 1.1: one row when OpenHands or OmniGent left something on this host (information)."""
+    from defenseclaw.removed_connectors import NOTICE, leftovers
 
     workspace = cfg.connector_workspace_dir() if hasattr(cfg, "connector_workspace_dir") else ""
-    for left in leftovers(str(getattr(cfg, "data_dir", "") or ""), workspace=workspace):
-        _status_row(
-            "Cleanup",
-            ux._style(f"{left.label} was removed in 1.0.4; {len(left.items)} item(s) to remove by hand", fg="yellow")
-            + ux.dim(" (steps: defenseclaw doctor)"),
-        )
+    if found := leftovers(str(getattr(cfg, "data_dir", "") or ""), workspace=workspace):
+        count = sum(len(left.items) for left in found)
+        _status_row("Removed", NOTICE + ux.dim(f" ({count} item(s) left; steps: defenseclaw doctor)"))
 
 
 def _live_gateway_pid(cfg) -> int:
@@ -1250,10 +1268,12 @@ def _refused_scoped_hook_credentials(cfg, health: dict | None) -> set[str]:
 
 
 def _hook_runtime_degraded_suffix(cfg, connector: str, *, credential_refused: bool = False) -> str:
-    """`` — DEGRADED (...)`` when a hook script, token or registration drifted (GAP-1141, GAP-1138, GAP-1230)."""
+    """`` — DEGRADED (...)`` when a hook script, token or registration drifted (GAP-1141, GAP-1138, GAP-1230)
+    or the agent's own settings turn its hooks off (GAP-1634)."""
     try:
         from defenseclaw.hook_integrity import (
             HookProblem,
+            agent_hook_switch_problems,
             hook_registration_problems,
             hook_runtime_problems,
             repair_command,
@@ -1266,7 +1286,12 @@ def _hook_runtime_degraded_suffix(cfg, connector: str, *, credential_refused: bo
                 blocking=True,
             )]
             if credential_refused
-            else hook_runtime_problems(cfg, connector) or hook_registration_problems(cfg, connector)
+            # An agent setting that turns every hook off (Claude Code or
+            # Copilot disableAllHooks, Codex [features] hooks = false) is
+            # DEGRADED here as in the alert and doctor (GAP-1634).
+            else hook_runtime_problems(cfg, connector)
+            or hook_registration_problems(cfg, connector)
+            or agent_hook_switch_problems(cfg, connector)
         )
     except Exception:  # noqa: BLE001 - status must survive incomplete runtime state.
         return ""
@@ -2089,7 +2114,7 @@ def _status_payload(app) -> dict:
 
     workspace = cfg.connector_workspace_dir() if hasattr(cfg, "connector_workspace_dir") else ""
     if left := [item.as_json() for item in leftovers(str(cfg.data_dir or ""), workspace=workspace)]:
-        # until 1.1: what the removed OpenHands/OmniGent teardown left.
+        # until 1.1: what the OpenHands/OmniGent teardown could not remove.
         payload["removed_connector_cleanup"] = left
 
     if app.store:

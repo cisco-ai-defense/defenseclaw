@@ -114,6 +114,82 @@ func ensureWindowsScannerRuntimeRoot(root string, gateway *windows.SID) error {
 	return nil
 }
 
+// adoptWindowsAdministratorsDefaultOwner makes BUILTIN\Administrators the
+// default owner of what this elevated process (and every process it starts)
+// creates, as an elevated administrator token under Admin Approval Mode
+// already has. The built-in Administrator (RID 500, which GitHub runners and
+// cloud VMs use) runs without Admin Approval Mode and its token's default
+// owner is its own SID, so the admission record and the prepared files it
+// wrote under the scanner runtime were refused by the runtime trust check
+// ('owner S-1-5-21-...-500 is not trusted ... expected Administrators or
+// LocalSystem', GAP-1718). A token that cannot take that owner (no
+// Administrators group with the owner attribute: LocalSystem, a standard
+// user) is left as it is. The returned function puts the previous default
+// owner back when the scanner runtime work is done.
+func adoptWindowsAdministratorsDefaultOwner() (func(), error) {
+	none := func() {}
+	var token windows.Token
+	if err := windows.OpenProcessToken(windows.CurrentProcess(), windows.TOKEN_QUERY|windows.TOKEN_ADJUST_DEFAULT, &token); err != nil {
+		return none, err
+	}
+	user, err := token.GetTokenUser()
+	if err != nil || user == nil || user.User.Sid == nil || user.User.Sid.IsWellKnown(windows.WinLocalSystemSid) {
+		_ = token.Close()
+		return none, err
+	}
+	groups, err := token.GetTokenGroups()
+	if err != nil {
+		_ = token.Close()
+		return none, err
+	}
+	var administrators *windows.SID
+	for _, group := range groups.AllGroups() {
+		if group.Sid != nil && group.Sid.IsWellKnown(windows.WinBuiltinAdministratorsSid) &&
+			group.Attributes&windows.SE_GROUP_ENABLED != 0 && group.Attributes&windows.SE_GROUP_OWNER != 0 {
+			administrators = group.Sid
+			break
+		}
+	}
+	if administrators == nil {
+		_ = token.Close()
+		return none, nil
+	}
+	setOwner := func(sid *windows.SID) error {
+		owner := struct{ Owner *windows.SID }{Owner: sid}
+		return windows.SetTokenInformation(token, windows.TokenOwner, (*byte)(unsafe.Pointer(&owner)), uint32(unsafe.Sizeof(owner)))
+	}
+	previous, err := windowsTokenDefaultOwner(token)
+	if err != nil {
+		_ = token.Close()
+		return none, err
+	}
+	if err := setOwner(administrators); err != nil {
+		_ = token.Close()
+		return none, err
+	}
+	return func() {
+		_ = setOwner(previous)
+		_ = token.Close()
+	}, nil
+}
+
+func windowsTokenDefaultOwner(token windows.Token) (*windows.SID, error) {
+	var size uint32
+	_ = windows.GetTokenInformation(token, windows.TokenOwner, nil, 0, &size)
+	if size < uint32(unsafe.Sizeof(uintptr(0))) {
+		return nil, errors.New("token owner is unavailable")
+	}
+	buffer := make([]byte, size)
+	if err := windows.GetTokenInformation(token, windows.TokenOwner, &buffer[0], size, &size); err != nil {
+		return nil, err
+	}
+	owner := (*struct{ Owner *windows.SID })(unsafe.Pointer(&buffer[0])).Owner
+	if owner == nil {
+		return nil, errors.New("token owner is unavailable")
+	}
+	return owner.Copy()
+}
+
 func windowsPathOwnedByAdministrators(path string) (bool, error) {
 	extended, err := winpath.Extended(path)
 	if err != nil {
@@ -238,7 +314,7 @@ func applyWindowsStandaloneScannerRuntime(result *enterprisestatus.Result, opts 
 			}
 		}
 	case "uninstall":
-		if len(result.Errors) != 0 {
+		if len(result.Errors) != 0 && !windowsScannerRuntimeUninstallRemovedTheDeployment(result, opts) {
 			return
 		}
 		// Under the scanner runtime lock, and only while no deployment is
@@ -267,7 +343,21 @@ func applyWindowsStandaloneScannerRuntime(result *enterprisestatus.Result, opts 
 				message = windowsScannerRuntimeServiceProblem()
 			}
 			if message != "" {
-				if result.Action == "verify" || result.Action == "recover" {
+				// A recovery that put an earlier release back (1.0.2 after a
+				// TIMEOUTSECONDS stop) restored that release's scanner
+				// runtime, which this release's admission rule does not
+				// prove: that is not a failed recovery, and the next ensure
+				// installs and admits this release's runtime (GAP-1709).
+				restoredOlder := result.Action == "recover" && opts != nil &&
+					compareWindowsEnterpriseVersions(opts.productVersion, result.InstalledVersion) > 0
+				if restoredOlder {
+					// The plain ensure clears it, not /repair (GAP-1709).
+					message = "the skill, MCP and plugin scanner runtime in place is the one DefenseClaw " + result.InstalledVersion +
+						" uses, which this recovery put back; this release's admission rule does not prove that release's record. " +
+						"The next DefenseClawSetup-Enterprise-Standalone-x64.exe /ensure CONFIG=<config.yaml> JSON=1 as LocalSystem " +
+						"installs and admits this release's runtime"
+				}
+				if (result.Action == "verify" || result.Action == "recover") && !restoredOlder {
 					result.AddError("scanner_runtime_unavailable", message)
 				} else {
 					result.AddWarning("scanner_runtime_unavailable", message)
@@ -545,6 +635,11 @@ func proveWindowsScannerRuntimeAdmissionLocked(root string, opts *windowsEnterpr
 	if err != nil || !unproven {
 		return "", nil
 	}
+	restoreOwner, err := adoptWindowsAdministratorsDefaultOwner()
+	if err != nil {
+		return "", fmt.Errorf("make Administrators the owner of the scanner runtime files: %w", err)
+	}
+	defer restoreOwner()
 	target := filepath.Join(root, managed.StandaloneWindowsScannerRuntimeName)
 	proveErr := windowsScannerRuntimeACLCheck(root, target)
 	if proveErr == nil {
@@ -842,6 +937,30 @@ func checkWindowsScannerRuntimeRootForRemoval(root string) error {
 	return nil
 }
 
+// windowsScannerRuntimeUninstallRemovedTheDeployment reports whether a failed
+// elevated uninstall left no installed deployment record. The runtime then
+// has no owner left, so it is retired as a clean uninstall's is; before, a
+// purge that removed the machine deployment and then failed on per-user state
+// (another program held a file in a user's .defenseclaw, or GAP-2231's
+// signed-out Path entry) left the 26,000-file runtime behind with no warning
+// (GAP-2230). A failed run reports no changes, so the record decides: one
+// that left the deployment installed, or a record that cannot be read, keeps
+// the runtime as before, and retireWindowsScannerRuntime reads the record
+// again under the scanner runtime lock. A standard account cannot remove it
+// and is not told it could not; a run deferred as busy (another lifecycle
+// run, or hook calls, still going) leaves it to that run and does not wait
+// for the scanner runtime lock.
+func windowsScannerRuntimeUninstallRemovedTheDeployment(result *enterprisestatus.Result, opts *windowsEnterpriseLifecycleOptions) bool {
+	if !windowsEnterpriseIsElevated() || windowsEnterpriseFailureCodeFor(result) == enterprisestatus.WindowsExitBusy {
+		return false
+	}
+	deployment, err := windowsScannerRuntimeDeployment(opts)
+	if err != nil {
+		return false
+	}
+	return deployment.State == winpath.EnterpriseDeploymentAbsent || deployment.State == winpath.EnterpriseDeploymentTombstone
+}
+
 // retireWindowsScannerRuntime removes the runtime root once no deployment is
 // installed. It takes the scanner runtime lock and reads the deployment
 // record under it, so it runs after a scanner step that started before it
@@ -948,6 +1067,11 @@ func installWindowsScannerRuntime(source, action string, opts *windowsEnterprise
 	if err != nil {
 		return err
 	}
+	restoreOwner, err := adoptWindowsAdministratorsDefaultOwner()
+	if err != nil {
+		return fmt.Errorf("make Administrators the owner of the scanner runtime files: %w", err)
+	}
+	defer restoreOwner()
 	owner, err := windowsScannerRuntimeOwnerOf(action, opts)
 	if err != nil {
 		return err
@@ -1204,6 +1328,11 @@ func reprepareWindowsScannerRuntimeLocked(action string, opts *windowsEnterprise
 	if err != nil {
 		return err
 	}
+	restoreOwner, err := adoptWindowsAdministratorsDefaultOwner()
+	if err != nil {
+		return fmt.Errorf("make Administrators the owner of the scanner runtime files: %w", err)
+	}
+	defer restoreOwner()
 	release, err := lockWindowsScannerRuntime(root)
 	if err != nil {
 		return err
@@ -1237,10 +1366,27 @@ func reprepareWindowsScannerRuntimeLocked(action string, opts *windowsEnterprise
 // prepare bound exited 0 with ok=true and a warning, and verify then failed
 // with every skill, MCP server and plugin install blocked (GAP-1063).
 func windowsScannerRuntimePrepareFailed(err error) string {
+	if errors.Is(err, errWindowsScannerPrepareTimedOut) {
+		// A busy computer (GAP-1687: ten hook drivers on 8 vCPU) can need
+		// more than the bound for a first prepare inside Setup's own 30
+		// minute limit. The work done is kept, so the same command finishes
+		// it: the run is retryable (1618), not a failed deployment.
+		return "DefenseClaw is installed and its services run, but preparing the skill, MCP and plugin scanner runtime did not finish within " +
+			windowsScannerPrepareTimeout.String() + " on this busy computer, so skill, MCP server and plugin installs stay blocked (scanner failure, fail-closed) until it does; " +
+			windowsScannerPrepareRetryNotice
+	}
 	return "DefenseClaw is installed and its services run, but the skill, MCP and plugin scanner runtime could not be prepared (" +
 		err.Error() + "), so every skill, MCP server and plugin install is blocked (scanner failure, fail-closed) and verify fails; " +
 		"run DefenseClawSetup-Enterprise-Standalone-x64.exe /repair JSON=1 as LocalSystem to prepare it"
 }
+
+// errWindowsScannerPrepareTimedOut marks a scanner runtime step stopped at
+// its bound.
+var errWindowsScannerPrepareTimedOut = errors.New("the bound was reached")
+
+// windowsScannerPrepareRetryNotice ends the message of a prepare that hit its
+// bound; windowsEnterpriseFailureCodeFor reads it as retry-later.
+const windowsScannerPrepareRetryNotice = "run the same DefenseClawSetup-Enterprise-Standalone-x64.exe command again (an MDM retry does): it continues the preparation"
 
 // windowsScannerProgress receives a scanner runtime step progress lines:
 // standard output for a person, the lifecycle log's diagnostics in a JSON
@@ -1314,7 +1460,7 @@ func runWindowsScannerRuntime(executable, step string) error {
 	if err != nil && errors.Is(ctx.Err(), context.DeadlineExceeded) {
 		// GAP-0297: Windows reports a process the deadline killed as a bare
 		// "exit status 1", which hid the cause.
-		return fmt.Errorf("%s the scanner runtime: timed out after %s", step, windowsScannerPrepareTimeout)
+		return fmt.Errorf("%s the scanner runtime: timed out after %s: %w", step, windowsScannerPrepareTimeout, errWindowsScannerPrepareTimedOut)
 	}
 	if err != nil {
 		return fmt.Errorf("%s the scanner runtime: %v: %s", step, err, windowsEnterpriseBoundedDiagnostic(strings.TrimSpace(string(out))))

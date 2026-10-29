@@ -1,0 +1,289 @@
+---
+title: Paths and troubleshooting
+description: Native Windows filesystem locations, supported overrides, safe diagnostics, and post-install and post-upgrade verification.
+keywords:
+  - DefenseClaw Windows paths
+  - DefenseClaw Windows troubleshooting
+  - DefenseClaw Windows doctor
+  - DefenseClaw Windows logs
+  - DEFENSECLAW_HOME
+  - CLAUDE_CONFIG_DIR CODEX_HOME
+---
+
+DefenseClaw keeps programs, data and each agent's own configuration in separate places. Change things with `defenseclaw` commands rather than by editing or deleting files. Problems on every OS are in [Troubleshooting](/docs/get-started/upgrade#troubleshooting).
+
+## Filesystem reference
+
+### Programs
+
+| Windows file in `%USERPROFILE%\.local\bin` | What it is |
+| --- | --- |
+| `defenseclaw.exe` | The CLI and TUI launcher. |
+| `defenseclaw.cmd` | The same launcher as a batch file, for scripts that name it. |
+| `defenseclaw` | The same launcher for Git Bash. cmd.exe and PowerShell ignore it. |
+| `defenseclaw-gateway.exe` | The gateway and its lifecycle commands. |
+| `defenseclaw-hook.exe` | The hook runner agents call. It opens no console window. |
+| `defenseclaw-acp.exe` | The [ACP guard](/docs/acp-guard). |
+| `skill-scanner.cmd`, `mcp-scanner.cmd` | Launchers for the bundled skill and MCP scanners. |
+| `defenseclaw-hook-state.json` | State the hook runner keeps; not configuration. |
+
+Do not replace or wrap these. Run the install command again to repair them. The installer adds `%USERPROFILE%\.local\bin` to your user `PATH`.
+
+On a managed Windows computer none of these per-user paths are used: the programs are in `C:\Program Files\Cisco\DefenseClaw\bin`, the administrator's config is `C:\ProgramData\Cisco\DefenseClaw\etc\config.yaml`, the audit database is `C:\ProgramData\Cisco\DefenseClaw\runtime\audit.db`, and the logs are in `C:\ProgramData\Cisco\DefenseClaw\logs` and `%WINDIR%\Logs\DefenseClaw`. The full list is in [Windows installation reference](/docs/enterprise/windows).
+
+### Data
+
+In `~/.defenseclaw`, `%USERPROFILE%\.defenseclaw` on Windows, or `DEFENSECLAW_HOME` when set.
+
+| Path | What it is | Edit it? |
+| --- | --- | --- |
+| `config.yaml` | Your configuration. | Use `defenseclaw config set` or the setup commands. The gateway applies a valid edit and keeps the previous policy if an edit is invalid; run `defenseclaw config validate` first when you edit by hand. |
+| `config.generation.json` | Generation, SHA-256, actor and time of each write to `config.yaml`. | No. |
+| `custom-providers.json` | Custom LLM providers, derived from `llm_providers`. | No. `defenseclaw doctor --fix` regenerates it. |
+| `config.yaml.v8.bak`, `migration-v9.json` | Kept by the `config_version` 9 migration. | Read them. `defenseclaw config migrate --ack` marks the record read. |
+| `.env` | Protected tokens and API keys. | No. Never print it. Use `defenseclaw keys`. |
+| `audit.db` | The local audit database (SQLite). | No. Do not open it with a second writer or attach it to a ticket. |
+| `gateway.log` | The gateway's output. | Read it locally; check excerpts before sharing. |
+| `logs/install-*.log` | One log per install, upgrade or rollback. | Read it. |
+| `logs/hook-failures.jsonl` | Hook delivery failures. | Read it locally; it can hold sensitive details. |
+| `.venv/` | The Python environment the installer manages. | No. |
+| `previous/` | The install the last upgrade replaced. | No. `defenseclaw rollback` swaps it back. |
+| `hooks/` | Generated hook files and per-connector credentials. | No. Never print or copy them. |
+| `backups/`, `connector_backups/` | Copies needed to restore agent files and earlier settings, including `config.yaml.before-redaction-*`. | No. They can contain credentials. |
+| `quarantine/` | Quarantined skills and plugins. | No. Use `defenseclaw skill restore` or `plugin restore`. |
+| `gateway.pid`, `watchdog.pid` | Records of the running gateway and watchdog. | No. |
+| `gateway.jsonl` | Exists only if you configured a JSONL destination with that path. | Manage it through [observability](/docs/observability). |
+
+Full tree and key reference: [Configuration](/docs/reference/configuration).
+
+### Agent files DefenseClaw changes
+
+Setup adds DefenseClaw's own marked entries to each agent's configuration and leaves your other settings alone. Change them only with `defenseclaw setup <connector>` and `defenseclaw setup remove <connector>`. Windows defaults:
+
+| Agent | Default file |
+| --- | --- |
+| Claude Code | `%USERPROFILE%\.claude\settings.json` (or `%CLAUDE_CONFIG_DIR%`) |
+| Codex | `%USERPROFILE%\.codex\config.toml` (or `%CODEX_HOME%`) |
+| Amp | `%USERPROFILE%\.config\amp\plugins\defenseclaw.ts` |
+| Antigravity | `%USERPROFILE%\.gemini\config\hooks.json` |
+| GitHub Copilot CLI | `%USERPROFILE%\.copilot\hooks\defenseclaw.json` (or `%COPILOT_HOME%`); with `--workspace`, `<workspace>\.github\hooks\defenseclaw.json` |
+| Cursor | `%USERPROFILE%\.cursor\hooks.json` |
+| Devin | `%APPDATA%\devin\config.json`; with a workspace, `<workspace>\.devin\hooks.v1.json` |
+| Hermes | `%LOCALAPPDATA%\hermes\config.yaml` (or `%HERMES_HOME%`) |
+| Kiro | `<project>\.kiro\hooks\defenseclaw.json` |
+| OpenCode | `%USERPROFILE%\.config\opencode\plugins\defenseclaw.js` (or `%OPENCODE_CONFIG_DIR%`) |
+
+The Amp and OpenCode plugin files carry a connector credential: never print or copy them. macOS and Linux paths are on each [connector page](/docs/connectors).
+
+Setup changes the Claude Code `settings.json` only as a regular file. If it is a symbolic link or junction, setup refuses, names the link and its target, and changes nothing. Replace the link with the file it points to, then run `defenseclaw setup claude-code --yes` again.
+
+## Supported path overrides
+
+Claude Code, Codex, GitHub Copilot CLI, Hermes and OpenCode let you move their configuration folder with `CLAUDE_CONFIG_DIR`, `CODEX_HOME`, `COPILOT_HOME`, `HERMES_HOME` and `OPENCODE_CONFIG_DIR`. Set them to absolute native paths before you install DefenseClaw or set up the connector. Setup checks and remembers them and refuses a path through a symbolic link or junction. For Codex, `defenseclaw setup codex --no-restart` keeps the folder the running gateway already uses and says so when `CODEX_HOME` names another one; run it again without `--no-restart` to move. Amp, Antigravity, Cursor and Devin have no such variable.
+
+<Tabs items={['PowerShell', 'cmd']}>
+  <Tab value="PowerShell">
+
+```powershell
+$env:CODEX_HOME = "D:\Agent Profiles\Codex"
+$env:CLAUDE_CONFIG_DIR = "D:\Agent Profiles\Claude"
+```
+
+  </Tab>
+  <Tab value="cmd">
+
+```cmd
+set "CODEX_HOME=D:\Agent Profiles\Codex"
+set "CLAUDE_CONFIG_DIR=D:\Agent Profiles\Claude"
+```
+
+  </Tab>
+</Tabs>
+
+Changing a variable later does not move DefenseClaw's entries. To move an agent's folder, run its setup again. The default data root is the current profile's `.defenseclaw`; `DEFENSECLAW_HOME` overrides it. Use the same value for every command, including `defenseclaw upgrade`. `DEFENSECLAW_FAIL_MODE` is not a path setting and no 1.0.4 hook reads it. Set the fail mode with `defenseclaw guardrail fail-mode open|closed`; setup writes it into the hooks and the OpenCode plugin, and `defenseclaw status` and `defenseclaw doctor` report it.
+
+DefenseClaw restricts its private files to the current user, Administrators and SYSTEM on Windows ([security model](/docs/get-started/windows/telemetry-security#ownership-and-filesystem-boundary)).
+
+## Quoting and case
+
+Quote every path that can contain spaces. In PowerShell use the call operator:
+
+```powershell
+& "$env:USERPROFILE\.local\bin\defenseclaw-gateway.exe" status
+```
+
+In cmd, quote the executable: `"%USERPROFILE%\.local\bin\defenseclaw-gateway.exe" status`. The hook command setup writes into Hermes `config.yaml` is a quoted absolute path to `defenseclaw-hook.exe` with forward slashes and plain arguments. Hermes runs it without a shell, so add no `&`, `.ps1` or wrapper. Windows compares variable names and paths without regard to case: do not use two agent folders or variables that differ only by case.
+
+## First diagnostics
+
+Run these before changing state:
+
+<Tabs items={['PowerShell', 'cmd']}>
+  <Tab value="PowerShell">
+
+```powershell
+Get-Command defenseclaw
+defenseclaw version
+defenseclaw-gateway status
+defenseclaw status
+defenseclaw guardrail status
+defenseclaw config validate
+defenseclaw doctor
+```
+
+  </Tab>
+  <Tab value="cmd">
+
+```cmd
+where defenseclaw
+defenseclaw version
+defenseclaw-gateway status
+defenseclaw status
+defenseclaw guardrail status
+defenseclaw config validate
+defenseclaw doctor
+```
+
+  </Tab>
+</Tabs>
+
+`version` shows whether the CLI and the gateway are the same release. `status` lists the configured connectors and whether the gateway runs them. For repairable findings, preview first with `defenseclaw doctor --fix --dry-run`; a token fix can restart the gateway.
+
+## Troubleshooting
+
+<Accordions>
+
+<Accordion title="audit.db grows fast or hook answers are slow during a tool-call flood">
+
+**Fix.** An agent loop or script that makes several tool calls a second grows `audit.db` by about 40 KiB per call, and on a slow disk hook answers can take seconds. Slow the loop down or batch its work and keep enough free disk. A call the gateway does not answer in time is blocked (`this account's gateway did not answer in time`); run it again. See [Hook floods on Windows](/docs/support-matrix#hook-floods-on-windows).
+
+**Check.** After the flood ends, `defenseclaw-gateway status` is healthy and an ordinary tool call is answered within a second or two. Retention (`observability.local.retention_days`, default 7) frees the space of older events.
+
+</Accordion>
+
+<Accordion title="The command is not recognized or the wrong version runs">
+
+**Fix.** Open a new terminal so the updated user `PATH` is loaded. Run `Get-Command defenseclaw -All` (PowerShell) or `where defenseclaw` (cmd). Run the install command again if the launcher is missing. Do not prepend an unpacked source checkout as a permanent workaround.
+
+**Check.** `defenseclaw version` prints a version, and `Get-Command defenseclaw` points to `%USERPROFILE%\.local\bin`.
+
+</Accordion>
+
+<Accordion title="defenseclaw-hook --version prints after the prompt, or > file captures nothing">
+
+`defenseclaw-hook.exe` is a no-console program. PowerShell does not wait for it as the last command of a pipeline, so the prompt returns first and `$LASTEXITCODE` is not the hook's exit code.
+
+**Fix.** Pipe it, or run it through cmd: `defenseclaw-hook --version | Out-String`, `defenseclaw-hook --version-json | ConvertFrom-Json`, or `cmd /c "%USERPROFILE%\.local\bin\defenseclaw-hook.exe --version"`.
+
+**Check.** The version prints. `defenseclaw doctor` compares the hook's release with the CLI's.
+
+</Accordion>
+
+<Accordion title="Ctrl+C asks Terminate batch job (Y/N)?">
+
+cmd.exe asks this whenever Ctrl+C reaches a batch file. This happens when you run `defenseclaw.cmd` by name, or on an older install with no `defenseclaw.exe` in `%USERPROFILE%\.local\bin`.
+
+**Fix.** The command has already stopped; answer `Y` or `N`. Run the installer or `defenseclaw upgrade` to add `defenseclaw.exe`.
+
+**Check.** Ctrl+C prints `Aborted!` and returns to the prompt.
+
+</Accordion>
+
+<Accordion title="An install, upgrade or rollback fails">
+
+**Fix.** Read the newest `%USERPROFILE%\.defenseclaw\logs\install-*.log`. A failed upgrade restores the previous install and keeps the attempt in `%USERPROFILE%\.defenseclaw\.failed-<time>`. To remove it, run `cmd /c rd /s /q "%USERPROFILE%\.defenseclaw\.failed-<time>"` (`Remove-Item -Force` stops at the copy's read-only key file). Close the TUI and other DefenseClaw commands if the installer reports files in use, then run the install command again.
+
+**Check.** `defenseclaw version` shows the new release.
+
+</Accordion>
+
+<Accordion title="An upgrade is interrupted">
+
+**Fix.** Close the TUI and other DefenseClaw commands, then run `defenseclaw upgrade` (or the install command) again. A cut-off run (closed window, power loss) first restores the install it was replacing. If the gateway was running before, the installer starts it again and exits with an error until it answers: start it with the command the error names (for a DefenseClaw Setup install, Setup's `defenseclaw-startup.exe`), then run the installer again. A run of 1.0.3 or earlier that was cut off early may not have recorded whether the gateway was running; the installer then leaves it stopped and says so. To go back a version on purpose, run `defenseclaw rollback`.
+
+**Check.** `defenseclaw version` shows one release for the CLI and the gateway.
+
+</Accordion>
+
+<Accordion title="The gateway is stopped, stale or owned by another process">
+
+**Fix.** Run `defenseclaw-gateway status`, then `defenseclaw-gateway start` or `restart`. DefenseClaw refuses a foreign listener or mismatched PID identity; investigate that process instead of deleting the PID file. Read `%USERPROFILE%\.defenseclaw\gateway.log` for the startup error. There is no sign-in startup entry; a hook also starts a stopped gateway on its first call. The watchdog is on by default (`gateway.watchdog.enabled` is `true`): starting the gateway also starts a `defenseclaw-gateway watchdog` process in your session. It is not a Windows service. Check it with `defenseclaw-gateway watchdog status`; set `gateway.watchdog.enabled` to `false` to turn it off.
+
+**Check.** `defenseclaw-gateway status` shows running.
+
+</Accordion>
+
+<Accordion title="Connector hooks, policy plugin or enforcement do not appear">
+
+**Fix.** Confirm the agent runs natively as the same Windows user. Run `defenseclaw guardrail status` and `defenseclaw doctor`, then re-run the connector's setup without `--mode` so it uses the saved mode; keep that mode if prompted. If action setup refuses an unsupported agent version, update the agent and retry. Restart the agent if its connector page says so; fully exit and relaunch Amp, and add `--plugin-ready-timeout 30` to `amp -x`. Do not copy hook entries between agent files by hand, edit OpenCode's `plugins\defenseclaw.js` or Amp's `defenseclaw.ts`, or add PowerShell or Bash syntax to Hermes `config.yaml`.
+
+**Check.** `defenseclaw doctor` shows the connector's hooks row as `[PASS]`. For Hermes, confirm the native hook check passes in doctor and inspect its effective fail mode with `defenseclaw guardrail status`.
+
+</Accordion>
+
+<Accordion title="A connector is disabled or status disagrees with configuration">
+
+**Fix.** Run `defenseclaw guardrail status` to compare the saved settings with what the gateway runs. A port, a connector's enablement or its hook fail mode applies after `defenseclaw-gateway restart`; every other change applies without one. Enable or disable one connector at a time ([disabling](/docs/guardrail/disabling)).
+
+**Check.** `guardrail status` matches the config.
+
+</Accordion>
+
+<Accordion title="A disabled skill or plugin still behaves unexpectedly">
+
+Disabling stops only what the agent loads by that exact name (Codex `$skill` selection, Claude Code skill and plugin loading). A copy under another path or name is not covered.
+
+**Fix.** Run `defenseclaw skill list` or `defenseclaw plugin list` and check which connector the item belongs to. To take the files away from the agent, quarantine the item. Restoring from quarantine does not clear a separate block or disable.
+
+**Check.** The agent no longer loads the item.
+
+</Accordion>
+
+<Accordion title="Native OTLP authentication fails">
+
+**Fix.** Host Codex and Claude Code setups remove the native OTLP settings and tokens they can prove DefenseClaw wrote, because those exporters cannot verify the local listener. An exporter you set yourself stays. An earlier install's exporter whose token is gone also stays, because setup can no longer prove it is DefenseClaw's; delete its `OTEL_*` entries from `%USERPROFILE%\.claude\settings.json` or its `[otel]` table from `%USERPROFILE%\.codex\config.toml`. Run the connector's setup again, then restart the agent to drop settings already loaded by its process. Native OTLP remains available inside isolated OpenShell. Never print, copy or replace token files or OTLP headers by hand. Hermes and Amp have no native OTLP export; for Amp run `defenseclaw setup amp --yes` again and relaunch Amp. Omitting `--mode` keeps Amp's saved mode.
+
+**Check.** The doctor authentication row is `[PASS]`.
+
+## Codex refuses every command in its first session
+
+**Fix.** The first Codex session after Codex sets up its sandbox (`Sandbox ready`) can refuse every shell command with `approval required by policy, but AskForApproval::Granular.sandbox_approval is false`. This is Codex, with or without DefenseClaw. Quit Codex and start it again once. See [Known limits](/docs/support-matrix#codex).
+
+**Check.** Commands run in the new session.
+
+</Accordion>
+
+<Accordion title="The TUI renders poorly or cannot redraw">
+
+**Fix.** Use Windows Terminal or a console of at least 80x24. Start `defenseclaw tui` directly, not through WSL, Git Bash or a pipe. Otherwise use the CLI commands; most take `--json`.
+
+**Check.** The TUI draws all panels.
+
+</Accordion>
+
+<Accordion title="Uninstall leaves user data or connector residue">
+
+`defenseclaw uninstall` keeps `%USERPROFILE%\.defenseclaw` unless you pass `--all`. If connector cleanup fails, even `--all` keeps the data it needs to retry.
+
+**Fix.** Run `defenseclaw doctor`, fix the connector it reports (usually by running that connector's setup again), and run `defenseclaw uninstall` again. Do not delete backups or agent configuration by hand while teardown is unresolved.
+
+**Check.** `defenseclaw uninstall` completes.
+
+![defenseclaw uninstall on Windows: the plan lists the connectors claudecode and codex for teardown, warns that an agent session that is open now goes on without DefenseClaw, and shows sandbox teardown no because OpenShell sandboxes do not run on Windows](/images/get-started/windows-uninstall-open-session.png)
+
+</Accordion>
+
+</Accordions>
+
+## Post-install and post-upgrade checklist
+
+Use harmless prompts only: no real secrets or customer data.
+
+- `defenseclaw version`: the CLI and the gateway report the same release.
+- `defenseclaw migrate --check` and `defenseclaw config validate` pass (after an upgrade).
+- `defenseclaw-gateway status` and `defenseclaw doctor` pass.
+- `defenseclaw guardrail status` lists each agent you set up with the mode, fail mode and enabled state you chose (the same as before an upgrade). Hermes follows the same gateway outage rule as the other agents ([gateway outage table](/docs/connectors/capability-matrix#gateway-outage)). A running DefenseClaw hook blocks every other failure; for a timed-out or killed hook see [Hermes fail mode](/docs/connectors/hermes#fail-mode). On a managed host, the administrator may choose open for a gateway outage; unusable answers still block. Under Secure Client, open is the default.
+- Restart each agent where its connector page says to, send a harmless prompt in each one, and look for the event in `defenseclaw tui` or `defenseclaw-gateway audit export --output -`. A harmless prompt creates an audit event, not an alert.
+- Leave the `previous` and `backups` folders alone until the gateway and every agent work.
+
+See also the [CLI reference](/docs/reference/cli), [Upgrade](/docs/get-started/upgrade) and [Windows](/docs/get-started/windows).

@@ -76,12 +76,22 @@ func windowsEnterpriseInstallerExitFailure(code int) error {
 // windowsEnterpriseUserStateRemainingMessage is the per_user_state_remaining
 // error of a LocalSystem purge that could not remove every enrolled
 // account's data. It ran as LocalSystem already, so it names what usually
-// holds the files and what a missing folder means (GAP-0888).
-func windowsEnterpriseUserStateRemainingMessage(count int, accounts string) string {
+// holds the files and what a missing folder means (GAP-0888). When the purge
+// already removed the target manifest that lists the enrolled accounts, a
+// second /uninstall PURGE=1 finds none of them and ends rc 0 with the folders
+// still there, so the message names the folders to delete by hand instead of
+// advising that rerun (GAP-2307).
+func windowsEnterpriseUserStateRemainingMessage(count int, accounts string, rerunFindsAccounts bool) string {
+	next := "sign the account out or close its agents, then run /uninstall PURGE=1 again as LocalSystem. "
+	if !rerunFindsAccounts {
+		next = "sign the account out or close its agents, then delete each folder named below by hand as an administrator: " +
+			"this purge already removed the machine deployment that lists the enrolled accounts, so /uninstall PURGE=1 run again no longer finds them. " +
+			"Do not delete a folder kept for the account's agent registrations (its connector_backups restore them): " +
+			"run Setup /ensure and then /uninstall PURGE=1 while that account has an active session. "
+	}
 	return fmt.Sprintf("--purge ran as LocalSystem but could not remove all DefenseClaw per-user data and binaries of %d enrolled account(s), "+
 		"which keep per-user hook tokens that nothing accepts any more. Usually an agent or editor that account runs still holds a file: "+
-		"sign the account out or close its agents, then run /uninstall PURGE=1 again as LocalSystem. "+
-		"An account whose profile folder no longer exists has nothing left to remove. Accounts: %s", count, accounts)
+		"%sAn account whose profile folder no longer exists has nothing left to remove. Accounts: %s", count, next, accounts)
 }
 
 // windowsManagedHooksPurgedBinariesMarker separates a purged account's label

@@ -9,7 +9,7 @@
 param(
     [string]$ModulePath = '',
     [string]$ScratchRoot = [IO.Path]::GetTempPath(),
-    [ValidateSet('All', 'Baseline', 'ExistingCas', 'Linked', 'Junction', 'Interrupted', 'Order')]
+    [ValidateSet('All', 'Baseline', 'ExistingCas', 'Marker', 'Linked', 'Junction', 'Interrupted', 'Order')]
     [string]$Case = 'All'
 )
 
@@ -300,6 +300,141 @@ try {
             if ([IO.File]::ReadAllText($positiveConfig) -cne
                 'prior native exporter') {
                 throw 'rollback did not restore a proven transaction postimage'
+            }
+        }
+        if ($SelectedCase -in @('All', 'Marker')) {
+            # GAP-2023: the take-back-pending markers return to their
+            # preimage, so a rolled-back upgrade keeps no new marker.
+            $fixture = New-NativeOTLPFixture -Name 'marker'
+            $paths = @(Get-DefenseClawUserNativeOTLPTransactionPaths `
+                    -UserHome $fixture.profile)
+            if ($paths.Count -ne 6 -or
+                $paths[4] -cne (Join-Path $fixture.profile '.defenseclaw\native-otlp-take-back-pending-codex.json') -or
+                $paths[5] -cne (Join-Path $fixture.profile '.defenseclaw\native-otlp-take-back-pending-claudecode.json')) {
+                throw 'take-back-pending markers are not in the transaction'
+            }
+            $codexMarker = $paths[4]
+            $claudeMarker = $paths[5]
+            New-Item -ItemType Directory -Force `
+                -Path ([IO.Path]::GetDirectoryName($claudeMarker)) | Out-Null
+            [IO.File]::WriteAllText($claudeMarker,
+                '{"connector":"claudecode","at":"2026-10-01T00:00:00Z"}')
+            $acl = Get-Acl -LiteralPath $claudeMarker
+            $acl.SetAccessRuleProtection($true, $true)
+            Set-Acl -LiteralPath $claudeMarker -AclObject $acl
+            $item = Get-Item -LiteralPath $claudeMarker
+            $item.CreationTimeUtc = [DateTime]::UtcNow.AddDays(-3)
+            $item.LastWriteTimeUtc = [DateTime]::UtcNow.AddDays(-2)
+            $item = Get-Item -LiteralPath $claudeMarker
+            $claudeBefore = [pscustomobject]@{
+                sha256 = (Get-FileHash -LiteralPath $claudeMarker `
+                    -Algorithm SHA256).Hash.ToLowerInvariant()
+                sddl = (Get-Acl -LiteralPath $claudeMarker).Sddl
+                creation = $item.CreationTimeUtc
+                modified = $item.LastWriteTimeUtc
+            }
+            Add-DefenseClawUserNativeOTLPTransactionSnapshot `
+                -SnapshotPath $fixture.snapshot -Layout $fixture.layout `
+                -Plan $fixture.plan
+            # The candidate guardian writes a new Codex marker and rewrites
+            # the Claude Code one (new time stamp, inherited ACL).
+            [IO.File]::WriteAllText($codexMarker,
+                '{"connector":"codex","at":"2026-10-28T10:00:00Z"}')
+            [IO.File]::WriteAllText($claudeMarker,
+                '{"connector":"claudecode","at":"2026-10-28T10:00:00Z"}')
+            $acl = Get-Acl -LiteralPath $claudeMarker
+            $acl.SetAccessRuleProtection($false, $true)
+            Set-Acl -LiteralPath $claudeMarker -AclObject $acl
+            Set-DefenseClawUserNativeOTLPTransactionPostimages `
+                -SnapshotPath $fixture.snapshot -Layout $fixture.layout
+            # A later guardian pass rewrites the new marker before the
+            # failure; it is still the transaction's marker.
+            [IO.File]::WriteAllText($codexMarker,
+                '{"connector":"codex","at":"2026-10-28T10:01:00Z"}')
+            $saved = Get-Content -LiteralPath $fixture.snapshot -Raw |
+                ConvertFrom-Json
+            if (@($saved.user_native_otlp_preimages.files).Count -ne 6) {
+                throw 'transaction did not record six files for the root'
+            }
+            $script:DefenseClawRollbackLeftovers = @()
+            Restore-DefenseClawUserNativeOTLPTransactionSnapshot `
+                -Snapshot $saved -SnapshotPath $fixture.snapshot `
+                -Layout $fixture.layout
+            if (Test-Path -LiteralPath $codexMarker) {
+                throw 'rollback kept the take-back marker the transaction created'
+            }
+            $item = Get-Item -LiteralPath $claudeMarker
+            if ((Get-FileHash -LiteralPath $claudeMarker -Algorithm SHA256).Hash.ToLowerInvariant() -cne $claudeBefore.sha256 -or
+                (Get-Acl -LiteralPath $claudeMarker).Sddl -cne $claudeBefore.sddl -or
+                $item.CreationTimeUtc -ne $claudeBefore.creation -or
+                $item.LastWriteTimeUtc -ne $claudeBefore.modified) {
+                throw 'rollback did not restore the earlier take-back marker exactly'
+            }
+            if (@($script:DefenseClawRollbackLeftovers).Count -ne 0) {
+                throw ('marker rollback reported leftovers: ' + ($script:DefenseClawRollbackLeftovers -join '; '))
+            }
+
+            # A marker path that is a hard link to a file outside the data
+            # dir is refused and reported; the outside file stays.
+            $linked = New-NativeOTLPFixture -Name 'marker-linked'
+            $linkedPaths = @(Get-DefenseClawUserNativeOTLPTransactionPaths `
+                    -UserHome $linked.profile)
+            Add-DefenseClawUserNativeOTLPTransactionSnapshot `
+                -SnapshotPath $linked.snapshot -Layout $linked.layout `
+                -Plan $linked.plan
+            $outside = Join-Path $Scratch 'marker-outside.json'
+            [IO.File]::WriteAllText($outside, 'outside file stays')
+            New-Item -ItemType Directory -Force `
+                -Path ([IO.Path]::GetDirectoryName($linkedPaths[4])) | Out-Null
+            New-Item -ItemType HardLink -Path $linkedPaths[4] -Target $outside | Out-Null
+            Set-DefenseClawUserNativeOTLPTransactionPostimages `
+                -SnapshotPath $linked.snapshot -Layout $linked.layout
+            $linkedSaved = Get-Content -LiteralPath $linked.snapshot -Raw |
+                ConvertFrom-Json
+            $script:DefenseClawRollbackLeftovers = @()
+            Restore-DefenseClawUserNativeOTLPTransactionSnapshot `
+                -Snapshot $linkedSaved -SnapshotPath $linked.snapshot `
+                -Layout $linked.layout
+            if (-not (Test-Path -LiteralPath $outside) -or
+                [IO.File]::ReadAllText($outside) -cne 'outside file stays' -or
+                @($script:DefenseClawRollbackLeftovers | Where-Object {
+                    $_ -like ('native OTLP user rollback: ' + $linkedPaths[4] + ':*')
+                }).Count -ne 1) {
+                throw 'a linked take-back marker was not refused and reported'
+            }
+
+            # A transaction an earlier module opened (four files per root)
+            # still rolls back.
+            $legacy = New-NativeOTLPFixture -Name 'marker-legacy'
+            $legacyPaths = @(Get-DefenseClawUserNativeOTLPTransactionPaths `
+                    -UserHome $legacy.profile)
+            New-Item -ItemType Directory -Force `
+                -Path ([IO.Path]::GetDirectoryName($legacyPaths[1])) | Out-Null
+            [IO.File]::WriteAllText($legacyPaths[1], 'prior Claude settings')
+            Add-DefenseClawUserNativeOTLPTransactionSnapshot `
+                -SnapshotPath $legacy.snapshot -Layout $legacy.layout `
+                -Plan $legacy.plan
+            $legacySaved = Get-Content -LiteralPath $legacy.snapshot -Raw |
+                ConvertFrom-Json
+            $legacySaved.user_native_otlp_preimages.files = @(
+                @($legacySaved.user_native_otlp_preimages.files)[0..3])
+            $legacySaved | ConvertTo-Json -Depth 12 |
+                Set-Content -LiteralPath $legacy.snapshot -Encoding UTF8
+            $claudeCas = Join-Path $legacy.profile '.claude\.defenseclaw-cas-state'
+            New-Item -ItemType Directory -Path $claudeCas | Out-Null
+            [IO.File]::WriteAllBytes(
+                (Join-Path $claudeCas '.defenseclaw-v2-protocol.lock'),
+                [byte[]]::new(0))
+            [IO.File]::WriteAllText($legacyPaths[1], 'candidate Claude settings')
+            Set-DefenseClawUserNativeOTLPTransactionPostimages `
+                -SnapshotPath $legacy.snapshot -Layout $legacy.layout
+            $legacySaved = Get-Content -LiteralPath $legacy.snapshot -Raw |
+                ConvertFrom-Json
+            Restore-DefenseClawUserNativeOTLPTransactionSnapshot `
+                -Snapshot $legacySaved -SnapshotPath $legacy.snapshot `
+                -Layout $legacy.layout
+            if ([IO.File]::ReadAllText($legacyPaths[1]) -cne 'prior Claude settings') {
+                throw 'a four-file transaction record no longer rolls back'
             }
         }
         if ($SelectedCase -in @('All', 'Linked')) {

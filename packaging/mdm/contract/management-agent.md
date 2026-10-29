@@ -922,6 +922,15 @@ off the device. The agent does not read `/health` itself (section 7); the
   Windows, when no bundle was confirmed before (a killed first bundle), there
   is no last good bundle to put back: the verified config of the unconfirmed
   bundle stays installed until a signed bundle is delivered and confirmed.
+  On Linux and macOS an `applied` receipt whose config a later config
+  replaced before the gateway confirmed it ends `failed` with `error_code`
+  `superseded` and `rolled_back` false; one whose run was killed and rolled
+  back by recovery ends `interrupted`, `rolled_back` true only when the
+  gateway reports the restored policy. A rollback that puts a pending
+  bundle's config back keeps that receipt confirmable by the next run. On
+  Windows a delivery whose transaction failed while the gateway was down
+  (nothing installed) stays open and the run reports `not_confirmed`: a
+  retry applies it, else the next run settles it `interrupted`.
   After the run, status reports no `bundle_pending` for them. Windows settles under
   `bundle.lock` (try-lock): a live apply that holds it keeps its own receipt.
   When an install transaction is pending, Windows recovers it first and
@@ -1041,10 +1050,27 @@ off the device. The agent does not read `/health` itself (section 7); the
   If inspection of the installed deployment fails, the journal is left for
   review and the ensure exits. An absent installation marker retains the
   existing no-CLI settlement behavior.
-  `defenseclaw-enterprise.sh` (Linux, macOS) keeps the
-  old value in memory only and puts it back when the bundle apply or the
-  ensure before it fails, the run stops early, or the MDM stops it (HUP, INT,
-  TERM); a run killed outright (`SIGKILL`) cannot, so redeliver the bundle.
+  `defenseclaw-enterprise.sh` (Linux, macOS) journals the same way in a
+  root-only folder, `/var/lib/defenseclaw-mdm/rotation` on Linux and
+  `/var/db/defenseclaw-mdm/rotation` on macOS: `<name>.entry` (the bundle
+  confirmed before the rotation, the SHA-256 of the stored value, whether a
+  value was stored before and the SHA-256 of the installed config then) and
+  `<name>.value`, a root-only plaintext copy of the earlier credential that
+  stays until the rotation settles. It holds `flock(2)` on `.lock` in that
+  folder for the whole run, so a concurrent run waits (after 10 minutes it
+  exits 75, `mdm_secret_failed`). It puts the credential back when the
+  bundle apply or the ensure before it fails or the run stops early, and a
+  killed run's entry at the start of the next ensure, after the package or
+  payload that ensure delivers (the newer gateway settles it); an entry is
+  retired without a put-back only when no deployment was installed before
+  that run. While an entry cannot be settled, every ensure exits
+  `mdm_secret_failed` before it stores a credential or applies a config,
+  and the wrapper log names the refusal; deliver the package with
+  `--source`, or fix the logged cause, and run ensure again. Every
+  completed uninstall (`uninstall.sh` or `enterprise linux|macos
+  uninstall`) overwrites each value and removes the journal; `--purge` also
+  removes the empty state folder (`/var/lib/defenseclaw-mdm`,
+  `/var/db/defenseclaw-mdm`).
 - Upgrade from 1.0.2 or 1.0.3: a bundle signed before 1.0.4 has no
   `value_sha256`, so on 1.0.4 `bundle verify`, `bundle apply` (also a repeat
   delivery of the confirmed bundle, which an older build answered
@@ -1418,6 +1444,23 @@ Later bundles go through 5.2.
    `count` above 0 or `state` `unknown`, report enforcement pending and get
    the sessions restarted (4.3, sessions that need a restart). Report anchor
    and credential changes yourself (section 0).
+
+### 5.3 Release floor
+
+On Linux and macOS, DefenseClaw 1.0.4 and later refuse to install a release
+below the confirmed bundle's `min_product_version` (`product_floor_refused`).
+The rollback marker and `--allow-downgrade` do not lift it.
+
+The preinstall of a 1.0.4 or later package checks the floor before it replaces
+files, but only with a gateway that has the check: the installed gateway when
+it is 1.0.4 or later, or else the floor checker a non-purge uninstall keeps.
+When the installed gateway is older than 1.0.4 or gone and there is no kept
+checker (an older package was installed below the floor, or an uninstall
+warned `floor_checker_not_kept`), the preinstall installs the files. The
+postinstall `ensure` of a 1.0.4 or later package then refuses a release below
+the floor, after its files are in place. Older packages do not check the floor
+in any script and can complete below it. Install only releases that meet the
+floor; to go below it, contact your administrator.
 
 ## 6. Locks
 

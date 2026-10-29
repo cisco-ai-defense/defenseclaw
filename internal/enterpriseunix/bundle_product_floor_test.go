@@ -185,6 +185,25 @@ func TestBundleProductFloorNeedsTrustAnchors(t *testing.T) {
 	}
 }
 
+// requirePackageFloorCheckScoped fails an operator message that promises a
+// package floor check without saying it is in the 1.0.4 and later package
+// scripts only: a package older than 1.0.4 runs plain ensure, which has no
+// floor check, so it can complete below the floor (rpm, dnf, dpkg -i, the
+// macOS Installer).
+func requirePackageFloorCheckScoped(t *testing.T, message string) {
+	t.Helper()
+	for _, want := range []string{"1.0.4 or later package", "a package older than 1.0.4 has no floor check and can complete below the floor"} {
+		if !strings.Contains(message, want) {
+			t.Fatalf("%q does not say %q", message, want)
+		}
+	}
+	for _, unscoped := range []string{"a package below that floor is refused", "the package scripts run"} {
+		if strings.Contains(message, unscoped) {
+			t.Fatalf("%q promises the floor check for every package (%q)", message, unscoped)
+		}
+	}
+}
+
 // A non-purge uninstall on a device with bundle trust anchors keeps a
 // root-only copy of the deployed gateway, so the package scripts can run
 // floor-check once the installed gateway is gone; a committed reinstall
@@ -202,9 +221,16 @@ func TestNonPurgeUninstallKeepsTheFloorCheckerForThePackageScripts(t *testing.T)
 			if hasWarning(r, codeFloorCheckerNotKept) {
 				t.Fatalf("keep-state uninstall did not keep the floor checker: %+v", r.Warnings)
 			}
-			if !strings.Contains(strings.Join(r.Changes, "\n"), filepath.Join(h.env.Layout.LifecycleDir, floorCheckerDir)) {
+			kept := ""
+			for _, line := range r.Changes {
+				if strings.Contains(line, filepath.Join(h.env.Layout.LifecycleDir, floorCheckerDir)) {
+					kept = line
+				}
+			}
+			if kept == "" {
 				t.Fatalf("the uninstall summary does not name the kept floor checker: %q", r.Changes)
 			}
+			requirePackageFloorCheckScoped(t, kept)
 			if _, err := os.Lstat(installed); !errors.Is(err, os.ErrNotExist) {
 				t.Fatalf("the installed gateway is still there (%v); the case needs it gone", err)
 			}
@@ -261,6 +287,14 @@ func TestNonPurgeUninstallKeepsTheFloorCheckerForThePackageScripts(t *testing.T)
 		r := h.run(Options{Action: ActionUninstall, KeepState: true})
 		if !hasWarning(r, codeFloorCheckerNotKept) {
 			t.Fatalf("no %s warning for a replaced gateway: %+v", codeFloorCheckerNotKept, r.Warnings)
+		}
+		for _, w := range r.Warnings {
+			if w.Code == codeFloorCheckerNotKept {
+				requirePackageFloorCheckScoped(t, w.Message)
+				if !strings.Contains(w.Message, "refused only by its postinstall, after its files are in place") {
+					t.Fatalf("the %s warning does not say when a 1.0.4 or later package is refused: %q", codeFloorCheckerNotKept, w.Message)
+				}
+			}
 		}
 		if _, err := os.Lstat(h.env.floorCheckerPath()); !errors.Is(err, os.ErrNotExist) {
 			t.Fatalf("kept a gateway the record does not name: %v", err)

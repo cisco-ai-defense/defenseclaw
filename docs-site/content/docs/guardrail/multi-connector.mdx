@@ -1,0 +1,161 @@
+---
+title: Multi-connector
+description: One DefenseClaw gateway enforces guardrail policy for several hook connectors at once, each with its own mode, fail mode, HITL, block message and rule pack under guardrail.connectors. Add a connector with setup <connector> and choose Add.
+keywords:
+  - DefenseClaw multi-connector
+  - guardrail.connectors
+  - DefenseClaw per-connector policy
+  - defenseclaw guardrail --connector
+---
+
+One gateway guards several agents at once, each with its own mode. Adding, replacing or removing an agent never deletes audit history: each audit row keeps the connector that produced it.
+
+<Video
+  src="multi-connector"
+  caption="One gateway guards Claude Code and Antigravity at once on a Mac, each with its own mode. A harmless echo runs in both. The same chmod 777 (rule CMD-CHMOD-WORLD, HIGH) makes Antigravity ask for confirmation, while Claude Code only records an alert. Reading /etc/shadow is blocked (CRITICAL). Deleting Antigravity's hook file is detected and repaired (connector-hook-tampered, then connector-hook-repaired). Splunk shows every verdict per connector."
+/>
+
+## Before you start
+
+- DefenseClaw is set up for one agent.
+- The new agent is a hook agent. OpenClaw and ZeptoClaw run through a proxy and cannot sit next to hook agents. To switch between a hook agent and a proxy agent, use `--replace` (see [Changing connectors](/docs/guardrail/switching-connectors#replace-instead-of-add)).
+
+## How one gateway enforces N connectors
+
+One gateway enforces several hook connectors. Each connector has an optional block under `guardrail.connectors.<name>` in `~/.defenseclaw/config.yaml`. An unset field inherits the global `guardrail.*` value, so a block carries only what differs. Proxy connectors (OpenClaw, ZeptoClaw) cannot be multi-connector peers: they own a proxy listener, so only one runs at a time.
+
+```yaml title="~/.defenseclaw/config.yaml"
+guardrail:
+  enabled: true
+  mode: action
+  hook_fail_mode: closed
+  rule_pack: default
+  connectors:
+    codex:
+      mode: action
+      hook_fail_mode: open
+    claudecode:
+      mode: observe
+      hilt:
+        enabled: true
+        min_severity: HIGH
+```
+
+## `claw.mode` keeps one primary connector
+
+`claw.mode` and `guardrail.connector` name the active connector on a single-connector install. With several connectors they keep naming one primary connector: the existing one when you add a connector, otherwise the first name in sorted order. Read the full roster from `guardrail.connectors`, `defenseclaw status` or `defenseclaw guardrail status`. While more than one connector is active, the gateway leaves out the process-level `defenseclaw.claw.mode` resource attribute; use the per-event `connector` metric label or the `defenseclaw.connector.source` span attribute.
+
+## Adding a connector (Add vs Replace)
+
+Run the hook setup for the agent you want to add. Setup first asks the new agent's enforcement mode, prints what it will change, and then, if another agent is already guarded, asks how to combine them. The questions, in order, are listed in [Changing connectors](/docs/guardrail/switching-connectors#the-questions-setup-asks).
+
+1. Run the agent's setup command.
+
+   ```bash
+   defenseclaw setup codex
+   ```
+
+   ```text
+     Enforcement mode for Codex
+       [1] observe — scan and report findings, never block (recommended to start)
+       [2] action  — scan and block/confirm when policy requires (PreToolUse deny)
+     Select mode (1, 2) [1]:
+     …
+     DefenseClaw is already configured for: claudecode
+     You are setting up: codex
+       [a] Add     — run it alongside the existing connector(s) (multi-connector)
+       [r] Replace — switch to only this connector
+       [c] Cancel  — make no changes
+     Choose (a, r, c) [a]: a
+     …
+     OK Desired roster staged for 'codex' - 2 connectors selected: claudecode, codex
+     OK codex mode=observe
+   ```
+
+   Add is the default, also with `--yes`. The new agent starts in observe mode. Add `--mode action` to block from the start.
+
+2. Check both agents.
+
+   ```bash
+   defenseclaw guardrail status
+   ```
+
+   ```text
+     * enabled:    yes
+         Connector    Key         State    Mode     Fail    Rule pack  Block/alert       HILT  Scan        Judge
+         -----------  ----------  -------  -------  ------  ---------  ----------------  ----  ----------  -----
+         Claude Code  claudecode  enabled  observe  open    default    CRITICAL/MEDIUM+  off   regex_only  off
+         Codex        codex       enabled  observe  open    default    CRITICAL/MEDIUM+  off   regex_only  off
+   ```
+
+   `Fail` is `open` under the default policy: while the gateway is not running a call runs with one warning. The strict policy, or a saved `closed`, shows `closed`.
+
+3. Give one agent its own settings. Add `--connector` to any guardrail command.
+
+   ```bash
+   defenseclaw guardrail mode action --connector codex
+   defenseclaw guardrail hilt on --min-severity HIGH --connector claudecode
+   ```
+
+   The [per-connector overrides](#per-connector-overrides) table lists what each agent can override.
+
+## Per-connector overrides
+
+The fields you can override per connector mirror the global guardrail knobs:
+
+| Field | Meaning | Inherits when unset |
+| --- | --- | --- |
+| `enabled` | Per-connector on/off switch (`guardrail disable --connector X`). Drops it from the active set and removes its hooks; re-enable restores it with no re-prompt. | enabled |
+| `mode` | `observe` (log only) or `action` (enforce). | global `guardrail.mode` |
+| `hook_fail_mode` | `open` / `closed` — what to do while the gateway is not running. Error, malformed or missing gateway answers block in either mode. | global `guardrail.hook_fail_mode` |
+| `hilt` | `{ enabled, min_severity }` — per-connector human-in-the-loop policy. | global `guardrail.hilt` |
+| `block_message` | Custom block text shown to this connector's agent. | global `guardrail.block_message` |
+| `rule_pack` | The rule pack this connector scans against: a preset or a `guardrail.custom_packs` name. | global `guardrail.rule_pack` |
+| `rules` | Rule customisation layered over this connector's pack: `protections`, `enable`, `disable`, `severity_overrides`, `suppressions`, `sensitive_tools`. See [Rules and custom packs](/docs/policies/rules). | the global `guardrail.rules` only |
+| `block_at` | Lowest severity that blocks: `CRITICAL`, `HIGH`, `MEDIUM` or `LOW`. | global `guardrail.block_at`, then the rule pack's level |
+| `alert_at` | Lowest severity that alerts, same values; never above the block level. | global `guardrail.alert_at`, then the rule pack's level |
+
+Set any override with `--connector`:
+
+```bash
+defenseclaw guardrail fail-mode closed --connector codex
+defenseclaw guardrail hilt on --min-severity HIGH --connector claudecode
+defenseclaw guardrail block-message "Codex policy blocked this" --connector codex
+defenseclaw guardrail block-at CRITICAL --connector codex
+defenseclaw guardrail use-pack strict --connector codex
+defenseclaw guardrail rule disable CMD-REVSHELL-NC --connector codex
+defenseclaw guardrail disable --connector codex
+defenseclaw guardrail enable  --connector codex
+```
+
+`guardrail hilt`, `fail-mode`, `block-message`, `enable` and `disable` print what they will change and ask `Proceed? [Y/n]`; Enter applies it, and `--yes` skips the question in scripts. `mode`, `block-at` and `use-pack` apply at once.
+
+`--connector X` writes only that connector's override. Unscoped writes are the broad path: `fail-mode`, `hilt` and `block-message` also reconcile active connector posture so an old override does not keep the old value. On a single-connector install `--connector` is rejected.
+
+### CLI contract: read vs write
+
+| Commands | Scope | How to narrow |
+| --- | --- | --- |
+| `defenseclaw status`, `defenseclaw doctor`, bare `defenseclaw guardrail status`, bare `guardrail fail-mode` / `hilt` / `block-message`, `skill list`, `mcp list`, `plugin list`, `tool list`, `tool status`, `codeguard status` | **Read — fans out to every active connector.** Identical layout whether one or N are wired. | `guardrail status --connector X`, `skill list --connector X`, `mcp list --connector X`, `plugin list --connector X`, `tool list --connector X`, and `tool status --connector X` narrow where supported. |
+| `alerts` | **Read — recent decisions across connectors by default.** | `alerts --connector X` filters to events attributed to one connector. |
+| `guardrail enable` / `disable` / `fail-mode` / `hilt` / `block-message` (with an argument) | **Guardrail write — scoped or broad.** `--connector X` writes one connector override. Omit `--connector` for the broad path: enable/disable is global; fail-mode, HITL, and block-message update active connector posture. | `--connector X` to target a specific connector. |
+| `skill`, `mcp`, `plugin`, and `tool` policy verbs (`block`, `allow`, `unblock`, plus runtime verbs such as `disable` / `enable` where supported) | **Asset-policy write — broad fallback by default, connector-scoped when requested.** Bare writes apply across matching configured connector copies or the unscoped fallback tier for that asset family. | `--connector X` writes or clears only that connector's scoped state. |
+| `mcp set` / `mcp unset`, `skill install`, `plugin remove`, `codeguard install` / `install-skill` | **Config/install write — all configured/active connectors by default.** | `--connector X` writes or removes only one connector's source. |
+| `skill scan` / `mcp scan` / `plugin scan` / `aibom scan` | **Scan — configured/active connectors by default.** | Positional target and `--connector X` narrow where supported. |
+
+## The firewall stays global
+
+Per-connector policy is a guardrail concept. The egress firewall is not per-connector: DefenseClaw compiles one `firewall.yaml` into the host-wide pf/iptables filter and merges each active connector's allowed hosts into one allowlist at boot. Those rules see network attributes, not the connector label, so they cannot attribute a connection to one of several agents.
+
+## Check it worked
+
+`defenseclaw guardrail status` lists only the agents you kept, and `defenseclaw doctor` reports no leftover hooks.
+
+## See also
+
+- [Changing connectors](/docs/guardrail/switching-connectors) — add, reconfigure, remove, or replace connector wiring
+- [Set up the guardrail](/docs/guardrail) — the central setup command
+- [Generate a setup command](/docs/command-generator)
+- [Turn on blocking](/docs/get-started/first-guardrail)
+- [Setup aliases](/docs/guardrail/aliases#direct-to-upstream-aliases-hook-or-policy-enforcement)
+- [User- and group-based policies](/docs/guardrail/user-and-group-policies) — per-user, per-group and per-agent profiles that layer on top of `guardrail.connectors`

@@ -52,19 +52,6 @@ const shellHookForeignGuardBlock = `# Standalone foreign-hook guard. Hermes runs
 # which cannot start under the address-space limit set above.
 DEFENSECLAW_FOREIGN_GUARD=@GUARD@
 DEFENSECLAW_GUARD_EVENT="$(printf '%s' "$PAYLOAD" | _dc_jq -r '.hook_event_name // empty' 2>/dev/null)" || DEFENSECLAW_GUARD_EVENT=""
-# The lifecycle marker is published before the gateway can stop. Answer a
-# pre-tool call here, before spawning the native guard or waiting on its
-# session exchange. A session-start record still follows its usual path:
-# Hermes cannot stop a session at that event.
-case "$DEFENSECLAW_GUARD_EVENT" in
-  pre_tool_call|"")
-    if defenseclaw_managed_lifecycle_held; then
-      defenseclaw_log_hook_failure hermes hermes-hook "managed lifecycle in progress" policy closed
-      hermes_block transport "the DefenseClaw gateway is being installed or upgraded on this computer; try again in a moment."
-      exit 0
-    fi
-    ;;
-esac
 case "$DEFENSECLAW_GUARD_EVENT" in
   pre_tool_call|on_session_start|"")
     DEFENSECLAW_GUARD_STATUS=0
@@ -76,6 +63,20 @@ case "$DEFENSECLAW_GUARD_EVENT" in
         ;;
       *)
         if [ "$DEFENSECLAW_GUARD_EVENT" != "on_session_start" ]; then
+          # The lifecycle marker is published before the gateway can stop and
+          # is also held by a run that changes nothing. Like the native hook,
+          # it decides only what the gateway could not answer: no answer, or a
+          # deny the check marked retryable. An allow goes on to the gateway
+          # and a confirmed deny keeps its own block (GAP-1676).
+          if defenseclaw_managed_lifecycle_held; then
+            case "$DEFENSECLAW_GUARD_RESULT" in
+              ""|*'"retryable":true'*)
+                defenseclaw_log_hook_failure hermes hermes-hook "managed lifecycle in progress" policy closed
+                hermes_block transport "the DefenseClaw gateway is being installed or upgraded on this computer; try again in a moment."
+                exit 0
+                ;;
+            esac
+          fi
           DEFENSECLAW_GUARD_REASON="$(printf '%s' "$DEFENSECLAW_GUARD_RESULT" | _dc_jq -r '.reason // empty' 2>/dev/null)" || DEFENSECLAW_GUARD_REASON=""
           DEFENSECLAW_GUARD_OUTPUT="$(printf '%s' "$DEFENSECLAW_GUARD_RESULT" | _dc_jq -c '.hook_output // empty' 2>/dev/null)" || DEFENSECLAW_GUARD_OUTPUT=""
           case "$DEFENSECLAW_GUARD_OUTPUT" in

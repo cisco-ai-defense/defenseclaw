@@ -86,6 +86,10 @@ var (
 	// errManagedHookSocketSELinuxDenied wraps a Unix standalone peer failure
 	// where SELinux kept this account from the hook socket.
 	errManagedHookSocketSELinuxDenied = errors.New("SELinux denied this account access to the DefenseClaw hook socket")
+	// errManagedHookSocketDirectoryUntrusted wraps a Unix standalone peer
+	// failure where the hook socket's directory is not owned by root or the
+	// gateway account, or others may write it (GAP-2405).
+	errManagedHookSocketDirectoryUntrusted = errors.New("the DefenseClaw hook socket directory is not trusted")
 	// errManagedGatewayPortHeld wraps a peer-verification failure whose
 	// cause is that the gateway service runs but another process listens on
 	// its API port (Windows). The hook still fails closed.
@@ -98,6 +102,12 @@ var (
 const managedHookSocketSELinuxDeniedReason = "enterprise_managed_hook_socket_selinux_denied"
 
 const managedGatewayPeerUnverifiedReason = "enterprise_managed_gateway_peer_unverified"
+
+// managedHookSocketDirectoryUntrustedReason is the hook-failure reason of a
+// Unix standalone managed hook whose hook socket directory is not owned by
+// root or the gateway account (or is writable by others). The block text
+// names the directory, as the managed shell hooks do (GAP-2405).
+const managedHookSocketDirectoryUntrustedReason = "enterprise_managed_hook_socket_directory_untrusted"
 
 // managedGatewayNotRunningReason is the hook-failure reason of a Windows
 // standalone managed hook whose gateway service is stopped, instead of
@@ -310,6 +320,10 @@ type Options struct {
 	// requestFacts are the headers of a call that cost work to compute,
 	// computed once for all of its tries (doRequest).
 	requestFacts *hookRequestFacts
+	// perUserLoopbackDial is set when Run made the per-user loopback client
+	// itself (newPerUserHookHTTPClient), so the listener table describes the
+	// endpoint the call dials (perUserInstallWindowWithoutListener).
+	perUserLoopbackDial bool
 	// HookContractID is the finite Setup-selected connector contract bound into
 	// the protected native Windows command. Codex uses it to prevent local
 	// failure paths from backfilling newer lifecycle controls into legacy tiers.
@@ -486,16 +500,13 @@ func runHook(ctx context.Context, opts Options) int {
 		sp = copilotVSCodeLocalSpec
 	}
 	if !ok {
-		if reason, removed := removedConnectorReason(opts.Connector); removed {
-			// until 1.1: a Windows hook an older release registered for a
-			// removed connector runs this launcher, not a script; it
-			// blocks the way the script's stub does.
-			if strings.EqualFold(strings.TrimSpace(opts.Connector), "openhands") {
-				body, _ := json.Marshal(map[string]string{"decision": "deny", "reason": reason})
-				fmt.Fprintln(opts.Stdout, string(body))
-			}
-			fmt.Fprintln(opts.Stderr, reason)
-			return blockExit
+		if removedConnector(opts.Connector) {
+			// until 1.1: a Windows hook an older release registered for
+			// OpenHands or OmniGent runs this launcher. DefenseClaw no
+			// longer guards them, so it lets the call run and says so; the
+			// gateway teardown removes the registration.
+			fmt.Fprintln(opts.Stderr, removedConnectorNotice)
+			return 0
 		}
 		// Unknown connector is a wiring bug, not a policy decision. Fail loud
 		// so it surfaces in tests / setup rather than silently disabling the
@@ -719,6 +730,7 @@ func sendToGateway(ctx context.Context, opts Options, sp spec, failMode string, 
 			if err != nil {
 				return failUnreachable(opts, sp, "closed", "per-user gateway listener ownership could not be verified: "+err.Error())
 			}
+			opts.perUserLoopbackDial = true
 		}
 	}
 
@@ -937,6 +949,13 @@ func doRequest(ctx context.Context, opts Options, sp spec, failMode string, payl
 	if !opts.ManagedEnterprise {
 		// Every try of a per-user hook.
 		send = sendConnectedBy
+	}
+	if perUserInstallWindowWithoutListener(opts) {
+		// This account's installer holds the lock and its gateway is not
+		// listening: the call gets the install-window answer at once, not
+		// after a dial Windows refuses only after its SYN retries and a
+		// restart wait the installer outlasts (GAP-1150).
+		return failUnreachable(withPerUserOutage(opts), sp, failMode, perUserGatewayRestartingReason)
 	}
 	resp, err := send()
 	if !opts.ManagedEnterprise {
@@ -2363,7 +2382,7 @@ func failUnreachable(opts Options, sp spec, failMode, reason string) int {
 			return failManagedStandaloneClosed(opts, sp, sp.unreachableStrict, "transport", reason)
 		} else {
 			fmt.Fprintf(opts.Stderr,
-				"defenseclaw: %s (fail mode closed): %s\n", unreachableLead(opts, sp, reason, "blocking"), unreachableDetail(opts, reason))
+				"defenseclaw: %s (%s): %s\n", unreachableLead(opts, sp, reason, "blocking"), unreachableModeNote(opts), unreachableDetail(opts, reason))
 			if text := perUserGatewayDownText(opts, reason); text != "" {
 				return emitPerUserGatewayDown(opts, sp, text)
 			}
@@ -2372,6 +2391,15 @@ func failUnreachable(opts Options, sp spec, failMode, reason string) int {
 	}
 	showWarning := true
 	if opts.perUserOutage {
+		// Claude Code and Codex show nothing a hook prints on an exit-0
+		// allow except a systemMessage, which only some events carry
+		// (perUserGatewayDownNotice). An event that cannot show the warning
+		// leaves the once-per-session marker for the next one that can, so
+		// a running session's first prompt does not spend it silently
+		// (GAP-1352).
+		if outageWarningNoticeOnly(sp.connector) && perUserGatewayDownNotice(opts, sp, reason) == "" {
+			return emitFailOpenAllow(opts, sp, reason)
+		}
 		showWarning = firstOutageWarning(opts)
 	}
 	if text := perUserOutageOpenText(opts, reason); text != "" && opts.perUserOutage {
@@ -2474,6 +2502,12 @@ func coldStartFailureReason(err error) string {
 // (defenseclaw_unreachable_notice_json) on the same events. A missing answer
 // never fails open outside Secure Client (noAnswerFailMode), so only the
 // outage reasons have a notice.
+// outageWarningNoticeOnly reports a connector whose agent shows a per-user
+// outage warning only as a systemMessage (perUserGatewayDownNotice).
+func outageWarningNoticeOnly(connector string) bool {
+	return connector == "claudecode" || connector == "codex"
+}
+
 func perUserGatewayDownNotice(opts Options, sp spec, reason string) string {
 	if opts.ManagedEnterprise || opts.ManagedUnixSocket != "" {
 		return ""
@@ -2532,6 +2566,20 @@ const perUserGatewayStatusHint = " `defenseclaw-gateway status` shows its state.
 // the gateway port answers, so the gateway is not "unreachable" there; the
 // line names the blocked or allowed event instead, a prompt rather than a
 // tool for UserPromptSubmit (GAP-1706).
+// unreachableModeNote names why a per-user call the gateway did not decide
+// was blocked: "fail mode closed" for a gateway outage the mode closed (or
+// strict availability, or the install window), and that it blocks in every
+// fail mode for a failure that is not an outage (a call the gateway took and
+// did not answer, a listener DefenseClaw cannot verify). A saved open mode
+// then no longer reads as ignored (GAP-1735).
+func unreachableModeNote(opts Options) string {
+	if opts.ManagedEnterprise || opts.ManagedUnixSocket != "" || opts.SecureClient || opts.perUserOutage ||
+		opts.StrictAvailability || perUserInstallWindow(opts) {
+		return "fail mode closed"
+	}
+	return "not a gateway outage, so it is blocked in every fail mode"
+}
+
 func unreachableLead(opts Options, sp spec, reason, verdict string) string {
 	if strings.HasPrefix(reason, foreignListenerReasonPrefix) {
 		return verdict + " this " + hookEventSubject(opts.Event)
@@ -2547,6 +2595,9 @@ func unreachableDetail(opts Options, reason string) string {
 	if opts.ManagedEnterprise || opts.ManagedUnixSocket != "" {
 		return reason
 	}
+	if perUserInstallWindowNamesTheInstall(opts, reason) {
+		return perUserInstallWindowDetail
+	}
 	switch reason {
 	case "gateway unreachable":
 		return "check `defenseclaw-gateway status`, or run `defenseclaw-gateway restart`"
@@ -2558,6 +2609,22 @@ func unreachableDetail(opts Options, reason string) string {
 			"try again in a moment, or check `defenseclaw-gateway status`"
 	}
 	return reason
+}
+
+// perUserInstallWindowDetail is the stderr detail of a per-user call blocked
+// while this account's installer holds the data directory: the same cause
+// the agent is shown (perUserGatewayDownText), not "restarting or not
+// running" (GAP-2394).
+const perUserInstallWindowDetail = "DefenseClaw is being installed or upgraded for this account, and its gateway " +
+	"starts again when that is done; try again in a moment, or run the installer again if it has stopped"
+
+// perUserInstallWindowNamesTheInstall reports a per-user failure whose
+// answer names the install window (perUserGatewayDownText): this account's
+// installer holds the data directory, and the failure is neither the
+// gateway's own error answer nor a listener DefenseClaw cannot verify,
+// which keep their cause.
+func perUserInstallWindowNamesTheInstall(opts Options, reason string) bool {
+	return opts.gatewayRefusal == "" && !strings.HasPrefix(reason, foreignListenerReasonPrefix) && perUserInstallWindow(opts)
 }
 
 // perUserGatewayDownText is what a per-user hook that fails closed because
@@ -2577,7 +2644,7 @@ func perUserGatewayDownText(opts Options, reason string) string {
 	if opts.ManagedEnterprise || opts.ManagedUnixSocket != "" {
 		return ""
 	}
-	if perUserInstallWindow(opts) {
+	if perUserInstallWindowNamesTheInstall(opts, reason) {
 		return "DefenseClaw blocked this " + hookEventSubject(opts.Event) + ": DefenseClaw is being installed or " +
 			"upgraded for this account, and its gateway starts again when that is done. Try again in a moment; " +
 			"if the installer has stopped, run the installer again to finish or undo the interrupted install."
@@ -2590,7 +2657,7 @@ func perUserGatewayDownText(opts Options, reason string) string {
 	}
 	if reason == perUserGatewayNoAnswerReason {
 		return "DefenseClaw blocked this " + hookEventSubject(opts.Event) + ": this account's DefenseClaw gateway " +
-			"did not answer in time (fail mode closed); it may be restarting or busy. Try again in a moment; if " +
+			"did not answer in time (a call the gateway took and did not answer is blocked in every fail mode); it may be restarting or busy. Try again in a moment; if " +
 			"this continues, check it with `defenseclaw-gateway status`."
 	}
 	lead := "DefenseClaw blocked this " + hookEventSubject(opts.Event) + ": "
@@ -2978,7 +3045,8 @@ const unboundAntigravityBindingReason = "missing or unsupported Antigravity hook
 // hooks and hooks in fail mode open are not handled here.
 func refuseClosedUnboundHook(opts *Options, sp spec, failMode string) (int, bool) {
 	// A registration that lost its event is a broken install, never a
-	// gateway outage: outside Secure Client it is refused in every fail mode.
+	// gateway outage: outside Secure Client it is refused, except a per-user
+	// Antigravity call in a tier that opens it (perUserUnboundAntigravityOpen).
 	if opts.SecureClient {
 		return 0, false
 	}
@@ -2999,6 +3067,19 @@ func refuseClosedUnboundHook(opts *Options, sp spec, failMode string) (int, bool
 		if err == nil && antigravityNonToolInput(data, int64(len(data)) > opts.MaxBody) {
 			return 0, false
 		}
+		if perUserUnboundAntigravityOpen(*opts) {
+			// Balanced defaults (GAP-1321): in the default and permissive
+			// tiers, where this account's config opens an outage, the call
+			// runs with a warning and an audit entry, as antigravity-hook.sh
+			// does. The gateway requires the event, so it is not asked.
+			opts.FailMode = "open"
+			logHookFailure(*opts, sp, unboundAntigravityBindingReason, "response", "open", false)
+			fmt.Fprintln(opts.Stderr, "defenseclaw: DefenseClaw is not checking this Antigravity tool call: its hook is "+
+				"registered without an Antigravity event DefenseClaw reviewed, so the call runs unchecked (fail mode open). "+
+				"Run `defenseclaw setup antigravity` to register it again.")
+			fmt.Fprintln(opts.Stdout, `{"decision":"allow","reason":`+mustJSONString(unboundAntigravityOpenText)+`}`)
+			return 0, true
+		}
 		text := "DefenseClaw blocked this tool call: its DefenseClaw hook is registered without an Antigravity event DefenseClaw reviewed. " +
 			"Run `defenseclaw setup antigravity` to register it again."
 		if opts.ManagedEnterprise {
@@ -3013,6 +3094,26 @@ func refuseClosedUnboundHook(opts *Options, sp spec, failMode string) (int, bool
 		return 0, true
 	}
 	return 0, false
+}
+
+// unboundAntigravityOpenText is the reason of the allow a per-user
+// Antigravity hook gives a registration that lost its event when this
+// account's tier opens it (perUserUnboundAntigravityOpen).
+const unboundAntigravityOpenText = "DefenseClaw did not check this tool call: its DefenseClaw hook is registered without " +
+	"an Antigravity event DefenseClaw reviewed. Run `defenseclaw setup antigravity` to register it again."
+
+// perUserUnboundAntigravityOpen reports a per-user Antigravity hook (not
+// managed, not Secure Client) whose registration lost its event, outside
+// strict availability and this account's install window, whose config on
+// disk gives Antigravity the open outage mode now (the default and
+// permissive tiers). Such a call is allowed with a warning; strict,
+// a closed tier and managed hooks deny it (refuseClosedUnboundHook).
+func perUserUnboundAntigravityOpen(opts Options) bool {
+	if opts.ManagedEnterprise || opts.ManagedUnixSocket != "" || opts.SecureClient || opts.StrictAvailability ||
+		opts.OutageFailModeNow == nil || perUserInstallWindow(opts) {
+		return false
+	}
+	return normalizeFailMode(opts.OutageFailModeNow()) == "open"
 }
 
 // antigravityNonToolInput reports an Antigravity hook input that is clearly
@@ -3081,7 +3182,9 @@ func copilotFailClosed(opts Options, sp spec, layer, reason string) (int, bool) 
 	if reason == managedUIDUnregisteredReason {
 		text = "DefenseClaw: " + unixUnenrolledAccountExplanation
 	}
-	if reason == managedGatewayNotRunningReason || reason == managedGatewayPortHeldReason ||
+	if install := managedInstallWindowText(opts, "transport", reason); install != "" {
+		text = install
+	} else if reason == managedGatewayNotRunningReason || reason == managedGatewayPortHeldReason ||
 		reason == managedGatewayRestartingReason {
 		// Say the service is stopped and who starts it, that it is
 		// restarting, or that another program holds its port
@@ -3361,6 +3464,9 @@ func managedPeerFailureReason(opts Options, err error) string {
 	if managedStandaloneHook(opts) && errors.Is(err, errManagedHookSocketSELinuxDenied) {
 		return managedHookSocketSELinuxDeniedReason
 	}
+	if managedStandaloneHook(opts) && errors.Is(err, errManagedHookSocketDirectoryUntrusted) {
+		return managedHookSocketDirectoryUntrustedReason
+	}
 	if opts.ExplainUnenrolledAccount && errors.Is(err, errManagedGatewayPortHeld) {
 		return managedGatewayPortHeldReason
 	}
@@ -3375,12 +3481,27 @@ const ManagedGatewayNotRunningReason = managedGatewayNotRunningReason
 // error that means the gateway service is not running.
 var ErrManagedGatewayNotRunning = errManagedGatewayNotRunning
 
+// ErrManagedHookSocketDirectoryUntrusted is wrapped by a Unix standalone
+// hook transport error whose hook socket directory is not trusted.
+var ErrManagedHookSocketDirectoryUntrusted = errManagedHookSocketDirectoryUntrusted
+
 // ManagedGatewayNotRunning reports an error from a managed hook transport
 // (ExchangeForeignHookSession included) that means the gateway service is
 // not running: a stopped Windows service, or a missing or refusing Unix hook
 // socket.
 func ManagedGatewayNotRunning(err error) bool {
 	return errors.Is(err, errManagedGatewayNotRunning)
+}
+
+// ManagedHookSocketDirectoryUntrustedReason is the reason of a Unix
+// standalone managed hook whose hook socket directory is not trusted.
+const ManagedHookSocketDirectoryUntrustedReason = managedHookSocketDirectoryUntrustedReason
+
+// ManagedHookSocketDirectoryUntrusted reports a managed hook transport error
+// (ExchangeForeignHookSession included) whose cause is a hook socket
+// directory not owned by root or the gateway account, or writable by others.
+func ManagedHookSocketDirectoryUntrusted(err error) bool {
+	return errors.Is(err, errManagedHookSocketDirectoryUntrusted)
 }
 
 // ManagedGatewayPortHeldReason is the reason code of a Windows standalone
@@ -3399,7 +3520,8 @@ func ManagedGatewayPortHeld(err error) bool {
 // false for any other reason.
 func ManagedTransportFailureText(event, reason string) (string, bool) {
 	if reason != managedGatewayNotRunningReason && reason != managedGatewayPortHeldReason &&
-		reason != managedGatewayRestartingReason && reason != managedGatewayNoAnswerReason {
+		reason != managedGatewayRestartingReason && reason != managedGatewayNoAnswerReason &&
+		reason != managedHookSocketDirectoryUntrustedReason {
 		return "", false
 	}
 	return managedStandaloneFailClosedText(event, "transport", reason), true
@@ -3411,7 +3533,7 @@ func ManagedTransportFailureText(event, reason string) (string, bool) {
 // connector's native block body where it has one. The exit codes are the
 // connector's usual fail-closed ones.
 func failManagedStandaloneClosed(opts Options, sp spec, result failResult, layer, reason string) int {
-	text := managedStandaloneFailClosedText(opts.Event, layer, reason)
+	text := managedFailClosedText(opts, layer, reason)
 	if sp.connector == "claudecode" {
 		return emitManagedClaudeBlock(opts, text)
 	}
@@ -3478,6 +3600,52 @@ func emitManagedClaudeBlock(opts Options, reason string) int {
 // account has no DefenseClaw folder (troubleshooting.mdx).
 const managedRuntimeHomeMissingReason = "enterprise_managed_runtime_home_missing"
 
+// managedFailClosedText is the fail-closed text of a managed hook:
+// managedInstallWindowText while the enterprise lifecycle holds the
+// gateway, else managedStandaloneFailClosedText.
+func managedFailClosedText(opts Options, layer, reason string) string {
+	if text := managedInstallWindowText(opts, layer, reason); text != "" {
+		return text
+	}
+	return managedStandaloneFailClosedText(opts.Event, layer, reason)
+}
+
+// managedInstallWindowText is what a managed hook says when the gateway is
+// stopped, restarting or silent while an enterprise lifecycle run (a package
+// install or upgrade, ensure, repair or rollback: managedLifecycleActive)
+// holds it: that DefenseClaw is being installed or upgraded and to try again,
+// as the per-user install window says (perUserGatewayDownText). It said "the
+// gateway is not available" or "is restarting to apply a change", which did
+// not name the upgrade (GAP-2173). "" for any other failure: a refusal
+// with its own cause (another program on the port, SELinux, a sandboxed
+// agent, a missing DefenseClaw folder) keeps its text.
+func managedInstallWindowText(opts Options, layer, reason string) string {
+	if layer != "transport" || !managedOutageShapedReason(reason) || !managedLifecycleActive(opts) {
+		return ""
+	}
+	return "DefenseClaw blocked this " + hookEventSubject(opts.Event) + ": DefenseClaw is being installed or " +
+		"upgraded on this computer, and its gateway starts again when that is done. Try again in a moment; " +
+		"if this continues, contact your administrator."
+}
+
+// managedOutageShapedReason reports a transport failure reason that a
+// stopped, restarting or silent gateway gives: the managed outage codes, and
+// the plain transport errors (no enterprise_ code) that
+// managedStandaloneFailClosedText calls "not available". A refusal with its
+// own cause (an unregistered account, another program on the port, SELinux,
+// a sandboxed agent, a missing DefenseClaw folder, a bad hook input) is not.
+func managedOutageShapedReason(reason string) bool {
+	switch reason {
+	case managedGatewayNotRunningReason, managedGatewayRestartingReason, managedGatewayNoAnswerReason,
+		managedGatewayPeerUnverifiedReason:
+		return true
+	case MalformedHookPayloadReason, managedHermesEventConflictReason, missingNativeAskReason,
+		unboundAntigravityBindingReason:
+		return false
+	}
+	return reason != "" && !strings.HasPrefix(reason, "enterprise_")
+}
+
 // managedStandaloneFailClosedText is what a standalone managed hook (Unix or
 // Windows, managedPlainFailClosed) says when it fails closed: that DefenseClaw blocked the prompt or tool
 // call, why in plain words and what to do, e.g. "DefenseClaw blocked this
@@ -3528,6 +3696,13 @@ func managedStandaloneFailClosedText(event, layer, reason string) string {
 	case reason == ManagedProcessContextUnknownReason:
 		cause, advice = "DefenseClaw cannot verify this agent's Linux process context and managed policy view",
 			"Start the agent from your normal login session; if this continues, contact your administrator."
+	case reason == managedHookSocketDirectoryUntrustedReason:
+		// The words of the managed shell hooks for the same check (GAP-0715,
+		// GAP-2405); the gateway may well be running. Like every other
+		// peer failure of the native hook, the internal peer reason code
+		// is not shown.
+		cause, advice = "the DefenseClaw hook socket directory is not owned by root or the gateway account, so DefenseClaw cannot trust the gateway it would reach",
+			"Ask your administrator to run `"+managedRepairCommand(runtime.GOOS)+"`."
 	case reason == managedHookSocketSELinuxDeniedReason:
 		cause, advice = "SELinux does not let your account reach the DefenseClaw gateway on this computer",
 			"Ask your administrator to run `enterprise linux repair`, which loads the DefenseClaw SELinux module that SELinux-confined accounts need."
@@ -3563,6 +3738,12 @@ func managedStatusCommand(goos string) string {
 		return "enterprise macos status"
 	}
 	return "enterprise linux status"
+}
+
+// managedRepairCommand is the lifecycle repair command of the platform the
+// hook runs on.
+func managedRepairCommand(goos string) string {
+	return strings.TrimSuffix(managedStatusCommand(goos), " status") + " repair"
 }
 
 // hookEventSubject names what an agent hook event carries, in the words a
@@ -4142,18 +4323,18 @@ func compactField(m map[string]json.RawMessage, field string) string {
 	return buf.String()
 }
 
-// removedConnectorReason is the block reason of a hook for a connector 1.0.4
-// removed (until 1.1), or false.
-func removedConnectorReason(connector string) (string, bool) {
-	switch strings.ToLower(strings.TrimSpace(connector)) {
-	case "openhands":
-		return "DefenseClaw blocked this call: OpenHands support was removed in DefenseClaw 1.0.4. " +
-			"To use OpenHands without DefenseClaw, remove every DefenseClaw hook from your OpenHands hooks.json, then restart OpenHands.", true
-	case "omnigent":
-		return "DefenseClaw blocked this call: OmniGent support was removed in DefenseClaw 1.0.4. " +
-			"To use OmniGent without DefenseClaw, remove DefenseClaw's policy from your OmniGent config.yaml, then restart OmniGent.", true
+// removedConnectorNotice is connector.RemovedConnectorNotice (this package
+// cannot import connector).
+const removedConnectorNotice = "OpenHands/OmniGent support was removed in 1.0.5; DefenseClaw no longer guards it."
+
+// removedConnector reports whether a hook names OpenHands or OmniGent, which
+// DefenseClaw no longer guards (until 1.1; connector.IsRemovedConnector).
+func removedConnector(name string) bool {
+	switch strings.ToLower(strings.TrimSpace(name)) {
+	case "openhands", "open-hands", "open_hands", "omnigent":
+		return true
 	}
-	return "", false
+	return false
 }
 
 // decodeDecision pulls the `decision` string from an already-compact JSON

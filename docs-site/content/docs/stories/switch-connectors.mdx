@@ -1,0 +1,128 @@
+---
+title: Add a connector without losing audit history
+description: Use defenseclaw setup <connector> to add or reconfigure agent wiring while preserving audit history for every connector.
+keywords:
+  - DefenseClaw connector setup
+  - DefenseClaw multi connector
+  - DefenseClaw audit history preserved
+---
+
+One gateway guards several agents at once, each with its own mode. Adding, replacing or removing an agent never deletes audit history: each audit row keeps the connector that produced it.
+
+This story retells the walkthrough briefly. The full pages are [Changing connectors](/docs/guardrail/switching-connectors) and [Multi-connector](/docs/guardrail/multi-connector).
+
+## Try it
+
+<Steps>
+
+<Step>
+
+### Add the second agent
+
+Run the agent's setup command. If another agent is already guarded, setup asks.
+
+```bash
+defenseclaw setup codex
+```
+
+```text
+  DefenseClaw is already configured for: claudecode
+  You are setting up: codex
+    [a] Add     — run it alongside the existing connector(s) (multi-connector)
+    [r] Replace — switch to only this connector
+    [c] Cancel  — make no changes
+  Choose (a, r, c) [a]: a
+  …
+  OK Desired roster staged for 'codex' - 2 connectors selected: claudecode, codex
+  OK codex mode=observe
+```
+
+Add is the default, also with `--yes`. The new agent starts in observe mode. Add `--mode action` to block from the start.
+
+</Step>
+
+<Step>
+
+### Check both agents
+
+Check both agents.
+
+```bash
+defenseclaw guardrail status
+```
+
+```text
+  * enabled:    yes
+      Connector    Key         State    Mode     Fail  Rule pack  Block/alert       HILT  Scan        Judge
+      -----------  ----------  -------  -------  ----  ---------  ----------------  ----  ----------  -----
+      Claude Code  claudecode  enabled  observe  open  default    CRITICAL/MEDIUM+  off   regex_only  off
+      Codex        codex       enabled  observe  open  default    CRITICAL/MEDIUM+  off   regex_only  off
+```
+
+</Step>
+
+<Step>
+
+### Give one agent its own settings
+
+Give one agent its own settings. Add `--connector` to any guardrail command.
+
+```bash
+defenseclaw guardrail mode action --connector codex
+defenseclaw guardrail hilt on --min-severity HIGH --connector claudecode
+```
+
+The [per-connector overrides](/docs/guardrail/multi-connector#per-connector-overrides) table lists what each agent can override.
+
+</Step>
+
+<Step>
+
+### Replace one agent with another
+
+Replace tears down the old agent's files and leaves only the new one.
+
+```bash
+defenseclaw setup claude-code --replace --mode action
+```
+
+Setup names the agents it removes and asks first (`--yes` skips the question). The same flag switches between a hook agent and a proxy agent (`defenseclaw setup openclaw --replace`) on Linux and macOS. Native Windows has no guardrail proxy, so OpenClaw and ZeptoClaw replacement is unsupported there. Without `--replace`, setup refuses and changes nothing.
+
+</Step>
+
+<Step>
+
+### Remove an agent
+
+```bash
+defenseclaw setup remove codex
+```
+
+```text
+  OK Removed connector 'codex'
+  OK Remaining connector(s): claudecode
+
+  Restarting gateway so the removed connector's hooks are torn down...
+```
+
+`--yes` skips the question and `--no-restart` restarts later. Removing the last agent needs `--force`. DefenseClaw stays installed; `defenseclaw uninstall` removes it.
+
+</Step>
+
+<Step>
+
+### Check it worked
+
+`defenseclaw guardrail status` lists only the agents you kept, and `defenseclaw doctor` reports no leftover hooks.
+
+</Step>
+
+</Steps>
+
+## Next
+
+<Cards>
+  <Card title="Multi-connector" href="/docs/guardrail/multi-connector" description="One gateway guards several agents at once, each with its own mode." />
+  <Card title="Changing connectors" href="/docs/guardrail/switching-connectors" description="Guard a second agent next to the first, replace one with another, or remove one." />
+  <Card title="Generate a setup command" href="/docs/command-generator" description="Build a non-interactive defenseclaw setup guardrail command for any agent in the browser, then copy it." />
+</Cards>

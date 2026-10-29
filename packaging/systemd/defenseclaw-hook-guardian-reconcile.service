@@ -5,7 +5,7 @@
 
 [Unit]
 Description=DefenseClaw hook guardian one-shot reconcile
-Documentation=https://cisco-ai-defense.github.io/defenseclaw/docs/enterprise/install/linux/
+Documentation=https://cisco-ai-defense.github.io/defenseclaw/docs/enterprise/linux/
 After=defenseclaw-gateway.service
 
 [Service]

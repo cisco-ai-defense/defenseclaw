@@ -52,7 +52,7 @@ func r104Loop2Check(t *testing.T, command, cwd, home, reason string) {
 // are data, so a "print > file" inside one is not an output. The same lexer
 // must not hide a real computed output after such data.
 func TestR104Loop2AWKProgramTextOnly(t *testing.T) {
-	skipNativeWindowsHomeGrammar(t)
+	skipPOSIXGrammarOnWindows(t)
 	home, cwd := r104Loop2Home(t)
 	for _, tc := range []struct {
 		name, command, reason string
@@ -104,7 +104,7 @@ func TestR104Loop2AWKProgramTextOnly(t *testing.T) {
 // t-string with a field evaluates code and stays under write analysis, and a
 // protected destination is never proved by its data.
 func TestR104Loop2PythonInertPrefixedData(t *testing.T) {
-	skipNativeWindowsHomeGrammar(t)
+	skipPOSIXGrammarOnWindows(t)
 	home, cwd := r104Loop2Home(t)
 	for _, tc := range []struct {
 		name, command, reason string

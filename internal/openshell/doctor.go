@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"net"
 	"os"
@@ -413,6 +414,12 @@ type Doctor struct {
 	// back or not, so the caller can record the files it wrote (setup's
 	// receipt, which teardown restores them from).
 	GatewayApplied func(*GatewayApplyResult)
+	// StopSync and StopSyncOut are the default Gateway's StopSync and Out:
+	// a fix's restart gives the service the stop sync, which GatewayApplied
+	// hears of, and names each MicroVM a sync before it could not sync
+	// (GAP-1927, GAP-1928).
+	StopSync    *StopSync
+	StopSyncOut io.Writer
 	// CLI is the openshell binary (default DefaultBinary).
 	CLI string
 
@@ -521,7 +528,8 @@ func (d *Doctor) defaults() {
 	}
 	if d.Gateway == nil {
 		d.Gateway = &GatewayConfigurator{Dir: d.Discover.ConfigDir, Runner: d.Runner, GOOS: d.GOOS, Discover: d.Discover, CLI: d.CLI, LookPath: d.LookPath,
-			ServiceDockerGroupMissing: d.ServiceDockerGroupMissing, Rendered: d.Rendered}
+			ServiceDockerGroupMissing: d.ServiceDockerGroupMissing, Rendered: d.Rendered,
+			StopSync: d.StopSync, StopSyncWritten: d.GatewayApplied, Out: d.StopSyncOut}
 		if d.Rendered != nil {
 			euid, egid := os.Geteuid(), os.Getegid()
 			if d.Geteuid != nil {

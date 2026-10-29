@@ -89,6 +89,24 @@ $Repo = if ($env:DEFENSECLAW_REPO) { $env:DEFENSECLAW_REPO } else { $DefaultRepo
 $ReleaseBase = if ($Repo -like "https://*") { $Repo.TrimEnd("/") } else { "https://github.com/$Repo" }
 $OfficialReleaseBase = "https://github.com/$DefaultRepo"
 $ReleaseSigner = '^https://github\.com/cisco-ai-defense/defenseclaw/\.github/workflows/release\.yaml@refs/heads/main$'
+function Resolve-DcPathVariables {
+    # A quoted "~\..." DEFENSECLAW_HOME or DEFENSECLAW_CONFIG (the shell did
+    # not expand it) names the caller's home, and a relative one names a
+    # folder from the caller's directory. PowerShell resolves both, but the
+    # CLI and the gateway this installer runs do not: the upgrade read no
+    # config and stopped (GAP-2113). Record the absolute path once, here, as
+    # install.sh does.
+    foreach ($name in @("DEFENSECLAW_HOME", "DEFENSECLAW_CONFIG")) {
+        $value = [Environment]::GetEnvironmentVariable($name, "Process")
+        if (-not $value) { continue }
+        if ($value -eq "~") { $value = $env:USERPROFILE }
+        elseif ($value -match '^~[\\/]') { $value = Join-Path $env:USERPROFILE $value.Substring(2) }
+        elseif (-not [IO.Path]::IsPathRooted($value)) { $value = Join-Path (Get-Location -PSProvider FileSystem).ProviderPath $value }
+        else { continue }
+        [Environment]::SetEnvironmentVariable($name, $value, "Process")
+    }
+}
+Resolve-DcPathVariables
 $DataDir = if ($env:DEFENSECLAW_HOME) { $env:DEFENSECLAW_HOME } else { Join-Path $env:USERPROFILE ".defenseclaw" }
 $Venv = Join-Path $DataDir ".venv"
 $BinDir = Join-Path $env:USERPROFILE ".local\bin"
@@ -3498,6 +3516,7 @@ function Install-New {
     Write-HookState
     if ((Test-Path -LiteralPath (Join-Path $DataDir "config.yaml")) -or $env:DEFENSECLAW_CONFIG) {
         Write-Info "Migrating config and data"
+        Find-RetiredConnectors
         if ($PrevVersion -and [version]$PrevVersion -lt [version]"1.0.0") { Repair-DataOwner }
         $migrateArgs = @("migrate")
         if ($PrevVersion) { $migrateArgs += @("--from-version", $PrevVersion) }
@@ -4451,38 +4470,42 @@ function Get-OtherBuildInstalled([string]$StagedGateway) {
     return @{ Installed = (& $name $installed); Staged = (& $name $staged) }
 }
 
-# until 1.1: the gateway tears the removed connectors (OpenHands, OmniGent)
-# down when it starts, but a start that brings the other connectors up only
-# logs one it could not finish, and an upgrade of a stopped gateway does not
-# start it. Check each here: one not done is torn down again, and one still
-# not done (an agent config that runs a hook DefenseClaw could not put the
-# sealed stub under) is named with its cause and step, and the install exits
-# 3, not 0. Without a config nothing was set up and the gateway cannot read
-# one, so there is nothing to check.
-function Complete-RetiredConnectorCleanup {
-    if (-not (Test-Path -LiteralPath (Join-Path $DataDir "config.yaml")) -and -not $env:DEFENSECLAW_CONFIG) { return $true }
-    $gateway = Join-Path $BinDir "defenseclaw-gateway.exe"
-    if (-not (Test-Path -LiteralPath $gateway -PathType Leaf)) {
-        Write-Err "DefenseClaw $Ver could not check that the removed OpenHands and OmniGent connectors are blocked: $gateway is missing"
-        return $false
-    }
+# until 1.1: whether an older setup of OpenHands or OmniGent is here, asked
+# before the migration and the new gateway's first start remove it, so the
+# one removal notice is printed after the upgrade (GAP-1892).
+$script:RetiredConnectorsFound = $false
+function Find-RetiredConnectors {
+    if (-not $PrevVersion) { return }
+    $python = Join-Path $Venv "Scripts\python.exe"
+    if (-not (Test-Path -LiteralPath $python -PathType Leaf)) { return }
     $ErrorActionPreference = "Continue"
-    $clean = $true
-    foreach ($name in @("openhands", "omnigent")) {
-        $verify = @("connector", "verify", "--connector", $name, "--data-dir", $DataDir)
-        if ((Invoke-Native $gateway $verify -Quiet) -eq 0) { continue }
-        [void](Invoke-Native $gateway @("connector", "teardown", "--connector", $name, "--data-dir", $DataDir) -Quiet)
-        # "$_" keeps only the text of a stderr line; Windows PowerShell 5.1
-        # formats the record with its script position otherwise.
-        $global:LASTEXITCODE = -1
-        try { $why = @(& $gateway @verify 2>&1 | ForEach-Object { "$_".Trim() } | Where-Object { $_ }) -join " " } catch { $why = "" }
-        if ($LASTEXITCODE -eq 0) { continue }
-        $why = $why -replace ("^(" + [char]0x2717 + "|X)\s+"), ""
-        if (-not $why) { $why = "run 'defenseclaw-gateway connector verify --connector $name' for the cause" }
-        Write-Err "DefenseClaw $Ver could not finish removing the $name connector, so its agent may not be blocked: $why"
-        $clean = $false
+    $probe = "import sys`nfrom defenseclaw.removed_connectors import found`nsys.exit(0 if found(sys.argv[1]) else 1)"
+    $script:RetiredConnectorsFound = ((Invoke-Native $python @("-I", "-c", $probe, $DataDir) -Quiet) -eq 0)
+}
+
+# until 1.1: the gateway removes what an older setup wrote for OpenHands and
+# OmniGent when it starts, but an upgrade of a stopped gateway does not start
+# it. When something of theirs is still here, run that teardown now. Then
+# print the one removal notice, when an older setup was found before the
+# upgrade or something is left, with what the teardown could not remove. It
+# never fails and blocks nothing: DefenseClaw no longer guards them. Without
+# a config nothing was set up.
+function Complete-RetiredConnectorCleanup {
+    if (-not (Test-Path -LiteralPath (Join-Path $DataDir "config.yaml")) -and -not $env:DEFENSECLAW_CONFIG) { return }
+    $gateway = Join-Path $BinDir "defenseclaw-gateway.exe"
+    $python = Join-Path $Venv "Scripts\python.exe"
+    if (-not (Test-Path -LiteralPath $gateway -PathType Leaf) -or -not (Test-Path -LiteralPath $python -PathType Leaf)) { return }
+    $ErrorActionPreference = "Continue"
+    $probe = "import sys`nfrom defenseclaw.removed_connectors import leftovers`nsys.exit(0 if leftovers(sys.argv[1]) else 1)"
+    if ((Invoke-Native $python @("-I", "-c", $probe, $DataDir) -Quiet) -eq 0) {
+        foreach ($name in @("openhands", "omnigent")) {
+            [void](Invoke-Native $gateway @("connector", "teardown", "--connector", $name, "--data-dir", $DataDir) -Quiet)
+        }
     }
-    return $clean
+    $found = if (Get-Variable -Name RetiredConnectorsFound -Scope Script -ValueOnly -ErrorAction SilentlyContinue) { "1" } else { "0" }
+    $report = "import sys`nfrom defenseclaw.removed_connectors import installer_lines`nfor line in installer_lines(sys.argv[1], sys.argv[2] == '1'):`n    print(line)"
+    try { $notes = @(& $python -I -c $report $DataDir $found 2>$null) } catch { $notes = @() }
+    if ($notes) { Write-Host ""; $notes | ForEach-Object { Write-Host $_ } }
 }
 
 # A gateway that was not running before an upgrade or repair is not started,
@@ -4876,7 +4899,13 @@ function Convert-HooksForRollback([string]$From, [string]$BackTo) {
     $gateway = Join-Path $BinDir "defenseclaw-gateway.exe"
     if (-not (Test-Path -LiteralPath $gateway)) { return }
     Protect-BackupsFolder
-    if ((Invoke-Native $gateway @("connector", "prepare-rollback", "--data-dir", $DataDir)) -ne 0) {
+    # until 1.1: back to a release before 1.0.5, the OpenHands and OmniGent
+    # files this release's teardown changed outside the data folder come
+    # back with it (GAP-2136).
+    $prepare = @("connector", "prepare-rollback", "--data-dir", $DataDir)
+    $help = Get-NativeOutput $gateway @("connector", "prepare-rollback", "--help")
+    if ($BackTo -and $help -match '--to-version') { $prepare += @("--to-version", $BackTo) }
+    if ((Invoke-Native $gateway $prepare) -ne 0) {
         Write-Warn ("Could not rewrite the agent hook entries of DefenseClaw $From in the form $BackTo reads (see above). " +
             "After the rollback, 'defenseclaw uninstall' may leave those DefenseClaw entries in the agent settings, such as " +
             "the cmd.exe entries that run defenseclaw-hook.exe in %USERPROFILE%\.claude\settings.json; remove them by hand")
@@ -5776,9 +5805,9 @@ function Invoke-Install {
     Remove-LifecycleManifest
     Remove-DeveloperFiles
     try { [Console]::TreatControlCAsInput = $false } catch { }
-    # until 1.1: an upgrade or repair never ends with a removed connector's
-    # hook left unsealed, whether or not its gateway was running before it.
-    if ($PrevVersion -and -not (Complete-RetiredConnectorCleanup)) { $startRc = 3 }
+    # until 1.1: an upgrade or repair removes what an older setup wrote for
+    # OpenHands and OmniGent, whether or not its gateway was running before it.
+    if ($PrevVersion) { Complete-RetiredConnectorCleanup }
     if ($PrevVersion -and -not $startNew -and -not (Complete-StoppedConnectorReconcile)) { $startRc = 3 }
 
     if ($startRc -eq 3) { Write-Warn "A connector needs attention before it is guarded again (see the gateway output above)" }

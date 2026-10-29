@@ -58,13 +58,17 @@ readonly RELEASE_BASE
 readonly OFFICIAL_RELEASE_BASE="https://github.com/${DEFAULT_REPO}"
 readonly RELEASE_SIGNER='^https://github\.com/cisco-ai-defense/defenseclaw/\.github/workflows/release\.yaml@refs/heads/main$'
 # A relative DEFENSECLAW_HOME or DEFENSECLAW_CONFIG names a folder from the
-# caller's directory. Record the absolute path once, here, so the locks this
-# installer takes, the folder hook-data-dir names and the gateway it starts
-# from its own runtime directory all see the same one.
+# caller's directory, and a quoted "~/..." one (the shell did not expand it)
+# names the caller's home. Record the absolute path once, here, so the locks
+# this installer takes, the folder hook-data-dir names, the removal notice
+# check and the gateway it starts from its own runtime directory all see the
+# same one.
 for dc_path_var in DEFENSECLAW_HOME DEFENSECLAW_CONFIG; do
     dc_path_value="${!dc_path_var:-}"
     case "${dc_path_value}" in
-        ""|/*|"~"|"~/"*) ;;
+        ""|/*) ;;
+        "~") export "${dc_path_var}=${HOME}" ;;
+        "~/"*) export "${dc_path_var}=${HOME}/${dc_path_value#"~/"}" ;;
         *) export "${dc_path_var}=$(pwd -P)/${dc_path_value}" ;;
     esac
 done
@@ -1270,6 +1274,57 @@ PY
     esac
 }
 
+# refuse_legacy_sandboxes PREVIOUS: an upgrade from DefenseClaw 1.0.0 to
+# 1.0.3 refuses, and changes nothing, while that release's gateway runs a
+# sandbox that may hold compute (GAP-0901). Each such session keeps the
+# supervisor it started with, an OpenShell release whose network broker can
+# let connections bypass sandbox policy (NVIDIA/OpenShell#4494), and the new
+# gateway can only report it unprotected: DefenseClaw stops no sandbox for
+# its user, who saves the work and ends it first. The phases are those the
+# package preinstall counts (legacy-sandbox-guard.sh dc_guard_holds). A
+# gateway that is not running, or that cannot list sandboxes (sandboxes off),
+# has none to name.
+refuse_legacy_sandboxes() {
+    local prev="${1:-}" gateway="${BIN_DIR}/defenseclaw-gateway" held name phase
+    is_version "${prev}" && ! version_lt "${prev}" 1.0.0 && version_lt "${prev}" 1.0.4 || return 0
+    ! is_version "${VERSION}" || ! version_lt "${VERSION}" 1.0.4 || return 0
+    [[ -x "${gateway}" && -x "${VENV}/bin/python" && -n "$(gateway_pid || true)" ]] || return 0
+    held="$("${VENV}/bin/python" -I - "${gateway}" <<'PY' 2>/dev/null
+import json, re, subprocess, sys
+try:
+    out = subprocess.run([sys.argv[1], "sandbox", "list", "--output", "json"], capture_output=True, text=True, timeout=10).stdout
+    rows = json.loads(out or "{}").get("sandboxes") or []
+except Exception:
+    rows = []
+for r in rows:
+    if not isinstance(r, dict) or not isinstance(r.get("name"), str):
+        continue
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,62}", r["name"]):
+        continue
+    phase = r.get("phase") if isinstance(r.get("phase"), str) else ""
+    driver = r.get("driver") if isinstance(r.get("driver"), str) and r.get("driver") else "docker"
+    reason = r.get("phase_reason") if isinstance(r.get("phase_reason"), str) else ""
+    if phase in ("stopped", "deleting", "deleted", "missing"):
+        continue
+    if phase == "completed" and driver == "docker":
+        continue
+    if phase == "error" and (driver == "docker" or reason.startswith("ProcessExited")):
+        continue
+    print(r["name"] + " " + (phase if re.fullmatch(r"[a-z_]{1,32}", phase) else "unknown"))
+PY
+)" || return 0
+    [[ -n "${held}" ]] || return 0
+    err "Sandboxes of DefenseClaw ${prev} are running; nothing was changed. Their sessions keep the network broker of the OpenShell release they started with, which can let connections bypass sandbox policy, and DefenseClaw ${VERSION} cannot contain it: it would only report them unprotected and run no new sandbox until they are gone. DefenseClaw stops no sandbox for you. End each one, then run this upgrade again:"
+    while read -r name phase; do
+        [[ -n "${name}" ]] || continue
+        case "${phase}" in
+            completed|error) printf '    %s (%s MicroVM, which OpenShell does not stop): defenseclaw sandbox delete %s (it deletes the sandbox with its work)\n' "${name}" "${phase}" "${name}" >&2 ;;
+            *) printf '    %s (%s): save the work you need, then defenseclaw sandbox stop %s\n' "${name}" "${phase}" "${name}" >&2 ;;
+        esac
+    done <<<"${held}"
+    exit 1
+}
+
 # other_build_installed: the installed gateway reports another build of this
 # version (its commit or build date) than the staged one (GAP-1063). An
 # installed gateway that does not answer is repaired, as before. Sets
@@ -1618,6 +1673,7 @@ REPAIR=false
 if [[ -n "${PREV_VERSION}" && "${PREV_VERSION}" == "${VERSION}" ]] && ! other_build_installed; then
     REPAIR=true
 fi
+refuse_legacy_sandboxes "${PREV_VERSION}"
 warn_running_sandboxes
 if [[ "${REPAIR}" == true ]]; then
     ask_yes_no "Reinstall DefenseClaw ${VERSION}?" || die "Cancelled; nothing was changed"
@@ -1718,11 +1774,9 @@ if [[ "${WAS_RUNNING}" == true ]]; then
     rm -f "${SNAP}/GATEWAY_RESTART_UNPROVEN"
 fi
 finish_swap
-# until 1.1: an upgrade or repair never ends with a removed connector's hook
-# left unsealed, whether or not its gateway was running before it.
-if [[ -n "${PREV_VERSION}" ]] && ! finish_retired_connector_cleanup; then
-    START_RC=3
-fi
+# until 1.1: an upgrade or repair removes what an older setup wrote for
+# OpenHands and OmniGent, whether or not its gateway was running before it.
+[[ -z "${PREV_VERSION}" ]] || finish_retired_connector_cleanup
 report_retired_connector_leftovers
 if [[ -n "${PREV_VERSION}" && "${WAS_RUNNING}" != true ]] && ! reconcile_stopped_connectors; then
     START_RC=3
@@ -2291,6 +2345,7 @@ swap_in() {
     fi
     if [[ -f "${DEFENSECLAW_HOME}/config.yaml" || -n "${DEFENSECLAW_CONFIG:-}" ]]; then
         info "Migrating config and data"
+        note_retired_connectors
         local args=(migrate)
         [[ -n "${PREV_VERSION}" ]] && args+=(--from-version "${PREV_VERSION}")
         DEFENSECLAW_GATEWAY_BIN="${BIN_DIR}/defenseclaw-gateway" "${VENV}/bin/defenseclaw" "${args[@]}" || return 1
@@ -2626,31 +2681,21 @@ finish_swap() {
     ok "Installed DefenseClaw ${VERSION}"
 }
 
-# until 1.1: the gateway tears the removed connectors (OpenHands, OmniGent)
-# down when it starts, but a start that brings the other connectors up only
-# logs one it could not finish, and an upgrade of a stopped gateway does not
-# start it. Check each here: one not done is torn down again, and one still
-# not done (an agent config that runs a hook DefenseClaw could not put the
-# sealed stub under) is named with its cause and step, and the install exits
-# 3, not 0. Without a config nothing was set up and the gateway cannot read
-# one, so there is nothing to check.
+# until 1.1: the gateway removes what an older setup wrote for OpenHands and
+# OmniGent when it starts, but an upgrade of a stopped gateway does not start
+# it. When something of theirs is still here, run that teardown now. It never
+# fails and blocks nothing (DefenseClaw no longer guards them); what it cannot
+# remove is listed as information below. Without a config nothing was set up.
 finish_retired_connector_cleanup() {
-    local gateway="${BIN_DIR}/defenseclaw-gateway" name why failed=0
+    local gateway="${BIN_DIR}/defenseclaw-gateway" name
     [[ -f "${DEFENSECLAW_HOME}/config.yaml" || -n "${DEFENSECLAW_CONFIG:-}" ]] || return 0
-    if [[ ! -x "${gateway}" ]]; then
-        err "DefenseClaw ${VERSION} could not check that the removed OpenHands and OmniGent connectors are blocked: ${gateway} is missing"
-        return 1
-    fi
+    [[ -x "${gateway}" ]] || return 0
+    "${VENV}/bin/python" -I -c 'import sys
+from defenseclaw.removed_connectors import leftovers
+sys.exit(0 if leftovers(sys.argv[1]) else 1)' "${DEFENSECLAW_HOME}" 2>>"${LOG}" || return 0
     for name in openhands omnigent; do
-        "${gateway}" connector verify --connector "${name}" --data-dir "${DEFENSECLAW_HOME}" >>"${LOG}" 2>&1 && continue
         "${gateway}" connector teardown --connector "${name}" --data-dir "${DEFENSECLAW_HOME}" >>"${LOG}" 2>&1 || true
-        why="$("${gateway}" connector verify --connector "${name}" --data-dir "${DEFENSECLAW_HOME}" 2>&1)" && continue
-        printf '%s\n' "${why}" >>"${LOG}"
-        why="$(printf '%s' "${why}" | tr '\n' ' ' | sed -E 's/^[[:space:]]*(✗|X)[[:space:]]+//; s/[[:space:]]+$//')"
-        err "DefenseClaw ${VERSION} could not finish removing the ${name} connector, so its agent may not be blocked: ${why:-see ${LOG}}"
-        failed=1
     done
-    return "${failed}"
 }
 
 # record_saved_installer: the SHA-256 of the saved installer, which
@@ -2693,19 +2738,31 @@ reconcile_stopped_connectors() {
     return 1
 }
 
-# until 1.1: the removed connectors' teardown deliberately keeps vendor
-# configs and import paths for manual cleanup. The gateway may complete its
-# deny-only script replacement during start, but its daemon log is not the
-# installer's output. List the remaining paths and exact steps here too.
+# until 1.1: whether an older setup of OpenHands or OmniGent is here, asked
+# before the migration and the new gateway's first start remove it, so the
+# one removal notice is printed after the upgrade (GAP-1892).
+RETIRED_CONNECTORS_FOUND=0
+note_retired_connectors() {
+    [[ -n "${PREV_VERSION:-}" ]] || return 0
+    if "${VENV}/bin/python" -I -c 'import sys
+from defenseclaw.removed_connectors import found
+sys.exit(0 if found(sys.argv[1]) else 1)' "${DEFENSECLAW_HOME}" 2>>"${LOG}"; then
+        RETIRED_CONNECTORS_FOUND=1
+    fi
+    return 0
+}
+
+# until 1.1: the one removal notice when an older setup of OpenHands or
+# OmniGent was here, then what their teardown could not remove; the
+# gateway's daemon log is not the installer's output.
 report_retired_connector_leftovers() {
     local notes
-    if ! notes="$("${VENV}/bin/python" -I - "${DEFENSECLAW_HOME}" <<'PY'
+    if ! notes="$("${VENV}/bin/python" -I - "${DEFENSECLAW_HOME}" "${RETIRED_CONNECTORS_FOUND:-0}" <<'PY'
 import sys
-from defenseclaw.removed_connectors import leftovers
+from defenseclaw.removed_connectors import installer_lines
 
-for left in leftovers(sys.argv[1]):
-    for line in left.lines():
-        print(line)
+for line in installer_lines(sys.argv[1], sys.argv[2] == "1"):
+    print(line)
 PY
 )"; then
         warn "Could not check removed connector leftovers; run 'defenseclaw status' for manual cleanup steps"
@@ -3007,9 +3064,15 @@ undo_rollback() {
 # those entries in the shape the older release removes; rolling forward runs
 # setup, which writes the current shape again.
 convert_hooks_for_rollback() {
-    local gateway="${BIN_DIR}/defenseclaw-gateway"
+    local gateway="${BIN_DIR}/defenseclaw-gateway" help
     [[ -x "${gateway}" ]] || return 0
-    "${gateway}" connector prepare-rollback --data-dir "${DEFENSECLAW_HOME}" 2>>"${LOG}" \
+    # until 1.1: back to a release before 1.0.5, the OpenHands and OmniGent
+    # files this release's teardown changed outside the data folder come back
+    # with it (GAP-2136).
+    local to=()
+    help="$("${gateway}" connector prepare-rollback --help 2>/dev/null || true)"
+    [[ "${help}" != *--to-version* || -z "${back_to:-}" ]] || to=(--to-version "${back_to}")
+    "${gateway}" connector prepare-rollback --data-dir "${DEFENSECLAW_HOME}" ${to[@]+"${to[@]}"} 2>>"${LOG}" \
         || warn "Could not rewrite the agent hook entries of DefenseClaw ${current:-?} in the form ${back_to} reads (see ${LOG}); after the rollback, 'defenseclaw uninstall' may leave those DefenseClaw entries in the agent settings, such as ~/.claude/settings.json; remove them by hand"
 }
 

@@ -653,8 +653,8 @@ func normalizeEnterpriseSetupArgumentsForFlavor(arguments []string, standalone b
 				continue
 			}
 			if standalone {
-				return nil, false, fmt.Errorf("unknown property %s; run %s /? for the actions and the NAME=value properties (CONFIG=, MANIFEST=, BUNDLE=, TRUSTANCHORS=, JSON=1, NOSTART=1, PURGE=1, FORCE=1, TIMEOUTSECONDS=, ALLOWEDSIGNERS=, ATTESTCLAUDEEFFECTIVEPOLICY=1)",
-					trimmed[:separator], standaloneSetupArtifactName)
+				return nil, false, fmt.Errorf("unknown property %s; run %s /? for the actions and the NAME=value properties (%s)",
+					trimmed[:separator], standaloneSetupArtifactName, standaloneSetupPropertyHint())
 			}
 		}
 		normalized = append(normalized, argument)
@@ -930,20 +930,28 @@ func standaloneEnterpriseSetupTimeout(opts enterpriseSetupOptions, cause error) 
 }
 
 func standaloneEnterpriseSetupTimeoutWithRecovery(opts enterpriseSetupOptions, cause error, report *enterprisestatus.Result) error {
-	if report != nil {
-		return enterpriseSetupLifecycleTimeout{error: fmt.Errorf(
-			"enterprise %s did not finish within TIMEOUTSECONDS=%d and Setup stopped it (%w). "+
-				"Setup replayed its pending transaction and no lifecycle record remains; this result is the recovered deployment's status, "+
-				"and the requested action did not finish. Run %s /status JSON=1, then retry the requested action",
-			opts.Action, int(opts.LifecycleTimeout/time.Second), cause, standaloneSetupArtifactName,
-		), recovery: report}
-	}
 	config := opts.Config
 	if strings.TrimSpace(config) == "" {
 		config = "<config.yaml>"
 	}
 	limit := int(opts.LifecycleTimeout / time.Second)
 	maximum := int(maximumLifecycleTimeout / time.Second)
+	if report != nil {
+		// The deployment is back as it was; what is left is the requested
+		// action as it was given, which needs a longer limit than the one it
+		// hit (GAP-1709, GAP-2114).
+		retry := standaloneSetupRetryCommand(opts, maximum)
+		longer := "with a longer limit"
+		if limit >= maximum {
+			longer = fmt.Sprintf("again (%d seconds is the longest limit)", maximum)
+		}
+		return enterpriseSetupLifecycleTimeout{error: fmt.Errorf(
+			"enterprise %s did not finish within TIMEOUTSECONDS=%d and Setup stopped it (%w). "+
+				"Setup replayed its pending transaction and no lifecycle record remains; this result is the recovered deployment's status, "+
+				"and the requested action did not finish. Run %s as LocalSystem %s: %s",
+			opts.Action, limit, cause, standaloneSetupArtifactName, longer, retry,
+		), recovery: report}
+	}
 	recovery := fmt.Sprintf("/ensure CONFIG=%s JSON=1 TIMEOUTSECONDS=%d to recover (without TIMEOUTSECONDS the limit is the default %d seconds)",
 		config, maximum, int(defaultLifecycleTimeout/time.Second))
 	if limit >= maximum {
@@ -954,6 +962,52 @@ func standaloneEnterpriseSetupTimeoutWithRecovery(opts enterpriseSetupOptions, c
 			"run %s /status JSON=1 to check, then run Setup as LocalSystem with %s",
 		opts.Action, limit, cause, standaloneSetupArtifactName, recovery,
 	)}
+}
+
+// standaloneSetupRetryCommand repeats a standalone Setup request as it was
+// given, with TIMEOUTSECONDS at timeoutSeconds: the action and every property
+// the run had, and no property it did not have (a BUNDLE= ensure stays a
+// bundle ensure, an uninstall keeps PURGE=1 and FORCE=1). GAP-2114.
+func standaloneSetupRetryCommand(opts enterpriseSetupOptions, timeoutSeconds int) string {
+	parts := []string{"/" + opts.Action}
+	value := func(name, v string) {
+		v = strings.TrimSpace(v)
+		if v == "" {
+			return
+		}
+		if strings.ContainsAny(v, " \t") {
+			v = `"` + v + `"`
+		}
+		parts = append(parts, name+"="+v)
+	}
+	flag := func(name string, on bool) {
+		if on {
+			parts = append(parts, name+"=1")
+		}
+	}
+	value("CONFIG", opts.Config)
+	value("MANIFEST", opts.Manifest)
+	value("BUNDLE", opts.Bundle)
+	value("TRUSTANCHORS", opts.TrustAnchors)
+	value("MODE", opts.Mode)
+	value("CONNECTOR", opts.Connector)
+	flag("REFUSECAPABILITYLOSS", opts.RefuseCapabilityLoss)
+	flag("NOSTART", opts.NoStart)
+	flag("PURGE", opts.Purge)
+	flag("FORCE", opts.Force)
+	value("ALLOWEDSIGNERS", opts.AllowedSigners)
+	flag("ATTESTCLAUDEEFFECTIVEPOLICY", opts.AttestClaudeEffectivePolicy)
+	flag("ATTESTAGENTAPPLICATIONCONTROL", opts.AttestAgentApplicationControl)
+	value("INSTALLROOT", opts.InstallRoot)
+	value("STATEROOT", opts.StateRoot)
+	value("GATEWAYSERVICENAME", opts.GatewayServiceName)
+	value("GUARDIANSERVICENAME", opts.GuardianServiceName)
+	value("CERTIFICATIONCODEXHOME", opts.CertificationCodexHome)
+	flag("ALLOWUNSIGNED", opts.AllowUnsigned)
+	flag("COREHARDENINGCERTIFICATION", opts.CoreHardeningCertification)
+	flag("JSON", opts.JSON)
+	parts = append(parts, fmt.Sprintf("TIMEOUTSECONDS=%d", timeoutSeconds))
+	return strings.Join(parts, " ")
 }
 
 // writeEnterpriseSetupUsage prints the Secure Client Setup usage.
@@ -974,6 +1028,29 @@ func writeEnterpriseSetupUsageForFlavor(output io.Writer, standalone bool) {
 		fmt.Fprintln(output, "Ensure (standalone Setup) converges the host: install, upgrade, repair, or no-op.")
 	}
 	fmt.Fprintln(output, "Production paths and service names are fixed by the enterprise lifecycle.")
+}
+
+// standaloneSetupUsageProperty matches a property row of
+// writeStandaloneSetupUsage: its name and the value it shows.
+var standaloneSetupUsageProperty = regexp.MustCompile(`(?m)^  ([A-Z]+)=(\S*)`)
+
+// standaloneSetupPropertyHint lists the properties /? prints, read from
+// writeStandaloneSetupUsage itself, so the unknown-property hint cannot miss
+// one the usage gains. A hand-kept copy lacked REFUSECAPABILITYLOSS=1
+// (GAP-2398). A placeholder value (<path>, <n>, <sha256>) is shown as NAME=,
+// a literal one as NAME=1.
+func standaloneSetupPropertyHint() string {
+	var usage strings.Builder
+	writeStandaloneSetupUsage(&usage)
+	var names []string
+	for _, match := range standaloneSetupUsageProperty.FindAllStringSubmatch(usage.String(), -1) {
+		value := match[2]
+		if strings.HasPrefix(value, "<") {
+			value = ""
+		}
+		names = append(names, match[1]+"="+value)
+	}
+	return strings.Join(names, ", ")
 }
 
 // writeStandaloneSetupUsage prints the standalone Setup usage in the form

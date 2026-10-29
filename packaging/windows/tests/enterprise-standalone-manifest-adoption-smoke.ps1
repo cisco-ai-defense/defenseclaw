@@ -282,6 +282,43 @@ try {
             }
             Set-TestGuardian $false $republishedSHA256 2 1 -Results @([pscustomobject]@{ sid = 'S-1-5-21-1-2-3-1017'; connector = 'codex'; ok = $true }, $signedOut)
             Assert-TestSyncRefuses 'signed-out account' 'sign in, or remove it with its profile, then run this command again: alice (S-1-5-21-1-2-3-1018). The guardian repairs their DefenseClaw hooks only in their own Windows session)'
+            # GAP-1657: a deleted account the guardian reports through the
+            # session wait (its home no longer exists) is accepted as a
+            # removed account, not named as a signed-out one to remove again.
+            $removedRow = [pscustomobject]@{
+                user = 'gone'; sid = 'S-1-5-21-1-2-3-1018'; connector = 'codex'; ok = $false
+                error = 'enterprise hooks: protected target requires repair but its exact active Windows session is unavailable (verification: enterprise hooks: user home C:\Users\gone no longer exists: the account was deleted or its profile folder removed; run Setup /ensure again (file does not exist))'
+            }
+            Set-TestGuardian $false $republishedSHA256 2 1 -Results @([pscustomobject]@{ sid = 'S-1-5-21-1-2-3-1017'; connector = 'codex'; ok = $true }, $removedRow)
+            $adoption = Get-DefenseClawStandaloneManifestAdoption `
+                -Layout $layout `
+                -GatewayServiceName 'DefenseClawGateway' `
+                -Activation $activation `
+                -InstalledManifestSHA256 $republishedSHA256
+            if (-not [bool]$adoption.ok) {
+                $failures.Add("a deleted account reported through the session wait refused the adoption: $($adoption.reason)")
+            }
+            # GAP-1657 (reopened): next to a row waiting for a signed-out
+            # account's next sign-in the gateway counts neither; both are
+            # still excused, and any other failure still refuses.
+            $waitingNextToRemoved = [pscustomobject]@{
+                user = 'dcw-std2'; sid = 'S-1-5-21-1-2-3-1019'; connector = 'hermes'; ok = $false
+                error = "enterprise hooks: protected target waits for its account's next sign-in: DefenseClaw 1.0.2 protected it, and this release's hooks install only in the account's own Windows session; its exact active Windows session is unavailable, so the guardian repairs it at the account's next sign-in (verification: drift)"
+            }
+            Set-TestGuardian $false $republishedSHA256 3 2 -Results @([pscustomobject]@{ sid = 'S-1-5-21-1-2-3-1017'; connector = 'codex'; ok = $true }, $removedRow, $waitingNextToRemoved)
+            $adoption = Get-DefenseClawStandaloneManifestAdoption `
+                -Layout $layout `
+                -GatewayServiceName 'DefenseClawGateway' `
+                -Activation $activation `
+                -InstalledManifestSHA256 $republishedSHA256
+            if (-not [bool]$adoption.ok -or [int64]$adoption.target_count -ne 3) {
+                $failures.Add("a removed profile next to a row waiting for its sign-in refused the adoption: $($adoption.reason)")
+            }
+            Set-TestGuardian $false $republishedSHA256 4 3 -Results @([pscustomobject]@{ sid = 'S-1-5-21-1-2-3-1017'; connector = 'codex'; ok = $true }, $removedRow, $waitingNextToRemoved, [pscustomobject]@{
+                    sid = 'S-1-5-21-1-2-3-1020'; connector = 'codex'; ok = $false
+                    error = 'enterprise hooks: write managed Claude Code hook runtime: access is denied'
+                })
+            Assert-TestSyncRefuses 'removed profile and waiting row next to another failure' 'failure-free reconcile'
             # A deleted account whose profile folder was removed fails every
             # reconcile until the enumerator's next pass drops its rows; the
             # guardian status counts exactly those failures, and the adoption

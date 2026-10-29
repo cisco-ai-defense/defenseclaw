@@ -73,6 +73,7 @@ var (
 	connectorFlagConfigHome           string
 	connectorFlagHookExe              string
 	connectorRollbackRestore          bool
+	connectorRollbackToVersion        string
 	connectorVerifySetupParent        string
 	connectorVerifySetupStartIdentity string
 	connectorVerifyCleanupRecord      string
@@ -188,8 +189,9 @@ var connectorCheckAgentSettingsCmd = &cobra.Command{
 	Short: "Check that the agent's own settings let DefenseClaw hooks run (run by setup)",
 	Long: `Run the check the named connector's Setup starts with: the agent's own
 settings must not turn its hooks off or fail to parse (for example a Codex
-config.toml with a syntax error, or Claude Code disableAllHooks). It changes
-nothing. 'defenseclaw setup' runs it before it restarts the gateway, so such
+config.toml with a syntax error, or Claude Code disableAllHooks), and the
+data directory's shared hook config (hooks/.hookcfg) must be one the hooks
+read (GAP-1325). It changes nothing. 'defenseclaw setup' runs it before it restarts the gateway, so such
 settings stop setup with the reason while the running gateway keeps enforcing
 (GAP-0615).
 
@@ -230,6 +232,8 @@ func init() {
 	_ = connectorCheckAgentSettingsCmd.Flags().MarkHidden("workspace-dir")
 	connectorPrepareRollbackCmd.Flags().BoolVar(&connectorRollbackRestore, "restore", false,
 		"Restore authenticated current-release hooks after an aborted rollback")
+	connectorPrepareRollbackCmd.Flags().StringVar(&connectorRollbackToVersion, "to-version", "",
+		"The release the rollback goes to: before 1.0.5, the OpenHands and OmniGent files this release removed come back")
 	connectorCmd.PersistentFlags().StringVar(&connectorFlagName, "connector", "",
 		"Connector name (default: the active connector; 'defenseclaw guardrail status' lists them)")
 	connectorCmd.PersistentFlags().BoolVar(&connectorFlagJSON, "json", false,
@@ -404,8 +408,8 @@ func bindConnectorLifecycleConfigHome(connectorName string) (func(), error) {
 	case "hermes":
 		variable = "HERMES_HOME"
 	case "openhands", "omnigent":
-		// until 1.1: teardown-only cleanup of a removed connector reads the
-		// home native Setup bound from SetupOpts.ConfigHome.
+		// until 1.1: the teardown-only cleanup of OpenHands and OmniGent
+		// reads the home native Setup bound from SetupOpts.ConfigHome.
 		return func() {}, nil
 	default:
 		return nil, fmt.Errorf("explicit config home is unsupported for connector %q", connectorName)
@@ -583,11 +587,19 @@ func runConnectorCheckAgentSettings(cmd *cobra.Command, _ []string) error {
 	if cfg != nil {
 		opts.ManagedEnterprise = managed.IsManagedEnterprise(cfg.DeploymentMode)
 	}
-	refusal := connector.CheckAgentSettings(conn, opts)
+	// Every connector of the data directory shares hooks/.hookcfg, so a
+	// malformed one refuses the setup of any of them (GAP-1325).
+	refusal := connector.SharedHookSidecarRefusal(opts)
+	if refusal == nil {
+		refusal = connector.CheckAgentSettings(conn, opts)
+	}
 	if connectorFlagJSON {
 		payload := map[string]any{"connector": name, "action": "check-agent-settings", "refused": refusal != nil}
 		if refusal != nil {
 			payload["reason"] = refusal.Error()
+			// A setup that restarts the gateway goes ahead: the gateway's
+			// writer repairs this sidecar (GAP-1815).
+			payload["repaired_by_restart"] = errors.Is(refusal, connector.ErrSharedHookSidecarRestartRepairs)
 		}
 		_ = json.NewEncoder(cmd.OutOrStdout()).Encode(payload)
 	} else if refusal != nil {
@@ -1079,27 +1091,8 @@ func runConnectorTeardown(cmd *cobra.Command, _ []string) error {
 		return fmt.Errorf("connector %s teardown: %w", name, err)
 	}
 
-	// until 1.1: in an uninstall, a removed connector's entries in the agent
-	// configs, its stub and its import path go too, so a removed DefenseClaw
-	// does not keep blocking the agent.
-	if os.Getenv(connector.RemovedConnectorUninstallEnv) == "1" {
-		if _, err := connector.UninstallRemovedConnector(name, opts); err != nil {
-			if connectorFlagJSON {
-				_ = json.NewEncoder(cmd.OutOrStdout()).Encode(map[string]any{
-					"connector": name,
-					"action":    "teardown",
-					"ok":        false,
-					"error":     err.Error(),
-				})
-				return fmt.Errorf("connector teardown failed")
-			}
-			return fmt.Errorf("connector %s teardown: %w", name, err)
-		}
-	}
-
-	// until 1.1: a removed connector's teardown changes only its hook script
-	// and tokens (outside an uninstall); the rest is listed with the steps to
-	// remove it by hand.
+	// until 1.1: what the teardown of OpenHands or OmniGent could not remove
+	// is listed as information, under the one removal notice.
 	leftovers, removed := connector.RemovedConnectorLeftovers(name, opts)
 	if connectorFlagJSON {
 		payload := map[string]any{
@@ -1108,11 +1101,15 @@ func runConnectorTeardown(cmd *cobra.Command, _ []string) error {
 			"ok":        true,
 		}
 		if removed {
+			payload["notice"] = connector.RemovedConnectorNotice
 			payload["leftovers"] = append([]connector.RemovedLeftover{}, leftovers...)
 		}
 		return json.NewEncoder(cmd.OutOrStdout()).Encode(payload)
 	}
 	fmt.Fprintf(cmd.OutOrStdout(), "  %s %s teardown complete\n", Style(glyph("✓", "OK"), "fg=green", "bold"), name)
+	if removed && len(leftovers) == 0 {
+		fmt.Fprintln(cmd.OutOrStdout(), connector.RemovedConnectorNotice)
+	}
 	fmt.Fprint(cmd.OutOrStdout(), connector.FormatRemovedLeftovers(name, leftovers))
 	return nil
 }
@@ -1286,12 +1283,31 @@ func runConnectorPrepareRollback(cmd *cobra.Command, _ []string) error {
 			converted[name] = count
 		}
 	}
+	// until 1.1 (GAP-2136): the agent files the OpenHands/OmniGent teardown
+	// changed are outside the data folder the rollback swaps.
+	var putBack []connector.RemovedRollbackResult
+	var putBackErr error
+	if !connectorRollbackRestore {
+		putBack, putBackErr = connector.RestoreRemovedConnectorFilesForRollback(dataDir, connectorRollbackToVersion)
+	}
 	if connectorFlagJSON {
 		payload := map[string]any{
 			"action":    "prepare-rollback",
 			"ok":        len(failed) == 0,
 			"converted": converted,
 			"failed":    failed,
+		}
+		if len(putBack) > 0 || putBackErr != nil {
+			restoredFiles := []string{}
+			for _, result := range putBack {
+				if result.Restored {
+					restoredFiles = append(restoredFiles, result.Path)
+				}
+			}
+			payload["removed_connector_files_restored"] = restoredFiles
+			if putBackErr != nil {
+				payload["removed_connector_files_error"] = putBackErr.Error()
+			}
 		}
 		if connectorRollbackRestore {
 			payload["restored"] = converted
@@ -1313,6 +1329,20 @@ func runConnectorPrepareRollback(cmd *cobra.Command, _ []string) error {
 			if reason, ok := failed[name]; ok {
 				fmt.Fprintf(cmd.ErrOrStderr(), "  %s: %s\n", name, reason)
 			}
+		}
+	}
+	if !connectorFlagJSON {
+		for _, result := range putBack {
+			if result.Restored {
+				fmt.Fprintf(cmd.OutOrStdout(), "  %s %s: put back %s as the earlier release set it up\n",
+					Style(glyph("✓", "OK"), "fg=green", "bold"), result.Connector, result.Path)
+			} else if result.Reason != "" {
+				fmt.Fprintf(cmd.OutOrStdout(), "  %s: kept %s as it is (%s); run the earlier release's setup for it if you need it\n",
+					result.Connector, result.Path, result.Reason)
+			}
+		}
+		if putBackErr != nil {
+			fmt.Fprintf(cmd.ErrOrStderr(), "  %v\n", putBackErr)
 		}
 	}
 	if len(failed) > 0 {

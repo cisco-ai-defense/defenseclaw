@@ -445,10 +445,17 @@ func TestHomeSpelledAuthorizedKeysWriteBlocks(t *testing.T) {
 		{"ruby read", `ruby -e 'File.open("~/.ssh/authorized_keys", "r") { |f| puts f.read }'`, "", "", true},
 		{"node read", `node -e 'require("fs").readFileSync("/home/alice/.ssh/authorized_keys")'`, "", "", true},
 		{"symlink read", `ln -s ~/.ssh/authorized_keys ./reader.link && cat ./reader.link`, "", "", true},
-		{"count", `grep -c ssh-ed25519 ~/.ssh/authorized_keys`, "", "", true},
+		// A plain read with no redirect, pipe into a writer or in-place flag
+		// stays allowed in action (owner decision 2, TGT-0194; GAP-2168); its
+		// write twin still blocks.
+		{"count", `grep -c ssh-ed25519 ~/.ssh/authorized_keys`, "", "", false},
+		{"count to keys file", `grep -c ssh-ed25519 marker.pub >> ~/.ssh/authorized_keys`, "", "", true},
+		{"fingerprint list", `ssh-keygen -l -f ~/.ssh/authorized_keys`, "", "", false},
+		{"fingerprint remove", `ssh-keygen -R host -f ~/.ssh/authorized_keys`, "", "", true},
 		{"metadata", `ls -l ~/.ssh/authorized_keys`, "", "", false},
 		{"diff", `diff ~/.ssh/authorized_keys marker.pub | head -5`, "", "", true},
-		{"line count", `wc -l ~/.ssh/authorized_keys`, "", "", true},
+		{"line count", `wc -l ~/.ssh/authorized_keys`, "", "", false},
+		{"line count to keys file", `wc -l marker.pub > ~/.ssh/authorized_keys2`, "", "", true},
 		{"ordinary count", `grep -c ssh-ed25519 report.txt`, "", "", false},
 		{"ordinary diff", `diff report.txt marker.pub | head -5`, "", "", false},
 		{"ordinary line count", `wc -l report.txt`, "", "", false},

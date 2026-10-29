@@ -1,22 +1,30 @@
 ---
 title: Claude Code
-description: Guard Claude Code with DefenseClaw hooks that can block or ask before a tool runs.
+description: Claude Code connector wires the documented lifecycle hook set. Thirteen current events can return block decisions, and PreToolUse supports native HITL ask.
 keywords:
-  - Claude Code connector
+  - DefenseClaw Claude Code connector
   - Claude Code hooks
-  - PreToolUse
+  - Claude Code PreToolUse
+  - Claude Code observability
 ---
 
 import { ConnectorSupport } from '@/components/support-matrix';
 
-DefenseClaw adds hooks to Claude Code's settings. Host setup disables native OpenTelemetry export and removes settings left by earlier releases: Claude Code cannot verify which local account holds a stopped gateway's TCP port. Isolated OpenShell images retain native telemetry. This is a hook connector: Claude Code talks to Anthropic directly and no proxy is involved.
+DefenseClaw adds hooks to Claude Code's settings, using [Anthropic's documented hook surfaces](https://code.claude.com/docs/en/hooks). Host setup disables native OpenTelemetry export and removes settings left by earlier releases: Claude Code cannot verify which local account holds a stopped gateway's TCP port. Isolated OpenShell images retain native telemetry. This is a hook connector: Claude Code talks to Anthropic directly at `api.anthropic.com` and no proxy is involved. No proxy listener is involved.
 
-On a per-user install, an explicitly saved `guardrail.hook_fail_mode` takes precedence over the selected tier. See the [gateway outage table](/docs/reference/apis/capability-matrix#gateway-outage) and [Fail modes](/docs/reference/configuration/fail-modes).
+On a per-user install, an explicitly saved `guardrail.hook_fail_mode` takes precedence over the selected tier. See the [gateway outage table](/docs/connectors/capability-matrix#gateway-outage) and [Fail modes](/docs/reference/fail-modes).
 ## Platform support
 
 <ConnectorSupport id="claudecode" />
 
-## Set up
+| Platform | Status | Connector path |
+| --- | --- | --- |
+| macOS and Linux | **Supported** | Portable command hooks; native OpenTelemetry only in isolated OpenShell. |
+| Native Windows x64 | **Supported** | Shell-free native executable hooks, using Claude Code's `command` plus `args` exec form. |
+
+On Windows, install and run Claude Code from PowerShell or CMD ([native setup](https://code.claude.com/docs/en/setup)). Git for Windows is recommended upstream when Claude should use its Bash tool, but it is optional: without it Claude uses its PowerShell tool. Git for Windows is not part of the DefenseClaw hook contract. WSL, Git Bash, Cygwin, MSYS, containers and virtual machines are outside the native connector path. Each hook entry except `PreToolUse` runs through the system `cmd.exe`. On a packaged install the `PreToolUse` entry runs the installed `defenseclaw-hook.exe` with `launcher-guard`, because Cursor imports the hooks in `~/.claude/settings.json` and runs an entry's command without its arguments, and a `cmd.exe` entry made Cursor block every tool call. On a one-line install, which has no separate installed hook, the `PreToolUse` entry runs `defenseclaw-gateway.exe` from the same folder with `launcher-guard` instead. Started that way, the guard gives Cursor no answer; Cursor's own DefenseClaw hooks, when set up, decide Cursor's tool calls. If the launcher is missing, for example after antivirus quarantine, Claude Code blocks each new prompt and each tool call with one sentence that says to run the DefenseClaw installer again.
+
+## Setup
 
 On a new install, run `defenseclaw init --connector claude-code` first. Until DefenseClaw is initialized, `defenseclaw setup claude-code` stops with `DefenseClaw is not initialized — run 'defenseclaw init' first.`
 
@@ -25,13 +33,11 @@ defenseclaw setup claude-code                # first setup defaults to observe: 
 defenseclaw setup claude-code --mode action  # block on policy hits
 ```
 
-A re-run without `--mode` keeps the current mode, including with `--yes`.
-Use `--mode observe` or `--mode action` to choose a mode explicitly.
+A re-run without `--mode` keeps the current mode, including with `--yes`. On a terminal it still asks for the mode, with the current one as the default (Enter keeps it), and whether to re-apply the hooks; in action mode it also asks whether to add the LLM judge. `--yes` skips the questions ([the questions setup asks](/docs/guardrail/switching-connectors#the-questions-setup-asks)). Use `--mode observe` or `--mode action` to choose a mode explicitly.
 
-On Windows, run the same commands in PowerShell. Quit and reopen Claude Code afterwards so it loads the hooks.
-After upgrading from an earlier release, quit all running Claude Code processes and reopen them so they stop using any old exporter settings.
+On Windows, run the same commands in PowerShell. Quit and reopen Claude Code afterwards so it loads the hooks. After upgrading from an earlier release, quit all running Claude Code processes and reopen them so they stop using any old exporter settings.
 
-## Check it
+### Check it
 
 ```bash
 defenseclaw status
@@ -39,17 +45,7 @@ defenseclaw status
 
 The agent appears under **Agents** with its mode. `defenseclaw doctor` passes the **Claude Code hooks** row.
 
-
-## What it can block or ask
-
-<HookEventsList connector="claudecode" />
-
-- In action mode `PreToolUse` can deny a tool call or ask you first. The question appears inside Claude Code in Manual mode, its default; in any other permission mode the call is blocked with a note to switch to Manual mode and ask again.
-- The prompt, permission, task, stop, compaction, config and elicitation events can also block.
-- Events that carry a tool's result (`PostToolUse`, `PostToolUseFailure`, `PermissionDenied`) are advisory. DefenseClaw scans them and records findings, but the tool has already run.
-- Observe mode records policy findings without blocking on those findings. When the gateway is not running, the default and permissive policies let the call run with one warning and strict blocks it; every other hook failure blocks ([gateway outage table](/docs/reference/apis/capability-matrix#gateway-outage)). Settings and limits are in [Fail modes](/docs/reference/configuration/fail-modes).
-
-## Files it changes
+## Files DefenseClaw will modify
 
 | What | macOS and Linux | Windows |
 | --- | --- | --- |
@@ -57,23 +53,167 @@ The agent appears under **Agents** with its mode. `defenseclaw doctor` passes th
 | Hook program | `~/.defenseclaw/hooks/claude-code-hook.sh` | `%USERPROFILE%\.local\bin\defenseclaw-hook.exe` (one-line install) or `%LOCALAPPDATA%\DefenseClaw\HookRuntime\defenseclaw-hook.exe` (Setup installer) |
 | Connector credentials | `~/.defenseclaw/hooks` | `%USERPROFILE%\.defenseclaw\hooks` |
 
-DefenseClaw backs up `settings.json` first. Teardown restores the backup, or removes only its own entries if you edited the file since.
+See the [Windows path reference](/docs/get-started/windows/paths-troubleshooting). DefenseClaw stores a hash-checked backup of `settings.json` first. Teardown restores it byte for byte when the identity still matches. If the file drifted, or you edited it since, it removes only DefenseClaw's entries.
+
+Setup changes only the files above. DefenseClaw also reads, without changing them, the files Claude Code uses for MCP servers, plugins, skills, agents and memory; see [AI Discovery](/docs/ai-discovery).
+
+<Accordions>
+<Accordion title="What DefenseClaw inventories for Claude Code">
+
+| Asset | Sources |
+| --- | --- |
+| MCP servers | Local and user state in `~/.claude.json` (`%CLAUDE_CONFIG_DIR%\.claude.json` when set), project `<workspace>/.mcp.json`, in that order, then the `mcpServers` block DefenseClaw 0.8.x wrote into `~/.claude/settings.json` (`mcp set` and `mcp unset` remove a same-named entry from it). Plugin-provided and claude.ai connector MCP are not attributed. |
+| Plugins | Marketplace cache (honors `CLAUDE_CODE_PLUGIN_CACHE_DIR`). Managed `enabledPlugins` wins over user, project and local. A dynamic `policyHelper` is reported unverified. |
+| Skills | Launch directory, every parent up to the repository root, and nested `.claude/skills` roots. Nested skills stay unverified until session activity proves activation. True skills win over legacy commands. Symlinks are canonicalized and de-duplicated. |
+| Agents | User and project agents by required frontmatter, closest project first. Managed, plugin and `--agents` agents stay unverified. |
+| Auto-memory | `autoMemoryDirectory`, or the shared repository default under `~/.claude/projects/<project>/memory`. Unverified when `--settings`, remote settings or native policy could change the path. |
+| `/add-dir` roots | Runtime only. Not in persistent inventory. From 2.1.219, `DirectoryAdded` records the path and source. |
+
+</Accordion>
+</Accordions>
+
+### Settings that turn the hooks off
+
+| Setting | Effect | How to notice and fix |
+| --- | --- | --- |
+| `disableAllHooks: true` in `~/.claude/settings.json` | Every hook off. | Guardrail-degraded alert, DEGRADED in `defenseclaw status`, **Claude Code hooks** row fails in `defenseclaw doctor`. Remove the key and restart Claude Code. |
+| Same key in `.claude/settings.local.json`, `.claude/settings.json` or a `claude --settings` file | Hooks off for that project or file. DefenseClaw records nothing for those sessions. | `status` and `doctor` check the current folder's project settings. A `--settings` file is invisible. |
+| `settings.json` keeps other DefenseClaw hooks but not `PreToolUse` | Tool calls uninspected. | `doctor` fails the **Claude Code hooks** row. Run `defenseclaw setup claude-code --yes`. |
+| `settings.json` is a symlink | Works on Linux and macOS. On a per-user install setup writes the hooks through a link to a file you own, also when that file is outside your home folder. A link or target that another account owns is refused, and setup changes nothing. On a managed install a link that leads out of your home folder is refused too. On Windows setup refuses a `settings.json` that is a symbolic link or junction, wherever it points, and changes nothing; `doctor` fails the **Claude Code hooks** row. | The refusal names the link and its target. Point the link at a file you own, or replace it with the file, then run setup again. On Windows replace the link with the file it points to, then run setup again. |
+
+## Enterprise (standalone profile)
+
+Claude Code gets machine policy instead of the per-user files. The `managed-settings.d` directory holds `90-defenseclaw.json` with the hooks and `00-defenseclaw-version-floor.json`.
+
+| OS | Directory |
+| --- | --- |
+| Linux | `/etc/claude-code` |
+| macOS | `/Library/Application Support/ClaudeCode` |
+| Windows | `C:\Program Files\ClaudeCode` |
+
+The machine-wide drop-in carries one hook contract for every account, not the version-selected one below. On Linux and macOS it is the 28-event `claudecode-hooks-v1` contract, with no `DirectoryAdded`, whatever Claude Code version a user runs, and the floor file sets `requiredMinimumVersion` to 2.1.154, the lowest version with a verified DefenseClaw hook contract. On standalone Windows the drop-in uses the 29-event `claudecode-hooks-v2` contract and the floor rises to 2.1.219 when every enrolled account runs Claude Code 2.1.219 or later; `enterprise policy show` and `verify` name the reason. Claude Code reads that setting only from 2.1.163, so builds older than 2.1.163 ignore it. Use application control to keep older builds off a host. Your own `requiredMinimumVersion` wins, and a file at that name that DefenseClaw did not write is yours: it is never rewritten or removed. Claude Code builds before 2.1.242 read the key only from a higher-precedence source (HKLM `Settings`, macOS managed preferences), which must carry it itself. See [Claude Code version floor](/docs/enterprise/machine-policy).
+
+### On a managed computer
+
+The per-user commands on this page do not run on a computer with a standalone enterprise install. On Linux and macOS, `defenseclaw` there offers only `sandbox` commands, `help` and `--version`: anything else prints "This computer is managed; use `defenseclaw sandbox status` for your read-only status and `defenseclaw sandbox policy explain` for your policy. Other commands require an administrator." and exits 2. On native Windows, `defenseclaw` is the administrator's command: it refuses `setup claudecode` and `setup remove`, and has no `guardrail` group.
+
+The administrator manages Claude Code in the managed `config.yaml`. `guardrail.connectors.claudecode: {}` adds it, the connector's `mode` and `hook_fail_mode` tune it, and `guardrail.connectors.claudecode.enabled: false` removes it. Apply the change as in [Change the config](/docs/enterprise/lifecycle), then check it with `enterprise policy verify` ([Machine policy](/docs/enterprise/machine-policy)).
+
+## Hook capabilities
+
+<HookEventsList connector="claudecode" />
+
+| Contract | Agent versions | Hook script | Events | Can block | Can ask |
+| --- | --- | --- | --- | --- | --- |
+| `claudecode-hooks-v1` | `>=2.1.154, <2.1.219` | `v7` | 28 | 13 | 1 |
+| `claudecode-hooks-v2` | `>=2.1.219` | `v7` | 29 | 14 | 1 |
+
+| Contract | Events registered | Block events | Ask events |
+| --- | --- | --- | --- |
+| `claudecode-hooks-v1` | `SessionStart`, `UserPromptSubmit`, `UserPromptExpansion`, `MessageDisplay`, `PreToolUse`, `PermissionRequest`, `PermissionDenied`, `PostToolUse`, `PostToolUseFailure`, `PostToolBatch`, `Stop`, `StopFailure`, `SubagentStart`, `SubagentStop`, `SessionEnd`, `InstructionsLoaded`, `ConfigChange`, `CwdChanged`, `FileChanged`, `WorktreeRemove`, `TaskCreated`, `TaskCompleted`, `TeammateIdle`, `PreCompact`, `PostCompact`, `Elicitation`, `ElicitationResult`, `Notification` | `UserPromptSubmit`, `UserPromptExpansion`, `PreToolUse`, `PermissionRequest`, `TaskCreated`, `TaskCompleted`, `TeammateIdle`, `Stop`, `SubagentStop`, `ConfigChange`, `PreCompact`, `Elicitation`, `ElicitationResult` | `PreToolUse` |
+| `claudecode-hooks-v2` | As the previous contract, plus `DirectoryAdded` | `UserPromptSubmit`, `UserPromptExpansion`, `PreToolUse`, `PermissionRequest`, `PostToolBatch`, `TaskCreated`, `TaskCompleted`, `TeammateIdle`, `Stop`, `SubagentStop`, `ConfigChange`, `PreCompact`, `Elicitation`, `ElicitationResult` | `PreToolUse` |
+
+| Fact | Value |
+| --- | --- |
+| Hook script | `claude-code-hook.sh` |
+| Hook config paths | `~/.claude/settings.json` |
+| Response field | `claude_code_output` |
+| Native OTLP | isolated OpenShell only; host setup removes only exporters DefenseClaw wrote; your own exporters stay |
+| W3C traceparent | yes |
+| Fail closed | yes |
+
+### What it can block or ask
+
+- In action mode `PreToolUse` can deny a tool call or ask you first. The question appears inside Claude Code in Manual mode, its default; in any other permission mode the call is blocked with a note to switch to Manual mode and ask again.
+- The prompt, permission, task, stop, compaction, config and elicitation events can also block.
+- Events that carry a tool's result (`PostToolUse`, `PostToolUseFailure`, `PermissionDenied`) are advisory. DefenseClaw scans them and records findings, but the tool has already run.
+- Observe mode records policy findings without blocking on those findings. On a per-user install, when the gateway is not running, the default and permissive policies let the call run with one warning; strict and managed installs block it ([gateway outage table](/docs/connectors/capability-matrix#gateway-outage)). A running hook blocks every other failure it detects; a killed or timed-out hook lets the call run ([Vendor limits](/docs/enterprise/machine-policy#vendor-limits)). Settings and limits are in [Fail modes](/docs/reference/fail-modes).
+
+### Verdict mapping
+
+Thirteen events can block on Claude Code `>=2.1.154, <2.1.219`. From `2.1.219` fourteen can, because `PostToolBatch` joins the list. Only `PreToolUse` supports native ask. `Setup` is observation-only and is not registered. `WorktreeCreate` is not registered, because a handler replaces Claude Code's default worktree creation and must return the new path.
+
+Claude Code's interactive `!` shell mode is outside this hook contract. In the reviewed native CLI, a command entered through `!` ran without a preceding `PreToolUse` or `UserPromptSubmit` event, while the same kind of command through the Bash tool produced `PreToolUse`. DefenseClaw cannot inspect or deny a direct `!` shell command through this connector; host filesystem permissions still apply.
+
+| Event group | DefenseClaw behavior |
+| --- | --- |
+| `PreToolUse` | Evaluates typed tool arguments. Action mode returns a deny, or `permissionDecision: ask`. |
+| `PostToolUse`, `PostToolUseFailure`, `PermissionDenied` | Carry returned content, not a typed action. Scanned for trust, secret and PII findings. Command, path, cognitive-file and C2 rules do not block on literals in the returned bytes, so source text that explains `rm -rf /` produces telemetry only. Advisory. |
+| `PostToolBatch` | Carries the batch's returned content, so its findings are advisory and command or path rules do not block on it. From 2.1.219 it can block continuation before the next model call. It cannot undo the batch's side effects. |
+| `DirectoryAdded` (2.1.219 and later) | Synchronous, matcherless, bounded to 30 seconds, observation only. Records the added path and source. No block, ask or decision authority. |
+| `ConfigChange` | Blockable, except when `source=policy_settings`, where Claude Code ignores blocking decisions. |
+
+A standalone `PostToolUse` response may use physically verified local source provenance to lower source-code trust findings to detection-only telemetry. Batch, failure, denial and mixed outputs stay untrusted content.
+
+### Native ask
+
+Only `PreToolUse` supports native ask. In action mode a confirm verdict returns `permissionDecision: ask` and Claude Code shows its own permission prompt. Confirm findings on other events are recorded as alerts.
+
+### Fail mode
+
+Can fail closed: yes. On a per-user install with no saved mode, a gateway that is not running follows the policy tier: the default and permissive policies let the call run with one warning, and the strict policy blocks it ([gateway outage table](/docs/connectors/capability-matrix#gateway-outage)). Every other failure, an error or unusable answer included, blocks the events that support a block response. Settings and edge cases are in [Fail modes](/docs/reference/fail-modes).
+
+### Subagents and the Agent tool
+
+Measured on Claude Code 2.1.156, with hooks outside a sandbox.
+
+| Behavior | Detail |
+| --- | --- |
+| The `Agent` call | Gets its own `PreToolUse`, and a `PostToolUse` after the subagent's hooks and `SubagentStop`. The result names the subagent in `tool_response.agentId`. A call with `run_in_background` gets its `PostToolUse` at launch with status `async_launched`. An unknown subagent type gets `PostToolUseFailure`. |
+| Subagent hooks | `SubagentStart`, `PreToolUse`, `PermissionRequest`, `PostToolUse`, `PostToolUseFailure`, `PostToolBatch` and `SubagentStop` carry `agent_id` and `agent_type`. The main agent's hooks carry neither. No hook carries the ID of the `Agent` call that started the subagent. |
+| Esc interrupt | The subagent sends nothing more: no `PostToolUse` for the `Agent` call, no `SubagentStop`, `PostToolBatch` or `Stop`. A call refused at the permission prompt gets no `PostToolUse`; only the turn's `PostToolBatch` lists it. |
+
+DefenseClaw records a subagent's calls under its agent ID and type, with the main agent as parent at depth 1, also for parallel `Agent` calls. The correlation ledger records each subagent as caused by the `Agent` call that ran it (relationship `caused_by`, rule `spawned-agent-tool-result`). A `PostToolBatch` is recorded as a `tool_batch` tool record listing its calls by `tool_name` and `tool_use_id`.
+
+Protection for active `AGENTS.md` and `MEMORY.md` files is bound to context. DefenseClaw accepts an active file only from an authenticated `InstructionsLoaded` event that names the exact absolute, regular, non-symlinked file. A later `PreToolUse` mutation is enforcement-eligible only in that session and for that path. If an authenticated event names a recognized path but file identity cannot be proved, DefenseClaw records bounded session uncertainty and fails closed only for a statically proven mutation of that canonical name.
+
+## How Claude Code reaches the gateway
+
+On every host install, setup removes the native exporter settings it can prove DefenseClaw wrote and revokes the scoped token. Proof is a value that carries the scoped credential setup gave Claude Code (the current one or one it recorded as retired), a value its setup backup recorded writing, or the earlier `otelHeadersHelper`. With no other exporter left, it sets Claude Code telemetry and the OTLP exporters off. An exporter you set yourself, such as your own collector in `OTEL_EXPORTER_OTLP_ENDPOINT`, stays with the settings that turn it on. A route counts as DefenseClaw's when it would send a DefenseClaw credential, also one it inherits: a signal endpoint you added, such as `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT`, without its own `_HEADERS` key sends the generic `OTEL_EXPORTER_OTLP_HEADERS` an earlier DefenseClaw release wrote, so setup removes it with them. Add it again after setup, or give it its own `_HEADERS` key first. Setup writes the content settings (`OTEL_LOG_USER_PROMPTS` and the other `OTEL_LOG_*` keys) as `0`; a value you set yourself stays. An exporter left by an earlier install whose credential is gone also stays, even when it sends `x-defenseclaw-*` headers or points at an old local port, because setup can no longer prove it is DefenseClaw's. Remove its `OTEL_*` entries from the `env` block in `~/.claude/settings.json` by hand. Quit and reopen Claude Code after an upgrade so an existing process stops using its old exporter settings. Isolated OpenShell images retain native logs and metrics; native traces and content-bearing telemetry gates stay off. Redaction follows the v8 bucket and profile policy: edit `observability.destinations[].routes[].selector.buckets` and `observability.redaction_profiles`, then follow [Redaction](/docs/observability/redaction).
+
+<Flow
+  direction="TB"
+  caption="Claude Code reaches the gateway through hooks. Only isolated OpenShell uses native OpenTelemetry for logs and metrics."
+>
+  <Node id="cc" kind="agent">Claude Code</Node>
+  <Node id="hooks" kind="connector">{`DefenseClaw hook\nruns on each hook event`}</Node>
+  <Node id="otel" kind="connector">{`Built-in telemetry\nOpenTelemetry exporter`}</Node>
+  <Node id="gateway" kind="gateway">{`DefenseClaw gateway\nAPI port, 18970 by default`}</Node>
+  <Edge from="cc" to="hooks" label="runs" />
+  <Edge from="hooks" to="gateway" label="asks for a verdict" />
+  <Edge from="cc" to="otel" label="exports" />
+  <Edge from="otel" to="gateway" label="logs + metrics" />
+</Flow>
+
+**Behind an HTTP proxy.** Host hooks reach the gateway on 127.0.0.1 and ignore `HTTP_PROXY` and `HTTPS_PROXY`. Host setup does not enable native OTLP. DefenseClaw does not add `NO_PROXY` to the `env` block in `~/.claude/settings.json`, because a value there would replace your shell's `NO_PROXY` for all Claude Code traffic. If your proxy log still shows `POST http://127.0.0.1:<port>/...` requests from Claude Code, set `NO_PROXY=127.0.0.1,localhost` (and `no_proxy`) in the shell that starts it, for example in `~/.bashrc` or `~/.zshrc`. On Windows run `setx NO_PROXY 127.0.0.1,localhost` once and open a new terminal.
+
+**Another account on the gateway port.** Host hooks verify the listener before sending an event. Native exporters cannot make that check, so host setup removes the exporters DefenseClaw wrote and their old credentials on Linux, macOS and Windows. An exporter you added yourself is yours and stays, and so does an earlier install's exporter whose credential is gone (remove it by hand, as above). `defenseclaw status` and `defenseclaw doctor` name a peer-held API port and suggest a free one. To give this account its own port, run `defenseclaw setup gateway --api-port <port>`. Keep the gateway running while Claude Code runs. A Claude Code process started before the upgrade must be restarted to discard its old settings.
+
+## In an OpenShell sandbox
+
+`defenseclaw sandbox run claude` runs Claude Code in an OpenShell sandbox ([macOS](/docs/sandboxes/macos), [guide](/docs/sandboxes/first-session)). The files below exist only in the image.
+
+| Item | Detail |
+| --- | --- |
+| Tier | Managed. Hooks are in `/etc/claude-code/managed-settings.d/50-defenseclaw.json` with `allowManagedHooksOnly`. The drop-in also turns off Claude Code's own sandbox, the auto-updater, installation checks and non-essential traffic, and sends OTel to DefenseClaw. Hooks fail closed and use a per-sandbox token. |
+| Skip permissions | On by default (`open` and `balanced` packs): `--dangerously-skip-permissions`. `--safe` or the `strict` pack keeps prompts, and managed settings refuse `bypassPermissions` from a flag or file. |
+| Sign-in | `--llm auto` shares `ANTHROPIC_API_KEY`, else `CLAUDE_CODE_OAUTH_TOKEN` (from `claude setup-token`). OpenShell holds the secret; the sandbox gets a placeholder valid only at `api.anthropic.com`. `--llm bedrock`, and `auto` when neither is set, shares a short-term `AWS_BEARER_TOKEN_BEDROCK` for the Bedrock Mantle Anthropic endpoint in `--bedrock-region` (default `$AWS_REGION`, then `$AWS_DEFAULT_REGION`, then `us-east-1`). `openshell.llm` sets the default. With `--llm none`, log in inside the sandbox; that login stays in the sandbox home. |
+| Bedrock models | Bedrock Mantle serves Claude only under `anthropic.*` ids. A Bedrock run starts on `anthropic.claude-sonnet-5` and maps Opus to `anthropic.claude-opus-4-8`, Sonnet to `anthropic.claude-sonnet-5`, and Haiku (also background tasks) to `anthropic.claude-haiku-4-5`. Pick another with `-- --model MODEL` or `/model`. |
+| Per-sandbox settings | A read-only `60-defenseclaw-run.json` wins over the image's. It pins the model provider (and Bedrock models), so a repository's `.claude/settings.json` cannot redirect the conversation. A read-only `/etc/claude-code/managed-mcp.json` lists the MCP servers brought from your setup. Repository `.mcp.json` servers do not start unless the pack sets [`mcp.project_servers: allow`](/docs/sandboxes/policy-packs). `--no-mcp` leaves yours behind. |
+| Image | Claude Code 2.1.156 by default. A version without a reviewed Linux hook contract is refused. Verified end to end against a mock model, including hostile settings such as `disableAllHooks`, and in a live run where a blocked command was denied and the egress block list held. |
 
 ## Limits
 
 - `disableAllHooks: true` in any Claude Code settings file turns every hook off. The gateway raises a guardrail-degraded alert, `defenseclaw status` shows DEGRADED, and `defenseclaw doctor` fails the **Claude Code hooks** row. Remove the key and restart Claude Code.
 - A project's `.claude/settings.json`, or a file passed with `claude --settings`, can do the same for its sessions. DefenseClaw cannot see a `--settings` file.
-- Claude Code does not run its hook for a command you type with `!` in shell mode. DefenseClaw cannot inspect or block that command. See [Known limits in 1.0.4](/docs/troubleshooting/known-limits#claude-code-shell).
-- Keep the gateway running while Claude Code runs. Give each account on a shared computer its own gateway port. Per-user hooks verify the connected gateway account before sending an event. During an outage the default and permissive policies let the call run with a warning, strict blocks it.
-- Per-user hooks live in a file you own. The [enterprise standalone profile](/docs/enterprise/configure/machine-policy) puts them in machine policy instead.
+- Claude Code does not run its hook for a command you type with `!` in shell mode, as input from you. DefenseClaw cannot inspect or block that command. See [Known limits](/docs/support-matrix#claude-code-shell).
+- `PostToolUse`, `PostToolUseFailure` and `PermissionDenied` are advisory: they cannot undo a finished tool.
+- `ConfigChange` is blockable, except when `source=policy_settings`, where Claude Code ignores blocking decisions.
+- `Setup` and `WorktreeCreate` are not registered.
+- Keep the gateway running while Claude Code runs. Give each account on a shared computer its own gateway port. Per-user hooks verify the connected gateway account before sending an event. What an outage does is in [What it can block or ask](#what-it-can-block-or-ask).
+- Per-user hooks live in a file you own. The [enterprise standalone profile](/docs/enterprise/machine-policy) puts them in machine policy instead.
 
-## On a managed computer
-
-The per-user commands on this page do not run on a computer with a standalone enterprise install. On Linux and macOS, `defenseclaw` there offers only `sandbox` commands, `help` and `--version`: anything else prints "This computer is managed; only `defenseclaw sandbox` commands are available here." and exits 2. On native Windows, `defenseclaw` is the administrator's command: it refuses `setup claudecode` and `setup remove`, and has no `guardrail` group.
-
-The administrator manages Claude Code in the managed `config.yaml`. `guardrail.connectors.claudecode: {}` adds it, the connector's `mode` and `hook_fail_mode` tune it, and `guardrail.connectors.claudecode.enabled: false` removes it. Apply the change as in [Change the config](/docs/enterprise/operate/lifecycle#change-the-config), then check it with `enterprise policy verify` ([Machine policy](/docs/enterprise/configure/machine-policy#inspect-export-and-verify)).
-
-## Turn it off
+## Disable
 
 For a per-user, single-connector install:
 
@@ -81,17 +221,6 @@ For a per-user, single-connector install:
 defenseclaw guardrail disable --yes
 ```
 
-With the default restart, disabling removes DefenseClaw hooks and OpenTelemetry
-settings from Claude Code's settings file. It preserves your other Claude Code
-settings. `defenseclaw guardrail enable` restores DefenseClaw hooks and telemetry
-settings. For a whole-guardrail disable with `--no-restart`, removal takes effect
-when you restart the gateway. With `--connector claudecode` and `--no-restart`,
-a running gateway removes the connector's entries at once.
-To remove the connector from DefenseClaw's configuration, run
-`defenseclaw setup remove claudecode --yes` (add `--force` if it is the last one).
+With the default restart, disabling removes DefenseClaw hooks and OpenTelemetry settings from Claude Code's settings file. It preserves your other Claude Code settings. `defenseclaw guardrail enable` restores DefenseClaw hooks and telemetry settings. It asks `Proceed? [Y/n]`; add `--yes` in scripts or when stdin is not a terminal. For a whole-guardrail disable with `--no-restart`, removal takes effect when you restart the gateway. With `--connector claudecode` and `--no-restart`, a running gateway removes the connector's entries at once. To remove the connector from DefenseClaw's configuration, run `defenseclaw setup remove claudecode --yes` (add `--force` if it is the last one).
 
 On a multi-connector install, add `--connector claudecode` to `guardrail disable` and `guardrail enable` to change only this agent.
-
-## Details
-
-Hook contracts and version floors, subagents, inventory, proxy behavior, enterprise policy files and the OpenShell sandbox image are in the [Claude Code reference](/docs/reference/connectors/claudecode).

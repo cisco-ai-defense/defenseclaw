@@ -14,16 +14,55 @@ import (
 	"strings"
 )
 
-// NativeSingleCall reads the CLI's preToolUse toolCalls envelope. A hook
-// decision covers the whole array, so only one fully named call can be
-// projected onto the gateway's single-call evaluator. Multiple calls and
-// unknown fields remain unparsed instead of silently dropping a write.
+// NativeSingleCall reads a CLI preToolUse toolCalls envelope of exactly one
+// fully named call. Unknown fields leave it unread instead of silently
+// dropping a write.
 func NativeSingleCall(value any) (string, any, bool) {
 	calls, ok := value.([]any)
 	if !ok || len(calls) != 1 {
 		return "", nil, false
 	}
-	call, ok := calls[0].(map[string]any)
+	return nativeCall(calls[0])
+}
+
+// MaxNativeCalls bounds the calls of one toolCalls envelope the gateway
+// judges; a larger envelope stays unread.
+const MaxNativeCalls = 64
+
+// NativeCall is one call of a CLI preToolUse toolCalls envelope, with the
+// arguments CLIToolArgs projects for it.
+type NativeCall struct {
+	Name string
+	Args json.RawMessage
+}
+
+// NativeCalls reads every call of a CLI preToolUse toolCalls envelope: a
+// model's parallel tool calls arrive in one hook, and the one decision covers
+// them all, so each is judged (GAP-1016). Every entry must be a fully named
+// call with exactly id, name and args whose arguments project; any other
+// entry leaves the whole envelope unread, so no write is dropped.
+func NativeCalls(value any) ([]NativeCall, bool) {
+	calls, ok := value.([]any)
+	if !ok || len(calls) == 0 || len(calls) > MaxNativeCalls {
+		return nil, false
+	}
+	out := make([]NativeCall, 0, len(calls))
+	for _, entry := range calls {
+		name, args, ok := nativeCall(entry)
+		if !ok {
+			return nil, false
+		}
+		projected := CLIToolArgs(name, args)
+		if len(projected) == 0 {
+			return nil, false
+		}
+		out = append(out, NativeCall{Name: name, Args: projected})
+	}
+	return out, true
+}
+
+func nativeCall(value any) (string, any, bool) {
+	call, ok := value.(map[string]any)
 	if !ok || !onlyKeys(call, "id", "name", "args") || len(call) != 3 {
 		return "", nil, false
 	}

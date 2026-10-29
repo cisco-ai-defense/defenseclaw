@@ -37,7 +37,7 @@ from defenseclaw.commands.cmd_mcp import (
 )
 from defenseclaw.config import MCPServerEntry
 from defenseclaw.enforce.policy import PolicyEngine
-from defenseclaw.models import Finding, ScanResult
+from defenseclaw.models import ActionState, Finding, ScanResult
 
 from tests.helpers import cleanup_app, make_app_context, make_separate_stderr_runner
 
@@ -2456,9 +2456,55 @@ class TestMcpListMultiConnectorDefault(MCPCommandTestBase):
         self.assertEqual(result.exit_code, 0, result.output)
         payload = {g["connector"]: g["mcp_servers"][0] for g in json.loads(result.output)}
         self.assertEqual(payload["codex"]["severity"], "HIGH")
-        self.assertEqual(payload["codex"]["verdict"], "rejected")
+        # GAP-1429: balanced MCP admission warns on HIGH, so the codex copy
+        # reads "warning"; the hermes copy has no scan of its own.
+        self.assertEqual(payload["codex"]["verdict"], "warning")
         self.assertNotIn("severity", payload["hermes"])
-        self.assertNotEqual(payload["hermes"]["verdict"], "rejected")
+        self.assertNotEqual(payload["hermes"]["verdict"], "warning")
+
+    def test_list_verdict_follows_the_admission_policy_for_the_scan_severity(self):
+        # GAP-1429: right after a balanced admission warned on HIGH findings,
+        # mcp list labelled the admitted server "rejected". The label now is
+        # what admission does with that severity: warning in balanced,
+        # rejected when the policy refuses HIGH.
+        self.app.cfg.mcp_servers = lambda connector=None, **_: self._one_server()  # type: ignore[method-assign]
+        self.app.cfg.active_connectors = lambda: ["codex"]  # type: ignore[method-assign]
+        self.app.store.insert_scan_result(
+            str(uuid.uuid4()), "mcp-scanner", "ctx7",
+            datetime.now(timezone.utc), 100, 2, "HIGH", "{}",
+        )
+
+        warned = json.loads(self.invoke(["list", "--json"]).output)[0]
+        self.assertEqual((warned["severity"], warned["verdict"]), ("HIGH", "warning"))
+
+        self.app.cfg.admission.mcp.actions["high"] = "block"
+        refused = json.loads(self.invoke(["list", "--json"]).output)[0]
+        self.assertEqual((refused["severity"], refused["verdict"]), ("HIGH", "rejected"))
+
+    def test_list_names_the_release_of_a_block_a_failed_scan_left(self):
+        # GAP-1855: after the gateway blocked a server because its admission
+        # scan failed, the list told the user to scan it again; that scan
+        # reported clean and the block stayed. The list now says a scan does
+        # not release it and names the command that does.
+        self.app.cfg.mcp_servers = lambda connector=None, **_: self._one_server()  # type: ignore[method-assign]
+        self.app.cfg.active_connectors = lambda: ["codex"]  # type: ignore[method-assign]
+        reason = "scanner failure (fail-closed): scanner: mcp-scanner exited 1"
+        self.app.store.set_action(
+            "mcp", "ctx7", "", ActionState(install="block", runtime="disable"), reason, "codex",
+        )
+        self.app.store.insert_scan_result(
+            str(uuid.uuid4()), "mcp-scanner", "ctx7",
+            datetime.now(timezone.utc), 100, 0, "", "{}",
+        )
+
+        result = self.invoke(["list"])
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        flat = " ".join(result.output.split())
+        self.assertIn("blocked because their admission scan failed: ctx7 (codex)", flat)
+        self.assertIn("a new scan does not release this block", flat)
+        self.assertIn("defenseclaw mcp unblock ctx7 --connector codex", flat)
+        self.assertNotIn("fix reachability, then scan again", flat)
 
 
 # ---------------------------------------------------------------------------

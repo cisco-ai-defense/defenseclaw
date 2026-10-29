@@ -522,6 +522,17 @@ def test_inspect_status_preserves_effective_judge_capture_default_and_override(t
         assert inspect_v8_operator_status(path).judge_bodies_enabled is False
 
 
+def test_inspect_status_names_the_configured_default_redaction_profile(tmp_path: Path) -> None:
+    # GAP-1394: the TUI Redaction summary reads it from here.
+    path = tmp_path / "config.yaml"
+    wire = SimpleNamespace(effective=_effective(), source=str(path), data_dir=str(tmp_path), plan_digest="a" * 64)
+    with patch("defenseclaw.observability.v8_status.inspect_v8_config", return_value=wire):
+        path.write_text("config_version: 8\nobservability: {}\n")
+        assert inspect_v8_operator_status(path).default_redaction_profile == "none"
+        path.write_text("config_version: 8\nobservability:\n  defaults:\n    redaction_profile: content\n")
+        assert inspect_v8_operator_status(path).default_redaction_profile == "content"
+
+
 def test_inspect_status_protects_snapshot_before_first_write(tmp_path: Path) -> None:
     path = tmp_path / "config.yaml"
     source = b"config_version: 8\nobservability: {}\n"

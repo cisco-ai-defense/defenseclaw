@@ -1,0 +1,148 @@
+---
+title: Recipes
+description: Catalog of the regex rules and suppressions shipped with DefenseClaw's bundled policy packs — search, filter, and copy the YAML.
+keywords:
+  - DefenseClaw recipes
+  - regex catalog
+  - guardrail rules
+  - suppressions
+---
+
+import { RecipeCatalog } from "@/components/policy-creator/recipe-catalog";
+
+The recipe catalog is the same library the [Policy creator](/docs/policies/creator) draws from.
+It holds every rule in the bundled `strict` pack, the `strict` pack's pre-judge strips and finding
+suppressions, and the `default` pack's tool suppressions (the strict pack has none). The other
+suppressions of the `default` and `permissive` packs are not in it; read them in the pack's
+`suppressions.yaml`. Copy an entry's YAML into your own pack, or use the creator to drop one into a
+draft and tune it.
+
+<Callout type="info" title="Where these come from">
+Rules come from the strict pack's `rules/` files. Suppressions come from
+`policies/guardrail/strict/suppressions.yaml`, and tool suppressions from
+`policies/guardrail/default/suppressions.yaml`. Each card names its source file. The catalog is generated at build
+time by `docs-site/scripts/build-policy-assets.ts`, so it changes when the packs change.
+</Callout>
+
+## Reading a recipe
+
+| Field           | Meaning                                                                                                           |
+| --------------- | ----------------------------------------------------------------------------------------------------------------- |
+| `kind`          | What this recipe slots into: a rule file (`rule:secret`, `rule:command`, …) or one of the three suppression layers (`pre_judge_strip`, `finding_suppression`, `tool_suppression`). |
+| `id`            | Stable identifier the engine uses for findings and telemetry. Keep it stable across edits.                        |
+| `pattern`       | The Go `regexp` (RE2) source the engine compiles. The creator's regex tester checks it is RE2-compatible.        |
+| `severity`      | `CRITICAL`, `HIGH`, `MEDIUM` or `LOW`. The active pack, or `guardrail block-at` and `alert-at`, maps it to an action. |
+| `confidence`    | How often a match is a true positive, from `0` to `1`.                                                            |
+| `tags`          | Free-form labels for filtering and reporting.                                                                     |
+| `examples` / `counterexamples` | Strings the creator's live tester runs through the pattern. Add your own in the regex tester.      |
+
+Each card's **YAML** view shows the entry as one list item. Paste a rule under the `rules:` key
+of a file in your pack's `rules/` directory, and a suppression under the matching list in
+`suppressions.yaml`.
+
+## Write a rule with an agent
+
+<Callout title="Hand this page to your agent">
+Paste this into your agent:
+
+```text
+Read https://cisco-ai-defense.github.io/defenseclaw/docs/policies/recipes/llms.md and follow it. Show me the rule before you apply it.
+```
+</Callout>
+
+You are an AI agent. Turn one sentence from the user into one rule in a custom rule pack, check it offline, and apply it to one agent only after the user agrees.
+
+### Hard rules
+
+1. Observe first. Do not switch an agent to action mode, change a fail mode, disable a connector or edit `config.yaml` by hand without the user's yes. `use-pack` edits `config.yaml` through the CLI; ask first.
+2. Never put a real key, token or customer string in a rule or an example.
+3. Stop on a managed computer: exit code `3`, or `"deployment_mode": "managed_enterprise"` in `defenseclaw status --json`. There, the administrator delivers packs.
+4. Never edit the shipped `default`, `strict` or `permissive` packs. Copy one.
+
+### Steps
+
+1. Restate the rule. Write one line: what command or content, which agent, what severity (`CRITICAL` always blocks; lower severities follow the block level). Ask the user to confirm.
+
+2. Copy the default pack.
+
+   ```bash
+   PACK=~/.defenseclaw/policies/guardrail/my-rule
+   cp -R ~/.defenseclaw/policies/guardrail/default "$PACK"
+   ```
+
+   Expected: no output.
+   If the source folder is missing, run `defenseclaw init` first and tell the user.
+   In action mode DefenseClaw blocks an agent that copies into `~/.defenseclaw` (`tamper.detector_state_write`: DefenseClaw protects its own files; with the permissive pack it only reports it). Then ask the user to run step 2 themselves, and continue.
+
+3. Write the rule file. Use this shape, which the quickstart demo also uses. Replace the id, expression, pattern and title.
+
+   ```yaml
+   version: 1
+   category: my-rule
+   rules:
+     - id: MY-RULE-1
+       tool_call_only: true
+       expression: >-
+         f.commands.exists(c, 'example-marker' in c.argv)
+       pattern: '\bexample-marker\b'
+       title: "Example marker"
+       severity: CRITICAL
+       confidence: 0.99
+       tags: [custom]
+   ```
+
+   Save it as `$PACK/rules/my-rule.yaml`. `expression` is a CEL check on the parsed command; `pattern` is the RE2 fallback ([CEL reference](/docs/policies/cel/authoring), [Regex cookbook](/docs/policies/regex-cookbook)).
+
+4. Validate offline.
+
+   ```bash
+   defenseclaw guardrail validate-pack "$PACK"
+   ```
+
+   Expected:
+
+   ```text
+   Rule pack valid: "/home/alice/.defenseclaw/policies/guardrail/my-rule"
+     rules: 240/244 enabled across 8 files
+     components: judges=4 judge_categories=23 local_patterns=11 suppressions=9 sensitive_tools=6
+     digest: b8f9…13e9e0
+     files digest: 4b04…8fa71b (the guardrail.custom_packs pin)
+   ```
+
+   If it prints `Rule pack invalid` and exits `1`: the next line is `<code> at <file>: <reason>`. Fix that file and repeat. Do not apply an invalid pack.
+
+5. Show the user the rule and the digest. Ask: "Apply this to `<agent>` only?"
+
+6. Apply to one agent, after the user says yes.
+
+   ```bash
+   defenseclaw guardrail use-pack my-rule --connector <agent>
+   ```
+
+   Expected: the pack is validated, its digest pinned in `guardrail.custom_packs.my-rule`, and the agent switched to it. The gateway reloads without a restart.
+   If it differs: quote the message. Do not edit `config.yaml` by hand.
+
+7. Check.
+
+   ```bash
+   defenseclaw guardrail list-packs
+   defenseclaw doctor
+   ```
+
+   Expected: `list-packs` shows `<agent>` using `my-rule`; doctor shows no new `[FAIL]`.
+   Optionally ask the user to run the matching command in the agent in observe mode and look at `defenseclaw alerts --limit 5`. The rule blocks only when that agent is in action mode; that switch is the user's decision.
+
+8. To undo: `defenseclaw guardrail use-pack --clear --connector <agent>`.
+
+### Report
+
+Reply with:
+
+- The user's sentence and the rule you wrote (the YAML).
+- The `validate-pack` result and digest.
+- The agent it applies to and whether that agent is in observe or action mode.
+- The undo command.
+
+## Browse the recipes
+
+<RecipeCatalog />

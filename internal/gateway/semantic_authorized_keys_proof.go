@@ -1206,7 +1206,11 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 			input.Command = args.Cmd
 		}
 	}
-	if hookpaths.ActionCommandDecisionWithGlobFacts(input.Command, input.CWD, facts.ActiveHome, globFacts) != "" {
+	decision := hookpaths.ActionCommandDecisionInShell(input.Command, input.CWD, facts.ActiveHome, globFacts, trustedPOSIXShellCall(input, facts))
+	if input.DialectHint != "" {
+		decision = hookpaths.ActionCommandDecisionWithDialectAndGlobFacts(input.Command, input.CWD, facts.ActiveHome, input.DialectHint, globFacts)
+	}
+	if decision != "" {
 		return true
 	}
 	if hookpaths.DynamicCopyProtectedBasename(input.Command, facts.ActiveHome) {
@@ -1240,6 +1244,16 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 		for _, operand := range hookpaths.LiteralWriteOperands(input.Command, input.CWD, input.ActiveHome) {
 			if writeTarget(operand, false, false) {
 				return true
+			}
+		}
+		if cannotResolveLocally && clientTargets != nil && hookpaths.AWKReadsProgramFile(input.Command) {
+			// An awk program file in the user's home this gateway cannot
+			// read: the user's hook read it and listed each print target,
+			// resolved (GAP-2178, GAP-0508). Facts keys start with NUL.
+			for operand, resolved := range clientTargets {
+				if !strings.HasPrefix(operand, "\x00") && (isProtected(operand) || isProtected(resolved)) {
+					return true
+				}
 			}
 		}
 		for _, operand := range hookpaths.AdjacentAssignedWriteOperands(input.Command, input.CWD, input.ActiveHome) {
@@ -1353,8 +1367,46 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 			request.Input.Tool, request.Input.Args, clientCWD, facts.ActiveHome, request.ResolvedWriteTargets,
 		)
 	}
+	if !patchKnown && cannotResolveLocally && clientTargets != nil && !truncated {
+		// Behind ProtectHome the gateway cannot resolve an envelope's
+		// targets in the user's home; the user's hook resolved each one
+		// (GAP-1106). A target the hook did not resolve stays unknown.
+		if lexical, parsed := hookpaths.ApplyPatchLexicalCommandTargets(
+			request.Input.Tool, request.Input.Args, input.Command, clientCWD, facts.ActiveHome,
+		); parsed && filepath.IsAbs(clientCWD) {
+			for _, target := range lexical {
+				resolved := clientTargets[hookpaths.OperandPath(target, clientCWD)]
+				if !filepath.IsAbs(resolved) || isProtected(resolved) || isProtected(target) {
+					return true
+				}
+			}
+			return false
+		}
+	}
+	if !patchKnown && cannotResolveLocally && clientTargets != nil && !truncated &&
+		hookpaths.ApplyPatchStagedFeed(request.Input.Args, input.Command) {
+		// A staged patch file this gateway cannot read: the user's hook read
+		// it and listed each directive target, resolved (classifier refix 1).
+		for operand, resolved := range clientTargets {
+			if isProtected(operand) || isProtected(resolved) {
+				return true
+			}
+		}
+	}
 	if !patchKnown {
-		return true
+		// Unknown targets (no readable envelope, apply_patch --help, a
+		// lookup of the program) reach the rule only when the call names a
+		// protected target: no protected-named word is never blocked
+		// (TGT-0194; GAP-0781, GAP-1106, GAP-1741, GAP-1872). A staged patch
+		// file is read above; only one that cannot be read reaches here. An apply_patch
+		// tool call that reaches here with no patch text (a connector
+		// refused or bounded it) stays unknown.
+		if hookpaths.ApplyPatchToolWithoutText(request.Input.Tool, request.Input.Args) {
+			return true
+		}
+		return hookpaths.PatchCallNamesProtectedTarget(
+			request.Input.Tool, request.Input.Args, input.Command, clientCWD, facts.ActiveHome, clientTargets,
+		) || hookpaths.PatchCallNamesProtectedTarget("", nil, request.LegacyText, clientCWD, facts.ActiveHome, clientTargets)
 	}
 	for _, target := range patchTargets {
 		if writeTarget(target, false, false) {
@@ -1362,6 +1414,12 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 		}
 	}
 	return false
+}
+
+// trustedPOSIXShellCall reports a call a POSIX shell runs (Bash tool,
+// POSIX dialect), which Git Bash runs on a Windows host.
+func trustedPOSIXShellCall(input actionfacts.Input, facts actionfacts.Facts) bool {
+	return input.DialectHint == actionfacts.DialectPOSIX || input.DialectHint == "" && facts.Parse.Dialect == actionfacts.DialectPOSIX
 }
 
 func trustedBase64ShellAuthorizedKeysWrite(input actionfacts.Input, facts actionfacts.Facts) bool {

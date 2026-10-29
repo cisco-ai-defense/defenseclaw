@@ -30,6 +30,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisepolicy"
+	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
@@ -230,8 +231,12 @@ func runEnterpriseHookStandaloneForeignCleanup(ctx context.Context, stderr io.Wr
 	}
 	vendor := enterprisepolicy.VendorMachinePolicyConnectors(runtime.GOOS)
 	// The descriptor names policy actually published by the lifecycle;
-	// config alone can name Claude with ownership turned off.
-	_, claudeManaged := enterpriseHookStandaloneMachinePolicySet()[enterprisepolicy.ConnectorClaudeCode]
+	// config alone can name Claude with ownership turned off. A descriptor
+	// that cannot be read says nothing about Claude Code: the pass neither
+	// writes nor removes the blocker (GAP-1889).
+	published := enterpriseHookStandaloneMachinePolicySet()
+	_, claudeManaged := published[enterprisepolicy.ConnectorClaudeCode]
+	claudeKnown := published != nil
 	leftovers := func(user string) []string {
 		out := []string{}
 		for _, name := range vendor {
@@ -242,7 +247,11 @@ func runEnterpriseHookStandaloneForeignCleanup(ctx context.Context, stderr io.Wr
 		return out
 	}
 	fingerprint := enterpriseHookForeignCleanupFingerprint(cleanups, accounts)
-	fingerprint += fmt.Sprintf("claude-managed:%t;", claudeManaged)
+	if claudeKnown {
+		fingerprint += fmt.Sprintf("claude-managed:%t;", claudeManaged)
+	} else {
+		fingerprint += "claude-managed:unknown;"
+	}
 	if vscode != nil {
 		fingerprint += fmt.Sprintf("copilot-vscode|%s|%t|%t;", vscode.HookBinary, vscode.HookFile, vscode.Plugin)
 	}
@@ -292,7 +301,7 @@ func runEnterpriseHookStandaloneForeignCleanup(ctx context.Context, stderr io.Wr
 	}
 	enterpriseHookForeignCleanupState.unrepaired = stillUnrepaired
 	due := newDrift || fingerprint != enterpriseHookForeignCleanupState.fingerprint ||
-		((len(cleanups) > 0 || governed || claudeManaged || !enterpriseHookForeignCleanupState.leftoversClean) &&
+		((len(cleanups) > 0 || governed || claudeManaged || len(accounts) > 0 || !enterpriseHookForeignCleanupState.leftoversClean) &&
 			now.Sub(enterpriseHookForeignCleanupState.last) >= enterpriseHookForeignCleanupInterval)
 	if due {
 		enterpriseHookForeignCleanupState.last = now
@@ -305,6 +314,7 @@ func runEnterpriseHookStandaloneForeignCleanup(ctx context.Context, stderr io.Wr
 
 	jobs := []enterpriseHookWorkerJob{}
 	clean := vscodeRemovalErr == nil && recordErr == nil
+	productCredentials := enterpriseHookStandaloneProductCredentialDigests()
 	for _, account := range accounts {
 		check := enterpriseHookCheckHome(account.Home, account.UID)
 		if check.State != enterprisehooks.HomeAvailable {
@@ -329,7 +339,27 @@ func runEnterpriseHookStandaloneForeignCleanup(ctx context.Context, stderr io.Wr
 			request.cleanupFence = newEnterpriseForeignHookFenceSession(request.ForeignCleanup, stderr, strconv.Itoa(account.UID), account.Home)
 		}
 		names := leftovers(account.User)
-		if len(cleanups) == 0 && len(names) == 0 && vscode == nil {
+		// DefenseClaw writes no native OTLP exporter into an account's own
+		// Codex or Claude Code configuration on a managed Unix host (Setup
+		// removes one; only an OpenShell sandbox image carries its own). One
+		// an earlier install left that carries a product credential sends
+		// it, with the agent's prompt telemetry, to whoever holds its port,
+		// which no DefenseClaw process serves (GAP-2376, GAP-0836 on
+		// Windows). Every eligible account with such a configuration gets
+		// the as-the-user removal; the worker gets the credentials' digests
+		// only.
+		var nativeOTLP []string
+		for _, name := range []string{"codex", "claudecode"} {
+			if _, err := os.Lstat(connector.UserNativeOTLPConfigPathFor(name, account.Home)); !errors.Is(err, os.ErrNotExist) {
+				nativeOTLP = append(nativeOTLP, name)
+			}
+		}
+		// While the machine policy does not cover Claude Code, a blocker an
+		// earlier enrollment pass wrote over the account's own hook script
+		// blocks every Claude Code tool call with no managed hook deciding:
+		// it goes (GAP-1829).
+		if len(cleanups) == 0 && len(names) == 0 && vscode == nil && (claudeManaged || !claudeKnown) &&
+			len(nativeOTLP) == 0 && !accountHasRemovedConnectorFiles(account.Home) {
 			continue
 		}
 		for index, name := range names {
@@ -353,6 +383,20 @@ func runEnterpriseHookStandaloneForeignCleanup(ctx context.Context, stderr io.Wr
 				Index: len(names), Mode: enterpriseHookWorkerModeBlockPersonalClaude,
 				Options: enterpriseHookWorkerOptions{ConnectorName: "claudecode", UserHome: account.Home,
 					OwnerUID: account.UID, OwnerGID: account.GID},
+			})
+		} else if claudeKnown {
+			request.Targets = append(request.Targets, enterpriseHookWorkerTarget{
+				Index: len(names), Mode: enterpriseHookWorkerModeUnblockPersonalClaude,
+				Options: enterpriseHookWorkerOptions{ConnectorName: "claudecode", UserHome: account.Home,
+					OwnerUID: account.UID, OwnerGID: account.GID, DataDir: filepath.Join(account.Home, ".defenseclaw")},
+			})
+		}
+		for i, name := range nativeOTLP {
+			request.Targets = append(request.Targets, enterpriseHookWorkerTarget{
+				Index: len(names) + 1 + i, Mode: enterpriseHookWorkerModeRemoveUserNativeOTLP,
+				Options: enterpriseHookWorkerOptions{ConnectorName: name, UserHome: account.Home,
+					OwnerUID: account.UID, OwnerGID: account.GID, DataDir: filepath.Join(account.Home, ".defenseclaw"),
+					ProductCredentials: productCredentials},
 			})
 		}
 		jobs = append(jobs, enterpriseHookWorkerJob{
@@ -441,6 +485,25 @@ func runEnterpriseHookStandaloneForeignCleanup(ctx context.Context, stderr io.Wr
 					clean = false
 					fmt.Fprintf(stderr, "defenseclaw: enterprise hooks: could not block the personal Claude Code hook for %s: %s\n", user,
 						boundedString(firstNonEmpty(result.Error, errEnterpriseHookWorkerNoResult.Error()), 512))
+				}
+				continue
+			}
+			if target.Mode == enterpriseHookWorkerModeRemoveUserNativeOTLP {
+				if !ok || !result.OK {
+					clean = false
+					fmt.Fprintf(stderr, "defenseclaw: enterprise hooks: could not check %s's own %s configuration for a native OTLP exporter that carries a DefenseClaw credential: %s\n", user, name,
+						boundedString(firstNonEmpty(result.Error, errEnterpriseHookWorkerNoResult.Error()), 512))
+				}
+				continue
+			}
+			if target.Mode == enterpriseHookWorkerModeUnblockPersonalClaude {
+				switch {
+				case !ok || !result.OK:
+					clean = false
+					fmt.Fprintf(stderr, "defenseclaw: enterprise hooks: could not remove the Claude Code blocker from the personal hook of %s: %s\n", user,
+						boundedString(firstNonEmpty(result.Error, errEnterpriseHookWorkerNoResult.Error()), 512))
+				case result.Removed:
+					fmt.Fprintf(stderr, "defenseclaw: enterprise hooks: removed the Claude Code blocker from the personal hook of %s: the machine policy no longer covers Claude Code; that account runs `defenseclaw setup claude-code` to restore its own hook\n", user)
 				}
 				continue
 			}

@@ -38,7 +38,11 @@ import click
 
 from defenseclaw import ux
 from defenseclaw.commands import compute_verdict as _compute_verdict
-from defenseclaw.commands._audit_notice import note_asset_policy_observed, saved_change_audit
+from defenseclaw.commands._audit_notice import (
+    note_asset_policy_observed,
+    release_superseded_scan_decision,
+    saved_change_audit,
+)
 from defenseclaw.commands._scan_ui import record_scan as _record_scan
 from defenseclaw.context import AppContext, pass_ctx
 from defenseclaw.enforce import asset_lists
@@ -4607,7 +4611,53 @@ def _skill_allow_pin(app: AppContext, skill_name: str, connector: str) -> str:
     for copy_connector, destination in _skill_quarantined_copies(app, skill_name):
         if copy_connector == connector:
             return destination
-    return ""
+    return _skill_scanned_copy(app, skill_name, connector)
+
+
+def _skill_scanned_copy(app: AppContext, skill_name: str, connector: str) -> str:
+    """The folder a skill known only from ``skill scan --path`` was scanned
+    at, when exactly one such folder is on record (GAP-1579): an allow is
+    pinned to that copy, so another folder with the same name is still
+    scanned. Several scanned folders stay ambiguous (name-only rule)."""
+    store = getattr(app, "store", None)
+    if store is None:
+        return ""
+    try:
+        latest = store.latest_scans_by_scanner("skill-scanner")
+    except Exception:  # noqa: BLE001 - no scan history means no pin
+        return ""
+    targets = {
+        os.path.realpath(str(ls.get("target") or ""))
+        for ls in latest
+        if ls.get("target") and os.path.basename(str(ls["target"]).rstrip("/\\")) == skill_name
+    }
+    # A pin must name a copy that stays: the folder still exists and is not
+    # the temporary copy "skill scan <url>" fetched and then removed
+    # (GAP-1974). Otherwise the name-only rule and its note apply.
+    targets = {target for target in targets if _skill_scan_copy_lasts(target)}
+    if connector and len(targets) > 1:
+        scoped = {
+            target for target in targets
+            if _scan_entry_matches_connector(app, {"target": target}, connector)
+        }
+        targets = scoped or targets
+    return next(iter(targets)) if len(targets) == 1 else ""
+
+
+def _skill_scan_copy_lasts(target: str) -> bool:
+    """A scanned folder an allow can pin: it exists and is not under the
+    URL fetch's temporary ``defenseclaw-skill-*`` folder."""
+    import tempfile
+
+    if not os.path.isdir(target):
+        return False
+    tmp_root = os.path.realpath(tempfile.gettempdir())
+    try:
+        rel = os.path.relpath(target, tmp_root)
+    except ValueError:  # another drive on Windows
+        return True
+    first = rel.split(os.sep, 1)[0]
+    return first == ".." or not first.startswith("defenseclaw-skill-")
 
 
 def _echo_skill_allow_scope(skill_name: str, connector: str, pin: str) -> None:
@@ -5010,6 +5060,7 @@ def enable(app: AppContext, name: str, connector_flag: str) -> None:
 
     if connector:
         pe.enable_for_connector("skill", skill_name, target_connector)
+        _clear_or_name_unscoped_skill_disable(pe, skill_name, target_connector)
     else:
         pe.enable("skill", skill_name)
 
@@ -5017,6 +5068,31 @@ def enable(app: AppContext, name: str, connector_flag: str) -> None:
         saved_change_audit(app.logger).log_action(
             "skill-enable", skill_name, f"re-enabled via CLI connector={connector}",
         )
+
+
+def _clear_or_name_unscoped_skill_disable(pe: Any, skill_name: str, connector: str) -> None:
+    """A scoped enable also reads the connector-less row, which disables the
+    skill for every connector: skill info and skill list kept saying
+    disabled after ``skill enable <n> --connector openclaw`` re-enabled it in
+    OpenClaw (GAP-0024). The watcher journals OpenClaw assets without a
+    connector, so for OpenClaw its own record there is cleared; any other
+    connector-wide disable stays and the CLI names it and the command that
+    clears it."""
+    entry = pe.unscoped_runtime_disable("skill", skill_name)
+    if entry is None:
+        return
+    if connector == "openclaw" and pe.is_openclaw_watcher_record(entry):
+        pe.enable("skill", skill_name)
+        click.echo(
+            f"[skill] {skill_name!r} watcher runtime disable cleared (connector=openclaw)"
+        )
+        return
+    click.secho(
+        f"note: {skill_name!r} still has a runtime disable for every connector "
+        f"(reason: {entry.reason or 'none recorded'}); "
+        f"clear it with: defenseclaw skill enable {skill_name}",
+        fg="yellow",
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -6106,6 +6182,13 @@ def install(app: AppContext, name: str, force: bool, take_action: bool, connecto
                 click.echo(
                     f"[install] installed {skill_name!r} -> {stages[key][2]} "
                     f"(connector={connector})"
+                )
+                release_superseded_scan_decision(
+                    app.logger, pe, "skill", skill_name, connector,
+                    enable_runtime=(
+                        (lambda: _enable_skill_via_gateway(app, skill_name))
+                        if _normalize_runtime_connector(connector) == "openclaw" else None
+                    ),
                 )
         if refused:
             raise SystemExit(1)

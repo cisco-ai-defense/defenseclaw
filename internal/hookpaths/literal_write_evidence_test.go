@@ -207,7 +207,7 @@ func TestR104IndirectWriterControls(t *testing.T) {
 }
 
 func TestR104IndirectFileReadStaysWithinProject(t *testing.T) {
-	skipNativeWindowsHomeGrammar(t)
+	skipPOSIXGrammarOnWindows(t)
 	parent := t.TempDir()
 	cwd := filepath.Join(parent, "project")
 	if err := os.Mkdir(cwd, 0o700); err != nil {

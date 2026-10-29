@@ -122,7 +122,7 @@ func (s *CodeGuardScanner) ScanContentWithProvenance(filename, content string) C
 			if len(r.extensions) > 0 && !extMatch(ext, r.extensions) {
 				continue
 			}
-			if r.pattern.MatchString(line) {
+			if r.matches(line) {
 				ln := lineNum + 1
 				findings = append(findings, Finding{
 					ID:                  r.id,
@@ -195,16 +195,25 @@ func (s *CodeGuardScanner) Scan(ctx context.Context, target string) (*ScanResult
 	return result, nil
 }
 
+// codeExtensions are the file extensions CodeGuard scans. Shell and
+// Windows script files are code: a PowerShell, batch or zsh script reads
+// and writes paths like any other program (GAP-2220: a .ps1 Write with
+// "Get-Content ..\temp\secrets.txt" was never scanned on the hook path).
 var codeExtensions = map[string]bool{
 	".py": true, ".js": true, ".ts": true, ".go": true,
 	".java": true, ".rb": true, ".php": true, ".sh": true,
+	".bash": true, ".zsh": true,
+	".ps1": true, ".psm1": true, ".bat": true, ".cmd": true,
+	".mjs": true, ".cjs": true, ".jsx": true, ".tsx": true,
 	".yaml": true, ".yml": true, ".json": true, ".xml": true,
 	".c": true, ".cpp": true, ".h": true, ".rs": true,
 }
 
-// IsCodeFile reports whether the given file extension is one CodeGuard scans.
+// IsCodeFile reports whether the given file extension is one CodeGuard
+// scans. Extensions match without regard to case: Windows paths are case
+// insensitive, so "Deploy.PS1" is the same script as "deploy.ps1".
 func IsCodeFile(ext string) bool {
-	return codeExtensions[ext]
+	return codeExtensions[strings.ToLower(ext)]
 }
 
 // collectCodeFiles skips an unreadable directory or entry unless strict, when
@@ -232,9 +241,15 @@ func collectCodeFiles(root string, strict bool) ([]string, error) {
 			if base == ".git" || base == "node_modules" || base == "__pycache__" || base == ".venv" || base == "venv" {
 				return filepath.SkipDir
 			}
+			if perr := probeDirOpen(path); perr != nil {
+				if strict {
+					return incompleteScan(path, perr)
+				}
+				return filepath.SkipDir
+			}
 			return nil
 		}
-		if !codeExtensions[filepath.Ext(path)] {
+		if !IsCodeFile(filepath.Ext(path)) {
 			return nil
 		}
 		info, lerr := os.Lstat(path)
@@ -276,6 +291,38 @@ type rule struct {
 	remediation string
 	extensions  []string
 	provenance  codeGuardFindingProvenance
+	// view, when set, is the part of a line the pattern reads: a built-in
+	// rule drops text that only mentions what it looks for (GAP-1226,
+	// GAP-1227).
+	view func(line string) string
+}
+
+// matches reports whether the rule fires on line.
+func (r rule) matches(line string) bool {
+	if r.view != nil {
+		line = r.view(line)
+	}
+	return r.pattern.MatchString(line)
+}
+
+// pathTraversalModuleSpecifier is the quoted module path of an import,
+// require or include statement. The author wrote that path into the
+// program; it is not a path built from input, so it is not a traversal.
+var pathTraversalModuleSpecifier = regexp.MustCompile(`^\s*(?:import|export)\b[^"'` + "`" + `]*\bfrom\s*(?:"[^"$]*"|'[^']*')|^\s*import\s*(?:"[^"$]*"|'[^']*')|\bimport\s*\(\s*(?:"[^"$]*"|'[^']*')|\b(?:require|require_relative|require_once|include|include_once)\s*\(?\s*(?:"[^"$]*"|'[^']*')|^\s*#\s*include\s*(?:"[^"$]*"|'[^']*')|@import\s+(?:url\(\s*)?(?:"[^"$]*"|'[^']*')`)
+
+// pathTraversalProse is a "..." ellipsis that no path separator follows:
+// prose ("Loading...", "days...") and an ellipsis before a string escape
+// ("Loading...\n", JSON text such as Claude's own onboarding template). An
+// ellipsis before "/" or "\" ("....//", "..././", "...\\") and every
+// two-dot form ("..\temp", "..\notes") stay path traversal (GAP-1935).
+var pathTraversalProse = regexp.MustCompile(`\.{3,}(?:\\[nrt"']|[^./\\]|$)`)
+
+// pathTraversalView is the part of a line CG-PATH-001 reads: what the code
+// does with a path, not an import of a sibling module or prose (GAP-1226,
+// GAP-1227).
+func pathTraversalView(line string) string {
+	line = pathTraversalModuleSpecifier.ReplaceAllString(line, " ")
+	return pathTraversalProse.ReplaceAllString(line, " ")
 }
 
 var builtinRules = codeOwnedBuiltinRules([]rule{
@@ -354,6 +401,7 @@ var builtinRules = codeOwnedBuiltinRules([]rule{
 		title:       "Potential path traversal",
 		pattern:     regexp.MustCompile(`(?i)(\.\.\/|\.\.\\|path\.join\(.*\.\.|os\.path\.join\(.*\.\.|filepath\.Join\(.*\.\.)`),
 		remediation: "Canonicalize paths and validate against an allowed root directory",
+		view:        pathTraversalView,
 	},
 })
 
@@ -399,7 +447,7 @@ func scanFileWithRules(path string, rules []rule) ([]Finding, error) {
 			if len(r.extensions) > 0 && !extMatch(ext, r.extensions) {
 				continue
 			}
-			if r.pattern.MatchString(line) {
+			if r.matches(line) {
 				ln := lineNum
 				findings = append(findings, Finding{
 					ID:                  r.id,

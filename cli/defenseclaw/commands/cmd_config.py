@@ -55,6 +55,7 @@ from defenseclaw.config_inspect import (
     inspect_v8_config,
 )
 from defenseclaw.context import AppContext, pass_ctx
+from defenseclaw.file_permissions import UNSAFE_PATH_NAMESPACE_VIEW
 from defenseclaw.observability.v8_config import (
     MAX_SOURCE_BYTES,
     RETIRED_KEY_ACTION_PREFIX,
@@ -128,7 +129,7 @@ def config_validate(quiet: bool) -> None:
     """Verify the config file parses and references valid enums."""
     result = validate_config()
     if quiet:
-        raise SystemExit(0 if result.ok else 1)
+        raise SystemExit(0 if result.ok and not result.not_checked else 1)
 
     click.echo()
     click.echo(f"  {ux.bold('Config:')} {result.path}")
@@ -137,6 +138,11 @@ def config_validate(quiet: bool) -> None:
     else:
         ux.warn(f"file does not exist yet — {config_module.first_run_hint()}")
 
+    if result.not_checked:
+        # Nothing was judged, so nothing is called valid (GAP-1395).
+        ux.warn(f"not checked: {result.not_checked}", indent="  ")
+        click.echo()
+        raise SystemExit(1)
     if result.parse_error:
         ux.err(f"parse error: {result.parse_error}", indent="  ")
     elif result.ok:
@@ -292,8 +298,6 @@ def config_get(app: AppContext, key: str, fmt: str, effective: bool) -> None:
     if written is not None:
         profile_key = parts[:2] in (["guardrail", "profiles"], ["guardrail", "profile_assignments"])
         view = _merge_defaults(written, _v8_defaults(app, profiles=profile_key))
-        if parts == ["guardrail", "hook_self_heal"]:
-            view.setdefault("guardrail", {}).setdefault("hook_self_heal", True)
         _resolve_defaults(app, view, written, profiles=profile_key)
     else:
         view = _key_view(app, parts)
@@ -302,8 +306,17 @@ def config_get(app: AppContext, key: str, fmt: str, effective: bool) -> None:
         # The resolved admission view writes an action as its shorthand; the
         # source may set one lifecycle field of it (GAP-0103).
         found, value = _lookup(written, parts)
+    if not found and written is None:
+        # The resolved observability plan folds observability.defaults into
+        # its destinations, so a key config.yaml sets there printed "not set"
+        # right after config set wrote it (GAP-1901): read it as written.
+        found, value = _lookup(_written_config() or {}, parts)
     if not found:
         found, value = _admission_lifecycle_field(view, parts)
+    if not found:
+        # A key the CLI's own config model does not carry still has the
+        # default the schema declares (GAP-1622).
+        found, value = _schema_default(parts)
     if not found:
         if _is_destination_key(parts):
             raise click.ClickException(_destination_not_set(key, parts, view))
@@ -693,6 +706,44 @@ def _shadowed_hilt_notes(changes: list) -> list[str]:
     ]
 
 
+def _seed_moved_data_dir(changes: list) -> list[str]:
+    """Seed the rule packs and Rego policies under a new data_dir.
+
+    The gateway loads its default rule pack from <policy_dir>/guardrail, and
+    an omitted policy_dir is under data_dir, so after config set data_dir it
+    refused to start until init had seeded the new folder (GAP-2126). Packs
+    already there are kept.
+    """
+    if not any(getattr(change, "path", "") == "data_dir" for change in changes):
+        return []
+    try:
+        cfg = config_module.load()
+    except Exception:  # noqa: BLE001 - the change is committed; seeding is best effort
+        return []
+    policy_dir = str(cfg.policy_dir or "")
+    if not policy_dir or os.path.isdir(os.path.join(policy_dir, "guardrail", "default")):
+        return []
+    from defenseclaw import bootstrap
+    from defenseclaw.file_permissions import make_private_directory
+
+    report = bootstrap.BootstrapReport(data_dir=cfg.data_dir)
+    for folder in (cfg.data_dir, policy_dir):
+        try:
+            make_private_directory(folder)
+        except OSError as exc:
+            report.errors.append(f"mkdir {folder}: {exc}")
+    if not report.errors:
+        bootstrap._seed_rego(cfg, report)
+        bootstrap._seed_guardrail_profiles(policy_dir, report)
+    if report.errors or not os.path.isdir(os.path.join(policy_dir, "guardrail", "default")):
+        detail = "; ".join(report.errors) or "no bundled rule packs"
+        return [
+            f"warning: the rule packs were not written to {policy_dir} ({detail}); the gateway cannot "
+            "start from the new data_dir until they are: defenseclaw init --non-interactive --yes"
+        ]
+    return [f"Seeded the rule packs and Rego policies in {policy_dir} for the new data_dir."]
+
+
 def _write_config_change(app: AppContext, changes: list, expect_sha256: str | None, verb: str) -> bool:
     """Apply the changes in one write through the writer; False when they changed nothing."""
     from defenseclaw import config_writer
@@ -768,6 +819,8 @@ def _write_config_change(app: AppContext, changes: list, expect_sha256: str | No
         click.echo(note)
     for note in _unloaded_signature_pack_notes(cfg):
         click.echo(note)
+    for note in _seed_moved_data_dir(changes):
+        click.echo(note, err=note.startswith("warning:"))
     pending = result.restart_required
     if pending:
         click.echo(f"Restart the gateway to apply {', '.join(pending)}: defenseclaw-gateway restart")
@@ -787,9 +840,17 @@ def _write_config_change(app: AppContext, changes: list, expect_sha256: str | No
         ))
     else:
         audit = saved_change_audit(logger)
-    audit.log_config_change(
-        f"config-{verb}", f"{key}=" + ("(unset)" if verb == "unset" else "(set)")
-    )
+    from defenseclaw.logger import CanonicalObservabilityError
+
+    try:
+        audit.log_config_change(
+            f"config-{verb}", f"{key}=" + ("(unset)" if verb == "unset" else "(set)")
+        )
+    except CanonicalObservabilityError as exc:
+        # The change is saved; only the gateway's audit ack is missing, so
+        # the command succeeded and says so, as guardrail use-pack does
+        # (GAP-1366).
+        ux.echo(f"  ⚠ Change saved, but the gateway did not confirm the audit event ({exc}).", err=True)
     return True
 
 
@@ -1025,7 +1086,13 @@ def config_unset(app: AppContext, keys: tuple[str, ...], expect_sha256: str | No
                 raise click.ClickException(f"{_destination_not_set(key, parts, view)} config.yaml was not changed.")
             raise click.ClickException(f"{key} is not a configuration key; config.yaml was not changed.")
     roster = _guarded_connector_modes(app)
-    if _write_config_change(app, [Change(key, unset=True) for key in keys], expect_sha256, "unset"):
+    changes = [
+        Change(
+            key, unset=True, prune_empty_to=_roster_entry_prune_scope(parts, written, app) or _unset_prune_scope(parts)
+        )
+        for key, parts in parsed
+    ]
+    if _write_config_change(app, changes, expect_sha256, "unset"):
         for note in _left_roster_notes(parsed, roster):
             click.echo(note)
         return
@@ -1058,7 +1125,7 @@ def config_migrate(dry_run: bool, ack: bool, as_json: bool) -> None:
     except ConfigInspectError as exc:
         raise click.ClickException(str(exc)) from exc
     if ack:
-        click.echo("Marked the config_version 9 migration record as read.")
+        click.echo(result.get("message") or "Marked the config_version 9 migration record as read.")
         return
     if as_json:
         click.echo(json.dumps(result, indent=2))
@@ -1114,6 +1181,114 @@ def _lookup(data: object, parts: list[str]) -> tuple[bool, object]:
         else:
             return False, None
     return True, value
+
+
+def _schema_default(parts: list) -> tuple[bool, object]:
+    """The ``default`` the config schema declares for *parts*, if any."""
+    schema = _v8_schema()
+    defs = schema.get("$defs") or {}
+
+    def _resolve(node: object) -> object:
+        while isinstance(node, dict) and "$ref" in node:
+            node = defs.get(str(node["$ref"]).rsplit("/", 1)[-1])
+        return node
+
+    node: object = schema
+    for part in parts:
+        node = _resolve(node)
+        properties = node.get("properties") if isinstance(node, dict) else None
+        if not isinstance(part, str) or not isinstance(properties, dict) or part not in properties:
+            return False, None
+        node = properties[part]
+        # A retired key has no default that applies: 1.0 reads none of them
+        # (GAP-1745), so get keeps saying it is not set.
+        if isinstance(node, dict) and node.get("deprecated") is True:
+            return False, None
+    node = _resolve(node)
+    if isinstance(node, dict) and node.get("deprecated") is True:
+        return False, None
+    if isinstance(node, dict) and "default" in node:
+        return True, node["default"]
+    return False, None
+
+
+def _roster_entry_prune_scope(parts: list, written: object, app: AppContext) -> str:
+    """``guardrail`` when an unset may also remove the roster entry it empties.
+
+    ``config set guardrail.connectors.<C>.<key>`` on a file whose roster
+    comes from ``guardrail.connector`` naming ``<C>`` (no
+    ``guardrail.connectors`` map) creates the entry ``<C>``. The roster does
+    not change, so undoing that set must not leave ``connectors: {<C>: {}}``
+    behind (GAP-0967). The entry stays whenever it is what puts ``<C>`` on
+    the roster: the map has other entries, or ``guardrail.connector`` names
+    another connector or none (``claw.mode`` alone does not enable Go hook
+    scanning, GAP-1953).
+    """
+    if len(parts) < 4 or parts[:2] != ["guardrail", "connectors"] or not isinstance(parts[2], str):
+        return ""
+    if not isinstance(written, dict):
+        return ""
+    connectors = _lookup(written, ["guardrail", "connectors"])[1]
+    if not isinstance(connectors, dict) or list(connectors) != [parts[2]]:
+        return ""
+    from defenseclaw.commands.cmd_guardrail import roster_entry_is_redundant
+
+    try:
+        cfg = app.cfg if app.cfg is not None else config_module.load()
+    except Exception:  # noqa: BLE001 - keep the entry when the roster cannot be read
+        return ""
+    return "guardrail" if roster_entry_is_redundant(cfg, parts[2], list(connectors)) else ""
+
+
+def _unset_prune_scope(parts: list) -> str:
+    """The scope ``config unset`` keeps when it removes a key's last child.
+
+    The unset also removes the parent maps it leaves empty, so undoing the
+    last edit of a scope restores the file as it was (GAP-0967), up to the
+    deepest scope whose emptiness means something: an entry of a named map
+    (``guardrail.connectors.codex``, ``guardrail.profiles.p``: present even
+    when it is ``{}``) or a map whose schema default is not empty. A top-level
+    section left empty goes too (``scanners: {}`` reads as no section), and
+    a path through a list is not pruned.
+    """
+    if any(not isinstance(part, str) for part in parts):
+        return ""
+    schema = _v8_schema()
+    if not schema:
+        return ""
+    defs = schema.get("$defs") or {}
+
+    def _resolve(node: object) -> object:
+        while isinstance(node, dict) and "$ref" in node:
+            node = defs.get(str(node["$ref"]).rsplit("/", 1)[-1])
+        return node
+
+    keep = 0
+    node: object = schema
+    for index, part in enumerate(parts[:-1]):
+        node = _resolve(node)
+        if not isinstance(node, dict):
+            break
+        properties = node.get("properties") or {}
+        if part in properties:
+            node = properties[part]
+            if (_resolve(node) or {}).get("default") not in (None, {}, []):
+                keep = index + 1
+        elif isinstance(node.get("additionalProperties"), dict):
+            node = node["additionalProperties"]
+            keep = index + 1
+        else:
+            break
+    if parts[:2] == ["guardrail", "profiles"] and len(parts) > 4 and parts[3] == "connectors":
+        # A profile's connector entry only holds overrides (it puts nothing
+        # on the roster), so it goes with its last key, up to the profile
+        # (GAP-1894).
+        keep = min(keep, 3)
+    if keep == 0:
+        from defenseclaw.config_writer import PRUNE_TO_TOP
+
+        return PRUNE_TO_TOP
+    return ".".join(parts[:keep])
 
 
 def _unlisted_entry_key(parts: list) -> bool:
@@ -1503,6 +1678,9 @@ class ValidationResult:
         # The canonical validator did not finish (a busy host); the file was
         # not judged invalid (GAP-1621).
         self.timed_out: bool = False
+        # The canonical validator could not run here (a sandbox hides the
+        # owner of the gateway's folders); the file was not judged (GAP-1395).
+        self.not_checked: str = ""
 
     @property
     def ok(self) -> bool:
@@ -1526,6 +1704,12 @@ def validate_config() -> ValidationResult:
         try:
             inspected = inspect_v8_config("validate", config_path=cfg_path)
         except ConfigInspectError as exc:
+            cause = exc.__cause__
+            if getattr(cause, "code", "") == UNSAFE_PATH_NAMESPACE_VIEW:
+                # Not judged: a sandbox hides who owns the gateway's folders,
+                # so the canonical validator was not run (GAP-1395).
+                res.not_checked = str(cause)
+                return res
             res.timed_out = isinstance(exc, ConfigInspectTimeoutError)
             res.errors.append(_v8_failure_detail(cfg_path, exc))
             return res

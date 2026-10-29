@@ -238,6 +238,9 @@ def _tolerant_output() -> None:
             setattr(sys, name, _AsciiGlyphs(stream))
 
 
+_VERSION_NEEDS_VALUE = "--version needs a release number, for example: defenseclaw upgrade --version 1.2.3"
+
+
 def _parse(command: str, args: list[str]) -> dict[str, object] | None:
     options: dict[str, object] = {"version": None, "yes": False}
     index = 0
@@ -247,11 +250,17 @@ def _parse(command: str, args: list[str]) -> dict[str, object] | None:
             return None
         if arg in ("-y", "--yes"):
             options["yes"] = True
-        elif command == "upgrade" and arg == "--version" and index + 1 < len(args):
+        elif command == "upgrade" and arg == "--version":
+            # A missing value is not an unknown option (GAP-2258): the flag is
+            # valid, so say what it needs. "--version --yes" is the same mistake.
+            if index + 1 >= len(args) or args[index + 1].startswith("-"):
+                raise ShimUsageError(_VERSION_NEEDS_VALUE)
             index += 1
             options["version"] = args[index]
         elif command == "upgrade" and arg.startswith("--version="):
             options["version"] = arg.split("=", 1)[1]
+            if not options["version"]:
+                raise ShimUsageError(_VERSION_NEEDS_VALUE)
         elif command == "upgrade" and arg == "--recover-corrupt-audit":
             # Hidden, kept for 0.8.x muscle memory and scripts: recovery is now automatic.
             print(RECOVER_CORRUPT_AUDIT_NOTE, file=sys.stderr)

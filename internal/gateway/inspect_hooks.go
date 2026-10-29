@@ -452,7 +452,7 @@ func (a *APIServer) alertSensitiveToolResult(r *http.Request, tool, output strin
 
 // alertSensitiveHookToolResult is the same alert for the connector hook
 // endpoints (Claude Code, Codex and every other agent hook), which finalize
-// their tool results through finalizeAgentHook instead of the inspect route.
+// their tool results through finalizeAgentHookAnswer instead of the inspect route.
 func (a *APIServer) alertSensitiveHookToolResult(ctx context.Context, connectorName string, req agentHookRequest, resp agentHookResponse) {
 	if a.logger == nil || a.managedAIDOnly() || req.ToolName == "" || !isResultLikeEvent(req.HookEventName) {
 		return

@@ -34,7 +34,11 @@ func TestWindowsBundleRestartPredictionMatchesTheHotPath(t *testing.T) {
 		{"policy only", base, "config_version: 9\nguardrail:\n  block_at: HIGH\n  hook_self_heal_debounce_ms: 500\n  connectors:\n    claudecode:\n      enabled: true\n", bundleRestartNotRequired, ""},
 		{"enrollment list only", "config_version: 9\nenterprise:\n  enrollment:\n    exclude_users:\n      - alice\n" + base[len("config_version: 9\n"):],
 			"config_version: 9\nenterprise:\n  enrollment:\n    exclude_users: []\n" + base[len("config_version: 9\n"):], bundleRestartNotRequired, ""},
-		{"connector added", base, base + "    amp:\n      enabled: true\n", bundleRestartNotRequired, ""},
+		{"connector added", base, base + "    opencode:\n      enabled: true\n", bundleRestartNotRequired, ""},
+		// A connector that sorts before the unset guardrail.connector's
+		// first key moves the primary connector the gateway holds until a
+		// restart (GAP-1498).
+		{"connector added before the primary", base, base + "    amp:\n      enabled: true\n", bundleRestartRequired, restartReasonSettings},
 		{"start-only key", base, "config_version: 9\nguardrail:\n  block_at: MEDIUM\n  hook_self_heal_debounce_ms: 600\n  connectors:\n    claudecode:\n      enabled: true\n", bundleRestartRequired, restartReasonSettings},
 		{"Codex protection on", base, base + "    codex:\n      enabled: true\n", bundleRestartRequired, restartReasonCodexMachinePolicy},
 		{"Fleet enabled", base, base + "fleet:\n  enabled: true\n", bundleRestartUnknown, restartReasonFleetSetup},

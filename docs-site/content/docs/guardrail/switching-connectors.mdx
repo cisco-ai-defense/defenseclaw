@@ -1,0 +1,149 @@
+---
+title: Changing connectors
+description: Use defenseclaw setup <connector> to add or reconfigure connector wiring, and setup remove <connector> to retire a connector without deleting audit history.
+keywords:
+  - DefenseClaw connector setup
+  - DefenseClaw multi connector
+  - DefenseClaw replace connector
+  - DefenseClaw audit history preserved
+---
+
+Guard a second agent next to the first, replace one with another, or remove one. Adding, replacing or removing an agent never deletes audit history: each audit row keeps the connector that produced it.
+
+DefenseClaw connector setup is centered on the connector alias:
+
+```bash
+defenseclaw setup codex
+defenseclaw setup hermes --mode action
+defenseclaw setup antigravity --mode observe
+```
+
+<Callout type="info">
+The audit DB is connector-agnostic. Adding, reconfiguring, removing, or replacing connector wiring does not delete history; each audit row keeps its own connector attribution.
+</Callout>
+
+## Before you start
+
+- DefenseClaw is set up for one agent.
+- The new agent is a hook agent. OpenClaw and ZeptoClaw run through a proxy and cannot sit next to hook agents (see [Replace instead of add](#replace-instead-of-add)).
+
+## Add or reconfigure
+
+Run the setup alias for the connector you want:
+
+```bash
+defenseclaw setup codex
+```
+
+If another agent is already guarded, setup asks how to combine them. Add is the default, also with `--yes`. The new agent starts in observe mode. Add `--mode action` to block from the start. To guard two agents at once, see [Multi-connector](/docs/guardrail/multi-connector).
+
+### The questions setup asks
+
+`defenseclaw setup <agent>` asks these questions in this order. The first one is the enforcement mode,
+answered with a number:
+
+```text
+  Enforcement mode for Codex
+  ──────────────────────────
+    [1] observe — scan and report findings, never block (recommended to start)
+    [2] action  — scan and block/confirm when policy requires (PreToolUse deny)
+  Select mode (1, 2) [1]:
+```
+
+Type `1` (observe) or `2` (action), or press Enter for the default in brackets: the agent's current mode when it is already set up, observe for a new one. Letters are
+rejected here. Passing `--mode observe` or `--mode action` answers this question,
+so setup does not ask it.
+
+Setup then prints what it will change and asks one more question. Which one depends on what is already set up:
+
+- **The agent is already guarded (a re-run):** `Codex is already configured; re-apply its hooks (mode=action)? [Y/n]:`. Enter or `y` rewrites its hooks in the mode you chose; `n` prints `Aborted — no changes made.` A re-run never asks Add, Replace or Cancel.
+- **No other agent is guarded:** `Configure DefenseClaw for Codex enforcement now? [Y/n]:` (`observability` in observe mode). `n` makes no changes.
+- **Another agent is guarded (here, `claudecode`):** setup asks how to combine them:
+
+```text
+  DefenseClaw is already configured for: claudecode
+  You are setting up: codex
+    [a] Add     — run it alongside the existing connector(s) (multi-connector)
+    [r] Replace — switch to only this connector
+    [c] Cancel  — make no changes
+  Choose (a, r, c) [a]:
+```
+
+Type `a` to keep both active. Type `r` only when you want DefenseClaw to tear
+down the previous connector's agent-side files before wiring the new one. `c`
+makes no changes.
+
+`--yes` answers these questions with their defaults. If you chose action mode, setup then offers the LLM judge:
+
+```text
+  Add LLM judge on top of rule scanning? [y/N]:
+```
+
+Press Enter or type `n` to keep rule scanning only, or `y` to add the judge
+(configure its model with `defenseclaw setup llm`). Observe mode skips this
+question. `--enable-judge` or `--no-enable-judge` answers it.
+
+To replace instead of add, pass `--replace`. Setup then asks a yes/no question
+in place of the Add/Replace/Cancel choice, followed by the judge question in
+action mode:
+
+```bash
+defenseclaw setup claude-code --replace --mode action
+```
+
+```text
+  Replace codex with claudecode? This removes the other connector(s). [y/N]: y
+  Add LLM judge on top of rule scanning? [y/N]: n
+```
+
+## Remove a connector
+
+When you no longer want a connector wired, remove it explicitly:
+
+```bash
+defenseclaw setup remove codex
+```
+
+```text
+  OK Removed connector 'codex'
+  OK Remaining connector(s): claudecode
+
+  Restarting gateway so the removed connector's hooks are torn down...
+```
+
+`--yes` skips the question and `--no-restart` restarts later. Removing the last agent needs `--force`. DefenseClaw stays installed; `defenseclaw uninstall` removes it.
+
+```bash
+defenseclaw setup remove codex --force
+```
+
+## Replace instead of add
+
+Choose **Replace** in the connector setup prompt when you want setup to tear down the previous connector's agent-side files before wiring the new one. Replace tears down the old agent's files and leaves only the new one.
+
+```bash
+defenseclaw setup claude-code --replace --mode action
+```
+
+Setup names the agents it removes and asks first (`--yes` skips the question). The same flag switches between a hook agent and a proxy agent (`defenseclaw setup openclaw --replace`) on Linux and macOS. Native Windows has no guardrail proxy, so OpenClaw and ZeptoClaw replacement is unsupported there. Without `--replace`, setup refuses and changes nothing.
+
+## Verify
+
+Check it worked:
+
+```bash
+defenseclaw guardrail status
+defenseclaw doctor
+```
+
+`defenseclaw guardrail status` lists only the agents you kept, and `defenseclaw doctor` reports no leftover hooks.
+
+## See also
+
+- [Multi-connector](/docs/guardrail/multi-connector) - one gateway enforcing several hook connectors
+- [Quick aliases](/docs/guardrail/aliases) - connector setup alias reference
+- [Disabling](/docs/guardrail/disabling) - roll back agent-side hook entries
+- [HITL](/docs/hitl) - per-connector approval behavior
+- [Generate a setup command](/docs/command-generator)
+- [Turn on blocking](/docs/get-started/first-guardrail)
+- [Setup aliases](/docs/guardrail/aliases)

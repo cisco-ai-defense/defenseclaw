@@ -1006,6 +1006,19 @@ func (s *Store) Advance(r *Receipt, next string, update func(*Receipt)) error {
 	return s.writeReceipt(r)
 }
 
+// RebindGeneration records that a lifecycle rollback wrote the committed
+// config of the applied, unconfirmed receipt r again, with the same bytes and
+// signed attribution, under the later config generation generation (the
+// counter never goes back), so the receipt still proves its commit and the
+// next run can confirm it from the gateway (GAP-1186).
+func (s *Store) RebindGeneration(r *Receipt, generation uint64) error {
+	if r.State != StateApplied || generation <= r.ConfigGeneration {
+		return fmt.Errorf("bundle receipt %s cannot move from config generation %d to %d", r.ReceiptID, r.ConfigGeneration, generation)
+	}
+	r.ConfigGeneration = generation
+	return s.writeReceipt(r)
+}
+
 // Fail ends r with code and a bounded message, and removes its staging
 // copy. The version directory stays until the next garbage collection: a
 // rollback may still point at it.

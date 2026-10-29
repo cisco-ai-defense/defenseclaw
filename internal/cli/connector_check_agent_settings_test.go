@@ -222,3 +222,52 @@ func TestConnectorCheckAgentSettingsFollowsExplicitCodexMigrationRoot(t *testing
 // jsonEscapedPath is path as --json output spells it: a Windows path's
 // backslashes are escaped.
 func jsonEscapedPath(path string) string { return strings.ReplaceAll(path, `\`, `\\`) }
+
+// GAP-1325: `defenseclaw setup claude-code` saved its change and reported
+// success while the data directory's shared hook config was malformed
+// (fail_modes null), which every hook of the data directory closes on. The
+// check setup runs first refuses it for any connector and changes nothing.
+func TestConnectorCheckAgentSettingsRefusesMalformedSharedHookSidecar(t *testing.T) {
+	for _, name := range []string{"claudecode", "cursor"} {
+		t.Run(name, func(t *testing.T) {
+			dataDir := testenv.PrivateTempDir(t)
+			defer withConnectorState(t, dataDir, name)()
+			settings := filepath.Join(t.TempDir(), "settings.json")
+			if err := os.WriteFile(settings, []byte("{}"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			previous := connector.ClaudeCodeSettingsPathOverride
+			connector.ClaudeCodeSettingsPathOverride = settings
+			t.Cleanup(func() { connector.ClaudeCodeSettingsPathOverride = previous })
+			sidecar := filepath.Join(dataDir, "hooks", ".hookcfg")
+			malformed := `{"version":2,"fail_modes":null,"legacy_fail_mode":"open"}`
+			if err := os.MkdirAll(filepath.Dir(sidecar), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(sidecar, []byte(malformed), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			connectorFlagJSON = true
+			stdout, stderr, code := runConnectorCmd(t, "check-agent-settings", "--connector", name, "--json")
+			if code != 1 {
+				t.Fatalf("exit = %d, want 1 (stdout=%q stderr=%q)", code, stdout, stderr)
+			}
+			var payload map[string]any
+			if err := json.Unmarshal([]byte(stdout), &payload); err != nil {
+				t.Fatalf("stdout is not JSON: %q (%v)", stdout, err)
+			}
+			reason, _ := payload["reason"].(string)
+			if payload["refused"] != true || !strings.Contains(reason, sidecar) || !strings.Contains(reason, "fail_modes") {
+				t.Fatalf("payload = %v; want a refusal naming %s", payload, sidecar)
+			}
+			// GAP-1815: no flat record can rebuild this null map, so a
+			// restart does not repair it either.
+			if payload["repaired_by_restart"] != false {
+				t.Fatalf("payload = %v; want repaired_by_restart false", payload)
+			}
+			if after, err := os.ReadFile(sidecar); err != nil || string(after) != malformed {
+				t.Fatalf("the check changed the sidecar: %q (%v)", after, err)
+			}
+		})
+	}
+}

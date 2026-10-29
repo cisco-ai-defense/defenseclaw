@@ -784,9 +784,6 @@ func (a *APIServer) inspectTrustedToolPolicyCtx(
 			observation.ParserUncertaintyCount,
 		)
 	}
-	ruleFindings := dispatchTrustedAction(ctx, action)
-	ruleFindings = provedHighWriteFindings(ctx, action, ruleFindings)
-
 	// CodeGuard: scan file content for any file-write tool.
 	//
 	// the legacy gate matched only the canonical
@@ -794,12 +791,19 @@ func (a *APIServer) inspectTrustedToolPolicyCtx(
 	// emit aliases like Claude Code "Write" / "Edit" / "MultiEdit",
 	// Codex "patch", and Cursor "applyDiff". Those bypassed CodeGuard
 	// entirely while carrying the same code payload. We accept any
-	// recognised file-write alias (case-insensitive).
+	// recognised file-write alias (case-insensitive). The scan runs beside
+	// the rule dispatch (startCodeGuardOnArgs, GAP-2284).
 	tool := strings.ToLower(toolName)
 	isWriteTool := isWriteToolName(tool)
-	var cgScan codeGuardArgsScan
+	var waitCodeGuard func() codeGuardArgsScan
 	if isWriteTool {
-		cgScan = a.runCodeGuardOnArgsWithProvenance(ctx, req)
+		waitCodeGuard = a.startCodeGuardOnArgs(ctx, req)
+	}
+	ruleFindings := inspectDispatchTrustedAction(ctx, action)
+	ruleFindings = provedHighWriteFindings(ctx, action, ruleFindings)
+	var cgScan codeGuardArgsScan
+	if waitCodeGuard != nil {
+		cgScan = waitCodeGuard()
 	}
 	cgFindings := codeGuardRuleFindings(cgScan, true, action.EnforcementCapable)
 
@@ -826,9 +830,13 @@ func (a *APIServer) inspectTrustedToolPolicyCtx(
 		runtimeAction := profileMeetActionForFindings(
 			ctx, a.decisionConfig(ctx), req.Connector, ruleFindings, true, false,
 		)
-		if enforceableSeverity != "NONE" {
+		// CodeGuard's findings carry no member and apply to every member.
+		// The rule findings decided above, each under its own member: their
+		// severity folded in here let an action member enforce an observe
+		// member's rule (GAP-1708).
+		if _, codeGuardSeverity := aggregateCodeGuardSeverity(cgFindings, "NONE", "NONE"); codeGuardSeverity != "NONE" {
 			codeGuardAction := profileMeetActionForSeverity(
-				ctx, a.decisionConfig(ctx), req.Connector, enforceableSeverity, true, false,
+				ctx, a.decisionConfig(ctx), req.Connector, codeGuardSeverity, true, false,
 			)
 			runtimeAction = strongerGuardrailAction(runtimeAction, codeGuardAction)
 		}
@@ -1374,6 +1382,25 @@ const maxConcurrentHookJudges = 16
 // still leaves 2s for the regex/AID phases plus response rendering.
 const defaultHookJudgeTimeout = 8 * time.Second
 
+// hookJudgeTimeout is guardrail.judge.hook_timeout, else
+// defaultHookJudgeTimeout.
+func hookJudgeTimeout(cfg *config.Config) time.Duration {
+	if cfg != nil && cfg.Guardrail.Judge.HookTimeout > 0 {
+		return time.Duration(cfg.Guardrail.Judge.HookTimeout * float64(time.Second))
+	}
+	return defaultHookJudgeTimeout
+}
+
+type hookJudgeBudgetKey struct{}
+
+// withHookJudgeBudget gives every hook judge call under ctx one shared end:
+// the calls of one hook (a parallel Copilot toolCalls envelope) answer in
+// the one round trip the hook client waits for, so their judge calls cannot
+// add up past it (GAP-1835).
+func withHookJudgeBudget(ctx context.Context, end time.Time) context.Context {
+	return context.WithValue(ctx, hookJudgeBudgetKey{}, end)
+}
+
 // hookJudgeInspect runs the LLM judge on hook-lane message content for
 // connectors gated on via guardrail.judge.hook_connectors. It maps the
 // request direction to the proxy lane's judge vocabulary and delegates
@@ -1458,11 +1485,7 @@ func (a *APIServer) runHookJudge(ctx context.Context, strategyDirection, judgeDi
 			// The hook client has one round-trip budget even when several
 			// profiles judge. Start every member under that same deadline so
 			// a slow observer cannot spend an action member's entire budget.
-			timeout := defaultHookJudgeTimeout
-			if cfg := a.decisionConfig(ctx); cfg != nil && cfg.Guardrail.Judge.HookTimeout > 0 {
-				timeout = time.Duration(cfg.Guardrail.Judge.HookTimeout * float64(time.Second))
-			}
-			judgeCtx, cancel := context.WithTimeout(ctx, timeout)
+			judgeCtx, cancel := context.WithTimeout(ctx, hookJudgeTimeout(a.decisionConfig(ctx)))
 			defer cancel()
 			results := make([]*ScanVerdict, len(meet.members))
 			var judges sync.WaitGroup
@@ -1587,6 +1610,19 @@ func (a *APIServer) runHookJudgeSingle(ctx context.Context, strategyDirection, j
 		return nil
 	}
 
+	timeout := hookJudgeTimeout(cfg)
+	if end, ok := ctx.Value(hookJudgeBudgetKey{}).(time.Time); ok {
+		// The hook's earlier calls spent the shared judge budget: keep the
+		// regex/AID verdict, as for any judge that cannot answer in time.
+		left := time.Until(end)
+		if left < time.Second {
+			fmt.Fprintf(os.Stderr, "[inspect] hook judge skipped (hook judge budget spent) connector=%s direction=%s; keeping regex/AID verdict\n",
+				connector, strategyDirection)
+			return nil
+		}
+		timeout = min(timeout, left)
+	}
+
 	a.hookJudgeSemOnce.Do(func() { a.hookJudgeSem = make(chan struct{}, maxConcurrentHookJudges) })
 	select {
 	case a.hookJudgeSem <- struct{}{}:
@@ -1597,10 +1633,6 @@ func (a *APIServer) runHookJudgeSingle(ctx context.Context, strategyDirection, j
 	}
 	defer func() { <-a.hookJudgeSem }()
 
-	timeout := defaultHookJudgeTimeout
-	if jcfg.HookTimeout > 0 {
-		timeout = time.Duration(jcfg.HookTimeout * float64(time.Second))
-	}
 	jctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	jctx = withJudgeSuppressionPack(jctx, a.connectorRulePack(ctx, connector))
@@ -1858,7 +1890,42 @@ func (a *APIServer) handleInspectTool(w http.ResponseWriter, r *http.Request) {
 	// path returns above and deliberately records nothing because installed
 	// hooks fail closed on an unreachable gateway.
 	a.recordManagedAIDFailOpenForSelectedGenericResult(r.Context(), verdict)
-	a.writeInspectVerdict(w, r, "/api/v1/inspect/tool", req.Tool, verdict)
+	response := verdict
+	// Secure Client answers stay byte-identical to origin/main (issue
+	// #1092, GAP-2137): the GAP-1602 evidence fill is for the other
+	// profiles only.
+	if cfg := a.decisionConfig(r.Context()); cfg == nil || !cfg.SecureClientIntegration() {
+		response = inspectToolResponseEvidence(verdict, req.Args)
+	}
+	a.writeInspectVerdict(w, r, "/api/v1/inspect/tool", req.Tool, response)
+}
+
+// inspectToolResponseEvidence gives each finding of the response that names
+// no matched text (a semantic rule decides on the parsed call, not a text
+// match) the call it judged as its evidence: the command of a shell call,
+// else the arguments. The response redacts it unless the caller asks for
+// raw evidence (X-DefenseClaw-Reveal-PII: 1, GAP-1602). The audit and
+// telemetry records keep the verdict as decided.
+func inspectToolResponseEvidence(verdict *ToolInspectVerdict, args json.RawMessage) *ToolInspectVerdict {
+	if verdict == nil || len(verdict.DetailedFindings) == 0 {
+		return verdict
+	}
+	text := string(args)
+	if command, present, valid := trustedTopLevelCommandField(args); valid && present && strings.TrimSpace(command) != "" {
+		text = command
+	}
+	evidence := sanitizeEvidence(text)
+	if strings.TrimSpace(evidence) == "" {
+		return verdict
+	}
+	cp := *verdict
+	cp.DetailedFindings = append([]RuleFinding(nil), verdict.DetailedFindings...)
+	for i := range cp.DetailedFindings {
+		if cp.DetailedFindings[i].Evidence == "" {
+			cp.DetailedFindings[i].Evidence = evidence
+		}
+	}
+	return &cp
 }
 
 // writeInspectVerdict is the only response boundary for direct inspect routes

@@ -225,7 +225,7 @@ func llmJudgeAllowsEmptyAPIKey(llm config.LLMConfig, providers *configs.Provider
 		return true
 	}
 	provider := strings.ToLower(strings.TrimSpace(llm.Provider))
-	if provider == "" && strings.TrimSpace(llm.InstanceName) != "" && providers != nil {
+	if (provider == "" || provider == customProviderType) && strings.TrimSpace(llm.InstanceName) != "" && providers != nil {
 		instance := strings.ToLower(strings.TrimSpace(llm.InstanceName))
 		for i := range providers.Providers {
 			if strings.ToLower(strings.TrimSpace(providers.Providers[i].Name)) == instance {

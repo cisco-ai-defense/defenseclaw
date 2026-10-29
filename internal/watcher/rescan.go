@@ -506,7 +506,7 @@ func (w *InstallWatcher) enumerateTargets() []InstallEvent {
 			entries, err := discover(dir, hermesskills.DefaultDirectoryLimit)
 			if err == nil {
 				for _, entry := range entries {
-					if entry.Bundled && trustBundled {
+					if (entry.Bundled && trustBundled) || w.inSkillInstallStaging(dir, entry.Path, claudeStagingGrace) {
 						continue
 					}
 					targets = append(targets, InstallEvent{
@@ -890,7 +890,7 @@ func enumerateClaudeWatcherPlugins(root string) []string {
 		// <marketplace>/<plugin>/<version>; plugin.json is optional. Admit
 		// exactly that directory and never let a nested dependency manifest
 		// manufacture a second plugin identity.
-		if depth == 3 {
+		if depth == 3 || depth == 1 && isCachePluginCopy(path) {
 			out = append(out, path)
 			return filepath.SkipDir
 		}

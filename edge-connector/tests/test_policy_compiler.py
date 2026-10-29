@@ -116,11 +116,11 @@ class PolicyCompilerExitTest(unittest.TestCase):
                     (work / 'policy.bin').unlink()
 
     def test_the_policies_page_examples_compile(self):
-        # Every policy on docs-site .../reference/edge-connector/policies.mdx compiles
+        # Every policy on docs-site .../edge-connector/policies.mdx compiles
         # with the command the page shows, and the bracketed form of each
         # IPv6 entry it lists is refused, as the page says (GAP-0592).
         docs_dir = ROOT.parent / 'docs-site' / 'content' / 'docs'
-        page = (docs_dir / 'reference' / 'edge-connector' / 'policies.mdx').read_text()
+        page = (docs_dir / 'edge-connector' / 'policies.mdx').read_text()
         blocks = re.findall(r'```yaml[^\n]*\n(.*?)```', page, re.S)
         self.assertGreaterEqual(len(blocks), 4)
         ipv6 = [dest for block in blocks for dest in re.findall(r'- "([0-9a-f:]*:[0-9a-f:]*)"', block)]

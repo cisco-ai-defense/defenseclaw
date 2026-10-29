@@ -475,6 +475,11 @@ def cli(ctx: click.Context) -> None:
         from defenseclaw.commands.cmd_config import validate_config
 
         result = validate_config()
+        # Not judged inside a sandbox that hides folder owners: status says
+        # so instead of calling the config invalid (GAP-1395).
+        app.config_not_checked = getattr(result, "not_checked", "")
+        if app.config_not_checked and invoked != "status":
+            ux.echo(f"Config check: not run: {app.config_not_checked}", err=True)
         if _audit_logs_can_read_with_ide_scope_typo(ctx, result):
             ux.echo(
                 "Config warning: ai_discovery.ide_inventory is invalid; log output is still available. "

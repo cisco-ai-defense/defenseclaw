@@ -599,8 +599,13 @@ def _unproven_per_user_gateway_target(host: str, port: int) -> str:
         cfg = config.load(without_guardrail_profiles=True)
         configured = gateway_api_client_host(cfg)
         if host != configured or int(port) != int(cfg.gateway.api_port):
-            return f"{host}:{port} is not the configured gateway endpoint for this account"
-        trust = _trusted_gateway_listener(cfg)
+            # A saved listener edit applies at the next restart; until then the
+            # running gateway's own descriptor names its endpoint (GAP-0441).
+            from defenseclaw.logger import _running_gateway_address
+
+            if _running_gateway_address(str(getattr(cfg, "data_dir", "") or "")) != (host, int(port)):
+                return f"{host}:{port} is not the configured gateway endpoint for this account"
+        trust = _trusted_gateway_listener(cfg, api_port=int(port))
         if not trust.trusted:
             if getattr(trust, "code", None) == "missing":
                 raise GatewayNotRunningError(trust.detail or "the gateway is not running")

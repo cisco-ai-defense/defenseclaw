@@ -10,7 +10,10 @@ import (
 	"bytes"
 	"errors"
 	"io/fs"
+	"sort"
 	"strings"
+
+	"gopkg.in/yaml.v3"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/config/configwrite"
@@ -112,6 +115,7 @@ func predictBundleRestart(goos string, defaults configwrite.ManagedDefaults, ins
 				Settings: configwrite.RestartSettingPatterns(restart)}
 		}
 		restart, _ = windowsBundleStartOnlyPaths(restart)
+		restart = append(restart, windowsPrimaryConnectorChange(installed, next)...)
 	}
 	if len(restart) == 0 {
 		return &bundleRestartPrediction{GatewayRestart: bundleRestartNotRequired, ReasonCodes: []string{}}
@@ -134,6 +138,49 @@ func windowsBundleStartOnlyPaths(restart []string) (startOnly []string, refreshT
 		refreshTargets = true
 	}
 	return startOnly, refreshTargets
+}
+
+// windowsPrimaryConnectorChange returns guardrail.connector when the change
+// moves the gateway's primary connector: the explicit guardrail.connector,
+// or, when none is set, the first guardrail.connectors key in sorted order
+// (config.dropRetiredConnectorSettings). The gateway reads it only at start
+// and holds the running one on a reload (guardrailNeedsRestart), so a
+// connector-set change that moves it, such as removing the first connector
+// entry, is start-only even though the connector set itself applies in
+// place: without a restart the gateway never reports the bundle policy
+// (bundle_policy_not_adopted, GAP-1498). A config that does not parse
+// counts as a change.
+func windowsPrimaryConnectorChange(before, after []byte) []string {
+	b, errB := windowsPrimaryConnector(before)
+	a, errA := windowsPrimaryConnector(after)
+	if errB == nil && errA == nil && a == b {
+		return nil
+	}
+	return []string{"guardrail.connector"}
+}
+
+func windowsPrimaryConnector(raw []byte) (string, error) {
+	var doc struct {
+		Guardrail struct {
+			Connector  string               `yaml:"connector"`
+			Connectors map[string]yaml.Node `yaml:"connectors"`
+		} `yaml:"guardrail"`
+	}
+	if err := yaml.Unmarshal(raw, &doc); err != nil {
+		return "", err
+	}
+	if primary := strings.ToLower(strings.TrimSpace(doc.Guardrail.Connector)); primary != "" {
+		return primary, nil
+	}
+	keys := make([]string, 0, len(doc.Guardrail.Connectors))
+	for key := range doc.Guardrail.Connectors {
+		keys = append(keys, strings.ToLower(strings.TrimSpace(key)))
+	}
+	sort.Strings(keys)
+	if len(keys) == 0 {
+		return "", nil
+	}
+	return keys[0], nil
 }
 
 // windowsEnterpriseHotTargetsPath reports a restart-required change

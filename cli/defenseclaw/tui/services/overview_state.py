@@ -24,6 +24,7 @@ from defenseclaw.connector_paths import (
     hermes_config_path,
     hermes_home,
 )
+from defenseclaw.connector_paths import normalize as normalize_connector
 from defenseclaw.observability.custody_status import (
     NativeDeliveryStatus,
     NativeDeliverySummary,
@@ -811,7 +812,7 @@ class OverviewPanelModel:
             notices.append(
                 OverviewNotice(
                     "info",
-                    "Loading the audit history - alert and hook counts show 0 until it finishes",
+                    "Loading the audit history - counts show 0 while loading",
                 )
             )
         if self.not_configured:
@@ -989,14 +990,17 @@ class OverviewPanelModel:
 
         # A stopped gateway leaves its last /health payload behind; notices
         # read from it ("since the gateway started 3m ago") would be stale.
+        idle_notice: OverviewNotice | None = None
         live_health = self.health is not None and not self.gateway_down()
         if live_health and self.health.connector is not None and self.cfg is not None:
-            live = self.health.connector.name.strip()
-            configured = self.cfg.claw_mode.strip()
-            roster = {c.strip().lower() for c, _m in self.cfg.connector_modes if c}
+            live = normalize_connector(self.health.connector.name)
+            # The gateway folds an alias of claw.mode (claude-code, Codex) to
+            # its registry name; compare the same names (GAP-2079).
+            configured = normalize_connector(self.cfg.claw_mode)
+            roster = {normalize_connector(c) for c, _m in self.cfg.connector_modes if c}
             # In a multi-connector install the gateway's primary connector can
             # be any rostered one; that is not drift (GAP-1220).
-            if live and configured and live != configured and live.lower() not in roster:
+            if live and configured and live != configured and live not in roster:
                 notices.append(
                     OverviewNotice(
                         "warn",
@@ -1006,12 +1010,15 @@ class OverviewPanelModel:
                     )
                 )
             uptime = timedelta(milliseconds=self.health.uptime_ms)
+            # The idle-connector notice is informational and only true until
+            # the first hook event, so it goes last: at 80x24 it pushed the
+            # Runtime notice and its N key below the fold (GAP-2104).
             if uptime > timedelta(minutes=1):
                 if self._is_multi_connector() and self.health.connectors:
                     # One idle connector out of several is normal; only say
                     # something when none of them has seen a hook event.
                     if not any(_connector_saw_traffic(conn) for conn in self.health.connectors):
-                        notices.append(
+                        idle_notice = (
                             OverviewNotice(
                                 "info",
                                 # One line at 80 columns: the wrapped rest fell
@@ -1021,7 +1028,7 @@ class OverviewPanelModel:
                             )
                         )
                 elif not _connector_saw_traffic(self.health.connector):
-                    notices.append(OverviewNotice("info", zero_connector_requests_notice(live, uptime)))
+                    idle_notice = OverviewNotice("info", zero_connector_requests_notice(live, uptime))
 
         probe_detail = gateway_availability.last_error.strip().lower()
         if not gateway_broken and "elevated sidecar" in probe_detail:
@@ -1052,6 +1059,8 @@ class OverviewPanelModel:
                     f"{runtime.connections} connections, no findings above the reporting floor"
                 )
             notices.append(OverviewNotice("info", message))
+        if idle_notice is not None:
+            notices.append(idle_notice)
 
         return tuple(notices)
 
@@ -1419,13 +1428,11 @@ class OverviewPanelModel:
         if self.cfg is None:
             return ""
         if self.cfg.guardrail_connector.strip():
-            return self.cfg.guardrail_connector.strip().lower()
+            return normalize_connector(self.cfg.guardrail_connector)
         primary = connector_filter.active_connector_name(self.cfg.connector_modes)
         if primary:
-            return primary.strip().lower()
-        if self.cfg.claw_mode.strip():
-            return self.cfg.claw_mode.strip().lower()
-        return ""
+            return normalize_connector(primary)
+        return normalize_connector(self.cfg.claw_mode)
 
     def scanner_overrides_summary(self) -> str:
         """One-line summary of the admission actions config.yaml overrides,

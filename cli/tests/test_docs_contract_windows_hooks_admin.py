@@ -38,7 +38,7 @@ def _hooks_commands_without_config() -> set[str]:
 
 def _admin_hooks_commands() -> dict[str, str]:
     """The cli.mdx `enterprise hooks` table rows: verb -> who runs it."""
-    text = (DOCS / "reference/commands/cli.mdx").read_text(encoding="utf-8")
+    text = (DOCS / "reference/cli.mdx").read_text(encoding="utf-8")
     section = text.split("### Per-user hooks (`enterprise hooks`)", 1)[1].split("\n### ", 1)[0]
     rows = {}
     for line in section.splitlines():
@@ -71,7 +71,9 @@ def test_windows_lifecycle_runs_the_hooks_status_and_verify():
     assert "$verb = if ($LiveVerify) {" in probe
     assert "if (Test-DefenseClawStandaloneProfile) { 'readiness' } else { 'verify' }" in probe
     assert "else { 'status' }" in probe
-    assert "-Arguments @('enterprise', 'hooks', $verb, '--manifest', $Layout.ManifestPath, '--json')" in module
+    assert "-Verb $verb" in probe
+    command = module.split("function Invoke-DefenseClawGuardianReadinessCommand", 1)[1].split("\nfunction ", 1)[0]
+    assert "-Arguments @('enterprise', 'hooks', $Verb, '--manifest', $Layout.ManifestPath, '--json')" in command
     status = module.split("function Get-DefenseClawLifecycleStatus", 1)[1].split("\nfunction ", 1)[0]
     assert "Get-DefenseClawGuardianStatusReport" in status
     report = module.split("function Get-DefenseClawGuardianStatusReport", 1)[1].split("\nfunction ", 1)[0]
@@ -117,7 +119,7 @@ def test_no_page_runs_enterprise_hooks_status_or_verify_from_a_standalone_window
 
 
 def test_cli_reference_says_how_a_windows_administrator_checks_the_hooks():
-    text = " ".join((DOCS / "reference/commands/cli.mdx").read_text(encoding="utf-8").split())
+    text = " ".join((DOCS / "reference/cli.mdx").read_text(encoding="utf-8").split())
     assert "To run `status` or `verify` yourself on Linux or macOS" in text
     assert (
         "On a managed Windows computer an elevated prompt has none of the service's settings, so "

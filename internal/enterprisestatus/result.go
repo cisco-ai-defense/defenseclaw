@@ -216,6 +216,81 @@ type Result struct {
 	// PreserveNotRootDeploymentState retains the pre-1.0 Secure Client JSON
 	// shape for an unelevated macOS lifecycle command.
 	PreserveNotRootDeploymentState bool `json:"-"`
+
+	// securityBy and coverageBy are why security_complete and
+	// coverage_complete are false (MarkSecurityIncomplete,
+	// MarkCoverageIncomplete); Finish names them on Linux and macOS.
+	securityBy, coverageBy []string
+}
+
+// CodeSecurityIncomplete is the warning that names why security_complete
+// (and coverage_complete) is false. Windows Setup uses it when no other
+// warning explains an incomplete result; Linux and macOS status, verify and
+// the package result list the warning codes behind each field, so an upgrade
+// that turns a field false says which check did (GAP-1861, GAP-1863).
+const CodeSecurityIncomplete = "security_incomplete"
+
+// MarkSecurityIncomplete sets security_complete false for reason: the code of
+// the warning or error that says why, or a short phrase when no warning does.
+func (r *Result) MarkSecurityIncomplete(reason string) {
+	r.SecurityComplete = false
+	r.securityBy = appendReason(r.securityBy, reason)
+}
+
+// MarkCoverageIncomplete sets coverage_complete and security_complete false
+// for reason (see MarkSecurityIncomplete).
+func (r *Result) MarkCoverageIncomplete(reason string) {
+	r.CoverageComplete = false
+	r.coverageBy = appendReason(r.coverageBy, reason)
+	r.MarkSecurityIncomplete(reason)
+}
+
+// ResetCompleteness starts the completeness verdict again: both fields true,
+// no reason. The Linux and macOS describe pass computes them from scratch.
+func (r *Result) ResetCompleteness() {
+	r.CoverageComplete, r.SecurityComplete = true, true
+	r.securityBy, r.coverageBy = nil, nil
+}
+
+func appendReason(reasons []string, reason string) []string {
+	reason = strings.TrimSpace(reason)
+	if reason == "" || slices.Contains(reasons, reason) {
+		return reasons
+	}
+	return append(reasons, reason)
+}
+
+// nameIncompleteFields replaces the security_incomplete warning with one that
+// lists why each false field is false. A field that ended true drops its
+// reasons (a later pass recomputed it); a result whose only reasons are its
+// errors gets no warning, the errors say it.
+func (r *Result) nameIncompleteFields() {
+	if r.CoverageComplete {
+		r.coverageBy = nil
+	}
+	if r.SecurityComplete {
+		r.securityBy = nil
+	}
+	warnings := make([]Message, 0, len(r.Warnings)+1)
+	for _, warning := range r.Warnings {
+		if warning.Code != CodeSecurityIncomplete {
+			warnings = append(warnings, warning)
+		}
+	}
+	r.Warnings = warnings
+	if r.SecurityComplete || len(r.securityBy) == 0 {
+		return
+	}
+	message := "security_complete is false because of: " + strings.Join(r.securityBy, ", ")
+	if len(r.Errors) > 0 {
+		message += " and the errors above"
+	}
+	if r.CoverageComplete {
+		message += "; coverage_complete is true"
+	} else if len(r.coverageBy) > 0 {
+		message += "; coverage_complete is false because of: " + strings.Join(r.coverageBy, ", ")
+	}
+	r.Warnings = append(r.Warnings, Message{Code: CodeSecurityIncomplete, Message: message + "; each warning above says what to do"})
 }
 
 // ScannerRuntime reports the scanners a standalone Windows deployment runs.
@@ -432,11 +507,15 @@ func (r *Result) AddWarning(code, message string) {
 // was told the host was protected (GAP-0664).
 func (r *Result) Finish(goos string, failureCode int) int {
 	if r.Bundle != nil && r.Bundle.SessionsRestartRequired != nil && r.Bundle.SessionsRestartRequired.Count > 0 {
-		r.CoverageComplete, r.SecurityComplete = false, false
+		code, _ := SessionWarning(*r.Bundle.SessionsRestartRequired)
+		r.MarkCoverageIncomplete(code)
 	}
 	r.OK = len(r.Errors) == 0
 	if !r.OK {
 		r.SecurityComplete = false
+	}
+	if goos != "windows" {
+		r.nameIncompleteFields()
 	}
 	switch {
 	case r.OK:

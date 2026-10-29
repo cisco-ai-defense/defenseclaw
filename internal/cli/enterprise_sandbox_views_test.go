@@ -23,6 +23,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/enterprisepolicy"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/packs"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxapi"
+	"github.com/defenseclaw/defenseclaw/internal/posixacl"
 	"github.com/defenseclaw/defenseclaw/internal/sandboxreg"
 	"github.com/defenseclaw/defenseclaw/internal/sandboxrelay"
 )
@@ -500,6 +501,93 @@ func TestPolicyVerifySandboxRows(t *testing.T) {
 	// Nothing configured, and Windows: no rows.
 	if buildEnterprisePolicySandbox(&config.Config{}, "linux", "alice", 1, nil) != nil || buildEnterprisePolicySandbox(c, "windows", "alice", -1, nil) != nil {
 		t.Error("rows without a sandbox policy or on Windows")
+	}
+}
+
+// GAP-0714: on the MicroVM driver policy verify --user judges what a run
+// needs: read-write access to /dev/kvm (the kvm group, a user ACL or an open
+// mode, not the group alone) and the docker group, in which the agent
+// images are built; an account that can open /dev/kvm is no "cannot start".
+func TestPolicyVerifyJudgesKVMAccessNotOnlyTheGroup(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("/dev/kvm access is a Linux check, made with POSIX file modes Windows does not keep")
+	}
+	prevProfile, prevGroups, prevDevice := enterprisePolicySandboxProfile, enterpriseAccountGroups, enterpriseKVMDevice
+	t.Cleanup(func() {
+		enterprisePolicySandboxProfile, enterpriseAccountGroups, enterpriseKVMDevice = prevProfile, prevGroups, prevDevice
+	})
+	enterprisePolicySandboxProfile = func(string) (string, string, string, bool, error) { return "eng", "group", "eng", false, nil }
+	enterpriseKVMDevice = filepath.Join(t.TempDir(), "kvm")
+	if err := os.WriteFile(enterpriseKVMDevice, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	c := &config.Config{}
+	c.OpenShell.Enabled = true
+	c.Enterprise.OpenShell.Driver, c.Enterprise.OpenShell.DriverFallback = config.EnterpriseOpenShellDriverAuto, config.EnterpriseOpenShellFallbackDocker
+	c.Guardrail.Profiles = map[string]config.GuardrailProfile{"eng": {Sandbox: &config.OpenShellAdminConfig{RequiredFor: []string{"claudecode"}}}}
+	states := []enterprisepolicy.State{{Connector: "claudecode", Route: enterprisepolicy.RouteMachinePolicy, Covered: true}}
+	row := func(check string) enterprisePolicySandboxRow {
+		t.Helper()
+		for _, r := range buildEnterprisePolicySandbox(c, "linux", "eng1", 1001, states).Rows {
+			if r.Check == check {
+				return r
+			}
+		}
+		t.Fatalf("no %s row", check)
+		return enterprisePolicySandboxRow{}
+	}
+	enterpriseAccountGroups = func(int) ([]string, error) { return []string{"users", "docker"}, nil }
+	if r := row("kvm group"); r.State != sandboxRowWarn || !strings.Contains(r.Detail, "cannot read and write /dev/kvm") ||
+		!strings.Contains(r.Detail, "docker fallback") || strings.Contains(r.Detail, "no sandbox can start") {
+		t.Errorf("closed /dev/kvm, auto with the docker fallback: %+v", r)
+	}
+	if err := os.Chmod(enterpriseKVMDevice, 0o666); err != nil {
+		t.Fatal(err)
+	}
+	if r := row("kvm group"); r.State != sandboxRowOK || !strings.Contains(r.Detail, "can read and write /dev/kvm") {
+		t.Errorf("an account that can open /dev/kvm outside the kvm group: %+v", r)
+	}
+	// The agent images are built in Docker: without the docker group no
+	// MicroVM starts either, whatever /dev/kvm allows.
+	enterpriseAccountGroups = func(int) ([]string, error) { return []string{"users"}, nil }
+	if r := row("docker group"); r.State != sandboxRowFail || !strings.Contains(r.Detail, "MicroVM agent images") {
+		t.Errorf("no docker group on the MicroVM driver: %+v", r)
+	}
+}
+
+// GAP-1784: a user ACL entry that names the account and withholds
+// read/write from /dev/kvm is the answer, also for an account in the kvm
+// group and on an open mode, as the lifecycle's groups row judges it.
+func TestPolicyVerifyHonoursAKVMACLEntryThatDenies(t *testing.T) {
+	prevProfile, prevGroups, prevDevice, prevACL := enterprisePolicySandboxProfile, enterpriseAccountGroups, enterpriseKVMDevice, enterpriseKVMACL
+	t.Cleanup(func() {
+		enterprisePolicySandboxProfile, enterpriseAccountGroups, enterpriseKVMDevice, enterpriseKVMACL = prevProfile, prevGroups, prevDevice, prevACL
+	})
+	enterprisePolicySandboxProfile = func(string) (string, string, string, bool, error) { return "eng", "group", "eng", false, nil }
+	enterpriseKVMDevice = filepath.Join(t.TempDir(), "kvm")
+	if err := os.WriteFile(enterpriseKVMDevice, nil, 0o666); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(enterpriseKVMDevice, 0o666); err != nil {
+		t.Fatal(err)
+	}
+	enterpriseKVMACL = func(string) (posixacl.View, error) {
+		return posixacl.View{Present: true, Mask: 0o7, Users: []posixacl.Entry{{Kind: "user", ID: 1001, Perm: 0}}}, nil
+	}
+	enterpriseAccountGroups = func(int) ([]string, error) { return []string{"users", "kvm", "docker"}, nil }
+	c := &config.Config{}
+	c.OpenShell.Enabled = true
+	c.Enterprise.OpenShell.Driver = config.EnterpriseOpenShellDriverVM
+	c.Guardrail.Profiles = map[string]config.GuardrailProfile{"eng": {Sandbox: &config.OpenShellAdminConfig{RequiredFor: []string{"claudecode"}}}}
+	states := []enterprisepolicy.State{{Connector: "claudecode", Route: enterprisepolicy.RouteMachinePolicy, Covered: true}}
+	var kvm *enterprisePolicySandboxRow
+	for _, r := range buildEnterprisePolicySandbox(c, "linux", "eng1", 1001, states).Rows {
+		if r.Check == "kvm group" {
+			kvm = &r
+		}
+	}
+	if kvm == nil || kvm.State != sandboxRowFail || !strings.Contains(kvm.Detail, "withholds read and write") {
+		t.Fatalf("kvm row with a denying user ACL entry = %+v, want a failure", kvm)
 	}
 }
 

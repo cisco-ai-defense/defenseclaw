@@ -595,27 +595,27 @@ def test_agent360_aggregates_model_and_tool_work_with_clickable_totals() -> None
         assert expression.startswith("max by (")
         assert "sum by (" in expression
         assert "observation_source" in expression
-        assert "largest source total" in expression
+        assert "largest source total" in expression.lower()
 
     for ref_id in ("edgesToolSummary", "nodesToolSummary"):
         assert (
             'body_gen_ai_tool_name!~"(?i)collaboration[._]*send[._]*message"'
             in expressions[ref_id]
         )
-        assert "excluding send_message requests represented by message nodes" in expressions[ref_id]
+        assert "without send_message" in expressions[ref_id]
     for ref_id in ("edgesMessages", "nodesMessages"):
         message_expression = expressions[ref_id]
         assert "message_target_group" in message_expression
         assert 'hasPrefix "/root/" .body_gen_ai_tool_call_arguments_target' in message_expression
         assert "/root and /root/* (grouped)" in message_expression
-        assert "non-root targets remain exact" in message_expression
+        assert "/root/* is one group" in message_expression
     assert "Messages to root" in expressions["nodesMessages"]
 
     root_anchor = expressions["nodesRootAnchor"]
     assert 'event_name="session_start"' in root_anchor
     assert 'id=`agent:{{.body_gen_ai_agent_id}}`' in root_anchor
     assert 'detail__node_type=`root_agent_anchor`' in root_anchor
-    assert "matching 24-hour session anchor" in root_anchor
+    assert "recovered from its 24h session anchor" in root_anchor
     assert "unless on (id)" in root_anchor
     assert 'label_format id=`agent:{{.body_gen_ai_agent_id}}` [$__range]' in root_anchor
 
@@ -626,7 +626,7 @@ def test_agent360_aggregates_model_and_tool_work_with_clickable_totals() -> None
     assert 'body_defenseclaw_correlation_relationship_source_kind="agent"' in spawn_parent_anchor
     assert 'body_defenseclaw_correlation_relationship_target_kind="agent"' in spawn_parent_anchor
     assert 'body_defenseclaw_correlation_relationship_type=~"parent_of|delegated_by"' in spawn_parent_anchor
-    assert "Parent endpoint recovered from typed parent_of or inverse delegated_by" in spawn_parent_anchor
+    assert "Parent recovered from parent_of or delegated_by" in spawn_parent_anchor
     assert "body_defenseclaw_agent_parent_id" not in spawn_parent_anchor
     assert "[24h]" in spawn_parent_anchor
     assert "[$__range]" in spawn_parent_anchor
@@ -648,7 +648,7 @@ def test_agent360_aggregates_model_and_tool_work_with_clickable_totals() -> None
     assert agent_nodes.startswith("((topk by (id) (1,")
     assert agent_nodes.count("topk by (id) (1,") == 2
     assert 'defenseclaw_event_name=~`session_start|subagent_start`' in agent_nodes
-    assert "Canonical 24-hour session_start or subagent_start identity" in agent_nodes
+    assert "Identity from the 24h session_start or subagent_start" in agent_nodes
     assert "and on (id)" in agent_nodes
     assert "unless on (id)" in agent_nodes
 
@@ -2575,7 +2575,7 @@ def _golden_backend_responses(
                     "detail__node_type=`tool_summary`": "tool:",
                     "detail__node_type=`approval_request`": "approval:",
                     "detail__node_type=`agent_messages`": "message:",
-                    "Session/subagent terminal observation": "outcome:",
+                    "Terminal outcomes; turn_end grouped": "outcome:",
                 }
                 node_prefix = next(
                     (
@@ -2869,7 +2869,7 @@ def test_live_golden_executes_authored_agent360_target_semantics(
     assert any(
         'detail__node_type=`agent`' in query
         and query.startswith("((topk by (id) (1,")
-        and "Canonical 24-hour session_start or subagent_start identity" in query
+        and "Identity from the 24h session_start or subagent_start" in query
         and "unless on (id)" in query
         for query in topology_queries
     )

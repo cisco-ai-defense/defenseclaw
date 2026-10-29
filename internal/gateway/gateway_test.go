@@ -2864,14 +2864,14 @@ func TestAPIStatusEmitsConnectorMode(t *testing.T) {
 			connector:        "codex",
 			wantMode:         "observability",
 			wantIntercept:    false,
-			wantTelemetryAll: []string{"hooks", "otel", "notify"},
+			wantTelemetryAll: []string{"hooks"},
 		},
 		{
 			name:             "claudecode_observability",
 			connector:        "claudecode",
 			wantMode:         "observability",
 			wantIntercept:    false,
-			wantTelemetryAll: []string{"hooks", "otel"},
+			wantTelemetryAll: []string{"hooks"},
 		},
 		{
 			name:             "openclaw_always_guardrail",
@@ -2970,6 +2970,54 @@ func TestAPIStatusEmitsConnectorMode(t *testing.T) {
 			}
 			if first["enforcement_surface"] != cm["enforcement_surface"] {
 				t.Errorf("connector_modes[0].enforcement_surface = %v, want %v", first["enforcement_surface"], cm["enforcement_surface"])
+			}
+		})
+	}
+}
+
+// GAP-2271: a host install registers only hooks (setup turns the native OTel
+// exporters off and writes Codex's notify bridge only for Secure Client), so
+// status must not list otel or notify there. Secure Client keeps main's list.
+func TestAPIStatusTelemetryListsOnlyTheRegisteredChannels(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		cfg  func() *config.Config
+		want map[string][]interface{}
+	}{
+		{
+			name: "host install",
+			cfg:  func() *config.Config { return &config.Config{} },
+			want: map[string][]interface{}{"codex": {"hooks"}, "claudecode": {"hooks"}, "copilot": {"hooks"}},
+		},
+		{
+			name: "secure client",
+			cfg:  func() *config.Config { return &config.Config{DeploymentMode: "managed_enterprise"} },
+			want: map[string][]interface{}{"codex": {"hooks", "otel", "notify"}, "claudecode": {"hooks", "otel"}, "copilot": {"hooks"}},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			for connector, want := range tc.want {
+				cfg := tc.cfg()
+				cfg.Guardrail.Connector = connector
+				api := &APIServer{health: NewSidecarHealth(), scannerCfg: cfg}
+				w := httptest.NewRecorder()
+				api.handleStatus(w, httptest.NewRequest(http.MethodGet, "/status", nil))
+				var result map[string]interface{}
+				if err := json.NewDecoder(w.Result().Body).Decode(&result); err != nil {
+					t.Fatalf("%s: decode: %v", connector, err)
+				}
+				mode, _ := result["connector_mode"].(map[string]interface{})
+				if got := mode["telemetry"]; !reflect.DeepEqual(got, want) {
+					t.Errorf("%s: connector_mode.telemetry = %#v, want %#v", connector, got, want)
+				}
+				modes, _ := result["connector_modes"].([]interface{})
+				if len(modes) == 0 {
+					t.Fatalf("%s: connector_modes empty", connector)
+				}
+				first, _ := modes[0].(map[string]interface{})
+				if got := first["telemetry"]; !reflect.DeepEqual(got, want) {
+					t.Errorf("%s: connector_modes[0].telemetry = %#v, want %#v", connector, got, want)
+				}
 			}
 		})
 	}

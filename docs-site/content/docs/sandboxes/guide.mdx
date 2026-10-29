@@ -1,0 +1,905 @@
+---
+title: Complete sandbox guide
+description: Recipes for a sandbox you already run, including how to unblock a site, answer an ask, review, undo or pull a session, change how a run starts, and fix sandbox problems.
+keywords:
+  - DefenseClaw sandbox
+  - OpenShell sandbox
+  - defenseclaw sandbox run
+  - Claude Code sandbox
+  - Codex sandbox
+  - dangerously skip permissions
+  - sandbox undo
+  - OpenShell MicroVM
+  - macOS sandbox
+---
+
+This page holds the recipes for a sandbox you already run: unblocking a site, answering an ask, reviewing and undoing a session, the run variations, and fixes for sandbox problems. Set up first on [Linux](/docs/sandboxes/linux) or [macOS](/docs/sandboxes/macos), then start with [Your first sandboxed session](/docs/sandboxes/first-session).
+
+## During the session
+
+### Unblock a destination
+
+Lift a block that stopped your agent, for one sandbox or for all of them, and answer the rare asks.
+
+#### Before you start
+
+- A sandbox is running or kept. See [run an agent](/docs/sandboxes/first-session).
+- The block is one you may lift. An unblock never opens this machine, private networks or cloud metadata addresses, and never overrides your own `openshell.egress.block` entries or your organization's.
+
+<Steps>
+
+<Step>
+
+#### See what was blocked
+
+```bash
+defenseclaw sandbox activity --sandbox myapp-7f3a
+```
+
+```text
+14:02:20 myapp-7f3a ✗ webhook.site (webhook catcher)  → unblock: defenseclaw sandbox unblock webhook.site --sandbox myapp-7f3a
+```
+
+The line ends with the exact command. The reason in parentheses is the category. If the line has no unblock command, the block cannot be lifted.
+
+</Step>
+
+<Step>
+
+#### Unblock it for one sandbox, or for all
+
+```bash
+defenseclaw sandbox unblock webhook.site --sandbox myapp-7f3a
+defenseclaw sandbox unblock webhook.site --always
+```
+
+`--always` adds the host to `openshell.egress.unblocked` in `config.yaml`. A managed `unblock HOST --sandbox NAME` without `--always` lasts for that sandbox's current session only. After a stop and start, DefenseClaw's destination rule applies again.
+
+In the TUI, select the blocked destination in the Sandboxes panel and press `u`, then choose the sandbox or **In every sandbox (always)**. In the macOS app, use **Unblock** in the notification, the menu bar or the Sandboxes panel.
+
+The feed confirms it, and the next request goes through:
+
+```text
+14:03:44 myapp-7f3a unblocked webhook.site for sandbox myapp-7f3a
+14:03:51 myapp-7f3a ✓ webhook.site
+```
+
+</Step>
+
+</Steps>
+
+Once a host is unblocked, DefenseClaw's tool-call rules for known exfil destinations (such as `C2-WEBHOOK-SITE`) stop flagging calls to it in the sandboxes the unblock covers. Calls to its subdomains, calls another rule flags, and calls Cisco AI Defense or the LLM judge flags or blocks keep their notice.
+
+### Answer the rare asks
+
+A client that ignores the proxy settings is refused by OpenShell, which files a request to open the destination. DefenseClaw decides most of those itself. It asks you for doors into your machine or network, and for requests OpenShell's policy advisor flags. The `balanced` profile also asks about sites outside its allowlist.
+
+```bash
+defenseclaw sandbox approvals
+```
+
+```text
+ID                   SANDBOX    KIND       DESTINATION                   BINARY         RISK   REASON
+ap_d52b76c279798ac7  myapp-ask  host_port  host.openshell.internal:8765  /usr/bin/curl  risky  the sandbox asks to reach port 8765 on your machine (--host-port 8765)
+  approve: defenseclaw sandbox approve <sandbox> <id> [--always]   reject: defenseclaw sandbox reject <sandbox> <id>
+```
+
+```bash
+defenseclaw sandbox approve myapp-ask ap_d52b76c279798ac7
+```
+
+```text
+  ✓ approved ap_d52b76c279798ac7 (host.openshell.internal); it applies at the next quiet moment of the sandbox (usually within a minute), then retry the connection that asked
+```
+
+`defenseclaw sandbox approvals --watch` keeps the list open. `defenseclaw sandbox reject SANDBOX ID` declines. In the TUI, the Asks view takes `a` (approve), `A` (always) and `x` (reject).
+
+An approval applies at the sandbox's next quiet moment, because every OpenShell policy change closes its open connections. On a managed computer with `allow_unblock: false`, approvals last for the session only and `approve --always` is refused.
+
+<TerminalAnimation
+  cwd="~/code/myapp"
+  speed={1.4}
+  height={260}
+  ariaLabel="Animated terminal replay of an ask: defenseclaw sandbox approvals lists one ask, the sandbox asking to reach port 8765 on your machine, then defenseclaw sandbox approve answers it and says it applies at the next quiet moment of the sandbox."
+  caption="Recorded on DefenseClaw 1.0.4 from a real Mac sandbox started with `--host-port 8765`. The ask names the program that connected (`/usr/bin/curl`) and the port on your machine."
+  frames={[
+    { type: "cmd", text: "defenseclaw sandbox approvals", pauseMs: 700 },
+    { type: "out", text: "ID                   SANDBOX     KIND       DESTINATION                   BINARY         RISK   REASON" },
+    { type: "out", text: "ap_9d93e548e5332e92  myapp-19f3  host_port  host.openshell.internal:8765  /usr/bin/curl  risky  the sandbox asks to reach port 8765 on your machine (--host-port 8765)" },
+    { type: "dim", text: "  approve: defenseclaw sandbox approve <sandbox> <id> [--always]   reject: defenseclaw sandbox reject <sandbox> <id>" },
+    { type: "spacer" },
+    { type: "cmd", text: "defenseclaw sandbox approve myapp-19f3 ap_9d93e548e5332e92", pauseMs: 700 },
+    { type: "ok", text: "  ✓ approved ap_9d93e548e5332e92 (host.openshell.internal); it applies at the next quiet moment of the sandbox (usually within a minute), then retry the connection that asked" },
+  ]}
+/>
+
+### Check the unblock
+
+```bash
+defenseclaw sandbox policy test --host webhook.site
+```
+
+The command says what the policy decides for the destination and why. `defenseclaw sandbox destinations myapp-7f3a` lists the site as reached.
+
+### Undo an unblock
+
+Remove an `--always` unblock by deleting the host from `openshell.egress.unblocked`. Remove a host you blocked yourself with `defenseclaw sandbox policy block --remove HOST`.
+
+## End of session
+
+Decide what to keep after a sandbox session: review the changes, undo them on a mounted folder, or pull a copy's work back into your project.
+
+`defenseclaw sandbox list` shows `mount` or `copy` in its MODE column. A Linux sandbox mounts your folder live by default. A Mac sandbox, a MicroVM sandbox and any `--copy` run work on a copy.
+
+### What the review flags
+
+```bash
+defenseclaw sandbox review myapp-7f3a --diff
+```
+
+```text
+  myapp-7f3a: 8 files changed (+212 −37)
+  ⚠ Changed files that can run code on your machine: package.json, .envrc  → review before running
+    HIGH     package.json — scripts.postinstall: npm lifecycle script changed (runs automatically on install): node scripts/setup.js
+```
+
+The review flags, most severe first, changes that can run code the next time you open, build, install, commit or push: git hooks and control files, npm scripts, build and editor config, new executables. It then lists findings from the secret and code scanners. For a copy, `review` previews what `pull` would bring back and applies nothing. The severity rules are in the [`sandbox review` reference](/docs/reference/sandbox-cli).
+
+### Keep or undo on Linux
+
+When a session on a mounted folder ends, DefenseClaw asks:
+
+```text
+Keep changes? [Y] keep  [u] undo everything  [d] show diff (then Enter)
+```
+
+`y` keeps them. `u` restores the folder to its pre-session snapshot. `d` shows the diff, then asks again. `--yes` keeps without asking, and `openshell.workdir.on_exit` (`ask`, `keep` or `undo`) sets the default.
+
+### Undo the session
+
+Undo works later too:
+
+```bash
+defenseclaw sandbox undo myapp-7f3a
+```
+
+```text
+  Undo will restore ~/code/myapp (2 paths):
+    remove  scripts/setup.sh
+    revert  package.json
+Restore ~/code/myapp to the snapshot? (the sandbox is stopped first) [y/N]
+```
+
+In a git project undo restores the working tree, HEAD, branch and staging area, and it saves the session's state in a commit first, so an undo can be undone. `--preview` only shows the changes. Files git ignores, such as `node_modules/`, are not in the snapshot: undo names them so you can reinstall, or you can turn on `openshell.workdir.undo_ignored`. Flags and edge cases: [`sandbox undo`](/docs/reference/sandbox-cli).
+
+### Pull on macOS
+
+On a copy, nothing reaches your folder until you choose it.
+
+{/* Checked against internal/openshell/workspace/copy.go (shallow clone with secrets held back) and internal/openshell/sandboxcli/session.go (review, then the "Bring the changes back?" question). */}
+
+<Flow direction="TB" compact caption="How your project gets into a sandbox copy and back. Skip leaves the work in the sandbox for a later pull.">
+  <Node id="in" kind="operator">{`Copy in\nsecrets held back`}</Node>
+  <Node id="edit" kind="agent">{`Agent edits the copy`}</Node>
+  <Node id="out" kind="generic">{`Pull the work out`}</Node>
+  <Node id="review" kind="decision">{`Review\nsecrets and unsafe code`}</Node>
+  <Node id="back" kind="operator">{`Apply, branch,\npatch file or skip`}</Node>
+  <Edge from="in" to="edit" />
+  <Edge from="edit" to="out" />
+  <Edge from="out" to="review" />
+  <Edge from="review" to="back" />
+</Flow>
+
+At the end of the session DefenseClaw pulls the work, scans the changed files and asks:
+
+```text
+Bring the changes back? [A] apply (3-way)  [b] branch dc/myapp-1c2d  [p] patch file  [s] skip  [d] show diff (then Enter)
+```
+
+| Answer | What happens |
+| --- | --- |
+| `A` apply | A three-way merge into your working tree. Your previous working tree is kept, so `sandbox undo` reverts the apply. |
+| `b` branch | The work goes on branch `dc/myapp-1c2d`. Your working tree is not touched. |
+| `p` patch file | The work is written to a patch file. |
+| `s` skip | Nothing changes; the work stays in the sandbox. |
+
+Changes that can run code, or that look like a secret, are applied only after a second yes. Pull later from any terminal:
+
+```bash
+defenseclaw sandbox pull myapp-1c2d --apply
+```
+
+`--branch` and `--patch-out FILE` pick the other answers. Without a mode, `pull` shows the review only. On a merge conflict, nothing is touched: the changes land on a branch and in `<name>.patch`, and `pull` exits `4`. All flags and edge cases are in [`sandbox pull`](/docs/reference/sandbox-cli).
+
+On a copy, `defenseclaw sandbox undo NAME` reverts the last `pull --apply`.
+
+<TerminalAnimation
+  cwd="~/code/myapp"
+  speed={1.4}
+  height={340}
+  ariaLabel="Animated terminal replay of bringing a copy's work back and undoing it: pull --apply lists the two changed files and applies them, keeping the previous working tree, then sandbox undo shows what it will revert, asks, and reverts the apply."
+  caption="Recorded on DefenseClaw 1.0.4 from a real Claude Code sandbox on a Mac. `undo` prints the preview and asks before it reverts (`--yes` skips the question)."
+  frames={[
+    { type: "cmd", text: "defenseclaw sandbox pull myapp-19f3 --apply", pauseMs: 700 },
+    { type: "out", text: "  Pulling myapp-19f3's work…" },
+    { type: "out", text: "  myapp-19f3: 2 files changed (+2 −0)" },
+    { type: "out", text: "    M README.md" },
+    { type: "out", text: "    A notes.md" },
+    { type: "ok", text: "  ✓ applied 2 changes to ~/code/myapp" },
+    { type: "out", text: "  your previous working tree is kept at refs/defenseclaw/copy/myapp-19f3/pre-apply; `defenseclaw sandbox undo myapp-19f3` reverts the apply" },
+    { type: "spacer" },
+    { type: "cmd", text: "defenseclaw sandbox undo myapp-19f3", pauseMs: 700 },
+    { type: "out", text: "  Undo will revert the last `pull --apply` of myapp-19f3 in ~/code/myapp (2 paths):" },
+    { type: "out", text: "    revert  README.md" },
+    { type: "out", text: "    remove  notes.md" },
+    { type: "out", text: "  edits you made since the apply stay" },
+    { type: "prompt", text: "Revert the apply in ~/code/myapp? [y/N] ", reply: "y", pauseMs: 800 },
+    { type: "ok", text: "  ✓ reverted the last apply: 2 paths in ~/code/myapp" },
+    { type: "out", text: "  bring the work back with `defenseclaw sandbox pull myapp-19f3 --apply`" },
+  ]}
+/>
+
+### Check the keep, apply or undo
+
+After a keep or an apply, `git -C ~/code/myapp status` shows the changes. After an undo, it shows the folder as it was before the session.
+
+## Variations
+
+Run flags for the cases the default run does not cover. Each section is one recipe. [Run an agent](/docs/sandboxes/first-session) covers the default run, and the [sandbox CLI reference](/docs/reference/sandbox-cli) lists every flag.
+
+Run these from your project folder, after `defenseclaw sandbox doctor` ends with `ready for sandboxes`.
+
+### Work on a copy
+
+```bash
+defenseclaw sandbox run codex --copy
+```
+
+DefenseClaw copies the folder into the sandbox with secret files held back. Nothing reaches your folder until you [pull](#pull-on-macos). Git-ignored files such as `node_modules/` are not copied, so install dependencies inside. Every run on a Mac is a copy.
+
+### Run agents in parallel
+
+Only one sandbox at a time can mount a folder live, so give each parallel run a name and a copy:
+
+```bash
+defenseclaw sandbox run claude --copy --name fix-tests
+defenseclaw sandbox run codex --copy --name docs
+```
+
+Each one's work can come back as its own branch (`dc/fix-tests`, `dc/docs`). Names use at most 19 lowercase letters, digits and `-`.
+
+### Run in the background
+
+```bash
+defenseclaw sandbox run claude --detach --prompt "fix the failing tests"
+```
+
+```text
+  ✓ Claude Code is running in the background in myapp-7f3a
+  follow:  defenseclaw sandbox logs myapp-7f3a -f
+  watch:   defenseclaw sandbox activity -f --sandbox myapp-7f3a
+  review:  defenseclaw sandbox review myapp-7f3a   undo: defenseclaw sandbox undo myapp-7f3a
+  stop:    defenseclaw sandbox stop myapp-7f3a
+```
+
+A detached run has no end-of-session question: use `review` and `undo`, or `pull` on a copy. Without `--detach`, `--prompt` runs headless and deletes its sandbox when nothing is left to bring back.
+
+### Give the agent a project secret
+
+```bash
+defenseclaw sandbox run claude --credential STRIPE_API_KEY=api.stripe.com
+```
+
+The sandbox gets a placeholder in `$STRIPE_API_KEY` that works only against `api.stripe.com`. OpenShell swaps in the real value from your shell on requests to that host, so the value never enters the sandbox.
+
+### Give the agent your GitHub token
+
+For GitHub, `--github-write` does the same for `GH_TOKEN` and `GITHUB_TOKEN`, bound to `api.github.com` only (enough for `gh pr create`, not for `git push`).
+
+### Choose the model credential
+
+`--llm auto` (the default) shares the first model credential it finds for the harness, for example `ANTHROPIC_API_KEY` for Claude Code. `--llm` picks one explicitly (`anthropic`, `claude-oauth`, `openai`, `bedrock` or `gemini`), and `--llm none` shares nothing. To set it for every run:
+
+```yaml
+openshell:
+  llm: bedrock    # auto (the default) | none | anthropic | claude-oauth | openai | bedrock | gemini
+```
+
+The lookup order for each harness is in the [`sandbox run` reference](/docs/reference/sandbox-cli).
+
+### Use a service on your machine
+
+```bash
+defenseclaw sandbox run claude --host-port 5432
+```
+
+Inside the sandbox the service is at `host.openshell.internal:5432`. The first connection arrives as an ask for you to [approve](#answer-the-rare-asks), because it is a door into your machine. A port the run did not list stays closed.
+
+### Keep the harness prompts
+
+`--safe` keeps the harness's own permission prompts. Flags after `--` that turn them off are dropped, with a warning.
+
+### Check it worked
+
+`defenseclaw sandbox list` shows each sandbox with its harness, mode and profile.
+
+### Undo
+
+`defenseclaw sandbox delete NAME` deletes a sandbox. `defenseclaw sandbox disable claude` removes a wrapper. Unset `openshell.llm` to return to `auto`.
+
+## MCP servers
+
+For Claude Code and Codex, a run brings your user-scope MCP servers into the sandbox under the same limits, and the hooks see every MCP tool call. The banner's `MCP` line lists them. Servers that DefenseClaw blocks, that run on this machine, or that the harness cannot run in a sandbox stay behind with a warning. Bind a server's secret with `--credential`. `--no-mcp` leaves all of them behind. `claude mcp add` inside a sandbox is refused: add the server on your machine in user scope and start a new sandbox.
+
+## Make `claude` run sandboxed
+
+```bash
+defenseclaw sandbox enable claude
+```
+
+```text
+  ✓ `claude` now runs in a DefenseClaw sandbox in new zsh sessions (~/.zshrc)
+  apply it now: source ~/.zshrc · bypass once: DEFENSECLAW_NO_SANDBOX=1 claude · undo: defenseclaw sandbox disable claude
+```
+
+`enable` adds a marked block to your shell's rc file that defines a `claude` function starting `sandbox run claude`. `DEFENSECLAW_NO_SANDBOX=1 claude` runs the harness directly, once, where your organization allows it; on a managed computer, an agent in `required_for` is still refused. In the TUI Sandboxes panel, `w` switches the wrappers on and off.
+
+## Resume, stop and delete
+
+`defenseclaw sandbox list` shows every sandbox and its phase.
+
+| Command | What it does |
+| --- | --- |
+| `sandbox connect NAME` | Resume: start it if stopped and attach the harness. `--shell` opens a shell. |
+| `sandbox stop NAME` | Stop it; it is kept. |
+| `sandbox delete NAME` | Delete the sandbox, its credentials and its undo snapshot. |
+
+## For agents
+
+<Callout title="Hand this page to your agent">
+Paste this into your agent:
+
+```text
+Read https://cisco-ai-defense.github.io/defenseclaw/docs/sandboxes/guide/llms.md and follow it. Ask me before unblocking anything.
+```
+</Callout>
+
+You are an AI agent. Set up OpenShell sandboxes for the user, run one agent in a sandbox and explain what you see. Sandboxes run on Linux and Apple-silicon Macs only.
+
+### Hard rules
+
+1. Observe first. Never unblock a site, switch to action mode, change a fail mode, disable a connector or edit `config.yaml` by hand without the user's yes to that exact change.
+2. Never print a key or token. Do not pass the user's secrets into a sandbox.
+3. Stop on a managed computer: exit code `3`, or `"deployment_mode": "managed_enterprise"` in `defenseclaw status --json`.
+4. Do not delete or undo a sandbox's work without the user's yes.
+
+### Steps
+
+1. Check the platform.
+
+   ```bash
+   uname -sm
+   ```
+
+   Expected: `Linux x86_64`, `Linux aarch64` or `Darwin arm64`.
+   If it differs (Windows, or an Intel Mac): stop. Sandboxes are unsupported there.
+
+2. Set up. This installs or checks Docker, OpenShell and the harness images and can take several minutes. Tell the user before you start.
+
+   ```bash
+   defenseclaw sandbox setup
+   ```
+
+   Expected: a list of checks ending without errors.
+   If a step fails, read its message and go to [Troubleshooting](#troubleshooting). Do not retry in a loop.
+
+3. Check readiness.
+
+   ```bash
+   defenseclaw sandbox doctor
+   ```
+
+   Expected: a list of `✓` rows ending with `✓ ready for sandboxes`.
+   If it differs: report each row without `✓` and its message. Repeat step 3 after each fix the user approves, until the last line says `ready for sandboxes`.
+
+4. Start the agent in a sandbox, in the project folder the user names. `sandbox run` gives the agent your terminal, and your shell has none, so either ask the user to run `defenseclaw sandbox run claude` in their own terminal, or run one task in the background:
+
+   ```bash
+   defenseclaw sandbox run claude --prompt "<the task the user gave>" --detach
+   defenseclaw sandbox logs -f <name>
+   ```
+
+   Expected: a banner that names the sandbox, the project folder and the policy. A detached run returns after the banner; its `Asks` row names the sandbox (`defenseclaw sandbox approvals --watch --sandbox <name>`).
+   If it says `` `sandbox run` attaches Claude Code to your terminal, and there is none ``, you left out `--prompt`. If the command is refused for another reason, quote the message.
+
+5. Read a block. In a second terminal, list what the sandbox allowed and refused.
+
+   ```bash
+   defenseclaw sandbox activity --sandbox <name>
+   ```
+
+   Expected: timestamped lines; a refused site looks like `✗ pastebin.com (paste site)  → unblock: defenseclaw sandbox unblock pastebin.com --sandbox <name>`.
+   If it differs: quote the lines you see. Do not run the unblock command. Ask the user: "Allow `<destination>` once, for good, or keep it blocked?" Then run only what they choose ([Unblock a destination](#unblock-a-destination)).
+
+6. At the end of the session, list sandboxes.
+
+   ```bash
+   defenseclaw sandbox list
+   ```
+
+   Expected: the session with its phase.
+   If the user wants to keep or drop the work, see [End of session](#end-of-session). Do not choose for them.
+
+### Report
+
+Reply with:
+
+- Platform and the last line of `sandbox doctor`.
+- The command you ran in the sandbox and the project folder.
+- Every block: what, why, and the user's decision.
+- What the user must still decide (keep, undo or pull the work).
+
+## Troubleshooting
+
+Start with the doctor. It checks the platform, your user, Landlock, Docker, systemd linger (the login session on a Mac), the OpenShell service, CLI, registration, mTLS files, version and driver, bind mounts, telemetry, the sandbox ports, the daemon, the hooks, the harness images, the shell wrappers, your organization's policy and sandbox TLS trust.
+
+```bash
+defenseclaw sandbox doctor
+```
+
+Every failed check names its fix on the next line (`→ …`). `--fix` applies the fixes that need only your user (starting or restarting the gateway, turning bind mounts on), after asking. It does not install OpenShell. The command exits 1 when a check fails and ends with `✗ not ready for sandboxes: N checks failed`. `--json` prints the report with `ok` (every check passed) and `ready` (sandboxes are also turned on). While `openshell.enabled` is false the last line reads `not ready for sandboxes yet`. `defenseclaw doctor` shows the same checks in its **Sandbox** section.
+
+Exit statuses: 3 means the platform or deployment is unsupported (Windows, WSL2, an Intel Mac, or running as root), 4 means `pull --apply` left your working tree alone and put the changes on a branch and in a patch file (a conflict, or git older than 2.38), 69 means no hook of the session reached DefenseClaw, and a harness's own non-zero status is passed through.
+
+### Find your problem
+
+- [Setup and the gateway](#setup-and-the-gateway): sandboxes are off, OpenShell missing or unusable, the gateway answers wrong or is down.
+- [Linux](/docs/sandboxes/linux#common-problems): Landlock, rootless Docker, docker group, image builds, live-mounted folders.
+- [macOS](/docs/sandboxes/macos#common-problems): Homebrew, Docker Desktop, MicroVM driver, first run.
+- [Runs and sessions](#runs-and-sessions): blocked tool calls, tamper alerts, rejected keys, error states, refused folders.
+- [Network](/docs/sandboxes/network#troubleshooting): a site is unreachable, git or npm over SSH, TLS-inspecting proxies, the ssh wrapper.
+- [Disk and telemetry](#disk-and-telemetry): low disk, MicroVM disks, red telemetry rows.
+- Every tool call is blocked: the sandbox hooks fail closed when they cannot reach DefenseClaw. Run `defenseclaw sandbox doctor` and start the daemon with `defenseclaw-gateway start`. Details: [Every tool call is blocked](#every-tool-call-is-blocked).
+- A tool cannot reach a site: the egress proxy blocked the site. Look for the block in `defenseclaw sandbox activity`. Details: [A tool cannot reach a site](/docs/sandboxes/network#a-tool-cannot-reach-a-site).
+
+### Setup and the gateway
+
+Run `defenseclaw sandbox doctor` first; each failed check names its fix. These are the setup and gateway failures it reports.
+
+#### Sandboxes are off
+
+**You see:** ``OpenShell sandboxes are off; run `defenseclaw sandbox setup` to turn them on``.
+
+**Cause:** `openshell.enabled` is false.
+
+**Fix:** run `defenseclaw sandbox setup`.
+
+**Check:** `defenseclaw sandbox doctor` ends with `ready for sandboxes`.
+
+#### No gateway service installed
+
+**You see:** the **Gateway** check's fix is `defenseclaw sandbox setup --install-openshell`.
+
+**Cause:** there is no gateway service to start: no `nvidia/openshell` formula on a Mac, no `openshell-gateway` user unit on Linux. `--fix` does not install one.
+
+**Fix:** run `defenseclaw sandbox setup --install-openshell`.
+
+**Check:** the **Gateway service** check passes.
+
+#### OpenShell installed another way
+
+**You see:** the **Gateway** and **Gateway service** checks say the OpenShell at a path ``was installed another way``.
+
+**Cause:** OpenShell came from somewhere other than the formula or NVIDIA's installer, such as release binaries. `--install-openshell` installs nothing where a supported CLI already exists.
+
+**Fix:** while its gateway answers, setup uses it, but DefenseClaw cannot start or restart it, so restart it yourself after a gateway change (on a Mac, save or sync each running guest’s work first, then run `defenseclaw sandbox stop NAME` for each one; the stop requests a disk sync, and a failed sync can lose later changes). With no gateway answering, start it yourself. For a gateway DefenseClaw manages, stop that gateway, remove that OpenShell, then run `defenseclaw sandbox setup --install-openshell`. On Linux the doctor compares `gateway.toml` and `gateway.env` with the start of your `openshell-gateway` process and warns until you restart it.
+
+**Check:** the **Gateway service** check passes or only warns, and `sandbox status` lists the gateway.
+
+#### OpenShell too old, too new or not usable yet
+
+**You see:** an **OpenShell CLI** warning or failure, a **Gateway** failure such as ``OpenShell 0.1.3 runs no DefenseClaw sandbox: before 0.1.5 its network broker let a sandbox's connections bypass the sandbox policy when it could not inspect them (NVIDIA/OpenShell#4494); upgrade OpenShell to 0.1.5 in place``, or ``the OpenShell gateway is not usable yet (Gateway service)``. `defenseclaw sandbox run` and `start` refuse with the same words.
+
+**Cause:** DefenseClaw drives a range of OpenShell releases ([requirements](/docs/sandboxes#requirements)). Older than the range or missing: setup offers the install. Inside the range but older than 0.1.5 (a 0.1.5 prerelease counts as older): DefenseClaw creates and starts no sandbox, the **Gateway** check fails and setup offers the upgrade in place. When the CLI is already 0.1.5 but the old gateway still answers (an upgrade that left it running), the check adds ``the CLI installed here is OpenShell 0.1.5``, and its fix restarts the gateway service. Newer than the range: setup does not downgrade it. Installed, but a gateway, registration or mTLS check fails: that is not the install's fault.
+
+**Fix:** answer yes (the default) to the upgrade question in `defenseclaw sandbox setup`, or run `defenseclaw sandbox setup --yes` or `--install-openshell`, which upgrade without asking. `--non-interactive` alone keeps the release you have, and setup then stops on the **Gateway** check. For a newer release, remove it first. For a failing gateway check, run the fix the check prints. The TUI shows the fix as the hint of **Install OpenShell**.
+
+**Check:** the **Gateway** and **OpenShell CLI** rows pass.
+
+
+The upgrade restarts the gateway, which affects every sandbox on it, of every owner. Setup names the running ones first. On the Docker driver, running sandboxes keep running and lose their connections, and Docker pulls the new supervisor images from `ghcr.io` first (when it cannot reach `ghcr.io`, setup keeps the release you have and changes nothing). On the MicroVM driver, the restart stops every running sandbox and loses what it wrote since its last sync, so setup upgrades only once OpenShell reports every sandbox on the gateway stopped (or deleting, or its VM gone); until then it keeps the release you have and names each sandbox with the command that stops it. A gateway restart DefenseClaw makes (`sandbox doctor --fix`, `sandbox setup`) follows the same rule on every release, and neither goes by elapsed time. For a running DefenseClaw guest, save or sync its work first, then `defenseclaw sandbox stop NAME`, which requests a disk sync before stopping. A completed MicroVM, or one with `MainProcessFailed` whose VM still runs on 0.1.5: nothing in OpenShell writes its disk back, so `defenseclaw sandbox start NAME` refuses. OpenShell 0.1.5 neither stops nor restarts a MicroVM whose workload completed, or whose main process failed, while its VM still runs: its start (`defenseclaw sandbox start NAME --end-vm`, or `openshell sandbox start NAME` for a raw sandbox) fails with Conflict and leaves it starting, where `stop` is refused too. Save or sync any work you can reach first and keep the VM while you need what it holds (it keeps the OpenShell gateway, so upgrades and gateway restarts wait). Only then delete it with `defenseclaw sandbox delete NAME` (or `openshell sandbox delete NAME`), which deletes it and its work. A MicroVM with `ProcessExited` can be stopped and started, but its work remains only through the last successful disk sync. On 0.1.3, save accessible work outside a MicroVM whose VM still runs before deleting it for the upgrade; one whose VM has gone can be stopped and started after it. A raw OpenShell sandbox (one you made with `openshell sandbox create`) is not a DefenseClaw sandbox, so the `defenseclaw sandbox` commands refuse it: save or sync a running guest’s work first; on a gateway older than 0.1.5, save its work outside the guest because raw stop may not flush it. Then use `openshell sandbox stop NAME`. For a completed or `MainProcessFailed` raw MicroVM on 0.1.5 or later, save accessible work and keep the VM while you need it, then `openshell sandbox delete NAME`, which deletes it and its work (its start and stop are refused). On an older gateway, save accessible work outside the guest before `openshell sandbox delete NAME`; that release cannot stop or start the ended MicroVM. If the gateway release is unknown, save accessible work outside the guest and try raw stop before considering deletion. For other error states, use the phase-specific raw advice below. A gateway DefenseClaw cannot read refuses the restart while a MicroVM runs as your account. DefenseClaw checks again under its lifecycle lock right before the restart, and from that check to the healthy gateway it creates and starts no sandbox. On a Mac the first start of each image prepares its MicroVM disk again, and `defenseclaw sandbox image prune` removes the old ones. A sandbox that keeps running through the upgrade still runs the old release's supervisor, with its network broker, until it stops, and DefenseClaw cannot contain that broker. It does not stop that legacy guest for you, since only you can save its work first. It closes its egress proxy and withdraws the network rules it added, and says the sandbox is not protected in the activity feed, in `defenseclaw sandbox status <name>` and in the doctor's failed **Legacy sandboxes** row (``<name>: legacy sandbox running, not protected by the 1.0.4 egress policy``), with the command that ends it. The same goes for a sandbox DefenseClaw 1.0.3 or older started, whose record names no release. Until it is gone, DefenseClaw creates and starts no sandbox, `exec` runs nothing in it, and `connect` refuses until you stop it. Save your work, then run `defenseclaw sandbox stop <name>` yourself (on a MicroVM it syncs the disk first, because 0.1.3 does not flush it on a stop, so what the guest writes after that may be lost). `defenseclaw sandbox start <name>` or `connect <name>` then starts it on the gateway's own supervisor, with its work. A MicroVM whose workload ended is not stopped by OpenShell: save the work you need, then delete it. A Docker sandbox made on 0.1.1 to 0.1.4 keeps its work, but OpenShell 0.1.5 cannot read the bootstrap the older Docker driver kept for it (in `~/.local/state/openshell/docker-sandbox-tokens`): its start fails with ``unknown field `outer_fence` ``, and the gateway's own start of it after the restart leaves it in OpenShell's error state. `defenseclaw sandbox start <name>` (and `connect` or `pull`, which start a stopped sandbox) first rewrites that bootstrap the way 0.1.5 writes it, then starts the sandbox with its work. For one in the error state, save any accessible work first, then run `defenseclaw sandbox stop <name>` and `start`. An `openshell sandbox start` of your own does not rewrite it. 0.1.5 names the supervisor's OCSF log files `openshell-ocsf.*.jsonl` instead of `openshell-ocsf.*.log`; update a collector of your own that reads them. DefenseClaw does not upgrade an OpenShell installed another way. Before it enables bind mounts (Linux), DefenseClaw checks that the gateway lets a client without a certificate finish the TLS handshake but refuses that client's API calls, and that the gateway has no OIDC issuer.
+
+##### A completed MicroVM cannot finish `start --end-vm`
+
+OpenShell 0.1.5 refuses `defenseclaw sandbox start NAME --end-vm` with Conflict (`VM sandbox is already running generation`) and leaves the sandbox in Starting, where `sandbox stop` is also refused. If this happens, keep the gateway running and save any accessible guest work outside the VM. The pending driver switch or upgrade cannot proceed while the VM still runs. Deleting the sandbox discards its retained work; choose that only after saving what you need. This is an OpenShell transition limit, and a successful non-destructive recovery from this state has not been established.
+
+##### A Linux sign-out ends a running MicroVM
+
+On Linux, the OpenShell gateway runs in the account's systemd user manager. If linger is off, signing out of the last session stops that manager and the gateway, which ends its MicroVMs even when a guest disk sync failed. Save or pull accessible work and stop the sandbox before sign-out. If an administrator wants the gateway to outlive login sessions, they can enable linger for that account with `loginctl enable-linger USER`; this changes the account's service lifetime and is an administrator choice. A failed sync does not make sign-out safe for unsynced guest writes.
+
+##### Other upgrade notes
+
+A Docker sandbox created on OpenShell 0.1.1 to 0.1.4 keeps its work, but OpenShell 0.1.5 cannot read the older bootstrap under `~/.local/state/openshell/docker-sandbox-tokens`. After the upgrade, use `defenseclaw sandbox start NAME`: DefenseClaw moves the bootstrap to 0.1.5's format before starting it. If the gateway already left the sandbox in an error state, save or sync accessible work first, then run `defenseclaw sandbox stop NAME` and `defenseclaw sandbox start NAME`. A raw `openshell sandbox start` does not perform this migration.
+
+Before stopping a raw OpenShell MicroVM on a gateway older than OpenShell 0.1.5, save its work yourself. On OpenShell 0.1.5 or later, `openshell sandbox stop` requests a guest flush before a planned stop. If the flush fails, changes after the last successful disk sync may still be lost.
+
+##### A guest from OpenShell 0.1.3 or older keeps its network after its rules are withdrawn
+
+**You see:** `defenseclaw sandbox status NAME` reports the sandbox not protected and says DefenseClaw withdraws the network rules it added, but that does not contain the old broker, which passes a connection it cannot inspect straight to the host.
+
+**Cause:** the MicroVM was started on OpenShell 0.1.3 or older and still runs that release's supervisor. Its network broker lets a connection it cannot inspect bypass the sandbox policy, so removing the guest's policy rules does not cut it off. This is an OpenShell 0.1.3 limit (NVIDIA/OpenShell#4494); DefenseClaw has no network cutoff below that broker, and it does not stop the guest for you, so as not to lose work it has not synced.
+
+**Fix:** restart the sandbox after DefenseClaw has withdrawn its rules. Save the work you need, then run `defenseclaw sandbox stop NAME` and `defenseclaw sandbox start NAME`; the next session runs on the current supervisor. If the stop is held because the disk could not sync, see [A MicroVM stop is held because its disk could not sync](#a-microvm-stop-is-held-because-its-disk-could-not-sync). For a guest whose workload completed or failed, follow [Legacy MicroVM guests](/docs/support-matrix#upgrade-and-policy-limits). Until it restarts, treat its network as open.
+
+**Check:** `defenseclaw sandbox status NAME` no longer reports the old supervisor.
+
+##### A contained VM has no confirmed network withdrawal
+
+If the OpenShell gateway does not answer, or a global OpenShell policy prevents DefenseClaw from withdrawing a VM's network rules, a contained VM can remain reported as unprotected even while new DefenseClaw runs are refused. A user-level DefenseClaw daemon has no host-level network cutoff for that VM, and this OpenShell release has no VM pause or network-off operation. Treat the network as still available until withdrawal is confirmed. Keep the guest and gateway under operator control while saving accessible work; stopping or deleting the VM can lose writes after its last successful disk sync. An administrator must decide whether to retain that work or end the VM despite the loss.
+
+#### A raw `openshell` sandbox stops a restart or rollback
+
+**You see:** `the gateway was not restarted`, with `OpenShell has not reported these stopped: NAME (ready): ...`. After a rollback it ends with `the rollback was aborted: the active gateway files were kept and the gateway was not restarted`.
+
+**Cause:** a gateway restart stops every MicroVM on it with no flush. DefenseClaw restarts only when OpenShell reports every sandbox stopped. It checks before the change and again right before the restart. While it restarts or rolls back, it holds a lock that every DefenseClaw sandbox command also takes, so no DefenseClaw `run`, `connect`, `start`, `stop` or `delete` gets in between. A raw `openshell` command takes no DefenseClaw lock, so DefenseClaw cannot hold it back.
+
+Starting a sandbox with raw `openshell` while DefenseClaw changes, restarts or rolls back the gateway is unsupported. When DefenseClaw sees such a sandbox, it aborts: it does not restart the gateway, it keeps the gateway files that are active now, and it leaves the pending-restart mark as it was. A sandbox started after the last check cannot be seen, and the restart ends it.
+
+**Fix:** save or sync any accessible guest work first, stop the named sandbox, confirm OpenShell reports it stopped, then run the DefenseClaw command again:
+
+- a raw OpenShell sandbox that is ready: save or sync its work first. On OpenShell 0.1.5 or later, use `openshell sandbox stop NAME`, which requests a guest flush before stopping it; if that flush fails, changes after the last successful disk sync may be lost. On an older or unknown gateway release, raw stop may end the VM without a guest flush: save its work outside the guest, then use `openshell sandbox stop NAME`.
+- a raw OpenShell sandbox in its error state on OpenShell 0.1.5 or later: with `ProcessPollFailed`, save any accessible work first, then use `openshell sandbox stop NAME`; a stop may lose unsynced changes. With `ProvisioningTimedOut`, OpenShell refuses stop: wait a minute for cleanup, then `openshell sandbox start NAME` and, once it is ready, save or sync its work before `openshell sandbox stop NAME`. For `MainProcessFailed`, see the completed case below. `ProcessExited` means the VM is already gone and does not block the restart. For another error reason, save accessible work, then try `openshell sandbox stop NAME`; if OpenShell refuses it, keep the gateway running until you can save the work or choose deletion.
+- a raw OpenShell sandbox that is completed, or has `MainProcessFailed` on OpenShell 0.1.5 or later: `openshell sandbox start NAME` fails with Conflict and leaves it starting, where `openshell sandbox stop NAME` is refused too, so save or sync any accessible work first and keep the VM while you need what it holds; the restart waits for it. Only then use `openshell sandbox delete NAME`, which deletes the guest and its work.
+- a raw OpenShell sandbox that is completed, or in its error state with a VM still running on a gateway older than 0.1.5: save any accessible work outside the guest first. This release cannot stop or start an ended MicroVM; `openshell sandbox delete NAME` deletes it and its work.
+- a raw OpenShell sandbox that is completed, or in its error state with a VM that may still run on an unknown gateway release: save any accessible work first. Raw stop may not flush the guest, so save its work outside it before you try `openshell sandbox stop NAME`; then check whether OpenShell reports it stopped. Only if OpenShell refuses stop or still does not report the VM stopped, `openshell sandbox delete NAME` deletes it and its work.
+- a raw OpenShell sandbox with `ProcessExited` on any release: its VM is already gone and does not block the restart. Its work remains only through the last successful disk sync.
+- a DefenseClaw sandbox: save or sync its work first, then `defenseclaw sandbox stop NAME`
+- then rerun what you ran: `defenseclaw sandbox teardown`, `defenseclaw sandbox setup` (with the same flags) or `defenseclaw sandbox doctor --fix`.
+
+Do not start raw `openshell` sandboxes until it finishes.
+
+**Check:** the command ends with `restored the OpenShell gateway configuration and restarted it` (teardown) or `gateway configured and restarted` (setup).
+
+If the message is `DefenseClaw is restarting or upgrading the OpenShell gateway`, another DefenseClaw command holds the lock. Wait for it to finish (it waits up to two minutes), then retry.
+
+#### The gateway answers with another release
+
+**You see:** ``the gateway that answers runs OpenShell 0.0.40, not the OpenShell … installed here``.
+
+**Cause:** the gateway that answers is not the one the CLI's install runs.
+
+**Fix:** run `defenseclaw sandbox doctor --fix`, which restarts the `openshell-gateway` unit (Linux) or Homebrew's `nvidia/openshell/openshell` service (Mac). If it still answers with another release, the service runs another OpenShell's gateway. Stop that gateway (`systemctl --user stop openshell-gateway`, or `brew services stop nvidia/openshell/openshell`), remove that OpenShell, then run `defenseclaw sandbox setup --install-openshell`.
+
+**Check:** the **Gateway** check shows the CLI's release.
+
+#### Something else holds the gateway's port
+
+**You see:** the gateway service is stopped, yet a gateway answers. Or the **Gateway service** check says ``127.0.0.1:17670, the gateway's port, is held by a process of another account``.
+
+**Cause:** another gateway, or another account's, owns the port. A machine runs one OpenShell gateway.
+
+**Fix:** stop that gateway, then start the service. For another account's gateway, hand it over ([Linux](/docs/sandboxes/linux#one-openshell-gateway-per-machine), [macOS](/docs/sandboxes/macos#one-openshell-gateway-per-mac)). `--fix` leaves this to you.
+
+If another program, such as another account's DefenseClaw gateway, already listens on your sandbox ingress or egress port, `defenseclaw sandbox setup` offers the next free port and writes it as `openshell.ingress_port` or `openshell.egress_port`; answer no to keep your port and free it yourself.
+
+**Check:** `defenseclaw sandbox doctor` shows the gateway service active.
+
+#### The daemon is not running
+
+**You see:** ``the DefenseClaw daemon is not running (start it with `defenseclaw-gateway start`)``, or ``the DefenseClaw gateway has not started on this account yet``.
+
+**Cause:** the daemon is stopped. With it down, sandbox hooks block every tool call. A session that ends while it is down skips its review and keep/undo question and says how to run them later. The sandbox and its undo point are kept.
+
+**Fix:** run `defenseclaw-gateway start`.
+
+**Check:** the **DefenseClaw daemon** check passes.
+
+#### Sandboxes are unavailable
+
+**You see:** ``sandboxes are unavailable: … (see `defenseclaw sandbox doctor`)``, or ``the OpenShell gateway is not running: nothing listens on 127.0.0.1:17670``.
+
+**Cause:** the OpenShell gateway service is stopped, or on Linux stopped with your login session.
+
+**Fix:** run `defenseclaw sandbox doctor --fix`. On Linux turn on linger: `sudo loginctl enable-linger $USER`.
+
+**Check:** the **Gateway service** and **systemd linger** checks pass.
+
+### Runs and sessions
+
+These problems appear while a sandbox runs or when you pull its work back. Before following a stop step below, save or sync accessible guest work; on a copy-mode MicroVM, pull work you need on the host. Then use `defenseclaw sandbox stop NAME`, which requests a disk sync before stopping a running MicroVM. A failed sync can lose changes since the last successful one.
+
+#### Copy mode, `--context` and the copy limit
+
+**You see:** ``copy mode: the OpenShell MicroVM (vm) driver mounts no host folders; …``. Or ``--context mounts a folder into the sandbox read-only, and the OpenShell MicroVM (vm) driver mounts no host folders``. Or ``stage the project copy: the copy (files and history) is …, above the … limit``.
+
+**Cause:** the first is expected on a Mac: every run works on a copy. `--context` needs a mount. The third means the copy passed `openshell.workdir.max_upload_mb`.
+
+**Fix:** bring the work back with `defenseclaw sandbox pull NAME`. Run without `--context` and put a copy of the reference folder inside the project. Raise `openshell.workdir.max_upload_mb`, or shrink the project (`openshell.workdir.git_depth` for shallower history).
+
+**Check:** the run starts.
+
+#### A connect says the sandbox was stopped while it attached
+
+**You see:** `NAME is stopped now: it was stopped while this session attached (another terminal's session ended, or a stop ran) → start it again: defenseclaw sandbox connect NAME`.
+
+**Cause:** another terminal's session ended, or `defenseclaw sandbox stop NAME` ran, and decided to stop the sandbox just before this connect recorded its session. DefenseClaw orders every attach with every stop and delete of a sandbox, so a stop never ends a session that attached before it. A session that comes second finds the sandbox stopped and does not start in it.
+
+**Fix:** run `defenseclaw sandbox connect NAME` again. It starts the sandbox and attaches.
+
+**Check:** the harness starts, and `defenseclaw sandbox status NAME` shows it ready.
+
+#### A sandbox keeps running: DefenseClaw cannot confirm the other sessions
+
+**You see:** ``cannot confirm whether another session uses NAME: ...; run `defenseclaw sandbox status NAME` before retrying``, or `NAME keeps running: cannot confirm whether another session uses NAME`.
+
+**Cause:** DefenseClaw could not count the sessions attached to the sandbox, or another DefenseClaw command held the sandbox for more than two minutes. An uncertain count is not zero sessions, so the session's end, `stop`, `delete` and `pull` leave the sandbox running.
+
+**Fix:** run `defenseclaw sandbox status NAME`, end the sessions you no longer need, then run `defenseclaw sandbox stop NAME`.
+
+**Check:** `defenseclaw sandbox list` shows it stopped.
+
+#### Every tool call is blocked
+
+**You see:** ``[defenseclaw] ⚠ DefenseClaw hooks are not reaching the daemon; every tool call is being blocked (<reason>). Run: defenseclaw sandbox doctor``, or ``⚠ the DefenseClaw daemon is not reachable, so the hooks fail closed``.
+
+**Cause:** the sandbox hooks fail closed. A hook that cannot reach DefenseClaw blocks the tool call. The run says so live, in the end-of-session summary and by exit status 69 when not one hook got through. The daemon can take up to a minute to answer after a start; a call blocked in that minute goes through when retried. If the daemon stopped for good, the run prints a warning, exits with status 1 and keeps the sandbox and its undo point.
+
+**Fix:** run `defenseclaw sandbox doctor` and read **Sandbox hooks** and **DefenseClaw daemon**. Start the daemon with `defenseclaw-gateway start`, then run the command the end-of-session line names (`sandbox review` and `sandbox undo`, or `sandbox pull` for a copy).
+
+**Check:** `defenseclaw sandbox status NAME` shows the `Hook traffic` row counting requests.
+
+#### A hook tamper or silence alert
+
+**You see:** ``⚠ hook tamper: Bash ran without a DefenseClaw verdict; the sandbox keeps running (hooks.on_tamper: alert)``, ``⚠ the harness is active but its hooks are silent; stopping the sandbox (hooks.on_silence: stop)``, or `silent!` in `sandbox list`.
+
+**Cause:** a tool ran without a DefenseClaw verdict, or the harness worked for `hooks.silence_after` (10 minutes in every built-in pack) without a hook request reaching DefenseClaw. `hooks.on_tamper` is `alert` in `open` and `stop` in `balanced` and `strict`. A managed-tier harness (Claude Code, Codex, GitHub Copilot CLI, Cursor Agent) only alerts on silence.
+
+**Fix:** review the activity and stop or delete the sandbox if you did not expect it. Resume a stopped one with `defenseclaw sandbox connect NAME`. Silence detection is a backstop: the file and network boundaries hold either way.
+
+**Check:** a new session shows hook requests in `sandbox status`.
+
+#### The model key was rejected
+
+**You see:** ``⚠ Amazon Bedrock rejected the sandbox's model credential (HTTP 401), so Claude Code gets no answers``.
+
+**Cause:** the provider rejected the shared key (expired or revoked). `/login` does not apply to it.
+
+**Fix:** put a fresh key in your shell, stop the session (`defenseclaw sandbox stop NAME` for a detached run), then run `defenseclaw sandbox connect NAME` from that shell.
+
+**Check:** the **Model key** row in `sandbox status` clears.
+
+#### A credential placeholder blocks the conversation
+
+**You see:** `API Error: 403 A credential placeholder in the request body cannot be forwarded` in the harness.
+
+**Cause:** the conversation printed a placeholder (an `env` or `printenv` output shows them), and the harness sends the whole conversation with every request. The key and DefenseClaw are fine.
+
+**Fix:** end the session and start a new conversation with `defenseclaw sandbox connect NAME`, without `--continue`.
+
+**Check:** the harness answers.
+
+#### A sandbox is not as DefenseClaw prepared it
+
+**You see:** ``sandbox <name> does not run as DefenseClaw prepared it; DefenseClaw deleted it`` (a run or create), or ``…; DefenseClaw stopped it again`` (a start). For a MicroVM, only work through the last successful disk sync is kept; a failed sync can lose later changes.
+
+**Cause:** the check after ready found the workload running as another uid or holding capabilities, or a hook, launcher or managed-settings file missing, changed or writable.
+
+**Fix:** if the message ends ``DefenseClaw could not stop the sandbox again, so it is still running``, run `defenseclaw sandbox stop NAME`. Rebuild the image (`defenseclaw sandbox image build <harness> --force`) and run again. On a Mac, `defenseclaw sandbox doctor --fix` fixes a uid mismatch.
+
+**Check:** the next run starts.
+
+#### A sandbox is in OpenShell's error state
+
+**You see:** ``<name> is in OpenShell's error state``, or the session ended with ``<name>'s container stopped under the session`` or ``<name>'s MicroVM stopped under the session``.
+
+**Cause:** a Docker container stopped while it ran (a Docker restart stops every one, or the workload failed), or a MicroVM's workload or VM process exited. `defenseclaw sandbox doctor` names the cause under **Sandbox hooks**. For a MicroVM, `defenseclaw sandbox status NAME` shows whether the phase reason is `MainProcessFailed` or `ProcessExited`.
+
+**Fix:** for a Docker sandbox, fix what stopped its container (start Docker again, for one), then run `defenseclaw sandbox stop NAME` and `defenseclaw sandbox start NAME`; these keep the sandbox and its work. For a MicroVM whose process exited (`ProcessExited`), fix the cause, then run `defenseclaw sandbox stop NAME` and `defenseclaw sandbox start NAME`. The sandbox remains, but its MicroVM work is kept only through the last successful disk sync; changes since then may be lost. For a MicroVM whose main process failed (`MainProcessFailed`), the VM may still run what the workload left running. DefenseClaw does not stop that still-running failed VM for you. OpenShell 0.1.5 neither stops nor restarts a MicroVM whose workload completed, or whose main process failed, while its VM still runs: its start (`defenseclaw sandbox start NAME --end-vm`, or `openshell sandbox start NAME` for a raw sandbox) fails with Conflict and leaves it starting, where `stop` is refused too. Save or sync any work you can reach first and keep the VM while you need what it holds (it keeps the OpenShell gateway, so upgrades and gateway restarts wait). Only then delete it with `defenseclaw sandbox delete NAME` (or `openshell sandbox delete NAME`), which deletes it and its work. For a provisioning timeout, see [The first run seems to hang](/docs/sandboxes/macos#the-first-run-seems-to-hang).
+
+**Check:** `defenseclaw sandbox list` shows it running again after the Docker or exited-VM recovery, or absent after deletion.
+
+For another MicroVM error reason, such as `ProcessPollFailed`, OpenShell may still hold the VM. Check `defenseclaw sandbox status NAME` and use the stop or delete guidance it shows; a stop that OpenShell refuses does not release the VM. Its work is kept only through the last successful disk sync.
+
+## A MicroVM stop is held because its disk could not sync
+
+On a MicroVM, `defenseclaw sandbox stop` syncs the VM's disk before it stops it. If that sync fails, DefenseClaw does not stop the VM: it keeps running with its work, and the command says what a stop would lose. Save the work you need (`defenseclaw sandbox pull NAME` for a copy run), then run `defenseclaw sandbox stop NAME` again; `defenseclaw sandbox delete NAME` ends it without keeping its work. To stop it anyway, run `defenseclaw sandbox stop NAME --discard-unsynced` (on a terminal, `defenseclaw sandbox stop NAME` asks first): it loses what the VM wrote since its last sync, and the activity feed shows `stop_unflushed`. A stop DefenseClaw makes for your organization's policy (a hook alarm, a revoked registration) does not end a MicroVM whose disk could not sync either, and neither does one it makes on its own for repeated foreign network rules or a lost sandbox listener: DefenseClaw contains it instead (it closes its egress proxy, withdraws its network rules and providers, reports it not protected and refuses new DefenseClaw runs), `sandbox status` names it, and it keeps running until you stop it with `--discard-unsynced` or delete it.
+
+Signing out without linger, `sandbox teardown` and an administrator's stop of the sandbox service end the OpenShell gateway, and with it the VM, even when its disk could not sync: DefenseClaw tries its synced stop again first, and names each VM whose disk still could not sync and what it may have lost (on your own computer, in the activity feed).
+
+#### A network rule from the last session was not removed
+
+**You see:** ``sandbox <name> did not start: the network rule <rule>, approved for its last session, could not be removed from its policy``, or ``sandbox <name> is still running with the network rule <rule> approved for its last session``.
+
+**Cause:** on a managed computer an approval for the session ends when the sandbox stops, and a start removes those rules. The gateway refused the removal twice.
+
+**Fix:** if the message says it is still running, run `defenseclaw sandbox stop NAME` and start it again. If it repeats, `defenseclaw sandbox doctor` checks the gateway.
+
+**Check:** the sandbox starts.
+
+#### Refusing to share a folder
+
+**You see:** ``refusing to share /home/alice with a sandbox: it is your home directory``.
+
+**Cause:** DefenseClaw refuses your home directory, system folders, `/tmp`, credential folders such as `~/.ssh` and agent homes such as `~/.claude`.
+
+**Fix:** run from a project folder inside your home.
+
+**Check:** the banner shows the project.
+
+#### Undo cannot look inside a folder
+
+**You see:** ``undo cannot look inside tools in …: the session took read permission away``.
+
+**Cause:** the agent removed read permission from a folder.
+
+**Fix:** run `chmod u+rwx tools`, review what is in it, and run undo again.
+
+**Check:** undo shows its preview.
+
+#### A policy limit refused the setting
+
+**You see:** ``blocked by your organization's DefenseClaw policy: <key>``, an `openshell.admin` limit.
+
+**Fix:** run `defenseclaw sandbox policy explain` to see which limit. See [sandbox policy](/docs/sandboxes/policy-packs).
+
+**Check:** the run starts with an allowed value.
+
+#### A harness cannot start in a MicroVM
+
+**You see:** ``<Harness> cannot start in an OpenShell MicroVM until OpenShell writes /etc/hosts; a gateway on the docker driver (Linux) runs it``.
+
+**Cause:** OpenShell's MicroVM driver leaves the sandbox's `/etc/hosts` empty, and this harness does not use the system resolver, which answers `localhost` there.
+
+**Fix:** on Linux, run that harness on a gateway with the Docker driver. On a Mac, use another harness until OpenShell fills in `/etc/hosts`.
+
+**Check:** `defenseclaw sandbox run <harness>` starts.
+
+#### A sandbox does not answer, though OpenShell reads it as running
+
+**You see:** ``NAME does not answer, though OpenShell still reads it as running: its … may have stopped under the session (…); `defenseclaw sandbox status NAME` shows its state``.
+
+**Cause:** the container or MicroVM behind the sandbox stopped while the session ran, and OpenShell has not noticed yet.
+
+**Fix:** run `defenseclaw sandbox status NAME`. Save what you can reach, then `defenseclaw sandbox stop NAME` and `defenseclaw sandbox connect NAME`.
+
+**Check:** `sandbox status NAME` shows the sandbox running and the session attaches.
+
+#### Your ssh configuration shares connections for host `sandbox`
+
+**You see:** `sandbox doctor` warns ``your ssh configuration shares connections for host "sandbox", the name OpenShell gives every sandbox (ControlMaster …, ControlPath …)``.
+
+**Cause:** DefenseClaw turns connection sharing off for the OpenShell sessions it runs. An `openshell sandbox connect`, `upload`, `download` or `forward` that you run yourself can still reach another sandbox than the one you name, through a connection an earlier one left open.
+
+**Fix:** in `~/.ssh/config`, above any `Host *`, add:
+
+```text
+Host sandbox
+  ControlMaster no
+  ControlPath none
+```
+
+**Check:** `defenseclaw sandbox doctor` no longer warns about ssh connection sharing.
+
+#### `sandbox run` needs a terminal
+
+**You see:** `` `sandbox run` attaches Claude Code to your terminal, and there is none ``.
+
+**Fix:** run it from a terminal, or pass `--prompt`.
+
+**Check:** the harness starts.
+
+### Disk and telemetry
+
+These are the disk, telemetry and MicroVM resource checks of `defenseclaw sandbox doctor`. The MicroVM entries apply to a Mac.
+
+#### Low disk space
+
+**You see:** builds or starts fail for lack of space.
+
+**Cause:** harness images and, on a Mac, a prepared MicroVM disk of about 5 GB per started image.
+
+**Fix:** `defenseclaw sandbox image prune` removes superseded harness images and their MicroVM disks. `defenseclaw sandbox image rm <harness>` removes every image of a harness you no longer run. Avoid `docker system prune` on a shared machine: it also removes other users' stopped containers, networks and build cache. If space does not return on a Mac, an app that backs up or indexes your files may hold a removed disk open (`lsof +L1` lists such files).
+
+**Check:** the **Disk space** check shows free space.
+
+#### Telemetry rows are red
+
+**You see:** `defenseclaw sandbox status` ends with a red **Telemetry** row, or the integration's health reads `openshell_telemetry_failed`. Or the health reads `openshell_egress_auth_failed`, with ``the sandbox egress proxy refused N request(s) with an invalid proxy credential`` in the daemon log.
+
+**Cause:** the recorder refused sandbox records (for example the telemetry runtime was down), counted and logged. For the egress case, something presented the proxy a malformed, unknown or revoked credential: a sandbox that kept an environment from before a restart, or another program on the machine.
+
+**Fix:** run `defenseclaw doctor` and `defenseclaw observability plan` ([sandbox telemetry](/docs/observability/sandbox-telemetry)). The egress case ends by itself after a minute without a refusal; if it repeats, run `defenseclaw sandbox doctor`.
+
+**Check:** the row turns green.
+
+#### Not enough free disk for the first start
+
+**You see:** ``not enough free disk space for this sandbox's first start: the MicroVM driver prepares a disk of about … from its image in …``.
+
+**Cause:** the volume of `~/.local/state/openshell/vm-driver` lacks the space, and the run is refused before anything is copied.
+
+**Fix:** free space there. `defenseclaw sandbox image prune` removes superseded harness images and the MicroVM disks prepared from them.
+
+**Check:** the run starts.
+
+#### A MicroVM's own disk is full
+
+**You see:** ``the sandbox's own disk is full (no space left on device): a MicroVM writes to an overlay disk …``, ``<name> cannot start: its own disk is full``, or `sandbox status` shows `Phase error: its own disk is full …`.
+
+**Cause:** a MicroVM stopped with its overlay disk full cannot start again, and its unpulled work cannot be read.
+
+**Fix:** while it runs, `defenseclaw sandbox exec NAME -- df -h /` shows the space. Free space, or pull the work, before it stops. A session whose end hits this leaves the MicroVM running: free space (`defenseclaw sandbox connect NAME --shell`), then `defenseclaw sandbox pull NAME`. Once stopped full, only `defenseclaw sandbox delete NAME` is left. Raise `overlay_disk_mib` under `[openshell.drivers.vm]` for new sandboxes (the doctor shows the value and where it is set).
+
+**Check:** `sandbox status NAME` shows no disk warning.
+
+#### A MicroVM went down without a flush
+
+**You see:** ``<name>'s MicroVM went down without DefenseClaw stopping it …``, or a pull's review flags a file that ``ends in N zero bytes`` or ``is empty, which a MicroVM stopped without a flush can leave``.
+
+**Cause:** the OpenShell gateway restarted under the MicroVM (`brew services restart`, an upgrade, a crash), which stops it without flushing its disk.
+
+**Fix:** check those files and have the agent write them again before you bring the work back. For a future running MicroVM, `defenseclaw sandbox stop` requests a disk sync first; a stop after the VM went down cannot recover unsynced changes. If a disk sync fails, changes after the last successful disk sync may be lost.
+
+**Check:** the next pull shows the files complete.
+
+#### MicroVM resources warn
+
+**You see:** **MicroVM resources** warns that an agent that builds code may need more.
+
+**Cause:** `vcpus`, `mem_mib` or `overlay_disk_mib` are low.
+
+**Fix:** raise them under `[openshell.drivers.vm]` in the gateway's `gateway.toml` (`/opt/homebrew/var/openshell/gateway.toml` for the Homebrew service, unless `~/.config/openshell/gateway.toml` exists), then run `brew services restart nvidia/openshell/openshell` after stopping running sandboxes.
+
+**Check:** the **MicroVM resources** row shows the new values.
+
+## Remove a retired standalone sandbox
+
+Needed only on a Linux host that ran the retired `openshell-sandbox` standalone integration (`defenseclaw init --sandbox` before 1.0), which ran OpenClaw as a `sandbox` user in a network namespace. The upgrade to 1.0 resets DefenseClaw's own config and leaves what that integration set up as root. Remove it by hand before you set up OpenShell sandboxes. This section stays for as long as a 0.8.x to 1.0.x upgrade is supported.
+
+```bash
+D=~/.defenseclaw   # DefenseClaw's data_dir, if you changed it
+# A host without systemd ran the sandbox with the launcher setup wrote:
+[ -x "$D/scripts/run-sandbox.sh" ] && sudo "$D/scripts/run-sandbox.sh" stop
+sudo systemctl disable --now defenseclaw-sandbox.target openshell-sandbox.service
+sudo rm -f /etc/systemd/system/defenseclaw-sandbox.target /etc/systemd/system/openshell-sandbox.service
+sudo rm -f /usr/local/lib/defenseclaw/{pre,start,post,cleanup}-sandbox.sh
+sudo systemctl daemon-reload
+sudo ip netns list                       # delete the sandbox's: sudo ip netns delete <name>
+sudo iptables -t nat -S | grep 10.200.0  # delete each: sudo iptables -t nat -D <the rule, without -A>
+sudo pgrep -u sandbox                    # nothing may run as the sandbox user any more
+sudo userdel -r sandbox                  # also removes /home/sandbox and its .openclaw link
+```
+
+Then put `net.ipv4.conf.all.route_localnet` back and remove what setup left in the data directory:
+
+```bash
+cd "$D"
+cat saved.route_localnet   # the value before setup: sudo sysctl -w net.ipv4.conf.all.route_localnet=VALUE
+sudo rm -f systemd/openshell-sandbox.service systemd/defenseclaw-sandbox.target \
+  scripts/{pre,start,post,cleanup,run}-sandbox.sh sandbox-resolv.conf \
+  openshell-policy.rego openshell-policy.yaml saved.route_localnet \
+  sandbox.netns sandbox.pids openshell.pid openclaw-ownership-backup.json
+rmdir systemd scripts 2>/dev/null
+```
+
+Give the OpenClaw home back to your user (`sudo chown -R "$USER": ~/.openclaw`, and `sudo setfacl -R -b ~/.openclaw` if `getfacl` still lists ACL entries; `migration-v9.json` names a home pinned elsewhere). Point `claw.home_dir` and `claw.config_file` back at it if they name `/home/sandbox`:
+
+```bash
+defenseclaw config set claw.home_dir ~/.openclaw
+defenseclaw config set claw.config_file ~/.openclaw/openclaw.json
+```
+
+In `openclaw.json` set `gateway.bind` back to `loopback` and the `defenseclaw` provider's `baseUrl` back to `localhost`. Without a `saved.route_localnet`, set `route_localnet` back to `0` unless you had set it yourself. The agent could write anywhere in the OpenClaw home while sandboxed, so scan it before OpenClaw runs on the host again, then rewire the guardrail:
+
+```bash
+defenseclaw skill scan --all
+defenseclaw plugin scan --all
+defenseclaw mcp scan --all
+defenseclaw setup guardrail
+```
+
+## Related
+
+- [Choose a policy pack](/docs/sandboxes/policy-packs)
+- [Sandbox network](/docs/sandboxes/network): the decision order and what each block category means.
+- [A tool cannot reach a site](/docs/sandboxes/network#a-tool-cannot-reach-a-site): git over SSH and databases.

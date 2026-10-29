@@ -238,3 +238,52 @@ func TestRemoveUserHooksKeepsTheUsersOwnConfig(t *testing.T) {
 		t.Fatalf("the purge removed the user's own file: %v", err)
 	}
 }
+
+// GAP-1978: a ~/.defenseclaw/hooks folder the account cannot search (made
+// root-owned by sudo with HOME kept) holds nothing the account's agents can
+// run: the removal takes the registration, leaves the folder as it is, and is
+// not a failure, so a managed uninstall --purge completes.
+func TestRemoveUserHooksLeavesAHookFolderTheAccountCannotSearch(t *testing.T) {
+	skipIfRoot(t)
+	home := newTestHome(t)
+	dataDir := filepath.Join(home, ".defenseclaw")
+	hermesConfig := filepath.Join(home, ".hermes", "config.yaml")
+	if err := os.MkdirAll(filepath.Dir(hermesConfig), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(hermesConfig, []byte("model:\n  default: test-model\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	hermes := InstallOptions{
+		ConnectorName: "hermes", UserHome: home, OwnerUID: os.Getuid(), OwnerGID: os.Getgid(),
+		APIAddr: "127.0.0.1:18970", ProxyAddr: "127.0.0.1:4000", APIToken: strings.Repeat("a", 64),
+		OTLPPathToken: strings.Repeat("d", 64), GuardrailMode: "action", HookFailMode: "closed",
+		AgentVersion: "Hermes Agent v0.21.5 (2026.9.24)", Registry: connector.NewDefaultRegistry(),
+	}
+	if _, err := Install(context.Background(), hermes); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+	hooks := filepath.Join(dataDir, "hooks")
+	before, err := os.ReadDir(hooks)
+	if err != nil || len(before) == 0 {
+		t.Fatalf("install wrote no hooks: %v", err)
+	}
+	if err := os.Chmod(hooks, 0); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(hooks, 0o700) })
+	if err := RemoveUserHooks(context.Background(), hermes); err != nil {
+		t.Fatalf("RemoveUserHooks with an unsearchable hooks folder: %v", err)
+	}
+	if err := os.Chmod(hooks, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	after, err := os.ReadDir(hooks)
+	if err != nil || len(after) != len(before) {
+		t.Fatalf("the unsearchable folder was changed: %d -> %d entries, %v", len(before), len(after), err)
+	}
+	config, err := os.ReadFile(hermesConfig)
+	if err != nil || strings.Contains(string(config), "hermes-hook.sh") {
+		t.Fatalf("the hermes registration stayed: %v\n%s", err, config)
+	}
+}

@@ -1,21 +1,30 @@
 ---
-title: What is DefenseClaw
-description: DefenseClaw adds policy, an audit trail and optional human approval to supported AI coding agents.
+title: What is DefenseClaw?
+description: A 60-second pitch — DefenseClaw adds policy, audit, and connector-specific human-in-the-loop controls to supported AI coding agents.
 keywords:
   - what is DefenseClaw
+  - Cisco governance
   - AI coding agent guardrail
-  - AI agent audit log
+  - AI agent observability
 ---
 
-DefenseClaw sits between your coding agent and what it can do. It answers three questions: what is the agent allowed to install, what is it doing right now, and what did it do. Skills, MCP servers and plugins are scanned before they run. Prompts and tool calls are checked as they happen, for the events each connector sends; coverage differs by agent (see the [capability matrix](/docs/reference/apis/capability-matrix)). Every decision goes to a local audit database and to the destinations you configure.
+DefenseClaw sits between your coding agent and what it can do. It answers three questions: what is the agent allowed to install, what is it doing right now, and what did it do. Skills, MCP servers and plugins are scanned before they run. Prompts and tool calls are checked as they happen, for the events each connector sends; coverage differs by agent (see the [capability matrix](/docs/connectors/capability-matrix)). Every decision goes to a local audit database and to the destinations you configure.
 
-## The three parts
+## Three modes, one command
+
+- **Observe** records policy findings without enforcing them. Hook fail mode and proxy availability still apply. Start here.
+- **Action** blocks findings at or above the block level. The shipped default blocks CRITICAL and alerts on HIGH and MEDIUM. Change it with `defenseclaw guardrail block-at`.
+- **Action with human approval (HITL)** pauses a risky call and asks you, on agents with a native approval prompt. Other agents take the connector's fallback right away.
+
+## Where DefenseClaw sits
+
+DefenseClaw has three parts:
 
 - **The CLI** (`defenseclaw`) sets everything up and shows you what happened. It also has a terminal UI (`defenseclaw tui`).
 - **The gateway** (`defenseclaw-gateway`) is a background process that decides and records. It listens on loopback, port 18970 by default.
 - **A connector** per agent: the hooks or plugin that send the agent's prompts and tool calls to the gateway. Some connectors send model traffic through a guardrail proxy instead.
 
-Every decision you make lives in one file, `~/.defenseclaw/config.yaml`. The running gateway applies policy changes without a restart. A few startup settings, such as listener and storage, wait for a restart ([which ones](/docs/reference/configuration/source-of-truth)).
+Every decision you make lives in one file, `~/.defenseclaw/config.yaml`. The running gateway applies policy changes without a restart. A few startup settings, such as listener and storage, wait for a restart ([which ones](/docs/reference/source-of-truth)).
 
 <Flow
   direction="TB"
@@ -36,19 +45,32 @@ Every decision you make lives in one file, `~/.defenseclaw/config.yaml`. The run
   <Edge from="gateway" to="audit" label="records" />
 </Flow>
 
-## The three modes
-
-- **Observe** records policy findings without enforcing them. Hook fail mode and proxy availability still apply. Start here.
-- **Action** blocks findings at or above the block level. The shipped default blocks CRITICAL and alerts on HIGH and MEDIUM. Change it with `defenseclaw guardrail block-at`.
-- **Action with human approval (HITL)** pauses a risky call and asks you, on agents with a native approval prompt. Other agents take the connector's fallback right away.
-
 ## What DefenseClaw is not
 
 <Callout type="warn">
 DefenseClaw does not prove an agent is safe, and it does not isolate the agent on its own. For isolation, run the agent in an OpenShell sandbox with `defenseclaw sandbox run`. Pair DefenseClaw with least-privilege credentials, human review and CI gates.
 </Callout>
 
+## Features
+
+Each feature page says what the feature does, when to use it and where the step-by-step guides and reference live.
+
 <Cards>
-  <Card title="Install" href="/docs/get-started/install" description="One command on macOS, Linux or Windows." />
+  <Card title="Guardrail" href="/docs/guardrail" description="How DefenseClaw checks an agent's prompts and tool calls, and decides to allow, alert, ask you, or block." />
+  <Card title="Policies" href="/docs/policies" description="How DefenseClaw decides whether to allow, alert, ask or block - rule packs, the optional LLM judge, suppressions, the session correlator and admission." />
+  <Card title="Scanning and admission" href="/docs/scanning" description="DefenseClaw scans skills, MCP servers and plugins when they appear, then allows, warns about or blocks them by severity." />
+  <Card title="AI Discovery" href="/docs/ai-discovery" description="Find the AI agents, models, MCP servers, skills and IDE plugins on a machine, and see which of them actually ran." />
+  <Card title="Sandboxes" href="/docs/sandboxes" description="Run Claude Code, Codex and other coding agents in skip-permissions mode inside NVIDIA OpenShell sandboxes, with DefenseClaw judging every tool call and every site." />
+  <Card title="ACP guard" href="/docs/acp-guard" description="Put DefenseClaw between an ACP editor and its coding agent so every prompt, output, permission, file and terminal message is checked." />
+  <Card title="Observability" href="/docs/observability" description="DefenseClaw records every event once, keeps local history, and sends redacted copies to the destinations you choose." />
+  <Card title="Terminal UI" href="/docs/tui" description="The DefenseClaw terminal UI is a keyboard-driven dashboard for gateway status, alerts, inventory, policies, sandboxes and setup." />
+  <Card title="macOS app" href="/docs/macos-app" description="The DefenseClaw menu-bar app for Apple-silicon Macs: install, panels, notifications and the sandboxes view." />
+  <Card title="Edge Connector" href="/docs/edge-connector" description="A C enforcement engine for Linux edge devices that checks tool calls locally and can ask a DefenseClaw Fleet gateway over MQTT when it cannot decide." />
+</Cards>
+
+## Next
+
+<Cards>
+  <Card title="Install" href="/docs/get-started/download" description="One command on macOS, Linux or Windows." />
   <Card title="Quickstart" href="/docs/get-started/quickstart" description="Block your first tool call in five minutes." />
 </Cards>

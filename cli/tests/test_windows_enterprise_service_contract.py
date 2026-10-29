@@ -79,7 +79,7 @@ INSTALL_ACL_SELF_HEAL_SMOKE = (
     / "tests"
     / "enterprise-install-acl-self-heal-smoke.ps1"
 )
-DEPLOYMENT_DOC = ROOT / "docs-site" / "content" / "docs" / "enterprise" / "install" / "secure-client.mdx"
+DEPLOYMENT_DOC = ROOT / "docs-site" / "content" / "docs" / "enterprise" / "secure-client.mdx"
 CERTIFICATION_DOC = ROOT / "docs" / "WINDOWS-ENTERPRISE-CERTIFICATION.md"
 MATRIX_TEST = ROOT / "internal" / "gateway" / "enterprise_mode_matrix_test.go"
 WINDOWS_LIFECYCLE_CLI = ROOT / "internal" / "cli" / "windows_enterprise_service.go"
@@ -2257,6 +2257,14 @@ def test_activation_rollback_and_guardian_failure_contracts_are_durable() -> Non
     # GAP-1940: pending rows of signed-out accounts are counted, not failures.
     assert "PSObject.Properties['pending']" in guardian_failure
     assert "are pending " in guardian_failure
+    # GAP-2290: a row's SID is named as its account, "DOMAIN\user (SID)".
+    assert "Get-DefenseClawGuardianDiagnosticAccountLabel" in guardian_failure
+    account_label = module[
+        module.index("function Get-DefenseClawGuardianDiagnosticAccountLabel") :
+        module.index("function Get-DefenseClawGuardianVerificationFailureDiagnostic")
+    ]
+    assert "Translate(" in account_label
+    assert '"$account ($Sid)"' in account_label
     assert "ready = $ready" in guardian_probe
     assert "return [bool]$readiness.ready" in guardian_boolean
     assert "Get-DefenseClawGuardianReadinessProbe `" in deployment_assertion
@@ -3666,7 +3674,7 @@ def test_enterprise_is_opt_in_without_disabling_normal_mode_repair() -> None:
     # The deployment page and its reference page together hold the contract.
     documentation = " ".join(
         (
-            read(DEPLOYMENT_DOC) + read(DEPLOYMENT_DOC.parent / "reference" / "secure-client.mdx")
+            read(DEPLOYMENT_DOC) + read(DEPLOYMENT_DOC)
         ).split()
     )
     harness = read(HARNESS)

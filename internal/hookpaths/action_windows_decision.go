@@ -8,6 +8,7 @@ import (
 	"path"
 	"strings"
 	"unicode/utf16"
+	"unicode/utf8"
 )
 
 // Windows hooks can run a POSIX shell while reporting a native Windows home.
@@ -47,7 +48,16 @@ func actionWindowsPath(value, cwd, home string) (string, bool) {
 		return "", false // drive-relative paths depend on mutable drive state
 	}
 	if !actionWindowsHome(value) {
-		value = strings.TrimRight(strings.ReplaceAll(cwd, `\`, "/"), "/") + "/" + value
+		base := strings.TrimRight(strings.ReplaceAll(cwd, `\`, "/"), "/")
+		if base == "" && strings.HasPrefix(value, "/") {
+			// A rooted path with no known working directory names the root
+			// of an unknown drive. Joining it to the empty directory made
+			// "/tmp/x" the network name //tmp/x, so the state check asked
+			// the network for a host named by the command (seconds per word
+			// on Windows, GAP-2256).
+			return "", false
+		}
+		value = base + "/" + value
 	}
 	// Remove lexical traversal before asking the filesystem to expand a short
 	// name. GetLongPathName cannot expand a nonexistent intermediate component.
@@ -95,56 +105,165 @@ func actionWindowsProtected(value, cwd, home string, readOnly bool) (bool, bool)
 	return false, true
 }
 
+// actionWindowsGrammar selects how actionWindowsScan reads a command.
+type actionWindowsGrammar uint8
+
+const (
+	// actionWindowsPlainGrammar reads only ASCII quotes, with no comment and
+	// no escape rule. A shell other than PowerShell (Git Bash, cmd) may run a
+	// command sent from a Windows home, and it reads comments, smart quotes
+	// and the backtick differently; a protected decision holds when either
+	// reading finds the target (GAP-1500 refix 2).
+	actionWindowsPlainGrammar actionWindowsGrammar = 1 << iota
+	// actionWindowsLiteralDollar keeps a $ inside a single-quoted string or
+	// an @'...'@ here-string from reading as a home variable ($ -> @).
+	actionWindowsLiteralDollar
+)
+
+// actionWindowsScanResult is one reading of a command. quoted[i] reports a
+// word whose first character is quoted (GAP-1473).
+type actionWindowsScanResult struct {
+	words   []string
+	literal []bool
+	quoted  []bool
+	ok      bool
+}
+
 // actionWindowsWords treats a quoted command body as one word and emits each
 // redirection separately, preserving an attached file descriptor. An unclosed
-// quote leaves the command unproved. A PowerShell here-string (@' or @" at
-// the end of its line) is one word, "@" + body + "@", and runs to the line
-// that starts with its closing '@ or "@: a quote inside the body (It's, "x")
-// does not end it. literal[i] reports a word that is exactly one @'...'@
-// here-string, whose body PowerShell does not expand ($ and the backtick are
-// characters there).
+// quote leaves the command unproved. Quotes, escapes and comments follow
+// PowerShell: ‘ ’ ‚ ‛ are single quotes and “ ” „ double quotes, like ' and ";
+// outside single quotes a backtick escapes the next character (a quote, a
+// blank, a # or a separator is then part of the word; a backtick at a line
+// end continues the line); a # that starts a token comments out the rest of
+// its line, and <# ... #> is a block comment. A PowerShell here-string (@' or
+// @" at the end of its line) is one word, "@" + body + "@", and runs to the
+// line that starts with its closing '@ or "@: a quote inside the body (It's,
+// "x") does not end it. literal[i] reports a word that is exactly one
+// @'...'@ here-string, whose body PowerShell does not expand ($ and the
+// backtick are characters there).
 func actionWindowsWords(command string) (words []string, literal []bool, ok bool) {
+	scan := actionWindowsScan(command, 0)
+	return scan.words, scan.literal, scan.ok
+}
+
+func actionWindowsScan(command string, grammar actionWindowsGrammar) (result actionWindowsScanResult) {
+	plain := grammar&actionWindowsPlainGrammar != 0
+	literalDollar := grammar&actionWindowsLiteralDollar != 0
 	var word strings.Builder
 	var quote byte
 	hereLen := -1
-	emit := func(value string, isLiteral bool) {
-		words = append(words, value)
-		literal = append(literal, isLiteral)
+	quoted := false // the current word has a quote, possibly an empty one
+	startQuoted := false
+	emit := func(value string, isLiteral, isQuoted bool) {
+		result.words = append(result.words, value)
+		result.literal = append(result.literal, isLiteral)
+		result.quoted = append(result.quoted, isQuoted)
 	}
 	flush := func() {
 		if word.Len() > 0 {
-			emit(word.String(), word.Len() == hereLen)
+			emit(word.String(), word.Len() == hereLen, startQuoted)
 			word.Reset()
 		}
 		hereLen = -1
+		quoted = false
+		startQuoted = false
+	}
+	quoteAt := func(i int) (byte, int) {
+		if plain {
+			if c := command[i]; c == '\'' || c == '"' {
+				return c, 1
+			}
+			return 0, 0
+		}
+		return actionWindowsQuote(command, i)
+	}
+	// escaped writes the backtick at i and the character after it. With
+	// literalDollar a backtick-escaped $ is literal text (GAP-1504).
+	escaped := func(i int) int {
+		if literalDollar && command[i+1] == '$' {
+			word.WriteByte('@')
+			return i + 1
+		}
+		_, size := utf8.DecodeRuneInString(command[i+1:])
+		word.WriteString(command[i : i+1+size])
+		return i + size
 	}
 	for i := 0; i < len(command); i++ {
 		c := command[i]
+		kind, size := quoteAt(i)
 		if quote != 0 {
-			if c == quote {
+			switch {
+			case kind == quote:
 				quote = 0
-			} else {
+				i += size - 1
+			case !plain && quote == '"' && c == '`' && i+1 < len(command):
+				i = escaped(i)
+			case literalDollar && quote == '\'' && c == '$':
+				word.WriteByte('@')
+			default:
+				if word.Len() == 0 {
+					startQuoted = true
+				}
 				word.WriteByte(c)
 			}
 			continue
 		}
-		switch c {
-		case '\'', '"':
+		if !plain && c == '`' && i+1 < len(command) {
+			if next := command[i+1]; next == '\r' || next == '\n' {
+				// A line continuation is a blank.
+				flush()
+				i++
+				if next == '\r' && i+1 < len(command) && command[i+1] == '\n' {
+					i++
+				}
+				continue
+			}
+			i = escaped(i)
+			continue
+		}
+		if !plain && word.Len() == 0 && !quoted && (i == 0 || strings.IndexByte(" \t\r\n;|&", command[i-1]) >= 0) {
+			if c == '#' {
+				end := strings.IndexAny(command[i:], "\r\n")
+				if end < 0 {
+					break
+				}
+				i += end - 1
+				continue
+			}
+			if c == '<' && i+1 < len(command) && command[i+1] == '#' {
+				end := strings.Index(command[i+2:], "#>")
+				if end < 0 {
+					return result
+				}
+				i += end + 3
+				continue
+			}
+		}
+		if kind != 0 {
 			if word.String() == "@" {
 				if bodyEnd, after, here, ok := actionWindowsHereStringEnd(command, i); here {
 					if !ok {
-						return words, literal, false
+						return result
 					}
-					word.WriteString(command[i+1 : bodyEnd])
+					body := command[i+size : bodyEnd]
+					if literalDollar && kind == '\'' {
+						body = strings.ReplaceAll(body, "$", "@")
+					}
+					word.WriteString(body)
 					word.WriteByte('@')
-					if c == '\'' {
+					if kind == '\'' {
 						hereLen = word.Len()
 					}
 					i = after - 1
 					continue
 				}
 			}
-			quote = c
+			quote, quoted = kind, true
+			i += size - 1
+			continue
+		}
+		switch c {
 		case ' ', '\t', '\r', '\n':
 			flush()
 		case '>', '<', ';', '|', '&':
@@ -168,17 +287,18 @@ func actionWindowsWords(command string) (words []string, literal []bool, ok bool
 			}
 			flush()
 			if i+1 < len(command) && command[i+1] == c && (c == '>' || c == '<' || c == '&' || c == '|') {
-				emit(command[i:i+2], false)
+				emit(command[i:i+2], false, false)
 				i++
 			} else {
-				emit(command[i:i+1], false)
+				emit(command[i:i+1], false, false)
 			}
 		default:
 			word.WriteByte(c)
 		}
 	}
 	flush()
-	return words, literal, quote == 0
+	result.ok = quote == 0
+	return result
 }
 
 // actionWindowsHereStringEnd reads the here-string whose opening quote is at
@@ -187,12 +307,12 @@ func actionWindowsWords(command string) (words []string, literal []bool, ok bool
 // is the byte after it. PowerShell also accepts lone CR line ends and smart
 // quote closing markers. An indented closer or no closer is unproved.
 func actionWindowsHereStringEnd(command string, open int) (bodyEnd, after int, here, ok bool) {
-	quote := command[open]
-	newline := strings.IndexAny(command[open+1:], "\r\n")
-	if newline < 0 || strings.Trim(command[open+1:open+1+newline], " \t") != "" {
+	quote, size := actionWindowsQuote(command, open)
+	newline := strings.IndexAny(command[open+size:], "\r\n")
+	if quote == 0 || newline < 0 || strings.Trim(command[open+size:open+size+newline], " \t") != "" {
 		return 0, 0, false, false
 	}
-	firstEnd := open + 1 + newline
+	firstEnd := open + size + newline
 	start := firstEnd + 1
 	if command[firstEnd] == '\r' && start < len(command) && command[start] == '\n' {
 		start++
@@ -218,6 +338,23 @@ func actionWindowsHereStringEnd(command string, open int) (bodyEnd, after int, h
 		}
 	}
 	return 0, 0, true, false
+}
+
+// actionWindowsQuote reports the quote that starts at command[i] and its
+// length: PowerShell reads ‘ ’ ‚ ‛ as ' and “ ” „ as ".
+func actionWindowsQuote(command string, i int) (kind byte, size int) {
+	if c := command[i]; c == '\'' || c == '"' {
+		return c, 1
+	}
+	if command[i] == 0xE2 && i+2 < len(command) && command[i+1] == 0x80 {
+		switch command[i+2] {
+		case 0x98, 0x99, 0x9A, 0x9B:
+			return '\'', 3
+		case 0x9C, 0x9D, 0x9E:
+			return '"', 3
+		}
+	}
+	return 0, 0
 }
 
 func actionWindowsHereStringCloserLen(line string, quote byte) int {
@@ -305,15 +442,6 @@ type actionWindowsResolvedSpan struct {
 
 // Keep bounded assignment resolution common to audit and enforcement. Only
 // literal assignments and Join-Path children are substituted into commands.
-func actionWindowsResolvedStatements(words []string, cwd, home string) [][]string {
-	spans := actionWindowsResolvedSpans(words, cwd, home)
-	statements := make([][]string, 0, len(spans))
-	for _, span := range spans {
-		statements = append(statements, span.words)
-	}
-	return statements
-}
-
 func actionWindowsResolvedSpans(words []string, cwd, home string) []actionWindowsResolvedSpan {
 	values := make(map[string]string)
 	var spans []actionWindowsResolvedSpan

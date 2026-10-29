@@ -68,6 +68,9 @@ func managedStandaloneHTTPClient(
 		if errors.Is(err, os.ErrPermission) && selinuxActive() {
 			return nil, standaloneSELinuxDeniedError(err)
 		}
+		if errors.Is(err, errManagedHookSocketDirectoryUntrusted) {
+			return nil, fmt.Errorf("%w: %w", errManagedGatewayPeerUnverified, err)
+		}
 		return nil, standalonePeerError("%v", err)
 	}
 	dialer := &net.Dialer{Timeout: 2 * time.Second}
@@ -80,8 +83,16 @@ func managedStandaloneHTTPClient(
 				conn, err := dialer.DialContext(ctx, "unix", socketPath)
 				if err != nil {
 					if errors.Is(err, syscall.ECONNREFUSED) || errors.Is(err, syscall.ENOENT) {
-						// The path existed before dialing. A refused listener or a
-						// race that removed it cannot prove a stopped service.
+						// The path existed when the client was built. A refused
+						// listener proves nothing, but a socket now missing in
+						// its trusted folder is the same proof the build
+						// takes: a socket unit that failed activation (masked
+						// or failing service) resets the call it queued and
+						// removes the socket, so a resend of that call finds
+						// it gone (GAP-0807).
+						if verr := validateStandaloneHookSocketPath(socketPath, serviceUID); errors.Is(verr, errStandaloneSocketMissing) {
+							return nil, standaloneGatewayStoppedError(verr)
+						}
 						return nil, standalonePeerError("hook socket stopped answering after verification: %v", err)
 					}
 					if errors.Is(err, syscall.EACCES) && selinuxActive() {
@@ -131,11 +142,11 @@ func validateStandaloneHookSocketPath(path string, serviceUID int) error {
 		return fmt.Errorf("hook socket directory: %w", err)
 	}
 	if !dirInfo.IsDir() || dirInfo.Mode().Perm()&0o022 != 0 {
-		return fmt.Errorf("hook socket directory %s must be a directory writable only by its owner", dir)
+		return fmt.Errorf("%w: hook socket directory %s must be a directory writable only by its owner", errManagedHookSocketDirectoryUntrusted, dir)
 	}
 	stat, ok := dirInfo.Sys().(*syscall.Stat_t)
 	if !ok || !standaloneTrustedGatewayUID(int(stat.Uid), serviceUID) {
-		return fmt.Errorf("hook socket directory %s is not owned by root or the gateway service account", dir)
+		return fmt.Errorf("%w: hook socket directory %s is not owned by root or the gateway service account", errManagedHookSocketDirectoryUntrusted, dir)
 	}
 	info, err := os.Lstat(path)
 	if errors.Is(err, os.ErrNotExist) {

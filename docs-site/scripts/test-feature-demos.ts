@@ -18,7 +18,7 @@ import {
 
 const connectorIds = new Set(matrix.connectors.map((connector) => connector.id));
 const cursorStory = readFileSync(
-  new URL('../content/docs/how-to/guardrail/stop-a-secret-upload.mdx', import.meta.url),
+  new URL('../content/docs/stories/cursor-secret-exfil.mdx', import.meta.url),
   'utf8',
 );
 const approvedFixtureHosts = new Set([
@@ -256,7 +256,7 @@ describe('feature demo catalog', () => {
   });
 
   it('identifies the enforcement write counter as config generation', () => {
-    const page = readFileSync(new URL('../content/docs/reference/apis/gateway-api.mdx', import.meta.url), 'utf8');
+    const page = readFileSync(new URL('../content/docs/reference/gateway-api.mdx', import.meta.url), 'utf8');
     assert.match(page, /returns the new config writer generation/);
     assert.match(page, /`\/health.policy.generation`/);
     assert.doesNotMatch(page, /returns the new policy generation/);
@@ -273,7 +273,11 @@ describe('feature demo catalog', () => {
     assert.ok(mcp!.boundaries.didNot.some((item) => /remote URL/i.test(item)));
 
     const registry = featureDemos.find((scenario) => scenario.id === 'registry-promote-require');
-    assert.match(registry!.tabs.map((tab) => tab.source).join('\n'), /sync: on_demand/);
+    // Registry sources have no sync field: sync is on demand because there is no poller,
+    // and registry_required lives under asset_policy.<type> (cli/defenseclaw/config.py).
+    const registrySource = registry!.tabs.map((tab) => tab.source).join('\n');
+    assert.doesNotMatch(registrySource, /^sync:|allow_private_network/m);
+    assert.match(registrySource, /asset_policy:\n  skill:\n    registry_required: true/);
     assert.match(registry!.summary + registry!.syntheticDataNotice, /on-demand|on demand/i);
   });
 
@@ -330,7 +334,8 @@ describe('feature demo catalog', () => {
     assert.match(cursorStory, /defenseclaw setup cursor --yes --mode action --rule-pack default --no-human-approval --restart/);
     assert.match(cursorStory, /✓ cursor rule pack: default \(per-connector override\)/);
     assert.match(cursorStory, /✓ cursor mode=action/);
-    assert.match(cursorStory, /✓ cursor hook failures=closed \(failClosed=true\)/);
+    assert.match(cursorStory, /✓ cursor gateway outage=open \(failClosed=true\)/);
+    assert.doesNotMatch(cursorStory, /cursor hook failures=/);
     assert.match(cursorStory, /ℹ Cursor runs all matching hooks/);
   });
 });

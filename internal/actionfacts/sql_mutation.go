@@ -48,7 +48,7 @@ func validSQLMutationFact(fact SQLMutationFact) bool {
 		return false
 	}
 	switch fact.Engine {
-	case "postgresql", "mysql", "sqlserver":
+	case "postgresql", "mysql", "sqlserver", "snowflake":
 	case "generic":
 		if fact.QuerySource != SQLMutationQueryStructured {
 			return false
@@ -337,6 +337,10 @@ func sqlMutationEngine(program string) (string, bool) {
 		return "mysql", true
 	case "sqlcmd":
 		return "sqlserver", true
+	case "snowsql":
+		// The database destruction pack lists snowsql; its inline query
+		// (-q/--query) is read as the other clients' are (GAP-1030).
+		return "snowflake", true
 	default:
 		return "", false
 	}
@@ -374,7 +378,8 @@ func parseExactSQLCLI(argv []string, engine string) (exactSQLCLI, bool) {
 		argument := argv[index]
 		key, value, consumesNext, flag, ok := exactSQLCLIOption(engine, argument)
 		if ok {
-			if _, duplicate := parsed.options[key]; duplicate {
+			previous, duplicate := parsed.options[key]
+			if duplicate && key != "option" {
 				return exactSQLCLI{}, false
 			}
 			if consumesNext {
@@ -387,6 +392,14 @@ func parseExactSQLCLI(argv []string, engine string) (exactSQLCLI, bool) {
 			if !flag && (!exactSQLScalar(value, maxCommandBytes) || unresolvedSQLMutationValue(value)) {
 				return exactSQLCLI{}, false
 			}
+			if key == "option" {
+				if !strings.Contains(value, "=") {
+					return exactSQLCLI{}, false
+				}
+				if duplicate {
+					value = previous + "\x00" + value
+				}
+			}
 			parsed.options[key] = value
 			if key == "query" {
 				parsed.query = value
@@ -396,7 +409,7 @@ func parseExactSQLCLI(argv []string, engine string) (exactSQLCLI, bool) {
 			}
 			continue
 		}
-		if strings.HasPrefix(argument, "-") || engine == "sqlserver" ||
+		if strings.HasPrefix(argument, "-") || engine == "sqlserver" || engine == "snowflake" ||
 			!exactSQLIdentity(argument) || parsed.database != "" {
 			return exactSQLCLI{}, false
 		}
@@ -422,6 +435,13 @@ func exactSQLCLIOption(engine, argument string) (key, value string, consumesNext
 		options = []option{{"-e", "query", false}, {"--execute", "query", false}, {"-D", "database", false}, {"--database", "database", false}, {"-h", "host", false}, {"--host", "host", false}, {"-P", "port", false}, {"--port", "port", false}, {"-u", "user", false}, {"--user", "user", false}, {"--ssl-mode", "ssl_mode", false}, {"-B", "batch", true}, {"--batch", "batch", true}, {"-N", "skip_column_names", true}, {"--skip-column-names", "skip_column_names", true}}
 	case "sqlserver":
 		options = []option{{"-q", "query", false}, {"-Q", "query", false}, {"-S", "server", false}, {"-d", "database", false}, {"-U", "user", false}, {"-E", "trusted_connection", true}, {"-C", "trust_server_certificate", true}}
+	case "snowflake":
+		// A query file (-f/--filename) is not inline SQL, as psql --file is
+		// not: it stays an unknown option, so no fact.
+		options = []option{{"-q", "query", false}, {"--query", "query", false}, {"-d", "database", false}, {"--dbname", "database", false}, {"-s", "schema", false}, {"--schemaname", "schema", false}, {"-a", "account", false}, {"--accountname", "account", false}, {"-u", "user", false}, {"--username", "user", false}, {"-r", "role", false}, {"--rolename", "role", false}, {"-w", "warehouse", false}, {"--warehouse", "warehouse", false}, {"-c", "connection", false}, {"--connection", "connection", false},
+			// -o/--option sets one display or runtime option (key=value,
+			// repeatable), never a query (GAP-1770).
+			{"-o", "option", false}, {"--option", "option", false}}
 	default:
 		return "", "", false, false, false
 	}
@@ -443,8 +463,23 @@ func exactSQLCLIOption(engine, argument string) (key, value string, consumesNext
 
 func exactSQLMutation(engine, query string) (SQLMutationOperation, SQLMutationScope, string, bool) {
 	if query == "" || len(query) > maxCommandBytes || unresolvedSQLMutationValue(query) ||
-		strings.ContainsAny(query, "'\"`[]#") || strings.Contains(query, "--") ||
-		strings.Contains(query, "/*") || strings.Contains(query, "*/") {
+		strings.ContainsAny(query, "'\"`[]") {
+		return "", "", "", false
+	}
+	if engine != "sqlite" {
+		// A comment is not what the statement does: the destructive grammar
+		// matches the SQL the database runs, after its comments are removed
+		// (GAP-1029). The SQLite chain keeps its exact canonical form.
+		stripped, ok := withoutSQLComments(engine, query)
+		if !ok {
+			return "", "", "", false
+		}
+		query = stripped
+	}
+	// A "#" is a MySQL line comment, removed above; on every other engine
+	// (and in a MySQL statement it could not remove) it stays indeterminate.
+	if strings.Contains(query, "--") || strings.Contains(query, "/*") || strings.Contains(query, "*/") ||
+		strings.Contains(query, "#") {
 		return "", "", "", false
 	}
 	statements := make([][]string, 0, 3)
@@ -493,6 +528,141 @@ func exactSQLMutation(engine, query string) (SQLMutationOperation, SQLMutationSc
 		return "", "", "", false
 	}
 	return exactSQLMutationTokens(engine, statements[0])
+}
+
+// withoutSQLComments removes the SQL comments of query, each replaced by a
+// space as the database reads it. The caller has refused every quote
+// character, so no comment marker can sit inside a string literal or quoted
+// identifier. A form whose meaning differs between engines stays
+// indeterminate (false): an unterminated block comment, a nested block
+// comment outside PostgreSQL and SQL Server, a stray "*/", and in MySQL (and
+// the engine-neutral db.execute) a "--" that is not followed by whitespace,
+// which MySQL does not read as a comment. MySQL and MariaDB do not nest block
+// comments, so a comment ends at its first "*/", and they run the body of an
+// executable comment ("/*!", "/*M!", with an optional 5 or 6 digit version):
+// its markers are removed and its body is read as SQL (GAP-2010).
+func withoutSQLComments(engine, query string) (string, bool) {
+	var out strings.Builder
+	inExecutable := false
+	for index := 0; index < len(query); {
+		rest := query[index:]
+		switch {
+		case inExecutable && (strings.HasPrefix(rest, "--") || rest[0] == '#'):
+			// A line comment inside an executable comment could swallow its
+			// "*/"; stay indeterminate.
+			return "", false
+		case strings.HasPrefix(rest, "--") || engine == "snowflake" && strings.HasPrefix(rest, "//"):
+			if strings.HasPrefix(rest, "--") && (engine == "mysql" || engine == "generic") &&
+				len(rest) > 2 && !strings.ContainsRune(" \t\r\n", rune(rest[2])) {
+				return "", false
+			}
+			// A line comment ends at the end of the line. PostgreSQL, SQL
+			// Server and Snowflake end a line at a carriage return as well
+			// as a line feed, so a bare CR must not hide the statement after
+			// it (GAP-1769). MySQL and MariaDB read to the line feed only.
+			end := strings.IndexAny(rest, "\r\n")
+			if engine == "mysql" {
+				end = strings.IndexByte(rest, '\n')
+			}
+			if end < 0 {
+				end = len(rest)
+			}
+			out.WriteByte(' ')
+			index += end
+		case engine == "mysql" && rest[0] == '#':
+			// MySQL and MariaDB read "#" to the end of the line as a comment
+			// (GAP-1936).
+			end := strings.IndexByte(rest, '\n')
+			if end < 0 {
+				end = len(rest)
+			}
+			out.WriteByte(' ')
+			index += end
+		case strings.HasPrefix(rest, "/*") && (engine == "postgresql" || engine == "sqlserver"):
+			// PostgreSQL and SQL Server nest block comments: the comment ends
+			// at the "*/" that balances its "/*" (GAP-1936). An unbalanced
+			// nest stays indeterminate.
+			end, ok := nestedSQLBlockCommentEnd(rest)
+			if !ok {
+				return "", false
+			}
+			out.WriteByte(' ')
+			index += end
+		case engine == "mysql" && (strings.HasPrefix(rest, "/*!") || strings.HasPrefix(rest, "/*M!")):
+			if inExecutable {
+				return "", false
+			}
+			marker := 3
+			if rest[2] == 'M' {
+				marker = 4
+			}
+			digits := 0
+			for marker+digits < len(rest) && rest[marker+digits] >= '0' && rest[marker+digits] <= '9' {
+				digits++
+			}
+			if digits != 0 && digits != 5 && digits != 6 {
+				return "", false
+			}
+			inExecutable = true
+			out.WriteByte(' ')
+			index += marker + digits
+		case engine == "mysql" && inExecutable && strings.HasPrefix(rest, "*/"):
+			inExecutable = false
+			out.WriteByte(' ')
+			index += 2
+		case engine == "mysql" && strings.HasPrefix(rest, "/*"):
+			// MySQL and MariaDB end a block comment at the first "*/",
+			// whatever its body holds (GAP-2010).
+			end := strings.Index(rest[2:], "*/")
+			if end < 0 || inExecutable {
+				return "", false
+			}
+			out.WriteByte(' ')
+			index += 2 + end + 2
+		case strings.HasPrefix(rest, "/*"):
+			end := strings.Index(rest[2:], "*/")
+			if end < 0 {
+				return "", false
+			}
+			body := rest[2 : 2+end]
+			if strings.Contains(body, "/*") || strings.HasPrefix(body, "!") || strings.HasPrefix(body, "M!") {
+				return "", false
+			}
+			out.WriteByte(' ')
+			index += 2 + end + 2
+		case strings.HasPrefix(rest, "*/"):
+			return "", false
+		default:
+			out.WriteByte(query[index])
+			index++
+		}
+	}
+	if inExecutable {
+		return "", false
+	}
+	return out.String(), true
+}
+
+// nestedSQLBlockCommentEnd returns the length of the nested block comment
+// that starts text ("/*"), or false when its nesting does not balance.
+func nestedSQLBlockCommentEnd(text string) (int, bool) {
+	depth := 0
+	for index := 0; index+1 < len(text); {
+		switch text[index : index+2] {
+		case "/*":
+			depth++
+			index += 2
+		case "*/":
+			depth--
+			index += 2
+			if depth == 0 {
+				return index, true
+			}
+		default:
+			index++
+		}
+	}
+	return 0, false
 }
 
 func exactSQLMutationTokens(engine string, tokens []string) (SQLMutationOperation, SQLMutationScope, string, bool) {

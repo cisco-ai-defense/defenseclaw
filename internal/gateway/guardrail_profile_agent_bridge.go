@@ -144,17 +144,7 @@ func (set *guardrailProfileSet) profileAgent(agent string, legacy profileAgentLe
 	if set == nil || agent == "" {
 		return agent, nil, nil
 	}
-	bridge := &set.agentBridge
-	bridge.once.Do(func() {
-		bridge.entries = map[string]bool{}
-		for _, assignment := range set.assignments {
-			for _, entry := range assignment.Match.Agents {
-				if entry = strings.ToLower(strings.TrimSpace(entry)); entry != "" {
-					bridge.entries[entry] = true
-				}
-			}
-		}
-	})
+	bridge := set.loadAgentBridge()
 	if len(bridge.entries) == 0 {
 		return agent, nil, nil
 	}
@@ -170,6 +160,111 @@ func (set *guardrailProfileSet) profileAgent(agent string, legacy profileAgentLe
 	}
 	unresolved, owned = bridge.resolve(strings.ToLower(agent), claim, known)
 	return agent, unresolved, owned
+}
+
+// loadAgentBridge is set's bridge with the assignments' agents entries.
+func (set *guardrailProfileSet) loadAgentBridge() *profileAgentBridge {
+	bridge := &set.agentBridge
+	bridge.once.Do(func() {
+		bridge.entries = map[string]bool{}
+		for _, assignment := range set.assignments {
+			for _, entry := range assignment.Match.Agents {
+				if entry = strings.ToLower(strings.TrimSpace(entry)); entry != "" {
+					bridge.entries[entry] = true
+				}
+			}
+		}
+	})
+	return bridge
+}
+
+// explainAgent is the agent identity explain matches for agent, named by
+// the administrator for userID's connectorName agent, and the 1.0.3 claim
+// it is matched with. An agent that is itself the 1.0.3 identity an agents
+// entry names for userID's agent is no identity a hook of userID presents:
+// the hook presents that agent's current identity and matches the entry
+// only through the upgrade's binding (profileAgent). Explain matches the
+// current identity with the same claim, so an entry the upgrade did not
+// bind to the account holding userID now is refused on explain as on the
+// hook path, and a bound one matches on both (GAP-0019). The ledger's
+// records of userID say which 1.0.3 identity its agents derive; without
+// one (the records were pruned, or the agent has not run since the
+// upgrade) explain derives it as the hook path does for connectorName.
+// Any other agent is explained by its identity, as before.
+func (set *guardrailProfileSet) explainAgent(agent, userID, connectorName string) (string, profileAgentLegacy) {
+	agent = strings.TrimSpace(agent)
+	user := agentidentity.NormalizeUserID(userID)
+	if set == nil || agent == "" || user == "" {
+		return agent, nil
+	}
+	b := set.loadAgentBridge()
+	legacy := strings.ToLower(agent)
+	if !b.entries[legacy] {
+		return agent, nil
+	}
+	b.mu.Lock()
+	b.refreshLocked(false)
+	current, claim, ok := b.currentOfLegacyLocked(legacy, user)
+	if !ok && b.read {
+		// A hook may have recorded the agent after the last read.
+		b.refreshLocked(true)
+		current, claim, ok = b.currentOfLegacyLocked(legacy, user)
+	}
+	_, isCurrent := b.derived[legacy]
+	b.mu.Unlock()
+	if !ok && !isCurrent {
+		if in, derived := explainAgentInputs(connectorName, user); derived && strings.ToLower(agentidentity.LegacyAgentID(in)) == legacy {
+			current = strings.ToLower(agentidentity.AgentID(in))
+			claim = profileAgentClaim{ID: legacy, UserID: user, MachineHash: in.MachineHash, Account: in.Account}
+			ok = current != "" && current != legacy
+		}
+	}
+	if !ok {
+		return agent, nil
+	}
+	claim = legacyAgentClaim(claim.ID, claim.UserID, claim.MachineHash, claim.Account, profileAgentSelf(claim.UserID))
+	return current, func() (profileAgentClaim, bool) { return claim, true }
+}
+
+// explainAgentInputs are the identity inputs the hook path derives for
+// userID's connectorName agent (resolveHookAgentIdentity), without the
+// account incarnation, which only the hook path records; false when one
+// is not known. Tests replace it.
+var explainAgentInputs = func(connectorName, userID string) (agentidentity.Inputs, bool) {
+	connectorName = strings.ToLower(strings.TrimSpace(connectorName))
+	if ManagedEnterpriseActive() || connectorName == "" || userID == "" {
+		return agentidentity.Inputs{}, false
+	}
+	user := agentIdentityUser{ID: userID, Home: userScopedIdentityHome(userID)}
+	if self := gatewaySelfUser(); !gatewayRunsAsServiceAccount() && self.ID == userID {
+		user = self
+	}
+	machine, _ := agentidentity.HostMachineHash()
+	in := agentidentity.Inputs{
+		MachineHash: machine, UserID: agentidentity.NormalizeUserID(user.ID), Account: agentIdentityAccount(user),
+		Connector: connectorName, InstallFP: agentIdentityInstallFP(connectorName, user),
+	}
+	return in, in.MachineHash != "" && in.Account != "" && in.InstallFP != ""
+}
+
+// currentOfLegacyLocked is the current identity, the lowest when several
+// incarnations recorded one, whose 1.0.3 identity is legacy for user's
+// agent, with its claim; false when agent is itself recorded as a current
+// identity or no record of user derives legacy. b.mu is held.
+func (b *profileAgentBridge) currentOfLegacyLocked(legacy, user string) (string, profileAgentClaim, bool) {
+	if !b.read {
+		return "", profileAgentClaim{}, false
+	}
+	if _, isCurrent := b.derived[legacy]; isCurrent {
+		return "", profileAgentClaim{}, false
+	}
+	current, found := "", profileAgentClaim{}
+	for id, claim := range b.derived {
+		if claim.ID == legacy && claim.UserID == user && (current == "" || id < current) {
+			current, found = id, claim
+		}
+	}
+	return current, found, current != ""
 }
 
 // resolve is profileAgent's binding side. claim is agent's when known; else

@@ -7,11 +7,11 @@
   "scripts": {
     "dev": "next dev --turbopack",
     "build": "next build",
-    "postbuild": "tsx ./scripts/check-search-index-size.ts && tsx ./scripts/build-page-markdown.ts && tsx ./scripts/check-diagram-widths.ts && npm run validate-seo",
-    "postbuild": "tsx ./scripts/build-page-markdown.ts && tsx ./scripts/check-diagram-widths.ts && npm run validate-seo && npm run test:support-matrix",
+    "postbuild": "tsx ./scripts/check-search-index-size.ts && tsx ./scripts/build-page-markdown.ts && tsx ./scripts/check-diagram-widths.ts && npm run validate-seo && npm run test:support-matrix",
     "start": "next start",
     "lint": "eslint .",
     "validate-links": "tsx ./scripts/validate-links.ts",
+    "validate-media": "tsx ./scripts/validate-media.ts",
     "validate-seo": "tsx ./scripts/validate-seo-output.ts",
     "validate-snippets": "tsx ./scripts/validate-shell-snippets.ts",
     "check-diagram-widths": "tsx ./scripts/check-diagram-widths.ts",
@@ -25,6 +25,7 @@
     "test:search": "tsx --test ./scripts/test-search.tsx",
     "check-search-index-size": "tsx ./scripts/check-search-index-size.ts",
     "test:docs-w4": "tsx --test ./scripts/test-docs-w4.ts",
+    "test:docs-py": "python3 -m unittest discover -s scripts -p 'test_*.py'",
     "postinstall": "fumadocs-mdx && tsx ./scripts/build-policy-assets.ts && tsx ./scripts/sync-connector-icons.ts"
   },
   "dependencies": {

@@ -1053,6 +1053,7 @@ func scanRuleCategoriesWithOptions(
 	}
 
 	// Scan raw text first
+	raw := &ruleScanText{text: text}
 	for categoryIndex := range generation.categories {
 		cat := &generation.categories[categoryIndex]
 		categoryAllowed := options.allowsCategory(cat.Name)
@@ -1071,6 +1072,9 @@ func scanRuleCategoriesWithOptions(
 			// more than one merged category. Findings are identities, not match
 			// occurrences, so emit each rule ID at most once per scan.
 			if seen[rule.ID] {
+				continue
+			}
+			if !raw.mayMatch(rule.Pattern) {
 				continue
 			}
 			loc := firstAcceptedRuleMatch(*rule, text)
@@ -1100,6 +1104,7 @@ func scanRuleCategoriesWithOptions(
 	// Scan normalized text to catch shell obfuscation
 	normalized := normalizeShell(text)
 	if normalized != text {
+		normalizedText := &ruleScanText{text: normalized}
 		for categoryIndex := range generation.categories {
 			cat := &generation.categories[categoryIndex]
 			categoryAllowed := options.allowsCategory(cat.Name)
@@ -1116,6 +1121,9 @@ func scanRuleCategoriesWithOptions(
 				}
 				if seen[rule.ID] {
 					continue // already found on raw pass
+				}
+				if !normalizedText.mayMatch(rule.Pattern) {
+					continue
 				}
 				loc := firstAcceptedRuleMatch(*rule, normalized)
 				if loc == nil {

@@ -1226,7 +1226,7 @@ func TestOpenClaw_Uninstall_RemovesAllDefenseClawLoadPaths(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := uninstallOpenClawExtension(ocHome); err != nil {
+	if err := uninstallOpenClawExtension(ocHome, false); err != nil {
 		t.Fatalf("uninstallOpenClawExtension: %v", err)
 	}
 
@@ -1308,6 +1308,122 @@ func TestOpenClaw_Setup_HILTEnablesPluginApprovalForwarding(t *testing.T) {
 	}
 	if targets, _ := pluginApprovals["targets"].([]interface{}); len(targets) != 1 {
 		t.Fatalf("approvals.plugin.targets clobbered: %v", pluginApprovals["targets"])
+	}
+}
+
+// GAP-1956: OpenClaw 2026.3.24 (the install.sh pin) rejects approvals.plugin,
+// so human approval on it is refused before openclaw.json is touched. The
+// refusal precedes the extension-bundle check, so it needs no bundle.
+func TestOpenClaw_Setup_HILTRefusedOnOpenClawWithoutPluginApprovals(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("OpenClaw requires the guardrail proxy and is intentionally unsupported by the native Windows hook-only build")
+	}
+	dir := t.TempDir()
+	ocHome := filepath.Join(dir, "openclaw-home")
+	if err := os.MkdirAll(ocHome, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	configPath := filepath.Join(ocHome, "openclaw.json")
+	before := []byte(`{"gateway":{"mode":"local"}}`)
+	if err := os.WriteFile(configPath, before, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	OpenClawHomeOverride = ocHome
+	defer func() { OpenClawHomeOverride = "" }()
+
+	c := NewOpenClawConnector()
+	opts := SetupOpts{DataDir: dir, ProxyAddr: "127.0.0.1:4000", APIAddr: "127.0.0.1:18970",
+		HILTEnabled: true, AgentVersion: "OpenClaw 2026.3.24 (cff6dc9)"}
+	err := c.Setup(context.Background(), opts)
+	if err == nil || !strings.Contains(err.Error(), "2026.3.28") || !strings.Contains(err.Error(), "2026.3.24") {
+		t.Fatalf("Setup err = %v, want the human approval refusal naming both versions", err)
+	}
+	after, _ := os.ReadFile(configPath)
+	if string(after) != string(before) {
+		t.Fatalf("openclaw.json changed by a refused setup: %s", after)
+	}
+	if _, err := os.Stat(filepath.Join(ocHome, "extensions", "defenseclaw")); !os.IsNotExist(err) {
+		t.Fatalf("extension written by a refused setup: %v", err)
+	}
+	for _, v := range []string{"OpenClaw 2026.3.28 (abc1234)", "2026.6.8", ""} {
+		if OpenClawLacksPluginApprovals(v) {
+			t.Fatalf("OpenClawLacksPluginApprovals(%q) = true", v)
+		}
+	}
+	if !OpenClawLacksPluginApprovals("2026.3.24") {
+		t.Fatal("OpenClawLacksPluginApprovals(2026.3.24) = false")
+	}
+}
+
+// GAP-2109: an approvals.plugin block an earlier setup --human-approval wrote
+// keeps an OpenClaw without plugin approvals from starting. Setup without
+// human approval and teardown take it back out on such an OpenClaw, and keep
+// every other approvals setting and any block of another shape.
+func TestOpenClaw_SetupAndTeardownDropTheRejectedPluginApprovalsBlock(t *testing.T) {
+	requireOpenClawExtensionBundle(t)
+
+	const written = `{"approvals":{"exec":{"enabled":true},"plugin":{"enabled":true,"mode":"session"}},"gateway":{"mode":"local"}}`
+	readApprovals := func(t *testing.T, path string) map[string]interface{} {
+		t.Helper()
+		var cfg map[string]interface{}
+		data, _ := os.ReadFile(path)
+		if err := json.Unmarshal(data, &cfg); err != nil {
+			t.Fatalf("openclaw.json not valid JSON: %v (%s)", err, data)
+		}
+		approvals, _ := cfg["approvals"].(map[string]interface{})
+		return approvals
+	}
+	for _, tc := range []struct {
+		name, version, config string
+		wantPlugin            bool
+	}{
+		{"old OpenClaw drops the written block", "OpenClaw 2026.3.24 (cff6dc9)", written, false},
+		{"plugin approvals supported keeps it", "OpenClaw 2026.6.8 (844f405)", written, true},
+		{"unknown version keeps it", "", written, true},
+		{"another shape is the operator's", "OpenClaw 2026.3.24 (cff6dc9)",
+			`{"approvals":{"exec":{"enabled":true},"plugin":{"enabled":true,"mode":"session","agentFilter":["main"]}}}`, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			ocHome := filepath.Join(dir, "openclaw-home")
+			if err := os.MkdirAll(ocHome, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			configPath := filepath.Join(ocHome, "openclaw.json")
+			if err := os.WriteFile(configPath, []byte(tc.config), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			OpenClawHomeOverride = ocHome
+			defer func() { OpenClawHomeOverride = "" }()
+
+			c := NewOpenClawConnector()
+			opts := SetupOpts{DataDir: dir, ProxyAddr: "127.0.0.1:4000", APIAddr: "127.0.0.1:18970", AgentVersion: tc.version}
+			if err := c.Setup(context.Background(), opts); err != nil {
+				t.Fatalf("Setup: %v", err)
+			}
+			approvals := readApprovals(t, configPath)
+			if _, ok := approvals["plugin"]; ok != tc.wantPlugin {
+				t.Fatalf("after Setup approvals.plugin present = %v, want %v (%v)", ok, tc.wantPlugin, approvals)
+			}
+			if _, ok := approvals["exec"]; !ok {
+				t.Fatalf("Setup dropped the operator's approvals.exec: %v", approvals)
+			}
+
+			// Teardown after an earlier release wrote it again.
+			if err := os.WriteFile(configPath, []byte(tc.config), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if err := c.Teardown(context.Background(), opts); err != nil {
+				t.Fatalf("Teardown: %v", err)
+			}
+			approvals = readApprovals(t, configPath)
+			if _, ok := approvals["plugin"]; ok != tc.wantPlugin {
+				t.Fatalf("after Teardown approvals.plugin present = %v, want %v (%v)", ok, tc.wantPlugin, approvals)
+			}
+			if _, ok := approvals["exec"]; !ok {
+				t.Fatalf("Teardown dropped the operator's approvals.exec: %v", approvals)
+			}
+		})
 	}
 }
 
@@ -7809,7 +7925,7 @@ func TestSandboxPreferenceWritesShimsWithoutPolicyFile(t *testing.T) {
 	}
 	dir := t.TempDir()
 	opts := SetupOpts{DataDir: dir, APIAddr: "127.0.0.1:18970", ProxyAddr: "127.0.0.1:4000"}
-	if err := SetupSubprocessEnforcement(SubprocessSandbox, opts); err != nil {
+	if err := SetupSubprocessEnforcement(SubprocessSandbox, opts, "openclaw"); err != nil {
 		t.Fatalf("setup: %v", err)
 	}
 	if _, err := os.Stat(filepath.Join(dir, "shims", "curl")); err != nil {
@@ -7845,7 +7961,7 @@ func TestTeardownSubprocessEnforcement(t *testing.T) {
 	opts := SetupOpts{DataDir: dir, APIAddr: "127.0.0.1:18970", ProxyAddr: "127.0.0.1:4000"}
 
 	// Setup first
-	if err := SetupSubprocessEnforcement(SubprocessShims, opts); err != nil {
+	if err := SetupSubprocessEnforcement(SubprocessShims, opts, "openclaw"); err != nil {
 		t.Fatalf("setup: %v", err)
 	}
 	// Verify shims exist
@@ -10980,7 +11096,7 @@ func TestPatchOpenClawConfig_Concurrent(t *testing.T) {
 		wg.Add(1)
 		go func(idx int) {
 			defer wg.Done()
-			errs[idx] = patchOpenClawConfig(configPath, "/tmp/ext-"+strings.Repeat("x", idx), false)
+			errs[idx] = patchOpenClawConfig(configPath, "/tmp/ext-"+strings.Repeat("x", idx), false, false)
 		}(i)
 	}
 	wg.Wait()
@@ -12370,5 +12486,53 @@ func skipManagedWindowsCodexHostSetup(t *testing.T) {
 	t.Helper()
 	if runtime.GOOS == "windows" {
 		t.Skip("managed Windows Codex hooks are machine policy that the requirements installer writes; host Setup refuses them")
+	}
+}
+
+func TestClaudeCodeWatchPathsForUnverifiedHomeKeepProjectEntries(t *testing.T) {
+	project := t.TempDir()
+	command := filepath.Join(project, ".claude", "commands", "review.md")
+	if err := os.MkdirAll(filepath.Dir(command), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(command, []byte("# review\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// The gateway's own working directory must never be watched in place of
+	// an unknown user directory.
+	gatewayCWD := t.TempDir()
+	for _, dir := range []string{"commands", "agents", filepath.Join("skills", "s")} {
+		if err := os.MkdirAll(filepath.Join(gatewayCWD, dir), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, file := range []string{filepath.Join("commands", "x.md"), filepath.Join("agents", "a.md"), filepath.Join("skills", "s", "SKILL.md")} {
+		if err := os.WriteFile(filepath.Join(gatewayCWD, file), []byte("x\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Chdir(gatewayCWD)
+	for _, home := range []string{"", "relative/home", string(filepath.Separator), string(filepath.Separator) + string(filepath.Separator)} {
+		t.Run(home, func(t *testing.T) {
+			paths := ClaudeCodeWatchPathsForHome(project, home)
+			for _, want := range []string{
+				filepath.Join(project, ".mcp.json"),
+				filepath.Join(project, ".claude", "settings.local.json"),
+				filepath.Join(project, ".claude", "settings.json"),
+				command,
+			} {
+				if !slices.Contains(paths, want) {
+					t.Fatalf("project watch path %s missing: %v", want, paths)
+				}
+			}
+			for _, path := range paths {
+				if !strings.HasPrefix(path, project+string(filepath.Separator)) {
+					t.Fatalf("watch path %s is outside the project: %v", path, paths)
+				}
+			}
+		})
+	}
+	if paths := ClaudeCodeWatchPathsForHome("", ""); paths == nil || len(paths) != 0 {
+		t.Fatalf("no project and no home = %#v, want an empty list", paths)
 	}
 }

@@ -1,0 +1,152 @@
+---
+title: Architecture
+description: How the Edge Connector evaluation pipeline works — local guards, verdict caching, Fleet escalation via MQTT, and the HMAC-chained audit trail.
+keywords:
+  - Edge Connector architecture
+  - evaluation pipeline
+  - trust boundary
+  - content scanning
+  - MQTT escalation
+  - audit trail
+---
+
+## System overview
+
+<Flow
+  direction="TB"
+  caption="A tool call goes from the agent through an integration layer to the engine. The engine decides locally, or asks the Fleet gateway through the MQTT broker."
+>
+  <Node id="agent" kind="agent">{`AI agent\nPicoClaw, LangChain, MCP client`}</Node>
+  <Node id="integ" kind="connector">{`Integration layer\nhook, middleware or FFI`}</Node>
+  <Node id="engine" kind="policy" emphasis>{`Edge Connector engine\nlibdclaw_core.so, 6 local checks`}</Node>
+  <Node id="broker" kind="generic">{`MQTT broker\nTLS, per-device ACLs`}</Node>
+  <Node id="fleet" kind="gateway">{`Fleet gateway\nverdict cache, policy push`}</Node>
+  <Edge from="agent" to="integ" label="tool call + content" />
+  <Edge from="integ" to="engine" label="dclaw_evaluate()" />
+  <Edge from="engine" to="broker" label="escalation request" variant="dashed" />
+  <Edge from="broker" to="fleet" variant="bidirectional" />
+</Flow>
+
+The integration layer maps `tool_name` to a capability, extracts the destination and content, sets the direction (request or response) and calls the engine over the Unix socket or the shared library. The engine returns `ALLOW`, `BLOCK`, `WARN` or `PENDING`.
+
+## Evaluation pipeline
+
+### Stage 1 — Input validation
+
+Rejects malformed requests at the IPC boundary. The JSON-RPC parser requires `tool_name`, its 64-character SHA-256 `tool_hash`, `capabilities`, and `session_id`; `destination` is optional in the wire format but required by local policy for network capabilities. The engine verifies that the hash matches the name and replaces caller-declared capabilities with its reviewed C mapping. Unknown tool names fail closed before the verdict cache or Fleet escalation. Add a reviewed C capability mapping before using a custom tool name; a Python adapter mapping alone cannot authorize the C daemon.
+
+### Stage 2 — Rate limiting
+
+Three independent token buckets, each refilled per-minute:
+
+| Bucket | Default | Controls |
+| --- | --- | --- |
+| Tool calls | 60/min | All tool invocations |
+| Network requests | 30/min | `NET_FETCH` and `SEND_MSG` capabilities |
+| Actuations | 10/min | `ACTUATE` capability (physical world) |
+
+When a bucket is empty, the verdict is `BLOCK` with reason `RATE_LIMIT`.
+
+### Stage 3 — Content scanning
+
+When the `content` field is present in the evaluation request, the scanner runs built-in DFA and structural checks against the payload:
+
+| Category | Detects |
+| --- | --- |
+| `secrets` | API keys, tokens, private keys, passwords |
+| `pii` | SSN, credit cards, email addresses, phone numbers |
+| `credentials` | AWS keys, GCP service accounts, database connection URIs |
+| `exfiltration` | Base64-encoded blobs, hex dumps, data URI payloads |
+| `injection` | Prompt injection, jailbreak attempts, system prompt overrides |
+| `commands` | Shell commands, SQL statements, code execution patterns |
+
+The pipeline immediately blocks findings that reach the built-in severity threshold. A scanner result of `WARN` does not change the final verdict; the request continues through local policy and cache checks. The `direction` field selects an inferred content scope and severity threshold; the structural exfiltration check applies to request/user-input scope. The DFA keyword patterns are fixed in this build and run for both directions. OTA policy cannot configure these patterns.
+
+The C evaluation path has no local tool-hash deny-list lookup or policy YAML hash feed. The Fleet gateway separately checks tool hashes received over MQTT; unknown hashes default to BLOCK.
+
+### Stage 4 — Destination filtering + SSRF validation
+
+For network capabilities, the engine requires a destination, checks SSRF rules first, then matches the destination against the compiled allowlist. Hostname destinations are blocked across build profiles until an enforced egress resolver/proxy exists. Only canonical public IPv4 or globally scoped IPv6 literals can pass to the allowlist (write an IPv6 entry without brackets; the policy compiler refuses a bracketed one); this parsing does not prove that an address is actually routable. Private and link-local addresses, numeric aliases such as octal/hex/decimal forms, and malformed ports are blocked. An unlisted destination is blocked with reason `DEST_DENY`; the policy compiler does not implement `destination_denylist`.
+
+**Built-in SSRF validation** blocks requests targeting:
+- Private ranges (`10.x`, `172.16–31.x`, `192.168.x`, `127.x`)
+- Cloud metadata endpoints (`169.254.169.254`, `metadata.google.internal`)
+- Link-local addresses (`fe80::/10`)
+
+### Stage 5 — Sequence correlation
+
+A finite state machine tracks capability invocations per session. When a configured dangerous sequence completes (e.g., `net_fetch` → `exec_shell`), the verdict is `BLOCK` with reason `CAP_SEQUENCE`. The DFA tables are generated by the policy compiler from the `capability_sequences` section of the policy YAML.
+
+### Stage 6 — Verdict cache
+
+The in-memory LRU cache stores Fleet verdicts keyed by the 32-byte tool hash alone. For requests reaching this stage, input, rate, content, destination, and sequence checks have already run; a cache hit avoids another Fleet request, not those local guards. The authenticated Fleet verdict supplies a TTL in minutes: zero removes any previous same-tool entry and is not cached, while positive values are capped locally at 60 minutes for ALLOW, seven days for BLOCK, and four hours for WARN. Entries expire using monotonic `hal_tick_ms()` elapsed time, independently of wall-clock trust. Policy YAML cannot set these TTLs.
+
+### Stage 7 — Fleet escalation
+
+When local policy cannot decide, the Edge Connector sends a verdict request to the Fleet gateway via MQTT 3.1.1. The wire payload includes:
+
+- Tool hash, a shortened tool name, capability, destination
+- Truncated content snippet (up to `DCLAW_ESCALATION_PAYLOAD_MAX`)
+- Session risk/capability metadata and request nonces
+
+The gateway evaluates the request by tool hash through its verdict cache; it does not pass the content snippet or destination into a separate model pipeline. Unknown hashes default to BLOCK. The `findings` wire field is a zero placeholder. In `sync_block` mode the device blocks pending a gateway verdict and stays blocked on timeout. In `speculative` mode it can allow immediately, even if the MQTT publish fails; a later gateway BLOCK cannot undo that action. Select the mode to match the consequence of the tool call.
+
+## Audit trail
+
+The HMAC-chained flash ring records compact evaluation decisions. Each entry contains:
+
+- Monotonic tick timestamp, session ID, and a 32-bit prefix of the tool hash
+- Action and reason
+- A 16-byte HMAC tag chained to the preceding retained entry
+
+The ring does not store full tool names, capabilities, or content findings. Its HMAC chain detects modification within the retained history. Buffered non-BLOCK entries reduce flash writes; BLOCK entries are written immediately when storage succeeds and are retained in RAM for retry on a transient write failure when space remains.
+
+## IPC schema
+
+The daemon accepts evaluation requests as JSON-RPC over its Unix socket:
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "method": "evaluate",
+  "params": {
+    "tool_name": "call_api",
+    "tool_hash": "515c7731d6367104f1431af261488829f178f87e0930fb7ca77785ba3ef19129",
+    "capabilities": 8,
+    "destination": "1.1.1.1",
+    "session_id": 1,
+    "direction": 0,
+    "content": "Authorization: Bearer sk-proj-abc123..."
+  }
+}
+```
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `tool_name` | string | yes | Name of the tool being called |
+| `tool_hash` | string | yes | 64-character lowercase or uppercase hex SHA-256 of `tool_name`; the engine verifies the binding |
+| `capabilities` | int | yes | Capability bitmask |
+| `destination` | string | no | Target destination; network capabilities must supply an approved public numeric IP literal |
+| `session_id` | int | yes | Session ID for sequence correlation |
+| `direction` | int | no | `0` (request) or `1` (response) — selects the inferred content scope and severity threshold |
+| `content` | string | no | Text payload to inspect. When omitted, only rule-based checks run. |
+
+## Cloud components
+
+The fleet management and verdict cache run as Go services alongside the main DefenseClaw gateway:
+
+| Component | Path | Description |
+| --- | --- | --- |
+| Fleet Manager | `internal/fleet/manager/` | Device registry, heartbeat, anomaly detection |
+| Verdict Cache | `internal/fleet/verdict/` | LRU verdict cache with TTL |
+| REST API | `internal/fleet/api.go` | `/api/v1/fleet/` endpoints |
+| Metrics | `internal/fleet/metrics.go` | Prometheus metrics for fleet health |
+
+## OTA policy updates
+
+Policy updates are distributed over MQTT. Production builds reject HMAC-signed updates unless they are built with `DCLAW_ALLOW_HMAC_OTA=ON` and the device is provisioned with a separate HMAC key (`DCLAW_OTA_HMAC_KEY`). Updates carry:
+- **HMAC-SHA256 signatures** — every update is cryptographically signed
+- **Anti-rollback** — monotonic version counter prevents downgrade attacks
+- **Local canary window** — each receiving device monitors its block rate for ten minutes and can restore its previous policy partition after a sustained spike
+- **Sequence replay protection** — duplicate or out-of-order updates are rejected

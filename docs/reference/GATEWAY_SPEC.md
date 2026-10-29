@@ -6,7 +6,7 @@ inspection, audit persistence, and observability. It is not specific to one
 connector topology.
 
 The consumer-facing endpoint contract is maintained on the
-[published gateway API page](https://cisco-ai-defense.github.io/defenseclaw/docs/reference/apis/gateway-api/).
+[published gateway API page](https://cisco-ai-defense.github.io/defenseclaw/docs/reference/gateway-api/).
 
 ## Ownership
 

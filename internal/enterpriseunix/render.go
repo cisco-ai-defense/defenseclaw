@@ -292,16 +292,23 @@ func (e *Env) renderDescriptor(in renderInputs) ([]byte, error) {
 	return managed.MarshalRuntimeDescriptor(d)
 }
 
-// openHookConnectors is each configured or machine-policy connector whose
-// hook fail mode the administrator's config resolves open
-// (config.Config.EffectiveHookFailModeForConnector), sorted; nil when none
-// is. The `--enterprise-managed` hook runtime reads it from the descriptor.
+// openHookConnectors is each configured, machine-policy or per-connector
+// guardrail entry whose hook fail mode the administrator's config resolves
+// open (config.Config.EffectiveHookFailModeForConnector), sorted; nil when
+// none is. The `--enterprise-managed` hook runtime reads it from the
+// descriptor. A connector the administrator set open under
+// guardrail.connectors counts even when it is not in the enrolled list (a
+// per-user registered Hermes, GAP-0362): its explicit open wins.
 func openHookConnectors(cfg *validatedConfig, machinePolicy []string) []string {
 	if cfg == nil || cfg.Loaded == nil {
 		return nil
 	}
+	names := append(append([]string{}, cfg.Connectors...), machinePolicy...)
+	for name := range cfg.Loaded.Guardrail.Connectors {
+		names = append(names, name)
+	}
 	set := map[string]bool{}
-	for _, name := range append(append([]string{}, cfg.Connectors...), machinePolicy...) {
+	for _, name := range names {
 		name = strings.ToLower(strings.TrimSpace(name))
 		if name != "" && cfg.Loaded.EffectiveHookFailModeForConnector(name) == "open" {
 			set[name] = true
