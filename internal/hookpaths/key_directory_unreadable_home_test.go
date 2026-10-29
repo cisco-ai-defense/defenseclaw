@@ -51,22 +51,29 @@ func TestRecursiveKeyDirectoryReadWhenHomeIsUnreadable(t *testing.T) {
 		{"grep TODO ~/.sshnotes", false},
 		{"ls -la ~/.ssh", false},
 	}
-	for _, unreadable := range []bool{false, true} {
-		if err := os.Chmod(homes, 0o700); err != nil {
-			t.Fatal(err)
+	// The managed macOS service account can name the home (/Users is
+	// listable) but not search it; a ProtectHome gateway cannot name it.
+	locked := map[string]string{"readable": "", "home": home, "homes": homes}
+	for _, view := range []string{"readable", "home", "homes"} {
+		for _, dir := range []string{homes, home} {
+			if err := os.Chmod(dir, 0o700); err != nil {
+				t.Fatal(err)
+			}
 		}
-		if unreadable {
-			if err := os.Chmod(homes, 0); err != nil {
+		if dir := locked[view]; dir != "" {
+			if err := os.Chmod(dir, 0); err != nil {
 				t.Fatal(err)
 			}
 		}
 		for _, row := range rows {
 			if got := ActionPrivateKeyRead(row.command, project, home); got != row.read {
-				t.Errorf("unreadable=%v %q: key read=%v, want %v", unreadable, row.command, got, row.read)
+				t.Errorf("locked=%s %q: key read=%v, want %v", view, row.command, got, row.read)
 			}
 		}
 	}
-	if err := os.Chmod(homes, 0o700); err != nil {
-		t.Fatal(err)
+	for _, dir := range []string{homes, home} {
+		if err := os.Chmod(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
 	}
 }
