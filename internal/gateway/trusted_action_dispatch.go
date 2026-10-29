@@ -1941,15 +1941,20 @@ func cmdTextSpansRead(command string, reading cmdOuterReading, trust bool) (span
 		}
 		if len(open.span) > 0 {
 			open.log = append(open.log, awaitRead{runs, cmdFeed})
-			if !cmdLineContinues(text) {
-				// The pipe or list ends here: the bodies now wait only
-				// for a line that closes a construct.
-				moved := slices.Clone(open.span)
-				release(&open)
-				for _, at := range moved {
-					await(&closing, at)
-				}
+		}
+		// Every body that read the line reads on when it continues a pipe
+		// or list (} |, done |), and waits for a closing line otherwise.
+		from, to := &open, &closing
+		if cmdLineContinues(text) {
+			if !closes {
+				return
 			}
+			from, to = &closing, &open
+		}
+		moved := slices.Clone(from.span)
+		release(from)
+		for _, at := range moved {
+			await(to, at)
 		}
 	}
 	argvQuoted := func(end int) {

@@ -654,6 +654,9 @@ func TestR105WindowsCMDHeredocSearchArgument(t *testing.T) {
 		// and comment-only lines (X03, X04), and a comment may follow the
 		// operator; a blank line before a separate statement keeps it text.
 		{"cat <<'EOF' |" + run + "\n\nbash", true},
+		{"{ cat <<'EOF'" + run + "\n} |\nbash", true},
+		{"{ cat <<'EOF'" + run + "\n} | # on\n\nbash", true},
+		{"{ cat <<'EOF'" + body + "\n} |\ngrep -c cmd", false},
 		{"cat <<'EOF' |" + run + "\n# then\nbash", true},
 		{"cat <<'EOF' |" + run + "\n  \r\n\t# then\r\n\nbash", true},
 		{"cat <<'EOF' | # pipe it on" + run + "\nbash", true},
