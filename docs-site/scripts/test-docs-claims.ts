@@ -1759,6 +1759,12 @@ const r105Rows: DocRow[] = [
   { gap: "GAP-2411", page: "enterprise/operations.mdx", has: ["`verify` reports `policy_not_applied` or `policy_reload_rejected` as an error"] },
   { gap: "GAP-2412", page: "enterprise/ai-defense-key.mdx", has: ["that applies signed policy bundles, contact your administrator: `secret set`"], lacks: ["bundle apply --bundle", "bundle sign --secret-file"] },
   { gap: "GAP-2412", page: "enterprise/troubleshooting.mdx", has: ["| `disk_full` | Linux, macOS; Windows policy bundles |"], lacks: ["Windows bundle apply"] },
+  // OWNER-0530 drafts (docs-b it1, 2026-10-29; owner approval pending, not for T10 unless approved): documented limits.
+  { gap: "GAP-2311", page: "support-matrix.mdx", section: "Per-user self-protection", has: ["In action mode it blocks a write to a protected file that is spelled out in the command", "**Command text built when it runs.**", "**A link made by git, then a write.**", "Once the link exists, a write through it is blocked.", "On a managed install DefenseClaw's own state is owned by root or SYSTEM"] },
+  { gap: "GAP-2444", page: "support-matrix.mdx", section: "Per-user self-protection", has: ["because the link does not exist yet when the hook reads the command", "A user's own files, such as `authorized_keys`, are as exposed as on a per-user install."] },
+  { gap: "GAP-1791", page: "support-matrix.mdx", section: "Hook floods on Windows", has: ["On a per-user install on Windows, the gateway keeps up with interactive sessions and short bursts", "Linux and managed Windows answered the same flood.", "Below that rate, interactive sessions are unaffected."] },
+  { gap: "GAP-2463", page: "enterprise/lifecycle.mdx", has: ["**Windows rollback to 1.0.4 with a signed-out Hermes user:**", "The `/verify` result names the account. It passes once that user signs in again."] },
+  { gap: "GAP-2508", page: "enterprise/lifecycle.mdx", has: ["**Windows rollback to 1.0.2 with Codex users:**", "each Codex event runs the hook twice and writes two audit rows", "A 1.0.2 `/repair` keeps both."] },
 ];
 
 function pageSection(name: string, heading?: string): string {
