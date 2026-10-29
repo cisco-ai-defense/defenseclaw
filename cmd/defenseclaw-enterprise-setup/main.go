@@ -164,6 +164,13 @@ type enterpriseSetupOptions struct {
 	Mode             string
 	Connector        string
 	LifecycleTimeout time.Duration
+	// Started is when this standalone Setup process started. Its
+	// TIMEOUTSECONDS limit counts from then, the payload checks and the
+	// unpacking before the lifecycle child included, so Setup ends within
+	// TIMEOUTSECONDS plus its bounded recovery on a loaded host too
+	// (GAP-2509). Zero counts from the lifecycle child's start (the Secure
+	// Client Setup and the recovery watchdog).
+	Started time.Time
 	// AllowedSigners is a comma-separated list of SHA-256 Authenticode
 	// signer thumbprints the standalone lifecycle accepts (customer
 	// re-signing). Standalone Setup only.
@@ -287,6 +294,9 @@ func runEnterpriseSetup(arguments []string, stdout, stderr io.Writer) int {
 		}
 		writeEnterpriseSetupFailureFor(stdout, stderr, standalone, name, opts, err, code)
 		return code
+	}
+	if standalone {
+		opts.Started = enterpriseSetupProcessStarted()
 	}
 	exitCode, err := executeEnterpriseSetup(context.Background(), opts, stdout, stderr)
 	if err != nil {
@@ -921,6 +931,24 @@ type enterpriseSetupLifecycleTimeout struct {
 }
 
 func (err enterpriseSetupLifecycleTimeout) Unwrap() error { return err.error }
+
+// standaloneEnterpriseSetupTimeoutBeforeLifecycle is Setup's error for a
+// standalone run whose payload checks and unpacking used up TIMEOUTSECONDS
+// (it counts from Setup's start, GAP-2509): the lifecycle child never
+// started, so nothing changed and no recovery ran.
+func standaloneEnterpriseSetupTimeoutBeforeLifecycle(opts enterpriseSetupOptions, cause error) error {
+	limit := int(opts.LifecycleTimeout / time.Second)
+	maximum := int(maximumLifecycleTimeout / time.Second)
+	longer := "with a longer limit"
+	if limit >= maximum {
+		longer = fmt.Sprintf("again (%d seconds is the longest limit)", maximum)
+	}
+	return enterpriseSetupLifecycleTimeout{error: fmt.Errorf(
+		"enterprise %s did not start within TIMEOUTSECONDS=%d (%w): the limit counts from Setup's start, and Setup's payload checks "+
+			"and unpacking used all of it, so the lifecycle did not run and nothing was changed. Run %s as LocalSystem %s: %s",
+		opts.Action, limit, cause, standaloneSetupArtifactName, longer, standaloneSetupRetryCommand(opts, maximum),
+	)}
+}
 
 // standaloneEnterpriseSetupTimeout names the manual retry when Setup's own
 // bounded replay could not prove restoration. That retry gets the longest

@@ -170,7 +170,7 @@ Setup properties use `NAME=value`; names are case-insensitive and ignore dashes.
 | `NOSTART=1` | Install with the services stopped and disabled (`not_started` warning); a later `/repair` starts them |
 | `PURGE=1` | With `/uninstall`: also remove each enrolled account's per-user data ([Remove](#remove)) |
 | `FORCE=1` | With `/uninstall`: remove the deployment without recovering a pending transaction |
-| `TIMEOUTSECONDS=<n>` | Lifecycle timeout, 60 to 7200. Default 1800. A standalone run stopped there then recovers for up to 10 more minutes: allow `TIMEOUTSECONDS` plus 10 minutes |
+| `TIMEOUTSECONDS=<n>` | Lifecycle timeout, 60 to 7200, counted from when Setup starts. Default 1800. A standalone run stopped there then recovers for up to 10 more minutes: allow `TIMEOUTSECONDS` plus 10 minutes |
 
 The other actions are `/install`, `/upgrade`, `/repair`, `/reconcile`, `/status`,
 `/verify` and `/uninstall`. Prefer `/ensure`; `/install` also needs `MANIFEST=`.

@@ -291,3 +291,64 @@ func TestStandaloneRecoveryOptionsDropTheRequestOnlySwitches(t *testing.T) {
 		t.Fatalf("recovery options = %+v", got)
 	}
 }
+
+// GAP-2509: a standalone Setup's TIMEOUTSECONDS counts from Setup's start,
+// so the payload checks and unpacking before the lifecycle child count. On
+// a loaded host they took minutes and Setup ran past TIMEOUTSECONDS plus its
+// recovery bound. A run whose limit is used up before the child starts does
+// not start it, recovers nothing and says nothing changed; a run without a
+// start time (Secure Client, the recovery watchdog) keeps the full limit.
+func TestTimeoutSecondsCountsFromSetupStart(t *testing.T) {
+	limit := 10 * time.Minute
+	now := time.Now()
+	opts := enterpriseSetupOptions{
+		Action: "ensure", Standalone: true, Config: `C:\cfg\config.yaml`,
+		LifecycleTimeout: limit, Started: now.Add(-4 * time.Minute),
+	}
+	if got, want := enterpriseSetupLifecycleDeadline(opts, now), opts.Started.Add(limit); !got.Equal(want) {
+		t.Fatalf("deadline = %s, want Started + TIMEOUTSECONDS = %s", got, want)
+	}
+	var deadline time.Time
+	run := runEnterpriseLifecycleChild(context.Background(), opts, func(ctx context.Context) ([]byte, error) {
+		deadline, _ = ctx.Deadline()
+		return nil, nil
+	}, func(context.Context) ([]byte, error) {
+		t.Fatal("recovery ran for a child that finished")
+		return nil, nil
+	})
+	if run.timedOut || run.notStarted {
+		t.Fatalf("run = %+v, want a finished child", run)
+	}
+	if spent := deadline.Sub(opts.Started); spent > limit+time.Second {
+		t.Fatalf("child deadline is %s after Setup's start, want at most TIMEOUTSECONDS (%s)", spent, limit)
+	}
+
+	opts.Started = now.Add(-limit - time.Minute)
+	started, recovered := false, false
+	run = runEnterpriseLifecycleChild(context.Background(), opts, func(context.Context) ([]byte, error) {
+		started = true
+		return nil, nil
+	}, func(context.Context) ([]byte, error) {
+		recovered = true
+		return nil, nil
+	})
+	if started || recovered || !run.timedOut || !run.notStarted || !errors.Is(run.cause, context.DeadlineExceeded) {
+		t.Fatalf("used-up limit: started=%t recovered=%t run=%+v, want the child not started and no recovery", started, recovered, run)
+	}
+	err := timedOutEnterpriseLifecycleError(opts, run)
+	var timeout enterpriseSetupLifecycleTimeout
+	if !errors.As(err, &timeout) || timeout.recovery != nil ||
+		!strings.Contains(err.Error(), "did not start within TIMEOUTSECONDS=600") ||
+		!strings.Contains(err.Error(), "nothing was changed") ||
+		!strings.Contains(err.Error(), "TIMEOUTSECONDS=7200") {
+		t.Fatalf("used-up limit error = %v, want the not-started timeout with the retry", err)
+	}
+
+	opts.Started = time.Time{}
+	if got := enterpriseSetupLifecycleDeadline(opts, now); !got.Equal(now.Add(limit)) {
+		t.Fatalf("no start time: deadline = %s, want now + TIMEOUTSECONDS", got)
+	}
+	if started := enterpriseSetupProcessStarted(); started.IsZero() || started.After(time.Now()) {
+		t.Fatalf("process start = %s, want a time not after now", started)
+	}
+}

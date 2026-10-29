@@ -184,3 +184,8 @@ def test_setup_time_budget_names_the_recovery_after_timeoutseconds():
     windows = (DOCS / "enterprise/install/reference/windows.mdx").read_text(encoding="utf-8")
     row = next(line for line in windows.splitlines() if line.startswith("| `TIMEOUTSECONDS=<n>`"))
     assert f"`TIMEOUTSECONDS` plus {minutes} minutes" in row, row
+    # The limit counts from Setup's start (opts.Started), so the budget holds
+    # when the payload checks and unpacking are slow (GAP-2509 review row).
+    assert "opts.Started.Add(opts.LifecycleTimeout)" in source, "deadline no longer counts from Setup's start"
+    assert "counted from when Setup starts" in time_bullet, time_bullet
+    assert "counted from when Setup starts" in row, row

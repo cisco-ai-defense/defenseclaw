@@ -22,6 +22,20 @@ const maximumLifecycleOutput = 2 << 20
 // after a timed-out lifecycle child; a seam for tests.
 var enterpriseSetupRecoveryTimeout = 10 * time.Minute
 
+// enterpriseSetupInitTime is when this process initialized, the start time
+// where Windows cannot give the process creation time.
+var enterpriseSetupInitTime = time.Now()
+
+// enterpriseSetupLifecycleDeadline is when the TIMEOUTSECONDS limit of a run
+// ends: opts.Started plus the limit for a standalone Setup, so the payload
+// checks and unpacking count (GAP-2509), else now plus the limit.
+func enterpriseSetupLifecycleDeadline(opts enterpriseSetupOptions, now time.Time) time.Time {
+	if opts.Started.IsZero() || opts.Started.After(now) {
+		return now.Add(opts.LifecycleTimeout)
+	}
+	return opts.Started.Add(opts.LifecycleTimeout)
+}
+
 // enterpriseLifecycleChildRun is one lifecycle child Setup ran under
 // TIMEOUTSECONDS, and the recovery it ran when that limit stopped the child.
 type enterpriseLifecycleChildRun struct {
@@ -29,7 +43,10 @@ type enterpriseLifecycleChildRun struct {
 	runErr   error
 	timedOut bool
 	// cause is the timeout context's error when timedOut.
-	cause       error
+	cause error
+	// notStarted is a run whose TIMEOUTSECONDS ended before the lifecycle
+	// child started: nothing ran, so nothing is recovered.
+	notStarted  bool
 	recovery    *enterprisestatus.Result
 	recoveryErr error
 }
@@ -46,8 +63,16 @@ func runEnterpriseLifecycleChild(
 	run func(context.Context) ([]byte, error),
 	recoverChild func(context.Context) ([]byte, error),
 ) enterpriseLifecycleChildRun {
-	ctx, cancel := context.WithTimeout(parent, opts.LifecycleTimeout)
+	ctx, cancel := context.WithDeadline(parent, enterpriseSetupLifecycleDeadline(opts, time.Now()))
 	var result enterpriseLifecycleChildRun
+	if err := ctx.Err(); err != nil {
+		// The payload checks and unpacking used up the limit (it counts
+		// from Setup's start, GAP-2509): the child is not started, so the
+		// deployment is as it was and needs no recovery.
+		cancel()
+		result.timedOut, result.notStarted, result.cause = true, true, err
+		return result
+	}
 	result.output, result.runErr = run(ctx)
 	result.cause = ctx.Err()
 	result.timedOut = result.cause != nil
@@ -155,6 +180,9 @@ func boundedRecoveryMessage(message string) string {
 func timedOutEnterpriseLifecycleError(opts enterpriseSetupOptions, run enterpriseLifecycleChildRun) error {
 	if !opts.Standalone {
 		return fmt.Errorf("enterprise %s exceeded the bounded %s timeout: %w", opts.Action, opts.LifecycleTimeout, run.cause)
+	}
+	if run.notStarted {
+		return standaloneEnterpriseSetupTimeoutBeforeLifecycle(opts, run.cause)
 	}
 	if run.recovery != nil {
 		return standaloneEnterpriseSetupTimeoutWithRecovery(opts, run.cause, run.recovery)

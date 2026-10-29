@@ -872,7 +872,10 @@ func enterpriseLifecycleArguments(stageRoot string, opts enterpriseSetupOptions)
 			}
 		}
 		if opts.Action == "ensure" {
-			if seconds := enterpriseEnsureChildTimeoutSeconds(opts.LifecycleTimeout); seconds > 0 {
+			// What is left of TIMEOUTSECONDS after the payload checks and
+			// unpacking (GAP-2509).
+			remaining := time.Until(enterpriseSetupLifecycleDeadline(opts, time.Now()))
+			if seconds := enterpriseEnsureChildTimeoutSeconds(remaining); seconds > 0 {
 				arguments = append(arguments, "--timeout-seconds", strconv.Itoa(seconds))
 			}
 		}
@@ -899,6 +902,19 @@ func enterpriseEnsureChildTimeoutSeconds(limit time.Duration) int {
 		seconds = 60
 	}
 	return seconds
+}
+
+// enterpriseSetupProcessStarted is this process's creation time, so the time
+// Windows took to load and start the Setup image counts toward
+// TIMEOUTSECONDS too (GAP-2509).
+func enterpriseSetupProcessStarted() time.Time {
+	var creation, exit, kernel, user windows.Filetime
+	if err := windows.GetProcessTimes(windows.CurrentProcess(), &creation, &exit, &kernel, &user); err == nil {
+		if started := time.Unix(0, creation.Nanoseconds()); started.Year() > 2000 && !started.After(time.Now()) {
+			return started
+		}
+	}
+	return enterpriseSetupInitTime
 }
 
 func trustedEnterpriseSetupEnvironment(stageRoot string) ([]string, error) {
