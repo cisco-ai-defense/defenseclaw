@@ -308,7 +308,17 @@ func dispatchTrustedAction(
 	// counts.
 	if twin, ok := stateGlobTwinRequest(request); ok {
 		defer func() {
-			findings = withTwinProvenBlocks(findings, dispatchTrustedAction(parent, twin))
+			twinFindings := dispatchTrustedAction(parent, twin)
+			if request.ProtectedHomeHook {
+				// The named reading lists state names that may not exist,
+				// and its other operands are not in the client map, which
+				// was walked for the call as written: only its state-write
+				// block counts there.
+				twinFindings = slices.DeleteFunc(twinFindings, func(f RuleFinding) bool {
+					return f.RuleID != "tamper.detector_state_write"
+				})
+			}
+			findings = withTwinProvenBlocks(findings, twinFindings)
 		}()
 	}
 	// A file writer run through nohup, nice, time, timeout, env NAME=value,
@@ -1069,6 +1079,7 @@ func provenLinkedStateWrite(facts actionfacts.Facts, request trustedActionReques
 	if !known || !strings.Contains(text, "ln") && !strings.Contains(text, "link") && !strings.Contains(text, "cp") {
 		return false
 	}
+	facts, request = protectedHomePlacedReading(facts, request)
 	projected := facts.EnforcementProjection()
 	if projected.ActiveHome == "" {
 		return false
@@ -1092,6 +1103,31 @@ func provenLinkedStateWrite(facts actionfacts.Facts, request trustedActionReques
 		links = &made
 	}
 	return links.HasAliases() && placedLinkedStateWrite(request, text, projected.ActiveHome, *links)
+}
+
+// protectedHomePlacedReading places a call of a managed hook peer whose
+// working directory the gateway could not resolve (ProtectHome keeps it out
+// of the user's home, so the hook CWD is empty) in the directory the hook
+// client reported, as the client keyed its evidence (managedClientCWD): the
+// link readings need absolute operands, so ln -s ~/.defenseclaw hc; cp a.txt
+// hc/config.yaml was not read there (GAP-2544). The client's directory only
+// adds a block of those readings: it must be absolute, without "..", and
+// in the caller's home or its project root.
+func protectedHomePlacedReading(facts actionfacts.Facts, request trustedActionRequest) (actionfacts.Facts, trustedActionRequest) {
+	if !request.ProtectedHomeHook || request.SkipLocalFilesystemResolution || filepath.IsAbs(request.Input.CWD) {
+		return facts, request
+	}
+	home := request.Input.ActiveHome
+	client := request.evidenceCWD
+	if !filepath.IsAbs(client) {
+		client = request.ResolvedWriteTargets[hookpaths.CWDKey]
+	}
+	if !filepath.IsAbs(home) || !filepath.IsAbs(client) || hasParentElement(client) || strings.ContainsRune(client, 0) ||
+		projectRootKey(client) != projectRootKey(home) && !insideHome(home, client) {
+		return facts, request
+	}
+	request.Input.CWD = filepath.Clean(client)
+	return actionfacts.Analyze(request.Input), request
 }
 
 // placedLinkedStateWrite reads each top-level statement in the directory
@@ -1158,6 +1194,7 @@ func provenFollowedInPlaceStateWrite(facts actionfacts.Facts, request trustedAct
 	if !known || !strings.Contains(text, "sed") && !strings.Contains(text, "perl") {
 		return false
 	}
+	facts, request = protectedHomePlacedReading(facts, request)
 	home := facts.EnforcementProjection().ActiveHome
 	if home == "" {
 		return false
@@ -5650,8 +5687,13 @@ func wrapperUnwrapTwinRequest(request trustedActionRequest) (trustedActionReques
 // a POSIX Bash call. The gateway expands the pattern on its own host, so a
 // gateway that may not read the user home (ProtectHome, or a request that
 // skips local resolution) has no reading.
+//
+// Behind ProtectHome the pattern is read against the names of the protected
+// state files and trees instead (actionfacts.StateGlobTwinNamed): cp a.txt
+// ~/.def*/config.yaml and cp a.txt ~/.defenseclaw/conf*.yaml name
+// config.yaml there too (GAP-2544). Only a block of that reading counts.
 func stateGlobTwinRequest(request trustedActionRequest) (trustedActionRequest, bool) {
-	if request.ProtectedHomeHook || request.SkipLocalFilesystemResolution {
+	if request.SkipLocalFilesystemResolution {
 		return trustedActionRequest{}, false
 	}
 	if request.Input.DialectHint != actionfacts.DialectPOSIX && request.Input.DialectHint != "" {
@@ -5661,7 +5703,15 @@ func stateGlobTwinRequest(request trustedActionRequest) (trustedActionRequest, b
 	if !known {
 		return trustedActionRequest{}, false
 	}
-	rewritten, ok := actionfacts.StateGlobTwin(command, request.Input.ActiveHome)
+	var (
+		rewritten string
+		ok        bool
+	)
+	if request.ProtectedHomeHook {
+		rewritten, ok = actionfacts.StateGlobTwinNamed(command, request.Input.ActiveHome, activeDefenseClawStateNames)
+	} else {
+		rewritten, ok = actionfacts.StateGlobTwin(command, request.Input.ActiveHome)
+	}
 	if !ok || rewritten == command {
 		return trustedActionRequest{}, false
 	}
