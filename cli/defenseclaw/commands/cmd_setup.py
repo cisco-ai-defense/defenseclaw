@@ -159,6 +159,21 @@ _supports_terminal_redraw = terminal_checkbox.supports_terminal_redraw
 _checkbox_key_name = terminal_checkbox.checkbox_key_name
 _render_checkbox_menu = terminal_checkbox.render_checkbox_menu
 
+# --workspace help (GAP-2471): setup without the flag keeps a claw.workspace_dir
+# pin that is a folder (GAP-0201), so the default is the pin when one is set.
+_WORKSPACE_OPTION_HELP = (
+    "Opt into workspace-scoped config for this setup. Defaults to the claw.workspace_dir "
+    "pin when one is set (it must be a folder), else global/user config. "
+    '--workspace "" selects global/user config.'
+)
+
+# GAP-2474: setup antigravity refuses --workspace (DefenseClaw owns only the
+# global hooks file), so its help names the refusal instead of the pin text.
+_ANTIGRAVITY_WORKSPACE_OPTION_HELP = (
+    "Not supported for Antigravity: setup antigravity refuses --workspace, because "
+    "DefenseClaw owns only the global ~/.gemini/config/hooks.json."
+)
+
 # Key used to stash the pre-invocation config.yaml mtime in the Click
 # context so the post-invocation hook can tell whether a `setup`
 # subcommand actually mutated config on disk. Using ``ctx.meta``
@@ -7057,7 +7072,7 @@ def _resolve_judge_hook_gate(
     "--workspace-dir",
     "workspace_dir",
     default=None,
-    help="Opt into workspace-scoped connector config. Defaults to global/user config.",
+    help=_WORKSPACE_OPTION_HELP,
 )
 @click.option(
     "--restart/--no-restart", default=True, help="Restart gateway and the active connector after setup (default: on)"
@@ -10526,26 +10541,77 @@ def _resolve_connector_workspace(workspace_dir: str | None) -> str:
         return workspace
 
 
-def _configure_connector_workspace(cfg, workspace_dir: str | None = None) -> str:
-    """Persist an explicit workspace, or clear it for global/user scope.
+def _workspace_peer_move_refusal(setup_slug: str, peers: list[str], requested: str, current: str) -> str:
+    """Refusal text for a --workspace that would move configured peers.
 
-    Setup without ``--workspace`` selects global scope. A workspace pinned
-    earlier (``config set claw.workspace_dir`` or an earlier ``--workspace``)
-    is then cleared, and setup says so and names the flag that keeps it
-    (GAP-0201): before, the pin vanished without a word.
+    Setup without --workspace keeps the current pin (GAP-0201), so with a
+    pin set that is not "user-global hooks": name the pin it keeps and the
+    explicit global choice instead (GAP-2472).
     """
-    workspace = _resolve_connector_workspace(workspace_dir)
+    head = (
+        f"--workspace pins one workspace for the whole install, so it would also move "
+        f"{', '.join(peers)} to {requested}, and their hooks would stop guarding "
+        "other folders. No changes made. "
+    )
+    scope_all = f"'defenseclaw setup guardrail --workspace {requested}' to scope every connector to that folder."
+    if current:
+        return head + (
+            f"Run 'defenseclaw setup {setup_slug}' without --workspace to keep the current pin "
+            f"{current}, 'defenseclaw setup {setup_slug} --workspace \"\"' (or "
+            "'defenseclaw config unset claw.workspace_dir', then setup again) to return every "
+            f"connector to user-global hooks, or {scope_all}"
+        )
+    return head + (
+        f"Run 'defenseclaw setup {setup_slug}' without --workspace to keep user-global hooks, or {scope_all}"
+    )
+
+
+def _setup_workspace_for_check(cfg, workspace_dir: str | None) -> str | None:
+    """The workspace setup will use, for the agent-settings precheck.
+
+    Setup without --workspace keeps a pin that is still a folder
+    (GAP-0201), so the precheck reads that workspace's files too.
+    """
+    if workspace_dir is not None:
+        return workspace_dir
+    try:
+        kept = _resolve_connector_workspace(str(getattr(cfg.claw, "workspace_dir", "") or ""))
+    except AttributeError:
+        return None
+    return kept if kept and os.path.isdir(kept) else None
+
+
+def _configure_connector_workspace(cfg, workspace_dir: str | None = None) -> str:
+    """Persist an explicit workspace, keep a valid earlier pin, or clear it.
+
+    ``--workspace <dir>`` pins *dir*; ``--workspace ""`` selects global scope.
+    Setup without ``--workspace`` keeps a workspace pinned earlier
+    (``config set claw.workspace_dir`` or an earlier ``--workspace``), so the
+    documented pre-set survives setup and the connector writes its workspace
+    copy (GAP-0201). A pin that is no longer a folder is cleared with a
+    warning, because hooks cannot be scoped to it.
+    """
     try:
         previous = str(getattr(cfg.claw, "workspace_dir", "") or "").strip()
-        cfg.claw.workspace_dir = workspace
     except AttributeError:
-        return workspace
-    if previous and not workspace:
+        return _resolve_connector_workspace(workspace_dir)
+    if workspace_dir is None and previous:
+        kept = _resolve_connector_workspace(previous)
+        if os.path.isdir(kept):
+            cfg.claw.workspace_dir = kept
+            ux.ok(
+                f"Keeping workspace pin {kept} (claw.workspace_dir). To return to global scope: "
+                "defenseclaw config unset claw.workspace_dir, then run setup again."
+            )
+            return kept
+        cfg.claw.workspace_dir = ""
         ux.warn(
-            f"Workspace pin {previous} cleared: setup without --workspace selects global scope. "
-            f"To keep it, pass --workspace {previous} (with more than one connector: "
-            f"defenseclaw setup guardrail --workspace {previous})."
+            f"Workspace pin {previous} cleared: it is not a folder, so setup selects global scope. "
+            "To pin a workspace, pass --workspace <folder>."
         )
+        return ""
+    workspace = _resolve_connector_workspace(workspace_dir)
+    cfg.claw.workspace_dir = workspace
     return workspace
 
 
@@ -10857,7 +10923,9 @@ def _apply_hook_connector_setup(
     if connector == "opencode":
         _preflight_opencode_plugin_folder()
 
-    if refusal := _agent_settings_refusal(app.cfg, connector, workspace_dir=workspace_dir, will_restart=restart):
+    if refusal := _agent_settings_refusal(
+        app.cfg, connector, workspace_dir=_setup_workspace_for_check(app.cfg, workspace_dir), will_restart=restart
+    ):
         ux.echo(f"  ✗ {refusal}", err=True)
         return False
 
@@ -11779,12 +11847,12 @@ def _setup_observability_alias(
         if peers:
             setup_slug = "claude-code" if connector == "claudecode" else connector
             raise click.ClickException(
-                f"--workspace pins one workspace for the whole install, so it would also move "
-                f"{', '.join(peers)} to {requested_workspace}, and their hooks would stop guarding "
-                "other folders. No changes made. Run 'defenseclaw setup "
-                f"{setup_slug}' without --workspace to keep user-global hooks, or "
-                f"'defenseclaw setup guardrail --workspace {requested_workspace}' to scope every "
-                "connector to that folder."
+                _workspace_peer_move_refusal(
+                    setup_slug,
+                    peers,
+                    requested_workspace,
+                    _setup_workspace_for_check(app.cfg, None) or "",
+                )
             )
 
     # GAP-2426: a guarded proxy connector (OpenClaw/ZeptoClaw) cannot run next
@@ -12928,7 +12996,7 @@ def _hook_guardrail_options(fn):
     "--workspace-dir",
     "workspace_dir",
     default=None,
-    help="Opt into workspace-scoped config for this setup. Defaults to global/user config.",
+    help=_WORKSPACE_OPTION_HELP,
 )
 @click.option(
     "--replace",
@@ -13070,7 +13138,7 @@ def setup_codex(
     "--workspace-dir",
     "workspace_dir",
     default=None,
-    help="Opt into workspace-scoped config for this setup. Defaults to global/user config.",
+    help=_WORKSPACE_OPTION_HELP,
 )
 @click.option(
     "--replace",
@@ -13888,7 +13956,7 @@ def _make_observability_setup_command(connector: str) -> click.Command:
         "--workspace-dir",
         "workspace_dir",
         default=None,
-        help="Opt into workspace-scoped config for this setup. Defaults to global/user config.",
+        help=_ANTIGRAVITY_WORKSPACE_OPTION_HELP if connector == "antigravity" else _WORKSPACE_OPTION_HELP,
     )
     @click.option(
         "--replace",
