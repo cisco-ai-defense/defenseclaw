@@ -130,6 +130,11 @@ func (f *fakeSandboxController) ReportWorkspace(_ context.Context, name string, 
 	return err
 }
 
+func (f *fakeSandboxController) ReportDisk(_ context.Context, name string, _ sandboxapi.DiskReport) error {
+	_, err := answer(f, "disk "+name, struct{}{})
+	return err
+}
+
 func (f *fakeSandboxController) Discover(_ context.Context, name string) (*sandboxapi.DiscoveryResult, error) {
 	return answer(f, "discover "+name, &sandboxapi.DiscoveryResult{Name: name, Result: "ok", Signals: []sandboxapi.DiscoverySignal{}})
 }

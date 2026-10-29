@@ -20,6 +20,7 @@ package sandboxcli
 
 import (
 	"context"
+	"encoding/json"
 	"slices"
 	"strings"
 	"testing"
@@ -290,5 +291,42 @@ func TestParseOverlayDF(t *testing.T) {
 	if ExitStopKept != 5 {
 		// The TUI reads this status (sandbox_panel.SANDBOX_STOP_KEPT_EXIT).
 		t.Fatalf("ExitStopKept = %d, want 5", ExitStopKept)
+	}
+}
+
+// GAP-1140: the warnings of the disk watch reach the daemon as they are
+// given, so `sandbox activity` names a filling disk while the agent runs,
+// not only the summary at the end of the session.
+func TestSessionDiskWarningsReachTheActivityFeed(t *testing.T) {
+	prev, prevSmall := overlayDiskEvery, smallOverlayDiskEvery
+	overlayDiskEvery, smallOverlayDiskEvery = time.Hour, 20*time.Millisecond
+	t.Cleanup(func() { overlayDiskEvery, smallOverlayDiskEvery = prev, prevSmall })
+	df70 := dfHeader + "/dev/vda           2097152 1468006    629146      70% /\n"
+	answers := []string{dfHalf, df70, dfFull}
+	sb := vmCopySandbox("vmbox")
+	ta := newTestApp(t, "", sb)
+	ta.IO.TTY = false
+	looks := 0
+	ta.stream.answer = func(argv []string) (int, string) {
+		if cmd := sandboxCommand(argv); len(cmd) > 0 && cmd[0] == "df" {
+			looks++
+			return 0, answers[min(looks, len(answers))-1]
+		}
+		return 0, ""
+	}
+	s := &session{app: ta.App, api: ta.API, cli: ta.cli("gw"), sb: &sb}
+	ctx, cancel := context.WithTimeout(bg, time.Duration(len(answers))*smallOverlayDiskEvery+500*time.Millisecond)
+	defer cancel()
+	s.watchOverlayDisk(ctx)
+	var reports []sandboxapi.DiskReport
+	for _, c := range ta.daemon.callsTo("POST", sandboxapi.PathSandboxes+"/vmbox/disk") {
+		var r sandboxapi.DiskReport
+		if err := json.Unmarshal(c.Body, &r); err != nil {
+			t.Fatal(err)
+		}
+		reports = append(reports, r)
+	}
+	if len(reports) != 2 || !reports[0].Fast || reports[0].SizeBytes != 2<<30 || reports[1].Fast || reports[1].FreeBytes != 0 {
+		t.Fatalf("disk reports after %d looks = %+v", looks, reports)
 	}
 }

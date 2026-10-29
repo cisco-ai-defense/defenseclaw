@@ -1459,3 +1459,32 @@ func TestStartRenewsTheModelCredential(t *testing.T) {
 		t.Fatalf("feed = %+v", ev)
 	}
 }
+
+// GAP-1140: the filling own disk a session found reaches the activity feed
+// at once, with how full it is and the steps; a report on no sandbox or
+// with impossible numbers is refused.
+func TestADiskReportNamesTheFillingDiskInTheFeed(t *testing.T) {
+	e := newEnv(t, nil)
+	e.create(sandboxapi.CreateRequest{Name: "vmdisk", Copy: true})
+	seq := e.m.Feed().Seq()
+	must(t, e.m.ReportDisk(t.Context(), "vmdisk", sandboxapi.DiskReport{SizeBytes: 2 << 30, FreeBytes: 600 << 20, Fast: true}))
+	var got []sandboxapi.ActivityEvent
+	for _, ev := range e.m.ActivitySince(seq, "vmdisk") {
+		if ev.Reason == sandboxapi.ReasonDiskFilling {
+			got = append(got, ev)
+		}
+	}
+	if len(got) != 1 || got[0].Kind != sandboxapi.ActivityLifecycle ||
+		!strings.Contains(got[0].Message, "70% full (600 MiB of 2.0 GiB free) and filling fast") ||
+		!strings.Contains(got[0].Message, "sandbox pull vmdisk") {
+		t.Fatalf("feed = %+v", got)
+	}
+	for _, bad := range []sandboxapi.DiskReport{{}, {SizeBytes: 1 << 30, FreeBytes: 2 << 30}, {SizeBytes: 1 << 30, FreeBytes: -1}} {
+		if err := e.m.ReportDisk(t.Context(), "vmdisk", bad); !sandboxapi.IsCode(err, sandboxapi.CodeInvalid) {
+			t.Fatalf("report %+v: %v", bad, err)
+		}
+	}
+	if err := e.m.ReportDisk(t.Context(), "nope", sandboxapi.DiskReport{SizeBytes: 1 << 30}); !sandboxapi.IsCode(err, sandboxapi.CodeNotFound) {
+		t.Fatalf("unknown sandbox: %v", err)
+	}
+}

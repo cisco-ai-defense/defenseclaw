@@ -76,6 +76,7 @@ type API interface {
 	RunLog(ctx context.Context, name string, lines int) (*sandboxapi.RunLog, error)
 	Destinations(ctx context.Context, name string) (*sandboxapi.Destinations, error)
 	ReportWorkspace(ctx context.Context, name string, r sandboxapi.WorkspaceReport) error
+	ReportDisk(ctx context.Context, name string, r sandboxapi.DiskReport) error
 	Discover(ctx context.Context, name string) (*sandboxapi.DiscoveryResult, error)
 	Processes(ctx context.Context, name string) (*sandboxapi.ProcessList, error)
 	Approvals(ctx context.Context, sandbox string) ([]sandboxapi.Approval, error)
