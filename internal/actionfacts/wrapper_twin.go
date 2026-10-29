@@ -27,7 +27,7 @@ import (
 )
 
 // WrapperUnwrapTwin returns the POSIX reading of command in which every cp,
-// mv, install, ln, dd, tee or rsync call run through static prefix
+// mv, install, ln, dd, tee, rsync or shell call run through static prefix
 // wrappers (nohup, nice, time, timeout, env, command, builtin, sudo, doas,
 // exec, setsid, stdbuf, ionice, taskset, chrt, flock, caffeinate with
 // their known options), or after a leading word that may expand to nothing
@@ -183,8 +183,10 @@ func wrapperProgramName(word string) string {
 }
 
 // wrappedWriterRun returns where the program word of a file writer
-// (dynamicOperandPrograms or rsync) is that args run after leading words
-// that may expand to nothing and static prefix wrappers.
+// (dynamicOperandPrograms or rsync) or of a POSIX shell is that args run
+// after leading words that may expand to nothing and static prefix
+// wrappers. A shell is the stop too: setsid sh -c STRING runs what
+// sh -c STRING runs (GAP-2519).
 func wrappedWriterRun(args []*syntax.Word) (PrefixWrapperRun, bool) {
 	index := 0
 	for index < len(args) && vanishingWord(args[index]) {
@@ -204,7 +206,7 @@ func wrappedWriterRun(args []*syntax.Word) (PrefixWrapperRun, bool) {
 			return PrefixWrapperRun{}, false
 		}
 		name := wrapperProgramName(word)
-		if dynamicOperandPrograms[name] || name == "rsync" {
+		if dynamicOperandPrograms[name] || name == "rsync" || wrappedShellPrograms[name] {
 			run.Index = index
 			return run, true
 		}
@@ -216,6 +218,10 @@ func wrappedWriterRun(args []*syntax.Word) (PrefixWrapperRun, bool) {
 	}
 	return PrefixWrapperRun{}, false
 }
+
+// wrappedShellPrograms are the shells whose wrapped call is read as the
+// plain call, so the plain reading of a -c STRING applies.
+var wrappedShellPrograms = map[string]bool{"sh": true, "bash": true, "dash": true, "ksh": true, "zsh": true}
 
 // flockShellString returns the index of the STRING word of a
 // flock FILE -c STRING (or --command STRING) call run after static prefix
