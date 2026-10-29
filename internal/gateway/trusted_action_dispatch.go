@@ -848,9 +848,11 @@ func withActiveStateTargetMention(
 	}
 	// A write through a link the command makes to active state is proven by
 	// the link reading: the mention scan and the whole-action proof do not
-	// follow the new link (GAP-2522).
+	// follow the new link (GAP-2522), nor read sed -i --follow-symlinks
+	// (GAP-2529).
 	if !hereStringMutates && !globbedStateMutation(facts) && !globbedStateMutationThroughLink(facts, request) &&
-		!archiveExtractsIntoState(facts, request) && !provenLinkedStateWrite(facts, request) {
+		!archiveExtractsIntoState(facts, request) && !provenLinkedStateWrite(facts, request) &&
+		!provenFollowedInPlaceStateWrite(facts, request) {
 		command, known := trustedBashCommandInput(request.Input)
 		if !known {
 			return findings
@@ -2149,6 +2151,141 @@ func provenLinkedStateWrite(facts actionfacts.Facts, request trustedActionReques
 		}
 		if linkedActiveStateWrite(projected, command, candidate, *links) {
 			return true
+		}
+	}
+	if links == nil {
+		made := hookpaths.CommandLinks(request.Input.Tool, text, request.Input.CWD, projected.ActiveHome)
+		links = &made
+	}
+	return links.HasAliases() && placedLinkedStateWrite(request, text, projected.ActiveHome, *links)
+}
+
+// placedLinkedStateWrite reads each top-level statement in the directory
+// it runs in, so a write after a cd through a link the command makes is
+// placed where the shell places it (cd ~ && ln -s .defenseclaw hc && cp
+// project/a.txt hc/config.yaml), and an in-place editor operand (sed -i,
+// perl -i) through a linked directory is the write it is on the state file
+// itself (ln -s ~/.defenseclaw hc; sed -i s/a/b/ hc/config.yaml, GAP-2522).
+// An in-place editor replaces the directory entry, so only a link to one of
+// its directories is followed. The statements are the ones the link reading
+// placed; a command whose directory changes it cannot place is read whole
+// in its own directory.
+func placedLinkedStateWrite(request trustedActionRequest, text, home string, links hookpaths.Links) bool {
+	statements, placed := hookpaths.TopLevelStatements(text, request.Input.CWD, home)
+	if !placed || len(statements) == 0 {
+		statements = []hookpaths.PlacedStatement{{Command: text, Dir: request.Input.CWD}}
+	}
+	for _, statement := range statements {
+		input := request.Input
+		input.Args, input.Argv, input.Command, input.CWD = nil, nil, statement.Command, statement.Dir
+		projected := actionfacts.Analyze(input).EnforcementProjection()
+		if projected.ActiveHome == "" {
+			continue
+		}
+		if statement.Dir != request.Input.CWD {
+			for _, candidate := range projected.Paths {
+				command, ok := integrityCommandByID(projected, candidate.CommandID)
+				if ok && stateCommandMutatesPath(command, candidate) &&
+					linkedActiveStateWrite(projected, command, candidate, links) {
+					return true
+				}
+			}
+		}
+		for _, operand := range hookpaths.InPlaceEditOperands(statement.Command, statement.Dir, home) {
+			for _, target := range links.AliasTargets(operand, true) {
+				written := actionfacts.PathFact{
+					Access: actionfacts.PathAccessWrite, Flavor: actionfacts.PathFlavorPOSIX,
+					Value: target, Normalized: target, Absolute: true, Resolved: target,
+				}
+				if matchesActiveDefenseClawState(projected, written) {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
+// provenFollowedInPlaceStateWrite reports sed -i --follow-symlinks (gsed
+// too, the option abbreviated or not) whose operand is active DefenseClaw
+// state, directly, through an existing link or through a link the same
+// command makes: GNU sed then rewrites the file the link names instead of
+// replacing the link (GAP-2529). The facts leave --follow-symlinks and a
+// clustered -i (-si, -Ei) partial, so no path proof holds for them. Without
+// --follow-symlinks sed -i and perl -i replace the directory entry: the
+// entry itself is judged (the operand name, its parent read through links),
+// never the file a final link names, so an edit of a link to state stays an
+// ordinary write (GAP-2531).
+func provenFollowedInPlaceStateWrite(facts actionfacts.Facts, request trustedActionRequest) bool {
+	if request.Input.DialectHint != actionfacts.DialectPOSIX && request.Input.DialectHint != "" {
+		return false
+	}
+	text, known := trustedBashCommandInput(request.Input)
+	if !known || !strings.Contains(text, "sed") && !strings.Contains(text, "perl") {
+		return false
+	}
+	home := facts.EnforcementProjection().ActiveHome
+	if home == "" {
+		return false
+	}
+	statements, placed := hookpaths.TopLevelStatements(text, request.Input.CWD, home)
+	if !placed || len(statements) == 0 {
+		statements = []hookpaths.PlacedStatement{{Command: text, Dir: request.Input.CWD}}
+	}
+	links := hookpaths.CommandLinks(request.Input.Tool, text, request.Input.CWD, home)
+	for _, statement := range statements {
+		operands := hookpaths.FollowedInPlaceEditOperands(statement.Command, statement.Dir, home)
+		entries := hookpaths.InPlaceEditOperands(statement.Command, statement.Dir, home)
+		if len(operands) == 0 && len(entries) == 0 {
+			continue
+		}
+		input := request.Input
+		input.Args, input.Argv, input.Command, input.CWD = nil, nil, statement.Command, statement.Dir
+		projected := actionfacts.Analyze(input).EnforcementProjection()
+		if projected.ActiveHome == "" {
+			continue
+		}
+		for _, operand := range operands {
+			targets := append([]string{operand}, links.AliasTargets(operand, false)...)
+			if physical, found := request.ResolvedWriteTargets[operand]; found {
+				targets = append(targets, physical)
+			} else if !request.SkipLocalFilesystemResolution && !request.ProtectedHomeHook {
+				if physical, ok := hookpaths.ResolveWriteTarget(operand); ok {
+					targets = append(targets, physical)
+				}
+			}
+			for _, target := range targets {
+				if active, same := hookpaths.ResolveActiveStateHardlinkTarget(target, projected.ActiveHome); same {
+					target = active
+				}
+				written := actionfacts.PathFact{
+					Access: actionfacts.PathAccessWrite, Flavor: actionfacts.PathFlavorPOSIX,
+					Value: target, Normalized: target, Absolute: true, Resolved: target,
+				}
+				if matchesActiveDefenseClawState(projected, written) {
+					return true
+				}
+			}
+		}
+		for _, entry := range entries {
+			if slices.Contains(operands, entry) {
+				continue
+			}
+			targets := append([]string{entry}, links.AliasTargets(entry, true)...)
+			if !request.SkipLocalFilesystemResolution && !request.ProtectedHomeHook {
+				if parent, ok := hookpaths.ResolveWriteTarget(filepath.Dir(entry)); ok {
+					targets = append(targets, filepath.Join(parent, filepath.Base(entry)))
+				}
+			}
+			for _, target := range targets {
+				written := actionfacts.PathFact{
+					Access: actionfacts.PathAccessWrite, Flavor: actionfacts.PathFlavorPOSIX,
+					Value: target, Normalized: target, Absolute: true, Resolved: target,
+				}
+				if matchesActiveDefenseClawState(projected, written) {
+					return true
+				}
+			}
 		}
 	}
 	return false

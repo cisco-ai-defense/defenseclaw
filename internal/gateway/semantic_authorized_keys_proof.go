@@ -1213,6 +1213,13 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 	if decision != "" {
 		return true
 	}
+	if request.ProtectedHomeHook && clientTargets[hookpaths.ActionDecisionKey] == hookpaths.ProtectedTargetDecision {
+		// Behind ProtectHome the walk above cannot follow the user's links;
+		// the user's hook ran the same decision on the same command and
+		// found a protected target, as a per-user gateway does (GAP-2514,
+		// GAP-2515).
+		return true
+	}
 	if hookpaths.DynamicCopyProtectedBasename(input.Command, facts.ActiveHome) {
 		return true
 	}
