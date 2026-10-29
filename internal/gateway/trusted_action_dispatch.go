@@ -1904,6 +1904,11 @@ func (r *cmdBodyReader) addArgumentList(command string, spans []cmdTextSpan, arg
 // quotes), which is read again. complete is false when the command needs
 // more reading than the bounds allow.
 func cmdInvocationReadings(command string, includeCMD bool) (bodies []string, complete bool) {
+	if !cmdSpellingPossible(command) {
+		// No reading can run cmd.exe: the bounds below must not turn a
+		// large or deeply nested command into a write (rows17 B08).
+		return nil, true
+	}
 	r := &cmdBodyReader{
 		readings: []cmdOuterReading{cmdReadingPowerShell, cmdReadingGitBash},
 		seen:     map[string]bool{},
@@ -1914,6 +1919,28 @@ func cmdInvocationReadings(command string, includeCMD bool) (bodies []string, co
 	}
 	r.read(command, 0)
 	return r.bodies, !r.overflow
+}
+
+// cmdSpellingPossible reports whether some reading of command may name
+// cmd.exe: "cmd" or "comspec" in the text with every quote, escape and
+// continuation character (quotes, backtick, caret, backslash, CR, LF) and
+// every non-ASCII rune taken out. It only ever over-reports, so a command it
+// rejects has no cmd program word in any reading.
+func cmdSpellingPossible(command string) bool {
+	var b strings.Builder
+	b.Grow(len(command))
+	for _, r := range command {
+		switch {
+		case r >= utf8.RuneSelf, r == 0x22, r == 0x27, r == 0x60, r == 0x5e, r == 0x5c, r == 0x0d, r == 0x0a:
+			continue
+		case r >= 0x41 && r <= 0x5a:
+			b.WriteRune(r + 0x20)
+		default:
+			b.WriteRune(r)
+		}
+	}
+	folded := b.String()
+	return strings.Contains(folded, "cmd") || strings.Contains(folded, "comspec")
 }
 
 // provenCMDSlashCStateWrite judges the body of a cmd /c or cmd /k call as
