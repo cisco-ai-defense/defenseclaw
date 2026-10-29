@@ -114,7 +114,7 @@ var hookDeliveryStartPoll = 100 * time.Millisecond
 
 // hookDeliveryGatewayStarting reports a gateway that cannot have sent its
 // 103 yet because it is not serving: the Linux standalone unit (Type=notify,
-// READY=1 after both listeners serve) is stopping or starting while the call
+// READY=1 after both listeners serve) is starting while the call
 // waits in the socket systemd holds. The first call after a stop
 // starts the gateway by socket activation; the gateway answered it and
 // advertised the receipt only after the 250 ms capability wait, so the hook
@@ -134,16 +134,16 @@ var hookDeliveryGatewayStarting = func(ctx context.Context, opts Options) bool {
 }
 
 // gatewayServiceNotServing reports a unit state in which the gateway does not
-// serve its sockets yet: stopping, or starting (the socket unit queued the
-// start for the waiting call). A stopped unit is not waited for: systemd
-// reports a unit it does not know as inactive too, and a failed unit will not
-// answer.
+// serve its sockets yet: starting (the socket unit queued the start for the
+// waiting call). A stopping unit is not waited for: the process still
+// draining its calls may be a 1.0.2/1.0.3 gateway (rpm upgrade, before
+// %posttrans restarts it) that sends no 103 and reads the body to the end,
+// so holding the body would keep its handler, and the unit, in the drain
+// until the answer budget blocks the call. A stopped unit is not waited for
+// either: systemd reports a unit it does not know as inactive too, and a
+// failed unit will not answer.
 func gatewayServiceNotServing(state gatewayServiceState) bool {
-	switch state.Active {
-	case "deactivating", "activating":
-		return true
-	}
-	return false
+	return state.Active == "activating"
 }
 
 func hookDeliveryWait(opts Options) time.Duration {

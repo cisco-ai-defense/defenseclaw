@@ -445,9 +445,52 @@ func TestManagedHookReleasesAnEarlierGatewayOnceItsUnitRuns(t *testing.T) {
 }
 
 func TestGatewayServiceNotServingStates(t *testing.T) {
-	for state, want := range map[string]bool{"inactive": false, "deactivating": true, "activating": true, "active": false, "failed": false, "reloading": false} {
+	for state, want := range map[string]bool{"inactive": false, "deactivating": false, "activating": true, "active": false, "failed": false, "reloading": false} {
 		if got := gatewayServiceNotServing(gatewayServiceState{Active: state}); got != want {
 			t.Errorf("gatewayServiceNotServing(%q) = %v, want %v", state, got, want)
 		}
+	}
+}
+
+// RV-ha10-0683: during an rpm upgrade from 1.0.2/1.0.3 the new hook runs
+// while the old gateway still serves; %posttrans then stops it. A benign
+// call that old gateway accepted (it sends no 103 and reads the body to the
+// end) reaches the capability wait while the unit is deactivating. The hook
+// releases its body at the capability wait, so the draining handler answers
+// and the call is allowed, instead of holding the body until the answer
+// budget blocks it.
+func TestManagedHookReleasesAnOldGatewayThatIsStoppingUnderTheCall(t *testing.T) {
+	var handlerDone atomic.Bool
+	// The unit drains the old process (deactivating, stop-sigterm) until its
+	// handler returns; the hook classifies that state as the probe would.
+	gatewayStartingFor(t, func() bool {
+		state := gatewayServiceState{Active: "inactive", Sub: "dead"}
+		if !handlerDone.Load() {
+			state = gatewayServiceState{Active: "deactivating", Sub: "stop-sigterm"}
+		}
+		return gatewayServiceNotServing(state)
+	})
+	received := make(chan string, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer handlerDone.Store(true)
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			received <- err.Error()
+			return
+		}
+		received <- string(body[len(body)-len(HookDeliveryReleased):])
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, "{\"action\":\"allow\"}\n")
+	}))
+	defer server.Close()
+	result, elapsed := runAgainstGateway(t, "claudecode", server.Listener.Addr().String(), managedToolCall("claudecode"))
+	if blocked(result) {
+		t.Fatalf("old gateway stopping under an accepted benign call: blocked after %s: code=%d stdout=%q stderr=%q", elapsed, result.code, result.stdout, result.stderr)
+	}
+	if got := <-received; got != HookDeliveryReleased {
+		t.Fatalf("old gateway read body tail %q, want the released marker", got)
+	}
+	if elapsed > 4*hookDeliveryCapabilityWait {
+		t.Fatalf("hook released the old gateway after %s, want about the capability wait", elapsed)
 	}
 }
