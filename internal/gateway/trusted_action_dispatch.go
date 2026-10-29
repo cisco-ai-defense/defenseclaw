@@ -1168,13 +1168,15 @@ func placedLinkedStateWrite(request trustedActionRequest, text, home string, lin
 		if projected.ActiveHome == "" {
 			continue
 		}
-		if statement.Dir != request.Input.CWD {
-			for _, candidate := range projected.Paths {
-				command, ok := integrityCommandByID(projected, candidate.CommandID)
-				if ok && stateCommandMutatesPath(command, candidate) &&
-					linkedActiveStateWrite(projected, command, candidate, links, statement.Dir) {
-					return true
-				}
+		// Every statement, not only one after a cd: a whole command the
+		// facts read as uncertain (a link named by a home path, ln -s
+		// ~/.defenseclaw/hooks ~/hk; cp a.txt ~/hk/x.sh, or made in a
+		// subshell) has no path facts of its own (GAP-2555).
+		for _, candidate := range projected.Paths {
+			command, ok := integrityCommandByID(projected, candidate.CommandID)
+			if ok && stateCommandMutatesPath(command, candidate) &&
+				linkedActiveStateWrite(projected, command, candidate, links, statement.Dir) {
+				return true
 			}
 		}
 		for _, operand := range hookpaths.InPlaceEditOperands(statement.Command, statement.Dir, home) {
