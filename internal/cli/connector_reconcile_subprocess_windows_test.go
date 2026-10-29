@@ -102,7 +102,10 @@ func TestConnectorReconcilePublishesManagedCodexRegistrationInSubprocess(t *test
 		if !ok || command == "" {
 			t.Fatalf("hooks.%s has no command_windows: %#v", event, handler)
 		}
-		decoded := decodeCodexManagedPowerShellCommand(t, command)
+		decoded, direct := codexManagedDirectHookCommand(command)
+		if !direct {
+			decoded = decodeCodexManagedPowerShellCommand(t, command)
+		}
 		if !strings.Contains(strings.ToLower(decoded), strings.ToLower(expectedHook)) ||
 			!strings.Contains(strings.ToLower(decoded), "'hook' '--connector' 'codex'") {
 			t.Fatalf("hooks.%s does not name the exact hook contract: %q", event, decoded)
@@ -190,6 +193,28 @@ func readCodexSubprocessTOML(t *testing.T, path string) map[string]interface{} {
 		t.Fatalf("parse %s: %v", path, err)
 	}
 	return document
+}
+
+// codexManagedDirectHookCommand reads the system cmd.exe form of a managed
+// Codex hook command (`<system>\cmd.exe /d /v:off /c "<launcher>" <args>`,
+// GAP-1908 ff58d2fd17) as the launcher path and its arguments quoted the way
+// the PowerShell bridge quotes them, so one check covers both forms.
+func codexManagedDirectHookCommand(command string) (string, bool) {
+	const marker = ` /d /v:off /c "`
+	at := strings.Index(strings.ToLower(command), marker)
+	if at < 0 || !strings.HasSuffix(strings.ToLower(command[:at]), `\cmd.exe`) {
+		return "", false
+	}
+	rest := command[at+len(marker):]
+	end := strings.IndexByte(rest, '"')
+	if end <= 0 {
+		return "", false
+	}
+	args := strings.Fields(rest[end+1:])
+	if len(args) == 0 {
+		return "", false
+	}
+	return rest[:end] + " '" + strings.Join(args, "' '") + "'", true
 }
 
 func decodeCodexManagedPowerShellCommand(t *testing.T, command string) string {
