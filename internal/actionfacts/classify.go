@@ -584,8 +584,6 @@ func classifyCommand(out *parseOutput, command *CommandFact) {
 		classifyPOSIXLink(out, command)
 	case "install":
 		classifyPOSIXInstall(out, command)
-	case "ln":
-		classifyPOSIXLink(out, command)
 	case "rsync":
 		classifyRsync(out, command)
 	case "setfacl":
@@ -3736,59 +3734,6 @@ func classifyPOSIXInstall(out *parseOutput, command *CommandFact) {
 		addOperation(command, OperationPermissionChange)
 		appendCommandPath(out, command, PathAccessMetadata, destination)
 	}
-}
-
-// classifyPOSIXLink records the name ln creates as a write: the last
-// operand, the -t directory, or with one operand a name in the current
-// directory (GAP-2496: ln -sf a.txt ~/.defenseclaw/config.yaml replaced
-// DefenseClaw state and tied no path to the call). The link target is only
-// a name the new link holds, so it is not recorded as a read or a write.
-func classifyPOSIXLink(out *parseOutput, command *CommandFact) {
-	if !requireCommandDialect(out, command, DialectPOSIX, DialectArgv) {
-		return
-	}
-	parsed := parseOwnedPOSIXOptions(
-		command.Argv,
-		exactOptionSet("-t", "--target-directory", "-S", "--suffix"),
-		exactOptionSet(
-			"-b", "-d", "-F", "-f", "-i", "-L", "-n", "-P", "-r", "-s", "-T", "-v",
-			"--backup", "--directory", "--force", "--interactive", "--logical",
-			"--no-dereference", "--no-target-directory", "--physical",
-			"--relative", "--symbolic", "--verbose",
-		),
-		exactOptionSet("--help", "--version"),
-	)
-	if parsed.preview {
-		command.Effect = EffectPreview
-		return
-	}
-	if !parsed.complete {
-		out.markPartial(IssueUnknownOperandGrammar)
-	}
-	destination, directory := parsed.values["-t"]
-	if !directory {
-		destination, directory = parsed.values["--target-directory"]
-	}
-	switch {
-	case directory && destination != "" && len(parsed.positionals) != 0:
-	case !directory && len(parsed.positionals) >= 2:
-		destination = parsed.positionals[len(parsed.positionals)-1]
-	case !directory && len(parsed.positionals) == 1:
-		target := strings.TrimRight(parsed.positionals[0], "/")
-		if slash := strings.LastIndexByte(target, '/'); slash >= 0 {
-			target = target[slash+1:]
-		}
-		destination = target
-	default:
-		out.markPartial(IssueUnknownOperandGrammar)
-		return
-	}
-	if destination == "" {
-		out.markPartial(IssueUnknownOperandGrammar)
-		return
-	}
-	addOperation(command, OperationCopy)
-	appendCommandPath(out, command, PathAccessWrite, destination)
 }
 
 // classifyRsync records the local destination of rsync (the last operand)
