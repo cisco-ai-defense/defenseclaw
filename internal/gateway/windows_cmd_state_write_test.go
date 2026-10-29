@@ -312,6 +312,21 @@ func TestR105WindowsCMDMentionsAndManyCalls(t *testing.T) {
 		{"cmd /c echo a; cmd /c \"type nul > " + state + "\"", true},
 		{"cmd --% /c type nul > " + state, true},
 		{"cmd --% /c echo a ; type nul > " + state, true},
+		// A double-quoted Git Bash $(...) is parsed on its own: a quote in
+		// a here-document it opens does not end the string, and PowerShell
+		// cannot parse a << in a $(...) of a string, so it runs none of it
+		// (pod it17: the real Claude Code heredoc commit was blocked).
+		{"git commit --allow-empty -q -m \"$(cat <<'MSG'\nfix: block cmd /c type nul > " + state + "\nThe \"cmd //c\" form is the Git Bash spelling.\nMSG\n)\" && git log --oneline -1", false},
+		{"git commit -m \"$(cat <<'EOF'\nnote: \"cmd /c type nul > " + state + "\" empties it\nEOF\n)\"", false},
+		{"echo \"$(printf '%s' \")\"; cmd //c echo a)\" && cat ~/.defenseclaw/config.yaml", false},
+		{"git commit -m \"$(cmd //c 'type nul > " + state + "')\"", true},
+		{"echo \"$(cat <<'EOF'\nx \"y\"\nEOF\n)\"; cmd //c \"type nul > " + state + "\"", true},
+		{"echo \"$(cat <<EOF\n$(cmd //c 'type nul > " + state + "')\nEOF\n)\"", true},
+		{"echo \"$(echo \")\"; cmd /c type nul > " + state + ")\"", true},
+		{"Write-Output \"$(cmd /c 'type nul > " + state + "')\"", true},
+		{"Write-Output \"$(# <<\n)\"; cmd /c \"type nul > " + state + "\"", true},
+		{"Write-Output \"$(<# << #> 1)\"; cmd /c \"type nul > " + state + "\"", true},
+		{"echo \"$(cat <<'EOF'\nunterminated \"q\"\n)\"; cmd //c \"type nul > " + state + "\"", true},
 	} {
 		for _, tool := range []string{"Bash", "shell_command", "PowerShell"} {
 			args, _ := json.Marshal(map[string]string{"command": tc.command})
