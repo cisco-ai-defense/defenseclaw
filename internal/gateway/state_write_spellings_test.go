@@ -469,3 +469,47 @@ func TestBareCopyReadsAsNoWrite(t *testing.T) {
 		{"cp a.txt ~/.defenseclaw/config.yaml; cp", true},
 	})
 }
+
+// env -C or --chdir with a home-spelled directory (~, ~/dir, $HOME,
+// "$HOME"/dir) runs the call in the active home: the caller shell expands
+// the word before env runs. The twin wrote cd '~' (a literal directory)
+// or gave no reading for "$HOME", so a relative state write there was
+// allowed (GAP-2519, checker r9i1 RV-r9-2 E01-E07, P07, P08). A literal ~
+// (quoted, or glued as --chdir=~ or -C~) is not expanded and stays a
+// project-relative directory.
+func TestEnvChdirHomeSpellingRunsTheCallInTheHome(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX shell spellings")
+	}
+	judgeHomeStateWriteRows(t, []homeStateWriteRow{
+		{"env -C ~ cp project/a.txt .defenseclaw/config.yaml", true},
+		{`env -C "$HOME" cp project/a.txt .defenseclaw/config.yaml`, true},
+		{"env -C $HOME cp project/a.txt .defenseclaw/config.yaml", true},
+		{"env -C ${HOME} cp project/a.txt .defenseclaw/hooks/x.sh", true},
+		{"env -C ~/ cp project/a.txt .defenseclaw/config.yaml", true},
+		{"env -C ~/.defenseclaw cp ../project/a.txt config.yaml", true},
+		{`env -C "$HOME/.defenseclaw" cp ../project/a.txt hooks/x.sh`, true},
+		{`env -C "$HOME"/.defenseclaw cp ../project/a.txt config.yaml`, true},
+		{`env --chdir="$HOME" cp project/a.txt .defenseclaw/config.yaml`, true},
+		{`env --chdir "$HOME" mv project/a.txt .defenseclaw/config.yaml`, true},
+		{`env -C"${HOME}" cp project/a.txt .defenseclaw/config.yaml`, true},
+		{"env -C ~ tee .defenseclaw/config.yaml < project/a.txt", true},
+		{"env -C ~ ln -sf project/a.txt .defenseclaw/config.yaml", true},
+		{"setsid env -C ~ cp project/a.txt .defenseclaw/config.yaml", true},
+		{"A=1 env -C ~ cp project/a.txt .defenseclaw/config.yaml", true},
+		{"env -C ~ env -C .defenseclaw cp ../project/a.txt config.yaml", true},
+		{"env -C /tmp env -C ~ cp project/a.txt .defenseclaw/config.yaml", true},
+		{`sh -c "env -C ~ cp project/a.txt .defenseclaw/config.yaml"`, true},
+		{`env -C ~ sh -c "setsid cp project/a.txt .defenseclaw/config.yaml"`, true},
+		{"env -C ~ cp project/a.txt .ssh/authorized_keys", true},
+		{"env -C ~ cp project/a.txt project/b.txt", false},
+		{"env -C ~/project cp a.txt b.txt", false},
+		{`env -C "$HOME/project" make --version`, false},
+		{"env -C ~ cat .defenseclaw/config.yaml", false},
+		{"env -C ~/.defenseclaw cp config.yaml ../project/backup.yaml", false},
+		{"env --chdir=~ cp a.txt .defenseclaw/config.yaml", false},
+		{"env -C '~' cp a.txt .defenseclaw/config.yaml", false},
+		{`env -C "$HOME"x cp a.txt .defenseclaw/config.yaml`, false},
+		{"env -C ~ ls -la", false},
+	})
+}

@@ -134,10 +134,10 @@ func wrapperUnwrapTwin(command string, depth int) (twin string, ok bool) {
 			open := typed.Args[0].Pos()
 			if len(typed.Assigns) > 0 {
 				open = typed.Assigns[0].Pos()
-				replace(open, open, "( cd "+posixSingleQuoted(run.Dir)+" && ")
+				replace(open, open, "( cd "+wrapperDirWord(run.Dir)+" && ")
 				replace(typed.Args[0].Pos(), typed.Args[run.Index].Pos(), "")
 			} else {
-				replace(open, typed.Args[run.Index].Pos(), "( cd "+posixSingleQuoted(run.Dir)+" && ")
+				replace(open, typed.Args[run.Index].Pos(), "( cd "+wrapperDirWord(run.Dir)+" && ")
 			}
 			if shell {
 				replace(typed.Args[run.Index].Pos(), typed.Args[text].Pos(), "sh -c ")
@@ -162,6 +162,103 @@ func wrapperUnwrapTwin(command string, depth int) (twin string, ok bool) {
 	}
 	out.WriteString(command[last:])
 	return out.String(), true
+}
+
+// homeDirSentinel starts a wrapper directory spelled from the active home
+// (env -C ~, env -C "$HOME"/dir, env --chdir="$HOME"): the caller shell
+// expands the word before env runs, so the child runs in the home, while
+// the twin wrote the literal word (cd '~') or gave no twin for "$HOME"
+// (GAP-2519, checker r9i1 RV-r9-2). A shell word cannot hold NUL, so the
+// marker never names a real directory.
+const homeDirSentinel = "\x00home"
+
+// wrapperDirWord writes the directory a wrapper runs its child in as a
+// shell word for the cd of the twin; a home-spelled directory is written
+// from "$HOME" again.
+func wrapperDirWord(dir string) string {
+	if rest, home := strings.CutPrefix(dir, homeDirSentinel); home {
+		if rest == "" {
+			return "\"$HOME\""
+		}
+		return "\"$HOME\"" + posixSingleQuoted(rest)
+	}
+	return posixSingleQuoted(dir)
+}
+
+// wrapperHomeDirWord returns the value of args[at] with homeDirSentinel in
+// place of its home when the word is the directory of a -C or --chdir
+// option (separate or glued) spelled from the active home. ok is false
+// for every other word.
+func wrapperHomeDirWord(args []*syntax.Word, at int) (string, bool) {
+	if at > 0 {
+		if option := projectPOSIXWord(args[at-1]); !option.Expands && (option.Value == "-C" || option.Value == "--chdir") {
+			if rest, home := homeSpelledDir(args[at], ""); home {
+				return homeDirSentinel + rest, true
+			}
+		}
+	}
+	for _, option := range []string{"--chdir=", "-C"} {
+		if rest, home := homeSpelledDir(args[at], option); home {
+			return option + homeDirSentinel + rest, true
+		}
+	}
+	return "", false
+}
+
+// homeSpelledDir returns the static rest of word after option (the literal
+// text that starts it) and a leading home spelling: an unquoted ~ or ~/ at
+// the word start (no option), or a plain $HOME or ${HOME}, bare or first
+// in double quotes. The rest is empty or starts with a slash; ok is false
+// when any other part expands or the word names another directory.
+func homeSpelledDir(word *syntax.Word, option string) (string, bool) {
+	if word == nil || len(word.Parts) == 0 {
+		return "", false
+	}
+	parts := word.Parts
+	var rest strings.Builder
+	lit, isLit := parts[0].(*syntax.Lit)
+	if option == "" && isLit && (lit.Value == "~" || strings.HasPrefix(lit.Value, "~/")) {
+		rest.WriteString(unquotePOSIXLiteral(lit.Value[1:], false))
+		parts = parts[1:]
+	} else {
+		if option != "" {
+			if !isLit || lit.Value != option || len(parts) < 2 {
+				return "", false
+			}
+			parts = parts[1:]
+		}
+		switch typed := parts[0].(type) {
+		case *syntax.ParamExp:
+			if !plainHomeParameter(typed) {
+				return "", false
+			}
+		case *syntax.DblQuoted:
+			if typed.Dollar || len(typed.Parts) == 0 || !plainHomeParameter(typed.Parts[0]) {
+				return "", false
+			}
+			for _, nested := range typed.Parts[1:] {
+				value, expands := projectPOSIXDoubleQuotedPart(nested)
+				if expands {
+					return "", false
+				}
+				rest.WriteString(value)
+			}
+		default:
+			return "", false
+		}
+		parts = parts[1:]
+	}
+	for _, part := range parts {
+		value, _, expands := projectPOSIXWordPart(part)
+		if expands {
+			return "", false
+		}
+		rest.WriteString(value)
+	}
+	if text := rest.String(); text == "" || strings.HasPrefix(text, "/") {
+		return text, true
+	}
+	return "", false
 }
 
 func posixSingleQuoted(value string) string {
@@ -238,6 +335,9 @@ func wrappedWriterRun(args []*syntax.Word) (PrefixWrapperRun, bool) {
 	value := func(at int) (string, bool) {
 		if at >= len(args) {
 			return "", false
+		}
+		if dir, home := wrapperHomeDirWord(args, at); home {
+			return dir, true
 		}
 		word := projectPOSIXWord(args[at])
 		return word.Value, !word.Expands
@@ -534,7 +634,7 @@ func envOptions(value func(int) (string, bool), next *int, run *PrefixWrapperRun
 		if dir == "" {
 			return false
 		}
-		if run.Dir != "" && !strings.HasPrefix(dir, "/") {
+		if run.Dir != "" && !strings.HasPrefix(dir, "/") && !strings.HasPrefix(dir, homeDirSentinel) {
 			dir = strings.TrimRight(run.Dir, "/") + "/" + dir
 		}
 		run.Dir = dir
