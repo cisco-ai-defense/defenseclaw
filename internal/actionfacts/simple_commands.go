@@ -283,6 +283,11 @@ func simpleCommands(input Input, facts Facts, depth int, interpreter string) []S
 					}
 				}
 			}
+			if decl, ok := stmt.Cmd.(*syntax.DeclClause); ok {
+				// export HOME=v sets HOME for the commands after it, as
+				// HOME=v; export HOME does (GAP-2476).
+				updateSimpleDeclVariables(state.vars, decl)
+			}
 			nextCWD, changedDirectory := simpleCommandNextCWD(text, &state, effective)
 			if !changedDirectory {
 				// An unmodeled shell builtin or dynamic program may move the
@@ -643,6 +648,41 @@ func uniqueSimpleStates(states []simpleShellState) []simpleShellState {
 		}
 	}
 	return result
+}
+
+// updateSimpleDeclVariables applies a HOME=value word of an export,
+// readonly, declare or typeset statement to vars, as updateSimpleVariables
+// applies a bare HOME=value: every later ~ and $HOME then names value. HOME
+// with no value keeps its value. Any option other than -x, -r and -g (a
+// reference, an integer, a case or an array attribute) changes what the
+// value means, so HOME becomes unknown. Other names keep the bound-variable
+// reading the action-level resolver judges.
+func updateSimpleDeclVariables(vars map[string]string, decl *syntax.DeclClause) {
+	if decl == nil || decl.Variant == nil {
+		return
+	}
+	switch decl.Variant.Value {
+	case "export", "readonly", "declare", "typeset":
+	default:
+		return
+	}
+	known := true
+	for _, assign := range decl.Args {
+		if assign != nil && assign.Name == nil &&
+			(assign.Value == nil || !homeDeclOption(projectPOSIXWord(assign.Value))) {
+			known = false
+		}
+	}
+	for _, assign := range decl.Args {
+		if assign == nil || assign.Name == nil || assign.Naked || assign.Name.Value != "HOME" {
+			continue
+		}
+		if !known || assign.Index != nil || assign.Array != nil {
+			delete(vars, assign.Name.Value)
+			continue
+		}
+		updateSimpleVariables(vars, []*syntax.Assign{assign})
+	}
 }
 
 func updateSimpleVariables(vars map[string]string, assigns []*syntax.Assign) {

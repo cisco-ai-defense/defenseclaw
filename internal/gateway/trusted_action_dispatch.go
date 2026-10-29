@@ -292,6 +292,16 @@ func dispatchTrustedAction(
 			findings = withTwinProvenBlocks(findings, dispatchTrustedAction(parent, twin))
 		}()
 	}
+	// A cp, mv, install or ln call with a runtime-expanded operand word has
+	// a partial argv that ties no path to the call, so a literal destination
+	// went unjudged (cp a.txt ~/.defenseclaw/config.yaml $(true), GAP-2477).
+	// Each reading with static operands is one way the call can run, and a
+	// block proven on one counts.
+	for _, twin := range dynamicOperandTwinRequests(request) {
+		defer func() {
+			findings = withTwinProvenBlocks(findings, dispatchTrustedAction(parent, twin))
+		}()
+	}
 
 	facts = actionfacts.Analyze(request.Input)
 	analyzed = true
@@ -5341,6 +5351,42 @@ func homeSpellingTwinRequest(request trustedActionRequest, logins ...string) (tr
 		}
 	}
 	return twin, true
+}
+
+// dynamicOperandTwinRequests returns the request for each reading of
+// actionfacts.DynamicOperandTwins of a POSIX Bash call. Behind ProtectHome
+// the targets of a reading are not in the hook client map, which was walked
+// for the call as written, and an unlisted write target is judged as a
+// possible keys-file write, so a reading there would block benign project
+// copies; that gateway keeps the client map judgment.
+func dynamicOperandTwinRequests(request trustedActionRequest) []trustedActionRequest {
+	if request.ProtectedHomeHook {
+		return nil
+	}
+	if request.Input.DialectHint != actionfacts.DialectPOSIX && request.Input.DialectHint != "" {
+		return nil
+	}
+	command, known := trustedBashCommandInput(request.Input)
+	if !known {
+		return nil
+	}
+	var twins []trustedActionRequest
+	for _, rewritten := range actionfacts.DynamicOperandTwins(command, request.Input.ActiveHome) {
+		if rewritten == command {
+			continue
+		}
+		twin := request
+		twin.record, twin.recordTelemetry = nil, nil
+		twin.Input.Command, twin.Input.Args, twin.Input.Argv = rewritten, nil, nil
+		twin.conflictSource = nil
+		if strings.Contains(request.LegacyText, command) {
+			twin.LegacyText = strings.ReplaceAll(request.LegacyText, command, rewritten)
+		} else {
+			twin.LegacyText = rewritten
+		}
+		twins = append(twins, twin)
+	}
+	return twins
 }
 
 func trustedBashCommandInput(input actionfacts.Input) (string, bool) {
