@@ -5541,7 +5541,7 @@ function Write-Warn([string]$m) {{ "WARN $m" }}
 {_ps1_function("Protect-BackupsFolder")}
 $backups = Join-Path $DataDir 'backups'
 New-Item -ItemType Directory -Path $backups -Force | Out-Null
-$names = @('claudecode-settings.before-rollback.json', 'claudecode-settings.before-rollback.witness.json', 'guardrail-profiles.json')
+$names = @('claudecode-settings.before-rollback.json', 'claudecode-settings.before-rollback.witness.json', 'codex-config.before-rollback.toml', 'guardrail-profiles.json')
 # Elevated (the GitHub runner, an elevated console) a new file belongs to the
 # Administrators group. The installer creates its files as the user when it
 # runs elevated (SwapDefaultOwner), so the copies here are made the same way.
@@ -5567,6 +5567,8 @@ foreach ($n in $names) {{ "$n=$((Get-Acl -LiteralPath (Join-Path $backups $n)).A
     assert "DIR=True" in out, out
     assert "claudecode-settings.before-rollback.json=True" in out, out
     assert "claudecode-settings.before-rollback.witness.json=True" in out, out
+    # GAP-2553: the Codex config copy prepare-rollback keeps.
+    assert "codex-config.before-rollback.toml=True" in out, out
     assert "guardrail-profiles.json=False" in out, out
 
 
