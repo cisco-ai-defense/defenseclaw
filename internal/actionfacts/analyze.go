@@ -22,6 +22,8 @@ import (
 	"strings"
 	"unicode"
 	"unicode/utf8"
+
+	"github.com/defenseclaw/defenseclaw/internal/shellparse"
 )
 
 // Analyze derives a bounded, deterministic semantic projection. It never
@@ -2191,7 +2193,9 @@ func validScalar(value string, max int) bool {
 }
 
 func validateCommandText(value string) IssueCode {
-	if len(value) > maxCommandBytes {
+	if len(value) > maxCommandBytes || shellparse.TooDeep(value) {
+		// Past the reading bounds; a nesting this deep never reaches the
+		// recursive shell parsers (GAP-2537).
 		return IssueInputLimit
 	}
 	if !utf8.ValidString(value) {
