@@ -63,7 +63,7 @@ func ActiveUserTildeTwin(command, activeHome string, logins ...string) (twin str
 		}
 		return false
 	}
-	homeFree := !strings.Contains(command, "HOME")
+	homeFree := !strings.Contains(withoutShellComments(command, syntax.LangBash), "HOME")
 	file, err := syntax.NewParser(syntax.Variant(syntax.LangBash)).Parse(strings.NewReader(command), "")
 	if err != nil {
 		return "", nil, false
@@ -304,7 +304,10 @@ func msysWordLiteralPieces(word *syntax.Word) []msysLiteralPiece {
 // is such an expansion (no assignment, export, read or quoted name).
 func windowsProfileHomeTwin(command string) (string, bool) {
 	const name = "USERPROFILE"
-	if !strings.Contains(command, name) || strings.Contains(command, "HOME") {
+	// A comment never runs, so its HOME or USERPROFILE text is not counted
+	// (GAP-2473).
+	scan := withoutShellComments(command, syntax.LangBash)
+	if !strings.Contains(scan, name) || strings.Contains(scan, "HOME") {
 		return command, false
 	}
 	file, err := syntax.NewParser(syntax.Variant(syntax.LangBash)).Parse(strings.NewReader(command), "")
@@ -324,7 +327,7 @@ func windowsProfileHomeTwin(command string) (string, bool) {
 		offsets = append(offsets, int(param.Param.Pos().Offset()))
 		return true
 	})
-	if len(offsets) == 0 || len(offsets) != strings.Count(command, name) {
+	if len(offsets) == 0 || len(offsets) != strings.Count(scan, name) {
 		return command, false
 	}
 	sort.Ints(offsets)

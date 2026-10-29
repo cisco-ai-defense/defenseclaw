@@ -145,20 +145,24 @@ func homeResolvedSource(source, home string) (string, bool) {
 	}
 	sort.Slice(spans, func(i, j int) bool { return spans[i].start < spans[j].start })
 	var out, rest strings.Builder
+	// A comment never runs, so a HOME inside one cannot change what ~ and
+	// $HOME name (GAP-2473); the guard below reads the text without them.
+	scan := withoutShellComments(source, syntax.LangPOSIX)
 	last := 0
 	for _, word := range spans {
 		if word.start < last {
 			return "", false
 		}
 		out.WriteString(source[last:word.start])
-		rest.WriteString(source[last:word.start])
+		rest.WriteString(scan[last:word.start])
 		out.WriteString("'" + strings.ReplaceAll(word.path, "'", `'\''`) + "'")
 		last = word.end
 	}
 	out.WriteString(source[last:])
-	rest.WriteString(source[last:])
-	// Any other mention of HOME (an assignment, export, unset or read) could
-	// change what ~ and $HOME name when the command runs.
+	rest.WriteString(scan[last:])
+	// Any other mention of HOME outside a comment (an assignment, export,
+	// unset or read) could change what ~ and $HOME name when the command
+	// runs.
 	if strings.Contains(rest.String(), "HOME") {
 		return "", false
 	}
@@ -347,4 +351,41 @@ func optionHomeRewriteWord(word *syntax.Word) (*syntax.Word, bool) {
 		return nil, false
 	}
 	return rest, true
+}
+
+// withoutShellComments returns source with the text of every shell comment
+// ("# ..." up to its line end) replaced by spaces, so every byte offset into
+// source is unchanged. A comment is never run, so it cannot change what HOME,
+// ~ or USERPROFILE name; the home twins read their raw-text HOME, USER and
+// USERPROFILE guards from this text, and a trailing "# HOME" no longer turns
+// a twin off (GAP-2473). Only comments the parser reports are blanked, so a
+// "#" inside a word, a quote, $# or ${#x} is kept. source is returned
+// unchanged when it has no "#" or does not parse.
+func withoutShellComments(source string, lang syntax.LangVariant) string {
+	if !strings.Contains(source, "#") {
+		return source
+	}
+	file, err := syntax.NewParser(syntax.Variant(lang), syntax.KeepComments(true)).
+		Parse(strings.NewReader(source), "")
+	if err != nil {
+		return source
+	}
+	out := []byte(source)
+	syntax.Walk(file, func(node syntax.Node) bool {
+		comment, ok := node.(*syntax.Comment)
+		if !ok {
+			return true
+		}
+		start, end := int(comment.Pos().Offset()), int(comment.End().Offset())
+		if start < 0 || end <= start || end > len(out) || out[start] != '#' {
+			return true
+		}
+		for i := start; i < end; i++ {
+			if out[i] != '\n' && out[i] != '\r' {
+				out[i] = ' '
+			}
+		}
+		return true
+	})
+	return string(out)
 }
