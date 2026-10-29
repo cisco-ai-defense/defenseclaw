@@ -7,7 +7,9 @@ import (
 	"context"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 )
 
 // The planner statistics are taken once the history is long enough and again
@@ -246,5 +248,108 @@ func TestPlannerStatisticsCoverIndexesAMigrationRebuilt(t *testing.T) {
 	// Once covered, a later pass of the same history takes nothing.
 	if ran, err := restarted.RefreshPlannerStatistics(ctx); err != nil || ran {
 		t.Fatalf("second pass: ran=%v err=%v, want no ANALYZE", ran, err)
+	}
+}
+
+// GAP-1790: ANALYZE gives the store's one connection back to a hook write
+// that waits for it, instead of holding it for the whole read of an index
+// (tens of seconds on a cold multi-gigabyte store, while every hook queued
+// behind it). The statistics are taken at the next pass.
+func TestPlannerStatisticsYieldTheConnectionToAWaitingWrite(t *testing.T) {
+	store, cleanup := newTestStore(t)
+	defer cleanup()
+	ctx := context.Background()
+	logEvents := func(n int) {
+		t.Helper()
+		for i := 0; i < n; i++ {
+			if err := store.LogEvent(Event{Action: "hook_decision", Target: "planner-yield", Severity: "INFO", SessionID: "s"}); err != nil {
+				t.Fatalf("LogEvent: %v", err)
+			}
+		}
+	}
+	// The first statistics, then a history that has doubled since: the
+	// refresh is the pass that yields.
+	logEvents(plannerStatsMinRows + 10)
+	if ran, err := store.RefreshPlannerStatistics(ctx); err != nil || !ran {
+		t.Fatalf("first statistics = (%t, %v), want taken", ran, err)
+	}
+	logEvents(2 * (plannerStatsMinRows + 10))
+	held := make(chan struct{})
+	var calls atomic.Int32
+	previous := plannerStatsAnalyzePhaseHook
+	plannerStatsAnalyzePhaseHook = func(ctx context.Context) {
+		if calls.Add(1) != 1 {
+			return
+		}
+		close(held)
+		// A slow cold read of a large index.
+		select {
+		case <-ctx.Done():
+		case <-time.After(5 * time.Second):
+		}
+	}
+	t.Cleanup(func() { plannerStatsAnalyzePhaseHook = previous })
+	type refresh struct {
+		ran bool
+		err error
+	}
+	first := make(chan refresh, 1)
+	go func() {
+		ran, err := store.RefreshPlannerStatistics(ctx)
+		first <- refresh{ran, err}
+	}()
+	select {
+	case <-held:
+	case <-time.After(10 * time.Second):
+		t.Fatal("ANALYZE never started")
+	}
+	started := time.Now()
+	if err := store.LogEvent(Event{Action: "hook_decision", Target: "planner-yield-hook", Severity: "INFO", SessionID: "s"}); err != nil {
+		t.Fatalf("hook write: %v", err)
+	}
+	if waited := time.Since(started); waited > 2*time.Second {
+		t.Fatalf("a hook write waited %s behind ANALYZE", waited)
+	}
+	got := <-first
+	if got.err != nil || got.ran {
+		t.Fatalf("interrupted refresh = (%t, %v), want (false, nil)", got.ran, got.err)
+	}
+	if ran, err := store.RefreshPlannerStatistics(ctx); err != nil || !ran {
+		t.Fatalf("next refresh = (%t, %v), want the statistics taken", ran, err)
+	}
+	if next := store.plannerStatsNext.Load(); next != 0 {
+		t.Fatalf("a complete pass left the resume point at target %d", next)
+	}
+}
+
+// GAP-1790, GAP-0233: a history without statistics (a store from before
+// 1.0.3) misplans the hooks' lookups until they are taken, so its first
+// ANALYZE does not yield to the hooks.
+func TestFirstPlannerStatisticsDoNotYield(t *testing.T) {
+	store, cleanup := newTestStore(t)
+	defer cleanup()
+	ctx := context.Background()
+	for i := 0; i < plannerStatsMinRows+10; i++ {
+		if err := store.LogEvent(Event{Action: "hook_decision", Target: "planner-first", Severity: "INFO", SessionID: "s"}); err != nil {
+			t.Fatalf("LogEvent: %v", err)
+		}
+	}
+	var calls atomic.Int32
+	previous := plannerStatsAnalyzePhaseHook
+	plannerStatsAnalyzePhaseHook = func(ctx context.Context) {
+		if calls.Add(1) != 1 {
+			return
+		}
+		go func() {
+			_ = store.LogEvent(Event{Action: "hook_decision", Target: "planner-first-hook", Severity: "INFO", SessionID: "s"})
+		}()
+		select {
+		case <-ctx.Done():
+		case <-time.After(400 * time.Millisecond):
+		}
+	}
+	t.Cleanup(func() { plannerStatsAnalyzePhaseHook = previous })
+	if ran, err := store.RefreshPlannerStatistics(ctx); err != nil || !ran {
+		t.Fatalf("first statistics = (%t, %v), want taken despite a waiting write", ran, err)
 	}
 }

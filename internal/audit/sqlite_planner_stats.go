@@ -6,8 +6,10 @@ package audit
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"strings"
+	"time"
 )
 
 const (
@@ -99,21 +101,36 @@ func (s *Store) RefreshPlannerStatistics(ctx context.Context) (bool, error) {
 			if s.walPressure.Load() {
 				return false, nil
 			}
-			if err := s.analyzeOne(ctx, target); err != nil {
+			// An index without statistics misplans the hooks' lookups
+			// (GAP-0233): taking them does not yield.
+			if err := s.analyzeOne(ctx, target, false); err != nil {
 				return false, err
 			}
 		}
 		s.plannerStatsComplete.Store(true)
 		return len(targets) > 0, nil
 	}
-	for _, target := range targets {
+	// Statistics that only describe a smaller history are refreshed behind
+	// the hooks: each ANALYZE yields to a waiting write. A pass that yielded
+	// goes on from the target it yielded at, so a busy store still gets
+	// through every target. A history without statistics (last == 0, a
+	// store from before 1.0.3) misplans the hooks' lookups until they are
+	// taken, so that first pass does not yield.
+	refresh := last > 0
+	for i := int(s.plannerStatsNext.Load()); i < len(targets); i++ {
 		if s.walPressure.Load() {
+			s.plannerStatsNext.Store(int64(i))
 			return false, nil
 		}
-		if err := s.analyzeOne(ctx, target); err != nil {
+		if err := s.analyzeOne(ctx, targets[i], refresh); err != nil {
+			if errors.Is(err, errPlannerStatsYielded) {
+				s.plannerStatsNext.Store(int64(i))
+				return false, nil
+			}
 			return false, err
 		}
 	}
+	s.plannerStatsNext.Store(0)
 	s.plannerStatsRows.Store(rows)
 	s.plannerStatsComplete.Store(true)
 	return true, nil
@@ -237,7 +254,7 @@ func (s *Store) plannerStatsTargets(ctx context.Context) ([]string, error) {
 
 // analyzeOne takes the statistics of one index or index-less table on a
 // connection it gives back when done.
-func (s *Store) analyzeOne(ctx context.Context, target string) error {
+func (s *Store) analyzeOne(ctx context.Context, target string, yield bool) error {
 	// The limit belongs to the connection that runs ANALYZE, which the pool
 	// may replace: set it on the one connection used here.
 	conn, err := s.db.Conn(ctx)
@@ -248,13 +265,87 @@ func (s *Store) analyzeOne(ctx context.Context, target string) error {
 	if _, err := conn.ExecContext(ctx, fmt.Sprintf("PRAGMA analysis_limit=%d", plannerStatsRowLimit)); err != nil {
 		return fmt.Errorf("audit: limit planner statistics: %w", err)
 	}
-	err = retryBusyObserved(ctx, "audit_planner_stats", s.sqliteBusyObservabilityV8(), func() error {
-		_, execErr := conn.ExecContext(ctx, `ANALYZE "`+strings.ReplaceAll(target, `"`, `""`)+`"`)
+	statementCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	yielded := func() bool { return false }
+	if yield {
+		yielded = s.yieldPlannerStatsToWriters(statementCtx, cancel)
+	}
+	err = retryBusyObserved(statementCtx, "audit_planner_stats", s.sqliteBusyObservabilityV8(), func() error {
+		if plannerStatsAnalyzePhaseHook != nil {
+			plannerStatsAnalyzePhaseHook(statementCtx)
+		}
+		_, execErr := conn.ExecContext(statementCtx, `ANALYZE "`+strings.ReplaceAll(target, `"`, `""`)+`"`)
 		return execErr
 	})
+	cancel()
 	_, _ = conn.ExecContext(ctx, "PRAGMA analysis_limit=0")
+	if yielded() && ctx.Err() == nil {
+		// SQLite rolled the statement back; the next pass takes it again,
+		// with the pages this one read still cached.
+		return fmt.Errorf("%w: %s", errPlannerStatsYielded, target)
+	}
 	if err != nil {
 		return fmt.Errorf("audit: take planner statistics of %s: %w", target, err)
 	}
 	return nil
+}
+
+// errPlannerStatsYielded reports an ANALYZE that gave the store's connection
+// back to a waiting writer before it finished (yieldPlannerStatsToWriters).
+var errPlannerStatsYielded = errors.New("audit: planner statistics yielded to waiting writers")
+
+// plannerStatsYieldWait is how long ANALYZE keeps the store's one connection
+// once another statement waits for it, and plannerStatsYieldPoll how often it
+// looks. Variables so tests can change them.
+var (
+	plannerStatsYieldWait = 100 * time.Millisecond
+	plannerStatsYieldPoll = 10 * time.Millisecond
+)
+
+// plannerStatsAnalyzePhaseHook runs inside each ANALYZE attempt while it
+// holds the store's connection: a test seam that holds the statement open.
+var plannerStatsAnalyzePhaseHook func(context.Context)
+
+// yieldPlannerStatsToWriters interrupts the ANALYZE on ctx (cancel) once a
+// statement has waited plannerStatsYieldWait for the store's one connection,
+// and returns whether it did. ANALYZE reads a whole index on that connection:
+// on a multi-gigabyte store with a cold page cache one index took it for
+// tens of seconds, and when the history had doubled since the last
+// statistics every hook queued behind it, an account's 32 requests filled,
+// and its later calls were refused and blocked as a gateway no-answer
+// (GAP-1790, managed RHEL, 3.7 GB store). Hooks come first; the statistics
+// are taken again at the next pass.
+func (s *Store) yieldPlannerStatsToWriters(ctx context.Context, cancel context.CancelFunc) func() bool {
+	var yielded bool
+	done := make(chan struct{})
+	base := s.db.Stats().WaitCount
+	go func() {
+		defer close(done)
+		ticker := time.NewTicker(plannerStatsYieldPoll)
+		defer ticker.Stop()
+		var waitingSince time.Time
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case now := <-ticker.C:
+				if s.db.Stats().WaitCount == base {
+					continue
+				}
+				if waitingSince.IsZero() {
+					waitingSince = now
+				}
+				if now.Sub(waitingSince) >= plannerStatsYieldWait {
+					yielded = true
+					cancel()
+					return
+				}
+			}
+		}
+	}()
+	return func() bool {
+		<-done
+		return yielded
+	}
 }

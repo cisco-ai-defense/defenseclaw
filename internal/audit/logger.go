@@ -367,7 +367,13 @@ func (l *Logger) persistScanWithCorrelation(
 	// boundary, but all signal fanout is owned by the generated v8 runtime.
 	// Passing nil legacy collaborators prevents a second JSONL/OTel path from
 	// being revived by configuration or a concurrent reload.
-	scanID, err := scanner.EmitScanResult(ctx, l.store, result, agent)
+	// Inside a hook call the scan's summary commits with the call's other
+	// writes (callScanPersistence).
+	var persistence scanner.ScanPersistence = l.store
+	if l.store != nil && CallWritesOpen(ctx, l.store) {
+		persistence = callScanPersistence{Store: l.store, ctx: ctx}
+	}
+	scanID, err := scanner.EmitScanResult(ctx, persistence, result, agent)
 	if err != nil {
 		return "", err
 	}

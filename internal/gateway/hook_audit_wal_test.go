@@ -32,9 +32,10 @@ import (
 const hookAuditWALFramesPerCall = 175
 
 // hookAuditCommitsPerCall bounds the commits of that call: the correlation
-// ledger, the scan lifecycle, the tool chain, the call's batch at its audit
-// row and at its hook_decision, and the receipt (GAP-1791).
-const hookAuditCommitsPerCall = 6
+// ledger, the tool chain, the call's batch at its audit row (with the rule
+// scan's summary since GAP-1790) and at its hook_decision, and the receipt
+// (GAP-1791).
+const hookAuditCommitsPerCall = 5
 
 // TestHookCallWALFramesBounded drives the real hook handler, audit store and
 // v8 runtime over five sessions and counts the log frames of the measured

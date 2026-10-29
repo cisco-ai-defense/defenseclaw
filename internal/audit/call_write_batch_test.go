@@ -7,6 +7,11 @@ import (
 	"context"
 	"sync"
 	"testing"
+	"time"
+
+	"github.com/google/uuid"
+
+	"github.com/defenseclaw/defenseclaw/internal/scanner"
 
 	"github.com/defenseclaw/defenseclaw/internal/observability"
 	observabilityredaction "github.com/defenseclaw/defenseclaw/internal/observability/redaction"
@@ -143,5 +148,99 @@ func TestCallWriteBatchCommitsObservationsWithTheAppends(t *testing.T) {
 	}
 	if got := countAuditEvents(t, store, "call-observed"); got != 1 {
 		t.Fatalf("%d rows", got)
+	}
+}
+
+func countScanResults(t *testing.T, store *Store, id string) int {
+	t.Helper()
+	var n int
+	if err := store.db.QueryRow(`SELECT COUNT(*) FROM scan_results WHERE id = ?`, id).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	return n
+}
+
+func hookRuleScan(id string, findings ...scanner.Finding) *scanner.ScanResult {
+	return &scanner.ScanResult{
+		ScanID: id, Scanner: "hook-rules", Target: "claudecode:PreToolUse", TargetType: "tool_call",
+		Timestamp: time.Now().UTC(), Findings: findings,
+	}
+}
+
+// GAP-1790, GAP-1791: the rule scan of a benign hook call (a runtime scan
+// without findings) commits with the call's other writes at its flush, not
+// in a transaction of its own on the store's one connection before the
+// verdict. A scan with findings, and a scan outside a call, still commit at
+// once.
+func TestHookScanSummaryCommitsWithTheCallsWrites(t *testing.T) {
+	store, _ := newGroupCommitWriter(t)
+	logger := NewLogger(store)
+	transactions := observeTransactions(t)
+	ctx := WithCallWriteBatch(context.Background(), store)
+	benign := uuid.Must(uuid.NewV7()).String()
+	if _, err := logger.persistScanWithCorrelation(ctx, hookRuleScan(benign), "allow",
+		ScanCorrelation{EvaluationID: "eval-benign", SessionID: "s1"}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if got := countScanResults(t, store, benign); got != 0 {
+		t.Fatalf("the benign scan summary committed before the call's flush (%d rows)", got)
+	}
+	found := uuid.Must(uuid.NewV7()).String()
+	if _, err := logger.persistScanWithCorrelation(ctx, hookRuleScan(found, scanner.Finding{
+		ID: "f1", Severity: scanner.SeverityHigh, Title: "T", Scanner: "hook-rules", RuleID: "hook.cat.slug",
+	}), "block", ScanCorrelation{EvaluationID: "eval-found", SessionID: "s1"}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if got := countScanResults(t, store, found); got != 1 {
+		t.Fatalf("a scan with findings waited for the flush (%d rows)", got)
+	}
+	FlushCallWrites(ctx)
+	if got := countScanResults(t, store, benign); got != 1 {
+		t.Fatalf("the benign scan summary was not committed by the flush (%d rows)", got)
+	}
+	if got := transactions(); len(got) != 1 || got[0] != "hook_call_transaction" {
+		t.Fatalf("transactions = %v, want one hook_call_transaction", got)
+	}
+	CloseCallWrites(ctx)
+	outside := uuid.Must(uuid.NewV7()).String()
+	if _, err := logger.persistScanWithCorrelation(ctx, hookRuleScan(outside), "allow",
+		ScanCorrelation{EvaluationID: "eval-late"}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if got := countScanResults(t, store, outside); got != 1 {
+		t.Fatalf("a scan after the batch closed did not commit at once (%d rows)", got)
+	}
+}
+
+// GAP-1790: a runtime scan does not wait on the finding lifecycle lock, which
+// only the current-state projection of an asset scan needs. Holding it around
+// every hook's scan transaction queued the hooks one behind another.
+func TestRuntimeScanDoesNotWaitOnTheFindingLifecycleLock(t *testing.T) {
+	store, _ := newGroupCommitWriter(t)
+	store.findingLifecycleMu.Lock()
+	locked := true
+	defer func() {
+		if locked {
+			store.findingLifecycleMu.Unlock()
+		}
+	}()
+	done := make(chan error, 1)
+	go func() {
+		_, err := store.PersistScanLifecycle(scanner.ScanSummaryParams{
+			ScanID: uuid.Must(uuid.NewV7()).String(), Scanner: "hook-rules", Target: "claudecode:PreToolUse",
+			TargetType: "tool_call", Timestamp: time.Now().UTC(), Verdict: "allow", EvaluationID: "eval-1",
+		}, nil, scanner.ScanFindingMeta{EvaluationID: "eval-1"})
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(2 * time.Second):
+		store.findingLifecycleMu.Unlock()
+		locked = false
+		<-done
+		t.Fatal("a runtime scan waited on the finding lifecycle lock")
 	}
 }

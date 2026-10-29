@@ -265,6 +265,9 @@ type Store struct {
 	// plannerStatsComplete is set once this process has checked that every
 	// planner statistics target of the history has its statistics.
 	plannerStatsComplete atomic.Bool
+	// plannerStatsNext is the target a full ANALYZE pass that yielded to
+	// the hooks goes on from (RefreshPlannerStatistics).
+	plannerStatsNext atomic.Int64
 	// observationGroup groups concurrent correlation observation writes
 	// into one transaction (CorrelationRepository.RecordObservations).
 	observationGroup writeGroup
