@@ -308,6 +308,18 @@ func TestSandboxAuthorityTwoAccounts(t *testing.T) {
 
 // Revocation and a restarted gateway: the store persists, a tombstone
 // stays revoked, and policy/current reports it.
+// A managed sandbox route without the CSRF client header is refused like
+// every other CSRF refusal: 403 with a JSON body and Content-Type
+// application/json (GAP-2540).
+func TestSandboxAuthorityMissingClientHeaderIsAJSONRefusal(t *testing.T) {
+	f := newSandboxFixture(t, config.EnterpriseEnrollmentConfig{}, nil)
+	rec := f.do(sbxAlice, http.MethodPost, sandboxrelay.PathPolicyResolve, claudeResolve(), map[string]string{sandboxrelay.ClientHeader: "", sandboxrelay.ConnectorHeader: "claudecode"})
+	if rec.Code != http.StatusForbidden || rec.Header().Get("Content-Type") != "application/json" ||
+		rec.Body.String() != "{\"error\":\"missing X-DefenseClaw-Client header\"}\n" {
+		t.Fatalf("missing client header: status %d Content-Type %q body %q", rec.Code, rec.Header().Get("Content-Type"), rec.Body.String())
+	}
+}
+
 func TestSandboxAuthorityRevokedAndRestart(t *testing.T) {
 	f := newSandboxFixture(t, config.EnterpriseEnrollmentConfig{}, nil)
 	f.setGroups(sbxAlice, "dc-sbx-contractors")

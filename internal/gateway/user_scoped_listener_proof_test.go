@@ -21,9 +21,10 @@ const (
 var listenerProofTestNonce = strings.Repeat("5a", 32)
 
 type listenerProofResult struct {
-	status int
-	proof  string
-	body   string
+	status      int
+	proof       string
+	body        string
+	contentType string
 }
 
 func requestUserScopedListenerProof(handler http.Handler, observed *userScopedObservation, method, remote, scope, keyID, nonce string) listenerProofResult {
@@ -42,9 +43,10 @@ func requestUserScopedListenerProof(handler http.Handler, observed *userScopedOb
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, req)
 	return listenerProofResult{
-		status: response.Code,
-		proof:  response.Header().Get(connector.UserScopedListenerProofHeader),
-		body:   response.Body.String(),
+		status:      response.Code,
+		proof:       response.Header().Get(connector.UserScopedListenerProofHeader),
+		body:        response.Body.String(),
+		contentType: response.Header().Get("Content-Type"),
 	}
 }
 
@@ -106,6 +108,11 @@ func TestUserScopedListenerProofAnswersOnlyAProtectedUsersHookCredential(t *test
 		result := requestUserScopedListenerProof(handler, observed, tc.method, tc.remote, tc.scope, tc.keyID, tc.nonce)
 		if result.status != http.StatusUnauthorized || result.proof != "" || observed.called {
 			t.Errorf("%s: status %d proof %q called=%v; want a 401 without a proof", name, result.status, result.proof, observed.called)
+		}
+		// The refusal is the documented auth refusal: a JSON body with
+		// Content-Type application/json, like /status (GAP-2540).
+		if result.contentType != "application/json" || result.body != "{\"error\":\"unauthorized\"}\n" {
+			t.Errorf("%s: refusal Content-Type %q body %q; want application/json {\"error\":\"unauthorized\"}", name, result.contentType, result.body)
 		}
 	}
 
