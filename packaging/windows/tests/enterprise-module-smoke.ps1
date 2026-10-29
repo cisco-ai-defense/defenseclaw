@@ -953,9 +953,12 @@ if ($elevated) {
                 throw 'legacy residual lifecycle lock did not inherit before reinstall'
             }
 
+            # The drifted descriptor is repaired, and the repair is reported
+            # on the warning stream. Keep it off stdout, which carries only the
+            # JSON report; a failed repair still throws.
             $lock = Enter-DefenseClawLifecycleLock `
                 -Layout $lockLayout `
-                -TimeoutSeconds 2
+                -TimeoutSeconds 2 3>$null
             try {
                 if ($null -eq $lock) {
                     throw 'persistent lifecycle file lock was not reusable'
@@ -1010,7 +1013,7 @@ if ($elevated) {
             try {
                 $repairedLock = Enter-DefenseClawLifecycleLock `
                     -Layout $lockLayout `
-                    -TimeoutSeconds 2
+                    -TimeoutSeconds 2 3>$null
             }
             finally {
                 if ($null -ne $repairedLock) {

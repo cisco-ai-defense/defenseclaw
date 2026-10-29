@@ -2253,10 +2253,9 @@ func withWindowsManagedRuntimeSelectorTransaction(
 }
 
 // repairWindowsManagedRuntimeMachineFile re-stamps the canonical protection
-// on a selector or selector lock whose owner or DACL drifted. Structure stays
-// fatal: a reparse point anywhere on the path, a hard-linked file, or an owner
-// outside SYSTEM, Administrators and TrustedInstaller is never adopted. It
-// reports whether a repair was made. Only elevated callers reach it.
+// on a selector or selector lock whose owner or DACL drifted, under the owner
+// and structure rules of repairWindowsManagedMachineFile. It reports whether a
+// repair was made. Only elevated callers reach it.
 func repairWindowsManagedRuntimeMachineFile(path string, userReadable bool) (bool, error) {
 	return repairWindowsManagedMachineFile(path, userReadable, func(path string) error {
 		return validateWindowsManagedRuntimeMachineFileProtection(path, userReadable)
@@ -2266,9 +2265,13 @@ func repairWindowsManagedRuntimeMachineFile(path string, userReadable bool) (boo
 // repairWindowsManagedMachineFile re-stamps the canonical machine-policy
 // protection on one administrator-owned file (a selector, a selector lock, a
 // Claude or Cursor transaction lock) when validate rejects it. Structure stays
-// fatal: a reparse point anywhere on the path, a hard-linked file, or an owner
-// outside SYSTEM, Administrators and TrustedInstaller is never adopted. It
-// reports whether a repair was made. Only elevated callers reach it.
+// fatal: a reparse point anywhere on the path or a hard-linked file is never
+// adopted. The owner must be SYSTEM, Administrators, TrustedInstaller or an
+// administrator principal the trust walk already accepts as drift (the
+// built-in Administrator, Domain or Enterprise Admins, a local Administrators
+// member, which an elevated takeown or manual edit leaves behind); a
+// standard-user owner is never adopted. It reports whether a repair was made.
+// Only elevated callers reach it.
 func repairWindowsManagedMachineFile(
 	path string,
 	userReadable bool,
@@ -2293,7 +2296,7 @@ func repairWindowsManagedMachineFile(
 		if err != nil {
 			return fmt.Errorf("inspect managed machine file owner: %w", err)
 		}
-		if !windowsEnterpriseAdminIdentity(owner) {
+		if !windowsEnterpriseAdminIdentity(owner) && !managed.WindowsAdminEquivalentPrincipal(owner) {
 			return fmt.Errorf("managed machine file owner %s is not trusted", owner)
 		}
 		return setWindowsManagedPolicyProtection(path, false, userReadable)

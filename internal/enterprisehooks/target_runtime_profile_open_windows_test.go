@@ -281,7 +281,9 @@ func TestWindowsManagedRuntimePlanSkipsProfileStillBusyAfterRetries(t *testing.T
 	if err != nil {
 		t.Fatalf("plan without publishing: %v", err)
 	}
-	if validation.ManifestSHA256 != strings.Repeat("a", 64) || validation.TargetCount != 1 ||
+	// TargetCount is the unchanged manifest's enabled-row count, here the
+	// busy user's three connector rows.
+	if validation.ManifestSHA256 != strings.Repeat("a", 64) || validation.TargetCount != len(manifest.Targets) ||
 		len(validation.Roots) != 0 || len(validation.SkippedProfiles) != 1 ||
 		validation.SkippedProfiles[0].SID != sid.String() {
 		t.Fatalf("validation plan = %+v, want the busy user skipped without a manifest change", validation)

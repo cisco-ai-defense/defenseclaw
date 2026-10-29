@@ -24,6 +24,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"golang.org/x/sys/windows"
 )
 
@@ -37,19 +38,40 @@ func TestEnsureClaudeCodeConfigDirWindowsProtectsCreatedDirectory(t *testing.T) 
 	}
 }
 
-func TestEnsureClaudeCodeConfigDirWindowsRejectsUntrustedExistingDirectory(t *testing.T) {
+// The user's own Claude configuration directory with an extra write grant (a
+// helpdesk or Domain Admins entry) is permission drift: hook enrollment
+// accepts and logs it and leaves the operator's ACL alone. A junction in
+// place of the directory is structural and still refuses.
+func TestEnsureClaudeCodeConfigDirWindowsAcceptsDriftedExistingDirectory(t *testing.T) {
+	t.Setenv(managed.TrustStrictAncestorsEnv, "")
+	captureManagedResilienceEvents(t)
 	configDir := filepath.Join(t.TempDir(), "existing-claude-config")
 	if err := os.MkdirAll(configDir, 0o700); err != nil {
 		t.Fatalf("create configuration directory: %v", err)
 	}
 	setHookAPITokenWindowsUntrustedDACL(t, configDir, windows.GENERIC_WRITE)
 
-	err := ensureClaudeCodeConfigDir(configDir)
-	if err == nil || !strings.Contains(err.Error(), "untrusted Windows principal") {
-		t.Fatalf("ensureClaudeCodeConfigDir error = %v, want untrusted-principal rejection", err)
+	if err := ensureClaudeCodeConfigDir(configDir); err != nil {
+		t.Fatalf("ensureClaudeCodeConfigDir error = %v, want drift accepted", err)
 	}
 	if err := hookAPIValidateDirectoryElement(configDir); err == nil ||
 		!strings.Contains(err.Error(), "untrusted Windows principal") {
 		t.Fatalf("existing operator ACL was unexpectedly rewritten: %v", err)
+	}
+}
+
+func TestEnsureClaudeCodeConfigDirWindowsRejectsJunction(t *testing.T) {
+	root := t.TempDir()
+	outside := filepath.Join(root, "outside")
+	if err := os.Mkdir(outside, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	junction := filepath.Join(root, "claude-config")
+	createTestDirectoryRedirect(t, junction, outside)
+	t.Cleanup(func() { _ = os.Remove(junction) })
+
+	err := ensureClaudeCodeConfigDir(junction)
+	if err == nil || !strings.Contains(strings.ToLower(err.Error()), "reparse") {
+		t.Fatalf("ensureClaudeCodeConfigDir on a junction error = %v, want reparse-point rejection", err)
 	}
 }

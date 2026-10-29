@@ -189,9 +189,7 @@ func TestInspectManagedCodexSystemRequirementsRejectsUserWritableSource(t *testi
 	if err := os.WriteFile(path, []byte("allow_managed_hooks_only = false\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Chmod(path, 0o666); err != nil {
-		t.Fatal(err)
-	}
+	grantTestUntrustedWriter(t, path)
 	codexSystemRequirementsPathForInspection = func() (string, error) { return path, nil }
 
 	if _, err := inspectCodexSystemRequirementsForMode(true); err == nil ||

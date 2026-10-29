@@ -56,3 +56,14 @@ func TestManagedInspectorRetryBackoff(t *testing.T) {
 		t.Fatalf("backoff = %v", got)
 	}
 }
+
+// An unmanaged gateway has no service manager to restart it, so a guardrail
+// (connector setup) failure must not stop the process before the API is ready.
+func TestGuardrailFailureIsFatalOnlyWhenManaged(t *testing.T) {
+	if guardrailFailureIsFatal("") || guardrailFailureIsFatal("unmanaged_byod") {
+		t.Fatal("an unmanaged gateway exits on a guardrail failure")
+	}
+	if !guardrailFailureIsFatal("managed_enterprise") {
+		t.Fatal("a managed gateway stays up with the guardrail dead")
+	}
+}

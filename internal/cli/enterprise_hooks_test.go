@@ -1558,6 +1558,7 @@ func TestEnterpriseHooksReconcileManagedRejectsUntrustedManifest(t *testing.T) {
 	if err := os.Chmod(manifest, 0o666); err != nil {
 		t.Fatalf("chmod manifest: %v", err)
 	}
+	grantUntrustedWriterForTest(t, manifest)
 
 	origCfg := cfg
 	origManifest := enterpriseHookManifest
@@ -1606,6 +1607,9 @@ func TestEnterpriseHookManagedRuntimeRejectsUserOwnedDataDir(t *testing.T) {
 	if err := os.Chmod(dir, 0o700); err != nil {
 		t.Fatalf("chmod data dir: %v", err)
 	}
+	// The process user can be an administrator principal, which the trust
+	// walk accepts as drift; give a standard-user principal write instead.
+	grantUntrustedWriterForTest(t, dir)
 	cfg = &config.Config{DataDir: dir, DeploymentMode: "managed_enterprise"}
 
 	err := validateEnterpriseHookManagedRuntime()

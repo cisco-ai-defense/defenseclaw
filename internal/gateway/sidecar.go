@@ -737,10 +737,12 @@ func (s *Sidecar) Run(ctx context.Context) (runErr error) {
 	var wg sync.WaitGroup
 	errCh := make(chan error, 7)
 	// fatalCh carries the death of a subsystem the gateway cannot protect
-	// without: the config manager, the REST API, the guardrail proxy and the
-	// IPC server. The process stops so the service manager restarts it,
-	// instead of staying Running with protection off.
+	// without: the config manager, the REST API, the guardrail proxy (managed
+	// deployments only, see guardrailFailureIsFatal) and the IPC server. The
+	// process stops so the service manager restarts it, instead of staying
+	// Running with protection off.
 	fatalCh := make(chan error, 4)
+	guardrailFatal := guardrailFailureIsFatal(s.currentConfig().DeploymentMode)
 
 	configPath := s.currentConfig().ConfigFilePath
 	if strings.TrimSpace(configPath) == "" {
@@ -847,7 +849,11 @@ func (s *Sidecar) Run(ctx context.Context) (runErr error) {
 		defer wg.Done()
 		if err := s.runRestartable(runCtx, "guardrail", s.guardrailRestartCh, s.runActiveGuardrail); err != nil && runCtx.Err() == nil {
 			fmt.Fprintf(os.Stderr, "[sidecar] guardrail exited with error: %v\n", err)
-			fatalCh <- subsystemFailure("guardrail", err)
+			if guardrailFatal {
+				fatalCh <- subsystemFailure("guardrail", err)
+			} else {
+				errCh <- err
+			}
 		}
 	}()
 
@@ -990,6 +996,18 @@ func (s *Sidecar) Run(ctx context.Context) (runErr error) {
 // subsystemFailure names the subsystem in a fatal error.
 func subsystemFailure(name string, err error) error {
 	return fmt.Errorf("sidecar: %s subsystem stopped: %w", name, err)
+}
+
+// guardrailFailureIsFatal reports whether the guardrail runner's death stops
+// the process. A managed deployment runs under a service manager that restarts
+// it, so exiting beats staying up with protection off. An unmanaged gateway is
+// started by the CLI with no supervisor: its guardrail runner also performs
+// connector setup, whose failures (a transient sharing or access-denied error
+// on an agent config file, an unsupported agent version) the operator fixes by
+// re-running setup. That gateway keeps its API, health reporting and audit
+// running and reports the guardrail error in health, as it did before.
+func guardrailFailureIsFatal(deploymentMode string) bool {
+	return managed.IsManagedEnterprise(deploymentMode)
 }
 
 // waitForStopOrSubsystemFailure blocks until ctx is done, returning nil, or

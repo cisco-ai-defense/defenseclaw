@@ -2094,7 +2094,12 @@ func TestVerifyWindowsClaudeRejectsHardLinkedSharedHook(t *testing.T) {
 	}
 }
 
-func TestManagedSharedHookVerifierRejectsNoncanonicalContractLockProtection(t *testing.T) {
+// Contract-lock descriptor drift (here an Everyone write grant) is permission
+// drift: an elevated verifier re-stamps the canonical protection on the held
+// file and an unprivileged one accepts and logs it. The contract bytes stay
+// bound by their digests either way; a hard-linked shared hook is still
+// refused (TestVerifyWindowsClaudeRejectsHardLinkedSharedHook).
+func TestManagedSharedHookVerifierRepairsNoncanonicalContractLockProtection(t *testing.T) {
 	fixture := newWindowsManagedInstallFixture(t, map[string]interface{}{"allowManagedHooksOnly": true})
 	opts := windowsManagedInstallOptions(fixture)
 	if _, err := Install(context.Background(), opts); err != nil {
@@ -2107,8 +2112,18 @@ func TestManagedSharedHookVerifierRejectsNoncanonicalContractLockProtection(t *t
 	if err := connector.VerifyManagedSharedHookScriptDigests(
 		dataDir,
 		fixture.targetSID.String(),
-	); err == nil || !strings.Contains(err.Error(), "protection is noncanonical") {
-		t.Fatalf("shared-hook verifier with noncanonical contract-lock DACL = %v, want protection rejection", err)
+	); err != nil {
+		t.Fatalf("shared-hook verifier with noncanonical contract-lock DACL = %v, want repair or accepted drift", err)
+	}
+	if !windows.GetCurrentProcessToken().IsElevated() {
+		return
+	}
+	everyone, err := windows.CreateWellKnownSid(windows.WinWorldSid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if windowsTestDACLGrants(lockPath, everyone, windows.FILE_WRITE_DATA) {
+		t.Fatal("elevated verifier left the Everyone write grant on the contract lock")
 	}
 }
 
