@@ -276,10 +276,11 @@ func analyze(input Input, twinCommand string, capture *redirectTargetCapture) Fa
 	}
 	finalizePOSIXNoExecPreviews(&base)
 	deduplicateFacts(&base)
-	facts := base.factsWithContext(
+	facts := base.factsWithWindowsShellCWD(
 		safeToolName(input.Tool),
 		safeScalar(cwd, maxScalarBytes),
 		activeHome,
+		input.MovedWindowsShellCWD,
 	)
 	respellTrustedPOSIXHomeTilde(&facts, homeRewrittenCommands, homeTildeOperands)
 	facts.ActiveAgentFiles = cloneSlice(activeAgentFiles)

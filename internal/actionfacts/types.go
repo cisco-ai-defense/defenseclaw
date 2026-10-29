@@ -63,6 +63,13 @@ type Input struct {
 	// Parsers never derive it from action input.
 	ActiveAgentFilesUncertain bool
 	DialectHint               Dialect
+	// MovedWindowsShellCWD is trusted caller context set only when the
+	// gateway judges one command of a POSIX shell action alone in the native
+	// Windows directory an earlier cd, pushd or env -C of the same action
+	// moved the shell to. Relative, drive, MSYS-mount and ~ operands of that
+	// command then resolve under it (GAP-2473); the whole action keeps its
+	// own reading.
+	MovedWindowsShellCWD bool `json:"-"`
 	// CurlCapabilities is trusted caller context for resolved curl executables.
 	// ActionFacts never discovers capabilities from GOOS, dialect, basename,
 	// PATH, or process state. Callers must authenticate and invalidate this
