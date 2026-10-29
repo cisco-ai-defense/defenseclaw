@@ -1083,7 +1083,7 @@ func provenLinkedStateWrite(facts actionfacts.Facts, request trustedActionReques
 			made := hookpaths.CommandLinks(request.Input.Tool, text, request.Input.CWD, projected.ActiveHome)
 			links = &made
 		}
-		if linkedActiveStateWrite(projected, command, candidate, *links) {
+		if linkedActiveStateWrite(projected, command, candidate, *links, request, false) {
 			return true
 		}
 	}
@@ -1120,13 +1120,23 @@ func placedLinkedStateWrite(request trustedActionRequest, text, home string, lin
 			for _, candidate := range projected.Paths {
 				command, ok := integrityCommandByID(projected, candidate.CommandID)
 				if ok && stateCommandMutatesPath(command, candidate) &&
-					linkedActiveStateWrite(projected, command, candidate, links) {
+					linkedActiveStateWrite(projected, command, candidate, links, request, true) {
 					return true
 				}
 			}
 		}
 		for _, operand := range hookpaths.InPlaceEditOperands(statement.Command, statement.Dir, home) {
-			for _, target := range links.AliasTargets(operand, true) {
+			targets := links.AliasTargets(operand, true)
+			if !request.SkipLocalFilesystemResolution && !request.ProtectedHomeHook {
+				// The linked entry's parent can go on through an existing
+				// disk link to state (GAP-2534); the entry keeps its name.
+				for _, target := range slices.Clone(targets) {
+					if parent, ok := hookpaths.ResolveWriteTarget(filepath.Dir(target)); ok {
+						targets = append(targets, filepath.Join(parent, filepath.Base(target)))
+					}
+				}
+			}
+			for _, target := range targets {
 				written := actionfacts.PathFact{
 					Access: actionfacts.PathAccessWrite, Flavor: actionfacts.PathFlavorPOSIX,
 					Value: target, Normalized: target, Absolute: true, Resolved: target,
@@ -1238,6 +1248,8 @@ func linkedActiveStateWrite(
 	command actionfacts.CommandFact,
 	candidate actionfacts.PathFact,
 	links hookpaths.Links,
+	request trustedActionRequest,
+	placed bool,
 ) bool {
 	value := candidate.Resolved
 	if value == "" {
@@ -1251,9 +1263,65 @@ func linkedActiveStateWrite(
 		slices.Contains([]string{"ln", "link", "gln", "glink"}, filepath.Base(command.Program)) ||
 		candidate.Access == actionfacts.PathAccessWrite && hasOperation(command, actionfacts.OperationMove) &&
 			!hasAnyOperation(command, actionfacts.OperationWrite, actionfacts.OperationAppend, actionfacts.OperationCopy)
-	for _, target := range links.AliasTargets(value, entry) {
+	targets := links.AliasTargets(value, entry)
+	for _, target := range targets {
 		linked := candidate
 		linked.Resolved = target
+		if matchesActiveDefenseClawState(projected, linked) {
+			return true
+		}
+	}
+	// The linked name can go on through a disk link that already exists:
+	// ln -s /opt/ext e; echo z > e/y/config.yaml, with /opt/ext/y ->
+	// ~/.defenseclaw, writes the state file. The names the command links
+	// reach (and, for a statement placed in a directory the links name, the
+	// operand itself) are resolved on disk as the direct spelling is in
+	// provenStateMutationPath (GAP-2534). An entry operand keeps its final
+	// name: only its parent is resolved.
+	if request.ProtectedHomeHook {
+		// Behind ProtectHome, PrivateTmp and PrivateDevices the gateway
+		// cannot read a directory the user can make, so the hook's map,
+		// which follows the operand through the command's links as the
+		// user, is the proof. Only an operand whose directory goes
+		// through a command link is read from it: a link that is the final
+		// name may be replaced, not followed (sed -i on the link).
+		if len(links.AliasTargets(filepath.Dir(value), false)) == 0 {
+			return false
+		}
+		physical := request.ResolvedWriteTargets[value]
+		if physical == "" || physical == value || !filepath.IsAbs(physical) {
+			return false
+		}
+		if active, same := hookpaths.ResolveActiveStateHardlinkTarget(physical, projected.ActiveHome); same {
+			physical = active
+		}
+		linked := candidate
+		linked.Resolved = physical
+		return matchesActiveDefenseClawState(projected, linked)
+	}
+	if request.SkipLocalFilesystemResolution {
+		return false
+	}
+	if placed {
+		targets = append(targets, value)
+	}
+	for _, target := range targets {
+		physical, ok := "", false
+		if entry {
+			if parent, found := hookpaths.ResolveWriteTarget(filepath.Dir(target)); found {
+				physical, ok = filepath.Join(parent, filepath.Base(target)), true
+			}
+		} else {
+			physical, ok = hookpaths.ResolveWriteTarget(target)
+		}
+		if !ok || physical == target {
+			continue
+		}
+		if active, same := hookpaths.ResolveActiveStateHardlinkTarget(physical, projected.ActiveHome); same {
+			physical = active
+		}
+		linked := candidate
+		linked.Resolved = physical
 		if matchesActiveDefenseClawState(projected, linked) {
 			return true
 		}

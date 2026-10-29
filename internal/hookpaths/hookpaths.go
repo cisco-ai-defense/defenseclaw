@@ -976,6 +976,13 @@ func ResolveConnector(connector, surface, event string, payload []byte) string {
 				opaqueFacts[OpaqueScopeFactPrefix+resolutionPath] = fact
 			}
 		}
+		if ok && aliasKnown && !protected.has(resolved) {
+			// Only the directory is followed: a link that is the final name
+			// may be replaced, not followed (sed -i on the link).
+			if state, inState := links.stateTarget(filepath.Dir(resolutionPath), home, protected); inState {
+				resolved = filepath.Join(state, filepath.Base(resolutionPath))
+			}
+		}
 		if !ok {
 			resolved = ""
 		}
@@ -3645,6 +3652,32 @@ const maxLinkAliasSteps = 256
 // directory, reaches a protected file, that file is the target. ok is false
 // when one of those names cannot be resolved.
 func (l shellLinks) resolve(path string, protected protectedFiles) (string, bool) {
+	return l.resolveUntil(path, protected, protected.has)
+}
+
+// stateTarget is the name in home's DefenseClaw state tree that the
+// directory path reaches through the command's links and the disk links
+// below their targets (ln -s /dev/shm/x e; echo z > e/y/config.yaml with
+// /dev/shm/x/y -> ~/.defenseclaw). A managed gateway cannot read such a
+// directory, so the target map describes the state file (GAP-2534).
+func (l shellLinks) stateTarget(path, home string, protected protectedFiles) (string, bool) {
+	if len(l.aliases) == 0 || home == "" {
+		return "", false
+	}
+	state := filepath.Join(home, ".defenseclaw")
+	inState := func(name string) bool {
+		_, under := cutPathPrefix(name, state)
+		return under
+	}
+	resolved, ok := l.resolveUntil(path, protected, func(name string) bool {
+		return protected.has(name) || inState(name)
+	})
+	return resolved, ok && inState(resolved)
+}
+
+// resolveUntil is resolve with the stop test: the walk returns the first
+// name through the links that stop accepts.
+func (l shellLinks) resolveUntil(path string, protected protectedFiles, stop func(string) bool) (string, bool) {
 	target := func(path string) (string, bool) {
 		resolved, ok := resolveWritePath(path, 0)
 		if ok {
@@ -3653,7 +3686,7 @@ func (l shellLinks) resolve(path string, protected protectedFiles) (string, bool
 		return resolved, ok
 	}
 	resolved, ok := target(path)
-	if !ok || len(l.aliases) == 0 || protected.has(resolved) {
+	if !ok || len(l.aliases) == 0 || stop(resolved) {
 		return resolved, ok
 	}
 	seen := map[string]bool{path: true}
@@ -3689,7 +3722,7 @@ func (l shellLinks) resolve(path string, protected protectedFiles) (string, bool
 				if !ok {
 					return "", false
 				}
-				if protected.has(linked) {
+				if stop(linked) {
 					return linked, true
 				}
 				queue = append(queue, next)
