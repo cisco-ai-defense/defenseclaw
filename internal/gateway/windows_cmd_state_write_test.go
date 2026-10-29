@@ -426,6 +426,32 @@ func TestR105WindowsCMDHeredocSearchArgument(t *testing.T) {
 		{"cat <<'EOF' | grep -c bash" + enableBody, false},
 		{"gh pr create --title \"$(git log -1 --format=%s)\" --body-file - <<'EOF'" + body, false},
 		{"gh pr create --title \"enable main() hash\" --body-file - <<'EOF'" + body, false},
+		// GAP-2536 rows: a redefinition hidden by a backslash or quotes, a
+		// redefinition on an earlier line and a command word that is a
+		// variable or $0 still hand the body to a shell; a keyword that is
+		// only an argument or a comment and a variable that is only an
+		// argument or a redirect target stay text.
+		{"\\alias grep=bash\ngrep -s bash <<'EOF'" + run, true},
+		{"al\"\"ias grep=bash\ngrep -s bash <<'EOF'" + run, true},
+		{"\\eval \"grep() { \\\"\\$0\\\" -s; }\"; grep -s bash <<'EOF'" + run, true},
+		{"\\hash -p \"$BASH\" grep; grep -s bash <<'EOF'" + run, true},
+		{"\\. ./x.sh; grep -s bash <<'EOF'" + run, true},
+		{"\"$BASH\" -s <<'EOF'" + run, true},
+		{"$0 -s <<'EOF'" + run, true},
+		{"${SHELL:-sh} <<'EOF'" + run, true},
+		{"cat <<'EOF' | \"$COMSPEC\"" + cmdBody, true},
+		{"\\alias grep=bash\ngrep -s x <<'EOF'" + run, true},
+		{"alias grep=bash; grep x <<'EOF'" + run, true},
+		{"alias grep=bash\ngrep x <<'EOF'" + run, true},
+		{"builtin alias grep=cmd\ngrep x <<'EOF'" + cmdBody, true},
+		{"\"grep\"() { bash; }; grep x <<'EOF'" + run, true},
+		{"grep -n alias <<'EOF'" + body, false},
+		{"grep -rn source <<'EOF'" + enableBody, false},
+		{"grep -n \"eval it\" <<'EOF'" + body, false},
+		{"grep -n cmd <<'EOF' # alias grep=bash; eval x" + body, false},
+		{"grep -n \"$PAT\" <<'EOF'" + body, false},
+		{"cat <<'EOF' > \"$OUT\"" + body, false},
+		{"arr=(); grep -c cmd <<'EOF'" + body, false},
 	} {
 		for _, tool := range []string{"Bash", "shell_command", "PowerShell"} {
 			args, _ := json.Marshal(map[string]string{"command": tc.command})

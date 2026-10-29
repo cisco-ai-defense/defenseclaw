@@ -1188,6 +1188,11 @@ func cmdHeredocFeeds(command string, pos int, trust bool) (runs, cmdFeed bool) {
 		end = pos + k
 	}
 	for _, word := range cmdLineReceiverWords(command[start:end], trust) {
+		if word == cmdUnknownReceiver {
+			// "$BASH" -s <<EOF, $0 <<EOF: the program is not known, so the
+			// body is read as a shell's and as cmd's (GAP-2536).
+			return true, true
+		}
 		if cmdShellWord(word) != "" {
 			runs = true
 		}
@@ -1205,14 +1210,52 @@ func cmdHeredocFeeds(command string, pos int, trust bool) (runs, cmdFeed bool) {
 
 var cmdAssignmentWord = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*(\[[^]]*\])?\+?=`)
 
-// cmdRedefinesCommand matches code that can make a text consumer's name run
-// something else (a function or alias definition, hash -p, enable) or that
-// runs a string or file in the current shell (eval, source, ., trap): then
-// no consumer is trusted and every word counts. It is matched on the code
-// outside here-document bodies, quoted words and comments
-// (cmdCodeOutsideText): prose in a body or a title is no definition
-// (GAP-2530 checker it2).
-var cmdRedefinesCommand = regexp.MustCompile(`(^|[\s;&|(){}])(function|alias|unalias|hash|enable|eval|source|trap|\.)([\s;&|]|$)|[A-Za-z0-9_.:+-]\s*\(\s*\)`)
+// cmdRedefinesCommand matches a function definition, name() or "name"()
+// (the quoted name is blanked by cmdCodeOutsideText), on the code outside
+// here-document bodies, quoted words and comments: prose in a body or a
+// title is no definition (GAP-2530 checker it2). An empty ( ) after =, $,
+// <, > or an extglob operator is an array or a substitution.
+var cmdRedefinesCommand = regexp.MustCompile(`(^|[^=$<>@!*+?])\s*\(\s*\)`)
+
+// cmdRedefiningCommands are the command words that can make a text
+// consumer's name run something else (alias, function, hash -p, enable) or
+// run a string or file in the current shell (eval, source, ., trap). They
+// are matched as command words after quote removal with backslashes
+// dropped (\alias, al""ias, "eval"; GAP-2536), so a keyword that is only an
+// argument (grep -n alias) or prose stays text.
+var cmdRedefiningCommands = map[string]bool{
+	"function": true, "alias": true, "unalias": true, "hash": true, "enable": true,
+	"eval": true, "source": true, "trap": true, ".": true,
+}
+
+// cmdUnknownReceiver marks a statement whose command word is an expansion
+// ($BASH, "$0", ${SHELL:-sh}, $(...)): the program it runs is not known
+// (GAP-2536).
+const cmdUnknownReceiver = "\x00unknown-receiver"
+
+// cmdRedefines reports whether the Git Bash command, with the text spans of
+// its untrusted reading, redefines a command (cmdRedefinesCommand,
+// cmdRedefiningCommands). The command words are read from the command with
+// only here-document bodies and comments blanked.
+func cmdRedefines(command string, spans []cmdTextSpan) bool {
+	if cmdRedefinesCommand.MatchString(cmdCodeOutsideText(command, spans)) {
+		return true
+	}
+	var prose []cmdTextSpan
+	for _, span := range spans {
+		if span.heredoc || (span.start >= 0 && span.start < len(command) && command[span.start] == '#') {
+			prose = append(prose, span)
+		}
+	}
+	var words []string
+	cmdScanReceiverWords(cmdCodeOutsideText(command, prose), 0, 0, false, &words)
+	for _, w := range words {
+		if cmdRedefiningCommands[w] {
+			return true
+		}
+	}
+	return false
+}
 
 // cmdCodeOutsideText returns command with the text spans of one reading
 // (here-document bodies, quoted words, comments) blanked. A quoted word
@@ -1249,14 +1292,16 @@ var cmdHeredocTextConsumers = map[string]bool{
 // options) is a bare known text consumer (grep cmd <<EOF). It over-reads,
 // never under-reads: with trust false every word counts.
 func cmdLineReceiverWords(line string, trust bool) []string {
-	words, _ := cmdScanReceiverWords(line, 0, 0, trust)
+	words, _ := cmdScanReceiverWords(line, 0, 0, trust, nil)
 	return words
 }
 
 // cmdScanReceiverWords scans line from i to the unquoted closer () or a
 // backtick, 0 for the end of the line) and returns the receiver words and
-// the offset of the closer.
-func cmdScanReceiverWords(line string, i int, closer byte, trust bool) (words []string, end int) {
+// the offset of the closer. An unquoted newline ends a statement. A non-nil
+// commandWords gets the command word of every statement with backslashes
+// dropped, and the word after builtin or command (cmdRedefines).
+func cmdScanReceiverWords(line string, i int, closer byte, trust bool, commandWords *[]string) (words []string, end int) {
 	var stmt []string
 	var word strings.Builder
 	inWord, redirect, depth := false, false, 0
@@ -1276,6 +1321,16 @@ func cmdScanReceiverWords(line string, i int, closer byte, trust bool) (words []
 	finish := func() {
 		flush()
 		redirect = false
+		if commandWords != nil {
+			k, _ := cmdStatementCommand(stmt)
+			for ; k < len(stmt); k++ {
+				w := strings.ReplaceAll(stmt[k], `\`, "")
+				*commandWords = append(*commandWords, w)
+				if w != "builtin" && w != "command" && !strings.HasPrefix(w, "-") {
+					break
+				}
+			}
+		}
 		words = append(words, cmdStatementReceiverWords(stmt, trust)...)
 		stmt = stmt[:0]
 	}
@@ -1285,7 +1340,7 @@ func cmdScanReceiverWords(line string, i int, closer byte, trust bool) (words []
 	// ("$(grep -m1 bash /etc/shells)" <<EOF, checker it2). The outer word
 	// only gets a marker, so it never reads as a consumer name.
 	nested := func(j int, cl byte) int {
-		inner, e := cmdScanReceiverWords(line, j, cl, false)
+		inner, e := cmdScanReceiverWords(line, j, cl, false, commandWords)
 		words = append(words, inner...)
 		word.WriteString("$()")
 		inWord = true
@@ -1369,7 +1424,7 @@ func cmdScanReceiverWords(line string, i int, closer byte, trust bool) (words []
 				continue
 			}
 			finish()
-		case ';', '|':
+		case ';', '|', '\n':
 			finish()
 		case '(':
 			if w := word.String(); inWord && strings.HasSuffix(w, "$") {
@@ -1400,17 +1455,15 @@ func cmdScanReceiverWords(line string, i int, closer byte, trust bool) (words []
 	return words, len(line)
 }
 
-// cmdStatementReceiverWords returns the words of one statement that can
-// name a receiver: none when its command word is a bare known text consumer
-// (no assignment before it, trust on), every word otherwise.
-func cmdStatementReceiverWords(stmt []string, trust bool) []string {
-	k := 0
-scan:
+// cmdStatementCommand returns the index of the command word of stmt, past
+// assignments, reserved words and time with its options, and whether an
+// assignment comes before it.
+func cmdStatementCommand(stmt []string) (k int, assigned bool) {
 	for k < len(stmt) {
 		switch w := stmt[k]; {
 		case cmdAssignmentWord.MatchString(w):
-			// PATH=... grep runs another program: never a trusted consumer.
-			return stmt
+			assigned = true
+			k++
 		case w == "{" || w == "}" || w == "!" || w == "if" || w == "then" || w == "else" || w == "elif" ||
 			w == "fi" || w == "do" || w == "done" || w == "while" || w == "until" || w == "esac":
 			k++
@@ -1420,13 +1473,27 @@ scan:
 				k++
 			}
 		default:
-			break scan
+			return k, assigned
 		}
 	}
-	if trust && k < len(stmt) && cmdTextConsumerStatement(stmt[k:]) {
+	return k, assigned
+}
+
+// cmdStatementReceiverWords returns the words of one statement that can
+// name a receiver: none when its command word is a bare known text consumer
+// (no assignment before it, trust on), every word otherwise, plus
+// cmdUnknownReceiver when the command word is an expansion.
+func cmdStatementReceiverWords(stmt []string, trust bool) []string {
+	k, assigned := cmdStatementCommand(stmt)
+	if k < len(stmt) && trust && !assigned && cmdTextConsumerStatement(stmt[k:]) {
+		// PATH=... grep runs another program: never a trusted consumer.
 		return nil
 	}
-	return cmdSplitQuotedWords(stmt)
+	words := cmdSplitQuotedWords(stmt)
+	if k < len(stmt) && strings.HasPrefix(stmt[k], "$") {
+		words = append(words[:len(words):len(words)], cmdUnknownReceiver)
+	}
+	return words
 }
 
 // cmdSplitQuotedWords returns words plus the pieces of every word that
@@ -1522,8 +1589,18 @@ func cmdTextSpans(command string, reading cmdOuterReading) (spans []cmdTextSpan,
 	// span offsets do not depend on trust, so the untrusted reading finds
 	// the spans first.
 	spans, stops = cmdTextSpansRead(command, reading, false)
-	if reading != cmdReadingGitBash || stops || !strings.Contains(command, "<<") ||
-		cmdRedefinesCommand.MatchString(cmdCodeOutsideText(command, spans)) {
+	if reading != cmdReadingGitBash || stops || !strings.Contains(command, "<<") {
+		return spans, stops
+	}
+	if cmdRedefines(command, spans) {
+		// A redefinition can make any consumer name a shell or cmd (alias
+		// grep=bash on an earlier line): every here-document body is read
+		// as run by both (over-read, never under-read; GAP-2536).
+		for k := range spans {
+			if spans[k].heredoc {
+				spans[k].runs, spans[k].cmdFeed = true, true
+			}
+		}
 		return spans, stops
 	}
 	return cmdTextSpansRead(command, reading, true)
