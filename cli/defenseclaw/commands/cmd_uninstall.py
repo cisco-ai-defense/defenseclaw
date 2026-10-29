@@ -379,10 +379,117 @@ def uninstall_cmd(
         raise SystemExit(1)
 
     _execute_plan(plan)
+    _warn_marked_native_otel_left()
     if plan.connectors:
         # The plan said so; the end says it again, once it is true (GAP-0255).
         ux.warn("Close any agent session still open: it runs without DefenseClaw's hooks now.")
     _render_kept_and_next_steps(plan)
+
+
+_NATIVE_OTEL_READ_LIMIT = 1024 * 1024
+
+
+def _read_agent_config(path: str) -> bytes:
+    """Read one agent config for the post-uninstall OTel check, or b"" (bounded)."""
+    try:
+        with open(path, "rb") as stream:
+            raw = stream.read(_NATIVE_OTEL_READ_LIMIT + 1)
+    except OSError:
+        return b""
+    return b"" if len(raw) > _NATIVE_OTEL_READ_LIMIT else raw
+
+
+def _marked_claude_otel_headers(env) -> list[str]:
+    """Claude Code OTLP header keys that carry both DefenseClaw markers and a bearer.
+
+    Mirror of cmd_doctor._codex_otel_marked_kept for the Claude Code env
+    block: x-defenseclaw-source = claudecode, x-defenseclaw-client =
+    claudecode-otel/..., and an authorization bearer.
+    """
+    if not isinstance(env, dict):
+        return []
+    fields = []
+    for key in sorted(env, key=str):
+        value = env.get(key)
+        if not (
+            isinstance(key, str)
+            and key.startswith("OTEL_EXPORTER_OTLP_")
+            and key.endswith("_HEADERS")
+            and isinstance(value, str)
+        ):
+            continue
+        headers = {}
+        for item in value.split(","):
+            name, sep, header_value = item.partition("=")
+            if sep:
+                headers[name.strip().lower()] = header_value.strip()
+        scheme, _, credential = headers.get("authorization", "").partition(" ")
+        if (
+            headers.get("x-defenseclaw-source") == "claudecode"
+            and headers.get("x-defenseclaw-client", "").startswith("claudecode-otel/")
+            and scheme.lower() == "bearer"
+            and len(credential.strip()) >= 8
+        ):
+            fields.append(key)
+    return fields
+
+
+def _warn_marked_native_otel_left() -> None:
+    """Name the agent OTel entries uninstall kept that still carry DefenseClaw's markers.
+
+    Teardown removes every exporter whose credential DefenseClaw can name. One
+    with DefenseClaw's x-defenseclaw-* headers and a bearer no install recorded
+    is the user's by the ownership rule (never by markers, GAP-1511), so it
+    stays. Doctor warns about it while DefenseClaw is installed (GAP-1610,
+    LEAD DECISION 05:36 option (b)); after uninstall nothing else would, and
+    the gateway port it exports to is served by nothing now, so uninstall says
+    it here with the manual step (GAP-2517). It only reads the files.
+    """
+    from defenseclaw import codex_toml
+    from defenseclaw.commands.cmd_doctor import _codex_otel_marked_kept
+    from defenseclaw.connector_paths import claude_settings_paths, codex_home
+
+    lines: list[tuple[str, str]] = []
+    codex_config = os.path.join(codex_home(), "config.toml")
+    raw = _read_agent_config(codex_config)
+    try:
+        document = codex_toml.loads(raw) if raw else {}
+    except (UnicodeError, TypeError, ValueError):
+        document = {}
+    otel = document.get("otel") if isinstance(document, dict) else None
+    marked = _codex_otel_marked_kept(otel, 0)
+    if marked:
+        fields = ", ".join(field for field, _ in marked)
+        targets = ", ".join(sorted({target for _, target in marked}))
+        lines.append(
+            (
+                f"{codex_config}: {fields} carry DefenseClaw's x-defenseclaw-source and x-defenseclaw-client "
+                f"headers and a bearer no DefenseClaw install recorded, so uninstall kept them as yours; "
+                f"Codex still sends its telemetry and that bearer to {targets}, which DefenseClaw no longer serves",
+                f"if you did not add them, delete the {fields} tables from {codex_config}",
+            )
+        )
+    claude_settings = claude_settings_paths()[0]
+    raw = _read_agent_config(claude_settings)
+    try:
+        settings = json.loads(raw.decode("utf-8-sig")) if raw else {}
+    except (UnicodeError, ValueError):
+        settings = {}
+    env = settings.get("env") if isinstance(settings, dict) else None
+    headers = _marked_claude_otel_headers(env)
+    if headers:
+        keys = ", ".join(headers)
+        lines.append(
+            (
+                f"{claude_settings}: env {keys} carry DefenseClaw's x-defenseclaw-source and x-defenseclaw-client "
+                "headers and a bearer no DefenseClaw install recorded, so uninstall kept them as yours",
+                f"if you did not add them, delete {keys} from the env block of {claude_settings}",
+            )
+        )
+    for detail, step in lines:
+        # An earlier DefenseClaw setup or a copied config may have left them.
+        ux.warn(detail)
+        ux.echo(f"    {step}")
 
 
 def _render_kept_and_next_steps(plan: UninstallPlan) -> None:
@@ -547,6 +654,7 @@ def _dispatch_native_windows_uninstall(
     if outcome.returncode == 0:
         ux.ok("Native Windows uninstall completed.")
         _relay_native_setup_removed_connector_leftovers(outcome.stdout, left_before, data_dir, wipe_data=wipe_data)
+        _warn_marked_native_otel_left()
         if binaries:
             _remove_script_install_after_native_setup(request.platform_name)
         return True
