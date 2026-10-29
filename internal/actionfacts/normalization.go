@@ -41,6 +41,8 @@ type pathNormalizationContext struct {
 	trustedSyntax bool
 	registry      bool
 	expansion     pathExpansionPolicy
+	// windowsShellCWD is Input.MovedWindowsShellCWD.
+	windowsShellCWD bool
 }
 
 func normalizePathFacts(facts []PathFact, cwd string, activeHomes ...string) {
@@ -54,6 +56,18 @@ func normalizePathFactsForCommands(
 	activeHome string,
 	commands []CommandFact,
 ) {
+	normalizePathFactsForCommandsInShell(facts, cwd, activeHome, commands, false)
+}
+
+// normalizePathFactsForCommandsInShell is normalizePathFactsForCommands;
+// windowsShellCWD is Input.MovedWindowsShellCWD.
+func normalizePathFactsForCommandsInShell(
+	facts []PathFact,
+	cwd string,
+	activeHome string,
+	commands []CommandFact,
+	windowsShellCWD bool,
+) {
 	commandByID := make(map[int64]*CommandFact, len(commands))
 	for i := range commands {
 		commandByID[commands[i].ID] = &commands[i]
@@ -64,6 +78,7 @@ func normalizePathFactsForCommands(
 			cwd,
 			commandByID[facts[i].CommandID],
 		)
+		context.windowsShellCWD = windowsShellCWD
 		normalized, absolute, resolved := derivePathWithContext(
 			facts[i],
 			cwd,
@@ -358,6 +373,11 @@ func derivePathWithContext(
 	}
 	switch context.syntax {
 	case pathSyntaxPOSIX:
+		if context.trustedSyntax && context.windowsShellCWD {
+			if normalized, absolute, resolved, ok := derivePOSIXPathUnderWindowsCWD(fact.Value, cwd, activeHome, context.expansion); ok {
+				return normalized, absolute, resolved
+			}
+		}
 		return derivePOSIXPathWithPolicy(
 			fact.Value,
 			cwd,
@@ -434,6 +454,45 @@ func looksWindowsPath(value string) bool {
 func isASCIILetter(value byte) bool {
 	return (value >= 'a' && value <= 'z') ||
 		(value >= 'A' && value <= 'Z')
+}
+
+// derivePOSIXPathUnderWindowsCWD reads an operand of a proven POSIX shell
+// command run under a native Windows working directory (Git Bash, MSYS):
+// that shell runs in the native directory and maps drive paths for every
+// program. A relative operand names the file under the directory, so after
+// cd ~ the operand .defenseclaw/config.yaml is the active state
+// (GAP-2473); a drive path (C:/x), an MSYS or Cygwin drive mount (/c/x,
+// /cygdrive/c/x) and ~ under a Windows home name the drive file. The POSIX
+// reading left all of them unresolved or POSIX-only. ok is false for an
+// expanding operand, another absolute POSIX path and any other working
+// directory: those keep the POSIX reading.
+func derivePOSIXPathUnderWindowsCWD(value, cwd, activeHome string, expansion pathExpansionPolicy) (string, bool, string, bool) {
+	if value == "" || syntaxForCWD(cwd) != pathSyntaxWindows || hasUnresolvedPathSyntaxWithPolicy(value, expansion) {
+		return "", false, "", false
+	}
+	native := value
+	switch {
+	case value == "~" || strings.HasPrefix(value, "~/"):
+		if !expansion.expandTilde || syntaxForCWD(activeHome) != pathSyntaxWindows {
+			return "", false, "", false
+		}
+	case len(value) >= 3 && value[1] == ':' && (value[2] == '/' || value[2] == '\\') &&
+		strings.ContainsRune("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ", rune(value[0])):
+	case strings.HasPrefix(value, "/"):
+		if native = MSYSDrivePath(value); native == value {
+			return "", false, "", false
+		}
+	case strings.HasPrefix(value, "~") || strings.ContainsAny(value, `\:`):
+		return "", false, "", false
+	}
+	normalized, absolute, resolved := deriveWindowsPathWithPolicy(native, cwd, activeHome, expansion)
+	if normalized == "" {
+		return "", false, "", false
+	}
+	if !strings.HasPrefix(value, "~") && !absolute {
+		normalized = path.Clean(value)
+	}
+	return normalized, absolute, resolved, true
 }
 
 func derivePOSIXPathWithPolicy(

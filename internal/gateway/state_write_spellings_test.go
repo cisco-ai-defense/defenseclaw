@@ -17,9 +17,14 @@
 package gateway
 
 import (
+	"os"
+	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
+
+	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
 )
 
 // A HOME value the walk could not read (export HOME=$(echo $HOME), HOME=$X,
@@ -512,4 +517,63 @@ func TestEnvChdirHomeSpellingRunsTheCallInTheHome(t *testing.T) {
 		{`env -C "$HOME"x cp a.txt .defenseclaw/config.yaml`, false},
 		{"env -C ~ ls -la", false},
 	})
+}
+
+// Under a native Windows home a cd to a home spelling ($HOME, ~,
+// $USERPROFILE, the MSYS drive mount), a cd .. or an env -C ~ moves the
+// Git Bash working directory, so a relative .defenseclaw operand after it
+// is the active state, as on Linux. The per-command reading left every
+// relative operand under the moved native directory unresolved (GAP-2473).
+// A relative write in the hook's own directory is resolved by the hook
+// client's write-target map, which this gateway-only test does not send.
+func TestWindowsHomeCdThenRelativeStateWrite(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("native Windows home")
+	}
+	home := t.TempDir()
+	cwd := filepath.Join(home, "project")
+	for _, dir := range []string{filepath.Join(home, ".defenseclaw", "hooks"), cwd} {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, name := range []string{filepath.Join(home, ".defenseclaw", "config.yaml"), filepath.Join(cwd, "a.txt")} {
+		if err := os.WriteFile(name, []byte("x\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	forward := filepath.ToSlash(home)
+	msys := "/" + strings.ToLower(forward[:1]) + forward[2:]
+	rows := []homeStateWriteRow{
+		{"cd $HOME && cp project/a.txt .defenseclaw/config.yaml", true},
+		{"cd ~ && cp project/a.txt .defenseclaw/config.yaml", true},
+		{"cd $USERPROFILE && cp project/a.txt .defenseclaw/config.yaml", true},
+		{"cd " + msys + " && cp project/a.txt .defenseclaw/config.yaml", true},
+		{"cd ~; cp project/a.txt .defenseclaw/hooks/x.sh", true},
+		{"cd .. && cp project/a.txt .defenseclaw/config.yaml", true},
+		{"cd ~/.defenseclaw && cp ../project/a.txt config.yaml", true},
+		{"env -C ~ cp project/a.txt .defenseclaw/config.yaml", true},
+		{"cd ~ && cp project/a.txt notes.txt", false},
+		{"cd ~ && cp project/a.txt project/b.txt", false},
+		{"cd $HOME && ls .defenseclaw", false},
+		{"cd ~/.defenseclaw && cp config.yaml ../project/backup.yaml", false},
+		{"cp a.txt .defenseclaw/config.yaml", false},
+		{"cp a.txt b.txt", false},
+	}
+	for _, connectorName := range []string{"claudecode", "codex"} {
+		installDefaultProfileConnector(t, connectorName)
+		for _, hint := range []actionfacts.Dialect{"", actionfacts.DialectPOSIX} {
+			for _, row := range rows {
+				input := actionfacts.Input{Tool: "Bash", Command: row.command, CWD: cwd, ActiveHome: home, DialectHint: hint}
+				findings := dispatchTrustedAction(t.Context(), trustedActionRequest{
+					Input: input, Connector: connectorName, EnforcementCapable: true,
+				})
+				if blocked := buildVerdict(findings, "tool_call").Action == "block"; blocked != row.block {
+					t.Errorf("%s hint=%q %q: block=%v, want %v", connectorName, hint, row.command, blocked, row.block)
+				}
+			}
+		}
+	}
 }

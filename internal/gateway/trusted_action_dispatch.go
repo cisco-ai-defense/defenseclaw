@@ -413,6 +413,14 @@ func dispatchTrustedActionWith(
 				child := request
 				child.Input.Command = simple.Text
 				child.Input.CWD = simple.CWD
+				// An earlier cd, pushd or env -C of the action moved a Git
+				// Bash shell to another native Windows directory: the
+				// child's operands resolve there (GAP-2473). The flag stays
+				// off for the action itself and for a child in the hook's
+				// own directory, whose readings are unchanged.
+				child.Input.MovedWindowsShellCWD = request.Input.MovedWindowsShellCWD ||
+					simple.CWD != "" && !strings.HasPrefix(simple.CWD, "/") &&
+						filepath.VolumeName(simple.CWD) != "" && !strings.EqualFold(filepath.Clean(simple.CWD), filepath.Clean(request.Input.CWD))
 				if evidenceCWDs != nil {
 					child.evidenceCWD = evidenceCWDs[index]
 				}
