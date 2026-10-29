@@ -100,6 +100,28 @@ builds:
         - cmd: go run ./internal/tools/windowsresources -target {{ .Os }}_{{ .Arch }} -executable "{{ .Path }}" -component hook -version {{ .Version }} -icon macos/DefenseClawMac/DefenseClawMac/Assets.xcassets/AppIcon.appiconset/icon_256.png
           output: true
 
+  # The one-line install's Claude Code PreToolUse guard: a small
+  # GUI-subsystem program of its own, so the guard is not the launcher it
+  # checks for and never gets a console window (GAP-2467).
+  - id: defenseclaw-hook-guard
+    main: ./cmd/defenseclaw-hook-guard
+    binary: defenseclaw-hook-guard
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - windows
+    goarch:
+      - amd64
+    flags:
+      - -trimpath
+      - -buildvcs=false
+    ldflags:
+      - -s -w -buildid=defenseclaw-hook-guard-{{.Commit}}-{{.Os}}-{{.Arch}} -H=windowsgui -X main.version={{.Version}} -X main.commit={{.Commit}} -X main.date={{.Date}}
+    hooks:
+      post:
+        - cmd: go run ./internal/tools/windowsresources -target {{ .Os }}_{{ .Arch }} -executable "{{ .Path }}" -component hook-guard -version {{ .Version }} -icon macos/DefenseClawMac/DefenseClawMac/Assets.xcassets/AppIcon.appiconset/icon_256.png
+          output: true
+
   - id: defenseclaw-acp-posix
     main: ./cmd/defenseclaw-acp
     binary: defenseclaw-acp
@@ -274,6 +296,7 @@ archives:
     ids:
       - defenseclaw-windows-amd64
       - defenseclaw-hook
+      - defenseclaw-hook-guard
       - defenseclaw-acp-windows-amd64
     formats:
       - zip

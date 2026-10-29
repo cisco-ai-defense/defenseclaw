@@ -126,7 +126,9 @@ $SetupHookState = Join-Path $env:LOCALAPPDATA "DefenseClaw\HookRuntime\hook-runt
 # once Setup is replaced (Publish-SetupLauncherTrampoline).
 $SetupDelegatedHooks = Join-Path $env:LOCALAPPDATA "DefenseClaw\HookRuntime\delegated"
 # Real files in BinDir. Connector hooks record these paths, so they never move.
-$ManagedBinaries = @("defenseclaw-gateway.exe", "defenseclaw-hook.exe", "defenseclaw-acp.exe")
+# defenseclaw-hook-guard.exe is the Claude Code PreToolUse guard, a small
+# GUI-subsystem program, so a tool call never opens a console window (GAP-2467).
+$ManagedBinaries = @("defenseclaw-gateway.exe", "defenseclaw-hook.exe", "defenseclaw-hook-guard.exe", "defenseclaw-acp.exe")
 # .cmd shims in BinDir for console scripts in the venv; the gateway runs them by name.
 $ManagedShims = @("defenseclaw", "skill-scanner", "mcp-scanner")
 # Git Bash does not run a .cmd file by its bare name, so `defenseclaw` there

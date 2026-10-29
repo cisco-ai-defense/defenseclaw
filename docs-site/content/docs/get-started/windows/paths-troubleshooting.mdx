@@ -23,6 +23,7 @@ DefenseClaw keeps programs, data and each agent's own configuration in separate 
 | `defenseclaw` | The same launcher for Git Bash. cmd.exe and PowerShell ignore it. |
 | `defenseclaw-gateway.exe` | The gateway and its lifecycle commands. |
 | `defenseclaw-hook.exe` | The hook runner agents call. It opens no console window. |
+| `defenseclaw-hook-guard.exe` | The small program Claude Code's `PreToolUse` entry starts. It runs `defenseclaw-hook.exe` and blocks the tool call when that is missing. It opens no console window. |
 | `defenseclaw-acp.exe` | The [ACP guard](/docs/acp-guard). |
 | `skill-scanner.cmd`, `mcp-scanner.cmd` | Launchers for the bundled skill and MCP scanners. |
 | `defenseclaw-hook-state.json` | State the hook runner keeps; not configuration. |
