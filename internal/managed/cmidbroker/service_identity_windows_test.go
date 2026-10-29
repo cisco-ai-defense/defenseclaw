@@ -12,13 +12,13 @@ import (
 )
 
 func TestNormalizeImagePathStripsNamespacePrefixes(t *testing.T) {
-	t.Setenv("DEFENSECLAW_TEST_ROOT", `C:\Program Files`)
+	t.Setenv("CMIDBROKER_IMAGEPATH_TEST_ROOT", `C:\Program Files`)
 	for input, want := range map[string]string{
-		`\??\C:\Program Files\x.exe`:                `C:\Program Files\x.exe`,
-		`\\?\C:\Program Files\x.exe`:                `C:\Program Files\x.exe`,
-		`%DEFENSECLAW_TEST_ROOT%\x.exe`:             `C:\Program Files\x.exe`,
-		`C:\Program Files\x.exe`:                    `C:\Program Files\x.exe`,
-		`\??\%DEFENSECLAW_TEST_ROOT%\Cisco\bin.exe`: `C:\Program Files\Cisco\bin.exe`,
+		`\??\C:\Program Files\x.exe`:                         `C:\Program Files\x.exe`,
+		`\\?\C:\Program Files\x.exe`:                         `C:\Program Files\x.exe`,
+		`%CMIDBROKER_IMAGEPATH_TEST_ROOT%\x.exe`:             `C:\Program Files\x.exe`,
+		`C:\Program Files\x.exe`:                             `C:\Program Files\x.exe`,
+		`\??\%CMIDBROKER_IMAGEPATH_TEST_ROOT%\Cisco\bin.exe`: `C:\Program Files\Cisco\bin.exe`,
 	} {
 		if got := normalizeImagePath(input); got != want {
 			t.Fatalf("normalizeImagePath(%q) = %q, want %q", input, got, want)
