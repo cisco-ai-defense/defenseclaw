@@ -269,7 +269,17 @@ func (s *Store) plannerStatsTargets(ctx context.Context) ([]string, error) {
 func (s *Store) analyzeOne(ctx context.Context, target string, yield bool) error {
 	// The limit belongs to the connection that runs ANALYZE, which the pool
 	// may replace: set it on the one connection used here.
+	if plannerStatsBeforeConnHook != nil {
+		plannerStatsBeforeConnHook()
+	}
+	// database/sql hands a released connection straight to one of the
+	// statements waiting for it, in no set order. So when this request had
+	// to wait, others may still be waiting once it has the connection, and
+	// those waits were all counted before it got it: they add nothing to the
+	// pool wait count while ANALYZE runs (GAP-1790).
+	waitsBefore := s.db.Stats().WaitCount
 	conn, err := s.db.Conn(ctx)
+	contended := s.db.Stats().WaitCount != waitsBefore
 	if err != nil {
 		return fmt.Errorf("audit: open connection for planner statistics: %w", err)
 	}
@@ -281,7 +291,7 @@ func (s *Store) analyzeOne(ctx context.Context, target string, yield bool) error
 	defer cancel()
 	yielded := func() bool { return false }
 	if yield {
-		yielded = s.yieldPlannerStatsToWriters(statementCtx, cancel)
+		yielded = s.yieldPlannerStatsToWriters(statementCtx, cancel, contended)
 	}
 	err = retryBusyObserved(statementCtx, "audit_planner_stats", s.sqliteBusyObservabilityV8(), func() error {
 		if plannerStatsAnalyzePhaseHook != nil {
@@ -315,6 +325,10 @@ var (
 	plannerStatsYieldPoll = 10 * time.Millisecond
 )
 
+// plannerStatsBeforeConnHook runs in analyzeOne just before it asks for the
+// store connection: a test seam that queues other statements first.
+var plannerStatsBeforeConnHook func()
+
 // plannerStatsAnalyzePhaseHook runs inside each ANALYZE attempt while it
 // holds the store's connection: a test seam that holds the statement open.
 var plannerStatsAnalyzePhaseHook func(context.Context)
@@ -327,22 +341,29 @@ var plannerStatsAnalyzePhaseHook func(context.Context)
 // statistics every hook queued behind it, an account's 32 requests filled,
 // and its later calls were refused and blocked as a gateway no-answer
 // (GAP-1790, managed RHEL, 3.7 GB store). Hooks come first; the statistics
-// are taken again at the next pass.
-func (s *Store) yieldPlannerStatsToWriters(ctx context.Context, cancel context.CancelFunc) func() bool {
+// are taken again at the next pass. contended says that ANALYZE itself
+// waited for the connection: statements queued with it may still wait, and
+// their waits are already in the pool count, so the hold is timed from the
+// start (on rc.10 a refresh kept the connection 13 s with five statements
+// waiting that had queued before it took it, GAP-1790).
+func (s *Store) yieldPlannerStatsToWriters(ctx context.Context, cancel context.CancelFunc, contended bool) func() bool {
 	var yielded bool
 	done := make(chan struct{})
 	base := s.db.Stats().WaitCount
+	var waitingSince time.Time
+	if contended {
+		waitingSince = time.Now()
+	}
 	go func() {
 		defer close(done)
 		ticker := time.NewTicker(plannerStatsYieldPoll)
 		defer ticker.Stop()
-		var waitingSince time.Time
 		for {
 			select {
 			case <-ctx.Done():
 				return
 			case now := <-ticker.C:
-				if s.db.Stats().WaitCount == base {
+				if waitingSince.IsZero() && s.db.Stats().WaitCount == base {
 					continue
 				}
 				if waitingSince.IsZero() {
