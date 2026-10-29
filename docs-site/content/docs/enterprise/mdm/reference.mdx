@@ -99,7 +99,11 @@ gpg --dearmor < defenseclaw-enterprise-release-key.asc > defenseclaw-enterprise-
   to `7200`). Allow at least that long in your MDM.
 - **One run at a time.** A second run while one holds the lifecycle lock, or
   while dpkg, rpm or the macOS installer is busy, exits `1618` (Windows) or `75`
-  (Linux, macOS). Retry later.
+  (Linux, macOS). Retry later. On Windows, a Setup that would upgrade the
+  installed release also exits `1618` (`lifecycle_busy`) before it changes
+  anything when the processors are less than 25% idle over 6 seconds: the
+  upgrade runs below normal priority so agent hooks keep answering, and could
+  not finish in time on a computer that busy.
 - **Leftovers of an unmanaged install (Linux, macOS).** If DefenseClaw machine
   files exist that no committed deployment owns, `ensure` refuses with
   `unmanaged_layout_present`. Take them over once by running
