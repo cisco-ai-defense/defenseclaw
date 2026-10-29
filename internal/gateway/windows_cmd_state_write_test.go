@@ -359,6 +359,8 @@ func TestR105WindowsCMDHeredocSearchArgument(t *testing.T) {
 	}
 	const state = `%USERPROFILE%\.defenseclaw\config.yaml`
 	const body = "\nTip: cmd /c type nul > " + state + " empties the config\nEOF"
+	const run = "\ncmd /c type nul > " + state + "\nEOF"
+	const cmdBody = "\ntype nul > " + state + "\nEOF"
 	for _, tc := range []struct {
 		command string
 		block   bool
@@ -380,6 +382,29 @@ func TestR105WindowsCMDHeredocSearchArgument(t *testing.T) {
 		{"cat <<'EOF' | grep -v x | sh\ncmd /c type nul > " + state + "\nEOF", true},
 		{"cat <<'EOF' | bash\ncmd /c type nul > " + state + "\nEOF", true},
 		{"grep -v x <<'EOF' | cmd" + body, true},
+		// Checker it1 rows: a launcher, a closed descriptor before a pipe,
+		// time options, a function and a substitution in double quotes
+		// still hand the body to a shell or cmd.
+		{"cat <<'EOF' >&-|sh" + run, true},
+		{"cat <<'EOF' 2>&-|bash" + run, true},
+		{"find . -maxdepth 0 -exec bash \\; <<'EOF'" + run, true},
+		{"function f { bash; }; f <<'EOF'" + run, true},
+		{"time -p bash <<'EOF'" + run, true},
+		{"flock /tmp/x bash <<'EOF'" + run, true},
+		{"wsl bash <<'EOF'" + run, true},
+		{"b''ash <<'EOF'" + run, true},
+		{"cat <<'EOF' >&-|cmd" + cmdBody, true},
+		{"time -p cmd <<'EOF'" + cmdBody, true},
+		{"\"$(command -v bash)\" <<'EOF'" + run, true},
+		{"cat <<'EOF' | \"$(command -v sh)\" -s" + run, true},
+		{"grep() { bash; }; grep x <<'EOF'" + run, true},
+		{"tee >(bash) <<'EOF'" + run, true},
+		{"/tmp/x/grep cmd <<'EOF'" + run, true},
+		// Text consumers keep their arguments as text.
+		{"gh pr create --title cmd --body-file - <<'EOF'" + body, false},
+		{"cat <<'EOF' | grep -c sh | wc -l" + body, false},
+		{"time -p grep -c bash <<'EOF'" + body, false},
+		{"! grep -q cmd <<'EOF'" + body, false},
 	} {
 		for _, tool := range []string{"Bash", "shell_command", "PowerShell"} {
 			args, _ := json.Marshal(map[string]string{"command": tc.command})

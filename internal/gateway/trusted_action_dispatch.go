@@ -1178,16 +1178,16 @@ func cmdHeredocDelimiter(command string, start int) (doc cmdHeredoc, end int, ok
 // cmdHeredocFeeds reports whether the command line around a here-document
 // operator at pos hands its body to a shell (bash <<EOF, cat <<EOF | sh) or
 // to cmd.exe (cmd <<EOF): then the body runs (over-block, never
-// under-block). Only command-position words of the outer line count: an
-// argument (grep cmd <<EOF, cat <<EOF | rg bash) names text a consumer
-// reads, not a receiver (GAP-2530).
+// under-block). Every word of the line counts except the arguments of a
+// known text consumer (grep cmd <<EOF, cat <<EOF | rg bash): they name text
+// the consumer reads, not a receiver (GAP-2530).
 func cmdHeredocFeeds(command string, pos int) (runs, cmdFeed bool) {
 	start := strings.LastIndexByte(command[:pos], '\n') + 1
 	end := len(command)
 	if k := strings.IndexByte(command[pos:], '\n'); k >= 0 {
 		end = pos + k
 	}
-	for _, word := range cmdLineCommandWords(command[start:end]) {
+	for _, word := range cmdLineReceiverWords(command[start:end], !cmdRedefinesCommand.MatchString(command)) {
 		if cmdShellWord(word) != "" {
 			runs = true
 		}
@@ -1203,19 +1203,43 @@ func cmdHeredocFeeds(command string, pos int) (runs, cmdFeed bool) {
 	return runs, cmdFeed
 }
 
-var cmdAssignmentWord = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*\+?=`)
+var cmdAssignmentWord = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*(\[[^]]*\])?\+?=`)
 
-// cmdLineCommandWords returns the words of one Git Bash line that can name
-// the program a statement runs: the first word of each statement (after ;
-// | & ( ) a backtick or $( inside double quotes), past assignments,
-// redirect targets and reserved words ({ ! if then do time ...). After a
-// wrapper (env, exec, xargs, sudo, ...) every later word of the statement
-// counts (over-read, never under-read). Quotes keep separators literal;
-// backslashes are kept so a Windows path keeps its base name.
-func cmdLineCommandWords(line string) []string {
-	var words []string
-	atCommand, wrapped, redirect, inWord := true, false, false, false
+// cmdRedefinesCommand matches a command that can make a text consumer's name
+// run something else (a function or alias definition, hash -p, enable):
+// then no consumer is trusted and every word counts.
+var cmdRedefinesCommand = regexp.MustCompile(`(^|[\s;&|(){}])(function|alias|unalias|hash|enable)([\s;&|]|$)|[A-Za-z0-9_.:+-]\s*\(\s*\)`)
+
+// cmdHeredocTextConsumers read standard input as text and never run it, so a
+// shell or cmd word among their arguments is a pattern or a title, not a
+// receiver (GAP-2530). Programs with a way to run their input (sed e, awk
+// system, sort --compress-program, git aliases, a pager) are not listed.
+var cmdHeredocTextConsumers = map[string]bool{
+	"grep": true, "egrep": true, "fgrep": true, "rg": true, "wc": true, "head": true, "tail": true,
+	"cut": true, "tr": true, "cat": true, "tac": true, "tee": true, "diff": true, "nl": true,
+	"fold": true, "fmt": true, "rev": true, "base64": true, "od": true, "xxd": true, "jq": true,
+	"md5sum": true, "sha1sum": true, "sha256sum": true, "gh": true,
+}
+
+// cmdLineReceiverWords returns the words of one Git Bash line that can name
+// the program that receives a here-document body: every word of every
+// statement (split at ; | & ( ) and read inside $( ), backticks and process
+// substitutions, quoted or not), less redirect targets, except the
+// arguments of a statement whose command word (past reserved words and time
+// options) is a bare known text consumer (grep cmd <<EOF). It over-reads,
+// never under-reads: with trust false every word counts.
+func cmdLineReceiverWords(line string, trust bool) []string {
+	words, _ := cmdScanReceiverWords(line, 0, 0, trust)
+	return words
+}
+
+// cmdScanReceiverWords scans line from i to the unquoted closer () or a
+// backtick, 0 for the end of the line) and returns the receiver words and
+// the offset of the closer.
+func cmdScanReceiverWords(line string, i int, closer byte, trust bool) (words []string, end int) {
+	var stmt []string
 	var word strings.Builder
+	inWord, redirect, depth := false, false, 0
 	flush := func() {
 		if !inWord {
 			return
@@ -1223,48 +1247,40 @@ func cmdLineCommandWords(line string) []string {
 		w := word.String()
 		word.Reset()
 		inWord = false
-		switch {
-		case redirect:
+		if redirect {
 			redirect = false
-		case wrapped:
-			words = append(words, w)
-		case atCommand:
-			words = append(words, w)
-			if cmdAssignmentWord.MatchString(w) {
-				return
-			}
-			name := strings.ToLower(strings.Trim(w, `"'`))
-			if k := strings.LastIndexAny(name, `\/`); k >= 0 {
-				name = name[k+1:]
-			}
-			name = strings.TrimSuffix(name, ".exe")
-			switch name {
-			case "{", "}", "!", "if", "then", "else", "elif", "do", "while", "until", "time", "coproc":
-			case "env", "exec", "command", "builtin", "nohup", "sudo", "doas", "su", "xargs", "nice", "ionice",
-				"timeout", "stdbuf", "winpty", "start", "runas", "setsid", "unbuffer", "chroot", "script", "eval",
-				"call", "busybox":
-				atCommand, wrapped = false, true
-			default:
-				atCommand = false
-			}
+			return
 		}
+		stmt = append(stmt, w)
 	}
-	separate := func() {
+	finish := func() {
 		flush()
-		atCommand, wrapped, redirect = true, false, false
+		redirect = false
+		words = append(words, cmdStatementReceiverWords(stmt, trust)...)
+		stmt = stmt[:0]
+	}
+	// nested reads a command substitution: its statements are commands of
+	// their own; the outer word only gets a marker, so it never reads as a
+	// consumer name.
+	nested := func(j int, cl byte) int {
+		inner, e := cmdScanReceiverWords(line, j, cl, trust)
+		words = append(words, inner...)
+		word.WriteString("$()")
+		inWord = true
+		return e
 	}
 	var quote byte
-	for i := 0; i < len(line); i++ {
+	for ; i < len(line); i++ {
 		c := line[i]
-		switch {
-		case quote == '\'':
+		switch quote {
+		case '\'':
 			if c == '\'' {
 				quote = 0
 			} else {
 				word.WriteByte(c)
 			}
 			continue
-		case quote == '"':
+		case '"':
 			switch {
 			case c == '"':
 				quote = 0
@@ -1272,14 +1288,10 @@ func cmdLineCommandWords(line string) []string {
 				word.WriteByte(c)
 				word.WriteByte(line[i+1])
 				i++
-			case c == '`' || c == '$' && i+1 < len(line) && line[i+1] == '(':
-				// A substitution inside double quotes runs a command.
-				separate()
-				if c == '$' {
-					i++
-				}
-			case c == ')':
-				separate()
+			case c == '$' && i+1 < len(line) && line[i+1] == '(':
+				i = nested(i+2, ')')
+			case c == '`':
+				i = nested(i+1, '`')
 			default:
 				word.WriteByte(c)
 			}
@@ -1300,37 +1312,126 @@ func cmdLineCommandWords(line string) []string {
 			flush()
 		case '<', '>':
 			// An fd number before the operator (2>file) is part of it.
-			if w := word.String(); inWord && strings.Trim(w, "0123456789") == "" {
+			if w := word.String(); inWord && w != "" && strings.Trim(w, "0123456789") == "" {
 				word.Reset()
 				inWord = false
 			}
 			flush()
-			for i+1 < len(line) && strings.IndexByte("<>&|-", line[i+1]) >= 0 {
-				i++
-			}
 			redirect = true
+			// One operator: > >> >| >& < << <<- <<< <& <>. A | or & after
+			// it that is not part of it separates statements.
+			if i+1 < len(line) {
+				switch n := line[i+1]; {
+				case c == '>' && (n == '>' || n == '|' || n == '&'), c == '<' && (n == '&' || n == '>'):
+					i++
+				case c == '<' && n == '<':
+					i++
+					if i+1 < len(line) && (line[i+1] == '<' || line[i+1] == '-') {
+						i++
+					}
+				}
+			}
+			if line[i] == '&' && i+1 < len(line) && line[i+1] == '-' {
+				// >&- and <&- close a descriptor: no target word.
+				i++
+				redirect = false
+			}
 		case '&':
 			if i+1 < len(line) && line[i+1] == '>' {
 				flush()
 				i++
-				for i+1 < len(line) && line[i+1] == '>' {
+				if i+1 < len(line) && line[i+1] == '>' {
 					i++
 				}
 				redirect = true
 				continue
 			}
-			separate()
-		case ';', '|', '(', ')', '`':
-			separate()
+			finish()
+		case ';', '|':
+			finish()
+		case '(':
+			if w := word.String(); inWord && strings.HasSuffix(w, "$") {
+				i = nested(i+1, ')')
+				continue
+			}
+			finish()
+			depth++
+		case ')':
+			if closer == ')' && depth == 0 {
+				finish()
+				return words, i
+			}
+			depth--
+			finish()
+		case '`':
+			if closer == '`' {
+				finish()
+				return words, i
+			}
+			i = nested(i+1, '`')
 		default:
 			word.WriteByte(c)
 			inWord = true
 		}
 	}
-	if quote == 0 || inWord {
-		flush()
+	finish()
+	return words, len(line)
+}
+
+// cmdStatementReceiverWords returns the words of one statement that can
+// name a receiver: none when its command word is a bare known text consumer
+// (no assignment before it, trust on), every word otherwise.
+func cmdStatementReceiverWords(stmt []string, trust bool) []string {
+	k := 0
+scan:
+	for k < len(stmt) {
+		switch w := stmt[k]; {
+		case cmdAssignmentWord.MatchString(w):
+			// PATH=... grep runs another program: never a trusted consumer.
+			return stmt
+		case w == "{" || w == "}" || w == "!" || w == "if" || w == "then" || w == "else" || w == "elif" ||
+			w == "fi" || w == "do" || w == "done" || w == "while" || w == "until" || w == "esac":
+			k++
+		case w == "time":
+			k++
+			for k < len(stmt) && strings.HasPrefix(stmt[k], "-") {
+				k++
+			}
+		default:
+			break scan
+		}
 	}
-	return words
+	if trust && k < len(stmt) && cmdTextConsumerStatement(stmt[k:]) {
+		return nil
+	}
+	return stmt
+}
+
+// cmdTextConsumerStatement reports whether args (command word first) runs
+// a known text consumer that cannot run its input: a bare name (a path may
+// be any program), gh only for pr, issue, release, api and gist (an alias
+// may run a shell), and no --pre or --pager option.
+func cmdTextConsumerStatement(args []string) bool {
+	name := strings.TrimSuffix(strings.ToLower(args[0]), ".exe")
+	if !cmdHeredocTextConsumers[name] {
+		return false
+	}
+	if name == "gh" {
+		if len(args) < 2 {
+			return false
+		}
+		switch args[1] {
+		case "pr", "issue", "release", "api", "gist":
+		default:
+			return false
+		}
+	}
+	for _, a := range args[1:] {
+		if strings.HasPrefix(a, "--pre") || strings.HasPrefix(a, "--pager") {
+			return false
+		}
+	}
+	return true
 }
 
 // cmdHeredocBodies reads the bodies of the pending here-documents from start
