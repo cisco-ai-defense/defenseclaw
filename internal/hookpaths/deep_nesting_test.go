@@ -90,3 +90,46 @@ func TestResolveConnectorDeepTextBodyIsNotShell(t *testing.T) {
 		}
 	}
 }
+
+// The command of a Codex apply_patch call is a patch envelope. A patch that
+// adds ordinary text with more than shellparse.MaxNestingDepth unclosed (, {
+// or [ (ANSI colour escapes) keeps complete evidence and its targets, as the
+// same patch under input does (GAP-2561, the RV-p4-1 class).
+func TestResolveConnectorDeepPatchBodyIsNotShell(t *testing.T) {
+	defer debug.SetMaxStack(debug.SetMaxStack(64 << 20))
+	home := t.TempDir()
+	cwd := home + "/project"
+	target := cwd + "/testdata/log.golden"
+	patch := func(path, body string) string {
+		return "*** Begin Patch\n*** Add File: " + path + "\n" + body + "*** End Patch\n"
+	}
+	colored := strings.Repeat("+\x1b[31mERROR\x1b[0m build step failed\n", 600)
+	for _, row := range []struct {
+		name, key, body, path string
+	}{
+		{"H01 colored command", "command", colored, target},
+		{"H02 colored input", "input", colored, target},
+		{"P02 600 (", "command", strings.Repeat("+(\n", 600), target},
+		{"P07 520 [", "command", "+" + strings.Repeat("[", 520) + "\n", target},
+		{"K1 colored key patch", "command", colored, home + "/.ssh/authorized_keys"},
+	} {
+		payload, err := json.Marshal(map[string]any{"tool_name": "apply_patch", "cwd": cwd,
+			"tool_input": map[string]any{row.key: patch(row.path, row.body)}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		targets, ok := Decode(ResolveConnector("codex", "", "PreToolUse", payload))
+		if !ok || targets[TruncatedKey] == "1" {
+			t.Errorf("%s: targets %v, want complete evidence", row.name, targets)
+		}
+		if _, listed := targets[row.path]; !listed {
+			t.Errorf("%s: targets %v, want %s", row.name, targets, row.path)
+		}
+	}
+	// A deep shell command is still past the bound.
+	payload, _ := json.Marshal(map[string]any{"tool_name": "Bash", "cwd": cwd,
+		"tool_input": map[string]any{"command": "cat ~/a.txt\n" + strings.Repeat("(", 180<<10)}})
+	if targets, _ := Decode(ResolveConnector("codex", "", "PreToolUse", payload)); targets[TruncatedKey] != "1" {
+		t.Errorf("deep Bash: targets %v, want incomplete evidence", targets)
+	}
+}

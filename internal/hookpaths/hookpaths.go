@@ -867,7 +867,14 @@ func ResolveConnector(connector, surface, event string, payload []byte) string {
 				// the command is measured: a Write or Edit body of ordinary
 				// text (colour escapes, brackets) is not shell (RV-p4-1).
 				if shellparse.TooDeep(command) {
-					return incompleteEvidence(cwd)
+					if !isApplyPatchToolName(tool) {
+						return incompleteEvidence(cwd)
+					}
+					// An apply_patch command is a patch envelope whose
+					// targets are read from the envelope below; deep text
+					// in it is file content, not shell, and no shell
+					// reader parses it (GAP-2561).
+					break
 				}
 				// A ~<login> tilde-prefix names this user's home from the
 				// password database. The gateway judges that spelling as the
