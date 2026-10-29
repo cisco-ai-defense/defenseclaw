@@ -135,7 +135,7 @@ On Windows, the guardian keeps Cursor's `hooks.json` and protected PowerShell ad
 
 ## Managed OpenCode plugin
 
-The standalone payload ships a managed OpenCode plugin at `<InstallRoot>/share/opencode/defenseclaw.js`: `/opt/defenseclaw/share/opencode/defenseclaw.js` on Linux, `/opt/cisco/defenseclaw/share/opencode/defenseclaw.js` on macOS, `C:\Program Files\Cisco\DefenseClaw\share\opencode\defenseclaw.js` on Windows. The Linux and macOS lifecycle installs it with the deployment's files; on Windows the guardian writes it. DefenseClaw adds it to the `plugin` list of OpenCode's managed config, so it runs in every user's OpenCode and users cannot edit or delete it.
+The standalone payload ships a managed OpenCode plugin at `<InstallRoot>/share/opencode/index.js`: `/opt/defenseclaw/share/opencode/index.js` on Linux, `/opt/cisco/defenseclaw/share/opencode/index.js` on macOS, `C:\Program Files\Cisco\DefenseClaw\share\opencode\index.js` on Windows. The Linux and macOS lifecycle installs it with the deployment's files; on Windows the guardian writes it. DefenseClaw adds its directory to the `plugins` list, or the compatible `plugin` list, of OpenCode's managed config, so it runs in every user's OpenCode and users cannot edit or delete it.
 
 - The plugin is the same file on every host and holds no credential. Each event runs the administrator-owned `defenseclaw-hook` beside it, which reaches the gateway the same way the other machine-policy hooks do and applies the foreign-plugin guard.
 - It fails closed: a tool call is blocked when the hook binary cannot run, answers with an error, or the gateway is unreachable. After uninstall it allows calls again.
@@ -299,7 +299,7 @@ sudo /opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise policy export --c
 | `claudecode` | `json` (default): the drop-in. `claude-hklm-json`, `reg`, `intune-settings-catalog`: the same content as a `HKLM\SOFTWARE\Policies\ClaudeCode` `Settings` value. `plist`: a macOS managed-preferences payload. `version-floor`: the [version floor](#claude-code-version-floor) drop-in. |
 | `cursor` | `json`: the enterprise `hooks.json` |
 | `copilot` | `json`: the `policy.d` drop-in |
-| `opencode` | `json`: a managed OpenCode config that loads `<install root>/share/opencode/defenseclaw.js`. Deploy it only where that plugin is installed. |
+| `opencode` | `json`: a managed OpenCode config that loads `<install root>/share/opencode/index.js`. Deploy it only where that plugin is installed. |
 | `devincascade` | `json`: the Cascade `hooks.json` that turns Cascade off |
 | `wsl` | Windows. `reg` (default), `json`, `intune`: the Claude Desktop `disableWslSessions` gate and, with `platform: disable`, `AllowWSL=0`. See [Agent sessions in WSL](/docs/enterprise/windows#agent-sessions-in-wsl) |
 

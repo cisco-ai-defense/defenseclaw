@@ -924,22 +924,18 @@ var builtinHookContracts = map[string][]HookContract{
 	}},
 	"opencode": {{
 		Connector:               "opencode",
-		ContractID:              "opencode-hooks-v1",
-		MinAgentVersion:         "1.18.10",
-		MaxAgentVersion:         "1.19.0",
+		ContractID:              openCodeV2ContractID,
+		MinAgentVersion:         "2.0.0",
+		MaxAgentVersion:         "2.2.0",
 		DefaultForUnversioned:   false,
 		HookScriptVersion:       "v7",
 		HookConfigPathTemplates: []string{"~/.config/opencode/plugins/defenseclaw.js"},
 		ResponseFieldName:       "hook_output",
-		// opencode exposes plugin hooks (not shell hooks). DefenseClaw's
-		// bridge plugin wires tool.execute.before (block) and
-		// tool.execute.after (observe). OpenCode v1.18.10-v1.18.33 also exposes
-		// permission.ask and chat/context mutation hooks; this focused bridge
-		// intentionally does not implement those surfaces.
+		// V2 awaits the before hook; after hooks and sessions are telemetry.
 		Events: []string{
 			"defenseclaw.plugin.loaded",
-			"session.created", "session.updated", "session.status", "session.idle",
-			"session.compacted", "session.error", "session.deleted",
+			"session.created", "session.status", "session.idle",
+			"session.error", "session.deleted",
 			"tool.execute.before", "tool.execute.after",
 		},
 		AIDSurfaces: []string{"tool_call", "tool_result"},
@@ -958,9 +954,11 @@ var builtinHookContracts = map[string][]HookContract{
 		SupportsTraceparent: false,
 		ToolCallLifecycle:   openCodeToolCallLifecycle(),
 		Notes: []string{
-			"opencode (https://opencode.ai) auto-loads JS/TS plugins from ~/.config/opencode/plugins/ — there is no command-hook config file to patch. DefenseClaw writes a dependency-free bridge plugin (defenseclaw.js) whose tool.execute.before POSTs to /api/v1/opencode/hook and throws new Error(reason) on a block decision, aborting the tool.",
-			"DefenseClaw intentionally implements block plus observe-only tool/lifecycle telemetry. OpenCode v1.18.10-v1.18.33 exposes permission.ask and chat/context mutation hooks, but this connector does not implement or claim them. The bridge honors fail-closed by throwing when the gateway is unreachable and FAIL_MODE=closed.",
-			"Source-reviewed range is >=1.18.10,<1.19.0 with current pin 1.18.33. The v1.18.33 Hooks entries used by this contract (config, event, tool.execute.before, tool.execute.after) match the v1.18.19 signatures; a thrown Error from tool.execute.before remains the block surface. The bridge refuses ambiguous MCP identity and action-mode allow claims when a later plugin can mutate args.",
+			"OpenCode v2 uses a default plugin definition with id and setup(ctx); ctx.tool.hook registers awaited execute.before and execute.after callbacks. Only the V2 API is exported; V1 implementations are not shipped.",
+			"Source reviewed at v2.0.0 (63f7ceecbed2d7d9a627518d935dd963b9d4ac9f) and dev/2.1.4 (f669c46c9604ea3d70b8a7ed1f0c10f3a5ac1f61): packages/plugin/src/promise/tool.ts and packages/core/src/tool.ts. https://opencode.ai/v2/docs/build/plugins/migrate-v1",
+			"Before awaiting a verdict, the bridge detaches and deeply freezes the inspected arguments and freezes the event. Later hooks cannot substitute an uninspected tool or input. Context and MCP identity are resolved through the local plugin API with a bounded timeout.",
+			"The v2 result status, content and structured output are forwarded without inventing v1 output strings. After-hook and lifecycle events are observe-only. No native approval or model-traffic interception is claimed.",
+			"Configured local plugins are directories in v2. Managed installs register a directory with an index.js entrypoint. Every delivery mode uses this V2 entrypoint.",
 		},
 	}},
 	"amp": {{
@@ -1106,7 +1104,9 @@ func resolveHookContractForOSModeIn(connectorName, rawVersion, goos string, stri
 			Reason:            "connector has no hook contract gate",
 		}
 	}
-	resolution := resolveHookContractAgainstIn(name, rawVersion, hookContractsForOS(name, goos), sandbox)
+	contracts := hookContractsForOS(name, goos)
+
+	resolution := resolveHookContractAgainstIn(name, rawVersion, contracts, sandbox)
 	if strict {
 		return strictHookContractResolutionOf(resolution)
 	}
@@ -1172,6 +1172,12 @@ func resolveHookContractMatch(name, rawVersion string, contracts []HookContract,
 		}
 	}
 	if gitBuildVersionRE.MatchString(raw) {
+		if name == "opencode" {
+			return HookContractResolution{
+				Connector: name, RawVersion: raw, Status: HookCompatibilityUnknown,
+				Reason: "OpenCode git build has no release version; install a versioned OpenCode V2 release",
+			}
+		}
 		// A source build (Hermes "vgit.5bba024 (2026.9.24)") has no release
 		// version: its digits are a commit hash or a date. Treat it as newer
 		// than every tested range instead of reading a version out of the hash,
@@ -1217,6 +1223,9 @@ func resolveHookContractMatch(name, rawVersion string, contracts []HookContract,
 			Status:            HookCompatibilityUnknown,
 			Reason:            fmt.Sprintf("agent version %s is known broken: %s (%s)", normalized, broken.Reason, broken.Issue),
 		}
+	}
+	if name == "opencode" {
+		contracts = openCodeContractsForVersion(contracts, normalized)
 	}
 	for _, contract := range contracts {
 		if contractMatchesAgentVersion(contract, raw, normalized) {
@@ -1505,6 +1514,9 @@ func resolveHookContractForOptions(
 		resolution = ResolveWindowsManagedKiroHookContract(opts.AgentVersion)
 	} else {
 		resolution = resolveHookContractForOS(connectorName, opts.AgentVersion, goos)
+	}
+	if connectorName == "opencode" && pluginSecureClientProfile(opts) {
+		resolution = resolveHookContractForOSMode(connectorName, opts.AgentVersion, goos, true)
 	}
 	if pinnedID != "" {
 		pinned, ok := hookContractByIDForOS(connectorName, pinnedID, goos)

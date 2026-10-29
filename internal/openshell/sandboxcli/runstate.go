@@ -387,7 +387,7 @@ const (
 
 // harnessOptions are, per harness, the interactive options a run passes
 // and whether each takes a value, from the pinned harness's --help (Claude
-// Code 2.1, Codex 0.146, OpenCode 1.18, Copilot CLI 1.0, Hermes 0.19): the
+// Code 2.1, Codex 0.146, OpenCode 2.1, Copilot CLI 1.0, Hermes 0.19): the
 // values, the switches, then the options that carry the first prompt. An
 // option with an optional value (Claude Code's --resume [id]) is left out:
 // only the shape of the next word can tell, as for any other option the
@@ -409,8 +409,8 @@ var harnessOptions = map[string]map[string]arity{
 		[]string{"-i", "--image"}),
 	// --prompt: "prompt to use", the TUI's first prompt.
 	"opencode": optionTable(
-		[]string{"-m", "--model", "-s", "--session", "--agent", "--port", "--hostname", "--log-level"},
-		[]string{"-c", "--continue", "--print-logs", "--auto"},
+		[]string{"-s", "--session", "--server", "--log-level", "--completions"},
+		[]string{"-c", "--continue", "--print-logs", "--auto", "--standalone", "--wizard"},
 		[]string{"--prompt"}),
 	// -i/--interactive: "start interactive mode and automatically execute
 	// this prompt"; --attachment: a file "attached to the initial prompt".

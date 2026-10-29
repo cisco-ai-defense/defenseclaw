@@ -122,7 +122,7 @@ The scanners themselves (`internal/scanner/*`, `internal/enforce/*`, `cli/defens
 | OpenClaw (proxy) | custom | connector | `openclaw config get mcp.servers`, then the file | `openclaw config set` | `<home>/extensions` |
 | ZeptoClaw (proxy) | custom | connector | yes / yes | unsupported | `~/.zeptoclaw/plugins` |
 | Hermes, Cursor, Devin, Copilot, OpenHands, Antigravity | `hookOnlyConnector` switch | connector surface read paths | yes / yes | Hermes YAML; Cursor, Copilot and OpenHands JSON; Devin `mcp_config.json`; Antigravity `serverUrl` | Hermes dirs + pip entry points; Cursor `~/.cursor/plugins/local` (discovery-only); Copilot command-backed (no dirs); Devin and OpenHands unsupported |
-| OpenCode, Amp (bridge) | `hookOnlyConnector` + `pluginArtifact` | filtered to existing roots (`opencodeWatcherDirs`, `ampWatcherSkillDirs`) | yes / yes | OpenCode `opencode.json`; Amp read-only | TS/JS plugin files; the managed bridge is excluded |
+| OpenCode, Amp (bridge) | `hookOnlyConnector` + `pluginArtifact` | filtered to existing roots (`opencodeWatcherDirs`, `ampWatcherSkillDirs`) | yes / yes | OpenCode `opencode.json`; Amp read-only | TS/JS files and immediate plugin directories; the managed bridge is excluded |
 | Kiro (ACP + hooks) | all surfaces unsupported; **no `ComponentScanner`** | **falls back to OpenClaw paths** | **Go: none**; Python: `.kiro/settings/mcp.json` | discovery-only error | none |
 | OmniGent | `SupportsComponentScanning` false | explicit `nil` arms | nil / exempt | unsupported | none |
 

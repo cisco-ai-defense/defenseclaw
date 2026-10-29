@@ -11,6 +11,7 @@
 //   node sandbox-plugin-contract.mjs amp <rendered plugin.ts>   (TypeScript stripping)
 
 import assert from "node:assert/strict";
+import { fixtureBridge } from "../../../opencodebridge/testdata/fixture.mjs";
 import { pathToFileURL } from "node:url";
 
 const [kind, pluginPath] = process.argv.slice(2);
@@ -62,28 +63,11 @@ function stubFetch(responses, isToolRequest) {
   return { all, tool };
 }
 
-// openCodeClient is the SDK client OpenCode hands its plugins, reduced to
-// the TUI toast the bridge shows a block with; failing makes it reject.
-function openCodeClient(failing) {
-  const toasts = [];
-  const client = {
-    tui: {
-      showToast: async (options) => {
-        toasts.push(options);
-        if (failing) throw new Error("fixture: no TUI");
-        return { data: true };
-      },
-    },
-  };
-  return { client, toasts };
-}
-
-async function openCodeToolCall(responses, token, failingToast) {
+async function openCodeToolCall(responses, token) {
   setToken(token);
   const seen = stubFetch(responses, (p) => p.hook_event_name === "tool.execute.before");
   const { url, module } = await load();
-  const { client, toasts } = openCodeClient(failingToast);
-  const hooks = await module.DefenseClaw({ directory: "/work/proj", client });
+  const hooks = await fixtureBridge(module, { directory: "/work/proj" });
   await hooks.config({ plugin_origins: [{ spec: url }], mcp: {} });
   let error;
   try {
@@ -91,7 +75,7 @@ async function openCodeToolCall(responses, token, failingToast) {
   } catch (err) {
     error = err;
   }
-  return { denied: Boolean(error), message: error ? error.message : "", toasts, ...seen };
+  return { denied: Boolean(error), message: error ? error.message : "", ...seen };
 }
 
 async function ampToolCall(responses, token) {
@@ -194,16 +178,8 @@ for (const scenario of scenarios) {
   assert.equal(run.denied, scenario.denied, `${kind}: ${scenario.name}: denied`);
   assert.equal(run.tool.length, scenario.tool, `${kind}: ${scenario.name}: tool requests`);
   if (scenario.denied) assert.match(run.message, /DefenseClaw|fixture/, `${kind}: ${scenario.name}: message`);
-  if (kind === "opencode") {
-    // OpenCode's TUI shows a refused tool as its bare command line, so every
-    // denial is also a toast carrying the reason the model gets, and where
-    // the TUI keeps it (the line, clicked).
-    assert.equal(run.toasts.length, scenario.denied ? 1 : 0, `${kind}: ${scenario.name}: toasts`);
-    if (scenario.denied) {
-      assert.equal(run.toasts[0].body.message, run.message + "\n\nClick the tool's red line in the conversation to show this again.",
-        `${kind}: ${scenario.name}: toast message`);
-      assert.equal(run.toasts[0].body.variant, "error", `${kind}: ${scenario.name}: toast variant`);
-    }
+  if (kind === "opencode" && scenario.denied) {
+    assert(run.message, `${kind}: ${scenario.name}: native tool error has no reason`);
   }
   if (scenario.verify) scenario.verify(run);
 }

@@ -3496,14 +3496,18 @@ def _litellm_version_note() -> tuple[str, str]:
 
     from defenseclaw.scanner import settings as scanner_settings
 
-    dist, floor = scanner_settings.LITELLM_DIST, scanner_settings.LITELLM_MIN_VERSION
+    dist = scanner_settings.LITELLM_DIST
+    floor, ceiling = scanner_settings.LITELLM_MIN_VERSION, scanner_settings.LITELLM_MAX_VERSION
     try:
         installed = importlib_metadata.version(dist)
     except importlib_metadata.PackageNotFoundError:
         return "fail", f"{dist} is not installed; {_scanner_repair_hint()}"
-    if tuple(int(part) for part in re.findall(r"\d+", installed)[:3]) < floor:
-        needed = ".".join(str(part) for part in floor)
-        return "warn", f"{dist} {installed} (this release needs {needed} or newer); {_scanner_repair_hint()}"
+    # Published stable releases may carry post/local metadata. A prerelease,
+    # development build or unreadable version cannot prove this stable range.
+    match = re.fullmatch(r"(\d+)\.(\d+)\.(\d+)(?:\.post\d+)?(?:\+[A-Za-z0-9.-]+)?", installed)
+    if not match or not floor <= tuple(int(part) for part in match.groups()) < ceiling:
+        needed = ">=" + ".".join(map(str, floor)) + ",<" + ".".join(map(str, ceiling))
+        return "warn", f"{dist} {installed} (this release needs {needed}); {_scanner_repair_hint()}"
     return "pass", f"{dist} {installed}"
 
 
@@ -8279,62 +8283,6 @@ def _opencode_runtime_remediation(status: str, runtime_detail: str) -> str:
 _OPENCODE_PLUGIN_SUFFIXES = (".js", ".ts")
 
 
-def _opencode_sibling_plugins(path: str) -> list[str]:
-    """Other OpenCode plugin files in the config folder of DefenseClaw's plugin *path*."""
-    own = os.path.realpath(path)
-    config_dir = os.path.dirname(os.path.dirname(os.path.abspath(path)))
-    found: list[str] = []
-    for folder in ("plugin", "plugins"):
-        directory = os.path.join(config_dir, folder)
-        try:
-            names = sorted(os.listdir(directory))
-        except OSError:
-            continue
-        for name in names:
-            candidate = os.path.join(directory, name)
-            if (
-                name.endswith(_OPENCODE_PLUGIN_SUFFIXES)
-                and os.path.realpath(candidate) != own
-                and os.path.isfile(candidate)
-            ):
-                found.append(candidate)
-    return found
-
-
-def _check_opencode_later_plugins(cfg, path: str, r: _DoctorResult) -> None:
-    """Warn in action mode when another plugin can load after DefenseClaw's.
-
-    OpenCode runs plugin hooks in load order and a later plugin can change a
-    tool call's arguments after DefenseClaw checked them, so in action mode
-    the bridge refuses every tool call while one is loaded (bridge v7). The
-    refusal reason is in the plugin's toast and in the failed tool, but
-    OpenCode's TUI shows only that the command was blocked (GAP-0469,
-    GAP-0465).
-    """
-
-    if _doctor_effective_guardrail_mode(getattr(cfg, "guardrail", None), "opencode") != "action":
-        return
-    others = _opencode_sibling_plugins(path)
-    if not others:
-        return
-    names = ", ".join(os.path.basename(other) for other in others)
-    _emit(
-        "warn",
-        "OpenCode plugin order",
-        f"other OpenCode plugins beside {path}: {names}. When OpenCode loads one after "
-        "defenseclaw.js, action mode refuses every tool call (\"later plugin argument mutations "
-        "are not observable\") and OpenCode shows only that the command was blocked",
-        r=r,
-        remediation=(
-            "move "
-            + " ".join(shlex.quote(other) for other in others)
-            + " out of the OpenCode plugin folder (a project's .opencode/plugins counts too), "
-            "or keep them and use `defenseclaw guardrail mode observe --connector opencode`; "
-            "then restart OpenCode"
-        ),
-    )
-
-
 def _authenticated_gateway_health(cfg) -> tuple[dict | None, str, bool]:
     """The gateway's health from its authenticated ``/status`` document.
 
@@ -9558,7 +9506,6 @@ def _check_hook_health(cfg, connector: str, r: _DoctorResult) -> None:
                             r=r,
                             remediation=_opencode_runtime_remediation(status, runtime_detail),
                         )
-                _check_opencode_later_plugins(cfg, path, r)
             elif connector == "hermes":
                 problem = _hermes_registered_execution_problem(cfg, path)
                 if problem:

@@ -44,6 +44,7 @@ const (
 	CorrelationProfileCopilotV1     CorrelationProfileVersion = "copilot-correlation-v1"
 	CorrelationProfileAntigravityV1 CorrelationProfileVersion = "antigravity-correlation-v1"
 	CorrelationProfileOpenCodeV1    CorrelationProfileVersion = "opencode-correlation-v1"
+	CorrelationProfileOpenCodeV2    CorrelationProfileVersion = "opencode-correlation-v2"
 	CorrelationProfileAMPV1         CorrelationProfileVersion = "amp-correlation-v1"
 	CorrelationProfileKiroACPV1     CorrelationProfileVersion = "kiro-acp-correlation-v1"
 )
@@ -768,6 +769,8 @@ func CorrelationSpecForConnector(name, hookContractID string) (CorrelationSpec, 
 		)
 		return makeSpec(CorrelationProfileAntigravityV1, "antigravity-hooks-v2", []CorrelationSurface{CorrelationSurfaceHook}, bindings, nil, []CorrelationInferenceRule{CorrelationInferencePromptBoundaryTurn, CorrelationInferenceUniquePendingTool}, complete(CorrelationCompletenessComplete, CorrelationCompletenessPartial, CorrelationCompletenessAbsent, CorrelationCompletenessPartial, CorrelationCompletenessPartial, CorrelationCompletenessAbsent, "stepIdx is a trajectory step, not a turn", "no documented customer OTLP surface"))
 	case "opencode":
+		profileVersion := CorrelationProfileOpenCodeV2
+		contractVersion := openCodeV2ContractID
 		bindings := appendBindings(base,
 			reported(CorrelationTargetSession, ns, "session", "sessionId"),
 			reported(CorrelationTargetParentSession, ns, "parent_session", "parentID", "parentId", "parentSessionId"),
@@ -775,7 +778,7 @@ func CorrelationSpecForConnector(name, hookContractID string) (CorrelationSpec, 
 			reported(CorrelationTargetSourceEvent, ns, "part", "part_id", "partId"),
 			reported(CorrelationTargetTool, ns, "tool_invocation", "callID", "callId", "toolCallId"),
 		)
-		return makeSpec(CorrelationProfileOpenCodeV1, "opencode-hooks-v1", []CorrelationSurface{CorrelationSurfaceHook}, bindings, nil, []CorrelationInferenceRule{CorrelationInferenceUniquePendingTool}, complete(CorrelationCompletenessComplete, CorrelationCompletenessComplete, CorrelationCompletenessPartial, CorrelationCompletenessComplete, CorrelationCompletenessPartial, CorrelationCompletenessAbsent, "no authenticated server-event adapter or reviewed native exporter is installed"))
+		return makeSpec(profileVersion, contractVersion, []CorrelationSurface{CorrelationSurfaceHook}, bindings, nil, []CorrelationInferenceRule{CorrelationInferenceUniquePendingTool}, complete(CorrelationCompletenessComplete, CorrelationCompletenessComplete, CorrelationCompletenessPartial, CorrelationCompletenessComplete, CorrelationCompletenessPartial, CorrelationCompletenessAbsent, "no authenticated server-event adapter or reviewed native exporter is installed"))
 	case "amp":
 		bindings := appendBindings(base,
 			reported(CorrelationTargetThread, ns, "thread", "thread_id"),

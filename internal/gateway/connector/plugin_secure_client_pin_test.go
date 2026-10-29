@@ -22,8 +22,8 @@ func TestSecureClientPluginTemplatesArePinned(t *testing.T) {
 	}{
 		{
 			current: "opencode-plugin.js", pinned: "opencode-plugin-secure-client.js",
-			templateSHA: "72ee5dcb51e28d153714e63401233ace81c17519e8970675d08a19d5730a5ab3",
-			renderSHA:   "9c3ec7c17b6c90885982c08ea5a6347a5121360bfb8f822b7528d84e72d87a12",
+			templateSHA: "35af25a1713050fe1c2e9dd9014a0fcda0d07caba350244360e9d2a31abdc08f",
+			renderSHA:   "efe0e4b45c37d81b1ce61fbba06074992f20dd00f3500b5868dc43bea762af04",
 		},
 		{
 			current: "amp-plugin.ts", pinned: "amp-plugin-secure-client.ts",

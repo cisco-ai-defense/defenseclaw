@@ -50,18 +50,12 @@ const DC_FOREIGN_GUARD = "{{.ForeignHookGuardJS}}";
 // standard user cannot remove the marker. Empty keeps the fail mode.
 const DC_INSTALL_MARKER = "{{.InstallMarkerJS}}";
 const DC_TIMEOUT_MS = 10000;
-const DC_PLUGIN_URL = import.meta.url;
 const DC_TOKEN_PATTERN = /^[0-9a-f]{64}$/;
 const DC_MAX_TOKEN_FILE_BYTES = 4096;
 
-// OpenCode v1.18.10-v1.18.19 passes the effective config (including its derived
-// plugin_origins list) to every plugin's config hook after external plugins
-// have loaded. Hooks then run sequentially in that same order. DefenseClaw's
-// global plugin is authoritative over final args only when no external plugin
-// follows it. Start conservative until the config hook proves that condition.
+// V2 pins each inspected tool event before awaiting any verdict.
 let DC_ARGUMENTS_AUTHORITATIVE = false;
 let DC_LATER_PLUGIN_COUNT = 0;
-let DC_MCP_SERVERS = [];
 let DC_MCP_IDENTITY_STATUS = "unverified";
 
 // defenseclawIdentityHeaders reports which end user this plugin runs as.
@@ -98,70 +92,11 @@ function defenseclawSafeIdentityValue(value) {
     /^[A-Za-z0-9._-]+$/.test(value);
 }
 
-function defenseclawPluginSpecifier(origin) {
-  const spec = origin && origin.spec;
-  if (Array.isArray(spec)) return typeof spec[0] === "string" ? spec[0] : "";
-  return typeof spec === "string" ? spec : "";
-}
-
-function defenseclawNormalizedPluginURL(spec) {
-  if (!spec || !spec.startsWith("file:")) return "";
-  try {
-    return new URL(spec).href;
-  } catch (_) {
-    return "";
-  }
-}
-
-// This is OpenCode v1.18.10-v1.18.19's published MCP tool-name sanitizer, mirrored
-// exactly from packages/opencode/src/mcp/catalog.ts.
+// V2's MCP catalog uses this sanitizer for exposed tool names.
 function defenseclawSanitizeMCPName(value) {
   return String(value || "").replace(/[^a-zA-Z0-9_-]/g, "_");
 }
 
-function defenseclawConfigure(config) {
-  const origins = config && Array.isArray(config.plugin_origins) ? config.plugin_origins : [];
-  const selfURL = defenseclawNormalizedPluginURL(DC_PLUGIN_URL);
-  const ownIndex = origins.findIndex(
-    (origin) => defenseclawNormalizedPluginURL(defenseclawPluginSpecifier(origin)) === selfURL,
-  );
-  DC_LATER_PLUGIN_COUNT = ownIndex >= 0 ? origins.length - ownIndex - 1 : origins.length;
-  DC_ARGUMENTS_AUTHORITATIVE = ownIndex >= 0 && DC_LATER_PLUGIN_COUNT === 0;
-
-  const mcp = config && config.mcp;
-  if (!mcp || typeof mcp !== "object" || Array.isArray(mcp)) {
-    DC_MCP_SERVERS = [];
-    DC_MCP_IDENTITY_STATUS = "authoritative";
-    return;
-  }
-  DC_MCP_SERVERS = Object.keys(mcp)
-    .filter((name) => mcp[name] && typeof mcp[name] === "object" && mcp[name].enabled !== false)
-    .map((name) => ({ name, sanitized: defenseclawSanitizeMCPName(name) }))
-    .filter((entry) => entry.sanitized);
-  const seen = new Set();
-  DC_MCP_IDENTITY_STATUS = "authoritative";
-  for (const entry of DC_MCP_SERVERS) {
-    if (seen.has(entry.sanitized)) {
-      DC_MCP_IDENTITY_STATUS = "collision";
-      break;
-    }
-    seen.add(entry.sanitized);
-  }
-}
-
-function defenseclawResolveMCPServer(toolName) {
-  const tool = String(toolName || "");
-  const candidates = DC_MCP_SERVERS.filter((entry) => tool.startsWith(entry.sanitized + "_"));
-  if (candidates.length === 0) return { status: "not_mcp", name: "" };
-  if (DC_MCP_IDENTITY_STATUS !== "authoritative" || candidates.length !== 1) {
-    return { status: "ambiguous", name: "" };
-  }
-  return { status: "authoritative", name: candidates[0].name };
-}
-
-// defenseclawDeploymentRemoved reports whether the managed deployment that
-// rendered this plugin was uninstalled: its install marker is definitively
-// absent. Any other inspection result keeps the plugin enforcing.
 async function defenseclawDeploymentRemoved() {
   if (!DC_INSTALL_MARKER) return false;
   try {
@@ -486,15 +421,16 @@ async function defenseclawPostLifecycle(event, cwd) {
   }
 }
 
-export const DefenseClaw = async ({ directory, worktree }) => {
+async function defenseclawHooks({ directory, worktree }) {
   const cwd = directory || worktree || "";
   // OpenCode loads plugins once at startup: a foreign plugin present now
   // keeps running for this process even if its file is deleted later, so a
   // block found at load holds for the whole process.
   const defenseclawStartupGuard = defenseclawForeignHookCheck("defenseclaw.plugin.loaded", cwd);
   return {
-    config: async (config) => {
-      defenseclawConfigure(config);
+    initialize: async () => {
+      DC_ARGUMENTS_AUTHORITATIVE = true;
+      DC_MCP_IDENTITY_STATUS = "authoritative";
       await defenseclawPostLoadHeartbeat(cwd);
     },
     // OpenCode publishes its session lifecycle through the generic event
@@ -504,8 +440,8 @@ export const DefenseClaw = async ({ directory, worktree }) => {
     // child session ID.
     event: async ({ event }) => {
       if (!event || ![
-        "session.created", "session.updated", "session.status", "session.idle",
-        "session.compacted", "session.error", "session.deleted",
+        "session.created", "session.status", "session.idle",
+        "session.error", "session.deleted",
       ].includes(event.type)) return;
       await defenseclawPostLifecycle(event, cwd);
     },
@@ -514,14 +450,14 @@ export const DefenseClaw = async ({ directory, worktree }) => {
     // The decision is resolved BEFORE the throw so a fail-open transport
     // error never turns into an accidental block.
     "tool.execute.before": async (input, output) => {
-      const blocked = (await defenseclawStartupGuard) || (await defenseclawForeignHookCheck("tool.execute.before", cwd));
+      const blocked = (await defenseclawStartupGuard) || (await defenseclawForeignHookCheck("tool.execute.before", input.cwd));
       if (blocked) throw new Error(blocked);
-      const mcpIdentity = defenseclawResolveMCPServer(input && input.tool);
+      const mcpIdentity = input.mcpIdentity;
       const verdict = await defenseclawPost(
         "tool.execute.before",
         input && input.tool,
         output && output.args,
-        cwd,
+        input.cwd,
         input,
         undefined,
         mcpIdentity,
@@ -541,21 +477,209 @@ export const DefenseClaw = async ({ directory, worktree }) => {
     // gateway can attribute this outcome to the exact call before a later tool
     // starts; transport and fail-mode results remain advisory and are ignored.
     "tool.execute.after": async (input, output) => {
-      const result = output && {
-        title: output.title,
-        output: output.output,
-        metadata: output.metadata,
-      };
+      const result = output;
       await defenseclawPost(
         "tool.execute.after",
         input && input.tool,
         input && input.args,
-        cwd,
+        input.cwd,
         input,
         result,
-        defenseclawResolveMCPServer(input && input.tool),
+        input.mcpIdentity,
         false,
       );
     },
   };
+}
+
+export default {
+  id: "cisco.defenseclaw",
+  setup: (context) => defenseclawV2Setup(context, defenseclawHooks),
 };
+
+// BEGIN GENERATED OPENCODE V2 ADAPTER
+// OpenCode v2 Promise plugin adapter. Reviewed against f669c46c9604ea3d70b8a7ed1f0c10f3a5ac1f61.
+// The host awaits execute.before and propagates a rejected Promise before
+// executing the tool. No OpenCode SDK package is needed at runtime.
+
+function defenseclawPinV2Event(event) {
+  if (!event || typeof event !== "object") throw new Error("DefenseClaw refused an incomplete OpenCode v2 tool event.");
+  let nodes = 0;
+  let characters = 0;
+  const copy = (value, depth) => {
+    if (++nodes > 16384 || depth > 64) throw new Error("DefenseClaw refused oversized OpenCode tool arguments.");
+    if (typeof value === "string") {
+      characters += value.length;
+      if (characters > 1048576) throw new Error("DefenseClaw refused oversized OpenCode tool arguments.");
+      return value;
+    }
+    if (value === null || typeof value === "boolean" || (typeof value === "number" && Number.isFinite(value))) return value;
+    if (!value || typeof value !== "object" || (!Array.isArray(value) && Object.getPrototypeOf(value) !== Object.prototype && Object.getPrototypeOf(value) !== null)) {
+      throw new Error("DefenseClaw refused non-JSON OpenCode tool arguments.");
+    }
+    const result = Array.isArray(value) ? [] : Object.create(null);
+    for (const [key, descriptor] of Object.entries(Object.getOwnPropertyDescriptors(value))) {
+      if (Array.isArray(value) && key === "length") continue;
+      if (!descriptor.enumerable) continue;
+      if (!("value" in descriptor)) throw new Error("DefenseClaw refused accessor tool arguments.");
+      characters += key.length;
+      if (characters > 1048576) throw new Error("DefenseClaw refused oversized OpenCode tool arguments.");
+      Object.defineProperty(result, key, { value: copy(descriptor.value, depth + 1), enumerable: true });
+    }
+    return Object.freeze(result);
+  };
+  // Pin both the tool identity and a detached, deeply immutable argument
+  // snapshot BEFORE awaiting the verdict. A later hook cannot substitute
+  // uninspected arguments, including by retaining the original nested object.
+  event.input = copy(event.input, 0);
+  Object.freeze(event);
+}
+
+async function defenseclawV2Bounded(operation) {
+  let timer;
+  try {
+    return await Promise.race([
+      operation(),
+      new Promise((_, reject) => {
+        timer = setTimeout(() => reject(new Error("DefenseClaw could not resolve OpenCode v2 context in time.")), 2000);
+      }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function defenseclawV2Context(ctx, event) {
+  if (!event || typeof event.tool !== "string" || !event.tool || typeof event.id !== "string" || !event.id || typeof event.sessionID !== "string" || !event.sessionID) {
+    throw new Error("DefenseClaw refused an incomplete OpenCode v2 tool event.");
+  }
+  const [session, response] = await defenseclawV2Bounded(() => Promise.all([
+    ctx.session.get({ sessionID: event.sessionID }), ctx.mcp.list(),
+  ]));
+  const directory = session && session.location && session.location.directory;
+  if (session?.id !== event.sessionID || typeof directory !== "string" || !directory || directory !== ctx.location?.directory || session.location.workspaceID !== ctx.location.workspaceID) {
+    throw new Error("DefenseClaw refused an OpenCode tool outside this plugin's verified session location.");
+  }
+  const servers = Array.isArray(response) ? response : response && response.data;
+  if (!Array.isArray(servers) || servers.length > 4096 || (response?.location && (response.location.directory !== directory || response.location.workspaceID !== ctx.location.workspaceID))) {
+    throw new Error("DefenseClaw could not resolve OpenCode MCP server identity.");
+  }
+  const names = servers.map((server) => {
+    if (!server || typeof server.name !== "string" || !server.name || server.name.length > 4096) throw new Error("DefenseClaw received an invalid OpenCode MCP server identity.");
+    return { name: server.name, sanitized: defenseclawSanitizeMCPName(server.name) };
+  });
+  const candidates = names.filter((server) => event.tool.startsWith(server.sanitized + "_"));
+  const mcpIdentity = candidates.length === 0 ? { status: "not_mcp", name: "" }
+    : candidates.length === 1 ? { status: "authoritative", name: candidates[0].name }
+    : { status: "ambiguous", name: "" };
+  return {
+    tool: event.tool, args: event.input, sessionID: event.sessionID,
+    messageID: event.messageID, callID: event.id, agent: event.agent,
+    cwd: directory, mcpIdentity,
+  };
+}
+
+function defenseclawV2Result(event) {
+  if (event.status === "error") return { opencode_v2_status: "error", error: { message: String(event.error?.message || "OpenCode tool failed") } };
+  if (event.status !== "completed" || !event.result || typeof event.result !== "object" || Array.isArray(event.result)) return { opencode_v2_status: "unknown" };
+  return { ...event.result, opencode_v2_status: "completed" };
+}
+
+function defenseclawV2SameLocation(ctx, location) {
+  return location?.directory === ctx.location?.directory && location?.workspaceID === ctx.location?.workspaceID;
+}
+
+function defenseclawV2Remember(sessions, id, location) {
+  if (sessions.size >= 4096 && !sessions.has(id)) sessions.delete(sessions.keys().next().value);
+  sessions.set(id, location);
+}
+
+async function defenseclawV2Lifecycle(ctx, event, sessions, hooks) {
+  const types = {
+    "session.created": "session.created", "session.deleted": "session.deleted",
+    "session.status": "session.status", "session.idle": "session.idle",
+    "session.execution.started": "session.status",
+    "session.execution.succeeded": "session.idle",
+    "session.execution.failed": "session.error",
+    "session.execution.interrupted": "session.idle",
+  };
+  const type = types[event.type];
+  const data = event.data;
+  if (!type || !data || typeof data.sessionID !== "string") return;
+  // Durable execution events can omit location. Resolve the session rather
+  // than attributing every event on the global bus to this plugin's project.
+  let location = event.location || data.location || sessions.get(data.sessionID);
+  if (!location) {
+    const session = await defenseclawV2Bounded(() => ctx.session.get({ sessionID: data.sessionID }));
+    if (session?.id !== data.sessionID) return;
+    location = session.location;
+  }
+  if (!defenseclawV2SameLocation(ctx, location)) return;
+  defenseclawV2Remember(sessions, data.sessionID, location);
+  const properties = { ...data, opencode_event_type: event.type };
+  if (event.type === "session.execution.started") properties.status = { type: "busy" };
+  await hooks.event({ event: { ...event, type, properties } });
+  if (event.type === "session.execution.failed") {
+    const id = typeof event.id === "string" && event.id ? event.id + ":idle" : event.id;
+    await hooks.event({ event: { ...event, id, type: "session.idle", properties } });
+  }
+  if (type === "session.deleted") sessions.delete(data.sessionID);
+}
+
+async function defenseclawV2Setup(ctx, createHooks) {
+  // V2 server plugins have no TUI toast API. Preserve notices in the host's
+  // log/stderr and return blocking reasons through the rejected tool Promise.
+  const client = { tui: { showToast: ({ body }) => { console.warn(String(body.message).startsWith("DefenseClaw") ? body.message : (body.title || "DefenseClaw") + ": " + body.message); } } };
+  const hooks = await createHooks({ client, directory: ctx.location?.directory });
+  const registrations = [];
+  const sessions = new Map();
+  const calls = new Map();
+  const controller = new AbortController();
+  const cleanup = async () => {
+    controller.abort();
+    sessions.clear();
+    calls.clear();
+    await Promise.allSettled(registrations.map((registration) => registration.dispose()));
+  };
+  try {
+    registrations.push(await ctx.tool.hook("execute.before", async (event) => {
+      calls.delete(event?.id);
+      defenseclawPinV2Event(event);
+      const input = await defenseclawV2Context(ctx, event);
+      defenseclawV2Remember(sessions, input.sessionID, ctx.location);
+      await hooks["tool.execute.before"](input, { args: event.input });
+      // Retain only verified metadata, never the potentially large tool input.
+      const { args, ...context } = input;
+      defenseclawV2Remember(calls, event.id, context);
+    }));
+    registrations.push(await ctx.tool.hook("execute.after", async (event) => {
+      // A telemetry failure cannot undo an already executed tool.
+      try {
+        const cached = calls.get(event?.id);
+        calls.delete(event?.id);
+        const paired = cached && cached.sessionID === event.sessionID && cached.tool === event.tool
+          && cached.messageID === event.messageID && cached.agent === event.agent;
+        const input = paired ? { ...cached, args: event.input } : await defenseclawV2Context(ctx, event);
+        await hooks["tool.execute.after"](input, defenseclawV2Result(event));
+      } catch (_) {}
+    }));
+    // In v2 authority comes from the pinned event above, independently of
+    // registration order. Initialize the common verdict/heartbeat path with that fact.
+    await hooks.initialize();
+    // Convert native data/location into the gateway event envelope.
+    // The subscription belongs to this plugin instance and stops on unload.
+    void (async () => {
+      try {
+        for await (const event of ctx.event.subscribe({ signal: controller.signal })) {
+          if (controller.signal.aborted) break;
+          try { await defenseclawV2Lifecycle(ctx, event, sessions, hooks); } catch (_) {}
+        }
+      } catch (_) {}
+    })();
+    return cleanup;
+  } catch (error) {
+    await cleanup();
+    throw error;
+  }
+}
+// END GENERATED OPENCODE V2 ADAPTER

@@ -52,7 +52,7 @@ func TestManagedPluginsAnswerClosedPromptlyDuringLifecycle(t *testing.T) {
 import { pathToFileURL } from "node:url";
 import { unlink } from "node:fs/promises";
 const loaded = await import(pathToFileURL(process.argv[1]).href);
-const plugin = await loaded.DefenseClaw({ directory: "", client: {} });
+const plugin = await fixtureBridge(loaded, { directory: "", client: {} });
 await plugin.config({ plugin_origins: [{ spec: pathToFileURL(process.argv[1]).href }], mcp: {} });
 const started = Date.now();
 try {

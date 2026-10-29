@@ -281,8 +281,8 @@ func TestCreateOnVMRefusesAnImageThatCannotStartInAMicroVM(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			e := newVMEnv(t, nil)
-			res := connector.ResolveSandboxHookContract("opencode", "1.18.31")
-			e.images.rec.HarnessVersion, e.images.rec.HookContract = "1.18.31", res.Contract.ContractID
+			res := connector.ResolveSandboxHookContract("opencode", "2.1.4")
+			e.images.rec.HarnessVersion, e.images.rec.HookContract = "2.1.4", res.Contract.ContractID
 			e.images.rec.MicroVMVerified, e.images.rec.MicroVMProblem, e.images.rec.MicroVMInconclusive = false, tc.problem, tc.inconclusive
 			_, err := e.tryCreate(sandboxapi.CreateRequest{Name: "vm-no", Harness: "opencode", Copy: true})
 			apiErr := wantCode(t, err, sandboxapi.CodeImageUnavailable)
@@ -410,8 +410,8 @@ func TestCreateResolvesTheImageForTheGatewayDriver(t *testing.T) {
 // driver's repository, which no registry serves.
 func TestCreateOnVMSendsTheAlias(t *testing.T) {
 	e := newVMEnv(t, nil)
-	res := connector.ResolveSandboxHookContract("opencode", "1.18.31")
-	e.images.rec.HarnessVersion, e.images.rec.HookContract = "1.18.31", res.Contract.ContractID
+	res := connector.ResolveSandboxHookContract("opencode", "2.1.4")
+	e.images.rec.HarnessVersion, e.images.rec.HookContract = "2.1.4", res.Contract.ContractID
 	e.create(sandboxapi.CreateRequest{Name: "vm-oc", Harness: "opencode", Copy: true})
 	got, err := e.client.GetSandbox(t.Context(), "vm-oc")
 	must(t, err)
@@ -787,8 +787,8 @@ func TestExplainReportsAVMFirstBoot(t *testing.T) {
 	}
 
 	o := newVMEnv(t, nil)
-	res := connector.ResolveSandboxHookContract("opencode", "1.18.31")
-	o.images.rec.HarnessVersion, o.images.rec.HookContract = "1.18.31", res.Contract.ContractID
+	res := connector.ResolveSandboxHookContract("opencode", "2.1.4")
+	o.images.rec.HarnessVersion, o.images.rec.HookContract = "2.1.4", res.Contract.ContractID
 	if _, err := o.m.gateway(t.Context()); err != nil {
 		t.Fatal(err)
 	}

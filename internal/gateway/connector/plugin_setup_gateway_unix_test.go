@@ -67,7 +67,7 @@ func TestPerUserPluginsPostThroughTheRenderedInstallGateway(t *testing.T) {
 				if err := os.WriteFile(path, []byte(renderPluginAssetForTest(t, plugin.asset, data)), 0o600); err != nil {
 					t.Fatal(err)
 				}
-				cmd := exec.Command(nodeForTest(t), "--input-type=module", "-e", plugin.harness, path)
+				cmd := exec.Command(nodeForTest(t), "--input-type=module", "-e", withOpenCodeV2Fixture(t, plugin.harness), path)
 				cmd.Env = append(sanitizedTestEnv(), "HOME="+home)
 				out, err := cmd.Output()
 				if err != nil {

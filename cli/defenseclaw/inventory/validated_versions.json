@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "description": "Human-reviewed highest validated upstream agent version per hook connector x OS. The live connector E2E workflow (.github/workflows/connector-live-e2e.yml) only REPORTS the version it ran against and opens a connector-regression issue on a live-cell failure — it never edits this file. A maintainer updates last_validated_version here (and, when raising/lowering a support floor/ceiling, hook_contracts.json + internal/gateway/connector/hook_contract.go) after reviewing a green run. 'os' keys are linux, macos, windows; an empty last_validated_version means 'not yet certified'.",
+  "description": "Human-reviewed highest validated upstream agent version per hook connector x OS. The live connector E2E workflow (.github/workflows/connector-live-e2e.yml) only REPORTS the version it ran against and opens a connector-regression issue on a live-cell failure \u2014 it never edits this file. A maintainer updates last_validated_version here (and, when raising/lowering a support floor/ceiling, hook_contracts.json + internal/gateway/connector/hook_contract.go) after reviewing a green run. 'os' keys are linux, macos, windows; an empty last_validated_version means 'not yet certified'.",
   "policy": "alert-only",
   "connectors": {
     "kiro": {
@@ -154,7 +154,7 @@
           "run_url": ""
         }
       },
-      "notes": "Source-reviewed contract is pinned to OpenCode 1.18.33 (reviewed range >=1.18.10,<1.19.0); the v1.18.33 Hooks entries used by this contract match the v1.18.19 signatures and a thrown Error from tool.execute.before remains the block surface. Native Windows setup is supported; authentic official-client validation metadata remains empty until the manual run is recorded, and live=false."
+      "notes": "V2-only source-reviewed contract >=2.0.0,<2.2.0, reviewed at 2.0.0 and 2.1.4. V1 certifications do not apply; authentic native official-client validation remains unrecorded and live=false."
     },
     "antigravity": {
       "version_probe": "agy --version",

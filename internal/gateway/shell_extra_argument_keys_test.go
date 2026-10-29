@@ -76,7 +76,7 @@ func shellExtraKeyHook(t *testing.T, connectorName, tool string, args json.RawMe
 func TestShellToolCallWithExtraArgumentKeys(t *testing.T) {
 	const rm = `"rm -rf ~/"`
 	for _, shell := range []struct{ connector, tool, workdir string }{
-		{"opencode", "bash", "workdir"},
+		{"opencode", "shell", "workdir"},
 		{"claudecode", "Bash", "workdir"},
 		{"devin", "exec", "workdir"},
 		{"kiro", "execute_bash", "working_dir"},

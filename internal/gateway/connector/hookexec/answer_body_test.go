@@ -70,7 +70,11 @@ func TestAPartialGatewayBodyIsNotADecision(t *testing.T) {
 			managed, elapsed := runAgainstGateway(t, "codex", partialAllowGateway(t, test.drop), func(opts *Options) {
 				managedCodex(opts)
 			})
-			if elapsed > time.Second || !blocked(managed) || !closedReason(managed.stderr) {
+			// The same watchdog race uses the managed timeout's typed code.
+			// Keep the bounded block assertion here; the deterministic read
+			// error below pins the managed incomplete-response reason.
+			managedClosedReason := closedReason(managed.stderr) || strings.Contains(managed.stderr, managedGatewayNoAnswerReason)
+			if elapsed > time.Second || !blocked(managed) || !managedClosedReason {
 				t.Fatalf("managed: after %s code=%d stdout=%q stderr=%q, want an incomplete-answer block",
 					elapsed, managed.code, managed.stdout, managed.stderr)
 			}
@@ -112,6 +116,13 @@ func TestHTTP200MalformedAnswersCannotUseOpenOutageMode(t *testing.T) {
 				if test.name == "read error after allow" && !strings.Contains(result.stderr, "incomplete gateway response") {
 					t.Fatalf("%s: error after HTTP 200 had reason %q, want incomplete gateway response", connector, result.stderr)
 				}
+			}
+			managed := run(t, "codex", test.rt(), managedCodex)
+			if !blocked(managed) {
+				t.Fatalf("managed: code=%d stdout=%q stderr=%q, want block", managed.code, managed.stdout, managed.stderr)
+			}
+			if test.name == "read error after allow" && !strings.Contains(managed.stderr, "incomplete gateway response") {
+				t.Fatalf("managed: error after HTTP 200 had reason %q, want incomplete gateway response", managed.stderr)
 			}
 		})
 	}

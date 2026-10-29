@@ -340,6 +340,99 @@ def test_windows_upgrade_lane_refuses_a_0x_previous_release() -> None:
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX shell scripts")
+@pytest.mark.parametrize(
+    ("predicted", "reported", "errors", "accepted"),
+    [
+        (("unprivileged_user_namespaces", "unprivileged_ptrace"), (), (), True),
+        (("unprivileged_user_namespaces", "unprivileged_ptrace"),
+         ("unprivileged_user_namespaces", "unprivileged_ptrace"), (), True),
+        (("unprivileged_ptrace",), ("unprivileged_user_namespaces",), (), False),
+        ((), ("unprivileged_ptrace",), (), False),
+        (("unprivileged_ptrace",), ("machine_policy_incomplete",), (), False),
+        (("unprivileged_ptrace",), ("unprivileged_ptrace",), ("lifecycle_failed",), False),
+    ],
+)
+def test_unix_previous_release_checks_only_allow_predicted_host_warnings(
+    tmp_path: Path, predicted: tuple[str, ...], reported: tuple[str, ...],
+    errors: tuple[str, ...], accepted: bool,
+) -> None:
+    lane = UNIX_LANE.read_text(encoding="utf-8")
+    functions = []
+    for name in ("check", "check_previous", "exit_status_matches"):
+        match = re.search(rf"^{name}\(\) \{{\n.*?^\}}\n", lane, re.MULTILINE | re.DOTALL)
+        assert match, name
+        functions.append(match.group(0))
+    result = _result(
+        warnings=[{"code": code} for code in reported],
+        errors=[{"code": code} for code in errors], ok=not errors,
+        exit_code=1 if errors else 0, security_complete=not reported,
+    )
+    path = tmp_path / "previous.json"
+    path.write_text(json.dumps(result), encoding="utf-8")
+    flags = [argument for code in predicted for argument in ("--require-warning", code)]
+    script = "\n".join(functions) + (
+        "\nset -eu\n"
+        f"kernel_views=({shlex.join(flags)})\n"
+        'check_previous "$fixture" previous-install --action ensure --installed --version 1.4.0\n'
+    )
+    completed = subprocess.run(
+        ["bash", "-c", script],
+        env={**os.environ, "python": sys.executable, "checker": str(CHECKER),
+             "platform": "linux", "fixture": str(path)},
+        capture_output=True, text=True, timeout=30, check=False,
+    )
+    assert (completed.returncode == 0) is accepted, completed.stdout + completed.stderr
+    # Exercise the same helper used by all three previous-release checks.
+    for step in ("01-previous-install", "02-previous-config", "03-previous-verify"):
+        assert f'check_previous "$results/{step}.json"' in lane
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX shell scripts")
+@pytest.mark.parametrize(
+    ("kind", "code", "error", "still_busy", "calls"),
+    [("pkg", 75, "lifecycle_busy", False, 1),
+     ("pkg", 75, "lifecycle_busy", True, 1),
+     ("pkg", 75, "other_failure", False, 0),
+     ("pkg", 1, "lifecycle_busy", False, 0),
+     ("deb", 75, "lifecycle_busy", False, 0)],
+)
+def test_unix_busy_retry_preserves_config_arguments_and_is_bounded(
+    tmp_path: Path, kind: str, code: int, error: str, still_busy: bool, calls: int,
+) -> None:
+    lane = UNIX_LANE.read_text(encoding="utf-8")
+    helper = re.search(r"^retry_busy\(\) \{.*?^\}\n", lane, re.MULTILINE | re.DOTALL)
+    assert helper
+    (tmp_path / "previous-config.json").write_text(
+        json.dumps({"errors": [{"code": error}]}), encoding="utf-8",
+    )
+    (tmp_path / "previous-config.rc").write_text(str(code), encoding="utf-8")
+    # Advancing SECONDS proves a persistent busy result stops at the deadline,
+    # without spending three minutes in the test.
+    script = helper.group(0) + (
+        '\nset -eu\nsleep() { SECONDS=$((SECONDS + 181)); }\n'
+        'lifecycle() { printf "%s\\n" "$@" >>"$results/calls"; '
+        'if [ "$still_busy" = false ]; then echo 0 >"$results/$1.rc"; fi; }\n'
+        'retry_busy previous-config ensure --from-package --config "$results/config with spaces.yaml" --reason ci-upgrade-lane\n'
+    )
+    completed = subprocess.run(
+        ["bash", "-c", script],
+        env={**os.environ, "kind": kind, "python": sys.executable,
+             "results": str(tmp_path), "still_busy": str(still_busy).lower()},
+        capture_output=True, text=True, timeout=10, check=False,
+    )
+    assert completed.returncode == 0, completed.stderr
+    recorded = tmp_path / "calls"
+    if calls:
+        assert recorded.read_text(encoding="utf-8").splitlines() == [
+            "previous-config", "ensure", "--from-package", "--config",
+            str(tmp_path / "config with spaces.yaml"), "--reason", "ci-upgrade-lane",
+        ]
+    else:
+        assert not recorded.exists()
+    assert 'retry_busy 02-previous-config ensure --from-package --config "$stage/config.yaml" --reason ci-upgrade-lane' in lane
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX shell scripts")
 def test_unix_upgrade_lane_checks_a_stored_credential_survives(tmp_path: Path) -> None:
     # The secrets check hashed an empty store before and after the upgrade,
     # which proves nothing; the lane now stores a credential first.

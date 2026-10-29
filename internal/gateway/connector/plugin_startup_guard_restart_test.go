@@ -65,11 +65,11 @@ const call = async (plugin, id) => {
     return "block:" + String(error && error.message || error);
   }
 };
-const first = await loaded.DefenseClaw({ directory: "", client: {} });
+const first = await fixtureBridge(loaded, { directory: "", client: {} });
 await first.config({ plugin_origins: [{ spec: href }], mcp: {} });
 console.log(await call(first, "C1"));
 console.log(await call(first, "C2"));
-const restarted = await loaded.DefenseClaw({ directory: "", client: {} });
+const restarted = await fixtureBridge(loaded, { directory: "", client: {} });
 await restarted.config({ plugin_origins: [{ spec: href }], mcp: {} });
 console.log(await call(restarted, "C3"));
 `, writeRenderedPlugin(t, "opencode-plugin.js", "defenseclaw.mjs", data))
@@ -248,11 +248,11 @@ const call = async (plugin, id) => {
     return "block:" + String(error && error.message || error);
   }
 };
-const first = await loaded.DefenseClaw({ directory: "", client: {} });
+const first = await fixtureBridge(loaded, { directory: "", client: {} });
 await first.config({ plugin_origins: [{ spec: href }], mcp: {} });
 console.log(await call(first, "C1"));
 console.log(await call(first, "C2"));
-const restarted = await loaded.DefenseClaw({ directory: "", client: {} });
+const restarted = await fixtureBridge(loaded, { directory: "", client: {} });
 await restarted.config({ plugin_origins: [{ spec: href }], mcp: {} });
 console.log(await call(restarted, "C3"));
 `, writeRenderedPlugin(t, "opencode-plugin.js", "defenseclaw.mjs", data))

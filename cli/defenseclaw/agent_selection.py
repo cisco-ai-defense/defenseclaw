@@ -259,9 +259,8 @@ def _select_agent_executable(data_dir: str, connector: str) -> SetupAgentSelecti
     spec = agent_discovery._SPECS[connector]
     if connector == "opencode" and os.name == "nt":
         rejection = (
-            "neither the official SST WinGet opencode.exe nor the npm opencode-ai package's opencode.exe "
-            "was found or trusted for this user; install one with 'winget install SST.opencode' or "
-            "'npm install -g opencode-ai'"
+            "no official V2 SST WinGet or @opencode/cli native image was found or trusted "
+            "for this user; install V2 with 'npm install -g @opencode/cli@2'"
         )
     else:
         rejection = "no installed executable was found in a built-in or operator-approved trusted prefix"
@@ -493,15 +492,18 @@ def _setup_agent_candidates(connector: str, spec, data_dir: str) -> tuple[str, .
     """Enumerate PATH candidates plus exact names under trusted API roots."""
 
     if connector == "opencode" and os.name == "nt":
-        # Protected native setup admits exactly two images, the same ones the
+        # Protected native setup admits the reviewed native images, the same ones the
         # gateway admits (opencode_admission_windows.go): the official SST
-        # WinGet image, then the native image of the npm opencode-ai package.
+        # @opencode/cli V2 image, then the official WinGet image.
         # Passive inventory may still display aliases and other
         # installations, but PATH, WinGet Links, generic roots, and configured
         # prefixes never participate in the mutation-authorizing selection.
         return tuple(
             candidate
-            for candidate in (_windows_opencode_winget_executable(), _windows_opencode_npm_executable())
+            for candidate in (
+                _windows_opencode_npm_executable(),
+                _windows_opencode_winget_executable(),
+            )
             if candidate and os.path.isfile(candidate)
         )
 
@@ -600,7 +602,7 @@ _AMP_NPM_NATIVE_RELATIVES = (
     # `npm i -g @sourcegraph/amp` nests the same native package (GAP-1437).
     ("node_modules", "@sourcegraph", "amp", "node_modules", "@ampcode", "cli", "bin", "amp.exe"),
 )
-_OPENCODE_NPM_NATIVE_RELATIVE = ("npm", "node_modules", "opencode-ai", "bin", "opencode.exe")
+_OPENCODE_NPM_NATIVE_RELATIVE = ("npm", "node_modules", "@opencode", "cli", "bin", "opencode.exe")
 
 
 def _codex_npm_native_candidates(root: str) -> tuple[str, ...]:
@@ -872,7 +874,7 @@ def _windows_opencode_winget_executable(local_app_data: str = "") -> str:
 
 
 def _windows_opencode_npm_executable(roaming_app_data: str = "") -> str:
-    """Return the current-token npm opencode-ai native image path."""
+    """Return the current-token @opencode/cli V2 native image path."""
 
     roaming = roaming_app_data or _windows_known_folder("3EB685DB-65F9-4CF6-A03A-E3EF65729F3D")
     if not roaming:
@@ -881,7 +883,7 @@ def _windows_opencode_npm_executable(roaming_app_data: str = "") -> str:
 
 
 def _opencode_npm_package_identity_verified(executable: str) -> bool:
-    """Mirror the gateway: the package.json beside bin\\ names opencode-ai."""
+    """Mirror the gateway: package.json must name the exact V2 package."""
 
     manifest = os.path.join(os.path.dirname(os.path.dirname(executable)), "package.json")
     try:
@@ -891,21 +893,28 @@ def _opencode_npm_package_identity_verified(executable: str) -> bool:
             parsed = json.load(handle)
     except (OSError, ValueError):
         return False
-    return isinstance(parsed, dict) and parsed.get("name") == "opencode-ai"
+    package = os.path.dirname(os.path.dirname(executable))
+    parent = os.path.dirname(package)
+    expected = ""
+    if (os.path.basename(package).casefold() == "cli" and os.path.basename(parent).casefold() == "@opencode"
+          and os.path.basename(os.path.dirname(parent)).casefold() == "node_modules"):
+        expected = "@opencode/cli"
+    return bool(expected) and isinstance(parsed, dict) and parsed.get("name") == expected
 
 
 def _is_windows_opencode_setup_binary(candidate: str) -> bool:
-    """Admit only the exact SST WinGet or npm opencode-ai image with its protected chain."""
+    """Admit only the exact reviewed WinGet/npm image with its protected chain."""
 
     lexical = os.path.abspath(candidate)
     local = _windows_known_folder("F1B32785-6FBA-4FCF-9D55-7B8E7F157091")
     expected = _windows_opencode_winget_executable(local) if local else ""
     if not expected or os.path.normcase(lexical) != os.path.normcase(expected):
         local = _windows_known_folder("3EB685DB-65F9-4CF6-A03A-E3EF65729F3D")
-        expected = _windows_opencode_npm_executable(local) if local else ""
+        expected_paths = (
+            (_windows_opencode_npm_executable(local),) if local else ()
+        )
         if (
-            not expected
-            or os.path.normcase(lexical) != os.path.normcase(expected)
+            not any(os.path.normcase(lexical) == os.path.normcase(path) for path in expected_paths)
             or not _opencode_npm_package_identity_verified(lexical)
         ):
             return False

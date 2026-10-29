@@ -196,12 +196,22 @@ func (f *hookSocketFixture) untrustSocketDir(t *testing.T) {
 // port.
 func (f *hookSocketFixture) requireOnlyTheTrustedRequest(t *testing.T, path string) {
 	t.Helper()
+	f.requireTrustedRequests(t, path, 1)
+}
+
+func (f *hookSocketFixture) requireTrustedRequests(t *testing.T, path string, count int) {
+	t.Helper()
 	paths, authorization, _ := f.gateway.recorded()
-	if len(paths) != 1 || paths[0] != path || authorization[0] != "" {
-		t.Fatalf("hook socket requests = %v (authorization %q), want one bearer-free request for %s", paths, authorization, path)
+	if len(paths) != count || len(authorization) != count {
+		t.Fatalf("hook socket requests = %v (authorization %q), want %d bearer-free requests", paths, authorization, count)
+	}
+	for i, actual := range paths {
+		if actual != path || authorization[i] != "" {
+			t.Fatalf("untrusted hook request %q (authorization %q)", actual, authorization[i])
+		}
 	}
 	if n := f.tcpConnections.Load(); n != 0 {
-		t.Fatalf("the standalone bridge connected to the TCP API port %d times", n)
+		t.Fatalf("standalone bridge connected to TCP %d times", n)
 	}
 }
 

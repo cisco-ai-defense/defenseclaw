@@ -430,7 +430,7 @@ nfpms:
       # OpenCode under fapolicyd while status stayed green (GAP-0763). The
       # lifecycle renders the same bytes and leaves the file to the package.
       - src: internal/enterprisepolicy/opencode_managed_plugin.js
-        dst: /opt/defenseclaw/share/opencode/defenseclaw.js
+        dst: /opt/defenseclaw/share/opencode/index.js
         file_info:
           mode: 0644
           owner: root

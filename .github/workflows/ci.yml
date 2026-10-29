@@ -730,7 +730,7 @@ jobs:
               "fastapi": ">=0.137.1,<0.138",
               # Keep the portable LiteLLM line in wheel metadata. A tool.uv
               # override is not shipped and cannot protect installers.
-              "litellm": ">=1.91.5,<1.92.0",
+              "litellm": ">=1.100.4,<1.101.0",
           }
           with zipfile.ZipFile(wheel) as archive:
               metadata_name = next(

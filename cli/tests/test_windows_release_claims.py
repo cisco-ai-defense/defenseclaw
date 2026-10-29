@@ -15,6 +15,7 @@ from defenseclaw.platform_support import (
     WINDOWS_NOT_CERTIFIED_CONNECTORS,
     WINDOWS_PREVIEW_CONNECTORS,
     WINDOWS_SUPPORTED_CONNECTORS,
+    connector_platform_support,
 )
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -103,7 +104,7 @@ def test_connector_pages_are_the_canonical_cross_platform_support_source() -> No
     for connector_id, page in connector_docs.items():
         text = page.read_text(encoding="utf-8")
         assert text.count("## Platform support") == 1, page
-        assert _platform_status(text, "macOS and Linux") == "Supported", page
+        assert _platform_status(text, "macOS and Linux") == status_labels[connector_platform_support(connector_id, "darwin").status], page
 
         source_support = WINDOWS_CONNECTOR_SUPPORT[connector_id]
         expected_status = status_labels[source_support.status]
@@ -388,18 +389,20 @@ def test_opencode_docs_exclude_unqualified_enforcement_media() -> None:
         "connectors"
     ]["opencode"]
 
-    assert len(contracts) == 1
-    assert contracts[0]["agent_version"] == {
-        "min_inclusive": "1.18.10",
-        "max_exclusive": "1.19.0",
+    by_id = {contract["contract_id"]: contract for contract in contracts}
+    assert set(by_id) == {"opencode-hooks-v2"}
+    assert by_id["opencode-hooks-v2"]["agent_version"] == {
+        "min_inclusive": "2.0.0",
+        "max_exclusive": "2.2.0",
     }
+    assert "V2 support is currently a preview" in connector_page
     assert validated["live"] is False
     assert validated["os"]["windows"] == {
         "last_validated_version": "",
         "last_validated_at": "",
         "run_url": "",
     }
-    # Enforcement media may return only with exact official-package 1.18.19
+    # Enforcement media may return only with exact official V2 package
     # SHA-256 provenance plus matching version/date/run acceptance metadata.
     assert not re.search(r"<Video\b", connector_page)
     assert "v1.17.3" not in connector_page

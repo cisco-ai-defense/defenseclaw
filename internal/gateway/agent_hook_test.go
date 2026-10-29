@@ -37,7 +37,7 @@ func TestAgentHookTrustedActionToolSelectsWindowsHostShellGrammar(t *testing.T) 
 		platform  string
 		want      string
 	}{
-		{connector: "opencode", tool: "bash", platform: "windows", want: "shell"},
+		{connector: "opencode", tool: "shell", platform: "windows", want: "shell"},
 		{connector: "copilot", tool: "powershell", platform: "windows", want: "shell"},
 		{connector: "copilot", tool: "powershell", platform: "linux", want: "powershell"},
 		{connector: "copilot", tool: "edit", platform: "windows", want: "edit"},

@@ -1095,8 +1095,12 @@ func (s *guardScan) scanPluginList(source hookSource, data []byte) []Finding {
 	if err != nil {
 		return []Finding{s.unreadable(source, err)}
 	}
-	value, _ := doc.get("plugin")
-	list, _ := value.([]any)
+	var list []any
+	for _, key := range []string{"plugin", "plugins"} {
+		value, _ := doc.get(key)
+		items, _ := value.([]any)
+		list = append(list, items...)
+	}
 	// Plugin paths in a config file resolve against its directory.
 	entrySource := source
 	entrySource.base = filepath.Dir(source.path)
@@ -1106,6 +1110,9 @@ func (s *guardScan) scanPluginList(source hookSource, data []byte) []Finding {
 		switch v := item.(type) {
 		case string:
 			name = v
+		case *object:
+			value, _ := v.get("package")
+			name, _ = value.(string)
 		case []any:
 			if len(v) > 0 {
 				name, _ = v[0].(string)
@@ -1115,10 +1122,23 @@ func (s *guardScan) scanPluginList(source hookSource, data []byte) []Finding {
 			continue
 		}
 		files, problem := s.referencedFiles([]handlerValue{{text: name, exec: true}}, entrySource, nil)
-		digest := sha256Hex(canonicalJSON(orderedFromMap(map[string]any{
+		tree := ""
+		if path, local := pluginSpecPath(name, entrySource.base); local {
+			if info, err := os.Stat(path); err == nil && info.IsDir() {
+				tree, err = s.treeDigest(path)
+				if err != nil {
+					problem = err.Error()
+				}
+			}
+		}
+		content := map[string]any{
 			"plugin": item,
 			"files":  files,
-		})))
+		}
+		if tree != "" {
+			content["tree"] = tree
+		}
+		digest := sha256Hex(canonicalJSON(orderedFromMap(content)))
 		finding := findingFor(req, source, "", name, digest, "plugin")
 		finding.key = sha256Hex(canonicalJSON(item))
 		if problem != "" {

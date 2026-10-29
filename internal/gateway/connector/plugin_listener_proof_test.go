@@ -105,7 +105,7 @@ func newImpostorListener(t *testing.T, recorder *listenerProofRecorder) *httptes
 const openCodeListenerProofHarness = `
 import { pathToFileURL } from "node:url";
 const loaded = await import(pathToFileURL(process.argv[1]).href);
-const plugin = await loaded.DefenseClaw({ directory: "" });
+const plugin = await fixtureBridge(loaded, { directory: "" });
 try {
   await plugin["tool.execute.before"](
     { tool: "Bash", sessionID: "S", messageID: "M", callID: "C" },
@@ -202,12 +202,18 @@ func TestPluginListenerProofKeepsTheCredentialFromAnImpostor(t *testing.T) {
 				t.Fatalf("impostor listener: verdict %q, want a fail-closed block", verdict)
 			}
 			requests := impostorSeen.snapshot()
-			if len(requests) != 1 || requests[0].path != UserScopedListenerProofPath || requests[0].method != http.MethodGet {
-				t.Fatalf("impostor must see only the proof request, saw %+v", requests)
+			wantChallenges := 1
+			if tc.connector == "opencode" {
+				wantChallenges = 2 // V2 setup heartbeat, then the tool probe.
 			}
-			if request := requests[0]; request.authorization != "" || request.body != "" ||
-				strings.Contains(request.path, credential) {
-				t.Fatalf("impostor received a credential or payload: %+v", request)
+			if len(requests) != wantChallenges {
+				t.Fatalf("impostor proof requests = %d, want %d", len(requests), wantChallenges)
+			}
+			for _, request := range requests {
+				if request.path != UserScopedListenerProofPath || request.method != http.MethodGet ||
+					request.authorization != "" || request.body != "" || strings.Contains(request.path, credential) {
+					t.Fatalf("impostor received a credential or payload: %+v", request)
+				}
 			}
 
 			// A host render missing both the native account check and the
@@ -266,7 +272,7 @@ func TestPerUserPluginsCheckPeerBeforeSending(t *testing.T) {
 			}
 			ctx, cancel := context.WithTimeout(context.Background(), nodeHarnessTimeout)
 			defer cancel()
-			cmd := exec.CommandContext(ctx, node, "--input-type=module", "-e", harness, plugin)
+			cmd := exec.CommandContext(ctx, node, "--input-type=module", "-e", withOpenCodeV2Fixture(t, harness), plugin)
 			cmd.Env = append(os.Environ(), "HOME="+root, "DC_PEER_MARKER="+marker)
 			output, err := cmd.CombinedOutput()
 			if err != nil {
@@ -288,7 +294,7 @@ func TestPerUserPluginsCheckPeerBeforeSending(t *testing.T) {
 			if err := os.WriteFile(openPlugin, []byte(openBody), 0o600); err != nil {
 				t.Fatal(err)
 			}
-			cmd = exec.CommandContext(ctx, node, "--input-type=module", "-e", harness, openPlugin)
+			cmd = exec.CommandContext(ctx, node, "--input-type=module", "-e", withOpenCodeV2Fixture(t, harness), openPlugin)
 			cmd.Env = append(os.Environ(), "HOME="+root, "DC_PEER_MARKER="+marker)
 			output, err = cmd.CombinedOutput()
 			if err != nil || !strings.Contains(string(output), "block:") {
@@ -344,7 +350,7 @@ func TestPerUserPluginsDoNotPostAfterTheCheckedListenerChanges(t *testing.T) {
 			}
 			ctx, cancel := context.WithTimeout(context.Background(), nodeHarnessTimeout)
 			defer cancel()
-			cmd := exec.CommandContext(ctx, node, "--input-type=module", "-e", harness, plugin)
+			cmd := exec.CommandContext(ctx, node, "--input-type=module", "-e", withOpenCodeV2Fixture(t, harness), plugin)
 			cmd.Env = append(os.Environ(), "HOME="+root)
 			output, err := cmd.CombinedOutput()
 			if err != nil {
@@ -403,7 +409,7 @@ func TestPerUserPluginsRejectSymlinkedNativePostBinary(t *testing.T) {
 			}
 			ctx, cancel := context.WithTimeout(context.Background(), nodeHarnessTimeout)
 			defer cancel()
-			cmd := exec.CommandContext(ctx, node, "--input-type=module", "-e", harness, plugin)
+			cmd := exec.CommandContext(ctx, node, "--input-type=module", "-e", withOpenCodeV2Fixture(t, harness), plugin)
 			cmd.Env = append(os.Environ(), "HOME="+root, "DC_PEER_MARKER="+marker)
 			output, err := cmd.CombinedOutput()
 			if err != nil || !strings.Contains(string(output), "block:") {

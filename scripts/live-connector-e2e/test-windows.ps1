@@ -3597,7 +3597,7 @@ threading.Event().wait()
         '\$openCodeBin = Join-Path \$localAppData ''Microsoft\\WinGet\\Packages\\SST\.opencode_Microsoft\.Winget\.Source_8wekyb3d8bbwe''' -and
         '\$openCodePath = Join-Path \$openCodeBin ''opencode\.exe''' -and
         $agentFixtureFunction -match 'OpenCodeVersionFixture' -and
-        $agentFixtureFunction -match 'opencode 1\.18\.11' -and
+        $agentFixtureFunction -match 'opencode 2\.1\.4' -and
         $agentFixtureFunction -match "\`$openCodePath @\('--version'\) -TimeoutSeconds 30" -and
         $agentFixtureFunction -notmatch "\`$openCodePath @\('--version'\) -TimeoutSeconds [0-9]\b" -and
         $agentFixtureFunction -match 'OpenCodePath = \$openCodePath' -and
@@ -4963,11 +4963,13 @@ threading.Event().wait()
         'Cursor contract requires the mode, the per-user failClosed registration and the default-tier open outage mode without unsupported claims'
     Assert-True ($doctorContract -match "'cursor' \{ 'configured file has no DefenseClaw Cursor command entries' \}") `
         'Cursor tamper contract expects exact zero-managed-entry rejection after lock-bound ownership filtering'
-    Assert-True ([IO.File]::ReadAllText($openCodeAssertion) -match 'await hooks\.config') `
-        'OpenCode contract runs the official config hook before tool hooks'
+    Assert-True ($openCodeAssertionText.Contains('await module.default.setup(') -and
+        $openCodeAssertionText.Contains('await hooks.get("execute.before")') -and
+        $openCodeAssertionText -notmatch 'await hooks\.config') `
+        'OpenCode V2 contract initializes setup and awaits native tool callbacks without a V1 config hook'
     Assert-True ($openCodeAssertionText -match '\["allow", "block", "lifecycle", "load"\]' -and
-        $openCodeAssertionText -match '(?s)await hooks\.config.*?if \(expected === "load"\).*?else if \(expected === "lifecycle"\)') `
-        'OpenCode setup load probe stops after the authenticated config hook'
+        $openCodeAssertionText -match '(?s)await module\.default\.setup.*?if \(expected === "load"\).*?else if \(expected === "lifecycle"\)') `
+        'OpenCode setup load probe stops after the authenticated V2 setup heartbeat'
     $synchronousCodexHookContract = [regex]::Match(
         $harnessText,
         '(?s)function Assert-CodexSynchronousWindowsHookCommand\b.*?\n\}'

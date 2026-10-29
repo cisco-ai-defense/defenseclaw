@@ -1,188 +1,131 @@
 ---
 title: OpenCode
-description: Guard OpenCode with a DefenseClaw bridge plugin that blocks risky tool calls by throwing before they run. Version contract, plugin behavior, config layers, inventory and the OpenShell sandbox image.
+description: Guard OpenCode V2 with a dependency-free plugin that rejects risky tool calls before execution. V2-only version contract, setup, inventory and deployment limits.
 keywords:
-  - DefenseClaw OpenCode connector
-  - opencode plugin
-  - tool.execute.before
+  - DefenseClaw OpenCode V2 connector
+  - OpenCode V2 plugin
+  - execute.before
   - OpenCode inventory
 ---
 
 import { ConnectorSupport } from '@/components/support-matrix';
 
-DefenseClaw installs one plugin file in OpenCode's plugin directory. The plugin sends each tool call to the gateway before it runs and throws if the verdict is a block. OpenCode talks to its model provider directly and no proxy is involved.
-
-OpenCode has no command-hook config surface. It [auto-loads JavaScript and TypeScript plugins](https://opencode.ai/docs/plugins/) from its user plugin directory at startup. DefenseClaw installs one dependency-free bridge plugin, `defenseclaw.js`, there. Its `tool.execute.before` hook forwards every tool call to the local gateway and throws when the verdict is a block. That awaited, thrown-error path is the authoritative enforcement boundary. OpenCode talks to its configured model provider directly, and there is no `opencode.json` edit or shell shim. The per-user bridge invokes the account-owned DefenseClaw native helper, which checks the connected listener before sending any bearer or event. The bridge needs no npm dependencies and never triggers a `bun install`.
+DefenseClaw supports **OpenCode V2 only**. Its dependency-free plugin default-exports an `id` and `setup(ctx)`, registers awaited `execute.before` and `execute.after` callbacks, and rejects a blocked call before OpenCode executes it. OpenCode sends model traffic directly to its provider; this connector does not proxy that traffic.
 
 ## Platform support
 
 <ConnectorSupport id="opencode" />
 
+V2 support is currently a preview. Native allow/block callbacks have been checked on macOS arm64. Native Linux and Windows vendor-CLI certification remains unrecorded.
+
 | Platform | Status | Notes |
 | --- | --- | --- |
-| macOS and Linux | **Supported** | The global bridge plugin is supported for the reviewed OpenCode `>=1.18.10,<1.19.0` contract. |
-| Native Windows x64 | **Supported** | Only direct native execution is supported. DefenseClaw admits the protected current-user `SST.opencode` WinGet executable or the native `opencode.exe` of the npm `opencode-ai` package. WSL is recommended by OpenCode but not required. Mixed WSL/native paths, other packages, Desktop sidecars and ARM64 are outside the contract. |
+| macOS and Linux | **Preview** | V2-only contract `>=2.0.0,<2.2.0`, reviewed at 2.0.0 and 2.1.4. Native callback validation currently covers macOS arm64. |
+| Native Windows x64 | **Preview** | Direct native execution with the official `@opencode/cli` package or the protected current-user `SST.opencode` WinGet executable. The installed version must be V2. Mixed WSL/native paths, Desktop sidecars, other packages and ARM64 are outside the native Windows contract. |
 
 ## Setup
 
-On a new install, run `defenseclaw init --connector opencode` first. Until DefenseClaw is initialized, `defenseclaw setup opencode` stops with `DefenseClaw is not initialized — run 'defenseclaw init' first.`
+Install OpenCode V2 first. If npm installed V1, remove that old package before installing V2; the two releases use the same `opencode` command. Follow the [vendor migration guide](https://opencode.ai/v2/docs/migrate-v1/).
+
+```bash
+npm uninstall -g opencode-ai
+npm install -g @opencode/cli@2
+```
+
+On a new DefenseClaw install, run `defenseclaw init --connector opencode` first. Until initialized, setup stops with `DefenseClaw is not initialized — run 'defenseclaw init' first.`
 
 ```bash
 defenseclaw setup opencode                # first setup defaults to observe: record only
-defenseclaw setup opencode --mode action  # block on policy hits by throwing
+defenseclaw setup opencode --mode action  # reject blocked calls before execution
 ```
 
-A re-run without `--mode` keeps the current mode. On Windows, run the same commands in PowerShell. Restart OpenCode afterwards. Until it starts, `defenseclaw status` shows OpenCode as `IDLE`, which is normal.
+A re-run without `--mode` keeps the current mode. Restart OpenCode afterwards, including after upgrading from V1. Setup replaces only DefenseClaw-owned artifacts and refreshes the contract lock. Legacy artifact names remain recognizable for cleanup; no V1 factory or V1 runtime contract is shipped.
 
 ### Check it
 
 ```bash
 defenseclaw status
+defenseclaw doctor
 ```
 
-The agent appears under **Agents** with its mode. `defenseclaw doctor` reports no failed check for it.
+The connector appears under **Agents** with its mode. `IDLE` is normal until OpenCode starts and loads the plugin.
 
 ### Version contract
 
-The contract is `opencode-hooks-v1` with bridge `v7`, source-reviewed for `>=1.18.10, <1.19.0` and pinned at the official [`v1.18.33` release](https://github.com/anomalyco/opencode/releases/tag/v1.18.33). The plugin hooks it uses (`config`, `event`, `tool.execute.before`, `tool.execute.after`) match the 1.18.19 types.
-
 | Installed version | What setup does |
 | --- | --- |
-| Older than 1.18.10, or known broken | Refuses in both modes before writing any config, plugin or lock, unless the exploratory `DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT=1` is set. |
-| Newer, such as 1.19.x | Uses the v1 contract and reports an untested newer version ([policy](/docs/connectors/compatibility#version-policy)). |
-| Not readable | Observe mode continues with a warning. Action mode is refused. |
+| OpenCode V1 or another detected non-V2 major | Refuses before activation in observe and action mode, including with the exploratory drift override. Install V2 and rerun setup. |
+| Git/source build without a release version | Refuses before activation, including with the drift override. Install a versioned V2 release; commit-hash digits do not identify its major version. |
+| `>=2.0.0,<2.2.0` | Uses `opencode-hooks-v2`, bridge generation `v7`. |
+| A newer V2 minor | Per-user setup uses the same V2 contract with an untested-version warning. Strict profiles retain their exact reviewed range. |
+| Not readable | Existing unversioned policy applies: observe warns; action refuses without an explicit exploratory override. This does not provide a V1 implementation. |
 
-On Windows, the WinGet path is `%LOCALAPPDATA%\Microsoft\WinGet\Packages\SST.opencode_Microsoft.Winget.Source_8wekyb3d8bbwe\opencode.exe` and the npm path is `%APPDATA%\npm\node_modules\opencode-ai\bin\opencode.exe`. When both exist, WinGet wins. OpenCode, DefenseClaw, the gateway, the plugin and their paths must all stay native Windows. Do not substitute WSL, Docker, a VM, Git Bash, Cygwin or MSYS ([OpenCode's Windows guide](https://opencode.ai/docs/windows-wsl/)).
+The plugin follows the [official V2 migration guide](https://opencode.ai/v2/docs/build/plugins/migrate-v1) and the API at [V2.0.0](https://github.com/anomalyco/opencode/tree/63f7ceecbed2d7d9a627518d935dd963b9d4ac9f/packages/plugin) and [dev/2.1.4](https://github.com/anomalyco/opencode/tree/f669c46c9604ea3d70b8a7ed1f0c10f3a5ac1f61/packages/plugin). It imports only Node built-ins and requires no OpenCode SDK package at runtime.
 
-## Lifecycle events
+## Files DefenseClaw will modify
 
-| Event | When it fires | DefenseClaw role | Verdict behavior |
-| --- | --- | --- | --- |
-| `tool.execute.before` | Right before a tool (`bash`, `read`, `edit`, …) runs | Inspect arguments, intercept risky commands | `block`: the gateway returns `{decision: "deny", reason}`, the bridge shows an error notice in the TUI and throws an `Error`, aborting the tool. The error is the reason itself when it comes from DefenseClaw (for example "DefenseClaw policy blocked this action (rule …)"). Otherwise it says DefenseClaw blocked the call under policy and that it did not run, followed by the reason. |
-| `tool.execute.after` | Right after a tool returns | Captures the official `title`, `output` and `metadata` for exact-call outcome attribution. Cannot block or undo. | Awaited, observe-only. Transport and fail-mode results are advisory. |
+A per-user install writes the owned `defenseclaw.js` into `OPENCODE_CONFIG_DIR/plugins/`, or `~/.config/opencode/plugins/` by default. OpenCode V2 auto-discovers the file. DefenseClaw does not edit the per-user `opencode.json` to register it.
 
-This is an in-process plugin contract. There is no hook stdin payload, stdout decision document or exit-code convention: OpenCode awaits the Promise from `tool.execute.before`, continues on a normal return and blocks when it throws.
+Managed standalone installs publish `<install root>/share/opencode/index.js` and register its directory. Configured V2 local plugins must name a directory containing `index.js`; a configured single-file path is not a V2 registration. Reconciliation removes owned legacy file references and preserves unrelated settings.
 
-### What it can block or ask
-
-What a gateway outage does to an OpenCode call, per install and fail mode, is in the [gateway outage table](/docs/connectors/capability-matrix#gateway-outage).
-
-- In action mode `tool.execute.before` blocks a tool call by throwing an error. The TUI shows a notice, and the model gets the reason.
-- `tool.execute.after` only records the result. The tool has already run.
-- OpenCode has no hook that stops a prompt. A matching prompt reaches the model. Tool-call rules still block.
-- There is no native ask. A confirm verdict runs the call and shows a warning notice with the severity and reason.
-
-### Native ask
-
-OpenCode 1.18.10 to 1.18.33 also expose `permission.ask`, `chat.params`, `chat.headers` and experimental message transformation hooks. DefenseClaw does not implement or claim them, so `confirm` has no resumable approval: the call runs and the bridge shows a warning notice with severity and reason. OpenCode's generic lifecycle `event` dispatch is not awaited, so no blocking or reliable delivery is claimed for it.
-
-### Fail mode
-
-Fail closed: yes, for the awaited `tool.execute.before` only. Settings and edge cases are in [Fail modes](/docs/reference/fail-modes).
-
-A per-user host bridge blocks `tool.execute.before` when its listener cannot be verified, even if an older sidecar still says `open`. What a gateway outage does is in the [gateway outage table](/docs/connectors/capability-matrix#gateway-outage). On managed hosts, an administrator may select open for a classified outage only; an unverified listener never receives the bearer or payload. Secure Client uses an administrator-owned native helper to verify the connected gateway service and blocks an unverified peer even when its outage mode is open. The bridge also awaits `tool.execute.after` for attribution but cannot undo a completed call. Generic lifecycle delivery is not awaited.
-
-## The bridge plugin
-
-The bridge resolves the gateway verdict before throwing. On per-user hosts, a failed peer check blocks before any credential or tool event leaves the account.
-
-```js
-"tool.execute.before": async (input, output) => {
-  const verdict = await defenseclawPost("tool.execute.before", input.tool, output.args, cwd);
-  if (verdict?.reason) throw defenseclawBlock(client, verdict.reason); // error notice + Error naming DefenseClaw
-  if (verdict?.mode === "action" && !DC_ARGUMENTS_AUTHORITATIVE) throw defenseclawBlock(client, "unobservable later mutation");
-}
-```
-
-The plugin file carries the connector-scoped token sidecar path, address and installed fail mode. DefenseClaw sets mode `0600` on Unix and restricts the Windows DACL to the current user, Administrators and SYSTEM. That stops other standard users, not the owning user or administrators. Doctor detects digest drift, and setup repair restores the packaged registration. Reconciliation publishes the custody receipt before the atomic plugin replacement, then the contract lock and active runtime state, and reports success only after re-reading the plugin, receipt, scoped token, lock and active marker as one current registration. A failure rolls back what it published. This proves registration consistency, not that a client loaded it.
-
-The plugin emits a secret-free `defenseclaw.plugin.loaded` heartbeat from its awaited config hook. When the digest is current but the gateway has no heartbeat, doctor shows a skip row, which is normal while OpenCode is closed. Open OpenCode and run `defenseclaw doctor` again. If the row still shows none, OpenCode may be running with `--pure`. A stale heartbeat is a warning. File presence alone is not runtime health.
-
-OpenCode runs plugin hooks sequentially, loading the global directory before project plugin directories, so a project plugin can change the shared `output.args` after DefenseClaw's pre-tool hook. Bridge v7 uses the official `plugin_origins` order to detect this. It still observes the pre-mutation arguments, but in action mode it refuses to return an authoritative allow when any later plugin exists.
-
-## Local surfaces
-
-| What | Where |
-| --- | --- |
-| Plugin | `$OPENCODE_CONFIG_DIR/plugins/defenseclaw.js` (default `~/.config/opencode/plugins/defenseclaw.js`; Windows `%OPENCODE_CONFIG_DIR%\plugins\defenseclaw.js`, default `%USERPROFILE%\.config\opencode\plugins\defenseclaw.js`) |
-
-Setup also writes a connector-scoped token sidecar under `~/.defenseclaw/hooks`. Per-user plugins use the account-owned `defenseclaw-gateway` native helper to verify the connected listener; Secure Client plugins use the administrator-owned native helper to verify the protected gateway service. The helper sends the token and tool event only on that verified connection. `opencode.json` is not edited. Restart OpenCode after an upgrade so it loads the repaired plugin.
-
-Setup writes only this file. Teardown removes it when unchanged since setup. If you or an administrator changed it, doctor reports digest drift and teardown keeps the modified file. `guardrail disable` and `setup remove opencode` refuse before saving while teardown is unverified. Preserve your edits, run `defenseclaw setup opencode --yes --restart` to restore the managed bytes, then retry. Restart OpenCode after teardown.
-
-<Accordions>
-<Accordion title="How DefenseClaw reads OpenCode's config and local assets">
-
-DefenseClaw resolves the v1.18.10 to v1.18.33 config layers in effective order: authenticated remote `.well-known` provenance (typed unverified, never fetched offline), global `config.json`, `opencode.json` and `opencode.jsonc`, `OPENCODE_CONFIG`, a pinned project's JSON and JSONC files and `.opencode` directory, the user `~/.opencode` directory, `OPENCODE_CONFIG_DIR`, and finally `OPENCODE_CONFIG_CONTENT`. JSONC, deep MCP overrides and `enabled:false` are preserved. A relative env path is resolved only against an explicit workspace.
-
-`defenseclaw mcp list --connector opencode`, `mcp set` and `mcp unset` operate on the top-level `mcp` map. Writes are refused while `OPENCODE_CONFIG_CONTENT` is active. For local MCP servers, `mcp set` warns about a command outside the trusted install prefixes (for example an nvm or `/opt` Node install) and writes it with an audit record. With `scanners.mcp_scanner.unverified_server: block` it refuses that command unless you trust the directory or pass `--force-untrusted-command`. Per-user inventory does not read OpenCode's managed config, MDM or Team layers. For server-scoped policy, bridge v7 mirrors OpenCode's server and tool sanitizer, maps the enabled MCP server names, and rejects sanitizer collisions or prefix ambiguity.
-
-| Asset | Local sources |
-| --- | --- |
-| Skills | Singular and plural `skill` and `skills` component directories, plus project and user `.claude/skills` and `.agents/skills` |
-| Plugins | Direct JS/TS files in `plugin` and `plugins` directories, plus the config `plugin` package list |
-| Agents | Markdown files in `agent` and `agents` directories, plus the config `agent` map |
-| Instructions | Global and project `AGENTS.md`, `CLAUDE.md` fallback, and bounded paths from config `instructions` |
-| Tools and commands | JS/TS files in `tool`/`tools`, Markdown commands in `command`/`commands`, and the config `command` map |
-
-Project discovery starts from the pinned workspace and walks up to its nearest `.git`. It never borrows the daemon's current directory or searches above that repository. The legacy config `tools` object is a permission map and is not reported as custom tools. Skill install uses `<workspace>/.opencode/skills` when a workspace is pinned, else `$OPENCODE_CONFIG_DIR/skills`. The managed `defenseclaw.js` is excluded from plugin inventory, scans and blocking. DefenseClaw does not install third-party plugins.
-
-</Accordion>
-</Accordions>
+On native Windows, the npm image is `%APPDATA%\npm\node_modules\@opencode\cli\bin\opencode.exe`. The admitted WinGet path is `%LOCALAPPDATA%\Microsoft\WinGet\Packages\SST.opencode_Microsoft.Winget.Source_8wekyb3d8bbwe\opencode.exe`. DefenseClaw verifies the native executable selection and package identity before setup. Neither a mutable npm command wrapper nor a WSL executable supplies that authority.
 
 ## Hook capabilities
 
-<HookEventsList connector="opencode" />
-
-| Contract | Agent versions | Hook script | Events | Can block | Can ask |
+| Contract | Reviewed range | Bridge | Events | Block surfaces | Native ask |
 | --- | --- | --- | --- | --- | --- |
-| `opencode-hooks-v1` | `>=1.18.10, <1.19.0` | `v7` | 10 | 1 | 0 |
+| `opencode-hooks-v2` | `>=2.0.0, <2.2.0` | `v7` | 8 | 1 | 0 |
 
-| Contract | Events registered | Block events | Ask events |
+| Contract | Events | Block events | Ask events |
 | --- | --- | --- | --- |
-| `opencode-hooks-v1` | `defenseclaw.plugin.loaded`, `session.created`, `session.updated`, `session.status`, `session.idle`, `session.compacted`, `session.error`, `session.deleted`, `tool.execute.before`, `tool.execute.after` | `tool.execute.before` | none |
+| `opencode-hooks-v2` | `defenseclaw.plugin.loaded`, `session.created`, `session.status`, `session.idle`, `session.error`, `session.deleted`, `tool.execute.before`, `tool.execute.after` | `tool.execute.before` | none |
 
-| Fact | Value |
-| --- | --- |
-| Hook script | `opencode-plugin.js` |
-| Hook config paths | `~/.config/opencode/plugins/defenseclaw.js` |
-| Response field | `hook_output` |
-| Native OTLP | no |
-| W3C traceparent | no |
-| Fail closed | yes |
+Before awaiting a verdict, the V2 adapter detaches and deeply freezes the inspected input and freezes the event. A later hook cannot substitute an uninspected tool or argument. Session location and MCP identity come from bounded local V2 API calls; invalid context is refused and action mode rejects ambiguous MCP identity.
 
-## Enterprise (standalone profile)
+Native V2 tools use `shell` with `command`, optional `workdir`, `timeout` and `background`; `read` and `write` use `path`; `edit` uses `path`, `oldString`, `newString` and optional `replaceAll`; `patch` uses `patchText`. The gateway analyzes these V2 fields for command and protected-path rules. OpenCode's `patch` is mapped to the reviewed patch parser only for this connector, preserving other connectors' patch formats.
+
+A blocked call returns its reason through the rejected tool Promise. V2 server plugins have no V1 TUI toast API; advisory notices use host logs. There is no native hook-side approval dialog. A confirm verdict is advisory rather than a native ask.
+
+The after hook preserves V2 `status`, structured `output`, `content` and metadata. Errors are failures. A shell result proves success only when completed with exit zero; a running background command is not completed success. After-hook findings cannot undo an already executed side effect.
+
+Paired after callbacks reuse bounded, verified before-call context. The cache retains metadata only, is cleared on unload, and falls back to fresh bounded context resolution for an unmatched callback. A new before callback always verifies current context.
+
+Session events are observe-only telemetry. The adapter maps native `session.execution.*` events to the gateway's status, error and idle events, resolves location-less events against the session, and disposes subscriptions and registrations on unload.
+
+See the [gateway outage table](/docs/connectors/capability-matrix#gateway-outage) for each installation mode's outage behavior.
+
+## Local surfaces
+
+V2 accepts compatible existing configuration syntax as well as native V2 fields. DefenseClaw reads both when resolving plugins, skills, agents, commands and MCP inventory. Retaining that data compatibility does not admit a V1 runtime.
+
+Native V2 plugin entries use `plugins`; MCP servers use `mcp.servers`. Relative paths are resolved only against an explicit workspace. Managed policy and JSONC handling preserve unrelated operator settings.
+
+V2 also accepts compatible direct MCP entries beside `mcp.servers`; native entries win same-name collisions. A higher-precedence server replaces the entire lower-layer object, so it must repeat any required endpoint, command, headers or environment fields. Passive plugin inventory reports activation as unverified when ordered plugin control directives prevent it from proving which exported IDs are enabled.
+
+## Enterprise deployments
+
+Per-user, managed standalone and Secure Client plugin variants all use the V2 entrypoint. The existing account and service verification boundaries remain in their respective transports. A detected V1 installation must be upgraded before connector activation.
+
+Managed standalone setup uses the administrator-owned shared plugin and the existing foreign-hook guard. Old file identities remain solely to migrate or remove installations written by an earlier DefenseClaw release.
+
+Application-control policies must permit OpenCode to read the managed directory and load `<install root>/share/opencode/index.js`. See the [managed plugin paths](/docs/enterprise/machine-policy#managed-opencode-plugin) for each OS.
 
 ### On a managed computer
 
-The per-user `setup`, `status` and `guardrail` commands on this page refuse on a standalone enterprise Linux or macOS host. An administrator adds `guardrail.connectors.opencode: {}` to the managed `config.yaml`, applies it through the [enterprise lifecycle](/docs/enterprise/lifecycle), and runs `enterprise policy verify`. DefenseClaw registers its plugin in OpenCode's managed config (`/etc/opencode/opencode.json` on Linux). Set `guardrail.connectors.opencode.enabled: false` in the managed config to turn it off. [Machine policy](/docs/enterprise/machine-policy) describes the route.
-
-DefenseClaw installs its plugin through OpenCode's managed config (`/etc/opencode`, `/Library/Application Support/opencode`, `%ProgramData%\opencode`), with the plugin at `<install root>/share/opencode/defenseclaw.js` ([machine policy](/docs/enterprise/machine-policy)). Under application control OpenCode must be allowed to read that file. OpenCode skips a plugin it cannot read and runs without DefenseClaw, which `status` and `verify` cannot see. On Linux the deb and rpm ship the plugin, so fapolicyd's package-database trust covers it. After a tarball install, add it to a trust file ([application control](/docs/enterprise/threat-model)).
+Per-user setup and guardrail commands refuse on a standalone enterprise Linux or macOS host. An administrator adds `guardrail.connectors.opencode: {}` to the managed `config.yaml`, applies it through the [enterprise lifecycle](/docs/enterprise/lifecycle), and runs `enterprise policy verify`. DefenseClaw registers the V2 plugin directory in OpenCode's managed config (`/etc/opencode/opencode.json` on Linux). Set `guardrail.connectors.opencode.enabled: false` in the managed configuration to disable it. See [Machine policy](/docs/enterprise/machine-policy) for platform paths and deployment steps.
 
 ## In an OpenShell sandbox
 
-`defenseclaw sandbox run opencode` runs OpenCode in an OpenShell sandbox ([macOS](/docs/sandboxes/macos), [guide](/docs/sandboxes/first-session)). `defenseclaw sandbox image build opencode` builds the image ahead of time, and `sandbox setup --harness` adds to the `openshell.harnesses` list.
+The image pin is OpenCode V2.1.4 from the official `@opencode/cli` package. Package integrity and the native binary digest are checked; Linux x64 uses the baseline binary rather than adding an AVX2 requirement. The V1 base-image package and its startup SDK-record workaround are removed. Interactive runs use `--standalone`; headless runs use `run --standalone`. The launcher refuses `--server` because an external server does not use this sandbox's managed plugin.
 
-| Item | Detail |
-| --- | --- |
-| Tier | User. The bridge is root-owned and registered from `/etc/opencode/opencode.json`, which user and project config cannot remove. OpenCode loads every other plugin and custom tool into the same process, where one could answer for the bridge. So the launcher refuses to start, naming the file, while any other plugin or custom tool would load, and refuses `--pure`. Remove the operator-added plugin or tool in its owning config. The refused start is not in `sandbox activity`. |
-| Blocked tool calls | OpenCode's TUI shows a refused call as its command line only, in red, with the reason after you click it. The plugin also shows a 15-second toast with the reason. The model gets the same reason as the tool's error. |
-| Keys | Esc interrupts a turn. Ctrl-C at an empty prompt quits OpenCode and ends the session. |
-| Quitting mid-call | OpenCode does not end a shell tool's command when it quits. DefenseClaw ends it at exit and names it. |
-| `(no output)` | OpenCode 1.18.31 can stop reading a command's output as soon as it exits and report "(no output)" although it ran. This is OpenCode's behavior, seen once on a new sandbox's first call. |
-| Skip permissions | On by default: `--auto`. `--safe` or the `strict` pack keeps prompts and drops `--auto`. |
-| Sign-in | `--llm auto` shares `ANTHROPIC_API_KEY` for the `anthropic` provider (`-- -m anthropic/<model>`), or else `OPENAI_API_KEY` for `openai` (`-m openai/<model>`). The sandbox gets a placeholder valid only at that API. `--llm bedrock`, and `auto` when neither is set, shares `AWS_BEARER_TOKEN_BEDROCK` for a custom provider on the Bedrock Mantle Anthropic endpoint (default model `anthropic.claude-haiku-4-5`). |
-| Image | OpenCode 1.18.31, replacing the base image's 1.2.18. It records `@opencode-ai/plugin` as installed so a new sandbox does not download about 20 MiB at every start. Verified end to end against a mock model, also with `plugin: []` in user and project config. The launcher refused planted plugins. In a live run a blocked call got the gateway's verdict, OpenCode showed the reason, the egress proxy blocked an exfiltration destination, and a connection around the proxy was refused. |
+The previous V1 live sandbox certification does not certify V2. The V2 image remains unverified and unselectable until a fresh OpenShell ingress, block and egress verification succeeds. Existing V1 image records no longer resolve to a supported OpenCode contract.
 
 ## Limits
 
-- Setup refuses an OpenCode older than the supported range. A newer one runs as an untested newer version.
-- On Windows only the WinGet `SST.opencode` package and the npm `opencode-ai` package are accepted, run natively. WSL is not part of the contract.
-- A listener owned by another local account receives no credential or tool event; `tool.execute.before` blocks with an unverified-listener reason, including under Secure Client. Per-user host hooks fail closed on gateway failure. A managed administrator can choose outage-only open.
-- A project plugin that loads after DefenseClaw's can change the arguments. In action mode the bridge then refuses to allow the call.
-- Running OpenCode with `--pure` turns external plugins off, and DefenseClaw sees nothing.
-- Generic lifecycle `event` dispatch is not awaited, so no blocking or reliable delivery is claimed for it.
-- `tool.execute.after` is observe-only.
+- Only V2 is supported. Neither an old V1 factory nor the drift override enables a detected V1 runtime.
+- This plugin inspects tool calls and outcomes; it does not intercept raw model traffic.
+- Server-plugin logs replace V1 toast behavior; native approval is not provided.
+- Native Linux/Windows vendor-CLI certification and V2 OpenShell live certification are not claimed by this preview.
 
 ## Disable
 
@@ -195,3 +138,5 @@ defenseclaw guardrail disable --yes
 With the default gateway restart, disabling removes DefenseClaw's plugin file. This preserves your other OpenCode settings. `defenseclaw guardrail enable` reinstalls DefenseClaw's plugin. To remove the connector, run `defenseclaw setup remove opencode --yes` (add `--force` if it is the last one). If you modified the plugin, `guardrail disable` and `setup remove` refuse before saving configuration, and the gateway is left as it was; `defenseclaw doctor` reports the change. Preserve your edits, run `defenseclaw setup opencode --yes --restart` to restore the managed plugin, then retry. Restart OpenCode afterwards.
 
 On a multi-connector install, add `--connector opencode` to `guardrail disable` and `guardrail enable` to change only this agent.
+
+No V2 hook or subscription starts when the plugin is not loaded.

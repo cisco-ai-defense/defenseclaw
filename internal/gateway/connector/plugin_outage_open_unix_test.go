@@ -19,8 +19,9 @@ import (
 const openCodeOutageHarness = `
 import { pathToFileURL } from "node:url";
 const toasts = [];
+console.warn = (message) => toasts.push(String(message));
 const href = pathToFileURL(process.argv[1]).href;
-const plugin = await (await import(href)).DefenseClaw({ directory: "", client: { tui: { showToast: async (arg) => { toasts.push(arg && arg.body ? arg.body.message : ""); return true; } } } });
+const plugin = await fixtureBridge(await import(href), { directory: "/work/repo" });
 await plugin.config({ plugin_origins: [{ spec: href }], mcp: {} });
 let verdict = "allow";
 try {
@@ -116,7 +117,7 @@ func TestPerUserPluginOutageOpenOnlyForAnOutage(t *testing.T) {
 					if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
 						t.Fatal(err)
 					}
-					cmd := exec.Command(nodeForTest(t), "--input-type=module", "-e", plugin.harness, path)
+					cmd := exec.Command(nodeForTest(t), "--input-type=module", "-e", withOpenCodeV2Fixture(t, plugin.harness), path)
 					cmd.Env = append(sanitizedTestEnv(), "HOME="+home)
 					out, err := cmd.Output()
 					if err != nil {

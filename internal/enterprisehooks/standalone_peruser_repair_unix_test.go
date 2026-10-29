@@ -323,7 +323,7 @@ func TestStandaloneVerifyRepairsAnAppendedManagedPluginLine(t *testing.T) {
 
 	for _, tc := range []struct{ name, agentVersion string }{
 		{"amp", "0.0.1785334225"},
-		{"opencode", "opencode 1.18.11"},
+		{"opencode", "opencode 2.1.4"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			home := newTestHome(t)
@@ -509,7 +509,7 @@ func TestStandaloneVerifyFollowsModeSwitchesInOneHome(t *testing.T) {
 	writeAgentConfigs(t, home, ".hermes/config.yaml", ".config/devin/config.json")
 	connectors := []struct{ name, version string }{
 		{"hermes", "0.21.5"}, {"kiro", "2.27.1"}, {"copilot", "1.0.20"},
-		{"devin", "3000.4.25"}, {"amp", "0.0.1785334300"}, {"opencode", "1.18.31"},
+		{"devin", "3000.4.25"}, {"amp", "0.0.1785334300"}, {"opencode", "2.1.4"},
 		{"antigravity", "1.2.11"}, {"cursor", "2.4.1"}, {"codex", "0.145.0"}, {"claudecode", "2.1.220"},
 	}
 	for _, mode := range []string{"observe", "action", "observe"} {

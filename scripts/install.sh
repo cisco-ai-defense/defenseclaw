@@ -549,7 +549,8 @@ resolved_agent_path() {
 
 # The installer's entry evidence: native fixed locations and npm/Bun
 # launcher symlinks to their exact Node entry. A folder name, manifest or
-# command on PATH is not an entry record.
+# command on PATH is not an entry record. Old opencode-ai paths remain only
+# to stop a previous installation safely during upgrade; setup requires V2.
 installed_agent_programs() {
     local agent name path target base link
     for agent in OpenCode:opencode Amp:amp; do
@@ -565,7 +566,7 @@ installed_agent_programs() {
             [[ -L "${link}" ]] || continue
             target="$(resolved_agent_path "${link}")" || continue
             case "${agent}:${target}" in
-                OpenCode:*/node_modules/opencode-ai/bin/opencode | Amp:*/node_modules/@sourcegraph/amp/dist/main.js)
+                OpenCode:*/node_modules/@opencode/cli/bin/opencode.exe | OpenCode:*/node_modules/@opencode/cli/bin/opencode | OpenCode:*/node_modules/opencode-ai/bin/opencode | Amp:*/node_modules/@sourcegraph/amp/dist/main.js)
                     printf '%s\t%s\n' "${agent%%:*}" "${target}" ;;
             esac
         done
@@ -584,7 +585,7 @@ runtime_agent_programs() {
         [[ -L "${link}" ]] || continue
         target="$(resolved_agent_path "${link}")" || continue
         case "${agent}:${target}" in
-            OpenCode:*/node_modules/opencode-ai/bin/opencode | Amp:*/node_modules/@sourcegraph/amp/dist/main.js)
+            OpenCode:*/node_modules/@opencode/cli/bin/opencode.exe | OpenCode:*/node_modules/@opencode/cli/bin/opencode | OpenCode:*/node_modules/opencode-ai/bin/opencode | Amp:*/node_modules/@sourcegraph/amp/dist/main.js)
                 printf '%s\t%s\n' "${agent%%:*}" "${target}" ;;
         esac
     done

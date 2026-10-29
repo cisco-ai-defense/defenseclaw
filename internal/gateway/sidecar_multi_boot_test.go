@@ -469,12 +469,12 @@ func TestSetupOneConnector_ObserveModeUnsupportedVersionSkipsBeforeSetup(t *test
 	s.cfg.Guardrail.Mode = "observe"
 	conn := &bootStubConnector{stubConnector: stubConnector{name: "opencode"}}
 	opts := mustConnectorSetupOpts(t, s, conn, "tok", "127.0.0.1:0", "127.0.0.1:0")
-	opts.AgentVersion = "opencode 1.18.9" // below the first tested release
+	opts.AgentVersion = "opencode 1.18.9" // V1 is no longer supported in any mode.
 
 	err := s.setupOneConnector(
 		context.Background(), conn, opts, "master", guardrail.NewRulePackCache(),
 	)
-	if err == nil || !strings.Contains(err.Error(), "not covered by a known hook contract") {
+	if err == nil || !strings.Contains(err.Error(), "OpenCode V2 is required") {
 		t.Fatalf("error = %v, want observe-mode unsupported-version refusal", err)
 	}
 	if conn.setupCalls != 0 {
@@ -2115,8 +2115,8 @@ func TestSingleConnectorSwitchOpenCodeSnapshotFailureLeavesPriorConnectorUntouch
 		DataDir:        s.cfg.DataDir,
 		GuardrailMode:  "observe",
 		HookFailMode:   "open",
-		AgentVersion:   "1.18.11",
-		HookContractID: "opencode-hooks-v1",
+		AgentVersion:   "2.1.4",
+		HookContractID: "opencode-hooks-v2",
 	}
 
 	_, err = s.prepareSingleConnectorSetupTransaction(
