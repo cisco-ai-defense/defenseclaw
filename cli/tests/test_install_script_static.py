@@ -3289,6 +3289,35 @@ def test_a_restored_gateway_that_needs_attention_is_not_reported_down(tmp_path: 
     assert "did not start again" not in out.stdout
 
 
+def test_a_restore_kept_stopped_points_at_the_gateway_cause_not_a_guess(tmp_path: Path) -> None:
+    # GAP-2478: after a rollback the installer added "close the agent if its
+    # settings are in use" to every startup refusal, also when the gateway had
+    # just said the cause was a failed agent version probe.
+    script = tmp_path / "restart.sh"
+    script.write_text(
+        'set -euo pipefail\ninfo() { echo "info: $*"; }\nwarn() { echo "warn: $*"; }\n'
+        + _install_sh_functions("restart_old")
+        + f'BIN_DIR="{tmp_path}/bin" WAS_RUNNING=true DEFENSECLAW_HOME="{tmp_path}"\nrestart_old true\necho "note=$RESTORED_NOTE"\n',
+        encoding="utf-8",
+    )
+
+    out = _run([str(script)], tmp_path)
+
+    assert out.returncode == 0, out.stderr
+    assert "info: Fix the startup error shown above, then run: " in out.stdout, out.stdout
+    assert "close the agent" not in out.stdout, out.stdout
+    assert "note=Your previous install is back, with its gateway kept stopped" in out.stdout
+
+
+def test_the_windows_kept_stopped_restore_does_not_guess_the_startup_cause() -> None:
+    # GAP-2478 (install.ps1 twin): both kept-stopped messages defer to the
+    # gateway's own cause and next step.
+    text = (ROOT / "scripts" / "install.ps1").read_text(encoding="utf-8")
+    assert "if its settings are in use" not in text
+    assert text.count("Fix the startup error shown above, then run: $gatewayCommand") == 1
+    assert "Fix the startup error the earlier install reported (its install log has it), then run: $gatewayCommand" in text
+
+
 # ── 1.0.4 (T8 smoke review loop round 3 of the Hermes/upgrade class) ────────
 
 

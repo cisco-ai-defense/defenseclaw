@@ -3591,7 +3591,9 @@ function Restart-Old([switch]$KeepStopped) {
         $gateway = if ($Setup) { Join-Path $Setup.Root "bin\defenseclaw-gateway.exe" } else { Join-Path $BinDir "defenseclaw-gateway.exe" }
         $gatewayCommand = "& '" + $gateway.Replace("'", "''") + "' start"
         Write-Warn "The previous install is restored with its gateway kept stopped to preserve its hook registration"
-        Write-Info "Fix the startup error above (close the agent if its settings are in use), then run: $gatewayCommand"
+        # The gateway names the cause and its next step; a guess here
+        # contradicted it (GAP-2478).
+        Write-Info "Fix the startup error shown above, then run: $gatewayCommand"
         return
     }
     if ($Run.OldGatewayDown) {
@@ -4218,7 +4220,7 @@ function Resume-InterruptedRun {
                 $gatewayCommand = "& '" + $gateway.Replace("'", "''") + "' start"
                 $Run.OldGatewayDown = $wasRunning
                 Write-Warn "The previous install is restored with its gateway kept stopped to preserve its hook registration"
-                Write-Info "Resolve the earlier startup error (close the agent if its settings are in use), then run: $gatewayCommand"
+                Write-Info "Fix the startup error the earlier install reported (its install log has it), then run: $gatewayCommand"
             } elseif ($wasRunning) {
                 Start-RecoveredGateway "restored"
             }
