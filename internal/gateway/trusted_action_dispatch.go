@@ -803,13 +803,14 @@ func withActiveStateTargetMention(
 	// POSIX twin alone (GAP-2047 row a): a read through one names state but
 	// changes none.
 	// A find with an unquoted -name/-path pattern is judged by its quoted
-	// twin (GAP-2498).
+	// twin (GAP-2498); xargs fed by a static printf or echo by the call it
+	// makes (GAP-0052).
 	hereStringMutates, hereStringJudged := hereStringStateMutation(facts, request)
 	if hereStringJudged && !hereStringMutates {
 		return findings
 	}
 	if !hereStringMutates && !globbedStateMutation(facts) && !globbedStateMutationThroughLink(facts, request) &&
-		!findGlobTwinStateMutation(facts, request) &&
+		!findGlobTwinStateMutation(facts, request) && !xargsStaticInputStateMutation(facts, request) &&
 		!archiveExtractsIntoState(facts, request) {
 		command, known := trustedBashCommandInput(request.Input)
 		if !known || !hookpaths.ActionStateTargetMention(command, request.Input.CWD, request.Input.ActiveHome) &&
