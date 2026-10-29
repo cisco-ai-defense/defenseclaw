@@ -3895,6 +3895,9 @@ def migrate(
     _refresh_local_observability_bundle(data_dir, __version__)
     _refresh_guardrail_profiles(data_dir, config_path)
     _refresh_rego_policies(data_dir, config_path)
+    # An agent that updated itself since setup is selected again (GAP-2513);
+    # a 0.x import has no sealed agent, so this does nothing there.
+    reselect_updated_windows_agents(data_dir)
     # A 0.8.x release may already have written config_version 8 (GAP-1390), so
     # the writer's version decides too: no 0.x release recorded the agents.
     if version < _FIRST_V8_CONFIG_VERSION or _version_before(from_version or "", (1, 0, 0)):
@@ -4189,6 +4192,83 @@ def _select_windows_agents(data_dir: str) -> None:
         return
     for name, selection in sorted(selections.items()):
         ux.ok(f"selected {selection.executable} for the {name} connector", indent="    ")
+    for name, detail in sorted(errors.items()):
+        ux.warn(f"no {name} executable to select ({detail}); run 'defenseclaw setup {name}'", indent="    ")
+
+
+def _sealed_windows_agent_changed(data_dir: str, connector: str) -> bool:
+    """Whether the program setup sealed for *connector* is no longer the one on disk."""
+
+    from defenseclaw.agent_selection import stable_executable_sha256
+
+    try:
+        with open(os.path.join(data_dir, "hook_contract_lock.json"), encoding="utf-8") as handle:
+            entry = (json.load(handle).get("connectors") or {}).get(connector) or {}
+    except (OSError, ValueError, AttributeError):
+        return False
+    executable = str(entry.get("agent_executable") or "")
+    sealed = str(entry.get("agent_executable_sha256") or "").lower()
+    if (
+        entry.get("agent_executable_source") != "setup-selected"
+        or not executable
+        or not re.fullmatch(r"[0-9a-f]{64}", sealed)
+    ):
+        return False
+    if not os.path.isfile(executable):
+        return True
+    try:
+        return stable_executable_sha256(executable) != sealed
+    except OSError:
+        return False
+
+
+def reselect_updated_windows_agents(data_dir: str) -> None:
+    """Select again an agent program that updated itself since setup (GAP-2513).
+
+    On Windows the gateway runs codex.exe (and the other protected agents)
+    only while it is the file setup sealed in hook_contract_lock.json. Codex
+    updates itself (its "Update now" prompt runs npm install -g), and the next
+    upgrade then failed to start the gateway and put the old install back with
+    its gateway stopped until ``defenseclaw setup codex`` ran. Running the
+    installer is the same explicit action: the connectors whose sealed
+    program changed get the selection setup records, with the same checks,
+    and the gateway seals the new program. An unchanged connector keeps its
+    sealed lock; managed installs are left to the administrator.
+    """
+
+    if os.name != "nt":
+        return
+    from defenseclaw import config as config_module
+    from defenseclaw.agent_selection import record_setup_agent_selections, setup_agent_selection_connectors
+
+    try:
+        cfg = config_module.load(data_dir=data_dir)
+        if config_module._is_managed_enterprise_mode(getattr(cfg, "deployment_mode", "")) or (
+            config_module._is_managed_enterprise_mode(os.environ.get(config_module.DEPLOYMENT_MODE_ENV))
+        ):
+            return
+        changed = [
+            name
+            for name in setup_agent_selection_connectors(cfg.active_connectors())
+            if _sealed_windows_agent_changed(data_dir, name)
+        ]
+        if not changed:
+            return
+        selections, errors = record_setup_agent_selections(data_dir, changed)
+        if errors and selections:
+            selections, retry_errors = record_setup_agent_selections(data_dir, list(selections))
+            if retry_errors:
+                errors.update(retry_errors)
+                selections = {}
+    except Exception as exc:  # noqa: BLE001 - the gateway start reports what it needs
+        ux.warn(f"could not check the agent programs setup selected: {exc}", indent="    ")
+        return
+    for name, selection in sorted(selections.items()):
+        ux.warn(
+            f"{name} changed since DefenseClaw set it up (an agent update does this); "
+            f"selected {selection.executable} ({selection.raw_version}) for the {name} connector",
+            indent="    ",
+        )
     for name, detail in sorted(errors.items()):
         ux.warn(f"no {name} executable to select ({detail}); run 'defenseclaw setup {name}'", indent="    ")
 

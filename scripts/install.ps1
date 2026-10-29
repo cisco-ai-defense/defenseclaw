@@ -4817,6 +4817,18 @@ function Undo-Rollback([string]$Reason, [string]$Current, [string]$BackTo, [stri
     return 1
 }
 
+function Select-UpdatedAgents([string]$Data) {
+    # An agent that updated itself since the older release set it up (Codex
+    # runs npm install -g from its "Update now" prompt) gets the selection
+    # that 'defenseclaw setup codex' records, written by the CLI of this
+    # install into the data of the older one; its gateway seals it at its
+    # next start (GAP-2513). Best effort: Get-StaleAgentEvidence names what
+    # is left.
+    $python = Join-Path $Venv "Scripts\python.exe"
+    if (-not (Test-Path -LiteralPath $python -PathType Leaf)) { return }
+    [void](Invoke-Native $python @("-c", "import sys; from defenseclaw import migrations; migrations.reselect_updated_windows_agents(sys.argv[1])", $Data))
+}
+
 function Invoke-Rollback {
     $backTo = Read-Text (Join-Path $Previous "VERSION")
     if (-not (Test-Version $backTo)) { Write-Step "Rolling back"; Die "No previous install to roll back to ($Previous is missing)" }
@@ -4839,6 +4851,9 @@ function Invoke-Rollback {
     Assert-NoActiveConnectorRecovery "Rollback to $backTo"
     if (-not $rollForward) {
         Assert-NoActiveConnectorRecovery "Rollback to $backTo" (Join-Path $Previous "data")
+        # The older gateway does not start with an agent program it did not
+        # set up; one that updated itself since gets selected again (GAP-2513).
+        Select-UpdatedAgents (Join-Path $Previous "data")
     }
     if (-not (Confirm-Step $question)) {
         Die "Rollback cancelled; nothing was changed"
