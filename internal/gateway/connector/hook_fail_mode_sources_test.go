@@ -933,3 +933,42 @@ func TestRefreshHookFailModesLeavesRetiredConnectorsUntouched(t *testing.T) {
 		t.Fatalf("shared sidecar after refresh: %+v", state)
 	}
 }
+
+// GAP-2481: the upgrade's refresh closed .hookcfg.opencode and the opencode
+// entry of hooks/.hookcfg in the install it replaced. No OpenCode plugin reads
+// either, and 1.0.2 does not write them again when its gateway starts, so a
+// rollback to 1.0.2 brought them back closed and they stayed. They are left
+// byte for byte; the hook connectors beside them are refreshed.
+func TestRefreshHookFailModesLeavesTheOpenCodeRecordAsItIs(t *testing.T) {
+	hookDir := t.TempDir()
+	shared := `{"version":2,"gateway_addr":"127.0.0.1:18970","fail_modes":{"codex":"open","opencode":"open"}}` + "\n"
+	files := map[string]string{
+		hookConfigSidecarName:               shared,
+		hookConfigSidecarName + ".opencode": "DEFENSECLAW_CONNECTOR=opencode\nDEFENSECLAW_FAIL_MODE=open\n",
+		hookConfigSidecarName + ".codex":    "DEFENSECLAW_CONNECTOR=codex\nDEFENSECLAW_FAIL_MODE=open\n",
+	}
+	for name, body := range files {
+		if err := os.WriteFile(filepath.Join(hookDir, name), []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	refreshed, err := RefreshHookFailModes(hookDir, func(string) string { return "closed" })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(refreshed.Sidecar, []string{"codex"}) {
+		t.Fatalf("refreshed %+v, want codex only", refreshed)
+	}
+	name := hookConfigSidecarName + ".opencode"
+	if body, _ := os.ReadFile(filepath.Join(hookDir, name)); string(body) != files[name] {
+		t.Fatalf("%s rewritten: %q", name, body)
+	}
+	state := readHookConfigSidecarForTest(t, hookDir)
+	if state.FailModes["opencode"] != "open" || state.FailModeSources["opencode"] != "" ||
+		state.FailModes["codex"] != "closed" || state.FailModeSources["codex"] != HookFailModeSourceConfig {
+		t.Fatalf("shared sidecar after refresh: %+v", state)
+	}
+	if flat := readFlatHookRecordForTest(t, hookDir, "codex"); flatRecordValueForTest([]byte(flat), "DEFENSECLAW_FAIL_MODE") != "closed" {
+		t.Fatalf("codex flat record %q, want closed", flat)
+	}
+}
