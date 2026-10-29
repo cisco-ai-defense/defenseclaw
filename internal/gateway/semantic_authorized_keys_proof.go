@@ -1055,6 +1055,7 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 				directoryFact && (changedDirectory ||
 					canonicalSemanticPath(resolved) == canonicalSemanticPath(filepath.Join(facts.ActiveHome, ".ssh"))) ||
 				operand == hookpaths.CWDKey && (changedDirectory || truncated) ||
+				operand == hookpaths.LinksStableKey ||
 				operand == hookpaths.TruncatedKey ||
 				resolved == "" && external(operand) && !truncated ||
 				isProtected(resolved) {
