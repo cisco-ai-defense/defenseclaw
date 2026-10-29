@@ -92,6 +92,14 @@ func TestWindowsBundleApplyLockWaitRefusesAfterAnUninstall(t *testing.T) {
 		!strings.Contains(out, "uninstalled while this run waited for the policy bundle lock") {
 		t.Fatalf("waited out an uninstall: done=%v err=%v exit=%d out=%s", done, err, commandExitCode(err), out)
 	}
+	// The uninstall commits long before it frees the lock: the wait ends
+	// at the commit, not at the release, so this process (the installed
+	// gateway binary) no longer keeps the uninstall from removing it.
+	start := time.Now()
+	opts, out, done, err = prepareWithHeldBundleLock(t, 30*time.Second, 5*time.Second)
+	if elapsed := time.Since(start); !done || opts.bundle != nil || !strings.Contains(out, `"not_managed"`) || elapsed >= 4*time.Second {
+		t.Fatalf("uninstall committed while the lock is held: done=%v err=%v elapsed=%s out=%s", done, err, elapsed, out)
+	}
 	// Still installed after the wait: the run goes on.
 	installed = true
 	if opts, out, done, err := prepareWithHeldBundleLock(t, 30*time.Second, 300*time.Millisecond); done || err != nil || opts.bundle == nil {
