@@ -157,6 +157,14 @@ _supports_terminal_redraw = terminal_checkbox.supports_terminal_redraw
 _checkbox_key_name = terminal_checkbox.checkbox_key_name
 _render_checkbox_menu = terminal_checkbox.render_checkbox_menu
 
+# --workspace help (GAP-2471): setup without the flag keeps a claw.workspace_dir
+# pin that is a folder (GAP-0201), so the default is the pin when one is set.
+_WORKSPACE_OPTION_HELP = (
+    "Opt into workspace-scoped config for this setup. Defaults to the claw.workspace_dir "
+    "pin when one is set (it must be a folder), else global/user config. "
+    '--workspace "" selects global/user config.'
+)
+
 # Key used to stash the pre-invocation config.yaml mtime in the Click
 # context so the post-invocation hook can tell whether a `setup`
 # subcommand actually mutated config on disk. Using ``ctx.meta``
@@ -7034,7 +7042,7 @@ def _resolve_judge_hook_gate(
     "--workspace-dir",
     "workspace_dir",
     default=None,
-    help="Opt into workspace-scoped connector config. Defaults to global/user config.",
+    help=_WORKSPACE_OPTION_HELP,
 )
 @click.option(
     "--restart/--no-restart", default=True, help="Restart gateway and the active connector after setup (default: on)"
@@ -10491,6 +10499,31 @@ def _resolve_connector_workspace(workspace_dir: str | None) -> str:
         return workspace
 
 
+def _workspace_peer_move_refusal(setup_slug: str, peers: list[str], requested: str, current: str) -> str:
+    """Refusal text for a --workspace that would move configured peers.
+
+    Setup without --workspace keeps the current pin (GAP-0201), so with a
+    pin set that is not "user-global hooks": name the pin it keeps and the
+    explicit global choice instead (GAP-2472).
+    """
+    head = (
+        f"--workspace pins one workspace for the whole install, so it would also move "
+        f"{', '.join(peers)} to {requested}, and their hooks would stop guarding "
+        "other folders. No changes made. "
+    )
+    scope_all = f"'defenseclaw setup guardrail --workspace {requested}' to scope every connector to that folder."
+    if current:
+        return head + (
+            f"Run 'defenseclaw setup {setup_slug}' without --workspace to keep the current pin "
+            f"{current}, 'defenseclaw setup {setup_slug} --workspace \"\"' (or "
+            "'defenseclaw config unset claw.workspace_dir', then setup again) to return every "
+            f"connector to user-global hooks, or {scope_all}"
+        )
+    return head + (
+        f"Run 'defenseclaw setup {setup_slug}' without --workspace to keep user-global hooks, or {scope_all}"
+    )
+
+
 def _setup_workspace_for_check(cfg, workspace_dir: str | None) -> str | None:
     """The workspace setup will use, for the agent-settings precheck.
 
@@ -11762,12 +11795,12 @@ def _setup_observability_alias(
         if peers:
             setup_slug = "claude-code" if connector == "claudecode" else connector
             raise click.ClickException(
-                f"--workspace pins one workspace for the whole install, so it would also move "
-                f"{', '.join(peers)} to {requested_workspace}, and their hooks would stop guarding "
-                "other folders. No changes made. Run 'defenseclaw setup "
-                f"{setup_slug}' without --workspace to keep user-global hooks, or "
-                f"'defenseclaw setup guardrail --workspace {requested_workspace}' to scope every "
-                "connector to that folder."
+                _workspace_peer_move_refusal(
+                    setup_slug,
+                    peers,
+                    requested_workspace,
+                    _setup_workspace_for_check(app.cfg, None) or "",
+                )
             )
 
     # GAP-2426: a guarded proxy connector (OpenClaw/ZeptoClaw) cannot run next
@@ -12911,7 +12944,7 @@ def _hook_guardrail_options(fn):
     "--workspace-dir",
     "workspace_dir",
     default=None,
-    help="Opt into workspace-scoped config for this setup. Defaults to global/user config.",
+    help=_WORKSPACE_OPTION_HELP,
 )
 @click.option(
     "--replace",
@@ -13053,7 +13086,7 @@ def setup_codex(
     "--workspace-dir",
     "workspace_dir",
     default=None,
-    help="Opt into workspace-scoped config for this setup. Defaults to global/user config.",
+    help=_WORKSPACE_OPTION_HELP,
 )
 @click.option(
     "--replace",
@@ -13869,7 +13902,7 @@ def _make_observability_setup_command(connector: str) -> click.Command:
         "--workspace-dir",
         "workspace_dir",
         default=None,
-        help="Opt into workspace-scoped config for this setup. Defaults to global/user config.",
+        help=_WORKSPACE_OPTION_HELP,
     )
     @click.option(
         "--replace",
