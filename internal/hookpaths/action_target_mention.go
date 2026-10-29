@@ -145,6 +145,7 @@ func actionPosixTargetMention(command, cwd, home string, depth int, stateOnly bo
 		found := false
 		effectiveCWD := cwd
 		var directoryStack []string
+		var movedOntoLinks []*syntax.Word
 		checkWord := func(word *syntax.Word) bool {
 			value, known := actionWordValue(word, values, effectiveCWD, home)
 			activeGlob := actionWordHasUnquotedGlob(word, command)
@@ -199,7 +200,24 @@ func actionPosixTargetMention(command, cwd, home string, depth int, stateOnly bo
 						return false
 					}
 				}
+				var moved *syntax.Word
+				var movedEntry string
+				if !stateOnly {
+					// A plain mv onto a link replaces the link: judge its
+					// entry, not the file it names (GAP-2559).
+					if word, entry, ok := actionPlainMoveOntoLink(call, values, effectiveCWD, home); ok {
+						moved, movedEntry = word, entry
+						movedOntoLinks = append(movedOntoLinks, word)
+					}
+				}
 				for _, word := range call.Args {
+					if moved != nil && word == moved {
+						if protectedEntry(movedEntry, protected, ssh) {
+							found = true
+							return false
+						}
+						continue
+					}
 					if checkWord(word) {
 						found = true
 						return false
@@ -212,6 +230,8 @@ func actionPosixTargetMention(command, cwd, home string, depth int, stateOnly bo
 		if found {
 			return true
 		}
+		// The text scan below would follow the link the move replaces.
+		nestedBodies = append(nestedBodies, movedOntoLinks...)
 	}
 	text := actionBlankPatchBodies(command, actionMaskLiteralMetacharacters(command))
 	if parsed && actionLiteralArgumentProgramsOnly(file, home) {
