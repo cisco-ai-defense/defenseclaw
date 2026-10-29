@@ -50,3 +50,30 @@ func TestUnreadableHomeValueKeepsThePreviousHome(t *testing.T) {
 		{"HOME=/tmp/x cp a.txt ~/project/out.txt", false},
 	})
 }
+
+// The runtime-operand readings of GAP-2477 knew only a bare cp, mv,
+// install or ln program word: dd, tee, a program path (/bin/cp) and a
+// command, env or sudo wrapper kept the partial argv that tied no path to
+// the call (checker pc11).
+func TestDynamicOperandWordThroughProgramPathsAndWrappers(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX shell spellings")
+	}
+	judgeHomeStateWriteRows(t, []homeStateWriteRow{
+		{"/bin/cp a.txt $HOME/.defenseclaw/config.yaml $(true)", true},
+		{"/usr/bin/cp a.txt HOMEDIR/.defenseclaw/config.yaml `true`", true},
+		{"command cp a.txt ~/.defenseclaw/config.yaml $(true)", true},
+		{"env cp a.txt ~/.defenseclaw/config.yaml $(true)", true},
+		{"sudo cp a.txt ~/.defenseclaw/config.yaml $(true)", true},
+		{"dd if=a.txt of=$HOME/.defenseclaw/config.yaml $(true)", true},
+		{"dd if=$SRC of=$HOME/.defenseclaw/config.yaml", true},
+		{"tee ~/.defenseclaw/config.yaml $(true) < a.txt", true},
+		{"cat a.txt | tee ~/.defenseclaw/config.yaml $X", true},
+		{"/bin/cp a.txt ~/.defenseclaw/config.yaml $X", true},
+		{"tee out.txt $(true) < a.txt", false},
+		{"/bin/cp a.txt b.txt $(true)", false},
+		{"dd if=a.txt of=out.img $(true)", false},
+		{"sudo cp a.txt /tmp/x.txt $(true)", false},
+		{"command -v cp $(true)", false},
+	})
+}

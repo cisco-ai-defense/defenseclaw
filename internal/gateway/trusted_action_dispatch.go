@@ -292,7 +292,7 @@ func dispatchTrustedAction(
 			findings = withTwinProvenBlocks(findings, dispatchTrustedAction(parent, twin))
 		}()
 	}
-	// A cp, mv, install or ln call with a runtime-expanded operand word has
+	// A cp, mv, install, ln, dd or tee call with a runtime-expanded operand word has
 	// a partial argv that ties no path to the call, so a literal destination
 	// went unjudged (cp a.txt ~/.defenseclaw/config.yaml $(true), GAP-2477).
 	// Each reading with static operands is one way the call can run, and a
@@ -302,7 +302,6 @@ func dispatchTrustedAction(
 			findings = withTwinProvenBlocks(findings, dispatchTrustedAction(parent, twin))
 		}()
 	}
-
 	facts = actionfacts.Analyze(request.Input)
 	analyzed = true
 	if conflict, ok := conflictingToolArgumentKeys(request, facts); ok {

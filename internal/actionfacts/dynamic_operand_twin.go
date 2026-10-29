@@ -33,8 +33,11 @@ import (
 const DynamicOperandPlaceholder = "/dev/null"
 
 // DynamicOperandTwins returns POSIX readings of command in which every cp,
-// mv, install and ln call that has a runtime-expanded operand word has only
-// static operands, so the role of each literal operand is known (GAP-2477).
+// mv, install, ln, dd and tee call (also by a path such as /bin/cp, or run
+// through command, env, sudo, exec or nohup) that has a runtime-expanded
+// operand word has only static operands, so the role of each literal operand
+// is known (GAP-2477). A key=value operand keeps its key (dd if=$SRC is read
+// as dd if=/dev/null).
 // One runtime-expanded word makes the whole argv partial and ties no path to
 // the call, so "cp a.txt ~/.defenseclaw/config.yaml $(true)" and
 // "cp $SRC ~/.defenseclaw/config.yaml" named no write at all.
@@ -86,17 +89,12 @@ func DynamicOperandTwins(command, activeHome string) (twins []string) {
 		if !ok || len(call.Args) < 2 {
 			return true
 		}
-		program := projectPOSIXWord(call.Args[0])
-		if program.Expands {
-			return true
-		}
-		switch program.Value {
-		case "cp", "mv", "install", "ln":
-		default:
+		first, known := dynamicOperandProgram(call.Args)
+		if !known {
 			return true
 		}
 		last := -1
-		for index := 1; index < len(call.Args); index++ {
+		for index := first; index < len(call.Args); index++ {
 			word := call.Args[index]
 			if !projectPOSIXWord(word).Expands {
 				last = index
@@ -104,9 +102,9 @@ func DynamicOperandTwins(command, activeHome string) (twins []string) {
 				return false
 			}
 		}
-		trailing := last > 0 && last < len(call.Args)-1
+		trailing := last >= first && last < len(call.Args)-1
 		var callPlain, callVanished []edit
-		for index := 1; index < len(call.Args); index++ {
+		for index := first; index < len(call.Args); index++ {
 			word := call.Args[index]
 			if !projectPOSIXWord(word).Expands {
 				continue
@@ -116,7 +114,7 @@ func DynamicOperandTwins(command, activeHome string) (twins []string) {
 				invalid = true
 				return false
 			}
-			replaced := edit{start: start, end: end, text: DynamicOperandPlaceholder}
+			replaced := edit{start: start, end: end, text: operandKeyPrefix(word) + DynamicOperandPlaceholder}
 			callPlain = append(callPlain, replaced)
 			if index > last {
 				if !vanishingWord(word) {
@@ -216,4 +214,63 @@ func vanishingWord(word *syntax.Word) bool {
 			part.Names == 0 && part.NestedParam == nil && len(part.Modifiers) == 0
 	}
 	return false
+}
+
+// dynamicOperandPrograms are the file-writing programs whose operands
+// DynamicOperandTwins reads.
+var dynamicOperandPrograms = map[string]bool{
+	"cp": true, "mv": true, "install": true, "ln": true, "dd": true, "tee": true,
+}
+
+// dynamicOperandProgram returns the index of the first operand of a
+// dynamicOperandPrograms call: the program may be named by a path
+// (/usr/bin/cp) and run through command, env (with NAME=value words), sudo,
+// exec or nohup with no options of their own. Any other wrapper form, or a
+// program word the shell expands, is not read.
+func dynamicOperandProgram(args []*syntax.Word) (int, bool) {
+	env := false
+	for index := 0; index < len(args)-1; index++ {
+		word := projectPOSIXWord(args[index])
+		if word.Expands || word.Value == "" {
+			return 0, false
+		}
+		if env && strings.Contains(word.Value, "=") && !strings.HasPrefix(word.Value, "=") {
+			// A NAME=value word of env.
+			continue
+		}
+		name := word.Value
+		if slash := strings.LastIndexByte(name, '/'); slash >= 0 {
+			name = name[slash+1:]
+		}
+		if dynamicOperandPrograms[name] {
+			return index + 1, true
+		}
+		switch name {
+		case "command", "sudo", "exec", "nohup", "env":
+			env = name == "env"
+		default:
+			return 0, false
+		}
+		if next := projectPOSIXWord(args[index+1]); next.Expands || strings.HasPrefix(next.Value, "-") {
+			return 0, false
+		}
+	}
+	return 0, false
+}
+
+// operandKeyPrefix returns the literal key= at the start of a word (if= of
+// dd if=$SRC, --target-directory= of cp), which the reading keeps.
+func operandKeyPrefix(word *syntax.Word) string {
+	if word == nil || len(word.Parts) == 0 {
+		return ""
+	}
+	lit, ok := word.Parts[0].(*syntax.Lit)
+	if !ok {
+		return ""
+	}
+	key, _, found := strings.Cut(lit.Value, "=")
+	if !found || key == "" || strings.ContainsAny(key, "/\\") {
+		return ""
+	}
+	return key + "="
 }
