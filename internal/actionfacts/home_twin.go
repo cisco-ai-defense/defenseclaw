@@ -79,6 +79,40 @@ func HomeResolvedTwin(input Input) (twin Facts, ok bool) {
 	return twin, true
 }
 
+// HomeSpelledTwin returns the analysis of a partial POSIX action with its
+// home-anchored words (as HomeResolvedTwin reads them: an unquoted ~/, or a
+// plain $HOME/ or ${HOME}/) spelled as the same path under input.ActiveHome.
+// Unlike HomeResolvedTwin, the twin may itself be partial (a subshell, a
+// bare cd ~), so it proves nothing on its own: a caller may use it only for
+// a check that adds a block, such as a write through a link the action
+// makes (GAP-2555). ok is false when the action has no such word, mentions
+// HOME elsewhere or has a here-document, or the twin is not POSIX.
+func HomeSpelledTwin(input Input) (twin Facts, ok bool) {
+	defer func() {
+		if recover() != nil {
+			twin, ok = Facts{}, false
+		}
+	}()
+	original, capture := analyzeWithRedirectTargets(input, "")
+	if original.Parse.Status != StatusPartial || original.Parse.Dialect != DialectPOSIX ||
+		!containsIssue(original.Parse.Issues, IssueDynamicWord) {
+		return Facts{}, false
+	}
+	home := strings.TrimRight(original.ActiveHome, "/")
+	if !posixShellHome(home) || strings.ContainsAny(home, "\x00\r\n") {
+		return Facts{}, false
+	}
+	resolved, ok := homeResolvedSource(capture.source, home)
+	if !ok {
+		return Facts{}, false
+	}
+	twin, _ = analyzeWithRedirectTargets(input, resolved)
+	if twin.Parse.Dialect != DialectPOSIX || len(twin.Commands) == 0 {
+		return Facts{}, false
+	}
+	return twin, true
+}
+
 // posixShellHome reports whether home, a normalized ActiveHome without a
 // trailing slash, can be written for $HOME in a POSIX command: an absolute
 // POSIX path, or a Windows drive path such as C:/Users/alice. The agents that
