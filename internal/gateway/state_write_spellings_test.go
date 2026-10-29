@@ -348,6 +348,36 @@ func TestWriteThroughALinkToStateIsAStateWrite(t *testing.T) {
 	})
 }
 
+// A link to state named under the home (~/hk, $HOME/hk) or made in a
+// subshell after cd ~ is the same alias as a relative one: the analysis left
+// the ~/ and $HOME/ write operand dynamic, so the write had no writer path
+// (GAP-2555), and once b86526ee67 read the subshell cd scope the cautious
+// unknown-link reading no longer stood in for it (checker pod3 RV-p3-1).
+func TestHomeNamedLinkToStateIsAStateWrite(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX shell spellings")
+	}
+	judgeHomeStateWriteRows(t, []homeStateWriteRow{
+		{"ln -s ~/.defenseclaw/hooks ~/hk; cp a.txt ~/hk/x.sh", true},
+		{"ln -s $HOME/.defenseclaw/hooks $HOME/hk; cp a.txt $HOME/hk/x.sh", true},
+		{`ln -s "$HOME/.defenseclaw" "$HOME/dc"; echo x > "$HOME/dc/config.yaml"`, true},
+		{"( ln -s ~/.defenseclaw/hooks ~/hk ) ; cp a.txt ~/hk/x.sh", true},
+		{"( cd ~ && ln -s .defenseclaw/hooks hk ) ; cp a.txt ~/hk/x.sh", true},
+		{"( cd ~ && ln -s ~/.defenseclaw/hooks hk ) ; cp a.txt ~/hk/x.sh", true},
+		{"( cd ~ && ln -s .defenseclaw dc ) ; cp a.txt ~/dc/config.yaml", true},
+		{"( cd ~ && ln -s .defenseclaw/config.yaml c ) ; echo x > ~/c", true},
+		{"( cd ~ && ln -s .defenseclaw/hooks hk ) && echo x > ~/hk/x.sh", true},
+		{"( cd ~ && ln -s .defenseclaw/hooks hk ) ; cp a.txt ~/hk/", true},
+		{"( cd ~ && ln -s .defenseclaw/hooks hk ) ; tee ~/hk/x.sh < a.txt", true},
+		{"ln -s ~/project/src ~/src-link; cp a.txt ~/src-link/x.txt", false},
+		{"( cd ~ && ln -s project/src s ) ; cp a.txt ~/s/x.txt", false},
+		{"ln -sf ~/project/a.txt ~/.local/bin/tool; ls ~/.local/bin", false},
+		{"ln -s ~/.defenseclaw/hooks ~/hk; ls ~/hk", false},
+		{"( cd ~ && ln -s .defenseclaw dc ) ; cat ~/dc/config.yaml", false},
+		{"cd ~ && cp -r project project-bak", false},
+	})
+}
+
 // env -C behind an assignment word, a flock FILE -c STRING and an env -C
 // call before a later wrapped state write were read as nothing (checker
 // pod4 Q03, R06, R01, R26, GAP-2519).

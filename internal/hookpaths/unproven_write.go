@@ -389,7 +389,7 @@ func unprovenShellParseWrite(command, cwd, home string) bool {
 	if len(command) > MaxPayloadBytes || shellparse.TooDeep(command) {
 		return true // Beyond the command proof bound, effects are unknown.
 	}
-	file, _ := syntax.NewParser(syntax.Variant(syntax.LangBash), syntax.RecoverErrors(8)).Parse(strings.NewReader(command), "")
+	file, _ := syntax.NewParser(syntax.Variant(syntax.LangBash), syntax.RecoverErrors(8)).Parse(shellparse.Reader(command), "")
 	if file == nil {
 		return strings.Contains(command, ">") ||
 			unprovenWriter.MatchString(command) && protectedReachFromText(command, cwd, home)
