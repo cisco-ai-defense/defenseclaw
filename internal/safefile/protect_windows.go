@@ -667,6 +667,12 @@ func privateSecurityDescriptorIsSafeForSubject(
 		}
 		if sid.Equals(identity.sid) {
 			foundOwner = true
+			if sid.Equals(system) {
+				// A LocalSystem caller is its own SYSTEM entry: one ACE
+				// satisfies both, or the private DACL it just wrote would
+				// never read back as safe and be rewritten on every call.
+				foundSystem = true
+			}
 			continue
 		}
 		if sid.Equals(system) {

@@ -21,6 +21,7 @@ import (
 	"time"
 	"unsafe"
 
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/winpath"
 	"golang.org/x/sys/windows"
 )
@@ -65,14 +66,19 @@ type WindowsManagedRuntimePlan struct {
 	ManifestSHA256 string                          `json:"manifest_sha256"`
 	TargetCount    int                             `json:"target_count"`
 	Roots          []WindowsManagedRuntimeRootPlan `json:"roots"`
-	// SkippedProfiles lists users a fresh Install left out because another
-	// process still held their profile folder after the retry window. Their
-	// manifest rows were removed before this plan bound the manifest, so the
-	// rest of the deployment proceeds; the enumerator adds them back later.
+	// SkippedProfiles lists users the plan left out so the rest of the
+	// deployment could proceed: a profile folder another process still held
+	// after the retry window, a retained root that could not be repaired, a
+	// profile that no longer resolves, or a user beyond the root cap. A fresh
+	// Install removes their manifest rows before the plan binds the manifest
+	// and the enumerator adds them back later. Upgrade and Repair keep their
+	// rows, because removing them would revoke protection they already have;
+	// the plan simply has no root for them and the Guardian keeps servicing
+	// them on its own schedule.
 	SkippedProfiles []WindowsManagedRuntimeSkippedProfile `json:"skipped_profiles,omitempty"`
-	// RepairedProfiles lists users whose retained .defenseclaw a fresh
-	// Install found with a drifted owner or DACL and re-stamped to the
-	// canonical descriptor. Reason says what was wrong.
+	// RepairedProfiles lists users whose retained .defenseclaw the plan found
+	// with a drifted owner or DACL and re-stamped to the canonical
+	// descriptor. Reason says what was wrong.
 	RepairedProfiles []WindowsManagedRuntimeSkippedProfile `json:"repaired_profiles,omitempty"`
 }
 
@@ -80,6 +86,11 @@ type WindowsManagedRuntimePlan struct {
 // a fresh Install could not bring back to the canonical descriptor; the user
 // is skipped rather than failing every user.
 var errWindowsManagedRuntimeBaselineUnrepairable = errors.New("retained managed runtime root could not be repaired")
+
+// errWindowsManagedRuntimePlanHost marks a planning failure that is not about
+// one profile (for example, no entropy for the staging names). It always
+// fails the plan instead of skipping a user.
+var errWindowsManagedRuntimePlanHost = errors.New("managed runtime planning failed")
 
 // WindowsManagedRuntimeSkippedProfile is one user a fresh Install skipped.
 type WindowsManagedRuntimeSkippedProfile struct {
@@ -245,12 +256,25 @@ func planWindowsManagedRuntimeRoots(
 	if !validWindowsManagedRuntimeDigest(manifestSHA256) {
 		return plan, fmt.Errorf("enterprise hooks: invalid managed runtime manifest SHA-256")
 	}
-	targets, err := resolveWindowsManagedRuntimeTargets(manifest)
+	// One row that no longer resolves (a deleted or renamed profile, an
+	// unsupported volume, a profile owner outside the trusted set) skips that
+	// user; it never fails the plan for everyone.
+	targets, skipped, err := resolveWindowsManagedRuntimePlanTargets(manifest)
 	if err != nil {
 		return plan, err
 	}
 	if len(targets) > windowsManagedRuntimeMaxRoots {
-		return plan, fmt.Errorf("enterprise hooks: managed runtime plan has %d roots, maximum is %d", len(targets), windowsManagedRuntimeMaxRoots)
+		for _, target := range targets[windowsManagedRuntimeMaxRoots:] {
+			skipped = append(skipped, WindowsManagedRuntimeSkippedProfile{
+				SID:      target.sid.String(),
+				UserHome: target.home,
+				Reason: fmt.Sprintf(
+					"managed runtime plan is limited to %d profiles",
+					windowsManagedRuntimeMaxRoots,
+				),
+			})
+		}
+		targets = targets[:windowsManagedRuntimeMaxRoots]
 	}
 	if count := windowsManagedRuntimeEnabledTargetCount(manifest); count > windowsManagedRuntimeMaxRoots*3 {
 		return plan, fmt.Errorf(
@@ -260,17 +284,12 @@ func planWindowsManagedRuntimeRoots(
 		)
 	}
 	roots := make([]WindowsManagedRuntimeRootPlan, 0, len(targets))
-	var skipped, repaired []WindowsManagedRuntimeSkippedProfile
+	var repaired []WindowsManagedRuntimeSkippedProfile
 	err = windowsManagedRuntimeSetupPrivilege(func() error {
 		for _, target := range targets {
-			root, repairedReason, inspectErr := planWindowsManagedRuntimeRootWithRepair(target, publish != nil)
-			if inspectErr == nil && repairedReason != "" {
-				repaired = append(repaired, WindowsManagedRuntimeSkippedProfile{
-					SID:      target.sid.String(),
-					UserHome: target.home,
-					Reason:   repairedReason,
-				})
-			}
+			// The installer repairs a drifted retained root in every mode.
+			// Upgrade and Repair used to reject it and fail every user.
+			root, repairedReason, inspectErr := planWindowsManagedRuntimeRootWithRepair(target, true)
 			if inspectErr == nil && publish != nil {
 				// Staging opens the folder for writing and finalize's rename
 				// opens it for writing again, so a holder that only blocks
@@ -280,16 +299,22 @@ func planWindowsManagedRuntimeRoots(
 				inspectErr = probeWindowsManagedRuntimeProfileMutable(target)
 			}
 			if inspectErr != nil {
-				if publish != nil && (errors.Is(inspectErr, windows.ERROR_SHARING_VIOLATION) ||
-					errors.Is(inspectErr, errWindowsManagedRuntimeBaselineUnrepairable)) {
-					skipped = append(skipped, WindowsManagedRuntimeSkippedProfile{
-						SID:      target.sid.String(),
-						UserHome: target.home,
-						Reason:   boundWindowsManagedRuntimeSkipReason(inspectErr.Error()),
-					})
-					continue
+				if errors.Is(inspectErr, errWindowsManagedRuntimePlanHost) {
+					return inspectErr
 				}
-				return inspectErr
+				skipped = append(skipped, WindowsManagedRuntimeSkippedProfile{
+					SID:      target.sid.String(),
+					UserHome: target.home,
+					Reason:   boundWindowsManagedRuntimeSkipReason(inspectErr.Error()),
+				})
+				continue
+			}
+			if repairedReason != "" {
+				repaired = append(repaired, WindowsManagedRuntimeSkippedProfile{
+					SID:      target.sid.String(),
+					UserHome: target.home,
+					Reason:   repairedReason,
+				})
 			}
 			roots = append(roots, root)
 		}
@@ -298,7 +323,21 @@ func planWindowsManagedRuntimeRoots(
 	if err != nil {
 		return WindowsManagedRuntimePlan{}, err
 	}
-	if len(skipped) != 0 {
+	for _, profile := range repaired {
+		managed.EmitResilienceEvent(managed.MarkerRepair, map[string]string{
+			"sid":    profile.SID,
+			"path":   filepath.Join(profile.UserHome, ".defenseclaw"),
+			"reason": "target_runtime_profile_repaired: " + profile.Reason,
+		})
+	}
+	for _, profile := range skipped {
+		managed.EmitResilienceEvent(managed.MarkerSkip, map[string]string{
+			"sid":    profile.SID,
+			"path":   profile.UserHome,
+			"reason": "target_runtime_profile_skipped: " + profile.Reason,
+		})
+	}
+	if len(skipped) != 0 && publish != nil {
 		manifest = withoutWindowsManagedRuntimeSkippedProfiles(manifest, skipped)
 		digest, publishErr := publish(manifest)
 		if publishErr != nil {
@@ -476,6 +515,10 @@ func CleanupWindowsManagedRuntimeRoots(
 	}
 	claims := make([]WindowsManagedRuntimeClaim, 0, len(request.Plan.Roots))
 	err = windowsManagedRuntimeSetupPrivilege(func() error {
+		// One root that cannot be cleaned (a file the gateway or user
+		// dropped, a database held open) is reported, but never stops the
+		// other roots from being rolled back.
+		var failures []error
 		for _, rootPlan := range request.Plan.Roots {
 			key := windowsManagedRuntimeRootKey(rootPlan.SID, rootPlan.UserHome)
 			claim, cleanupErr := cleanupWindowsManagedRuntimeRoot(rootPlan, claimsByRoot[key], cleanupSpecs[key])
@@ -483,10 +526,15 @@ func CleanupWindowsManagedRuntimeRoots(
 				claims = append(claims, claim)
 			}
 			if cleanupErr != nil {
-				return cleanupErr
+				managed.EmitResilienceEvent(managed.MarkerSkip, map[string]string{
+					"sid":    rootPlan.SID,
+					"path":   rootPlan.DataDir,
+					"reason": "target_runtime_cleanup_left_root: " + cleanupErr.Error(),
+				})
+				failures = append(failures, cleanupErr)
 			}
 		}
-		return nil
+		return errors.Join(failures...)
 	})
 	return claims, err
 }
@@ -501,11 +549,90 @@ func windowsManagedRuntimeCleanupClaimReportable(claim WindowsManagedRuntimeClai
 }
 
 func resolveWindowsManagedRuntimeTargets(manifest Manifest) ([]windowsManagedRuntimeTarget, error) {
+	return resolveWindowsManagedRuntimeTargetsExcept(manifest, nil)
+}
+
+// resolveWindowsManagedRuntimePlanTargets resolves every enabled row and
+// returns, instead of an error, a skipped profile for each user whose row no
+// longer resolves. Only a row too malformed to name a user (an invalid SID or
+// a relative profile path) still fails the plan.
+func resolveWindowsManagedRuntimePlanTargets(
+	manifest Manifest,
+) ([]windowsManagedRuntimeTarget, []WindowsManagedRuntimeSkippedProfile, error) {
+	var skipped []WindowsManagedRuntimeSkippedProfile
+	except := make(map[string]struct{})
+	for index, row := range manifest.Targets {
+		if !row.IsEnabled() {
+			continue
+		}
+		sid, home, ok := windowsManagedRuntimeRowIdentity(row)
+		if !ok {
+			return nil, nil, fmt.Errorf("enterprise hooks: managed runtime target %d does not name a user", index)
+		}
+		if _, done := except[strings.ToUpper(sid)]; done {
+			continue
+		}
+		if _, err := resolveWindowsManagedRuntimeTarget(row.UserHome, row.SID, row.DataDir); err != nil {
+			except[strings.ToUpper(sid)] = struct{}{}
+			skipped = append(skipped, WindowsManagedRuntimeSkippedProfile{
+				SID:      sid,
+				UserHome: home,
+				Reason:   boundWindowsManagedRuntimeSkipReason("profile_invalid: " + err.Error()),
+			})
+		}
+	}
+	targets, err := resolveWindowsManagedRuntimeTargetsExcept(manifest, except)
+	if err != nil {
+		return nil, nil, err
+	}
+	return targets, skipped, nil
+}
+
+// windowsManagedRuntimeRowIdentity returns the canonical SID string and clean
+// absolute profile path a manifest row names, without touching the profile.
+func windowsManagedRuntimeRowIdentity(row ManifestTarget) (string, string, bool) {
+	sid, err := windows.StringToSid(strings.TrimSpace(row.SID))
+	if err != nil {
+		return "", "", false
+	}
+	home := filepath.Clean(strings.TrimSpace(row.UserHome))
+	if !filepath.IsAbs(home) {
+		return "", "", false
+	}
+	return sid.String(), home, true
+}
+
+func windowsManagedRuntimeSkippedSIDs(skipped []WindowsManagedRuntimeSkippedProfile) map[string]struct{} {
+	sids := make(map[string]struct{}, len(skipped))
+	for _, profile := range skipped {
+		sids[strings.ToUpper(strings.TrimSpace(profile.SID))] = struct{}{}
+	}
+	return sids
+}
+
+func windowsManagedRuntimeRowSkipped(row ManifestTarget, except map[string]struct{}) bool {
+	if len(except) == 0 {
+		return false
+	}
+	sid, err := windows.StringToSid(strings.TrimSpace(row.SID))
+	if err != nil {
+		return false
+	}
+	_, skipped := except[strings.ToUpper(sid.String())]
+	return skipped
+}
+
+// resolveWindowsManagedRuntimeTargetsExcept resolves every enabled row except
+// those belonging to a skipped user.
+func resolveWindowsManagedRuntimeTargetsExcept(
+	manifest Manifest,
+	except map[string]struct{},
+) ([]windowsManagedRuntimeTarget, error) {
 	bySID := make(map[string]string)
 	byHome := make(map[string]string)
 	unique := make(map[string]windowsManagedRuntimeTarget)
 	for index, row := range manifest.Targets {
-		if !row.IsEnabled() {
+		if !row.IsEnabled() || windowsManagedRuntimeRowSkipped(row, except) {
 			continue
 		}
 		target, err := resolveWindowsManagedRuntimeTarget(row.UserHome, row.SID, row.DataDir)
@@ -562,8 +689,9 @@ func windowsManagedRuntimeCleanupSpecs(plan WindowsManagedRuntimePlan, manifest 
 			generationConnectors: make(map[string]struct{}),
 		}
 	}
+	skippedSIDs := windowsManagedRuntimeSkippedSIDs(plan.SkippedProfiles)
 	for index, row := range manifest.Targets {
-		if !row.IsEnabled() {
+		if !row.IsEnabled() || windowsManagedRuntimeRowSkipped(row, skippedSIDs) {
 			continue
 		}
 		target, err := resolveWindowsManagedRuntimeTarget(row.UserHome, row.SID, row.DataDir)
@@ -679,12 +807,12 @@ func planWindowsManagedRuntimeRootWithRepair(
 	}
 	randomLeaf := make([]byte, windowsManagedRuntimeStageRandomBytes)
 	if _, err := io.ReadFull(windowsManagedRuntimeEntropy, randomLeaf); err != nil {
-		return WindowsManagedRuntimeRootPlan{}, "", fmt.Errorf("enterprise hooks: generate managed runtime staging leaf: %w", err)
+		return WindowsManagedRuntimeRootPlan{}, "", fmt.Errorf("enterprise hooks: %w: generate managed runtime staging leaf: %w", errWindowsManagedRuntimePlanHost, err)
 	}
 	root.StagingLeaf = windowsManagedRuntimeStagePrefix + hex.EncodeToString(randomLeaf)
 	marker, err := randomWindowsManagedRuntimeMarkerSID(windowsManagedRuntimeEntropy)
 	if err != nil {
-		return WindowsManagedRuntimeRootPlan{}, "", err
+		return WindowsManagedRuntimeRootPlan{}, "", fmt.Errorf("enterprise hooks: %w: %w", errWindowsManagedRuntimePlanHost, err)
 	}
 	root.MarkerSID = marker.String()
 	return root, repaired, nil
@@ -1123,7 +1251,8 @@ var (
 
 	windowsManagedRuntimeProfileRetrySpent struct {
 		sync.Mutex
-		total time.Duration
+		total     time.Duration
+		exhausted bool
 	}
 )
 
@@ -1152,6 +1281,17 @@ func reserveWindowsManagedRuntimeProfileRetry(delay time.Duration) bool {
 	spent.Lock()
 	defer spent.Unlock()
 	if spent.total+delay > windowsManagedRuntimeProfileRetryBudget {
+		if !spent.exhausted {
+			// Logged once per process: later busy profiles get one attempt
+			// and are skipped rather than failing the run.
+			spent.exhausted = true
+			managed.EmitResilienceEvent(managed.MarkerAccept, map[string]string{
+				"reason": fmt.Sprintf(
+					"target_runtime_profile_retry_budget_exhausted: %s of busy-profile retries used; remaining profiles get one attempt",
+					windowsManagedRuntimeProfileRetryBudget,
+				),
+			})
+		}
 		return false
 	}
 	spent.total += delay
@@ -1558,7 +1698,13 @@ func validateWindowsManagedRuntimePlan(plan WindowsManagedRuntimePlan, manifest 
 	if !validWindowsManagedRuntimeDigest(plan.ManifestSHA256) {
 		return fmt.Errorf("enterprise hooks: managed runtime plan manifest digest is invalid")
 	}
-	targets, err := resolveWindowsManagedRuntimeTargets(manifest)
+	if err := validateWindowsManagedRuntimeSkippedProfiles(plan.SkippedProfiles, manifest); err != nil {
+		return err
+	}
+	targets, err := resolveWindowsManagedRuntimeTargetsExcept(
+		manifest,
+		windowsManagedRuntimeSkippedSIDs(plan.SkippedProfiles),
+	)
 	if err != nil {
 		return err
 	}
@@ -1570,9 +1716,6 @@ func validateWindowsManagedRuntimePlan(plan WindowsManagedRuntimePlan, manifest 
 	}
 	if plan.TargetCount != targetCount || targetCount > windowsManagedRuntimeMaxRoots*3 {
 		return fmt.Errorf("enterprise hooks: managed runtime plan target count does not match manifest")
-	}
-	if err := validateWindowsManagedRuntimeSkippedProfiles(plan.SkippedProfiles, manifest); err != nil {
-		return err
 	}
 	if err := validateWindowsManagedRuntimeRepairedProfiles(plan.RepairedProfiles, plan.Roots); err != nil {
 		return err
@@ -1607,14 +1750,12 @@ func validateWindowsManagedRuntimePlan(plan WindowsManagedRuntimePlan, manifest 
 }
 
 // validateWindowsManagedRuntimeSkippedProfiles requires each skipped user to
-// be well formed, listed once, and absent from the manifest the plan binds.
+// be well formed and listed once. A skipped user may still be enrolled in the
+// manifest (Upgrade and Repair never revoke); the plan then simply holds no
+// root for them, which the root-count check enforces.
 func validateWindowsManagedRuntimeSkippedProfiles(skipped []WindowsManagedRuntimeSkippedProfile, manifest Manifest) error {
-	if len(skipped) > windowsManagedRuntimeMaxRoots {
-		return fmt.Errorf("enterprise hooks: managed runtime plan skips more than %d profiles", windowsManagedRuntimeMaxRoots)
-	}
-	inManifest := make(map[string]struct{}, len(manifest.Targets))
-	for _, row := range manifest.Targets {
-		inManifest[strings.ToUpper(strings.TrimSpace(row.SID))] = struct{}{}
+	if len(skipped) > windowsManagedRuntimeMaxRoots*3 {
+		return fmt.Errorf("enterprise hooks: managed runtime plan skips more than %d profiles", windowsManagedRuntimeMaxRoots*3)
 	}
 	seen := make(map[string]struct{}, len(skipped))
 	for index, profile := range skipped {
@@ -1629,9 +1770,6 @@ func validateWindowsManagedRuntimeSkippedProfiles(skipped []WindowsManagedRuntim
 			return fmt.Errorf("enterprise hooks: managed runtime plan skips profile %s twice", profile.SID)
 		}
 		seen[key] = struct{}{}
-		if _, present := inManifest[key]; present {
-			return fmt.Errorf("enterprise hooks: managed runtime plan skips profile %s that the manifest still enrolls", profile.SID)
-		}
 	}
 	return nil
 }

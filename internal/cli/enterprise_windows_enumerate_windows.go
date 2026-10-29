@@ -376,11 +376,29 @@ func runEnterpriseWindowsEnumerateInterval(
 	// without a discoverable CLI are silently skipped. The
 	// byte-identical short-circuit in WriteTargetsManifestAtomic
 	// keeps steady-state ticks free of fsnotify wakes.
-	if err := runEnterpriseWindowsEnumerateSingleCycle(ctx, stderr, manifestPath, true); err != nil {
-		if !isEnterpriseWindowsEnumerateConfigMissing(err) {
-			fmt.Fprintf(stderr, "[hook-enumerator] initial cycle failed: %v\n", err)
+	health := enterpriseWindowsEnumerateHealth{interval: opts.interval}
+	retry := time.NewTimer(time.Hour)
+	if !retry.Stop() {
+		<-retry.C
+	}
+	defer retry.Stop()
+	runCycle := func(label string) {
+		err := runEnterpriseWindowsEnumerateSingleCycle(ctx, stderr, manifestPath, true)
+		if err != nil && isEnterpriseWindowsEnumerateConfigMissing(err) {
+			return
+		}
+		if err != nil {
+			fmt.Fprintf(stderr, "[hook-enumerator] %s failed: %v\n", label, err)
+		}
+		// A failed cycle never stops the service. It is retried on a
+		// bounded backoff that is shorter than the normal interval, so a
+		// transient lock or drifted manifest heals without waiting a full
+		// interval.
+		if delay, retryNeeded := health.observe(stderr, manifestPath, err); retryNeeded {
+			resetEnterpriseHookWatchTimer(retry, delay)
 		}
 	}
+	runCycle("initial cycle")
 
 	ticker := time.NewTicker(opts.interval)
 	defer ticker.Stop()
@@ -389,11 +407,9 @@ func runEnterpriseWindowsEnumerateInterval(
 		case <-ctx.Done():
 			return nil
 		case <-ticker.C:
-			if err := runEnterpriseWindowsEnumerateSingleCycle(ctx, stderr, manifestPath, true); err != nil {
-				if !isEnterpriseWindowsEnumerateConfigMissing(err) {
-					fmt.Fprintf(stderr, "[hook-enumerator] cycle failed: %v\n", err)
-				}
-			}
+			runCycle("cycle")
+		case <-retry.C:
+			runCycle("retry cycle")
 		}
 	}
 }

@@ -33,7 +33,7 @@ func ensureCodexConfigDir(path string) error {
 	if err != nil {
 		return fmt.Errorf("create private Codex configuration directory: %w", err)
 	}
-	if err := hookAPIValidateDirectory(path); err != nil {
+	if err := hookAPIValidateUserConfigDirectory(path, created); err != nil {
 		state := "existing"
 		if created {
 			state = "new"

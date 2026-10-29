@@ -67,6 +67,13 @@ type windowsManagedHooksLifecycleReport struct {
 	LegacyActivationState string `json:"legacy_activation_state,omitempty"`
 	Phase                 string `json:"phase,omitempty"`
 	Error                 string `json:"error,omitempty"`
+	// Orphaned-selector pruning evidence. selector_paths is reported whenever
+	// it resolved, including on failure, so the installer's fallback can act
+	// on exactly these files and nothing else.
+	PrunedSelectors []windowsManagedHooksPrunedSelector `json:"pruned_selectors,omitempty"`
+	SelectorPaths   []string                            `json:"selector_paths,omitempty"`
+	SkipConnector   string                              `json:"skip_connector,omitempty"`
+	SkipReason      string                              `json:"skip_reason,omitempty"`
 }
 
 type windowsManagedHooksLifecycleContext struct {
@@ -144,7 +151,8 @@ func newWindowsManagedHooksLifecycleCommand() *cobra.Command {
 		Hidden: true,
 	}
 	for _, action := range []string{
-		"capture", "classify-activation", "restore", "retire", "retire-committed",
+		"capture", "classify-activation", "prune-orphaned-selectors",
+		"restore", "retire", "retire-committed",
 	} {
 		action := action
 		var jsonOutput bool
@@ -199,7 +207,8 @@ func runWindowsManagedHooksLifecycle(
 		return report, err
 	}
 	if action != "capture" && action != "restore" && action != "retire" &&
-		action != "retire-committed" && action != "classify-activation" {
+		action != "retire-committed" && action != "classify-activation" &&
+		action != "prune-orphaned-selectors" {
 		return fail(fmt.Errorf("unsupported managed-hook lifecycle snapshot action %q", action))
 	}
 	if err := enterpriseHooksNativePlatformPreflight(); err != nil {
@@ -225,6 +234,20 @@ func runWindowsManagedHooksLifecycle(
 		if err != nil {
 			return fail(err)
 		}
+		return report, nil
+	}
+	if action == "prune-orphaned-selectors" {
+		result, err := newWindowsManagedHooksSelectorPrune(ctx, *pending).run()
+		report.TransactionID = pending.ID
+		report.SelectorPaths = result.SelectorPaths
+		report.PrunedSelectors = result.PrunedSelectors
+		if err != nil {
+			return fail(err)
+		}
+		report.OK = true
+		report.Phase = result.Phase
+		report.SkipConnector = result.SkipConnector
+		report.SkipReason = result.SkipReason
 		return report, nil
 	}
 	if action == "classify-activation" {
@@ -721,7 +744,7 @@ func windowsManagedHooksLifecycleCommittedTransactionID(
 		!validWindowsManagedHooksLifecycleTransactionID(activation.DeploymentGenerationID) ||
 		(activation.State != "never_activated" && activation.State != "activated") ||
 		!validWindowsManagedHooksLifecycleHex(activation.ManifestSHA256, sha256.Size) ||
-		activation.TargetCount != len(ctx.targets) {
+		activation.TargetCount < 0 {
 		return "", errors.New("deployment managed-hook activation binding is invalid")
 	}
 	manifestSHA256, err := hashWindowsManagedHooksLifecycleTrustedFile(
@@ -732,11 +755,7 @@ func windowsManagedHooksLifecycleCommittedTransactionID(
 	if err != nil {
 		return "", err
 	}
-	if activation.ManifestSHA256 != manifestSHA256 {
-		return "", errors.New(
-			"deployment managed-hook activation binding does not match the protected manifest",
-		)
-	}
+	acceptWindowsManagedHooksActivationDrift(*activation, manifestSHA256, len(ctx.targets))
 	return activation.DeploymentGenerationID, nil
 }
 
@@ -973,6 +992,92 @@ func classifyLegacyWindowsManagedHooksActivation(
 	return windowsManagedHooksNeverActivated, nil
 }
 
+// newWindowsManagedHooksSelectorPrune binds orphaned-selector pruning to the
+// live Guardian records, lifecycle recovery paths, machine policies and
+// selector primitives of this deployment layout.
+func newWindowsManagedHooksSelectorPrune(
+	ctx windowsManagedHooksLifecycleContext,
+	pending windowsManagedHooksLifecycleTransaction,
+) windowsManagedHooksSelectorPrune {
+	return windowsManagedHooksSelectorPrune{
+		transactionID: pending.ID,
+		journalPath:   ctx.journalPath,
+		quarantinePath: filepath.Join(
+			pending.Directory,
+			windowsManagedHooksLifecycleRecoveryLeaf,
+		),
+		guardianRecords: func() (bool, bool, bool, error) {
+			_, activation, err := loadEnterpriseHookGuardianActivation(ctx.runtimePath)
+			if err != nil {
+				return false, false, false, fmt.Errorf("inspect Guardian activation: %w", err)
+			}
+			_, authorization, err := loadEnterpriseHookGuardianAuthorization(ctx.runtimePath)
+			if err != nil {
+				return false, false, false, fmt.Errorf("inspect Guardian authorization: %w", err)
+			}
+			_, state, err := loadEnterpriseHookGuardianState(ctx.runtimePath)
+			if err != nil {
+				return false, false, false, fmt.Errorf("inspect Guardian state: %w", err)
+			}
+			return activation, authorization, state, nil
+		},
+		machinePolicyEnrollment: func() (string, string, error) {
+			return windowsManagedHooksMachinePolicyEnrollment(ctx)
+		},
+		selectorPaths: func() (map[string]string, error) {
+			return windowsManagedHooksLifecycleSelectorPaths(ctx)
+		},
+		pathExists:   windowsManagedHooksLifecyclePathExists,
+		capture:      windowsManagedHooksLifecycleSelectorCapture,
+		restore:      windowsManagedHooksLifecycleSelectorRestore,
+		verifyAbsent: validateWindowsManagedHooksLifecycleSelectorAbsent,
+	}
+}
+
+// windowsManagedHooksMachinePolicyEnrollment reports the first connector
+// whose machine policy could still route a hook to a selector entry. A policy
+// that cannot be read is an error, never "not enrolled".
+func windowsManagedHooksMachinePolicyEnrollment(
+	ctx windowsManagedHooksLifecycleContext,
+) (string, string, error) {
+	programFiles, err := winpath.TrustedProgramFiles()
+	if err != nil {
+		return "", "", fmt.Errorf("resolve trusted Program Files for Claude policy: %w", err)
+	}
+	directory := filepath.Join(programFiles, "ClaudeCode", "managed-settings.d")
+	for _, leaf := range []string{"90-defenseclaw.json", ".defenseclaw-managed-hooks.state"} {
+		path := filepath.Join(directory, leaf)
+		err := validateWindowsManagedHooksLifecycleSelectorAbsent(path, "Claude "+leaf)
+		if errors.Is(err, errWindowsManagedHooksLifecycleSelectorPresent) {
+			return "claudecode", "Claude managed policy " + path + " is present", nil
+		}
+		if err != nil {
+			return "", "", err
+		}
+	}
+	codexRegistry, err := connector.ResolveWindowsCodexManagedRuntimeRegistry(ctx.opts.HookBinary)
+	if err != nil {
+		return "", "", err
+	}
+	if codexRegistry.Active || len(codexRegistry.Targets) != 0 {
+		return "codex", fmt.Sprintf(
+			"Codex managed runtime registry is active with %d targets",
+			len(codexRegistry.Targets),
+		), nil
+	}
+	cursorTargets, cursorActive, err := enterprisehooks.ReadWindowsCursorManagedPolicyTargets()
+	if err != nil {
+		return "", "", err
+	}
+	if cursorActive || len(cursorTargets) != 0 {
+		return "cursor", fmt.Sprintf(
+			"Cursor managed policy is active with %d targets",
+			len(cursorTargets),
+		), nil
+	}
+	return "", "", nil
+}
+
 func validateLegacyWindowsManagedHooksClaudePreactivation() error {
 	programFiles, err := winpath.TrustedProgramFiles()
 	if err != nil {
@@ -1097,7 +1202,6 @@ func validateWindowsManagedHooksGuardianActivation(
 ) (pending, failed []windowsManagedHooksTeardownTarget, err error) {
 	_, activationTimeErr := time.Parse(time.RFC3339Nano, activation.UpdatedAt)
 	targetsByKey := make(map[string]windowsManagedHooksTeardownTarget, len(ctx.targets))
-	expected := make([]enterpriseHookReconcileRow, 0, len(ctx.targets))
 	active := make([]enterpriseHookReconcileRow, 0, len(ctx.targets))
 	pendingTargets := make([]windowsManagedHooksTeardownTarget, 0, len(ctx.targets))
 	failedTargets := make([]windowsManagedHooksTeardownTarget, 0, len(ctx.targets))
@@ -1108,10 +1212,6 @@ func validateWindowsManagedHooksGuardianActivation(
 			return nil, nil, errors.New("protected teardown manifest contains a duplicate target")
 		}
 		targetsByKey[key] = target
-		expected = append(expected, enterpriseHookReconcileRow{
-			SID:       target.SID,
-			Connector: target.Connector,
-		})
 	}
 	seen := make(map[string]struct{}, len(state.Results))
 	for _, row := range state.Results {
@@ -1137,11 +1237,11 @@ func validateWindowsManagedHooksGuardianActivation(
 			return nil, nil, errors.New("protected Guardian state target home does not match the deployment manifest")
 		}
 		if row.Pending {
-			if !target.Deferred {
-				return nil, nil, errors.New("protected Guardian state defers a target not authorized for deferred enrollment")
-			}
 			if row.Result != nil || strings.TrimSpace(row.Error) != "" {
 				return nil, nil, errors.New("protected Guardian pending target contains contradictory runtime evidence")
+			}
+			if !target.Deferred {
+				return nil, nil, errors.New("protected Guardian state defers a target not authorized for deferred enrollment")
 			}
 			pendingTargets = append(pendingTargets, target)
 			continue
@@ -1162,6 +1262,24 @@ func validateWindowsManagedHooksGuardianActivation(
 			Connector: target.Connector,
 			OK:        true,
 		})
+	}
+	// The enumerator may have added a user to the manifest after the last
+	// Guardian reconcile wrote these records. Such a row has no recorded
+	// disposition yet; treat it as possibly wired so teardown still removes
+	// whatever an interrupted reconcile may have installed, and bind the
+	// records only to the rows they actually report.
+	reported := make([]enterpriseHookReconcileRow, 0, len(seen))
+	unreported := make([]windowsManagedHooksTeardownTarget, 0)
+	for _, target := range ctx.targets {
+		key := strings.ToLower(target.Connector) + "\x00" + strings.ToUpper(target.SID)
+		if _, ok := seen[key]; ok {
+			reported = append(reported, enterpriseHookReconcileRow{
+				SID:       target.SID,
+				Connector: target.Connector,
+			})
+			continue
+		}
+		unreported = append(unreported, target)
 	}
 	if err := validateWindowsManagedHooksGuardianProtectedRows(
 		activation.ProtectedTargets,
@@ -1196,37 +1314,59 @@ func validateWindowsManagedHooksGuardianActivation(
 		authorization.ProtectedTargets,
 		"authorization",
 	)
-	stateIssues := compareEnterpriseHookProtectedTargetSets(expected, state.Results, "guardian state")
+	stateIssues := compareEnterpriseHookProtectedTargetSets(reported, state.Results, "guardian state")
 	healthy := len(failedTargets) == 0
 	maxProtected := len(active) + len(failedTargets)
+	reportedCount := len(reported)
 	if activation.Version != enterpriseHookGuardianActivationVersion ||
 		!validEnterpriseHookHex(activation.ReconcileID, 16) ||
 		authorization.Version != 1 || state.Version != 1 || activationTimeErr != nil ||
 		activation.OK != healthy || activation.FailureCount != len(failedTargets) ||
 		activation.SuccessCount != len(active) ||
 		activation.PendingCount != len(pendingTargets) ||
-		activation.TargetCount != len(ctx.targets) ||
+		activation.TargetCount != reportedCount ||
 		len(activation.ProtectedTargets) < len(active) || len(activation.ProtectedTargets) > maxProtected ||
 		authorization.OK != healthy || authorization.FailureCount != len(failedTargets) ||
 		authorization.SuccessCount != len(active) ||
 		authorization.PendingCount != len(pendingTargets) ||
-		authorization.TargetCount != len(ctx.targets) ||
+		authorization.TargetCount != reportedCount ||
 		len(authorization.ProtectedTargets) < len(active) || len(authorization.ProtectedTargets) > maxProtected ||
 		state.OK != healthy || state.FailureCount != len(failedTargets) ||
 		state.SuccessCount != len(active) || state.PendingCount != len(pendingTargets) ||
-		state.TargetCount != len(ctx.targets) ||
-		len(state.Results) != len(ctx.targets) ||
+		state.TargetCount != reportedCount ||
+		len(state.Results) != reportedCount ||
 		activation.UpdatedAt == "" || activation.UpdatedAt != authorization.UpdatedAt ||
 		activation.UpdatedAt != state.UpdatedAt ||
 		!sameEnterpriseHookPath(activation.Manifest, ctx.manifestPath) ||
 		!sameEnterpriseHookPath(state.Manifest, ctx.manifestPath) ||
-		activation.ManifestSHA256 != manifestSHA256 ||
+		!validEnterpriseHookHex(activation.ManifestSHA256, sha256.Size) ||
 		len(activationIssues) != 0 || len(authorizationIssues) != 0 ||
 		len(stateIssues) != 0 {
 		return nil, nil, errors.New(
 			"protected Guardian activation does not exactly bind the legacy deployment manifest and authorization",
 		)
 	}
+	// The manifest digest is advisory. The enumerator republishes the
+	// manifest for an agent version bump or a new user, and the Guardian
+	// re-pins on its next reconcile; the row-level binding above is what
+	// authorizes teardown.
+	if activation.ManifestSHA256 != manifestSHA256 {
+		managed.EmitResilienceEvent(managed.MarkerAccept, map[string]string{
+			"path":            ctx.manifestPath,
+			"reason":          "Guardian activation predates the current manifest; the Guardian re-pins it on its next reconcile",
+			"pinned_sha256":   activation.ManifestSHA256,
+			"manifest_sha256": manifestSHA256,
+		})
+	}
+	for _, target := range unreported {
+		managed.EmitResilienceEvent(managed.MarkerAccept, map[string]string{
+			"path":      target.DataDir,
+			"sid":       target.SID,
+			"connector": target.Connector,
+			"reason":    "manifest row added after the last Guardian reconcile; treated as possibly wired",
+		})
+	}
+	failedTargets = append(failedTargets, unreported...)
 	sortWindowsManagedHooksTeardownTargets(pendingTargets)
 	sortWindowsManagedHooksTeardownTargets(failedTargets)
 	return pendingTargets, failedTargets, nil
@@ -1803,12 +1943,6 @@ func sameWindowsManagedHooksLifecycleTransactionBackup(path, directory string) b
 		}
 	}
 	return true
-}
-
-var windowsManagedHooksLifecycleSelectorConnectors = [...]string{
-	"claudecode",
-	"codex",
-	"cursor",
 }
 
 // absentWindowsManagedHooksLifecycleSelectorSnapshots returns the canonical

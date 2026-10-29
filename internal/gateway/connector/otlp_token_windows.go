@@ -27,6 +27,7 @@ import (
 	"path/filepath"
 	"unsafe"
 
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"golang.org/x/sys/windows"
 )
 
@@ -53,7 +54,17 @@ func otlpValidatePerm(path string, _ os.FileInfo) error {
 	if err != nil {
 		return err
 	}
-	return otlpWindowsRejectUntrustedReadACEs(path, dacl)
+	if err := otlpWindowsRejectUntrustedReadACEs(path, dacl); err != nil {
+		// An extra reader (a backup agent, a helpdesk group) does not make the
+		// credential unusable: the read is accepted and logged, and the next
+		// privileged publish replaces the file with the canonical protection.
+		if !isManagedPermissionDrift(err) || managed.TrustStrictAncestors() {
+			return err
+		}
+		emitManagedResilience(managed.MarkerAccept, path,
+			"credential has an extra reader; a privileged publish restores its protection: "+err.Error(), nil)
+	}
+	return nil
 }
 
 // otlpValidateOwner rejects reparse points, non-regular files, untrusted
@@ -141,14 +152,14 @@ func otlpWindowsPathSecurity(path string) (*windows.ACL, error) {
 		return nil, fmt.Errorf("inspect Windows owner for %s: %w", path, err)
 	}
 	if !hookAPIWindowsTrustedPrincipal(owner) {
-		return nil, fmt.Errorf("owner %s is not trusted for OTLP token path %s", hookAPIWindowsSIDString(owner), path)
+		return nil, managedPermissionDrift("owner %s is not trusted for OTLP token path %s", hookAPIWindowsSIDString(owner), path)
 	}
 	dacl, _, err := sd.DACL()
 	if err != nil {
 		return nil, fmt.Errorf("inspect Windows DACL for %s: %w", path, err)
 	}
 	if dacl == nil {
-		return nil, fmt.Errorf("null Windows DACL is not trusted: %s", path)
+		return nil, managedPermissionDrift("null Windows DACL is not trusted: %s", path)
 	}
 	return dacl, nil
 }
@@ -188,7 +199,7 @@ func otlpWindowsRejectUntrustedReadACEs(path string, dacl *windows.ACL) error {
 		if hookAPIWindowsOwnerRightsPrincipal(sid) || hookAPIWindowsTrustedPrincipal(sid) {
 			continue
 		}
-		return fmt.Errorf(
+		return managedPermissionDrift(
 			"untrusted Windows principal %s has read-like access mask 0x%x on %s",
 			hookAPIWindowsSIDString(sid), uint32(ace.Mask), path,
 		)
@@ -297,4 +308,15 @@ func createSecureOTLPPathTokenTempFile(tokenPath string) (*os.File, string, erro
 		return file, tmpPath, nil
 	}
 	return nil, "", fmt.Errorf("create unique secure Windows OTLP token temp file")
+}
+
+// otlpPathTokenDriftNeedsRepublish reports whether a token that was readable
+// despite permission drift should be republished, with the same value, by
+// this caller. Only the installer and the LocalSystem guardian repair.
+func otlpPathTokenDriftNeedsRepublish(path string) bool {
+	if !windowsManagedCanRepair() {
+		return false
+	}
+	replace, err := otlpPathTokenNeedsSecureReplacement(path)
+	return err == nil && replace
 }

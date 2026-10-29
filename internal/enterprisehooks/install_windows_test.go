@@ -1951,9 +1951,16 @@ func TestVerifyWindowsClaudeRejectsAndInstallRepairsTamperedSharedHook(t *testin
 		t.Fatalf("tamper shared hook: %v", err)
 	}
 
-	if _, err := Verify(context.Background(), opts); err == nil ||
-		!strings.Contains(err.Error(), "shared hook script digest mismatch") {
-		t.Fatalf("Verify after shared-hook tamper = %v, want digest rejection", err)
+	// A digest mismatch is repaired by republishing the generated scripts,
+	// then verified again; it no longer fails the user.
+	if _, err := Verify(context.Background(), opts); err != nil {
+		t.Fatalf("Verify after shared-hook tamper = %v, want republish and success", err)
+	}
+	if got, err := os.ReadFile(path); err != nil || !bytes.Equal(got, want) {
+		t.Fatalf("Verify did not republish the tampered shared hook: err=%v", err)
+	}
+	if err := os.WriteFile(path, []byte("tampered shared hook\n"), 0o600); err != nil {
+		t.Fatalf("tamper shared hook again: %v", err)
 	}
 
 	opts.AllowMissingHookConfigRepair = true
@@ -2017,9 +2024,11 @@ func TestVerifyWindowsClaudeRepairsAtomicSharedHookReplacementWithoutAdvancingCo
 		t.Fatalf("atomically replace managed hook: %v", err)
 	}
 
-	if _, err := Verify(context.Background(), opts); err == nil ||
-		!strings.Contains(err.Error(), "shared hook script digest mismatch") {
-		t.Fatalf("Verify after atomic replacement = %v, want digest rejection", err)
+	if _, err := Verify(context.Background(), opts); err != nil {
+		t.Fatalf("Verify after atomic replacement = %v, want republish and success", err)
+	}
+	if got, err := os.ReadFile(path); err != nil || !bytes.Equal(got, want) {
+		t.Fatalf("Verify did not republish the replaced shared hook: err=%v", err)
 	}
 	opts.AllowMissingHookConfigRepair = true
 	if _, err := Install(context.Background(), opts); err != nil {
@@ -2047,7 +2056,10 @@ func TestVerifyWindowsClaudeRepairsAtomicSharedHookReplacementWithoutAdvancingCo
 	}
 }
 
-func TestVerifyWindowsClaudeRejectsNoncanonicalSharedHookProtection(t *testing.T) {
+// Shared-hook descriptor drift (here an Everyone write grant) is repaired by
+// an elevated verifier and accepted with a log by an unprivileged one; the
+// script bytes stay bound by the contract digest either way.
+func TestVerifyWindowsClaudeRepairsNoncanonicalSharedHookProtection(t *testing.T) {
 	fixture := newWindowsManagedInstallFixture(t, map[string]interface{}{"allowManagedHooksOnly": true})
 	opts := windowsManagedInstallOptions(fixture)
 	if _, err := Install(context.Background(), opts); err != nil {
@@ -2056,9 +2068,29 @@ func TestVerifyWindowsClaudeRejectsNoncanonicalSharedHookProtection(t *testing.T
 	path := filepath.Join(fixture.home, ".defenseclaw", "hooks", "inspect-tool.sh")
 	setWindowsTestUntrustedWriteDACL(t, path, fixture.targetSID)
 
-	if _, err := Verify(context.Background(), opts); err == nil ||
-		!strings.Contains(err.Error(), "shared hook protection is noncanonical") {
-		t.Fatalf("Verify with noncanonical shared-hook DACL = %v, want protection rejection", err)
+	if _, err := Verify(context.Background(), opts); err != nil {
+		t.Fatalf("Verify with noncanonical shared-hook DACL = %v, want repair or accepted drift", err)
+	}
+}
+
+// Structure is still reported: a hard-linked shared hook is never adopted,
+// whatever its descriptor.
+func TestVerifyWindowsClaudeRejectsHardLinkedSharedHook(t *testing.T) {
+	fixture := newWindowsManagedInstallFixture(t, map[string]interface{}{"allowManagedHooksOnly": true})
+	opts := windowsManagedInstallOptions(fixture)
+	if _, err := Install(context.Background(), opts); err != nil {
+		t.Fatalf("initial Install: %v", err)
+	}
+	path := filepath.Join(fixture.home, ".defenseclaw", "hooks", "inspect-tool.sh")
+	if err := os.Link(path, filepath.Join(fixture.home, "inspect-tool-alias.sh")); err != nil {
+		t.Fatalf("hard-link shared hook: %v", err)
+	}
+	_, err := Verify(context.Background(), opts)
+	if err == nil {
+		t.Fatal("Verify accepted a hard-linked shared hook")
+	}
+	if errors.Is(err, connector.ErrManagedSharedHookScriptDigestMismatch) {
+		t.Fatalf("hard-linked shared hook reported as a digest mismatch: %v", err)
 	}
 }
 
@@ -2423,7 +2455,38 @@ func TestValidateWindowsManagedPolicyDirectoryProtectionRejectsUnprotectedLeaf(t
 	}
 }
 
-func TestWindowsClaudeManagedPolicyTransactionRejectsHostilePrecreatedLock(t *testing.T) {
+// An administrator-owned lock whose DACL drifted (here an Everyone write
+// grant) is re-stamped before the transaction opens it.
+func TestWindowsClaudeManagedPolicyTransactionRepairsDriftedLock(t *testing.T) {
+	fixture := newWindowsManagedInstallFixture(t, nil)
+	lockPath := filepath.Join(filepath.Dir(fixture.policyPath), windowsClaudeManagedLockFile)
+	if err := os.WriteFile(lockPath, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := setWindowsManagedPolicyProtection(lockPath, false, false); err != nil {
+		t.Fatal(err)
+	}
+	setWindowsTestUntrustedWriteDACL(t, lockPath, fixture.targetSID)
+	if err := setWindowsManagedPolicyOwnerForTest(lockPath); err != nil {
+		t.Fatal(err)
+	}
+	called := false
+	if err := withWindowsClaudeManagedPolicyTransaction(func() error {
+		called = true
+		return nil
+	}); err != nil {
+		t.Fatalf("transaction with drifted lock: %v", err)
+	}
+	if !called {
+		t.Fatal("transaction callback did not run after the lock was repaired")
+	}
+	if err := windowsManagedPolicyFileTrustCheck(lockPath); err != nil {
+		t.Fatalf("lock still untrusted after repair: %v", err)
+	}
+}
+
+// Structure stays fatal: a hard-linked lock is never adopted.
+func TestWindowsClaudeManagedPolicyTransactionRejectsHardLinkedLock(t *testing.T) {
 	fixture := newWindowsManagedInstallFixture(t, nil)
 	lockPath := filepath.Join(filepath.Dir(fixture.policyPath), windowsClaudeManagedLockFile)
 	if err := os.WriteFile(lockPath, []byte("hostile"), 0o600); err != nil {
@@ -2433,17 +2496,34 @@ func TestWindowsClaudeManagedPolicyTransactionRejectsHostilePrecreatedLock(t *te
 		t.Fatal(err)
 	}
 	setWindowsTestUntrustedWriteDACL(t, lockPath, fixture.targetSID)
+	if err := os.Link(lockPath, filepath.Join(fixture.home, "lock-alias")); err != nil {
+		t.Fatal(err)
+	}
 	called := false
 	err := withWindowsClaudeManagedPolicyTransaction(func() error {
 		called = true
 		return nil
 	})
 	if err == nil || !strings.Contains(strings.ToLower(err.Error()), "lock is untrusted") {
-		t.Fatalf("transaction error = %v, want hostile lock refusal", err)
+		t.Fatalf("transaction error = %v, want hard-linked lock refusal", err)
 	}
 	if called {
-		t.Fatal("transaction callback ran with hostile precreated lock")
+		t.Fatal("transaction callback ran with a hard-linked lock")
 	}
+}
+
+// setWindowsManagedPolicyOwnerForTest puts the owner back to Administrators
+// after a test helper rewrote the DACL, so only the DACL has drifted.
+func setWindowsManagedPolicyOwnerForTest(path string) error {
+	owner, err := windowsManagedPolicyOwnerSID()
+	if err != nil {
+		return err
+	}
+	extended, err := winpath.Extended(path)
+	if err != nil {
+		return err
+	}
+	return windows.SetNamedSecurityInfo(extended, windows.SE_FILE_OBJECT, windows.OWNER_SECURITY_INFORMATION, owner, nil, nil, nil)
 }
 
 func TestWindowsClaudeManagedPolicyTransactionHeldLockTimesOut(t *testing.T) {

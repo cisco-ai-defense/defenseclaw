@@ -275,9 +275,16 @@ func TestWindowsManagedRuntimePlanSkipsProfileStillBusyAfterRetries(t *testing.T
 	manifest := windowsManagedRuntimeTestManifest(home, sid)
 	manifestPath := `C:\ProgramData\DefenseClaw\etc\targets.yaml`
 
-	// Without the skip, a busy profile still fails the whole plan.
-	if _, err := PlanWindowsManagedRuntimeRoots(manifest, manifestPath, strings.Repeat("a", 64)); !errors.Is(err, windows.ERROR_SHARING_VIOLATION) {
-		t.Fatalf("plan without skipping: error = %v, want a sharing violation", err)
+	// Upgrade and Repair skip the busy user too, but keep their rows: the
+	// plan stays bound to the unchanged manifest and simply has no root.
+	validation, err := PlanWindowsManagedRuntimeRoots(manifest, manifestPath, strings.Repeat("a", 64))
+	if err != nil {
+		t.Fatalf("plan without publishing: %v", err)
+	}
+	if validation.ManifestSHA256 != strings.Repeat("a", 64) || validation.TargetCount != 1 ||
+		len(validation.Roots) != 0 || len(validation.SkippedProfiles) != 1 ||
+		validation.SkippedProfiles[0].SID != sid.String() {
+		t.Fatalf("validation plan = %+v, want the busy user skipped without a manifest change", validation)
 	}
 
 	resetWindowsManagedRuntimeProfileRetrySpent()
@@ -308,25 +315,41 @@ func TestWindowsManagedRuntimePlanSkipsProfileStillBusyAfterRetries(t *testing.T
 	}
 }
 
-func TestWindowsManagedRuntimePlanSkipKeepsOtherErrorsFatal(t *testing.T) {
+// One profile the installer cannot open skips that user; it never fails the
+// plan for everyone. A failure that is not about one profile still does.
+func TestWindowsManagedRuntimePlanSkipsInaccessibleProfileButHostErrorsStayFatal(t *testing.T) {
 	sid := currentWindowsTestSID(t)
 	home := newWindowsManagedRuntimeBAOwnedProfile(t, sid)
 	shortenWindowsManagedRuntimeProfileRetry(t, 3, nil)
+	previousCreate := windowsManagedRuntimeProfileCreateFile
 	windowsManagedRuntimeProfileCreateFile = func(*uint16, uint32, uint32, *windows.SecurityAttributes, uint32, uint32, windows.Handle) (windows.Handle, error) {
 		return windows.InvalidHandle, windows.ERROR_ACCESS_DENIED
 	}
 	published := false
-	_, err := PlanWindowsManagedRuntimeRootsSkippingBusyProfiles(
+	plan, err := PlanWindowsManagedRuntimeRootsSkippingBusyProfiles(
 		windowsManagedRuntimeTestManifest(home, sid),
 		`C:\ProgramData\DefenseClaw\etc\targets.yaml`,
 		strings.Repeat("a", 64),
 		func(Manifest) (string, error) { published = true; return strings.Repeat("b", 64), nil },
 	)
-	if !errors.Is(err, windows.ERROR_ACCESS_DENIED) {
-		t.Fatalf("error = %v, want access denied to stay fatal", err)
+	if err != nil {
+		t.Fatalf("plan with an inaccessible profile: %v", err)
 	}
-	if published {
-		t.Fatal("the manifest was rewritten for a non-busy failure")
+	if !published || len(plan.SkippedProfiles) != 1 || len(plan.Roots) != 0 {
+		t.Fatalf("plan = %+v, want the inaccessible user skipped and removed", plan)
+	}
+
+	windowsManagedRuntimeProfileCreateFile = previousCreate
+	resetWindowsManagedRuntimeProfileRetrySpent()
+	previousEntropy := windowsManagedRuntimeEntropy
+	windowsManagedRuntimeEntropy = strings.NewReader("")
+	t.Cleanup(func() { windowsManagedRuntimeEntropy = previousEntropy })
+	if _, err := PlanWindowsManagedRuntimeRoots(
+		windowsManagedRuntimeTestManifest(home, sid),
+		`C:\ProgramData\DefenseClaw\etc\targets.yaml`,
+		strings.Repeat("a", 64),
+	); !errors.Is(err, errWindowsManagedRuntimePlanHost) {
+		t.Fatalf("error = %v, want a host planning failure to stay fatal", err)
 	}
 }
 
@@ -334,17 +357,21 @@ func TestWindowsManagedRuntimeSkippedProfilesValidation(t *testing.T) {
 	sid := currentWindowsTestSID(t)
 	other := "S-1-5-21-111-222-333-1009"
 	manifest := windowsManagedRuntimeTestManifest(`C:\Users\carol`, sid)
+	// Upgrade and Repair skip a user without revoking their rows.
+	stillEnrolled := WindowsManagedRuntimeSkippedProfile{SID: sid.String(), UserHome: `C:\Users\carol`, Reason: "busy"}
+	if err := validateWindowsManagedRuntimeSkippedProfiles([]WindowsManagedRuntimeSkippedProfile{stillEnrolled}, manifest); err != nil {
+		t.Fatalf("skipped user still enrolled rejected: %v", err)
+	}
 	ok := WindowsManagedRuntimeSkippedProfile{SID: other, UserHome: `C:\Users\dave`, Reason: "sharing violation"}
 	if err := validateWindowsManagedRuntimeSkippedProfiles([]WindowsManagedRuntimeSkippedProfile{ok}, manifest); err != nil {
 		t.Fatalf("valid skipped profile rejected: %v", err)
 	}
 	for name, bad := range map[string][]WindowsManagedRuntimeSkippedProfile{
-		"still enrolled": {{SID: sid.String(), UserHome: `C:\Users\carol`, Reason: "busy"}},
-		"duplicate":      {ok, ok},
-		"empty reason":   {{SID: other, UserHome: `C:\Users\dave`, Reason: " "}},
-		"relative home":  {{SID: other, UserHome: `Users\dave`, Reason: "busy"}},
-		"invalid SID":    {{SID: "not-a-sid", UserHome: `C:\Users\dave`, Reason: "busy"}},
-		"long reason":    {{SID: other, UserHome: `C:\Users\dave`, Reason: strings.Repeat("x", windowsManagedRuntimeSkipReasonMax+1)}},
+		"duplicate":     {ok, ok},
+		"empty reason":  {{SID: other, UserHome: `C:\Users\dave`, Reason: " "}},
+		"relative home": {{SID: other, UserHome: `Users\dave`, Reason: "busy"}},
+		"invalid SID":   {{SID: "not-a-sid", UserHome: `C:\Users\dave`, Reason: "busy"}},
+		"long reason":   {{SID: other, UserHome: `C:\Users\dave`, Reason: strings.Repeat("x", windowsManagedRuntimeSkipReasonMax+1)}},
 	} {
 		if err := validateWindowsManagedRuntimeSkippedProfiles(bad, manifest); err == nil {
 			t.Fatalf("%s: invalid skipped profile accepted", name)
@@ -381,9 +408,8 @@ func TestWindowsManagedRuntimeFreshInstallPlanSkipsUserBlockedForWriters(t *test
 
 // A retained .defenseclaw whose DACL drifted (here: every canonical entry
 // replaced by one full-control grant) fails every fresh Install for every user
-// unless it is repaired. Upgrade/Repair planning still rejects it; a fresh
-// Install re-stamps the canonical descriptor, records the repair, and plans
-// the root as a canonical baseline.
+// unless it is repaired. Every planning mode re-stamps the canonical
+// descriptor, records the repair, and plans the root as a canonical baseline.
 func TestWindowsManagedRuntimeFreshInstallPlanRepairsDriftedRetainedRoot(t *testing.T) {
 	target := currentWindowsTestSID(t)
 	home := newWindowsTargetOwnedTestHome(t, target)
@@ -408,9 +434,20 @@ func TestWindowsManagedRuntimeFreshInstallPlanRepairsDriftedRetainedRoot(t *test
 	manifest := windowsManagedRuntimeTestManifest(home, target)
 	manifestPath := `C:\ProgramData\DefenseClaw\etc\targets.yaml`
 
-	if _, err := PlanWindowsManagedRuntimeRoots(manifest, manifestPath, strings.Repeat("a", 64)); err == nil ||
-		!strings.Contains(err.Error(), "reject noncanonical managed runtime baseline") {
-		t.Fatalf("Upgrade/Repair plan error = %v, want the drifted root rejected", err)
+	validation, err := PlanWindowsManagedRuntimeRoots(manifest, manifestPath, strings.Repeat("a", 64))
+	if err != nil {
+		t.Fatalf("Upgrade/Repair plan with a drifted retained root: %v", err)
+	}
+	if len(validation.RepairedProfiles) != 1 || len(validation.SkippedProfiles) != 0 || len(validation.Roots) != 1 {
+		t.Fatalf("Upgrade/Repair plan = %+v, want the drifted root repaired", validation)
+	}
+	if err := windows.SetNamedSecurityInfo(
+		dataDir,
+		windows.SE_FILE_OBJECT,
+		windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION,
+		nil, nil, drifted, nil,
+	); err != nil {
+		t.Fatal(err)
 	}
 
 	published := false
@@ -432,4 +469,38 @@ func TestWindowsManagedRuntimeFreshInstallPlanRepairsDriftedRetainedRoot(t *test
 		t.Fatalf("repaired profiles = %+v, want the user with the drift reason", plan.RepairedProfiles)
 	}
 	assertWindowsTargetOwnedCanonicalDirectory(t, dataDir, target)
+}
+
+// A row whose profile no longer exists (deleted or renamed after the last
+// enumeration) skips that user. The other user is still planned, and
+// Upgrade/Repair keep the stale rows rather than revoke them.
+func TestWindowsManagedRuntimePlanSkipsRowWhoseProfileIsGone(t *testing.T) {
+	sid := currentWindowsTestSID(t)
+	home := newWindowsManagedRuntimeBAOwnedProfile(t, sid)
+	shortenWindowsManagedRuntimeProfileRetry(t, 3, nil)
+	gone, err := windows.StringToSid("S-1-5-21-1947302811-2864019257-3719054423-1077")
+	if err != nil {
+		t.Fatal(err)
+	}
+	goneHome := filepath.Join(t.TempDir(), "renamed-away")
+	manifest := windowsManagedRuntimeTestManifest(home, sid)
+	manifest.Targets = append(manifest.Targets, windowsManagedRuntimeTestManifest(goneHome, gone).Targets...)
+
+	plan, err := PlanWindowsManagedRuntimeRoots(manifest, `C:\ProgramData\DefenseClaw\etc\targets.yaml`, strings.Repeat("a", 64))
+	if err != nil {
+		t.Fatalf("plan with a vanished profile: %v", err)
+	}
+	if len(plan.Roots) != 1 || !strings.EqualFold(plan.Roots[0].SID, sid.String()) {
+		t.Fatalf("plan roots = %+v, want only the live user", plan.Roots)
+	}
+	if len(plan.SkippedProfiles) != 1 || plan.SkippedProfiles[0].SID != gone.String() ||
+		!strings.HasPrefix(plan.SkippedProfiles[0].Reason, "profile_invalid: ") {
+		t.Fatalf("skipped = %+v, want the vanished user", plan.SkippedProfiles)
+	}
+	if plan.TargetCount != len(manifest.Targets) {
+		t.Fatalf("target count = %d, want the unchanged manifest's %d", plan.TargetCount, len(manifest.Targets))
+	}
+	if err := validateWindowsManagedRuntimePlan(plan, manifest); err != nil {
+		t.Fatalf("plan with a skipped enrolled user does not validate: %v", err)
+	}
 }

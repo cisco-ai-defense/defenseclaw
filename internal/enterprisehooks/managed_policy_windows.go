@@ -1002,9 +1002,11 @@ func validateWindowsClaudeManagedRuntime(target windowsClaudeManagedPolicyTarget
 	); err != nil {
 		return fmt.Errorf("enterprise hooks: current managed Claude runtime sidecars are invalid: %w", err)
 	}
-	if err := connector.VerifyManagedSharedHookScriptDigests(
+	if err := verifyWindowsManagedSharedHookScriptsWithRepair(
+		filepath.Dir(target.dataDir),
 		target.dataDir,
-		target.targetSID.String(),
+		target.gatewayAddr,
+		target.targetSID,
 	); err != nil {
 		return fmt.Errorf(
 			"enterprise hooks: current managed Claude shared hook runtime is invalid: %w",
@@ -1343,7 +1345,7 @@ func withWindowsClaudeManagedPolicyTransaction(fn func() error) error {
 		if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
 			return fmt.Errorf("enterprise hooks: refusing non-regular managed policy transaction lock: %s", lockPath)
 		}
-		if err := windowsManagedPolicyFileTrustCheck(lockPath); err != nil {
+		if _, err := repairWindowsManagedMachineFile(lockPath, false, windowsManagedPolicyFileTrustCheck); err != nil {
 			return fmt.Errorf("enterprise hooks: managed policy transaction lock is untrusted: %w", err)
 		}
 	} else if !errors.Is(statErr, os.ErrNotExist) {
@@ -1975,7 +1977,16 @@ func ensureWindowsManagedPolicyDirectory(path string) error {
 			// Validate before creating anything. The production trust check
 			// validates this directory and its complete existing ancestor chain.
 			if err := windowsManagedPolicyAncestorTrustCheck(current); err != nil {
-				return fmt.Errorf("enterprise hooks: managed policy ancestor is untrusted: %w", err)
+				// The policy folder itself, or a vendor folder directly under
+				// ProgramData or Program Files, may have been created by MDM,
+				// the vendor installer, or a standard user before DefenseClaw.
+				// An elevated caller takes it over; anything else stays fatal.
+				if !windowsManagedPolicyFolderRepairable(current, path) {
+					return fmt.Errorf("enterprise hooks: managed policy ancestor is untrusted: %w", err)
+				}
+				if repairErr := repairWindowsManagedPolicyFolder(current, windowsManagedPolicyAncestorTrustCheck); repairErr != nil {
+					return fmt.Errorf("enterprise hooks: managed policy ancestor is untrusted: %w", errors.Join(err, repairErr))
+				}
 			}
 			break
 		}
@@ -1990,7 +2001,12 @@ func ensureWindowsManagedPolicyDirectory(path string) error {
 		current = parent
 	}
 	if len(missing) == 0 {
-		return windowsManagedPolicyDirTrustCheck(path)
+		if err := windowsManagedPolicyDirTrustCheck(path); err != nil {
+			if repairErr := repairWindowsManagedPolicyFolder(path, windowsManagedPolicyDirTrustCheck); repairErr != nil {
+				return errors.Join(err, repairErr)
+			}
+		}
+		return nil
 	}
 	attributes, err := windowsManagedPolicyDirectorySecurityAttributes()
 	if err != nil {
@@ -2044,12 +2060,79 @@ func ensureWindowsManagedPolicyDirectory(path string) error {
 		}
 		if concurrentlyCreated {
 			if err := validateWindowsManagedPolicyDirectoryProtection(directory); err != nil {
-				return cleanupCreated(fmt.Errorf("enterprise hooks: verify managed policy directory %s: %w", directory, err))
+				if repairErr := repairWindowsManagedPolicyFolder(directory, validateWindowsManagedPolicyDirectoryProtection); repairErr != nil {
+					return cleanupCreated(fmt.Errorf("enterprise hooks: verify managed policy directory %s: %w", directory, errors.Join(err, repairErr)))
+				}
 			}
 		} else if err := windowsManagedPolicyDirTrustCheck(directory); err != nil {
 			return cleanupCreated(fmt.Errorf("enterprise hooks: verify managed policy directory %s: %w", directory, err))
 		}
 	}
+	return nil
+}
+
+// windowsManagedPolicyFolderRepairable limits folder takeover to the policy
+// folder being prepared and vendor folders one level below ProgramData or
+// Program Files. Those system roots themselves are never touched.
+func windowsManagedPolicyFolderRepairable(folder, policyDir string) bool {
+	if sameWindowsEnterprisePath(folder, policyDir) {
+		return true
+	}
+	parent := filepath.Dir(filepath.Clean(folder))
+	for _, resolve := range []func() (string, error){winpath.TrustedProgramData, winpath.TrustedProgramFiles} {
+		root, err := resolve()
+		if err == nil && sameWindowsEnterprisePath(parent, root) &&
+			isWindowsManagedPolicyAncestorOf(folder, policyDir) {
+			return true
+		}
+	}
+	return false
+}
+
+func isWindowsManagedPolicyAncestorOf(folder, path string) bool {
+	folder = strings.ToLower(filepath.Clean(folder))
+	path = strings.ToLower(filepath.Clean(path))
+	return strings.HasPrefix(path, folder+`\`)
+}
+
+// repairWindowsManagedPolicyFolder takes ownership of a machine-policy folder
+// and re-stamps the canonical protected DACL. It runs only for an elevated
+// caller, and only after the structural checks pass: a real directory with no
+// reparse point anywhere on its path. Ownership is taken whatever the current
+// owner, because a folder squatted by a standard user would otherwise block
+// every user's enforcement. Files inside are still validated individually.
+func repairWindowsManagedPolicyFolder(path string, validate func(string) error) error {
+	drift := validate(path)
+	if drift == nil {
+		return nil
+	}
+	if err := requireWindowsEnterpriseAdministrator(); err != nil {
+		return fmt.Errorf("repair requires an elevated caller: %w", err)
+	}
+	if err := rejectWindowsReparseChain(path); err != nil {
+		return err
+	}
+	info, err := os.Lstat(path)
+	if err != nil {
+		return err
+	}
+	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("managed policy folder is not a plain directory: %s", path)
+	}
+	previousOwner, _ := windowsPathOwnerNoFollow(path)
+	if err := RunWithWindowsOwnerRestorePrivilege(func() error {
+		return setWindowsManagedPolicyProtection(path, true, true)
+	}); err != nil {
+		return fmt.Errorf("re-stamp managed policy folder: %w", err)
+	}
+	if err := validate(path); err != nil {
+		return fmt.Errorf("managed policy folder still untrusted after repair: %w", err)
+	}
+	managed.EmitResilienceEvent(managed.MarkerRepair, map[string]string{
+		"path":           path,
+		"previous_owner": windowsSIDString(previousOwner),
+		"reason":         "machine policy folder protection drifted or folder was pre-created: " + drift.Error(),
+	})
 	return nil
 }
 

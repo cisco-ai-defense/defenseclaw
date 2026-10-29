@@ -110,7 +110,23 @@ func ValidateTrustedRuntimeDir(path, label string) error {
 // Do not use this for paths whose permissions DefenseClaw alone owns; keep
 // ValidateTrustedFilePath for those.
 func ValidateTrustedFilePathTolerant(path, label string) error {
-	return validateTrustedFilePathTolerant(path, label, windowsTrustLeaf.tolerant())
+	return ValidateExecutableFilePath(path, label)
+}
+
+// ValidateExecutableFilePath validates a binary or library that DefenseClaw or
+// LocalSystem executes or loads (the CMID broker executable, cmidapi.dll, a
+// gateway or hook executable). Code integrity is advisory: structural failures
+// (missing element, symlink, reparse point, wrong type, non-NTFS mount) stay
+// fatal, every permission verdict is accepted, and an untrusted writer or
+// owner on the file itself is additionally logged once as a critical
+// MarkerBoundary finding naming the path and principal. The caller keeps
+// running and loading the file; a privileged component re-stamps the ACL and
+// Install, Upgrade and Repair re-copy the binary. Pin TrustStrictAncestorsEnv
+// to make every verdict fatal again.
+func ValidateExecutableFilePath(path, label string) error {
+	leaf := windowsTrustLeaf.tolerant()
+	leaf.code = true
+	return validateTrustedFilePathTolerant(path, label, leaf)
 }
 
 // ValidateTrustedFileStructureTolerant is ValidateTrustedFilePathTolerant for
@@ -334,11 +350,15 @@ func validateTrustedWindowsRuntimeDir(path, label string, allowedWriter *windows
 //   - structureOnly skips the owner and DACL checks on the element entirely,
 //     for a named file whose caller checks its permissions on its own handle.
 //     Never set on an ancestor.
+//   - code marks the named file as executable code: an untrusted writer or
+//     owner is also logged as a MarkerBoundary finding. Only meaningful with
+//     drift, and never set on an ancestor.
 type windowsTrustScope struct {
 	narrowMask    bool
 	advisory      bool
 	drift         bool
 	structureOnly bool
+	code          bool
 }
 
 // tolerant returns the scope with the same mask and drift tolerance set.
@@ -435,6 +455,14 @@ func validateTrustedWindowsPathElementWithWriter(
 		windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION,
 	)
 	if err != nil {
+		if acceptUnreadableDescriptor(scope, err) {
+			// The element's DACL no longer grants this caller READ_CONTROL.
+			// Its type and reparse state were checked above through
+			// attributes, which is all an ancestor or a drift-tolerant
+			// element needs; the permissions belong to whoever re-ACLed it.
+			reportTrustDrift(path, label, "security descriptor is not readable: "+err.Error())
+			return nil
+		}
 		return fmt.Errorf("%s: inspect Windows security descriptor: %w", path, err)
 	}
 	if sd == nil {
@@ -444,7 +472,13 @@ func validateTrustedWindowsPathElementWithWriter(
 	if err != nil {
 		return fmt.Errorf("%s: inspect Windows owner: %w", path, err)
 	}
-	if !windowsTrustedPathOwner(owner, allowedWriter) {
+	if !windowsTrustedPathOwner(owner, allowedWriter) && acceptAdminEquivalent(scope, path, label, "owner", owner) {
+		// An administrator account or domain admin group owns the element:
+		// accepted and logged, never fatal.
+	} else if !windowsTrustedPathOwner(owner, allowedWriter) {
+		if scope.code {
+			reportCodeIntegrityFinding(path, label, sidString(owner), "untrusted owner")
+		}
 		expected := "Administrators, LocalSystem, or TrustedInstaller"
 		if allowedWriter != nil {
 			expected = fmt.Sprintf("%s, or the pinned service SID %s", expected, sidString(allowedWriter))
@@ -492,7 +526,7 @@ func rejectUntrustedWindowsWriteACEsWithWriter(
 			continue
 		}
 		switch ace.Header.AceType {
-		case accessAllowedObjectACEType, accessAllowedCallbackACEType, accessAllowedCallbackObjectACEType:
+		case accessAllowedObjectACEType, accessAllowedCallbackObjectACEType:
 			// Not a permission verdict: the ACE layout differs from
 			// ACCESS_ALLOWED_ACE, so ace.Mask and ace.SidStart cannot be read
 			// and this walk has no idea who was granted what. Advisory mode
@@ -512,7 +546,10 @@ func rejectUntrustedWindowsWriteACEsWithWriter(
 				return err
 			}
 			continue
-		case windows.ACCESS_ALLOWED_ACE_TYPE:
+		case windows.ACCESS_ALLOWED_ACE_TYPE, accessAllowedCallbackACEType:
+			// A callback (conditional) allow entry has the ACCESS_ALLOWED_ACE
+			// layout followed by its condition, so its trustee and mask are
+			// judged like a plain entry: the condition can only narrow it.
 		default:
 			continue
 		}
@@ -525,6 +562,12 @@ func rejectUntrustedWindowsWriteACEsWithWriter(
 			continue
 		}
 		if !windowsTrustedOwner(sid) && !sameWindowsSID(sid, allowedWriter) {
+			if acceptAdminEquivalent(scope, path, label, fmt.Sprintf("writer mask 0x%x", uint32(ace.Mask)), sid) {
+				continue
+			}
+			if scope.code {
+				reportCodeIntegrityFinding(path, label, sidString(sid), fmt.Sprintf("write-like access mask 0x%x", uint32(ace.Mask)))
+			}
 			if err := scope.relaxVerdict(path, label, fmt.Errorf(
 				"%s: untrusted Windows principal %s has write-like access mask 0x%x",
 				path, sidString(sid), uint32(ace.Mask),
@@ -534,6 +577,46 @@ func rejectUntrustedWindowsWriteACEsWithWriter(
 		}
 	}
 	return nil
+}
+
+// acceptUnreadableDescriptor reports whether an error reading an element's
+// security descriptor is drift rather than a structural failure: access denied
+// on an ancestor inside the platform installer's roots, or on any element of
+// a drift-tolerant walk. Strict mode keeps it fatal.
+func acceptUnreadableDescriptor(scope windowsTrustScope, err error) bool {
+	if !errors.Is(err, windows.ERROR_ACCESS_DENIED) || trustStrictAncestors() {
+		return false
+	}
+	return scope.advisory || scope.drift
+}
+
+// acceptAdminEquivalent accepts and logs an owner or writer that is an
+// administrator principal outside the core trusted set (the built-in
+// Administrator account, Domain Admins, Enterprise Admins, a local
+// Administrators member). It reports false, leaving the verdict to the caller,
+// in strict mode or when sid is not administrator-equivalent.
+func acceptAdminEquivalent(scope windowsTrustScope, path, label, what string, sid *windows.SID) bool {
+	if scope.structureOnly || trustStrictAncestors() || !windowsAdminEquivalentOwner(sid) {
+		return false
+	}
+	reportTrustDrift(path, label, fmt.Sprintf("%s %s is an administrator principal, not a canonical owner or writer", what, sidString(sid)))
+	return true
+}
+
+// reportCodeIntegrityFinding logs an untrusted writer or owner on executable
+// code once per (path, principal, reason) as a critical, non-fatal boundary
+// finding.
+func reportCodeIntegrityFinding(path, label, principal, reason string) {
+	fields := map[string]string{
+		"path":      path,
+		"object":    label,
+		"principal": principal,
+		"reason":    reason,
+	}
+	if !advisoryLogDedupe.shouldEmit(path, MarkerBoundary, FormatResilienceEvent(MarkerBoundary, fields)) {
+		return
+	}
+	EmitResilienceEvent(MarkerBoundary, fields)
 }
 
 // WindowsAncestorReplaceAccess reports whether mask lets a principal replace a

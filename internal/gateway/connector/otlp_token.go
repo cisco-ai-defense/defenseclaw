@@ -205,9 +205,16 @@ func EnsureOTLPPathToken(dataDir string, scope OTLPPathTokenScope) (string, erro
 
 	var token string
 	err = withOTLPPathTokenLock(tokenPath, func() error {
+		republish := false
 		if existing, readErr := readSecureOTLPPathTokenFile(dataDir, tokenPath); readErr == nil && existing != "" {
 			token = existing
-			return nil
+			// A token readable despite permission drift keeps its value; a
+			// privileged caller republishes it with the canonical protection
+			// so the drift does not outlive this pass.
+			if !otlpPathTokenDriftNeedsRepublish(tokenPath) {
+				return nil
+			}
+			republish = true
 		} else if readErr != nil && !os.IsNotExist(readErr) {
 			replace, replaceErr := otlpPathTokenNeedsSecureReplacement(tokenPath)
 			if replaceErr != nil {
@@ -218,11 +225,13 @@ func EnsureOTLPPathToken(dataDir string, scope OTLPPathTokenScope) (string, erro
 			}
 		}
 
-		buf := make([]byte, otlpTokenLen)
-		if _, err := rand.Read(buf); err != nil {
-			return fmt.Errorf("EnsureOTLPPathToken: csprng read: %w", err)
+		if !republish {
+			buf := make([]byte, otlpTokenLen)
+			if _, err := rand.Read(buf); err != nil {
+				return fmt.Errorf("EnsureOTLPPathToken: csprng read: %w", err)
+			}
+			token = hex.EncodeToString(buf)
 		}
-		token = hex.EncodeToString(buf)
 
 		// A unique temp file avoids stale-name collisions after crashes. The
 		// advisory lock serializes independent DefenseClaw processes, and the

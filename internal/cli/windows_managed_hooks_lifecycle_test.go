@@ -99,7 +99,8 @@ func TestWindowsManagedHooksLifecycleCommandIsHiddenAndBounded(t *testing.T) {
 		actions = append(actions, child.Name())
 	}
 	if !slices.Equal(actions, []string{
-		"capture", "classify-activation", "restore", "retire", "retire-committed",
+		"capture", "classify-activation", "prune-orphaned-selectors",
+		"restore", "retire", "retire-committed",
 	}) {
 		t.Fatalf("actions = %v", actions)
 	}
@@ -562,8 +563,8 @@ func TestValidateLegacyWindowsManagedHooksGuardianActivationIsExact(t *testing.T
 	}
 
 	for name, mutate := range map[string]func(*enterpriseHookGuardianActivation, *enterpriseHookGuardianAuthorization, *enterpriseHookGuardianState){
-		"manifest digest": func(value *enterpriseHookGuardianActivation, _ *enterpriseHookGuardianAuthorization, _ *enterpriseHookGuardianState) {
-			value.ManifestSHA256 = strings.Repeat("b", 64)
+		"malformed manifest digest": func(value *enterpriseHookGuardianActivation, _ *enterpriseHookGuardianAuthorization, _ *enterpriseHookGuardianState) {
+			value.ManifestSHA256 = "not-a-digest"
 		},
 		"stale target": func(value *enterpriseHookGuardianActivation, _ *enterpriseHookGuardianAuthorization, _ *enterpriseHookGuardianState) {
 			value.ProtectedTargets[0].SID = "S-1-5-21-111-222-333-1099"

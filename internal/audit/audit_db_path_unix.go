@@ -111,3 +111,8 @@ func auditDBModeMatches(info os.FileInfo, want os.FileMode) bool {
 func auditDBImmediateDirectoryModeTrusted(info os.FileInfo) bool {
 	return info.Mode().Perm()&0o022 == 0
 }
+
+// Unix hardening runs with the gateway's own rights; a failure is real.
+func auditDBPlatformHardeningFailureIsDrift(error) bool { return false }
+
+func auditDBPlatformReportAccept(string, string) {}

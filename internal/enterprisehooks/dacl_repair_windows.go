@@ -13,6 +13,7 @@ import (
 	"strings"
 	"unsafe"
 
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/winpath"
 	"golang.org/x/sys/windows"
 )
@@ -98,7 +99,7 @@ func runWindowsEnterpriseGuardianDACLRepair(
 		}
 		repairErr := privilegeErr
 		if repairErr == nil {
-			repairErr = repairWindowsTargetOwnedPathDACLNoFollow(home, path, target, directory)
+			repairErr = repairWindowsTargetOwnedPathNoFollow(home, path, target, directory, true)
 		}
 		token.Close()
 
@@ -161,6 +162,23 @@ func repairWindowsTargetOwnedPathDACLNoFollow(
 	target *windows.SID,
 	directory bool,
 ) error {
+	return repairWindowsTargetOwnedPathNoFollow(home, path, target, directory, false)
+}
+
+// repairWindowsTargetOwnedPathNoFollow is the shared walk. With reclaimOwner
+// (only the LocalSystem thread holding backup and restore privileges sets
+// it), an element owned by SYSTEM, Administrators or TrustedInstaller (left
+// by an elevated agent, CLI or backup restore) or by an account SID that no
+// longer resolves (a migrated or re-provisioned profile) is handed back to
+// the target before validation. A resolvable foreign owner is never adopted,
+// and reparse points and hard links are refused before any owner change.
+func repairWindowsTargetOwnedPathNoFollow(
+	home string,
+	path string,
+	target *windows.SID,
+	directory bool,
+	reclaimOwner bool,
+) error {
 	homeAbs, err := filepath.Abs(home)
 	if err != nil {
 		return err
@@ -215,9 +233,15 @@ func repairWindowsTargetOwnedPathDACLNoFollow(
 
 	for index, part := range parts {
 		final := index == len(parts)-1
-		child, err := openWindowsGuardianACLChild(handle, part, final, directory)
+		child, err := openWindowsGuardianACLChildAccess(handle, part, final, directory, reclaimOwner)
 		if err != nil {
 			return fmt.Errorf("enterprise hooks: open DACL repair path element %q: %w", part, err)
+		}
+		if reclaimOwner {
+			if err := reclaimWindowsGuardianACLOwner(child, target, filepath.Join(homeAbs, filepath.Join(parts[:index+1]...))); err != nil {
+				_ = windows.CloseHandle(child)
+				return fmt.Errorf("enterprise hooks: reclaim owner of path element %q: %w", part, err)
+			}
 		}
 		if err := validateWindowsGuardianACLHandle(child, target, !final || directory, final, false); err != nil {
 			_ = windows.CloseHandle(child)
@@ -293,6 +317,16 @@ func openWindowsGuardianACLChild(
 	final bool,
 	directory bool,
 ) (windows.Handle, error) {
+	return openWindowsGuardianACLChildAccess(parent, name, final, directory, false)
+}
+
+func openWindowsGuardianACLChildAccess(
+	parent windows.Handle,
+	name string,
+	final bool,
+	directory bool,
+	writeOwner bool,
+) (windows.Handle, error) {
 	objectName, err := windows.NewNTUnicodeString(name)
 	if err != nil {
 		return 0, err
@@ -324,6 +358,9 @@ func openWindowsGuardianACLChild(
 	} else {
 		access |= windows.FILE_READ_ATTRIBUTES | windows.FILE_LIST_DIRECTORY | windows.SYNCHRONIZE
 		options |= windows.FILE_DIRECTORY_FILE | windows.FILE_SYNCHRONOUS_IO_NONALERT
+	}
+	if writeOwner {
+		access |= windows.WRITE_OWNER | windows.FILE_READ_ATTRIBUTES
 	}
 	var handle windows.Handle
 	var status windows.IO_STATUS_BLOCK
@@ -423,4 +460,59 @@ func validateWindowsGuardianACLHandle(
 		return fmt.Errorf("expected regular file")
 	}
 	return nil
+}
+
+// reclaimWindowsGuardianACLOwner hands one already opened, no-follow element
+// back to the target when its owner is an administrator principal or an
+// account SID that no longer resolves. Any other owner is left for the
+// validation that follows to report.
+func reclaimWindowsGuardianACLOwner(handle windows.Handle, target *windows.SID, path string) error {
+	owner, err := windowsHandleOwner(handle)
+	if err != nil {
+		return err
+	}
+	if owner != nil && owner.Equals(target) {
+		return nil
+	}
+	if !windowsEnterpriseAdminIdentity(owner) && !windowsOrphanedAccountSID(owner) {
+		return nil
+	}
+	var info windows.ByHandleFileInformation
+	if err := windows.GetFileInformationByHandle(handle, &info); err != nil {
+		return fmt.Errorf("inspect element before owner transfer: %w", err)
+	}
+	if info.FileAttributes&windows.FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+		return fmt.Errorf("path element is a reparse point")
+	}
+	if info.FileAttributes&windows.FILE_ATTRIBUTE_DIRECTORY == 0 && info.NumberOfLinks != 1 {
+		return errWindowsManagedHardlink
+	}
+	if err := windows.SetSecurityInfo(
+		handle,
+		windows.SE_FILE_OBJECT,
+		windows.OWNER_SECURITY_INFORMATION,
+		target,
+		nil,
+		nil,
+		nil,
+	); err != nil {
+		return fmt.Errorf("transfer owner to target: %w", err)
+	}
+	managed.EmitResilienceEvent(managed.MarkerRepair, map[string]string{
+		"sid":            target.String(),
+		"path":           path,
+		"previous_owner": windowsSIDString(owner),
+		"reason":         "user_runtime_owner_reclaimed",
+	})
+	return nil
+}
+
+// windowsOrphanedAccountSID reports a local or domain account SID that no
+// longer maps to an account, as after a domain migration or re-provisioning.
+func windowsOrphanedAccountSID(sid *windows.SID) bool {
+	if sid == nil || !strings.HasPrefix(sid.String(), "S-1-5-21-") {
+		return false
+	}
+	_, _, _, err := sid.LookupAccount("")
+	return errors.Is(err, windows.ERROR_NONE_MAPPED)
 }

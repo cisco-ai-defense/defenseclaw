@@ -70,6 +70,16 @@ func TestRepairEnterpriseHookManagedRuntimePlatformWrapsPrivilegedWrite(t *testi
 
 	driftedDir := func(t *testing.T) string {
 		t.Helper()
+		originalShared := enterpriseWindowsManagedDataPathsRepair
+		t.Cleanup(func() { enterpriseWindowsManagedDataPathsRepair = originalShared })
+		// Exercise the legacy fallback: the shared repair reports that it
+		// could not fix the directory.
+		enterpriseWindowsManagedDataPathsRepair = func(
+			paths managed.ManagedDataPaths,
+			_ managed.CanonicalOptions,
+		) []managed.CanonicalResult {
+			return []managed.CanonicalResult{{Path: paths.DataDir, Outcome: managed.CanonicalAccepted}}
+		}
 		dir := t.TempDir()
 		if err := managed.ValidateTrustedServiceRuntimeDir(dir, "managed data_dir", serviceAccount); err == nil {
 			t.Skip("temp directory already satisfies the managed runtime contract")

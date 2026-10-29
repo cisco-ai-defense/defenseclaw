@@ -448,7 +448,9 @@ func TestAuditDBWindowsRejectsUntrustedWriteACL(t *testing.T) {
 	assertAuditDBPathError(t, filepath.Join(directory, "audit.db"), "untrusted Windows principal")
 }
 
-func TestAuditDBWindowsRejectsInheritedReadAccessForSQLiteSidecars(t *testing.T) {
+// A foreign read-only entry can disclose audit content but cannot change it:
+// it is accepted and logged, and the guardian re-stamps the descriptor.
+func TestAuditDBWindowsAcceptsInheritedReadAccessForSQLiteSidecars(t *testing.T) {
 	directory := filepath.Join(t.TempDir(), "protected")
 	if err := os.Mkdir(directory, 0o700); err != nil {
 		t.Fatal(err)
@@ -457,7 +459,11 @@ func TestAuditDBWindowsRejectsInheritedReadAccessForSQLiteSidecars(t *testing.T)
 		t.Fatal(err)
 	}
 	grantEveryoneAuditDBWindowsAccess(t, directory, windows.GENERIC_READ, true)
-	assertAuditDBPathError(t, filepath.Join(directory, "audit.db"), "untrusted Windows principal")
+	db, err := openHardenedAuditSQLite(filepath.Join(directory, "audit.db"), auditDBPathHooks{})
+	if err != nil {
+		t.Fatalf("inheritable read entry on the audit directory refused: %v", err)
+	}
+	_ = db.Close()
 }
 
 func TestAuditDBWindowsRejectsMutableAncestor(t *testing.T) {
@@ -493,7 +499,7 @@ func TestAuditDBWindowsRejectsPermissiveExistingLeaf(t *testing.T) {
 	assertAuditDBPathError(t, path, "untrusted Windows principal")
 }
 
-func TestAuditDBWindowsRejectsStaleSidecarReadACL(t *testing.T) {
+func TestAuditDBWindowsAcceptsStaleSidecarReadACLButRejectsWrite(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "audit.db")
 	db, err := openHardenedAuditSQLite(path, auditDBPathHooks{})
 	if err != nil {
@@ -514,8 +520,17 @@ func TestAuditDBWindowsRejectsStaleSidecarReadACL(t *testing.T) {
 	if prepared != nil {
 		prepared.close()
 	}
+	if err != nil {
+		t.Fatalf("read-only entry on a stale sidecar refused: %v", err)
+	}
+	// Write authority on the sidecar stays fatal.
+	grantEveryoneAuditDBWindowsAccess(t, sidecar, windows.GENERIC_WRITE, false)
+	prepared, err = prepareAuditDatabasePath(path, auditDBPathHooks{})
+	if prepared != nil {
+		prepared.close()
+	}
 	if err == nil || !strings.Contains(err.Error(), "SQLite sidecar -journal") {
-		t.Fatalf("stale sidecar ACL error = %v", err)
+		t.Fatalf("stale sidecar write ACL error = %v", err)
 	}
 }
 

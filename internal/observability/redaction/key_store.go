@@ -14,7 +14,14 @@ import (
 	"crypto/rand"
 	"errors"
 	"io"
+	"path/filepath"
 )
+
+// CorrelationKeyPath returns the file LoadOrCreateCorrelationKey keeps the
+// correlation key in for dataDir.
+func CorrelationKeyPath(dataDir string) string {
+	return filepath.Join(dataDir, correlationKeyFilename)
+}
 
 const (
 	correlationKeyFilename   = "redaction-correlation.key"

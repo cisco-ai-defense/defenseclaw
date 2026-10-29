@@ -115,6 +115,14 @@ type ConfigManager struct {
 	// a REWRITTEN file, not a deletion.
 	envOverlayApplied atomic.Bool
 
+	// envConfigRejected is set while env_config.json exists but was
+	// rejected (untrusted, unreadable, malformed) and no overlay endpoint
+	// has ever been applied in this process. The endpoint in effect is then
+	// the config.yaml value, which may belong to another region, so managed
+	// inspection stays off until the overlay applies. Cleared by a
+	// successful apply or by the file being absent.
+	envConfigRejected atomic.Bool
+
 	current atomic.Value // *config.Config
 	gen     atomic.Uint64
 	mu      sync.Mutex
@@ -142,6 +150,13 @@ func (m *ConfigManager) recordLoadError(ctx context.Context, errorType string) {
 		return
 	}
 	recordConfigLoadErrorV8(ctx, m.observabilityV8, errorType)
+}
+
+// EnvConfigRejected reports whether env_config.json is present but rejected
+// and no overlay endpoint has been applied yet, so the endpoint in effect may
+// not be the tenant's region. Safe on a nil manager.
+func (m *ConfigManager) EnvConfigRejected() bool {
+	return m != nil && m.envConfigRejected.Load()
 }
 
 // getEnvConfigPath returns the current env_config.json overlay path, or
@@ -510,6 +525,7 @@ func (m *ConfigManager) Reload(ctx context.Context, reason string) error {
 			// see exactly what's on disk.
 			next.CiscoAIDefense.Endpoint = ep
 			m.envOverlayApplied.Store(true)
+			m.envConfigRejected.Store(false)
 		case errors.Is(envErr, config.ErrEnvConfigMissing) && m.envOverlayApplied.Load():
 			// File disappeared AFTER we had already applied an overlay
 			// endpoint. Treat this the same as a malformed overlay: a
@@ -523,6 +539,7 @@ func (m *ConfigManager) Reload(ctx context.Context, reason string) error {
 			fmt.Fprintf(os.Stderr, "[config] env_config overlay disappeared after prior successful apply: retaining current endpoint\n")
 			envOverlayErr = fmt.Errorf("env_config overlay disappeared after prior successful apply: %w", envErr)
 		case errors.Is(envErr, config.ErrEnvConfigMissing):
+			m.envConfigRejected.Store(false)
 			// Pre-arrival: env_config.json has never been present.
 			// Leave next.CiscoAIDefense.Endpoint alone, which yields
 			// the config.yaml value (a hardcoded US-prod default when
@@ -546,6 +563,19 @@ func (m *ConfigManager) Reload(ctx context.Context, reason string) error {
 			}
 			fmt.Fprintf(os.Stderr, "[config] env_config overlay rejected: %v (retaining current endpoint)\n", envErr)
 			envOverlayErr = envErr
+			if !m.envOverlayApplied.Load() {
+				// Never fall back to the config.yaml endpoint: it may be
+				// another region. Inspection stays closed until the overlay
+				// applies; the file watch and the retry ticker reload it.
+				if !m.envConfigRejected.Swap(true) {
+					managed.EmitResilienceEvent(managed.MarkerDegraded, map[string]string{
+						"subsystem": "managed-inspector",
+						"reason":    "env_config_rejected: " + envErr.Error(),
+						"path":      envPath,
+					})
+				}
+				envOverlayErr = fmt.Errorf("env_config_rejected: %w", envErr)
+			}
 		}
 	}
 	// managed_enterprise: carry boot-time-derived runtime Gateway

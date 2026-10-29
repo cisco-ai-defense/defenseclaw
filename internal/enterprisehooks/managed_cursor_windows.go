@@ -185,13 +185,15 @@ func withWindowsCursorManagedTransaction(fn func() error) error {
 		return fmt.Errorf("enterprise hooks: prepare Cursor enterprise directory: %w", err)
 	}
 	if err := validateWindowsManagedPolicyDirectoryProtection(root); err != nil {
-		return fmt.Errorf("enterprise hooks: verify exact Cursor enterprise directory protection: %w", err)
+		if repairErr := repairWindowsManagedPolicyFolder(root, validateWindowsManagedPolicyDirectoryProtection); repairErr != nil {
+			return fmt.Errorf("enterprise hooks: verify exact Cursor enterprise directory protection: %w", errors.Join(err, repairErr))
+		}
 	}
 	if info, statErr := os.Lstat(lockPath); statErr == nil {
 		if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
 			return fmt.Errorf("enterprise hooks: refusing non-regular Cursor transaction lock: %s", lockPath)
 		}
-		if err := windowsManagedPolicyFileTrustCheck(lockPath); err != nil {
+		if _, err := repairWindowsManagedMachineFile(lockPath, false, windowsManagedPolicyFileTrustCheck); err != nil {
 			return fmt.Errorf("enterprise hooks: Cursor transaction lock is untrusted: %w", err)
 		}
 	} else if !errors.Is(statErr, os.ErrNotExist) {
@@ -843,9 +845,34 @@ func validateWindowsCursorPrivateReceiptMetadata(
 	return nil
 }
 
+type windowsCursorProfileMode int
+
+const (
+	windowsCursorProfileNone windowsCursorProfileMode = iota
+	// windowsCursorProfileTolerant checks every enrolled profile but only
+	// logs one that is unreachable or drifted (a deleted, detached or moved
+	// profile). That user keeps their enrollment entry; nobody else is
+	// blocked from enrolling, publishing or tearing down.
+	windowsCursorProfileTolerant
+	// windowsCursorProfileStrict fails on an invalid profile. It is used only
+	// for the user whose enrollment is being added.
+	windowsCursorProfileStrict
+)
+
 func canonicalWindowsCursorManagedTargets(
 	raw []WindowsCursorManagedRuntimeTarget,
 	validateProfiles bool,
+) ([]WindowsCursorManagedRuntimeTarget, error) {
+	mode := windowsCursorProfileNone
+	if validateProfiles {
+		mode = windowsCursorProfileTolerant
+	}
+	return canonicalWindowsCursorManagedTargetsMode(raw, mode)
+}
+
+func canonicalWindowsCursorManagedTargetsMode(
+	raw []WindowsCursorManagedRuntimeTarget,
+	mode windowsCursorProfileMode,
 ) ([]WindowsCursorManagedRuntimeTarget, error) {
 	targets := make([]WindowsCursorManagedRuntimeTarget, 0, len(raw))
 	seen := make(map[string]struct{}, len(raw))
@@ -864,14 +891,21 @@ func canonicalWindowsCursorManagedTargets(
 			return nil, fmt.Errorf("enterprise hooks: duplicate Cursor target SID %s", sid)
 		}
 		seen[key] = struct{}{}
-		if validateProfiles {
+		if mode != windowsCursorProfileNone {
 			home := filepath.Dir(dataDir)
 			verifiedHome, verifiedSID, err := validateWindowsEnterpriseHome(home, sid.String())
-			if err != nil {
-				return nil, err
+			if err == nil && (!sameWindowsEnterprisePath(home, verifiedHome) || !verifiedSID.Equals(sid)) {
+				err = fmt.Errorf("enterprise hooks: Cursor target %s profile identity changed", sid)
 			}
-			if !sameWindowsEnterprisePath(home, verifiedHome) || !verifiedSID.Equals(sid) {
-				return nil, fmt.Errorf("enterprise hooks: Cursor target %s profile identity changed", sid)
+			if err != nil {
+				if mode == windowsCursorProfileStrict {
+					return nil, err
+				}
+				managed.EmitResilienceEvent(managed.MarkerSkip, map[string]string{
+					"unit":   "cursor@" + strings.ToUpper(sid.String()),
+					"path":   home,
+					"reason": "cursor_target_profile_missing: " + err.Error(),
+				})
 			}
 		}
 		targets = append(targets, WindowsCursorManagedRuntimeTarget{SID: sid.String(), DataDir: dataDir})
@@ -912,9 +946,11 @@ func installWindowsCursorManagedPolicy(
 	if targetSID == nil {
 		return nil, errors.New("enterprise hooks: Cursor target SID is required")
 	}
-	targets, err := canonicalWindowsCursorManagedTargets([]WindowsCursorManagedRuntimeTarget{{
+	// The user being enrolled must have a valid profile now; already enrolled
+	// peers are checked tolerantly below.
+	targets, err := canonicalWindowsCursorManagedTargetsMode([]WindowsCursorManagedRuntimeTarget{{
 		SID: targetSID.String(), DataDir: dataDir,
-	}}, true)
+	}}, windowsCursorProfileStrict)
 	if err != nil {
 		return nil, err
 	}

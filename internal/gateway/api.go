@@ -485,6 +485,13 @@ func (a *APIServer) lookupOTLPPathToken(source string) string {
 	a.otlpPathTokenLastStatAt[scope] = time.Now()
 
 	tok, err := connector.LoadOTLPPathToken(dataDir, scope)
+	if err != nil && connector.IsManagedPermissionDrift(err) && haveCached {
+		// Owner or writer drift on the token file is not a reason to fail
+		// every OTLP request: keep the cached token and let the guardian
+		// republish the file.
+		reportTokenDriftAccepted("otlp:"+string(scope), err)
+		return cached.token
+	}
 	if err != nil || tok == "" {
 		// Read failed after a successful stat: race with rotation
 		// rename, or unreadable file. Drop the cache so we don't
@@ -520,6 +527,21 @@ func (a *APIServer) hookAPITokenMatches(connectorName, presented string) bool {
 		return cached != "" && constantTimeStringMatch(presented, cached)
 	}
 	tok, err := connector.LoadHookAPIToken(dataDir, name)
+	if err != nil && connector.IsManagedPermissionDrift(err) {
+		// Owner or writer drift on the token file must not reject every hook
+		// request: keep authenticating against the cached token and let the
+		// guardian republish the file.
+		a.hookAPITokenMu.RLock()
+		cached := ""
+		if a.hookAPITokens != nil {
+			cached = a.hookAPITokens[name]
+		}
+		a.hookAPITokenMu.RUnlock()
+		if cached != "" {
+			reportTokenDriftAccepted("hook:"+name, err)
+			return constantTimeStringMatch(presented, cached)
+		}
+	}
 	if err != nil || tok == "" {
 		a.hookAPITokenMu.Lock()
 		if a.hookAPITokens != nil {
@@ -535,6 +557,22 @@ func (a *APIServer) hookAPITokenMatches(connectorName, presented string) bool {
 	a.hookAPITokens[name] = tok
 	a.hookAPITokenMu.Unlock()
 	return constantTimeStringMatch(presented, tok)
+}
+
+var tokenDriftAcceptedOnce sync.Map
+
+// reportTokenDriftAccepted logs, once per token and reason, that a token
+// file's permission drift was accepted and the cached token kept.
+func reportTokenDriftAccepted(token string, err error) {
+	reason := err.Error()
+	if _, seen := tokenDriftAcceptedOnce.LoadOrStore(token+"\x00"+reason, struct{}{}); seen {
+		return
+	}
+	managed.EmitResilienceEvent(managed.MarkerAccept, map[string]string{
+		"object": "token " + token,
+		"reason": reason,
+		"action": "cached token kept; guardian republishes",
+	})
 }
 
 func (a *APIServer) hookTokenScopeForPath(path string) (string, bool) {
@@ -787,10 +825,13 @@ func listenWithRetry(ctx context.Context, addr string, budget time.Duration) (ne
 		if err == nil {
 			return ln, nil
 		}
-		if !isAddrInUse(err) || time.Now().After(deadline) || ctx.Err() != nil {
+		if !isBindConflict(err) || time.Now().After(deadline) || ctx.Err() != nil {
+			if isBindConflict(err) {
+				return nil, describeBindConflict(addr, err)
+			}
 			return nil, err
 		}
-		fmt.Fprintf(os.Stderr, "[sidecar-api] %s still in use after restart, retrying bind (attempt %d)\n", addr, attempt)
+		fmt.Fprintf(os.Stderr, "[sidecar-api] %s unavailable (%v), retrying bind (attempt %d)\n", addr, err, attempt)
 		select {
 		case <-ctx.Done():
 			return nil, ctx.Err()
@@ -809,6 +850,41 @@ func isAddrInUse(err error) bool {
 	msg := strings.ToLower(err.Error())
 	return strings.Contains(msg, "address already in use") ||
 		strings.Contains(msg, "only one usage of each socket address")
+}
+
+// isBindConflict reports a bind failure worth retrying: the address is in use,
+// or Windows refused it with WSAEACCES, which is what a port inside an
+// excluded range (Hyper-V, WinNAT, Docker reservations) or a port another
+// service holds exclusively returns.
+func isBindConflict(err error) bool {
+	return isAddrInUse(err) || isBindAccessDenied(err)
+}
+
+func isBindAccessDenied(err error) bool {
+	const wsaeacces = 10013
+	var errno syscall.Errno
+	if errors.As(err, &errno) && errno == wsaeacces {
+		return true
+	}
+	return strings.Contains(strings.ToLower(err.Error()), "forbidden by its access permissions")
+}
+
+// describeBindConflict turns a final bind conflict into an error that names
+// the cause and the remedy, and reports it once as a missing prerequisite.
+func describeBindConflict(addr string, err error) error {
+	reason := "address in use by another process"
+	remedy := "stop the other listener or change gateway.api_port"
+	if isBindAccessDenied(err) {
+		reason = "port is reserved or held exclusively (excluded port range)"
+		remedy = "check `netsh int ipv4 show excludedportrange protocol=tcp` and move gateway.api_port out of the range"
+	}
+	managed.EmitResilienceEvent(managed.MarkerPrereq, map[string]string{
+		"subsystem": "api",
+		"addr":      addr,
+		"reason":    reason,
+		"remedy":    remedy,
+	})
+	return fmt.Errorf("%s (%s; %s): %w", reason, addr, remedy, err)
 }
 
 func (a *APIServer) Run(ctx context.Context) error {

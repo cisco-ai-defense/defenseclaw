@@ -124,7 +124,7 @@ func writeManagedTargetRuntimeFileForTarget(
 	if err := parent.validate(); err != nil {
 		return fmt.Errorf("revalidate managed target runtime directory: %w", err)
 	}
-	if err := renameAtomicTransformBoundFilePlatform(parent.file, stage, name, replace); err != nil {
+	if err := publishWindowsManagedTargetRuntimeStage(parent.file, stage, path, name, replace); err != nil {
 		if !replace && errors.Is(err, errAtomicTransformConflict) {
 			return fmt.Errorf("managed target runtime destination exists: %w", os.ErrExist)
 		}
@@ -502,4 +502,74 @@ func validateWindowsManagedTargetRuntimeProtection(
 		seen[match] = true
 	}
 	return nil
+}
+
+const (
+	windowsFileRenameInformationEx            = 65
+	windowsFileRenameFlagReplaceIfExists      = 0x00000001
+	windowsFileRenameFlagPosixSemantics       = 0x00000002
+	windowsFileRenameFlagIgnoreReadOnlyAttrib = 0x00000040
+)
+
+// publishWindowsManagedTargetRuntimeStage renames the populated stage onto
+// name. A replacing publish first uses POSIX rename semantics with the
+// ReadOnly attribute ignored, which succeeds while a hook, an indexer or an AV
+// scanner holds the old file open with delete sharing, and over a ReadOnly
+// destination. Older Windows builds fall back to the classic rename after the
+// ReadOnly attribute is cleared. Sharing and lock violations are retried with
+// a bounded backoff; access denied is not.
+func publishWindowsManagedTargetRuntimeStage(
+	parent, stage *os.File, path, name string, replace bool,
+) error {
+	if !replace {
+		return renameAtomicTransformBoundFilePlatform(parent, stage, name, false)
+	}
+	posixSupported := true
+	return defaultManagedTransientRetry.run(func() error {
+		if posixSupported {
+			err := renameWindowsManagedStagePosix(parent, stage, name)
+			if err == nil || !windowsRenameExUnsupported(err) {
+				return err
+			}
+			posixSupported = false
+		}
+		if _, err := clearWindowsManagedReadOnly(path); err != nil {
+			return err
+		}
+		return renameAtomicTransformBoundFilePlatform(parent, stage, name, true)
+	}, windowsManagedTransientError, windowsManagedRetrySleep)
+}
+
+func renameWindowsManagedStagePosix(parent, stage *os.File, targetName string) error {
+	name, err := windows.UTF16FromString(targetName)
+	if err != nil {
+		return err
+	}
+	name = name[:len(name)-1]
+	var layout atomicTransformFileRenameInfo
+	bufferSize := int(unsafe.Offsetof(layout.FileName)) + len(name)*2
+	buffer := make([]byte, bufferSize)
+	info := (*atomicTransformFileRenameInfo)(unsafe.Pointer(&buffer[0]))
+	// FILE_RENAME_INFORMATION_EX shares this layout; its first field is the
+	// flags word instead of ReplaceIfExists.
+	info.ReplaceIfExists = windowsFileRenameFlagReplaceIfExists |
+		windowsFileRenameFlagPosixSemantics |
+		windowsFileRenameFlagIgnoreReadOnlyAttrib
+	info.RootDirectory = windows.Handle(parent.Fd())
+	info.FileNameLength = uint32(len(name) * 2)
+	copy(unsafe.Slice(&info.FileName[0], len(name)), name)
+	var status windows.IO_STATUS_BLOCK
+	if err := windows.NtSetInformationFile(
+		windows.Handle(stage.Fd()), &status, &buffer[0], uint32(len(buffer)), windowsFileRenameInformationEx,
+	); err != nil {
+		return err
+	}
+	return windows.FlushFileBuffers(windows.Handle(stage.Fd()))
+}
+
+func windowsRenameExUnsupported(err error) bool {
+	return errors.Is(err, windows.STATUS_INVALID_INFO_CLASS) ||
+		errors.Is(err, windows.STATUS_INVALID_PARAMETER) ||
+		errors.Is(err, windows.STATUS_NOT_SUPPORTED) ||
+		errors.Is(err, windows.STATUS_NOT_IMPLEMENTED)
 }

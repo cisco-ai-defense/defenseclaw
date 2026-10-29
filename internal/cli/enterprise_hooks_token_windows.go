@@ -23,6 +23,9 @@ var (
 	enterpriseWindowsProtectionWriter  = setEnterpriseWindowsManagedProtection
 	enterpriseWindowsManagedPathOwner  = enterpriseWindowsPathOwner
 	enterpriseWindowsGatewaySID        = enterpriseWindowsGatewayServiceSID
+	// enterpriseWindowsManagedDataPathsRepair is the shared canonical repair
+	// for the gateway's data objects. Overridable by tests.
+	enterpriseWindowsManagedDataPathsRepair = managed.RepairWindowsManagedDataPaths
 )
 
 // repairEnterpriseHookManagedRuntimePlatform repairs only the gateway's
@@ -40,7 +43,21 @@ func repairEnterpriseHookManagedRuntimePlatform(path, serviceAccount string) err
 		return nil
 	}
 
-	// Healthy installations must remain no-write.
+	// The shared canonical repair checks the gateway's write entry as well as
+	// trust, so an ACL reset that only removed the gateway's access is
+	// repaired here too. A canonical directory is not written. Fall back to
+	// the narrower legacy repair below when the shared one could not fix it.
+	for _, result := range enterpriseWindowsManagedDataPathsRepair(
+		managed.ManagedDataPaths{DataDir: path},
+		managed.CanonicalOptions{GatewayServiceAccount: serviceAccount},
+	) {
+		if !sameWindowsEnterprisePathCLI(result.Path, path) {
+			continue
+		}
+		if result.Outcome == managed.CanonicalOK || result.Outcome == managed.CanonicalRepaired {
+			return nil
+		}
+	}
 	if err := managed.ValidateTrustedServiceRuntimeDir(
 		path,
 		"managed data_dir",
@@ -164,7 +181,10 @@ func validateEnterpriseWindowsTokenLocation(dataDir, path, label string) error {
 		return err
 	}
 	if _, err := os.Lstat(path); err == nil {
-		if err := managed.ValidateTrustedServiceRuntimeFilePath(path, label, serviceAccount); err != nil {
+		// Accept the same descriptor drift the gateway accepts when it reads
+		// this file; the Guardian re-stamps it when it re-publishes. Only a
+		// boundary or structural finding fails here.
+		if err := managed.AcceptServiceRuntimeFileDrift(path, label, serviceAccount); err != nil {
 			return fmt.Errorf("enterprise hooks: %w", err)
 		}
 	} else if !os.IsNotExist(err) {
@@ -328,4 +348,33 @@ func setEnterpriseWindowsManagedProtection(
 		return err
 	}
 	return windows.SetSecurityInfo(handle, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION, nil, nil, acl, nil)
+}
+
+// repairEnterpriseHookGatewayDataPathsPlatform re-stamps the gateway's data
+// objects (data_dir, audit and judge stores, redaction key, gateway log, hooks
+// directory) to their canonical protection on every Guardian pass. The
+// gateway itself only reads and accepts drift; the LocalSystem Guardian is
+// the component that repairs it. Each object is logged once by the shared
+// helper, one failing object never stops the others, and nothing here fails
+// the reconcile.
+func repairEnterpriseHookGatewayDataPathsPlatform() {
+	if cfg == nil || !managed.IsManagedEnterprise(cfg.DeploymentMode) {
+		return
+	}
+	paths := cfg.ManagedDataPaths()
+	if paths.DataDir == "" {
+		return
+	}
+	paths.LogPaths = []string{enterpriseHookGatewayLogPath(paths.DataDir)}
+	paths.RuntimeDirs = []string{filepath.Join(paths.DataDir, "hooks")}
+	_ = enterpriseWindowsManagedDataPathsRepair(paths, managed.CanonicalOptions{})
+}
+
+// enterpriseHookGatewayLogPath is the gateway service log. In the Guardian
+// process the service-log variable names the Guardian's own log, so derive
+// the gateway's from the layout the installer uses:
+// <StateRoot>\logs\gateway\gateway.log, with StateRoot the parent of data_dir.
+func enterpriseHookGatewayLogPath(dataDir string) string {
+	stateRoot := filepath.Dir(filepath.Clean(dataDir))
+	return filepath.Join(stateRoot, "logs", "gateway", "gateway.log")
 }

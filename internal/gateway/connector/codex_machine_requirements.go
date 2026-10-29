@@ -124,6 +124,10 @@ type WindowsCodexMachineRequirementsReport struct {
 	ManagedEvents                 []string `json:"managed_events"`
 	Details                       []string `json:"details,omitempty"`
 	Error                         string   `json:"error,omitempty"`
+	// PinMismatch reports that a content-hash pin no longer matches the live
+	// requirements bytes. It is advisory: verification still succeeds and the
+	// next privileged reconcile refreshes the pin.
+	PinMismatch bool `json:"pin_mismatch,omitempty"`
 }
 
 type windowsCodexMachineOwnership struct {

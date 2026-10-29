@@ -372,6 +372,19 @@ func TestValidateWindowsManagedHooksTeardownActivationBindsManifest(t *testing.T
 	); err != nil {
 		t.Fatal(err)
 	}
+	// The enumerator republishing the manifest after the installer pinned
+	// it is logged and accepted, never a teardown failure.
+	events := captureResilienceEvents(t)
+	if _, err := validateWindowsManagedHooksTeardownActivation(
+		&valid,
+		strings.Repeat("c", 64),
+		4,
+	); err != nil {
+		t.Fatalf("republished manifest rejected: %v", err)
+	}
+	if len(*events) != 1 || !strings.Contains((*events)[0], `pinned_sha256="`+manifestSHA256+`"`) {
+		t.Fatalf("events = %v", *events)
+	}
 
 	tests := []struct {
 		name   string
@@ -395,8 +408,6 @@ func TestValidateWindowsManagedHooksTeardownActivationBindsManifest(t *testing.T
 			changed.State = "unknown"
 			return &changed
 		}(), digest: manifestSHA256, count: 3},
-		{name: "manifest mismatch", record: &valid, digest: strings.Repeat("c", 64), count: 3},
-		{name: "target count mismatch", record: &valid, digest: manifestSHA256, count: 2},
 		{name: "target count exceeds bound", record: func() *windowsManagedHooksActivationRecord {
 			changed := valid
 			changed.TargetCount = windowsManagedHooksTeardownTargetMax + 1

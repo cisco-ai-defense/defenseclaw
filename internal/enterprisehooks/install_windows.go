@@ -8,13 +8,16 @@ package enterprisehooks
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"crypto/subtle"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"unsafe"
 
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
@@ -711,9 +714,11 @@ func prepareWindowsGenericPath(home, raw string, target *windows.SID, wantDir, r
 				}
 				continue
 			}
-			if !allowRepair {
-				return fmt.Errorf("enterprise hooks: %s trust check failed: %w", label, err)
-			}
+			// Repair drift on any object inside the canonical namespace, not
+			// only for a user this connector protected before: a first
+			// install, a reinstall and a second connector for the same user
+			// all meet the same shared folders. The privileged repair still
+			// refuses reparse points, hard links and foreign owners.
 			if err := repairWindowsTargetOwnedPathDACL(home, current, target, elementWantsDir); err != nil {
 				return fmt.Errorf("enterprise hooks: repair %s protection for %s: %w", label, current, err)
 			}
@@ -739,6 +744,22 @@ const windowsEnterpriseTokenMaxBytes int64 = 64 << 10
 
 var errWindowsManagedHardlink = errors.New("managed regular file has more than one hard link")
 
+// windowsManagedObstructionAlternateSlot returns an unused, uniquely named
+// quarantine slot next to path.
+func windowsManagedObstructionAlternateSlot(path string) (string, error) {
+	for attempt := 0; attempt < 8; attempt++ {
+		suffix := make([]byte, 6)
+		if _, err := io.ReadFull(rand.Reader, suffix); err != nil {
+			return "", fmt.Errorf("enterprise hooks: name alternate quarantine slot: %w", err)
+		}
+		candidate := windowsManagedObstructionQuarantinePath(path) + "-" + hex.EncodeToString(suffix)
+		if _, err := os.Lstat(candidate); errors.Is(err, os.ErrNotExist) {
+			return candidate, nil
+		}
+	}
+	return "", fmt.Errorf("enterprise hooks: no free alternate quarantine slot for %s", path)
+}
+
 func windowsManagedObstructionQuarantinePath(path string) string {
 	return path + windowsManagedObstructionQuarantineSuffix
 }
@@ -762,26 +783,23 @@ func quarantineWindowsTargetOwnedObstruction(home, path string, target *windows.
 			label, path, windowsSIDString(owner), windowsSIDString(target))
 	}
 	quarantine := windowsManagedObstructionQuarantinePath(path)
-	// If a prior repair left an admin-owned slot in the quarantine
-	// location, the target-token purge below will refuse it (its
-	// handle-owner check compares against the exact target SID).
-	// Remove any admin-owned slot via os.RemoveAll under the current
-	// elevated install process's privileges BEFORE the target-token
-	// purge runs, so the subsequent purge has a clean canvas.
-	// Target-owned slots stay on the target-token path.
+	// The canonical slot may hold an object the target cannot delete (left
+	// by an elevated process, or owned by an account that no longer
+	// resolves). This code runs as the target, so it cannot clear that slot;
+	// trying to used to wedge the repair forever. Leave it alone and use a
+	// fresh, uniquely named slot beside it instead.
 	if slotOwner, slotOwnerErr := windowsPathOwnerNoFollow(quarantine); slotOwnerErr == nil &&
-		slotOwner != nil && !slotOwner.Equals(target) &&
-		windowsEnterpriseAdminIdentity(slotOwner) {
-		fmt.Fprintf(os.Stderr,
-			"[enterprise-hooks] clearing admin-owned quarantine slot before "+
-				"target-token purge: %s (slot owner=%s, target=%s)\n",
-			quarantine, windowsSIDString(slotOwner), windowsSIDString(target))
-		if removeErr := os.RemoveAll(quarantine); removeErr != nil {
-			return fmt.Errorf(
-				"enterprise hooks: clear admin-owned quarantine slot %s: %w",
-				quarantine, removeErr,
-			)
+		slotOwner != nil && !slotOwner.Equals(target) {
+		alternate, err := windowsManagedObstructionAlternateSlot(path)
+		if err != nil {
+			return err
 		}
+		managed.EmitResilienceEvent(managed.MarkerAccept, map[string]string{
+			"sid":    windowsSIDString(target),
+			"path":   quarantine,
+			"reason": "quarantine_slot_reclaimed: slot owned by " + windowsSIDString(slotOwner) + " left in place; using " + filepath.Base(alternate),
+		})
+		quarantine = alternate
 	}
 	if err := removeWindowsTargetOwnedQuarantine(quarantine, target, false); err != nil {
 		return fmt.Errorf(
@@ -1424,7 +1442,7 @@ func validateWindowsEnterpriseHomeAnchor(home string, target *windows.SID) error
 	if err != nil {
 		return fmt.Errorf("enterprise hooks: inspect user home anchor attributes: %w", err)
 	}
-	if attributes&windows.FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+	if attributes&windows.FILE_ATTRIBUTE_REPARSE_POINT != 0 && !windowsPathHasHarmlessReparseTag(home) {
 		return fmt.Errorf("enterprise hooks: user home anchor is a reparse point: %s", home)
 	}
 	owner, err := windowsPathOwnerNoFollow(home)
@@ -1950,7 +1968,8 @@ func rejectWindowsReparseChain(path string) error {
 			return err
 		}
 		attributes, err := windows.GetFileAttributes(ptr)
-		if err == nil && attributes&windows.FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+		if err == nil && attributes&windows.FILE_ATTRIBUTE_REPARSE_POINT != 0 &&
+			!windowsPathHasHarmlessReparseTag(current) {
 			return fmt.Errorf("enterprise hooks: reparse point in path: %s", current)
 		}
 		if err != nil && err != windows.ERROR_FILE_NOT_FOUND && err != windows.ERROR_PATH_NOT_FOUND {
@@ -1962,6 +1981,58 @@ func rejectWindowsReparseChain(path string) error {
 		}
 		current = parent
 	}
+}
+
+var windowsHarmlessReparseLogged sync.Map
+
+// windowsPathHasHarmlessReparseTag reads the reparse tag of one path element
+// without following it and reports whether it is a storage-only tag (Compact
+// OS, deduplication, cloud placeholder). Each such path is logged once per
+// process. Any error reading the tag counts as not harmless.
+func windowsPathHasHarmlessReparseTag(path string) bool {
+	extended, err := winpath.Extended(path)
+	if err != nil {
+		return false
+	}
+	name, err := windows.UTF16PtrFromString(extended)
+	if err != nil {
+		return false
+	}
+	handle, err := windows.CreateFile(
+		name,
+		windows.FILE_READ_ATTRIBUTES,
+		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE,
+		nil,
+		windows.OPEN_EXISTING,
+		windows.FILE_FLAG_BACKUP_SEMANTICS|windows.FILE_FLAG_OPEN_REPARSE_POINT,
+		0,
+	)
+	if err != nil {
+		return false
+	}
+	defer windows.CloseHandle(handle)
+	var info windowsFileAttributeTagInfo
+	if err := windows.GetFileInformationByHandleEx(
+		handle,
+		windows.FileAttributeTagInfo,
+		(*byte)(unsafe.Pointer(&info)),
+		uint32(unsafe.Sizeof(info)),
+	); err != nil {
+		return false
+	}
+	if info.FileAttributes&windows.FILE_ATTRIBUTE_REPARSE_POINT == 0 {
+		return true
+	}
+	if !harmlessWindowsReparseTag(info.ReparseTag) {
+		return false
+	}
+	if _, logged := windowsHarmlessReparseLogged.LoadOrStore(strings.ToLower(path), struct{}{}); !logged {
+		managed.EmitResilienceEvent(managed.MarkerAccept, map[string]string{
+			"path":   path,
+			"reason": fmt.Sprintf("storage-only reparse tag 0x%08x does not redirect the path", info.ReparseTag),
+		})
+	}
+	return true
 }
 
 func windowsSIDString(sid *windows.SID) string {

@@ -15,6 +15,7 @@ import (
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/version"
 	"golang.org/x/sys/windows"
 )
@@ -362,6 +363,7 @@ func installWindowsClaudeManagedResultSecure(ctx context.Context, opts InstallOp
 	}
 
 	_ = ctx
+	retireWindowsManagedRuntimePreviousGeneration(generationCommit)
 	return InstallResult{
 		Connector:                  conn.Name(),
 		UserHome:                   home,
@@ -485,9 +487,11 @@ func verifyWindowsClaudeUserRuntimeReadOnly(
 	); err != nil {
 		return lock, fmt.Errorf("enterprise hooks: managed hook runtime sidecars are invalid: %w", err)
 	}
-	if err := connector.VerifyManagedSharedHookScriptDigests(
+	if err := verifyWindowsManagedSharedHookScriptsWithRepair(
+		home,
 		dataDir,
-		targetSID.String(),
+		setup.APIAddr,
+		targetSID,
 	); err != nil {
 		return lock, fmt.Errorf(
 			"enterprise hooks: managed Claude shared hook runtime is invalid: %w",
@@ -536,4 +540,33 @@ func verifyWindowsClaudeUserRuntimeReadOnly(
 		)
 	}
 	return lock, nil
+}
+
+// verifyWindowsManagedSharedHookScriptsWithRepair verifies the shared hook
+// scripts against their pinned digests. A digest mismatch (an editor, an
+// antivirus rewrite, a partial copy) is logged and repaired by republishing
+// the scripts from the embedded templates as the target user; only a second
+// failed verification is an error. Any other verification failure, such as
+// an untrusted writer or a structural problem, is returned unchanged.
+func verifyWindowsManagedSharedHookScriptsWithRepair(
+	home string,
+	dataDir string,
+	apiAddr string,
+	targetSID *windows.SID,
+) error {
+	err := connector.VerifyManagedSharedHookScriptDigests(dataDir, targetSID.String())
+	if !errors.Is(err, connector.ErrManagedSharedHookScriptDigestMismatch) {
+		return err
+	}
+	managed.EmitResilienceEvent(managed.MarkerAccept, map[string]string{
+		"path":   filepath.Join(dataDir, "hooks"),
+		"sid":    targetSID.String(),
+		"reason": "shared hook script digest drifted; republishing: " + err.Error(),
+	})
+	if repairErr := windowsEnterpriseTargetImpersonation(targetSID, home, func() error {
+		return connector.RepublishManagedSharedHookScripts(dataDir, apiAddr)
+	}); repairErr != nil {
+		return errors.Join(err, fmt.Errorf("republish shared hook scripts: %w", repairErr))
+	}
+	return connector.VerifyManagedSharedHookScriptDigests(dataDir, targetSID.String())
 }

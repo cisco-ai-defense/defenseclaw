@@ -14,10 +14,10 @@
 #   access to managed path: C:\Program Files\Cisco\Cisco Secure Client\
 #   DefenseClaw\ipc"}
 # Fixed by Set-DefenseClawPathAcl's exact canonical DACL replacement
-# plus the icacls /inheritance:r self-heal inside
+# plus the one privileged native re-stamp inside
 # Assert-DefenseClawCanonicalRawPathAcl, which re-reads the descriptor
-# via native GetFileSecurityDescriptor and warns-and-continues if the
-# protected flag still cannot be set (bulldoze posture).
+# via native GetFileSecurityDescriptor and, when it still is not exact,
+# accepts and logs it unless another principal can write the path.
 
 [CmdletBinding()]
 param()
@@ -170,7 +170,7 @@ try {
     if (-not [bool]$result.protected_after) {
         throw (
             'self-heal smoke: SE_DACL_PROTECTED is not set after ' +
-            'Set-DefenseClawPathAcl - the icacls /inheritance:r self-heal ' +
+            'Set-DefenseClawPathAcl - the privileged native re-stamp ' +
             'did not fire or did not take effect'
         )
     }

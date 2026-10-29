@@ -17,7 +17,9 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"golang.org/x/sys/windows"
 )
 
@@ -162,7 +164,28 @@ func atomicTransformFileV2Locked(
 	perm os.FileMode,
 	transform func(current []byte, exists bool) (atomicTransformResult, error),
 ) error {
+	// A ReadOnly agent config refuses the write-open used for protection
+	// convergence and the ReplaceFileW publication with access denied. Clear
+	// the attribute for this transaction and put it back on whatever file
+	// holds the name afterwards, so the user's choice survives the update.
+	restoreReadOnly, err := clearWindowsManagedReadOnly(path)
+	if err != nil {
+		return fmt.Errorf("prepare ReadOnly config %s for update: %w", path, err)
+	}
+	defer func() {
+		if restoreErr := restoreReadOnly(); restoreErr != nil {
+			emitManagedResilience(managed.MarkerAccept, path,
+				"could not restore ReadOnly attribute after update: "+restoreErr.Error(), nil)
+		}
+	}()
+	var lastConflict error
 	for attempt := 0; attempt < atomicTransformMaxAttempts; attempt++ {
+		if attempt > 0 && lastConflict != nil {
+			// A conflict at begin or commit is usually an editor, indexer or AV
+			// handle on the config; give it a moment instead of spending every
+			// attempt within a few milliseconds.
+			windowsManagedRetrySleep(atomicTransformV2ConflictRetry.delay(attempt - 1))
+		}
 		if err := recoverAtomicTransformV2Locked(inputPath, stateDir); err != nil {
 			return fmt.Errorf("recover interrupted config transform for %s: %w", path, err)
 		}
@@ -225,6 +248,7 @@ func atomicTransformFileV2Locked(
 				return errors.Join(err, recoverErr)
 			}
 			if errors.Is(err, errAtomicTransformConflict) {
+				lastConflict = err
 				continue
 			}
 			return err
@@ -256,6 +280,7 @@ func atomicTransformFileV2Locked(
 				return errors.Join(err, recoverErr)
 			}
 			if errors.Is(err, errAtomicTransformConflict) {
+				lastConflict = err
 				continue
 			}
 			return err
@@ -265,11 +290,27 @@ func atomicTransformFileV2Locked(
 		}
 		return nil
 	}
+	if lastConflict != nil {
+		return fmt.Errorf(
+			"config %s could not be published in %d attempts; another process kept it busy or changed it (last error: %v)",
+			inputPath,
+			atomicTransformMaxAttempts,
+			lastConflict,
+		)
+	}
 	return fmt.Errorf(
 		"config %s changed during each of %d read/merge attempts; refusing to overwrite concurrent edits",
 		inputPath,
 		atomicTransformMaxAttempts,
 	)
+}
+
+// atomicTransformV2ConflictRetry spaces out attempts after a publication
+// conflict; the budget stays near one second across all attempts.
+var atomicTransformV2ConflictRetry = managedTransientRetry{
+	Attempts: atomicTransformMaxAttempts,
+	Initial:  10 * time.Millisecond,
+	Max:      320 * time.Millisecond,
 }
 
 func withAtomicTransformV2ProtocolLock(

@@ -33,10 +33,16 @@ var (
 
 	windowsCodexMachineProgramData     = winpath.TrustedProgramData
 	windowsCodexMachineTrustedDirCheck = func(path, label string) error {
-		return managed.ValidateTrustedRuntimeDir(path, label)
+		return ensureWindowsCodexMachineDirTrust(path, label)
 	}
 	windowsCodexMachineTrustedFileCheck = func(path, label string) error {
 		return managed.ValidateTrustedFilePath(path, label)
+	}
+	// windowsCodexMachineStructureFileCheck keeps only the structural half of
+	// the trust walk (reparse points, links, object type, volume). It decides
+	// whether a failed strict check was permission drift or a real boundary.
+	windowsCodexMachineStructureFileCheck = func(path, label string) error {
+		return managed.ValidateTrustedFileStructureTolerant(path, label)
 	}
 	windowsCodexMachineVolumeCheck = validateWindowsCodexMachineVolume
 )
@@ -482,12 +488,13 @@ func VerifyWindowsCodexMachineRequirements(
 		if state.Pending {
 			return errors.New("Codex requirements ownership contains an incomplete transaction")
 		}
+		// Content-hash pins are advisory: an outside edit that keeps the exact
+		// DefenseClaw hooks (checked above) is reported here and re-pinned by
+		// the next privileged reconcile, never failed.
 		if state.PostimageSHA256 != report.PostimageSHA256 {
-			return fmt.Errorf(
-				"Codex requirements hash %s does not match protected postimage %s",
-				report.PostimageSHA256,
-				state.PostimageSHA256,
-			)
+			report.PinMismatch = true
+			managedPinMismatch(opts.RequirementsPath, "ownership postimage",
+				state.PostimageSHA256, report.PostimageSHA256)
 		}
 		runtime, err := parseWindowsCodexManagedRuntimeState(managedState.data)
 		if err != nil {
@@ -497,7 +504,9 @@ func VerifyWindowsCodexMachineRequirements(
 			return err
 		}
 		if runtime.RequirementsSHA256 != report.PostimageSHA256 {
-			return errors.New("Codex managed runtime state is not bound to the current requirements bytes")
+			report.PinMismatch = true
+			managedPinMismatch(opts.RequirementsPath, "managed runtime state",
+				runtime.RequirementsSHA256, report.PostimageSHA256)
 		}
 		return nil
 	})
@@ -872,7 +881,9 @@ func ResolveWindowsCodexManagedRuntimeRegistry(
 			return result, nil
 		}
 	}
-	err = withWindowsCodexMachinePolicyLock(requirementsPath, func() error {
+	// Hook reads take the lock shared so concurrent hooks never queue behind
+	// one another; only writers take it exclusively.
+	err = withWindowsCodexMachinePolicyLockMode(requirementsPath, true, func() error {
 		var resolveErr error
 		result, resolveErr = resolveWindowsCodexManagedRuntimeRegistryLocked(
 			requirementsPath,
@@ -960,8 +971,10 @@ func resolveWindowsCodexManagedRuntimeRegistryLocked(
 			state.HookExecutable,
 		)
 	}
-	if state.RequirementsSHA256 != windowsCodexMachineHash(requirements.data) {
-		return result, errors.New("Codex managed runtime state is stale for the active requirements bytes")
+	if live := windowsCodexMachineHash(requirements.data); state.RequirementsSHA256 != live {
+		// The exact DefenseClaw hooks were verified above; a stale hash pin
+		// alone only means an outside edit landed before the next reconcile.
+		managedPinMismatch(requirementsPath, "managed runtime state", state.RequirementsSHA256, live)
 	}
 	targets, err := normalizeWindowsCodexManagedRuntimeTargets(state.Targets)
 	if err != nil {
@@ -1108,8 +1121,11 @@ func verifyWindowsCodexMachineRequirementsLocked(
 		return err
 	}
 	hash := windowsCodexMachineHash(requirements.data)
-	if state.Pending || state.PostimageSHA256 != hash {
-		return errors.New("Codex requirements ownership is pending or stale")
+	if state.Pending {
+		return errors.New("Codex requirements ownership contains an incomplete transaction")
+	}
+	if state.PostimageSHA256 != hash {
+		managedPinMismatch(opts.RequirementsPath, "ownership postimage", state.PostimageSHA256, hash)
 	}
 	managedState, err := readWindowsCodexMachineFile(
 		opts.ManagedStatePath,
@@ -1128,7 +1144,9 @@ func verifyWindowsCodexMachineRequirementsLocked(
 		return err
 	}
 	if runtime.RequirementsSHA256 != hash {
-		return errors.New("Codex managed runtime state is stale for current requirements")
+		// Publish and target removal re-pin the state to the live bytes, so
+		// a stale pin here must not stop them.
+		managedPinMismatch(opts.RequirementsPath, "managed runtime state", runtime.RequirementsSHA256, hash)
 	}
 	if expectedTargets != nil {
 		normalized, err := normalizeWindowsCodexManagedRuntimeTargets(expectedTargets)
@@ -1346,6 +1364,14 @@ func withWindowsCodexMachinePolicyLock(
 	requirementsPath string,
 	fn func() error,
 ) error {
+	return withWindowsCodexMachinePolicyLockMode(requirementsPath, false, fn)
+}
+
+func withWindowsCodexMachinePolicyLockMode(
+	requirementsPath string,
+	shared bool,
+	fn func() error,
+) error {
 	windowsCodexMachineProcessMu.Lock()
 	defer windowsCodexMachineProcessMu.Unlock()
 
@@ -1353,7 +1379,7 @@ func withWindowsCodexMachinePolicyLock(
 		filepath.Dir(requirementsPath),
 		windowsCodexManagedLockFile,
 	)
-	lock, overlapped, err := acquireWindowsCodexMachineFileLock(lockPath)
+	lock, overlapped, err := acquireWindowsCodexMachineFileLockMode(lockPath, shared)
 	if err != nil {
 		return err
 	}
@@ -1364,6 +1390,13 @@ func withWindowsCodexMachinePolicyLock(
 
 func acquireWindowsCodexMachineFileLock(
 	path string,
+) (windows.Handle, *windows.Overlapped, error) {
+	return acquireWindowsCodexMachineFileLockMode(path, false)
+}
+
+func acquireWindowsCodexMachineFileLockMode(
+	path string,
+	shared bool,
 ) (windows.Handle, *windows.Overlapped, error) {
 	parent := filepath.Dir(path)
 	if err := windowsCodexMachineTrustedDirCheck(parent, "Codex machine policy lock parent"); err != nil {
@@ -1378,7 +1411,7 @@ func acquireWindowsCodexMachineFileLock(
 				path,
 			)
 		}
-		if err := windowsCodexMachineTrustedFileCheck(path, "Codex machine policy lock"); err != nil {
+		if err := ensureWindowsCodexMachineFileTrust(path, "Codex machine policy lock", true); err != nil {
 			return 0, nil, err
 		}
 	} else if !errors.Is(err, os.ErrNotExist) {
@@ -1426,10 +1459,14 @@ func acquireWindowsCodexMachineFileLock(
 	}
 	overlapped := new(windows.Overlapped)
 	deadline := time.Now().Add(windowsCodexMachineLockTimeout)
+	lockFlags := uint32(windows.LOCKFILE_EXCLUSIVE_LOCK | windows.LOCKFILE_FAIL_IMMEDIATELY)
+	if shared {
+		lockFlags = windows.LOCKFILE_FAIL_IMMEDIATELY
+	}
 	for {
 		err = windows.LockFileEx(
 			handle,
-			windows.LOCKFILE_EXCLUSIVE_LOCK|windows.LOCKFILE_FAIL_IMMEDIATELY,
+			lockFlags,
 			0,
 			1,
 			0,
@@ -1559,7 +1596,7 @@ func validateWindowsCodexMachineLayout(opts WindowsCodexMachineRequirementsOptio
 }
 
 func readWindowsCodexMachineBinary(path string) error {
-	if err := windowsCodexMachineTrustedFileCheck(path, "Codex managed hook binary"); err != nil {
+	if err := ensureWindowsCodexMachineFileTrust(path, "Codex managed hook binary", false); err != nil {
 		return err
 	}
 	file, err := openWindowsCodexNoFollow(path, windows.GENERIC_READ, false)
@@ -1599,7 +1636,7 @@ func readWindowsCodexMachineFile(
 	if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 || info.Size() > int64(limit) {
 		return result, fmt.Errorf("%s is not a bounded regular file", label)
 	}
-	if err := windowsCodexMachineTrustedFileCheck(path, label); err != nil {
+	if err := ensureWindowsCodexMachineFileTrust(path, label, true); err != nil {
 		return result, err
 	}
 	handle, err := openWindowsCodexNoFollow(path, windows.GENERIC_READ, false)
@@ -1679,6 +1716,20 @@ func writeWindowsCodexMachineFile(path string, data []byte, limit int, label str
 		cleanup()
 		return fmt.Errorf("protect %s temp file: %w", label, err)
 	}
+	// ReplaceFileW refuses a ReadOnly destination with access denied, which
+	// would leave the ownership record pending. Clear the attribute for the
+	// publication and put it back on the published file afterwards.
+	restoreReadOnly, err := clearWindowsManagedReadOnly(path)
+	if err != nil {
+		cleanup()
+		return fmt.Errorf("prepare %s for publication: %w", label, err)
+	}
+	defer func() {
+		if restoreErr := restoreReadOnly(); restoreErr != nil {
+			emitManagedResilience(managed.MarkerAccept, path,
+				"could not restore ReadOnly attribute after publication: "+restoreErr.Error(), nil)
+		}
+	}()
 	if err := safefile.ReplaceFile(tmpPath, path); err != nil {
 		cleanup()
 		return fmt.Errorf("publish %s: %w", label, err)
@@ -1781,7 +1832,7 @@ func deleteWindowsCodexMachineFile(path, label string) error {
 	if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
 		return fmt.Errorf("%s is not a regular file", label)
 	}
-	if err := windowsCodexMachineTrustedFileCheck(path, label); err != nil {
+	if err := ensureWindowsCodexMachineFileTrust(path, label, true); err != nil {
 		return err
 	}
 	handle, err := openWindowsCodexNoFollow(
@@ -1871,5 +1922,116 @@ func validateWindowsCodexMachineVolume(path string) error {
 	if _, err := winpath.ValidateFixedNTFSMountedPath(path); err != nil {
 		return fmt.Errorf("Codex machine path is not on a trusted mount-manager NTFS drive: %w", err)
 	}
+	return nil
+}
+
+// ensureWindowsCodexMachineFileTrust is the trust gate for every existing
+// Codex machine file. Structure (reparse points, links, object type, volume)
+// stays fatal. Permission drift is repaired first when repairable is set and
+// the process is the installer or the LocalSystem guardian; whatever cannot
+// be repaired, including drift seen by a standard-user hook, is accepted and
+// logged so it never stops reconcile, verify or the hook.
+func ensureWindowsCodexMachineFileTrust(path, label string, repairable bool) error {
+	strictErr := windowsCodexMachineTrustedFileCheck(path, label)
+	if strictErr == nil {
+		return nil
+	}
+	if err := windowsCodexMachineStructureFileCheck(path, label); err != nil {
+		return err
+	}
+	drift, driftErr := windowsCodexMachineFileDrift(path)
+	reason := strictErr.Error()
+	if driftErr == nil && !drift.Canonical {
+		reason = drift.Reason() + ": " + reason
+	}
+	if repairable && driftErr == nil && !drift.Canonical && windowsManagedCanRepair() {
+		if repairErr := repairWindowsCodexMachineFileProtection(path); repairErr != nil {
+			reason += "; repair failed: " + repairErr.Error()
+		} else if recheckErr := windowsCodexMachineTrustedFileCheck(path, label); recheckErr == nil {
+			emitManagedResilience(managedDriftMarker(drift, true, true), path,
+				"re-stamped canonical protection: "+reason, map[string]string{"label": label})
+			return nil
+		} else {
+			// The leaf is canonical now; what remains is outside it, such as
+			// a drifted ancestor, and is accepted below.
+			strictErr = recheckErr
+			reason = "re-stamped leaf; remaining: " + recheckErr.Error()
+		}
+	}
+	if managed.TrustStrictAncestors() {
+		return strictErr
+	}
+	emitManagedResilience(managedDriftMarker(drift, false, true), path,
+		"accepted permission drift: "+reason, map[string]string{"label": label})
+	return nil
+}
+
+// windowsCodexMachineCanonicalDescriptorSDDL is the descriptor
+// setWindowsCodexMachineFileProtection stamps, in SDDL form.
+func windowsCodexMachineCanonicalDescriptorSDDL(userReadable bool) string {
+	sddl := "O:BAD:P(A;;FA;;;BA)(A;;FA;;;SY)"
+	if userReadable {
+		sddl += "(A;;FR;;;BU)"
+	}
+	return sddl
+}
+
+func windowsCodexMachineCanonicalModel(userReadable bool) managedDescriptor {
+	model := managedDescriptor{
+		Owner:     managedSIDAdministrators,
+		Protected: true,
+		ACEs: []managedACE{
+			{SID: managedSIDAdministrators, Mask: managedFileAllAccess},
+			{SID: managedSIDLocalSystem, Mask: managedFileAllAccess},
+		},
+	}
+	if userReadable {
+		model.ACEs = append(model.ACEs, managedACE{SID: managedSIDUsers, Mask: managedFileGenericRead})
+	}
+	return model
+}
+
+func windowsCodexMachineFileDrift(path string) (managedDrift, error) {
+	actual, err := windowsManagedPathDescriptorModel(path, false)
+	if err != nil {
+		return managedDrift{}, err
+	}
+	return classifyManagedDrift(actual, managedDriftPolicy{
+		Canonical: windowsCodexMachineCanonicalModel(windowsCodexMachineFileUserReadable(path)),
+	}), nil
+}
+
+// repairWindowsCodexMachineFileProtection re-stamps the canonical owner and
+// protected DACL on an existing no-follow single-link Codex machine file. The
+// owner is normalized to Administrators: an administrator's rename-save under
+// the default "object creator" owner policy leaves that user's SID instead.
+func repairWindowsCodexMachineFileProtection(path string) error {
+	descriptor, err := windows.SecurityDescriptorFromString(
+		windowsCodexMachineCanonicalDescriptorSDDL(windowsCodexMachineFileUserReadable(path)),
+	)
+	if err != nil {
+		return err
+	}
+	return repairWindowsManagedDescriptor(path, false, descriptor)
+}
+
+// ensureWindowsCodexMachineDirTrust validates a Codex machine directory.
+// Structure stays fatal; permission drift such as the inherited ProgramData
+// "Users create" grant or an MDM-applied ACL is accepted and logged, because
+// the protected files inside are judged and repaired on their own. The
+// installer re-stamps the directory descriptor on every action.
+func ensureWindowsCodexMachineDirTrust(path, label string) error {
+	strictErr := managed.ValidateTrustedRuntimeDir(path, label)
+	if strictErr == nil {
+		return nil
+	}
+	if managed.TrustStrictAncestors() {
+		return strictErr
+	}
+	if err := managed.ValidateTrustedRuntimeDirTolerant(path, label); err != nil {
+		return err
+	}
+	emitManagedResilience(managed.MarkerAccept, path,
+		"accepted directory permission drift: "+strictErr.Error(), map[string]string{"label": label})
 	return nil
 }

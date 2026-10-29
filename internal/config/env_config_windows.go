@@ -82,18 +82,24 @@ func openEnvConfig(path string) (*os.File, error) {
 	if err != nil {
 		return nil, fmt.Errorf("encode env_config path: %w", err)
 	}
-	handle, err := windows.CreateFile(
-		pathPtr,
-		windows.GENERIC_READ,
-		windows.FILE_SHARE_READ,
-		nil,
-		windows.OPEN_EXISTING,
-		// OPEN_REPARSE_POINT so a symlink/junction posing as the file
-		// surfaces as a reparse-flagged handle that the check below
-		// rejects, rather than silently redirecting the open.
-		windows.FILE_ATTRIBUTE_NORMAL|windows.FILE_FLAG_OPEN_REPARSE_POINT,
-		0,
-	)
+	// AVC rewrites the file in place and antivirus scans it, so a sharing
+	// violation is retried briefly instead of being reported as a rejected
+	// overlay. Writers are shared so a holder does not lock the gateway out;
+	// the handle pins the object that is validated and read.
+	handle, err := managed.RetryTransientOpen(func() (windows.Handle, error) {
+		return windows.CreateFile(
+			pathPtr,
+			windows.GENERIC_READ,
+			windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE,
+			nil,
+			windows.OPEN_EXISTING,
+			// OPEN_REPARSE_POINT so a symlink/junction posing as the file
+			// surfaces as a reparse-flagged handle that the check below
+			// rejects, rather than silently redirecting the open.
+			windows.FILE_ATTRIBUTE_NORMAL|windows.FILE_FLAG_OPEN_REPARSE_POINT,
+			0,
+		)
+	})
 	if err != nil {
 		// Map ERROR_FILE_NOT_FOUND / ERROR_PATH_NOT_FOUND into
 		// os.ErrNotExist so LoadEnvConfigEndpoint's pre-arrival branch

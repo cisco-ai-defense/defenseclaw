@@ -21,11 +21,13 @@ package redaction
 import (
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"time"
 	"unsafe"
 
@@ -120,7 +122,11 @@ func openWindowsCorrelationKeyDirectory(path string, publicationRoot bool) (wind
 	// Omitting FILE_SHARE_DELETE pins this path component. The caller retains a
 	// handle for every ancestor, so later absolute-path operations cannot be
 	// redirected by renaming any component after validation.
-	access := uint32(windows.FILE_READ_ATTRIBUTES | windows.READ_CONTROL)
+	// Traverse is the data right that makes the share-mode pin effective
+	// (an attribute-only or READ_CONTROL-only open takes no part in the share
+	// check) and, unlike READ_CONTROL, survives an ancestor DACL tightened to
+	// traverse-only.
+	access := uint32(windows.FILE_READ_ATTRIBUTES | windows.FILE_TRAVERSE)
 	if publicationRoot {
 		// FileRenameInformation resolves the fixed destination name relative to
 		// this pinned final directory handle. FILE_WRITE_DATA is FILE_ADD_FILE on
@@ -243,12 +249,21 @@ func loadExistingWindowsCorrelationKey(dataDir string, hooks keyStoreHooks) (Cor
 	if err != nil {
 		return CorrelationKey{}, false, err
 	}
+	validate := validateWindowsCorrelationKeyHandle
 	if needsHardening {
 		if err := hardenExistingWindowsCorrelationKey(path, handle); err != nil {
-			return CorrelationKey{}, false, err
+			if !windowsCorrelationHardeningFailureIsDrift(err) {
+				return CorrelationKey{}, false, err
+			}
+			// Every shape that asks for hardening is confined to the gateway
+			// service, SYSTEM, Administrators and OWNER RIGHTS. When this
+			// process cannot re-stamp it (the gateway holds read access only),
+			// accept the trusted drift and keep the structural checks.
+			windowsCorrelationReportAccept("descriptor is trusted but not canonical; this process cannot re-stamp it")
+			validate = validateWindowsCorrelationKeyPhysicalHandle
 		}
 	}
-	if err := validateWindowsCorrelationKeyHandle(handle); err != nil {
+	if err := validate(handle); err != nil {
 		return CorrelationKey{}, false, err
 	}
 	if err := runAfterExistingValidation(hooks); err != nil {
@@ -262,10 +277,16 @@ func loadExistingWindowsCorrelationKey(dataDir string, hooks keyStoreHooks) (Cor
 	if n, err := file.Read(extra[:]); n != 0 || !errors.Is(err, io.EOF) {
 		return CorrelationKey{}, false, keyStoreError(KeyStoreErrorInvalidLength)
 	}
-	if err := validateWindowsCorrelationKeyHandle(handle); err != nil {
+	if err := validate(handle); err != nil {
 		return CorrelationKey{}, false, err
 	}
 	return newCorrelationKey(material), true, nil
+}
+
+// windowsCorrelationHardeningFailureIsDrift reports a hardening failure that
+// is a missing right rather than a structural problem with the key.
+func windowsCorrelationHardeningFailureIsDrift(err error) bool {
+	return IsKeyStoreError(err, KeyStoreErrorUnavailable) || IsKeyStoreError(err, KeyStoreErrorUnsafePermissions)
 }
 
 func windowsCorrelationExistingKeyAccess(harden bool) uint32 {
@@ -338,6 +359,10 @@ func windowsCorrelationSecurityNeedsHardening(handle windows.Handle) (bool, erro
 		return false, err
 	}
 	if !owner.Equals(expectedOwner) {
+		if dacl, _, daclErr := descriptor.DACL(); daclErr == nil && windowsCorrelationDriftAcceptable(owner, dacl, expectedOwner) {
+			windowsCorrelationReportAccept(fmt.Sprintf("owner %s is a trusted administrator principal, not the gateway service", owner.String()))
+			return false, nil
+		}
 		return false, keyStoreError(KeyStoreErrorUnsafeOwner)
 	}
 	group, _, err := descriptor.Group()
@@ -386,7 +411,77 @@ func windowsCorrelationSecurityNeedsHardening(handle windows.Handle) (bool, erro
 			return true, nil
 		}
 	}
+	if windowsCorrelationDriftAcceptable(owner, dacl, expectedOwner) {
+		// Extra read entries (a backup agent, an inherited Users read after a
+		// reset) or administrator entries: the key cannot be rewritten by an
+		// untrusted principal, and the gateway cannot re-stamp it with its
+		// read-only access. Accepted and logged; the guardian repairs it.
+		windowsCorrelationReportAccept("descriptor carries extra trusted or read-only entries")
+		return false, nil
+	}
 	return false, keyStoreError(KeyStoreErrorUnsafePermissions)
+}
+
+// windowsCorrelationDriftAcceptable reports whether a non-canonical key
+// descriptor still gives no untrusted principal write authority: the owner is
+// the gateway service, SYSTEM, Administrators, TrustedInstaller or an
+// administrator principal, and every write-capable entry belongs to one of
+// those (or to OWNER RIGHTS). Read-only entries for anyone are accepted.
+// Strict mode keeps every deviation fatal.
+func windowsCorrelationDriftAcceptable(owner *windows.SID, dacl *windows.ACL, expectedOwner *windows.SID) bool {
+	if managed.TrustStrictAncestors() || owner == nil || dacl == nil {
+		return false
+	}
+	trusted := func(sid *windows.SID) bool {
+		return sid.Equals(expectedOwner) || managed.IsWindowsTrustedAdminOwner(sid) ||
+			windowsCorrelationAdminEquivalent(sid)
+	}
+	if !trusted(owner) {
+		return false
+	}
+	const writeLike = windows.GENERIC_ALL | windows.GENERIC_WRITE | windows.DELETE | windows.WRITE_DAC |
+		windows.WRITE_OWNER | windows.FILE_WRITE_DATA | windows.FILE_APPEND_DATA | windows.FILE_WRITE_EA |
+		windows.FILE_WRITE_ATTRIBUTES
+	for index := uint16(0); index < dacl.AceCount; index++ {
+		var ace *windows.ACCESS_ALLOWED_ACE
+		if err := windows.GetAce(dacl, uint32(index), &ace); err != nil || ace == nil {
+			return false
+		}
+		if ace.Header.AceFlags&windows.INHERIT_ONLY_ACE != 0 {
+			continue
+		}
+		switch ace.Header.AceType {
+		case windows.ACCESS_ALLOWED_ACE_TYPE:
+		case windows.ACCESS_DENIED_ACE_TYPE:
+			continue
+		default:
+			// An entry this check cannot read is never presumed safe.
+			return false
+		}
+		if windows.ACCESS_MASK(ace.Mask)&writeLike == 0 {
+			continue
+		}
+		sid := (*windows.SID)(unsafe.Pointer(&ace.SidStart))
+		if trusted(sid) || sid.IsWellKnown(windows.WinCreatorOwnerRightsSid) {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+var windowsCorrelationAdminEquivalent = managed.WindowsAdminEquivalentPrincipal
+
+var windowsCorrelationAcceptedOnce sync.Map
+
+func windowsCorrelationReportAccept(reason string) {
+	if _, seen := windowsCorrelationAcceptedOnce.LoadOrStore(reason, struct{}{}); seen {
+		return
+	}
+	managed.EmitResilienceEvent(managed.MarkerAccept, map[string]string{
+		"object": "redaction correlation key",
+		"reason": reason,
+	})
 }
 
 type windowsCorrelationACEExpectation struct {

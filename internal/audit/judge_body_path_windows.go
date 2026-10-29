@@ -72,6 +72,14 @@ func validateJudgeBodyPlatformTrust(path string, _ os.FileInfo, directory, prote
 		windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION,
 	)
 	if err != nil {
+		if !protectChildren && errors.Is(err, windows.ERROR_ACCESS_DENIED) && managed.PlatformInstallerOwnedPath(path) {
+			// An installer-owned ancestor whose DACL no longer grants this
+			// process READ_CONTROL is permission drift, not structure.
+			if relaxErr := managed.RelaxAncestorTrustVerdict(true, path, "judge body ancestor",
+				managed.NewTrustVerdict("judge_body: security descriptor is not readable: %v", err)); relaxErr == nil {
+				return nil
+			}
+		}
 		return fmt.Errorf("judge_body: inspect Windows security descriptor: %w", err)
 	}
 	if sd == nil {

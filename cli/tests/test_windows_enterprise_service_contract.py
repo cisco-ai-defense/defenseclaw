@@ -3716,7 +3716,7 @@ def test_certification_accepts_only_the_canonical_persistent_lifecycle_lock() ->
         "persistent lifecycle file lock was not canonically repaired in place for reinstall"
         in smoke
     )
-    assert "writable inherited lifecycle lock was silently adopted" in smoke
+    assert "writable inherited lifecycle lock was not repaired in place" in smoke
     assert "lifecycle_file_lock_reuse_stable = $elevated" in smoke
 
 

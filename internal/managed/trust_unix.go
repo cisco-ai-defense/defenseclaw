@@ -270,3 +270,17 @@ func trustedRuntimeOwner(uid uint32) bool {
 	}
 	return uid == uint32(serviceUID)
 }
+
+// ValidateExecutableFilePath validates a binary or library DefenseClaw loads.
+// The advisory code-integrity rule is Windows-only; here it is the strict
+// ValidateTrustedFilePath check, unchanged.
+func ValidateExecutableFilePath(path, label string) error {
+	return ValidateTrustedFilePath(path, label)
+}
+
+// AcceptServiceRuntimeFileDrift is the gateway's drift-accepting judgement of
+// a runtime file it reads. Descriptor drift is a Windows concept; here it is
+// the existing ValidateTrustedServiceRuntimeFilePath check.
+func AcceptServiceRuntimeFileDrift(path, label, serviceAccount string) error {
+	return ValidateTrustedServiceRuntimeFilePath(path, label, serviceAccount)
+}
