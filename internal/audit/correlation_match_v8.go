@@ -477,17 +477,7 @@ func (repo *CorrelationRepository) matchIdentifiers(ctx context.Context, connect
 	if len(identifiers) == 0 {
 		return nil, nil
 	}
-	clauses := make([]string, 0, len(identifiers))
-	args := []any{string(connector)}
-	for _, identifier := range identifiers {
-		clauses = append(clauses, "(identifier.namespace=? AND identifier.identifier_kind=? AND identifier.value_digest=?)")
-		args = append(args, identifier.Namespace, string(identifier.Kind), identifier.ValueDigest)
-	}
-	filters := ""
-	if mirror != nil {
-		filters = " AND event.source_rail<>? AND event.event_name=?"
-		args = append(args, string(mirror.Rail), mirror.EventName)
-	}
+	from, args := correlationIdentifierMatchFrom(connector, identifiers, mirror)
 	// A session or agent identifier matches every earlier event of that
 	// session. classifyCorrelationMatches needs only whether the matches span
 	// more than one logical group (then the result is ambiguous and uses no
@@ -498,9 +488,6 @@ func (repo *CorrelationRepository) matchIdentifiers(ctx context.Context, connect
 	// all of the session's events, and the per-call cost grew with the session
 	// (rel-1-0-3 GAP-0247, GAP-0186).
 	const columns = `SELECT event.semantic_event_id, event.logical_group_id, event.received_time_unix_nano `
-	from := `FROM correlation_identifiers AS identifier
-		JOIN correlation_events AS event ON event.semantic_event_id=identifier.semantic_event_id
-		WHERE identifier.connector_instance_id=? AND (` + strings.Join(clauses, " OR ") + `)` + filters
 	rows, err := repo.queryCorrelationMatchRows(ctx, columns+from+` LIMIT 1`, args...)
 	if err != nil || len(rows) == 0 {
 		return rows, err
@@ -516,6 +503,32 @@ func (repo *CorrelationRepository) matchIdentifiers(ctx context.Context, connect
 	}
 	return repo.queryCorrelationMatchRows(ctx, columns+from+`
 		ORDER BY event.received_time_unix_nano, event.semantic_event_id LIMIT 1`, args...)
+}
+
+// correlationIdentifierMatchFrom is the FROM and WHERE of matchIdentifiers'
+// reads. The connector is part of every identifier term, not one term beside
+// them: without planner statistics (a store from before 1.0.3 until its first
+// ANALYZE ends) SQLite took a lone connector_instance_id=? as about ten rows
+// and read the connector's whole identifier ledger on every hook, the
+// GAP-0233 misplan; on a multi-gigabyte store that left every hook of the
+// first ANALYZE unanswered (GAP-2505). With the connector in each term the
+// only index plan is one full-key seek per identifier, with or without
+// statistics.
+func correlationIdentifierMatchFrom(connector ConnectorInstanceID, identifiers []CorrelationMatchIdentifier, mirror *CorrelationMirrorCompatibility) (string, []any) {
+	clauses := make([]string, 0, len(identifiers))
+	args := make([]any, 0, 4*len(identifiers)+2)
+	for _, identifier := range identifiers {
+		clauses = append(clauses, "(identifier.connector_instance_id=? AND identifier.namespace=? AND identifier.identifier_kind=? AND identifier.value_digest=?)")
+		args = append(args, string(connector), identifier.Namespace, string(identifier.Kind), identifier.ValueDigest)
+	}
+	filters := ""
+	if mirror != nil {
+		filters = " AND event.source_rail<>? AND event.event_name=?"
+		args = append(args, string(mirror.Rail), mirror.EventName)
+	}
+	return `FROM correlation_identifiers AS identifier
+		JOIN correlation_events AS event ON event.semantic_event_id=identifier.semantic_event_id
+		WHERE (` + strings.Join(clauses, " OR ") + `)` + filters, args
 }
 
 func (repo *CorrelationRepository) matchTraceSpan(ctx context.Context, connector ConnectorInstanceID, traceID, spanID string) ([]correlationMatchRow, error) {
