@@ -3951,6 +3951,10 @@ def _openclaw_plugin_required(cfg, enabled_connectors) -> bool:
     """
     if "openclaw" not in enabled_connectors:
         return False
+    if _guardrail_disabled(cfg):
+        # setup guardrail --disable removes the plugin on purpose: its missing
+        # version evidence is not a reinstall (GAP-2511 review row).
+        return False
     return not openclaw_implied_but_not_installed(cfg)
 
 
@@ -14342,7 +14346,8 @@ def doctor(
                 _emit(
                     "skip",
                     "Connector",
-                    f"{_CONNECTOR_LABELS.get(_c, _c)} — guardrail disabled; enable with: defenseclaw guardrail enable",
+                    f"{_CONNECTOR_LABELS.get(_c, _c)} — guardrail disabled; "
+                    f"enable with: {_guardrail_enable_command(cfg, _c)}",
                     r=r,
                 )
             continue
@@ -16285,6 +16290,22 @@ def _guardrail_disabled(cfg) -> bool:
     return gc is not None and getattr(gc, "enabled", True) is False
 
 
+def _guardrail_enable_command(cfg, connector: str) -> str:
+    """The command that turns a disabled guardrail back on for *connector*.
+
+    ``guardrail enable`` refuses a proxy connector (OpenClaw, ZeptoClaw) with
+    no ``guardrail.model``: it would forward model traffic to an unset
+    upstream. Their setup command asks for it (docs guardrail/disabling).
+    """
+    from defenseclaw.platform_support import is_proxy_connector
+
+    gc = getattr(cfg, "guardrail", None)
+    llm = getattr(cfg, "llm", None)
+    if is_proxy_connector(connector) and not (getattr(gc, "model", "") or getattr(llm, "model", "")):
+        return f"defenseclaw setup {connector}"
+    return "defenseclaw guardrail enable"
+
+
 def _check_disabled_guardrail_hooks(cfg, connector: str, r: _DoctorResult) -> None:
     """Report the hooks of a disabled guardrail: removed is expected (GAP-2511).
 
@@ -16293,6 +16314,9 @@ def _check_disabled_guardrail_hooks(cfg, connector: str, r: _DoctorResult) -> No
     quietly: any problem means the hooks are gone (SKIP); a clean pass means
     DefenseClaw hooks are still registered and still call the gateway (WARN).
     """
+    if connector == "openclaw":
+        _check_disabled_openclaw_plugin(cfg, r)
+        return
     probe = _DoctorResult(passive=True, quiet=True)
     probe.set_section("services")
     try:
@@ -16313,6 +16337,40 @@ def _check_disabled_guardrail_hooks(cfg, connector: str, r: _DoctorResult) -> No
         "skip",
         "Connector hooks",
         f"{label} — hooks removed (guardrail disabled; expected after a disable)",
+        r=r,
+    )
+
+
+def _check_disabled_openclaw_plugin(cfg, r: _DoctorResult) -> None:
+    """OpenClaw after a disable: its gateway row stays, the plugin decides.
+
+    OpenClaw has no hook registration. Its Services check probes the OpenClaw
+    gateway, which a disable leaves running, so a clean pass there does not
+    mean DefenseClaw still guards it. What the teardown removes is the
+    DefenseClaw plugin in ``<openclaw home>/extensions/defenseclaw``. The
+    gateway row runs as usual (an unreachable OpenClaw gateway still FAILs)
+    and the plugin directory reads removed (SKIP) or still installed (WARN).
+    """
+    _check_openclaw_gateway(cfg, r)
+    if openclaw_implied_but_not_installed(cfg):
+        return
+    claw = getattr(cfg, "claw", None)
+    home = os.path.expanduser(str(getattr(claw, "home_dir", "") or "~/.openclaw"))
+    plugin_dir = os.path.join(home, "extensions", "defenseclaw")
+    label = _CONNECTOR_LABELS.get("openclaw", "OpenClaw")
+    if os.path.lexists(plugin_dir):
+        _emit(
+            "warn",
+            "Connector hooks",
+            f"{label} — guardrail disabled, but the DefenseClaw plugin is still installed ({plugin_dir})",
+            r=r,
+            remediation=f"defenseclaw-gateway restart (removes it), or {_guardrail_enable_command(cfg, 'openclaw')}",
+        )
+        return
+    _emit(
+        "skip",
+        "Connector hooks",
+        f"{label} — DefenseClaw plugin removed (guardrail disabled; expected after a disable)",
         r=r,
     )
 

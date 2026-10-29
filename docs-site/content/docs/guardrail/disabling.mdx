@@ -48,6 +48,8 @@ Open the agent's config (for example `~/.claude/settings.json`). No DefenseClaw 
 
 `defenseclaw doctor` shows the guardrail as disabled. It still checks the agents' hooks: a SKIP row says they are removed, which is expected after a disable. If DefenseClaw hooks are still registered, doctor warns and names `defenseclaw-gateway restart`, which removes them.
 
+OpenClaw has no hooks: doctor checks that the DefenseClaw plugin is gone from `~/.openclaw/extensions/defenseclaw` (SKIP when removed, a warning when it is still there) and still checks that the OpenClaw gateway answers. With no `guardrail.model` set, doctor names `defenseclaw setup openclaw` to turn it back on, because `guardrail enable` needs a model for OpenClaw.
+
 ## Turn it back on
 
 ```bash
