@@ -364,7 +364,7 @@ sudo /opt/cisco/defenseclaw/bin/defenseclaw-gateway scan mcp https://mcp.example
 ```
 
 The scan runs through the managed gateway, and only an administrator can read its token, so run
-it with `sudo`. The gateway service cannot read user folders (`/Users`, `/var/root`). Copy the folder to one that every account can read, such as
+it with `sudo`. The gateway service cannot read user folders (`/Users`, `/var/root`); a folder in `/tmp` is scanned. Copy the folder to one that every account can read, such as
 `/opt/defenseclaw-scan`, and scan the copy. A refused scan exits `3` and says `Nothing was
 scanned`. A deployment installed from the payload archive has no scanner runtime: install the
 package to scan.

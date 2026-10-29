@@ -113,8 +113,10 @@ sudo /opt/cisco/defenseclaw/bin/defenseclaw-gateway audit export --since 2h --co
 | `audit findings` | The distinct current scan findings: skill, MCP, plugin, code, AIBOM and inventory scans. Guardrail decisions are not tracked here; use `alerts` or `audit export` |
 
 `scan skill`, `scan plugin` and `scan mcp` also run as root on a managed Linux or macOS host: the
-package installs the scanners and the scan runs through the managed gateway. A folder inside
-a home or temporary folder is refused until you copy it to one the service can read. See
+package installs the scanners and the scan runs through the managed gateway. A folder the
+service cannot read is refused (exit `3`) until you copy it to one it can. On Linux that is
+a folder inside a home folder, `/root`, `/tmp`, `/var/tmp` or `/run/user`; on macOS one
+inside `/Users` or `/var/root`. On macOS a folder in `/tmp` is scanned. See
 [Linux](/docs/enterprise/linux#scan-skills-mcp-servers-and-plugins) and
 [macOS](/docs/enterprise/macos#scan-skills-mcp-servers-and-plugins).
 

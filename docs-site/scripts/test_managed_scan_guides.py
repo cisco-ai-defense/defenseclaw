@@ -15,7 +15,7 @@ class ManagedScanGuideTest(unittest.TestCase):
         # scanners, so the guide gives the administrator's managed-gateway scan.
         self.assertIn("sudo /opt/defenseclaw/bin/defenseclaw-gateway scan skill /path/to/skill", before_steps)
         self.assertIn("sudo /opt/cisco/defenseclaw/bin/defenseclaw-gateway scan skill /path/to/skill", before_steps)
-        self.assertIn("outside home and temporary folders", before_steps)
+        self.assertIn("outside home folders (and, on Linux, temporary folders;", before_steps)
         self.assertIn("support-matrix#managed-linux-and-macos-scans", before_steps)
 
     def test_mcp_guide_gives_managed_route_before_per_user_steps(self):
@@ -31,7 +31,10 @@ class ManagedScanGuideTest(unittest.TestCase):
         limits = (GUIDES.parent / "support-matrix.mdx").read_text()
         section = limits.split("## Managed Linux and macOS scans", 1)[1].split("\n## ", 1)[0]
         self.assertIn("install the skill, MCP and plugin scanners", section)
-        self.assertIn("cannot read home folders or temporary folders", section)
+        self.assertIn("cannot read home folders (on Linux `/home` and `/root`; on macOS `/Users` and `/var/root`)", section)
+        # GAP-2548: only the Linux unit has a private /tmp; managed macOS scans /tmp.
+        self.assertIn("on Linux, temporary folders (`/tmp`, `/var/tmp` and `/run/user`)", section)
+        self.assertIn("On macOS a folder in `/tmp` is scanned.", section)
         self.assertIn("has no scanners", section)
 
     def test_managed_windows_reference_distinguishes_unfinished_mcp_scan(self):
