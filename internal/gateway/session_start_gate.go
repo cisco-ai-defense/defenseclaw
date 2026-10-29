@@ -247,11 +247,20 @@ func (g *sessionStartGate) await(ctx context.Context, key string, wait, arrival 
 			}
 			g.mu.Unlock()
 			window := time.NewTimer(min(arrival, wait))
+			// The wait for a start uses no gateway CPU: it gives up the
+			// caller's run slot, so a parallel burst of tool calls of
+			// sessions this process has not seen does not queue one
+			// arrival wait after another behind the caller's few slots
+			// and run past the hooks' answer budget (GAP-0050).
+			resume := pauseHookRunSlot(ctx)
 			select {
 			case <-arrived:
+				resume()
 			case <-window.C:
+				resume()
 				g.judgeMissingStart(ctx, key, startCheck)
 			case <-ctx.Done():
+				resume()
 				window.Stop()
 				return sessionStartPendingReason, true
 			}
@@ -277,11 +286,16 @@ func (g *sessionStartGate) await(ctx context.Context, key string, wait, arrival 
 			continue
 		default:
 		}
+		// Waiting for another call's start verdict uses no CPU either.
+		resume := pauseHookRunSlot(ctx)
 		select {
 		case <-entry.done:
+			resume()
 		case <-timer.C:
+			resume()
 			return sessionStartPendingReason, true
 		case <-ctx.Done():
+			resume()
 			return sessionStartPendingReason, true
 		}
 	}
