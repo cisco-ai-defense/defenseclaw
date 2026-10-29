@@ -96,6 +96,14 @@ const LinksStableKey = "\x00links-stable"
 // itself (ProtectHome) reads it; a missing answer keeps its fallback.
 const GlobFactPrefix = "\x00glob:"
 
+// ReadingTargetPrefix keys the hook client resolution of one write operand
+// on a static reading of a call with a runtime-expanded operand word
+// (actionfacts.DynamicOperandTwins, GAP-2477), for an operand that the call
+// as written lists with an empty (unknown) answer. Only the gateway judgment
+// of that reading behind ProtectHome reads it; the call as written keeps
+// the unknown answer. An empty or missing fact leaves the operand unknown.
+const ReadingTargetPrefix = "\x00reading-target:"
+
 // maxWriteTargetLinkDepth matches the Linux kernel limit (MAXSYMLINKS) for
 // one path resolution. Every followed link counts, also in parent components,
 // so a link loop ends here and reports an unresolvable target.
@@ -854,6 +862,8 @@ func ResolveConnector(connector, surface, event string, payload []byte) string {
 	var directoryOperands []RedirectOccurrence
 	var directoryUnknown bool
 	links := shellLinks{known: true}
+	var dynamicReadings []string
+	readingTargets := map[string]string{}
 	sourceFacts := map[string]string{}
 	if physicalCWD, ok := ResolveWriteTarget(cwd); ok {
 		sourceFacts[DirectoryFactPrefix+cwd] = physicalCWD
@@ -947,21 +957,36 @@ func ResolveConnector(connector, surface, event string, payload []byte) string {
 				// caffeinate, sudo -i, env -iC DIR, ...) runs the call it
 				// wraps. The gateway judges that call through
 				// actionfacts.WrapperUnwrapTwin, but behind ProtectHome it
-				// reads the wrapped call's targets only from this map, so the
-				// map also lists the targets of that reading (GAP-2563).
+				// reads the targets of the wrapped call only from this map, so
+				// the map also lists the targets of that reading (GAP-2563).
 				if !isApplyPatchToolName(tool) {
-					if twin, isTwin := actionfacts.WrapperUnwrapTwin(command); isTwin && twin != command {
+					readings := []string{command}
+					if wrapped, isTwin := actionfacts.WrapperUnwrapTwin(command); isTwin && wrapped != command {
+						readings = append(readings, wrapped)
 						twinInput := fallback
-						twinInput.Command = twin
+						twinInput.Command = wrapped
 						twinFacts := actionfacts.Analyze(twinInput)
 						facts.Paths = append(facts.Paths, twinFacts.Paths...)
 						truncated = truncated || twinFacts.Parse.Status == actionfacts.StatusLimitExceeded
-						twinOperands, _, _ := ShellWriteOperands(twin, cwd, home)
+						twinOperands, _, _ := ShellWriteOperands(wrapped, cwd, home)
 						operands = append(operands, twinOperands...)
-						literalOperands = append(literalOperands, LiteralWriteOperands(twin, cwd, home)...)
-						twinDirectories, twinUnknown := ShellDirectoryWriteOperands(twin, cwd, home, sourceFacts, true, false)
+						literalOperands = append(literalOperands, LiteralWriteOperands(wrapped, cwd, home)...)
+						twinDirectories, twinUnknown := ShellDirectoryWriteOperands(wrapped, cwd, home, sourceFacts, true, false)
 						directoryOperands = append(directoryOperands, twinDirectories...)
 						truncated = truncated || twinUnknown
+					}
+					// A cp, mv, install, ln, dd or tee call with a
+					// runtime-expanded operand word ($(true), `true`, $SRC)
+					// has a partial argv. The gateway judges its static
+					// readings (actionfacts.DynamicOperandTwins), also of the
+					// wrapped call, and behind ProtectHome reads their targets
+					// only from this map (GAP-2477); they are listed below.
+					for _, reading := range readings {
+						for _, twin := range actionfacts.DynamicOperandTwins(reading, home) {
+							if twin != reading && !slices.Contains(dynamicReadings, twin) {
+								dynamicReadings = append(dynamicReadings, twin)
+							}
+						}
 					}
 				}
 				// A link the command creates can make a later write a write
@@ -1174,6 +1199,56 @@ func ResolveConnector(connector, surface, event string, payload []byte) string {
 		targets[PatchCompleteKey] = "1"
 		size += entry
 	}
+	// Each static reading of a call with a runtime-expanded operand word
+	// (GAP-2477) is one way the call runs: its write targets are resolved
+	// through the link walk of that reading, whose argv is complete, and
+	// listed when the call as written did not list them already.
+	for _, reading := range dynamicReadings {
+		readingInput := input
+		readingInput.Tool, readingInput.Args, readingInput.Command = "Bash", nil, reading
+		readingFacts := actionfacts.Analyze(readingInput)
+		truncated = truncated || readingFacts.Parse.Status == actionfacts.StatusLimitExceeded
+		readingPaths, _, _ := ShellWriteOperands(reading, cwd, home)
+		readingPaths = append(readingPaths, LiteralWriteOperands(reading, cwd, home)...)
+		readingDirectories, readingUnknown := ShellDirectoryWriteOperands(reading, cwd, home, sourceFacts, true, false)
+		truncated = truncated || readingUnknown
+		for _, operand := range readingDirectories {
+			readingPaths = append(readingPaths, operand.Path)
+		}
+		for _, candidate := range readingFacts.Paths {
+			if candidate.Access == actionfacts.PathAccessWrite || candidate.Access == actionfacts.PathAccessAppend {
+				if candidate.Resolved != "" {
+					readingPaths = append(readingPaths, candidate.Resolved)
+				}
+			}
+		}
+		callLinks := links
+		links = commandLinksWithFacts(reading, cwd, home, sourceFacts, true)
+		for _, path := range readingPaths {
+			key := OperandPath(path, cwd)
+			old, listed := targets[key]
+			if listed && old != "" {
+				continue
+			}
+			add(path, true, false)
+			if !listed {
+				continue
+			}
+			// The call as written keeps its unknown answer; the answer of
+			// this reading is a fact of the reading only.
+			resolved, present := targets[key]
+			if present {
+				size -= len(jsonString(key)) + 1 + len(jsonString(resolved)) + 1
+			}
+			targets[key] = ""
+			size += len(jsonString(key)) + 1 + len(jsonString("")) + 1
+			if previous, seen := readingTargets[ReadingTargetPrefix+key]; seen && previous != resolved {
+				resolved = ""
+			}
+			readingTargets[ReadingTargetPrefix+key] = resolved
+		}
+		links = callLinks
+	}
 	for key, value := range sourceFacts {
 		entry := len(jsonString(key)) + 1 + len(jsonString(value)) + 1
 		if len(targets)-1 >= MaxWriteTargets || size+entry > maxEncodedTargets {
@@ -1185,7 +1260,7 @@ func ResolveConnector(connector, surface, event string, payload []byte) string {
 	}
 	// A fact that does not fit is omitted; the gateway reads a missing fact
 	// as unknown, so the map need not be marked truncated for it.
-	for _, extra := range []map[string]string{opaqueFacts, globFacts} {
+	for _, extra := range []map[string]string{opaqueFacts, globFacts, readingTargets} {
 		for _, key := range slices.Sorted(maps.Keys(extra)) {
 			entry := len(jsonString(key)) + 1 + len(jsonString(extra[key])) + 1
 			if len(targets)-1 >= MaxWriteTargets || size+entry > maxEncodedTargets {
