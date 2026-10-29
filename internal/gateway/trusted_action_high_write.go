@@ -311,7 +311,13 @@ func provedHighWriteFindings(
 		// A POSIX shell on a Windows host (Git Bash, the shell of Claude
 		// Code's Bash tool) writes host paths (GAP-0768).
 		if hostFlavor == actionfacts.PathFlavorWindows && target.Flavor == actionfacts.PathFlavorPOSIX && !isSandboxHookRequest(ctx) {
-			if host, ok := windowsHostPathOfPOSIXOperand(target.Value, request.Input.CWD, request.Input.ActiveHome); ok {
+			// A relative operand after an earlier cd (`cd sub && echo x >
+			// CLAUDE.md`) is not in the hook cwd: it stays unplaced, as the
+			// hook-artifact reader does (GAP-1776).
+			cwdMoved := slices.ContainsFunc(facts.Commands, func(earlier actionfacts.CommandFact) bool {
+				return earlier.ID < target.CommandID && actionfacts.ChangesShellDirectory(earlier)
+			})
+			if host, ok := windowsHostPathOfPOSIXOperand(target.Value, request.Input.CWD, request.Input.ActiveHome, cwdMoved); ok {
 				target.Resolved, target.Flavor = host, actionfacts.PathFlavorWindows
 			}
 		}
@@ -614,8 +620,9 @@ func highWriteCatalogRule(rule PatternRule) bool {
 // (C:\x, C:/x), an MSYS drive mount (/c/x), a path under ~ when the home
 // is a Windows path, or a relative path against a Windows working
 // directory, in the forward-slash spelling ActionFacts gives Windows paths.
-// Any other operand (/tmp, /etc: the MSYS root) is not placed (ok false).
-func windowsHostPathOfPOSIXOperand(value, cwd, home string) (string, bool) {
+// Any other operand (/tmp, /etc: the MSYS root) is not placed (ok false),
+// nor is a relative one when an earlier command moved the shell (cwdMoved).
+func windowsHostPathOfPOSIXOperand(value, cwd, home string, cwdMoved bool) (string, bool) {
 	drive := func(p string) bool {
 		return len(p) >= 3 && (p[1] == ':') && (p[2] == '/' || p[2] == '\\') &&
 			('a' <= p[0] && p[0] <= 'z' || 'A' <= p[0] && p[0] <= 'Z')
@@ -639,7 +646,7 @@ func windowsHostPathOfPOSIXOperand(value, cwd, home string) (string, bool) {
 	case strings.HasPrefix(value, "~"):
 		return "", false
 	}
-	if !drive(cwd) {
+	if cwdMoved || !drive(cwd) {
 		return "", false
 	}
 	return clean(cwd + "/" + value), true
