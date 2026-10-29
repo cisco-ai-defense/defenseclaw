@@ -17,6 +17,7 @@
 package openshell
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -87,6 +88,41 @@ func formulaKegInstalled(prefix string) bool {
 		}
 	}
 	return false
+}
+
+// otherFormulaTap is the tap of the openshell keg the Homebrew at prefix
+// links when another tap than GatewayFormula's installed it (homebrew/core
+// has an openshell formula too), from the keg's INSTALL_RECEIPT.json; ""
+// for NVIDIA's formula, no keg or no receipt. That formula writes no
+// gateway certificates and has no gateway service, and Homebrew installs
+// NVIDIA's only once it is removed: `defenseclaw sandbox setup
+// --install-openshell` keeps a supported CLI it finds, so it is no fix
+// while it is there (GAP-2507).
+func otherFormulaTap(prefix string) string {
+	if prefix == "" {
+		return ""
+	}
+	keg := formulaKegState(prefix)
+	if keg == "" {
+		return ""
+	}
+	raw, err := os.ReadFile(filepath.Join(keg, "INSTALL_RECEIPT.json"))
+	if err != nil {
+		return ""
+	}
+	var receipt struct {
+		Source struct {
+			Tap string `json:"tap"`
+		} `json:"source"`
+	}
+	if json.Unmarshal(raw, &receipt) != nil {
+		return ""
+	}
+	tap := strings.TrimSpace(receipt.Source.Tap)
+	if tap == "" || strings.EqualFold(tap, path.Dir(GatewayFormula)) {
+		return ""
+	}
+	return tap
 }
 
 // formulaKegState records the active Homebrew opt link. A new Cellar

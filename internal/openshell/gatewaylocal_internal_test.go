@@ -153,3 +153,66 @@ func TestRegisterLocalTakesTheHomebrewPKILayoutWithoutWaiting(t *testing.T) {
 		})
 	}
 }
+
+// GAP-2507: a Mac whose openshell keg is homebrew/core's (no post-install
+// certificates, no gateway service) was told to run `defenseclaw sandbox
+// setup --install-openshell`, which keeps the supported CLI it finds and
+// ended on the same message. The refusal and the doctor fix name the
+// removal of that formula first; NVIDIA's own keg keeps its install text.
+func TestAHomebrewCoreOpenShellIsNamedForRemovalNotReinstalled(t *testing.T) {
+	for _, tc := range []struct {
+		name, tap   string
+		wantRemoval bool
+	}{
+		{"homebrew/core keg", "homebrew/core", true},
+		{"NVIDIA formula keg", "nvidia/openshell", false},
+		{"keg without a receipt", "", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			configDir, brew := filepath.Join(root, "config"), filepath.Join(root, "brew")
+			keg := filepath.Join(brew, "Cellar", "openshell", "0.1.5")
+			for _, d := range []string{configDir, keg, filepath.Join(brew, "opt")} {
+				if err := os.MkdirAll(d, 0o755); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := os.Symlink(filepath.Join("..", "Cellar", "openshell", "0.1.5"), filepath.Join(brew, "opt", "openshell")); err != nil {
+				t.Fatal(err)
+			}
+			if tc.tap != "" {
+				receipt := `{"installed_on_request":true,"source":{"spec":"stable","tap":"` + tc.tap + `"}}`
+				if err := os.WriteFile(filepath.Join(keg, "INSTALL_RECEIPT.json"), []byte(receipt), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			tls := filepath.Join(brew, "var", "openshell", "tls")
+			runner := &registrationRunner{}
+			r := &doctorRun{Doctor: &Doctor{GOOS: "darwin", CLI: "openshell", Runner: runner,
+				Discover: DiscoverOptions{ConfigDir: configDir},
+				Gateway:  &GatewayConfigurator{BrewPrefix: brew, RestartWait: time.Minute}}}
+			err := r.registerLocal(context.Background())
+			if err == nil || len(runner.calls) != 0 || !strings.Contains(err.Error(), "has no client certificates in "+tls) {
+				t.Fatalf("registration without PKI: %v, calls %+v", err, runner.calls)
+			}
+			fix := r.homebrewPKIFix(tls, "openshell gateway add")
+			removal := "brew uninstall openshell && " + installOpenShellCommand
+			for _, got := range []string{err.Error(), fix.Summary + ": " + fix.Command} {
+				if tc.wantRemoval {
+					for _, want := range []string{removal, "openshell formula of " + tc.tap, "owner of the Homebrew prefix"} {
+						if !strings.Contains(got, want) {
+							t.Errorf("%q does not name %q", got, want)
+						}
+					}
+					continue
+				}
+				if strings.Contains(got, "uninstall") || !strings.Contains(got, installOpenShellCommand) {
+					t.Errorf("NVIDIA or unknown keg %q: want the install step, no removal", got)
+				}
+			}
+			if tc.wantRemoval && fix.Command != removal {
+				t.Errorf("fix command %q, want %q", fix.Command, removal)
+			}
+		})
+	}
+}
