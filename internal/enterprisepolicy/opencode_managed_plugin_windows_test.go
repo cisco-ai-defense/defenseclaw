@@ -108,7 +108,7 @@ func TestPublishWindowsGoOwnedInstallsTheOpenCodePlugin(t *testing.T) {
 			t.Fatalf("%s must be removed: %v", gone, err)
 		}
 	}
-	if body, err := os.ReadFile(config); err == nil && strings.Contains(string(body), "defenseclaw.js") {
+	if body, err := os.ReadFile(config); err == nil && strings.Contains(string(body), strings.ReplaceAll(openCodePluginSpec(opts), `\`, `\\`)) {
 		t.Fatalf("teardown must remove DefenseClaw's OpenCode entry:\n%s", body)
 	}
 }

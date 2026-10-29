@@ -110,6 +110,7 @@ from defenseclaw.connector_contracts import (
     normalize_agent_version,
     normalize_connector,
     openclaw_needs_interception_advisory,
+    opencode_requires_v2_upgrade,
     resolve_connector_contract,
     stable_agent_version,
 )
@@ -6181,11 +6182,7 @@ def _check_connector_version_supported_for_setup(
     # OpenCode needs a validated plugin contract, and a kiro-cli below the
     # floor has a surface that sends no hooks (GAP-0227): their messages say so.
     strict_unknown = connector in {"opencode", "kiro"}
-    if (
-        connector == "opencode"
-        and compatibility.normalized_version
-        and compatibility.normalized_version.split(".", 1)[0] != "2"
-    ):
+    if connector == "opencode" and opencode_requires_v2_upgrade(compatibility.raw_version):
         detail = f"OpenCode V2 is required; detected {version_display}. {upgrade_guidance}"
         if emit:
             ux.err(detail)

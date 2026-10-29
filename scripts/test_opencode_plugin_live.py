@@ -160,7 +160,7 @@ def check(binary: str, blocked: bool, registration: str, tool: str) -> None:
                 "snapshots": False,
                 "permissions": [{"action": "*", "resource": "*", "effect": "allow"}],
                 "providers": {
-                    "fixture": {"package": "@ai-sdk/openai-compatible", "settings": settings, "models": models}
+                    "fixture": {"package": "aisdk:@ai-sdk/openai-compatible", "settings": settings, "models": models}
                 },
             }
             (config_dir / "opencode.json").write_text(json.dumps(config))

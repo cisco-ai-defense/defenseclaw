@@ -238,14 +238,19 @@ func cleanJSONSource(scan *guardScan, source hookSource, backupDir string, resul
 			if !exists {
 				continue
 			}
-			list, _ := value.([]any)
+			list, ok := value.([]any)
+			if !ok {
+				continue
+			}
 			kept := make([]any, 0, len(list))
 			for _, item := range list {
 				if !remove[sha256Hex(canonicalJSON(item))] {
 					kept = append(kept, item)
 				}
 			}
-			doc.set(key, kept)
+			if len(kept) != len(list) {
+				doc.set(key, kept)
+			}
 		}
 	} else {
 		hooksValue, _ := doc.get("hooks")

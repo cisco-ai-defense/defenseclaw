@@ -20,8 +20,8 @@ V2 support is currently a preview. Native allow/block callbacks have been checke
 
 | Platform | Status | Notes |
 | --- | --- | --- |
-| macOS and Linux | **Supported** | V2-only preview contract `>=2.0.0,<2.2.0`, reviewed at 2.0.0 and 2.1.4. Native callback validation currently covers macOS arm64. |
-| Native Windows x64 | **Supported** | V2-only preview; direct native execution with the official `@opencode/cli` package or the protected current-user `SST.opencode` WinGet executable. The installed version must be V2. Mixed WSL/native paths, Desktop sidecars, other packages and ARM64 are outside the native Windows contract. |
+| macOS and Linux | **Preview** | V2-only contract `>=2.0.0,<2.2.0`, reviewed at 2.0.0 and 2.1.4. Native callback validation currently covers macOS arm64. |
+| Native Windows x64 | **Preview** | Direct native execution with the official `@opencode/cli` package or the protected current-user `SST.opencode` WinGet executable. The installed version must be V2. Mixed WSL/native paths, Desktop sidecars, other packages and ARM64 are outside the native Windows contract. |
 
 ## Setup
 
@@ -55,6 +55,7 @@ The connector appears under **Agents** with its mode. `IDLE` is normal until Ope
 | Installed version | What setup does |
 | --- | --- |
 | OpenCode V1 or another detected non-V2 major | Refuses before activation in observe and action mode, including with the exploratory drift override. Install V2 and rerun setup. |
+| Git/source build without a release version | Refuses before activation, including with the drift override. Install a versioned V2 release; commit-hash digits do not identify its major version. |
 | `>=2.0.0,<2.2.0` | Uses `opencode-hooks-v2`, bridge generation `v7`. |
 | A newer V2 minor | Per-user setup uses the same V2 contract with an untested-version warning. Strict profiles retain their exact reviewed range. |
 | Not readable | Existing unversioned policy applies: observe warns; action refuses without an explicit exploratory override. This does not provide a V1 implementation. |
@@ -87,6 +88,8 @@ A blocked call returns its reason through the rejected tool Promise. V2 server p
 
 The after hook preserves V2 `status`, structured `output`, `content` and metadata. Errors are failures. A shell result proves success only when completed with exit zero; a running background command is not completed success. After-hook findings cannot undo an already executed side effect.
 
+Paired after callbacks reuse bounded, verified before-call context. The cache retains metadata only, is cleared on unload, and falls back to fresh bounded context resolution for an unmatched callback. A new before callback always verifies current context.
+
 Session events are observe-only telemetry. The adapter maps native `session.execution.*` events to the gateway's status, error and idle events, resolves location-less events against the session, and disposes subscriptions and registrations on unload.
 
 See the [gateway outage table](/docs/connectors/capability-matrix#gateway-outage) for each installation mode's outage behavior.
@@ -97,11 +100,15 @@ V2 accepts compatible existing configuration syntax as well as native V2 fields.
 
 Native V2 plugin entries use `plugins`; MCP servers use `mcp.servers`. Relative paths are resolved only against an explicit workspace. Managed policy and JSONC handling preserve unrelated operator settings.
 
+V2 also accepts compatible direct MCP entries beside `mcp.servers`; native entries win same-name collisions. A higher-precedence server replaces the entire lower-layer object, so it must repeat any required endpoint, command, headers or environment fields. Passive plugin inventory reports activation as unverified when ordered plugin control directives prevent it from proving which exported IDs are enabled.
+
 ## Enterprise deployments
 
 Per-user, managed standalone and Secure Client plugin variants all use the V2 entrypoint. The existing account and service verification boundaries remain in their respective transports. A detected V1 installation must be upgraded before connector activation.
 
 Managed standalone setup uses the administrator-owned shared plugin and the existing foreign-hook guard. Old file identities remain solely to migrate or remove installations written by an earlier DefenseClaw release.
+
+Application-control policies must permit OpenCode to read the managed directory and load `<install root>/share/opencode/index.js`. See the [managed plugin paths](/docs/enterprise/machine-policy#managed-opencode-plugin) for each OS.
 
 ### On a managed computer
 

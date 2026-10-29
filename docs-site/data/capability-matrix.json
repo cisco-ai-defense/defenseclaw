@@ -194,7 +194,7 @@
     {
       "id": "opencode",
       "label": "OpenCode",
-      "windowsSupport": "supported",
+      "windowsSupport": "preview",
       "windowsNote": "Native Windows x64 uses the reviewed @opencode/cli V2 image or an admitted V2 WinGet CLI.",
       "summary": "Auto-loaded bridge plugin with tool-execution blocking.",
       "family": "hooks",

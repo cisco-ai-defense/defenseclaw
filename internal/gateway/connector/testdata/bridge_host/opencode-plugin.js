@@ -1204,7 +1204,8 @@ async function defenseclawV2Lifecycle(ctx, event, sessions, hooks) {
   if (event.type === "session.execution.started") properties.status = { type: "busy" };
   await hooks.event({ event: { ...event, type, properties } });
   if (event.type === "session.execution.failed") {
-    await hooks.event({ event: { ...event, type: "session.idle", properties } });
+    const id = typeof event.id === "string" && event.id ? event.id + ":idle" : event.id;
+    await hooks.event({ event: { ...event, id, type: "session.idle", properties } });
   }
   if (type === "session.deleted") sessions.delete(data.sessionID);
 }
@@ -1216,23 +1217,33 @@ async function defenseclawV2Setup(ctx, createHooks) {
   const hooks = await createHooks({ client, directory: ctx.location?.directory });
   const registrations = [];
   const sessions = new Map();
+  const calls = new Map();
   const controller = new AbortController();
   const cleanup = async () => {
     controller.abort();
     sessions.clear();
+    calls.clear();
     await Promise.allSettled(registrations.map((registration) => registration.dispose()));
   };
   try {
     registrations.push(await ctx.tool.hook("execute.before", async (event) => {
+      calls.delete(event?.id);
       defenseclawPinV2Event(event);
       const input = await defenseclawV2Context(ctx, event);
       defenseclawV2Remember(sessions, input.sessionID, ctx.location);
       await hooks["tool.execute.before"](input, { args: event.input });
+      // Retain only verified metadata, never the potentially large tool input.
+      const { args, ...context } = input;
+      defenseclawV2Remember(calls, event.id, context);
     }));
     registrations.push(await ctx.tool.hook("execute.after", async (event) => {
       // A telemetry failure cannot undo an already executed tool.
       try {
-        const input = await defenseclawV2Context(ctx, event);
+        const cached = calls.get(event?.id);
+        calls.delete(event?.id);
+        const paired = cached && cached.sessionID === event.sessionID && cached.tool === event.tool
+          && cached.messageID === event.messageID && cached.agent === event.agent;
+        const input = paired ? { ...cached, args: event.input } : await defenseclawV2Context(ctx, event);
         await hooks["tool.execute.after"](input, defenseclawV2Result(event));
       } catch (_) {}
     }));

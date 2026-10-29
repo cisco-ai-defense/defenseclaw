@@ -195,11 +195,11 @@ func TestVerifyCopilotSandboxPolicyRejectsTampering(t *testing.T) {
 }
 
 func TestVerifyOpenCodeSandboxManagedConfigRejectsTampering(t *testing.T) {
-	plugin := `"plugin":["file://` + OpenCodeSandboxPluginPath + `"]`
+	plugin := `"plugin":["` + openCodeSandboxPluginURL() + `"]`
 	good := sandboxFile(t, sandboxArtifactsFor(t, NewOpenCodeConnector(), "2.1.4"), OpenCodeSandboxManagedConfigPath).Data
 	assertTamperRejected(t, verifyOpenCodeSandboxManagedConfig, good, map[string][]byte{
 		"no-plugin":      []byte(`{"plugin":[],"autoupdate":false,"share":"disabled"}`),
-		"extra-plugin":   []byte(`{"plugin":["file://` + OpenCodeSandboxPluginPath + `","file:///tmp/x.js"],"autoupdate":false,"share":"disabled"}`),
+		"extra-plugin":   []byte(`{"plugin":["` + openCodeSandboxPluginURL() + `","file:///tmp/x.js"],"autoupdate":false,"share":"disabled"}`),
 		"autoupdate":     []byte(`{` + plugin + `,"share":"disabled"}`),
 		"share-enabled":  []byte(`{` + plugin + `,"autoupdate":false,"share":"auto"}`),
 		"not-json":       []byte(`plugin = []`),

@@ -87,8 +87,10 @@ crosses a zone boundary is an attack surface and is listed in
 OpenCode's managed config directories (`/etc/opencode`,
 `/Library/Application Support/opencode`, `%ProgramData%\opencode`) are used
 only when the managed OpenCode plugin is installed at
-`<install root>/share/opencode/index.js`. This release does not ship
-that plugin, so OpenCode is a per-user connector on every OS
+`<install root>/share/opencode/index.js`. The standalone payload ships
+that plugin and uses the machine-policy route while the plugin is trusted,
+ownership is enabled, and the managed config names its directory. Otherwise
+OpenCode uses the guarded per-user fallback
 (`internal/enterprisepolicy/opencode.go`).
 
 ```mermaid

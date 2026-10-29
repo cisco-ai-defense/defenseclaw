@@ -5465,57 +5465,81 @@ def _enumerate_plugins_filesystem(
                 row["logical_id"] = discovered.logical_id
             rows.append(row)
     if connector_paths.normalize(resolved_connector) == "opencode":
+        resolution = connector_paths._resolve_opencode_config(workspace_dir)  # type: ignore[attr-defined]
         seen_config_ids = {str(row["id"]).casefold() for row in rows}
-        for row in _opencode_config_plugin_rows(workspace_dir):
+        for row in _opencode_config_plugin_rows(workspace_dir, resolution=resolution):
             identity = str(row["id"]).casefold()
             if identity in seen_config_ids:
                 continue
             seen_config_ids.add(identity)
             rows.append(row)
+        if any(_opencode_plugin_control(spec) for _, spec in _opencode_plugin_specs(resolution)):
+            for row in rows:
+                _opencode_unverified_plugin_activation(row)
     return rows
 
 
-def _opencode_config_plugin_rows(workspace_dir: str) -> list[dict[str, Any]]:
-    """Inventory v1 ``plugin`` and v2 ``plugins`` specs without loading them."""
+def _opencode_plugin_specs(resolution: connector_paths.OpenCodeConfigResolution):
+    for layer in resolution.layers:
+        if not isinstance(layer.data, dict):
+            continue
+        for key in ("plugin", "plugins"):
+            values = layer.data.get(key)
+            if not isinstance(values, list):
+                continue
+            for value in values:
+                spec = value[0] if isinstance(value, list) and value else value
+                if isinstance(spec, dict):
+                    spec = spec.get("package")
+                if isinstance(spec, str) and spec.strip():
+                    yield layer, spec.strip()
 
-    managed_bridge = os.path.normcase(
-        os.path.abspath(connector_paths.connector_config_files("opencode")[0])
-    )
+
+def _opencode_plugin_control(spec: str) -> bool:
+    return spec.startswith(("-", "opencode.")) or spec == "*" or spec.endswith(".*")
+
+
+def _opencode_unverified_plugin_activation(row: dict[str, Any]) -> None:
+    row.update(enabled=False, status="unverified", activation_verified=False, activation_unverified=True)
+    row["activation_reason"] = "OpenCode's ordered plugin controls require runtime activation verification."
+
+
+def _opencode_config_plugin_rows(
+    workspace_dir: str,
+    *,
+    resolution: connector_paths.OpenCodeConfigResolution | None = None,
+) -> list[dict[str, Any]]:
+    """Inventory configured V2 packages without executing them or selector IDs."""
+
+    managed_bridge = os.path.normcase(os.path.abspath(connector_paths.connector_config_files("opencode")[0]))
     rows: list[dict[str, Any]] = []
-    for layer in connector_paths._resolve_opencode_config(workspace_dir).layers:  # type: ignore[attr-defined]
-        configured = []
-        if isinstance(layer.data, dict):
-            for key in ("plugin", "plugins"):
-                values = layer.data.get(key)
-                if isinstance(values, list):
-                    configured.extend(values)
-        for value in configured:
-            spec = value[0] if isinstance(value, list) and value else value
-            if isinstance(spec, dict):
-                spec = spec.get("package")
-            if not isinstance(spec, str) or not spec.strip():
-                continue
-            plugin_id = spec.strip()
-            path_candidate = ""
-            if plugin_id.startswith(("./", "../")) and layer.path:
-                path_candidate = os.path.abspath(
-                    os.path.join(os.path.dirname(layer.path), plugin_id)
-                )
-            elif os.path.isabs(plugin_id):
-                path_candidate = os.path.abspath(plugin_id)
-            if path_candidate and os.path.normcase(path_candidate) == managed_bridge:
-                continue
-            rows.append(
-                {
-                    "id": plugin_id,
-                    "name": plugin_id,
-                    "origin": layer.source,
-                    "enabled": True,
-                    "status": "configured",
-                    "path": layer.path or layer.source,
-                    "configuration_only": True,
-                }
-            )
+    resolution = resolution or connector_paths._resolve_opencode_config(workspace_dir)  # type: ignore[attr-defined]
+    specs = list(_opencode_plugin_specs(resolution))
+    controlled = any(_opencode_plugin_control(spec) for _, spec in specs)
+    for layer, plugin_id in specs:
+        if _opencode_plugin_control(plugin_id):
+            continue
+        path_candidate = ""
+        if plugin_id.startswith(("./", "../")) and layer.path:
+            path_candidate = os.path.abspath(os.path.join(os.path.dirname(layer.path), plugin_id))
+        elif os.path.isabs(plugin_id):
+            path_candidate = os.path.abspath(plugin_id)
+        if path_candidate and os.path.normcase(path_candidate) == managed_bridge:
+            continue
+        rows.append(
+            {
+                "id": plugin_id,
+                "name": plugin_id,
+                "origin": layer.source,
+                "enabled": True,
+                "status": "configured",
+                "path": layer.path or layer.source,
+                "configuration_only": True,
+            }
+        )
+    if controlled:
+        for row in rows:
+            _opencode_unverified_plugin_activation(row)
     return rows
 
 

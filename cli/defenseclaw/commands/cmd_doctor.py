@@ -3496,14 +3496,18 @@ def _litellm_version_note() -> tuple[str, str]:
 
     from defenseclaw.scanner import settings as scanner_settings
 
-    dist, floor = scanner_settings.LITELLM_DIST, scanner_settings.LITELLM_MIN_VERSION
+    dist = scanner_settings.LITELLM_DIST
+    floor, ceiling = scanner_settings.LITELLM_MIN_VERSION, scanner_settings.LITELLM_MAX_VERSION
     try:
         installed = importlib_metadata.version(dist)
     except importlib_metadata.PackageNotFoundError:
         return "fail", f"{dist} is not installed; {_scanner_repair_hint()}"
-    if tuple(int(part) for part in re.findall(r"\d+", installed)[:3]) < floor:
-        needed = ".".join(str(part) for part in floor)
-        return "warn", f"{dist} {installed} (this release needs {needed} or newer); {_scanner_repair_hint()}"
+    # Published stable releases may carry post/local metadata. A prerelease,
+    # development build or unreadable version cannot prove this stable range.
+    match = re.fullmatch(r"(\d+)\.(\d+)\.(\d+)(?:\.post\d+)?(?:\+[A-Za-z0-9.-]+)?", installed)
+    if not match or not floor <= tuple(int(part) for part in match.groups()) < ceiling:
+        needed = ">=" + ".".join(map(str, floor)) + ",<" + ".".join(map(str, ceiling))
+        return "warn", f"{dist} {installed} (this release needs {needed}); {_scanner_repair_hint()}"
     return "pass", f"{dist} {installed}"
 
 

@@ -376,6 +376,15 @@ def normalize_agent_version(raw: str | None) -> str:
     return ".".join(normalized)
 
 
+def opencode_requires_v2_upgrade(raw_version: str | None) -> bool:
+    """Mirror RequireOpenCodeV2, independently of exploratory contract drift."""
+    raw = (raw_version or "").strip()
+    if _GIT_BUILD_RE.search(raw):
+        return True
+    normalized = normalize_agent_version(raw)
+    return bool(normalized and normalized.split(".", 1)[0] != "2")
+
+
 # Mirror Go connector.KiroCLIHookFloor: before it a non-interactive
 # `kiro-cli chat --v3` run loads no hooks (kiro.dev/docs/cli/headless), so its
 # tool calls never reach DefenseClaw (rel-1-0-4 GAP-0227).
@@ -643,6 +652,15 @@ def resolve_connector_contract(
             status=STATUS_UNVERSIONED,
             reason="agent version not probed; using connector default hook contract",
             contract=contract,
+        )
+    if name == "opencode" and _GIT_BUILD_RE.search(raw):
+        return ConnectorCompatibility(
+            connector=name,
+            raw_version=raw,
+            normalized_version="",
+            status=STATUS_UNKNOWN,
+            reason="OpenCode git build has no release version; install a versioned OpenCode V2 release",
+            contract=None,
         )
     normalized = normalize_agent_version(raw)
     if not normalized:

@@ -200,9 +200,10 @@ func (opencodeTarget) Paths(opts Options) ([]string, error) {
 	return []string{path}, nil
 }
 
-// openCodePluginSpec names a directory: v2 resolves index.js, and v1's
-// package loader accepts the same directory. File specs remain ownership
-// aliases while v1 installations upgrade to the dual-version bridge.
+// openCodePluginSpec names the V2 directory entrypoint containing index.js.
+// Retain the old defenseclaw.js ownership alias through DefenseClaw 1.x for
+// the supported 0.8.x-to-1.x upgrade/teardown path; remove it with that path
+// before DefenseClaw 2.0. It never activates a V1 runtime.
 func openCodePluginSpec(opts Options) string {
 	return dirFor(opts, opts.OpenCodePluginPath)
 }

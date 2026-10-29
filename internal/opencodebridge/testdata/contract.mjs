@@ -102,6 +102,10 @@ export async function contract(plugin, fixture) {
   assert(payloads.some((p) => p.hook_event_name === "session.status" && p.session_id === "ses_child"));
   assert(payloads.some((p) => p.hook_event_name === "session.error" && p.session_id === "ses_child"));
   assert(payloads.some((p) => p.hook_event_name === "session.idle" && p.session_id === "ses_child"));
+  const failed = payloads.find((p) => p.hook_event_name === "session.error" && p.session_id === "ses_child");
+  const idle = payloads.find((p) => p.hook_event_name === "session.idle" && p.session_id === "ses_child");
+  assert.equal(failed.source_event_id, "evt_failed");
+  assert.equal(idle.source_event_id, "evt_failed:idle");
   await cleanup();
   await new Promise((resolve) => setImmediate(resolve));
   assert.equal(disposed, 2);

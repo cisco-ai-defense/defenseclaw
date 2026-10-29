@@ -33,7 +33,7 @@ func TestOpenCodeRejectsOtherMajorsBeforeAnyWriteEvenWithDriftOverride(t *testin
 	if err := os.WriteFile(OpenCodePluginPathOverride, []byte(original), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	for _, agentVersion := range []string{"1.18.33", "3.0.0"} {
+	for _, agentVersion := range []string{"1.18.33", "3.0.0", "vgit.1a2b3c4", "vgit.2fa91c0", "vgit.5bba024"} {
 		for _, mode := range []SetupOpts{
 			{GuardrailMode: "observe"},
 			{GuardrailMode: "action"},
@@ -103,7 +103,7 @@ await contract(plugin, {
 }
 
 func TestOpenCodeV2GeneratedAdapter(t *testing.T) {
-	for _, file := range []string{"hooks/opencode-plugin.js", "hooks/opencode-plugin-secure-client.js", "../../enterprisepolicy/opencode_managed_plugin.js"} {
+	for _, file := range []string{"hooks/opencode-plugin.js", "hooks/opencode-plugin-secure-client.js", "../../enterprisepolicy/opencode_managed_plugin.js", "testdata/bridge_host/opencode-plugin.js", "testdata/bridge_host/opencode-plugin-managed.js"} {
 		body, err := os.ReadFile(file)
 		if err != nil {
 			t.Fatal(err)
@@ -190,6 +190,8 @@ func TestOpenCodeV2VersionSelection(t *testing.T) {
 		{"2.2.0", openCodeV2ContractID, HookCompatibilityKnown},
 		{"3.0.0", "", HookCompatibilityUnknown},
 		{"vgit.5bba024", "", HookCompatibilityUnknown},
+		{"vgit.2fa91c0", "", HookCompatibilityUnknown},
+		{"vgit.1a2b3c4", "", HookCompatibilityUnknown},
 	} {
 		t.Run(tc.version, func(t *testing.T) {
 			for _, goos := range []string{"linux", "darwin", "windows"} {

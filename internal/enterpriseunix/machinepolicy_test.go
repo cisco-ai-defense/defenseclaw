@@ -1161,7 +1161,7 @@ func TestInstallShipsTheManagedOpenCodePlugin(t *testing.T) {
 			if exists(h.env.P(plugin)) || exists(h.env.P(filepath.Dir(plugin))) {
 				t.Fatal("uninstall left the managed plugin behind")
 			}
-			if exists(h.env.P(config)) && strings.Contains(h.read(config), plugin) {
+			if exists(h.env.P(config)) && strings.Contains(h.read(config), `"`+filepath.Dir(plugin)+`"`) {
 				t.Fatalf("uninstall left DefenseClaw's OpenCode entry:\n%s", h.read(config))
 			}
 		})

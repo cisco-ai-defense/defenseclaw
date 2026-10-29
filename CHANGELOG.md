@@ -10,6 +10,7 @@ for current behavior.
 
 ## [Unreleased] — 1.0.4
 
+- **OpenCode V2 configuration and review corrections:** preserve mixed MCP entries and unrelated settings, apply whole-server overrides, and report plugin activation as unverified when ordered controls prevent proof. Git-build hashes no longer select a release contract. Configured plugin directory approvals cover their contents, lifecycle events have distinct source identities, and paired result callbacks reuse bounded verified context. Platform metadata consistently labels V2 as preview; scanner doctor checks both bounds of the pinned LiteLLM range.
 - **OpenCode V2 only:** remove V1 runtime contracts and factories across plugin delivery modes; refuse detected non-V2 majors before setup writes, including with the drift override. Upgrade OpenCode to V2, rerun setup and restart. The sandbox pin moves to 2.1.4; its V1 certification is retired pending fresh V2 verification.
 - OpenCode v2 preview CI fixes: stable bridge line endings on Windows, sandbox entrypoint verification, patched dependency floors, and less style work during TUI tab changes. The existing Windows responsiveness limit stays at 150 ms.
 

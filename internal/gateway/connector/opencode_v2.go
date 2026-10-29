@@ -17,6 +17,9 @@ func RequireOpenCodeV2(name, rawVersion string) error {
 	if normalizeConnectorName(name) != "opencode" {
 		return nil
 	}
+	if gitBuildVersionRE.MatchString(rawVersion) {
+		return fmt.Errorf("OpenCode V2 is required; the detected git build has no release version. Install @opencode/cli@2, rerun defenseclaw setup opencode, and restart OpenCode")
+	}
 	version := NormalizeAgentVersion("opencode", rawVersion)
 	if version != "" && versionTuple(version)[0] != 2 {
 		return fmt.Errorf("OpenCode V2 is required; detected %s. Install @opencode/cli@2, rerun defenseclaw setup opencode, and restart OpenCode", version)

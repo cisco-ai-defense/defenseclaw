@@ -13,6 +13,8 @@ TARGETS = (
     "internal/gateway/connector/hooks/opencode-plugin.js",
     "internal/enterprisepolicy/opencode_managed_plugin.js",
     "internal/gateway/connector/hooks/opencode-plugin-secure-client.js",
+    "internal/gateway/connector/testdata/bridge_host/opencode-plugin.js",
+    "internal/gateway/connector/testdata/bridge_host/opencode-plugin-managed.js",
 )
 
 

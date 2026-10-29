@@ -1171,7 +1171,13 @@ func resolveHookContractMatch(name, rawVersion string, contracts []HookContract,
 			Contract:          bestEffortHookContract(contracts),
 		}
 	}
-	if name != "opencode" && gitBuildVersionRE.MatchString(raw) {
+	if gitBuildVersionRE.MatchString(raw) {
+		if name == "opencode" {
+			return HookContractResolution{
+				Connector: name, RawVersion: raw, Status: HookCompatibilityUnknown,
+				Reason: "OpenCode git build has no release version; install a versioned OpenCode V2 release",
+			}
+		}
 		// A source build (Hermes "vgit.5bba024 (2026.9.24)") has no release
 		// version: its digits are a commit hash or a date. Treat it as newer
 		// than every tested range instead of reading a version out of the hash,
