@@ -1052,12 +1052,18 @@ func provenStateMutationPath(facts actionfacts.Facts, request trustedActionReque
 			if matchesActiveDefenseClawState(projected, candidate) {
 				return true
 			}
-			if request.ProtectedHomeHook && candidate.Access == actionfacts.PathAccessDelete {
+			if request.ProtectedHomeHook {
 				// The gateway cannot follow the directory through a link
 				// the user can make; the hook placed the entry as the user
-				// and lists it only when it is in the state tree (GAP-2549).
+				// and lists it only when it is in the state tree: a delete
+				// under its operand (GAP-2549), a move destination under
+				// StateEntryFactPrefix (GAP-2554).
+				prefix := ""
+				if candidate.Access != actionfacts.PathAccessDelete {
+					prefix = hookpaths.StateEntryFactPrefix
+				}
 				for _, spelling := range spellings {
-					if placed := request.ResolvedWriteTargets[spelling]; filepath.IsAbs(placed) {
+					if placed := request.ResolvedWriteTargets[prefix+spelling]; filepath.IsAbs(placed) {
 						candidate.Resolved = placed
 						if matchesActiveDefenseClawState(projected, candidate) {
 							return true

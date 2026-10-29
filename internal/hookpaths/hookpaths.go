@@ -70,6 +70,15 @@ const SourceLinkFactPrefix = "\x00source-link:"
 // opaque, and a missing fact leaves the operand unknown.
 const OpaqueScopeFactPrefix = "\x00opaque-scope:"
 
+// StateEntryFactPrefix keys the DefenseClaw state entry that a move
+// destination replaces, by the absolute operand: mv replaces the final name,
+// so only its directory is followed, through the links of the command and
+// the disk links the user sees (mv a.txt /dev/shm/x/y/config.yaml with
+// /dev/shm/x/y -> ~/.defenseclaw). The client lists it only when that entry
+// is in the state tree. A managed gateway behind ProtectHome, PrivateTmp and
+// PrivateDevices cannot follow the directory itself (GAP-2554).
+const StateEntryFactPrefix = "\x00state-entry:"
+
 // GlobFactPrefix keys the hook client's expansion of one pathname pattern
 // that the action target scan checks, by the absolute pattern. "0" means the
 // user's view expanded it completely and no match reaches a protected file;
@@ -1068,6 +1077,38 @@ func ResolveConnector(connector, surface, event string, payload []byte) string {
 		size += cost
 		targets[path] = entry
 	}
+	// A move destination replaces its final name as a delete removes it; the
+	// write above follows the whole name, so the state entry it replaces is
+	// listed under its own key (GAP-2554).
+	for _, candidate := range facts.Paths {
+		if candidate.Access != actionfacts.PathAccessWrite || strings.HasSuffix(candidate.Value, "/") ||
+			!moveOnlyCommand(facts.Commands, candidate.CommandID) {
+			continue
+		}
+		path := candidate.Resolved
+		if path == "" {
+			path = candidate.Normalized
+		}
+		if !filepath.IsAbs(path) || strings.ContainsAny(path, "*?[]$`") {
+			continue
+		}
+		path = filepath.Clean(path)
+		key := StateEntryFactPrefix + path
+		if _, listed := targets[key]; listed || len(path) > MaxWriteTargetPathBytes || len(targets)-1 >= MaxWriteTargets {
+			continue
+		}
+		entry, inState := links.stateEntry(path, home, protected)
+		if !inState {
+			continue
+		}
+		cost := len(jsonString(key)) + 1 + len(jsonString(entry)) + 1
+		if size+cost > maxEncodedTargets {
+			truncated = true
+			continue
+		}
+		size += cost
+		targets[key] = entry
+	}
 	// An apply_patch edit names its files in the patch envelope, not in a
 	// redirect. Unknown targets make the map incomplete.
 	patchTargets, patchKnown := ApplyPatchWriteTargets(tool, args, "", cwd, home)
@@ -1485,6 +1526,10 @@ func Decode(value string) (map[string]string, bool) {
 			return nil, false
 		}
 		if strings.HasPrefix(key, DirectoryFactPrefix) && value != "?" && !filepath.IsAbs(value) {
+			return nil, false
+		}
+		if strings.HasPrefix(key, StateEntryFactPrefix) &&
+			(!filepath.IsAbs(strings.TrimPrefix(key, StateEntryFactPrefix)) || !filepath.IsAbs(value)) {
 			return nil, false
 		}
 		if strings.HasPrefix(key, SourceLinkFactPrefix) && (value != "0" && value != "1" && value != "?") {
@@ -3740,6 +3785,21 @@ func (l shellLinks) stateTarget(path, home string, protected protectedFiles) (st
 		return protected.has(name) || inState(name)
 	})
 	return resolved, ok && inState(resolved)
+}
+
+// moveOnlyCommand reports a command that moves its operands and does not
+// also write, append or copy them, as the gateway reads a move destination.
+func moveOnlyCommand(commands []actionfacts.CommandFact, id int64) bool {
+	for _, command := range commands {
+		if command.ID != id {
+			continue
+		}
+		return slices.Contains(command.Operations, actionfacts.OperationMove) &&
+			!slices.Contains(command.Operations, actionfacts.OperationWrite) &&
+			!slices.Contains(command.Operations, actionfacts.OperationAppend) &&
+			!slices.Contains(command.Operations, actionfacts.OperationCopy)
+	}
+	return false
 }
 
 // stateEntry is the name in the DefenseClaw state tree of home that a
