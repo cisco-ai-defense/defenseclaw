@@ -2356,7 +2356,9 @@ func topLevelStatementDirectories(file *syntax.File, cwd, home string) (statemen
 		dir   string
 		stack []string
 	}
-	const maxPlaces = 16
+	// Each ; after a cd that may fail can double the places; 64 reads six
+	// such cds before the conservative reading (GAP-2574 checker N04).
+	const maxPlaces = 64
 	join := func(sets ...[]place) []place {
 		var out []place
 		seen := make(map[string]bool)
@@ -3462,12 +3464,30 @@ func diskSourceMayLink(source, cwd, home string, facts map[string]string, record
 		return true
 	}
 	// An older hook has no fact. ProtectHome and PrivateTmp turn even an
-	// existing source into ENOENT for the gateway.
+	// existing source into ENOENT for the gateway, but they hide the whole
+	// home or temporary tree: a source missing from a directory the gateway
+	// can see is missing, so cd build; cp -r ../src out read where the shell
+	// stood when the cd fails is a plain copy (GAP-2574 checker R01).
+	if os.IsNotExist(err) && visibleSourceDirectory(filepath.Dir(path), lstat) {
+		return false
+	}
 	return runtime.GOOS == "linux" &&
 		((home != "" && (path == home || strings.HasPrefix(path, home+string(filepath.Separator)))) ||
 			path == "/home" || strings.HasPrefix(path, "/home/") ||
 			path == "/tmp" || strings.HasPrefix(path, "/tmp/") ||
 			path == "/var/tmp" || strings.HasPrefix(path, "/var/tmp/"))
+}
+
+// visibleSourceDirectory reports a directory the gateway sees on disk that
+// ProtectHome or PrivateTmp would not leave in place: not the root of the
+// home or temporary trees they replace (/home, /tmp, /var/tmp, /root).
+func visibleSourceDirectory(dir string, lstat func(string) (os.FileInfo, error)) bool {
+	switch filepath.Clean(dir) {
+	case "/", "/home", "/tmp", "/var/tmp", "/root", "/run/user":
+		return false
+	}
+	info, err := lstat(dir)
+	return err == nil && info.IsDir()
 }
 
 // treeHasSymlink reports a link inside a directory a recursive copy keeps.
