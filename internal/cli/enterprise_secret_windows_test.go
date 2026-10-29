@@ -148,8 +148,10 @@ func stubWindowsSecretHost(t *testing.T, layout managed.StandaloneLayout) *windo
 	previousChangeSpool := windowsChangeSpool
 	previousManaged := managedHostWindowsStandalone
 	previousLive := windowsSecretGatewayLive
+	previousStartedAfter := windowsSecretGatewayStartedAfter
 	t.Cleanup(func() {
 		windowsSecretGatewayLive = previousLive
+		windowsSecretGatewayStartedAfter = previousStartedAfter
 		windowsSecretLayout, windowsSecretDeploymentInstalled, windowsSecretIsElevated, windowsSecretRestartGateway, windowsSecretSpawnRecovery, windowsSecretConfigTrusted, windowsSecretAbsentConfigParentTrusted = previousLayout, previousInstalled, previousElevated, previousRestart, previousRecovery, previousConfigTrusted, previousAbsentParentTrusted
 		windowsSecretLockBundleStore, windowsSecretLifecycleLockPath, windowsSecretLifecycleLock, windowsSecretInstallerLockWait, secretRawArgs = previousBundle, previousPath, previousLifecycle, previousWait, previousArgs
 		windowsChangeSpool = previousChangeSpool
@@ -178,6 +180,11 @@ func stubWindowsSecretHost(t *testing.T, layout managed.StandaloneLayout) *windo
 	}
 	windowsSecretSpawnRecovery = func() (windowsSecretRecoveryControl, error) { return &fakeWindowsSecretRecovery{}, nil }
 	windowsSecretGatewayLive = func() (bool, error) { return true, nil }
+	// The stubbed gateway is not a process this computer runs: the real
+	// DefenseClawGateway of a managed lane host started after any test
+	// credential's preserved timestamp and turned a needed restart into a
+	// no-op (GAP-2572). Tests of that rule set their own.
+	windowsSecretGatewayStartedAfter = func(time.Time) bool { return false }
 	windowsSecretConfigTrusted = func(string) error { return nil }
 	windowsSecretAbsentConfigParentTrusted = func(string) error { return nil }
 	windowsSecretLockBundleStore = func(_ context.Context, dir string, wait time.Duration) (func(), error) {

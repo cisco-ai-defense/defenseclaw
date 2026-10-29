@@ -148,6 +148,7 @@ func TestHookOutageFailModeNowHonorsTheManagedHostMarker(t *testing.T) {
 	managedHostDescriptorPath = func() string { return marker }
 	managedHostWindowsStandalone = func() (string, bool) { return "", false }
 	secureClientHost = func() bool { return false }
+	managedHostWindowsMarkerUncertain = func() bool { return false }
 	t.Cleanup(func() {
 		managedHostDescriptorPath = oldDescriptor
 		managedHostWindowsStandalone = oldWindows
