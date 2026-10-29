@@ -16,6 +16,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
@@ -46,26 +47,33 @@ import (
 // secureClientHost uses machine roots, a trusted installation, and its
 // registered service. An ordinary user may be unable to read the protected
 // deployment record; that does not demote an otherwise verified installation.
+// A first install writes that record only when its lifecycle transaction
+// commits; until then the transaction's own protected record
+// (install\pending.json) stands in for it, so the target enumeration and the
+// helpers the install runs apply the Secure Client rules, as they already do
+// for Repair and Upgrade.
 var secureClientHost = func() bool {
 	return classifySecureClientHost(secureClientClassificationChecks{
-		roots:         winpath.TrustedEnterpriseRoots,
-		deployment:    winpath.InspectEnterpriseDeploymentAt,
-		trustedDir:    managed.ValidateTrustedRuntimeDir,
-		trustedMarker: managed.ValidateTrustedInstallMarkerDir,
-		trustedFile:   managed.ValidateTrustedFilePath,
-		serviceImage:  windowsServiceImagePath,
+		roots:              winpath.TrustedEnterpriseRoots,
+		deployment:         winpath.InspectEnterpriseDeploymentAt,
+		trustedDir:         managed.ValidateTrustedRuntimeDir,
+		trustedMarker:      managed.ValidateTrustedInstallMarkerDir,
+		trustedFile:        managed.ValidateTrustedFilePath,
+		trustedTransaction: managed.ValidateTrustedFilePath,
+		serviceImage:       windowsServiceImagePath,
 	})
 }
 
 // The checks are supplied explicitly so Windows tests can represent a real
 // protected installation without replacing the runner's machine registration.
 type secureClientClassificationChecks struct {
-	roots         func(string) (winpath.EnterpriseRoots, error)
-	deployment    func(string, string) (winpath.EnterpriseDeployment, error)
-	trustedDir    func(string, string) error
-	trustedMarker func(string, string) error
-	trustedFile   func(string, string) error
-	serviceImage  func(string) (string, error)
+	roots              func(string) (winpath.EnterpriseRoots, error)
+	deployment         func(string, string) (winpath.EnterpriseDeployment, error)
+	trustedDir         func(string, string) error
+	trustedMarker      func(string, string) error
+	trustedFile        func(string, string) error
+	trustedTransaction func(string, string) error
+	serviceImage       func(string) (string, error)
 }
 
 func classifySecureClientHost(checks secureClientClassificationChecks) bool {
@@ -74,7 +82,15 @@ func classifySecureClientHost(checks secureClientClassificationChecks) bool {
 		return false
 	}
 	deployment, err := checks.deployment(roots.Profile, roots.MetadataPath)
-	if err != nil || !secureClientDeploymentMayBeInstalled(deployment.State) {
+	if err != nil {
+		return false
+	}
+	state := deployment.State
+	if state == winpath.EnterpriseDeploymentAbsent &&
+		checks.trustedTransaction(filepath.Join(filepath.Dir(roots.MetadataPath), "pending.json"), "Secure Client lifecycle transaction") == nil {
+		state = winpath.EnterpriseDeploymentUnknown
+	}
+	if !secureClientDeploymentMayBeInstalled(state) {
 		return false
 	}
 	if err := checks.trustedDir(roots.InstallRoot, "Secure Client installation"); err != nil {
@@ -87,7 +103,7 @@ func classifySecureClientHost(checks secureClientClassificationChecks) bool {
 		return false
 	}
 	image, err := checks.serviceImage(managed.StandaloneWindowsGatewaySvc)
-	return err == nil && secureClientLayoutMatches(roots, deployment.State, image)
+	return err == nil && secureClientLayoutMatches(roots, state, image)
 }
 
 func secureClientLayoutMatches(roots winpath.EnterpriseRoots, state winpath.EnterpriseDeploymentState, image string) bool {
