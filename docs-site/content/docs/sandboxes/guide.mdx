@@ -116,10 +116,10 @@ An approval applies at the sandbox's next quiet moment, because every OpenShell 
 ### Check the unblock
 
 ```bash
-defenseclaw sandbox policy test --host webhook.site
+defenseclaw sandbox policy test --sandbox myapp-7f3a --host webhook.site
 ```
 
-The command says what the policy decides for the destination and why. `defenseclaw sandbox destinations myapp-7f3a` lists the site as reached.
+The command says what the sandbox's policy decides for the destination and why, unblocks included. Name the sandbox: without `--sandbox` the test reads the pack and `config.yaml` without the daemon, leaves unblocks out and still says `blocked` for a host you unblocked, also with `--always`. `defenseclaw sandbox destinations myapp-7f3a` lists the site as reached.
 
 ### Undo an unblock
 

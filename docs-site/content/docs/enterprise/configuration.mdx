@@ -24,7 +24,7 @@ A standalone deployment reads one administrator-owned `config.yaml` per host. Th
 - The package ships no config. Write it as root and keep it unwritable by other users. The MDM wrapper refuses a config file a non-administrator can write (`mdm_untrusted_input`); see [Deliver the config](/docs/enterprise/mdm#deliver-the-config).
 - Linux and macOS take the config from `--config`, else the file already at the path, else a built-in default that observes and protects nothing.
 - On Windows, supply the file to ensure (`--config`, Setup's `CONFIG=` or the wrapper's `-ConfigPath`). Do not edit the installed copy: ensure only compares the file you supply.
-- The file may be at most 4 MiB and 65,536 parsed YAML nodes. A larger file is refused before anything changes, with `configuration source exceeds the 4 MiB limit` or `parsed YAML exceeds the 65,536-node limit`. Shorten long lists, or move rules into a [custom rule pack](#custom-rule-packs).
+- The file may be at most 4 MiB and 65,536 parsed YAML nodes. A larger file is refused before anything changes. On Linux and macOS, ensure refuses it as `config_invalid` (exit `1`) with `config exceeds 4194304 bytes`, or with `<file> line <n>: parsed YAML exceeds the 65,536-node limit`. On Windows, Setup and `enterprise windows ensure` refuse it as `invalid_arguments` (exit `1639`) with `configuration source exceeds the 4 MiB limit` or `parsed YAML exceeds the 65,536-node limit`. Shorten long lists, or move rules into a [custom rule pack](#custom-rule-packs).
 
 ## Files next to the config
 
