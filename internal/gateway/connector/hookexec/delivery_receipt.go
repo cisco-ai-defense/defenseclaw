@@ -35,6 +35,28 @@ type hookDeliveryRequest struct {
 	// released: the capability wait passed first and the body ended with
 	// HookDeliveryReleased. The answer is ordinary, with no receipt.
 	released bool
+	// heldForStart: the capability wait passed while the gateway unit was
+	// starting, so the body was kept open for the start.
+	heldForStart bool
+}
+
+// errGatewayDroppedHeldCall marks a call whose connection failed while the
+// hook kept its body open for a gateway start. The gateway that accepted the
+// connection exited before it read the whole call (a restart whose old
+// process stopped within the capability wait), so it never evaluated the
+// call: the call is sent again, to the gateway that starts, like a reset.
+var errGatewayDroppedHeldCall = errors.New("gateway dropped the call while it was starting")
+
+func (d *hookDeliveryRequest) markHeldForStart() {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.heldForStart = true
+}
+
+func (d *hookDeliveryRequest) wasHeldForStart() bool {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.heldForStart
 }
 
 // DeliveryReceiptEvent reports whether a managed native hook sends a delivery
@@ -93,6 +115,7 @@ func prepareHookDeliveryRequest(req *http.Request, payload []byte, wait time.Dur
 			}
 			if starting != nil && starting(req.Context()) {
 				seenStarting = true
+				delivery.markHeldForStart()
 				timer.Reset(hookDeliveryStartPoll)
 				continue
 			}

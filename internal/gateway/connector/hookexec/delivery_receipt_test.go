@@ -494,3 +494,32 @@ func TestManagedHookReleasesAnOldGatewayThatIsStoppingUnderTheCall(t *testing.T)
 		t.Fatalf("hook released the old gateway after %s, want about the capability wait", elapsed)
 	}
 }
+
+// RV-ha10-0683, live ha11: the old gateway that accepted the call exits
+// within the capability wait (a restart: it stopped in under 200 ms) and the
+// unit is starting again when the hook asks. The connection is gone, so the
+// hook does not hold it for the start: the call is sent again to the gateway
+// that starts, and it is allowed.
+func TestManagedHookSendsAgainWhenTheGatewayThatAcceptedTheCallExitsDuringAStart(t *testing.T) {
+	startedAt := time.Now()
+	gatewayStartingFor(t, func() bool { return time.Since(startedAt) < 1200*time.Millisecond })
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if requests.Add(1) == 1 {
+			time.Sleep(150 * time.Millisecond)
+			conn, _, err := http.NewResponseController(w).Hijack()
+			if err == nil {
+				_ = conn.Close()
+			}
+			return
+		}
+		_, _ = io.ReadAll(r.Body)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, "{\"action\":\"allow\"}\n")
+	}))
+	defer server.Close()
+	result, elapsed := runAgainstGateway(t, "claudecode", server.Listener.Addr().String(), managedToolCall("claudecode"))
+	if blocked(result) {
+		t.Fatalf("call whose gateway exited during a restart was blocked after %s (requests %d): code=%d stdout=%q stderr=%q", elapsed, requests.Load(), result.code, result.stdout, result.stderr)
+	}
+}

@@ -1455,6 +1455,9 @@ func sendHookRequest(
 	if err != nil {
 		if delivery != nil {
 			delivery.close()
+			if delivery.wasHeldForStart() && ctx.Err() == nil {
+				err = fmt.Errorf("%w: %w", errGatewayDroppedHeldCall, err)
+			}
 		}
 		return nil, markConnectedTimeout(err, connected.Load())
 	}
