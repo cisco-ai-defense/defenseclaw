@@ -32,7 +32,8 @@ def _repair_command(*args: str) -> str:
 
 
 def _binary(path: Path) -> str:
-    path.write_bytes(b"test-binary")
+    # Distinct bytes per file: a byte-identical copy of a pinned agent is that agent (GAP-0496).
+    path.write_bytes(b"test-binary:" + path.name.encode())
     path.chmod(0o700)
     return str(path.resolve())
 
@@ -2145,6 +2146,81 @@ def test_a_direct_entry_that_starts_the_pinned_agent_keeps_verify_red(tmp_path, 
         document["agent_servers"]["Other agent"] = {"command": _binary(tmp_path / "other-agent"), "args": ["acp"]}
         settings.write_text(json.dumps(document))
         assert CliRunner().invoke(acp_cmd, ["verify"], obj=app).exit_code == 0
+        settings.write_text(json.dumps(clean))
+        assert CliRunner().invoke(acp_cmd, ["verify"], obj=app).exit_code == 0
+    finally:
+        cleanup_app(app, db_path, data_dir)
+
+
+_NPM_SHIM = (
+    "@ECHO off\r\nGOTO start\r\n:find_dp0\r\nSET dp0=%~dp0\r\nEXIT /b\r\n:start\r\nSETLOCAL\r\nCALL :find_dp0\r\n"
+    '"%dp0%\\node_modules\\opencode-ai\\bin\\opencode.exe"   %*\r\n'
+)
+
+
+def test_a_direct_entry_that_starts_the_file_a_pinned_shim_wraps_or_a_copy_keeps_verify_red(tmp_path, monkeypatch):
+    """On Windows the lock pins npm's opencode.cmd; the opencode.exe it starts is the same agent (GAP-0496).
+
+    A direct entry that starts the wrapped executable (with a flag before the
+    ACP subcommand) or a byte-identical copy of it under another name runs the
+    agent without the guard, so verify and status stay red and setup leaves
+    it. A file of the same size with other bytes and a copied shim that starts
+    nothing are not this pair's bypass.
+    """
+    _isolate_client_config(monkeypatch, tmp_path)
+    app, data_dir, db_path = _app(tmp_path)
+    settings = _zed_settings(tmp_path)
+    settings.parent.mkdir(parents=True)
+    guard = _binary(tmp_path / "defenseclaw-acp")
+    npm = tmp_path / "npm"
+    native = npm / "node_modules" / "opencode-ai" / "bin" / "opencode.exe"
+    native.parent.mkdir(parents=True)
+    native.write_bytes(b"opencode-native-image")
+    shim = npm / "opencode.cmd"
+    shim.write_text(_NPM_SHIM, newline="")
+    copied = tmp_path / "proj" / "oc-agent.exe"
+    copied.parent.mkdir()
+    copied.write_bytes(native.read_bytes())
+    lookalike = tmp_path / "proj" / "same-size.exe"
+    lookalike.write_bytes(b"x" * len(native.read_bytes()))
+    stray_shim = tmp_path / "proj" / "opencode.cmd"
+    stray_shim.write_text(_NPM_SHIM, newline="")
+    setup_args = ["setup", "--client", "zed", "--agent", "opencode", "--guard-binary", guard, "--agent-binary", str(shim)]
+    try:
+        settings.write_text(json.dumps({"agent_servers": {}}))
+        assert CliRunner().invoke(acp_cmd, setup_args, obj=app).exit_code == 0
+        assert CliRunner().invoke(acp_cmd, ["verify"], obj=app).exit_code == 0
+        clean = json.loads(settings.read_text())
+        variants = {
+            "wrapped executable, flag first": {"command": str(native), "args": ["--print-logs", "acp"]},
+            "renamed copy": {"command": str(copied), "args": ["acp"]},
+        }
+        for label, direct in variants.items():
+            document = copy.deepcopy(clean)
+            document["agent_servers"]["My OpenCode"] = direct
+            settings.write_text(json.dumps(document))
+
+            verified = CliRunner().invoke(acp_cmd, ["verify"], obj=app)
+            assert verified.exit_code != 0, (label, verified.output)
+            assert "'My OpenCode' is not DefenseClaw's: it launches opencode without the DefenseClaw guard" in (
+                verified.output
+            ), (label, verified.output)
+            status = json.loads(CliRunner().invoke(acp_cmd, ["status", "--json"], obj=app).output)
+            assert status["bindings"]["zed/opencode"]["healthy"] is False, label
+
+            again = CliRunner().invoke(acp_cmd, setup_args, obj=app)
+            assert again.exit_code == 0, (label, again.output)
+            assert json.loads(settings.read_text())["agent_servers"]["My OpenCode"] == direct, label
+            assert "Left editor entry 'My OpenCode'" in again.output, (label, again.output)
+
+        for label, other in {
+            "same size, other bytes": {"command": str(lookalike), "args": ["acp"]},
+            "copied shim that starts nothing": {"command": str(stray_shim), "args": ["acp"]},
+        }.items():
+            document = copy.deepcopy(clean)
+            document["agent_servers"]["Other"] = other
+            settings.write_text(json.dumps(document))
+            assert CliRunner().invoke(acp_cmd, ["verify"], obj=app).exit_code == 0, label
         settings.write_text(json.dumps(clean))
         assert CliRunner().invoke(acp_cmd, ["verify"], obj=app).exit_code == 0
     finally:

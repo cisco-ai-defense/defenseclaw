@@ -11,6 +11,7 @@ import hashlib
 import io
 import json
 import os
+import re
 import secrets
 import shlex
 import shutil
@@ -696,11 +697,59 @@ def _pinned_agent_path(data_dir: str, client: str, agent: str) -> str:
     return path_value if isinstance(path_value, str) else ""
 
 
+# A Windows command shim (npm, pnpm and Volta write one per PATH name) starts
+# the file it quotes after %dp0% or %~dp0: npm's opencode.cmd ends in
+# "%dp0%\node_modules\opencode-ai\bin\opencode.exe" %*.
+_SHIM_SUFFIXES = (".cmd", ".bat")
+_SHIM_TARGET = re.compile(r'"%~?dp0%?[\\/]([^"\r\n]+)"', re.IGNORECASE)
+
+
+def _shim_targets(path_value: str) -> list[str]:
+    """The files a Windows command shim at path_value starts ([] for any other file)."""
+    if os.path.splitext(path_value)[1].lower() not in _SHIM_SUFFIXES:
+        return []
+    try:
+        with open(path_value, "rb") as stream:
+            text = stream.read(64 << 10).decode("utf-8", "replace")
+    except OSError:
+        return []
+    base = os.path.dirname(os.path.abspath(path_value))
+    targets: list[str] = []
+    for relative in _SHIM_TARGET.findall(text):
+        candidate = os.path.normpath(os.path.join(base, relative.replace("\\", os.sep).replace("/", os.sep)))
+        if candidate not in targets and os.path.isfile(candidate):
+            targets.append(candidate)
+    return targets
+
+
+def _same_agent_file(candidate: str, pinned: str) -> bool:
+    """Whether candidate is the pinned agent file or a byte-identical copy of it.
+
+    A copy or a renamed copy of the agent executable starts the same agent. A
+    shim is matched only as the same file: its bytes name a path relative to
+    where it sits, so a copied shim starts something else.
+    """
+    try:
+        if os.path.samefile(candidate, pinned):
+            return True
+        if os.path.splitext(pinned)[1].lower() in _SHIM_SUFFIXES or not os.path.isfile(candidate):
+            return False
+        size = os.path.getsize(pinned)
+        if size == 0 or os.path.getsize(candidate) != size:
+            return False
+        return _sha256_file(candidate) == _sha256_file(pinned)
+    except (OSError, ValueError):
+        return False
+
+
 def _launches_file(entry: dict[str, Any], path_value: str) -> bool:
-    """Whether an editor entry's command is the file at path_value.
+    """Whether an editor entry's command starts the agent file at path_value.
 
     The editor resolves a bare command on PATH, so a PATH name, another
-    spelling of the path or a link to the file all launch it.
+    spelling of the path, a link to the file or a copy of it all start it.
+    When either side is a Windows command shim, the file the shim starts
+    counts too: the lock pins npm's opencode.cmd on Windows, and an entry
+    that starts the opencode.exe it wraps runs the same agent (GAP-0496).
     """
     command = entry.get("command")
     if not path_value or not isinstance(command, str) or not command.strip():
@@ -708,10 +757,9 @@ def _launches_file(entry: dict[str, Any], path_value: str) -> bool:
     found = os.path.expanduser(command) if os.path.dirname(command) else shutil.which(command)
     if not found:
         return False
-    try:
-        return os.path.samefile(found, path_value)
-    except (OSError, ValueError):
-        return False
+    pinned = [path_value, *_shim_targets(path_value)]
+    launched = [found, *_shim_targets(found)]
+    return any(_same_agent_file(candidate, target) for candidate in launched for target in pinned)
 
 
 def _left_pair_entries(
