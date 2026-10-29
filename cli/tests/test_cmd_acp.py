@@ -2200,8 +2200,8 @@ def test_a_direct_entry_that_starts_the_file_a_pinned_shim_wraps_or_a_copy_keeps
     A direct entry that starts the wrapped executable (with a flag before the
     ACP subcommand) or a byte-identical copy of it under another name runs the
     agent without the guard, so verify and status stay red and setup leaves
-    it. A file of the same size with other bytes and a copied shim that starts
-    nothing are not this pair's bypass.
+    it. A file of the same size with other bytes and a copied shim (under a
+    non-agent name) that starts nothing are not this pair's bypass.
     """
     _isolate_client_config(monkeypatch, tmp_path)
     app, data_dir, db_path = _app(tmp_path)
@@ -2219,7 +2219,7 @@ def test_a_direct_entry_that_starts_the_file_a_pinned_shim_wraps_or_a_copy_keeps
     copied.write_bytes(native.read_bytes())
     lookalike = tmp_path / "proj" / "same-size.exe"
     lookalike.write_bytes(b"x" * len(native.read_bytes()))
-    stray_shim = tmp_path / "proj" / "opencode.cmd"
+    stray_shim = tmp_path / "proj" / "other-tool.cmd"
     stray_shim.write_text(_NPM_SHIM, newline="")
     setup_args = ["setup", "--client", "zed", "--agent", "opencode", "--guard-binary", guard, "--agent-binary", str(shim)]
     try:
@@ -2291,7 +2291,7 @@ def test_other_node_agents_beside_a_pinned_node_shim_keep_verify_green(tmp_path,
     for name, package in (
         ("copilot", "@github\\copilot"),
         ("copilot-alt", "@github\\copilot"),
-        ("gemini", "@google\\gemini-cli"),
+        ("qwen", "@qwen-code\\qwen-code"),
     ):
         script = prefix.joinpath("node_modules", *package.split("\\"), "index.js")
         script.parent.mkdir(parents=True, exist_ok=True)
@@ -2307,11 +2307,11 @@ def test_other_node_agents_beside_a_pinned_node_shim_keep_verify_green(tmp_path,
         assert CliRunner().invoke(acp_cmd, ["verify"], obj=app).exit_code == 0
         clean = json.loads(settings.read_text())
         for label, other in {
-            "another node-based agent": {"command": str(prefix / "gemini.cmd"), "args": ["--experimental-acp"]},
+            "another node-based agent": {"command": str(prefix / "qwen.cmd"), "args": ["--experimental-acp"]},
             "node.exe running another script": {"command": str(node), "args": ["other.js"]},
         }.items():
             document = copy.deepcopy(clean)
-            document["agent_servers"]["Gemini CLI"] = other
+            document["agent_servers"]["Qwen Code"] = other
             settings.write_text(json.dumps(document))
             verified = CliRunner().invoke(acp_cmd, ["verify"], obj=app)
             assert verified.exit_code == 0, (label, verified.output)
@@ -2353,7 +2353,7 @@ def test_an_interpreter_entry_that_runs_the_pinned_agent_script_keeps_verify_red
     node = prefix / "node.exe"
     node.write_bytes(b"node-interpreter-image")
     scripts = {}
-    for name, package in (("copilot", "@github\\copilot"), ("gemini", "@google\\gemini-cli")):
+    for name, package in (("copilot", "@github\\copilot"), ("qwen", "@qwen-code\\qwen-code")):
         script = prefix.joinpath("node_modules", *package.split("\\"), "index.js")
         script.parent.mkdir(parents=True, exist_ok=True)
         script.write_text("// " + package)
@@ -2389,11 +2389,11 @@ def test_an_interpreter_entry_that_runs_the_pinned_agent_script_keeps_verify_red
                 assert "Left editor entry 'My Copilot'" in again.output, (pinned, label, again.output)
 
             for label, other in {
-                "node.exe another absolute script": {"command": str(node), "args": [str(scripts["gemini"]), "--acp"]},
+                "node.exe another absolute script": {"command": str(node), "args": [str(scripts["qwen"]), "--acp"]},
                 "node.exe a relative script": {"command": str(node), "args": ["node_modules/copilot/index.js"]},
             }.items():
                 document = copy.deepcopy(clean)
-                document["agent_servers"]["Gemini CLI"] = other
+                document["agent_servers"]["Qwen Code"] = other
                 settings.write_text(json.dumps(document))
                 assert CliRunner().invoke(acp_cmd, ["verify"], obj=app).exit_code == 0, (pinned, label)
             settings.write_text(json.dumps(clean))
