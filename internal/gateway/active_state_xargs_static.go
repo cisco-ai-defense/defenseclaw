@@ -184,6 +184,21 @@ func printfStaticOutput(values []string) (string, bool) {
 					}
 					next++
 					conversions++
+				case "b":
+					// %b prints its argument with the echo -e escapes
+					// interpreted; \c stops all output (pod check31).
+					if next < len(args) {
+						decoded, stop, ok := printfBArgument(args[next])
+						if !ok {
+							return "", false
+						}
+						out.WriteString(decoded)
+						if stop {
+							return out.String(), true
+						}
+					}
+					next++
+					conversions++
 				default:
 					return "", false
 				}
@@ -199,6 +214,28 @@ func printfStaticOutput(values []string) (string, bool) {
 			return out.String(), true
 		}
 	}
+}
+
+// printfBArgument is a printf %b argument with its escapes decoded (\0NNN
+// octal, as echo -e); stop is true at \c.
+func printfBArgument(value string) (string, bool, bool) {
+	var out strings.Builder
+	for at := 0; at < len(value); at++ {
+		if value[at] != '\\' {
+			out.WriteByte(value[at])
+			continue
+		}
+		if at+1 < len(value) && value[at+1] == 'c' {
+			return out.String(), true, true
+		}
+		decoded, width, ok := xargsEscape(value[at+1:], true)
+		if !ok {
+			return "", false, false
+		}
+		out.WriteString(decoded)
+		at += width
+	}
+	return out.String(), false, true
 }
 
 // echoStaticOutput is what echo [-neE] WORDS prints.

@@ -5,6 +5,7 @@ package gateway
 
 import (
 	"context"
+	"path"
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
@@ -20,10 +21,15 @@ import (
 // twin goes through the whole dispatcher, the way its direct spelling is
 // judged when typed, so project forms and reads stay allowed.
 func xargsStaticInputStateMutation(facts actionfacts.Facts, request trustedActionRequest) bool {
-	if facts.Parse.Status == actionfacts.StatusInvalid || !strings.HasPrefix(facts.ActiveHome, "/") {
+	if !strings.HasPrefix(facts.ActiveHome, "/") {
 		return false
 	}
 	command, known := trustedBashCommandInput(request.Input)
+	// The POSIX parse rejects a bash here-string (`cat <<< WORD | xargs`);
+	// the twin parses the command as bash itself.
+	if facts.Parse.Status == actionfacts.StatusInvalid && !strings.Contains(command, "<<<") {
+		return false
+	}
 	if !known || len(command) > maxHereStringTwinBytes || !strings.Contains(command, "xargs") ||
 		!strings.Contains(command, "|") {
 		return false
@@ -71,6 +77,14 @@ func stateTwinMutates(request trustedActionRequest, twin string) (mutates, judge
 // xargs splits it (xargsStaticCallTwin); otherwise each word is one item
 // (xargsCallTwin).
 func xargsStaticInputTwin(command, home string, split bool) (string, bool) {
+	return xargsStaticInputTwinAt(command, home, split, 0)
+}
+
+// maxXargsTwinScriptDepth bounds the nested shell scripts (`sh -c "..."`)
+// the twin rewrites inside.
+const maxXargsTwinScriptDepth = 2
+
+func xargsStaticInputTwinAt(command, home string, split bool, depth int) (string, bool) {
 	file, err := syntax.NewParser(syntax.Variant(syntax.LangBash)).Parse(strings.NewReader(command), "")
 	if err != nil {
 		return "", false
@@ -81,12 +95,32 @@ func xargsStaticInputTwin(command, home string, split bool) (string, bool) {
 		if !ok {
 			return true
 		}
+		// `sh -c "printf %s\\n ~/.defenseclaw/hooks | xargs rm -rf"` (pod
+		// check31 W01-W03, W08, W10): the pipe is in a fixed script word,
+		// so the script is rewritten and put back as one quoted word; the
+		// twin keeps the shell call, which the dispatcher judges as typed.
+		if call, ok := stmt.Cmd.(*syntax.CallExpr); ok {
+			if index, ok := shellScriptWordIndex(call); ok && depth < maxXargsTwinScriptDepth {
+				if script, ok := staticWordText(call.Args[index]); ok {
+					if inner, ok := xargsStaticInputTwinAt(script, home, split, depth+1); ok {
+						call.Args[index] = xargsQuotedWord(inner)
+						changed = true
+					}
+				}
+			}
+			return true
+		}
 		pipe, ok := stmt.Cmd.(*syntax.BinaryCmd)
-		if !ok || pipe.Op != syntax.Pipe || len(pipe.X.Redirs) != 0 || pipe.X.Background || pipe.X.Negated {
+		if !ok || pipe.Op != syntax.Pipe || pipe.X.Background || pipe.X.Negated {
 			return true
 		}
 		producer, ok := pipe.X.Cmd.(*syntax.CallExpr)
 		if !ok {
+			return true
+		}
+		// `cat <<< WORD | xargs ...` prints WORD and a newline (pod check31).
+		here := catHereStringWord(pipe.X, producer)
+		if len(pipe.X.Redirs) != 0 && here == nil {
 			return true
 		}
 		reader, ok := pipe.Y.Cmd.(*syntax.CallExpr)
@@ -95,12 +129,21 @@ func xargsStaticInputTwin(command, home string, split bool) (string, bool) {
 		}
 		var direct syntax.Command
 		if homeFixed {
-			if input, ok := staticPrintedText(producer, home); ok {
+			input, ok := staticPrintedText(producer, home)
+			if here != nil {
+				var value string
+				value, ok = xargsStaticValue(here, home)
+				input = value + "\n"
+			}
+			if ok {
 				direct, _ = xargsStaticCallTwin(reader, input, home)
 			}
 		}
 		if direct == nil {
 			words, ok := staticPrintedWords(producer)
+			if here != nil {
+				words, ok = []*syntax.Word{here}, true
+			}
 			if !ok {
 				return true
 			}
@@ -121,6 +164,47 @@ func xargsStaticInputTwin(command, home string, split bool) (string, bool) {
 		return "", false
 	}
 	return out.String(), true
+}
+
+// shellScriptWordIndex is the index of the script word of a POSIX shell
+// call `sh -c SCRIPT`, `bash -lc SCRIPT`, `bash --norc -c SCRIPT`; false
+// for any other call or an option it does not know.
+func shellScriptWordIndex(call *syntax.CallExpr) (int, bool) {
+	if len(call.Assigns) != 0 || len(call.Args) < 3 {
+		return 0, false
+	}
+	switch path.Base(call.Args[0].Lit()) {
+	case "sh", "bash", "dash", "zsh", "ksh":
+	default:
+		return 0, false
+	}
+	script := false
+	for index := 1; index < len(call.Args); index++ {
+		word := call.Args[index].Lit()
+		switch {
+		case script:
+			return index, true
+		case word == "--login" || word == "--norc" || word == "--noprofile" || word == "--posix":
+		case len(word) > 1 && word[0] == '-' && word[1] != '-' && strings.Trim(word[1:], "abcefhilmnpuvxEBHPT") == "":
+			script = strings.ContainsRune(word[1:], 'c')
+			if !script {
+				continue
+			}
+		default:
+			return 0, false
+		}
+	}
+	return 0, false
+}
+
+// catHereStringWord is the word of `cat <<< WORD` (a cat call with no
+// arguments and that one redirect), nil otherwise.
+func catHereStringWord(stmt *syntax.Stmt, call *syntax.CallExpr) *syntax.Word {
+	if len(call.Assigns) != 0 || len(call.Args) != 1 || call.Args[0].Lit() != "cat" ||
+		len(stmt.Redirs) != 1 || stmt.Redirs[0].Op != syntax.WordHdoc || stmt.Redirs[0].N != nil {
+		return nil
+	}
+	return stmt.Redirs[0].Word
 }
 
 // staticPrintedWords is the argument words a printf or echo call prints

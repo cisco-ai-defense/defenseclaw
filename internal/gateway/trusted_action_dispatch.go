@@ -805,12 +805,15 @@ func withActiveStateTargetMention(
 	// A find with an unquoted -name/-path pattern is judged by its quoted
 	// twin (GAP-2498); xargs fed by a static printf or echo by the call it
 	// makes (GAP-0052).
+	// `cat <<< WORD | xargs rm -rf` is a here-string too: its xargs twin
+	// is judged before the here-string verdict ends the check (pod check31).
 	hereStringMutates, hereStringJudged := hereStringStateMutation(facts, request)
-	if hereStringJudged && !hereStringMutates {
+	xargsMutates := xargsStaticInputStateMutation(facts, request)
+	if hereStringJudged && !hereStringMutates && !xargsMutates {
 		return findings
 	}
-	if !hereStringMutates && !globbedStateMutation(facts) && !globbedStateMutationThroughLink(facts, request) &&
-		!findGlobTwinStateMutation(facts, request) && !xargsStaticInputStateMutation(facts, request) &&
+	if !hereStringMutates && !xargsMutates && !globbedStateMutation(facts) && !globbedStateMutationThroughLink(facts, request) &&
+		!findGlobTwinStateMutation(facts, request) &&
 		!archiveExtractsIntoState(facts, request) {
 		command, known := trustedBashCommandInput(request.Input)
 		if !known || !hookpaths.ActionStateTargetMention(command, request.Input.CWD, request.Input.ActiveHome) &&
