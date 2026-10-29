@@ -159,8 +159,16 @@ On macOS, the skill, MCP and plugin scanners DefenseClaw starts run as you, with
 
 On Windows, every hook decision adds about 40 KiB to the account's audit database (`audit.db`), and a sustained flood of tool calls (an agent loop or script that makes several calls a second for minutes) grows it for as long as the flood runs. In 1.0.5 tests on Windows Server 2025, 1,800 calls at 4 a second added 74 MB and 2,400 calls at 10 a second added 98 MB; every call was answered and allowed. Windows writes the database to disk more slowly than Linux and macOS, so on a disk with slow scattered writes the write-ahead log (`audit.db-wal`) can also pass its 256 MiB alarm and hook answers can take seconds ([Local history](/docs/observability#local-history)). A call the gateway took but did not answer in time is blocked in every policy tier, never let through: a per-user hook says `this account's gateway did not answer in time (it may be restarting or busy)`, a managed hook reports `enterprise_managed_gateway_no_answer`. This is a Windows disk-write limit. Slow the loop down or batch its work, and keep enough free disk for the flood. Retention deletes events older than `observability.local.retention_days` (default 7) and frees their space; the `defenseclaw.sqlite.wal.bytes` metric shows the log size.
 
-{/* GAP-1791/GAP-1303/GAP-0614 draft (conditional, owner item 2): put the sustained capacity hook-answer-b measures where this paragraph names 10 calls a second. */}
-On a per-user install on Windows, the gateway keeps up with interactive sessions and short bursts, but not with a long automated flood while the disk is also busy. In a 1.0.5 test on Windows Server 2025, a 15-minute flood at 10 calls a second (9,000 calls), with four other processes forcing writes to the same disk, left most benign calls blocked with `this account's gateway did not answer in time (it may be restarting or busy)`, and prompts typed in an agent session during the flood were blocked too. The 2,400-call run above had no other disk load. Linux answered the same flood, and so did a managed Windows install in observe mode. A lower rate that holds for 15 minutes on a busy disk has not been measured. On per-user Windows, keep automated loops well below 10 calls a second and off busy disks, or run them on a managed install.
+On a per-user install on Windows, the gateway answers about 30 tool calls a second without blocking benign calls on a host with 16 vCPUs, and it stops keeping up near 40. In 1.0.5 tests on Windows Server 2025 with four other processes forcing writes to the same disk, 10 calls a second for 15 minutes (9,000 calls) and 20 a second for 3 minutes were all answered and allowed. At 30 a second, 13 of 5,400 calls were blocked, all in the first two seconds of the burst. At about 40 a second the host ran out of CPU and calls were blocked with `this account's gateway did not answer in time (it may be restarting or busy)` until the load dropped. Each call costs about a third of a CPU second on the host, mostly for starting the hook processes, so a host with fewer cores keeps up with fewer calls. Interactive sessions are far below these rates. Keep automated loops under 30 calls a second, and lower on a smaller host.
+
+## Hook capacity on managed hosts
+
+A managed host fails closed. When the gateway does not answer a tool-call hook within the hook wait of about 3.5 seconds, the hook blocks the call (`enterprise_managed_gateway_no_answer`), and only after that full wait. Under a heavy burst of calls, or with a very large audit store, the gateway can be slow enough that some calls wait out the 3.5 seconds and are denied. Measured in 1.0.5:
+
+- **Parallel burst.** On a managed macOS host with a 710 MB audit store, the gateway answered about 14 calls a second when 32 tool calls ran in parallel. A call that was not answered in time was denied after the full wait.
+- **First start after an upgrade.** With a 2 GB audit store, the first cold start of the gateway after an upgrade denied 27 to 37 calls at the full wait before it answered normally.
+
+An agent that runs a few tool calls at a time is not affected. To reduce the effect, lower the number of tool calls the agent runs in parallel, and keep the audit store small: an administrator can lower `observability.local.retention_days` (default 7) in the managed config and apply it with `enterprise <os> ensure` ([Local history](/docs/observability#local-history)). Upgrade while agents are idle.
 
 ## Linux sign-out
 
@@ -172,13 +180,14 @@ On Linux, the gateway confirms an SSH session through systemd-logind, or through
 
 ## Per-user self-protection
 
-On a per-user install the hook decides from the command text the agent sends. In every mode it blocks a write to DefenseClaw's own state that is spelled out in the command (rule `tamper.detector_state_write`; the permissive pack only reports it). In action mode it also blocks a spelled-out write to SSH keys, `authorized_keys` and agent instruction files. Two kinds of command cannot be decided by reading them:
+On a per-user install the agent runs as the account that owns DefenseClaw's own files, SSH keys and agent instruction files, and the hook decides from the command text the agent sends. It blocks the common ways an agent could change DefenseClaw's own files, SSH keys or protected instruction files. DefenseClaw's own state is protected in every mode (rule `tamper.detector_state_write`; the permissive pack only reports it). SSH keys, `authorized_keys` and agent instruction files are protected in action mode.
+
+Shell can express the same write in many ways, and some unusual forms are not recognised. Two kinds cannot be decided by reading the command:
 
 - **Command text built when it runs.** A command that joins strings, fills in variables or decodes a value while it runs, and then runs the result, has no fixed text for the hook to check beforehand.
 - **A link made by git, then a write.** A git command such as a pull or a checkout can create a symbolic link from the repository's content. A write later in the same command that goes through that new link can reach the file the link points to, because the link does not exist yet when the hook reads the command.
 
-{/* GAP-2522 (rel-1-0-4, P1 open): remove the next paragraph once its fix ships in the build that carries this page. */}
-A write to DefenseClaw's own state through a link that the same command makes is not yet blocked in 1.0.5. The same form aimed at SSH keys is blocked.
+The LLM judge (the LLM guardrail) is the second layer for protected-file access. If you need more than the command reader gives, turn it on; see [Optional LLM judge](/docs/policies/deterministic-detection#optional-llm-judge).
 
 On a managed install DefenseClaw's own state is owned by root or SYSTEM, so these commands cannot change it. A user's own files, such as `authorized_keys`, are as exposed as on a per-user install. Check for links in repositories you pull. For what DefenseClaw repairs afterwards and what to protect yourself, see **Protected files in action mode** under [Security](#security).
 
