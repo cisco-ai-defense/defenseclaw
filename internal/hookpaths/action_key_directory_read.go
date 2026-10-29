@@ -138,7 +138,15 @@ func actionKeyDirectory(value, cwd, home string, windows bool) bool {
 	}
 	ssh, ok := ResolveWriteTarget(filepath.Join(home, ".ssh"))
 	if !ok {
-		return false
+		// A managed gateway behind ProtectHome (or the macOS service
+		// account) cannot walk the caller's home, so neither name resolves.
+		// The SSH directory spelled as itself is still the key directory: a
+		// recursive reader of ~/.ssh prints every key there, as it does for
+		// the per-user gateway (GAP-2565). A name below it is not read as a
+		// directory here, since only a walk could tell a file from one.
+		_, homeReadable := ResolveWriteTarget(home)
+		return !homeReadable && filepath.IsAbs(home) &&
+			samePathName(filepath.Clean(OperandPath(value, cwd)), filepath.Join(filepath.Clean(home), ".ssh"))
 	}
 	resolved, ok := ResolveWriteTarget(OperandPath(value, cwd))
 	if !ok {
