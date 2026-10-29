@@ -802,11 +802,14 @@ func withActiveStateTargetMention(
 	// A bash here-string, which the POSIX parse rejects, is judged by its
 	// POSIX twin alone (GAP-2047 row a): a read through one names state but
 	// changes none.
+	// A find with an unquoted -name/-path pattern is judged by its quoted
+	// twin (GAP-2498).
 	hereStringMutates, hereStringJudged := hereStringStateMutation(facts, request)
 	if hereStringJudged && !hereStringMutates {
 		return findings
 	}
 	if !hereStringMutates && !globbedStateMutation(facts) && !globbedStateMutationThroughLink(facts, request) &&
+		!findGlobTwinStateMutation(facts, request) &&
 		!archiveExtractsIntoState(facts, request) {
 		command, known := trustedBashCommandInput(request.Input)
 		if !known || !hookpaths.ActionStateTargetMention(command, request.Input.CWD, request.Input.ActiveHome) &&
