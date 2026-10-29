@@ -5,6 +5,10 @@
 
 package connector
 
+// codexRollbackBackupName is the copy of the per-user Codex config.toml taken
+// before ConvertHooksForRollback rewrites it, under <data dir>/backups.
+const codexRollbackBackupName = "codex-config.before-rollback.toml"
+
 // ConvertHooksForRollback rewrites the per-user Codex handlers this release
 // registers as the direct system cmd.exe start of the launcher (GAP-1908)
 // into the encoded PowerShell bridge releases 1.0.1 to 1.0.4 write and own,

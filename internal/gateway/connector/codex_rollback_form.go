@@ -9,10 +9,6 @@ import (
 	"strings"
 )
 
-// codexRollbackBackupName is the copy of the per-user Codex config.toml taken
-// before ConvertHooksForRollback rewrites it, under <data dir>/backups.
-const codexRollbackBackupName = "codex-config.before-rollback.toml"
-
 // convertCodexWindowsHookForms rewrites, in place, every per-user Codex
 // handler under hooks that is exactly a command this release renders for
 // launcher, event and hook contract, between the two forms:
