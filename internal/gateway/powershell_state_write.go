@@ -110,6 +110,17 @@ var psKnownParameters = []string{
 	"wa", "wv", "infa", "iv", "ov", "ob", "pv", "vb", "db", "proga", "wi", "cf",
 }
 
+// psSwitchParameter reports a known switch parameter (no value of its own).
+func psSwitchParameter(name string) bool {
+	switch strings.ToLower(name) {
+	case "force", "recurse", "nonewline", "passthru", "whatif", "confirm",
+		"append", "noclobber", "usetransaction", "container", "asbytestream",
+		"wait", "verbose", "debug", "wi", "cf", "vb", "db":
+		return true
+	}
+	return false
+}
+
 // psParameterReadings returns the readings of a mutator statement with
 // abbreviated parameters: one with every unique prefix spelled out, and,
 // for each parameter that stays unknown or ambiguous, that reading without
@@ -150,12 +161,23 @@ func psParameterReadings(form string) ([]string, bool) {
 			}
 		}
 		switch {
+		case matches == 1 && hasValue:
+			// -Name:value binds as -Name value, and a switch bound to
+			// anything but $true is off; the readers know only the spaced
+			// form, so the colon form dropped the proof (checker it16
+			// RV16-1).
+			texts[k] = "-" + full
+			if psSwitchParameter(full) {
+				if !strings.EqualFold(value, "$true") && value != "1" {
+					texts[k] = ""
+				}
+			} else if value != "" {
+				texts[k] += " " + value
+			}
+			changed = true
 		case matches == 1 && strings.EqualFold(full, name):
 		case matches == 1:
 			texts[k] = "-" + full
-			if hasValue {
-				texts[k] += ":" + value
-			}
 			changed = true
 		default:
 			unknown = append(unknown, k)
@@ -166,17 +188,17 @@ func psParameterReadings(form string) ([]string, bool) {
 		return nil, true
 	}
 	var readings []string
-	if changed {
-		readings = append(readings, strings.Join(texts, " "))
-	}
 	without := func(skip, count int) string {
 		parts := make([]string, 0, len(texts))
 		for k, text := range texts {
-			if k < skip || k >= skip+count {
+			if text != "" && (k < skip || k >= skip+count) {
 				parts = append(parts, text)
 			}
 		}
 		return strings.Join(parts, " ")
+	}
+	if changed {
+		readings = append(readings, without(len(texts), 0))
 	}
 	for _, k := range unknown {
 		readings = append(readings, without(k, 1))
@@ -266,6 +288,17 @@ func psCollectStateWriteForms(command string, depth int, seen map[string]bool, f
 			return true, true
 		}
 		// A body PowerShell cannot parse runs nothing; only its bound counts.
+		if bounded, _ := psCollectStateWriteForms(body, depth+1, seen, forms, budget); bounded {
+			return true, true
+		}
+	}
+	for _, body := range scan.bodies {
+		if !strings.Contains(strings.ToLower(body), "defenseclaw") {
+			continue
+		}
+		if depth >= psNestedShellDepth {
+			return true, true
+		}
 		if bounded, _ := psCollectStateWriteForms(body, depth+1, seen, forms, budget); bounded {
 			return true, true
 		}
@@ -392,10 +425,18 @@ func psNestedShellBody(statement string, budget *psBudget) (string, bool) {
 		// Invoke-Expression runs its string in this session as a -Command
 		// body (checker it15 RV15-2).
 		for k := 1; k < len(words); k++ {
-			name, _, _ := strings.Cut(strings.ToLower(words[k].text), ":")
+			name, value, _ := strings.Cut(words[k].text, ":")
+			name = strings.ToLower(name)
 			if !words[k].quoted && strings.HasPrefix(name, "-") {
-				if len(name) >= 2 && strings.HasPrefix("-command", name) && k+1 < len(words) {
-					return body(words[k+1 : k+2]), true
+				if len(name) >= 2 && strings.HasPrefix("-command", name) {
+					// -Command:'...' binds the string in the same word
+					// (checker it16 RV16-2).
+					if value != "" {
+						return body([]psWord{{text: value}}), true
+					}
+					if k+1 < len(words) {
+						return body(words[k+1 : k+2]), true
+					}
 				}
 				continue
 			}
@@ -421,11 +462,99 @@ func psProgramName(word string) string {
 	return strings.TrimSuffix(program, ".exe")
 }
 
+// psPipedInvokeBody returns the string a pipeline element runs when it is
+// Invoke-Expression (iex) and the element before it is one string:
+// 'Clear-Content STATE' | iex runs Clear-Content (checker it16 RV16-2).
+func psPipedInvokeBody(from, element string, budget *psBudget) (string, bool) {
+	word := strings.TrimSpace(element)
+	if index := strings.IndexAny(word, " \t\r\n"); index >= 0 {
+		word = word[:index]
+	}
+	if program := psProgramName(word); program != "iex" && program != "invoke-expression" {
+		return "", false
+	}
+	from = strings.TrimSpace(from)
+	if !psQuotedWord(from, budget) {
+		return "", false
+	}
+	return psUnquote(from, budget), true
+}
+
+// psStartProcessStatement reports a statement (so far) whose command is
+// Start-Process or one of its aliases; only its first word is read.
+func psStartProcessStatement(cur []rune) bool {
+	k := 0
+	for k < len(cur) && (cur[k] == ' ' || cur[k] == '\t' || cur[k] == '\r') {
+		k++
+	}
+	end := k
+	for end < len(cur) && end-k <= len("start-process") && cur[end] != ' ' && cur[end] != '\t' {
+		end++
+	}
+	switch strings.ToLower(string(cur[k:end])) {
+	case "start-process", "saps", "start":
+		return true
+	}
+	return false
+}
+
+// psJoinListWords joins the words of a comma list written with blanks
+// ('-c', 'x' or "-c" ,"x") and of a (...) or @(...) array into one word, as
+// PowerShell binds them to one parameter (checker it16 RV16-2).
+func psJoinListWords(words []psWord, budget *psBudget) []psWord {
+	out := make([]psWord, 0, len(words))
+	for k := 0; k < len(words); k++ {
+		word := words[k]
+		depth := psParenDelta(word.text, budget)
+		for k+1 < len(words) && budget.step() &&
+			(strings.HasSuffix(word.text, ",") || strings.HasPrefix(words[k+1].text, ",") || depth > 0) {
+			k++
+			word.text += " " + words[k].text
+			depth += psParenDelta(words[k].text, budget)
+		}
+		out = append(out, word)
+	}
+	return out
+}
+
+// psParenDelta is the count of ( minus ) of word outside its strings.
+func psParenDelta(word string, budget *psBudget) int {
+	r := []rune(word)
+	scan := newPSScan(r, budget)
+	delta := 0
+	for i := 0; i < len(r) && budget.step(); i++ {
+		switch {
+		case r[i] == '`':
+			i++
+		case psSingleQuote(r[i]):
+			i = scan.singleQuoted(i) - 1
+		case psDoubleQuote(r[i]):
+			i = scan.doubleQuoted(i) - 1
+		case r[i] == '(':
+			delta++
+		case r[i] == ')':
+			delta--
+		}
+	}
+	return delta
+}
+
+// psArrayBody returns the elements of a (...) or @(...) array literal, or
+// text itself.
+func psArrayBody(text string) string {
+	t := strings.TrimPrefix(strings.TrimSpace(text), "@")
+	if len(t) >= 2 && t[0] == '(' && t[len(t)-1] == ')' {
+		return t[1 : len(t)-1]
+	}
+	return text
+}
+
 // psStartProcessShellBody returns the script a Start-Process of powershell
 // or pwsh runs: its -ArgumentList (a string or a comma list, joined with
 // spaces as Start-Process does) is the shell's argument line (checker it15
 // RV15-2).
 func psStartProcessShellBody(words []psWord, budget *psBudget) (string, bool) {
+	words = psJoinListWords(words, budget)
 	var file, arguments string
 	var positional []string
 	for k := 1; k < len(words); k++ {
@@ -464,7 +593,7 @@ func psStartProcessShellBody(words []psWord, budget *psBudget) (string, bool) {
 		return "", false
 	}
 	var parts []string
-	for _, part := range psSplitArguments(arguments, budget) {
+	for _, part := range psSplitArguments(psArrayBody(arguments), budget) {
 		if part == "" {
 			return "", false
 		}
@@ -538,6 +667,7 @@ type psStateScan struct {
 	runes      []rune
 	pieces     []string
 	targets    []string
+	bodies     []string // strings piped into Invoke-Expression
 	parseError bool
 	budget     *psBudget
 }
@@ -577,10 +707,18 @@ func (s *psStateScan) tokenStart(i int) bool {
 func (s *psStateScan) code(i int, nested bool) int {
 	r := s.runes
 	var cur []rune
+	var last, pipedFrom string
 	flush := func() {
-		if strings.TrimSpace(string(cur)) != "" && s.account(len(cur)) {
-			s.pieces = append(s.pieces, string(cur))
+		text := string(cur)
+		if strings.TrimSpace(text) != "" && s.account(len(cur)) {
+			s.pieces = append(s.pieces, text)
+			if pipedFrom != "" {
+				if body, ok := psPipedInvokeBody(pipedFrom, text, s.budget); ok {
+					s.bodies = append(s.bodies, body)
+				}
+			}
 		}
+		last, pipedFrom = text, ""
 		cur = cur[:0]
 	}
 	for i < len(r) && !s.parseError && s.budget.step() {
@@ -592,7 +730,17 @@ func (s *psStateScan) code(i int, nested bool) int {
 				cur = append(cur, r[i+1])
 			}
 			i += 2
-		case c == '\n' || c == ';' || c == '|' || c == '&' || c == '{' || c == '}':
+		case c == '|':
+			// A string piped into Invoke-Expression runs as its body
+			// (checker it16 RV16-2).
+			flush()
+			if i+1 < len(r) && r[i+1] == '|' {
+				i += 2
+				continue
+			}
+			pipedFrom = last
+			i++
+		case c == '\n' || c == ';' || c == '&' || c == '{' || c == '}':
 			flush()
 			i++
 		case c == ')':
@@ -607,10 +755,19 @@ func (s *psStateScan) code(i int, nested bool) int {
 				tail = tail[len(tail)-32:]
 			}
 			method := strings.ToLower(strings.TrimRight(string(tail), " \t"))
-			flush()
+			// A Start-Process statement keeps its (...) and @(...)
+			// argument arrays, so the -ArgumentList it runs is read
+			// (checker it16 RV16-2); the body is still scanned as a piece.
+			keep := psStartProcessStatement(cur)
+			if !keep {
+				flush()
+			}
 			end := s.code(i+1, true)
 			if s.overBound() {
 				return len(r)
+			}
+			if keep && s.account(end-i) {
+				cur = append(cur, r[i:end]...)
 			}
 			if write := psFileWriteMethod(method); write != nil && end-1 > i+1 && s.account(end-1-i) {
 				args := psSplitArguments(string(r[i+1:end-1]), s.budget)
