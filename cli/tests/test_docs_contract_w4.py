@@ -70,7 +70,7 @@ def test_bash_examples_disclose_the_shell_before_commands(path):
     ("segmentation.mdx", "effective hook fail mode", "Open: the call runs and the failure is recorded"),
     ("guardrail/index.mdx", "defenseclaw-hook.exe", ""),
     ("connectors/devin.mdx", "comments and formatting are removed", "JSONC content in those files are kept"),
-    ("connectors/antigravity.mdx", "`~/.defenseclaw/hooks/antigravity-hook.sh` stays after `guardrail disable` and `setup remove antigravity` as an inert stub that exits successfully", None),
+    ("connectors/antigravity.mdx", "`guardrail disable` and `setup remove antigravity` also remove `~/.defenseclaw/hooks/antigravity-hook.sh`", "as an inert stub"),
     ("connectors/devin.mdx", "If setup cannot edit the project file in place, for example when it has a duplicate top-level key, it writes it back as JSON too, so its comments, formatting and BOM are removed", None),
 ])
 def test_corrected_operator_claims(path, required, forbidden):

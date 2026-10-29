@@ -1848,6 +1848,10 @@ func (c *hookOnlyConnector) teardown(ctx context.Context, opts SetupOpts, hermes
 		if err := removeCursorHookArtifacts(opts); err != nil {
 			errs = append(errs, fmt.Sprintf("remove Cursor hook artifacts: %v", err))
 		}
+	} else if c.name == "antigravity" {
+		if err := removeAntigravityHookScript(opts, c.scriptName); err != nil {
+			errs = append(errs, fmt.Sprintf("remove the Antigravity hook script: %v", err))
+		}
 	} else if err := writeDisabledHookTombstone(opts, c.scriptName, c.name); err != nil {
 		errs = append(errs, fmt.Sprintf("disabled hook tombstone: %v", err))
 	}
@@ -2082,6 +2086,30 @@ func hermesHomeHoldsOwnedEntries(configPath, hookScript, command string) (hooks,
 		}
 	}
 	return hooks, approvals, nil
+}
+
+// removeAntigravityHookScript removes the hook script teardown leaves no use
+// for (GAP-2335). Antigravity blocks only on the decision a hook prints: a
+// hook command that cannot start gives no decision, and Antigravity runs the
+// call, which is what the exit-0 tombstone did too. So a running Antigravity
+// that still calls the removed path keeps working without a stub. A file without the DefenseClaw marker, or one teardown
+// cannot remove, gets the disabled tombstone as before, so a foreign or
+// locked file is never left forwarding stale payloads.
+func removeAntigravityHookScript(opts SetupOpts, scriptName string) error {
+	path := filepath.Join(opts.DataDir, "hooks", scriptName)
+	if _, err := os.Lstat(path); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		return writeDisabledHookTombstone(opts, scriptName, "antigravity")
+	}
+	if !scriptHasMarker(path) {
+		return writeDisabledHookTombstone(opts, scriptName, "antigravity")
+	}
+	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return writeDisabledHookTombstone(opts, scriptName, "antigravity")
+	}
+	return nil
 }
 
 // removeCursorHookArtifacts removes only files that still carry the

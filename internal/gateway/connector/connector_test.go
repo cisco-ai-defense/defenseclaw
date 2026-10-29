@@ -3204,12 +3204,8 @@ func TestEveryHookOwner_TeardownLeavesTombstone(t *testing.T) {
 			hookAPI:    "/api/v1/copilot/hook",
 			setup:      hookOnlySetup(".json", NewCopilotConnector, &CopilotHooksPathOverride),
 		},
-		{
-			name:       "antigravity",
-			hookScript: "antigravity-hook.sh",
-			hookAPI:    "/api/v1/antigravity/hook",
-			setup:      hookOnlySetup(".json", NewAntigravityConnector, &AntigravityHooksPathOverride),
-		},
+		// Antigravity removes its script instead (GAP-2335):
+		// TestAntigravityTeardownRemovesItsHookScript.
 	}
 
 	// Defence-in-depth: every Connector returned by setup must actually
