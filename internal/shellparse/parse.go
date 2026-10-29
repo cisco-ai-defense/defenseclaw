@@ -11,9 +11,42 @@ import (
 	"mvdan.cc/sh/v3/syntax"
 )
 
+// MaxNestingDepth bounds how deep a command may nest (, { and [ before a
+// parser reads it. The mvdan parser recurses once or more per level of (,
+// $(, $((, { and [, and a 180 KiB command of ( overflowed the 1 GB
+// goroutine stack of the Windows gateway: a fatal error no recover catches,
+// so the whole gateway exited (GAP-2537). No real command nests this deep.
+const MaxNestingDepth = 512
+
+// TooDeep reports whether command nests (, { or [ deeper than
+// MaxNestingDepth, in one linear pass over every byte (quotes and escapes
+// count too, so the bound holds whatever the grammar). A command it reports
+// is past the reading bounds: callers take their over-limit path and never
+// hand it to a recursive parser.
+func TooDeep(command string) bool {
+	depth := 0
+	for i := 0; i < len(command); i++ {
+		switch command[i] {
+		case '(', '{', '[':
+			if depth++; depth > MaxNestingDepth {
+				return true
+			}
+		case ')', '}', ']':
+			if depth > 0 {
+				depth--
+			}
+		}
+	}
+	return false
+}
+
 // Parse reads a command with the same Bash-then-POSIX grammar used for hook
-// command proofs. Callers bound their inputs before parsing.
+// command proofs. Callers bound their inputs before parsing; a command past
+// MaxNestingDepth is not parsed.
 func Parse(command string) (*syntax.File, bool) {
+	if TooDeep(command) {
+		return nil, false
+	}
 	for _, variant := range []syntax.LangVariant{syntax.LangBash, syntax.LangPOSIX} {
 		file, err := syntax.NewParser(syntax.Variant(variant)).Parse(strings.NewReader(command), "")
 		if err == nil {

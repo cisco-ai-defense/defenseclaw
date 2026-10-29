@@ -37,6 +37,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/guardrail/semantic"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail/semanticpb"
 	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
+	"github.com/defenseclaw/defenseclaw/internal/shellparse"
 	"mvdan.cc/sh/v3/expand"
 	"mvdan.cc/sh/v3/pattern"
 	"mvdan.cc/sh/v3/syntax"
@@ -260,6 +261,11 @@ func dispatchTrustedAction(
 	if _, ok := managedHookPeerFromContext(parent); ok {
 		request.ProtectedHomeHook = true
 	}
+	if trustedActionCommandTooDeep(request.Input) {
+		// Past the reading bounds: no reader below parses it, and the call
+		// takes the over-limit path (GAP-2537).
+		return trustedActionLimitFindings(request.EnforcementCapable)
+	}
 	var (
 		facts     actionfacts.Facts
 		analyzed  bool
@@ -400,14 +406,7 @@ func dispatchTrustedActionWith(
 						// evaluation. It is not itself an enforcement finding.
 						continue
 					}
-					const ruleID = "ACTION-COMPOUND-LIMIT"
-					failure := RuleFinding{
-						RuleID: ruleID, Title: "Shell command exceeds policy evaluation limit",
-						Severity: "CRITICAL", Confidence: 1,
-						enforcement: findingEnforcementAllowed,
-					}.withTrustedActionProof(newEvaluationFailureFindingProof(ruleID))
-					findings = withSimpleCommandFindings(findings,
-						applyTrustedActionProofBoundary([]RuleFinding{failure}, request.EnforcementCapable))
+					findings = withSimpleCommandFindings(findings, trustedActionLimitFindings(request.EnforcementCapable))
 					break
 				}
 				child := request
@@ -448,6 +447,15 @@ func dispatchTrustedActionWith(
 				// the call budget, like its parent.
 				child.generation, child.budget = generation, budget
 				childFindings := dispatchTrustedAction(ctx, child)
+				if child.Input.MovedWindowsShellCWD && !request.Input.MovedWindowsShellCWD {
+					// The moved-directory reading only adds findings: the
+					// child's reading without it (a hooks-dir removal or move
+					// under a home spelling) keeps every block it proved
+					// (GAP-2473 RV-r10-1).
+					unmoved := child
+					unmoved.Input.MovedWindowsShellCWD = false
+					childFindings = withSimpleCommandFindings(childFindings, dispatchTrustedAction(ctx, unmoved))
+				}
 				if simple.ZshHistoryBuiltin {
 					// Zsh's history builtin lists events (fc -l). The Bash-only
 					// history -c clear rule does not apply inside that shell.
@@ -5741,6 +5749,34 @@ func stateGlobTwinRequest(request trustedActionRequest) (trustedActionRequest, b
 		return trustedActionRequest{}, false
 	}
 	return bashReadingRequest(request, command, rewritten), true
+}
+
+// trustedActionLimitFindings is the over-limit verdict of a shell command
+// past the policy reading bounds.
+func trustedActionLimitFindings(enforcementCapable bool) []RuleFinding {
+	const ruleID = "ACTION-COMPOUND-LIMIT"
+	failure := RuleFinding{
+		RuleID: ruleID, Title: "Shell command exceeds policy evaluation limit",
+		Severity: "CRITICAL", Confidence: 1,
+		enforcement: findingEnforcementAllowed,
+	}.withTrustedActionProof(newEvaluationFailureFindingProof(ruleID))
+	return applyTrustedActionProofBoundary([]RuleFinding{failure}, enforcementCapable)
+}
+
+// trustedActionCommandTooDeep reports whether the call's command (the
+// command input, or the top-level command argument of any tool) nests past
+// shellparse.MaxNestingDepth. Every shell reader of the gateway, the hook
+// proofs and actionfacts recurse per nesting level; such a command
+// overflowed the Windows gateway's stack (GAP-2537).
+func trustedActionCommandTooDeep(input actionfacts.Input) bool {
+	if shellparse.TooDeep(input.Command) {
+		return true
+	}
+	if input.Command != "" || len(bytes.TrimSpace(input.Args)) == 0 {
+		return false
+	}
+	command, present, valid := trustedTopLevelCommandField(input.Args)
+	return valid && present && shellparse.TooDeep(command)
 }
 
 func trustedBashCommandInput(input actionfacts.Input) (string, bool) {

@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/defenseclaw/defenseclaw/internal/shellparse"
 	"mvdan.cc/sh/v3/syntax"
 )
 
@@ -385,7 +386,7 @@ func unprovenProtectedWriteDepth(command, cwd, home string, depth int) string {
 // Recoverable syntax errors may leave executable calls and redirects in the
 // syntax tree. Check those effects before discarding the failed parse.
 func unprovenShellParseWrite(command, cwd, home string) bool {
-	if len(command) > MaxPayloadBytes {
+	if len(command) > MaxPayloadBytes || shellparse.TooDeep(command) {
 		return true // Beyond the command proof bound, effects are unknown.
 	}
 	file, _ := syntax.NewParser(syntax.Variant(syntax.LangBash), syntax.RecoverErrors(8)).Parse(strings.NewReader(command), "")
