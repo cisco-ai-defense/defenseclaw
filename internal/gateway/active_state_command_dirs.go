@@ -26,6 +26,10 @@ type commandDirectoryScope struct {
 	stack    [][]string
 	listID   int64
 	listDirs []string
+	// held is where the shell is when every earlier cd of the scope held
+	// (the answer before the cd scope work); heldStack is its pushd stack.
+	held      []string
+	heldStack [][]string
 }
 
 // posixCommandDirectories is every working directory each POSIX command
@@ -49,6 +53,11 @@ type commandDirectoryScope struct {
 // or under a wrapper (`sudo rm`) walk their own scope, which starts in the
 // directories of the parent command; their cd moves them and never the
 // outer shell. Every set is bounded (boundCommandDirectories).
+//
+// Pod check29: the bound always keeps the directory where every earlier cd
+// held and the scope start, so 4 or more relative cds and a .. traversal
+// (`sh -c "cd a; cd b; cd c; cd d; rm -rf ../../../../.defenseclaw/hooks/*"`)
+// are still judged where the shell really is.
 func posixCommandDirectories(facts actionfacts.Facts, home string) [][]string {
 	dirs := make([][]string, len(facts.Commands))
 	var callDirs []string
@@ -56,7 +65,7 @@ func posixCommandDirectories(facts actionfacts.Facts, home string) [][]string {
 		callDirs = []string{path.Clean(facts.CWD)}
 	}
 	stateRoot := home + "/.defenseclaw"
-	scopes := map[int64]*commandDirectoryScope{0: {start: callDirs, current: callDirs}}
+	scopes := map[int64]*commandDirectoryScope{0: {start: callDirs, current: callDirs, held: callDirs}}
 	indexOfID := make(map[int64]int, len(facts.Commands))
 	for index, command := range facts.Commands {
 		indexOfID[command.ID] = index
@@ -68,7 +77,7 @@ func posixCommandDirectories(facts actionfacts.Facts, home string) [][]string {
 				if len(start) == 1 && start[0] == "" {
 					start = nil
 				}
-				scopes[scopeID] = &commandDirectoryScope{start: start, current: start}
+				scopes[scopeID] = &commandDirectoryScope{start: start, current: start, held: start}
 			}
 		}
 		scope := scopes[scopeID]
@@ -88,37 +97,42 @@ func posixCommandDirectories(facts actionfacts.Facts, home string) [][]string {
 		if command.Background || command.PipelineID != 0 {
 			continue
 		}
-		var next []string
+		var next, heldNext []string
 		words, ok := stateOperandWords(command)
 		switch {
 		case !ok:
 		case program == "popd":
 			if len(words) == 0 && len(scope.stack) != 0 {
-				next, scope.stack = scope.stack[len(scope.stack)-1], scope.stack[:len(scope.stack)-1]
+				last := len(scope.stack) - 1
+				next, scope.stack = scope.stack[last], scope.stack[:last]
+				heldNext, scope.heldStack = scope.heldStack[last], scope.heldStack[:last]
 			}
 		default:
 			next = cdTargets(program, words, home, here)
+			heldNext = cdTargets(program, words, home, scope.held)
 			if program == "pushd" && len(next) != 0 {
 				scope.stack = append(scope.stack, here)
+				scope.heldStack = append(scope.heldStack, scope.held)
 			}
 		}
+		scope.held = heldNext
 		if command.ShortCircuitListID != 0 &&
 			command.ControlFlowOperator == actionfacts.ControlFlowOperatorAnd {
 			scope.listID, scope.listDirs = command.ShortCircuitListID, next
 		}
 		scope.current = boundCommandDirectories(
-			unionDirectories(scope.current, here, next), scope.start, next, home, stateRoot)
+			unionDirectories(scope.current, here, next, scope.held), scope.held, scope.start, next, home, stateRoot)
 	}
 	return dirs
 }
 
 // boundCommandDirectories keeps at most maxCommandDirectories of dirs, in
-// this order: the state root and its ancestors, the directories in the state
-// root, the directories the cd just led to, the start of the scope, the
+// this order: where every cd held, the start of the scope, the state root and its ancestors, the directories in the state
+// root, the directories the cd just led to, the
 // directories in the home, then the others. Within a class the shorter path
 // is kept first: a chain of relative cds that did not hold leads ever
 // deeper, while the shell is still in one of the shorter directories.
-func boundCommandDirectories(dirs, start, next []string, home, stateRoot string) []string {
+func boundCommandDirectories(dirs, held, start, next []string, home, stateRoot string) []string {
 	if len(dirs) <= maxCommandDirectories {
 		return dirs
 	}
@@ -136,12 +150,13 @@ func boundCommandDirectories(dirs, start, next []string, home, stateRoot string)
 		}
 	}
 	everyDir := func(string) bool { return true }
+	keep(held, everyDir)
+	keep(start, everyDir)
 	keep(dirs, func(dir string) bool {
 		return dir == stateRoot || dir == "/" || strings.HasPrefix(stateRoot, dir+"/")
 	})
 	keep(dirs, func(dir string) bool { return strings.HasPrefix(dir, stateRoot+"/") })
 	keep(next, everyDir)
-	keep(start, everyDir)
 	keep(dirs, func(dir string) bool { return strings.HasPrefix(dir, home+"/") })
 	keep(dirs, everyDir)
 	return kept

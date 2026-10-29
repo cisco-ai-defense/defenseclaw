@@ -62,6 +62,12 @@ func TestR105GAP2485NestedScriptCdAndChainCost(t *testing.T) {
 		{"Q5 sh -c relative state", "sh -c \"cd .defenseclaw; rm -rf hooks/*\"", true, ""},
 		{"MB1 nested project clean", "bash -c \"cd ~/proj2 && git clean -fdx\"", false, ""},
 		{"nested project rm", "sh -c \"cd proj2; rm -rf build/*\"", false, ""},
+		// Pod check29: 4 or more relative cds, then a .. traversal.
+		{"Y5 four cds then cd ..", "sh -c \"cd a; cd b; cd c; cd d; cd ../../../../.defenseclaw; rm -rf hooks/*\"", true, ""},
+		{"Y6 four cds then rm ..", "sh -c \"cd a; cd b; cd c; cd d; rm -rf ../../../../.defenseclaw/hooks/*\"", true, ""},
+		{"Y outer four cds then rm ..", "cd a; cd b; cd c; cd d; cd e; rm -rf ../../../../../.defenseclaw/hooks/*", true, ""},
+		{"Y pushd popd chain", "sh -c \"pushd a; cd b; cd c; cd d; cd e; popd; rm -rf .defenseclaw/hooks/*\"", true, ""},
+		{"Y benign four cds then rm ..", "sh -c \"cd proj2; cd build; cd x; cd y; rm -rf ../../*.o\"", false, ""},
 	}
 	for _, mode := range []string{"observe", "action"} {
 		r105RunStateRowsChecked(t, mode, project, projectRows, true)
