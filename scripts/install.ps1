@@ -149,10 +149,12 @@ $ManagedFiles = $ManagedBinaries + @($ManagedShims | ForEach-Object { "$_.cmd" }
 # which Install-New replaces with $CliLauncher. These must go.
 $DeveloperFiles = @("litellm.exe", "skill-scanner.exe", "skill-scanner-api.exe",
     "skill-scanner-pre-commit.exe", "mcp-scanner.exe", "mcp-scanner-api.exe", ".defenseclaw-source-root")
-# Data-dir entries that are install machinery, not user data.
+# Data-dir entries that are install machinery, not user data. A
+# `<name>.dc-removed-<hex>` folder is one an uninstall's after-exit cleanup
+# renamed and is still deleting (1.0.2 on): never data (GAP-2499).
 $NotData = @(".venv", ".venv.busy", ".uv", "previous", "previous.new", ".repair", ".staging", ".failed-*",
     "installer", "logs", ".install.lock", "backups", ".rollback-hold", ".rollback-hold.done",
-    ".lifecycle-txn.json", ".lifecycle-txn.json.new", ".lifecycle-closer")
+    ".lifecycle-txn.json", ".lifecycle-txn.json.new", ".lifecycle-closer", "*.dc-removed-*")
 # Connectors supported on Windows (cli/defenseclaw/platform_support.py).
 $ConnectorChoices = @("codex", "claudecode", "hermes", "cursor", "devin", "copilot", "antigravity",
     "opencode", "amp", "kiro", "none")
@@ -1871,8 +1873,22 @@ function Clear-StagedRelease {
 }
 
 function Get-TreeSize([string]$Path) {
+    # A folder can go while it is walked (an uninstall's after-exit cleanup
+    # deletes its renamed .uv in the background), and Get-ChildItem -Recurse
+    # then stops the install with "The system cannot find the file specified"
+    # despite -ErrorAction (GAP-2499). Each folder is listed on its own; one
+    # that went counts as empty. Links are not followed.
     $size = [long]0
-    foreach ($file in @(Get-ChildItem -LiteralPath $Path -Recurse -Force -File -ErrorAction SilentlyContinue)) { $size += $file.Length }
+    $dirs = New-Object System.Collections.Generic.Stack[string]
+    $dirs.Push($Path)
+    while ($dirs.Count) {
+        $items = @()
+        try { $items = @(Get-ChildItem -LiteralPath $dirs.Pop() -Force -ErrorAction SilentlyContinue) } catch { continue }
+        foreach ($item in $items) {
+            if (-not $item.PSIsContainer) { $size += $item.Length }
+            elseif (-not ($item.Attributes -band [IO.FileAttributes]::ReparsePoint)) { $dirs.Push($item.FullName) }
+        }
+    }
     return $size
 }
 
@@ -3480,6 +3496,30 @@ function Protect-BinDir {
     }
 }
 
+function Save-HelperRecoveryCopy {
+    # A 1.0.2 or 1.0.3 install.ps1 rolls forward with its own binary list and
+    # leaves defenseclaw-hook-guard.exe out, while the Claude Code PreToolUse
+    # entry this release wrote names it (GAP-2525). Their swap keeps installer\
+    # as one folder, so keep a copy there with the digests of the gateway and
+    # the guard; the gateway puts a missing guard back when it starts. Best
+    # effort: without the copy only that roll-forward case is not repaired.
+    $guard = Join-Path $BinDir "defenseclaw-hook-guard.exe"
+    $gateway = Join-Path $BinDir "defenseclaw-gateway.exe"
+    if (-not (Test-Path -LiteralPath $guard -PathType Leaf) -or -not (Test-Path -LiteralPath $gateway -PathType Leaf)) { return }
+    try {
+        New-Item -ItemType Directory -Path $InstallerDir -Force | Out-Null
+        Install-File $guard (Join-Path $InstallerDir "defenseclaw-hook-guard.exe")
+        $lines = foreach ($name in @("defenseclaw-gateway.exe", "defenseclaw-hook-guard.exe")) {
+            "$((Get-Sha256 (Join-Path $BinDir $name)).ToLowerInvariant())  $name"
+        }
+        $record = Join-Path $InstallerDir "binaries.sha256"
+        [IO.File]::WriteAllText("$record.new", (($lines -join "`n") + "`n"), (New-Object Text.UTF8Encoding $false))
+        Publish-File "$record.new" $record
+    } catch {
+        Write-Warn "Could not keep a recovery copy of defenseclaw-hook-guard.exe in $InstallerDir ($($_.Exception.Message))"
+    }
+}
+
 function Install-New {
     Write-Info "Installing DefenseClaw $Ver"
     Write-Info "Building the final Python environment in $Venv (the checked packages come from the uv cache)"
@@ -3503,6 +3543,7 @@ function Install-New {
         $staged = Join-Path $Staging "bin\$name"
         if (Test-Path -LiteralPath $staged) { Install-File $staged (Join-Path $BinDir $name) }
     }
+    Save-HelperRecoveryCopy
     foreach ($name in $ManagedShims) {
         $target = Join-Path $Venv "Scripts\$name.exe"
         if (Test-Path -LiteralPath $target) { Write-Shim $name $target }

@@ -286,6 +286,9 @@ func runStart(cmd *cobra.Command, args []string) error {
 			return fmt.Errorf("hook cold start skipped: %w", err)
 		}
 	}
+	// GAP-2521: an older release roll-forward leaves out the helpers it does
+	// not know; put back the ones this install recorded.
+	restorePerUserInstallerHelpers(dataDir)
 	err = runStartLocked(cmd, args, coldStart)
 	if err != nil && coldStart {
 		if running, _ := daemon.New(dataDir).IsRunning(); !running {
@@ -804,6 +807,7 @@ func runRestart(cmd *cobra.Command, _ []string) error {
 	}
 	defer release()
 	recordGatewayLoginPath(config.DefaultDataPath())
+	restorePerUserInstallerHelpers(config.DefaultDataPath())
 	d := daemon.New(config.DefaultDataPath())
 	// Restart may stop an otherwise healthy managed gateway. Validate every
 	// process-identity artifact before that first side effect so malformed or
