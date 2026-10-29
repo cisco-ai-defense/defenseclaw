@@ -882,52 +882,113 @@ func provenStateMutationPath(facts actionfacts.Facts, request trustedActionReque
 		if !provenMutation {
 			continue
 		}
-		if entry, ok := stateDirectoryEntryTarget(command, candidate, request); ok {
-			candidate.Resolved = entry
-			if matchesActiveDefenseClawStateInLine(projected, candidate, lineStaysOff, request.ResolvedWriteTargets) {
+		// The spelling the kernel walks first (GAP-2047 L5), then the
+		// lexical one the path fact keeps.
+		if walked, ok := stateWalkSpelling(candidate, request.Input.CWD, projected.ActiveHome); ok {
+			physicalCandidate := candidate
+			physicalCandidate.Resolved = walked
+			if provenStateCandidateMatches(projected, command, physicalCandidate, request, lineStaysOff) {
 				return true
 			}
-			continue
 		}
-		physical := ""
-		for _, spelling := range []string{candidate.Resolved, candidate.Value, candidate.Normalized} {
-			if value, found := request.ResolvedWriteTargets[spelling]; found {
-				physical = value
-				break
-			}
-		}
-		if physical == "" && !request.SkipLocalFilesystemResolution {
-			if request.ProtectedHomeHook {
-				// Only an OS-proved alias is safe to resolve here when the
-				// authenticated hook supplied no target-map entry. The home
-				// itself is the peer's home from the account database: a
-				// find that starts there (`yes | find ~ ...`, which the
-				// client lists no target for) is judged from it (GAP-2404
-				// pod ip21, managed RHEL).
-				physical, _ = hookpaths.ResolveActiveStateHardlinkTarget(candidate.Resolved, projected.ActiveHome)
-				if physical == "" && path.IsAbs(candidate.Resolved) &&
-					path.Clean(candidate.Resolved) == path.Clean(projected.ActiveHome) {
-					physical = path.Clean(candidate.Resolved)
-				}
-			} else {
-				physical, _ = hookpaths.ResolveWriteTarget(candidate.Resolved)
-			}
-		}
-		if physical == "" {
-			continue
-		}
-		if active, same := hookpaths.ResolveActiveStateHardlinkTarget(physical, projected.ActiveHome); same {
-			physical = active
-		}
-		if candidate.Flavor == actionfacts.PathFlavorPOSIX {
-			physical = filepath.ToSlash(physical)
-		}
-		candidate.Resolved = physical
-		if matchesActiveDefenseClawStateInLine(projected, candidate, lineStaysOff, request.ResolvedWriteTargets) {
+		if provenStateCandidateMatches(projected, command, candidate, request, lineStaysOff) {
 			return true
 		}
 	}
 	return false
+}
+
+// provenStateCandidateMatches places one proven mutating operand (a
+// directory entry, the hook's resolved target or the local link walk) and
+// reports it in the active state.
+func provenStateCandidateMatches(
+	projected actionfacts.Facts,
+	command actionfacts.CommandFact,
+	candidate actionfacts.PathFact,
+	request trustedActionRequest,
+	lineStaysOff func() bool,
+) bool {
+	if entry, ok := stateDirectoryEntryTarget(command, candidate, request); ok {
+		candidate.Resolved = entry
+		if matchesActiveDefenseClawStateInLine(projected, candidate, lineStaysOff, request.ResolvedWriteTargets) {
+			return true
+		}
+		return false
+	}
+	physical := ""
+	for _, spelling := range []string{candidate.Resolved, candidate.Value, candidate.Normalized} {
+		if value, found := request.ResolvedWriteTargets[spelling]; found {
+			physical = value
+			break
+		}
+	}
+	if physical == "" && !request.SkipLocalFilesystemResolution {
+		if request.ProtectedHomeHook {
+			// Only an OS-proved alias is safe to resolve here when the
+			// authenticated hook supplied no target-map entry. The home
+			// itself is the peer's home from the account database: a
+			// find that starts there (`yes | find ~ ...`, which the
+			// client lists no target for) is judged from it (GAP-2404
+			// pod ip21, managed RHEL).
+			physical, _ = hookpaths.ResolveActiveStateHardlinkTarget(candidate.Resolved, projected.ActiveHome)
+			if physical == "" && path.IsAbs(candidate.Resolved) &&
+				path.Clean(candidate.Resolved) == path.Clean(projected.ActiveHome) {
+				physical = path.Clean(candidate.Resolved)
+			}
+		} else {
+			physical, _ = hookpaths.ResolveWriteTarget(candidate.Resolved)
+		}
+	}
+	if physical == "" {
+		return false
+	}
+	if active, same := hookpaths.ResolveActiveStateHardlinkTarget(physical, projected.ActiveHome); same {
+		physical = active
+	}
+	if candidate.Flavor == actionfacts.PathFlavorPOSIX {
+		physical = filepath.ToSlash(physical)
+	}
+	candidate.Resolved = physical
+	return matchesActiveDefenseClawStateInLine(projected, candidate, lineStaysOff, request.ResolvedWriteTargets)
+}
+
+// stateWalkSpelling is the spelling of an operand with a `..` component
+// as the kernel walks it: a `..` after a link ascends from the link's
+// target, so with dclink -> ~/.defenseclaw `rm -rf dclink/../.defenseclaw/hooks`
+// removes ~/.defenseclaw/hooks while its lexical spelling (the path fact)
+// is ./.defenseclaw/hooks (GAP-2047 L5, T10). It is the operand joined to
+// the call cwd, uncleaned, when that join cleans to the fact's resolved
+// path (an operand placed after a cd keeps its lexical spelling only); ok
+// is false for any other operand, which keeps its lexical spelling.
+func stateWalkSpelling(candidate actionfacts.PathFact, cwd, home string) (string, bool) {
+	if candidate.Flavor == actionfacts.PathFlavorWindows || !hasDotDotComponent(candidate.Value) {
+		return "", false
+	}
+	trimmed := strings.TrimRight(candidate.Value, "/")
+	if strings.HasSuffix(trimmed, "/..") || strings.HasSuffix(trimmed, "/.") || trimmed == ".." {
+		return "", false
+	}
+	full, ok := stateHomePath(candidate.Value, strings.TrimRight(home, "/"), cwd)
+	if !ok || !path.IsAbs(full) || path.Clean(full) != path.Clean(filepath.ToSlash(candidate.Resolved)) {
+		return "", false
+	}
+	return full, true
+}
+
+// hasDotDotComponent reports a slash path with a `..` component.
+func hasDotDotComponent(word string) bool {
+	return slices.Contains(strings.Split(word, "/"), "..")
+}
+
+// walkParent is the parent of a slash path without removing its `..`
+// components (filepath.Dir cleans them lexically).
+func walkParent(value string) string {
+	value = strings.TrimRight(value, "/")
+	index := strings.LastIndex(value, "/")
+	if index <= 0 {
+		return "/"
+	}
+	return value[:index]
 }
 
 // stateLinkResolver resolves a path through links: the hook's resolved
@@ -970,7 +1031,8 @@ func globbedStateMutationThroughLink(facts actionfacts.Facts, request trustedAct
 	}
 	resolve := stateLinkResolver(request)
 	root, inState := stateRootOf(home, resolve)
-	for _, command := range facts.Commands {
+	dirs := posixCommandDirectories(facts, home)
+	for commandIndex, command := range facts.Commands {
 		if command.Effect == actionfacts.EffectPreview || command.Dialect != actionfacts.DialectPOSIX {
 			continue
 		}
@@ -978,8 +1040,18 @@ func globbedStateMutationThroughLink(facts actionfacts.Facts, request trustedAct
 		if !ok {
 			continue
 		}
+		git := path.Base(command.Program) == "git"
 		rewritten, changed := slices.Clone(words), false
 		for index, word := range words {
+			if git {
+				// `git -C dclink clean -fdx`: a -C or --work-tree value is
+				// a directory git enters, so the whole word is resolved
+				// (GAP-2047 L11).
+				if spelled, ok := gitDirectoryWordThroughLink(words, index, home, facts.CWD, root, resolve, inState); ok {
+					rewritten[index], changed = spelled, true
+					continue
+				}
+			}
 			if spelled, ok := stateWordThroughLink(word, home, facts.CWD, root, resolve, inState); ok {
 				rewritten[index], changed = spelled, true
 			}
@@ -987,8 +1059,50 @@ func globbedStateMutationThroughLink(facts actionfacts.Facts, request trustedAct
 		if changed && globbedStateCommandMutates(command, rewritten, home, facts.CWD) {
 			return true
 		}
+		// `cd dclink && git clean -fdx`: a directory the command runs in
+		// after a cd, physically in the state but spelled outside it, is
+		// judged by its ~/.defenseclaw spelling (GAP-2047 L11).
+		if commandIndex >= len(dirs) {
+			continue
+		}
+		program, programWords := unwrapStateWrapper(command, words)
+		for _, dir := range dirs[commandIndex] {
+			if !strings.HasPrefix(dir, "/") {
+				continue
+			}
+			spelled, ok := stateWordThroughLink(strings.TrimRight(dir, "/")+"/", home, facts.CWD, root, resolve, inState)
+			if ok && globbedStateCommandMutates(program, programWords, home, strings.TrimRight(spelled, "/")) {
+				return true
+			}
+		}
 	}
 	return false
+}
+
+// gitDirectoryWordThroughLink spells the value of a git -C or --work-tree
+// option (its own word or attached with =) under ~/.defenseclaw when the
+// directory it names is physically in the state.
+func gitDirectoryWordThroughLink(
+	words []string, index int, home, cwd, root string,
+	resolve func(string) (string, bool),
+	inState func(string) bool,
+) (string, bool) {
+	word, prefix := words[index], ""
+	switch {
+	case strings.HasPrefix(word, "--work-tree="):
+		prefix, word = "--work-tree=", strings.TrimPrefix(word, "--work-tree=")
+	case index > 0 && (words[index-1] == "-C" || words[index-1] == "--work-tree"):
+	default:
+		return "", false
+	}
+	if word == "" || strings.HasPrefix(word, "-") || stateWordExpands(word) {
+		return "", false
+	}
+	spelled, ok := stateWordThroughLink(strings.TrimRight(word, "/")+"/", home, cwd, root, resolve, inState)
+	if !ok {
+		return "", false
+	}
+	return prefix + strings.TrimRight(spelled, "/"), true
 }
 
 // stateWordThroughLink returns word spelled under ~/.defenseclaw when its
@@ -1017,14 +1131,20 @@ func stateWordThroughLink(
 		}
 	}
 	directory := path.Clean("/" + strings.Join(components[:split], "/"))
-	if directory == "/" || directory == home {
-		return "", false
-	}
+	// A `..` after a link ascends from the link's target, so the directory
+	// part is resolved as the kernel walks it and its lexical spelling
+	// proves nothing (`rm -rf dclink/../.defenseclaw/*`, GAP-2047 L5).
+	walked := hasDotDotComponent(strings.Join(components[:split], "/"))
 	spelledRoot := home + "/.defenseclaw"
-	if directory == spelledRoot || strings.HasPrefix(directory, spelledRoot+"/") {
+	if !walked && (directory == "/" || directory == home ||
+		directory == spelledRoot || strings.HasPrefix(directory, spelledRoot+"/")) {
 		return "", false
 	}
-	physical, ok := resolve(directory)
+	walkSpelling := directory
+	if walked {
+		walkSpelling = "/" + strings.TrimLeft(strings.Join(components[:split], "/"), "/")
+	}
+	physical, ok := resolve(walkSpelling)
 	if !ok || !inState(physical) {
 		return "", false
 	}
@@ -1070,6 +1190,13 @@ func stateOperandThroughLink(facts actionfacts.Facts, request trustedActionReque
 		if physical, ok := resolve(target); ok && inState(physical) {
 			return true
 		}
+		// `rm -rf dclink/../.defenseclaw/hooks`: the parent as the kernel
+		// walks it (GAP-2047 L5).
+		if walked, ok := stateWalkSpelling(candidate, request.Input.CWD, home); ok {
+			if physical, ok := resolve(walkParent(walked)); ok && inState(physical) {
+				return true
+			}
+		}
 	}
 	return false
 }
@@ -1103,7 +1230,13 @@ func stateDirectoryEntryTarget(
 		windows && (strings.HasSuffix(candidate.Value, `\`) || strings.HasSuffix(candidate.Value, `\.`)) {
 		return "", false
 	}
-	parent, ok := hookpaths.ResolveWriteTarget(filepath.Dir(value))
+	parentSpelling := filepath.Dir(value)
+	if !windows && hasDotDotComponent(value) {
+		// A walked spelling (stateWalkSpelling): the kernel follows a link
+		// before the `..` after it.
+		parentSpelling = walkParent(value)
+	}
+	parent, ok := hookpaths.ResolveWriteTarget(parentSpelling)
 	if !ok {
 		return "", false
 	}
