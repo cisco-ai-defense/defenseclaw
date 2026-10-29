@@ -18,8 +18,8 @@ import (
 const processStartTimeKnown = true
 
 // hookWrapperHops is how many launching processes processStartTime looks
-// through: the system PowerShell bridge of a registration and the per-user
-// stable launcher.
+// through: the system PowerShell bridge or system cmd.exe of a registration
+// and the per-user stable launcher.
 const hookWrapperHops = 2
 
 // maxHookWrapperLead is how much earlier than the process it launched a
@@ -39,27 +39,30 @@ func processStartTime(time.Time) (time.Time, bool) {
 	if err != nil {
 		return time.Time{}, false
 	}
-	powerShell := ""
+	var wrappers []string
 	if system, err := windows.GetSystemDirectory(); err == nil {
-		powerShell = filepath.Join(system, "WindowsPowerShell", "v1.0", "powershell.exe")
+		wrappers = append(wrappers,
+			filepath.Join(system, "WindowsPowerShell", "v1.0", "powershell.exe"),
+			filepath.Join(system, "cmd.exe"))
 	}
-	return callStartBehindWrappers(created, hookWrapperChain(), powerShell), true
+	return callStartBehindWrappers(created, hookWrapperChain(), wrappers...), true
 }
 
 // callStartBehindWrappers is when the call began: created, or the creation
 // of the wrappers that launched this process for it (nearest first). Codex,
 // Antigravity, Cursor and the other agents whose registration is a system
-// PowerShell -EncodedCommand line start PowerShell first, and the per-user
+// PowerShell -EncodedCommand line start PowerShell first, Codex's direct
+// registration starts the system cmd.exe first (GAP-1908), and the per-user
 // stable launcher starts the full hook: their start counts against the
 // budgets as the hook's own does, since the agent waits for all of it (a
 // Codex call blocked at 6.4 s with 3 s of hook time behind a 1.9 s
 // PowerShell start, GAP-0167). Only an earlier start is taken, so the
 // budgets can only get shorter: the call fails closed sooner, never later.
 // A parent created after its child is a reused process id, not the wrapper.
-func callStartBehindWrappers(created time.Time, chain []hookWrapperProcess, powerShell string) time.Time {
+func callStartBehindWrappers(created time.Time, chain []hookWrapperProcess, wrappers ...string) time.Time {
 	start := created
 	for _, parent := range chain {
-		if !hookWrapperImage(parent.image, powerShell) || !parent.created.Before(start) ||
+		if !hookWrapperImage(parent.image, wrappers) || !parent.created.Before(start) ||
 			start.Sub(parent.created) > maxHookWrapperLead {
 			break
 		}
@@ -69,14 +72,19 @@ func callStartBehindWrappers(created time.Time, chain []hookWrapperProcess, powe
 }
 
 // hookWrapperImage reports a wrapper the registrations launch the hook
-// through: the system PowerShell, or a DefenseClaw hook binary (the per-user
-// stable launcher).
-func hookWrapperImage(image, powerShell string) bool {
+// through: one of wrappers (the system PowerShell and the system cmd.exe),
+// or a DefenseClaw hook binary (the per-user stable launcher).
+func hookWrapperImage(image string, wrappers []string) bool {
 	image = filepath.Clean(strings.TrimSpace(image))
 	if strings.EqualFold(filepath.Base(image), "defenseclaw-hook.exe") {
 		return true
 	}
-	return powerShell != "" && strings.EqualFold(image, filepath.Clean(powerShell))
+	for _, wrapper := range wrappers {
+		if wrapper != "" && strings.EqualFold(image, filepath.Clean(wrapper)) {
+			return true
+		}
+	}
+	return false
 }
 
 // hookWrapperChain reads the launching processes of this one, nearest first,

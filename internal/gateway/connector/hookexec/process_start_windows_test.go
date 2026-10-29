@@ -13,10 +13,12 @@ import (
 )
 
 // GAP-0167: the budgets of a hook launched through the system PowerShell
-// bridge (Codex) or the per-user stable launcher count from the wrapper's
-// start; anything else keeps the hook's own start.
+// bridge, the system cmd.exe of a direct registration (Codex, GAP-1908) or
+// the per-user stable launcher count from the wrapper's start; anything else
+// keeps the hook's own start.
 func TestCallStartCountsTheWrappersThatLaunchedTheHook(t *testing.T) {
 	const powerShell = `C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe`
+	const cmdExe = `C:\Windows\System32\cmd.exe`
 	created := time.Unix(1_000, 0)
 	at := func(lead time.Duration) time.Time { return created.Add(-lead) }
 	for _, test := range []struct {
@@ -35,13 +37,20 @@ func TestCallStartCountsTheWrappersThatLaunchedTheHook(t *testing.T) {
 			{`C:\Users\u\.local\bin\defenseclaw-hook.exe`, at(800 * time.Millisecond)},
 			{powerShell, at(1500 * time.Millisecond)},
 		}, at(1500 * time.Millisecond)},
+		{"system cmd.exe of a direct registration", []hookWrapperProcess{{cmdExe, at(300 * time.Millisecond)}}, at(300 * time.Millisecond)},
+		{"cmd.exe then the agent shell PowerShell", []hookWrapperProcess{
+			{cmdExe, at(300 * time.Millisecond)},
+			{powerShell, at(2 * time.Second)},
+		}, at(2 * time.Second)},
+		{"another cmd.exe", []hookWrapperProcess{{`C:\Users\u\cmd.exe`, at(time.Second)}}, created},
+		{"cmd.exe started long before (a console)", []hookWrapperProcess{{cmdExe, at(time.Minute)}}, created},
 		{"launcher under the agent", []hookWrapperProcess{
 			{`C:\Users\u\.local\bin\defenseclaw-hook.exe`, at(800 * time.Millisecond)},
 			{`C:\Users\u\AppData\Local\claude\claude.exe`, at(time.Hour)},
 		}, at(800 * time.Millisecond)},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			if got := callStartBehindWrappers(created, test.chain, powerShell); !got.Equal(test.want) {
+			if got := callStartBehindWrappers(created, test.chain, powerShell, cmdExe); !got.Equal(test.want) {
 				t.Fatalf("call start %s, want %s", got, test.want)
 			}
 		})

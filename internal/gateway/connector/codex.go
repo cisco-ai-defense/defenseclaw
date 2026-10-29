@@ -2131,7 +2131,7 @@ func windowsCodexHookCommand() string {
 }
 
 func windowsCodexHookCommandForEvent(event, contractID string) string {
-	return windowsNativePowerShellHookCommandForCodexEvent(event, contractID, defenseclawHookBinary())
+	return windowsCodexHookCommandForBinaryEvent(event, contractID, defenseclawHookBinary())
 }
 
 func codexHookCommandForPlatform(

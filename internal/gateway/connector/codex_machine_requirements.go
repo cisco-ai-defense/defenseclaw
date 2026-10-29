@@ -257,13 +257,33 @@ type codexMachineRequirementsLayout struct {
 
 // windowsCodexBoundManagedHookCommand is the standalone command of one
 // managed group. It names the group's event and the hook contract, which
-// the hook requires, and starts the GUI-subsystem launcher through the
-// awaited Process.Start statements (windowsAwaitedHookStatements): the
-// PowerShell call operator does not wait for a GUI-subsystem process, so its
-// exit code (2 blocks) and stdout never reached Codex and every decision was
-// lost.
+// the hook requires, and starts the GUI-subsystem launcher directly through
+// the system cmd.exe (windowsCmdDirectHookCommand): the PowerShell bridge
+// releases up to 1.0.4 wrote started a second Windows PowerShell on every
+// call, which under load used up the hook's answer budget (GAP-1908). A
+// launcher path the direct form cannot carry keeps the bridge.
 func windowsCodexBoundManagedHookCommand(hookBinary, event, contractID string) string {
-	arguments := []string{"hook", "--connector", "codex", "--enterprise-managed", "--event", event, "--hook-contract", contractID}
+	if command, ok := windowsCmdDirectHookCommand(hookBinary, windowsCodexBoundManagedHookArguments(event, contractID)); ok {
+		return command
+	}
+	return bridgeWindowsCodexBoundManagedHookCommand(hookBinary, event, contractID)
+}
+
+func windowsCodexBoundManagedHookArguments(event, contractID string) []string {
+	return []string{"hook", "--connector", "codex", "--enterprise-managed", "--event", event, "--hook-contract", contractID}
+}
+
+// bridgeWindowsCodexBoundManagedHookCommand is the bound managed command
+// releases 1.0.1 to 1.0.4 wrote for every launcher path: the encoded system
+// PowerShell bridge that starts the GUI-subsystem launcher through the
+// awaited Process.Start statements (windowsAwaitedHookStatements); the
+// PowerShell call operator does not wait for a GUI-subsystem process, so its
+// exit code and stdout would never reach Codex. It is still rendered for a
+// launcher path windowsCmdDirectHookCommand cannot carry, and reconcile and
+// removal own it (windowsCodexRenderedHookCommand) while those releases are
+// upgrade sources.
+func bridgeWindowsCodexBoundManagedHookCommand(hookBinary, event, contractID string) string {
+	arguments := windowsCodexBoundManagedHookArguments(event, contractID)
 	script := strings.Join(append([]string{
 		"$ErrorActionPreference='Stop'",
 		"$env:NoDefaultCurrentDirectoryInExePath='1'",
@@ -401,11 +421,19 @@ var windowsCodexBoundArgumentsPattern = regexp.MustCompile(
 	`'--event'[ ,]'((?:[^']|'')*)'[ ,]'--hook-contract'[ ,]'((?:[^']|'')*)'`,
 )
 
+// windowsCodexDirectBoundArgumentsPattern finds the event and hook contract
+// at the end of a direct bound managed command (windowsCmdDirectHookCommand).
+var windowsCodexDirectBoundArgumentsPattern = regexp.MustCompile(
+	` --event ([A-Za-z0-9._-]+) --hook-contract ([A-Za-z0-9._-]+)$`,
+)
+
 // windowsCodexRenderedHookCommand reports whether command is exactly a
 // managed Codex command DefenseClaw renders for hookBinary, and for which
 // event and hook contract: the unbound form (windowsCodexManagedHookCommand,
 // no event or contract), or the bound form for the event and hook contract
-// the command names, current (windowsCodexBoundManagedHookCommand) or of the
+// the command names, current (windowsCodexBoundManagedHookCommand, direct or
+// bridge), the bridge of releases 1.0.1 to 1.0.4
+// (bridgeWindowsCodexBoundManagedHookCommand), or of the
 // 1.0.0 certification builds
 // (legacyStartProcessWindowsCodexBoundManagedHookCommand). The event and the
 // contract are read from the script only to render the candidate; ownership
@@ -418,6 +446,10 @@ func windowsCodexRenderedHookCommand(command, hookBinary string) (event, contrac
 	if command == windowsCodexManagedHookCommand(hookBinary) {
 		return "", "", true
 	}
+	if match := windowsCodexDirectBoundArgumentsPattern.FindStringSubmatch(command); match != nil &&
+		command == windowsCodexBoundManagedHookCommand(hookBinary, match[1], match[2]) {
+		return match[1], match[2], true
+	}
 	prefix := windowsSystemPowerShellExe() + " -NoLogo -NoProfile -NonInteractive -EncodedCommand "
 	if !strings.HasPrefix(command, prefix) {
 		return "", "", false
@@ -429,7 +461,7 @@ func windowsCodexRenderedHookCommand(command, hookBinary string) (event, contrac
 	for _, match := range windowsCodexBoundArgumentsPattern.FindAllStringSubmatch(script, -1) {
 		event := strings.ReplaceAll(match[1], "''", "'")
 		contract := strings.ReplaceAll(match[2], "''", "'")
-		if command == windowsCodexBoundManagedHookCommand(hookBinary, event, contract) ||
+		if command == bridgeWindowsCodexBoundManagedHookCommand(hookBinary, event, contract) ||
 			command == legacyStartProcessWindowsCodexBoundManagedHookCommand(hookBinary, event, contract) {
 			return event, contract, true
 		}
