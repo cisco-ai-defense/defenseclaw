@@ -5,6 +5,7 @@
 # InstallRoot drops the lifecycle lock and its empty folder whatever path
 # removed the deployment (a PURGE=1 over a 1.0.2 tombstone set no flag);
 # an uninstall that keeps either root, and every other action, keep it.
+# The finalizer of a CLI uninstall drops it once it removed the last root.
 
 #Requires -Version 5.1
 
@@ -39,6 +40,32 @@ try {
         if (Test-DefenseClawStandaloneUninstallLeftNothing -Action 'Uninstall' -Layout $layout) {
             $failures.Add('an uninstall that kept StateRoot drops the lifecycle lock')
         }
+        # The finalizer of a CLI uninstall (the CLI's running image kept
+        # InstallRoot, so the CLI's own run kept the lock) drops it once
+        # its receipt is gone and no root is left; never while its receipt
+        # or a root stays.
+        Microsoft.PowerShell.Management\Remove-Item -LiteralPath $layout.StateRoot -Force
+        $layout.SelfUninstallReceiptPath = (Microsoft.PowerShell.Management\Join-Path $root 'self-uninstall-receipt.json')
+        $script:DefenseClawRemoveLifecycleLockOnExit = $false
+        if (-not (Test-DefenseClawSelfUninstallFinalizerDropsLifecycleLock -Layout $layout)) {
+            $failures.Add('a CLI uninstall finalizer that removed the last root keeps the lifecycle lock')
+        }
+        [void](Microsoft.PowerShell.Management\New-Item -ItemType File -Path $layout.SelfUninstallReceiptPath)
+        if (Test-DefenseClawSelfUninstallFinalizerDropsLifecycleLock -Layout $layout) {
+            $failures.Add('a finalizer drops the lifecycle lock while its receipt stays')
+        }
+        Microsoft.PowerShell.Management\Remove-Item -LiteralPath $layout.SelfUninstallReceiptPath -Force
+        [void](Microsoft.PowerShell.Management\New-Item -ItemType Directory -Path $layout.InstallRoot)
+        if (Test-DefenseClawSelfUninstallFinalizerDropsLifecycleLock -Layout $layout) {
+            $failures.Add('a finalizer drops the lifecycle lock while InstallRoot stays')
+        }
+        $script:DefenseClawRemoveLifecycleLockOnExit = $true
+        if (-not (Test-DefenseClawSelfUninstallFinalizerDropsLifecycleLock -Layout $layout)) {
+            $failures.Add('a finalizer that ran the purge itself keeps the lifecycle lock')
+        }
+        $script:DefenseClawRemoveLifecycleLockOnExit = $false
+        Microsoft.PowerShell.Management\Remove-Item -LiteralPath $layout.InstallRoot -Force
+        [void](Microsoft.PowerShell.Management\New-Item -ItemType Directory -Path $layout.StateRoot)
         $script:DefenseClawEnterpriseProfile = 'SecureClient'
         Microsoft.PowerShell.Management\Remove-Item -LiteralPath $layout.StateRoot -Force
         if (Test-DefenseClawStandaloneUninstallLeftNothing -Action 'Uninstall' -Layout $layout) {

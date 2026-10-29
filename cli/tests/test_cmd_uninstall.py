@@ -361,6 +361,7 @@ class WindowsOwnedCleanupTests(unittest.TestCase):
                 "defenseclaw-gateway.exe",
                 "defenseclaw-acp.exe",
                 "defenseclaw-hook.exe",
+                "defenseclaw-hook-guard.exe",
                 "skill-scanner.cmd",
                 "mcp-scanner.cmd",
                 "defenseclaw-hook-state.json",

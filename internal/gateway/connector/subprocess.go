@@ -1503,6 +1503,12 @@ func refreshHookFailModesLocked(hookDir string, mode func(connector string) stri
 			// .hookcfg.openhands of the removed OpenHands (GAP-0610).
 			continue
 		}
+		if hookRuntimeRecordUnread(name) {
+			// Nothing reads it, and the earlier release does not write it
+			// again when its gateway starts: closed here, the record came
+			// back with a rollback and stayed (GAP-2481). Left byte for byte.
+			continue
+		}
 		want := mode(name)
 		if want == "" {
 			continue
@@ -1799,6 +1805,16 @@ func hookScriptInFolderCalls(hookDir, fn string) bool {
 		}
 	}
 	return false
+}
+
+// hookRuntimeRecordUnread reports a per-user connector whose hooks read no
+// hooks/.hookcfg entry or flat record in any release this one rolls back to
+// or upgrades from: the OpenCode plugin carries its own outage mode (1.0.2
+// and 1.0.3 bake the saved mode, 1.0.4 the config's outage mode, this
+// release reads the config at call time), and its Setup removes the record
+// (GAP-0635). RefreshHookFailModes leaves such a record as it is.
+func hookRuntimeRecordUnread(name string) bool {
+	return name == "opencode"
 }
 
 // connectorHookAdapters are the Windows PowerShell adapters a per-user Cursor

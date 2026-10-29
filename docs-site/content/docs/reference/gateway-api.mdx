@@ -185,7 +185,7 @@ With `openshell.enabled: false` the subsystem is absent.
     "enabled": true,
     "hook_enforcement": true,
     "enforcement_surface": "agent_lifecycle_hooks",
-    "telemetry": ["hooks", "otel", "notify"],
+    "telemetry": ["hooks"],
     "proxy_intercept": false
   },
   "connector_modes": [
@@ -198,7 +198,7 @@ With `openshell.enabled: false` the subsystem is absent.
       "enabled": true,
       "hook_enforcement": true,
       "enforcement_surface": "agent_lifecycle_hooks",
-      "telemetry": ["hooks", "otel", "notify"],
+      "telemetry": ["hooks"],
       "proxy_intercept": false
     },
     {
@@ -210,7 +210,7 @@ With `openshell.enabled: false` the subsystem is absent.
       "enabled": true,
       "hook_enforcement": false,
       "enforcement_surface": "agent_lifecycle_hooks",
-      "telemetry": ["hooks", "otel"],
+      "telemetry": ["hooks"],
       "proxy_intercept": false
     }
   ]
@@ -227,7 +227,7 @@ With `openshell.enabled: false` the subsystem is absent.
   report the effective `observe`/`action` posture; `hook_fail_mode` is the
   effective hook fail mode; `enabled` is the connector's effective guardrail
   enablement; `hook_enforcement` is true for a non-proxy connector in action
-  mode; `enforcement_surface` identifies the proxy or lifecycle-hook path; `telemetry` lists reported wiring channels; and
+  mode; `enforcement_surface` identifies the proxy or lifecycle-hook path; `telemetry` lists the channels the install registers for the connector, which on a host install is `["hooks"]` for every connector (native agent OTel exporters run only inside OpenShell sandboxes); and
   `proxy_intercept` is true only for proxy connectors. `mode`,
   `enforcement_surface`, and `proxy_intercept` are derived from the
   connector's declared LLM traffic mode, through the same predicate the

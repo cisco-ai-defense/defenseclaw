@@ -128,6 +128,11 @@ const nativeHookFlag = "hook --connector "
 
 const windowsGatewayBinaryName = "defenseclaw-gateway.exe"
 const windowsHookBinaryName = "defenseclaw-hook.exe"
+
+// windowsHookGuardBinaryName is the one-line install's Claude Code PreToolUse
+// guard program, cmd/defenseclaw-hook-guard: a small GUI-subsystem file of
+// its own (see claudeCodeOneLinePreToolGuardFor).
+const windowsHookGuardBinaryName = "defenseclaw-hook-guard.exe"
 const nativeWindowsInstallStateMaxBytes = 128 * 1024
 const nativeWindowsLayoutValidationAttempts = 50
 const nativeWindowsLayoutValidationRetryDelay = 10 * time.Millisecond

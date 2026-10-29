@@ -3393,7 +3393,9 @@ func readWindowsEnterpriseStandaloneEnrollmentAt(manifestPath, runtimeDir string
 	if state, exists, err := loadEnterpriseHookGuardianState(runtimeDir); err == nil && exists {
 		enrollment.Pending = state.PendingCount
 		for _, row := range state.Results {
-			if enterpriseHookAwaitingSignInError(row) {
+			// A row the earlier release's hooks still guard is enrolled
+			// with an older hook matrix, not pending (GAP-2463).
+			if enterpriseHookAwaitingSignInError(row) && !enterpriseHookEarlierMatrixRow(row) {
 				enrollment.Pending++
 			}
 		}

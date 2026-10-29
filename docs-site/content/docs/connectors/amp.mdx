@@ -37,7 +37,7 @@ defenseclaw setup amp --workspace /path/to/repo        # also inventory the repo
 
 A re-run without `--mode` keeps the current mode. On a terminal setup still asks for the mode, with the current one as the default (Enter keeps it), and whether to re-apply the hooks; in action mode it also asks whether to add the LLM judge. `--yes` skips the questions ([the questions setup asks](/docs/guardrail/switching-connectors#the-questions-setup-asks)). On Windows, use a Windows path. The plugin is per user in every case.
 
-`--workspace` sets the workspace for the whole DefenseClaw install, including Amp's project inventory. It inventories that repository's `.amp/settings.json` or `.jsonc`, `.amp/plugins`, skills, checks, guidance, MCP servers and custom agents. Use it on a single-Amp install: if it would move configured peer connectors to a different scope, setup refuses and changes nothing. On a multi-connector install, run `defenseclaw setup amp` without `--workspace` for global protection. Global setup governs tool calls and inventories user and managed surfaces.
+`--workspace` sets the workspace for the whole DefenseClaw install, including Amp's project inventory. It inventories that repository's `.amp/settings.json` or `.jsonc`, `.amp/plugins`, skills, checks, guidance, MCP servers and custom agents. Use it on a single-Amp install: if it would move configured peer connectors to a different scope, setup refuses and changes nothing. On a multi-connector install, run `defenseclaw setup amp` without `--workspace` (and with no workspace pinned) for global protection. Global setup governs tool calls and inventories user and managed surfaces.
 
 For headless runs, give Amp time to load plugins:
 

@@ -212,7 +212,7 @@ func powerShellCmdlet(program string) bool {
 		"start-process", "get-process", "stop-process", "remove-process",
 		"clear-disk", "add-localgroupmember", "get-localgroupmember",
 		"add-adgroupmember", "get-adgroupmember", "register-scheduledtask",
-		"write-output", "write-host", "get-date":
+		"write-output", "write-host", "get-date", "clear-content", "rename-item":
 		return true
 	default:
 		return false
@@ -221,7 +221,7 @@ func powerShellCmdlet(program string) bool {
 
 func powerShellAlias(program string) bool {
 	switch program {
-	case "gc", "gci", "gi", "gp", "sp", "rp", "ri", "ni", "iwr", "irm", "tee":
+	case "gc", "gci", "gi", "gp", "sp", "rp", "ri", "ni", "iwr", "irm", "tee", "clc", "rni":
 		return true
 	default:
 		return false

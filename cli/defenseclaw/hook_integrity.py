@@ -480,9 +480,10 @@ def _claude_guardable_hook_executable(path: str) -> bool:
 
 
 # The PreToolUse guard program: the installed full hook of a packaged install,
-# or the one-line install's gateway beside its launcher. Keep it identical to
+# the one-line install's GUI-subsystem guard beside its launcher (GAP-2467), or
+# the gateway beside the launcher (a repository build). Keep it identical to
 # claudeCodePreToolGuardProgram.
-_CLAUDE_PRETOOL_GUARD_PROGRAMS = ("defenseclaw-hook.exe", "defenseclaw-gateway.exe")
+_CLAUDE_PRETOOL_GUARD_PROGRAMS = ("defenseclaw-hook.exe", "defenseclaw-hook-guard.exe", "defenseclaw-gateway.exe")
 
 
 def _claude_pretool_guard_program(path: str) -> bool:

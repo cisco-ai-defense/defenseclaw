@@ -273,6 +273,27 @@ var enterpriseHookRecordedHomeGone = func(home string) bool {
 	return err == nil && others
 }
 
+// enterpriseHookLiveHomeGone reports whether the recorded home of a live
+// account (the directory still gives it that home) is gone, so its
+// registrations went with it and the uninstall warns and goes on (#1287).
+// A home that was moved or renamed aside in its home root (mv /Users/u
+// /Users/.u-away) is not gone: a folder the account owns next to it still
+// holds its agent configs with DefenseClaw entries that call the hook
+// binary, as the guardian says ("not available yet"). That home only is not
+// available, and the uninstall refuses before anything changes, as it does
+// for the same home on the pending-cleanup path (GAP-2482).
+func enterpriseHookLiveHomeGone(home string, uid int) bool {
+	return enterpriseHookRecordedHomeGone(home) && !enterpriseHookHomeMovedAside(home, uid)
+}
+
+// enterpriseHookHomeMovedAside reports whether the home root of a missing
+// home holds another folder owned by the account. Tests replace it.
+var enterpriseHookHomeMovedAside = func(home string, uid int) bool {
+	home = filepath.Clean(home)
+	moved, err := enterprisehooks.BoundedDirHasOwnedSubdir(filepath.Dir(home), uid, filepath.Base(home), enterpriseHookHomeCheckTimeout)
+	return moved || err != nil
+}
+
 // enterpriseHookRecordedHomeMoved reports whether a re-homed account's
 // recorded home counts as moved: it is gone, or it is an empty folder (an
 // rsync, then its contents deleted). A recorded home that still holds any

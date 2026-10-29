@@ -87,9 +87,21 @@ func TestMSYSDrivePathTwinSpellsTheDrive(t *testing.T) {
 		{"cd /c && ls", "cd C: && ls", true},
 		// GAP-2399: a literal key ending at "=" before the mount.
 		{"dd if=a.txt of=/c/Users/dcw/.defenseclaw/config.yaml", "dd if=a.txt of=C:/Users/dcw/.defenseclaw/config.yaml", true},
-		{"tool --output=/cygdrive/d/x 'of='/c/y", "tool --output=D:/x 'of='/c/y", true},
+		// GAP-2468: the mount is read from the word's literal text with
+		// quotes removed, and $USERPROFILE is the home.
+		{"tool --output=/cygdrive/d/x 'of='/c/y", "tool --output=D:/x 'of='C:/y", true},
+		{"dd if=a.txt of='/c/Users/dcw/f'", "dd if=a.txt of='C:/Users/dcw/f'", true},
+		{`dd if=a.txt "of=/c/Users/dcw/f"`, `dd if=a.txt "of=C:/Users/dcw/f"`, true},
+		{`dd if=a.txt of="/c/Users/dcw/f"`, `dd if=a.txt of="C:/Users/dcw/f"`, true},
+		{`cp a.txt "/c/Users/dcw/f" '/c'/x`, `cp a.txt "C:/Users/dcw/f" 'C:'/x`, true},
+		{"dd if=a.txt of=$USERPROFILE/.defenseclaw/config.yaml", "dd if=a.txt of=$HOME/.defenseclaw/config.yaml", true},
+		{`rm -rf ${USERPROFILE}/h "$USERPROFILE/f" /c/x`, `rm -rf ${HOME}/h "$HOME/f" C:/x`, true},
+		{"USERPROFILE=/tmp; cp a.txt $USERPROFILE/f", "", false},
+		{"echo $HOME; cp a.txt $USERPROFILE/f", "", false},
+		{"cp a.txt ${USERPROFILE:-/tmp}/f '$USERPROFILE'", "", false},
+		{`cp a.txt "$x/c/y" $'/c/y' "x/c/y"`, "", false},
 		{"env a/b=/c/x x=/cc/d", "", false},
-		{`echo "/c/Users/dcw/f" x/c/y /cc/d /tmp/x`, "", false},
+		{`echo x/c/y /cc/d /tmp/x`, "", false},
 		{"cat <<EOF\n/c/Users/dcw/f\nEOF\n", "", false},
 	} {
 		twin, ok := MSYSDrivePathTwin(tc.command, home)

@@ -27,6 +27,9 @@ type trustedPOSIXHomeRewrite struct {
 	tildeOperands map[string]string
 	// homeGlobs is set when a $HOME or ${HOME} pattern was rewritten.
 	homeGlobs bool
+	// optionHomeValues is set when a long option's attached $HOME value
+	// was rewritten (`--work-tree=$HOME/.x`, GAP-2047 row d).
+	optionHomeValues bool
 }
 
 // rewriteTrustedPOSIXHomeTilde replaces home-anchored operands of simple
@@ -165,7 +168,8 @@ func rewriteTrustedPOSIXHomeTilde(source, activeHome string) (trustedPOSIXHomeRe
 			continue
 		}
 		if prefix, ok := findOptionHomeWord(word); ok {
-			// `-f$HOME/...`: the -f path of BSD find, attached (GAP-2135).
+			// `-f$HOME/...`: the -f path of BSD find, attached (GAP-2135);
+			// `--work-tree=$HOME/...`: a long option's value (GAP-2047).
 			suffix, _ := homeAnchoredLiteralWord(&syntax.Word{Parts: word.Parts[1:]})
 			start, end := int(word.Pos().Offset()), int(word.End().Offset())
 			if start < last || end > len(source) {
@@ -174,6 +178,9 @@ func rewriteTrustedPOSIXHomeTilde(source, activeHome string) (trustedPOSIXHomeRe
 			out.WriteString(source[last:start])
 			out.WriteString(prefix + activeHome + suffix)
 			last = end
+			if strings.HasPrefix(prefix, "--") {
+				rewrite.optionHomeValues = true
+			}
 			continue
 		}
 		if suffix, user := userHomeRewriteWord(word, activeHome); user {
@@ -270,10 +277,10 @@ func rewriteTrustedPOSIXHomeTilde(source, activeHome string) (trustedPOSIXHomeRe
 		return trustedPOSIXHomeRewrite{}, false
 	}
 	out.WriteString(source[last:])
-	// A separate HOME, USER or LOGNAME mention can change what the rewritten
-	// operands name.
-	if strings.Contains(out.String(), "HOME") || strings.Contains(out.String(), "USER") ||
-		strings.Contains(out.String(), "LOGNAME") {
+	// A separate HOME, USER or LOGNAME mention outside a comment can change
+	// what the rewritten operands name (GAP-2473).
+	if scan := withoutShellComments(out.String(), syntax.LangPOSIX); strings.Contains(scan, "HOME") ||
+		strings.Contains(scan, "USER") || strings.Contains(scan, "LOGNAME") {
 		return trustedPOSIXHomeRewrite{}, false
 	}
 	rewrite.source = out.String()
@@ -924,26 +931,46 @@ func staticHomeRewriteWord(word *syntax.Word) bool {
 	return true
 }
 
-// findOptionHomeWord reports a find option word whose -f path is attached
-// and starts with a plain $HOME or ${HOME} (`-f$HOME/.x`, `-xf${HOME}/.x`)
-// and returns its option letters; the shell expands that HOME as in a
-// separate word (GAP-2135).
+// findOptionHomeWord reports an option word whose path value is attached
+// and starts with a plain $HOME or ${HOME} and returns the option text
+// before it: the -f path of BSD find (`-f$HOME/.x`, `-xf${HOME}/.x`,
+// GAP-2135) or a long option's `=` value (`--work-tree=$HOME/.x`,
+// `--work-tree="$HOME/.x"`, GAP-2047 row d). The shell expands that HOME
+// as in a separate word, so the value names the same path as `$HOME/.x`.
 func findOptionHomeWord(word *syntax.Word) (string, bool) {
 	literal, ok := firstLiteral(word)
-	if !ok || len(word.Parts) < 2 || !findAttachedPathOption.MatchString(literal.Value) {
+	if !ok || len(word.Parts) < 2 {
+		return "", false
+	}
+	find := findAttachedPathOption.MatchString(literal.Value)
+	if !find && !longAttachedValueOption.MatchString(literal.Value) {
 		return "", false
 	}
 	rest := &syntax.Word{Parts: word.Parts[1:]}
 	if _, anchored := homeAnchoredLiteralWord(rest); !anchored || !plainHomeRewriteWord(rest) {
 		return "", false
 	}
-	if _, home := word.Parts[1].(*syntax.ParamExp); !home {
+	switch typed := word.Parts[1].(type) {
+	case *syntax.ParamExp:
+	case *syntax.DblQuoted:
+		// Only a long option value: the quoted HOME reads the same
+		// unquoted once plainHomeRewriteWord accepted its text.
+		if find || len(typed.Parts) == 0 {
+			return "", false
+		}
+		if _, home := typed.Parts[0].(*syntax.ParamExp); !home {
+			return "", false
+		}
+	default:
 		return "", false
 	}
 	return literal.Value, true
 }
 
-var findAttachedPathOption = regexp.MustCompile(`^-[EHLPXdsx]*f$`)
+var (
+	findAttachedPathOption  = regexp.MustCompile(`^-[EHLPXdsx]*f$`)
+	longAttachedValueOption = regexp.MustCompile(`^--[A-Za-z][A-Za-z0-9-]*=$`)
+)
 
 // bareHomeWord reports a word that is the home directory itself through a
 // plain HOME parameter: $HOME, ${HOME}, "$HOME", "${HOME}", each optionally
@@ -1313,24 +1340,49 @@ func quotedOptionHomeRewrite(word *syntax.Word, activeHome string) (quotedOption
 // unresolved because it does not start with "/", so every check that reads
 // the resolved path saw no path at all (GAP-2304, GAP-2122 Windows leg).
 // The path resolves to itself, cleaned, as an absolute ~ operand does on
-// Linux and macOS. Other paths are left as they are.
+// Linux and macOS. A relative operand resolves against the working
+// directory (C:\Users\x\.defenseclaw\hooks after cd ~/.defenseclaw/hooks,
+// read in slash form), as the POSIX resolver joins it with a "/" working
+// directory on Linux and macOS (T6D16: cd ~/.defenseclaw/hooks && find
+// -exec cat {} \; -delete). Only a result in the trusted home is
+// resolved; other paths are left as they are.
 func resolveTrustedDriveHomePaths(facts *Facts) {
 	if facts == nil || !DriveSlashPath(facts.ActiveHome) {
 		return
 	}
 	home := strings.TrimRight(path.Clean(facts.ActiveHome), "/")
+	inHome := func(cleaned string) bool {
+		return strings.EqualFold(cleaned, home) || strings.HasPrefix(strings.ToLower(cleaned), strings.ToLower(home)+"/")
+	}
+	cwd := strings.ReplaceAll(facts.CWD, `\`, "/")
+	if !DriveSlashPath(cwd) || !inHome(path.Clean(cwd)) {
+		cwd = ""
+	}
 	for index := range facts.Paths {
 		fact := &facts.Paths[index]
-		if fact.Flavor != PathFlavorPOSIX || fact.Resolved != "" || !DriveSlashPath(fact.Value) ||
+		if fact.Flavor != PathFlavorPOSIX || fact.Resolved != "" || fact.Value == "" ||
 			strings.ContainsAny(fact.Value, "*?[{$`") {
 			continue
 		}
-		cleaned := path.Clean(fact.Value)
-		if !strings.EqualFold(cleaned, home) && !strings.HasPrefix(strings.ToLower(cleaned), strings.ToLower(home)+"/") {
+		cleaned := ""
+		switch {
+		case DriveSlashPath(fact.Value):
+			cleaned = path.Clean(fact.Value)
+		case cwd != "" && posixRelativeOperand(fact.Value):
+			cleaned = path.Join(path.Clean(cwd), fact.Value)
+		}
+		if cleaned == "" || !inHome(cleaned) {
 			continue
 		}
 		fact.Resolved = cleaned
 	}
+}
+
+// posixRelativeOperand reports a plain relative POSIX operand ("." or
+// "hooks/x"): no root, home, drive, Windows separator or option spelling.
+func posixRelativeOperand(value string) bool {
+	return value != "" && !strings.HasPrefix(value, "/") && !strings.HasPrefix(value, "~") &&
+		!strings.HasPrefix(value, "-") && !strings.ContainsAny(value, `\:`)
 }
 
 // DriveSlashPath reports a drive-letter path in slash form

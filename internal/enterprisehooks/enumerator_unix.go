@@ -51,6 +51,10 @@ var unixNologinShells = map[string]struct{}{
 	"/bin/false": {}, "/usr/bin/false": {}, "/sbin/false": {},
 }
 
+// unixLoginShell gives the login shell of an account whose resolver left
+// Account.Shell empty (macOS os/user, GAP-2483). Tests replace it.
+var unixLoginShell = unixidentity.LoginShell
+
 // UnixEnumeratorState is persisted between cycles (root-only) so revocation
 // needs several definitive misses.
 type UnixEnumeratorState struct {
@@ -568,9 +572,15 @@ func EnumerateUnix(ctx context.Context, cfg *config.Config, registry *connector.
 				continue
 			}
 		}
-		if _, nologin := unixNologinShells[filepath.Clean(account.Shell)]; nologin && !explicitlyIncluded && !authoredTarget {
-			skip("non-interactive login shell " + account.Shell)
-			continue
+		if !explicitlyIncluded && !authoredTarget {
+			shell := strings.TrimSpace(account.Shell)
+			if shell == "" {
+				shell = unixLoginShell(ctx, name)
+			}
+			if _, nologin := unixNologinShells[filepath.Clean(shell)]; nologin && shell != "" {
+				skip("non-interactive login shell " + shell)
+				continue
+			}
 		}
 		if !authoredTarget {
 			if ok, transientErr, counted, reason := groupFilterAllows(opts.Resolver, account, enrollment); !ok {

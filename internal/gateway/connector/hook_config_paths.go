@@ -559,6 +559,58 @@ func (c *hookOnlyConnector) renderedHookEntriesPresent(opts SetupOpts, document 
 	return false
 }
 
+// HookRegistrationLacksOnlyFailClosed reports a Hermes registration that
+// holds exactly the entries this release renders except the fail_closed
+// setting of its pre_tool_call entry: the matrix an earlier release wrote
+// before Setup added fail_closed (rel-1-0-5 GAP-2463). Those hooks still run
+// on every event and still block through the hook's answer; only a spawn
+// error or timeout of pre_tool_call does not block. It is false for every
+// other connector, for a render without fail_closed, and for any other
+// difference (an edited, missing or extra DefenseClaw entry).
+func HookRegistrationLacksOnlyFailClosed(conn Connector, opts SetupOpts) (bool, error) {
+	hookOnly, ok := conn.(*hookOnlyConnector)
+	if !ok || hookOnly.name != "hermes" {
+		return false, nil
+	}
+	paths := HookConfigPathsForConnector(conn, opts)
+	if len(paths) == 0 {
+		return false, nil
+	}
+	command := hermesConfiguredHookCommand(hookOnly.hookCommand(opts), opts.HookExecutable)
+	recognized := hermesRecognizedHookCommands(command)
+	want := make(map[string]interface{}, len(hermesRequiredHooks))
+	relaxed := false
+	for _, spec := range hermesRequiredHooks {
+		entry := hermesHookEntry(command, spec.event, spec.matcher, opts)
+		if _, set := entry["fail_closed"]; set {
+			delete(entry, "fail_closed")
+			relaxed = true
+		}
+		want[spec.event] = entry
+	}
+	if !relaxed {
+		return false, nil
+	}
+	for _, path := range paths {
+		decoded, err := decodeHookConfigFile(path)
+		if err != nil {
+			return false, err
+		}
+		document, _ := decoded.(map[string]interface{})
+		if document == nil {
+			return false, nil
+		}
+		hooks, _ := document["hooks"].(map[string]interface{})
+		if !hookEventEntriesMatch(hooks, want, func(_ string, entry interface{}) bool {
+			command, _ := hermesHookEntryCommand(entry)
+			return hermesReplaceableHookCommand(command, recognized)
+		}) {
+			return false, nil
+		}
+	}
+	return true, nil
+}
+
 // hookEventEntriesMatch checks an agent's event -> handler-list hook map
 // against the entries Setup renders (want): every event in want holds its
 // entry exactly once, and no event holds another entry claims marks as

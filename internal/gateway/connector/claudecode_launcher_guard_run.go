@@ -5,11 +5,10 @@ package connector
 
 import (
 	"encoding/json"
-	"errors"
-	"fmt"
 	"io"
 	"os"
-	"os/exec"
+
+	"github.com/defenseclaw/defenseclaw/internal/hookguard"
 )
 
 // RunClaudeCodeLauncherGuard runs launcher with hookArgs and passes its stdin,
@@ -19,18 +18,7 @@ import (
 // a direct start of a missing launcher was a non-blocking error that let the
 // tool call run unchecked.
 func RunClaudeCodeLauncherGuard(launcher string, hookArgs []string, stdin io.Reader, stdout, stderr io.Writer) int {
-	command := exec.Command(launcher, hookArgs...)
-	command.Stdin, command.Stdout, command.Stderr = stdin, stdout, stderr
-	err := command.Run()
-	if err == nil {
-		return 0
-	}
-	var exitErr *exec.ExitError
-	if errors.As(err, &exitErr) && exitErr.ExitCode() >= 0 {
-		return exitErr.ExitCode()
-	}
-	fmt.Fprintln(stderr, ClaudeCodeLauncherMissingMessage)
-	return 2
+	return hookguard.Run(launcher, hookArgs, stdin, stdout, stderr)
 }
 
 // ClaudeCodeGatewayPreToolGuard answers a start of defenseclaw-gateway.exe as

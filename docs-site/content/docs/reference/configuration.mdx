@@ -451,7 +451,7 @@ Defaults from the loader. Omitted keys take these values.
 | `deployment_mode` | empty | `managed_enterprise` on a managed device. Restart required. |
 | `claw.mode` | `openclaw` | The primary connector. With several active it names the first; the OTel attribute `defenseclaw.claw.mode` is set only while a single connector is active. |
 | `claw.home_dir`, `claw.config_file` | `~/.openclaw`, `~/.openclaw/openclaw.json` | Where the OpenClaw install is looked up. |
-| `claw.workspace_dir` | empty | Set by `setup <connector> --workspace`; scopes hooks to one folder ([Per-connector files](#per-connector-files)). |
+| `claw.workspace_dir` | empty | Set by `setup <connector> --workspace` or `config set`; scopes hooks to one folder, and setup without `--workspace` keeps it ([Per-connector files](#per-connector-files)). |
 | `gateway.host`, `gateway.port` | `127.0.0.1`, `18789` | The upstream agent gateway (OpenClaw and ZeptoClaw fleet link). |
 | `gateway.fleet_mode` | `auto` | `auto`, `enabled` or `disabled`: when to dial `host:port` ([OpenClaw fleet link](#openclaw-fleet-link)). |
 | `gateway.token_env` | `DEFENSECLAW_GATEWAY_TOKEN` | The variable that holds the sidecar API token ([Keys](/docs/reference/keys)). |
@@ -1029,7 +1029,7 @@ There is no `DEFENSECLAW_GATEWAY_BIND`, `DEFENSECLAW_DATA_DIR` or `DEFENSECLAW_L
 
 Before the first mutation, a backup record is stored at `~/.defenseclaw/connector_backups/<connector>/<logical-name>.json`. It binds the connector, logical name and absolute target path, and holds the pristine bytes, permissions, pristine hash and post-setup hash. Teardown (or `--disable`) restores the pristine bytes only when the current file still matches the recorded identity; if it drifted, teardown removes only DefenseClaw-owned entries and keeps unrelated edits.
 
-Hook connectors default to global scope. `claw.workspace_dir` is empty unless you pass `--workspace`; GitHub Copilot CLI then uses it for `.github/hooks/defenseclaw.json` and workspace-local component discovery. Re-run `defenseclaw setup <connector>` without `--workspace` to return to global scope. The workspace is one value for the whole install, so `setup <connector> --workspace` refuses while other connectors are configured; use `defenseclaw setup guardrail --workspace <dir>` to scope every connector to one folder.
+Hook connectors default to global scope. `claw.workspace_dir` is empty unless you pass `--workspace` or set it with `config set`; GitHub Copilot CLI then uses it for `.github/hooks/defenseclaw.json` and workspace-local component discovery. Setup without `--workspace` keeps a pin that is still a folder (it clears one that is not, with a warning). To return to global scope, run `defenseclaw config unset claw.workspace_dir`, then `defenseclaw setup <connector>` again. The workspace is one value for the whole install, so `setup <connector> --workspace` refuses while other connectors are configured; use `defenseclaw setup guardrail --workspace <dir>` to scope every connector to one folder.
 
 Every hook setup writes the resolved path contract to `~/.defenseclaw/hook_contract_lock.json`. Its `locations` block records the pinned workspace, hook config file, generated script, and the MCP, skills, rules, plugins and agents surfaces DefenseClaw scans. `defenseclaw doctor` compares the lock against the files the active SDK can load.
 

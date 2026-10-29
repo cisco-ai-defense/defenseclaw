@@ -115,11 +115,6 @@ func pruneOutageWarningMarkers(dir string, before time.Time) {
 	}
 }
 
-// readCapped reads up to max bytes from r. It returns overflow=true (and the
-// first max bytes, which no caller hands on as the payload) when the input
-// exceeds max, mirroring
-// defenseclaw_read_stdin_capped: refuse, don't truncate. A 1-byte probe past
-// the cap detects the overflow without buffering an unbounded body.
 // utf8BOM is the UTF-8 byte order mark. A Windows PowerShell (.NET
 // Framework) host whose console input code page is UTF-8 (65001) writes it
 // ahead of everything it sends to a redirected child stdin:
@@ -137,6 +132,11 @@ func TrimUTF8BOM(payload []byte) []byte {
 	return bytes.TrimPrefix(payload, utf8BOM)
 }
 
+// readCapped reads up to max bytes from r. It returns overflow=true (and the
+// first max bytes, which no caller hands on as the payload) when the input
+// exceeds max, mirroring
+// defenseclaw_read_stdin_capped: refuse, don't truncate. A 1-byte probe past
+// the cap detects the overflow without buffering an unbounded body.
 func readCapped(r io.Reader, max int64) (payload []byte, overflow bool, err error) {
 	if r == nil {
 		return nil, false, nil

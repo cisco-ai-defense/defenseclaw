@@ -1791,7 +1791,8 @@ asks the same decider the egress proxy uses.
 - On an unmanaged computer, without `--sandbox`, `--pack`, `--profile` and
   `--harness` resolve the policy a run in this folder would get, with
   `config.yaml` (or the defaults) and the folder's repository policy. No daemon
-  is needed, so CI can check a pack.
+  is needed, so CI can check a pack. Unblocks (`sandbox unblock`, `--always`
+  included) are left out: use `--sandbox` to see them.
 - On a managed computer, without `--sandbox`, the daemon tests your own policy for
   a new run in this folder. `--harness` selects the agent. `--pack` and
   `--profile` are refused, and with `--sandbox` omit all three

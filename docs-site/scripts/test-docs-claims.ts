@@ -1425,6 +1425,12 @@ const r105Rows: DocRow[] = [
   { gap: "GH #1100 p0:GAP-0742", page: "enterprise/troubleshooting.mdx", section: "Lifecycle error codes", has: ["An unreadable `~/.defenseclaw` or `~/.defenseclaw/hooks` is not on this list: the guardian sets it back to `0700`."] },
   // GH #1101 reference items (docs pod, 2026-10-28): config limits, block_message refusal, pack manifest re-pin.
   { gap: "GH #1101 p0:GAP-0677", page: "enterprise/configuration.mdx", section: "Where the config lives", has: ["The file may be at most 4 MiB and 65,536 parsed YAML nodes.", "`configuration source exceeds the 4 MiB limit`", "`parsed YAML exceeds the 65,536-node limit`", "move rules into a [custom rule pack](#custom-rule-packs)"], lacks: ["The file is limited to 4 MiB and 65,536 YAML nodes."] },
+  { gap: "GH #1101 p0:GAP-0677", page: "enterprise/configuration.mdx", section: "Where the config lives", has: ["On Windows, Setup and `enterprise windows ensure` refuse it as `invalid_arguments` (exit `1639`) with `configuration source exceeds the 4 MiB limit` or `parsed YAML exceeds the 65,536-node limit`."] },
+  // GAP-2495 (docs pod, 2026-10-29, live OSS RHEL rc.9 docker sandbox): only --sandbox includes unblocks; the local test leaves them out.
+  { gap: "GAP-2495", page: "sandboxes/guide.mdx", section: "Check the unblock", has: ["defenseclaw sandbox policy test --sandbox myapp-7f3a --host webhook.site", "unblocks included. Name the sandbox: without `--sandbox` the test reads the pack and `config.yaml` without the daemon, leaves unblocks out and still says `blocked` for a host you unblocked, also with `--always`."] },
+  { gap: "GAP-2495", page: "reference/sandbox-cli.mdx", section: "`sandbox policy test`", has: ["Unblocks (`sandbox unblock`, `--always` included) are left out: use `--sandbox` to see them."] },
+  // GAP-2494 (docs pod, 2026-10-29, live managed RHEL rc.9): Linux and macOS ensure check the size first and word it themselves.
+  { gap: "GAP-2494", page: "enterprise/configuration.mdx", section: "Where the config lives", has: ["On Linux and macOS, ensure refuses it as `config_invalid` (exit `1`) with `config exceeds 4194304 bytes`, or with `<file> line <n>: parsed YAML exceeds the 65,536-node limit`."], lacks: ["refuse it with the same message"] },
   { gap: "GH #1101 p0:GAP-0677", page: "enterprise/windows.mdx", section: "2. Write the config", has: ["The file may be at most 4 MiB and 65,536 YAML nodes", "([limits](/docs/enterprise/configuration#where-the-config-lives))"] },
   { gap: "GH #1101 p0:GAP-0765", page: "enterprise/configuration.mdx", has: ["A longer one is refused with `guardrail.block_message must be a string of at most 4096 characters (it has 4097)`"] },
   { gap: "GH #1101 p0:GAP-0777", page: "policies/rulepack-validation.mdx", has: ["Adding or editing that file changes the digest, so validate the pack again and pin the new digest"] },
@@ -1442,8 +1448,9 @@ const r105Rows: DocRow[] = [
   { gap: "GAP-2366", page: "reference/env-vars.mdx", has: ["`DEFENSECLAW_ENTERPRISE_PROFILE` exported in a shell is dropped when the", "command starts. The writers keep writing as usual, and `defenseclaw doctor`", "lists the variable under `Ignored environment overrides`."], lacks: ["process's writers refuse changes (exit code `3`"] },
   { gap: "GAP-2365", page: "guardrail/switching-connectors.mdx", has: ["`Codex is already configured; re-apply its hooks (mode=action)? [Y/n]:`", "A re-run never asks Add, Replace or Cancel.", "`Configure DefenseClaw for Codex enforcement now? [Y/n]:`", "the agent's current mode when it is already set up, observe for a new one"] },
   { gap: "GAP-2221", page: "edge-connector/install.mdx", has: ["when no Fleet API token is saved yet, setup first asks `Generate a new fleet API bearer token? [Y/n]`", "so `sudo` can ask for your password", "Edge setup is incomplete`, and Fleet stays off"] },
-  { gap: "GAP-2171", page: "enterprise/operations.mdx", has: ["it prints `unknown flag` and exits `1`, not `1639`"] },
-  { gap: "GAP-2171", page: "enterprise/troubleshooting.mdx", has: ["exits `1` with `unknown flag` before the lifecycle runs"] },
+  // GAP-2493 (docs pod, 2026-10-29, live managed Windows rc.9): since GAP-2448 fe875fb90f a Windows lifecycle flag error exits 1639 (GAP-2171 text replaced).
+  { gap: "GAP-2493", page: "enterprise/operations.mdx", has: ["(a misspelled flag such as `--bogus`) exits `1639`, like an argument the lifecycle rejects (`--profile bogus`).", "or with `--json` one result whose only error is `invalid_arguments`", "1.0.4 and earlier exit `1` for an unknown flag."], lacks: ["exits `1`, not `1639`"] },
+  { gap: "GAP-2493", page: "enterprise/troubleshooting.mdx", has: ["(a misspelled flag) on a lifecycle verb also exits `1639`, with `unknown flag` (1.0.4 and earlier exit `1`)"], lacks: ["exits `1` with `unknown flag` before the lifecycle runs"] },
   { gap: "GAP-2367", page: "reference/setup-commands.mdx", has: ["writes it to `ai_discovery.trusted_binary_prefixes` in `~/.defenseclaw/config.yaml`"], lacks: ["and persists to `~/.defenseclaw/.env`"] },
   { gap: "GAP-2367", page: "reference/cli.mdx", has: ["writes it to `ai_discovery.trusted_binary_prefixes` in `~/.defenseclaw/config.yaml`"], lacks: ["and persists to `~/.defenseclaw/.env`"] },
   { gap: "GAP-2368", page: "get-started/windows/paths-troubleshooting.mdx", has: ["The watchdog is on by default (`gateway.watchdog.enabled` is `true`)", "set `gateway.watchdog.enabled` to `false` to turn it off"], lacks: ["The watchdog runs only when `gateway.watchdog.enabled` is set"] },
@@ -1620,6 +1627,10 @@ const r105Rows: DocRow[] = [
   { gap: "GAP-2424", page: "guardrail/index.mdx", has: ["The picker's \"never block\" covers policy findings. Observe still blocks an agent that changes DefenseClaw's own files"] },
   { gap: "GAP-2424", page: "guardrail/multi-connector.mdx", has: ["The picker's \"never block\" covers policy findings. Observe still blocks an agent that changes DefenseClaw's own files"] },
   { gap: "GAP-2424", page: "guardrail/switching-connectors.mdx", has: ["The picker's \"never block\" covers policy findings. Observe still blocks an agent that changes DefenseClaw's own files"] },
+  // GAP-2488 (docs pod, 2026-10-29, live managed RHEL rc.9 + GAP-2482 c81952fdbf): a live account home moved aside next to a folder it owns is not available; the uninstall refuses (uninstall_precheck_refused).
+  { gap: "GAP-2488", page: "enterprise/lifecycle.mdx", has: ["When an enrolled user's home folder was deleted and its parent folder still holds other entries", "So is a home moved or renamed aside: its parent folder still holds another folder the account owns", "mount it, or move it back to its home path, and run the uninstall again."], lacks: ["It names the home: mount it and run the uninstall again."] },
+  { gap: "GAP-2488", page: "enterprise/troubleshooting.mdx", section: "Lifecycle error codes", has: ["or the home was moved or renamed aside, so its parent folder still holds another folder the account owns) is refused before anything changes too", "mount it or move it back to its home path, or recreate a deleted home folder", "or the home folder of a live account was deleted, so uninstall could not remove", "A home moved or renamed aside (its parent folder still holds another folder the account owns) is not deleted: uninstall refuses instead"] },
+  { gap: "GAP-2271", page: "reference/gateway-api.mdx", section: "Health & status", has: ["\"telemetry\": [\"hooks\"],", "which on a host install is `[\"hooks\"]` for every connector (native agent OTel exporters run only inside OpenShell sandboxes)"], lacks: ["\"telemetry\": [\"hooks\", \"otel\"", "`telemetry` lists reported wiring channels"] },
   { gap: "GAP-2466", page: "enterprise/linux.mdx", section: "2. Stage the config", has: ["Write the config as `config_version: 9`. `ensure` also takes a `config_version: 8` file: it migrates it to 9, keeps `config.yaml.v8.bak` and `migration-v9.json`, and warns `config_version_8`. It refuses any other version with `config_invalid`."], lacks: ["The lifecycle requires `config_version: 9`"] },
   { gap: "GAP-2466", page: "enterprise/macos.mdx", section: "2. Stage the config", has: ["Write the config as `config_version: 9`. `ensure` also takes a `config_version: 8` file: it migrates it to 9, keeps `config.yaml.v8.bak` and `migration-v9.json`, and warns `config_version_8`. It refuses any other version with `config_invalid`."], lacks: ["The lifecycle requires `config_version: 9`"] },
   { gap: "GAP-2440", page: "get-started/upgrade.mdx", section: "Upgrade", has: ["For a few seconds while the installer swaps the hooks, a hook from the release you upgrade from (1.0.4 or earlier) can show its own generic text instead", "that a gateway cold start failed, or that you should run `defenseclaw-gateway restart`", "That text comes from the older release and cannot change; you do not need to restart anything, wait for the installer to finish and retry."], lacks: ["A hook from the release you upgrade from can instead say that the gateway is stopped or unreachable."] },
@@ -2095,8 +2106,8 @@ describe('setup re-run question, trusted-paths store and watchdog default match 
 });
 
 // GAP-2179: every NAME=value property standalone Setup /? prints is in both
-// Setup property tables. GAP-2171: an unknown defenseclaw.exe flag under
-// `enterprise` keeps cobra's error (exit 1); only lifecycle refusals are 1639.
+// Setup property tables. GAP-2171/GAP-2493: the enterprise tree keeps its own flag-error exits; since
+// GAP-2448 a Windows lifecycle verb's unknown flag exits 1639 like its other argument refusals.
 describe('Setup properties and the Windows unknown-flag exit match the code (GAP-2179, GAP-2171)', () => {
   it('lists every property standalone Setup /? prints', () => {
     const main = source('cmd/defenseclaw-enterprise-setup/main.go');
@@ -2107,6 +2118,12 @@ describe('Setup properties and the Windows unknown-flag exit match the code (GAP
       const text = pageSection(page);
       for (const p of props) assert.ok(text.includes('`' + p + '='), `${page} Setup property table lacks ${p}=`);
     }
+  });
+  it('gives a Windows lifecycle flag error the invalid-arguments exit 1639 (GAP-2493)', () => {
+    const svc = source('internal/cli/windows_enterprise_service.go');
+    assert.ok(svc.includes('cmd.SetFlagErrorFunc(func(c *cobra.Command, err error) error {\n\t\treturn lifecycleArgumentError(c, action, opts.jsonOutput, flagError(c, err))'), 'Windows lifecycle verbs no longer route flag errors through lifecycleArgumentError: re-check enterprise/operations.mdx and enterprise/troubleshooting.mdx (GAP-2493)');
+    const unix = source('internal/cli/enterprise_unix.go');
+    assert.ok(unix.includes('return withExitCode(err, enterprisestatus.InvalidArgsExitCode(runtime.GOOS))') && unix.includes('return invalidLifecycleArguments(&delegatedUsageError{msg: usageMessage(c, err), err: err})') && unix.includes('result.AddError("invalid_arguments", message)'), 'lifecycle flag errors no longer exit with the invalid-arguments code or print invalid_arguments with --json (GAP-2493)');
   });
   it('keeps the enterprise tree out of the root usage-error mapping', () => {
     const exit = source('internal/cli/exit_code.go');
@@ -2196,10 +2213,24 @@ describe('1.0.5 docs rows', () => {
 });
 
 // GH #1101 (p0 GAP-0677, GAP-0765): the limit messages the configuration pages quote.
+describe('policy test leaves unblocks out without --sandbox (GAP-2495)', () => {
+  it('only the daemon path carries unblocks', () => {
+    const pt = source('internal/openshell/sandboxcli/policytest.go');
+    assert.ok(pt.includes('viaDaemon := o.Sandbox != ""') && pt.includes('// no daemon (no unblocks apply), so CI can check a pack.') && !pt.includes('Egress.Unblocked'), 'the local policy test may now include unblocks: re-check sandboxes/guide.mdx Check the unblock and reference/sandbox-cli.mdx (GAP-2495)');
+  });
+});
+
 describe('config limit refusals match the configuration pages (GH #1101)', () => {
   it('the parser and schema still word the 4 MiB, 65,536-node and block_message limits as quoted', () => {
     const yaml = source('internal/config/yaml_v8.go');
     assert.ok(yaml.includes('"configuration source exceeds the 4 MiB limit"') && yaml.includes('"parsed YAML exceeds the 65,536-node limit"'), 'config size/node refusal changed: re-check enterprise/configuration.mdx Where the config lives');
+    // Windows (p0 GAP-0677): the profile read refuses a file over 4 MiB first (managed config <path> exceeds 4194304 bytes);
+    // the standalone profile replaces that with the gateway compiler message above and refuses it as invalid arguments (1639).
+    const profile = source('internal/cli/windows_enterprise_profile.go');
+    assert.ok(profile.includes('if compiled := windowsEnterpriseStandaloneConfigPreflight(path); compiled != nil {') && profile.includes('return fmt.Errorf("%w: %w", errWindowsEnterpriseInvalidArguments, err)') && profile.includes('opts.suppliedConfigRefusal = err'), 'Windows no longer gives the gateway compiler size/node message as invalid arguments: re-check the Windows sentence in enterprise/configuration.mdx Where the config lives');
+    assert.ok(source('internal/cli/windows_enterprise_config_preflight_windows.go').includes('return windowsEnterpriseStandaloneConfigCompile(configPath)'), 'the Windows config preflight no longer runs the gateway compiler: re-check enterprise/configuration.mdx Where the config lives');
+    // GAP-2494: Linux and macOS ensure refuse an oversized file in enterpriseunix before the parser sees it.
+    assert.ok(source('internal/enterpriseunix/config.go').includes('return nil, fmt.Errorf("config exceeds %d bytes", config.ObservabilityV8MaxSourceBytes)') && source('internal/config/observability_v8_types.go').includes('ObservabilityV8MaxSourceBytes = 4 * 1024 * 1024'), 'Linux/macOS config size refusal changed: re-check the Linux and macOS sentence in enterprise/configuration.mdx Where the config lives (GAP-2494)');
     const schema = source('internal/config/schema_v8.go');
     assert.ok(schema.includes('"a string of %s %d characters"') && schema.includes('" (it has %d)"'), 'schema length refusal changed: re-check the block_message sentence in enterprise/configuration.mdx');
     const configSchema = JSON.parse(source('schemas/config/v8/defenseclaw-config.schema.json'));
