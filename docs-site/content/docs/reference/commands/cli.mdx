@@ -1266,7 +1266,7 @@ Setup. See [Install with an MDM](/docs/enterprise/mdm).
 | `MANIFEST=<file>` | Absolute path of a guardian target manifest. `/install` needs both `CONFIG=` and `MANIFEST=`; `/ensure` prepares a manifest from the config |
 | `ALLOWEDSIGNERS=<sha256>,<sha256>` | Accepted Authenticode signer thumbprints, comma-separated |
 | `JSON=1`, `NOSTART=1`, `PURGE=1` | Print JSON, stage without starting, also remove each enrolled account's DefenseClaw data and per-user binaries on uninstall |
-| `TIMEOUTSECONDS=<n>` | Lifecycle timeout, from 60 to 7200 seconds. Default 1800 |
+| `TIMEOUTSECONDS=<n>` | Lifecycle timeout, from 60 to 7200 seconds, counted from when Setup starts. Default 1800. A change needs at least about 120; lower values suit only `/verify` and `/status` |
 | `/quiet`, `/norestart` | Accepted and ignored |
 
 Property names are case-insensitive, and dashes in them are ignored. Paths

@@ -96,7 +96,9 @@ func enterpriseSetupStartFromCreation(now, creation time.Time) time.Time {
 		return time.Time{}
 	}
 	return now.Add(-now.Sub(creation))
-} // enterpriseSetupLifecycleDeadline is when the TIMEOUTSECONDS limit of a run
+}
+
+// enterpriseSetupLifecycleDeadline is when the TIMEOUTSECONDS limit of a run
 // ends: opts.Started plus the limit for a standalone Setup, so the payload
 // checks and unpacking count (GAP-2509), else now plus the limit.
 func enterpriseSetupLifecycleDeadline(opts enterpriseSetupOptions, now time.Time) time.Time {

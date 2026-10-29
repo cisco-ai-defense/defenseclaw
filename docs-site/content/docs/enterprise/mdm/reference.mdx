@@ -98,7 +98,7 @@ gpg --dearmor < defenseclaw-enterprise-release-key.asc > defenseclaw-enterprise-
 - **Time.** Setup gives the lifecycle 30 minutes by default (`TIMEOUTSECONDS=60`
   to `7200`), counted from when Setup starts, so its payload checks and unpacking
   count too; a run with less than about a minute left after them does not start
-  the lifecycle and changes nothing. Allow at least that long in your MDM. On Windows, a standalone Setup
+  the lifecycle and changes nothing, so a change needs `TIMEOUTSECONDS` of at least about 2 minutes (`120`); lower values suit only `/verify` and `/status`. Allow at least that long in your MDM. On Windows, a standalone Setup
   run stopped at `TIMEOUTSECONDS` then runs its own recovery for up to 10 more
   minutes, so allow `TIMEOUTSECONDS` plus 10 minutes (40 minutes by default). An
   MDM that ends Setup sooner can stop that recovery and leave `verify` failing
@@ -135,7 +135,7 @@ and `/norestart` are accepted and ignored.
 | `NOSTART=1` | Install with the services stopped (mutating actions only). |
 | `PURGE=1` | With `/uninstall`, also remove each enrolled account's DefenseClaw data and per-user binaries. |
 | `FORCE=1` | With `/uninstall`, last resort: remove the deployment without recovering a pending transaction. |
-| `TIMEOUTSECONDS=` | Lifecycle timeout, 60 to 7200 seconds. Default 1800. |
+| `TIMEOUTSECONDS=` | Lifecycle timeout, 60 to 7200 seconds, counted from when Setup starts. Default 1800. A change needs at least about 120; lower values suit only `/verify` and `/status`. |
 | `ATTESTCLAUDEEFFECTIVEPOLICY=1` | With `/repair`: record the administrator's attestation that Claude Code runs DefenseClaw's managed hooks. See [Claude Code on Windows](#claude-code-on-windows). |
 
 ## Exit codes

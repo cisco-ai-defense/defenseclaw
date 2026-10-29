@@ -189,3 +189,14 @@ def test_setup_time_budget_names_the_recovery_after_timeoutseconds():
     assert "opts.Started.Add(opts.LifecycleTimeout)" in source, "deadline no longer counts from Setup's start"
     assert "counted from when Setup starts" in time_bullet, time_bullet
     assert "counted from when Setup starts" in row, row
+    # A change counted from Setup's start needs the payload checks (11-26 s
+    # live) plus the lifecycle start minimum (minimumEnterpriseLifecycleStart,
+    # about 67 s for /ensure), so 60-90 never starts one; the pages that give
+    # the 60 to 7200 range name the effective minimum (GAP-2509 checker P4).
+    assert "const minimumEnterpriseLifecycleStart = 60 * time.Second" in source, "lifecycle start minimum moved"
+    cli = (DOCS / "reference/commands/cli.mdx").read_text(encoding="utf-8")
+    cli_row = next(line for line in cli.splitlines() if line.startswith("| `TIMEOUTSECONDS=<n>`"))
+    mdm_row = next(line for line in mdm.splitlines() if line.startswith("| `TIMEOUTSECONDS=`"))
+    for text in (time_bullet, row, mdm_row, cli_row):
+        assert "at least about 2 minutes" in text or "at least about 120" in text, text
+        assert "only `/verify` and `/status`" in text, text
