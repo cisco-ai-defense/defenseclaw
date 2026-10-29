@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/winpath"
 	"golang.org/x/sys/windows"
@@ -118,17 +119,12 @@ func readWindowsGatewayProfileRoots() ([]string, error) {
 		roots = append(roots, root)
 	}
 	// Compare both configured names and destinations of redirected roots.
-	physical := make([]string, 0, len(roots)*2)
-	for _, root := range roots {
-		physical = append(physical, root)
-		resolved, resolveErr := resolveWindowsGatewayPath(root)
-		if resolveErr != nil {
-			return nil, resolveErr
-		}
-		physical = append(physical, resolved)
-	}
-	return physical, nil
+	return windowsGatewayProfileRootResolution.resolve(roots, time.Now(), resolveWindowsGatewayPath)
 }
+
+// windowsGatewayProfileRootResolution keeps the gateway process's last
+// resolution of its profile roots (profileRootResolution).
+var windowsGatewayProfileRootResolution profileRootResolution
 
 func expandWindowsGatewayProfilePath(raw, systemDrive, windowsDir string) (string, error) {
 	path := strings.TrimSpace(strings.ReplaceAll(raw, "/", `\`))
