@@ -430,11 +430,12 @@ func enterpriseHookRemoveJobs(rows []enterpriseHookRemoveRow) (map[int]*enterpri
 		switch enterpriseHookCheckHome(home, uid).State {
 		case enterprisehooks.HomeAvailable:
 		case enterprisehooks.HomePending:
-			if enterpriseHookRecordedHomeGone(home) {
-				// The home folder of a live account was deleted or moved
-				// away (#1287): the registrations went with it, so the
-				// account is already clean. The uninstall warns with this
-				// reason and goes on.
+			if enterpriseHookLiveHomeGone(home, uid) {
+				// The home folder of a live account was deleted (#1287):
+				// the registrations went with it, so the account is
+				// already clean. The uninstall warns with this reason and
+				// goes on. A home moved aside next to it is only not
+				// available (GAP-2482).
 				pending = append(pending, enterpriseHookHomeGoneEntry(label, home, name))
 				continue
 			}
@@ -1077,7 +1078,7 @@ func addEnterpriseHookStatePurges(jobs map[int]*enterpriseHookWorkerJob, rows []
 			reason := "its home is not trusted"
 			home := filepath.Clean(strings.TrimSpace(target.UserHome))
 			if filepath.IsAbs(home) && enterpriseHookCheckHome(home, *target.UID).State == enterprisehooks.HomePending {
-				if enterpriseHookRecordedHomeGone(home) {
+				if enterpriseHookLiveHomeGone(home, *target.UID) {
 					// Its ~/.defenseclaw went with the home (#1287):
 					// nothing is left to purge, and its manifest rows
 					// already warn that the home is gone.
