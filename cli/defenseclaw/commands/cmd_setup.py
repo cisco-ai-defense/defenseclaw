@@ -26,6 +26,7 @@ import binascii
 import copy
 import hashlib
 import json as _json
+import ntpath
 import os
 import queue
 import re
@@ -8163,6 +8164,8 @@ def _codex_config_has_managed_hooks(
     path: str, data_dir: str | None, copied_data_dir: str | None = None,
 ) -> bool:
     """Find Codex hook commands in one stable bounded config, ignoring user edits."""
+    from defenseclaw.doctor_hooks import _codex_cmd_direct_parts
+
     try:
         config = codex_toml.loads(read_regular_file_no_follow(path, max_bytes=_SETUP_CODEX_BACKUP_MAX_BYTES))
     except (OSError, ValueError, UnicodeError):
@@ -8206,8 +8209,18 @@ def _codex_config_has_managed_hooks(
                         for script in scripts
                     ):
                         return True
-                    # Windows writes an encoded native launcher command, which
-                    # has no data-dir path. Its Codex hook signature is root proof.
+                    # Windows writes the direct cmd.exe launcher command
+                    # (GAP-1908) or, for a launcher path that form cannot carry,
+                    # an encoded native launcher command; neither has a data-dir
+                    # path. Its Codex hook signature is root proof.
+                    direct = _codex_cmd_direct_parts(command)
+                    if (
+                        direct is not None
+                        and ntpath.basename(direct[0]).casefold() == "defenseclaw-hook.exe"
+                        and direct[1][:3] == ["hook", "--connector", "codex"]
+                        and "--hook-contract" in direct[1]
+                    ):
+                        return True
                     encoded = re.search(r"-EncodedCommand\s+([A-Za-z0-9+/=]+)", command, re.IGNORECASE)
                     if encoded is None or len(encoded.group(1)) > 65536:
                         continue

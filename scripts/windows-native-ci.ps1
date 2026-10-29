@@ -4746,6 +4746,27 @@ function Assert-NoGatewayAutoStart {
     }
 }
 
+# Get-DirectCodexHookCommand parses the direct Codex hook command Setup writes
+# for a launcher path neither shell can expand (windowsCmdDirectHookCommand,
+# GAP-1908): <system>\cmd.exe /d /v:off /c "<launcher>" <arguments>. It returns
+# the launcher and its arguments, or $null when the command is not exactly that
+# form with the system cmd.exe.
+function Get-DirectCodexHookCommand([string]$Command) {
+    $match = [regex]::Match(
+        $Command,
+        '^(?<cmd>[A-Za-z]:\\[A-Za-z0-9\\._~-]+) /d /v:off /c "(?<file>[A-Za-z]:\\[\p{L}\p{Nd} \\._~-]+)"(?<arguments>(?: [A-Za-z0-9._-]+)+)$'
+    )
+    if (-not $match.Success) { return $null }
+    $systemCmd = Join-Path ([Environment]::SystemDirectory) 'cmd.exe'
+    if (-not [string]::Equals($match.Groups['cmd'].Value, $systemCmd, [StringComparison]::OrdinalIgnoreCase)) {
+        return $null
+    }
+    return [pscustomobject]@{
+        File = $match.Groups['file'].Value
+        Arguments = [string[]]@($match.Groups['arguments'].Value.Substring(1).Split(' '))
+    }
+}
+
 # Get-AwaitedHookBridge parses a decoded hook bridge script: the launcher is
 # started with Process.Start, which keeps the handle CreateProcess returned so
 # a launcher that exits at once still returns its status, and with the call
@@ -4893,11 +4914,18 @@ function Assert-WizardHookRegistration(
                 try { $command = $literal | ConvertFrom-Json -ErrorAction Stop }
                 catch { throw "wizard-selected Codex command_windows is malformed: $($_.Exception.Message)" }
             }
-            $encoded = [regex]::Match($command, '(?i)(?:^|\s)-EncodedCommand\s+([A-Za-z0-9+/=]+)(?:\s|$)')
-            if (-not $encoded.Success) { throw 'wizard-selected Codex registration does not use EncodedCommand' }
-            try { $script = [Text.Encoding]::Unicode.GetString([Convert]::FromBase64String($encoded.Groups[1].Value)) }
-            catch { throw "wizard-selected Codex command is not valid UTF-16LE Base64: $($_.Exception.Message)" }
-            $bridge = Get-AwaitedHookBridge $script
+            # Setup writes the direct cmd.exe command (GAP-1908), or the encoded
+            # PowerShell bridge for a launcher path that form cannot carry.
+            $bridge = Get-DirectCodexHookCommand $command
+            if ($null -eq $bridge) {
+                $encoded = [regex]::Match($command, '(?i)(?:^|\s)-EncodedCommand\s+([A-Za-z0-9+/=]+)(?:\s|$)')
+                if (-not $encoded.Success) {
+                    throw 'wizard-selected Codex registration uses neither the direct cmd.exe command nor EncodedCommand'
+                }
+                try { $script = [Text.Encoding]::Unicode.GetString([Convert]::FromBase64String($encoded.Groups[1].Value)) }
+                catch { throw "wizard-selected Codex command is not valid UTF-16LE Base64: $($_.Exception.Message)" }
+                $bridge = Get-AwaitedHookBridge $script
+            }
             $arguments = @(if ($null -ne $bridge) { $bridge.Arguments })
             $file = if ($null -ne $bridge) { $bridge.File } else { '' }
             $boundEvent = if ($arguments.Count -eq 7) { $arguments[4] } else { '' }
@@ -5235,18 +5263,35 @@ function Set-WizardCodexLegacyNonWaitingHook([object]$Specification) {
     if ($Specification.Connector -ne 'codex') { return }
 
     $registration = [IO.File]::ReadAllText($Specification.ConfigPath)
-    $encodedMatches = [regex]::Matches(
+    $tomlString = [regex]::Match(
         $registration,
-        '(?i)-EncodedCommand\s+(?<encoded>[A-Za-z0-9+/=]+)'
+        '(?m)^\s*command_windows\s*=\s*(?<literal>"(?:\\.|[^"\\])*"|''[^'']*'')\s*$'
     )
-    if ($encodedMatches.Count -eq 0) {
-        throw 'cannot stage legacy Codex hook: registration has no EncodedCommand'
+    if (-not $tomlString.Success) {
+        throw 'cannot stage legacy Codex hook: registration has no command_windows hook'
     }
-    $currentEncoded = $encodedMatches[0].Groups['encoded'].Value
-    try { $script = [Text.Encoding]::Unicode.GetString([Convert]::FromBase64String($currentEncoded)) }
-    catch { throw "cannot stage legacy Codex hook: invalid encoded command: $($_.Exception.Message)" }
-
-    $bridge = Get-AwaitedHookBridge $script
+    $literal = $tomlString.Groups['literal'].Value
+    if ($literal.StartsWith("'", [StringComparison]::Ordinal)) {
+        $command = $literal.Substring(1, $literal.Length - 2)
+    } else {
+        try { $command = $literal | ConvertFrom-Json -ErrorAction Stop }
+        catch { throw "cannot stage legacy Codex hook: command_windows is malformed: $($_.Exception.Message)" }
+    }
+    # The current registration is the direct cmd.exe command (GAP-1908) or,
+    # for a launcher path that form cannot carry, the encoded bridge.
+    $currentEncoded = ''
+    $script = ''
+    $bridge = Get-DirectCodexHookCommand $command
+    if ($null -eq $bridge) {
+        $encoded = [regex]::Match($command, '(?i)-EncodedCommand\s+(?<encoded>[A-Za-z0-9+/=]+)')
+        if (-not $encoded.Success) {
+            throw 'cannot stage legacy Codex hook: registration is neither the direct cmd.exe command nor EncodedCommand'
+        }
+        $currentEncoded = $encoded.Groups['encoded'].Value
+        try { $script = [Text.Encoding]::Unicode.GetString([Convert]::FromBase64String($currentEncoded)) }
+        catch { throw "cannot stage legacy Codex hook: invalid encoded command: $($_.Exception.Message)" }
+        $bridge = Get-AwaitedHookBridge $script
+    }
     if ($null -eq $bridge -or
         [IO.Path]::GetFileName($bridge.File) -cne 'defenseclaw-hook.exe' -or
         @($bridge.Arguments).Count -lt 3 -or
@@ -5262,7 +5307,14 @@ function Set-WizardCodexLegacyNonWaitingHook([object]$Specification) {
         throw 'cannot stage legacy Codex hook: generated command did not change'
     }
     $legacyEncoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($legacyScript))
-    $updated = $registration.Replace($currentEncoded, $legacyEncoded)
+    if ($currentEncoded) {
+        $updated = $registration.Replace($currentEncoded, $legacyEncoded)
+    } else {
+        # The direct command has no script to swap: put the 0.8.x bridge in its place.
+        $powershell = Join-Path ([Environment]::SystemDirectory) 'WindowsPowerShell\v1.0\powershell.exe'
+        $legacyCommand = "$powershell -NoLogo -NoProfile -NonInteractive -EncodedCommand $legacyEncoded"
+        $updated = $registration.Replace($literal, "'" + $legacyCommand + "'")
+    }
     if ($updated -ceq $registration) {
         throw 'cannot stage legacy Codex hook: registration bytes did not change'
     }

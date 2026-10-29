@@ -2012,6 +2012,89 @@ class WindowsHookDoctorTests(unittest.TestCase):
         self.assertEqual(check.state, "stale", check.detail)
         self.assertIn("obsolete gateway launcher", check.detail)
 
+    @staticmethod
+    def _direct_hook_command(runtime: Path | str, *, event: str = "", contract: str = "") -> str:
+        """The direct cmd.exe Codex command Setup writes (windowsCmdDirectHookCommand, GAP-1908)."""
+        arguments = ["hook", "--connector", "codex"]
+        if event:
+            arguments += ["--event", event]
+        if contract:
+            arguments += ["--hook-contract", contract]
+        return doctor_hooks._windows_system_cmd_path() + " /d /v:off /c \"" + str(runtime) + "\" " + " ".join(arguments)
+
+    def test_healthy_codex_direct_cmd_invocation(self) -> None:
+        # GAP-2543 / GAP-2542: Setup writes this form for the default launcher
+        # path; Doctor, Setup readiness and fail-mode read it as DefenseClaw-owned.
+        runtime = self._runtime()
+        config = self._config("codex", self._direct_hook_command(runtime), codex_features=False)
+
+        check = self._validate("codex", config)
+
+        self.assertEqual(check.state, "healthy", check.detail)
+        self.assertIn("Windows-native executable", check.detail)
+        bound = self._direct_hook_command(runtime, event="PreToolUse", contract="codex-hooks-v4")
+        self.assertTrue(doctor_hooks._managed_hook_command(bound, "codex"))
+        target, args, kind = doctor_hooks._command_target(bound, "codex")
+        self.assertEqual(target, str(runtime))
+        self.assertEqual(args, ["hook", "--connector", "codex", "--event", "PreToolUse", "--hook-contract", "codex-hooks-v4"])
+        self.assertEqual(kind, "direct")
+
+    def test_codex_direct_cmd_with_unsupported_contract_stays_owned_for_repair(self) -> None:
+        runtime = self._runtime()
+        command = self._direct_hook_command(runtime, event="PreToolUse", contract="codex-hooks-v99")
+
+        with self.assertRaises(_InspectionError) as raised:
+            doctor_hooks._command_target(command, "codex")
+
+        self.assertEqual(raised.exception.state, "malformed")
+        self.assertTrue(doctor_hooks._managed_hook_command(command, "codex"))
+
+    def test_codex_direct_cmd_lookalikes_stay_foreign(self) -> None:
+        runtime = self._runtime()
+        current = self._direct_hook_command(runtime, event="PreToolUse", contract="codex-hooks-v4")
+        system_cmd = doctor_hooks._windows_system_cmd_path()
+        quoted = "\"" + str(runtime) + "\""
+        lookalikes = {
+            "other-cmd": current.replace(system_cmd, r"C:\Tools\cmd.exe", 1),
+            "bare-cmd": current.replace(system_cmd, "cmd.exe", 1),
+            "quoted-cmd": current.replace(system_cmd, "\"" + system_cmd + "\"", 1),
+            "autorun": current.replace(" /d /v:off /c ", " /v:off /c ", 1),
+            "delayed-expansion": current.replace("/v:off", "/v:on", 1),
+            "keep-shell": current.replace(" /c ", " /k ", 1),
+            "extra-space": current.replace(" /c ", " /c  ", 1),
+            "unquoted-launcher": current.replace(quoted, str(runtime), 1),
+            "chained": current + " & calc.exe",
+            "env-expansion": current.replace("PreToolUse", "%PreToolUse%", 1),
+            "bang-expansion": current.replace("PreToolUse", "!PreToolUse!", 1),
+            "call-operator": "& " + current,
+            "env-prefix": "set NoDefaultCurrentDirectoryInExePath=1&& " + current,
+            "other-launcher": current.replace(quoted, "\"" + str(self._runtime("other-hook.exe")) + "\"", 1),
+            "other-connector": current.replace("--connector codex", "--connector claudecode", 1),
+        }
+        for name, command in lookalikes.items():
+            with self.subTest(name=name):
+                self.assertNotEqual(command, current)
+                self.assertFalse(doctor_hooks._managed_hook_command(command, "codex"))
+
+    @unittest.skipUnless(os.name == "nt", "Windows Codex registration root proof")
+    def test_setup_finds_direct_cmd_codex_hooks_as_root_proof(self) -> None:
+        from defenseclaw.commands import cmd_setup
+
+        runtime = self._runtime()
+        for name, command, expected in (
+            ("direct", self._direct_hook_command(runtime, event="PreToolUse", contract="codex-hooks-v4"), True),
+            ("lookalike", self._direct_hook_command(runtime, event="PreToolUse", contract="codex-hooks-v4") + " & x", False),
+        ):
+            with self.subTest(name=name):
+                path = self.root / f"{name}.toml"
+                escaped = command.replace("\\", "\\\\").replace("\"", "\\\"")
+                path.write_text(
+                    "[[hooks.PreToolUse]]\n[[hooks.PreToolUse.hooks]]\ntype = \"command\"\n"
+                    f"command_windows = \"{escaped}\"\n",
+                    encoding="utf-8",
+                )
+                self.assertEqual(cmd_setup._codex_config_has_managed_hooks(str(path), str(self.data)), expected)
+
     def test_claude_rejects_cmd_and_bat_exec_registrations(self) -> None:
         for extension in (".cmd", ".bat"):
             with self.subTest(extension=extension):
