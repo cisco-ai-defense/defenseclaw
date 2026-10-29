@@ -108,6 +108,40 @@ internally as part of its trusted transaction. That is not a general
 PowerShell 5 support promise. The disposable-host certification harness itself
 requires 64-bit PowerShell 7.
 
+### Service logon rights and endpoint management
+
+Install, repair, and upgrade provision `SeServiceLogonRight` for the exact
+`NT SERVICE\DefenseClawGateway` identity after validating the disabled service
+configuration and before activation. The assignment is additive and leaves
+existing account rights intact. It is separate from the gateway's restricted
+SID and runtime `RequiredPrivileges`; neither of those settings changes.
+
+Deploy the machine installer silently through trusted endpoint management in
+the LocalSystem context. Users do not need local administrator rights or an
+interactive UAC prompt. The gateway still runs under its restricted virtual
+account. Confirm the actual MSI's supported enterprise configuration properties
+and privileged execution path before rollout; this module does not define the
+external MSI wrapper.
+
+If CyberArk or another control denies LSA policy access, setup records a warning
+and still attempts normal service startup because a group assignment may
+already authorize the account. Startup and application readiness must succeed.
+JSON lifecycle output preserves policy advisories in its `warnings` array
+without mixing console warning text into the JSON document.
+No-start/deferred provisioning cannot prove that the service can log on until
+activation is attempted. Read-only status and verification do not grant rights.
+
+If GPO or MDM manages service logon rights, IT must include the exact service
+SID in its existing allow policy and check applicable deny policies. A deny
+overrides an allow, and policy refresh can replace a local assignment. Preserve
+other accounts in that policy, then test policy refresh, service restart and
+reboot. Use `sc.exe showsid DefenseClawGateway` to obtain the service SID.
+
+The narrow direct assignment is retained after failed installation, rollback,
+or uninstall. Setup does not remove it because it cannot distinguish an
+installer-created grant from a pre-existing or centrally managed grant. This
+does not change the existing file, service, or enrollment rollback records.
+
 Every lifecycle command accepts `--json`. Install, repair, and upgrade require
 the complete approved gateway, hook, config, and manifest input set. Do not
 copy a partial command from this overview; use the exact
