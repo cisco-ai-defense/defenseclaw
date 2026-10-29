@@ -104,7 +104,11 @@ func TestSetupConnectorsIsolated_RetriesSettingsInUse(t *testing.T) {
 		connectorSettingsBusy, connectorSettingsBusyBudget, connectorSettingsBusyDelay = busy, budget, delay
 	})
 	connectorSettingsBusy = func(err error) bool { return errors.Is(err, errSettingsInUse) }
-	connectorSettingsBusyBudget, connectorSettingsBusyDelay = 200*time.Millisecond, time.Millisecond
+	// The three-busy case gets a budget it cannot run out of: under -race
+	// one setupOneConnector (rule pack load + compile) can take longer than
+	// a short budget, which rolled claudecode back after one retry. It still
+	// ends after four setups. Only the stuck case below uses a short budget.
+	connectorSettingsBusyBudget, connectorSettingsBusyDelay = 30*time.Second, time.Millisecond
 
 	s := multiBootSidecar(t)
 	held := &busyOnceConnector{bootStubConnector: bootStubConnector{stubConnector: stubConnector{name: "claudecode"}}, busySetups: 3}
@@ -124,6 +128,7 @@ func TestSetupConnectorsIsolated_RetriesSettingsInUse(t *testing.T) {
 	}
 
 	// A file that stays in use is not waited on forever.
+	connectorSettingsBusyBudget = 200 * time.Millisecond
 	stuck := &busyOnceConnector{bootStubConnector: bootStubConnector{stubConnector: stubConnector{name: "claudecode"}}, busySetups: 1 << 20}
 	started := time.Now()
 	got, _ = s.setupConnectorsIsolated(
