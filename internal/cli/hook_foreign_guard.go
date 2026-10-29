@@ -582,6 +582,9 @@ func captureHookPayloadFacts(opts *hookexec.Options) hookPayloadFacts {
 		source = os.Stdin
 	}
 	buffered, err := io.ReadAll(io.LimitReader(source, hookForeignGuardPayloadLimit))
+	// The facts and the hook read the payload without a UTF-8 byte order
+	// mark a Windows PowerShell wrapper put ahead of it (GAP-2449).
+	buffered = hookexec.TrimUTF8BOM(buffered)
 	opts.Stdin = io.MultiReader(bytes.NewReader(buffered), source)
 	if err != nil {
 		return facts

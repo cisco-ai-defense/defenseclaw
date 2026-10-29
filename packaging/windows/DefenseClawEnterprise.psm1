@@ -6184,6 +6184,75 @@ function Enter-DefenseClawLifecycleLock {
     throw "another DefenseClaw enterprise lifecycle mutation holds the protected file lock for more than $TimeoutSeconds seconds"
 }
 
+# How long a standalone uninstall waits for bundle.lock (GAP-2438). Longer
+# than the 30 s a bundle apply, an ensure TRUSTANCHORS= or a secret set that
+# holds bundle.lock waits for lifecycle.lock, which the uninstall holds: such
+# a run gives up (1618) and releases bundle.lock before this wait ends.
+$script:DefenseClawBundleStoreLockWaitSeconds = 45
+
+function Enter-DefenseClawBundleStoreLock {
+    <#
+        GAP-2438: a standalone uninstall removes StateRoot, which holds the
+        policy bundle store and its bundle.lock. It takes bundle.lock after
+        lifecycle.lock, before it changes anything, so no bundle apply,
+        TRUSTANCHORS= ensure or secret set writes under StateRoot while it is
+        removed. The lock is the byte-range lock the Go runs take
+        (lockWindowsBundleStore). A held lock past the wait is the lifecycle
+        busy refusal (1618) with nothing changed. No bundle.lock, nothing to
+        wait for: $null. The handle allows delete, so Exit before StateRoot
+        is removed (Complete-DefenseClawStatePurge).
+    #>
+    param(
+        [Parameter(Mandatory)][hashtable]$Layout,
+        [int]$TimeoutSeconds = $script:DefenseClawBundleStoreLockWaitSeconds
+    )
+    $path = Microsoft.PowerShell.Management\Join-Path ([string]$Layout.InstallStateDirectory) 'bundle.lock'
+    $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
+    while ($true) {
+        $stream = $null
+        try {
+            $item = Microsoft.PowerShell.Management\Get-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue
+            if ($null -eq $item) {
+                return $null
+            }
+            if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or $item.PSIsContainer) {
+                throw "the policy bundle lock is not a regular file: $path"
+            }
+            $stream = [IO.File]::Open(
+                $path,
+                [IO.FileMode]::Open,
+                [IO.FileAccess]::ReadWrite,
+                ([IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete)
+            )
+            $stream.Lock(0, 1)
+            Write-DefenseClawLifecyclePhase -Stage 'bundle lock acquired'
+            return $stream
+        }
+        catch [IO.FileNotFoundException], [IO.DirectoryNotFoundException] {
+            if ($null -ne $stream) { $stream.Dispose() }
+            return $null
+        }
+        catch [IO.IOException] {
+            if ($null -ne $stream) { $stream.Dispose() }
+            if ([DateTime]::UtcNow -ge $deadline) {
+                throw (
+                    'a DefenseClaw policy bundle apply, TRUSTANCHORS= ensure or secret set holds the protected file lock ' +
+                    "$path for more than $TimeoutSeconds seconds; the uninstall changed nothing and can be run again"
+                )
+            }
+            Microsoft.PowerShell.Utility\Start-Sleep -Milliseconds 250
+        }
+    }
+}
+
+function Exit-DefenseClawPurgeBundleLock {
+    # Releases the bundle.lock an uninstall took (Enter-DefenseClawBundleStoreLock).
+    if ($null -ne $script:DefenseClawPurgeBundleLock) {
+        try { $script:DefenseClawPurgeBundleLock.Dispose() } catch { }
+        $script:DefenseClawPurgeBundleLock = $null
+    }
+}
+
 function Exit-DefenseClawLifecycleLock {
     param([Parameter(Mandatory)]$Lock)
     # The protected machine-wide lock identity intentionally persists across
@@ -32598,6 +32667,9 @@ function Complete-DefenseClawStatePurge {
         [string]$intent.phase -ceq 'contract_locks_pending') {
         throw 'refusing StateRoot removal while connector contract cleanup is pending'
     }
+    # The bundle.lock handle would keep its folder from being removed; every
+    # bundle run waits for lifecycle.lock, which this run still holds.
+    Exit-DefenseClawPurgeBundleLock
     $stateRootIdentityProperty = $intent.PSObject.Properties[
         'state_root_identity'
     ]
@@ -38849,6 +38921,7 @@ function Invoke-DefenseClawEnterpriseLifecycle {
     }
     $script:DefenseClawLauncherTemp = [string]$LauncherTemp
     $script:DefenseClawRemoveLifecycleLockOnExit = $false
+    $script:DefenseClawPurgeBundleLock = $null
     $script:DefenseClawUninstallPurgeUserState = (
         $Action -eq 'Uninstall' -and [bool]$Purge -and (Test-DefenseClawStandaloneProfile)
     )
@@ -39330,6 +39403,11 @@ function Invoke-DefenseClawEnterpriseLifecycle {
                 -GatewayServiceName $GatewayServiceName `
                 -GuardianServiceName $GuardianServiceName
         }
+        if ($Action -eq 'Uninstall' -and $Purge -and (Test-DefenseClawStandaloneProfile)) {
+            # The uninstall removes StateRoot: hold bundle.lock too, in the
+            # order no bundle run inverts for long (GAP-2438).
+            $script:DefenseClawPurgeBundleLock = Enter-DefenseClawBundleStoreLock -Layout $layout
+        }
         if ($Action -in @('Install', 'Upgrade', 'Repair') -and
             $GatewayServiceName -ceq 'DefenseClawGateway') {
             Assert-DefenseClawNoOtherProfileDeployment
@@ -39719,6 +39797,7 @@ function Invoke-DefenseClawEnterpriseLifecycle {
         throw
     }
     finally {
+        Exit-DefenseClawPurgeBundleLock
         Exit-DefenseClawLifecycleLock -Lock $lifecycleLock
         $leftNothing = Test-DefenseClawStandaloneUninstallLeftNothing -Action $Action -Layout $layout
         if ($script:DefenseClawRemoveLifecycleLockOnExit -or $leftNothing) {

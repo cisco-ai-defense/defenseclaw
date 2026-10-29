@@ -8,7 +8,7 @@ package cli
 import "golang.org/x/sys/windows"
 
 // sidecarAnswerAtHookPriority runs a Windows gateway at the above-normal
-// priority class of the hooks it answers (cmd/defenseclaw-hook/internal/
+// priority class of the hooks it answers (cmd/internal/
 // hookpriority). A hook raises itself to above normal before its packages
 // initialize, so a burst of hook processes (a Claude Code turn that reads 60
 // files at once starts 60) took the whole CPU ahead of a normal-priority

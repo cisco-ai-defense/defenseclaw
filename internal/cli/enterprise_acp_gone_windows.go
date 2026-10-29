@@ -45,6 +45,11 @@ func removeEnterpriseACPUserCopyAsUser(entry acp.EnterpriseUserCopyCleanup) (boo
 	return err == nil, err
 }
 
+// enterpriseACPDescribeHomePrincipal: a Windows enrollment names a SID.
+func enterpriseACPDescribeHomePrincipal(principal, _ string) (enterpriseACPAccount, error) {
+	return enterpriseACPAccount{}, fmt.Errorf("%s names no account", principal)
+}
+
 // enterpriseACPLookupWindowsAccount is replaceable in tests.
 var enterpriseACPLookupWindowsAccount = gateway.LookupWindowsAccount
 

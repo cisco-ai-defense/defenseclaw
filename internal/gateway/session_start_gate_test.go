@@ -240,3 +240,38 @@ func TestClaudeToolCallHeldBySessionStartInFlight(t *testing.T) {
 		t.Fatalf("PostToolUse was held: %v", findings)
 	}
 }
+
+// GAP-2455: while an install or upgrade of the account holds its data
+// directory, the hook config lock and the fail-mode hold make the Codex
+// registration repair fail. That is no reason to block the session: its
+// calls are decided as at any other time in the window. Without the install
+// (control) the failed repair still blocks the session.
+func TestCodexSessionStartDuringAnInstallDoesNotBlockTheSession(t *testing.T) {
+	for _, install := range []bool{true, false} {
+		name := "install window"
+		if !install {
+			name = "no install (control)"
+		}
+		t.Run(name, func(t *testing.T) {
+			h := newSessionStartGateHarness(t)
+			if install {
+				holdInstallLock(t, h.api.scannerCfg.DataDir)
+			}
+			startDone := make(chan int, 1)
+			go func() { code, _ := h.post("SessionStart", "upgrade-session", nil); startDone <- code }()
+			<-h.started
+			h.repair <- errHookRepairSuppressed
+			code := <-startDone
+			action, findings := h.toolCall("upgrade-session")
+			if install {
+				if code != http.StatusOK || action == guardrailActionBlock {
+					t.Fatalf("SessionStart status %d, tool call action=%q findings=%v; want the ordinary call decided as usual", code, action, findings)
+				}
+				return
+			}
+			if code != http.StatusServiceUnavailable || action != guardrailActionBlock || !slices.Contains(findings, "SESSION-START-BLOCKED") {
+				t.Fatalf("control: SessionStart status %d, tool call action=%q findings=%v", code, action, findings)
+			}
+		})
+	}
+}

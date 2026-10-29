@@ -4,13 +4,13 @@
 package gateway
 
 import (
-	"os"
 	"path"
 	"strings"
 
 	"mvdan.cc/sh/v3/syntax"
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
+	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
 	"github.com/defenseclaw/defenseclaw/internal/shellparse"
 )
 
@@ -779,17 +779,161 @@ func findStripDirectoriesStayOff(
 	if rootName == "" || !findStripFactsStayOff(facts, find.ID, rootName) {
 		return false
 	}
-	entries, err := os.ReadDir(path.Dir(path.Clean(root)))
-	if err != nil {
+	if lineStaysOff == nil {
+		return hookpaths.StateRootSiblings(root) == "0"
+	}
+	return lineStaysOff()
+}
+
+// findStripSiblingsStayOff reports that no name beside the state root
+// starts with its name (hookpaths.StateRootSiblings). The hook client's
+// listing, read as the user, is used first: a managed gateway runs as
+// _defenseclaw or behind ProtectHome and cannot list the home, so its own
+// listing would refuse every home find (GAP-2404 pod check20). Without
+// the client's fact only a gateway that may read the home lists it.
+func findStripSiblingsStayOff(request trustedActionRequest, root string) bool {
+	if value, present := request.ResolvedWriteTargets[hookpaths.StateRootSiblingsPrefix+root]; present {
+		return value == "0"
+	}
+	if request.SkipLocalFilesystemResolution || request.ProtectedHomeHook {
 		return false
 	}
-	for _, entry := range entries {
-		name := strings.ToLower(entry.Name())
-		if name != rootName && strings.HasPrefix(name, rootName) {
+	return hookpaths.StateRootSiblings(root) == "0"
+}
+
+// findStripStdinFilters read their standard input and print to standard
+// output when they name no file: the sink of a find's output
+// (`... | head`, `| tail -1`, `| wc -l`, GAP-2404 pod check21).
+var findStripStdinFilters = map[string]struct{}{
+	"head": {}, "tail": {}, "wc": {}, "sort": {}, "uniq": {}, "grep": {}, "cat": {},
+}
+
+// findStripStdinFilterStaysOff reports a findStripStdinFilters command with
+// a complete argv, no wrapper, no path fact and no word that names a file
+// it would read or write: only options (and, for grep, one pattern), so it
+// creates no file the find could hand on and answers no prompt from a file.
+// sort -o/-T and a uniq output operand write; a long option is accepted
+// only when spelled in full from findStripFilterLongOptions; a word with a
+// path separator, a leading ~ or $, or a file option is refused.
+func findStripStdinFilterStaysOff(facts actionfacts.Facts, command actionfacts.CommandFact) bool {
+	program := strings.ToLower(command.Program)
+	if _, filter := findStripStdinFilters[program]; !filter || len(command.Wrappers) != 0 ||
+		command.Effect != actionfacts.EffectExecute || !command.ArgvComplete || len(command.Argv) == 0 ||
+		strings.ToLower(path.Base(command.Argv[0])) != program {
+		return false
+	}
+	for _, candidate := range facts.Paths {
+		if candidate.CommandID == command.ID {
 			return false
 		}
 	}
-	return lineStaysOff == nil || lineStaysOff()
+	patternSeen := false
+	options := true
+	for index := 1; index < len(command.Argv); index++ {
+		word := command.Argv[index]
+		if strings.ContainsAny(word, "/\\$`~") || strings.HasPrefix(word, "@") {
+			return false
+		}
+		switch {
+		case options && word == "--":
+			options = false
+		case options && strings.HasPrefix(word, "--"):
+			// getopt_long takes any unambiguous prefix of a long option
+			// (`sort --o=NAME` is --output, pod check22), so only the
+			// exact read-only names below stay off.
+			name, _, attached := strings.Cut(strings.TrimPrefix(word, "--"), "=")
+			takesValue, readOnly := findStripFilterLongOptions[program][name]
+			if !readOnly {
+				return false
+			}
+			if takesValue && !attached {
+				if index+1 >= len(command.Argv) || strings.ContainsAny(command.Argv[index+1], "/\\$`~") {
+					return false
+				}
+				index++
+			}
+			if program == "grep" && name == "regexp" {
+				patternSeen = true
+			}
+		case options && len(word) > 1 && word[0] == '-':
+			letters := word[1:]
+			if program == "sort" && strings.ContainsAny(letters, "oT") ||
+				program == "grep" && strings.ContainsAny(letters, "f") {
+				return false
+			}
+			// -n 5, -c 10, -e PATTERN, -m 3: the value is the next word.
+			if index+1 < len(command.Argv) && findStripFilterOptionTakesValue(program, letters) {
+				index++
+				if program == "grep" && strings.HasSuffix(letters, "e") {
+					patternSeen = true
+				}
+			}
+		default:
+			// The one pattern operand of grep; any other operand is a file.
+			if program != "grep" || patternSeen {
+				return false
+			}
+			patternSeen = true
+		}
+	}
+	return true
+}
+
+// findStripFilterLongOptions are the long options of each
+// findStripStdinFilters program that read standard input and write only
+// standard output, spelled in full; true marks one that takes a value
+// (`--key 2`, `--lines=5`). Every other long option, an abbreviation
+// included, names or may name a file (--output, --temporary-directory,
+// --compress-program, --files0-from, --file, --random-source).
+var findStripFilterLongOptions = map[string]map[string]bool{
+	"head": {"lines": true, "bytes": true, "quiet": false, "silent": false, "verbose": false,
+		"zero-terminated": false, "help": false, "version": false},
+	"tail": {"lines": true, "bytes": true, "quiet": false, "silent": false, "verbose": false,
+		"zero-terminated": false, "follow": false, "retry": false, "sleep-interval": true,
+		"max-unchanged-stats": true, "help": false, "version": false},
+	"wc": {"lines": false, "words": false, "bytes": false, "chars": false, "max-line-length": false,
+		"total": true, "help": false, "version": false},
+	"sort": {"numeric-sort": false, "general-numeric-sort": false, "human-numeric-sort": false,
+		"month-sort": false, "version-sort": false, "random-sort": false, "reverse": false,
+		"unique": false, "stable": false, "ignore-case": false, "ignore-leading-blanks": false,
+		"dictionary-order": false, "ignore-nonprinting": false, "zero-terminated": false,
+		"merge": false, "check": false, "debug": false, "key": true, "field-separator": true,
+		"sort": true, "buffer-size": true, "parallel": true, "batch-size": true,
+		"help": false, "version": false},
+	"uniq": {"count": false, "repeated": false, "all-repeated": false, "group": false,
+		"unique": false, "ignore-case": false, "skip-fields": true, "skip-chars": true,
+		"check-chars": true, "zero-terminated": false, "help": false, "version": false},
+	"grep": {"count": false, "ignore-case": false, "no-ignore-case": false, "invert-match": false,
+		"line-number": false, "quiet": false, "silent": false, "extended-regexp": false,
+		"fixed-strings": false, "basic-regexp": false, "perl-regexp": false, "word-regexp": false,
+		"line-regexp": false, "max-count": true, "only-matching": false, "no-messages": false,
+		"color": false, "colour": false, "regexp": true, "after-context": true,
+		"before-context": true, "context": true, "text": false, "null-data": false,
+		"byte-offset": false, "initial-tab": false, "label": true, "line-buffered": false,
+		"no-filename": false, "with-filename": false, "help": false, "version": false},
+	"cat": {"number": false, "number-nonblank": false, "show-all": false, "show-ends": false,
+		"show-tabs": false, "show-nonprinting": false, "squeeze-blank": false,
+		"help": false, "version": false},
+}
+
+// findStripFilterOptionTakesValue reports a short option cluster of a
+// findStripStdinFilters program whose last letter takes the next word.
+func findStripFilterOptionTakesValue(program, letters string) bool {
+	if letters == "" {
+		return false
+	}
+	last := letters[len(letters)-1]
+	switch program {
+	case "head", "tail":
+		return strings.IndexByte("ncs", last) >= 0 && len(letters) == 1
+	case "sort":
+		return strings.IndexByte("kt", last) >= 0
+	case "uniq":
+		return strings.IndexByte("fsw", last) >= 0
+	case "grep":
+		return strings.IndexByte("eABCm", last) >= 0
+	}
+	return false
 }
 
 func findStripRootName(root string) string {
@@ -821,7 +965,8 @@ func findStripFactsStayOff(facts actionfacts.Facts, except int64, rootName strin
 		if command.Effect != actionfacts.EffectExecute || !command.ArgvComplete {
 			return false
 		}
-		if _, safe := findStripSafeNeighbours[strings.ToLower(command.Program)]; !safe {
+		if _, safe := findStripSafeNeighbours[strings.ToLower(command.Program)]; !safe &&
+			!findStripStdinFilterStaysOff(facts, command) {
 			return false
 		}
 	}
@@ -837,10 +982,21 @@ func findStripFactsStayOff(facts actionfacts.Facts, except int64, rootName strin
 	return true
 }
 
-// findStripLineStaysOffOf judges the other simple commands of the whole
-// command line a hook child was cut from (request.parentPatch): each must
-// stay off as findStripFactsStayOff reads it. It is computed once.
+// findStripLineStaysOffOf judges, for a find under judgment in request,
+// the names beside the state root (findStripSiblingsStayOff) and the other
+// simple commands of the whole command line a hook child was cut from
+// (findStripOtherCommandsStayOffOf).
 func findStripLineStaysOffOf(request trustedActionRequest, root string) func() bool {
+	others := findStripOtherCommandsStayOffOf(request, root)
+	return func() bool {
+		return findStripSiblingsStayOff(request, root) && (others == nil || others())
+	}
+}
+
+// findStripOtherCommandsStayOffOf judges the other simple commands of the
+// whole command line a hook child was cut from (request.parentPatch): each
+// must stay off as findStripFactsStayOff reads it. It is computed once.
+func findStripOtherCommandsStayOffOf(request trustedActionRequest, root string) func() bool {
 	if !request.simpleCommandPass || request.parentPatch == nil {
 		return nil
 	}

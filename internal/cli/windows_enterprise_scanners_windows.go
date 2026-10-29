@@ -282,13 +282,7 @@ func applyWindowsStandaloneScannerRuntime(result *enterprisestatus.Result, opts 
 			windowsScannerProgress = &windowsScannerDiagnostics{opts: opts}
 			defer func() { windowsScannerProgress = previous }()
 		}
-		source := ""
-		if installer := strings.TrimSpace(opts.resolvedInstaller); installer != "" {
-			candidate := filepath.Join(filepath.Dir(installer), managed.StandaloneWindowsScannerRuntimeName)
-			if info, err := os.Lstat(candidate); err == nil && info.Mode().IsRegular() {
-				source = candidate
-			}
-		}
+		source := windowsScannerRuntimeStagedSource(opts)
 		if source == "" {
 			// No staged copy to install from (a repair or ensure run from the installed
 			// CLI): a runtime that is installed but not unpacked is prepared again, so a
@@ -297,7 +291,7 @@ func applyWindowsStandaloneScannerRuntime(result *enterprisestatus.Result, opts 
 			reprepareInstalledWindowsScannerRuntime(result, opts)
 		} else {
 			var superseded *windowsScannerRuntimeSupersededError
-			if err := installWindowsScannerRuntime(source, action, opts); errors.As(err, &superseded) {
+			if err := windowsScannerRuntimeInstaller(source, action, opts); errors.As(err, &superseded) {
 				result.AddWarning("scanner_runtime_superseded", superseded.Error())
 			} else if err != nil {
 				result.AddError("scanner_runtime_unavailable", windowsScannerRuntimePrepareFailed(err))
@@ -332,6 +326,9 @@ func applyWindowsStandaloneScannerRuntime(result *enterprisestatus.Result, opts 
 		// folder anyway. Recovery must also prove this shared executable tree.
 		if result.Installed && !windowsEnterpriseResultHasWarning(result, windowsEnterpriseHealthNotChecked) {
 			result.Scanners = windowsScannerRuntimeReader()
+			if finishRecoveredWindowsScannerRuntime(result, opts) {
+				return
+			}
 			// Every scan fails closed without a ready runtime, so verify
 			// fails and an MDM detection remediates (GAP-0294).
 			message := ""
@@ -376,6 +373,68 @@ func applyWindowsStandaloneScannerRuntime(result *enterprisestatus.Result, opts 
 			}
 		}
 	}
+}
+
+// windowsScannerRuntimeInstaller is installWindowsScannerRuntime; a seam for
+// tests.
+var windowsScannerRuntimeInstaller = installWindowsScannerRuntime
+
+// windowsScannerRuntimeStagedSource is the scanner executable staged beside
+// this run's installer, or "" when the run has none (a run from the
+// installed CLI).
+func windowsScannerRuntimeStagedSource(opts *windowsEnterpriseLifecycleOptions) string {
+	if opts == nil {
+		return ""
+	}
+	installer := strings.TrimSpace(opts.resolvedInstaller)
+	if installer == "" {
+		return ""
+	}
+	candidate := filepath.Join(filepath.Dir(installer), managed.StandaloneWindowsScannerRuntimeName)
+	if info, err := os.Lstat(candidate); err == nil && info.Mode().IsRegular() {
+		return candidate
+	}
+	return ""
+}
+
+// finishRecoveredWindowsScannerRuntime runs, in Setup's bounded recovery
+// after TIMEOUTSECONDS stopped an install, upgrade, repair or ensure, the
+// scanner step that run did not reach. The scanner step runs after the
+// transaction commits, so a stop between the two leaves this release
+// installed beside the earlier release's scanner runtime: after a 1.0.3
+// upgrade, its schema 1 admission record, which this release does not run.
+// The recovery then failed scanner_runtime_unavailable and verify failed
+// until a manual /repair (GAP-2456). Only a recovery that settled this
+// release, from a Setup payload that stages the scanner, with no error so
+// far and a runtime that is not ready, installs it, by the same checks as
+// the run it completes (trust policy, owner, lock); a recovery that put an
+// earlier release back keeps that release's runtime (GAP-1709). It returns
+// true when it settled the step and reported its outcome.
+func finishRecoveredWindowsScannerRuntime(result *enterprisestatus.Result, opts *windowsEnterpriseLifecycleOptions) bool {
+	if result.Action != "recover" || opts == nil || len(result.Errors) != 0 ||
+		result.Scanners == nil || result.Scanners.State == "ready" ||
+		compareWindowsEnterpriseVersions(opts.productVersion, result.InstalledVersion) != 0 {
+		return false
+	}
+	source := windowsScannerRuntimeStagedSource(opts)
+	if source == "" {
+		return false
+	}
+	var superseded *windowsScannerRuntimeSupersededError
+	err := windowsScannerRuntimeInstaller(source, "recover", opts)
+	switch {
+	case errors.As(err, &superseded):
+		// Another run owns the runtime now; report what is there.
+		result.AddWarning("scanner_runtime_superseded", superseded.Error())
+		result.Scanners = windowsScannerRuntimeReader()
+		return false
+	case err != nil:
+		result.AddError("scanner_runtime_unavailable", windowsScannerRuntimePrepareFailed(err))
+		result.Scanners = windowsScannerRuntimeReader()
+		return true
+	}
+	result.Scanners = windowsScannerRuntimeReader()
+	return false
 }
 
 // windowsScannerRuntimeReader is readWindowsScannerRuntime; a seam for tests.

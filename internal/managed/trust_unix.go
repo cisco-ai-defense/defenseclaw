@@ -162,7 +162,7 @@ func validateServiceRuntimeTreeEntries(root, label string) error {
 	entries := 0
 	err := filepath.WalkDir(root, func(cur string, _ fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
-			return walkErr
+			return UnreadableServiceFolder(cur, label, walkErr)
 		}
 		if cur == root {
 			return nil
@@ -194,6 +194,58 @@ func validateServiceRuntimeTreeEntries(root, label string) error {
 		return fmt.Errorf("%s has more than %d entries", root, serviceRuntimeTreeMaxEntries)
 	}
 	return err
+}
+
+// UnreadableServiceFolder turns a permission error from listing dir, a
+// folder of a policy tree, into one that names the folder, its mode and owner,
+// and the fix the lifecycle gives for the same folder. A root shell under
+// umask 077 makes such a folder (mkdir -p policies/guardrail), and every
+// reload of the gateway service account then failed with only
+// "open <folder>: permission denied" (GAP-2432). Any other error, or a path
+// that is not a folder, is returned unchanged.
+func UnreadableServiceFolder(dir, label string, cause error) error {
+	if !errors.Is(cause, fs.ErrPermission) {
+		return cause
+	}
+	info, err := os.Lstat(dir)
+	if err != nil || !info.IsDir() {
+		return cause
+	}
+	owner := "an unknown owner"
+	if st, ok := info.Sys().(*syscall.Stat_t); ok {
+		owner = fmt.Sprintf("%s:%s", lookupUserName(st.Uid), lookupGroupName(st.Gid))
+	}
+	group := serviceGroupName(runtime.GOOS, os.Getenv(UnixServiceAccountEnv))
+	return fmt.Errorf("%s is %04o owned by %s, so the %s service account cannot read the %s below it; "+
+		"let the %s service group through it without opening it to other accounts "+
+		"(for example: chown root:%s %s && chmod 0750 %s) and retry: %w",
+		dir, info.Mode().Perm(), owner, group, label, group, group, dir, dir, cause)
+}
+
+// serviceGroupName is the group of the packaged gateway service account,
+// the group the lifecycle gives read access to administrator folders.
+func serviceGroupName(goos, custom string) string {
+	if custom = strings.TrimSpace(custom); custom != "" {
+		return custom
+	}
+	if goos == "darwin" {
+		return StandaloneDarwinServiceUser
+	}
+	return StandaloneLinuxServiceUser
+}
+
+func lookupUserName(uid uint32) string {
+	if u, err := user.LookupId(strconv.FormatUint(uint64(uid), 10)); err == nil && u.Username != "" {
+		return u.Username
+	}
+	return strconv.FormatUint(uint64(uid), 10)
+}
+
+func lookupGroupName(gid uint32) string {
+	if g, err := user.LookupGroupId(strconv.FormatUint(uint64(gid), 10)); err == nil && g.Name != "" {
+		return g.Name
+	}
+	return strconv.FormatUint(uint64(gid), 10)
 }
 
 // ValidateTrustedServiceRuntimeFilePath validates a service-owned runtime

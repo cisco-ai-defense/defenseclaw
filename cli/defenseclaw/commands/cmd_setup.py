@@ -18504,7 +18504,10 @@ def setup_splunk(
     _print_splunk_status(app)
     print_redaction_status_hint(app.cfg)
     click.echo()
-    _print_splunk_next_steps(did_o11y, did_logs, did_enterprise)
+    _print_splunk_next_steps(
+        did_o11y, did_logs, did_enterprise,
+        local_splunk_free=_local_splunk_license_is_free(app.local_splunk_license_group),
+    )
 
     if app.logger:
         parts: list[str] = []
@@ -18657,7 +18660,10 @@ def _interactive_splunk_setup(
     _print_splunk_status(app)
     print_redaction_status_hint(app.cfg)
     click.echo()
-    _print_splunk_next_steps(did_o11y, did_logs, did_enterprise)
+    _print_splunk_next_steps(
+        did_o11y, did_logs, did_enterprise,
+        local_splunk_free=_local_splunk_license_is_free(app.local_splunk_license_group),
+    )
 
     if app.logger:
         parts = []
@@ -18893,8 +18899,21 @@ def _setup_logs(
         aws_region=aws_region,
         refresh_bundle=refresh_bundle,
     )
-    click.echo("  Local Splunk configured (Free mode from day 1)")
+    click.echo(_local_splunk_configured_line(app.local_splunk_license_group))
     return True
+
+
+def _local_splunk_license_is_free(license_group: object) -> bool:
+    """Splunk Free has no Web login; every other licence asks for one (GAP-1398, GAP-1750)."""
+    return str(license_group or "").strip().lower() == "free"
+
+
+def _local_splunk_configured_line(license_group: str) -> str:
+    if _local_splunk_license_is_free(license_group):
+        return "  Local Splunk configured (Free mode from day 1)"
+    if license_group:
+        return f"  Local Splunk configured (license: {license_group})"
+    return "  Local Splunk configured"
 
 
 def _setup_enterprise(
@@ -19109,6 +19128,8 @@ def _apply_logs_config(
             refresh_bundle=refresh_bundle,
             gateway_token_env=gateway_token_env,
         )
+        # Native Windows local Splunk always runs the Free licence.
+        app.local_splunk_license_group = "Free"
         return
 
     # Prove an unrecorded legacy sink belongs to this exact bridge before the
@@ -19130,6 +19151,7 @@ def _apply_logs_config(
     )
     if not contract:
         raise SystemExit(1)
+    app.local_splunk_license_group = str(contract.get("license_group", "") or "")
 
     hec_url = contract.get("hec_url", _SPLUNK_LOCAL_HEC_DEFAULTS["hec_endpoint"])
     hec_token = contract.get("hec_token", "")
@@ -19889,7 +19911,7 @@ def _bootstrap_bridge(
         click.echo("  Local Splunk is ready")
         web_url = contract.get("splunk_web_url", "http://127.0.0.1:8000")
         click.echo(f"    Web UI: {web_url}")
-        free = str(contract.get("license_group", "")).lower() == "free"
+        free = _local_splunk_license_is_free(contract.get("license_group", ""))
         if free:
             click.echo("    License: Free")
         click.echo()
@@ -20546,15 +20568,21 @@ def _print_splunk_status(app: AppContext) -> None:
         click.echo()
 
 
-def _print_splunk_next_steps(did_o11y: bool, did_logs: bool, did_enterprise: bool = False) -> None:
+def _print_splunk_next_steps(
+    did_o11y: bool, did_logs: bool, did_enterprise: bool = False, *, local_splunk_free: bool = True,
+) -> None:
     click.echo("  Next steps:")
     click.echo("    1. Start (or restart) the DefenseClaw sidecar:")
     click.echo("       defenseclaw-gateway restart")
     if did_logs:
-        # Local Splunk runs in Free mode on every OS: no Web login (GAP-1398).
         click.echo("    2. Open local Splunk Web at http://127.0.0.1:8000")
-        click.echo("       Web authentication is disabled in Splunk Free mode.")
-        click.echo("       To view the HEC/runtime secrets explicitly: defenseclaw setup splunk --show-credentials")
+        if local_splunk_free:
+            # Splunk Free has no Web login (GAP-1398).
+            click.echo("       Web authentication is disabled in Splunk Free mode.")
+            click.echo("       To view the HEC/runtime secrets explicitly: defenseclaw setup splunk --show-credentials")
+        else:
+            # Any other licence asks for the admin login (GAP-2422, same rule as the ready block).
+            click.echo("       Log in as admin; show the password with: defenseclaw setup splunk --show-credentials")
         click.echo("    3. Validate data in local Splunk")
     if did_enterprise:
         step = "3" if did_logs else "2"
@@ -20626,7 +20654,11 @@ def _show_splunk_credentials(data_dir: str) -> None:
         click.echo("  Splunk Web Credentials")
         ux.echo("  ──────────────────────")
         click.echo("    URL:       http://127.0.0.1:8000")
-        click.echo("    Web auth:  disabled in Splunk Free mode; these apply only if Splunk asks for a login")
+        # Same rule as the bridge (bridge_runs_in_free_mode): only SPLUNK_LICENSE_URI=Free has no Web login (GAP-2423).
+        if values.get("SPLUNK_LICENSE_URI", "") == "Free":
+            click.echo("    Web auth:  disabled in Splunk Free mode; these apply only if Splunk asks for a login")
+        else:
+            click.echo("    Web auth:  required (this local Splunk does not run the Free licence); log in with these")
         click.echo("    Username:  admin")
         click.echo(f"    Password:  {password}")
     click.echo()

@@ -32,8 +32,15 @@ func init() { raiseForHook(os.Args[1:]) }
 // to a process the hook starts (a gateway cold start runs at normal
 // priority). A class already above normal is kept. It reports whether it
 // raised the class.
+//
+// The launcher guard (`launcher-guard <defenseclaw-hook.exe> hook ...`, the
+// Windows Claude Code PreToolUse handler of the one-line install and of a
+// packaged install) starts the hook, so it is raised too. At normal priority
+// it waited behind the above-normal hooks and gateway of the calls already
+// running: in a 60-way parallel read the guards started the hooks 1 to 4 s
+// late and the answers came 3 to 5 s after the call (GAP-0050).
 func raiseForHook(args []string) bool {
-	if len(args) == 0 || args[0] != "hook" {
+	if len(args) == 0 || (args[0] != "hook" && args[0] != LauncherGuardSubcommand) {
 		return false
 	}
 	process := windows.CurrentProcess()

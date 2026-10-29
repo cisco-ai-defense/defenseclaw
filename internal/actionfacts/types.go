@@ -73,6 +73,14 @@ type Input struct {
 	// lineage references. A zero key disables that projection. Neither the key
 	// nor the input values are retained by Facts.
 	CredentialLineageHMACKey [32]byte `json:"-"`
+	// ActiveStateTreeNames is trusted caller context: the authenticated hook
+	// client's answers, read as the user, to whether the protected
+	// DefenseClaw state tree holds a name a find -name/-iname test matches
+	// (hookpaths.StateTreeNameKey -> "0"/"1"). A managed gateway runs as a
+	// service account that cannot read the home, so its own index counts
+	// every name as state (GAP-2404 pod check21). ActionFacts copies the map
+	// and never derives it from action input.
+	ActiveStateTreeNames map[string]string `json:"-"`
 }
 
 // Facts contains the statically proven subset of one action. Attacker-
@@ -329,6 +337,9 @@ type Facts struct {
 	// and principal names never cross the ActionFacts boundary.
 	POSIXUnrestrictedSudoersGrantWrites []POSIXUnrestrictedSudoersGrantWriteFact `json:"-"`
 	Artifacts                           []ArtifactFact
+	// ActiveStateTreeNames is Input.ActiveStateTreeNames, copied in process
+	// for the state-tree name checks of a find (never serialized).
+	ActiveStateTreeNames map[string]string `json:"-"`
 }
 
 // CloudMetadataCredentialReadFact retains only the provider family proven by

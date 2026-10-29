@@ -16,7 +16,11 @@ const CodeSessionsNeedRestart = "sessions_need_restart"
 // SessionProcess is the minimal process information needed for a managed
 // hook activation check. Callers obtain it from the platform process scan.
 type SessionProcess struct {
-	PID       int
+	PID int
+	// PPID is the parent process, 0 when unknown. A launcher and the agent
+	// process it starts (the npm node script and its native Codex) are one
+	// session (GAP-2439).
+	PPID      int
 	User      string
 	Agent     string
 	StartedAt time.Time
@@ -78,7 +82,11 @@ func WriteSessionEntries(w io.Writer, status SessionRestartStatus) {
 func UnprotectedSessions(processes []SessionProcess, changed map[string]time.Time) SessionRestartStatus {
 	status := SessionRestartStatus{State: "known", Entries: []SessionEntry{}}
 	sort.Slice(processes, func(i, j int) bool { return processes[i].PID < processes[j].PID })
+	leaders := SessionLeaders(processes)
 	for _, process := range processes {
+		if process.PID > 0 && leaders[process.PID] != process.PID {
+			continue
+		}
 		at := changed[process.Agent]
 		if process.PID <= 0 || at.IsZero() || process.StartedAt.IsZero() || !process.StartedAt.Before(at) {
 			continue
@@ -90,6 +98,44 @@ func UnprotectedSessions(processes []SessionProcess, changed map[string]time.Tim
 		}
 	}
 	return status
+}
+
+// SessionLeaders maps the pid of each listed process to the pid of the
+// session it belongs to. A process whose parent chain reaches another listed
+// process of the same agent and user belongs to the topmost such process:
+// one npm Codex runs as a node launcher and the native codex it starts, and
+// both match an agent CLI, but they are one session, which a restart of the
+// launcher restarts (GAP-2439, GitHub #1360). Processes of another agent or
+// user, and processes that only share a name, are never merged. A parent
+// cycle ends the walk; the lowest pid seen leads it.
+func SessionLeaders(processes []SessionProcess) map[int]int {
+	byPID := make(map[int]SessionProcess, len(processes))
+	for _, process := range processes {
+		if process.PID > 0 {
+			byPID[process.PID] = process
+		}
+	}
+	leaders := make(map[int]int, len(byPID))
+	for pid, process := range byPID {
+		leader := pid
+		seen := map[int]bool{pid: true}
+		for {
+			parent, ok := byPID[byPID[leader].PPID]
+			if !ok || parent.PID == leader || parent.Agent != process.Agent || parent.User != process.User {
+				break
+			}
+			if seen[parent.PID] {
+				for member := range seen {
+					leader = min(leader, member)
+				}
+				break
+			}
+			seen[parent.PID] = true
+			leader = parent.PID
+		}
+		leaders[pid] = leader
+	}
+	return leaders
 }
 
 // SetBundleSessions adds the live scan to the bundle block and warns while

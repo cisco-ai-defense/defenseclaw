@@ -5,6 +5,7 @@ package connector
 
 import (
 	"encoding/base64"
+	"path/filepath"
 	"regexp"
 	"strings"
 )
@@ -175,10 +176,10 @@ func otlpUnhex(c byte) (byte, bool) {
 // otlpKnownProductTokens returns the credentials this install can name: the
 // scoped and hook tokens Setup was given, the gateway master token (an
 // exporter that sends it is never an operator's, GAP-0035) and the scope's
-// token sidecar. A
-// sidecar that cannot be read (missing, or another account's on Windows) adds
-// nothing, and a value then needs another known credential to be the
-// product's.
+// token sidecar, and the token sidecar of the scope in the other install of
+// a rollback pair (rollbackPartnerDataDir). A sidecar that cannot be read
+// (missing, or one of another account on Windows) adds nothing, and a value
+// then needs another known credential to be the product credential.
 func otlpKnownProductTokens(opts SetupOpts, scope OTLPPathTokenScope) []string {
 	known := []string{strings.TrimSpace(opts.OTLPPathToken), strings.TrimSpace(opts.APIToken), strings.TrimSpace(opts.GatewayToken)}
 	known = append(known, opts.knownCredentials...)
@@ -186,8 +187,22 @@ func otlpKnownProductTokens(opts SetupOpts, scope OTLPPathTokenScope) []string {
 		if token, err := LoadOTLPPathToken(opts.DataDir, scope); err == nil {
 			known = append(known, token)
 		}
+		if token, err := LoadOTLPPathToken(rollbackPartnerDataDir(opts.DataDir), scope); err == nil {
+			known = append(known, token)
+		}
 	}
 	return known
+}
+
+// rollbackPartnerDataDir is where the installers keep the data of the other
+// install of a rollback pair: install.sh and install.ps1 swap the live install
+// with <data dir>/previous, and its data/ holds the files of that install.
+// After a rollback to an older release and a roll forward, the older release
+// has written its native exporter with the token kept in that slot, which the
+// sidecar of this install never held; it is a product credential all the same
+// (GAP-2461).
+func rollbackPartnerDataDir(dataDir string) string {
+	return filepath.Join(dataDir, "previous", "data")
 }
 
 // otlpBearerCredential returns the credential of an Authorization value that

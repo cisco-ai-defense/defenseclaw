@@ -630,6 +630,11 @@ func (c *Client) ReportWorkspace(ctx context.Context, name string, r WorkspaceRe
 	return c.do(ctx, http.MethodPost, sandboxPath(name, "workspace"), nil, r, nil)
 }
 
+// ReportDisk names a filling MicroVM disk in the activity feed.
+func (c *Client) ReportDisk(ctx context.Context, name string, r DiskReport) error {
+	return c.do(ctx, http.MethodPost, sandboxPath(name, "disk"), nil, r, nil)
+}
+
 // Approvals lists pending asks, optionally for one sandbox.
 func (c *Client) Approvals(ctx context.Context, sandbox string) ([]Approval, error) {
 	q := url.Values{}

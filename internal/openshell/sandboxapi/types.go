@@ -1041,6 +1041,21 @@ const (
 	WorkspaceUndo = "undo"
 )
 
+// DiskReport is POST /sandboxes/{name}/disk: what a session found on the
+// own disk of its running MicroVM when it warned that the disk is filling,
+// so the daemon names it in the activity feed while the agent still runs,
+// not only in the summary at the end of the session (GAP-1140).
+type DiskReport struct {
+	SizeBytes int64 `json:"size_bytes"`
+	FreeBytes int64 `json:"free_bytes"`
+	// Fast is the early warning: at the rate the free space fell, the disk
+	// fills before the session looks again.
+	Fast bool `json:"fast,omitempty"`
+}
+
+// ReasonDiskFilling is the sandbox.lifecycle reason of a DiskReport.
+const ReasonDiskFilling = "disk_filling"
+
 // WorkspaceReport is POST /sandboxes/{name}/workspace: a copy-mode
 // workspace step the CLI ran (upload, pull with apply/branch/patch, or the
 // undo of an apply), so the daemon records it with the sandbox's identity.

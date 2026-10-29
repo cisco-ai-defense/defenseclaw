@@ -1027,6 +1027,8 @@ func (s *Sidecar) Run(ctx context.Context) (runErr error) {
 	defer runCancel()
 	s.setRunCancel(runCancel)
 	defer s.setRunCancel(nil)
+	// An idle gateway gives back the heap its calls freed (GAP-2013).
+	go runIdleMemoryRelease(runCtx)
 	// The endpoint inventory cannot be emitted from NewSidecar: schema v8
 	// deliberately binds its generation-owned runtime afterward. Publish the
 	// first complete connector/MCP snapshot immediately after that binding, then
@@ -8045,6 +8047,11 @@ func hookContractDriftAdmission(name string, previous, current connector.HookCon
 		}
 		fmt.Fprintf(os.Stderr, "[guardrail] connector %s hook contract %s (written by %s) is now %s in DefenseClaw %s; agent version %q is unchanged, refreshing the lock\n",
 			name, previous.ContractID, writer, current.ContractID, current.DefenseClawVersion, current.RawAgentVersion)
+		return nil
+	}
+	if connector.HookContractAgentUpdateAdmitted(previous, current) && current.CompatibilityStatus == connector.HookCompatibilityNotGated {
+		fmt.Fprintf(os.Stderr, "[guardrail] WARNING: connector %s agent version changed from %q to %q; its hooks are not version-gated, refreshing the lock\n",
+			name, previous.RawAgentVersion, current.RawAgentVersion)
 		return nil
 	}
 	if connector.HookContractAgentUpdateAdmitted(previous, current) {

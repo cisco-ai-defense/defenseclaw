@@ -8,6 +8,8 @@ import (
 	"path"
 	"path/filepath"
 	"strings"
+
+	"mvdan.cc/sh/v3/syntax"
 )
 
 // actionRecursiveKeyDirectoryRead reports a content reader that walks the
@@ -221,4 +223,212 @@ func actionWindowsPipedKeyDirectoryRead(head, reader []string, cwd, home string)
 		}
 	}
 	return false
+}
+
+// actionCertainDirectoryCalls maps each call that runs only after a cd or
+// pushd to one absolute directory succeeded to that cd call: in cd /proj &&
+// grep -rn TODO . the grep runs in /proj and in no directory an earlier cd
+// named (GAP-2421). Only the statement just before && counts, so a relative
+// directory (CDPATH), cd -, a directory set by another program (source,
+// eval, a function) and a cd in a subshell or group keep every candidate.
+// A right side that may change the directory again (cd -, popd, cd ~-,
+// cd "$OLDPWD", a nested shell that does so) keeps every candidate for all
+// its calls (RV26-1), and a command with a function, an alias, a trap, eval
+// or source keeps them all.
+func actionCertainDirectoryCalls(file *syntax.File, home string) map[*syntax.CallExpr]*syntax.CallExpr {
+	certain := make(map[*syntax.CallExpr]*syntax.CallExpr)
+	opaque := false
+	syntax.Walk(file, func(node syntax.Node) bool {
+		switch node := node.(type) {
+		case *syntax.FuncDecl:
+			opaque = true
+		case *syntax.CallExpr:
+			if len(node.Args) == 0 {
+				break
+			}
+			program, static := StaticWord(node.Args[0], home)
+			switch program {
+			case "eval", "source", ".", "trap", "alias", "builtin", "command":
+				opaque = true
+			}
+			opaque = opaque || !static
+		}
+		return !opaque
+	})
+	if opaque {
+		return certain
+	}
+	// syntax.Walk visits an outer && before the ones inside its right side,
+	// so the innermost cd a call depends on is the one kept.
+	syntax.Walk(file, func(node syntax.Node) bool {
+		binary, ok := node.(*syntax.BinaryCmd)
+		if !ok || binary.Op != syntax.AndStmt {
+			return true
+		}
+		last := binary.X
+		for {
+			inner, ok := last.Cmd.(*syntax.BinaryCmd)
+			if !ok || inner.Op != syntax.AndStmt {
+				break
+			}
+			last = inner.Y
+		}
+		cd, ok := last.Cmd.(*syntax.CallExpr)
+		if !ok || last.Negated || last.Background || last.Coprocess || len(last.Redirs) != 0 ||
+			len(cd.Assigns) != 0 || len(cd.Args) != 2 {
+			return true
+		}
+		program, programStatic := StaticWord(cd.Args[0], home)
+		target, targetStatic := StaticWord(cd.Args[1], home)
+		if !programStatic || !targetStatic || program != "cd" && program != "pushd" || !filepath.IsAbs(target) {
+			return true
+		}
+		if actionMayChangeDirectory(binary.Y, home) {
+			return true
+		}
+		syntax.Walk(binary.Y, func(inner syntax.Node) bool {
+			if call, ok := inner.(*syntax.CallExpr); ok {
+				certain[call] = cd
+			}
+			return true
+		})
+		return true
+	})
+	return certain
+}
+
+// actionMayChangeDirectory reports a command that names a directory change
+// anywhere in its text, quoted shell bodies included: cd, pushd, popd,
+// Set-Location and its aliases, ~- or OLDPWD (RV26-1). Any such mention may
+// take a later reader back to an earlier directory, so it is never certain.
+// Each whole word is judged, both as the shell expands it and as its literal
+// text with quotes, backslashes and brace punctuation removed, so a program
+// split across parts (c\d, "c"d, c'd', an empty quote pair inside cd or
+// popd) or a nested body that does so (bash -c 'c""d -') still counts
+// (RV-it2-1).
+func actionMayChangeDirectory(node syntax.Node, home string) bool {
+	inToken := func(r rune) bool {
+		return r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '_' || r == '~' || r == '-'
+	}
+	mentionsText := func(text string) bool {
+		for _, token := range strings.FieldsFunc(text, func(r rune) bool { return !inToken(r) }) {
+			switch strings.ToLower(token) {
+			case "cd", "chdir", "pushd", "popd", "sl", "set-location", "push-location", "pop-location", "~-", "oldpwd":
+				return true
+			}
+		}
+		return false
+	}
+	joined := strings.NewReplacer(`'`, "", `"`, "", `\`, "", "{", "", "}", "", ",", "", "`", "")
+	mentions := func(text string) bool {
+		return mentionsText(text) || mentionsText(joined.Replace(text))
+	}
+	found := false
+	syntax.Walk(node, func(inner syntax.Node) bool {
+		switch inner := inner.(type) {
+		case *syntax.Word:
+			if value, static := StaticWord(inner, home); static && mentions(value) {
+				found = true
+			} else if mentions(actionWordLiteralText(inner)) {
+				found = true
+			}
+		case *syntax.ParamExp:
+			found = found || inner.Param != nil && mentions(inner.Param.Value)
+		}
+		return !found
+	})
+	return found
+}
+
+// actionWordLiteralText is the literal text of a word with its quoting
+// taken off: the parts of c\d, "c"d and c'd' joined as cd. An expansion
+// adds nothing.
+func actionWordLiteralText(word *syntax.Word) string {
+	var text strings.Builder
+	var add func(parts []syntax.WordPart)
+	add = func(parts []syntax.WordPart) {
+		for _, part := range parts {
+			switch part := part.(type) {
+			case *syntax.Lit:
+				text.WriteString(part.Value)
+			case *syntax.SglQuoted:
+				text.WriteString(part.Value)
+			case *syntax.DblQuoted:
+				add(part.Parts)
+			}
+		}
+	}
+	add(word.Parts)
+	return text.String()
+}
+
+// actionWindowsCertainLocation reports a location statement whose success
+// a following && statement needs to place it in next and nowhere earlier
+// (GAP-2421). cmd's cd and chdir without /d change the directory of the
+// named drive only, so they are certain only when every earlier candidate
+// is on that drive; cd - and cd + return to an earlier directory.
+func actionWindowsCertainLocation(statement []string, next string, earlier []string) bool {
+	if operand := strings.TrimSpace(statement[1]); operand == "-" || operand == "+" || strings.HasPrefix(operand, "-") {
+		return false
+	}
+	switch strings.TrimSuffix(strings.ToLower(programBase(strings.ReplaceAll(statement[0], `\`, "/"))), ".exe") {
+	case "sl", "set-location", "pushd", "push-location":
+		return true
+	case "cd", "chdir":
+		drive := actionWindowsDrive(next)
+		if drive == "" {
+			return false
+		}
+		for _, dir := range earlier {
+			if actionWindowsDrive(dir) != drive {
+				return false
+			}
+		}
+		return true
+	}
+	return false
+}
+
+// actionWindowsStatementNamesLocation reports a flat Windows statement with
+// a location program in any word, a leading ( { or & taken off: ( cd -,
+// (Set-Location -), (popd (RV26-1).
+func actionWindowsStatementNamesLocation(statement []string) bool {
+	for _, word := range statement {
+		if actionWindowsLocationProgram(strings.TrimLeft(word, "({&")) {
+			return true
+		}
+	}
+	return false
+}
+
+// actionWindowsUngroupedStatement is a flat Windows statement without the
+// grouping around it: (grep -r . .) reads as grep -r . . (RV26-1).
+func actionWindowsUngroupedStatement(statement []string) []string {
+	if len(statement) == 0 {
+		return statement
+	}
+	words := append([]string(nil), statement...)
+	if first := strings.TrimLeft(words[0], "({"); first == "" {
+		words = words[1:]
+	} else {
+		words[0] = first
+	}
+	if len(words) == 0 {
+		return words
+	}
+	if last := strings.TrimRight(words[len(words)-1], ")}"); last == "" {
+		words = words[:len(words)-1]
+	} else {
+		words[len(words)-1] = last
+	}
+	return words
+}
+
+// actionWindowsDrive is the lower-case drive letter of an absolute Windows
+// path (C:\x, C:/x), or "" for any other spelling.
+func actionWindowsDrive(dir string) string {
+	if len(dir) >= 3 && asciiLetter(dir[0]) && dir[1] == ':' && (dir[2] == '\\' || dir[2] == '/') {
+		return strings.ToLower(dir[:1])
+	}
+	return ""
 }
