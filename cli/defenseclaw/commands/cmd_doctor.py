@@ -13386,7 +13386,22 @@ def doctor(
     inventory_health = None
     if not _config_validation_failed(r) and _trusted_gateway_listener(cfg).trusted:
         inventory_health = _live_gateway_health(cfg)
+    guardrail_off = _guardrail_disabled(cfg)
     for _c in inventory_connectors:
+        if guardrail_off:
+            # setup guardrail --disable: the gateway removed the hooks and the
+            # lock entry of every connector, so the Mode, Hook contract and
+            # runtime rows below would warn about a fail mode and a lock that a
+            # disabled guardrail does not have (GAP-2511). Services checks the
+            # hooks.
+            with _doctor_label_suffix(f"[{_c}]"):
+                _emit(
+                    "skip",
+                    "Connector",
+                    f"{_CONNECTOR_LABELS.get(_c, _c)} — guardrail disabled; enable with: defenseclaw guardrail enable",
+                    r=r,
+                )
+            continue
         if not _connector_enabled(cfg, _c):
             # Operator-disabled (guardrail disable --connector X): the Go boot
             # loop drops it from the active set and tears its hooks down, so
@@ -13475,6 +13490,10 @@ def doctor(
     # Observe mode mutes approvals the same way for every connector: one row.
     _hilt_observe_only: list[tuple[str, str]] = []
     for _conn in hook_connectors:
+        if guardrail_off and _connector_enabled(cfg, _conn):
+            with _doctor_label_suffix(f"[{_conn}]" if _multi_hooks else ""):
+                _check_disabled_guardrail_hooks(cfg, _conn, r)
+            continue
         if not _connector_enabled(cfg, _conn):
             # Disabled connector: hooks were torn down, so probing hook health
             # / HILT would FAIL spuriously. Mark it disabled and move on,
@@ -15304,6 +15323,44 @@ def _fleet_uplink_unused(cfg) -> bool:
     """True when connectors are configured and none of them is a proxy connector."""
     names = set(_doctor_active_connectors(cfg))
     return bool(names) and not (names & _FLEET_PROXY_CONNECTORS)
+
+
+def _guardrail_disabled(cfg) -> bool:
+    """Whether ``guardrail.enabled`` is false (``setup guardrail --disable``)."""
+    gc = getattr(cfg, "guardrail", None)
+    return gc is not None and getattr(gc, "enabled", True) is False
+
+
+def _check_disabled_guardrail_hooks(cfg, connector: str, r: _DoctorResult) -> None:
+    """Report the hooks of a disabled guardrail: removed is expected (GAP-2511).
+
+    The disable restarts the gateway, which removes the connector hooks.
+    The usual hook check then fails on every missing entry, so it runs
+    quietly: any problem means the hooks are gone (SKIP); a clean pass means
+    DefenseClaw hooks are still registered and still call the gateway (WARN).
+    """
+    probe = _DoctorResult(passive=True, quiet=True)
+    probe.set_section("services")
+    try:
+        _check_connector_hooks(cfg, connector, probe)
+    except Exception:  # noqa: BLE001 - an unreadable registration is not a registered hook.
+        probe.failed += 1
+    label = _CONNECTOR_LABELS.get(connector, connector)
+    if probe.passed and not probe.failed and not probe.warned:
+        _emit(
+            "warn",
+            "Connector hooks",
+            f"{label} — guardrail disabled, but its DefenseClaw hooks are still registered",
+            r=r,
+            remediation="defenseclaw-gateway restart (removes them), or defenseclaw guardrail enable",
+        )
+        return
+    _emit(
+        "skip",
+        "Connector hooks",
+        f"{label} — hooks removed (guardrail disabled; expected after a disable)",
+        r=r,
+    )
 
 
 def _connector_enabled(cfg, connector: str) -> bool:

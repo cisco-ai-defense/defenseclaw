@@ -3033,6 +3033,57 @@ class TestConnectorEnabled(unittest.TestCase):
         self.assertTrue(_connector_enabled(cfg, "codex"))
 
 
+
+class TestDisabledGuardrailDoctorRows(unittest.TestCase):
+    """GAP-2511: after setup guardrail --disable doctor says the hooks are removed.
+
+    The disable removes every connector hook and lock entry; doctor reported
+    no readable fail mode, no lock entry and FAIL rows for the missing hooks.
+    """
+
+    def _cfg(self, enabled):
+        from defenseclaw import config
+
+        cfg = config.default_config()
+        cfg.guardrail.enabled = enabled
+        return cfg
+
+    def test_disabled_guardrail_is_recognised(self):
+        from defenseclaw.commands.cmd_doctor import _guardrail_disabled
+
+        self.assertTrue(_guardrail_disabled(self._cfg(False)))
+        self.assertFalse(_guardrail_disabled(self._cfg(True)))
+        cfg = MagicMock()
+        cfg.guardrail = None
+        self.assertFalse(_guardrail_disabled(cfg))
+
+    def test_removed_hooks_after_a_disable_are_a_skip_not_a_failure(self):
+        from defenseclaw.commands import cmd_doctor
+
+        def missing(cfg, connector, r):
+            cmd_doctor._emit("fail", "Claude Code hooks", "missing: hook registration has no hooks table", r=r)
+
+        r = _DoctorResult()
+        with patch.object(cmd_doctor, "_check_connector_hooks", side_effect=missing):
+            cmd_doctor._check_disabled_guardrail_hooks(self._cfg(False), "claudecode", r)
+        self.assertEqual((r.failed, r.warned), (0, 0))
+        self.assertEqual([c["status"] for c in r.checks], ["skip"])
+        self.assertIn("hooks removed (guardrail disabled", r.checks[0]["detail"])
+
+    def test_hooks_still_registered_after_a_disable_warn_with_a_restart(self):
+        from defenseclaw.commands import cmd_doctor
+
+        def present(cfg, connector, r):
+            cmd_doctor._emit("pass", "Claude Code hooks", "registered", r=r)
+
+        r = _DoctorResult()
+        with patch.object(cmd_doctor, "_check_connector_hooks", side_effect=present):
+            cmd_doctor._check_disabled_guardrail_hooks(self._cfg(False), "claudecode", r)
+        self.assertEqual(r.warned, 1)
+        self.assertIn("still registered", r.checks[0]["detail"])
+        self.assertIn("defenseclaw-gateway restart", r.checks[0]["remediation"])
+
+
 class TestDetectionStrategyRow(unittest.TestCase):
     """N3 — read-only per-connector detection-strategy / judge-gating row."""
 

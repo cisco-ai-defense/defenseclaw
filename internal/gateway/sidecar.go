@@ -4966,6 +4966,15 @@ func (s *Sidecar) runGuardrail(ctx context.Context) error {
 			}
 		}
 		publishHealth := func() {
+			if !s.currentConfig().Guardrail.Enabled {
+				// guardrail.enabled=false: the teardown above removed the
+				// hooks, so nothing enforces or observes through them. A
+				// running state made doctor call the just-restarted gateway
+				// stale (GAP-2511); the multi-connector boot and the proxy
+				// path already report disabled.
+				s.health.SetGuardrail(StateDisabled, "", nil)
+				return
+			}
 			policyMode, enforcementEnabled, summary, surface := modeDetails()
 			detail := map[string]interface{}{
 				"summary":             summary,
