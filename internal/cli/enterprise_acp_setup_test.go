@@ -133,6 +133,72 @@ func TestEnterpriseACPSetupStateRejectsChangedEditorCommand(t *testing.T) {
 	}
 }
 
+// The guard refuses an entry whose agent command changed after setup, so list
+// and verify cannot call that setup done; a key the editor owns (Zed stores
+// the picked mode in the entry) leaves it done (GAP-1154).
+func TestEnterpriseACPSetupStateRejectsAChangedAgentCommandTheGuardRefuses(t *testing.T) {
+	home := t.TempDir()
+	dataDir := filepath.Join(home, ".defenseclaw")
+	settings := filepath.Join(home, ".config", "zed", "settings.json")
+	lockPath := acpContractLockPath(dataDir, "zed", "kiro")
+	tokenPath, err := acp.EnterpriseUserTokenPath(dataDir, "zed", "kiro")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, dir := range []string{filepath.Dir(settings), filepath.Dir(lockPath)} {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	guard := filepath.Join(home, "defenseclaw-acp")
+	writeEntry := func(agentCommand string, extra map[string]any) {
+		t.Helper()
+		entry := map[string]any{
+			"command": guard,
+			"args":    []string{"--token-file", tokenPath, "--contract-lock", lockPath, "--", agentCommand, "acp"},
+		}
+		for key, value := range extra {
+			entry[key] = value
+		}
+		body, err := json.Marshal(map[string]any{"agent_servers": map[string]any{acpManagedEntryName("kiro"): entry}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(settings, body, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeEntry("/opt/agents/kiro-cli", nil)
+	digest, err := acp.ClientEntrySHA256(settings, "zed", "kiro", lockPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lock := acp.RuntimeContractLock{}
+	lock.Client.ConfigPath = settings
+	lock.Client.ConfigSHA256 = acp.EntryDigestPrefix + digest
+	lock.Guard.Path = guard
+	lock.Profile, lock.Mode = "locked", "action"
+	body, err := json.Marshal(lock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(lockPath, body, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if done, note := enterpriseACPSetupState(dataDir, home, "zed", "kiro", "locked", "action"); !done {
+		t.Fatalf("unmodified setup is stale: %s", note)
+	}
+	writeEntry("/opt/agents/kiro-cli", map[string]any{"default_mode": "accept-edits"})
+	if done, note := enterpriseACPSetupState(dataDir, home, "zed", "kiro", "locked", "action"); !done {
+		t.Fatalf("an editor-owned key made setup stale: %s", note)
+	}
+	writeEntry("/opt/agents/other-agent", nil)
+	if done, note := enterpriseACPSetupState(dataDir, home, "zed", "kiro", "locked", "action"); done ||
+		!strings.Contains(note, "changed after setup") {
+		t.Fatalf("changed agent command reported as setup done: done=%v note=%q", done, note)
+	}
+}
+
 // The setup command of an enrollment a newer one replaced is refused and
 // changes nothing: it overwrote the working entry and lock (GAP-0733).
 func TestEnterpriseACPUserSetupRefusesAReplacedEnrollment(t *testing.T) {

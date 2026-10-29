@@ -653,6 +653,7 @@ func runEnterpriseACPVerify(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		return enterpriseACPResult(cmd, nil, err)
 	}
+	enterpriseACPUseRecordedDataDir(&enrollment, credential.UserDataDir)
 	if enrollment.accountGone {
 		what, selector := enterpriseACPGoneAccount(enrollment)
 		return enterpriseACPResult(cmd, nil, fmt.Errorf(
@@ -738,12 +739,17 @@ func runEnterpriseACPRevoke(cmd *cobra.Command, _ []string) error {
 	}
 	// Revoke centrally first. From this point a copied or cached bearer has no
 	// authority even if user-side cleanup is interrupted.
-	found := true
+	found, recordedDataDir := true, ""
 	if err := withEnterpriseACPServiceOwner(cfg.DataDir, func() error {
 		if !cfg.SecureClientIntegration() {
 			// A revoke of an enrollment that never existed said "revoked"
 			// (GAP-0355).
 			found = enterpriseACPRecordExists(cfg.DataDir, enrollment)
+			if credential, loadErr := acp.LoadEnterpriseCredential(
+				cfg.DataDir, enrollment.principal, enrollment.client, enrollment.agent, enrollment.profile,
+			); loadErr == nil {
+				recordedDataDir = credential.UserDataDir
+			}
 		}
 		return acp.RemoveEnterpriseCredential(
 			cfg.DataDir, enrollment.principal, enrollment.client, enrollment.agent, enrollment.profile,
@@ -756,6 +762,7 @@ func runEnterpriseACPRevoke(cmd *cobra.Command, _ []string) error {
 		notFound = fmt.Sprintf("no ACP enrollment for %s %s/%s in profile %s was found; nothing was revoked",
 			enterpriseACPWho(enrollment), enrollment.client, enrollment.agent, enrollment.profile)
 	}
+	enterpriseACPUseRecordedDataDir(&enrollment, recordedDataDir)
 	if enrollment.accountGone {
 		// No account, so no home to clean.
 		what, _ := enterpriseACPGoneAccount(enrollment)
@@ -809,6 +816,28 @@ func runEnterpriseACPRevoke(cmd *cobra.Command, _ []string) error {
 		payload["note"] = note
 	}
 	return enterpriseACPResult(cmd, enterpriseACPRevokePayload(payload, notFound), err)
+}
+
+// enterpriseACPUseRecordedDataDir points an enrollment whose command named no
+// --data-dir at the user data dir its service record holds, when that dir is
+// inside the target home. Verify and revoke used <home>/.defenseclaw: verify
+// called the copy in the recorded dir missing, and revoke removed the service
+// record but left that copy and named the wrong token_file, while list already
+// read the recorded dir (GAP-2431 pod review). Secure Client keeps main.
+func enterpriseACPUseRecordedDataDir(enrollment *enterpriseACPEnrollment, recorded string) {
+	if cfg == nil || cfg.SecureClientIntegration() || strings.TrimSpace(enterpriseACPUserDataDir) != "" ||
+		recorded == "" || enrollment.target.home == "" {
+		return
+	}
+	home, err := filepath.Abs(enrollment.target.home)
+	if err != nil {
+		return
+	}
+	relative, err := filepath.Rel(home, recorded)
+	if err != nil || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) || filepath.IsAbs(relative) {
+		return
+	}
+	enrollment.dataDir = recorded
 }
 
 // enterpriseACPCheck is the success mark: ASCII when Windows output goes to

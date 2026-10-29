@@ -1672,6 +1672,11 @@ class TestSetupSplunkCommand(unittest.TestCase):
     ):
         from defenseclaw.commands.cmd_setup import setup
 
+        def report_free(app, **_kwargs):
+            app.local_splunk_license_group = "Free"
+
+        mock_apply_logs_config.side_effect = report_free
+
         result = self.runner.invoke(
             setup,
             ["splunk", "--logs", "--non-interactive", "--accept-splunk-license"],
@@ -1768,6 +1773,44 @@ class TestSetupSplunkCommand(unittest.TestCase):
         self.assertNotIn("License: Free", result.output)
         self.assertIn("Splunk Web: log in as admin", result.output)
         self.assertIn("defenseclaw setup splunk --show-credentials", result.output)
+
+    @patch("defenseclaw.commands.cmd_setup._preflight_docker", return_value=(True, ""))
+    @patch("defenseclaw.commands.cmd_setup.subprocess.run")
+    @patch("defenseclaw.commands.cmd_setup.splunk_bridge_bin", return_value="/tmp/fake-splunk-claw-bridge")
+    def test_setup_splunk_logs_summary_and_next_steps_follow_a_non_free_license(
+        self, _mock_bridge_bin, mock_run, _mock_preflight,
+    ):
+        # GAP-2422: the summary and next steps follow the bridge licence like
+        # the ready block does; a Trial bridge never reads "Free mode".
+        from defenseclaw.commands.cmd_setup import setup
+
+        mock_run.return_value = MagicMock(
+            returncode=0,
+            stdout=json.dumps(
+                {
+                    "splunk_web_url": "http://127.0.0.1:8000",
+                    "hec_url": "http://127.0.0.1:8088/services/collector/event",
+                    "hec_token": "bootstrap-token",
+                    "license_group": "Trial",
+                    "web_login_required": True,
+                    "index": "defenseclaw_local",
+                    "source": "defenseclaw",
+                    "sourcetype": "defenseclaw:json",
+                }
+            ),
+            stderr="",
+        )
+        result = self.runner.invoke(
+            setup,
+            ["splunk", "--logs", "--non-interactive", "--accept-splunk-license"],
+            obj=self.app,
+            catch_exceptions=False,
+        )
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertNotIn("Free mode", result.output)
+        self.assertIn("Local Splunk configured (license: Trial)", result.output)
+        next_steps = result.output.split("Next steps:", 1)[1]
+        self.assertIn("Log in as admin; show the password with: defenseclaw setup splunk --show-credentials", next_steps)
 
     @patch("defenseclaw.commands.cmd_setup._preflight_docker", return_value=(True, ""))
     @patch("defenseclaw.commands.cmd_setup.subprocess.run")
@@ -2338,6 +2381,27 @@ class TestSetupSplunkCommand(unittest.TestCase):
         self.assertIn("Splunk Web Credentials", result.output)
         self.assertIn("Username:  admin", result.output)
         self.assertIn("Password:  test-splunk-pass", result.output)
+
+    def test_setup_splunk_show_credentials_follows_the_bridge_license(self):
+        """GAP-2423: only a Free bridge env says Web auth is disabled; any other licence says log in."""
+        from defenseclaw.commands.cmd_setup import setup
+
+        env_dir = os.path.join(self.tmp_dir, "splunk-bridge", "env")
+        os.makedirs(env_dir)
+        env_file = os.path.join(env_dir, ".env")
+        for license_uri, free in (("Free", True), ("", False), ("/opt/splunk/etc/licenses/trial.lic", False)):
+            with open(env_file, "w") as f:
+                f.write(f"SPLUNK_LICENSE_URI={license_uri}\nSPLUNK_PASSWORD=test-splunk-pass\n")
+            result = self.runner.invoke(
+                setup, ["splunk", "--show-credentials"], obj=self.app, catch_exceptions=False,
+            )
+            self.assertEqual(result.exit_code, 0, result.output)
+            self.assertIn("Username:  admin", result.output)
+            if free:
+                self.assertIn("Web auth:  disabled in Splunk Free mode", result.output)
+            else:
+                self.assertNotIn("Free mode", result.output, license_uri)
+                self.assertIn("Web auth:  required", result.output)
 
 
 # ---------------------------------------------------------------------------

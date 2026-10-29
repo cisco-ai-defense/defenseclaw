@@ -415,6 +415,25 @@ func ValidateRuntimeContract(path, clientID, agentID, profile string, mode Mode,
 	return nil
 }
 
+// ClientConfigMatchesLock reports whether the editor settings file still
+// matches what the contract lock at lockPath pins, by the rule the guard
+// applies at start (ValidateRuntimeContract): the guarded entries for an
+// entry-pinned lock, the whole file otherwise. enterprise acp list and verify
+// said setup was done while the guard refused the entry because the agent it
+// starts had been changed in the entry (GAP-1154).
+func ClientConfigMatchesLock(lock RuntimeContractLock, lockPath, clientID, agentID string) bool {
+	path, err := filepath.Abs(lock.Client.ConfigPath)
+	if err != nil || strings.TrimSpace(lock.Client.ConfigSHA256) == "" {
+		return false
+	}
+	if pinned, entry := strings.CutPrefix(lock.Client.ConfigSHA256, EntryDigestPrefix); entry && !secureClientHost() {
+		observed, digestErr := ClientEntrySHA256(path, clientID, agentID, lockPath)
+		return digestErr == nil && strings.EqualFold(observed, pinned)
+	}
+	observed, digestErr := fileSHA256(path)
+	return digestErr == nil && strings.EqualFold(observed, lock.Client.ConfigSHA256)
+}
+
 // SecureClientHost reports a Secure Client install, whose guard keeps the
 // behaviour of main (issue #1092).
 func SecureClientHost() bool { return secureClientHost() }
