@@ -144,7 +144,7 @@ func psParameterReadings(form string) ([]string, bool) {
 			continue
 		}
 		c := word.text[1]
-		if !(c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z') {
+		if (c < 'a' || c > 'z') && (c < 'A' || c > 'Z') {
 			continue
 		}
 		name, value, hasValue := strings.Cut(word.text[1:], ":")
@@ -558,7 +558,7 @@ func psStartProcessShellBody(words []psWord, budget *psBudget) (string, bool) {
 	var file, arguments string
 	var positional []string
 	for k := 1; k < len(words); k++ {
-		name, value, hasValue := strings.Cut(strings.ToLower(words[k].text), ":")
+		name, _, hasValue := strings.Cut(strings.ToLower(words[k].text), ":")
 		if words[k].quoted || !strings.HasPrefix(name, "-") || len(name) < 2 {
 			positional = append(positional, words[k].text)
 			continue
@@ -566,6 +566,7 @@ func psStartProcessShellBody(words []psWord, budget *psBudget) (string, bool) {
 		if !hasValue && psStartProcessSwitch(name) {
 			continue
 		}
+		var value string
 		if !hasValue {
 			if k+1 >= len(words) {
 				break

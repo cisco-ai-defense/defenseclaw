@@ -78,7 +78,7 @@ func TestSetupConnectorsIsolated_RetriesASlowProbe(t *testing.T) {
 
 // errSettingsInUse stands for the Windows sharing violation an agent that
 // holds its settings file open causes (connector.FileBusyError).
-var errSettingsInUse = errors.New("A file cannot be opened because the share access flags are incompatible")
+var errSettingsInUse = errors.New("A file cannot be opened because the share access flags are incompatible") //nolint:staticcheck // the Windows sharing-violation text as the system writes it
 
 // busyOnceConnector finds its settings file in use on its first setups.
 type busyOnceConnector struct {
