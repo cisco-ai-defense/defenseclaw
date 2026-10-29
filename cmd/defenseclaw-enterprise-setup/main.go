@@ -945,7 +945,7 @@ func standaloneEnterpriseSetupTimeoutBeforeLifecycle(opts enterpriseSetupOptions
 	}
 	return enterpriseSetupLifecycleTimeout{error: fmt.Errorf(
 		"enterprise %s did not start within TIMEOUTSECONDS=%d (%w): the limit counts from Setup's start, and Setup's payload checks "+
-			"and unpacking used all of it, so the lifecycle did not run and nothing was changed. Run %s as LocalSystem %s: %s",
+			"and unpacking left too little of it to start the lifecycle, so it did not run and nothing was changed. Run %s as LocalSystem %s: %s",
 		opts.Action, limit, cause, standaloneSetupArtifactName, longer, standaloneSetupRetryCommand(opts, maximum),
 	)}
 }

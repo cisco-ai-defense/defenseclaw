@@ -26,7 +26,77 @@ var enterpriseSetupRecoveryTimeout = 10 * time.Minute
 // where Windows cannot give the process creation time.
 var enterpriseSetupInitTime = time.Now()
 
-// enterpriseSetupLifecycleDeadline is when the TIMEOUTSECONDS limit of a run
+// minimumEnterpriseLifecycleStart is the least of TIMEOUTSECONDS a standalone
+// mutation or uninstall needs left to start its lifecycle child: the
+// shortest TIMEOUTSECONDS, and the shortest --timeout-seconds the ensure
+// child accepts.
+const minimumEnterpriseLifecycleStart = 60 * time.Second
+
+// enterpriseEnsureChildLimit is the ensure deadline Setup hands its CLI
+// child from what is left of TIMEOUTSECONDS: that less a tenth of it (at
+// most two minutes), so the child ends with its own lifecycle_timeout and
+// service start-mode restore before Setup stops its process tree (GAP-2265:
+// the child kept a fixed 12 minutes and an upgrade on a busy host failed
+// with most of the 30-minute default left). ok is false when that is under
+// the child's 60-second minimum: a child given 60 seconds then would
+// outlive Setup's own deadline and be stopped mid-transaction instead.
+func enterpriseEnsureChildLimit(remaining time.Duration) (limit time.Duration, ok bool) {
+	if remaining <= 0 {
+		return 0, false
+	}
+	margin := remaining / 10
+	if margin > 2*time.Minute {
+		margin = 2 * time.Minute
+	}
+	limit = (remaining - margin).Truncate(time.Second)
+	return limit, limit >= minimumEnterpriseLifecycleStart
+}
+
+// enterpriseEnsureChildTimeoutSeconds is the --timeout-seconds Setup hands
+// its ensure child. A run that counts from Setup's start never starts a
+// child with too little left (enterpriseLifecycleChildTooLate); without a
+// start time the child gets at least its 60-second minimum. Zero (no limit
+// known) keeps the child's default.
+func enterpriseEnsureChildTimeoutSeconds(remaining time.Duration) int {
+	if remaining <= 0 {
+		return 0
+	}
+	limit, ok := enterpriseEnsureChildLimit(remaining)
+	if !ok {
+		limit = minimumEnterpriseLifecycleStart
+	}
+	return int(limit / time.Second)
+}
+
+// enterpriseLifecycleChildTooLate reports a standalone mutation or
+// uninstall whose TIMEOUTSECONDS, counted from Setup's start, has too
+// little left to start the lifecycle child: under 60 seconds, or for
+// /ensure under what gives the child its own deadline before Setup's
+// (GAP-2509 review). Setup's limit would stop such a child, most likely
+// mid-transaction, and leave the result to the recovery. Read-only actions
+// and runs without a start time are not refused.
+func enterpriseLifecycleChildTooLate(opts enterpriseSetupOptions, remaining time.Duration) bool {
+	if !opts.Standalone || opts.Started.IsZero() ||
+		!(enterpriseSetupMutation(opts.Action, true) || opts.Action == "uninstall") {
+		return false
+	}
+	if opts.Action == "ensure" {
+		_, ok := enterpriseEnsureChildLimit(remaining)
+		return !ok
+	}
+	return remaining < minimumEnterpriseLifecycleStart
+}
+
+// enterpriseSetupStartFromCreation is the process start time on this
+// process's monotonic clock: now less the process age, so a wall-clock step
+// after the start (a w32time correction at boot, a snapshot restore) does
+// not move the TIMEOUTSECONDS deadline. Zero when creation is not usable.
+func enterpriseSetupStartFromCreation(now, creation time.Time) time.Time {
+	if creation.Year() <= 2000 || creation.After(now) {
+		return time.Time{}
+	}
+	return now.Add(-now.Sub(creation))
+} // enterpriseSetupLifecycleDeadline is when the TIMEOUTSECONDS limit of a run
 // ends: opts.Started plus the limit for a standalone Setup, so the payload
 // checks and unpacking count (GAP-2509), else now plus the limit.
 func enterpriseSetupLifecycleDeadline(opts enterpriseSetupOptions, now time.Time) time.Time {
@@ -63,12 +133,18 @@ func runEnterpriseLifecycleChild(
 	run func(context.Context) ([]byte, error),
 	recoverChild func(context.Context) ([]byte, error),
 ) enterpriseLifecycleChildRun {
-	ctx, cancel := context.WithDeadline(parent, enterpriseSetupLifecycleDeadline(opts, time.Now()))
+	deadline := enterpriseSetupLifecycleDeadline(opts, time.Now())
+	ctx, cancel := context.WithDeadline(parent, deadline)
 	var result enterpriseLifecycleChildRun
-	if err := ctx.Err(); err != nil {
-		// The payload checks and unpacking used up the limit (it counts
-		// from Setup's start, GAP-2509): the child is not started, so the
-		// deployment is as it was and needs no recovery.
+	err := ctx.Err()
+	if err == nil && enterpriseLifecycleChildTooLate(opts, time.Until(deadline)) {
+		err = context.DeadlineExceeded
+	}
+	if err != nil {
+		// The payload checks and unpacking used up the limit, or left too
+		// little to start the lifecycle (it counts from Setup's start,
+		// GAP-2509): the child is not started, so the deployment is as it
+		// was and needs no recovery.
 		cancel()
 		result.timedOut, result.notStarted, result.cause = true, true, err
 		return result

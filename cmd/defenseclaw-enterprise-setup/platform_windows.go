@@ -883,34 +883,13 @@ func enterpriseLifecycleArguments(stageRoot string, opts enterpriseSetupOptions)
 	return arguments
 }
 
-// enterpriseEnsureChildTimeoutSeconds is the ensure deadline Setup hands
-// its CLI child: TIMEOUTSECONDS less a tenth of it (at most two minutes),
-// so the child ends with its own lifecycle_timeout and service start-mode
-// restore before Setup stops its process tree (GAP-2265: the child kept a
-// fixed 12 minutes and an upgrade on a busy host failed with most of the
-// 30-minute default left). Zero (no limit known) keeps the child's default.
-func enterpriseEnsureChildTimeoutSeconds(limit time.Duration) int {
-	if limit <= 0 {
-		return 0
-	}
-	margin := limit / 10
-	if margin > 2*time.Minute {
-		margin = 2 * time.Minute
-	}
-	seconds := int((limit - margin) / time.Second)
-	if seconds < 60 {
-		seconds = 60
-	}
-	return seconds
-}
-
 // enterpriseSetupProcessStarted is this process's creation time, so the time
 // Windows took to load and start the Setup image counts toward
 // TIMEOUTSECONDS too (GAP-2509).
 func enterpriseSetupProcessStarted() time.Time {
 	var creation, exit, kernel, user windows.Filetime
 	if err := windows.GetProcessTimes(windows.CurrentProcess(), &creation, &exit, &kernel, &user); err == nil {
-		if started := time.Unix(0, creation.Nanoseconds()); started.Year() > 2000 && !started.After(time.Now()) {
+		if started := enterpriseSetupStartFromCreation(time.Now(), time.Unix(0, creation.Nanoseconds())); !started.IsZero() {
 			return started
 		}
 	}
