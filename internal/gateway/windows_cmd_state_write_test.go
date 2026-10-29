@@ -6,7 +6,10 @@ package gateway
 import (
 	"encoding/json"
 	"slices"
+	"strconv"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
 )
@@ -97,6 +100,30 @@ func TestR105WindowsCMDSlashCStateWrite(t *testing.T) {
 		{`cmd /q /c "type notes.txt & type nul > ` + state + `"`, true},
 		{`C:\Windows\System32\cmd.exe /c "type nul > ` + state + `"`, true},
 		{`cmd /c "cmd /c type nul > ` + state + `"`, true},
+		// Every way an agent hands the body to cmd.exe (checker it8 RV8-1).
+		{`& cmd /c "type nul > ` + state + `"`, true},
+		{`cmd /c 'type nul > ` + state + `'`, true},
+		{`cmd.exe /c 'echo x > ` + state + `'`, true},
+		{`cmd //c "type nul > ` + state + `"`, true},
+		{`cmd //c 'type nul > ` + state + `'`, true},
+		{`cmd/c "type nul > ` + state + `"`, true},
+		{`cmd /v:on /c "type nul > ` + state + `"`, true},
+		{`cmd /e:on /c "type nul > ` + state + `"`, true},
+		{`cmd /u /c "type nul > ` + state + `"`, true},
+		{`cmd /k "type nul > ` + state + `"`, true},
+		{`cmd //k "echo x > ` + state + `"`, true},
+		{`& $env:ComSpec /c "type nul > ` + state + `"`, true},
+		{`& ${env:ComSpec} /c "type nul > ` + state + `"`, true},
+		{`%ComSpec% /c "type nul > ` + state + `"`, true},
+		{`Start-Process cmd -ArgumentList '/c type nul > ` + state + `' -Wait`, true},
+		{`Start-Process -FilePath cmd.exe -ArgumentList "/c copy /y nul ` + state + `" -Wait`, true},
+		{`"C:\Windows\System32\cmd.exe" /c "type nul > ` + state + `"`, true},
+		{`Write-Output a; & cmd /c 'type nul > ` + state + `'`, true},
+		// An -ArgumentList array is joined with spaces (checker it9 RV9-2 X11).
+		{`Start-Process -FilePath cmd.exe -ArgumentList '/c','type nul > ` + state + `' -Wait`, true},
+		{`Start-Process cmd '/c type nul > ` + state + `'`, true},
+		{`powershell -Command "cmd /c 'type nul > ` + state + `'"`, true},
+		{`Write-Output "$(cmd /c type nul > ` + state + `)"`, true},
 		// Ordinary work stays allowed.
 		{`cmd /c "type nul > notes8.txt"`, false},
 		{`cmd /c copy /y nul empty8.txt`, false},
@@ -104,6 +131,51 @@ func TestR105WindowsCMDSlashCStateWrite(t *testing.T) {
 		{`cmd /c type ` + state, false},
 		{`cmd /c "type notes.txt 2>nul"`, false},
 		{`cmd /c dir %USERPROFILE%\.defenseclaw`, false},
+		{`& cmd /c "type nul > notes8.txt"`, false},
+		{`cmd //c 'dir'`, false},
+		{`cmd /k "echo hi"`, false},
+		{`cmd /v:on /c "echo !PATH! > notes.txt"`, false},
+		{`Start-Process cmd -ArgumentList '/c type nul > notes.txt' -Wait`, false},
+		{`& $env:ComSpec /c "copy ` + state + ` backup.yaml"`, false},
+		{`cmd /c 'type nul > %USERPROFILE%\.defenseclawx\a.txt'`, false},
+		{`cmdkey /list`, false},
+		{`Write-Output 'cmd /c dir'`, false},
+		// A text that only mentions the cmd state write (checker it9 RV9-1).
+		{`Write-Output 'Tip: cmd /c type nul > ` + state + ` empties the config'`, false},
+		{`git commit -m 'block cmd //c "type nul > ` + state + `"'`, false},
+		{`git commit -m "fix: block cmd /c type nul > ` + state + `"`, false},
+		{"@'\nnotes: cmd /c type nul > " + state + "\n'@ | Set-Content notes.md", false},
+		{`gh issue comment 1 --body "repro: & cmd /c 'type nul > ` + state + `'"`, false},
+		{`Write-Output "Start-Process cmd -ArgumentList '/c type nul > ` + state + `'"`, false},
+		{"# cmd /c type nul > " + state + "\nGet-ChildItem", false},
+		{`cmd /c echo see cmd /c type nul docs`, false},
+		// Every reading of the outer shell is judged; an unterminated quote
+		// is no text span; a runner is a shell word, not any -c (checker
+		// it10 RV10-1, RV10-2).
+		{`echo don\'t; cmd //c "type nul > ` + state + `"`, true},
+		{`echo $'it\'s'; cmd //c "type nul > ` + state + `"`, true},
+		{"cat > n.txt <<EOF\ndon't\nEOF\ncmd //c \"type nul > " + state + "\"", true},
+		{`<# don't #> cmd /c "type nul > ` + state + `"`, true},
+		{`Write-Output "C:\temp\"; cmd /c "type nul > ` + state + `"`, true},
+		{`bash -lc "cmd //c 'type nul > ` + state + `'"`, true},
+		{`iex("cmd /c 'type nul > ` + state + `'")`, true},
+		{`powershell "cmd /c 'type nul > ` + state + `'"`, true},
+		{`& 'C:\Windows\System32\cmd.exe' /c 'type nul > ` + state + `'`, true},
+		{`echo \"; cmd //c "type nul > ` + state + `"`, true},
+		{`x='a'\''b'; cmd //c "type nul > ` + state + `"`, true},
+		{`echo {# ; cmd //c "type nul > ` + state + `"`, true},
+		{"echo \"`cmd //c 'type nul > " + state + "'`\"", true},
+		{`Write-Output ‘a'b’; cmd /c "type nul > ` + state + `"`, true},
+		{`Start-Process powershell -ArgumentList '-c "cmd /c type nul > ` + state + `"'`, true},
+		{`Start-Process cmd -ArgumentList @('/c','type nul > ` + state + `')`, true},
+		{strings.Repeat("cmd /c echo 0; ", 70) + `cmd /c "type nul > ` + state + `"`, true},
+		{`grep -c "cmd /c type nul > ` + state + `" notes.md`, false},
+		{`rg -c 'cmd /c del ` + state + `' docs`, false},
+		{`git log --grep "cmd /c type nul > ` + state + `"`, false},
+		{`bash -lc "grep -c 'cmd /c type nul > ` + state + `' notes.md"`, false},
+		{`iex "Write-Output 'cmd /c type nul > ` + state + `'"`, false},
+		{`Write-Output x; cmd /c dir`, false},
+		{`Start-Process cmd -ArgumentList '/c','type nul > notes.txt' -Wait`, false},
 	} {
 		for _, tool := range []string{"Bash", "shell_command", "PowerShell"} {
 			args, _ := json.Marshal(map[string]string{"command": tc.command})
@@ -116,6 +188,142 @@ func TestR105WindowsCMDSlashCStateWrite(t *testing.T) {
 			verdict := buildVerdict(findings, "tool_call")
 			if got := verdict.Action == "block"; got != tc.block {
 				t.Errorf("%s %s (dialect %q): action %q, want block=%t (findings %v)",
+					tool, tc.command, input.DialectHint, verdict.Action, tc.block, findings)
+			}
+		}
+	}
+}
+
+// TestR105WindowsCMDStateDirectoryRemove: a cmd /c body that removes or
+// moves the DefenseClaw state directory itself is a state mutation, as the
+// same command typed into cmd is (checker it9 RV9-2 X02, X07). The hook
+// supplies the resolved directory, as it does on the Windows host.
+func TestR105WindowsCMDStateDirectoryRemove(t *testing.T) {
+	const connectorName = "r105-cmd-state-dir"
+	installToolCallCorpusProfileConnector(t, connectorName, "default")
+	const home = `C:\Users\Alice`
+	resolved := map[string]string{}
+	for _, value := range []string{"C:/Users/Alice/.defenseclaw", "C:/Users/Alice/.defenseclaw/config.yaml",
+		"C:/Users/Alice/.defenseclawx", "C:/Users/Alice/project/build"} {
+		resolved[value] = value
+	}
+	for _, tc := range []struct {
+		command string
+		block   bool
+	}{
+		{`cmd //c "rmdir /s /q %USERPROFILE%\.defenseclaw"`, true},
+		{`cmd /d /c rd /s /q %USERPROFILE%\.defenseclaw`, true},
+		{`cmd /c rd /s /q C:\Users\Alice\.defenseclaw`, true},
+		{`& cmd /c 'rmdir /s /q %USERPROFILE%\.defenseclaw'`, true},
+		{`cmd /c move %USERPROFILE%\.defenseclaw %USERPROFILE%\dc-old`, true},
+		// Ordinary work stays allowed.
+		{`cmd /c dir %USERPROFILE%\.defenseclaw`, false},
+		{`cmd /c rd /s /q %USERPROFILE%\.defenseclawx`, false},
+		{`cmd /c rd /s /q build`, false},
+		{`Write-Output 'cmd /c rd /s /q %USERPROFILE%\.defenseclaw'`, false},
+	} {
+		for _, tool := range []string{"Bash", "shell_command", "PowerShell"} {
+			args, _ := json.Marshal(map[string]string{"command": tc.command})
+			input := actionfacts.Input{Tool: tool, Args: args, CWD: home + `\project`, ActiveHome: home}
+			input.DialectHint = agentHookWindowsShellDialect(input)
+			findings := dispatchTrustedAction(t.Context(), trustedActionRequest{
+				Input: input, LegacyText: string(args), Connector: connectorName,
+				EnforcementCapable: true, ResolvedWriteTargets: resolved,
+			})
+			verdict := buildVerdict(findings, "tool_call")
+			if got := verdict.Action == "block"; got != tc.block {
+				t.Errorf("%s %s (dialect %q): action %q, want block=%t (findings %v)",
+					tool, tc.command, input.DialectHint, verdict.Action, tc.block, findings)
+			}
+		}
+	}
+}
+
+// TestR105WindowsCMDBodyReaderIsLinear: the cmd body reader stays far inside
+// the hook budget on large crafted commands (checker it10 RV10-3: 32 KB took
+// 8.8 s at 60f41d7b57), and a command it cannot read within its bounds
+// counts as the state write it may hide.
+func TestR105WindowsCMDBodyReaderIsLinear(t *testing.T) {
+	const size = 64 << 10
+	for _, unit := range []string{"'a' ", "cmd x 'a' ", "cmd /c x ", "\"$(", "cmd -args 'a' ", "a; "} {
+		command := "cmd x " + strings.Repeat(unit, size/len(unit))
+		start := time.Now()
+		cmdInvocationReadings(command, true)
+		if took := time.Since(start); took > 2*time.Second {
+			t.Errorf("unit %q: %d bytes read in %s", unit, len(command), took)
+		}
+	}
+	const state = `%USERPROFILE%\.defenseclaw\config.yaml`
+	request := trustedActionRequest{Input: actionfacts.Input{
+		Tool: "PowerShell", Command: strings.Repeat("cmd /c x ", 1000) + "type nul > " + state,
+		CWD: `C:\Users\Alice\project`, ActiveHome: `C:\Users\Alice`, DialectHint: actionfacts.DialectPowerShell,
+	}}
+	if !provenCMDSlashCStateWrite(request) {
+		t.Errorf("a command beyond the reader bounds is not judged a state write")
+	}
+}
+
+// TestR105WindowsCMDMentionsAndManyCalls: text that only mentions a cmd.exe
+// state write in a Git Bash here-document body stays allowed, as does an
+// ordinary command with many cmd calls and a DefenseClaw state read; a
+// here-document fed to a shell or to cmd, an unquoted body's $(...) and a
+// stop-parsing cmd call still block (checker it11 RV11-1, RV11-2, K01).
+func TestR105WindowsCMDMentionsAndManyCalls(t *testing.T) {
+	const connectorName = "r105-cmd-mentions"
+	installToolCallCorpusProfileConnector(t, connectorName, "default")
+	const home = `C:\Users\Alice`
+	resolved := map[string]string{}
+	for _, value := range []string{"C:/Users/Alice/.defenseclaw", "C:/Users/Alice/.defenseclaw/config.yaml"} {
+		resolved[value] = value
+	}
+	const state = `%USERPROFILE%\.defenseclaw\config.yaml`
+	steps := func(format string, n int, sep, tail string) string {
+		var parts []string
+		for k := range n {
+			parts = append(parts, strings.ReplaceAll(format, "N", strconv.Itoa(k)))
+		}
+		return strings.Join(parts, sep) + sep + tail
+	}
+	for _, tc := range []struct {
+		command string
+		block   bool
+	}{
+		{"git commit -m \"$(cat <<'EOF'\nfix: block cmd /c type nul > " + state + "\n\nEOF\n)\"", false},
+		{"cat > notes.md <<'EOF'\nTip: cmd /c type nul > " + state + " empties the config\nEOF", false},
+		{"cat > notes.md <<'EOF'\nrepro: cmd //c \"rmdir /s /q %USERPROFILE%\\.defenseclaw\"\nEOF", false},
+		{"cat > notes.md <<EOF\nTip: cmd /c type nul > " + state + " empties it\nEOF", false},
+		{"cat > notes.md <<-'EOF'\n\tdon't run cmd /c type nul > " + state + "\n\tEOF\necho done", false},
+		{steps("cmd /c echo stepN", 8, "; ", `Get-Content $HOME\.defenseclaw\config.yaml`), false},
+		{steps("cmd /c echo stepN", 20, "; ", `Get-Content $HOME\.defenseclaw\config.yaml`), false},
+		{steps("cmd /c ver", 12, "; ", `cmd /c dir %USERPROFILE%\.defenseclaw`), false},
+		{steps("cmd //c echo sN", 12, " && ", "cat ~/.defenseclaw/config.yaml"), false},
+		// Still a state write.
+		{"bash <<'EOF'\ncmd /c type nul > " + state + "\nEOF", true},
+		{"cat <<'EOF' | sh\ncmd /c type nul > " + state + "\nEOF", true},
+		{"cmd <<'EOF'\ntype nul > " + state + "\nEOF", true},
+		{"cat > notes.md <<EOF\n$(cmd /c type nul > " + state + ")\nEOF", true},
+		{"cat <<'EOF'\nnote\nEOF\ncmd /c type nul > " + state, true},
+		{"cat <<'EOF' \"x\nEOF\" ; cmd /c type nul > " + state + "\nEOF", true},
+		{"echo $((1<<2))\ncmd /c type nul > " + state + "\n2", true},
+		{"${x <<}\ncmd /c type nul > " + state + "\n}", true},
+		{"cat <<'EOF'\nnote\n", false},
+		{"cat <<'EOF'\ncmd /c type nul > " + state, true},
+		{steps("cmd /c echo stepN", 8, "; ", "cmd /c type nul > "+state), true},
+		{"cmd /c echo a; cmd /c \"type nul > " + state + "\"", true},
+		{"cmd --% /c type nul > " + state, true},
+		{"cmd --% /c echo a ; type nul > " + state, true},
+	} {
+		for _, tool := range []string{"Bash", "shell_command", "PowerShell"} {
+			args, _ := json.Marshal(map[string]string{"command": tc.command})
+			input := actionfacts.Input{Tool: tool, Args: args, CWD: home + `\project`, ActiveHome: home}
+			input.DialectHint = agentHookWindowsShellDialect(input)
+			findings := dispatchTrustedAction(t.Context(), trustedActionRequest{
+				Input: input, LegacyText: string(args), Connector: connectorName,
+				EnforcementCapable: true, ResolvedWriteTargets: resolved,
+			})
+			verdict := buildVerdict(findings, "tool_call")
+			if got := verdict.Action == "block"; got != tc.block {
+				t.Errorf("%s %q (dialect %q): action %q, want block=%t (findings %v)",
 					tool, tc.command, input.DialectHint, verdict.Action, tc.block, findings)
 			}
 		}
