@@ -1186,13 +1186,16 @@ func placedLinkedStateWrite(request trustedActionRequest, text, home string, lin
 		if projected.ActiveHome == "" {
 			continue
 		}
-		if statement.Dir != request.Input.CWD {
-			for _, candidate := range projected.Paths {
-				command, ok := integrityCommandByID(projected, candidate.CommandID)
-				if ok && stateCommandMutatesPath(command, candidate) &&
-					linkedActiveStateWrite(projected, command, candidate, links, request, true) {
-					return true
-				}
+		// Each statement is read alone, in its directory, even when that is
+		// the starting directory: a lone statement gets the trusted home
+		// for its ~ and $HOME words, which the whole list does not, so
+		// ln -s ~/.defenseclaw/hooks ~/hk; cp a.txt ~/hk/x.sh names its
+		// write here only (GAP-2555).
+		for _, candidate := range projected.Paths {
+			command, ok := integrityCommandByID(projected, candidate.CommandID)
+			if ok && stateCommandMutatesPath(command, candidate) &&
+				linkedActiveStateWrite(projected, command, candidate, links, request, true) {
+				return true
 			}
 		}
 		for _, operand := range hookpaths.InPlaceEditOperands(statement.Command, statement.Dir, home) {
