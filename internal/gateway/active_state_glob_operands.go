@@ -40,10 +40,11 @@ const maxStateBraceExpansions = 64
 // temp cleanup such as `rm ~/.defenseclaw/*.log` or
 // `rm ~/.defenseclaw/logs/*` matches none and stays allowed.
 func globbedStateMutation(facts actionfacts.Facts) bool {
-	home := strings.TrimRight(facts.ActiveHome, "/")
-	if !strings.HasPrefix(home, "/") {
+	home, cwd, ok := globStateHome(facts.ActiveHome, facts.CWD)
+	if !ok {
 		return false
 	}
+	facts.CWD = cwd
 	for _, command := range facts.Commands {
 		if command.Effect == actionfacts.EffectPreview || command.Dialect != actionfacts.DialectPOSIX {
 			continue
@@ -57,6 +58,50 @@ func globbedStateMutation(facts actionfacts.Facts) bool {
 		}
 	}
 	return false
+}
+
+// globStateHome is the active home and call cwd the glob read places words
+// in: a POSIX home as is, or (GAP-2566) the drive home of a Git Bash parse
+// on Windows, C:/Users/x, in slash form with the cwd backslashes read as
+// slashes. The drive home used to return early, so on Windows a pattern
+// delete of the hooks tree (`rm -rf ~/.defenseclaw/hooks/*`) was allowed
+// with no finding while the same delete naming one file blocked.
+func globStateHome(activeHome, cwd string) (string, string, bool) {
+	home := strings.TrimRight(activeHome, "/")
+	if strings.HasPrefix(home, "/") {
+		return home, cwd, true
+	}
+	home = strings.TrimRight(strings.ReplaceAll(home, `\`, "/"), "/")
+	if !actionfacts.DriveSlashPath(home + "/") {
+		return "", "", false
+	}
+	if drive := strings.ReplaceAll(cwd, `\`, "/"); actionfacts.DriveSlashPath(drive) {
+		cwd = drive
+	}
+	return home, cwd, true
+}
+
+// stateRootedPath reports an absolute path of the shell: /x, or a drive
+// path in slash form (Git Bash on Windows).
+func stateRootedPath(value string) bool {
+	return strings.HasPrefix(value, "/") || actionfacts.DriveSlashPath(value)
+}
+
+// stateDriveWord gives a Git Bash spelling of a drive path its slash form
+// when the home is a drive home: C:\x and C:/x, and the MSYS /c/x.
+func stateDriveWord(word, home string) string {
+	if !actionfacts.DriveSlashPath(home + "/") {
+		return word
+	}
+	if len(word) >= 3 && word[1] == ':' && word[2] == '\\' {
+		word = strings.ReplaceAll(word, `\`, "/")
+	}
+	if len(word) >= 2 && word[0] == '/' && (len(word) == 2 || word[2] == '/') {
+		if letter := word[1]; letter >= 'a' && letter <= 'z' || letter >= 'A' && letter <= 'Z' {
+			return string(letter) + ":/" + strings.TrimPrefix(word[2:], "/")
+		}
+	}
+	return word
 }
 
 // stateOperandWords returns the static spelling of each argument after the
@@ -129,7 +174,9 @@ func globbedStateCommandMutates(command actionfacts.CommandFact, words []string,
 			return false
 		}
 		destination := rsyncOperands[len(rsyncOperands)-1]
-		if strings.Contains(destination, ":") {
+		// A drive home path (C:/Users/x/.defenseclaw/, the ~ of a Git Bash
+		// parse) is local, not host:path.
+		if strings.Contains(destination, ":") && !actionfacts.DriveSlashPath(destination) {
 			return false
 		}
 		deletes := slices.ContainsFunc(rsyncOptions, rsyncDeletes)
@@ -381,6 +428,7 @@ func stateWordExpands(word string) bool {
 // stateHomePath places a word: a leading ~ is the active home, a relative
 // word is under cwd. ok is false for a word with no static spelling.
 func stateHomePath(word, home, cwd string) (string, bool) {
+	word = stateDriveWord(word, home)
 	switch {
 	case word == "":
 		return "", false
@@ -390,9 +438,9 @@ func stateHomePath(word, home, cwd string) (string, bool) {
 		return home + word[1:], true
 	case strings.HasPrefix(word, "~"):
 		return "", false
-	case strings.HasPrefix(word, "/"):
+	case stateRootedPath(word):
 		return word, true
-	case strings.HasPrefix(cwd, "/"):
+	case stateRootedPath(cwd):
 		return strings.TrimRight(cwd, "/") + "/" + word, true
 	}
 	return "", false
@@ -409,6 +457,11 @@ func stateRelativeComponents(word, home, cwd string) [][]string {
 		}
 		full = path.Clean(full)
 		relative, within := strings.CutPrefix(full, home+"/")
+		if actionfacts.DriveSlashPath(home + "/") {
+			// NTFS names are case-insensitive: ~/.DefenseClaw/Hooks is
+			// the hooks tree.
+			relative, within = strings.CutPrefix(strings.ToLower(full), strings.ToLower(home)+"/")
+		}
 		if !within || relative == "" {
 			continue
 		}
