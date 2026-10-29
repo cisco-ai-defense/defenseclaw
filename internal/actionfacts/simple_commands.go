@@ -201,7 +201,11 @@ func simpleCommands(input Input, facts Facts, depth int, interpreter string) []S
 					changed = true
 				}
 			}
-			if resolved, ok := simpleResolvedVariables(text, effective); ok {
+			// The shell expands the words of the command, ~ included, before
+			// it applies the prefix assignments, so HOME=/tmp cp a ~/f
+			// writes the previous ~/f (GAP-2476). The prefixes set only the
+			// environment of the program (effective, used for nested scripts).
+			if resolved, ok := simpleResolvedVariables(text, state.vars); ok {
 				text = resolved
 				changed = true
 			}
@@ -651,25 +655,37 @@ func uniqueSimpleStates(states []simpleShellState) []simpleShellState {
 }
 
 // updateSimpleDeclVariables applies a HOME=value word of an export,
-// readonly, declare or typeset statement to vars, as updateSimpleVariables
-// applies a bare HOME=value: every later ~ and $HOME then names value. HOME
-// with no value keeps its value. Any option other than -x, -r and -g (a
-// reference, an integer, a case or an array attribute) changes what the
-// value means, so HOME becomes unknown. Other names keep the bound-variable
-// reading the action-level resolver judges.
+// readonly, declare, typeset or local statement to vars, as
+// updateSimpleVariables applies a bare HOME=value: every later ~ and $HOME
+// then names value. HOME with no value keeps its value. An option other
+// than -x, -r and -g (export -n also assigns) can change what the value
+// means (a reference, an integer, a case or an array attribute): HOME then
+// keeps its previous value, so a later ~ or $HOME write is still judged
+// against a home the call can reach (GAP-2476, RV-pc11-1). Other names
+// keep the bound-variable reading the action-level resolver judges.
 func updateSimpleDeclVariables(vars map[string]string, decl *syntax.DeclClause) {
 	if decl == nil || decl.Variant == nil {
 		return
 	}
 	switch decl.Variant.Value {
-	case "export", "readonly", "declare", "typeset":
+	case "export", "readonly", "declare", "typeset", "local":
 	default:
 		return
 	}
 	known := true
 	for _, assign := range decl.Args {
-		if assign != nil && assign.Name == nil &&
-			(assign.Value == nil || !homeDeclOption(projectPOSIXWord(assign.Value))) {
+		if assign == nil || assign.Name != nil {
+			continue
+		}
+		if assign.Value == nil {
+			known = false
+			continue
+		}
+		option := projectPOSIXWord(assign.Value)
+		if decl.Variant.Value == "export" && !option.Expands && option.Value == "-n" {
+			continue
+		}
+		if !homeDeclOption(option) {
 			known = false
 		}
 	}
@@ -678,7 +694,6 @@ func updateSimpleDeclVariables(vars map[string]string, decl *syntax.DeclClause) 
 			continue
 		}
 		if !known || assign.Index != nil || assign.Array != nil {
-			delete(vars, assign.Name.Value)
 			continue
 		}
 		updateSimpleVariables(vars, []*syntax.Assign{assign})
@@ -695,9 +710,13 @@ func updateSimpleVariables(vars map[string]string, assigns []*syntax.Assign) {
 			vars[name] = ""
 		} else if value, known := simpleStaticWord(assign.Value, vars); known {
 			vars[name] = value
-		} else {
+		} else if name != "HOME" {
 			delete(vars, name)
 		}
+		// A HOME value the walk cannot read (HOME=$(echo $HOME), HOME=$X)
+		// keeps the previous HOME: an unknown HOME dropped every later ~
+		// write (GAP-2476). A home that a run-time value really moves to is
+		// outside what the static check can follow.
 	}
 }
 
