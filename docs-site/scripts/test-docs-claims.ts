@@ -1425,6 +1425,7 @@ const r105Rows: DocRow[] = [
   { gap: "GH #1100 p0:GAP-0742", page: "enterprise/troubleshooting.mdx", section: "Lifecycle error codes", has: ["An unreadable `~/.defenseclaw` or `~/.defenseclaw/hooks` is not on this list: the guardian sets it back to `0700`."] },
   // GH #1101 reference items (docs pod, 2026-10-28): config limits, block_message refusal, pack manifest re-pin.
   { gap: "GH #1101 p0:GAP-0677", page: "enterprise/configuration.mdx", section: "Where the config lives", has: ["The file may be at most 4 MiB and 65,536 parsed YAML nodes.", "`configuration source exceeds the 4 MiB limit`", "`parsed YAML exceeds the 65,536-node limit`", "move rules into a [custom rule pack](#custom-rule-packs)"], lacks: ["The file is limited to 4 MiB and 65,536 YAML nodes."] },
+  { gap: "GH #1101 p0:GAP-0677", page: "enterprise/configuration.mdx", section: "Where the config lives", has: ["On Windows, Setup and `enterprise windows ensure` refuse it with the same message, as `invalid_arguments` (exit `1639`)."] },
   { gap: "GH #1101 p0:GAP-0677", page: "enterprise/windows.mdx", section: "2. Write the config", has: ["The file may be at most 4 MiB and 65,536 YAML nodes", "([limits](/docs/enterprise/configuration#where-the-config-lives))"] },
   { gap: "GH #1101 p0:GAP-0765", page: "enterprise/configuration.mdx", has: ["A longer one is refused with `guardrail.block_message must be a string of at most 4096 characters (it has 4097)`"] },
   { gap: "GH #1101 p0:GAP-0777", page: "policies/rulepack-validation.mdx", has: ["Adding or editing that file changes the digest, so validate the pack again and pin the new digest"] },
@@ -2200,6 +2201,11 @@ describe('config limit refusals match the configuration pages (GH #1101)', () =>
   it('the parser and schema still word the 4 MiB, 65,536-node and block_message limits as quoted', () => {
     const yaml = source('internal/config/yaml_v8.go');
     assert.ok(yaml.includes('"configuration source exceeds the 4 MiB limit"') && yaml.includes('"parsed YAML exceeds the 65,536-node limit"'), 'config size/node refusal changed: re-check enterprise/configuration.mdx Where the config lives');
+    // Windows (p0 GAP-0677): the profile read refuses a file over 4 MiB first (managed config <path> exceeds 4194304 bytes);
+    // the standalone profile replaces that with the gateway compiler message above and refuses it as invalid arguments (1639).
+    const profile = source('internal/cli/windows_enterprise_profile.go');
+    assert.ok(profile.includes('if compiled := windowsEnterpriseStandaloneConfigPreflight(path); compiled != nil {') && profile.includes('return fmt.Errorf("%w: %w", errWindowsEnterpriseInvalidArguments, err)') && profile.includes('opts.suppliedConfigRefusal = err'), 'Windows no longer gives the gateway compiler size/node message as invalid arguments: re-check the Windows sentence in enterprise/configuration.mdx Where the config lives');
+    assert.ok(source('internal/cli/windows_enterprise_config_preflight_windows.go').includes('return windowsEnterpriseStandaloneConfigCompile(configPath)'), 'the Windows config preflight no longer runs the gateway compiler: re-check enterprise/configuration.mdx Where the config lives');
     const schema = source('internal/config/schema_v8.go');
     assert.ok(schema.includes('"a string of %s %d characters"') && schema.includes('" (it has %d)"'), 'schema length refusal changed: re-check the block_message sentence in enterprise/configuration.mdx');
     const configSchema = JSON.parse(source('schemas/config/v8/defenseclaw-config.schema.json'));
