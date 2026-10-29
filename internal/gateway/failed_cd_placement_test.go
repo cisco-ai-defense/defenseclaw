@@ -26,7 +26,8 @@ func TestFailedDirectoryChangeKeepsLaterStatementsInStartingDirectory(t *testing
 	}
 	home := t.TempDir()
 	cwd := filepath.Join(home, "project")
-	for _, dir := range []string{filepath.Join(home, ".defenseclaw", "hooks"), filepath.Join(home, ".ssh"), filepath.Join(cwd, "src")} {
+	for _, dir := range []string{filepath.Join(home, ".defenseclaw", "hooks"), filepath.Join(home, ".ssh"), filepath.Join(cwd, "src"),
+		filepath.Join(cwd, "build"), filepath.Join(cwd, "lib")} {
 		if err := os.MkdirAll(dir, 0o700); err != nil {
 			t.Fatal(err)
 		}
@@ -61,6 +62,18 @@ func TestFailedDirectoryChangeKeepsLaterStatementsInStartingDirectory(t *testing
 		{"cd /nonexistent-gap2574 || cd src; ln -s ../a.txt b", false},
 		{"pushd ./src; ln -s ../a.txt b; popd", false},
 		{"pushd /nonexistent-gap2574 && ln -s ../.defenseclaw dc && cat dc/config.yaml", false},
+		// Checker it10 rows: a recursive copy named from the parent after
+		// a cd to an existing directory reads a source missing where the
+		// shell stood if the cd failed; a missing source is not a link
+		// (R01, R03, R05, R07), and six relative cds joined by ; stay
+		// placed (N04).
+		{"cd build; cp -r ../src ./src-copy; cd ..", false},
+		{"cd build; cp -r ../lib .", false},
+		{"cd build; cp -a ../src/. ./out/", false},
+		{"cd build; cp -r ../missing-dir ./x", false},
+		{"cd a1; ls; cd a2; ls; cd a3; ls; cd a4; ls; cd a5; ln -s ../a.txt b", false},
+		{"cd a1; cd a2; cd a3; cd a4; cd a5; cd a6; ln -s ../a.txt b", false},
+		{"cd build; cd /nonexistent-gap2574; cp -r ../src ./s; cp a.txt ../.defenseclaw/config.yaml", true},
 	}
 	for _, connector := range []string{"claudecode", "codex"} {
 		installDefaultProfileConnector(t, connector)
