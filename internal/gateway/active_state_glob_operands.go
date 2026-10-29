@@ -81,8 +81,12 @@ func globbedStateCommandMutates(command actionfacts.CommandFact, words []string,
 	expanded := func(word string) bool { return stateWordExpands(word) }
 	switch strings.ToLower(command.Program) {
 	case "rm", "unlink", "rmdir", "shred":
+		// A word with no static spelling (`$X`) can expand to nothing, so a
+		// static state operand beside it is removed whatever it expands to
+		// (`rm -rf ~/.defenseclaw/hooks $X`, GAP-2484; BALANCED rule 2).
+		dynamic := slices.Contains(words, "")
 		for _, operand := range operands {
-			if expanded(operand) && statePatternReaches(operand, home, cwd) {
+			if (expanded(operand) || dynamic) && statePatternReaches(operand, home, cwd) {
 				return true
 			}
 		}
@@ -156,7 +160,7 @@ func globbedStateCommandMutates(command actionfacts.CommandFact, words []string,
 		if !ok {
 			return false
 		}
-		paths := operands[index+1:]
+		paths := gitCleanPathspecs(words)
 		if len(paths) == 0 {
 			tree, root := stateDirectoryOf(base, home, cwd)
 			return tree || root
@@ -286,6 +290,42 @@ func gitCleanDirectory(words []string, home, cwd string) (string, bool) {
 		return path.Clean(next), true
 	}
 	return base, true
+}
+
+// gitCleanPathspecs returns the static pathspecs after the clean
+// subcommand. The value of -e/--exclude (also `-fdxe keep`) is a pattern
+// git keeps, not a path it removes, so `clean -fdx -e keep` cleans the
+// whole tree (GAP-2047); a word with no static spelling can expand to
+// nothing (`clean -fdx $X`, GAP-2484). Neither narrows the clean.
+func gitCleanPathspecs(words []string) []string {
+	index := slices.Index(words, "clean")
+	if index < 0 {
+		return nil
+	}
+	var paths []string
+	optionsDone := false
+	for next := index + 1; next < len(words); next++ {
+		word := words[next]
+		switch {
+		case word == "":
+		case optionsDone:
+			paths = append(paths, word)
+		case word == "--":
+			optionsDone = true
+		case word == "--exclude":
+			next++
+		case len(word) > 1 && word[0] == '-' && word[1] != '-':
+			// A short cluster ending in e takes the next word as its value;
+			// an e inside the cluster takes the rest of it.
+			if strings.IndexByte(word[1:], 'e') == len(word)-2 {
+				next++
+			}
+		case strings.HasPrefix(word, "-"):
+		default:
+			paths = append(paths, word)
+		}
+	}
+	return paths
 }
 
 func gitCleanForces(option string) bool {
