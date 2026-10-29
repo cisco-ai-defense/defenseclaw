@@ -965,7 +965,7 @@ func mergeWindowsCursorManagedRebuildHooks(
 	}
 	// Only DefenseClaw's own entries change: a file it cannot edit in place
 	// (not JSON, or a duplicate key) is the administrator's to fix.
-	hooks, err := connector.SpliceWindowsCursorEnterpriseHooksInPlace(base, adapterPath, failMode)
+	hooks, err := connector.SpliceWindowsCursorEnterpriseHooksInPlace(base, adapterPath, cursorMachineHookFlagMode(failMode))
 	if err != nil && snapshot.existed && (!json.Valid(snapshot.data) || errors.Is(err, connector.ErrWindowsCursorHooksNotEditableInPlace)) {
 		return nil, fmt.Errorf("enterprise hooks: %s is not JSON DefenseClaw can edit in place, so the Cursor machine guard cannot be registered in it; "+
 			"it was left as it is: fix the file or remove it, then run repair again: %w", snapshot.path, err)
@@ -1081,6 +1081,19 @@ func cursorManagedPolicyFailMode(state windowsCursorManagedPolicyState) string {
 		return "closed"
 	}
 	return canonicalHookFailMode(state.HookFailMode)
+}
+
+// cursorMachineHookFlagMode is the delivery mode the machine hooks.json
+// records in Cursor's failClosed flag, which covers a hook process that never
+// answers. Under Secure Client it is the policy's mode (#1163), so the default
+// opens as it does on 26.8.4; every other profile closes it, as
+// effectiveFailClosed does for a per-user registration. The adapter still
+// makes the configured gateway-outage decision whenever it runs.
+func cursorMachineHookFlagMode(failMode string) string {
+	if secureClientHookDelivery() {
+		return failMode
+	}
+	return "closed"
 }
 
 // Legacy state is intentionally rendered byte-for-byte until reconciliation.
@@ -1412,7 +1425,7 @@ func installWindowsCursorManagedPolicy(
 			if !base.Exists {
 				data = []byte("{}\n")
 			}
-			hooks, err := connector.SpliceWindowsCursorEnterpriseHooks(data, before.adapter.path, state.HookFailMode)
+			hooks, err := connector.SpliceWindowsCursorEnterpriseHooks(data, before.adapter.path, cursorMachineHookFlagMode(state.HookFailMode))
 			return safefile.SharedEdit{Data: hooks}, err
 		}
 		if _, err := renderHooks(beforeHooks); err != nil {
@@ -1495,7 +1508,7 @@ func installWindowsCursorManagedPolicy(
 			}
 			return failMutation(err)
 		}
-		if err := connector.VerifyWindowsCursorEnterpriseHooks(installed.hooks.data, installed.adapter.path, cursorManagedPolicyFailMode(installed.parsed)); err != nil {
+		if err := connector.VerifyWindowsCursorEnterpriseHooks(installed.hooks.data, installed.adapter.path, cursorMachineHookFlagMode(cursorManagedPolicyFailMode(installed.parsed))); err != nil {
 			return failMutation(fmt.Errorf("enterprise hooks: installed Cursor hook command is not current: %w", err))
 		}
 		rollback = func() error {

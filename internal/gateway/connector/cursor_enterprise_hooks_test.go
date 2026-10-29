@@ -482,32 +482,42 @@ func TestIsBuiltinCursorConnector(t *testing.T) {
 	}
 }
 
-func TestWindowsCursorProcessFailureBlocksWithOpenGatewayOutage(t *testing.T) {
-	body, err := MergeWindowsCursorEnterpriseHooks(nil, testWindowsCursorAdapter, "open")
-	if err != nil {
-		t.Fatal(err)
-	}
-	cfg, err := decodeCursorHooksJSON(body)
-	if err != nil {
-		t.Fatal(err)
-	}
-	hooks, err := cursorHooksObject(cfg, false)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, event := range cursorEnterpriseHookEvents {
-		entries, ok := cursorHookEntryList(hooks[event])
-		if !ok || len(entries) != 1 {
-			t.Fatalf("Cursor %s entries = %#v", event, hooks[event])
+// Cursor's host flag covers a hook process that never answers. It follows
+// the delivery mode the caller passes: closed outside Secure Client, the
+// administrator's mode under it (open by default, as on 26.8.4).
+func TestWindowsCursorHostFlagFollowsTheDeliveryMode(t *testing.T) {
+	for mode, want := range map[string]bool{"open": false, "closed": true, "": true} {
+		body, err := MergeWindowsCursorEnterpriseHooks(nil, testWindowsCursorAdapter, mode)
+		if err != nil {
+			t.Fatal(err)
 		}
-		entry, ok := entries[0].(map[string]interface{})
-		if !ok || entry["failClosed"] != true {
-			t.Fatalf("Cursor %s process failure can run a tool: %#v", event, entries[0])
+		cfg, err := decodeCursorHooksJSON(body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		hooks, err := cursorHooksObject(cfg, false)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, event := range cursorEnterpriseHookEvents {
+			entries, ok := cursorHookEntryList(hooks[event])
+			if !ok || len(entries) != 1 {
+				t.Fatalf("Cursor %s entries = %#v", event, hooks[event])
+			}
+			entry, ok := entries[0].(map[string]interface{})
+			if !ok || entry["failClosed"] != want {
+				t.Fatalf("mode %q: Cursor %s entry = %#v, want failClosed %v", mode, event, entries[0], want)
+			}
+		}
+		if err := VerifyWindowsCursorEnterpriseHooks(body, testWindowsCursorAdapter, mode); err != nil {
+			t.Fatalf("mode %q: rendered policy is not current: %v", mode, err)
 		}
 	}
 }
 
-func TestWindowsCursorUpgradeRepairsOpenProcessFailureContract(t *testing.T) {
+// 1.0.4 wrote failClosed true for every mode. An open policy reads it for an
+// upgrade, refuses it as current, and reconciles it to the mode.
+func TestWindowsCursorUpgradeRepairsTheAlwaysClosedHostFlag(t *testing.T) {
 	current, err := MergeWindowsCursorEnterpriseHooks(nil, testWindowsCursorAdapter, "open")
 	if err != nil {
 		t.Fatal(err)
@@ -522,17 +532,27 @@ func TestWindowsCursorUpgradeRepairsOpenProcessFailureContract(t *testing.T) {
 	}
 	for _, event := range cursorEnterpriseHookEvents {
 		entries, _ := cursorHookEntryList(hooks[event])
-		entries[0].(map[string]interface{})["failClosed"] = false
+		entries[0].(map[string]interface{})["failClosed"] = true
 	}
 	previous, err := encodeCursorHooksJSON(cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if err := VerifyWindowsCursorEnterpriseHooksForMigration(previous, testWindowsCursorAdapter, "open"); err != nil {
-		t.Fatalf("previous 1.0.x policy must remain upgrade-readable: %v", err)
+		t.Fatalf("1.0.4 policy must remain upgrade-readable: %v", err)
+	}
+	if err := VerifyWindowsCursorEnterpriseHooksRegistered(previous, testWindowsCursorAdapter, "open"); err != nil {
+		t.Fatalf("1.0.4 policy is still DefenseClaw's registration: %v", err)
 	}
 	if err := VerifyWindowsCursorEnterpriseHooks(previous, testWindowsCursorAdapter, "open"); err == nil {
-		t.Fatal("current verify accepted the old fail-open process contract")
+		t.Fatal("current verify accepted the 1.0.4 always-closed host flag for an open policy")
+	}
+	// A closed policy does not take a flag turned off as its registration.
+	if err := VerifyWindowsCursorEnterpriseHooksForMigration(current, testWindowsCursorAdapter, "closed"); err == nil {
+		t.Fatal("migration read accepted failClosed false for a closed policy")
+	}
+	if err := VerifyWindowsCursorEnterpriseHooksRegistered(current, testWindowsCursorAdapter, "closed"); err == nil {
+		t.Fatal("presence read accepted failClosed false for a closed policy")
 	}
 	repaired, err := MergeWindowsCursorEnterpriseHooks(previous, testWindowsCursorAdapter, "open")
 	if err != nil {

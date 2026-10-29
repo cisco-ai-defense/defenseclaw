@@ -237,7 +237,7 @@ func TestWindowsCursorTargetPublicationKeepsAConcurrentHooksSave(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if hooks, err = connector.MergeWindowsCursorEnterpriseHooks(hooks, paths.Adapter, state.HookFailMode); err != nil {
+			if hooks, err = connector.MergeWindowsCursorEnterpriseHooks(hooks, paths.Adapter, cursorMachineHookFlagMode(state.HookFailMode)); err != nil {
 				t.Fatal(err)
 			}
 			for path, content := range map[string][]byte{paths.Adapter: adapter, paths.State: body, paths.Hooks: hooks} {

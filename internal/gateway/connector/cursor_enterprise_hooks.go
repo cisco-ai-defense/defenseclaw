@@ -218,9 +218,11 @@ func renderWindowsCursorAdapterWithTargets(hookBinary, failMode string, managed 
 // (cursorEnterpriseHookEvents) and none on any other event, including a
 // retired one an earlier release registered. Existing unrelated
 // top-level fields, hook events, and hook entries retain their JSON semantics
-// and order. The failMode argument is retained for the caller's outage-policy
-// parity; the host flag always closes an unanswered hook outside Secure Client.
-func MergeWindowsCursorEnterpriseHooks(existing []byte, adapterPath, _ string) ([]byte, error) {
+// and order. Each entry's failClosed flag is set from failMode: Cursor's host
+// flag covers a hook process that never answers, so the caller passes the
+// delivery mode it wants for that case (closed outside Secure Client, the
+// administrator's mode under it, as effectiveFailClosed does per user).
+func MergeWindowsCursorEnterpriseHooks(existing []byte, adapterPath, failMode string) ([]byte, error) {
 	command, legacyCommand, err := windowsCursorEnterpriseHookCommands(adapterPath)
 	if err != nil {
 		return nil, err
@@ -268,7 +270,7 @@ func MergeWindowsCursorEnterpriseHooks(existing []byte, adapterPath, _ string) (
 		if !ok {
 			return nil, fmt.Errorf("Cursor hooks event %q must be an array", event) //nolint:staticcheck // Preserve the product or platform name in this operator diagnostic.
 		}
-		hooks[event] = append(entries, windowsCursorEnterpriseHookEntry(command))
+		hooks[event] = append(entries, windowsCursorEnterpriseHookEntry(command, failMode))
 	}
 	return encodeCursorHooksJSON(cfg)
 }
@@ -331,8 +333,11 @@ func verifyWindowsCursorEnterpriseHooks(existing []byte, adapterPath, failMode s
 				continue
 			}
 			owned++
-			if !isExactWindowsCursorEnterpriseHookEntry(raw, entryCommand,
-				allowPrevious && normalizeHookFailMode(failMode) == "open") {
+			// A migration or presence read also accepts failClosed true,
+			// which 1.0.4 wrote for every mode. A closed policy still
+			// requires true, so a flag turned off reads as drift.
+			if !isExactWindowsCursorEnterpriseHookEntry(raw, entryCommand, failMode,
+				allowPrevious || allowRetired) {
 				return 0, fmt.Errorf("cursor hooks event %q has a drifted DefenseClaw entry", event)
 			}
 			if selectedCommand != "" && selectedCommand != entryCommand {
@@ -784,12 +789,12 @@ func cursorHookEntryList(raw interface{}) ([]interface{}, bool) {
 	return entries, ok
 }
 
-func windowsCursorEnterpriseHookEntry(command string) map[string]interface{} {
+func windowsCursorEnterpriseHookEntry(command, failMode string) map[string]interface{} {
 	return map[string]interface{}{
 		"type":       "command",
 		"command":    command,
 		"timeout":    windowsCursorEnterpriseHookTimeoutSeconds,
-		"failClosed": true,
+		"failClosed": normalizeHookFailMode(failMode) == "closed",
 	}
 }
 
@@ -820,7 +825,7 @@ func cursorHookCommand(raw interface{}) string {
 	return strings.TrimSpace(command)
 }
 
-func isExactWindowsCursorEnterpriseHookEntry(raw interface{}, command string, allowLegacyOpen bool) bool {
+func isExactWindowsCursorEnterpriseHookEntry(raw interface{}, command, failMode string, acceptAlwaysClosed bool) bool {
 	entry, ok := raw.(map[string]interface{})
 	if !ok || len(entry) != 4 || cursorHookCommand(entry) != command {
 		return false
@@ -832,7 +837,7 @@ func isExactWindowsCursorEnterpriseHookEntry(raw interface{}, command string, al
 		return false
 	}
 	timeoutSeconds, err := timeout.Int64()
-	return err == nil && typeName == "command" && validFailMode && (failClosed || allowLegacyOpen) && timeoutSeconds == windowsCursorEnterpriseHookTimeoutSeconds
+	return err == nil && typeName == "command" && validFailMode && (failClosed == (normalizeHookFailMode(failMode) == "closed") || (acceptAlwaysClosed && failClosed)) && timeoutSeconds == windowsCursorEnterpriseHookTimeoutSeconds
 }
 
 // cursorHookEventManaged reports whether the Windows machine policy registers

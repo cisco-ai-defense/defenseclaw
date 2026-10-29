@@ -106,7 +106,7 @@ func spliceCursorEnterpriseHooks(data []byte, adapterPath, failMode string, remo
 	}
 	entry := ""
 	if !remove {
-		encoded, err := json.Marshal(windowsCursorEnterpriseHookEntry(command))
+		encoded, err := json.Marshal(windowsCursorEnterpriseHookEntry(command, failMode))
 		if err != nil {
 			return nil, false
 		}
