@@ -200,3 +200,12 @@ def test_setup_time_budget_names_the_recovery_after_timeoutseconds():
     for text in (time_bullet, row, mdm_row, cli_row):
         assert "at least about 2 minutes" in text or "at least about 120" in text, text
         assert "only `/verify` and `/status`" in text, text
+    # 120 only lets a change start; the MDM allowance stays TIMEOUTSECONDS
+    # plus the recovery, and the repo setup guide names the same minimum
+    # (GAP-2509 checker iter-5 P4).
+    assert "Allow at least that long in your MDM" not in time_bullet, time_bullet
+    assert "only lets a change start" in time_bullet, time_bullet
+    guide = (REPO / "docs/WINDOWS-ENTERPRISE-SETUP.md").read_text(encoding="utf-8")
+    guide_row = next(line for line in guide.splitlines() if line.startswith("| `TIMEOUTSECONDS=`"))
+    assert "at least about 120" in guide_row, guide_row
+    assert "counted from when Setup starts" in guide_row, guide_row

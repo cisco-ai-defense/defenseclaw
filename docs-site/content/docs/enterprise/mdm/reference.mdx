@@ -98,7 +98,9 @@ gpg --dearmor < defenseclaw-enterprise-release-key.asc > defenseclaw-enterprise-
 - **Time.** Setup gives the lifecycle 30 minutes by default (`TIMEOUTSECONDS=60`
   to `7200`), counted from when Setup starts, so its payload checks and unpacking
   count too; a run with less than about a minute left after them does not start
-  the lifecycle and changes nothing, so a change needs `TIMEOUTSECONDS` of at least about 2 minutes (`120`); lower values suit only `/verify` and `/status`. Allow at least that long in your MDM. On Windows, a standalone Setup
+  the lifecycle and changes nothing, so a change needs `TIMEOUTSECONDS` of at least about 2 minutes (`120`); lower values suit only `/verify` and `/status`. `120` only lets a change start: an
+  unloaded upgrade or `/ensure` takes about 5 to 8 minutes, so keep the default unless you
+  have a reason not to. On Windows, a standalone Setup
   run stopped at `TIMEOUTSECONDS` then runs its own recovery for up to 10 more
   minutes, so allow `TIMEOUTSECONDS` plus 10 minutes (40 minutes by default). An
   MDM that ends Setup sooner can stop that recovery and leave `verify` failing

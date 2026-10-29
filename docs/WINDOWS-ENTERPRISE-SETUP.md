@@ -176,7 +176,7 @@ reboot.
 | `JSON=1` | Print the lifecycle result document. |
 | `NOSTART=1` | Install, upgrade, repair or ensure without starting the services. |
 | `PURGE=1` | With `/uninstall`, also remove each enrolled account's `%USERPROFILE%\.defenseclaw` and per-user binaries. `/uninstall` always removes the machine state under `C:\ProgramData\Cisco\DefenseClaw`. |
-| `TIMEOUTSECONDS=` | The lifecycle time limit, from 60 to 7200 seconds. The default is 1800. |
+| `TIMEOUTSECONDS=` | The lifecycle time limit, from 60 to 7200 seconds, counted from when Setup starts. The default is 1800. A change needs at least about 120; lower values suit only `/verify` and `/status`. A standalone run stopped at the limit then recovers for up to 10 more minutes, so let your MDM wait `TIMEOUTSECONDS` plus 10 minutes. |
 
 `CONFIG=` and `MANIFEST=` must be absolute local drive paths to regular,
 non-link files whose folder chain only administrators and SYSTEM can write.
