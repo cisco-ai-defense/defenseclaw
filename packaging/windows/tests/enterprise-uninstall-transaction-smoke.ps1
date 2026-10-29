@@ -3781,7 +3781,10 @@ targets:
             $outputPath = ''
             switch ($action) {
                 'plan' {
-                    if ($Arguments.Count -ne 8 -or
+                    # A fresh Install also passes --skip-busy-profiles last.
+                    if (($Arguments.Count -ne 8 -and
+                            -not ($Arguments.Count -eq 9 -and
+                                [string]$Arguments[8] -ceq '--skip-busy-profiles')) -or
                         [string]$Arguments[4] -cne '--manifest' -or
                         [string]$Arguments[6] -cne '--output') {
                         throw 'target-runtime plan mock received unexpected arguments'
