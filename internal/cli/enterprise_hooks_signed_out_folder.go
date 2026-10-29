@@ -14,16 +14,17 @@ import (
 // on the owner or permissions of the account's DefenseClaw folder (data) or
 // its hooks folder (hook), or, for connectors with managed runtime
 // generations (Codex, Copilot), on either folder through the runtime
-// generation check (no group 1, GAP-2516). Keep it equal to $script:SignedOutUntrustedFolderPattern
+// generation check or the Hermes footprint check (no group 1, GAP-2516). Keep it equal to $script:SignedOutUntrustedFolderPattern
 // in packaging/windows/DefenseClawEnterprise.psm1 (a contract test compares
 // them).
 var enterpriseHookSignedOutUntrustedFolderPattern = regexp.MustCompile(
 	`^enterprise hooks: protected target requires repair but its exact active Windows session is unavailable ` +
-		`\(verification: enterprise hooks: (?:managed (data|hook) directory verification failed|managed runtime generation directory is untrusted): enterprise hooks: (?:` +
+		`\(verification: enterprise hooks: (?:managed (data|hook) directory verification failed|managed runtime generation directory is untrusted|footprint directory trust check failed): enterprise hooks: (?:` +
 		`managed Windows DACL on (.+) has \d+ ACEs, expected \d+|` +
 		`managed Windows DACL is not protected on (.+)|` +
 		`managed Windows DACL on (.+) contains unexpected or duplicate ACE for principal S-[0-9-]+ \(mask 0x[0-9a-f]+, inheritance 0x[0-9a-f]+\)|` +
 		`managed Windows DACL on (.+) contains non-canonical ACE type at index \d+|` +
+		`managed Windows DACL on (.+) contains non-canonical ACE type \d+ at index \d+ \(principal S-[0-9-]+\)|` +
 		`owner SID \S+ does not match target SID S-[0-9-]+ on (.+)|` +
 		`null or unreadable Windows DACL on (.+))\)$`,
 )

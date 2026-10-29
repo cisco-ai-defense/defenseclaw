@@ -51,6 +51,14 @@ func TestEnterpriseHookSignedOutUntrustedFolder(t *testing.T) {
 			`enterprise hooks: managed Windows DACL is not protected on C:\Users\r103gb13-u1\.defenseclaw\hooks)`}, folder: dataDir + `\hooks`},
 		{name: "runtime generation data folder", row: enterpriseHookReconcileRow{Error: unavail + genCheck +
 			`enterprise hooks: owner SID S-1-5-32-545 does not match target SID S-1-5-21-1-2-3-1123 on C:\Users\r103gb13-u1\.defenseclaw)`}, folder: dataDir},
+		// GAP-2516 residual live (cap-ewin4, deny ACE drift): the Hermes
+		// footprint check and the current ACE type text.
+		{name: "footprint deny entry", row: enterpriseHookReconcileRow{Error: unavail +
+			`enterprise hooks: footprint directory trust check failed: enterprise hooks: managed Windows DACL on C:\Users\r103gb13-u1\.defenseclaw\hooks contains non-canonical ACE type 1 at index 0 (principal S-1-5-32-544))`}, folder: dataDir + `\hooks`},
+		{name: "runtime generation deny entry", row: enterpriseHookReconcileRow{Error: unavail + genCheck +
+			`enterprise hooks: managed Windows DACL on C:\Users\r103gb13-u1\.defenseclaw\hooks contains non-canonical ACE type 1 at index 0 (principal S-1-5-32-544))`}, folder: dataDir + `\hooks`},
+		{name: "footprint another folder", row: enterpriseHookReconcileRow{Error: unavail +
+			`enterprise hooks: footprint directory trust check failed: enterprise hooks: managed Windows DACL is not protected on C:\Users\r103gb13-u1\.hermes)`}},
 		{name: "runtime generation below hooks", row: enterpriseHookReconcileRow{Error: unavail + genCheck +
 			`enterprise hooks: managed Windows DACL is not protected on C:\Users\r103gb13-u1\.defenseclaw\hooks\codex)`}},
 		{name: "runtime generation another account", row: enterpriseHookReconcileRow{Error: unavail + genCheck +

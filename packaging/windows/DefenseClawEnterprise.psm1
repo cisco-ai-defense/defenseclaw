@@ -240,11 +240,12 @@ $script:DefenseClawSignedOutUntrustedFolders = @()
 # enterpriseHookSignedOutUntrustedFolderPattern in the gateway.
 $script:SignedOutUntrustedFolderPattern = [regex]::new(
     '^enterprise hooks: protected target requires repair but its exact active Windows session is unavailable ' +
-    '\(verification: enterprise hooks: (?:managed (data|hook) directory verification failed|managed runtime generation directory is untrusted): enterprise hooks: (?:' +
+    '\(verification: enterprise hooks: (?:managed (data|hook) directory verification failed|managed runtime generation directory is untrusted|footprint directory trust check failed): enterprise hooks: (?:' +
     'managed Windows DACL on (.+) has \d+ ACEs, expected \d+|' +
     'managed Windows DACL is not protected on (.+)|' +
     'managed Windows DACL on (.+) contains unexpected or duplicate ACE for principal S-[0-9-]+ \(mask 0x[0-9a-f]+, inheritance 0x[0-9a-f]+\)|' +
     'managed Windows DACL on (.+) contains non-canonical ACE type at index \d+|' +
+    'managed Windows DACL on (.+) contains non-canonical ACE type \d+ at index \d+ \(principal S-[0-9-]+\)|' +
     'owner SID \S+ does not match target SID S-[0-9-]+ on (.+)|' +
     'null or unreadable Windows DACL on (.+))\)$',
     [Text.RegularExpressions.RegexOptions]::CultureInvariant
