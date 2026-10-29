@@ -230,6 +230,13 @@ to about 4 seconds, then is blocked the same way. Prompts and session, stop and 
 keep their whole budget. Lifecycle runs run at a lower CPU priority than the hooks on every OS,
 so a repair does not take the CPU the hooks need to answer in time.
 
+A gateway too busy to answer blocks a tool call only when this budget runs out, never before it,
+so a burst makes calls wait longer before it blocks any. Measured on Windows Server 2025 with
+8 vCPUs in action mode: when one account starts 60 tool calls at once, each in a new session,
+every 15 seconds, about 9 in 10 calls get their decision within the budget (median about
+2.8 seconds) and the rest are blocked at the budget with `enterprise_managed_gateway_no_answer`.
+That is about 6 such calls per vCPU at once. In observe mode the same burst was answered in full.
+
 The administrator's `hook_fail_mode: open` allows a call only while the hook proves the
 gateway service is stopped (no gateway took the call). A restart the hook cannot prove
 stopped blocks, and so does a hook that reaches its answer deadline without a decision. Integrity,
