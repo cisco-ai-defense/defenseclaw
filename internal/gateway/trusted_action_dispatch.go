@@ -872,8 +872,12 @@ func withActiveStateTargetMention(
 		// Behind ProtectHome the gateway cannot open the user's home, so the
 		// mention scan cannot place a home target. A redirect target the
 		// shell opens is still proven against the hook client's resolved
-		// target map (GAP-2328: $CMD; echo $X > ~/.defenseclaw/config.yaml).
-		if !request.ProtectedHomeHook || !provenShellRedirectStateWrite(request) {
+		// target map (GAP-2328: $CMD; echo $X > ~/.defenseclaw/config.yaml),
+		// and so is a proven writer or delete whose operand the client
+		// followed into the state tree through a link the gateway cannot
+		// read (GAP-2549: rm /dev/shm/x/y/config.yaml, y -> ~/.defenseclaw).
+		if !request.ProtectedHomeHook ||
+			!provenShellRedirectStateWrite(request) && !provenStateMutationPath(facts, request) {
 			return findings
 		}
 	} else if !provenStateMutationPath(facts, request) && !provenBashAggregateStateWrite(request) &&
@@ -1043,9 +1047,23 @@ func provenStateMutationPath(facts actionfacts.Facts, request trustedActionReque
 			continue
 		}
 		if entry, ok := stateDirectoryEntryTarget(command, candidate, request); ok {
+			spellings := []string{candidate.Resolved, candidate.Value, candidate.Normalized}
 			candidate.Resolved = entry
 			if matchesActiveDefenseClawState(projected, candidate) {
 				return true
+			}
+			if request.ProtectedHomeHook && candidate.Access == actionfacts.PathAccessDelete {
+				// The gateway cannot follow the directory through a link
+				// the user can make; the hook placed the entry as the user
+				// and lists it only when it is in the state tree (GAP-2549).
+				for _, spelling := range spellings {
+					if placed := request.ResolvedWriteTargets[spelling]; filepath.IsAbs(placed) {
+						candidate.Resolved = placed
+						if matchesActiveDefenseClawState(projected, candidate) {
+							return true
+						}
+					}
+				}
 			}
 			continue
 		}
@@ -1111,7 +1129,7 @@ func provenLinkedStateWrite(facts actionfacts.Facts, request trustedActionReques
 				made := hookpaths.CommandLinks(request.Input.Tool, text, request.Input.CWD, projected.ActiveHome)
 				links = &made
 			}
-			if linkedActiveStateWrite(projected, command, candidate, *links, request.Input.CWD) {
+			if linkedActiveStateWrite(projected, command, candidate, *links, request, request.Input.CWD, false) {
 				return true
 			}
 		}
@@ -1183,19 +1201,30 @@ func placedLinkedStateWrite(request trustedActionRequest, text, home string, lin
 		if projected.ActiveHome == "" {
 			continue
 		}
-		// Every statement, not only one after a cd: a whole command the
-		// facts read as uncertain (a link named by a home path, ln -s
-		// ~/.defenseclaw/hooks ~/hk; cp a.txt ~/hk/x.sh, or made in a
-		// subshell) has no path facts of its own (GAP-2555).
+		// Each statement is read alone, in its directory, even when that is
+		// the starting directory: a lone statement gets the trusted home
+		// for its ~ and $HOME words, which the whole list does not, so
+		// ln -s ~/.defenseclaw/hooks ~/hk; cp a.txt ~/hk/x.sh names its
+		// write here only (GAP-2555).
 		for _, candidate := range projected.Paths {
 			command, ok := integrityCommandByID(projected, candidate.CommandID)
 			if ok && stateCommandMutatesPath(command, candidate) &&
-				linkedActiveStateWrite(projected, command, candidate, links, statement.Dir) {
+				linkedActiveStateWrite(projected, command, candidate, links, request, statement.Dir, true) {
 				return true
 			}
 		}
 		for _, operand := range hookpaths.InPlaceEditOperands(statement.Command, statement.Dir, home) {
-			for _, target := range links.AliasTargets(operand, true) {
+			targets := links.AliasTargets(operand, true)
+			if !request.SkipLocalFilesystemResolution && !request.ProtectedHomeHook {
+				// The linked entry's parent can go on through an existing
+				// disk link to state (GAP-2534); the entry keeps its name.
+				for _, target := range slices.Clone(targets) {
+					if parent, ok := hookpaths.ResolveWriteTarget(filepath.Dir(target)); ok {
+						targets = append(targets, filepath.Join(parent, filepath.Base(target)))
+					}
+				}
+			}
+			for _, target := range targets {
 				written := actionfacts.PathFact{
 					Access: actionfacts.PathAccessWrite, Flavor: actionfacts.PathFlavorPOSIX,
 					Value: target, Normalized: target, Absolute: true, Resolved: target,
@@ -1308,7 +1337,9 @@ func linkedActiveStateWrite(
 	command actionfacts.CommandFact,
 	candidate actionfacts.PathFact,
 	links hookpaths.Links,
+	request trustedActionRequest,
 	cwd string,
+	placed bool,
 ) bool {
 	value := candidate.Resolved
 	if value == "" {
@@ -1327,9 +1358,65 @@ func linkedActiveStateWrite(
 		slices.Contains([]string{"ln", "link", "gln", "glink"}, filepath.Base(command.Program)) ||
 		candidate.Access == actionfacts.PathAccessWrite && hasOperation(command, actionfacts.OperationMove) &&
 			!hasAnyOperation(command, actionfacts.OperationWrite, actionfacts.OperationAppend, actionfacts.OperationCopy)
-	for _, target := range links.AliasTargets(value, entry) {
+	targets := links.AliasTargets(value, entry)
+	for _, target := range targets {
 		linked := candidate
 		linked.Resolved = target
+		if matchesActiveDefenseClawState(projected, linked) {
+			return true
+		}
+	}
+	// The linked name can go on through a disk link that already exists:
+	// ln -s /opt/ext e; echo z > e/y/config.yaml, with /opt/ext/y ->
+	// ~/.defenseclaw, writes the state file. The names the command links
+	// reach (and, for a statement placed in a directory the links name, the
+	// operand itself) are resolved on disk as the direct spelling is in
+	// provenStateMutationPath (GAP-2534). An entry operand keeps its final
+	// name: only its parent is resolved.
+	if request.ProtectedHomeHook {
+		// Behind ProtectHome, PrivateTmp and PrivateDevices the gateway
+		// cannot read a directory the user can make, so the hook's map,
+		// which follows the operand through the command's links as the
+		// user, is the proof. Only an operand whose directory goes
+		// through a command link is read from it: a link that is the final
+		// name may be replaced, not followed (sed -i on the link).
+		if len(links.AliasTargets(filepath.Dir(value), false)) == 0 {
+			return false
+		}
+		physical := request.ResolvedWriteTargets[value]
+		if physical == "" || physical == value || !filepath.IsAbs(physical) {
+			return false
+		}
+		if active, same := hookpaths.ResolveActiveStateHardlinkTarget(physical, projected.ActiveHome); same {
+			physical = active
+		}
+		linked := candidate
+		linked.Resolved = physical
+		return matchesActiveDefenseClawState(projected, linked)
+	}
+	if request.SkipLocalFilesystemResolution {
+		return false
+	}
+	if placed {
+		targets = append(targets, value)
+	}
+	for _, target := range targets {
+		physical, ok := "", false
+		if entry {
+			if parent, found := hookpaths.ResolveWriteTarget(filepath.Dir(target)); found {
+				physical, ok = filepath.Join(parent, filepath.Base(target)), true
+			}
+		} else {
+			physical, ok = hookpaths.ResolveWriteTarget(target)
+		}
+		if !ok || physical == target {
+			continue
+		}
+		if active, same := hookpaths.ResolveActiveStateHardlinkTarget(physical, projected.ActiveHome); same {
+			physical = active
+		}
+		linked := candidate
+		linked.Resolved = physical
 		if matchesActiveDefenseClawState(projected, linked) {
 			return true
 		}

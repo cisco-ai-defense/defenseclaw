@@ -57,6 +57,16 @@ func isPatchInputField(field string) bool {
 	}
 }
 
+// isPatchEnvelopeField reports the "input" key of a patch tool whose value
+// is a patch envelope. Codex and the Copilot CLI send the freeform patch as
+// {"input": "*** Begin Patch ..."}; that text is the patch, not a nested
+// command line whose "***" words are globs (GAP-2180). Any other "input"
+// value keeps the nested reading.
+func isPatchEnvelopeField(field string, value any) bool {
+	text, ok := value.(string)
+	return ok && field == "input" && strings.HasPrefix(text, "*** Begin Patch")
+}
+
 func isRelativePatchPath(value string) bool {
 	if value == "" || strings.HasPrefix(value, "/") ||
 		strings.HasPrefix(value, `\`) || value == "~" ||

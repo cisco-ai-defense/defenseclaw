@@ -73,16 +73,14 @@ func ShellDirectoryWriteOperands(command, cwd, home string, directoryFacts map[s
 		}
 		return value, ok
 	}
+	// directory is expanded: StaticWord already read an unquoted ~ or ~/
+	// from home, so a ~ left here was quoted and names a directory called ~
+	// (RV-c7-1); env --chdir=~/x does not expand it either.
 	setDirectory := func(s *shellDirectoryState, directory string, physicalMode bool) {
-		absolute := directory == "~" || strings.HasPrefix(directory, "~/") || filepath.IsAbs(directory)
-		switch {
-		case directory == "~":
-			s.logical = home
-		case strings.HasPrefix(directory, "~/"):
-			s.logical = filepath.Join(home, directory[2:])
-		case filepath.IsAbs(directory):
+		absolute := filepath.IsAbs(directory)
+		if absolute {
 			s.logical = filepath.Clean(directory)
-		default:
+		} else {
 			s.logical = filepath.Join(s.logical, directory)
 		}
 		wasKnown := s.known

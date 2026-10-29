@@ -8,6 +8,7 @@ import (
 	"bytes"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"io/fs"
 	"maps"
 	"os"
@@ -69,6 +70,14 @@ const SourceLinkFactPrefix = "\x00source-link:"
 // in place of its incomplete walk. A name lexically inside a scope stays
 // opaque, and a missing fact leaves the operand unknown.
 const OpaqueScopeFactPrefix = "\x00opaque-scope:"
+
+// ReplacedLinkFactPrefix keys a write operand that a plain move replaces:
+// an existing link to a file (or a dangling one) that mv renames over, so
+// the file the link names is not written and the map entry of the operand
+// is the link entry itself (movedOntoLinkEntries, GAP-2558). "1" is the
+// only value. A gateway that cannot walk the user home reads it only for an
+// operand its own facts place as such a move destination.
+const ReplacedLinkFactPrefix = "\x00replaced-link:"
 
 // GlobFactPrefix keys the hook client's expansion of one pathname pattern
 // that the action target scan checks, by the absolute pattern. "0" means the
@@ -932,6 +941,12 @@ func ResolveConnector(connector, surface, event string, payload []byte) string {
 			}
 		}
 	}
+	// A move onto an existing link to a file replaces the link: those
+	// entries are described as the entry itself (GAP-2558).
+	var replacedLinks map[string]bool
+	if links.known && !links.opaque && len(links.aliases) == 0 {
+		replacedLinks = movedOntoLinkEntries(facts)
+	}
 	targets := map[string]string{CWDKey: cwd}
 	// The fixed part counts the truncation marker, so setting it never
 	// exceeds the budget.
@@ -983,6 +998,21 @@ func ResolveConnector(connector, surface, event string, payload []byte) string {
 				opaqueFacts[OpaqueScopeFactPrefix+resolutionPath] = fact
 			}
 		}
+		entryOnly := false
+		if replacedLinks[path] {
+			// mv replaces the link entry: only its directory is followed,
+			// the file the link names is not written (GAP-2558).
+			if parent, parentOK := ResolveWriteTarget(filepath.Dir(path)); parentOK {
+				resolved, ok, entryOnly = filepath.Join(parent, filepath.Base(path)), true, true
+			}
+		}
+		if ok && aliasKnown && !entryOnly && !protected.has(resolved) {
+			// Only the directory is followed: a link that is the final name
+			// may be replaced, not followed (sed -i on the link).
+			if state, inState := links.stateTarget(filepath.Dir(resolutionPath), home, protected); inState {
+				resolved = filepath.Join(state, filepath.Base(resolutionPath))
+			}
+		}
 		if !ok {
 			resolved = ""
 		}
@@ -993,7 +1023,14 @@ func ResolveConnector(connector, surface, event string, payload []byte) string {
 		}
 		size += entry
 		targets[path] = resolved
-		if resolved != "" {
+		if entryOnly {
+			key := ReplacedLinkFactPrefix + path
+			if cost := len(jsonString(key)) + 1 + len(jsonString("1")) + 1; size+cost <= maxEncodedTargets {
+				targets[key] = "1"
+				size += cost
+			}
+		}
+		if resolved != "" && !entryOnly {
 			// Protection follows the file: a symlink, a hard link, a case or
 			// short-name variant of an instruction file, and the physical
 			// file a symlinked one reaches (GAP-0869, GAP-0971).
@@ -1034,6 +1071,39 @@ func ResolveConnector(connector, surface, event string, payload []byte) string {
 			continue
 		}
 		add(path, false, false)
+	}
+	// A delete removes the final name, so only its directory is followed.
+	// Behind ProtectHome, PrivateTmp and PrivateDevices a managed gateway
+	// cannot follow that directory through a disk link or a link the command
+	// makes, so a delete whose entry lands in the DefenseClaw state tree is
+	// listed with that entry (GAP-2549). Removing a link itself names the
+	// link, not what it reaches, and is not listed.
+	for _, candidate := range facts.Paths {
+		if candidate.Access != actionfacts.PathAccessDelete || strings.HasSuffix(candidate.Value, "/") {
+			continue
+		}
+		path := candidate.Resolved
+		if path == "" {
+			path = candidate.Normalized
+		}
+		if !filepath.IsAbs(path) || strings.ContainsAny(path, "*?[]$`") {
+			continue
+		}
+		path = filepath.Clean(path)
+		if _, listed := targets[path]; listed || len(path) > MaxWriteTargetPathBytes || len(targets)-1 >= MaxWriteTargets {
+			continue
+		}
+		entry, inState := links.stateEntry(path, home, protected)
+		if !inState {
+			continue
+		}
+		cost := len(jsonString(path)) + 1 + len(jsonString(entry)) + 1
+		if size+cost > maxEncodedTargets {
+			truncated = true
+			continue
+		}
+		size += cost
+		targets[path] = entry
 	}
 	// An apply_patch edit names its files in the patch envelope, not in a
 	// redirect. Unknown targets make the map incomplete.
@@ -1461,6 +1531,10 @@ func Decode(value string) (map[string]string, bool) {
 			!filepath.IsAbs(strings.TrimPrefix(key, OpaqueScopeFactPrefix))) {
 			return nil, false
 		}
+		if strings.HasPrefix(key, ReplacedLinkFactPrefix) && (value != "1" ||
+			!filepath.IsAbs(strings.TrimPrefix(key, ReplacedLinkFactPrefix))) {
+			return nil, false
+		}
 		if strings.HasPrefix(key, GlobFactPrefix) && (value != "0" && value != "1" ||
 			!filepath.IsAbs(strings.TrimPrefix(key, GlobFactPrefix))) {
 			return nil, false
@@ -1492,6 +1566,81 @@ func pathFactIsRedirect(candidate actionfacts.PathFact, commands []actionfacts.C
 	return false
 }
 
+// movedOntoLinkEntries lists the destinations of a plain move (mv, with
+// no write, append or copy in the same command) that are an existing
+// symbolic link to a file or a dangling one: rename(2) replaces the link
+// entry and leaves the file it names untouched, so mv a.txt c with c a
+// user link to ~/.defenseclaw/config.yaml writes c, not the state file
+// (GAP-2558). A managed gateway behind ProtectHome judges the move from
+// the client map, which otherwise followed the final link. A destination
+// that another writer of the command also names (cp, a redirect), a
+// trailing separator, a link to a directory (the move lands inside it) or
+// a link whose target cannot be read is not listed.
+func movedOntoLinkEntries(facts actionfacts.Facts) map[string]bool {
+	var out map[string]bool
+	for path := range PlainMoveDestinations(facts) {
+		info, err := os.Lstat(path)
+		if err != nil || info.Mode()&os.ModeSymlink == 0 {
+			continue
+		}
+		if target, err := os.Stat(path); err == nil && target.IsDir() || err != nil && !errors.Is(err, fs.ErrNotExist) {
+			continue
+		}
+		if out == nil {
+			out = map[string]bool{}
+		}
+		out[path] = true
+	}
+	return out
+}
+
+// PlainMoveDestinations lists, from the facts alone, the absolute move
+// destinations of a plain mv (no write, append or copy operation in the
+// same command, no trailing separator) that no other writer of the action
+// names.
+func PlainMoveDestinations(facts actionfacts.Facts) map[string]bool {
+	moved := map[string]bool{}
+	written := map[string]bool{}
+	for _, candidate := range facts.Paths {
+		if candidate.Access != actionfacts.PathAccessWrite && candidate.Access != actionfacts.PathAccessAppend {
+			continue
+		}
+		path := candidate.Resolved
+		if path == "" {
+			path = candidate.Normalized
+		}
+		if !filepath.IsAbs(path) {
+			continue
+		}
+		path = filepath.Clean(path)
+		value := filepath.ToSlash(candidate.Value)
+		plainMove := candidate.Access == actionfacts.PathAccessWrite &&
+			!strings.HasSuffix(value, "/") && !strings.HasSuffix(value, "/.") &&
+			!pathFactIsRedirect(candidate, facts.Commands)
+		if plainMove {
+			plainMove = false
+			for _, command := range facts.Commands {
+				if command.ID == candidate.CommandID {
+					plainMove = slices.Contains(command.Operations, actionfacts.OperationMove) &&
+						!slices.Contains(command.Operations, actionfacts.OperationWrite) &&
+						!slices.Contains(command.Operations, actionfacts.OperationAppend) &&
+						!slices.Contains(command.Operations, actionfacts.OperationCopy)
+					break
+				}
+			}
+		}
+		if plainMove {
+			moved[path] = true
+		} else {
+			written[path] = true
+		}
+	}
+	for path := range written {
+		delete(moved, path)
+	}
+	return moved
+}
+
 // Programs that create a link from their operands: ln and link always, cp
 // with --link or --symbolic-link. mv and rename move a link to another name;
 // cd changes what a relative link operand denotes. A multicall binary runs
@@ -1513,7 +1662,10 @@ var (
 )
 
 // linkAlias is a name that a link created by the command gives to target.
-type linkAlias struct{ name, target string }
+// text is the target a relative symbolic link stores, read from the link
+// directory, so a move of the link names another target; it is empty when
+// the target does not depend on where the link sits.
+type linkAlias struct{ name, target, text string }
 
 // shellLinks are the links one shell command creates. known is false when
 // link names or operands are dynamic or an archive can extract links. opaque
@@ -1527,6 +1679,48 @@ type shellLinks struct {
 	globalOpaque     bool
 	opaqueScopes     []opaqueScope
 	copyDestinations []string
+	// renames, cds and copyScopes are the facts of the command that decide
+	// at the end whether its links stay known; a caller reading a nested
+	// literal shell body carries them out to its own links (GAP-2526).
+	renames, cds bool
+	copyScopes   []string
+	// renameOps are the static mv calls; wrappedCds is a directory change
+	// that only a wrapper or a nested shell runs (GAP-2532, GAP-2533).
+	renameOps  []renameOp
+	wrappedCds bool
+	// findMoves are the find -exec mv calls read as moves (GAP-2533).
+	findMoves []findMove
+	// linkTexts are the source texts of the link calls (RV-c4-1).
+	linkTexts []string
+}
+
+// merge adds the links a nested literal shell body makes.
+func (l *shellLinks) merge(inner shellLinks) {
+	l.aliases = append(l.aliases, inner.aliases...)
+	l.known = l.known && inner.known
+	l.opaque = l.opaque || inner.opaque
+	l.relative = l.relative || inner.relative
+	l.globalOpaque = l.globalOpaque || inner.globalOpaque
+	l.opaqueScopes = append(l.opaqueScopes, inner.opaqueScopes...)
+	l.copyDestinations = append(l.copyDestinations, inner.copyDestinations...)
+	l.linkTexts = append(l.linkTexts, inner.linkTexts...)
+}
+
+// literalShellBody returns the body of a POSIX shell called as sh -c BODY with
+// only fixed options, every word static and no positional words after the
+// body, when the body itself parses. Anything else returns "".
+func literalShellBody(program string, words []string, static []bool) string {
+	if !posixShellProgram(program) || slices.Contains(static, false) {
+		return ""
+	}
+	body, ok := shellCommandBodyIndex(words)
+	if !ok || body != len(words)-1 {
+		return ""
+	}
+	if _, parsed := parseShell(words[body]); !parsed {
+		return ""
+	}
+	return words[body]
 }
 
 // unknown marks the links unknown, and opaque when a link may be created.
@@ -1639,6 +1833,13 @@ func writePathForms(path string, linkDepth int) ([]string, bool) {
 }
 
 func commandLinksWithFacts(command, cwd, home string, facts map[string]string, record bool) shellLinks {
+	return commandLinks(command, cwd, home, facts, record, false)
+}
+
+// commandLinks reads the links of command. A nested literal shell body
+// returns its facts without the end checks: its caller runs them once
+// over its own links and the body links together.
+func commandLinks(command, cwd, home string, facts map[string]string, record, nested bool) shellLinks {
 	links := shellLinks{known: true}
 	file, parsed := parseShell(command)
 	if !parsed {
@@ -1655,9 +1856,14 @@ func commandLinksWithFacts(command, cwd, home string, facts map[string]string, r
 	linkCall, linkCWD := staticChangedDirectoryLink(file, cwd, home)
 	linkDirs, linkDirsKnown := topLevelLinkDirectories(file, cwd, home)
 	env := expand.ListEnviron("HOME=" + strings.TrimRight(home, "/"))
-	renames, cds := false, false
+	renames, cds, wrappedCds := false, false, false
 	var copyScopes []string
+	var renameOps []renameOp
+	var findMoves []findMove
 	boundPrograms := actionBoundProgramWords(file, home)
+	// A literal shell -c body is read in this directory only when nothing in
+	// the command changes directory first.
+	changesDirectory := tactics.RunsProgram(command, cdPrograms...)
 	syntax.Walk(file, func(node syntax.Node) bool {
 		call, isCall := node.(*syntax.CallExpr)
 		if !isCall || len(call.Args) == 0 {
@@ -1730,6 +1936,7 @@ func commandLinksWithFacts(command, cwd, home string, facts map[string]string, r
 			if call == linkCall {
 				workingDirectory = linkCWD
 			}
+			links.linkTexts = append(links.linkTexts, command[call.Pos().Offset():call.End().Offset()])
 			if slices.Contains(static, false) || !links.add(program, words[1:], workingDirectory) {
 				links.unknown(true)
 			}
@@ -1760,6 +1967,7 @@ func commandLinksWithFacts(command, cwd, home string, facts map[string]string, r
 			}
 			switch {
 			case option:
+				links.linkTexts = append(links.linkTexts, command[call.Pos().Offset():call.End().Offset()])
 				if slices.Contains(static, false) || !links.add(program, words[1:], dir) {
 					links.unknown(true)
 				}
@@ -1792,9 +2000,35 @@ func commandLinksWithFacts(command, cwd, home string, facts map[string]string, r
 				links.unknownIn(destination)
 			}
 		case slices.Contains(renamePrograms, program):
-			renames = true
+			// A static mv is followed; rename (a pattern) and a dynamic
+			// word are not read (GAP-2532).
+			op, read := renameOp{}, false
+			if program != "rename" && !slices.Contains(static, false) {
+				op, read = parseRename(words[1:], cwd)
+			}
+			if read {
+				renameOps = append(renameOps, op)
+			} else {
+				renames = true
+			}
 		case slices.Contains(cdPrograms, program):
 			cds = true
+		case !changesDirectory && literalShellBody(program, words, static) != "":
+			// sh -c "ln -s build/out bin" makes the link the plain ln makes,
+			// in the same directory: read the body as that command, so its
+			// links are known (or opaque) exactly as they would be written
+			// plain (GAP-2526).
+			// Renames and link-copying archives in the body also act on
+			// links made outside it (a top-level link renamed by sh -c
+			// "mv c d"), so they count as facts of this command too.
+			inner := commandLinks(literalShellBody(program, words, static), cwd, home, facts, record, true)
+			links.merge(inner)
+			renames = renames || inner.renames
+			cds = cds || inner.cds
+			wrappedCds = wrappedCds || inner.wrappedCds
+			copyScopes = append(copyScopes, inner.copyScopes...)
+			renameOps = append(renameOps, inner.renameOps...)
+			findMoves = append(findMoves, inner.findMoves...)
 		default:
 			// A wrapper (sudo, env, xargs, find -exec, sh -c) may run one.
 			text := command[start.Offset():call.End().Offset()]
@@ -1811,23 +2045,75 @@ func commandLinksWithFacts(command, cwd, home string, facts map[string]string, r
 				}
 			}
 			renames = renames || tactics.RunsProgram(text, renamePrograms...)
-			cds = cds || tactics.RunsProgram(text, cdPrograms...)
+			// env -C DIR, sudo -D DIR and find -execdir run their child in
+			// another directory, like a cd in a nested shell (GAP-2533).
+			if tactics.RunsProgram(text, cdPrograms...) || wrapperChangesDirectory(program, words, static) {
+				cds, wrappedCds = true, true
+			}
+			// find -exec runs its child argv, which the wrapper reading
+			// above does not see (GAP-2533). A find -exec mv into a fixed
+			// project directory is read as a move.
+			move, moveRead := parseFindMove(program, words, static, cwd)
+			for _, child := range findExecCommands(command, program, args, words, static) {
+				if tactics.RunsProgram(child, linkPrograms...) {
+					links.unknown(true)
+				}
+				if tactics.RunsProgram(child, renamePrograms...) {
+					if moveRead {
+						findMoves = append(findMoves, move)
+					} else {
+						renames = true
+					}
+				}
+				if tactics.RunsProgram(child, cdPrograms...) {
+					cds, wrappedCds = true, true
+				}
+			}
 		}
 		return true
 	})
+	if nested {
+		links.renames, links.cds, links.copyScopes = renames, cds, copyScopes
+		links.renameOps, links.wrappedCds, links.findMoves = renameOps, wrappedCds, findMoves
+		return links
+	}
 	if len(links.aliases) > 0 {
 		for _, scope := range copyScopes {
 			links.unknownCopyIn(scope)
 		}
 	}
-	if len(links.aliases) > 0 && (renames || cds && links.relative && linkCall == nil && !linkDirsKnown) {
-		links.unknown(true)
+	if len(links.aliases) > 0 {
+		// A rename keeps the links known only when every rename is a
+		// static mv read in the starting directory and every link is an
+		// ordinary project link (GAP-2532). A directory change that only a
+		// nested shell or a wrapper runs is not placed by the statement
+		// walk, so a link that may reach SSH or DefenseClaw state is opaque
+		// after it (GAP-2533); a link to a system tool or a sibling
+		// directory stays known, as with a plain cd.
+		stable := true
+		moves := len(renameOps) > 0 || len(findMoves) > 0
+		switch {
+		case renames || moves && cds:
+			stable = false
+		case moves:
+			stable = links.followRenames(renameOps) && links.findMovesClear(findMoves, home) && links.aliasesAwayFromState(cwd, home)
+		}
+		// A nested cd or a find -exec mv may also go below a linked
+		// directory through a disk link to state (RV-c4-1).
+		if stable && (wrappedCds || len(findMoves) > 0) {
+			stable = links.aliasesAwayFromState(cwd, home) && links.linkedTreesClear(command, cwd, home, wrappedCds, findMoves)
+		}
+		if !stable || cds && links.relative && linkCall == nil && !linkDirsKnown {
+			links.unknown(true)
+		}
 	}
 	// Scopes are read against the starting directory; after a directory
 	// change a relative write may land in a scope under another name.
 	if cds && len(links.opaqueScopes) > 0 {
 		links.globalOpaque = true
 	}
+	links.renames, links.cds, links.copyScopes = renames, cds, copyScopes
+	links.renameOps, links.wrappedCds, links.findMoves = renameOps, wrappedCds, findMoves
 	return links
 }
 
@@ -1858,8 +2144,10 @@ func topLevelLinkDirectories(file *syntax.File, cwd, home string) (dirs map[*syn
 // topLevelStatementDirectories lists the top-level statements of a ; / && /
 // || list other than its cd statements, each with the directory it runs in,
 // read lexically from cwd through the static cd statements before it
-// (GAP-1742). known is false when any cd, pushd or popd is elsewhere or
-// dynamic, or a top-level program word is not static.
+// (GAP-1742). The statements of a plain ( ... ) subshell are listed in its
+// place, and its cd statements end with it (GAP-2551). known is false when
+// any cd, pushd or popd is elsewhere or dynamic, or a top-level program word
+// is not static.
 func topLevelStatementDirectories(file *syntax.File, cwd, home string) (statements []*syntax.Stmt, dirs []string, known bool) {
 	// An enter or leave entry opens or closes a subshell: ( cd src && ln -s
 	// ../a.txt b ) runs its list from the directory it starts in, and its cd
@@ -3386,7 +3674,7 @@ func (l *shellLinks) add(program string, args []string, cwd string) bool {
 		if len(args) != 2 || strings.HasPrefix(args[0], "-") {
 			return false
 		}
-		l.record(args[0], args[1], false, cwd)
+		l.record(args[0], args[1], false, false, cwd)
 		return true
 	}
 	if slices.Contains(copyPrograms, program) {
@@ -3405,10 +3693,10 @@ func (l *shellLinks) add(program string, args []string, cwd string) bool {
 		literal := parsed.symbolic
 		for _, source := range parsed.sources {
 			if len(parsed.sources) == 1 && !parsed.targetDir {
-				l.record(source, dest, literal, cwd)
+				l.record(source, dest, literal, literal, cwd)
 			}
 			if dir != "" {
-				l.record(source, filepath.Join(dir, filepath.Base(filepath.Clean(source))), literal, cwd)
+				l.record(source, filepath.Join(dir, filepath.Base(filepath.Clean(source))), literal, literal, cwd)
 			}
 		}
 		return true
@@ -3494,10 +3782,10 @@ func (l *shellLinks) add(program string, args []string, cwd string) bool {
 	literal := symbolic && !relative
 	for _, source := range sources {
 		if dest != "" {
-			l.record(source, dest, literal, cwd)
+			l.record(source, dest, literal, symbolic, cwd)
 		}
 		if dir != "" {
-			l.record(source, filepath.Join(dir, filepath.Base(filepath.Clean(source))), literal, cwd)
+			l.record(source, filepath.Join(dir, filepath.Base(filepath.Clean(source))), literal, symbolic, cwd)
 		}
 	}
 	return true
@@ -3505,7 +3793,9 @@ func (l *shellLinks) add(program string, args []string, cwd string) bool {
 
 // record adds the alias that a link at name to source creates, under the
 // literal name and the name with its directory's existing links resolved.
-func (l *shellLinks) record(source, name string, literal bool, cwd string) {
+//
+// symbolic marks a symbolic link, whose relative target moves with it.
+func (l *shellLinks) record(source, name string, literal, symbolic bool, cwd string) {
 	if source == "" || name == "" {
 		return
 	}
@@ -3519,10 +3809,22 @@ func (l *shellLinks) record(source, name string, literal bool, cwd string) {
 		}
 		target = base + string(filepath.Separator) + target
 	}
-	l.aliases = append(l.aliases, linkAlias{name: name, target: target})
+	text := ""
+	switch {
+	case symbolic && literal && !filepath.IsAbs(source):
+		text = source
+	case symbolic && !literal:
+		// ln -r stores the target relative to the link directory; a path
+		// it cannot relate keeps a .. step, so a moved link stays opaque.
+		text = ".."
+		if relative, err := filepath.Rel(filepath.Dir(name), filepath.Clean(target)); err == nil {
+			text = relative
+		}
+	}
+	l.aliases = append(l.aliases, linkAlias{name: name, target: target, text: text})
 	if dir, ok := resolveWritePath(filepath.Dir(name), 0); ok {
 		if resolved := filepath.Join(dir, filepath.Base(name)); resolved != name {
-			l.aliases = append(l.aliases, linkAlias{name: resolved, target: target})
+			l.aliases = append(l.aliases, linkAlias{name: resolved, target: target, text: text})
 		}
 	}
 }
@@ -3543,6 +3845,60 @@ const maxLinkAliasSteps = 256
 // directory, reaches a protected file, that file is the target. ok is false
 // when one of those names cannot be resolved.
 func (l shellLinks) resolve(path string, protected protectedFiles) (string, bool) {
+	return l.resolveUntil(path, protected, protected.has)
+}
+
+// stateTarget is the name in home's DefenseClaw state tree that the
+// directory path reaches through the command's links and the disk links
+// below their targets (ln -s /dev/shm/x e; echo z > e/y/config.yaml with
+// /dev/shm/x/y -> ~/.defenseclaw). A managed gateway cannot read such a
+// directory, so the target map describes the state file (GAP-2534).
+func (l shellLinks) stateTarget(path, home string, protected protectedFiles) (string, bool) {
+	if len(l.aliases) == 0 || home == "" {
+		return "", false
+	}
+	state := filepath.Join(home, ".defenseclaw")
+	inState := func(name string) bool {
+		_, under := cutPathPrefix(name, state)
+		return under
+	}
+	resolved, ok := l.resolveUntil(path, protected, func(name string) bool {
+		return protected.has(name) || inState(name)
+	})
+	return resolved, ok && inState(resolved)
+}
+
+// stateEntry is the name in the DefenseClaw state tree of home that a
+// delete of path removes: its directory followed through the command links
+// and the disk links on the way (rm e/y/config.yaml after ln -s /dev/shm/x
+// e, with /dev/shm/x/y -> ~/.defenseclaw), its final name kept. ok is false
+// when the entry is not in the state tree or is path itself.
+func (l shellLinks) stateEntry(path, home string, protected protectedFiles) (string, bool) {
+	if home == "" {
+		return "", false
+	}
+	state := filepath.Join(home, ".defenseclaw")
+	dir := filepath.Dir(path)
+	parent, ok := "", false
+	if len(l.aliases) > 0 {
+		parent, ok = l.stateTarget(dir, home, protected)
+	}
+	if !ok {
+		parent, ok = ResolveWriteTarget(dir)
+	}
+	if !ok {
+		return "", false
+	}
+	entry := filepath.Join(parent, filepath.Base(path))
+	if _, under := cutPathPrefix(entry, state); !under || entry == path {
+		return "", false
+	}
+	return entry, true
+}
+
+// resolveUntil is resolve with the stop test: the walk returns the first
+// name through the links that stop accepts.
+func (l shellLinks) resolveUntil(path string, protected protectedFiles, stop func(string) bool) (string, bool) {
 	target := func(path string) (string, bool) {
 		resolved, ok := resolveWritePath(path, 0)
 		if ok {
@@ -3551,7 +3907,7 @@ func (l shellLinks) resolve(path string, protected protectedFiles) (string, bool
 		return resolved, ok
 	}
 	resolved, ok := target(path)
-	if !ok || len(l.aliases) == 0 || protected.has(resolved) {
+	if !ok || len(l.aliases) == 0 || stop(resolved) {
 		return resolved, ok
 	}
 	seen := map[string]bool{path: true}
@@ -3597,7 +3953,7 @@ func (l shellLinks) resolve(path string, protected protectedFiles) (string, bool
 					}
 					next = collapsed
 				}
-				if protected.has(linked) {
+				if stop(linked) {
 					return linked, true
 				}
 				queue = append(queue, next)
