@@ -21,6 +21,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/defenseclaw/defenseclaw/internal/shellparse"
 	"mvdan.cc/sh/v3/syntax"
 )
 
@@ -99,7 +100,7 @@ func homeResolvedSource(source, home string) (string, bool) {
 		return "", false
 	}
 	file, err := syntax.NewParser(syntax.Variant(syntax.LangPOSIX)).
-		Parse(strings.NewReader(source), "")
+		Parse(shellparse.Reader(source), "")
 	if err != nil {
 		return "", false
 	}
@@ -366,7 +367,7 @@ func withoutShellComments(source string, lang syntax.LangVariant) string {
 		return source
 	}
 	file, err := syntax.NewParser(syntax.Variant(lang), syntax.KeepComments(true)).
-		Parse(strings.NewReader(source), "")
+		Parse(shellparse.Reader(source), "")
 	if err != nil {
 		return source
 	}

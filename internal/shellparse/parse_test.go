@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"mvdan.cc/sh/v3/syntax"
 )
 
 func TestTooDeep(t *testing.T) {
@@ -50,5 +52,21 @@ func TestParseRefusesDeepNestingWithoutRecursing(t *testing.T) {
 	nested := strings.Repeat("$(echo ", 64) + "x" + strings.Repeat(")", 64)
 	if _, ok := Parse("echo " + nested); !ok {
 		t.Error("64-level command substitution did not parse")
+	}
+}
+
+// Reader refuses a deep command as a read error, so a caller that hands it
+// to its own syntax.Parser gets that error instead of a recursion
+// (GAP-2556).
+func TestReaderRefusesDeepNesting(t *testing.T) {
+	defer debug.SetMaxStack(debug.SetMaxStack(64 << 20))
+	for _, unit := range []string{"(", "$(", "$((", "{ ", "["} {
+		command := strings.Repeat(unit, (180<<10)/len(unit)) + "\necho done"
+		if _, err := syntax.NewParser().Parse(Reader(command), ""); err == nil {
+			t.Errorf("unit %q: deep command parsed", unit)
+		}
+	}
+	if _, err := syntax.NewParser().Parse(Reader("(cd src && (make && (echo ok)))"), ""); err != nil {
+		t.Errorf("ordinary nesting: %v", err)
 	}
 }

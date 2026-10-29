@@ -17,6 +17,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
 	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
+	"github.com/defenseclaw/defenseclaw/internal/shellparse"
 	"mvdan.cc/sh/v3/syntax"
 )
 
@@ -230,7 +231,7 @@ func trustedPythonAssignedArgv(input actionfacts.Input, argv []string) bool {
 	if !ok || len(command) > 64<<10 {
 		return false
 	}
-	file, err := syntax.NewParser(syntax.Variant(syntax.LangPOSIX)).Parse(strings.NewReader(command), "")
+	file, err := syntax.NewParser(syntax.Variant(syntax.LangPOSIX)).Parse(shellparse.Reader(command), "")
 	if err != nil || len(file.Stmts) != 1 {
 		return false
 	}
@@ -388,7 +389,7 @@ func trustedStaticRedirectAuthorizedKeysWrite(input actionfacts.Input, facts act
 		facts.Parse.Dialect != actionfacts.DialectPOSIX {
 		return false
 	}
-	file, err := syntax.NewParser(syntax.Variant(syntax.LangBash)).Parse(strings.NewReader(input.Command), "")
+	file, err := syntax.NewParser(syntax.Variant(syntax.LangBash)).Parse(shellparse.Reader(input.Command), "")
 	if err != nil {
 		return false
 	}
@@ -500,7 +501,7 @@ func trustedHereStringAuthorizedKeysWrite(input actionfacts.Input) bool {
 	if input.Command == "" || len(input.Command) > 64<<10 {
 		return false
 	}
-	file, err := syntax.NewParser(syntax.Variant(syntax.LangBash)).Parse(strings.NewReader(input.Command), "")
+	file, err := syntax.NewParser(syntax.Variant(syntax.LangBash)).Parse(shellparse.Reader(input.Command), "")
 	if err != nil || len(file.Stmts) != 1 || len(file.Stmts[0].Redirs) != 2 {
 		return false
 	}
@@ -529,7 +530,7 @@ func trustedDDOutputAuthorizedKeysWrite(input actionfacts.Input) bool {
 	if input.Command == "" || len(input.Command) > 64<<10 {
 		return false
 	}
-	file, err := syntax.NewParser(syntax.Variant(syntax.LangPOSIX)).Parse(strings.NewReader(input.Command), "")
+	file, err := syntax.NewParser(syntax.Variant(syntax.LangPOSIX)).Parse(shellparse.Reader(input.Command), "")
 	if err != nil || len(file.Stmts) != 1 {
 		return false
 	}
@@ -763,7 +764,7 @@ func trustedFindExecAuthorizedKeysWrite(input actionfacts.Input) bool {
 	if input.Command == "" || len(input.Command) > 64<<10 || input.ActiveHome == "" {
 		return false
 	}
-	file, err := syntax.NewParser(syntax.Variant(syntax.LangPOSIX)).Parse(strings.NewReader(input.Command), "")
+	file, err := syntax.NewParser(syntax.Variant(syntax.LangPOSIX)).Parse(shellparse.Reader(input.Command), "")
 	if err != nil || len(file.Stmts) != 1 || len(file.Stmts[0].Redirs) != 0 {
 		return false
 	}
@@ -802,7 +803,7 @@ func trustedFindExecAuthorizedKeysWrite(input actionfacts.Input) bool {
 	if !ok || len(quoted.Value) > 16<<10 {
 		return false
 	}
-	script, err := syntax.NewParser(syntax.Variant(syntax.LangPOSIX)).Parse(strings.NewReader(quoted.Value), "")
+	script, err := syntax.NewParser(syntax.Variant(syntax.LangPOSIX)).Parse(shellparse.Reader(quoted.Value), "")
 	if err != nil || len(script.Stmts) != 1 || len(script.Stmts[0].Redirs) != 1 {
 		return false
 	}
@@ -829,7 +830,7 @@ func trustedAuthorizedKeysSymlinkWrite(input actionfacts.Input) bool {
 	if input.Command == "" || len(input.Command) > 64<<10 || input.ActiveHome == "" {
 		return false
 	}
-	file, err := syntax.NewParser(syntax.Variant(syntax.LangPOSIX)).Parse(strings.NewReader(input.Command), "")
+	file, err := syntax.NewParser(syntax.Variant(syntax.LangPOSIX)).Parse(shellparse.Reader(input.Command), "")
 	if err != nil {
 		return false
 	}
@@ -1475,7 +1476,7 @@ func trustedStaticStatementAuthorizedKeysWrite(input actionfacts.Input) bool {
 	if input.Command == "" || len(input.Command) > 64<<10 {
 		return false
 	}
-	file, err := syntax.NewParser(syntax.Variant(syntax.LangPOSIX)).Parse(strings.NewReader(input.Command), "")
+	file, err := syntax.NewParser(syntax.Variant(syntax.LangPOSIX)).Parse(shellparse.Reader(input.Command), "")
 	if err != nil || len(file.Stmts) < 2 || len(file.Stmts) > 16 {
 		return false
 	}
@@ -1508,7 +1509,7 @@ func trustedAuthorizedKeysGlobWrite(input actionfacts.Input) bool {
 	if input.Command == "" || len(input.Command) > 64<<10 {
 		return false
 	}
-	file, err := syntax.NewParser(syntax.Variant(syntax.LangPOSIX)).Parse(strings.NewReader(input.Command), "")
+	file, err := syntax.NewParser(syntax.Variant(syntax.LangPOSIX)).Parse(shellparse.Reader(input.Command), "")
 	if err != nil {
 		return false
 	}
@@ -1550,7 +1551,7 @@ func trustedAssignedAuthorizedKeysWrite(input actionfacts.Input) bool {
 	if input.Command == "" || len(input.Command) > 64<<10 || input.ActiveHome == "" {
 		return false
 	}
-	file, err := syntax.NewParser(syntax.Variant(syntax.LangPOSIX)).Parse(strings.NewReader(input.Command), "")
+	file, err := syntax.NewParser(syntax.Variant(syntax.LangPOSIX)).Parse(shellparse.Reader(input.Command), "")
 	if err != nil || len(file.Stmts) != 2 {
 		return false
 	}
@@ -1596,7 +1597,7 @@ func trustedSedInPlaceAuthorizedKeysWrite(input actionfacts.Input) bool {
 	if input.Command == "" || len(input.Command) > 64<<10 {
 		return false
 	}
-	file, err := syntax.NewParser(syntax.Variant(syntax.LangPOSIX)).Parse(strings.NewReader(input.Command), "")
+	file, err := syntax.NewParser(syntax.Variant(syntax.LangPOSIX)).Parse(shellparse.Reader(input.Command), "")
 	if err != nil || len(file.Stmts) != 1 || len(file.Stmts[0].Redirs) != 0 {
 		return false
 	}
@@ -1713,7 +1714,7 @@ func trustedHomeDirectoryAuthorizedKeysWrite(input actionfacts.Input) bool {
 	if input.Command == "" || input.ActiveHome == "" || len(input.Command) > 64<<10 {
 		return false
 	}
-	file, err := syntax.NewParser(syntax.Variant(syntax.LangBash)).Parse(strings.NewReader(input.Command), "")
+	file, err := syntax.NewParser(syntax.Variant(syntax.LangBash)).Parse(shellparse.Reader(input.Command), "")
 	if err != nil {
 		return false
 	}

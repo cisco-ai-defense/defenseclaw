@@ -656,6 +656,13 @@ func ResolveConnector(connector, surface, event string, payload []byte) string {
 	if len(payload) > MaxPayloadBytes {
 		return incompleteEvidence("")
 	}
+	// A body nested past the reading bound is past the analysis limits as
+	// a whole: no reader below parses it (GAP-2556). JSON itself never
+	// nests that deep; a command hidden behind \u0028 escapes is still
+	// refused by shellparse.Reader in every parser.
+	if shellparse.TooDeep(string(payload)) {
+		return incompleteEvidence("")
+	}
 	var envelope map[string]json.RawMessage
 	if json.Unmarshal(payload, &envelope) != nil {
 		return ""
