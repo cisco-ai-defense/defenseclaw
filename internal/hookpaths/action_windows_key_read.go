@@ -53,6 +53,9 @@ func actionWindowsKeyReadStatements(command, cwd, home string) bool {
 		// reads what it lists (Get-ChildItem $HOME\.ssh | Select-String
 		// ., RV22-1).
 		var pipeHead []string
+		// dirs[certain:] are the candidates of the next statement: after
+		// cd C:\proj && only the directory it entered is (GAP-2421).
+		certain := 0
 		for i := 0; i <= len(words); i++ {
 			if i < len(words) {
 				switch words[i] {
@@ -61,32 +64,64 @@ func actionWindowsKeyReadStatements(command, cwd, home string) bool {
 					continue
 				}
 			}
-			statement := actionWindowsReaderWords(words[start:i])
+			raw := words[start:i]
+			statement := actionWindowsReaderWords(raw)
+			// (grep -r . .) reads as grep -r . . (RV26-1).
+			reader := actionWindowsUngroupedStatement(statement)
 			piped := start > 0 && words[start-1] == "|"
 			if !piped {
 				pipeHead = statement
 			}
+			// Both readings of a statement count: as written (a loop body's
+			// ${f} keeps its brace) and without the grouping around it.
+			readings := [][]string{statement}
+			if strings.Join(reader, "\x00") != strings.Join(statement, "\x00") {
+				readings = append(readings, reader)
+			}
 			if piped {
-				for _, dir := range dirs {
-					if actionWindowsPipedKeyDirectoryRead(pipeHead, statement, dir, home) {
-						return true
+				for _, stage := range readings {
+					for _, dir := range dirs[certain:] {
+						if actionWindowsPipedKeyDirectoryRead(pipeHead, stage, dir, home) {
+							return true
+						}
 					}
 				}
 			}
 			if len(statement) >= 3 && statement[0] == "for" && statement[2] == "in" {
 				loops[statement[1]] = statement[3:]
 			}
-			for _, candidate := range actionWindowsLoopBindings(statement, loops) {
-				for _, dir := range dirs {
-					if actionPrivateKeyReadWords(candidate, dir, home, keyReadWindows, 0) {
-						return true
+			for _, stage := range readings {
+				for _, candidate := range actionWindowsLoopBindings(stage, loops) {
+					for _, dir := range dirs[certain:] {
+						if actionPrivateKeyReadWords(candidate, dir, home, keyReadWindows, 0) {
+							return true
+						}
 					}
 				}
 			}
-			if len(statement) == 2 && actionWindowsLocationProgram(statement[0]) && len(dirs) < 8 {
-				if next, ok := actionWindowsPath(statement[1], dirs[len(dirs)-1], home); ok {
-					dirs = append(dirs, next)
+			separator := ""
+			if i < len(words) {
+				separator = words[i]
+			}
+			switch {
+			case len(statement) == 2 && actionWindowsLocationProgram(statement[0]) && len(dirs) < 8:
+				next, ok := actionWindowsPath(statement[1], dirs[len(dirs)-1], home)
+				if !ok {
+					certain = 0
+					break
 				}
+				dirs = append(dirs, next)
+				if separator == "&&" && actionWindowsCertainLocation(statement, next, dirs[certain:len(dirs)-1]) {
+					certain = len(dirs) - 1
+				} else {
+					certain = 0
+				}
+			case len(statement) > 0 && actionWindowsLocationProgram(statement[0]),
+				separator != "&&" && separator != "|",
+				actionWindowsStatementNamesLocation(raw):
+				// (cd - && ..., (Set-Location -), (popd: a location
+				// change inside parentheses or a block (RV26-1).
+				certain = 0
 			}
 			start = i + 1
 		}

@@ -2808,6 +2808,39 @@ func archiveDestination(program string, args []string, static []bool, cwd string
 	return filepath.Clean(destination)
 }
 
+// tarLongOptions are the tar long options tarDestination scopes. An
+// abbreviation must name exactly one of them; any other option, such as one
+// that runs a program (--to-command, --use-compress-program,
+// --checkpoint-action, --info-script), writes another file (--index-file,
+// --listed-incremental), renames members (--transform) or keeps existing
+// links (--keep-directory-symlink), is an unknown destination (GAP-2445).
+var tarLongOptions = append([]string{
+	"directory", "dir", "cd", "one-top-level", "file", "strip-components", "exclude",
+	"exclude-from", "files-from", "warning", "owner", "group", "mode", "mtime",
+	"blocking-factor", "record-size", "format", "label", "newer", "after-date",
+	"newer-mtime", "exclude-tag", "exclude-tag-all", "exclude-tag-under",
+	"totals", "occurrence", "checkpoint",
+}, tarLongFlags...)
+
+// tarLongFlags are tar long options without a value that do not move the
+// extraction destination.
+var tarLongFlags = []string{
+	"zstd", "absolute-names", "get", "extract", "list", "create",
+	"overwrite", "overwrite-dir", "no-overwrite-dir", "keep-old-files", "skip-old-files",
+	"keep-newer-files", "unlink-first", "recursive-unlink", "no-same-owner", "same-owner",
+	"no-same-permissions", "same-permissions", "preserve-permissions", "numeric-owner",
+	"touch", "verbose", "gzip", "gunzip", "ungzip", "bzip2", "xz", "lzip", "lzma", "lzop",
+	"auto-compress", "no-auto-compress", "wildcards", "no-wildcards", "wildcards-match-slash",
+	"no-wildcards-match-slash", "anchored", "no-anchored", "ignore-case", "no-ignore-case",
+	"ignore-zeros", "ignore-failed-read", "sparse", "show-transformed-names",
+	"delay-directory-restore", "no-delay-directory-restore", "no-recursion", "recursion",
+	"null", "no-null", "unquote", "no-unquote", "full-time", "utc", "exclude-vcs",
+	"exclude-vcs-ignores", "exclude-backups", "exclude-caches", "exclude-caches-all",
+	"exclude-caches-under", "check-links", "read-full-records", "verify", "same-order",
+	"preserve-order", "seek", "no-seek", "force-local", "xattrs", "no-xattrs", "acls",
+	"no-acls", "selinux", "no-selinux",
+}
+
 // tarDestination reads destination-bearing tar options in short clusters,
 // old-style option words, and unique long-option abbreviations. Ambiguity
 // leaves the archive scope global.
@@ -2836,10 +2869,7 @@ func tarDestination(args []string, static []bool, cwd string) (string, bool) {
 		}
 		if strings.HasPrefix(arg, "--") {
 			name, value, joined := strings.Cut(arg[2:], "=")
-			option, unique := longOption(name, []string{
-				"directory", "dir", "cd", "one-top-level", "file", "strip-components",
-				"exclude", "zstd", "absolute-names", "get", "extract", "list", "create",
-			})
+			option, unique := longOption(name, tarLongOptions)
 			if !unique {
 				return "", false
 			}
@@ -2859,20 +2889,25 @@ func tarDestination(args []string, static []bool, cwd string) (string, bool) {
 				if joined && !consume(value) {
 					return "", false
 				}
-			case "file", "strip-components", "exclude":
+			case "file", "strip-components", "exclude", "exclude-from", "files-from", "warning",
+				"owner", "group", "mode", "mtime", "blocking-factor", "record-size", "format", "label",
+				"newer", "after-date", "newer-mtime", "exclude-tag", "exclude-tag-all", "exclude-tag-under":
 				if !joined {
 					i++
 					if i >= len(args) || !static[i] || args[i] == "" {
 						return "", false
 					}
 				}
-			case "zstd", "absolute-names", "get", "extract", "list", "create":
+			case "totals", "occurrence", "checkpoint":
+				// An optional value is only ever joined (--totals=SIGNAL).
+			default:
+				if !slices.Contains(tarLongFlags, option) {
+					// A future or unknown destination option cannot be scoped safely.
+					return "", false
+				}
 				if joined {
 					return "", false
 				}
-			default:
-				// A future or unknown destination option cannot be scoped safely.
-				return "", false
 			}
 			continue
 		}
@@ -2898,7 +2933,10 @@ func tarDestination(args []string, static []bool, cwd string) (string, bool) {
 				if !oldStyle {
 					j = len(cluster)
 				}
-			case 'f':
+			case 'f', 'T', 'X', 'b', 'N', 'V', 'H', 'K', 'L':
+				// The archive, a member list or exclude file, the blocking
+				// factor, a date, a label, a format, a starting member or a tape
+				// length: one value, never the destination.
 				if oldStyle || j+1 == len(cluster) {
 					i++
 					if i >= len(args) || !static[i] {
@@ -2908,9 +2946,13 @@ func tarDestination(args []string, static []bool, cwd string) (string, bool) {
 				if !oldStyle {
 					j = len(cluster)
 				}
-			case 'a', 'x', 'z', 'j', 'J', 'v', 'O', 't', 'c', 'P', 'p', 'h', 'k', 'm', 'w', 'U':
+			case 'a', 'x', 'z', 'j', 'J', 'v', 'O', 't', 'c', 'P', 'p', 'h', 'k', 'm', 'w', 'U',
+				'o', 'S', 'B', 'l', 'r', 'u', 'i', 'n':
 			default:
-				// Unknown short options may consume a path.
+				// Unknown short options may consume a path. -W is GNU --verify,
+				// but bsdtar (macOS /usr/bin/tar, Windows tar.exe) reads
+				// -W NAME=VALUE as --NAME=VALUE, so -W directory=DIR moves the
+				// destination (GAP-2445).
 				return "", false
 			}
 		}

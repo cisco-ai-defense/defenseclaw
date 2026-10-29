@@ -85,6 +85,10 @@ func TestMSYSDrivePathTwinSpellsTheDrive(t *testing.T) {
 		{"rm -rf /cygdrive/c/Users/dcw/.defenseclaw/hooks", "rm -rf C:/Users/dcw/.defenseclaw/hooks", true},
 		{"cp a.txt '/d/x y' > /c/Users/dcw/out.txt", "cp a.txt 'D:/x y' > C:/Users/dcw/out.txt", true},
 		{"cd /c && ls", "cd C: && ls", true},
+		// GAP-2399: a literal key ending at "=" before the mount.
+		{"dd if=a.txt of=/c/Users/dcw/.defenseclaw/config.yaml", "dd if=a.txt of=C:/Users/dcw/.defenseclaw/config.yaml", true},
+		{"tool --output=/cygdrive/d/x 'of='/c/y", "tool --output=D:/x 'of='/c/y", true},
+		{"env a/b=/c/x x=/cc/d", "", false},
 		{`echo "/c/Users/dcw/f" x/c/y /cc/d /tmp/x`, "", false},
 		{"cat <<EOF\n/c/Users/dcw/f\nEOF\n", "", false},
 	} {

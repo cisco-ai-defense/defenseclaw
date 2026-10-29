@@ -213,8 +213,18 @@ func ActionPrivateKeyRead(command, cwd, home string) bool {
 	// grep -r . ., RV22-1). The previous directories stay candidates, as on
 	// a Windows home: the change may fail or sit in a subshell.
 	dirs := []string{cwd}
-	readAt := func(words []string) bool {
-		for _, dir := range dirs {
+	// A call that runs only after cd <absolute dir> succeeded reads in that
+	// directory or a later one, not in the earlier candidates (cd ~/.ssh &&
+	// cd /proj && grep -rn TODO ., GAP-2421). cdAt is where each cd call
+	// put its directory in dirs.
+	certain := actionCertainDirectoryCalls(file, home)
+	cdAt := make(map[*syntax.CallExpr]int)
+	readAt := func(call *syntax.CallExpr, words []string) bool {
+		candidates := dirs
+		if at, ok := cdAt[certain[call]]; ok {
+			candidates = dirs[at:]
+		}
+		for _, dir := range candidates {
 			if actionPrivateKeyReadWords(words, dir, home, mode, 0) {
 				return true
 			}
@@ -270,12 +280,13 @@ func ActionPrivateKeyRead(command, cwd, home string) bool {
 			}
 		}
 		if bound < 0 {
-			found = readAt(words)
+			found = readAt(call, words)
 			if base := programBase(words[0]); (base == "cd" || base == "pushd") && len(dirs) < 8 {
 				switch {
 				case len(words) == 1:
 					dirs = append(dirs, home)
 				case len(words) == 2 && words[1] != "" && words[1] != "-":
+					cdAt[call] = len(dirs)
 					dirs = append(dirs, OperandPath(words[1], dirs[len(dirs)-1]))
 				}
 			}
@@ -284,7 +295,7 @@ func ActionPrivateKeyRead(command, cwd, home string) bool {
 		name := actionSoleParameter(call.Args[bound])
 		for _, item := range loops[name] {
 			words[bound] = item
-			if readAt(words) {
+			if readAt(call, words) {
 				found = true
 				break
 			}
