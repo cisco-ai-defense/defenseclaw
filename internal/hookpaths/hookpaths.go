@@ -656,13 +656,6 @@ func ResolveConnector(connector, surface, event string, payload []byte) string {
 	if len(payload) > MaxPayloadBytes {
 		return incompleteEvidence("")
 	}
-	// A body nested past the reading bound is past the analysis limits as
-	// a whole: no reader below parses it (GAP-2556). JSON itself never
-	// nests that deep; a command hidden behind \u0028 escapes is still
-	// refused by shellparse.Reader in every parser.
-	if shellparse.TooDeep(string(payload)) {
-		return incompleteEvidence("")
-	}
 	var envelope map[string]json.RawMessage
 	if json.Unmarshal(payload, &envelope) != nil {
 		return ""
@@ -869,6 +862,13 @@ func ResolveConnector(connector, surface, event string, payload []byte) string {
 		for _, key := range []string{"command", "cmd"} {
 			var command string
 			if json.Unmarshal(toolArgs[key], &command) == nil && command != "" {
+				// A shell command nested past the reading bound is past the
+				// analysis limits: no reader below parses it (GAP-2556). Only
+				// the command is measured: a Write or Edit body of ordinary
+				// text (colour escapes, brackets) is not shell (RV-p4-1).
+				if shellparse.TooDeep(command) {
+					return incompleteEvidence(cwd)
+				}
 				// A ~<login> tilde-prefix names this user's home from the
 				// password database. The gateway judges that spelling as the
 				// home (actionfacts.ActiveUserTildeTwin) and, behind

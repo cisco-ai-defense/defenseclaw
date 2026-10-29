@@ -60,3 +60,33 @@ func TestResolveConnectorBoundsDeepNesting(t *testing.T) {
 		t.Errorf("8-level subshell: incomplete evidence %v", targets)
 	}
 }
+
+// The nesting bound measures the shell command only. A managed Write or Edit
+// of an ordinary file whose text has many unclosed (, { or [ (an ANSI colour
+// escape ESC[31m is one) is not shell: it keeps its target and complete
+// evidence, so the managed gateway does not fail it closed (RV-p4-1 of
+// GAP-2556, BALANCED-DEFAULTS).
+func TestResolveConnectorDeepTextBodyIsNotShell(t *testing.T) {
+	home := t.TempDir()
+	target := home + "/project/ordinary/log.txt"
+	colored := strings.Repeat("\x1b[31mERROR\x1b[0m build step failed\n", 600)
+	for _, row := range []struct {
+		name string
+		tool string
+		args map[string]any
+	}{
+		{"W1 colored Write", "Write", map[string]any{"file_path": target, "content": colored}},
+		{"W2 Write of (", "Write", map[string]any{"file_path": target, "content": strings.Repeat("(", 600)}},
+		{"W4 relative Write", "Write", map[string]any{"file_path": "project/ordinary/log.txt", "content": strings.Repeat("(", 600)}},
+		{"E1 colored Edit", "Edit", map[string]any{"file_path": target, "old_string": "x", "new_string": colored}},
+	} {
+		payload, err := json.Marshal(map[string]any{"tool_name": row.tool, "cwd": home, "tool_input": row.args})
+		if err != nil {
+			t.Fatal(err)
+		}
+		targets, ok := Decode(ResolveConnector("claudecode", "", "PreToolUse", payload))
+		if !ok || targets[TruncatedKey] == "1" {
+			t.Errorf("%s: targets %v, want complete evidence", row.name, targets)
+		}
+	}
+}
