@@ -1921,7 +1921,7 @@ func commandLinks(command, cwd, home string, facts map[string]string, record, ne
 		// A nested cd or a find -exec mv may also go below a linked
 		// directory through a disk link to state (RV-c4-1).
 		if stable && (wrappedCds || len(findMoves) > 0) {
-			stable = links.aliasesAwayFromState(cwd, home) && links.linkedTreesClear(command, cwd, home)
+			stable = links.aliasesAwayFromState(cwd, home) && links.linkedTreesClear(command, cwd, home, wrappedCds, findMoves)
 		}
 		if !stable || cds && links.relative && linkCall == nil && !linkDirsKnown {
 			links.unknown(true)

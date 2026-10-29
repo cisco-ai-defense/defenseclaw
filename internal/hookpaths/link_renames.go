@@ -8,6 +8,7 @@ import (
 	"slices"
 	"strings"
 	"syscall"
+	"time"
 
 	"mvdan.cc/sh/v3/syntax"
 )
@@ -275,14 +276,21 @@ func (s stateReach) movedMatchHits(dir, pattern string) bool {
 // a larger tree is read as one that may hold a link to state.
 const maxLinkedTreeEntries = 20000
 
+// linkedTreeBudget bounds the time of that walk on a hook call; a walk that
+// runs longer is read the same way (RV-c5-2 note: /usr/lib took 3.8 s).
+const linkedTreeBudget = 1500 * time.Millisecond
+
 // linkedTreesClear reports that a directory change in a nested shell or a
 // wrapper, or a find -exec mv, cannot reach SSH or DefenseClaw state through
 // a disk link below a directory a link of the command names (RV-c4-1). The
 // statement walk does not place those directory changes, so the disk links
-// under the link are checked instead: the walk runs only when a command
-// word outside the link calls may name a link, and finds no disk link
-// that reaches state. A plain cd resolves such disk links itself.
-func (l shellLinks) linkedTreesClear(command, cwd, home string) bool {
+// under the link are checked instead. The walk runs when a nested or
+// wrapped directory change may enter a link (mayEnterLink), or when a find
+// start path or move destination is at or under a link name or goes through
+// a disk link. A find that names no link does not descend into one (find
+// does not follow links), so a large linked tree beside it is not read
+// (RV-c5-2). A plain cd resolves such disk links itself.
+func (l shellLinks) linkedTreesClear(command, cwd, home string, wrapped bool, moves []findMove) bool {
 	state := newStateReach(home)
 	reach := Links{links: l}
 	var dirs []string
@@ -303,22 +311,77 @@ func (l shellLinks) linkedTreesClear(command, cwd, home string) bool {
 			}
 		}
 	}
-	if len(dirs) == 0 || !l.mayEnterLink(command, cwd) {
+	if len(dirs) == 0 {
 		return true
 	}
-	return treesAwayFromState(dirs, state)
+	enter := wrapped && l.mayEnterLink(command, cwd)
+	for _, move := range moves {
+		for _, path := range append(slices.Clone(move.starts), move.dest) {
+			enter = enter || l.pathEntersLink(path, cwd)
+		}
+	}
+	return !enter || treesAwayFromState(dirs, state)
 }
 
+// pathEntersLink reports that an absolute path is at or under a link name
+// of the command, or that a step of it is a disk link, dangling or not:
+// the steps below cwd for a path under cwd, else every step.
+func (l shellLinks) pathEntersLink(path, cwd string) bool {
+	for _, alias := range l.aliases {
+		if pathAtOrUnder(path, alias.name) {
+			return true
+		}
+	}
+	base, rest := string(filepath.Separator), strings.TrimLeft(path, string(filepath.Separator))
+	if r, under := cutPathPrefix(path, cwd); under {
+		base, rest = cwd, r
+	}
+	link, _ := diskLinkSteps(base, rest)
+	return link
+}
+
+// diskLinkSteps reads word as a path from base, one step at a time while
+// the steps exist: link is true when a step is a disk link, dangling or
+// not; dirs are the directories the steps name.
+func diskLinkSteps(base, word string) (link bool, dirs []string) {
+	path := base
+	for _, part := range strings.Split(filepath.ToSlash(word), "/") {
+		if part == "" || part == "." {
+			continue
+		}
+		path = filepath.Join(path, part)
+		info, err := os.Lstat(path)
+		if err != nil {
+			return false, dirs
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			return true, dirs
+		}
+		if info.IsDir() {
+			dirs = append(dirs, path)
+		}
+	}
+	return false, dirs
+}
+
+// maxEnterBases bounds the directories mayEnterLink reads words from.
+const maxEnterBases = 64
+
 // mayEnterLink reports that a word of command other than the link calls
-// names a link (its base name), may expand or match one, makes find follow
-// links, or is a dangling disk link in cwd that may name a new link.
+// names a link (a path step equal to its base name), may expand or match
+// one, makes find follow links, or goes through a disk link, dangling or
+// not (RV-c5-1: a project disk link to a name the command links, d2/r ->
+// ../e, or to one it re-targets, p2 -> e2). Each word is read as a path
+// from cwd and from the directories earlier words name, so cd d2 && cd r/x
+// is read too. The walk this starts only blocks when a linked tree holds a
+// disk link to state.
 func (l shellLinks) mayEnterLink(command, cwd string) bool {
 	if strings.ContainsAny(command, "$`*?[{\\") {
 		return true
 	}
-	words := commandTokens(command)
+	words := commandWords(command)
 	for _, text := range l.linkTexts {
-		for _, word := range commandTokens(text) {
+		for _, word := range commandWords(text) {
 			if i := slices.Index(words, word); i >= 0 {
 				words = slices.Delete(words, i, i+1)
 			}
@@ -329,23 +392,44 @@ func (l shellLinks) mayEnterLink(command, cwd string) bool {
 		names[filepath.Base(alias.name)] = true
 	}
 	for _, word := range words {
-		if names[word] || word == "-L" || word == "-follow" {
+		if word == "-L" || word == "-follow" {
 			return true
 		}
-		path := absolutePath(word, cwd)
-		if info, err := os.Lstat(path); err == nil && info.Mode()&os.ModeSymlink != 0 {
-			if _, err := filepath.EvalSymlinks(path); err != nil {
+		for _, part := range strings.Split(word, "/") {
+			if names[part] {
 				return true
+			}
+		}
+	}
+	bases := []string{filepath.Clean(cwd)}
+	seen := map[string]bool{bases[0]: true}
+	for range 2 {
+		for _, word := range words {
+			starts := bases
+			if filepath.IsAbs(word) {
+				starts = []string{string(filepath.Separator)}
+			}
+			for _, start := range starts {
+				link, dirs := diskLinkSteps(start, word)
+				if link {
+					return true
+				}
+				for _, dir := range dirs {
+					if !seen[dir] && len(bases) < maxEnterBases {
+						seen[dir] = true
+						bases = append(bases, dir)
+					}
+				}
 			}
 		}
 	}
 	return false
 }
 
-// commandTokens splits command text into path components and words.
-func commandTokens(text string) []string {
+// commandWords splits command text into words; a word may be a path.
+func commandWords(text string) []string {
 	return strings.FieldsFunc(text, func(r rune) bool {
-		return strings.ContainsRune(" \t\n\r/\"';&|()<>=,", r)
+		return strings.ContainsRune(" \t\n\r\"\x27;&|()<>=,", r)
 	})
 }
 
@@ -355,6 +439,7 @@ func treesAwayFromState(dirs []string, state stateReach) bool {
 	seen := make(map[string]bool)
 	queue := slices.Clone(dirs)
 	entries := 0
+	deadline := time.Now().Add(linkedTreeBudget)
 	for len(queue) > 0 {
 		dir := queue[0]
 		queue = queue[1:]
@@ -365,7 +450,7 @@ func treesAwayFromState(dirs []string, state stateReach) bool {
 		clear := true
 		err := filepath.WalkDir(dir, func(path string, entry fs.DirEntry, err error) error {
 			entries++
-			if err != nil || entries > maxLinkedTreeEntries {
+			if err != nil || entries > maxLinkedTreeEntries || entries%256 == 0 && time.Now().After(deadline) {
 				clear = false
 				return filepath.SkipAll
 			}
@@ -482,6 +567,8 @@ func wrapperChangesDirectory(program string, words []string, static []bool) bool
 type findMove struct {
 	pattern, dest string
 	dir           bool
+	// starts are the absolute start paths (cwd when find names none).
+	starts []string
 }
 
 // parseFindMove reads find PATH... [-type T] [-maxdepth N] [-mindepth N]
@@ -495,6 +582,12 @@ func parseFindMove(program string, words []string, static []bool, cwd string) (f
 	i := 1
 	for i < len(words) && !strings.HasPrefix(words[i], "-") && words[i] != "(" && words[i] != "!" {
 		i++
+	}
+	for _, start := range words[1:i] {
+		move.starts = append(move.starts, absolutePath(start, cwd))
+	}
+	if len(move.starts) == 0 {
+		move.starts = []string{filepath.Clean(cwd)}
 	}
 	exec := false
 	for ; i < len(words); i++ {

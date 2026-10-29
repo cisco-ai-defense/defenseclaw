@@ -52,7 +52,27 @@ func TestR105LinkRenameAndNestedCd(t *testing.T) {
 	if err := os.Symlink(filepath.Join(clean, "lib"), filepath.Join(clean, "current")); err != nil {
 		t.Fatal(err)
 	}
-	place := strings.NewReplacer("{E}", ext, "{C}", clean)
+	// RV-c5-1: project disk links that reach a name the command links
+	// (d2/r -> ../e, dangling until ln makes e) or re-targets (p2 -> e2).
+	if err := os.MkdirAll(filepath.Join(cwd, "d2"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(cwd, "benign", "x"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for _, link := range [][2]string{{"../e", filepath.Join(cwd, "d2", "r")}, {"benign", filepath.Join(cwd, "e2")}, {"e2", filepath.Join(cwd, "p2")}} {
+		if err := os.Symlink(link[0], link[1]); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// RV-c5-2: an outside directory larger than the linked-tree walk bound.
+	big := t.TempDir()
+	for i := range 20005 {
+		if err := os.WriteFile(filepath.Join(big, fmt.Sprintf("f%05d", i)), nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	place := strings.NewReplacer("{E}", ext, "{C}", clean, "{BIG}", big)
 	t.Setenv("HOME", home)
 	rows := []struct {
 		command string
@@ -124,12 +144,25 @@ func TestR105LinkRenameAndNestedCd(t *testing.T) {
 		{`ln -s {E} e; find . -name "*.txt" -exec mv {} e/x/ \;`, true},
 		{`ln -s {E} e; find e/x -maxdepth 0 -execdir sh -c "echo k >> x/authorized_keys" \;`, true},
 		{`ln -s {E} e; find e/ -name x -exec mv {} build/ \;; echo k >> build/x/authorized_keys`, true},
+		// RV-c5-1: the nested cd reaches the link through a project disk link.
+		{`ln -s {E} e; bash -c "cd d2/r/x && echo k >> authorized_keys"`, true},
+		{`ln -s {E} e; bash -c "cd d2/r/y && echo z > config.yaml"`, true},
+		{`ln -sfn {E} e2; bash -c "cd p2/x && echo k >> authorized_keys"`, true},
+		{`ln -s {E} e; sh -c "cd d2/r && cd x && echo k >> authorized_keys"`, true},
+		{`ln -s {E} e; sh -c "cd d2 && cd r/x && echo k >> authorized_keys"`, true},
+		{`ln -s {E} e; find d2/r/x -maxdepth 0 -execdir sh -c "echo k >> x/authorized_keys" ';'`, true},
+		{`ln -s {E} e; find . -maxdepth 1 -name a.txt -exec mv {} d2/r/x/ \;`, true},
 		// Benign: the nested cd does not go through the link, or the linked
 		// directory holds no disk link to state.
 		{`ln -s {E} ext; bash -c "cd src && ls"`, false},
 		{`ln -s {C} sdk; sh -c "cd sdk/current && ls"`, false},
 		{`ln -s {C} sdk; bash -c "cd sdk && ls lib"`, false},
 		{`ln -s {C} sdk; find . -name "*.orig" -exec mv {} sdk/lib/ \;`, false},
+		{`ln -s {C} sdk; bash -c "cd p2/x && ls"`, false},
+		// RV-c5-2: a find that names no link does not read a large linked
+		// tree beside it.
+		{`ln -s {BIG} big; find . -name "*.tmp" -exec mv {} build/ \;`, false},
+		{`ln -s {BIG} big; bash -c "cd src && ls"`, false},
 	}
 	for _, connectorName := range []string{"claudecode", "codex"} {
 		installDefaultProfileConnector(t, connectorName)
