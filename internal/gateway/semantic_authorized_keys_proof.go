@@ -1128,6 +1128,12 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 				return true
 			}
 		}
+		// On a static reading of a call with a runtime-expanded operand
+		// word, the client answer of that reading decides an operand the
+		// call as written left unknown (GAP-2477).
+		if reading := clientTargets[hookpaths.ReadingTargetPrefix+target]; request.staticOperandReading && reading != "" {
+			return isProtected(reading)
+		}
 		if request.ResolvedWriteTargets != nil {
 			resolved, present := request.ResolvedWriteTargets[target]
 			switch {
@@ -1163,6 +1169,9 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 			// key write (GAP-1440). An empty answer stays unknown.
 			if !ok && request.ProtectedHomeHook && links.Known() {
 				if resolved := clientTargets[target]; resolved != "" {
+					return isProtected(resolved)
+				}
+				if resolved := clientTargets[hookpaths.ReadingTargetPrefix+target]; request.staticOperandReading && resolved != "" {
 					return isProtected(resolved)
 				}
 			}

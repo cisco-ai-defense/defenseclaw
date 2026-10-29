@@ -172,6 +172,11 @@ type trustedActionRequest struct {
 	// ProtectedHomeHook is set only from a kernel-verified managed hook peer.
 	// Its gateway cannot inspect the caller's home when ProtectHome is active.
 	ProtectedHomeHook bool
+	// staticOperandReading marks a DynamicOperandTwins reading judged behind
+	// ProtectHome: for an operand the call as written left unknown in the
+	// hook client map, the answer of the reading
+	// (hookpaths.ReadingTargetPrefix) decides (GAP-2477).
+	staticOperandReading bool
 	// ResolvedWriteTargets comes from the hook running as the real user.
 	// A present empty map means the client inspected the action and found no
 	// static write target; nil denotes missing or invalid client evidence.
@@ -5480,14 +5485,9 @@ func homeSpellingTwinRequest(request trustedActionRequest, logins ...string) (tr
 
 // dynamicOperandTwinRequests returns the request for each reading of
 // actionfacts.DynamicOperandTwins of a POSIX Bash call. Behind ProtectHome
-// the targets of a reading are not in the hook client map, which was walked
-// for the call as written, and an unlisted write target is judged as a
-// possible keys-file write, so a reading there would block benign project
-// copies; that gateway keeps the client map judgment.
+// (managed hook peer) the hook client map lists the targets of the same
+// readings (hookpaths), so they are judged there too (GAP-2477).
 func dynamicOperandTwinRequests(request trustedActionRequest) []trustedActionRequest {
-	if request.ProtectedHomeHook {
-		return nil
-	}
 	if request.Input.DialectHint != actionfacts.DialectPOSIX && request.Input.DialectHint != "" {
 		return nil
 	}
@@ -5498,7 +5498,9 @@ func dynamicOperandTwinRequests(request trustedActionRequest) []trustedActionReq
 	var twins []trustedActionRequest
 	for _, rewritten := range actionfacts.DynamicOperandTwins(command, request.Input.ActiveHome) {
 		if rewritten != command {
-			twins = append(twins, bashReadingRequest(request, command, rewritten))
+			twin := bashReadingRequest(request, command, rewritten)
+			twin.staticOperandReading = request.ProtectedHomeHook
+			twins = append(twins, twin)
 		}
 	}
 	return twins
