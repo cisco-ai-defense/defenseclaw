@@ -314,7 +314,7 @@ func (l shellLinks) linkedTreesClear(command, cwd, home string, wrapped bool, mo
 	if len(dirs) == 0 {
 		return true
 	}
-	enter := wrapped && l.mayEnterLink(command, cwd)
+	enter := wrapped && l.mayEnterLink(command, cwd, home)
 	for _, move := range moves {
 		for _, path := range append(slices.Clone(move.starts), move.dest) {
 			enter = enter || l.pathEntersLink(path, cwd)
@@ -375,7 +375,9 @@ const maxEnterBases = 64
 // from cwd and from the directories earlier words name, so cd d2 && cd r/x
 // is read too. The walk this starts only blocks when a linked tree holds a
 // disk link to state.
-func (l shellLinks) mayEnterLink(command, cwd string) bool {
+// A word that starts with ~ or ~/ is read from home; ~user, ~+ and any
+// other tilde word may name the link (RV-c6-1).
+func (l shellLinks) mayEnterLink(command, cwd, home string) bool {
 	if strings.ContainsAny(command, "$`*?[{\\") {
 		return true
 	}
@@ -385,6 +387,14 @@ func (l shellLinks) mayEnterLink(command, cwd string) bool {
 			if i := slices.Index(words, word); i >= 0 {
 				words = slices.Delete(words, i, i+1)
 			}
+		}
+	}
+	for i, word := range words {
+		switch {
+		case home != "" && (word == "~" || strings.HasPrefix(word, "~/")):
+			words[i] = filepath.Join(home, word[1:])
+		case strings.HasPrefix(word, "~"):
+			return true
 		}
 	}
 	names := make(map[string]bool)

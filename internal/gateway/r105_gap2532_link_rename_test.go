@@ -15,7 +15,7 @@ import (
 // link is ordinary work (GAP-2532); a link to SSH or DefenseClaw state
 // stays opaque when a nested shell changes directory or find -exec renames
 // it (GAP-2533), also through a disk link below a linked outside directory
-// (RV-c4-1).
+// (RV-c4-1), also when the nested cd spells it from ~ (RV-c6-1).
 func TestR105LinkRenameAndNestedCd(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("posix shell rows")
@@ -152,6 +152,13 @@ func TestR105LinkRenameAndNestedCd(t *testing.T) {
 		{`ln -s {E} e; sh -c "cd d2 && cd r/x && echo k >> authorized_keys"`, true},
 		{`ln -s {E} e; find d2/r/x -maxdepth 0 -execdir sh -c "echo k >> x/authorized_keys" ';'`, true},
 		{`ln -s {E} e; find . -maxdepth 1 -name a.txt -exec mv {} d2/r/x/ \;`, true},
+		// RV-c6-1: the nested cd names the project disk link through ~.
+		{`ln -s {E} e; bash -c "cd ~/project/d2/r/x && echo k >> authorized_keys"`, true},
+		{`ln -sfn {E} e2; bash -c "cd ~/project/p2/x && echo k >> authorized_keys"`, true},
+		{`ln -s {E} e; bash -c "cd ~/project/d2/r/y && echo z > config.yaml"`, true},
+		{`ln -s {E} e; sh -c "cd ~/project/d2/r && cd x && echo k >> authorized_keys"`, true},
+		{`ln -s {E} e; find ~/project/d2/r/x -maxdepth 0 -execdir sh -c "echo k >> x/authorized_keys" ';'`, true},
+		{`ln -s {E} e; bash -c "cd ~+/d2/r/x && echo k >> authorized_keys"`, true},
 		// Benign: the nested cd does not go through the link, or the linked
 		// directory holds no disk link to state.
 		{`ln -s {E} ext; bash -c "cd src && ls"`, false},
@@ -159,6 +166,7 @@ func TestR105LinkRenameAndNestedCd(t *testing.T) {
 		{`ln -s {C} sdk; bash -c "cd sdk && ls lib"`, false},
 		{`ln -s {C} sdk; find . -name "*.orig" -exec mv {} sdk/lib/ \;`, false},
 		{`ln -s {C} sdk; bash -c "cd p2/x && ls"`, false},
+		{`ln -s {C} sdk; bash -c "cd ~/project/src && ls"`, false},
 		// RV-c5-2: a find that names no link does not read a large linked
 		// tree beside it.
 		{`ln -s {BIG} big; find . -name "*.tmp" -exec mv {} build/ \;`, false},
