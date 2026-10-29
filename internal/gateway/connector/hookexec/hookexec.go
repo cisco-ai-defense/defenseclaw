@@ -1010,13 +1010,34 @@ func doRequest(ctx context.Context, opts Options, sp spec, failMode string, payl
 	// been evaluated, so it is sent again a few times within the hook's own
 	// deadline instead of failing the tool call for a burst the gateway
 	// clears in seconds (GAP-0205).
-	for retry := 0; !opts.SecureClient && err == nil && resp.StatusCode == http.StatusTooManyRequests && retry < hookBusyRetries; retry++ {
+	//
+	// A tool call with an answer budget is never denied for a busy gateway
+	// before that budget ends (GAP-0050, owner ruling: in action or closed
+	// mode a deny only after the full hook budget). A refusal of the
+	// account's own budget (its in-flight cap or rate) clears as soon as
+	// one of the account's own calls ends, usually well inside the whole
+	// second Retry-After can say, so such a call is sent again after
+	// hookCallerBusyRetryDelay; a resend that no longer fits waits for the
+	// budget to end and the call is then denied as unanswered.
+	retries := hookBusyRetries
+	if !opts.answerBy.IsZero() {
+		retries = hookBusyBoundedRetries
+	}
+	for retry := 0; !opts.SecureClient && err == nil && resp.StatusCode == http.StatusTooManyRequests && retry < retries; retry++ {
 		delay := retryAfterDelay(resp.Header.Get("Retry-After"))
+		if !opts.answerBy.IsZero() && callerBudgetRefusal(resp) {
+			delay = min(delay, hookCallerBusyRetryDelay)
+		}
 		_ = resp.Body.Close()
 		if !retryFitsAnswer(opts.answerBy, delay) {
 			// A resend could not be answered within the tool call's
-			// answer budget: the gateway is too busy for it now.
-			return failAfterErrorStatus(opts, sp, failMode, knownStatus)
+			// answer budget: the gateway is too busy for it now. The call
+			// is denied when the budget ends, not before it.
+			<-ctx.Done()
+			if gatewayNoAnswer(ctx) {
+				return failAfterErrorStatus(opts, sp, failMode, knownStatus)
+			}
+			return failUnreachable(opts, sp, nonOutageFailMode(opts, failMode), "gateway busy")
 		}
 		timer := time.NewTimer(delay)
 		select {
@@ -1305,8 +1326,36 @@ func perUserRefusalText(opts Options, status int, body []byte) string {
 }
 
 // hookBusyRetries is how many times a hook sends its call again after the
-// gateway answered 429.
-const hookBusyRetries = 4
+// gateway answered 429. A call with an answer budget may send it up to
+// hookBusyBoundedRetries times: its budget, not the count, ends the resends.
+const (
+	hookBusyRetries        = 4
+	hookBusyBoundedRetries = 32
+)
+
+// hookCallerBusyRetryDelay is the pause before a call with an answer budget
+// is sent again after the gateway refused it for the account's own budget
+// (GAP-0050). The refusal is local to the account and costs the gateway no
+// evaluation, and a slot of the account frees as soon as one of its calls
+// ends.
+var hookCallerBusyRetryDelay = 250 * time.Millisecond
+
+// callerBusyReason is the reason of a 429 for one caller's own budget
+// (hook_caller_limits.go managedHookReasonRateLimited); a full gateway
+// answers enterprise_managed_overloaded and keeps its Retry-After.
+const callerBusyReason = "enterprise_managed_rate_limited"
+
+// callerBusyRefusalBodyLimit bounds the 429 body read for its reason.
+const callerBusyRefusalBodyLimit = 4 << 10
+
+// callerBudgetRefusal reports a 429 whose body names the caller's own budget.
+func callerBudgetRefusal(resp *http.Response) bool {
+	if resp == nil || resp.Body == nil {
+		return false
+	}
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, callerBusyRefusalBodyLimit))
+	return refusalReason(body) == callerBusyReason
+}
 
 // hookAuthRetries and hookAuthRetryDelay bound the resend of a Windows
 // standalone call the gateway answered 401 (GAP-0680): about 8 seconds,
