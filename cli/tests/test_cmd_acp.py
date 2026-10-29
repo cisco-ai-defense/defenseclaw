@@ -2295,3 +2295,73 @@ def test_other_node_agents_beside_a_pinned_node_shim_keep_verify_green(tmp_path,
         assert CliRunner().invoke(acp_cmd, ["verify"], obj=app).exit_code == 0
     finally:
         cleanup_app(app, db_path, data_dir)
+
+
+def test_an_interpreter_entry_that_runs_the_pinned_agent_script_keeps_verify_red(tmp_path, monkeypatch):
+    """node <agent package script> starts the pinned agent without the guard (GAP-2487).
+
+    The lock pins npm's copilot.cmd (Windows) or the agent script itself (a
+    node agent's PATH link on Linux and macOS). An entry that runs node.exe
+    or node with that script as an argument, with flags before it or after
+    it, is a bypass of the pair: verify and status stay red and setup leaves
+    it. node running another script by an absolute path, or a relative
+    script, is not.
+    """
+    _isolate_client_config(monkeypatch, tmp_path)
+    app, data_dir, db_path = _app(tmp_path)
+    settings = _zed_settings(tmp_path)
+    settings.parent.mkdir(parents=True)
+    guard = _binary(tmp_path / "defenseclaw-acp")
+    prefix = tmp_path / "nodejs"
+    prefix.mkdir()
+    node = prefix / "node.exe"
+    node.write_bytes(b"node-interpreter-image")
+    scripts = {}
+    for name, package in (("copilot", "@github\\copilot"), ("gemini", "@google\\gemini-cli")):
+        script = prefix.joinpath("node_modules", *package.split("\\"), "index.js")
+        script.parent.mkdir(parents=True, exist_ok=True)
+        script.write_text("// " + package)
+        scripts[name] = script
+        (prefix / f"{name}.cmd").write_text(_NODE_SHIM.replace("{package}", package), newline="")
+    try:
+        for pinned in (prefix / "copilot.cmd", scripts["copilot"]):
+            setup_args = [
+                "setup", "--client", "zed", "--agent", "copilot", "--guard-binary", guard,
+                "--agent-binary", str(pinned),
+            ]
+            settings.write_text(json.dumps({"agent_servers": {}}))
+            assert CliRunner().invoke(acp_cmd, setup_args, obj=app).exit_code == 0, pinned
+            assert CliRunner().invoke(acp_cmd, ["verify"], obj=app).exit_code == 0, pinned
+            clean = json.loads(settings.read_text())
+            for label, direct in {
+                "node.exe <script>": {"command": str(node), "args": [str(scripts["copilot"]), "--acp", "--stdio"]},
+                "node flag first": {"command": str(node), "args": ["--no-warnings", str(scripts["copilot"]), "--acp"]},
+            }.items():
+                document = copy.deepcopy(clean)
+                document["agent_servers"]["My Copilot"] = direct
+                settings.write_text(json.dumps(document))
+                verified = CliRunner().invoke(acp_cmd, ["verify"], obj=app)
+                assert verified.exit_code != 0, (pinned, label, verified.output)
+                assert "'My Copilot' is not DefenseClaw's: it launches copilot without the DefenseClaw guard" in (
+                    verified.output
+                ), (pinned, label, verified.output)
+                status = json.loads(CliRunner().invoke(acp_cmd, ["status", "--json"], obj=app).output)
+                assert status["bindings"]["zed/copilot"]["healthy"] is False, (pinned, label)
+                again = CliRunner().invoke(acp_cmd, setup_args, obj=app)
+                assert again.exit_code == 0, (pinned, label, again.output)
+                assert json.loads(settings.read_text())["agent_servers"]["My Copilot"] == direct, (pinned, label)
+                assert "Left editor entry 'My Copilot'" in again.output, (pinned, label, again.output)
+
+            for label, other in {
+                "node.exe another absolute script": {"command": str(node), "args": [str(scripts["gemini"]), "--acp"]},
+                "node.exe a relative script": {"command": str(node), "args": ["node_modules/copilot/index.js"]},
+            }.items():
+                document = copy.deepcopy(clean)
+                document["agent_servers"]["Gemini CLI"] = other
+                settings.write_text(json.dumps(document))
+                assert CliRunner().invoke(acp_cmd, ["verify"], obj=app).exit_code == 0, (pinned, label)
+            settings.write_text(json.dumps(clean))
+            assert CliRunner().invoke(acp_cmd, ["verify"], obj=app).exit_code == 0, pinned
+            assert CliRunner().invoke(acp_cmd, ["remove", "--client", "zed", "--agent", "copilot"], obj=app).exit_code == 0
+    finally:
+        cleanup_app(app, db_path, data_dir)

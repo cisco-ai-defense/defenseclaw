@@ -749,6 +749,27 @@ def _same_agent_file(candidate: str, pinned: str) -> bool:
         return False
 
 
+def _entry_path_arguments(entry: dict[str, Any]) -> list[str]:
+    """The arguments of an editor entry that name an existing file by an absolute or ~ path.
+
+    An interpreter or a wrapper entry (node, node.exe, env) starts the file
+    it is given: node <agent package script> runs the agent as its shim
+    would. A relative argument depends on the editor's working folder and a
+    bare name is not looked up on PATH by an interpreter, so neither counts.
+    """
+    args = entry.get("args")
+    if not isinstance(args, list):
+        return []
+    paths: list[str] = []
+    for arg in args:
+        if not isinstance(arg, str) or not arg.strip():
+            continue
+        value = os.path.expanduser(arg)
+        if os.path.isabs(value) and os.path.isfile(value):
+            paths.append(value)
+    return paths
+
+
 def _launches_file(entry: dict[str, Any], path_value: str) -> bool:
     """Whether an editor entry's command starts the agent file at path_value.
 
@@ -757,15 +778,19 @@ def _launches_file(entry: dict[str, Any], path_value: str) -> bool:
     When either side is a Windows command shim, the file the shim starts
     counts too: the lock pins npm's opencode.cmd on Windows, and an entry
     that starts the opencode.exe it wraps runs the same agent (GAP-0496).
+    An argument that names the agent file, or the package script a pinned
+    shim runs, starts it too: node <agent script> is the same launch as the
+    agent's own shim or link (GAP-2487).
     """
     command = entry.get("command")
     if not path_value or not isinstance(command, str) or not command.strip():
         return False
     found = os.path.expanduser(command) if os.path.dirname(command) else shutil.which(command)
-    if not found:
+    launched = [found, *_shim_targets(found)] if found else []
+    launched += _entry_path_arguments(entry)
+    if not launched:
         return False
     pinned = [path_value, *_shim_targets(path_value)]
-    launched = [found, *_shim_targets(found)]
     return any(_same_agent_file(candidate, target) for candidate in launched for target in pinned)
 
 
