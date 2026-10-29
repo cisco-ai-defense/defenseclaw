@@ -165,3 +165,37 @@ func TestLocalHomeCountsOnlyInItsFunctionBody(t *testing.T) {
 	})
 }
 
+// A file writer run through nohup, nice, time, timeout or env NAME=value,
+// through command, sudo or env with options, or after a leading word that
+// may expand to nothing, tied no write to the call, while it writes what
+// the plain call writes (GAP-2512, GAP-2477 checker pod2 W05-W12).
+func TestWrappedFileWriterWritesWhatThePlainCallWrites(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX shell spellings")
+	}
+	judgeHomeStateWriteRows(t, []homeStateWriteRow{
+		{"nohup cp a.txt ~/.defenseclaw/config.yaml", true},
+		{"nice cp a.txt ~/.defenseclaw/config.yaml", true},
+		{"nice -n 5 cp a.txt ~/.defenseclaw/hooks/x.sh", true},
+		{"nice -5 mv a.txt ~/.defenseclaw/config.yaml", true},
+		{"time cp a.txt ~/.defenseclaw/config.yaml", true},
+		{"time -p cp a.txt ~/.defenseclaw/config.yaml", true},
+		{"/usr/bin/time -f %e cp a.txt ~/.defenseclaw/config.yaml", true},
+		{"timeout 5 cp a.txt ~/.defenseclaw/config.yaml", true},
+		{"timeout -k 2 10s install a.txt ~/.defenseclaw/hooks/x.sh", true},
+		{"env NAME=v cp a.txt ~/.defenseclaw/config.yaml", true},
+		{"env -i cp a.txt ~/.defenseclaw/config.yaml $(true)", true},
+		{"sudo -u root cp a.txt ~/.defenseclaw/config.yaml $(true)", true},
+		{"command -p cp a.txt ~/.defenseclaw/config.yaml $(true)", true},
+		{"$(true) cp a.txt ~/.defenseclaw/config.yaml", true},
+		{"nohup nice tee ~/.defenseclaw/config.yaml < a.txt", true},
+		{"nohup ln -sf a.txt ~/.defenseclaw/config.yaml", true},
+		{"nohup cp a.txt b.txt", false},
+		{"env FOO=1 cp a.txt b.txt", false},
+		{"nice ls -la", false},
+		{"time cp a.txt ~/project/c.txt", false},
+		{"timeout 60 rsync -a src/ ~/project/backup/", false},
+		{"sudo -u root cp a.txt /tmp/x.txt", false},
+		{"nohup cp ~/.defenseclaw/config.yaml ~/project/backup.yaml", false},
+	})
+}
