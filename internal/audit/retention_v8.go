@@ -1182,6 +1182,41 @@ func materializeRetentionAuditCandidates(
 	return count, nil
 }
 
+// The legacy ACK baseline statements start from the batch's candidate set
+// (at most RetentionBatchSize ids) and look each audit row up by id; CROSS
+// JOIN keeps that order whatever the statistics say. With a plain JOIN the
+// planner drove both from audit_events: the projection statement read the
+// whole id index and the baseline statement every bucket-less row. On a
+// multi-GB store with a cold page cache that took about 3.5 s inside every
+// audit retention batch, which holds the store's writer, so the hooks queued
+// behind it after a gateway start passed their answer budget (GAP-1790).
+func retentionACKBaselineInsert(actionPlaceholders string) string {
+	return fmt.Sprintf(`
+		INSERT OR IGNORE INTO alert_acknowledgement_baselines (
+			alert_id, baseline_version, disposition, actor, disposition_at,
+			legacy_event_id, raw_legacy_severity, legacy_original_severity,
+			timestamp_provenance, created_at
+		)
+		SELECT event.id, 1, 'acknowledged', COALESCE(NULLIF(event.actor,''), 'unknown'), event.timestamp,
+			event.id, 'ACK', 'unknown', 'legacy_occurrence_timestamp_unreliable', ?
+		FROM retention_v8_audit_candidates AS candidate
+		CROSS JOIN audit_events AS event ON event.id = candidate.id
+		WHERE event.bucket IS NULL AND UPPER(COALESCE(event.severity,'')) = 'ACK'
+		AND event.action IN (%s)`, actionPlaceholders)
+}
+
+const retentionACKProjectionInsert = `
+		INSERT OR IGNORE INTO alert_acknowledgement_projection (
+			alert_id, disposition, actor, disposition_at, projection_version,
+			source, source_event_id, updated_at
+		)
+		SELECT baseline.alert_id, baseline.disposition, baseline.actor,
+			baseline.disposition_at, baseline.baseline_version,
+			'legacy_ack', baseline.legacy_event_id, ?
+		FROM retention_v8_audit_candidates AS candidate
+		CROSS JOIN audit_events AS event ON event.id = candidate.id
+		CROSS JOIN alert_acknowledgement_baselines AS baseline ON baseline.alert_id = event.id`
+
 func materializeRetentionACKBaselines(
 	ctx context.Context,
 	tx *sql.Tx,
@@ -1196,33 +1231,11 @@ func materializeRetentionACKBaselines(
 	for _, action := range actions {
 		args = append(args, action)
 	}
-	_, err := tx.ExecContext(ctx, fmt.Sprintf(`
-		INSERT OR IGNORE INTO alert_acknowledgement_baselines (
-			alert_id, baseline_version, disposition, actor, disposition_at,
-			legacy_event_id, raw_legacy_severity, legacy_original_severity,
-			timestamp_provenance, created_at
-		)
-		SELECT event.id, 1, 'acknowledged', COALESCE(NULLIF(event.actor,''), 'unknown'), event.timestamp,
-			event.id, 'ACK', 'unknown', 'legacy_occurrence_timestamp_unreliable', ?
-		FROM audit_events AS event
-		JOIN retention_v8_audit_candidates AS candidate ON candidate.id = event.id
-		WHERE event.bucket IS NULL AND UPPER(COALESCE(event.severity,'')) = 'ACK'
-		AND event.action IN (%s)`, placeholders), args...)
+	_, err := tx.ExecContext(ctx, retentionACKBaselineInsert(placeholders), args...)
 	if err != nil {
 		return fmt.Errorf("retention materialize legacy ACK baseline: %w", err)
 	}
-	_, err = tx.ExecContext(ctx, `
-		INSERT OR IGNORE INTO alert_acknowledgement_projection (
-			alert_id, disposition, actor, disposition_at, projection_version,
-			source, source_event_id, updated_at
-		)
-		SELECT baseline.alert_id, baseline.disposition, baseline.actor,
-			baseline.disposition_at, baseline.baseline_version,
-			'legacy_ack', baseline.legacy_event_id, ?
-		FROM alert_acknowledgement_baselines AS baseline
-		JOIN audit_events AS event ON event.id = baseline.alert_id
-		JOIN retention_v8_audit_candidates AS candidate ON candidate.id = event.id`,
-		createdAt.Format(time.RFC3339Nano))
+	_, err = tx.ExecContext(ctx, retentionACKProjectionInsert, createdAt.Format(time.RFC3339Nano))
 	if err != nil {
 		return fmt.Errorf("retention materialize legacy ACK projection: %w", err)
 	}

@@ -24,6 +24,11 @@ import (
 	"runtime"
 	"strings"
 
+	// Its init raises a Windows launcher-guard start to above-normal
+	// priority before the CLI packages initialize (GAP-0050).
+	_ "github.com/defenseclaw/defenseclaw/cmd/internal/hookpriority"
+	// Its init keeps the collector off until main starts (GAP-0050).
+	"github.com/defenseclaw/defenseclaw/cmd/internal/initgc"
 	"github.com/defenseclaw/defenseclaw/internal/cli"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
@@ -40,6 +45,7 @@ var (
 )
 
 func main() {
+	initgc.Restore()
 	// The one-line install's Windows Claude Code PreToolUse handler runs this
 	// binary as its launcher guard, so a launcher removed in the middle of a
 	// turn blocks the next tool call. It runs before anything that could print

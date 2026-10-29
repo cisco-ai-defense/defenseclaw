@@ -44,8 +44,17 @@ func TestAHookProcessRunsAboveNormalPriority(t *testing.T) {
 			t.Fatalf("from %#x: hook class %#x, want above normal", from, class)
 		}
 	}
+	for _, from := range []uint32{windows.NORMAL_PRIORITY_CLASS, windows.BELOW_NORMAL_PRIORITY_CLASS} {
+		setClass(t, from)
+		if !raiseForHook([]string{LauncherGuardSubcommand, `C:\Users\u\.local\bin\defenseclaw-hook.exe`, "hook", "--connector", "claudecode"}) {
+			t.Fatalf("from %#x: the launcher guard did not raise its class", from)
+		}
+		if class := currentClass(t); class != windows.ABOVE_NORMAL_PRIORITY_CLASS {
+			t.Fatalf("from %#x: launcher guard class %#x, want above normal", from, class)
+		}
+	}
 	setClass(t, windows.NORMAL_PRIORITY_CLASS)
-	for _, args := range [][]string{nil, {"notify"}, {"--version"}, {"--version-json"}, {"start", "hook"}} {
+	for _, args := range [][]string{nil, {"notify"}, {"--version"}, {"--version-json"}, {"start", "hook"}, {"start", LauncherGuardSubcommand}} {
 		if raiseForHook(args) || currentClass(t) != windows.NORMAL_PRIORITY_CLASS {
 			t.Fatalf("%q raised the class to %#x", args, currentClass(t))
 		}
