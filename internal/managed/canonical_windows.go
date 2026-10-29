@@ -52,6 +52,17 @@ func AssessCanonical(path string, kind ObjectKind, opts CanonicalOptions) (Canon
 	return canonicalize(path, kind, opts, false)
 }
 
+// valid reports whether kind is one of the managed object kinds; only
+// canonicalize, on Windows, needs it.
+func (kind ObjectKind) valid() bool {
+	switch kind {
+	case ObjectRuntimeDirectory, ObjectRuntimeFile, ObjectRuntimeSecretFile,
+		ObjectConfigFile, ObjectConfigDirectory:
+		return true
+	}
+	return false
+}
+
 func canonicalize(path string, kind ObjectKind, opts CanonicalOptions, repair bool) (CanonicalResult, error) {
 	result := CanonicalResult{Path: path, Kind: kind}
 	fail := func(err error) (CanonicalResult, error) {
@@ -93,11 +104,13 @@ func canonicalize(path string, kind ObjectKind, opts CanonicalOptions, repair bo
 		return result, nil
 	}
 	descriptorUnreadable := false
+	attributeOnlyHandle := false
 	if errors.Is(err, windows.ERROR_ACCESS_DENIED) {
 		// The DACL no longer lets this caller read it. Structure is still
 		// checked through an attribute-only open; a privileged repair then
 		// reads the descriptor with backup semantics.
 		descriptorUnreadable = true
+		attributeOnlyHandle = true
 		handle, err = openCanonicalObject(clean, uint32(windows.FILE_READ_ATTRIBUTES))
 	}
 	if err != nil {
@@ -147,6 +160,11 @@ func canonicalize(path string, kind ObjectKind, opts CanonicalOptions, repair bo
 	result.UntrustedWriters = assessment.UntrustedWriters
 	result.GatewayAccessMissing = assessment.GatewayAccessMissing
 	result.Outcome = assessment.outcome()
+	if descriptorUnreadable && TrustStrictAncestors() {
+		// Strict mode keeps an unverifiable owner and writer set fatal.
+		result.Outcome = CanonicalBoundary
+		result.RepairError = "security descriptor is not readable"
+	}
 	if result.Outcome == CanonicalOK || !repair {
 		reportCanonicalResult(result, opts)
 		return result, nil
@@ -170,7 +188,26 @@ func canonicalize(path string, kind ObjectKind, opts CanonicalOptions, repair bo
 		reportCanonicalResult(result, opts)
 		return result, nil
 	}
-	desc, err = readObjectDescriptor(handle)
+	if attributeOnlyHandle {
+		// handle was opened without READ_CONTROL because the descriptor was
+		// unreadable; handle rights are fixed at open, so re-read through a
+		// privileged reopen of the same object.
+		err = RunWithWindowsRepairPrivileges(func() error {
+			verify, openErr := openCanonicalObject(clean, uint32(windows.READ_CONTROL|windows.FILE_READ_ATTRIBUTES))
+			if openErr != nil {
+				return openErr
+			}
+			defer func() { _ = windows.CloseHandle(verify) }()
+			if same, sameErr := sameWindowsFile(handle, verify); sameErr != nil || !same {
+				return errors.New("object changed during repair verification")
+			}
+			var readErr error
+			desc, readErr = readObjectDescriptor(verify)
+			return readErr
+		})
+	} else {
+		desc, err = readObjectDescriptor(handle)
+	}
 	if err != nil {
 		result.RepairError = "re-read repaired descriptor: " + err.Error()
 		reportCanonicalResult(result, opts)

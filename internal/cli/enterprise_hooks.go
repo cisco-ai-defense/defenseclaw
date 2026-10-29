@@ -1724,7 +1724,7 @@ func runEnterpriseHookReconcileOnce(ctx context.Context) (enterpriseHookReconcil
 				row.Error = "pending: " + enterpriseHookBoundReason(err.Error())
 			}
 			if !protected {
-				unenrolled[enterpriseHookTargetHealthUnit(row)] = struct{}{}
+				unenrolled[enterpriseHookEnrollmentUnit(target)] = struct{}{}
 			}
 			enterpriseHookTargetHealth.observe(row, row.Error)
 		} else {

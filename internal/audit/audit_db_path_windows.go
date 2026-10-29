@@ -587,11 +587,12 @@ func rejectUntrustedAuditDBWindowsACEs(
 			auditDBWindowsAcceptAdminPrincipal(path, fmt.Sprintf("entry mask 0x%x", uint32(ace.Mask)), sid) {
 			continue
 		}
-		if !writeLike && !auditDBWindowsTrustedPrincipal(sid, gatewayServiceSID) {
+		if !writeLike && !managed.TrustStrictAncestors() && !auditDBWindowsTrustedPrincipal(sid, gatewayServiceSID) {
 			// A foreign read-only entry (a backup or DLP agent, an inherited
 			// Users read after a reset) can disclose audit content but cannot
 			// change it. Accept and log it; the guardian re-stamps the
-			// canonical descriptor. Only write authority stays fatal.
+			// canonical descriptor. Only write authority stays fatal, and
+			// strict mode keeps every foreign entry fatal.
 			auditDBWindowsReportAccept(path, fmt.Sprintf(
 				"principal %s has read-only access mask 0x%x", auditDBWindowsSID(sid), uint32(ace.Mask)))
 			continue

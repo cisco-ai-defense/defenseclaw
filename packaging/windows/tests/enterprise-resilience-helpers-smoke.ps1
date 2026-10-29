@@ -81,7 +81,8 @@ if (-not $rejected) {
     throw 'an unknown resilience marker was accepted'
 }
 Write-DefenseClawResilienceEvent -Marker defenseclaw_accept -Fields @{ path = 'p' } 3>$null
-if (@(Get-DefenseClawResilienceEvents) -cne 'defenseclaw_accept path="p"') {
+$kept = @(Get-DefenseClawResilienceEvents)
+if ($kept.Count -ne 1 -or $kept[0] -cne 'defenseclaw_accept path="p"') {
     throw 'a written resilience event was not kept for the action result'
 }
 

@@ -742,6 +742,38 @@ func TestHookAPITokenWindowsAcceptsWritableAncestorThroughPublicOperations(t *te
 	}
 }
 
+// A grant that lets an untrusted principal rename, delete or re-ACL a
+// user-owned folder above the data directory lets it swap the token tree for
+// one it controls, so owner-based drift acceptance does not cover it.
+func TestHookAPITokenWindowsRejectsReplaceGrantOnUserOwnedAncestor(t *testing.T) {
+	const fileDeleteChild windows.ACCESS_MASK = 0x00000040
+	for _, tc := range []struct {
+		name string
+		mask windows.ACCESS_MASK
+	}{
+		{name: "delete_child", mask: fileDeleteChild},
+		{name: "delete", mask: windows.DELETE},
+		{name: "write_dac", mask: windows.WRITE_DAC},
+		{name: "generic_all", mask: windows.GENERIC_ALL},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			assertHookAPITokenRejectedByEnsureAndLoad(t, "untrusted Windows principal", func(t *testing.T) string {
+				root := testenv.PrivateTempDir(t)
+				ancestor := filepath.Join(root, "ancestor")
+				dataDir := filepath.Join(ancestor, "data")
+				if err := os.MkdirAll(dataDir, 0o700); err != nil {
+					t.Fatalf("create token data path: %v", err)
+				}
+				if _, err := EnsureHookAPIToken(dataDir, "codex"); err != nil {
+					t.Fatalf("seed token: %v", err)
+				}
+				setHookAPITokenWindowsUntrustedDACL(t, ancestor, tc.mask)
+				return dataDir
+			})
+		})
+	}
+}
+
 func TestHookAPITokenWindowsAllowsInheritOnlyTemplateOnSharedAncestor(t *testing.T) {
 	const inheritedModifyMask windows.ACCESS_MASK = 0xe0010000
 

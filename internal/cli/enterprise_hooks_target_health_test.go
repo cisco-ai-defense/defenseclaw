@@ -72,3 +72,22 @@ func TestEnterpriseHookEnrollmentManifestDropsOnlyUnprotectedFailures(t *testing
 		t.Fatal("input manifest was modified")
 	}
 }
+
+// A SID-less target is keyed by its own user, home and data directory, so
+// dropping one never drops another SID-less target of the same connector.
+func TestEnterpriseHookEnrollmentManifestKeysSIDLessTargetsApart(t *testing.T) {
+	manifest := enterprisehooks.Manifest{Version: 1, Targets: []enterprisehooks.ManifestTarget{
+		{Connector: "codex", User: "alice", UserHome: `C:\Users\alice`},
+		{Connector: "codex", User: "bob", UserHome: `C:\Users\bob`},
+	}}
+	unenrolled := map[string]struct{}{
+		enterpriseHookEnrollmentUnit(manifest.Targets[1]): {},
+	}
+	reduced := enterpriseHookEnrollmentManifest(manifest, nil, unenrolled)
+	if len(reduced.Targets) != 1 || reduced.Targets[0].User != "alice" {
+		t.Fatalf("kept = %+v, want only alice", reduced.Targets)
+	}
+	if enterpriseHookEnrollmentUnit(manifest.Targets[0]) == enterpriseHookEnrollmentUnit(manifest.Targets[1]) {
+		t.Fatal("SID-less targets share an enrollment key")
+	}
+}

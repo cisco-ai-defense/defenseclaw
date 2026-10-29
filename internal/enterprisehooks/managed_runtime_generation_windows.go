@@ -2284,22 +2284,15 @@ func repairWindowsManagedMachineFile(
 	if err := rejectWindowsReparseChain(path); err != nil {
 		return false, err
 	}
+	// Type, link count and owner are judged on the same no-follow handle
+	// that carries the re-stamp, so nothing is resolved by path in between.
 	err := RunWithWindowsOwnerRestorePrivilege(func() error {
-		links, err := windowsManagedRuntimeMachineFileLinks(path)
-		if err != nil {
-			return err
-		}
-		if links != 1 {
-			return errors.New("managed machine file has more than one hard link")
-		}
-		owner, err := windowsPathOwnerNoFollow(path)
-		if err != nil {
-			return fmt.Errorf("inspect managed machine file owner: %w", err)
-		}
-		if !windowsEnterpriseAdminIdentity(owner) && !managed.WindowsAdminEquivalentPrincipal(owner) {
-			return fmt.Errorf("managed machine file owner %s is not trusted", owner)
-		}
-		return setWindowsManagedPolicyProtection(path, false, userReadable)
+		return setWindowsManagedPolicyProtectionNoFollow(path, false, userReadable, func(owner *windows.SID) error {
+			if !windowsEnterpriseAdminIdentity(owner) && !managed.WindowsAdminEquivalentPrincipal(owner) {
+				return fmt.Errorf("managed machine file owner %s is not trusted", owner)
+			}
+			return nil
+		})
 	})
 	if err != nil {
 		return false, errors.Join(drift, fmt.Errorf("repair refused: %w", err))
@@ -2312,38 +2305,6 @@ func repairWindowsManagedMachineFile(
 		"reason": "managed machine file protection drifted: " + drift.Error(),
 	})
 	return true, nil
-}
-
-func windowsManagedRuntimeMachineFileLinks(path string) (uint32, error) {
-	extended, err := winpath.Extended(path)
-	if err != nil {
-		return 0, err
-	}
-	name, err := windows.UTF16PtrFromString(extended)
-	if err != nil {
-		return 0, err
-	}
-	handle, err := windows.CreateFile(
-		name,
-		windows.FILE_READ_ATTRIBUTES,
-		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE,
-		nil,
-		windows.OPEN_EXISTING,
-		windows.FILE_FLAG_BACKUP_SEMANTICS|windows.FILE_FLAG_OPEN_REPARSE_POINT,
-		0,
-	)
-	if err != nil {
-		return 0, err
-	}
-	defer windows.CloseHandle(handle)
-	var info windows.ByHandleFileInformation
-	if err := windows.GetFileInformationByHandle(handle, &info); err != nil {
-		return 0, err
-	}
-	if info.FileAttributes&(windows.FILE_ATTRIBUTE_DIRECTORY|windows.FILE_ATTRIBUTE_REPARSE_POINT) != 0 {
-		return 0, errors.New("managed runtime machine file is not a plain file")
-	}
-	return info.NumberOfLinks, nil
 }
 
 func validateWindowsManagedRuntimeMachineFileProtection(

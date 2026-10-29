@@ -1940,8 +1940,14 @@ func ensureWindowsCodexMachineFileTrust(path, label string, repairable bool) err
 		return err
 	}
 	drift, driftErr := windowsCodexMachineFileDrift(path)
+	if driftErr != nil && isManagedDescriptorStructural(driftErr) {
+		// A descriptor this code cannot classify is structural, not drift.
+		return errors.Join(strictErr, driftErr)
+	}
 	reason := strictErr.Error()
-	if driftErr == nil && !drift.Canonical {
+	if driftErr != nil {
+		reason += "; descriptor model unavailable: " + driftErr.Error()
+	} else if !drift.Canonical {
 		reason = drift.Reason() + ": " + reason
 	}
 	if repairable && driftErr == nil && !drift.Canonical && windowsManagedCanRepair() {

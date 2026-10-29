@@ -2473,6 +2473,9 @@ func TestValidateWindowsManagedPolicyDirectoryProtectionRejectsUnprotectedLeaf(t
 // An administrator-owned lock whose DACL drifted (here an Everyone write
 // grant) is re-stamped before the transaction opens it.
 func TestWindowsClaudeManagedPolicyTransactionRepairsDriftedLock(t *testing.T) {
+	if !windows.GetCurrentProcessToken().IsElevated() {
+		t.Skip("repairing an Administrators-owned lock needs an elevated token")
+	}
 	fixture := newWindowsManagedInstallFixture(t, nil)
 	lockPath := filepath.Join(filepath.Dir(fixture.policyPath), windowsClaudeManagedLockFile)
 	if err := os.WriteFile(lockPath, nil, 0o600); err != nil {
@@ -2482,8 +2485,11 @@ func TestWindowsClaudeManagedPolicyTransactionRepairsDriftedLock(t *testing.T) {
 		t.Fatal(err)
 	}
 	setWindowsTestUntrustedWriteDACL(t, lockPath, fixture.targetSID)
-	if err := setWindowsManagedPolicyOwnerForTest(lockPath); err != nil {
-		t.Fatal(err)
+	// Own the lock by BUILTIN\Administrators, not the fixture's canonical
+	// owner, so the repair's owner admission is exercised for a real
+	// administrator owner whatever account runs the test.
+	if err := setWindowsAdministratorsOwnerForTest(lockPath); err != nil {
+		t.Skipf("set Administrators owner: %v", err)
 	}
 	called := false
 	if err := withWindowsClaudeManagedPolicyTransaction(func() error {
@@ -2527,10 +2533,10 @@ func TestWindowsClaudeManagedPolicyTransactionRejectsHardLinkedLock(t *testing.T
 	}
 }
 
-// setWindowsManagedPolicyOwnerForTest puts the owner back to Administrators
-// after a test helper rewrote the DACL, so only the DACL has drifted.
-func setWindowsManagedPolicyOwnerForTest(path string) error {
-	owner, err := windowsManagedPolicyOwnerSID()
+// setWindowsAdministratorsOwnerForTest makes BUILTIN\Administrators the
+// owner, leaving the drifted DACL in place.
+func setWindowsAdministratorsOwnerForTest(path string) error {
+	owner, err := windows.CreateWellKnownSid(windows.WinBuiltinAdministratorsSid)
 	if err != nil {
 		return err
 	}
@@ -3075,5 +3081,51 @@ func TestWindowsEnterpriseManagedAgentVersionIsNotAnInstallPrerequisite(t *testi
 				)
 			}
 		})
+	}
+}
+
+// Alternate quarantine slots are bounded: an absent or target-owned slot is
+// used, a slot held by another owner is skipped and left alone, and when every
+// slot is held the quarantine is refused instead of creating another one.
+func TestWindowsManagedObstructionAlternateSlotIsBounded(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "obstruction")
+	current, err := windows.GetCurrentProcessToken().GetTokenUser()
+	if err != nil {
+		t.Fatal(err)
+	}
+	self := current.User.Sid
+	if got, err := windowsManagedObstructionAlternateSlot(path, self); err != nil ||
+		got != windowsManagedObstructionAlternatePath(path, 1) {
+		t.Fatalf("first slot = %q, %v; want slot 1", got, err)
+	}
+	for index := 1; index <= windowsManagedObstructionAlternateSlots; index++ {
+		if err := os.WriteFile(windowsManagedObstructionAlternatePath(path, index), nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Slots this process created are reusable for their owner as target (the
+	// test user, or Administrators on an elevated token).
+	fileOwner, err := windowsPathOwnerNoFollow(windowsManagedObstructionAlternatePath(path, 1))
+	if err != nil || fileOwner == nil {
+		t.Fatalf("slot owner: %v", err)
+	}
+	if got, err := windowsManagedObstructionAlternateSlot(path, fileOwner); err != nil ||
+		got != windowsManagedObstructionAlternatePath(path, 1) {
+		t.Fatalf("target-owned slot = %q, %v; want slot 1 reused", got, err)
+	}
+	// For any other target every slot is held by another owner.
+	other, err := windows.CreateWellKnownSid(windows.WinLocalServiceSid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, err := windowsManagedObstructionAlternateSlot(path, other); err == nil {
+		t.Fatalf("slot = %q with every slot held by another owner, want refusal", got)
+	}
+	if err := os.Remove(windowsManagedObstructionAlternatePath(path, 3)); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := windowsManagedObstructionAlternateSlot(path, other); err != nil ||
+		got != windowsManagedObstructionAlternatePath(path, 3) {
+		t.Fatalf("freed slot = %q, %v; want slot 3", got, err)
 	}
 }

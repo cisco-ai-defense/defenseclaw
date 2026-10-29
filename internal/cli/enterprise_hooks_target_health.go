@@ -44,6 +44,22 @@ func enterpriseHookTargetHealthUnit(row enterpriseHookReconcileRow) string {
 	return enterpriseHookUnit(row.Connector, row.SID)
 }
 
+// enterpriseHookEnrollmentUnit identifies one manifest target for the
+// enrollment filter. It uses the raw manifest identity, never a resolved SID,
+// so the reconcile loop and the filter agree; a target without a SID is keyed
+// by its user, home and data directory so it never shares a key with another
+// SID-less target of the same connector.
+func enterpriseHookEnrollmentUnit(target enterprisehooks.ManifestTarget) string {
+	if sid := strings.TrimSpace(target.SID); sid != "" {
+		return enterpriseHookUnit(target.Connector, sid)
+	}
+	return strings.ToLower(strings.TrimSpace(target.Connector)) + "@user:" + strings.ToLower(strings.Join([]string{
+		strings.TrimSpace(target.User),
+		strings.TrimSpace(target.UserHome),
+		strings.TrimSpace(target.DataDir),
+	}, "|"))
+}
+
 func enterpriseHookUnit(connectorName, sid string) string {
 	return strings.ToLower(strings.TrimSpace(connectorName)) + "@" + strings.ToUpper(strings.TrimSpace(sid))
 }
@@ -104,7 +120,7 @@ func enterpriseHookEnrollmentManifest(
 	reduced.Targets = make([]enterprisehooks.ManifestTarget, 0, len(manifest.Targets))
 	for _, target := range manifest.Targets {
 		if target.IsEnabled() {
-			if _, skip := drop[enterpriseHookUnit(target.Connector, target.SID)]; skip {
+			if _, skip := drop[enterpriseHookEnrollmentUnit(target)]; skip {
 				continue
 			}
 		}

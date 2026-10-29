@@ -46,15 +46,6 @@ func (kind ObjectKind) Directory() bool {
 	return kind == ObjectRuntimeDirectory || kind == ObjectConfigDirectory
 }
 
-func (kind ObjectKind) valid() bool {
-	switch kind {
-	case ObjectRuntimeDirectory, ObjectRuntimeFile, ObjectRuntimeSecretFile,
-		ObjectConfigFile, ObjectConfigDirectory:
-		return true
-	}
-	return false
-}
-
 // CanonicalOutcome is what EnsureCanonical or AssessCanonical concluded about
 // one object.
 type CanonicalOutcome string

@@ -129,9 +129,22 @@ func enableWindowsManagedRepairPrivilege(token windows.Token, name string) error
 	return nil
 }
 
+// errManagedDescriptorStructural marks a descriptor whose entries this code
+// cannot parse or classify (an unsupported allow-entry type, a malformed
+// DACL). It is structural, never permission drift: a caller that cannot
+// classify a descriptor must not accept it as harmless drift.
+var errManagedDescriptorStructural = errors.New("unclassifiable Windows security descriptor")
+
+// isManagedDescriptorStructural reports whether err from a descriptor model
+// read is structural rather than a failure to read the descriptor at all.
+func isManagedDescriptorStructural(err error) bool {
+	return errors.Is(err, errManagedDescriptorStructural)
+}
+
 // windowsManagedDescriptorModel converts a live security descriptor into the
 // platform-neutral model. An entry type this code cannot parse is returned as
-// an error: it is structural, never a permission verdict.
+// an error wrapping errManagedDescriptorStructural: it is structural, never a
+// permission verdict.
 func windowsManagedDescriptorModel(sd *windows.SECURITY_DESCRIPTOR) (managedDescriptor, error) {
 	var model managedDescriptor
 	if sd == nil {
@@ -160,7 +173,7 @@ func windowsManagedDescriptorModel(sd *windows.SECURITY_DESCRIPTOR) (managedDesc
 	for index := uint16(0); index < dacl.AceCount; index++ {
 		var ace *windows.ACCESS_ALLOWED_ACE
 		if err := windows.GetAce(dacl, uint32(index), &ace); err != nil {
-			return model, fmt.Errorf("inspect Windows ACE %d: %w", index, err)
+			return model, fmt.Errorf("%w: inspect Windows ACE %d: %w", errManagedDescriptorStructural, index, err)
 		}
 		if ace == nil {
 			continue
@@ -172,7 +185,7 @@ func windowsManagedDescriptorModel(sd *windows.SECURITY_DESCRIPTOR) (managedDesc
 				// A template for children only; it grants nothing here.
 				continue
 			}
-			return model, fmt.Errorf("unsupported Windows ACE type 0x%x", ace.Header.AceType)
+			return model, fmt.Errorf("%w: unsupported Windows ACE type 0x%x", errManagedDescriptorStructural, ace.Header.AceType)
 		}
 		sid := (*windows.SID)(unsafe.Pointer(&ace.SidStart))
 		model.ACEs = append(model.ACEs, managedACE{
@@ -480,12 +493,20 @@ func ensureWindowsManagedLockProtection(lock windowsManagedLockRepair) error {
 		return err
 	}
 	var drift managedDrift
-	if model, modelErr := windowsManagedHandleDescriptorModel(lock.Handle); modelErr == nil {
-		drift = classifyManagedDrift(model, lock.Policy)
+	model, modelErr := windowsManagedHandleDescriptorModel(lock.Handle)
+	if modelErr != nil && isManagedDescriptorStructural(modelErr) {
+		// An entry this code cannot classify is structural; never accept it
+		// as harmless drift.
+		return errors.Join(err, modelErr)
 	}
 	reason := err.Error()
-	if !drift.Canonical && len(drift.Reason()) > 0 {
-		reason = drift.Reason() + ": " + reason
+	if modelErr == nil {
+		drift = classifyManagedDrift(model, lock.Policy)
+		if !drift.Canonical && len(drift.Reason()) > 0 {
+			reason = drift.Reason() + ": " + reason
+		}
+	} else {
+		reason += "; descriptor model unavailable: " + modelErr.Error()
 	}
 	repairErr := repairWindowsManagedHeldLock(lock)
 	if repairErr == nil {

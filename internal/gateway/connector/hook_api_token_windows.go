@@ -7,6 +7,7 @@
 package connector
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -413,7 +414,8 @@ func hookAPIDriftRelaxer(
 		if verdict == nil {
 			return nil
 		}
-		if accept && !managed.TrustStrictAncestors() {
+		var replace hookAPIReplaceVerdict
+		if accept && !managed.TrustStrictAncestors() && !errors.As(verdict, &replace) {
 			emitManagedResilience(managed.MarkerAccept, path, verdict.Error(),
 				map[string]string{"label": hookAPITrustLabel})
 			return nil
@@ -423,6 +425,27 @@ func hookAPIDriftRelaxer(
 		}
 		return nil
 	}
+}
+
+// hookAPIReplaceVerdict marks an untrusted, non-administrator grant that can
+// rename, delete or re-ACL an element (DELETE, DELETE_CHILD, WRITE_DAC,
+// WRITE_OWNER, GENERIC_ALL). Such a principal can swap the token directory
+// for a tree it controls, so owner-based drift acceptance never covers it.
+type hookAPIReplaceVerdict struct{ error }
+
+func (v hookAPIReplaceVerdict) Unwrap() error { return v.error }
+
+// hookAPIWindowsReplaceAccess reports whether mask lets its holder replace the
+// element or a child of it, rather than only add to or annotate it.
+func hookAPIWindowsReplaceAccess(mask windows.ACCESS_MASK) bool {
+	const fileDeleteChild windows.ACCESS_MASK = 0x00000040
+	replace := windows.ACCESS_MASK(
+		windows.GENERIC_ALL |
+			windows.DELETE |
+			windows.WRITE_DAC |
+			windows.WRITE_OWNER,
+	)
+	return mask&(replace|fileDeleteChild) != 0
 }
 
 func hookAPIRejectUntrustedWindowsWriteACEs(path string, dacl *windows.ACL, wantDir, protectChildren, advisory bool) error {
@@ -482,10 +505,14 @@ func hookAPIRejectUntrustedWindowsWriteACEsWith(
 			continue
 		}
 		if !hookAPIWindowsTrustedPrincipal(sid) {
-			if err := relax(fmt.Errorf(
+			verdict := fmt.Errorf(
 				"untrusted Windows principal %s has write-like access mask 0x%x on %s",
 				hookAPIWindowsSIDString(sid), uint32(ace.Mask), path,
-			)); err != nil {
+			)
+			if hookAPIWindowsReplaceAccess(ace.Mask) && !managed.WindowsAdminEquivalentPrincipal(sid) {
+				verdict = hookAPIReplaceVerdict{error: verdict}
+			}
+			if err := relax(verdict); err != nil {
 				return err
 			}
 		}

@@ -8,9 +8,7 @@ package enterprisehooks
 import (
 	"bytes"
 	"context"
-	"crypto/rand"
 	"crypto/subtle"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -744,20 +742,35 @@ const windowsEnterpriseTokenMaxBytes int64 = 64 << 10
 
 var errWindowsManagedHardlink = errors.New("managed regular file has more than one hard link")
 
-// windowsManagedObstructionAlternateSlot returns an unused, uniquely named
-// quarantine slot next to path.
-func windowsManagedObstructionAlternateSlot(path string) (string, error) {
-	for attempt := 0; attempt < 8; attempt++ {
-		suffix := make([]byte, 6)
-		if _, err := io.ReadFull(rand.Reader, suffix); err != nil {
-			return "", fmt.Errorf("enterprise hooks: name alternate quarantine slot: %w", err)
-		}
-		candidate := windowsManagedObstructionQuarantinePath(path) + "-" + hex.EncodeToString(suffix)
+// windowsManagedObstructionAlternateSlots bounds the alternate quarantine
+// slots next to one path, so repeated obstructions while the canonical slot is
+// held by another owner cannot accumulate slots without limit.
+const windowsManagedObstructionAlternateSlots = 4
+
+func windowsManagedObstructionAlternatePath(path string, index int) string {
+	return fmt.Sprintf("%s-%d", windowsManagedObstructionQuarantinePath(path), index)
+}
+
+// windowsManagedObstructionAlternateSlot returns a bounded alternate
+// quarantine slot next to path: the first one that is absent or owned by the
+// target (the caller purges it before reuse). A slot owned by anyone else is
+// left untouched and skipped; when every slot is, the quarantine is refused.
+func windowsManagedObstructionAlternateSlot(path string, target *windows.SID) (string, error) {
+	for index := 1; index <= windowsManagedObstructionAlternateSlots; index++ {
+		candidate := windowsManagedObstructionAlternatePath(path, index)
 		if _, err := os.Lstat(candidate); errors.Is(err, os.ErrNotExist) {
+			return candidate, nil
+		} else if err != nil {
+			continue
+		}
+		if owner, err := windowsPathOwnerNoFollow(candidate); err == nil && owner != nil && owner.Equals(target) {
 			return candidate, nil
 		}
 	}
-	return "", fmt.Errorf("enterprise hooks: no free alternate quarantine slot for %s", path)
+	return "", fmt.Errorf(
+		"enterprise hooks: all %d alternate quarantine slots for %s are held by another owner",
+		windowsManagedObstructionAlternateSlots, path,
+	)
 }
 
 func windowsManagedObstructionQuarantinePath(path string) string {
@@ -786,11 +799,11 @@ func quarantineWindowsTargetOwnedObstruction(home, path string, target *windows.
 	// The canonical slot may hold an object the target cannot delete (left
 	// by an elevated process, or owned by an account that no longer
 	// resolves). This code runs as the target, so it cannot clear that slot;
-	// trying to used to wedge the repair forever. Leave it alone and use a
-	// fresh, uniquely named slot beside it instead.
+	// trying to used to wedge the repair forever. Leave it alone and use one
+	// of a bounded set of alternate slots beside it instead.
 	if slotOwner, slotOwnerErr := windowsPathOwnerNoFollow(quarantine); slotOwnerErr == nil &&
 		slotOwner != nil && !slotOwner.Equals(target) {
-		alternate, err := windowsManagedObstructionAlternateSlot(path)
+		alternate, err := windowsManagedObstructionAlternateSlot(path, target)
 		if err != nil {
 			return err
 		}
@@ -845,8 +858,14 @@ func removeWindowsTargetOwnedQuarantine(path string, target *windows.SID, allowN
 	return purgeWindowsTargetOwnedQuarantine(path, target)
 }
 
+// cleanupWindowsManagedObstructionQuarantine purges the canonical slot and
+// every bounded alternate slot the target owns. A slot owned by anyone else
+// is refused by the purge and left in place.
 func cleanupWindowsManagedObstructionQuarantine(path string, target *windows.SID) {
 	_ = removeWindowsTargetOwnedQuarantine(windowsManagedObstructionQuarantinePath(path), target, true)
+	for index := 1; index <= windowsManagedObstructionAlternateSlots; index++ {
+		_ = removeWindowsTargetOwnedQuarantine(windowsManagedObstructionAlternatePath(path, index), target, true)
+	}
 }
 
 func cleanupWindowsGenericFootprintQuarantines(

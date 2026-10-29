@@ -416,7 +416,12 @@ func windowsCorrelationSecurityNeedsHardening(handle windows.Handle) (bool, erro
 		// reset) or administrator entries: the key cannot be rewritten by an
 		// untrusted principal, and the gateway cannot re-stamp it with its
 		// read-only access. Accepted and logged; the guardian repairs it.
-		windowsCorrelationReportAccept("descriptor carries extra trusted or read-only entries")
+		// An untrusted reader is named so triage sees the key was exposed.
+		reason := "descriptor carries extra trusted or read-only entries"
+		if readers := windowsCorrelationUntrustedReaders(dacl, expectedOwner); len(readers) > 0 {
+			reason = "untrusted principal can read the correlation key: " + strings.Join(readers, ",")
+		}
+		windowsCorrelationReportAccept(reason)
 		return false, nil
 	}
 	return false, keyStoreError(KeyStoreErrorUnsafePermissions)
@@ -468,6 +473,35 @@ func windowsCorrelationDriftAcceptable(owner *windows.SID, dacl *windows.ACL, ex
 		return false
 	}
 	return true
+}
+
+// windowsCorrelationUntrustedReaders lists the principals outside the trusted
+// set that an allow entry grants read access to the key.
+func windowsCorrelationUntrustedReaders(dacl *windows.ACL, expectedOwner *windows.SID) []string {
+	if dacl == nil {
+		return nil
+	}
+	const readLike = windows.GENERIC_ALL | windows.GENERIC_READ | windows.GENERIC_EXECUTE | windows.FILE_READ_DATA
+	var readers []string
+	for index := uint16(0); index < dacl.AceCount; index++ {
+		var ace *windows.ACCESS_ALLOWED_ACE
+		if err := windows.GetAce(dacl, uint32(index), &ace); err != nil || ace == nil {
+			continue
+		}
+		if ace.Header.AceFlags&windows.INHERIT_ONLY_ACE != 0 || ace.Header.AceType != windows.ACCESS_ALLOWED_ACE_TYPE {
+			continue
+		}
+		if windows.ACCESS_MASK(ace.Mask)&readLike == 0 {
+			continue
+		}
+		sid := (*windows.SID)(unsafe.Pointer(&ace.SidStart))
+		if sid.Equals(expectedOwner) || managed.IsWindowsTrustedAdminOwner(sid) ||
+			windowsCorrelationAdminEquivalent(sid) || sid.IsWellKnown(windows.WinCreatorOwnerRightsSid) {
+			continue
+		}
+		readers = append(readers, sid.String())
+	}
+	return readers
 }
 
 var windowsCorrelationAdminEquivalent = managed.WindowsAdminEquivalentPrincipal

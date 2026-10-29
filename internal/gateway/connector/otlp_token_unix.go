@@ -75,6 +75,10 @@ func otlpPathTokenDriftNeedsRepublish(_ string) bool {
 	return false
 }
 
+func otlpPathTokenDriftDisclosedValue(_ string) bool {
+	return false
+}
+
 func createSecureOTLPPathTokenTempFile(tokenPath string) (*os.File, string, error) {
 	tmp, err := os.CreateTemp(filepath.Dir(tokenPath), otlpPathTokenTempPrefix(tokenPath)+"*")
 	if err != nil {

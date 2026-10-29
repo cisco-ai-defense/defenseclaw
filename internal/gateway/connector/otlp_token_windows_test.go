@@ -162,8 +162,9 @@ func TestOTLPPathTokenWindowsSecureCreationAndRepairsBroadDACL(t *testing.T) {
 		name       string
 		permission windows.ACCESS_MASK
 		// readDrift: an extra reader is permission drift. The token stays
-		// usable (accepted and logged) and a privileged publish restores
-		// its protection with the same value.
+		// usable (accepted and logged) for an unprivileged caller; a
+		// privileged publish rotates it, because the reader may already
+		// hold the value, and restores its protection.
 		readDrift bool
 		wantError string
 	}{
@@ -188,14 +189,23 @@ func TestOTLPPathTokenWindowsSecureCreationAndRepairsBroadDACL(t *testing.T) {
 				if token, err := LoadOTLPPathToken(dataDir, OTLPScopeCodex); err != nil || token != first {
 					t.Fatalf("LoadOTLPPathToken with an extra reader matched=%v err=%v, want the token", token == first, err)
 				}
+				originalCanRepair := windowsManagedCanRepair
+				t.Cleanup(func() { windowsManagedCanRepair = originalCanRepair })
+				windowsManagedCanRepair = func() bool { return false }
 				second, err := EnsureOTLPPathToken(dataDir, OTLPScopeCodex)
 				if err != nil || second != first {
-					t.Fatalf("EnsureOTLPPathToken with an extra reader matched=%v err=%v, want the same token", second == first, err)
+					t.Fatalf("unprivileged EnsureOTLPPathToken with an extra reader matched=%v err=%v, want the same token", second == first, err)
 				}
-				if windowsManagedCanRepair() {
-					if replace, err := otlpPathTokenNeedsSecureReplacement(path); err != nil || replace {
-						t.Fatalf("privileged publish left the extra reader: replace=%v err=%v", replace, err)
-					}
+				windowsManagedCanRepair = func() bool { return true }
+				rotated, err := EnsureOTLPPathToken(dataDir, OTLPScopeCodex)
+				if err != nil || rotated == "" || rotated == first {
+					t.Fatalf("privileged EnsureOTLPPathToken with an extra reader rotated=%v err=%v, want a new token", rotated != first, err)
+				}
+				if replace, err := otlpPathTokenNeedsSecureReplacement(path); err != nil || replace {
+					t.Fatalf("privileged publish left the extra reader: replace=%v err=%v", replace, err)
+				}
+				if loaded, err := LoadOTLPPathToken(dataDir, OTLPScopeCodex); err != nil || loaded != rotated {
+					t.Fatalf("load rotated token: matched=%v err=%v", loaded == rotated, err)
 				}
 				return
 			}

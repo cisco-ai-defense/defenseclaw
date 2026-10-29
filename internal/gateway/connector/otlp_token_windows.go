@@ -320,3 +320,16 @@ func otlpPathTokenDriftNeedsRepublish(path string) bool {
 	replace, err := otlpPathTokenNeedsSecureReplacement(path)
 	return err == nil && replace
 }
+
+// otlpPathTokenDriftDisclosedValue reports whether the drift on an existing
+// token grants an untrusted principal read access, so its value may already
+// be known and must be rotated rather than republished. Write-only and owner
+// drift keep the value.
+func otlpPathTokenDriftDisclosedValue(path string) bool {
+	dacl, err := otlpWindowsPathSecurity(path)
+	if err != nil {
+		// The descriptor cannot be judged; rotating is the safe choice.
+		return true
+	}
+	return otlpWindowsRejectUntrustedReadACEs(path, dacl) != nil
+}

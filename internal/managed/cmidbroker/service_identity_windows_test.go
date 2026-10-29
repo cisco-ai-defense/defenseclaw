@@ -35,6 +35,15 @@ func TestSameExecutablePathComparesFileIdentity(t *testing.T) {
 	if !sameExecutablePath(`\\?\`+path, path) {
 		t.Fatal("prefixed spelling of the same file did not match")
 	}
+	// A hard link is a second name for the same file: the spelling differs,
+	// so only the volume and file-index comparison can match it.
+	link := filepath.Join(dir, "broker-link.exe")
+	if err := os.Link(path, link); err != nil {
+		t.Fatal(err)
+	}
+	if !sameExecutablePath(link, path) {
+		t.Fatal("hard link to the same file did not match by file identity")
+	}
 	other := filepath.Join(dir, "other.exe")
 	if err := os.WriteFile(other, []byte("y"), 0o600); err != nil {
 		t.Fatal(err)

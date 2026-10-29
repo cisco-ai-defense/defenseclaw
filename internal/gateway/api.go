@@ -237,6 +237,9 @@ type APIServer struct {
 	// same nil-guard semantics: only assign non-nil concrete values to
 	// this field (see inspector.go for the nil-interface trap).
 	ciscoInspector Inspector
+	// ciscoInspectorMu guards ciscoInspector: the managed inspector retry
+	// can bind it after Run has started serving hook requests.
+	ciscoInspectorMu sync.RWMutex
 
 	// hookJudge forwards hook-lane message content (prompts + tool
 	// results delivered by hook connectors) to the LLM judge — the
@@ -268,7 +271,21 @@ func (a *APIServer) SetCiscoInspector(c Inspector) {
 		a.observabilityV8Mu.RUnlock()
 		c.bindObservabilityV8(metricRuntime)
 	}
+	a.ciscoInspectorMu.Lock()
 	a.ciscoInspector = c
+	a.ciscoInspectorMu.Unlock()
+}
+
+// currentCiscoInspector returns the hook-lane inspector, or nil when none is
+// bound yet. Every production reader goes through it because
+// SetCiscoInspector may run concurrently with request handlers.
+func (a *APIServer) currentCiscoInspector() Inspector {
+	if a == nil {
+		return nil
+	}
+	a.ciscoInspectorMu.RLock()
+	defer a.ciscoInspectorMu.RUnlock()
+	return a.ciscoInspector
 }
 
 // SetHookJudge wires the LLM judge onto the API server so the hook
