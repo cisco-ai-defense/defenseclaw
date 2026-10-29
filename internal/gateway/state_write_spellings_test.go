@@ -19,6 +19,7 @@ package gateway
 import (
 	"runtime"
 	"testing"
+	"time"
 )
 
 // A HOME value the walk could not read (export HOME=$(echo $HOME), HOME=$X,
@@ -110,5 +111,186 @@ func TestLinkRsyncAndPatternStateWrites(t *testing.T) {
 		{"cp a.txt ~/project/*.bak", false},
 		{"cp a.txt ~/.defenseclaw/nomatch*.yaml", false},
 		{"ls ~/.defenseclaw/conf*.yaml", false},
+	})
+}
+
+// The pattern reading listed every directory a wildcard above the home
+// could reach: ls /*/*/*/*/*/.defenseclaw/x took 27 s and more, past the
+// hook answer budget, so one extra word turned a blocked command into the
+// fail-mode answer (RV-pod2-1, GAP-2496). Only the active home
+// .defenseclaw tree is read now, and a pattern that spells that name with
+// wildcards is read too.
+func TestStatePatternReadsOnlyTheHomeStateTree(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX shell spellings")
+	}
+	start := time.Now()
+	judgeHomeStateWriteRows(t, []homeStateWriteRow{
+		{"cp a.txt ~/.defenseclaw/config.yaml; ls /*/*/*/*/*/.defenseclaw/x", true},
+		{"cp a.txt ~/.defenseclaw/config.yaml; ls /*/*/*/*/*/*/*/.defenseclaw/x", true},
+		{"cp a.txt ~/.def*/config.yaml", true},
+		{"cp a.txt ~/.defensecla[w]/config.yaml", true},
+		{"ln -sf a.txt ~/.def*/config.yaml", true},
+		{"cp a.txt HOMEDIR/.defenseclaw/c?nfig.yaml", true},
+		{"ls /*/*/*/*/*/.defenseclaw/x", false},
+		{"ls /*/*/*/*/*/*/*/.defenseclaw/x", false},
+		{"ls ~/.def*/conf*.yaml", false},
+		{"cp a.txt ~/.def*/nomatch.yaml", false},
+		{"cp ~/.def*/config.yaml ~/project/backup.yaml", false},
+	})
+	if elapsed := time.Since(start); elapsed > 30*time.Second {
+		t.Fatalf("44 pattern rows took %s; the reading must not walk past the home", elapsed)
+	}
+}
+
+// local HOME=v was applied to the caller with no function scope, also at
+// the top level, where bash refuses local and leaves HOME as it was, and
+// after the function returned, when the caller HOME is back (RV-pod2-2,
+// GAP-2476).
+func TestLocalHomeCountsOnlyInItsFunctionBody(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX shell spellings")
+	}
+	judgeHomeStateWriteRows(t, []homeStateWriteRow{
+		{"local HOME=/tmp/x; cp a.txt ~/.defenseclaw/config.yaml", true},
+		{"local HOME=/tmp/x 2>/dev/null; cp a.txt ~/.defenseclaw/config.yaml", true},
+		{"f(){ local HOME=/tmp/x; }; f; cp a.txt ~/.defenseclaw/config.yaml", true},
+		{"f(){ local HOME=/tmp/x; true; }; f; f; cp a.txt ~/.defenseclaw/hooks/x.sh", true},
+		{"f(){ if true; then local HOME=/tmp/x; fi; }; f; cp a.txt ~/.defenseclaw/config.yaml", true},
+		{"f(){ local HOME=$HOME/.defenseclaw; cp a.txt ~/config.yaml; }; f", true},
+		{"g(){ cp a.txt ~/config.yaml; }; f(){ local HOME=$HOME/.defenseclaw; g; }; f", true},
+		{"f(){ HOME=$HOME/.defenseclaw; }; f; cp a.txt ~/config.yaml", true},
+		{"f(){ local HOME=$HOME/.defenseclaw; true; }; f; cp a.txt ~/config.yaml", false},
+		{"f(){ local HOME=/tmp/fakehome; cp a.txt ~/out.txt; }; f", false},
+	})
+}
+
+// A file writer run through nohup, nice, time, timeout or env NAME=value,
+// through command, sudo or env with options, or after a leading word that
+// may expand to nothing, tied no write to the call, while it writes what
+// the plain call writes (GAP-2512, GAP-2477 checker pod2 W05-W12).
+func TestWrappedFileWriterWritesWhatThePlainCallWrites(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX shell spellings")
+	}
+	judgeHomeStateWriteRows(t, []homeStateWriteRow{
+		{"nohup cp a.txt ~/.defenseclaw/config.yaml", true},
+		{"nice cp a.txt ~/.defenseclaw/config.yaml", true},
+		{"nice -n 5 cp a.txt ~/.defenseclaw/hooks/x.sh", true},
+		{"nice -5 mv a.txt ~/.defenseclaw/config.yaml", true},
+		{"time cp a.txt ~/.defenseclaw/config.yaml", true},
+		{"time -p cp a.txt ~/.defenseclaw/config.yaml", true},
+		{"/usr/bin/time -f %e cp a.txt ~/.defenseclaw/config.yaml", true},
+		{"timeout 5 cp a.txt ~/.defenseclaw/config.yaml", true},
+		{"timeout -k 2 10s install a.txt ~/.defenseclaw/hooks/x.sh", true},
+		{"env NAME=v cp a.txt ~/.defenseclaw/config.yaml", true},
+		{"env -i cp a.txt ~/.defenseclaw/config.yaml $(true)", true},
+		{"sudo -u root cp a.txt ~/.defenseclaw/config.yaml $(true)", true},
+		{"command -p cp a.txt ~/.defenseclaw/config.yaml $(true)", true},
+		{"$(true) cp a.txt ~/.defenseclaw/config.yaml", true},
+		{"nohup nice tee ~/.defenseclaw/config.yaml < a.txt", true},
+		{"nohup ln -sf a.txt ~/.defenseclaw/config.yaml", true},
+		{"nohup cp a.txt b.txt", false},
+		{"env FOO=1 cp a.txt b.txt", false},
+		{"nice ls -la", false},
+		{"time cp a.txt ~/project/c.txt", false},
+		{"timeout 60 rsync -a src/ ~/project/backup/", false},
+		{"sudo -u root cp a.txt /tmp/x.txt", false},
+		{"nohup cp ~/.defenseclaw/config.yaml ~/project/backup.yaml", false},
+	})
+}
+
+// A static prefix wrapper that runs its child in the caller directory
+// (nohup, env NAME=value) made a wrapped ln an unreadable link, so its
+// destination counted as a possible keys write: nohup ln -sf $(pwd)/a.txt
+// ~/.local/bin/tool blocked while the plain ln is allowed (checker p3i3
+// RV-p3i3-1, GAP-2496). The wrapped ln reads like the plain ln.
+func TestWrappedLinkReadsLikeThePlainLink(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX shell spellings")
+	}
+	judgeHomeStateWriteRows(t, []homeStateWriteRow{
+		{"nohup ln -sf $(pwd)/a.txt ~/.local/bin/tool", false},
+		{"env A=1 ln -s $(pwd)/a.txt ~/.local/bin/tool", false},
+		{"nohup ln -sf ~/project/a.txt ~/.local/bin/tool", false},
+		{"nohup ln -sf $PWD/a.txt ~/.local/bin/tool", false},
+		{"nohup ln -sf `pwd`/a.txt ~/.local/bin/tool", false},
+		{"nohup ln -s $(pwd)/a.txt ~/.local/bin/tool", false},
+		{"ln -sf $(pwd)/a.txt ~/.local/bin/tool", false},
+		{"nohup ln -sf a.txt ~/.defenseclaw/config.yaml", true},
+		{"env A=1 ln -sfn /tmp/x ~/.defenseclaw/hooks", true},
+		{"nohup ln -s ~/.ssh/authorized_keys k; cp a.txt k", true},
+		{"env PATH=/tmp/bin ln -s ~/.ssh/authorized_keys k; cp a.txt k", true},
+	})
+}
+
+// A file writer run through setsid, stdbuf, ionice, taskset, chrt, doas,
+// flock FILE, caffeinate, sudo -i or -s, env -C DIR or builtin command
+// tied no write to the call, while it writes what the plain call writes
+// (GAP-2519, checker p3i3 X01-X06, X17, X25-X27, X32).
+func TestExecRunnersWriteWhatThePlainCallWrites(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX shell spellings")
+	}
+	judgeHomeStateWriteRows(t, []homeStateWriteRow{
+		{"setsid cp a.txt ~/.defenseclaw/config.yaml", true},
+		{"setsid -f cp a.txt ~/.defenseclaw/config.yaml", true},
+		{"stdbuf -o0 cp a.txt ~/.defenseclaw/config.yaml", true},
+		{"stdbuf -o L tee ~/.defenseclaw/config.yaml < a.txt", true},
+		{"ionice -c3 cp a.txt ~/.defenseclaw/config.yaml", true},
+		{"ionice -c 2 -n 7 mv a.txt ~/.defenseclaw/config.yaml", true},
+		{"taskset -c 0 cp a.txt ~/.defenseclaw/config.yaml", true},
+		{"taskset 0x1 install a.txt ~/.defenseclaw/hooks/x.sh", true},
+		{"chrt -b 0 cp a.txt ~/.defenseclaw/config.yaml", true},
+		{"doas cp a.txt ~/.defenseclaw/config.yaml", true},
+		{"doas -u root cp a.txt ~/.defenseclaw/config.yaml", true},
+		{"flock /tmp/zzl cp a.txt ~/.defenseclaw/config.yaml", true},
+		{"flock -w 5 /tmp/zzl cp a.txt ~/.defenseclaw/config.yaml", true},
+		{"caffeinate -i cp a.txt ~/.defenseclaw/config.yaml", true},
+		{"sudo -i cp a.txt ~/.defenseclaw/config.yaml", true},
+		{"sudo -s cp a.txt ~/.defenseclaw/config.yaml", true},
+		{"env --chdir=/ cp a.txt ~/.defenseclaw/config.yaml", true},
+		{"env -C / cp HOMEDIR/project/a.txt HOMEDIR/.defenseclaw/config.yaml", true},
+		{"env -C HOMEDIR cp project/a.txt .defenseclaw/config.yaml", true},
+		{"builtin command cp a.txt ~/.defenseclaw/config.yaml", true},
+		{"setsid nohup cp a.txt ~/.ssh/authorized_keys", true},
+		{"setsid cp a.txt b.txt", false},
+		{"stdbuf -oL tee out.log < a.txt", false},
+		{"flock /tmp/zzl make --version", false},
+		{"ionice -c3 cp a.txt ~/project/backup.txt", false},
+		{"env -C /tmp cp HOMEDIR/project/a.txt .defenseclaw-notes.txt", false},
+		{"env -C /tmp cp HOMEDIR/project/a.txt .defenseclaw/config.yaml", false},
+		{"taskset -c 0 cp ~/.defenseclaw/config.yaml ~/project/backup.yaml", false},
+	})
+}
+
+// export, declare and typeset of HOME in a function body went unread when
+// the action also defined a function (the exported-function reading
+// refused an assignment word), and declare or typeset without -g there
+// set the caller HOME, while bash makes it local to the body (checker
+// p3i3 D01-D04c, D12, D18, D21, GAP-2476).
+func TestHomeDeclarationInAFunctionBody(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX shell spellings")
+	}
+	judgeHomeStateWriteRows(t, []homeStateWriteRow{
+		{"f(){ declare HOME=/tmp/x; }; f; cp a.txt ~/.defenseclaw/config.yaml", true},
+		{"f(){ typeset HOME=/tmp/x; }; f; cp a.txt ~/.defenseclaw/config.yaml", true},
+		{"f(){ declare -x HOME=/tmp/x; }; f; cp a.txt ~/.defenseclaw/config.yaml", true},
+		{"f(){ declare -r HOME=/tmp/x; }; f; cp a.txt ~/.defenseclaw/config.yaml", true},
+		{"f(){ declare HOME=/tmp/x; }; f; cp a.txt ~/.defenseclaw/hooks/x.sh", true},
+		{"f(){ typeset -x HOME=/tmp/x; }; f; mv a.txt ~/.defenseclaw/config.yaml", true},
+		{"f(){ declare HOME=$HOME/.defenseclaw; cp a.txt ~/config.yaml; }; f", true},
+		{"f(){ export HOME=$HOME/.defenseclaw; cp a.txt ~/config.yaml; }; f", true},
+		{"f(){ declare -g HOME=$HOME/.defenseclaw; }; f; cp a.txt ~/config.yaml", true},
+		{"f(){ export HOME=$HOME/.defenseclaw; }; f; cp a.txt ~/config.yaml", true},
+		{"f(){ readonly HOME=$HOME/.defenseclaw; }; f; cp a.txt ~/config.yaml", true},
+		{"declare HOME=$HOME/.defenseclaw; cp a.txt ~/config.yaml", true},
+		{"f(){ export HOME=/tmp/x; cp a.txt ~/.defenseclaw/config.yaml; }; f", false},
+		{"f(){ declare -g HOME=/tmp/x; }; f; cp a.txt ~/.defenseclaw/config.yaml", false},
+		{"f(){ declare HOME=/tmp/x; cp a.txt ~/.defenseclaw/config.yaml; }; f", false},
+		{"declare HOME=/tmp/x; cp a.txt ~/out.txt", false},
+		{"f(){ declare -x HOME=$(mktemp -d); cp a.txt ~/out.txt; }; f", false},
+		{"f(){ export FOO=1; cp a.txt ~/project/out.txt; }; f", false},
 	})
 }

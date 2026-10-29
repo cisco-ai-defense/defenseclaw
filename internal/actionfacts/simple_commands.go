@@ -39,6 +39,16 @@ type simpleShellState struct {
 	cwdUnknown bool
 	dirStack   []string
 	vars       map[string]string
+	// homeLocals holds, innermost last, the HOME of the caller of each
+	// function body that made HOME local; the body end restores it.
+	homeLocals []simpleHomeLocal
+}
+
+// simpleHomeLocal is the caller HOME saved by a local HOME in the function
+// body of scope.
+type simpleHomeLocal struct {
+	scope, home string
+	known       bool
 }
 
 const (
@@ -48,7 +58,8 @@ const (
 
 func (s simpleShellState) clone() simpleShellState {
 	copy := simpleShellState{cwd: s.cwd, cwdUnknown: s.cwdUnknown,
-		dirStack: slices.Clone(s.dirStack), vars: make(map[string]string, len(s.vars))}
+		dirStack: slices.Clone(s.dirStack), vars: make(map[string]string, len(s.vars)),
+		homeLocals: slices.Clone(s.homeLocals)}
 	for name, value := range s.vars {
 		copy.vars[name] = value
 	}
@@ -142,31 +153,28 @@ func simpleCommands(input Input, facts Facts, depth int, interpreter string) []S
 				return []SimpleCommand{{EvaluationFailure: "parse"}}
 			}
 			parent := previousScope[:index]
-			if previousScope[index+1] == 'c' {
-				states[parent] = uniqueSimpleStates(append(states[parent], states[previousScope]...))
-				if len(states[parent]) > maxSimpleStates {
-					return []SimpleCommand{{EvaluationFailure: "limit"}}
+			body, ran := states[previousScope]
+			switch previousScope[index+1] {
+			case 'c':
+				if ran {
+					states[parent] = uniqueSimpleStates(append(simpleScopeStates(states, parent), body...))
 				}
+			case 'f':
+				// A called function body always runs; its local HOME ends
+				// with it (GAP-2476, RV-pod2-2).
+				if ran {
+					states[parent] = uniqueSimpleStates(simpleEndFunctionBody(body, previousScope))
+				}
+			}
+			if len(states[parent]) > maxSimpleStates {
+				return []SimpleCommand{{EvaluationFailure: "limit"}}
 			}
 			previousScope = parent
 		}
 		previousScope = part.scope
-		variants, present := states[part.scope]
-		if !present {
-			parent := part.scope
-			for {
-				index := strings.LastIndexByte(parent, '/')
-				if index < 0 {
-					return []SimpleCommand{{EvaluationFailure: "parse"}}
-				}
-				parent = parent[:index]
-				if inherited, ok := states[parent]; ok {
-					for _, state := range inherited {
-						variants = append(variants, state.clone())
-					}
-					break
-				}
-			}
+		variants := simpleScopeStates(states, part.scope)
+		if variants == nil {
+			return []SimpleCommand{{EvaluationFailure: "parse"}}
 		}
 		file, parsed := shellparse.Parse(part.text)
 		if !parsed || len(file.Stmts) != 1 {
@@ -290,7 +298,7 @@ func simpleCommands(input Input, facts Facts, depth int, interpreter string) []S
 			if decl, ok := stmt.Cmd.(*syntax.DeclClause); ok {
 				// export HOME=v sets HOME for the commands after it, as
 				// HOME=v; export HOME does (GAP-2476).
-				updateSimpleDeclVariables(state.vars, decl)
+				updateSimpleDeclVariables(&state, decl, part.scope)
 			}
 			nextCWD, changedDirectory := simpleCommandNextCWD(text, &state, effective)
 			if !changedDirectory {
@@ -646,7 +654,8 @@ func uniqueSimpleStates(states []simpleShellState) []simpleShellState {
 	for _, state := range states {
 		if !slices.ContainsFunc(result, func(previous simpleShellState) bool {
 			return previous.cwd == state.cwd && previous.cwdUnknown == state.cwdUnknown &&
-				slices.Equal(previous.dirStack, state.dirStack) && maps.Equal(previous.vars, state.vars)
+				slices.Equal(previous.dirStack, state.dirStack) && maps.Equal(previous.vars, state.vars) &&
+				slices.Equal(previous.homeLocals, state.homeLocals)
 		}) {
 			result = append(result, state)
 		}
@@ -663,14 +672,41 @@ func uniqueSimpleStates(states []simpleShellState) []simpleShellState {
 // keeps its previous value, so a later ~ or $HOME write is still judged
 // against a home the call can reach (GAP-2476, RV-pc11-1). Other names
 // keep the bound-variable reading the action-level resolver judges.
-func updateSimpleDeclVariables(vars map[string]string, decl *syntax.DeclClause) {
+//
+// local HOME=v counts only in a function body, until the body ends: bash
+// refuses local outside a function (HOME is unchanged), and the caller
+// HOME is back once the function returns (RV-pod2-2). declare and typeset
+// without -g in a function body are local too; export, readonly and
+// declare -g there set the caller HOME (checker p3i3 D01-D21).
+func updateSimpleDeclVariables(state *simpleShellState, decl *syntax.DeclClause, scope string) {
 	if decl == nil || decl.Variant == nil {
 		return
 	}
+	vars := state.vars
+	local := false
 	switch decl.Variant.Value {
-	case "export", "readonly", "declare", "typeset", "local":
+	case "export", "readonly":
+	case "declare", "typeset":
+		// In a function body declare and typeset make the name local
+		// unless -g is given (bash, ksh); at the top level they set it.
+		local = simpleFunctionBodyScope(scope) != "" && !simpleDeclGlobal(decl)
+	case "local":
+		if simpleFunctionBodyScope(scope) == "" {
+			return
+		}
+		local = true
 	default:
 		return
+	}
+	if local {
+		body := simpleFunctionBodyScope(scope)
+		declaresHome := slices.ContainsFunc(decl.Args, func(assign *syntax.Assign) bool {
+			return assign != nil && assign.Name != nil && assign.Name.Value == "HOME"
+		})
+		if declaresHome && (len(state.homeLocals) == 0 || state.homeLocals[len(state.homeLocals)-1].scope != body) {
+			home, known := vars["HOME"]
+			state.homeLocals = append(state.homeLocals, simpleHomeLocal{scope: body, home: home, known: known})
+		}
 	}
 	known := true
 	for _, assign := range decl.Args {
@@ -698,6 +734,77 @@ func updateSimpleDeclVariables(vars map[string]string, decl *syntax.DeclClause) 
 		}
 		updateSimpleVariables(vars, []*syntax.Assign{assign})
 	}
+}
+
+// simpleDeclGlobal reports a static -g option word of a declaration.
+func simpleDeclGlobal(decl *syntax.DeclClause) bool {
+	for _, assign := range decl.Args {
+		if assign == nil || assign.Name != nil || assign.Value == nil {
+			continue
+		}
+		option := projectPOSIXWord(assign.Value)
+		if !option.Expands && strings.HasPrefix(option.Value, "-") && strings.ContainsRune(option.Value[1:], 103) {
+			return true
+		}
+	}
+	return false
+}
+
+// simpleScopeStates returns the states of scope: its own, or copies of
+// those of the nearest scope around it that has states. nil means none.
+func simpleScopeStates(states map[string][]simpleShellState, scope string) []simpleShellState {
+	if own, present := states[scope]; present {
+		return own
+	}
+	for {
+		index := strings.LastIndexByte(scope, '/')
+		if index < 0 {
+			return nil
+		}
+		scope = scope[:index]
+		if inherited, ok := states[scope]; ok {
+			copies := make([]simpleShellState, 0, len(inherited))
+			for _, state := range inherited {
+				copies = append(copies, state.clone())
+			}
+			return copies
+		}
+	}
+}
+
+// simpleFunctionBodyScope returns the innermost function body scope (kind
+// f or e) that holds scope, or "" at the top level of the action.
+func simpleFunctionBodyScope(scope string) string {
+	for {
+		index := strings.LastIndexByte(scope, '/')
+		if index < 0 {
+			return ""
+		}
+		if kind := scope[index+1]; kind == 'f' || kind == 'e' {
+			return scope
+		}
+		scope = scope[:index]
+	}
+}
+
+// simpleEndFunctionBody restores the caller HOME that a local HOME of the
+// function body of scope saved.
+func simpleEndFunctionBody(states []simpleShellState, scope string) []simpleShellState {
+	ended := make([]simpleShellState, 0, len(states))
+	for _, state := range states {
+		state = state.clone()
+		if last := len(state.homeLocals) - 1; last >= 0 && state.homeLocals[last].scope == scope {
+			saved := state.homeLocals[last]
+			state.homeLocals = state.homeLocals[:last]
+			if saved.known {
+				state.vars["HOME"] = saved.home
+			} else {
+				delete(state.vars, "HOME")
+			}
+		}
+		ended = append(ended, state)
+	}
+	return ended
 }
 
 func updateSimpleVariables(vars map[string]string, assigns []*syntax.Assign) {

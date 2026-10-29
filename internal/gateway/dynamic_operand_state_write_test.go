@@ -39,7 +39,7 @@ func judgeHomeStateWriteRows(t *testing.T, rows []homeStateWriteRow) {
 	t.Helper()
 	home := t.TempDir()
 	cwd := filepath.Join(home, "project")
-	for _, dir := range []string{filepath.Join(home, ".defenseclaw", "hooks"), filepath.Join(home, ".ssh"), cwd} {
+	for _, dir := range []string{filepath.Join(home, ".defenseclaw", "hooks"), filepath.Join(home, ".ssh"), filepath.Join(home, ".local", "bin"), cwd} {
 		if err := os.MkdirAll(dir, 0o700); err != nil {
 			t.Fatal(err)
 		}

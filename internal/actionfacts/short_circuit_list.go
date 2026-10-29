@@ -245,14 +245,15 @@ func sequenceStatementDetails(source string, compound, allSimple bool) (statemen
 	var redirects []string
 	scope := "0"
 	nextScope := 0
-	childScope := func(sharedShell bool, walk func() bool) bool {
+	// childScope walks statements in a child scope of a kind: s a subshell
+	// (its state is dropped), c a conditional or loop body of the same
+	// shell (its state joins the path that skipped it), f a function body
+	// run by this shell (its state replaces the caller state, less its
+	// local variables), e a function body run by a child shell.
+	childScope := func(kind byte, walk func() bool) bool {
 		parent := scope
 		nextScope++
-		kind := "s"
-		if sharedShell {
-			kind = "c"
-		}
-		scope = parent + "/" + kind + strconv.Itoa(nextScope)
+		scope = parent + "/" + string(kind) + strconv.Itoa(nextScope)
 		defer func() { scope = parent }()
 		return walk()
 	}
@@ -309,7 +310,7 @@ func sequenceStatementDetails(source string, compound, allSimple bool) (statemen
 		})
 		for _, stmts := range nested {
 			subshells++
-			ok := childScope(false, func() bool { return flattenAll(stmts) })
+			ok := childScope('s', func() bool { return flattenAll(stmts) })
 			subshells--
 			if !ok {
 				return false
@@ -329,8 +330,8 @@ func sequenceStatementDetails(source string, compound, allSimple bool) (statemen
 				return false, false
 			}
 			if allSimple && (typed.Op == syntax.Pipe || typed.Op == syntax.PipeAll) {
-				return true, childScope(false, func() bool { return flatten(typed.X) }) &&
-					childScope(false, func() bool { return flatten(typed.Y) })
+				return true, childScope('s', func() bool { return flatten(typed.X) }) &&
+					childScope('s', func() bool { return flatten(typed.Y) })
 			}
 			return true, flatten(typed.X) && flatten(typed.Y)
 		}
@@ -347,7 +348,7 @@ func sequenceStatementDetails(source string, compound, allSimple bool) (statemen
 		case *syntax.Subshell:
 			subshells++
 			defer func() { subshells-- }()
-			return true, childScope(false, func() bool { return flattenAll(typed.Stmts) })
+			return true, childScope('s', func() bool { return flattenAll(typed.Stmts) })
 		case *syntax.Block:
 			return true, flattenAll(typed.Stmts)
 		case *syntax.TimeClause:
@@ -357,14 +358,14 @@ func sequenceStatementDetails(source string, compound, allSimple bool) (statemen
 			return true, flatten(typed.Stmt)
 		case *syntax.IfClause:
 			for clause := typed; clause != nil; clause = clause.Else {
-				if !flattenAll(clause.Cond) || !childScope(true, func() bool { return flattenAll(clause.Then) }) {
+				if !flattenAll(clause.Cond) || !childScope('c', func() bool { return flattenAll(clause.Then) }) {
 					return true, false
 				}
 			}
 			return true, true
 		case *syntax.WhileClause:
 			return true, flattenAll(typed.Cond) &&
-				childScope(true, func() bool { return flattenAll(typed.Do) })
+				childScope('c', func() bool { return flattenAll(typed.Do) })
 		case *syntax.ForClause:
 			switch iteration := typed.Loop.(type) {
 			case *syntax.WordIter:
@@ -381,7 +382,7 @@ func sequenceStatementDetails(source string, compound, allSimple bool) (statemen
 			default:
 				return true, false
 			}
-			return true, childScope(true, func() bool { return flattenAll(typed.Do) })
+			return true, childScope('c', func() bool { return flattenAll(typed.Do) })
 		case *syntax.CaseClause:
 			if !allSimple && !inertPOSIXWords(typed.Word) ||
 				allSimple && !flattenSubstitutions(typed.Word) {
@@ -398,7 +399,7 @@ func sequenceStatementDetails(source string, compound, allSimple bool) (statemen
 						}
 					}
 				}
-				if !childScope(true, func() bool { return flattenAll(item.Stmts) }) {
+				if !childScope('c', func() bool { return flattenAll(item.Stmts) }) {
 					return true, false
 				}
 			}
@@ -517,7 +518,7 @@ func sequenceStatementDetails(source string, compound, allSimple bool) (statemen
 							return false
 						}
 						functionDepth++
-						ok := flatten(body)
+						ok := childScope('f', func() bool { return flatten(body) })
 						functionDepth--
 						if !ok {
 							return false
@@ -565,7 +566,7 @@ func sequenceStatementDetails(source string, compound, allSimple bool) (statemen
 			// variables stay there.
 			functionDepth++
 			subshells++
-			ok := childScope(false, func() bool { return flatten(body) })
+			ok := childScope('e', func() bool { return flatten(body) })
 			subshells--
 			functionDepth--
 			if !ok {
@@ -628,6 +629,11 @@ func simpleExportedFunctionNames(decl *syntax.DeclClause) ([]string, bool) {
 			values = append(values, arg.Name.Value)
 			continue
 		}
+		if arg.Name != nil {
+			// NAME=value sets a variable; it exports no function (export
+			// HOME=v in a function body, GAP-2476).
+			continue
+		}
 		if arg.Name == nil && arg.Value != nil {
 			value, known := simpleStaticWord(arg.Value, nil)
 			if !known {
@@ -658,9 +664,8 @@ func simpleExportedFunctionNames(decl *syntax.DeclClause) ([]string, bool) {
 				exportAttribute = true
 			} else if flag == 'n' {
 				unexport = true
-			} else if !strings.ContainsRune("np", flag) {
-				return nil, false
 			}
+			// Another attribute (-g, -r, -p, ...) exports no function.
 		}
 		index++
 	}

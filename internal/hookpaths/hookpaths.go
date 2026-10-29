@@ -1673,6 +1673,15 @@ func commandLinksWithFacts(command, cwd, home string, facts map[string]string, r
 		if static[0] {
 			program = programBase(words[0])
 		}
+		// A static prefix wrapper (nohup, nice, env NAME=value, sudo -u)
+		// runs its child argv in this directory: the child is read as the
+		// plain call, so nohup ln -sf a ~/.local/bin/tool is the plain ln
+		// (RV-p3i3-1). A wrapper that moves the directory or changes which
+		// program the child word names keeps the wrapper reading below.
+		if index, wrapped := plainWrappedChild(words, static); wrapped {
+			args, words, static, start = args[index:], words[index:], static[index:], args[index].Pos()
+			program = programBase(words[0])
+		}
 		// busybox ln and toybox ln are ln (GAP-1521).
 		for slices.Contains(multicallPrograms, program) && len(args) > 1 {
 			args, words, static, start = args[1:], words[1:], static[1:], args[1].Pos()
@@ -1856,9 +1865,31 @@ func topLevelLinkDirectories(file *syntax.File, cwd, home string) (dirs map[*syn
 		}
 		if slices.Contains(linkPrograms, programBase(program)) {
 			dirs[call] = dir
+			continue
+		}
+		values := make([]string, len(call.Args))
+		literal := make([]bool, len(call.Args))
+		for i, arg := range call.Args {
+			values[i], literal[i] = StaticWord(arg, home)
+		}
+		if index, wrapped := plainWrappedChild(values, literal); wrapped &&
+			slices.Contains(linkPrograms, programBase(values[index])) {
+			dirs[call] = dir
 		}
 	}
 	return dirs, true
+}
+
+// plainWrappedChild returns the index of the program word that a chain of
+// static prefix wrappers at words[0] runs with the same directory and the
+// same program resolution, as a static word.
+func plainWrappedChild(words []string, static []bool) (int, bool) {
+	run, ok := actionfacts.StaticPrefixWrapperChild(words, static)
+	if !ok || run.Dir != "" || run.DirUnknown || run.ChangesResolution ||
+		run.Index >= len(words) || !static[run.Index] || words[run.Index] == "" {
+		return 0, false
+	}
+	return run.Index, true
 }
 
 // staticChangedDirectoryLink handles one ordered cd/link/write chain. The

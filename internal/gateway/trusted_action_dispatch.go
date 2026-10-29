@@ -311,6 +311,15 @@ func dispatchTrustedAction(
 			findings = withTwinProvenBlocks(findings, dispatchTrustedAction(parent, twin))
 		}()
 	}
+	// A file writer run through nohup, nice, time, timeout, env NAME=value,
+	// command, sudo or exec (or after a word that may expand to nothing)
+	// writes what the plain call writes (GAP-2512); the plain reading is
+	// judged, and only its block counts.
+	if twin, ok := wrapperUnwrapTwinRequest(request); ok {
+		defer func() {
+			findings = withTwinProvenBlocks(findings, dispatchTrustedAction(parent, twin))
+		}()
+	}
 
 	facts = actionfacts.Analyze(request.Input)
 	analyzed = true
@@ -5381,21 +5390,48 @@ func dynamicOperandTwinRequests(request trustedActionRequest) []trustedActionReq
 	}
 	var twins []trustedActionRequest
 	for _, rewritten := range actionfacts.DynamicOperandTwins(command, request.Input.ActiveHome) {
-		if rewritten == command {
-			continue
+		if rewritten != command {
+			twins = append(twins, bashReadingRequest(request, command, rewritten))
 		}
-		twin := request
-		twin.record, twin.recordTelemetry = nil, nil
-		twin.Input.Command, twin.Input.Args, twin.Input.Argv = rewritten, nil, nil
-		twin.conflictSource = nil
-		if strings.Contains(request.LegacyText, command) {
-			twin.LegacyText = strings.ReplaceAll(request.LegacyText, command, rewritten)
-		} else {
-			twin.LegacyText = rewritten
-		}
-		twins = append(twins, twin)
 	}
 	return twins
+}
+
+// bashReadingRequest returns request with its Bash command replaced by
+// another reading of it; the reading records nothing of its own.
+func bashReadingRequest(request trustedActionRequest, command, rewritten string) trustedActionRequest {
+	twin := request
+	twin.record, twin.recordTelemetry = nil, nil
+	twin.Input.Command, twin.Input.Args, twin.Input.Argv = rewritten, nil, nil
+	twin.conflictSource = nil
+	if strings.Contains(request.LegacyText, command) {
+		twin.LegacyText = strings.ReplaceAll(request.LegacyText, command, rewritten)
+	} else {
+		twin.LegacyText = rewritten
+	}
+	return twin
+}
+
+// wrapperUnwrapTwinRequest returns the request for
+// actionfacts.WrapperUnwrapTwin of a POSIX Bash call. A ProtectHome
+// gateway (managed hook peer) has no reading: the hook client map lists
+// only the targets the client read from the wrapped call.
+func wrapperUnwrapTwinRequest(request trustedActionRequest) (trustedActionRequest, bool) {
+	if request.ProtectedHomeHook {
+		return trustedActionRequest{}, false
+	}
+	if request.Input.DialectHint != actionfacts.DialectPOSIX && request.Input.DialectHint != "" {
+		return trustedActionRequest{}, false
+	}
+	command, known := trustedBashCommandInput(request.Input)
+	if !known {
+		return trustedActionRequest{}, false
+	}
+	rewritten, ok := actionfacts.WrapperUnwrapTwin(command)
+	if !ok || rewritten == command {
+		return trustedActionRequest{}, false
+	}
+	return bashReadingRequest(request, command, rewritten), true
 }
 
 // stateGlobTwinRequest returns the request for actionfacts.StateGlobTwin of
@@ -5417,16 +5453,7 @@ func stateGlobTwinRequest(request trustedActionRequest) (trustedActionRequest, b
 	if !ok || rewritten == command {
 		return trustedActionRequest{}, false
 	}
-	twin := request
-	twin.record, twin.recordTelemetry = nil, nil
-	twin.Input.Command, twin.Input.Args, twin.Input.Argv = rewritten, nil, nil
-	twin.conflictSource = nil
-	if strings.Contains(request.LegacyText, command) {
-		twin.LegacyText = strings.ReplaceAll(request.LegacyText, command, rewritten)
-	} else {
-		twin.LegacyText = rewritten
-	}
-	return twin, true
+	return bashReadingRequest(request, command, rewritten), true
 }
 
 func trustedBashCommandInput(input actionfacts.Input) (string, bool) {
