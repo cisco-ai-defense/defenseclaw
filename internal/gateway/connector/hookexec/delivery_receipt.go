@@ -54,7 +54,7 @@ func wantsHookDeliveryReceipt(opts Options) bool {
 	return opts.ManagedEnterprise && !opts.SecureClient && opts.answerWatch != nil && !opts.answerBy.IsZero()
 }
 
-func prepareHookDeliveryRequest(req *http.Request, payload []byte, wait time.Duration) (*http.Request, *hookDeliveryRequest) {
+func prepareHookDeliveryRequest(req *http.Request, payload []byte, wait time.Duration, starting func(context.Context) bool) (*http.Request, *hookDeliveryRequest) {
 	reader, writer := io.Pipe()
 	delivery := &hookDeliveryRequest{writer: writer, ready: make(chan struct{})}
 	req.Body = reader
@@ -80,14 +80,70 @@ func prepareHookDeliveryRequest(req *http.Request, payload []byte, wait time.Dur
 		}
 		timer := time.NewTimer(wait)
 		defer timer.Stop()
-		select {
-		case <-delivery.ready:
-		case <-timer.C:
+		// seenStarting: the gateway was still starting when the wait
+		// passed; once it runs it gets the capability wait again.
+		seenStarting := false
+		for {
+			select {
+			case <-delivery.ready:
+				return
+			case <-req.Context().Done():
+				return
+			case <-timer.C:
+			}
+			if starting != nil && starting(req.Context()) {
+				seenStarting = true
+				timer.Reset(hookDeliveryStartPoll)
+				continue
+			}
+			if seenStarting {
+				seenStarting, starting = false, nil
+				timer.Reset(wait)
+				continue
+			}
 			delivery.release()
-		case <-req.Context().Done():
+			return
 		}
 	}()
 	return req, delivery
+}
+
+// hookDeliveryStartPoll is how often a hook whose capability wait passed
+// asks again whether its gateway is still starting.
+var hookDeliveryStartPoll = 100 * time.Millisecond
+
+// hookDeliveryGatewayStarting reports a gateway that cannot have sent its
+// 103 yet because it is not serving: the Linux standalone unit (Type=notify,
+// READY=1 after both listeners serve) is stopping or starting while the call
+// waits in the socket systemd holds. The first call after a stop
+// starts the gateway by socket activation; the gateway answered it and
+// advertised the receipt only after the 250 ms capability wait, so the hook
+// had already released its request and the allowed call was audited
+// unconfirmed (GAP-0683). An earlier gateway that never sends a 103 (a
+// package upgrade in flight) still gets its release once the unit runs. The
+// probe only runs after the capability wait passed without a 103, and the
+// request deadline bounds the wait. Elsewhere no probe is wired and the
+// release comes at the capability wait, as before.
+var hookDeliveryGatewayStarting = func(ctx context.Context, opts Options) bool {
+	probe := standaloneGatewayServiceProbe
+	if !opts.ManagedEnterprise || !opts.ManagedStandalone || opts.SecureClient || probe == nil {
+		return false
+	}
+	state, err := probe(ctx)
+	return err == nil && gatewayServiceNotServing(state)
+}
+
+// gatewayServiceNotServing reports a unit state in which the gateway does not
+// serve its sockets yet: stopping, or starting (the socket unit queued the
+// start for the waiting call). A stopped unit is not waited for: systemd
+// reports a unit it does not know as inactive too, and a failed unit will not
+// answer.
+func gatewayServiceNotServing(state gatewayServiceState) bool {
+	switch state.Active {
+	case "deactivating", "activating":
+		return true
+	}
+	return false
 }
 
 func hookDeliveryWait(opts Options) time.Duration {

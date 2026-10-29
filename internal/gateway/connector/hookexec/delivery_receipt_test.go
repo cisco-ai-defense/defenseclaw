@@ -5,6 +5,7 @@ package hookexec
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -357,5 +358,96 @@ func TestManagedHookTakesTheAnswerAfterALateEarlyHint(t *testing.T) {
 	}
 	if got := <-received; got != HookDeliveryReleased {
 		t.Fatalf("gateway read %q after its answer, want the released marker", got)
+	}
+}
+
+func gatewayStartingFor(t *testing.T, starting func() bool) {
+	t.Helper()
+	previous := hookDeliveryGatewayStarting
+	hookDeliveryGatewayStarting = func(context.Context, Options) bool { return starting() }
+	t.Cleanup(func() { hookDeliveryGatewayStarting = previous })
+}
+
+// GAP-0683: the first call after a stop starts the managed gateway by
+// socket activation. The gateway advertises the receipt only once it serves,
+// after the capability wait. The hook keeps its request open while the unit
+// is starting, so it acknowledges the answer and the allowed call is not
+// audited unconfirmed.
+func TestManagedHookKeepsItsReceiptForASocketActivatedGateway(t *testing.T) {
+	var serving atomic.Bool
+	gatewayStartingFor(t, func() bool { return !serving.Load() })
+	received := make(chan string, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(2 * hookDeliveryCapabilityWait)
+		serving.Store(true)
+		if err := http.NewResponseController(w).EnableFullDuplex(); err != nil {
+			received <- err.Error()
+			return
+		}
+		w.Header().Set("Connection", "close")
+		w.WriteHeader(http.StatusEarlyHints)
+		length, _ := strconv.Atoi(r.Header.Get(HookDeliveryPayloadBytesHeader))
+		if _, err := io.ReadFull(r.Body, make([]byte, length)); err != nil {
+			received <- err.Error()
+			return
+		}
+		w.Header().Set(HookDeliveryRequiredHeader, "1")
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, "{\"action\":\"allow\"}\n")
+		_ = http.NewResponseController(w).Flush()
+		line := make([]byte, len(HookDeliveryReceiptAck))
+		if _, err := io.ReadFull(r.Body, line); err != nil {
+			received <- err.Error()
+			return
+		}
+		_, _ = io.WriteString(w, HookDeliveryConfirmed)
+		_ = http.NewResponseController(w).Flush()
+		received <- string(line)
+	}))
+	defer server.Close()
+	result, _ := runAgainstGateway(t, "claudecode", server.Listener.Addr().String(), managedToolCall("claudecode"))
+	if blocked(result) {
+		t.Fatalf("socket-activated answer was blocked: code=%d stdout=%q stderr=%q", result.code, result.stdout, result.stderr)
+	}
+	if got := <-received; got != HookDeliveryReceiptAck {
+		t.Fatalf("gateway read %q after its answer, want the receipt %q", got, HookDeliveryReceiptAck)
+	}
+}
+
+// An earlier gateway that never sends a 103 (a package upgrade in flight)
+// and is still starting gets the released marker once its unit runs, and the
+// hook takes its ordinary answer.
+func TestManagedHookReleasesAnEarlierGatewayOnceItsUnitRuns(t *testing.T) {
+	startedAt := time.Now()
+	gatewayStartingFor(t, func() bool { return time.Since(startedAt) < 3*hookDeliveryCapabilityWait })
+	received := make(chan string, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			received <- err.Error()
+			return
+		}
+		received <- string(body[len(body)-len(HookDeliveryReleased):])
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, "{\"action\":\"allow\"}\n")
+	}))
+	defer server.Close()
+	result, _ := runAgainstGateway(t, "claudecode", server.Listener.Addr().String(), managedToolCall("claudecode"))
+	if blocked(result) {
+		t.Fatalf("earlier gateway answer was blocked: code=%d stdout=%q stderr=%q", result.code, result.stdout, result.stderr)
+	}
+	if got := <-received; got != HookDeliveryReleased {
+		t.Fatalf("earlier gateway read body tail %q, want the released marker", got)
+	}
+	if waited := time.Since(startedAt); waited < 3*hookDeliveryCapabilityWait {
+		t.Fatalf("hook released after %s, before the unit ran", waited)
+	}
+}
+
+func TestGatewayServiceNotServingStates(t *testing.T) {
+	for state, want := range map[string]bool{"inactive": false, "deactivating": true, "activating": true, "active": false, "failed": false, "reloading": false} {
+		if got := gatewayServiceNotServing(gatewayServiceState{Active: state}); got != want {
+			t.Errorf("gatewayServiceNotServing(%q) = %v, want %v", state, got, want)
+		}
 	}
 }

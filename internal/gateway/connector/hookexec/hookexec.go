@@ -1441,7 +1441,10 @@ func sendHookRequest(
 	opts.requestFacts.set(req.Header, opts, payload)
 	var delivery *hookDeliveryRequest
 	if wantsHookDeliveryReceipt(opts) {
-		req, delivery = prepareHookDeliveryRequest(req, payload, hookDeliveryWait(opts))
+		gatewayStarting := hookDeliveryGatewayStarting
+		req, delivery = prepareHookDeliveryRequest(req, payload, hookDeliveryWait(opts), func(ctx context.Context) bool {
+			return gatewayStarting(ctx, opts)
+		})
 	}
 
 	var connected atomic.Bool
