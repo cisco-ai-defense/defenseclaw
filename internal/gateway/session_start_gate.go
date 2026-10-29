@@ -251,8 +251,10 @@ func (g *sessionStartGate) await(ctx context.Context, key string, wait, arrival 
 			// caller's run slot, so a parallel burst of tool calls of
 			// sessions this process has not seen does not queue one
 			// arrival wait after another behind the caller's few slots
-			// and run past the hooks' answer budget (GAP-0050).
-			resume := pauseHookRunSlot(ctx)
+			// and run past the hooks' answer budget (GAP-0050). It is
+			// parked too, so the burst's other calls are admitted and
+			// wait for their starts at the same time.
+			resume := parkHookCaller(ctx)
 			select {
 			case <-arrived:
 				resume()
@@ -287,7 +289,7 @@ func (g *sessionStartGate) await(ctx context.Context, key string, wait, arrival 
 		default:
 		}
 		// Waiting for another call's start verdict uses no CPU either.
-		resume := pauseHookRunSlot(ctx)
+		resume := parkHookCaller(ctx)
 		select {
 		case <-entry.done:
 			resume()

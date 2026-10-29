@@ -54,6 +54,18 @@ import (
 // gives its slot up while it waits on a remote scanner (yieldHookRunSlot),
 // which uses no gateway CPU, so a caller's parallel tool calls do not queue
 // behind Cisco AI Defense or LLM judge round trips.
+//
+// A request that waits for its agent session's start (the action-mode
+// arrival wait, or another call's start verdict) uses no gateway CPU and
+// no run slot, so it is also parked (parkHookCaller): for that wait it does
+// not count toward the in-flight bounds of new requests, up to as many parked
+// requests per caller as its in-flight cap and, for all callers together, as
+// the global bound. A 60-way parallel tool turn of sessions the gateway has
+// not seen otherwise admitted 32 calls, made the rest wait out the first
+// calls' 1 s arrival wait before they were admitted and then pay their own,
+// and about a quarter of the turn ran past the 3.5 s managed answer budget
+// (GAP-0050). A parked request takes its in-flight place back when its wait
+// ends, over the bound if need be: it was admitted and is answered.
 const (
 	// hookCallerRate and hookCallerBurst are one caller's sustained and
 	// burst request budget. An agent sends a few requests per tool call, so
@@ -85,8 +97,11 @@ type hookCallerLimiter struct {
 	lastSweep time.Time
 	// total is the number of admitted requests that have not finished, for
 	// all callers; lastOverloadLog paces the log line of a full gateway.
-	total           int
-	telemetryTotal  int
+	total          int
+	telemetryTotal int
+	// parked is how many of total wait without gateway CPU for a session
+	// start (parkHookCaller); they do not count against new admissions.
+	parked          int
 	lastOverloadLog time.Time
 	// Test overrides; zero values select the defaults above.
 	now                                            func() time.Time
@@ -96,6 +111,8 @@ type hookCallerLimiter struct {
 type hookCallerBudget struct {
 	limiter  *rate.Limiter
 	inFlight int
+	// parked is how many of inFlight are parked (parkHookCaller).
+	parked int
 	// running holds one token per request of this caller that is running.
 	running  chan struct{}
 	lastSeen time.Time
@@ -164,7 +181,7 @@ func (l *hookCallerLimiter) acquire(caller string) (release func(), run chan str
 	telemetry := strings.HasSuffix(caller, hookCallerTelemetryBudget)
 	// Keep half the host capacity available to hooks even when exporters
 	// from many accounts all retry together.
-	if l.total >= l.globalLimit() || (telemetry && l.telemetryTotal >= max(1, l.globalLimit()/2)) {
+	if l.total-l.parked >= l.globalLimit() || (telemetry && l.telemetryTotal >= max(1, l.globalLimit()/2)) {
 		logNow = now.Sub(l.lastOverloadLog) >= hookCallerLogInterval
 		if logNow {
 			l.lastOverloadLog = now
@@ -172,16 +189,14 @@ func (l *hookCallerLimiter) acquire(caller string) (release func(), run chan str
 		return nil, nil, managedHookReasonOverloaded, logNow
 	}
 	rps, burst, inFlight, running := l.limits(caller)
-	// Keep capacity for at least three other callers even when one
-	// caller fills every request it may hold while queued.
-	inFlight = min(inFlight, max(1, l.globalLimit()/4))
+	inFlight = l.callerInFlight(inFlight)
 	budget := l.callers[caller]
 	if budget == nil {
 		budget = &hookCallerBudget{limiter: rate.NewLimiter(rate.Limit(rps), burst), running: make(chan struct{}, running)}
 		l.callers[caller] = budget
 	}
 	budget.lastSeen = now
-	if budget.inFlight >= inFlight || !budget.limiter.AllowN(now, 1) {
+	if budget.inFlight-budget.parked >= inFlight || !budget.limiter.AllowN(now, 1) {
 		logNow = now.Sub(budget.lastLog) >= hookCallerLogInterval
 		if logNow {
 			budget.lastLog = now
@@ -206,6 +221,42 @@ func (l *hookCallerLimiter) acquire(caller string) (release func(), run chan str
 			l.mu.Unlock()
 		})
 	}, budget.running, "", false
+}
+
+// callerInFlight is the in-flight cap of one caller whose own cap is
+// inFlight: it keeps capacity for at least three other callers even when one
+// caller fills every request it may hold while queued.
+func (l *hookCallerLimiter) callerInFlight(inFlight int) int {
+	return min(inFlight, max(1, l.globalLimit()/4))
+}
+
+// park takes one admitted request of caller out of the in-flight bounds of
+// new requests while it waits without gateway CPU, unless the caller already
+// has as many parked requests as its in-flight cap or all callers together
+// as many as the global bound (then the request keeps counting, as before).
+// unpark ends the wait; it runs once.
+func (l *hookCallerLimiter) park(caller string) (unpark func()) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	budget := l.callers[caller]
+	if budget == nil || budget.inFlight-budget.parked <= 0 {
+		return func() {}
+	}
+	_, _, inFlight, _ := l.limits(caller)
+	if budget.parked >= l.callerInFlight(inFlight) || l.parked >= l.globalLimit() {
+		return func() {}
+	}
+	budget.parked++
+	l.parked++
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			l.mu.Lock()
+			budget.parked--
+			l.parked--
+			l.mu.Unlock()
+		})
+	}
 }
 
 // hookCallerTelemetryBudget suffixes the budget key of a caller's OTLP
@@ -237,7 +288,8 @@ func hookCallerBudgetKey(identity, path string) string {
 // function is nil after answering 429 or when the client went away while it
 // waited.
 func (a *APIServer) admitHookCaller(w http.ResponseWriter, r *http.Request, identity, route string) (*http.Request, func()) {
-	release, run, refusal, logNow := a.hookCallerLimits.acquire(hookCallerBudgetKey(identity, r.URL.Path))
+	key := hookCallerBudgetKey(identity, r.URL.Path)
+	release, run, refusal, logNow := a.hookCallerLimits.acquire(key)
 	if refusal == "" {
 		if r.Context().Err() != nil {
 			// The client left before it had a slot: nothing to serve.
@@ -258,7 +310,7 @@ func (a *APIServer) admitHookCaller(w http.ResponseWriter, r *http.Request, iden
 		}
 		select {
 		case run <- struct{}{}:
-			slot := &hookRunSlot{run: run, held: true}
+			slot := &hookRunSlot{run: run, held: true, park: func() func() { return a.hookCallerLimits.park(key) }}
 			return r.WithContext(context.WithValue(r.Context(), hookRunSlotContextKey{}, slot)), func() {
 				slot.end()
 				release()
@@ -297,6 +349,9 @@ type hookRunSlot struct {
 	mu   sync.Mutex
 	held bool // the request holds one token of run
 	done bool // the request has ended
+	// park takes the request out of its caller's in-flight bounds for a
+	// wait without gateway CPU (hookCallerLimiter.park); nil in tests.
+	park func() (unpark func())
 }
 
 type hookRunSlotContextKey struct{}
@@ -343,6 +398,23 @@ func pauseHookRunSlot(ctx context.Context) (resume func()) {
 			return
 		}
 		slot.held = true
+	}
+}
+
+// parkHookCaller frees the caller's run slot (pauseHookRunSlot) and parks the
+// request (hookCallerLimiter.park) while it waits for its agent session's
+// start, which uses no gateway CPU, so the caller's other parallel calls are
+// admitted and wait for their own starts at the same time (GAP-0050). resume
+// unparks the request, then takes a slot back as pauseHookRunSlot's does.
+func parkHookCaller(ctx context.Context) (resume func()) {
+	resumeSlot := pauseHookRunSlot(ctx)
+	unpark := func() {}
+	if slot, _ := ctx.Value(hookRunSlotContextKey{}).(*hookRunSlot); slot != nil && slot.park != nil {
+		unpark = slot.park()
+	}
+	return func() {
+		unpark()
+		resumeSlot()
 	}
 }
 
