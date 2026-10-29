@@ -6326,17 +6326,10 @@ func (s *Sidecar) setupConnectorsIsolatedTransaction(ctx context.Context, conns 
 				}
 				rollbackErr := rollbackMultiConnectorPublication(context.WithoutCancel(ctx), transaction)
 				failed := fmt.Errorf("connector %s refresh failed: %w", registration.conn.Name(), err)
-				switch {
-				case errors.Is(err, connector.ErrSetupRefusedUnchanged):
+				if !errors.Is(err, connector.ErrSetupRefusedUnchanged) {
 					// A Setup refusal (a known-broken agent, an unsupported
 					// profile topology) names its own next step.
-				case errors.As(err, new(agentVersionUnread)):
-					// Discovery could not read the agent's version, so no
-					// open agent is the cause: the refusal names the cause
-					// and its fix (GAP-1167, GAP-2479).
-					failed = fmt.Errorf("%w, then run: defenseclaw upgrade", failed)
-				default:
-					failed = fmt.Errorf("%w; close the agent holding its settings, then run: defenseclaw upgrade", failed)
+					failed = fmt.Errorf("%w%s", failed, refreshRefusalNextStep(err))
 				}
 				if rollbackErr != nil {
 					failed = fmt.Errorf("%w; connector setup rollback incomplete: %v", failed, rollbackErr)
@@ -7902,7 +7895,7 @@ func (s *Sidecar) failGuardrailWithRollback(ctx context.Context, opts connector.
 	fmt.Fprintf(os.Stderr, "[guardrail] connector %s %s failed: %v\n", conn.Name(), surface, err)
 	previouslyActive := !opts.ManagedEnterprise && len(authority) > 0 && len(authority[0].applied) > 0 && authority[0].applied[0].previouslyActive
 	if previouslyActive && !errors.Is(err, connector.ErrSetupRefusedUnchanged) {
-		err = fmt.Errorf("%w; close the agent holding its settings, then run: defenseclaw upgrade", err)
+		err = fmt.Errorf("%w%s", err, refreshRefusalNextStep(err))
 	}
 	if !previouslyActive && !errors.Is(err, connector.ErrSetupRefusedUnchanged) {
 		recordAndRollbackFailedConnectorSetup(conn, opts, ctx)
@@ -7978,6 +7971,13 @@ func (e agentVersionUnread) Error() string { return string(e) }
 // unchanged.
 func unversionedAgentAdmissionError(dataDir, name, agentVersion, reason string) error {
 	probe, cause := connector.CachedAgentVersionProbeError(dataDir, name)
+	if probe == "" && connector.CachedAgentNotFound(dataDir, name) {
+		// The connector is enrolled but discovery found no agent binary for
+		// this account, so there is no version to read and no open agent to
+		// close. The fix is the agent or the connector, never the drift env
+		// (GAP-2520).
+		return fmt.Errorf("%w: connector %s agent version %q is not verified against a known hook contract: %w; put the agent back on the PATH of this account, or remove the connector (defenseclaw setup remove %s)", ErrHookContractAdmission, name, agentVersion, agentVersionUnread("discovery did not find the agent on the PATH of this account"), name)
+	}
 	if probe == "" {
 		return fmt.Errorf("%w: connector %s agent version %q is not verified against a known hook contract: %s (set DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT=1 only for exploratory testing)", ErrHookContractAdmission, name, agentVersion, reason)
 	}
@@ -7996,6 +7996,22 @@ func unversionedAgentAdmissionError(dataDir, name, agentVersion, reason string) 
 		why, next = "discovery could not read the agent's version", "check that it starts from this account and prints its version"
 	}
 	return fmt.Errorf("%w: connector %s agent version %q is not verified against a known hook contract: %w (%s); %s", ErrHookContractAdmission, name, agentVersion, why, probe, next)
+}
+
+// refreshRefusalNextStep is the next step a failed refresh of an active
+// connector names. Only a cause an open agent can explain tells the user to
+// close it. An agent discovery could not find or read names its own fix
+// (GAP-1167, GAP-2479, GAP-2520), and an agent that answered a setup probe
+// too slowly is started once first (GAP-2520).
+func refreshRefusalNextStep(err error) string {
+	switch {
+	case errors.As(err, new(agentVersionUnread)):
+		return ", then run: defenseclaw upgrade"
+	case errors.Is(err, connector.ErrAgentVersionProbeTimeout):
+		return "; the agent answered too slowly (a cold first start or a busy host): start it once from this account and let it finish, then run: defenseclaw upgrade"
+	default:
+		return "; close the agent holding its settings, then run: defenseclaw upgrade"
+	}
 }
 
 // GuardrailAgentSettingsRefused is the guardrail health detail that maps each
