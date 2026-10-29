@@ -56,10 +56,23 @@ type windowsStandaloneRowContext struct {
 	// sessionActive: the user has an active session now, so the guardian
 	// can re-render the user's hooks for a changed agent version at once.
 	sessionActive bool
+	// signedIn: the user has a session now, active or disconnected. A
+	// disconnected session still runs the user's agents, so their app and
+	// extension surfaces are read under that session's token and a rejected
+	// one is reported (GAP-1130, as for quarantine removal in GAP-0795); only
+	// an active session changes a row.
+	signedIn bool
 	// user names the profile in reports (its directory name).
 	user string
 	// report receives agents found installed but not enrollable.
 	report func(UnprotectedAgent)
+}
+
+// surfacesReadable reports whether the owner's app and extension surfaces
+// are read this cycle: the owner has a session token, active or
+// disconnected.
+func (c windowsStandaloneRowContext) surfacesReadable() bool {
+	return c.sessionActive || c.signedIn
 }
 
 // unprotected reports an installed agent that has no row: it is not
@@ -220,6 +233,12 @@ func applyStandaloneRowStateFor(row *ManifestTarget, previous map[string]Manifes
 					notFollowed, notFollowedReason = discovered, reason
 				}
 			}
+		} else if rowContext.signedIn {
+			// A disconnected session still runs the user's agents: a
+			// rejected app or extension surface is reported beside the
+			// enrolled row, which keeps its version until the user is
+			// active again (the guardian re-renders hooks only then).
+			_ = windowsStandaloneSurfaceVersion(row, logf, rowContext, prev.AgentVersion)
 		}
 		if ok, reason := windowsStandaloneRowAdmission(row.UserHome, row.Connector, version); !ok {
 			logfSafely(logf, row.SID, fmt.Sprintf("(SID, %s) row dropped: %s", row.Connector, reason))

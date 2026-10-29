@@ -34,16 +34,16 @@ import (
 // metadata, refuses reparse chains, bounds every read, and executes
 // nothing. Every read of a user-writable location (the profile's extension
 // folders, app data and package folders, and a relocated VSCODE_EXTENSIONS
-// folder) runs under the profile owner's active-session token
-// (windowsSurfaceReadAs), so it can reach nothing the user could not; only
-// administrator-protected sources (WindowsApps) are read as LocalSystem. A
-// signed-out user has no token, so their surfaces are discovered after
-// they sign in. Layouts vendors do not document are marked "live check".
+// folder) runs under the token of the profile owner's session, active or
+// disconnected (windowsSurfaceReadAs), so it can reach nothing the user
+// could not; only administrator-protected sources (WindowsApps) are read as
+// LocalSystem. A signed-out user has no token, so their surfaces are
+// discovered after they sign in. Layouts vendors do not document are marked "live check".
 
 // windowsSurfaceReadAs runs fn under the token of the profile owner sid
 // (replaceable in tests).
 var windowsSurfaceReadAs = func(sid, profileHome string, fn func() error) error {
-	return runAsTarget(TargetCredentials{UserHome: profileHome, SID: sid}, fn)
+	return runAsTarget(TargetCredentials{UserHome: profileHome, SID: sid, AllowDisconnected: true}, fn)
 }
 
 // windowsUserEnvironment reads a value of the user's persistent
@@ -385,13 +385,14 @@ func readWindowsDirBounded(dir string) ([]os.DirEntry, bool, error) {
 
 // windowsStandaloneSurfaces is the admission of the profile's app and
 // extension surfaces, or false while the owner is signed out (discovery
-// needs the owner's token; the sign-in cycle discovers them).
+// needs the token of the owner's session, active or disconnected; the
+// sign-in cycle discovers them).
 func windowsStandaloneSurfaces(row *ManifestTarget, logf EnumerationLogger, rowContext windowsStandaloneRowContext) (surfaceAdmission, bool) {
 	name := strings.ToLower(strings.TrimSpace(row.Connector))
 	if _, ok := windowsSurfaceExtensions[name]; !ok {
 		return surfaceAdmission{}, false
 	}
-	if !rowContext.sessionActive {
+	if !rowContext.surfacesReadable() {
 		logfSafely(logf, row.SID, "(SID, "+name+") app and extension discovery waits until the user signs in")
 		return surfaceAdmission{}, false
 	}
@@ -422,8 +423,11 @@ func windowsStandaloneSurfaces(row *ManifestTarget, logf EnumerationLogger, rowC
 // extension surfaces, or "". While the owner is signed out it is
 // cliVersion. Refused and explicitly below-contract surfaces are reported
 // beside a CLI; an unversioned surface beside a CLI remains a known limit.
+// In a disconnected session the surfaces are read and reported only: the
+// result is cliVersion, so a row follows or is enrolled from a surface
+// only in an active session.
 func windowsStandaloneSurfaceVersion(row *ManifestTarget, logf EnumerationLogger, rowContext windowsStandaloneRowContext, cliVersion string) string {
-	if cliVersion != "" && !rowContext.sessionActive {
+	if cliVersion != "" && !rowContext.surfacesReadable() {
 		// The CLI enrolls the row; its surfaces are read in the owner's
 		// next signed-in cycle.
 		return cliVersion
@@ -433,7 +437,7 @@ func windowsStandaloneSurfaceVersion(row *ManifestTarget, logf EnumerationLogger
 	if !ok {
 		return cliVersion
 	}
-	enrolled := cliVersion != "" || len(admission.admitted) != 0
+	enrolled := cliVersion != "" || (rowContext.sessionActive && len(admission.admitted) != 0)
 	for _, rejected := range admission.rejected {
 		consequence, refusal := "", RefusalMissing
 		switch {
@@ -451,6 +455,9 @@ func windowsStandaloneSurfaceVersion(row *ManifestTarget, logf EnumerationLogger
 		if rowContext.report != nil {
 			rowContext.report(rejected.unprotected(rowContext.user, canonicalManifestTargetSID(row.SID), nil, name, consequence, refusal))
 		}
+	}
+	if !rowContext.sessionActive {
+		return cliVersion
 	}
 	version := admission.rowVersion(cliVersion)
 	if version != cliVersion {

@@ -391,3 +391,62 @@ func TestWindowsStandaloneNativeClaudeWithoutRecordedBuildSaysWhatIsMissing(t *t
 		t.Fatalf("reported %+v, want the launcher and the missing versions folder named", reported)
 	}
 }
+
+// A disconnected session still runs its owner's agents, so their editor
+// extensions are read under that session's token and one below the hook
+// contract is reported beside the enrolled row, as in an active session
+// (GAP-1130). Only an active session changes a row: the known row keeps
+// its version, and an extension alone enrolls no one while disconnected.
+// A signed-out owner is not read at all.
+func TestWindowsDisconnectedSessionReportsAnOldExtensionAndKeepsTheRow(t *testing.T) {
+	stubMachineWinGet(t, nil)
+	home, current := t.TempDir(), t.TempDir()
+	for root, name := range map[string]string{home: "anthropic.claude-code-2.0.50-win32-x64", current: "anthropic.claude-code-2.1.220-win32-x64"} {
+		if err := os.MkdirAll(filepath.Join(root, ".vscode", "extensions", name), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	const sid = "S-1-5-21-1-2-3-1001"
+	previousReadAs := windowsSurfaceReadAs
+	impersonated := 0
+	windowsSurfaceReadAs = func(owner, profileHome string, fn func() error) error {
+		impersonated++
+		return fn()
+	}
+	t.Cleanup(func() { windowsSurfaceReadAs = previousReadAs })
+	var reported []UnprotectedAgent
+	disconnected := windowsStandaloneRowContext{signedIn: true, user: "alice", report: func(agent UnprotectedAgent) { reported = append(reported, agent) }}
+
+	enabled := true
+	prior := ManifestTarget{SID: sid, Connector: "claudecode", AgentVersion: "2.1.292", Enabled: &enabled}
+	previous := map[string]ManifestTarget{previousManifestKey(prior.SID, prior.Connector): prior}
+	row := ManifestTarget{SID: sid, Connector: "claudecode", UserHome: home}
+	if !applyStandaloneRowStateFor(&row, previous, nil, disconnected) || row.AgentVersion != "2.1.292" {
+		t.Fatalf("disconnected known row = %+v, want it kept at 2.1.292", row)
+	}
+	if impersonated == 0 || len(reported) != 1 || reported[0].Code != UnprotectedCodeSurfaceUnverified ||
+		reported[0].Version != "2.0.50" || reported[0].Surface != "extension" {
+		t.Fatalf("disconnected owner old extension: impersonated %d, reported %+v; want one surface_unverified 2.0.50", impersonated, reported)
+	}
+
+	reported = nil
+	fresh := &ManifestTarget{SID: sid, UserHome: home, Connector: "claudecode"}
+	if got := windowsStandaloneSurfaceVersion(fresh, nil, disconnected, ""); got != "" || len(reported) != 1 || reported[0].Version != "2.0.50" {
+		t.Fatalf("disconnected old-extension-only profile = %q, reported %+v; want no enrollment and the old extension reported", got, reported)
+	}
+	reported = nil
+	fresh = &ManifestTarget{SID: sid, UserHome: current, Connector: "claudecode"}
+	if got := windowsStandaloneSurfaceVersion(fresh, nil, disconnected, ""); got != "" || len(reported) != 0 {
+		t.Fatalf("disconnected supported-extension-only profile = %q, reported %+v; want no enrollment until the user is active", got, reported)
+	}
+	if got := windowsStandaloneSurfaceVersion(fresh, nil, windowsStandaloneRowContext{sessionActive: true, user: "alice", report: disconnected.report}, ""); got != "2.1.220" {
+		t.Fatalf("active supported-extension-only profile = %q, want it enrolled at 2.1.220", got)
+	}
+
+	reported, impersonated = nil, 0
+	row = ManifestTarget{SID: sid, Connector: "claudecode", UserHome: home}
+	signedOut := windowsStandaloneRowContext{user: "alice", report: disconnected.report}
+	if !applyStandaloneRowStateFor(&row, previous, nil, signedOut) || row.AgentVersion != "2.1.292" || impersonated != 0 || len(reported) != 0 {
+		t.Fatalf("signed-out known row = %+v, impersonated %d, reported %+v", row, impersonated, reported)
+	}
+}
