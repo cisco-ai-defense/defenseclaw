@@ -66,6 +66,21 @@ func TestEnterpriseLifecycleChildHelper(t *testing.T) {
 		report(true, false, 0)
 	case "pending":
 		report(true, true, 0)
+	case "own-deadline", "own-failure":
+		// The ensure child ended itself, at the deadline Setup handed it or
+		// with another failure, and printed its result.
+		code := "lifecycle_timeout"
+		if mode == "own-failure" {
+			code = "lifecycle_error"
+		}
+		_ = os.WriteFile(pidFile, []byte(strconv.Itoa(os.Getpid())), 0o600)
+		body, _ := json.Marshal(map[string]any{
+			"schema_version": 2, "action": "ensure", "profile": "standalone", "platform": "windows",
+			"ok": false, "exit_code": 1603, "installed": false,
+			"errors": []map[string]string{{"code": code, "message": code + ": Windows enterprise installer did not finish"}},
+		})
+		os.Stdout.Write(append(body, byte(10)))
+		os.Exit(1)
 	case "refused":
 		report(false, false, 1, "Setup replayed only the pending transaction, so the deployment is not reported settled: "+
 			"these lifecycle records remain for the full recovery of an ensure run as LocalSystem: state-purge intent")
@@ -189,6 +204,77 @@ func TestTimeoutKillsTheLifecycleChildThenRecoversBeforeReturning(t *testing.T) 
 				result.TransactionPending || len(result.Services) != 1 || result.Services[0].State != "running" ||
 				len(result.Errors) != 1 || result.Errors[0].Code != "lifecycle_timeout" {
 				t.Fatalf("Setup result after a recovered timeout = %s (%v)", stdout.String(), err)
+			}
+		})
+	}
+}
+
+// GAP-2456: the standalone ensure child ends itself at the deadline Setup
+// hands it (GAP-2265), shortly before TIMEOUTSECONDS, so Setup limit never
+// fires. That stop can land after the transaction commits and before the
+// scanner runtime step, so it gets the same bounded recovery as a stop by
+// Setup itself; any other child failure, and a read-only action, do not.
+func TestAChildThatEndedAtItsOwnDeadlineIsRecoveredLikeATimeout(t *testing.T) {
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	helper := func(mode, pidFile string, calls *int) func(context.Context) ([]byte, error) {
+		return func(ctx context.Context) ([]byte, error) {
+			if calls != nil {
+				*calls++
+			}
+			child := processutil.CommandContext(ctx, executable, "-test.run=^TestEnterpriseLifecycleChildHelper$")
+			child.Env = append(os.Environ(), lifecycleHelperMode+"="+mode, lifecycleHelperPIDFile+"="+pidFile)
+			var captured bytes.Buffer
+			child.Stdout = &captured
+			err := processutil.RunTree(child)
+			return captured.Bytes(), err
+		}
+	}
+	cases := []struct {
+		name, action, mode string
+		recovered          bool
+	}{
+		{name: "ensure ended at its own deadline", action: "ensure", mode: "own-deadline", recovered: true},
+		{name: "ensure failed otherwise", action: "ensure", mode: "own-failure"},
+		{name: "status is not recovered", action: "status", mode: "own-deadline"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			childPID := filepath.Join(t.TempDir(), "child.pid")
+			opts := enterpriseSetupOptions{Action: tc.action, Standalone: true, JSON: true, LifecycleTimeout: time.Minute}
+			recoveries := 0
+			run := runEnterpriseLifecycleChild(context.Background(), opts,
+				helper(tc.mode, childPID, nil), helper("recover", childPID, &recoveries))
+			if run.runErr == nil {
+				t.Fatal("the child failure was lost")
+			}
+			if !tc.recovered {
+				if run.timedOut || recoveries != 0 || run.recovery != nil {
+					t.Fatalf("timedOut=%v recoveries=%d: only a stop at the deadline is recovered", run.timedOut, recoveries)
+				}
+				return
+			}
+			if !run.timedOut || !errors.Is(run.cause, context.DeadlineExceeded) || recoveries != 1 || run.recovery == nil {
+				t.Fatalf("timedOut=%v cause=%v recoveries=%d recovery=%v (%v): a child that ended at its own deadline was not recovered",
+					run.timedOut, run.cause, recoveries, run.recovery != nil, run.recoveryErr)
+			}
+			err := timedOutEnterpriseLifecycleError(opts, run)
+			if err == nil || !strings.Contains(err.Error(), "Setup replayed its pending transaction") {
+				t.Fatalf("timeout error = %v", err)
+			}
+			var stdout, stderr bytes.Buffer
+			writeEnterpriseSetupFailureFor(&stdout, &stderr, true, standaloneSetupArtifactName, opts, err, enterpriseFailureExitCode)
+			var result struct {
+				Installed bool `json:"installed"`
+				Errors    []struct {
+					Code string `json:"code"`
+				} `json:"errors"`
+			}
+			if err := json.Unmarshal(stdout.Bytes(), &result); err != nil || !result.Installed ||
+				len(result.Errors) != 1 || result.Errors[0].Code != "lifecycle_timeout" {
+				t.Fatalf("Setup result = %s (%v)", stdout.String(), err)
 			}
 		})
 	}

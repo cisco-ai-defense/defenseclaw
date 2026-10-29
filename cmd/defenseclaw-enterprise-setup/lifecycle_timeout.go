@@ -52,11 +52,41 @@ func runEnterpriseLifecycleChild(
 	result.cause = ctx.Err()
 	result.timedOut = result.cause != nil
 	cancel()
-	if result.timedOut && opts.Standalone &&
-		(enterpriseSetupMutation(opts.Action, true) || opts.Action == "uninstall") {
+	recoverable := opts.Standalone && (enterpriseSetupMutation(opts.Action, true) || opts.Action == "uninstall")
+	if recoverable && !result.timedOut && enterpriseLifecycleChildEndedAtItsDeadline(result.output, result.runErr) {
+		// The standalone ensure child ends itself shortly before
+		// TIMEOUTSECONDS (the deadline Setup hands it, GAP-2265). It stopped
+		// for the same limit, possibly after its transaction committed and
+		// before the scanner runtime step, so it gets the same recovery
+		// (GAP-2456: without it verify failed scanner_runtime_unavailable
+		// until a manual /repair).
+		result.timedOut = true
+		result.cause = context.DeadlineExceeded
+	}
+	if result.timedOut && recoverable {
 		result.recovery, result.recoveryErr = recoverTimedOutStandaloneLifecycle(parent, recoverChild)
 	}
 	return result
+}
+
+// enterpriseLifecycleChildEndedAtItsDeadline reports a lifecycle child that
+// exited with its own schema-2 lifecycle_timeout result: it ended at the
+// deadline Setup handed it, before Setup stopped its process tree.
+func enterpriseLifecycleChildEndedAtItsDeadline(output []byte, runErr error) bool {
+	if runErr == nil || len(output) > maximumLifecycleOutput {
+		return false
+	}
+	document, _ := splitStandaloneLifecycleJSON(output)
+	var report enterprisestatus.Result
+	if json.Unmarshal(document, &report) != nil || report.SchemaVersion != 2 || report.Profile != "standalone" {
+		return false
+	}
+	for _, message := range report.Errors {
+		if message.Code == "lifecycle_timeout" {
+			return true
+		}
+	}
+	return false
 }
 
 // standaloneRecoveryOptions are the options of the recovery child: the
