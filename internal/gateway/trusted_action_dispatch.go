@@ -827,14 +827,16 @@ func withActiveStateTargetMention(
 				// The mention scan places files below the state directory; a
 				// cmd /c body that removes or moves the directory itself (cmd
 				// /c rd /s /q %USERPROFILE%\.defenseclaw) names none, while the
-				// cmd twin proves the mutation of the state root (classifier-ps
-				// checker it9 RV9-2 X02, X07).
-				if !strings.Contains(strings.ToLower(command), ".defenseclaw") || !provenCMDSlashCStateWrite(request) {
+				// cmd twin (or the PowerShell reading, GAP-2414) proves the mutation of
+				// the state root (classifier-ps checker it9 RV9-2 X02, X07).
+				if !strings.Contains(strings.ToLower(command), ".defenseclaw") ||
+					!provenCMDSlashCStateWrite(request) && !provenPowerShellStateWrite(request) {
 					return findings
 				}
 			}
 		} else if !provenStateMutationPath(facts, request) && !provenBashAggregateStateWrite(request) &&
-			!provenShellRedirectStateWrite(request) && !provenCMDSlashCStateWrite(request) {
+			!provenShellRedirectStateWrite(request) && !provenCMDSlashCStateWrite(request) &&
+			!provenPowerShellStateWrite(request) {
 			return findings
 		}
 	}
