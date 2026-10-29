@@ -361,7 +361,8 @@ def _upgrade(version: str | None, *, yes: bool) -> int:
         except BaseException:
             shutil.rmtree(workdir, ignore_errors=True)
             raise
-    return _run_installer(installer, (["--yes"] if yes else []) + extra, workdir)
+    newer = installed if _key(version) < _key(installed) else None
+    return _run_installer(installer, (["--yes"] if yes else []) + extra, workdir, newer=newer)
 
 
 def _active_config_path() -> str:
@@ -666,7 +667,7 @@ def legacy_setup_rollback_refusal(back_to: str, previous: str, repo: str) -> str
     )
 
 
-def _run_installer(path: str, args: list[str], workdir: str) -> int:
+def _run_installer(path: str, args: list[str], workdir: str, *, newer: str | None = None) -> int:
     # The installer downloads the release assets: hand it update.source
     # through its DEFENSECLAW_REPO input (an owner/name or an https base URL).
     configured = _configured_update_source()
@@ -720,6 +721,14 @@ def _run_installer(path: str, args: list[str], workdir: str) -> int:
     bash = "/bin/bash" if os.path.exists("/bin/bash") else (shutil.which("bash") or "bash")
     sys.stdout.flush()
     sys.stderr.flush()
+    if newer:
+        # A downgrade from newer: the older installer keeps the hook helper of
+        # this release, so the shim waits for it (rel-1-0-4:GAP-2503).
+        rc = _wait_for_installer([bash, path, *args])
+        shutil.rmtree(workdir, ignore_errors=True)
+        if rc == 0:
+            _drop_newer_hook_helper(newer)
+        return rc
     try:
         # path is absolute; keep the caller's directory for relative vendor
         # paths handed to an installer from an older release.
@@ -728,6 +737,75 @@ def _run_installer(path: str, args: list[str], workdir: str) -> int:
         shutil.rmtree(workdir, ignore_errors=True)
         raise ShimError(f"could not run {bash}: {exc}") from None
     return 0  # pragma: no cover - execv does not return
+
+
+def _wait_for_installer(argv: list[str]) -> int:
+    try:
+        proc = subprocess.Popen(argv)  # noqa: S603 - fixed interpreter and verified script
+    except OSError as exc:
+        raise ShimError(f"could not run {argv[0]}: {exc}") from None
+    while True:
+        try:
+            return proc.wait()
+        except KeyboardInterrupt:
+            # The installer gets the same Ctrl-C and finishes or undoes its swap.
+            continue
+
+
+HOOK_HELPER = os.path.join("hooks", "_hardening.sh")
+_HOOK_HELPER_MAX_BYTES = 4 << 20
+
+
+def _drop_newer_hook_helper(newer: str) -> None:
+    """After a downgrade from ``newer``, let the older gateway write its own hook helper.
+
+    A gateway of 1.0.4 or older keeps a hooks/_hardening.sh whose schema line
+    is newer than its own, and the helper of a newer release runs native
+    commands the older binaries do not have: after ``defenseclaw upgrade
+    --version 1.0.2`` every hook call was refused as "the gateway is running
+    but did not answer" until the helper was removed and the gateway restarted
+    (rel-1-0-4:GAP-2503). The helper goes only when it is byte for byte the one
+    the replaced install (previous/, ``newer``) has. Until 1.1: remove with the
+    1.0.2, 1.0.3 and 1.0.4 downgrade paths.
+    """
+    home = _data_home()
+    live = os.path.join(home, HOOK_HELPER)
+    left = os.path.join(home, "previous", "data", HOOK_HELPER)
+    try:
+        with open(os.path.join(home, "previous", "VERSION"), encoding="utf-8") as handle:
+            if handle.read(64).strip() != newer:
+                return
+        if not all(stat.S_ISREG(os.lstat(path).st_mode) for path in (live, left)):
+            return
+        with open(live, "rb") as mine, open(left, "rb") as theirs:
+            if mine.read(_HOOK_HELPER_MAX_BYTES + 1) != theirs.read(_HOOK_HELPER_MAX_BYTES + 1):
+                return
+        os.unlink(live)
+    except OSError:
+        return
+    gateway = os.path.join(os.path.expanduser("~"), ".local", "bin", "defenseclaw-gateway")
+    print(f"  → Removed the hook helper of DefenseClaw {newer}; the gateway writes its own when it starts")
+    if not _gateway_running(home):
+        return
+    try:
+        rc = subprocess.call([gateway, "restart"])  # noqa: S603 - the installed gateway
+    except OSError:
+        rc = 1
+    if rc != 0:
+        print("  ! The gateway did not restart; hook calls are refused until it does. Run: defenseclaw-gateway restart")
+
+
+def _gateway_running(home: str) -> bool:
+    try:
+        with open(os.path.join(home, "gateway.pid"), encoding="utf-8") as handle:
+            text = handle.read(4096).strip()
+        pid = json.loads(text).get("pid") if text.startswith("{") else int(text)
+        if not isinstance(pid, int) or pid <= 0:
+            return False
+        os.kill(pid, 0)
+    except (OSError, ValueError, AttributeError):
+        return False
+    return True
 
 
 def _windows_terminal_without_desktop() -> bool:

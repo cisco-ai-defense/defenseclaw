@@ -1416,6 +1416,12 @@ if [[ "${ROLLBACK}" == true ]]; then
         fi
         die "Rollback failed part-way; see ${LOG}"
     fi
+    # rel-1-0-4:GAP-2503: going back to an older release, drop the hook
+    # helper the newer install left in the restored hooks, so the older
+    # gateway writes its own when it starts.
+    if [[ -n "${current}" ]] && version_lt "${back_to}" "${current}"; then
+        drop_newer_hook_helper "${PREVIOUS}/data"
+    fi
     # GAP-0009: a connector set up after the upgrade is not configured in the
     # install now back, whose data has no hook script for it: its agent ran a
     # hook that no longer exists (Claude Code blocked every prompt). The
@@ -3076,6 +3082,22 @@ convert_hooks_for_rollback() {
     [[ "${help}" != *--to-version* || -z "${back_to:-}" ]] || to=(--to-version "${back_to}")
     "${gateway}" connector prepare-rollback --data-dir "${DEFENSECLAW_HOME}" ${to[@]+"${to[@]}"} 2>>"${LOG}" \
         || warn "Could not rewrite the agent hook entries of DefenseClaw ${current:-?} in the form ${back_to} reads (see ${LOG}); after the rollback, 'defenseclaw uninstall' may leave those DefenseClaw entries in the agent settings, such as ~/.claude/settings.json; remove them by hand"
+}
+
+# drop_newer_hook_helper LEFT_DATA: remove the live hooks/_hardening.sh when
+# it is the helper of the newer install just left (LEFT_DATA, its data in
+# previous/). A gateway of 1.0.4 or older keeps a helper with a newer schema
+# line than its own, and that helper runs native commands its binaries do not
+# have: after a downgrade to 1.0.2 and a rollback, every hook call was refused
+# as "the gateway is running but did not answer" (rel-1-0-4:GAP-2503). The
+# older gateway writes its own helper when it starts. Until 1.1: remove with
+# the 1.0.2, 1.0.3 and 1.0.4 rollback paths.
+drop_newer_hook_helper() {
+    local live="${DEFENSECLAW_HOME}/hooks/_hardening.sh" left="$1/hooks/_hardening.sh"
+    [[ -f "${live}" && ! -L "${live}" && -f "${left}" && ! -L "${left}" ]] || return 0
+    [[ "$(sha256_of "${live}")" == "$(sha256_of "${left}")" ]] || return 0
+    rm -f -- "${live}" \
+        || warn "Could not remove the newer hook helper ${live}; if hook calls are refused after the rollback, remove it and run: defenseclaw-gateway restart"
 }
 
 # prune_orphaned_hooks GATEWAY...: with the first GATEWAY that has the
