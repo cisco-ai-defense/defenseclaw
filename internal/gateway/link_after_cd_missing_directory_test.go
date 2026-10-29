@@ -6,8 +6,6 @@ package gateway
 import (
 	"os"
 	"path/filepath"
-	"runtime"
-	"strings"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
@@ -18,7 +16,8 @@ import (
 // && ln -s ../a.txt b links <cwd>/a.txt whether src exists yet or not, and is
 // not an authorized_keys mutation (GAP-2550). A target that climbs out of
 // such a directory into ~/.ssh, through a link the command makes, or a write
-// through a link made inside a subshell, still blocks.
+// through a link made inside a subshell, still blocks, on Windows (Git Bash) too, where the facts leave a relative
+// POSIX operand unresolved.
 func TestLinkAfterCdIntoMissingOrSubshellDirectory(t *testing.T) {
 	home := t.TempDir()
 	cwd := filepath.Join(home, "project")
@@ -36,9 +35,6 @@ func TestLinkAfterCdIntoMissingOrSubshellDirectory(t *testing.T) {
 	}
 	t.Setenv("HOME", home)
 	t.Setenv("USERPROFILE", home)
-	// This fixture home is not a Windows DefenseClaw state root, so the state
-	// rows are read on POSIX hosts here; the Windows state rows run live.
-	stateRows := runtime.GOOS != "windows"
 	rows := []struct {
 		command string
 		block   bool
@@ -72,9 +68,6 @@ func TestLinkAfterCdIntoMissingOrSubshellDirectory(t *testing.T) {
 		installDefaultProfileConnector(t, connector)
 		for _, hint := range []actionfacts.Dialect{"", actionfacts.DialectPOSIX} {
 			for _, row := range rows {
-				if !stateRows && strings.Contains(row.command, ".defenseclaw hc") {
-					continue
-				}
 				input := actionfacts.Input{Tool: "Bash", Command: row.command, CWD: cwd, ActiveHome: home, DialectHint: hint}
 				findings := dispatchTrustedAction(t.Context(), trustedActionRequest{Input: input, Connector: connector, EnforcementCapable: true})
 				if blocked := buildVerdict(findings, "tool_call").Action == "block"; blocked != row.block {

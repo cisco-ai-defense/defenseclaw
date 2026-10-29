@@ -1102,7 +1102,7 @@ func provenLinkedStateWrite(facts actionfacts.Facts, request trustedActionReques
 			made := hookpaths.CommandLinks(request.Input.Tool, text, request.Input.CWD, projected.ActiveHome)
 			links = &made
 		}
-		if linkedActiveStateWrite(projected, command, candidate, *links) {
+		if linkedActiveStateWrite(projected, command, candidate, *links, request.Input.CWD) {
 			return true
 		}
 	}
@@ -1164,7 +1164,7 @@ func placedLinkedStateWrite(request trustedActionRequest, text, home string, lin
 			for _, candidate := range projected.Paths {
 				command, ok := integrityCommandByID(projected, candidate.CommandID)
 				if ok && stateCommandMutatesPath(command, candidate) &&
-					linkedActiveStateWrite(projected, command, candidate, links) {
+					linkedActiveStateWrite(projected, command, candidate, links, statement.Dir) {
 					return true
 				}
 			}
@@ -1283,13 +1283,19 @@ func linkedActiveStateWrite(
 	command actionfacts.CommandFact,
 	candidate actionfacts.PathFact,
 	links hookpaths.Links,
+	cwd string,
 ) bool {
 	value := candidate.Resolved
 	if value == "" {
 		value = candidate.Normalized
 	}
 	if !filepath.IsAbs(value) {
-		return false
+		// A POSIX operand under a Windows working directory (Git Bash) has
+		// no resolved form in the facts; the link reading places it in the
+		// directory the statement runs in, as the shell does (GAP-2550).
+		if value = placedPOSIXOperand(value, cwd); value == "" {
+			return false
+		}
 	}
 	// ln, a delete and a move replace or remove the final name itself.
 	entry := candidate.Access == actionfacts.PathAccessDelete ||
@@ -1304,6 +1310,17 @@ func linkedActiveStateWrite(
 		}
 	}
 	return false
+}
+
+// placedPOSIXOperand places a plain relative POSIX operand (no tilde,
+// parameter, substitution or pattern) in an absolute working directory, or
+// returns "".
+func placedPOSIXOperand(value, cwd string) string {
+	if value == "" || !filepath.IsAbs(cwd) || strings.HasPrefix(value, "-") ||
+		strings.ContainsAny(value, "~$`*?[\x00\r\n") || path.IsAbs(value) {
+		return ""
+	}
+	return hookpaths.OperandPath(filepath.FromSlash(value), cwd)
 }
 
 // stateDirectoryEntryTarget places an operand that removes or replaces a
