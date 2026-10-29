@@ -346,6 +346,7 @@ var plannerStatsAnalyzePhaseHook func(context.Context)
 // their waits are already in the pool count, so the hold is timed from the
 // start (on rc.10 a refresh kept the connection 13 s with five statements
 // waiting that had queued before it took it, GAP-1790).
+// Retention correlation batches use it the same way (deleteCorrelationBatch).
 func (s *Store) yieldPlannerStatsToWriters(ctx context.Context, cancel context.CancelFunc, contended bool) func() bool {
 	var yielded bool
 	done := make(chan struct{})

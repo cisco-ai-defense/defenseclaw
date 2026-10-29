@@ -192,6 +192,10 @@ type retentionHooks struct {
 	afterLegacyJudgeCommit        func() error
 	afterAuthoritativeJudgeCommit func() error
 	checkpoint                    func(context.Context, *Store, *JudgeBodyStore) error
+	// inCorrelationDelete runs inside each correlation delete attempt, with
+	// the store connection held, just before the statement: a test seam
+	// that holds the statement open until its context ends.
+	inCorrelationDelete func(context.Context)
 }
 
 func (hooks retentionHooks) withDefaults() retentionHooks {
@@ -784,6 +788,10 @@ func (reaper *RetentionReaper) drainCorrelationState(
 		{RetentionCorrelationEvents, []any{unixNano(now), unixNano(cutoff)}},
 	}
 	deadline := reaper.hooks.now().Add(reaper.correlationBudget())
+	// A batch gives the connection back to the hooks waiting for it during
+	// the first half of the budget, and runs to its end in the second half:
+	// a run under steady hook traffic still deletes rows.
+	yieldUntil := reaper.hooks.now().Add(reaper.correlationBudget() / 2)
 	// Rotate the first stage on every run. A busy early stage can consume the
 	// whole time budget after one batch, so registry order alone does not
 	// guarantee that later relationship/event cleanup will ever run.
@@ -799,7 +807,20 @@ func (reaper *RetentionReaper) drainCorrelationState(
 				result.Backlog = true
 				return nil
 			}
-			deleted, err := reaper.deleteCorrelationBatch(ctx, stage.class, stage.args...)
+			deleted, err := reaper.deleteCorrelationBatch(ctx, stage.class, reaper.yieldsToHooks(yieldUntil), stage.args...)
+			for errors.Is(err, errRetentionYielded) {
+				// The batch was rolled back, nothing was deleted: let the
+				// waiting hooks run, then take it again with the pages it
+				// read still cached.
+				if err := reaper.hooks.yield(ctx); err != nil {
+					return err
+				}
+				if !reaper.hooks.now().Before(deadline) {
+					result.Backlog = true
+					return nil
+				}
+				deleted, err = reaper.deleteCorrelationBatch(ctx, stage.class, reaper.yieldsToHooks(yieldUntil), stage.args...)
+			}
 			if err != nil {
 				return err
 			}
@@ -819,9 +840,27 @@ func (reaper *RetentionReaper) drainCorrelationState(
 	}
 }
 
+// errRetentionYielded reports a correlation delete that was interrupted and
+// rolled back because hook statements waited for the store connection.
+var errRetentionYielded = errors.New("audit: retention batch yielded to waiting hooks")
+
+// yieldsToHooks says whether a correlation batch started now gives the
+// store connection back to waiting hooks. Secure Client keeps its batches.
+func (reaper *RetentionReaper) yieldsToHooks(until time.Time) bool {
+	return !reaper.secureClient && reaper.hooks.now().Before(until)
+}
+
+// deleteCorrelationBatch deletes one bounded batch of a correlation class.
+// With yieldToHooks, the statement is interrupted once another statement
+// has waited plannerStatsYieldWait for the store connection, and it returns
+// errRetentionYielded with nothing deleted. On a multi-gigabyte store with a
+// cold page cache one batch read pages for about 18 s after a gateway start
+// while every hook call queued behind it, and benign calls were denied as a
+// gateway no-answer (GAP-1790, managed RHEL, 6.8 GB store).
 func (reaper *RetentionReaper) deleteCorrelationBatch(
 	ctx context.Context,
 	class RetentionTableClass,
+	yieldToHooks bool,
 	args ...any,
 ) (int64, error) {
 	statement, err := correlationRetentionDeleteStatement(class)
@@ -839,12 +878,29 @@ func (reaper *RetentionReaper) deleteCorrelationBatch(
 	defer release()
 	var deleted int64
 	err = retryBusy(ctx, "observability_v8_retention_"+string(class), func() error {
+		waitsBefore := reaper.store.db.Stats().WaitCount
 		tx, beginErr := reaper.store.db.BeginTx(ctx, nil)
 		if beginErr != nil {
 			return beginErr
 		}
 		defer tx.Rollback() //nolint:errcheck
-		res, execErr := tx.ExecContext(ctx, statement, args...)
+		statementCtx, cancel := context.WithCancel(ctx)
+		defer cancel()
+		interrupted := func() bool { return false }
+		if yieldToHooks {
+			// When BeginTx itself waited, the statements queued with it are
+			// already in the pool wait count: time the hold from the start.
+			contended := reaper.store.db.Stats().WaitCount != waitsBefore
+			interrupted = reaper.store.yieldPlannerStatsToWriters(statementCtx, cancel, contended)
+		}
+		if reaper.hooks.inCorrelationDelete != nil {
+			reaper.hooks.inCorrelationDelete(statementCtx)
+		}
+		res, execErr := tx.ExecContext(statementCtx, statement, args...)
+		cancel()
+		if execErr != nil && interrupted() && ctx.Err() == nil {
+			return errRetentionYielded
+		}
 		if execErr != nil {
 			return execErr
 		}
