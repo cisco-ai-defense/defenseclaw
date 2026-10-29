@@ -653,8 +653,8 @@ func normalizeEnterpriseSetupArgumentsForFlavor(arguments []string, standalone b
 				continue
 			}
 			if standalone {
-				return nil, false, fmt.Errorf("unknown property %s; run %s /? for the actions and the NAME=value properties (CONFIG=, MANIFEST=, BUNDLE=, TRUSTANCHORS=, JSON=1, NOSTART=1, PURGE=1, FORCE=1, TIMEOUTSECONDS=, ALLOWEDSIGNERS=, ATTESTCLAUDEEFFECTIVEPOLICY=1)",
-					trimmed[:separator], standaloneSetupArtifactName)
+				return nil, false, fmt.Errorf("unknown property %s; run %s /? for the actions and the NAME=value properties (%s)",
+					trimmed[:separator], standaloneSetupArtifactName, standaloneSetupPropertyHint())
 			}
 		}
 		normalized = append(normalized, argument)
@@ -1028,6 +1028,29 @@ func writeEnterpriseSetupUsageForFlavor(output io.Writer, standalone bool) {
 		fmt.Fprintln(output, "Ensure (standalone Setup) converges the host: install, upgrade, repair, or no-op.")
 	}
 	fmt.Fprintln(output, "Production paths and service names are fixed by the enterprise lifecycle.")
+}
+
+// standaloneSetupUsageProperty matches a property row of
+// writeStandaloneSetupUsage: its name and the value it shows.
+var standaloneSetupUsageProperty = regexp.MustCompile(`(?m)^  ([A-Z]+)=(\S*)`)
+
+// standaloneSetupPropertyHint lists the properties /? prints, read from
+// writeStandaloneSetupUsage itself, so the unknown-property hint cannot miss
+// one the usage gains. A hand-kept copy lacked REFUSECAPABILITYLOSS=1
+// (GAP-2398). A placeholder value (<path>, <n>, <sha256>) is shown as NAME=,
+// a literal one as NAME=1.
+func standaloneSetupPropertyHint() string {
+	var usage strings.Builder
+	writeStandaloneSetupUsage(&usage)
+	var names []string
+	for _, match := range standaloneSetupUsageProperty.FindAllStringSubmatch(usage.String(), -1) {
+		value := match[2]
+		if strings.HasPrefix(value, "<") {
+			value = ""
+		}
+		names = append(names, match[1]+"="+value)
+	}
+	return strings.Join(names, ", ")
 }
 
 // writeStandaloneSetupUsage prints the standalone Setup usage in the form

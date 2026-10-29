@@ -186,8 +186,26 @@ def litellm_model(llm: LLMConfig) -> str:
     """
     model = llm.model or ""
     if model and llm.provider and "/" not in model:
-        return f"{llm.provider}/{model}"
-    return model
+        model = f"{llm.provider}/{model}"
+    return _with_bedrock_inference_profile(llm, model)
+
+
+def _with_bedrock_inference_profile(llm: LLMConfig, model: str) -> str:
+    """Put ``llm.bedrock.inference_profile`` (e.g. ``us.``) before a Bedrock id.
+
+    The gateway provider does this before dispatch; models such as Claude
+    Haiku 4.5 are served only through a cross-region inference profile, so
+    the scanner judge sent the bare id and failed (GAP-2396). Mirrors
+    ``withBedrockInferenceProfile`` in internal/scanner/skill.go.
+    """
+    bedrock = getattr(llm, "bedrock", None)
+    profile = (getattr(bedrock, "inference_profile", "") or "").strip() if bedrock else ""
+    if not profile:
+        return model
+    prefix, sep, model_id = model.partition("/")
+    if not sep or prefix.lower() != "bedrock" or "/" in model_id or model_id.startswith(("arn:", profile)):
+        return model
+    return f"{prefix}/{profile}{model_id}"
 
 
 def llm_analyzer_ready(

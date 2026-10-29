@@ -877,8 +877,12 @@ def test_native_ci_install_state_write_waits_for_a_read_only_sharer(tmp_path: Pa
 
 def test_native_windows_artifact_builder_supports_acp_resource_component() -> None:
     harness = WINDOWS_NATIVE_CI.read_text(encoding="utf-8-sig")
-    assert "[ValidateSet('gateway', 'hook', 'launcher', 'startup', 'setup', 'acp-guard')]" in harness
+    assert "[ValidateSet('gateway', 'hook', 'hook-guard', 'launcher', 'startup', 'setup', 'acp-guard')]" in harness
     assert "@('defenseclaw-acp.exe', './cmd/defenseclaw-acp'" in harness
+    # The release-shaped zip carries the one-line install's GUI-subsystem
+    # Claude Code PreToolUse guard beside the hook (GAP-2467).
+    assert "@('defenseclaw-hook-guard.exe', './cmd/defenseclaw-hook-guard'" in harness
+    assert "-buildid=defenseclaw-hook-guard-$sourceCommit -H=windowsgui" in harness
 
 
 def test_native_lifecycle_ci_binds_stable_launcher_to_installed_source() -> None:

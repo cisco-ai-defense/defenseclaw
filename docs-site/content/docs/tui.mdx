@@ -45,11 +45,18 @@ arrow keys, Page Up/Page Down or End to reach lower metrics such as Agents.
 ![DefenseClaw TUI Overview panel: the tab bar, hook call, block, finding and guardrail cards, the connector scope, services and enforcement summaries, and the Restart Gateway, Run Doctor and Scan AI Agents buttons](/images/tui/overview.png)
 
 On Overview, press `G` to start or restart the gateway and `z` to enable or run
-AI Discovery. The key row shows both actions at 80 columns.
+AI Discovery. The quick-action row at the end of Overview lists both as
+`[G] Gateway` and `[z] AI Discovery` (at 80x24, scroll down to it). The hint
+line above the status line is not a key list on Overview: it shows the most
+urgent notice, for example `500 recent critical/high alert events need review.
+Press 2 for Alerts.`, and a rotating tip when there is none; press `?` for
+every key.
 
 Switch panels with the number/letter key shown, from any panel (only an open
 Setup form or a `/` search box types digits and letters), or cycle with `Tab` /
-`Shift+Tab`. Press `Ctrl+P` to fuzzy-jump to any panel by name. At 80 columns, the tab strip keeps every panel's key on screen and spells out
+`Shift+Tab`. The one exception is Sandboxes: there `P`, `R` and `A` are the
+panel's own pull, review and always-approve keys. On Sandboxes, press `p` for
+Policies, and `Tab` or `Ctrl+P` to reach Registries or Activity. Press `Ctrl+P` to fuzzy-jump to any panel by name. At 80 columns, the tab strip keeps every panel's key on screen and spells out
 the current panel (for example, `1 Overview`); other tabs may show only their
 keys. The title below the strip names the current panel. Wider terminals add
 short or full names to other tabs as room allows. Unread counts stay visible
@@ -155,15 +162,17 @@ file format.
 
 ### Config generation and policy digest
 
-The status line at the bottom of every panel ends with the policy the running
-gateway applies. With the guardrail off it reads:
+The status line at the bottom of every panel shows the applied config
+generation and policy digest as its own segment, right after the gateway:
 
 ```text
-● guardrail off · gen 10 · 8b19ede82344
+Ready.  │  ● Gateway (up 2m)  │  ● gen 10 · 8b19ede82344  │  ● Watchdog  │  ● Guardrail (action)  │ …
 ```
 
-With the guardrail on, the first part is the active policy and mode, for
-example `policy strict · action · gen 10 · 8b19ede82344`. `gen` is the
+The active policy and mode are a separate segment further along the line, for
+example `● policy strict · action` (`● guardrail off` with the guardrail off);
+a narrow terminal cuts the end of the line to `…`, so that segment may not
+show at 80 columns. `gen` is the
 applied config generation counter from `config.generation.json`, reported as
 `policy.config_generation` by the gateway. It survives a gateway restart;
 when the counter is unknown or zero, the footer shows only the digest. The hex
@@ -204,8 +213,8 @@ block NAME`, `defenseclaw mcp allow NAME` or `defenseclaw tool block NAME
 - `disable`, `enable`, `quarantine` and `restore` are runtime actions kept in
   the audit database, not in `config.yaml`.
 - On a managed standalone device the three policy verbs fail with the message
-  `This device is managed: add it to asset_policy in the admin config (MDM or
-  management plane)`, which the TUI shows in the status line and in Activity.
+  `This device is managed: the asset_policy block and allow lists are set in
+  the admin config (MDM or management plane)`, which the TUI shows in the status line and in Activity.
   Nothing changes. See [Admission reference](/docs/policies/admission).
 
 ## Five actions you will use most
@@ -343,6 +352,8 @@ and help beside the table:
 | `r` | Revert unsaved changes (`R` opens Registries) |
 | `w` | Back to the task list |
 
+The **Admission Defaults** section has one row, **Allow List Bypass** (`admission.defaults.allow_list_bypass_scan`). On, the default, a first-party allow-list entry installs without a scan; off, it is scanned. An unset key shows `true`, the value it inherits.
+
 Keys the TUI can't save show as read-only rows; their hint says where to change
 them (in `config.yaml`, or with `defenseclaw setup <connector>` for connector
 hooks). Only problems in fields you changed block a save. If `config.yaml`
@@ -436,7 +447,7 @@ the details window takes the keys of its view, and `Esc` closes it.
 | `a` / `A` / `x` | Approve the selected ask once, always approve it (asks again; every future sandbox may reach it too, and a toast confirms what was saved), or reject it. An approval applies when the agent is idle. `A` is not offered for a port on this machine, a private or IP-literal address, or a proposal with allowed IPs: those open for one sandbox only. Outside Asks, `a` switches to Asks when one waits |
 | `c` | Connect: start the sandbox if it is stopped and attach its harness |
 | `n` | New run: open the [launch dialog](#start-a-run-from-the-tui) |
-| `s` | Save or sync accessible work first, then stop the sandbox (asks first; if a MicroVM's stop is held because its disk could not be synced, the TUI asks whether to stop it anyway; that keeps what reached its disk, and what was not synced may be lost, the same as `defenseclaw sandbox stop NAME --yes`); it is kept, so `c` resumes it. `defenseclaw sandbox stop <name>` runs in this terminal and asks again while a detached run is still going; DefenseClaw marks that run interrupted and keeps its log for `defenseclaw sandbox logs <name>` |
+| `s` | Save or sync accessible work first, then stop the sandbox (asks first; if a MicroVM's disk could not be synced first, `defenseclaw sandbox stop` asks in this terminal whether to stop it anyway, losing what it wrote since its last sync, the same as `defenseclaw sandbox stop NAME --discard-unsynced`; a no keeps it running); it is kept, so `c` resumes it. `defenseclaw sandbox stop <name>` runs in this terminal and asks again while a detached run is still going; DefenseClaw marks that run interrupted and keeps its log for `defenseclaw sandbox logs <name>` |
 | `d` | Delete the sandbox (asks first) with its providers, credentials and snapshot. Undo is no longer possible; your project folder keeps its current contents |
 | `U` | Save work you want to keep first, then undo: preview the changes, ask, stop a running sandbox, and put the project folder back to its pre-session snapshot. For a sandbox that works on a copy, `U` reverts its last `pull --apply` instead: `defenseclaw sandbox undo <name>` previews the revert in this terminal and asks, and edits you made since stay |
 | `R` | Review the changed files that can run code on your machine (a sandbox that mounts its folder) |

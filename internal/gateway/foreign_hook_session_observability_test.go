@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisepolicy"
 	"github.com/defenseclaw/defenseclaw/internal/observability"
 	"github.com/defenseclaw/defenseclaw/internal/useridentity"
@@ -180,5 +181,60 @@ func TestForeignHookSessionDenialNamesWhatWasDenied(t *testing.T) {
 	}
 	if !toolDecision {
 		t.Fatal("no hook decision record with lifecycle.event tool_start (GAP-2216)")
+	}
+}
+
+// GAP-1903: a foreign-hook guard block row names the session, the agent and
+// the session instance (ais-) of the exchange, as the allow rows of the same
+// agent session do, so a SIEM can join the block to the session it stopped.
+func TestForeignHookSessionDenialRowNamesTheSessionAndAgent(t *testing.T) {
+	sharedRegMu.Lock()
+	previous := sharedReg
+	sharedReg = NewAgentRegistry("", "")
+	sharedRegMu.Unlock()
+	t.Cleanup(func() {
+		sharedRegMu.Lock()
+		sharedReg = previous
+		sharedRegMu.Unlock()
+	})
+	store, logger := testStoreAndLogger(t)
+	api := &APIServer{store: store, logger: logger}
+	sid := "S-1-5-21-1111-2222-3333-1001"
+	ctx := context.WithValue(context.Background(), verifiedUserScopedIdentityContextKey{}, sid)
+	ctx = ContextWithAgentIdentity(ctx, AgentIdentity{
+		UserID: sid, UserIDKind: useridentity.KindForID(sid), UserName: "dcw-std1",
+	})
+	allowed := audit.EnvelopeFromContext(enrichAgentHookContext(ctx, agentHookRequest{
+		ConnectorName: "claudecode", HookEventName: "PreToolUse", SessionID: "session-fh-1903",
+	}))
+	if allowed.AgentInstanceID == "" {
+		t.Fatalf("the hook path gave the session no agent instance: %+v", allowed)
+	}
+	// The session's rows name its root agent (minted at its start from the
+	// agent identity, correlation_occurrence_v8.go).
+	rootAgent := agentNodeID(resolveHookAgentIdentity(ctx, agentHookRequest{ConnectorName: "claudecode"}).ID,
+		"claudecode", "session-fh-1903", "root")
+	decision := enterprisepolicy.GuardDecision{Deny: true, Reason: "enterprise_foreign_hook_blocked: user hook"}
+	api.auditForeignHookSessionDenial(ctx, "claudecode", enterprisepolicy.SessionExchange{
+		Key:   enterprisepolicy.SessionKey{Connector: "claudecode", Session: "session-fh-1903", Process: "process-1"},
+		Event: "PreToolUse", Decision: decision,
+	}, decision)
+
+	events, err := store.ListEvents(10)
+	if err != nil {
+		t.Fatalf("ListEvents: %v", err)
+	}
+	var row *audit.Event
+	for i := range events {
+		if events[i].Action == string(audit.ActionConnectorHook) {
+			row = &events[i]
+		}
+	}
+	if row == nil {
+		t.Fatalf("no connector-hook block row in %d events", len(events))
+	}
+	if row.SessionID != "session-fh-1903" || row.AgentInstanceID != allowed.AgentInstanceID || row.AgentID != rootAgent {
+		t.Fatalf("block row session=%q instance=%q agent=%q, want session-fh-1903, %q and %q",
+			row.SessionID, row.AgentInstanceID, row.AgentID, allowed.AgentInstanceID, rootAgent)
 	}
 }

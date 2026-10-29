@@ -195,16 +195,25 @@ func (s *CodeGuardScanner) Scan(ctx context.Context, target string) (*ScanResult
 	return result, nil
 }
 
+// codeExtensions are the file extensions CodeGuard scans. Shell and
+// Windows script files are code: a PowerShell, batch or zsh script reads
+// and writes paths like any other program (GAP-2220: a .ps1 Write with
+// "Get-Content ..\temp\secrets.txt" was never scanned on the hook path).
 var codeExtensions = map[string]bool{
 	".py": true, ".js": true, ".ts": true, ".go": true,
 	".java": true, ".rb": true, ".php": true, ".sh": true,
+	".bash": true, ".zsh": true,
+	".ps1": true, ".psm1": true, ".bat": true, ".cmd": true,
+	".mjs": true, ".cjs": true, ".jsx": true, ".tsx": true,
 	".yaml": true, ".yml": true, ".json": true, ".xml": true,
 	".c": true, ".cpp": true, ".h": true, ".rs": true,
 }
 
-// IsCodeFile reports whether the given file extension is one CodeGuard scans.
+// IsCodeFile reports whether the given file extension is one CodeGuard
+// scans. Extensions match without regard to case: Windows paths are case
+// insensitive, so "Deploy.PS1" is the same script as "deploy.ps1".
 func IsCodeFile(ext string) bool {
-	return codeExtensions[ext]
+	return codeExtensions[strings.ToLower(ext)]
 }
 
 // collectCodeFiles skips an unreadable directory or entry unless strict, when
@@ -232,9 +241,15 @@ func collectCodeFiles(root string, strict bool) ([]string, error) {
 			if base == ".git" || base == "node_modules" || base == "__pycache__" || base == ".venv" || base == "venv" {
 				return filepath.SkipDir
 			}
+			if perr := probeDirOpen(path); perr != nil {
+				if strict {
+					return incompleteScan(path, perr)
+				}
+				return filepath.SkipDir
+			}
 			return nil
 		}
-		if !codeExtensions[filepath.Ext(path)] {
+		if !IsCodeFile(filepath.Ext(path)) {
 			return nil
 		}
 		info, lerr := os.Lstat(path)

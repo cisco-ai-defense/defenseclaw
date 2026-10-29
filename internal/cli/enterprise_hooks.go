@@ -761,6 +761,10 @@ var (
 	// release whose hook-contract lock a target still carries. Tests
 	// replace it.
 	enterpriseHookReconcileTargetRelease = enterprisehooks.WindowsProtectedTargetFromOtherRelease
+	// enterpriseHookReconcileTargetEarlierMatrix reports a target whose
+	// agent config still holds an earlier release's hook matrix (GAP-2463).
+	// Tests replace it.
+	enterpriseHookReconcileTargetEarlierMatrix = enterprisehooks.WindowsProtectedTargetRunsEarlierHookMatrix
 	// enterpriseHookReconcileTargetFailModeChange returns the hook fail mode
 	// a target's lock records and the one the config asks for. Tests
 	// replace it.
@@ -810,7 +814,28 @@ const (
 	enterpriseHookAwaitingSignInFailOpen   = "its hooks keep hook fail mode open"
 	// A signed-out account's Hermes home is unobservable (GAP-1433).
 	enterpriseHookAwaitingSignInHermesHome = "its Hermes home cannot be read while the account is signed out"
+	// An earlier release's hook matrix, which lacks only the fail_closed
+	// setting this release adds, still runs for it (GAP-2463).
+	enterpriseHookAwaitingSignInEarlierMatrix = "its earlier release's hooks still run"
 )
+
+// enterpriseHookEarlierMatrixRow reports a guardian row that waits for its
+// account's next connect while the hooks an earlier release registered still
+// guard it (enterpriseHookAwaitingSignInEarlierMatrix). Status reports it as
+// enrolled with an older hook matrix, not as pending (GAP-2463).
+func enterpriseHookEarlierMatrixRow(row enterpriseHookReconcileRow) bool {
+	return enterpriseHookAwaitingSignInError(row) &&
+		strings.HasPrefix(
+			strings.TrimPrefix(strings.TrimSpace(row.Error), enterpriseHookAwaitingSignInPrefix+": "),
+			enterpriseHookAwaitingSignInEarlierMatrix,
+		)
+}
+
+// enterpriseHookEarlierMatrixState is the guarded-but-not-fail-closed state
+// of such a row, for status and verify.
+const enterpriseHookEarlierMatrixState = "enrolled with the hook matrix of an earlier DefenseClaw release " +
+	"(upgrade pending at the account's next connect): guarded, but a hook spawn error or timeout does not " +
+	"block until the guardian upgrades it in the account's own Windows session"
 
 // enterpriseHookAwaitingSignInCause words, for status and verify, why a
 // guardian row that waits for its account's next sign-in (its error) is not
@@ -821,6 +846,8 @@ func enterpriseHookAwaitingSignInCause(guardianErr string) string {
 	case strings.HasPrefix(cause, enterpriseHookAwaitingSignInFailClosed):
 		return "its hooks still fail closed, and the guardian renders hook fail mode open in the account's own " +
 			"Windows session at its next sign-in"
+	case strings.HasPrefix(cause, enterpriseHookAwaitingSignInEarlierMatrix):
+		return enterpriseHookEarlierMatrixState
 	case strings.HasPrefix(cause, enterpriseHookAwaitingSignInHermesHome):
 		return "Hermes NOT COVERED: the account is signed out, so its registry hive and the HERMES_HOME it selects " +
 			"cannot be read; its installed hook is unchanged, and the guardian verifies it again at the account's next sign-in"
@@ -911,6 +938,17 @@ func enterpriseHookRepairAfterVerifyFailure(
 				)
 			}
 			if written, other, releaseErr := enterpriseHookReconcileTargetRelease(opts); releaseErr == nil && other {
+				// The earlier release's hooks may still run unchanged: then
+				// the account is guarded, only not fail-closed, until its
+				// next connect (GAP-2463).
+				if earlier, matrixErr := enterpriseHookReconcileTargetEarlierMatrix(opts); matrixErr == nil && earlier {
+					return enterprisehooks.InstallResult{}, false, fmt.Errorf(
+						"%w: %s: DefenseClaw %s registered them without fail_closed, and this release's hooks "+
+							"install only in the account's own Windows session; its exact active Windows session is "+
+							"unavailable, so the guardian upgrades them at the account's next connect (verification: %v)",
+						errEnterpriseHookAwaitingSignIn, enterpriseHookAwaitingSignInEarlierMatrix, written, verifyErr,
+					)
+				}
 				return enterprisehooks.InstallResult{}, false, fmt.Errorf(
 					"%w: DefenseClaw %s protected it, and this release's hooks install only in the account's own "+
 						"Windows session; its exact active Windows session is unavailable, so the guardian repairs "+
@@ -1113,7 +1151,7 @@ func enterpriseHookEnrollmentFromRows(rows []enterpriseHookReconcileRow) []enter
 		}
 		state := "failed"
 		switch {
-		case row.OK:
+		case row.OK, enterpriseHookEarlierMatrixRow(row):
 			state = "enrolled"
 		case row.Pending, enterpriseHookAwaitingSignInError(row):
 			state = "pending"
@@ -1457,7 +1495,11 @@ func enterpriseHookGuardianFailureIssue(row enterpriseHookReconcileRow) string {
 	account := enterpriseHookSignedOutAccount(row)
 	if enterpriseHookAwaitingSignInRow(row) {
 		if account == "" {
-			account = enterpriseHookTargetLabel(row)
+			account = enterpriseHookTargetIssueLabel(row)
+		}
+		if enterpriseHookEarlierMatrixRow(row) {
+			return fmt.Sprintf("%s for %s is %s",
+				strings.TrimSpace(row.Connector), account, enterpriseHookEarlierMatrixState)
 		}
 		return fmt.Sprintf("%s for %s is pending until that account signs in: %s",
 			strings.TrimSpace(row.Connector), account, enterpriseHookAwaitingSignInCause(row.Error))
@@ -1475,7 +1517,7 @@ func enterpriseHookGuardianFailureIssue(row enterpriseHookReconcileRow) string {
 	if detail == "" {
 		detail = "no target error was recorded"
 	}
-	return fmt.Sprintf("last guardian reconcile failed for %s: %s", enterpriseHookTargetLabel(row), detail)
+	return fmt.Sprintf("last guardian reconcile failed for %s: %s", enterpriseHookTargetIssueLabel(row), detail)
 }
 
 func loadEnterpriseHookGuardianState(dataDir string) (enterpriseHookGuardianState, bool, error) {
@@ -1684,7 +1726,7 @@ func compareEnterpriseHookGuardianRecordsExcusing(
 				}
 			}
 			if !covered {
-				issues = append(issues, fmt.Sprintf("protected authorization does not cover %s", enterpriseHookTargetLabel(row)))
+				issues = append(issues, fmt.Sprintf("protected authorization does not cover %s", enterpriseHookTargetIssueLabel(row)))
 			}
 		}
 	}
@@ -1733,11 +1775,11 @@ func compareEnterpriseHookProtectedTargetSets(
 	for _, row := range expected {
 		key := enterpriseHookProtectedTargetKey(row)
 		if key == "" {
-			issues = append(issues, fmt.Sprintf("current enabled target is incomplete: %s", enterpriseHookTargetLabel(row)))
+			issues = append(issues, fmt.Sprintf("current enabled target is incomplete: %s", enterpriseHookTargetIssueLabel(row)))
 			continue
 		}
 		if _, duplicate := expectedByKey[key]; duplicate {
-			issues = append(issues, fmt.Sprintf("current enabled target is duplicated: %s", enterpriseHookTargetLabel(row)))
+			issues = append(issues, fmt.Sprintf("current enabled target is duplicated: %s", enterpriseHookTargetIssueLabel(row)))
 			continue
 		}
 		expectedByKey[key] = row
@@ -1745,23 +1787,23 @@ func compareEnterpriseHookProtectedTargetSets(
 	for _, row := range actual {
 		key := enterpriseHookProtectedTargetKey(row)
 		if key == "" {
-			issues = append(issues, fmt.Sprintf("protected %s contains an incomplete target: %s", record, enterpriseHookTargetLabel(row)))
+			issues = append(issues, fmt.Sprintf("protected %s contains an incomplete target: %s", record, enterpriseHookTargetIssueLabel(row)))
 			continue
 		}
 		if _, duplicate := actualByKey[key]; duplicate {
-			issues = append(issues, fmt.Sprintf("protected %s contains a duplicate target: %s", record, enterpriseHookTargetLabel(row)))
+			issues = append(issues, fmt.Sprintf("protected %s contains a duplicate target: %s", record, enterpriseHookTargetIssueLabel(row)))
 			continue
 		}
 		actualByKey[key] = row
 	}
 	for key, row := range expectedByKey {
 		if _, covered := actualByKey[key]; !covered {
-			issues = append(issues, fmt.Sprintf("protected %s does not cover %s", record, enterpriseHookTargetLabel(row)))
+			issues = append(issues, fmt.Sprintf("protected %s does not cover %s", record, enterpriseHookTargetIssueLabel(row)))
 		}
 	}
 	for key, row := range actualByKey {
 		if _, enabled := expectedByKey[key]; !enabled {
-			issues = append(issues, fmt.Sprintf("protected %s contains extra or stale target %s", record, enterpriseHookTargetLabel(row)))
+			issues = append(issues, fmt.Sprintf("protected %s contains extra or stale target %s", record, enterpriseHookTargetIssueLabel(row)))
 		}
 	}
 	sort.Strings(issues)
@@ -1783,6 +1825,18 @@ func sameEnterpriseHookPath(a, b string) bool {
 		return strings.EqualFold(filepath.Clean(absA), filepath.Clean(absB))
 	}
 	return filepath.Clean(absA) == filepath.Clean(absB)
+}
+
+// enterpriseHookTargetIssueLabel names a target in a failure or drift
+// message. On Windows a guardian row carries only the account's SID, so the
+// message names the account as "user (SID)", as the guardian notices do
+// (GAP-2290); elsewhere it is enterpriseHookTargetLabel. Only rendered: keys
+// and matching use the SID.
+func enterpriseHookTargetIssueLabel(row enterpriseHookReconcileRow) string {
+	if strings.TrimSpace(row.SID) == "" {
+		return enterpriseHookTargetLabel(row)
+	}
+	return strings.TrimSpace(row.Connector) + "@" + enterpriseHookTargetIssueAccount(row)
 }
 
 func enterpriseHookTargetLabel(row enterpriseHookReconcileRow) string {
@@ -1815,11 +1869,23 @@ type enterpriseHookVerifyRun struct {
 	// sign-in to the error of the guardian row that records the wait.
 	AwaitingSignIn map[string]string
 	// RecordedProtected names the excused signed-out Hermes rows
-	// (enterpriseHookHermesSignedOutRow) the guardian last recorded as
+	// (enterpriseHookHermesSignedOutRow) and the rows failed only by an
+	// enterpriseHookUserFileFault that the guardian last recorded as
 	// protected; the protected records are compared with them as protected.
 	RecordedProtected map[string]bool
 	AuthorizationErr  error
 }
+
+// enterpriseHookUserFileFault is a verify row error whose only cause is a
+// file in the target account's own profile that DefenseClaw reads but the
+// guardian's pass and Setup readiness report as a warning (on Windows, the
+// Claude Code user settings the migration cannot finish): the row fails, but
+// the guardian's protected records, which recorded the row protected, are no
+// second fault (GAP-0031).
+type enterpriseHookUserFileFault struct{ err error }
+
+func (f enterpriseHookUserFileFault) Error() string { return f.err.Error() }
+func (f enterpriseHookUserFileFault) Unwrap() error { return f.err }
 
 // enterpriseHookVerifyExcusedNote is the note of one of run.Excused: for a
 // row that waits for its signed-out account's next sign-in, why, from the
@@ -1865,13 +1931,23 @@ func enterpriseHookVerifyAwaitingSignIn(
 		return false
 	}
 	available, err := enterpriseHookReconcileSessionAvailable(target)
-	if err != nil && enterpriseHookReconcileSecureClient() && enterpriseHookSessionCheckNotLocalSystem(err) {
-		// Setup's own verify runs as the elevated administrator, which
-		// cannot query another account's session. On Secure Client the
-		// guardian's fresh protected record of the wait stands, as status
-		// reads it: the LocalSystem guardian proved the session absent when
-		// it wrote the row, and repairs the target once the account signs in.
-		return true
+	if err != nil && enterpriseHookSessionCheckNotLocalSystem(err) {
+		// Setup's own verify, and an administrator's verify or signed
+		// bundle apply, run as the elevated administrator, which cannot
+		// query another account's session. On Secure Client the guardian's
+		// fresh protected record of the wait stands, as status reads it:
+		// the LocalSystem guardian proved the session absent when it wrote
+		// the row, and repairs the target once the account signs in.
+		if enterpriseHookReconcileSecureClient() {
+			return true
+		}
+		// Standalone reads the session list instead, as the Hermes wait
+		// does: refusing every wait there failed verify 1603, and the
+		// hot-config proof of a signed bundle, after a hook fail mode change
+		// while an enrolled account was signed out or disconnected
+		// (GAP-2044, GAP-1719).
+		noSession, listErr := enterpriseHookTargetHasNoSession(target)
+		return listErr == nil && noSession
 	}
 	return err == nil && !available
 }
@@ -2425,6 +2501,17 @@ func runEnterpriseHookVerifyAttemptWithScope(ctx context.Context, registrationOn
 			row.OK = false
 			row.Error = targetErr.Error()
 			run.Failures++
+			var userFile enterpriseHookUserFileFault
+			if errors.As(targetErr, &userFile) && recorded[enterpriseHookProtectedTargetKey(row)].OK {
+				// The row fails on a file in the account's own profile
+				// only, and the guardian, whose readiness reports that
+				// file as a warning, recorded it protected: the records
+				// still describe it, so they are not a second fault.
+				if run.RecordedProtected == nil {
+					run.RecordedProtected = map[string]bool{}
+				}
+				run.RecordedProtected[enterpriseHookProtectedTargetKey(row)] = true
+			}
 			if excused > 0 && enterpriseHookRemovedAccountRow(row) {
 				run.Excused = append(run.Excused, row)
 			} else if excused > 0 && enterpriseHookVerifyAwaitingSignIn(awaitingSignIn, target, row) {
@@ -2916,7 +3003,7 @@ func runEnterpriseHookReconcileOnce(ctx context.Context) (enterpriseHookReconcil
 						// A Hermes or Devin config put back or recreated
 						// (GAP-0588), or a native OTLP exporter the managed
 						// install could not take back (GAP-1839).
-						notices = append(notices, enterpriseHookGuardianNotice{User: firstNonEmptyString(row.User, row.SID), Connector: row.Connector, AgentConfig: result.AgentConfig})
+						notices = append(notices, enterpriseHookGuardianNotice{User: enterpriseHookNoticeAccount(row), Connector: row.Connector, AgentConfig: result.AgentConfig})
 					}
 					recheck = recheckWindow > 0 && previousProtection.PreviouslyProtected && !repaired
 					recheckOpts = opts
@@ -3106,6 +3193,10 @@ func runEnterpriseHooksWatch(cmd *cobra.Command, _ []string) error {
 	// left it. A Write or Chmod that the writer policy or the settle window
 	// drops still counts when the file no longer matches it.
 	ownedSnapshot := map[string]string{}
+	// foundSnapshot is each owned file's fingerprint as the last reconcile
+	// found it (the snapshot before ownedSnapshot was retaken), so a pass
+	// that made and then dropped a file can be told from a change (GAP-0030).
+	foundSnapshot := map[string]string{}
 	// Post-reconcile guards against the self-trigger loop. Every
 	// reconcile writes into watched dirs (chmod on hook configs and
 	// hook scripts inside hardenInstallFootprint, plus writing
@@ -3176,6 +3267,12 @@ func runEnterpriseHooksWatch(cmd *cobra.Command, _ []string) error {
 		}
 		for _, f := range run.WatchSharedFiles {
 			sharedOwned[filepath.Clean(f)] = struct{}{}
+		}
+		for k := range foundSnapshot {
+			delete(foundSnapshot, k)
+		}
+		for k, v := range ownedSnapshot {
+			foundSnapshot[k] = v
 		}
 		takeEnterpriseHookOwnedSnapshot(ownedSnapshot, exclusiveOwned, sharedOwned, enterpriseHookOwnedFileFingerprint)
 		status := "ok"
@@ -3382,6 +3479,14 @@ func runEnterpriseHooksWatch(cmd *cobra.Command, _ []string) error {
 			// there: an in-place overwrite of the scoped token right after
 			// a pass waited for the interval pass (GAP-0044), as did an
 			// in-place rewrite of a shared agent config (GAP-0045).
+			// A Create, Remove or Rename of an exclusive-writer file in the
+			// settle window that left the file as the pass found it and as
+			// it left it is the pass's own make-and-drop tail (a backup
+			// receipt a failed repair rolled back): it does not arm another
+			// pass, so the repair backoff applies (GAP-0030).
+			if !settling && actionable && enterpriseHookWatchExclusiveTailUnchanged(time.Now(), settleUntil, event, exclusiveOwned, foundSnapshot, ownedSnapshot, enterpriseHookOwnedFileFingerprint) {
+				settling = true
+			}
 			if (!actionable || settling) &&
 				!enterpriseHookWatchOwnedFileChanged(event.Name, exclusiveOwned, sharedOwned, ownedSnapshot, enterpriseHookOwnedFileFingerprint) {
 				if settling {
@@ -3701,6 +3806,37 @@ func enterpriseHookWatchEventInSettleWindow(now, settleUntil time.Time, op fsnot
 		return false
 	}
 	return now.Before(settleUntil)
+}
+
+// enterpriseHookWatchExclusiveTailUnchanged reports whether a Create, Remove
+// or Rename of an exclusive-writer file, seen before settleUntil, left the
+// file exactly as the last reconcile found it (found) and as it left it
+// (left). Such an event is that reconcile's own tail: it made the file and
+// dropped it again, as a failed repair does when it rolls back the backup
+// receipt it just wrote (GAP-0030). A change made by anyone during the pass
+// leaves the file unlike what the pass found, and a file with no fingerprint
+// in either snapshot is not judged, so both still reconcile. Shared-writer
+// files (agent configs) are never judged here.
+func enterpriseHookWatchExclusiveTailUnchanged(now, settleUntil time.Time, event fsnotify.Event, exclusiveOwned map[string]struct{}, found, left map[string]string, fingerprint func(string) string) bool {
+	if settleUntil.IsZero() || !now.Before(settleUntil) {
+		return false
+	}
+	if event.Op&(fsnotify.Create|fsnotify.Remove|fsnotify.Rename) == 0 {
+		return false
+	}
+	cleaned := filepath.Clean(event.Name)
+	if _, ok := exclusiveOwned[cleaned]; !ok {
+		return false
+	}
+	before, ok := found[cleaned]
+	if !ok {
+		return false
+	}
+	after, ok := left[cleaned]
+	if !ok || after != before {
+		return false
+	}
+	return fingerprint(cleaned) == after
 }
 
 // enterpriseHookReconcileRowsHash is a content fingerprint over the

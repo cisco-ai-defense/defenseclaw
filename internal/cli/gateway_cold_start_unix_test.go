@@ -241,3 +241,48 @@ func TestHookColdStartEndsAtOnceWhileAnotherStartRuns(t *testing.T) {
 		t.Fatalf("a hook start that ended beside another start recorded a failure: %v", statErr)
 	}
 }
+
+// GAP-2082: an upgrade that stopped between the binary swap and its finish
+// (power loss) leaves .install.lock with a dead installer and an
+// interrupted-install record beside it. The hooks no longer hold that lock
+// (GAP-1024), but neither a hook nor the watchdog may start the half-done
+// install: the cold start refuses with the install reason until the next
+// installer run finishes or undoes it. Without the record the dead
+// installer's lock is abandoned and the start goes ahead (control).
+func TestHookColdStartRefusesWhileAnInterruptedInstallWaitsForRecovery(t *testing.T) {
+	for _, record := range []string{"", "previous.new", ".repair", ".rollback-hold", ".lifecycle-txn.json"} {
+		t.Run("record "+record, func(t *testing.T) {
+			dataDir := t.TempDir()
+			lock := filepath.Join(dataDir, ".install.lock")
+			if err := os.Mkdir(lock, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(lock, "pid"), []byte("99999999\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if record != "" {
+				if err := os.Mkdir(filepath.Join(dataDir, record), 0o700); err != nil {
+					t.Fatal(err)
+				}
+			}
+			err := hookColdStartRefusal(dataDir, time.Now())
+			if record == "" {
+				if err != nil {
+					t.Fatalf("abandoned lock without a recovery record refused the start: %v", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), "install") {
+				t.Fatalf("pending recovery %s = %v, want the install refusal", record, err)
+			}
+			// A record without a lock is not an install: the installer
+			// removes the lock last only after it finished the recovery.
+			if err := os.RemoveAll(lock); err != nil {
+				t.Fatal(err)
+			}
+			if err := hookColdStartRefusal(dataDir, time.Now()); err != nil {
+				t.Fatalf("record %s without a lock refused the start: %v", record, err)
+			}
+		})
+	}
+}

@@ -570,7 +570,7 @@ func (d *fakeDaemon) serve(w http.ResponseWriter, r *http.Request) {
 				u.Summary = "1 file restored"
 			}
 			reply(u)
-		case verb == "workspace":
+		case verb == "workspace", verb == "disk":
 			reply(map[string]string{"status": "recorded"})
 		default:
 			fail(sandboxapi.CodeNotFound, "unknown verb")
@@ -1012,6 +1012,16 @@ type fakeGateway struct {
 	// upToDate has Plan find nothing to change, as it does for a gateway
 	// whose configuration already says what a change would write.
 	upToDate bool
+	// stopSyncs counts StopSync calls; stopSyncRes and stopSyncErr are
+	// their answer.
+	stopSyncs   int
+	stopSyncRes *openshell.GatewayApplyResult
+	stopSyncErr error
+}
+
+func (f *fakeGateway) StopSync(context.Context) (*openshell.GatewayApplyResult, error) {
+	f.stopSyncs++
+	return f.stopSyncRes, f.stopSyncErr
 }
 
 func (f *fakeGateway) Restart(context.Context) error { f.restarts++; return nil }

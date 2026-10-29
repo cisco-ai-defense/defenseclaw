@@ -327,6 +327,43 @@ $stream.Dispose()
             # Loop round 2: the same deny while a program also holds a file
             # in InstallRoot fails too; the holder exiting would not end it.
             Set-TestFolderSddl $deniedParent 'O:BAG:BAD:P(D;;0x44;;;WD)(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)'
+            # GAP-2263: an elevated OpenSSH or similar session starts with
+            # SeBackupPrivilege and SeRestorePrivilege enabled, and a rename
+            # with those enabled is not checked against the deny, so these
+            # rows passed or failed by how the shell was started. Setup runs
+            # them as LocalSystem, whose token has both disabled; the rows
+            # run the same way here and give back what was enabled.
+            $privilegeType = Microsoft.PowerShell.Utility\Add-Type -PassThru -Namespace ('DefenseClawSmoke' + [Guid]::NewGuid().ToString('N')) -Name BackupRestorePrivileges -MemberDefinition @'
+[StructLayout(LayoutKind.Sequential)] public struct LUID { public uint Low; public int High; }
+[StructLayout(LayoutKind.Sequential)] public struct TOKEN_PRIVILEGES { public uint Count; public LUID Luid; public uint Attributes; }
+[DllImport("advapi32.dll", SetLastError = true)] static extern bool OpenProcessToken(IntPtr process, uint access, out IntPtr token);
+[DllImport("advapi32.dll", SetLastError = true, CharSet = CharSet.Unicode)] static extern bool LookupPrivilegeValueW(string system, string name, out LUID luid);
+[DllImport("advapi32.dll", SetLastError = true)] static extern bool AdjustTokenPrivileges(IntPtr token, bool disableAll, ref TOKEN_PRIVILEGES state, uint length, ref TOKEN_PRIVILEGES previous, out uint returnLength);
+[DllImport("kernel32.dll")] static extern IntPtr GetCurrentProcess();
+[DllImport("kernel32.dll")] static extern bool CloseHandle(IntPtr handle);
+// Sets one privilege of this process (enabled or disabled) and returns
+// whether it was enabled before; a privilege the token lacks is a no-op.
+public static bool Set(string name, bool enable) {
+    IntPtr token;
+    if (!OpenProcessToken(GetCurrentProcess(), 0x28, out token)) throw new System.ComponentModel.Win32Exception();
+    try {
+        TOKEN_PRIVILEGES state = new TOKEN_PRIVILEGES();
+        state.Count = 1;
+        state.Attributes = enable ? 2u : 0u;
+        if (!LookupPrivilegeValueW(null, name, out state.Luid)) throw new System.ComponentModel.Win32Exception();
+        TOKEN_PRIVILEGES previous = new TOKEN_PRIVILEGES();
+        uint length;
+        if (!AdjustTokenPrivileges(token, false, ref state, (uint)Marshal.SizeOf(typeof(TOKEN_PRIVILEGES)), ref previous, out length))
+            throw new System.ComponentModel.Win32Exception();
+        if (Marshal.GetLastWin32Error() == 1300) return false;
+        return previous.Count == 0 ? enable : (previous.Attributes & 2u) != 0;
+    } finally { CloseHandle(token); }
+}
+'@
+            $privilegeType = @($privilegeType | Microsoft.PowerShell.Core\Where-Object { $_.Name -ceq 'BackupRestorePrivileges' })[0]
+            $enabledBefore = @(foreach ($name in @('SeBackupPrivilege', 'SeRestorePrivilege')) {
+                    if ($privilegeType::Set($name, $false)) { $name }
+                })
             try {
                 foreach ($withHolder in @($false, $true)) {
                     $holder = $null
@@ -349,6 +386,7 @@ $stream.Dispose()
                 }
             }
             finally {
+                foreach ($name in $enabledBefore) { [void]$privilegeType::Set($name, $true) }
                 Set-TestFolderSddl $deniedParent $adminOnly
             }
             try {

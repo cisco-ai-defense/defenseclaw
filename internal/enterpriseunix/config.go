@@ -25,6 +25,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/config/configwrite"
+	gatewayconnector "github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/observability/destinations/local"
@@ -252,6 +253,41 @@ func (e *Env) validateConfigSource(raw []byte, source string) (*validatedConfig,
 	}
 	validated.Source = source
 	return validated, nil
+}
+
+// refuseUnknownGuardrailConnectors refuses a guardrail.connector or
+// guardrail.connectors entry that names no DefenseClaw connector. The
+// enumerator skips such an entry, so ensure applied a misspelled agent with
+// ok true and the administrator believed that agent was protected
+// (GAP-2337; Windows Setup refuses it since GAP-0723). The loader has
+// already dropped the connectors 1.0.4 retired (until 1.1), so an upgraded
+// config that still names them is not refused.
+func refuseUnknownGuardrailConnectors(cfg *config.Config, source, installed string) error {
+	if cfg == nil {
+		return nil
+	}
+	var names []string
+	if strings.TrimSpace(cfg.Guardrail.Connector) != "" {
+		names = append(names, cfg.Guardrail.Connector)
+	}
+	for name := range cfg.Guardrail.Connectors {
+		if strings.TrimSpace(name) != "" {
+			names = append(names, name)
+		}
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		if gatewayconnector.IsKnownBuiltinConnector(config.NormalizeConnectorName(name)) {
+			continue
+		}
+		file := source
+		if file == "" {
+			file = installed
+		}
+		return fmt.Errorf("%s: guardrail connector %q is not a DefenseClaw connector, so no agent is protected by it; correct the name (one of %s) or remove the entry, then rerun",
+			file, strings.TrimSpace(name), strings.Join(gatewayconnector.NewDefaultRegistry().Names(), ", "))
+	}
+	return nil
 }
 
 // plainConfigError is a config problem in plain words; it keeps the

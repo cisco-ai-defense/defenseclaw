@@ -139,6 +139,35 @@ def _click_result_reaches_marker(result, marker: str) -> bool:
 
 
 @pytest.mark.parametrize(
+    ("connector", "host_os", "expected_hook", "other_hook"),
+    (
+        ("copilot", "windows", "hooks/copilot-hook.ps1 (the hook Copilot runs on Windows)", "on non-Windows"),
+        ("copilot", "linux", "hooks/copilot-hook.sh", "copilot-hook.ps1"),
+        ("copilot", "darwin", "hooks/copilot-hook.sh", "copilot-hook.ps1"),
+        ("cursor", "windows", "hooks/cursor-hook.ps1 (the hook Cursor runs on Windows)", "on non-Windows"),
+        ("cursor", "linux", "hooks/cursor-hook.sh", "cursor-hook.ps1"),
+    ),
+)
+def test_mutation_notice_names_the_hook_file_this_os_registers(
+    connector: str,
+    host_os: str,
+    expected_hook: str,
+    other_hook: str,
+) -> None:
+    """GAP-2280: setup copilot on native Windows named only copilot-hook.sh, not the .ps1 Copilot runs there."""
+    runner = CliRunner()
+    with (
+        patch("defenseclaw.commands.cmd_setup.platform_support.host_os", return_value=host_os),
+        runner.isolation() as (stdout, _stderr, _input),
+    ):
+        cmd_setup._print_connector_mutation_notice(connector)
+
+    notice = stdout.getvalue().decode()
+    assert expected_hook in notice
+    assert other_hook not in notice
+
+
+@pytest.mark.parametrize(
     ("host_os", "expected_hook", "other_hook"),
     (
         ("windows", "protected native defenseclaw-hook.exe boundary on Windows", "devin-hook.sh"),
@@ -3360,6 +3389,30 @@ class TestHelpParity(unittest.TestCase):
         self.assertIn("eleven from 0.145", out)
         self.assertIn("SessionEnd", out)
         self.assertNotIn("ten on 0.133+", out)
+
+    def test_hook_connector_help_names_only_the_channels_a_host_setup_registers(self):
+        # GAP-2205: host setup wires only the hooks (the preview says so since
+        # GAP-0295); the help still listed a Notify bridge and native OTel.
+        for connector in ("codex", "claude-code"):
+            out = " ".join(self._help([connector, "--help"]).split())
+            self.assertIn("Hooks", out)
+            self.assertNotIn("Notify —", out)
+            self.assertNotIn("OTel —", out)
+            self.assertNotIn("telemetry channels", out)
+            self.assertIn("registers no native OTel exporter", out)
+            self.assertIn("OpenShell sandbox", out)
+            self.assertIn("needed so the connector's hooks are wired", out)
+
+    def test_hook_connector_help_names_who_adds_native_otel_and_notify(self):
+        # GAP-2270: only the OpenShell sandbox renderer writes a native OTel
+        # exporter (sandboxNativeOTLP); Secure Client adds only Codex's notify
+        # bridge (codexRegistersNotify). The help said Secure Client adds OTel.
+        claude = " ".join(self._help(["claude-code", "--help"]).split())
+        self.assertIn("Only an OpenShell sandbox adds it.", claude)
+        self.assertNotIn("Secure Client", claude)
+        codex = " ".join(self._help(["codex", "--help"]).split())
+        self.assertIn("An OpenShell sandbox adds both; Secure Client adds only the notify bridge.", codex)
+        self.assertNotIn("Only Secure Client and OpenShell sandboxes add them", codex)
 
 
 # ---------------------------------------------------------------------------

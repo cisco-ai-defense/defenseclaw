@@ -3653,6 +3653,20 @@ try {
         }
     }
     $result = DefenseClawEnterprise\Invoke-DefenseClawEnterpriseLifecycle @arguments
+    # A kit rotation journal the uninstall kept or left is named in the
+    # result, so the Setup and CLI JSON carry it (GAP-1913).
+    if ($Action -eq 'Uninstall' -and $null -ne $result -and
+        $null -ne (Microsoft.PowerShell.Core\Get-Command -Name 'DefenseClawEnterprise\Get-DefenseClawMdmRotationJournalKept' -ErrorAction SilentlyContinue)) {
+        $journalKept = [string](DefenseClawEnterprise\Get-DefenseClawMdmRotationJournalKept)
+        if (-not [string]::IsNullOrWhiteSpace($journalKept)) {
+            $result |
+                Microsoft.PowerShell.Utility\Add-Member `
+                    -MemberType NoteProperty `
+                    -Name mdm_rotation_journal_kept `
+                    -Value $journalKept `
+                    -Force
+        }
+    }
     if ($null -ne $result.PSObject.Properties['ok'] -and -not [bool]$result.ok) {
         $exitCode = 1
     }

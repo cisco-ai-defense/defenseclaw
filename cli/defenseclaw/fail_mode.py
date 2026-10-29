@@ -158,6 +158,10 @@ class ConnectorFailModeState:
     # Reporting context only; the resolver still decides the hook mode.
     deployment: str = ""
     policy_tier: str = ""
+    # False when config.yaml saves no hook fail mode for the connector (or
+    # globally): ``configured`` is then the normalized default, not a choice
+    # the user made, and the note must not name it as one.
+    configured_saved: bool = True
 
     @property
     def _managed_windows_runtime(self) -> bool:
@@ -226,9 +230,14 @@ class ConnectorFailModeState:
                 reason = f"this per-user deployment keeps hooks fail-{self.desired}"
             else:
                 reason = f"the effective policy selects hooks fail-{self.desired}"
-            notes.append(
-                f"{reason}; guardrail.hook_fail_mode={self.configured} does not control hook failures here"
-            )
+            if self.configured_saved:
+                notes.append(
+                    f"{reason}; guardrail.hook_fail_mode={self.configured} does not control hook failures here"
+                )
+            else:
+                # Nothing is saved: the normalized default (closed) is no
+                # value the user chose, so do not name one (GAP-2248).
+                notes.append(f"{reason}; guardrail.hook_fail_mode is not set")
         if not self.runtime_verified and self._managed_windows_runtime:
             notes.append(
                 "the managed native hook runs the mode of the runtime generation the guardian publishes, "
@@ -366,7 +375,14 @@ def resolve_connector_fail_mode(
         configured_entries = getattr(guardrail, "connectors", {}) or {}
         entry = configured_entries.get(name)
     raw = getattr(entry, "hook_fail_mode", "") if entry is not None else ""
-    configured = normalize_fail_mode(raw or getattr(guardrail, "hook_fail_mode", ""))
+    saved_value = raw or getattr(guardrail, "hook_fail_mode", "")
+    configured = normalize_fail_mode(saved_value)
+    # GuardrailConfig fills an unset global hook_fail_mode with closed and
+    # records whether config.yaml saved one (_hook_fail_mode_saved).
+    configured_saved = str(raw or "").strip().lower() in _VALID_MODES or (
+        bool(getattr(guardrail, "_hook_fail_mode_saved", True))
+        and str(getattr(guardrail, "hook_fail_mode", "") or "").strip().lower() in _VALID_MODES
+    )
     resolver = getattr(guardrail, "effective_hook_fail_mode", None)
     desired = normalize_fail_mode(resolver(name) if callable(resolver) else configured)
     deployment, policy_tier = _fail_mode_note_context(cfg, guardrail, name)
@@ -381,6 +397,7 @@ def resolve_connector_fail_mode(
             _resolve_native_deny_fail_mode(cfg, name, configured, desired),
             deployment=deployment,
             policy_tier=policy_tier,
+            configured_saved=configured_saved,
         )
         if sidecar_drift:
             return replace(state, drift=(*state.drift, sidecar_drift))
@@ -420,7 +437,11 @@ def resolve_connector_fail_mode(
     # Windows Codex registration is a structured event matrix whose native
     # validator below checks the exact command, launcher, contract, policy,
     # trust, and file identities, so the text probe is not used there.
-    elif name == "codex" and not _is_windows() and not _codex_registration_current(workspace):
+    elif (
+        name == "codex"
+        and not _is_windows()
+        and not _codex_registration_current(workspace, str(getattr(cfg, "data_dir", "") or ""))
+    ):
         drift.append("registration-missing")
 
     drift.extend(registration_integrity_drift(cfg, name))
@@ -508,6 +529,7 @@ def resolve_connector_fail_mode(
         runtime_verified=runtime_verified,
         deployment=deployment,
         policy_tier=policy_tier,
+        configured_saved=configured_saved,
     )
 
 
@@ -1252,15 +1274,36 @@ def codex_windows_hook_config_path(cfg: Any) -> str:
     return str(Path(codex_home()) / ("managed_config.toml" if managed else "config.toml"))
 
 
-def _codex_registration_current(workspace: str = "") -> bool:
+def _codex_registration_current(workspace: str = "", data_dir: str = "") -> bool:
+    """Whether Codex's config.toml registers DefenseClaw's hooks.
+
+    The hook commands run the scripts in this install's data directory, so a
+    custom DEFENSECLAW_HOME (``~/dchome/hooks/codex-hook.sh``) names no
+    "defenseclaw" in the path and still is DefenseClaw's registration
+    (GAP-1882).
+    """
     paths = connector_config_files("codex", workspace_dir=workspace)
     if not paths:
         return False
     config_path = Path(paths[0])
     data = _read_small_file(config_path)
-    if data is None:
+    if data is None or "[hooks]" not in data:
         return False
-    return "[hooks]" in data and "defenseclaw" in data.lower()
+    if "defenseclaw" in data.lower():
+        return True
+    if not data_dir.strip():
+        return False
+    hook = os.path.join(os.path.expanduser(data_dir), "hooks", "codex-hook.sh")
+    return _comparable_path_text(hook) in _comparable_path_text(data)
+
+
+def _comparable_path_text(text: str) -> str:
+    """Path text in one spelling, so a hook command matches its install path.
+
+    A TOML basic string doubles each backslash, a Windows path may use either
+    separator, and Windows paths ignore case (GAP-2275).
+    """
+    return os.path.normcase(text.replace("\\\\", "\\")).replace("\\", "/")
 
 
 def _registration_lock_state(
@@ -1494,10 +1537,14 @@ def _unix_registration_freshness(cfg: Any, connector: str) -> str | None:
     registration = _read_small_file(Path(paths[0]))
     if registration is None:
         return "registration-missing"
-    expected = str((Path(cfg.data_dir) / "hooks" / script_name).resolve())
+    hook = Path(cfg.data_dir).expanduser() / "hooks" / script_name
+    # Setup writes the data dir's own spelling; a HOME below a symlinked
+    # directory resolves elsewhere, and either names this install's hook
+    # (GAP-2371: the resolved form alone reported a fresh registration stale).
+    expected = {os.path.normpath(str(hook)), str(hook.resolve())}
     # JSON/TOML string literals escape a backslash when this helper is unit
     # tested from Windows; Unix paths use '/' and are unchanged.
-    expected_forms = {expected, expected.replace("\\", "\\\\")}
+    expected_forms = expected | {form.replace("\\", "\\\\") for form in expected}
     if not any(candidate in registration for candidate in expected_forms):
         return "registration-command-stale"
     return None

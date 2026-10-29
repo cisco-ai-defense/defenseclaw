@@ -151,3 +151,73 @@ func TestBundleReceiptEventsDroppedReachesStatus(t *testing.T) {
 		t.Fatal("a marked receipt event does not read as reported")
 	}
 }
+
+// GAP-2439 (GitHub #1360): one npm Codex runs as a node launcher and the
+// native codex it starts. Both match the agent, so one terminal session was
+// counted twice. A launcher and its own child are one session, named by the
+// launcher pid; separate sessions, other users and other agents stay apart.
+func TestUnprotectedSessionsCountsALauncherAndItsChildOnce(t *testing.T) {
+	changed := time.Date(2026, 10, 21, 22, 30, 0, 0, time.UTC)
+	before := changed.Add(-10 * time.Minute)
+	only := map[string]time.Time{"codex": changed, "claudecode": changed}
+	for _, tc := range []struct {
+		name     string
+		rows     []SessionProcess
+		wantPIDs []int
+	}{
+		{"launcher and child", []SessionProcess{
+			{PID: 3706708, PPID: 3706701, User: "u1", Agent: "codex", StartedAt: before.Add(30 * time.Millisecond)},
+			{PID: 3706701, PPID: 900, User: "u1", Agent: "codex", StartedAt: before},
+		}, []int{3706701}},
+		{"two sessions of one user", []SessionProcess{
+			{PID: 10, PPID: 1, User: "u1", Agent: "codex", StartedAt: before},
+			{PID: 11, PPID: 10, User: "u1", Agent: "codex", StartedAt: before},
+			{PID: 20, PPID: 1, User: "u1", Agent: "codex", StartedAt: before},
+			{PID: 21, PPID: 20, User: "u1", Agent: "codex", StartedAt: before},
+		}, []int{10, 20}},
+		{"another agent or user is never merged", []SessionProcess{
+			{PID: 30, PPID: 1, User: "u1", Agent: "claudecode", StartedAt: before},
+			{PID: 31, PPID: 30, User: "u1", Agent: "codex", StartedAt: before},
+			{PID: 40, PPID: 1, User: "u1", Agent: "codex", StartedAt: before},
+			{PID: 41, PPID: 40, User: "u2", Agent: "codex", StartedAt: before},
+		}, []int{30, 31, 40, 41}},
+		{"a deeper tree is one session", []SessionProcess{
+			{PID: 50, PPID: 1, User: "u1", Agent: "codex", StartedAt: before},
+			{PID: 51, PPID: 50, User: "u1", Agent: "codex", StartedAt: before},
+			{PID: 52, PPID: 51, User: "u1", Agent: "codex", StartedAt: before},
+		}, []int{50}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := UnprotectedSessions(tc.rows, only)
+			if got.State != "known" || got.Count != len(tc.wantPIDs) || len(got.Entries) != len(tc.wantPIDs) {
+				t.Fatalf("sessions = %+v, want pids %v", got, tc.wantPIDs)
+			}
+			for i, pid := range tc.wantPIDs {
+				if got.Entries[i].PID != pid {
+					t.Fatalf("entry %d = %+v, want pid %d", i, got.Entries[i], pid)
+				}
+			}
+		})
+	}
+}
+
+// A parent cycle in a bad process table ends the walk and still names the
+// session once, instead of hanging or dropping every process.
+func TestSessionLeadersEndsAParentCycle(t *testing.T) {
+	changed := time.Date(2026, 10, 21, 22, 30, 0, 0, time.UTC)
+	rows := []SessionProcess{
+		{PID: 7, PPID: 8, User: "u1", Agent: "codex", StartedAt: changed.Add(-time.Minute)},
+		{PID: 8, PPID: 7, User: "u1", Agent: "codex", StartedAt: changed.Add(-time.Minute)},
+		{PID: 9, PPID: 9, User: "u1", Agent: "codex", StartedAt: changed.Add(-time.Minute)},
+	}
+	done := make(chan SessionRestartStatus, 1)
+	go func() { done <- UnprotectedSessions(rows, map[string]time.Time{"codex": changed}) }()
+	select {
+	case got := <-done:
+		if got.Count != 2 || len(got.Entries) != 2 || got.Entries[0].PID != 7 || got.Entries[1].PID != 9 {
+			t.Fatalf("sessions with a parent cycle = %+v, want pids 7 and 9", got)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("a parent cycle did not end")
+	}
+}

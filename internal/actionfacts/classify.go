@@ -55,6 +55,12 @@ func FilesystemFormatterProgram(program string) bool {
 }
 
 func classifyOutput(out *parseOutput) {
+	classifyOutputAt(out, 0)
+}
+
+// classifyOutputAt classifies out; wrapperDepth bounds the programs of a
+// find or xargs that classifyEmbeddedPrograms reads on their own.
+func classifyOutputAt(out *parseOutput, wrapperDepth int) {
 	if out == nil {
 		return
 	}
@@ -80,6 +86,7 @@ func classifyOutput(out *parseOutput) {
 			return
 		}
 	}
+	classifyEmbeddedPrograms(out, wrapperDepth)
 
 	allowPreview := out.status == StatusComplete
 	requiredPreviewPaths := 0
@@ -381,6 +388,8 @@ func classifyCommand(out *parseOutput, command *CommandFact) {
 		}
 	case "uniq":
 		classifyUniqOutputOperand(out, command)
+	case "xxd":
+		classifyXxdOperands(out, command)
 	case "getcap":
 		classifyGetcap(out, command)
 	case "where", "where.exe":
@@ -571,6 +580,8 @@ func classifyCommand(out *parseOutput, command *CommandFact) {
 		}
 	case "chmod", "chown", "chgrp":
 		classifyPOSIXPermissionChange(out, command, program)
+	case "ln":
+		classifyPOSIXLink(out, command)
 	case "install":
 		classifyPOSIXInstall(out, command)
 	case "setfacl":
@@ -751,6 +762,13 @@ func classifyCommand(out *parseOutput, command *CommandFact) {
 		classifySourceInvocation(out, command)
 	case "powershell", "powershell.exe", "pwsh", "pwsh.exe":
 		classifyPowerShellArtifactInvocation(out, command)
+	case ":":
+		// ":" runs nothing: its redirects are its only effect (`: > f`,
+		// GAP-2076). A ': <<EOF' comment block, or any other stdin, keeps
+		// the parse partial, so text in it is never enforced.
+		if command.LiteralStdin != "" || command.LiteralStdinAmbiguous || posixDescriptorIsRedirected(command, 0) {
+			out.markPartial(IssueUnknownOperandGrammar)
+		}
 	case "cmd", "cmd.exe",
 		"echo", "printf", "pwd", "cd", "true", "false", "sleep", "date",
 		"whoami", "id", "uname", "test", "[", "expr", "read", "export",
@@ -2868,18 +2886,58 @@ func classifySearchPaths(out *parseOutput, command *CommandFact, program string)
 		}
 	case "find":
 		startingPaths := findStartingPaths(command.Argv)
+		if len(startingPaths) == 0 && findSearchesDefaultStart(command.Argv) ||
+			findFirstWordIsGNUPrimary(command.Argv) {
+			// GNU find and bfs search '.' when no starting point is
+			// given (GAP-2267); BSD find refuses to run. A first word
+			// such as -follow is a GNU primary and a BSD -f path.
+			startingPaths = append(startingPaths, ".")
+		}
 		for _, operand := range startingPaths {
 			appendPath(out, command.ID, PathAccessRead, operand)
 		}
-		if hasAnyArgument(command.Argv, "-delete") {
-			addOperation(command, OperationDelete)
+		// An embedded rm, unlink, rmdir or shred given only the found
+		// entry removes it, as -delete does, and mv {} DEST moves it away
+		// (GAP-2122). Only such exact embedded commands (and true/false)
+		// are read; any other keeps the find partial.
+		embedded := findExactEmbeddedCommands(command.Argv)
+		if hasAnyArgument(command.Argv, "-delete") || embedded.deletes || len(embedded.moveTo) != 0 {
+			if len(embedded.moveTo) != 0 {
+				addOperation(command, OperationMove)
+			}
+			if hasAnyArgument(command.Argv, "-delete") || embedded.deletes {
+				addOperation(command, OperationDelete)
+			}
 			for _, operand := range startingPaths {
 				appendPath(out, command.ID, PathAccessDelete, operand)
+			}
+			for _, destination := range embedded.moveTo {
+				appendPath(out, command.ID, PathAccessWrite, destination)
 			}
 		}
 		if findHasEmbeddedCommand(command.Argv) {
 			addOperation(command, OperationExecute)
-			out.markPartial(IssueUnsupportedConstruct)
+			if !embedded.exact {
+				out.markPartial(IssueUnsupportedConstruct)
+				// Any other embedded program but a reader or a mode or
+				// owner change (sh -c, sudo/env wrappers, truncate, cp,
+				// sed -i, ...) is handed the found entries and may write
+				// or remove them, so the starting points are written
+				// paths with no proven operation (GAP-2122): owners that
+				// guard a tree can judge them; the find stays partial.
+				// A copy-out (cp/rsync to a destination, tar -c or zip
+				// into an archive, json.tool into a file) only reads the
+				// found entries and writes its output (pod check8).
+				handed := FindHandedEntries(command.Argv)
+				if handed.MayChange {
+					for _, operand := range startingPaths {
+						appendPath(out, command.ID, PathAccessWrite, operand)
+					}
+				}
+				for _, output := range handed.Outputs {
+					appendPath(out, command.ID, PathAccessWrite, output)
+				}
+			}
 		}
 		classifyFindOutputOperands(out, command)
 	case "fd":
@@ -3050,9 +3108,36 @@ func searchPatternOptions(argv []string) (bool, []string) {
 	return false, files
 }
 
+// findSearchesDefaultStart reports a find argv that, with no starting
+// point, searches the working directory: anything but --help and
+// --version.
+func findSearchesDefaultStart(argv []string) bool {
+	for _, argument := range argv[1:] {
+		switch argument {
+		case "--help", "-help", "--version", "-version":
+			return false
+		}
+	}
+	return true
+}
+
+// findFirstWordIsGNUPrimary reports a find whose first argument is a GNU
+// primary that BSD getopt reads as an attached -f path (`find -follow
+// -delete`: GNU searches '.', BSD searches "ollow").
+func findFirstWordIsGNUPrimary(argv []string) bool {
+	if len(argv) < 2 {
+		return false
+	}
+	switch argv[1] {
+	case "-follow", "-false", "-fls", "-fprint", "-fprint0", "-fprintf", "-fstype":
+		return true
+	}
+	return false
+}
+
 func findStartingPaths(argv []string) []string {
 	var paths []string
-	options := true
+	options, operands := true, false
 	for i := 1; i < len(argv); i++ {
 		arg := argv[i]
 		if options && arg == "--" {
@@ -3062,18 +3147,130 @@ func findStartingPaths(argv []string) []string {
 		if findExpressionStart(arg) {
 			break
 		}
-		if options {
-			switch arg {
-			case "-H", "-L", "-P":
-				continue
-			}
-			if strings.HasPrefix(arg, "-") {
+		if options && strings.HasPrefix(arg, "-") {
+			if operands {
 				break
 			}
+			skip, start, ok := findLeadingOption(argv, i)
+			if !ok {
+				break
+			}
+			if start != "" {
+				paths = append(paths, start)
+			}
+			i += skip
+			continue
 		}
+		operands = true
 		paths = append(paths, arg)
 	}
 	return paths
+}
+
+// findLeadingOption reads the option word argv[i] before find's starting
+// points (GAP-2135): GNU -H, -L, -P, -D debugopts and -Olevel, and the BSD
+// option letters E, H, L, P, X, d, s and x, which getopt lets one word
+// combine, ending in an optional f whose path argument (the rest of the
+// word, or the next word) is a starting point.
+// skip is the number of argument words it takes; ok is false for a word
+// that is not one of them.
+func findLeadingOption(argv []string, i int) (skip int, start string, ok bool) {
+	arg := argv[i]
+	switch {
+	case arg == "-D":
+		if i+1 >= len(argv) {
+			return 0, "", false
+		}
+		return 1, "", true
+	case strings.HasPrefix(arg, "-O") && len(arg) > 2:
+		return 0, "", true
+	}
+	letters := arg[1:]
+	if letters == "" {
+		return 0, "", false
+	}
+	for index, letter := range letters {
+		switch {
+		case strings.ContainsRune("EHLPXdsx", letter):
+		case letter == 'f':
+			// getopt takes the rest of the word as the -f path
+			// (`-f/path`, `-xf/path`), else the next word.
+			if rest := letters[index+1:]; rest != "" {
+				return 0, rest, true
+			}
+			if i+1 >= len(argv) {
+				return 0, "", false
+			}
+			return 1, argv[i+1], true
+		default:
+			return 0, "", false
+		}
+	}
+	return 0, "", true
+}
+
+// findEmbeddedCommandFacts is what the -exec, -execdir, -ok and -okdir
+// commands of a find do when every one is exact (GAP-2122): rm, unlink,
+// rmdir or shred with only options and the found entry {}, mv with only
+// options, {} and one literal destination, or a bare true or false.
+type findEmbeddedCommandFacts struct {
+	exact   bool
+	deletes bool
+	moveTo  []string
+}
+
+func findExactEmbeddedCommands(argv []string) findEmbeddedCommandFacts {
+	result := findEmbeddedCommandFacts{exact: true}
+	for i := 1; i < len(argv); i++ {
+		switch argv[i] {
+		case "-exec", "-execdir", "-ok", "-okdir":
+		default:
+			continue
+		}
+		end := i + 1
+		for end < len(argv) && argv[end] != ";" && argv[end] != "+" {
+			end++
+		}
+		if end >= len(argv) || end == i+1 {
+			return findEmbeddedCommandFacts{}
+		}
+		program := argv[i+1]
+		program = strings.ToLower(program[strings.LastIndex(program, "/")+1:])
+		var found, others []string
+		for _, word := range argv[i+2 : end] {
+			switch {
+			case word == "{}":
+				found = append(found, word)
+			case strings.HasPrefix(word, "-"):
+				if program == "mv" && (strings.HasPrefix(word, "-t") || strings.HasPrefix(word, "--target")) {
+					return findEmbeddedCommandFacts{}
+				}
+			default:
+				others = append(others, word)
+			}
+		}
+		switch program {
+		case "true", "false":
+			if end != i+2 {
+				return findEmbeddedCommandFacts{}
+			}
+		case "rm", "unlink", "rmdir", "shred":
+			if len(found) != 1 || len(others) != 0 {
+				return findEmbeddedCommandFacts{}
+			}
+			result.deletes = true
+		case "mv":
+			if len(found) != 1 || len(others) != 1 || argv[end-1] != others[0] ||
+				strings.ContainsAny(others[0], "{}$`*?[") {
+				return findEmbeddedCommandFacts{}
+			}
+			result.moveTo = append(result.moveTo, others[0])
+		default:
+			return findEmbeddedCommandFacts{}
+		}
+		i = end
+	}
+	return result
 }
 
 func findExpressionStart(value string) bool {
@@ -3445,16 +3642,16 @@ func classifyPOSIXPermissionChange(
 		"-c", "--changes", "-f", "--silent", "--quiet", "-v", "--verbose",
 		"--no-preserve-root", "--preserve-root", "-R", "--recursive",
 	)
-	switch program {
-	case "chown":
+	// -H -L -P -h choose how symlinks are followed; chmod has them on
+	// BSD/macOS (and GNU coreutils 9.x), chown and chgrp everywhere
+	// (GAP-2077: `chmod -h 777 ~/.defenseclaw/hooks` lost its target).
+	if program == "chown" {
 		values["--from"] = struct{}{}
-		fallthrough
-	case "chgrp":
-		for option := range exactOptionSet(
-			"-H", "-L", "-P", "-h", "--dereference", "--no-dereference",
-		) {
-			flags[option] = struct{}{}
-		}
+	}
+	for option := range exactOptionSet(
+		"-H", "-L", "-P", "-h", "--dereference", "--no-dereference",
+	) {
+		flags[option] = struct{}{}
 	}
 
 	parsed := parseOwnedPOSIXOptions(

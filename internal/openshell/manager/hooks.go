@@ -676,11 +676,16 @@ func (m *Manager) checkHookSilence(ctx context.Context) {
 		working := !ref.IsZero() && !since.Before(ref) && b.activeAt.Sub(since) >= after
 		// The reach check found the session's hooks not reaching DefenseClaw
 		// (they connect and none authenticates, or OpenShell refuses them)
-		// and not one hook of the session authenticated, for silence_after:
-		// the harness tried its hooks, which is its work, while OpenShell
-		// showed DefenseClaw none of its traffic (a MicroVM's model calls,
-		// GAP-1328).
-		unreached := !b.reach.since.IsZero() && !b.hooks.lastHook.After(b.started) && now.Sub(b.reach.since) >= after
+		// and not one hook of the session authenticated, for silence_after,
+		// while the harness kept trying its hooks after that finding: its
+		// tries are its work, and OpenShell showed DefenseClaw none of its
+		// other traffic (a MicroVM's model calls, GAP-1328). A session that
+		// tried no hook since the finding is idle, not silent (one open
+		// event a policy reload cut, then a user reading docs), and model
+		// calls without a single hook request (noHookYet) are no proof the
+		// hooks are broken: both keep the warning only (GAP-1783).
+		unreached := !b.reach.since.IsZero() && !b.reach.noHookYet && b.reach.lastAttempt.After(b.reach.since) &&
+			!b.hooks.lastHook.After(b.started) && now.Sub(b.reach.since) >= after
 		if !working && !unreached {
 			continue
 		}

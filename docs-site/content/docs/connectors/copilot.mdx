@@ -31,7 +31,7 @@ defenseclaw setup copilot  # first setup defaults to observe
 defenseclaw setup copilot --workspace /path/to/repo
 ```
 
-A re-run without `--mode` keeps the current mode. On Windows, use PowerShell and a Windows path such as `'C:\path\to\repo'`. Hooks are global by default. `--workspace` writes them into one repository instead and pins the workspace for the whole install. Setup refuses it once another connector is configured. To scope every connector to a repository, run `defenseclaw setup guardrail --workspace /path/to/repo`.
+A re-run without `--mode` keeps the current mode. On a terminal setup still asks for the mode, with the current one as the default (Enter keeps it), and whether to re-apply the hooks; in action mode it also asks whether to add the LLM judge. `--yes` skips the questions ([the questions setup asks](/docs/guardrail/switching-connectors#the-questions-setup-asks)). On Windows, use PowerShell and a Windows path such as `'C:\path\to\repo'`. Hooks are global by default. `--workspace` writes them into one repository instead and pins the workspace for the whole install. Setup refuses it once another connector is configured. To scope every connector to a repository, run `defenseclaw setup guardrail --workspace /path/to/repo`.
 
 Interactive setup asks for the mode, whether to add to or replace an existing connector roster, and whether to add an LLM judge. For scripts, pass `--yes --mode observe` (or `--mode action`).
 
@@ -46,6 +46,12 @@ The agent appears under **Agents** with its mode. `defenseclaw doctor` reports n
 ### What setup copilot actually does
 
 By default setup writes global hooks to `~/.copilot/hooks/defenseclaw.json`. `--workspace /path/to/repo` writes `<workspace>/.github/hooks/defenseclaw.json` instead, pins the workspace for the whole install, and sets `claw.workspace_dir` (later setups keep it; `defenseclaw config unset claw.workspace_dir` returns to global setup). Setup refuses it once another connector is configured, because it would move that connector's hooks. To scope all connectors together, run `defenseclaw setup guardrail --workspace /path/to/repo`. Use `setup copilot --workspace` only on a Copilot-only install whose repository should carry the hook file. If `COPILOT_HOME` is set, DefenseClaw uses it instead of `~/.copilot` for hooks, MCP, skills and agents.
+
+DefenseClaw owns every handler in `~/.copilot/hooks/defenseclaw.json`. If an event DefenseClaw binds already holds a handler of yours, setup refuses for Copilot only and changes nothing. The gateway still starts and keeps its other connectors. The message names the event and the file. Move your handler to another file in the same hooks directory (Copilot reads every file there), then run `defenseclaw setup copilot --yes`.
+
+When Copilot sends several tool calls at once, DefenseClaw judges each call. The most restrictive verdict answers the hook. An edit whose diff changes no line is treated as that file's edit.
+
+A managed install before 1.0.4 may have left `enabledPlugins["defenseclaw@defenseclaw"]` in Copilot's machine `managed-settings.json`. Copilot then warns at every start that the marketplace `defenseclaw` is not found. A standard user cannot remove the entry. `defenseclaw setup copilot` and `defenseclaw setup remove copilot` print one warning that names the file and the entry. Ask an administrator to delete it. Nothing is printed on a managed computer.
 
 | Flag | Default | What it does |
 | --- | --- | --- |
@@ -215,7 +221,7 @@ Not covered yet:
 
 - No hook can stop a prompt. A matching prompt reaches the model in observe and action mode, and its alert reads `detected in the prompt (cannot block)`.
 - `postToolUseFailure` cannot block or reverse the failed tool.
-- Copilot runs a call when its hook times out or cannot start. See the [gateway outage table](/docs/connectors/capability-matrix#gateway-outage) for per-user and managed outage behavior. An unchecked call is recorded in `~/.defenseclaw/logs/hook-failures.jsonl` and reported as a `guardrail-degraded` alert when the gateway starts again. Every other failure DefenseClaw sees (unusable answer, missing token, oversized input) is denied, and the reason names the next step. Under Secure Client the hook stays open.
+- Copilot runs a call when its hook times out or cannot start. See the [gateway outage table](/docs/connectors/capability-matrix#gateway-outage) for per-user and managed outage behavior. An unchecked call is recorded in `~/.defenseclaw/logs/hook-failures.jsonl`; on a per-user install it is reported as a `guardrail-degraded` alert when the gateway starts again. A managed gateway raises no such alert: on a managed host whose administrator selected `open`, the call keeps only that account's `hook-failures.jsonl` line (`outcome` `fail_open`). Every other failure DefenseClaw sees (unusable answer, missing token, oversized input) is denied, and the reason names the next step. Under Secure Client the hook stays open.
 - DefenseClaw does not configure Copilot's own OpenTelemetry exporter. Telemetry comes from hook events.
 - GitHub states that per-path sandbox denials cannot be enforced on Windows (Copilot CLI 1.0.76 release notes), so do not rely on Copilot's Windows sandbox for filesystem containment.
 - The VS Code Local harness reads its own hook format. The enterprise profile covers it; see [GitHub Copilot in VS Code](#github-copilot-in-vs-code).

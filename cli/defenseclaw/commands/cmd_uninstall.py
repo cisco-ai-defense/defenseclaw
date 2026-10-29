@@ -228,6 +228,10 @@ class UninstallPlan:
     # sandboxes run ("" when it did). The teardown would delete whatever
     # runs, so an unknown answer stops the run too, unless stop_sandboxes.
     sandbox_list_error: str = ""
+    # sandboxes_off is set when that unknown answer came with sandboxes off:
+    # `sandbox list` cannot list them then, and the off-state teardown's dry
+    # run is what names them, once the OpenShell gateway answers (GAP-0037).
+    sandboxes_off: bool = False
     # setup_leftovers are the %LOCALAPPDATA%\DefenseClaw folders that
     # DefenseClaw Setup left after the installer replaced it (Windows,
     # --binaries only).
@@ -1664,6 +1668,8 @@ def _owned_binary_targets(platform_name: str) -> tuple[str, tuple[str, ...]]:
             "defenseclaw-gateway.exe",
             "defenseclaw-acp.exe",
             "defenseclaw-hook.exe",
+            # The Claude Code PreToolUse guard of the one-line install (GAP-2467).
+            "defenseclaw-hook-guard.exe",
             "skill-scanner.cmd",
             "mcp-scanner.cmd",
             # Written by install.ps1: binds defenseclaw-hook.exe to the data dir.
@@ -2088,6 +2094,11 @@ def _render_plan(plan: UninstallPlan, *, dry_run: bool) -> None:
             unread = f"the sandbox list could not be read ({plan.sandbox_list_error})"
             if plan.stop_sandboxes:
                 ux.echo(f"      {ux.dim('·')} {unread}: any running sandbox is stopped and deleted (--stop-sandboxes)")
+            elif plan.sandboxes_off:
+                ux.echo(
+                    f"      {ux.dim('·')} {unread}: this run stops before any change; while sandboxes are off, "
+                    f"{_OFF_SANDBOXES_CHECK}; or add --stop-sandboxes or --skip-sandbox-teardown"
+                )
             else:
                 ux.echo(
                     f"      {ux.dim('·')} {unread}: this run stops before any change; check with "
@@ -2878,6 +2889,7 @@ def _validate_plan(plan: UninstallPlan) -> None:
                 "defenseclaw-gateway.exe",
                 "defenseclaw-acp.exe",
                 "defenseclaw-hook.exe",
+                "defenseclaw-hook-guard.exe",
                 "skill-scanner.cmd",
                 "mcp-scanner.cmd",
                 "defenseclaw-hook-state.json",
@@ -3287,15 +3299,15 @@ def _sandbox_kernel_feed_hint(plan: UninstallPlan, unit: str = _SANDBOX_FEED_UNI
 _SANDBOX_LIST_TIMEOUT_SECONDS = 10
 
 
-def _listed_sandboxes(gateway_path: str) -> tuple[list, str]:
-    """The sandbox rows ``sandbox list`` prints, and why it could not say ('' when it did).
+def _listed_sandboxes(gateway_path: str) -> tuple[list, str, bool]:
+    """The sandbox rows ``sandbox list`` prints, why it could not say ('' when it did), and whether sandboxes are off.
 
     No gateway binary, or a gateway that reports sandboxes unsupported here,
     answers with no rows: no sandbox can run, and the teardown deletes none.
     A failed, timed-out or unreadable list is an unknown answer (GAP-0448).
     """
     if not gateway_path or not os.path.isfile(gateway_path):
-        return [], ""
+        return [], "", False
     try:
         proc = subprocess.run(
             [gateway_path, "sandbox", "list", "--output", "json"],
@@ -3305,17 +3317,19 @@ def _listed_sandboxes(gateway_path: str) -> tuple[list, str]:
             timeout=_SANDBOX_LIST_TIMEOUT_SECONDS,
         )
     except subprocess.TimeoutExpired:
-        return [], f"`sandbox list` did not answer within {_SANDBOX_LIST_TIMEOUT_SECONDS} seconds"
+        return [], f"`sandbox list` did not answer within {_SANDBOX_LIST_TIMEOUT_SECONDS} seconds", False
     except OSError as exc:
-        return [], f"`sandbox list` could not run: {exc.strerror or exc}"
+        return [], f"`sandbox list` could not run: {exc.strerror or exc}", False
     if proc.returncode == _SANDBOX_UNSUPPORTED_EXIT:
-        return [], ""
-    if proc.returncode != 0 and _sandboxes_off(proc.stdout) and _off_teardown_deletes_no_sandbox(gateway_path):
+        return [], "", False
+    off = proc.returncode != 0 and _sandboxes_off(proc.stdout)
+    if off and _off_teardown_finds_no_running_sandbox(gateway_path):
         # Sandboxes are off and the teardown, which asks OpenShell itself
-        # while they are off, finds no sandbox to delete: none runs, and
-        # nothing holds work (GAP-0765). One OpenShell still has keeps the
+        # while they are off, finds no sandbox that runs: none, or only
+        # stopped ones, as with sandboxes on (GAP-0765, GAP-1810). One that
+        # may run, or sandboxes it could not list (GAP-1782), keep the
         # unknown answer below.
-        return [], ""
+        return [], "", False
     if proc.returncode != 0:
         lines = [
             line.strip().removeprefix("✗").strip().removeprefix("Error:").strip()
@@ -3323,14 +3337,14 @@ def _listed_sandboxes(gateway_path: str) -> tuple[list, str]:
             if line.strip()
         ]
         reason = lines[-1][:300] if lines else f"it exited with status {proc.returncode}"
-        return [], f"`sandbox list` failed: {reason}"
+        return [], f"`sandbox list` failed: {reason}", off
     try:
         rows = json.loads(proc.stdout or "").get("sandboxes")
     except (ValueError, AttributeError):
         rows = None
     if not isinstance(rows, list):
-        return [], "`sandbox list` printed no sandbox list"
-    return [row for row in rows if isinstance(row, dict) and row.get("name")], ""
+        return [], "`sandbox list` printed no sandbox list", False
+    return [row for row in rows if isinstance(row, dict) and row.get("name")], "", False
 
 
 def _sandboxes_off(stdout: str) -> bool:
@@ -3346,19 +3360,22 @@ def _sandboxes_off(stdout: str) -> bool:
     return isinstance(answer, dict) and answer.get("enabled") is False and answer.get("available") is False
 
 
-# The dry run's "sandboxes" row when it deletes none ("sandboxes         none"),
-# and its line when it has nothing to tear down at all.
-_TEARDOWN_NO_SANDBOX = re.compile(r"^\s*sandboxes\s+none\s*$", re.MULTILINE)
+# The dry run's "sandboxes" row ("sandboxes         none", "unknown (...)",
+# or the names, a stopped one as "NAME (stopped)"), and its line when it has
+# nothing to tear down at all.
+_TEARDOWN_SANDBOXES = re.compile(r"^\s*sandboxes\s+(\S.*?)\s*$", re.MULTILINE)
+_TEARDOWN_STOPPED_SANDBOX = re.compile(r"^[a-z0-9][a-z0-9-]* \((?:stopped|completed|deleted|missing)\)$")
 _TEARDOWN_NOTHING = "nothing to tear down"
 
 
-def _off_teardown_deletes_no_sandbox(gateway_path: str) -> bool:
-    """Whether ``sandbox teardown --dry-run`` names no sandbox to delete.
+def _off_teardown_finds_no_running_sandbox(gateway_path: str) -> bool:
+    """Whether ``sandbox teardown --dry-run`` names no sandbox that may run.
 
     With sandboxes off no daemon lists the sandboxes, and the teardown asks
     OpenShell's gateway directly for those of this data directory: a dry run
-    that names none is the answer the list could not give. A dry run that
-    fails or names one keeps the list unknown.
+    that names none, or only stopped ones, is the answer the list could not
+    give. A dry run that fails, could not list them ("unknown") or names one
+    that may run keeps the list unknown.
     """
     if not _gateway_supports_sandbox_teardown(gateway_path):
         return False
@@ -3373,7 +3390,16 @@ def _off_teardown_deletes_no_sandbox(gateway_path: str) -> bool:
     except (OSError, subprocess.TimeoutExpired):
         return False
     out = proc.stdout or ""
-    return proc.returncode == 0 and (_TEARDOWN_NOTHING in out or bool(_TEARDOWN_NO_SANDBOX.search(out)))
+    if proc.returncode != 0:
+        return False
+    if _TEARDOWN_NOTHING in out:
+        return True
+    row = _TEARDOWN_SANDBOXES.search(out)
+    if not row:
+        return False
+    if row.group(1) == "none":
+        return True
+    return all(_TEARDOWN_STOPPED_SANDBOX.match(entry) for entry in row.group(1).split(", "))
 
 
 def _live_mounted_sandboxes(rows: list) -> tuple[str, ...]:
@@ -3406,7 +3432,7 @@ def _with_listed_sandboxes(plan: UninstallPlan, stop_sandboxes: bool) -> Uninsta
     """*plan* with the sandboxes its teardown would stop, from one ``sandbox list``."""
     if not plan.sandbox_teardown:
         return plan
-    rows, error = _listed_sandboxes(plan.gateway_path)
+    rows, error, off = _listed_sandboxes(plan.gateway_path)
     if error and not _gateway_supports_sandbox_teardown(plan.gateway_path):
         # A gateway without ``sandbox teardown`` deletes no sandbox
         # (_sandbox_teardown), so there is nothing to protect.
@@ -3417,7 +3443,18 @@ def _with_listed_sandboxes(plan: UninstallPlan, stop_sandboxes: bool) -> Uninsta
         running_sandboxes=_running_sandboxes(rows),
         stop_sandboxes=stop_sandboxes,
         sandbox_list_error=error,
+        sandboxes_off=bool(error) and off,
     )
+
+
+# How to see the sandboxes while they are off: `sandbox list` asks the
+# sandbox daemon, which has them off; the teardown asks OpenShell itself.
+_OFF_SANDBOXES_CHECK = (
+    "`defenseclaw sandbox list` cannot list them: `defenseclaw-gateway sandbox teardown --dry-run` names them "
+    "once the OpenShell gateway answers (when it does not, start it"
+    + (" with `systemctl --user start openshell-gateway`" if sys.platform.startswith("linux") else "")
+    + ")"
+)
 
 
 def _running_sandboxes_refusal(plan: UninstallPlan) -> str:
@@ -3430,6 +3467,18 @@ def _running_sandboxes_refusal(plan: UninstallPlan) -> str:
     """
     if not plan.sandbox_teardown or plan.stop_sandboxes:
         return ""
+    if plan.sandbox_list_error and plan.sandboxes_off:
+        # With sandboxes off `sandbox list` fails whatever runs, so it is no
+        # way to check (GAP-0037): the off-state teardown's dry run names the
+        # sandboxes once the OpenShell gateway answers.
+        return (
+            f"the sandbox list could not be read ({plan.sandbox_list_error}), so this run cannot tell whether "
+            "OpenShell sandboxes still run for this account; a running sandbox may hold work never pulled back, "
+            "and the sandbox teardown would stop and delete it; nothing was changed. While sandboxes are off, "
+            f"{_OFF_SANDBOXES_CHECK}. Then run this command again, add --stop-sandboxes to stop and delete any "
+            "running sandbox with the teardown, or add --skip-sandbox-teardown to uninstall without the sandbox "
+            "teardown."
+        )
     if plan.sandbox_list_error:
         # A destructive step does not go ahead on an unknown answer (GAP-0448).
         return (
@@ -3853,18 +3902,41 @@ def _is_reparse_path(path: str | os.PathLike[str]) -> bool:
     return bool(attributes & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0))
 
 
+def _rmtree_gone_ok(path: str) -> None:
+    """rmtree that counts a file or folder another remover took first as removed.
+
+    Two uninstalls of one account at once (two terminals) walk the same
+    trees: each failed with ENOENT on what the other had just deleted and
+    left data behind for a second run (GAP-2355).
+    """
+
+    def gone_ok(function, failed_path, exc) -> None:
+        error = exc if isinstance(exc, BaseException) else exc[1]
+        if isinstance(error, FileNotFoundError):
+            return
+        raise error
+
+    if sys.version_info >= (3, 12):
+        shutil.rmtree(path, onexc=gone_ok)
+    else:
+        shutil.rmtree(path, onerror=gone_ok)
+
+
 def _remove_tree_entry(entry: os.DirEntry[str]) -> None:
     """Remove one direct child without following symlinks/reparse points."""
-    if _is_reparse_path(entry.path):
-        if os.path.isdir(entry.path):
-            os.rmdir(entry.path)
-        else:
-            os.unlink(entry.path)
-        return
-    if entry.is_dir(follow_symlinks=False):
-        shutil.rmtree(entry.path)
-        return
-    os.unlink(entry.path)
+    try:
+        if _is_reparse_path(entry.path):
+            if os.path.isdir(entry.path):
+                os.rmdir(entry.path)
+            else:
+                os.unlink(entry.path)
+            return
+        if entry.is_dir(follow_symlinks=False):
+            _rmtree_gone_ok(entry.path)
+            return
+        os.unlink(entry.path)
+    except FileNotFoundError:
+        return  # another remover took it first: it is gone (GAP-2355)
 
 
 def _remove_data_dir(
@@ -3953,6 +4025,8 @@ def _remove_data_dir(
 
     try:
         os.rmdir(data_dir)
+    except FileNotFoundError:
+        pass  # a concurrent uninstall of this account removed it (GAP-2355)
     except OSError as exc:
         # A data dir on its own filesystem (GAP-1447) is a mount point: the
         # contents are gone, and only an administrator can unmount the folder.

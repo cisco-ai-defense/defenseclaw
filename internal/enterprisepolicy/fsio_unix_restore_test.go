@@ -94,6 +94,58 @@ func TestRestorePublishedDirsRemovesWriteWithoutMissingReadOrSearch(t *testing.T
 	}
 }
 
+// GAP-2181: a repair of a managed-settings.d an account made group-writable
+// (0775) took the write away only after the publish had read the drop-in,
+// and that read refuses a writable directory, so the repair exited 1
+// machine_policy_incomplete in the run that fixed the directory. The publish
+// takes the write away first and puts the hooks back in the same run.
+func TestPublishTakesWriteAwayFromAPublishedDirectoryBeforeItReadsThePolicy(t *testing.T) {
+	withHigherSources(t)
+	previous := trustedOwner
+	uid := uint32(os.Getuid())
+	trustedOwner = func(owner uint32) bool { return owner == uid }
+	t.Cleanup(func() { trustedOwner = previous })
+	for _, platform := range []string{"linux", "darwin"} {
+		t.Run(platform, func(t *testing.T) {
+			opts := publishTestOptions(t)
+			opts.GOOS = platform
+			opts.SkipTrustChecks = false
+			if err := os.Chmod(opts.Root, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := Publish(opts, []string{"claudecode"}); err != nil {
+				t.Fatal(err)
+			}
+			dir := filepath.Join(claudeDir(t, opts), "managed-settings.d")
+			dropIn := filepath.Join(dir, DefenseClawDropInName)
+			published := readFile(t, dropIn)
+			if err := os.WriteFile(dropIn, []byte("{}\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Chmod(dir, 0o775); err != nil {
+				t.Fatal(err)
+			}
+			result, err := Publish(opts, []string{"claudecode"})
+			if err != nil {
+				t.Fatalf("publish under a group-writable %s: %v", dir, err)
+			}
+			if info, err := os.Stat(dir); err != nil || info.Mode().Perm() != 0o755 {
+				t.Fatalf("%s after the publish: %v, %v; want 0755", dir, info, err)
+			}
+			if got := readFile(t, dropIn); got != published {
+				t.Fatalf("the publish did not put the hooks back:\n%s", got)
+			}
+			if !containsString(result.MachinePolicyConnectors, "claudecode") || !result.Changed {
+				t.Fatalf("publish result = %+v", result)
+			}
+			verified, err := VerifyAll(opts, []string{"claudecode"})
+			if err != nil || !containsString(verified.MachinePolicyConnectors, "claudecode") {
+				t.Fatalf("verify after the publish: %+v, %v", verified, err)
+			}
+		})
+	}
+}
+
 // GAP-0924: Codex opens /etc/codex/requirements.toml by name, so the repair
 // of an administrator's 0700 /etc/codex adds search only: listing it showed
 // its unrelated files to every account. Search alone lets any account open

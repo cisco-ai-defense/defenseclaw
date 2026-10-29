@@ -1441,7 +1441,7 @@ func windowsExactCMDBuiltin(executable windowsWord, program string) bool {
 	}
 	switch program {
 	case "echo", "ver", "rem", "type", "dir", "del", "erase", "rmdir", "rd",
-		"mkdir", "md", "copy", "move":
+		"mkdir", "md", "copy", "move", "ren", "rename":
 		return true
 	default:
 		return false
@@ -1475,6 +1475,12 @@ func newWindowsFactBuilder(out *parseOutput) *windowsFactBuilder {
 
 func (b *windowsFactBuilder) addPath(commandID int64, access PathAccess, value string) {
 	if value == "" {
+		return
+	}
+	if access == PathAccessRead && windowsNullDeviceOperand(value) {
+		// Reading the null device (type nul, copy nul f) reads nothing:
+		// it is no path and leaves the command exact, so its redirect or
+		// copy target keeps its write proof (GAP-2408).
 		return
 	}
 	canonical, ok := windowsCanonicalPathFactValue(value)
@@ -1698,6 +1704,11 @@ func windowsClassifyPowerShell(
 	if classifyEndpointSecurityControl(builder.out, command) {
 		return
 	}
+	if name == "sc" && windowsPowerShellSCSetContent(args) {
+		// Windows PowerShell 5.1 aliases sc to Set-Content; a path
+		// operand (not a service verb or \\server) is that write (GAP-2414).
+		name = "set-content"
+	}
 	if name != "stop-process" &&
 		!windowsScannerProgram(name) &&
 		!((name == "reg" || name == "reg.exe") &&
@@ -1832,9 +1843,25 @@ func windowsClassifyPowerShell(
 	case "copy-item", "copy", "cp":
 		windowsAddOperation(command, OperationCopy)
 		windowsAddPowerShellSourceDestination(command.ID, args, false, builder)
-	case "move-item", "move", "mv", "rename-item", "rni":
+	case "move-item", "move", "mv":
 		windowsAddOperation(command, OperationMove)
 		windowsAddPowerShellSourceDestination(command.ID, args, true, builder)
+	case "rename-item", "rni", "ren":
+		// ren is the PowerShell alias of Rename-Item (GAP-2414).
+		windowsAddOperation(command, OperationMove)
+		windowsAddPowerShellRename(command.ID, args, builder)
+	case "clear-content", "clc":
+		// Clear-Content empties each named file: a write of its content
+		// (GAP-2414).
+		windowsAddOperation(command, OperationWrite)
+		windowsAddPowerShellPaths(
+			"clear-content",
+			command.ID,
+			PathAccessWrite,
+			args,
+			false,
+			builder,
+		)
 	case "select-string":
 		windowsAddOperation(command, OperationSearch)
 		windowsAddPowerShellPaths(
@@ -2059,6 +2086,9 @@ func windowsClassifyCMD(
 	case "move":
 		windowsAddOperation(command, OperationMove)
 		windowsAddSourceDestination(command.ID, args, true, builder)
+	case "ren", "rename":
+		windowsAddOperation(command, OperationMove)
+		windowsAddCMDRename(command.ID, args, builder)
 	case "curl", "curl.exe", "wget", "wget.exe":
 		windowsClassifyWeb(command, args, false, builder)
 	case "certutil", "certutil.exe":
@@ -3766,6 +3796,9 @@ func windowsAddPowerShellPaths(
 			strings.HasPrefix(lower, "-whatif:")) {
 			continue
 		}
+		if unquoted && windowsSkipPowerShellCommonParameter(args, &i, lower, builder) {
+			continue
+		}
 		if unquoted && strings.HasPrefix(lower, "-") {
 			builder.out.markPartial(IssueUnknownOperandGrammar)
 			continue
@@ -3776,6 +3809,48 @@ func windowsAddPowerShellPaths(
 		builder.out.markPartial(IssueUnknownOperandGrammar)
 	}
 	return filesystemFound, environmentFound
+}
+
+// windowsPowerShellCommonParameter reports whether lower (an unquoted
+// parameter word in lower case, optionally -Name:value) is a PowerShell
+// common parameter or one of its aliases, and whether it takes the next word
+// as its value. Every cmdlet accepts them and none of them moves the target,
+// so they must not leave a path parse partial and drop the state-write proof
+// (checker it14 RV14-1, GAP-2414).
+func windowsPowerShellCommonParameter(lower string) (takesValue, known bool) {
+	name, _, joined := strings.Cut(lower, ":")
+	switch name {
+	case "-erroraction", "-ea", "-warningaction", "-wa",
+		"-informationaction", "-infa", "-errorvariable", "-ev",
+		"-warningvariable", "-wv", "-informationvariable", "-iv",
+		"-outvariable", "-ov", "-outbuffer", "-ob",
+		"-pipelinevariable", "-pv", "-progressaction", "-proga":
+		return !joined, true
+	case "-verbose", "-vb", "-debug", "-db":
+		return false, true
+	}
+	return false, false
+}
+
+// windowsSkipPowerShellCommonParameter consumes a common parameter at
+// args[*i] (and its value) and reports whether it did.
+func windowsSkipPowerShellCommonParameter(
+	args []windowsWord,
+	i *int,
+	lower string,
+	builder *windowsFactBuilder,
+) bool {
+	takesValue, known := windowsPowerShellCommonParameter(lower)
+	if !known {
+		return false
+	}
+	if takesValue {
+		*i++
+		if *i >= len(args) {
+			builder.out.markPartial(IssueUnknownOperandGrammar)
+		}
+	}
+	return true
 }
 
 func windowsKnownRecursiveForceSwitch(program, value string) (string, bool) {
@@ -4203,6 +4278,9 @@ func windowsAddPowerShellPrimaryPath(
 			strings.HasPrefix(lower, "-whatif:")) {
 			continue
 		}
+		if unquoted && windowsSkipPowerShellCommonParameter(args, &i, lower, builder) {
+			continue
+		}
 		if unquoted && strings.HasPrefix(lower, "-") {
 			builder.out.markPartial(IssueUnknownOperandGrammar)
 			continue
@@ -4261,6 +4339,52 @@ func windowsCMDPathOperand(value string) bool {
 	}
 	return strings.HasPrefix(value, "/") &&
 		strings.ContainsAny(value[1:], `/\`)
+}
+
+// windowsNullDeviceOperand reports a cmd or PowerShell operand that names
+// the Win32 null device: nul or nul: in any case, or \\.\nul.
+func windowsNullDeviceOperand(value string) bool {
+	switch strings.ToLower(strings.ReplaceAll(value, "/", `\`)) {
+	case "nul", "nul:", `\\.\nul`:
+		return true
+	}
+	return false
+}
+
+// windowsAddCMDRename projects cmd's ren SOURCE NEWNAME: the source leaves
+// its name and NEWNAME is created beside it, as a move within the source
+// directory (GAP-2408). NEWNAME is a bare name; cmd rejects a drive or path
+// in it and renames nothing, so such a form stays partial.
+func windowsAddCMDRename(commandID int64, args []windowsWord, builder *windowsFactBuilder) {
+	var operands []windowsWord
+	for _, arg := range args {
+		if arg.expands {
+			builder.out.markPartial(IssueDynamicWord)
+			continue
+		}
+		if strings.HasPrefix(arg.value, "/") && !windowsCMDPathOperand(arg.value) {
+			continue
+		}
+		operands = append(operands, arg)
+	}
+	if len(operands) != 2 {
+		builder.out.markPartial(IssueUnknownOperandGrammar)
+		return
+	}
+	source, name := operands[0].value, operands[1].value
+	builder.addPath(commandID, PathAccessRead, source)
+	builder.addPath(commandID, PathAccessDelete, source)
+	if name == "" || strings.ContainsAny(name, `:/\`) {
+		builder.out.markPartial(IssueUnknownOperandGrammar)
+		return
+	}
+	directory := ""
+	if index := strings.LastIndexAny(source, `/\`); index >= 0 {
+		directory = source[:index+1]
+	} else if len(source) >= 2 && source[1] == ':' {
+		directory = source[:2]
+	}
+	builder.addPath(commandID, PathAccessWrite, directory+name)
 }
 
 func windowsAddSourceDestination(
@@ -4352,6 +4476,7 @@ func windowsAddPowerShellSourceDestination(
 			case unquoted && (switchParams[lower] ||
 				strings.HasPrefix(lower, "-confirm:") ||
 				strings.HasPrefix(lower, "-whatif:")):
+			case unquoted && windowsSkipPowerShellCommonParameter(args, &i, lower, builder):
 			case unquoted && strings.HasPrefix(lower, "-"):
 				builder.out.markPartial(IssueUnknownOperandGrammar)
 			default:
@@ -4380,6 +4505,117 @@ func windowsAddPowerShellSourceDestination(
 		builder.addPath(commandID, PathAccessDelete, source.value)
 	}
 	builder.addPath(commandID, PathAccessWrite, destination.value)
+}
+
+// windowsAddPowerShellRename projects Rename-Item [-Path|-LiteralPath] SOURCE
+// [-NewName] NAME: the source leaves its name and NAME is created beside it,
+// as cmd's ren is projected (GAP-2414). A NAME with a separator or a drive
+// keeps the read and delete of the source and leaves the parse partial.
+func windowsAddPowerShellRename(commandID int64, args []windowsWord, builder *windowsFactBuilder) {
+	var source, name *windowsWord
+	var positionals []windowsWord
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		if arg.expands {
+			builder.out.markPartial(IssueDynamicWord)
+			continue
+		}
+		lower := strings.ToLower(arg.value)
+		unquoted := arg.quote == QuoteNone
+		switch {
+		case unquoted && (lower == "-path" || lower == "-literalpath" || lower == "-newname"):
+			if !windowsPowerShellLiteralParameterValue(args, i+1) ||
+				lower == "-newname" && name != nil || lower != "-newname" && source != nil {
+				builder.out.markPartial(IssueUnknownOperandGrammar)
+				if i+1 < len(args) {
+					i++
+				}
+				continue
+			}
+			i++
+			if lower == "-newname" {
+				name = &args[i]
+			} else {
+				source = &args[i]
+			}
+		case unquoted && lower == "-credential":
+			i++
+			if i >= len(args) || args[i].expands {
+				builder.out.markPartial(IssueUnknownOperandGrammar)
+			}
+		case unquoted && (lower == "-force" || lower == "-passthru" ||
+			lower == "-confirm" || lower == "-whatif" ||
+			strings.HasPrefix(lower, "-confirm:") ||
+			strings.HasPrefix(lower, "-whatif:")):
+		case unquoted && windowsSkipPowerShellCommonParameter(args, &i, lower, builder):
+		case unquoted && strings.HasPrefix(lower, "-"):
+			builder.out.markPartial(IssueUnknownOperandGrammar)
+		default:
+			positionals = append(positionals, arg)
+		}
+	}
+	if source == nil && len(positionals) > 0 {
+		source = &positionals[0]
+		positionals = positionals[1:]
+	}
+	if name == nil && len(positionals) > 0 {
+		name = &positionals[0]
+		positionals = positionals[1:]
+	}
+	if len(positionals) > 0 {
+		builder.out.markPartial(IssueUnknownOperandGrammar)
+	}
+	if source == nil {
+		builder.out.markPartial(IssueUnknownOperandGrammar)
+		return
+	}
+	builder.addPath(commandID, PathAccessRead, source.value)
+	builder.addPath(commandID, PathAccessDelete, source.value)
+	if name == nil || name.value == "" {
+		builder.out.markPartial(IssueUnknownOperandGrammar)
+		return
+	}
+	directory := ""
+	if index := strings.LastIndexAny(source.value, `/\`); index >= 0 {
+		directory = source.value[:index+1]
+	} else if len(source.value) >= 2 && source.value[1] == ':' {
+		directory = source.value[:2]
+	}
+	if strings.ContainsAny(name.value, `:/\`) {
+		// Rename-Item takes a full NewName only in the source directory
+		// (rni C:\src.txt C:\renamed.txt); any other directory fails.
+		builder.addPath(commandID, PathAccessWrite, name.value)
+		nameDirectory := ""
+		if index := strings.LastIndexAny(name.value, `/\`); index >= 0 {
+			nameDirectory = name.value[:index+1]
+		}
+		if directory == "" || !strings.EqualFold(
+			strings.ReplaceAll(nameDirectory, "/", `\`),
+			strings.ReplaceAll(directory, "/", `\`),
+		) {
+			builder.out.markPartial(IssueUnknownOperandGrammar)
+		}
+		return
+	}
+	builder.addPath(commandID, PathAccessWrite, directory+name.value)
+}
+
+// windowsPowerShellSCSetContent reports an sc call that Windows PowerShell
+// 5.1 runs as Set-Content: the first operand is a parameter or a path, not
+// an sc.exe service verb or a \\server name.
+func windowsPowerShellSCSetContent(args []windowsWord) bool {
+	if len(args) == 0 {
+		return false
+	}
+	first := strings.ToLower(args[0].value)
+	if args[0].quote == QuoteNone && strings.HasPrefix(first, "-") {
+		return true
+	}
+	if strings.HasPrefix(first, `\\`) || strings.HasPrefix(first, "//") {
+		return false
+	}
+	return strings.ContainsAny(first, `/\.:`) || strings.HasPrefix(first, "$") ||
+		strings.HasPrefix(first, "~")
 }
 
 func windowsPowerShellLiteralParameterValue(args []windowsWord, index int) bool {
@@ -4542,7 +4778,7 @@ func powerShellSupportsPreview(program string) bool {
 		"new-item",
 		"set-item", "set-itemproperty", "sp", "new-itemproperty",
 		"remove-itemproperty", "rp",
-		"copy-item", "move-item", "rename-item",
+		"copy-item", "move-item", "rename-item", "clear-content",
 		"start-process", "stop-process", "remove-process",
 		"clear-disk", "add-localgroupmember", "add-adgroupmember",
 		"register-scheduledtask":
@@ -4554,7 +4790,7 @@ func powerShellSupportsPreview(program string) bool {
 
 func powerShellPreviewAlias(program string) bool {
 	switch program {
-	case "ac", "copy", "cp", "cpi", "mi", "move", "mv", "ni", "rni",
+	case "ac", "copy", "cp", "cpi", "mi", "move", "mv", "ni", "rni", "ren", "clc",
 		"del", "erase", "rd", "ri", "rm", "rmdir":
 		return true
 	default:
@@ -4582,7 +4818,7 @@ func windowsMutatingProgram(program string) bool {
 		"set-item", "set-itemproperty", "sp", "new-itemproperty",
 		"remove-itemproperty", "rp",
 		"copy-item", "copy", "cp", "move-item", "move", "mv",
-		"rename-item", "rni",
+		"rename-item", "rni", "ren", "rename", "clear-content", "clc",
 		"start-process", "stop-process", "remove-process",
 		"clear-disk", "add-localgroupmember", "add-adgroupmember",
 		"register-scheduledtask",

@@ -64,6 +64,24 @@ type HookOutage struct {
 // plugins with their block (templateData.ManagedOutageClosed renders both).
 var managedUnixOutageClosed = map[string]bool{"amp": true, "copilot": true, "opencode": true}
 
+// ManagedPerUserRouteOutageClosed reports a connector whose hook or plugin on
+// the per-user route of a managed standalone install on goos blocks a gateway
+// outage whatever hook_fail_mode says (templateData.ManagedOutageClosed): on
+// Linux and macOS every connector in managedUnixOutageClosed, on Windows its
+// in-agent plugins (ManagedPluginOutageClosedEveryOS). Status reports such a
+// connector's effective_hook_fail_mode as closed (GAP-0465).
+func ManagedPerUserRouteOutageClosed(name, goos string) bool {
+	name = normalizeConnectorName(name)
+	if !managedUnixOutageClosed[name] {
+		return false
+	}
+	if goos != "windows" {
+		return true
+	}
+	conn, ok := NewDefaultRegistry().Get(name)
+	return ok && isPluginArtifactConnector(conn)
+}
+
 // strictAvailabilityExceptions are the hooks that do not read
 // DEFENSECLAW_STRICT_AVAILABILITY; every other hook reads it.
 var strictAvailabilityExceptions = map[string]string{

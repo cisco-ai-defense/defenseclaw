@@ -673,6 +673,12 @@ func (a *APIServer) hookAPITokenMatches(connectorName, presented string) bool {
 	}
 
 	dataDir := a.configDataDir()
+	// A removed connector whose token file its teardown could not delete:
+	// the hook registration is gone, so the credential is refused while the
+	// removal is retried (GAP-0858).
+	if connector.HookAPITokenRevoked(dataDir, name) {
+		return false
+	}
 	if dataDir == "" {
 		a.hookAPITokenMu.RLock()
 		cached := ""
@@ -2032,7 +2038,7 @@ func sameRuntimeDataDir(left, right string) bool {
 //	  "mode":       "guardrail" | "observability", // legacy data-path field
 //	  "policy_mode": "observe" | "action",
 //	  "enforcement_surface": "llm_proxy" | "agent_lifecycle_hooks",
-//	  "telemetry":  ["hooks", "otel", "notify"],   // active channels
+//	  "telemetry":  ["hooks"],   // channels the install registers
 //	  "proxy_intercept": true | false,
 //	}
 //
@@ -2093,7 +2099,6 @@ func connectorModeFor(name, policyMode string) map[string]interface{} {
 	mode := "guardrail"
 	intercept := true
 	surface := "llm_proxy"
-	var telemetry []string
 	policyMode = strings.ToLower(strings.TrimSpace(policyMode))
 	if policyMode != "action" {
 		policyMode = "observe"
@@ -2115,24 +2120,12 @@ func connectorModeFor(name, policyMode string) map[string]interface{} {
 		surface = "agent_lifecycle_hooks"
 	}
 
-	switch name {
-	case "codex":
-		// codex telemetry always wires all three channels (hooks,
-		// the [otel.exporter.otlp-http] block, the notify bridge).
-		telemetry = []string{"hooks", "otel", "notify"}
-	case "claudecode":
-		// Claude Code uses hooks + the OTel env-block; no notify
-		// equivalent (Anthropic doesn't ship a turn-complete shim).
-		telemetry = []string{"hooks", "otel"}
-	case "hermes", "cursor", "devin", "copilot",
-		"antigravity", "opencode", "amp", "kiro":
-		telemetry = []string{"hooks"}
-	default:
-		// openclaw / zeptoclaw / unknown: enforcement is the only
-		// supported mode today. Hooks are wired by the connector;
-		// no native OTel surface from those agents.
-		telemetry = []string{"hooks"}
-	}
+	// A host install registers only the connector's hooks: setup turns the
+	// native OTel exporters off (they run only in the OpenShell sandbox
+	// renderer) and writes Codex's notify bridge only for Secure Client
+	// (codexRegistersNotify). connectorModeForDecision reports the Secure
+	// Client channels.
+	telemetry := []string{"hooks"}
 
 	return map[string]interface{}{
 		"connector":           name,
@@ -2141,6 +2134,19 @@ func connectorModeFor(name, policyMode string) map[string]interface{} {
 		"enforcement_surface": surface,
 		"telemetry":           telemetry,
 		"proxy_intercept":     intercept,
+	}
+}
+
+// secureClientConnectorTelemetry is the telemetry list the Secure Client
+// profile reports, unchanged from main.
+func secureClientConnectorTelemetry(name string) []string {
+	switch name {
+	case "codex":
+		return []string{"hooks", "otel", "notify"}
+	case "claudecode":
+		return []string{"hooks", "otel"}
+	default:
+		return []string{"hooks"}
 	}
 }
 
@@ -2166,6 +2172,10 @@ func connectorModeForDecision(cfg, decisionCfg *config.Config, name string) map[
 		enabled = cfg.Guardrail.EffectiveEnabled(name)
 	}
 	out := connectorModeFor(name, guardrailMode)
+	if cfg != nil && cfg.SecureClientIntegration() {
+		// Secure Client answers stay as on main (out of 1.0.x scope).
+		out["telemetry"] = secureClientConnectorTelemetry(name)
+	}
 	if guardrailMode != "" {
 		out["guardrail_mode"] = guardrailMode
 	}
@@ -3140,7 +3150,7 @@ func (a *APIServer) handleSkillScan(w http.ResponseWriter, r *http.Request) {
 
 	if a.logger != nil {
 		_ = a.logger.LogActionCtx(r.Context(), string(audit.ActionAPISkillScan), req.Target, fmt.Sprintf("findings=%d max=%s", len(result.Findings), result.MaxSeverity()))
-		_ = a.logger.LogScanWithCorrelation(r.Context(), result, "", ScanCorrelationFromContext(r.Context()))
+		_ = a.logger.LogScanWithCorrelation(r.Context(), result, "", scanCorrelationWithJudge(r.Context(), result))
 	}
 
 	a.writeJSON(w, http.StatusOK, withScannerSettings(cfg, "skill", scanAPIResponseEnvelope(result)))
@@ -3320,7 +3330,7 @@ func (a *APIServer) handlePluginScan(w http.ResponseWriter, r *http.Request) {
 
 	if a.logger != nil {
 		_ = a.logger.LogActionCtx(r.Context(), string(audit.ActionAPIPluginScan), req.Target, fmt.Sprintf("findings=%d max=%s", len(result.Findings), result.MaxSeverity()))
-		_ = a.logger.LogScanWithCorrelation(r.Context(), result, "", ScanCorrelationFromContext(r.Context()))
+		_ = a.logger.LogScanWithCorrelation(r.Context(), result, "", scanCorrelationWithJudge(r.Context(), result))
 	}
 
 	a.writeJSON(w, http.StatusOK, scanAPIResponseEnvelope(result))
@@ -4966,4 +4976,15 @@ func connectorProxyBindsByName(name string) bool {
 		return true
 	}
 	return proxyShouldBindForConnector(conn, nil)
+}
+
+// scanCorrelationWithJudge is ScanCorrelationFromContext plus the LLM judge
+// model the skill or plugin scan ran with, so its audit rows say the judge
+// ran, as the install watcher rows do (GAP-0575, GAP-2435).
+func scanCorrelationWithJudge(ctx context.Context, result *scanner.ScanResult) audit.ScanCorrelation {
+	correlation := ScanCorrelationFromContext(ctx)
+	if result != nil {
+		correlation.JudgeModel = result.JudgeModel
+	}
+	return correlation
 }

@@ -135,7 +135,10 @@ func TestCursorWindowsShellPermissionChecks(t *testing.T) {
 		{"set content", `Set-Content -Path $HOME\.ssh\authorized_keys -Value marker`, true},
 		{"tee", `echo marker | tee -Append $HOME\.ssh\authorized_keys`, true},
 		{"home read", `Get-Content $HOME\.ssh\authorized_keys`, false},
-		{"native read", `type C:\Users\alice\.ssh\authorized_keys`, true},
+		// cmd type only reads: a plain read stays allowed in action (owner
+		// decision 2, GAP-2168); its append twin still blocks.
+		{"native read", `type C:\Users\alice\.ssh\authorized_keys`, false},
+		{"native read appended", `type marker.pub >> C:\Users\alice\.ssh\authorized_keys`, true},
 		{"cat read", `cat C:\Users\alice\.ssh\authorized_keys`, false},
 		{"other curl output", `curl.exe -o C:\Users\alice\notes.txt https://example.com`, false},
 		{"authorized curl output", `curl.exe -o C:\Users\alice\.ssh\authorized_keys https://example.com`, true},

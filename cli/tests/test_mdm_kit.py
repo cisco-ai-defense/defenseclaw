@@ -85,7 +85,7 @@ def test_copied_helpers_are_identical() -> None:
     scripts = {name: _text(MDM / "linux" / name) for name in UNIX_SCRIPTS}
     for function in ("dc_platform", "dc_stat_uid", "dc_stat_mode", "dc_acl_write_entry", "dc_trusted_path"):
         assert len({_shell_function(text, function) for text in scripts.values()}) == 1, function
-    for function in ("dc_json_escape", "dc_log", "dc_busy_output"):
+    for function in ("dc_json_escape", "dc_log", "dc_busy_output", "dc_sweep_stages"):
         wrapper = _shell_function(scripts["defenseclaw-enterprise.sh"], function)
         assert wrapper == _shell_function(scripts["uninstall.sh"], function), function
     canonical = _shared_region(_text(MDM / "windows" / "detect.ps1"))
@@ -807,6 +807,51 @@ def _rotation_functions(*names: str) -> str:
         start = text.index(f"function {name} {{")
         functions.append(text[start : text.index("\n}\n", start) + 3])
     return "\n".join(functions)
+
+
+def _detect_functions(*names: str) -> str:
+    text = _text(MDM / "windows" / "detect.ps1").replace("\r\n", "\n")
+    functions = []
+    for name in names:
+        start = text.find(f"function {name} {{")
+        if start >= 0:
+            functions.append(text[start : text.index("\n}\n", start) + 3])
+    return "\n".join(functions)
+
+
+@pytest.mark.skipif(_any_pwsh7() is None, reason="needs PowerShell 7")
+def test_windows_detect_orders_prereleases_by_identifier(tmp_path: Path) -> None:
+    # GAP-1987: -MinimumVersion compared prereleases as one ordinal string, so
+    # an installed rc.10 read older than a minimum rc.9 (Intune reinstall loop)
+    # and an installed rc.3 newer than a minimum rc.10.
+    cases = [
+        ("1.0.5-rc.10", "1.0.5-rc.9", True),
+        ("1.0.5-rc.9", "1.0.5-rc.10", False),
+        ("1.0.5-rc.3", "1.0.5-rc.10", False),
+        ("1.0.5-rc.10", "1.0.5-rc.2", True),
+        ("1.0.5-rc.10", "1.0.5-rc.10", True),
+        ("1.0.5", "1.0.5-rc.10", True),
+        ("1.0.5-rc.10", "1.0.5", False),
+        ("1.0.5-rc.1", "1.0.5-rc.beta", False),
+        ("1.0.5-alpha.1", "1.0.5-alpha", True),
+        ("1.0.5-beta", "1.0.5-alpha.9", True),
+        ("1.0.6-rc.1", "1.0.5", True),
+        ("1.0.4", "1.0.5-rc.1", False),
+    ]
+    probe = tmp_path / "detect-version.ps1"
+    probe.write_text(
+        "$ErrorActionPreference = 'Stop'\n"
+        + _detect_functions("ConvertTo-DefenseClawComparableVersion", "Compare-DefenseClawPrerelease",
+                            "Test-DefenseClawVersionAtLeast")
+        + "\n"
+        + "".join(f"'{{0}}' -f (Test-DefenseClawVersionAtLeast -Installed '{a}' -Minimum '{b}')\n" for a, b, _ in cases),
+        encoding="utf-8",
+    )
+    result = subprocess.run([_any_pwsh7(), "-NoProfile", "-NonInteractive", "-File", str(probe)],
+                            capture_output=True, text=True, timeout=30)
+    assert result.returncode == 0, result.stdout + result.stderr
+    got = [line.strip() == "True" for line in result.stdout.splitlines() if line.strip()]
+    assert got == [want for _, _, want in cases], list(zip(cases, got))
 
 
 @pytest.mark.skipif(_any_pwsh7() is None, reason="needs PowerShell 7")
@@ -3897,7 +3942,7 @@ dc_main
 @pytest.mark.parametrize("case", ["journal", "link", "foreign"])
 def test_unix_uninstall_removes_the_rotation_journal(tmp_path: Path, os_dir: str, case: str) -> None:
     text = _text(MDM / os_dir / "uninstall.sh")
-    functions = "\n".join(_shell_function(text, name) for name in ("dc_remove_rotation_journal", "dc_remove_stage_parent"))
+    functions = "\n".join(_shell_function(text, name) for name in ("dc_remove_rotation_journal", "dc_sweep_stages", "dc_remove_stage_parent"))
     state = tmp_path / "defenseclaw-mdm"
     state.mkdir(mode=0o700)
     journal = state / "rotation"
@@ -4063,7 +4108,7 @@ def test_windows_uninstall_removes_the_rotation_journal() -> None:
 @pytest.mark.parametrize("alive", [False, True])
 def test_unix_uninstall_purge_sweeps_stale_kit_stages(tmp_path: Path, os_dir: str, alive: bool) -> None:
     text = _text(MDM / os_dir / "uninstall.sh")
-    function = _shell_function(text, "dc_remove_stage_parent")
+    function = _shell_function(text, "dc_sweep_stages") + "\n" + _shell_function(text, "dc_remove_stage_parent")
     state = tmp_path / "defenseclaw-mdm"
     stage = state / "defenseclaw-mdm.Ab12Cd"
     stage.mkdir(parents=True)
@@ -4079,6 +4124,82 @@ dc_remove_stage_parent
     result = subprocess.run(["sh", "-c", script], capture_output=True, text=True, timeout=30)
     assert result.returncode == 0, result.stderr
     assert stage.exists() == alive and state.exists() == alive
+
+
+# GAP-1733 (reopened on macOS): the macOS wrapper stages in /var/tmp (or the
+# --staging-dir folder), not in its state folder, so a purge after a killed
+# kit run left that run's stage. The purge sweeps those parents too, with the
+# wrapper's rule: a stage whose run is gone goes, a live run's stage, one that
+# is not root's and a fresh one without a pid (the uninstall's own) stay. The
+# Linux copy does not touch /var/tmp.
+@pytest.mark.skipif(os.name != "posix", reason="POSIX shell scripts")
+@pytest.mark.parametrize("platform", ["darwin", "linux"])
+def test_unix_uninstall_purge_sweeps_the_macos_and_staging_dir_stages(tmp_path: Path, platform: str) -> None:
+    function = _shell_function(_text(MDM / "macos" / "uninstall.sh"), "dc_remove_stage_parent")
+    sweep = _shell_function(_text(MDM / "macos" / "uninstall.sh"), "dc_sweep_stages")
+    vartmp, custom, state = tmp_path / "vartmp", tmp_path / "custom", tmp_path / "state"
+    for folder in (vartmp, custom, state):
+        folder.mkdir(mode=0o700)
+    def stage(parent: Path, name: str, pid: int | None) -> Path:
+        path = parent / f"defenseclaw-mdm.{name}"
+        path.mkdir()
+        if pid is not None:
+            (path / "pid").write_text(f"{pid}\n", encoding="utf-8")
+        return path
+    killed, live = stage(vartmp, "Killed", 2147483646), stage(vartmp, "Live", os.getpid())
+    own, foreign = stage(vartmp, "Own", None), stage(vartmp, "Foreign", 2147483646)
+    custom_killed = stage(custom, "Killed", 2147483646)
+    script = f"""set -eu
+DC_PURGE=1 DC_SCRIPT_OS={platform} DC_KIT_STATE='{state}' DC_STAGING_DIR='{custom}'
+dc_log() {{ :; }}
+dc_stat_uid() {{ case "$1" in *Foreign) echo 501 ;; *) echo 0 ;; esac; }}
+{sweep}
+{function.replace("dc_sweep_stages /var/tmp", f"dc_sweep_stages '{vartmp}'")}
+dc_remove_stage_parent
+"""
+    assert 'if [ "${DC_SCRIPT_OS:-}" = darwin ]; then\n        dc_sweep_stages /var/tmp' in function
+    result = subprocess.run(["sh", "-c", script], capture_output=True, text=True, timeout=30)
+    assert result.returncode == 0, result.stderr
+    assert killed.exists() is (platform == "linux")
+    assert live.exists() and own.exists() and foreign.exists()
+    assert not custom_killed.exists() and custom.is_dir()
+    assert not state.exists()
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX shell scripts")
+@pytest.mark.parametrize("os_dir", ["linux", "macos"])
+def test_unix_uninstall_refuses_an_untrusted_or_relative_staging_dir(tmp_path: Path, os_dir: str) -> None:
+    text = _text(MDM / os_dir / "uninstall.sh")
+    assert "--staging-dir) DC_STAGING_DIR=${2:-}; shift 2 ;;" in text
+    assert "[--staging-dir DIR]" in text and "sed -n '2,32p'" in text
+    lines = text.splitlines()
+    assert lines[31].startswith("# Usage: uninstall.sh")
+    check = text.split('[ "$(id -u)" = 0 ] ||', 1)[1].split("\nfi\n", 1)[0].split("\n", 1)[1] + "\nfi\n"
+    # GAP-2453: take the top-level DC_TRUST_ACL initialization from the script
+    # itself (set -u), not from the harness, so a missing folder or a file (the
+    # [ ! -d ] branch, where dc_trusted_path never ran) still reaches dc_fail_result.
+    init = "\n".join(line for line in lines if line.startswith("DC_TRUST_ACL="))
+    (tmp_path / "file").write_text("x\n", encoding="utf-8")
+    cases = (
+        ("relative/dir", "0", 2, "mdm_invalid_arguments", "absolute path"),
+        (str(tmp_path), "1", 1, "mdm_staging_untrusted", "only root can write"),
+        (str(tmp_path / "missing"), "0", 1, "mdm_staging_untrusted", "does not exist"),
+        (str(tmp_path / "file"), "0", 1, "mdm_staging_untrusted", "only root can write"),
+    )
+    for value, trusted, rc, code, words in cases:
+        script = f"""set -eu
+DC_EXIT_INVALID=2 DC_EXIT_FAILURE=1 DC_STAGING_DIR='{value}'
+{init}
+dc_fail_result() {{ echo "$2|$3"; exit "$1"; }}
+dc_trusted_path() {{ DC_TRUST_ACL=""; return {trusted}; }}
+{check}
+echo passed
+"""
+        result = subprocess.run(["sh", "-c", script], capture_output=True, text=True, timeout=30)
+        got_code, _, message = result.stdout.strip().partition("|")
+        assert (result.returncode, got_code) == (rc, code), (value, result.stdout, result.stderr)
+        named = code == "mdm_invalid_arguments" or value in message
+        assert words in message and named and result.stderr == "", (value, result.stdout, result.stderr)
 
 
 # GAP-1850: two first kit runs at once race on creating the state folders.

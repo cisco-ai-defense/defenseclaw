@@ -57,6 +57,8 @@ shell.
 | A check failed | `1` | `1603` |
 | Invalid arguments | `2` | `1639` |
 
+On Windows, an option `defenseclaw.exe` does not know (a misspelled flag such as `--bogus`) exits `1639`, like an argument the lifecycle rejects (`--profile bogus`). It prints `unknown flag` and the usage, or with `--json` one result whose only error is `invalid_arguments`. 1.0.4 and earlier exit `1` for an unknown flag.
+
 On Linux and macOS, `verify` skips its checks and exits `75` with `lifecycle_busy` while another lifecycle run is in progress; run it again. On Windows it fails (`1603`) while another run's transaction is pending. `verify` also runs on a schedule: daily on Linux (`defenseclaw-enterprise-verify.timer`) and macOS (`com.cisco.defenseclaw.verify`), and from your MDM on Windows (for example `detect.ps1 -RequireHealthy`).
 
 A pending agent install scan is a warning, not a failure: when the enumerator's record of unprotected agents is missing or more than 16 minutes old (for example right after a fresh install or an upgrade), `status` and `verify` show one `agent_install_scan_incomplete` warning that starts `NOT COVERED (scan pending)` and gives the record's age, and set `coverage_complete` and `security_complete` to `false`. The warning alone does not fail `verify`; every other failure, including an agent the old record lists that fails `verify`, still does. `defenseclaw doctor` run as root shows the same warning. The scan runs every five minutes; to run one now, restart the enumerator (`sudo systemctl restart defenseclaw-hook-enumerator.service`, `sudo launchctl kickstart -k system/com.cisco.defenseclaw.hook-enumerator`, or `Restart-Service DefenseClawHookEnumerator`).
@@ -109,6 +111,12 @@ sudo /opt/cisco/defenseclaw/bin/defenseclaw-gateway audit export --since 2h --co
 | `enterprise hooks status` | The guardian's summary, then an Enrollment section: one line per account with each connector's state from the last reconcile (enrolled, pending or failed). `--json` adds the same list as `enrollment`. When every connector uses machine policy the section can be absent while eligible users remain protected; check `status` and `verify` for coverage |
 | `audit export` | The audit records as JSONL, oldest first. `--since` and `--until` take an RFC3339 time or a duration ago (`30m`, `2h`). `--limit N` keeps the first N matching rows, or with `--newest` the N most recent. `--connector` keeps one agent's rows, and `--output` writes a file (it refuses to replace one unless you pass `--force`). An administrator can use `--db <copied-audit.db>` to read a retained database copy read-only after decommission; keep its WAL and SHM companions with it. |
 | `audit findings` | The distinct current scan findings: skill, MCP, plugin, code, AIBOM and inventory scans. Guardrail decisions are not tracked here; use `alerts` or `audit export` |
+
+`scan skill`, `scan plugin` and `scan mcp` also run as root on a managed Linux or macOS host: the
+package installs the scanners and the scan runs through the managed gateway. A folder inside
+a home or temporary folder is refused until you copy it to one the service can read. See
+[Linux](/docs/enterprise/linux#scan-skills-mcp-servers-and-plugins) and
+[macOS](/docs/enterprise/macos#scan-skills-mcp-servers-and-plugins).
 
 On managed Windows, use `defenseclaw enterprise windows status --profile standalone --json`
 from an elevated administrator prompt. The `enrollment.accounts` field lists each
@@ -298,8 +306,8 @@ of files. Two numbers identify it:
   and the policy assets it names (rule packs, Rego modules, signature packs,
   scanner policies). Secret values and the `ai_discovery.home_dirs` list the
   enumerator fills in are left out, and a path under `data_dir` is written as
-  `${data_dir}`. The gateway stamps it on `/health` and `/status`
-  (`policy.effective_digest`) and on its decision events.
+  `${data_dir}`. The gateway stamps it on `/status` and on the administrator's
+  `/health` (`policy.effective_digest`), and on its decision events.
 
 On every OS every lifecycle result carries both in the `policy` object:
 
@@ -350,7 +358,24 @@ What the lifecycle does with it:
   lifecycle result has no `policy` object.
 
 The gateway reports the same digest, with its own policy generation, on `/health`
-and `/status`:
+and `/status`. On a managed standalone computer `/health` carries the `policy`
+object only for an administrator: root or the gateway's own account on the hook
+socket (Linux and macOS), or a request with the gateway token. A plain
+`curl http://127.0.0.1:18970/health`, even under `sudo`, has no `policy` key, and
+neither has the hook socket's answer to a standard account. As root, read it from
+the hook socket:
+
+```bash title="Linux"
+sudo curl -s --unix-socket /run/defenseclaw-hook/hook.sock http://localhost/health
+```
+
+```bash title="macOS"
+sudo curl -s --unix-socket /opt/cisco/defenseclaw/run/hook.sock http://localhost/health
+```
+
+or read `/status` (it needs the gateway token), or the `policy:` line of
+`enterprise linux|macos|windows status`. See
+[The policy object](/docs/reference/gateway-api#the-policy-object).
 
 ```json title="/health (policy)"
 "policy": {
@@ -437,8 +462,10 @@ sudo /opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise policy show --jso
 
 - `policy show` prints the effective policy line after its header, for example
   `Effective policy sha256:7b38f1df3862, config generation 3`, and adds a `policy`
-  object (`effective_digest`, `config_generation`) to `--json`. It is the only way to
-  read the digest on Windows; `policy verify` does not print it.
+  object (`effective_digest`, `config_generation`) to `--json`. The lifecycle
+  `status --json` and `verify --json` results carry the same digest as
+  `policy.effective_digest` on every OS ([Health fields](#health-fields));
+  `policy verify` does not print it.
 - `policy verify` exits `1` when coverage is incomplete.
 - Add `--connector <name>` to check one connector, and `--user <name>` to also check
   that user's own agent config for hooks DefenseClaw has not approved.
@@ -497,7 +524,8 @@ ready. Once the account is fixed, the next reconcile (within a minute) clears th
 warning.
 
 When the guardian is refused by a path in the user's own home (a link, a file where a
-folder belongs, a folder where a file belongs, or a folder the worker cannot read),
+folder belongs, a folder where a file belongs, or a folder the worker cannot read,
+other than `~/.defenseclaw` and its hooks folder, which the guardian sets back to `0700`),
 `status`, `verify` and `reconcile` report the warning `guardian_target_user_path`,
 which names the path. It does not fail `reconcile`, `verify`,
 `detect.sh --require-healthy` or `security_complete`, because only that account is
@@ -511,10 +539,15 @@ account: DefenseClaw's registration or plugin in the agent's default config; the
 modes of a user-owned `~/.defenseclaw` and its hooks folder (restored to `0700`); a
 deleted or edited hook script, and a hook runtime whose fail mode no longer matches
 the config; a missing `~/.kiro` or `~/.kiro/hooks` folder; and group or other write
-on the home folder of an enrolled user. It changes nothing else, so these stay
+on the home folder of an enrolled user; a `features.hooks` key in the user's `~/.codex/config.toml`
+under Codex machine policy (it conflicts with the pinned setting, and Codex then refuses project
+trust writes); and a native OTLP exporter in the user's `~/.codex/config.toml` or
+`~/.claude/settings.json` that carries a DefenseClaw credential. It changes nothing else, so these stay
 unprotected until the user or an administrator fixes them: a link or non-directory
 where an agent's config folder belongs, an agent config the agent cannot parse, a
 special file such as a named pipe at a config path, and files another account owns.
+
+A file event starts a guardian pass at once, and the pass watches every protected target for 300 ms, so a program that rewrites an agent's hook block over and over (Hermes was the case tested) is repaired within about 3 seconds of its first damaged write. Faster restores can still undo the repair. On macOS the guardian reads an account's launchd `HERMES_HOME` (set with `launchctl setenv`), so a Hermes home outside `~/.hermes` is protected.
 
 To find the account, read `warnings[]` in `status --json` or `verify --json`: each
 `guardian_target_user_path` and `guardian_target_failed` entry names the user, the
@@ -524,6 +557,8 @@ lists every user and connector with its state.
 ### When a user breaks their own setup (Linux and macOS)
 
 A user can break files DefenseClaw needs in their own account, for example by replacing an agent's config folder with a link. That account is then unprotected for the affected per-user agents; everyone else stays protected. The guardian reports `guardian_target_user_path` (a path in the user's home refused it; does not fail `verify`) or `guardian_target_failed` (sets `security_complete: false`). Read `warnings[]` in `status --json` to find the account.
+
+`~/.defenseclaw` and `~/.defenseclaw/hooks` follow one rule. While each is a real folder the user owns, the guardian sets its mode back to `0700` within a minute, also after `chmod 000`, and reports nothing. A link or a file in place of either folder is not changed: it is reported as `guardian_target_user_path` until the user puts the folder back.
 
 ## Rotate per-user credentials
 
@@ -704,7 +739,7 @@ event log.
 | Config changes applied | `journalctl -u defenseclaw-enterprise-apply.service` |
 | Daily verify | `journalctl -u defenseclaw-enterprise-verify.service` |
 | `/var/log/defenseclaw` | Empty by default: the services write to the journal. The gateway may write only there and in `/var/lib/defenseclaw`, so it is the place for a `jsonl` file destination (see [Audit records and SIEM forwarding](#audit-records-and-siem-forwarding)) |
-| Package install result | `/var/lib/defenseclaw-enterprise/last-package-result.json` (the package's postinstall moves its log away, so no `.log` stays beside it after an upgrade) |
+| Package install result | `/var/lib/defenseclaw-enterprise/last-package-result.json`, and `last-package-result.log` beside it with the standard error of the same run (often empty, `0` bytes). Every rpm or deb install and upgrade writes both. A later `ensure` that recovers a host after a failed package run removes both |
 | MDM wrapper log | `/var/log/defenseclaw-enterprise-mdm.log` |
 | Kernel sensor records | With Tetragon and Plane C, the sensor helper's records reach your destinations as `ai.runtime.plane_health`, `ai.runtime.kernel_policy`, `ai.runtime.kernel_event` and `enforcement.block.applied` with the initiator `kernel`. See [Tetragon on a Linux fleet](/docs/enterprise/tetragon) |
 

@@ -144,6 +144,7 @@ func (rt *sandboxRuntime) statusListenerAddresses(st *sandboxapi.Status) {
 	}
 	rt.listenMu.Lock()
 	defer rt.listenMu.Unlock()
+	st.ListenersProven = true
 	var missing, keys []string
 	if !rt.listening["ingress"] {
 		st.IngressAddr = ""

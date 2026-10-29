@@ -5,8 +5,6 @@
 
 package cli
 
-import "github.com/defenseclaw/defenseclaw/internal/config"
-
 // Windows keeps the validator's diagnostic; its managed Setup words it.
 func configValidatePlainRefusal(error, configV8WireFailure, string, string) (string, bool) {
 	return "", false
@@ -15,6 +13,3 @@ func configValidatePlainRefusal(error, configV8WireFailure, string, string) (str
 // configValidateCredentialsDir leaves credential references to the source's
 // own path on Windows.
 func configValidateCredentialsDir(string) string { return "" }
-
-// configValidateRequiredSandboxPacks: Windows runs no sandboxes.
-func configValidateRequiredSandboxPacks(*config.Config) error { return nil }

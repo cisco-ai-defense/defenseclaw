@@ -48,15 +48,18 @@ const enterpriseHookIdentitySpoolRetryInterval = time.Minute
 var enterpriseHookLoadIdentityAccounts = enterprisehooks.LoadUnixIdentityAccounts
 
 // The guardian lists local accounts under its root identity, independently
-// of whether an agent's per-user files produced an enrollment row.
-var enterpriseHookLocalAccounts = unixidentity.LocalAccounts
+// of whether an agent's per-user files produced an enrollment row: those of
+// every local account database, so a systemd-userdb account is warmed up as
+// an /etc/passwd one is (GAP-0026).
+var enterpriseHookLocalAccounts = unixidentity.LocalDatabaseAccounts
 
 // enterpriseHookAccountDatabasePoll is how often the watch loop reads the
 // local account database's stamp (enterpriseHookLocalAccountsStamp).
 var enterpriseHookAccountDatabasePoll = 2 * time.Second
 
 // enterpriseHookAccountDatabaseChanges receives after the local account
-// database changes (useradd, userdel, usermod): the watch loop then
+// database changes (useradd, userdel, usermod), or a directory that holds a
+// listed account's home does (enterpriseHookHomeRootsStamp): the watch loop then
 // reconciles, so the guardian spools a new account's identity record before
 // its first hook. At the one-minute tick a fresh local account's first
 // Codex turn came first and was refused "group membership is unconfirmed"
@@ -67,7 +70,16 @@ func enterpriseHookAccountDatabaseChanges(ctx context.Context) <-chan struct{} {
 	if cfg == nil || !cfg.StandaloneEnterprise() {
 		return nil
 	}
-	stamp, poll := enterpriseHookLocalAccountsStamp, enterpriseHookAccountDatabasePoll
+	poll, accountsStamp, homeRootsStamp := enterpriseHookAccountDatabasePoll, enterpriseHookLocalAccountsStamp, enterpriseHookHomeRootsStamp
+	// The directories that hold the listed homes count too: a directory
+	// account recreated under the same name, uid and home path changes no
+	// account database file (GAP-2028).
+	stamp := func() string {
+		if accounts := accountsStamp(); accounts != "" {
+			return accounts + homeRootsStamp()
+		}
+		return ""
+	}
 	last := stamp()
 	if last == "" || poll <= 0 {
 		return nil
@@ -248,12 +260,21 @@ func enterpriseHookIdentitySpoolAccounts(ctx context.Context, stderr io.Writer, 
 	// another home, and its record, whose home proof tells the gateway it is
 	// another account (GAP-0422), is rewritten at the next tick instead of
 	// after the interval.
+	// It names the SID the directory holds for the uid too: an Active
+	// Directory account deleted and created again under the same name, uid
+	// and home changes no other part of its key, and its record kept the
+	// earlier SID until the interval, so the gateway refused every call of
+	// the new account as "UPN unconfirmed" for up to 15 minutes (GAP-2133).
+	incarnation := enterpriseHookAccountIncarnationLookup(ctx)
 	list := func(uid int, user string, homeInode uint64) {
 		seen[uid] = true
 		accounts = append(accounts, enterprisehooks.IdentitySpoolAccount{UID: uid, User: user})
 		key := strconv.Itoa(uid) + ":" + user
 		if homeInode != 0 {
 			key += ":" + strconv.FormatUint(homeInode, 10)
+		}
+		if sid := enterpriseHookKeySID(incarnation, uid, user); sid != "" {
+			key += ":" + sid
 		}
 		keys = append(keys, key)
 	}
@@ -339,7 +360,7 @@ func enterpriseHookIdentitySpoolAccounts(ctx context.Context, stderr io.Writer, 
 			}
 		}
 		for _, uid := range enterpriseHookRecordedCallerUIDs(dir) {
-			if !seen[uid] && !enterpriseHookLocalRecordLeft(dir, uid) {
+			if !seen[uid] && !enterpriseHookLocalRecordLeft(ctx, dir, uid) {
 				list(uid, canonicalUser(uid), 0)
 			}
 		}
@@ -655,16 +676,59 @@ func enterpriseHookIdentityDataDir() string {
 // signal). Such a record is not refreshed as a recorded caller's: the pass
 // does not list it, so the cleanup removes it as any unlisted local record.
 // Refreshing it kept a deleted local account's record for good, and status
-// and verify warned identity_records_stale for it (GAP-1864). Tests replace
-// it.
-var enterpriseHookLocalRecordLeft = func(dir string, uid int) bool {
+// and verify warned identity_records_stale for it (GAP-1864).
+//
+// Where the process's own account lookups keep answering for an account
+// deleted after the process first asked (macOS: the guardian's getpwuid
+// kept naming a local account sysadminctl had deleted, while a new process
+// and dscl found none), a found answer is checked against a fresh listing
+// of the local account database (enterpriseHookLocalAccounts, which runs
+// dscl): the uid has left when that listing answers and holds no account
+// with it. A listing that fails or lists nothing shows nothing. That
+// listing holds only the local node, so an account of another directory
+// node that the record's facts read as local (a network account of an
+// LDAPv3 or Open Directory bind with no Active Directory or mobile marker)
+// is not in it either: the uid has left only when a fresh read across the
+// search policy (enterpriseHookRecordedAccountGone) also shows that the
+// account's name no longer holds the uid: it has no record, or its record
+// now holds another uid while no record across the search policy holds
+// this one (the name was given to a new account after the deletion).
+func enterpriseHookLocalRecordLeft(ctx context.Context, dir string, uid int) bool {
 	record, err := enterprisehooks.ReadIdentitySpoolRecord(dir, strconv.Itoa(uid), nil)
 	if err != nil || record.Facts.Directory != useridentity.DirectoryLocal {
 		return false
 	}
-	_, err = enterprisehooks.StandaloneResolver().LookupUID(uid)
-	return errors.Is(err, unixidentity.ErrNotFound)
+	account, err := enterprisehooks.StandaloneResolver().LookupUID(uid)
+	if errors.Is(err, unixidentity.ErrNotFound) {
+		return true
+	}
+	if err != nil || !enterpriseHookLookupsOutliveDeletion {
+		return false
+	}
+	local, err := enterpriseHookLocalAccounts(ctx)
+	if err != nil || len(local) == 0 {
+		return false
+	}
+	for _, listed := range local {
+		if listed == uid {
+			return false
+		}
+	}
+	name := strings.TrimSpace(account.Name)
+	if name == "" {
+		name = strings.TrimSpace(record.User)
+	}
+	return enterpriseHookRecordedAccountGone(ctx, name, uid)
 }
+
+// enterpriseHookRecordedAccountGone is unixidentity.AccountUIDGone: fresh
+// dscl /Search reads show that the name no longer holds the uid while no
+// bound directory node is offline. Tests replace it.
+var enterpriseHookRecordedAccountGone = unixidentity.AccountUIDGone
+
+// enterpriseHookLookupsOutliveDeletion is
+// unixidentity.ProcessLookupsOutliveDeletion; tests set it.
+var enterpriseHookLookupsOutliveDeletion = unixidentity.ProcessLookupsOutliveDeletion
 
 func enterpriseHookRecordedCallerUIDs(dir string) []int {
 	entries, err := os.ReadDir(dir)
@@ -1080,6 +1144,45 @@ func (l *enterpriseHookLeftOutAccounts) resolve() {
 	l.unresolved = nil
 }
 
+// enterpriseHookKeySIDs is the SID part of the last key of each uid
+// (enterpriseHookKeySID).
+var enterpriseHookKeySIDs struct {
+	sync.Mutex
+	byUID map[int]enterpriseHookKeySIDEntry
+}
+
+type enterpriseHookKeySIDEntry struct{ user, sid string }
+
+// enterpriseHookKeySID is the SID part of an identity spool key: the
+// incarnation lookup's "sid:..." answer for a directory account, "" for a
+// local account or another service (their changes show in the account
+// database stamp). A lookup that does not answer keeps the uid's last SID
+// for the same name, so an unanswered lookup does not start a pass.
+func enterpriseHookKeySID(lookup func(uid int, user string) (string, bool), uid int, user string) string {
+	if lookup == nil || user == "" {
+		return ""
+	}
+	state := &enterpriseHookKeySIDs
+	incarnation, known := lookup(uid, user)
+	state.Lock()
+	defer state.Unlock()
+	if !known {
+		if last, ok := state.byUID[uid]; ok && last.user == user {
+			return last.sid
+		}
+		return ""
+	}
+	sid := ""
+	if strings.HasPrefix(incarnation, "sid:") {
+		sid = incarnation
+	}
+	if state.byUID == nil {
+		state.byUID = map[int]enterpriseHookKeySIDEntry{}
+	}
+	state.byUID[uid] = enterpriseHookKeySIDEntry{user: user, sid: sid}
+	return sid
+}
+
 // enterpriseHookIdentitySpoolDirForConfig is the identity spool of the
 // current settings.
 func enterpriseHookIdentitySpoolDirForConfig() string {
@@ -1094,9 +1197,11 @@ func enterpriseHookIdentitySpoolDirForConfig() string {
 // stamp. A change of the database (useradd, userdel) makes the next tick
 // rewrite the records, whose home proofs the gateway does not take for the
 // uid's holder while they carry an earlier stamp (GAP-0422, GAP-1876,
-// GAP-2026).
+// GAP-2026). So does a change of a directory that holds a listed home: a
+// home removed and created again can get the same inode number, and a
+// directory account recreated with it changes no key (GAP-2028).
 func enterpriseHookIdentitySpoolFingerprint(keys []string) string {
-	return strings.Join(keys, ";") + "|" + enterpriseHookLocalAccountsStamp()
+	return strings.Join(keys, ";") + "|" + enterpriseHookLocalAccountsStamp() + enterpriseHookHomeRootsStamp()
 }
 
 // enterpriseHookIdentitySpoolPassDue reports whether a pass of the identity
@@ -1154,6 +1259,7 @@ func startEnterpriseHookIdentitySpool(ctx context.Context, stderr io.Writer, run
 	// gateway does on reload (GAP-1255).
 	useridentity.SetTrustedADChildDomains(cfg.AIDiscovery.TrustedADChildDomains)
 	accounts, keys, withdraw := enterpriseHookIdentitySpoolAccounts(ctx, stderr, dir, run)
+	enterpriseHookNoteHomeRoots(run.Rows)
 	enrolled := slices.DeleteFunc(slices.Clone(accounts), func(a enterprisehooks.IdentitySpoolAccount) bool { return a.Left })
 	startEnterpriseHookDirectoryReturnWatch(ctx, stderr, dir, enrolled)
 	startEnterpriseHookDirectoryReachWatch(ctx, stderr, dir, enrolled)

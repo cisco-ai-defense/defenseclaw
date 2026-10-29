@@ -245,7 +245,7 @@ function stringID(value: unknown): string {
 
 
 // Command and target fields the bounded review of an oversized call keeps
-// verbatim at any depth (Bash "command" or "cmd", argv arrays, patches,
+// verbatim at any depth (a shell "command" or "cmd", argv arrays, patches,
 // scripts and every path or target form); other strings keep an 8 KiB head.
 // Every value of the call's arguments (tool_input) is kept the same way,
 // whatever its key (an MCP server may act on any argument, and the gateway
@@ -592,10 +592,24 @@ async function gatewayFetch(path: string, init: RequestInit, token: string): Pro
 	if (!DC_HOOK_SOCKET) {
 		if (DC_PER_USER_NATIVE_POST) {
 			const binary = perUserHookPostBinary()
-			const output = execFileSync(binary, ["hook-post", "--api-addr", DC_API_ADDR], {
+			const post = () => execFileSync(binary, ["hook-post", "--api-addr", DC_API_ADDR], {
 				input: JSON.stringify({ path, headers: init.headers || {}, body: String(init.body || "") }),
-				timeout: DC_TIMEOUT_MS, maxBuffer: 2 * 1024 * 1024, windowsHide: true, encoding: "utf8",
+				// The helper's diagnostics (a refused connection during an outage)
+				// stay in the error the caller classifies; inherited, they reached
+				// the agent's screen over the one outage warning (GAP-1314).
+				timeout: DC_TIMEOUT_MS, maxBuffer: 2 * 1024 * 1024, windowsHide: true, encoding: "utf8", stdio: ["pipe", "pipe", "pipe"],
 			})
+			let output: string
+			try {
+				output = post()
+			} catch (error) {
+				// One more try only for a connected-peer proof that failed (exit 8:
+				// nothing was sent, GAP-1236); any other failure may come after the
+				// gateway took the call and is not sent twice (GAP-2083).
+				const failed = error as { status?: unknown; signal?: unknown } | null
+				if (!failed || failed.status !== 8 || failed.signal) throw error
+				output = post()
+			}
 			const reply = JSON.parse(output) as { status: number; body: string; retry_after?: string }
 			if (!Number.isInteger(reply.status) || reply.status < 100 || reply.status > 599 || typeof reply.body !== "string") {
 				throw new Error("invalid native gateway response")
@@ -690,7 +704,7 @@ function runForeignHookCheck(event: string, cwd: string): Promise<ForeignCheck> 
 						fail(safeError(error))
 						return
 					}
-					let verdict: { deny?: unknown, reason?: unknown, retryable?: unknown }
+					let verdict: { deny?: unknown, reason?: unknown, retryable?: unknown, warnings?: unknown }
 					try {
 						verdict = JSON.parse(String(stdout))
 					} catch {
@@ -698,7 +712,9 @@ function runForeignHookCheck(event: string, cwd: string): Promise<ForeignCheck> 
 						return
 					}
 					if (verdict && verdict.deny === false) {
-						resolve({ reason: "", retryable: false })
+						// foreign_hooks report names the unapproved hook's file and
+						// digest for the user (GAP-0697).
+						resolve({ reason: "", retryable: false, warnings: Array.isArray(verdict.warnings) ? verdict.warnings.map(String) : [] })
 						return
 					}
 					resolve({
@@ -735,7 +751,7 @@ function foreignCheckFailure(event: string, why: string): string {
 // A confirmed foreign plugin loaded with Amp stays loaded for this process,
 // so only an availability failure lets a later call retry the load-time
 // check, while this call stays closed.
-type ForeignCheck = { reason: string, retryable: boolean }
+type ForeignCheck = { reason: string, retryable: boolean, warnings?: string[] }
 
 // promptNotice sets DefenseClaw's hidden agent.start notice apart from the
 // user's prompt. Amp places the message right after the prompt text, and a
@@ -860,7 +876,19 @@ async function perUserOutageNotice(): Promise<string> {
 // write for a call that ran unchecked, in this install's data directory, so
 // the gateway reports it when it is back. Best effort: a row that cannot be
 // written never changes the verdict.
-async function logFailOpen(reason: string, payload: Record<string, unknown>): Promise<void> {
+// perUserFailureCause is the cause of a failed per-user check, for the block
+// text: the helper's last stderr line without its program prefix, else the
+// plugin's own error (an answer it refused), bounded and on one line.
+function perUserFailureCause(error: unknown): string {
+	const failed = error as { stderr?: unknown; status?: unknown } | null
+	const lines = String(failed?.stderr || "").split(/\r?\n/).map((line) => line.trim()).filter(Boolean)
+	let cause = lines.length ? lines[lines.length - 1].replace(/^defenseclaw-(gateway|hook-post)( hook-post)?: /, "") : ""
+	if (!cause && !Number.isInteger(failed?.status)) cause = safeError(error)
+	cause = cause.replace(/[\u0000-\u001f]+/g, " ").slice(0, 240)
+	return cause || "per-user gateway peer unverified"
+}
+
+async function logFailOpen(reason: string, payload: Record<string, unknown>, closed = false): Promise<void> {
 	try {
 		const dir = join(dirname(dirname(DC_TOKEN_FILE)), "logs")
 		await mkdir(dir, { recursive: true, mode: 0o700 })
@@ -871,9 +899,9 @@ async function logFailOpen(reason: string, payload: Record<string, unknown>): Pr
 				connector: "amp",
 				hook: "amp-plugin",
 				reason,
-				category: "transport",
-				fail_mode: "open",
-				outcome: "fail_open",
+				category: closed ? "response" : "transport",
+				fail_mode: closed ? "closed" : "open",
+				outcome: closed ? "fail_closed" : "fail_open",
 				session_id: String(payload.session_id || "").slice(0, 256),
 				call_id: String(payload.source_event_id || payload.tool_call_id || randomBytes(16).toString("hex")).slice(0, 256),
 			}) + "\n")
@@ -910,7 +938,7 @@ async function perUserGatewayDownText(error: unknown, status: number): Promise<s
 		text = "this account's DefenseClaw gateway is not running (fail mode closed). " +
 			"Start it with `defenseclaw-gateway start`, then try again."
 	} else if (failure?.name === "AbortError" || failure?.name === "TimeoutError") {
-		text = "this account's DefenseClaw gateway did not answer in time (fail mode closed); it may be restarting or busy. " +
+		text = "this account's DefenseClaw gateway did not answer in time (a call the gateway took and did not answer is blocked in every fail mode); it may be restarting or busy. " +
 			"Try again in a moment."
 	} else {
 		text = "the DefenseClaw gateway is not running or not answering (fail mode closed). " +
@@ -928,11 +956,6 @@ async function perUserGatewayDownText(error: unknown, status: number): Promise<s
 function installLockDirs(): string[] {
 	return [dirname(dirname(DC_TOKEN_FILE)), String(process.env.DEFENSECLAW_HOME || "") || join(homedir(), ".defenseclaw")]
 }
-
-// An interrupted install keeps its lock on purpose, next to one of these,
-// until the installer runs again and finishes or undoes it
-// (hookexec.InstallLockRecoveryRecords).
-const DC_INSTALL_RECOVERY_RECORDS = ["previous.new", ".repair", ".rollback-hold", ".lifecycle-txn.json"]
 
 // installLockNumber reads the lock's pid file: "absent" (missing,
 // empty or not a positive number), "valid", or "unreadable" (not a small
@@ -954,6 +977,30 @@ async function installLockNumber(path: string): Promise<{ state: "absent" | "val
 // "<boot_id> <starttime>" (field 22 of /proc/<pid>/stat), on macOS its
 // creation second as `LC_ALL=C TZ=UTC ps -o lstart=` prints it, on Windows
 // its creation FILETIME; null when the system does not say.
+// processStartMs is when process pid started (ms since the epoch), from the
+// identity the system keeps (processIdentity), or null.
+function processStartMs(pid: number): number | null {
+	const identity = processIdentity(pid)
+	if (identity === null) return null
+	try {
+		if (process.platform === "linux") {
+			const line = String(readFileSync("/proc/stat", "utf8")).split("\n").find((entry) => entry.startsWith("btime "))
+			const boot = line ? Number(line.slice(6).trim()) : NaN
+			const ticks = Number(identity.split(" ")[1])
+			return Number.isFinite(boot) && Number.isFinite(ticks) ? boot * 1000 + ticks * 10 : null
+		}
+		if (process.platform === "darwin") {
+			const [, month, day, time, year] = identity.split(" ")
+			const started = Date.parse(month + " " + day + ", " + year + " " + time + " UTC")
+			return Number.isFinite(started) ? started : null
+		}
+		if (process.platform === "win32") return Number(BigInt(identity) / 10000n - 11644473600000n)
+	} catch {
+		// The system does not say.
+	}
+	return null
+}
+
 function processIdentity(pid: number): string | null {
 	try {
 		if (process.platform === "linux") {
@@ -1052,14 +1099,6 @@ async function installLockState(dir: string): Promise<"none" | "stale" | "held">
 		return "none"
 	}
 	if (!info.isDirectory()) return "held"
-	for (const name of DC_INSTALL_RECOVERY_RECORDS) {
-		try {
-			await lstat(join(dir, name))
-			return "held"
-		} catch (error) {
-			if (!missing(error)) return "held"
-		}
-	}
 	const owner = await installLockNumber(join(lock, "pid"))
 	if (owner.state !== "valid" || owner.value > 2147483647) return "held"
 	// A live installer's pid names no other process: this one is reused.
@@ -1071,6 +1110,12 @@ async function installLockState(dir: string): Promise<"none" | "stale" | "held">
 	}
 	if (processEnded(owner.value)) return "stale"
 	const identity = await installLockRecord(join(lock, "proc-start"))
+	if (identity.state === "absent") {
+		// A 1.0.2/1.0.3 lock has no identity record: its pid names a later
+		// process when that process started after the lock (GAP-1465).
+		const started = processStartMs(owner.value)
+		return started !== null && started > info.mtimeMs + 2000 ? "stale" : "held"
+	}
 	if (identity.state !== "valid") return "held"
 	const current = processIdentity(owner.value)
 	return current !== null && current !== identity.value ? "stale" : "held"
@@ -1157,12 +1202,24 @@ export default function defenseclawAmpPlugin(amp: PluginAPI) {
 	// running for this process even if its file is deleted later, so a block
 	// found at load holds for the whole process.
 	let startupGuard: Promise<ForeignCheck> | null = runForeignHookCheck("session.load", workspaceRoot)
+	let foreignWarned = false
 	const foreignHookCheck = async (event: string): Promise<string> => {
 		if (await managedLifecycleHeld()) return DC_MANAGED_LIFECYCLE_TEXT
 		if (!startupGuard) startupGuard = runForeignHookCheck("session.load", workspaceRoot)
 		const startup = await startupGuard
 		if (startup.retryable) startupGuard = null
-		return startup.reason || (await runForeignHookCheck(event, workspaceRoot)).reason
+		if (startup.reason) return startup.reason
+		const call = await runForeignHookCheck(event, workspaceRoot)
+		const warnings = (call.warnings && call.warnings.length ? call.warnings : startup.warnings) || []
+		if (!call.reason && !foreignWarned && warnings.length) {
+			foreignWarned = true
+			try {
+				void Promise.resolve(amp.ui.notify("DefenseClaw warning: " + warnings.join("; "))).catch(() => {})
+			} catch {
+				// A notice never changes the verdict.
+			}
+		}
+		return call.reason
 	}
 
 	async function agentFacts(threadID: string, ctx: { thread: { agent(): Promise<Agent> } }): Promise<AgentFacts> {
@@ -1364,7 +1421,10 @@ export default function defenseclawAmpPlugin(amp: PluginAPI) {
 				if ((error as { status?: unknown } | null)?.status === 7) {
 					return { action: "block", reason: await perUserGatewayDownText(error, 0) }
 				}
-				return { action: "block", reason: "DefenseClaw hook failed closed (per-user gateway peer unverified)" }
+				// Name the cause and record the call (GAP-1898, GAP-1236).
+				const cause = perUserFailureCause(error)
+				if (actionable) await logFailOpen(cause, payload, true)
+				return { action: "block", reason: `DefenseClaw hook failed closed (${cause})` }
 			}
 			if (await deploymentRemoved()) return { action: "allow" }
 			if (actionable && await installLockHeld()) return { action: "block", reason: DC_INSTALL_WINDOW_TEXT }

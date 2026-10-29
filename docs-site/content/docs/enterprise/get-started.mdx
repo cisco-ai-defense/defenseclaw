@@ -101,7 +101,13 @@ sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux status --json
   "readiness": { "gateway": true, "guardian": true, "enumerator": true, "sensor_helper": true },
   "coverage_complete": true,
   "security_complete": false,
-  "warnings": [{ "code": "hook_process_fail_open", "message": "Codex can run a tool after its PreToolUse hook is killed or times out" }],
+  "warnings": [
+    { "code": "hook_process_fail_open", "message": "claudecode: a killed PreToolUse hook or PreToolUse timeout is non-blocking; ..." },
+    { "code": "hook_process_fail_open", "message": "codex: a killed PreToolUse hook or PreToolUse timeout is non-blocking; ..." },
+    { "code": "unprivileged_user_namespaces", "message": "standard users can create user namespaces (user.max_user_namespaces=...): ..." },
+    { "code": "unprivileged_ptrace", "message": "standard users can trace their own processes (kernel.yama.ptrace_scope=0): ..." },
+    { "code": "security_incomplete", "message": "security_complete is false because of: hook_process_fail_open, unprivileged_user_namespaces, unprivileged_ptrace; ..." }
+  ],
   "errors": []
 }
 ```
@@ -112,7 +118,10 @@ On Windows, from an elevated prompt:
 Read `coverage_complete` and `security_complete` ([Health fields](/docs/enterprise/operations#health-fields)).
 With Codex, Claude Code, Copilot, Devin, Hermes, Kiro or Antigravity enabled, installed hooks can provide complete coverage
 while `security_complete` remains `false`: the agent can continue after a stopped
-or timed-out hook. `hook_process_fail_open` names that residual risk.
+or timed-out hook. `hook_process_fail_open` names that residual risk, once per
+enabled connector, with the connector name first. `unprivileged_user_namespaces` and
+`unprivileged_ptrace` appear while the kernel allows them, and `security_incomplete`
+lists the warnings that keep `security_complete` false.
 
 ## 6. Pilot in observe mode, then expand in rings
 

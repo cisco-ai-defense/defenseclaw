@@ -249,7 +249,10 @@ class StatusCommandTests(unittest.TestCase):
         result = CliRunner().invoke(cmd_guardrail.status_cmd, [], obj=app)
         self.assertEqual(result.exit_code, 0, msg=result.output)
         self.assertIn("action mode with fail mode open", result.output)
-        self.assertIn("defenseclaw guardrail use-pack strict", result.output)
+        # The open is saved, and a saved mode wins over the strict policy
+        # (GAP-0039): the hint names fail-mode closed.
+        self.assertIn("defenseclaw guardrail fail-mode closed", result.output)
+        self.assertNotIn("use-pack strict", result.output)
 
     def test_status_shows_a_proxy_connector_closed_whatever_hook_fail_mode_says(self):
         # GAP-1646: ZeptoClaw and OpenClaw are proxy-backed, so their proxy
@@ -283,7 +286,7 @@ class StatusCommandTests(unittest.TestCase):
                 result = CliRunner().invoke(cmd_guardrail.status_cmd, [], obj=app)
             self.assertEqual(result.exit_code, 0, msg=result.output)
             self.assertIn("action mode for guardrail profile(s) engineering with fail mode open", result.output)
-            self.assertIn("defenseclaw guardrail use-pack strict", result.output)
+            self.assertIn("defenseclaw guardrail fail-mode closed", result.output)  # saved open (GAP-0039)
         # A profile that keeps observe (or sets action for another connector)
         # adds no warning.
         app = make_ctx(enabled=True, connector="kiro", hook_fail_mode="open")
@@ -817,7 +820,8 @@ def test_per_user_amp_outage_open_template_records_an_actionable_call() -> None:
         'return { action: "allow"'
     )
     writer = source.split("async function logFailOpen(", 1)[1].split("async function perUserGatewayDownText", 1)[0]
-    for field in ('"hook-failures.jsonl"', 'connector: "amp"', 'fail_mode: "open"', 'outcome: "fail_open"'):
+    # A call the plugin blocks is recorded closed (GAP-1236); an outage call is open.
+    for field in ('"hook-failures.jsonl"', 'connector: "amp"', 'fail_mode: closed ? "closed" : "open"', 'outcome: closed ? "fail_closed" : "fail_open"'):
         assert field in writer
 
 

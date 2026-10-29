@@ -51,6 +51,9 @@ class AppContext:
         # Why the config check did not run here (a sandbox hides folder
         # owners); status shows it instead of an invalid config (GAP-1395).
         self.config_not_checked: str = ""
+        # The licence group the local Splunk stack reported in this run. The
+        # setup summary and next steps say "Free mode" only for Free (GAP-2422).
+        self.local_splunk_license_group: str = ""
 
 
 pass_ctx = click.make_pass_decorator(AppContext, ensure=True)

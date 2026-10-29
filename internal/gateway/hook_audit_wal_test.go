@@ -26,8 +26,15 @@ import (
 // f7142cb7ba a call of this test wrote 369 frames, 1.4 MiB, in 15 commits:
 // at 10 calls a second the log grew about 17 MiB/s on a slow disk and passed
 // its 256 MiB alarm (GAP-1303, GAP-0614). With the partial sparse-key
-// indexes a call writes 266.
-const hookAuditWALFramesPerCall = 320
+// indexes a call wrote 256 in 15 commits; with the call's event-history rows
+// and observations in one transaction (audit.CallWriteBatch, GAP-1791) it
+// writes about 163 in 6.
+const hookAuditWALFramesPerCall = 175
+
+// hookAuditCommitsPerCall bounds the commits of that call: the correlation
+// ledger, the scan lifecycle, the tool chain, the call's batch at its audit
+// row and at its hook_decision, and the receipt (GAP-1791).
+const hookAuditCommitsPerCall = 6
 
 // TestHookCallWALFramesBounded drives the real hook handler, audit store and
 // v8 runtime over five sessions and counts the log frames of the measured
@@ -106,5 +113,8 @@ func TestHookCallWALFramesBounded(t *testing.T) {
 		perCall*float64(frame)/1024, float64(commits)/measured)
 	if perCall > hookAuditWALFramesPerCall {
 		t.Errorf("a benign PreToolUse writes %.1f WAL frames; the budget is %d", perCall, hookAuditWALFramesPerCall)
+	}
+	if perCallCommits := float64(commits) / measured; perCallCommits > hookAuditCommitsPerCall {
+		t.Errorf("a benign PreToolUse makes %.1f commits; the budget is %d", perCallCommits, hookAuditCommitsPerCall)
 	}
 }

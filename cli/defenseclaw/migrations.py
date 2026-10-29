@@ -3893,6 +3893,7 @@ def migrate(
         raise MigrationError(f"{config_path} is at config_version {reached} after migrating; expected {target}")
     _restore_set_aside_keys(data_dir, config_path)
     _refresh_local_observability_bundle(data_dir, __version__)
+    _record_legacy_local_splunk_sink(data_dir, config_path)
     _refresh_guardrail_profiles(data_dir, config_path)
     _refresh_rego_policies(data_dir, config_path)
     # An agent that updated itself since setup is selected again (GAP-2513);
@@ -3902,8 +3903,43 @@ def migrate(
     # the writer's version decides too: no 0.x release recorded the agents.
     if version < _FIRST_V8_CONFIG_VERSION or _version_before(from_version or "", (1, 0, 0)):
         _select_windows_agents(data_dir)
-        _seal_windows_hook_credentials(data_dir)
+    # Every upgrade: 1.0.2-1.0.4 also wrote some hook credentials with an
+    # inherited DACL (GAP-2207), not only 0.x. Sealing is idempotent.
+    _seal_windows_hook_credentials(data_dir)
     return MigrateResult(version, target, names, changed=bool(names))
+
+
+def _record_legacy_local_splunk_sink(data_dir: str, config_path: str) -> None:
+    """Record the local Splunk sink 1.0.3 or earlier local setup created (GAP-2128).
+
+    Without the record the sink counts as remote and its exporter sends the
+    HEC token to any account that listens on 127.0.0.1:8088 once the stack is
+    stopped. Only a sink its bridge contract and Docker container prove is
+    recorded. Best effort: a failure names the setup rerun that records it,
+    and the upgrade goes on.
+    """
+    if not os.path.isdir(os.path.join(data_dir, "splunk-bridge")):
+        return
+    gateway_token_env = ""
+    try:
+        root = yaml.safe_load(_read_config_text(config_path) or "") or {}
+        gateway = root.get("gateway") if isinstance(root, dict) else None
+        if isinstance(gateway, dict) and isinstance(gateway.get("token_env"), str):
+            gateway_token_env = gateway["token_env"]
+    except yaml.YAMLError:
+        pass
+    try:
+        from defenseclaw.commands.cmd_setup import record_legacy_local_splunk_sink
+
+        recorded = record_legacy_local_splunk_sink(data_dir, gateway_token_env=gateway_token_env)
+    except Exception as exc:  # noqa: BLE001 - best effort, named with its remedy
+        ux.warn(
+            f"The local Splunk sink could not be recorded ({type(exc).__name__}); until it is, its "
+            "token may go to another account's listener on its address. Run: defenseclaw setup splunk --logs"
+        )
+        return
+    if recorded:
+        ux.ok(f"Recorded the local Splunk sink {recorded} that an earlier local setup created", indent="    ")
 
 
 def _restore_set_aside_keys(data_dir: str, config_path: str) -> None:
@@ -3970,10 +4006,11 @@ def _restore_set_aside_keys(data_dir: str, config_path: str) -> None:
 
 
 def _seal_windows_hook_credentials(data_dir: str) -> None:
-    """Give the hook credentials a 0.x Windows install wrote a private DACL.
+    """Give the hook credentials an older Windows install wrote a private DACL.
 
-    0.8.x left ``hooks\\.hook-<scope>.token`` and ``.otlp-<scope>.token``
-    with the DACL they inherit from the folder. 1.x keeps those files, and
+    0.8.x, and 1.0.2-1.0.4 for some connectors (GAP-2207), left
+    ``hooks\\.hook-<scope>.token`` and ``.otlp-<scope>.token``
+    with the DACL they inherit from the folder. Later releases keep those files, and
     ``defenseclaw setup rotate-token`` refuses a hook credential whose DACL is
     inheritable (GAP-0364). A file that only trusted principals can read gets
     the owner-only DACL 1.x writes; any other is left as it is: the gateway

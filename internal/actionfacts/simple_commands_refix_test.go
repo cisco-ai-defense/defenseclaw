@@ -9,6 +9,7 @@ import (
 )
 
 func TestSimpleCommandsW24Continuation(t *testing.T) {
+	skipPOSIXPathsOnWindows(t)
 	for _, tt := range []struct {
 		name, command, cwd, home string
 		dialect                  Dialect

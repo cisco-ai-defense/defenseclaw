@@ -35,7 +35,7 @@ defenseclaw setup amp --mode action                    # enforce calls and resul
 defenseclaw setup amp --workspace /path/to/repo        # also inventory the repository
 ```
 
-A re-run without `--mode` keeps the current mode. On Windows, use a Windows path. The plugin is per user in every case.
+A re-run without `--mode` keeps the current mode. On a terminal setup still asks for the mode, with the current one as the default (Enter keeps it), and whether to re-apply the hooks; in action mode it also asks whether to add the LLM judge. `--yes` skips the questions ([the questions setup asks](/docs/guardrail/switching-connectors#the-questions-setup-asks)). On Windows, use a Windows path. The plugin is per user in every case.
 
 `--workspace` sets the workspace for the whole DefenseClaw install, including Amp's project inventory. It inventories that repository's `.amp/settings.json` or `.jsonc`, `.amp/plugins`, skills, checks, guidance, MCP servers and custom agents. Use it on a single-Amp install: if it would move configured peer connectors to a different scope, setup refuses and changes nothing. On a multi-connector install, run `defenseclaw setup amp` without `--workspace` (and with no workspace pinned) for global protection. Global setup governs tool calls and inventories user and managed surfaces.
 
@@ -103,7 +103,7 @@ Amp can ask in the active foreground thread during `tool.call` and before a `too
 
 ### Fail mode
 
-Can fail closed: yes. On a per-user install a gateway that is not running follows the policy tier: the default and permissive policies let the call run with one warning and a `hook-failures.jsonl` record, and the strict policy blocks it ([gateway outage table](/docs/connectors/capability-matrix#gateway-outage)). Every other per-user failure blocks the events that support a block response, and an unverified listener receives no bearer or event. Secure Client uses an administrator-owned native helper to verify the connected gateway service and blocks an unverified peer even when its outage mode is open. Settings and edge cases are in [Fail modes](/docs/reference/fail-modes).
+Can fail closed: yes. On a per-user install with no saved mode, a gateway that is not running follows the policy tier: the default and permissive policies let the call run with one warning and a `hook-failures.jsonl` record, and the strict policy blocks it ([gateway outage table](/docs/connectors/capability-matrix#gateway-outage)). Every other per-user failure blocks the events that support a block response, and an unverified listener receives no bearer or event. Secure Client uses an administrator-owned native helper to verify the connected gateway service and blocks an unverified peer even when its outage mode is open. Settings and edge cases are in [Fail modes](/docs/reference/fail-modes). A per-user plugin runs the `defenseclaw-gateway` the install uses, also when it is installed outside `~/.local/bin`, as long as its folder, the parent and the binary belong to this account and no other account can write them. When the helper's check of the connected listener fails before anything is sent, the plugin retries once. It never retries a call the gateway already took, so a tool call is evaluated once. A blocked call names the helper's own line or the refused answer, not a generic unverified-peer message. On Windows the plugin accepts the `OWNER RIGHTS` full-control entry that DefenseClaw writes on `%USERPROFILE%\.defenseclaw`.
 
 ### Rejected command display
 

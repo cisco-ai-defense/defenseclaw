@@ -217,14 +217,23 @@ func TestDoctorOnAManagedComputerChecksOnlyThisAccount(t *testing.T) {
 // TestDoctorRegistersAGatewayUnderAHomebrewOfYourOwn: the fix for a missing
 // registration is the command that works under the Homebrew prefix: the
 // OpenShell CLI finds the gateway's certificates only under /opt/homebrew
-// and /usr/local unless it is told where they are (GAP-0110).
+// and /usr/local unless it is told where they are (GAP-0110). The
+// certificates are the ones the post-install step of the formula wrote under
+// the prefix (GAP-0319): with them the fix registers the gateway itself;
+// without them it runs that step first and is not automatic (GAP-2457).
 func TestDoctorRegistersAGatewayUnderAHomebrewOfYourOwn(t *testing.T) {
 	const mac, linux = "openshell gateway add https://localhost:17670 --local --name openshell",
 		"openshell gateway add https://127.0.0.1:17670 --local --name openshell"
-	for _, tc := range []struct{ goos, prefix, want string }{
-		{"darwin", "/Users/a/homebrew", "OPENSHELL_LOCAL_TLS_DIR=/Users/a/homebrew/var/openshell/tls " + mac},
-		{"darwin", "/opt/homebrew", mac},
-		{"linux", "/Users/a/homebrew", linux},
+	own := filepath.Join(t.TempDir(), "homebrew")
+	writeHomebrewPKI(t, filepath.Join(own, "var", "openshell", "tls"))
+	for _, tc := range []struct {
+		goos, prefix, want string
+		postinstall        bool
+	}{
+		{"darwin", own, "OPENSHELL_LOCAL_TLS_DIR=" + filepath.Join(own, "var", "openshell", "tls") + " " + mac, false},
+		{"darwin", "/Users/a/homebrew", "OPENSHELL_LOCAL_TLS_DIR=/Users/a/homebrew/var/openshell/tls " + mac, true},
+		{"darwin", "/opt/homebrew", mac, true},
+		{"linux", "/Users/a/homebrew", linux, false},
 	} {
 		f := newDoctorFixture(t)
 		f.doctor.GOOS, f.doctor.Gateway.GOOS, f.doctor.Gateway.BrewPrefix = tc.goos, tc.goos, tc.prefix
@@ -234,10 +243,82 @@ func TestDoctorRegistersAGatewayUnderAHomebrewOfYourOwn(t *testing.T) {
 		if err := os.RemoveAll(filepath.Join(f.dir, "gateways")); err != nil {
 			t.Fatal(err)
 		}
-		c := f.run().Get(openshell.CheckIDRegistration)
-		if c == nil || c.Status != openshell.StatusFail || c.Fix == nil || c.Fix.Command != tc.want {
-			t.Fatalf("%s %s: registration check = %+v", tc.goos, tc.prefix, c)
+		want := tc.want
+		if tc.postinstall {
+			want = f.doctor.Gateway.BrewCommand() + " postinstall nvidia/openshell/openshell && " + want
 		}
+		c := f.run().Get(openshell.CheckIDRegistration)
+		if c == nil || c.Status != openshell.StatusFail || c.Fix == nil || c.Fix.Command != want || (c.Fix.Apply == nil) != tc.postinstall {
+			t.Fatalf("%s %s: registration check = %+v, want command %q (automatic %v)", tc.goos, tc.prefix, c, want, !tc.postinstall)
+		}
+	}
+}
+
+// writeHomebrewPKI writes the client certificates the post-install step of
+// the nvidia/openshell/openshell formula leaves in dir (GAP-0319): ca.crt,
+// with the client pair in client/.
+func writeHomebrewPKI(t *testing.T, dir string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Join(dir, "client"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"ca.crt", "client/tls.crt", "client/tls.key"} {
+		writeFile(t, filepath.Join(dir, name), name, 0o600)
+	}
+}
+
+// TestDoctorRegistrationNamesTheStepThatWritesTheHomebrewCertificates
+// (GAP-2457): on macOS the post-install step of the Homebrew formula writes
+// the client certificates a registration takes, not the gateway start
+// (GAP-0319). With the service stopped the registration fix no longer says
+// the start writes them: with the formula's certificates in place it starts
+// and registers the gateway; without them it names the post-install step,
+// then the start and the registration.
+func TestDoctorRegistrationNamesTheStepThatWritesTheHomebrewCertificates(t *testing.T) {
+	const add = "openshell gateway add https://localhost:17670 --local --name openshell"
+	for _, tc := range []struct {
+		name         string
+		pki, running bool
+		then         string
+	}{
+		{"stopped with the formula certificates", true, false, " services start nvidia/openshell/openshell && "},
+		{"stopped without them", false, false, " postinstall nvidia/openshell/openshell && brew services start nvidia/openshell/openshell && "},
+		{"running without them", false, true, " postinstall nvidia/openshell/openshell && "},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newDoctorFixture(t)
+			f.doctor.GOOS, f.doctor.Gateway.GOOS = "darwin", "darwin"
+			status := "none"
+			if tc.running {
+				status = "started"
+			}
+			f.runner.On("brew services info nvidia/openshell/openshell --json",
+				fmt.Sprintf(`[{"running":%v,"loaded":%v,"status":%q,"file":"/x.plist"}]`, tc.running, tc.running, status), nil)
+			tls := filepath.Join(f.brew, "var", "openshell", "tls")
+			if tc.pki {
+				writeHomebrewPKI(t, tls)
+			}
+			if err := os.RemoveAll(filepath.Join(f.dir, "gateways")); err != nil {
+				t.Fatal(err)
+			}
+			c := f.run().Get(openshell.CheckIDRegistration)
+			if c == nil || c.Fix == nil {
+				t.Fatalf("registration check = %+v", c)
+			}
+			want := "brew" + tc.then + "OPENSHELL_LOCAL_TLS_DIR=" + tls + " " + add
+			if c.Status != openshell.StatusFail || c.Fix.Command != want || c.Fix.Apply != nil {
+				t.Fatalf("registration fix = %+v, want the command %q, not automatic", c.Fix, want)
+			}
+			if strings.Contains(c.Fix.Summary, "it writes the client certificates") {
+				t.Fatalf("the fix says the gateway start writes the certificates: %q", c.Fix.Summary)
+			}
+			if wantText := "formula wrote in " + tls; tc.pki && !strings.Contains(c.Fix.Summary, wantText) {
+				t.Fatalf("fix summary %q does not say %q", c.Fix.Summary, wantText)
+			}
+			if wantText := "no client certificates in " + tls + " (the post-install step of the nvidia/openshell/openshell formula writes them"; !tc.pki && !strings.Contains(c.Fix.Summary, wantText) {
+				t.Fatalf("fix summary %q does not say %q", c.Fix.Summary, wantText)
+			}
+		})
 	}
 }
 

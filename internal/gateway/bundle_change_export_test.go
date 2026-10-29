@@ -402,6 +402,49 @@ func TestBundleReceiptReporterKeepsAChangeUntilTheDestinationHasIt(t *testing.T)
 	}
 }
 
+// A credential change restarts the gateway within seconds, so a gateway can
+// stop after the destination acknowledged a change and before a poll marked
+// it reported (here the audit store refuses the row, which keeps the change
+// unmarked). The next gateway sends the change only to the sinks that do not
+// have it: the store gets its row, the destination nothing more, and the
+// change is marked reported; its acknowledgement records go with the mark.
+// Before, the acknowledgement lived in memory only, so the restarted gateway
+// exported the change to the destination a second time (GAP-0526).
+func TestBundleReceiptReporterDoesNotResendAnAcknowledgedChangeAfterARestart(t *testing.T) {
+	f := newChangeExportFixture(t)
+	if _, err := f.database.Exec(`CREATE TRIGGER audit_store_full BEFORE INSERT ON audit_events
+		BEGIN SELECT RAISE(ABORT, 'database or disk is full'); END`); err != nil {
+		t.Fatal(err)
+	}
+	first := f.reporter()
+	pollUntil(t, first, func() bool { return f.exported() > 0 })
+	deadline := time.Now().Add(10 * time.Second)
+	for len(first.acknowledgedDestinations(f.ev.EventID)) == 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("the destination's acknowledgement was not recorded")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if first.hasSeen(f.ev.EventID) {
+		t.Fatal("a change the audit store refused was marked reported")
+	}
+	if _, err := f.database.Exec(`DROP TRIGGER audit_store_full`); err != nil {
+		t.Fatal(err)
+	}
+	restarted := f.reporter()
+	pollUntil(t, restarted, func() bool { return restarted.hasSeen(f.ev.EventID) })
+	for range 3 {
+		restarted.poll(t.Context())
+	}
+	time.Sleep(300 * time.Millisecond) // the destination exports every 10 ms
+	if n, rows := f.exported(), f.storedRows(t); n != 1 || rows != 1 {
+		t.Fatalf("after the restart: exported %d, stored %d; want 1 and 1", n, rows)
+	}
+	if _, err := os.Lstat(filepath.Join(restarted.acknowledgedDir(), f.ev.EventID)); !os.IsNotExist(err) {
+		t.Fatalf("the acknowledgements of a reported change were kept: %v", err)
+	}
+}
+
 // A change is marked reported only once its audit row survives a power
 // loss. The store commits with synchronous=NORMAL; LogConfigChange then
 // commits once on a synchronous=FULL connection, which flushes the whole

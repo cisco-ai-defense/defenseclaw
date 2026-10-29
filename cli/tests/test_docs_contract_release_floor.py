@@ -20,6 +20,7 @@ DOCS = REPO / "docs-site/content/docs"
 REFERENCE = "enterprise/lifecycle.mdx"  # 1.0.3 layout: Release floor limits is on the lifecycle page
 LIFECYCLE = "enterprise/lifecycle.mdx"
 TROUBLESHOOTING = "enterprise/troubleshooting.mdx"
+AI_DEFENSE_KEY = "enterprise/ai-defense-key.mdx"
 OPERATOR_CONTRACT = "packaging/mdm/contract/management-agent.md"
 CONTRACT_FLOOR = "### 5.3 Release floor"
 CONTACT = "contact your administrator"
@@ -167,6 +168,21 @@ def test_no_public_page_carries_a_signed_bundle_procedure() -> None:
             if _BUNDLE_PROCEDURE.search(line):
                 hits.append(f"{page.relative_to(DOCS)}:{number}: {line.strip()}")
     assert not hits, hits
+
+
+def test_ai_defense_key_rotation_leaves_bundle_steps_to_the_administrator() -> None:
+    """rel-1-0-4:GAP-2320: under the owner hold the rotation section of a
+    bundle-managed device says to contact the administrator and carries no
+    signed-bundle step (anchors, sign, apply), also one the line regex misses."""
+    text = _section(AI_DEFENSE_KEY, "## Rotate the key")
+    assert "`secret_ref_mismatch`" in text
+    assert "`secret_ref_unbound`" in text
+    hits = [m.group(0) for m in _SIGNED_BUNDLE_RECOVERY.finditer(text)]
+    hits += [m.group(0) for m in _BUNDLE_PROCEDURE.finditer(text)]
+    assert not hits, hits
+    assert "trust anchors" not in text
+    assert "The new bundle" not in text
+    assert f"{CONTACT}: `secret set` alone cannot change it" in text
 
 
 def test_operator_contract_states_the_floor_without_a_procedure() -> None:

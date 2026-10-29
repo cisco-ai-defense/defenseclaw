@@ -841,7 +841,7 @@ On a managed standalone device the admin config is the only source. Every
 writer refuses, and the attempt is recorded in the audit log:
 
 ```text
-Error: This device is managed: add it to asset_policy in the admin config (MDM or management plane)
+This device is managed: the asset_policy block and allow lists are set in the admin config (MDM or management plane)
 ```
 
 The CLI exits with code 3, and `defenseclaw config set` refuses with the

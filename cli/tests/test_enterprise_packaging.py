@@ -363,6 +363,13 @@ def test_enterprise_package_pins_owner_and_mode_of_every_entry() -> None:
             continue
         checked += 1
         info = entry.get("file_info") or {}
+        if entry.get("type") == "tree":
+            # The scanner runtime tree (GAP-1527) holds programs and files:
+            # its build sets every mode (0755 folders and programs, 0644
+            # files), so the entry pins only the owner.
+            if entry["dst"] != "/opt/defenseclaw/scanner-runtime" or "mode" in info or info.get("owner") != "root" or info.get("group") != "root":
+                problems.append(f"{entry['dst']}: tree file_info {info!r}, want owner root group root and the modes of the build")
+            continue
         if entry.get("type") == "dir" or entry["dst"] in _NFPM_EXECUTABLES:
             want = _NFPM_DIR_MODE
         else:
@@ -2847,3 +2854,13 @@ def test_macos_pkg_preinstall_refuses_while_an_earlier_daemon_runs_a_sandbox(tmp
     finally:
         if idle.poll() is None:
             idle.kill()
+
+
+# GAP-1527: the package's scanner runtime tree gets its modes from its build,
+# whatever umask the builder has (GAP-0108): folders and programs 0755,
+# every other file 0644, no link.
+def test_scanner_runtime_build_sets_every_mode() -> None:
+    script = (ROOT / "packaging/unix/build-scanner-runtime.sh").read_text(encoding="utf-8")
+    assert "path.chmod(0o755)" in script
+    assert "path.chmod(0o755 if mode & 0o111 else 0o644)" in script
+    assert 'sys.exit(f"{path} is not a file or folder")' in script

@@ -278,7 +278,7 @@ func TestTetragonReadinessChecks(t *testing.T) {
 		{"no agent names where agents are seen", "observe", "enforce", func(in *tetragonInputs, _ *tetragonProbes) {
 			in.State.UIDs = []kernelpolicy.UIDStatus{{UID: 1001, User: "dcr-std1", Connectors: []string{"claudecode"},
 				State: kernelpolicy.UIDInactive, Reason: kernelpolicy.ReasonNoAnchors}}
-		}, []want{{checkAgents, checkFail, "or enroll a user who runs one; an agent counts when it is installed in the user's home (for example ~/.local/bin/claude), in /usr/local/bin or /usr/bin, or in the bin folder of a prefix listed in enterprise.enrollment.agent_prefixes, on a path only root or that user can change; a shared install anywhere else, or on a path other accounts can write, is not seen"}}},
+		}, []want{{checkAgents, checkFail, "or enroll a user who runs one; an agent counts when it is installed in the user's home (for example ~/.local/bin/claude), in /usr/local/bin, /usr/bin or /home/linuxbrew/.linuxbrew/bin, or in the bin folder of a prefix listed in enterprise.enrollment.agent_prefixes, on a path only root or that user can change; a shared install anywhere else, or on a path other accounts can write, is not seen"}}},
 		{"approval missing", "observe", "enforce", func(in *tetragonInputs, _ *tetragonProbes) { *in = withUsers(*in) },
 			[]want{{checkApproval, checkInfo, "not approved yet"}, {checkBurnIn, checkInfo, "1 of 3"},
 				{checkConnectorsAction, checkPass, "claudecode"}}},

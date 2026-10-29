@@ -207,7 +207,7 @@ func TestR104IndirectWriterControls(t *testing.T) {
 }
 
 func TestR104IndirectFileReadStaysWithinProject(t *testing.T) {
-	skipNativeWindowsHomeGrammar(t)
+	skipPOSIXGrammarOnWindows(t)
 	parent := t.TempDir()
 	cwd := filepath.Join(parent, "project")
 	if err := os.Mkdir(cwd, 0o700); err != nil {
@@ -290,5 +290,75 @@ func TestR104RecursiveFunctionWithoutFileEffects(t *testing.T) {
 	command := `f() { f; echo marker >> ~/.ssh/authorized_keys; }; f`
 	if _, unknown := ShellDirectoryWriteOperands(command, cwd, home, nil, false, false); !unknown {
 		t.Fatal("recursive body with a file write must stay unknown")
+	}
+}
+
+// GH #1169 (GAP-2429): the seven interpreter literal writes of the issue
+// (Python Path.open and here-doc bodies, both also after cd through a
+// directory link, a Perl lexical handle, a Node write stream and env -C)
+// reach the protected keys file in the hook client's proof; the same
+// writes to an ordinary project file do not.
+func TestInterpreterLiteralWritesThroughLinksReachTheKeysFile(t *testing.T) {
+	skipPOSIXGrammarOnWindows(t)
+	home := t.TempDir()
+	cwd := filepath.Join(home, "project")
+	if err := os.MkdirAll(filepath.Join(home, ".ssh"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(cwd, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	protected := filepath.Join(home, ".ssh", "authorized_keys")
+	if err := os.WriteFile(protected, []byte("marker\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(protected, filepath.Join(cwd, "disklink")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(home, ".ssh"), filepath.Join(cwd, "dirlink")); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", home)
+	targets := func(t *testing.T, command string) []string {
+		t.Helper()
+		payload, err := json.Marshal(map[string]any{"tool_name": "Bash", "cwd": cwd,
+			"tool_input": map[string]string{"command": command}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		got, ok := Decode(Resolve(payload))
+		if !ok {
+			t.Fatal("client proof did not decode")
+		}
+		var values []string
+		for _, value := range got {
+			values = append(values, value)
+		}
+		return values
+	}
+	for _, tc := range []struct{ name, command, benign string }{
+		{"path open", `python3 -c 'from pathlib import Path; Path("disklink").open("a").write("k")'`,
+			`python3 -c 'from pathlib import Path; Path("notes.txt").open("a").write("k")'`},
+		{"python here document", "python3 - <<'PY'\nopen(\"disklink\",\"a\").write(\"k\")\nPY",
+			"python3 - <<'PY'\nopen(\"notes.txt\",\"a\").write(\"k\")\nPY"},
+		{"path open after cd", `cd dirlink && python3 -c 'from pathlib import Path; Path("authorized_keys").open("a").write("k")'`,
+			`python3 -c 'from pathlib import Path; Path("authorized_keys").open("a").write("k")'`},
+		{"here document after cd", "cd dirlink && python3 - <<'PY'\nopen(\"authorized_keys\",\"a\").write(\"k\")\nPY",
+			"python3 - <<'PY'\nopen(\"authorized_keys\",\"a\").write(\"k\")\nPY"},
+		{"perl lexical handle after cd", `cd dirlink && perl -e 'open my $fh, ">>", "authorized_keys"; print $fh "k"'`,
+			`perl -e 'open my $fh, ">>", "authorized_keys"; print $fh "k"'`},
+		{"node write stream after cd", `cd dirlink && node -e 'require("fs").createWriteStream("authorized_keys").write("k")'`,
+			`node -e 'require("fs").createWriteStream("authorized_keys").write("k")'`},
+		{"env -C child", `env -C dirlink python3 -c 'from pathlib import Path; Path("authorized_keys").open("a").write("k")'`,
+			`env -C . python3 -c 'from pathlib import Path; Path("authorized_keys").open("a").write("k")'`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := targets(t, tc.command); !slices.Contains(got, protected) {
+				t.Fatalf("client proof has no protected target: %v", got)
+			}
+			if got := targets(t, tc.benign); slices.Contains(got, protected) {
+				t.Fatalf("benign twin %q reached the keys file: %v", tc.benign, got)
+			}
+		})
 	}
 }

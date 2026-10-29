@@ -78,6 +78,7 @@ func HoldHookFailModes(
 			return err
 		}
 		out.Scripts = appendMissing(out.Scripts, second.Scripts)
+		out.Shims = appendMissing(out.Shims, second.Shims)
 		return nil
 	})
 	if err != nil {

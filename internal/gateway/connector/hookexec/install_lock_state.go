@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/procidentity"
 )
@@ -22,16 +23,40 @@ import (
 // and no clock step changes the answer.
 const InstallLockIdentityName = "proc-start"
 
-// InstallLockRecoveryRecords are the interrupted-install records install.sh
-// and install.ps1 keep the lock for, on purpose, after the installer exits:
-// the next run takes the lock over and finishes or undoes that install.
-var InstallLockRecoveryRecords = []string{"previous.new", ".repair", ".rollback-hold", ".lifecycle-txn.json"}
+// installRecoveryRecords are the interrupted-install records install.sh and
+// install.ps1 leave beside .install.lock when an upgrade stops between the
+// binary swap and its finish (power loss, a killed installer): the next
+// installer run takes the lock over and finishes or undoes that install.
+var installRecoveryRecords = []string{"previous.new", ".repair", ".rollback-hold", ".lifecycle-txn.json"}
+
+// InstallRecoveryPending reports an interrupted install of the per-user data
+// directory home that waits for the next installer run: its .install.lock is
+// there (any file type, or it cannot be read) and an interrupted-install
+// record sits beside it (or cannot be read). A hook call does not read it:
+// its allow or deny follows the lock's owner alone (installLockStale,
+// GAP-1024). What would run the half-done install does: a hook cold start,
+// the watchdog's start and the strict install window still treat it as an
+// install in progress until the installer finishes or undoes it (GAP-2082).
+func InstallRecoveryPending(home string) bool {
+	if strings.TrimSpace(home) == "" {
+		return false
+	}
+	if _, err := installLockLstat(filepath.Join(home, ".install.lock")); err != nil && errors.Is(err, fs.ErrNotExist) {
+		return false
+	}
+	for _, name := range installRecoveryRecords {
+		if _, err := installLockLstat(filepath.Join(home, name)); err == nil || !errors.Is(err, fs.ErrNotExist) {
+			return true
+		}
+	}
+	return false
+}
 
 // installLockStale is the one stale-lock rule of every per-user hook (this
 // package, hook-outage-mode, the shell hooks, the OpenCode and Amp plugins)
 // and of `defenseclaw doctor`. It reads only the owner's identity, never a
-// clock: a lock folder in home is no lock only when no interrupted-install
-// record sits beside it and its owner is proven gone: its pid names no
+// clock: a lock folder in home is no lock only when its owner is proven
+// gone: its pid names no
 // process, or this reader's own process (no reader writes a lock), or a
 // process whose identity is not the one its InstallLockIdentityName record
 // holds (a reused pid). Everything else holds, for as long as it lasts: a
@@ -39,15 +64,14 @@ var InstallLockRecoveryRecords = []string{"previous.new", ".repair", ".rollback-
 // that has not written it yet), a lock without an identity record whose pid
 // names a live process (1.0.2, 1.0.3), a record or identity that cannot be
 // read, a lock that is not a folder. A deadline file an earlier 1.0.4
-// build wrote is not read.
+// build wrote is not read. An interrupted-install record beside the lock
+// (previous.new, .repair, .rollback-hold, .lifecycle-txn.json) does not hold
+// it once its installer is gone: a failed upgrade waiting for the next
+// installer run no longer closes every hook until then; doctor names the
+// recovery step (GAP-1024).
 func installLockStale(lstat func(string) (fs.FileInfo, error), home string, info fs.FileInfo) bool {
 	if info == nil || !info.IsDir() {
 		return false
-	}
-	for _, name := range InstallLockRecoveryRecords {
-		if _, err := lstat(filepath.Join(home, name)); err == nil || !errors.Is(err, fs.ErrNotExist) {
-			return false
-		}
 	}
 	lock := filepath.Join(home, ".install.lock")
 	pid, state := installLockPID(lstat, filepath.Join(lock, "pid"))
@@ -71,6 +95,9 @@ func installLockOwnerGone(lstat func(string) (fs.FileInfo, error), lock string, 
 		return true
 	}
 	recorded, state := installLockIdentity(lstat, filepath.Join(lock, InstallLockIdentityName))
+	if state == lockNumberAbsent {
+		return legacyInstallLockPIDReused(lstat, lock, pid)
+	}
 	if state != lockNumberValid {
 		return false
 	}
@@ -141,4 +168,24 @@ func installLockPID(lstat func(string) (fs.FileInfo, error), path string) (int64
 		return 0, lockNumberAbsent
 	}
 	return value, lockNumberValid
+}
+
+// installLockLegacySlack is how much later than the lock folder's last change
+// a record-less lock's process may have started and still be its installer
+// (the installer writes its pid right after it makes the folder; times have
+// a coarse resolution).
+const installLockLegacySlack = 2 * time.Second
+
+// legacyInstallLockPIDReused reports a 1.0.2/1.0.3 lock (no identity record)
+// whose pid names a process that started after the lock folder was last
+// changed: a later process got the killed installer's pid, so the lock is
+// stale (LEAD DECISION 2026-10-26 13:58, GAP-1465; install.sh applies the same
+// rule). A live installer started before its lock and keeps holding it.
+func legacyInstallLockPIDReused(lstat func(string) (fs.FileInfo, error), lock string, pid int) bool {
+	info, err := lstat(lock)
+	if err != nil {
+		return false
+	}
+	started, known := procidentity.StartTime(pid)
+	return known && started.After(info.ModTime().Add(installLockLegacySlack))
 }

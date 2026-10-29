@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"net"
 	"os"
@@ -413,6 +414,12 @@ type Doctor struct {
 	// back or not, so the caller can record the files it wrote (setup's
 	// receipt, which teardown restores them from).
 	GatewayApplied func(*GatewayApplyResult)
+	// StopSync and StopSyncOut are the default Gateway's StopSync and Out:
+	// a fix's restart gives the service the stop sync, which GatewayApplied
+	// hears of, and names each MicroVM a sync before it could not sync
+	// (GAP-1927, GAP-1928).
+	StopSync    *StopSync
+	StopSyncOut io.Writer
 	// CLI is the openshell binary (default DefaultBinary).
 	CLI string
 
@@ -521,7 +528,8 @@ func (d *Doctor) defaults() {
 	}
 	if d.Gateway == nil {
 		d.Gateway = &GatewayConfigurator{Dir: d.Discover.ConfigDir, Runner: d.Runner, GOOS: d.GOOS, Discover: d.Discover, CLI: d.CLI, LookPath: d.LookPath,
-			ServiceDockerGroupMissing: d.ServiceDockerGroupMissing, Rendered: d.Rendered}
+			ServiceDockerGroupMissing: d.ServiceDockerGroupMissing, Rendered: d.Rendered,
+			StopSync: d.StopSync, StopSyncWritten: d.GatewayApplied, Out: d.StopSyncOut}
 		if d.Rendered != nil {
 			euid, egid := os.Geteuid(), os.Getegid()
 			if d.Geteuid != nil {
@@ -1824,20 +1832,30 @@ func (r *doctorRun) checkRegistration() {
 	}
 }
 
-// registrationFix registers a missing local gateway. The gateway writes
-// the client certificates a registration takes when it starts, so with its
-// service stopped the service's fix comes first: it starts the gateway and
-// registers it.
+// registrationFix registers a missing local gateway. With its service
+// stopped the service's fix comes first: it starts the gateway and
+// registers it. The client certificates a registration takes come from the
+// gateway's first start under systemd, but from the post-install step of
+// the Homebrew formula on macOS, never from a start there (GAP-0319): a
+// Homebrew install without them is told that step (GAP-2457).
 func (r *doctorRun) registrationFix() *Fix {
 	add := r.addCommandLine()
+	brewTLS := r.localRegistrationTLSDir()
 	switch {
 	case r.portHeld:
 		return &Fix{Summary: "nothing to register while this account's gateway cannot run (see Gateway service)"}
-	case r.service != nil && r.service.Installed && !r.service.Active:
+	case r.service != nil && r.service.Installed && !r.service.Active && brewTLS == "":
 		return &Fix{Summary: "start the gateway first (Gateway service): it writes the client certificates a registration takes; " +
 			"`defenseclaw sandbox doctor --fix` starts and registers it", Command: r.startCommand().String() + " && " + add}
+	case r.service != nil && r.service.Installed && !r.service.Active && clientBundle(brewTLS):
+		return &Fix{Summary: "start the gateway first (Gateway service), then register it with the client certificates the " + GatewayFormula +
+			" formula wrote in " + brewTLS + "; `defenseclaw sandbox doctor --fix` starts and registers it", Command: r.startCommand().String() + " && " + add}
+	case r.service != nil && r.service.Installed && !r.service.Active:
+		return r.homebrewPKIFix(brewTLS, add)
 	case !r.canRegisterLocal():
 		return &Fix{Summary: "register the local gateway", Command: add}
+	case brewTLS != "" && !clientBundle(brewTLS):
+		return r.homebrewPKIFix(brewTLS, add)
 	}
 	return &Fix{Summary: "register the local gateway", Command: add, Automatic: true, Apply: func(ctx context.Context) error {
 		if _, err := Discover(r.Discover); err == nil {

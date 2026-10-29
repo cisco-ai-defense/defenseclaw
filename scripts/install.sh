@@ -1830,9 +1830,10 @@ outage_open_notice() {
     # DEFENSECLAW_HOME is readonly and already exported: a prefix assignment
     # of it is an error (GAP-0016).
     "${VENV}/bin/python" -I - <<'PY' 2>/dev/null || true
-# GAP-1885: "notice" when this config saves no hook fail mode (global or for
-# an active connector) and a per-user connector now lets a gateway outage
-# run (the default and permissive tiers); 1.0.2 and 1.0.3 closed it.
+# GAP-1885: "notice" when an active per-user connector whose hook fail mode
+# this config does not save (for it, or globally) now lets a gateway outage
+# run (the default and permissive tiers); 1.0.2 and 1.0.3 closed it. A mode
+# saved for one connector says nothing about another one.
 try:
     from defenseclaw import config as dc_config
     cfg = dc_config.load()
@@ -1843,9 +1844,10 @@ try:
         for name in names:
             override = guard._connector_override(name)
             if override is not None and str(override.hook_fail_mode or "").strip():
-                saved = True
-        if not saved and any(guard.effective_hook_fail_mode(name) == "open" for name in names):
-            print("notice")
+                continue
+            if not saved and guard.effective_hook_fail_mode(name) == "open":
+                print("notice")
+                break
 except Exception:
     pass
 PY
@@ -2516,7 +2518,9 @@ restart_old() {
         printf -v gateway_command '%q' "${BIN_DIR}/defenseclaw-gateway"
         RESTORED_NOTE="Your previous install is back, with its gateway kept stopped to preserve its hook registration."
         warn "${RESTORED_NOTE}"
-        info "Resolve the startup error (close the agent if its settings are in use), then run: ${gateway_command} start"
+        # The gateway names the cause and its next step ("The gateway stopped:"
+        # above); a guess here contradicted it (GAP-2478).
+        info "Fix the startup error shown above, then run: ${gateway_command} start"
         return 0
     fi
     if [[ "${WAS_RUNNING}" == true ]]; then
@@ -3062,9 +3066,15 @@ undo_rollback() {
 # those entries in the shape the older release removes; rolling forward runs
 # setup, which writes the current shape again.
 convert_hooks_for_rollback() {
-    local gateway="${BIN_DIR}/defenseclaw-gateway"
+    local gateway="${BIN_DIR}/defenseclaw-gateway" help
     [[ -x "${gateway}" ]] || return 0
-    "${gateway}" connector prepare-rollback --data-dir "${DEFENSECLAW_HOME}" 2>>"${LOG}" \
+    # until 1.1: back to a release before 1.0.5, the OpenHands and OmniGent
+    # files this release's teardown changed outside the data folder come back
+    # with it (GAP-2136).
+    local to=()
+    help="$("${gateway}" connector prepare-rollback --help 2>/dev/null || true)"
+    [[ "${help}" != *--to-version* || -z "${back_to:-}" ]] || to=(--to-version "${back_to}")
+    "${gateway}" connector prepare-rollback --data-dir "${DEFENSECLAW_HOME}" ${to[@]+"${to[@]}"} 2>>"${LOG}" \
         || warn "Could not rewrite the agent hook entries of DefenseClaw ${current:-?} in the form ${back_to} reads (see ${LOG}); after the rollback, 'defenseclaw uninstall' may leave those DefenseClaw entries in the agent settings, such as ~/.claude/settings.json; remove them by hand"
 }
 

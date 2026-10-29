@@ -53,7 +53,9 @@ The `quiet` preset is the one with the fewest false positives, and it is measure
 
 ### Before you start
 
-These `defenseclaw skill` steps are for a per-user installation. On managed Linux and macOS, the standard user's `defenseclaw` launcher offers only `sandbox` commands, and the managed packages include no skill scanner (see [Known limits](/docs/support-matrix#managed-linux-and-macos-scans)). There an administrator checks a skill's files with the CodeGuard rules, `sudo /opt/defenseclaw/bin/defenseclaw-gateway scan code /path/to/skill` on Linux or `sudo /opt/cisco/defenseclaw/bin/defenseclaw-gateway scan code /path/to/skill` on macOS, and sets any allow rule in the admin config. On managed Windows, use the administrator's `defenseclaw.exe scan skill` command for a folder outside user profiles.
+These `defenseclaw skill` steps are for a per-user installation. On managed Linux and macOS, the standard user's `defenseclaw` launcher offers only `sandbox` commands, so an administrator scans the skill with the managed gateway: `sudo /opt/defenseclaw/bin/defenseclaw-gateway scan skill /path/to/skill` on Linux or `sudo /opt/cisco/defenseclaw/bin/defenseclaw-gateway scan skill /path/to/skill` on macOS, for a folder outside home and temporary folders (see [Known limits](/docs/support-matrix#managed-linux-and-macos-scans)), and sets any allow rule in the admin config. On managed Windows, use the administrator's `defenseclaw.exe scan skill` command for a folder outside user profiles.
+
+`defenseclaw-gateway scan code` needs to read the whole folder. A directory it cannot list or a file it cannot read, including a macOS privacy-protected folder, makes the scan incomplete: it prints `code scan incomplete: part of <folder> could not be read, so nothing was reported as clean`, exits 1 and reports nothing.
 
 - A judge makes the scan accurate: `defenseclaw setup llm` and `defenseclaw keys set DEFENSECLAW_LLM_KEY`. Without one the scan runs the static rules only and `defenseclaw doctor` warns.
 - Python 3.11 or newer. See [Versions, platforms and availability](#versions-platforms-and-availability).
@@ -459,7 +461,7 @@ DefenseClaw pins the scanner versions below. `defenseclaw doctor` compares the i
 
 `cisco-ai-skill-scanner` 2.2.1 ships platform wheels only, each bundling a native helper, so there is no pure-Python wheel. DefenseClaw pins the wheel for macOS 13 or newer (Apple silicon and Intel), Linux with glibc (x86_64 and aarch64) and Windows x64. There is no wheel for Windows on ARM or for musl-based Linux, and DefenseClaw does not ship for either.
 
-DefenseClaw itself still runs on Python 3.10, but skill scanning does not: on a 3.10 runtime the scanner is not installed, and `defenseclaw doctor` reports `skill and MCP scanning need Python 3.11+; this runtime is Python 3.10`. The installers ship Python 3.12 or 3.13.
+DefenseClaw needs Python 3.11 to 3.13 (the package refuses Python 3.10), so every supported runtime includes the scanner. The installers ship Python 3.12 or 3.13.
 
 The scanner is a hard runtime dependency, and supported release-managed runtimes include it. If it is absent from a packaged runtime, treat the installation as damaged; do not patch its managed virtual environment with `pip`. Use the [supported install or repair path](/docs/get-started/download). Source contributors should synchronize the checkout's locked environment with `uv sync`. If the SDK is missing when you run a scan, DefenseClaw prints a concise dependency error and exits cleanly; it does not crash the gateway.
 

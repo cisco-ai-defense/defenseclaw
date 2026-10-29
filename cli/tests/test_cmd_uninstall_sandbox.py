@@ -96,7 +96,7 @@ class SandboxTeardownTests(unittest.TestCase):
             ' {"name": "copy-one", "workdir_mode": "copy", "phase": "stopped"}]}'
         )
         with patch("subprocess.run", return_value=_completed(stdout=listed)) as run:
-            rows, error = cmd_uninstall._listed_sandboxes(self.gateway)
+            rows, error, _ = cmd_uninstall._listed_sandboxes(self.gateway)
         live = cmd_uninstall._live_mounted_sandboxes(rows)
         self.assertEqual(error, "")
         self.assertEqual(run.call_args.args[0], [self.gateway, "sandbox", "list", "--output", "json"])
@@ -110,7 +110,7 @@ class SandboxTeardownTests(unittest.TestCase):
             " ".join(buf.getvalue().split()),
         )
         with patch("subprocess.run", return_value=_completed(returncode=1)):
-            rows, error = cmd_uninstall._listed_sandboxes(self.gateway)
+            rows, error, _ = cmd_uninstall._listed_sandboxes(self.gateway)
         self.assertEqual(cmd_uninstall._live_mounted_sandboxes(rows), ())
         self.assertIn("`sandbox list` failed", error)
 

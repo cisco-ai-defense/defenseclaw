@@ -98,7 +98,7 @@ func TestStatusV2BlocksLinuxAndMacOS(t *testing.T) {
 				// Honest values: what the hook renderer resolves (GAP-0037),
 				// whatever the resolver answers on this branch.
 				for name, state := range r.Connectors {
-					if want := enterprisehooks.ManagedHookFailMode(cfg, name); state.EffectiveHookFailMode != want {
+					if want := enterprisehooks.ManagedStatusHookFailMode(cfg, name, goos, state.ManagedHook != nil && *state.ManagedHook); state.EffectiveHookFailMode != want {
 						t.Fatalf("%s: %s effective_hook_fail_mode %q, the renderer resolves %q", action, name, state.EffectiveHookFailMode, want)
 					}
 					if want := cfg.EffectiveGuardrailModeForConnector(name); state.EffectiveMode != want {

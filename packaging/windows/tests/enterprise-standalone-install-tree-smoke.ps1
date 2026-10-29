@@ -801,7 +801,7 @@ try {
                 try {
                     [Environment]::SetEnvironmentVariable('DEFENSECLAW_MANAGED_TRUST_STRICT_ANCESTORS', '1', 'Process')
                     foreach ($case in 'lag', 'swapped') {
-                        $lag = New-TestLayout ('rollback-' + $case)
+                        $lag = New-TrustedTestLayout ('rollback-' + $case)
                         $lagHook = [IO.Path]::Combine($lag.BinDirectory, 'defenseclaw-hook.exe')
                         [IO.File]::WriteAllText($lagHook, 'stand-in')
                         $lagSnapshot = $security::GetDirectorySecuritySnapshotNoFollowIfExists($lag.InstallRoot)
@@ -848,7 +848,7 @@ try {
                             try {
                                 Remove-DefenseClawManagedTree `
                                     -Path $lag.InstallRoot `
-                                    -RequiredBase $Root `
+                                    -RequiredBase $trustedBase `
                                     -Label 'InstallRoot' `
                                     -RetryHeldFileMilliseconds 15000 `
                                     -ExpectedRootIdentity ([string]$lagSnapshot.Identity) `

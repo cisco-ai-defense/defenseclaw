@@ -40,7 +40,7 @@ defenseclaw setup kiro                # first setup defaults to observe
 defenseclaw setup kiro --mode action  # block where Kiro honors a veto
 ```
 
-A re-run without `--mode` keeps the current mode. On Windows, run the same commands in PowerShell. Restart Kiro CLI, or run `/agent swap defenseclaw`, so `/hooks` lists the hooks.
+A re-run without `--mode` keeps the current mode. On a terminal setup still asks for the mode, with the current one as the default (Enter keeps it), and whether to re-apply the hooks; in action mode it also asks whether to add the LLM judge. `--yes` skips the questions ([the questions setup asks](/docs/guardrail/switching-connectors#the-questions-setup-asks)). On Windows, run the same commands in PowerShell. Restart Kiro CLI, or run `/agent swap defenseclaw`, so `/hooks` lists the hooks.
 
 ### Check it
 
@@ -102,7 +102,7 @@ Kiro documents a global scope, `~/.kiro/hooks/`, merged with the project's `.kir
 
 ### Fail mode
 
-Fail closed while the hook runs: yes. On a per-user install a gateway that is not running follows the policy tier: the default and permissive policies let the call run with one warning, and the strict policy blocks it ([gateway outage table](/docs/connectors/capability-matrix#gateway-outage)). Every other failure, an error or unusable answer included, blocks the events that support a block response. On a managed host the administrator's `guardrail.hook_fail_mode` decides an outage, and the default is `closed` ([gateway outage table](/docs/connectors/capability-matrix#gateway-outage)). A hook that fails closed exits 2, the only non-zero status Kiro treats as a block. Kiro CLI 2.x was measured running the tool when a hook had not answered within its timeout. Standalone status and verify warn `hook_process_fail_open` and set `security_complete: false` while Kiro is enabled. Settings and edge cases are in [Fail modes](/docs/reference/fail-modes). What a gateway outage does to a Kiro call is in the [gateway outage table](/docs/connectors/capability-matrix#gateway-outage).
+Fail closed while the hook runs: yes. On a per-user install with no saved mode, a gateway that is not running follows the policy tier: the default and permissive policies let the call run with one warning, and the strict policy blocks it ([gateway outage table](/docs/connectors/capability-matrix#gateway-outage)). Every other failure, an error or unusable answer included, blocks the events that support a block response. On a managed host the administrator's `guardrail.hook_fail_mode` decides an outage, and the default is `closed` ([gateway outage table](/docs/connectors/capability-matrix#gateway-outage)). A hook that fails closed exits 2, the only non-zero status Kiro treats as a block. Kiro CLI 2.x was measured running the tool when a hook had not answered within its timeout. Standalone status and verify warn `hook_process_fail_open` and set `security_complete: false` while Kiro is enabled. Settings and edge cases are in [Fail modes](/docs/reference/fail-modes). What a gateway outage does to a Kiro call is in the [gateway outage table](/docs/connectors/capability-matrix#gateway-outage).
 
 ## Hook capabilities
 
@@ -139,7 +139,7 @@ Managed Windows pins each enrolled user to one of two reviewed contracts: `kiro-
 
 ## ACP guard
 
-The ACP guard is an enforcement path of its own. It vetoes prompts, output, permissions, filesystem, terminal and extension methods at the protocol boundary, whichever Kiro surface the editor launches. See the [ACP guard guide](/docs/acp-guard). It runs on every OS for per-user installs, for editors that start Kiro over ACP. ACP editors are not supported in enterprise managed mode; in enterprise managed mode, ACP editors are enrolled with `defenseclaw-gateway enterprise acp enroll`, which is preview and not yet verified live.
+The ACP guard is an enforcement path of its own. It vetoes prompts, output, permissions, filesystem, terminal and extension methods at the protocol boundary, whichever Kiro surface the editor launches. See the [ACP guard guide](/docs/acp-guard). It runs on every OS for per-user installs, for editors that start Kiro over ACP. In enterprise managed mode an administrator enrolls each user, editor and agent with `defenseclaw-gateway enterprise acp enroll`, and the user runs the setup command it reports. Managed ACP is preview: it has not passed a live round in this release ([Support matrix](/docs/support-matrix)).
 
 ```bash
 defenseclaw acp setup --client zed --agent kiro

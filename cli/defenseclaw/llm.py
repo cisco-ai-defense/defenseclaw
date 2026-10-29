@@ -477,6 +477,12 @@ def call_llm(request: dict) -> dict:
     # takes 1 only); let LiteLLM drop what the model refuses, not fail.
     kwargs["drop_params"] = True
 
+    # The bridge protocol is one JSON document on stdout. On a failure LiteLLM
+    # prints "Give Feedback / Get Help" and "LiteLLM.Info" lines to stdout,
+    # so the plugin scanner could not parse the answer and reported
+    # "Expecting value: line 2 column 1" instead of the provider error
+    # (GAP-2105; the same switch keeps doctor quiet, GAP-1489).
+    litellm.suppress_debug_info = True
     t0 = time.perf_counter()
     try:
         response = litellm.completion(**kwargs)

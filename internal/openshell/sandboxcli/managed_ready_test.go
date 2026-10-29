@@ -273,3 +273,106 @@ func TestFirstRunReadiesOnAnOlderManagedDaemon(t *testing.T) {
 		t.Fatalf("create calls %d after readying an older daemon", len(c))
 	}
 }
+
+// GAP-0534: a first run the organization does not allow (sandboxes not
+// allowed for the account, or an agent its profile leaves out) announces no
+// OpenShell install or start: the ready refuses it in the organization's
+// words and installs nothing.
+func TestAForbiddenAccountsFirstRunAnnouncesNoInstall(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		edit func(*sandboxapi.ManagedExplain)
+	}{
+		{"sandboxes not allowed", func(me *sandboxapi.ManagedExplain) { me.Allowed = false }},
+		{"agent left out", func(me *sandboxapi.ManagedExplain) { me.AllowedHarnesses = []string{"claudecode"} }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ta := newTestApp(t, "")
+			ta.daemon.status.Available, ta.daemon.status.Gateway = false, nil
+			ta.daemon.status.Managed = managedStatusFixture()
+			ta.daemon.explain.Managed = managedExplainFixture()
+			tc.edit(ta.daemon.explain.Managed)
+			_ = ta.Run(bg, RunOptions{Harness: "codex"})
+			if out := ta.output(); strings.Contains(out, "Installing OpenShell") || strings.Contains(out, "Starting your OpenShell gateway") {
+				t.Fatalf("a forbidden first run announced an install or start:\n%s", out)
+			}
+			if r := ta.daemon.callsTo("POST", sandboxapi.PathReady); len(r) != 1 {
+				t.Fatalf("ready calls = %d, want the one whose refusal the run prints", len(r))
+			}
+		})
+	}
+	// The allowed run still says what it does.
+	ta := newTestApp(t, "")
+	ta.daemon.status.Available, ta.daemon.status.Gateway = false, nil
+	ta.daemon.status.Managed = managedStatusFixture()
+	ta.daemon.explain.Managed = managedExplainFixture()
+	_ = ta.Run(bg, RunOptions{Harness: "codex"})
+	if out := ta.output(); !strings.Contains(out, "Installing OpenShell") && !strings.Contains(out, "Starting your OpenShell gateway") {
+		t.Fatalf("an allowed first run did not say it readies OpenShell:\n%s", out)
+	}
+}
+
+// GAP-0534: an account the organization does not allow sandboxes is refused
+// by the managed gateway's own view before the run reaches its sandbox
+// daemon, whose socket would start it: no status, explain or ready call goes
+// to the daemon, and the words are the daemon's ready refusal. A view that
+// allows the account, a provisional one, a left-out agent and a gateway that
+// does not answer still go to the daemon, which decides as before.
+func TestAForbiddenAccountsRunStartsNoSandboxDaemon(t *testing.T) {
+	forbidden := managedExplainFixture()
+	forbidden.Allowed = false
+	ta := newTestApp(t, "")
+	ta.daemon.status.Available, ta.daemon.status.Gateway = false, nil
+	ta.daemon.status.Managed = managedStatusFixture()
+	var asked []string
+	ta.ManagedAccountPolicy = func(_ context.Context, harness string) (*sandboxapi.ManagedExplain, error) {
+		asked = append(asked, harness)
+		return forbidden, nil
+	}
+	err := ta.Run(bg, RunOptions{Harness: "codex"})
+	if err == nil || !strings.Contains(err.Error(), "doesn't allow sandboxes for your account") {
+		t.Fatalf("forbidden account run = %v", err)
+	}
+	if len(asked) != 1 || asked[0] != "codex" {
+		t.Fatalf("policy asked for %q", asked)
+	}
+	ta.daemon.mu.Lock()
+	reached := len(ta.daemon.calls)
+	ta.daemon.mu.Unlock()
+	if reached != 0 {
+		t.Fatalf("the forbidden run reached the sandbox daemon %d times", reached)
+	}
+	if out := ta.output(); strings.Contains(out, "Installing OpenShell") || strings.Contains(out, "Starting your OpenShell gateway") {
+		t.Fatalf("a forbidden run announced an install or start:\n%s", out)
+	}
+
+	for _, tc := range []struct {
+		name string
+		view func() (*sandboxapi.ManagedExplain, error)
+	}{
+		{"allowed", func() (*sandboxapi.ManagedExplain, error) { return managedExplainFixture(), nil }},
+		{"provisional", func() (*sandboxapi.ManagedExplain, error) {
+			me := managedExplainFixture()
+			me.Allowed, me.Provisional = false, true
+			return me, nil
+		}},
+		{"agent left out", func() (*sandboxapi.ManagedExplain, error) {
+			me := managedExplainFixture()
+			me.AllowedHarnesses = []string{"claudecode"}
+			return me, nil
+		}},
+		{"gateway does not answer", func() (*sandboxapi.ManagedExplain, error) { return nil, errors.New("hook socket refused") }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ta := newTestApp(t, "")
+			ta.daemon.status.Available, ta.daemon.status.Gateway = false, nil
+			ta.daemon.status.Managed = managedStatusFixture()
+			ta.daemon.explain.Managed = managedExplainFixture()
+			ta.ManagedAccountPolicy = func(context.Context, string) (*sandboxapi.ManagedExplain, error) { return tc.view() }
+			_ = ta.Run(bg, RunOptions{Harness: "codex"})
+			if len(ta.daemon.callsTo("GET", sandboxapi.PathStatus)) == 0 {
+				t.Fatal("the run did not reach the sandbox daemon")
+			}
+		})
+	}
+}

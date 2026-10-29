@@ -27,7 +27,12 @@
 #
 #   --payload DIR   use prebuilt darwin/arm64 binaries (defenseclaw-gateway,
 #                   defenseclaw-hook, defenseclaw-sensor-helper and optionally
-#                   defenseclaw-acp) instead of building them.
+#                   defenseclaw-acp and defenseclaw-scanners) instead of
+#                   building them.
+#   --scanner-runtime DIR
+#                   use a prebuilt darwin-arm64 scanner runtime tree
+#                   (packaging/unix/build-scanner-runtime.sh --target
+#                   darwin-arm64) instead of building it; building needs uv.
 #
 # Signing is optional and off by default:
 #   MACOS_APP_SIGN_IDENTITY        "Developer ID Application: ..." codesigns
@@ -48,11 +53,13 @@ readonly LAUNCH_AGENTS_DIR="Library/LaunchAgents"
 VERSION=""
 DIST_DIR="dist"
 PAYLOAD=""
+SCANNER_RUNTIME=""
 while [ "$#" -gt 0 ]; do
     case "$1" in
         --version) VERSION="${2:?--version needs a value}"; shift 2 ;;
         --dist-dir) DIST_DIR="${2:?--dist-dir needs a value}"; shift 2 ;;
         --payload) PAYLOAD="${2:?--payload needs a value}"; shift 2 ;;
+        --scanner-runtime) SCANNER_RUNTIME="${2:?--scanner-runtime needs a value}"; shift 2 ;;
         -h | --help) sed -n '2,35p' "$0"; exit 0 ;;
         *) echo "unknown argument: $1" >&2; exit 2 ;;
     esac
@@ -84,10 +91,10 @@ mkdir -p "$ROOT/$INSTALL_BIN" "$SCRIPTS"
 
 binaries=(defenseclaw-gateway defenseclaw-hook defenseclaw-sensor-helper)
 if [ -n "$PAYLOAD" ]; then
-    for name in "${binaries[@]}" defenseclaw-acp; do
+    for name in "${binaries[@]}" defenseclaw-acp defenseclaw-scanners; do
         if [ -f "$PAYLOAD/$name" ]; then
             install -m 0755 "$PAYLOAD/$name" "$ROOT/$INSTALL_BIN/$name"
-        elif [ "$name" != defenseclaw-acp ]; then
+        elif [ "$name" != defenseclaw-acp ] && [ "$name" != defenseclaw-scanners ]; then
             echo "payload $PAYLOAD lacks $name" >&2
             exit 1
         fi
@@ -109,6 +116,23 @@ else
     build defenseclaw-hook ./cmd/defenseclaw-hook "$version_flags"
     build defenseclaw-sensor-helper ./cmd/defenseclaw-sensor-helper "$version_flags"
     build defenseclaw-acp ./cmd/defenseclaw-acp "$version_flags"
+    build defenseclaw-scanners ./cmd/defenseclaw-scanners "-s -w"
+fi
+
+# The scanner runtime defenseclaw-scanners runs (GAP-1527): CPython and the
+# locked scanner packages, root-owned under the install root. Without it the
+# package's scan skill|mcp|plugin cannot run.
+runtime_root="$ROOT/opt/cisco/defenseclaw/scanner-runtime"
+if [ -n "${SCANNER_RUNTIME:-}" ]; then
+    [ -f "$SCANNER_RUNTIME/runtime.json" ] || { echo "scanner runtime $SCANNER_RUNTIME has no runtime.json" >&2; exit 1; }
+    mkdir -p "$runtime_root"
+    cp -R "$SCANNER_RUNTIME/." "$runtime_root/"
+else
+    "$REPO_ROOT/packaging/unix/build-scanner-runtime.sh" --target darwin-arm64 --out-dir "$runtime_root"
+fi
+if [ -n "$(find "$runtime_root" -type l -print -quit)" ]; then
+    echo "scanner runtime $runtime_root holds links" >&2
+    exit 1
 fi
 
 # The standard account cannot install Homebrew or Xcode tools. Build these on
@@ -139,6 +163,23 @@ if [ -n "${MACOS_APP_SIGN_IDENTITY:-}" ]; then
     for binary in "$ROOT/$INSTALL_BIN"/* "$e2fs_root/sbin"/*; do
         codesign "${sign_args[@]}" --identifier "com.cisco.defenseclaw.$(basename "$binary")" "$binary"
     done
+    # Every Mach-O file of the scanner runtime carries the same signature.
+    # The interpreter loads the extension modules of other packages, so it
+    # may load libraries this identity signed (library validation) and keeps
+    # the executable-memory rights CPython's ctypes and cffi need.
+    entitlements="$WORK/scanner-python.entitlements"
+    cat >"$entitlements" <<'PLIST'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>com.apple.security.cs.disable-library-validation</key><true/>
+<key>com.apple.security.cs.allow-unsigned-executable-memory</key><true/>
+</dict></plist>
+PLIST
+    find "$runtime_root" -type f \( -name '*.so' -o -name '*.dylib' \) -print0 |
+        xargs -0 -n 50 codesign "${sign_args[@]}"
+    codesign "${sign_args[@]}" --entitlements "$entitlements" --identifier com.cisco.defenseclaw.scanner-python \
+        "$runtime_root"/python/bin/python3.*
 fi
 gateway_digest=$(shasum -a 256 "$ROOT/$INSTALL_BIN/defenseclaw-gateway" | awk '{print $1}')
 agent_program="/$INSTALL_BIN/launch-agents/$gateway_digest/defenseclaw-gateway"
@@ -399,6 +440,41 @@ if command -v dc_legacy_sandbox_guard >/dev/null 2>&1 &&
     ! dc_legacy_sandbox_guard darwin /opt/cisco/defenseclaw/bin/defenseclaw-gateway /usr/local/bin/defenseclaw; then
     refuse sandboxes_running "DefenseClaw ${installed:-an earlier release} is installed, and this install was refused: $dc_guard_reason" "$dc_guard_message"
 fi
+# A sandbox daemon of DefenseClaw before 1.0.4 exits by itself once the
+# package gave its program a new file, as soon as it counts no running
+# sandbox, and its exit stops the account's OpenShell gateway: also under a
+# MicroVM that completed or whose main process failed while its VM still
+# runs, which it does not count, so that VM ends with no flush (GAP-0868,
+# GAP-0903, GAP-0979 on macOS). Its program is the LaunchAgent's copy under
+# bin/launch-agents/<digest>/, which the postinstall renames over before its
+# ensure. Hold each one (SIGSTOP), last, before any file is replaced; the
+# postinstall ends the held ones with SIGKILL, which runs nothing on their
+# way out, and the launcher starts the installed daemon. If the install
+# never reaches the postinstall, they go on after 10 minutes.
+sandbox_held="$state/sandbox-daemons.held"
+if [ -n "$installed" ] && awk -v v="$installed" 'BEGIN {
+        sub(/^v/, "", v); sub(/[-+].*/, "", v); split(v, x, ".")
+        exit !(x[1] + 0 < 1 || (x[1] + 0 == 1 && x[2] + 0 == 0 && x[3] + 0 < 4))
+    }'; then
+    s_list=$(ps -axo pid=,lstart=,command= 2>/dev/null | awk '{
+        command = ""
+        for (i = 7; i <= NF; i++) command = command (i > 7 ? " " : "") $i
+        if (command ~ /^\/opt\/cisco\/defenseclaw\/bin\/(launch-agents\/[0-9a-f]+\/)?defenseclaw-gateway sandbox-daemon$/)
+            print $1 "|" $2 " " $3 " " $4 " " $5 " " $6
+    }')
+    if [ -n "$s_list" ] && (umask 077 && printf '%s\n' "$s_list" >"$sandbox_held") 2>/dev/null; then
+        printf '%s\n' "$s_list" | while IFS='|' read -r s_pid s_start; do
+            kill -STOP "$s_pid" 2>/dev/null || true
+        done
+        (
+            sleep 600 || exit 0
+            if [ -f "$sandbox_held" ]; then
+                while IFS='|' read -r s_pid s_start; do kill -CONT "$s_pid" 2>/dev/null; done <"$sandbox_held"
+                rm -f "$sandbox_held"
+            fi
+        ) </dev/null >/dev/null 2>&1 &
+    fi
+fi
 exit 0
 EOF
 "$REPO_ROOT/scripts/stamp-package-script.sh" "$VERSION" "$SCRIPTS/preinstall" "$SCRIPTS/preinstall"
@@ -437,9 +513,9 @@ refresh_program() {
 }
 refresh_programs() {
     for program in "$1/bin/defenseclaw-gateway" "$1/bin/defenseclaw-hook" "$1/bin/defenseclaw-sensor-helper" \
-        "$1/bin/defenseclaw-acp" "$1"/bin/launch-agents/*/defenseclaw-gateway "$1"/share/e2fsprogs/sbin/*; do
+        "$1/bin/defenseclaw-acp" "$1/bin/defenseclaw-scanners" "$1"/bin/launch-agents/*/defenseclaw-gateway "$1"/share/e2fsprogs/sbin/*; do
         case $program in
-        */bin/defenseclaw-acp | */bin/launch-agents/* | */share/e2fsprogs/sbin/*)
+        */bin/defenseclaw-acp | */bin/defenseclaw-scanners | */bin/launch-agents/* | */share/e2fsprogs/sbin/*)
             # Optional: an unmatched pattern stays literal and is skipped.
             [ -e "$program" ] || [ -L "$program" ] || continue
             ;;
@@ -450,6 +526,26 @@ refresh_programs() {
         fi
     done
 }
+# The preinstall held each sandbox daemon of a DefenseClaw before 1.0.4
+# (SIGSTOP), whose own exit would stop its account's OpenShell gateway also
+# under a completed or failed MicroVM that still runs (GAP-0868). End each
+# one that is still the same process with SIGKILL, which runs nothing on its
+# way out, before its program gets a new file, and resume (SIGCONT) any other
+# so nothing stays stopped once the list is gone. Both sides compare lstart
+# with its runs of spaces folded, as the preinstall's awk wrote it: lstart
+# pads a day from 1 to 9 ("Fri Nov  6").
+sandbox_held="$state/sandbox-daemons.held"
+if [ -f "$sandbox_held" ]; then
+    while IFS='|' read -r s_pid s_start; do
+        s_now=$(ps -o lstart= -p "$s_pid" 2>/dev/null | awk '{$1 = $1; print}')
+        if [ -n "$s_now" ] && [ "$s_now" = "$s_start" ]; then
+            kill -KILL "$s_pid" 2>/dev/null || true
+        else
+            kill -CONT "$s_pid" 2>/dev/null || true
+        fi
+    done <"$sandbox_held"
+    rm -f "$sandbox_held"
+fi
 if ! refresh_programs "$prefix"; then
     exit 1
 fi

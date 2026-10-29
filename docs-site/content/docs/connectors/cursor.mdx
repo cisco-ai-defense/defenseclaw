@@ -31,7 +31,7 @@ defenseclaw setup cursor  # first setup defaults to observe
 defenseclaw setup cursor --mode action --no-human-approval
 ```
 
-A re-run without `--mode` keeps the current mode. On Windows, run the same commands in PowerShell. Action mode turns on event-native deny and leaves native approval off. Interactive setup asks for the mode, whether to add to or replace an existing connector roster, and whether to add an LLM judge. For scripts, pass `--yes --mode observe` (or `--mode action`).
+A re-run without `--mode` keeps the current mode. On a terminal setup still asks for the mode, with the current one as the default (Enter keeps it), and whether to re-apply the hooks; in action mode it also asks whether to add the LLM judge. `--yes` skips the questions ([the questions setup asks](/docs/guardrail/switching-connectors#the-questions-setup-asks)). On Windows, run the same commands in PowerShell. Action mode turns on event-native deny and leaves native approval off. Interactive setup asks for the mode, whether to add to or replace an existing connector roster, and whether to add an LLM judge. For scripts, pass `--yes --mode observe` (or `--mode action`).
 
 Action setup requires an installed Cursor version covered by a hook contract. If that check fails, setup exits with an error before changing the connector roster or hooks. Install a supported version and rerun `defenseclaw setup cursor --yes --mode action --no-human-approval`. To stage observation explicitly, run `defenseclaw setup cursor --yes --mode observe`.
 

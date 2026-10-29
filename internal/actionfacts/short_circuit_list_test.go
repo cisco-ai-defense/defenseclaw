@@ -26,6 +26,7 @@ import (
 // GAP-0616: the shared full-parser flattening step exposes every simple
 // command with its shell-scoped directory, including stage and redirect forms.
 func TestSimpleCommands(t *testing.T) {
+	skipPOSIXPathsOnWindows(t)
 	type location struct{ text, cwd string }
 	tests := []struct {
 		command string

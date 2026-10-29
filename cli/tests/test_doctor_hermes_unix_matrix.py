@@ -1,11 +1,17 @@
 """Unix Hermes doctor must check the hook registration Hermes executes."""
 
 import json
+import os
 from pathlib import Path
 
+import pytest
 import yaml
-
 from defenseclaw.doctor_hooks import _HERMES_REQUIRED_HOOKS, unix_hermes_hook_problem
+
+# unix_hermes_hook_problem serves Linux and macOS only: doctor sends a Windows
+# Hermes registration to _check_windows_native_hooks (GAP-2321). It parses the
+# command with POSIX shlex, which a Windows path does not survive.
+pytestmark = pytest.mark.skipif(os.name == "nt", reason="Unix Hermes hook matrix; Windows uses the native hook check")
 
 
 def test_unix_hermes_doctor_rejects_skipped_or_unusable_hooks(tmp_path: Path) -> None:

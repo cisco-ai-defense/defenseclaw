@@ -500,6 +500,9 @@ func TestStandaloneCleanupHandlesEmptyDirectoryHome(t *testing.T) {
 			useReportingStandaloneRunner(t)
 			oldHome := filepath.Join(f.homes, "sample-user-old")
 			uid, gid := os.Getuid()+1, os.Getgid()
+			// A home is gone only from a parent that still holds other
+			// homes: an empty parent can be an unmounted volume (GAP-0443).
+			f.home(t, "other-user", 0o700)
 			if kind != "recorded-home-gone" {
 				oldHome = f.home(t, "sample-user-old", 0o700)
 				uid, gid = rehomedTestUID(t, oldHome)

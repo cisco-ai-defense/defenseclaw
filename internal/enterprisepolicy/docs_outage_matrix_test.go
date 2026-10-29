@@ -5,6 +5,7 @@ package enterprisepolicy
 
 import (
 	"encoding/json"
+	"errors"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -279,6 +280,11 @@ func pinnedOutageSentence(rel, sentence string) bool {
 			strings.HasPrefix(sentence, "On a managed host the administrator's fail mode decides an outage: `closed`, the default, denies it")
 	case "connectors/cursor.mdx":
 		return strings.HasPrefix(sentence, "The administrator's resolved fail mode decides what the running hook does on a gateway outage")
+	case "connectors/hermes.mdx":
+		// The managed-standalone Windows row of the Hermes outage table
+		// (docs e9847430bd, GAP-0515, verified on dc-fc-r104-sa-ewin1) is
+		// pinned by test-docs-claims.ts (train T7).
+		return strings.HasPrefix(sentence, "On Windows, where Hermes has no guard, an administrator's `open` lets the call run during an outage")
 	}
 	return false
 }
@@ -329,5 +335,40 @@ func TestOutageBehaviourIsStatedOnlyInTheCapabilityMatrix(t *testing.T) {
 		if !linked[page] {
 			t.Errorf("%s does not link to the gateway outage table (%s)", page, outageTableLink)
 		}
+	}
+}
+
+// The OpenCode and Amp plugins render closed on a managed standalone host
+// (only Secure Client renders the administrator mode), so a page that says
+// an administrator may pick open for an outage must scope it to Secure
+// Client (GAP-2309).
+func TestPluginPagesScopeAdministratorOutageOpenToSecureClient(t *testing.T) {
+	docs := filepath.Join(repoRoot(), "docs-site", "content", "docs")
+	read := 0
+	// The reference/connectors pages exist only in the newer docs layout;
+	// a layout without them is checked on the pages it has.
+	for _, rel := range []string{
+		"connectors/opencode.mdx", "connectors/amp.mdx",
+		"reference/connectors/opencode.mdx", "reference/connectors/amp.mdx",
+	} {
+		data, err := os.ReadFile(filepath.Join(docs, filepath.FromSlash(rel)))
+		if errors.Is(err, fs.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		read++
+		for _, sentence := range sentenceBreak.Split(string(data), -1) {
+			low := strings.ToLower(strings.Join(strings.Fields(sentence), " "))
+			if strings.Contains(low, "administrator") && strings.Contains(low, "outage") &&
+				regexp.MustCompile(`\b(?:select|choose|pick)s?\b[^.]*\bopen\b`).MatchString(low) &&
+				!strings.Contains(low, "secure client") {
+				t.Errorf("%s offers administrator outage open without scoping it to Secure Client: %.240q", rel, sentence)
+			}
+		}
+	}
+	if read == 0 {
+		t.Fatal("no OpenCode or Amp connector page found")
 	}
 }

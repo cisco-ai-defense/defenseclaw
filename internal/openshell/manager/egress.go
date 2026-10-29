@@ -299,6 +299,31 @@ func (m *Manager) containOldSupervisorNetwork(ctx context.Context, b *box) {
 	m.containOldSupervisorNetworkLocked(ctx, b)
 }
 
+// networkWithdrawn refuses a network rule for sandbox name while DefenseClaw
+// keeps its network withdrawn (containOldSupervisorNetwork): a legacy guest
+// on an old supervisor gets no rule from DefenseClaw, whoever approved it
+// (the automatic approvals of an open pack, the user, a host port), until it
+// runs on the current supervisor; an approval would undo the containment
+// (GAP-1859). Callers must not hold m.mu.
+func (m *Manager) networkWithdrawn(name string) error {
+	m.mu.Lock()
+	b := m.boxes[name]
+	if b == nil {
+		m.mu.Unlock()
+		return nil
+	}
+	rec, phase := b.rec, b.phase
+	if b.sb != nil {
+		phase = auditPhase(b.sb.Status.Phase)
+	}
+	m.mu.Unlock()
+	if !rec.OldSupervisorNetworkClosed && !oldSupervisorLive(phase, rec) {
+		return nil
+	}
+	return sandboxapi.Errorf(sandboxapi.CodeConflict, "%s: %s: DefenseClaw withdrew its network rules and adds none while it runs on that supervisor; %s",
+		name, legacyUnprotected, legacyWayOn(name, phase, rec.Driver))
+}
+
 // scheduleOldSupervisorNetwork waits for a concurrent start, stop or delete
 // to finish before withdrawing rules. In particular, a start cannot read
 // the old record before containment and then launch under a stripped policy.
@@ -815,13 +840,18 @@ func (m *Manager) enforceAll(ctx context.Context) bool {
 // sandbox reopens, which before stayed cut until the sandbox was created
 // again (GAP-0466). Each reattach is recorded and published; one that
 // fails is retried on the next pass. A sandbox whose policy cannot be
-// resolved (eff nil) gets nothing back.
+// resolved (eff nil) gets nothing back, and neither does a legacy guest
+// whose network DefenseClaw withdrew (networkWithdrawn): a provider rule
+// opens its endpoint around the egress proxy on a supervisor DefenseClaw
+// cannot contain, so it waits for the restart on the current supervisor
+// like every other rule (GAP-1859).
 func (m *Manager) restoreProviderEndpoints(ctx context.Context, gw *Gateway, b *box, eff *packs.Effective) {
 	m.mu.Lock()
 	rec, ready := b.rec, b.phase == audit.SandboxPhaseReady && !b.deleted && !b.creating
 	m.mu.Unlock()
 	if !ready || eff == nil || len(rec.DetachedProviders) == 0 ||
-		credentialsRefusal(m.floor(eff), rec.CredentialProfile, len(rec.Credentials) > 0) != nil {
+		credentialsRefusal(m.floor(eff), rec.CredentialProfile, len(rec.Credentials) > 0) != nil ||
+		m.networkWithdrawn(rec.Name) != nil {
 		return
 	}
 	for _, provider := range rec.DetachedProviders {

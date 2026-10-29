@@ -42,7 +42,7 @@ defenseclaw setup antigravity                 # first setup defaults to observe
 defenseclaw setup antigravity --mode action   # deny or ask at PreToolUse
 ```
 
-A re-run without `--mode` keeps the current mode. On Windows, run the same commands in PowerShell. Sign-in still goes through Windows Credential Manager or Google's browser flow.
+A re-run without `--mode` keeps the current mode. On a terminal setup still asks for the mode, with the current one as the default (Enter keeps it), and whether to re-apply the hooks; in action mode it also asks whether to add the LLM judge. `--yes` skips the questions ([the questions setup asks](/docs/guardrail/switching-connectors#the-questions-setup-asks)). On Windows, run the same commands in PowerShell. Sign-in still goes through Windows Credential Manager or Google's browser flow.
 
 ### Check it
 
@@ -73,7 +73,7 @@ Setup backs up `hooks.json` and keeps unrelated hooks. It writes only the global
 
 - In action mode `PreToolUse` can deny a tool call or ask you first, using Antigravity's own `decision` field. The ask always prompts, even when you chose "Always Allow" before.
 - `PreInvocation` and `PostInvocation` can only add context. `PostToolUse` only observes. `Stop` is always allowed.
-- Observe mode records policy findings without blocking on those findings. When the gateway is not running, the default and permissive policies let the call run with one warning and strict denies `PreToolUse`; every other hook failure denies it ([gateway outage table](/docs/connectors/capability-matrix#gateway-outage)).
+- Observe mode records policy findings without blocking on those findings. With no saved mode, when the gateway is not running, the default and permissive policies let the call run with one warning and strict denies `PreToolUse`; every other hook failure denies it ([gateway outage table](/docs/connectors/capability-matrix#gateway-outage)).
 
 ### Verdict mapping
 
@@ -111,6 +111,8 @@ DefenseClaw's hook contract covers `agy` `>=1.1.8`. Google's [changelog](https:/
 ### Hook schema
 
 All handlers are synchronous with a 30-second timeout. The event name is not in Antigravity's stdin, so DefenseClaw binds each registration to a trusted event argument (on Linux and macOS a positional argument, `antigravity-hook.sh PreToolUse`; on Windows the native hook's `--event`) and forwards it to the gateway in a local header, without rewriting the stdin captured for audit.
+
+A registration that lost its event argument (an older or hand-edited `hooks.json`) cannot be sent to the gateway, which requires the event. On a per-user install in the default or permissive policy the call runs with a warning and a `hook-failures.jsonl` row; the strict policy, the install window and a managed install deny it. Either way the fix is `defenseclaw setup antigravity`, and a running gateway rewrites the registration on its own.
 
 | Event | Registration shape | Stdin beyond common metadata | DefenseClaw stdout |
 | --- | --- | --- | --- |

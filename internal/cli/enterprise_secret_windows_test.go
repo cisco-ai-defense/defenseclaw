@@ -449,11 +449,15 @@ func TestWindowsSecretUnchangedCredentialRestartsOnlyAGatewayThatMayHoldAnotherV
 		startedAfter bool
 		wantRestart  bool
 		wantText     string
+		noStore      bool
 	}{
 		{name: "identical set, gateway loaded it", action: "set", startedAfter: true, wantText: "already holds this value; gateway restart not needed"},
 		{name: "identical set, older gateway", action: "set", wantRestart: true},
 		{name: "absent remove, gateway loaded the store", action: "remove", startedAfter: true, wantText: "was not stored; nothing to remove"},
 		{name: "absent remove, older gateway", action: "remove", wantRestart: true, wantText: "was not stored; nothing to remove; gateway restarted: true"},
+		// No credential was ever stored, so no store folder exists: the
+		// folder that would hold it dates the last change (GAP-1690).
+		{name: "absent remove, no store folder, gateway started after", action: "remove", noStore: true, startedAfter: true, wantText: "was not stored; nothing to remove"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			windowsSecretTestHarness(t)
@@ -462,8 +466,10 @@ func TestWindowsSecretUnchangedCredentialRestartsOnlyAGatewayThatMayHoldAnotherV
 			if tc.action == "set" {
 				name, stored = "ai-defense-api-key", "ai-defense-api-key"
 			}
-			if _, err := runWindowsSecretCommand(t, "set", enterpriseSecretOptions{name: stored, fromStdin: true}, "same-value\n"); err != nil {
-				t.Fatal(err)
+			if !tc.noStore {
+				if _, err := runWindowsSecretCommand(t, "set", enterpriseSecretOptions{name: stored, fromStdin: true}, "same-value\n"); err != nil {
+					t.Fatal(err)
+				}
 			}
 			saved := windowsSecretGatewayStartedAfter
 			t.Cleanup(func() { windowsSecretGatewayStartedAfter = saved })
@@ -1724,5 +1730,165 @@ func TestWindowsSecretSetIfStoredProvesAbsence(t *testing.T) {
 	}
 	if _, err := runWindowsSecretCommand(t, "set", opts, "delivered-value\n"); err != nil {
 		t.Fatalf("proven absence refused: %v", err)
+	}
+}
+
+// GAP-2430 (issue #1319): a set whose new value fails the gateway trust
+// check after the write leaves the previous credential exactly as it was
+// (bytes, owner and protected DACL), reports change_failed, restarts
+// nothing and leaves no temporary or kept file. With nothing stored before,
+// nothing is stored after.
+func TestWindowsSecretFailedTrustCheckKeepsThePreviousCredential(t *testing.T) {
+	dir := windowsSecretTestHarness(t)
+	layout, err := windowsSecretLayout()
+	if err != nil {
+		t.Fatal(err)
+	}
+	host := stubWindowsSecretHost(t, layout)
+	const name = "ai-defense-api-key"
+	credential := filepath.Join(dir, name)
+	securityOf := func() string {
+		t.Helper()
+		extended, _ := winpath.Extended(credential)
+		sd, err := windows.GetNamedSecurityInfo(extended, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION|windows.OWNER_SECURITY_INFORMATION)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return sd.String()
+	}
+	onlyTheCredential := func(want []string) {
+		t.Helper()
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var names []string
+		for _, entry := range entries {
+			names = append(names, entry.Name())
+		}
+		if strings.Join(names, ",") != strings.Join(want, ",") {
+			t.Fatalf("secrets folder holds %v, want %v", names, want)
+		}
+	}
+	if out, err := runWindowsSecretCommand(t, "set", enterpriseSecretOptions{name: name, fromStdin: true, json: true}, "first-value-0001\r\n"); err != nil {
+		t.Fatalf("first set: %v\n%s", err, out)
+	}
+	before, err := os.ReadFile(credential)
+	if err != nil {
+		t.Fatal(err)
+	}
+	beforeSecurity := securityOf()
+
+	previousCheck := windowsSecretTrustCheck
+	t.Cleanup(func() { windowsSecretTrustCheck = previousCheck })
+	checked := 0
+	windowsSecretTrustCheck = func(n, d string) error {
+		checked++
+		if data, _ := os.ReadFile(filepath.Join(d, n)); strings.TrimSpace(string(data)) != "second-value-0002" {
+			t.Errorf("the trust check read %q, want the new value in place", data)
+		}
+		return errors.New("principal S-1-5-32-545 may read the protected credential")
+	}
+	host.events = nil
+	out, err := runWindowsSecretCommand(t, "set", enterpriseSecretOptions{name: name, fromStdin: true, json: true}, "second-value-0002\r\n")
+	if err == nil || commandExitCode(err) != windowsSecretExitFailure || checked != 1 {
+		t.Fatalf("set with a failing trust check: %v (exit %d, checks %d), want exit %d after one check", err, commandExitCode(err), checked, windowsSecretExitFailure)
+	}
+	var doc struct {
+		OK     bool `json:"ok"`
+		Errors []struct {
+			Code    string `json:"code"`
+			Message string `json:"message"`
+		} `json:"errors"`
+	}
+	if err := json.Unmarshal([]byte(out), &doc); err != nil || doc.OK || len(doc.Errors) != 1 || doc.Errors[0].Code != "change_failed" ||
+		!strings.Contains(doc.Errors[0].Message, "previous credential is kept unchanged") {
+		t.Fatalf("failure document %s (%v), want one change_failed error that says the previous credential is kept", out, err)
+	}
+	if strings.Contains(out, "second-value-0002") || strings.Contains(out, "first-value-0001") {
+		t.Fatal("the failure document prints a value")
+	}
+	after, err := os.ReadFile(credential)
+	if err != nil || !bytes.Equal(after, before) {
+		t.Fatalf("stored credential after the failed set: %v (equal %v), want the previous bytes", err, bytes.Equal(after, before))
+	}
+	if got := securityOf(); got != beforeSecurity {
+		t.Fatalf("credential security %s, want the previous %s", got, beforeSecurity)
+	}
+	onlyTheCredential([]string{name})
+	if slices.Contains(host.events, "restart") {
+		t.Fatalf("events %v: the gateway restarted after a failed set", host.events)
+	}
+
+	// Nothing stored before: nothing stored after, nothing left behind.
+	windowsSecretTrustCheck = previousCheck
+	if out, err := runWindowsSecretCommand(t, "remove", enterpriseSecretOptions{name: name, json: true}, ""); err != nil {
+		t.Fatalf("remove: %v\n%s", err, out)
+	}
+	windowsSecretTrustCheck = func(string, string) error { return errors.New("refused") }
+	if _, err := runWindowsSecretCommand(t, "set", enterpriseSecretOptions{name: name, fromStdin: true, json: true}, "third-value-0003\r\n"); err == nil {
+		t.Fatal("set with a failing trust check and nothing stored succeeded")
+	}
+	if _, err := os.Lstat(credential); !os.IsNotExist(err) {
+		t.Fatalf("a value that failed the trust check is stored: %v", err)
+	}
+	if entries, err := os.ReadDir(dir); err == nil && len(entries) != 0 {
+		t.Fatalf("secrets folder keeps %d entries after the failed set, want none", len(entries))
+	}
+}
+
+// GAP-2430 live (dc-fc-r104-cap-ewin4): a concurrent process that holds the
+// rejected new file open made the put-back fail with access denied, and the
+// previous credential was dropped with it. The put-back waits out a short
+// hold; a hold it cannot wait out leaves the previous value under its kept
+// name.
+func TestWindowsSecretPutBackWaitsOutAShortHoldOnTheRejectedFile(t *testing.T) {
+	dir := t.TempDir()
+	final := filepath.Join(dir, "ai-defense-api-key")
+	kept := filepath.Join(dir, ".ai-defense-api-key.kept-0011223344556677")
+	if err := os.WriteFile(final, []byte("new-value"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(kept, []byte("previous-value"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	hold := func() windows.Handle {
+		t.Helper()
+		p, _ := windows.UTF16PtrFromString(final)
+		h, err := windows.CreateFile(p, windows.GENERIC_READ, windows.FILE_SHARE_READ, nil, windows.OPEN_EXISTING, windows.FILE_ATTRIBUTE_NORMAL, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return h
+	}
+	h := hold()
+	released := make(chan struct{})
+	go func() {
+		time.Sleep(400 * time.Millisecond)
+		_ = windows.CloseHandle(h)
+		close(released)
+	}()
+	if err := restoreWindowsSecret(kept, final); err != nil {
+		t.Fatalf("put-back after a 400 ms hold: %v", err)
+	}
+	<-released
+	if data, err := os.ReadFile(final); err != nil || string(data) != "previous-value" {
+		t.Fatalf("after the put-back %s holds %q (%v), want the previous value", final, data, err)
+	}
+	if _, err := os.Lstat(kept); !os.IsNotExist(err) {
+		t.Fatalf("the kept name is still there: %v", err)
+	}
+
+	// A hold longer than the wait: the previous value stays under its kept name.
+	if err := os.WriteFile(kept, []byte("previous-value"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	h = hold()
+	defer windows.CloseHandle(h)
+	if err := restoreWindowsSecret(kept, final); err == nil {
+		t.Fatal("put-back over a file held for the whole wait succeeded")
+	}
+	if data, err := os.ReadFile(kept); err != nil || string(data) != "previous-value" {
+		t.Fatalf("kept copy %q (%v), want the previous value", data, err)
 	}
 }

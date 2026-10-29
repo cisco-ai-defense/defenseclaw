@@ -7,6 +7,7 @@ import (
 	"context"
 	"database/sql"
 	"strings"
+	"time"
 )
 
 // preparedStatementQueries are the inserts every hook call repeats: about 7
@@ -48,7 +49,9 @@ func (s *Store) txExecPrepared(ctx context.Context, tx *sql.Tx, op, query string
 	if stmt == nil {
 		return txExecContextObserved(ctx, tx, op, s.sqliteBusyObservabilityV8(), query, args...)
 	}
+	started := time.Now()
 	res, err := tx.StmtContext(ctx, stmt).ExecContext(ctx, args...)
+	s.noteWriteAttempt(started, err, true)
 	if err != nil && strings.Contains(err.Error(), "statement from different database") {
 		// A transaction of another handle: run the text there.
 		return txExecContextObserved(ctx, tx, op, s.sqliteBusyObservabilityV8(), query, args...)
@@ -58,5 +61,5 @@ func (s *Store) txExecPrepared(ctx context.Context, tx *sql.Tx, op, query string
 			reportSQLiteBusyDetached(ctx, observer, op)
 		}
 	}
-	return res, err
+	return res, s.markHeldLockError(err)
 }

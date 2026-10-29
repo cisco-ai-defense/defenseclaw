@@ -487,7 +487,7 @@ func posixRecursiveForceFlags(argv []string) bool {
 	recursive := false
 	force := false
 	options := true
-	for _, argument := range argv[1:] {
+	for _, argument := range argvOperands(argv) {
 		if options && argument == "--" {
 			options = false
 			continue
@@ -559,7 +559,7 @@ func powerShellSwitchValueEnabled(value string, joined bool) bool {
 func cmdRecursiveQuietFlags(argv []string) bool {
 	recursive := false
 	quiet := false
-	for _, argument := range argv[1:] {
+	for _, argument := range argvOperands(argv) {
 		switch strings.ToLower(argument) {
 		case "/s":
 			recursive = true
@@ -2015,7 +2015,7 @@ func staticKubernetesExecOuter(command actionfacts.CommandFact) bool {
 		hasArgumentFold(command.Argv, "--version") {
 		return false
 	}
-	for index, argument := range command.Argv[1:] {
+	for index, argument := range argvOperands(command.Argv) {
 		action := strings.ToLower(argument)
 		if action != "exec" && action != "debug" &&
 			(action != "rsh" || !(oneOfFold(command.Program, "oc"))) {

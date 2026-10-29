@@ -44,7 +44,7 @@ defenseclaw setup devin --mode observe
 defenseclaw setup devin --mode action
 ```
 
-A first setup without `--mode` defaults to observe; a re-run without `--mode` keeps the current mode.
+A first setup without `--mode` defaults to observe; a re-run without `--mode` keeps the current mode. On a terminal a re-run still asks for the mode, with the current one as the default (Enter keeps it), and whether to re-apply the hooks; in action mode it also asks whether to add the LLM judge. `--yes` skips the questions ([the questions setup asks](/docs/guardrail/switching-connectors#the-questions-setup-asks)).
 
 On Windows, run the same commands in PowerShell. Review observed events before you use action mode. Restart open Devin CLI sessions and reopen Devin Desktop tabs afterwards.
 
@@ -130,7 +130,7 @@ Devin has no native resumable ask. A `confirm` finding stays in audit and cannot
 
 ### Fail mode
 
-Can fail closed: yes. On a per-user install a gateway that is not running follows the policy tier: the default and permissive policies let the call run with one warning, and the strict policy blocks it ([gateway outage table](/docs/connectors/capability-matrix#gateway-outage)). Every other failure, an error or unusable answer included, blocks the events that support a block response. In a standalone enterprise deployment each hook follows the administrator's fail mode: `closed` unless `hook_fail_mode` (global or for Devin) is `open`. Devin itself blocks only on exit `2`; every other hook error fails open on its side. Settings and edge cases are in [Fail modes](/docs/reference/fail-modes). What a gateway outage does to a Devin call is in the [gateway outage table](/docs/connectors/capability-matrix#gateway-outage).
+Can fail closed: yes. On a per-user install with no saved mode, a gateway that is not running follows the policy tier: the default and permissive policies let the call run with one warning, and the strict policy blocks it ([gateway outage table](/docs/connectors/capability-matrix#gateway-outage)). Every other failure, an error or unusable answer included, blocks the events that support a block response. In a standalone enterprise deployment each hook follows the administrator's fail mode: `closed` unless `hook_fail_mode` (global or for Devin) is `open`. Devin itself blocks only on exit `2`; every other hook error fails open on its side. Settings and edge cases are in [Fail modes](/docs/reference/fail-modes). What a gateway outage does to a Devin call is in the [gateway outage table](/docs/connectors/capability-matrix#gateway-outage).
 
 ## Hook capabilities
 

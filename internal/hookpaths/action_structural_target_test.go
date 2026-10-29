@@ -35,8 +35,8 @@ func TestR104StructuralProtectedNamedPOSIX(t *testing.T) {
 		`for p in ~/.ssh/authorized_k*; do cp payload "$p"; done`,
 		`for p in ~/.s*/authorized_keys; do cp payload "$p"; done`,
 		`sh -c 'cat "$HOME/.ssh/authorized_keys"'`,
-		`grep marker ~/.ssh/authorized_keys`,
-		`wc -l ~/.ssh/authorized_keys`,
+		`grep marker payload >> ~/.ssh/authorized_keys`,
+		`wc -l ~/.ssh/authorized_keys > ~/.ssh/authorized_keys2`,
 		`cd ~/.ssh && echo authorized_keys`,
 		`ls ~/.ssh && echo done`,
 	} {
@@ -50,6 +50,9 @@ func TestR104StructuralProtectedNamedPOSIX(t *testing.T) {
 		`cd ~/.ssh`, `pushd ~/.ssh`, `ls ~/.ssh`, `ls -o ~/.ssh`, `stat ~/.ssh`,
 		`cd ~/.ssh && cat authorized_keys`, `cd ~/.ssh && ls authorized_keys`,
 		`grep marker report.txt`,
+		// Plain reads stay allowed in action (owner decision 2, GAP-2168).
+		`grep marker ~/.ssh/authorized_keys`,
+		`wc -l ~/.ssh/authorized_keys`,
 		`cp payload ~/.s*/ordinary.txt`, `cp payload ~/.ssh/*.pub`,
 		`pushd build; popd; cp payload authorized_keys`,
 	} {

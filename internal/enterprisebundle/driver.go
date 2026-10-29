@@ -887,6 +887,40 @@ func (d *Driver) installedPendingOwner(rc *Receipt, installed string) *Receipt {
 	return nil
 }
 
+// PendingCommitTakenOver returns the other unfinished receipt, of a lower
+// version, whose lifecycle commit (config.generation.json) holds
+// installedConfig when rc renders exactly those bytes and has no commit of
+// its own: a version bump that changes no setting, delivered while the lower
+// bundle waits for the gateway. rc can record its own generation for those
+// bytes without changing what the gateway enforces, so it needs no running
+// gateway; the lower receipt then settles superseded (GAP-1187, GAP-2088).
+// nil when rc is not that case.
+func (d *Driver) PendingCommitTakenOver(rc *Receipt, installedConfig []byte) (*Receipt, error) {
+	if rc == nil || installedConfig == nil {
+		return nil, nil
+	}
+	installed := sha256Hex(installedConfig)
+	if installed != rc.ConfigSHA256 {
+		return nil, nil
+	}
+	if _, committed := d.committedGeneration(rc, installed); committed {
+		return nil, nil
+	}
+	receipts, err := d.Store.Unsettled()
+	if err != nil {
+		return nil, err
+	}
+	for _, other := range receipts {
+		if other.ReceiptID == rc.ReceiptID || other.Version >= rc.Version || (other.State != StateStaged && other.State != StateApplied) {
+			continue
+		}
+		if _, committed := d.committedGeneration(other, installed); committed {
+			return other, nil
+		}
+	}
+	return nil, nil
+}
+
 func installedPendingMessage(owner *Receipt) string {
 	return fmt.Sprintf("; the deployment holds policy bundle %s version %d (receipt %s), which an earlier run committed and the gateway has not confirmed: "+
 		"it stays installed and pending, nothing was rolled back, and the next lifecycle run settles it", owner.BundleID, owner.Version, owner.ReceiptID)

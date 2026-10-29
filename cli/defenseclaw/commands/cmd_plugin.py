@@ -36,7 +36,11 @@ import click
 
 from defenseclaw import connector_paths, ux
 from defenseclaw.commands import compute_verdict as _compute_verdict
-from defenseclaw.commands._audit_notice import note_asset_policy_observed, saved_change_audit
+from defenseclaw.commands._audit_notice import (
+    note_asset_policy_observed,
+    release_superseded_scan_decision,
+    saved_change_audit,
+)
 from defenseclaw.commands._scan_ui import record_scan as _record_scan
 from defenseclaw.context import AppContext, pass_ctx
 from defenseclaw.enforce import asset_lists
@@ -1577,6 +1581,13 @@ def install(app: AppContext, name_or_path: str, force: bool, take_action: bool, 
             raise SystemExit(1)
         for connector, plugin_path in installed_by_connector.items():
             click.echo(f"[install] installed {plugin_name!r} -> {plugin_path} (connector={connector})")
+            release_superseded_scan_decision(
+                app.logger, pe, "plugin", plugin_name, connector,
+                enable_runtime=(
+                    (lambda: _enable_plugin_via_gateway(app, plugin_name))
+                    if _normalize_runtime_connector(connector) == "openclaw" else None
+                ),
+            )
             if app.logger:
                 saved_change_audit(app.logger).log_action(
                     "plugin-install",
@@ -5117,7 +5128,14 @@ def _plugin_info_card(
     if connector:
         info_map["connector"] = connector
     if scan_entry is not None:
-        info_map["scan"] = scan_entry
+        # GAP-2123: the private stored rule ids never reach the output, and
+        # the Verdict is the word plugin list shows for this scan (the
+        # GAP-1389 judge-only pre-step included); an action has its own line.
+        info_map["scan"] = _public_scan_entry(scan_entry)
+        if not scan_entry.get("clean"):
+            label, _style = _plugin_list_verdict_for(app, connector)(None, scan_entry)
+            if label != "-":
+                info_map["scan"]["verdict"] = label
     if action_name in actions_map:
         ae = actions_map[action_name]
         if not ae.actions.is_empty():
@@ -5176,7 +5194,7 @@ def _print_plugin_info_card(
             click.echo("  Findings: 0 findings")
         else:
             sev = scan_data.get("max_severity", "INFO")
-            verdict, _style = _compute_verdict(None, scan_data)
+            verdict = scan_data.get("verdict") or _compute_verdict(None, scan_data)[0]
             if verdict == "-":
                 verdict = str(sev).lower()
             click.secho(f"  Verdict:  {verdict}", fg=_SCAN_SEVERITY_COLORS.get(sev))

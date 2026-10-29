@@ -729,9 +729,9 @@ jobs:
               "pyjwt": ">=2.15.0",
               "starlette": ">=1.3.1,<1.4",
               "fastapi": ">=0.137.1,<0.138",
-              # Keep the portable LiteLLM line in wheel metadata. A tool.uv
+              # Keep the fixed LiteLLM line in wheel metadata. A tool.uv
               # override is not shipped and cannot protect installers.
-              "litellm": ">=1.91.5,<1.92.0",
+              "litellm": ">=1.103.10,<1.104.0",
           }
           with zipfile.ZipFile(wheel) as archive:
               metadata_name = next(
@@ -963,11 +963,25 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
   connector-matrix:
-    name: Connector Matrix
+    name: Connector Matrix (${{ matrix.label }})
     needs: changes
     if: ${{ !cancelled() && needs.changes.outputs.core != 'false' }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    # The connector package alone took 16 of the 20 minutes (the job was
+    # cancelled at its budget with every test passed), so its matrix tests
+    # run in two parts beside the other packages (Makefile
+    # CONNECTOR_MATRIX_PART).
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - part: packages
+            label: packages and CLI
+          - part: "0"
+            label: connector 1 of 2
+          - part: "1"
+            label: connector 2 of 2
     steps:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
@@ -986,7 +1000,7 @@ jobs:
           save-cache: ${{ github.ref == 'refs/heads/main' }}
       - run: make plugin
       - run: make dev-pycli
-      - run: make connector-matrix-test
+      - run: make connector-matrix-test CONNECTOR_MATRIX_PART=${{ matrix.part }} CONNECTOR_MATRIX_CONNECTOR_PARTS=2
 
   # The Secure Client profile hook hardening flow (a synthetic target home and
   # a TCP fake gateway) runs only on macOS. Linux has only the standalone
@@ -1270,6 +1284,16 @@ jobs:
           tar -xzf "$dir/goreleaser.tar.gz" -C "$dir" goreleaser
           "$dir/goreleaser" --version
           echo "$dir" >> "$GITHUB_PATH"
+      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+      # The managed Linux packages install the scanner runtime (GAP-1527);
+      # nfpm takes these trees, so they are built first.
+      - name: Build the managed Linux scanner runtimes
+        shell: bash
+        run: |
+          set -euo pipefail
+          for target in linux-amd64 linux-arm64; do
+            packaging/unix/build-scanner-runtime.sh --target "$target" --out-dir "scanner-runtime/$target"
+          done
       - name: Build the Linux packages with the release GoReleaser config
         env:
           # A snapshot needs no tag history; the version is 9.9.9-SNAPSHOT-<commit>.
@@ -1440,6 +1464,7 @@ jobs:
           persist-credentials: false
       - uses: ./.github/actions/setup-go
         id: go
+      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
       - name: Build the unsigned standalone pkg
         shell: bash
         env:

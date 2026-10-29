@@ -249,6 +249,26 @@ def test_doctor_warns_and_fix_removes_only_a_stale_lock(account):
     assert cmd_doctor._fix_stale_install_lock(account.cfg, assume_yes=True)[0] == "skip"
 
 
+# GAP-2092: once its installer is gone, the lock of an interrupted install
+# holds no tool call (GAP-1024; only the strict tier and the gateway start
+# wait for it, GAP-2082), so doctor does not say the hooks wait; while its
+# installer runs, the lock holds like any other.
+@pytest.mark.parametrize("record", ["previous.new", ".repair", ".rollback-hold", ".lifecycle-txn.json"])
+def test_doctor_says_an_interrupted_install_holds_no_tool_call_once_its_installer_is_gone(account, record):
+    lock = _lock(account.data, f"{DEAD}\n")
+    (account.data / record).mkdir()
+    r = cmd_doctor._DoctorResult(mode="check")
+    cmd_doctor._check_install_lock(account.cfg, r)
+    check = r.checks[-1]
+    assert check["reason_code"] == "install-lock-interrupted-install", check
+    detail = str(check.get("detail", "")) + str(check.get("message", ""))
+    assert "hooks wait" not in detail, check
+    assert "hold no tool call" in detail and "strict tier blocks" in detail, check
+    assert "installer again" in str(check.get("remediation", "")), check
+    _live_owner(lock)
+    assert cmd_doctor._install_lock_state(str(account.data))[0] == "held"
+
+
 def test_fix_keeps_a_lock_an_interrupted_install_keeps(account):
     lock = _lock(account.data, f"{DEAD}\n")
     (account.data / "previous.new").mkdir()
@@ -442,11 +462,12 @@ def test_the_repair_is_registered_and_documented():
     assert "doctor.install.stale-lock.clear" in ids
     for page in ("reference/cli.mdx",):
         assert "doctor.install.stale-lock.clear" in (REPO / "docs-site/content/docs" / page).read_text()
-    # The plugins and doctor share the same records and bounds.
+    # Doctor names an interrupted install's recovery step; the plugins do not
+    # hold a lock for its records once the installer is gone (GAP-1024).
     for asset in ("amp-plugin.ts", "opencode-plugin.js"):
         body = (REPO / "internal/gateway/connector/hooks" / asset).read_text()
         for record in cmd_doctor._INSTALL_RECOVERY_RECORDS:
-            assert f'"{record}"' in body, (asset, record)
+            assert f'"{record}"' not in body, (asset, record)
         # One identity record, and no clock (round k).
         assert '"proc-start"' in body and "NO_PID_MS" not in body and "START_SLACK" not in body
 

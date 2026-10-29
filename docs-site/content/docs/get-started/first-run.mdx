@@ -9,11 +9,19 @@ keywords:
   - DefenseClaw scripted setup
 ---
 
-After the [install](/docs/get-started/download), DefenseClaw is on disk but not configured. `defenseclaw init` is the guided wizard. `defenseclaw quickstart` is the zero-prompt equivalent with safe defaults. Both run the same setup and print the same report. You do not need `init` before `quickstart`. For a guided first block, follow the [Quickstart](/docs/get-started/quickstart).
+After the [install](/docs/get-started/download), DefenseClaw is on disk but not configured. `defenseclaw init` is the guided wizard. `defenseclaw quickstart` is the zero-prompt equivalent with safe defaults. Both run the same setup and print the same report. You do not need `init` before `quickstart`. If `init` chose no agent and started the gateway, `quickstart --connector <name>` restarts the gateway so it loads the agent and writes its hooks. For a guided first block, follow the [Quickstart](/docs/get-started/quickstart).
 
 ## Path A: interactive (`defenseclaw init`)
 
-On a terminal, `init` runs local agent discovery, pre-selects every installed hook connector and configures them all in `observe` mode. It then shows one checklist, **Select connector(s) for action enforcement**; tick the agents that should block. The action-only settings (hook fail mode and human approval with its minimum severity) are asked once and shared by every agent you promote. On a new install the fail mode prompt offers `closed`. The wizard asks **Start gateway after setup?** (default yes).
+On a terminal, `init` runs local agent discovery, prints the **Agent discovery** table and asks, in this order:
+
+1. **Select active connector(s)**: every installed hook connector is pre-selected (on an install that is already set up, the active ones). Clear a box to leave that agent out, or clear every box to protect no host agent for now.
+2. **Scanner mode** (`local`, `remote` or `both`, default `local`).
+3. **Select connector(s) for action enforcement**: the agents you tick block; every other selected agent runs in `observe`.
+4. Only when you ticked an agent in step 3: **Require human approval for risky actions?** (default no; yes also asks the minimum severity), asked once and shared by every action agent, then **Select action connector(s) for LLM judge** (leave it clear for rules-only scanning; a ticked agent asks for the judge LLM settings).
+5. **Start gateway after setup?** (default yes), then **Run targeted readiness checks?** (default yes).
+
+`init` does not ask for an outage mode and saves none: while the gateway is not running, the default and permissive policies let a call run with a warning and strict blocks it. Pass `--fail-mode` to save a choice; a saved choice wins over the policy, also over `use-pack strict`. When a saved `open` decides, the `Next` lines say `While the gateway is not running, hooks let calls run with a warning (your saved fail mode; to block them: ...)` and name the command that saves `closed` instead. A later `init` run keeps the fail modes already saved for your connectors.
 
 Proxy connectors are detected but left out of the observe-all set, because they own the single LLM proxy port. Use `defenseclaw setup <proxy>` for them.
 
@@ -123,7 +131,7 @@ In CI, check the `status` field of `--json-summary`, because `partial` also exit
     },
     "--fail-mode": {
       type: "open|closed",
-      description: "Hook fail mode. Omitted, it keeps the current setting, which is closed on a new install.",
+      description: "Saves your choice for a gateway outage; a saved choice wins over the policy. Omitted, nothing is saved: the default and permissive policies let a call run with a warning, strict blocks it.",
     },
     "--human-approval / --no-human-approval": {
       type: "flag",

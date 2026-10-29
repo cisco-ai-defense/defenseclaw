@@ -1900,6 +1900,36 @@ func (m *Manager) recordSnapshot(ctx context.Context, b *box) {
 	m.tel.RecordSandboxWorkspace(ctx, ev)
 }
 
+// ReportDisk names in the activity feed the filling own disk of a running
+// MicroVM that its session found (GAP-1140): the session warned in its
+// terminal and summary only, so `sandbox activity` said nothing until the
+// disk was full and the session over. Report only: nothing is stopped.
+func (m *Manager) ReportDisk(_ context.Context, name string, r sandboxapi.DiskReport) error {
+	if _, err := m.box(name); err != nil {
+		return err
+	}
+	if r.SizeBytes <= 0 || r.FreeBytes < 0 || r.FreeBytes > r.SizeBytes {
+		return sandboxapi.Errorf(sandboxapi.CodeInvalid, "size_bytes must be positive and free_bytes between 0 and size_bytes")
+	}
+	used := (r.SizeBytes - r.FreeBytes) * 100 / r.SizeBytes
+	msg := fmt.Sprintf("its own disk is %d%% full (%s of %s free)", used, diskBytes(r.FreeBytes), diskBytes(r.SizeBytes))
+	if r.Fast {
+		msg += " and filling fast"
+	}
+	msg += ": a MicroVM stopped with its disk full cannot start again; `defenseclaw sandbox exec " + name +
+		" -- df -h /` shows it, `defenseclaw sandbox pull " + name + "` brings its work back before it fills"
+	m.feed.Publish(sandboxapi.ActivityEvent{Kind: sandboxapi.ActivityLifecycle, Sandbox: name, Reason: sandboxapi.ReasonDiskFilling, Message: msg})
+	return nil
+}
+
+// diskBytes is n bytes in MiB, or in GiB with one decimal from 1 GiB.
+func diskBytes(n int64) string {
+	if n >= 1<<30 {
+		return fmt.Sprintf("%.1f GiB", float64(n)/(1<<30))
+	}
+	return fmt.Sprintf("%d MiB", n>>20)
+}
+
 // ReportWorkspace records a copy-mode workspace step the CLI ran (upload,
 // or pull with apply, branch or patch) with the sandbox's identity.
 func (m *Manager) ReportWorkspace(ctx context.Context, name string, r sandboxapi.WorkspaceReport) error {

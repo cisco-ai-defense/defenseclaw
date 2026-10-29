@@ -43,36 +43,41 @@ func r104Loop3CDPathHome(t *testing.T) (home, cwd string) {
 }
 
 // A cd operand that Bash may resolve through CDPATH does not prove the
-// directory the later write lands in, so the link scope stays opaque and the
-// proof is incomplete, whatever name the write uses. An absolute or ./ cd
-// without dot-dot keeps the precise proof.
+// directory the later write lands in, so the ordered cd/link/write shortcut
+// does not take it. The link itself is placed in the directory the top-level
+// cd statements name (GAP-1742): a link of plain files is not a protected
+// write, so the link scope is not opaque and the evidence stays complete.
+// An unexported CDPATH that the hook cannot see is a documented limit of the
+// pre-tool check; a pushd keeps the conservative opaque scope.
 func TestR104Loop3SearchPathCDKeepsLinkScopeOpaque(t *testing.T) {
+	skipPOSIXGrammarOnWindows(t)
 	home, cwd := r104Loop3CDPathHome(t)
 	for _, tc := range []struct {
-		command string
-		opaque  bool
+		command  string
+		searched bool // the cd may use CDPATH: no ordered-chain shortcut
+		opaque   bool
 	}{
-		{`cd sub && ln -s ../a b && echo marker > out.txt`, true},
-		{`cd sub && ln -s ../a b && echo marker >> out.txt`, true},
-		{`cd sub && ln -s ../a b && echo marker > notes.md`, true},
-		{`cd "sub" && ln -s ../a b && echo marker > out.txt`, true},
-		{`cd sub/ && ln -s ../a b && echo marker > out.txt`, true},
-		{`cd sub/. && ln -s ../a b && echo marker > out.txt`, true},
-		{`cd sub/deeper && ln -s ../../a b && echo marker > out.txt`, true},
-		{`cd ../project/sub && ln -s ../a b && echo marker > out.txt`, true},
-		{`cd ./sub/../sub && ln -s ../a b && echo marker > out.txt`, true},
-		{`pushd sub && ln -s ../a b && echo marker > out.txt`, true},
-		{`cd ./sub && ln -s ../a b && echo marker > out.txt`, false},
-		{`cd ./sub/deeper && ln -s ../../a b && echo marker > out.txt`, false},
-		{`cd . && ln -s a b && echo marker > out.txt`, false},
-		{`cd ` + filepath.ToSlash(filepath.Join(cwd, "sub")) + ` && ln -s ../a b && echo marker > out.txt`, false},
+		{`cd sub && ln -s ../a b && echo marker > out.txt`, true, false},
+		{`cd sub && ln -s ../a b && echo marker >> out.txt`, true, false},
+		{`cd sub && ln -s ../a b && echo marker > notes.md`, true, false},
+		{`cd "sub" && ln -s ../a b && echo marker > out.txt`, true, false},
+		{`cd sub/ && ln -s ../a b && echo marker > out.txt`, true, false},
+		{`cd sub/. && ln -s ../a b && echo marker > out.txt`, true, false},
+		{`cd sub/deeper && ln -s ../../a b && echo marker > out.txt`, true, false},
+		{`cd ../project/sub && ln -s ../a b && echo marker > out.txt`, true, false},
+		{`cd ./sub/../sub && ln -s ../a b && echo marker > out.txt`, true, false},
+		{`pushd sub && ln -s ../a b && echo marker > out.txt`, true, true},
+		{`cd ./sub && ln -s ../a b && echo marker > out.txt`, false, false},
+		{`cd ./sub/deeper && ln -s ../../a b && echo marker > out.txt`, false, false},
+		{`cd . && ln -s a b && echo marker > out.txt`, false, false},
+		{`cd ` + filepath.ToSlash(filepath.Join(cwd, "sub")) + ` && ln -s ../a b && echo marker > out.txt`, false, false},
 	} {
 		file, ok := parseShell(tc.command)
 		if !ok {
 			t.Fatalf("%q does not parse", tc.command)
 		}
-		if call, _ := staticChangedDirectoryLink(file, cwd, home); (call != nil) == tc.opaque {
-			t.Fatalf("%q: shortcut = %v, want %v", tc.command, call != nil, !tc.opaque)
+		if call, _ := staticChangedDirectoryLink(file, cwd, home); (call != nil) == tc.searched {
+			t.Fatalf("%q: shortcut = %v, want %v", tc.command, call != nil, !tc.searched)
 		}
 		if links := commandLinksWithFacts(tc.command, cwd, home, nil, false); links.globalOpaque != tc.opaque {
 			t.Fatalf("%q: opaque link scope = %v, want %v", tc.command, links.globalOpaque, tc.opaque)

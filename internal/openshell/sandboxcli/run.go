@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
 	"net/url"
 	"slices"
 	"sort"
@@ -144,6 +145,9 @@ func (a *App) Run(ctx context.Context, o RunOptions) (err error) {
 	if err != nil {
 		return err
 	}
+	if err := a.refuseForbiddenAccount(ctx, spec.Name); err != nil {
+		return err
+	}
 	api, err := a.api()
 	if err != nil {
 		return err
@@ -151,16 +155,23 @@ func (a *App) Run(ctx context.Context, o RunOptions) (err error) {
 	// A managed computer whose OpenShell is not ready yet installs or starts
 	// it for this run: the run's own policy decides first, so a pack, agent
 	// or group the organization forbids installs nothing (GAP-0812).
-	st, err := a.preflight(ctx, api, sandboxapi.ReadyRequest{Harness: spec.Name, Pack: o.Pack}, func(ctx context.Context, st *sandboxapi.Status) error {
+	st, err := a.preflight(ctx, api, sandboxapi.ReadyRequest{Harness: spec.Name, Pack: o.Pack}, func(ctx context.Context, st *sandboxapi.Status) (bool, error) {
 		ex, err := a.runPolicyRefusal(ctx, api, st, spec, project, o, true)
-		if err == nil && ex != nil && ex.Managed != nil && ex.Managed.Provisional {
+		if err != nil || ex == nil || ex.Managed == nil {
+			return true, err
+		}
+		if ex.Managed.Provisional {
 			// The ready waits for the directory before it installs or
 			// starts anything, as the create does (GAP-0820): say why the
 			// run pauses (GAP-1552).
 			a.note(fmt.Sprintf("your organization's directory did not answer, so DefenseClaw waits up to %s for your sandbox policy before it starts OpenShell…",
 				sandboxrelay.ResolveIdentityWait.Round(time.Second)))
+			return true, nil
 		}
-		return err
+		// An account or agent the organization does not allow in a sandbox:
+		// the ready refuses it in the organization's words and installs or
+		// starts nothing, so the run announces no install (GAP-0534).
+		return managedExplainAllowsAgent(ex.Managed, spec.Name), nil
 	})
 	if err != nil {
 		return err
@@ -720,7 +731,7 @@ func (a *App) runNative(spec *harness.Spec, args []string) error {
 
 // preflight checks that the daemon runs with sandboxes available, after it
 // readied a managed computer's OpenShell for the run (readyManaged).
-func (a *App) preflight(ctx context.Context, api API, run sandboxapi.ReadyRequest, beforeReady func(context.Context, *sandboxapi.Status) error) (*sandboxapi.Status, error) {
+func (a *App) preflight(ctx context.Context, api API, run sandboxapi.ReadyRequest, beforeReady readyCheck) (*sandboxapi.Status, error) {
 	return a.checkSandboxes(ctx, api, true, run, beforeReady)
 }
 
@@ -730,7 +741,7 @@ func (a *App) preflight(ctx context.Context, api API, run sandboxapi.ReadyReques
 // set) refuses the run before the ready installs or starts anything
 // (readyManaged).
 func (a *App) checkSandboxes(ctx context.Context, api API, ready bool, run sandboxapi.ReadyRequest,
-	beforeReady func(context.Context, *sandboxapi.Status) error) (*sandboxapi.Status, error) {
+	beforeReady readyCheck) (*sandboxapi.Status, error) {
 	st, err := api.Status(ctx)
 	if err != nil {
 		return nil, apiError(err)
@@ -788,6 +799,47 @@ func policyRefusal(err error) bool {
 	return strings.HasPrefix(e.Detail, sandboxrelay.ReasonPolicyUnloadable)
 }
 
+// refuseForbiddenAccount refuses the run of an account whose organization
+// does not allow it sandboxes, by the managed gateway's own settled view
+// (ManagedAccountPolicy), before the run reaches the account's sandbox
+// daemon: its socket starts the daemon, which then held the sandbox ports
+// and wrote its state for an account that can run no sandbox (GAP-0534).
+// The words are the daemon's ready refusal. A view that is provisional (the
+// directory has not answered yet), that allows the account, or that the
+// gateway did not give leaves the decision to the daemon, as before; an
+// agent or pack refusal is the daemon's too.
+func (a *App) refuseForbiddenAccount(ctx context.Context, harness string) error {
+	if a.ManagedAccountPolicy == nil {
+		return nil
+	}
+	view, err := a.ManagedAccountPolicy(ctx, harness)
+	if err != nil || view == nil || view.Provisional || view.Allowed {
+		return nil
+	}
+	a.managedSeen = managedStatusOfExplain(view)
+	return apiError(&sandboxapi.Error{Code: sandboxapi.CodeAdminViolation, Status: http.StatusForbidden,
+		Message: "Your organization doesn't allow sandboxes for your account.", Detail: sandboxrelay.ReasonNotAllowed})
+}
+
+// readyCheck judges a run before its ready installs or starts anything
+// (readyManaged): an error refuses the run; announce false is a run the
+// ready itself refuses, which installs nothing and so gets no install
+// notice (GAP-0534).
+type readyCheck func(ctx context.Context, st *sandboxapi.Status) (announce bool, err error)
+
+// managedExplainAllowsAgent reports whether the caller's managed policy view
+// allows the agent conn in a sandbox: sandboxes allowed for the account, and
+// the agent on the profile's list when it has one (the daemon's ready and
+// the create judge both).
+func managedExplainAllowsAgent(me *sandboxapi.ManagedExplain, conn string) bool {
+	if !me.Allowed {
+		return false
+	}
+	return len(me.AllowedHarnesses) == 0 || slices.ContainsFunc(me.AllowedHarnesses, func(h string) bool {
+		return config.NormalizeConnectorName(h) == conn
+	})
+}
+
 // readier is a daemon client that readies a managed computer's OpenShell
 // (sandboxapi.Client.Ready).
 type readier interface {
@@ -803,18 +855,22 @@ type readier interface {
 // refuses the run first: what the run's policy forbids installs nothing
 // (GAP-0812).
 func (a *App) readyManaged(ctx context.Context, api API, st *sandboxapi.Status, run sandboxapi.ReadyRequest,
-	beforeReady func(context.Context, *sandboxapi.Status) error) (*sandboxapi.Status, error) {
+	beforeReady readyCheck) (*sandboxapi.Status, error) {
 	if !readiesAtRun(api, st) {
 		return st, nil
 	}
+	announce := true
 	if beforeReady != nil {
-		if err := beforeReady(ctx, st); err != nil {
+		var err error
+		if announce, err = beforeReady(ctx, st); err != nil {
 			return nil, err
 		}
 	}
-	if a.managedInstallPending(st.Managed) {
+	switch {
+	case !announce:
+	case a.managedInstallPending(st.Managed):
 		a.note(strings.TrimSpace("Installing OpenShell "+st.Managed.OpenShellVersion) + " for your account and starting it (first run only)…")
-	} else {
+	default:
 		a.note("Starting your OpenShell gateway…")
 	}
 	ready, err := api.(readier).Ready(ctx, run)

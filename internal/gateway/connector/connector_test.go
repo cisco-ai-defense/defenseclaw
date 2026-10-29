@@ -7921,7 +7921,7 @@ func TestSandboxPreferenceWritesShimsWithoutPolicyFile(t *testing.T) {
 	}
 	dir := t.TempDir()
 	opts := SetupOpts{DataDir: dir, APIAddr: "127.0.0.1:18970", ProxyAddr: "127.0.0.1:4000"}
-	if err := SetupSubprocessEnforcement(SubprocessSandbox, opts); err != nil {
+	if err := SetupSubprocessEnforcement(SubprocessSandbox, opts, "openclaw"); err != nil {
 		t.Fatalf("setup: %v", err)
 	}
 	if _, err := os.Stat(filepath.Join(dir, "shims", "curl")); err != nil {
@@ -7957,7 +7957,7 @@ func TestTeardownSubprocessEnforcement(t *testing.T) {
 	opts := SetupOpts{DataDir: dir, APIAddr: "127.0.0.1:18970", ProxyAddr: "127.0.0.1:4000"}
 
 	// Setup first
-	if err := SetupSubprocessEnforcement(SubprocessShims, opts); err != nil {
+	if err := SetupSubprocessEnforcement(SubprocessShims, opts, "openclaw"); err != nil {
 		t.Fatalf("setup: %v", err)
 	}
 	// Verify shims exist

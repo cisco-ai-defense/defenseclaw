@@ -194,6 +194,17 @@ func claudeCodeProfileRespond(in HookRespondInput) HookRespondOutput {
 	return HookRespondOutput{FieldName: "claude_code_output", Output: output}
 }
 
+// claudeCodeProfileWatchPaths mirrors the gateway's
+// claudeCodeWatchPathsForRequest: on a managed gateway the home entries come
+// from the verified caller's home, never the service account's; an
+// unresolved caller keeps only its project entries (GAP-0066).
+func claudeCodeProfileWatchPaths(req HookProfileRequest, root string) []string {
+	if req.ManagedWatch {
+		return ClaudeCodeWatchPathsForHome(root, req.WatchHome)
+	}
+	return ClaudeCodeWatchPaths(root)
+}
+
 // claudeCodeOutputForProfile mirrors claudeCodeOutput() in
 // gateway/claude_code_hook.go. Duplicated (not imported) because the
 // connector package cannot depend on gateway. Both are live: the
@@ -252,10 +263,13 @@ func claudeCodeOutputForProfile(req HookProfileRequest, action, rawAction, reaso
 	if watchRoot == "" {
 		watchRoot = req.CWD
 	}
+	if watchRoot == "" && req.ManagedWatch {
+		watchRoot = req.WatchCWD
+	}
 	if event == "SessionStart" {
 		output := map[string]interface{}{
 			"hookEventName": "SessionStart",
-			"watchPaths":    ClaudeCodeWatchPaths(watchRoot),
+			"watchPaths":    claudeCodeProfileWatchPaths(req, watchRoot),
 		}
 		if additional != "" {
 			output["additionalContext"] = additional
@@ -263,7 +277,12 @@ func claudeCodeOutputForProfile(req HookProfileRequest, action, rawAction, reaso
 		return map[string]interface{}{"hookSpecificOutput": output}
 	}
 	if event == "CwdChanged" || event == "FileChanged" {
-		output := map[string]interface{}{"watchPaths": ClaudeCodeWatchPaths(watchRoot)}
+		// Claude Code reads watchPaths of these events only inside
+		// hookSpecificOutput; a top-level key is ignored (GAP-2288).
+		output := map[string]interface{}{"hookSpecificOutput": map[string]interface{}{
+			"hookEventName": event,
+			"watchPaths":    claudeCodeProfileWatchPaths(req, watchRoot),
+		}}
 		if additional != "" {
 			output["systemMessage"] = additional
 		}
@@ -279,8 +298,6 @@ func claudeCodeOutputForProfile(req HookProfileRequest, action, rawAction, reaso
 			"hookEventName":     event,
 			"additionalContext": additional,
 		}}
-	case "CwdChanged":
-		return map[string]interface{}{"watchPaths": []string{}}
 	default:
 		return map[string]interface{}{"systemMessage": additional}
 	}

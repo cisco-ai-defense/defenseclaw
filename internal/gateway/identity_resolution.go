@@ -571,9 +571,14 @@ func (set *guardrailProfileSet) explainOnRequestPaths(connectorName string, deci
 
 // explainLiveDecision is what subject's requests on connectorName get from
 // the facts the gateway cached for it, decided as explain decides
-// (explainOnRequestPaths), and the refusal a sandbox run still gets.
-func (set *guardrailProfileSet) explainLiveDecision(subject *profileSubject, connectorName, agent string) (profileDecision, string) {
+// (explainOnRequestPaths), and the refusal a sandbox run still gets. A
+// 1.0.3 claim of agent (explainAgent) is decided with its binding, as the
+// hook decides it (GAP-0019).
+func (set *guardrailProfileSet) explainLiveDecision(subject *profileSubject, connectorName, agent string, legacy profileAgentLegacy) (profileDecision, string) {
 	live, _, sandboxRefused := set.explainOnRequestPaths(connectorName, func(path profilePath) profileDecision {
+		if legacy != nil {
+			return set.matchAgent(subject, profileSubjectLookup, connectorName, nil, path, agent, legacy)
+		}
 		return set.matchResolved(subject, resolveIdentity(subject, nil), profileSubjectLookup, connectorName, nil, path, agent)
 	})
 	return live, sandboxRefused

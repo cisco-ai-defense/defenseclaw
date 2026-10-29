@@ -276,6 +276,36 @@ class LiteLLMModelTests(unittest.TestCase):
         llm = LLMConfig(model="gpt-4o", provider="")
         self.assertEqual(litellm_model(llm), "gpt-4o")
 
+    def test_gap2396_bedrock_inference_profile_like_the_gateway(self):
+        # Haiku 4.5 on Bedrock is served only through an inference profile;
+        # the gateway adds llm.bedrock.inference_profile, so the scanner
+        # judge must send the same id (GAP-2396).
+        prof = BedrockKeyConfig(region="us-east-1", auth_mode="instance_role", inference_profile="us.")
+        haiku = "anthropic.claude-haiku-4-5-20251001-v1:0"
+        arn = "arn:aws:bedrock:us-east-1:111122223333:application-inference-profile/x"
+        cases = [
+            (LLMConfig(model=haiku, provider="bedrock", bedrock=prof), "bedrock/us." + haiku),
+            (LLMConfig(model="bedrock/" + haiku, bedrock=prof), "bedrock/us." + haiku),
+            (LLMConfig(model="us." + haiku, provider="bedrock", bedrock=prof), "bedrock/us." + haiku),
+            (LLMConfig(model=haiku, provider="bedrock"), "bedrock/" + haiku),
+            (LLMConfig(model=arn, provider="bedrock", bedrock=prof), arn),
+            (LLMConfig(model="gpt-5", provider="openai", bedrock=prof), "openai/gpt-5"),
+        ]
+        for llm, want in cases:
+            self.assertEqual(litellm_model(llm), want, llm.model)
+
+    def test_gap2396_custom_bedrock_instance_reaches_the_scanner_model(self):
+        llm = LLMConfig(
+            model="anthropic.claude-haiku-4-5-20251001-v1:0", provider="custom", instance_name="acme-bedrock-prod"
+        )
+        instance = {
+            "name": "acme-bedrock-prod",
+            "base_provider_type": "bedrock",
+            "bedrock": {"region": "us-east-1", "auth_mode": "instance_role", "inference_profile": "us."},
+        }
+        _apply_instance_overlay(llm, "", providers=[instance])
+        self.assertEqual(litellm_model(llm), "bedrock/us.anthropic.claude-haiku-4-5-20251001-v1:0")
+
 
 class LiteLLMCompletionKwargsTests(unittest.TestCase):
     def setUp(self):

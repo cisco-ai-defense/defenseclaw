@@ -33,6 +33,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 )
 
 const activeConnectorFile = "active_connector.json"
@@ -1891,6 +1892,60 @@ func VerifyManagedSharedHookScriptDigests(dataDir, expectedOwnerSID string) erro
 	return nil
 }
 
+// VerifyManagedConnectorHookScriptDigests checks, without following a link,
+// that each per-user hook script of conn the contract lock entry recorded
+// (claude-code-hook.sh, for example) is still in opts.DataDir/hooks with the
+// recorded bytes. A recorded script that is missing or edited is an error, so
+// the guardian's verify reports the drift and its repair rewrites the script:
+// the drift check ignores script digests, and the managed Windows verify
+// checked only the shared inspect-* scripts, so a deleted
+// claude-code-hook.sh stayed missing until another runtime file drifted
+// (GAP-2227). A script the lock does not record (a lock an earlier release
+// wrote) is not checked.
+func VerifyManagedConnectorHookScriptDigests(
+	opts SetupOpts,
+	conn Connector,
+	entry HookContractLockEntry,
+	expectedOwnerSID string,
+) error {
+	if conn == nil || strings.TrimSpace(opts.DataDir) == "" || len(entry.HookScriptDigests) == 0 {
+		return nil
+	}
+	if runtime.GOOS == "windows" && strings.TrimSpace(expectedOwnerSID) == "" {
+		return errors.New("managed connector hook script target SID is empty")
+	}
+	shared := map[string]bool{}
+	for _, name := range append(append([]string{}, genericHookScripts...), hookHelperScripts...) {
+		shared[name] = true
+	}
+	for _, path := range hookScriptPathsForConnector(opts, conn) {
+		name := filepath.Base(path)
+		if shared[name] {
+			continue
+		}
+		want, ok := entry.HookScriptDigests[name]
+		if !ok {
+			continue
+		}
+		got, exists, err := stableManagedArtifactDigestForOwner(
+			path,
+			"managed connector hook script "+name,
+			managedHookRuntimeArtifactMaxBytes,
+			expectedOwnerSID,
+		)
+		if err != nil {
+			return fmt.Errorf("verify managed connector hook script %s: %w", path, err)
+		}
+		if !exists {
+			return fmt.Errorf("managed connector hook script is missing: %s", path)
+		}
+		if got != want {
+			return fmt.Errorf("managed connector hook script digest mismatch: %s", path)
+		}
+	}
+	return nil
+}
+
 func pathInsideConnectorDataDir(dataDir, path string) bool {
 	base, err := filepath.Abs(dataDir)
 	if err != nil {
@@ -2564,6 +2619,80 @@ type cachedAgentSignal struct {
 	Version    string `json:"version"`
 	BinaryPath string `json:"binary_path"`
 	Installed  *bool  `json:"installed"`
+	Error      string `json:"error"`
+}
+
+// agentVersionProbeErrorMaxBytes bounds the discovery error a refusal quotes.
+const agentVersionProbeErrorMaxBytes = 400
+
+// AgentVersionProbeCause is why the last agent discovery found a connector's
+// agent binary but recorded no version. Each cause has its own next step, so
+// a refusal does not tell a user with a slow or untrusted install to fix PATH
+// (GAP-2479). The texts it matches are the ones
+// cli/defenseclaw/inventory/agent_discovery.py records.
+type AgentVersionProbeCause int
+
+const (
+	// AgentVersionProbeUnreadable: the version could not be read for another
+	// recorded reason (version metadata, an unidentified Kiro surface).
+	AgentVersionProbeUnreadable AgentVersionProbeCause = iota
+	// AgentVersionProbeDidNotRun: the binary ran and failed or printed no
+	// version (a node script with no node on PATH exits 127).
+	AgentVersionProbeDidNotRun
+	// AgentVersionProbeTimedOut: the binary did not answer within the probe
+	// budget (a cold first start or a busy host).
+	AgentVersionProbeTimedOut
+	// AgentVersionProbeUntrustedPath: discovery did not run the binary
+	// because it is outside the trusted install prefixes.
+	AgentVersionProbeUntrustedPath
+	// AgentVersionProbeNotProbed: the command that wrote the cache set up
+	// other connectors only, so it did not run this agent.
+	AgentVersionProbeNotProbed
+)
+
+// classifyAgentVersionProbeError reads the whole recorded error (one entry
+// per binary candidate, joined by "; "). A timed-out candidate is the one
+// discovery selects, so it wins; a trusted candidate that ran and failed wins
+// over one that was not run.
+func classifyAgentVersionProbeError(detail string) AgentVersionProbeCause {
+	switch {
+	case strings.Contains(detail, "version probe timed out"):
+		return AgentVersionProbeTimedOut
+	case strings.Contains(detail, "version not probed"):
+		return AgentVersionProbeNotProbed
+	case strings.Contains(detail, "version probe exited"),
+		strings.Contains(detail, "version probe failed"),
+		strings.Contains(detail, "version probe returned empty stdout"):
+		return AgentVersionProbeDidNotRun
+	case strings.Contains(detail, "not in a trusted install prefix"):
+		return AgentVersionProbeUntrustedPath
+	default:
+		return AgentVersionProbeUnreadable
+	}
+}
+
+// CachedAgentVersionProbeError returns what the last agent discovery recorded
+// when it found the connector's agent binary but could not read its version,
+// and why (for example "version probe exited 127: /usr/bin/env: node: No
+// such file or directory" for a node script with no node on PATH). A refusal
+// of the unversioned agent then names that cause and its own next step
+// instead of an agent "holding its settings" (GAP-1167, GAP-2479). It returns
+// "" when the cache has a version, records no binary, or records no error.
+func CachedAgentVersionProbeError(dataDir, connectorName string) (string, AgentVersionProbeCause) {
+	signal, ok := loadCachedAgentSignal(dataDir, connectorName)
+	if !ok || strings.TrimSpace(signal.Version) != "" || strings.TrimSpace(signal.BinaryPath) == "" {
+		return "", AgentVersionProbeUnreadable
+	}
+	detail := strings.Join(strings.Fields(signal.Error), " ")
+	cause := classifyAgentVersionProbeError(detail)
+	if len(detail) <= agentVersionProbeErrorMaxBytes {
+		return detail, cause
+	}
+	cut := agentVersionProbeErrorMaxBytes
+	for cut > 0 && !utf8.RuneStart(detail[cut]) {
+		cut--
+	}
+	return detail[:cut] + "...", cause
 }
 
 // CachedAgentNotFound reports whether the last agent discovery recorded in

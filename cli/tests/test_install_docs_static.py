@@ -665,8 +665,14 @@ def test_scanner_recovery_docs_match_dependency_and_registry_contracts() -> None
     )
 
     assert "python_version>='3.11'" in pyproject
-    assert "including a POSIX release install" in mcp_docs
-    assert "Use Python 3.11 or newer" in mcp_docs
+    # requires-python dropped 3.10 (GAP-1715), so no supported runtime omits the
+    # MCP scanner and the page must not describe a 3.10 runtime (GAP-2216).
+    assert 'requires-python = ">=3.11,<3.14"' in pyproject
+    mcp_words = " ".join(mcp_docs.split())
+    assert "DefenseClaw itself needs Python 3.11 to 3.13" in mcp_words
+    assert "every supported runtime includes MCP scanning" in mcp_words
+    assert "including a POSIX release install" not in mcp_words
+    assert "every supported runtime includes it" in " ".join(registry_docs.split())
     assert "affected skill scans fail" in registry_docs
     assert "marked `error`" in registry_docs
     assert "MCP entries" in registry_docs and "remain `pending`" in registry_docs

@@ -38,6 +38,12 @@ func actionPureMake(command, home string) bool {
 // write. Missing, unreadable, or complex make input leaves the call to make
 // alone: parse uncertainty is audit information, not a protected target.
 func actionMakeProtectedRecipe(command, cwd, home string) bool {
+	return actionMakeProtectedRecipeDepth(command, cwd, home, 0)
+}
+
+// A recipe that runs make again ($(MAKE) -f other.mk) is read the same way,
+// to a bounded depth (GAP-0996).
+func actionMakeProtectedRecipeDepth(command, cwd, home string, depth int) bool {
 	return actionMakeRecipeMatches(command, cwd, home, func(recipe, dir, home string) bool {
 		protected := newProtectedFiles(home)
 		ssh := filepath.Join(home, ".ssh")
@@ -48,7 +54,7 @@ func actionMakeProtectedRecipe(command, cwd, home string) bool {
 				return true
 			}
 		}
-		return false
+		return depth < 4 && actionMakeProtectedRecipeDepth(recipe, dir, home, depth+1)
 	})
 }
 
@@ -66,6 +72,7 @@ func actionMakeRecipeMatches(command, cwd, home string, matches func(string, str
 	if !ok {
 		return false
 	}
+	feeds := actionMakeStdinFeeds(file, cwd, home)
 	found := false
 	syntax.Walk(file, func(node syntax.Node) bool {
 		stmt, ok := node.(*syntax.Stmt)
@@ -107,12 +114,97 @@ func actionMakeRecipeMatches(command, cwd, home string, matches func(string, str
 		if proof.stdinFile {
 			if content, fixed := actionLiteralHereDocument(stmt); fixed {
 				proof.parse(content)
+			} else if name := actionStaticStdinFile(stmt, cwd, home); name != "" {
+				proof.read(name)
+			} else {
+				for _, name := range feeds[stmt] {
+					proof.read(name)
+				}
 			}
 		}
 		found = proof.matches(matches)
 		return !found
 	})
 	return found
+}
+
+// actionStaticStdinFile returns the file a static `< FILE` redirect feeds to
+// the statement's standard input (the last one wins, as in the shell), or "".
+func actionStaticStdinFile(stmt *syntax.Stmt, cwd, home string) string {
+	name := ""
+	for _, redirect := range stmt.Redirs {
+		if redirect.Op != syntax.RdrIn || redirect.Word == nil || redirect.N != nil && redirect.N.Value != "0" {
+			continue
+		}
+		value, fixed := StaticWord(redirect.Word, home)
+		if !fixed || value == "" {
+			return ""
+		}
+		name = OperandPath(value, cwd)
+	}
+	return name
+}
+
+// actionMakeStdinFeeds maps each pipeline stage to the files a plain
+// `cat FILE...` (or `cat < FILE`) stage before it writes to its standard
+// input, so `cat evil.mk | make -f -` reads evil.mk like `make -f - <
+// evil.mk` (GAP-0996). Any other feeder, or a cat with options, feeds nothing
+// known.
+func actionMakeStdinFeeds(file *syntax.File, cwd, home string) map[*syntax.Stmt][]string {
+	feeds := make(map[*syntax.Stmt][]string)
+	syntax.Walk(file, func(node syntax.Node) bool {
+		stmt, ok := node.(*syntax.Stmt)
+		if !ok {
+			return true
+		}
+		stages := actionPipeStages(stmt)
+		for i := 1; i < len(stages); i++ {
+			if names := actionCatFeedFiles(stages[i-1], cwd, home); len(names) != 0 {
+				feeds[stages[i]] = names
+			}
+		}
+		return true
+	})
+	return feeds
+}
+
+func actionPipeStages(stmt *syntax.Stmt) []*syntax.Stmt {
+	binary, ok := stmt.Cmd.(*syntax.BinaryCmd)
+	if !ok || binary.Op != syntax.Pipe && binary.Op != syntax.PipeAll || len(stmt.Redirs) != 0 {
+		return []*syntax.Stmt{stmt}
+	}
+	return append(actionPipeStages(binary.X), actionPipeStages(binary.Y)...)
+}
+
+func actionCatFeedFiles(stmt *syntax.Stmt, cwd, home string) []string {
+	call, ok := stmt.Cmd.(*syntax.CallExpr)
+	if !ok || len(call.Args) == 0 {
+		return nil
+	}
+	words := make([]string, len(call.Args))
+	for i, word := range call.Args {
+		value, fixed := StaticWord(word, home)
+		if !fixed {
+			return nil
+		}
+		words[i] = value
+	}
+	if programBase(words[0]) != "cat" {
+		return nil
+	}
+	var names []string
+	for _, word := range words[1:] {
+		if word == "" || strings.HasPrefix(word, "-") {
+			return nil
+		}
+		names = append(names, OperandPath(word, cwd))
+	}
+	if len(names) == 0 {
+		if name := actionStaticStdinFile(stmt, cwd, home); name != "" {
+			names = append(names, name)
+		}
+	}
+	return names
 }
 
 type makeRecipeRule struct {
@@ -156,7 +248,7 @@ func (p *makeRecipeProof) options(args []string) {
 		}
 		switch option {
 		case "-f", "--file", "--makefile":
-			if value == "-" {
+			if value == "-" || value == "/dev/stdin" || value == "/dev/fd/0" || value == "/proc/self/fd/0" {
 				p.stdinFile = true
 			} else if value != "" {
 				p.files = append(p.files, value)
@@ -227,12 +319,19 @@ func (p *makeRecipeProof) matches(match func(string, string, string) bool) bool 
 		}
 		for _, recipe := range rule.recipes {
 			recipe = strings.TrimLeft(recipe, " \t@-+")
+			// make passes the environment's HOME as a variable and runs
+			// $(MAKE) as make (GAP-0996).
+			recipe = makeRecipeVariables(p.home).Replace(recipe)
 			if match(recipe, p.dir, p.home) {
 				return true
 			}
 		}
 	}
 	return false
+}
+
+func makeRecipeVariables(home string) *strings.Replacer {
+	return strings.NewReplacer("$(HOME)", home, "${HOME}", home, "$(MAKE)", "make", "${MAKE}", "make")
 }
 
 func makeRecipeMatch(pattern, goal string) (string, bool) {

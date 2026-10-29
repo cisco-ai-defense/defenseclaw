@@ -24,9 +24,16 @@ The rule on Windows: only a hook or plugin that waits for DefenseClaw's answer
 can block. OTLP and other telemetry add detail to the audit log and
 dashboards, but cannot block an action after the fact.
 
-Host setup disables Codex and Claude Code native OTLP and revokes credentials
-from earlier releases because those exporters cannot verify who holds a
-stopped gateway's port. Hook and plugin
+Host setup removes the Codex and Claude Code native OTLP exporters it can
+prove DefenseClaw wrote and revokes credentials from earlier releases, because
+those exporters cannot verify who holds a stopped gateway's port. Proof is a
+value with the scoped credential setup gave that connector (current, or
+recorded as retired) or a value its setup backup recorded. An exporter you set yourself
+stays. An exporter left by an earlier install whose credential is gone also
+stays, even with `x-defenseclaw-*` headers or an old local port, because setup
+can no longer prove it is DefenseClaw's. Remove it by hand: the `OTEL_*`
+entries in the `env` block of `%USERPROFILE%\.claude\settings.json`, or the
+`[otel]` table in `%USERPROFILE%\.codex\config.toml`. Hook and plugin
 credentials are also connector-scoped and remain distinct from the gateway
 master token. Connector pages identify which channels exist and where their
 managed settings live.
@@ -110,7 +117,7 @@ credential, each with its own new value. It stops the gateway, saves the new
 values, updates each agent's hook or plugin, and starts the gateway again. If
 a step fails after the gateway stopped, it puts the previous values and
 gateway back. Rotation always includes the gateway restart, and it does not
-rewrite a token that you supply through your own environment variable.
+rewrite a token that you supply through your own environment variable. Hook credentials are private to your account, including those an upgrade from an earlier 1.0 release carried over, so `rotate-token` works after an upgrade.
 
 Each connector still gets its own credential, separate from the gateway
 token; rotation never prints them or lets one connector use another's. After
@@ -177,9 +184,12 @@ The per-user package runs as the current user and changes only what it
 created or recorded. Its installer state, credentials, audit database, and
 process records are owned by the current user. `audit.db` and `.env` grant
 access only to the user (`OWNER RIGHTS` or the account) and SYSTEM, so an
-administrator can read them only after taking ownership. The other files are
-readable by the user, Administrators, and SYSTEM, and so is OpenCode's managed
-plugin. That keeps other standard users out, but it does not protect against
+administrator can read them only after taking ownership. The `.defenseclaw`
+folder, `config.yaml`, `agent_selection.json`, `hooks\.hookcfg`, the hook
+tokens and scripts, and OpenCode's managed plugin also grant access only to the user (or `OWNER RIGHTS`) and SYSTEM.
+A few files the gateway writes (`judge_bodies.db`, the `audit.db-wal` and
+`audit.db-shm` journals, `redaction-correlation.key` and some `.lock` files)
+also grant Administrators. That keeps other standard users out, but it does not protect against
 the user themself or an administrator; `defenseclaw doctor` detects a changed
 plugin and setup puts it back. Files that agents own keep their own
 permissions.

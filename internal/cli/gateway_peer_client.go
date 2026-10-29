@@ -18,7 +18,17 @@ import (
 )
 
 var perUserGatewayClientFactory = hookexec.NewPerUserGatewayHTTPClient
-var managedGatewayClientFactory = hookexec.NewManagedEnterpriseGatewayHTTPClient
+
+// managedGatewayClientFactory waits out a managed gateway that runs but is
+// not listening yet: a scan right after secret set restarted the gateway
+// failed at once with "running service has no listener yet" (GAP-2442).
+var managedGatewayClientFactory = func(timeout time.Duration, apiAddr, serviceName string) (*http.Client, error) {
+	return hookexec.NewManagedEnterpriseGatewayHTTPClientAwaitingStart(timeout, apiAddr, serviceName, managedGatewayStartBudget)
+}
+
+// managedGatewayStartBudget bounds how long a CLI command waits for a
+// starting managed gateway to listen.
+const managedGatewayStartBudget = 30 * time.Second
 
 // gatewayPeerClient is the transport for Go CLI requests to the local
 // gateway. The owner of the connected socket is checked after Dial, before
@@ -32,6 +42,14 @@ func gatewayPeerClient(c *config.Config, host string, port int, timeout time.Dur
 	if _, present := managedHostWindowsStandalone(); present &&
 		(c == nil || c.StandaloneEnterprise() || managed.IsManagedEnterprise(c.DeploymentMode)) {
 		return managedGatewayClientFactory(timeout, net.JoinHostPort(host, strconv.Itoa(port)), managed.StandaloneWindowsGatewaySvc)
+	}
+	// The administrator's scan on a managed Linux or macOS computer loads no
+	// config (GAP-1234): the managed deployment record names the gateway
+	// service, which runs as its own account, not the caller's.
+	if c == nil && runtime.GOOS != "windows" {
+		if _, present := managedHostUnixRecord(nil); present {
+			return managedGatewayClientFactory(timeout, net.JoinHostPort(host, strconv.Itoa(port)), managedServiceName(false))
+		}
 	}
 	if c != nil && (c.StandaloneEnterprise() || managed.IsManagedEnterprise(c.DeploymentMode)) {
 		return managedGatewayClientFactory(timeout, net.JoinHostPort(host, strconv.Itoa(port)), managedServiceName(false))

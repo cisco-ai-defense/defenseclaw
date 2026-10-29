@@ -518,8 +518,34 @@ func (runtime *Runtime) emitWithLeaseControls(
 	if export == observability.RemoteExportAfterLocalWrite && (!outcome.LocalPersisted() || !local.flushed(ctx)) {
 		return outcome, nil
 	}
-	runtime.dispatchOptional(ctx, lease, graph, outcome)
+	runtime.dispatchAfterLocalCommit(ctx, lease, graph, local.store, outcome)
 	return outcome, nil
+}
+
+// dispatchAfterLocalCommit hands an outcome's optional work to its
+// dispatchers once its local write is committed: at once, or, while the
+// write waits in its hook call's batch (audit.CallWriteBatch), after the call
+// flushes it, on a fork of the lease so the generation stays live until then.
+func (runtime *Runtime) dispatchAfterLocalCommit(
+	ctx context.Context,
+	lease *runtimegraph.Lease,
+	graph *runtimegraph.Graph,
+	store *audit.Store,
+	outcome pipeline.LocalLogOutcome,
+) {
+	if audit.CallWritesOpen(ctx, store) {
+		if fork := lease.Fork(); fork != nil {
+			dispatchCtx := context.WithoutCancel(ctx)
+			if audit.DeferAfterCallWrites(ctx, store, func() {
+				defer fork.Release()
+				runtime.dispatchOptional(dispatchCtx, fork, graph, outcome)
+			}) {
+				return
+			}
+			fork.Release()
+		}
+	}
+	runtime.dispatchOptional(ctx, lease, graph, outcome)
 }
 
 // leaseRecordBuilder builds one occurrence's record on the pinned generation:
@@ -645,7 +671,11 @@ func (runtime *Runtime) EmitAtomicBatch(
 		outcome := outcomes[index]
 		if outcome.LocalPersisted() || outcome.ManagedOnly() ||
 			(processErr != nil && export == observability.RemoteExportDefault && len(outcome.OptionalWork()) > 0) {
-			runtime.dispatchOptional(items[index].Context, lease, graph, outcome)
+			if processErr != nil {
+				runtime.dispatchOptional(items[index].Context, lease, graph, outcome)
+				continue
+			}
+			runtime.dispatchAfterLocalCommit(items[index].Context, lease, graph, local.store, outcome)
 		}
 	}
 	return outcomes, processErr

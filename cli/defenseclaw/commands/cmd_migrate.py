@@ -185,7 +185,7 @@ def _report_hook_fail_mode_changes(data_dir: str) -> None:
     try:
         with open(os.path.join(data_dir, "hook_contract_lock.json"), encoding="utf-8") as stream:
             lock = json.load(stream)
-        from defenseclaw.config import load
+        from defenseclaw.config import load, outage_block_hint, saved_hook_fail_mode_scope
 
         cfg = load(data_dir=data_dir)
         guardrail = cfg.guardrail
@@ -201,8 +201,10 @@ def _report_hook_fail_mode_changes(data_dir: str) -> None:
         sealed = str(entry.get("hook_fail_mode", "")).strip().lower() if isinstance(entry, dict) else ""
         if sealed != "closed" or guardrail.effective_hook_fail_mode(name) != "open":
             continue
+        # A saved open wins over the strict policy, so name it and its fix (GAP-0039).
+        why = "your saved fail mode" if saved_hook_fail_mode_scope(guardrail, name) else "default policy"
         ux.warn(
             f"{name} hooks now let a call run with a warning while the gateway is not running "
-            "(default policy), where the previous release blocked it. Every other hook failure still blocks."
+            f"({why}), where the previous release blocked it. Every other hook failure still blocks."
         )
-        ux.subhead("To block calls during an outage: defenseclaw guardrail use-pack strict", indent="    ")
+        ux.subhead(f"To block calls during an outage: {outage_block_hint(guardrail, name)}", indent="    ")

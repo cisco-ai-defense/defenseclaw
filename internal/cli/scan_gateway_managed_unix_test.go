@@ -15,62 +15,64 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/scanner"
 )
 
-// GAP-1234: the managed Linux and macOS packages ship no skill, MCP or
-// plugin scanner, so `defenseclaw-gateway scan skill|mcp|plugin` cannot run
-// there. Root got "no per-user gateway to check" and, past that, "skill-
-// scanner not found ... repair the managed DefenseClaw installation". Every
-// caller now gets one answer that names the limit and the scan that runs
-// here, and nothing reaches the gateway.
-func TestManagedUnixGatewayScanNamesTheScannerLimit(t *testing.T) {
+// GAP-1234 / GAP-1527: the managed Linux and macOS packages install the
+// scanner runtime, so on a host with it `defenseclaw-gateway scan
+// skill|mcp|plugin` reaches the managed gateway (root got "no per-user
+// gateway to check" before). A deployment without the runtime (the payload
+// archive) answers exit 3 naming the package, and nothing reaches the
+// gateway.
+func TestManagedUnixGatewayScanRunsThroughTheManagedGateway(t *testing.T) {
 	descriptor := filepath.Join(t.TempDir(), "managed-runtime.json")
 	if err := os.WriteFile(descriptor, []byte("{}"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	restorePath, restoreTrust, restoreEndpoint := managedHostDescriptorPath, managedHostRecordTrusted, scanGatewayEndpoint
+	restorePath, restoreTrust, restoreEndpoint, restoreRuntime := managedHostDescriptorPath, managedHostRecordTrusted, scanGatewayEndpoint, managedScanUnixRuntime
 	t.Cleanup(func() {
-		managedHostDescriptorPath, managedHostRecordTrusted, scanGatewayEndpoint = restorePath, restoreTrust, restoreEndpoint
+		managedHostDescriptorPath, managedHostRecordTrusted, scanGatewayEndpoint, managedScanUnixRuntime = restorePath, restoreTrust, restoreEndpoint, restoreRuntime
 	})
 	managedHostDescriptorPath = func() string { return descriptor }
 	managedHostRecordTrusted = func(string) error { return nil }
-	scanGatewayEndpoint = func() (string, string, error) {
-		t.Fatal("a managed Linux or macOS scan reached the gateway")
-		return "", "", nil
-	}
-	gateway := managedHostGatewayCommand()
-	for _, kind := range []string{"skill", "mcp", "plugin"} {
-		for _, uid := range []int{0, 991, 1000} {
-			t.Run(fmt.Sprintf("%s as uid %d", kind, uid), func(t *testing.T) {
-				withManagedHostCallerUID(t, uid)
-				err := runGatewayScan(&cobra.Command{}, kind, t.TempDir())
-				if err == nil {
-					t.Fatalf("scan %s ran on a managed Linux or macOS computer", kind)
-				}
-				var coded interface{ ExitCode() int }
-				if !errors.As(err, &coded) || coded.ExitCode() != 3 {
-					t.Fatalf("scan %s exit code: %v", kind, err)
-				}
-				message := err.Error()
-				for _, want := range []string{descriptor, "include no", "scanner", "Nothing was scanned"} {
-					if !strings.Contains(message, want) {
-						t.Fatalf("scan %s answer lacks %q: %s", kind, want, message)
+	asked := errors.New("asked the managed gateway")
+	for _, installed := range []bool{true, false} {
+		managedScanUnixRuntime = func() error { return nil }
+		if !installed {
+			managedScanUnixRuntime = func() error { return managed.ErrNoScannerRuntime }
+		}
+		for _, kind := range []string{"skill", "mcp", "plugin"} {
+			for _, uid := range []int{0, 991, 1000} {
+				t.Run(fmt.Sprintf("%s as uid %d runtime %v", kind, uid, installed), func(t *testing.T) {
+					withManagedHostCallerUID(t, uid)
+					reached := false
+					scanGatewayEndpoint = func() (string, string, error) { reached = true; return "", "", asked }
+					target := "/opt/defenseclaw-scan/review"
+					if kind == "mcp" {
+						target = "https://mcp.example.test/mcp"
 					}
-				}
-				for _, stale := range []string{"no per-user gateway", "repair"} {
-					if strings.Contains(message, stale) {
-						t.Fatalf("scan %s answer still says %q: %s", kind, stale, message)
+					err := runGatewayScan(&cobra.Command{}, kind, target)
+					if installed {
+						if !reached || !errors.Is(err, asked) {
+							t.Fatalf("scan %s with the runtime installed did not reach the managed gateway: %v", kind, err)
+						}
+						return
 					}
-				}
-				route := "`sudo " + gateway + " scan code <path>`"
-				if kind == "mcp" {
-					route = "agent's own MCP configuration"
-				}
-				if !strings.Contains(message, route) {
-					t.Fatalf("scan %s answer lacks the route %q: %s", kind, route, message)
-				}
-			})
+					if reached {
+						t.Fatalf("scan %s without a runtime reached the gateway", kind)
+					}
+					var coded interface{ ExitCode() int }
+					if !errors.As(err, &coded) || coded.ExitCode() != 3 {
+						t.Fatalf("scan %s exit code: %v", kind, err)
+					}
+					for _, want := range []string{"installs the scanner runtime", "payload archive", "Nothing was scanned"} {
+						if !strings.Contains(err.Error(), want) {
+							t.Fatalf("scan %s answer lacks %q: %s", kind, want, err)
+						}
+					}
+				})
+			}
 		}
 	}
 }

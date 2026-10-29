@@ -498,7 +498,10 @@ jobs:
     needs: changes
     if: ${{ !cancelled() && needs.changes.outputs.pwsh != 'false' }}
     runs-on: windows-latest
-    timeout-minutes: 15
+    # test_install_ps1.py alone takes 9-10 minutes on the hosted runner; the
+    # whole job ran 14.7-15.3 minutes from 1.0.5 rc.3 on and was cancelled
+    # at 15 before the connector harness tests ran.
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
@@ -541,6 +544,9 @@ jobs:
       - name: Committed uninstall finalized retry regression
         if: ${{ !cancelled() }}
         run: ./packaging/windows/tests/enterprise-uninstall-finalized-retry-smoke.ps1
+      - name: Committed uninstall tombstone per-user purge regression
+        if: ${{ !cancelled() }}
+        run: ./packaging/windows/tests/enterprise-uninstall-tombstone-user-state-purge-smoke.ps1
       - name: Committed uninstall postcommit recovery regression
         run: ./packaging/windows/tests/enterprise-uninstall-postcommit-recovery-smoke.ps1
       - name: Shared hook install scope preflight regression

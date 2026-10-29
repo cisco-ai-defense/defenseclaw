@@ -1348,6 +1348,7 @@ func (tx *CorrelationTx) PutObservation(ctx context.Context, observation Correla
 // audit.db. A metric batch passes the observations of all its records, so it
 // costs one commit, not one per metric (B-26), and concurrent batches share
 // one (GAP-1790). Either every observation of a call commits or none does.
+// Inside a hook call's open CallWriteBatch they commit when the call flushes.
 func (repo *CorrelationRepository) RecordObservations(
 	ctx context.Context,
 	observations ...CorrelationObservation,
@@ -1361,6 +1362,18 @@ func (repo *CorrelationRepository) RecordObservations(
 	if len(observations) == 0 {
 		return nil
 	}
+	// A hook call commits its observations with its appends (CallWriteBatch).
+	if repo.deferObservations(ctx, append([]CorrelationObservation(nil), observations...)) {
+		return nil
+	}
+	return repo.recordObservationsDirect(ctx, observations)
+}
+
+// recordObservationsDirect is RecordObservations' own (grouped) transaction.
+func (repo *CorrelationRepository) recordObservationsDirect(
+	ctx context.Context,
+	observations []CorrelationObservation,
+) error {
 	// Concurrent observation batches share one transaction (writeGroup).
 	// BeginTx is outside putCorrelationObservationTx's busy retry. On Windows
 	// antivirus can lock a freshly created audit.db long enough that the first

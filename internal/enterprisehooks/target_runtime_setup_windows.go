@@ -912,6 +912,16 @@ func planWindowsManagedRuntimeRoot(target windowsManagedRuntimeTarget, pendingAl
 			}
 		}
 		err := validateWindowsTargetOwnedDirectoryHandle(final, target.data, target.sid)
+		if err != nil && !adoptPurgeKept && windowsEnterpriseStandaloneProcess() &&
+			recoverStaleWindowsSetupRelaxedDataDir(target.data, target.sid) {
+			// An Upgrade/Repair plan over a data directory a guardian left
+			// in its setup shape (stopped mid-setup, or by a rolled-back
+			// lifecycle) recovers it as the generation GC does: /repair
+			// refused it as a per-user install leftover, before the GC
+			// that recovers it ever ran (GAP-1334). A relax a running setup
+			// holds, and any other DACL, stay refused.
+			err = validateWindowsTargetOwnedDirectoryHandle(final, target.data, target.sid)
+		}
 		if err != nil && adoptPurgeKept {
 			adopted, adoptErr := adoptWindowsManagedRuntimePurgeKeptRoot(parent, final, target)
 			if adoptErr != nil {

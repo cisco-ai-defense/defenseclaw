@@ -320,7 +320,13 @@ func NewSandboxDaemon(opts SandboxDaemonOptions) (*SandboxDaemon, error) {
 		home: accountHome(uid), openShell: opts.openShell,
 	}
 	if d.openShell == nil {
-		d.openShell = newAccountOpenShell(runtime.GOOS, uid, d.home, opts.Logf)
+		ao := newAccountOpenShell(runtime.GOOS, uid, d.home, opts.Logf)
+		ao.recordUnsynced = func(names []string) {
+			if err := manager.RecordUnsyncedStops(opts.StateDir, names, time.Now()); err != nil && opts.Logf != nil {
+				opts.Logf("could not record the unsynced stop for the sandbox feed: %v", err)
+			}
+		}
+		d.openShell = ao
 	}
 	d.settingsAt.Store(time.Now().UnixNano())
 	// The registrations file is the user's own. Until the managed gateway
@@ -1862,6 +1868,9 @@ func (d *SandboxDaemon) managedStatusFor(ctx context.Context, s sandboxrelay.Dae
 		me, _, err := d.managedExplain(ctx, sandboxapi.ExplainRequest{Harness: connector}, nil)
 		if err != nil {
 			out.Allowed = false
+			if out.PolicyUnread == "" {
+				out.PolicyUnread, out.PolicyLimited = managedPolicyUnread(err)
+			}
 			continue
 		}
 		allowed := managedExplainAllowsHarness(me, connector) && managedPostureFatal(me) == nil
@@ -1878,6 +1887,17 @@ func (d *SandboxDaemon) managedStatusFor(ctx context.Context, s sandboxrelay.Dae
 		}
 	}
 	return out
+}
+
+// managedPolicyUnread is why a status's managed explain gave no answer, as
+// the user may read it, and whether the caller's request limit refused it
+// (GAP-2203): doctor then names the limit, not a failed policy.
+func managedPolicyUnread(err error) (string, bool) {
+	var apiErr *sandboxapi.Error
+	if errors.As(err, &apiErr) {
+		return sandboxapi.DisplayText(apiErr.Message), apiErr.Status == http.StatusTooManyRequests
+	}
+	return sandboxapi.DisplayText(err.Error()), false
 }
 
 // managedViewTimeout bounds the managed gateway calls a status makes.

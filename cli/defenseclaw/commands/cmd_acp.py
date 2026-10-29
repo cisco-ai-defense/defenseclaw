@@ -17,7 +17,7 @@ import shutil
 import stat
 import time
 from datetime import datetime, timezone
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from typing import Any
 
 import click
@@ -689,8 +689,33 @@ def _free_entry_name(servers: dict[str, Any], agent: str) -> str:
 _CHANGED, _DIRECT, _UNRECORDED_GUARD, _RESERVED_NAME = "changed", "direct", "guard", "name"
 
 
+def _pinned_agent_path(data_dir: str, client: str, agent: str) -> str:
+    """The agent executable the pair's contract lock pins ("" without a usable lock)."""
+    lock = _lock_document(_contract_lock_path(data_dir, client, agent), client, agent)
+    path_value = lock["agent"].get("path") if lock else None
+    return path_value if isinstance(path_value, str) else ""
+
+
+def _launches_file(entry: dict[str, Any], path_value: str) -> bool:
+    """Whether an editor entry's command is the file at path_value.
+
+    The editor resolves a bare command on PATH, so a PATH name, another
+    spelling of the path or a link to the file all launch it.
+    """
+    command = entry.get("command")
+    if not path_value or not isinstance(command, str) or not command.strip():
+        return False
+    found = os.path.expanduser(command) if os.path.dirname(command) else shutil.which(command)
+    if not found:
+        return False
+    try:
+        return os.path.samefile(found, path_value)
+    except (OSError, ValueError):
+        return False
+
+
 def _left_pair_entries(
-    servers: dict[str, Any], client: str, agent: str, records: EntryRecords
+    servers: dict[str, Any], client: str, agent: str, records: EntryRecords, agent_path: str = ""
 ) -> list[tuple[str, str, bool]]:
     """The pair's foreign entries: entries DefenseClaw cannot prove it wrote as they are now.
 
@@ -700,8 +725,11 @@ def _left_pair_entries(
     name), _DIRECT (it launches the agent without the guard), _UNRECORDED_GUARD
     (it starts a guard for the pair with no matching record, as releases
     through 1.0.3 wrote the reserved entry) or _RESERVED_NAME (it has the
-    pair's reserved name and nothing else of DefenseClaw's). adoptable: it
-    launches the agent directly, so acp adopt can route it through the guard.
+    pair's reserved name and nothing else of DefenseClaw's). agent_path is the
+    agent executable the pair's lock pins: an entry that starts that file
+    without the guard is _DIRECT whatever its name, arguments or spelling of
+    the path (GAP-0496). adoptable: it launches the catalog command, so acp
+    adopt can route it through the guard.
     Setup writes DefenseClaw's own entry next to them, adoption and removal
     leave them, and verify reports them.
     """
@@ -715,10 +743,11 @@ def _left_pair_entries(
         if name in owned:
             continue
         entry = value if isinstance(value, dict) else {}
-        adoptable = bool(entry) and not _entry_is_guarded(entry) and _agent_for_entry(entry) == agent
+        unguarded = bool(entry) and not _entry_is_guarded(entry)
+        adoptable = unguarded and _agent_for_entry(entry) == agent
         if name in recorded:
             why = _CHANGED
-        elif adoptable:
+        elif adoptable or (unguarded and _launches_file(entry, agent_path)):
             why = _DIRECT
         elif _carries_marker(entry, client, agent):
             why = _UNRECORDED_GUARD
@@ -784,7 +813,9 @@ def _left_entries(client: str, agent: str, data_dir: str) -> list[tuple[str, boo
     servers = _read_json_object(_client_path(client)).get("agent_servers")
     if not isinstance(servers, dict):
         return []
-    return _left_pair_entries(servers, client, agent, _owned_entry_records(data_dir))
+    return _left_pair_entries(
+        servers, client, agent, _owned_entry_records(data_dir), _pinned_agent_path(data_dir, client, agent)
+    )
 
 
 def _warn_redirected_acp_dir(redirected: bool, data_dir: str) -> None:
@@ -1040,7 +1071,9 @@ def _verify_binding(
         # DefenseClaw wrote and that changed since, one that launches the agent
         # without the guard, or a recordless guard entry under any name. Each
         # problem names its manual step.
-        left = _left_pair_entries(servers, client, agent, records) if isinstance(servers, dict) else []
+        left = _left_pair_entries(
+            servers, client, agent, records, _pinned_agent_path(data_dir, client, agent)
+        ) if isinstance(servers, dict) else []
         problems.extend(_foreign_entry_problem(item, client, agent, client_path) for item in left)
         # An entry this pair adopted that is gone from the file.
         problems.extend(
@@ -1090,10 +1123,11 @@ def _verify_binding(
             problems.append("client configuration path does not match")
         elif settings_usable and isinstance(client_digest, str) and client_digest.startswith(_ENTRY_DIGEST_PREFIX):
             # The lock pins the guarded entries, checked as the guard checks them (GAP-0912, GAP-0504).
-            if client_digest[len(_ENTRY_DIGEST_PREFIX):].lower() != _guard_entry_sha256(
-                servers, client, agent, lock_path.resolve()
-            ):
-                problems.append(f"the {_managed_name(agent)} entry changed after setup (the contract lock pins it)")
+            pinned_digest = client_digest[len(_ENTRY_DIGEST_PREFIX):].lower()
+            if pinned_digest != _guard_entry_sha256(servers, client, agent, lock_path.resolve()):
+                problems.append(
+                    _pinned_entry_problem(servers, names, client, agent, lock_path.resolve(), pinned_digest)
+                )
         elif settings_usable and (not isinstance(client_digest, str) or client_digest != _client_digest(client_path)):
             problems.append("client configuration digest has drifted")
     for key in ("agent", "guard"):
@@ -1166,6 +1200,35 @@ def _verify_binding(
                 f"editor entry {name!r} does not send verdicts to this gateway ({gateway_url}); re-run acp setup"
             )
     return problems
+
+
+def _pinned_entry_problem(
+    servers: dict[str, Any], names: list[str], client: str, agent: str, lock_path: Path, pinned_digest: str
+) -> str:
+    """Why the entries the contract lock pins no longer match it, naming the entries themselves (GAP-0043).
+
+    The guard pins the entries that start it with this lock (an adopted or
+    numbered entry has its own name), so the message names those, not the
+    reserved name. When the entries setup wrote are unchanged and only an
+    entry it did not write starts the guard with the lock, it says so.
+    """
+    guarded = [name for name, entry in sorted(servers.items()) if _entry_starts_lock(entry, lock_path)]
+    added = [name for name in guarded if name not in names]
+    if added and len(added) < len(guarded) and _guard_entry_sha256(
+        {name: entry for name, entry in servers.items() if name not in added}, client, agent, lock_path
+    ) == pinned_digest:
+        listed = ", ".join(repr(name) for name in added)
+        return (
+            f"editor {'entry' if len(added) == 1 else 'entries'} {listed} "
+            f"{'starts' if len(added) == 1 else 'start'} the guard with this pair's contract lock, "
+            "which pins only the entries setup wrote, so the guard refuses to start"
+        )
+    changed = [name for name in guarded if name in names] or guarded or [_managed_name(agent)]
+    listed = ", ".join(repr(name) for name in changed)
+    return (
+        f"the {listed} {'entry' if len(changed) == 1 else 'entries'} changed after setup "
+        f"(the contract lock pins {'it' if len(changed) == 1 else 'them'})"
+    )
 
 
 def _foreign_entry_problem(item: tuple[str, str, bool], client: str, agent: str, path: Path) -> str:
@@ -1948,9 +2011,18 @@ def refresh_cmd(app: AppContext, from_sha256: str, guard_path: str) -> None:
 _GUARD_BASENAMES = {"defenseclaw-acp", "defenseclaw-acp.exe"}
 
 
+# Windows launchers an editor can start directly. npm installs agents such as
+# OpenCode as a .cmd launcher, so an entry that names opencode.cmd launches the
+# same catalog agent as opencode.exe (GAP-0191). A .ps1 is not startable.
+_WINDOWS_LAUNCHER_SUFFIXES = (".exe", ".cmd", ".bat")
+
+
 def _entry_basename(command: str) -> str:
-    name = Path(str(command or "")).name.lower()
-    return name[:-4] if name.endswith(".exe") else name
+    name = PureWindowsPath(str(command or "")).name.lower()
+    for suffix in _WINDOWS_LAUNCHER_SUFFIXES:
+        if name.endswith(suffix):
+            return name[: -len(suffix)]
+    return name
 
 
 def _entry_is_guarded(entry: dict[str, Any]) -> bool:

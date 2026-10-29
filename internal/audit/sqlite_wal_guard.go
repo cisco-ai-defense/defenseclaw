@@ -32,8 +32,12 @@ const (
 	WALEmergencyArmBytes = WALHardLimitBytes - 48<<20
 )
 
-// auditBusyTimeoutMillis is the busy_timeout of every audit connection.
-const auditBusyTimeoutMillis = 5000
+// auditBusyTimeoutMillis is the busy_timeout of every audit connection: how
+// long one statement waits for a write lock that another connection holds.
+// It stays well under a hook's answer budget, because the
+// store's writes before a hook's answer would otherwise wait it out one after
+// another while another process holds the lock (GAP-1021, writeLockWait).
+const auditBusyTimeoutMillis = 750
 
 // walIdleTrimBytes is the WAL file size at which a fully copied log is cut
 // to zero bytes even though it is below the caller's limit: a log that stops

@@ -99,7 +99,7 @@ DefenseClaw admits a small, reviewable CEL surface.
 | --- | --- |
 | Boolean logic | `&&`, `\|\|`, `!` |
 | Scalar comparison | `==`, `!=`, and `in` for bounded Boolean, integer, and string values |
-| Collection predicates | `exists`, `all`, `map` and `filter` comprehensions; nesting is limited to two levels |
+| Collection predicates | `exists` and `all` comprehensions; nesting is limited to two levels. A comprehension must give a Boolean, so `validate-pack` refuses `map`, `filter` and `exists_one` (`semantic_surface`) |
 | String predicates | `startsWith`, `endsWith`, `contains`, and member-form `matches` |
 | Literals | Boolean, integer, string, and scalar lists |
 | Field selection | Typed fields reachable from `f` using protobuf snake-case names |
@@ -128,6 +128,8 @@ dynamic regexes and global-form `matches(value, pattern)` are rejected.
 These bounds apply before connector action mapping. Exceeding an admission
 limit rejects the candidate; exceeding a runtime limit takes that owner to its
 fallback without stopping unrelated rules.
+
+`validate-pack` names only `exists()` and `all()` in a refusal, the two comprehensions it admits. A rule nested too deeply is refused with `it nests exists() and all() too deeply; flatten the check or split it into separate rules`. A rule over the static cost limit is refused with `estimated worst-case evaluation cost is above the per-rule limit` and the advice to test one list, prefer `==`, `in` or `startsWith` over `contains` or `matches` inside a nested comprehension, or split the check into separate rules.
 
 The 512-byte CEL regex limit caps its size. The static cost limit can reject a shorter pattern; check the whole rule with `defenseclaw guardrail validate-pack`.
 

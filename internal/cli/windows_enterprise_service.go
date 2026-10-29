@@ -74,6 +74,10 @@ type windowsEnterpriseLifecycleOptions struct {
 	// without recovering a pending transaction (GAP-0920, GAP-1041).
 	force         bool
 	allowUnsigned bool
+	// timeoutSeconds is the standalone ensure deadline Setup hands its CLI
+	// child: Setup's own TIMEOUTSECONDS limit less its margin (GAP-2265).
+	// Zero keeps windowsEnterpriseEnsureTimeout for a direct caller.
+	timeoutSeconds int
 	// deferredConfig stages a protected installed deployment with every
 	// managed service disabled. A later Repair with both authenticated
 	// policy files prepares user runtimes and performs guardian-first
@@ -369,15 +373,6 @@ func newWindowsEnterpriseLifecycleCommand(action string) *cobra.Command {
 	// exit 1639 and the refused anchor install recorded (GAP-0608). Only
 	// ensure shows them in its help.
 	if windowsEnterpriseMutationAction(action) {
-		if action == "ensure" {
-			cmd.SetFlagErrorFunc(windowsAnchorsArgumentRefusal)
-			cmd.Args = func(c *cobra.Command, args []string) error {
-				if err := strayArgumentError(c, args); err != nil {
-					return windowsAnchorsArgumentRefusal(c, err)
-				}
-				return nil
-			}
-		}
 		flags.StringVar(&opts.bundlePath, "bundle", "",
 			"standalone: apply this signed policy bundle (.dcbundle file); the bundle carries the config, so not with --config")
 		flags.BoolVar(&opts.refuseCapabilityLoss, "refuse-capability-loss", false, "refuse a bundle that disables a currently enforced capability")
@@ -388,6 +383,13 @@ func newWindowsEnterpriseLifecycleCommand(action string) *cobra.Command {
 				_ = flags.MarkHidden(name)
 			}
 		}
+	}
+	if action == "ensure" {
+		// Setup passes its TIMEOUTSECONDS budget here, so the documented
+		// limit, not a fixed one inside, bounds the run (GAP-2265).
+		flags.IntVar(&opts.timeoutSeconds, "timeout-seconds", 0,
+			"standalone: ensure deadline in seconds (Setup passes its TIMEOUTSECONDS limit; default 720)")
+		_ = flags.MarkHidden("timeout-seconds")
 	}
 	if action == "uninstall" {
 		flags.BoolVar(&opts.force, "force", false,
@@ -416,6 +418,24 @@ func newWindowsEnterpriseLifecycleCommand(action string) *cobra.Command {
 		"standalone: SHA-256 thumbprint of an accepted Authenticode signer certificate (repeatable)")
 	flags.StringVar(&opts.productVersion, "product-version", "",
 		"standalone: version recorded for this deployment (default: this CLI's version)")
+	// GAP-2448: with --json an argument error (an unknown flag, a malformed
+	// value; on ensure also a stray argument) prints one lifecycle result
+	// with invalid_arguments, exit 1639. ensure records a refused anchor
+	// install (windowsAnchorsArgumentRefusal); the other verbs keep their own
+	// positional-argument handling (usageArgsExemptGroups).
+	flagError := lifecycleFlagError
+	if action == "ensure" {
+		flagError = windowsAnchorsArgumentRefusal
+		cmd.Args = func(c *cobra.Command, args []string) error {
+			if err := strayArgumentError(c, args); err != nil {
+				return lifecycleArgumentError(c, action, opts.jsonOutput, flagError(c, err))
+			}
+			return nil
+		}
+	}
+	cmd.SetFlagErrorFunc(func(c *cobra.Command, err error) error {
+		return lifecycleArgumentError(c, action, opts.jsonOutput, flagError(c, err))
+	})
 	if action == "status" || action == "verify" {
 		// Status and verify only read the deployment. The install,
 		// upgrade, uninstall and certification inputs stay accepted but

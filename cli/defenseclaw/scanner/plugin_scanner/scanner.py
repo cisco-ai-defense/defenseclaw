@@ -332,25 +332,32 @@ _EXECUTABLE_WALK_LIMIT = 5000
 
 
 def _plugin_has_executable_files(target: str, ctx: ScanContext) -> bool:
-    """Whether the plugin holds anything that runs: collected source, a
-    script, binary or interpreter suffix, a regular file with an executable
-    bit or whose first bytes are ``#!``, ELF, Mach-O or ``MZ`` (on every OS),
+    return _first_executable_file(target, ctx) is not None
+
+
+def _first_executable_file(target: str, ctx: ScanContext) -> str | None:
+    """What makes the plugin hold anything that runs (None: nothing does):
+    collected source, a script, binary or interpreter suffix, a regular file
+    with an executable bit or whose first bytes are ``#!``, ELF, Mach-O or ``MZ`` (on every OS),
     a hooks/MCP/LSP config, or a manifest key that starts code. A symlink, a
     non-regular file, an unreadable file or folder, an unparsable manifest or
     a tree past the walk limit counts as executable, so only a plain,
     readable tree of documents is "no executable files" (GAP-1389, GAP-2009).
     A ``.git`` folder is walked like any other; only git's hook samples are
-    skipped (GAP-2036)."""
-    if ctx.source_files or not os.path.isdir(target) or os.path.islink(target):
-        return True
+    skipped (GAP-2036). The answer names the first path and why, so a test
+    can say which file of a git checkout counted (GAP-2140)."""
+    if ctx.source_files:
+        return "collected source files"
+    if not os.path.isdir(target) or os.path.islink(target):
+        return "plugin root is not a plain folder"
     walk_errors: list[OSError] = []
     seen = 0
     for root, dirs, files in os.walk(target, followlinks=False, onerror=walk_errors.append):
         if walk_errors:
-            return True
+            return f"unreadable: {walk_errors[0]}"
         for name in dirs:
             if os.path.islink(os.path.join(root, name)):
-                return True
+                return f"folder link: {os.path.relpath(os.path.join(root, name), target)}"
         git_parts = _git_dir_parts(os.path.relpath(root, target))
         git_objects = git_parts is not None and "objects" in git_parts
         for name in files:
@@ -359,25 +366,27 @@ def _plugin_has_executable_files(target: str, ctx: ScanContext) -> bool:
             if not git_objects:
                 seen += 1
             if seen > _EXECUTABLE_WALK_LIMIT:
-                return True
+                return f"more than {_EXECUTABLE_WALK_LIMIT} files"
             path = os.path.join(root, name)
             if _is_git_hook_sample(root, git_parts, name):
                 continue
             suffix = os.path.splitext(name)[1].casefold()
             folded = name.casefold()
             if suffix in _EXECUTABLE_SUFFIXES or folded in _EXECUTABLE_CONFIG_NAMES or folded in _EXECUTABLE_NAMES:
-                return True
+                return f"name: {os.path.relpath(path, target)}"
             try:
                 st = os.lstat(path)
-            except OSError:
-                return True
+            except OSError as exc:
+                return f"unreadable: {exc}"
             if stat.S_ISLNK(st.st_mode) or not stat.S_ISREG(st.st_mode):
-                return True
-            if st.st_mode & 0o111 or _starts_with_executable_magic(path):
-                return True
+                return f"not a regular file: {os.path.relpath(path, target)}"
+            if st.st_mode & 0o111:
+                return f"mode {stat.S_IMODE(st.st_mode):o}: {os.path.relpath(path, target)}"
+            if _starts_with_executable_magic(path):
+                return f"first bytes: {os.path.relpath(path, target)}"
             if name.casefold() in _MANIFEST_NAMES and _manifest_starts_code(path):
-                return True
-    return bool(walk_errors)
+                return f"manifest starts code: {os.path.relpath(path, target)}"
+    return f"unreadable: {walk_errors[0]}" if walk_errors else None
 
 
 def _git_dir_parts(rel_root: str) -> list[str] | None:

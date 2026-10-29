@@ -42,12 +42,15 @@ class _Recorder:
 def test_config_audit_uses_live_listener_through_coalesced_port_edits(tmp_path, monkeypatch) -> None:
     import json
 
+    from defenseclaw.file_permissions import protect_private_file
     from defenseclaw.logger import _GatewayConfigRecorder
 
     (tmp_path / "gateway.pid").write_text(str(os.getpid()), encoding="utf-8")
     record = tmp_path / "gateway-api.json"
     record.write_text(json.dumps({"pid": os.getpid(), "host": "127.0.0.1", "port": 19080}), encoding="utf-8")
-    record.chmod(0o600)
+    # The CLI trusts only a private record: 0600 on POSIX, a protected
+    # owner-only DACL on Windows, where chmod keeps the inherited one (GAP-2322).
+    protect_private_file(record)
     ports = []
 
     class Client:

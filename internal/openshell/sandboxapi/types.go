@@ -113,9 +113,15 @@ type Status struct {
 	// OpenShell does not stop and whose VM may still run, until OpenShell
 	// reports it stopped or deleted (openshell.HoldsGateway). Unset by a
 	// daemon before DefenseClaw 1.0.4 (Busy).
-	Live             *int      `json:"live,omitempty"`
-	PendingApprovals int       `json:"pending_approvals"`
-	LastReconcile    time.Time `json:"last_reconcile,omitzero"`
+	Live             *int `json:"live,omitempty"`
+	PendingApprovals int  `json:"pending_approvals"`
+	// ListenersProven says IngressAddr and EgressAddr name only the sandbox
+	// ports this daemon holds now (the gateway's statusListenerAddresses),
+	// so the doctor takes a named port for the daemon's own also while
+	// sandboxes are unavailable. Unset by a daemon before DefenseClaw 1.0.5,
+	// whose addresses could be the configured ones (GAP-1875).
+	ListenersProven bool      `json:"listeners_proven,omitempty"`
+	LastReconcile   time.Time `json:"last_reconcile,omitzero"`
 	// StartedAt is when the daemon's sandbox subsystem started. Nothing
 	// keeps the sandboxes' counters (HookCoverage, EgressStats) across a
 	// restart: they count from then, so a session that began earlier knows
@@ -222,6 +228,12 @@ type ManagedStatus struct {
 	// DeniedHarnesses names configured harnesses whose profile forbids a
 	// sandbox. Empty with Allowed false means the policy could not be read.
 	DeniedHarnesses []string `json:"denied_harnesses,omitempty"`
+	// PolicyUnread is why the managed gateway gave no policy answer when
+	// Allowed is false and DeniedHarnesses is empty ("" from an older
+	// daemon), and PolicyLimited says the caller's request limit refused
+	// it: that passes on its own and is not a policy verdict (GAP-2203).
+	PolicyUnread  string `json:"policy_unread,omitempty"`
+	PolicyLimited bool   `json:"policy_limited,omitempty"`
 	// HostRunGate, when present, is the caller's gateway decision carried
 	// from a managed explain into a launch banner.
 	HostRunGate string `json:"host_run_gate,omitempty"`
@@ -1028,6 +1040,21 @@ const (
 	// WorkspaceUndo is the revert of the last `pull --apply`.
 	WorkspaceUndo = "undo"
 )
+
+// DiskReport is POST /sandboxes/{name}/disk: what a session found on the
+// own disk of its running MicroVM when it warned that the disk is filling,
+// so the daemon names it in the activity feed while the agent still runs,
+// not only in the summary at the end of the session (GAP-1140).
+type DiskReport struct {
+	SizeBytes int64 `json:"size_bytes"`
+	FreeBytes int64 `json:"free_bytes"`
+	// Fast is the early warning: at the rate the free space fell, the disk
+	// fills before the session looks again.
+	Fast bool `json:"fast,omitempty"`
+}
+
+// ReasonDiskFilling is the sandbox.lifecycle reason of a DiskReport.
+const ReasonDiskFilling = "disk_filling"
 
 // WorkspaceReport is POST /sandboxes/{name}/workspace: a copy-mode
 // workspace step the CLI ran (upload, pull with apply/branch/patch, or the

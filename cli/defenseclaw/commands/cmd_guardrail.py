@@ -61,7 +61,12 @@ from contextlib import contextmanager
 import click
 
 from defenseclaw import ux
-from defenseclaw.config import _assert_config_write_allowed, config_path_for_data_dir
+from defenseclaw.config import (
+    _assert_config_write_allowed,
+    config_path_for_data_dir,
+    outage_block_hint,
+    saved_hook_fail_mode_scope,
+)
 from defenseclaw.config_writer import ConfigWriteError
 from defenseclaw.connector_contracts import has_native_approval_prompt, normalize_connector
 from defenseclaw.context import AppContext, pass_ctx
@@ -995,7 +1000,12 @@ def status_cmd(app: AppContext, connector_flag: str | None, as_json: bool = Fals
         configured_cfm = gc.effective_hook_fail_mode(name) if hasattr(gc, "effective_hook_fail_mode") else fail_mode
         cfm = configured_cfm
         fail_drift = ""
-        if normalize_connector(name) in _RUNTIME_FAIL_MODE_CONNECTORS:
+        if _is_proxy_connector(name):
+            # A proxy-backed connector has no hooks: its model calls fail
+            # while the gateway is down, as `guardrail fail-mode` shows
+            # (GAP-1963 R6-F1). The hook outage mode does not apply.
+            cfm = "closed"
+        elif normalize_connector(name) in _RUNTIME_FAIL_MODE_CONNECTORS:
             runtime_state = resolve_connector_fail_mode(app.cfg, name)
             if runtime_state.runtime is not None:
                 cfm = runtime_state.runtime
@@ -1080,12 +1090,16 @@ def status_cmd(app: AppContext, connector_flag: str | None, as_json: bool = Fals
                 )
                 deployment = str(getattr(app.cfg, "deployment_mode", "") or "")
                 managed_host = deployment.strip().lower() == "managed_enterprise"
-                fix = (
-                    f"set closed with defenseclaw guardrail fail-mode closed{scope}"
-                    if managed_host
-                    else "block them with the strict policy: defenseclaw guardrail use-pack strict"
-                    + (f" --connector {name}" if scope else "")
-                )
+                saved_scope = saved_hook_fail_mode_scope(gc, name)
+                if managed_host:
+                    fix = f"set closed with defenseclaw guardrail fail-mode closed{scope}"
+                elif saved_scope:
+                    # A saved open wins over the strict policy (GAP-0039).
+                    fix = "your saved fail mode keeps them open; block them with " + outage_block_hint(gc, name)
+                else:
+                    fix = "block them with the strict policy: defenseclaw guardrail use-pack strict" + (
+                        f" --connector {name}" if scope else ""
+                    )
                 posture_rows.append(
                     f"{_connector_label(name)} ({name}) {where} with fail mode open: while the gateway "
                     f"is down its hooks allow calls that policy blocks; {fix}"
@@ -1754,11 +1768,20 @@ def _set_connector_fail_mode(app: AppContext, requested: str, mode: str | None, 
     )
 
 
-def _put_back_global_fail_mode(gc: object, value: str, saved: bool) -> None:
-    """Restore the global hook fail mode and whether the user had saved one."""
+def _restore_global_hook_fail_mode(gc: object, value: str, saved: bool) -> None:
+    """Put the global hook_fail_mode back as it was before a failed change.
 
-    gc.hook_fail_mode = value
-    object.__setattr__(gc, "_hook_fail_mode_saved", saved)
+    An unset global reads as "closed" in memory (GuardrailConfig keeps that
+    public default) but is not a saved choice. Assigning that value back would
+    mark it saved, so a rollback wrote ``hook_fail_mode: closed`` that the
+    user never chose (GAP-2019). An unset value goes back unset.
+    """
+
+    if saved:
+        gc.hook_fail_mode = value
+        return
+    gc.hook_fail_mode = ""
+    object.__setattr__(gc, "hook_fail_mode", value)
 
 
 def _apply_global_fail_mode_transaction(
@@ -1829,7 +1852,7 @@ def _apply_global_fail_mode_transaction(
         except OSError as exc:
             # A failed writer commit leaves config.yaml as it was, and no
             # registration file has been touched yet.
-            _put_back_global_fail_mode(gc, old_global, old_global_saved)
+            _restore_global_hook_fail_mode(gc, old_global, old_global_saved)
             for name, (old_entry, old_mode) in old_entries.items():
                 old_entry.hook_fail_mode = old_mode
             ux.err(
@@ -1888,7 +1911,7 @@ def _apply_global_fail_mode_transaction(
                                 + ". Run `defenseclaw doctor`, then retry the fail-mode command."
                             )
             except (OSError, RuntimeError, click.ClickException) as exc:
-                _put_back_global_fail_mode(gc, old_global, old_global_saved)
+                _restore_global_hook_fail_mode(gc, old_global, old_global_saved)
                 for name, (old_entry, old_mode) in old_entries.items():
                     old_entry.hook_fail_mode = old_mode
                 try:

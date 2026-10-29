@@ -931,6 +931,18 @@ func TestLoadRulePackExplainsTheSemanticCostLimits(t *testing.T) {
 	if !strings.Contains(packErr.Reason, strconv.FormatUint(semanticRuleStaticCostLimit, 10)) {
 		t.Errorf("reason = %q, want the per-rule limit", packErr.Reason)
 	}
+	// GAP-0049: the surface check refuses map(), filter() and exists_one()
+	// before the cost estimate runs, so a cost refusal only ever involves
+	// exists() and all(); the reason names only those (as GAP-0036 does for
+	// the depth refusal).
+	if !strings.Contains(packErr.Reason, "exists() or all()") {
+		t.Errorf("reason = %q, want it to name exists() and all()", packErr.Reason)
+	}
+	for _, refusedMacro := range []string{"map", "filter", "exists_one"} {
+		if strings.Contains(packErr.Reason, refusedMacro) {
+			t.Errorf("reason = %q names %s, which the surface check refuses at any depth", packErr.Reason, refusedMacro)
+		}
+	}
 
 	var rules strings.Builder
 	rules.WriteString("version: 1\ncategory: custom\nrules:\n")
@@ -989,6 +1001,55 @@ func TestLoadRulePackNamesTheInvalidSemanticRule(t *testing.T) {
 	if !strings.HasPrefix(packErr.Reason, "rule R4-MARKER-BLOCK (entry 1) expression is invalid: it does not type-check") ||
 		!strings.Contains(packErr.Reason, "quote string literals") || strings.Contains(packErr.Reason, "dccert") {
 		t.Fatalf("reason = %q", packErr.Reason)
+	}
+}
+
+// GAP-0036: the comprehension-depth refusal names only the list macros a
+// rule-pack expression admits. map(), filter() and exists_one() are refused by
+// the surface check, so naming them here told authors they were allowed at a
+// lower depth.
+func TestComprehensionDepthRefusalNamesOnlyAdmittedMacros(t *testing.T) {
+	load := func(expression string) *RulePackError {
+		t.Helper()
+		dir := t.TempDir()
+		body := strings.Replace(validRulesYAML("custom", "R-DEPTH"), "    title:",
+			"    tool_call_only: true\n    expression: '"+expression+"'\n    title:", 1)
+		writeRulePackFile(t, dir, "rules/custom.yaml", body)
+		_, err := LoadRulePack(dir)
+		if err == nil {
+			return nil
+		}
+		return requireRulePackError(t, err, "")
+	}
+	for _, admitted := range []string{
+		"f.commands.exists(c, c.argv_complete)",
+		"f.commands.all(c, c.argv_complete)",
+		"f.commands.exists(c, c.argv.all(a, a != \"x\"))",
+	} {
+		if packErr := load(admitted); packErr != nil {
+			t.Fatalf("%s refused: %v", admitted, packErr)
+		}
+	}
+	for _, refused := range []string{
+		"f.commands.map(c, c.argv_complete).exists(b, b)",
+		"f.commands.filter(c, c.argv_complete).exists(b, b.argv_complete)",
+		"f.commands.exists_one(c, c.argv_complete)",
+	} {
+		if packErr := load(refused); packErr == nil || packErr.Code != "semantic_surface" {
+			t.Fatalf("%s: refusal = %v, want semantic_surface", refused, packErr)
+		}
+	}
+	packErr := load("f.commands.exists(c, c.argv.exists(a, f.commands.exists(d, d.argv_complete)))")
+	if packErr == nil || packErr.Code != "semantic_comprehension_depth" {
+		t.Fatalf("three nested exists(): refusal = %v, want semantic_comprehension_depth", packErr)
+	}
+	if !strings.Contains(packErr.Reason, "exists() and all()") {
+		t.Errorf("reason = %q, want it to name exists() and all()", packErr.Reason)
+	}
+	for _, refusedMacro := range []string{"map", "filter", "exists_one"} {
+		if strings.Contains(packErr.Reason, refusedMacro) {
+			t.Errorf("reason = %q names %s, which the surface check refuses at any depth", packErr.Reason, refusedMacro)
+		}
 	}
 }
 

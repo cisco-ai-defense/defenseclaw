@@ -18,6 +18,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"errors"
+	"fmt"
 	"net"
 	"net/http"
 	"net/http/httptrace"
@@ -27,6 +28,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/defenseclaw/defenseclaw/internal/gateway/connector/hookexec"
 	"github.com/defenseclaw/defenseclaw/internal/netguard"
 	"github.com/defenseclaw/defenseclaw/internal/observability"
 	"github.com/defenseclaw/defenseclaw/internal/observability/delivery"
@@ -98,6 +100,7 @@ type baseConfig struct {
 	network     NetworkOptions
 	observer    WarningObserver
 	credentials bool
+	localStack  bool
 }
 
 type preparedTransport struct {
@@ -172,7 +175,7 @@ func prepareTransport(ctx context.Context, config baseConfig) (preparedTransport
 	emitPolicyWarnings(config, endpoint.Scheme)
 	transport := &http.Transport{
 		Proxy:                 nil,
-		DialContext:           netguard.V8SafeDialContext(policy, dialer, resolver),
+		DialContext:           checkLocalStackListener(config.localStack, netguard.V8SafeDialContext(policy, dialer, resolver)),
 		TLSClientConfig:       tlsConfig,
 		ForceAttemptHTTP2:     true,
 		MaxIdleConns:          16,
@@ -189,6 +192,45 @@ func prepareTransport(ctx context.Context, config baseConfig) (preparedTransport
 		},
 		activation: activation,
 	}, nil
+}
+
+// verifyLocalStackListener proves a loopback connection reaches a listener
+// of this account or of the system account (hookexec.VerifyLocalPeer).
+// Replaceable in tests.
+var verifyLocalStackListener = hookexec.VerifyLocalPeer
+
+// errLocalStackListenerUnverified is a local-stack connection whose listener
+// another account holds, or whose account could not be read: nothing was
+// written to it, so the batch stays queued and is retried.
+var errLocalStackListenerUnverified = errors.New("local Splunk listener is not proven to be this account's local stack")
+
+// checkLocalStackListener wraps dial for the sink local Splunk setup
+// recorded: a loopback connection is closed before any byte (the TLS hello
+// and the HEC token included) unless verifyLocalStackListener proves its
+// listener. When the stack is stopped, another account can bind 127.0.0.1:8088
+// and would otherwise receive the token and every audit batch (GAP-2115, the
+// GAP-1087 rule for the bundled OTLP stack). Every other destination dials as
+// before: an operator's own Splunk may run as its own service account.
+func checkLocalStackListener(
+	localStack bool,
+	dial func(context.Context, string, string) (net.Conn, error),
+) func(context.Context, string, string) (net.Conn, error) {
+	if !localStack {
+		return dial
+	}
+	return func(ctx context.Context, network, address string) (net.Conn, error) {
+		connection, err := dial(ctx, network, address)
+		if err != nil {
+			return nil, err
+		}
+		if remote, ok := connection.RemoteAddr().(*net.TCPAddr); ok && remote.IP.IsLoopback() {
+			if verifyErr := verifyLocalStackListener(connection); verifyErr != nil {
+				_ = connection.Close()
+				return nil, fmt.Errorf("%w: %w: %v", netguard.ErrV8ConnectionFailed, errLocalStackListenerUnverified, verifyErr)
+			}
+		}
+		return connection, nil
+	}
 }
 
 func newTLSConfig(endpoint *url.URL, options TLSOptions) (*tls.Config, error) {

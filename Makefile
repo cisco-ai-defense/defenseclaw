@@ -1138,16 +1138,40 @@ go-test-cov: sync-openclaw-extension
 	$(HOST_PYTHON) scripts/merge_go_coverage.py --output coverage.out coverage-go-*.out
 	@rm -f coverage-go-*.out
 
-connector-matrix-test: go-connector-matrix-test py-connector-matrix-test
+CONNECTOR_MATRIX_RUN := Connector|Hook|CodeGuard|Telemetry|OTLP|AgentHook|Mode|Setup|Teardown|Capability|Matrix
+# The connector package alone runs about 16 minutes of the matrix, so CI
+# splits it to stay inside the 20-minute job budget: CONNECTOR_MATRIX_PART=
+# packages runs the other packages and the Python matrix, and 0 .. N-1 run
+# that part of the connector package's matrix tests (N =
+# CONNECTOR_MATRIX_CONNECTOR_PARTS, balanced on go-linux.json). The default,
+# all, runs everything in one go test.
+CONNECTOR_MATRIX_PART ?= all
+CONNECTOR_MATRIX_CONNECTOR_PARTS ?= 2
+
+connector-matrix-test: go-connector-matrix-test $(if $(filter all packages,$(CONNECTOR_MATRIX_PART)),py-connector-matrix-test)
 
 go-connector-matrix-test: sync-openclaw-extension
+ifeq ($(CONNECTOR_MATRIX_PART),all)
 	go test -count=1 -timeout $(GO_TEST_TIMEOUT) \
 		./internal/cli \
 		./internal/config \
 		./internal/gateway \
 		./internal/gateway/connector \
 		./test/e2e \
-		-run 'Connector|Hook|CodeGuard|Telemetry|OTLP|AgentHook|Mode|Setup|Teardown|Capability|Matrix'
+		-run '$(CONNECTOR_MATRIX_RUN)'
+else ifeq ($(CONNECTOR_MATRIX_PART),packages)
+	go test -count=1 -timeout $(GO_TEST_TIMEOUT) \
+		./internal/cli \
+		./internal/config \
+		./internal/gateway \
+		./test/e2e \
+		-run '$(CONNECTOR_MATRIX_RUN)'
+else
+	run="$$($(HOST_PYTHON) scripts/go_test_shards.py --package-dir internal/gateway/connector \
+		--match '$(CONNECTOR_MATRIX_RUN)' --timings scripts/test-timings/go-linux.json \
+		--shard-count $(CONNECTOR_MATRIX_CONNECTOR_PARTS) --shard-index $(CONNECTOR_MATRIX_PART))" && \
+		go test -count=1 -timeout $(GO_TEST_TIMEOUT) ./internal/gateway/connector -run "$$run"
+endif
 
 py-connector-matrix-test: pycli
 	$(VENV_BIN)/python$(EXE) -m pytest -q \
@@ -1516,6 +1540,8 @@ dist-gateway: _checkout-write-preflight sync-openclaw-extension
 		if [ "$$goos" = windows ]; then \
 			CGO_ENABLED=0 GOOS=$$goos GOARCH=$$goarch go build -trimpath -ldflags "-s -w -H=windowsgui -X main.version=$(VERSION) $(BUILD_INFO_LDFLAGS)" \
 				-o "$$stage/defenseclaw-hook.exe" ./cmd/defenseclaw-hook; \
+			CGO_ENABLED=0 GOOS=$$goos GOARCH=$$goarch go build -trimpath -ldflags "-s -w -H=windowsgui -X main.version=$(VERSION) $(BUILD_INFO_LDFLAGS)" \
+				-o "$$stage/defenseclaw-hook-guard.exe" ./cmd/defenseclaw-hook-guard; \
 			rm -f "$$out/defenseclaw-$(VERSION)-$$goos-$$goarch.zip"; \
 			(cd "$$stage" && zip -q "$$out/defenseclaw-$(VERSION)-$$goos-$$goarch.zip" ./*); \
 		else \

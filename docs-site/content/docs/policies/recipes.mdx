@@ -72,7 +72,7 @@ You are an AI agent. Turn one sentence from the user into one rule in a custom r
 
    Expected: no output.
    If the source folder is missing, run `defenseclaw init` first and tell the user.
-   In action mode DefenseClaw blocks an agent that copies into `~/.defenseclaw` (`tamper.detector_state_write`: DefenseClaw protects its own files). Then ask the user to run step 2 themselves, and continue.
+   In every mode, observe included, DefenseClaw blocks an agent that copies into `~/.defenseclaw` (`tamper.detector_state_write`: DefenseClaw protects its own files; with the permissive pack it only reports it). Then ask the user to run step 2 themselves, and continue.
 
 3. Write the rule file. Use this shape, which the quickstart demo also uses. Replace the id, expression, pattern and title.
 

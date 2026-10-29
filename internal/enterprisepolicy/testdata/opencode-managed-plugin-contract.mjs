@@ -117,6 +117,15 @@ for (const [stdout, exit, pattern] of [
   await assert.rejects(before(hooks), pattern);
 }
 
+// GAP-0850, GAP-1080: a closed outage keeps the hook's own sentence, which
+// names the stopped gateway and what to do, instead of only its exit status.
+{
+  const hooks = await load();
+  answer("event.json", JSON.stringify({ hook_output: { decision: "deny", reason: "DefenseClaw blocked this tool call: the DefenseClaw gateway service is not running on this computer. Try again in a moment; if this continues, ask your administrator to check DefenseClaw on this computer (enterprise_managed_gateway_not_running)." } }), 2);
+  await assert.rejects(before(hooks), /gateway service is not running on this computer.*enterprise_managed_gateway_not_running/);
+}
+console.log("case ok: a closed outage names the stopped gateway");
+
 // A successful process exit is not evidence that the gateway inspected the
 // call. An incomplete or contradictory decision must fail closed on every
 // managed OpenCode route (Linux, macOS and Windows load this same plugin).
@@ -186,6 +195,38 @@ for (const response of [
   await assert.rejects(before(hooks, "a_b_tool"), /ambiguous MCP server identity/);
 }
 
+// GAP-1017, GAP-1180, GAP-1520: a load-time check that could not run (the
+// gateway was down), or a deny the guard marks retryable, is asked again on
+// the next tool call: once the gateway answers, the session's tools run
+// without restarting the agent.
+for (const [guard, guardExit] of [
+  ["", 1],
+  [JSON.stringify({ deny: true, retryable: true, reason: "DefenseClaw blocked this tool call: the DefenseClaw gateway service is not running on this computer." }), 0],
+]) {
+  const hooks = await load({ guard, guardExit });
+  await assert.rejects(before(hooks), /DefenseClaw/);
+  answer("guard.json", JSON.stringify({ deny: false }));
+  answer("event.json", JSON.stringify({ action: "allow", mode: "observe", hook_output: { decision: "allow" } }));
+  assert.equal(await before(hooks), undefined, "the session runs again once the check answers");
+}
+console.log("case ok: an unanswered load-time check is retried");
+
+// GAP-0697: foreign_hooks report lets the unapproved plugin run and shows
+// the guard's warning, which names its file and digest, once per process.
+{
+  const toasts = [];
+  const client = { tui: { showToast: async (arg) => { toasts.push(arg && arg.body ? arg.body : arg); return true; } } };
+  const warning = "unapproved opencode hook in /work/repo/.opencode/plugins/t7foreign.js (sha256:11b8d8c2); your organization reports it but allows it to run";
+  const hooks = await load({ client, guard: JSON.stringify({ deny: false, warnings: [warning] }) });
+  answer("event.json", JSON.stringify({ action: "allow", mode: "observe", hook_output: { decision: "allow" } }));
+  assert.equal(await before(hooks), undefined);
+  assert.equal(await before(hooks), undefined);
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  const shown = toasts.filter((toast) => toast.variant === "warning" && toast.message.includes("t7foreign.js (sha256:11b8d8c2)"));
+  assert.equal(shown.length, 1, JSON.stringify(toasts));
+}
+console.log("case ok: a reported foreign plugin is named once");
+
 // A foreign plugin found at load blocks every call for the process, also
 // after its file is removed; each denied call still runs the guard check,
 // which the gateway records.
@@ -211,13 +252,11 @@ for (const response of [
   const hooks = await load({ guard: "garbage" });
   await assert.rejects(before(hooks), /unapproved plugin/);
 }
-// A failed load-time check holds for the process (OpenCode loads plugins
-// once), so the reason says to restart the agent.
+// A failed load-time check blocks with its cause and is asked again on the
+// next call (GAP-1017, GAP-1180), so it says to try again, not to restart.
 {
   const hooks = await load({ guard: "", guardExit: 1 });
-  await assert.rejects(before(hooks), /could not check for unapproved plugins when the agent started.*Restart the agent/);
-  answer("guard.json", JSON.stringify({ deny: false }));
-  await assert.rejects(before(hooks), /Restart the agent/);
+  await assert.rejects(before(hooks), /could not check for unapproved plugins when the agent started.*Try again once DefenseClaw is available/);
 }
 
 // Post-tool telemetry and lifecycle events never throw.

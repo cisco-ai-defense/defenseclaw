@@ -309,6 +309,61 @@ func TestStandaloneRepairRestoresTheUsersOwnDataDirModes(t *testing.T) {
 	requirePerm(t, elsewhere, 0o500)
 }
 
+// A user who loosened their own ~/.defenseclaw or its hooks folder (chmod
+// 755) kept verification green, so the guardian's interval reconcile
+// reported no change and the folder stayed loose until another change
+// started a repair (rel-1-0-4 GAP-2341). Verification now names the folder
+// and its mode, the repair restores 0700, and the Secure Client profile
+// keeps its earlier verification.
+func TestStandaloneVerifyReportsALoosenedDataDirMode(t *testing.T) {
+	requireEnterpriseHookInstaller(t)
+	skipIfRoot(t)
+	setStandaloneProfileForTest(t, true)
+	home := newTestHome(t)
+	opts := hermesStandaloneOptions(t, home)
+	if _, err := Install(context.Background(), opts); err != nil {
+		t.Fatalf("install: %v", err)
+	}
+	dataDir := filepath.Join(home, ".defenseclaw")
+	hooks := filepath.Join(dataDir, "hooks")
+	t.Cleanup(func() {
+		_ = os.Chmod(dataDir, 0o700)
+		_ = os.Chmod(hooks, 0o700)
+	})
+	if _, err := Verify(context.Background(), opts); err != nil {
+		t.Fatalf("verify after the install: %v", err)
+	}
+	repair := opts
+	repair.AllowMissingHookConfigRepair = true
+	for _, loosened := range []string{hooks, dataDir} {
+		if err := os.Chmod(loosened, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		_, err := Verify(context.Background(), opts)
+		if err == nil || !strings.Contains(err.Error(), loosened+" has mode 0755, want 0700") {
+			t.Fatalf("verify with %s at 0755 = %v, want the mode named", loosened, err)
+		}
+		if _, err := Install(context.Background(), repair); err != nil {
+			t.Fatalf("repair of %s: %v", loosened, err)
+		}
+		requirePerm(t, dataDir, 0o700)
+		requirePerm(t, hooks, 0o700)
+		if _, err := Verify(context.Background(), opts); err != nil {
+			t.Fatalf("verify after the repair of %s: %v", loosened, err)
+		}
+	}
+
+	// Outside the standalone profile the mode is not part of verification.
+	setStandaloneProfileForTest(t, false)
+	if err := os.Chmod(hooks, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Verify(context.Background(), opts); err != nil && strings.Contains(err.Error(), "want 0700") {
+		t.Fatalf("Secure Client verify = %v, want no mode check", err)
+	}
+	requirePerm(t, hooks, 0o755)
+}
+
 // A managed in-agent plugin (Amp, OpenCode), its runtime lock and its
 // custody receipt are all user-owned. An appended line with matching lock
 // and receipt digests kept the old checks green, but verification must

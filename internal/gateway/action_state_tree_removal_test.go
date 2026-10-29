@@ -145,12 +145,29 @@ func TestR105GAP1774WholeTreeOfActiveState(t *testing.T) {
 		{"rm -rf policies", "rm -rf ~/.defenseclaw/policies", true, ""},
 		{"rm -rf receipts", "rm -rf ~/.defenseclaw/receipts", true, ""},
 		{"rm -rf whole state", "rm -rf ~/.defenseclaw", true, ""},
-		{"ln -sf over config", "ln -sf /tmp/r105-other ~/.defenseclaw/config.yaml", true, "classifier seam GAP-1774: actionfacts has no ln grammar (effect uncertain, no path fact for the link name)"},
-		{"ln -sfn over hooks", "ln -sfn /tmp/r105-other ~/.defenseclaw/hooks", true, "classifier seam GAP-1774: actionfacts has no ln grammar (effect uncertain, no path fact for the link name)"},
+		{"ln -sf over config", "ln -sf /tmp/r105-other ~/.defenseclaw/config.yaml", true, ""},
+		{"ln -sfn over hooks", "ln -sfn /tmp/r105-other ~/.defenseclaw/hooks", true, ""},
+		{"ln -s into installer", "ln -s /tmp/r105-other ~/.defenseclaw/installer", true, ""},
+		{"ln -sf over hook", "ln -sf /tmp/r105-other ~/.defenseclaw/hooks/claude-code-hook.sh", true, ""},
+		{"ln -sfT over hooks", "ln -sfT /tmp/r105-other ~/.defenseclaw/hooks", true, ""},
+		{"ln -t into policies", "ln -s -t ~/.defenseclaw/policies /tmp/r105-other/default.yaml", true, ""},
+		{"ln into hooks slash", "ln -sf /tmp/r105-other/claude-code-hook.sh ~/.defenseclaw/hooks/", true, ""},
+		{"ln many into receipts", "ln -sf /tmp/a /tmp/installer.sha256 ~/.defenseclaw/receipts", true, ""},
+		{"ln hard over config", "ln -f /tmp/r105-other ~/.defenseclaw/config.yaml", true, ""},
+		{"ln $HOME over config", "ln -sf /tmp/r105-other $HOME/.defenseclaw/config.yaml", true, ""},
+		{"ln BSD -h over hooks", "ln -sfh /tmp/r105-other ~/.defenseclaw/hooks", true, ""},
+		{"ln config into root", "ln -sf /tmp/config.yaml ~/.defenseclaw", true, ""},
+		{"ln config into root slash", "ln -sf /tmp/config.yaml ~/.defenseclaw/", true, ""},
 		{"rm -rf logs", "rm -rf ~/.defenseclaw/logs", false, ""},
 		{"ls installer", "ls -la ~/.defenseclaw/installer", false, ""},
 		{"copy installer out", "cp -r ~/.defenseclaw/installer ./installer-copy", false, ""},
 		{"link to config elsewhere", "ln -s ~/.defenseclaw/config.yaml ./config-link", false, ""},
+		{"link to hooks elsewhere", "ln -sfn ~/.defenseclaw/hooks ./hooks-link", false, ""},
+		{"link named after target in cwd", "ln -s ~/.defenseclaw/config.yaml", false, ""},
+		{"link into logs", "ln -sf /tmp/r105-other ~/.defenseclaw/logs/latest.log", false, ""},
+		{"link into state root", "ln -s /tmp/r105-other ~/.defenseclaw/", false, ""},
+		{"project link", "ln -sf ../shared/notes.txt notes-link", false, ""},
+		{"ln --help", "ln --help", false, ""},
 		{"project look-alike tree", "rm -rf .defenseclaw/installer", false, ""},
 	}
 	for _, mode := range []string{"observe", "action"} {
@@ -238,6 +255,24 @@ func TestR105GAP2075FindDeleteOfProtectedStateNames(t *testing.T) {
 		{"find root iname codex bracket log", "find ~/.defenseclaw -iname 'CODEX*[.LOG]*' -delete", true, ""},
 		{"find HOME suppress bracket tmp", "find $HOME/.defenseclaw -name 'suppress*[.tmp]*' -delete", true, ""},
 		{"find root unterminated bracket", "find ~/.defenseclaw -name 'codex*[.log' -delete", true, ""},
+		// find runs its expression left to right: an action before the
+		// name test removes every entry (pod check 3).
+		{"find root delete before name log", "find ~/.defenseclaw -delete -name '*.log'", true, ""},
+		{"find root type delete before name tmp", "find ~/.defenseclaw -type f -delete -name '*.tmp'", true, ""},
+		{"find HOME delete before iname LOG", "find $HOME/.defenseclaw -delete -iname '*.LOG'", true, ""},
+		{"find root depth delete before name jsonl", "find ~/.defenseclaw -depth -delete -name '*.jsonl'", true, ""},
+		{"find root mtime delete before name log", "find ~/.defenseclaw -mtime +7 -delete -name '*.log'", true, ""},
+		// A primary that takes arguments swallows the words after it: GNU
+		// -fprintf takes FILE=-name FORMAT=*.log, so the -delete removes
+		// every entry (pod check 4). An unknown primary is not cleanup.
+		{"find root fprintf swallows name", "find ~/.defenseclaw -fprintf -name '*.log' -delete", true, ""},
+		{"find HOME type fprintf swallows iname", "find $HOME/.defenseclaw -type f -fprintf -iname '*.LOG' -delete", true, ""},
+		{"find root fprint swallows name", "find ~/.defenseclaw -fprint -name '*.log' -delete", true, ""},
+		{"find root unknown primary", "find ~/.defenseclaw -frobnicate -name '*.log' -delete", true, ""},
+		// -cnewer and BSD -depth n take one argument: a name word after
+		// them is their argument, not a test.
+		{"find root cnewer swallows name", "find ~/.defenseclaw -cnewer -name '*.log' -delete", true, ""},
+		{"find root bsd depth n then delete", "find ~/.defenseclaw -depth 1 -delete -name '*.log'", true, ""},
 		// Log cleanup from the root stays allowed with no state finding.
 		{"find root log cleanup", "find ~/.defenseclaw -name '*.log' -mtime +7 -delete", false, ""},
 		{"find root tmp cleanup", "find ~/.defenseclaw -type f -name '*.tmp' -delete", false, ""},
@@ -247,6 +282,18 @@ func TestR105GAP2075FindDeleteOfProtectedStateNames(t *testing.T) {
 		{"find root escaped log", `find ~/.defenseclaw -name '*\.log' -delete`, false, ""},
 		{"find root rotated digit logs", "find ~/.defenseclaw -name 'gateway.log.[0-9]*' -delete", false, ""},
 		{"find logs tree", "find ~/.defenseclaw/logs -mtime +7 -delete", false, ""},
+		{"find root log cleanup delete twice", "find ~/.defenseclaw -name '*.log' -delete -delete", false, ""},
+		{"find root log cleanup then mtime", "find ~/.defenseclaw -name '*.log' -delete -mtime +7", false, ""},
+		{"find root log cleanup fprintf record", `find ~/.defenseclaw -name '*.log' -fprintf /tmp/removed.txt '%p\n' -delete`, false, ""},
+		{"find root log cleanup print", "find ~/.defenseclaw -name '*.log' -print -delete", false, ""},
+		{"find root maxdepth log cleanup", "find ~/.defenseclaw -maxdepth 2 -name '*.log' -mmin +60 -delete", false, ""},
+		// Reference-file and BSD numeric primaries are known, not unknown
+		// words: the cleanup stays allowed (pod check5 over-block).
+		{"find root log cleanup cnewer", "find ~/.defenseclaw -name '*.log' -cnewer /tmp/ref -delete", false, ""},
+		{"find root log cleanup anewer", "find ~/.defenseclaw -name '*.log' -anewer /tmp/ref -delete", false, ""},
+		{"find root log cleanup bsd depth n", "find ~/.defenseclaw -name '*.log' -depth 1 -delete", false, ""},
+		{"find root log cleanup bsd Bnewer", "find ~/.defenseclaw -name '*.log' -Bnewer /tmp/ref -delete", false, ""},
+		{"find root log cleanup depth option", "find ~/.defenseclaw -depth -name '*.log' -delete", false, ""},
 	}
 	for _, mode := range []string{"observe", "action"} {
 		r105RunStateRowsChecked(t, mode, cwd, rows, true)
@@ -269,10 +316,10 @@ func TestR105GAP2077ChmodGroupOtherWriteOfStateTree(t *testing.T) {
 		{"chmod a+w root", "chmod a+w ~/.defenseclaw", true, ""},
 		// BSD/macOS symlink options come before the mode (pod check 1); the
 		// state owner skips them, the shell grammar seam gives the path fact.
-		{"chmod -h 777 hooks", "chmod -h 777 ~/.defenseclaw/hooks", true, "classifier seam GAP-2077: actionfacts chmod grammar does not know the BSD/macOS -h -H -L -P options, so the call gets no path fact"},
-		{"chmod -RH 777 root", "chmod -RH 777 ~/.defenseclaw", true, "classifier seam GAP-2077: actionfacts chmod grammar does not know the BSD/macOS -h -H -L -P options, so the call gets no path fact"},
-		{"chmod -R -L o+w root", "chmod -R -L o+w ~/.defenseclaw", true, "classifier seam GAP-2077: actionfacts chmod grammar does not know the BSD/macOS -h -H -L -P options, so the call gets no path fact"},
-		{"chmod -P g+w hooks", "chmod -R -P g+w ~/.defenseclaw/hooks", true, "classifier seam GAP-2077: actionfacts chmod grammar does not know the BSD/macOS -h -H -L -P options, so the call gets no path fact"},
+		{"chmod -h 777 hooks", "chmod -h 777 ~/.defenseclaw/hooks", true, ""},
+		{"chmod -RH 777 root", "chmod -RH 777 ~/.defenseclaw", true, ""},
+		{"chmod -R -L o+w root", "chmod -R -L o+w ~/.defenseclaw", true, ""},
+		{"chmod -P g+w hooks", "chmod -R -P g+w ~/.defenseclaw/hooks", true, ""},
 		// macOS ACL grants of write to another principal.
 		{"chmod +a everyone write hooks", `chmod +a "everyone allow write,append" ~/.defenseclaw/hooks`, true, ""},
 		{"chmod +a# staff add_file root", `chmod +a# 0 "group:staff allow add_file" ~/.defenseclaw`, true, ""},

@@ -50,16 +50,17 @@ def test_status_reports_a_proxy_connector_closed_whatever_hook_fail_mode_says(cf
 
 @pytest.mark.parametrize("proxy", ["openclaw", "zeptoclaw"])
 def test_setup_summary_shows_the_proxy_outage_behaviour(cfg, proxy):
+    cfg.claw.mode = proxy
+    cfg.guardrail.connector = proxy
     cfg.guardrail.hook_fail_mode = "open"
-    assert cmd_setup._summary_hook_fail_mode(cfg.guardrail, proxy).startswith("closed (proxy-backed")
+    assert cmd_setup._guardrail_summary_hook_fail_mode(cfg, proxy).startswith("closed (proxy-backed")
 
 
 def test_setup_summary_shows_a_hook_connectors_effective_mode(cfg):
     cfg.claw.mode = "codex"
     cfg.guardrail.connector = "codex"
     cfg.guardrail.connectors["codex"] = PerConnectorGuardrailConfig(hook_fail_mode="closed")
-    assert cmd_setup._summary_hook_fail_mode(cfg.guardrail, "codex") == cfg.guardrail.effective_hook_fail_mode("codex")
-    assert cmd_setup._summary_hook_fail_mode(cfg.guardrail, "codex") == "closed"
+    assert cmd_setup._guardrail_summary_hook_fail_mode(cfg, "codex") == "closed"
 
 
 def test_the_preflight_refusal_names_the_setup_command_the_operator_ran():
