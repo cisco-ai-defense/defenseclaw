@@ -51,6 +51,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/assetfacts"
 	"github.com/defenseclaw/defenseclaw/internal/copilotargs"
 	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/managed/refusalpipe"
 	"github.com/defenseclaw/defenseclaw/internal/useridentity"
 )
@@ -3618,14 +3619,47 @@ func managedFailClosedText(opts Options, layer, reason string) string {
 // gateway is not available" or "is restarting to apply a change", which did
 // not name the upgrade (GAP-2173). "" for any other failure: a refusal
 // with its own cause (another program on the port, SELinux, a sandboxed
-// agent, a missing DefenseClaw folder) keeps its text.
+// agent, a missing DefenseClaw folder) keeps its text. The runtime-state
+// refusals that say only "not set up correctly"
+// (managedLifecycleRuntimeStateReason) name the run too: a Setup or package
+// run rewrites that state (the runtime generation, the hook socket, the
+// machine registrations) while it holds the gateway, so a call between two
+// of its steps read half-written state, not a broken install (GAP-2462,
+// GAP-2459). Such a refusal resolved no gateway service, so the Windows
+// marker is read on the standalone gateway service.
 func managedInstallWindowText(opts Options, layer, reason string) string {
-	if layer != "transport" || !managedOutageShapedReason(reason) || !managedLifecycleActive(opts) {
+	if layer != "transport" {
+		return ""
+	}
+	if managedLifecycleRuntimeStateReason(reason) {
+		if strings.TrimSpace(opts.ManagedGatewayServiceName) == "" {
+			opts.ManagedGatewayServiceName = managed.StandaloneWindowsGatewaySvc
+		}
+	} else if !managedOutageShapedReason(reason) {
+		return ""
+	}
+	if !managedLifecycleActive(opts) {
 		return ""
 	}
 	return "DefenseClaw blocked this " + hookEventSubject(opts.Event) + ": DefenseClaw is being installed or " +
 		"upgraded on this computer, and its gateway starts again when that is done. Try again in a moment; " +
 		"if this continues, contact your administrator."
+}
+
+// managedLifecycleRuntimeStateReason reports a managed runtime-state
+// refusal that managedStandaloneFailClosedText words "DefenseClaw is not set
+// up correctly on this computer": an invalid or missing runtime generation or
+// descriptor, a missing hook socket, an untrusted machine-policy summary.
+// Refusals with a cause of their own (a missing DefenseClaw folder, a disable
+// sentinel) are not.
+func managedLifecycleRuntimeStateReason(reason string) bool {
+	switch reason {
+	case managedRuntimeHomeMissingReason, "enterprise_managed_runtime_disable_sentinel_forbidden":
+		return false
+	}
+	return strings.HasPrefix(reason, "enterprise_managed_runtime") ||
+		reason == "enterprise_managed_hook_socket_missing" ||
+		reason == "enterprise_machine_policy_summary_untrusted"
 }
 
 // managedOutageShapedReason reports a transport failure reason that a
