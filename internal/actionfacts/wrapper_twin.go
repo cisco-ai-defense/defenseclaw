@@ -40,6 +40,14 @@ import (
 // relative operand is read where the call runs. ok is false when no call
 // was rewritten. A caller counts only a block proven on the reading.
 func WrapperUnwrapTwin(command string) (twin string, ok bool) {
+	return wrapperUnwrapTwin(command, 0)
+}
+
+// maxNestedShellStrings bounds how deep wrapperUnwrapTwin reads shell
+// STRINGs inside shell STRINGs.
+const maxNestedShellStrings = 4
+
+func wrapperUnwrapTwin(command string, depth int) (twin string, ok bool) {
 	defer func() {
 		if recover() != nil {
 			twin, ok = "", false
@@ -63,6 +71,21 @@ func WrapperUnwrapTwin(command string) (twin string, ok bool) {
 			edits = append(edits, edit{start: start, end: end, text: text})
 		}
 	}
+	// A static shell STRING is its own command line: a wrapper inside it
+	// (sh -c "setsid sh -c 'cp ...'") is read the same way, and the STRING
+	// word is written as the quoted reading (GAP-2519).
+	nested := func(word *syntax.Word) {
+		if depth >= maxNestedShellStrings {
+			return
+		}
+		value := projectPOSIXWord(word)
+		if value.Expands {
+			return
+		}
+		if body, changed := wrapperUnwrapTwin(value.Value, depth+1); changed && body != value.Value {
+			replace(word.Pos(), word.End(), posixSingleQuoted(body))
+		}
+	}
 	syntax.Walk(file, func(node syntax.Node) bool {
 		switch typed := node.(type) {
 		case *syntax.TimeClause:
@@ -78,6 +101,7 @@ func WrapperUnwrapTwin(command string) (twin string, ok bool) {
 			if command, ok := flockShellString(typed.Args); ok {
 				// flock FILE -c STRING runs sh -c STRING under the lock.
 				replace(typed.Args[0].Pos(), typed.Args[command].Pos(), "sh -c ")
+				nested(typed.Args[command])
 				return true
 			}
 			run, writer := wrappedWriterRun(typed.Args)
@@ -88,6 +112,11 @@ func WrapperUnwrapTwin(command string) (twin string, ok bool) {
 			// (bash --norc -c, sh -c -- STRING, bash -euo pipefail -c)
 			// runs what sh -c STRING runs (GAP-2527).
 			text, shell := shellOptionsString(typed.Args, run.Index)
+			if shell {
+				nested(typed.Args[text])
+			} else if body, plain := plainShellString(typed.Args, run.Index); plain {
+				nested(typed.Args[body])
+			}
 			if run.Dir == "" && shell {
 				replace(typed.Args[0].Pos(), typed.Args[text].Pos(), "sh -c ")
 				return true
@@ -254,7 +283,7 @@ func shellOptionsString(args []*syntax.Word, at int) (int, bool) {
 	if name, ok := static(at); !ok || !wrappedShellPrograms[wrapperProgramName(name)] {
 		return 0, false
 	}
-	command := false
+	command, noexec := false, false
 	for i := at + 1; i < len(args); i++ {
 		word, ok := static(i)
 		if !ok {
@@ -265,7 +294,7 @@ func shellOptionsString(args []*syntax.Word, at int) (int, bool) {
 			if !command || i+1 >= len(args) {
 				return 0, false
 			}
-			return i + 1, true
+			return i + 1, !noexec
 		case word == "--rcfile" || word == "--init-file":
 			i++
 			if _, ok := static(i); !ok {
@@ -278,7 +307,11 @@ func shellOptionsString(args []*syntax.Word, at int) (int, bool) {
 				return 0, false
 			}
 		case len(word) > 1 && (word[0] == '-' || word[0] == '+'):
-			values := 0
+			// -n and -o noexec read the STRING and run nothing; +n and
+			// +o noexec turn that off again (bash +n -c STRING runs it),
+			// and the last setting wins.
+			set := word[0] == '-'
+			var values []rune
 			for _, flag := range word[1:] {
 				switch {
 				case flag == 'c':
@@ -287,18 +320,22 @@ func shellOptionsString(args []*syntax.Word, at int) (int, bool) {
 					}
 					command = true
 				case flag == 'n':
-					return 0, false // -n reads the STRING and runs nothing.
+					noexec = set
 				case flag == 'o' || flag == 'O':
-					values++
+					values = append(values, flag)
 				case flag >= 'a' && flag <= 'z' || flag >= 'A' && flag <= 'Z':
 				default:
 					return 0, false
 				}
 			}
-			for ; values > 0; values-- {
+			for _, flag := range values {
 				i++
-				if value, ok := static(i); !ok || value == "noexec" {
+				value, ok := static(i)
+				if !ok {
 					return 0, false
+				}
+				if flag == 'o' && value == "noexec" {
+					noexec = set
 				}
 			}
 		default:
@@ -308,10 +345,23 @@ func shellOptionsString(args []*syntax.Word, at int) (int, bool) {
 			if first, _ := static(at + 1); i == at+2 && first == "-c" {
 				return 0, false
 			}
-			return i, true
+			return i, !noexec
 		}
 	}
 	return 0, false
+}
+
+// plainShellString returns the index of the STRING of a POSIX shell at
+// args[at] started as SHELL -c STRING.
+func plainShellString(args []*syntax.Word, at int) (int, bool) {
+	if at+2 >= len(args) {
+		return 0, false
+	}
+	name, option := projectPOSIXWord(args[at]), projectPOSIXWord(args[at+1])
+	if name.Expands || option.Expands || option.Value != "-c" || !wrappedShellPrograms[wrapperProgramName(name.Value)] {
+		return 0, false
+	}
+	return at + 2, true
 }
 
 // flockShellString returns the index of the STRING word of a
