@@ -908,13 +908,18 @@ const (
 // double-quoted word or an unquoted Git Bash here-document body. heredoc
 // marks a Git Bash here-document body, whose runs (fed to a shell) and
 // cmdFeed (fed to cmd.exe) are set from its command line (checker it11
-// RV11-1).
+// RV11-1). argvRuns marks a Git Bash double-quoted word whose command
+// substitution holds a here-document and whose output is the argv or input
+// of a launcher, an unknown program, a shell or cmd (env "$(cat <<EOF)"):
+// the bodies of those here-documents are read as run by a shell and cmd
+// (GAP-2539).
 type cmdTextSpan struct {
 	start, end       int
 	inner            string
 	runs, args       bool
 	expands, heredoc bool
 	cmdFeed          bool
+	argvRuns         bool
 }
 
 func cmdSingleQuote(r rune, reading cmdOuterReading) bool {
@@ -1125,6 +1130,9 @@ type cmdHeredoc struct {
 	stripTabs, quoted bool
 	level             int
 	runs, cmdFeed     bool
+	// op is the offset of the << operator and lineStart the start of its
+	// logical command line (cmdTextSpansRead).
+	op, lineStart int
 }
 
 // cmdHeredocDelimiter reads the delimiter word after a Git Bash << at start
@@ -1175,19 +1183,18 @@ func cmdHeredocDelimiter(command string, start int) (doc cmdHeredoc, end int, ok
 	return doc, min(j, len(command)), doc.delim != ""
 }
 
-// cmdHeredocFeeds reports whether the command line around a here-document
-// operator at pos hands its body to a shell (bash <<EOF, cat <<EOF | sh) or
-// to cmd.exe (cmd <<EOF): then the body runs (over-block, never
-// under-block). Every word of the line counts except, with trust on, the
-// arguments of a known text consumer (grep cmd <<EOF, cat <<EOF | rg bash):
-// they name text the consumer reads, not a receiver (GAP-2530).
-func cmdHeredocFeeds(command string, pos int, trust bool) (runs, cmdFeed bool) {
-	start := strings.LastIndexByte(command[:pos], '\n') + 1
-	end := len(command)
-	if k := strings.IndexByte(command[pos:], '\n'); k >= 0 {
-		end = pos + k
-	}
-	for _, word := range cmdLineReceiverWords(command[start:end], pos-start, trust) {
+// cmdHeredocFeeds reports whether the logical command line around a
+// here-document operator at offset op of line hands its body to a shell
+// (bash <<EOF, cat <<EOF | sh) or to cmd.exe (cmd <<EOF): then the body runs
+// (over-block, never under-block). Every word of the line counts except,
+// with trust on, the arguments of a known text consumer (grep cmd <<EOF,
+// cat <<EOF | rg bash): they name text the consumer reads, not a receiver
+// (GAP-2530). The line is the whole command line as bash reads it: lines
+// joined by a backslash-newline, quoted words and substitutions that span
+// lines included (bash \<newline><<EOF, cat <<EOF \<newline>| bash;
+// GAP-2538).
+func cmdHeredocFeeds(line string, op int, trust bool) (runs, cmdFeed bool) {
+	for _, word := range cmdLineReceiverWords(line, op, trust) {
 		if word == cmdUnknownReceiver {
 			// "$BASH" -s <<EOF, $0 <<EOF, env "$BASH" -s <<EOF: the program
 			// is not known, so the body is read as a shell's and as cmd's
@@ -1328,21 +1335,26 @@ func cmdLineReceiverWords(line string, op int, trust bool) []string {
 func cmdScanReceiverWords(line string, i int, closer byte, trust bool, op int, commandWords *[]string) (words []string, end int) {
 	var stmt []string
 	var stmtExp []bool // stmtExp[k]: stmt[k] holds an expansion
+	var stmtOp []bool  // stmtOp[k]: stmt[k] is a substitution that holds op
+	// docs are the here-documents opened on the current line: their bodies
+	// are text read by their own receiver, skipped as bash skips them.
+	var docs []cmdHeredoc
 	var word strings.Builder
-	inWord, wordExp, redirect, depth := false, false, false, 0
+	inWord, wordExp, wordOp, redirect, depth := false, false, false, false, 0
 	flush := func() {
 		if !inWord {
 			return
 		}
-		w, exp := word.String(), wordExp
+		w, exp, holds := word.String(), wordExp, wordOp
 		word.Reset()
-		inWord, wordExp = false, false
+		inWord, wordExp, wordOp = false, false, false
 		if redirect {
 			redirect = false
 			return
 		}
 		stmt = append(stmt, w)
 		stmtExp = append(stmtExp, exp)
+		stmtOp = append(stmtOp, holds)
 	}
 	finish := func() {
 		flush()
@@ -1363,8 +1375,8 @@ func cmdScanReceiverWords(line string, i int, closer byte, trust bool, op int, c
 				}
 			}
 		}
-		words = append(words, cmdStatementReceiverWords(stmt, stmtExp, trust)...)
-		stmt, stmtExp = stmt[:0], stmtExp[:0]
+		words = append(words, cmdStatementReceiverWords(stmt, stmtExp, stmtOp, trust)...)
+		stmt, stmtExp, stmtOp = stmt[:0], stmtExp[:0], stmtOp[:0]
 	}
 	// nested reads a command substitution: its statements are commands of
 	// their own, and no consumer in them is trusted: a consumer printing
@@ -1377,9 +1389,12 @@ func cmdScanReceiverWords(line string, i int, closer byte, trust bool, op int, c
 		word.WriteString("$()")
 		inWord = true
 		// Its output is an expansion, unless it holds the here-document
-		// operator: git commit -m "$(cat <<EOF hands the body to cat.
+		// operator: git commit -m "$(cat <<EOF hands the body to cat, whose
+		// output is the word (cmdArgvHeredocReceiver, GAP-2539).
 		if op < j || op > e {
 			wordExp = true
+		} else {
+			wordOp = true
 		}
 		return e
 	}
@@ -1398,6 +1413,8 @@ func cmdScanReceiverWords(line string, i int, closer byte, trust bool, op int, c
 			switch {
 			case c == '"':
 				quote = 0
+			case c == '\\' && i+1 < len(line) && line[i+1] == '\n':
+				i++ // a backslash-newline is removed (GAP-2538).
 			case c == '\\' && i+1 < len(line):
 				word.WriteByte(c)
 				word.WriteByte(line[i+1])
@@ -1417,6 +1434,12 @@ func cmdScanReceiverWords(line string, i int, closer byte, trust bool, op int, c
 			quote = c
 			inWord = true
 		case '\\':
+			if i+1 < len(line) && line[i+1] == '\n' {
+				// A backslash-newline joins the lines: bash removes it
+				// (bash \<newline><<EOF; GAP-2538).
+				i++
+				continue
+			}
 			word.WriteByte(c)
 			if i+1 < len(line) {
 				word.WriteByte(line[i+1])
@@ -1441,6 +1464,9 @@ func cmdScanReceiverWords(line string, i int, closer byte, trust bool, op int, c
 					i++
 				case c == '<' && n == '<':
 					i++
+					if doc, _, ok := cmdHeredocDelimiter(line, i+1); ok {
+						docs = append(docs, doc)
+					}
 					if i+1 < len(line) && (line[i+1] == '<' || line[i+1] == '-') {
 						i++
 					}
@@ -1464,6 +1490,14 @@ func cmdScanReceiverWords(line string, i int, closer byte, trust bool, op int, c
 			finish()
 		case ';', '|', '\n':
 			finish()
+			if c == '\n' && len(docs) > 0 {
+				// The bodies start after this line; a body that does not
+				// end stays scanned (over-read).
+				if bodies, bodyEnd := cmdHeredocBodies(line, i+1, docs); len(bodies) == len(docs) {
+					i = bodyEnd
+				}
+				docs = nil
+			}
 		case '(':
 			if w := word.String(); inWord && strings.HasSuffix(w, "$") {
 				i = nested(i+1, ')')
@@ -1524,14 +1558,14 @@ func cmdStatementCommand(stmt []string) (k int, assigned bool) {
 // (no assignment before it, trust on), every word otherwise, plus
 // cmdUnknownReceiver when it can run a program named by an expansion
 // (cmdExpansionReceiver).
-func cmdStatementReceiverWords(stmt []string, exp []bool, trust bool) []string {
+func cmdStatementReceiverWords(stmt []string, exp, ops []bool, trust bool) []string {
 	k, assigned := cmdStatementCommand(stmt)
 	if k < len(stmt) && trust && !assigned && cmdTextConsumerStatement(stmt[k:]) {
 		// PATH=... grep runs another program: never a trusted consumer.
 		return nil
 	}
 	words := cmdSplitQuotedWords(stmt)
-	if k < len(stmt) && cmdExpansionReceiver(stmt, exp, k) {
+	if k < len(stmt) && (cmdExpansionReceiver(stmt, exp, k) || cmdArgvHeredocReceiver(stmt, ops, k)) {
 		words = append(words[:len(words):len(words)], cmdUnknownReceiver)
 	}
 	return words
@@ -1553,6 +1587,43 @@ func cmdExpansionReceiver(stmt []string, exp []bool, k int) bool {
 	for _, e := range exp[k+1:] {
 		if e {
 			return true
+		}
+	}
+	return false
+}
+
+// cmdArgvHeredocReceiver reports whether a word of the statement with
+// command word k is a substitution that holds the here-document operator
+// (ops) and hands the body over as the argv of a program that may run it:
+// the command word itself ($(cat <<EOF)), or an argument of any command but
+// a known text consumer, a command that runs no argument
+// (cmdExpansionInertCommands) and git commit, tag or notes, whose argument
+// is a message: env $(cat <<EOF), exec, timeout `cat <<EOF`, xargs
+// (GAP-2539). Unknown programs over-read, never under-read.
+func cmdArgvHeredocReceiver(stmt []string, ops []bool, k int) bool {
+	if !slices.Contains(ops[k:], true) {
+		return false
+	}
+	if ops[k] {
+		return true
+	}
+	return !cmdExpansionInertCommands[stmt[k]] && !cmdTextConsumerStatement(stmt[k:]) && !cmdGitMessageStatement(stmt[k:])
+}
+
+// cmdGitMessageStatement reports git commit, tag or notes (past -C and -c
+// with their values and other options): a git alias cannot shadow a git
+// command, and their arguments are a message or names, never a program.
+func cmdGitMessageStatement(args []string) bool {
+	if strings.TrimSuffix(strings.ToLower(args[0]), ".exe") != "git" {
+		return false
+	}
+	for i := 1; i < len(args); i++ {
+		switch a := args[i]; {
+		case a == "-C" || a == "-c":
+			i++
+		case strings.HasPrefix(a, "-"):
+		default:
+			return a == "commit" || a == "tag" || a == "notes"
 		}
 	}
 	return false
@@ -1711,6 +1782,30 @@ func cmdTextSpansRead(command string, reading cmdOuterReading, trust bool) (span
 		return i == 0 || strings.IndexByte(commentSeparators, command[i-1]) >= 0
 	}
 	n := len(command)
+	// lineStart is the start of the Git Bash logical command line: after
+	// the last newline outside ( ) frames, quoted words, here-document
+	// bodies and backslash-newlines (GAP-2538). lineQuoted are the double-
+	// quoted spans of that line with a << inside (GAP-2539).
+	lineStart := 0
+	var lineQuoted []int
+	argvQuoted := func(end int) {
+		for _, k := range lineQuoted {
+			span := spans[k]
+			for from := 0; ; {
+				at := strings.Index(span.inner[from:], "<<")
+				if at < 0 {
+					break
+				}
+				op := span.start + 1 + from + at
+				if runs, cmdFeed := cmdHeredocFeeds(command[lineStart:end], op-lineStart, trust); runs || cmdFeed {
+					spans[k].argvRuns = true
+					break
+				}
+				from += at + 2
+			}
+		}
+		lineQuoted = lineQuoted[:0]
+	}
 	for i := 0; i < n; {
 		c := command[i]
 		switch {
@@ -1781,14 +1876,22 @@ func cmdTextSpansRead(command string, reading cmdOuterReading, trust bool) (span
 				continue
 			}
 			doc.level = parens
-			doc.runs, doc.cmdFeed = cmdHeredocFeeds(command, i, trust)
+			doc.op, doc.lineStart = i, lineStart
 			pending = append(pending, doc)
 			i = end
 			continue
 		case reading == cmdReadingGitBash && c == '\n':
 			subscript = 0
+			if parens == 0 {
+				argvQuoted(i)
+			}
 			if len(pending) > 0 && parens <= pending[0].level {
-				// The bodies start after the line that ends the command.
+				// The receivers are read on the logical line that ends here;
+				// the bodies start after it.
+				for k := range pending {
+					doc := &pending[k]
+					doc.runs, doc.cmdFeed = cmdHeredocFeeds(command[doc.lineStart:i], doc.op-doc.lineStart, trust)
+				}
 				bodies, end := cmdHeredocBodies(command, i+1, pending)
 				pending = nil
 				if len(bodies) > 0 {
@@ -1796,6 +1899,9 @@ func cmdTextSpansRead(command string, reading cmdOuterReading, trust bool) (span
 					i = end
 					continue
 				}
+			}
+			if parens == 0 {
+				lineStart = i + 1
 			}
 		case reading == cmdReadingPowerShell && c == '<' && i+1 < n && command[i+1] == '#':
 			if end := strings.Index(command[i+2:], "#>"); end >= 0 {
@@ -1846,6 +1952,9 @@ func cmdTextSpansRead(command string, reading cmdOuterReading, trust bool) (span
 					// git commit -m "$(cat <<'EOF' ... EOF)" message).
 					return spans, true
 				}
+				if reading == cmdReadingGitBash && c == '"' && strings.Contains(inner, "<<") {
+					lineQuoted = append(lineQuoted, len(spans))
+				}
 				spans = append(spans, cmdTextSpan{start: i, end: end, inner: inner, expands: c == '"'})
 				i = end
 				continue
@@ -1853,6 +1962,7 @@ func cmdTextSpansRead(command string, reading cmdOuterReading, trust bool) (span
 		}
 		i++
 	}
+	argvQuoted(n)
 	cmdMarkRunStrings(command, spans)
 	return spans, false
 }
@@ -2211,6 +2321,19 @@ func (r *cmdBodyReader) read(command string, depth int) {
 	}
 }
 
+// readArgvHeredocs reads the here-document bodies of the Git Bash
+// substitution body sub, whose output a launcher or a shell runs
+// (cmdTextSpan.argvRuns): as a shell's and as cmd's (GAP-2539).
+func (r *cmdBodyReader) readArgvHeredocs(sub string, depth int) {
+	spans, _ := cmdTextSpans(sub, cmdReadingGitBash)
+	for _, span := range spans {
+		if span.heredoc && !r.overflow {
+			r.add(span.inner)
+			r.read(span.inner, depth+1)
+		}
+	}
+}
+
 func (r *cmdBodyReader) readWith(command string, reading cmdOuterReading, depth int) {
 	spans, stops := cmdTextSpans(command, reading)
 	if stops {
@@ -2235,6 +2358,9 @@ func (r *cmdBodyReader) readWith(command string, reading cmdOuterReading, depth 
 		if reading != cmdReadingCMD && span.expands {
 			for _, sub := range cmdSubexpressions(span.inner, reading) {
 				r.read(sub, depth+1)
+				if span.argvRuns {
+					r.readArgvHeredocs(sub, depth+1)
+				}
 			}
 		}
 	}

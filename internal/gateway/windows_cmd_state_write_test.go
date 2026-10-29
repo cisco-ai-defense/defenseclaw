@@ -477,6 +477,36 @@ func TestR105WindowsCMDHeredocSearchArgument(t *testing.T) {
 		{"[ -n \"$X\" ] && grep -n cmd <<'EOF'" + body, false},
 		{"echo \"$HOME\"; grep -c cmd <<'EOF'" + body, false},
 		{"\"$PYTHON\" - <<'EOF'\nprint('hi')\nEOF", false},
+		// GAP-2538 rows: a backslash-newline joins the lines before the
+		// receiver read, so a continued line still hands the body to a
+		// shell or cmd; a continued text consumer or git commit stays text.
+		{"bash \\\n<<'EOF'" + run, true},
+		{"env \"$BASH\" \\\n-s <<'EOF'" + run, true},
+		{"\"$BASH\" \\\n-s <<'EOF'" + run, true},
+		{"cat <<'EOF' \\\n| bash" + run, true},
+		{"grep -v x <<'EOF' \\\n| bash" + run, true},
+		{"env \\\nbash -s <<'EOF'" + run, true},
+		{"cat <<'EOF' \\\n| cmd" + cmdBody, true},
+		{"git commit \\\n-F - <<'EOF'" + body, false},
+		{"grep -n \\\ncmd <<'EOF'" + body, false},
+		{"cat <<'EOF' \\\n| grep -c cmd" + body, false},
+		// GAP-2539 rows: a substitution that holds a here-document and is an
+		// argument of a launcher or an unknown program hands the body over as
+		// its argv; git commit/tag/notes, gh pr/issue, a text consumer, a
+		// command that runs no argument and an assignment keep it text.
+		{"env $(cat <<'EOF'" + run + "\n)", true},
+		{"exec $(cat <<'EOF'" + run + "\n)", true},
+		{"$(cat <<'EOF'" + run + "\n)", true},
+		{"timeout 9 `cat <<'EOF'" + run + "\n`", true},
+		{"xargs $(cat <<'EOF'" + run + "\n) </dev/null", true},
+		{"nice \"$(cat <<'EOF'\nbash\nEOF\n)\" -s <<'X'\ncmd /c type nul > " + state + "\nX", true},
+		{"env \"$(cat <<'EOF'" + run + "\n)\"", true},
+		{"echo \"$(cat <<'EOF'" + run + "\n)\" | bash", true},
+		{"gh pr create --title t --body \"$(cat <<'EOF'" + body + "\n)\"", false},
+		{"git tag -a v1 -m \"$(cat <<'EOF'" + body + "\n)\"", false},
+		{"MSG=$(cat <<'EOF'" + body + "\n)", false},
+		{"echo \"$(cat <<'EOF'" + body + "\n)\" > notes.md", false},
+		{"grep -c cmd notes.md \"$(cat <<'EOF'" + body + "\n)\"", false},
 	} {
 		for _, tool := range []string{"Bash", "shell_command", "PowerShell"} {
 			args, _ := json.Marshal(map[string]string{"command": tc.command})
