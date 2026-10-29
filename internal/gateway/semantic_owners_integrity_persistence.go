@@ -2529,6 +2529,18 @@ func matchesDefenseClawStateCandidate(value string) bool {
 		strings.HasPrefix(value, ".defenseclaw/")
 }
 
+// activeDefenseClawStateNames are the names directly under ~/.defenseclaw
+// that matchesActiveDefenseClawState protects: the state files and the
+// protected trees. A gateway that may not list the home expands a state
+// pattern against them (stateGlobTwinRequest, GAP-2544).
+var activeDefenseClawStateNames = []string{
+	".env", "audit.db", "audit.db-shm", "audit.db-wal", "cache", "confidence_policy.yaml",
+	"config.yaml", "custom-providers.json", "device.key", "guardrail_runtime.json", "hooks",
+	"installer", "judge.db", "judge.db-shm", "judge.db-wal", "judge_bodies.db",
+	"judge_bodies.db-shm", "judge_bodies.db-wal", "picked_connector", "policies", "previous",
+	"quarantine", "receipts", "registries",
+}
+
 func matchesActiveDefenseClawState(
 	facts actionfacts.Facts,
 	candidate actionfacts.PathFact,
