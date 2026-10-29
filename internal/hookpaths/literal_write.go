@@ -91,8 +91,10 @@ func literalWriteOperandsDepth(command, cwd, home string, depth int) (operands [
 			if i == 0 && !static && simpleShellParameter(arg) == boundName {
 				words[i], static = boundValue, true
 			}
-			if !static && i > 0 && awkProgramName(words[0]) {
-				// An awk word the command assigned (GAP-2197). A generated
+			if !static && i > 0 && (awkProgramName(words[0]) || programBase(words[0]) == "tee" && wordExpandsParameter(arg)) {
+				// An awk word the command assigned (GAP-2197), or a tee
+				// operand named by an assigned variable or a ${f:-default}
+				// the shell expands to its default (GAP-2514). A generated
 				// basename has no fixed spelling and stays dynamic.
 				if known := valuesAt(stmt); known != nil {
 					if value, fixed := actionWordValue(shellUnescapedWord(arg), known, cwd, home); fixed &&
@@ -776,4 +778,16 @@ func awkProgramName(word string) bool {
 		return true
 	}
 	return false
+}
+
+// wordExpandsParameter reports a word that contains a parameter expansion.
+func wordExpandsParameter(word *syntax.Word) bool {
+	found := false
+	syntax.Walk(word, func(node syntax.Node) bool {
+		if _, ok := node.(*syntax.ParamExp); ok {
+			found = true
+		}
+		return !found
+	})
+	return found
 }

@@ -43,6 +43,20 @@ const TruncatedKey = "\x00truncated"
 // view. The gateway may be unable to repeat that walk under ProtectHome.
 const PatchCompleteKey = "\x00patch-complete"
 
+// ActionDecisionKey carries the user's hook reading of a shell command:
+// ProtectedTargetDecision when the command's concrete write operands, walked
+// as the user (actionConcreteProtectedWrite), reach a protected file. Only
+// concrete writes count, not the wider target-mention scan, so a read
+// through a link to the keys file stays allowed. A managed gateway behind
+// ProtectHome cannot repeat that walk of the user's links (a variable or
+// ${f:-default} write target, a tar -C directory link), so it reads this
+// fact as a per-user gateway reads its own walk (GAP-2514, GAP-2515). It is
+// positive evidence only: no value can make a call less restricted.
+const ActionDecisionKey = "\x00action-decision"
+
+// ProtectedTargetDecision is the only ActionDecisionKey value.
+const ProtectedTargetDecision = "protected-target"
+
 // SourceLinkFactPrefix identifies a copy source inspected by the user-side hook.
 const SourceLinkFactPrefix = "\x00source-link:"
 
@@ -831,6 +845,7 @@ func ResolveConnector(connector, surface, event string, payload []byte) string {
 	opaqueFacts := map[string]string{}
 	var globFacts map[string]string
 	var unprovenReason string
+	var protectedDecision bool
 	// identities is the file-identity evidence for InstructionIdentityKey:
 	// every existing instruction file a write target names.
 	// fileIdentities are the write targets' own identities (FileIdentitiesKey).
@@ -872,6 +887,9 @@ func ResolveConnector(connector, surface, event string, payload []byte) string {
 				}
 				if !isApplyPatchToolName(tool) && unprovenReason == "" {
 					unprovenReason = ActionCommandAuditReason(command, cwd, home)
+				}
+				if !isApplyPatchToolName(tool) && !protectedDecision {
+					protectedDecision = actionConcreteProtectedWrite(command, cwd, home)
 				}
 				fallback := input
 				fallback.Tool, fallback.Args, fallback.Command = "Bash", nil, command
@@ -1059,6 +1077,15 @@ func ResolveConnector(connector, surface, event string, payload []byte) string {
 				break
 			}
 			targets[key] = extra[key]
+			size += entry
+		}
+	}
+	if protectedDecision {
+		entry := len(jsonString(ActionDecisionKey)) + 1 + len(jsonString(ProtectedTargetDecision)) + 1
+		if size+entry > maxEncodedTargets || len(targets) >= MaxWriteTargets+2 {
+			truncated = true
+		} else {
+			targets[ActionDecisionKey] = ProtectedTargetDecision
 			size += entry
 		}
 	}
@@ -1379,6 +1406,7 @@ func Decode(value string) (map[string]string, bool) {
 	if json.Unmarshal(data, &targets) != nil || len(targets) > 2*MaxWriteTargets+6 ||
 		(targets[TruncatedKey] != "" && targets[TruncatedKey] != "1") ||
 		(targets[PatchCompleteKey] != "" && targets[PatchCompleteKey] != "1") ||
+		(targets[ActionDecisionKey] != "" && targets[ActionDecisionKey] != ProtectedTargetDecision) ||
 		(targets[UnprovenReasonKey] != "" && UnprovenWriteTitle(targets[UnprovenReasonKey]) == "") {
 		return nil, false
 	}
@@ -2820,6 +2848,15 @@ var tarLongFlags = []string{
 // old-style option words, and unique long-option abbreviations. Ambiguity
 // leaves the archive scope global.
 func tarDestination(args []string, static []bool, cwd string) (string, bool) {
+	destination, _, _, ok := tarScan(args, static, cwd)
+	return destination, ok
+}
+
+// tarScan is tarDestination with the member operands and whether the call
+// extracts (an x in an option cluster, --extract or --get).
+func tarScan(args []string, static []bool, cwd string) (string, []string, bool, bool) {
+	var members []string
+	extract := false
 	destination := cwd
 	changed := false
 	consume := func(value string) bool {
@@ -2832,7 +2869,7 @@ func tarDestination(args []string, static []bool, cwd string) (string, bool) {
 	options := true
 	for i := 0; i < len(args); i++ {
 		if !static[i] {
-			return "", false
+			return "", nil, false, false
 		}
 		arg := args[i]
 		if arg == "--" {
@@ -2840,29 +2877,33 @@ func tarDestination(args []string, static []bool, cwd string) (string, bool) {
 			continue
 		}
 		if !options {
+			members = append(members, arg)
 			continue
 		}
 		if strings.HasPrefix(arg, "--") {
 			name, value, joined := strings.Cut(arg[2:], "=")
 			option, unique := longOption(name, tarLongOptions)
 			if !unique {
-				return "", false
+				return "", nil, false, false
+			}
+			if option == "extract" || option == "get" {
+				extract = true
 			}
 			switch option {
 			case "directory", "dir", "cd":
 				if !joined {
 					i++
 					if i >= len(args) || !static[i] {
-						return "", false
+						return "", nil, false, false
 					}
 					value = args[i]
 				}
 				if !consume(value) {
-					return "", false
+					return "", nil, false, false
 				}
 			case "one-top-level":
 				if joined && !consume(value) {
-					return "", false
+					return "", nil, false, false
 				}
 			case "file", "strip-components", "exclude", "exclude-from", "files-from", "warning",
 				"owner", "group", "mode", "mtime", "blocking-factor", "record-size", "format", "label",
@@ -2870,7 +2911,7 @@ func tarDestination(args []string, static []bool, cwd string) (string, bool) {
 				if !joined {
 					i++
 					if i >= len(args) || !static[i] || args[i] == "" {
-						return "", false
+						return "", nil, false, false
 					}
 				}
 			case "totals", "occurrence", "checkpoint":
@@ -2878,16 +2919,17 @@ func tarDestination(args []string, static []bool, cwd string) (string, bool) {
 			default:
 				if !slices.Contains(tarLongFlags, option) {
 					// A future or unknown destination option cannot be scoped safely.
-					return "", false
+					return "", nil, false, false
 				}
 				if joined {
-					return "", false
+					return "", nil, false, false
 				}
 			}
 			continue
 		}
 		oldStyle := i == 0 && !strings.HasPrefix(arg, "-")
 		if !oldStyle && !strings.HasPrefix(arg, "-") {
+			members = append(members, arg)
 			continue
 		}
 		cluster := strings.TrimPrefix(arg, "-")
@@ -2898,12 +2940,12 @@ func tarDestination(args []string, static []bool, cwd string) (string, bool) {
 				if oldStyle || value == "" {
 					i++
 					if i >= len(args) || !static[i] {
-						return "", false
+						return "", nil, false, false
 					}
 					value = args[i]
 				}
 				if !consume(value) {
-					return "", false
+					return "", nil, false, false
 				}
 				if !oldStyle {
 					j = len(cluster)
@@ -2915,24 +2957,26 @@ func tarDestination(args []string, static []bool, cwd string) (string, bool) {
 				if oldStyle || j+1 == len(cluster) {
 					i++
 					if i >= len(args) || !static[i] {
-						return "", false
+						return "", nil, false, false
 					}
 				}
 				if !oldStyle {
 					j = len(cluster)
 				}
-			case 'a', 'x', 'z', 'j', 'J', 'v', 'O', 't', 'c', 'P', 'p', 'h', 'k', 'm', 'w', 'U',
+			case 'x':
+				extract = true
+			case 'a', 'z', 'j', 'J', 'v', 'O', 't', 'c', 'P', 'p', 'h', 'k', 'm', 'w', 'U',
 				'o', 'S', 'B', 'l', 'r', 'u', 'i', 'n':
 			default:
 				// Unknown short options may consume a path. -W is GNU --verify,
 				// but bsdtar (macOS /usr/bin/tar, Windows tar.exe) reads
 				// -W NAME=VALUE as --NAME=VALUE, so -W directory=DIR moves the
 				// destination (GAP-2445).
-				return "", false
+				return "", nil, false, false
 			}
 		}
 	}
-	return destination, true
+	return destination, members, extract, true
 }
 
 // opaqueProgram is a Windows program that creates links from operands this
