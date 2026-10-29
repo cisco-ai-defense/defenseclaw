@@ -3130,9 +3130,26 @@ class TestDisabledGuardrailDoctorRows(unittest.TestCase):
     def test_a_disabled_guardrail_does_not_require_the_openclaw_plugin(self):
         from defenseclaw.commands import cmd_doctor
 
-        with patch.object(cmd_doctor, "openclaw_implied_but_not_installed", return_value=False):
+        disabled = {"guardrail": {"state": "disabled"}}
+        with (
+            patch.object(cmd_doctor, "openclaw_implied_but_not_installed", return_value=False),
+            patch.object(cmd_doctor, "_live_gateway_health", return_value=disabled),
+        ):
             self.assertFalse(cmd_doctor._openclaw_plugin_required(self._cfg(False), {"openclaw"}))
             self.assertTrue(cmd_doctor._openclaw_plugin_required(self._cfg(True), {"openclaw"}))
+
+    def test_guardrail_enabled_false_alone_still_requires_the_openclaw_plugin(self):
+        # guardrail.enabled=false is also the default of a config that never
+        # enabled the guardrail: only a verified gateway that reports its
+        # guardrail disabled proves the teardown removed the plugin on purpose.
+        from defenseclaw.commands import cmd_doctor
+
+        for health in (None, {}, {"guardrail": {"state": "running"}}, {"guardrail": {"state": "error"}}):
+            with (
+                patch.object(cmd_doctor, "openclaw_implied_but_not_installed", return_value=False),
+                patch.object(cmd_doctor, "_live_gateway_health", return_value=health),
+            ):
+                self.assertTrue(cmd_doctor._openclaw_plugin_required(self._cfg(False), {"openclaw"}), health)
 
     def test_the_enable_hint_names_setup_for_a_proxy_connector_without_a_model(self):
         # guardrail enable refuses OpenClaw with no guardrail.model, so the

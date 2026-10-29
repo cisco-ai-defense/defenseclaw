@@ -3951,9 +3951,12 @@ def _openclaw_plugin_required(cfg, enabled_connectors) -> bool:
     """
     if "openclaw" not in enabled_connectors:
         return False
-    if _guardrail_disabled(cfg):
-        # setup guardrail --disable removes the plugin on purpose: its missing
-        # version evidence is not a reinstall (GAP-2511 review row).
+    if _guardrail_disabled(cfg) and _gateway_reports_guardrail_disabled(cfg):
+        # setup guardrail --disable restarts the gateway, whose teardown
+        # removes the plugin on purpose: its missing version evidence is not a
+        # reinstall (GAP-2511 review row). guardrail.enabled=false alone is
+        # also the default of a config that never enabled the guardrail, so
+        # only the running gateway's own disabled state proves the teardown.
         return False
     return not openclaw_implied_but_not_installed(cfg)
 
@@ -16288,6 +16291,19 @@ def _guardrail_disabled(cfg) -> bool:
     """Whether ``guardrail.enabled`` is false (``setup guardrail --disable``)."""
     gc = getattr(cfg, "guardrail", None)
     return gc is not None and getattr(gc, "enabled", True) is False
+
+
+def _gateway_reports_guardrail_disabled(cfg) -> bool:
+    """Whether the verified running gateway reports its guardrail disabled.
+
+    A gateway that booted with ``guardrail.enabled=false`` ran the connector
+    teardown before it published that state. No verified gateway, or any
+    other state, is not proof (GAP-2511).
+    """
+    health = _live_gateway_health(cfg)
+    guardrail = health.get("guardrail") if isinstance(health, dict) else None
+    state = guardrail.get("state") if isinstance(guardrail, dict) else None
+    return isinstance(state, str) and state.strip().lower() == "disabled"
 
 
 def _guardrail_enable_command(cfg, connector: str) -> str:
