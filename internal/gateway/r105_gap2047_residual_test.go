@@ -182,3 +182,32 @@ func TestR105Check18AttachedRsyncValuesWorkTreeAfterCAndQuotedHomeGlobs(t *testi
 		r105RunStateRowsChecked(t, mode, cwd, rows, true)
 	}
 }
+
+// GAP-2047 row (d) (pod check18): the HOME-spelled value of a long option
+// (`git --work-tree=$HOME/.defenseclaw clean -fdx`) names the state tree
+// like `--work-tree ~/.defenseclaw`, so the clean of it blocks in every
+// mode, both connectors; the same spelling on a project tree, a dry run
+// and a long option of another program stay quiet.
+func TestR105GAP2047HomeSpelledLongOptionValue(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX shell forms")
+	}
+	home, cwd := r105StateFixture(t)
+	if err := os.MkdirAll(filepath.Join(home, "proj2"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	rows := []r105StateRow{
+		{"git work-tree=$HOME state clean", "git --work-tree=$HOME/.defenseclaw clean -fdx", true, ""},
+		{"git work-tree=${HOME} hooks clean", "git --work-tree=${HOME}/.defenseclaw/hooks clean -fd", true, ""},
+		{"git work-tree=quoted $HOME state clean", `git --work-tree="$HOME/.defenseclaw" clean -fdx`, true, ""},
+		{"git git-dir and work-tree=$HOME clean", "git --git-dir=/tmp/g.git --work-tree=$HOME/.defenseclaw clean -ffdx", true, ""},
+		// Allowed and quiet.
+		{"git work-tree=$HOME project clean", "git --work-tree=$HOME/proj2 clean -fdx", false, ""},
+		{"git work-tree=$HOME state dry run", "git --work-tree=$HOME/.defenseclaw clean -n -d", false, ""},
+		{"git work-tree=$HOME state status", "git --work-tree=$HOME/.defenseclaw status", false, ""},
+		{"configure prefix=$HOME", "./configure --prefix=$HOME/.local", false, ""},
+	}
+	for _, mode := range []string{"observe", "action"} {
+		r105RunStateRowsChecked(t, mode, cwd, rows, true)
+	}
+}

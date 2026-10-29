@@ -230,7 +230,8 @@ func analyze(input Input, twinCommand string, capture *redirectTargetCapture) Fa
 			if rewrite, ok := rewriteTrustedPOSIXHomeTilde(command, home); ok {
 				if resolved := parse(rewrite.source); resolved.status == StatusComplete ||
 					findRewriteKeepsOnlyEmbeddedPartial(resolved) ||
-					rewrite.homeGlobs && rewriteKeepsOnlyStaticGlobs(resolved) {
+					rewrite.homeGlobs && rewriteKeepsOnlyStaticGlobs(resolved) ||
+					rewrite.optionHomeValues && rewriteKeepsOnlyOperandGrammar(resolved) {
 					parsed = resolved
 					// A Windows drive home (GAP-0912) keeps its rewritten
 					// spelling: the POSIX parse cannot resolve a drive path,
@@ -2249,6 +2250,32 @@ func rewriteKeepsOnlyStaticGlobs(resolved parseOutput) bool {
 		}
 	}
 	return globs != 0
+}
+
+// rewriteKeepsOnlyOperandGrammar reports a home rewrite of a long option's
+// attached $HOME value (`git --work-tree=$HOME/.defenseclaw clean -fdx`)
+// whose parse is left partial only because the program's operand grammar
+// is not modelled, with no dynamic or expanding word. The absolute
+// spelling parses the same way and keeps its argv, so the $HOME spelling
+// gets the same words (GAP-2047 row d); before, the value had no static
+// spelling and no state check could read it.
+func rewriteKeepsOnlyOperandGrammar(resolved parseOutput) bool {
+	if resolved.status != StatusPartial || len(resolved.commands) == 0 {
+		return false
+	}
+	for _, issue := range resolved.issues {
+		if issue != IssueUnknownOperandGrammar {
+			return false
+		}
+	}
+	for _, command := range resolved.commands {
+		for _, argument := range command.Arguments {
+			if argument.Expands {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 // findRewriteKeepsOnlyEmbeddedPartial reports a home rewrite whose parse is
