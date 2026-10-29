@@ -58,6 +58,8 @@ func platformOpenDirectoryNodeStates(context.Context) (string, error) {
 	return "", errors.New("unixidentity: no Open Directory on this platform")
 }
 
+func platformLoginShell(context.Context, commandRunner, string) string { return "" }
+
 func platformMobileAccounts(context.Context) (map[string]string, error) {
 	return nil, errors.New("unixidentity: no local directory node on this platform")
 }
