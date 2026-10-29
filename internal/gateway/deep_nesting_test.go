@@ -4,6 +4,7 @@
 package gateway
 
 import (
+	"context"
 	"encoding/json"
 	"runtime/debug"
 	"strings"
@@ -58,6 +59,63 @@ func TestDeeplyNestedCommandTakesTheOverLimitPath(t *testing.T) {
 		})
 		if verdict := buildVerdict(findings, "tool_call"); verdict.Action == "block" {
 			t.Errorf("%q: blocked, %v", command, FindingStrings(findings))
+		}
+	}
+}
+
+// The command of a Codex apply_patch call is a patch envelope, not shell:
+// a patch adding ordinary text with more than shellparse.MaxNestingDepth
+// unclosed (, { or [ (ANSI colour escapes) is judged by its targets, in the
+// OSS and managed paths, and a key patch with the same text still blocks.
+// A 180 KiB patch of ( is read without a stack overflow (GAP-2561).
+func TestDeepPatchBodyIsJudgedByItsTargets(t *testing.T) {
+	defer debug.SetMaxStack(debug.SetMaxStack(64 << 20))
+	installDefaultProfileConnector(t, "codex")
+	home := t.TempDir()
+	cwd := home + "/project"
+	patch := func(path, body string) string {
+		return "*** Begin Patch\n*** Add File: " + path + "\n" + body + "*** End Patch\n"
+	}
+	golden := cwd + "/testdata/log.golden"
+	colored := strings.Repeat("+\x1b[31mERROR\x1b[0m build step failed\n", 600)
+	for _, row := range []struct {
+		name, body, path string
+		block            bool
+	}{
+		{"P01 colored", colored, golden, false},
+		{"P02 600 (", strings.Repeat("+(\n", 600), golden, false},
+		{"P07 520 [", "+" + strings.Repeat("[", 520) + "\n", golden, false},
+		{"K1 colored key patch", colored, home + "/.ssh/authorized_keys", true},
+	} {
+		for _, call := range []struct {
+			key     string
+			managed bool
+		}{{"command", false}, {"command", true}, {"input", false}, {"input", true}} {
+			managed := call.managed
+			args, _ := json.Marshal(map[string]string{call.key: patch(row.path, row.body)})
+			ctx := context.Background()
+			if managed {
+				ctx = withManagedHookPeer(ctx, managedHookPeer{Home: home})
+			}
+			findings := dispatchTrustedAction(ctx, trustedActionRequest{
+				Input:     actionfacts.Input{Tool: "apply_patch", Args: args, CWD: cwd, ActiveHome: home},
+				Connector: "codex", EnforcementCapable: true,
+			})
+			if blocked := buildVerdict(findings, "tool_call").Action == "block"; blocked != row.block {
+				t.Errorf("%s %s managed=%v: block %v, want %v: %v", row.name, call.key, managed, blocked, row.block, FindingStrings(findings))
+			}
+		}
+	}
+	for _, unit := range []string{"(", "[IO.File]::WriteAllText(", "$("} {
+		body := "+" + strings.Repeat(unit, (180<<10)/len(unit)) + "\n"
+		args, _ := json.Marshal(map[string]string{"command": patch(golden, body)})
+		start := time.Now()
+		_ = dispatchTrustedAction(t.Context(), trustedActionRequest{
+			Input:     actionfacts.Input{Tool: "apply_patch", Args: args, CWD: cwd, ActiveHome: home},
+			Connector: "codex", EnforcementCapable: true,
+		})
+		if took := time.Since(start); took > 3*time.Second {
+			t.Errorf("unit %q: judged in %s", unit, took)
 		}
 	}
 }

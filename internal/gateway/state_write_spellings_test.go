@@ -549,6 +549,34 @@ func TestEnvChdirHomeSpellingRunsTheCallInTheHome(t *testing.T) {
 	})
 }
 
+// GNU env reads a bundle of short options as the separate options: env
+// -iC ~ is env -i -C ~, and the shell still expands the separate ~ to the
+// home before env runs. The env reading gave up at any bundled option, so
+// a relative state write in the home was allowed (GAP-2519, checker r10i2
+// RV-r10-3).
+func TestEnvBundledShortOptionsRunTheCallInTheHome(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX shell spellings")
+	}
+	judgeHomeStateWriteRows(t, []homeStateWriteRow{
+		{"env -iC ~ cp project/a.txt .defenseclaw/config.yaml", true},
+		{`env -iC "$HOME" cp project/a.txt .defenseclaw/config.yaml`, true},
+		{`env -iC"$HOME" cp project/a.txt .defenseclaw/config.yaml`, true},
+		{"env -i0C ~/.defenseclaw cp ../project/a.txt config.yaml", true},
+		{"env -vC ~ cp project/a.txt .defenseclaw/hooks/x.sh", true},
+		{"env -iu FOO -C ~ cp project/a.txt .defenseclaw/config.yaml", true},
+		{"env -i0 -C ~ cp project/a.txt .defenseclaw/config.yaml", true},
+		{"env -v cp a.txt ~/.defenseclaw/config.yaml", true},
+		{"setsid env -iC ~ cp project/a.txt .defenseclaw/config.yaml", true},
+		{"env -iC ~ cp project/a.txt project/b.txt", false},
+		{"env -iC ~/project cp a.txt b.txt", false},
+		{"env -iC ~ cat .defenseclaw/config.yaml", false},
+		{"env -iC \x27~\x27 cp a.txt .defenseclaw/config.yaml", false},
+		{"env -i0 make --version", false},
+		{"env -iC ~ ls -la", false},
+	})
+}
+
 // Under a native Windows home a cd to a home spelling ($HOME, ~,
 // $USERPROFILE, the MSYS drive mount), a cd .. or an env -C ~ moves the
 // Git Bash working directory, so a relative .defenseclaw operand after it
