@@ -555,6 +555,16 @@ func TestWindowsHomeCdThenRelativeStateWrite(t *testing.T) {
 		{"cd .. && cp project/a.txt .defenseclaw/config.yaml", true},
 		{"cd ~/.defenseclaw && cp ../project/a.txt config.yaml", true},
 		{"env -C ~ cp project/a.txt .defenseclaw/config.yaml", true},
+		// The moved-directory reading keeps the hooks-dir removal and
+		// move blocks of the reading without it (RV-r10-1).
+		{"cd ~ && rm -rf $HOME/.defenseclaw/hooks", true},
+		{"cd $HOME && rm -rf " + forward + "/.defenseclaw/hooks", true},
+		{"cd ~; rm -rf " + msys + "/.defenseclaw/hooks  # clean HOME dir", true},
+		{"cd ~ && rm -rf ${USERPROFILE}/.defenseclaw/hooks  # clean HOME dir", true},
+		{"cd ~ && mv ${USERPROFILE}/.defenseclaw/hooks ${USERPROFILE}/old-hooks", true},
+		{"cd $HOME && rmdir ~/.defenseclaw/hooks", true},
+		{"cd ~ && rm -rf project/build", false},
+		{"cd ~ && mv project/a.txt project/c.txt", false},
 		{"cd ~ && cp project/a.txt notes.txt", false},
 		{"cd ~ && cp project/a.txt project/b.txt", false},
 		{"cd $HOME && ls .defenseclaw", false},

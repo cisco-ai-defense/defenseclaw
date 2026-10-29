@@ -438,6 +438,15 @@ func dispatchTrustedActionWith(
 				// the call budget, like its parent.
 				child.generation, child.budget = generation, budget
 				childFindings := dispatchTrustedAction(ctx, child)
+				if child.Input.MovedWindowsShellCWD && !request.Input.MovedWindowsShellCWD {
+					// The moved-directory reading only adds findings: the
+					// child's reading without it (a hooks-dir removal or move
+					// under a home spelling) keeps every block it proved
+					// (GAP-2473 RV-r10-1).
+					unmoved := child
+					unmoved.Input.MovedWindowsShellCWD = false
+					childFindings = withSimpleCommandFindings(childFindings, dispatchTrustedAction(ctx, unmoved))
+				}
 				if simple.ZshHistoryBuiltin {
 					// Zsh's history builtin lists events (fc -l). The Bash-only
 					// history -c clear rule does not apply inside that shell.
