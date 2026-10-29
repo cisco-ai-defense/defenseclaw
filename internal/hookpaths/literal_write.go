@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 
 	"mvdan.cc/sh/v3/syntax"
@@ -91,8 +92,10 @@ func literalWriteOperandsDepth(command, cwd, home string, depth int) (operands [
 			if i == 0 && !static && simpleShellParameter(arg) == boundName {
 				words[i], static = boundValue, true
 			}
-			if !static && i > 0 && awkProgramName(words[0]) {
-				// An awk word the command assigned (GAP-2197). A generated
+			if !static && i > 0 && (awkProgramName(words[0]) || programBase(words[0]) == "tee" && wordExpandsParameter(arg)) {
+				// An awk word the command assigned (GAP-2197), or a tee
+				// operand named by an assigned variable or a ${f:-default}
+				// the shell expands to its default (GAP-2514). A generated
 				// basename has no fixed spelling and stays dynamic.
 				if known := valuesAt(stmt); known != nil {
 					if value, fixed := actionWordValue(shellUnescapedWord(arg), known, cwd, home); fixed &&
@@ -215,6 +218,91 @@ func sedFollowsInPlaceLinks(words []string) bool {
 		}
 	}
 	return false
+}
+
+// InPlaceEditOperands lists the files a sed -i or perl -i call of the
+// command edits in place, as absolute paths read in cwd, whatever their
+// parent directory. The editor replaces the directory entry; a caller that
+// follows the name through a link the same command makes to a directory
+// reads the file the edit replaces (GAP-2522).
+func InPlaceEditOperands(command, cwd, home string) (operands []string) {
+	file, ok := parseShell(command)
+	if !ok || !filepath.IsAbs(cwd) {
+		return nil
+	}
+	syntax.Walk(file, func(node syntax.Node) bool {
+		call, ok := node.(*syntax.CallExpr)
+		if !ok || len(call.Args) == 0 {
+			return true
+		}
+		words := make([]string, len(call.Args))
+		static := make([]bool, len(call.Args))
+		for i, arg := range call.Args {
+			words[i], static[i] = StaticWord(arg, home)
+		}
+		if index, wrapped := plainWrappedChild(words, static); wrapped {
+			words, static = words[index:], static[index:]
+		}
+		if slices.Contains(static, false) {
+			return true
+		}
+		var files []string
+		switch programBase(words[0]) {
+		case "sed", "gsed":
+			files = sedInPlaceFiles(words)
+		case "perl":
+			files = perlInPlaceFiles(words)
+		}
+		for _, name := range files {
+			if name != "" && !strings.ContainsAny(name, "\x00\r\n") {
+				operands = append(operands, OperandPath(name, cwd))
+			}
+		}
+		return true
+	})
+	return operands
+}
+
+// perlInPlaceFiles lists the file operands of perl -i (-pi -e CODE FILE,
+// -i.bak -ne CODE FILE). Without -e the first operand is the script.
+func perlInPlaceFiles(words []string) []string {
+	inPlace, script := false, false
+	var files []string
+	for i := 1; i < len(words); i++ {
+		word := words[i]
+		switch {
+		case word == "--":
+			files = append(files, words[i+1:]...)
+			i = len(words)
+		case strings.HasPrefix(word, "-") && len(word) > 1 && !strings.HasPrefix(word, "--"):
+			cluster := word[1:]
+			for j := 0; j < len(cluster); j++ {
+				switch string(cluster[j]) {
+				case "i":
+					inPlace = true
+					j = len(cluster) // the rest is the backup suffix
+				case "e", "E":
+					script = true
+					if j == len(cluster)-1 {
+						i++
+					}
+					j = len(cluster)
+				case "I", "M", "m", "x", "C", "d", "D", "F", "0":
+					j = len(cluster) // takes the rest of the word
+				}
+			}
+		case strings.HasPrefix(word, "-"):
+			continue
+		case !script:
+			script = true
+		default:
+			files = append(files, word)
+		}
+	}
+	if !inPlace {
+		return nil
+	}
+	return files
 }
 
 func sedInPlaceFiles(words []string) []string {
@@ -776,4 +864,16 @@ func awkProgramName(word string) bool {
 		return true
 	}
 	return false
+}
+
+// wordExpandsParameter reports a word that contains a parameter expansion.
+func wordExpandsParameter(word *syntax.Word) bool {
+	found := false
+	syntax.Walk(word, func(node syntax.Node) bool {
+		if _, ok := node.(*syntax.ParamExp); ok {
+			found = true
+		}
+		return !found
+	})
+	return found
 }

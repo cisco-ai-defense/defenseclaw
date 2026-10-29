@@ -43,6 +43,20 @@ const TruncatedKey = "\x00truncated"
 // view. The gateway may be unable to repeat that walk under ProtectHome.
 const PatchCompleteKey = "\x00patch-complete"
 
+// ActionDecisionKey carries the user's hook reading of a shell command:
+// ProtectedTargetDecision when the command's concrete write operands, walked
+// as the user (actionConcreteProtectedWrite), reach a protected file. Only
+// concrete writes count, not the wider target-mention scan, so a read
+// through a link to the keys file stays allowed. A managed gateway behind
+// ProtectHome cannot repeat that walk of the user's links (a variable or
+// ${f:-default} write target, a tar -C directory link), so it reads this
+// fact as a per-user gateway reads its own walk (GAP-2514, GAP-2515). It is
+// positive evidence only: no value can make a call less restricted.
+const ActionDecisionKey = "\x00action-decision"
+
+// ProtectedTargetDecision is the only ActionDecisionKey value.
+const ProtectedTargetDecision = "protected-target"
+
 // SourceLinkFactPrefix identifies a copy source inspected by the user-side hook.
 const SourceLinkFactPrefix = "\x00source-link:"
 
@@ -831,6 +845,7 @@ func ResolveConnector(connector, surface, event string, payload []byte) string {
 	opaqueFacts := map[string]string{}
 	var globFacts map[string]string
 	var unprovenReason string
+	var protectedDecision bool
 	// identities is the file-identity evidence for InstructionIdentityKey:
 	// every existing instruction file a write target names.
 	// fileIdentities are the write targets' own identities (FileIdentitiesKey).
@@ -872,6 +887,9 @@ func ResolveConnector(connector, surface, event string, payload []byte) string {
 				}
 				if !isApplyPatchToolName(tool) && unprovenReason == "" {
 					unprovenReason = ActionCommandAuditReason(command, cwd, home)
+				}
+				if !isApplyPatchToolName(tool) && !protectedDecision {
+					protectedDecision = actionConcreteProtectedWrite(command, cwd, home)
 				}
 				fallback := input
 				fallback.Tool, fallback.Args, fallback.Command = "Bash", nil, command
@@ -1059,6 +1077,15 @@ func ResolveConnector(connector, surface, event string, payload []byte) string {
 				break
 			}
 			targets[key] = extra[key]
+			size += entry
+		}
+	}
+	if protectedDecision {
+		entry := len(jsonString(ActionDecisionKey)) + 1 + len(jsonString(ProtectedTargetDecision)) + 1
+		if size+entry > maxEncodedTargets || len(targets) >= MaxWriteTargets+2 {
+			truncated = true
+		} else {
+			targets[ActionDecisionKey] = ProtectedTargetDecision
 			size += entry
 		}
 	}
@@ -1379,6 +1406,7 @@ func Decode(value string) (map[string]string, bool) {
 	if json.Unmarshal(data, &targets) != nil || len(targets) > 2*MaxWriteTargets+6 ||
 		(targets[TruncatedKey] != "" && targets[TruncatedKey] != "1") ||
 		(targets[PatchCompleteKey] != "" && targets[PatchCompleteKey] != "1") ||
+		(targets[ActionDecisionKey] != "" && targets[ActionDecisionKey] != ProtectedTargetDecision) ||
 		(targets[UnprovenReasonKey] != "" && UnprovenWriteTitle(targets[UnprovenReasonKey]) == "") {
 		return nil, false
 	}
@@ -1779,7 +1807,41 @@ func commandLinksWithFacts(command, cwd, home string, facts map[string]string, r
 // false when any cd, pushd or popd is elsewhere or dynamic, so the link scope
 // keeps its conservative reading.
 func topLevelLinkDirectories(file *syntax.File, cwd, home string) (dirs map[*syntax.CallExpr]string, known bool) {
-	var statements []*syntax.Stmt
+	statements, placed, known := topLevelStatementDirectories(file, cwd, home)
+	if !known {
+		return nil, false
+	}
+	dirs = make(map[*syntax.CallExpr]string)
+	for i, stmt := range statements {
+		call, ok := stmt.Cmd.(*syntax.CallExpr)
+		if !ok || len(call.Args) == 0 {
+			continue
+		}
+		program, _ := StaticWord(call.Args[0], home)
+		if slices.Contains(linkPrograms, programBase(program)) {
+			dirs[call] = placed[i]
+			continue
+		}
+		values := make([]string, len(call.Args))
+		literal := make([]bool, len(call.Args))
+		for j, arg := range call.Args {
+			values[j], literal[j] = StaticWord(arg, home)
+		}
+		if index, wrapped := plainWrappedChild(values, literal); wrapped &&
+			slices.Contains(linkPrograms, programBase(values[index])) {
+			dirs[call] = placed[i]
+		}
+	}
+	return dirs, true
+}
+
+// topLevelStatementDirectories lists the top-level statements of a ; / && /
+// || list other than its cd statements, each with the directory it runs in,
+// read lexically from cwd through the static cd statements before it
+// (GAP-1742). known is false when any cd, pushd or popd is elsewhere or
+// dynamic, or a top-level program word is not static.
+func topLevelStatementDirectories(file *syntax.File, cwd, home string) (statements []*syntax.Stmt, dirs []string, known bool) {
+	var all []*syntax.Stmt
 	var flatten func(*syntax.Stmt)
 	flatten = func(stmt *syntax.Stmt) {
 		if pair, ok := stmt.Cmd.(*syntax.BinaryCmd); ok && len(stmt.Redirs) == 0 && !stmt.Background && !stmt.Negated &&
@@ -1788,13 +1850,13 @@ func topLevelLinkDirectories(file *syntax.File, cwd, home string) (dirs map[*syn
 			flatten(pair.Y)
 			return
 		}
-		statements = append(statements, stmt)
+		all = append(all, stmt)
 	}
 	for _, stmt := range file.Stmts {
 		flatten(stmt)
 	}
 	topLevel := make(map[*syntax.CallExpr]bool)
-	for _, stmt := range statements {
+	for _, stmt := range all {
 		if call, ok := stmt.Cmd.(*syntax.CallExpr); ok && !stmt.Background {
 			topLevel[call] = true
 		}
@@ -1811,45 +1873,65 @@ func topLevelLinkDirectories(file *syntax.File, cwd, home string) (dirs map[*syn
 		return true
 	})
 	if !known {
-		return nil, false
+		return nil, nil, false
 	}
-	dirs = make(map[*syntax.CallExpr]string)
 	dir := cwd
-	for _, stmt := range statements {
+	for _, stmt := range all {
 		call, ok := stmt.Cmd.(*syntax.CallExpr)
 		if !ok || len(call.Args) == 0 {
+			statements, dirs = append(statements, stmt), append(dirs, dir)
 			continue
 		}
 		program, static := StaticWord(call.Args[0], home)
 		if !static {
-			return nil, false
+			return nil, nil, false
 		}
 		if slices.Contains(cdPrograms, programBase(program)) {
 			if programBase(program) != "cd" || len(call.Args) != 2 || len(call.Assigns) != 0 {
-				return nil, false
+				return nil, nil, false
 			}
 			target, static := StaticWord(call.Args[1], home)
 			if !static || target == "" || strings.HasPrefix(target, "-") || !filepath.IsAbs(dir) {
-				return nil, false
+				return nil, nil, false
 			}
 			dir = OperandPath(target, dir)
 			continue
 		}
-		if slices.Contains(linkPrograms, programBase(program)) {
-			dirs[call] = dir
-			continue
-		}
-		values := make([]string, len(call.Args))
-		literal := make([]bool, len(call.Args))
-		for i, arg := range call.Args {
-			values[i], literal[i] = StaticWord(arg, home)
-		}
-		if index, wrapped := plainWrappedChild(values, literal); wrapped &&
-			slices.Contains(linkPrograms, programBase(values[index])) {
-			dirs[call] = dir
-		}
+		statements, dirs = append(statements, stmt), append(dirs, dir)
 	}
-	return dirs, true
+	return statements, dirs, true
+}
+
+// PlacedStatement is one top-level statement of a shell command and the
+// directory it runs in.
+type PlacedStatement struct {
+	Command string
+	Dir     string
+}
+
+// TopLevelStatements splits a ; / && / || list into its statements other
+// than its static cd statements, each with the directory it runs in: cd ~ &&
+// ln -s .defenseclaw hc && cp a.txt hc/config.yaml runs the ln and the cp in
+// ~ (GAP-2522). ok is false when the command does not parse, or a directory
+// change is elsewhere or dynamic.
+func TopLevelStatements(command, cwd, home string) ([]PlacedStatement, bool) {
+	file, parsed := parseShell(command)
+	if !parsed {
+		return nil, false
+	}
+	statements, dirs, known := topLevelStatementDirectories(file, cwd, home)
+	if !known {
+		return nil, false
+	}
+	out := make([]PlacedStatement, 0, len(statements))
+	for i, stmt := range statements {
+		start, end := int(stmt.Pos().Offset()), int(stmt.End().Offset())
+		if start < 0 || end > len(command) || start >= end {
+			return nil, false
+		}
+		out = append(out, PlacedStatement{Command: command[start:end], Dir: dirs[i]})
+	}
+	return out, true
 }
 
 // plainWrappedChild returns the index of the program word that a chain of
@@ -2224,6 +2306,12 @@ func (l Links) Target(path string) (string, bool) {
 		return path, true
 	}
 	return l.links.resolve(path, l.protected)
+}
+
+// HasAliases reports that the command makes at least one link whose name
+// and target were both read.
+func (l Links) HasAliases() bool {
+	return len(l.links.aliases) > 0
 }
 
 // AliasTargets returns the names path reaches through the links the
@@ -2888,6 +2976,15 @@ var tarLongFlags = []string{
 // old-style option words, and unique long-option abbreviations. Ambiguity
 // leaves the archive scope global.
 func tarDestination(args []string, static []bool, cwd string) (string, bool) {
+	destination, _, _, ok := tarScan(args, static, cwd)
+	return destination, ok
+}
+
+// tarScan is tarDestination with the member operands and whether the call
+// extracts (an x in an option cluster, --extract or --get).
+func tarScan(args []string, static []bool, cwd string) (string, []string, bool, bool) {
+	var members []string
+	extract := false
 	destination := cwd
 	changed := false
 	consume := func(value string) bool {
@@ -2900,7 +2997,7 @@ func tarDestination(args []string, static []bool, cwd string) (string, bool) {
 	options := true
 	for i := 0; i < len(args); i++ {
 		if !static[i] {
-			return "", false
+			return "", nil, false, false
 		}
 		arg := args[i]
 		if arg == "--" {
@@ -2908,29 +3005,33 @@ func tarDestination(args []string, static []bool, cwd string) (string, bool) {
 			continue
 		}
 		if !options {
+			members = append(members, arg)
 			continue
 		}
 		if strings.HasPrefix(arg, "--") {
 			name, value, joined := strings.Cut(arg[2:], "=")
 			option, unique := longOption(name, tarLongOptions)
 			if !unique {
-				return "", false
+				return "", nil, false, false
+			}
+			if option == "extract" || option == "get" {
+				extract = true
 			}
 			switch option {
 			case "directory", "dir", "cd":
 				if !joined {
 					i++
 					if i >= len(args) || !static[i] {
-						return "", false
+						return "", nil, false, false
 					}
 					value = args[i]
 				}
 				if !consume(value) {
-					return "", false
+					return "", nil, false, false
 				}
 			case "one-top-level":
 				if joined && !consume(value) {
-					return "", false
+					return "", nil, false, false
 				}
 			case "file", "strip-components", "exclude", "exclude-from", "files-from", "warning",
 				"owner", "group", "mode", "mtime", "blocking-factor", "record-size", "format", "label",
@@ -2938,7 +3039,7 @@ func tarDestination(args []string, static []bool, cwd string) (string, bool) {
 				if !joined {
 					i++
 					if i >= len(args) || !static[i] || args[i] == "" {
-						return "", false
+						return "", nil, false, false
 					}
 				}
 			case "totals", "occurrence", "checkpoint":
@@ -2946,16 +3047,17 @@ func tarDestination(args []string, static []bool, cwd string) (string, bool) {
 			default:
 				if !slices.Contains(tarLongFlags, option) {
 					// A future or unknown destination option cannot be scoped safely.
-					return "", false
+					return "", nil, false, false
 				}
 				if joined {
-					return "", false
+					return "", nil, false, false
 				}
 			}
 			continue
 		}
 		oldStyle := i == 0 && !strings.HasPrefix(arg, "-")
 		if !oldStyle && !strings.HasPrefix(arg, "-") {
+			members = append(members, arg)
 			continue
 		}
 		cluster := strings.TrimPrefix(arg, "-")
@@ -2966,12 +3068,12 @@ func tarDestination(args []string, static []bool, cwd string) (string, bool) {
 				if oldStyle || value == "" {
 					i++
 					if i >= len(args) || !static[i] {
-						return "", false
+						return "", nil, false, false
 					}
 					value = args[i]
 				}
 				if !consume(value) {
-					return "", false
+					return "", nil, false, false
 				}
 				if !oldStyle {
 					j = len(cluster)
@@ -2983,24 +3085,26 @@ func tarDestination(args []string, static []bool, cwd string) (string, bool) {
 				if oldStyle || j+1 == len(cluster) {
 					i++
 					if i >= len(args) || !static[i] {
-						return "", false
+						return "", nil, false, false
 					}
 				}
 				if !oldStyle {
 					j = len(cluster)
 				}
-			case 'a', 'x', 'z', 'j', 'J', 'v', 'O', 't', 'c', 'P', 'p', 'h', 'k', 'm', 'w', 'U',
+			case 'x':
+				extract = true
+			case 'a', 'z', 'j', 'J', 'v', 'O', 't', 'c', 'P', 'p', 'h', 'k', 'm', 'w', 'U',
 				'o', 'S', 'B', 'l', 'r', 'u', 'i', 'n':
 			default:
 				// Unknown short options may consume a path. -W is GNU --verify,
 				// but bsdtar (macOS /usr/bin/tar, Windows tar.exe) reads
 				// -W NAME=VALUE as --NAME=VALUE, so -W directory=DIR moves the
 				// destination (GAP-2445).
-				return "", false
+				return "", nil, false, false
 			}
 		}
 	}
-	return destination, true
+	return destination, members, extract, true
 }
 
 // opaqueProgram is a Windows program that creates links from operands this
