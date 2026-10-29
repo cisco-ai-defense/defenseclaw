@@ -422,6 +422,20 @@ func resolveWritePath(path string, linkDepth int) (string, bool) {
 	return resolved, ok
 }
 
+// windowsMountPointLink reports a Windows directory junction (mount point).
+// Go reports a junction as os.ModeIrregular, not os.ModeSymlink, yet a write
+// through it lands in the junction target, so the walk follows it like a
+// link (GAP-1515: with sshlink -> ~\.ssh, sshlink\authorized_keys looked
+// like a project file). An irregular entry that names no target stays a
+// plain component.
+func windowsMountPointLink(candidate string, info os.FileInfo) bool {
+	if runtime.GOOS != "windows" || info.Mode()&os.ModeIrregular == 0 {
+		return false
+	}
+	_, err := os.Readlink(candidate)
+	return err == nil
+}
+
 // walkWritePath resolves both ordinary operands and raw symlink targets. base
 // is the already-resolved directory containing a relative target. When collect
 // is true, forms includes every traversed name and link hop for opaque-scope
@@ -480,7 +494,7 @@ func walkWritePath(base, path string, linkDepth int, collect, patchTarget bool) 
 				return "", nil, linkDepth, false
 			}
 			unknown := os.IsNotExist(err)
-			if err == nil && info.Mode()&os.ModeSymlink != 0 {
+			if err == nil && (info.Mode()&os.ModeSymlink != 0 || windowsMountPointLink(candidate, info)) {
 				// The cwd proc link is interpreted by the process opening the
 				// operand. Resolving it in the hook would prove a different path.
 				if ProcCWDWriteOperand(candidate) {
