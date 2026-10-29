@@ -6330,9 +6330,10 @@ func (s *Sidecar) setupConnectorsIsolatedTransaction(ctx context.Context, conns 
 				case errors.Is(err, connector.ErrSetupRefusedUnchanged):
 					// A Setup refusal (a known-broken agent, an unsupported
 					// profile topology) names its own next step.
-				case errors.Is(err, errAgentDidNotRun):
-					// The agent cannot start, so no agent holds its settings:
-					// the refusal names what to fix (GAP-1167).
+				case errors.As(err, new(agentVersionUnread)):
+					// Discovery could not read the agent's version, so no
+					// open agent is the cause: the refusal names the cause
+					// and its fix (GAP-1167, GAP-2479).
 					failed = fmt.Errorf("%w, then run: defenseclaw upgrade", failed)
 				default:
 					failed = fmt.Errorf("%w; close the agent holding its settings, then run: defenseclaw upgrade", failed)
@@ -7963,20 +7964,38 @@ func (s *Sidecar) saveSingleConnectorReadyState(
 // the last verified contract.
 var ErrHookContractAdmission = errors.New("hook contract admission failed")
 
-// errAgentDidNotRun marks a refusal of an unversioned agent whose binary was
-// found but did not run when discovery read its version (a node script with
-// no node on PATH). The next step is to make the agent run, not to close an
-// agent that cannot be open (GAP-1167).
-var errAgentDidNotRun = errors.New("the agent did not run when discovery read its version")
+// agentVersionUnread marks a refusal of an unversioned agent whose binary
+// discovery found but whose version it could not read; its text is the cause.
+// The next step is the cause's own, never closing an agent that is not the
+// problem (GAP-1167, GAP-2479).
+type agentVersionUnread string
+
+func (e agentVersionUnread) Error() string { return string(e) }
 
 // unversionedAgentAdmissionError is the action-mode refusal of an agent with
-// no probed version. When discovery recorded why the agent did not run, the
-// refusal quotes it and names the fix; the admission rule is unchanged.
+// no probed version. When discovery recorded why it has no version, the
+// refusal quotes it and names the fix for that cause; the admission rule is
+// unchanged.
 func unversionedAgentAdmissionError(dataDir, name, agentVersion, reason string) error {
-	if probe := connector.CachedAgentVersionProbeError(dataDir, name); probe != "" {
-		return fmt.Errorf("%w: connector %s agent version %q is not verified against a known hook contract: %w (%s); make it run from this account, for example by putting its runtime on PATH", ErrHookContractAdmission, name, agentVersion, errAgentDidNotRun, probe)
+	probe, cause := connector.CachedAgentVersionProbeError(dataDir, name)
+	if probe == "" {
+		return fmt.Errorf("%w: connector %s agent version %q is not verified against a known hook contract: %s (set DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT=1 only for exploratory testing)", ErrHookContractAdmission, name, agentVersion, reason)
 	}
-	return fmt.Errorf("%w: connector %s agent version %q is not verified against a known hook contract: %s (set DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT=1 only for exploratory testing)", ErrHookContractAdmission, name, agentVersion, reason)
+	var why agentVersionUnread
+	var next string
+	switch cause {
+	case connector.AgentVersionProbeDidNotRun:
+		why, next = "the agent did not run when discovery read its version", "make it run from this account, for example by putting its runtime on PATH"
+	case connector.AgentVersionProbeTimedOut:
+		why, next = "the agent did not answer its version probe in time", "start it once from this account so its first start finishes (a cold disk or a busy host makes it slow)"
+	case connector.AgentVersionProbeUntrustedPath:
+		why, next = "discovery did not run the agent because its install path is not trusted", "install it where only administrators or this account can write, or put that install first on PATH"
+	case connector.AgentVersionProbeNotProbed:
+		why, next = "discovery has not read the agent's version yet", "check that it starts from this account"
+	default:
+		why, next = "discovery could not read the agent's version", "check that it starts from this account and prints its version"
+	}
+	return fmt.Errorf("%w: connector %s agent version %q is not verified against a known hook contract: %w (%s); %s", ErrHookContractAdmission, name, agentVersion, why, probe, next)
 }
 
 // GuardrailAgentSettingsRefused is the guardrail health detail that maps each

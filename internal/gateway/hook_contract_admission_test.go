@@ -288,21 +288,57 @@ func TestRunActiveGuardrailReportsReleaseCausedRefusalAsFailure(t *testing.T) {
 	}
 }
 
-// An upgrade refreshes an active connector whose agent binary is on PATH but
-// does not run (a node script with no node on PATH): discovery records no
-// version and why. The refusal is unchanged (the start still fails and the
-// upgrade rolls back), but it names the cause and the fix instead of telling
-// the user to close an agent that cannot be open (GAP-1167).
+// An upgrade refreshes an active connector whose agent binary discovery found
+// but whose version it could not read: discovery records no version and why.
+// The refusal is unchanged (the start still fails and the upgrade rolls back),
+// but it names that cause and the fix for it instead of telling the user to
+// close an agent that cannot be open (GAP-1167). Each cause gets its own next
+// step: only an agent that ran and failed is told to fix its runtime on PATH
+// (GAP-2479).
 func TestRefreshOfAnAgentThatDidNotRunNamesTheCauseNotAnOpenAgent(t *testing.T) {
-	for name, probeError := range map[string]string{
-		"agent did not run":     "/opt/dc-agents/bin/claude: version probe exited 127: /usr/bin/env: ‘node’: No such file or directory",
-		"no recorded probe err": "",
+	const runtimeHint = "putting its runtime on PATH"
+	longTimeout := strings.Repeat("/opt/dc-agents/bin/claude-untrusted: binary path is not in a trusted install prefix; ", 6) + "/opt/dc-agents/bin/claude: version probe timed out"
+	for name, tc := range map[string]struct {
+		probeError string
+		want       []string
+		unwanted   []string
+	}{
+		"agent did not run": {
+			probeError: "/opt/dc-agents/bin/claude: version probe exited 127: /usr/bin/env: ‘node’: No such file or directory",
+			want:       []string{"the agent did not run when discovery read its version", "version probe exited 127", "No such file or directory", runtimeHint},
+		},
+		"probe timed out": {
+			probeError: "/opt/dc-agents/bin/claude: version probe timed out",
+			want:       []string{"did not answer its version probe in time", "version probe timed out", "start it once from this account"},
+			unwanted:   []string{runtimeHint, "the agent did not run"},
+		},
+		"timeout recorded past the quoted length": {
+			probeError: longTimeout,
+			want:       []string{"did not answer its version probe in time", "start it once from this account"},
+			unwanted:   []string{runtimeHint, "is not trusted"},
+		},
+		"untrusted install path": {
+			probeError: "/home/u/open/claude: binary path is not in a trusted install prefix",
+			want:       []string{"its install path is not trusted", "not in a trusted install prefix", "only administrators or this account can write"},
+			unwanted:   []string{runtimeHint, "the agent did not run"},
+		},
+		"not probed": {
+			probeError: "version not probed: not being set up",
+			want:       []string{"has not read the agent's version yet", "version not probed", "check that it starts from this account"},
+			unwanted:   []string{runtimeHint, "the agent did not run"},
+		},
+		"other unreadable version": {
+			probeError: "/opt/dc-agents/bin/claude: version metadata is unavailable",
+			want:       []string{"could not read the agent's version", "version metadata is unavailable", "prints its version"},
+			unwanted:   []string{runtimeHint, "the agent did not run"},
+		},
+		"no recorded probe err": {},
 	} {
 		t.Run(name, func(t *testing.T) {
 			s := admissionSidecar(t)
 			raw, err := json.Marshal(map[string]any{
 				"agents": map[string]any{"claudecode": map[string]any{
-					"version": "", "binary_path": "/opt/dc-agents/bin/claude", "installed": false, "error": probeError,
+					"version": "", "binary_path": "/opt/dc-agents/bin/claude", "installed": false, "error": tc.probeError,
 				}},
 			})
 			if err != nil {
@@ -324,21 +360,21 @@ func TestRefreshOfAnAgentThatDidNotRunNamesTheCauseNotAnOpenAgent(t *testing.T) 
 				t.Fatalf("refresh error = %v, setupCalls = %d; want the unversioned agent refused before setup", err, conn.setupCalls)
 			}
 			message := err.Error()
-			if probeError == "" {
-				if errors.Is(err, errAgentDidNotRun) || !strings.Contains(message, "close the agent holding its settings") {
+			if tc.probeError == "" {
+				if errors.As(err, new(agentVersionUnread)) || !strings.Contains(message, "close the agent holding its settings") {
 					t.Fatalf("refresh error = %q, want the unchanged message", message)
 				}
 				return
 			}
-			if !errors.Is(err, errAgentDidNotRun) {
-				t.Fatalf("refresh error = %q, want it marked as an agent that did not run", message)
+			if !errors.As(err, new(agentVersionUnread)) {
+				t.Fatalf("refresh error = %q, want it marked as an agent whose version discovery could not read", message)
 			}
-			for _, want := range []string{"version probe exited 127", "No such file or directory", "putting its runtime on PATH", "then run: defenseclaw upgrade"} {
+			for _, want := range append([]string{"is not verified against a known hook contract", "then run: defenseclaw upgrade"}, tc.want...) {
 				if !strings.Contains(message, want) {
 					t.Fatalf("refresh error = %q, want %q", message, want)
 				}
 			}
-			for _, unwanted := range []string{"close the agent holding its settings", "DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT"} {
+			for _, unwanted := range append([]string{"close the agent holding its settings", "DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT"}, tc.unwanted...) {
 				if strings.Contains(message, unwanted) {
 					t.Fatalf("refresh error = %q, must not say %q", message, unwanted)
 				}
