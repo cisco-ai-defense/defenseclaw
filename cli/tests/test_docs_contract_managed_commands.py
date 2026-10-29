@@ -166,3 +166,21 @@ def test_untrusted_setup_input_is_documented_as_1639_everywhere():
             assert "`1639`" in sentence, (page, sentence)
             assert "`1603`" not in sentence, (page, sentence)
     assert checked >= 4
+
+
+def test_setup_time_budget_names_the_recovery_after_timeoutseconds():
+    """GAP-2509: a standalone Setup run stopped at TIMEOUTSECONDS runs one
+    recovery child bounded on its own (enterpriseSetupRecoveryTimeout), so
+    Setup can run that much longer. An MDM time budget of TIMEOUTSECONDS ends
+    Setup inside its recovery and leaves verify failing; the pages that give
+    the budget name the extra minutes."""
+    source = (REPO / "cmd/defenseclaw-enterprise-setup/lifecycle_timeout.go").read_text(encoding="utf-8")
+    match = re.search(r"var enterpriseSetupRecoveryTimeout = (\d+) \* time\.Minute", source)
+    assert match, "recovery bound not found"
+    minutes = match.group(1)
+    mdm = (DOCS / "enterprise/mdm/reference.mdx").read_text(encoding="utf-8")
+    time_bullet = mdm[mdm.index("- **Time.**"):mdm.index("- **One run at a time.**")]
+    assert f"`TIMEOUTSECONDS` plus {minutes} minutes" in time_bullet, time_bullet
+    windows = (DOCS / "enterprise/install/reference/windows.mdx").read_text(encoding="utf-8")
+    row = next(line for line in windows.splitlines() if line.startswith("| `TIMEOUTSECONDS=<n>`"))
+    assert f"`TIMEOUTSECONDS` plus {minutes} minutes" in row, row
