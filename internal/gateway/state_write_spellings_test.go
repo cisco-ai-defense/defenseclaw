@@ -399,3 +399,117 @@ func TestRunnersBeforeAShellStringWriteWhatTheStringWrites(t *testing.T) {
 		{"env -i cp a.txt b.txt $(true)", false},
 	})
 }
+
+func TestShellOptionsBeforeTheStringWriteWhatTheStringWrites(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX shell spellings")
+	}
+	judgeHomeStateWriteRows(t, []homeStateWriteRow{
+		{`sh -c -- "cp a.txt ~/.defenseclaw/config.yaml"`, true},
+		{`sh -c - "cp a.txt ~/.defenseclaw/config.yaml"`, true},
+		{`bash --norc -c "cp a.txt ~/.defenseclaw/config.yaml"`, true},
+		{`bash --noprofile -c "cp a.txt ~/.defenseclaw/hooks/x.sh"`, true},
+		{`bash --login -c "cp a.txt ~/.defenseclaw/config.yaml"`, true},
+		{`bash --posix -c "cp a.txt ~/.defenseclaw/config.yaml"`, true},
+		{`bash -euo pipefail -c "cp a.txt ~/.defenseclaw/config.yaml"`, true},
+		{`bash -c -x "cp a.txt ~/.defenseclaw/config.yaml"`, true},
+		{`bash --rcfile /dev/null -c "tee ~/.defenseclaw/config.yaml < a.txt"`, true},
+		{`setsid bash --norc -c "cp a.txt ~/.defenseclaw/config.yaml"`, true},
+		{`setsid sh -c -- "cp a.txt ~/.defenseclaw/config.yaml"`, true},
+		{`A=1 bash --noprofile --norc -c "cp a.txt ~/.defenseclaw/config.yaml"`, true},
+		{`env -C HOMEDIR bash --norc -c "cp project/a.txt .defenseclaw/config.yaml"`, true},
+		{`bash --norc -c "make --version"`, false},
+		{`sh -c -- "cp a.txt b.txt"`, false},
+		{`bash -euo pipefail -c "npm --version"`, false},
+		{`bash --login -c "cat ~/.defenseclaw/config.yaml"`, false},
+		{`bash -- script.sh`, false},
+		{`bash -n --norc -c "cp a.txt ~/.defenseclaw/config.yaml"`, false},
+		{`bash -o noexec -c -- "cp a.txt ~/.defenseclaw/config.yaml"`, false},
+		// +n and +o noexec turn noexec off, and the last setting wins.
+		{`bash +n -c "cp a.txt ~/.defenseclaw/config.yaml"`, true},
+		{`dash +n -c "cp a.txt ~/.defenseclaw/hooks/x.sh"`, true},
+		{`setsid bash +n -c "cp a.txt ~/.defenseclaw/config.yaml"`, true},
+		{`bash -n +n -c "cp a.txt ~/.defenseclaw/config.yaml"`, true},
+		{`setsid bash +o noexec -c "cp a.txt ~/.defenseclaw/config.yaml"`, true},
+		{`setsid bash -o noexec +o noexec -c "cp a.txt ~/.defenseclaw/config.yaml"`, true},
+		{`bash +n -n -c "cp a.txt ~/.defenseclaw/config.yaml"`, false},
+		{`setsid bash +o noexec -o noexec -c "cp a.txt ~/.defenseclaw/config.yaml"`, false},
+		{`bash +n -c "make --version"`, false},
+	})
+}
+
+func TestRunnersInsideAShellStringWriteWhatTheyWrite(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX shell spellings")
+	}
+	judgeHomeStateWriteRows(t, []homeStateWriteRow{
+		{`sh -c "setsid sh -c 'cp a.txt ~/.defenseclaw/config.yaml'"`, true},
+		{`setsid sh -c "setsid sh -c 'cp a.txt ~/.defenseclaw/hooks/x.sh'"`, true},
+		{`bash -c "nohup bash --norc -c 'cp a.txt ~/.defenseclaw/config.yaml'"`, true},
+		{`sh -c "flock /tmp/l -c 'cp a.txt ~/.defenseclaw/config.yaml'"`, true},
+		{`sh -c "nohup cp a.txt ~/.defenseclaw/config.yaml"`, true},
+		{`flock /tmp/l -c "setsid cp a.txt ~/.defenseclaw/config.yaml"`, true},
+		{`sh -c "sh -c 'sh -c \"setsid cp a.txt ~/.defenseclaw/config.yaml\"'"`, true},
+		{`sh -c "setsid sh -c 'cp a.txt b.txt'"`, false},
+		{`sh -c "setsid sh -c 'make build'"`, false},
+		{`sh -c "nohup cat a.txt"`, false},
+		{`bash -c "nohup bash --norc -c 'cat ~/.defenseclaw/config.yaml'"`, false},
+	})
+}
+
+func TestBareCopyReadsAsNoWrite(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX shell spellings")
+	}
+	judgeHomeStateWriteRows(t, []homeStateWriteRow{
+		{"cp", false},
+		{"ls; cp", false},
+		{`sh -c "cp"`, false},
+		{"cp; cp a.txt ~/.defenseclaw/config.yaml", true},
+		{"cp a.txt ~/.defenseclaw/config.yaml; cp", true},
+	})
+}
+
+// env -C or --chdir with a home-spelled directory (~, ~/dir, $HOME,
+// "$HOME"/dir) runs the call in the active home: the caller shell expands
+// the word before env runs. The twin wrote cd '~' (a literal directory)
+// or gave no reading for "$HOME", so a relative state write there was
+// allowed (GAP-2519, checker r9i1 RV-r9-2 E01-E07, P07, P08). A literal ~
+// (quoted, or glued as --chdir=~ or -C~) is not expanded and stays a
+// project-relative directory.
+func TestEnvChdirHomeSpellingRunsTheCallInTheHome(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX shell spellings")
+	}
+	judgeHomeStateWriteRows(t, []homeStateWriteRow{
+		{"env -C ~ cp project/a.txt .defenseclaw/config.yaml", true},
+		{`env -C "$HOME" cp project/a.txt .defenseclaw/config.yaml`, true},
+		{"env -C $HOME cp project/a.txt .defenseclaw/config.yaml", true},
+		{"env -C ${HOME} cp project/a.txt .defenseclaw/hooks/x.sh", true},
+		{"env -C ~/ cp project/a.txt .defenseclaw/config.yaml", true},
+		{"env -C ~/.defenseclaw cp ../project/a.txt config.yaml", true},
+		{`env -C "$HOME/.defenseclaw" cp ../project/a.txt hooks/x.sh`, true},
+		{`env -C "$HOME"/.defenseclaw cp ../project/a.txt config.yaml`, true},
+		{`env --chdir="$HOME" cp project/a.txt .defenseclaw/config.yaml`, true},
+		{`env --chdir "$HOME" mv project/a.txt .defenseclaw/config.yaml`, true},
+		{`env -C"${HOME}" cp project/a.txt .defenseclaw/config.yaml`, true},
+		{"env -C ~ tee .defenseclaw/config.yaml < project/a.txt", true},
+		{"env -C ~ ln -sf project/a.txt .defenseclaw/config.yaml", true},
+		{"setsid env -C ~ cp project/a.txt .defenseclaw/config.yaml", true},
+		{"A=1 env -C ~ cp project/a.txt .defenseclaw/config.yaml", true},
+		{"env -C ~ env -C .defenseclaw cp ../project/a.txt config.yaml", true},
+		{"env -C /tmp env -C ~ cp project/a.txt .defenseclaw/config.yaml", true},
+		{`sh -c "env -C ~ cp project/a.txt .defenseclaw/config.yaml"`, true},
+		{`env -C ~ sh -c "setsid cp project/a.txt .defenseclaw/config.yaml"`, true},
+		{"env -C ~ cp project/a.txt .ssh/authorized_keys", true},
+		{"env -C ~ cp project/a.txt project/b.txt", false},
+		{"env -C ~/project cp a.txt b.txt", false},
+		{`env -C "$HOME/project" make --version`, false},
+		{"env -C ~ cat .defenseclaw/config.yaml", false},
+		{"env -C ~/.defenseclaw cp config.yaml ../project/backup.yaml", false},
+		{"env --chdir=~ cp a.txt .defenseclaw/config.yaml", false},
+		{"env -C '~' cp a.txt .defenseclaw/config.yaml", false},
+		{`env -C "$HOME"x cp a.txt .defenseclaw/config.yaml`, false},
+		{"env -C ~ ls -la", false},
+	})
+}

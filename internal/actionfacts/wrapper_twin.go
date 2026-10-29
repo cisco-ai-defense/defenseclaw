@@ -40,6 +40,14 @@ import (
 // relative operand is read where the call runs. ok is false when no call
 // was rewritten. A caller counts only a block proven on the reading.
 func WrapperUnwrapTwin(command string) (twin string, ok bool) {
+	return wrapperUnwrapTwin(command, 0)
+}
+
+// maxNestedShellStrings bounds how deep wrapperUnwrapTwin reads shell
+// STRINGs inside shell STRINGs.
+const maxNestedShellStrings = 4
+
+func wrapperUnwrapTwin(command string, depth int) (twin string, ok bool) {
 	defer func() {
 		if recover() != nil {
 			twin, ok = "", false
@@ -63,6 +71,21 @@ func WrapperUnwrapTwin(command string) (twin string, ok bool) {
 			edits = append(edits, edit{start: start, end: end, text: text})
 		}
 	}
+	// A static shell STRING is its own command line: a wrapper inside it
+	// (sh -c "setsid sh -c 'cp ...'") is read the same way, and the STRING
+	// word is written as the quoted reading (GAP-2519).
+	nested := func(word *syntax.Word) {
+		if depth >= maxNestedShellStrings {
+			return
+		}
+		value := projectPOSIXWord(word)
+		if value.Expands {
+			return
+		}
+		if body, changed := wrapperUnwrapTwin(value.Value, depth+1); changed && body != value.Value {
+			replace(word.Pos(), word.End(), posixSingleQuoted(body))
+		}
+	}
 	syntax.Walk(file, func(node syntax.Node) bool {
 		switch typed := node.(type) {
 		case *syntax.TimeClause:
@@ -78,10 +101,27 @@ func WrapperUnwrapTwin(command string) (twin string, ok bool) {
 			if command, ok := flockShellString(typed.Args); ok {
 				// flock FILE -c STRING runs sh -c STRING under the lock.
 				replace(typed.Args[0].Pos(), typed.Args[command].Pos(), "sh -c ")
+				nested(typed.Args[command])
 				return true
 			}
 			run, writer := wrappedWriterRun(typed.Args)
-			if !writer || run.Index == 0 {
+			if !writer {
+				return true
+			}
+			// A shell started with other options before its STRING
+			// (bash --norc -c, sh -c -- STRING, bash -euo pipefail -c)
+			// runs what sh -c STRING runs (GAP-2527).
+			text, shell := shellOptionsString(typed.Args, run.Index)
+			if shell {
+				nested(typed.Args[text])
+			} else if body, plain := plainShellString(typed.Args, run.Index); plain {
+				nested(typed.Args[body])
+			}
+			if run.Dir == "" && shell {
+				replace(typed.Args[0].Pos(), typed.Args[text].Pos(), "sh -c ")
+				return true
+			}
+			if run.Index == 0 {
 				return true
 			}
 			if run.Dir == "" {
@@ -94,10 +134,13 @@ func WrapperUnwrapTwin(command string) (twin string, ok bool) {
 			open := typed.Args[0].Pos()
 			if len(typed.Assigns) > 0 {
 				open = typed.Assigns[0].Pos()
-				replace(open, open, "( cd "+posixSingleQuoted(run.Dir)+" && ")
+				replace(open, open, "( cd "+wrapperDirWord(run.Dir)+" && ")
 				replace(typed.Args[0].Pos(), typed.Args[run.Index].Pos(), "")
 			} else {
-				replace(open, typed.Args[run.Index].Pos(), "( cd "+posixSingleQuoted(run.Dir)+" && ")
+				replace(open, typed.Args[run.Index].Pos(), "( cd "+wrapperDirWord(run.Dir)+" && ")
+			}
+			if shell {
+				replace(typed.Args[run.Index].Pos(), typed.Args[text].Pos(), "sh -c ")
 			}
 			replace(typed.End(), typed.End(), " )")
 		}
@@ -119,6 +162,103 @@ func WrapperUnwrapTwin(command string) (twin string, ok bool) {
 	}
 	out.WriteString(command[last:])
 	return out.String(), true
+}
+
+// homeDirSentinel starts a wrapper directory spelled from the active home
+// (env -C ~, env -C "$HOME"/dir, env --chdir="$HOME"): the caller shell
+// expands the word before env runs, so the child runs in the home, while
+// the twin wrote the literal word (cd '~') or gave no twin for "$HOME"
+// (GAP-2519, checker r9i1 RV-r9-2). A shell word cannot hold NUL, so the
+// marker never names a real directory.
+const homeDirSentinel = "\x00home"
+
+// wrapperDirWord writes the directory a wrapper runs its child in as a
+// shell word for the cd of the twin; a home-spelled directory is written
+// from "$HOME" again.
+func wrapperDirWord(dir string) string {
+	if rest, home := strings.CutPrefix(dir, homeDirSentinel); home {
+		if rest == "" {
+			return "\"$HOME\""
+		}
+		return "\"$HOME\"" + posixSingleQuoted(rest)
+	}
+	return posixSingleQuoted(dir)
+}
+
+// wrapperHomeDirWord returns the value of args[at] with homeDirSentinel in
+// place of its home when the word is the directory of a -C or --chdir
+// option (separate or glued) spelled from the active home. ok is false
+// for every other word.
+func wrapperHomeDirWord(args []*syntax.Word, at int) (string, bool) {
+	if at > 0 {
+		if option := projectPOSIXWord(args[at-1]); !option.Expands && (option.Value == "-C" || option.Value == "--chdir") {
+			if rest, home := homeSpelledDir(args[at], ""); home {
+				return homeDirSentinel + rest, true
+			}
+		}
+	}
+	for _, option := range []string{"--chdir=", "-C"} {
+		if rest, home := homeSpelledDir(args[at], option); home {
+			return option + homeDirSentinel + rest, true
+		}
+	}
+	return "", false
+}
+
+// homeSpelledDir returns the static rest of word after option (the literal
+// text that starts it) and a leading home spelling: an unquoted ~ or ~/ at
+// the word start (no option), or a plain $HOME or ${HOME}, bare or first
+// in double quotes. The rest is empty or starts with a slash; ok is false
+// when any other part expands or the word names another directory.
+func homeSpelledDir(word *syntax.Word, option string) (string, bool) {
+	if word == nil || len(word.Parts) == 0 {
+		return "", false
+	}
+	parts := word.Parts
+	var rest strings.Builder
+	lit, isLit := parts[0].(*syntax.Lit)
+	if option == "" && isLit && (lit.Value == "~" || strings.HasPrefix(lit.Value, "~/")) {
+		rest.WriteString(unquotePOSIXLiteral(lit.Value[1:], false))
+		parts = parts[1:]
+	} else {
+		if option != "" {
+			if !isLit || lit.Value != option || len(parts) < 2 {
+				return "", false
+			}
+			parts = parts[1:]
+		}
+		switch typed := parts[0].(type) {
+		case *syntax.ParamExp:
+			if !plainHomeParameter(typed) {
+				return "", false
+			}
+		case *syntax.DblQuoted:
+			if typed.Dollar || len(typed.Parts) == 0 || !plainHomeParameter(typed.Parts[0]) {
+				return "", false
+			}
+			for _, nested := range typed.Parts[1:] {
+				value, expands := projectPOSIXDoubleQuotedPart(nested)
+				if expands {
+					return "", false
+				}
+				rest.WriteString(value)
+			}
+		default:
+			return "", false
+		}
+		parts = parts[1:]
+	}
+	for _, part := range parts {
+		value, _, expands := projectPOSIXWordPart(part)
+		if expands {
+			return "", false
+		}
+		rest.WriteString(value)
+	}
+	if text := rest.String(); text == "" || strings.HasPrefix(text, "/") {
+		return text, true
+	}
+	return "", false
 }
 
 func posixSingleQuoted(value string) string {
@@ -196,6 +336,9 @@ func wrappedWriterRun(args []*syntax.Word) (PrefixWrapperRun, bool) {
 		if at >= len(args) {
 			return "", false
 		}
+		if dir, home := wrapperHomeDirWord(args, at); home {
+			return dir, true
+		}
 		word := projectPOSIXWord(args[at])
 		return word.Value, !word.Expands
 	}
@@ -222,6 +365,104 @@ func wrappedWriterRun(args []*syntax.Word) (PrefixWrapperRun, bool) {
 // wrappedShellPrograms are the shells whose wrapped call is read as the
 // plain call, so the plain reading of a -c STRING applies.
 var wrappedShellPrograms = map[string]bool{"sh": true, "bash": true, "dash": true, "ksh": true, "zsh": true}
+
+// shellOptionsString returns the index of the STRING a POSIX shell at
+// args[at] runs when options other than the one -c stand before it: long
+// startup options (--norc, --noprofile, --login, --posix, --rcfile FILE),
+// short option clusters with their -o/-O values, and the -- or - that ends
+// the options after -c. ok is false for the plain SHELL -c STRING, for a
+// script or stdin shell, and for a word that is not static.
+func shellOptionsString(args []*syntax.Word, at int) (int, bool) {
+	static := func(i int) (string, bool) {
+		if i >= len(args) {
+			return "", false
+		}
+		word := projectPOSIXWord(args[i])
+		return word.Value, !word.Expands
+	}
+	if name, ok := static(at); !ok || !wrappedShellPrograms[wrapperProgramName(name)] {
+		return 0, false
+	}
+	command, noexec := false, false
+	for i := at + 1; i < len(args); i++ {
+		word, ok := static(i)
+		if !ok {
+			return 0, false
+		}
+		switch {
+		case word == "--" || word == "-":
+			if !command || i+1 >= len(args) {
+				return 0, false
+			}
+			return i + 1, !noexec
+		case word == "--rcfile" || word == "--init-file":
+			i++
+			if _, ok := static(i); !ok {
+				return 0, false
+			}
+		case strings.HasPrefix(word, "--"):
+			switch word {
+			case "--login", "--noprofile", "--norc", "--posix", "--noediting", "--restricted", "--verbose":
+			default:
+				return 0, false
+			}
+		case len(word) > 1 && (word[0] == '-' || word[0] == '+'):
+			// -n and -o noexec read the STRING and run nothing; +n and
+			// +o noexec turn that off again (bash +n -c STRING runs it),
+			// and the last setting wins.
+			set := word[0] == '-'
+			var values []rune
+			for _, flag := range word[1:] {
+				switch {
+				case flag == 'c':
+					if word[0] != '-' {
+						return 0, false
+					}
+					command = true
+				case flag == 'n':
+					noexec = set
+				case flag == 'o' || flag == 'O':
+					values = append(values, flag)
+				case flag >= 'a' && flag <= 'z' || flag >= 'A' && flag <= 'Z':
+				default:
+					return 0, false
+				}
+			}
+			for _, flag := range values {
+				i++
+				value, ok := static(i)
+				if !ok {
+					return 0, false
+				}
+				if flag == 'o' && value == "noexec" {
+					noexec = set
+				}
+			}
+		default:
+			if !command {
+				return 0, false
+			}
+			if first, _ := static(at + 1); i == at+2 && first == "-c" {
+				return 0, false
+			}
+			return i, !noexec
+		}
+	}
+	return 0, false
+}
+
+// plainShellString returns the index of the STRING of a POSIX shell at
+// args[at] started as SHELL -c STRING.
+func plainShellString(args []*syntax.Word, at int) (int, bool) {
+	if at+2 >= len(args) {
+		return 0, false
+	}
+	name, option := projectPOSIXWord(args[at]), projectPOSIXWord(args[at+1])
+	if name.Expands || option.Expands || option.Value != "-c" || !wrappedShellPrograms[wrapperProgramName(name.Value)] {
+		return 0, false
+	}
+	return at + 2, true
+}
 
 // flockShellString returns the index of the STRING word of a
 // flock FILE -c STRING (or --command STRING) call run after static prefix
@@ -393,7 +634,7 @@ func envOptions(value func(int) (string, bool), next *int, run *PrefixWrapperRun
 		if dir == "" {
 			return false
 		}
-		if run.Dir != "" && !strings.HasPrefix(dir, "/") {
+		if run.Dir != "" && !strings.HasPrefix(dir, "/") && !strings.HasPrefix(dir, homeDirSentinel) {
 			dir = strings.TrimRight(run.Dir, "/") + "/" + dir
 		}
 		run.Dir = dir
