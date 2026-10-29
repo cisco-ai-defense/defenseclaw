@@ -2225,3 +2225,73 @@ def test_a_direct_entry_that_starts_the_file_a_pinned_shim_wraps_or_a_copy_keeps
         assert CliRunner().invoke(acp_cmd, ["verify"], obj=app).exit_code == 0
     finally:
         cleanup_app(app, db_path, data_dir)
+
+
+_NODE_SHIM = (
+    "@ECHO off\r\nGOTO start\r\n:find_dp0\r\nSET dp0=%~dp0\r\nEXIT /b\r\n:start\r\nSETLOCAL\r\nCALL :find_dp0\r\n\r\n"
+    "IF EXIST \"%dp0%\\node.exe\" (\r\n  SET \"_prog=%dp0%\\node.exe\"\r\n) ELSE (\r\n  SET \"_prog=node\"\r\n"
+    "  SET PATHEXT=%PATHEXT:;.JS;=;%\r\n)\r\n\r\nendLocal & goto #_undefined_# 2>NUL || title %COMSPEC% & "
+    "\"%_prog%\"  \"%dp0%\\node_modules\\{package}\\index.js\" %*\r\n"
+)
+
+
+def test_other_node_agents_beside_a_pinned_node_shim_keep_verify_green(tmp_path, monkeypatch):
+    '''The node.exe beside npm's shims (nvm-windows, fnm) is not the pinned agent (GAP-0496 review row).
+
+    The lock pins npm's copilot.cmd, which quotes the shared node.exe before
+    the package script it runs. Another node-based agent in the same folder,
+    or node.exe running another script, is not this pair's bypass; a second
+    shim that runs the same package script still is.
+    '''
+    _isolate_client_config(monkeypatch, tmp_path)
+    app, data_dir, db_path = _app(tmp_path)
+    settings = _zed_settings(tmp_path)
+    settings.parent.mkdir(parents=True)
+    guard = _binary(tmp_path / "defenseclaw-acp")
+    prefix = tmp_path / "nodejs"
+    prefix.mkdir()
+    node = prefix / "node.exe"
+    node.write_bytes(b"node-interpreter-image")
+    for name, package in (
+        ("copilot", "@github\\copilot"),
+        ("copilot-alt", "@github\\copilot"),
+        ("gemini", "@google\\gemini-cli"),
+    ):
+        script = prefix.joinpath("node_modules", *package.split("\\"), "index.js")
+        script.parent.mkdir(parents=True, exist_ok=True)
+        script.write_text("// " + package)
+        (prefix / f"{name}.cmd").write_text(_NODE_SHIM.replace("{package}", package), newline="")
+    setup_args = [
+        "setup", "--client", "zed", "--agent", "copilot", "--guard-binary", guard,
+        "--agent-binary", str(prefix / "copilot.cmd"),
+    ]
+    try:
+        settings.write_text(json.dumps({"agent_servers": {}}))
+        assert CliRunner().invoke(acp_cmd, setup_args, obj=app).exit_code == 0
+        assert CliRunner().invoke(acp_cmd, ["verify"], obj=app).exit_code == 0
+        clean = json.loads(settings.read_text())
+        for label, other in {
+            "another node-based agent": {"command": str(prefix / "gemini.cmd"), "args": ["--experimental-acp"]},
+            "node.exe running another script": {"command": str(node), "args": ["other.js"]},
+        }.items():
+            document = copy.deepcopy(clean)
+            document["agent_servers"]["Gemini CLI"] = other
+            settings.write_text(json.dumps(document))
+            verified = CliRunner().invoke(acp_cmd, ["verify"], obj=app)
+            assert verified.exit_code == 0, (label, verified.output)
+            status = json.loads(CliRunner().invoke(acp_cmd, ["status", "--json"], obj=app).output)
+            assert status["bindings"]["zed/copilot"]["healthy"] is True, label
+
+        document = copy.deepcopy(clean)
+        direct = {"command": str(prefix / "copilot-alt.cmd"), "args": ["--acp", "--stdio"]}
+        document["agent_servers"]["My Copilot"] = direct
+        settings.write_text(json.dumps(document))
+        verified = CliRunner().invoke(acp_cmd, ["verify"], obj=app)
+        assert verified.exit_code != 0, verified.output
+        assert "'My Copilot' is not DefenseClaw's: it launches copilot without the DefenseClaw guard" in (
+            verified.output
+        )
+        settings.write_text(json.dumps(clean))
+        assert CliRunner().invoke(acp_cmd, ["verify"], obj=app).exit_code == 0
+    finally:
+        cleanup_app(app, db_path, data_dir)

@@ -698,14 +698,22 @@ def _pinned_agent_path(data_dir: str, client: str, agent: str) -> str:
 
 
 # A Windows command shim (npm, pnpm and Volta write one per PATH name) starts
-# the file it quotes after %dp0% or %~dp0: npm's opencode.cmd ends in
-# "%dp0%\node_modules\opencode-ai\bin\opencode.exe" %*.
+# the last file it quotes after %dp0% or %~dp0: npm's opencode.cmd ends in
+# "%dp0%\node_modules\opencode-ai\bin\opencode.exe" %*. A shim for a node
+# package first quotes the node.exe beside it (an IF EXIST check and the
+# interpreter), then the package script it runs.
 _SHIM_SUFFIXES = (".cmd", ".bat")
 _SHIM_TARGET = re.compile(r'"%~?dp0%?[\\/]([^"\r\n]+)"', re.IGNORECASE)
 
 
 def _shim_targets(path_value: str) -> list[str]:
-    """The files a Windows command shim at path_value starts ([] for any other file)."""
+    """The agent file a Windows command shim at path_value starts ([] for any other file).
+
+    Only the last quoted file counts. An earlier one is the shared interpreter
+    (node.exe beside npm's global shims on nvm-windows and fnm), and counting
+    it would make every other node-based agent in that folder start the
+    pinned agent.
+    """
     if os.path.splitext(path_value)[1].lower() not in _SHIM_SUFFIXES:
         return []
     try:
@@ -714,12 +722,11 @@ def _shim_targets(path_value: str) -> list[str]:
     except OSError:
         return []
     base = os.path.dirname(os.path.abspath(path_value))
-    targets: list[str] = []
-    for relative in _SHIM_TARGET.findall(text):
-        candidate = os.path.normpath(os.path.join(base, relative.replace("\\", os.sep).replace("/", os.sep)))
-        if candidate not in targets and os.path.isfile(candidate):
-            targets.append(candidate)
-    return targets
+    quoted = _SHIM_TARGET.findall(text)
+    if not quoted:
+        return []
+    candidate = os.path.normpath(os.path.join(base, quoted[-1].replace("\\", os.sep).replace("/", os.sep)))
+    return [candidate] if os.path.isfile(candidate) else []
 
 
 def _same_agent_file(candidate: str, pinned: str) -> bool:
