@@ -44,7 +44,7 @@ func TestPerUserHermesToolCallFailsClosedUnlessAnOutageIsOpen(t *testing.T) {
 	}{
 		{name: "gateway down", want: "the DefenseClaw gateway is not running or not answering (fail mode closed)",
 			rt: func() *stubRT { return &stubRT{err: errors.New("connection refused")} }},
-		{name: "timeout", want: "this account's DefenseClaw gateway did not answer in time (fail mode closed)",
+		{name: "timeout", want: "this account's DefenseClaw gateway did not answer in time (" + perUserNotOutageNote + ")",
 			rt: func() *stubRT { return &stubRT{onRequest: waitForDeadline} }, timeout: 200 * time.Millisecond},
 		{name: "gateway 5xx", want: "returned an answer DefenseClaw could not use",
 			rt: func() *stubRT { return &stubRT{status: 503, body: "unavailable"} }},

@@ -2374,7 +2374,8 @@ func failUnreachable(opts Options, sp spec, failMode, reason string) int {
 			return failManagedStandaloneClosed(opts, sp, sp.unreachableStrict, "transport", reason)
 		} else {
 			fmt.Fprintf(opts.Stderr,
-				"defenseclaw: %s (fail mode closed): %s\n", unreachableLead(opts, sp, reason, "blocking"), unreachableDetail(opts, reason))
+				"defenseclaw: %s (%s): %s\n", unreachableLead(opts, sp, reason, "blocking"), unreachableModeNote(opts, reason),
+				unreachableDetail(opts, reason))
 			if text := perUserGatewayDownText(opts, reason); text != "" {
 				return emitPerUserGatewayDown(opts, sp, text)
 			}
@@ -2543,6 +2544,27 @@ func unreachableLead(opts Options, sp spec, reason, verdict string) string {
 	return "gateway unreachable, " + verdict + " " + sp.subject
 }
 
+// perUserNotOutageNote is the reason a blocked per-user call gives when its
+// own gateway took the call and did not answer: that is not an outage, so the
+// call is blocked in every fail mode (LEAD RULING 02:09). The shell hooks say
+// the same (defenseclaw_unreachable_mode_note).
+const perUserNotOutageNote = "not a gateway outage, so it is blocked in every fail mode"
+
+// unreachableModeNote names, in the blocked unreachable line and text, why
+// the call was blocked. A per-user call its gateway took and did not answer
+// is blocked in every fail mode, so beside a saved open mode "fail mode
+// closed" read as the mode being ignored (GAP-2475; GAP-2279 fixed the shell
+// hooks). An outage the mode closed, strict availability, this account's
+// install window and managed, socket and Secure Client hooks keep "fail mode
+// closed".
+func unreachableModeNote(opts Options, reason string) string {
+	if reason == perUserGatewayNoAnswerReason && !opts.ManagedEnterprise && opts.ManagedUnixSocket == "" &&
+		!opts.SecureClient && !opts.StrictAvailability && !perUserInstallWindow(opts) {
+		return perUserNotOutageNote
+	}
+	return "fail mode closed"
+}
+
 // unreachableDetail is the text after the colon of the unreachable line. The
 // lead already says "gateway unreachable", so a per-user hook names the next
 // step instead of repeating it (GAP-1204); a managed hook's gateway is not the
@@ -2594,7 +2616,7 @@ func perUserGatewayDownText(opts Options, reason string) string {
 	}
 	if reason == perUserGatewayNoAnswerReason {
 		return "DefenseClaw blocked this " + hookEventSubject(opts.Event) + ": this account's DefenseClaw gateway " +
-			"did not answer in time (fail mode closed); it may be restarting or busy. Try again in a moment; if " +
+			"did not answer in time (" + unreachableModeNote(opts, reason) + "); it may be restarting or busy. Try again in a moment; if " +
 			"this continues, check it with `defenseclaw-gateway status`."
 	}
 	lead := "DefenseClaw blocked this " + hookEventSubject(opts.Event) + ": "
