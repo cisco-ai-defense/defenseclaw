@@ -1974,6 +1974,41 @@ func writePathForms(path string, linkDepth int) ([]string, bool) {
 	return forms, ok
 }
 
+// directoryStackOperand stands for a bash directory-stack tilde word (~1,
+// ~+2, ~-1, ~+, ~- alone or before a slash) in the copy and archive argv the
+// link walk reads. The shell expands such a word to one directory path
+// (or leaves it literal): never to an option or to several words. A source
+// spelled so is a path the walk does not place, read as a possible link; a
+// destination spelled so keeps the dynamic reading (GAP-2552).
+const directoryStackOperand = "\x00directory-stack:"
+
+var directoryStackTilde = regexp.MustCompile(`^~([+-]?[0-9]{1,3}|[+-])(/|$)`)
+
+// withDirectoryStackOperands returns words and static with each all-literal
+// directory-stack tilde word read as a static directoryStackOperand path,
+// unless destination (the call destination of that reading) is one.
+func withDirectoryStackOperands(args []*syntax.Word, words []string, static []bool, destination func([]string, []bool) string) ([]string, []bool) {
+	var stackWords []string
+	var stackStatic []bool
+	for i, arg := range args {
+		if i == 0 || static[i] || len(arg.Parts) != 1 {
+			continue
+		}
+		lit, ok := arg.Parts[0].(*syntax.Lit)
+		if !ok || !directoryStackTilde.MatchString(lit.Value) || strings.ContainsAny(lit.Value, "*?[") {
+			continue
+		}
+		if stackWords == nil {
+			stackWords, stackStatic = slices.Clone(words), slices.Clone(static)
+		}
+		stackWords[i], stackStatic[i] = directoryStackOperand+lit.Value, true
+	}
+	if stackWords == nil || strings.Contains(destination(stackWords, stackStatic), directoryStackOperand) {
+		return words, static
+	}
+	return stackWords, stackStatic
+}
+
 func commandLinksWithFacts(command, cwd, home string, facts map[string]string, record bool) shellLinks {
 	return commandLinks(command, cwd, home, facts, record, false)
 }
@@ -2067,6 +2102,22 @@ func commandLinks(command, cwd, home string, facts map[string]string, record, ne
 			if static[0] {
 				program = programBase(words[0])
 			}
+		}
+		// A directory-stack tilde (~1, ~-) in a copy or archive argv is one
+		// path, never an option (GAP-2552). A copy that makes links (cp -s,
+		// cp -l) keeps the dynamic reading: the walk would record the
+		// placeholder as the link target.
+		switch {
+		case slices.Contains(copyPrograms, program):
+			if makesLinks, _ := copyLinkOptions(args[1:], words[1:], static[1:]); !makesLinks {
+				words, static = withDirectoryStackOperands(args, words, static, func(words []string, static []bool) string {
+					return cpDestination(words[1:], static[1:], cwd)
+				})
+			}
+		case slices.Contains(archivePrograms, program):
+			words, static = withDirectoryStackOperands(args, words, static, func(words []string, static []bool) string {
+				return archiveDestination(program, words[1:], static[1:], cwd)
+			})
 		}
 		if opaqueProgram(program) {
 			links.unknown(true)
@@ -3452,6 +3503,11 @@ func archiveCopiesDiskSymlink(program string, args []string, static []bool, cwd,
 }
 
 func diskSourceMayLink(source, cwd, home string, facts map[string]string, record bool, lstat func(string) (os.FileInfo, error)) bool {
+	if strings.Contains(source, directoryStackOperand) {
+		// A directory-stack tilde names a directory the walk does not
+		// place, so a link there is unknown.
+		return true
+	}
 	path := OperandPath(source, cwd)
 	key := SourceLinkFactPrefix + path
 	if !record && facts != nil {
