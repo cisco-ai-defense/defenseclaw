@@ -190,6 +190,7 @@ func actionWindowsExpressionBodies(text string, plain, hereBody bool, bodies []s
 	var stack []frame
 	var quote byte
 	var heredocs []actionHeredoc
+	lines := &HeredocLines{}
 	// braces counts the open ${...} parameter expansions and subscript the
 	// open name[...] subscripts of the Git Bash reading: a << there is
 	// pattern or arithmetic text, not a here-document (RV5-2).
@@ -363,7 +364,7 @@ func actionWindowsExpressionBodies(text string, plain, hereBody bool, bodies []s
 			// The bodies start after the line that ends the command: a
 			// newline inside a $(...) opened after the operator is still
 			// command text (cat <<'A' $(echo x<newline>...), RV5-2).
-			i = actionSkipHeredocBodies(text, i+1, heredocs) - 1
+			i = actionSkipHeredocBodies(text, i+1, heredocs, lines) - 1
 			heredocs = nil
 			continue
 		}
@@ -480,7 +481,7 @@ func actionQuotedHeredoc(text string, start int) (actionHeredoc, int, bool) {
 // the rest stays scanned: over-block, never under-block (RV3-1). It also
 // returns start when any pending here-document is unquoted, because its
 // expanded body lies on these lines (cat <<B; cat <<'A', RV4-1).
-func actionSkipHeredocBodies(text string, start int, docs []actionHeredoc) int {
+func actionSkipHeredocBodies(text string, start int, docs []actionHeredoc, lines *HeredocLines) int {
 	for _, doc := range docs {
 		if !doc.quoted {
 			return start
@@ -488,24 +489,13 @@ func actionSkipHeredocBodies(text string, start int, docs []actionHeredoc) int {
 	}
 	pos := start
 	for _, doc := range docs {
-		found := false
-		for pos < len(text) && !found {
-			end := strings.IndexByte(text[pos:], '\n')
-			next := len(text)
-			line := text[pos:]
-			if end >= 0 {
-				line, next = text[pos:pos+end], pos+end+1
-			}
-			line = strings.TrimSuffix(line, "\r")
-			if doc.stripTabs {
-				line = strings.TrimLeft(line, "\t")
-			}
-			pos = next
-			found = line == doc.delim
-		}
+		// lines finds the delimiter line in time linear in text over all
+		// the bodies of one reading (GAP-2557).
+		_, lineEnd, found := lines.Next(text, doc.delim, doc.stripTabs, pos)
 		if !found {
 			return start
 		}
+		pos = min(lineEnd+1, len(text))
 	}
 	return pos
 }

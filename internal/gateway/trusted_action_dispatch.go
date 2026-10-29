@@ -1048,8 +1048,10 @@ func cmdGitBashSubstitutionEnd(command string, start int, budget *int) (int, boo
 				continue
 			}
 		case c == '\n' && len(pending) > 0:
-			bodies, end := cmdHeredocBodies(command, j+1, pending)
+			bodies, end := cmdHeredocBodies(command, j+1, pending, nil)
 			if len(bodies) < len(pending) {
+				// The search read the rest of the command (GAP-2557).
+				*budget -= len(command) - j
 				return 0, false
 			}
 			*budget -= end - j
@@ -1266,7 +1268,7 @@ var cmdCompoundReserved = map[string]int{
 // line (GAP-2547).
 func cmdCompoundShape(text string) (delta int, closes bool) {
 	var words []string
-	cmdScanReceiverWords(text, 0, 0, false, -1, &words)
+	cmdScanReceiverWords(text, 0, 0, false, -1, &words, nil)
 	for _, w := range words {
 		switch w {
 		case "for", "case", "select":
@@ -1281,11 +1283,40 @@ func cmdCompoundShape(text string) (delta int, closes bool) {
 }
 
 // cmdLineContinues reports a Git Bash line that ends in a pipe or list
-// operator (|, |&, ||, &&): the command goes on on the next line, after any
-// here-document bodies (GAP-2547).
+// operator (|, |&, ||, &&), before any comment: the command goes on on the
+// next line that holds a word, after any here-document bodies (GAP-2547).
 func cmdLineContinues(line string) bool {
-	t := strings.TrimRight(line, " \t\r")
+	t := strings.TrimRight(cmdLineCode(line), " \t\r")
 	return strings.HasSuffix(t, "|") || strings.HasSuffix(t, "|&") || strings.HasSuffix(t, "&&")
+}
+
+// cmdLineHasWord reports a Git Bash line with a word outside its comment.
+// Bash reads a pipe or list left open across blank and comment-only lines
+// (GAP-2547 checker it7 X03, X04), so such a line neither continues nor
+// ends the command.
+func cmdLineHasWord(line string) bool {
+	return strings.Trim(cmdLineCode(line), " \t\r") != ""
+}
+
+// cmdLineCode returns a Git Bash line up to its comment: a # that starts a
+// word outside quotes.
+func cmdLineCode(line string) string {
+	var quote byte
+	for i := 0; i < len(line); i++ {
+		switch c := line[i]; {
+		case c == '\\' && quote != '\'':
+			i++
+		case quote != 0:
+			if c == quote {
+				quote = 0
+			}
+		case c == '\'' || c == '"':
+			quote = c
+		case c == '#' && (i == 0 || strings.IndexByte(" \t\r\n;|&()<>", line[i-1]) >= 0):
+			return line[:i]
+		}
+	}
+	return line
 }
 
 // cmdExpansionInertCommands never run an argument or hand standard input to
@@ -1312,7 +1343,7 @@ func cmdRedefines(command string, spans []cmdTextSpan) bool {
 		}
 	}
 	var words []string
-	cmdScanReceiverWords(cmdCodeOutsideText(command, prose), 0, 0, false, -1, &words)
+	cmdScanReceiverWords(cmdCodeOutsideText(command, prose), 0, 0, false, -1, &words, nil)
 	for _, w := range words {
 		// An expansion command word can be any of them ($E 'grep() { bash; }'
 		// after E=eval, $'alias' grep=bash), and a PATH assignment changes
@@ -1362,7 +1393,7 @@ var cmdHeredocTextConsumers = map[string]bool{
 // holds it (git commit -m "$(cat <<EOF) is where the body goes, not an
 // expansion naming the outer program.
 func cmdLineReceiverWords(line string, op int, trust bool) []string {
-	words, _ := cmdScanReceiverWords(line, 0, 0, trust, op, nil)
+	words, _ := cmdScanReceiverWords(line, 0, 0, trust, op, nil, nil)
 	return words
 }
 
@@ -1373,7 +1404,19 @@ func cmdLineReceiverWords(line string, op int, trust bool) []string {
 // dropped, and the word after builtin or command, followed by
 // cmdUnknownReceiver when it is an expansion, and cmdPathAssignment for a
 // statement that assigns PATH (cmdRedefines).
-func cmdScanReceiverWords(line string, i int, closer byte, trust bool, op int, commandWords *[]string) (words []string, end int) {
+func cmdScanReceiverWords(line string, i int, closer byte, trust bool, op int, commandWords *[]string, lines *hookpaths.HeredocLines) (words []string, end int) {
+	if lines == nil {
+		// One finder for line and every substitution read in it (GAP-2557).
+		lines = &hookpaths.HeredocLines{}
+	}
+	end = cmdScanReceiverWordsInto(line, i, closer, trust, op, commandWords, lines, &words)
+	return words, end
+}
+
+// cmdScanReceiverWordsInto is cmdScanReceiverWords appending to words, which
+// the substitutions read in it share: copying the words of each nested
+// $( up a level was quadratic in the nesting (GAP-2557).
+func cmdScanReceiverWordsInto(line string, i int, closer byte, trust bool, op int, commandWords *[]string, lines *hookpaths.HeredocLines, words *[]string) int {
 	var stmt []string
 	var stmtExp []bool // stmtExp[k]: stmt[k] holds an expansion
 	var stmtOp []bool  // stmtOp[k]: stmt[k] is a substitution that holds op
@@ -1421,7 +1464,7 @@ func cmdScanReceiverWords(line string, i int, closer byte, trust bool, op int, c
 				}
 			}
 		}
-		words = append(words, cmdStatementReceiverWords(stmt, stmtExp, stmtOp, trust)...)
+		*words = append(*words, cmdStatementReceiverWords(stmt, stmtExp, stmtOp, trust)...)
 		stmt, stmtExp, stmtOp = stmt[:0], stmtExp[:0], stmtOp[:0]
 	}
 	// nested reads a command substitution: its statements are commands of
@@ -1430,8 +1473,7 @@ func cmdScanReceiverWords(line string, i int, closer byte, trust bool, op int, c
 	// ("$(grep -m1 bash /etc/shells)" <<EOF, checker it2). The outer word
 	// only gets a marker, so it never reads as a consumer name.
 	nested := func(j int, cl byte) int {
-		inner, e := cmdScanReceiverWords(line, j, cl, false, op, commandWords)
-		words = append(words, inner...)
+		e := cmdScanReceiverWordsInto(line, j, cl, false, op, commandWords, lines, words)
 		word.WriteString("$()")
 		inWord = true
 		// Its output is an expansion, unless it holds the here-document
@@ -1539,7 +1581,7 @@ func cmdScanReceiverWords(line string, i int, closer byte, trust bool, op int, c
 			if c == '\n' && len(docs) > 0 {
 				// The bodies start after this line; a body that does not
 				// end stays scanned (over-read).
-				if bodies, bodyEnd := cmdHeredocBodies(line, i+1, docs); len(bodies) == len(docs) {
+				if bodies, bodyEnd := cmdHeredocBodies(line, i+1, docs, lines); len(bodies) == len(docs) {
 					i = bodyEnd
 				}
 				docs = nil
@@ -1554,14 +1596,14 @@ func cmdScanReceiverWords(line string, i int, closer byte, trust bool, op int, c
 		case ')':
 			if closer == ')' && depth == 0 {
 				finish()
-				return words, i
+				return i
 			}
 			depth--
 			finish()
 		case '`':
 			if closer == '`' {
 				finish()
-				return words, i
+				return i
 			}
 			i = nested(i+1, '`')
 		default:
@@ -1572,7 +1614,7 @@ func cmdScanReceiverWords(line string, i int, closer byte, trust bool, op int, c
 		}
 	}
 	finish()
-	return words, len(line)
+	return len(line)
 }
 
 // cmdStatementCommand returns the index of the command word of stmt, past
@@ -1749,32 +1791,22 @@ func cmdTextConsumerStatement(args []string) bool {
 // the offset after the last one read. A delimiter line that is never found
 // ends the reading there: the rest stays scanned (over-block, never
 // under-block).
-func cmdHeredocBodies(command string, start int, docs []cmdHeredoc) (spans []cmdTextSpan, end int) {
+//
+// lines finds the delimiter lines; nil scans line by line, which costs the
+// text up to the delimiter (or the rest of the command when none comes).
+func cmdHeredocBodies(command string, start int, docs []cmdHeredoc, lines *hookpaths.HeredocLines) (spans []cmdTextSpan, end int) {
 	pos := start
 	end = start
 	for _, doc := range docs {
 		bodyStart := pos
-		found := false
-		for pos < len(command) && !found {
-			lineEnd := len(command)
-			if k := strings.IndexByte(command[pos:], '\n'); k >= 0 {
-				lineEnd = pos + k
-			}
-			line := strings.TrimSuffix(command[pos:lineEnd], "\r")
-			if doc.stripTabs {
-				line = strings.TrimLeft(line, "\t")
-			}
-			if line == doc.delim {
-				found = true
-				spans = append(spans, cmdTextSpan{start: bodyStart, end: lineEnd, inner: command[bodyStart:pos],
-					expands: !doc.quoted, heredoc: true, runs: doc.runs, cmdFeed: doc.cmdFeed})
-				end = lineEnd
-			}
-			pos = lineEnd + 1
-		}
+		lineStart, lineEnd, found := lines.Next(command, doc.delim, doc.stripTabs, pos)
 		if !found {
 			break
 		}
+		spans = append(spans, cmdTextSpan{start: bodyStart, end: lineEnd, inner: command[bodyStart:lineStart],
+			expands: !doc.quoted, heredoc: true, runs: doc.runs, cmdFeed: doc.cmdFeed})
+		end = lineEnd
+		pos = lineEnd + 1
 	}
 	return spans, end
 }
@@ -1818,6 +1850,8 @@ func cmdTextSpansRead(command string, reading cmdOuterReading, trust bool) (span
 	// nestBudget bounds the nested $(...) reading of double-quoted words
 	// (linear in the command, RV10-3).
 	nestBudget := 8*len(command) + 1<<16
+	// lines finds the delimiter lines of the bodies in linear time (GAP-2557).
+	lines := &hookpaths.HeredocLines{}
 	// stopParsing is the end of a PowerShell --% tail: verbatim text.
 	stopParsing := -1
 	commentSeparators := " \t\r\n;|&()<>"
@@ -1867,7 +1901,7 @@ func cmdTextSpansRead(command string, reading cmdOuterReading, trust bool) (span
 	var awaiting []awaitingDoc
 	compound, physStart, skipNL := 0, 0, -1
 	awaitLine := func(text string) {
-		if len(awaiting) == 0 {
+		if len(awaiting) == 0 || !cmdLineHasWord(text) {
 			return
 		}
 		_, closes := shape(text)
@@ -1994,10 +2028,15 @@ func cmdTextSpansRead(command string, reading cmdOuterReading, trust bool) (span
 					doc := &pending[k]
 					doc.runs, doc.cmdFeed = feeds(command[doc.lineStart:i], doc.op-doc.lineStart)
 				}
-				bodies, end := cmdHeredocBodies(command, i+1, pending)
+				bodies, end := cmdHeredocBodies(command, i+1, pending, lines)
+				// The pending docs share one logical line: read it once
+				// (cmdLineContinues is linear in the line).
+				readFrom, continues := -1, false
 				for k := range bodies {
-					awaiting = append(awaiting, awaitingDoc{span: len(spans) + k,
-						reading: cmdLineContinues(command[pending[k].lineStart:i])})
+					if pending[k].lineStart != readFrom {
+						readFrom, continues = pending[k].lineStart, cmdLineContinues(command[pending[k].lineStart:i])
+					}
+					awaiting = append(awaiting, awaitingDoc{span: len(spans) + k, reading: continues})
 				}
 				pending = nil
 				if len(bodies) > 0 {

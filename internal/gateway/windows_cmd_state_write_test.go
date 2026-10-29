@@ -5,6 +5,7 @@ package gateway
 
 import (
 	"encoding/json"
+	"fmt"
 	"slices"
 	"strconv"
 	"strings"
@@ -309,6 +310,80 @@ func TestR105WindowsCMDHeredocReceiverReadIsLinear(t *testing.T) {
 	}
 }
 
+// TestR105WindowsCMDHeredocDelimiterSearchIsLinear: finding the delimiter
+// lines of many here-documents stays linear in the command when the code
+// read for redefinitions has the bodies blanked, or a delimiter never comes
+// (GAP-2557: 1 MiB of { cat <<A .. } | state write took ~60 s). The time
+// for 256 KB must stay near 16x the best time for 16 KB (quadratic is
+// 256x), and the decision is the same at both sizes.
+func TestR105WindowsCMDHeredocDelimiterSearchIsLinear(t *testing.T) {
+	const connectorName = "r105-cmd-heredoc-delim-linear"
+	installToolCallCorpusProfileConnector(t, connectorName, "default")
+	const home = `C:\Users\Alice`
+	resolved := map[string]string{}
+	for _, value := range []string{"C:/Users/Alice/.defenseclaw", "C:/Users/Alice/.defenseclaw/config.yaml"} {
+		resolved[value] = value
+	}
+	const write = "cmd /c type nul > %USERPROFILE%\\.defenseclaw\\config.yaml"
+	decide := func(command string, runs int) (bool, time.Duration) {
+		args, _ := json.Marshal(map[string]string{"command": command})
+		input := actionfacts.Input{Tool: "Bash", Args: args, CWD: home + `\project`, ActiveHome: home}
+		input.DialectHint = agentHookWindowsShellDialect(input)
+		best := time.Duration(-1)
+		block := false
+		for range runs {
+			start := time.Now()
+			findings := dispatchTrustedAction(t.Context(), trustedActionRequest{
+				Input: input, LegacyText: string(args), Connector: connectorName,
+				EnforcementCapable: true, ResolvedWriteTargets: resolved,
+			})
+			if took := time.Since(start); best < 0 || took < best {
+				best = took
+			}
+			block = buildVerdict(findings, "tool_call").Action == "block"
+		}
+		return block, best
+	}
+	distinct := func(size int) string {
+		var b strings.Builder
+		for k := 0; b.Len() < size; k++ {
+			fmt.Fprintf(&b, "cat <<'A%d'\n", k)
+		}
+		return b.String()
+	}
+	for _, tc := range []struct {
+		name  string
+		build func(size int) string
+		block bool
+	}{
+		{"brace docs, state write", func(size int) string {
+			return "{\n" + strings.Repeat("cat <<'A'\nx\nA\n", size/14) + "} | " + write
+		}, true},
+		{"brace docs, benign", func(size int) string {
+			return "{\n" + strings.Repeat("cat <<'A'\nx\nA\n", size/14) + "} | grep -c x\ngit status"
+		}, false},
+		{"unterminated docs, state write", func(size int) string {
+			return strings.Repeat("cat <<'A'\n", size/10) + write
+		}, true},
+		{"unterminated distinct docs, state write", func(size int) string {
+			return distinct(size) + write
+		}, true},
+		{"unterminated substitution docs, state write", func(size int) string {
+			return strings.Repeat("x=$(cat <<'A'\n", size/14) + write
+		}, true},
+	} {
+		smallBlock, small := decide(tc.build(16<<10), 3)
+		bigBlock, big := decide(tc.build(256<<10), 1)
+		t.Logf("%s: 16 KB %s, 256 KB %s", tc.name, small, big)
+		if smallBlock != tc.block || bigBlock != tc.block {
+			t.Errorf("%s: block %t at 16 KB, %t at 256 KB, want %t", tc.name, smallBlock, bigBlock, tc.block)
+		}
+		if big > 48*small+200*time.Millisecond {
+			t.Errorf("%s: 16 KB in %s, 256 KB in %s (not linear)", tc.name, small, big)
+		}
+	}
+}
+
 // TestR105WindowsCMDMentionsAndManyCalls: text that only mentions a cmd.exe
 // state write in a Git Bash here-document body stays allowed, as does an
 // ordinary command with many cmd calls and a DefenseClaw state read; a
@@ -571,6 +646,18 @@ func TestR105WindowsCMDHeredocSearchArgument(t *testing.T) {
 		{"( cat <<'EOF'" + body + "\n) > notes.md", false},
 		{"if true; then\n  cat > notes.md <<'EOF'" + body + "\n  bash build.sh\nfi", false},
 		{"cat > notes.md <<'EOF'" + body + "\nbash build.sh", false},
+		// GAP-2547 checker it7: bash reads a pipe or list on across blank
+		// and comment-only lines (X03, X04), and a comment may follow the
+		// operator; a blank line before a separate statement keeps it text.
+		{"cat <<'EOF' |" + run + "\n\nbash", true},
+		{"cat <<'EOF' |" + run + "\n# then\nbash", true},
+		{"cat <<'EOF' |" + run + "\n  \r\n\t# then\r\n\nbash", true},
+		{"cat <<'EOF' | # pipe it on" + run + "\nbash", true},
+		{"cat <<'EOF' |" + run + "\ngrep -v x | # keep going\n\nbash", true},
+		{"cat > notes.md <<'EOF'" + body + "\n\nbash build.sh", false},
+		{"cat > notes.md <<'EOF'" + body + "\n# build\nbash build.sh", false},
+		{"cat <<'EOF' | # count" + body + "\n\n# the matches\ngrep -c cmd", false},
+		{"echo \"a | #b\" > notes.md\nbash build.sh", false},
 	} {
 		for _, tool := range []string{"Bash", "shell_command", "PowerShell"} {
 			args, _ := json.Marshal(map[string]string{"command": tc.command})
