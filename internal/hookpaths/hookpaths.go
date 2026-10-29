@@ -1506,7 +1506,10 @@ var (
 )
 
 // linkAlias is a name that a link created by the command gives to target.
-type linkAlias struct{ name, target string }
+// text is the target a relative symbolic link stores, read from the link
+// directory, so a move of the link names another target; it is empty when
+// the target does not depend on where the link sits.
+type linkAlias struct{ name, target, text string }
 
 // shellLinks are the links one shell command creates. known is false when
 // link names or operands are dynamic or an archive can extract links. opaque
@@ -1525,6 +1528,10 @@ type shellLinks struct {
 	// literal shell body carries them out to its own links (GAP-2526).
 	renames, cds bool
 	copyScopes   []string
+	// renameOps are the static mv calls; wrappedCds is a directory change
+	// that only a wrapper or a nested shell runs (GAP-2532, GAP-2533).
+	renameOps  []renameOp
+	wrappedCds bool
 }
 
 // merge adds the links a nested literal shell body makes.
@@ -1665,6 +1672,13 @@ func writePathForms(path string, linkDepth int) ([]string, bool) {
 }
 
 func commandLinksWithFacts(command, cwd, home string, facts map[string]string, record bool) shellLinks {
+	return commandLinks(command, cwd, home, facts, record, false)
+}
+
+// commandLinks reads the links of command. A nested literal shell body
+// returns its facts without the end checks: its caller runs them once
+// over its own links and the body links together.
+func commandLinks(command, cwd, home string, facts map[string]string, record, nested bool) shellLinks {
 	links := shellLinks{known: true}
 	file, parsed := parseShell(command)
 	if !parsed {
@@ -1681,8 +1695,9 @@ func commandLinksWithFacts(command, cwd, home string, facts map[string]string, r
 	linkCall, linkCWD := staticChangedDirectoryLink(file, cwd, home)
 	linkDirs, linkDirsKnown := topLevelLinkDirectories(file, cwd, home)
 	env := expand.ListEnviron("HOME=" + strings.TrimRight(home, "/"))
-	renames, cds := false, false
+	renames, cds, wrappedCds := false, false, false
 	var copyScopes []string
+	var renameOps []renameOp
 	boundPrograms := actionBoundProgramWords(file, home)
 	// A literal shell -c body is read in this directory only when nothing in
 	// the command changes directory first.
@@ -1797,7 +1812,17 @@ func commandLinksWithFacts(command, cwd, home string, facts map[string]string, r
 				links.unknownIn(destination)
 			}
 		case slices.Contains(renamePrograms, program):
-			renames = true
+			// A static mv is followed; rename (a pattern) and a dynamic
+			// word are not read (GAP-2532).
+			op, read := renameOp{}, false
+			if program != "rename" && !slices.Contains(static, false) {
+				op, read = parseRename(words[1:], cwd)
+			}
+			if read {
+				renameOps = append(renameOps, op)
+			} else {
+				renames = true
+			}
 		case slices.Contains(cdPrograms, program):
 			cds = true
 		case !changesDirectory && literalShellBody(program, words, static) != "":
@@ -1808,11 +1833,13 @@ func commandLinksWithFacts(command, cwd, home string, facts map[string]string, r
 			// Renames and link-copying archives in the body also act on
 			// links made outside it (a top-level link renamed by sh -c
 			// "mv c d"), so they count as facts of this command too.
-			inner := commandLinksWithFacts(literalShellBody(program, words, static), cwd, home, facts, record)
+			inner := commandLinks(literalShellBody(program, words, static), cwd, home, facts, record, true)
 			links.merge(inner)
 			renames = renames || inner.renames
 			cds = cds || inner.cds
+			wrappedCds = wrappedCds || inner.wrappedCds
 			copyScopes = append(copyScopes, inner.copyScopes...)
+			renameOps = append(renameOps, inner.renameOps...)
 		default:
 			// A wrapper (sudo, env, xargs, find -exec, sh -c) may run one.
 			text := command[start.Offset():call.End().Offset()]
@@ -1829,17 +1856,52 @@ func commandLinksWithFacts(command, cwd, home string, facts map[string]string, r
 				}
 			}
 			renames = renames || tactics.RunsProgram(text, renamePrograms...)
-			cds = cds || tactics.RunsProgram(text, cdPrograms...)
+			if tactics.RunsProgram(text, cdPrograms...) {
+				cds, wrappedCds = true, true
+			}
+			// find -exec runs its child argv, which the wrapper reading
+			// above does not see (GAP-2533).
+			for _, child := range findExecCommands(command, program, args, words, static) {
+				if tactics.RunsProgram(child, linkPrograms...) {
+					links.unknown(true)
+				}
+				renames = renames || tactics.RunsProgram(child, renamePrograms...)
+				if tactics.RunsProgram(child, cdPrograms...) {
+					cds, wrappedCds = true, true
+				}
+			}
 		}
 		return true
 	})
+	if nested {
+		links.renames, links.cds, links.copyScopes = renames, cds, copyScopes
+		links.renameOps, links.wrappedCds = renameOps, wrappedCds
+		return links
+	}
 	if len(links.aliases) > 0 {
 		for _, scope := range copyScopes {
 			links.unknownCopyIn(scope)
 		}
 	}
-	if len(links.aliases) > 0 && (renames || cds && links.relative && linkCall == nil && !linkDirsKnown) {
-		links.unknown(true)
+	if len(links.aliases) > 0 {
+		// A rename keeps the links known only when every rename is a
+		// static mv read in the starting directory and every link is an
+		// ordinary project link (GAP-2532). A directory change that only a
+		// nested shell or a wrapper runs is not placed by the statement
+		// walk, so it needs the same project links (GAP-2533).
+		stable := true
+		switch {
+		case renames || len(renameOps) > 0 && cds:
+			stable = false
+		case len(renameOps) > 0:
+			stable = links.followRenames(renameOps) && links.aliasesInProject(cwd, home)
+		}
+		if stable && wrappedCds {
+			stable = links.aliasesInProject(cwd, home)
+		}
+		if !stable || cds && links.relative && linkCall == nil && !linkDirsKnown {
+			links.unknown(true)
+		}
 	}
 	// Scopes are read against the starting directory; after a directory
 	// change a relative write may land in a scope under another name.
@@ -1847,6 +1909,7 @@ func commandLinksWithFacts(command, cwd, home string, facts map[string]string, r
 		links.globalOpaque = true
 	}
 	links.renames, links.cds, links.copyScopes = renames, cds, copyScopes
+	links.renameOps, links.wrappedCds = renameOps, wrappedCds
 	return links
 }
 
@@ -3387,7 +3450,7 @@ func (l *shellLinks) add(program string, args []string, cwd string) bool {
 		if len(args) != 2 || strings.HasPrefix(args[0], "-") {
 			return false
 		}
-		l.record(args[0], args[1], false, cwd)
+		l.record(args[0], args[1], false, false, cwd)
 		return true
 	}
 	if slices.Contains(copyPrograms, program) {
@@ -3406,10 +3469,10 @@ func (l *shellLinks) add(program string, args []string, cwd string) bool {
 		literal := parsed.symbolic
 		for _, source := range parsed.sources {
 			if len(parsed.sources) == 1 && !parsed.targetDir {
-				l.record(source, dest, literal, cwd)
+				l.record(source, dest, literal, literal, cwd)
 			}
 			if dir != "" {
-				l.record(source, filepath.Join(dir, filepath.Base(filepath.Clean(source))), literal, cwd)
+				l.record(source, filepath.Join(dir, filepath.Base(filepath.Clean(source))), literal, literal, cwd)
 			}
 		}
 		return true
@@ -3495,10 +3558,10 @@ func (l *shellLinks) add(program string, args []string, cwd string) bool {
 	literal := symbolic && !relative
 	for _, source := range sources {
 		if dest != "" {
-			l.record(source, dest, literal, cwd)
+			l.record(source, dest, literal, symbolic, cwd)
 		}
 		if dir != "" {
-			l.record(source, filepath.Join(dir, filepath.Base(filepath.Clean(source))), literal, cwd)
+			l.record(source, filepath.Join(dir, filepath.Base(filepath.Clean(source))), literal, symbolic, cwd)
 		}
 	}
 	return true
@@ -3506,7 +3569,9 @@ func (l *shellLinks) add(program string, args []string, cwd string) bool {
 
 // record adds the alias that a link at name to source creates, under the
 // literal name and the name with its directory's existing links resolved.
-func (l *shellLinks) record(source, name string, literal bool, cwd string) {
+//
+// symbolic marks a symbolic link, whose relative target moves with it.
+func (l *shellLinks) record(source, name string, literal, symbolic bool, cwd string) {
 	if source == "" || name == "" {
 		return
 	}
@@ -3520,10 +3585,22 @@ func (l *shellLinks) record(source, name string, literal bool, cwd string) {
 		}
 		target = base + string(filepath.Separator) + target
 	}
-	l.aliases = append(l.aliases, linkAlias{name: name, target: target})
+	text := ""
+	switch {
+	case symbolic && literal && !filepath.IsAbs(source):
+		text = source
+	case symbolic && !literal:
+		// ln -r stores the target relative to the link directory; a path
+		// it cannot relate keeps a .. step, so a moved link stays opaque.
+		text = ".."
+		if relative, err := filepath.Rel(filepath.Dir(name), filepath.Clean(target)); err == nil {
+			text = relative
+		}
+	}
+	l.aliases = append(l.aliases, linkAlias{name: name, target: target, text: text})
 	if dir, ok := resolveWritePath(filepath.Dir(name), 0); ok {
 		if resolved := filepath.Join(dir, filepath.Base(name)); resolved != name {
-			l.aliases = append(l.aliases, linkAlias{name: resolved, target: target})
+			l.aliases = append(l.aliases, linkAlias{name: resolved, target: target, text: text})
 		}
 	}
 }
