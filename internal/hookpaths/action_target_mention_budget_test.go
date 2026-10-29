@@ -75,3 +75,73 @@ func TestLongHeredocResolvesEachDistinctWordOnce(t *testing.T) {
 		t.Fatal("repeated authorized_keys target was not found")
 	}
 }
+
+// GAP-2279 on Windows: the Windows target scan (a Windows home) checked
+// every word of a long heredoc again, and on Windows each check is a chain
+// of file-system calls (about 1 ms), so a benign 100 KB body cost 21 s and
+// a 450 KB body 94 s in the gateway. Each distinct candidate is now checked
+// once per scan and directory; a repeated protected word still decides it.
+func TestLongWindowsHeredocChecksEachDistinctCandidateOnce(t *testing.T) {
+	const home = `C:\Users\Alice`
+	const cwd = home + `\project`
+	const lines = 2000
+	var body strings.Builder
+	body.WriteString("cat > /tmp/notes.sh <<EOF2\n")
+	for range lines {
+		body.WriteString("echo line benign filler for heredoc payload size\n")
+	}
+	body.WriteString("EOF2\n")
+	benign := body.String()
+
+	before := actionWindowsCandidateChecks.Load()
+	if ActionStateTargetMention(benign, cwd, home) {
+		t.Fatal("benign heredoc named active state")
+	}
+	if actionProtectedTargetMentionDepth(benign, cwd, home, 0, false, nil) {
+		t.Fatal("benign heredoc named a protected key")
+	}
+	// About ten distinct words: a few dozen checks, not several per word
+	// occurrence (was more than 30,000).
+	if checks := actionWindowsCandidateChecks.Load() - before; checks > 200 {
+		t.Fatalf("%d candidate checks for %d repeated lines; want each distinct candidate checked once", checks, lines)
+	}
+
+	const state = home + `\.defenseclaw\config.yaml`
+	protected := strings.Replace(benign, "echo line benign filler for heredoc payload size\n", "echo "+state+"\n", 3)
+	if !ActionStateTargetMention(protected, cwd, home) {
+		t.Fatal("repeated active-state target was not found")
+	}
+	keys := strings.Replace(benign, "echo line benign filler for heredoc payload size\n", "echo ok >> "+home+`\.ssh\authorized_keys`+"\n", 3)
+	if !actionProtectedTargetMentionDepth(keys, cwd, home, 0, false, nil) {
+		t.Fatal("repeated authorized_keys target was not found")
+	}
+}
+
+// GAP-2279 on Windows: the private-key read scan of a Windows command the
+// word splitter cannot structure (a Bash heredoc read through cat) checked
+// every word of the body as a read operand, each a chain of file-system
+// calls on Windows. Each distinct operand is now checked once per
+// statement; a protected key read still decides it.
+func TestLongWindowsCatOperandsCheckEachDistinctOperandOnce(t *testing.T) {
+	const home = `C:\Users\alice`
+	const cwd = home + `\project`
+	const lines = 2000
+	var body strings.Builder
+	body.WriteString("cat /tmp/notes.sh <<EOF2\n")
+	for range lines {
+		body.WriteString("echo line benign filler for heredoc payload size\n")
+	}
+	body.WriteString("EOF2\n")
+	benign := body.String()
+	before := actionPrivateReadChecks.Load()
+	if ActionPrivateKeyRead(benign, cwd, home) {
+		t.Fatal("benign heredoc read a private key")
+	}
+	if checks := actionPrivateReadChecks.Load() - before; checks > 100 {
+		t.Fatalf("%d operand checks for %d repeated lines; want each distinct operand checked once", checks, lines)
+	}
+	keyRead := strings.Replace(benign, "echo line benign filler for heredoc payload size\n", `%USERPROFILE%\.ssh\id_ed25519`+"\n", 3)
+	if !ActionPrivateKeyRead(keyRead, cwd, home) {
+		t.Fatal("repeated private key operand was not found")
+	}
+}

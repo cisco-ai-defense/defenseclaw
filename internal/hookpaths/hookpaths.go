@@ -22,6 +22,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
 	"github.com/defenseclaw/defenseclaw/internal/copilotargs"
+	"github.com/defenseclaw/defenseclaw/internal/rxprefilter"
 	"github.com/defenseclaw/defenseclaw/internal/sensor/tactics"
 	"github.com/defenseclaw/defenseclaw/internal/shellparse"
 	"mvdan.cc/sh/v3/expand"
@@ -1943,7 +1944,8 @@ var dataPrograms = []string{"echo", "printf", "grep", "egrep", "fgrep", "rg", "a
 // interpreter may read the text from an argument, a here-document, a pipe or
 // a file the command writes, under any name or wrapper.
 func opaqueLinkText(file *syntax.File, command, home string) bool {
-	if !opaqueLink.MatchString(command) {
+	// Skip the automaton over a long command without its literals (GAP-2279).
+	if !rxprefilter.MayMatch(opaqueLink, command) || !opaqueLink.MatchString(command) {
 		return false
 	}
 	for _, stmt := range file.Stmts {

@@ -2867,11 +2867,17 @@ func actionWindowsWordMentionsTarget(word, cwd, home string, stateOnly bool) boo
 	return actionWindowsWordNamesTarget(word, cwd, home, stateOnly, true)
 }
 
+// actionWindowsCandidateChecks counts the candidate checks of Windows target
+// scans, so a test can prove a long command checks each distinct candidate
+// once (GAP-2279).
+var actionWindowsCandidateChecks atomic.Int64
+
 // actionWindowsWordNamesTarget reports a protected-named word; sshDirectory
 // also counts the bare .ssh directory.
 func actionWindowsWordNamesTarget(word, cwd, home string, stateOnly, sshDirectory bool) bool {
 	var check func(candidate string) bool
 	check = func(candidate string) bool {
+		actionWindowsCandidateChecks.Add(1)
 		candidate = strings.ReplaceAll(candidate, "`", "")
 		if strings.ContainsAny(candidate, "\r\n") {
 			// A word of several lines (a here-string body, such as the
