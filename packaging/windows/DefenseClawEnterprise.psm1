@@ -6174,9 +6174,6 @@ function Enter-DefenseClawLifecycleLock {
 # holds bundle.lock waits for lifecycle.lock, which the uninstall holds: such
 # a run gives up (1618) and releases bundle.lock before this wait ends.
 $script:DefenseClawBundleStoreLockWaitSeconds = 45
-# The bundle.lock handle an uninstall holds; set before any caller reads it
-# under strict mode (the forced uninstall preparation releases it, GAP-2506).
-$script:DefenseClawPurgeBundleLock = $null
 
 function Enter-DefenseClawBundleStoreLock {
     <#
