@@ -55,9 +55,15 @@ const (
 // guardian resolves; every fact comes from the account database and the
 // guardian's own stat of the home. Tests replace it.
 //
-// The account lookups run again only when the homes file changes or once
-// per enterpriseHookIdentitySpoolInterval; each tick only stats the homes,
-// so a recreated home still changes the key at the next tick. A uid the
+// The account lookups run again only when the homes file or the local
+// account database (enterpriseHookLocalAccountsStamp) changes, or once per
+// enterpriseHookIdentitySpoolInterval; each tick only stats the homes, so a
+// recreated home still changes the key at the next tick. The gateway does
+// not rewrite the homes file when a served account is deleted, so without
+// the account database stamp a deleted local account stayed listed from the
+// cache until the interval: every pass failed its lookup, the failed pass
+// kept its record, and status and verify warned directory_lookups_failing
+// (GAP-1864, RHEL leg). A uid the
 // lookup budget did not reach, or whose lookup or home stat failed this
 // time, keeps its last answer, so the spool fingerprint does not flap on a
 // host with many served accounts (GAP-1866).
@@ -71,17 +77,18 @@ var enterpriseHookGatewayPeerAccounts = func(dataDir string) []enterpriseHookPee
 		enterpriseHookPeerListing.reset()
 		return nil
 	}
+	stamp := enterpriseHookLocalAccountsStamp()
 	l := &enterpriseHookPeerListing
 	l.Lock()
 	defer l.Unlock()
-	if l.path != path || l.size != info.Size() || !l.mtime.Equal(info.ModTime()) ||
+	if l.path != path || l.size != info.Size() || !l.mtime.Equal(info.ModTime()) || l.stamp != stamp ||
 		time.Since(l.at) >= enterpriseHookIdentitySpoolInterval || time.Since(l.at) < 0 {
 		last := l.accounts
 		if l.path != path {
 			last = nil
 		}
 		l.accounts = enterpriseHookResolveGatewayPeers(path, last)
-		l.path, l.size, l.mtime, l.at = path, info.Size(), info.ModTime(), time.Now()
+		l.path, l.size, l.mtime, l.stamp, l.at = path, info.Size(), info.ModTime(), stamp, time.Now()
 	}
 	uids := make([]int, 0, len(l.accounts))
 	for uid := range l.accounts {
@@ -109,6 +116,7 @@ type enterpriseHookPeerCache struct {
 	path     string
 	size     int64
 	mtime    time.Time
+	stamp    string
 	at       time.Time
 	accounts map[int]enterpriseHookCachedPeer
 }
