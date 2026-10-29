@@ -16,20 +16,31 @@ func TestGAP2400LiteralIndirectPrivateKeyReadersReachGateway(t *testing.T) {
 	ctx := withManagedHookPeer(context.Background(), managedHookPeer{Home: home})
 	glob := "~/.ssh/" + "id_*"
 	for _, tc := range []struct {
-		name, command string
-		blocked       bool
+		name, tool, command string
+		blocked             bool
 	}{
-		{"pipeline into PowerShell reader", "Get-ChildItem " + glob + " | Get-Content", true},
-		{"pipeline into POSIX reader", "ls " + glob + " | xargs cat", true},
-		{"literal variable into reader", "$p = ~/.ssh/" + "id_ed25519; Get-Content $p", true},
-		{"project pipeline into reader", "Get-ChildItem ~/project/notes* | Get-Content", false},
-		{"directory listing", "Get-ChildItem ~/.ssh", false},
+		{"pipeline into PowerShell reader", "PowerShell", "Get-ChildItem " + glob + " | Get-Content", true},
+		{"pipeline into POSIX reader", "Bash", "ls " + glob + " | xargs cat", true},
+		{"literal variable into reader", "PowerShell", "$p = ~/.ssh/" + "id_ed25519; Get-Content $p", true},
+		{"M02 trailing gc", "PowerShell", "gci " + glob + " | gc", true},
+		{"M18 assigned type", "PowerShell", `$k = "$HOME\.ssh\` + "id_ed25519" + `"; type $k`, true},
+		{"M20 xargs head", "Bash", "ls $HOME/.ssh/" + "id_* | xargs head", true},
+		{"Raw parameter", "PowerShell", "Get-ChildItem " + glob + " | Get-Content -Raw", true},
+		{"Encoding parameter", "PowerShell", "gci " + glob + " | gc -Encoding utf8", true},
+		{"B26 bare cat in Bash", "Bash", "ls " + glob + " | cat", false},
+		{"B26 PowerShell alias", "PowerShell", "ls " + glob + " | cat", true},
+		{"explicit project path with Raw", "PowerShell", "Get-ChildItem " + glob + " | Get-Content -Raw -Path ~/project/notes.txt", false},
+		{"bare head", "Bash", "ls " + glob + " | head", false},
+		{"bare tail", "Bash", "ls " + glob + " | tail", false},
+		{"bare base64", "Bash", "ls " + glob + " | base64", false},
+		{"project pipeline into reader", "PowerShell", "Get-ChildItem ~/project/notes* | Get-Content", false},
+		{"directory listing", "PowerShell", "Get-ChildItem ~/.ssh", false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			resp := api.evaluateClaudeCodeHook(ctx, claudeCodeHookRequest{
 				HookEventName: "PreToolUse", SessionID: "gap2400-static-reader", CWD: cwd,
-				ToolName: "PowerShell", ToolInput: map[string]interface{}{"command": tc.command},
-				Payload: map[string]interface{}{"tool_name": "PowerShell"},
+				ToolName: tc.tool, ToolInput: map[string]interface{}{"command": tc.command},
+				Payload: map[string]interface{}{"tool_name": tc.tool},
 			})
 			got := resp.Action == "block" && strings.Contains(strings.Join(resp.Findings, ","), "PATH-SSH-KEY:")
 			if got != tc.blocked {

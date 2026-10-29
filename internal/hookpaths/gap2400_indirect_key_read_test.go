@@ -3,7 +3,50 @@
 
 package hookpaths
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
+)
+
+func TestGAP2400BarePipelineReaderDialect(t *testing.T) {
+	home, cwd := `C:\Users\u`, `C:\Users\u\project`
+	glob := "~/.ssh/" + "id_*"
+	for _, tc := range []struct {
+		name, consumer    string
+		powershell, posix bool
+	}{
+		{"B26 cat", "cat", true, false},
+		{"type", "type", true, false},
+		{"head", "head", false, false},
+		{"tail", "tail", false, false},
+		{"base64", "base64", false, false},
+		{"Get-Content Raw", "Get-Content -Raw", true, true},
+	} {
+		command := "ls " + glob + " | " + tc.consumer
+		for _, shell := range []struct {
+			name    string
+			dialect actionfacts.Dialect
+			want    bool
+		}{
+			{"powershell", actionfacts.DialectPowerShell, tc.powershell},
+			{"bash", actionfacts.DialectPOSIX, tc.posix},
+		} {
+			t.Run(tc.name+"/"+shell.name, func(t *testing.T) {
+				if got := ActionPrivateKeyReadWithDialect(command, cwd, home, shell.dialect); got != shell.want {
+					t.Errorf("ActionPrivateKeyReadWithDialect(%q, %q) = %t, want %t", command, shell.dialect, got, shell.want)
+				}
+			})
+		}
+	}
+}
+
+func TestGAP2400PowerShellTypeOnPOSIXHome(t *testing.T) {
+	command := `$k = "$HOME\.ssh\` + "id_ed25519" + `"; type $k`
+	if !ActionPrivateKeyReadWithDialect(command, "/home/u/project", "/home/u", actionfacts.DialectPowerShell) {
+		t.Errorf("PowerShell type did not read assigned private key path: %q", command)
+	}
+}
 
 func TestGAP2400LiteralPrivateKeyReadBindings(t *testing.T) {
 	for _, env := range []struct{ name, home, cwd string }{
@@ -13,11 +56,22 @@ func TestGAP2400LiteralPrivateKeyReadBindings(t *testing.T) {
 		key := "~/.ssh/" + "id_ed25519"
 		glob := "~/.ssh/" + "id_*"
 		project := "~/project/" + "notes*"
+		posix := env.name == "posix"
 		for _, tc := range []struct {
 			name, command string
 			want          bool
 		}{
 			{"powershell glob piped to content reader", "Get-ChildItem " + glob + " | Get-Content", true},
+			{"M02 trailing gc", "gci " + glob + " | gc", true},
+			{"M18 variable then type", "$k = \"$HOME\\.ssh\\" + "id_ed25519\"; type $k", !posix},
+			{"M20 xargs head", "ls $HOME/.ssh/" + "id_* | xargs head", true},
+			{"Get-Content Raw pipeline", "Get-ChildItem " + glob + " | Get-Content -Raw", true},
+			{"gc encoding pipeline", "gci " + glob + " | gc -Encoding utf8", true},
+			{"explicit project path with Raw", "Get-ChildItem " + glob + " | Get-Content -Raw -Path ~/project/notes.txt", false},
+			{"B26 POSIX listing piped to cat", "ls " + glob + " | cat", !posix},
+			{"bare head receives listing text", "ls " + glob + " | head", false},
+			{"bare tail receives listing text", "ls " + glob + " | tail", false},
+			{"bare base64 receives listing text", "ls " + glob + " | base64", false},
 			{"powershell glob piped to foreach reader", "Get-ChildItem " + glob + " | ForEach-Object { Get-Content $_ }", true},
 			{"powershell foreach variable bound to glob", "foreach ($f in Get-ChildItem " + glob + ") { Get-Content $f }", true},
 			{"powershell literal assignment used by reader", "$p = " + key + "; Get-Content $p", true},

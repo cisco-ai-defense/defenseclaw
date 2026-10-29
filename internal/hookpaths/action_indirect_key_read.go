@@ -6,13 +6,15 @@ package hookpaths
 import (
 	"path"
 	"strings"
+
+	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
 )
 
 // actionLiteralIndirectPrivateKeyRead binds only paths written in this command.
 // A producer's literal path can reach a pipe reader, and a literal assignment
 // or Join-Path can reach a later reader. Evaluated or decoded command text is
 // deliberately outside this proof.
-func actionLiteralIndirectPrivateKeyRead(command, cwd, home string) bool {
+func actionLiteralIndirectPrivateKeyRead(command, cwd, home string, dialect actionfacts.Dialect) bool {
 	if len(command) > MaxPayloadBytes || strings.Contains(command, "<<") {
 		return false
 	}
@@ -22,7 +24,9 @@ func actionLiteralIndirectPrivateKeyRead(command, cwd, home string) bool {
 		return false
 	}
 	if !strings.Contains(lower, "cat") && !strings.Contains(lower, "content") &&
-		!strings.Contains(lower, "gc ") && !strings.Contains(lower, "new-psdrive") {
+		!strings.Contains(lower, "gc") && !strings.Contains(lower, "type") &&
+		!strings.Contains(lower, "head") && !strings.Contains(lower, "tail") &&
+		!strings.Contains(lower, "base64") && !strings.Contains(lower, "new-psdrive") {
 		return false
 	}
 	mode := keyReadMode(0)
@@ -69,8 +73,11 @@ func actionLiteralIndirectPrivateKeyRead(command, cwd, home string) bool {
 						if value, ok := actionIndirectValue([]string{word}, values, cwd, home); ok {
 							words[i] = value
 						}
+						if dialect == actionfacts.DialectPowerShell && mode&keyReadWindows == 0 {
+							words[i] = strings.ReplaceAll(words[i], `\`, "/")
+						}
 					}
-					if previousPipe && producer != "" && actionIndirectConsumerReads(words, producer, cwd, home, mode) {
+					if previousPipe && producer != "" && actionIndirectConsumerReads(words, producer, cwd, home, mode, dialect) {
 						return true
 					}
 					if actionPrivateKeyReadWords(actionWindowsReaderWords(words), cwd, home, mode, 0) {
@@ -221,7 +228,10 @@ func actionIndirectProducer(words []string, cwd, home string) string {
 	return ""
 }
 
-func actionIndirectConsumerReads(words []string, source, cwd, home string, mode keyReadMode) bool {
+func actionIndirectConsumerReads(words []string, source, cwd, home string, mode keyReadMode, dialect actionfacts.Dialect) bool {
+	if dialect == actionfacts.DialectPowerShell && mode&keyReadWindows == 0 {
+		source = strings.ReplaceAll(source, `\`, "/")
+	}
 	if !actionPrivateKeyReadWords([]string{"cat", source}, cwd, home, mode, 0) {
 		return false
 	}
@@ -229,8 +239,10 @@ func actionIndirectConsumerReads(words []string, source, cwd, home string, mode 
 		return false
 	}
 	switch programBase(words[0]) {
-	case "get-content", "gc", "cat", "head", "tail", "type", "base64":
-		return len(words) == 1
+	case "get-content", "gc":
+		return actionIndirectBarePSReader(words)
+	case "cat", "type":
+		return dialect == actionfacts.DialectPowerShell && actionIndirectBarePSReader(words)
 	case "xargs":
 		for _, word := range words[1:] {
 			if strings.HasPrefix(word, "-") || word == "1" {
@@ -247,6 +259,24 @@ func actionIndirectConsumerReads(words []string, source, cwd, home string, mode 
 		}
 	}
 	return false
+}
+
+// A PowerShell content reader accepts pipeline paths when it has no explicit
+// path operand. Only options that do not supply a path are set aside here.
+func actionIndirectBarePSReader(words []string) bool {
+	for i := 1; i < len(words); i++ {
+		switch strings.ToLower(words[i]) {
+		case "-raw", "-force", "-wait":
+		case "-encoding", "-readcount", "-totalcount", "-tail", "-stream", "-delimiter", "-erroraction":
+			i++
+			if i >= len(words) {
+				return false
+			}
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 func actionIndirectForeachRead(words []string, values map[string]string, cwd, home string, mode keyReadMode) bool {
