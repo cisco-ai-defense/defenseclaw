@@ -322,10 +322,13 @@ func TestPlannerStatisticsYieldTheConnectionToAWaitingWrite(t *testing.T) {
 	}
 }
 
-// GAP-1790, GAP-0233: a history without statistics (a store from before
-// 1.0.3) misplans the hooks' lookups until they are taken, so its first
-// ANALYZE does not yield to the hooks.
-func TestFirstPlannerStatisticsDoNotYield(t *testing.T) {
+// GAP-2505: the first statistics of a history (a store from before 1.0.3)
+// also give the store's one connection back to a hook write that waits for
+// it. On a 3.9 GB managed RHEL store that pass ran about 100 s, and while it
+// kept the connection nearly every benign hook was denied as "did not answer
+// in time". The hooks' lookups do not need the statistics to plan their
+// seeks (TestHookLedgerLookupsSeekTheFullKeyWithoutPlannerStatistics).
+func TestFirstPlannerStatisticsYieldTheConnectionToAWaitingWrite(t *testing.T) {
 	store, cleanup := newTestStore(t)
 	defer cleanup()
 	ctx := context.Background()
@@ -334,22 +337,50 @@ func TestFirstPlannerStatisticsDoNotYield(t *testing.T) {
 			t.Fatalf("LogEvent: %v", err)
 		}
 	}
+	held := make(chan struct{})
 	var calls atomic.Int32
 	previous := plannerStatsAnalyzePhaseHook
 	plannerStatsAnalyzePhaseHook = func(ctx context.Context) {
 		if calls.Add(1) != 1 {
 			return
 		}
-		go func() {
-			_ = store.LogEvent(Event{Action: "hook_decision", Target: "planner-first-hook", Severity: "INFO", SessionID: "s"})
-		}()
+		close(held)
 		select {
 		case <-ctx.Done():
-		case <-time.After(400 * time.Millisecond):
+		case <-time.After(5 * time.Second):
 		}
 	}
 	t.Cleanup(func() { plannerStatsAnalyzePhaseHook = previous })
+	type refresh struct {
+		ran bool
+		err error
+	}
+	first := make(chan refresh, 1)
+	go func() {
+		ran, err := store.RefreshPlannerStatistics(ctx)
+		first <- refresh{ran, err}
+	}()
+	select {
+	case <-held:
+	case <-time.After(10 * time.Second):
+		t.Fatal("ANALYZE never started")
+	}
+	started := time.Now()
+	if err := store.LogEvent(Event{Action: "hook_decision", Target: "planner-first-hook", Severity: "INFO", SessionID: "s"}); err != nil {
+		t.Fatalf("hook write: %v", err)
+	}
+	if waited := time.Since(started); waited > 2*time.Second {
+		t.Fatalf("a hook write waited %s behind the first ANALYZE", waited)
+	}
+	got := <-first
+	if got.err != nil || got.ran {
+		t.Fatalf("interrupted first statistics = (%t, %v), want (false, nil)", got.ran, got.err)
+	}
 	if ran, err := store.RefreshPlannerStatistics(ctx); err != nil || !ran {
-		t.Fatalf("first statistics = (%t, %v), want taken despite a waiting write", ran, err)
+		t.Fatalf("next pass = (%t, %v), want the statistics taken", ran, err)
+	}
+	var stats int
+	if err := store.db.QueryRow("SELECT COUNT(*) FROM sqlite_stat1").Scan(&stats); err != nil || stats == 0 {
+		t.Fatalf("sqlite_stat1 rows = %d (%v), want the first statistics", stats, err)
 	}
 }

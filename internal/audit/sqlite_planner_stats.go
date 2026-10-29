@@ -110,19 +110,20 @@ func (s *Store) RefreshPlannerStatistics(ctx context.Context) (bool, error) {
 		s.plannerStatsComplete.Store(true)
 		return len(targets) > 0, nil
 	}
-	// Statistics that only describe a smaller history are refreshed behind
-	// the hooks: each ANALYZE yields to a waiting write. A pass that yielded
-	// goes on from the target it yielded at, so a busy store still gets
-	// through every target. A history without statistics (last == 0, a
-	// store from before 1.0.3) misplans the hooks' lookups until they are
-	// taken, so that first pass does not yield.
-	refresh := last > 0
+	// The statistics are taken behind the hooks: each ANALYZE yields to a
+	// waiting write. A pass that yielded goes on from the target it yielded
+	// at, so a busy store still gets through every target. That includes
+	// the first statistics of a history (last == 0, a store from before
+	// 1.0.3): the hooks' ledger lookups plan the same seeks without them
+	// (correlationIdentifierMatchFrom, toolChainSessionDigestSQL), and on a
+	// multi-gigabyte store a first pass that kept the connection left every
+	// hook of its ~100 s unanswered (GAP-2505).
 	for i := int(s.plannerStatsNext.Load()); i < len(targets); i++ {
 		if s.walPressure.Load() {
 			s.plannerStatsNext.Store(int64(i))
 			return false, nil
 		}
-		if err := s.analyzeOne(ctx, targets[i], refresh); err != nil {
+		if err := s.analyzeOne(ctx, targets[i], true); err != nil {
 			if errors.Is(err, errPlannerStatsYielded) {
 				s.plannerStatsNext.Store(int64(i))
 				return false, nil
