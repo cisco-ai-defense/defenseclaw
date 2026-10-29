@@ -381,16 +381,24 @@ func (repo *ToolChainRepository) observeTx(
 		matches.EnforcementSafeMask, denied, stableActionID, receiptIDs, false)
 }
 
+// toolChainSessionDigestSQL reads the session identifier of one event. The
+// unary + keeps connector_instance_id out of index selection: without planner
+// statistics SQLite preferred that prefix of the unique identifier index,
+// which every row of the connector shares, over the semantic_event_id index,
+// and each hook read the connector's whole identifier ledger (GAP-0233,
+// GAP-2505). The event's own rows are few, so the connector stays a filter.
+const toolChainSessionDigestSQL = `SELECT DISTINCT value_digest
+		FROM correlation_identifiers
+		WHERE semantic_event_id=? AND +connector_instance_id=? AND identifier_kind='session'
+		ORDER BY value_digest LIMIT 2`
+
 func loadExactToolChainSession(
 	ctx context.Context,
 	tx *sql.Tx,
 	eventID SemanticEventID,
 	connectorID ConnectorInstanceID,
 ) (string, bool, error) {
-	rows, err := tx.QueryContext(ctx, `SELECT DISTINCT value_digest
-		FROM correlation_identifiers
-		WHERE semantic_event_id=? AND connector_instance_id=? AND identifier_kind='session'
-		ORDER BY value_digest LIMIT 2`, string(eventID), string(connectorID))
+	rows, err := tx.QueryContext(ctx, toolChainSessionDigestSQL, string(eventID), string(connectorID))
 	if err != nil {
 		return "", false, err
 	}

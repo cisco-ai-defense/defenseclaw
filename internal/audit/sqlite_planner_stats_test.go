@@ -7,7 +7,9 @@ import (
 	"context"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 )
 
 // The planner statistics are taken once the history is long enough and again
@@ -247,4 +249,263 @@ func TestPlannerStatisticsCoverIndexesAMigrationRebuilt(t *testing.T) {
 	if ran, err := restarted.RefreshPlannerStatistics(ctx); err != nil || ran {
 		t.Fatalf("second pass: ran=%v err=%v, want no ANALYZE", ran, err)
 	}
+}
+
+// GAP-1790: ANALYZE gives the store's one connection back to a hook write
+// that waits for it, instead of holding it for the whole read of an index
+// (tens of seconds on a cold multi-gigabyte store, while every hook queued
+// behind it). The statistics are taken at the next pass.
+func TestPlannerStatisticsYieldTheConnectionToAWaitingWrite(t *testing.T) {
+	store, cleanup := newTestStore(t)
+	defer cleanup()
+	ctx := context.Background()
+	logEvents := func(n int) {
+		t.Helper()
+		for i := 0; i < n; i++ {
+			if err := store.LogEvent(Event{Action: "hook_decision", Target: "planner-yield", Severity: "INFO", SessionID: "s"}); err != nil {
+				t.Fatalf("LogEvent: %v", err)
+			}
+		}
+	}
+	// The first statistics, then a history that has doubled since: the
+	// refresh is the pass that yields.
+	logEvents(plannerStatsMinRows + 10)
+	if ran, err := store.RefreshPlannerStatistics(ctx); err != nil || !ran {
+		t.Fatalf("first statistics = (%t, %v), want taken", ran, err)
+	}
+	logEvents(2 * (plannerStatsMinRows + 10))
+	held := make(chan struct{})
+	var calls atomic.Int32
+	previous := plannerStatsAnalyzePhaseHook
+	plannerStatsAnalyzePhaseHook = func(ctx context.Context) {
+		if calls.Add(1) != 1 {
+			return
+		}
+		close(held)
+		// A slow cold read of a large index.
+		select {
+		case <-ctx.Done():
+		case <-time.After(5 * time.Second):
+		}
+	}
+	t.Cleanup(func() { plannerStatsAnalyzePhaseHook = previous })
+	type refresh struct {
+		ran bool
+		err error
+	}
+	first := make(chan refresh, 1)
+	go func() {
+		ran, err := store.RefreshPlannerStatistics(ctx)
+		first <- refresh{ran, err}
+	}()
+	select {
+	case <-held:
+	case <-time.After(10 * time.Second):
+		t.Fatal("ANALYZE never started")
+	}
+	started := time.Now()
+	if err := store.LogEvent(Event{Action: "hook_decision", Target: "planner-yield-hook", Severity: "INFO", SessionID: "s"}); err != nil {
+		t.Fatalf("hook write: %v", err)
+	}
+	if waited := time.Since(started); waited > 2*time.Second {
+		t.Fatalf("a hook write waited %s behind ANALYZE", waited)
+	}
+	got := <-first
+	if got.err != nil || got.ran {
+		t.Fatalf("interrupted refresh = (%t, %v), want (false, nil)", got.ran, got.err)
+	}
+	if ran, err := store.RefreshPlannerStatistics(ctx); err != nil || !ran {
+		t.Fatalf("next refresh = (%t, %v), want the statistics taken", ran, err)
+	}
+	if next := store.plannerStatsNext.Load(); next != 0 {
+		t.Fatalf("a complete pass left the resume point at target %d", next)
+	}
+}
+
+// GAP-2505: the first statistics of a history (a store from before 1.0.3)
+// also give the store's one connection back to a hook write that waits for
+// it. On a 3.9 GB managed RHEL store that pass ran about 100 s, and while it
+// kept the connection nearly every benign hook was denied as "did not answer
+// in time". The hooks' lookups do not need the statistics to plan their
+// seeks (TestHookLedgerLookupsSeekTheFullKeyWithoutPlannerStatistics).
+func TestFirstPlannerStatisticsYieldTheConnectionToAWaitingWrite(t *testing.T) {
+	store, cleanup := newTestStore(t)
+	defer cleanup()
+	ctx := context.Background()
+	for i := 0; i < plannerStatsMinRows+10; i++ {
+		if err := store.LogEvent(Event{Action: "hook_decision", Target: "planner-first", Severity: "INFO", SessionID: "s"}); err != nil {
+			t.Fatalf("LogEvent: %v", err)
+		}
+	}
+	held := make(chan struct{})
+	var calls atomic.Int32
+	previous := plannerStatsAnalyzePhaseHook
+	plannerStatsAnalyzePhaseHook = func(ctx context.Context) {
+		if calls.Add(1) != 1 {
+			return
+		}
+		close(held)
+		select {
+		case <-ctx.Done():
+		case <-time.After(5 * time.Second):
+		}
+	}
+	t.Cleanup(func() { plannerStatsAnalyzePhaseHook = previous })
+	type refresh struct {
+		ran bool
+		err error
+	}
+	first := make(chan refresh, 1)
+	go func() {
+		ran, err := store.RefreshPlannerStatistics(ctx)
+		first <- refresh{ran, err}
+	}()
+	select {
+	case <-held:
+	case <-time.After(10 * time.Second):
+		t.Fatal("ANALYZE never started")
+	}
+	started := time.Now()
+	if err := store.LogEvent(Event{Action: "hook_decision", Target: "planner-first-hook", Severity: "INFO", SessionID: "s"}); err != nil {
+		t.Fatalf("hook write: %v", err)
+	}
+	if waited := time.Since(started); waited > 2*time.Second {
+		t.Fatalf("a hook write waited %s behind the first ANALYZE", waited)
+	}
+	got := <-first
+	if got.err != nil || got.ran {
+		t.Fatalf("interrupted first statistics = (%t, %v), want (false, nil)", got.ran, got.err)
+	}
+	if ran, err := store.RefreshPlannerStatistics(ctx); err != nil || !ran {
+		t.Fatalf("next pass = (%t, %v), want the statistics taken", ran, err)
+	}
+	var stats int
+	if err := store.db.QueryRow("SELECT COUNT(*) FROM sqlite_stat1").Scan(&stats); err != nil || stats == 0 {
+		t.Fatalf("sqlite_stat1 rows = %d (%v), want the first statistics", stats, err)
+	}
+}
+
+// GAP-2505 (RV-ha8-2505): a first pass that yielded part way, then a gateway
+// restart (rpm upgrade, reboot). The history tables now have statistics, so
+// the new process takes the pass for the targets that have none, and that
+// pass gives the store's connection back to a waiting hook write as well.
+// Before, it kept the connection for the rest of the targets, the share of
+// the ~100 s first statistics of a multi-gigabyte store from 1.0.2 that the
+// yielded pass left.
+func TestPlannerStatisticsAfterAPartialFirstPassAndARestartYieldToAWaitingWrite(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "audit.db")
+	ctx := context.Background()
+	open := func() *Store {
+		t.Helper()
+		store, err := NewStore(path)
+		if err != nil {
+			t.Fatalf("NewStore: %v", err)
+		}
+		if err := store.Init(); err != nil {
+			t.Fatalf("Init: %v", err)
+		}
+		return store
+	}
+	logEvent := func(store *Store, target string) {
+		t.Helper()
+		if err := store.LogEvent(Event{Action: "hook_decision", Target: target, Severity: "INFO", SessionID: "s"}); err != nil {
+			t.Fatalf("LogEvent: %v", err)
+		}
+	}
+	previous := plannerStatsAnalyzePhaseHook
+	t.Cleanup(func() { plannerStatsAnalyzePhaseHook = previous })
+	// holdAt holds the n-th ANALYZE of a pass open, as a slow cold read of a
+	// large index, and reports when it holds.
+	holdAt := func(n int32, hold time.Duration) <-chan struct{} {
+		held := make(chan struct{})
+		var calls atomic.Int32
+		plannerStatsAnalyzePhaseHook = func(ctx context.Context) {
+			if calls.Add(1) != n {
+				return
+			}
+			close(held)
+			select {
+			case <-ctx.Done():
+			case <-time.After(hold):
+			}
+		}
+		return held
+	}
+	type refresh struct {
+		ran bool
+		err error
+	}
+	// waitingWrite starts a pass, writes while the held ANALYZE runs and
+	// returns how long the write waited.
+	waitingWrite := func(store *Store, held <-chan struct{}, target string) (time.Duration, refresh) {
+		t.Helper()
+		pass := make(chan refresh, 1)
+		go func() {
+			ran, err := store.RefreshPlannerStatistics(ctx)
+			pass <- refresh{ran, err}
+		}()
+		select {
+		case <-held:
+		case <-time.After(10 * time.Second):
+			t.Fatal("ANALYZE never started")
+		}
+		started := time.Now()
+		logEvent(store, target)
+		waited := time.Since(started)
+		return waited, <-pass
+	}
+	statRows := func(store *Store) int {
+		t.Helper()
+		var n int
+		if err := store.db.QueryRow("SELECT COUNT(*) FROM sqlite_stat1").Scan(&n); err != nil {
+			t.Fatalf("sqlite_stat1: %v", err)
+		}
+		return n
+	}
+
+	first := open()
+	for i := 0; i < plannerStatsMinRows+10; i++ {
+		logEvent(first, "planner-partial")
+	}
+	// The first statistics yield at the fourth target.
+	if _, got := waitingWrite(first, holdAt(4, 5*time.Second), "planner-partial-hook"); got.err != nil || got.ran {
+		t.Fatalf("yielded first pass = (%t, %v), want (false, nil)", got.ran, got.err)
+	}
+	partial := statRows(first)
+	if partial == 0 {
+		t.Fatal("fixture: the yielded first pass took no statistics")
+	}
+	if err := first.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	restarted := open()
+	defer restarted.Close()
+	waited, got := waitingWrite(restarted, holdAt(1, 3*time.Second), "planner-restart-hook")
+	if waited > 2*time.Second {
+		t.Fatalf("after a partial first pass and a restart a hook write waited %s behind ANALYZE", waited)
+	}
+	if got.err != nil || got.ran {
+		t.Fatalf("interrupted pass after the restart = (%t, %v), want (false, nil)", got.ran, got.err)
+	}
+	plannerStatsAnalyzePhaseHook = previous
+	if ran, err := restarted.RefreshPlannerStatistics(ctx); err != nil || !ran {
+		t.Fatalf("next pass = (%t, %v), want the missing statistics taken", ran, err)
+	}
+	missing, err := restarted.plannerStatsMissingTargets(ctx, mustPlannerStatsTargets(t, restarted))
+	if err != nil {
+		t.Fatalf("missing targets: %v", err)
+	}
+	if len(missing) != 0 || statRows(restarted) <= partial {
+		t.Fatalf("after the pass %d targets still have no statistics (%d rows, %d before)", len(missing), statRows(restarted), partial)
+	}
+}
+
+func mustPlannerStatsTargets(t *testing.T, store *Store) []string {
+	t.Helper()
+	targets, err := store.plannerStatsTargets(context.Background())
+	if err != nil {
+		t.Fatalf("planner statistics targets: %v", err)
+	}
+	return targets
 }

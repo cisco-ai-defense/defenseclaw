@@ -1443,7 +1443,10 @@ func sendHookRequest(
 	opts.requestFacts.set(req.Header, opts, payload)
 	var delivery *hookDeliveryRequest
 	if wantsHookDeliveryReceipt(opts) {
-		req, delivery = prepareHookDeliveryRequest(req, payload, hookDeliveryWait(opts))
+		gatewayStarting := hookDeliveryGatewayStarting
+		req, delivery = prepareHookDeliveryRequest(req, payload, hookDeliveryWait(opts), func(ctx context.Context) bool {
+			return gatewayStarting(ctx, opts)
+		})
 	}
 
 	var connected atomic.Bool
@@ -1454,6 +1457,9 @@ func sendHookRequest(
 	if err != nil {
 		if delivery != nil {
 			delivery.close()
+			if delivery.wasHeldForStart() && ctx.Err() == nil {
+				err = fmt.Errorf("%w: %w", errGatewayDroppedHeldCall, err)
+			}
 		}
 		return nil, markConnectedTimeout(err, connected.Load())
 	}
@@ -2383,7 +2389,8 @@ func failUnreachable(opts Options, sp spec, failMode, reason string) int {
 			return failManagedStandaloneClosed(opts, sp, sp.unreachableStrict, "transport", reason)
 		} else {
 			fmt.Fprintf(opts.Stderr,
-				"defenseclaw: %s (%s): %s\n", unreachableLead(opts, sp, reason, "blocking"), unreachableModeNote(opts), unreachableDetail(opts, reason))
+				"defenseclaw: %s (%s): %s\n", unreachableLead(opts, sp, reason, "blocking"), unreachableModeNote(opts, reason),
+				unreachableDetail(opts, reason))
 			if text := perUserGatewayDownText(opts, reason); text != "" {
 				return emitPerUserGatewayDown(opts, sp, text)
 			}
@@ -2567,25 +2574,36 @@ const perUserGatewayStatusHint = " `defenseclaw-gateway status` shows its state.
 // the gateway port answers, so the gateway is not "unreachable" there; the
 // line names the blocked or allowed event instead, a prompt rather than a
 // tool for UserPromptSubmit (GAP-1706).
-// unreachableModeNote names why a per-user call the gateway did not decide
-// was blocked: "fail mode closed" for a gateway outage the mode closed (or
-// strict availability, or the install window), and that it blocks in every
-// fail mode for a failure that is not an outage (a call the gateway took and
-// did not answer, a listener DefenseClaw cannot verify). A saved open mode
-// then no longer reads as ignored (GAP-1735).
-func unreachableModeNote(opts Options) string {
-	if opts.ManagedEnterprise || opts.ManagedUnixSocket != "" || opts.SecureClient || opts.perUserOutage ||
-		opts.StrictAvailability || perUserInstallWindow(opts) {
-		return "fail mode closed"
-	}
-	return "not a gateway outage, so it is blocked in every fail mode"
-}
-
 func unreachableLead(opts Options, sp spec, reason, verdict string) string {
 	if strings.HasPrefix(reason, foreignListenerReasonPrefix) {
 		return verdict + " this " + hookEventSubject(opts.Event)
 	}
 	return "gateway unreachable, " + verdict + " " + sp.subject
+}
+
+// perUserNotOutageNote is the reason a blocked per-user call gives when its
+// own gateway took the call and did not answer: that is not an outage, so the
+// call is blocked in every fail mode (LEAD RULING 02:09). The shell hooks say
+// the same (defenseclaw_unreachable_mode_note).
+const perUserNotOutageNote = "not a gateway outage, so it is blocked in every fail mode"
+
+// unreachableModeNote names, in the blocked unreachable line and text, why
+// the call was blocked. A per-user call its gateway took and did not answer
+// is blocked in every fail mode, so beside a saved open mode "fail mode
+// closed" read as the mode being ignored (GAP-2475; GAP-2279 fixed the shell
+// hooks). An outage the mode closed, strict availability, this account's
+// install window and managed, socket and Secure Client hooks keep "fail mode
+// closed".
+//
+// Every other per-user failure that is not an outage (opts.perUserOutage
+// unset: a call the gateway took and did not answer, a listener DefenseClaw
+// cannot verify) is blocked in every fail mode too and says so (GAP-1735).
+func unreachableModeNote(opts Options, reason string) string {
+	if opts.ManagedEnterprise || opts.ManagedUnixSocket != "" || opts.SecureClient || opts.perUserOutage ||
+		opts.StrictAvailability || perUserInstallWindow(opts) {
+		return "fail mode closed"
+	}
+	return perUserNotOutageNote
 }
 
 // unreachableDetail is the text after the colon of the unreachable line. The
@@ -2658,7 +2676,7 @@ func perUserGatewayDownText(opts Options, reason string) string {
 	}
 	if reason == perUserGatewayNoAnswerReason {
 		return "DefenseClaw blocked this " + hookEventSubject(opts.Event) + ": this account's DefenseClaw gateway " +
-			"did not answer in time (a call the gateway took and did not answer is blocked in every fail mode); it may be restarting or busy. Try again in a moment; if " +
+			"did not answer in time (" + unreachableModeNote(opts, reason) + "); it may be restarting or busy. Try again in a moment; if " +
 			"this continues, check it with `defenseclaw-gateway status`."
 	}
 	lead := "DefenseClaw blocked this " + hookEventSubject(opts.Event) + ": "

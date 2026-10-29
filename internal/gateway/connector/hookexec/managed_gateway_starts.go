@@ -109,7 +109,7 @@ func gatewayRestartShaped(err error) bool {
 	if err == nil || errors.Is(err, errPerUserPeerUnverified) {
 		return false
 	}
-	if errors.Is(err, errManagedGatewayNotRunning) || errors.Is(err, errGatewayNotConnected) {
+	if errors.Is(err, errManagedGatewayNotRunning) || errors.Is(err, errGatewayNotConnected) || errors.Is(err, errGatewayDroppedHeldCall) {
 		return true
 	}
 	if errors.Is(err, errManagedGatewayPeerUnverified) || errors.Is(err, errInvalidHookRequest) {

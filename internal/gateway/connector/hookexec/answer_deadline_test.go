@@ -5,7 +5,9 @@ package hookexec
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -169,6 +171,31 @@ func TestPerUserToolCallAppliesItsFailModeWhenTheGatewayDoesNotAnswer(t *testing
 	open, elapsed := runAgainstGateway(t, "claudecode", hungGateway(t), func(opts *Options) { opts.FailMode = "open" })
 	if elapsed > time.Second || open.code != 0 || !strings.Contains(open.stdout, "did not answer in time") {
 		t.Fatalf("open: after %s code=%d stdout=%q stderr=%q, want the notice", elapsed, open.code, open.stdout, open.stderr)
+	}
+}
+
+// A per-user call its own gateway took and did not answer is blocked in
+// every fail mode. Its stderr line and its block say that, not "fail mode
+// closed", which beside a saved open mode read as the mode being ignored
+// (GAP-2475, OSS Windows native hook). A refused connection in fail mode
+// closed is an outage the mode closed and keeps "fail mode closed".
+func TestPerUserNoAnswerBlockNamesWhyNotFailModeClosed(t *testing.T) {
+	shortAnswerBudget(t, 300*time.Millisecond)
+	for _, mode := range []string{"open", "closed"} {
+		result, _ := runAgainstGateway(t, "claudecode", hungGateway(t), func(opts *Options) { opts.FailMode = mode })
+		if !blocked(result) || strings.Contains(result.stderr+result.stdout, "fail mode closed") ||
+			!strings.Contains(result.stderr, "("+perUserNotOutageNote+"): this account's gateway did not answer in time") ||
+			!strings.Contains(result.stdout, perUserNotOutageNote) {
+			t.Fatalf("fail mode %s: code=%d stdout=%q stderr=%q, want a block that says it is not an outage and is blocked in every fail mode",
+				mode, result.code, result.stdout, result.stderr)
+		}
+	}
+	down := run(t, "claudecode", &stubRT{err: errors.New("connection refused")}, func(opts *Options) {
+		opts.FailMode = "closed"
+		opts.GatewayRecovery = func(context.Context, error) error { return errors.New("hook cold start skipped") }
+	})
+	if !blocked(down) || !strings.Contains(down.stderr, "(fail mode closed): ") {
+		t.Fatalf("outage: code=%d stdout=%q stderr=%q, want the fail mode closed line", down.code, down.stdout, down.stderr)
 	}
 }
 
