@@ -390,6 +390,17 @@ After the sign-in the enumerator records the new groups, which drops the
 account's old directory facts: the next hook request, a few seconds later at most,
 uses the new profile, and `profile-explain` shows the same one.
 
+Windows groups are known only while the user has a desktop session (console
+or Remote Desktop); an SSH, scheduled-task or `runas` session does not count.
+For a user who is signed out, or who has not signed in at the desktop on this
+computer yet, `profile-explain --user` shows `group_count` `0` and `groups`
+`null`: the groups are unknown, not empty. When a `groups` assignment exists,
+the answer says so: `match` is `default_lookup_failed`, `unproven_facts` lists
+`groups:unknown`, `refused` is `true`, and a warning names the cause (no active
+desktop session, or no identity record yet). With no `groups` assignment
+nothing depends on the groups, so there is no warning. To check a group
+assignment, explain the user while they are signed in at the desktop.
+
 ### macOS
 
 | What the OS knows | Where DefenseClaw reads it | Assurance |

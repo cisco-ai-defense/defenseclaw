@@ -72,7 +72,7 @@ guardrail:
       mode: action       # this agent blocks; the others only observe
 ```
 
-`observe` logs the verdict without blocking; `action` blocks what policy denies. A connector's own `mode` overrides the global value. `block_message` may contain at most 4096 characters. A longer one is refused with `guardrail.block_message must be a string of at most 4096 characters (it has 4097)`.
+`observe` logs the verdict without blocking; `action` blocks what policy denies. A connector's own `mode` overrides the global value. `block_message` may contain at most 4096 characters. A longer one is refused and nothing changes. On Linux and macOS, ensure prints `guardrail.block_message must be a string of at most 4096 characters (it has 4097)`. On Windows, `enterprise windows ensure` refuses it as `invalid_arguments` (exit `1639`) at `$.guardrail.block_message` with `configuration violates the maxLength constraint; expected a string of at most 4096 characters (it has 4097)`.
 
 | Route | Connectors | What DefenseClaw changes |
 | --- | --- | --- |

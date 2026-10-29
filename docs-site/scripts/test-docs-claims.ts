@@ -1432,7 +1432,13 @@ const r105Rows: DocRow[] = [
   // GAP-2494 (docs pod, 2026-10-29, live managed RHEL rc.9): Linux and macOS ensure check the size first and word it themselves.
   { gap: "GAP-2494", page: "enterprise/configuration.mdx", section: "Where the config lives", has: ["On Linux and macOS, ensure refuses it as `config_invalid` (exit `1`) with `config exceeds 4194304 bytes`, or with `<file> line <n>: parsed YAML exceeds the 65,536-node limit`."], lacks: ["refuse it with the same message"] },
   { gap: "GH #1101 p0:GAP-0677", page: "enterprise/windows.mdx", section: "2. Write the config", has: ["The file may be at most 4 MiB and 65,536 YAML nodes", "([limits](/docs/enterprise/configuration#where-the-config-lives))"] },
-  { gap: "GH #1101 p0:GAP-0765", page: "enterprise/configuration.mdx", has: ["A longer one is refused with `guardrail.block_message must be a string of at most 4096 characters (it has 4097)`"] },
+  { gap: "GH #1101 p0:GAP-0765", page: "enterprise/configuration.mdx", has: ["On Linux and macOS, ensure prints `guardrail.block_message must be a string of at most 4096 characters (it has 4097)`."] },
+  // GAP-2500 (docs pod, 2026-10-29, live managed Windows rc.9): Windows words the block_message limit as the schema error.
+  { gap: "GAP-2500", page: "enterprise/configuration.mdx", has: ["On Windows, `enterprise windows ensure` refuses it as `invalid_arguments` (exit `1639`) at `$.guardrail.block_message` with `configuration violates the maxLength constraint; expected a string of at most 4096 characters (it has 4097)`."], lacks: ["A longer one is refused with `guardrail.block_message must be"] },
+  // GAP-2502 (docs pod, 2026-10-29, live OSS RHEL rc.9 action mode): a local credential read alerts; only an SSH private key read is denied.
+  { gap: "GAP-2502", page: "segmentation.mdx", section: "Credential files", has: ["| Hook rules in action mode: an SSH private key read is denied, other credential reads alert (see below) |", "A plain local read of another credential file, for example `cat ~/.aws/credentials` (`PATH-AWS-CREDS`), is a `MEDIUM` alert and the command goes ahead"], lacks: ["`PATH-AWS-CREDS`) | Hook rules in action mode |"] },
+  // GAP-2491 (docs pod, 2026-10-29, live managed RHEL rc.9 -> 1.0.3 dnf downgrade, 1.4 GB audit.db): hooks deny for minutes after the rollback.
+  { gap: "GAP-2491", page: "enterprise/lifecycle.mdx", section: "Roll back", has: ["**Rollback to 1.0.3 with a large audit store (Linux):**", "On RHEL with a 1.4 GB store this lasted 3.5 to 7.5 minutes after `dnf downgrade` finished.", "Roll back while agents are idle"] },
   { gap: "GH #1101 p0:GAP-0777", page: "policies/rulepack-validation.mdx", has: ["Adding or editing that file changes the digest, so validate the pack again and pin the new digest"] },
   // 1.0.5 docs sync (2026-10-28): fixed 1.0.4 known issues left the page; open ones stay.
   { gap: "1.0.4 known issues fixed in 1.0.5", page: "support-matrix.mdx", section: "Known issues", lacks: ["These are bugs in 1.0.4.", "**Changing the fail mode with Setup `/ensure`:**", "hot-config-undo-closed", "**No skill, MCP or plugin scanner:**"] },
@@ -1449,7 +1455,10 @@ const r105Rows: DocRow[] = [
   { gap: "GAP-2365", page: "guardrail/switching-connectors.mdx", has: ["`Codex is already configured; re-apply its hooks (mode=action)? [Y/n]:`", "A re-run never asks Add, Replace or Cancel.", "`Configure DefenseClaw for Codex enforcement now? [Y/n]:`", "the agent's current mode when it is already set up, observe for a new one"] },
   { gap: "GAP-2221", page: "edge-connector/install.mdx", has: ["when no Fleet API token is saved yet, setup first asks `Generate a new fleet API bearer token? [Y/n]`", "so `sudo` can ask for your password", "Edge setup is incomplete`, and Fleet stays off"] },
   // GAP-2493 (docs pod, 2026-10-29, live managed Windows rc.9): since GAP-2448 fe875fb90f a Windows lifecycle flag error exits 1639 (GAP-2171 text replaced).
-  { gap: "GAP-2493", page: "enterprise/operations.mdx", has: ["(a misspelled flag such as `--bogus`) exits `1639`, like an argument the lifecycle rejects (`--profile bogus`).", "or with `--json` one result whose only error is `invalid_arguments`", "1.0.4 and earlier exit `1` for an unknown flag."], lacks: ["exits `1`, not `1639`"] },
+  // GAP-2510 (docs pod it4, live managed Windows rc.9, AD eng1 signed out / RDP signed in / signed out): groups exist only during a desktop session.
+  { gap: "GAP-2510", page: "enterprise/identity-sources.mdx", section: "Windows", has: ["Windows groups are known only while the user has a desktop session (console", "`profile-explain --user` shows `group_count` `0` and `groups` `null`: the groups are unknown, not empty.", "`groups:unknown`, `refused` is `true`, and a warning names the cause (no active", "To check a group assignment, explain the user while they are signed in at the desktop."] },
+  // GAP-2493 LEAD-CHECK (docs pod it4, live managed Windows rc.9): 1639 only for enterprise windows lifecycle verbs; root flag error 2 (usageFlagError), other enterprise commands 1 (exempt tree).
+  { gap: "GAP-2493", page: "enterprise/operations.mdx", has: ["a misspelled flag (such as `--bogus`) on an `enterprise windows` lifecycle command, for example `enterprise windows status` or `verify`, exits `1639`, like an argument the lifecycle rejects (`--profile bogus`).", "or with `--json` one result whose only error is `invalid_arguments`", "1.0.4 and earlier exit `1` for an unknown flag.", "another `enterprise` command (`enterprise policy show --bogus`) exits `1`, and the rest of `defenseclaw.exe` (`defenseclaw.exe --bogus`) exits `2` with the usage line."], lacks: ["exits `1`, not `1639`", "an option `defenseclaw.exe` does not know (a misspelled flag such as `--bogus`) exits `1639`"] },
   { gap: "GAP-2493", page: "enterprise/troubleshooting.mdx", has: ["(a misspelled flag) on a lifecycle verb also exits `1639`, with `unknown flag` (1.0.4 and earlier exit `1`)"], lacks: ["exits `1` with `unknown flag` before the lifecycle runs"] },
   { gap: "GAP-2367", page: "reference/setup-commands.mdx", has: ["writes it to `ai_discovery.trusted_binary_prefixes` in `~/.defenseclaw/config.yaml`"], lacks: ["and persists to `~/.defenseclaw/.env`"] },
   { gap: "GAP-2367", page: "reference/cli.mdx", has: ["writes it to `ai_discovery.trusted_binary_prefixes` in `~/.defenseclaw/config.yaml`"], lacks: ["and persists to `~/.defenseclaw/.env`"] },
@@ -2220,6 +2229,13 @@ describe('policy test leaves unblocks out without --sandbox (GAP-2495)', () => {
   });
 });
 
+describe('a local credential read alerts, an SSH private key read is denied (GAP-2502)', () => {
+  it('the gateway still makes a plain credential-path read an alert', () => {
+    const disp = source('internal/gateway/trusted_action_context_disposition.go');
+    assert.ok(disp.includes('// A local read of a credential path is MEDIUM: alert, do not') && disp.includes('finding.enforcement = findingEnforcementAlertOnly') && disp.includes('trustedActionActiveSSHPrivateKeyContentRead(findingFacts)'), 'credential-read disposition changed: re-check segmentation.mdx Credential files (GAP-2502)');
+  });
+});
+
 describe('config limit refusals match the configuration pages (GH #1101)', () => {
   it('the parser and schema still word the 4 MiB, 65,536-node and block_message limits as quoted', () => {
     const yaml = source('internal/config/yaml_v8.go');
@@ -2233,6 +2249,8 @@ describe('config limit refusals match the configuration pages (GH #1101)', () =>
     assert.ok(source('internal/enterpriseunix/config.go').includes('return nil, fmt.Errorf("config exceeds %d bytes", config.ObservabilityV8MaxSourceBytes)') && source('internal/config/observability_v8_types.go').includes('ObservabilityV8MaxSourceBytes = 4 * 1024 * 1024'), 'Linux/macOS config size refusal changed: re-check the Linux and macOS sentence in enterprise/configuration.mdx Where the config lives (GAP-2494)');
     const schema = source('internal/config/schema_v8.go');
     assert.ok(schema.includes('"a string of %s %d characters"') && schema.includes('" (it has %d)"'), 'schema length refusal changed: re-check the block_message sentence in enterprise/configuration.mdx');
+    // GAP-2500: Linux/macOS word it <path> must be <expected>; Windows gives the schema summary.
+    assert.ok(source('internal/enterpriseunix/config_messages.go').includes('reason = "must be " + schemaErr.Expected') && schema.includes('Summary:       "configuration violates the " + keyword + " constraint",'), 'block_message refusal wording changed: re-check the Linux/macOS and Windows sentences in enterprise/configuration.mdx (GAP-2500)');
     const configSchema = JSON.parse(source('schemas/config/v8/defenseclaw-config.schema.json'));
     const limits: unknown[] = [];
     const walk = (node: unknown): void => {
