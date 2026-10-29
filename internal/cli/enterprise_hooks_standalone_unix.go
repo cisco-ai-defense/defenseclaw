@@ -677,6 +677,9 @@ func runEnterpriseHookReconcileOnceStandaloneUnix(ctx context.Context) (enterpri
 		return run, err
 	}
 	run.ManifestSHA256 = manifestSHA256
+	// until 1.1: the OpenHands/OmniGent rows a 1.0.2-1.0.4 enumerator wrote
+	// are not enrolled targets (GAP-2504).
+	manifest.Targets = withoutRemovedConnectorTargets(manifest.Targets)
 	apiAddr, proxyAddr := enterpriseHookListenAddrs()
 	hookSocket, serviceUID, transportErr := enterpriseHookStandaloneHookTransport()
 	resolver := enterprisehooks.StandaloneResolver()

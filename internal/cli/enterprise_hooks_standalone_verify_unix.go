@@ -43,6 +43,9 @@ func runEnterpriseHookVerifyAttemptStandaloneUnix(ctx context.Context, registrat
 	if err != nil {
 		return run, err
 	}
+	// until 1.1: the guardian skips the OpenHands/OmniGent rows an older
+	// enumerator wrote, so verify does too (GAP-2504).
+	manifest.Targets = withoutRemovedConnectorTargets(manifest.Targets)
 	records := loadEnterpriseHookGuardianRecords(cfg.DataDir)
 	authorization, exists, authorizationErr := records.Authorization, records.AuthorizationExists, records.AuthorizationErr
 	activation, activationExists, activationErr := records.Activation, records.ActivationExists, records.ActivationErr
