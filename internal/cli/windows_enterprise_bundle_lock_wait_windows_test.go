@@ -67,6 +67,9 @@ func TestWindowsBundleApplyWithoutLockWaitFailsAtOnce(t *testing.T) {
 
 // A4: --lock-wait waits for bundle.lock and then runs.
 func TestWindowsBundleApplyLockWaitTakesTheReleasedLock(t *testing.T) {
+	saved := windowsBundleDeploymentInstalled
+	t.Cleanup(func() { windowsBundleDeploymentInstalled = saved })
+	windowsBundleDeploymentInstalled = func() bool { return true }
 	opts, out, done, err := prepareWithHeldBundleLock(t, 30*time.Second, 300*time.Millisecond)
 	if done || err != nil || opts.bundle == nil || opts.bundle.prepared == nil {
 		t.Fatalf("--lock-wait 30s with the lock released after 300ms: done=%v err=%v out=%s", done, err, out)
