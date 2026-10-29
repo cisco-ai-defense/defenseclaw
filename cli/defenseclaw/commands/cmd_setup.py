@@ -10491,26 +10491,52 @@ def _resolve_connector_workspace(workspace_dir: str | None) -> str:
         return workspace
 
 
-def _configure_connector_workspace(cfg, workspace_dir: str | None = None) -> str:
-    """Persist an explicit workspace, or clear it for global/user scope.
+def _setup_workspace_for_check(cfg, workspace_dir: str | None) -> str | None:
+    """The workspace setup will use, for the agent-settings precheck.
 
-    Setup without ``--workspace`` selects global scope. A workspace pinned
-    earlier (``config set claw.workspace_dir`` or an earlier ``--workspace``)
-    is then cleared, and setup says so and names the flag that keeps it
-    (GAP-0201): before, the pin vanished without a word.
+    Setup without --workspace keeps a pin that is still a folder
+    (GAP-0201), so the precheck reads that workspace's files too.
     """
-    workspace = _resolve_connector_workspace(workspace_dir)
+    if workspace_dir is not None:
+        return workspace_dir
+    try:
+        kept = _resolve_connector_workspace(str(getattr(cfg.claw, "workspace_dir", "") or ""))
+    except AttributeError:
+        return None
+    return kept if kept and os.path.isdir(kept) else None
+
+
+def _configure_connector_workspace(cfg, workspace_dir: str | None = None) -> str:
+    """Persist an explicit workspace, keep a valid earlier pin, or clear it.
+
+    ``--workspace <dir>`` pins *dir*; ``--workspace ""`` selects global scope.
+    Setup without ``--workspace`` keeps a workspace pinned earlier
+    (``config set claw.workspace_dir`` or an earlier ``--workspace``), so the
+    documented pre-set survives setup and the connector writes its workspace
+    copy (GAP-0201). A pin that is no longer a folder is cleared with a
+    warning, because hooks cannot be scoped to it.
+    """
     try:
         previous = str(getattr(cfg.claw, "workspace_dir", "") or "").strip()
-        cfg.claw.workspace_dir = workspace
     except AttributeError:
-        return workspace
-    if previous and not workspace:
+        return _resolve_connector_workspace(workspace_dir)
+    if workspace_dir is None and previous:
+        kept = _resolve_connector_workspace(previous)
+        if os.path.isdir(kept):
+            cfg.claw.workspace_dir = kept
+            ux.ok(
+                f"Keeping workspace pin {kept} (claw.workspace_dir). To return to global scope: "
+                "defenseclaw config unset claw.workspace_dir, then run setup again."
+            )
+            return kept
+        cfg.claw.workspace_dir = ""
         ux.warn(
-            f"Workspace pin {previous} cleared: setup without --workspace selects global scope. "
-            f"To keep it, pass --workspace {previous} (with more than one connector: "
-            f"defenseclaw setup guardrail --workspace {previous})."
+            f"Workspace pin {previous} cleared: it is not a folder, so setup selects global scope. "
+            "To pin a workspace, pass --workspace <folder>."
         )
+        return ""
+    workspace = _resolve_connector_workspace(workspace_dir)
+    cfg.claw.workspace_dir = workspace
     return workspace
 
 
@@ -10821,7 +10847,9 @@ def _apply_hook_connector_setup(
     if connector == "opencode":
         _preflight_opencode_plugin_folder()
 
-    if refusal := _agent_settings_refusal(app.cfg, connector, workspace_dir=workspace_dir, will_restart=restart):
+    if refusal := _agent_settings_refusal(
+        app.cfg, connector, workspace_dir=_setup_workspace_for_check(app.cfg, workspace_dir), will_restart=restart
+    ):
         ux.echo(f"  ✗ {refusal}", err=True)
         return False
 

@@ -11,8 +11,8 @@ from types import SimpleNamespace
 
 import click
 import pytest
-from defenseclaw import config as dcconfig
 from defenseclaw import agent_selection, fail_mode, hook_integrity
+from defenseclaw import config as dcconfig
 from defenseclaw.commands import cmd_doctor, cmd_setup
 from defenseclaw.connector_contracts import (
     connector_lock_contract_invariant,
@@ -1699,7 +1699,7 @@ def test_setup_refuses_agent_settings_before_it_changes_anything(monkeypatch, tm
 
 
 @pytest.mark.parametrize("connector", ("claudecode", "copilot"))
-@pytest.mark.parametrize("requested_scope", ("new", "global"))
+@pytest.mark.parametrize("requested_scope", ("new", "global", "kept"))
 def test_setup_prechecks_the_requested_workspace_when_switching_away_from_refusal(
     monkeypatch, tmp_path: Path, connector: str, requested_scope: str,
 ) -> None:
@@ -1729,12 +1729,16 @@ def test_setup_prechecks_the_requested_workspace_when_switching_away_from_refusa
         lambda *_args, **_kwargs: touched.append("version") or False,
     )
     monkeypatch.setattr(cmd_setup, "_capture_setup_config_snapshot", lambda *_a, **_k: touched.append("snapshot"))
-    requested = str(new_workspace) if requested_scope == "new" else None
+    # "global" is the explicit --workspace ""; "kept" is setup without
+    # --workspace, which keeps the earlier pin and so prechecks it (GAP-0201).
+    requested = {"new": str(new_workspace), "global": "", "kept": None}[requested_scope]
+    expected = {"new": str(new_workspace), "global": "", "kept": str(old_workspace)}[requested_scope]
     assert cmd_setup._apply_hook_connector_setup(
         SimpleNamespace(cfg=cfg), connector=connector, restart=True, workspace_dir=requested,
     ) is False
-    assert seen and seen[0][seen[0].index("--workspace-dir") + 1] == (str(new_workspace) if requested else "")
-    assert touched == ["version"]
+    assert seen and seen[0][seen[0].index("--workspace-dir") + 1] == expected
+    # The kept pin is the refused workspace: setup stops before the version check.
+    assert touched == ([] if requested_scope == "kept" else ["version"])
     assert cfg.claw.workspace_dir == str(old_workspace)
 
 
