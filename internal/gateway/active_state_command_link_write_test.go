@@ -145,6 +145,23 @@ func TestSedFollowSymlinksToActiveStateBlocks(t *testing.T) {
 		{"ln -s src/n.txt n; sed -i --follow-symlinks s/a/b/ n", false},
 		{"ln -s src s; sed --follow-symlinks -i s/a/b/ s/n.txt", false},
 		{"sed --follow-symlinks -n 1p ~/.defenseclaw/config.yaml", false},
+		// Abbreviated --follow-symlinks and -i clustered after another
+		// short option (GAP-2529), and the cluster on the state path (GAP-2531).
+		{"sed --fo -i s/a/b/ oldcfg", true},
+		{"sed --follow -i s/a/b/ oldcfg", true},
+		{"sed --fo -i s/a/b/ ~/.defenseclaw/config.yaml", true},
+		{"sed -si --follow-symlinks s/a/b/ oldcfg", true},
+		{"sed -ni --follow-symlinks p oldcfg", true},
+		{"sed -Ei --follow-symlinks s/a/b/ oldcfg", true},
+		{"sed -si --follow-symlinks s/a/b/ ~/.defenseclaw/config.yaml", true},
+		{"ln -s ~/.defenseclaw/config.yaml c; sed -si --follow-symlinks s/a/b/ c", true},
+		{"sed -si s/a/b/ ~/.defenseclaw/config.yaml", true},
+		{"sed -Ei s/a/b/ ~/.defenseclaw/hooks/x.sh", true},
+		{"sed -si s/a/b/ oldcfg", false},
+		{"sed -si --follow-symlinks s/a/b/ a.txt", false},
+		{"sed --fo -i s/a/b/ alink", false},
+		{"sed -Ei s/a/b/ a.txt", false},
+		{"sed -n -e 1p --fo oldcfg", false},
 	}
 	for _, connector := range []string{"claudecode", "codex"} {
 		installDefaultProfileConnector(t, connector)
