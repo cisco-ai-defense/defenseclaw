@@ -41,6 +41,10 @@ Redaction follows the v8 bucket and profile policy: edit `observability.destinat
 
 On native Windows, DefenseClaw writes each event and contract into `%CODEX_HOME%\config.toml` and marks the hooks trusted there, because Codex on Windows does not read hooks from `managed_config.toml`. The registered command runs system Windows PowerShell with `-EncodedCommand`, which starts `defenseclaw-hook.exe` synchronously with inherited handles and the bound `--event` and `--hook-contract`. No POSIX shell or WSL is involved. On managed Windows, the enumerator enrolls Codex installed with npm, the official `install.ps1` at its default location, or WinGet. A relocated `CODEX_HOME`, or another folder that discovery finds but cannot enroll, is reported as `agent_unprotected` ([Enrollment](/docs/enterprise/enrollment)). Managed enrollment publishes hooks in `%ProgramData%\OpenAI\Codex\requirements.toml`. The per-user `managed_config.toml` is read only to clean up older registrations.
 
+On Windows, setup refuses a Codex home that goes through a symbolic link or junction, before it changes anything. The default `%USERPROFILE%\.codex` counts. The message names the folder and the fix: make it a real folder, or set `CODEX_HOME` to the real folder. Then run `defenseclaw setup codex` again. The gateway keeps running.
+
+If setup finds a syntax error in your `config.toml`, the refusal names the file, line and column. Setup keeps each line ending of the lines it does not render, and keeps your comments after the hooks it renders again.
+
 ### Check it
 
 ```bash
@@ -241,6 +245,8 @@ export NO_PROXY="${NO_PROXY:+$NO_PROXY,}127.0.0.1,localhost,::1" no_proxy="${no_
 | `doctor` warns about rejected OTLP attempts after an upgrade | The daemon keeps the old telemetry credential. Run `codex app-server daemon restart`. The **Native OTLP credentials** row clears 24 hours after the last refused attempt. |
 | First prompt of a new session recorded twice | Codex 0.156 starts a second internal session during the first turn, with its own session id. It fires `SessionStart`, `UserPromptSubmit` and `Stop` for the same prompt. Two rows differ in `defenseclaw.session.root.id`. Count prompts by session and turn id. |
 | Connections to OpenAI when the gateway starts (Windows) | Each gateway start or restart with the Codex connector enabled runs Codex's app-server once to read its effective requirements. It connects to OpenAI (for example chatgpt.com) and can reach your model provider. |
+| A Codex session start is refused with `Codex runtime registration is unavailable` | The gateway is running and answered with an error (HTTP 503). It could not repair Codex's hook registration. This is not an outage. The text names the setup step: `defenseclaw setup codex --yes`. If the Codex executable changed since setup (a Codex update does this), it says so. Run the step. |
+| `doctor` warns on **Codex OTel ownership** | `config.toml` holds an `[otel]` exporter that carries DefenseClaw's `x-defenseclaw-source` and `x-defenseclaw-client` headers and a bearer this install never recorded. Setup keeps it as yours. Codex sends prompt telemetry and that bearer to a loopback port DefenseClaw does not serve. If you did not add it, delete the named tables. Doctor never removes it. |
 | Hooks fail after a Codex update (Windows) | Setup records the Codex executable's path and SHA-256. An update changes it, so doctor fails the **Hook contract** and **Codex hooks** rows with `policy-blocked: selected Codex executable no longer matches protected Setup evidence`. Run `defenseclaw setup codex --yes`. |
 
 ## Disable

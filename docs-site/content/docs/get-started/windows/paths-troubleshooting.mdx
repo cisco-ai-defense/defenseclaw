@@ -79,7 +79,7 @@ Setup changes the Claude Code `settings.json` only as a regular file. If it is a
 
 ## Supported path overrides
 
-Claude Code, Codex, GitHub Copilot CLI, Hermes and OpenCode let you move their configuration folder with `CLAUDE_CONFIG_DIR`, `CODEX_HOME`, `COPILOT_HOME`, `HERMES_HOME` and `OPENCODE_CONFIG_DIR`. Set them to absolute native paths before you install DefenseClaw or set up the connector. Setup checks and remembers them and refuses a path through a symbolic link or junction. For Codex, `defenseclaw setup codex --no-restart` keeps the folder the running gateway already uses and says so when `CODEX_HOME` names another one; run it again without `--no-restart` to move. Amp, Antigravity, Cursor and Devin have no such variable.
+Claude Code, Codex, GitHub Copilot CLI, Hermes and OpenCode let you move their configuration folder with `CLAUDE_CONFIG_DIR`, `CODEX_HOME`, `COPILOT_HOME`, `HERMES_HOME` and `OPENCODE_CONFIG_DIR`. Set them to absolute native paths before you install DefenseClaw or set up the connector. Setup checks and remembers them and refuses a path through a symbolic link or junction, before it changes anything. For Codex the refusal names the folder and the fix: set `CODEX_HOME` to the real folder, or unset it to use `%USERPROFILE%\.codex`, then run `defenseclaw setup codex`. The same holds for the other four variables. For Codex, `defenseclaw setup codex --no-restart` keeps the folder the running gateway already uses and says so when `CODEX_HOME` names another one; run it again without `--no-restart` to move. Amp, Antigravity, Cursor and Devin have no such variable.
 
 <Tabs items={['PowerShell', 'cmd']}>
   <Tab value="PowerShell">
@@ -100,7 +100,7 @@ set "CLAUDE_CONFIG_DIR=D:\Agent Profiles\Claude"
   </Tab>
 </Tabs>
 
-Changing a variable later does not move DefenseClaw's entries. To move an agent's folder, run its setup again. The default data root is the current profile's `.defenseclaw`; `DEFENSECLAW_HOME` overrides it. Use the same value for every command, including `defenseclaw upgrade`. `DEFENSECLAW_FAIL_MODE` is not a path setting and no 1.0.4 hook reads it. Set the fail mode with `defenseclaw guardrail fail-mode open|closed`; setup writes it into the hooks and the OpenCode plugin, and `defenseclaw status` and `defenseclaw doctor` report it.
+Changing a variable later does not move DefenseClaw's entries. To move an agent's folder, run its setup again. The default data root is the current profile's `.defenseclaw`; `DEFENSECLAW_HOME` overrides it. `install.ps1` turns a quoted `~\...` or a relative `DEFENSECLAW_HOME` or `DEFENSECLAW_CONFIG` into an absolute path first (a relative one is taken from the folder you run it in), so use an absolute path for later commands. Use the same value for every command, including `defenseclaw upgrade`. `DEFENSECLAW_FAIL_MODE` is not a path setting and no 1.0.4 hook reads it. Set the fail mode with `defenseclaw guardrail fail-mode open|closed`; setup writes it into the hooks and the OpenCode plugin, and `defenseclaw status` and `defenseclaw doctor` report it.
 
 DefenseClaw restricts its private files to the current user, Administrators and SYSTEM on Windows ([security model](/docs/get-started/windows/telemetry-security#ownership-and-filesystem-boundary)).
 

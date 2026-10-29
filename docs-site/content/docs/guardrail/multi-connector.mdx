@@ -72,7 +72,7 @@ Run the hook setup for the agent you want to add. Setup first asks the new agent
      OK codex mode=observe
    ```
 
-   Add is the default, also with `--yes`. The new agent starts in observe mode. Add `--mode action` to block from the start.
+   Add is the default, also with `--yes`. The new agent starts in observe mode. Add `--mode action` to block from the start. The picker's "never block" covers policy findings. Observe still blocks an agent that changes DefenseClaw's own files, such as a copy into `~/.defenseclaw` (rule `tamper.detector_state_write`; the permissive pack only reports it).
 
 2. Check both agents.
 

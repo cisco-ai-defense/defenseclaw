@@ -183,7 +183,7 @@ The layers divide the work so that two of them never make the same decision:
    two controls; hooks keep everything that needs intent.
 2. **The kernel mode never exceeds the guardrail mode.** A connector in
    guardrail observe mode does not block on a policy verdict; it reports
-   "would block"; hook failures still follow the effective hook fail mode. The kernel controls do not deny for that connector either:
+   "would block"; hook failures still follow the effective hook fail mode. One exception: an agent that changes DefenseClaw's own files, such as a copy into `~/.defenseclaw`, is blocked in every mode (rule `tamper.detector_state_write`; the permissive pack only reports it). The kernel controls do not deny for that connector either:
    they stay in monitor mode and status says `kernel_enforce_guardrail_observe`.
 3. **The kernel never denies what the hook path needs.** The controls cover
    SSH private keys and shell and autostart writes. They never cover the hook

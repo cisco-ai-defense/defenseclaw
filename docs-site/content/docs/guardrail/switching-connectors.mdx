@@ -52,7 +52,7 @@ answered with a number:
 
 Type `1` (observe) or `2` (action), or press Enter for the default in brackets: the agent's current mode when it is already set up, observe for a new one. Letters are
 rejected here. Passing `--mode observe` or `--mode action` answers this question,
-so setup does not ask it.
+so setup does not ask it. The picker's "never block" covers policy findings. Observe still blocks an agent that changes DefenseClaw's own files, such as a copy into `~/.defenseclaw` (rule `tamper.detector_state_write`; the permissive pack only reports it). See [Write a rule with an agent](/docs/policies/recipes#write-a-rule-with-an-agent).
 
 Setup then prints what it will change and asks one more question. Which one depends on what is already set up:
 

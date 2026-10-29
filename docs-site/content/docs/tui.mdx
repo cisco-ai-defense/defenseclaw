@@ -352,6 +352,8 @@ and help beside the table:
 | `r` | Revert unsaved changes (`R` opens Registries) |
 | `w` | Back to the task list |
 
+The **Admission Defaults** section has one row, **Allow List Bypass** (`admission.defaults.allow_list_bypass_scan`). On, the default, a first-party allow-list entry installs without a scan; off, it is scanned. An unset key shows `true`, the value it inherits.
+
 Keys the TUI can't save show as read-only rows; their hint says where to change
 them (in `config.yaml`, or with `defenseclaw setup <connector>` for connector
 hooks). Only problems in fields you changed block a save. If `config.yaml`

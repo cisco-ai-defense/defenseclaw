@@ -110,6 +110,8 @@ The guardrail checks what your agent is about to do (a prompt, a shell command, 
   ]}
 />
 
+The picker's "never block" covers policy findings. Observe still blocks an agent that changes DefenseClaw's own files, such as a copy into `~/.defenseclaw` (rule `tamper.detector_state_write`; the permissive pack only reports it). See [Two modes](#two-modes-you-have-to-choose-between).
+
 ## Same setup, no prompts
 
 ```bash
@@ -168,7 +170,7 @@ Telemetry redaction is configured per destination with `defenseclaw setup redact
 
 You choose how strict it is per agent with a mode:
 
-- **Observe** records policy findings without enforcing them. Start here.
+- **Observe** records policy findings without enforcing them. Start here. One exception: an agent that changes DefenseClaw's own files, such as a copy into `~/.defenseclaw`, is blocked in every mode (rule `tamper.detector_state_write`; the permissive pack only reports it).
 - **Action** applies the block and alert levels below.
 - **Human approval (HITL)** is an option in action mode. A risky call below the block level pauses and asks you first, on agents that can ask.
 
@@ -236,7 +238,7 @@ Codex, Cursor, Hermes, OpenCode, Devin, Kiro and ZeptoClaw cannot ask. GitHub Co
 ### What it does not do
 
 - It cannot see what a child program writes after a command starts. For protected files, add a sandbox or file permissions.
-- Observe mode does not enforce policy findings, whatever the levels say. Hook fail mode and proxy availability still apply.
+- Observe mode does not enforce policy findings, whatever the levels say. Hook fail mode and proxy availability still apply. One exception: an agent that changes DefenseClaw's own files, such as a copy into `~/.defenseclaw`, is blocked in every mode (rule `tamper.detector_state_write`; the permissive pack only reports it).
 - The TUI does not hold or resume a paused call. Approval happens in the agent.
 
 ## Connector resolution
@@ -646,7 +648,7 @@ Rule pack valid: "/home/alice/my-guardrail-pack"
   files digest: a86e…b6314d (the guardrail.custom_packs pin)
 ```
 
-`use-pack` pins the pack by digest. If you edit the pack later, the gateway keeps the old policy; `defenseclaw doctor` fails the **Config validation** and **Rule pack** rows and skips **Policy** until you pin the new `files digest` (the Rule pack row prints the `config set` command). [Rules and custom packs](/docs/policies/rules) has the details.
+`use-pack` pins the pack by digest and checks every existing pin of the same pack directory by file identity, so another spelling of the path (a symlink, or a different letter case on a case-insensitive volume) cannot leave a stale pin. `use-pack --clear --connector X` and `guardrail mode --clear --connector X` remove the connector's entry when nothing else is set on it, and keep it only when it is what puts the connector on the roster. `guardrail mode observe` runs the same refusals setup runs for every agent it moves out of action mode, and stops with the reason if one holds in every mode, so a switch can always be undone. If you edit the pack later, the gateway keeps the old policy; `defenseclaw doctor` fails the **Config validation** and **Rule pack** rows and skips **Policy** until you pin the new `files digest` (the Rule pack row prints the `config set` command). [Rules and custom packs](/docs/policies/rules) has the details.
 
 ### Next
 

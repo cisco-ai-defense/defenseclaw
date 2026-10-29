@@ -400,7 +400,7 @@ You are an AI agent. Set up OpenShell sandboxes for the user, run one agent in a
    ```
 
    Expected: a list of `✓` rows ending with `✓ ready for sandboxes`.
-   If it differs: report each row without `✓` and its message. Repeat step 3 after each fix the user approves, until the last line says `ready for sandboxes`.
+   If it differs: report each row without `✓` and its message (a **Host Git** row needs git 2.29 or newer; tell the user, do not install it yourself). Repeat step 3 after each fix the user approves, until the last line says `ready for sandboxes`.
 
 4. Start the agent in a sandbox, in the project folder the user names. `sandbox run` gives the agent your terminal, and your shell has none, so either ask the user to run `defenseclaw sandbox run claude` in their own terminal, or run one task in the background:
 
@@ -410,7 +410,7 @@ You are an AI agent. Set up OpenShell sandboxes for the user, run one agent in a
    ```
 
    Expected: a banner that names the sandbox, the project folder and the policy. A detached run returns after the banner; its `Asks` row names the sandbox (`defenseclaw sandbox approvals --watch --sandbox <name>`).
-   If it says `` `sandbox run` attaches Claude Code to your terminal, and there is none ``, you left out `--prompt`. If the command is refused for another reason, quote the message.
+   If it says `` `sandbox run` attaches Claude Code to your terminal, and there is none ``, you left out `--prompt`. If it says `Your organization doesn't allow sandboxes for your account.`, stop: the administrator's policy forbids it, and nothing was installed. If the command is refused for another reason, quote the message.
 
 5. Read a block. In a second terminal, list what the sandbox allowed and refused.
 
@@ -527,7 +527,7 @@ Before stopping a raw OpenShell MicroVM on a gateway older than OpenShell 0.1.5,
 
 **You see:** `defenseclaw sandbox status NAME` reports the sandbox not protected and says DefenseClaw withdraws the network rules it added, but that does not contain the old broker, which passes a connection it cannot inspect straight to the host.
 
-**Cause:** the MicroVM was started on OpenShell 0.1.3 or older and still runs that release's supervisor. Its network broker lets a connection it cannot inspect bypass the sandbox policy, so removing the guest's policy rules does not cut it off. This is an OpenShell 0.1.3 limit (NVIDIA/OpenShell#4494); DefenseClaw has no network cutoff below that broker, and it does not stop the guest for you, so as not to lose work it has not synced.
+**Cause:** the MicroVM was started on OpenShell 0.1.3 or older and still runs that release's supervisor. Its network broker lets a connection it cannot inspect bypass the sandbox policy, so removing the guest's policy rules does not cut it off. While DefenseClaw has withdrawn the guest's network, no approval adds a network rule or provider to it, whoever approved it, including a host-port approval; the create-time network returns when the guest runs on the current supervisor. This is an OpenShell 0.1.3 limit (NVIDIA/OpenShell#4494); DefenseClaw has no network cutoff below that broker, and it does not stop the guest for you, so as not to lose work it has not synced.
 
 **Fix:** restart the sandbox after DefenseClaw has withdrawn its rules. Save the work you need, then run `defenseclaw sandbox stop NAME` and `defenseclaw sandbox start NAME`; the next session runs on the current supervisor. If the stop is held because the disk could not sync, see [A MicroVM stop is held because its disk could not sync](#a-microvm-stop-is-held-because-its-disk-could-not-sync). For a guest whose workload completed or failed, follow [Legacy MicroVM guests](/docs/support-matrix#upgrade-and-policy-limits). Until it restarts, treat its network as open.
 
@@ -580,7 +580,7 @@ If the message is `DefenseClaw is restarting or upgrading the OpenShell gateway`
 
 **Fix:** stop that gateway, then start the service. For another account's gateway, hand it over ([Linux](/docs/sandboxes/linux#one-openshell-gateway-per-machine), [macOS](/docs/sandboxes/macos#one-openshell-gateway-per-mac)). `--fix` leaves this to you.
 
-If another program, such as another account's DefenseClaw gateway, already listens on your sandbox ingress or egress port, `defenseclaw sandbox setup` offers the next free port and writes it as `openshell.ingress_port` or `openshell.egress_port`; answer no to keep your port and free it yourself.
+If another program, such as another account's DefenseClaw gateway, already listens on your sandbox ingress or egress port, `defenseclaw sandbox setup` offers the next free port and writes it as `openshell.ingress_port` or `openshell.egress_port`; answer no to keep your port and free it yourself. When your own daemon holds a port, the doctor does not report it as held by another process, even while another account holds the other one.
 
 **Check:** `defenseclaw sandbox doctor` shows the gateway service active.
 
@@ -706,6 +706,8 @@ On a MicroVM, `defenseclaw sandbox stop` syncs the VM's disk before it stops it.
 
 Signing out without linger, `sandbox teardown` and an administrator's stop of the sandbox service end the OpenShell gateway, and with it the VM, even when its disk could not sync: DefenseClaw tries its synced stop again first, and names each VM whose disk still could not sync and what it may have lost (on your own computer, in the activity feed).
 
+Every stop or restart of the OpenShell gateway syncs the disk of each MicroVM that OpenShell lists as ready first, whoever started it and whoever stops the gateway, on Linux and macOS. On Linux the gateway's systemd unit runs the sync as a stop command, and `defenseclaw sandbox setup` and every restart DefenseClaw makes give your unit that command if it lacks it. On a Mac, DefenseClaw syncs right before it stops the Homebrew gateway job, then starts the job again; if Homebrew refuses to start it, DefenseClaw starts the job from its own plist, so a restart does not leave the gateway down. A managed computer does the same: its Linux unit runs `sandbox-daemon sync-sandboxes --managed` as a second stop command, and the managed macOS stop syncs first. A MicroVM that could not be synced is ended with the gateway anyway, and the activity feed shows `stop_unflushed` for it. A sandbox started by raw `openshell` just before the stop is still booting and has written nothing yet.
+
 #### A network rule from the last session was not removed
 
 **You see:** ``sandbox <name> did not start: the network rule <rule>, approved for its last session, could not be removed from its policy``, or ``sandbox <name> is still running with the network rule <rule> approved for its last session``.
@@ -735,6 +737,16 @@ Signing out without linger, `sandbox teardown` and an administrator's stop of th
 **Fix:** run `chmod u+rwx tools`, review what is in it, and run undo again.
 
 **Check:** undo shows its preview.
+
+#### Your organization does not allow sandboxes for your account
+
+**You see:** `Your organization doesn't allow sandboxes for your account.` (or `Your organization doesn't allow this agent in a sandbox.`) when you run `defenseclaw sandbox run`.
+
+**Cause:** your administrator's policy for your account turns sandboxes off, or leaves that agent out. On a managed computer DefenseClaw decides this before it starts your sandbox daemon or announces an OpenShell install, so nothing is started or installed for the refused run. If your organization's directory does not answer, DefenseClaw says so and waits up to 10 seconds for your policy before it starts OpenShell. Commands that only read (`sandbox list`, `sandbox status`) answer from DefenseClaw's records while sandboxes are off and start no gateway.
+
+**Fix:** ask your administrator to change the policy. Nothing on your side lifts it.
+
+**Check:** after the administrator's change, `defenseclaw sandbox run` starts.
 
 #### A policy limit refused the setting
 
@@ -826,7 +838,7 @@ These are the disk, telemetry and MicroVM resource checks of `defenseclaw sandbo
 
 **You see:** ``the sandbox's own disk is full (no space left on device): a MicroVM writes to an overlay disk …``, ``<name> cannot start: its own disk is full``, or `sandbox status` shows `Phase error: its own disk is full …`.
 
-**Cause:** a MicroVM stopped with its overlay disk full cannot start again, and its unpulled work cannot be read.
+**Cause:** a MicroVM stopped with its overlay disk full cannot start again, and its unpulled work cannot be read. A copy-mode session looks at the MicroVM's own disk soon after it starts, then every 15 seconds on a disk of 4 GiB or less (every 2 minutes on a larger one). It warns when the disk is 90% full, and once earlier when the free space is falling so fast that the disk would be full before the look after next. The warning only reports; nothing is stopped.
 
 **Fix:** while it runs, `defenseclaw sandbox exec NAME -- df -h /` shows the space. Free space, or pull the work, before it stops. A session whose end hits this leaves the MicroVM running: free space (`defenseclaw sandbox connect NAME --shell`), then `defenseclaw sandbox pull NAME`. Once stopped full, only `defenseclaw sandbox delete NAME` is left. Raise `overlay_disk_mib` under `[openshell.drivers.vm]` for new sandboxes (the doctor shows the value and where it is set).
 

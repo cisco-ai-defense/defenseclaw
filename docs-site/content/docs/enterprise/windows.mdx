@@ -162,7 +162,8 @@ Each key under `guardrail.connectors` turns on one agent. With none, `status` wa
 `no_connectors_enabled` and `verify` fails ([choose the agents](/docs/enterprise/configuration),
 [settings](/docs/enterprise/configuration)). Pick `gateway.api_port` before the
 first install: every user's hooks are bound to it, so changing it later means
-uninstall and install again.
+uninstall and install again. The file may be at most 4 MiB and 65,536 YAML nodes
+([limits](/docs/enterprise/configuration#where-the-config-lives)).
 
 Setup takes the config only from an absolute local path that standard users cannot
 change. Stage it in a folder you own:
@@ -276,11 +277,16 @@ Setup properties use `NAME=value`; names are case-insensitive and ignore dashes.
 | `NOSTART=1` | Install with the services stopped and disabled (`not_started` warning); a later `/repair` starts them |
 | `PURGE=1` | With `/uninstall`: also remove each enrolled account's per-user data ([Remove](#remove)) |
 | `FORCE=1` | With `/uninstall`: remove the deployment without recovering a pending transaction |
-| `TIMEOUTSECONDS=<n>` | Lifecycle timeout, 60 to 7200. Default 1800 |
+| `TIMEOUTSECONDS=<n>` | Lifecycle timeout, 60 to 7200. Default 1800. It also bounds the `ensure` Setup runs (Setup gives it the limit less a tenth, taking off at most 2 minutes), so a slow upgrade is no longer cut off at 12 minutes. A direct `defenseclaw.exe ... ensure` keeps its 12-minute limit. A run that stops at the limit prints the retry command with the same properties and `TIMEOUTSECONDS=7200` |
 
 The other actions are `/install`, `/upgrade`, `/repair`, `/reconcile`, `/status`,
 `/verify` and `/uninstall`. Prefer `/ensure`; `/install` also needs `MANIFEST=`.
-`/?` lists the actions and properties.
+`/?` lists the actions and properties. A property Setup does not know is refused with a hint
+that lists every property `/?` lists. A relative `CONFIG=` or `--config` path is `invalid_arguments`.
+`/repair` run from another release than the installed one is refused with `invalid_arguments`
+before it changes anything; it names the installed release, Setup `/ensure` to move to this
+release and `/upgrade` to go down. Prerelease versions order as semver does (`rc.10` is newer
+than `rc.9`), in Setup, `/ensure` and the Intune detect script.
 
 ### 4. Add the AI Defense key
 
@@ -835,7 +841,7 @@ On a computer with the standalone deployment the per-user product refuses to run
 | --- | --- |
 | `install.ps1` | Refuses when the marker key exists, or when `DisableSelfUpdate` under `HKLM\SOFTWARE\Policies\Cisco\DefenseClaw` is nonzero |
 | `defenseclaw upgrade`, `defenseclaw rollback` | Refuse when the marker key exists |
-| Per-user gateway | Refuses to start on a managed computer |
+| Per-user gateway | Refuses to start on a managed computer. `defenseclaw gateway stop`, `start` and `restart` refuse there too; the message names `status` and the installed release's Setup `/repair` as the way to restart the managed gateway |
 
 Nothing migrates a per-user install. Before you deploy, have each user run
 `defenseclaw uninstall --all --binaries --yes`. Setup needs `--all`: it does not
@@ -866,9 +872,16 @@ those too. The marker key, the Add/Remove Programs entry and a `DisableSelfUpdat
 value the lifecycle wrote are removed, and the lifecycle log stays. A standalone
 Setup uninstall removes the administrator-only
 `C:\ProgramData\Cisco\DefenseClaw-Lifecycle\lifecycle.lock` and its directory even
-without `PURGE=1`. The Secure Client profile keeps the lock unless `PURGE=1`. On a
-computer without DefenseClaw, uninstall succeeds and changes nothing.
+without `PURGE=1`. A plain installed CLI uninstall leaves the lock file and its folder
+in place (without `--purge`). They are harmless and the next install reuses them; to remove them, delete
+`C:\ProgramData\Cisco\DefenseClaw-Lifecycle` from an elevated prompt once no
+DefenseClaw run is active. The Secure Client profile keeps the lock unless `PURGE=1`.
+On a computer without DefenseClaw, uninstall succeeds and changes nothing, so it does
+not remove a lock an earlier uninstall left.
 
+- A standalone uninstall first runs a read-only check of the hook teardown (guardian, enrollment
+  and runtime selectors). If the check refuses, DefenseClaw stays fully installed and the
+  result names what to repair. Repair it, then uninstall again.
 - Run the CLI uninstall with `defenseclaw.exe`; other installed binaries refuse it
   (`1639`). If an uninstall committed but could not finish, run Setup again as
   LocalSystem with `/uninstall JSON=1` (and `PURGE=1` if the original was a purge).
@@ -881,10 +894,11 @@ computer without DefenseClaw, uninstall succeeds and changes nothing.
 - **Per-user registrations.** Uninstall revokes every enrollment, then removes
   DefenseClaw's own registrations and plugins (Amp, Antigravity, Devin, Hermes,
   Kiro, OpenCode, a Copilot user hook file) from the agent config of users with an
-  active session, running as each user. Acting as a user needs LocalSystem, so an
+  active (connected) session, running as each user. Acting as a user needs LocalSystem, so an
   uninstall from an elevated prompt or Add/Remove Programs removes none and
-  reports `user_registrations_pending`. Signed-out users keep theirs; failures
-  report `user_registrations_failed`. An older Claude Code per-user hook in
+  reports `user_registrations_pending`. Signed-out users, and signed-in users whose
+  session is disconnected (`query user` shows `Disc`), keep theirs and are named in
+  `user_registrations_pending`; failures report `user_registrations_failed`. An older Claude Code per-user hook in
   `%USERPROFILE%\.claude\settings.json` is removed exactly, and a changed one is
   kept with `claude_settings_hook_left`.
 - **`PURGE=1`** also removes each enrolled account's `%USERPROFILE%\.defenseclaw`
@@ -892,13 +906,18 @@ computer without DefenseClaw, uninstall succeeds and changes nothing.
   hooks back), its `.defenseclaw.rollback-<random>` copies, the DefenseClaw
   launchers and binaries in `%USERPROFILE%\.local\bin`, the Claude Code drop-ins,
   `machine-policy.json`, the runtime selectors and the lifecycle lock. An account
-  without an active session keeps its `.defenseclaw` for the registrations that
+  without an active (connected) session keeps its `.defenseclaw` for the registrations that
   stay (`user_registrations_pending` and `per_user_state_remaining` warnings; the
-  purge exits `0`). It needs
+  purge exits `0`). A signed-out account's registry hive is not loaded, so it also keeps its user
+  Path entry for `%USERPROFILE%\.local\bin`; that is a warning too, and the entry runs nothing.
+  A `PURGE=1` run after a plain uninstall already finished removes the accounts' per-user data
+  as well. It needs
   LocalSystem: otherwise it removes the machine deployment but none of these
   folders, fails with a nonzero exit and names each account
   (`per_user_state_remaining`). Run Setup `/ensure` and then `/uninstall PURGE=1`
-  as LocalSystem while the accounts have a connected session. It still removes the
+  as LocalSystem while the accounts have a connected session. If the purge already removed the
+  machine deployment that lists the accounts, a second `PURGE=1` finds none of them: the error
+  then names the folders to delete by hand. It still removes the
   marker, so an Intune registry detection rule reports DefenseClaw as not
   installed. The `machine_state_remaining` warning names anything it could not
   remove.
