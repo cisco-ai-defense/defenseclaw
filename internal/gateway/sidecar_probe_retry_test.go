@@ -18,9 +18,11 @@ package gateway
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"reflect"
 	"testing"
+	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail"
@@ -71,5 +73,75 @@ func TestSetupConnectorsIsolated_RetriesASlowProbe(t *testing.T) {
 	}
 	if missing := connectorsNotStarted([]connector.Connector{stuck, peer}, []string{"codex"}); !reflect.DeepEqual(missing, []string{"claudecode"}) {
 		t.Fatalf("connectorsNotStarted = %v, want [claudecode]", missing)
+	}
+}
+
+// errSettingsInUse stands for the Windows sharing violation an agent that
+// holds its settings file open causes (connector.FileBusyError).
+var errSettingsInUse = errors.New("A file cannot be opened because the share access flags are incompatible")
+
+// busyOnceConnector finds its settings file in use on its first setups.
+type busyOnceConnector struct {
+	bootStubConnector
+	busySetups int
+}
+
+func (c *busyOnceConnector) Setup(ctx context.Context, opts connector.SetupOpts) error {
+	if c.setupCalls < c.busySetups {
+		c.setupCalls++
+		return fmt.Errorf("claudecode otel env: %w", errSettingsInUse)
+	}
+	return c.bootStubConnector.Setup(ctx, opts)
+}
+
+// GAP-2524: Claude Code held settings.json open for a moment while the
+// upgraded gateway started, the claudecode refresh failed on the sharing
+// violation, and the installer rolled the upgrade back. Setup now tries
+// again for a bounded time; a file that stays in use still fails the start.
+func TestSetupConnectorsIsolated_RetriesSettingsInUse(t *testing.T) {
+	busy, budget, delay := connectorSettingsBusy, connectorSettingsBusyBudget, connectorSettingsBusyDelay
+	t.Cleanup(func() {
+		connectorSettingsBusy, connectorSettingsBusyBudget, connectorSettingsBusyDelay = busy, budget, delay
+	})
+	connectorSettingsBusy = func(err error) bool { return errors.Is(err, errSettingsInUse) }
+	connectorSettingsBusyBudget, connectorSettingsBusyDelay = 200*time.Millisecond, time.Millisecond
+
+	s := multiBootSidecar(t)
+	held := &busyOnceConnector{bootStubConnector: bootStubConnector{stubConnector: stubConnector{name: "claudecode"}}, busySetups: 3}
+	peer := &bootStubConnector{stubConnector: stubConnector{name: "codex"}}
+	got, err := s.setupConnectorsIsolated(
+		context.Background(), []connector.Connector{held, peer},
+		"tok", "127.0.0.1:0", "127.0.0.1:0", "master", guardrail.NewRulePackCache(),
+	)
+	if err != nil {
+		t.Fatalf("setupConnectorsIsolated: %v", err)
+	}
+	if want := []string{"claudecode", "codex"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("survivors=%v, want %v", got, want)
+	}
+	if held.setupCalls != 4 || held.teardownCalls != 0 {
+		t.Fatalf("held connector setupCalls=%d teardownCalls=%d, want 4 and 0", held.setupCalls, held.teardownCalls)
+	}
+
+	// A file that stays in use is not waited on forever.
+	stuck := &busyOnceConnector{bootStubConnector: bootStubConnector{stubConnector: stubConnector{name: "claudecode"}}, busySetups: 1 << 20}
+	started := time.Now()
+	got, _ = s.setupConnectorsIsolated(
+		context.Background(), []connector.Connector{stuck},
+		"tok", "127.0.0.1:0", "127.0.0.1:0", "master", guardrail.NewRulePackCache(),
+	)
+	if len(got) != 0 || stuck.setupCalls < 2 || time.Since(started) > 5*time.Second {
+		t.Fatalf("stuck settings: survivors=%v setupCalls=%d after %s", got, stuck.setupCalls, time.Since(started))
+	}
+
+	// Other failures are not retried.
+	other := &busyOnceConnector{bootStubConnector: bootStubConnector{stubConnector: stubConnector{name: "claudecode"}}}
+	other.setupErr = errors.New("claudecode settings hooks: parse claude settings: bad json")
+	_, _ = s.setupConnectorsIsolated(
+		context.Background(), []connector.Connector{other},
+		"tok", "127.0.0.1:0", "127.0.0.1:0", "master", guardrail.NewRulePackCache(),
+	)
+	if other.setupCalls != 1 {
+		t.Fatalf("a parse failure was set up %d times, want 1", other.setupCalls)
 	}
 }

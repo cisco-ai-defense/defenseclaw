@@ -6292,6 +6292,32 @@ func (s *Sidecar) setupConnectorsIsolatedTransaction(ctx context.Context, conns 
 			}
 			err = s.setupOneConnector(ctx, registration.conn, registration.opts, masterKey, cache)
 		}
+		// An agent that has its settings file open (Claude Code writes
+		// settings.json while it runs) makes a Windows open or replace fail
+		// with a sharing violation for a moment. Setup reads the file again
+		// on every run, so it is tried again for a bounded time instead of
+		// failing the start: an upgrade rolled back on it (GAP-2524).
+		for busySince := time.Now(); err != nil && connectorSettingsBusy(err) && ctx.Err() == nil &&
+			time.Since(busySince) < connectorSettingsBusyBudget; {
+			fmt.Fprintf(os.Stderr, "[guardrail] connector %s: %v; its settings are in use, retrying\n",
+				registration.conn.Name(), err)
+			if transaction.publishSetupProgress {
+				s.health.SetGuardrail(StateStarting, "", map[string]interface{}{
+					"setup_connector": registration.conn.Name(),
+					"setup_step":      index + 1,
+					"setup_total":     len(registrations),
+					"setup_busy":      true,
+				})
+			}
+			select {
+			case <-ctx.Done():
+			case <-time.After(connectorSettingsBusyDelay):
+			}
+			if ctx.Err() != nil {
+				break
+			}
+			err = s.setupOneConnector(ctx, registration.conn, registration.opts, masterKey, cache)
+		}
 		if errors.Is(err, connector.ErrAgentConfigRefusal) {
 			// The agent's own settings refuse the hooks, for example after
 			// `codex features disable hooks`. Setup changed nothing, so the
@@ -6424,6 +6450,19 @@ func (s *Sidecar) setupConnectorsIsolatedTransaction(ctx context.Context, conns 
 // connectorProbeTimeoutAttempts bounds setup attempts for a connector whose
 // agent probe ran out of time (GAP-1714).
 const connectorProbeTimeoutAttempts = 3
+
+// connectorSettingsBusy reports a transient Windows sharing or lock
+// violation on a file Setup reads or replaces (connector.FileBusyError;
+// always false off Windows). Tests replace it.
+var connectorSettingsBusy = connector.FileBusyError
+
+// connectorSettingsBusyBudget and connectorSettingsBusyDelay bound the
+// retries of a connector setup whose agent holds its settings file open
+// (GAP-2524). The budget stays inside the installer readiness wait.
+var (
+	connectorSettingsBusyBudget = 5 * time.Second
+	connectorSettingsBusyDelay  = 250 * time.Millisecond
+)
 
 // connectorsNotStarted lists the configured connectors that did not come up.
 func connectorsNotStarted(conns []connector.Connector, succeeded []string) []string {
