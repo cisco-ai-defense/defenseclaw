@@ -104,6 +104,15 @@ type identityCache[T any] struct {
 	// that the account does not exist.
 	gone        func(error) bool
 	confirmGone bool
+	// awaitsRootProof, when set, marks a lookup error that only a proof
+	// recorded by root can settle: a non-root gateway cannot show that SSSD
+	// holds no other account of a local uid (GAP-0653), and takes the proof
+	// the hook guardian records instead. rootProofRecorded reports whether
+	// the guardian has recorded that proof for the account that holds key
+	// now. Such a failure is the wait for the first guardian pass, not a
+	// directory outage (GAP-2535).
+	awaitsRootProof   func(error) bool
+	rootProofRecorded func(key string) bool
 	// trustedUntil, when set, is when the inputs of a lookup of key started
 	// at now stop being trusted (zero: no bound beyond maxAge): the
 	// guardian's identity record, trusted identitySpoolMaxAge from when it
@@ -153,6 +162,9 @@ type identityCacheEntry[T any] struct {
 	lastFailedAt time.Time
 	// gone is set when the last failure said the account does not exist.
 	gone bool
+	// awaitsRootProof is set when the last failure waits only for a proof
+	// root records (identityCache.awaitsRootProof).
+	awaitsRootProof bool
 	// trustedUntil is when the inputs of the served facts stop being
 	// trusted (identityCache.trustedUntil); zero for no bound.
 	trustedUntil time.Time
@@ -676,6 +688,7 @@ func (c *identityCache[T]) noteResultLocked(key string, entry *identityCacheEntr
 		c.answeredAt = now
 		c.noteAnsweredLocked(entry.facts, now)
 		entry.gone = false
+		entry.awaitsRootProof = false
 		if entry.failedSince.IsZero() {
 			return ""
 		}
@@ -685,6 +698,7 @@ func (c *identityCache[T]) noteResultLocked(key string, entry *identityCacheEntr
 	}
 	entry.lastFailedAt = now
 	entry.gone = c.gone != nil && c.gone(err)
+	entry.awaitsRootProof = c.awaitsRootProof != nil && c.awaitsRootProof(err)
 	reason := err.Error()
 	if len(reason) > 300 {
 		reason = reason[:300] + "..."
@@ -742,16 +756,32 @@ const identityHealthMaxAccounts = 10
 
 // health reports the failing accounts. An idle account whose last failure is
 // older than the TTL is not counted: nothing retries it until it is used.
+//
+// A failure that waited only for the root-recorded proof of the hook
+// guardian (awaitsRootProof) is not counted once the guardian has recorded
+// it: the directory answered, and the next lookup takes the proof. The first
+// hook of a new local account on an SSSD-joined host runs before the first
+// guardian pass, and status and verify then warned directory_lookups_failing
+// for the full TTL when the account made no further call (GAP-2535). Such an
+// entry is looked up again at once, so its facts settle without a hook call;
+// a lookup that then fails for another reason is counted again.
 func (c *identityCache[T]) health() identityCacheHealth {
 	var h identityCacheHealth
 	if c == nil {
 		return h
 	}
+	proven := c.rootProofsRecorded()
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	now := c.now()
 	for key, entry := range c.entries {
 		if entry.failedSince.IsZero() || now.Sub(entry.lastFailedAt) >= identityDirectoryTTL {
+			continue
+		}
+		if entry.awaitsRootProof && proven[key] {
+			if entry.inflight == nil {
+				c.refreshLocked(key, entry)
+			}
 			continue
 		}
 		if entry.gone && entry.fetchedAt.IsZero() && !entry.usedByHook {
@@ -780,4 +810,29 @@ func (c *identityCache[T]) health() identityCacheHealth {
 		h.Accounts = h.Accounts[:identityHealthMaxAccounts]
 	}
 	return h
+}
+
+// rootProofsRecorded reports, for each key whose last lookup failure waits
+// for a proof root records, whether the guardian has recorded it. The check
+// reads the account database and the guardian record, so it runs without
+// the lock.
+func (c *identityCache[T]) rootProofsRecorded() map[string]bool {
+	if c.rootProofRecorded == nil {
+		return nil
+	}
+	c.mu.Lock()
+	var keys []string
+	for key, entry := range c.entries {
+		if entry.awaitsRootProof && !entry.failedSince.IsZero() {
+			keys = append(keys, key)
+		}
+	}
+	c.mu.Unlock()
+	proven := make(map[string]bool, len(keys))
+	for _, key := range keys {
+		if c.rootProofRecorded(key) {
+			proven[key] = true
+		}
+	}
+	return proven
 }

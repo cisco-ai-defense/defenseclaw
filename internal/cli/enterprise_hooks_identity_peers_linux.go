@@ -61,12 +61,11 @@ const (
 // recreated home still changes the key at the next tick. The gateway does
 // not rewrite the homes file when a served account is deleted, so without
 // the account database stamp a deleted local account stayed listed from the
-// cache until the interval: every pass failed its lookup, the failed pass
-// kept its record, and status and verify warned directory_lookups_failing
-// (GAP-1864, RHEL leg). A uid the
-// lookup budget did not reach, or whose lookup or home stat failed this
-// time, keeps its last answer, so the spool fingerprint does not flap on a
-// host with many served accounts (GAP-1866).
+// cache until the interval: every pass failed its lookup and the failed
+// pass kept its record (GAP-1864, RHEL leg). A uid the lookup budget did not
+// reach, or whose lookup or home stat failed this time, keeps its last
+// answer, so the spool fingerprint does not flap on a host with many served
+// accounts (GAP-1866).
 var enterpriseHookGatewayPeerAccounts = func(dataDir string) []enterpriseHookPeerAccount {
 	if strings.TrimSpace(dataDir) == "" {
 		return nil
