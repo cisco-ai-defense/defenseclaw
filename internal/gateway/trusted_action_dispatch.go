@@ -302,6 +302,16 @@ func dispatchTrustedAction(
 			findings = withTwinProvenBlocks(findings, dispatchTrustedAction(parent, twin))
 		}()
 	}
+	// A pathname pattern under ~/.defenseclaw names the state files it
+	// matches when the shell runs the call (cp a.txt ~/.defenseclaw/conf*.yaml,
+	// GAP-2496); the reading with the matches is judged, and only its block
+	// counts.
+	if twin, ok := stateGlobTwinRequest(request); ok {
+		defer func() {
+			findings = withTwinProvenBlocks(findings, dispatchTrustedAction(parent, twin))
+		}()
+	}
+
 	facts = actionfacts.Analyze(request.Input)
 	analyzed = true
 	if conflict, ok := conflictingToolArgumentKeys(request, facts); ok {
@@ -5386,6 +5396,37 @@ func dynamicOperandTwinRequests(request trustedActionRequest) []trustedActionReq
 		twins = append(twins, twin)
 	}
 	return twins
+}
+
+// stateGlobTwinRequest returns the request for actionfacts.StateGlobTwin of
+// a POSIX Bash call. The gateway expands the pattern on its own host, so a
+// gateway that may not read the user home (ProtectHome, or a request that
+// skips local resolution) has no reading.
+func stateGlobTwinRequest(request trustedActionRequest) (trustedActionRequest, bool) {
+	if request.ProtectedHomeHook || request.SkipLocalFilesystemResolution {
+		return trustedActionRequest{}, false
+	}
+	if request.Input.DialectHint != actionfacts.DialectPOSIX && request.Input.DialectHint != "" {
+		return trustedActionRequest{}, false
+	}
+	command, known := trustedBashCommandInput(request.Input)
+	if !known {
+		return trustedActionRequest{}, false
+	}
+	rewritten, ok := actionfacts.StateGlobTwin(command, request.Input.ActiveHome)
+	if !ok || rewritten == command {
+		return trustedActionRequest{}, false
+	}
+	twin := request
+	twin.record, twin.recordTelemetry = nil, nil
+	twin.Input.Command, twin.Input.Args, twin.Input.Argv = rewritten, nil, nil
+	twin.conflictSource = nil
+	if strings.Contains(request.LegacyText, command) {
+		twin.LegacyText = strings.ReplaceAll(request.LegacyText, command, rewritten)
+	} else {
+		twin.LegacyText = rewritten
+	}
+	return twin, true
 }
 
 func trustedBashCommandInput(input actionfacts.Input) (string, bool) {

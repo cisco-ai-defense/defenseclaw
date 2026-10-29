@@ -573,6 +573,10 @@ func classifyCommand(out *parseOutput, command *CommandFact) {
 		classifyPOSIXPermissionChange(out, command, program)
 	case "install":
 		classifyPOSIXInstall(out, command)
+	case "ln":
+		classifyPOSIXLink(out, command)
+	case "rsync":
+		classifyRsync(out, command)
 	case "setfacl":
 		classifySetfacl(out, command)
 	case "setcap":
@@ -3544,6 +3548,136 @@ func classifyPOSIXInstall(out *parseOutput, command *CommandFact) {
 	}
 }
 
+// classifyPOSIXLink records the name ln creates as a write: the last
+// operand, the -t directory, or with one operand a name in the current
+// directory (GAP-2496: ln -sf a.txt ~/.defenseclaw/config.yaml replaced
+// DefenseClaw state and tied no path to the call). The link target is only
+// a name the new link holds, so it is not recorded as a read or a write.
+func classifyPOSIXLink(out *parseOutput, command *CommandFact) {
+	if !requireCommandDialect(out, command, DialectPOSIX, DialectArgv) {
+		return
+	}
+	parsed := parseOwnedPOSIXOptions(
+		command.Argv,
+		exactOptionSet("-t", "--target-directory", "-S", "--suffix"),
+		exactOptionSet(
+			"-b", "-d", "-F", "-f", "-i", "-L", "-n", "-P", "-r", "-s", "-T", "-v",
+			"--backup", "--directory", "--force", "--interactive", "--logical",
+			"--no-dereference", "--no-target-directory", "--physical",
+			"--relative", "--symbolic", "--verbose",
+		),
+		exactOptionSet("--help", "--version"),
+	)
+	if parsed.preview {
+		command.Effect = EffectPreview
+		return
+	}
+	if !parsed.complete {
+		out.markPartial(IssueUnknownOperandGrammar)
+	}
+	destination, directory := parsed.values["-t"]
+	if !directory {
+		destination, directory = parsed.values["--target-directory"]
+	}
+	switch {
+	case directory && destination != "" && len(parsed.positionals) != 0:
+	case !directory && len(parsed.positionals) >= 2:
+		destination = parsed.positionals[len(parsed.positionals)-1]
+	case !directory && len(parsed.positionals) == 1:
+		target := strings.TrimRight(parsed.positionals[0], "/")
+		if slash := strings.LastIndexByte(target, '/'); slash >= 0 {
+			target = target[slash+1:]
+		}
+		destination = target
+	default:
+		out.markPartial(IssueUnknownOperandGrammar)
+		return
+	}
+	if destination == "" {
+		out.markPartial(IssueUnknownOperandGrammar)
+		return
+	}
+	addOperation(command, OperationCopy)
+	appendCommandPath(out, command, PathAccessWrite, destination)
+}
+
+// classifyRsync records the local destination of rsync (the last operand)
+// as a write and each local source as a read (GAP-2496: rsync a.txt
+// ~/.defenseclaw/hooks/x.sh tied no path to the call). A remote operand
+// (host:path, rsync://) is not a local path. --remove-source-files also
+// deletes the sources; a dry run or a listing writes nothing.
+func classifyRsync(out *parseOutput, command *CommandFact) {
+	if !requireCommandDialect(out, command, DialectPOSIX, DialectArgv) {
+		return
+	}
+	parsed := parseOwnedPOSIXOptions(
+		command.Argv,
+		exactOptionSet(
+			"-e", "--rsh", "-f", "--filter", "-T", "--temp-dir", "-B", "--block-size",
+			"--rsync-path", "--exclude", "--include", "--exclude-from", "--include-from",
+			"--files-from", "--compare-dest", "--copy-dest", "--link-dest", "--backup-dir",
+			"--suffix", "--chmod", "--chown", "--log-file", "--password-file",
+			"--partial-dir", "--max-size", "--min-size", "--bwlimit", "--timeout",
+			"--port", "--out-format", "--info", "--debug", "--max-delete",
+			"--modify-window", "--compress-level", "--skip-compress", "--usermap",
+			"--groupmap", "--iconv", "--contimeout", "--address",
+		),
+		exactOptionSet(
+			"-a", "-v", "-z", "-r", "-l", "-p", "-t", "-g", "-o", "-D", "-h", "-P",
+			"-u", "-c", "-x", "-H", "-A", "-X", "-S", "-W", "-q", "-i", "-R", "-L",
+			"-k", "-K", "-E", "-m", "-C", "-b", "-I", "-O", "-J", "-U", "-N", "-d",
+			"--archive", "--verbose", "--compress", "--recursive", "--progress",
+			"--partial", "--delete", "--delete-after", "--delete-before",
+			"--delete-during", "--delete-delay", "--delete-excluded", "--human-readable",
+			"--update", "--checksum", "--links", "--perms", "--times", "--group",
+			"--owner", "--devices", "--specials", "--hard-links", "--acls", "--xattrs",
+			"--sparse", "--whole-file", "--quiet", "--itemize-changes", "--relative",
+			"--copy-links", "--stats", "--mkpath", "--inplace", "--append",
+			"--append-verify", "--existing", "--ignore-existing",
+			"--remove-source-files", "--force", "--prune-empty-dirs", "--no-motd",
+			"--safe-links", "--numeric-ids", "--omit-dir-times", "--size-only",
+			"--ignore-times", "--one-file-system", "--backup", "--dirs",
+			"--keep-dirlinks", "--copy-dirlinks", "--executability", "--cvs-exclude",
+		),
+		exactOptionSet("--help", "--version", "-n", "--dry-run", "--list-only"),
+	)
+	if parsed.preview {
+		command.Effect = EffectPreview
+		return
+	}
+	if !parsed.complete {
+		out.markPartial(IssueUnknownOperandGrammar)
+	}
+	if len(parsed.positionals) < 2 {
+		out.markPartial(IssueUnknownOperandGrammar)
+		return
+	}
+	_, removeSources := parsed.seen["--remove-source-files"]
+	addOperation(command, OperationCopy)
+	for _, source := range parsed.positionals[:len(parsed.positionals)-1] {
+		if rsyncRemoteOperand(source) {
+			continue
+		}
+		appendCommandPath(out, command, PathAccessRead, source)
+		if removeSources {
+			addOperation(command, OperationDelete)
+			appendCommandPath(out, command, PathAccessDelete, source)
+		}
+	}
+	if destination := parsed.positionals[len(parsed.positionals)-1]; !rsyncRemoteOperand(destination) {
+		appendCommandPath(out, command, PathAccessWrite, destination)
+	}
+}
+
+// rsyncRemoteOperand reports host:path, host::module and rsync:// operands.
+func rsyncRemoteOperand(operand string) bool {
+	if strings.HasPrefix(operand, "rsync://") {
+		return true
+	}
+	colon := strings.IndexByte(operand, ':')
+	return colon > 0 && !strings.Contains(operand[:colon], "/")
+}
+
 func dangerousInstallMode(mode string) bool {
 	if parsed, err := strconv.ParseUint(mode, 8, 16); err == nil {
 		return len(mode) == 4 && parsed&06000 != 0 ||
@@ -4283,7 +4417,7 @@ func copyMoveShortFlags(flags string, move bool) bool {
 	if flags == "" {
 		return false
 	}
-	allowed := "abdfHilnprRuvx"
+	allowed := "abdfHilnprRsuvx"
 	if move {
 		allowed = "bfinTuv"
 	}

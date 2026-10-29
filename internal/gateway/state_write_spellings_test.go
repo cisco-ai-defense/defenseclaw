@@ -77,3 +77,38 @@ func TestDynamicOperandWordThroughProgramPathsAndWrappers(t *testing.T) {
 		{"command -v cp $(true)", false},
 	})
 }
+
+// ln, rsync and cp -s had no write fact, and a pathname pattern under
+// ~/.defenseclaw named no state file, so these literal state writes were
+// allowed by the gateway reading (GAP-2496).
+func TestLinkRsyncAndPatternStateWrites(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX shell spellings")
+	}
+	judgeHomeStateWriteRows(t, []homeStateWriteRow{
+		{"ln -sf a.txt ~/.defenseclaw/config.yaml", true},
+		{"ln -sf a.txt HOMEDIR/.defenseclaw/config.yaml", true},
+		{"ln a.txt ~/.defenseclaw/config.yaml", true},
+		{"ln -sfn /tmp/x ~/.defenseclaw/hooks", true},
+		{"ln -s -t ~/.defenseclaw/hooks /tmp/x.sh", true},
+		{"rsync a.txt ~/.defenseclaw/hooks/x.sh", true},
+		{"rsync -a src/ ~/.defenseclaw/hooks/", true},
+		{"rsync -avz --progress a.txt ~/.defenseclaw/config.yaml", true},
+		{"cp -s a.txt ~/.defenseclaw/config.yaml", true},
+		{"cp a.txt ~/.defenseclaw/config.y?ml", true},
+		{"cp a.txt ~/.defenseclaw/conf*.yaml", true},
+		{"cp a.txt $HOME/.defenseclaw/conf[i]g.yaml", true},
+		{"ln -sf $(pwd)/a.txt ~/.local/bin/tool", false},
+		{"ln -s $HOME/.defenseclaw/config.yaml ~/project/cfg-link", false},
+		{"ln -s ~/.defenseclaw/config.yaml cfg", false},
+		{"ln -sf ~/project/a.txt ~/project/link", false},
+		{"rsync -a src/ ~/project/backup/", false},
+		{"rsync -av ~/.defenseclaw/ /tmp/dcbackup/", false},
+		{"rsync -a ~/project/ host:/srv/project/", false},
+		{"rsync -n a.txt ~/.defenseclaw/config.yaml", false},
+		{"cp -s ~/project/a.txt ~/project/slink", false},
+		{"cp a.txt ~/project/*.bak", false},
+		{"cp a.txt ~/.defenseclaw/nomatch*.yaml", false},
+		{"ls ~/.defenseclaw/conf*.yaml", false},
+	})
+}
