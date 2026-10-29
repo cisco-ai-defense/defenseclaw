@@ -425,6 +425,35 @@ func TestShellOptionsBeforeTheStringWriteWhatTheStringWrites(t *testing.T) {
 		{`bash -- script.sh`, false},
 		{`bash -n --norc -c "cp a.txt ~/.defenseclaw/config.yaml"`, false},
 		{`bash -o noexec -c -- "cp a.txt ~/.defenseclaw/config.yaml"`, false},
+		// +n and +o noexec turn noexec off, and the last setting wins.
+		{`bash +n -c "cp a.txt ~/.defenseclaw/config.yaml"`, true},
+		{`dash +n -c "cp a.txt ~/.defenseclaw/hooks/x.sh"`, true},
+		{`setsid bash +n -c "cp a.txt ~/.defenseclaw/config.yaml"`, true},
+		{`bash -n +n -c "cp a.txt ~/.defenseclaw/config.yaml"`, true},
+		{`setsid bash +o noexec -c "cp a.txt ~/.defenseclaw/config.yaml"`, true},
+		{`setsid bash -o noexec +o noexec -c "cp a.txt ~/.defenseclaw/config.yaml"`, true},
+		{`bash +n -n -c "cp a.txt ~/.defenseclaw/config.yaml"`, false},
+		{`setsid bash +o noexec -o noexec -c "cp a.txt ~/.defenseclaw/config.yaml"`, false},
+		{`bash +n -c "make --version"`, false},
+	})
+}
+
+func TestRunnersInsideAShellStringWriteWhatTheyWrite(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX shell spellings")
+	}
+	judgeHomeStateWriteRows(t, []homeStateWriteRow{
+		{`sh -c "setsid sh -c 'cp a.txt ~/.defenseclaw/config.yaml'"`, true},
+		{`setsid sh -c "setsid sh -c 'cp a.txt ~/.defenseclaw/hooks/x.sh'"`, true},
+		{`bash -c "nohup bash --norc -c 'cp a.txt ~/.defenseclaw/config.yaml'"`, true},
+		{`sh -c "flock /tmp/l -c 'cp a.txt ~/.defenseclaw/config.yaml'"`, true},
+		{`sh -c "nohup cp a.txt ~/.defenseclaw/config.yaml"`, true},
+		{`flock /tmp/l -c "setsid cp a.txt ~/.defenseclaw/config.yaml"`, true},
+		{`sh -c "sh -c 'sh -c \"setsid cp a.txt ~/.defenseclaw/config.yaml\"'"`, true},
+		{`sh -c "setsid sh -c 'cp a.txt b.txt'"`, false},
+		{`sh -c "setsid sh -c 'make build'"`, false},
+		{`sh -c "nohup cat a.txt"`, false},
+		{`bash -c "nohup bash --norc -c 'cat ~/.defenseclaw/config.yaml'"`, false},
 	})
 }
 
