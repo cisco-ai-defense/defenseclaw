@@ -160,26 +160,50 @@ func (r *doctorRun) registerLocal(ctx context.Context) error {
 // noHomebrewPKI is the refusal of a registration under a Homebrew install
 // without the client certificates: the post-install step of the
 // GatewayFormula formula writes them. With that formula installed, its
-// post-install step is run again; without it (an OpenShell from another
-// formula, which writes none), the formula is installed.
+// post-install step is run again; with the openshell formula of another
+// tap, which writes none, that one is removed first (GAP-2507); without
+// either, the formula is installed.
 func (r *doctorRun) noHomebrewPKI(dir string) error {
 	next := "install OpenShell from the " + GatewayFormula + " formula, whose post-install step writes them: `" + installOpenShellCommand + "`"
-	if r.service != nil && r.service.Installed {
+	if tap := otherFormulaTap(r.brewPrefix()); tap != "" {
+		next = r.otherFormulaStep(tap) + ": `" + r.replaceOtherFormulaCommand() + "`"
+	} else if r.service != nil && r.service.Installed {
 		next = "run the post-install step of the " + GatewayFormula + " formula again as the owner of the Homebrew prefix (`" +
 			r.Gateway.BrewCommand() + " postinstall " + GatewayFormula + "`), then `" + r.addCommandLine() + "`"
 	}
 	return fmt.Errorf("the Homebrew install of OpenShell has no client certificates in %s, so the gateway cannot be registered; %s", dir, next)
 }
 
+// otherFormulaStep says why the openshell formula of tap is replaced and
+// by whom: `defenseclaw sandbox setup --install-openshell` keeps the
+// supported CLI it finds, so it installs the GatewayFormula formula only
+// once that one is removed, and NVIDIA's installer runs Homebrew as the
+// account that runs it (GAP-2507).
+func (r *doctorRun) otherFormulaStep(tap string) string {
+	return "this OpenShell is the openshell formula of " + tap + ", which writes none and runs no gateway service, and `" +
+		installOpenShellCommand + "` keeps an OpenShell it finds: as the owner of the Homebrew prefix, remove that formula, then install OpenShell from the " +
+		GatewayFormula + " formula"
+}
+
+// replaceOtherFormulaCommand removes the openshell formula of another tap
+// and installs GatewayFormula's with NVIDIA's installer.
+func (r *doctorRun) replaceOtherFormulaCommand() string {
+	return r.Gateway.BrewCommand() + " uninstall openshell && " + installOpenShellCommand
+}
+
 // homebrewPKIFix is the registration fix of a Homebrew install whose
 // prefix holds no client certificates in dir: the post-install step of the
 // GatewayFormula formula writes them (run again as the owner of the prefix,
 // then the gateway is started when stopped and registered), or, without
-// that formula, its install. Neither a gateway start nor a registration
+// that formula, its install, after the removal of the openshell formula of
+// another tap (GAP-2507). Neither a gateway start nor a registration
 // writes them (GAP-0319, GAP-2457).
 func (r *doctorRun) homebrewPKIFix(dir, add string) *Fix {
 	summary := "the Homebrew install of OpenShell has no client certificates in " + dir +
 		" (the post-install step of the " + GatewayFormula + " formula writes them, not the gateway start)"
+	if tap := otherFormulaTap(r.brewPrefix()); tap != "" {
+		return &Fix{Summary: summary + "; " + r.otherFormulaStep(tap), Command: r.replaceOtherFormulaCommand()}
+	}
 	if r.service == nil || !r.service.Installed {
 		return &Fix{Summary: summary + ": install OpenShell from that formula", Command: installOpenShellCommand}
 	}
