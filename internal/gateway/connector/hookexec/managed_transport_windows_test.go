@@ -356,7 +356,7 @@ func TestRunningManagedGatewayServiceNeedsAnIPv4Listener(t *testing.T) {
 	managedEnterpriseListening = func(string) (bool, bool) { return true, true }
 	managedEnterpriseListeningIPv4 = func(string) (bool, bool) { return false, true }
 
-	client, err := managedEnterpriseHTTPClient(time.Second, addr, "DefenseClawGateway")
+	client, err := managedEnterpriseHTTPClientFor(time.Second, addr, "DefenseClawGateway", true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -364,9 +364,12 @@ func TestRunningManagedGatewayServiceNeedsAnIPv4Listener(t *testing.T) {
 	if err == nil || !errors.Is(err, errManagedGatewayPeerUnverified) || !errors.Is(err, errGatewayNotConnected) {
 		t.Fatalf("err = %v, want a peer failure for a service without an IPv4 listener", err)
 	}
+	if errors.Is(err, errManagedGatewayNotRunning) {
+		t.Fatalf("a running service without an IPv4 listener was reported as stopped: %v", err)
+	}
 	open := Options{ManagedEnterprise: true, SecureClient: true, FailMode: "open"}
-	if ManagedOutageFailsOpen(open, err) {
-		t.Fatalf("an open fail mode let a running service without an IPv4 listener through: %v", err)
+	if got := managedPeerFailMode(open, "open", err); got != "closed" {
+		t.Fatalf("Secure Client open fail mode decided %q for a running service without an IPv4 listener, want closed: %v", got, err)
 	}
 	_ = listener.Close()
 	if got := <-bytesRead; len(got) != 0 {
@@ -389,41 +392,68 @@ func TestStoppedManagedGatewayServiceWithAPortListenerIsNotAnOutage(t *testing.T
 		return 0, fmt.Errorf("%w (state=1 pid=0)", errManagedGatewayNotRunning)
 	}
 	restoreManagedTransportSeams(t, stopped, func(net.Conn) (uint32, error) { return 202, nil })
-	previousListening := managedEnterpriseListening
-	t.Cleanup(func() { managedEnterpriseListening = previousListening })
-	open := Options{ManagedEnterprise: true, ManagedStandalone: true, FailMode: "open"}
+	previousListening, previousIPv4 := managedEnterpriseListening, managedEnterpriseListeningIPv4
+	t.Cleanup(func() { managedEnterpriseListening, managedEnterpriseListeningIPv4 = previousListening, previousIPv4 })
+	standalone := Options{ManagedEnterprise: true, ManagedStandalone: true, FailMode: "open"}
+	secureClient := Options{ManagedEnterprise: true, SecureClient: true, FailMode: "open"}
 
 	for _, tc := range []struct {
-		name       string
-		listening  bool
-		known      bool
-		notRunning bool
-		portHeld   bool
+		name  string
+		ipv4  bool
+		any   bool
+		known bool
+		// Whether each profile sees an outage (otherwise a held port, or a
+		// listen table it cannot read).
+		standaloneOutage, secureClientOutage bool
 	}{
-		{name: "another process holds the port", listening: true, known: true, portHeld: true},
+		{name: "another process holds the port over IPv4", ipv4: true, any: true, known: true},
+		// Only Secure Client reads the IPv6 table; the standalone profile
+		// keeps the IPv4 check it had.
+		{name: "another process holds the port over IPv6 only", any: true, known: true, standaloneOutage: true},
 		{name: "listen table unreadable", known: false},
-		{name: "nothing listens", known: true, notRunning: true},
+		{name: "nothing listens", known: true, standaloneOutage: true, secureClientOutage: true},
 	} {
-		t.Run(tc.name, func(t *testing.T) {
-			managedEnterpriseListening = func(string) (bool, bool) { return tc.listening, tc.known }
-			client, err := managedEnterpriseHTTPClient(time.Second, addr, "DefenseClawGateway")
-			if err != nil {
-				t.Fatal(err)
-			}
-			_, err = client.Post("http://"+addr+"/api/v1/hook", "application/json", strings.NewReader(`{"secret":"must-not-leak"}`))
-			if err == nil || !errors.Is(err, errManagedGatewayPeerUnverified) {
-				t.Fatalf("err = %v, want a peer failure", err)
-			}
-			if got := errors.Is(err, errManagedGatewayNotRunning); got != tc.notRunning {
-				t.Fatalf("not running = %v, want %v (err %v)", got, tc.notRunning, err)
-			}
-			if got := errors.Is(err, errManagedGatewayPortHeld); got != tc.portHeld {
-				t.Fatalf("port held = %v, want %v (err %v)", got, tc.portHeld, err)
-			}
-			if got := ManagedOutageFailsOpen(open, err); got != tc.notRunning {
-				t.Fatalf("ManagedOutageFailsOpen = %v, want %v (err %v)", got, tc.notRunning, err)
-			}
-		})
+		for _, profile := range []struct {
+			name   string
+			secure bool
+			opts   Options
+			outage bool
+		}{
+			{"standalone", false, standalone, tc.standaloneOutage},
+			{"secure client", true, secureClient, tc.secureClientOutage},
+		} {
+			t.Run(tc.name+"/"+profile.name, func(t *testing.T) {
+				managedEnterpriseListening = func(string) (bool, bool) { return tc.any, tc.known }
+				managedEnterpriseListeningIPv4 = func(string) (bool, bool) { return tc.ipv4, tc.known }
+				client, err := managedEnterpriseHTTPClientFor(time.Second, addr, "DefenseClawGateway", profile.secure)
+				if err != nil {
+					t.Fatal(err)
+				}
+				_, err = client.Post("http://"+addr+"/api/v1/hook", "application/json", strings.NewReader(`{"secret":"must-not-leak"}`))
+				if err == nil || !errors.Is(err, errManagedGatewayPeerUnverified) {
+					t.Fatalf("err = %v, want a peer failure", err)
+				}
+				if got := errors.Is(err, errManagedGatewayNotRunning); got != profile.outage {
+					t.Fatalf("not running = %v, want %v (err %v)", got, profile.outage, err)
+				}
+				wantHeld := tc.known && !profile.outage
+				if got := errors.Is(err, errManagedGatewayPortHeld); got != wantHeld {
+					t.Fatalf("port held = %v, want %v (err %v)", got, wantHeld, err)
+				}
+				want := "closed"
+				if profile.outage {
+					want = "open"
+				}
+				if got := managedPeerFailMode(profile.opts, "open", err); got != want {
+					t.Fatalf("open fail mode decided %q, want %q (err %v)", got, want, err)
+				}
+				if !profile.secure {
+					if got := ManagedOutageFailsOpen(profile.opts, err); got != profile.outage {
+						t.Fatalf("ManagedOutageFailsOpen = %v, want %v (err %v)", got, profile.outage, err)
+					}
+				}
+			})
+		}
 	}
 	_ = listener.Close()
 	if got := <-bytesRead; len(got) != 0 {

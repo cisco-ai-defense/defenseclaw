@@ -73,6 +73,19 @@ func managedEnterpriseHTTPClient(
 	apiAddr string,
 	serviceName string,
 ) (*http.Client, error) {
+	return managedEnterpriseHTTPClientFor(timeout, apiAddr, serviceName, false)
+}
+
+// managedEnterpriseHTTPClientFor is managedEnterpriseHTTPClient for a hook
+// that knows its profile: under Secure Client a stopped gateway's port also
+// counts as held when another process listens on it over IPv6
+// (stoppedManagedGatewayError). Every other caller keeps the IPv4 check.
+func managedEnterpriseHTTPClientFor(
+	timeout time.Duration,
+	apiAddr string,
+	serviceName string,
+	secureClient bool,
+) (*http.Client, error) {
 	canonicalAddr, err := normalizeManagedGatewayAddress(apiAddr)
 	if err != nil {
 		return nil, managedGatewayPeerError("%v", err)
@@ -101,7 +114,7 @@ func managedEnterpriseHTTPClient(
 
 				servicePID, err := managedEnterpriseQueryServicePID(serviceName)
 				if errors.Is(err, errManagedGatewayNotRunning) {
-					return nil, stoppedManagedGatewayError(canonicalAddr, err)
+					return nil, stoppedManagedGatewayError(canonicalAddr, err, secureClient)
 				}
 				if err != nil {
 					return nil, managedGatewayPeerError("query protected gateway service: %v", err)
@@ -173,9 +186,14 @@ func managedEnterpriseHTTPClient(
 // an integrity failure (errManagedGatewayPortHeld, closed in every fail
 // mode), and so is a listen table the hook cannot read: before, the stopped
 // service was reported before the port was looked at, so fail mode open
-// allowed the call while another program held the port.
-func stoppedManagedGatewayError(canonicalAddr string, serviceErr error) error {
-	listening, known := managedEnterpriseListening(canonicalAddr)
+// allowed the call while another program held the port. Under Secure Client
+// a listener on the port over IPv6 counts as well; the standalone profile
+// keeps the IPv4 check.
+func stoppedManagedGatewayError(canonicalAddr string, serviceErr error, secureClient bool) error {
+	listening, known := managedEnterpriseListeningIPv4(canonicalAddr)
+	if secureClient {
+		listening, known = managedEnterpriseListening(canonicalAddr)
+	}
 	switch {
 	case !known:
 		return managedGatewayPeerError("gateway service is not running and the listeners on %s cannot be read: %v", canonicalAddr, serviceErr)

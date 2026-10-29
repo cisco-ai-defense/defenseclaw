@@ -848,10 +848,11 @@ func RunCodexNotify(ctx context.Context, opts Options, payload []byte) int {
 	if opts.HTTPClient == nil {
 		if opts.ManagedEnterprise {
 			var err error
-			opts.HTTPClient, err = managedEnterpriseHTTPClient(
+			opts.HTTPClient, err = managedEnterpriseHTTPClientFor(
 				defaultHookRequestTimeout,
 				opts.APIAddr,
 				opts.ManagedGatewayServiceName,
+				opts.SecureClient,
 			)
 			if err != nil {
 				fmt.Fprintln(opts.Stderr, managedGatewayPeerUnverifiedReason)
