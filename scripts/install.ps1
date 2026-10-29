@@ -149,10 +149,12 @@ $ManagedFiles = $ManagedBinaries + @($ManagedShims | ForEach-Object { "$_.cmd" }
 # which Install-New replaces with $CliLauncher. These must go.
 $DeveloperFiles = @("litellm.exe", "skill-scanner.exe", "skill-scanner-api.exe",
     "skill-scanner-pre-commit.exe", "mcp-scanner.exe", "mcp-scanner-api.exe", ".defenseclaw-source-root")
-# Data-dir entries that are install machinery, not user data.
+# Data-dir entries that are install machinery, not user data. A
+# `<name>.dc-removed-<hex>` folder is one an uninstall's after-exit cleanup
+# renamed and is still deleting (1.0.2 on): never data (GAP-2499).
 $NotData = @(".venv", ".venv.busy", ".uv", "previous", "previous.new", ".repair", ".staging", ".failed-*",
     "installer", "logs", ".install.lock", "backups", ".rollback-hold", ".rollback-hold.done",
-    ".lifecycle-txn.json", ".lifecycle-txn.json.new", ".lifecycle-closer")
+    ".lifecycle-txn.json", ".lifecycle-txn.json.new", ".lifecycle-closer", "*.dc-removed-*")
 # Connectors supported on Windows (cli/defenseclaw/platform_support.py).
 $ConnectorChoices = @("codex", "claudecode", "hermes", "cursor", "devin", "copilot", "antigravity",
     "opencode", "amp", "kiro", "none")
@@ -1871,8 +1873,22 @@ function Clear-StagedRelease {
 }
 
 function Get-TreeSize([string]$Path) {
+    # A folder can go while it is walked (an uninstall's after-exit cleanup
+    # deletes its renamed .uv in the background), and Get-ChildItem -Recurse
+    # then stops the install with "The system cannot find the file specified"
+    # despite -ErrorAction (GAP-2499). Each folder is listed on its own; one
+    # that went counts as empty. Links are not followed.
     $size = [long]0
-    foreach ($file in @(Get-ChildItem -LiteralPath $Path -Recurse -Force -File -ErrorAction SilentlyContinue)) { $size += $file.Length }
+    $dirs = New-Object System.Collections.Generic.Stack[string]
+    $dirs.Push($Path)
+    while ($dirs.Count) {
+        $items = @()
+        try { $items = @(Get-ChildItem -LiteralPath $dirs.Pop() -Force -ErrorAction SilentlyContinue) } catch { continue }
+        foreach ($item in $items) {
+            if (-not $item.PSIsContainer) { $size += $item.Length }
+            elseif (-not ($item.Attributes -band [IO.FileAttributes]::ReparsePoint)) { $dirs.Push($item.FullName) }
+        }
+    }
     return $size
 }
 

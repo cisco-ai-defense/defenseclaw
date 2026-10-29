@@ -1618,6 +1618,55 @@ def test_write_kept_uv_cache_runs_under_strict_mode(tmp_path: Path, cache: str) 
     assert any("download cache" in line for line in lines) == (cache == "one-file")
 
 
+
+@pytest.mark.skipif(POWERSHELL is None, reason="PowerShell is not installed")
+@pytest.mark.allow_subprocess
+def test_sizing_the_data_folder_while_an_uninstall_cleanup_deletes_a_tree_never_stops_the_install(tmp_path: Path) -> None:
+    # GAP-2499: install.ps1 started while a 1.0.2+ uninstall's after-exit
+    # cmd.exe was deleting .uv.dc-removed-<hex> stopped at "Preparing" with
+    # "The system cannot find the file specified" from Get-ChildItem -Recurse
+    # in Get-TreeSize (-ErrorAction does not catch the enumerator's error).
+    # The renamed tree is not data, and a folder that goes mid-walk counts as
+    # empty. The mock Get-ChildItem throws that error for a folder named gone,
+    # and for a recursive listing of any tree that holds one.
+    data = tmp_path / "data"
+    (data / "policies" / "gone").mkdir(parents=True)
+    (data / "policies" / "gone" / "x.bin").write_bytes(b"x" * 300)
+    (data / "policies" / "keep.rego").write_bytes(b"k" * 1000)
+    (data / "config.yaml").write_bytes(b"c" * 24)
+    (data / ".uv.dc-removed-52d721f3" / "python").mkdir(parents=True)
+    (data / ".uv.dc-removed-52d721f3" / "python" / "python.exe").write_bytes(b"p" * 5000)
+    tree = _text()[_text().index("function Get-TreeSize(") :]
+    tree = tree[: tree.index("\n}\n") + 3]
+    script = f"""
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
+$DataDir = '{data}'
+{_not_data()}
+function Get-ChildItem {{
+    param([string]$LiteralPath, [switch]$Recurse, [switch]$Force, [switch]$File, $ErrorAction)
+    $gone = @(Microsoft.PowerShell.Management\\Get-ChildItem -LiteralPath $LiteralPath -Recurse -Force -Directory -ErrorAction SilentlyContinue | Where-Object Name -eq 'gone')
+    if ((Split-Path -Leaf $LiteralPath) -eq 'gone' -or ($Recurse -and $gone.Count)) {{
+        throw [IO.FileNotFoundException]::new('The system cannot find the file specified')
+    }}
+    Microsoft.PowerShell.Management\\Get-ChildItem -LiteralPath $LiteralPath -Recurse:$Recurse -Force:$Force -File:$File -ErrorAction SilentlyContinue
+}}
+{_ps1_function("Get-DataEntries")}
+{tree}
+{_ps1_function("Get-DataSize")}
+'ENTRIES=' + ((Get-DataEntries | ForEach-Object Name | Sort-Object) -join ',')
+try {{ 'SIZE=' + (Get-DataSize) }} catch {{ 'THROW=' + $_.Exception.Message }}
+'MISSING=' + (Get-TreeSize (Join-Path $DataDir 'absent'))
+'FILE=' + (Get-TreeSize (Join-Path $DataDir 'config.yaml'))
+"""
+    completed = _run_powershell(script)
+    out = completed.stdout + completed.stderr
+    assert completed.returncode == 0, out
+    assert "ENTRIES=config.yaml,policies" in out, out
+    assert "SIZE=1024" in out, out
+    assert "MISSING=0" in out and "FILE=24" in out, out
+
+
 def test_a_failed_first_install_names_the_kept_uv_cache_and_a_full_disk() -> None:
     # GAP-1883: the space refusal and a staging failure kept the uv cache
     # silently, and a disk that filled at the binary copy showed only the
