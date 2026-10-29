@@ -1055,6 +1055,7 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 				directoryFact && (changedDirectory ||
 					canonicalSemanticPath(resolved) == canonicalSemanticPath(filepath.Join(facts.ActiveHome, ".ssh"))) ||
 				operand == hookpaths.CWDKey && (changedDirectory || truncated) ||
+				operand == hookpaths.LinksStableKey ||
 				operand == hookpaths.TruncatedKey ||
 				resolved == "" && external(operand) && !truncated ||
 				isProtected(resolved) {
@@ -1085,6 +1086,14 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 	// the command is known, before the first writeTarget call.
 	var links hookpaths.Links
 	var safeRedirects []hookpaths.RedirectOccurrence
+	// A plain mv onto an existing link to a file replaces the link entry
+	// and writes neither file (GAP-2559); a gateway that reads the file
+	// system judges that destination by its entry. Behind ProtectHome the
+	// client map decides it (GAP-2558).
+	var movedOntoLinks map[string]bool
+	if !cannotResolveLocally {
+		movedOntoLinks = hookpaths.MovedOntoLinkEntries(facts)
+	}
 	writeTarget := func(target string, safeRedirect, ownCopy bool) bool {
 		if !filepath.IsAbs(target) && (target == "" || !filepath.IsAbs(clientCWD)) {
 			// No directory places this operand: the gateway cannot see the
@@ -1123,6 +1132,10 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 		}
 		if isProtected(target) {
 			return true
+		}
+		if movedOntoLinks[target] {
+			parent, ok := hookpaths.ResolveWriteTarget(filepath.Dir(target))
+			return !ok || isProtected(filepath.Join(parent, filepath.Base(target)))
 		}
 		if physicalCWD := request.ResolvedWriteTargets[hookpaths.DirectoryFactPrefix+clientCWD]; filepath.IsAbs(physicalCWD) &&
 			strings.HasPrefix(target, clientCWD+string(filepath.Separator)) {

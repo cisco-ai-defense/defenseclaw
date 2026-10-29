@@ -79,6 +79,16 @@ const OpaqueScopeFactPrefix = "\x00opaque-scope:"
 // operand its own facts place as such a move destination.
 const ReplacedLinkFactPrefix = "\x00replaced-link:"
 
+// LinksStableKey is the user-side hook reading of a command that makes
+// links and renames with a static mv: every link it makes and every name
+// a link target reaches lies away from SSH and DefenseClaw state on the
+// user view of the disk (aliasesAwayFromState, GAP-2532), so its links stay
+// known. "1" is the only value. Only a gateway that cannot open the
+// command directory itself (ProtectHome) reads it, in place of that walk
+// of the user home; the rename and link reading itself is still its own
+// (GAP-2564).
+const LinksStableKey = "\x00links-stable"
+
 // GlobFactPrefix keys the hook client's expansion of one pathname pattern
 // that the action target scan checks, by the absolute pattern. "0" means the
 // user's view expanded it completely and no match reaches a protected file;
@@ -1164,6 +1174,13 @@ func ResolveConnector(connector, surface, event string, payload []byte) string {
 			size += entry
 		}
 	}
+	if links.movesStable && links.known && !links.opaque {
+		entry := len(jsonString(LinksStableKey)) + 1 + len(jsonString("1")) + 1
+		if size+entry <= maxEncodedTargets && len(targets) < MaxWriteTargets+2 {
+			targets[LinksStableKey] = "1"
+			size += entry
+		}
+	}
 	if protectedDecision {
 		entry := len(jsonString(ActionDecisionKey)) + 1 + len(jsonString(ProtectedTargetDecision)) + 1
 		if size+entry > maxEncodedTargets || len(targets) >= MaxWriteTargets+2 {
@@ -1491,6 +1508,7 @@ func Decode(value string) (map[string]string, bool) {
 		(targets[TruncatedKey] != "" && targets[TruncatedKey] != "1") ||
 		(targets[PatchCompleteKey] != "" && targets[PatchCompleteKey] != "1") ||
 		(targets[ActionDecisionKey] != "" && targets[ActionDecisionKey] != ProtectedTargetDecision) ||
+		(targets[LinksStableKey] != "" && targets[LinksStableKey] != "1") ||
 		(targets[UnprovenReasonKey] != "" && UnprovenWriteTitle(targets[UnprovenReasonKey]) == "") {
 		return nil, false
 	}
@@ -1691,6 +1709,9 @@ type shellLinks struct {
 	// literal shell body carries them out to its own links (GAP-2526).
 	renames, cds bool
 	copyScopes   []string
+	// movesStable: the static renames were followed and every link was
+	// read away from state on this view of the disk (LinksStableKey).
+	movesStable bool
 	// renameOps are the static mv calls; wrappedCds is a directory change
 	// that only a wrapper or a nested shell runs (GAP-2532, GAP-2533).
 	renameOps  []renameOp
@@ -2117,7 +2138,20 @@ func commandLinks(command, cwd, home string, facts map[string]string, record, ne
 		case renames || moves && cds:
 			stable = false
 		case moves:
-			stable = links.followRenames(renameOps) && links.findMovesClear(findMoves, home) && links.aliasesAwayFromState(cwd, home)
+			stable = links.followRenames(renameOps) && links.findMovesClear(findMoves, home)
+			if stable {
+				switch {
+				case links.aliasesAwayFromState(cwd, home):
+					links.movesStable = true
+				case facts[LinksStableKey] == "1" && len(findMoves) == 0:
+					// Behind ProtectHome the gateway cannot walk the user
+					// home; the user-side hook did (LinksStableKey).
+					_, readable := ResolveWriteTarget(cwd)
+					stable = !readable
+				default:
+					stable = false
+				}
+			}
 		}
 		// A nested cd or a find -exec mv may also go below a linked
 		// directory through a disk link to state (RV-c4-1).
