@@ -5,8 +5,11 @@ package gateway
 
 import (
 	"context"
+	"encoding/json"
 	"strings"
 	"testing"
+
+	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
 )
 
 func TestGAP2400LiteralIndirectPrivateKeyReadersReachGateway(t *testing.T) {
@@ -45,6 +48,42 @@ func TestGAP2400LiteralIndirectPrivateKeyReadersReachGateway(t *testing.T) {
 			got := resp.Action == "block" && strings.Contains(strings.Join(resp.Findings, ","), "PATH-SSH-KEY:")
 			if got != tc.blocked {
 				t.Errorf("command %q: action=%q findings=%v, want PATH-SSH-KEY block=%t", tc.command, resp.Action, resp.Findings, tc.blocked)
+			}
+		})
+	}
+}
+
+func TestGAP2400CodexWindowsBashUsesPowerShellKeyReader(t *testing.T) {
+	const connector = "codex"
+	installDefaultProfileConnector(t, connector)
+	const home = `C:\Users\Alice`
+	for _, tc := range []struct {
+		name, command string
+		blocked       bool
+	}{
+		{"key glob into cat", `ls ~/.ssh/id_* | cat`, true},
+		{"key glob into type", `ls ~/.ssh/id_* | type`, true},
+		{"project glob into cat", `ls ~/project/*.pub | cat`, false},
+		{"project glob into type", `ls ~/project/*.pub | type`, false},
+		{"public key glob into cat", `ls ~/.ssh/*.pub | cat`, false},
+		{"public key glob into type", `ls ~/.ssh/*.pub | type`, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			args, err := json.Marshal(map[string]string{"command": tc.command})
+			if err != nil {
+				t.Fatal(err)
+			}
+			input := actionfacts.Input{
+				Tool: "Bash", Args: args, CWD: home + `\project`, ActiveHome: home,
+			}
+			input.DialectHint = selectWindowsShellDialect(input.Tool, tc.command, input)
+			findings := dispatchTrustedAction(t.Context(), trustedActionRequest{
+				Input: input, LegacyText: string(args), Connector: connector,
+				EnforcementCapable: true, windowsShellDialect: true,
+			})
+			got := buildVerdict(findings, "tool_call").Action == guardrailActionBlock
+			if got != tc.blocked || (tc.blocked && findingWithID(findings, "PATH-SSH-KEY") == nil) {
+				t.Errorf("blocked=%t, want %t; findings=%v", got, tc.blocked, findingIDs(findings))
 			}
 		})
 	}

@@ -42,7 +42,7 @@ func appendTrustedPrivateKeyReaderFinding(
 		}
 		dialect := request.Input.DialectHint
 		switch {
-		case strings.EqualFold(request.Input.Tool, "Bash"):
+		case strings.EqualFold(request.Input.Tool, "Bash") && !strings.EqualFold(request.Connector, "codex"):
 			dialect = actionfacts.DialectPOSIX
 		case strings.EqualFold(request.Input.Tool, "PowerShell"):
 			dialect = actionfacts.DialectPowerShell
