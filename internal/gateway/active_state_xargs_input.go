@@ -103,7 +103,11 @@ func xargsStaticInputTwinAt(command, home string, split bool, depth int) (string
 			if index, ok := shellScriptWordIndex(call); ok && depth < maxXargsTwinScriptDepth {
 				if script, ok := staticWordText(call.Args[index]); ok {
 					if inner, ok := xargsStaticInputTwinAt(script, home, split, depth+1); ok {
-						call.Args[index] = xargsQuotedWord(inner)
+						// The twin runs the rewritten script with no shell
+						// options (they do not change what it removes), so the
+						// dispatcher judges the plain `SHELL -c SCRIPT` form.
+						args := []*syntax.Word{call.Args[0], {Parts: []syntax.WordPart{&syntax.Lit{Value: "-c"}}}, xargsQuotedWord(inner)}
+						call.Args = append(args, call.Args[index+1:]...)
 						changed = true
 					}
 				}
@@ -173,6 +177,22 @@ func shellScriptWordIndex(call *syntax.CallExpr) (int, bool) {
 	if len(call.Assigns) != 0 || len(call.Args) < 3 {
 		return 0, false
 	}
+	// The classifier's shell option reader first (pod check32: -o NAME,
+	// -O NAME, -euo pipefail, -c --), then the short form below, which also
+	// reads zsh.
+	argv := make([]string, 0, len(call.Args))
+	for _, word := range call.Args {
+		text, ok := staticWordText(word)
+		if !ok {
+			break
+		}
+		argv = append(argv, text)
+	}
+	if len(argv) == len(call.Args) {
+		if index, ok := actionfacts.ShellCommandStringIndex(argv); ok {
+			return index, true
+		}
+	}
 	switch path.Base(call.Args[0].Lit()) {
 	case "sh", "bash", "dash", "zsh", "ksh":
 	default:
@@ -198,9 +218,12 @@ func shellScriptWordIndex(call *syntax.CallExpr) (int, bool) {
 }
 
 // catHereStringWord is the word of `cat <<< WORD` (a cat call with no
-// arguments and that one redirect), nil otherwise.
+// arguments, or only `-` or `--` (pod check32 O5), and that one redirect),
+// nil otherwise.
 func catHereStringWord(stmt *syntax.Stmt, call *syntax.CallExpr) *syntax.Word {
-	if len(call.Assigns) != 0 || len(call.Args) != 1 || call.Args[0].Lit() != "cat" ||
+	stdinOnly := len(call.Args) == 1 ||
+		(len(call.Args) == 2 && (call.Args[1].Lit() == "-" || call.Args[1].Lit() == "--"))
+	if len(call.Assigns) != 0 || !stdinOnly || call.Args[0].Lit() != "cat" ||
 		len(stmt.Redirs) != 1 || stmt.Redirs[0].Op != syntax.WordHdoc || stmt.Redirs[0].N != nil {
 		return nil
 	}
