@@ -205,10 +205,23 @@ func shellScriptWordIndex(call *syntax.CallExpr) (int, bool) {
 		case script:
 			return index, true
 		case word == "--login" || word == "--norc" || word == "--noprofile" || word == "--posix":
-		case len(word) > 1 && word[0] == '-' && word[1] != '-' && strings.Trim(word[1:], "abcefhilmnpuvxEBHPT") == "":
-			script = strings.ContainsRune(word[1:], 'c')
-			if !script {
-				continue
+		case len(word) > 1 && (word[0] == '-' || word[0] == '+') && word[1] != '-' &&
+			strings.Trim(word[1:], "abcefhilmopuvxBEHOPT") == "":
+			// -o NAME / -O NAME / +o NAME take the next word (pod check33
+			// P20-P22 `sh -o errexit -c`, `zsh -o pipefail -c`, `ksh -o
+			// pipefail -c`); -n and -o noexec run nothing (check33 N1), so
+			// they are not read as a script call.
+			for values := strings.Count(word[1:], "o") + strings.Count(word[1:], "O"); values > 0; values-- {
+				index++
+				if index >= len(call.Args) || call.Args[index].Lit() == "" || call.Args[index].Lit() == "noexec" {
+					return 0, false
+				}
+			}
+			if strings.ContainsRune(word[1:], 'c') {
+				if word[0] != '-' {
+					return 0, false
+				}
+				script = true
 			}
 		default:
 			return 0, false
@@ -218,11 +231,11 @@ func shellScriptWordIndex(call *syntax.CallExpr) (int, bool) {
 }
 
 // catHereStringWord is the word of `cat <<< WORD` (a cat call with no
-// arguments, or only `-` or `--` (pod check32 O5), and that one redirect),
-// nil otherwise.
+// arguments, or only `-`, `--` (pod check32 O5) or `-u` (ignored by GNU
+// cat, pod check33 N3), and that one redirect), nil otherwise.
 func catHereStringWord(stmt *syntax.Stmt, call *syntax.CallExpr) *syntax.Word {
 	stdinOnly := len(call.Args) == 1 ||
-		(len(call.Args) == 2 && (call.Args[1].Lit() == "-" || call.Args[1].Lit() == "--"))
+		(len(call.Args) == 2 && (call.Args[1].Lit() == "-" || call.Args[1].Lit() == "--" || call.Args[1].Lit() == "-u"))
 	if len(call.Assigns) != 0 || !stdinOnly || call.Args[0].Lit() != "cat" ||
 		len(stmt.Redirs) != 1 || stmt.Redirs[0].Op != syntax.WordHdoc || stmt.Redirs[0].N != nil {
 		return nil
