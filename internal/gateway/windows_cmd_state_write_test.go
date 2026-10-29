@@ -344,3 +344,56 @@ func TestR105WindowsCMDMentionsAndManyCalls(t *testing.T) {
 		}
 	}
 }
+
+// TestR105WindowsCMDHeredocSearchArgument: a here-document fed to a text
+// consumer whose argument names cmd or a shell (grep cmd <<EOF) is text the
+// consumer reads; only a command-position word of the outer line receives
+// the body (GAP-2530, regression of f625b4a83e).
+func TestR105WindowsCMDHeredocSearchArgument(t *testing.T) {
+	const connectorName = "r105-cmd-heredoc-search"
+	installToolCallCorpusProfileConnector(t, connectorName, "default")
+	const home = `C:\Users\Alice`
+	resolved := map[string]string{}
+	for _, value := range []string{"C:/Users/Alice/.defenseclaw", "C:/Users/Alice/.defenseclaw/config.yaml"} {
+		resolved[value] = value
+	}
+	const state = `%USERPROFILE%\.defenseclaw\config.yaml`
+	const body = "\nTip: cmd /c type nul > " + state + " empties the config\nEOF"
+	for _, tc := range []struct {
+		command string
+		block   bool
+	}{
+		{"grep -n cmd <<'EOF'" + body, false},
+		{"grep -c cmd.exe <<'EOF'" + body, false},
+		{"rg -i bash <<'EOF'" + body, false},
+		{"grep -E 'cmd|sh' <<'EOF'" + body, false},
+		{"cat <<'EOF' | grep cmd" + body, false},
+		{"cat <<'EOF' | grep -i \"cmd /c\" > hits.txt" + body, false},
+		{"wc -l <<'EOF' 2>cmd" + body, false},
+		// Still fed to cmd or a shell.
+		{"cmd <<'EOF'\ntype nul > " + state + "\nEOF", true},
+		{"FOO=1 cmd <<'EOF'\ntype nul > " + state + "\nEOF", true},
+		{"env cmd <<'EOF'\ntype nul > " + state + "\nEOF", true},
+		{"<<'EOF' cmd\ntype nul > " + state + "\nEOF", true},
+		{"\"C:\\Windows\\System32\\cmd.exe\" <<'EOF'\ntype nul > " + state + "\nEOF", true},
+		{"{ cmd; } <<'EOF'\ntype nul > " + state + "\nEOF", true},
+		{"cat <<'EOF' | grep -v x | sh\ncmd /c type nul > " + state + "\nEOF", true},
+		{"cat <<'EOF' | bash\ncmd /c type nul > " + state + "\nEOF", true},
+		{"grep -v x <<'EOF' | cmd" + body, true},
+	} {
+		for _, tool := range []string{"Bash", "shell_command", "PowerShell"} {
+			args, _ := json.Marshal(map[string]string{"command": tc.command})
+			input := actionfacts.Input{Tool: tool, Args: args, CWD: home + `\project`, ActiveHome: home}
+			input.DialectHint = agentHookWindowsShellDialect(input)
+			findings := dispatchTrustedAction(t.Context(), trustedActionRequest{
+				Input: input, LegacyText: string(args), Connector: connectorName,
+				EnforcementCapable: true, ResolvedWriteTargets: resolved,
+			})
+			verdict := buildVerdict(findings, "tool_call")
+			if got := verdict.Action == "block"; got != tc.block {
+				t.Errorf("%s %q (dialect %q): action %q, want block=%t (findings %v)",
+					tool, tc.command, input.DialectHint, verdict.Action, tc.block, findings)
+			}
+		}
+	}
+}

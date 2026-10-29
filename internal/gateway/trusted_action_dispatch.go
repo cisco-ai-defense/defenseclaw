@@ -1178,16 +1178,16 @@ func cmdHeredocDelimiter(command string, start int) (doc cmdHeredoc, end int, ok
 // cmdHeredocFeeds reports whether the command line around a here-document
 // operator at pos hands its body to a shell (bash <<EOF, cat <<EOF | sh) or
 // to cmd.exe (cmd <<EOF): then the body runs (over-block, never
-// under-block).
+// under-block). Only command-position words of the outer line count: an
+// argument (grep cmd <<EOF, cat <<EOF | rg bash) names text a consumer
+// reads, not a receiver (GAP-2530).
 func cmdHeredocFeeds(command string, pos int) (runs, cmdFeed bool) {
 	start := strings.LastIndexByte(command[:pos], '\n') + 1
 	end := len(command)
 	if k := strings.IndexByte(command[pos:], '\n'); k >= 0 {
 		end = pos + k
 	}
-	for _, word := range strings.FieldsFunc(command[start:end], func(r rune) bool {
-		return strings.ContainsRune(" \t\r;|&()<>", r)
-	}) {
+	for _, word := range cmdLineCommandWords(command[start:end]) {
 		if cmdShellWord(word) != "" {
 			runs = true
 		}
@@ -1201,6 +1201,136 @@ func cmdHeredocFeeds(command string, pos int) (runs, cmdFeed bool) {
 		}
 	}
 	return runs, cmdFeed
+}
+
+var cmdAssignmentWord = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*\+?=`)
+
+// cmdLineCommandWords returns the words of one Git Bash line that can name
+// the program a statement runs: the first word of each statement (after ;
+// | & ( ) a backtick or $( inside double quotes), past assignments,
+// redirect targets and reserved words ({ ! if then do time ...). After a
+// wrapper (env, exec, xargs, sudo, ...) every later word of the statement
+// counts (over-read, never under-read). Quotes keep separators literal;
+// backslashes are kept so a Windows path keeps its base name.
+func cmdLineCommandWords(line string) []string {
+	var words []string
+	atCommand, wrapped, redirect, inWord := true, false, false, false
+	var word strings.Builder
+	flush := func() {
+		if !inWord {
+			return
+		}
+		w := word.String()
+		word.Reset()
+		inWord = false
+		switch {
+		case redirect:
+			redirect = false
+		case wrapped:
+			words = append(words, w)
+		case atCommand:
+			words = append(words, w)
+			if cmdAssignmentWord.MatchString(w) {
+				return
+			}
+			name := strings.ToLower(strings.Trim(w, `"'`))
+			if k := strings.LastIndexAny(name, `\/`); k >= 0 {
+				name = name[k+1:]
+			}
+			name = strings.TrimSuffix(name, ".exe")
+			switch name {
+			case "{", "}", "!", "if", "then", "else", "elif", "do", "while", "until", "time", "coproc":
+			case "env", "exec", "command", "builtin", "nohup", "sudo", "doas", "su", "xargs", "nice", "ionice",
+				"timeout", "stdbuf", "winpty", "start", "runas", "setsid", "unbuffer", "chroot", "script", "eval",
+				"call", "busybox":
+				atCommand, wrapped = false, true
+			default:
+				atCommand = false
+			}
+		}
+	}
+	separate := func() {
+		flush()
+		atCommand, wrapped, redirect = true, false, false
+	}
+	var quote byte
+	for i := 0; i < len(line); i++ {
+		c := line[i]
+		switch {
+		case quote == '\'':
+			if c == '\'' {
+				quote = 0
+			} else {
+				word.WriteByte(c)
+			}
+			continue
+		case quote == '"':
+			switch {
+			case c == '"':
+				quote = 0
+			case c == '\\' && i+1 < len(line):
+				word.WriteByte(c)
+				word.WriteByte(line[i+1])
+				i++
+			case c == '`' || c == '$' && i+1 < len(line) && line[i+1] == '(':
+				// A substitution inside double quotes runs a command.
+				separate()
+				if c == '$' {
+					i++
+				}
+			case c == ')':
+				separate()
+			default:
+				word.WriteByte(c)
+			}
+			continue
+		}
+		switch c {
+		case '\'', '"':
+			quote = c
+			inWord = true
+		case '\\':
+			word.WriteByte(c)
+			if i+1 < len(line) {
+				word.WriteByte(line[i+1])
+				i++
+			}
+			inWord = true
+		case ' ', '\t', '\r':
+			flush()
+		case '<', '>':
+			// An fd number before the operator (2>file) is part of it.
+			if w := word.String(); inWord && strings.Trim(w, "0123456789") == "" {
+				word.Reset()
+				inWord = false
+			}
+			flush()
+			for i+1 < len(line) && strings.IndexByte("<>&|-", line[i+1]) >= 0 {
+				i++
+			}
+			redirect = true
+		case '&':
+			if i+1 < len(line) && line[i+1] == '>' {
+				flush()
+				i++
+				for i+1 < len(line) && line[i+1] == '>' {
+					i++
+				}
+				redirect = true
+				continue
+			}
+			separate()
+		case ';', '|', '(', ')', '`':
+			separate()
+		default:
+			word.WriteByte(c)
+			inWord = true
+		}
+	}
+	if quote == 0 || inWord {
+		flush()
+	}
+	return words
 }
 
 // cmdHeredocBodies reads the bodies of the pending here-documents from start
