@@ -1954,12 +1954,18 @@ func commandLinks(command, cwd, home string, facts map[string]string, record, ne
 			args, words, static, start = args[run.Index:], words[run.Index:], static[run.Index:], args[run.Index].Pos()
 			program = programBase(words[0])
 		}
-		callDir := cwd
+		// A call after a cd that may fail may run in more than one
+		// directory; each is read (GAP-2574).
+		callDirs := []string{cwd}
 		if placed, ok := linkDirs[call]; ok {
-			callDir = placed
+			callDirs = placed
 		}
 		if movedDir != "" {
-			callDir = OperandPath(movedDir, callDir)
+			moved := make([]string, 0, len(callDirs))
+			for _, dir := range callDirs {
+				moved = append(moved, OperandPath(movedDir, dir))
+			}
+			callDirs = moved
 		}
 		// busybox ln and toybox ln are ln (GAP-1521).
 		for slices.Contains(multicallPrograms, program) && len(args) > 1 {
@@ -1978,16 +1984,22 @@ func commandLinks(command, cwd, home string, facts map[string]string, record, ne
 			// A program named by a parameter or a substitution may be ln.
 			links.unknown(false)
 		case slices.Contains(linkPrograms, program):
-			workingDirectory := cwd
-			if dir, placed := linkDirs[call]; placed {
-				workingDirectory = dir
+			workingDirectories := []string{cwd}
+			if placed, ok := linkDirs[call]; ok {
+				workingDirectories = placed
 			}
 			if call == linkCall {
-				workingDirectory = linkCWD
+				workingDirectories = []string{linkCWD}
 			}
 			links.linkTexts = append(links.linkTexts, command[call.Pos().Offset():call.End().Offset()])
-			if slices.Contains(static, false) || !links.add(program, words[1:], workingDirectory) {
+			if slices.Contains(static, false) {
 				links.unknown(true)
+				break
+			}
+			for _, workingDirectory := range workingDirectories {
+				if !links.add(program, words[1:], workingDirectory) {
+					links.unknown(true)
+				}
 			}
 		case slices.Contains(copyPrograms, program):
 			// A copy after static top-level cd statements runs in the
@@ -1995,50 +2007,52 @@ func commandLinks(command, cwd, home string, facts map[string]string, record, ne
 			// starting directory, where a missing source read as a possible
 			// link and made cd ~ && cp -r project project-bak a key write
 			// (GAP-2551).
-			dir := callDir
-			if len(args) == 3 && !static[1] && static[2] &&
-				quotedDynamicCopySource(args[1]) && words[2] != "" && !strings.HasPrefix(words[2], "-") {
-				// A quoted source is one argv word. If it expands to an option,
-				// cp has no source and cannot write its fixed destination.
-				links.copyDestinations = append(links.copyDestinations, OperandPath(words[2], dir))
-				return true
-			}
-			destination := cpDestination(words[1:], static[1:], dir)
-			if destination != "" {
-				links.copyDestinations = append(links.copyDestinations, destination)
-			}
-			option, dynamic := copyLinkOptions(args[1:], words[1:], static[1:])
-			if copyPreservesLinks(words[1:], static[1:]) {
-				copyScopes = append(copyScopes, destination)
-				if cpDiskSymlink(words[1:], static[1:], dir, home, facts, record) {
-					links.unknownCopyIn(destination)
+			for _, dir := range callDirs {
+				if len(args) == 3 && !static[1] && static[2] &&
+					quotedDynamicCopySource(args[1]) && words[2] != "" && !strings.HasPrefix(words[2], "-") {
+					// A quoted source is one argv word. If it expands to an option,
+					// cp has no source and cannot write its fixed destination.
+					links.copyDestinations = append(links.copyDestinations, OperandPath(words[2], dir))
+					continue
 				}
-			}
-			switch {
-			case option:
-				links.linkTexts = append(links.linkTexts, command[call.Pos().Offset():call.End().Offset()])
-				if slices.Contains(static, false) || !links.add(program, words[1:], dir) {
-					links.unknown(true)
+				destination := cpDestination(words[1:], static[1:], dir)
+				if destination != "" {
+					links.copyDestinations = append(links.copyDestinations, destination)
 				}
-			case dynamic:
-				// A word that is not static may expand to a link option.
-				links.unknown(false)
-				copyScopes = append(copyScopes, cpDestination(words[1:], static[1:], dir))
+				option, dynamic := copyLinkOptions(args[1:], words[1:], static[1:])
+				if copyPreservesLinks(words[1:], static[1:]) {
+					copyScopes = append(copyScopes, destination)
+					if cpDiskSymlink(words[1:], static[1:], dir, home, facts, record) {
+						links.unknownCopyIn(destination)
+					}
+				}
+				switch {
+				case option:
+					links.linkTexts = append(links.linkTexts, command[call.Pos().Offset():call.End().Offset()])
+					if slices.Contains(static, false) || !links.add(program, words[1:], dir) {
+						links.unknown(true)
+					}
+				case dynamic:
+					// A word that is not static may expand to a link option.
+					links.unknown(false)
+					copyScopes = append(copyScopes, cpDestination(words[1:], static[1:], dir))
+				}
 			}
 		case slices.Contains(archivePrograms, program):
-			dir := callDir // As for a copy (GAP-2551).
-			if slices.Contains(static[1:], false) {
-				// An option supplied at runtime may select extraction.
-				links.unknownIn(archiveDestination(program, words[1:], static[1:], dir))
-			}
-			if archiveMayLink(program, words[1:], static[1:]) {
-				links.unknownIn(archiveDestination(program, words[1:], static[1:], dir))
-			}
-			if archiveCopiesLinks(program, words[1:], static[1:]) {
-				destination := archiveDestination(program, words[1:], static[1:], dir)
-				copyScopes = append(copyScopes, destination)
-				if archiveCopiesDiskSymlink(program, words[1:], static[1:], dir, home, facts, record) {
-					links.unknownIn(destination)
+			for _, dir := range callDirs { // As for a copy (GAP-2551).
+				if slices.Contains(static[1:], false) {
+					// An option supplied at runtime may select extraction.
+					links.unknownIn(archiveDestination(program, words[1:], static[1:], dir))
+				}
+				if archiveMayLink(program, words[1:], static[1:]) {
+					links.unknownIn(archiveDestination(program, words[1:], static[1:], dir))
+				}
+				if archiveCopiesLinks(program, words[1:], static[1:]) {
+					destination := archiveDestination(program, words[1:], static[1:], dir)
+					copyScopes = append(copyScopes, destination)
+					if archiveCopiesDiskSymlink(program, words[1:], static[1:], dir, home, facts, record) {
+						links.unknownIn(destination)
+					}
 				}
 			}
 		case program == "git":
@@ -2183,74 +2197,68 @@ func commandLinks(command, cwd, home string, facts map[string]string, record, ne
 // command whose directory changes are all static top-level cd statements in
 // a ; / && / || list (cd build && ln ../a.txt b1, cd ~ && cp -r a b): each
 // call runs in the directory the cd statements before it name, read
-// lexically from cwd (GAP-1742, GAP-2551). A plain ( ... ) subshell is read
-// the same way, and its cd statements end with it. known is false when any
+// lexically from cwd (GAP-1742, GAP-2551); a call after a cd that may fail
+// runs in each directory it may stand in (GAP-2574). A plain ( ... )
+// subshell is read the same way, and its cd statements end with it. known is false when any
 // cd, pushd or popd is elsewhere or dynamic, so the link scope keeps its
 // conservative reading.
-func topLevelLinkDirectories(file *syntax.File, cwd, home string) (dirs map[*syntax.CallExpr]string, known bool) {
+func topLevelLinkDirectories(file *syntax.File, cwd, home string) (dirs map[*syntax.CallExpr][]string, known bool) {
 	statements, placed, known := topLevelStatementDirectories(file, cwd, home)
 	if !known {
 		return nil, false
 	}
-	dirs = make(map[*syntax.CallExpr]string)
+	dirs = make(map[*syntax.CallExpr][]string)
 	for i, stmt := range statements {
-		// Every call starts in its directory; a wrapper that moves the
+		// Every call starts in its directories; a wrapper that moves the
 		// directory (env -C) moves it from there.
 		if call, ok := stmt.Cmd.(*syntax.CallExpr); ok && len(call.Args) > 0 {
-			dirs[call] = placed[i]
+			dirs[call] = append(dirs[call], placed[i])
 		}
 	}
 	return dirs, true
 }
 
 // topLevelStatementDirectories lists the top-level statements of a ; / && /
-// || list other than its cd statements, each with the directory it runs in,
-// read lexically from cwd through the static cd statements before it
-// (GAP-1742). The statements of a plain ( ... ) subshell are listed in its
-// place, and its cd statements end with it (GAP-2551). A top-level pushd of
-// one static directory that CDPATH cannot move (absolute, ~, . or ..) moves
-// as cd does and keeps the directory it left for a bare popd (GAP-2562). known is false when any cd, pushd or popd is
+// || list other than its cd statements, each with every directory it may run
+// in, read lexically from cwd through the static cd statements before it
+// (GAP-1742). A statement that may run in two directories is listed once for
+// each. A cd, pushd or popd may fail (a missing or unreadable directory):
+// the statements an && after it runs see only the changed directory, but a
+// statement after ; or || also runs where the shell stood before, so
+// pushd /missing; cp a.txt ../.defenseclaw/config.yaml is read in both
+// directories (GAP-2574). The statements of a plain ( ... ) subshell are
+// listed in its place, and its cd statements end with it (GAP-2551). A
+// top-level pushd of one static directory that CDPATH cannot move
+// (absolute, ~, . or ..) moves as cd does and keeps the directory it left
+// for a bare popd (GAP-2562). known is false when any cd, pushd or popd is
 // elsewhere or dynamic, a pushd or popd takes another form, a popd has no
-// pushd to return to, or a top-level program word is not static.
+// pushd to return to, a top-level program word is not static, or the
+// command has more possible directories than are read.
 func topLevelStatementDirectories(file *syntax.File, cwd, home string) (statements []*syntax.Stmt, dirs []string, known bool) {
-	// An enter or leave entry opens or closes a subshell: ( cd src && ln -s
-	// ../a.txt b ) runs its list from the directory it starts in, and its cd
-	// statements do not move the statements after it (GAP-2550).
-	type entry struct {
-		stmt         *syntax.Stmt
-		enter, leave bool
-	}
-	var all []entry
-	var flatten func(*syntax.Stmt)
-	flatten = func(stmt *syntax.Stmt) {
+	// The calls the statement walk below places; a cd anywhere else keeps
+	// the conservative reading.
+	topLevel := make(map[*syntax.CallExpr]bool)
+	var collect func(*syntax.Stmt)
+	collect = func(stmt *syntax.Stmt) {
 		plain := len(stmt.Redirs) == 0 && !stmt.Background && !stmt.Negated
 		if pair, ok := stmt.Cmd.(*syntax.BinaryCmd); ok && plain &&
 			(pair.Op == syntax.AndStmt || pair.Op == syntax.OrStmt) {
-			flatten(pair.X)
-			flatten(pair.Y)
+			collect(pair.X)
+			collect(pair.Y)
 			return
 		}
 		if sub, ok := stmt.Cmd.(*syntax.Subshell); ok && plain {
-			all = append(all, entry{enter: true})
 			for _, inner := range sub.Stmts {
-				flatten(inner)
+				collect(inner)
 			}
-			all = append(all, entry{leave: true})
 			return
 		}
-		all = append(all, entry{stmt: stmt})
-	}
-	for _, stmt := range file.Stmts {
-		flatten(stmt)
-	}
-	topLevel := make(map[*syntax.CallExpr]bool)
-	for _, e := range all {
-		if e.stmt == nil {
-			continue
-		}
-		if call, ok := e.stmt.Cmd.(*syntax.CallExpr); ok && !e.stmt.Background {
+		if call, ok := stmt.Cmd.(*syntax.CallExpr); ok && !stmt.Background {
 			topLevel[call] = true
 		}
+	}
+	for _, stmt := range file.Stmts {
+		collect(stmt)
 	}
 	known = true
 	syntax.Walk(file, func(node syntax.Node) bool {
@@ -2266,49 +2274,112 @@ func topLevelStatementDirectories(file *syntax.File, cwd, home string) (statemen
 	if !known {
 		return nil, nil, false
 	}
-	dir := cwd
-	// stack is the pushd directory stack; a subshell starts with a copy
-	// of it and its changes end with it.
-	type frame struct {
+	// A place is one directory the shell may stand in, with its pushd
+	// stack. A subshell starts from the places it is entered in and its
+	// changes end with it.
+	type place struct {
 		dir   string
 		stack []string
 	}
-	var stack []string
-	var outer []frame
-	for _, e := range all {
-		switch {
-		case e.enter:
-			outer = append(outer, frame{dir: dir, stack: slices.Clone(stack)})
-			continue
-		case e.leave:
-			last := outer[len(outer)-1]
-			dir, stack, outer = last.dir, last.stack, outer[:len(outer)-1]
-			continue
+	const maxPlaces = 16
+	join := func(sets ...[]place) []place {
+		var out []place
+		seen := make(map[string]bool)
+		for _, set := range sets {
+			for _, p := range set {
+				key := p.dir + "\x00" + strings.Join(p.stack, "\x00")
+				if !seen[key] {
+					seen[key] = true
+					out = append(out, p)
+				}
+			}
 		}
-		stmt := e.stmt
-		call, ok := stmt.Cmd.(*syntax.CallExpr)
-		if !ok || len(call.Args) == 0 {
-			statements, dirs = append(statements, stmt), append(dirs, dir)
-			continue
+		return out
+	}
+	var run func(*syntax.Stmt, []place) (succeeded, failed []place, ok bool)
+	runList := func(list []*syntax.Stmt, in []place) (succeeded, failed []place, ok bool) {
+		succeeded, failed = in, in
+		current := in
+		for _, stmt := range list {
+			if succeeded, failed, ok = run(stmt, current); !ok {
+				return nil, nil, false
+			}
+			current = join(succeeded, failed)
+		}
+		return succeeded, failed, true
+	}
+	run = func(stmt *syntax.Stmt, in []place) (succeeded, failed []place, ok bool) {
+		if len(in) > maxPlaces {
+			return nil, nil, false
+		}
+		plain := len(stmt.Redirs) == 0 && !stmt.Background && !stmt.Negated
+		if pair, isPair := stmt.Cmd.(*syntax.BinaryCmd); isPair && plain &&
+			(pair.Op == syntax.AndStmt || pair.Op == syntax.OrStmt) {
+			leftOK, leftFailed, ok := run(pair.X, in)
+			if !ok {
+				return nil, nil, false
+			}
+			if pair.Op == syntax.AndStmt {
+				rightOK, rightFailed, ok := run(pair.Y, leftOK)
+				return rightOK, join(leftFailed, rightFailed), ok
+			}
+			rightOK, rightFailed, ok := run(pair.Y, leftFailed)
+			return join(leftOK, rightOK), rightFailed, ok
+		}
+		if sub, isSub := stmt.Cmd.(*syntax.Subshell); isSub && plain {
+			if _, _, ok := runList(sub.Stmts, in); !ok {
+				return nil, nil, false
+			}
+			return in, in, true
+		}
+		call, isCall := stmt.Cmd.(*syntax.CallExpr)
+		if !isCall || len(call.Args) == 0 {
+			for _, p := range join(in) {
+				statements, dirs = append(statements, stmt), append(dirs, p.dir)
+			}
+			return in, in, true
 		}
 		program, static := StaticWord(call.Args[0], home)
 		if !static {
 			return nil, nil, false
 		}
-		if base := programBase(program); slices.Contains(cdPrograms, base) {
-			if len(call.Assigns) != 0 || !filepath.IsAbs(dir) {
+		base := programBase(program)
+		if !slices.Contains(cdPrograms, base) {
+			placed := make(map[string]bool)
+			for _, p := range in {
+				if !placed[p.dir] {
+					placed[p.dir] = true
+					statements, dirs = append(statements, stmt), append(dirs, p.dir)
+				}
+			}
+			return in, in, true
+		}
+		if len(call.Assigns) != 0 {
+			return nil, nil, false
+		}
+		var moved []place
+		for _, p := range in {
+			if !filepath.IsAbs(p.dir) {
 				return nil, nil, false
 			}
-			if base == "popd" {
-				// A bare popd returns to the directory the last pushd
-				// left; any other form, or nothing to return to, is
-				// not read.
-				if len(call.Args) != 1 || len(stack) == 0 {
-					return nil, nil, false
-				}
-				dir, stack = stack[len(stack)-1], stack[:len(stack)-1]
-				continue
+		}
+		switch {
+		case base == "popd":
+			// A bare popd returns to the directory the last pushd left;
+			// any other form, or nothing to return to, is not read. Where
+			// the stack is empty the popd fails and the shell stays.
+			if len(call.Args) != 1 {
+				return nil, nil, false
 			}
+			for _, p := range in {
+				if len(p.stack) > 0 {
+					moved = append(moved, place{dir: p.stack[len(p.stack)-1], stack: slices.Clone(p.stack[:len(p.stack)-1])})
+				}
+			}
+			if len(moved) == 0 {
+				return nil, nil, false
+			}
+		default:
 			if len(call.Args) != 2 {
 				return nil, nil, false
 			}
@@ -2316,19 +2387,29 @@ func topLevelStatementDirectories(file *syntax.File, cwd, home string) (statemen
 			if !static || target == "" || strings.HasPrefix(target, "-") || base == "pushd" && strings.HasPrefix(target, "+") {
 				return nil, nil, false
 			}
-			if base == "pushd" {
-				// pushd keeps the conservative reading for a bare
-				// relative name, which an unexported CDPATH may move
-				// (TestR104Loop3SearchPathCDKeepsLinkScopeOpaque).
-				if !pushdBypassesCDPath(target) {
-					return nil, nil, false
-				}
-				stack = append(stack, dir)
+			// pushd keeps the conservative reading for a bare relative
+			// name, which an unexported CDPATH may move
+			// (TestR104Loop3SearchPathCDKeepsLinkScopeOpaque).
+			if base == "pushd" && !pushdBypassesCDPath(target) {
+				return nil, nil, false
 			}
-			dir = OperandPath(target, dir)
-			continue
+			for _, p := range in {
+				next := place{dir: OperandPath(target, p.dir), stack: slices.Clone(p.stack)}
+				if base == "pushd" {
+					next.stack = append(next.stack, p.dir)
+				}
+				moved = append(moved, next)
+			}
 		}
-		statements, dirs = append(statements, stmt), append(dirs, dir)
+		moved = join(moved)
+		// The change may fail; the shell then stays where it was.
+		if stmt.Negated {
+			return in, moved, true
+		}
+		return moved, in, true
+	}
+	if _, _, ok := runList(file.Stmts, []place{{dir: cwd}}); !ok {
+		return nil, nil, false
 	}
 	return statements, dirs, true
 }

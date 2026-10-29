@@ -1095,6 +1095,53 @@ func provenStateMutationPath(facts actionfacts.Facts, request trustedActionReque
 			return true
 		}
 	}
+	return !wholeActionProven && placedStatementStateWrite(facts, request)
+}
+
+// placedStatementStateWrite reads each top-level statement of a ; / && / ||
+// list alone, in every directory the shell may run it in, when the whole
+// list is not proven: a pushd leaves the analysis partial, so pushd
+// /missing; cp a.txt ../.defenseclaw/config.yaml had no proof, although the
+// failed pushd leaves the shell where it was and the cp writes the state
+// file (GAP-2574). A statement proven alone that mutates active state is
+// the state write; it only adds this block.
+func placedStatementStateWrite(facts actionfacts.Facts, request trustedActionRequest) bool {
+	if request.Input.DialectHint != actionfacts.DialectPOSIX && request.Input.DialectHint != "" {
+		return false
+	}
+	text, known := trustedBashCommandInput(request.Input)
+	if !known || !strings.Contains(text, "cd") && !strings.Contains(text, "pushd") && !strings.Contains(text, "popd") {
+		return false
+	}
+	facts, request = protectedHomePlacedReading(facts, request)
+	home := facts.EnforcementProjection().ActiveHome
+	if home == "" || !filepath.IsAbs(request.Input.CWD) {
+		return false
+	}
+	statements, placed := hookpaths.TopLevelStatements(text, request.Input.CWD, home)
+	if !placed || len(statements) < 2 {
+		return false
+	}
+	for _, statement := range statements {
+		input := request.Input
+		input.Args, input.Argv, input.Command, input.CWD = nil, nil, statement.Command, statement.Dir
+		projected := actionfacts.Analyze(input).EnforcementProjection()
+		if projected.ActiveHome == "" || !projected.Authoritative() || !projected.EnforcementEligible() {
+			continue
+		}
+		for _, candidate := range projected.Paths {
+			command, ok := integrityCommandByID(projected, candidate.CommandID)
+			if !ok || !stateCommandMutatesPath(command, candidate) {
+				continue
+			}
+			if active, same := hookpaths.ResolveActiveStateHardlinkTarget(candidate.Resolved, projected.ActiveHome); same {
+				candidate.Resolved = active
+			}
+			if matchesActiveDefenseClawState(projected, candidate) {
+				return true
+			}
+		}
+	}
 	return false
 }
 
