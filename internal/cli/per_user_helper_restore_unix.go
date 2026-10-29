@@ -19,10 +19,10 @@ func perUserPrivateDir(path string) bool {
 	if err != nil || !info.IsDir() {
 		return false
 	}
-	return perUserOwnedPrivateFile(info)
+	return perUserOwnedPrivateFile(path, info)
 }
 
-func perUserOwnedPrivateFile(info os.FileInfo) bool {
+func perUserOwnedPrivateFile(_ string, info os.FileInfo) bool {
 	st, ok := info.Sys().(*syscall.Stat_t)
 	if !ok || int(st.Uid) != os.Getuid() {
 		return false

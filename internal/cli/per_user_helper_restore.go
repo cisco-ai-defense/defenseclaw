@@ -145,7 +145,7 @@ func restorePerUserHelper(source, target, digest string) error {
 	if err != nil {
 		return err
 	}
-	if !info.Mode().IsRegular() || !perUserOwnedPrivateFile(info) || info.Size() > maxPerUserHelperSize {
+	if !info.Mode().IsRegular() || !perUserOwnedPrivateFile(source, info) || info.Size() > maxPerUserHelperSize {
 		return errors.New("the installer copy is not a private file of this account")
 	}
 	data, err := safefile.ReadRegularFileBounded(source, maxPerUserHelperSize)

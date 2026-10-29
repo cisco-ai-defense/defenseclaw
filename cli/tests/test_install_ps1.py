@@ -8684,3 +8684,19 @@ def test_the_windows_venv_gets_the_published_tiktoken_rank_files_so_the_first_im
     )
     repair = _ps1_function("Repair-TiktokenRanks")
     assert "Invoke-Native $Python @(\"-I\", $code, $site) -Quiet" in repair and "Write-Warn" in repair
+
+
+def test_an_install_keeps_a_recorded_hook_guard_copy_an_older_roll_forward_cannot_drop() -> None:
+    # GAP-2525: a 1.0.2 or 1.0.3 install.ps1 roll-forward restores only its own
+    # binaries, so defenseclaw-hook-guard.exe went missing while the Claude Code
+    # PreToolUse entry names it. installer moves back as one folder: the install
+    # keeps the guard there with the digests the gateway checks before it puts
+    # the guard back at start (internal/cli/per_user_helper_restore.go).
+    body = _ps1_function("Save-HelperRecoveryCopy")
+    assert 'Install-File $guard (Join-Path $InstallerDir "defenseclaw-hook-guard.exe")' in body
+    assert 'Join-Path $InstallerDir "binaries.sha256"' in body
+    assert '@("defenseclaw-gateway.exe", "defenseclaw-hook-guard.exe")' in body
+    assert "Publish-File" in body and "catch" in body
+    install_new = _ps1_function("Install-New")
+    loop = install_new.index("foreach ($name in $ManagedBinaries)")
+    assert loop < install_new.index("Save-HelperRecoveryCopy") < install_new.index("Write-HookState")
