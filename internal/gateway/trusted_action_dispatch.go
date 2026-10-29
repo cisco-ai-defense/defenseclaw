@@ -1002,8 +1002,13 @@ func cmdDoubleQuote(r rune, reading cmdOuterReading) bool {
 
 // cmdQuotedWord reads the quoted word that starts at i. ok is false when no
 // quote starts there or the word is not terminated: an unterminated quote is
-// not text, the scan goes on (RV10-1).
-func cmdQuotedWord(command string, i int, reading cmdOuterReading) (end int, inner string, ok bool) {
+// not text, the scan goes on (RV10-1). In the Git Bash reading a $(...)
+// inside a double-quoted word is a command substitution that bash parses on
+// its own, so a quote inside it (or inside a here-document it opens) does
+// not end the word (pod it17: git commit -m "$(cat <<'EOF' ... "cmd //c"
+// ... EOF )" was read as two words and the mention blocked). budget bounds
+// that nested reading; past it the word ends at the next quote as before.
+func cmdQuotedWord(command string, i int, reading cmdOuterReading, budget *int) (end int, inner string, ok bool) {
 	open, size := utf8.DecodeRuneInString(command[i:])
 	single, double := cmdSingleQuote(open, reading), cmdDoubleQuote(open, reading)
 	if !single && !double {
@@ -1023,6 +1028,19 @@ func cmdQuotedWord(command string, i int, reading cmdOuterReading) (end int, inn
 			j += w + next
 			continue
 		}
+		if double && reading != cmdReadingCMD && r == '$' && j+1 < len(command) && command[j+1] == '(' &&
+			budget != nil && *budget > 0 {
+			end, ok := 0, false
+			if reading == cmdReadingGitBash {
+				end, ok = cmdGitBashSubstitutionEnd(command, j+2, budget)
+			} else {
+				end, ok = cmdPowerShellSubexpressionEnd(command, j+2, budget)
+			}
+			if ok {
+				j = end
+				continue
+			}
+		}
 		if closes(r) {
 			if reading == cmdReadingPowerShell && j+w < len(command) {
 				if r2, w2 := utf8.DecodeRuneInString(command[j+w:]); closes(r2) {
@@ -1039,6 +1057,131 @@ func cmdQuotedWord(command string, i int, reading cmdOuterReading) (end int, inn
 		j += w
 	}
 	return 0, "", false
+}
+
+// cmdGitBashSubstitutionEnd returns the offset after the ) that closes the
+// Git Bash command substitution whose body starts at start: quotes,
+// backticks, nested parentheses and here-document bodies inside it are
+// skipped as bash parses them. ok is false when it does not close (or the
+// budget runs out): the caller keeps its plain reading.
+func cmdGitBashSubstitutionEnd(command string, start int, budget *int) (int, bool) {
+	depth := 1
+	var pending []cmdHeredoc
+	for j := start; j < len(command); {
+		*budget--
+		if *budget <= 0 {
+			return 0, false
+		}
+		c := command[j]
+		switch {
+		case c == '\\':
+			j += 2
+			continue
+		case c == '\'':
+			k := strings.IndexByte(command[j+1:], '\'')
+			if k < 0 {
+				return 0, false
+			}
+			*budget -= k
+			j += k + 2
+			continue
+		case c == '"':
+			end, _, ok := cmdQuotedWord(command, j, cmdReadingGitBash, budget)
+			if !ok {
+				return 0, false
+			}
+			*budget -= end - j
+			j = end
+			continue
+		case c == '`':
+			k := strings.IndexByte(command[j+1:], '`')
+			if k < 0 {
+				return 0, false
+			}
+			*budget -= k
+			j += k + 2
+			continue
+		case c == '<' && j+1 < len(command) && command[j+1] == '<' && (j+2 >= len(command) || command[j+2] != '<'):
+			if doc, end, ok := cmdHeredocDelimiter(command, j+2); ok {
+				pending = append(pending, doc)
+				j = end
+				continue
+			}
+		case c == '\n' && len(pending) > 0:
+			bodies, end := cmdHeredocBodies(command, j+1, pending)
+			if len(bodies) < len(pending) {
+				return 0, false
+			}
+			*budget -= end - j
+			pending = nil
+			j = end
+			continue
+		case c == '(':
+			depth++
+		case c == ')':
+			depth--
+			if depth == 0 {
+				return j + 1, true
+			}
+		}
+		j++
+	}
+	return 0, false
+}
+
+// cmdPowerShellSubexpressionEnd returns the offset after the ) that closes
+// the PowerShell $(...) of a double-quoted string whose body starts at
+// start: strings, backtick escapes, comments and nested parentheses inside
+// it are skipped as PowerShell parses them. ok is false when it does not
+// close (or the budget runs out).
+func cmdPowerShellSubexpressionEnd(command string, start int, budget *int) (int, bool) {
+	depth := 1
+	for j := start; j < len(command); {
+		*budget--
+		if *budget <= 0 {
+			return 0, false
+		}
+		c := command[j]
+		tokenStart := j == 0 || strings.IndexByte(" \t\r\n;|&(){}", command[j-1]) >= 0
+		switch {
+		case c == '`':
+			j += 2
+			continue
+		case c == '#' && tokenStart:
+			k := strings.IndexByte(command[j:], '\n')
+			if k < 0 {
+				return 0, false
+			}
+			*budget -= k
+			j += k
+			continue
+		case c == '<' && j+1 < len(command) && command[j+1] == '#':
+			k := strings.Index(command[j+2:], "#>")
+			if k < 0 {
+				return 0, false
+			}
+			*budget -= k
+			j += k + 4
+			continue
+		case c == '\'' || c == '"':
+			end, _, ok := cmdQuotedWord(command, j, cmdReadingPowerShell, budget)
+			if !ok {
+				return 0, false
+			}
+			*budget -= end - j
+			j = end
+			continue
+		case c == '(':
+			depth++
+		case c == ')':
+			depth--
+			if depth == 0 {
+				return j + 1, true
+			}
+		}
+		j++
+	}
+	return 0, false
 }
 
 // cmdHeredoc is a pending Git Bash here-document of cmdTextSpans.
@@ -1171,6 +1314,9 @@ func cmdTextSpans(command string, reading cmdOuterReading) (spans []cmdTextSpan,
 	// << inside the first three is no here-document operator (RV5-2).
 	braces, arith, subscript, parens := 0, 0, 0, 0
 	var pending []cmdHeredoc
+	// nestBudget bounds the nested $(...) reading of double-quoted words
+	// (linear in the command, RV10-3).
+	nestBudget := 8*len(command) + 1<<16
 	// stopParsing is the end of a PowerShell --% tail: verbatim text.
 	stopParsing := -1
 	commentSeparators := " \t\r\n;|&()<>"
@@ -1308,7 +1454,14 @@ func cmdTextSpans(command string, reading cmdOuterReading) (spans []cmdTextSpan,
 			}
 			continue
 		case c == '"' || c == '\'' || c >= utf8.RuneSelf:
-			if end, inner, ok := cmdQuotedWord(command, i, reading); ok {
+			if end, inner, ok := cmdQuotedWord(command, i, reading, &nestBudget); ok {
+				if reading == cmdReadingPowerShell && c == '"' && cmdPowerShellSubexpressionStops(inner) {
+					// PowerShell parses a $(...) of a string as code: a
+					// token-start << there is a parse error too, so it
+					// runs none of the command (pod it17: a Git Bash
+					// git commit -m "$(cat <<'EOF' ... EOF)" message).
+					return spans, true
+				}
 				spans = append(spans, cmdTextSpan{start: i, end: end, inner: inner, expands: c == '"'})
 				i = end
 				continue
@@ -1318,6 +1471,45 @@ func cmdTextSpans(command string, reading cmdOuterReading) (spans []cmdTextSpan,
 	}
 	cmdMarkRunStrings(command, spans)
 	return spans, false
+}
+
+// cmdPowerShellSubexpressionStops reports a $(...) of the double-quoted
+// PowerShell string inner with a << that starts a token outside its quotes,
+// which PowerShell cannot parse. One level is read (linear).
+func cmdPowerShellSubexpressionStops(inner string) bool {
+	if !strings.Contains(inner, "<<") {
+		return false
+	}
+	for _, sub := range cmdSubexpressions(inner, cmdReadingPowerShell) {
+		for i := 0; i < len(sub); i++ {
+			c := sub[i]
+			tokenStart := i == 0 || strings.IndexByte(" \t\r\n;|&(){}", sub[i-1]) >= 0
+			switch {
+			case c == '`':
+				i++
+			case c == '#' && tokenStart:
+				// A comment: a << in it is text.
+				if k := strings.IndexByte(sub[i:], '\n'); k >= 0 {
+					i += k
+				} else {
+					i = len(sub)
+				}
+			case c == '<' && i+1 < len(sub) && sub[i+1] == '#':
+				if k := strings.Index(sub[i+2:], "#>"); k >= 0 {
+					i += k + 3
+				} else {
+					i = len(sub)
+				}
+			case c == '\'' || c == '"':
+				if end, _, ok := cmdQuotedWord(sub, i, cmdReadingPowerShell, nil); ok {
+					i = end - 1
+				}
+			case c == '<' && i+1 < len(sub) && sub[i+1] == '<' && tokenStart:
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func cmdNameByte(c byte) bool {
@@ -1511,6 +1703,14 @@ func cmdSubexpressions(inner string, reading cmdOuterReading) []string {
 	var subs []string
 	var open []int // body start of each open (, -1 for a plain one
 	for i := 0; i < len(inner); i++ {
+		if len(open) > 0 && (inner[i] == '\'' || inner[i] == '"') {
+			// A quoted word inside a $(...) is text of it: a ) there does
+			// not close it (pod it17); an unterminated one is scanned on.
+			if end, _, ok := cmdQuotedWord(inner, i, reading, nil); ok {
+				i = end - 1
+				continue
+			}
+		}
 		switch inner[i] {
 		case '(':
 			if i > 0 && inner[i-1] == '$' {
@@ -1769,6 +1969,11 @@ func (r *cmdBodyReader) addArgumentList(command string, spans []cmdTextSpan, arg
 // quotes), which is read again. complete is false when the command needs
 // more reading than the bounds allow.
 func cmdInvocationReadings(command string, includeCMD bool) (bodies []string, complete bool) {
+	if !cmdSpellingPossible(command) {
+		// No reading can run cmd.exe: the bounds below must not turn a
+		// large or deeply nested command into a write (rows17 B08).
+		return nil, true
+	}
 	r := &cmdBodyReader{
 		readings: []cmdOuterReading{cmdReadingPowerShell, cmdReadingGitBash},
 		seen:     map[string]bool{},
@@ -1779,6 +1984,28 @@ func cmdInvocationReadings(command string, includeCMD bool) (bodies []string, co
 	}
 	r.read(command, 0)
 	return r.bodies, !r.overflow
+}
+
+// cmdSpellingPossible reports whether some reading of command may name
+// cmd.exe: "cmd" or "comspec" in the text with every quote, escape and
+// continuation character (quotes, backtick, caret, backslash, CR, LF) and
+// every non-ASCII rune taken out. It only ever over-reports, so a command it
+// rejects has no cmd program word in any reading.
+func cmdSpellingPossible(command string) bool {
+	var b strings.Builder
+	b.Grow(len(command))
+	for _, r := range command {
+		switch {
+		case r >= utf8.RuneSelf, r == 0x22, r == 0x27, r == 0x60, r == 0x5e, r == 0x5c, r == 0x0d, r == 0x0a:
+			continue
+		case r >= 0x41 && r <= 0x5a:
+			b.WriteRune(r + 0x20)
+		default:
+			b.WriteRune(r)
+		}
+	}
+	folded := b.String()
+	return strings.Contains(folded, "cmd") || strings.Contains(folded, "comspec")
 }
 
 // provenCMDSlashCStateWrite judges the body of a cmd /c or cmd /k call as

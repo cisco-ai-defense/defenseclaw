@@ -82,3 +82,40 @@ func TestOpaqueCMDWrapperArgvReductionPreservesExtractedCWD(t *testing.T) {
 		t.Fatalf("call-operator reduction lost the working directory: ok=%t view=%+v original=%+v", ok, view, facts)
 	}
 }
+
+// GAP-1727: a cmd.exe call read in the CMD grammar, or in the POSIX reading
+// of a Windows shell call, keeps its outer argv and the parsed quoted body
+// as a view; without /d both stay partial (AutoRun), so before the fix only
+// a PowerShell reading had the view. A POSIX home has no such view.
+func TestOpaqueCMDWrapperArgvReductionReadsCMDAndWindowsPOSIXGrammar(t *testing.T) {
+	const marker = "fc-block-marker-1727"
+	for _, tc := range []struct {
+		name, command, home string
+		hint                Dialect
+		want                bool
+	}{
+		{"CMD sole quoted body", `cmd.exe /c "echo fc-block-marker-1727 > f.txt"`, `C:\Users\Alice`, DialectCMD, true},
+		{"CMD quoted body list", `cmd.exe /c "echo fc-block-marker-1727 > x.txt && type x.txt"`, `C:\Users\Alice`, DialectCMD, true},
+		{"CMD quoted body no redirect", `cmd /c "echo fc-block-marker-1727"`, `C:\Users\Alice`, DialectCMD, true},
+		{"Windows POSIX unquoted", `cmd.exe /c echo fc-block-marker-1727 > f.txt`, `C:\Users\Alice`, "", true},
+		{"Windows POSIX d switch", `cmd.exe /d /c echo fc-block-marker-1727`, `C:\Users\Alice`, "", true},
+		{"POSIX home unquoted", `cmd.exe /c echo fc-block-marker-1727 > f.txt`, "/home/alice", "", false},
+		{"CMD keep-open switch", `cmd.exe /k "echo fc-block-marker-1727"`, `C:\Users\Alice`, DialectCMD, false},
+		{"CMD dynamic body", `cmd.exe /c "echo %MARKER% > f.txt"`, `C:\Users\Alice`, DialectCMD, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			input := Input{Tool: "shell_command", Command: tc.command, ActiveHome: tc.home, DialectHint: tc.hint}
+			facts := Analyze(input)
+			view, ok := OpaqueCMDWrapperArgvReduction(input, facts)
+			found := ok && slices.ContainsFunc(view.Commands, func(command CommandFact) bool {
+				return command.ArgvComplete && slices.Contains(command.Argv, marker)
+			})
+			if found != tc.want {
+				t.Fatalf("view=%t marker=%t, want %t; parse=%+v commands=%+v", ok, found, tc.want, facts.Parse, facts.Commands)
+			}
+			if ok && (facts.Authoritative() || !view.EnforcementEligible()) {
+				t.Fatalf("view is not a match-only argv view of a partial action: %+v", view)
+			}
+		})
+	}
+}

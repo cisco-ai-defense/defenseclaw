@@ -156,6 +156,40 @@ func TestR105WindowsPowerShellStateWriteSpellings(t *testing.T) {
 		{`iex "defenseclaw status"`, false},
 		{`Start-Process powershell -ArgumentList '-c','Get-Content $HOME\.defenseclaw\config.yaml' -Wait`, false},
 		{`Start-Process notepad -ArgumentList $HOME\.defenseclaw\config.yaml`, false},
+		// A colon-bound parameter (-Path:STATE), a string piped into
+		// Invoke-Expression, -Command:'...' and a Start-Process argument
+		// list written with blanks or as an array keep the proof (checker
+		// it16 RV16-1, RV16-2).
+		{`Clear-Content -Path:$HOME\.defenseclaw\config.yaml`, true},
+		{`Remove-Item -LiteralPath:$HOME\.defenseclaw\config.yaml`, true},
+		{`Set-Content -Path:$HOME\.defenseclaw\config.yaml -Value:x`, true},
+		{`Rename-Item -Path:$HOME\.defenseclaw\config.yaml -NewName:c.bak`, true},
+		{`Rename-Item -LiteralPath:$HOME\.defenseclaw\config.yaml -NewName c.bak`, true},
+		{`Move-Item -Path:$HOME\.defenseclaw\config.yaml -Destination:$HOME\c.bak`, true},
+		{`Remove-Item -Path:$HOME\.defenseclaw\config.yaml -Force:$true -Confirm:$false`, true},
+		{`'Clear-Content $HOME\.defenseclaw\config.yaml' | iex`, true},
+		{`'Remove-Item $HOME\.defenseclaw\config.yaml' | Invoke-Expression`, true},
+		{`"Clear-Content $HOME\.defenseclaw\config.yaml" | Invoke-Expression`, true},
+		{`'Clear-Content $HOME\.defenseclaw\config.yaml' | iex -ErrorAction Stop`, true},
+		{`Invoke-Expression -Command:'Clear-Content $HOME\.defenseclaw\config.yaml'`, true},
+		{`iex -Command:"Remove-Item $HOME\.defenseclaw\config.yaml"`, true},
+		{`Start-Process powershell -ArgumentList '-c', 'Clear-Content $HOME\.defenseclaw\config.yaml' -Wait`, true},
+		{`Start-Process powershell -ArgumentList "-c", "Clear-Content $HOME\.defenseclaw\config.yaml"`, true},
+		{`Start-Process powershell -ArgumentList '-NoProfile', '-Command', 'Remove-Item $HOME\.defenseclaw\config.yaml' -Wait`, true},
+		{`Start-Process powershell '-c', 'Clear-Content $HOME\.defenseclaw\config.yaml'`, true},
+		{`Start-Process powershell -ArgumentList @('-c', 'Clear-Content $HOME\.defenseclaw\config.yaml') -Wait`, true},
+		{`Start-Process powershell -ArgumentList ('-c','Clear-Content $HOME\.defenseclaw\config.yaml')`, true},
+		{`Start-Process powershell -ArgumentList '-NoProfile', '-c', 'ren $HOME\.defenseclaw\config.yaml c.bak' -WindowStyle Hidden`, true},
+		{`Get-Content -Path:$HOME\.defenseclaw\config.yaml`, false},
+		{`Copy-Item -Path:$HOME\.defenseclaw\config.yaml -Destination:.\c-copy.yaml`, false},
+		{`Start-Process powershell -ArgumentList '-c', 'Get-Content $HOME\.defenseclaw\config.yaml' -Wait`, false},
+		{`'Get-Content $HOME\.defenseclaw\config.yaml' | iex`, false},
+		{`Start-Process notepad -ArgumentList '$HOME\.defenseclaw\config.yaml', '/A'`, false},
+		{`'defenseclaw status' | iex`, false},
+		{`Remove-Item -Path:notes-old.txt -Force:$true -Confirm:$false; Get-Content $HOME\.defenseclaw\config.yaml`, false},
+		{`'Clear-Content notes-old.txt' | iex; Get-Content $HOME\.defenseclaw\config.yaml`, false},
+		{`Start-Process powershell -ArgumentList @('-c', 'Get-ChildItem') -Wait; Get-Content $HOME\.defenseclaw\config.yaml`, false},
+		{`Rename-Item -Path:$HOME\.defenseclaw\config.yaml -NewName:c.bak -WhatIf:$true`, false},
 	} {
 		for _, tool := range []string{"Bash", "shell_command", "PowerShell"} {
 			args, _ := json.Marshal(map[string]string{"command": tc.command})

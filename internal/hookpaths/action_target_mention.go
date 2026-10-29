@@ -1810,6 +1810,24 @@ func actionPosixNestedShellMention(file *syntax.File, cwd, home string, depth in
 					}
 				}
 			}
+			if base == "pwsh" || base == "powershell" {
+				// pwsh -Command "<body>" on a POSIX home: a body that only
+				// prints (Write-Output, Write-Host, echo) or runs a read-only
+				// git command passes a quoted ~ as text, as the same body does
+				// on its own (GAP-1473). Any other body keeps the whole-text
+				// reading, where a quoted ~ names the home.
+				if j, ok := actionPowerShellCommandBodyIndex(call.Args, i, home); ok {
+					if child, childStatic := StaticWord(call.Args[j], home); childStatic &&
+						actionPowerShellPrintOnlyBody(child, home) {
+						if actionProtectedTargetMentionDepth(child, cwd, home, depth+1, stateOnly, globs) {
+							found = true
+							return false
+						}
+						bodies = append(bodies, call.Args[j])
+					}
+				}
+				continue
+			}
 			if !posixShellProgram(base) && base != "ash" {
 				continue
 			}
@@ -1839,6 +1857,74 @@ func actionPosixNestedShellMention(file *syntax.File, cwd, home string, depth in
 		return !found
 	})
 	return bodies, found
+}
+
+// actionPowerShellCommandBodyIndex returns the index of the -Command body
+// of a pwsh or powershell call whose program word is args[at]: only the
+// switches that do not change what the body runs may come first (-NoProfile,
+// -NoLogo, -NonInteractive, -ExecutionPolicy <policy>), and the body must be
+// the last word.
+func actionPowerShellCommandBodyIndex(args []*syntax.Word, at int, home string) (int, bool) {
+	for j := at + 1; j < len(args); j++ {
+		option, static := StaticWord(args[j], home)
+		if !static {
+			return 0, false
+		}
+		switch strings.ToLower(option) {
+		case "-noprofile", "-nop", "-nologo", "-nol", "-noninteractive", "-noni":
+			continue
+		case "-executionpolicy", "-ep", "-ex":
+			j++
+			continue
+		case "-command", "-c":
+			return j + 1, j+2 == len(args)
+		}
+		return 0, false
+	}
+	return 0, false
+}
+
+// actionPowerShellPrintOnlyBody reports a PowerShell -Command body, read as
+// shell words, whose every command prints its arguments (Write-Output,
+// Write-Host, echo) or is a read-only git command (actionLiteralGitWords),
+// with no redirect, assignment, function or process substitution. PowerShell
+// passes a quoted ~ to them as text; a cmdlet path parameter resolves it.
+func actionPowerShellPrintOnlyBody(body, home string) bool {
+	file, parsed := parseShell(body)
+	if !parsed {
+		return false
+	}
+	printOnly, calls := true, 0
+	syntax.Walk(file, func(node syntax.Node) bool {
+		if !printOnly {
+			return false
+		}
+		switch node := node.(type) {
+		case *syntax.FuncDecl, *syntax.ProcSubst, *syntax.CoprocClause, *syntax.DeclClause, *syntax.Redirect:
+			printOnly = false
+			return false
+		case *syntax.CallExpr:
+			if len(node.Assigns) != 0 || len(node.Args) == 0 {
+				printOnly = false
+				return false
+			}
+			calls++
+			program, static := staticProgramWord(node.Args[0], home)
+			if !static {
+				printOnly = false
+				return false
+			}
+			switch strings.ToLower(programBase(program)) {
+			case "write-output", "write-host", "echo":
+			case "git":
+				printOnly = actionLiteralGitWords(node.Args[1:], home)
+			default:
+				printOnly = false
+			}
+		}
+		return printOnly
+	})
+	return printOnly && calls > 0
 }
 
 // actionBlankWords replaces the bytes of each word with spaces.
@@ -2215,6 +2301,10 @@ func actionWindowsTargetMentionAs(command, cwd, home string, depth int, stateOnl
 	// Quotes that are literal in the outer command do not stop expansion there.
 	raw := actionWindowsScan(command, grammar)
 	rawWords, rawOK := raw.words, raw.ok
+	// printBodies are pwsh/powershell -Command bodies read on their own
+	// below that only print or run a read-only git command: their quoted ~
+	// is text there, as in the same body on its own (GAP-1473 RV18-1).
+	var printBodies map[string]bool
 	if rawOK && actionWindowsInvokedTextMention(rawWords, cwd, home, depth, stateOnly) {
 		return true
 	}
@@ -2246,8 +2336,15 @@ func actionWindowsTargetMentionAs(command, cwd, home string, depth int, stateOnl
 					break
 				}
 				if strings.EqualFold(rawWords[j], "-command") || strings.EqualFold(rawWords[j], "-c") {
-					if actionWindowsTargetMention(rawWords[j+1], cwd, home, depth+1, stateOnly, actionfacts.DialectPowerShell) {
+					body := rawWords[j+1]
+					if actionWindowsTargetMention(body, cwd, home, depth+1, stateOnly, actionfacts.DialectPowerShell) {
 						return true
+					}
+					if actionWindowsPrintOnlyCommandBody(body, cwd, home) {
+						if printBodies == nil {
+							printBodies = make(map[string]bool)
+						}
+						printBodies[body] = true
 					}
 					break
 				}
@@ -2306,18 +2403,29 @@ func actionWindowsTargetMentionAs(command, cwd, home string, depth int, stateOnl
 	var directoryStack []string
 	for _, span := range actionWindowsResolvedSpans(words, cwd, home) {
 		for j, word := range span.words {
-			if !skip[span.start+j] && mentions(word, effectiveCWD) {
+			if !skip[span.start+j] && !printBodies[word] && mentions(word, effectiveCWD) {
 				return true
 			}
 		}
 		actionWindowsAdvanceDirectory(span.words, home, &effectiveCWD, &directoryStack)
 	}
 	for i, word := range words {
-		if !skip[i] && mentions(word, cwd) {
+		if !skip[i] && !printBodies[word] && mentions(word, cwd) {
 			return true
 		}
 	}
 	return false
+}
+
+// actionWindowsPrintOnlyCommandBody reports a pwsh/powershell -Command body
+// that only prints or runs a read-only git command in both readings: as
+// shell words (actionPowerShellPrintOnlyBody: no redirect, assignment,
+// function or substitution) and as PowerShell statements
+// (actionWindowsReadingWritesNothing: no subexpression or script block).
+// Any writer body keeps the whole-text reading of its outer word.
+func actionWindowsPrintOnlyCommandBody(body, cwd, home string) bool {
+	return actionPowerShellPrintOnlyBody(body, home) &&
+		actionWindowsReadingWritesNothing(body, cwd, home, 0, actionfacts.DialectPowerShell)
 }
 
 // actionWindowsPOSIXShellMention reads the script that a POSIX shell (Git
