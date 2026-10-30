@@ -325,6 +325,9 @@ func newTenantAccount(
 			key.Aliases = deploymentAliasesToBifrost(bedrock.DeploymentAliases)
 		}
 	}
+	if providerKey == schemas.Bedrock {
+		key.Aliases = withBedrockConverseRoute(key.Aliases, model)
+	}
 
 	// Vertex posture → Bifrost VertexKeyConfig. Auth modes:
 	//   - "service_account":   env var holds the JSON; AuthCredentials populated.
@@ -540,7 +543,7 @@ func getBifrostClient(
 		baseURL:  baseURL,
 		tlsID:    tls.id(),
 		subID:    subBlockID(bedrock, vertex, azure),
-		aliasID:  azureAPIVersionIdentityAliasID(providerKey, model, azure),
+		aliasID:  azureAPIVersionIdentityAliasID(providerKey, model, azure) + bedrockConverseAliasID(providerKey, model),
 		egressID: egressID,
 	}
 

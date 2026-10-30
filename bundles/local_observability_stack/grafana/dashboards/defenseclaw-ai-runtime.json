@@ -1860,7 +1860,7 @@
       },
       "targets": [
         {
-          "expr": "count by (control) (sum by (host_name, body_defenseclaw_ai_runtime_finding_id, control, body_defenseclaw_ai_runtime_kernel_target) (count_over_time(({service_name=\"defenseclaw\"} | json | __error__=\"\" | host_name=~\"$host\" | event_name=\"ai.runtime.activity\" | body_user_id=~\"$user\" | body_defenseclaw_ai_runtime_kernel_outcome=\"would_block\" | body_defenseclaw_ai_runtime_finding_id!=\"\" | label_format control=\"{{.body_defenseclaw_ai_runtime_kernel_control}}\")[$__range])) > 0)",
+          "expr": "sum by (control) (max by (host_name, body_defenseclaw_ai_runtime_finding_id, control) (max_over_time(({service_name=\"defenseclaw\"} | json | __error__=\"\" | host_name=~\"$host\" | event_name=\"ai.runtime.activity\" | body_user_id=~\"$user\" | body_defenseclaw_ai_runtime_kernel_outcome=\"would_block\" | body_defenseclaw_ai_runtime_finding_id!=\"\" | label_format control=\"{{.body_defenseclaw_ai_runtime_kernel_control}}\", hits=`{{ or .body_defenseclaw_ai_runtime_kernel_count \"1\" }}` | unwrap hits | __error__=\"\")[$__range])) > 0)",
           "refId": "A",
           "instant": true,
           "queryType": "instant",

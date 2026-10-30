@@ -966,6 +966,26 @@ DEFENSECLAW_LLM_MODEL_ENV = "DEFENSECLAW_LLM_MODEL"
 _DEFAULT_LLM_TIMEOUT = 30
 _DEFAULT_LLM_MAX_RETRIES = 2
 
+# Amazon Bedrock model ids and cross-region inference profile ids:
+# "<vendor>.<model>" or "<geo>.<vendor>.<model>" ("us.anthropic.claude-haiku-
+# 4-5-20251001-v1:0", "us.openai.gpt-5.6-luna", "amazon.nova-pro-v1:0"). Ids
+# of the other providers never start with a vendor name and a dot. Mirrors
+# bedrockModelIDPattern in internal/config/config.go.
+BEDROCK_MODEL_ID_RE = re.compile(
+    r"^(?:(?:us|eu|apac|jp|au|ca|global|us-gov)\.)?"
+    r"(?:anthropic|amazon|meta|mistral|cohere|ai21|openai|deepseek|qwen|writer|twelvelabs|stability|luma|google|nvidia|minimax|moonshot|moonshotai)"
+    r"\.[a-z0-9]"
+)
+
+
+def is_bedrock_model_id(model: str) -> bool:
+    """Whether ``model``, written without a provider prefix, is a Bedrock id.
+
+    An unprefixed Bedrock id then resolves to the bedrock provider for the
+    scanners and for key injection, as the gateway does (GAP-2640).
+    """
+    return bool(BEDROCK_MODEL_ID_RE.match((model or "").strip().lower()))
+
 # Recognized "provider/" prefixes understood by both the Go gateway
 # (Bifrost routes by the provider prefix) and by the Python scanners
 # (LiteLLM accepts the same "provider/model" shape). Anything outside
@@ -1207,6 +1227,8 @@ class LLMConfig:
             return self.provider.strip().lower()
         if "/" in self.model:
             return self.model.split("/", 1)[0].strip().lower()
+        if is_bedrock_model_id(self.model):
+            return "bedrock"
         return ""
 
     def keyless_auth_mode(self) -> str:

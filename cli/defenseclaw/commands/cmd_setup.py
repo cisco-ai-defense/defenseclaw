@@ -2135,8 +2135,73 @@ def _configure_llm_non_interactive(
         tls_ca_cert_file=tls_ca_cert_file,
         insecure_skip_verify=insecure_skip_verify,
     )
+    _settle_bedrock_model_and_region(llm)
 
     _clear_legacy_llm_fields(cfg)
+
+
+# Short names people type for the Bedrock models the docs use. Anything else
+# that is not a Bedrock id is refused before it is saved (GAP-2638).
+_BEDROCK_HAIKU_4_5 = "us.anthropic.claude-haiku-4-5-20251001-v1:0"
+_BEDROCK_LUNA = "us.openai.gpt-5.6-luna"
+_BEDROCK_SHORT_MODEL_NAMES = {
+    "haiku-4.5": _BEDROCK_HAIKU_4_5,
+    "haiku-4-5": _BEDROCK_HAIKU_4_5,
+    "claude-haiku-4.5": _BEDROCK_HAIKU_4_5,
+    "claude-haiku-4-5": _BEDROCK_HAIKU_4_5,
+    "luna": _BEDROCK_LUNA,
+    "gpt-5.6-luna": _BEDROCK_LUNA,
+}
+_BEDROCK_PROVIDERS = ("bedrock", "amazon-bedrock")
+
+
+def _settle_bedrock_model_and_region(llm) -> None:
+    """Give a Bedrock LLM block a real model id and a region (GAP-2638).
+
+    ``--model haiku-4.5`` was saved as written, so the ping failed with
+    LiteLLM's ``Unknown provider=None`` and every judge call would too. A
+    known short name now becomes its full Bedrock id; any other value that is
+    not a Bedrock id, an ARN or a ``--bedrock-deployment`` alias is refused.
+    Without ``--bedrock-region`` the region came from nowhere, so doctor
+    failed "bedrock configured without a region"; it is now taken from
+    ``AWS_REGION``, then ``AWS_DEFAULT_REGION``, then ``us-east-1`` (the
+    default the gateway's Bedrock client uses), saved and printed.
+    """
+    from defenseclaw.config import BedrockKeyConfig, is_bedrock_model_id  # noqa: PLC0415
+
+    if (llm.provider or "").strip().lower() not in _BEDROCK_PROVIDERS:
+        return
+    if (llm.instance_name or "").strip():
+        # A bound llm_providers entry names its own models and region; a
+        # role-level region here would override the entry's.
+        return
+    prefix, sep, bare = (llm.model or "").partition("/")
+    if not sep or prefix.lower() not in _BEDROCK_PROVIDERS:
+        prefix, sep, bare = "", "", llm.model or ""
+    aliases = llm.bedrock.deployment_aliases if llm.bedrock is not None else {}
+    if bare and not is_bedrock_model_id(bare) and not bare.startswith("arn:") and bare not in aliases:
+        full = _BEDROCK_SHORT_MODEL_NAMES.get(bare.strip().lower())
+        if full is None:
+            raise click.UsageError(
+                f"{bare!r} is not an Amazon Bedrock model id. Give the full id or inference profile, "
+                f"for example {_BEDROCK_HAIKU_4_5} or {_BEDROCK_LUNA}."
+            )
+        llm.model = f"{prefix}{sep}{full}"
+        ux.subhead(f"Using the Bedrock model id {full} for {bare}.")
+    if llm.bedrock is not None and (llm.bedrock.region or llm.region or "").strip():
+        return
+    if llm.bedrock is None and (llm.region or "").strip():
+        return
+    source = "AWS_REGION"
+    region = (os.environ.get("AWS_REGION") or "").strip()
+    if not region:
+        source, region = "AWS_DEFAULT_REGION", (os.environ.get("AWS_DEFAULT_REGION") or "").strip()
+    if not region:
+        source, region = "the default", "us-east-1"
+    if llm.bedrock is None:
+        llm.bedrock = BedrockKeyConfig()
+    llm.bedrock.region = region
+    ux.subhead(f"Bedrock region {region} (from {source}); change it with --bedrock-region.")
 
 
 def _apply_llm_inherit(cfg, *, inherit_from: str | None, target_path: str) -> None:

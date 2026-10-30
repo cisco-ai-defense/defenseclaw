@@ -755,11 +755,15 @@ func judgeExtraParams(model string) map[string]any {
 }
 
 func (j *LLMJudge) judgeChatRequest(messages []ChatMessage, maxTok int, kind string) *ChatRequest {
-	temperature := 0.0
+	var temperature *float64
+	if !modelRefusesTemperature(j.model) {
+		zero := 0.0
+		temperature = &zero
+	}
 	return &ChatRequest{
 		Messages:       messages,
 		MaxTokens:      intPtr(maxTok),
-		Temperature:    &temperature,
+		Temperature:    temperature,
 		ResponseFormat: judgeResponseFormatFor(kind, judgeNeedsToolSafeSchemaKeys(j.providerName, j.model)),
 		Fallbacks:      j.cfg.Fallbacks,
 		ExtraParams:    judgeExtraParams(j.model),

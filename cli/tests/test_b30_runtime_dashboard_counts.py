@@ -17,14 +17,19 @@ def test_grafana_no_hook_and_would_block_count_distinct_findings() -> None:
     panels = {panel["title"]: panel for panel in dashboard["panels"]}
     no_hook = panels["Agent activity with no hook decision"]
     control = panels["Would-block in monitor mode, by control"]
-    for panel in (no_hook, control):
+    for panel, per_finding in ((no_hook, "sum by"), (control, "max by")):
         target = panel["targets"][0]
         expression = target["expr"]
         assert "body_defenseclaw_ai_runtime_finding_id" in expression
-        assert "sum by (host_name, body_defenseclaw_ai_runtime_finding_id" in expression
+        assert f"{per_finding} (host_name, body_defenseclaw_ai_runtime_finding_id" in expression
         assert "[$__range]" in expression
         assert target["instant"] is True
-    assert "body_defenseclaw_ai_runtime_kernel_target" in control["targets"][0]["expr"]  # GAP-1400
+    # GAP-1400: one finding's activity carries its native hits in kernel.count
+    # (two autostart files are 2); the bar adds them, rows of one hit count once.
+    expression = control["targets"][0]["expr"]
+    assert expression.startswith("sum by (control) (max by (host_name, body_defenseclaw_ai_runtime_finding_id, control)")
+    assert "unwrap hits" in expression and "body_defenseclaw_ai_runtime_kernel_count" in expression
+    assert "kernel_target" not in expression
     assert no_hook["type"] == "stat"
     assert control["type"] == "bargauge"
 
@@ -38,8 +43,8 @@ def test_splunk_timecharts_keep_first_sighting_bucket() -> None:
     for title, distinct_fields in (
         ("Host-plane tactics by kill-chain stage", "host runtime_finding_id runtime_tactic"),
         # GAP-1400: one finding ID can carry several native hits (two
-        # autostart files); each target counts once, repeats of a hit do not.
-        ("Would-block by control (monitor mode)", "host runtime_finding_id runtime_kernel_control runtime_kernel_target"),
+        # autostart files); its rows carry the count, repeats count once.
+        ("Would-block by control (monitor mode)", "host runtime_finding_id runtime_kernel_control"),
     ):
         query = panels[title].findtext("chart/search/query")
         assert query is not None
