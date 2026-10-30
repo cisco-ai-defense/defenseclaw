@@ -601,7 +601,11 @@ func rejectUntrustedWindowsWriteACEsWithWriter(
 		}
 		sid := (*windows.SID)(unsafe.Pointer(&ace.SidStart))
 		writeLike := windowsWriteLikeAccess(ace.Mask)
-		if scope.narrowMask && !windowsWorldSID(sid) {
+		// The narrower ancestor rule ignores create-child bits, which an
+		// object-inheritable entry would hand to every new file as write
+		// data and append data; those entries keep the full rule.
+		if scope.narrowMask && !windowsWorldSID(sid) &&
+			ace.Header.AceFlags&windows.OBJECT_INHERIT_ACE == 0 {
 			writeLike = WindowsAncestorReplaceAccess(ace.Mask)
 		}
 		if !writeLike {
