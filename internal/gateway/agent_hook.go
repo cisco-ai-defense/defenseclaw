@@ -994,6 +994,7 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 		hungUpBeforeAnswer := r.Context().Err() != nil
 		var preKey preToolDecisionKey
 		preNoted := false
+		shellBridge := r.Header.Get(hookexec.HookShellBridgeHeader) == "shell"
 		if delivery != nil {
 			preKey, preNoted = a.notePreToolDecision(ctx, req, wireResp)
 			body := a.hookAnswerBody(ctx, profile, connectorName, req, wireResp, "")
@@ -1006,7 +1007,7 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 				})
 			}()
 			if receipt == hookexec.HookDeliveryReleased {
-				resp = a.unreceiptedHookDecision(hungUpBeforeAnswer, connectorName, req.HookEventName, resp)
+				resp = a.unreceiptedHookDecision(shellBridge, hungUpBeforeAnswer, connectorName, req.HookEventName, resp)
 			} else {
 				resp = a.deliveredHookDecision(connectorName, resp, receipt)
 			}
@@ -1014,7 +1015,7 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 			answered = &delivered
 			hookStageForTest(ctx, "delivered")
 		} else {
-			resp = a.unreceiptedHookDecision(hungUpBeforeAnswer, connectorName, req.HookEventName, resp)
+			resp = a.unreceiptedHookDecision(shellBridge, hungUpBeforeAnswer, connectorName, req.HookEventName, resp)
 		}
 		elapsed := time.Since(t0)
 		enrichAgentHookSpan(ctx, req, resp, elapsed)

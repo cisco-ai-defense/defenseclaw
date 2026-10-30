@@ -99,6 +99,14 @@ const HookDeliveryReleased = "\n"
 
 const HookDeliveryConfirmed = "received\n"
 
+// HookShellBridgeHeader marks the gateway post of a managed standalone shell
+// hook (curl over the hook socket, value "shell"). The shell bridge has no
+// answer watchdog and asks for no delivery receipt: the agent gets the answer
+// the gateway sent, or the closed fallback of the bridge when the request
+// fails, so a missing receipt does not make its verdict unconfirmed
+// (GAP-2614). The native hook never sends it.
+const HookShellBridgeHeader = "X-DefenseClaw-Hook-Bridge"
+
 // HookProgressStatus is the informational status of that report.
 const HookProgressStatus = http.StatusProcessing
 

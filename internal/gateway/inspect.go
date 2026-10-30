@@ -94,6 +94,12 @@ type ToolInspectRequest struct {
 	// typed hook payload (never from the public inspect wire). It picks the
 	// project of an enrolled account's MCP server (mcpAccountRuntimeBlock).
 	callerCWD string
+	// skipJudge keeps the LLM judge off content that carries no prompt or
+	// tool text of its own, only the name of a file the agent itself keeps
+	// (Claude Code FileChanged on ~/.claude.json, GAP-2623). The rule and AID
+	// lanes still scan it and the event is still recorded. Set only by a
+	// connector adapter, never from the public inspect wire.
+	skipJudge bool
 }
 
 // ToolInspectVerdict is the response from the inspect endpoint.
@@ -1328,7 +1334,9 @@ func (a *APIServer) inspectMessageContent(ctx context.Context, req *ToolInspectR
 	// gated on via guardrail.judge.hook_connectors. Runs after the
 	// regex + AID lanes so detection_strategy=regex_judge can skip the
 	// LLM round-trip when the local lanes were already decisive.
-	if jv := a.hookJudgeInspect(ctx, req, content, verdict); jv != nil {
+	if req.skipJudge {
+		// No judge round-trip (see ToolInspectRequest.skipJudge).
+	} else if jv := a.hookJudgeInspect(ctx, req, content, verdict); jv != nil {
 		verdict = mergeWithJudgeVerdict(verdict, jv)
 	}
 	if req.contentScope == ruleContentScopeSource {

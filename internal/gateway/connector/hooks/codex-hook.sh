@@ -663,6 +663,7 @@ codex_gateway_post() {
 {{end}}    "${AUTH_HEADER_ARGS[@]+"${AUTH_HEADER_ARGS[@]}"}" \
     "${TRACE_HEADER_ARGS[@]+"${TRACE_HEADER_ARGS[@]}"}" \
     "${IDENTITY_HEADER_ARGS[@]+"${IDENTITY_HEADER_ARGS[@]}"}"{{if .HookSocketTransportSH}} \
+    -H "X-DefenseClaw-Hook-Bridge: shell" \
     --unix-socket "${DEFENSECLAW_HOOK_SOCKET}"{{end}}
 }
 
