@@ -135,16 +135,21 @@ func TestStatusNamesAgentSessionsOlderThanTheActivation(t *testing.T) {
 	}
 	agent("4321", "claude\x00--resume\x00", 100)          // started an hour before the activation
 	agent("4322", "claude\x00--resume\x00", 3600*100+600) // started after it
-	// Hermes runs its bootstrap with `python3 -I -c`; a Codex session
-	// reads the managed requirements per turn through an app-server
-	// started after the install (GAP-0936).
+	// Hermes runs its bootstrap with `python3 -I -c`. A Codex session that
+	// started before the activation loads no hook later, even when its
+	// app-server daemon started after the install (private #12): it is
+	// named, the newer daemon is not.
 	agent("4323", "/home/u/.hermes/tools/python/bin/python3\x00-I\x00-c\x00import os\nfrom hermes_cli.main import main\x00", 100)
 	agent("4324", "/home/u/.codex/packages/app-server-daemon/releases/0.161.0/codex\x00app-server\x00--listen\x00unix://\x00", 3600*100+600)
 	agent("4325", "codex\x00", 100)
-	got := messagesOf(h.run(Options{Action: ActionStatus}).Warnings, codeAgentSessionsRestart)
-	if !strings.Contains(got, "claude (pid 4321)") || !strings.Contains(got, "hermes (pid 4323)") ||
-		strings.Contains(got, "(pid 4322)") || strings.Contains(got, "(pid 4324)") || strings.Contains(got, "(pid 4325)") {
-		t.Fatalf("status does not name exactly the older uninspected sessions: %q", got)
+	result := h.run(Options{Action: ActionStatus})
+	got := messagesOf(result.Warnings, codeAgentSessionsRestart)
+	if !strings.Contains(got, "claude (pid 4321)") || !strings.Contains(got, "hermes (pid 4323)") || !strings.Contains(got, "codex (pid 4325)") ||
+		strings.Contains(got, "(pid 4322)") || strings.Contains(got, "(pid 4324)") {
+		t.Fatalf("status does not name exactly the older sessions: %q", got)
+	}
+	if p := result.EnforcementPending; p == nil || p.Count != 3 || strings.Join(p.Connectors, ",") != "claudecode,codex,hermes" {
+		t.Fatalf("enforcement_pending = %+v, want 3 sessions of claudecode, codex and hermes", p)
 	}
 	// A Codex background server started before the install keeps the
 	// requirements it read then: its sessions ran with no decision, and a

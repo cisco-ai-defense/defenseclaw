@@ -45,17 +45,14 @@ var agentCLINames = map[string]bool{
 	"devin": true, "hermes": true, "agy": true, "kiro-cli": true,
 }
 
-// agentsReadingHooksLive pick up DefenseClaw's hooks without a restart: a
-// Codex session open before the install is inspected at once when its
-// app-server reads the managed requirements per turn, so naming it asked
-// users to restart sessions that were already inspected (GAP-0936). The
-// Codex background server (the app-server daemon) is the exception: one
-// started before the install keeps the requirements it read then, so the
-// sessions it serves ran tool calls with no decision, and a new Codex
-// session refuses it ("Cannot use the shared background server") until it
-// is restarted (GAP-0988, GAP-0983). It and the Codex sessions of its user
-// are named.
-var agentsReadingHooksLive = map[string]bool{"codex": true}
+// Codex is named like every other agent: a Codex session (TUI only, or
+// served by the app-server daemon) keeps the managed requirements it read
+// when it started and loads no DefenseClaw hook later (Codex 0.159.3, live
+// on RHEL 2026-10-30; private #12). An older allowlist skipped Codex
+// sessions on the premise that Codex reads the requirements per turn. A
+// Codex background server started before the install is named with how to
+// restart it: a new Codex session refuses it ("Cannot use the shared
+// background server") until it is restarted (GAP-0988, GAP-0983).
 
 // codexBackgroundServer reports the Codex app-server daemon process (not
 // its "app-server daemon" supervisor or an IDE stdio server).
@@ -171,17 +168,10 @@ func (e *Env) agentSessionsStartedBefore(ctx context.Context, since time.Time, s
 	case "darwin":
 		all = e.darwinAgentSessions(ctx)
 	}
-	oldServer := map[int]bool{}
-	for _, session := range all {
-		if session.CodexServer && session.Started.Before(since) {
-			oldServer[session.UID] = true
-		}
-	}
 	all = oneProcessPerSession(all)
 	var out []agentSession
 	for _, session := range all {
-		if session.UID == 0 || session.UID == serviceUID || !session.Started.Before(since) ||
-			(agentsReadingHooksLive[session.Agent] && !session.CodexServer && !oldServer[session.UID]) {
+		if session.UID == 0 || session.UID == serviceUID || !session.Started.Before(since) {
 			continue
 		}
 		out = append(out, session)
