@@ -2356,6 +2356,11 @@ func commandLinks(command, cwd, home string, facts map[string]string, record, ne
 		case moves:
 			stable = links.followRenames(renameOps)
 		}
+		// LINK/.. resolves from the link target, which no lexical reading
+		// places; both gateways read it, so a LinksStableKey cannot hide it.
+		if stable && !links.dotDotPastLinksClear(command, cwd, home) {
+			stable = false
+		}
 		if stable && walked && !userView {
 			stable = links.findMovesClear(findMoves, home) && links.aliasesAwayFromState(cwd, home)
 			// A nested cd or a find -exec mv may also go below a linked

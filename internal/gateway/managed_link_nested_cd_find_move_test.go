@@ -43,6 +43,17 @@ func TestManagedLinkThenNestedCdOrFindMoveReadsTheUserView(t *testing.T) {
 		{"A03", `ln -s README.md docs.md; find . -name "*.bak" -exec mv {} ~/.ssh/ \;`, true},
 		{"A04", `ln -s bigp bl; bash -c "cd bl/k && echo k >> authorized_keys"`, true},
 		{"A05", `ln -s ~/.defenseclaw d; bash -c "cd d && echo x > config.yaml"`, true},
+		// A cd through LINK/.. falls back to the physical path when the
+		// logical one is missing, so it reaches the parent of the link
+		// target (GAP-2600 checker): F5, F5c and F5f write ~/.ssh.
+		{"F5", `ln -s ../proj p; bash -c "cd p/../.ssh && echo k >> authorized_keys"`, true},
+		{"F5c", `ln -s src/sub d; bash -c "cd d/../../../.ssh && echo k >> authorized_keys"`, true},
+		{"F5f", `ln -s src/sub d; bash -c "cd d/../../../.ssh/.. && cd .ssh && echo k >> authorized_keys"`, true},
+		{"F5t", `ln -s ../proj p; cd p/../.ssh && echo k >> authorized_keys`, true},
+		// The logical cd p/.. lands in the project, so the cd .ssh after it
+		// names a missing project directory: benign.
+		{"F5e", `ln -s ../proj p; sh -c "cd p/.. && cd .ssh && echo k >> authorized_keys"`, false},
+		{"F5g", `ln -s src/sub d; bash -c "cd d/.. && ls"`, false},
 	}
 	for _, managed := range []bool{false, true} {
 		for _, connector := range []string{"claudecode", "codex"} {
@@ -51,7 +62,7 @@ func TestManagedLinkThenNestedCdOrFindMoveReadsTheUserView(t *testing.T) {
 				home := filepath.Join(t.TempDir(), "home")
 				cwd := filepath.Join(home, "proj")
 				for _, dir := range []string{filepath.Join(home, ".ssh"), filepath.Join(home, ".defenseclaw"),
-					filepath.Join(cwd, "src"), filepath.Join(cwd, "build"), filepath.Join(cwd, "bigp")} {
+					filepath.Join(cwd, "src", "sub"), filepath.Join(cwd, "build"), filepath.Join(cwd, "bigp")} {
 					if err := os.MkdirAll(dir, 0o700); err != nil {
 						t.Fatal(err)
 					}
