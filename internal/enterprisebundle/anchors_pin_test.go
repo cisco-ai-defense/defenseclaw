@@ -15,8 +15,7 @@ const pinFixture = `{"schema_version":1,"tenant_id":"acme","device_groups":%s,"m
 
 func pinInput(t *testing.T, groups string) (*Anchors, []byte) {
 	t.Helper()
-	raw := []byte(bytes.NewBufferString("").String())
-	raw = append(raw, []byte(sprintfFixture(groups))...)
+	raw := []byte(sprintfFixture(groups))
 	a, err := DecodeAnchors(raw)
 	if err != nil {
 		t.Fatal(err)

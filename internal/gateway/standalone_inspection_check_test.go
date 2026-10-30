@@ -44,12 +44,17 @@ func TestProbeAIDefenseReportsTheHealthCodesAndSendsNoContent(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			endpoint := unreachableURL
-			var body string
+			// The handler hands the request body over a channel: after a
+			// client timeout it still runs, so a plain variable raced.
+			received := make(chan string, 1)
 			if !test.down {
 				release := make(chan struct{})
 				server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 					raw, _ := io.ReadAll(r.Body)
-					body = string(raw)
+					select {
+					case received <- string(raw):
+					default:
+					}
 					if r.Header.Get("X-Cisco-AI-Defense-API-Key") != key {
 						t.Errorf("the request did not carry the stored key")
 					}
@@ -78,8 +83,16 @@ func TestProbeAIDefenseReportsTheHealthCodesAndSendsNoContent(t *testing.T) {
 			if !contract[got] {
 				t.Fatalf("check %q is not a value of inspection.ai_defense in the contract", got)
 			}
-			if !test.down && !strings.Contains(body, `"content":"."`) {
-				t.Fatalf("the check sent more than the probe message: %s", body)
+			if !test.down {
+				var body string
+				select {
+				case body = <-received:
+				case <-time.After(10 * time.Second):
+					t.Fatal("the server never received the check request")
+				}
+				if !strings.Contains(body, `"content":"."`) {
+					t.Fatalf("the check sent more than the probe message: %s", body)
+				}
 			}
 		})
 	}
