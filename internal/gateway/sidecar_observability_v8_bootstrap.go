@@ -28,6 +28,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
 	"github.com/defenseclaw/defenseclaw/internal/inventory"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/observability"
 	"github.com/defenseclaw/defenseclaw/internal/observability/delivery"
 	"github.com/defenseclaw/defenseclaw/internal/observability/destinations"
@@ -318,9 +319,10 @@ func (s *Sidecar) prepareObservabilityV8Runtime(
 		s.observeObservabilityV8Delivery(transition)
 	})
 	destinationFactory, err := destinations.NewFactory(destinations.Options{
-		SecureClient:  s.currentConfig().SecureClientIntegration(),
-		ConsoleStream: destinations.ConsoleStderr,
-		Stdout:        os.Stdout, Stderr: os.Stderr,
+		SecureClient:   s.currentConfig().SecureClientIntegration(),
+		ManagedService: managed.IsManagedEnterprise(s.currentConfig().DeploymentMode),
+		ConsoleStream:  destinations.ConsoleStderr,
+		Stdout:         os.Stdout, Stderr: os.Stderr,
 		Secrets:  sidecarObservabilityV8SecretResolver{credentialsDir: s.currentConfig().ObservabilityCredentialsDir()},
 		CALoader: destinations.CAFileLoaderFunc(sidecarLoadObservabilityV8CA),
 		// Exporters check each destination, then connect through the

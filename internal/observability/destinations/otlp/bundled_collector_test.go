@@ -48,7 +48,7 @@ func TestBundledStackSendsNothingToAnUnprovenCollector(t *testing.T) {
 				return previous(conn)
 			}
 			for _, protocol := range []string{ProtocolHTTP, ProtocolGRPCProtobuf} {
-				sent := exportOneTestLog(t, tc.destination, protocol)
+				sent := exportOneTestLog(t, tc.destination, protocol, false)
 				if sent != tc.wantSent {
 					t.Fatalf("%s: collector received a record = %v, want %v", protocol, sent, tc.wantSent)
 				}
@@ -60,9 +60,41 @@ func TestBundledStackSendsNothingToAnUnprovenCollector(t *testing.T) {
 	}
 }
 
+// GAP-2608: a managed gateway runs as a service account (_defenseclaw,
+// LocalSystem) that never runs the bundled stack; the administrator collector
+// runs as its own account. A managed gateway delivers to it under the
+// bundled stack name and runs no listener check; a per-user gateway keeps the
+// GAP-1087 refusal for the same listener.
+func TestManagedGatewayDeliversToTheAdministratorCollectorUnderTheBundledName(t *testing.T) {
+	previous := verifyBundledCollector
+	t.Cleanup(func() { verifyBundledCollector = previous })
+	var checked atomic.Int64
+	verifyBundledCollector = func(net.Conn) error {
+		checked.Add(1)
+		return errors.New("local peer socket belongs to another account")
+	}
+	for _, destination := range []string{"local-observability", "local-otlp-logs"} {
+		for _, protocol := range []string{ProtocolHTTP, ProtocolGRPCProtobuf} {
+			checked.Store(0)
+			if !exportOneTestLog(t, destination, protocol, true) {
+				t.Fatalf("managed %s %s: the administrator collector received nothing", destination, protocol)
+			}
+			if got := checked.Load(); got != 0 {
+				t.Fatalf("managed %s %s: listener checks = %d, want 0", destination, protocol, got)
+			}
+			if exportOneTestLog(t, destination, protocol, false) {
+				t.Fatalf("per-user %s %s: a foreign listener received a record", destination, protocol)
+			}
+			if checked.Load() == 0 {
+				t.Fatalf("per-user %s %s: the listener was not checked", destination, protocol)
+			}
+		}
+	}
+}
+
 // exportOneTestLog exports one log record to a fresh loopback collector of
 // this process over protocol and reports whether the collector received it.
-func exportOneTestLog(t *testing.T, destination, protocol string) bool {
+func exportOneTestLog(t *testing.T, destination, protocol string, managedService bool) bool {
 	t.Helper()
 	var received atomic.Int64
 	var capture *grpcLogCapture
@@ -93,6 +125,7 @@ func exportOneTestLog(t *testing.T, destination, protocol string) bool {
 		Destination: destination, Protocol: protocol, Endpoint: endpoint,
 		Selected: []observability.Signal{observability.SignalLogs}, Timeout: time.Second,
 		TLS: TLSConfig{Insecure: true}, NetworkSafety: NetworkSafety{AllowPrivateNetworks: true},
+		ManagedService: managedService,
 	}, Dependencies{})
 	adapter, err := factory.NewLogAdapter(context.Background(), testLogResourceSnapshot())
 	if err != nil {
