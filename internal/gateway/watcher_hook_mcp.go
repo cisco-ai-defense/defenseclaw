@@ -29,6 +29,18 @@ func watcherUsesHookReportedMCP(cfg *config.Config) bool {
 	return runtime.GOOS != "windows" && cfg != nil && cfg.StandaloneEnterprise() && !cfg.SecureClientIntegration()
 }
 
+// WatcherAdmitsOnlyHookReportedMCP reports whether the install watcher of a
+// managed Linux or macOS gateway runs only for the MCP servers the hooks
+// report: no skill or plugin folder is configured for the service to watch.
+func WatcherAdmitsOnlyHookReportedMCP(cfg *config.Config) bool {
+	if cfg == nil || !cfg.Gateway.Watcher.Enabled || !watcherUsesHookReportedMCP(cfg) {
+		return false
+	}
+	w := cfg.Gateway.Watcher
+	return !watcherUsesConnectorDirs(cfg) && !watcherUsesEnrolledUserDirs(cfg) &&
+		!(w.Skill.Enabled && len(w.Skill.Dirs) > 0) && !(w.Plugin.Enabled && len(w.Plugin.Dirs) > 0)
+}
+
 // hookReportedMCPLimit bounds the servers a gateway keeps from hook reports.
 const hookReportedMCPLimit = 4096
 
