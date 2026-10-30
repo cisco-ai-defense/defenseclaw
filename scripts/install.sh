@@ -1432,10 +1432,13 @@ if [[ "${ROLLBACK}" == true ]]; then
         fi
         die "Rollback failed part-way; see ${LOG}"
     fi
-    # rel-1-0-4:GAP-2503: going back to an older release, drop the hook
-    # helper the newer install left in the restored hooks, so the older
-    # gateway writes its own when it starts.
-    if [[ -n "${current}" ]] && version_lt "${back_to}" "${current}"; then
+    # rel-1-0-4:GAP-2503: going back to 1.0.4 or older, drop the hook helper
+    # the newer install left in the restored hooks, so the older gateway
+    # writes its own when it starts. 1.0.5 and later ship the same helper,
+    # and with only plugin connectors (OpenCode) set up their gateway never
+    # writes one: it refused to start without it and the rollback undid
+    # itself (rel-1-0-6:GAP-0047).
+    if [[ -n "${current}" ]] && version_lt "${back_to}" "${current}" && version_lt "${back_to}" 1.0.5; then
         drop_newer_hook_helper "${PREVIOUS}/data"
     fi
     # GAP-0009: a connector set up after the upgrade is not configured in the
