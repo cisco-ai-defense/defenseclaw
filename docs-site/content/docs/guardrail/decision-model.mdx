@@ -1,0 +1,134 @@
+---
+title: Decision model
+description: An optional fast model in front of the LLM judge. It allows the clear benign tool calls itself and sends the rest to the judge. Off by default. The skill scanner records its score as advisory only.
+keywords:
+  - DefenseClaw decision model
+  - decision_model
+  - System One
+  - DEFENSECLAW_DECISION_MODEL_KEY
+  - defenseclaw setup decision-model
+  - LLM judge cost
+---
+
+The decision model is a small, fast model that sits between the rules and the [LLM judge](/docs/guardrail#examples). It answers one question per tool call, "allow, confirm or block?", with calibrated probabilities. DefenseClaw lets it decide the clear calls and sends the unclear ones to the judge. It is off by default.
+
+Like the [unified LLM key](/docs/guardrail/unified-llm-key), it is one setting, `decision_model:`, used by two components:
+
+| Component | What it does with the decision model |
+| --- | --- |
+| Guardrail (tool calls) | A first pass before the LLM judge: a confident allow skips the judge, a confident block is checked by the judge, everything else goes to the judge. |
+| `defenseclaw skill scan` | Records the model's score for the skill. Advisory only: it never adds a finding or changes the verdict. |
+
+## Before you start
+
+- A decision model endpoint that speaks the System One protocol: `POST` a JSON body `{model, state, questions}` and get back `answers` with probabilities. It can be a server on the same machine (`http://127.0.0.1:...`) or a hosted service over `https`.
+- The LLM judge turned on for the connectors you want covered. The decision model only runs where the judge runs: tool calls of a connector in `guardrail.judge.hook_connectors`, with a judge detection strategy (`regex_judge` or `judge_first`).
+
+Turning it on adds one network call per judged tool call, to the URL you configure. Plain `http` is accepted only for a loopback host; any other host needs `https`.
+
+## Turn it on
+
+1. Point DefenseClaw at the endpoint.
+
+   ```bash
+   defenseclaw setup decision-model --base-url https://dm.example.com/v1/systemone --model jev-1.13.0 --ping
+   ```
+
+   ```text
+     OK Saved to /home/alice/.defenseclaw/config.yaml
+       decision_model.enabled:        true
+       decision_model.model:          jev-1.13.0
+       decision_model.base_url:       https://dm.example.com/v1/systemone
+       decision_model.api_key_env:    DEFENSECLAW_DECISION_MODEL_KEY = not set (fine for a local server)
+       ...
+     OK Decision model reachable: answered allow (risk 0.00) in 64 ms
+   ```
+
+   Run it with no flags to answer the questions instead. The running gateway applies the change without a restart.
+
+2. If the endpoint needs a token, store it. The prompt is hidden and the value goes to `~/.defenseclaw/.env`.
+
+   ```bash
+   defenseclaw keys set DEFENSECLAW_DECISION_MODEL_KEY
+   ```
+
+   Then restart the gateway so it loads the token: `defenseclaw-gateway restart`.
+
+3. Check it.
+
+   ```bash
+   defenseclaw setup decision-model --show --ping
+   defenseclaw doctor
+   ```
+
+   `doctor` shows a `Decision model` row while it is on, and nothing while it is off.
+
+### During `defenseclaw init`
+
+The init wizard asks one optional question, **Do you want to use a decision model?** The default is no. Yes asks for the endpoint URL, the model name, the token variable and, hidden, the token.
+
+In scripts, pass the flags; `--yes` alone leaves it off:
+
+```bash
+defenseclaw init --yes --decision-model-url https://dm.example.com/v1/systemone --decision-model-name jev-1.13.0
+defenseclaw quickstart --decision-model-url http://127.0.0.1:8791/v1/systemone --decision-model-name my-model
+```
+
+`init --no-decision-model` turns it off. The init report has a `Decision Model` step that says whether the endpoint answered.
+
+## How it decides
+
+Risk is `1 - P(allow)` from the model's answer.
+
+| The model says | DefenseClaw does |
+| --- | --- |
+| allow, risk at or below `allow_threshold` (0.30) | Allows the call. The judge does not run. |
+| block, risk at or above `block_threshold` (0.75) | Adds a HIGH `JUDGE-DECISION-MODEL` finding and runs the judge, which can raise it (`on_confident_block: escalate`, the default). With `decide`, the finding stands and the judge does not run. |
+| anything else | Runs the judge as usual. |
+
+The rules always run first. A rule block is never revisited, and the decision model can never turn a rule finding into an allow. Its finding goes through `block_at` and `alert_at` like any judge finding, so at the default `block_at: CRITICAL` a decision-model block alone is an alert, not a block. In observe mode nothing is blocked.
+
+## When it is down
+
+A decision model that is unreachable, slower than `timeout` (3 seconds), or answers outside the protocol changes nothing: the judge decides that call exactly as it does without a decision model. Each call is recorded as a judge event of kind `decision_model` with its action (`allow`, `block`, `escalate` or `error`), latency and failure class, and the gateway log says `decision model unavailable (...); the LLM judge decides this call as before`.
+
+## Skill scans
+
+`defenseclaw skill scan` passes the decision model to the skill scanner's System One tier (skill-scanner 2.3 and later). The tier asks whether the skill is unsafe to install and records the probability:
+
+```text
+  Decision model: jev-1.13.0 scored 0.12 unsafe (advisory only; it does not change the verdict)
+```
+
+The score is also under `settings.decision_model` in `skill scan --json`. The skill scanner treats the tier as advisory on purpose: the model it measured did not separate malicious from benign skills. Keep the [LLM judge](/docs/scanning/skill-scanner#the-judge) on for skill verdicts. The install watcher does not call the decision model.
+
+## Managed devices
+
+On a managed device the administrator sets `decision_model:` in the admin `config.yaml` or signed policy bundle, like `llm:`. A standard user cannot change it: `setup decision-model` and the TUI are refused by the managed config writer. The gateway reads the token only from the protected credential named by `decision_model.credential`, in the same secrets directory as `enterprise.inspection.llm.credential`; `api_key_env` and the user's `.env` are ignored.
+
+## Settings
+
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `decision_model.enabled` | `false` | Turn it on. Needs `base_url` and `model`. |
+| `decision_model.model` | empty | Model name sent in each request. |
+| `decision_model.base_url` | empty | Full endpoint URL. `https`, or `http` to `127.0.0.1`, `::1` or `localhost`. No credentials in the URL. |
+| `decision_model.api_key_env` | `DEFENSECLAW_DECISION_MODEL_KEY` | Variable that holds the bearer token. An unset variable sends no token. |
+| `decision_model.credential` | empty | Managed devices only: protected credential that holds the token. |
+| `decision_model.timeout` | `3` | Seconds per call (up to 30). |
+| `decision_model.allow_threshold` | `0.30` | Risk at or below which an allow skips the judge. |
+| `decision_model.block_threshold` | `0.75` | Risk at or above which a block answer is a confident block. |
+| `decision_model.on_confident_block` | `escalate` | `escalate` or `decide`. |
+
+In the TUI, open **0 Setup**, press `c` for the config editor and pick the **Decision Model** section.
+
+## Benchmarks
+
+The routing and thresholds are the operating point measured in the [System One benchmark](https://huggingface.co/spaces/Vineethsain/defenseclaw-system-one). On its broad tool-call corpus (3,817 cases), rules, then OpenJev, then the Gemma 4 judge cut judge traffic from 100% to 16% and false blocks from 23 to 14 of 3,381 benign calls, with block-only F1 from 0.712 to 0.738 (0.752 with escalate-on-confirm). The board ranks twelve candidate models; check each model's licence before you deploy it (the OpenJev weights are CC BY-NC 4.0, non-commercial).
+
+## Limits
+
+- Tool calls only. Prompts, completions and tool results go to the judge as before.
+- It runs only where the judge runs; with the judge off, turning it on changes no guardrail verdict (`doctor` and `setup decision-model` say so).
+- The skill-scan score is advisory and is not used by the install watcher.
+- Secure Client deployments refuse `decision_model`.

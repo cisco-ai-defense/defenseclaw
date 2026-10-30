@@ -72,10 +72,12 @@ dependencies = [
     # the newest trusted release whose METADATA permits the project's secure
     # LiteLLM floor. Pin its PyPI-attested wheel and hash until upstream ships
     # a release compatible with LiteLLM >=1.103.10.
-    # TODO(mcp-scanner 4.8.x): every 4.8.x release (4.8.5 included) pins
-    # litellm==1.93.0, which is vulnerable to CVE-2026-84377 (fixed on that
-    # line in 1.93.2). Move to 4.8.x only when upstream publishes a release
-    # that relaxes the LiteLLM pin (for example litellm>=1.103.10,<2).
+    # TODO(mcp-scanner 4.8.x): the newest release, 4.8.7 (2026-10-20), pins
+    # litellm==1.93.2, which still carries GHSA-g5ff-637f-6q2m (fixed in
+    # 1.95.0) and CVE-2026-114612, and requires mcp>=2.0 where DefenseClaw
+    # caps mcp<2; a plain pip install of the wheel cannot resolve it. Move to
+    # 4.8.x only when upstream relaxes the LiteLLM pin (for example
+    # litellm>=1.103.10,<2) and DefenseClaw's stdio scan path supports mcp 2.
     "cisco-ai-mcp-scanner @ https://files.pythonhosted.org/packages/af/40/d42943f9e3da40ee9b5f00439fda38b62fc379034383f85a6e06d7825796/cisco_ai_mcp_scanner-4.3.0-py3-none-any.whl#sha256=ea1a30d6bc282f2b4081bc4eced4287a20326891588624d5b2e07b388710b812 ; python_version>='3.11'",
     # CVE-2026-52869, CVE-2026-52870, and CVE-2026-59950 affect older MCP
     # SDK releases. DefenseClaw imports the SDK directly for stdio scanning,

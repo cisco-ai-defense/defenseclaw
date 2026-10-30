@@ -8,6 +8,7 @@
     "disabling",
     "semantic-routing",
     "unified-llm-key",
+    "decision-model",
     "---Benchmarks---",
     "benchmarks",
     "llm-judge-benchmark"
