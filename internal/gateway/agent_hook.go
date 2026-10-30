@@ -819,6 +819,10 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 		// audit envelope without a second pass here.
 		// The judge fallback of this call, for its audit row and record (#1395).
 		ctx = withHookJudgeFallbackNote(ctx)
+		if cfg := a.decisionConfig(ctx); shellHookBoundsToolGate(connectorName, req.HookEventName, r) &&
+			(cfg == nil || !cfg.SecureClientIntegration()) {
+			ctx = withShellToolGateBound(ctx)
+		}
 		accountingCtx := ctx
 		evaluationCtx, managedAIDFailOpenGate := deferManagedAIDFailOpenNativeHookAccounting(ctx)
 		// An argumentless Copilot permission callback is bound to the call of

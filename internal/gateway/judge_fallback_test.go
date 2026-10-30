@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/gateway/connector/hookexec"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail"
 	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
 )
@@ -174,5 +175,71 @@ func TestHookJudgeFallbackCountedThroughTheHookHandler(t *testing.T) {
 	}
 	if got := judgeFallbacksFor("copilot"); got != 1 {
 		t.Fatalf("copilot fallbacks = %d, want 1 (details %v)", got, judgeHealth.details())
+	}
+}
+
+func TestShellHookBoundsOnlyClaudeCodeAndCodexToolGates(t *testing.T) {
+	plain := httptest.NewRequest(http.MethodPost, "/", nil)
+	progress := httptest.NewRequest(http.MethodPost, "/", nil)
+	progress.Header.Set(hookexec.HookProgressHeader, "1")
+	for _, tc := range []struct {
+		connector, event string
+		r                *http.Request
+		want             bool
+	}{
+		{"claudecode", "PreToolUse", plain, true},
+		{"codex", "PermissionRequest", plain, true},
+		{"claudecode", "UserPromptSubmit", plain, false},
+		{"claudecode", "PostToolUse", plain, false},
+		{"copilot", "preToolUse", plain, false},
+		{"claudecode", "PreToolUse", progress, false}, // the progress-bounded native hook already is
+	} {
+		if got := shellHookBoundsToolGate(tc.connector, tc.event, tc.r); got != tc.want {
+			t.Errorf("%s %s progress=%v: %v, want %v", tc.connector, tc.event, tc.r == progress, got, tc.want)
+		}
+	}
+}
+
+// #1395, live on dc-rhel: the Claude Code shell hook gives PreToolUse 4 s in
+// all and does not ask for progress reports. A tool judge queued on a slow
+// model held the answer to its 8 s hook_timeout, the hook gave up at 4 s and
+// failed the benign call closed. The answer now keeps the rule verdict at the
+// answer window and reports a late judge.
+func TestShellToolGateJudgeAnswersInsideTheHookBudget(t *testing.T) {
+	judgeHealth.reset()
+	t.Cleanup(judgeHealth.reset)
+	cfg := &config.Config{}
+	cfg.Guardrail.Mode = "action"
+	cfg.Guardrail.Connector = "claudecode"
+	cfg.Guardrail.DetectionStrategy = "judge_first"
+	cfg.Guardrail.Judge = config.JudgeConfig{Enabled: true, Injection: true, ToolInjection: true,
+		HookConnectors: []string{"claudecode"}}
+	slow := &slowLLMProvider{mockLLMProvider: mockLLMProvider{response: &ChatResponse{Model: "test-model",
+		Choices: []ChatChoice{{Message: &ChatMessage{Content: "{}"}}}}}, delay: 6 * time.Second, finished: make(chan error, 8)}
+	api := &APIServer{scannerCfg: cfg, health: NewSidecarHealth()}
+	api.SetHookJudge(&LLMJudge{cfg: &cfg.Guardrail.Judge, model: "test-model", provider: slow, rp: &guardrail.RulePack{}})
+	cwd, _ := json.Marshal(t.TempDir())
+	body := `{"session_id":"f1395-shell-gate","hook_event_name":"PreToolUse","cwd":` + string(cwd) +
+		`,"tool_name":"Bash","tool_use_id":"t1","tool_input":{"command":"git log --oneline -n 20 -- ./internal"}}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/claude-code/hook", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	if h := hookpaths.ResolveConnector("claudecode", "", "PreToolUse", []byte(body)); h != "" {
+		req.Header.Set(hookpaths.Header, h)
+	}
+	w := httptest.NewRecorder()
+	start := time.Now()
+	api.handleAgentHook("claudecode").ServeHTTP(w, req)
+	elapsed := time.Since(start)
+	if elapsed > hookJudgeAnswerWindow+time.Second {
+		t.Fatalf("PreToolUse answered after %s with a 6 s judge; the shell hook gives up at 4 s", elapsed)
+	}
+	if strings.Contains(w.Body.String(), `"deny"`) || strings.Contains(w.Body.String(), `"block"`) {
+		t.Fatalf("benign call denied: %s", w.Body.String())
+	}
+	if got := judgeFallbacksFor("claudecode"); got != 1 {
+		t.Fatalf("claudecode fallbacks = %d, want 1 late (details %v)", got, judgeHealth.details())
+	}
+	if last, _ := judgeHealth.details()["judge_last_fallback"].(string); last != "late (claudecode)" {
+		t.Fatalf("last fallback = %q, want late (claudecode)", last)
 	}
 }
