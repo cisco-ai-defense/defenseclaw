@@ -17,8 +17,9 @@ import (
 )
 
 // GAP-2636: an /upgrade that Setup's TIMEOUTSECONDS stopped and its replay
-// finished ends 1603 with the new version installed. The marker and the
-// Add/Remove Programs entry must name that version, not the old one.
+// (the recover action) finished ends 1603 with the new version installed.
+// The marker and the Add/Remove Programs entry must name that version, not
+// the old one.
 func TestFailedRunRefreshesTheRegisteredInstalledVersion(t *testing.T) {
 	suffix := make([]byte, 6)
 	if _, err := rand.Read(suffix); err != nil {
@@ -49,11 +50,15 @@ func TestFailedRunRefreshesTheRegisteredInstalledVersion(t *testing.T) {
 		key.Close()
 	}
 
-	result := &enterprisestatus.Result{Action: "upgrade", Installed: true, InstalledVersion: "1.0.6"}
-	version, ok := windowsEnterpriseFailedRunInstalledVersion(result)
-	if !ok || version != "1.0.6" {
-		t.Fatalf("failed upgrade with the new version installed: got %q, %t", version, ok)
+	for name, run := range map[string]*enterprisestatus.Result{
+		"Setup's recovery after the replay": {Action: "recover", OK: true, Installed: true, InstalledVersion: "1.0.6"},
+		"failed upgrade":                    {Action: "upgrade", Installed: true, InstalledVersion: "1.0.6"},
+	} {
+		if version, ok := windowsEnterpriseInstalledVersionToRecord(run); !ok || version != "1.0.6" {
+			t.Fatalf("%s with the new version installed: got %q, %t", name, version, ok)
+		}
 	}
+	version := "1.0.6"
 	if err := refreshWindowsEnterpriseRegistrationVersion(registry.CURRENT_USER, markerPath, arpPath, version); err != nil {
 		t.Fatal(err)
 	}
@@ -85,12 +90,13 @@ func TestFailedRunRefreshesTheRegisteredInstalledVersion(t *testing.T) {
 
 	for name, run := range map[string]*enterprisestatus.Result{
 		"pending transaction":  {Action: "upgrade", Installed: true, InstalledVersion: "1.0.6", TransactionPending: true},
+		"pending recovery":     {Action: "recover", OK: true, Installed: true, InstalledVersion: "1.0.6", TransactionPending: true},
 		"no installed version": {Action: "upgrade", Installed: true},
 		"not installed":        {Action: "install", InstalledVersion: "1.0.6"},
 		"read-only action":     {Action: "verify", Installed: true, InstalledVersion: "1.0.6"},
 		"successful run":       {Action: "upgrade", OK: true, Installed: true, InstalledVersion: "1.0.6"},
 	} {
-		if version, ok := windowsEnterpriseFailedRunInstalledVersion(run); ok {
+		if version, ok := windowsEnterpriseInstalledVersionToRecord(run); ok {
 			t.Errorf("%s: refreshed the registration to %q", name, version)
 		}
 	}

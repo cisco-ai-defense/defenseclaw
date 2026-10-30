@@ -143,8 +143,9 @@ func windowsEnterpriseMutationAction(action string) bool {
 
 // updateWindowsEnterpriseRegistration publishes the marker and ARP entry
 // after a successful mutation and removes them after a successful
-// uninstall. A failed run leaves the previous registration unchanged except
-// for the installed version (windowsEnterpriseFailedRunInstalledVersion).
+// uninstall. A failed run, and Setup's transaction recovery, leave the
+// previous registration unchanged except for the installed version
+// (windowsEnterpriseInstalledVersionToRecord).
 func updateWindowsEnterpriseRegistration(result *enterprisestatus.Result, opts *windowsEnterpriseLifecycleOptions) error {
 	if !result.OK {
 		if windowsEnterpriseRolledBackFirstInstall(result) {
@@ -161,11 +162,7 @@ func updateWindowsEnterpriseRegistration(result *enterprisestatus.Result, opts *
 			removeEmptyWindowsEnterpriseInstallParent()
 			return err
 		}
-		if version, ok := windowsEnterpriseFailedRunInstalledVersion(result); ok {
-			return refreshWindowsEnterpriseRegistrationVersion(
-				registry.LOCAL_MACHINE, WindowsEnterpriseMarkerKey, windowsEnterpriseARPKey, version)
-		}
-		return nil
+		return refreshWindowsEnterpriseRegisteredVersion(result)
 	}
 	switch {
 	case result.Action == "uninstall" && !result.Installed:
@@ -175,20 +172,36 @@ func updateWindowsEnterpriseRegistration(result *enterprisestatus.Result, opts *
 	case windowsEnterpriseMutationAction(result.Action) && result.Installed:
 		return writeWindowsEnterpriseRegistration(result, opts)
 	}
-	return nil
+	return refreshWindowsEnterpriseRegisteredVersion(result)
 }
 
-// windowsEnterpriseFailedRunInstalledVersion is the version a failed
-// install, upgrade, repair or ensure leaves installed, when the run knows it
-// and no transaction is pending. A run can fail after the deployment of
-// record changed: Setup's TIMEOUTSECONDS stops an /upgrade, its replay of the
-// pending transaction finishes the upgrade, and the run still ends 1603. The
-// marker's ProductVersion and the Add/Remove Programs DisplayVersion then
-// kept the old version, and the MDM wrapper, which reads the marker, reported
-// it as installed_version (GAP-2636).
-func windowsEnterpriseFailedRunInstalledVersion(result *enterprisestatus.Result) (string, bool) {
-	if result == nil || result.OK || !windowsEnterpriseMutationAction(result.Action) ||
-		!result.Installed || result.TransactionPending {
+func refreshWindowsEnterpriseRegisteredVersion(result *enterprisestatus.Result) error {
+	version, ok := windowsEnterpriseInstalledVersionToRecord(result)
+	if !ok {
+		return nil
+	}
+	return refreshWindowsEnterpriseRegistrationVersion(
+		registry.LOCAL_MACHINE, WindowsEnterpriseMarkerKey, windowsEnterpriseARPKey, version)
+}
+
+// windowsEnterpriseInstalledVersionToRecord is the installed version a run
+// that publishes no full registration must still record, when it knows it
+// and no transaction is pending:
+//   - Setup's transaction recovery (the hidden recover action): after
+//     TIMEOUTSECONDS stops an /upgrade, Setup replays the pending
+//     transaction, which can finish the upgrade, and the request still ends
+//     1603 with the recovered status;
+//   - a failed install, upgrade, repair or ensure, which can fail after the
+//     deployment of record changed.
+//
+// The marker's ProductVersion and the Add/Remove Programs DisplayVersion
+// kept the old version after such a run, and the MDM wrapper, which reads
+// the marker, reported it as installed_version (GAP-2636).
+func windowsEnterpriseInstalledVersionToRecord(result *enterprisestatus.Result) (string, bool) {
+	if result == nil || !result.Installed || result.TransactionPending {
+		return "", false
+	}
+	if result.Action != "recover" && (result.OK || !windowsEnterpriseMutationAction(result.Action)) {
 		return "", false
 	}
 	version := strings.TrimSpace(result.InstalledVersion)
