@@ -12054,14 +12054,24 @@ def _check_judge_calls(cfg, r: _DoctorResult) -> None:
         _emit("skip", label, "no judge calls since the gateway started", r=r)
         return
     errors: list[str] = []
+    total = 0
     for (raw,) in rows:
         try:
             payload = json.loads(raw or "{}")
         except ValueError:
             continue
-        if isinstance(payload, dict) and str(payload.get("defenseclaw.judge.action", "")).lower() == "error":
+        if not isinstance(payload, dict):
+            continue
+        # The decision model logs its own rows (kind decision_model); its
+        # health has its own "Decision model" row and is not the judge's.
+        if payload.get("defenseclaw.judge.kind") == "decision_model":
+            continue
+        total += 1
+        if str(payload.get("defenseclaw.judge.action", "")).lower() == "error":
             errors.append(str(payload.get("defenseclaw.judge.error_summary") or "no error summary"))
-    total = len(rows)
+    if not total:
+        _emit("skip", label, "no judge calls since the gateway started", r=r)
+        return
     if not errors:
         _emit("pass", label, f"last {total} judge call(s) completed", r=r)
         return
