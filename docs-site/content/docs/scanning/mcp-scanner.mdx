@@ -63,7 +63,7 @@ Each server is scanned independently and findings are tagged with the connector 
 
 These `defenseclaw mcp` steps are for a per-user installation. On managed Linux and macOS, the standard user's `defenseclaw` launcher offers only `sandbox` commands, so users add the server through the connector's MCP configuration, for example `claude mcp add`. An administrator scans a remote server with the managed gateway: `sudo /opt/defenseclaw/bin/defenseclaw-gateway scan mcp URL` on Linux or `sudo /opt/cisco/defenseclaw/bin/defenseclaw-gateway scan mcp URL` on macOS (see [Known limits](/docs/support-matrix#managed-linux-and-macos-scans)). On managed Windows, use the administrator's `defenseclaw.exe scan mcp` command for a remote URL.
 
-- A judge: `defenseclaw setup llm` and `defenseclaw keys set DEFENSECLAW_LLM_KEY`. Without one the scan runs YARA signatures only and prints `LLM analyzer skipped`.
+- A judge: `defenseclaw setup llm` and `defenseclaw keys set DEFENSECLAW_LLM_KEY`. Without one the scan runs YARA signatures only. It prints `LLM analyzer skipped` when a model is set but its key is missing, and nothing when no model is set.
 - A configured connector (`defenseclaw setup <connector>`). DefenseClaw reads each connector's MCP config.
 
 ### Steps
@@ -130,7 +130,6 @@ A remote URL whose hostname has no DNS answer is a scan that did not finish, not
 Set every key with `defenseclaw config set` (one key, validated, applied at once), the `defenseclaw setup mcp-scanner` wizard, or an edit to `config.yaml`. A change that does not validate is refused and the file is left alone.
 
 ```bash
-defenseclaw config set scanners.mcp_scanner.analyzers --json '["yara", "llm"]'
 defenseclaw config set scanners.mcp_scanner.judge_source inherit
 defenseclaw config set scanners.mcp_scanner.scan_prompts true
 defenseclaw config set scanners.mcp_scanner.scan_resources true
@@ -142,14 +141,21 @@ Set scanners.mcp_scanner.scan_prompts (config generation 30, sha256 ebe5d7074f38
 Effective policy digest: sha256:...
 ```
 
+Leave `analyzers` unset: a scan then runs YARA, and the LLM judge as well once `defenseclaw setup llm` has a model and key. Set `analyzers` only to pick analyzers yourself (see [Analyzers](#analyzers)). A list you set is run exactly as written, so `["yara", "llm"]` with no judge configured makes every scan fail, and `mcp set` adds nothing:
+
+```text
+error: scan failed: Cannot proceed with scan - missing required configuration:
+  • LLM analyzer requested but MCP_SCANNER_LLM_API_KEY not configured (or AWS credentials for Bedrock models)
+'context7' was not added. Run 'defenseclaw mcp set' again once the server can be scanned, or add it unscanned with --skip-scan.
+```
+
+The variable it names is the scanner's own; DefenseClaw clears it and passes the judge from the `llm:` block. Set up a judge with `defenseclaw setup llm` and `defenseclaw keys set DEFENSECLAW_LLM_KEY`, or go back to automatic selection with `defenseclaw config set scanners.mcp_scanner.analyzers --json '[]'`.
+
 The same settings, written out:
 
 ```yaml title="~/.defenseclaw/config.yaml (excerpt)"
 scanners:
   mcp_scanner:
-    analyzers:
-      - yara
-      - llm
     judge_source: inherit
     scan_prompts: true
     scan_resources: true
@@ -191,9 +197,11 @@ scanners:
 
 A pin that does not match its file is refused where the config is applied: the managed lifecycle (`ensure`, `install`, `upgrade`, Setup) names the key and changes nothing, and the gateway rejects a reload with `policy_reload_rejected`, keeping the policy it last built. A rule file edited in place under its pin is rejected the same way; until you pin the new digest or restore the file, MCP scans that load it fail closed.
 
-Automatic selection never fails a scan for a missing optional key: a configured cloud model without its key falls back to YARA and prints `warning: LLM analyzer skipped: DEFENSECLAW_LLM_KEY is not configured; continuing with local analyzers`. An explicit list is honored exactly as written.
+Automatic selection never fails a scan for a missing optional key: a configured cloud model without its key falls back to YARA and prints `warning: LLM analyzer skipped: DEFENSECLAW_LLM_KEY is not configured; continuing with local analyzers`. An explicit list is honored exactly as written: one that names `llm` fails every scan until a judge is configured.
 
 A clean verdict means every selected analyzer read every tool. If the YARA analyzer, the bundled DefenseClaw YARA rules or the Cisco AI Defense API analyzer fails on a tool, or the bundled rules are missing from the installation, the scan fails with `the scan of MCP server '<name>' is incomplete, so it has no verdict` (or names the missing rules) and admission blocks the server as not scanned. Only the LLM analyzer degrades with a warning, as described above.
+
+To add the Cisco AI Defense analyzer to YARA and a configured judge:
 
 ```bash
 defenseclaw keys set CISCO_AI_DEFENSE_API_KEY
@@ -262,7 +270,7 @@ vllm serve /models/acme-judge-8b --served-model-name acme-judge-8b \
 defenseclaw setup llm --provider vllm --model acme-judge-8b --base-url http://127.0.0.1:8000/v1 --non-interactive
 ```
 
-Until a judge works, automatic selection runs YARA alone, so the server is still scanned, and each scan prints `LLM analyzer skipped` with the name of the missing key. Treat that as a gap to close, not a setup: YARA matches known patterns, and it is the judge that reads a tool's description against what the tool does.
+Until a judge works, automatic selection runs YARA alone, so the server is still scanned. When a model is set but its key is missing, each scan prints `LLM analyzer skipped` with the name of that key; with no model set, it prints nothing. Treat that as a gap to close, not a setup: YARA matches known patterns, and it is the judge that reads a tool's description against what the tool does.
 
 ## Removed keys
 
