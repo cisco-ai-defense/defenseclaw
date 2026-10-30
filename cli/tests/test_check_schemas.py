@@ -468,7 +468,10 @@ class TestManagementContractSchemas(unittest.TestCase):
         # bundle status prints the state records current and last_good with
         # the delivery_id that confirmed them (GAP-0001).
         def drop_delivery_id(schema: dict) -> None:
+            # current (currentRef, from 1.0.6 with min_product_version) and
+            # last_good (ref) both carry it.
             schema["$defs"]["ref"]["properties"].pop("delivery_id")
+            schema["$defs"]["currentRef"]["properties"].pop("delivery_id")
 
         with tempfile.TemporaryDirectory() as tmp:
             result = self._tampered(
