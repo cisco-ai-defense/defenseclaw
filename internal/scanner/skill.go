@@ -34,6 +34,11 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/processutil"
 )
 
+// judgeCompatSkillScanner is the entry point the DefenseClaw CLI wheel
+// installs beside skill-scanner. It runs skill-scanner with the fix that
+// accepts a well-formed judge answer from any supported model (GAP-2609).
+const judgeCompatSkillScanner = "defenseclaw-skill-scanner"
+
 var ansiRe = regexp.MustCompile(`\x1b\[[0-9;]*[a-zA-Z]`)
 
 // liteLLMModel returns the model string shaped for LiteLLM /

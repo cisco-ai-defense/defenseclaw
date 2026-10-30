@@ -175,6 +175,25 @@ def inject_llm_env(llm: LLMConfig, *, overwrite: bool = False) -> list[str]:
     return touched
 
 
+def drop_unsupported_litellm_params() -> None:
+    """Let LiteLLM drop a request parameter the judge model does not take (GAP-2612).
+
+    The scanner SDKs send fixed sampling settings: mcp-scanner asks for
+    ``temperature=0.1``, which GPT-5.6 Luna on Bedrock refuses (only 1 is
+    supported), so LiteLLM raised UnsupportedParamsError before the request
+    and the LLM analyzer was skipped. With ``drop_params`` LiteLLM leaves out
+    such a parameter and the model answers with its own default, as
+    DefenseClaw does for its own calls (``defenseclaw.llm``) and skill-scanner
+    does for each of its calls. Process-wide on purpose: a scan may run in
+    worker threads, and no scanner needs a refused parameter to fail the call.
+    """
+    try:
+        import litellm
+    except ImportError:
+        return
+    litellm.drop_params = True
+
+
 def litellm_model(llm: LLMConfig) -> str:
     """Return the model string shaped for LiteLLM.
 

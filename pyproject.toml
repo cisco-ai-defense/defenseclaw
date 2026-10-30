@@ -144,6 +144,7 @@ dev = [
 [project.scripts]
 defenseclaw = "defenseclaw.entry:main"
 defenseclaw-observability = "defenseclaw.observability.local_stack:main"
+defenseclaw-skill-scanner = "defenseclaw.scanner._skill_judge_compat:main"
 
 [build-system]
 requires = ["setuptools==82.0.1"]

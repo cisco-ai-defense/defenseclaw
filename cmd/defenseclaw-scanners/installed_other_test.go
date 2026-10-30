@@ -41,7 +41,8 @@ func TestGAP1527LauncherRunsTheInstalledRuntime(t *testing.T) {
 		t.Fatalf("skill-scanner exit %d: %s", code, stderr.String())
 	}
 	lines := strings.Split(strings.TrimSpace(stdout.String()), "\n")
-	if len(lines) < 6 || lines[0] != "-I" || lines[1] != "-B" || lines[2] != "-c" || lines[4] != "skill-scanner" || lines[len(lines)-1] != "/opt/defenseclaw-scan/s" {
+	// The scanner runs through the DefenseClaw judge-answer fix (GAP-2609).
+	if len(lines) != 6 || lines[0] != "-I" || lines[1] != "-B" || lines[2] != "-c" || lines[3] != skillScannerScript || lines[4] != "scan" || lines[5] != "/opt/defenseclaw-scan/s" {
 		t.Fatalf("interpreter arguments = %q", lines)
 	}
 	stdout.Reset()

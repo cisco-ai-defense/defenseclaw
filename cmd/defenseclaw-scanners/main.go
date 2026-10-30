@@ -67,7 +67,9 @@ type runtimeManifest struct {
 // The Python programs each tool runs. Arguments after the program reach it
 // as sys.argv[1:].
 const (
-	consoleEntryPointScript = `import importlib.metadata as m,sys; name=sys.argv[1]; sys.argv=[name,*sys.argv[2:]]; matches=[e for e in m.entry_points(group="console_scripts") if e.name==name]; sys.exit(matches[0].load()() if len(matches)==1 else 1)`
+	// skillScannerScript runs skill-scanner with the DefenseClaw fix that
+	// accepts a well-formed judge answer from any supported model (GAP-2609).
+	skillScannerScript = `import sys; from defenseclaw.scanner._skill_judge_compat import main; sys.exit(main())`
 
 	// pluginScanScript runs the plugin judge the gateway resolved for
 	// scanners.plugin, as the CLI wrapper does; a judge it cannot run stops
@@ -226,7 +228,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 		pruneOtherRuntimes(root, manifest.SHA256[:16])
 		return 0
 	case "skill-scanner":
-		script, scriptArgs = consoleEntryPointScript, append([]string{"skill-scanner"}, args[1:]...)
+		script, scriptArgs = skillScannerScript, args[1:]
 	case "plugin-scan":
 		script, scriptArgs = pluginScanScript, args[1:]
 	case "mcp-scan":
