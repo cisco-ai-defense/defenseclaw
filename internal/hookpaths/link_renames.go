@@ -220,6 +220,173 @@ func (l shellLinks) aliasesAwayFromState(cwd, home string) bool {
 	return true
 }
 
+// dotDotPastLinksClear reports that no word of command steps through a
+// link the command makes and then up with .. to SSH or DefenseClaw state.
+// The kernel, and cd when the logical path is missing, resolve LINK/.. from
+// the link target, so after ln -s ../proj p a cd p/../.ssh enters ~/.ssh
+// while the lexical reading lands in the project (GAP-2600 checker). A
+// physical walk that passes through state is not clear, nor one that ends
+// in a directory holding state (the home) unless the word is a cd operand
+// whose logical path exists: cwd and its parents exist, so cd p/.. back
+// into the project stays clear. cd -P and set -P always go physical.
+func (l shellLinks) dotDotPastLinksClear(command, cwd, home string) bool {
+	if len(l.aliases) == 0 || home == "" || !strings.Contains(command, "..") {
+		return true
+	}
+	state := newStateReach(home)
+	words := commandWords(command)
+	for _, text := range l.linkTexts {
+		for _, word := range commandWords(text) {
+			if i := slices.Index(words, word); i >= 0 {
+				words = slices.Delete(words, i, i+1)
+			}
+		}
+	}
+	physical := slices.Contains(words, "-P") || strings.Contains(command, "physical")
+	for w, word := range words {
+		parts := strings.Split(filepath.ToSlash(word), "/")
+		for i, part := range parts {
+			if !slices.Contains(parts[i+1:], "..") {
+				break
+			}
+			for _, alias := range l.aliases {
+				if part == "" || part == "." || part == ".." || filepath.Base(alias.name) != part {
+					continue
+				}
+				end, through := state.physicalWalk(alias.target, parts[i+1:])
+				if through {
+					return false
+				}
+				if !state.hits(end) {
+					continue
+				}
+				cdOperand := w > 0 && (words[w-1] == "cd" || words[w-1] == "pushd")
+				if physical || !cdOperand || !logicalDirExists(absolutePath(word, cwd), cwd) {
+					return false
+				}
+			}
+		}
+	}
+	return true
+}
+
+// diskLinkDotDotReachesState is dotDotPastLinksClear for the links already
+// on disk: a word that steps through a disk link and then up with .. is
+// walked from the link target, so cd p/../.ssh with p -> ../proj reaches
+// ~/.ssh. Only the user view of the disk shows the link; behind ProtectHome
+// the gateway reads this walk from ActionDecisionKey (GAP-2600 pod).
+func diskLinkDotDotReachesState(command, cwd, home string) bool {
+	if home == "" || !strings.Contains(command, "..") {
+		return false
+	}
+	start, ok := ResolveWriteTarget(cwd)
+	if !ok {
+		return false
+	}
+	state := newStateReach(home)
+	words := commandWords(command)
+	physical := slices.Contains(words, "-P") || strings.Contains(command, "physical")
+	for w, word := range words {
+		if !strings.Contains(word, "..") {
+			continue
+		}
+		base, rest := start, word
+		if strings.HasPrefix(word, "~") {
+			expanded, known := tildeWordPath(word, cwd, home)
+			if !known {
+				continue
+			}
+			rest = expanded
+		}
+		if filepath.IsAbs(rest) {
+			base = string(filepath.Separator)
+		}
+		parts := strings.Split(filepath.ToSlash(rest), "/")
+		path := base
+		for i, part := range parts {
+			if part == "" || part == "." {
+				continue
+			}
+			if part == ".." {
+				path = filepath.Dir(path)
+				continue
+			}
+			path = filepath.Join(path, part)
+			info, err := os.Lstat(path)
+			if err != nil {
+				break
+			}
+			if info.Mode()&os.ModeSymlink == 0 {
+				continue
+			}
+			if !slices.Contains(parts[i+1:], "..") {
+				break
+			}
+			target, resolved := ResolveWriteTarget(path)
+			if !resolved {
+				break
+			}
+			end, through := state.physicalWalk(target, parts[i+1:])
+			if through {
+				return true
+			}
+			cdOperand := w > 0 && (words[w-1] == "cd" || words[w-1] == "pushd")
+			if state.hits(end) && (physical || !cdOperand || !logicalDirExists(absolutePath(word, cwd), cwd)) {
+				return true
+			}
+			break
+		}
+	}
+	return false
+}
+
+// physicalWalk follows steps from a link target as the kernel does, through
+// the disk links it can read; through is true when a step is at or in
+// state.
+func (s stateReach) physicalWalk(target string, steps []string) (end string, through bool) {
+	path := filepath.Clean(target)
+	if resolved, ok := ResolveWriteTarget(path); ok {
+		path = resolved
+	}
+	for _, step := range steps {
+		switch step {
+		case "", ".":
+			continue
+		case "..":
+			path = filepath.Dir(path)
+		default:
+			path = filepath.Join(path, step)
+		}
+		if resolved, ok := ResolveWriteTarget(path); ok {
+			path = resolved
+		}
+		if s.within(path) {
+			return path, true
+		}
+	}
+	return path, false
+}
+
+// within reports a resolved path that is state or lies in it.
+func (s stateReach) within(resolved string) bool {
+	for _, path := range s.sensitive {
+		if pathAtOrUnder(resolved, path) {
+			return true
+		}
+	}
+	return s.inState(resolved)
+}
+
+// logicalDirExists reports a directory that cwd is at or under, or one the
+// disk shows; a gateway behind ProtectHome sees only the first kind.
+func logicalDirExists(path, cwd string) bool {
+	if pathAtOrUnder(cwd, path) {
+		return true
+	}
+	info, err := os.Stat(path)
+	return err == nil && info.IsDir()
+}
+
 // stateReach tests resolved paths against SSH and DefenseClaw state: the
 // state paths and their resolved forms, the authorized-keys files and the
 // DefenseClaw state files.

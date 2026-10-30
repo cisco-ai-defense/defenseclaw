@@ -81,13 +81,16 @@ const OpaqueScopeFactPrefix = "\x00opaque-scope:"
 const ReplacedLinkFactPrefix = "\x00replaced-link:"
 
 // LinksStableKey is the user-side hook reading of a command that makes
-// links and renames with a static mv: every link it makes and every name
-// a link target reaches lies away from SSH and DefenseClaw state on the
-// user view of the disk (aliasesAwayFromState, GAP-2532), so its links stay
-// known. "1" is the only value. Only a gateway that cannot open the
-// command directory itself (ProtectHome) reads it, in place of that walk
-// of the user home; the rename and link reading itself is still its own
-// (GAP-2564).
+// links and renames with a static mv, moves with find -exec mv or changes
+// directory in a nested shell or a wrapper: every link it makes and every
+// name a link target reaches lies away from SSH and DefenseClaw state on
+// the user view of the disk (aliasesAwayFromState, GAP-2532), the moved
+// matches land away from the links and state (findMovesClear) and no
+// linked tree holds a disk link to state (linkedTreesClear, GAP-2533), so
+// its links stay known. "1" is the only value. Only a gateway that cannot
+// open the command directory itself (ProtectHome) reads it, in place of
+// those walks of the user home; the rename and link reading itself is still
+// its own (GAP-2564, GAP-2600).
 const LinksStableKey = "\x00links-stable"
 
 // GlobFactPrefix keys the hook client's expansion of one pathname pattern
@@ -1860,8 +1863,8 @@ type shellLinks struct {
 	// literal shell body carries them out to its own links (GAP-2526).
 	renames, cds bool
 	copyScopes   []string
-	// movesStable: the static renames were followed and every link was
-	// read away from state on this view of the disk (LinksStableKey).
+	// movesStable: the renames were followed and the disk walks read
+	// every link away from state on this view of the disk (LinksStableKey).
 	movesStable bool
 	// renameOps are the static mv calls; wrappedCds is a directory change
 	// that only a wrapper or a nested shell runs (GAP-2532, GAP-2533).
@@ -2334,31 +2337,38 @@ func commandLinks(command, cwd, home string, facts map[string]string, record, ne
 		// walk, so a link that may reach SSH or DefenseClaw state is opaque
 		// after it (GAP-2533); a link to a system tool or a sibling
 		// directory stays known, as with a plain cd.
+		//
+		// The disk walks (aliasesAwayFromState, findMovesClear,
+		// linkedTreesClear) read the user home. Behind ProtectHome the
+		// gateway cannot open the command directory, so it takes their
+		// answer from the user-side hook, which ran the same walks on the
+		// user view of the disk (LinksStableKey, GAP-2564); for a nested
+		// cd or a find -exec mv too (GAP-2600). The rename reading is
+		// always the gateway own.
 		stable := true
 		moves := len(renameOps) > 0 || len(findMoves) > 0
+		walked := moves || wrappedCds
+		_, readable := ResolveWriteTarget(cwd)
+		userView := !readable && facts[LinksStableKey] == "1"
 		switch {
 		case renames || moves && cds:
 			stable = false
 		case moves:
-			stable = links.followRenames(renameOps) && links.findMovesClear(findMoves, home)
-			if stable {
-				switch {
-				case links.aliasesAwayFromState(cwd, home):
-					links.movesStable = true
-				case facts[LinksStableKey] == "1" && len(findMoves) == 0:
-					// Behind ProtectHome the gateway cannot walk the user
-					// home; the user-side hook did (LinksStableKey).
-					_, readable := ResolveWriteTarget(cwd)
-					stable = !readable
-				default:
-					stable = false
-				}
-			}
+			stable = links.followRenames(renameOps)
 		}
-		// A nested cd or a find -exec mv may also go below a linked
-		// directory through a disk link to state (RV-c4-1).
-		if stable && (wrappedCds || len(findMoves) > 0) {
-			stable = links.aliasesAwayFromState(cwd, home) && links.linkedTreesClear(command, cwd, home, wrappedCds, findMoves)
+		// LINK/.. resolves from the link target, which no lexical reading
+		// places; both gateways read it, so a LinksStableKey cannot hide it.
+		if stable && !links.dotDotPastLinksClear(command, cwd, home) {
+			stable = false
+		}
+		if stable && walked && !userView {
+			stable = links.findMovesClear(findMoves, home) && links.aliasesAwayFromState(cwd, home)
+			// A nested cd or a find -exec mv may also go below a linked
+			// directory through a disk link to state (RV-c4-1).
+			if stable && (wrappedCds || len(findMoves) > 0) {
+				stable = links.linkedTreesClear(command, cwd, home, wrappedCds, findMoves)
+			}
+			links.movesStable = stable
 		}
 		if !stable || cds && links.relative && linkCall == nil && !linkDirsKnown {
 			links.unknown(true)
