@@ -29,6 +29,12 @@ func ValidateTrustedConfigPath(path string) error {
 	return ValidateTrustedFilePath(path, "managed config")
 }
 
+// ValidateTrustedPolicyFilePath is ValidateTrustedFilePath on Unix. On Windows
+// it accepts and logs permission drift on a managed policy or data file.
+func ValidateTrustedPolicyFilePath(path, label string) error {
+	return ValidateTrustedFilePath(path, label)
+}
+
 // ValidateTrustedFilePath rejects managed_enterprise policy/input files that a
 // standard user could replace or edit. The managed service may run as a
 // dedicated non-root user, but authoritative inputs must stay admin-owned.

@@ -102,6 +102,14 @@ func managedEnterpriseHTTPClient(
 				if errors.Is(err, errManagedGatewayNotRunning) {
 					return nil, stoppedManagedGatewayError(canonicalAddr, err)
 				}
+				if errors.Is(err, windows.ERROR_ACCESS_DENIED) {
+					return nil, fmt.Errorf(
+						"%w: %w: query protected gateway service: %v",
+						errManagedGatewayPeerUnverified,
+						errManagedGatewayServiceUnreadable,
+						err,
+					)
+				}
 				if err != nil {
 					return nil, managedGatewayPeerError("query protected gateway service: %v", err)
 				}

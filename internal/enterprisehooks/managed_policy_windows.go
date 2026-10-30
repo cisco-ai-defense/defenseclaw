@@ -1393,9 +1393,13 @@ func openWindowsClaudeManagedPolicyLockFile(path string) (windows.Handle, error)
 	if err != nil {
 		return 0, err
 	}
+	// Exclusivity comes from the zero share mode, not the access mask; the
+	// lock's content is never written. Read-only access also opens a lock
+	// file that carries the ReadOnly attribute, which a write open refuses
+	// with access denied.
 	return windows.CreateFile(
 		pathPtr,
-		windows.GENERIC_READ|windows.GENERIC_WRITE,
+		windows.GENERIC_READ,
 		0,
 		nil,
 		windows.OPEN_ALWAYS,

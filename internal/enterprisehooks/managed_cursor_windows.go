@@ -281,6 +281,7 @@ func snapshotWindowsCursorManagedArtifacts() (windowsCursorManagedArtifacts, err
 		return result, err
 	}
 	receiptPath := paths.Receipt
+	repairWindowsCursorPrivateReceiptProtection(receiptPath)
 	result.receipt, err = snapshotWindowsManagedFileWithLimit(receiptPath, windowsCursorManagedReceiptLimit)
 	if err != nil {
 		return result, err
@@ -290,6 +291,30 @@ func snapshotWindowsCursorManagedArtifacts() (windowsCursorManagedArtifacts, err
 		return result, err
 	}
 	return result, nil
+}
+
+// repairWindowsCursorPrivateReceiptProtection re-stamps the private
+// administrator-only descriptor on an existing rollback receipt whose owner or
+// DACL drifted, before its metadata is captured. Only a privileged caller can
+// repair; for anyone else, or when the repair is refused, the receipt is left
+// as it is and judged by the validators.
+func repairWindowsCursorPrivateReceiptProtection(path string) {
+	info, err := os.Lstat(path)
+	if err != nil || !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
+		return
+	}
+	_, _ = repairWindowsManagedMachineFile(path, false, func(path string) error {
+		if err := windowsManagedPolicyFileTrustCheck(path); err != nil {
+			return err
+		}
+		metadata, err := snapshotWindowsCursorManagedFileMetadata(
+			windowsManagedFileSnapshot{path: path, existed: true},
+		)
+		if err != nil {
+			return err
+		}
+		return validateWindowsCursorPrivateReceiptMetadata(metadata)
+	})
 }
 
 func snapshotWindowsCursorManagedPublicArtifacts() (windowsCursorManagedArtifacts, error) {
@@ -520,7 +545,15 @@ func validateWindowsCursorManagedArtifacts(
 		return artifacts, fmt.Errorf("enterprise hooks: untrusted Cursor rollback receipt: %w", err)
 	}
 	if err := validateWindowsCursorPrivateReceiptMetadata(artifacts.receiptMetadata); err != nil {
-		return artifacts, err
+		// The trust check above already refused an untrusted owner or
+		// writer, and the state binds the receipt bytes by digest below. A
+		// descriptor that is merely not the private canonical one (inherited
+		// entries after icacls /reset, an extra reader) is accepted and
+		// logged; a privileged snapshot re-stamps it first.
+		managed.EmitResilienceEvent(managed.MarkerAccept, map[string]string{
+			"path":   artifacts.receipt.path,
+			"reason": "Cursor rollback receipt descriptor is not the private canonical form: " + err.Error(),
+		})
 	}
 	if artifacts.parsed.ReceiptSHA256 != windowsManagedPolicyDigest(artifacts.receipt.data) {
 		return artifacts, errors.New("enterprise hooks: Cursor rollback receipt identity changed")

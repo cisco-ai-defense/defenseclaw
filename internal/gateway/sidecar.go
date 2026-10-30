@@ -874,10 +874,7 @@ func (s *Sidecar) Run(ctx context.Context) (runErr error) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			if err := s.ipcRunner.Run(runCtx); err != nil && runCtx.Err() == nil {
-				fmt.Fprintf(os.Stderr, "[sidecar] ipc server exited with error: %v\n", err)
-				fatalCh <- subsystemFailure("ipc", err)
-			}
+			s.runIPCWithRetry(runCtx)
 		}()
 	}
 	// Report sandbox health — only present when standalone mode is active

@@ -29,8 +29,50 @@ import (
 	"golang.org/x/sys/windows"
 )
 
+// ValidateTrustedConfigPath validates config.yaml. Drift on its owner or DACL
+// is repaired first when the caller can (a LocalSystem service or an elevated
+// administrator; never the gateway, whose token cannot re-ACL it), and what
+// survives is accepted and logged by ValidateTrustedPolicyFilePath. Structural
+// failures stay fatal.
 func ValidateTrustedConfigPath(path string) error {
-	return ValidateTrustedFilePath(path, "managed config")
+	const label = "managed config"
+	err := ValidateTrustedFilePath(path, label)
+	if err == nil || trustStrictAncestors() {
+		return err
+	}
+	// Only the service-pinned managed config is ever re-stamped, never an
+	// arbitrary path a caller passed in.
+	if pinned := strings.TrimSpace(os.Getenv(ConfigPathEnv)); pinned != "" &&
+		strings.EqualFold(filepath.Clean(pinned), filepath.Clean(path)) {
+		result, ensureErr := EnsureCanonical(path, ObjectConfigFile, CanonicalOptions{})
+		if ensureErr != nil {
+			return errors.Join(err, ensureErr)
+		}
+		if result.Outcome == CanonicalRepaired && ValidateTrustedFilePath(path, label) == nil {
+			return nil
+		}
+	}
+	return ValidateTrustedPolicyFilePath(path, label)
+}
+
+// ValidateTrustedPolicyFilePath validates a managed policy or data file that
+// DefenseClaw reads but a service cannot always repair (config.yaml,
+// targets.yaml, deployment.json). It walks like ValidateTrustedFilePath, but a
+// permission verdict on the file or an ancestor is accepted and logged instead
+// of refusing the file, and an untrusted owner or writer on the file itself is
+// logged once as a MarkerBoundary finding naming the principal. The installer
+// re-stamps the canonical descriptor on its next Install, Upgrade or Repair.
+// Structural failures (missing element, symlink, reparse point, wrong type,
+// non-NTFS mount) stay fatal. Pin TrustStrictAncestorsEnv to make every
+// verdict fatal again.
+func ValidateTrustedPolicyFilePath(path, label string) error {
+	err := ValidateTrustedFilePath(path, label)
+	if err == nil || trustStrictAncestors() {
+		return err
+	}
+	leaf := windowsTrustLeaf.tolerant()
+	leaf.code = true
+	return validateTrustedFilePathTolerant(path, label, leaf)
 }
 
 // ValidateTrustedFilePath is the Windows counterpart of the unix

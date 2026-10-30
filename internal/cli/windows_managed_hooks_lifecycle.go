@@ -556,7 +556,7 @@ func resolveWindowsManagedHooksLifecycleContext() (
 		return ctx, err
 	}
 	manifestPath := filepath.Join(stateRoot, "hook-guardian", "targets.yaml")
-	if err := managed.ValidateTrustedFilePath(
+	if err := managed.ValidateTrustedPolicyFilePath(
 		manifestPath,
 		"Windows enterprise hook target manifest",
 	); err != nil {

@@ -115,8 +115,11 @@ var (
 			os.Getenv(managed.WindowsServiceAccountEnv),
 		)
 	}
+	// Permission drift on targets.yaml is accepted and logged (an untrusted
+	// writer as a boundary finding); the installer re-stamps it. Structure
+	// stays fatal.
 	enterpriseHookManifestFileTrustCheck = func(path string) error {
-		return managed.ValidateTrustedFilePath(path, "hook guardian manifest")
+		return managed.ValidateTrustedPolicyFilePath(path, "hook guardian manifest")
 	}
 	enterpriseHooksRemoveManagedPolicy  = enterprisehooks.RemoveManagedPolicy
 	enterpriseHookScopedTokenMinter     = enterpriseHookScopedToken

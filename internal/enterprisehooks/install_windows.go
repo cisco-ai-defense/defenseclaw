@@ -30,7 +30,7 @@ var (
 	windowsEnterpriseAdministratorCheck = requireWindowsEnterpriseAdministrator
 	windowsEnterpriseHookExecutable     = defaultWindowsEnterpriseHookExecutable
 	windowsEnterpriseHookTrustCheck     = func(path string) error {
-		return managed.ValidateTrustedFilePath(path, "enterprise hook executable")
+		return managed.ValidateExecutableFilePath(path, "enterprise hook executable")
 	}
 	windowsEnterpriseTargetImpersonation    = withWindowsEnterpriseTargetImpersonation
 	windowsEnterpriseConnectorCertification = certifyWindowsEnterpriseConnector

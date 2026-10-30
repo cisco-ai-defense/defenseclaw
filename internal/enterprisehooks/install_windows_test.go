@@ -2547,6 +2547,32 @@ func setWindowsAdministratorsOwnerForTest(path string) error {
 	return windows.SetNamedSecurityInfo(extended, windows.SE_FILE_OBJECT, windows.OWNER_SECURITY_INFORMATION, owner, nil, nil, nil)
 }
 
+func TestWindowsClaudeManagedPolicyLockOpensReadOnlyLockFile(t *testing.T) {
+	lockPath := filepath.Join(t.TempDir(), windowsClaudeManagedLockFile)
+	if err := os.WriteFile(lockPath, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	pointer, err := windows.UTF16PtrFromString(lockPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := windows.SetFileAttributes(pointer, windows.FILE_ATTRIBUTE_READONLY); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = windows.SetFileAttributes(pointer, windows.FILE_ATTRIBUTE_NORMAL) })
+	held, err := openWindowsClaudeManagedPolicyLockFile(lockPath)
+	if err != nil {
+		t.Fatalf("open ReadOnly lock file: %v", err)
+	}
+	defer windows.CloseHandle(held)
+	if second, err := openWindowsClaudeManagedPolicyLockFile(lockPath); err == nil {
+		_ = windows.CloseHandle(second)
+		t.Fatal("second open of a held lock succeeded, want a sharing violation")
+	} else if !errors.Is(err, windows.ERROR_SHARING_VIOLATION) {
+		t.Fatalf("second open error = %v, want a sharing violation", err)
+	}
+}
+
 func TestWindowsClaudeManagedPolicyTransactionHeldLockTimesOut(t *testing.T) {
 	fixture := newWindowsManagedInstallFixture(t, nil)
 	lockPath := filepath.Join(filepath.Dir(fixture.policyPath), windowsClaudeManagedLockFile)

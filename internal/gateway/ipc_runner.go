@@ -12,9 +12,13 @@ package gateway
 
 import (
 	"context"
+	"fmt"
+	"os"
+	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/notifier"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
 // IPCRunner is the minimal shape the sidecar needs from the local
@@ -37,6 +41,51 @@ func (s *Sidecar) SetIPCRunner(r IPCRunner) {
 		return
 	}
 	s.ipcRunner = r
+}
+
+// ipcRetryInitialDelay and ipcRetryMaxDelay bound the backoff between IPC
+// server attempts. Variables so tests can shorten them.
+var (
+	ipcRetryInitialDelay = 15 * time.Second
+	ipcRetryMaxDelay     = 5 * time.Minute
+)
+
+// runIPCWithRetry keeps the local IPC server running without making it a
+// subsystem the gateway exits for. A failed bind is most often permission
+// drift on the IPC folder (icacls /reset on the install tree removes the
+// gateway's entry, and the gateway's write-restricted token cannot re-ACL the
+// folder); exiting would only crash-loop the gateway and take enforcement
+// down with it. The gateway runs degraded instead, its IPC health reports the
+// error, and the server is retried with a bounded backoff until a privileged
+// component (the guardian or the installer) has repaired the folder.
+func (s *Sidecar) runIPCWithRetry(ctx context.Context) {
+	delay := ipcRetryInitialDelay
+	for {
+		err := s.ipcRunner.Run(ctx)
+		if ctx.Err() != nil {
+			return
+		}
+		if err == nil {
+			delay = ipcRetryInitialDelay
+		} else {
+			fmt.Fprintf(os.Stderr, "[sidecar] ipc server exited with error: %v\n", err)
+			managed.EmitResilienceEvent(managed.MarkerDegraded, map[string]string{
+				"subsystem": "ipc",
+				"reason":    err.Error(),
+				"action":    fmt.Sprintf("retry in %s", delay),
+			})
+		}
+		timer := time.NewTimer(delay)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return
+		case <-timer.C:
+		}
+		if delay *= 2; delay > ipcRetryMaxDelay {
+			delay = ipcRetryMaxDelay
+		}
+	}
 }
 
 // OSNotifier returns the notifier.Dispatcher owned by this sidecar

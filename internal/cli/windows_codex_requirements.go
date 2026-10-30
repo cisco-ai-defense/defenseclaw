@@ -30,7 +30,7 @@ var (
 	windowsCodexRequirementsVerifier       = connector.VerifyWindowsCodexMachineRequirements
 	windowsCodexRequirementsRemover        = connector.RemoveWindowsCodexMachineRequirements
 	windowsCodexRequirementsExecutable     = os.Executable
-	windowsCodexRequirementsManifestTrust  = managed.ValidateTrustedFilePath
+	windowsCodexRequirementsManifestTrust  = managed.ValidateTrustedPolicyFilePath
 	windowsCodexRequirementsManifestLoader = enterprisehooks.LoadManifest
 )
 
@@ -357,7 +357,7 @@ func readWindowsCodexDeploymentMetadata(
 	if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 || info.Size() > 128<<10 {
 		return metadata, false, errors.New("protected deployment metadata is not a bounded regular file")
 	}
-	if err := managed.ValidateTrustedFilePath(path, "Windows enterprise deployment metadata"); err != nil {
+	if err := managed.ValidateTrustedPolicyFilePath(path, "Windows enterprise deployment metadata"); err != nil {
 		return metadata, false, err
 	}
 	file, err := os.Open(path)

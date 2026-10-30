@@ -301,3 +301,32 @@ func TestAcceptUnreadableDescriptorScopes(t *testing.T) {
 		t.Fatal("strict mode must keep access denied fatal")
 	}
 }
+
+func TestValidateTrustedPolicyFilePathAcceptsUntrustedWriterAsBoundary(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(path, []byte("ok"), 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	setTestFileDACL(t, path, testDACL(t, "D:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;FA;;;OW)(A;;FW;;;BU)"), true)
+	if err := ValidateTrustedFilePath(path, "policy test"); err == nil {
+		t.Fatal("ValidateTrustedFilePath accepted a Users writer; the strict API must be unchanged")
+	}
+	var boundaries []string
+	previous := ReportResilienceEvent
+	ReportResilienceEvent = func(marker string, fields map[string]string) {
+		if marker == MarkerBoundary {
+			boundaries = append(boundaries, fields["path"])
+		}
+	}
+	t.Cleanup(func() { ReportResilienceEvent = previous })
+	_ = captureTrustDrift(t)
+	if err := ValidateTrustedPolicyFilePath(path, "policy test"); err != nil {
+		t.Fatalf("ValidateTrustedPolicyFilePath refused permission drift: %v", err)
+	}
+	if len(boundaries) == 0 {
+		t.Fatal("ValidateTrustedPolicyFilePath logged no boundary finding for a Users writer")
+	}
+	if err := ValidateTrustedPolicyFilePath(filepath.Join(filepath.Dir(path), "missing.yaml"), "policy test"); err == nil {
+		t.Fatal("ValidateTrustedPolicyFilePath accepted a missing file; structure must stay fatal")
+	}
+}

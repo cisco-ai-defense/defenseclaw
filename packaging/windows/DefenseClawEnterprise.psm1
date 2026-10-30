@@ -5820,6 +5820,9 @@ function Write-DefenseClawJsonAtomic {
             $json,
             [Text.UTF8Encoding]::new($false)
         )
+        # A ReadOnly, Hidden or System attribute on the file being replaced
+        # makes the replacing move fail with access denied.
+        [void](Clear-DefenseClawRestrictiveFileAttributes -Path $Path)
         Microsoft.PowerShell.Management\Move-Item -LiteralPath $temporary -Destination $Path -Force
     }
     finally {
@@ -9245,9 +9248,32 @@ function Get-DefenseClawDeploymentMetadata {
             if (Test-DefenseClawTrustStrictAncestors) {
                 throw
             }
+            $authenticatedRepairError = $_.Exception.Message
             Write-DefenseClawAclSelfHealAdvisory `
                 -Path $Layout.MetadataPath `
-                -Reason "deployment metadata ACL repair did not complete: $($_.Exception.Message)"
+                -Reason "deployment metadata ACL repair did not complete: $authenticatedRepairError"
+            # The authenticated repair refuses an untrusted owner or writer
+            # because it cannot prove nobody else wrote the file. That is an
+            # integrity finding, not a reason to stop: record it, re-stamp the
+            # canonical descriptor through the privileged no-follow writer
+            # (which still refuses a reparse point, a directory or an extra
+            # hard link), and let the schema checks below judge the content.
+            Write-DefenseClawResilienceEvent -Marker defenseclaw_boundary -Fields @{
+                path   = [string]$Layout.MetadataPath
+                reason = "deployment metadata had an untrusted owner or writer: $authenticatedRepairError"
+            }
+            $nativeSecurity = Initialize-DefenseClawNativeSecurity
+            [void]$nativeSecurity::SetPathSecurityDescriptorPrivilegedNoFollow(
+                [string]$Layout.MetadataPath,
+                $expectedMetadataAcl.GetSecurityDescriptorSddlForm(
+                    [Security.AccessControl.AccessControlSections]::All
+                ),
+                $false
+            )
+            Write-DefenseClawResilienceEvent -Marker defenseclaw_repair -Fields @{
+                path   = [string]$Layout.MetadataPath
+                reason = "re-stamped the canonical descriptor after: $authenticatedRepairError"
+            }
         }
     }
     Assert-DefenseClawCanonicalPathAcl `
@@ -11655,8 +11681,9 @@ function Initialize-DefenseClawCodexMachinePolicyParent {
             if (-not (Microsoft.PowerShell.Management\Test-Path -LiteralPath $directory -PathType Container)) {
                 throw "Codex machine-policy ancestor is occupied by a non-directory: $directory"
             }
-            # Existing shared directories are validation-only. Never take
-            # ownership or rewrite their ACLs, even when elevated.
+            # Existing shared directories keep their ACL unless it gives an
+            # untrusted principal write authority or ownership; only then is
+            # the canonical descriptor re-stamped (see the assertion).
             Assert-DefenseClawCodexMachinePolicyDirectory -Path $directory
             continue
         }
@@ -20354,7 +20381,10 @@ function Get-DefenseClawLifecycleStatus {
     $guardianReady = $false
     $codexRequirementsReady = $false
     $codexRequirementsDisposition = $null
-    $codexTargetEnabled = $false
+    # Like Claude and Cursor, fall back to the protected deployment record
+    # when the live Codex requirements command fails; the failure itself is
+    # reported through errors and codex_requirements_ready.
+    $codexTargetEnabled = [bool]$Layout.CodexTargetEnabled
     $cursorTargetEnabled = [bool]$Layout.CursorTargetEnabled
     $claudeTargetEnabled = [bool]$Layout.ClaudeTargetEnabled
     $claudeEffectivePolicyVerified = [bool](

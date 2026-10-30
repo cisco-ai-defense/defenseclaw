@@ -1842,7 +1842,7 @@ func readWindowsManagedRuntimeSelector(
 			"enterprise hooks: managed runtime selector is not a bounded regular file",
 		)
 	}
-	if err := validateWindowsManagedRuntimeMachineFileProtection(path, true); err != nil {
+	if err := validateWindowsManagedRuntimeSelectorForRead(path); err != nil {
 		return selector, nil, false, err
 	}
 	data, err := connector.ReadManagedHookRuntimeFile(
@@ -1853,7 +1853,7 @@ func readWindowsManagedRuntimeSelector(
 	if err != nil {
 		return selector, nil, false, err
 	}
-	if err := validateWindowsManagedRuntimeMachineFileProtection(path, true); err != nil {
+	if err := validateWindowsManagedRuntimeSelectorForRead(path); err != nil {
 		return selector, nil, false, err
 	}
 	selector, err = decodeWindowsManagedRuntimeSelector(data, connectorName)
@@ -1861,6 +1861,35 @@ func readWindowsManagedRuntimeSelector(
 		return selector, nil, false, err
 	}
 	return selector, data, true, nil
+}
+
+// validateWindowsManagedRuntimeSelectorForRead judges a selector read outside
+// the selector transaction (prepare, verify, resolve, compare-and-swap). The
+// exact canonical descriptor is preferred; a drifted one (inheritance switched
+// back on by icacls /reset, an extra reader, another trusted owner) is
+// re-stamped when the caller holds the privileges to do so, and otherwise
+// accepted and logged as long as no untrusted principal can write the file.
+// The next selector transaction re-stamps it under the lock. Structure and an
+// untrusted writer stay fatal.
+func validateWindowsManagedRuntimeSelectorForRead(path string) error {
+	exactErr := validateWindowsManagedRuntimeMachineFileProtection(path, true)
+	if exactErr == nil {
+		return nil
+	}
+	if err := rejectWindowsReparseChain(path); err != nil {
+		return err
+	}
+	if repaired, err := repairWindowsManagedRuntimeMachineFile(path, true); err == nil && repaired {
+		return nil
+	}
+	if err := windowsManagedPolicyFileTrustCheck(path); err != nil {
+		return errors.Join(exactErr, err)
+	}
+	managed.EmitResilienceEvent(managed.MarkerAccept, map[string]string{
+		"path":   path,
+		"reason": "managed runtime selector descriptor is not canonical but grants no untrusted write: " + exactErr.Error(),
+	})
+	return nil
 }
 
 func marshalWindowsManagedRuntimeSelector(
