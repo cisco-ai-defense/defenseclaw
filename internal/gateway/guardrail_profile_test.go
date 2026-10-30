@@ -924,7 +924,7 @@ func TestExplainNamesWindowsGroupsWithoutAnIdentityRecord(t *testing.T) {
 	previous := currentIdentitySpoolDir()
 	t.Cleanup(func() { setIdentitySpoolDir(previous) })
 	setIdentitySpoolDir(t.TempDir())
-	if note := spoolRecordNote("S-1-5-21-1-2-3-1104", time.Now()); !strings.Contains(note, "no identity record for this account yet") {
+	if note := spoolRecordNote("S-1-5-21-1-2-3-1104", time.Now(), false); !strings.Contains(note, "no identity record for this account yet") {
 		t.Fatalf("spool note = %q", note)
 	}
 	if !awaitingSpool(useridentity.DirectoryFacts{Directory: useridentity.DirectoryActiveDirectory}) ||
@@ -950,7 +950,7 @@ func TestExplainNamesWindowsGroupsWithoutAnIdentityRecord(t *testing.T) {
 		t.Fatal("Open Directory facts without a UPN or a directory must await the guardian record; a local node account and facts the record named must not")
 	}
 	setIdentitySpoolDir("")
-	if spoolRecordNote("S-1-5-21-1-2-3-1104", time.Now()) != "" {
+	if spoolRecordNote("S-1-5-21-1-2-3-1104", time.Now(), false) != "" {
 		t.Fatal("a gateway without a spool has no record to wait for")
 	}
 	named := &profileSubject{Groups: []string{"S-1-1-0", "Everyone", "S-1-5-21-1-2-3-9001", "S-1-5-21-1-2-3-9002"}}
@@ -2502,5 +2502,20 @@ func TestUnknownAssignmentGroupsAgreeWithCaseInsensitiveMatcher(t *testing.T) {
 	got := unknownAssignmentGroupsForOS(context.Background(), assignments, exists, nil, nil, "linux")
 	if len(got) != 1 || !strings.HasPrefix(got[0], `assignment 2: group "DC-R102-GONE" is not known`) {
 		t.Fatalf("warnings = %q, want only the group no spelling of which exists", got)
+	}
+}
+
+// GAP-0507: the signed-out note names the strict default as the safety net
+// only when no assignment chose the profile; a users, SID or agent assignment
+// ahead of the groups selects it without the token groups.
+func TestSignedOutNoteClaimsTheStrictDefaultOnlyWhenNoAssignmentSelected(t *testing.T) {
+	if got := spoolSignedOutNote(false); !strings.Contains(got, "a strict default profile protects this gap") ||
+		!strings.Contains(got, "group assignments cannot match") {
+		t.Fatalf("default-profile note = %q", got)
+	}
+	got := spoolSignedOutNote(true)
+	if strings.Contains(got, "strict default") || !strings.Contains(got, "group assignments cannot match") ||
+		!strings.Contains(got, "chosen by an assignment") {
+		t.Fatalf("selected-profile note = %q", got)
 	}
 }
