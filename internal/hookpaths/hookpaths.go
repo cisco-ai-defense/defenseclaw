@@ -1730,7 +1730,7 @@ var directoryStackTilde = regexp.MustCompile(`^~([+-]?[0-9]{1,3}|[+-])(/|$)`)
 // stack is the known bash directory stack of the call (stack[0] the current
 // directory), a source word it names is read as that directory instead, so
 // the walk inspects it like any other source (GAP-2586).
-func withDirectoryStackOperands(args []*syntax.Word, words []string, static []bool, stack []string, destination func([]string, []bool) string) ([]string, []bool) {
+func withDirectoryStackOperands(args []*syntax.Word, words []string, static []bool, stack directoryStack, destination func([]string, []bool) string) ([]string, []bool) {
 	var stackWords []string
 	var stackStatic []bool
 	var stackArgs []int
@@ -1769,13 +1769,22 @@ func directoryStackWord(arg *syntax.Word) bool {
 	return ok && directoryStackTilde.MatchString(lit.Value) && !strings.ContainsAny(lit.Value, "*?[")
 }
 
+// directoryStack is what a placed call knows of the bash directory stack:
+// dirs as bash prints them with dirs (dirs[0] the current directory) and
+// oldpwd, the directory a cd, pushd or popd of the same command left ("" when
+// none did or the command may set OLDPWD another way).
+type directoryStack struct {
+	dirs   []string
+	oldpwd string
+}
+
 // directoryStackPath expands a bash directory-stack tilde word (~N, ~+N,
-// ~-N, ~+) against stack, the directory stack bash prints with dirs
-// (stack[0] the current directory). ~- (OLDPWD) and an index outside the
-// stack are not expanded: bash leaves an out-of-range word literal.
-func directoryStackPath(word string, stack []string) (string, bool) {
+// ~-N, ~+, ~-) against stack. ~- is OLDPWD, expanded only when the command
+// set it (GAP-2586); an index outside the stack is not expanded: bash leaves
+// an out-of-range word literal.
+func directoryStackPath(word string, stack directoryStack) (string, bool) {
 	match := directoryStackTilde.FindStringSubmatch(word)
-	if match == nil || len(stack) == 0 || !filepath.IsAbs(stack[0]) {
+	if match == nil || len(stack.dirs) == 0 || !filepath.IsAbs(stack.dirs[0]) {
 		return "", false
 	}
 	spec, rest := match[1], word[1+len(match[1]):]
@@ -1783,13 +1792,16 @@ func directoryStackPath(word string, stack []string) (string, bool) {
 	switch {
 	case spec == "+":
 	case spec == "-":
-		return "", false
+		if !filepath.IsAbs(stack.oldpwd) {
+			return "", false
+		}
+		return stack.oldpwd + rest, true
 	case strings.HasPrefix(spec, "-"):
 		n, err := strconv.Atoi(spec[1:])
 		if err != nil {
 			return "", false
 		}
-		index = len(stack) - 1 - n
+		index = len(stack.dirs) - 1 - n
 	default:
 		n, err := strconv.Atoi(strings.TrimPrefix(spec, "+"))
 		if err != nil {
@@ -1797,10 +1809,10 @@ func directoryStackPath(word string, stack []string) (string, bool) {
 		}
 		index = n
 	}
-	if index < 0 || index >= len(stack) {
+	if index < 0 || index >= len(stack.dirs) {
 		return "", false
 	}
-	return stack[index] + rest, true
+	return stack.dirs[index] + rest, true
 }
 
 func commandLinksWithFacts(command, cwd, home string, facts map[string]string, record bool) shellLinks {
@@ -2021,8 +2033,9 @@ func commandLinksWithFacts(command, cwd, home string, facts map[string]string, r
 // cd, pushd or popd is elsewhere or dynamic, so the link scope keeps its
 // conservative reading. stacks holds the bash directory stack each placed
 // call sees (stack[0] its directory, then the directories pushd saved), unless
-// the command runs dirs anywhere (dirs -c, dirs +N edit the stack).
-func topLevelLinkDirectories(file *syntax.File, cwd, home string) (dirs map[*syntax.CallExpr]string, stacks map[*syntax.CallExpr][]string, known bool) {
+// the command runs dirs anywhere (dirs -c, dirs +N edit the stack), and the
+// OLDPWD the cd, pushd and popd statements before it set (GAP-2586).
+func topLevelLinkDirectories(file *syntax.File, cwd, home string) (dirs map[*syntax.CallExpr]string, stacks map[*syntax.CallExpr]directoryStack, known bool) {
 	// statements holds the flattened statements; a nil entry at an index in
 	// enter or leave marks where a subshell starts or ends.
 	var statements []*syntax.Stmt
@@ -2057,6 +2070,7 @@ func topLevelLinkDirectories(file *syntax.File, cwd, home string) (dirs map[*syn
 	}
 	known = true
 	stackKnown := true
+	oldpwdKnown := !mayWriteOldPWD(file, home)
 	syntax.Walk(file, func(node syntax.Node) bool {
 		call, ok := node.(*syntax.CallExpr)
 		if !ok || len(call.Args) == 0 {
@@ -2077,18 +2091,20 @@ func topLevelLinkDirectories(file *syntax.File, cwd, home string) (dirs map[*syn
 		return nil, nil, false
 	}
 	dirs = make(map[*syntax.CallExpr]string)
-	stacks = make(map[*syntax.CallExpr][]string)
-	dir := cwd
-	var saved, pushed []string
+	stacks = make(map[*syntax.CallExpr]directoryStack)
+	dir, oldpwd := cwd, ""
+	var saved, pushed, savedOldpwd []string
 	var savedPushed [][]string
 	usedPushd := false
 	for index, stmt := range statements {
 		for n := leave[index]; n > 0; n-- {
 			dir, saved = saved[len(saved)-1], saved[:len(saved)-1]
+			oldpwd, savedOldpwd = savedOldpwd[len(savedOldpwd)-1], savedOldpwd[:len(savedOldpwd)-1]
 			pushed, savedPushed = savedPushed[len(savedPushed)-1], savedPushed[:len(savedPushed)-1]
 		}
 		for n := enter[index]; n > 0; n-- {
 			saved = append(saved, dir)
+			savedOldpwd = append(savedOldpwd, oldpwd)
 			savedPushed = append(savedPushed, slices.Clone(pushed))
 		}
 		call, ok := stmt.Cmd.(*syntax.CallExpr)
@@ -2106,7 +2122,7 @@ func topLevelLinkDirectories(file *syntax.File, cwd, home string) (dirs map[*syn
 			// pushd, a popd with no pushd before it) keeps the conservative
 			// reading.
 			if programBase(program) == "popd" && len(call.Args) == 1 && len(call.Assigns) == 0 && len(pushed) > 0 {
-				dir, pushed = pushed[len(pushed)-1], pushed[:len(pushed)-1]
+				oldpwd, dir, pushed = dir, pushed[len(pushed)-1], pushed[:len(pushed)-1]
 				continue
 			}
 			if (programBase(program) != "cd" && programBase(program) != "pushd") || len(call.Args) != 2 || len(call.Assigns) != 0 {
@@ -2120,7 +2136,7 @@ func topLevelLinkDirectories(file *syntax.File, cwd, home string) (dirs map[*syn
 				pushed = append(pushed, dir)
 				usedPushd = true
 			}
-			dir = OperandPath(target, dir)
+			oldpwd, dir = dir, OperandPath(target, dir)
 			continue
 		}
 		// A link after a pushd keeps the conservative reading: the
@@ -2146,10 +2162,43 @@ func topLevelLinkDirectories(file *syntax.File, cwd, home string) (dirs map[*syn
 			for i := len(pushed) - 1; i >= 0; i-- {
 				stack = append(stack, pushed[i])
 			}
-			stacks[call] = stack
+			placed := directoryStack{dirs: stack}
+			if oldpwdKnown {
+				placed.oldpwd = oldpwd
+			}
+			stacks[call] = placed
 		}
 	}
 	return dirs, stacks, true
+}
+
+// variableWriters are the bash builtins that may set or unset a variable an
+// argument names (or run text that does).
+var variableWriters = []string{"builtin", "declare", "enable", "eval", "export", "getopts", "let", "local", "mapfile",
+	"printf", "read", "readarray", "readonly", "set", "shopt", "source", "trap", "typeset", "unset", "."}
+
+// mayWriteOldPWD reports a command that may set OLDPWD other than by a cd,
+// pushd or popd: any word or assignment that names OLDPWD, or any word that
+// names a builtin that writes variables. ~- then stays unexpanded.
+func mayWriteOldPWD(file *syntax.File, home string) bool {
+	writes := false
+	syntax.Walk(file, func(node syntax.Node) bool {
+		if writes {
+			return false
+		}
+		switch node := node.(type) {
+		case *syntax.Lit:
+			writes = strings.Contains(node.Value, "OLDPWD")
+		case *syntax.CallExpr:
+			for _, arg := range node.Args {
+				if word, static := StaticWord(arg, home); static && slices.Contains(variableWriters, programBase(word)) {
+					writes = true
+				}
+			}
+		}
+		return !writes
+	})
+	return writes
 }
 
 // plainWrappedChild returns the index of the program word that a chain of

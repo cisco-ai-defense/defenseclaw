@@ -123,6 +123,18 @@ func TestPushdRecursiveCopyReadsSourcesInTheNewDirectory(t *testing.T) {
 		{"pushd src && cp -r ~2/ordinary ord14", true},
 		{"pushd ~/.ssh && popd && pushd ~ && cp project/a.txt .ssh/authorized_keys", true},
 		{"pushd /tmp && popd && cp a.txt ~/.ssh/authorized_keys", true},
+		{"pushd src && cp -r ~-/ordinary ord15", false},
+		{"pushd src && rsync -a ~-/ordinary/ out2/", false},
+		{"cd src && cp -r ~-/ordinary ord16", false},
+		{"cd src && rsync -a ~-/ordinary/ out3/", false},
+		{"cd src && cd .. && cp -r ~-/../ordinary ord17", false},
+		{"cd ~/linked && cd ~/project && cp -a ~- lb3 && echo k >> lb3/lnk", true},
+		{"cd src && cp -a ~-/../linked lb4 && echo k >> lb4/lnk", true},
+		{"cd src && OLDPWD=$HOME/linked && cp -a ~- lb5 && echo k >> lb5/lnk", true},
+		{"cd src && export OLDPWD=$HOME/linked && cp -a ~- lb6 && echo k >> lb6/lnk", true},
+		{"cd src && printf -v OLD$x %s $HOME/linked && cp -a ~- lb7 && echo k >> lb7/lnk", true},
+		{"( cd ~/linked ) && cp -a ~- lb8 && echo k >> lb8/lnk", true},
+		{"cp -a ~- lb9 && echo k >> lb9/lnk", true},
 	}
 	for _, mode := range []string{"action"} {
 		for _, row := range rows {
