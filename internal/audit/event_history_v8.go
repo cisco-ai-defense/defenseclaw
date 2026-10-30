@@ -1629,22 +1629,30 @@ func (writer *EventHistoryWriter) VerifyEventHistoryRange(
 		return EventHistoryVerificationRange{}, fmt.Errorf("audit: read v8 event-history verification range: %w", err)
 	}
 	defer rows.Close()
-	results := make([]EventHistoryVerification, 0, limit+1)
+	// The rows are read first: verifying a row that names a field class set
+	// reads the set, and the store has one connection.
+	type storedRow struct{ recordID, projected, projectionHash, payloadHMAC, algorithm, keyID string }
+	stored := make([]storedRow, 0, limit+1)
 	for rows.Next() {
-		var recordID, projected, projectionHash, payloadHMAC, algorithm, keyID string
-		if err := rows.Scan(&recordID, &projected, &projectionHash, &payloadHMAC, &algorithm, &keyID); err != nil {
+		var row storedRow
+		if err := rows.Scan(&row.recordID, &row.projected, &row.projectionHash, &row.payloadHMAC, &row.algorithm, &row.keyID); err != nil {
 			return EventHistoryVerificationRange{}, fmt.Errorf("audit: scan v8 event-history verification range")
 		}
+		stored = append(stored, row)
+	}
+	if err := rows.Err(); err != nil {
+		return EventHistoryVerificationRange{}, fmt.Errorf("audit: iterate v8 event-history verification range: %w", err)
+	}
+	rows.Close()
+	results := make([]EventHistoryVerification, 0, len(stored))
+	for _, row := range stored {
 		result, err := writer.verifyStoredProjection(
-			ctx, recordID, []byte(projected), projectionHash, payloadHMAC, algorithm, keyID,
+			ctx, row.recordID, []byte(row.projected), row.projectionHash, row.payloadHMAC, row.algorithm, row.keyID,
 		)
 		if err != nil {
 			return EventHistoryVerificationRange{}, err
 		}
 		results = append(results, result)
-	}
-	if err := rows.Err(); err != nil {
-		return EventHistoryVerificationRange{}, fmt.Errorf("audit: iterate v8 event-history verification range: %w", err)
 	}
 	page := EventHistoryVerificationRange{Records: results}
 	if len(page.Records) > limit {

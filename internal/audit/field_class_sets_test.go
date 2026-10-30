@@ -6,6 +6,7 @@ package audit
 import (
 	"bytes"
 	"compress/gzip"
+	"context"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
@@ -113,6 +114,38 @@ func TestFieldClassSetStoredOnceAndRowsVerify(t *testing.T) {
 		}
 		if !strings.Contains(payload, `"message":"wide `+id+`"`) {
 			t.Fatalf("row %s payload_json = %s", id, payload)
+		}
+	}
+}
+
+// A range verification reads rows that name sets without waiting on the
+// store's one connection.
+func TestFieldClassSetRangeVerification(t *testing.T) {
+	store := newV8HistoryStore(t)
+	signer := &testProjectionSigner{key: bytes.Repeat([]byte{0x34}, 32), keyID: "integrity-key-v1"}
+	writer, err := NewEventHistoryWriter(store, signer, nil, testLocalProfileResolver{profile: observabilityredaction.ProfileNone})
+	if err != nil {
+		t.Fatal(err)
+	}
+	base := time.Date(2026, 10, 30, 12, 0, 0, 0, time.UTC)
+	for index := 0; index < 3; index++ {
+		record := newWideV8HistoryRecord(t, fmt.Sprintf("fcs-range-%d", index), base.Add(time.Duration(index)*time.Second))
+		if err := writer.Append(record, projectV8HistoryRecord(t, record, observabilityredaction.ProfileNone)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
+	page, err := writer.VerifyEventHistoryRange(ctx, base, base.Add(time.Minute), 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(page.Records) != 3 {
+		t.Fatalf("range = %#v", page)
+	}
+	for _, result := range page.Records {
+		if result.Status != EventHistoryVerified {
+			t.Fatalf("range verification = %#v", result)
 		}
 	}
 }
