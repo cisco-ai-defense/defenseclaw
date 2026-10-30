@@ -193,3 +193,39 @@ def test_defenseclaw_yara_findings_keep_the_yara_scanner_label() -> None:
     finding = SimpleNamespace(severity="HIGH", analyzer="DefenseClaw YARA", summary="x", details={})
     result = mcp.MCPScannerWrapper(MCPScannerConfig(analyzers="yara"))._convert([finding], "t", 0.1)
     assert [f.scanner for f in result.findings] == ["mcp-scanner/YARA"]
+
+
+def _rpc_error(code: int, message: str, data: object = None) -> Exception:
+    error = Exception(message)
+    error.error = SimpleNamespace(code=code, message=message, data=data)  # type: ignore[attr-defined]
+    return error
+
+
+def test_legacy_http_version_rejection_falls_back_to_initialize() -> None:
+    # mcp.deepwiki.com (MCP TypeScript SDK before 2026-07-28) answers
+    # server/discover this way and still accepts initialize() (GAP-0020).
+    pytest.importorskip("mcpscanner")
+    from mcpscanner import Scanner
+
+    class Probe(Scanner):
+        pass
+
+    mcp._accept_legacy_http_version_rejection(Probe)
+    mcp._accept_legacy_http_version_rejection(Probe)  # idempotent
+    rejection = _rpc_error(
+        -32600,
+        "Bad Request: Unsupported protocol version: 2026-07-28. "
+        "Supported versions: 2024-11-05, 2025-03-26, 2025-06-18, 2025-11-25",
+    )
+    assert Probe._should_fallback_to_initialize(rejection, legacy_http=True)
+    assert not Probe._should_fallback_to_initialize(rejection)
+    assert not Probe._should_fallback_to_initialize(
+        _rpc_error(-32600, "Bad Request: Unsupported Content-Type"), legacy_http=True
+    )
+    assert not Probe._should_fallback_to_initialize(
+        _rpc_error(-32600, "Bad Request: Unsupported protocol version: x", data={"why": 1}), legacy_http=True
+    )
+    # The upstream shapes keep working.
+    assert Probe._should_fallback_to_initialize(
+        _rpc_error(-32600, "Bad Request: Missing session ID"), legacy_http=True
+    )

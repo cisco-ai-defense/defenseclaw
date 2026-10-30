@@ -94,6 +94,42 @@ def _named_analyzer(analyzer: object, name: str) -> object:
     return analyzer
 
 
+# MCP Scanner 4.8.7 retries the legacy initialize() handshake after a failed
+# server/discover (protocol 2026-07-28) over HTTP only for the exact
+# "Bad Request: Missing session ID" rejection. MCP TypeScript SDK servers that
+# predate 2026-07-28 (for example mcp.deepwiki.com) reject it with
+# -32600 "Bad Request: Unsupported protocol version: 2026-07-28 ..." and still
+# accept initialize(), so the scan failed where 4.3.0 scanned them (GAP-0020).
+# Accept that one rejection too, for legacy HTTP only; every other error
+# keeps its upstream meaning. Remove once a pinned scanner release includes
+# cisco-ai-defense/mcp-scanner#296.
+_LEGACY_HTTP_VERSION_REJECTION = "Bad Request: Unsupported protocol version: "
+
+
+def _accept_legacy_http_version_rejection(scanner_cls: type) -> None:
+    original = getattr(scanner_cls, "_should_fallback_to_initialize", None)
+    if not callable(original) or getattr(original, "_defenseclaw_legacy_http_version", False):
+        return
+
+    def should_fallback(error: Exception, *, legacy_stdio: bool = False, legacy_http: bool = False) -> bool:
+        if original(error, legacy_stdio=legacy_stdio, legacy_http=legacy_http):
+            return True
+        rpc_error = getattr(error, "error", None)
+        code = getattr(error, "code", None)
+        if code is None:
+            code = getattr(rpc_error, "code", None)
+        message = str(getattr(rpc_error, "message", None) or error)
+        return (
+            legacy_http
+            and code == -32600
+            and getattr(rpc_error, "data", None) in (None, "")
+            and message.startswith(_LEGACY_HTTP_VERSION_REJECTION)
+        )
+
+    should_fallback._defenseclaw_legacy_http_version = True  # type: ignore[attr-defined]
+    scanner_cls._should_fallback_to_initialize = staticmethod(should_fallback)
+
+
 def _supplemental_yara_analyzers(yara_analyzer_cls: type, yara_cfg: MCPScannerYARAConfig | None = None) -> list[object]:
     """Load DefenseClaw rules alongside, never instead of, SDK YARA rules.
 
@@ -1530,6 +1566,7 @@ class MCPScannerWrapper:
                 )
             else:
                 supplemental_analyzers = _supplemental_yara_analyzers(YaraAnalyzer, getattr(self.config, "yara", None))
+        _accept_legacy_http_version_rejection(MCPSDKScanner)
         scanner = MCPSDKScanner(
             sdk_config,
             custom_analyzers=supplemental_analyzers,
