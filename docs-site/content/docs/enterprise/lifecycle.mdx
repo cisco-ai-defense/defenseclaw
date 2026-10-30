@@ -568,6 +568,7 @@ so a burst makes calls wait longer before it blocks any. Measured on Windows Ser
 every 15 seconds, about 9 in 10 calls get their decision within the budget (median about
 2.8 seconds) and the rest are blocked at the budget with `enterprise_managed_gateway_no_answer`.
 That is about 6 such calls per vCPU at once. In observe mode the same burst was answered in full.
+On Linux, measured on a per-user install on RHEL 9.8 with 4 vCPUs, up to 3 interactive agents per vCPU working at once got every tool-call decision within 2 seconds (613 calls, maximum 1.9 seconds). See [Many agents on one Linux host](/docs/support-matrix#many-agents-on-one-linux-host).
 
 While a Setup, pkg or rpm run holds the gateway, the block names the run: "DefenseClaw is being
 installed or upgraded on this computer, and its gateway starts again when that is done. Try again
