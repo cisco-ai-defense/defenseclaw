@@ -31,7 +31,6 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/daemon"
-	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/safefile"
 	"github.com/defenseclaw/defenseclaw/internal/version"
 )
@@ -139,17 +138,9 @@ func rootPersistentPreRunE(cmd *cobra.Command, _ []string) error {
 		}
 	}
 	version.SetBinaryVersion(appVersion)
-	if auditDir := filepath.Dir(cfg.AuditDB); auditDir != "." {
-		if err := managed.PrepareServiceRuntimeDir(cfg.DeploymentMode, auditDir, "audit store directory"); err != nil {
-			return fmt.Errorf("failed to prepare audit store directory: %w", err)
-		}
-	}
-	auditStore, err = audit.NewStore(cfg.AuditDB)
+	auditStore, err = openGatewayAuditStore(cmd.Context(), cfg.DeploymentMode, cfg.AuditDB)
 	if err != nil {
-		return fmt.Errorf("failed to open audit store: %w", err)
-	}
-	if err := auditStore.Init(); err != nil {
-		return fmt.Errorf("failed to init audit store: %w", err)
+		return err
 	}
 	auditLog = audit.NewLogger(auditStore)
 	installCorrelator(auditStore, os.Stderr)
