@@ -2005,6 +2005,8 @@ type machineVersionReport struct {
 	// SecretSetBundle is optional for older gateway versions. Its type is
 	// checked while unknown identity members remain refused.
 	SecretSetBundle bool `json:"secret_set_bundle,omitempty"`
+	// IdentityRefresh (from 1.0.6) is optional in the same way.
+	IdentityRefresh bool `json:"identity_refresh,omitempty"`
 }
 
 func validateMachineVersion(output []byte, expectedName, expectedVersion, expectedCommit string) error {

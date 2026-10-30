@@ -936,10 +936,15 @@ def test_offline_chain_and_timeout_helpers_are_strictly_bounded() -> None:
 
 
 def test_binary_identity_accepts_the_gateway_capability_members() -> None:
-    # The gateway's --version-json reports both capabilities in packaged
-    # 1.0.4 binaries. The build identity check must accept that shape.
+    # The gateway's --version-json reports its capabilities (secret_set_bundle
+    # from 1.0.4, identity_refresh from 1.0.6). The build identity check must
+    # accept that shape and still type-check each capability.
     identity = BINARY_IDENTITY_PS1.read_text(encoding="utf-8")
-    assert "$allowed = @($required + 'built' + 'management_contract' + 'secret_set_bundle')" in identity
+    assert (
+        "$allowed = @($required + 'built' + 'management_contract' + 'secret_set_bundle' + 'identity_refresh')"
+        in identity
+    )
+    assert "invalid identity_refresh capability" in identity
 
 
 @pytest.mark.skipif(os.name != "nt", reason="requires native Windows process identity")
@@ -959,6 +964,8 @@ def test_stale_or_off_commit_distroot_binary_identity_is_rejected(tmp_path: Path
         '"commit": os.Getenv("DC_IDENTITY_COMMIT")}; '
         'if os.Getenv("DC_IDENTITY_SECRET_BUNDLE") == "1" { '
         'identity["secret_set_bundle"] = true }; '
+        'if os.Getenv("DC_IDENTITY_REFRESH") == "1" { '
+        'identity["identity_refresh"] = true }; '
         '_ = json.NewEncoder(os.Stdout).Encode(identity) }\n',
         encoding="utf-8",
     )
@@ -1009,6 +1016,7 @@ def test_stale_or_off_commit_distroot_binary_identity_is_rejected(tmp_path: Path
         "DC_IDENTITY_VERSION": "1.2.3",
         "DC_IDENTITY_COMMIT": expected_commit,
         "DC_IDENTITY_SECRET_BUNDLE": "1",
+        "DC_IDENTITY_REFRESH": "1",
     })
     accepted = subprocess.run(
         [pwsh, "-NoProfile", "-NonInteractive", "-Command", command],

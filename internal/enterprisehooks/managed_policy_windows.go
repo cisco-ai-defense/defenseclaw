@@ -1095,9 +1095,10 @@ type windowsClaudeManagedRuntimeVersionReport struct {
 	// ManagementContract is the management agent contract the gateway
 	// implements; accepted, not checked.
 	ManagementContract int `json:"management_contract,omitempty"`
-	// Older installed gateways can omit this capability; a present value
+	// Older installed gateways can omit these capabilities; a present value
 	// must still be a boolean under the strict identity decoder.
 	SecretSetBundle bool `json:"secret_set_bundle,omitempty"`
+	IdentityRefresh bool `json:"identity_refresh,omitempty"`
 }
 
 func validateWindowsClaudeManagedRuntimeVersion(target windowsClaudeManagedPolicyTarget, expectedVersion string) error {
