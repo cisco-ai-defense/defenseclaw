@@ -107,11 +107,17 @@ func windowsSimpleGroupSource(source string, dialect windowsDialect) (string, []
 			}
 		}
 		if atStart {
-			if opener, end, recognized, valid := windowsSimpleGroupOpening(runes, i, dialect); recognized {
+			if opener, end, header, recognized, valid := windowsSimpleGroupOpening(runes, i, dialect); recognized {
 				if !valid || len(stack) >= 32 {
 					return "", nil, false
 				}
 				blank(i, end)
+				if header[1] > header[0] {
+					// The condition runs before the body, in the caller:
+					// it is a statement of its own (GAP-0935).
+					copy(clean[header[0]:header[1]], runes[header[0]:header[1]])
+					clean[header[1]] = ';'
+				}
 				stack = append(stack, opener)
 				events = append(events, windowsSimpleGroupEvent{offset: i, open: true})
 				i = end - 1
@@ -213,13 +219,16 @@ func windowsSimpleNeedsBoundary(runes []rune, from int) bool {
 	return from < len(runes) && !strings.ContainsRune(";&|\r\n)}", runes[from])
 }
 
-func windowsSimpleGroupOpening(runes []rune, start int, dialect windowsDialect) (rune, int, bool, bool) {
+// windowsSimpleGroupOpening reads the control syntax that opens a group at
+// start. header is the rune span of an if, elseif or while condition that is
+// kept as a statement of its own; it is empty for any other opening.
+func windowsSimpleGroupOpening(runes []rune, start int, dialect windowsDialect) (opener rune, end int, header [2]int, recognized, valid bool) {
 	if dialect == windowsCMD {
 		if runes[start] == '(' {
-			return ')', start + 1, true, true
+			return ')', start + 1, header, true, true
 		}
 		if !windowsSimpleKeyword(runes, start, "if") {
-			return 0, 0, false, false
+			return 0, 0, header, false, false
 		}
 		end := start + 2
 		for end < len(runes) && runes[end] != '(' && runes[end] != '\r' && runes[end] != '\n' {
@@ -227,12 +236,12 @@ func windowsSimpleGroupOpening(runes []rune, start int, dialect windowsDialect) 
 		}
 		if end >= len(runes) || runes[end] != '(' ||
 			!windowsSimpleCMDIfHeader(string(runes[start:end])) {
-			return 0, 0, true, false
+			return 0, 0, header, true, false
 		}
-		return ')', end + 1, true, true
+		return ')', end + 1, header, true, true
 	}
 	if runes[start] == '{' {
-		return '}', start + 1, true, true
+		return '}', start + 1, header, true, true
 	}
 	if runes[start] == '&' || runes[start] == '.' {
 		end := start + 1
@@ -240,7 +249,7 @@ func windowsSimpleGroupOpening(runes []rune, start int, dialect windowsDialect) 
 			end++
 		}
 		if end < len(runes) && runes[end] == '{' {
-			return '}', end + 1, true, true
+			return '}', end + 1, header, true, true
 		}
 	}
 	for _, keyword := range []string{"if", "elseif", "while", "foreach", "for", "switch"} {
@@ -252,20 +261,30 @@ func windowsSimpleGroupOpening(runes []rune, start int, dialect windowsDialect) 
 			index++
 		}
 		if index >= len(runes) || runes[index] != '(' {
-			return 0, 0, true, false
+			return 0, 0, header, true, false
 		}
 		close := windowsSimpleCloseParen(runes, index)
-		if close < 0 || !windowsSimpleInertHeader(keyword, string(runes[index+1:close])) {
-			return 0, 0, true, false
+		if close < 0 {
+			return 0, 0, header, true, false
+		}
+		condition := string(runes[index+1 : close])
+		if !windowsSimpleInertHeader(keyword, condition) {
+			// A condition that is not a literal may or may not select the
+			// body, so the body is judged as one that runs, as a POSIX
+			// if or while body is (GAP-0935).
+			if !windowsSimpleStatementHeader(keyword, condition) {
+				return 0, 0, header, true, false
+			}
+			header = [2]int{index + 1, close}
 		}
 		end := close + 1
 		for end < len(runes) && (runes[end] == ' ' || runes[end] == '\t') {
 			end++
 		}
 		if end >= len(runes) || runes[end] != '{' {
-			return 0, 0, true, false
+			return 0, 0, [2]int{}, true, false
 		}
-		return '}', end + 1, true, true
+		return '}', end + 1, header, true, true
 	}
 	if windowsSimpleKeyword(runes, start, "else") {
 		end := start + 4
@@ -273,11 +292,25 @@ func windowsSimpleGroupOpening(runes []rune, start int, dialect windowsDialect) 
 			end++
 		}
 		if end >= len(runes) || runes[end] != '{' {
-			return 0, 0, true, false
+			return 0, 0, header, true, false
 		}
-		return '}', end + 1, true, true
+		return '}', end + 1, header, true, true
 	}
-	return 0, 0, false, false
+	return 0, 0, header, false, false
+}
+
+// windowsSimpleStatementHeader reports an if, elseif or while condition that
+// is one plain command or expression (Test-Path x, $env:CI, $i -lt 3),
+// with no group, subexpression, scriptblock or statement separator: it can
+// be judged as a statement of its own. Other conditions keep the action
+// whole.
+func windowsSimpleStatementHeader(keyword, header string) bool {
+	switch keyword {
+	case "if", "elseif", "while":
+	default:
+		return false
+	}
+	return strings.TrimSpace(header) != "" && !strings.ContainsAny(header, ";|&{}()\r\n`")
 }
 
 func windowsSimpleKeyword(runes []rune, start int, keyword string) bool {

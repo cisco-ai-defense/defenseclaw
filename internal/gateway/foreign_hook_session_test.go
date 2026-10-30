@@ -609,25 +609,9 @@ func TestForeignHookSessionSlowAllowsOfOtherIdentitiesDoNotRefuseAnExchange(t *t
 	}
 }
 
-// slowForeignHookResponse takes delay to write each response, as a client
-// that reads slowly but within the write deadline does.
-type slowForeignHookResponse struct {
-	http.ResponseWriter
-	delay   time.Duration
-	written *time.Time
-}
-
-func (w slowForeignHookResponse) Unwrap() http.ResponseWriter { return w.ResponseWriter }
-
-func (w slowForeignHookResponse) Write(data []byte) (int, error) {
-	time.Sleep(w.delay)
-	n, err := w.ResponseWriter.Write(data)
-	*w.written = time.Now()
-	return n, err
-}
-
-// sequencedForeignHookResponse is slowForeignHookResponse that marks the
-// write with the next value of seq instead of a clock reading.
+// sequencedForeignHookResponse takes delay to write each response, as a
+// client that reads slowly but within the write deadline does, and marks the
+// write with the next value of seq.
 type sequencedForeignHookResponse struct {
 	http.ResponseWriter
 	delay   time.Duration
