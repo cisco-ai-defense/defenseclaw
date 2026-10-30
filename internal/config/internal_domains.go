@@ -58,7 +58,7 @@ func validInternalDomain(domain string) bool {
 		}
 		for index := 0; index < len(label); index++ {
 			c := label[index]
-			if !(c >= 'a' && c <= 'z' || c >= '0' && c <= '9' || c == '-') {
+			if (c < 'a' || c > 'z') && (c < '0' || c > '9') && c != '-' {
 				return false
 			}
 		}
