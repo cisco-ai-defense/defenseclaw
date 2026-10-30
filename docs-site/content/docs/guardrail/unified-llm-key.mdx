@@ -15,7 +15,7 @@ keywords:
 
 DefenseClaw sends every LLM call through one of two layers: the in-process **Bifrost** SDK (the gateway and the judge) or **LiteLLM** (the scanner SDKs). Both derive the provider key from `DEFENSECLAW_LLM_KEY` and the model prefix. For the short path, see [Set up an LLM key](/docs/guardrail/unified-llm-key).
 
-One key, `DEFENSECLAW_LLM_KEY`, powers the LLM judge and the skill, MCP and plugin scanners. Set it once. Override it per component only if you need separate billing or rate limits ([LLM providers](/docs/guardrail/unified-llm-key#per-component-overrides)).
+One key, `DEFENSECLAW_LLM_KEY`, powers the LLM judge and the skill, MCP and plugin scanners. The optional [decision model](/docs/guardrail/decision-model) has its own setting and token, `DEFENSECLAW_DECISION_MODEL_KEY`. Set it once. Override it per component only if you need separate billing or rate limits ([LLM providers](/docs/guardrail/unified-llm-key#per-component-overrides)).
 
 ## The happy path
 

@@ -262,8 +262,7 @@ older Setup does not check the floor and can install below it.
 On every OS, a 1.0.6 or later release that finds itself below the floor
 reports `product_below_floor` in `status`, `verify` and `bundle status`. It is
 a warning only: the policy keeps enforcing and nothing is repaired or
-reinstalled. `bundle status` shows the floor as `current.min_product_version`;
-check it before you deploy an older release.
+reinstalled.
 
 To roll back to 1.0.4, the confirmed floor must be unset or 1.0.4 or lower.
 Keep package deployment under administrator control, and check that the

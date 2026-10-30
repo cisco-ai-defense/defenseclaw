@@ -10,7 +10,7 @@ keywords:
   - LLM judge cost
 ---
 
-The decision model is a small, fast model that sits between the rules and the [LLM judge](/docs/guardrail#examples). It answers one question per tool call, "allow, confirm or block?", with calibrated probabilities. DefenseClaw lets it decide the clear calls and sends the unclear ones to the judge. It is off by default.
+The decision model is a small, fast model that sits between the rules and the [LLM judge](/docs/guardrail). It answers one question per tool call, "allow, confirm or block?", with calibrated probabilities. DefenseClaw lets it decide the clear calls and sends the unclear ones to the judge. It is off by default.
 
 Like the [unified LLM key](/docs/guardrail/unified-llm-key), it is one setting, `decision_model:`, used by two components:
 
