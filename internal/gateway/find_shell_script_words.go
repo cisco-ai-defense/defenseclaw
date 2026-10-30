@@ -780,7 +780,7 @@ func findStripDirectoriesStayOff(
 		return false
 	}
 	if lineStaysOff == nil {
-		return hookpaths.StateRootSiblings(root) == "0"
+		return hookpaths.StateRootSiblingsForFinds(root, facts) == "0"
 	}
 	return lineStaysOff()
 }
@@ -798,7 +798,9 @@ func findStripSiblingsStayOff(request trustedActionRequest, root string) bool {
 	if request.SkipLocalFilesystemResolution || request.ProtectedHomeHook {
 		return false
 	}
-	return hookpaths.StateRootSiblings(root) == "0"
+	// Only a name the find's name tests pass is handed to the script
+	// (GAP-2597), as the hook client reads it.
+	return hookpaths.StateRootSiblingsForFinds(root, actionfacts.Analyze(request.Input)) == "0"
 }
 
 // findStripStdinFilters read their standard input and print to standard
