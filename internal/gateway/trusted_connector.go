@@ -4,7 +4,6 @@
 package gateway
 
 import (
-	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/binary"
@@ -25,10 +24,10 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/config/configwrite"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisebundle"
 	"github.com/defenseclaw/defenseclaw/internal/sandboxauth"
 	"github.com/defenseclaw/defenseclaw/internal/useridentity"
-	"github.com/defenseclaw/defenseclaw/internal/version"
 )
 
 // Trusted connectors (issue #1392).
@@ -161,20 +160,16 @@ func trustedConnectorAccountListed(id string) bool {
 }
 
 // trustedConnectorActivation decides whether a managed gateway honours the
-// list: trust anchors are installed, the bundle store's current bundle
-// verifies against them (signature, files, version floor, product floor),
-// and config.yaml is exactly that bundle's config rendered against its
-// version directory. Generation records and bundle state are root-written
-// files: they only name the candidate; the signature and the re-render
-// decide. Anything else, a CONFIG= install included, is not honoured.
+// list: trust anchors are installed and config.yaml is exactly what a signed
+// bundle in the store renders for the bundle its generation record names
+// (enterprisebundle.CheckSignedActivation, the activation gate the config
+// manager applies to every reload). The record only names the candidate; the
+// signature and the re-render decide. A CONFIG= install (no anchors), or a
+// record that names no bundle, is not honoured.
 var trustedConnectorActivation = signedBundleActivation
 
-// bundleStoreFor and anchorTrust are the bundle store and the anchor file
-// check signedBundleActivation uses; tests replace them.
-var (
-	bundleStoreFor = enterprisebundle.StoreFor
-	anchorTrust    enterprisebundle.TrustCheck
-)
+// trustedConnectorSignatures caches manifest signature checks in memory.
+var trustedConnectorSignatures enterprisebundle.SignatureCache
 
 func signedBundleActivation(cfg *config.Config) (bool, string) {
 	if cfg == nil || !cfg.StandaloneEnterprise() {
@@ -184,40 +179,27 @@ func signedBundleActivation(cfg *config.Config) (bool, string) {
 	if path == "" {
 		return false, trustedConnectorsActivationError
 	}
-	anchors, err := enterprisebundle.LoadAnchors(filepath.Join(filepath.Dir(path), "trust", enterprisebundle.AnchorsName), anchorTrust)
+	dir := filepath.Dir(path)
+	anchors, anchorsRaw, err := enterprisebundle.ReadAnchorsFile(filepath.Join(dir, "trust", enterprisebundle.AnchorsName), nil)
 	if err != nil {
 		if enterprisebundle.CodeOf(err) == enterprisebundle.CodeAnchorMissing || errors.Is(err, fs.ErrNotExist) {
 			return false, trustedConnectorsNoAnchors
 		}
 		return false, trustedConnectorsActivationError
 	}
-	store, err := bundleStoreFor(runtime.GOOS)
-	if err != nil {
-		return false, trustedConnectorsActivationError
-	}
-	state, err := store.LoadState()
-	if err != nil || state.Current == nil {
-		return false, trustedConnectorsNotSigned
-	}
-	bundle, err := store.ReadVersion(state.Current)
-	if err != nil {
-		return false, trustedConnectorsNotSigned
-	}
-	if _, err := enterprisebundle.Verify(context.Background(), enterprisebundle.VerifyInput{
-		Bundle: bundle, Anchors: anchors, Platform: runtime.GOOS, Now: time.Now(),
-		Confirmed: state.Confirmed(), ProductVersion: version.Current().BinaryVersion,
-	}); err != nil {
-		return false, trustedConnectorsNotSigned
-	}
-	rendered, err := enterprisebundle.RenderConfig(bundle, store.VersionDir(state.Current.Dir))
-	if err != nil {
-		return false, trustedConnectorsNotSigned
-	}
 	installed, err := os.ReadFile(path)
 	if err != nil {
 		return false, trustedConnectorsActivationError
 	}
-	if !bytes.Equal(installed, rendered) {
+	state, err := configwrite.ReadGenerationState(path)
+	if err != nil || strings.TrimSpace(state.BundleID) == "" {
+		return false, trustedConnectorsNotSigned
+	}
+	in := enterprisebundle.ActivationInput{
+		BundlesDir: filepath.Join(dir, enterprisebundle.BundlesDirName),
+		Anchors:    anchors, AnchorsRaw: anchorsRaw, Platform: runtime.GOOS, Cache: &trustedConnectorSignatures,
+	}
+	if _, refusal := enterprisebundle.CheckSignedActivation(in, state.BundleID, state.BundleVersion, state.SignerKeyID, installed); refusal != nil {
 		return false, trustedConnectorsNotSigned
 	}
 	return true, ""
