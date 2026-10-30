@@ -41,7 +41,6 @@ func TestComposeRequiresProductFloorForTrustedConnectors(t *testing.T) {
 	}
 	for name, key := range map[string]string{
 		"agent_gateway": "connectors:\n  agent_gateway:\n    enabled: true\n",
-		"root_scope":    "guardrail:\n  chains:\n    root_scope: true\n",
 	} {
 		root, b := writeBundle(t, mergeTopLevel(bundleConfig(t), key))
 		in := enterprisebundle.ComposeInput{
@@ -55,12 +54,8 @@ func TestComposeRequiresProductFloorForTrustedConnectors(t *testing.T) {
 	}
 }
 
-// mergeTopLevel adds a top-level block to config, or merges a guardrail
-// block into the existing one.
+// mergeTopLevel adds a top-level block to config.
 func mergeTopLevel(config, block string) string {
-	if strings.HasPrefix(block, "guardrail:\n") && strings.Contains(config, "\nguardrail:\n") {
-		return strings.Replace(config, "\nguardrail:\n", "\n"+block, 1)
-	}
 	return config + block
 }
 

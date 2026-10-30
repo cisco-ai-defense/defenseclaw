@@ -1941,18 +1941,6 @@
           "pattern": "^(|[a-z0-9][a-z0-9_-]{0,63})$",
           "default": "",
           "description": "Profile for subjects no assignment selects. Empty keeps the guardrail.* configuration."
-        },
-        "chains": {
-          "type": "object",
-          "additionalProperties": false,
-          "description": "Tool-call chain evaluation settings.",
-          "properties": {
-            "root_scope": {
-              "type": "boolean",
-              "default": false,
-              "description": "Managed only, off by default: also evaluate chains across the sessions of one root_session_id a trusted connector sends. Honoured only from a signed bundle. Requires min_product_version 1.0.6 in a bundle."
-            }
-          }
         }
       }
     },

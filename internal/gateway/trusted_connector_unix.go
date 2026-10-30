@@ -65,18 +65,6 @@ func withTrustedConnectorBudget[T any](fn func(ctx context.Context, r unixidenti
 	}
 }
 
-// trustedConnectorAdminGroupNames are the bare group names that make an
-// account an administrator (compared without case, without a domain).
-var trustedConnectorAdminGroupNames = map[string]bool{
-	"root": true, "wheel": true, "sudo": true, "admin": true,
-	"administrators": true, "domain admins": true, "enterprise admins": true, "schema admins": true,
-}
-
-func trustedConnectorAdminGroup(name string) bool {
-	bare, _ := useridentity.SplitQualifiedName(strings.TrimSpace(name))
-	return trustedConnectorAdminGroupNames[strings.ToLower(bare)]
-}
-
 // lookupTrustedConnectorAccount resolves a name or uid to one account. A
 // bare name another account shares (a local and a directory account), or
 // whose namesakes cannot be ruled out, is ambiguous.
@@ -107,6 +95,20 @@ func lookupTrustedConnectorAccount(ctx context.Context, r unixidentity.Resolver,
 		}
 	}
 	return account, "", nil
+}
+
+// withTrustedConnectorBudget2 is withTrustedConnectorBudget for a lookup
+// that also names why it refused.
+func withTrustedConnectorBudget2[T any](fn func(ctx context.Context, r unixidentity.Resolver) (T, string, error)) (T, string, error) {
+	type pair struct {
+		value T
+		cause string
+	}
+	got, err := withTrustedConnectorBudget(func(ctx context.Context, r unixidentity.Resolver) (pair, error) {
+		value, cause, err := fn(ctx, r)
+		return pair{value, cause}, err
+	})
+	return got.value, got.cause, err
 }
 
 // accountIsAdministrator reports uid 0 (and every alias of it), or a member
@@ -149,6 +151,8 @@ func resolveTrustedConnectorEntry(entry config.TrustedConnectorConfig) trustedCo
 		groups   map[string]bool
 		warnings []string
 	}
+	// Each lookup has its own budget: a long may_act_for list or one slow
+	// answer never fails the whole entry.
 	result, err := withTrustedConnectorBudget(func(ctx context.Context, r unixidentity.Resolver) (resolved, error) {
 		res := resolved{users: map[string]bool{}, groups: map[string]bool{}}
 		account, cause, err := lookupTrustedConnectorAccount(ctx, r, out.AccountSpec)
@@ -166,38 +170,43 @@ func resolveTrustedConnectorEntry(entry config.TrustedConnectorConfig) trustedCo
 		}
 		if admin {
 			res.disabled = "account_is_administrator"
-			return res, nil
-		}
-		for _, user := range entry.MayActFor.Users {
-			person, cause, err := lookupTrustedConnectorAccount(ctx, r, user)
-			switch {
-			case err != nil && cause == "":
-				return res, err
-			case err != nil:
-				res.warnings = append(res.warnings, "a may_act_for.users entry did not resolve to one account ("+cause+")")
-			case person.UID == 0:
-				res.warnings = append(res.warnings, "a may_act_for.users entry is root; dropped")
-			case person.UID == account.UID:
-				res.warnings = append(res.warnings, "a may_act_for.users entry is the connector's own account; dropped")
-			default:
-				res.users[strconv.Itoa(person.UID)] = true
-			}
-		}
-		for _, name := range entry.MayActFor.Groups {
-			group, err := r.LookupGroup(strings.TrimSpace(name))
-			switch {
-			case err != nil && !unixidentity.IsNotFound(err):
-				return res, err
-			case err != nil:
-				res.warnings = append(res.warnings, "a may_act_for.groups entry did not resolve")
-			case group.GID == 0 || trustedConnectorAdminGroup(group.Name):
-				res.warnings = append(res.warnings, "a may_act_for.groups entry is an admin group; dropped")
-			default:
-				res.groups[strconv.Itoa(group.GID)] = true
-			}
 		}
 		return res, nil
 	})
+	if err == nil && result.disabled == "" {
+		for _, user := range entry.MayActFor.Users {
+			person, cause, lookupErr := withTrustedConnectorBudget2(func(ctx context.Context, r unixidentity.Resolver) (unixidentity.Account, string, error) {
+				return lookupTrustedConnectorAccount(ctx, r, user)
+			})
+			switch {
+			case lookupErr != nil && cause == "":
+				result.warnings = append(result.warnings, "a may_act_for.users entry could not be looked up; dropped until the next refresh")
+			case lookupErr != nil:
+				result.warnings = append(result.warnings, "a may_act_for.users entry did not resolve to one account ("+cause+")")
+			case person.UID == 0:
+				result.warnings = append(result.warnings, "a may_act_for.users entry is root; dropped")
+			case person.UID == result.account.UID:
+				result.warnings = append(result.warnings, "a may_act_for.users entry is the connector's own account; dropped")
+			default:
+				result.users[strconv.Itoa(person.UID)] = true
+			}
+		}
+		for _, name := range entry.MayActFor.Groups {
+			group, lookupErr := withTrustedConnectorBudget(func(_ context.Context, r unixidentity.Resolver) (unixidentity.Group, error) {
+				return r.LookupGroup(strings.TrimSpace(name))
+			})
+			switch {
+			case lookupErr != nil && !unixidentity.IsNotFound(lookupErr):
+				result.warnings = append(result.warnings, "a may_act_for.groups entry could not be looked up; dropped until the next refresh")
+			case lookupErr != nil:
+				result.warnings = append(result.warnings, "a may_act_for.groups entry did not resolve")
+			case group.GID == 0 || trustedConnectorAdminGroup(group.Name):
+				result.warnings = append(result.warnings, "a may_act_for.groups entry is an admin group; dropped")
+			default:
+				result.groups[strconv.Itoa(group.GID)] = true
+			}
+		}
+	}
 	if err != nil {
 		out.Disabled = "lookup_failed"
 		out.Warnings = append(out.Warnings, "lookup failed: "+boundedLogText(err.Error()))
@@ -240,9 +249,41 @@ type actingForPersonAnswer struct {
 	gids      []int
 	admin     bool
 	at        time.Time
+	// cause is set for a definitive refusal (unknown or ambiguous name),
+	// kept like an answer so a connector cannot make every distinct
+	// spelling a directory lookup.
+	cause string
 }
 
-const actingForPeopleMax = 4096
+const (
+	actingForPeopleMax = 4096
+	// actingForLookupsPerAccount bounds the lookups one connector account
+	// has in flight; more are refused as unavailable.
+	actingForLookupsPerAccount = 4
+)
+
+var actingForInFlight = struct {
+	sync.Mutex
+	n map[string]int
+}{n: map[string]int{}}
+
+func beginActingForLookup(account string) bool {
+	actingForInFlight.Lock()
+	defer actingForInFlight.Unlock()
+	if actingForInFlight.n[account] >= actingForLookupsPerAccount {
+		return false
+	}
+	actingForInFlight.n[account]++
+	return true
+}
+
+func endActingForLookup(account string) {
+	actingForInFlight.Lock()
+	defer actingForInFlight.Unlock()
+	if actingForInFlight.n[account]--; actingForInFlight.n[account] <= 0 {
+		delete(actingForInFlight.n, account)
+	}
+}
 
 // actingForDirectory is the directory facts cache of asserted people. It is
 // not the hook path's cache: a lookup a connector starts for a person never
@@ -260,6 +301,15 @@ var actingForDirectory = sync.OnceValue(func() *identityDirectoryCache {
 var actingForDirectoryLookup = func(uid string) (useridentity.DirectoryFacts, bool) {
 	cache := actingForDirectory()
 	facts, ok := cache.get(uid, true)
+	if ok && !facts.ResolvedAt.IsZero() && time.Since(facts.ResolvedAt) >= identityDirectoryTTL {
+		// Past their lifetime the cache serves the old facts while it
+		// refreshes; a connector's call waits for the refresh instead.
+		answer := cache.explain(uid, trustedConnectorLookupBudget)
+		facts, ok = answer.facts, answer.ok && !answer.running && answer.reason == ""
+		if ok && time.Since(facts.ResolvedAt) >= identityDirectoryTTL {
+			ok = false
+		}
+	}
 	if !ok || facts.ResolvedAt.IsZero() || cache.unsettled(facts) {
 		return useridentity.DirectoryFacts{}, false
 	}
@@ -280,6 +330,10 @@ func resolveActingFor(entry trustedConnectorEntry, user string, now time.Time) (
 	}
 	actingForPeople.Unlock()
 	if !cached {
+		if !beginActingForLookup(entry.AccountID) {
+			return actingFor{}, actingForRefusal{Code: actingForRefusedLookupUnavailable, Cause: "busy"}
+		}
+		defer endActingForLookup(entry.AccountID)
 		type looked struct {
 			answer actingForPersonAnswer
 			cause  string
@@ -303,10 +357,8 @@ func resolveActingFor(entry trustedConnectorEntry, user string, now time.Time) (
 		if err != nil {
 			return actingFor{}, actingForRefusal{Code: actingForRefusedLookupUnavailable, Cause: "lookup"}
 		}
-		if result.cause != "" {
-			return actingFor{}, actingForRefusal{Code: actingForRefusedNotAllowed, Cause: result.cause}
-		}
 		answer = result.answer
+		answer.cause = result.cause
 		answer.at = now
 		actingForPeople.Lock()
 		if len(actingForPeople.entries) >= actingForPeopleMax {
@@ -316,6 +368,8 @@ func resolveActingFor(entry trustedConnectorEntry, user string, now time.Time) (
 		actingForPeople.Unlock()
 	}
 	switch {
+	case answer.cause != "":
+		return actingFor{}, actingForRefusal{Code: actingForRefusedNotAllowed, Cause: answer.cause}
 	case answer.admin || answer.uid == "0":
 		return actingFor{}, actingForRefusal{Code: actingForRefusedNotAllowed, Cause: actingForCauseAdminTarget}
 	case answer.uid == entry.AccountID || trustedConnectorAccountListed(answer.uid):

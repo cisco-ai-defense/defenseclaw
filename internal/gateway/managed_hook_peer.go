@@ -45,6 +45,9 @@ const (
 	managedHookReasonConnectorUnknown  = "enterprise_managed_connector_unknown"
 	managedHookReasonSurfaceUnverified = "enterprise_managed_surface_unverified"
 	managedHookReasonGuardianOnly      = "enterprise_managed_guardian_only"
+	// managedHookReasonTrustedConnectorRoute refuses a trusted connector's
+	// service account on any route but agent-gateway.
+	managedHookReasonTrustedConnectorRoute = "enterprise_managed_trusted_connector_route_only"
 )
 
 // managedHookPeer is the kernel-verified identity of a caller on the
@@ -347,6 +350,12 @@ func (z *managedHookAuthorizer) decide(peer managedHookPeer, connectorName, surf
 	}
 	if connectorName == connector.AgentGatewayConnectorName {
 		return z.decideAgentGateway(peer)
+	}
+	if trustedConnectorAccountListed(strconv.Itoa(peer.UID)) {
+		// A trusted connector's account calls for people on the
+		// agent-gateway route only; it never gets its own profile on
+		// another hook or inspect route.
+		return denyManagedHook(http.StatusForbidden, managedHookReasonTrustedConnectorRoute)
 	}
 	if peer.UID == 0 {
 		if strings.EqualFold(strings.TrimSpace(z.enrollment.Root), config.EnterpriseRootDeny) {

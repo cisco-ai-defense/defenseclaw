@@ -277,7 +277,9 @@ func sandboxSessionStateKey(ctx context.Context, sessionID string) string {
 	if binding, ok := sandboxauth.FromContext(ctx); ok {
 		return "sandbox\x00" + sandboxBindingScope(binding) + "\x00" + sessionID
 	}
-	return sessionID
+	// A trusted connector's call for a person keeps its state under the
+	// connector account and the person (trusted_connector.go).
+	return actingForSessionStateScope(ctx) + sessionID
 }
 
 // sandboxBindingScope names the trust domain of a sandbox's state: its

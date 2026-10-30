@@ -4,15 +4,16 @@
 package gateway
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/binary"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -24,10 +25,10 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
-	"github.com/defenseclaw/defenseclaw/internal/config/configwrite"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisebundle"
 	"github.com/defenseclaw/defenseclaw/internal/sandboxauth"
 	"github.com/defenseclaw/defenseclaw/internal/useridentity"
+	"github.com/defenseclaw/defenseclaw/internal/version"
 )
 
 // Trusted connectors (issue #1392).
@@ -118,6 +119,9 @@ type trustedConnectorState struct {
 	byAccount  map[string]int
 	refreshed  time.Time
 	cfg        []config.TrustedConnectorConfig
+	// unresolved is set while an honoured entry's account never resolved:
+	// any acting_for is then refused, since the caller may be that account.
+	unresolved bool
 }
 
 var trustedConnectorsState atomic.Pointer[trustedConnectorState]
@@ -157,11 +161,22 @@ func trustedConnectorAccountListed(id string) bool {
 }
 
 // trustedConnectorActivation decides whether a managed gateway honours the
-// list: trust anchors are installed and the live configuration is the one a
-// signed bundle activated (its generation record names the bundle and binds
-// these bytes). The private activation gate tightens this to "the confirmed
-// signed bundle's content"; it replaces this function when it lands.
-var trustedConnectorActivation = func(cfg *config.Config) (bool, string) {
+// list: trust anchors are installed, the bundle store's current bundle
+// verifies against them (signature, files, version floor, product floor),
+// and config.yaml is exactly that bundle's config rendered against its
+// version directory. Generation records and bundle state are root-written
+// files: they only name the candidate; the signature and the re-render
+// decide. Anything else, a CONFIG= install included, is not honoured.
+var trustedConnectorActivation = signedBundleActivation
+
+// bundleStoreFor and anchorTrust are the bundle store and the anchor file
+// check signedBundleActivation uses; tests replace them.
+var (
+	bundleStoreFor = enterprisebundle.StoreFor
+	anchorTrust    enterprisebundle.TrustCheck
+)
+
+func signedBundleActivation(cfg *config.Config) (bool, string) {
 	if cfg == nil || !cfg.StandaloneEnterprise() {
 		return false, trustedConnectorsNotManaged
 	}
@@ -169,22 +184,40 @@ var trustedConnectorActivation = func(cfg *config.Config) (bool, string) {
 	if path == "" {
 		return false, trustedConnectorsActivationError
 	}
-	if _, err := os.Lstat(filepath.Join(filepath.Dir(path), "trust", enterprisebundle.AnchorsName)); err != nil {
-		if errors.Is(err, fs.ErrNotExist) {
+	anchors, err := enterprisebundle.LoadAnchors(filepath.Join(filepath.Dir(path), "trust", enterprisebundle.AnchorsName), anchorTrust)
+	if err != nil {
+		if enterprisebundle.CodeOf(err) == enterprisebundle.CodeAnchorMissing || errors.Is(err, fs.ErrNotExist) {
 			return false, trustedConnectorsNoAnchors
 		}
 		return false, trustedConnectorsActivationError
 	}
-	raw, err := os.ReadFile(path)
+	store, err := bundleStoreFor(runtime.GOOS)
 	if err != nil {
 		return false, trustedConnectorsActivationError
 	}
-	state, err := configwrite.ReadGenerationState(path)
+	state, err := store.LoadState()
+	if err != nil || state.Current == nil {
+		return false, trustedConnectorsNotSigned
+	}
+	bundle, err := store.ReadVersion(state.Current)
 	if err != nil {
 		return false, trustedConnectorsNotSigned
 	}
-	if strings.TrimSpace(state.BundleID) == "" ||
-		!strings.EqualFold(strings.TrimPrefix(state.ConfigSHA256, "sha256:"), configwrite.SHA256Hex(raw)) {
+	if _, err := enterprisebundle.Verify(context.Background(), enterprisebundle.VerifyInput{
+		Bundle: bundle, Anchors: anchors, Platform: runtime.GOOS, Now: time.Now(),
+		Confirmed: state.Confirmed(), ProductVersion: version.Current().BinaryVersion,
+	}); err != nil {
+		return false, trustedConnectorsNotSigned
+	}
+	rendered, err := enterprisebundle.RenderConfig(bundle, store.VersionDir(state.Current.Dir))
+	if err != nil {
+		return false, trustedConnectorsNotSigned
+	}
+	installed, err := os.ReadFile(path)
+	if err != nil {
+		return false, trustedConnectorsActivationError
+	}
+	if !bytes.Equal(installed, rendered) {
 		return false, trustedConnectorsNotSigned
 	}
 	return true, ""
@@ -233,6 +266,14 @@ func configureTrustedConnectors(cfg *config.Config) {
 }
 
 func buildTrustedConnectorState(cfg *config.Config) *trustedConnectorState {
+	return buildTrustedConnectorStateFrom(cfg, trustedConnectorsState.Load())
+}
+
+// buildTrustedConnectorStateFrom resolves cfg's entries. An entry whose
+// lookup fails keeps the account id the previous state resolved, disabled
+// (lookup_failed): its calls are refused rather than served under the
+// account's own profile.
+func buildTrustedConnectorStateFrom(cfg *config.Config, previous *trustedConnectorState) *trustedConnectorState {
 	state := &trustedConnectorState{byAccount: map[string]int{}, refreshed: time.Now().UTC()}
 	if cfg == nil || cfg.SecureClientIntegration() || len(cfg.Enterprise.Identity.TrustedConnectors) == 0 {
 		return state
@@ -250,6 +291,19 @@ func buildTrustedConnectorState(cfg *config.Config) *trustedConnectorState {
 	accounts := map[string]bool{}
 	for _, entry := range state.cfg {
 		resolved := resolveTrustedConnectorEntry(entry)
+		if resolved.AccountID == "" && previous != nil {
+			for _, old := range previous.entries {
+				if old.Name == resolved.Name && old.AccountSpec == resolved.AccountSpec && old.AccountID != "" {
+					resolved.AccountID, resolved.AccountName = old.AccountID, old.AccountName
+					if resolved.Disabled == "" {
+						resolved.Disabled = "lookup_failed"
+					}
+				}
+			}
+		}
+		if resolved.AccountID == "" {
+			state.unresolved = true
+		}
 		state.entries = append(state.entries, resolved)
 		if resolved.AccountID != "" {
 			if accounts[resolved.AccountID] {
@@ -300,38 +354,6 @@ func logTrustedConnectorState(state *trustedConnectorState) {
 			fmt.Fprintf(os.Stderr, "[identity] trusted connector %q: %s\n", entry.Name, warning)
 		}
 	}
-}
-
-// trustedConnectorStatus is the root-only status view of the list (no
-// person names; ids of the service accounts only).
-func trustedConnectorStatus() map[string]interface{} {
-	s := trustedConnectorStateNow()
-	if !s.configured {
-		return nil
-	}
-	out := map[string]interface{}{"honoured": s.honoured}
-	if s.reason != "" {
-		out["reason"] = s.reason
-	}
-	entries := make([]map[string]interface{}, 0, len(s.entries))
-	for _, entry := range s.entries {
-		row := map[string]interface{}{
-			"name": entry.Name, "account_id": entry.AccountID,
-			"users": len(entry.Users), "groups": len(entry.Groups),
-		}
-		if entry.Disabled != "" {
-			row["disabled"] = entry.Disabled
-		}
-		if len(entry.Warnings) > 0 {
-			row["warnings"] = len(entry.Warnings)
-		}
-		entries = append(entries, row)
-	}
-	out["entries"] = entries
-	if !s.refreshed.IsZero() {
-		out["refreshed_at"] = s.refreshed.Format(time.RFC3339)
-	}
-	return out
 }
 
 // actingFor is a request's honoured acting_for.
@@ -519,8 +541,48 @@ type actingForRefusal struct {
 
 func (r actingForRefusal) refused() bool { return r.Code != "" }
 
-// actingForDigest names an asserted user in logs without its spelling.
-func actingForDigest(value string) string {
-	sum := sha256.Sum256([]byte(value))
-	return hex.EncodeToString(sum[:6])
+// trustedConnectorAdminGroupNames are the bare group names that make an
+// account an administrator (compared without case, without a domain).
+var trustedConnectorAdminGroupNames = map[string]bool{
+	"root": true, "wheel": true, "sudo": true, "admin": true,
+	"administrators": true, "domain admins": true, "enterprise admins": true, "schema admins": true,
+}
+
+func trustedConnectorAdminGroup(name string) bool {
+	name = strings.TrimSpace(name)
+	if strings.EqualFold(name, "S-1-5-32-544") {
+		return true
+	}
+	bare, _ := useridentity.SplitQualifiedName(name)
+	return trustedConnectorAdminGroupNames[strings.ToLower(bare)]
+}
+
+// trustedConnectorCallerIsAdmin is the per-call check of the service
+// account itself, from the facts the hook socket verified: root's group or
+// an admin group refuses the call even between two refreshes.
+func trustedConnectorCallerIsAdmin(ctx context.Context, peer managedHookPeer) bool {
+	if peer.UID == 0 || peer.GID == 0 {
+		return true
+	}
+	subject, ok := verifiedSubjectFromContext(ctx)
+	if !ok {
+		return false
+	}
+	for _, group := range subject.Directory.Groups {
+		if trustedConnectorAdminGroup(group) {
+			return true
+		}
+	}
+	return false
+}
+
+// actingForSessionStateScope qualifies in-memory per-session state (the
+// tool judge's context, step indexes) with the connector account and the
+// person, so people behind one or two connectors never share it.
+func actingForSessionStateScope(ctx context.Context) string {
+	af, ok := actingForFromContext(ctx)
+	if !ok {
+		return ""
+	}
+	return "trusted\x00" + af.ConnectorAccountID + "\x00" + af.Person.UserID + "\x00"
 }

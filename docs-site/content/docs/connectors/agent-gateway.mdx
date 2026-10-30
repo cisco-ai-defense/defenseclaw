@@ -25,14 +25,14 @@ connectors:
 The setting takes effect at the next gateway restart.
 
 - **Per-user install.** The route is served on the gateway's TCP API and takes the gateway token, like every hook route. `acting_for` and `root_session_id` are ignored and recorded as `acting_for_ignored=untrusted_caller` and `root_session_ignored=untrusted_caller` in the local audit. They never change a verdict.
-- **Managed device.** Only the lifecycle or a signed bundle sets the key. The route is served only on the managed hook socket, where the kernel names the caller. The caller must be an enrolled user calling for themselves, or the service account of a [trusted connector](/docs/enterprise/trusted-connectors). Any other caller, root included, is refused with `enterprise_managed_connector_unknown`.
+- **Managed device.** Only the lifecycle or a signed bundle sets the key. The route is served only on the managed hook socket (`/run/defenseclaw-hook/hook.sock` on Linux), where the kernel names the caller. The caller must be an enrolled user calling for themselves, or the service account of a [trusted connector](/docs/enterprise/trusted-connectors). Any other caller, root included, is refused with `enterprise_managed_connector_unknown`.
 - **Windows managed devices** have no hook socket, so the route is not served there in 1.0.6.
 
 A signed bundle that sets `connectors.agent_gateway` must carry `min_product_version: 1.0.6` or later; `bundle sign` refuses it otherwise.
 
 ## Event contract
 
-`POST /api/v1/agent-gateway/hook` with a JSON body. The schema is [`schemas/connectors/agent-gateway-hook.json`](https://github.com/cisco-ai-defense/defenseclaw/blob/main/schemas/connectors/agent-gateway-hook.json). Unknown fields, duplicate keys and fields an event does not take are refused with HTTP 400 and a `code`.
+`POST /api/v1/agent-gateway/hook` with a JSON body, `Content-Type: application/json` and an `X-DefenseClaw-Client` header naming the caller (any value; the gateway refuses a POST without it). The schema is [`schemas/connectors/agent-gateway-hook.json`](https://github.com/cisco-ai-defense/defenseclaw/blob/main/schemas/connectors/agent-gateway-hook.json). Unknown fields, duplicate keys and fields an event does not take are refused with HTTP 400 and a `code`.
 
 | Field | Events | Notes |
 | --- | --- | --- |
@@ -47,7 +47,7 @@ A signed bundle that sets `connectors.agent_gateway` must carry `min_product_ver
 | `cwd` | any | absolute working directory of the call |
 | `traceparent` | any | W3C trace context |
 | `acting_for` | any | `{user}`; honoured only for a trusted connector |
-| `root_session_id` | any | honoured only for a trusted connector |
+| `root_session_id` | any | for a trusted connector: recorded in the local audit and kept with one person; chains are still evaluated per session |
 
 `tool.kind` picks the tool the rules already know: `shell` is judged by the shell rules (`input` is the command, or `{"command": ...}`), `file_read` and `file_write` by the path rules (`input` names `path`), `fetch` by the network rules (`input` is the URL, or `{"url": ...}`). `mcp` and `other` keep the tool name and get every content scan that applies to a tool DefenseClaw does not know. Path rules and `~` resolve against the account that runs the tools.
 

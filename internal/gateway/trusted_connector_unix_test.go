@@ -7,6 +7,8 @@ package gateway
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -202,10 +204,6 @@ func TestTrustedConnectorStateResolvesByID(t *testing.T) {
 	bad, ok := trustedConnectorForAccount("2009")
 	if !ok || bad.Disabled != "account_is_administrator" {
 		t.Fatalf("an admin service account is usable: %+v", bad)
-	}
-	status := trustedConnectorStatus()
-	if status["honoured"] != true || len(status["entries"].([]map[string]interface{})) != 3 {
-		t.Fatalf("status = %v", status)
 	}
 }
 
@@ -449,5 +447,144 @@ func TestManagedHookAuthorizerAgentGateway(t *testing.T) {
 		if decision.Allow != tc.allow || (!tc.allow && decision.Reason != managedHookReasonConnectorUnknown) {
 			t.Errorf("%s: decision = %+v", name, decision)
 		}
+	}
+}
+
+// Review F1: an entry whose lookup fails keeps the account id it had, so
+// the account is refused rather than served under its own profile; an
+// account that never resolved refuses every acting_for.
+func TestTrustedConnectorLookupFailureKeepsTheAccountListed(t *testing.T) {
+	f := useTrustedConnectorFixture(t)
+	f.resolver.slow.Store(true)
+	next := buildTrustedConnectorStateFrom(trustedConnectorTestConfig(), trustedConnectorStateNow())
+	trustedConnectorsState.Store(next)
+	entry, ok := trustedConnectorForAccount(strconv.Itoa(svcUID))
+	if !ok || entry.Disabled != "lookup_failed" {
+		t.Fatalf("entry after a failed refresh = %+v (listed %v)", entry, ok)
+	}
+	api := &APIServer{}
+	_, refusal, _ := api.agentGatewayIdentity(socketContext(svcUID, "svc-gas", "/var/lib/svc-gas"),
+		gatewayEvent(t, `{"event":"session_start","session_id":"lf","acting_for":{"user":"eng1"}}`), time.Now())
+	if refusal.Code != actingForRefusedConnectorDisabled {
+		t.Fatalf("refusal = %+v", refusal)
+	}
+	cold := buildTrustedConnectorStateFrom(trustedConnectorTestConfig(), nil)
+	trustedConnectorsState.Store(cold)
+	if !cold.unresolved {
+		t.Fatal("a never-resolved entry is not marked")
+	}
+	_, refusal, _ = api.agentGatewayIdentity(socketContext(svcUID, "svc-gas", "/var/lib/svc-gas"),
+		gatewayEvent(t, `{"event":"session_start","session_id":"lf2","acting_for":{"user":"eng1"}}`), time.Now())
+	if refusal.Code != actingForRefusedConnectorDisabled || refusal.Cause != "account_unresolved" {
+		t.Fatalf("cold refusal = %+v", refusal)
+	}
+}
+
+// Review F2: two connector accounts sending one session id for two people
+// never share in-memory session state.
+func TestActingForSessionStateIsPerConnectorAndPerson(t *testing.T) {
+	useTrustedConnectorFixture(t)
+	api := &APIServer{}
+	a, ra, _ := api.agentGatewayIdentity(socketContext(svcUID, "svc-gas", "/var/lib/svc-gas"),
+		gatewayEvent(t, `{"event":"session_start","session_id":"1","acting_for":{"user":"eng1"}}`), time.Now())
+	b, rb, _ := api.agentGatewayIdentity(socketContext(svc2UID, "svc-other", "/var/lib/svc-other"),
+		gatewayEvent(t, `{"event":"session_start","session_id":"1","acting_for":{"user":"eng1"}}`), time.Now())
+	if ra.refused() || rb.refused() {
+		t.Fatal(ra, rb)
+	}
+	if sandboxSessionStateKey(a, "1") == sandboxSessionStateKey(b, "1") || sandboxSessionStateKey(a, "1") == "1" {
+		t.Fatalf("keys %q %q", sandboxSessionStateKey(a, "1"), sandboxSessionStateKey(b, "1"))
+	}
+	if verifiedSessionCaller(a) == verifiedSessionCaller(b) {
+		t.Fatal("one session caller for two connectors")
+	}
+}
+
+// Review F5: the service account is checked on every call.
+func TestTrustedConnectorAdminCallerRefusedPerCall(t *testing.T) {
+	useTrustedConnectorFixture(t)
+	api := &APIServer{}
+	ctx := withManagedHookPeer(context.Background(), managedHookPeer{UID: svcUID, GID: 0, Name: "svc-gas", Home: "/var/lib/svc-gas"})
+	ctx = withVerifiedSubject(ctx, VerifiedSubject{UserID: strconv.Itoa(svcUID), Source: subjectSourcePeerCredentials})
+	_, refusal, _ := api.agentGatewayIdentity(ctx, gatewayEvent(t, `{"event":"session_start","session_id":"adm","acting_for":{"user":"eng1"}}`), time.Now())
+	if refusal.Code != actingForRefusedConnectorDisabled || refusal.Cause != "account_is_administrator" {
+		t.Fatalf("gid 0: %+v", refusal)
+	}
+	ctx = withManagedHookPeer(context.Background(), managedHookPeer{UID: svcUID, GID: svcUID, Name: "svc-gas"})
+	ctx = withVerifiedSubject(ctx, VerifiedSubject{UserID: strconv.Itoa(svcUID), Source: subjectSourcePeerCredentials,
+		Directory: useridentity.DirectoryFacts{Groups: []string{"svc-gas", "Domain Admins@dclab.test"}}})
+	_, refusal, _ = api.agentGatewayIdentity(ctx, gatewayEvent(t, `{"event":"session_start","session_id":"adm2","acting_for":{"user":"eng1"}}`), time.Now())
+	if refusal.Code != actingForRefusedConnectorDisabled {
+		t.Fatalf("admin group: %+v", refusal)
+	}
+}
+
+// Review F7: a trusted connector's account gets no other hook route.
+func TestTrustedConnectorAccountOnlyOnItsRoute(t *testing.T) {
+	useTrustedConnectorFixture(t)
+	uid := svcUID
+	ledger := managedHookLedger{Targets: []managedHookLedgerTarget{{User: "svc-gas", UID: &uid, Connector: "claudecode", OK: true}}}
+	z := newManagedHookAuthorizer(config.EnterpriseEnrollmentConfig{}, []string{"codex"}, func() (managedHookLedger, error) { return ledger, nil })
+	for _, name := range []string{"claudecode", "codex"} {
+		if d := z.decide(managedHookPeer{UID: svcUID, Name: "svc-gas"}, name, ""); d.Allow || d.Reason != managedHookReasonTrustedConnectorRoute {
+			t.Errorf("%s: %+v", name, d)
+		}
+	}
+	if d := z.decide(managedHookPeer{UID: svcUID, Name: "svc-gas"}, connector.AgentGatewayConnectorName, ""); !d.Allow {
+		t.Fatalf("agent-gateway: %+v", d)
+	}
+}
+
+// Review F8: a refused spelling is kept, and one account has a bounded
+// number of lookups in flight.
+func TestActingForRefusalsCachedAndLookupsBounded(t *testing.T) {
+	f := useTrustedConnectorFixture(t)
+	entry, _ := trustedConnectorForAccount(strconv.Itoa(svcUID))
+	if _, refusal := resolveActingFor(entry, "ghost", time.Now()); refusal.Cause != actingForCauseUnknownUser {
+		t.Fatal(refusal)
+	}
+	before := f.resolver.lookups.Load()
+	if _, refusal := resolveActingFor(entry, "ghost", time.Now()); refusal.Cause != actingForCauseUnknownUser {
+		t.Fatal(refusal)
+	}
+	if f.resolver.lookups.Load() != before {
+		t.Fatal("a refused spelling was looked up again")
+	}
+	for i := 0; i < actingForLookupsPerAccount; i++ {
+		if !beginActingForLookup(entry.AccountID) {
+			t.Fatalf("lookup %d refused", i)
+		}
+	}
+	if _, refusal := resolveActingFor(entry, "eng2", time.Now()); refusal.Code != actingForRefusedLookupUnavailable || refusal.Cause != "busy" {
+		t.Fatalf("over the bound: %+v", refusal)
+	}
+	for i := 0; i < actingForLookupsPerAccount; i++ {
+		endActingForLookup(entry.AccountID)
+	}
+}
+
+// Review F3: without anchors, or with a store that holds no verified
+// current bundle, the list is not honoured.
+func TestSignedBundleActivationFailsClosed(t *testing.T) {
+	dir := t.TempDir()
+	cfg := &config.Config{DeploymentMode: "managed_enterprise", ConfigFilePath: filepath.Join(dir, "config.yaml")}
+	cfg.Enterprise.Profile = "standalone"
+	if err := os.WriteFile(cfg.ConfigFilePath, []byte("config_version: 9\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if ok, reason := signedBundleActivation(cfg); ok || reason != trustedConnectorsNoAnchors {
+		t.Fatalf("no anchors: %v %s", ok, reason)
+	}
+	if err := os.MkdirAll(filepath.Join(dir, "trust"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "trust", "bundle-anchors.json"), []byte("{}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if ok, _ := signedBundleActivation(cfg); ok {
+		t.Fatal("invalid anchors honoured")
+	}
+	if ok, reason := signedBundleActivation(&config.Config{}); ok || reason != trustedConnectorsNotManaged {
+		t.Fatalf("per-user: %v %s", ok, reason)
 	}
 }

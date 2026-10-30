@@ -100,6 +100,11 @@ func agentGatewayAuditExtra(ctx context.Context) map[string]string {
 	if audit.rootSessionIgnored {
 		extra["root_session_ignored"] = agentGatewayIgnoredUntrusted
 	}
+	if audit.rootSessionHonoured != "" {
+		// Attribution only: chains are evaluated per session (root-scope
+		// chains, issue #1391, are not in this release).
+		extra["root_session_id"] = audit.rootSessionHonoured
+	}
 	return extra
 }
 
@@ -201,6 +206,11 @@ func (a *APIServer) agentGatewayIdentity(ctx context.Context, ev connector.Agent
 			if ev.ActingFor == nil {
 				return ctx, actingForRefusal{Code: actingForRefusedRequired, Cause: "absent"}, audit
 			}
+			if trustedConnectorCallerIsAdmin(ctx, peer) {
+				// Checked on every call, not only at the refresh.
+				return withActingForRefusalConnector(ctx, entry.Name, ev.ActingFor.User),
+					actingForRefusal{Code: actingForRefusedConnectorDisabled, Cause: "account_is_administrator"}, audit
+			}
 			af, refusal := resolveActingFor(entry, ev.ActingFor.User, now)
 			if refusal.refused() {
 				return withActingForRefusalConnector(ctx, entry.Name, ev.ActingFor.User), refusal, audit
@@ -217,6 +227,10 @@ func (a *APIServer) agentGatewayIdentity(ctx context.Context, ev connector.Agent
 				audit.rootSessionHonoured = ev.RootSessionID
 			}
 			return ctx, actingForRefusal{}, audit
+		}
+		if ev.ActingFor != nil && trustedConnectorStateNow().honoured && trustedConnectorStateNow().unresolved {
+			// An entry's account has not resolved yet; this caller may be it.
+			return ctx, actingForRefusal{Code: actingForRefusedConnectorDisabled, Cause: "account_unresolved"}, audit
 		}
 	}
 	audit.actingForIgnored = ev.ActingFor != nil

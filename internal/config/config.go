@@ -1910,9 +1910,6 @@ type GuardrailConfig struct {
 	ProfileAssignments []ProfileAssignment         `mapstructure:"profile_assignments" yaml:"profile_assignments,omitempty"`
 	DefaultProfile     string                      `mapstructure:"default_profile"     yaml:"default_profile,omitempty"`
 
-	// Chains tunes tool-call chain evaluation (trusted_connectors.go).
-	Chains GuardrailChainsConfig `mapstructure:"chains" yaml:"chains,omitempty"`
-
 	// profileConnectors is set only on a configuration DerivedForProfile
 	// returns: the profile's own connectors map, keyed by normalized
 	// connector name. policyOverride layers it over Connectors so a profile
