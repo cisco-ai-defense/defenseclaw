@@ -71,6 +71,7 @@ that rewrite these files during an agent session would be undone; leave
   the background after its tool call ended is reported as yours.
 - A symlink at a watched name is checked as a link (its target name), not the
   file it points to.
-- A rollback to 1.0.5 or older refuses a config that sets
-  `guardrail.protected_files`. Remove the block before you roll back. Unset,
-  nothing is written.
+- `defenseclaw rollback` to 1.0.5 or older puts back the config from before
+  the upgrade. A 1.0.5 or older release started on a config that sets
+  `guardrail.protected_files` refuses it, so remove the block first if you
+  move the config by hand. Unset, nothing is written.
