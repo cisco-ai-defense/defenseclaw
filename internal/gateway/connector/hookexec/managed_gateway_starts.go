@@ -88,7 +88,7 @@ func ManagedGatewayRestarting(err error) bool {
 // at once. The error left at the end is the caller's fail-closed result.
 func newManagedHookHTTPClient(ctx context.Context, opts Options, timeout time.Duration, restartDeadline time.Time) (*http.Client, error) {
 	if !opts.ManagedStandalone {
-		return managedEnterpriseHTTPClient(timeout, opts.APIAddr, opts.ManagedGatewayServiceName)
+		return managedEnterpriseHTTPClientFor(timeout, opts.APIAddr, opts.ManagedGatewayServiceName, opts.SecureClient)
 	}
 	client, err := managedStandaloneHTTPClient(timeout, opts.ManagedUnixSocket, opts.ManagedServiceUID)
 	for err != nil && awaitGatewayRestart(ctx, restartDeadline, err) {

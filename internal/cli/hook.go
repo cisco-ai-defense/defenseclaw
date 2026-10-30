@@ -525,6 +525,9 @@ func buildHookOptionsForRuntime(connector, event, apiAddr, _ string, enterpriseM
 			SecureClient:          secureClientHost(),
 			ManagedRuntimeFailure: enterpriseManagedHookRuntimeFailureReason(),
 		}
+		if failMode, strict, ok := secureClientEnrollmentGapDelivery(opts.SecureClient, opts.ManagedRuntimeFailure); ok {
+			opts.FailMode, opts.StrictAvailability = failMode, strict
+		}
 		opts.FailureLogHome = managedHookFailureLogHome
 		// Marks a failed Unix standalone runtime as the standalone profile's
 		// (no transport is selected); a no-op elsewhere.
@@ -669,9 +672,13 @@ func buildHookOptionsForRuntime(connector, event, apiAddr, _ string, enterpriseM
 		// decision 2026-10-20: explicit open or closed wins, unset is closed,
 		// and open under Secure Client, #1163). A runtime failure, and
 		// anything but open, keeps the fail-closed, strict-availability
-		// contract. The agent's environment never changes it.
+		// contract, except a Secure Client account that is not enrolled yet
+		// (secureClientEnrollmentGapDelivery). The agent's environment never
+		// opens it.
 		opts.FailMode = enterpriseManagedHookRuntimeFailMode()
-		if managedRuntimeFailure != "" || opts.FailMode != "open" {
+		if failMode, strict, ok := secureClientEnrollmentGapDelivery(opts.SecureClient, managedRuntimeFailure); ok {
+			opts.FailMode, opts.StrictAvailability = failMode, strict
+		} else if managedRuntimeFailure != "" || opts.FailMode != "open" {
 			opts.FailMode = "closed"
 			opts.StrictAvailability = true
 		}
@@ -825,6 +832,21 @@ func hookIsLoopbackAddr(addr string) bool {
 
 // hookEnvTrue mirrors defenseclaw_should_fail_closed_on_unreachable's truthy
 // set: 1, true, yes (case-insensitive).
+// secureClientEnrollmentGapDelivery is the delivery of a Secure Client hook
+// whose account is not enrolled yet (hookexec.ManagedEnrollmentGap): absent
+// from the protected target set, or registered with no published runtime.
+// No authenticated generation names a mode for it, so it takes the profile's
+// open default (#1163), and DEFENSECLAW_STRICT_AVAILABILITY can only close
+// it. ok is false for the standalone hook, for every other runtime failure
+// and off a Secure Client host: they keep the fail-closed,
+// strict-availability contract.
+func secureClientEnrollmentGapDelivery(secureClient bool, reason string) (failMode string, strict, ok bool) {
+	if !secureClient || !hookexec.ManagedEnrollmentGap(reason) || implicitEnterpriseManagedHook() {
+		return "", false, false
+	}
+	return "open", hookEnvTrue(os.Getenv("DEFENSECLAW_STRICT_AVAILABILITY")), true
+}
+
 func hookEnvTrue(v string) bool {
 	switch strings.ToLower(strings.TrimSpace(v)) {
 	case "1", "true", "yes":

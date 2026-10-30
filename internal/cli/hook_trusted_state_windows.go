@@ -368,8 +368,8 @@ func enterpriseManagedRuntimeAbsenceNoop(
 		nativeEnterpriseHookRuntimeSnapshot.connector == connectorName &&
 		nativeEnterpriseHookRuntimeSnapshot.err == nil {
 		nativeEnterpriseHookRuntimeSnapshot.err = fmt.Errorf(
-			"%s: connector %s is absent from the protected target set",
-			enterprisehooks.WindowsManagedSIDUnregisteredReason,
+			"%w: connector %s is absent from the protected target set",
+			enterprisehooks.ErrWindowsManagedSIDUnregistered,
 			connectorName,
 		)
 	}
@@ -409,17 +409,16 @@ func enterpriseManagedHookRuntimeFailureReason() string {
 	if !prepared || err == nil {
 		return ""
 	}
-	if strings.Contains(err.Error(), enterprisehooks.WindowsManagedSIDUnregisteredReason) {
+	if errors.Is(err, enterprisehooks.ErrWindowsManagedSIDUnregistered) {
 		return enterprisehooks.WindowsManagedSIDUnregisteredReason
 	}
 	if errors.Is(err, enterprisehooks.ErrWindowsStandaloneHooksClosed) {
 		return enterprisehooks.ErrWindowsStandaloneHooksClosed.Error()
 	}
 	// A registered account with no runtime has not signed in since it was
-	// enrolled. Only the standalone hook says so; Secure Client keeps its
-	// reason.
-	if errors.Is(err, enterprisehooks.ErrWindowsManagedRuntimeGenerationPending) &&
-		standaloneEnterpriseHookCheck(nativeHookExecutable()) {
+	// enrolled. The machine-side runtime selector says so, not the
+	// account's own files, so every managed profile reports it.
+	if errors.Is(err, enterprisehooks.ErrWindowsManagedRuntimeGenerationPending) {
 		return enterprisehooks.WindowsManagedEnrollmentPendingReason
 	}
 	// The account's DefenseClaw folder (renamed, moved or deleted) is gone:

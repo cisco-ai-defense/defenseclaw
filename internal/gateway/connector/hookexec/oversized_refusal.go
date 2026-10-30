@@ -139,7 +139,7 @@ func refusalReportTransport(opts Options) (*http.Client, string, bool) {
 	case opts.ExplainUnenrolledAccount && opts.AuthenticatedManagedToken != nil &&
 		strings.TrimSpace(*opts.AuthenticatedManagedToken) != "":
 		if client == nil {
-			client, err = managedEnterpriseHTTPClient(oversizedRefusalReportTimeout, opts.APIAddr, opts.ManagedGatewayServiceName)
+			client, err = managedEnterpriseHTTPClientFor(oversizedRefusalReportTimeout, opts.APIAddr, opts.ManagedGatewayServiceName, opts.SecureClient)
 		}
 		return client, strings.TrimSpace(*opts.AuthenticatedManagedToken), err == nil
 	}
