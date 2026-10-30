@@ -217,6 +217,25 @@ var peerRootProofRecorded = func(key string) bool {
 	return err == nil && recorded
 }
 
+// peerRootProofAccountGone reports whether the account database answers
+// that no account holds the uid key (unixidentity.ErrNotFound): the local
+// account whose lookup waited for the guardian's proof was deleted
+// (GAP-2595). A lookup error is not an absence. Tests replace it.
+var peerRootProofAccountGone = func(key string) bool {
+	uid, err := strconv.Atoi(key)
+	if err != nil {
+		return false
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), peerDirectoryLookupTimeout)
+	defer cancel()
+	resolver, err := newPeerNSSResolver(ctx)
+	if err != nil {
+		return false
+	}
+	_, err = resolver.LookupUID(uid)
+	return unixidentity.IsNotFound(err)
+}
+
 // resolvePeerDirectoryFacts is the peer directory cache's lookup
 // (peerNSSFacts). A lookup that fails leaves the account and its groups
 // unproven, and the profile matcher selects the strictest profile that

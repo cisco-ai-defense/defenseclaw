@@ -1591,7 +1591,37 @@ func groupFilterAllows(resolver unixidentity.Resolver, account unixidentity.Acco
 			return true, false, false, ""
 		}
 	}
+	// An include_groups name that does not resolve to a group here (a
+	// short AD name on an SSSD host that wants the qualified one, a typo,
+	// a directory that cannot answer) says nothing about membership: the
+	// account stays pending, as on Windows, so existing rows and hooks are
+	// kept and no new row is added until it resolves (GAP-2619).
+	if unresolved := unresolvedIncludeGroups(resolver, enrollment.IncludeGroups); len(unresolved) > 0 {
+		return false, true, false, fmt.Sprintf("enterprise.enrollment.include_groups %s does not resolve to a group on this host, so membership of it is unknown; pending until it resolves: existing rows kept, no new rows (name the group as getent group prints it)", strings.Join(unresolved, ", "))
+	}
 	return false, false, true, "not a member of any enterprise.enrollment.include_groups group"
+}
+
+// unresolvedIncludeGroups lists, quoted, the include_groups entries the
+// resolver cannot find by name or, for a numeric entry, by gid.
+func unresolvedIncludeGroups(resolver unixidentity.Resolver, include []string) []string {
+	var out []string
+	for _, raw := range include {
+		name := strings.TrimSpace(raw)
+		if name == "" {
+			continue
+		}
+		var err error
+		if gid, convErr := strconv.Atoi(name); convErr == nil {
+			_, err = resolver.LookupGroupID(gid)
+		} else {
+			_, err = resolver.LookupGroup(name)
+		}
+		if err != nil {
+			out = append(out, strconv.Quote(name))
+		}
+	}
+	return out
 }
 
 // unixReservedUID explains why uid can never be an interactive user:

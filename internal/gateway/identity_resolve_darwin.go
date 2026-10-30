@@ -28,6 +28,7 @@ var managedHookPeerAccountIncarnation = func(unixidentity.Account) (string, bool
 var (
 	peerUnsharedUIDNeedsRoot = func(error) bool { return false }
 	peerRootProofRecorded    = func(string) bool { return false }
+	peerRootProofAccountGone = func(string) bool { return false }
 )
 
 // managedHookPeerGuardianIncarnation names nothing on macOS either

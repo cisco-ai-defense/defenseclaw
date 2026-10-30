@@ -101,6 +101,46 @@ func TestChangeKeepsTheTargetsVerifyAcceptsAsWarnings(t *testing.T) {
 	}
 }
 
+// GAP-2593: with a shared Hermes install (enrollment.agent_prefixes) every
+// enrolled account is a Hermes target, and the guardian cannot add hooks for
+// an account that has not set Hermes up (no ~/.hermes). A managed ensure
+// failed with guardian_target_failed for each such account although the
+// change was applied. That folder is the account's own, as for the other
+// user-path refusals: a warning, with security_complete false. A missing
+// folder outside the account's home still fails the change.
+func TestChangeWarnsForAnAccountThatHasNotCreatedItsAgentConfigFolder(t *testing.T) {
+	h := newTestHost(t, "linux")
+	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
+	writeGuardianResults(t, h,
+		map[string]any{"user": "bob", "user_home": "/home/bob", "connector": "hermes", "ok": false,
+			"error": "enterprise hooks: hook config file missing: /home/bob/.hermes/config.yaml"},
+		map[string]any{"user": "alice", "user_home": "/home/alice", "connector": "hermes", "ok": false,
+			"error": "enterprise hooks: hook config parent missing: /home/alice/.hermes"})
+	r := h.run(Options{Action: ActionEnsure})
+	requireOK(t, r)
+	if r.SecurityComplete {
+		t.Fatal("ensure reports security_complete while alice's Hermes has no hooks")
+	}
+	if msg := messagesOf(r.Warnings, codeGuardianTargetUserPath); !strings.Contains(msg, "hermes for user alice is not protected: hook config parent missing: /home/alice/.hermes") {
+		t.Fatalf("ensure warnings = %+v, want alice's target as a user-path warning", r.Warnings)
+	}
+	if msg := messagesOf(r.Warnings, codeGuardianTargetUserPath); !strings.Contains(msg, "hermes for user bob is not protected: hook config file missing: /home/bob/.hermes/config.yaml") {
+		t.Fatalf("ensure warnings = %+v, want bob's target (a ~/.hermes with no config yet) as a user-path warning", r.Warnings)
+	}
+	if msg := messagesOf(r.Warnings, codeGuardianTargetFailed); msg != "" {
+		t.Fatalf("ensure still reports guardian_target_failed: %q", msg)
+	}
+
+	writeGuardianResults(t, h,
+		map[string]any{"user": "alice", "user_home": "/home/alice", "connector": "hermes", "ok": false,
+			"error": "enterprise hooks: hook config parent missing: /srv/shared/.hermes"})
+	requireError(t, h.run(Options{Action: ActionEnsure}), codeGuardianTargetFailed)
+	writeGuardianResults(t, h,
+		map[string]any{"user": "alice", "user_home": "/home/alice", "connector": "hermes", "ok": false,
+			"error": "enterprise hooks: hook config parent missing: /home/alice"})
+	requireError(t, h.run(Options{Action: ActionEnsure}), codeGuardianTargetFailed)
+}
+
 // GAP-0985: a run that ends before its action does anything (an empty
 // bundle inbox, a queued apply run that stands down) exited 0 next to
 // security_complete false while the guardian reported an enrolled target it

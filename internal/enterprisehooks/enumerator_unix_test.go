@@ -1684,3 +1684,59 @@ func TestEnumerateUnixKiroIDEDoesNotHideAnUnversionedCLI(t *testing.T) {
 		})
 	}
 }
+
+// An include_groups name that does not resolve (a short AD name on an SSSD
+// host that wants the qualified one) leaves membership unknown: enrolled
+// rows are kept and no account gets a new row, as on Windows (GAP-2619).
+func TestEnumerateUnixUnresolvedIncludeGroupKeepsRowsAndAddsNone(t *testing.T) {
+	root := trustedTestDir(t)
+	homes := filepath.Join(root, "home")
+	manifestPath := filepath.Join(root, "manifest.json")
+	for _, name := range []string{"dev", "newdev", "other"} {
+		makeHome(t, homes, name)
+	}
+	resolver := &fakeResolver{
+		accounts: map[string]unixidentity.Account{
+			"dev":    {Name: "dev", UID: 2001, GID: 2001, Home: filepath.Join(homes, "dev"), Shell: "/bin/bash"},
+			"newdev": {Name: "newdev", UID: 2002, GID: 2002, Home: filepath.Join(homes, "newdev"), Shell: "/bin/bash"},
+			"other":  {Name: "other", UID: 2003, GID: 2003, Home: filepath.Join(homes, "other"), Shell: "/bin/bash"},
+		},
+		listed:     []string{"dev", "newdev", "other"},
+		groups:     map[string][]int{"dev": {5001}, "newdev": {5001}, "other": {}},
+		groupNames: map[int]string{5001: "ai-devs@corp.example"},
+	}
+	writeTestManifest(t, manifestPath,
+		ManifestTarget{User: "dev", UserHome: filepath.Join(homes, "dev"), UID: intPointer(2001), GID: intPointer(2001), Connector: "opencode", AgentVersion: "1.18.33", HomeInode: 42},
+	)
+	discover := func(context.Context, unixidentity.Account, []string) (map[string]string, map[string]string, error) {
+		return map[string]string{"opencode": "1.18.33"}, nil, nil
+	}
+	cfg := enumeratorConfig("opencode")
+	cfg.Enterprise.Enrollment.IncludeGroups = []string{"ai-devs"}
+	state := &UnixEnumeratorState{Version: 1, Misses: map[string]int{}}
+	opts := UnixEnumerateOptions{ExistingManifestPath: manifestPath, Resolver: resolver, HomeRoots: []string{homes}, UIDMin: 1000, UIDMax: 60000, CheckHome: availableHome, State: state, Discover: discover}
+	for cycle := 1; cycle <= UnixRevokeAfterMisses+1; cycle++ {
+		manifest, report, err := EnumerateUnix(context.Background(), cfg, connector.NewDefaultRegistry(), opts)
+		if err != nil {
+			t.Fatal(err)
+		}
+		users := manifestUsers(manifest)
+		if !users["dev"] || users["newdev"] || users["other"] {
+			t.Fatalf("cycle %d: an unresolved include group must keep enrolled rows and add none: users=%v misses=%v", cycle, users, state.Misses)
+		}
+		if !strings.Contains(strings.Join(report.Skipped, "\n"), `include_groups "ai-devs" does not resolve`) {
+			t.Fatalf("cycle %d: the unresolved name must be reported: %v", cycle, report.Skipped)
+		}
+		writeTestManifest(t, manifestPath, manifest.Targets...)
+	}
+	// The qualified name resolves: members enroll, a non-member is revoked
+	// by the usual counted path (never enrolled here, so simply absent).
+	cfg.Enterprise.Enrollment.IncludeGroups = []string{"ai-devs@corp.example"}
+	manifest, _, err := EnumerateUnix(context.Background(), cfg, connector.NewDefaultRegistry(), opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if users := manifestUsers(manifest); !users["dev"] || !users["newdev"] || users["other"] {
+		t.Fatalf("resolved include group: users=%v", users)
+	}
+}

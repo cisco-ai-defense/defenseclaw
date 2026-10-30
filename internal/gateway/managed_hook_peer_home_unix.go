@@ -952,6 +952,7 @@ func (c *managedHookPeerHomeCache) directoryCache() *identityDirectoryCache {
 		c.directories.settling = openDirectorySettling
 		c.directories.awaitsRootProof = peerUnsharedUIDNeedsRoot
 		c.directories.rootProofRecorded = peerRootProofRecorded
+		c.directories.rootProofAccountGone = peerRootProofAccountGone
 	})
 	return c.directories
 }
