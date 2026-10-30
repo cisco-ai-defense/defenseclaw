@@ -31,11 +31,14 @@ func validControls(t *testing.T) (tracingPolicy, LintOptions, *world) {
 	// compiler keeps them separate in monitor mode to avoid duplicate hits.
 	// Each compiled policy is one file_open hook: [NoPost, ssh, profile
 	// files, autostart dirs].
+	// The path_link and path_rename entries after it are linted on their
+	// own (TestLintNameChangeHooks).
 	tp := cloneTP(t, p.tp)
 	binTP := cloneTP(t, bin.tp)
-	if len(tp.Spec.LsmHooks) != 1 || len(binTP.Spec.LsmHooks) != 1 {
-		t.Fatalf("hooks = %d and %d, want one file_open entry each", len(tp.Spec.LsmHooks), len(binTP.Spec.LsmHooks))
+	if hookNames(tp) != "file_open,path_link,path_rename" || hookNames(binTP) != "file_open,path_link,path_rename" {
+		t.Fatalf("hooks = %s and %s, want file_open, path_link, path_rename", hookNames(tp), hookNames(binTP))
 	}
+	tp.Spec.LsmHooks, binTP.Spec.LsmHooks = tp.Spec.LsmHooks[:1], binTP.Spec.LsmHooks[:1]
 	tp.Spec.LsmHooks[0].Selectors = []tpSelector{
 		tp.Spec.LsmHooks[0].Selectors[0],
 		binTP.Spec.LsmHooks[0].Selectors[1],
@@ -48,6 +51,52 @@ func validControls(t *testing.T) (tracingPolicy, LintOptions, *world) {
 		t.Fatalf("the compiler's own output fails lint: %v", v)
 	}
 	return tp, opts, w
+}
+
+func hookNames(tp tracingPolicy) string {
+	var names []string
+	for _, hook := range tp.Spec.LsmHooks {
+		names = append(names, hook.Hook)
+	}
+	return strings.Join(names, ",")
+}
+
+// TestLintNameChangeHooks: the compiled path_link and path_rename entries
+// pass lint, and each loses that when it breaks a rule an Override needs.
+func TestLintNameChangeHooks(t *testing.T) {
+	w := newWorld(t, baseTargets)
+	c := w.compile(Input{Controls: &Scope{Mode: PolicyEnforce, UIDs: []int{1001}}})
+	p := policyOf(t, c, FamilyControls)
+	opts := LintOptions{Homes: []string{"/home/alice", "/home/bob"}, FS: w.fs}
+	if v := lintTP(t, cloneTP(t, p.tp), opts); len(v) != 0 {
+		t.Fatalf("compiled policy fails lint: %v", v)
+	}
+	cases := []struct {
+		name   string
+		rule   int
+		mutate func(*tracingPolicy)
+	}{
+		{"another hook", 5, func(tp *tracingPolicy) { tp.Spec.LsmHooks[1].Hook = "path_unlink" }},
+		{"no uid condition", 2, func(tp *tracingPolicy) {
+			sel := &tp.Spec.LsmHooks[2].Selectors[0]
+			sel.MatchArgs = sel.MatchArgs[:1]
+		}},
+		{"a path outside the homes", 6, func(tp *tracingPolicy) {
+			tp.Spec.LsmHooks[1].Selectors[1].MatchArgs[0].Values = []string{"/etc/passwd"}
+		}},
+		{"no lineage anchor", 2, func(tp *tracingPolicy) {
+			tp.Spec.LsmHooks[2].Selectors[1].MatchBinaries[0].FollowChildren = false
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			tp := cloneTP(t, p.tp)
+			tc.mutate(&tp)
+			if v := lintTP(t, tp, opts); !hasRule(v, tc.rule) {
+				t.Fatalf("violations = %v, want rule %d", v, tc.rule)
+			}
+		})
+	}
 }
 
 func cloneTP(t *testing.T, tp tracingPolicy) tracingPolicy {

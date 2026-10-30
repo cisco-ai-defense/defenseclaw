@@ -41,3 +41,19 @@ controls:
     dirs:
       - .config/systemd/user/
       - .config/autostart/
+  # Agent descendants may not open the user's SSH authorized keys files for
+  # writing, and may not change them by another name: no new hard link to
+  # them or at their names (path_link), no rename onto or away from them and
+  # no rename of the .ssh directory itself (path_rename). A hard link made
+  # before the policy loaded cannot be matched by name; the sensor helper
+  # reports it as protected_file_extra_links. Unlinking and symlink creation
+  # are not covered here; the gateway's protected-file watch alerts on them.
+  - id: kernel.ssh_authorized_keys_write
+    rule_id: persistence.ssh_authorized_keys_write
+    access: write
+    files:
+      - .ssh/authorized_keys
+      - .ssh/authorized_keys2
+    links: true
+    rename_dirs:
+      - .ssh/

@@ -583,16 +583,26 @@ func compileControls(fsys FS, set kernel.Set, in Input, scope Scope, homes map[i
 
 	ssh, _ := set.Control(kernel.ControlSSHPrivateKeyRead)
 	persist, _ := set.Control(kernel.ControlPersistenceWrite)
+	keys, _ := set.Control(kernel.ControlSSHAuthorizedKeysWrite)
 	sshFiles, _, n1 := pathsFor(fsys, homeDirs, ssh.Files, nil, true)
 	persistFiles, persistDirs, n2 := pathsFor(fsys, homeDirs, persist.Files, persist.Dirs, true)
+	keyFiles, _, n3 := pathsFor(fsys, homeDirs, keys.Files, nil, true)
+	keyDirs, _, n4 := pathsFor(fsys, homeDirs, trimSlashes(keys.RenameDirs), nil, true)
 	notes = append(notes, n1...)
 	notes = append(notes, n2...)
+	notes = append(notes, n3...)
+	notes = append(notes, n4...)
+	notes = append(notes, extraLinkNotes(fsys, append(append([]string(nil), keyFiles...), persistFiles...))...)
+	// The persistence and authorized keys files share one write selector:
+	// both are exact names opened for writing, and the path index below
+	// names the control of each path.
+	writeFiles := dedupe(append(append([]string(nil), persistFiles...), keyFiles...))
 
 	uidValues := make([]string, len(uids))
 	for i, uid := range uids {
 		uidValues[i] = strconv.Itoa(uid)
 	}
-	override := func(anchor string, pidValues []int, operator string, paths []string, write bool) tpSelector {
+	override := func(anchor string, pidValues []int, pathAt int, operator string, paths []string, write bool) tpSelector {
 		sel := tpSelector{MatchNamespaces: hostNS()}
 		switch anchor {
 		case "binaries":
@@ -600,7 +610,7 @@ func compileControls(fsys FS, set kernel.Set, in Input, scope Scope, homes map[i
 		default:
 			sel.MatchPIDs = []tpPIDs{{Operator: "In", FollowForks: true, Values: pidValues}}
 		}
-		sel.MatchArgs = []tpMatchArg{{Args: []int{0}, Operator: operator, Values: paths}}
+		sel.MatchArgs = []tpMatchArg{{Args: []int{pathAt}, Operator: operator, Values: paths}}
 		if write {
 			sel.MatchArgs = append(sel.MatchArgs, tpMatchArg{Args: []int{1}, Operator: "Mask", Values: []string{writeMask}})
 		}
@@ -618,18 +628,21 @@ func compileControls(fsys FS, set kernel.Set, in Input, scope Scope, homes map[i
 		sel.MatchActions = []tpAction{{Action: "Override", ArgError: &eperm}, {Action: "Post"}}
 		return sel
 	}
-	anchored := func(operator string, paths []string, write bool) []tpSelector {
+	anchoredAt := func(pathAt int, operator string, paths []string, write bool) []tpSelector {
 		if len(paths) == 0 {
 			return nil
 		}
 		var out []tpSelector
 		if len(binList) > 0 {
-			out = append(out, override("binaries", nil, operator, paths, write))
+			out = append(out, override("binaries", nil, pathAt, operator, paths, write))
 		}
 		if len(pids) > 0 {
-			out = append(out, override("pids", pids, operator, paths, write))
+			out = append(out, override("pids", pids, pathAt, operator, paths, write))
 		}
 		return out
+	}
+	anchored := func(operator string, paths []string, write bool) []tpSelector {
+		return anchoredAt(0, operator, paths, write)
 	}
 
 	hook := tpLsm{Hook: "file_open", Args: fileArgs(true)}
@@ -645,10 +658,37 @@ func compileControls(fsys FS, set kernel.Set, in Input, scope Scope, homes map[i
 		})
 	}
 	hook.Selectors = append(hook.Selectors, sshSelectors...)
-	hook.Selectors = append(hook.Selectors, anchored("Equal", persistFiles, true)...)
+	hook.Selectors = append(hook.Selectors, anchored("Equal", writeFiles, true)...)
 	hook.Selectors = append(hook.Selectors, anchored("Prefix", persistDirs, true)...)
 	if len(hook.Selectors) > 0 {
 		tp.Spec.LsmHooks = []tpLsm{hook}
+	}
+	// A write through another name of an authorized keys file is not an
+	// open of that name. path_link refuses a new hard link to the files or
+	// at their names; path_rename refuses a rename onto or away from them
+	// and of the .ssh directory. Both read dentries, which Tetragon names
+	// within their own mount only, so a path on a home that is not on the
+	// root mount is left out and said so (the gateway's watch still alerts).
+	if keys.Links {
+		linkFiles, n5 := dentryPaths(fsys, keyFiles)
+		renamePaths, n6 := dentryPaths(fsys, dedupe(append(append([]string(nil), keyFiles...), keyDirs...)))
+		notes = append(notes, n5...)
+		notes = append(notes, n6...)
+		for _, h := range []struct {
+			name  string
+			paths []string
+			args  []tpArg
+		}{
+			{"path_link", linkFiles, dentryArgs(0, 2)},
+			{"path_rename", renamePaths, dentryArgs(1, 3)},
+		} {
+			lsm := tpLsm{Hook: h.name, Args: h.args}
+			lsm.Selectors = append(lsm.Selectors, anchoredAt(0, "Equal", h.paths, false)...)
+			lsm.Selectors = append(lsm.Selectors, anchoredAt(1, "Equal", h.paths, false)...)
+			if len(lsm.Selectors) > 0 {
+				tp.Spec.LsmHooks = append(tp.Spec.LsmHooks, lsm)
+			}
+		}
 	}
 	if len(tp.Spec.LsmHooks) == 0 {
 		return tp, Policy{}, append(notes, ReasonNoAnchors), over
@@ -667,7 +707,81 @@ func compileControls(fsys FS, set kernel.Set, in Input, scope Scope, homes map[i
 	for _, p := range persistDirs {
 		meta.Paths.Prefixes[p] = kernel.ControlPersistenceWrite
 	}
+	for _, p := range append(append([]string(nil), keyFiles...), keyDirs...) {
+		meta.Paths.Exact[p] = kernel.ControlSSHAuthorizedKeysWrite
+	}
 	return tp, meta, notes, over
+}
+
+// dentryArgs are the arguments of a path_link or path_rename hook: the
+// source dentry, the target dentry and the source inode's owner. The hooks
+// carry no credentials; the owner of the existing source is the user whose
+// file is linked or renamed (a new name at a protected path is still the
+// user's own file when an agent of that user made it).
+func dentryArgs(source, target int) []tpArg {
+	return []tpArg{
+		{Index: source, Type: "dentry"},
+		{Index: target, Type: "dentry"},
+		{Index: source, Type: "uint32", Resolve: "d_inode.i_uid.val", Label: "owner_uid"},
+	}
+}
+
+func trimSlashes(dirs []string) []string {
+	out := make([]string, 0, len(dirs))
+	for _, dir := range dirs {
+		out = append(out, strings.TrimSuffix(dir, "/"))
+	}
+	return out
+}
+
+// mountFS is an FS that knows where its mounts are. Tetragon names a dentry
+// by walking to the root of the file system it is on, so the name it
+// matches equals the full path only on a file system mounted at "/" from
+// its own root.
+type mountFS interface {
+	DentryPath(path string) (string, bool)
+}
+
+// dentryPaths keeps the paths a dentry selector can match by their full
+// name. Each path that would be named otherwise is left out with a note,
+// never rewritten: a rewritten name would leave the lint's home rule.
+func dentryPaths(fsys FS, paths []string) ([]string, []string) {
+	mounts, ok := fsys.(mountFS)
+	if !ok {
+		return paths, nil
+	}
+	var kept, notes []string
+	for _, p := range paths {
+		if named, ok := mounts.DentryPath(p); ok && named == p {
+			kept = append(kept, p)
+			continue
+		}
+		notes = append(notes, NoteDentryMount+":"+p)
+	}
+	return kept, notes
+}
+
+// linkCounter is an FS that reports a file's hard link count.
+type linkCounter interface {
+	Links(path string) (uint64, bool)
+}
+
+// extraLinkNotes names each protected file that has more than one hard
+// link. A link made before the policy loaded is another name of the same
+// file that no path selector can match; the administrator removes it.
+// Only the protected path is named, never the other name or the contents.
+func extraLinkNotes(fsys FS, paths []string) []string {
+	counter, ok := fsys.(linkCounter)
+	if !ok {
+		return nil
+	}
+	var notes []string
+	for _, p := range dedupe(paths) {
+		if n, ok := counter.Links(p); ok && n > 1 {
+			notes = append(notes, NoteExtraLinks+":"+p)
+		}
+	}
+	return notes
 }
 
 // resolveExempt resolves the ssh programs that exist on this host. A program

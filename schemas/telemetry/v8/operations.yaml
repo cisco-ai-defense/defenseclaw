@@ -1343,8 +1343,8 @@ attributes:
   normalization:
     id: enum-v1
     overrides:
-      enum: [kernel.ssh_private_key_read, kernel.persistence_write]
-    notes: The two built-in controls. kernel.ssh_private_key_read maps to the guardrail rule PATH-SSH-KEY and kernel.persistence_write to persistence.shell_profile_write
+      enum: [kernel.ssh_private_key_read, kernel.persistence_write, kernel.ssh_authorized_keys_write]
+    notes: The three built-in controls. kernel.ssh_private_key_read maps to the guardrail rule PATH-SSH-KEY, kernel.persistence_write to persistence.shell_profile_write and kernel.ssh_authorized_keys_write to persistence.ssh_authorized_keys_write
   introduced_in: telemetry-registry-v2
 - id: defenseclaw.ai.runtime.kernel.event
   type: string
@@ -1791,7 +1791,7 @@ attributes:
   normalization:
     id: enum-v1
     overrides:
-      enum: [kernel.ssh_private_key_read, kernel.persistence_write, customer]
+      enum: [kernel.ssh_private_key_read, kernel.persistence_write, kernel.ssh_authorized_keys_write, customer]
     notes: The DefenseClaw control of a denial or would-block, or customer for an event of the host's own Tetragon policy
   introduced_in: telemetry-registry-v2
 - id: defenseclaw.ai.model.provenance.quantized

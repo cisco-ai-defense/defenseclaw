@@ -230,13 +230,20 @@ const (
 	WarnLSMUnavailable       = "kernel_lsm_unavailable"
 	WarnPauseInvalid         = "kernel_pause_file_invalid"
 	WarnConfigInvalid        = "tetragon_config_invalid"
-	ReasonNoAnchors          = "kernel_enforce_inactive: no anchors"
-	ReasonNoReadyUsers       = "kernel_enforce_inactive: no user finished burn-in"
-	ReasonIdentityUnknown    = "tetragon_identity_unknown"
-	ReasonHeuristicRoot      = "heuristic_root"
-	ReasonIDEHosted          = "ide_hosted"
-	ReasonNotEnrolled        = "not_enrolled"
-	ReasonGuardrailObserve   = "guardrail_observe"
+	// NoteExtraLinks:<path> is a protected file with more than one hard
+	// link: the other name is not matched by any path selector, so the
+	// administrator removes it.
+	NoteExtraLinks = "protected_file_extra_links"
+	// NoteDentryMount:<path> is a protected path whose link and rename
+	// selectors were left out because its home is not on the root mount.
+	NoteDentryMount        = "kernel_link_rename_not_covered"
+	ReasonNoAnchors        = "kernel_enforce_inactive: no anchors"
+	ReasonNoReadyUsers     = "kernel_enforce_inactive: no user finished burn-in"
+	ReasonIdentityUnknown  = "tetragon_identity_unknown"
+	ReasonHeuristicRoot    = "heuristic_root"
+	ReasonIDEHosted        = "ide_hosted"
+	ReasonNotEnrolled      = "not_enrolled"
+	ReasonGuardrailObserve = "guardrail_observe"
 )
 
 // The two limits of enforcement, each a warning and the reason of a user

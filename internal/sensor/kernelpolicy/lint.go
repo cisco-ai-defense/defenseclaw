@@ -92,7 +92,8 @@ func isNoPost(sel tpSelector) bool {
 //  3. actions are only Post, NoPost and Override -EPERM;
 //  4. no hook runtime, provider credential, agent state root or repository
 //     path in an Override selector;
-//  5. no exec hook, no kprobe Override, nothing but file_open and tcp_connect;
+//  5. no exec hook, no kprobe Override, nothing but file_open, path_link,
+//     path_rename and tcp_connect;
 //  6. every path is absolute, clean, inside an enrolled home (or a listed
 //     system path) and free of symlinks;
 //  7. one entry per LSM hook name (Tetragon 1.7.0 keeps only the last one,
@@ -160,9 +161,10 @@ func Lint(data []byte, opts LintOptions) []Violation {
 		}
 	}
 	for h, hook := range tp.Spec.LsmHooks {
-		// Rule 5: the only LSM hook is file_open. Exec hooks are never
+		// Rule 5: the LSM hooks are file_open and the two name changes of
+		// a protected file (path_link, path_rename). Exec hooks are never
 		// rendered, with or without Override.
-		if hook.Hook != "file_open" {
+		if !allowedLSMHooks[hook.Hook] {
 			add(5, h, -1, "LSM hook %q is not allowed", hook.Hook)
 		}
 		lintSelectors(h, hook.Args, hook.Selectors, true, enforcing, opts, add)
@@ -186,13 +188,13 @@ func lintSelectors(h int, args []tpArg, selectors []tpSelector, lsm, enforcing b
 		add(7, h, -1, "%d selectors; Tetragon accepts %d per hook", len(selectors), MaxSelectors)
 	}
 	uidIndex := -1
-	pathIndex := -1
+	pathIndex := map[int]bool{}
 	for i, arg := range args {
-		if arg.Resolve == "f_cred.uid.val" {
+		if uidResolves[arg.Resolve] {
 			uidIndex = i
 		}
-		if arg.Type == "file" && arg.Resolve == "" && pathIndex < 0 {
-			pathIndex = i
+		if (arg.Type == "file" || arg.Type == "dentry") && arg.Resolve == "" {
+			pathIndex[i] = true
 		}
 	}
 	for s, sel := range selectors {
@@ -281,11 +283,11 @@ func lintSelectors(h int, args []tpArg, selectors []tpSelector, lsm, enforcing b
 			if at == uidIndex && (arg.Operator == "Equal" || arg.Operator == "InMap") {
 				uidValues += len(arg.Values)
 			}
-			if at == pathIndex {
+			if pathIndex[at] {
 				lintPaths(h, s, arg, override, opts, add)
 			}
 		}
-		if lsm && pathIndex < 0 {
+		if lsm && len(pathIndex) == 0 {
 			add(8, h, -1, "hook has no file argument")
 		}
 		// Rule 2: an Override selector is scoped to an enrolled lineage.
@@ -326,6 +328,14 @@ func lintSelectors(h int, args []tpArg, selectors []tpSelector, lsm, enforcing b
 		}
 	}
 }
+
+// allowedLSMHooks are the LSM hooks a DefenseClaw policy may name.
+var allowedLSMHooks = map[string]bool{"file_open": true, "path_link": true, "path_rename": true}
+
+// uidResolves are the argument resolutions that read a uid: the opener of a
+// file (file_open) and the owner of a linked or renamed inode (path_link,
+// path_rename carry no credentials).
+var uidResolves = map[string]bool{"f_cred.uid.val": true, "d_inode.i_uid.val": true}
 
 // numericArg reports whether a hook argument is a number, which Tetragon
 // matches from values written into the selector itself.

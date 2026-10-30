@@ -1,9 +1,9 @@
-# defenseclaw-derived: tetragon-policy family=observe kernel_policy=sha256:08b71155b713
+# defenseclaw-derived: tetragon-policy family=observe kernel_policy=sha256:40d66b85f4b8
 # Written by defenseclaw-sensor-helper. Do not edit: the helper reconciles this policy.
 apiVersion: cilium.io/v1alpha1
 kind: TracingPolicy
 metadata:
-  name: defenseclaw-observe-dcbdb400
+  name: defenseclaw-observe-0ce797eb
 spec:
   lsmhooks:
     - hook: file_open
@@ -79,6 +79,8 @@ spec:
                 - /home/engineer@example.test/.bash_profile
                 - /home/engineer@example.test/.bashrc
                 - /home/engineer@example.test/.profile
+                - /home/engineer@example.test/.ssh/authorized_keys
+                - /home/engineer@example.test/.ssh/authorized_keys2
                 - /home/engineer@example.test/.zshrc
             - args: [1]
               operator: Mask
@@ -108,12 +110,12 @@ spec:
               rateLimit: 1m
               rateLimitScope: process
 ---
-# defenseclaw-derived: tetragon-policy family=controls kernel_policy=sha256:08b71155b713
+# defenseclaw-derived: tetragon-policy family=controls kernel_policy=sha256:40d66b85f4b8
 # Written by defenseclaw-sensor-helper. Do not edit: the helper reconciles this policy.
 apiVersion: cilium.io/v1alpha1
 kind: TracingPolicy
 metadata:
-  name: defenseclaw-controls-329898b2
+  name: defenseclaw-controls-581d8043
 spec:
   options:
     - name: policy-mode
@@ -193,6 +195,8 @@ spec:
                 - /home/engineer@example.test/.bash_profile
                 - /home/engineer@example.test/.bashrc
                 - /home/engineer@example.test/.profile
+                - /home/engineer@example.test/.ssh/authorized_keys
+                - /home/engineer@example.test/.ssh/authorized_keys2
                 - /home/engineer@example.test/.zshrc
             - args: [1]
               operator: Mask
@@ -227,6 +231,130 @@ spec:
               operator: Mask
               values:
                 - "2"
+            - args: [2]
+              operator: Equal
+              values:
+                - "94404135"
+          matchActions:
+            - action: Override
+              argError: -1
+            - action: Post
+    - hook: path_link
+      args:
+        - index: 0
+          type: dentry
+        - index: 2
+          type: dentry
+        - index: 0
+          type: uint32
+          resolve: d_inode.i_uid.val
+          label: owner_uid
+      selectors:
+        - matchBinaries:
+            - operator: In
+              values:
+                - /opt/agents/bin/claude
+                - /opt/agents/lib/node_modules/@anthropic-ai/claude-code/bin/claude.exe
+              followChildren: true
+          matchNamespaces:
+            - namespace: Pid
+              operator: In
+              values:
+                - host_ns
+          matchArgs:
+            - args: [0]
+              operator: Equal
+              values:
+                - /home/engineer@example.test/.ssh/authorized_keys
+                - /home/engineer@example.test/.ssh/authorized_keys2
+            - args: [2]
+              operator: Equal
+              values:
+                - "94404135"
+          matchActions:
+            - action: Override
+              argError: -1
+            - action: Post
+        - matchBinaries:
+            - operator: In
+              values:
+                - /opt/agents/bin/claude
+                - /opt/agents/lib/node_modules/@anthropic-ai/claude-code/bin/claude.exe
+              followChildren: true
+          matchNamespaces:
+            - namespace: Pid
+              operator: In
+              values:
+                - host_ns
+          matchArgs:
+            - args: [1]
+              operator: Equal
+              values:
+                - /home/engineer@example.test/.ssh/authorized_keys
+                - /home/engineer@example.test/.ssh/authorized_keys2
+            - args: [2]
+              operator: Equal
+              values:
+                - "94404135"
+          matchActions:
+            - action: Override
+              argError: -1
+            - action: Post
+    - hook: path_rename
+      args:
+        - index: 1
+          type: dentry
+        - index: 3
+          type: dentry
+        - index: 1
+          type: uint32
+          resolve: d_inode.i_uid.val
+          label: owner_uid
+      selectors:
+        - matchBinaries:
+            - operator: In
+              values:
+                - /opt/agents/bin/claude
+                - /opt/agents/lib/node_modules/@anthropic-ai/claude-code/bin/claude.exe
+              followChildren: true
+          matchNamespaces:
+            - namespace: Pid
+              operator: In
+              values:
+                - host_ns
+          matchArgs:
+            - args: [0]
+              operator: Equal
+              values:
+                - /home/engineer@example.test/.ssh
+                - /home/engineer@example.test/.ssh/authorized_keys
+                - /home/engineer@example.test/.ssh/authorized_keys2
+            - args: [2]
+              operator: Equal
+              values:
+                - "94404135"
+          matchActions:
+            - action: Override
+              argError: -1
+            - action: Post
+        - matchBinaries:
+            - operator: In
+              values:
+                - /opt/agents/bin/claude
+                - /opt/agents/lib/node_modules/@anthropic-ai/claude-code/bin/claude.exe
+              followChildren: true
+          matchNamespaces:
+            - namespace: Pid
+              operator: In
+              values:
+                - host_ns
+          matchArgs:
+            - args: [1]
+              operator: Equal
+              values:
+                - /home/engineer@example.test/.ssh
+                - /home/engineer@example.test/.ssh/authorized_keys
+                - /home/engineer@example.test/.ssh/authorized_keys2
             - args: [2]
               operator: Equal
               values:
