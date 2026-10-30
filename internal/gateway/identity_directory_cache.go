@@ -222,24 +222,7 @@ func (c *identityCache[T]) getWithColdWait(key string, block, waitCold bool) (T,
 		return zero, false
 	}
 	c.mu.Lock()
-	now := c.now()
-	entry := c.entries[key]
-	first := entry == nil
-	if first {
-		if len(c.entries) >= identityDirectoryMax {
-			c.evictLocked()
-		}
-		entry = &identityCacheEntry[T]{}
-		c.entries[key] = entry
-	}
-	entry.usedByHook = true
-	c.dropAgedLocked(key, entry, now)
-	age := now.Sub(entry.fetchedAt)
-	invalidated := c.invalidatedLocked(entry)
-	expired := age >= c.lifetime(entry.facts) || invalidated
-	if (!entry.ok || expired) && entry.inflight == nil && !now.Before(entry.nextAttempt) {
-		c.refreshLocked(key, entry)
-	}
+	entry, first, expired, invalidated := c.serveLocked(key)
 	if entry.ok {
 		facts, wait, fetchedAt := entry.facts, entry.inflight, entry.fetchedAt
 		// An incomplete answer past its lifetime (a group no name answered
@@ -299,6 +282,32 @@ func (c *identityCache[T]) getWithColdWait(key string, block, waitCold bool) (T,
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return entry.facts, entry.ok
+}
+
+// serveLocked is the start of every read that serves cached facts: it finds
+// or creates key's entry, drops facts no longer served (dropAgedLocked), and
+// starts the refresh that an unresolved, expired or invalidated entry is due.
+// expired covers facts past their lifetime and invalidated ones
+// (invalidatedLocked).
+func (c *identityCache[T]) serveLocked(key string) (entry *identityCacheEntry[T], first, expired, invalidated bool) {
+	now := c.now()
+	entry = c.entries[key]
+	first = entry == nil
+	if first {
+		if len(c.entries) >= identityDirectoryMax {
+			c.evictLocked()
+		}
+		entry = &identityCacheEntry[T]{}
+		c.entries[key] = entry
+	}
+	entry.usedByHook = true
+	c.dropAgedLocked(key, entry, now)
+	invalidated = c.invalidatedLocked(entry)
+	expired = now.Sub(entry.fetchedAt) >= c.lifetime(entry.facts) || invalidated
+	if (!entry.ok || expired) && entry.inflight == nil && !now.Before(entry.nextAttempt) {
+		c.refreshLocked(key, entry)
+	}
+	return entry, first, expired, invalidated
 }
 
 // dropAgedLocked stops serving entry's facts once they are maxAge old, or
