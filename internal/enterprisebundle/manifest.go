@@ -156,6 +156,10 @@ const maxManifestDepth = 8
 // ValidBundleID reports whether id is "b-" followed by a canonical ULID.
 func ValidBundleID(id string) bool { return bundleIDPattern.MatchString(id) }
 
+// ValidDeviceGroup reports whether group is a device group name: 1 to 128
+// characters of [A-Za-z0-9._-] that start with a letter or digit.
+func ValidDeviceGroup(group string) bool { return scopeIDPattern.MatchString(group) }
+
 // DecodeManifest decodes and validates manifest.json. It refuses
 // (manifest_invalid) a document over MaxManifestBytes, invalid UTF-8 or a
 // byte-order mark, keys that are unknown, repeated or not lower-case

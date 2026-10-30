@@ -75,7 +75,7 @@ struct LocalModelsView: View {
                             Divider()
                             Text("\(signal.product) · \(signal.detector)")
                             if let model = signal.model { Text(AIDiscoveryGrouping.modelDetail(model)) }
-                            if let runtime = signal.runtime { Text(AIDiscoveryGrouping.runtimeDetail(runtime)) }
+                            if let runtime = signal.runtime { Text(AIDiscoveryGrouping.runtimeDetail(runtime, sandboxName: signal.sandboxName)) }
                         }
                     }.font(.caption).textSelection(.enabled).padding(16)
                 }

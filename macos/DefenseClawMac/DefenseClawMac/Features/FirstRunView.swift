@@ -63,7 +63,10 @@ struct FirstRunView: View {
     @State private var profile = "observe"
     @State private var scannerMode = "local"
     @State private var llmJudge = false
-    @State private var failMode = "open"
+    /// cmd_init._current_hook_fail_mode: a new install gets the config
+    /// default, closed (hooks block where supported when a check can't
+    /// finish); the TUI first run opens on the same value.
+    @State private var failMode = "closed"
     @State private var humanApproval = false
     @State private var hiltSeverity = "HIGH"
     @AppStorage(GatewayAutoStartPreference.key) private var startGateway = true
@@ -273,11 +276,17 @@ struct FirstRunView: View {
                 Toggle("Enable LLM judge", isOn: $llmJudge)
             }
             Section("Enforcement") {
-                Picker("Hook Failure Mode", selection: $failMode) {
-                    Text("Open - allow and log").tag("open")
-                    Text("Closed - block").tag("closed")
-                }
+                // tui/panels/first_run.py: fail mode and HITL apply to the
+                // action profile only; observe keeps failing open and the
+                // CLI preserves any saved setting.
                 if profile == "action" {
+                    Picker("Hook Failure Mode", selection: $failMode) {
+                        Text("Closed - block where supported").tag("closed")
+                        Text("Open - allow and log").tag("open")
+                    }
+                    Text("Action profile only. If a check can't finish: closed = block where supported, open = allow and log.")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
                     Toggle("Require human approval", isOn: $humanApproval)
                     if humanApproval {
                         Picker("Approval Minimum Severity", selection: $hiltSeverity) {

@@ -30,6 +30,16 @@ struct SandboxesView: View {
     @State private var confirmAlways: SandboxAsk?
     @State private var confirmAlwaysUnblock: SandboxActivity?
     @State private var inspectedSandbox: SandboxRow?
+    /// Pull to a branch the user names (the TUI's "Put it on a branch you
+    /// name" pull action): the row asked for, and the name typed.
+    @State private var pullToNamedBranch: SandboxRow?
+    @State private var branchName = ""
+    /// The selected sandbox's process tree (GET …/processes, re-read every
+    /// poll while it runs) and the detached run its stop kept (GET …/logs,
+    /// read once per selection of a stopped sandbox); keyed by name so a
+    /// stale read never shows under another row.
+    @State private var processTrees: [String: Any] = [:]
+    @State private var detachedRuns: [String: String] = [:]
 
     private var snapshot: SandboxSnapshot { appState.sandbox }
     private var selected: SandboxRow? {
@@ -64,6 +74,20 @@ struct SandboxesView: View {
         .sheet(item: $inspectedSandbox) { row in
             SandboxInspectorView(row: row, overview: AnyView(detail(row)))
                 .environment(appState)
+        }
+        .task(id: processKey) { await loadProcesses() }
+        .task(id: runLogKey) { await loadDetachedRun() }
+        .alert(
+            "Pull \(pullToNamedBranch?.name ?? "") to a branch you name",
+            isPresented: Binding(get: { pullToNamedBranch != nil }, set: { if !$0 { pullToNamedBranch = nil } }),
+            presenting: pullToNamedBranch
+        ) { row in
+            TextField("Branch", text: $branchName)
+            Button("Pull") { pull(row, toBranch: branchName) }
+            Button("Cancel", role: .cancel) {}
+        } message: { row in
+            Text("Puts \(row.name)'s work on the branch (sandbox pull --branch-name); your working tree stays as it is. "
+                + "A branch name has no spaces and does not start with -.")
         }
         .confirmationDialog(
             "Stop \(confirmStop?.name ?? "")?",
@@ -122,6 +146,60 @@ struct SandboxesView: View {
         }
     }
 
+    /// Re-read the tree each poll while the selected sandbox runs with its
+    /// process tree on; a stopped sandbox has no live processes.
+    private var processKey: String {
+        guard let selected, selected.processTree, selected.running else { return "" }
+        return "\(appState.installationGeneration)|\(selected.name)|\(snapshot.fetchedAt?.timeIntervalSince1970 ?? 0)"
+    }
+
+    /// One read as a stopped sandbox is selected (the TUI reads it as the
+    /// detail opens); a running sandbox has no kept run to show.
+    private var runLogKey: String {
+        guard let selected, !selected.running else { return "" }
+        // While no answer is cached (a transport failure), re-read on each poll.
+        let pending = detachedRuns[selected.name] == nil ? "|\(snapshot.fetchedAt?.timeIntervalSince1970 ?? 0)" : ""
+        return "\(appState.installationGeneration)|\(selected.name)|\(selected.phase)\(pending)"
+    }
+
+    private func loadProcesses() async {
+        guard let selected, selected.processTree, selected.running else { return }
+        let name = selected.name
+        guard let payload = try? await appState.gateway.sandboxProcesses(name: name) else {
+            processTrees[name] = nil
+            return
+        }
+        processTrees[name] = payload
+    }
+
+    private func loadDetachedRun() async {
+        guard let selected, !selected.running else { return }
+        let name = selected.name
+        do {
+            // nil is the daemon's 404: no log was kept (a definitive "").
+            let kept = try await appState.gateway.sandboxRunLog(name: name)
+            detachedRuns[name] = kept?.text(name: name) ?? ""
+        } catch {
+            detachedRuns[name] = nil
+        }
+    }
+
+    /// The alerts the Alerts panel lists for this sandbox (raised since it
+    /// was created), by severity.
+    private func raisedAlerts(_ row: SandboxRow) -> [Severity: Int] {
+        SandboxRaisedAlerts.counts(for: row, alerts: appState.unackedAlerts)
+    }
+
+    private func pull(_ row: SandboxRow, toBranch branch: String) {
+        if let problem = SandboxRow.branchNameProblem(branch) {
+            appState.sandboxActionMessage = problem
+            appState.sandboxActionFailed = true
+            return
+        }
+        let name = branch.trimmingCharacters(in: .whitespacesAndNewlines)
+        runCLI("Pull \(row.name) to branch \(name)", row.pullToBranchArguments(named: name))
+    }
+
     private var header: some View {
         HStack(spacing: 12) {
             VStack(alignment: .leading, spacing: 2) {
@@ -160,6 +238,14 @@ struct SandboxesView: View {
     @ViewBuilder
     private var notReady: some View {
         switch snapshot.state {
+        case "off" where !snapshot.status.gatewayElsewhere.isEmpty:
+            // Setup would stop at the other account's gateway (GAP-0307).
+            DCEmptyState(
+                title: "Sandboxes are off for this account",
+                message: snapshot.headline,
+                systemImage: "person.2.slash"
+            )
+            Button("Run sandbox doctor") { runCLI("Sandbox doctor", ["sandbox", "doctor"], mutation: false) }
         case "off":
             DCEmptyState(
                 title: "Sandboxes are off",
@@ -190,14 +276,23 @@ struct SandboxesView: View {
                     TableColumn("Pack/Profile", value: \.policyLabel)
                     TableColumn("Mode") { row in Text(row.workdirMode.isEmpty ? "—" : row.workdirMode) }
                     TableColumn("Up", value: \.uptimeText)
-                    TableColumn("Sites") { row in Text("\(row.destinations) (\(row.blocked) blocked)") }
+                    TableColumn("Sites") { row in
+                        Text("\(row.destinations) (\(row.blocked) blocked)\(row.aiSitesText)")
+                            .help(row.sitesText)
+                    }
+                    // The row's health alerts, then how many alerts it raised
+                    // (the TUI's alerts_cell).
                     TableColumn("Alerts") { row in
-                        if row.alerts.isEmpty {
+                        let raised = SandboxRaisedAlerts.cellText(raisedAlerts(row))
+                        if row.alerts.isEmpty, raised.isEmpty {
                             Text("—").foregroundStyle(.secondary)
                         } else {
-                            Label("\(row.alerts.count)", systemImage: "exclamationmark.triangle.fill")
-                                .foregroundStyle(Cisco.orange)
-                                .help(row.alerts.joined(separator: "\n"))
+                            Label(
+                                [row.alerts.isEmpty ? "" : "\(row.alerts.count)", raised].filter { !$0.isEmpty }.joined(separator: ", "),
+                                systemImage: "exclamationmark.triangle.fill"
+                            )
+                            .foregroundStyle(Cisco.orange)
+                            .help((row.alerts + [SandboxRaisedAlerts.detailText(raisedAlerts(row))]).filter { !$0.isEmpty }.joined(separator: "\n"))
                         }
                     }
                 }
@@ -206,17 +301,40 @@ struct SandboxesView: View {
         }
     }
 
+    /// The detail's label/value pairs, in the TUI's order (detail_pairs).
+    private func detailPairs(_ row: SandboxRow) -> [(String, String)] {
+        var pairs: [(String, String)] = [("Harness", row.harnessLabel)]
+        if row.repoPolicy { pairs.append(("Repo policy", row.repoPolicyText)) }
+        pairs += [
+            ("Skip-permissions", row.yolo ? "on" : "off"),
+            ("Project", row.project.isEmpty ? "—" : "\(row.project) → \(row.workdir) (\(row.workdirMode))"),
+            ("Sites", row.sitesText),
+            ("Tool calls", "\(row.toolCalls) (\(row.toolBlocked) blocked" + (row.toolAsked > 0 ? ", \(row.toolAsked) asked)" : ")")),
+        ]
+        if !row.running, let run = detachedRuns[row.name], !run.isEmpty { pairs.append(("Detached run", run)) }
+        pairs += [
+            ("Hook events", row.hookEventsLabel),
+            ("Last tool block", row.lastBlocked.isEmpty ? "—" : row.lastBlocked),
+        ]
+        if !row.image.isEmpty { pairs.append(("Image", row.image)) }
+        if row.processTree {
+            // A stopped sandbox has no live processes, and a failed read has
+            // none to show: the last tree is never shown as current.
+            let payload = row.running ? processTrees[row.name] : nil
+            let tree = SandboxProcessTree.lines(from: payload)
+            pairs.append(("Processes", tree.isEmpty
+                ? SandboxProcessTree.placeholder(from: payload, running: row.running)
+                : tree.joined(separator: "\n")))
+        }
+        pairs.append(("Undo", row.undoLabel))
+        let raised = SandboxRaisedAlerts.detailText(raisedAlerts(row))
+        if !raised.isEmpty { pairs.append(("Alerts", raised)) }
+        return pairs
+    }
+
     private func detail(_ row: SandboxRow) -> some View {
         DCCard(row.name, systemImage: "info.circle") {
-            KeyValueGrid(pairs: [
-                ("Harness", row.harnessLabel),
-                ("Project", row.project.isEmpty ? "—" : "\(row.project) → \(row.workdir) (\(row.workdirMode))"),
-                ("Skip-permissions", row.yolo ? "on" : "off"),
-                ("Tool calls", "\(row.toolCalls) (\(row.toolBlocked) blocked" + (row.toolAsked > 0 ? ", \(row.toolAsked) asked)" : ")")),
-                ("Hook events", row.hookEventsLabel),
-                ("Last tool block", row.lastBlocked.isEmpty ? "—" : row.lastBlocked),
-                ("Undo", row.undoLabel),
-            ] + (row.runImage.isEmpty ? [] : [("Run image", row.runImage)]))
+            KeyValueGrid(pairs: detailPairs(row))
             ForEach(row.alerts, id: \.self) { alert in
                 Label(alert, systemImage: "exclamationmark.triangle.fill")
                     .font(.caption)
@@ -236,6 +354,11 @@ struct SandboxesView: View {
                         runCLI("Pull \(row.name) to branch dc/\(row.name)", row.pullToBranchArguments)
                     }
                     .help("Puts \(row.name)'s work on branch dc/\(row.name); your working tree stays as it is.")
+                    Button("Pull to branch…") {
+                        branchName = "dc/\(row.name)"
+                        pullToNamedBranch = row
+                    }
+                    .help("Puts \(row.name)'s work on a branch you name (sandbox pull --branch-name); your working tree stays as it is.")
                 } else {
                     Button("Review changes") {
                         runCLI("Review \(row.name)", ["sandbox", "review", row.name], mutation: false)
@@ -460,8 +583,12 @@ struct SandboxOverviewCard: View {
                     metric("Active", "\(snapshot.active.count)")
                     metric("Blocked sites", "\(snapshot.sandboxes.reduce(0) { $0 + $1.blocked })")
                     metric("Asks", "\(snapshot.asks.count)", tint: snapshot.asks.isEmpty ? .primary : Cisco.orange)
-                    metric("Alerts", "\(snapshot.sandboxes.reduce(0) { $0 + $1.alerts.count })",
-                           tint: snapshot.sandboxes.contains { !$0.alerts.isEmpty } ? Cisco.orange : .primary)
+                    // Health alerts plus the alerts each sandbox raised (the
+                    // TUI's alerts_cell).
+                    let alerts = snapshot.sandboxes.reduce(0) {
+                        $0 + $1.alerts.count + SandboxRaisedAlerts.total(SandboxRaisedAlerts.counts(for: $1, alerts: appState.unackedAlerts))
+                    }
+                    metric("Alerts", "\(alerts)", tint: alerts > 0 ? Cisco.orange : .primary)
                 }
                 Button("Open Sandboxes") { appState.openSandboxes() }
                     .controlSize(.small)

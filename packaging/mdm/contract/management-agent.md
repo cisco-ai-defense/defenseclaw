@@ -403,6 +403,7 @@ member; use these fallbacks on it:
 | Windows secret locks and JSON | Windows `secret set` / `remove` take `--lock-wait`, `bundle.lock` then `lifecycle.lock`, and print a JSON document on every outcome | do **not** pass `--lock-wait` (exit 1); the set takes no lock and can collide with an apply's confirm step or an installer run; failures print no JSON |
 | Linux and macOS secret failure JSON | `secret set` / `remove` / `status` print the schema-1 failure document for an argument, flag, privilege, value or stdin read error | those failures print one line on stderr and no JSON: classify them by the exit code (2 fix the call, 1 failed) |
 | Anchors command (Linux, macOS) | `enterprise bundle anchors install` | install the file as the MDM kit does (section 4.8) |
+| `--trust-anchors`, `--device-group` (from 1.0.6, Linux and macOS) | `bundle apply --trust-anchors F` installs anchors and applies the bundle in one transaction; `anchors install --device-group G` pins the device (4.8) | an unknown flag: exit 2 with no JSON; run `anchors install`, then `apply`, and restore by hand on a failure (4.8) |
 | `secret_set_bundle` (from 1.0.4) | `secret set --bundle` stores a credential a newer signed bundle signs (4.7) | an unknown flag: leave it out; the build binds no credential value, so store the credential without it |
 | Optional status v2 members (from 1.0.3) | `bundle verify` `secret_refs_missing` and `restart_prediction` (4.2); `status` / `verify` `connectors`, `openshell` and `identity` (4.4.1); each only when present | absent: preflight by verifying and reading the refusal, and treat every apply as one that can restart the gateway |
 
@@ -559,7 +560,11 @@ Exit 0.
   that device (or on a computer with the same version and layout) and compare
   its `effective_policy_digest` with `gateway_digest` of `bundle status` after
   the apply. Do not compare digests computed by different product versions;
-  the digest algorithm is not part of the contract.
+  the digest algorithm is not part of the contract, and a build never prints
+  the digest another product version would compute. To compare a fleet that
+  runs mixed versions, compare `effective_policy_digest` only among devices
+  with the same `product_version` of `enterprise <os> status`, and use
+  `digest_verified` (the signer's digest checked on this device) for the rest.
 - Preflight before an apply:
   1. Run verify. `already_applied` with `config_drift` `false`: done. With
      `config_drift` `true`, the installed config drifted: apply the same
@@ -1173,6 +1178,24 @@ off the device. The agent does not read `/health` itself (section 7); the
   in every case. A Windows build without `management_contract` reports `ok`
   from gateway readiness alone, which does not prove the key.
 
+  **Prove the key before the first prompt (Linux and macOS, from 1.0.6).**
+  `enterprise secret check --name ai-defense-api-key --json` (root, read-only,
+  no lock) builds the client the gateway builds, from the stored credential and
+  the administrator's egress proxy, and makes one authenticated request whose
+  only content is a single full stop. It prints `secret-result.schema.json`
+  (the check branch): `ai_defense` is `ok`, `disabled` or `unavailable:<code>`
+  with the codes of the table above (never `unknown`, `not_initialized` or
+  `gateway_not_ready`), `ok` is true only for `ok`, and a key AI Defense
+  rejects is `unavailable:auth_failed` with `errors[0].code`
+  `ai_defense_unavailable`, exit 1. `--name` must be the credential
+  `enterprise.inspection.ai_defense.credential` names (else `invalid_arguments`,
+  exit 2); failures before the request are the failure document of the other
+  verbs (`not_root`, `not_installed`, `state_invalid`). It does not change what
+  `inspection.ai_defense` reports; the next prompt does that. Builds before
+  1.0.6 have no `check` verb (an unknown command, exit 2): read `unknown`
+  until the first prompt, as above. Windows has no `check`: read
+  `inspection.ai_defense` from `enterprise windows status`.
+
 The agent holds the value in its own memory and writes it to the child's
 stdin; the examples stand that in with a variable of the agent process
 (`key`, `$key`), never an environment variable, which the child would
@@ -1232,8 +1255,13 @@ is still the one owner.
   MDM kit and Windows `--trust-anchors`): any valid root-owned file is
   installed, an older one included, so the agent tracks which anchor file
   it last installed. The confirmed bundle version floor still applies.
-- stdout: `anchors-install.schema.json` (`sha256`, `previous_sha256` and
-  `key_ids` for the agent's own report). The change is audited as
+- `--device-group <group>` (from 1.0.6) pins the device to one group: the
+  source must list that group or no group (else `anchor_invalid`, nothing
+  written) and the installed file lists it alone, so a bundle for another
+  group is refused `target_mismatch`. A source that already lists only that
+  group keeps its bytes. A pin only narrows what the file trusts.
+- stdout: `anchors-install.schema.json` (`sha256`, `previous_sha256`,
+  `device_groups` and `key_ids` for the agent's own report). The change is audited as
   `config.trust_anchors.changed` (section 0).
   Exit: 0; 1; 2; 75.
 
@@ -1279,6 +1307,23 @@ else
   rm -f "$ETC/trust/bundle-anchors.json"
 fi
 ```
+
+**Anchors and the first bundle in one transaction on Linux and macOS (from
+1.0.6): `enterprise bundle apply --bundle B --trust-anchors F [--device-group G]
+--json`.** As Windows `ensure --trust-anchors F --bundle B` below: under the
+lifecycle lock the file is checked like `anchors install` checks it, written,
+and the bundle is verified against it. The file stays only when the bundle is
+confirmed, or applied and waiting for the gateway to report its policy (the
+next run settles it against the same file). A bundle that fails puts the
+previous file back, or removes the new one when there was none, so the agent
+no longer restores by hand; the failed change is audited as
+`config.trust_anchors.changed` with outcome `failed`. A successful run lists
+`installed trust anchors in <path>` or `replaced the trust anchors in <path>`
+in `changes` and is not a no-op, also when the bundle is the confirmed one.
+`--trust-anchors` goes with `--bundle`, not `--inbox`; `--device-group` goes
+with `--trust-anchors`. stdout: `lifecycle-result.schema.json`. Builds before
+1.0.6 refuse the flags (exit 2); use `anchors install`, then `apply`, and the
+restore recipe below.
 
 **Windows: `enterprise windows ensure --profile standalone --trust-anchors F
 [--bundle B] --json`** (every build). It takes `bundle.lock`, checks the source
@@ -1341,10 +1386,16 @@ enforcing.
   again, copied from its signed manifest (`enterprise bundle sign
   --rollback-of`). As with every member, the agent ignores it when it does
   not know it and treats its absence as normal (section 0).
-- Receipt ids are not ordered in time. Keep the set of `receipt_id`s already
-  forwarded (prune ids whose file is gone) and order receipts by
-  `finished_at` when the order matters; do not keep only the last id.
-  Nothing is acknowledged back.
+- Receipt ids are not ordered in time. From 1.0.6 each public receipt and
+  receipt event carries `seq`, the delivery sequence of this device: it grows
+  by one for each new delivery (a retry of a bundle is a new delivery), never
+  goes back while the receipt history exists, and orders receipts without a
+  clock. The agent may remember the highest `seq` it forwarded, and treats a
+  `seq` below it as a device whose history was reset (reinstalled or purged)
+  and starts again from the set of `receipt_id`s. On builds without `seq`, and
+  as the portable rule, keep the set of `receipt_id`s already forwarded (prune
+  ids whose file is gone) and order receipts by `finished_at` when the order
+  matters; do not keep only the last id. Nothing is acknowledged back.
 
 ```sh
 ls -1 /etc/defenseclaw/bundles/receipt-events/        # macOS: /opt/cisco/defenseclaw/etc/bundles/receipt-events/

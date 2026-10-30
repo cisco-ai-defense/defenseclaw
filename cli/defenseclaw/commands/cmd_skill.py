@@ -838,6 +838,8 @@ def _build_actions_map(store, connector: str = "", cfg=None) -> dict[str, Any]:
     except Exception:
         quarantine_records = []
     for record in quarantine_records:
+        if not _quarantine_copy_present(record):
+            continue
         current = actions_map.get(record.target_name)
         if record.state == "pending" and current is not None and str(current.reason or "").startswith(
             "quarantine failed"
@@ -1421,6 +1423,16 @@ def _mark_pending_admissions(app: AppContext, skills: list[dict[str, Any]]) -> N
             s["admission"] = state
 
 
+def _quarantine_copy_present(record: Any) -> bool:
+    """False for a quarantine record whose held copy was deleted by hand.
+
+    The record stays as restore provenance, but the skill is no longer held:
+    ``skill list`` and the TUI Skills panel must not keep a quarantined row
+    for it. A restore in progress keeps its row until it is finalized.
+    """
+    return record.state == "restoring" or os.path.lexists(record.quarantine_path)
+
+
 def _mark_quarantined_phantoms(app: AppContext, skills: list[dict[str, Any]]) -> None:
     """Flag off-disk skills whose files are held in quarantine.
 
@@ -1434,7 +1446,7 @@ def _mark_quarantined_phantoms(app: AppContext, skills: list[dict[str, Any]]) ->
         held = {
             record.target_name
             for record in app.store.list_quarantine_records("skill")
-            if record.state in ("pending", "active")
+            if record.state in ("pending", "active") and _quarantine_copy_present(record)
         }
     except Exception:
         return

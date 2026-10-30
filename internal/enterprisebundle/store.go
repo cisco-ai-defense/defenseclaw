@@ -634,7 +634,7 @@ func (s *Store) PublicReceiptEventsDir() string {
 // quote loader detail), the manifest hash and the version directory.
 func (s *Store) writePublicReceipt(r *Receipt) error {
 	out := enterprisestatus.PublicReceipt{
-		SchemaVersion: enterprisestatus.PublicReceiptSchemaVersion, ReceiptID: r.ReceiptID, DeliveryID: r.DeliveryID,
+		SchemaVersion: enterprisestatus.PublicReceiptSchemaVersion, ReceiptID: r.ReceiptID, DeliveryID: r.DeliveryID, Seq: r.Sequence,
 		BundleID: r.BundleID, Version: r.Version, SignerKeyID: r.SignerKeyID, Principal: r.Principal, Actor: r.Actor,
 		ChangeSummary: r.ChangeSummary, RollbackOf: r.RollbackOf, State: r.State, ErrorCode: string(r.ErrorCode),
 		EffectivePolicyDigest: r.EffectivePolicyDigest, EnforcingDigest: r.EnforcingDigest,
