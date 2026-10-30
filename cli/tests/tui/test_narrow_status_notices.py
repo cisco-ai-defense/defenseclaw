@@ -3,11 +3,11 @@
 
 """Health and the next diagnostic command remain visible at 80 columns."""
 
+import json
 from dataclasses import replace
 from datetime import datetime, timezone
 
 from defenseclaw.config import default_config
-from defenseclaw.tui.panels.overview import DoctorCache, DoctorCheck
 from defenseclaw.tui.services.overview_state import OVERVIEW_NOTICE_WIDTH
 from fixtures import screen_text, snapshot_app
 from rich.text import Text
@@ -49,6 +49,23 @@ async def test_config_editor_and_palette_status_labels_fit_at_80_columns(tmp_pat
 
 
 async def test_doctor_failure_notice_keeps_the_remediation_command(tmp_path, monkeypatch):
+    # The failed run as `defenseclaw doctor` leaves it in <data_dir>/doctor_cache.json.
+    # Every Overview reload reads this file, so a background signal refresh
+    # that copied the app before the cache was loaded cannot clear the notice
+    # when it lands (it did on the Windows runner: notice row empty).
+    (tmp_path / "doctor_cache.json").write_text(
+        json.dumps(
+            {
+                "captured_at": datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z"),
+                "passed": 0,
+                "failed": 1,
+                "warned": 0,
+                "skipped": 0,
+                "checks": [{"status": "fail", "label": "Hermes hooks", "detail": "unverified"}],
+            }
+        ),
+        encoding="utf-8",
+    )
     app = snapshot_app(tmp_path)
     # The fixture has no sidecar API port, so a health poll that lands during
     # the test (the Windows runner is slow enough) puts the gateway-health
@@ -57,15 +74,13 @@ async def test_doctor_failure_notice_keeps_the_remediation_command(tmp_path, mon
     async with app.run_test(size=(80, 24)) as pilot:
         await pilot.pause()
         app.action_switch_panel("policies")
-        app.overview_model.set_doctor_cache(
-            DoctorCache(
-                captured_at=datetime.now(timezone.utc),
-                failed=1,
-                checks=(DoctorCheck("fail", "Hermes hooks", "unverified"),),
-            )
-        )
+        # A signal refresh whose detached copy predates the cache load, then
+        # the load: the order the slow runner hit.
+        app._schedule_signal_data_refresh()  # noqa: SLF001 - drive the background reload.
+        app._load_doctor_cache()  # noqa: SLF001 - exercise the disk consumer.
         notice = next(n for n in app.overview_model.build_notices() if "defenseclaw doctor" in n.message)
         assert Text.from_markup(notice.message).cell_len <= OVERVIEW_NOTICE_WIDTH
+        await app.workers.wait_for_complete()
         app.action_switch_panel("overview")
         await pilot.pause()
         screen = screen_text(app)
