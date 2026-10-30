@@ -453,6 +453,12 @@ func (a *APIServer) sessionStartCheck(connectorName string) func(context.Context
 	}
 }
 
+// The sentence a call of a blocked session gets around its start's reason.
+const (
+	sessionStartBlockedPrefix = "DefenseClaw blocked this agent session when it started ("
+	sessionStartBlockedSuffix = "), so it blocks this call. Restart the agent."
+)
+
 func sessionStartBlockedReason(reason string) string {
 	reason = strings.TrimSpace(reason)
 	if len(reason) > 400 {
@@ -461,7 +467,35 @@ func sessionStartBlockedReason(reason string) string {
 	if reason == "" {
 		reason = sessionStartUnfinishedReason
 	}
-	return "DefenseClaw blocked this agent session when it started (" + reason + "), so it blocks this call. Restart the agent."
+	return sessionStartBlockedPrefix + reason + sessionStartBlockedSuffix
+}
+
+// trustedSessionStartGateReason reports a session-start gate refusal made
+// of DefenseClaw text only: the pending refusal, or the blocked-start
+// sentence around an unfinished check or a ship-authored start reason (a
+// Codex registration refusal after a Codex update, a catalog rule match).
+// A start reason with free-form text (a path, a scanner title) fails the
+// match and stays redacted (GAP-2643).
+func trustedSessionStartGateReason(reason string) bool {
+	if reason == sessionStartPendingReason {
+		return true
+	}
+	inner, ok := strings.CutPrefix(reason, sessionStartBlockedPrefix)
+	if !ok {
+		return false
+	}
+	if inner, ok = strings.CutSuffix(inner, sessionStartBlockedSuffix); !ok {
+		return false
+	}
+	return inner == sessionStartUnfinishedReason || trustedRefusalReason(inner)
+}
+
+// trustedCodexStartRegistrationRefusal reports the two refusals
+// codexStartRegistrationRefusal writes without a path or digest: the
+// generic setup step and the Codex self-update cause (GAP-1884).
+func trustedCodexStartRegistrationRefusal(reason string) bool {
+	return reason == codexStartRegistrationUnavailable+codexStartRegistrationSetupStep ||
+		reason == codexStartRegistrationUnavailable+": "+connector.ErrCodexExecutableChanged.Error()
 }
 
 // sessionStartVerdictBlocks reports a start verdict that blocks the session:
