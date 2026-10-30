@@ -2438,31 +2438,37 @@ def _source_path_cell(value: str, width: int = SOURCE_CELL_WIDTH) -> str:
 
 
 _MIN_FIT_CELLS = 12
+_DETAILS_HEADER_CELLS = len("Details")
 
 
 def _fit_catalog_rows(
     columns: tuple[str, ...], rows: tuple[tuple[str, ...], ...], width: int
 ) -> tuple[tuple[str, ...], ...]:
-    """Rows whose columns up to Actions fit ``width`` cells (GAP-2624).
+    """Rows whose columns, Details included, fit ``width`` cells (GAP-2624, GAP-2642).
 
     At 80x24 a long skill name or source path pushed the Actions column off
-    screen. The widest of Name and Source gives up cells first (a name keeps
-    its head, a path keeps its tail); Details, the last column, may still be
-    cut. The detail pane keeps every value in full.
+    screen, and then cut Details, the last column, to two or three letters.
+    The widest of Name and Source gives up cells first (a name keeps its head,
+    a path keeps its tail) so that the Details header and a few characters of
+    its text stay visible; a Details value longer than the cells left ends in
+    an ellipsis. The detail pane keeps every value in full.
     """
 
     if width <= 0 or not rows or "Source" not in columns or "Name" not in columns:
         return rows
     last = len(columns) - 1
+    has_details = columns[last] == "Details"
     # Every column through the one before Details must fit (DataTable pads
     # each cell by one column on each side).
-    upto = last - 1 if columns[last] == "Details" else last
+    upto = last - 1 if has_details else last
     name_i, source_i = columns.index("Name"), columns.index("Source")
 
     def cells(i: int) -> int:
         return max(len(columns[i]), *(len(row[i]) for row in rows))
 
-    over = sum(cells(i) + 2 for i in range(upto + 1)) - width
+    # Keep room for the Details header (a column is padded by two cells).
+    reserve = _DETAILS_HEADER_CELLS + 2 if has_details else 0
+    over = sum(cells(i) + 2 for i in range(upto + 1)) + reserve - width
     caps = {name_i: cells(name_i), source_i: cells(source_i)}
     while over > 0:
         i = max(caps, key=lambda k: caps[k])
@@ -2477,7 +2483,15 @@ def _fit_catalog_rows(
             return value
         return "\u2026" + value[-(cap - 1) :] if i == source_i else value[: cap - 1] + "\u2026"
 
-    return tuple(tuple(cut(i, value) for i, value in enumerate(row)) for row in rows)
+    fitted = tuple(tuple(cut(i, value) for i, value in enumerate(row)) for row in rows)
+    if not has_details:
+        return fitted
+    left = width - sum(max(len(columns[i]), *(len(row[i]) for row in fitted)) + 2 for i in range(upto + 1)) - 2
+    details_cap = max(left, _DETAILS_HEADER_CELLS)
+    return tuple(
+        (*row[:last], row[last] if len(row[last]) <= details_cap else row[last][: details_cap - 1] + "\u2026")
+        for row in fitted
+    )
 
 
 def _truncate(value: str, width: int) -> str:
