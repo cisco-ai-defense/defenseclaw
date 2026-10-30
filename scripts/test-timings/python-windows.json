@@ -513,8 +513,6 @@
   "cli/tests/test_telemetry_go_output_coordinator.py": 0.3,
   "cli/tests/test_telemetry_go_producer_plan.py": 32.45,
   "cli/tests/test_telemetry_output_writer.py": 1.65,
-  "cli/tests/test_telemetry_registry_candidate_renderer.py": 44.02,
-  "cli/tests/test_telemetry_registry_generator.py": 131.03,
   "cli/tests/test_telemetry_runtime_assets.py": 0.35,
   "cli/tests/test_telemetry_schema_resources.py": 3.12,
   "cli/tests/test_telemetry_security_registry.py": 11.85,
