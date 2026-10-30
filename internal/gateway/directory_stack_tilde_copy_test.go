@@ -43,9 +43,9 @@ func TestDirectoryStackTildeCopyIsNotAKeysWrite(t *testing.T) {
 		{"pushd /tmp && tar czf out.tgz ~1", false},
 		{"pushd src && tar czf out.tgz ~1", false},
 		{"pushd src; pushd ..; cp ~1/../a.txt c.txt", false},
-		// A recursive copy keeps links; the walk does not place the
-		// directory the stack word names, so it stays a possible link copy.
-		{"pushd src && cp -r ~1/src src-copy", true},
+		// A recursive copy keeps links; the walk reads the directory the
+		// stack word names after a static pushd like any source (GAP-2586).
+		{"pushd src && cp -r ~1/src src-copy", false},
 		{"pushd ~/.ssh && pushd /tmp && cp ~1/id_ed25519 /tmp/k", true},
 		{"pushd ~/.ssh; dirs -c; ls ~1", false},
 		{"pushd ~/.ssh; dirs -v", false},
@@ -113,6 +113,14 @@ func TestPushdRecursiveCopyReadsSourcesInTheNewDirectory(t *testing.T) {
 		{"pushd ~ && cp project/a.txt .ssh/authorized_keys", true},
 		{"pushd ~ && cp -r project/a.txt .defenseclaw/config.yaml", true},
 		{"pushd ~ && cp -a linked linked-bak && echo k >> linked-bak/lnk", true},
+		{"pushd src && cp -r ~1/ordinary ord10", false},
+		{"pushd src && rsync -a ~1/ordinary/ out/", false},
+		{"pushd src && cp -r ~+1/ordinary ord11 && cp -r ~-0/ordinary ord12", false},
+		{"pushd src && tar czf o.tgz ~1/ordinary", false},
+		{"pushd src && cp -a ~1/../linked lb && echo k >> lb/lnk", true},
+		{"pushd src && rsync -a ~1/../linked/ lb2/ && echo k >> lb2/lnk", true},
+		{"pushd src && dirs -c && cp -r ~1/ordinary ord13", true},
+		{"pushd src && cp -r ~2/ordinary ord14", true},
 		{"pushd ~/.ssh && popd && pushd ~ && cp project/a.txt .ssh/authorized_keys", true},
 		{"pushd /tmp && popd && cp a.txt ~/.ssh/authorized_keys", true},
 	}

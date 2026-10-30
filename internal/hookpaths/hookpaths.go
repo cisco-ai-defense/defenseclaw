@@ -16,6 +16,7 @@ import (
 	"regexp"
 	"runtime"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"unicode"
@@ -1725,27 +1726,81 @@ var directoryStackTilde = regexp.MustCompile(`^~([+-]?[0-9]{1,3}|[+-])(/|$)`)
 
 // withDirectoryStackOperands returns words and static with each all-literal
 // directory-stack tilde word read as a static directoryStackOperand path,
-// unless destination (the call destination of that reading) is one.
-func withDirectoryStackOperands(args []*syntax.Word, words []string, static []bool, destination func([]string, []bool) string) ([]string, []bool) {
+// unless destination (the call destination of that reading) is one. When
+// stack is the known bash directory stack of the call (stack[0] the current
+// directory), a source word it names is read as that directory instead, so
+// the walk inspects it like any other source (GAP-2586).
+func withDirectoryStackOperands(args []*syntax.Word, words []string, static []bool, stack []string, destination func([]string, []bool) string) ([]string, []bool) {
 	var stackWords []string
 	var stackStatic []bool
+	var stackArgs []int
 	for i, arg := range args {
 		if i == 0 || static[i] || len(arg.Parts) != 1 {
 			continue
 		}
-		lit, ok := arg.Parts[0].(*syntax.Lit)
-		if !ok || !directoryStackTilde.MatchString(lit.Value) || strings.ContainsAny(lit.Value, "*?[") {
+		if !directoryStackWord(arg) {
 			continue
 		}
+		lit := arg.Parts[0].(*syntax.Lit)
 		if stackWords == nil {
 			stackWords, stackStatic = slices.Clone(words), slices.Clone(static)
 		}
 		stackWords[i], stackStatic[i] = directoryStackOperand+lit.Value, true
+		stackArgs = append(stackArgs, i)
 	}
 	if stackWords == nil || strings.Contains(destination(stackWords, stackStatic), directoryStackOperand) {
 		return words, static
 	}
+	for _, i := range stackArgs {
+		if path, ok := directoryStackPath(strings.TrimPrefix(stackWords[i], directoryStackOperand), stack); ok {
+			stackWords[i] = path
+		}
+	}
 	return stackWords, stackStatic
+}
+
+// directoryStackWord reports an all-literal directory-stack tilde word
+// (~1, ~+2/src) with no glob character.
+func directoryStackWord(arg *syntax.Word) bool {
+	if len(arg.Parts) != 1 {
+		return false
+	}
+	lit, ok := arg.Parts[0].(*syntax.Lit)
+	return ok && directoryStackTilde.MatchString(lit.Value) && !strings.ContainsAny(lit.Value, "*?[")
+}
+
+// directoryStackPath expands a bash directory-stack tilde word (~N, ~+N,
+// ~-N, ~+) against stack, the directory stack bash prints with dirs
+// (stack[0] the current directory). ~- (OLDPWD) and an index outside the
+// stack are not expanded: bash leaves an out-of-range word literal.
+func directoryStackPath(word string, stack []string) (string, bool) {
+	match := directoryStackTilde.FindStringSubmatch(word)
+	if match == nil || len(stack) == 0 || !filepath.IsAbs(stack[0]) {
+		return "", false
+	}
+	spec, rest := match[1], word[1+len(match[1]):]
+	index := 0
+	switch {
+	case spec == "+":
+	case spec == "-":
+		return "", false
+	case strings.HasPrefix(spec, "-"):
+		n, err := strconv.Atoi(spec[1:])
+		if err != nil {
+			return "", false
+		}
+		index = len(stack) - 1 - n
+	default:
+		n, err := strconv.Atoi(strings.TrimPrefix(spec, "+"))
+		if err != nil {
+			return "", false
+		}
+		index = n
+	}
+	if index < 0 || index >= len(stack) {
+		return "", false
+	}
+	return stack[index] + rest, true
 }
 
 func commandLinksWithFacts(command, cwd, home string, facts map[string]string, record bool) shellLinks {
@@ -1763,7 +1818,7 @@ func commandLinksWithFacts(command, cwd, home string, facts map[string]string, r
 		return links
 	}
 	linkCall, linkCWD := staticChangedDirectoryLink(file, cwd, home)
-	linkDirs, linkDirsKnown := topLevelLinkDirectories(file, cwd, home)
+	linkDirs, linkStacks, linkDirsKnown := topLevelLinkDirectories(file, cwd, home)
 	env := expand.ListEnviron("HOME=" + strings.TrimRight(home, "/"))
 	renames, cds := false, false
 	var copyScopes []string
@@ -1831,12 +1886,12 @@ func commandLinksWithFacts(command, cwd, home string, facts map[string]string, r
 		switch {
 		case slices.Contains(copyPrograms, program):
 			if makesLinks, _ := copyLinkOptions(args[1:], words[1:], static[1:]); !makesLinks {
-				words, static = withDirectoryStackOperands(args, words, static, func(words []string, static []bool) string {
+				words, static = withDirectoryStackOperands(args, words, static, linkStacks[call], func(words []string, static []bool) string {
 					return cpDestination(words[1:], static[1:], cwd)
 				})
 			}
 		case slices.Contains(archivePrograms, program):
-			words, static = withDirectoryStackOperands(args, words, static, func(words []string, static []bool) string {
+			words, static = withDirectoryStackOperands(args, words, static, linkStacks[call], func(words []string, static []bool) string {
 				return archiveDestination(program, words[1:], static[1:], cwd)
 			})
 		}
@@ -1964,8 +2019,10 @@ func commandLinksWithFacts(command, cwd, home string, facts map[string]string, r
 // lexically from cwd (GAP-1742, GAP-2551). A plain ( ... ) subshell is read
 // the same way, and its cd statements end with it. known is false when any
 // cd, pushd or popd is elsewhere or dynamic, so the link scope keeps its
-// conservative reading.
-func topLevelLinkDirectories(file *syntax.File, cwd, home string) (dirs map[*syntax.CallExpr]string, known bool) {
+// conservative reading. stacks holds the bash directory stack each placed
+// call sees (stack[0] its directory, then the directories pushd saved), unless
+// the command runs dirs anywhere (dirs -c, dirs +N edit the stack).
+func topLevelLinkDirectories(file *syntax.File, cwd, home string) (dirs map[*syntax.CallExpr]string, stacks map[*syntax.CallExpr][]string, known bool) {
 	// statements holds the flattened statements; a nil entry at an index in
 	// enter or leave marks where a subshell starts or ends.
 	var statements []*syntax.Stmt
@@ -1999,9 +2056,16 @@ func topLevelLinkDirectories(file *syntax.File, cwd, home string) (dirs map[*syn
 		}
 	}
 	known = true
+	stackKnown := true
 	syntax.Walk(file, func(node syntax.Node) bool {
 		call, ok := node.(*syntax.CallExpr)
-		if !ok || len(call.Args) == 0 || topLevel[call] {
+		if !ok || len(call.Args) == 0 {
+			return true
+		}
+		if program, static := StaticWord(call.Args[0], home); !static || programBase(program) == "dirs" {
+			stackKnown = false
+		}
+		if topLevel[call] {
 			return true
 		}
 		if program, static := StaticWord(call.Args[0], home); !static || slices.Contains(cdPrograms, programBase(program)) {
@@ -2010,9 +2074,10 @@ func topLevelLinkDirectories(file *syntax.File, cwd, home string) (dirs map[*syn
 		return true
 	})
 	if !known {
-		return nil, false
+		return nil, nil, false
 	}
 	dirs = make(map[*syntax.CallExpr]string)
+	stacks = make(map[*syntax.CallExpr][]string)
 	dir := cwd
 	var saved, pushed []string
 	var savedPushed [][]string
@@ -2032,7 +2097,7 @@ func topLevelLinkDirectories(file *syntax.File, cwd, home string) (dirs map[*syn
 		}
 		program, static := StaticWord(call.Args[0], home)
 		if !static {
-			return nil, false
+			return nil, nil, false
 		}
 		if slices.Contains(cdPrograms, programBase(program)) {
 			// A plain popd returns to the directory a pushd in this list
@@ -2045,11 +2110,11 @@ func topLevelLinkDirectories(file *syntax.File, cwd, home string) (dirs map[*syn
 				continue
 			}
 			if (programBase(program) != "cd" && programBase(program) != "pushd") || len(call.Args) != 2 || len(call.Assigns) != 0 {
-				return nil, false
+				return nil, nil, false
 			}
 			target, static := StaticWord(call.Args[1], home)
 			if !static || target == "" || strings.HasPrefix(target, "-") || strings.HasPrefix(target, "+") || !filepath.IsAbs(dir) {
-				return nil, false
+				return nil, nil, false
 			}
 			if programBase(program) == "pushd" {
 				pushed = append(pushed, dir)
@@ -2061,18 +2126,30 @@ func topLevelLinkDirectories(file *syntax.File, cwd, home string) (dirs map[*syn
 		// A link after a pushd keeps the conservative reading: the
 		// link-name proof covers cd only (GAP-1742), so a link call (or a
 		// call that names a link program) after pushd is not placed.
+		// A directory-stack tilde operand (~1/src) after the program word
+		// expands to one directory path, never to a program (GAP-2586).
 		if usedPushd {
-			for _, arg := range call.Args {
+			for i, arg := range call.Args {
+				if i > 0 && directoryStackWord(arg) {
+					continue
+				}
 				if word, static := StaticWord(arg, home); !static || slices.Contains(linkPrograms, programBase(word)) {
-					return nil, false
+					return nil, nil, false
 				}
 			}
 		}
 		// Every other call starts in dir; a wrapper that moves the
 		// directory (env -C) moves it from there.
 		dirs[call] = dir
+		if stackKnown {
+			stack := []string{dir}
+			for i := len(pushed) - 1; i >= 0; i-- {
+				stack = append(stack, pushed[i])
+			}
+			stacks[call] = stack
+		}
 	}
-	return dirs, true
+	return dirs, stacks, true
 }
 
 // plainWrappedChild returns the index of the program word that a chain of
