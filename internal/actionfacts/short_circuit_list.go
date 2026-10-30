@@ -800,11 +800,12 @@ func simpleExportedFunctionNames(decl *syntax.DeclClause) ([]string, bool) {
 			break
 		}
 		for _, flag := range option[1:] {
-			if flag == 'f' {
+			switch flag {
+			case 'f':
 				exportFunctions = true
-			} else if flag == 'x' {
+			case 'x':
 				exportAttribute = true
-			} else if flag == 'n' {
+			case 'n':
 				unexport = true
 			}
 			// Another attribute (-g, -r, -p, ...) exports no function.
