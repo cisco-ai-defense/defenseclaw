@@ -24,6 +24,7 @@ import (
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 )
 
 // Unit is one managed systemd unit or launchd job.
@@ -228,7 +229,7 @@ func systemdTimerStampPath(timer string) string {
 	return filepath.Join("/var/lib/systemd/timers", "stamp-"+timer)
 }
 
-var systemdVersionPattern = regexp.MustCompile(`(?m)^systemd\s+(\d+)`)
+var systemdVersionPattern = lazyregexp.New(`(?m)^systemd\s+(\d+)`)
 
 func (m *systemdManager) Version(ctx context.Context) int {
 	if m.version > 0 {
@@ -559,10 +560,10 @@ func (m *launchdManager) Disable(ctx context.Context, unit Unit) error {
 
 var (
 	// launchctl prints multi-word states ("not running", "spawn scheduled").
-	launchdStatePattern = regexp.MustCompile(`(?m)^\s*state = ([^\n]*?)\s*$`)
-	launchdPIDPattern   = regexp.MustCompile(`(?m)^\s*pid = (\d+)`)
-	launchdRunsPattern  = regexp.MustCompile(`(?m)^\s*runs = (\d+)`)
-	launchdExitPattern  = regexp.MustCompile(`(?m)^\s*last exit code = (\S+)`)
+	launchdStatePattern = lazyregexp.New(`(?m)^\s*state = ([^\n]*?)\s*$`)
+	launchdPIDPattern   = lazyregexp.New(`(?m)^\s*pid = (\d+)`)
+	launchdRunsPattern  = lazyregexp.New(`(?m)^\s*runs = (\d+)`)
+	launchdExitPattern  = lazyregexp.New(`(?m)^\s*last exit code = (\S+)`)
 )
 
 func (m *launchdManager) Status(ctx context.Context, unit Unit) (enterprisestatus.Service, error) {

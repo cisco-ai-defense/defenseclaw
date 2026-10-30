@@ -7,25 +7,26 @@ import (
 	"maps"
 	"os"
 	"path/filepath"
-	"regexp"
 	"slices"
 	"strings"
 
 	"mvdan.cc/sh/v3/syntax"
+
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 )
 
 var (
-	literalOpenCall         = regexp.MustCompile(`\b(?:open|File\.open|fs\.openSync|os\.open|(?:io\.)?FileIO)\s*\(`)
-	literalWriteCall        = regexp.MustCompile(`\b(?:appendFileSync|writeFileSync|File\.write|File\.binwrite)\s*\(`)
-	literalNodeStream       = regexp.MustCompile(`\brequire\s*\(\s*['"]fs['"]\s*\)\s*\.createWriteStream\s*\(`)
-	literalPathWrite        = regexp.MustCompile(`\b(?:pathlib\.)?Path\s*\(\s*['"]([^'"]+)['"]\s*\)\s*\.write_(?:text|bytes)\s*\(`)
-	literalPathOpen         = regexp.MustCompile(`\b(?:pathlib\.)?Path\s*\(\s*['"]([^'"]+)['"]\s*\)\s*\.open\s*\(\s*['"]([waxr][waxr+bt]*)['"]\s*\)`)
-	literalPythonPathCall   = regexp.MustCompile(`\b(?:pathlib\.)?Path\s*\(`)
-	literalPerlOpen         = regexp.MustCompile(`\bopen\s+(?:my\s+)?(?:\$?\w+)\s*,\s*['"](?:>>|>)['"]\s*,\s*['"]([^'"]+)['"]`)
-	literalCopyCall         = regexp.MustCompile(`\b(?:shutil\.(?:copyfile|copy|copy2)|copyFileSync|copyFile|copyfile|copy2|(?:File::Copy::)?copy)\s*\(`)
-	literalPythonCopyImport = regexp.MustCompile(`\bfrom\s+shutil\s+import\s+copyfile\b`)
-	literalPerlCopy         = regexp.MustCompile(`\b(?:File::Copy::)?copy\s+['"][^'"]+['"]\s*,\s*(['"][^'"]+['"])`)
-	literalPerlImport       = regexp.MustCompile(`\buse\s+File::Copy\b`)
+	literalOpenCall         = lazyregexp.New(`\b(?:open|File\.open|fs\.openSync|os\.open|(?:io\.)?FileIO)\s*\(`)
+	literalWriteCall        = lazyregexp.New(`\b(?:appendFileSync|writeFileSync|File\.write|File\.binwrite)\s*\(`)
+	literalNodeStream       = lazyregexp.New(`\brequire\s*\(\s*['"]fs['"]\s*\)\s*\.createWriteStream\s*\(`)
+	literalPathWrite        = lazyregexp.New(`\b(?:pathlib\.)?Path\s*\(\s*['"]([^'"]+)['"]\s*\)\s*\.write_(?:text|bytes)\s*\(`)
+	literalPathOpen         = lazyregexp.New(`\b(?:pathlib\.)?Path\s*\(\s*['"]([^'"]+)['"]\s*\)\s*\.open\s*\(\s*['"]([waxr][waxr+bt]*)['"]\s*\)`)
+	literalPythonPathCall   = lazyregexp.New(`\b(?:pathlib\.)?Path\s*\(`)
+	literalPerlOpen         = lazyregexp.New(`\bopen\s+(?:my\s+)?(?:\$?\w+)\s*,\s*['"](?:>>|>)['"]\s*,\s*['"]([^'"]+)['"]`)
+	literalCopyCall         = lazyregexp.New(`\b(?:shutil\.(?:copyfile|copy|copy2)|copyFileSync|copyFile|copyfile|copy2|(?:File::Copy::)?copy)\s*\(`)
+	literalPythonCopyImport = lazyregexp.New(`\bfrom\s+shutil\s+import\s+copyfile\b`)
+	literalPerlCopy         = lazyregexp.New(`\b(?:File::Copy::)?copy\s+['"][^'"]+['"]\s*,\s*(['"][^'"]+['"])`)
+	literalPerlImport       = lazyregexp.New(`\buse\s+File::Copy\b`)
 )
 
 // LiteralWriteOperands lists fixed write paths inside a directly invoked

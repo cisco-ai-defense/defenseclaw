@@ -40,11 +40,11 @@ package kernelpolicy
 
 import (
 	"fmt"
-	"regexp"
 	"sort"
 	"strings"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 	kernel "github.com/defenseclaw/defenseclaw/policies/kernel"
 )
 
@@ -188,7 +188,7 @@ const (
 
 // policyNamePattern is the only shape of name the helper may ever delete,
 // and only when its own state also recorded it.
-var policyNamePattern = regexp.MustCompile(`^defenseclaw-(observe|connect|controls|controls-burnin)-[0-9a-f]{8}$`)
+var policyNamePattern = lazyregexp.New(`^defenseclaw-(observe|connect|controls|controls-burnin)-[0-9a-f]{8}$`)
 
 // IsDefenseClawName reports whether name has the shape of a policy this
 // package loads. Matching the shape is necessary, never sufficient, to touch
@@ -403,7 +403,7 @@ func (i Intent) CustomerEventsSetting() string {
 
 // connectorName is the shape of a connector name in the drop-in; anything
 // else is dropped (it could never match an enrolled connector anyway).
-var connectorName = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{0,63}$`)
+var connectorName = lazyregexp.New(`^[a-z0-9][a-z0-9_-]{0,63}$`)
 
 // Lookup is the environment read seam (envvars.Lookup in the helper).
 type Lookup func(name string) (string, bool)

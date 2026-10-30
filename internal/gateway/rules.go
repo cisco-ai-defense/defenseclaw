@@ -29,6 +29,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail/semantic"
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 	"github.com/defenseclaw/defenseclaw/internal/rxprefilter"
 )
 
@@ -1171,8 +1172,8 @@ var shellNormalizeReplacer = strings.NewReplacer(
 	`\`, "", // stray backslashes
 )
 
-var shellVarPattern = regexp.MustCompile(`\$\{?\w+\}?`)
-var shellGlobPattern = regexp.MustCompile(`\?`)
+var shellVarPattern = lazyregexp.New(`\$\{?\w+\}?`)
+var shellGlobPattern = lazyregexp.New(`\?`)
 
 func normalizeShell(s string) string {
 	n := shellNormalizeReplacer.Replace(s)

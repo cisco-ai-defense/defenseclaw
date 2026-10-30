@@ -4,8 +4,9 @@
 package hookpaths
 
 import (
-	"regexp"
 	"strings"
+
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 )
 
 // Inline interpreter code that names a private key under .ssh and calls a
@@ -13,8 +14,8 @@ import (
 // python3 -c "print(open(os.path.expanduser('~/.ssh/id_ed25519')).read())".
 // The public key and its certificate are not private keys.
 var (
-	actionInterpreterPrivateKeyName = regexp.MustCompile(`\bid_(?:rsa|ed25519|ecdsa|dsa)\b`)
-	actionInterpreterReader         = regexp.MustCompile(`\b(?:open|openSync|FileIO|read_text|read_bytes|readFile\w*|createReadStream|File\.(?:read|open|binread|readlines|foreach)|IO\.(?:read|binread|readlines))\s*\(|\bopen\s+[A-Za-z_$]`)
+	actionInterpreterPrivateKeyName = lazyregexp.New(`\bid_(?:rsa|ed25519|ecdsa|dsa)\b`)
+	actionInterpreterReader         = lazyregexp.New(`\b(?:open|openSync|FileIO|read_text|read_bytes|readFile\w*|createReadStream|File\.(?:read|open|binread|readlines|foreach)|IO\.(?:read|binread|readlines))\s*\(|\bopen\s+[A-Za-z_$]`)
 )
 
 // actionInterpreterReadsPrivateKey reports python -c, node -e, perl -e or

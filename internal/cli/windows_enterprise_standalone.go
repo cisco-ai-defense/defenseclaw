@@ -22,7 +22,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -39,6 +38,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisepolicy"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/winpath"
 )
@@ -206,7 +206,7 @@ var (
 	// enumerates the first guardian manifest from.
 	windowsEnterpriseEnsureConfigLoader = config.LoadFromFile
 
-	windowsEnterpriseMessageCodePattern = regexp.MustCompile(`^([a-z][a-z0-9_]{2,63}):\s`)
+	windowsEnterpriseMessageCodePattern = lazyregexp.New(`^([a-z][a-z0-9_]{2,63}):\s`)
 )
 
 // windowsEnterpriseLifecycleBusyMarker is the installer's lock-contention
@@ -594,7 +594,7 @@ func windowsEnterpriseStderrCode(body []byte) string {
 	return ""
 }
 
-var windowsEnterpriseInstallerExitPattern = regexp.MustCompile(`\(exit code (-?[0-9]+)\)|exited with code (-?[0-9]+)`)
+var windowsEnterpriseInstallerExitPattern = lazyregexp.New(`\(exit code (-?[0-9]+)\)|exited with code (-?[0-9]+)`)
 
 func windowsEnterpriseInstallerExitCode(err error) (int, bool) {
 	match := windowsEnterpriseInstallerExitPattern.FindStringSubmatch(err.Error())
@@ -2392,7 +2392,7 @@ const windowsEnterpriseRepairServiceAccess = "run defenseclaw enterprise windows
 // windowsEnterpriseServiceRightsPattern matches the lifecycle's report that a
 // managed path lacks the rights of a service's virtual account, which it
 // names only by its S-1-5-80 SID.
-var windowsEnterpriseServiceRightsPattern = regexp.MustCompile(
+var windowsEnterpriseServiceRightsPattern = lazyregexp.New(
 	`managed path is missing required rights for (S-1-5-80(?:-[0-9]+)+) \(required=([^ )]*) actual=([^)]*)\): (.+)$`)
 
 // windowsEnterpriseServiceSIDName returns the service whose virtual account
@@ -3509,7 +3509,7 @@ func runWindowsEnterpriseStandaloneEnsure(
 }
 
 var windowsEnterpriseRestoreStartModes = restoreWindowsEnterpriseStartModes
-var windowsEnterpriseRestoreServiceName = regexp.MustCompile(`^DefenseClaw[A-Za-z0-9_]+$`)
+var windowsEnterpriseRestoreServiceName = lazyregexp.New(`^DefenseClaw[A-Za-z0-9_]+$`)
 
 // restoreWindowsEnterpriseStartModes is the last-resort startup-mode cleanup
 // when an installer child was terminated before its transaction rollback.

@@ -20,7 +20,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"regexp"
 	"sort"
 	"strings"
 	"sync"
@@ -33,6 +32,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/envvars"
 	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail"
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 	"github.com/defenseclaw/defenseclaw/internal/redaction"
 )
 
@@ -451,7 +451,7 @@ func wrapJudgeSample(content string) string {
 // context probe (catches typos like "passsswd", space-separated "etc
 // passwd", spelled-out "etc slash passwd") without flipping the default
 // posture into over-blocking for legitimate sysadmin questions.
-var sensitiveFileContextRe = regexp.MustCompile(
+var sensitiveFileContextRe = lazyregexp.New(
 	`(?i)` +
 		`\betc[\s/\\]+(?:slash[\s]+)?(?:pas{0,8}wd|sha{0,2}dow|sudoers|hosts|hostname|resolv\.conf)\b` +
 		`|\betc%2F(?:pas{0,8}wd|sha{0,2}dow|sudoers)\b` +
@@ -1524,7 +1524,7 @@ func (j *LLMJudge) piiToVerdictWith(rp *guardrail.RulePack, data map[string]inte
 // JSON parsing (handles markdown-fenced output)
 // ---------------------------------------------------------------------------
 
-var markdownFenceRe = regexp.MustCompile("(?s)```(?:json)?\\s*\n?(.*?)\\s*```")
+var markdownFenceRe = lazyregexp.New("(?s)```(?:json)?\\s*\n?(.*?)\\s*```")
 
 func truncateJudgeLog(s string, maxLen int) string {
 	s = strings.ReplaceAll(s, "\n", " ")

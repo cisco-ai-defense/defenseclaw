@@ -10,11 +10,11 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"regexp"
 	"sort"
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 	"github.com/spf13/cobra"
 )
 
@@ -731,9 +731,9 @@ func writeSortedJSONValue(buf *bytes.Buffer, v any, prefix, indent string) error
 // personality, etc.).
 
 var (
-	tomlTopLevelRE   = regexp.MustCompile(`^\[([^\[\]\.\s]+)\]\s*$`)
-	tomlTableHeader  = regexp.MustCompile(`^\s*\[\[?[^\[\]]+\]\]?\s*$`)
-	codexNotifyStart = regexp.MustCompile(`^\s*notify\s*=`)
+	tomlTopLevelRE   = lazyregexp.New(`^\[([^\[\]\.\s]+)\]\s*$`)
+	tomlTableHeader  = lazyregexp.New(`^\s*\[\[?[^\[\]]+\]\]?\s*$`)
+	codexNotifyStart = lazyregexp.New(`^\s*notify\s*=`)
 	// tomlOtelSectionRE matches every table header rooted at the `otel`
 	// key: bare `[otel]`, dotted `[otel.exporter]`,
 	// `[otel.exporter.otlp-http]`, `[otel.exporter.otlp-http.headers]`,
@@ -744,14 +744,14 @@ var (
 	// that stops at the first sub-table would miss them. This regex
 	// lets the section-scan walk every `otel.*` subsection as one
 	// logical block.
-	tomlOtelSectionRE = regexp.MustCompile(`^\s*\[otel(?:\.[^\[\]]+)?\]\s*$`)
+	tomlOtelSectionRE = lazyregexp.New(`^\s*\[otel(?:\.[^\[\]]+)?\]\s*$`)
 	// tomlHooksEventRE captures the `<event>` name from a
 	// `[hooks.<event>[.sub]]` or `[[hooks.<event>[.sub]]]` header.
 	// Used to construct a per-event scan predicate so the scrubber
 	// only removes DefenseClaw-owned event subtrees and leaves any
 	// adjacent user-owned event blocks intact — see the mixed-hooks
 	// regression note on scrubCodexFile.
-	tomlHooksEventRE = regexp.MustCompile(`^\s*\[\[?hooks\.([^\[\].]+)`)
+	tomlHooksEventRE = lazyregexp.New(`^\s*\[\[?hooks\.([^\[\].]+)`)
 	// tomlHooksSectionRE matches every table header rooted at the
 	// `hooks` key, in EITHER single-bracket or double-bracket
 	// (array-of-tables) form:
@@ -779,7 +779,7 @@ var (
 	// `defenseclaw uninstall --purge`. This regex lets the section
 	// scan span every `hooks.*` subsection as one logical block, same
 	// pattern as tomlOtelSectionRE.
-	tomlHooksSectionRE = regexp.MustCompile(`^\s*\[\[?hooks(?:\.[^\[\]]+)?\]\]?\s*$`)
+	tomlHooksSectionRE = lazyregexp.New(`^\s*\[\[?hooks(?:\.[^\[\]]+)?\]\]?\s*$`)
 )
 
 func scrubCodexFile(path string, markers []string) (bool, error) {

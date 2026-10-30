@@ -36,12 +36,12 @@ import (
 	"fmt"
 	"os"
 	"path"
-	"regexp"
 	"sort"
 	"strconv"
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 	"github.com/defenseclaw/defenseclaw/internal/openshell"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/harness"
 )
@@ -187,10 +187,10 @@ type Context struct {
 }
 
 var (
-	digestRE     = regexp.MustCompile(`^[a-z0-9][a-z0-9._/:-]*@sha256:[0-9a-f]{64}$`)
-	repositoryRE = regexp.MustCompile(`^[a-z0-9]+(?:[._-][a-z0-9]+)*(?:/[a-z0-9]+(?:[._-][a-z0-9]+)*)*$`)
-	versionRE    = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9.+_-]{0,63}$`)
-	safePathRE   = regexp.MustCompile(`^/[A-Za-z0-9._/-]+$`)
+	digestRE     = lazyregexp.New(`^[a-z0-9][a-z0-9._/:-]*@sha256:[0-9a-f]{64}$`)
+	repositoryRE = lazyregexp.New(`^[a-z0-9]+(?:[._-][a-z0-9]+)*(?:/[a-z0-9]+(?:[._-][a-z0-9]+)*)*$`)
+	versionRE    = lazyregexp.New(`^[A-Za-z0-9][A-Za-z0-9.+_-]{0,63}$`)
+	safePathRE   = lazyregexp.New(`^/[A-Za-z0-9._/-]+$`)
 )
 
 // systemDirs are never re-owned or re-moded by the overlay.

@@ -17,17 +17,17 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"regexp"
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 	"gopkg.in/yaml.v3"
 )
 
 // settingsReferenceURL is the enterprise settings reference.
 const settingsReferenceURL = config.EnterpriseSettingsReferenceURL
 
-var configHeaderPattern = regexp.MustCompile(`headers(?:\["([^"]+)"\]|\.([A-Za-z0-9_.-]+))$`)
+var configHeaderPattern = lazyregexp.New(`headers(?:\["([^"]+)"\]|\.([A-Za-z0-9_.-]+))$`)
 
 // plainConfigProblem renders an invalid enum value or an unstored protected
 // credential as one plain sentence: the file and line, the field, the value

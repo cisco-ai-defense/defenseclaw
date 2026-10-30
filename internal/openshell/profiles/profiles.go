@@ -54,6 +54,8 @@ import (
 
 	v1 "github.com/NVIDIA/OpenShell/sdk/go/openshell/v1"
 	"gopkg.in/yaml.v3"
+
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 )
 
 //go:embed templates/*.yaml.tmpl
@@ -136,9 +138,9 @@ func BedrockProfileID(template, region string) string {
 }
 
 var (
-	ingressProfileRE = regexp.MustCompile(`^` + regexp.QuoteMeta(IngressID) + `-([1-9][0-9]{0,4})$`)
+	ingressProfileRE = lazyregexp.New(`^` + regexp.QuoteMeta(IngressID) + `-([1-9][0-9]{0,4})$`)
 	// bedrockProfileRE matches the regional id of every Mantle template.
-	bedrockProfileRE = regexp.MustCompile(`^(?:` + strings.Join(quotedIDs(kindBedrock), "|") + `)-` + regionPattern + `$`)
+	bedrockProfileRE = lazyregexp.New(`^(?:` + strings.Join(quotedIDs(kindBedrock), "|") + `)-` + regionPattern + `$`)
 )
 
 // quotedIDs are the regexp-quoted template IDs of kind, sorted.
@@ -257,8 +259,8 @@ type Profile struct {
 const regionPattern = `[a-z]{2}(?:-[a-z]+)+-[0-9]`
 
 var (
-	binaryRE = regexp.MustCompile(`^/[A-Za-z0-9._@+/-]+$`)
-	regionRE = regexp.MustCompile(`^` + regionPattern + `$`)
+	binaryRE = lazyregexp.New(`^/[A-Za-z0-9._@+/-]+$`)
+	regionRE = lazyregexp.New(`^` + regionPattern + `$`)
 )
 
 type templateData struct {
@@ -383,10 +385,10 @@ type endpointDoc struct {
 }
 
 var (
-	idRE     = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,62}$`)
-	envRE    = regexp.MustCompile(`^[A-Z_][A-Z0-9_]*$`)
-	hostRE   = regexp.MustCompile(`^[a-z0-9](?:[a-z0-9.-]{0,251}[a-z0-9])?$`)
-	headerRE = regexp.MustCompile(`^[a-z0-9-]+$`)
+	idRE     = lazyregexp.New(`^[a-z0-9][a-z0-9-]{0,62}$`)
+	envRE    = lazyregexp.New(`^[A-Z_][A-Z0-9_]*$`)
+	hostRE   = lazyregexp.New(`^[a-z0-9](?:[a-z0-9.-]{0,251}[a-z0-9])?$`)
+	headerRE = lazyregexp.New(`^[a-z0-9-]+$`)
 
 	categories = map[string]v1.ProfileCategory{
 		"other":     v1.ProfileCategory("Other"),

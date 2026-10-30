@@ -13,7 +13,6 @@ import (
 	"maps"
 	"os"
 	"path/filepath"
-	"regexp"
 	"runtime"
 	"slices"
 	"strings"
@@ -21,6 +20,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/acp"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/safefile"
 	"github.com/spf13/cobra"
@@ -309,7 +309,7 @@ func resolveEnterpriseACPEnrollment(requireAuthorization bool) (enterpriseACPEnr
 
 // enterpriseACPProfileNameRE is the form of a profile name an enrollment
 // accepts when acp.profiles does not define it.
-var enterpriseACPProfileNameRE = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`)
+var enterpriseACPProfileNameRE = lazyregexp.New(`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`)
 
 // enterpriseACPShortName bounds a name echoed in a refusal.
 func enterpriseACPShortName(name string) string {

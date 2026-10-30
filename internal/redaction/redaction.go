@@ -59,12 +59,12 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
-	"regexp"
 	"strings"
 	"sync/atomic"
 	"unicode/utf8"
 
 	"github.com/defenseclaw/defenseclaw/internal/envvars"
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 )
 
 // revealEnvVar is the single environment variable that opts logs into
@@ -184,10 +184,10 @@ func projectString(s string) string {
 // pathological prefix values cannot inflate the placeholder past
 // the documented bound.
 var (
-	placeholderShortRe    = regexp.MustCompile(`^<redacted len=\d{1,12}>$`)
-	placeholderStandardRe = regexp.MustCompile(`^<redacted len=\d{1,12} sha=[0-9a-f]{8}>$`)
-	placeholderEntityRe   = regexp.MustCompile(`^<redacted len=\d{1,12} prefix="(?:[^"\\]|\\.){1,16}" sha=[0-9a-f]{8}>$`)
-	placeholderEvidenceRe = regexp.MustCompile(`^<redacted-evidence len=\d{1,12}(?: match=\[\d{1,12}:\d{1,12}\])? sha=[0-9a-f]{8}>$`)
+	placeholderShortRe    = lazyregexp.New(`^<redacted len=\d{1,12}>$`)
+	placeholderStandardRe = lazyregexp.New(`^<redacted len=\d{1,12} sha=[0-9a-f]{8}>$`)
+	placeholderEntityRe   = lazyregexp.New(`^<redacted len=\d{1,12} prefix="(?:[^"\\]|\\.){1,16}" sha=[0-9a-f]{8}>$`)
+	placeholderEvidenceRe = lazyregexp.New(`^<redacted-evidence len=\d{1,12}(?: match=\[\d{1,12}:\d{1,12}\])? sha=[0-9a-f]{8}>$`)
 )
 
 // isPlaceholder reports whether s is one of our own redaction

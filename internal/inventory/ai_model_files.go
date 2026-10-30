@@ -28,12 +28,13 @@ import (
 	"math"
 	"os"
 	"path/filepath"
-	"regexp"
 	"runtime"
 	"sort"
 	"strings"
 	"syscall"
 	"unicode"
+
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 )
 
 const (
@@ -120,7 +121,7 @@ type modelFileCycle struct {
 	incomplete   bool
 }
 
-var modelWeightShardPattern = regexp.MustCompile(`(?i)-[0-9]{1,6}-of-[0-9]{1,6}(?:\.|$)`)
+var modelWeightShardPattern = lazyregexp.New(`(?i)-[0-9]{1,6}-of-[0-9]{1,6}(?:\.|$)`)
 
 // detectModelFiles inventories local model artifacts without reading model
 // binary contents. Specialized stores receive bounded recurring starts while

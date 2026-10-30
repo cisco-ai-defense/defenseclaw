@@ -30,6 +30,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
@@ -68,7 +69,7 @@ const guardianStateFile = "hook_guardian_state.json"
 // its definitive misses per target and the source of each account.
 const enumeratorStateFile = ".targets-enumerator-state.json"
 
-var unverifiedVersionPattern = regexp.MustCompile(`agent version "([^"]*)"`)
+var unverifiedVersionPattern = lazyregexp.New(`agent version "([^"]*)"`)
 
 // describeHookContracts reports every guardian target the guardian could
 // not protect (an unverified hook contract gets its own code) and marks the
@@ -645,7 +646,7 @@ func truncateUTF8(value string, limit int) string {
 // targetAccountMissingPattern is the whole of the guardian's definitive
 // "no such account" resolution error (resolveEnterpriseHookStandaloneAccount
 // in internal/cli), with the account name quoted as Go's %q does.
-var targetAccountMissingPattern = regexp.MustCompile(`^enterprise hooks: target account "(?:[^"\\]|\\.)*" does not exist: no such account$`)
+var targetAccountMissingPattern = lazyregexp.New(`^enterprise hooks: target account "(?:[^"\\]|\\.)*" does not exist: no such account$`)
 
 // targetAccountMissingError matches the guardian's definitive "no such
 // account" resolution error: `enterprise hooks: target account "<name>"
@@ -691,7 +692,7 @@ var userHomePathRefusalPatterns = []*regexp.Regexp{
 // wrapped: a folder the account made unreadable stops the bootstrap's lstat
 // before the strict validate step would (Antigravity ~/.gemini, GAP-0051).
 // The first group is the wrapped refusal.
-var userHomePathRefusalWrapper = regexp.MustCompile(`^bootstrap missing hook config for [a-z][a-z0-9_-]*: enterprise hooks: (.+)$`)
+var userHomePathRefusalWrapper = lazyregexp.New(`^bootstrap missing hook config for [a-z][a-z0-9_-]*: enterprise hooks: (.+)$`)
 
 // userHomePathRefusal reports whether reason is one of those refusals for a
 // path strictly inside home, the target account's own home, bare or inside

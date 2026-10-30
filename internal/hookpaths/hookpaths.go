@@ -23,6 +23,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
 	"github.com/defenseclaw/defenseclaw/internal/copilotargs"
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 	"github.com/defenseclaw/defenseclaw/internal/rxprefilter"
 	"github.com/defenseclaw/defenseclaw/internal/sensor/tactics"
 	"github.com/defenseclaw/defenseclaw/internal/shellparse"
@@ -1832,7 +1833,7 @@ var (
 	cdPrograms        = []string{"cd", "pushd", "popd"}
 	multicallPrograms = []string{"busybox", "toybox"}
 	archivePrograms   = []string{"rsync", "cpio", "bsdcpio", "pax", "tar", "gtar", "bsdtar", "unzip", "7z", "7za", "7zr", "jar", "ditto"}
-	copyLinkOption    = regexp.MustCompile(`(?:^|\s)(?:-[A-Za-z]*[ls][A-Za-z]*|--(?:link|symbolic-link))(?:[\s=]|$)`)
+	copyLinkOption    = lazyregexp.New(`(?:^|\s)(?:-[A-Za-z]*[ls][A-Za-z]*|--(?:link|symbolic-link))(?:[\s=]|$)`)
 	// opaqueLink is a link that an interpreter, PowerShell or a Windows tool
 	// creates from text this package does not evaluate.
 	opaqueLink = regexp.MustCompile(`(?i)\bos\.(?:sym)?link\s*\(|\.(?:hardlink_to|symlink_to|link_to)\s*\(|` +
@@ -2022,7 +2023,7 @@ func writePathForms(path string, linkDepth int) ([]string, bool) {
 // destination spelled so keeps the dynamic reading (GAP-2552).
 const directoryStackOperand = "\x00directory-stack:"
 
-var directoryStackTilde = regexp.MustCompile(`^~([+-]?[0-9]{1,3}|[+-])(/|$)`)
+var directoryStackTilde = lazyregexp.New(`^~([+-]?[0-9]{1,3}|[+-])(/|$)`)
 
 // withDirectoryStackOperands returns words and static with each all-literal
 // directory-stack tilde word read as a static directoryStackOperand path,

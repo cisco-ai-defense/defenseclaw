@@ -13,16 +13,18 @@ import (
 	"slices"
 	"strings"
 	"unicode/utf8"
+
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 )
 
 // Python path rules describe a write, not a mention. Keep the original byte
 // offsets for finding locations while ignoring comments and docstrings.
-var pythonAssignment = regexp.MustCompile(`^\s*([A-Za-z_][A-Za-z_0-9]*)\s*=`)
-var pythonWriteMethod = regexp.MustCompile(`\.(?:write_text|write_bytes|unlink|rmdir|rename|touch)\s*\(`)
+var pythonAssignment = lazyregexp.New(`^\s*([A-Za-z_][A-Za-z_0-9]*)\s*=`)
+var pythonWriteMethod = lazyregexp.New(`\.(?:write_text|write_bytes|unlink|rmdir|rename|touch)\s*\(`)
 var pythonModuleWrite = regexp.MustCompile(`\b(?:os\.(?:remove|unlink|rename|replace|truncate|rmdir|removedirs)|shutil\.(?:move|rmtree|copy|copy2|copyfile|copytree))\s*\(`)
 var pythonWriteOpen = regexp.MustCompile(`\bopen\s*\([^\n)]*,\s*["'][rbtU]*[wax+]`)
-var pythonPathCall = regexp.MustCompile(`\bPath\s*\(`)
-var pythonName = regexp.MustCompile(`[A-Za-z_][A-Za-z_0-9]*`)
+var pythonPathCall = lazyregexp.New(`\bPath\s*\(`)
+var pythonName = lazyregexp.New(`[A-Za-z_][A-Za-z_0-9]*`)
 
 // pythonPathWriteMatch returns the first match of rule, a path, that a write
 // call acts on. The path may sit in a string; the write call must start in
@@ -477,7 +479,7 @@ func pythonImportPathMoves(code string) bool {
 // submodule_search_locations of its spec), the __self__ of a module's
 // function (sys.exit.__self__ is sys), and a change of the directory an -c
 // program imports from (chdir, fchdir, chroot).
-var pythonImportPathChange = regexp.MustCompile(
+var pythonImportPathChange = lazyregexp.New(
 	`\b(?:f?chdir|chroot|__path__|submodule_search_locations|__self__)\b`)
 
 // pythonSysAttributes are the attributes of sys that neither hold nor change

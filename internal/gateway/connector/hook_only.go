@@ -28,7 +28,6 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
-	"regexp"
 	"runtime"
 	"strconv"
 	"strings"
@@ -39,6 +38,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/copilotargs"
 	"github.com/defenseclaw/defenseclaw/internal/hermespath"
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/safefile"
 	"gopkg.in/yaml.v3"
@@ -5720,7 +5720,7 @@ func copilotCommandContainsScript(raw interface{}, hookScript string) bool {
 // Match the Windows doctor's adapter binding and legacy launcher forms on
 // unexpected events. These handlers must be claimed by Setup and teardown
 // even when an older install used a different data directory or binary.
-var copilotPowerShellAdapterBinding = regexp.MustCompile(`(?i)^& '((?:[^']|'')+copilot-hook\.ps1)' -Event '([^']+)'$`)
+var copilotPowerShellAdapterBinding = lazyregexp.New(`(?i)^& '((?:[^']|'')+copilot-hook\.ps1)' -Event '([^']+)'$`)
 
 func copilotPowerShellCommandClaimsHandler(raw interface{}, adapter string) bool {
 	switch value := raw.(type) {

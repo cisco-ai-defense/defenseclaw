@@ -17,13 +17,13 @@ import (
 	"net/netip"
 	"net/url"
 	"path/filepath"
-	"regexp"
 	"sort"
 	"strconv"
 	"strings"
 	"unicode"
 	"unicode/utf8"
 
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 	"github.com/defenseclaw/defenseclaw/internal/observability"
 	"golang.org/x/text/unicode/norm"
 )
@@ -49,11 +49,11 @@ const (
 )
 
 var (
-	observabilityV8StableNamePattern  = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{0,63}$`)
-	observabilityV8EnvNamePattern     = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]{0,255}$`)
-	observabilityV8SelectorPattern    = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$`)
-	observabilityV8ResourceKeyPattern = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9_.-]{0,127}$`)
-	observabilityV8HostnamePattern    = regexp.MustCompile(`^[A-Za-z0-9](?:[A-Za-z0-9.-]{0,251}[A-Za-z0-9])?$`)
+	observabilityV8StableNamePattern  = lazyregexp.New(`^[a-z0-9][a-z0-9_-]{0,63}$`)
+	observabilityV8EnvNamePattern     = lazyregexp.New(`^[A-Za-z_][A-Za-z0-9_]{0,255}$`)
+	observabilityV8SelectorPattern    = lazyregexp.New(`^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$`)
+	observabilityV8ResourceKeyPattern = lazyregexp.New(`^[A-Za-z][A-Za-z0-9_.-]{0,127}$`)
+	observabilityV8HostnamePattern    = lazyregexp.New(`^[A-Za-z0-9](?:[A-Za-z0-9.-]{0,251}[A-Za-z0-9])?$`)
 	observabilityV8ReservedPrefixes   = []netip.Prefix{
 		netip.MustParsePrefix("0.0.0.0/8"),
 		netip.MustParsePrefix("192.0.0.0/24"),

@@ -20,9 +20,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"reflect"
-	"regexp"
 	"sort"
 	"strings"
+
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 )
 
 // Per-run Claude Code managed files (see SandboxRunConfig).
@@ -241,7 +242,7 @@ func claudeCodeSandboxMCPConfig(servers []SandboxMCPServer) ([]byte, error) {
 }
 
 // claudeCodeServerNamePattern is the 2.1.156 allowlist serverName pattern.
-var claudeCodeServerNamePattern = regexp.MustCompile(`^[a-zA-Z0-9_-]+$`)
+var claudeCodeServerNamePattern = lazyregexp.New(`^[a-zA-Z0-9_-]+$`)
 
 // validateClaudeCodeRunSettingsSchema checks the per-run drop-in against the
 // Claude Code 2.1.156 settings schema (zod) for every key DefenseClaw sets,

@@ -40,6 +40,7 @@ import (
 	"syscall"
 
 	"github.com/defenseclaw/defenseclaw/internal/guardrail/semantic"
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 	"gopkg.in/yaml.v3"
 )
 
@@ -1468,7 +1469,7 @@ func validateRequiredRegex(rel, field, pattern string) error {
 }
 
 // safeRuleIDPattern bounds the rule ids echoed in validation errors.
-var safeRuleIDPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$`)
+var safeRuleIDPattern = lazyregexp.New(`^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$`)
 
 // ruleFieldLabel names a rule by its id and its 1-based place in the file, so
 // an author can find it (GAP-1225). An id outside the safe set is left out.

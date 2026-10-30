@@ -26,6 +26,7 @@ import (
 	"regexp"
 	"strings"
 
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 	"github.com/defenseclaw/defenseclaw/internal/legacyconnector"
 )
 
@@ -41,7 +42,7 @@ import (
 // that does not tolerate the extension gates the entire host plane on that
 // platform. A real Windows host proved it -- every kernel observation was
 // discarded for having no agent above it, because the agent was "claude.exe".
-var agentProcessPattern = regexp.MustCompile(
+var agentProcessPattern = lazyregexp.New(
 	`(?i)^(claude|codex|cursor|cursor-agent|aider|goose|crush|opencode|continue|` +
 		`cline|` + legacyconnector.ProcessName + `|copilot|copilot-language-server|gh-copilot|` +
 		`amp|devin|swe-agent|autogpt|agentgpt|babyagi|` +
@@ -69,7 +70,7 @@ var agentCmdlinePatterns = []struct {
 // mcpProcessPattern matches MCP server processes, which are the agent's hands:
 // an agent reaches the filesystem, a database, or a cloud API through one of
 // these rather than directly. They are agent processes in their own right.
-var mcpProcessPattern = regexp.MustCompile(`(?i)(mcp[-_]server|server[-_]mcp|modelcontextprotocol)`)
+var mcpProcessPattern = lazyregexp.New(`(?i)(mcp[-_]server|server[-_]mcp|modelcontextprotocol)`)
 
 // mcpInterpreters are the runtimes an MCP server is normally launched through,
 // where the thing being executed is an argument rather than argv[0].

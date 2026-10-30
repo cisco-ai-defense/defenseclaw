@@ -29,6 +29,8 @@ import (
 	"time"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 )
 
 type CodeGuardScanner struct {
@@ -308,14 +310,14 @@ func (r rule) matches(line string) bool {
 // pathTraversalModuleSpecifier is the quoted module path of an import,
 // require or include statement. The author wrote that path into the
 // program; it is not a path built from input, so it is not a traversal.
-var pathTraversalModuleSpecifier = regexp.MustCompile(`^\s*(?:import|export)\b[^"'` + "`" + `]*\bfrom\s*(?:"[^"$]*"|'[^']*')|^\s*import\s*(?:"[^"$]*"|'[^']*')|\bimport\s*\(\s*(?:"[^"$]*"|'[^']*')|\b(?:require|require_relative|require_once|include|include_once)\s*\(?\s*(?:"[^"$]*"|'[^']*')|^\s*#\s*include\s*(?:"[^"$]*"|'[^']*')|@import\s+(?:url\(\s*)?(?:"[^"$]*"|'[^']*')`)
+var pathTraversalModuleSpecifier = lazyregexp.New(`^\s*(?:import|export)\b[^"'` + "`" + `]*\bfrom\s*(?:"[^"$]*"|'[^']*')|^\s*import\s*(?:"[^"$]*"|'[^']*')|\bimport\s*\(\s*(?:"[^"$]*"|'[^']*')|\b(?:require|require_relative|require_once|include|include_once)\s*\(?\s*(?:"[^"$]*"|'[^']*')|^\s*#\s*include\s*(?:"[^"$]*"|'[^']*')|@import\s+(?:url\(\s*)?(?:"[^"$]*"|'[^']*')`)
 
 // pathTraversalProse is a "..." ellipsis that no path separator follows:
 // prose ("Loading...", "days...") and an ellipsis before a string escape
 // ("Loading...\n", JSON text such as Claude's own onboarding template). An
 // ellipsis before "/" or "\" ("....//", "..././", "...\\") and every
 // two-dot form ("..\temp", "..\notes") stay path traversal (GAP-1935).
-var pathTraversalProse = regexp.MustCompile(`\.{3,}(?:\\[nrt"']|[^./\\]|$)`)
+var pathTraversalProse = lazyregexp.New(`\.{3,}(?:\\[nrt"']|[^./\\]|$)`)
 
 // pathTraversalView is the part of a line CG-PATH-001 reads: what the code
 // does with a path, not an import of a sibling module or prose (GAP-1226,

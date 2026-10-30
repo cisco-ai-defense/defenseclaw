@@ -10,7 +10,6 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
-	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -18,13 +17,14 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 	"github.com/defenseclaw/defenseclaw/internal/secretshape"
 )
 
 // envPlaceholderPattern is a ${NAME} environment placeholder. Nothing in the
 // config loader expands it, so only the name form counts as a reference: a
 // literal wrapped in ${...} is still a literal.
-var envPlaceholderPattern = regexp.MustCompile(`^\$\{[A-Za-z_][A-Za-z0-9_]{0,127}\}$`)
+var envPlaceholderPattern = lazyregexp.New(`^\$\{[A-Za-z_][A-Za-z0-9_]{0,127}\}$`)
 
 // configKey is key as the config loader reads it. The loader matches keys
 // case-insensitively and reads a dotted key as a path (llm.api_key at the top

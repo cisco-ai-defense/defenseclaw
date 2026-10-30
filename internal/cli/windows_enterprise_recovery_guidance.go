@@ -18,6 +18,7 @@ import (
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 )
 
 // Recovery evidence and failure guidance for the standalone Windows
@@ -182,7 +183,7 @@ func windowsEnterpriseRecoveryGatewayWarnings(
 var (
 	// Internal security-descriptor detail that a failed lifecycle must not
 	// hand the administrator as its error.
-	windowsEnterpriseSecurityDetailPattern = regexp.MustCompile(`(?i)\b(DACLs?|ACEs?|ACLs?|SDDL|security descriptors?)\b`)
+	windowsEnterpriseSecurityDetailPattern = lazyregexp.New(`(?i)\b(DACLs?|ACEs?|ACLs?|SDDL|security descriptors?)\b`)
 	windowsEnterpriseSecurityRewrites      = []struct {
 		pattern *regexp.Regexp
 		plain   string
@@ -204,7 +205,7 @@ var (
 			"DefenseClaw could not read the permissions on $1 ($2)",
 		},
 	}
-	windowsEnterpriseDrivePathPattern = regexp.MustCompile(`[A-Za-z]:\\`)
+	windowsEnterpriseDrivePathPattern = lazyregexp.New(`[A-Za-z]:\\`)
 )
 
 // windowsEnterpriseStandaloneErrorText turns a lifecycle diagnostic into the
@@ -284,7 +285,7 @@ func windowsEnterpriseCommittedJournalNextStep(original string, installed bool) 
 
 // windowsEnterpriseANSIPattern matches the color sequences PowerShell may
 // write around an error record.
-var windowsEnterpriseANSIPattern = regexp.MustCompile(`\x1b\[[0-9;]*m`)
+var windowsEnterpriseANSIPattern = lazyregexp.New(`\x1b\[[0-9;]*m`)
 
 // windowsEnterpriseExecutionPolicyRefusal explains a lifecycle that
 // PowerShell refused to start because of the machine execution policy. A

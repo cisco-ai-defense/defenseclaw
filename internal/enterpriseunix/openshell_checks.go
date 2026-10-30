@@ -18,12 +18,12 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"regexp"
 	"runtime"
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 	"github.com/defenseclaw/defenseclaw/internal/openshell"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxapi"
 	"github.com/defenseclaw/defenseclaw/internal/posixacl"
@@ -459,7 +459,7 @@ func (e *Env) openshellBinaryVersion(ctx context.Context, path string) (openshel
 	return openshell.VersionFromOutput(strings.TrimSpace(string(res.Stdout)))
 }
 
-var versionRange = regexp.MustCompile(`^>=([0-9]+\.[0-9]+\.[0-9]+)(?: <([0-9]+\.[0-9]+\.[0-9]+))?$`)
+var versionRange = lazyregexp.New(`^>=([0-9]+\.[0-9]+\.[0-9]+)(?: <([0-9]+\.[0-9]+\.[0-9]+))?$`)
 
 // versionAllowed reports whether have satisfies enterprise.openshell.version:
 // an exact release, a ">=x <y" range, or (empty) the releases DefenseClaw

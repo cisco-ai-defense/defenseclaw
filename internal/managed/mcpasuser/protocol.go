@@ -27,11 +27,11 @@ import (
 	"fmt"
 	"io"
 	"path/filepath"
-	"regexp"
 	"strings"
 	"unicode"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 )
 
 const (
@@ -77,9 +77,9 @@ func PublishedConnector(connector string) bool {
 }
 
 var (
-	serviceNamePattern = regexp.MustCompile(`^[A-Za-z0-9_.-]{1,80}$`)
-	sidPattern         = regexp.MustCompile(`^S-1-[0-9]+(-[0-9]+){1,14}$`)
-	digestPattern      = regexp.MustCompile(`^[0-9a-f]{64}$`)
+	serviceNamePattern = lazyregexp.New(`^[A-Za-z0-9_.-]{1,80}$`)
+	sidPattern         = lazyregexp.New(`^S-1-[0-9]+(-[0-9]+){1,14}$`)
+	digestPattern      = lazyregexp.New(`^[0-9a-f]{64}$`)
 )
 
 // Request names one published server. It carries no command: the enumerator

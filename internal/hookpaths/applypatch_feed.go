@@ -8,9 +8,10 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"regexp"
 	"runtime"
 	"strings"
+
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 )
 
 // A staged patch is an apply_patch call that reads its envelope from a file:
@@ -25,7 +26,7 @@ import (
 const patchFeedPlaceholder = "_dc_inline_patch_"
 
 // patchFeedProgram matches a program word the staged-patch reading knows.
-var patchFeedProgram = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9_.-]*$`)
+var patchFeedProgram = lazyregexp.New(`^[A-Za-z][A-Za-z0-9_.-]*$`)
 
 // patchStagedFeeds returns the files that the apply_patch calls of a shell
 // text read on stdin. ok is false unless the text is a staged-patch command

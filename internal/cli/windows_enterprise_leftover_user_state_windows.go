@@ -19,13 +19,13 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"regexp"
 	"sort"
 	"strings"
 
 	"golang.org/x/sys/windows/registry"
 
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/winpath"
 )
@@ -58,7 +58,7 @@ var windowsEnterpriseStandaloneStateRootGone = func() bool {
 	return os.IsNotExist(err)
 }
 
-var windowsEnterpriseProfileSIDPattern = regexp.MustCompile(`^S-1-(5-21|12-1)-[0-9-]+$`)
+var windowsEnterpriseProfileSIDPattern = lazyregexp.New(`^S-1-(5-21|12-1)-[0-9-]+$`)
 
 func listWindowsEnterpriseProfileHomes() []windowsEnterpriseProfileHome {
 	key, err := registry.OpenKey(registry.LOCAL_MACHINE,

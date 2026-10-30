@@ -14,8 +14,9 @@ import (
 	"bytes"
 	"fmt"
 	"path"
-	"regexp"
 	"strings"
+
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 )
 
 // Violation is one lint finding. Hook and Selector are -1 when the finding
@@ -50,7 +51,7 @@ type LintOptions struct {
 // observe policy's system group).
 var systemPaths = map[string]bool{"/etc/shadow": true, "/etc/sudoers.d/": true}
 
-var dns1123 = regexp.MustCompile(`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`)
+var dns1123 = lazyregexp.New(`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`)
 
 // overrideForbiddenDirs and overrideForbiddenFiles are path fragments an
 // Override selector must never name: the hook runtime, provider credentials

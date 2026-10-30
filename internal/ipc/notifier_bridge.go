@@ -15,6 +15,7 @@ import (
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/gateway/notifier"
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 	pb "github.com/defenseclaw/defenseclaw/proto/defenseclaw/secureclient/v1"
 )
 
@@ -40,7 +41,7 @@ import (
 // AVC wire body can carry rule detail on subsequent lines) is fully
 // captured for downstream cleanup rather than silently degrading to
 // the generic "a policy violation" copy.
-var ciscoAIDefenseBodyPrefix = regexp.MustCompile(`(?s)^Cisco AI Defense:\s*(.*)$`)
+var ciscoAIDefenseBodyPrefix = lazyregexp.New(`(?s)^Cisco AI Defense:\s*(.*)$`)
 
 // categoryTokenPattern is the "keep" filter applied to each
 // comma-separated element of the AID findings list. Category labels
@@ -55,7 +56,7 @@ var ciscoAIDefenseBodyPrefix = regexp.MustCompile(`(?s)^Cisco AI Defense:\s*(.*)
 // The underscore requirement lets us keep every real AID category
 // while dropping every rule-name shape. Any lowercase letter or
 // space is also disqualifying.
-var categoryTokenPattern = regexp.MustCompile(`^[A-Z][A-Z0-9]*(_[A-Z0-9]+)+$`)
+var categoryTokenPattern = lazyregexp.New(`^[A-Z][A-Z0-9]*(_[A-Z0-9]+)+$`)
 
 // paranoidSecretPatterns is a last-line defense against notifier call
 // sites leaking a secret into the notification body. The upstream

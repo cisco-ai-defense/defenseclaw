@@ -16,7 +16,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"regexp"
 	"strconv"
 	"strings"
 
@@ -24,6 +23,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 )
 
 // Codex requirements.toml is a single administrator file. DefenseClaw never
@@ -107,8 +107,8 @@ func tomlString(value string) string {
 }
 
 var (
-	tomlTableHeader = regexp.MustCompile(`^\s*\[\s*([^\[\]]+?)\s*\]\s*(#.*)?$`)
-	tomlArrayHeader = regexp.MustCompile(`^\s*\[\[\s*([^\[\]]+?)\s*\]\]\s*(#.*)?$`)
+	tomlTableHeader = lazyregexp.New(`^\s*\[\s*([^\[\]]+?)\s*\]\s*(#.*)?$`)
+	tomlArrayHeader = lazyregexp.New(`^\s*\[\[\s*([^\[\]]+?)\s*\]\]\s*(#.*)?$`)
 )
 
 // stripCodexOwned removes DefenseClaw's regions and marked lines, leaving

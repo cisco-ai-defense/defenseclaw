@@ -24,12 +24,12 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"regexp"
 	"sort"
 	"strings"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/config/configwrite"
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 )
 
 // A change event is the record a root command leaves when it changes the
@@ -87,12 +87,12 @@ const (
 )
 
 var (
-	changeEventIDPattern = regexp.MustCompile(`^c-[0-7][0-9A-HJKMNP-TV-Z]{25}$`)
-	changeCodePattern    = regexp.MustCompile(`^[a-z][a-z0-9_]{0,63}$`)
-	changeSHA256Pattern  = regexp.MustCompile(`^[0-9a-f]{64}$`)
-	changeKeyIDPattern   = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$`)
-	changeSecretPattern  = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,62}$`)
-	changeActorPattern   = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:/-]{0,255}$`)
+	changeEventIDPattern = lazyregexp.New(`^c-[0-7][0-9A-HJKMNP-TV-Z]{25}$`)
+	changeCodePattern    = lazyregexp.New(`^[a-z][a-z0-9_]{0,63}$`)
+	changeSHA256Pattern  = lazyregexp.New(`^[0-9a-f]{64}$`)
+	changeKeyIDPattern   = lazyregexp.New(`^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$`)
+	changeSecretPattern  = lazyregexp.New(`^[a-z0-9][a-z0-9-]{0,62}$`)
+	changeActorPattern   = lazyregexp.New(`^[A-Za-z0-9][A-Za-z0-9._:/-]{0,255}$`)
 
 	// maxReportedChangeEvents is how many reported events the spool keeps:
 	// a write removes the oldest reported events beyond it.

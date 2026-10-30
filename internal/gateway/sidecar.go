@@ -55,6 +55,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail"
 	"github.com/defenseclaw/defenseclaw/internal/inventory"
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/managed/cloudreg"
 	"github.com/defenseclaw/defenseclaw/internal/managed/cmidbroker"
@@ -1032,6 +1033,11 @@ func (s *Sidecar) Run(ctx context.Context) (runErr error) {
 	defer s.setRunCancel(nil)
 	// An idle gateway gives back the heap its calls freed (GAP-2013).
 	go runIdleMemoryRelease(runCtx)
+	// Package-level patterns compile on first use (internal/lazyregexp), so
+	// that a hook process does not compile them all at start. The gateway
+	// compiles them now, off the request path, so that its first hook does
+	// not pay for them either.
+	go lazyregexp.CompileAll()
 	// The endpoint inventory cannot be emitted from NewSidecar: schema v8
 	// deliberately binds its generation-owned runtime afterward. Publish the
 	// first complete connector/MCP snapshot immediately after that binding, then

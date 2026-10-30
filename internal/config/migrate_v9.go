@@ -30,7 +30,6 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
-	"regexp"
 	"runtime"
 	"slices"
 	"sort"
@@ -45,6 +44,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/config/internal/cfgtxn"
 	"github.com/defenseclaw/defenseclaw/internal/configs"
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/policy/regodata"
 	"github.com/defenseclaw/defenseclaw/policies"
@@ -2695,7 +2695,7 @@ func v9ChildMappings(m *yaml.Node) []v9NamedNode {
 
 var (
 	v9BuiltinPacks   = map[string]bool{"default": true, "strict": true, "permissive": true}
-	v9PackNameUnsafe = regexp.MustCompile(`[^a-z0-9_-]+`)
+	v9PackNameUnsafe = lazyregexp.New(`[^a-z0-9_-]+`)
 )
 
 // v9GuardrailScopes are the guardrail scopes that select a pack and

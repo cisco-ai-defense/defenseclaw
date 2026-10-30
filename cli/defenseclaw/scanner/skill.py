@@ -169,6 +169,20 @@ def _utf8_skill_copy(target: str) -> Iterator[str]:
 LLM_ANALYSIS_FAILED = "LLM_ANALYSIS_FAILED"
 
 
+def _scanner_llm_configured() -> bool:
+    """Whether skill-scanner can make an LLM call in this scan.
+
+    Its LLM analyzer, behavioral alignment client and adjudicator take their
+    model and provider only from ``SKILL_SCANNER_*`` variables, which
+    :func:`settings.scanner_env` sets from the resolved judge and otherwise
+    removes. With none set, no scanner component reaches LiteLLM.
+    """
+    return any(
+        value.strip() and name.upper().startswith("SKILL_SCANNER_") and "LLM" in name.upper()
+        for name, value in os.environ.items()
+    )
+
+
 class JudgeUnavailableError(RuntimeError):
     """The LLM judge did not run, so the scan is incomplete (GAP-0376)."""
 
@@ -251,7 +265,6 @@ class SkillScannerWrapper:
 
         # Accept a well-formed answer from any judge model (GAP-2609).
         install_judge_compat()
-        drop_unsupported_litellm_params()
         cfg = self.config
         policy = _scan_policy(ScanPolicy, cfg)
 
@@ -288,6 +301,10 @@ class SkillScannerWrapper:
 
         with settings.scanner_env(env, secure_client=self.secure_client):
             self._inject_env()
+            if _scanner_llm_configured():
+                # Importing LiteLLM costs about 2 s; a scan with no judge
+                # model makes no LLM call, so it skips the import.
+                drop_unsupported_litellm_params()
             analyzers = build_analyzers(**build_kwargs)
             scanner = SkillScanner(analyzers=analyzers, policy=policy)
 

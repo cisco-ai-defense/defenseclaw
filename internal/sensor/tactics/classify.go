@@ -24,6 +24,8 @@ package tactics
 import (
 	"regexp"
 	"strings"
+
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 )
 
 // Observation is one normalised kernel event handed to the classifier.
@@ -108,19 +110,19 @@ var exfilHosts = []string{
 }
 
 // exfilCommand recognises a transfer to a public drop point in one argv.
-var exfilCommand = regexp.MustCompile(`(?i)\b(curl|wget|nc|ncat|scp|rsync|Invoke-WebRequest|iwr|Invoke-RestMethod)\b`)
+var exfilCommand = lazyregexp.New(`(?i)\b(curl|wget|nc|ncat|scp|rsync|Invoke-WebRequest|iwr|Invoke-RestMethod)\b`)
 
 // credentialReader recognises the commands that read a file, so a path in an
 // argv is only treated as credential access when something is actually reading
 // it. Without this an editor opening a config, or a grep across a tree, would
 // classify as a credential read.
-var credentialReader = regexp.MustCompile(
+var credentialReader = lazyregexp.New(
 	`(?i)\b(cat|head|tail|less|more|strings|xxd|od|base64|cp|scp|rsync|dd|` +
 		`type|Get-Content|gc|Copy-Item|awk|sed|python3?|node|jq)\b`)
 
 // localMCPCommand recognises an agent starting a local MCP tool server, which
 // is how it reaches the filesystem, a database, or a cloud API.
-var localMCPCommand = regexp.MustCompile(`(?i)(mcp[-_]server|server[-_]mcp|@modelcontextprotocol/)`)
+var localMCPCommand = lazyregexp.New(`(?i)(mcp[-_]server|server[-_]mcp|@modelcontextprotocol/)`)
 
 // Classify turns one observation into a tactic match, or reports false when
 // the observation is not one.
@@ -432,9 +434,9 @@ func encodingCommand(words []shellWord) (string, bool) {
 var (
 	harnessShell          = `^(?:"[^"]*"|\S*)\s+(?:-\S*\s+)*["']?`
 	harnessSnapshotFile   = `["']?[^\s"']*[/\\]shell-snapshots[/\\]snapshot-[\w.-]+\.sh`
-	harnessSnapshotWriter = regexp.MustCompile(harnessShell + `SNAPSHOT_FILE=` + harnessSnapshotFile)
-	harnessToolCall       = regexp.MustCompile(harnessShell + `source\s+` + harnessSnapshotFile)
-	harnessEval           = regexp.MustCompile(
+	harnessSnapshotWriter = lazyregexp.New(harnessShell + `SNAPSHOT_FILE=` + harnessSnapshotFile)
+	harnessToolCall       = lazyregexp.New(harnessShell + `source\s+` + harnessSnapshotFile)
+	harnessEval           = lazyregexp.New(
 		`(?s)&&\s*eval\s+(.+?)\s*<\s*/dev/null\s*&&\s*pwd\s+-P\s*>\|\s*\S*claude-[0-9a-f]+-cwd["']?\s*$`)
 )
 

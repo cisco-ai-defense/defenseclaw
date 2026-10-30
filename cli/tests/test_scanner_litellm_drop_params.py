@@ -16,12 +16,16 @@
 
 """Scanner judges drop request parameters the model refuses (GAP-2612)."""
 
+import os
 import unittest
-from unittest.mock import patch
+from datetime import datetime, timezone
+from unittest.mock import MagicMock, patch
 
 import litellm
-from defenseclaw.config import LLMConfig, MCPScannerConfig, MCPServerEntry
+from defenseclaw.config import LLMConfig, MCPScannerConfig, MCPServerEntry, SkillScannerConfig
+from defenseclaw.models import ScanResult
 from defenseclaw.scanner import _llm_env
+from defenseclaw.scanner import skill as skill_mod
 from defenseclaw.scanner.mcp import MCPScannerWrapper
 from litellm.exceptions import UnsupportedParamsError
 from litellm.utils import get_optional_params
@@ -67,6 +71,54 @@ class DropUnsupportedParamsTest(unittest.TestCase):
                 patch.object(MCPScannerWrapper, "_scan_local", side_effect=scan_local):
             wrapper.scan("local-srv", entry)
         self.assertEqual(seen, [True])
+
+
+class SkillScanLiteLLMTest(unittest.TestCase):
+    """A skill scan turns drop_params on only when a judge can call LiteLLM.
+
+    Importing LiteLLM takes about 2 s; a static-only scan never calls it.
+    """
+
+    def _scan(self, scanner_cfg: SkillScannerConfig, llm: LLMConfig) -> list[dict[str, str]]:
+        seen: list[dict[str, str]] = []
+
+        def drop() -> None:
+            seen.append({k: v for k, v in os.environ.items() if k.startswith("SKILL_SCANNER_")})
+
+        def build(**_kwargs):
+            # The SDK builds its analyzers after drop_params is set.
+            seen.append({"built": "1"})
+            return []
+
+        sdk = MagicMock()
+        sdk.SkillScanner.return_value.scan_skill.return_value = MagicMock(findings=[])
+        result = ScanResult(scanner="skill-scanner", target="/tmp/skill", timestamp=datetime.now(timezone.utc))
+        with patch.dict("sys.modules", {
+            "skill_scanner": sdk,
+            "skill_scanner.core": MagicMock(),
+            "skill_scanner.core.analyzer_factory": MagicMock(build_analyzers=build),
+            "skill_scanner.core.scan_policy": MagicMock(),
+        }), patch.object(skill_mod, "drop_unsupported_litellm_params", side_effect=drop), \
+                patch.object(skill_mod, "install_judge_compat", create=True), \
+                patch.object(skill_mod.SkillScannerWrapper, "_convert", return_value=result), \
+                patch.dict(os.environ, {"SKILL_SCANNER_LLM_MODEL": "inherited/model"}):
+            skill_mod.SkillScannerWrapper(scanner_cfg, llm=llm).scan("/tmp/skill")
+        return seen
+
+    def test_judge_scan_drops_params_before_the_analyzers_are_built(self):
+        seen = self._scan(
+            SkillScannerConfig(use_llm=True),
+            LLMConfig(provider="openai", model="openai/gpt-test", api_key="test-key"),
+        )
+        self.assertEqual(len(seen), 2)
+        self.assertEqual(seen[0].get("SKILL_SCANNER_LLM_MODEL"), "openai/gpt-test")
+        self.assertEqual(seen[1], {"built": "1"})
+
+    def test_static_scan_does_not_import_litellm(self):
+        # The shell's SKILL_SCANNER_LLM_MODEL is removed for the scan, as
+        # before, so it does not count as a judge.
+        seen = self._scan(SkillScannerConfig(use_llm=False), LLMConfig())
+        self.assertEqual(seen, [{"built": "1"}])
 
 
 if __name__ == "__main__":

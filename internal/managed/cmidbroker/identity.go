@@ -5,8 +5,9 @@ package cmidbroker
 
 import (
 	"fmt"
-	"regexp"
 	"strings"
+
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 )
 
 const (
@@ -15,7 +16,7 @@ const (
 	localPipePrefix       = `\\.\pipe\`
 )
 
-var certificationGatewayPattern = regexp.MustCompile(`^DefenseClawCertGateway_([a-f0-9]{10})$`)
+var certificationGatewayPattern = lazyregexp.New(`^DefenseClawCertGateway_([a-f0-9]{10})$`)
 
 // ValidateIdentityBinding ensures all names describe one production or
 // certification scope. The pipe leaf is exactly the broker service name, so a

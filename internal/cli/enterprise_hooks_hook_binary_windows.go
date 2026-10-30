@@ -23,7 +23,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -31,6 +30,7 @@ import (
 	"golang.org/x/sys/windows"
 
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/winpath"
 )
@@ -105,7 +105,7 @@ func watchWindowsStandaloneHookBinary(ctx context.Context, stderr io.Writer) {
 
 // windowsReplacementCopyPattern is the copy an upgrade keeps of a binary a
 // running program still used: <binary>.backup.<32 hex>.
-var windowsReplacementCopyPattern = regexp.MustCompile(`^(?i:defenseclaw[a-z0-9-]*\.exe)\.backup\.[0-9a-f]{32}$`)
+var windowsReplacementCopyPattern = lazyregexp.New(`^(?i:defenseclaw[a-z0-9-]*\.exe)\.backup\.[0-9a-f]{32}$`)
 
 // removeWindowsStandaloneReplacementCopies removes, as soon as no program
 // runs it any more, the copy an upgrade kept of a binary an editor's ACP

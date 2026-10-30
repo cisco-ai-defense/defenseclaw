@@ -17,13 +17,13 @@
 package gateway
 
 import (
-	"regexp"
 	"runtime"
 	"slices"
 	"strings"
 	"sync/atomic"
 
 	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 	"github.com/defenseclaw/defenseclaw/internal/redaction"
 	"github.com/defenseclaw/defenseclaw/internal/scanner"
 )
@@ -56,7 +56,7 @@ func trustedBuiltInMatchReason(reason string) bool {
 }
 
 // matchLabelStart opens every "<rule-id>:<title>" label of a matched reason.
-var matchLabelStart = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}:`)
+var matchLabelStart = lazyregexp.New(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}:`)
 
 // splitMatchLabels splits the body of a "matched: " reason into its labels.
 // Labels are joined with ", ", and a rule title may hold ", " too ("P0 marker,
@@ -159,7 +159,7 @@ var standaloneEnterpriseActive atomic.Bool
 func setStandaloneEnterpriseActive(v bool) { standaloneEnterpriseActive.Store(v) }
 
 // agentRuleIDPattern is the shape of a rule ID an agent message may name.
-var agentRuleIDPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
+var agentRuleIDPattern = lazyregexp.New(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
 
 // agentBlockNoRetry ends every policy block the agent receives. An agent that
 // got only the rule name sometimes rewrote the blocked command to get the
@@ -295,7 +295,7 @@ func agentObservedReason(action, sourceReason, displayReason string, policy reda
 // reasons (inspect.go): `tool "<name>" is on the static block list` and
 // `mcp server "<name>" is blocked`. The name is the tool or server the agent
 // itself called; any other text fails the match and stays redacted.
-var agentBlockListReasonPattern = regexp.MustCompile(
+var agentBlockListReasonPattern = lazyregexp.New(
 	`^(tool|mcp server) "([A-Za-z0-9][A-Za-z0-9._:@/-]{0,127})" (?:is on the static block list|is blocked)$`)
 
 // agentJudgeKinds words the LLM judge reasons (llm_judge.go) for the agent.
@@ -372,20 +372,20 @@ var agentAssetPolicyKeys = []string{
 
 // agentAssetPolicyValuePattern is the shape of a value an asset-policy reason
 // may show the agent: the asset name the agent itself asked for, or an enum.
-var agentAssetPolicyValuePattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:@/-]{0,127}$`)
+var agentAssetPolicyValuePattern = lazyregexp.New(`^[A-Za-z0-9][A-Za-z0-9._:@/-]{0,127}$`)
 
 // agentAssetPolicyNamePattern is the shape of an asset_name the agent may be
 // shown: the plain shape, with letters, marks and digits of any script, so a
 // denied skill named "epa-café" reads as a sentence like an ASCII one instead
 // of the redacted key=value reason (GAP-0572). Spaces, quotes, controls and
 // format characters still fail the match and stay redacted.
-var agentAssetPolicyNamePattern = regexp.MustCompile(`^[\p{L}\p{N}][\p{L}\p{M}\p{N}._:@/-]{0,127}$`)
+var agentAssetPolicyNamePattern = lazyregexp.New(`^[\p{L}\p{N}][\p{L}\p{M}\p{N}._:@/-]{0,127}$`)
 
 // Only the fixed runtime-disable template and known admission verdict kinds
 // may become an agent sentence. Scanner errors and finding titles can contain
 // untrusted text, so the subject names their category without copying them.
-var agentMCPAdmissionPattern = regexp.MustCompile(`^mcp server "([A-Za-z0-9][A-Za-z0-9._:@/-]{0,127})" is disabled because its install admission rejected it \(([^\r\n]{1,512})\); asset_policy\.mode does not apply to admission verdicts$`)
-var agentMCPFindingPattern = regexp.MustCompile(`^auto-block: watch detected (LOW|MEDIUM|HIGH|CRITICAL) findings \(scanner=[A-Za-z0-9._-]{1,64}\)(?:: [^\r\n]{1,512})?(?:; rescan retained block)?$`)
+var agentMCPAdmissionPattern = lazyregexp.New(`^mcp server "([A-Za-z0-9][A-Za-z0-9._:@/-]{0,127})" is disabled because its install admission rejected it \(([^\r\n]{1,512})\); asset_policy\.mode does not apply to admission verdicts$`)
+var agentMCPFindingPattern = lazyregexp.New(`^auto-block: watch detected (LOW|MEDIUM|HIGH|CRITICAL) findings \(scanner=[A-Za-z0-9._-]{1,64}\)(?:: [^\r\n]{1,512})?(?:; rescan retained block)?$`)
 
 func agentMCPAdmissionSubject(reason string) string {
 	m := agentMCPAdmissionPattern.FindStringSubmatch(reason)

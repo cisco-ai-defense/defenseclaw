@@ -19,7 +19,6 @@ package gateway
 import (
 	"encoding/base64"
 	"path"
-	"regexp"
 	"runtime"
 	"slices"
 	"strconv"
@@ -27,6 +26,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
 	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 )
 
 const (
@@ -2053,7 +2053,7 @@ func matchesActiveSudoers(
 		integritySingleChild(value, "/etc/sudoers.d")
 }
 
-var unrestrictedSudoersGrantLine = regexp.MustCompile(
+var unrestrictedSudoersGrantLine = lazyregexp.New(
 	`^(%?[A-Za-z_][A-Za-z0-9_.-]*|ALL)[\t ]+ALL[\t ]*=[\t ]*\([\t ]*ALL(?:[\t ]*:[\t ]*ALL)?[\t ]*\)[\t ]+NOPASSWD[\t ]*:[\t ]*ALL[\t ]*$`,
 )
 

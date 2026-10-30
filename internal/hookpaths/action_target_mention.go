@@ -24,6 +24,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 	"mvdan.cc/sh/v3/syntax"
 )
 
@@ -277,8 +278,8 @@ func actionPosixTargetMention(command, cwd, home string, depth int, stateOnly bo
 // pathlib, str.format, % formatting, Perl's . operator or a .ssh directory
 // variable joined later (GAP-1732, GAP-2005, the GAP-0475 class).
 var (
-	actionInterpreterSSHName  = regexp.MustCompile(`\.ssh\b`)
-	actionInterpreterKeysName = regexp.MustCompile(`\bauthorized_keys2?\b`)
+	actionInterpreterSSHName  = lazyregexp.New(`\.ssh\b`)
+	actionInterpreterKeysName = lazyregexp.New(`\bauthorized_keys2?\b`)
 )
 
 // actionInterpreterHomeCall matches the home spellings that the
@@ -286,7 +287,7 @@ var (
 // expanduser: GAP-0475, a path bound again before the write, GAP-1299).
 // Such code is allowed only when that proof places every write on an
 // ordinary path; a home call elsewhere in the code proves nothing (GAP-2005).
-var actionInterpreterHomeCall = regexp.MustCompile(`Path\.home\(\)|expanduser\(`)
+var actionInterpreterHomeCall = lazyregexp.New(`Path\.home\(\)|expanduser\(`)
 
 // actionInterpreterCodeWrites reports a writer call (open, write_text,
 // appendFileSync ...) in executable code, not inside a string or comment:
@@ -574,7 +575,7 @@ func actionEvaluatesRuntimeNames(file *syntax.File, uncalled map[*syntax.FuncDec
 // that runs code for every file: a pattern followed by (e:code:),
 // (e'code'), (+name) or a longer qualifier list such as (.e:code:)
 // (RV6-1). Prose such as "see (e.g. x)" has a space before the paren.
-var actionZshQualifierText = regexp.MustCompile(`[^\s(]\([^()\s]*(?:e[^A-Za-z0-9_\s()]|\+[A-Za-z_])`)
+var actionZshQualifierText = lazyregexp.New(`[^\s(]\([^()\s]*(?:e[^A-Za-z0-9_\s()]|\+[A-Za-z_])`)
 
 // actionZshGlobSubstWord reports a word with a zsh glob-subst expansion:
 // $~name, ${~name} or a ${(...~...)name} flag list. The bash parser reads
@@ -809,7 +810,7 @@ func patchCommandResolutionChange(line string) bool {
 // not the home. Writers and redirects keep the conservative home spelling.
 const actionLiteralTilde = "\x1e"
 
-var actionMentionToken = regexp.MustCompile(`[A-Za-z0-9_./~*?\[\]\x1e-]+`)
+var actionMentionToken = lazyregexp.New(`[A-Za-z0-9_./~*?\[\]\x1e-]+`)
 
 func actionLiteralArgumentProgramsOnly(file *syntax.File, home string) bool {
 	literal := true
@@ -1319,8 +1320,8 @@ func (g *actionGlobs) dotNames() bool { return g != nil && g.dots }
 // GLOBIGNORE, zsh GLOB_DOTS or a (D) qualifier, or a startup file
 // (BASH_ENV) that may set one.
 var (
-	actionDotglobSetting   = regexp.MustCompile(`dotglob|globdots|globignore|bashenv`)
-	actionDotglobQualifier = regexp.MustCompile(`[*?\]]\([^()]*D[^()]*\)`)
+	actionDotglobSetting   = lazyregexp.New(`dotglob|globdots|globignore|bashenv`)
+	actionDotglobQualifier = lazyregexp.New(`[*?\]]\([^()]*D[^()]*\)`)
 )
 
 func actionCommandMayDotglob(command string) bool {
@@ -3144,7 +3145,7 @@ func actionWindowsDynamicKeyPath(value string) bool {
 	}
 }
 
-var actionWindowsDynamicPart = regexp.MustCompile(`\$\{[^}]*\}|\$\([^)]*\)|\$[a-z_][a-z0-9_]*(:[a-z_][a-z0-9_]*)?|%[^%/]*%`)
+var actionWindowsDynamicPart = lazyregexp.New(`\$\{[^}]*\}|\$\([^)]*\)|\$[a-z_][a-z0-9_]*(:[a-z_][a-z0-9_]*)?|%[^%/]*%`)
 
 func actionWindowsProtectedGlobReach(pattern, cwd, home string) bool {
 	pattern = strings.ReplaceAll(pattern, `\`, "/")

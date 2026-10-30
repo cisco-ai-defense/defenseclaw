@@ -24,7 +24,6 @@ import (
 	"io"
 	"math"
 	"os"
-	"regexp"
 	"runtime"
 	"strconv"
 	"strings"
@@ -33,6 +32,7 @@ import (
 
 	"gopkg.in/yaml.v3"
 
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
@@ -827,17 +827,17 @@ func v8Error(source string, code V8YAMLErrorCode, path string, node *yaml.Node, 
 	return result
 }
 
-var v8YAMLSyntaxLine = regexp.MustCompile(`(?:^|[ :])line ([0-9]+)(?:[ :]|$)`)
+var v8YAMLSyntaxLine = lazyregexp.New(`(?:^|[ :])line ([0-9]+)(?:[ :]|$)`)
 
 // yaml.v3 reports parser errors (unlike scanner errors) with the 0-based
 // line of their context mark, one line before the bad line that Python and
 // editors name (GAP-1430).
-var v8YAMLParserError = regexp.MustCompile(
+var v8YAMLParserError = lazyregexp.New(
 	`did not find expected (?:<document start>|node content|key|'-' indicator|',' or '\]'|',' or '\}')`)
 
 // v8YAMLSyntaxReasonPrefix strips the "yaml: line N: " lead from a yaml.v3
 // error so only the parser's reason is left.
-var v8YAMLSyntaxReasonPrefix = regexp.MustCompile(`^(?:yaml: )?(?:line [0-9]+: )?`)
+var v8YAMLSyntaxReasonPrefix = lazyregexp.New(`^(?:yaml: )?(?:line [0-9]+: )?`)
 
 // v8YAMLSyntaxReason returns the parser's fixed-text reason, or "" when the
 // reason could quote the file (anchor or tag names) or is not a short phrase.

@@ -21,9 +21,9 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
-	"regexp"
 	"strings"
 
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 	"github.com/defenseclaw/defenseclaw/internal/openshell"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxapi"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/workspace"
@@ -52,7 +52,7 @@ const (
 	roleCredential = "credential"
 )
 
-var labelValueUnsafe = regexp.MustCompile(`[^A-Za-z0-9._-]+`)
+var labelValueUnsafe = lazyregexp.New(`[^A-Za-z0-9._-]+`)
 
 // labelValue makes s a valid label value (at most 63 characters, starting
 // and ending alphanumeric), or "".
@@ -107,7 +107,7 @@ func errReplaced(name string) error {
 			"DefenseClaw leaves it alone: `defenseclaw sandbox delete %s` releases what DefenseClaw held for its own", name, name)
 }
 
-var dnsUnsafe = regexp.MustCompile(`[^a-z0-9-]+`)
+var dnsUnsafe = lazyregexp.New(`[^a-z0-9-]+`)
 
 // nameSuffixLen is the "-<rand4>" of a generated name.
 const nameSuffixLen = 5
@@ -160,7 +160,7 @@ func credentialProfileID(name, host string, port int) string {
 // credentialProfilePrefix starts every --credential provider profile id.
 const credentialProfilePrefix = "dc-cred-"
 
-var imageVersionUnsafe = regexp.MustCompile(`[^A-Za-z0-9.+_-]+`)
+var imageVersionUnsafe = lazyregexp.New(`[^A-Za-z0-9.+_-]+`)
 
 // ImageVersion is the DefenseClaw version baked into overlay image content
 // hashes. `defenseclaw sandbox image build` must use the same value, or the

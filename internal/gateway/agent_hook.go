@@ -27,7 +27,6 @@ import (
 	"os"
 	"path"
 	"path/filepath"
-	"regexp"
 	"runtime"
 	"runtime/debug"
 	"slices"
@@ -46,6 +45,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector/hookexec"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/notifier"
 	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/managed/mcpasuser"
 	"github.com/defenseclaw/defenseclaw/internal/observability"
@@ -3483,7 +3483,7 @@ const (
 
 // unparsedToolCallReasonConnector is the connector name the reason may hold:
 // a registry name from the hook route, never payload text.
-var unparsedToolCallReasonConnector = regexp.MustCompile(`^[a-z][a-z0-9-]{0,31}$`)
+var unparsedToolCallReasonConnector = lazyregexp.New(`^[a-z][a-z0-9-]{0,31}$`)
 
 // unparsedToolCallReason is the reason of the hookToolCallUnparsedRuleID
 // block for connectorName.

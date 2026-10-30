@@ -24,7 +24,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"regexp"
 	"runtime"
 	"sort"
 	"strconv"
@@ -40,6 +39,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/daemon"
 	"github.com/defenseclaw/defenseclaw/internal/gateway"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
@@ -161,7 +161,7 @@ func gatewayStatusDroppableValue(err error) bool {
 	return schemaErr.Keyword == "enum" || schemaErr.Keyword == "type" || schemaErr.Keyword == "additionalProperties"
 }
 
-var yamlPathSegment = regexp.MustCompile(`^(?:\.([A-Za-z0-9_-]+)|\[([0-9]+)\])`)
+var yamlPathSegment = lazyregexp.New(`^(?:\.([A-Za-z0-9_-]+)|\[([0-9]+)\])`)
 
 // yamlWithoutPath removes the value at a schema display path such as
 // $.guardrail.mode or $.connectors[0].name from a YAML document. With a

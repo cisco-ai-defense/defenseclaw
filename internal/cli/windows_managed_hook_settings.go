@@ -7,11 +7,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"regexp"
 	"sort"
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 )
 
 // removeWindowsManagedClaudeCommands removes only handlers whose executable
@@ -122,7 +122,7 @@ func windowsClaudeHooksNamingDefenseClaw(raw []byte) ([]string, error) {
 
 // windowsClaudeHookEventNamePattern is the shape of a Claude Code hook event
 // name. Another key is user text and is not repeated.
-var windowsClaudeHookEventNamePattern = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9_-]{0,63}$`)
+var windowsClaudeHookEventNamePattern = lazyregexp.New(`^[A-Za-z][A-Za-z0-9_-]{0,63}$`)
 
 func windowsClaudeHookEventLabel(event string) string {
 	if windowsClaudeHookEventNamePattern.MatchString(event) {

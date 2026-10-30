@@ -19,9 +19,10 @@ package connector
 import (
 	"fmt"
 	"net/url"
-	"regexp"
 	"sort"
 	"strings"
+
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 )
 
 // Per-sandbox managed harness configuration.
@@ -92,7 +93,7 @@ type SandboxModelProvider struct {
 }
 
 // sandboxModelNamePattern is a model id a run may pin.
-var sandboxModelNamePattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$`)
+var sandboxModelNamePattern = lazyregexp.New(`^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$`)
 
 // SandboxModelProviderOpenAI is Codex's built-in OpenAI provider id.
 const SandboxModelProviderOpenAI = "openai"
@@ -143,8 +144,8 @@ const (
 var (
 	// sandboxMCPNamePattern is Claude Code's allowlist serverName pattern,
 	// which also keeps a name a single TOML key segment for Codex.
-	sandboxMCPNamePattern = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
-	sandboxEnvNamePattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]{0,127}$`)
+	sandboxMCPNamePattern = lazyregexp.New(`^[A-Za-z0-9_-]{1,64}$`)
+	sandboxEnvNamePattern = lazyregexp.New(`^[A-Za-z_][A-Za-z0-9_]{0,127}$`)
 )
 
 // ValidateSandboxMCPServer checks one imported server: a Claude Code

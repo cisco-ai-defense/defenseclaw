@@ -31,7 +31,6 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
-	"regexp"
 	"runtime"
 	"sort"
 	"strconv"
@@ -45,6 +44,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/gateway"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail"
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 	"github.com/defenseclaw/defenseclaw/internal/observability"
 	"github.com/defenseclaw/defenseclaw/internal/pathidentity"
 	"github.com/defenseclaw/defenseclaw/internal/safefile"
@@ -1198,7 +1198,7 @@ const emptyConfigProbeBytes = 64 << 10
 // load, to tell a cut-short file from an older or invalid one.
 const incompleteConfigProbeBytes = 4 << 20
 
-var configVersionLine = regexp.MustCompile(`(?m)^config_version[ \t]*:`)
+var configVersionLine = lazyregexp.New(`(?m)^config_version[ \t]*:`)
 
 // incompleteConfigFile reports a config.yaml that stops mid-document:
 // DefenseClaw always ends it with a newline, and a file cut short before

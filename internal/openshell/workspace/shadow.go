@@ -26,10 +26,11 @@ import (
 	"os"
 	"path"
 	"path/filepath"
-	"regexp"
 	"sort"
 	"strconv"
 	"strings"
+
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 )
 
 // shadow is a DefenseClaw-owned git directory whose work tree is the
@@ -263,9 +264,9 @@ func (s *shadow) writeAlternates() error {
 }
 
 var (
-	loosePrefixRE = regexp.MustCompile(`^[0-9a-f]{2}$`)
-	looseObjectRE = regexp.MustCompile(`^[0-9a-f]{38}([0-9a-f]{24})?$`)
-	packFileRE    = regexp.MustCompile(`^pack-[0-9a-f]+\.(pack|rev|bitmap|mtimes|promisor|idx)$`)
+	loosePrefixRE = lazyregexp.New(`^[0-9a-f]{2}$`)
+	looseObjectRE = lazyregexp.New(`^[0-9a-f]{38}([0-9a-f]{24})?$`)
+	packFileRE    = lazyregexp.New(`^pack-[0-9a-f]+\.(pack|rev|bitmap|mtimes|promisor|idx)$`)
 )
 
 // DefaultMaxObjectCopyBytes caps how many bytes of the project's git

@@ -18,11 +18,12 @@ package connector
 
 import (
 	"fmt"
-	"regexp"
 	"runtime"
 	"strconv"
 	"strings"
 	"sync/atomic"
+
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 )
 
 const (
@@ -155,7 +156,7 @@ var knownBrokenAgentVersions = map[string][]KnownBrokenAgentVersion{
 
 // gitBuildReleaseDateRE reads the release date a source build prints after
 // its commit ("Hermes Agent vgit.5bba024 (2026.9.24)").
-var gitBuildReleaseDateRE = regexp.MustCompile(`\(([0-9]{4}\.[0-9]{1,2}\.[0-9]{1,2})(?:\.[0-9]+)?\)`)
+var gitBuildReleaseDateRE = lazyregexp.New(`\(([0-9]{4}\.[0-9]{1,2}\.[0-9]{1,2})(?:\.[0-9]+)?\)`)
 
 // strictHookContractResolution restores exact-range matching: a version
 // outside every tested range stays unknown. The Secure Client profile sets
@@ -177,14 +178,14 @@ func StrictHookContractResolution() bool {
 
 // gitBuildVersionRE matches source-build version strings such as Hermes
 // "Hermes Agent vgit.5bba024 (2026.9.24)".
-var gitBuildVersionRE = regexp.MustCompile(`(?i)(?:^|[^a-z0-9])v?git[.+-]?[0-9a-f]{7,40}(?:[^a-z0-9]|$)`)
+var gitBuildVersionRE = lazyregexp.New(`(?i)(?:^|[^a-z0-9])v?git[.+-]?[0-9a-f]{7,40}(?:[^a-z0-9]|$)`)
 
 // gitBuildCompareVersion stands in for a git build when it is compared
 // with release-style (non-date) tested bounds.
 const gitBuildCompareVersion = "999.999.999"
 
-var versionNumberRE = regexp.MustCompile(`(?i)(?:^|[^0-9])v?([0-9]+)(?:\.([0-9]+))?(?:\.([0-9]+))?`)
-var hermesGitReleaseRE = regexp.MustCompile(`^Hermes Agent vunknown \(([0-9]{4}\.[0-9]{1,2}\.[0-9]{1,2})\)$`)
+var versionNumberRE = lazyregexp.New(`(?i)(?:^|[^0-9])v?([0-9]+)(?:\.([0-9]+))?(?:\.([0-9]+))?`)
+var hermesGitReleaseRE = lazyregexp.New(`^Hermes Agent vunknown \(([0-9]{4}\.[0-9]{1,2}\.[0-9]{1,2})\)$`)
 
 var proxyConnectorsWithoutHookGate = map[string]bool{
 	"openclaw":  true,

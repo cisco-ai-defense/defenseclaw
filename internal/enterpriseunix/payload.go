@@ -19,10 +19,10 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"regexp"
 	"strings"
 	"syscall"
 
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
@@ -46,7 +46,7 @@ func packageCompilerSourcePath(layout managed.StandaloneLayout) string {
 	return filepath.Join(layout.InstallRoot, compilerPackageDir, compilerFileName)
 }
 
-var versionPattern = regexp.MustCompile(`^(dev|[0-9]+\.[0-9]+\.[0-9]+([.+-][0-9A-Za-z.+-]+)?)$`)
+var versionPattern = lazyregexp.New(`^(dev|[0-9]+\.[0-9]+\.[0-9]+([.+-][0-9A-Za-z.+-]+)?)$`)
 
 // emptySHA256 is the SHA-256 of zero bytes.
 const emptySHA256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"

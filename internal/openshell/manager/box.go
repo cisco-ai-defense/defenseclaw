@@ -22,7 +22,6 @@ import (
 	"fmt"
 	"maps"
 	"reflect"
-	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -31,6 +30,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 	"github.com/defenseclaw/defenseclaw/internal/openshell"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/egress"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/harness"
@@ -384,7 +384,7 @@ func (m *Manager) keepHookCounts() {
 	}
 }
 
-var imageDigestPattern = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
+var imageDigestPattern = lazyregexp.New(`^sha256:[0-9a-f]{64}$`)
 
 // identity is the correlation.sandbox group for the box. Callers hold
 // Manager.mu.

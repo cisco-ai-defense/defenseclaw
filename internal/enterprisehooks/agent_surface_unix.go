@@ -18,12 +18,12 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"regexp"
 	"sort"
 	"strings"
 	"syscall"
 
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 	"github.com/defenseclaw/defenseclaw/internal/legacyconnector"
 )
 
@@ -350,7 +350,7 @@ func readUnixSmallRegularFile(path string) ([]byte, bool) {
 	return data, true
 }
 
-var unixPlistShortVersion = regexp.MustCompile(`<key>CFBundleShortVersionString</key>\s*<string>([^<]{1,128})</string>`)
+var unixPlistShortVersion = lazyregexp.New(`<key>CFBundleShortVersionString</key>\s*<string>([^<]{1,128})</string>`)
 
 // readUnixBundleVersion returns an XML Info.plist's
 // CFBundleShortVersionString, or "" (a binary plist is not parsed).
@@ -413,7 +413,7 @@ func runUnixBundledEngine(ctx context.Context, home, dir string, patterns []stri
 // from a per-user discovery worker.
 const UnixAgentSurfacesMax = 16
 
-var unixAgentSurfaceHost = regexp.MustCompile(`^[a-z0-9-]{1,32}$`)
+var unixAgentSurfaceHost = lazyregexp.New(`^[a-z0-9-]{1,32}$`)
 
 // ValidUnixAgentSurface checks a surface a per-user worker reported: the
 // worker runs as the user, so the parent keeps only well-formed values.
