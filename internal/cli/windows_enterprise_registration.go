@@ -143,7 +143,8 @@ func windowsEnterpriseMutationAction(action string) bool {
 
 // updateWindowsEnterpriseRegistration publishes the marker and ARP entry
 // after a successful mutation and removes them after a successful
-// uninstall. Failed runs leave the previous registration unchanged.
+// uninstall. A failed run leaves the previous registration unchanged except
+// for the installed version (windowsEnterpriseFailedRunInstalledVersion).
 func updateWindowsEnterpriseRegistration(result *enterprisestatus.Result, opts *windowsEnterpriseLifecycleOptions) error {
 	if !result.OK {
 		if windowsEnterpriseRolledBackFirstInstall(result) {
@@ -160,6 +161,10 @@ func updateWindowsEnterpriseRegistration(result *enterprisestatus.Result, opts *
 			removeEmptyWindowsEnterpriseInstallParent()
 			return err
 		}
+		if version, ok := windowsEnterpriseFailedRunInstalledVersion(result); ok {
+			return refreshWindowsEnterpriseRegistrationVersion(
+				registry.LOCAL_MACHINE, WindowsEnterpriseMarkerKey, windowsEnterpriseARPKey, version)
+		}
 		return nil
 	}
 	switch {
@@ -169,6 +174,62 @@ func updateWindowsEnterpriseRegistration(result *enterprisestatus.Result, opts *
 		return err
 	case windowsEnterpriseMutationAction(result.Action) && result.Installed:
 		return writeWindowsEnterpriseRegistration(result, opts)
+	}
+	return nil
+}
+
+// windowsEnterpriseFailedRunInstalledVersion is the version a failed
+// install, upgrade, repair or ensure leaves installed, when the run knows it
+// and no transaction is pending. A run can fail after the deployment of
+// record changed: Setup's TIMEOUTSECONDS stops an /upgrade, its replay of the
+// pending transaction finishes the upgrade, and the run still ends 1603. The
+// marker's ProductVersion and the Add/Remove Programs DisplayVersion then
+// kept the old version, and the MDM wrapper, which reads the marker, reported
+// it as installed_version (GAP-2636).
+func windowsEnterpriseFailedRunInstalledVersion(result *enterprisestatus.Result) (string, bool) {
+	if result == nil || result.OK || !windowsEnterpriseMutationAction(result.Action) ||
+		!result.Installed || result.TransactionPending {
+		return "", false
+	}
+	version := strings.TrimSpace(result.InstalledVersion)
+	return version, version != ""
+}
+
+// refreshWindowsEnterpriseRegistrationVersion sets the marker's
+// ProductVersion and the Add/Remove Programs DisplayVersion to version when
+// they differ. It changes only an existing registration: a failed run never
+// publishes one, and every other value stays as the last successful run
+// wrote it.
+func refreshWindowsEnterpriseRegistrationVersion(root registry.Key, markerPath, arpPath, version string) error {
+	marker, err := registry.OpenKey(root, markerPath, registry.SET_VALUE|registry.QUERY_VALUE|registry.WOW64_64KEY)
+	if errors.Is(err, registry.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("open the enterprise marker key: %w", err)
+	}
+	defer marker.Close()
+	if current, _, readErr := marker.GetStringValue("ProductVersion"); readErr != nil || current != version {
+		if err := marker.SetStringValue("ProductVersion", version); err != nil {
+			return fmt.Errorf("write enterprise marker ProductVersion: %w", err)
+		}
+		if err := marker.SetStringValue("UpdatedAt", windowsEnterpriseNow().UTC().Format(time.RFC3339)); err != nil {
+			return fmt.Errorf("write enterprise marker UpdatedAt: %w", err)
+		}
+	}
+	arp, err := registry.OpenKey(root, arpPath, registry.SET_VALUE|registry.QUERY_VALUE|registry.WOW64_64KEY)
+	if errors.Is(err, registry.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("open the Add/Remove Programs entry: %w", err)
+	}
+	defer arp.Close()
+	if current, _, readErr := arp.GetStringValue("DisplayVersion"); readErr == nil && current == version {
+		return nil
+	}
+	if err := arp.SetStringValue("DisplayVersion", version); err != nil {
+		return fmt.Errorf("write Add/Remove Programs DisplayVersion: %w", err)
 	}
 	return nil
 }
