@@ -27,6 +27,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"sort"
 	"strings"
 
@@ -43,14 +44,72 @@ type Docker interface {
 	Getenv(key string) string
 }
 
+// SystemDockerHost is the system Docker engine on Linux: the one the
+// managed OpenShell gateway's docker and MicroVM drivers ask (the gateway
+// starts without DOCKER_HOST), and the one the managed availability checks
+// judge by the account's docker group.
+const SystemDockerHost = "unix:///var/run/docker.sock"
+
 // CLI runs the docker binary, in this process's environment.
 type CLI struct {
 	// Binary defaults to "docker".
 	Binary string
+	// Host, when set, is the engine every command uses (DOCKER_HOST, with
+	// DOCKER_CONTEXT dropped), whatever engine the account's current
+	// Docker context or environment names.
+	Host string
 }
 
-// Getenv implements Docker: docker runs in this process's environment.
-func (CLI) Getenv(key string) string { return os.Getenv(key) }
+// ManagedCLI is the docker CLI that builds, lists and removes the harness
+// images on a computer, managed tells whether it is a managed one. A
+// managed Linux computer pins the system engine: its OpenShell gateway's
+// docker and MicroVM drivers boot the images from there, and an account
+// whose Docker context or service environment named another engine
+// (rootless Docker, another account's daemon) had its image built where
+// the gateway could not find it, which then tried to pull it from the
+// reserved registry name (#1195). Everywhere else it is the account's own
+// docker CLI, which the managed macOS gateway follows (GAP-0613).
+func ManagedCLI(managed bool, goos string) CLI {
+	if managed && goos == "linux" {
+		return CLI{Host: SystemDockerHost}
+	}
+	return CLI{}
+}
+
+// Getenv implements Docker: docker runs in this process's environment,
+// with Host as its DOCKER_HOST when set.
+func (c CLI) Getenv(key string) string {
+	if c.Host != "" {
+		switch key {
+		case "DOCKER_HOST":
+			return c.Host
+		case "DOCKER_CONTEXT":
+			return ""
+		}
+	}
+	return os.Getenv(key)
+}
+
+// environ is the environment docker runs in ("" when it is this process's
+// own): extra on the PATH for docker's plugins, Host as the one engine.
+func (c CLI) environ(extra []string) []string {
+	if len(extra) == 0 && c.Host == "" {
+		return nil
+	}
+	env := os.Environ()
+	if c.Host != "" {
+		env = slices.DeleteFunc(env, func(kv string) bool {
+			return strings.HasPrefix(kv, "DOCKER_HOST=") || strings.HasPrefix(kv, "DOCKER_CONTEXT=")
+		})
+		env = append(env, "DOCKER_HOST="+c.Host)
+	}
+	if len(extra) > 0 {
+		// docker runs its plugins and credential helpers (buildx,
+		// docker-credential-desktop) from its own folder.
+		env = append(env, "PATH="+strings.Join(append([]string{os.Getenv("PATH")}, extra...), string(os.PathListSeparator)))
+	}
+	return env
+}
 
 // Run implements Docker.
 func (c CLI) Run(ctx context.Context, stdin io.Reader, stdout, stderr io.Writer, args ...string) error {
@@ -59,11 +118,7 @@ func (c CLI) Run(ctx context.Context, stdin io.Reader, stdout, stderr io.Writer,
 		binary, extra = DockerBinary(runtime.GOOS, exec.LookPath, os.Stat)
 	}
 	cmd := processutil.CommandContext(ctx, binary, args...)
-	if len(extra) > 0 {
-		// docker runs its plugins and credential helpers (buildx,
-		// docker-credential-desktop) from its own folder.
-		cmd.Env = append(os.Environ(), "PATH="+strings.Join(append([]string{os.Getenv("PATH")}, extra...), string(os.PathListSeparator)))
-	}
+	cmd.Env = c.environ(extra)
 	cmd.Stdin = stdin
 	cmd.Stdout = stdout
 	cmd.Stderr = stderr
