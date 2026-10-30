@@ -1834,6 +1834,63 @@ type shellLinks struct {
 	findMoves []findMove
 	// linkTexts are the source texts of the link calls (RV-c4-1).
 	linkTexts []string
+	// plainCopies are the link-keeping copies whose sources are plain
+	// names in the starting directory (GAP-2582).
+	plainCopies []plainCopy
+}
+
+// plainCopy is a static link-keeping cp call in the starting directory
+// whose every source is one plain name there, with no option that
+// follows a source link: the call copies only the entries it names, so
+// it carries a link the command makes only when it names that link or a
+// directory the link is in (GAP-2582).
+type plainCopy struct {
+	destination string
+	sources     []string
+}
+
+// copyMayCarryLink reports that the copy names a link the command makes,
+// or a directory that holds one or is reached through one.
+func (l shellLinks) copyMayCarryLink(call plainCopy) bool {
+	for _, alias := range l.aliases {
+		for _, source := range call.sources {
+			if _, under := cutPathPrefix(alias.name, source); under {
+				return true
+			}
+			if _, under := cutPathPrefix(source, alias.name); under {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// plainCopySources returns the sources of a static link-keeping cp call
+// read in cwd when each is one plain name there and no option follows a
+// source link (-H, -L, --dereference); ok is false otherwise.
+func plainCopySources(args []string, cwd string) ([]string, bool) {
+	for _, arg := range args {
+		if arg == "--" {
+			break
+		}
+		if strings.HasPrefix(arg, "--dereference") || strings.HasPrefix(arg, "-") && !strings.HasPrefix(arg, "--") &&
+			strings.ContainsAny(arg[1:], "HL") {
+			return nil, false
+		}
+	}
+	parsed := cpOperands(args, makeStatic(len(args)))
+	if !parsed.ok || len(parsed.sources) == 0 {
+		return nil, false
+	}
+	sources := make([]string, 0, len(parsed.sources))
+	for _, source := range parsed.sources {
+		if source == "" || source == "." || source == ".." || strings.HasPrefix(source, "-") ||
+			strings.HasPrefix(source, "~") || strings.ContainsAny(source, "/\\*?[$`:") {
+			return nil, false
+		}
+		sources = append(sources, OperandPath(source, cwd))
+	}
+	return sources, true
 }
 
 // merge adds the links a nested literal shell body makes.
@@ -2035,6 +2092,7 @@ func commandLinks(command, cwd, home string, facts map[string]string, record, ne
 	env := expand.ListEnviron("HOME=" + strings.TrimRight(home, "/"))
 	renames, cds, wrappedCds := false, false, false
 	var copyScopes []string
+	var plainCopies []plainCopy
 	var renameOps []renameOp
 	var findMoves []findMove
 	boundPrograms := actionBoundProgramWords(file, home)
@@ -2166,6 +2224,11 @@ func commandLinks(command, cwd, home string, facts map[string]string, record, ne
 				option, dynamic := copyLinkOptions(args[1:], words[1:], static[1:])
 				if copyPreservesLinks(words[1:], static[1:]) {
 					copyScopes = append(copyScopes, destination)
+					if dir == cwd && destination != "" && !slices.Contains(static, false) {
+						if sources, plain := plainCopySources(words[1:], dir); plain {
+							plainCopies = append(plainCopies, plainCopy{destination: destination, sources: sources})
+						}
+					}
 					if cpDiskSymlink(words[1:], static[1:], dir, home, facts, record) {
 						links.unknownCopyIn(destination)
 					}
@@ -2234,6 +2297,7 @@ func commandLinks(command, cwd, home string, facts map[string]string, record, ne
 			cds = cds || inner.cds
 			wrappedCds = wrappedCds || inner.wrappedCds
 			copyScopes = append(copyScopes, inner.copyScopes...)
+			plainCopies = append(plainCopies, inner.plainCopies...)
 			renameOps = append(renameOps, inner.renameOps...)
 			findMoves = append(findMoves, inner.findMoves...)
 		default:
@@ -2281,11 +2345,31 @@ func commandLinks(command, cwd, home string, facts map[string]string, record, ne
 	})
 	if nested {
 		links.renames, links.cds, links.copyScopes = renames, cds, copyScopes
+		links.plainCopies = plainCopies
 		links.renameOps, links.wrappedCds, links.findMoves = renameOps, wrappedCds, findMoves
 		return links
 	}
 	if len(links.aliases) > 0 {
+		// A link-keeping copy may carry a link the command makes into its
+		// destination. A copy that names only plain entries of the
+		// starting directory, none of them a link the command makes or a
+		// directory around one, carries none: ln -s build/out bin && cp -a
+		// build dist is a project copy (GAP-2582). A rename or a directory
+		// change may move a link under such a name, so then every copy
+		// stays opaque.
+		carriesNone := map[string]int{}
+		if !renames && !cds && len(renameOps) == 0 && len(findMoves) == 0 {
+			for _, call := range plainCopies {
+				if !links.copyMayCarryLink(call) {
+					carriesNone[call.destination]++
+				}
+			}
+		}
 		for _, scope := range copyScopes {
+			if carriesNone[scope] > 0 {
+				carriesNone[scope]--
+				continue
+			}
 			links.unknownCopyIn(scope)
 		}
 	}
