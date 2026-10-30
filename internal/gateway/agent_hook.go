@@ -939,6 +939,7 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 		// offer returns. Only a hang-up observed before the answer was sent
 		// can establish that an unreceipted hook missed that answer.
 		hungUpBeforeAnswer := r.Context().Err() != nil
+		shellBridge := r.Header.Get(hookexec.HookShellBridgeHeader) == "shell"
 		if delivery != nil {
 			attemptedWrite = true
 			receipt := func() string {
@@ -949,12 +950,12 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 				})
 			}()
 			if receipt == hookexec.HookDeliveryReleased {
-				resp = a.unreceiptedHookDecision(hungUpBeforeAnswer, connectorName, req.HookEventName, resp)
+				resp = a.unreceiptedHookDecision(shellBridge, hungUpBeforeAnswer, connectorName, req.HookEventName, resp)
 			} else {
 				resp = a.deliveredHookDecision(connectorName, resp, receipt)
 			}
 		} else {
-			resp = a.unreceiptedHookDecision(hungUpBeforeAnswer, connectorName, req.HookEventName, resp)
+			resp = a.unreceiptedHookDecision(shellBridge, hungUpBeforeAnswer, connectorName, req.HookEventName, resp)
 		}
 		elapsed := time.Since(t0)
 		enrichAgentHookSpan(ctx, req, resp, elapsed)

@@ -670,15 +670,15 @@ func TestUnreceiptedManagedHookDecisions(t *testing.T) {
 		{"opencode", "tool.execute.before", true, "unconfirmed"},
 		{"claudecode", "UserPromptSubmit", true, "unconfirmed"},
 	} {
-		if got := api.unreceiptedHookDecision(tc.hungUp, tc.connector, tc.event, allow).Action; got != tc.want {
+		if got := api.unreceiptedHookDecision(false, tc.hungUp, tc.connector, tc.event, allow).Action; got != tc.want {
 			t.Errorf("%s %s (hung up %v) = %q, want %q", tc.connector, tc.event, tc.hungUp, got, tc.want)
 		}
 	}
-	if got := api.unreceiptedHookDecision(false, "codex", "PreToolUse", agentHookResponse{Action: "block", Reason: "policy"}); got.Action != "block" || got.Reason != "policy" {
+	if got := api.unreceiptedHookDecision(false, false, "codex", "PreToolUse", agentHookResponse{Action: "block", Reason: "policy"}); got.Action != "block" || got.Reason != "policy" {
 		t.Errorf("policy block = %+v, want it kept", got)
 	}
 	secureClient := &APIServer{scannerCfg: &config.Config{DeploymentMode: "managed_enterprise", Enterprise: config.EnterpriseConfig{Profile: "secure_client"}}}
-	if got := secureClient.unreceiptedHookDecision(true, "codex", "PreToolUse", allow).Action; got != "allow" {
+	if got := secureClient.unreceiptedHookDecision(false, true, "codex", "PreToolUse", allow).Action; got != "allow" {
 		t.Errorf("Secure Client = %q, want its response contract unchanged", got)
 	}
 }
@@ -697,7 +697,7 @@ func TestManagedHangupWithoutReceiptDoesNotClaimAnEnforcedBlock(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			for _, got := range []agentHookResponse{
-				api.unreceiptedHookDecision(true, "claudecode", "PreToolUse", tc.resp),
+				api.unreceiptedHookDecision(false, true, "claudecode", "PreToolUse", tc.resp),
 				api.deliveredHookDecision("claudecode", tc.resp, ""),
 			} {
 				if got.Action != hookActionUnconfirmed || got.Mode != tc.resp.Mode || got.RawAction != tc.resp.RawAction {
@@ -740,5 +740,35 @@ func TestManagedHookMissingReceiptRecordsOnlyKnownEnforcement(t *testing.T) {
 				t.Fatalf("policy block reason = %q, want policy", got.Reason)
 			}
 		})
+	}
+}
+
+// A managed shell hook post (GAP-2614: the Linux and macOS Antigravity bridge)
+// sends no receipt because it has no answer watchdog: the agent got the
+// answer the gateway sent. Its verdict keeps the evaluated decision; a caller
+// that hung up first and a native hook without a receipt stay unconfirmed.
+func TestUnreceiptedShellBridgeKeepsTheAnswerTheGatewaySent(t *testing.T) {
+	cfg := &config.Config{DeploymentMode: "managed_enterprise", Enterprise: config.EnterpriseConfig{Profile: "standalone"}}
+	cfg.Guardrail.HookFailMode = "closed"
+	api := &APIServer{scannerCfg: cfg}
+	allow := agentHookResponse{Action: "allow", RawAction: "allow", Mode: "observe"}
+	observed := agentHookResponse{Action: "allow", RawAction: "block", Mode: "observe", WouldBlock: true, Reason: "matched: marker"}
+	if got := api.unreceiptedHookDecision(true, false, "antigravity", "PreToolUse", allow); got.Action != "allow" || got.Reason == hookexec.ManagedGatewayNoAnswerReason {
+		t.Errorf("shell bridge allow = %+v, want allow", got)
+	}
+	if got := api.unreceiptedHookDecision(true, false, "antigravity", "PreToolUse", observed); got.Action != "allow" || got.RawAction != "block" || !got.WouldBlock || got.Reason != "matched: marker" {
+		t.Errorf("shell bridge observe marker = %+v, want allow raw_action=block would_block", got)
+	}
+	if got := api.unreceiptedHookDecision(true, false, "copilot", "preToolUse", allow); got.Action != "allow" {
+		t.Errorf("copilot shell bridge allow = %+v, want allow", got)
+	}
+	if got := api.unreceiptedHookDecision(true, true, "antigravity", "PreToolUse", allow); got.Action != hookActionUnconfirmed {
+		t.Errorf("shell bridge caller hung up = %+v, want unconfirmed", got)
+	}
+	if got := api.unreceiptedHookDecision(false, false, "antigravity", "PreToolUse", allow); got.Action != hookActionUnconfirmed {
+		t.Errorf("native hook without a receipt = %+v, want unconfirmed", got)
+	}
+	if got := api.unreceiptedHookDecision(true, false, "antigravity", "PreToolUse", agentHookResponse{Action: "block", Reason: "policy"}); got.Action != "block" || got.Reason != "policy" {
+		t.Errorf("shell bridge policy block = %+v, want it kept", got)
 	}
 }
