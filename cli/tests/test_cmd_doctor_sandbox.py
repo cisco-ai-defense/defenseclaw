@@ -235,6 +235,41 @@ def test_a_stopped_gateway_is_one_root_cause_and_unused_sandboxes_only_warn(tmp_
     assert result.failed == 0
 
 
+def test_an_openshell_release_without_sandboxes_warns_per_user_and_fails_managed(tmp_path: Path, monkeypatch) -> None:
+    # GAP-0059: a 1.0.2 -> 1.0.5 upgrade over OpenShell 0.1.3 left doctor red
+    # on a per-user install whose gateway and hooks are healthy.
+    refused = (
+        "OpenShell 0.1.3 runs no DefenseClaw sandbox: before 0.1.5 its network broker let a sandbox's "
+        "connections bypass the sandbox policy when it could not inspect them (NVIDIA/OpenShell#4494); "
+        "upgrade OpenShell to 0.1.5 in place"
+    )
+    fix = {"summary": "upgrade OpenShell to 0.1.5 in place", "command": "defenseclaw sandbox setup --install-openshell"}
+    report = {"checks": [
+        {"id": "gateway-version", "title": "Gateway", "status": "fail", "detail": refused, "fix": fix},
+        {"id": "defenseclaw-daemon", "title": "DefenseClaw daemon", "status": "fail",
+         "detail": "running, but sandboxes are unavailable: " + refused},
+        {"id": "legacy-sandbox", "title": "Legacy sandboxes", "status": "fail",
+         "detail": "old: legacy sandbox running, not protected by the 1.0.4 egress policy"},
+    ]}
+    binary = _gateway(tmp_path, json.dumps(report))
+    monkeypatch.setattr("defenseclaw.gateway.resolve_gateway_binary", lambda: binary)
+
+    result = _DoctorResult()
+    _check_sandbox(_cfg(True), result)
+    gateway, daemon, legacy = result.checks
+    assert (gateway["status"], daemon["status"], legacy["status"]) == ("warn", "skip", "fail")
+    assert gateway["detail"].startswith(refused) and "blocks only sandbox runs" in gateway["detail"]
+    assert gateway["remediation"] == "upgrade OpenShell to 0.1.5 in place: defenseclaw sandbox setup --install-openshell"
+    assert daemon["detail"] == "depends on: OpenShell gateway (the daemon is running)"
+
+    managed = _cfg(True)
+    managed.deployment_mode = "managed_enterprise"
+    result = _DoctorResult()
+    _check_sandbox(managed, result)
+    assert [row["status"] for row in result.checks] == ["fail", "skip", "fail"]
+    assert result.checks[0]["detail"] == refused
+
+
 def test_local_policy_digest_refuses_untrusted_gateway(monkeypatch: pytest.MonkeyPatch) -> None:
     from defenseclaw import gateway
 
