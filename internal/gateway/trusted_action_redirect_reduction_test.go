@@ -459,6 +459,12 @@ func TestTrustedActionBlocksBuiltInRuleInEachStatementOfCompoundCommand(t *testi
 		{"for i in $(rm -rf /); do :; done", true},
 		{"case $(rm -rf /) in *) true;; esac", true},
 		{"f() { rm -rf /; }; f", true},
+		// A program word bound to a function name calls it (GAP-0934).
+		{"f() { rm -rf /; }; x=f; $x", true},
+		{"x=f; f() { rm -rf /; }; \"${x}\"", true},
+		{"f() { echo ok; }; x=rm; $x -rf /", true},
+		{"f() { rm -rf /; }; x=f; echo $x", false},
+		{"f() { rm -rf /; }; g() { echo hi; }; x=g; $x", false},
 		{"cat <<'EOF'\nhello\nEOF\nrm -rf /", true},
 		{"rm -rf /tmp/dc-x; echo $HOME", false},
 		{"(rm -rf /tmp/dc-x) 2>&1", false},

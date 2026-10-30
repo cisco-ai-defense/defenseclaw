@@ -281,6 +281,28 @@ func sequenceStatementDetails(source string, compound, allSimple bool) (statemen
 	subshells := 0
 	functions := make(map[string]*syntax.Stmt)
 	functionDepth := 0
+	// assigned holds the static values the walk has seen assigned to each
+	// variable, so a program word such as $x can name the function it
+	// calls (GAP-0934); unbound holds the variables the action may also
+	// bind in a way the walk cannot read.
+	assigned := make(map[string][]string)
+	unbound := simpleUnreadBindings(file)
+	record := func(assign *syntax.Assign) {
+		if assign == nil || assign.Name == nil || assign.Naked {
+			return
+		}
+		value := ""
+		if assign.Value != nil {
+			static, ok := simpleStaticWord(assign.Value, nil)
+			if !ok {
+				return
+			}
+			value = static
+		}
+		if !slices.Contains(assigned[assign.Name.Value], value) {
+			assigned[assign.Name.Value] = append(assigned[assign.Name.Value], value)
+		}
+	}
 	// exported are the functions this action exported. A child shell imports
 	// them, so each body is judged once, at the first later command that may
 	// start one; an export alone runs nothing.
@@ -475,16 +497,38 @@ func sequenceStatementDetails(source string, compound, allSimple bool) (statemen
 					}
 				}
 			}
+			if call, ok := stmt.Cmd.(*syntax.CallExpr); ok && len(call.Args) == 0 {
+				for _, assign := range call.Assigns {
+					record(assign)
+				}
+			}
+			if decl, ok := stmt.Cmd.(*syntax.DeclClause); ok {
+				for _, assign := range decl.Args {
+					record(assign)
+				}
+			}
 			if call, ok := stmt.Cmd.(*syntax.CallExpr); ok && len(call.Args) != 0 {
 				name, known := simpleFunctionCallName(call)
+				var bound []string
 				if !known && len(functions) != 0 {
 					// A runtime program word may name any function defined in
-					// this action. No complete per-command view exists.
-					return false
+					// this action. It is read only when it is one variable
+					// that the action binds to static values alone: each
+					// value is a call the action may make.
+					names, ok := simpleAssignedProgramNames(call.Args[0], assigned, unbound)
+					if !ok {
+						return false
+					}
+					bound = names
 				}
 				var bodies []*syntax.Stmt
 				if body, found := functions[name]; found {
 					bodies = append(bodies, body)
+				}
+				for _, boundName := range bound {
+					if body, found := functions[boundName]; found && !slices.Contains(bodies, body) {
+						bodies = append(bodies, body)
+					}
 				}
 				program, _ := simpleStaticWord(call.Args[0], nil)
 				_, _, trapAction, _ := simpleNestedScript(call, nil, nil, nil)
@@ -579,6 +623,104 @@ func sequenceStatementDetails(source string, compound, allSimple bool) (statemen
 		return nil, false, false
 	}
 	return statements, reduced, true
+}
+
+// simpleAssignedProgramNames returns the program names that word, one
+// plain $x or ${x} (quoted or not), can expand to when the action assigns x
+// only static values (x=f; $x calls the function f, GAP-0934). It is false
+// for any other word, for an x the action never assigns (its value comes
+// from the environment) and for an x it may bind in another way.
+func simpleAssignedProgramNames(word *syntax.Word, assigned map[string][]string, unbound map[string]bool) ([]string, bool) {
+	if word == nil {
+		return nil, false
+	}
+	name := ""
+	plain := true
+	syntax.Walk(word, func(node syntax.Node) bool {
+		if param, ok := node.(*syntax.ParamExp); ok {
+			if name != "" || param.Param == nil {
+				plain = false
+			} else {
+				name = param.Param.Value
+			}
+			return false
+		}
+		return plain
+	})
+	values := assigned[name]
+	if !plain || name == "" || unbound[name] || len(values) == 0 {
+		return nil, false
+	}
+	names := make([]string, 0, len(values))
+	for _, value := range values {
+		resolved, ok := simpleStaticWord(word, map[string]string{name: value})
+		if !ok {
+			return nil, false
+		}
+		if resolved != "" && !slices.Contains(names, resolved) {
+			names = append(names, resolved)
+		}
+	}
+	return names, true
+}
+
+// simpleUnreadBindings returns the variables that file may bind other than
+// by a static NAME=value assignment: a dynamic, appended or array value, a
+// declaration option (a nameref or an attribute), a for loop, arithmetic,
+// or a builtin that writes a named variable (read, printf -v, unset, ...).
+func simpleUnreadBindings(file *syntax.File) map[string]bool {
+	unbound := make(map[string]bool)
+	mark := func(name string) {
+		if simpleVariableName(name) {
+			unbound[name] = true
+		}
+	}
+	syntax.Walk(file, func(node syntax.Node) bool {
+		switch typed := node.(type) {
+		case *syntax.Assign:
+			if typed.Name == nil {
+				break
+			}
+			_, static := simpleStaticWord(typed.Value, nil)
+			if typed.Append || typed.Index != nil || typed.Array != nil || typed.Value != nil && !static {
+				mark(typed.Name.Value)
+			}
+		case *syntax.DeclClause:
+			for _, assign := range typed.Args {
+				if assign != nil && assign.Naked && assign.Name == nil {
+					// An option such as -n or -i changes what every name means.
+					for _, other := range typed.Args {
+						if other != nil && other.Name != nil {
+							mark(other.Name.Value)
+						}
+					}
+				}
+			}
+		case *syntax.ForClause:
+			if iteration, ok := typed.Loop.(*syntax.WordIter); ok && iteration.Name != nil {
+				mark(iteration.Name.Value)
+			}
+		case *syntax.ArithmCmd, *syntax.ArithmExp, *syntax.LetClause:
+			syntax.Walk(node, func(inner syntax.Node) bool {
+				if literal, ok := inner.(*syntax.Lit); ok {
+					mark(literal.Value)
+				}
+				return true
+			})
+			return false
+		case *syntax.CallExpr:
+			// Any literal argument that is a name or starts NAME= (read x,
+			// printf -v x, unset x, eval x=g) may bind that name.
+			for _, arg := range typed.Args[min(1, len(typed.Args)):] {
+				if literal := arg.Lit(); literal != "" {
+					name, _, _ := strings.Cut(literal, "=")
+					mark(name)
+				}
+			}
+		}
+		return true
+	})
+	return unbound
 }
 
 // eval parses its static script in the caller's shell. Function definitions
