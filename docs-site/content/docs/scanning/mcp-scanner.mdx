@@ -221,9 +221,11 @@ defenseclaw setup mcp-scanner                      # interactive
 
 defenseclaw setup mcp-scanner \
   --non-interactive \
-  --analyzers yara,llm \
+  --analyzers auto \
   --scan-prompts --scan-resources --scan-instructions
 ```
+
+`--analyzers auto` runs YARA, and the judge as well once `defenseclaw setup llm` has a model and key. Name `llm` yourself (`--analyzers yara,llm`) only when a judge is set up: with no judge every scan then fails with `LLM analyzer requested but MCP_SCANNER_LLM_API_KEY not configured`, and `mcp set` adds nothing.
 
 | Flag | What it sets |
 | --- | --- |
