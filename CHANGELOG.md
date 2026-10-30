@@ -15,6 +15,7 @@ for current behavior.
 - **The upgrade stops before it changes anything while the guarded OpenCode is V1.** The running DefenseClaw keeps guarding it; install V2 and upgrade again, or remove OpenCode from DefenseClaw first. With V2 installed, the upgrade writes the V2 plugin without a setup run. A rollback to 1.0.5 or earlier is refused while OpenCode V2 is set up, because those releases cannot guard it.
 - **DefenseClaw notices reach the OpenCode screen again.** V2 has no toast and does not show plugin logs, so the outage warning (default and permissive tiers run with one warning per session), confirm notices and foreign-plugin warnings are added under the tool call's result.
 - **An oversized OpenCode call is reviewed, not refused on size.** Observe records it and lets it run; action blocks it.
+- **Managed hosts warn while a user can still run OpenCode V1.** V1 loads the V2 plugin but never runs it, so its calls ran unchecked with nothing on screen. Linux, macOS and Windows `status`, `verify` and `ensure` now warn `opencode_v1_unprotected` for each such user, with the copy and the remedy, and report `coverage_complete: false`. The enumerator finds `opencode-ai` in the user's home, the machine prefixes and the folders below `/opt`. Nothing is blocked or removed.
 - **Managed hosts register the OpenCode plugin folder (`share/opencode/index.js`).** An approved directory plugin is approved by its content: approve the new digest of each previously approved folder after the upgrade.
 
 ## [Unreleased] — 1.0.5

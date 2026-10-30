@@ -464,13 +464,10 @@ func (l *lifecycle) describeUnprotectedAgents() {
 		l.reportInstallScanPending(enterprisehooks.UnprotectedAgentsRecordFromEarlierInstall(written))
 	}
 	for _, agent := range agents {
-		if agent.Code == enterprisehooks.UnprotectedCodeHookContractUnverified ||
-			agent.Code == enterprisehooks.UnprotectedCodeInstallScanIncomplete ||
-			agent.Code == enterprisehooks.UnprotectedCodeKiroCLIBelowHookFloor ||
-			agent.Code == enterprisehooks.UnprotectedCodeKiroIDEBelowGlobalHooksFloor {
-			// No contract, an incomplete install scan, a headless CLI path
-			// without hooks, or an IDE that cannot read global hooks: the
-			// deployment does not cover it (GAP-0151).
+		if enterprisehooks.UnprotectedCodeLeavesCoverageIncomplete(agent.Code) {
+			// The deployment does not cover it: no contract, an incomplete
+			// install scan, a CLI path or IDE without hooks (GAP-0151), or
+			// OpenCode V1 (rel-1-0-6 GAP-0037).
 			r.MarkCoverageIncomplete(agent.Code)
 		}
 		if l.opts.Action == ActionVerify && (agent.Refusal == enterprisehooks.RefusalMissing ||
