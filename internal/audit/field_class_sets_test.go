@@ -5,11 +5,14 @@ package audit
 
 import (
 	"bytes"
+	"compress/gzip"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -262,5 +265,62 @@ func TestFieldClassSetsBounded(t *testing.T) {
 	verification, err := writer.VerifyEventHistoryRecord(t.Context(), record.RecordID())
 	if err != nil || verification.Status != EventHistoryUnsigned {
 		t.Fatalf("inline row verification = %#v, %v", verification, err)
+	}
+}
+
+// A store the published 1.0.3 gateway wrote upgrades with no schema move for
+// the set table: its rows keep their inline classes and new rows name sets.
+func TestFieldClassSetsOnStoreWrittenByPublished103(t *testing.T) {
+	compressed, err := os.Open(filepath.Join("testdata", "audit-1.0.3.db.gz"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer compressed.Close()
+	reader, err := gzip.NewReader(compressed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), "audit.db")
+	target, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := io.Copy(target, reader); err != nil {
+		t.Fatal(err)
+	}
+	if err := target.Close(); err != nil {
+		t.Fatal(err)
+	}
+	store, err := NewStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	if err := store.Init(); err != nil {
+		t.Fatal(err)
+	}
+	var version, inline int
+	if err := store.db.QueryRow(`SELECT MAX(version) FROM schema_version`).Scan(&version); err != nil || version != len(migrations) {
+		t.Fatalf("schema = %d, %v; want %d", version, err, len(migrations))
+	}
+	if err := store.db.QueryRow(`SELECT COUNT(*) FROM audit_events WHERE json_type(projected_record_json,'$.field_classes."$set"') IS NULL
+		AND projected_record_json IS NOT NULL`).Scan(&inline); err != nil || inline == 0 {
+		t.Fatalf("1.0.3 rows with inline classes = %d, %v", inline, err)
+	}
+	writer, err := NewEventHistoryWriter(store, nil, nil, testLocalProfileResolver{profile: observabilityredaction.ProfileNone})
+	if err != nil {
+		t.Fatal(err)
+	}
+	record := newWideV8HistoryRecord(t, "fcs-103", time.Date(2026, 10, 30, 12, 0, 0, 0, time.UTC))
+	if err := writer.Append(record, projectV8HistoryRecord(t, record, observabilityredaction.ProfileNone)); err != nil {
+		t.Fatal(err)
+	}
+	projected, _, _, _ := storedFieldClassRow(t, store, record.RecordID())
+	if !strings.Contains(projected, `"field_classes":{"$set":"`) {
+		t.Fatalf("a new row on an upgraded 1.0.3 store keeps its classes inline: %s", projected)
+	}
+	if verification, err := writer.VerifyEventHistoryRecord(t.Context(), record.RecordID()); err != nil ||
+		verification.Status != EventHistoryUnsigned || !verification.ProjectionHashValid {
+		t.Fatalf("verification = %#v, %v", verification, err)
 	}
 }
