@@ -132,7 +132,7 @@ Can fail closed: yes. A per-user Cursor hook uses an explicit saved outage mode;
 | Build | Behavior | Check |
 | --- | --- | --- |
 | Agent CLI 2026.10.01-14929f9 | Did not emit `beforeSubmitPrompt` in a managed standalone run although `hooks.json` registered it. Prompts reached the model with the gateway stopped. Tool hooks still ran and blocked. | Look for `beforeSubmitPrompt` rows with `hook_decision` in the audit log. DefenseClaw status and enterprise verify warn about this. |
-| Same build, gateway down, action mode | A refused prompt is dropped without a message: the input clears and the start screen returns. The hook answers `continue: false` with a reason, but the CLI does not display `user_message` for that event. Tool calls show their reason. | Run `defenseclaw-gateway status` (or `defenseclaw-gateway start` on a per-user install). Refusals are the `"connector":"cursor"` lines with `"fail_mode":"closed"` in `~/.defenseclaw/logs/hook-failures.jsonl`. |
+| 2026.10.01-14929f9 and 2026.10.22-27dcf5f, action mode | A refused prompt is dropped without a message, with the gateway running or stopped: the input clears and the start screen returns. The hook answers `continue: false` with a reason, but the CLI does not display `user_message` for that event. Tool calls show their reason. | Gateway running: `defenseclaw alerts --connector cursor` lists the block and its rule. Gateway stopped: `defenseclaw-gateway status` says so (start it with `defenseclaw-gateway start` on a per-user install), and the refusals are the `"connector":"cursor"` lines with `"fail_mode":"closed"` in `~/.defenseclaw/logs/hook-failures.jsonl`. |
 | 2026.10.01-e373342 and -14929f9, managed Windows | After you answer `[a] Trust this workspace` on the first start in a folder, the CLI can stay on "Trusting workspace..." and ignore typing and Ctrl+C. The folder is already trusted. | Close the tab and start `cursor-agent` again, or start new folders with `cursor-agent --trust`. |
 
 ## Enterprise (standalone profile)
@@ -167,7 +167,7 @@ DefenseClaw builds the image, but it is **unverified**, so `defenseclaw sandbox 
 - Cursor runs Enterprise, Team, Project and User hooks and merges them by that priority. DefenseClaw owns only the user hook and cannot prove a higher-priority source is absent or detect a conflict.
 - Cursor applies the Enterprise hooks file only on plans that support enterprise hooks. The macOS route is a preview and is not verified live.
 - Cursor Agent CLI builds that do not emit `beforeSubmitPrompt` let prompts reach the model, even when the gateway is down. Tool hooks still block. Check `hook_decision` audit rows before you claim prompt coverage.
-- When the gateway is down in action mode, Cursor Agent CLI drops a refused prompt without showing why. Run `defenseclaw-gateway status`.
+- In action mode, Cursor Agent CLI drops a refused prompt without showing why, whether the gateway is running or stopped. `defenseclaw alerts --connector cursor` shows the block and its rule; if it lists nothing, run `defenseclaw-gateway status`.
 - On managed Windows, the first start in a new folder can stall at "Trusting workspace...". Close the tab and start again, or start with `cursor-agent --trust`.
 - Cursor Agent cannot run in an OpenShell sandbox yet.
 
