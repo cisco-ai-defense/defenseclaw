@@ -287,6 +287,15 @@ checked as that user. A user who is not signed in has their servers blocked
 until they sign in. See
 [MCP servers in user profiles](/docs/enterprise/windows#mcp-servers-in-user-profiles).
 
+On managed Linux and macOS the gateway service cannot read home folders. The
+Claude Code and Codex hooks read the server definition as the user and send it
+with the tool call, and the gateway scans and admits a URL server (for example
+one added with `claude mcp add --transport http`) at its first tool call: that
+call is refused as still scanning, and a call after the verdict is decided by
+it. A local (stdio) server of an enrolled user is not started by the gateway on
+these platforms, so it gets no install scan; `asset_policy.mcp` lists still
+apply to its calls.
+
 <Steps>
   <Step>
     **Scan on add.** `defenseclaw mcp set <name> ...` scans the server before

@@ -95,6 +95,7 @@ func (a *APIServer) claudeCodeMCPAssetDecision(ctx context.Context, req claudeCo
 	if decision, refused := a.mcpStateUnreadableDecision(ctx, "claudecode", req.HookEventName, probe); refused {
 		return decision, true
 	}
+	a.noteHookReportedMCPServer(ctx, "claudecode", req.HookEventName, probe)
 	if decision, refused := a.mcpAdmissionPendingDecision(ctx, "claudecode", req.HookEventName, probe); refused {
 		return decision, true
 	}
@@ -248,6 +249,7 @@ func (a *APIServer) codexMCPAssetDecision(ctx context.Context, req codexHookRequ
 	}
 	probe := mcpProbeFromFields(a.codexMCPServerName(ctx, req), req.ToolName, req.ToolInput)
 	probe.WorkspaceDir = req.CWD
+	a.noteHookReportedMCPServer(ctx, "codex", req.HookEventName, probe)
 	if decision, refused := a.mcpAdmissionPendingDecision(ctx, "codex", req.HookEventName, probe); refused {
 		return decision, true
 	}

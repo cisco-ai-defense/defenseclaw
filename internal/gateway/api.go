@@ -91,6 +91,9 @@ type APIServer struct {
 	// projectSkills are the project skill folders the install watcher
 	// watches; nil when no watcher shares them (GAP-1063).
 	projectSkills *projectSkillRoots
+	// hookMCP are the MCP servers the managed Linux and macOS hooks report,
+	// which the install watcher admits (GAP-2591); nil elsewhere.
+	hookMCP *hookReportedMCPServers
 
 	// exemptAuditAt is when each exempt account and connector last got an
 	// enterprise-exempt-user audit row (auditEnterpriseExemptUser).

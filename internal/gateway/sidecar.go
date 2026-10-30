@@ -99,6 +99,9 @@ type Sidecar struct {
 	// projectSkills are the project skill folders the hooks report, which
 	// the install watcher watches next to the connectors' (GAP-1063).
 	projectSkills projectSkillRoots
+	// hookMCP are the MCP servers the hooks of a managed Linux or macOS
+	// gateway report, which its install watcher admits (GAP-2591).
+	hookMCP hookReportedMCPServers
 
 	startedAt  time.Time
 	cfg        *config.Config
@@ -3823,7 +3826,7 @@ func WatcherWatchesDirs(cfg *config.Config) bool {
 	if !w.Enabled {
 		return false
 	}
-	return watcherUsesConnectorDirs(cfg) || watcherUsesEnrolledUserDirs(cfg) ||
+	return watcherUsesConnectorDirs(cfg) || watcherUsesEnrolledUserDirs(cfg) || watcherUsesHookReportedMCP(cfg) ||
 		(w.Skill.Enabled && len(w.Skill.Dirs) > 0) || (w.Plugin.Enabled && len(w.Plugin.Dirs) > 0)
 }
 
@@ -4075,10 +4078,10 @@ func (s *Sidecar) runWatcherOnce(ctx context.Context) (restart bool, err error) 
 	}
 
 	warnUnenforcedAssetPolicy(s.currentConfig(), skillDirs, pluginDirs,
-		watcherUsesConnectorDirs(s.currentConfig()) || enrolled != nil)
+		watcherUsesConnectorDirs(s.currentConfig()) || enrolled != nil || watcherUsesHookReportedMCP(s.currentConfig()))
 	// A per-user connector can have only MCP servers (Kiro has no asset
 	// directories). Its discovery poll still needs a running watcher.
-	if len(skillDirs) == 0 && len(pluginDirs) == 0 && enrolled == nil &&
+	if len(skillDirs) == 0 && len(pluginDirs) == 0 && enrolled == nil && !watcherUsesHookReportedMCP(s.currentConfig()) &&
 		(!(watcherUsesConnectorDirs(s.currentConfig())) || s.currentConfig().SecureClientIntegration()) {
 		s.health.SetWatcher(watcherState, watcherDetail, watcherDetails(map[string]interface{}{
 			"skill_dirs":  0,
@@ -4177,6 +4180,11 @@ func (s *Sidecar) runWatcherOnce(ctx context.Context) (restart bool, err error) 
 				}
 				return kept, nil
 			})
+			w.SetMCPDiscoveryPoll(true)
+		} else if watcherUsesHookReportedMCP(cfg) {
+			// The service may not read the users homes: it admits the URL
+			// servers their hooks report with each tool call (GAP-2591).
+			w.SetMCPServerSource(s.hookMCP.list)
 			w.SetMCPDiscoveryPoll(true)
 		}
 	}
@@ -8388,6 +8396,7 @@ func (s *Sidecar) runAPI(ctx context.Context) error {
 		api.initGuardrailProfiles(api.scannerCfg)
 	}
 	api.projectSkills = &s.projectSkills
+	api.hookMCP = &s.hookMCP
 	s.setAPIServer(api)
 	defer s.setAPIServer(nil)
 	if set := api.guardrailProfileSet(); set != nil {
