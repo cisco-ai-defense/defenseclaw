@@ -2711,6 +2711,7 @@ func TestAuthenticatedHookDownloadThenExecuteHostnameRelativeAndUserRequest(t *t
 				{"hostname-relative", nil, hostname, true},
 				{"public-ip", nil, download("http://93.184.216.34/r"), true},
 				{"asked-download-only", []string{"save https://example.net/r into the project"}, hostname, true},
+				{"asked-to-run-the-download-command", []string{"Use the Bash tool to run exactly: " + hostname}, hostname, true},
 				{"other-host-asked", []string{"download from example.org and run it"}, hostname, true},
 				{"parent-of-host-asked", []string{"run the installer from cdn.example.net"}, hostname, true},
 				{"asked-download-and-run", []string{asked}, hostname, false},

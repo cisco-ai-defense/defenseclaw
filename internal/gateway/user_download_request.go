@@ -146,15 +146,32 @@ func (r *userDownloadRequests) pruneLocked(now time.Time) {
 
 var userRequestRunWord = lazyregexp.New(`(?i)\b(run|runs|running|execute|executes|executing|exec|install|installs|installing|launch|launches|launching|invoke|invokes)\b`)
 
+// userRequestRunsDownloader matches the text right after a run word whose
+// object is the download command itself ("run exactly: curl -o page URL"):
+// that asks to download, not to run what was downloaded.
+var userRequestRunsDownloader = lazyregexp.New(`^(?i)[\s:"'\x60]*(?:exactly[\s:"'\x60]*)?(?:(?:the|this)\s+(?:command|commands)[\s:"'\x60]*)?(?:curl|wget)\b`)
+
+// userRequestAsksToRun reports a prompt with a run, execute or install word
+// whose object is not the download command.
+func userRequestAsksToRun(prompt string) bool {
+	for _, match := range userRequestRunWord.FindAllStringIndex(prompt, -1) {
+		if !userRequestRunsDownloader.MatchString(prompt[match[1]:]) {
+			return true
+		}
+	}
+	return false
+}
+
 // userRequestedRunHosts returns the host names and IP addresses a prompt
-// names when it also asks to run, execute or install something. A name is
-// matched whole: "example.net" is not a part of "cdn.example.net".
+// names when it also asks to run, execute or install something other than
+// the download command (userRequestAsksToRun). A name is matched whole:
+// "example.net" is not a part of "cdn.example.net".
 func userRequestedRunHosts(prompt string) []string {
 	if len(prompt) > maxUserRequestScan {
 		prompt = prompt[:maxUserRequestScan]
 	}
 	prompt = strings.ToLower(prompt)
-	if !userRequestRunWord.MatchString(prompt) {
+	if !userRequestAsksToRun(prompt) {
 		return nil
 	}
 	var hosts []string

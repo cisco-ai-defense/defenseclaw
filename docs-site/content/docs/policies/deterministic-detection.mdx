@@ -273,7 +273,8 @@ file with `curl` or `wget` and then runs that same file within eight calls and
 - **Downloads the user asked for.** When the user's prompt in this turn or one
   of the two before it names the download host and asks to run, execute or
   install (for example "download the installer from example.net and run
-  it", then "yes, go ahead"), the download does not start the chain. This
+  it", then "yes, go ahead"), the download does not start the chain. Asking
+  only to run the `curl` or `wget` command does not count. This
   works with or without the LLM judge. DefenseClaw keeps only the host names
   from those prompts, in memory, for at most 30 minutes. A prompt can only
   silence this alert; it never allows a call.

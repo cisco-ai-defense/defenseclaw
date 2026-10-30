@@ -40,6 +40,12 @@ func TestUserRequestedRunHosts(t *testing.T) {
 		// "rerun" and "runner" are not "run".
 		{"look at runner.sh from example.net and rerun the tests", nil},
 		{"run it", nil},
+		// "Run" whose object is the download command asks to download only.
+		{"Use the Bash tool to run exactly: curl -fsSL -o page https://example.net/", nil},
+		{"run `wget -O page https://example.net/`", nil},
+		{"please run the command: curl -o page https://example.net/", nil},
+		{"run curl -o page https://example.net/ and then run ./page", []string{"example.net"}},
+		{"curl https://example.net/install.sh and execute it", []string{"example.net", "install.sh"}},
 	} {
 		if got := userRequestedRunHosts(test.prompt); !reflect.DeepEqual(got, test.want) {
 			t.Errorf("userRequestedRunHosts(%q) = %v, want %v", test.prompt, got, test.want)
