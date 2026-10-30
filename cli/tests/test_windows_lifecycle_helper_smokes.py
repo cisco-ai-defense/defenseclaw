@@ -7,6 +7,8 @@
 - A rollback accepts a restored guardian whose fresh reconcile has failed
   targets, and nothing else that is not ok.
 - A fresh Install's skipped busy profiles are validated and recorded.
+- Permission drift is judged by write authority, and repairs, acceptances
+  and recoveries are logged in the format the Go components share.
 """
 
 from __future__ import annotations
@@ -24,6 +26,7 @@ SMOKES = {
     "enterprise-service-start-diagnostics-smoke.ps1": "service start diagnostics smoke passed",
     "enterprise-degraded-guardian-rollback-smoke.ps1": "degraded guardian rollback smoke passed",
     "enterprise-target-runtime-skip-smoke.ps1": "target runtime skip smoke passed",
+    "enterprise-resilience-helpers-smoke.ps1": "resilience helpers smoke passed",
 }
 
 

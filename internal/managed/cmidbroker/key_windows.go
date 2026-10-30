@@ -116,15 +116,21 @@ func LoadAuthKey(path, gatewayServiceName string, policy KeyDriftPolicy) ([AuthK
 	if err != nil {
 		return key, fmt.Errorf("broker authentication key path is invalid")
 	}
-	handle, err := windows.CreateFile(
-		pathPtr,
-		windows.GENERIC_READ|windows.FILE_READ_ATTRIBUTES|windows.READ_CONTROL,
-		windows.FILE_SHARE_READ,
-		nil,
-		windows.OPEN_EXISTING,
-		windows.FILE_ATTRIBUTE_NORMAL|windows.FILE_FLAG_OPEN_REPARSE_POINT,
-		0,
-	)
+	handle, err := openKeyForRead(pathPtr)
+	if errors.Is(err, windows.ERROR_ACCESS_DENIED) && !strict && policy.Repair && gatewaySID != nil {
+		// SYSTEM lost read on the key itself. Re-stamp the canonical
+		// descriptor through a privileged, backup-semantics open first, then
+		// read it as usual.
+		reason := "SYSTEM read access denied"
+		if repairErr := repairUnreadableKey(pathPtr, gatewaySID); repairErr != nil {
+			policy.Report(KeyDriftReport{
+				Action: KeyDriftAccepted, Object: authKeyObject, Path: path, Reason: reason, RepairError: repairErr.Error(),
+			})
+		} else {
+			policy.Report(KeyDriftReport{Action: KeyDriftRepaired, Object: authKeyObject, Path: path, Reason: reason})
+			handle, err = openKeyForRead(pathPtr)
+		}
+	}
 	if err != nil {
 		return key, fmt.Errorf("broker authentication key is unavailable")
 	}
@@ -240,6 +246,75 @@ func settleKeyDrift(
 	}
 	policy.Report(KeyDriftReport{Action: KeyDriftRepaired, Object: authKeyObject, Path: path, Reason: reason})
 	return nil
+}
+
+// openKeyForRead opens the key for its single read. The share mode refuses a
+// concurrent writer; a writer that holds the key for a moment (the installer
+// rewriting it, a backup or antivirus scan) is retried within a bounded
+// budget. Access denied is returned at once.
+var openKeyForRead = func(pathPtr *uint16) (windows.Handle, error) {
+	return managed.RetryTransientOpen(func() (windows.Handle, error) {
+		return windows.CreateFile(
+			pathPtr,
+			windows.GENERIC_READ|windows.FILE_READ_ATTRIBUTES|windows.READ_CONTROL,
+			windows.FILE_SHARE_READ,
+			nil,
+			windows.OPEN_EXISTING,
+			windows.FILE_ATTRIBUTE_NORMAL|windows.FILE_FLAG_OPEN_REPARSE_POINT,
+			0,
+		)
+	})
+}
+
+// repairUnreadableKey stamps the canonical descriptor on a key whose DACL no
+// longer lets SYSTEM read it. The open uses backup semantics with the restore
+// and backup privileges enabled, which grant READ_CONTROL, WRITE_DAC and
+// WRITE_OWNER whatever the DACL says, and requests no data access. The
+// structural checks run on that handle before anything is written; the
+// ancestor chain is pinned by the caller.
+func repairUnreadableKey(pathPtr *uint16, gatewaySID *windows.SID) error {
+	descriptor, err := windows.SecurityDescriptorFromString(fmt.Sprintf(canonicalAuthKeySDDL, gatewaySID.String()))
+	if err != nil {
+		return fmt.Errorf("build canonical key descriptor: %w", err)
+	}
+	owner, _, err := descriptor.Owner()
+	if err != nil {
+		return fmt.Errorf("read canonical key owner: %w", err)
+	}
+	group, _, err := descriptor.Group()
+	if err != nil {
+		return fmt.Errorf("read canonical key group: %w", err)
+	}
+	dacl, _, err := descriptor.DACL()
+	if err != nil {
+		return fmt.Errorf("read canonical key DACL: %w", err)
+	}
+	return managed.RunWithWindowsRepairPrivileges(func() error {
+		handle, err := managed.RetryTransientOpen(func() (windows.Handle, error) {
+			return windows.CreateFile(
+				pathPtr,
+				windows.READ_CONTROL|windows.WRITE_DAC|windows.WRITE_OWNER|windows.FILE_READ_ATTRIBUTES,
+				windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE,
+				nil,
+				windows.OPEN_EXISTING,
+				windows.FILE_FLAG_BACKUP_SEMANTICS|windows.FILE_FLAG_OPEN_REPARSE_POINT,
+				0,
+			)
+		})
+		if err != nil {
+			return fmt.Errorf("open key for repair: %w", err)
+		}
+		defer func() { _ = windows.CloseHandle(handle) }()
+		if err := validateKeyStructure(handle); err != nil {
+			return err
+		}
+		info := windows.SECURITY_INFORMATION(windows.OWNER_SECURITY_INFORMATION | windows.GROUP_SECURITY_INFORMATION |
+			windows.DACL_SECURITY_INFORMATION | windows.PROTECTED_DACL_SECURITY_INFORMATION)
+		if err := windows.SetSecurityInfo(handle, windows.SE_FILE_OBJECT, info, owner, group, dacl, nil); err != nil {
+			return fmt.Errorf("apply canonical key descriptor: %w", err)
+		}
+		return nil
+	})
 }
 
 // openKeyForRepair opens the key a second time with the given rights so its
@@ -386,15 +461,17 @@ func pinDirectoryChain(path string) ([]windows.Handle, error) {
 			closeHandles(handles)
 			return nil, err
 		}
-		handle, err := windows.CreateFile(
-			pointer,
-			windows.FILE_LIST_DIRECTORY|windows.FILE_READ_ATTRIBUTES|windows.READ_CONTROL,
-			windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE,
-			nil,
-			windows.OPEN_EXISTING,
-			windows.FILE_FLAG_BACKUP_SEMANTICS|windows.FILE_FLAG_OPEN_REPARSE_POINT,
-			0,
-		)
+		handle, err := pinDirectory(pointer)
+		if errors.Is(err, windows.ERROR_ACCESS_DENIED) {
+			// A re-ACLed ancestor that no longer grants SYSTEM read is
+			// permission drift, not a structural failure: the backup
+			// privilege opens it whatever its DACL says. The handle stays
+			// valid after the privileged thread reverts.
+			_ = managed.RunWithWindowsRepairPrivileges(func() error {
+				handle, err = pinDirectory(pointer)
+				return err
+			})
+		}
 		if err != nil {
 			closeHandles(handles)
 			return nil, err
@@ -410,6 +487,27 @@ func pinDirectoryChain(path string) ([]windows.Handle, error) {
 		handles = append(handles, handle)
 	}
 	return handles, nil
+}
+
+// pinDirectory holds one ancestor open without delete sharing, so it cannot be
+// renamed or replaced while the key is validated and read. Traverse is the
+// one data right the pin asks for: an attribute-only open would skip the
+// share-access check that makes the pin effective, while list or READ_CONTROL
+// access fails on an ancestor whose DACL was tightened. A transient sharing
+// violation (an installer or Explorer holding the folder for delete) is
+// retried.
+func pinDirectory(pointer *uint16) (windows.Handle, error) {
+	return managed.RetryTransientOpen(func() (windows.Handle, error) {
+		return windows.CreateFile(
+			pointer,
+			windows.FILE_TRAVERSE|windows.FILE_READ_ATTRIBUTES,
+			windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE,
+			nil,
+			windows.OPEN_EXISTING,
+			windows.FILE_FLAG_BACKUP_SEMANTICS|windows.FILE_FLAG_OPEN_REPARSE_POINT,
+			0,
+		)
+	})
 }
 
 func closeHandles(handles []windows.Handle) {

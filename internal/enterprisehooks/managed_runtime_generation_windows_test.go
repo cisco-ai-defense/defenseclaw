@@ -211,13 +211,17 @@ func TestWindowsManagedRuntimeGenerationOldOrNewPublication(t *testing.T) {
 	if err != nil || !newSelector.Existed || newSelector.CAS == oldSelector.CAS {
 		t.Fatalf("capture new complete selector: existed=%v changed=%v err=%v", newSelector.Existed, newSelector.CAS != oldSelector.CAS, err)
 	}
-	if err := RestoreWindowsManagedRuntimeSelectorCAS(
+	restoredCAS, err := RestoreWindowsManagedRuntimeSelectorCAS(
 		WindowsManagedRuntimeSelectorFullRestoreOptions{
 			Snapshot:        oldSelector,
 			ExpectedCurrent: newSelector.CAS,
 		},
-	); err != nil {
+	)
+	if err != nil {
 		t.Fatalf("restore old complete selector by CAS: %v", err)
+	}
+	if restoredCAS != oldSelector.CAS {
+		t.Fatalf("restored selector CAS = %+v, want the snapshot's %+v", restoredCAS, oldSelector.CAS)
 	}
 	rolledBack, err := ResolveWindowsManagedRuntimeGeneration(resolve)
 	if err != nil || rolledBack.GenerationID != first.GenerationID() {
@@ -250,7 +254,7 @@ func TestWindowsManagedRuntimeGenerationOldOrNewPublication(t *testing.T) {
 	if err != nil || !thirdSelector.Existed {
 		t.Fatalf("capture outer complete selector: existed=%v err=%v", thirdSelector.Existed, err)
 	}
-	if err := RestoreWindowsManagedRuntimeSelectorCAS(
+	if _, err := RestoreWindowsManagedRuntimeSelectorCAS(
 		WindowsManagedRuntimeSelectorFullRestoreOptions{
 			Snapshot:        oldSelector,
 			ExpectedCurrent: thirdSelector.CAS,
@@ -261,7 +265,7 @@ func TestWindowsManagedRuntimeGenerationOldOrNewPublication(t *testing.T) {
 	if _, err := ResolveWindowsManagedRuntimeGeneration(resolve); err == nil {
 		t.Fatal("selector with a removed bundle resolved instead of failing closed")
 	}
-	if err := RestoreWindowsManagedRuntimeSelectorCAS(
+	if _, err := RestoreWindowsManagedRuntimeSelectorCAS(
 		WindowsManagedRuntimeSelectorFullRestoreOptions{
 			Snapshot:        thirdSelector,
 			ExpectedCurrent: oldSelector.CAS,

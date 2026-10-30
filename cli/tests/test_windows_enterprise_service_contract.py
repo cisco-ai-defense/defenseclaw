@@ -3925,7 +3925,7 @@ def test_certification_accepts_only_the_canonical_persistent_lifecycle_lock() ->
         "persistent lifecycle file lock was not canonically repaired in place for reinstall"
         in smoke
     )
-    assert "writable inherited lifecycle lock was silently adopted" in smoke
+    assert "writable inherited lifecycle lock was not repaired in place" in smoke
     assert "lifecycle_file_lock_reuse_stable = $elevated" in smoke
 
 
@@ -4006,6 +4006,13 @@ def test_atomic_managed_file_replacement_is_idempotent_on_every_engine(
             "function Get-DefenseClawClaudeMinimumClientVersion"
         )
     ]
+    helpers = ""
+    for helper in (
+        "Clear-DefenseClawRestrictiveFileAttributes",
+        "Invoke-DefenseClawTransientFileRetry",
+    ):
+        start = module.index(f"\nfunction {helper} ") + 1
+        helpers += module[start : module.index("\nfunction ", start) + 1]
     probe = tmp_path / f"atomic-file-replacement-{Path(engine).stem}.ps1"
     probe.write_text(
         "Set-StrictMode -Version Latest\n"
@@ -4027,7 +4034,11 @@ def test_atomic_managed_file_replacement_is_idempotent_on_every_engine(
         "    param([Parameter(Mandatory)][string]$Path)\n"
         "    [void][IO.Directory]::CreateDirectory($Path)\n"
         "}\n"
+        "function Write-DefenseClawResilienceEvent {\n"
+        "    param([string]$Marker, [hashtable]$Fields)\n"
+        "}\n"
         + profile_check
+        + helpers
         + atomic_install
         + r'''
 foreach ($profileName in @('SecureClient', 'Standalone')) {
@@ -6368,8 +6379,15 @@ def test_secure_client_purge_removes_only_defenseclaw_user_runtime_entries() -> 
     assert '$warnings.Add("nuclear uninstall left per-user DefenseClaw runtime state: $entry")' in nuclear
     assert "user_runtime_removed                     = [string[]]@($userRuntime.removed)" in nuclear
     assert "user_runtime_remaining                   = [string[]]@($userRuntime.remaining)" in nuclear
-    # Still reported as a successful purge.
-    assert "ok                                       = $true" in nuclear
+    # Still reported as a successful purge: what stays in a profile is a
+    # warning, never one of the incomplete items that clear ok.
+    assert "ok                                       = ($incomplete.Count -eq 0)" in nuclear
+    user_runtime_step = nuclear[
+        nuclear.index("$userRuntime = Remove-DefenseClawManagedUserRuntimeLeftovers") : nuclear.index(
+            "$serviceStateProbe = {"
+        )
+    ]
+    assert "$incomplete.Add" not in user_runtime_step
 
     scope = _module_function(module, "Test-DefenseClawManagedUserRuntimeCleanupScope")
     assert "Test-DefenseClawStandaloneProfile" in scope

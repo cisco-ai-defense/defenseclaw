@@ -95,6 +95,11 @@ var (
 	// cause is that the gateway service runs but another process listens on
 	// its API port (Windows). The hook still fails closed.
 	errManagedGatewayPortHeld = errors.New("another process holds the enterprise managed gateway API port")
+	// errManagedGatewayServiceUnreadable: the service control manager denied
+	// the hook a status query on the gateway service, which a hardened
+	// service security descriptor does. It also wraps
+	// errManagedGatewayPeerUnverified, so nothing is sent to the port.
+	errManagedGatewayServiceUnreadable = errors.New("enterprise managed gateway service status is not readable")
 )
 
 // managedHookSocketSELinuxDeniedReason is the hook-failure reason of a Unix
@@ -120,6 +125,10 @@ const managedGatewayNotRunningReason = "enterprise_managed_gateway_not_running"
 // port while the gateway service runs: it said the service was not running
 // (GAP-1029). Secure Client keeps managedGatewayPeerUnverifiedReason.
 const managedGatewayPortHeldReason = "enterprise_managed_gateway_port_held"
+
+// managedGatewayServiceUnreadableReason: the gateway service's security
+// descriptor no longer lets the user query it; Repair re-applies it.
+const managedGatewayServiceUnreadableReason = "enterprise_managed_gateway_service_unreadable"
 
 const (
 	codexBoundEventHeader    = "X-DefenseClaw-Hook-Event"
@@ -3562,11 +3571,23 @@ func managedRuntimeFailureMode(opts Options, reason string) string {
 // unverified peer failure. That is an authenticated Secure Client
 // hook (opts.SecureClient, set only on a host the strict Secure Client
 // classifier verified, and secureClientHook, #1163) or a standalone hook,
-// whose fail mode is the administrator's (owner decision 2026-10-20). Every
-// other peer failure (another process on the gateway port, a service the
-// hook cannot query) fails closed.
+// whose fail mode is the administrator's (owner decision 2026-10-20). A
+// Secure Client hook whose gateway service's security descriptor denies it
+// a status query follows its fail mode too: that is permission drift, not
+// evidence of another peer, and nothing was sent to the port. A standalone
+// hook keeps it closed (only a proven stopped service is its outage,
+// ManagedOutageFailsOpen). Every other peer failure (another process on the
+// gateway port, a changed service PID, a listener table the hook cannot
+// read) fails closed.
 func managedPeerFailMode(opts Options, failMode string, err error) string {
-	if errors.Is(err, errManagedGatewayNotRunning) && ((opts.SecureClient && secureClientHook(opts)) || managedNativeDecision(opts)) {
+	if errors.Is(err, errManagedGatewayPortHeld) {
+		return "closed"
+	}
+	secureClient := opts.SecureClient && secureClientHook(opts)
+	if errors.Is(err, errManagedGatewayNotRunning) && (secureClient || managedNativeDecision(opts)) {
+		return failMode
+	}
+	if errors.Is(err, errManagedGatewayServiceUnreadable) && secureClient {
 		return failMode
 	}
 	return "closed"
@@ -3617,11 +3638,16 @@ func managedCopilotOpen(opts Options, sp spec, failMode string) bool {
 // managedPeerFailureReason is the hook-failure reason of a managed
 // peer-verification failure: every managed hook says when the gateway
 // service is proven not running (a stopped Windows service, or a Unix
-// standalone socket missing in a trusted directory); any other
+// standalone socket missing in a trusted directory), and a Secure Client hook
+// says when the service's status cannot be read
+// (managedGatewayServiceUnreadableReason); any other
 // Secure Client peer failure keeps managedGatewayPeerUnverifiedReason.
 func managedPeerFailureReason(opts Options, err error) string {
 	if errors.Is(err, errManagedGatewayNotRunning) {
 		return managedGatewayNotRunningReason
+	}
+	if errors.Is(err, errManagedGatewayServiceUnreadable) && opts.SecureClient && secureClientHook(opts) {
+		return managedGatewayServiceUnreadableReason
 	}
 	if managedStandaloneHook(opts) && errors.Is(err, errManagedHookSocketSELinuxDenied) {
 		return managedHookSocketSELinuxDeniedReason

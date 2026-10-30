@@ -152,6 +152,7 @@ func runBroker(ctx context.Context, options brokerOptions, ready chan<- struct{}
 	// Both hooks are process-global; set them once, before any trust check.
 	managed.ReportTrustDrift = drift.trust
 	managed.ReportTrustAdvisory = drift.trust
+	managed.ReportResilienceEvent = drift.resilience
 
 	serverConfig := cmidbroker.ServerConfig{
 		PipeName:           options.pipeName,
@@ -161,15 +162,22 @@ func runBroker(ctx context.Context, options brokerOptions, ready chan<- struct{}
 	if err := cmidbroker.ValidateBrokerServiceIdentity(serverConfig); err != nil {
 		return reportStartupFailureEvent(options.serviceName, err, drift.pendingSummary())
 	}
-	if err := validateBrokerPath(options.logPath, "broker log", true); err != nil {
-		return reportStartupFailureEvent(options.serviceName, err, drift.pendingSummary())
+	// The broker log is diagnostics, not a dependency: when its folder or file
+	// cannot be used (lost write access, ReadOnly, a log shipper holding it,
+	// an unsafe path), the broker logs to the Application event log instead
+	// and keeps serving, because the gateway cannot start without it.
+	var logger *log.Logger
+	logFile, logErr := openValidatedBrokerLog(options.logPath)
+	if logErr != nil {
+		events := newEventLogWriter(options.serviceName)
+		defer events.Close()
+		logger = log.New(events, "", 0)
+		logger.Printf("%s subsystem=%q reason=%q path=%q",
+			managed.MarkerDegraded, "broker-log", logErr.Error(), options.logPath)
+	} else {
+		defer logFile.Close()
+		logger = log.New(logFile, "", log.LstdFlags|log.LUTC)
 	}
-	logFile, err := openBrokerLog(options.logPath)
-	if err != nil {
-		return reportStartupFailureEvent(options.serviceName, err, drift.pendingSummary())
-	}
-	defer logFile.Close()
-	logger := log.New(logFile, "", log.LstdFlags|log.LUTC)
 	logger.Printf("stage=startup version=%s commit=%s protocol=%d", version, commit, cmidbroker.ProtocolVersion)
 	defer logger.Print("stage=shutdown")
 	drift.attach(logger)
@@ -301,6 +309,52 @@ func validateBrokerPath(path, label string, parentOnly bool) error {
 	return managed.ValidateTrustedFilePathTolerant(path, label)
 }
 
+func openValidatedBrokerLog(path string) (*os.File, error) {
+	if err := validateBrokerPath(path, "broker log", true); err != nil {
+		return nil, err
+	}
+	return openBrokerLog(path)
+}
+
+// eventLogWriter writes each log line to the Application event log under the
+// broker's service name. A write that fails is dropped: there is nowhere left
+// to report it.
+type eventLogWriter struct {
+	mu     sync.Mutex
+	events *eventlog.Log
+}
+
+func newEventLogWriter(serviceName string) *eventLogWriter {
+	writer := &eventLogWriter{}
+	if events, err := eventlog.Open(serviceName); err == nil {
+		writer.events = events
+	}
+	return writer
+}
+
+func (writer *eventLogWriter) Write(line []byte) (int, error) {
+	writer.mu.Lock()
+	defer writer.mu.Unlock()
+	if writer.events != nil {
+		message := strings.TrimRight(string(line), "\r\n")
+		if strings.Contains(message, "error=") || strings.Contains(message, managed.MarkerBoundary) {
+			_ = writer.events.Warning(2, message)
+		} else {
+			_ = writer.events.Info(3, message)
+		}
+	}
+	return len(line), nil
+}
+
+func (writer *eventLogWriter) Close() {
+	writer.mu.Lock()
+	defer writer.mu.Unlock()
+	if writer.events != nil {
+		_ = writer.events.Close()
+		writer.events = nil
+	}
+}
+
 // driftSink collects stage=acl-drift lines. Lines raised before the log is
 // open are buffered and flushed, in order, right after the stage=startup line;
 // after that they go straight to the log. Each distinct line is written once
@@ -320,6 +374,12 @@ func newDriftSink() *driftSink {
 func (sink *driftSink) trust(path, label, reason string) {
 	sink.record(fmt.Sprintf("stage=acl-drift action=%s object=%q path=%q reason=%q",
 		cmidbroker.KeyDriftAccepted, label, path, reason))
+}
+
+// resilience receives managed resilience events (repair, accept, boundary,
+// degraded, prereq) and records them as stage=resilience lines.
+func (sink *driftSink) resilience(marker string, fields map[string]string) {
+	sink.record("stage=resilience " + managed.FormatResilienceEvent(marker, fields))
 }
 
 // key receives auth key drift reports.
@@ -406,7 +466,7 @@ func openBrokerLog(path string) (*os.File, error) {
 	handle, err := windows.CreateFile(
 		pointer,
 		windows.FILE_APPEND_DATA|windows.SYNCHRONIZE,
-		windows.FILE_SHARE_READ,
+		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE,
 		nil,
 		windows.OPEN_ALWAYS,
 		windows.FILE_ATTRIBUTE_NORMAL|windows.FILE_FLAG_OPEN_REPARSE_POINT,

@@ -72,6 +72,14 @@ func validateJudgeBodyPlatformTrust(path string, _ os.FileInfo, directory, prote
 		windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION,
 	)
 	if err != nil {
+		if !protectChildren && errors.Is(err, windows.ERROR_ACCESS_DENIED) && managed.PlatformInstallerOwnedPath(path) {
+			// An installer-owned ancestor whose DACL no longer grants this
+			// process READ_CONTROL is permission drift, not structure.
+			if relaxErr := managed.RelaxAncestorTrustVerdict(true, path, "judge body ancestor",
+				managed.NewTrustVerdict("judge_body: security descriptor is not readable: %v", err)); relaxErr == nil {
+				return nil
+			}
+		}
 		return fmt.Errorf("judge_body: inspect Windows security descriptor: %w", err)
 	}
 	if sd == nil {
@@ -255,7 +263,8 @@ func rejectUntrustedJudgeBodyWindowsWriteACEs(path string, dacl *windows.ACL, di
 		}
 		readExposesDatabase := protectChildren && (!directory || inheritsToChildren) &&
 			judgeBodyWindowsReadLikeAccess(ace.Mask)
-		if !judgeBodyWindowsWriteLikeAccess(ace.Mask, protectChildren) && !readExposesDatabase {
+		writeLike := judgeBodyWindowsWriteLikeAccess(ace.Mask, protectChildren)
+		if !writeLike && !readExposesDatabase {
 			continue
 		}
 		switch ace.Header.AceType {
@@ -268,6 +277,24 @@ func rejectUntrustedJudgeBodyWindowsWriteACEs(path string, dacl *windows.ACL, di
 		sid := (*windows.SID)(unsafe.Pointer(&ace.SidStart))
 		if sid.IsWellKnown(windows.WinCreatorOwnerRightsSid) ||
 			inheritOnly && sid.IsWellKnown(windows.WinCreatorOwnerSid) {
+			continue
+		}
+		if writeLike && directory &&
+			managed.AcceptInheritedCreateChild(path, "judge body store", ace.Header.AceFlags, ace.Mask, sid) {
+			// C:\ProgramData's container-only Users create-child entry,
+			// inherited after a reset: it cannot change, rename or delete an
+			// existing child. Accepted and logged; the guardian re-stamps.
+			continue
+		}
+		if !writeLike && !managed.TrustStrictAncestors() && !judgeBodyWindowsTrustedPrincipal(sid) {
+			// A foreign read-only entry (an inherited Users read after a
+			// reset, a backup agent) can disclose judge bodies but cannot
+			// change them. Accepted and logged, as for the audit store; only
+			// write authority stays fatal, and strict mode keeps every
+			// foreign entry fatal.
+			auditDBWindowsReportAccept(path, fmt.Sprintf(
+				"principal %s has read-only access mask 0x%x on the judge body store",
+				judgeBodyWindowsSID(sid), uint32(ace.Mask)))
 			continue
 		}
 		if !judgeBodyWindowsTrustedPrincipal(sid) {

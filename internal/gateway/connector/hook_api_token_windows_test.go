@@ -701,7 +701,10 @@ func TestHookAPITokenWindowsRejectsOrdinaryWriteOnSharedAncestor(t *testing.T) {
 	}
 }
 
-func TestHookAPITokenWindowsRejectsWritableAncestorThroughPublicOperations(t *testing.T) {
+// A write grant on a folder above the data directory that the user owns is
+// drift on a folder DefenseClaw doesn't own: every public operation accepts it
+// and logs it instead of failing hooks for that user.
+func TestHookAPITokenWindowsAcceptsWritableAncestorThroughPublicOperations(t *testing.T) {
 	for _, tc := range []struct {
 		name string
 		mask windows.ACCESS_MASK
@@ -709,6 +712,49 @@ func TestHookAPITokenWindowsRejectsWritableAncestorThroughPublicOperations(t *te
 		{name: "generic_write", mask: windows.GENERIC_WRITE},
 		{name: "write_extended_attributes", mask: windows.FILE_WRITE_EA},
 		{name: "write_attributes", mask: windows.FILE_WRITE_ATTRIBUTES},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := testenv.PrivateTempDir(t)
+			ancestor := filepath.Join(root, "ancestor")
+			dataDir := filepath.Join(ancestor, "data")
+			if err := os.MkdirAll(dataDir, 0o700); err != nil {
+				t.Fatalf("create token data path: %v", err)
+			}
+			seeded, err := EnsureHookAPIToken(dataDir, "codex")
+			if err != nil {
+				t.Fatalf("seed token: %v", err)
+			}
+			setHookAPITokenWindowsUntrustedDACL(t, ancestor, tc.mask)
+			if token, err := EnsureHookAPIToken(dataDir, "codex"); err != nil || token != seeded {
+				t.Fatalf("ensure = %q, %v; want the seeded token", token, err)
+			}
+			if token, err := LoadHookAPIToken(dataDir, "codex"); err != nil || token != seeded {
+				t.Fatalf("load = %q, %v; want the seeded token", token, err)
+			}
+			path, err := HookAPITokenFilePath(dataDir, "codex")
+			if err != nil {
+				t.Fatalf("token path: %v", err)
+			}
+			if token, err := readSecureHookAPITokenFile(dataDir, path); err != nil || token != seeded {
+				t.Fatalf("read = %q, %v; want the seeded token", token, err)
+			}
+		})
+	}
+}
+
+// A grant that lets an untrusted principal rename, delete or re-ACL a
+// user-owned folder above the data directory lets it swap the token tree for
+// one it controls, so owner-based drift acceptance does not cover it.
+func TestHookAPITokenWindowsRejectsReplaceGrantOnUserOwnedAncestor(t *testing.T) {
+	const fileDeleteChild windows.ACCESS_MASK = 0x00000040
+	for _, tc := range []struct {
+		name string
+		mask windows.ACCESS_MASK
+	}{
+		{name: "delete_child", mask: fileDeleteChild},
+		{name: "delete", mask: windows.DELETE},
+		{name: "write_dac", mask: windows.WRITE_DAC},
+		{name: "generic_all", mask: windows.GENERIC_ALL},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			assertHookAPITokenRejectedByEnsureAndLoad(t, "untrusted Windows principal", func(t *testing.T) string {

@@ -3,8 +3,8 @@
 
 #Requires -Version 5.1
 
-# A fresh Install leaves out a user whose profile folder stays busy and lists
-# them in the target-runtime plan. The installer must accept only a well-formed
+# Every install-like action leaves out a user whose profile folder stays busy
+# and lists them in the target-runtime plan. The installer must accept only a well-formed
 # list and must record each skipped user, with the reason, as a warning and in
 # the hook-guardian log. The helpers are loaded from the module by AST.
 
@@ -19,7 +19,7 @@ $ast = [Management.Automation.Language.Parser]::ParseFile($modulePath, [ref]$nul
 if (@($parseErrors).Count -ne 0) {
     throw "module does not parse: $(@($parseErrors)[0])"
 }
-foreach ($name in @('Get-DefenseClawTargetRuntimeSkippedProfiles', 'Write-DefenseClawTargetRuntimeSkippedProfiles')) {
+foreach ($name in @('Get-DefenseClawTargetRuntimeSkippedProfiles', 'Write-DefenseClawTargetRuntimeSkippedProfiles', 'ConvertTo-DefenseClawResilienceFieldValue', 'Format-DefenseClawResilienceEvent')) {
     $definition = $ast.Find({
             param($node)
             $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq $name
@@ -29,6 +29,9 @@ foreach ($name in @('Get-DefenseClawTargetRuntimeSkippedProfiles', 'Write-Defens
     }
     . ([scriptblock]::Create($definition.Extent.Text))
 }
+
+$script:ResilienceMarkers = @('defenseclaw_repair', 'defenseclaw_skip')
+$script:ResilienceEvents = [Collections.Generic.List[string]]::new()
 
 function New-Plan($Skipped, $Repaired = $null) {
     $plan = [ordered]@{ schema_version = 1; roots = @() }
@@ -88,6 +91,11 @@ try {
     if (-not $logged.Contains('[installer] target_runtime_profile_skipped: user S-1-5-21-111-222-333-1009')) {
         throw "hook-guardian log does not record the skip: $logged"
     }
+    if (-not $warningText.Contains('defenseclaw_skip path="C:\\Users\\dave"') -or
+        -not $warningText.Contains('unit="user S-1-5-21-111-222-333-1009"') -or
+        -not $logged.Contains('[installer] defenseclaw_skip ')) {
+        throw "skip is not logged with the shared marker: $warningText"
+    }
 }
 finally {
     [IO.Directory]::Delete($logDirectory, $true)
@@ -125,6 +133,9 @@ try {
     }
     if (-not ([IO.File]::ReadAllText($logPath)).Contains('[installer] target_runtime_profile_repaired: user S-1-5-21-111-222-333-1010')) {
         throw 'hook-guardian log does not record the repair'
+    }
+    if (-not $warningText.Contains('defenseclaw_repair path="C:\\Users\\erin"')) {
+        throw "repair is not logged with the shared marker: $warningText"
     }
 }
 finally {

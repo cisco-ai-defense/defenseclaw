@@ -90,7 +90,7 @@ func TestWindowsDriftScopeDowngradesLeafPermissionVerdicts(t *testing.T) {
 		if err := windows.GetAce(dacl, 0, &ace); err != nil {
 			t.Fatalf("GetAce: %v", err)
 		}
-		ace.Header.AceType = 0x9 // allow callback
+		ace.Header.AceType = 0x5 // allow object
 		if err := rejectUntrustedWindowsWriteACEsWithWriter("leaf", "broker test", dacl, nil, leaf); err != nil {
 			t.Fatalf("drift scope refused an unsupported ACE type: %v", err)
 		}
@@ -256,4 +256,77 @@ func reportsMention(reports []string, path, reason string) bool {
 		}
 	}
 	return false
+}
+
+// Executable code is advisory: an untrusted writer is accepted, and also
+// logged as a critical boundary finding with the principal.
+func TestExecutableLeafLogsBoundaryForUntrustedWriter(t *testing.T) {
+	advisoryLogDedupe.reset()
+	t.Cleanup(advisoryLogDedupe.reset)
+	var events []string
+	previous := ReportResilienceEvent
+	ReportResilienceEvent = func(marker string, fields map[string]string) {
+		events = append(events, FormatResilienceEvent(marker, fields))
+	}
+	t.Cleanup(func() { ReportResilienceEvent = previous })
+	_ = captureTrustDrift(t)
+
+	leaf := windowsTrustLeaf.tolerant()
+	leaf.code = true
+	dacl := testDACL(t, "D:P(A;;FA;;;SY)(A;;0x1301bf;;;BU)")
+	if err := rejectUntrustedWindowsWriteACEsWithWriter(`C:\bin\broker.exe`, "CMID broker executable", dacl, nil, leaf); err != nil {
+		t.Fatalf("code leaf refused an untrusted writer: %v", err)
+	}
+	if len(events) != 1 || !strings.HasPrefix(events[0], MarkerBoundary) || !strings.Contains(events[0], "S-1-5-32-545") {
+		t.Fatalf("events = %v, want one boundary naming BUILTIN\\Users", events)
+	}
+}
+
+func TestAcceptUnreadableDescriptorScopes(t *testing.T) {
+	t.Setenv(TrustStrictAncestorsEnv, "")
+	if !acceptUnreadableDescriptor(windowsTrustAncestor, windows.ERROR_ACCESS_DENIED) {
+		t.Fatal("advisory ancestor access denied should be drift")
+	}
+	if !acceptUnreadableDescriptor(windowsTrustLeaf.tolerant(), windows.ERROR_ACCESS_DENIED) {
+		t.Fatal("tolerant leaf access denied should be drift")
+	}
+	if acceptUnreadableDescriptor(windowsTrustLeaf, windows.ERROR_ACCESS_DENIED) {
+		t.Fatal("strict leaf access denied must stay fatal")
+	}
+	if acceptUnreadableDescriptor(windowsTrustAncestor, windows.ERROR_FILE_NOT_FOUND) {
+		t.Fatal("not found must stay fatal")
+	}
+	t.Setenv(TrustStrictAncestorsEnv, "1")
+	if acceptUnreadableDescriptor(windowsTrustAncestor, windows.ERROR_ACCESS_DENIED) {
+		t.Fatal("strict mode must keep access denied fatal")
+	}
+}
+
+func TestValidateTrustedPolicyFilePathAcceptsUntrustedWriterAsBoundary(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(path, []byte("ok"), 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	setTestFileDACL(t, path, testDACL(t, "D:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;FA;;;OW)(A;;FW;;;BU)"), true)
+	if err := ValidateTrustedFilePath(path, "policy test"); err == nil {
+		t.Fatal("ValidateTrustedFilePath accepted a Users writer; the strict API must be unchanged")
+	}
+	var boundaries []string
+	previous := ReportResilienceEvent
+	ReportResilienceEvent = func(marker string, fields map[string]string) {
+		if marker == MarkerBoundary {
+			boundaries = append(boundaries, fields["path"])
+		}
+	}
+	t.Cleanup(func() { ReportResilienceEvent = previous })
+	_ = captureTrustDrift(t)
+	if err := ValidateTrustedPolicyFilePath(path, "policy test"); err != nil {
+		t.Fatalf("ValidateTrustedPolicyFilePath refused permission drift: %v", err)
+	}
+	if len(boundaries) == 0 {
+		t.Fatal("ValidateTrustedPolicyFilePath logged no boundary finding for a Users writer")
+	}
+	if err := ValidateTrustedPolicyFilePath(filepath.Join(filepath.Dir(path), "missing.yaml"), "policy test"); err == nil {
+		t.Fatal("ValidateTrustedPolicyFilePath accepted a missing file; structure must stay fatal")
+	}
 }

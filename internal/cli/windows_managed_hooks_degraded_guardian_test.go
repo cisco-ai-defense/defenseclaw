@@ -8,6 +8,8 @@ package cli
 import (
 	"strings"
 	"testing"
+
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
 // degradedGuardianFixture is a Guardian reconcile with one active, one
@@ -143,8 +145,8 @@ func TestWindowsManagedHooksGuardianKeepsBindingWithFailures(t *testing.T) {
 				Connector: f.pendingRow.Connector, SID: f.pendingRow.SID, OK: true,
 			})
 		},
-		"manifest digest mismatch": func(f *degradedGuardianFixture) {
-			f.activation.ManifestSHA256 = strings.Repeat("b", 64)
+		"malformed manifest digest": func(f *degradedGuardianFixture) {
+			f.activation.ManifestSHA256 = "not-a-digest"
 		},
 		"records from different reconciles": func(f *degradedGuardianFixture) {
 			f.state.UpdatedAt = "2026-10-29T00:00:01Z"
@@ -186,5 +188,73 @@ func TestWindowsManagedHooksTeardownBindsFailedTargets(t *testing.T) {
 	}
 	if !windowsManagedHooksTeardownTargetIn(targets[0], failed) || windowsManagedHooksTeardownTargetIn(targets[1], failed) {
 		t.Fatal("failed target membership is wrong")
+	}
+}
+
+// The enumerator republishes the manifest (an agent version bump, a new user)
+// between Guardian reconciles. The stale digest is logged and accepted, and a
+// row the Guardian has not reported yet is treated as possibly wired.
+func TestWindowsManagedHooksGuardianAcceptsRepublishedManifest(t *testing.T) {
+	events := captureResilienceEvents(t)
+	f := newDegradedGuardianFixture(true)
+	f.activation.ManifestSHA256 = strings.Repeat("b", 64)
+	added := windowsManagedHooksTeardownTarget{
+		Connector: "codex",
+		SID:       "S-1-5-21-111-222-333-1777",
+		DataDir:   `C:\Users\newcomer\.defenseclaw`,
+	}
+	f.ctx.targets = append(append([]windowsManagedHooksTeardownTarget(nil), f.ctx.targets...), added)
+
+	pending, failed, err := f.validate()
+	if err != nil {
+		t.Fatalf("republished manifest rejected: %v", err)
+	}
+	if len(pending) != 1 {
+		t.Fatalf("pending = %+v", pending)
+	}
+	found := false
+	for _, target := range failed {
+		if target == added {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("failed = %+v, want the unreported row treated as possibly wired", failed)
+	}
+	if len(*events) != 2 {
+		t.Fatalf("events = %v, want the digest drift and the unreported row", *events)
+	}
+	for _, event := range *events {
+		if !strings.HasPrefix(event, managed.MarkerAccept+" ") {
+			t.Fatalf("event = %q", event)
+		}
+	}
+}
+
+// A never-protected, non-deferred user who is signed out is recorded as a
+// failed row whose error says it is waiting. The coverage wait accepts it,
+// teardown treats it as possibly wired, and a non-deferred pending row is
+// still rejected, so earlier releases read the same state after a rollback.
+func TestWindowsManagedHooksGuardianAcceptsWaitingTargetAsFailed(t *testing.T) {
+	f := newDegradedGuardianFixture(false)
+	f.state.Results = append([]enterpriseHookReconcileRow(nil), f.state.Results...)
+	f.state.Results[0].Error = "pending: no active session for the target user"
+
+	pending, failed, err := f.validate()
+	if err != nil {
+		t.Fatalf("waiting target rejected: %v", err)
+	}
+	if len(pending) != 1 || pending[0] != f.ctx.targets[2] {
+		t.Fatalf("pending = %+v, want only the deferred target", pending)
+	}
+	if len(failed) != 1 || failed[0] != f.ctx.targets[0] {
+		t.Fatalf("failed = %+v, want the waiting target treated as possibly wired", failed)
+	}
+
+	f.state.Results[0] = enterpriseHookReconcileRow{
+		Connector: f.failedRow.Connector, SID: f.failedRow.SID, UserHome: f.failedRow.UserHome, Pending: true,
+	}
+	if _, _, err := f.validate(); err == nil {
+		t.Fatal("non-deferred pending target was accepted")
 	}
 }

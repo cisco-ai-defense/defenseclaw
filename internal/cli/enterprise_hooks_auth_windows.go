@@ -13,8 +13,12 @@
 package cli
 
 import (
+	"errors"
+	"fmt"
 	"os"
 
+	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
+	"github.com/defenseclaw/defenseclaw/internal/winpath"
 	"golang.org/x/sys/windows"
 )
 
@@ -40,4 +44,71 @@ func setEnterpriseHookAuthorizationOwnership(path string) error {
 
 func setEnterpriseHookGuardianStateOwnership(path string) error {
 	return setEnterpriseHookAuthorizationOwnership(path)
+}
+
+// repairEnterpriseHookGuardianLedgerObjectPlatform re-stamps one guardian
+// ledger object to its canonical owner and DACL. Only the LocalSystem
+// guardian or an elevated installer reaches this path. Structure stays fatal:
+// a reparse point anywhere on the path, a hard-linked file, or an owner
+// outside SYSTEM, Administrators and TrustedInstaller is never adopted,
+// because any of those could hand the protected ledger to someone else.
+func repairEnterpriseHookGuardianLedgerObjectPlatform(path string, directory bool) error {
+	if err := enterpriseWindowsReparseChainCheck(path); err != nil {
+		return fmt.Errorf("refusing unsafe hook guardian ledger path: %w", err)
+	}
+	if !directory {
+		links, err := enterpriseWindowsLedgerLinkCount(path)
+		if err != nil {
+			return err
+		}
+		if links != 1 {
+			return errors.New("hook guardian ledger file has more than one hard link")
+		}
+	}
+	owner, err := enterpriseWindowsManagedPathOwner(path)
+	if err != nil {
+		return fmt.Errorf("inspect hook guardian ledger owner: %w", err)
+	}
+	if !enterpriseWindowsRuntimeRepairOwnerTrusted(owner, nil) {
+		ownerSID := "<nil>"
+		if owner != nil {
+			ownerSID = owner.String()
+		}
+		return fmt.Errorf("hook guardian ledger owner is not trusted: %s", ownerSID)
+	}
+	return enterprisehooks.RunWithWindowsOwnerRestorePrivilege(func() error {
+		return enterpriseHookAuthorizationOwnershipSetter(path)
+	})
+}
+
+func enterpriseWindowsLedgerLinkCount(path string) (uint32, error) {
+	extended, err := winpath.Extended(path)
+	if err != nil {
+		return 0, err
+	}
+	name, err := windows.UTF16PtrFromString(extended)
+	if err != nil {
+		return 0, err
+	}
+	handle, err := windows.CreateFile(
+		name,
+		windows.FILE_READ_ATTRIBUTES,
+		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE,
+		nil,
+		windows.OPEN_EXISTING,
+		windows.FILE_FLAG_OPEN_REPARSE_POINT|windows.FILE_FLAG_BACKUP_SEMANTICS,
+		0,
+	)
+	if err != nil {
+		return 0, fmt.Errorf("open hook guardian ledger file: %w", err)
+	}
+	defer windows.CloseHandle(handle)
+	var info windows.ByHandleFileInformation
+	if err := windows.GetFileInformationByHandle(handle, &info); err != nil {
+		return 0, fmt.Errorf("inspect hook guardian ledger file: %w", err)
+	}
+	if info.FileAttributes&windows.FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+		return 0, errors.New("hook guardian ledger file is a reparse point")
+	}
+	return info.NumberOfLinks, nil
 }

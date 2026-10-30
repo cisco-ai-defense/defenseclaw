@@ -247,6 +247,7 @@ func TestLoadFromFile_ManagedEnterpriseRejectsUntrustedConfigPath(t *testing.T) 
 		if err := os.WriteFile(path, data, 0o600); err != nil {
 			t.Fatalf("write config: %v", err)
 		}
+		grantUntrustedWriterForTest(t, path)
 		_, err := LoadFromFile(path)
 		if err == nil {
 			t.Fatal("LoadFromFile succeeded for untrusted managed_enterprise config path")
@@ -268,6 +269,7 @@ func TestLoadFromFile_ManagedEnterpriseEnvPinRejectsUntrustedUnmanagedFile(t *te
 	if err := os.WriteFile(path, []byte("config_version: 9\ndeployment_mode: unmanaged_byod\n"), 0o600); err != nil {
 		t.Fatalf("write config: %v", err)
 	}
+	grantUntrustedWriterForTest(t, path)
 	t.Setenv(managed.DeploymentModeEnv, string(DeploymentModeManagedEnterprise))
 	_, err := LoadFromFile(path)
 	if err == nil || !strings.Contains(err.Error(), "managed_enterprise config trust check failed") {

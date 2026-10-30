@@ -836,7 +836,8 @@ targets:
                 [string]$SelfHealKind,
                 [string]$SelfHealGatewayServiceSID,
                 # Accepted and ignored: the config ACL repair gate passes it.
-                [switch]$IgnoreCreatorTemplates
+                [switch]$IgnoreCreatorTemplates,
+                [switch]$HealOnlyUntrusted
             )
             if ($script:HarnessState.ContainsKey('purge_acl_invalid') -and
                 [bool]$script:HarnessState.purge_acl_invalid -and

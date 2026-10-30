@@ -134,6 +134,17 @@ func dialManagedGatewayService(ctx context.Context, canonicalAddr, serviceName s
 	if errors.Is(err, errManagedGatewayNotRunning) {
 		return nil, stoppedManagedGatewayError(canonicalAddr, err, secureClient)
 	}
+	if errors.Is(err, windows.ERROR_ACCESS_DENIED) {
+		// A service security descriptor that denies the user a status query
+		// is permission drift, not evidence of another peer: the hook follows
+		// its fail mode (managedPeerFailMode) and nothing is sent to the port.
+		return nil, fmt.Errorf(
+			"%w: %w: query protected gateway service: %v",
+			errManagedGatewayPeerUnverified,
+			errManagedGatewayServiceUnreadable,
+			err,
+		)
+	}
 	if err != nil {
 		return nil, managedGatewayPeerError("query protected gateway service: %v", err)
 	}

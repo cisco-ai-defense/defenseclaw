@@ -393,7 +393,10 @@ def test_compliant_ensure_verify_collects_old_runtime_generations() -> None:
     go = (ROOT / "internal" / "cli" / "windows_enterprise_standalone.go").read_text(encoding="utf-8")
     assert f'windowsEnterpriseCollectGenerationsVariable = "{variable}"' in go
     lifecycle_go = (ROOT / "internal" / "cli" / "windows_managed_hooks_lifecycle.go").read_text(encoding="utf-8")
-    assert '"capture", "classify-activation", "collect", "restore", "retire", "retire-committed",' in lifecycle_go
+    assert (
+        '"capture", "classify-activation", "collect", "prune-orphaned-selectors",\n'
+        '\t\t"restore", "retire", "retire-committed",'
+    ) in lifecycle_go
 
 
 def test_standalone_first_enumeration_has_a_longer_named_budget() -> None:

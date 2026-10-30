@@ -249,6 +249,7 @@ func installWindowsCursorManagedResult(
 		}
 		return InstallResult{}, err
 	}
+	retireWindowsManagedRuntimePreviousGeneration(generationCommit)
 	return InstallResult{
 		Connector:                  "cursor",
 		UserHome:                   target.home,

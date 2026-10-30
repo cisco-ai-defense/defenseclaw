@@ -12,15 +12,19 @@ import (
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"golang.org/x/sys/windows"
 )
 
 var (
-	windowsManagedRuntimeGenerationPrepare = PrepareWindowsManagedRuntimeGeneration
-	windowsManagedRuntimeGenerationCommit  = CommitWindowsManagedRuntimeGeneration
-	windowsManagedRuntimeGenerationDiscard = DiscardWindowsManagedRuntimeGenerationPublication
-	windowsManagedRuntimeGenerationResolve = ResolveWindowsManagedRuntimeGeneration
-	windowsManagedRuntimeGenerationVerify  = VerifyWindowsManagedRuntimeGeneration
+	windowsManagedRuntimeGenerationPrepare  = PrepareWindowsManagedRuntimeGeneration
+	windowsManagedRuntimeGenerationCommit   = CommitWindowsManagedRuntimeGeneration
+	windowsManagedRuntimeGenerationDiscard  = DiscardWindowsManagedRuntimeGenerationPublication
+	windowsManagedRuntimeGenerationResolve  = ResolveWindowsManagedRuntimeGeneration
+	windowsManagedRuntimeGenerationVerify   = VerifyWindowsManagedRuntimeGeneration
+	windowsManagedRuntimeGenerationFinalize = func(commit WindowsManagedRuntimeSelectorCommit) error {
+		return commit.Finalize()
+	}
 )
 
 func prepareWindowsManagedRuntimeGenerationForInstall(
@@ -75,6 +79,26 @@ func rollbackWindowsManagedRuntimeGeneration(
 		commit.Rollback(),
 		windowsManagedRuntimeGenerationDiscard(publication),
 	)
+}
+
+// retireWindowsManagedRuntimePreviousGeneration deletes the bundle a
+// successful install just replaced, so rotations of the token, gateway, fail
+// mode or contract stop piling up stale bundles toward the collection cap.
+// It runs only when the embedding process says no lifecycle transaction could
+// still roll back to that bundle, and it is best effort: a bundle that cannot
+// be retired is logged and left for generation collection.
+func retireWindowsManagedRuntimePreviousGeneration(commit WindowsManagedRuntimeSelectorCommit) {
+	allowed := WindowsManagedRuntimeRetirePreviousGenerationAllowed
+	if allowed == nil || !commit.Changed() || !allowed() {
+		return
+	}
+	if err := windowsManagedRuntimeGenerationFinalize(commit); err != nil {
+		managed.EmitResilienceEvent(managed.MarkerSkip, map[string]string{
+			"connector": commit.connector,
+			"sid":       commit.targetSID,
+			"reason":    "runtime_generation_retire_skipped: " + err.Error(),
+		})
+	}
 }
 
 func discardWindowsManagedRuntimeGeneration(
