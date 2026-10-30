@@ -6,6 +6,7 @@ package gateway
 
 import (
 	"context"
+	"fmt"
 	"runtime"
 	"testing"
 
@@ -93,5 +94,26 @@ func TestManagedUnixHookReportedMCPServerIsAdmittedBeforeItsCalls(t *testing.T) 
 		if watcherUsesHookReportedMCP(other) {
 			t.Fatalf("config %q/%q lists hook-reported MCP servers", other.DeploymentMode, other.Enterprise.Profile)
 		}
+	}
+}
+
+// One account reporting many servers (its hook facts are its own claim)
+// must not use up the list for the other accounts, whose new servers would
+// then be left unscanned (GAP-2591 review).
+func TestHookReportedMCPServersCapIsPerAccount(t *testing.T) {
+	reported := &hookReportedMCPServers{}
+	for i := 0; i < hookReportedMCPLimit; i++ {
+		reported.note(config.MCPServerEntry{Name: fmt.Sprintf("forged%d", i), URL: "https://mcp.example.com/mcp",
+			Connector: "claudecode", Home: "/home/eng1"})
+	}
+	if servers, _ := reported.list(); len(servers) >= hookReportedMCPLimit {
+		t.Fatalf("one account filled the list of every account (%d servers)", len(servers))
+	}
+	if !reported.note(config.MCPServerEntry{Name: "fcctx7", URL: "https://mcp.example.com/mcp", Connector: "claudecode", Home: "/home/eng2"}) {
+		t.Fatal("a new server of another account was not listed after one account reported many")
+	}
+	// A changed definition of a listed server is still recorded at the cap.
+	if !reported.note(config.MCPServerEntry{Name: "forged0", URL: "https://other.example.com/mcp", Connector: "claudecode", Home: "/home/eng1"}) {
+		t.Fatal("a changed URL of a listed server was not recorded at the per-account cap")
 	}
 }

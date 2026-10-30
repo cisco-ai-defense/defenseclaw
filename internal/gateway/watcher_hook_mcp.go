@@ -32,11 +32,18 @@ func watcherUsesHookReportedMCP(cfg *config.Config) bool {
 // hookReportedMCPLimit bounds the servers a gateway keeps from hook reports.
 const hookReportedMCPLimit = 4096
 
+// hookReportedMCPPerHomeLimit bounds the share of one account. The hook facts
+// are the claim of the caller, so without it one user reporting many made-up
+// servers filled the list and the new servers of every other user were left
+// unscanned.
+const hookReportedMCPPerHomeLimit = 256
+
 // hookReportedMCPServers are the MCP servers the managed hooks reported, one
 // per connector, account home and name, with the definition last reported.
 type hookReportedMCPServers struct {
 	mu      sync.Mutex
 	servers map[string]config.MCPServerEntry
+	perHome map[string]int
 }
 
 func (h *hookReportedMCPServers) list() ([]config.MCPServerEntry, error) {
@@ -57,13 +64,16 @@ func (h *hookReportedMCPServers) note(entry config.MCPServerEntry) bool {
 	defer h.mu.Unlock()
 	if h.servers == nil {
 		h.servers = map[string]config.MCPServerEntry{}
+		h.perHome = map[string]int{}
 	}
 	if old, ok := h.servers[key]; ok {
 		if old.URL == entry.URL && old.Transport == entry.Transport {
 			return false
 		}
-	} else if len(h.servers) >= hookReportedMCPLimit {
+	} else if len(h.servers) >= hookReportedMCPLimit || h.perHome[entry.Home] >= hookReportedMCPPerHomeLimit {
 		return false
+	} else {
+		h.perHome[entry.Home]++
 	}
 	h.servers[key] = entry
 	return true
