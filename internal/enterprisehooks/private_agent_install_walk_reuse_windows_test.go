@@ -130,3 +130,53 @@ func TestWindowsPrivateHomeWalkReportsAFinishedIncompleteWalk(t *testing.T) {
 		t.Fatal("an expired scan reported a walk")
 	}
 }
+
+// enumerate --once exits after its cycle, so it waits for a walk its scan
+// gave up on and runs one more cycle with it (rel-1-0-6 r106 CI); with no
+// such walk it does not wait.
+func TestWaitWindowsPrivateWalksReportedWaitsForAWalkAScanGaveUpOn(t *testing.T) {
+	for len(windowsPrivateWalkLate) > 0 {
+		<-windowsPrivateWalkLate
+	}
+	home := filepath.Join(t.TempDir(), "dcw-std2")
+	run := windowsPrivateWalkRun
+	t.Cleanup(func() { windowsPrivateWalkRun = run })
+	prefix := filepath.Join(home, "work", "tool")
+	release := make(chan struct{})
+	windowsPrivateWalkRun = func(ctx context.Context, _ string) ([]string, bool) {
+		select { // a cold first walk under install load
+		case <-release:
+			return []string{prefix}, true
+		case <-ctx.Done():
+			return nil, false
+		}
+	}
+
+	quick, cancelQuick := context.WithTimeout(context.Background(), 5*time.Second)
+	started := time.Now()
+	if WaitWindowsPrivateWalksReported(quick) {
+		t.Fatal("no walk was reported incomplete, want no extra cycle")
+	}
+	cancelQuick()
+	if waited := time.Since(started); waited > time.Second {
+		t.Fatalf("waited %s with no reported walk, want no wait", waited)
+	}
+
+	scan, cancelScan := context.WithTimeout(context.Background(), 2500*time.Millisecond)
+	_, complete := windowsPrivateHomeWalk(scan, home)
+	cancelScan()
+	if complete {
+		t.Fatal("the scan did not wait out its walk, want the account incomplete")
+	}
+	time.AfterFunc(200*time.Millisecond, func() { close(release) })
+	wait, cancelWait := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancelWait()
+	if !WaitWindowsPrivateWalksReported(wait) {
+		t.Fatal("the walk finished complete, want one more cycle")
+	}
+	again, cancelAgain := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancelAgain()
+	if got, complete := windowsPrivateHomeWalk(again, home); !complete || len(got) != 1 || got[0] != prefix {
+		t.Fatalf("the extra cycle's walk = %q complete=%t, want the walked prefix", got, complete)
+	}
+}
