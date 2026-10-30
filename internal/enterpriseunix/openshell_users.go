@@ -477,14 +477,17 @@ func (o *commandUserOps) Status(ctx context.Context, a SandboxAccount) (SandboxS
 		// A daemon that is not running does not mean no sandbox runs: it
 		// crashed, was killed or (macOS) left when idle, and the account's
 		// OpenShell gateway unit (setup mode) keeps hosting its sandboxes.
-		// The launcher starts the daemon on demand and the daemon counts what
-		// the gateway runs, so ask it. When neither service runs, durable
+		// `sandbox status` starts the daemon on demand and the daemon counts
+		// what the gateway runs, so ask it. When neither service runs, durable
 		// guest records still need checking before calling the account idle.
 		if !o.unitRunning(ctx, a, userUnitGatewayService, labelOpenShellGateway) {
 			return st, e.retainedComputeRefusal(a)
 		}
 	}
-	res, err := o.runAs(ctx, a, userCommandTimeout, e.launcherPath(), "sandbox", "status", "--output", "json")
+	// The managed binary, not the launcher path: a foreign file there (a
+	// Python install, say) is its own row (checkLauncher), and its output
+	// is no answer from the account's daemon (GAP-0016).
+	res, err := o.runAs(ctx, a, userCommandTimeout, e.launcherTarget(), "sandbox", "status", "--output", "json")
 	if err != nil {
 		return st, fmt.Errorf("ask the sandbox daemon of %s: %w", a.Name, err)
 	}
@@ -501,8 +504,7 @@ func (o *commandUserOps) Status(ctx context.Context, a SandboxAccount) (SandboxS
 	if err := json.Unmarshal(res.Stdout, &reply); err != nil {
 		return st, fmt.Errorf("read the sandbox status of %s: %w", a.Name, err)
 	}
-	// The launcher's command started the daemon when the gateway ran without
-	// one.
+	// The command started the daemon when the gateway ran without one.
 	st.Active = true
 	st.Running = reply.Running
 	// A daemon before 1.0.4 does not say which sandboxes may hold compute:
@@ -802,7 +804,7 @@ func (o *commandUserOps) Reload(ctx context.Context, a SandboxAccount) error {
 }
 
 func (o *commandUserOps) Teardown(ctx context.Context, a SandboxAccount) error {
-	res, err := o.runAs(ctx, a, teardownTimeout, o.env.launcherPath(), "sandbox", "teardown", "--yes")
+	res, err := o.runAs(ctx, a, teardownTimeout, o.env.launcherTarget(), "sandbox", "teardown", "--yes")
 	if err == nil || res.ExitCode <= 0 {
 		return err
 	}
