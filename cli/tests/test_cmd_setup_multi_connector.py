@@ -403,6 +403,39 @@ class TestAdditiveSetupCommand(unittest.TestCase):
         self.assertEqual(restart.call_count, 2)
         self.assertEqual(restart.call_args_list[1].kwargs["connectors"], ["claudecode"])
 
+    def test_bare_batch_that_drops_connectors_names_them_and_the_add_command_gap2615(self):
+        # GAP-2615: setup -c amp --yes on a multi-connector install sets the
+        # exact roster; when the gateway refuses that switch, the error must
+        # say the batch tried to remove the others and how to add one instead.
+        self._seed_map("claudecode", "codex")
+        prior = tuple(self.app.cfg.active_connectors())
+        with (
+            _setup_patches() as restart,
+            patch("defenseclaw.commands.cmd_setup._is_pid_alive", return_value=False),
+        ):
+            restart.side_effect = [click.ClickException("connector switch rollback boundary"), None]
+            result = _invoke(["-c", "cursor", "--mode", "action", "--yes"], self.app)
+
+        self.assertNotEqual(result.exit_code, 0, msg=result.output)
+        self.assertIn("sets the exact connector list, so it removes: claudecode, codex", result.output)
+        self.assertIn("tried to remove claudecode, codex", result.output)
+        self.assertIn("defenseclaw setup cursor --mode action --yes", result.output)
+        self.assertNotIn("run the same setup command again", result.output)
+        self.assertEqual(tuple(self.app.cfg.active_connectors()), prior)
+
+    def test_bare_batch_that_keeps_the_roster_has_no_replace_hint_gap2615(self):
+        self._seed_map("codex", "cursor")
+        with (
+            _setup_patches() as restart,
+            patch("defenseclaw.commands.cmd_setup._is_pid_alive", return_value=False),
+        ):
+            restart.side_effect = [click.ClickException("connector runtime readiness failed"), None]
+            result = _invoke(["-c", "codex", "-c", "cursor", "--yes"], self.app)
+
+        self.assertNotEqual(result.exit_code, 0, msg=result.output)
+        self.assertNotIn("tried to remove", result.output)
+        self.assertNotIn("sets the exact connector list", result.output)
+
     def test_failed_restart_restores_the_discovery_cache_from_before_the_version_check(self):
         # GAP-0547: `setup codex --mode action` republished agent_discovery.json
         # in its version check, before the rollback point was taken. The

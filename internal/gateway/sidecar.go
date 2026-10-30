@@ -5270,7 +5270,7 @@ func (s *Sidecar) runGuardrailMulti(ctx context.Context) error {
 		}
 		setupSeed.activeState = activeState
 		setupSeed.hookLockState = hookLockState
-		candidates, unavailable := s.removedConnectorRollbackCandidates(
+		candidates, unavailable, _ := s.removedConnectorRollbackCandidates(
 			registry, previous, names, apiToken, proxyAddr, apiAddr, masterKey, hookLockState,
 		)
 		removed, teardownFailed := teardownRemovedConnectorCandidates(candidates, ctx)
@@ -6128,7 +6128,7 @@ func (s *Sidecar) teardownPreviousConnectorTransaction(
 		return nil
 	}
 	previousName := strings.Join(previousNames, ", ")
-	candidates, unavailable := s.removedConnectorRollbackCandidates(
+	candidates, unavailable, dropped := s.removedConnectorRollbackCandidates(
 		registry,
 		previousNames,
 		[]string{requested.Name()},
@@ -6138,7 +6138,9 @@ func (s *Sidecar) teardownPreviousConnectorTransaction(
 		masterKey,
 		transaction.hookLockState,
 	)
-	if len(unavailable) > 0 || len(candidates) != len(previousNames) {
+	// A dropped name left the roster without a teardown, so it needs no
+	// rollback authority; requested Setup publishes the roster without it.
+	if len(unavailable) > 0 || len(candidates)+len(dropped) != len(previousNames) {
 		return fmt.Errorf(
 			"refuse connector switch %s to %s without complete prior-registration rollback authority",
 			previousName,
@@ -6147,7 +6149,7 @@ func (s *Sidecar) teardownPreviousConnectorTransaction(
 	}
 	removed, failed := teardownRemovedConnectorCandidates(candidates, ctx)
 	candidates, failed = keepAgentSettingsRefusedTeardowns(ctx, candidates, failed, transaction)
-	if len(failed) > 0 || len(removed)+len(transaction.keptRegistrations) != len(previousNames) {
+	if len(failed) > 0 || len(removed)+len(transaction.keptRegistrations)+len(dropped) != len(previousNames) {
 		// Teardown may have partially changed the old registration. Reapply the
 		// captured candidate before returning, without touching the requested
 		// connector because its Setup has not run yet.
@@ -7861,9 +7863,9 @@ func (s *Sidecar) removedConnectorRollbackCandidates(
 	previous, current []string,
 	apiToken, proxyAddr, apiAddr, masterKey string,
 	lockState *connector.HookContractLockSnapshot,
-) ([]multiConnectorSetupRollbackPoint, []string) {
+) ([]multiConnectorSetupRollbackPoint, []string, []string) {
 	if registry == nil || len(previous) == 0 {
-		return nil, nil
+		return nil, nil, nil
 	}
 	keep := make(map[string]struct{}, len(current))
 	for _, name := range current {
@@ -7873,6 +7875,10 @@ func (s *Sidecar) removedConnectorRollbackCandidates(
 	}
 	var candidates []multiConnectorSetupRollbackPoint
 	var failed []string
+	// dropped lists the names that left the roster here without a teardown
+	// (no build-shipped owner, or no lock and nothing installed), so a
+	// caller that must account for every previous name counts them (GAP-2617).
+	var dropped []string
 	for _, previousName := range previous {
 		name := strings.TrimSpace(previousName)
 		if name == "" {
@@ -7896,6 +7902,7 @@ func (s *Sidecar) removedConnectorRollbackCandidates(
 				continue
 			}
 			s.auditDroppedConnectorState(name, "removed")
+			dropped = append(dropped, name)
 			continue
 		}
 		opts, err := s.connectorSetupOptsChecked(conn, apiToken, proxyAddr, apiAddr)
@@ -7910,6 +7917,15 @@ func (s *Sidecar) removedConnectorRollbackCandidates(
 			opts:             opts,
 			previouslyActive: true,
 			previousLock:     lockState.RawEntry(name),
+		}
+		if dropRemovedConnectorWithNothingInstalled(conn, opts, point.previousLock) {
+			// No lock and no registration: retrying its teardown on every
+			// start can never succeed and only keeps a connector the config
+			// no longer names in the active roster (GAP-2617).
+			fmt.Fprintf(os.Stderr, "[guardrail] removed connector %s has no hook contract lock and nothing installed — removed its hook credential and dropped it from the active roster\n", name)
+			s.auditDroppedConnectorState(name, "removed-unregistered")
+			dropped = append(dropped, name)
+			continue
 		}
 		priorOpts, err := priorConnectorSetupOpts(point)
 		if err != nil {
@@ -7928,7 +7944,29 @@ func (s *Sidecar) removedConnectorRollbackCandidates(
 		}
 		candidates = append(candidates, point)
 	}
-	return candidates, failed
+	return candidates, failed, dropped
+}
+
+// dropRemovedConnectorWithNothingInstalled reports whether a connector that
+// left the configuration can leave the active roster without a teardown: it
+// has no hook contract lock entry and a clean VerifyClean (no hooks, plugin or
+// env DefenseClaw wrote in the agent's files). The per-user hook credential an
+// older release may have issued for it is the only thing left; it is removed
+// first (what Teardown does), so no route accepts it once the name is gone.
+// Any lock, registration or a credential that cannot be removed keeps the
+// strict retain-for-retry path.
+func dropRemovedConnectorWithNothingInstalled(conn connector.Connector, opts connector.SetupOpts, lock connector.HookContractLockEntry) bool {
+	if conn == nil || strings.TrimSpace(lock.Connector) != "" {
+		return false
+	}
+	if err := conn.VerifyClean(opts); err != nil {
+		return false
+	}
+	if err := connector.RemoveHookAPIToken(opts.DataDir, conn.Name()); err != nil {
+		fmt.Fprintf(os.Stderr, "[guardrail] removed connector %s: remove its hook credential: %v — retaining for teardown retry\n", conn.Name(), err)
+		return false
+	}
+	return true
 }
 
 // teardownRemovedConnectorCandidates removes only connectors for which the

@@ -204,6 +204,9 @@ _SETUP_UNVERIFIED_PEERS_KEY = "defenseclaw._setup_unverified_peers"
 # but are not guarded until setup runs for them again (GAP-2013).
 _SETUP_RUNTIME_SKIPPED_PEERS_KEY = "defenseclaw._setup_runtime_skipped_peers"
 _SETUP_BATCH_ROLLBACK_KEY = "defenseclaw._setup_batch_rollback_snapshot"
+# Active connectors a bare `setup -c ...` batch drops because -c names the
+# exact roster. A failed restart names them and the add-one command (GAP-2615).
+_SETUP_BATCH_REMOVED_KEY = "defenseclaw._setup_batch_removed_connectors"
 # Deferred per-connector audit records for a restarting bare batch. The result
 # callback emits these only after the gateway is healthy, so a fresh quickstart
 # can retain fail-closed canonical admission without trying to audit through a
@@ -12179,8 +12182,30 @@ def _reconcile_batch_active_connectors(cfg, connectors: list[str]) -> list[str]:
 
     removed = sorted(before - set(selected))
     if removed:
-        click.echo("  " + ux.dim("Inactive connectors removed from this setup: " + ", ".join(removed)))
+        click.echo(
+            "  "
+            + ux.dim(
+                "This setup sets the exact connector list, so it removes: "
+                + ", ".join(removed)
+                + ". To add a connector and keep the others, run: defenseclaw setup <connector>"
+            )
+        )
     return removed
+
+
+def _batch_replace_hint(removed: object, added: list[tuple[str, str]]) -> str:
+    """Explain a failed exact-roster batch and give the add-one command (GAP-2615)."""
+    names = [n for n in removed if isinstance(n, str) and n] if isinstance(removed, list | tuple) else []
+    if not names or not added:
+        return ""
+    commands = " and ".join(f"`defenseclaw setup {c} --mode {m} --yes`" for c, m in added)
+    added_names = ", ".join(c for c, _ in added)
+    return (
+        "This setup (-c/--connector) sets the exact connector list, so it also tried to remove "
+        + ", ".join(names)
+        + f". To add {added_names} and keep the others, run {commands} instead "
+        "(or name every connector to keep with -c)."
+    )
 
 
 def _strategy_uses_judge(strategy: str) -> bool:
@@ -12634,8 +12659,9 @@ def _apply_setup_batch(
                 ctx.meta[_SETUP_RESTART_HANDLED_KEY] = True
                 return
 
+    removed_by_batch: list[str] = []
     if not preserve_global_settings:
-        _reconcile_batch_active_connectors(app.cfg, connectors)
+        removed_by_batch = _reconcile_batch_active_connectors(app.cfg, connectors)
     gc = app.cfg.guardrail
     click.echo()
     click.echo(f"  Configuring {len(connectors)} connector(s): {', '.join(connectors)}")
@@ -12709,6 +12735,7 @@ def _apply_setup_batch(
     # were already current. Unrelated setup subcommands never set this marker.
     if restart:
         ctx.meta[_SETUP_BATCH_ROLLBACK_KEY] = setup_snapshot
+        ctx.meta[_SETUP_BATCH_REMOVED_KEY] = tuple(removed_by_batch)
         readiness_targets = set(applied)
         if preserve_global_settings:
             # Adding to an existing roster: the gateway republishes the whole
@@ -17976,8 +18003,21 @@ def _auto_restart_sidecar_after_setup(ctx: click.Context, *_args, **_kwargs) -> 
         except Exception as exc:  # noqa: BLE001 — readiness failure rolls the whole batch back.
             snapshot = ctx.meta.get(_SETUP_BATCH_ROLLBACK_KEY)
             if isinstance(snapshot, _SetupConfigSnapshot):
-                with _temporary_codex_setup_marker(None) if migrate_codex_root else nullcontext():
-                    _rollback_failed_connector_application(app, snapshot, exc)
+                try:
+                    with _temporary_codex_setup_marker(None) if migrate_codex_root else nullcontext():
+                        _rollback_failed_connector_application(app, snapshot, exc)
+                except click.ClickException as failure:
+                    hint = _batch_replace_hint(ctx.meta.get(_SETUP_BATCH_REMOVED_KEY), batch_audits)
+                    if hint:
+                        # Rerunning the same exact-list batch fails the same
+                        # way; the hint gives the command that adds one.
+                        base = (
+                            failure.format_message()
+                            .replace("Fix that error, then run the same setup command again; ", "")
+                            .replace(", then run the same setup command again.", ".")
+                        )
+                        failure.message = f"{base} {hint}"
+                    raise
             raise
         ux.echo(
             f"  ✓ Configured {len(focus)} connector(s); runtime roster and hook-contract evidence are ready"
