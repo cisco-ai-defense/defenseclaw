@@ -22,12 +22,11 @@ import (
 // (~/.defenseclaw.bak, ~/.defenseclaw-notes.md) is never handed to the
 // script, so the benign watch row allows on OSS and managed (GAP-2597);
 // an archive named ~/.defenseclaw.zip, a test after the action or an -o
-// keep it blocked.
+// keep it blocked. On Windows the per-user gateway also judges the Git Bash
+// drive view (/C:/Users/x), whose state root is the drive path the hook
+// client listed.
 func TestHomeFindArchiveStripSkipsSiblingsTheNameTestRefuses(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("POSIX home layout")
-	}
-	if os.Geteuid() == 0 {
+	if runtime.GOOS != "windows" && os.Geteuid() == 0 {
 		t.Skip("a hidden home is readable by root")
 	}
 	unzip := `-exec sh -c 'unzip -d "${1%.zip}" "$1"' _ {} \;`
@@ -51,6 +50,11 @@ func TestHomeFindArchiveStripSkipsSiblingsTheNameTestRefuses(t *testing.T) {
 	// itself (a hook that sends the raw payload).
 	for _, mode := range []string{"oss", "oss-gateway", "managed"} {
 		managed := mode == "managed"
+		if managed && runtime.GOOS == "windows" {
+			// A Windows home is not hidden by a mode change; the Git Bash
+			// drive view of a per-user call is what Windows adds (GAP-2577).
+			continue
+		}
 		for _, connector := range []string{"claudecode", "codex"} {
 			installDefaultProfileConnector(t, connector)
 			for _, row := range rows {
