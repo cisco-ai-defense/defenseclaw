@@ -1415,6 +1415,9 @@ describe('Known limits by lead decision (rel-1-0-4 P1 reconcile)', () => {
 // heading of the page; the row reads only that section and its subsections.
 type DocRow = { gap: string; page: string; section?: string; has?: string[]; lacks?: string[] };
 const r105Rows: DocRow[] = [
+  // GAP-1225/GAP-1283 docs follow-up (LEAD 11:52 + LEAD STEER 01:39 10-30; T11 dc-fc-r103-a3-rhel2 C09 TST-45568/45569): Linux agents-per-vCPU figure next to the hook capacity text.
+  { gap: "GAP-1225", page: "support-matrix.mdx", section: "Many agents on one Linux host", has: ["the gateway answered every tool-call hook within 2 seconds with up to 3 interactive agents per vCPU working at once", "All 613 tool calls sent through the registered Claude Code and Codex hooks were answered and allowed: median about 1.5 seconds, maximum 1.9 seconds"] },
+  { gap: "GAP-1225", page: "enterprise/lifecycle.mdx", section: "Gateway restarts and hook timing", has: ["up to 3 interactive agents per vCPU working at once got every tool-call decision within 2 seconds (613 calls, maximum 1.9 seconds)", "[Many agents on one Linux host](/docs/support-matrix#many-agents-on-one-linux-host)"] },
   // GH #1100 Windows Remove items (docs pod, 2026-10-28, live on rc.8): the installed CLI uninstall keeps lifecycle.lock, a disconnected session keeps its registrations.
   { gap: "GH #1100 p0:GAP-0764", page: "enterprise/windows.mdx", section: "Remove", has: ["A plain installed CLI uninstall leaves the lock file and its folder", "`C:\\ProgramData\\Cisco\\DefenseClaw-Lifecycle` from an elevated prompt once no", "not remove a lock an earlier uninstall left."] },
   { gap: "GH #1100 p0:GAP-0675", page: "enterprise/windows.mdx", section: "Remove", has: ["active (connected) session, running as each user.", "session is disconnected (`query user` shows `Disc`), keep theirs and are named in"] },
