@@ -1220,9 +1220,12 @@ func TestCommandLinkWriteFailsClosedInEveryMode(t *testing.T) {
 		`cd -P dirlink && cd .. && echo ok >> notes.txt`,
 		`ln -s ~/.ssh/authorized_keys freshlink; sed -i 's/marker/k/' freshlink`,
 		`cp --archive disklink notes.txt`,
-		`cp -a -t copy tree`,
 	}
 	allowed := []string{
+		// A bare copy of a tree that carries a link is not a write: it copies a
+		// project as it is (GAP-2579); a write through the carried link still
+		// blocks in the copy rows above.
+		`cp -a -t copy tree`,
 		`cd dirlink && cat authorized_keys`,
 		`tar "$o" xenial.tar > log`,
 		`"$PY" x.py > out.txt`,
