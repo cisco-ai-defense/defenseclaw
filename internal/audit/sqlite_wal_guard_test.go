@@ -462,15 +462,11 @@ func floodTheStore(t *testing.T, store *Store) (stop func(), writes func() []flo
 	}
 }
 
-// walFloodInterval paces floodTheStore at about 100 commits a second: ten
-// times the sustained 10 Hz hook flood GAP-1303 sizes the emergency hold for,
-// with commits well inside walIdleWindow (20 ms) apart, so no idle gap opens. A
-// commit every millisecond (up to about 1 kHz on a hosted Windows runner, a hundred
-// times that flood) left so much unsynced log behind each copy that the
-// runner's own write and sync of it under the writer, on top of the injected
-// 300 ms copy, outran the fixed 1 s emergency hold on two passes in a row
-// (r106 CI, Windows shard pk3: deferred at 1.0004 s and 1.0013 s, the log
-// growing fourfold between them).
+// walFloodInterval paces floodTheStore at about 100 commits a second, with
+// commits well inside walIdleWindow (20 ms) apart, so no idle gap opens. One
+// flood commit is one audit row, about 17 WAL frames; a hook call writes
+// about 163 (hookAuditWALFramesPerCall), so this flood writes about as much
+// log a second as the 10 Hz hook flood GAP-1303 sizes the emergency hold for.
 const walFloodInterval = 10 * time.Millisecond
 
 // longestFloodWrite is the longest of writes that started in [from, to].
@@ -482,6 +478,47 @@ func longestFloodWrite(writes []floodWrite, from, to time.Time) time.Duration {
 		}
 	}
 	return longest
+}
+
+// copyAllButTheLastCommit copies the store's log into the database, all but
+// its last commit, and keeps the log at its length. The flood test's scaled
+// log stands in for a long log that earlier guard passes kept copying: every
+// pass copies passively, so at the emergency arm only the writes since the
+// previous pass are left. A setup log of thousands of frames that was never
+// copied made the pass's first copy let in a dozen or more flood commits;
+// the copy under the writer then had to write and sync their pages on top of
+// the 300 ms modelled copy, and a hosted Windows disk (about 1 ms a random
+// page) outran the 1 s hold on both passes (r106 CI, GAP-0024). A reader on
+// the snapshot before the last commit stops the copy short of it, so the log
+// is not restarted.
+func copyAllButTheLastCommit(t *testing.T, store *Store) {
+	t.Helper()
+	reader, err := openSQLite(store.dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reader.Close()
+	snapshot, err := reader.BeginTx(t.Context(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer snapshot.Rollback()
+	var rows int
+	if err := snapshot.QueryRow(`SELECT count(*) FROM audit_events`).Scan(&rows); err != nil {
+		t.Fatal(err)
+	}
+	logWALGuardEvents(t, store, 1)
+	db, err := store.checkpointConn()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var busy, frames, copied int
+	if err := db.QueryRow(`PRAGMA wal_checkpoint(PASSIVE)`).Scan(&busy, &frames, &copied); err != nil {
+		t.Fatal(err)
+	}
+	if busy != 0 || copied <= 0 || copied >= frames {
+		t.Fatalf("copy of the setup log: busy %d, %d of %d frames copied; want all but the last commit", busy, copied, frames)
+	}
 }
 
 // GAP-1303: a persistent final copy three times slower than the ordinary hold
@@ -496,6 +533,7 @@ func TestCheckpointWALIfLargeBoundsALogOverTheLimitUnderAFlood(t *testing.T) {
 	stopOrdinary()
 	ordinary := longestFloodWrite(ordinaryWrites(), time.Time{}, time.Now())
 	logWALGuardEvents(t, store, 200)
+	copyAllButTheLastCommit(t, store)
 	// Scale the measured frames to the production band between the emergency
 	// arm and the 256 MiB alarm without allocating a 176 MiB fixture.
 	frames := (walFileSize(t, store) - 32) / (4096 + 24)
