@@ -645,3 +645,43 @@ func TestIdentityHealthDoesNotCountALookupThatWaitedOnlyForTheGuardianRecordedPr
 		t.Fatalf("a directory outage with a guardian record: %+v, want uid 1007 failing", h)
 	}
 }
+
+// GAP-2595: a served local account deleted after its first hook, whose lookup
+// waited for the guardian's root-only proof, kept status and verify warning
+// directory_lookups_failing for the TTL although the guardian removed its
+// record. Once no account holds the uid that failure is not counted; a
+// directory outage for an account that still exists is.
+func TestIdentityHealthDoesNotCountAProofWaitForAnAccountThatIsGone(t *testing.T) {
+	now := time.Unix(1_800_000_000, 0)
+	needsRoot := errors.New("only root can ask SSSD whether its domains are online")
+	var deleted atomic.Bool
+	cache := newIdentityCache(func(string) (useridentity.DirectoryFacts, error) {
+		return useridentity.DirectoryFacts{}, needsRoot
+	})
+	cache.awaitsRootProof = func(err error) bool { return errors.Is(err, needsRoot) }
+	cache.rootProofRecorded = func(string) bool { return false }
+	cache.rootProofAccountGone = func(string) bool { return deleted.Load() }
+	cache.now = func() time.Time { return now }
+	cache.logf = func(string, ...any) {}
+	cache.get("1006", true)
+	if h := cache.health(); h.Failing != 1 || len(h.Accounts) != 1 || h.Accounts[0] != "1006" {
+		t.Fatalf("while the account exists: %+v, want uid 1006 failing", h)
+	}
+	deleted.Store(true)
+	if h := cache.health(); h.Failing != 0 {
+		t.Fatalf("after the account was deleted: %+v, want nothing failing", h)
+	}
+
+	offline := errors.New("sssd offline")
+	other := newIdentityCache(func(string) (useridentity.DirectoryFacts, error) {
+		return useridentity.DirectoryFacts{}, offline
+	})
+	other.awaitsRootProof = func(err error) bool { return errors.Is(err, needsRoot) }
+	other.rootProofAccountGone = func(string) bool { return true }
+	other.now = func() time.Time { return now }
+	other.logf = func(string, ...any) {}
+	other.get("1007", true)
+	if h := other.health(); h.Failing != 1 || len(h.Accounts) != 1 || h.Accounts[0] != "1007" {
+		t.Fatalf("a directory outage: %+v, want uid 1007 failing", h)
+	}
+}

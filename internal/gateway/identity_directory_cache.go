@@ -113,6 +113,11 @@ type identityCache[T any] struct {
 	// directory outage (GAP-2535).
 	awaitsRootProof   func(error) bool
 	rootProofRecorded func(key string) bool
+	// rootProofAccountGone reports whether the account database no longer
+	// holds an account of key: the local account whose lookup waited for
+	// the guardian's proof was deleted, and the guardian removed its record
+	// (GAP-1864), so nothing waits for the proof any more (GAP-2595).
+	rootProofAccountGone func(key string) bool
 	// trustedUntil, when set, is when the inputs of a lookup of key started
 	// at now stop being trusted (zero: no bound beyond maxAge): the
 	// guardian's identity record, trusted identitySpoolMaxAge from when it
@@ -764,13 +769,16 @@ const identityHealthMaxAccounts = 10
 // guardian pass, and status and verify then warned directory_lookups_failing
 // for the full TTL when the account made no further call (GAP-2535). Such an
 // entry is looked up again at once, so its facts settle without a hook call;
-// a lookup that then fails for another reason is counted again.
+// a lookup that then fails for another reason is counted again. Nor is such
+// a failure counted once no account holds the uid: a served local account
+// deleted after that first hook kept the host failing for the TTL although
+// the guardian removed its record (GAP-2595).
 func (c *identityCache[T]) health() identityCacheHealth {
 	var h identityCacheHealth
 	if c == nil {
 		return h
 	}
-	proven := c.rootProofsRecorded()
+	proven, gone := c.rootProofsRecorded()
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	now := c.now()
@@ -782,6 +790,9 @@ func (c *identityCache[T]) health() identityCacheHealth {
 			if entry.inflight == nil {
 				c.refreshLocked(key, entry)
 			}
+			continue
+		}
+		if entry.awaitsRootProof && gone[key] {
 			continue
 		}
 		if entry.gone && entry.fetchedAt.IsZero() && !entry.usedByHook {
@@ -813,12 +824,13 @@ func (c *identityCache[T]) health() identityCacheHealth {
 }
 
 // rootProofsRecorded reports, for each key whose last lookup failure waits
-// for a proof root records, whether the guardian has recorded it. The check
-// reads the account database and the guardian record, so it runs without
-// the lock.
-func (c *identityCache[T]) rootProofsRecorded() map[string]bool {
-	if c.rootProofRecorded == nil {
-		return nil
+// for a proof root records, whether the guardian has recorded it (proven) or
+// the account database no longer holds an account of the key (gone). The
+// checks read the account database and the guardian record, so they run
+// without the lock.
+func (c *identityCache[T]) rootProofsRecorded() (proven, gone map[string]bool) {
+	if c.rootProofRecorded == nil && c.rootProofAccountGone == nil {
+		return nil, nil
 	}
 	c.mu.Lock()
 	var keys []string
@@ -828,11 +840,14 @@ func (c *identityCache[T]) rootProofsRecorded() map[string]bool {
 		}
 	}
 	c.mu.Unlock()
-	proven := make(map[string]bool, len(keys))
+	proven = make(map[string]bool, len(keys))
+	gone = make(map[string]bool)
 	for _, key := range keys {
-		if c.rootProofRecorded(key) {
+		if c.rootProofRecorded != nil && c.rootProofRecorded(key) {
 			proven[key] = true
+		} else if c.rootProofAccountGone != nil && c.rootProofAccountGone(key) {
+			gone[key] = true
 		}
 	}
-	return proven
+	return proven, gone
 }
