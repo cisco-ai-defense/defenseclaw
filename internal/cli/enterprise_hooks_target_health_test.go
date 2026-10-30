@@ -91,3 +91,30 @@ func TestEnterpriseHookEnrollmentManifestKeysSIDLessTargetsApart(t *testing.T) {
 		t.Fatal("SID-less targets share an enrollment key")
 	}
 }
+
+func TestEnterpriseHookFailedTargetKeepsEnrollmentWhenLedgerIsUnreadable(t *testing.T) {
+	if !enterpriseHookFailedTargetUnenrolls(false, false) {
+		t.Fatal("a target the ledger confirms was never protected is unenrolled")
+	}
+	if enterpriseHookFailedTargetUnenrolls(true, false) {
+		t.Fatal("a previously protected target keeps its enrollment")
+	}
+	if enterpriseHookFailedTargetUnenrolls(false, true) {
+		t.Fatal("a target whose ledger is unreadable keeps its enrollment")
+	}
+
+	manifest := enterprisehooks.Manifest{Version: 1, Targets: []enterprisehooks.ManifestTarget{
+		{Connector: "codex", SID: "S-1-5-21-1-2-3-1001"},
+	}}
+	rows := []enterpriseHookReconcileRow{
+		{Connector: "codex", SID: "S-1-5-21-1-2-3-1001", Error: "read hook guardian authorization: access is denied"},
+	}
+	unenrolled := map[string]struct{}{}
+	if enterpriseHookFailedTargetUnenrolls(false, true) {
+		unenrolled[enterpriseHookEnrollmentUnit(manifest.Targets[0])] = struct{}{}
+	}
+	reduced := enterpriseHookEnrollmentManifest(manifest, rows, unenrolled)
+	if len(reduced.Targets) != 1 {
+		t.Fatalf("kept = %+v, want the target with the unreadable ledger", reduced.Targets)
+	}
+}

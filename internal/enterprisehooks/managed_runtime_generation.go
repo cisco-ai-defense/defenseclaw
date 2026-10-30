@@ -367,10 +367,12 @@ func ReadWindowsManagedRuntimeSelectorCAS(
 
 // RestoreWindowsManagedRuntimeSelectorCAS restores a complete connector
 // selector only when the current full-selector CAS matches the protected
-// lifecycle journal.
+// lifecycle journal. It returns the CAS of the selector it actually left in
+// place, which differs from the snapshot's when an entry whose bundle no
+// longer loads was dropped; a later compensating restore must expect it.
 func RestoreWindowsManagedRuntimeSelectorCAS(
 	opts WindowsManagedRuntimeSelectorFullRestoreOptions,
-) error {
+) (WindowsManagedRuntimeSelectorCAS, error) {
 	return restoreWindowsManagedRuntimeSelectorCASPlatform(opts)
 }
 

@@ -393,17 +393,19 @@ func runWindowsManagedHooksLifecycle(
 		if err != nil {
 			return fail(err)
 		}
-		if err := restoreWindowsManagedHooksLifecycleSelectors(
+		publishedSelectors, err := restoreWindowsManagedHooksLifecycleSelectors(
 			journal.RuntimeSelectors,
 			currentSelectors,
-		); err != nil {
+		)
+		if err != nil {
 			return fail(err)
 		}
 		currentClaude, err := captureWindowsManagedHooksLifecycleClaude(ctx, journal)
 		if err != nil {
-			selectorErr := restoreWindowsManagedHooksLifecycleSelectors(
+			_, selectorErr := restoreWindowsManagedHooksLifecycleSelectorsExpecting(
 				currentSelectors,
 				journal.RuntimeSelectors,
+				publishedSelectors,
 			)
 			return fail(errors.Join(err, selectorErr))
 		}
@@ -430,9 +432,10 @@ func runWindowsManagedHooksLifecycle(
 				)
 			},
 		); err != nil {
-			selectorErr := restoreWindowsManagedHooksLifecycleSelectors(
+			_, selectorErr := restoreWindowsManagedHooksLifecycleSelectorsExpecting(
 				currentSelectors,
 				journal.RuntimeSelectors,
+				publishedSelectors,
 			)
 			return fail(errors.Join(err, selectorErr))
 		}
@@ -1027,9 +1030,12 @@ func newWindowsManagedHooksSelectorPrune(
 		selectorPaths: func() (map[string]string, error) {
 			return windowsManagedHooksLifecycleSelectorPaths(ctx)
 		},
-		pathExists:   windowsManagedHooksLifecyclePathExists,
-		capture:      windowsManagedHooksLifecycleSelectorCapture,
-		restore:      windowsManagedHooksLifecycleSelectorRestore,
+		pathExists: windowsManagedHooksLifecyclePathExists,
+		capture:    windowsManagedHooksLifecycleSelectorCapture,
+		restore: func(opts enterprisehooks.WindowsManagedRuntimeSelectorFullRestoreOptions) error {
+			_, err := windowsManagedHooksLifecycleSelectorRestore(opts)
+			return err
+		},
 		verifyAbsent: validateWindowsManagedHooksLifecycleSelectorAbsent,
 	}
 }
@@ -2034,25 +2040,57 @@ func validateWindowsManagedHooksLifecycleSelectors(
 	return nil
 }
 
+// restoreWindowsManagedHooksLifecycleSelectors publishes desired over the
+// selectors captured in current and returns the CAS of each selector it
+// actually published.
 func restoreWindowsManagedHooksLifecycleSelectors(
 	desired []enterprisehooks.WindowsManagedRuntimeSelectorSnapshot,
 	current []enterprisehooks.WindowsManagedRuntimeSelectorSnapshot,
-) error {
+) ([]enterprisehooks.WindowsManagedRuntimeSelectorCAS, error) {
+	if err := validateWindowsManagedHooksLifecycleSelectors(current); err != nil {
+		return nil, err
+	}
+	expected := make([]enterprisehooks.WindowsManagedRuntimeSelectorCAS, len(current))
+	for index := range current {
+		expected[index] = current[index].CAS
+	}
+	return restoreWindowsManagedHooksLifecycleSelectorsExpecting(desired, current, expected)
+}
+
+// restoreWindowsManagedHooksLifecycleSelectorsExpecting publishes desired over
+// live selectors whose CAS is expected. A restore that dropped an entry
+// publishes a selector that differs from its snapshot, so a compensating
+// restore passes the CAS that restore returned, not the snapshot's. If one
+// connector fails, the connectors already restored are put back to current.
+func restoreWindowsManagedHooksLifecycleSelectorsExpecting(
+	desired []enterprisehooks.WindowsManagedRuntimeSelectorSnapshot,
+	current []enterprisehooks.WindowsManagedRuntimeSelectorSnapshot,
+	expected []enterprisehooks.WindowsManagedRuntimeSelectorCAS,
+) ([]enterprisehooks.WindowsManagedRuntimeSelectorCAS, error) {
 	if err := validateWindowsManagedHooksLifecycleSelectors(desired); err != nil {
-		return err
+		return nil, err
 	}
 	if err := validateWindowsManagedHooksLifecycleSelectors(current); err != nil {
-		return err
+		return nil, err
 	}
+	if len(expected) != len(desired) {
+		return nil, fmt.Errorf(
+			"managed-hook lifecycle selector restore has %d expected selector states; expected %d",
+			len(expected),
+			len(desired),
+		)
+	}
+	published := make([]enterprisehooks.WindowsManagedRuntimeSelectorCAS, len(desired))
 	restored := 0
 	for index := range desired {
-		err := windowsManagedHooksLifecycleSelectorRestore(
+		cas, err := windowsManagedHooksLifecycleSelectorRestore(
 			enterprisehooks.WindowsManagedRuntimeSelectorFullRestoreOptions{
 				Snapshot:        desired[index],
-				ExpectedCurrent: current[index].CAS,
+				ExpectedCurrent: expected[index],
 			},
 		)
 		if err == nil {
+			published[index] = cas
 			restored++
 			continue
 		}
@@ -2062,10 +2100,10 @@ func restoreWindowsManagedHooksLifecycleSelectors(
 			err,
 		)}
 		for rollbackIndex := restored - 1; rollbackIndex >= 0; rollbackIndex-- {
-			rollbackErr := windowsManagedHooksLifecycleSelectorRestore(
+			_, rollbackErr := windowsManagedHooksLifecycleSelectorRestore(
 				enterprisehooks.WindowsManagedRuntimeSelectorFullRestoreOptions{
 					Snapshot:        current[rollbackIndex],
-					ExpectedCurrent: desired[rollbackIndex].CAS,
+					ExpectedCurrent: published[rollbackIndex],
 				},
 			)
 			if rollbackErr != nil {
@@ -2076,9 +2114,9 @@ func restoreWindowsManagedHooksLifecycleSelectors(
 				))
 			}
 		}
-		return errors.Join(failures...)
+		return nil, errors.Join(failures...)
 	}
-	return nil
+	return published, nil
 }
 
 func garbageCollectWindowsManagedHooksLifecycleGenerations(

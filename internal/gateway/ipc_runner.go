@@ -14,6 +14,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"sync/atomic"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
@@ -43,6 +44,22 @@ func (s *Sidecar) SetIPCRunner(r IPCRunner) {
 	s.ipcRunner = r
 }
 
+type ipcServingHookKey struct{}
+
+// MarkIPCServing is called by an IPCRunner once its listener is bound and it
+// has started serving. runIPCWithRetry uses it to reset its backoff, so a
+// server that served and later failed is retried at the initial delay instead
+// of inheriting the backoff its earlier failed binds built up. A no-op for a
+// context that runIPCWithRetry did not create.
+func MarkIPCServing(ctx context.Context) {
+	if ctx == nil {
+		return
+	}
+	if hook, ok := ctx.Value(ipcServingHookKey{}).(func()); ok && hook != nil {
+		hook()
+	}
+}
+
 // ipcRetryInitialDelay and ipcRetryMaxDelay bound the backoff between IPC
 // server attempts. Variables so tests can shorten them.
 var (
@@ -60,14 +77,20 @@ var (
 // component (the guardian or the installer) has repaired the folder.
 func (s *Sidecar) runIPCWithRetry(ctx context.Context) {
 	delay := ipcRetryInitialDelay
+	var served atomic.Bool
+	runCtx := context.WithValue(ctx, ipcServingHookKey{}, func() { served.Store(true) })
 	for {
-		err := s.ipcRunner.Run(ctx)
+		served.Store(false)
+		err := s.ipcRunner.Run(runCtx)
 		if ctx.Err() != nil {
 			return
 		}
-		if err == nil {
+		// Back off only across consecutive attempts that never served: a
+		// server that bound and served restarts the schedule.
+		if err == nil || served.Load() {
 			delay = ipcRetryInitialDelay
-		} else {
+		}
+		if err != nil {
 			fmt.Fprintf(os.Stderr, "[sidecar] ipc server exited with error: %v\n", err)
 			managed.EmitResilienceEvent(managed.MarkerDegraded, map[string]string{
 				"subsystem": "ipc",

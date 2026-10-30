@@ -115,12 +115,23 @@ var (
 			os.Getenv(managed.WindowsServiceAccountEnv),
 		)
 	}
-	// Permission drift on targets.yaml is accepted and logged (an untrusted
-	// writer as a boundary finding); the installer re-stamps it. Structure
-	// stays fatal.
+	// Permission drift on targets.yaml is re-stamped first when the caller is
+	// privileged (the LocalSystem guardian or enumerator, or the installer);
+	// what survives is accepted and logged (an untrusted writer as a boundary
+	// finding). Structure stays fatal.
 	enterpriseHookManifestFileTrustCheck = func(path string) error {
-		return managed.ValidateTrustedPolicyFilePath(path, "hook guardian manifest")
+		const label = "hook guardian manifest"
+		if err := managed.ValidateTrustedFilePath(path, label); err == nil {
+			return nil
+		}
+		if enterpriseHooksRuntimeGOOS() == "windows" &&
+			enterpriseHookManifestACLRepair(path) == nil &&
+			managed.ValidateTrustedFilePath(path, label) == nil {
+			return nil
+		}
+		return managed.ValidateTrustedPolicyFilePath(path, label)
 	}
+	enterpriseHookManifestACLRepair     = repairEnterpriseHookManifestACL
 	enterpriseHooksRemoveManagedPolicy  = enterprisehooks.RemoveManagedPolicy
 	enterpriseHookScopedTokenMinter     = enterpriseHookScopedToken
 	enterpriseHookScopedOTLPTokenMinter = enterpriseHookScopedOTLPToken
@@ -1586,6 +1597,10 @@ func runEnterpriseHookReconcileOnce(ctx context.Context) (enterpriseHookReconcil
 		token := ""
 		otlpToken := ""
 		var previousProtection enterpriseHookPreviousProtection
+		// ledgerUnreadable records that the protection ledger could not be
+		// read for this target, so "not protected" is unknown rather than
+		// confirmed and the target must keep its enrollment.
+		ledgerUnreadable := false
 		resolved, err := resolveEnterpriseHookTargetValues(target.User, target.UserHome, intPtrValue(target.UID), intPtrValue(target.GID), target.SID, target.DataDir)
 		resolveFailed := err != nil
 		if err == nil {
@@ -1601,6 +1616,7 @@ func runEnterpriseHookReconcileOnce(ctx context.Context) (enterpriseHookReconcil
 			)
 			if authorizationErr != nil {
 				err = authorizationErr
+				ledgerUnreadable = true
 			}
 		}
 		if err == nil && target.IsDeferred() &&
@@ -1706,13 +1722,17 @@ func runEnterpriseHookReconcileOnce(ctx context.Context) (enterpriseHookReconcil
 				// The profile no longer resolves (an FSLogix or roaming
 				// profile detached, a renamed folder). Look the target up by
 				// its manifest identity so a protected user keeps protection.
-				protected, _ = previousEnterpriseHookSuccess(
+				var ledgerErr error
+				protected, ledgerErr = previousEnterpriseHookSuccess(
 					cfg.DataDir,
 					target.User,
 					target.UserHome,
 					target.SID,
 					target.Connector,
 				)
+				if ledgerErr != nil {
+					ledgerUnreadable = true
+				}
 			}
 			failures++
 			row.OK = false
@@ -1726,7 +1746,7 @@ func runEnterpriseHookReconcileOnce(ctx context.Context) (enterpriseHookReconcil
 				// tick without blocking anyone else.
 				row.Error = "pending: " + enterpriseHookBoundReason(err.Error())
 			}
-			if !protected {
+			if enterpriseHookFailedTargetUnenrolls(protected, ledgerUnreadable) {
 				unenrolled[enterpriseHookEnrollmentUnit(target)] = struct{}{}
 			}
 			enterpriseHookTargetHealth.observe(row, row.Error)

@@ -778,18 +778,19 @@ func readWindowsManagedRuntimeSelectorCASPlatform(
 
 func restoreWindowsManagedRuntimeSelectorCASPlatform(
 	opts WindowsManagedRuntimeSelectorFullRestoreOptions,
-) error {
+) (WindowsManagedRuntimeSelectorCAS, error) {
+	var published WindowsManagedRuntimeSelectorCAS
 	snapshot, restored, err := validateWindowsManagedRuntimeSelectorSnapshotFull(opts.Snapshot)
 	if err != nil {
-		return err
+		return published, err
 	}
 	if err := validateWindowsManagedRuntimeSelectorCAS(opts.ExpectedCurrent); err != nil {
-		return fmt.Errorf("enterprise hooks: invalid expected full selector CAS: %w", err)
+		return published, fmt.Errorf("enterprise hooks: invalid expected full selector CAS: %w", err)
 	}
 	if err := windowsManagedRuntimeSelectorMutationAuthorize(); err != nil {
-		return err
+		return published, err
 	}
-	return withWindowsManagedRuntimeSelectorTransaction(snapshot.Connector, func() error {
+	err = withWindowsManagedRuntimeSelectorTransaction(snapshot.Connector, func() error {
 		_, currentData, currentExists, err := readWindowsManagedRuntimeSelector(
 			snapshot.Connector,
 			true,
@@ -843,8 +844,32 @@ func restoreWindowsManagedRuntimeSelectorCASPlatform(
 		}
 		reduced := *restored
 		reduced.Targets = kept
-		return publishWindowsManagedRuntimeSelector(reduced)
+		if err := publishWindowsManagedRuntimeSelector(reduced); err != nil {
+			return err
+		}
+		// Recapture what was actually published: a dropped entry makes it
+		// differ from the snapshot, and a compensating restore must expect
+		// this CAS, not the snapshot's.
+		_, publishedData, publishedExists, err := readWindowsManagedRuntimeSelector(
+			snapshot.Connector,
+			true,
+		)
+		if err != nil {
+			return err
+		}
+		if !publishedExists {
+			return errors.New("enterprise hooks: restored selector is missing after publication")
+		}
+		published = WindowsManagedRuntimeSelectorCAS{
+			Exists: true,
+			SHA256: windowsManagedRuntimeSHA256(publishedData),
+		}
+		return nil
 	})
+	if err != nil {
+		return WindowsManagedRuntimeSelectorCAS{}, err
+	}
+	return published, nil
 }
 
 func discardWindowsManagedRuntimeGenerationPublicationPlatform(

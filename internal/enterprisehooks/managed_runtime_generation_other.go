@@ -99,8 +99,8 @@ func verifyWindowsManagedRuntimeSelectorTargetAbsentPlatform(
 
 func restoreWindowsManagedRuntimeSelectorCASPlatform(
 	WindowsManagedRuntimeSelectorFullRestoreOptions,
-) error {
-	return errWindowsManagedRuntimeGenerationUnsupported
+) (WindowsManagedRuntimeSelectorCAS, error) {
+	return WindowsManagedRuntimeSelectorCAS{}, errWindowsManagedRuntimeGenerationUnsupported
 }
 
 func garbageCollectWindowsManagedRuntimeGenerationsPlatform(

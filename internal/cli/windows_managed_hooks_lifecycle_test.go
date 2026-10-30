@@ -852,23 +852,86 @@ func TestRestoreWindowsManagedHooksLifecycleSelectorsCompensatesPartialRestore(t
 	originalRestore := windowsManagedHooksLifecycleSelectorRestore
 	t.Cleanup(func() { windowsManagedHooksLifecycleSelectorRestore = originalRestore })
 	var calls []string
+	var expected []enterprisehooks.WindowsManagedRuntimeSelectorCAS
 	injected := errors.New("injected Cursor selector restore failure")
+	// Each successful restore reports a published CAS that differs from its
+	// snapshot, as when an entry with an unloadable bundle was dropped.
+	reducedCAS := func(connectorName string) enterprisehooks.WindowsManagedRuntimeSelectorCAS {
+		return enterprisehooks.WindowsManagedRuntimeSelectorCAS{
+			Exists: true,
+			SHA256: "sha256:reduced-" + connectorName,
+		}
+	}
 	windowsManagedHooksLifecycleSelectorRestore = func(
 		opts enterprisehooks.WindowsManagedRuntimeSelectorFullRestoreOptions,
-	) error {
+	) (enterprisehooks.WindowsManagedRuntimeSelectorCAS, error) {
 		calls = append(calls, opts.Snapshot.Connector)
+		expected = append(expected, opts.ExpectedCurrent)
 		if len(calls) == 3 {
-			return injected
+			return enterprisehooks.WindowsManagedRuntimeSelectorCAS{}, injected
 		}
-		return nil
+		return reducedCAS(opts.Snapshot.Connector), nil
 	}
-	err := restoreWindowsManagedHooksLifecycleSelectors(prior, current)
+	_, err := restoreWindowsManagedHooksLifecycleSelectors(prior, current)
 	if !errors.Is(err, injected) {
 		t.Fatalf("selector restore error = %v, want injected failure", err)
 	}
 	wantCalls := []string{"claudecode", "codex", "cursor", "codex", "claudecode"}
 	if !slices.Equal(calls, wantCalls) {
 		t.Fatalf("selector restore calls = %v, want %v", calls, wantCalls)
+	}
+	// The compensating restores expect what was actually published.
+	if expected[3] != reducedCAS("codex") || expected[4] != reducedCAS("claudecode") {
+		t.Fatalf("compensating restores expected %+v, want the published reduced CAS", expected[3:])
+	}
+}
+
+func TestRestoreWindowsManagedHooksLifecycleSelectorsReturnsPublishedCAS(t *testing.T) {
+	prior := make([]enterprisehooks.WindowsManagedRuntimeSelectorSnapshot, 0, 3)
+	current := make([]enterprisehooks.WindowsManagedRuntimeSelectorSnapshot, 0, 3)
+	for _, connectorName := range windowsManagedHooksLifecycleSelectorConnectors {
+		prior = append(prior, enterprisehooks.WindowsManagedRuntimeSelectorSnapshot{
+			SchemaVersion:  1,
+			Connector:      connectorName,
+			Existed:        true,
+			Selector:       []byte("prior-" + connectorName),
+			SelectorSHA256: "sha256:prior-" + connectorName,
+			CAS: enterprisehooks.WindowsManagedRuntimeSelectorCAS{
+				Exists: true,
+				SHA256: "sha256:prior-" + connectorName,
+			},
+		})
+		current = append(current, enterprisehooks.WindowsManagedRuntimeSelectorSnapshot{
+			SchemaVersion: 1,
+			Connector:     connectorName,
+		})
+	}
+	originalRestore := windowsManagedHooksLifecycleSelectorRestore
+	t.Cleanup(func() { windowsManagedHooksLifecycleSelectorRestore = originalRestore })
+	var expected []enterprisehooks.WindowsManagedRuntimeSelectorCAS
+	windowsManagedHooksLifecycleSelectorRestore = func(
+		opts enterprisehooks.WindowsManagedRuntimeSelectorFullRestoreOptions,
+	) (enterprisehooks.WindowsManagedRuntimeSelectorCAS, error) {
+		expected = append(expected, opts.ExpectedCurrent)
+		return enterprisehooks.WindowsManagedRuntimeSelectorCAS{
+			Exists: true,
+			SHA256: "sha256:reduced-" + opts.Snapshot.Connector,
+		}, nil
+	}
+	published, err := restoreWindowsManagedHooksLifecycleSelectors(prior, current)
+	if err != nil {
+		t.Fatalf("restore selectors: %v", err)
+	}
+	// A compensating restore of current over the published selectors must
+	// expect the published CAS, not the prior snapshot's.
+	expected = nil
+	if _, err := restoreWindowsManagedHooksLifecycleSelectorsExpecting(current, prior, published); err != nil {
+		t.Fatalf("compensating restore: %v", err)
+	}
+	for index, connectorName := range windowsManagedHooksLifecycleSelectorConnectors {
+		if expected[index].SHA256 != "sha256:reduced-"+connectorName {
+			t.Fatalf("compensating restore of %s expected %+v, want the published CAS", connectorName, expected[index])
+		}
 	}
 }
 

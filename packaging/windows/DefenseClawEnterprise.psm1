@@ -11682,8 +11682,9 @@ function Initialize-DefenseClawCodexMachinePolicyParent {
                 throw "Codex machine-policy ancestor is occupied by a non-directory: $directory"
             }
             # Existing shared directories keep their ACL unless it gives an
-            # untrusted principal write authority or ownership; only then is
-            # the canonical descriptor re-stamped (see the assertion).
+            # untrusted principal write authority or ownership, or lacks the
+            # SYSTEM or Administrators full-control rights; only then is the
+            # canonical descriptor re-stamped (see the assertion).
             Assert-DefenseClawCodexMachinePolicyDirectory -Path $directory
             continue
         }

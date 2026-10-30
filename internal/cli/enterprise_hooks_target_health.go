@@ -99,6 +99,14 @@ func (tracker *enterpriseHookTargetHealthTracker) clear(row enterpriseHookReconc
 	tracker.mu.Unlock()
 }
 
+// enterpriseHookFailedTargetUnenrolls reports whether a failed target is left
+// out of this tick's published enrollment set: only when its protection
+// ledger was read and confirms it was never protected. A target whose ledger
+// could not be read keeps its enrollment, because its protection is unknown.
+func enterpriseHookFailedTargetUnenrolls(protected, ledgerUnreadable bool) bool {
+	return !protected && !ledgerUnreadable
+}
+
 // enterpriseHookEnrollmentManifest returns the manifest whose enabled rows
 // the Guardian publishes into machine policy this tick: every row except a
 // failed target that was never protected (including a signed-out user who

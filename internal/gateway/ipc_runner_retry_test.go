@@ -62,3 +62,53 @@ func TestRunIPCWithRetryKeepsRetryingABindFailure(t *testing.T) {
 		t.Fatalf("Run calls = %d, want 4", got)
 	}
 }
+
+// servedThenFailingIPCRunner binds and serves, then fails, on every attempt.
+type servedThenFailingIPCRunner struct {
+	attempts int32
+	calls    atomic.Int32
+	done     chan struct{}
+}
+
+func (r *servedThenFailingIPCRunner) Run(ctx context.Context) error {
+	MarkIPCServing(ctx)
+	if r.calls.Add(1) == r.attempts {
+		close(r.done)
+		<-ctx.Done()
+		return nil
+	}
+	return errors.New("ipc: serve: connection reset")
+}
+
+func TestRunIPCWithRetryResetsBackoffOnceTheServerServed(t *testing.T) {
+	previousInitial, previousMax := ipcRetryInitialDelay, ipcRetryMaxDelay
+	// Without a reset, 15 consecutive failures would sleep 1ms+2ms+...+16s.
+	ipcRetryInitialDelay, ipcRetryMaxDelay = time.Millisecond, time.Minute
+	t.Cleanup(func() { ipcRetryInitialDelay, ipcRetryMaxDelay = previousInitial, previousMax })
+
+	runner := &servedThenFailingIPCRunner{attempts: 16, done: make(chan struct{})}
+	sidecar := &Sidecar{}
+	sidecar.SetIPCRunner(runner)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	finished := make(chan struct{})
+	go func() {
+		sidecar.runIPCWithRetry(ctx)
+		close(finished)
+	}()
+	select {
+	case <-runner.done:
+	case <-time.After(5 * time.Second):
+		t.Fatalf("retry delay was not reset after the server served; calls=%d", runner.calls.Load())
+	}
+	cancel()
+	select {
+	case <-finished:
+	case <-time.After(5 * time.Second):
+		t.Fatal("runIPCWithRetry did not return after cancellation")
+	}
+}
+
+func TestMarkIPCServingIsANoOpOutsideTheRetryLoop(t *testing.T) {
+	MarkIPCServing(context.Background())
+}

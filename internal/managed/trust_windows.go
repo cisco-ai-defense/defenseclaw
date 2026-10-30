@@ -537,6 +537,9 @@ func validateTrustedWindowsPathElementWithWriter(
 		return fmt.Errorf("%s: inspect Windows DACL: %w", path, err)
 	}
 	if dacl == nil {
+		if scope.code {
+			reportCodeIntegrityFinding(path, label, "Everyone", "null DACL")
+		}
 		return scope.relaxVerdict(path, label, fmt.Errorf(
 			"%s: null Windows DACL is not trusted", path,
 		))
