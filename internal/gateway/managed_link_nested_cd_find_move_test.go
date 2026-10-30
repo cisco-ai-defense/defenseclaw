@@ -73,6 +73,18 @@ func TestManagedLinkThenNestedCdOrFindMoveReadsTheUserView(t *testing.T) {
 		{"P5", `ln -s ../proj p; bash -c "set -P; cd p/.. && echo k >> .ssh/authorized_keys"`, true},
 		{"N5", `ln -s ../proj p; cat p/../.ssh/authorized_keys > keys.txt`, true},
 		{"D10", `cp a.txt dp/../.ssh/authorized_keys`, true},
+		// H rows start in the home and cd into the project first (GAP-2533
+		// VD rows V2, V3, V5): a static top-level cd places the link and the
+		// find -exec mv, so they read as the same rows without the cd. The
+		// state twins keep blocking. PROJ is the project path.
+		{"H-V2", `cd ~/proj && ln -s src/a.txt alias.txt; find . -type f -name "*.tmp" -exec mv {} build/ \;`, false},
+		{"H-V3", `cd PROJ && ln -s src/a.txt alias.txt; find . -type f -name "*.tmp" -exec mv {} build/ \;`, false},
+		{"H-V5", `cd ~/proj && ln -s README.md docs.md; find . -name "*.bak" -exec mv {} /tmp/ \;`, false},
+		{"H-R03", `cd ~/proj && ln -s ~/.defenseclaw/config.yaml c; find . -name c -exec mv {} d \;; echo x > d`, true},
+		{"H-A02", `cd ~/proj && ln -s ~/.ssh s; find . -name "*.pub" -exec mv {} s/ \;`, true},
+		{"H-A03", `cd ~/proj && ln -s README.md docs.md; find . -name "*.bak" -exec mv {} ~/.ssh/ \;`, true},
+		{"H-A06", `cd ~/proj && ln -s ~/.ssh s && cd s && find . -name "*.pub" -exec mv {} authorized_keys \;`, true},
+		{"H-A07", `cd ~/.ssh && ln -s ../proj/README.md docs.md; find . -name "*.pub" -exec mv {} authorized_keys \;`, true},
 	}
 	for _, managed := range []bool{false, true} {
 		for _, connector := range []string{"claudecode", "codex"} {
@@ -107,8 +119,12 @@ func TestManagedLinkThenNestedCdOrFindMoveReadsTheUserView(t *testing.T) {
 					}
 				}
 				t.Setenv("HOME", home)
-				payload, _ := json.Marshal(map[string]any{"hook_event_name": "PreToolUse", "cwd": cwd,
-					"tool_name": "Bash", "tool_input": map[string]string{"command": row.command}})
+				command, start := row.command, cwd
+				if strings.HasPrefix(row.id, "H-") {
+					command, start = strings.ReplaceAll(command, "PROJ", cwd), home
+				}
+				payload, _ := json.Marshal(map[string]any{"hook_event_name": "PreToolUse", "cwd": start,
+					"tool_name": "Bash", "tool_input": map[string]string{"command": command}})
 				targets, ok := hookpaths.Decode(hookpaths.ResolveConnector(connector, "", "", payload))
 				if !ok {
 					t.Fatalf("%s: client map does not decode", row.id)
@@ -118,7 +134,7 @@ func TestManagedLinkThenNestedCdOrFindMoveReadsTheUserView(t *testing.T) {
 						t.Fatal(err)
 					}
 				}
-				input := actionfacts.Input{Tool: "Bash", Command: row.command, CWD: cwd, ActiveHome: home,
+				input := actionfacts.Input{Tool: "Bash", Command: command, CWD: start, ActiveHome: home,
 					DialectHint: actionfacts.DialectPOSIX}
 				findings := dispatchTrustedAction(t.Context(), trustedActionRequest{Input: input, Connector: connector,
 					EnforcementCapable: true, ProtectedHomeHook: managed, ResolvedWriteTargets: targets})
@@ -128,7 +144,7 @@ func TestManagedLinkThenNestedCdOrFindMoveReadsTheUserView(t *testing.T) {
 					}
 				}
 				if blocked := buildVerdict(findings, "tool_call").Action == "block"; blocked != row.block {
-					t.Errorf("managed=%v %s %s %q: block=%v, want %v (%s)", managed, connector, row.id, row.command, blocked, row.block,
+					t.Errorf("managed=%v %s %s %q: block=%v, want %v (%s)", managed, connector, row.id, command, blocked, row.block,
 						strings.Join(FindingStrings(findings), ","))
 				}
 			}

@@ -2249,14 +2249,19 @@ func commandLinks(command, cwd, home string, facts map[string]string, record, ne
 		case slices.Contains(renamePrograms, program):
 			// A static mv is followed; rename (a pattern) and a dynamic
 			// word are not read (GAP-2532).
-			op, read := renameOp{}, false
-			if program != "rename" && !slices.Contains(static, false) {
-				op, read = parseRename(words[1:], cwd)
-			}
-			if read {
-				renameOps = append(renameOps, op)
-			} else {
+			// Each is read in every directory the statement walk places
+			// the call in (GAP-2533: cd ~/proj && ... mv a b).
+			if program == "rename" || slices.Contains(static, false) {
 				renames = true
+				break
+			}
+			for _, dir := range callDirs {
+				op, read := parseRename(words[1:], dir)
+				if !read {
+					renames = true
+					break
+				}
+				renameOps = append(renameOps, op)
 			}
 		case slices.Contains(cdPrograms, program):
 			cds = true
@@ -2299,15 +2304,22 @@ func commandLinks(command, cwd, home string, facts map[string]string, record, ne
 			}
 			// find -exec runs its child argv, which the wrapper reading
 			// above does not see (GAP-2533). A find -exec mv into a fixed
-			// project directory is read as a move.
-			move, moveRead := parseFindMove(program, words, static, cwd)
+			// project directory is read as a move, in every directory the
+			// statement walk places the find in.
+			var moves []findMove
+			moveRead := true
+			for _, dir := range callDirs {
+				move, read := parseFindMove(program, words, static, dir)
+				moveRead = moveRead && read
+				moves = append(moves, move)
+			}
 			for _, child := range findExecCommands(command, program, args, words, static) {
 				if tactics.RunsProgram(child, linkPrograms...) {
 					links.unknown(true)
 				}
 				if tactics.RunsProgram(child, renamePrograms...) {
 					if moveRead {
-						findMoves = append(findMoves, move)
+						findMoves = append(findMoves, moves...)
 					} else {
 						renames = true
 					}
@@ -2345,13 +2357,20 @@ func commandLinks(command, cwd, home string, facts map[string]string, record, ne
 		// user view of the disk (LinksStableKey, GAP-2564); for a nested
 		// cd or a find -exec mv too (GAP-2600). The rename reading is
 		// always the gateway own.
+		//
+		// Static top-level cd statements (linkDirsKnown) place every link,
+		// mv and find call, which are read in those directories, so they
+		// do not make the moves unknown: cd ~/proj && ln -s src/a.txt a;
+		// find . -name "*.tmp" -exec mv {} build/ \; reads as the same row
+		// run in ~/proj (GAP-2533). Any other directory change does.
 		stable := true
 		moves := len(renameOps) > 0 || len(findMoves) > 0
 		walked := moves || wrappedCds
 		_, readable := ResolveWriteTarget(cwd)
 		userView := !readable && facts[LinksStableKey] == "1"
+		placedCds := cds && linkDirsKnown && !wrappedCds
 		switch {
-		case renames || moves && cds:
+		case renames || moves && cds && !placedCds:
 			stable = false
 		case moves:
 			stable = links.followRenames(renameOps)
