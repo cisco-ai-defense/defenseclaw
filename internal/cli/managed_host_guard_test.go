@@ -145,6 +145,18 @@ func TestManagedWindowsSetupAnswer(t *testing.T) {
 		!strings.Contains(err.Error(), "session-only HERMES_HOME is NOT COVERED") {
 		t.Fatalf("doctor on a managed Windows computer: %v", err)
 	}
+	// GAP-0536: --help of an answer printed the refusal and exited 1; it
+	// prints usage with the answer as the description and exits 0.
+	for _, args := range [][]string{{"doctor", "--help"}, {"doctor", "-h"}, {"setup", "codex", "--help"}, {"skill", "list", "-h"}} {
+		var out strings.Builder
+		root.SetOut(&out)
+		root.SetArgs(args)
+		if err := root.Execute(); err != nil || !strings.Contains(out.String(), "Usage:") ||
+			!strings.Contains(out.String(), "managed") {
+			t.Fatalf("%v on a managed Windows computer: err %v, output %q", args, err, out.String())
+		}
+	}
+	root.SetOut(io.Discard)
 	// GAP-1719: `upgrade` was a bare unknown command.
 	root.SetArgs([]string{"upgrade"})
 	if err := root.Execute(); err == nil || !strings.Contains(err.Error(), "upgrades are installed by your organization") {

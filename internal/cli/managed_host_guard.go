@@ -132,7 +132,9 @@ func addManagedWindowsSetupAnswer(root *cobra.Command) {
 // answer, unless root already has that command. The answer needs no per-user
 // config: without the skip annotation the root pre-run tried to load
 // ~/.defenseclaw/config.yaml, which a managed computer never has, and printed
-// "failed to load config" instead.
+// "failed to load config" instead. With flag parsing off, --help reached the
+// answer too: `doctor --help` exited 1 with the refusal and no usage
+// (GAP-0536). Help prints the answer as the description and exits 0.
 func addManagedWindowsAnswer(root *cobra.Command, name string, answer func(args []string) error) {
 	for _, command := range root.Commands() {
 		if command.Name() == name {
@@ -145,10 +147,33 @@ func addManagedWindowsAnswer(root *cobra.Command, name string, answer func(args 
 		DisableFlagParsing: true,
 		SilenceUsage:       true,
 		Annotations:        map[string]string{"defenseclaw.skip-daemon-bootstrap": "true"},
-		RunE: func(_ *cobra.Command, args []string) error {
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if rest, help := managedAnswerHelpArgs(args); help {
+				cmd.Long = answer(rest).Error()
+				return cmd.Help()
+			}
 			return answer(args)
 		},
 	})
+}
+
+// managedAnswerHelpArgs reports whether args ask for help (-h or --help
+// before a "--") and returns them without the help flags.
+func managedAnswerHelpArgs(args []string) ([]string, bool) {
+	rest := make([]string, 0, len(args))
+	help := false
+	for i, arg := range args {
+		if arg == "--" {
+			rest = append(rest, args[i:]...)
+			break
+		}
+		if arg == "-h" || arg == "--help" {
+			help = true
+			continue
+		}
+		rest = append(rest, arg)
+	}
+	return rest, help
 }
 
 // managedWindowsAdminCommandAnswer tells a user on a managed Windows computer
