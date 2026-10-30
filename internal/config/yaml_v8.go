@@ -267,6 +267,11 @@ func parseV8YAML(source string, data []byte) (*V8YAMLDocument, error) {
 				"llm_providers is not accepted in Secure Client config_version 8",
 				"remove llm_providers from the Secure Client source")
 		}
+		if node := v8YAMLMapValue(root, "decision_model"); node != nil {
+			return nil, v8Error(source, V8YAMLErrorLegacyKeyForbidden, "$.decision_model", node,
+				"decision_model is not accepted in Secure Client config_version 8",
+				"remove decision_model from the Secure Client source")
+		}
 		// Keep the legacy-key errors of main (issue #1092); elsewhere
 		// the schema refuses those keys.
 		if err := rejectV8YAMLLegacyKeys(source, root); err != nil {

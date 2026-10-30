@@ -109,6 +109,13 @@ type LLMJudge struct {
 	provider     LLMProvider
 	rp           *guardrail.RulePack
 	secureClient bool
+	// decision is the decision model in front of the tool-call judge; nil
+	// when decision_model is off.
+	decision *decisionModel
+	// decisionStates holds each prepared call's decision-model state until
+	// it is judged (keepDecisionState / takeDecisionState).
+	decisionStatesMu sync.Mutex
+	decisionStates   map[string]decisionModelState
 
 	toolContextMu sync.Mutex
 	toolContext   map[string]toolJudgeSessionContext
@@ -748,11 +755,15 @@ func judgeExtraParams(model string) map[string]any {
 }
 
 func (j *LLMJudge) judgeChatRequest(messages []ChatMessage, maxTok int, kind string) *ChatRequest {
-	temperature := 0.0
+	var temperature *float64
+	if !modelRefusesTemperature(j.model) {
+		zero := 0.0
+		temperature = &zero
+	}
 	return &ChatRequest{
 		Messages:       messages,
 		MaxTokens:      intPtr(maxTok),
-		Temperature:    &temperature,
+		Temperature:    temperature,
 		ResponseFormat: judgeResponseFormatFor(kind, judgeNeedsToolSafeSchemaKeys(j.providerName, j.model)),
 		Fallbacks:      j.cfg.Fallbacks,
 		ExtraParams:    judgeExtraParams(j.model),
@@ -2155,6 +2166,16 @@ func (j *LLMJudge) toolJudgeContextSample(ctx context.Context, toolName, args st
 		}
 	}
 	fmt.Fprintf(&sample, "<CURRENT_TOOL_CALL tool=%q>\n%s\n</CURRENT_TOOL_CALL>", sanitizeToolName(toolName), current)
+	if j.decision != nil {
+		state := decisionModelState{
+			SessionUserIntent: entry.userIntent,
+			CurrentToolCall:   decisionModelToolCall{Tool: sanitizeToolName(toolName), Arguments: current},
+		}
+		for _, event := range prior {
+			state.RecentToolCalls = append(state.RecentToolCalls, decisionModelToolCall{Tool: event.toolName, Arguments: event.args})
+		}
+		j.keepDecisionState(sample.String(), state)
+	}
 	return sample.String()
 }
 
@@ -2289,7 +2310,14 @@ func (j *LLMJudge) prepareToolJudgeSample(ctx context.Context, toolName, args st
 	return j.toolJudgeContextSample(ctx, toolName, args), true
 }
 
+// runToolJudgeSample judges one prepared tool call: the decision model
+// first when one is configured (decision_model.go), then the LLM judge.
 func (j *LLMJudge) runToolJudgeSample(ctx context.Context, toolName, args, sample string) *ScanVerdict {
+	return j.runToolDecision(ctx, toolName, args, sample)
+}
+
+// runToolJudgeLLM is the LLM tool-call judge.
+func (j *LLMJudge) runToolJudgeLLM(ctx context.Context, toolName, args, sample string) *ScanVerdict {
 
 	timeout := time.Duration(j.cfg.Timeout) * time.Second
 	if timeout <= 0 {

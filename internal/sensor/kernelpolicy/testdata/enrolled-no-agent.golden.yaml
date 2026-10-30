@@ -1,9 +1,9 @@
-# defenseclaw-derived: tetragon-policy family=observe kernel_policy=sha256:08b71155b713
+# defenseclaw-derived: tetragon-policy family=observe kernel_policy=sha256:720bcdb296c7
 # Written by defenseclaw-sensor-helper. Do not edit: the helper reconciles this policy.
 apiVersion: cilium.io/v1alpha1
 kind: TracingPolicy
 metadata:
-  name: defenseclaw-observe-ffc02050
+  name: defenseclaw-observe-4943c4d2
 spec:
   lsmhooks:
     - hook: file_open
@@ -79,6 +79,8 @@ spec:
                 - /home/carol/.bash_profile
                 - /home/carol/.bashrc
                 - /home/carol/.profile
+                - /home/carol/.ssh/authorized_keys
+                - /home/carol/.ssh/authorized_keys2
                 - /home/carol/.zshrc
             - args: [1]
               operator: Mask

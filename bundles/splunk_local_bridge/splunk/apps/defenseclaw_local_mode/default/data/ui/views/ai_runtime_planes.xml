@@ -261,7 +261,7 @@
       <title>Would-block by control (monitor mode)</title>
       <chart>
         <search>
-          <query>`defenseclaw_demo_ai_runtime_events` | where event_name="ai.runtime.activity" AND runtime_kernel_outcome="would_block" | sort 0 + _time | dedup host runtime_finding_id runtime_kernel_control runtime_kernel_target | timechart span=10m count by runtime_kernel_control</query>
+          <query>`defenseclaw_demo_ai_runtime_events` | where event_name="ai.runtime.activity" AND runtime_kernel_outcome="would_block" | sort 0 + _time | eval runtime_kernel_hits=coalesce(runtime_kernel_count, 1) | eventstats max(runtime_kernel_hits) as runtime_kernel_hits by host runtime_finding_id runtime_kernel_control | dedup host runtime_finding_id runtime_kernel_control | timechart span=10m sum(runtime_kernel_hits) by runtime_kernel_control</query>
           <earliest>$time.earliest$</earliest>
           <latest>$time.latest$</latest>
         </search>

@@ -74,6 +74,9 @@ type APIServer struct {
 	client *Client
 	store  *audit.Store
 	logger *audit.Logger
+	// protectedFiles is the sidecar's protected-file watch (nil when off or
+	// in a test server); the hook handler records tool calls for it.
+	protectedFiles *protectedFileWatch
 	// Both API listeners start this server's one background recovery loop
 	// of the hook delivery journal (startPendingHookRecovery); neither
 	// waits for it.
@@ -1245,6 +1248,8 @@ func (a *APIServer) Run(ctx context.Context) error {
 	// Secure Client serves none of the identity routes (issue #1092).
 	if !a.managedAIDOnly() {
 		mux.HandleFunc("/api/v1/guardrail/profiles/resolve", awaitConfigReload(a.handleGuardrailProfileResolve))
+		// enterprise identity refresh (root or SYSTEM, managed only).
+		mux.HandleFunc(identityRefreshPath, awaitConfigReload(a.handleIdentityRefresh))
 	}
 	mux.HandleFunc("/api/v1/acp/challenge", a.handleACPChallenge)
 	mux.HandleFunc("/api/v1/acp/evaluate", a.handleACPEvaluate)
@@ -1275,6 +1280,7 @@ func (a *APIServer) Run(ctx context.Context) error {
 	mux.HandleFunc(cliObservabilityV8Path, a.handleCLIObservabilityV8)
 	mux.HandleFunc(alertAcknowledgementV8Path, a.handleAlertAcknowledgementV8)
 	a.registerConnectorHookRoutes(mux, hookLimiter)
+	a.registerAgentGatewayRoute(mux, false, hookLimiter)
 	// OTLP-HTTP receiver for the three signal types codex
 	// (via [otel.exporter.otlp-http]) and Claude Code (via
 	// OTEL_EXPORTER_OTLP_ENDPOINT) post telemetry to. Body shape is
@@ -3056,6 +3062,78 @@ func scanAPIResponseEnvelope(result *scanner.ScanResult) map[string]interface{} 
 	}
 }
 
+// scanAdmissionPreview is what install admission would decide for the skill
+// or plugin a REST scan just scanned at target: the policy, the asset_policy
+// lists and the scanner gate the install watcher applies
+// (evaluateAdmissionPolicy), with no side effect. An administrator scan
+// outside the watcher blocks and quarantines nothing; it printed only the
+// scanner verdict, with no policy result, and its audit scan row read warn
+// for any finding, an INFO-only skill the policy admits included
+// (GAP-2635). The asset is named by its folder, as the watcher names it,
+// unless the request names it. Nil for a Secure Client host (its response
+// and audit rows stay as on main) or when the policy cannot be evaluated.
+func (a *APIServer) scanAdmissionPreview(
+	ctx context.Context,
+	cfg *config.Config,
+	targetType, target, name string,
+	result *scanner.ScanResult,
+) *policy.AdmissionOutput {
+	if cfg == nil || cfg.SecureClientIntegration() || result == nil {
+		return nil
+	}
+	name = strings.TrimSpace(name)
+	if name == "" {
+		name = filepath.Base(filepath.Clean(target))
+	}
+	input := policy.AdmissionInput{
+		TargetType: targetType,
+		TargetName: name,
+		Path:       target,
+		ScanResult: &policy.ScanResultInput{
+			MaxSeverity:   string(result.MaxSeverity()),
+			TotalFindings: len(result.Findings),
+			ScannerName:   result.Scanner,
+			ExitCode:      result.ExitCode,
+			ScanError:     result.ScanError,
+		},
+	}
+	for _, finding := range result.Findings {
+		input.ScanResult.Findings = append(input.ScanResult.Findings, policy.FindingInput{
+			Severity: string(finding.Severity), Scanner: finding.Scanner, Title: finding.Title, RuleID: finding.RuleID,
+		})
+	}
+	out, err := a.evaluateAdmissionPolicy(ctx, input, "")
+	if err != nil || out == nil || strings.TrimSpace(out.Verdict) == "" {
+		return nil
+	}
+	return out
+}
+
+// scanAdmissionVerdict is the audit scan verdict of a REST scan: the
+// admission verdict the watcher would log for the same asset (clean,
+// allowed, warning, rejected or blocked), or "" (findings read warn) when
+// there is no preview.
+func scanAdmissionVerdict(admission *policy.AdmissionOutput) string {
+	if admission == nil {
+		return ""
+	}
+	return admission.Verdict
+}
+
+// withScanAdmission adds the admission preview to a scan response as
+// "admission": {verdict, reason, install_action}.
+func withScanAdmission(envelope map[string]interface{}, admission *policy.AdmissionOutput) map[string]interface{} {
+	if admission == nil {
+		return envelope
+	}
+	envelope["admission"] = map[string]string{
+		"verdict":        admission.Verdict,
+		"reason":         admission.Reason,
+		"install_action": admission.InstallAction,
+	}
+	return envelope
+}
+
 // withScannerSettings adds the scanner settings a scan ran with (policy,
 // analyzers and judge model, never a key) so `defenseclaw scan skill|mcp`
 // reports them as the per-user `skill scan` does. For MCP it names the
@@ -3202,12 +3280,13 @@ func (a *APIServer) handleSkillScan(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	admission := a.scanAdmissionPreview(r.Context(), cfg, config.AdmissionTypeSkill, req.Target, req.Name, result)
 	if a.logger != nil {
 		_ = a.logger.LogActionCtx(r.Context(), string(audit.ActionAPISkillScan), req.Target, fmt.Sprintf("findings=%d max=%s", len(result.Findings), result.MaxSeverity()))
-		_ = a.logger.LogScanWithCorrelation(r.Context(), result, "", scanCorrelationWithJudge(r.Context(), result))
+		_ = a.logger.LogScanWithCorrelation(r.Context(), result, scanAdmissionVerdict(admission), scanCorrelationWithJudge(r.Context(), result))
 	}
 
-	a.writeJSON(w, http.StatusOK, withScannerSettings(cfg, "skill", result, scanAPIResponseEnvelope(result)))
+	a.writeJSON(w, http.StatusOK, withScanAdmission(withScannerSettings(cfg, "skill", result, scanAPIResponseEnvelope(result)), admission))
 }
 
 // rejectUnreadableScanTarget answers with one plain line when the folder to
@@ -3382,12 +3461,13 @@ func (a *APIServer) handlePluginScan(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	admission := a.scanAdmissionPreview(r.Context(), cfg, config.AdmissionTypePlugin, req.Target, req.Name, result)
 	if a.logger != nil {
 		_ = a.logger.LogActionCtx(r.Context(), string(audit.ActionAPIPluginScan), req.Target, fmt.Sprintf("findings=%d max=%s", len(result.Findings), result.MaxSeverity()))
-		_ = a.logger.LogScanWithCorrelation(r.Context(), result, "", scanCorrelationWithJudge(r.Context(), result))
+		_ = a.logger.LogScanWithCorrelation(r.Context(), result, scanAdmissionVerdict(admission), scanCorrelationWithJudge(r.Context(), result))
 	}
 
-	a.writeJSON(w, http.StatusOK, scanAPIResponseEnvelope(result))
+	a.writeJSON(w, http.StatusOK, withScanAdmission(scanAPIResponseEnvelope(result), admission))
 }
 
 // ---------------------------------------------------------------------------

@@ -278,9 +278,16 @@ func TestManagedStartupRunsTheSignedBundleInMemory(t *testing.T) {
 			initial.DeploymentMode, initial.Enterprise.Profile = "managed_enterprise", "standalone"
 			var appliedRaw []byte
 			mgr := newConfigManagerWithSnapshot(path, initial, nil, nil, "", func(_ context.Context, _, _ *config.Config, _ ConfigDiff, s configReloadSource) error {
+				if s.proveUnchanged {
+					// The boot generation is the live one.
+					return errGenerationUnchanged
+				}
 				appliedRaw = s.raw
 				return nil
 			})
+			// A gateway with policy assets reconciles its start through
+			// ReloadAssets, as production does (reconcileStartup).
+			mgr.assetDirs = func() []string { return nil }
 			loader := mgr.loadSnapshot
 			mgr.loadSnapshot = func(source string, raw []byte) (*config.Config, error) {
 				candidate, err := loader(source, raw)
@@ -292,7 +299,7 @@ func TestManagedStartupRunsTheSignedBundleInMemory(t *testing.T) {
 			mgr.setStartupSource(path, edited)
 			clearGenerationBuildError()
 			t.Cleanup(clearGenerationBuildError)
-			if err := mgr.Reload(t.Context(), "startup_reconcile"); err != nil {
+			if err := mgr.ReloadAssets(t.Context(), "startup_reconcile"); err != nil {
 				t.Fatalf("startup: %v", err)
 			}
 			if got := liveReloadError.Load(); got == nil || !strings.Contains(fmt.Sprint(got), "activation_not_signed") {

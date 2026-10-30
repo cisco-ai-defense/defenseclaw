@@ -93,6 +93,7 @@ gateway.
 | `anchors-install.schema.json` | `.../enterprise/management/anchors-install-v1.json` | `enterprise bundle anchors install --json` (Linux, macOS) |
 | `bundle-receipt.schema.json` | `.../enterprise/management/bundle-receipt-v1.json` | the files `<etc>/bundles/receipt.json` and `<etc>/bundles/receipt-events/<receipt_id>.json` |
 | `bundle-anchors.schema.json` | `.../enterprise/management/bundle-anchors-v1.json` | the trust anchor file the agent supplies (input) |
+| `identity-refresh.schema.json` | `.../enterprise/management/identity-refresh-v1.json` | `enterprise identity refresh --json` (from 1.0.6) |
 
 Every `$id` starts with `https://defenseclaw.cisco.com/schemas/enterprise/`.
 The schemas are Draft 2020-12 and closed (`additionalProperties: false`), so
@@ -433,6 +434,7 @@ member; use these fallbacks on it:
 | Linux and macOS secret failure JSON | `secret set` / `remove` / `status` print the schema-1 failure document for an argument, flag, privilege, value or stdin read error | those failures print one line on stderr and no JSON: classify them by the exit code (2 fix the call, 1 failed) |
 | Anchors command (Linux, macOS) | `enterprise bundle anchors install` | install the file as the MDM kit does (section 4.8) |
 | `--trust-anchors`, `--device-group` (from 1.0.6, Linux and macOS) | `bundle apply --trust-anchors F` installs anchors and applies the bundle in one transaction; `anchors install --device-group G` pins the device (4.8) | an unknown flag: exit 2 with no JSON; run `anchors install`, then `apply`, and restore by hand on a failure (4.8) |
+| `identity_refresh` (from 1.0.6) | `enterprise identity refresh` re-reads directory facts now (4.10) | no such command: directory facts refresh within 15 minutes, or at the next sign-in on Windows |
 | `secret_set_bundle` (from 1.0.4) | `secret set --bundle` stores a credential a newer signed bundle signs (4.7) | an unknown flag: leave it out; the build binds no credential value, so store the credential without it |
 | Optional status v2 members (from 1.0.3) | `bundle verify` `secret_refs_missing` and `restart_prediction` (4.2); `status` / `verify` `connectors`, `openshell` and `identity` (4.4.1); each only when present | absent: preflight by verifying and reading the refusal, and treat every apply as one that can restart the gateway |
 
@@ -1458,6 +1460,43 @@ ls -1 /etc/defenseclaw/bundles/receipt-events/        # macOS: /opt/cisco/defens
 Get-ChildItem 'C:\ProgramData\Cisco\DefenseClaw\etc\bundles\receipt-events' -Filter *.json
 ```
 
+### 4.10 Re-read directory facts: `enterprise identity refresh`
+
+- argv: `enterprise identity refresh [--user <name|uid|SID>] [--flush-os-cache] [--max-users N] --json`.
+  Optional, from 1.0.6 (`identity_refresh` in `--version-json`).
+- Privilege: root, or an elevated administrator or SYSTEM on Windows. Any
+  other caller gets `not_admin` (exit 1, 1603 on Windows) before any account
+  is resolved. Standalone managed devices only (`not_managed` otherwise).
+- What it does: the gateway re-reads the directory facts (groups, UPN) of the
+  `--user` account, or of every account it has cached (at most `--max-users`,
+  default 500, 8 lookups at a time), and lists in `changes[]` the accounts
+  whose guardrail profile changed. Hook calls use the new facts from their
+  next call. Nothing else changes: no config, policy or default decision.
+- `--flush-os-cache`: Linux with SSSD runs `sss_cache -u <account>` with
+  `--user`, `sss_cache -E` without it. macOS runs `dscacheutil -flushcache`
+  and `dsmemberutil flushcache` without `--user` only (macOS has no
+  per-account flush; with `--user` it reports `reason: no_per_user_flush`).
+  Windows flushes nothing.
+- Windows: an account takes its groups from its sign-in token. A signed-in
+  account gets a directory group change at its next sign-in; such accounts
+  are listed in `windows_token_groups_pending` (warning of the same code).
+- Lock: one run at a time; a second run gets `refresh_busy`, exit 75 (1618).
+- Privacy: account names and ids are in this output only. The audit row
+  `identity-refresh-completed` and its telemetry carry counts, duration and
+  the flush scope.
+- Exit codes: 0 done (also when some accounts of an all-account run failed:
+  warning `accounts_failed`); 1 / 1603 `lookup_failed` for a failed `--user`
+  account, `not_admin`, `not_managed`, `gateway_unavailable`; 2 / 1639
+  `invalid_arguments`, `account_unresolved`; 75 / 1618 `refresh_busy`.
+- Schema `identity-refresh.schema.json`.
+
+```sh
+"$GW" enterprise identity refresh --user eng2@corp.example.com --flush-os-cache --json
+```
+```powershell
+& $GW enterprise identity refresh --json
+```
+
 ## 5. The agent loop
 
 ### 5.0 Set up a device that has no MDM
@@ -1575,15 +1614,15 @@ The rollback marker and `--allow-downgrade` do not lift it. Windows Setup
 `/repair` and `/ensure`, before it changes anything; a 1.0.5 or older Setup
 does not check the floor.
 
-Check the floor before you dispatch a downgrade; the package refusal is the
-second line. `bundle status` reports it as `current.min_product_version`
-(absent when the bundle sets none and on builds before 1.0.6). For a rollback
-to 1.0.4 it must be unset or at most 1.0.4. On a 1.0.4 or 1.0.5 device, `bundle status`
-has no such member and its `floor` is the bundle version floor, not the
-release floor: keep the release floor you signed and compare it with
-`--version-json` yourself. A 1.0.6 or later release that runs below the floor
-warns `product_below_floor` in `status`, `verify` and `bundle status`; the
-warning changes nothing on the device.
+Check the floor first, the package refusal is the second line: `bundle
+status` reports it as `current.min_product_version` (absent when the bundle
+sets none and on builds before 1.0.6). Compare it with the target version
+before you dispatch a downgrade; a rollback to 1.0.4 needs it unset or at
+most 1.0.4. On a 1.0.4 or 1.0.5 device, `bundle status` has no such member
+and its `floor` is the bundle version floor, not the release floor. A 1.0.6
+or later release that runs below the floor warns `product_below_floor` in
+`status`, `verify` and `bundle status`; the warning changes nothing on the
+device. To go below the floor, contact your administrator.
 
 The preinstall of a 1.0.4 or later package checks the floor before it replaces
 files, but only with a gateway that has the check: the installed gateway when

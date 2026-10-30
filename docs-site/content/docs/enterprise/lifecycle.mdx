@@ -252,13 +252,12 @@ Packages older than 1.0.4 installed through `rpm`, `dnf`, `dpkg -i` or the
 macOS Installer run their own older scripts, which do not check the floor.
 `dpkg -i` does not run the apt hook.
 
-The 1.0.6 and later Windows Setup checks the floor on `/install`,
-`/upgrade`, `/repair` and `/ensure` before it changes anything, and refuses a
-release below it (`product_floor_refused`, exit `1603`). A floor that cannot
-be read refuses too. The check runs in the Setup's own verified copy of
-DefenseClaw and reads the kept policy state, so it also holds after an
-uninstall that kept the state. The 1.0.4 and 1.0.5 Windows Setup, and older
-ones, do not check the floor and can install below it.
+**Windows Setup.** From 1.0.6, Setup `/install`, `/upgrade`, `/repair` and
+`/ensure` check the floor before they change anything, with the Setup's own
+verified copy of DefenseClaw, and refuse a release below it
+(`product_floor_refused`, exit `1603`). A floor that cannot be read refuses
+too. The check also works after an uninstall that kept the state. A 1.0.5 or
+older Setup does not check the floor and can install below it.
 
 On every OS, a 1.0.6 or later release that finds itself below the floor
 reports `product_below_floor` in `status`, `verify` and `bundle status`. It is

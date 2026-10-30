@@ -34,7 +34,7 @@ from typing import Any
 # The scanner versions this release pins (pyproject.toml; checked by
 # cli/tests/test_dependency_contract.py and reported by doctor).
 SKILL_SCANNER_DIST = "cisco-ai-skill-scanner"
-SKILL_SCANNER_VERSION = "2.2.1"
+SKILL_SCANNER_VERSION = "2.3.2"
 MCP_SCANNER_DIST = "cisco-ai-mcp-scanner"
 # TODO(mcp-scanner 4.8.x): 4.8.x pins litellm==1.93.0 (CVE-2026-84377);
 # move when upstream relaxes that pin (see pyproject.toml).

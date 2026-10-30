@@ -1411,6 +1411,152 @@ def setup_llm(
         _run_llm_ping(cfg.resolve_llm(target_path))
 
 
+@setup.command("decision-model")
+@click.option("--show", is_flag=True, default=False, help="Print the current decision model settings and exit.")
+@click.option("--enable/--disable", "enabled", default=None, help="Turn the decision model on or off.")
+@click.option("--model", default=None, help="Model name the System One endpoint serves (sent in each request).")
+@click.option(
+    "--base-url",
+    default=None,
+    help="Full endpoint URL, e.g. http://127.0.0.1:8791/v1/systemone. https anywhere, http only to loopback.",
+)
+@click.option(
+    "--api-key-env",
+    default=None,
+    help="Env var holding the bearer token (default DEFENSECLAW_DECISION_MODEL_KEY; local servers need none).",
+)
+@click.option(
+    "--timeout",
+    type=float,
+    default=None,
+    help="Seconds one call may take (default 1; never more than a quarter of the judge's time).",
+)
+@click.option(
+    "--allow-threshold", type=float, default=None, help="Risk at or below this skips the judge (default 0.30)."
+)
+@click.option(
+    "--block-threshold", type=float, default=None, help="Risk at or above this is a confident block (default 0.75)."
+)
+@click.option(
+    "--on-confident-block",
+    type=click.Choice(["escalate", "decide"], case_sensitive=False),
+    default=None,
+    help="escalate (default): the judge still checks a confident block. decide: the block stands without the judge.",
+)
+@click.option(
+    "--ping/--no-ping", "run_ping", default=False, help="After saving, send one benign request to check the endpoint."
+)
+@click.option("--non-interactive", "--accept-defaults", is_flag=True, help="Use flags instead of prompts.")
+@pass_ctx
+def setup_decision_model(
+    app: AppContext,
+    show: bool,
+    enabled: bool | None,
+    model: str | None,
+    base_url: str | None,
+    api_key_env: str | None,
+    timeout: float | None,
+    allow_threshold: float | None,
+    block_threshold: float | None,
+    on_confident_block: str | None,
+    run_ping: bool,
+    non_interactive: bool,
+) -> None:
+    """Configure the unified decision model (``decision_model:``).
+
+    A small, fast model that speaks the System One protocol. The guardrail
+    runs it in front of the LLM judge on tool calls: it allows the clear
+    benign calls itself and sends the rest to the judge. ``skill scan``
+    records its advisory score. Off by default; when it is down, the judge
+    decides as before. The token, if any, goes in ~/.defenseclaw/.env with
+    ``defenseclaw keys set DEFENSECLAW_DECISION_MODEL_KEY``.
+    """
+    from defenseclaw import decision_model as dmod
+    from defenseclaw.enforce import asset_lists
+
+    cfg = app.cfg
+    if not show and asset_lists.is_secure_client(cfg):
+        raise click.ClickException("the decision model is not available on Secure Client deployments")
+    if show:
+        click.echo()
+        ux.section("Decision model")
+        for label, value in dmod.summary_rows(cfg):
+            click.echo(f"    {ux.dim(label + ':')} {value}")
+        note = dmod.judge_note(cfg)
+        if note:
+            ux.subhead(note)
+        ux.subhead("To change: run 'defenseclaw setup decision-model' without --show.")
+        return
+
+    if api_key_env is not None and api_key_env.strip():
+        api_key_env = _validated_api_key_env_name(
+            api_key_env, "'--api-key-env'", dmod.DECISION_MODEL_KEY_ENV
+        )
+    flags_given = any(v is not None for v in (enabled, model, base_url, api_key_env, timeout,
+                                              allow_threshold, block_threshold, on_confident_block))
+    if not non_interactive and not flags_given:
+        dm = cfg.decision_model
+        click.echo()
+        terminal_checkbox.restore_line_prompt_mode()
+        ux.section("Decision model")
+        ux.subhead("A fast model in front of the LLM judge: it allows the clear benign tool calls")
+        ux.subhead("itself and sends the rest to the judge. Benchmarks: " + dmod.BENCHMARK_URL)
+        click.echo()
+        enabled = click.confirm(f"  {dmod.INIT_QUESTION}", default=dm.enabled)
+        if enabled:
+            base_url = click.prompt("  Endpoint URL", default=dm.base_url or dmod.DEFAULT_BASE_URL).strip()
+            model = click.prompt("  Model name", default=dm.model or "").strip()
+            api_key_env = click.prompt(
+                "  Token env var (leave the default for a local server)",
+                default=dm.effective_api_key_env(),
+            ).strip()
+    elif enabled is None and (base_url or model):
+        # Naming an endpoint or model on the command line turns it on.
+        enabled = True
+    previous = "on" if cfg.decision_model.enabled else "off"
+    try:
+        updated = dmod.apply_settings(
+            cfg,
+            enabled=enabled,
+            model=model,
+            base_url=base_url,
+            api_key_env=api_key_env,
+            timeout=timeout,
+            allow_threshold=allow_threshold,
+            block_threshold=block_threshold,
+            on_confident_block=on_confident_block,
+        )
+    except dmod.DecisionModelError as exc:
+        raise click.ClickException(str(exc)) from exc
+    cfg.save()
+    if app.logger:
+        from defenseclaw.commands._audit_notice import saved_change_audit
+
+        details = (
+            f"enabled={'true' if updated.enabled else 'false'} previous={previous} "
+            f"model={''.join(updated.model.split()) or '(unset)'} api_key_env={updated.effective_api_key_env()}"
+        )
+        try:
+            saved_change_audit(app.logger).log_config_change("decision_model", details)
+        except CanonicalObservabilityError as exc:
+            ux.echo(f"  ⚠ Change saved, but the gateway did not confirm the audit event ({exc}).", err=True)
+    click.echo()
+    ux.ok(f"Saved to {config_path_for_data_dir(cfg.data_dir)}")
+    for label, value in dmod.summary_rows(cfg):
+        ux.kv(label, value)
+    note = dmod.judge_note(cfg)
+    if note:
+        ux.subhead(note)
+    click.echo()
+    ux.subhead("The running gateway applies it without a restart.")
+    if run_ping and updated.active():
+        result = dmod.ping(updated, cfg.data_dir)
+        if result.ok:
+            ux.ok(f"Decision model reachable: {result.detail}")
+        else:
+            ux.warn(f"Decision model not reachable: {result.detail}; the LLM judge decides alone until it is")
+
+
 @setup.command("skill-scanner")
 @click.option("--use-llm/--no-use-llm", default=None, help="Enable (or disable) the LLM analyzer")
 @click.option("--use-behavioral/--no-use-behavioral", default=None, help="Enable (or disable) the behavioral analyzer")
@@ -1989,8 +2135,73 @@ def _configure_llm_non_interactive(
         tls_ca_cert_file=tls_ca_cert_file,
         insecure_skip_verify=insecure_skip_verify,
     )
+    _settle_bedrock_model_and_region(llm)
 
     _clear_legacy_llm_fields(cfg)
+
+
+# Short names people type for the Bedrock models the docs use. Anything else
+# that is not a Bedrock id is refused before it is saved (GAP-2638).
+_BEDROCK_HAIKU_4_5 = "us.anthropic.claude-haiku-4-5-20251001-v1:0"
+_BEDROCK_LUNA = "us.openai.gpt-5.6-luna"
+_BEDROCK_SHORT_MODEL_NAMES = {
+    "haiku-4.5": _BEDROCK_HAIKU_4_5,
+    "haiku-4-5": _BEDROCK_HAIKU_4_5,
+    "claude-haiku-4.5": _BEDROCK_HAIKU_4_5,
+    "claude-haiku-4-5": _BEDROCK_HAIKU_4_5,
+    "luna": _BEDROCK_LUNA,
+    "gpt-5.6-luna": _BEDROCK_LUNA,
+}
+_BEDROCK_PROVIDERS = ("bedrock", "amazon-bedrock")
+
+
+def _settle_bedrock_model_and_region(llm) -> None:
+    """Give a Bedrock LLM block a real model id and a region (GAP-2638).
+
+    ``--model haiku-4.5`` was saved as written, so the ping failed with
+    LiteLLM's ``Unknown provider=None`` and every judge call would too. A
+    known short name now becomes its full Bedrock id; any other value that is
+    not a Bedrock id, an ARN or a ``--bedrock-deployment`` alias is refused.
+    Without ``--bedrock-region`` the region came from nowhere, so doctor
+    failed "bedrock configured without a region"; it is now taken from
+    ``AWS_REGION``, then ``AWS_DEFAULT_REGION``, then ``us-east-1`` (the
+    default the gateway's Bedrock client uses), saved and printed.
+    """
+    from defenseclaw.config import BedrockKeyConfig, is_bedrock_model_id  # noqa: PLC0415
+
+    if (llm.provider or "").strip().lower() not in _BEDROCK_PROVIDERS:
+        return
+    if (llm.instance_name or "").strip():
+        # A bound llm_providers entry names its own models and region; a
+        # role-level region here would override the entry's.
+        return
+    prefix, sep, bare = (llm.model or "").partition("/")
+    if not sep or prefix.lower() not in _BEDROCK_PROVIDERS:
+        prefix, sep, bare = "", "", llm.model or ""
+    aliases = llm.bedrock.deployment_aliases if llm.bedrock is not None else {}
+    if bare and not is_bedrock_model_id(bare) and not bare.startswith("arn:") and bare not in aliases:
+        full = _BEDROCK_SHORT_MODEL_NAMES.get(bare.strip().lower())
+        if full is None:
+            raise click.UsageError(
+                f"{bare!r} is not an Amazon Bedrock model id. Give the full id or inference profile, "
+                f"for example {_BEDROCK_HAIKU_4_5} or {_BEDROCK_LUNA}."
+            )
+        llm.model = f"{prefix}{sep}{full}"
+        ux.subhead(f"Using the Bedrock model id {full} for {bare}.")
+    if llm.bedrock is not None and (llm.bedrock.region or llm.region or "").strip():
+        return
+    if llm.bedrock is None and (llm.region or "").strip():
+        return
+    source = "AWS_REGION"
+    region = (os.environ.get("AWS_REGION") or "").strip()
+    if not region:
+        source, region = "AWS_DEFAULT_REGION", (os.environ.get("AWS_DEFAULT_REGION") or "").strip()
+    if not region:
+        source, region = "the default", "us-east-1"
+    if llm.bedrock is None:
+        llm.bedrock = BedrockKeyConfig()
+    llm.bedrock.region = region
+    ux.subhead(f"Bedrock region {region} (from {source}); change it with --bedrock-region.")
 
 
 def _apply_llm_inherit(cfg, *, inherit_from: str | None, target_path: str) -> None:

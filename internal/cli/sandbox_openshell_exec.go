@@ -466,7 +466,7 @@ var openShellExecDefaultNamespaceSandboxIDs = func() (map[string]bool, error) {
 		"--format", `{{.Label "openshell.ai/sandbox-id"}}`)
 	cmd.Env = append(slices.DeleteFunc(os.Environ(), func(kv string) bool {
 		return strings.HasPrefix(kv, "DOCKER_HOST=") || strings.HasPrefix(kv, "DOCKER_CONTEXT=")
-	}), "DOCKER_HOST=unix:///var/run/docker.sock")
+	}), "DOCKER_HOST="+image.SystemDockerHost)
 	out, err := cmd.Output()
 	if err != nil {
 		return nil, err

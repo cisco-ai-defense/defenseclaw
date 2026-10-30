@@ -502,6 +502,7 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 			})
 			return
 		}
+		a.noteProtectedFileActivity(r.Context(), connectorName, req, identityFacts.ID)
 		toolRoute := profile.ToolCallLifecycle.RouteForEvent(req.HookEventName)
 		if (connectorName == "claudecode" || connectorName == "codex") &&
 			req.HookEventName == "PreToolUse" && !preToolFieldsValid(payload) {
@@ -3923,6 +3924,11 @@ func (a *APIServer) agentHookEnabled(ctx context.Context, name string) bool {
 		return false
 	}
 	if cfg.ConnectorHookConfig(name).Enabled {
+		return true
+	}
+	// The agent-gateway route exists only while connectors.agent_gateway is
+	// on (agent_gateway_hook.go); every call that reaches it is evaluated.
+	if name == connector.AgentGatewayConnectorName && cfg.Connectors.AgentGateway.Enabled && !cfg.SecureClientIntegration() {
 		return true
 	}
 	if a.health != nil && a.health.HasConnectorSource(name, "automatic") && cfg.ApplicationProtection.EffectiveEnabled(name) {

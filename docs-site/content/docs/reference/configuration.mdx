@@ -465,6 +465,8 @@ Defaults from the loader. Omitted keys take these values.
 | `watch.debounce_ms`, `watch.auto_block` | `500`, `true` | Debounce for file events, and whether a rejected install is blocked. |
 | `watch.rescan_enabled`, `watch.rescan_interval_min`, `watch.rescan_content_gated` | `true`, `60`, `true` | Periodic rescan of installed assets; content gating skips a target whose content did not change. |
 | `llm.timeout`, `llm.max_retries` | `30`, `2` | Seconds and retries for the unified LLM block. |
+| `decision_model.enabled` | `false` | The [decision model](/docs/guardrail/decision-model) in front of the LLM judge on tool calls. Needs `decision_model.base_url` and `.model`; the token is in `DEFENSECLAW_DECISION_MODEL_KEY` (`.api_key_env`), or `.credential` on a managed device. |
+| `decision_model.timeout`, `.allow_threshold`, `.block_threshold`, `.on_confident_block` | `1`, `0.30`, `0.75`, `escalate` | Seconds per call; risk at or below which an allow skips the judge; risk at or above which a block answer is confident; whether the judge still checks a confident block. Hot reload. |
 | `cisco_ai_defense.endpoint` | `https://us.api.inspect.aidefense.security.cisco.com` | The AI Defense inspection endpoint. |
 | `cisco_ai_defense.api_key_env`, `.timeout_ms` | `CISCO_AI_DEFENSE_API_KEY`, `3000` | The key variable, and the request timeout. |
 | `notifications.enabled` | `true` on macOS and native Windows, else `false` | Desktop notifications master switch (`defenseclaw setup notifications`). |
@@ -478,6 +480,7 @@ Defaults from the loader. Omitted keys take these values.
 | `guardrail.judge_sweep` | `true` | Run the full judge on content the regex triage found no signal in. |
 | `guardrail.retain_judge_bodies`, `.judge_persist_queue_depth` | `true`, `1024` | Keep raw judge bodies in `judge_bodies.db`, and the async write queue depth. Restart required. |
 | `guardrail.hook_self_heal`, `.hook_self_heal_debounce_ms` | `true`, `500` | Re-install a deleted DefenseClaw hook block while the gateway runs. Restart required. |
+| `guardrail.protected_files.on_change`, `.paths` | `alert`, built-in list | The [protected-file watch](/docs/guardrail/protected-files): alert on an agent's change to SSH authorized keys, shell startup files and autostart entries; `restore` (opt-in) puts the content back; `off` turns it off. Restart required. |
 
 When `gateway.api_bind` is empty the sidecar uses `127.0.0.1` ([bind address](/docs/reference/gateway-api#bind-address)). The `openshell:` block is under [OpenShell sandbox settings](#openshell-sandbox-settings).
 

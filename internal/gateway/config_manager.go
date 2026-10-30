@@ -1431,7 +1431,9 @@ func (m *ConfigManager) reload(ctx context.Context, reason string, assets bool, 
 	// fail-mode table, and reports not ok with a HIGH alert.
 	var startupFallback *enterprisebundle.SignedVersion
 	startupRefused := false
-	if !assets && !m.rejected && reason == "startup_reconcile" && m.appliedRaw == nil && m.startupKnown &&
+	// A gateway with policy assets reconciles its start with ReloadAssets
+	// (assets set), so the check does not depend on that flag.
+	if !m.rejected && reason == "startup_reconcile" && m.appliedRaw == nil && m.startupKnown &&
 		sha256.Sum256(source.raw) == m.startupSource && (oldCfg.StandaloneEnterprise() || next.StandaloneEnterprise()) {
 		if refusal := m.startupActivationRefusal(source.raw); refusal != nil {
 			startupRefused = true
@@ -2162,7 +2164,10 @@ func diffConfigs(oldCfg, newCfg *config.Config) ConfigDiff {
 	add("notifications", oldCfg.Notifications, newCfg.Notifications)
 	add("routing", oldCfg.Routing, newCfg.Routing)
 	add("llm_providers", oldCfg.LLMProviders, newCfg.LLMProviders)
+	add("decision_model", oldCfg.DecisionModel, newCfg.DecisionModel)
 	add("update", oldCfg.Update, newCfg.Update)
+	// connectors.agent_gateway registers a route at start: restart-required.
+	add("connectors", oldCfg.Connectors, newCfg.Connectors)
 	add("environment", oldCfg.Environment, newCfg.Environment)
 	add("tenant_id", oldCfg.TenantID, newCfg.TenantID)
 	add("workspace_id", oldCfg.WorkspaceID, newCfg.WorkspaceID)
@@ -2252,7 +2257,10 @@ func diffConfigs(oldCfg, newCfg *config.Config) ConfigDiff {
 		// restarts in-process for llm, watch and scanners (watcherRestart),
 		// and the API and hook scans build their scanners from the live
 		// config per request. connector_hooks has no gateway reader.
-		"llm":             {},
+		"llm": {},
+		// The decision model rides on the judge, which is rebuilt for it
+		// (judgeNeedsRebuild); the skill scanner reads it per scan.
+		"decision_model":  {},
 		"scanners":        {},
 		"watch":           {},
 		"connector_hooks": {},
@@ -2390,6 +2398,8 @@ func holdRestartRequired(running, next *config.Config, restart []string) *config
 			held.Enterprise.Inspection = inspection
 		case "plugin_dir":
 			held.PluginDir = running.PluginDir
+		case "connectors":
+			held.Connectors = running.Connectors
 		default:
 			return nil
 		}

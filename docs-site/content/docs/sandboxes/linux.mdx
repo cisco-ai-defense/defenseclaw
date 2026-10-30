@@ -268,16 +268,6 @@ Run `defenseclaw sandbox doctor` first. These are the Linux-only failures it rep
 
 **Check:** `make test` runs inside the new sandbox.
 
-### Python HTTPS fails on an old kernel
-
-**You see:** on a kernel older than 5.19 (RHEL 9 runs 5.14), a Python program fails every HTTPS request with `[Errno 95] Operation not supported`.
-
-**Cause:** OpenShell cannot tell a program on those kernels whom its connection goes to, and Python's `ssl` module asks before every handshake. DefenseClaw works around it in the Python harnesses and the image's own Python (`python3`, `pip` and virtual environments made with them). A Python you download inside the sandbox, for example with `uv python install`, is not covered.
-
-**Fix:** use the image's `python3`, or `uv pip`, which is not affected.
-
-**Check:** the HTTPS request succeeds.
-
 ### Docker BuildKit or buildx is missing
 
 **You see:** ``docker's buildx plugin is not available (`docker buildx version`: …)``, the **Docker BuildKit** check fails, or ``DOCKER_BUILDKIT=0 turns BuildKit off``.

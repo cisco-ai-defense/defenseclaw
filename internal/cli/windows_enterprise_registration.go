@@ -143,7 +143,9 @@ func windowsEnterpriseMutationAction(action string) bool {
 
 // updateWindowsEnterpriseRegistration publishes the marker and ARP entry
 // after a successful mutation and removes them after a successful
-// uninstall. Failed runs leave the previous registration unchanged.
+// uninstall. A failed run, and Setup's transaction recovery, leave the
+// previous registration unchanged except for the installed version
+// (windowsEnterpriseInstalledVersionToRecord).
 func updateWindowsEnterpriseRegistration(result *enterprisestatus.Result, opts *windowsEnterpriseLifecycleOptions) error {
 	if !result.OK {
 		if windowsEnterpriseRolledBackFirstInstall(result) {
@@ -160,7 +162,7 @@ func updateWindowsEnterpriseRegistration(result *enterprisestatus.Result, opts *
 			removeEmptyWindowsEnterpriseInstallParent()
 			return err
 		}
-		return nil
+		return refreshWindowsEnterpriseRegisteredVersion(result)
 	}
 	switch {
 	case result.Action == "uninstall" && !result.Installed:
@@ -169,6 +171,78 @@ func updateWindowsEnterpriseRegistration(result *enterprisestatus.Result, opts *
 		return err
 	case windowsEnterpriseMutationAction(result.Action) && result.Installed:
 		return writeWindowsEnterpriseRegistration(result, opts)
+	}
+	return refreshWindowsEnterpriseRegisteredVersion(result)
+}
+
+func refreshWindowsEnterpriseRegisteredVersion(result *enterprisestatus.Result) error {
+	version, ok := windowsEnterpriseInstalledVersionToRecord(result)
+	if !ok {
+		return nil
+	}
+	return refreshWindowsEnterpriseRegistrationVersion(
+		registry.LOCAL_MACHINE, WindowsEnterpriseMarkerKey, windowsEnterpriseARPKey, version)
+}
+
+// windowsEnterpriseInstalledVersionToRecord is the installed version a run
+// that publishes no full registration must still record, when it knows it
+// and no transaction is pending:
+//   - Setup's transaction recovery (the hidden recover action): after
+//     TIMEOUTSECONDS stops an /upgrade, Setup replays the pending
+//     transaction, which can finish the upgrade, and the request still ends
+//     1603 with the recovered status;
+//   - a failed install, upgrade, repair or ensure, which can fail after the
+//     deployment of record changed.
+//
+// The marker's ProductVersion and the Add/Remove Programs DisplayVersion
+// kept the old version after such a run, and the MDM wrapper, which reads
+// the marker, reported it as installed_version (GAP-2636).
+func windowsEnterpriseInstalledVersionToRecord(result *enterprisestatus.Result) (string, bool) {
+	if result == nil || !result.Installed || result.TransactionPending {
+		return "", false
+	}
+	if result.Action != "recover" && (result.OK || !windowsEnterpriseMutationAction(result.Action)) {
+		return "", false
+	}
+	version := strings.TrimSpace(result.InstalledVersion)
+	return version, version != ""
+}
+
+// refreshWindowsEnterpriseRegistrationVersion sets the marker's
+// ProductVersion and the Add/Remove Programs DisplayVersion to version when
+// they differ. It changes only an existing registration: a failed run never
+// publishes one, and every other value stays as the last successful run
+// wrote it.
+func refreshWindowsEnterpriseRegistrationVersion(root registry.Key, markerPath, arpPath, version string) error {
+	marker, err := registry.OpenKey(root, markerPath, registry.SET_VALUE|registry.QUERY_VALUE|registry.WOW64_64KEY)
+	if errors.Is(err, registry.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("open the enterprise marker key: %w", err)
+	}
+	defer marker.Close()
+	if current, _, readErr := marker.GetStringValue("ProductVersion"); readErr != nil || current != version {
+		if err := marker.SetStringValue("ProductVersion", version); err != nil {
+			return fmt.Errorf("write enterprise marker ProductVersion: %w", err)
+		}
+		if err := marker.SetStringValue("UpdatedAt", windowsEnterpriseNow().UTC().Format(time.RFC3339)); err != nil {
+			return fmt.Errorf("write enterprise marker UpdatedAt: %w", err)
+		}
+	}
+	arp, err := registry.OpenKey(root, arpPath, registry.SET_VALUE|registry.QUERY_VALUE|registry.WOW64_64KEY)
+	if errors.Is(err, registry.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("open the Add/Remove Programs entry: %w", err)
+	}
+	defer arp.Close()
+	if current, _, readErr := arp.GetStringValue("DisplayVersion"); readErr == nil && current == version {
+		return nil
+	}
+	if err := arp.SetStringValue("DisplayVersion", version); err != nil {
+		return fmt.Errorf("write Add/Remove Programs DisplayVersion: %w", err)
 	}
 	return nil
 }

@@ -602,6 +602,20 @@ def validate_config_field(field: ConfigField) -> ValidationResult:
         return ValidationResult("error", "expected true or false")
     if field.kind == "choice" and field.options and value not in field.options:
         return ValidationResult("error", "choose one of: " + ", ".join(field.options))
+    if field.key in _FLOAT_FIELD_KEYS and value:
+        try:
+            number = float(value)
+        except ValueError:
+            return ValidationResult("error", "expected a number")
+        upper = 30.0 if field.key.endswith("timeout") else 1.0
+        if not 0 <= number <= upper:
+            return ValidationResult("error", f"must be between 0 and {upper:g}")
+    if field.key == "decision_model.base_url" and value:
+        from defenseclaw.config import decision_model_url_error
+
+        problem = decision_model_url_error(value)
+        if problem:
+            return ValidationResult("error", problem)
     if field.key.startswith("openshell."):
         openshell_result = _validate_openshell_field(field.key, value)
         if openshell_result is not None:
@@ -1375,6 +1389,13 @@ def _apply_typed_field(cfg: object | dict[str, Any], key: str, value: str) -> No
             parsed = 0
         set_config_value(cfg, key, parsed)
         return
+    if key in _FLOAT_FIELD_KEYS:
+        try:
+            parsed_float = float(value) if value.strip() else 0.0
+        except ValueError:
+            parsed_float = 0.0
+        set_config_value(cfg, key, parsed_float)
+        return
     if key in _CSV_FIELD_KEYS:
         set_config_value(cfg, key, split_csv(value))
         return
@@ -1597,6 +1618,16 @@ _BOOL_FIELD_KEYS = frozenset(
         "codex.enabled",
         "codex.scan_on_session_start",
         "codex.scan_on_stop",
+        "decision_model.enabled",
+    }
+)
+
+# Decision model numbers are fractions (thresholds) or fractional seconds.
+_FLOAT_FIELD_KEYS = frozenset(
+    {
+        "decision_model.timeout",
+        "decision_model.allow_threshold",
+        "decision_model.block_threshold",
     }
 )
 

@@ -65,6 +65,10 @@ const (
 	subjectSourcePeerCredentials = "peer_credentials"
 	subjectSourceUserCredential  = "user_scoped_credential"
 	subjectSourceProcessOwner    = "process_owner"
+	// subjectSourceTrustedConnector marks the person a trusted connector
+	// acts for (trusted_connector.go). It is never a request's
+	// VerifiedSubject: only profile selection and attribution read it.
+	subjectSourceTrustedConnector = "trusted_connector"
 )
 
 type verifiedSubjectContextKey struct{}
@@ -187,6 +191,12 @@ func requestIdentityFor(ctx context.Context, userID string) *llmEventIdentity {
 	if ctx == nil || !identityFactsEnabled.Load() {
 		return nil
 	}
+	if identity, ok := actingForRequestIdentity(ctx, userID); ok {
+		// The person a trusted connector acts for: facts the gateway
+		// resolved, at verified_by_connector; no session facts (the hook's
+		// session is the connector's).
+		return identity
+	}
 	var out llmEventIdentity
 	subject, verified := verifiedSubjectFromContext(ctx)
 	verified = verified && subject.UserID == userID
@@ -271,7 +281,8 @@ func (id *llmEventIdentity) v8() v8IdentityAttrs {
 			useridentity.SessionLocal, useridentity.SessionSSH, useridentity.SessionRDP, useridentity.SessionConsole)
 		attrs.ClientAddress = v8IdentityToken(session.ClientAddr, 256, false, true)
 	}
-	if assurance == useridentity.AssuranceVerified || assurance == useridentity.AssuranceClaimed {
+	if assurance == useridentity.AssuranceVerified || assurance == useridentity.AssuranceClaimed ||
+		assurance == useridentity.AssuranceVerifiedByConnector {
 		if attrs.Principal.IsPresent() || attrs.Domain.IsPresent() || attrs.Directory.IsPresent() ||
 			attrs.TenantID.IsPresent() || attrs.Source.IsPresent() || attrs.SessionKind.IsPresent() ||
 			attrs.ClientAddress.IsPresent() {
@@ -453,6 +464,9 @@ func applyIdentityPosture(cfg *config.Config) {
 		groups = nil
 	}
 	setProfileAssignmentGroups(groups)
+	// Trusted connectors resolve their accounts and may_act_for lists here
+	// and on every refresh (trusted_connector.go).
+	configureTrustedConnectors(cfg)
 }
 
 // profileAssignmentGroupNames are the groups the committed guardrail profile

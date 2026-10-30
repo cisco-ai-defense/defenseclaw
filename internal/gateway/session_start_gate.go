@@ -98,7 +98,9 @@ func sessionStartGateKey(ctx context.Context, connectorName, sessionID string) s
 // (a per-user gateway has one user).
 func verifiedSessionCaller(ctx context.Context) string {
 	if peer, ok := managedHookPeerFromContext(ctx); ok {
-		return "uid:" + strconv.Itoa(peer.UID)
+		// A trusted connector's calls are scoped to the person too, so two
+		// people behind one connector never share a session's state.
+		return "uid:" + strconv.Itoa(peer.UID) + actingForSessionCaller(ctx)
 	}
 	if identity, _ := ctx.Value(verifiedUserScopedIdentityContextKey{}).(string); identity != "" {
 		return "user:" + identity

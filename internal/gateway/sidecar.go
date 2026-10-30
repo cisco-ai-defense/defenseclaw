@@ -140,11 +140,13 @@ type Sidecar struct {
 	sandboxRecorderOnce sync.Once
 	sandboxRecorder     *audit.SandboxRecorder
 
-	webhooksMu        sync.RWMutex
-	aiDiscoveryMu     sync.RWMutex
-	aiRuntimeMu       sync.RWMutex
-	apiMu             sync.RWMutex
-	apiServer         *APIServer
+	webhooksMu    sync.RWMutex
+	aiDiscoveryMu sync.RWMutex
+	aiRuntimeMu   sync.RWMutex
+	apiMu         sync.RWMutex
+	apiServer     *APIServer
+	// protectedFiles is the protected-file watch, nil when it is off.
+	protectedFiles    *protectedFileWatch
 	apiProfilesReady  chan struct{}
 	hookGuardsMu      sync.RWMutex
 	hookGuards        map[*HookConfigGuard]struct{}
@@ -1299,6 +1301,10 @@ func (s *Sidecar) Run(ctx context.Context) (runErr error) {
 		}
 	}()
 
+	// The protected-file watch (#1172): alerts on an agent's change to an
+	// SSH authorized keys file, shell startup file or autostart entry.
+	s.startProtectedFileWatch(runCtx)
+
 	// Goroutine 2: Skill/MCP watcher (opt-in via config)
 	wg.Add(1)
 	go func() {
@@ -1926,6 +1932,13 @@ func buildSharedJudge(cfg *config.Config, rp *guardrail.RulePack, providers *gen
 		return nil, unavailable, nil
 	}
 	judge.secureClient = cfg.SecureClientIntegration()
+	if !judge.secureClient {
+		judge.decision = newDecisionModel(cfg, dotenvPath)
+		if judge.decision != nil {
+			fmt.Fprintf(os.Stderr, "[sidecar] decision model enabled in front of the tool-call judge (model=%s, allow<=%.2f, block>=%.2f)\n",
+				judge.decision.model, judge.decision.allowAt, judge.decision.blockAt)
+		}
+	}
 
 	features := "tool-result-pii"
 	if cfg.Guardrail.Judge.ToolInjection {
@@ -2627,7 +2640,8 @@ func judgeNeedsRebuild(oldCfg, newCfg *config.Config, rulePackChanged bool, oldP
 		oldProviders.digest() != newProviders.digest() ||
 		!reflect.DeepEqual(oldCfg.LLM, newCfg.LLM) ||
 		!reflect.DeepEqual(oldCfg.LLMProviders, newCfg.LLMProviders) ||
-		!reflect.DeepEqual(oldCfg.Guardrail.Judge, newCfg.Guardrail.Judge)
+		!reflect.DeepEqual(oldCfg.Guardrail.Judge, newCfg.Guardrail.Judge) ||
+		!reflect.DeepEqual(oldCfg.DecisionModel, newCfg.DecisionModel)
 }
 
 func apiNeedsRestart(oldCfg, newCfg *config.Config) bool {
@@ -2752,6 +2766,7 @@ func (s *Sidecar) setAPIServer(api *APIServer) {
 	if api != nil {
 		s.bindAPIServerObservabilityV8Locked(api)
 		api.SetHookRegistrationRepair(s.ensureActiveHookRegistration)
+		api.protectedFiles = s.protectedFiles
 	}
 	s.apiServer = api
 	if api != nil && s.apiProfilesReady != nil {

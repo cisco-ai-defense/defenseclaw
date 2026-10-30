@@ -181,6 +181,9 @@ const (
 	profileSubjectVerified     = "verified"
 	profileSubjectProcessOwner = "process_owner"
 	profileSubjectLookup       = "lookup"
+	// profileSubjectVerifiedByConnector is the person a trusted connector
+	// acts for (trusted_connector.go).
+	profileSubjectVerifiedByConnector = "verified_by_connector"
 )
 
 // profileDecision is the profile one request resolved to. Name "" means no
@@ -703,6 +706,12 @@ func resolveGuardrailProfileFor(ctx context.Context, set *guardrailProfileSet) *
 // profileRequestSubject returns the verified subject of ctx and where it
 // came from, or ("", "") when the request has none.
 func profileRequestSubject(ctx context.Context) (*profileSubject, string) {
+	// A trusted connector's call for a person selects the person's profile
+	// from the facts the gateway resolved for them. The route attaches it
+	// only for a hook-socket caller (never a sandbox).
+	if subject, ok := actingForProfileSubject(ctx); ok {
+		return &subject, profileSubjectVerifiedByConnector
+	}
 	// A sandbox bearer names a host user for attribution, but it does not
 	// authenticate the process calling the loopback ingress. Never inherit
 	// the gateway owner's verified subject for these requests. The one
@@ -1046,7 +1055,11 @@ func (set *guardrailProfileSet) matchResolved(subject *profileSubject, res ident
 	}
 	decision := set.selectProfile(subject, res, source, connectorName, scans, path, agent)
 	if decision.Refused == "" {
-		set.matches.put(key, decision)
+		userID := ""
+		if subject != nil {
+			userID = subject.UserID
+		}
+		set.matches.put(key, userID, decision)
 	}
 	return decision
 }

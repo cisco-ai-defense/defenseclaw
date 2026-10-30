@@ -1,0 +1,349 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://defenseclaw.cisco.com/schemas/enterprise/management/identity-refresh-v1.json",
+  "title": "enterprise identity refresh --json",
+  "description": "`enterprise identity refresh [--user U] [--flush-os-cache] [--max-users N] --json` (internal/cli/enterprise_identity_refresh.go; the gateway route internal/gateway/identity_refresh.go). Root (Linux, macOS) or an elevated administrator or SYSTEM (Windows) only: any other caller gets not_admin before any account is resolved. The gateway re-reads the directory facts of the --user account or of every cached account (at most --max-users, default 500, 8 lookups at a time) and lists in changes[] each account, and each connector an assignment names, whose guardrail profile changed; hook calls use the new facts from their next call. Account names appear only here; the audit row identity-refresh-completed and its telemetry carry counts. A success has ok true and exit 0, also when some accounts of an all-account run failed (warning accounts_failed); a --user run whose lookup failed is lookup_failed, exit 1 (1603). Other errors: not_admin, not_supported_secure_client, not_managed, gateway_unavailable (exit 1 or 1603), invalid_arguments and account_unresolved (2 or 1639), refresh_busy (75 or 1618). On Windows windows_token_groups_pending lists the accounts whose groups come from their sign-in token: a directory group change reaches them at their next sign-in.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "ok",
+    "warnings",
+    "errors",
+    "exit_code"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "ok": {
+      "type": "boolean"
+    },
+    "scope": {
+      "enum": [
+        "user",
+        "all"
+      ]
+    },
+    "profiles_configured": {
+      "type": "boolean",
+      "description": "false when no guardrail profiles are configured: facts are re-read, and nothing can change."
+    },
+    "refreshed": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "changed": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "failed": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "skipped": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Cached accounts left out by --max-users."
+    },
+    "changes": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "user_id",
+          "previous_profile",
+          "previous_match",
+          "profile",
+          "match"
+        ],
+        "properties": {
+          "user_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256,
+            "description": "The uid (Linux, macOS) or SID (Windows)."
+          },
+          "user_name": {
+            "type": "string",
+            "description": "The account name. Local output only: names never reach the audit log or telemetry."
+          },
+          "connector": {
+            "type": "string",
+            "description": "Set when the change is for requests of one connector an assignment names."
+          },
+          "previous_profile": {
+            "type": "string",
+            "description": "\"\" for none (the base guardrail configuration)."
+          },
+          "previous_match": {
+            "type": "string"
+          },
+          "profile": {
+            "type": "string"
+          },
+          "match": {
+            "type": "string"
+          },
+          "refused": {
+            "type": "boolean",
+            "description": "true when requests that need an unconfirmed fact are now refused."
+          }
+        }
+      }
+    },
+    "failures": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "user_id",
+          "code"
+        ],
+        "properties": {
+          "user_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256,
+            "description": "The uid (Linux, macOS) or SID (Windows)."
+          },
+          "user_name": {
+            "type": "string",
+            "description": "The account name. Local output only: names never reach the audit log or telemetry."
+          },
+          "code": {
+            "enum": [
+              "lookup_failed",
+              "account_unresolved"
+            ]
+          }
+        }
+      }
+    },
+    "windows_token_groups_pending": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "user_id"
+        ],
+        "properties": {
+          "user_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256,
+            "description": "The uid (Linux, macOS) or SID (Windows)."
+          },
+          "user_name": {
+            "type": "string",
+            "description": "The account name. Local output only: names never reach the audit log or telemetry."
+          }
+        }
+      }
+    },
+    "duration_ms": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "os_cache_flush": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "requested",
+        "flushed"
+      ],
+      "properties": {
+        "requested": {
+          "type": "boolean"
+        },
+        "flushed": {
+          "enum": [
+            "none",
+            "user",
+            "all"
+          ]
+        },
+        "method": {
+          "enum": [
+            "sss_cache",
+            "dscacheutil"
+          ]
+        },
+        "reason": {
+          "enum": [
+            "not_sssd",
+            "no_per_user_flush",
+            "windows_token_groups",
+            "failed"
+          ]
+        }
+      }
+    },
+    "warnings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "code",
+          "message"
+        ],
+        "properties": {
+          "code": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9_]*$"
+          },
+          "message": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "errors": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "code",
+          "message"
+        ],
+        "properties": {
+          "code": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9_]*$"
+          },
+          "message": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "exit_code": {
+      "type": "integer"
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "ok": {
+            "const": true
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "scope",
+          "profiles_configured",
+          "refreshed",
+          "changed",
+          "failed",
+          "skipped",
+          "changes",
+          "failures",
+          "duration_ms"
+        ],
+        "properties": {
+          "errors": {
+            "maxItems": 0
+          },
+          "exit_code": {
+            "const": 0
+          }
+        }
+      },
+      "else": {
+        "properties": {
+          "errors": {
+            "minItems": 1
+          },
+          "exit_code": {
+            "not": {
+              "const": 0
+            }
+          }
+        }
+      }
+    }
+  ],
+  "examples": [
+    {
+      "schema_version": 1,
+      "ok": true,
+      "scope": "all",
+      "profiles_configured": true,
+      "refreshed": 3,
+      "changed": 1,
+      "failed": 0,
+      "skipped": 0,
+      "changes": [
+        {
+          "user_id": "1916801105",
+          "user_name": "eng2@corp.example.com",
+          "previous_profile": "engineering",
+          "previous_match": "group",
+          "profile": "contractors",
+          "match": "default"
+        }
+      ],
+      "failures": [],
+      "duration_ms": 412,
+      "os_cache_flush": {
+        "requested": true,
+        "flushed": "all",
+        "method": "sss_cache"
+      },
+      "warnings": [],
+      "errors": [],
+      "exit_code": 0
+    },
+    {
+      "schema_version": 1,
+      "ok": true,
+      "scope": "user",
+      "profiles_configured": true,
+      "refreshed": 1,
+      "changed": 0,
+      "failed": 0,
+      "skipped": 0,
+      "changes": [],
+      "failures": [],
+      "windows_token_groups_pending": [
+        {
+          "user_id": "S-1-5-21-1004336348-1177238915-682003330-1105",
+          "user_name": "CORP\\eng2"
+        }
+      ],
+      "duration_ms": 95,
+      "os_cache_flush": {
+        "requested": true,
+        "flushed": "none",
+        "reason": "windows_token_groups"
+      },
+      "warnings": [
+        {
+          "code": "windows_token_groups_pending",
+          "message": "1 account(s) take groups from their sign-in token: a directory group change reaches them at their next sign-in"
+        }
+      ],
+      "errors": [],
+      "exit_code": 0
+    },
+    {
+      "schema_version": 1,
+      "ok": false,
+      "warnings": [],
+      "errors": [
+        {
+          "code": "not_admin",
+          "message": "run this command as root"
+        }
+      ],
+      "exit_code": 1
+    }
+  ]
+}

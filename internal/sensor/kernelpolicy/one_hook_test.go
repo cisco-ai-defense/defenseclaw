@@ -107,8 +107,10 @@ func TestEnforcingControlsDenyTheKeyReadInTheirOnlyHook(t *testing.T) {
 	golden(t, "enforce-launch-alias", c)
 
 	p := policyOf(t, c, FamilyControls)
-	if len(p.tp.Spec.LsmHooks) != 1 {
-		t.Fatalf("%d hook entries, want one:\n%s", len(p.tp.Spec.LsmHooks), p.YAML)
+	// One file_open entry, then one entry each of path_link and
+	// path_rename (the authorized keys names).
+	if hookCount(p, "file_open") != 1 || hookCount(p, "path_link") != 1 || hookCount(p, "path_rename") != 1 || hookCount(p, "path_symlink") != 1 || len(p.tp.Spec.LsmHooks) != 4 {
+		t.Fatalf("%d hook entries, want one per hook name:\n%s", len(p.tp.Spec.LsmHooks), p.YAML)
 	}
 	hook := p.tp.Spec.LsmHooks[0]
 	if hook.Hook != "file_open" || len(hook.Args) != 3 || hook.Args[2].Resolve != "f_cred.uid.val" {
@@ -128,7 +130,7 @@ func TestEnforcingControlsDenyTheKeyReadInTheirOnlyHook(t *testing.T) {
 		mask     bool
 	}{
 		{"Equal", keys, false},
-		{"Equal", []string{home + "/.bash_profile", home + "/.bashrc", home + "/.profile", home + "/.zshrc"}, true},
+		{"Equal", []string{home + "/.bash_profile", home + "/.bashrc", home + "/.profile", home + "/.ssh/authorized_keys", home + "/.ssh/authorized_keys2", home + "/.zshrc"}, true},
 		{"Prefix", []string{home + "/.config/autostart/", home + "/.config/systemd/user/"}, true},
 	}
 	for i, wantSel := range want {

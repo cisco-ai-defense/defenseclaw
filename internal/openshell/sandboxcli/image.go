@@ -24,6 +24,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"sort"
 	"strings"
@@ -81,6 +82,16 @@ type builderImages struct {
 
 func (b *builderImages) store() *image.Store { return image.NewStore(b.app.imageDataDir()) }
 
+// docker is the docker CLI for this computer's harness images: on a
+// managed Linux computer the system engine its gateway uses (#1195).
+func (b *builderImages) docker() image.CLI {
+	goos := b.app.GOOS
+	if goos == "" {
+		goos = runtime.GOOS
+	}
+	return image.ManagedCLI(b.app.ManagedHost() || onManagedHost(), goos)
+}
+
 func (b *builderImages) spec(h *harness.Spec, microVM bool) (image.BuildSpec, error) {
 	a := b.app
 	bs := image.BuildSpec{
@@ -101,7 +112,7 @@ func (b *builderImages) spec(h *harness.Spec, microVM bool) (image.BuildSpec, er
 }
 
 func (b *builderImages) Build(ctx context.Context, h *harness.Spec, microVM, force bool, log io.Writer) (image.Record, bool, error) {
-	builder := &image.Builder{Docker: image.CLI{}, Store: b.store(), Log: log}
+	builder := &image.Builder{Docker: b.docker(), Store: b.store(), Log: log}
 	spec, err := b.spec(h, microVM)
 	if err != nil {
 		return image.Record{}, false, err
@@ -126,7 +137,7 @@ func (b *builderImages) Build(ctx context.Context, h *harness.Spec, microVM, for
 }
 
 func (b *builderImages) Preflight(ctx context.Context, h *harness.Spec, microVM, force bool) error {
-	builder := &image.Builder{Docker: image.CLI{}, Store: b.store(), Log: io.Discard}
+	builder := &image.Builder{Docker: b.docker(), Store: b.store(), Log: io.Discard}
 	spec, err := b.spec(h, microVM)
 	if err != nil {
 		return err
@@ -135,7 +146,7 @@ func (b *builderImages) Preflight(ctx context.Context, h *harness.Spec, microVM,
 }
 
 func (b *builderImages) Current(h *harness.Spec, microVM bool) (bool, error) {
-	builder := &image.Builder{Docker: image.CLI{}, Store: b.store(), Log: io.Discard}
+	builder := &image.Builder{Docker: b.docker(), Store: b.store(), Log: io.Discard}
 	spec, err := b.spec(h, microVM)
 	if err != nil {
 		return false, err
@@ -149,12 +160,12 @@ func (b *builderImages) Current(h *harness.Spec, microVM bool) (bool, error) {
 func (b *builderImages) List() ([]image.Record, error) { return b.store().List() }
 
 func (b *builderImages) Gone(ctx context.Context, recs []image.Record) (map[string]bool, error) {
-	builder := &image.Builder{Docker: image.CLI{}, Store: b.store(), Log: io.Discard}
+	builder := &image.Builder{Docker: b.docker(), Store: b.store(), Log: io.Discard}
 	return builder.Gone(ctx, recs)
 }
 
 func (b *builderImages) Size(ctx context.Context, h *harness.Spec, microVM bool, ref string) (uint64, error) {
-	builder := &image.Builder{Docker: image.CLI{}, Store: b.store(), Log: io.Discard}
+	builder := &image.Builder{Docker: b.docker(), Store: b.store(), Log: io.Discard}
 	if h != nil {
 		spec, err := b.spec(h, microVM)
 		if err != nil {
@@ -173,12 +184,12 @@ func (b *builderImages) Size(ctx context.Context, h *harness.Spec, microVM bool,
 }
 
 func (b *builderImages) GoneIDs(ctx context.Context, ids []string) (map[string]bool, error) {
-	builder := &image.Builder{Docker: image.CLI{}, Store: b.store(), Log: io.Discard}
+	builder := &image.Builder{Docker: b.docker(), Store: b.store(), Log: io.Discard}
 	return builder.GoneIDs(ctx, ids)
 }
 
 func (b *builderImages) Prune(ctx context.Context, opts image.PruneOptions) (image.PruneReport, error) {
-	builder := &image.Builder{Docker: image.CLI{}, Store: b.store(), Log: io.Discard}
+	builder := &image.Builder{Docker: b.docker(), Store: b.store(), Log: io.Discard}
 	return builder.Prune(ctx, opts)
 }
 
@@ -221,7 +232,7 @@ func (b *builderImages) Remove(ctx context.Context, harnesses []string, dryRun b
 	var firstErr error
 	for _, tag := range tags {
 		var stderr bytes.Buffer
-		err := image.CLI{}.Run(ctx, nil, io.Discard, &stderr, "image", "rm", "--", tag)
+		err := b.docker().Run(ctx, nil, io.Discard, &stderr, "image", "rm", "--", tag)
 		if err != nil && !strings.Contains(stderr.String()+err.Error(), "No such image") {
 			if firstErr == nil {
 				firstErr = fmt.Errorf("docker image rm %s: %w", tag, err)

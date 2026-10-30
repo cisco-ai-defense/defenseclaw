@@ -28,6 +28,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"sort"
 	"strings"
@@ -340,6 +341,12 @@ type Config struct {
 	// source bytes, not viper, so map keys keep their case.
 	LLMProviders LLMProvidersConfig `mapstructure:"-" yaml:"llm_providers,omitempty"`
 
+	// DecisionModel is the unified decision model (System One protocol):
+	// the guardrail's fast first pass in front of the LLM judge on tool
+	// calls, and the skill scanner's advisory score. Off by default. See
+	// decision_model.go.
+	DecisionModel DecisionModelConfig `mapstructure:"decision_model" yaml:"decision_model,omitempty"`
+
 	DataDir string `mapstructure:"data_dir"              yaml:"data_dir"`
 	AuditDB string `mapstructure:"audit_db"         yaml:"audit_db"`
 	// JudgeBodiesDB is the standalone SQLite file that holds
@@ -403,6 +410,9 @@ type Config struct {
 	// Update holds the self-update settings (config_version 9).
 	Update UpdateConfig `mapstructure:"update" yaml:"update,omitempty"`
 	Fleet  FleetConfig  `mapstructure:"fleet"            yaml:"fleet,omitempty"`
+	// Connectors holds settings of connectors that install nothing into an
+	// agent, such as the agent-gateway hook route (trusted_connectors.go).
+	Connectors ConnectorsConfig `mapstructure:"connectors" yaml:"connectors,omitempty"`
 }
 
 // RoutingConfig mirrors routing.RoutingConfig for config.yaml parsing.
@@ -1060,7 +1070,27 @@ func (l LLMConfig) ProviderPrefix() string {
 	if idx := strings.Index(l.Model, "/"); idx > 0 {
 		return strings.ToLower(l.Model[:idx])
 	}
+	if IsBedrockModelID(l.Model) {
+		return "bedrock"
+	}
 	return ""
+}
+
+// bedrockModelIDPattern matches Amazon Bedrock model ids and cross-region
+// inference profile ids: "<vendor>.<model>" or "<geo>.<vendor>.<model>", for
+// example "anthropic.claude-haiku-4-5-20251001-v1:0",
+// "us.anthropic.claude-haiku-4-5-20251001-v1:0", "us.openai.gpt-5.6-luna" or
+// "amazon.nova-pro-v1:0". Ids of the other providers never start with a
+// vendor name and a dot ("gpt-4o", "claude-haiku-4-5", "gemini-2.5-pro").
+// Mirrors BEDROCK_MODEL_ID_RE in cli/defenseclaw/config.py.
+var bedrockModelIDPattern = regexp.MustCompile(`^(?:(?:us|eu|apac|jp|au|ca|global|us-gov)\.)?(?:anthropic|amazon|meta|mistral|cohere|ai21|openai|deepseek|qwen|writer|twelvelabs|stability|luma|google|nvidia|minimax|moonshot|moonshotai)\.[a-z0-9]`)
+
+// IsBedrockModelID reports whether model, written without a provider
+// prefix, is a Bedrock model or inference profile id. An unprefixed Bedrock
+// id then resolves to the bedrock provider everywhere (gateway judge,
+// scanners, credential injection) instead of to no provider (GAP-2640).
+func IsBedrockModelID(model string) bool {
+	return bedrockModelIDPattern.MatchString(strings.ToLower(strings.TrimSpace(model)))
 }
 
 // IsLocalProvider returns true when the resolved provider prefix points
@@ -1906,6 +1936,12 @@ type GuardrailConfig struct {
 	Profiles           map[string]GuardrailProfile `mapstructure:"profiles"            yaml:"profiles,omitempty"`
 	ProfileAssignments []ProfileAssignment         `mapstructure:"profile_assignments" yaml:"profile_assignments,omitempty"`
 	DefaultProfile     string                      `mapstructure:"default_profile"     yaml:"default_profile,omitempty"`
+
+	// ProtectedFiles configures the gateway's protected-file watch
+	// (protected_files.go). Unset keeps the default: alert on a change an
+	// agent tool call made, restore nothing. Never written while unset, so
+	// a rollback to a release without the key reads the file unchanged.
+	ProtectedFiles ProtectedFilesConfig `mapstructure:"protected_files" yaml:"protected_files,omitempty"`
 
 	// profileConnectors is set only on a configuration DerivedForProfile
 	// returns: the profile's own connectors map, keyed by normalized
@@ -3153,11 +3189,29 @@ func loadConfigSourceCheckedWithLayout(
 		}
 		return nil, fmt.Errorf("config: guardrail: %w", err)
 	}
+	if err := cfg.DecisionModel.Validate(); err != nil {
+		if ReportConfigLoadError != nil {
+			ReportConfigLoadError(context.Background(), "decision_model_invalid")
+		}
+		return nil, fmt.Errorf("config: decision_model: %w", settingErrorAt("decision_model", err))
+	}
 	if err := cfg.ValidateGuardrailProfiles(); err != nil {
 		if ReportConfigLoadError != nil {
 			ReportConfigLoadError(context.Background(), "guardrail_invalid")
 		}
 		return nil, fmt.Errorf("config: guardrail: %w", err)
+	}
+	if err := cfg.ValidateIdentityChainSettings(); err != nil {
+		if ReportConfigLoadError != nil {
+			ReportConfigLoadError(context.Background(), "connectors_invalid")
+		}
+		return nil, err
+	}
+	if err := cfg.Guardrail.ProtectedFiles.Validate(); err != nil {
+		if ReportConfigLoadError != nil {
+			ReportConfigLoadError(context.Background(), "guardrail_invalid")
+		}
+		return nil, fmt.Errorf("config: %w", err)
 	}
 	if err := cfg.Scanners.Validate(); err != nil {
 		if ReportConfigLoadError != nil {
@@ -3936,6 +3990,7 @@ func setDefaultsForPlatform(dataDir, goos string, deterministic bool) {
 	viper.SetDefault("guardrail.rule_pack_dir", join(dataDir, "policies", "guardrail", "default"))
 	viper.SetDefault("guardrail.hilt.enabled", false)
 	viper.SetDefault("guardrail.hilt.min_severity", "HIGH")
+	viper.SetDefault("decision_model.enabled", false)
 	viper.SetDefault("guardrail.judge.enabled", false)
 	viper.SetDefault("guardrail.judge.injection", true)
 	viper.SetDefault("guardrail.judge.pii", true)

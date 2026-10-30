@@ -1045,6 +1045,23 @@ def test_a_downgrade_drops_the_hook_helper_this_release_left_and_restarts_the_ga
     assert restarts == ([[gateway, "restart"]] if running else [])
 
 
+def test_a_downgrade_to_1_0_5_or_later_keeps_the_hook_helper(
+    home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, execs: list[list[str]]
+) -> None:
+    # rel-1-0-6:GAP-0047: 1.0.5 and 1.0.6 ship the same hooks/_hardening.sh,
+    # and a 1.0.5 gateway with only OpenCode set up never writes one: after
+    # the shim dropped it, that gateway refused to start. The installer runs
+    # as for an upgrade; nothing is dropped or restarted afterwards.
+    monkeypatch.setattr("defenseclaw.__version__", "1.0.6")
+    monkeypatch.setenv(upgrade_shim.LOCAL_DIR_ENV, str(_release_dir(tmp_path, "1.0.5")))
+    monkeypatch.setattr(upgrade_shim, "_drop_newer_hook_helper", lambda newer: pytest.fail("helper dropped"))
+    monkeypatch.setattr(upgrade_shim, "_wait_for_installer", lambda argv: pytest.fail("waited for the installer"))
+
+    assert upgrade_shim.run(["upgrade", "--version", "1.0.5", "--yes"]) == 0
+
+    assert len(execs) == 1 and execs[0][-1] != "--rollback"
+
+
 @pytest.mark.parametrize("case", ["other-helper", "previous-not-newer", "installer-failed"])
 def test_a_downgrade_keeps_a_hook_helper_it_did_not_leave(
     home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, case: str

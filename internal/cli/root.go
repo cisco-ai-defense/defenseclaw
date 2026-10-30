@@ -93,6 +93,9 @@ type machineVersionReport struct {
 	// member: an older build refuses the flag, and the MDM wrappers store a
 	// credential without it there.
 	SecretSetBundle bool `json:"secret_set_bundle,omitempty"`
+	// IdentityRefresh reports `enterprise identity refresh` (from 1.0.6).
+	// An optional member: an older build has no such command.
+	IdentityRefresh bool `json:"identity_refresh,omitempty"`
 }
 
 func writeMachineVersion(w io.Writer) error {
@@ -104,6 +107,7 @@ func writeMachineVersion(w io.Writer) error {
 		Built:              appBuildDate,
 		ManagementContract: managementContract,
 		SecretSetBundle:    true,
+		IdentityRefresh:    true,
 	})
 }
 
