@@ -80,12 +80,22 @@ var scanGatewayEndpoint = func() (string, string, error) {
 	return "http://" + net.JoinHostPort(gatewayClientHost(cfg), strconv.Itoa(cfg.Gateway.APIPort)), token, nil
 }
 
+// gatewayScanAdmission is the admission result a skill or plugin scan
+// response carries.
+type gatewayScanAdmission struct {
+	Verdict string `json:"verdict"`
+	Reason  string `json:"reason"`
+}
+
 type gatewayScanResponse struct {
 	Verdict  string         `json:"verdict"`
 	BySev    map[string]int `json:"findings_count_by_severity"`
 	Settings map[string]any `json:"scanner_settings"`
 	Warnings []string       `json:"warnings"`
-	Result   struct {
+	// Admission is what install admission would decide for the scanned
+	// skill or plugin; the scan itself blocks nothing (GAP-2635).
+	Admission *gatewayScanAdmission `json:"admission"`
+	Result    struct {
 		Target   string `json:"target"`
 		Duration int64  `json:"duration"`
 		Findings []struct {
@@ -169,7 +179,12 @@ func runGatewayScan(cmd *cobra.Command, kind, target string) error {
 		if value == "" {
 			value = "(none)"
 		}
-		fmt.Fprintf(out, "  %-12s %s\n", strings.ReplaceAll(key, "_", " ")+":", value)
+		label := strings.ReplaceAll(key, "_", " ")
+		if key == "policy" {
+			// The scan preset; "policy:" is the admission result below.
+			label = "preset"
+		}
+		fmt.Fprintf(out, "  %-12s %s\n", label+":", value)
 	}
 	for _, warning := range parsed.Warnings {
 		fmt.Fprintf(out, "  %-12s %s\n", "warning:", warning)
@@ -179,6 +194,9 @@ func runGatewayScan(cmd *cobra.Command, kind, target string) error {
 		verdict = "clean"
 	}
 	fmt.Fprintf(out, "  %-12s %s (%d findings)\n", "verdict:", verdict, len(parsed.Result.Findings))
+	if line := gatewayScanPolicyLine(kind, parsed.Admission); line != "" {
+		fmt.Fprintf(out, "  %-12s %s\n", "policy:", line)
+	}
 	for _, finding := range parsed.Result.Findings {
 		label := finding.RuleID
 		if label == "" {
@@ -187,4 +205,28 @@ func runGatewayScan(cmd *cobra.Command, kind, target string) error {
 		fmt.Fprintf(out, "    [%s] %s: %s\n", finding.Severity, label, finding.Title)
 	}
 	return nil
+}
+
+// gatewayScanPolicyLine is the "policy:" line of a skill or plugin scan, in
+// the words of the per-user `skill scan` line (GAP-1592): what install
+// admission would decide for it. The scan itself blocks and quarantines
+// nothing (GAP-2635). "" when the gateway sent no admission result (MCP
+// scans, a Secure Client host, an older gateway).
+func gatewayScanPolicyLine(kind string, admission *gatewayScanAdmission) string {
+	if admission == nil {
+		return ""
+	}
+	reason := strings.TrimSpace(admission.Reason)
+	if reason != "" {
+		reason = " (" + reason + ")"
+	}
+	switch strings.ToLower(strings.TrimSpace(admission.Verdict)) {
+	case "rejected", "blocked":
+		return fmt.Sprintf("rejected - the policy would refuse this %s at install%s; this scan blocked nothing", kind, reason)
+	case "warning":
+		return fmt.Sprintf("accepted with a warning - the policy would admit this %s at install%s", kind, reason)
+	case "allowed", "clean":
+		return fmt.Sprintf("accepted - the policy would admit this %s at install%s", kind, reason)
+	}
+	return ""
 }
