@@ -43,7 +43,14 @@ var trustedConnectorSameNameAccounts = unixidentity.SameNameAccounts
 // errTrustedConnectorLookupTimeout is a lookup that ran over its budget.
 var errTrustedConnectorLookupTimeout = errors.New("account lookup did not finish in time")
 
-// withTrustedConnectorBudget runs fn within the lookup budget.
+// trustedConnectorLookups counts lookups still running, including those the
+// budget gave up on: tests wait for it before they restore the hooks a lookup
+// reads.
+var trustedConnectorLookups sync.WaitGroup
+
+// withTrustedConnectorBudget runs fn within the lookup budget. A lookup over
+// the budget is abandoned, not stopped (the account database takes no
+// context); it ends on its own and its answer is dropped.
 func withTrustedConnectorBudget[T any](fn func(ctx context.Context, r unixidentity.Resolver) (T, error)) (T, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), trustedConnectorLookupBudget)
 	defer cancel()
@@ -52,8 +59,11 @@ func withTrustedConnectorBudget[T any](fn func(ctx context.Context, r unixidenti
 		err   error
 	}
 	done := make(chan result, 1)
+	newResolver := trustedConnectorResolver
+	trustedConnectorLookups.Add(1)
 	go func() {
-		value, err := fn(ctx, trustedConnectorResolver(ctx))
+		defer trustedConnectorLookups.Done()
+		value, err := fn(ctx, newResolver(ctx))
 		done <- result{value, err}
 	}()
 	select {

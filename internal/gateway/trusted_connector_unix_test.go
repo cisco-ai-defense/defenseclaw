@@ -151,6 +151,8 @@ func useTrustedConnectorFixture(t *testing.T) *trustedConnectorFixture {
 		return nil, nil
 	}
 	t.Cleanup(func() {
+		// A lookup the budget abandoned still reads these hooks until it ends.
+		trustedConnectorLookups.Wait()
 		trustedConnectorResolver, trustedConnectorActivation = previousResolver, previousActivation
 		actingForDirectoryLookup, trustedConnectorSameNameAccounts = previousLookup, previousTwins
 		trustedConnectorsState.Store(nil)
