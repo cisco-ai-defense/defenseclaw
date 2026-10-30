@@ -1713,6 +1713,87 @@ def _check_sudo_runtime_leftovers(cfg, r: _DoctorResult) -> None:
     )
 
 
+# Vendor machine-policy folders agents read administrator policy from. An
+# agent treats the folder's presence as policy: Codex pauses every launch with
+# "Organization settings could not be loaded" when /etc/codex exists but it
+# cannot read it. A gateway run as root (the Mac app's administrator mode, or
+# sudo) used to create /etc/codex with mode 0700 for its /etc/codex/skills
+# watch; the watcher no longer creates vendor folders and a root gateway
+# removes the empty ones it recorded, but a folder left by an older release
+# needs an administrator. Keyed by platform so tests can substitute paths.
+_VENDOR_POLICY_DIRS: dict[str, tuple[str, ...]] = {
+    "darwin": (
+        "/etc/codex",
+        "/etc/cursor",
+        "/etc/github-copilot",
+        "/Library/Application Support/ClaudeCode",
+        "/Library/Application Support/opencode",
+    ),
+    "linux": (
+        "/etc/codex",
+        "/etc/cursor",
+        "/etc/github-copilot",
+        "/etc/claude-code",
+        "/etc/opencode",
+    ),
+}
+
+
+def _vendor_policy_dirs(platform_name: str | None = None) -> tuple[str, ...]:
+    platform_name = platform_name or sys.platform
+    if platform_name.startswith("linux"):
+        return _VENDOR_POLICY_DIRS["linux"]
+    if platform_name == "darwin":
+        return _VENDOR_POLICY_DIRS["darwin"]
+    return ()
+
+
+def _unreadable_vendor_policy_dirs(paths: tuple[str, ...]) -> list[str]:
+    """Vendor policy folders that exist but this account cannot traverse."""
+
+    unreadable: list[str] = []
+    for path in paths:
+        try:
+            if not os.path.isdir(path) or os.path.islink(path):
+                continue
+        except OSError:
+            continue
+        if not os.access(path, os.R_OK | os.X_OK):
+            unreadable.append(path)
+    return unreadable
+
+
+def _check_vendor_policy_dirs(cfg, r: _DoctorResult, *, platform_name: str | None = None) -> None:
+    """Name vendor policy folders this account cannot read (an agent would pause)."""
+
+    paths = _vendor_policy_dirs(platform_name)
+    if not paths:
+        return
+    unreadable = _unreadable_vendor_policy_dirs(paths)
+    if not unreadable:
+        _emit(
+            "pass",
+            "Vendor policy folders",
+            "no unreadable agent policy folder on this computer",
+            r=r,
+            check_id="doctor.state.vendor-policy-folders",
+        )
+        return
+    _emit(
+        "fail",
+        "Vendor policy folders",
+        "unreadable by this account (an agent treats the folder as administrator "
+        "policy and pauses when it cannot read it; Codex: \"Organization settings "
+        "could not be loaded\"): " + ", ".join(unreadable),
+        r=r,
+        check_id="doctor.state.vendor-policy-folders",
+        reason_code="vendor-policy-folder-unreadable",
+        remediation="as an administrator, remove a folder that only holds empty folders "
+        "a root gateway's watcher created (sudo rm -rf <folder>), or make real policy "
+        "readable (sudo chmod -R a+rX <folder>); then relaunch the agent",
+    )
+
+
 def _doctor_config_present(cfg) -> bool:
     """Return whether Doctor has an initialized config it may repair."""
     from defenseclaw.config import config_path_for_data_dir
@@ -14296,6 +14377,7 @@ def doctor(
     _check_config(cfg, r)
     _check_ignored_dotenv_keys(cfg, r)
     _check_sudo_runtime_leftovers(cfg, r)
+    _check_vendor_policy_dirs(cfg, r)
     _check_audit_db(cfg, r)
     _check_inventory_storage(cfg, r)
     _check_device_identity(cfg, r)

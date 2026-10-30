@@ -41,12 +41,37 @@ const hookPayloadTooLargeRuleID = "HOOK-PAYLOAD-TOO-LARGE"
 func (a *APIServer) hookSideRefusalResponse(ctx context.Context, connectorName string, req agentHookRequest) agentHookResponse {
 	profile := a.hookProfileForRequest(ctx, connectorName)
 	mode := sandboxHookMode(ctx, connectorName, a.agentHookMode(ctx, connectorName))
-	reason := "DefenseClaw blocked this " + hookRefusalSubject(req.HookEventName) +
-		": it is too large for DefenseClaw to inspect."
+	reason := hookSideRefusalReason(req.HookEventName)
 	resp := agentHookResponseForProfile(profile, req, "block", "block", "MEDIUM", reason, nil, mode, false, profile.Capabilities)
 	resp.RuleIDs = []string{hookPayloadTooLargeRuleID}
 	resp.SourceReason = reason
 	return resp
+}
+
+// hookSideRefusalReasonTail ends the reason of a call a hook refused as too
+// large to inspect.
+const hookSideRefusalReasonTail = ": it is too large for DefenseClaw to inspect."
+
+func hookSideRefusalReason(event string) string {
+	return "DefenseClaw blocked this " + hookRefusalSubject(event) + hookSideRefusalReasonTail
+}
+
+// trustedHookSideRefusalReason reports the too-large refusal, which names
+// only what the event carries.
+func trustedHookSideRefusalReason(reason string) bool {
+	subject, ok := strings.CutPrefix(reason, "DefenseClaw blocked this ")
+	if !ok {
+		return false
+	}
+	subject, ok = strings.CutSuffix(subject, hookSideRefusalReasonTail)
+	if !ok {
+		return false
+	}
+	switch subject {
+	case "prompt", "tool call", "tool result", "request":
+		return true
+	}
+	return false
 }
 
 // hookRefusalSubject names what a hook event carries: a prompt, a tool call

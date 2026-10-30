@@ -3862,20 +3862,7 @@ func createsAgentOwnedDir(dir string) bool {
 // /etc/codex/skills watch. An absent vendor system folder is watched once an
 // administrator or installer creates it, like an agent-owned folder
 // (GAP-2354). Tests substitute a private root.
-var vendorSystemRoots = defaultVendorSystemRoots()
-
-func defaultVendorSystemRoots() []string {
-	if runtime.GOOS == "windows" {
-		var roots []string
-		for _, name := range []string{"ProgramData", "ProgramFiles", "ProgramFiles(x86)", "SystemRoot"} {
-			if value := strings.TrimSpace(os.Getenv(name)); value != "" {
-				roots = append(roots, filepath.Clean(value))
-			}
-		}
-		return roots
-	}
-	return []string{"/etc", "/private/etc", "/Library"}
-}
+var vendorSystemRoots = gatewayconnector.DefaultVendorSystemRoots()
 
 // errAbsentVendorSystemDir reports a watch root under vendorSystemRoots that
 // does not exist; the watcher never creates it.
@@ -3897,24 +3884,7 @@ func isAbsentVendorSystemDir(dir string) bool {
 }
 
 func underVendorSystemRoot(absolute string) bool {
-	cleaned := filepath.Clean(absolute)
-	for _, root := range vendorSystemRoots {
-		root = filepath.Clean(root)
-		if root == "" || root == "." || root == string(filepath.Separator) {
-			continue
-		}
-		if runtime.GOOS == "windows" {
-			if strings.EqualFold(cleaned, root) ||
-				strings.HasPrefix(strings.ToLower(cleaned), strings.ToLower(root)+string(filepath.Separator)) {
-				return true
-			}
-			continue
-		}
-		if cleaned == root || strings.HasPrefix(cleaned, root+string(filepath.Separator)) {
-			return true
-		}
-	}
-	return false
+	return gatewayconnector.UnderVendorSystemRoot(absolute, vendorSystemRoots)
 }
 
 // errWatchDirNotCreated reads "create dir": the watcher could not create a
