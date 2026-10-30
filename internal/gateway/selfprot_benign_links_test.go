@@ -103,6 +103,17 @@ func TestSelfProtManagedAliasOutsideCopyScope(t *testing.T) {
 	}, "claudecode", "codex")
 }
 
+// env -C DIR ln runs ln in DIR, as a copy child does (GAP-2579, GAP-2576).
+func TestSelfProtEnvChdirLinkIsPlaced(t *testing.T) {
+	checkSelfProtRows(t, []selfProtRow{
+		{"B21", `env -C ~/project ln -s build/out bin`, "allow"},
+		{"L08", `env -C ~/project ln -sf ordinary/o.txt ln2.go; cp a.txt ln2.go`, "allow"},
+		{"E02", `env -C ~/project ln -sf ../.ssh/authorized_keys ln3; cp a.txt ln3`, "block"},
+		{"E03", `env -C ~/project ln -s ../.ssh ks; cp a.txt ks/authorized_keys`, "block"},
+		{"A09", `env -C ~ ln -s .ssh/authorized_keys project/k7`, "block"},
+	}, "claudecode", "codex")
+}
+
 // The own destination of a copy after a placed directory change is read
 // against its own scope (GAP-2579).
 func TestSelfProtCopyAfterDirectoryChange(t *testing.T) {

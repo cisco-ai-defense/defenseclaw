@@ -2128,11 +2128,13 @@ func commandLinks(command, cwd, home string, facts map[string]string, record, ne
 			program = programBase(words[0])
 		}
 		// A static wrapper that only moves the directory (env -C DIR,
-		// env --chdir DIR) runs a copy or archive child there (GAP-2551).
+		// env --chdir DIR) runs a copy, archive (GAP-2551) or link child
+		// (GAP-2579) there.
 		movedDir := ""
 		if run, ok := actionfacts.StaticPrefixWrapperChild(words, static); ok && run.Dir != "" && !run.DirUnknown &&
 			!run.ChangesResolution && run.Index < len(words) && static[run.Index] && words[run.Index] != "" &&
-			(slices.Contains(copyPrograms, programBase(words[run.Index])) || slices.Contains(archivePrograms, programBase(words[run.Index]))) {
+			(slices.Contains(copyPrograms, programBase(words[run.Index])) || slices.Contains(archivePrograms, programBase(words[run.Index])) ||
+				slices.Contains(linkPrograms, programBase(words[run.Index]))) {
 			movedDir = run.Dir
 			args, words, static, start = args[run.Index:], words[run.Index:], static[run.Index:], args[run.Index].Pos()
 			program = programBase(words[0])
@@ -2189,6 +2191,22 @@ func commandLinks(command, cwd, home string, facts map[string]string, record, ne
 			}
 			if call == linkCall {
 				workingDirectories = []string{linkCWD}
+			}
+			if movedDir != "" {
+				workingDirectories = callDirs
+				// An operand that names SSH or DefenseClaw state read from the
+				// moved directory keeps the wrapper reading (RV-p1c A09).
+				state := newStateReach(home)
+				for i, word := range words[1:] {
+					if !static[i+1] || strings.HasPrefix(word, "-") {
+						continue
+					}
+					for _, dir := range callDirs {
+						if state.hits(filepath.Clean(OperandPath(word, dir))) {
+							links.unknown(true)
+						}
+					}
+				}
 			}
 			links.linkTexts = append(links.linkTexts, command[call.Pos().Offset():call.End().Offset()])
 			if slices.Contains(static, false) {
