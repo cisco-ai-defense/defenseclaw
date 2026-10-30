@@ -8,8 +8,10 @@ package redaction
 import (
 	"crypto/sha256"
 	"fmt"
+	"maps"
 	"sort"
 	"strings"
+	"sync"
 
 	"github.com/defenseclaw/defenseclaw/internal/observability"
 	legacyredaction "github.com/defenseclaw/defenseclaw/internal/redaction"
@@ -105,13 +107,13 @@ func isPersonalIdentifierPointer(pointer string) bool {
 
 // BuiltInProfile resolves one immutable built-in profile.
 func BuiltInProfile(name ProfileName) (Profile, bool) {
-	profile, ok := builtInProfiles()[name]
+	profile, ok := builtInProfileTable()[name]
 	return profile, ok
 }
 
 // BuiltInProfiles returns independent immutable values in stable order.
 func BuiltInProfiles() []Profile {
-	definitions := builtInProfiles()
+	definitions := builtInProfileTable()
 	return []Profile{
 		definitions[ProfileNone],
 		definitions[ProfileSensitive],
@@ -155,7 +157,7 @@ func NewCustomProfile(
 	if err := validateProfileName(name); err != nil {
 		return Profile{}, err
 	}
-	if _, reserved := builtInProfiles()[name]; reserved {
+	if _, reserved := builtInProfileTable()[name]; reserved {
 		return Profile{}, fmt.Errorf("custom redaction profile name is reserved")
 	}
 	if base != ProfileSensitive && base != ProfileContent && base != ProfileStrict {
@@ -237,7 +239,20 @@ func (catalog ProfileCatalog) Names() []ProfileName {
 	return names
 }
 
+// builtInProfileTable is the four built-in profiles, resolved once. validProfile
+// runs for every projection and rebuilt all four with their SHA-256
+// fingerprints on each call (34 allocations, about 2.4 us; r106 perf audit).
+// Profile is a value of fixed-size arrays, so a lookup returns an independent
+// copy; nothing may write to the shared map: builtInProfiles hands out a copy.
+var builtInProfileTable = sync.OnceValue(resolveBuiltInProfiles)
+
+// builtInProfiles returns a new map of the built-in profiles, which the caller
+// may extend (NewProfileCatalog adds the custom profiles to it).
 func builtInProfiles() map[ProfileName]Profile {
+	return maps.Clone(builtInProfileTable())
+}
+
+func resolveBuiltInProfiles() map[ProfileName]Profile {
 	none := resolvedBuiltIn(ProfileNone, [fieldClassCount]TransformationMode{
 		ModePreserve, ModePreserve, ModePreserve, ModePreserve,
 		ModePreserve, ModePreserve, ModePreserve, ModePreserve,
