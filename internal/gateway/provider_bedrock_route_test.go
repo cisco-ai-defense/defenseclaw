@@ -124,11 +124,11 @@ func TestJudgeChatRequestLeavesOutRefusedTemperature(t *testing.T) {
 
 // TestBifrostE2E_LiveBedrockLunaJudge sends the judge's own request shape to
 // GPT-5.6 Luna on Bedrock. It needs a Bedrock API key in
-// DEFENSECLAW_LIVE_BEDROCK_KEY and is skipped otherwise.
+// BIFROST_API_KEY and is skipped otherwise.
 func TestBifrostE2E_LiveBedrockLunaJudge(t *testing.T) {
-	key := os.Getenv("DEFENSECLAW_LIVE_BEDROCK_KEY")
+	key := os.Getenv("BIFROST_API_KEY")
 	if key == "" {
-		t.Skip("DEFENSECLAW_LIVE_BEDROCK_KEY not set: skipping live Bedrock Luna judge test")
+		t.Skip("BIFROST_API_KEY not set: skipping live Bedrock Luna judge test")
 	}
 	llm := &config.LLMConfig{Model: "bedrock/" + lunaProfile, APIKey: key, Bedrock: &config.BedrockKeyConfig{Region: "us-east-1"}}
 	p, err := NewProviderForLLMConfig(llm, nil)
