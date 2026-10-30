@@ -12,11 +12,21 @@
 
 package cli
 
-import "github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
+import (
+	"context"
+
+	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
+	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
+)
+
+// identityRefreshFlushDirectoryCaches empties the Open Directory caches the
+// way the hook guardian does after an outage; replaceable in tests.
+var identityRefreshFlushDirectoryCaches = enterprisehooks.FlushDirectoryCaches
 
 // identityRefreshPlatformFlushOSCache flushes the Directory Services and
-// membership caches. macOS has no per-account flush, so with --user nothing
-// is flushed: the other accounts keep their cache.
+// membership caches (dscacheutil -flushcache, dsmemberutil flushcache).
+// macOS has no per-account flush, so with --user nothing is flushed: the
+// other accounts keep their cache.
 func identityRefreshPlatformFlushOSCache(name string) (identityRefreshFlush, *enterprisestatus.Message) {
 	flush := identityRefreshFlush{Flushed: "none"}
 	if name != "" {
@@ -24,11 +34,11 @@ func identityRefreshPlatformFlushOSCache(name string) (identityRefreshFlush, *en
 		return flush, &enterprisestatus.Message{Code: "os_cache_not_flushed",
 			Message: "macOS has no per-account directory cache flush; run without --user to flush the whole cache"}
 	}
-	for _, step := range [][]string{{"/usr/bin/dscacheutil", "-flushcache"}, {"/usr/sbin/dsmemberutil", "flushcache"}} {
-		if err := identityRefreshRun(step[0], step[1:]...); err != nil {
-			flush.Reason = "failed"
-			return flush, &enterprisestatus.Message{Code: "os_cache_flush_failed", Message: step[0] + " failed: " + err.Error()}
-		}
+	ctx, cancel := context.WithTimeout(context.Background(), identityRefreshCommandTimeout)
+	defer cancel()
+	if err := identityRefreshFlushDirectoryCaches(ctx); err != nil {
+		flush.Reason = "failed"
+		return flush, &enterprisestatus.Message{Code: "os_cache_flush_failed", Message: "the Open Directory cache flush failed: " + err.Error()}
 	}
 	flush.Flushed, flush.Method = "all", "dscacheutil"
 	return flush, nil

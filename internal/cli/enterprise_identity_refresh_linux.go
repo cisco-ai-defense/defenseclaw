@@ -14,6 +14,7 @@ package cli
 
 import (
 	"bufio"
+	"context"
 	"errors"
 	"os"
 	"os/exec"
@@ -32,6 +33,13 @@ var (
 	identityRefreshNSSwitch    = "/etc/nsswitch.conf"
 	identityRefreshSSSDBackend = identityRefreshUsesSSSD
 )
+
+// identityRefreshRun runs one OS cache command; replaceable in tests.
+var identityRefreshRun = func(path string, args ...string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), identityRefreshCommandTimeout)
+	defer cancel()
+	return exec.CommandContext(ctx, path, args...).Run()
+}
 
 // identityRefreshUsesSSSD reports SSSD as an account backend: sss_cache is
 // installed and the passwd line of nsswitch.conf names sss.

@@ -13,10 +13,8 @@
 package cli
 
 import (
-	"context"
 	"fmt"
 	"os"
-	"os/exec"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/gateway"
@@ -36,10 +34,3 @@ func identityRefreshPlatformResolveUser(user string) (string, string, error) {
 
 // identityRefreshCommandTimeout bounds one OS cache flush command.
 const identityRefreshCommandTimeout = 30 * time.Second
-
-// identityRefreshRun runs one OS cache command; replaceable in tests.
-var identityRefreshRun = func(path string, args ...string) error {
-	ctx, cancel := context.WithTimeout(context.Background(), identityRefreshCommandTimeout)
-	defer cancel()
-	return exec.CommandContext(ctx, path, args...).Run()
-}
