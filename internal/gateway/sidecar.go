@@ -4766,7 +4766,22 @@ func (s *Sidecar) runGuardrail(ctx context.Context) error {
 		// inverted operator expectations, so both paths now exit the
 		// guardrail goroutine with the wrapped error via the shared
 		// failGuardrailWithRollback helper.
-		if err := connector.SetupRecordingCreatedDirs(ctx, conn, setupOpts); err != nil {
+		// The only configured connector waits out an agent that holds its
+		// settings file open, as each connector of a roster does: a
+		// Windows upgrade with only Claude Code set up rolled back on a
+		// 3 s hold (GAP-2567, the single-connector twin of GAP-2524).
+		err := singleConnectorSetup(ctx, conn, setupOpts)
+		err = retrySetupWhileSettingsBusy(ctx, conn.Name(), err, func() {
+			s.health.SetGuardrail(StateStarting, "", map[string]interface{}{
+				"setup_connector": conn.Name(),
+				"setup_step":      1,
+				"setup_total":     1,
+				"setup_busy":      true,
+			})
+		}, func() error {
+			return singleConnectorSetup(ctx, conn, setupOpts)
+		})
+		if err != nil {
 			return failSetup("setup", fmt.Errorf("connector %s setup failed: %w", conn.Name(), err))
 		}
 		// Post-Setup verification: every owned hook script the
@@ -6308,10 +6323,7 @@ func (s *Sidecar) setupConnectorsIsolatedTransaction(ctx context.Context, conns 
 		// with a sharing violation for a moment. Setup reads the file again
 		// on every run, so it is tried again for a bounded time instead of
 		// failing the start: an upgrade rolled back on it (GAP-2524).
-		for busySince := time.Now(); err != nil && connectorSettingsBusy(err) && ctx.Err() == nil &&
-			time.Since(busySince) < connectorSettingsBusyBudget; {
-			fmt.Fprintf(os.Stderr, "[guardrail] connector %s: %v; its settings are in use, retrying\n",
-				registration.conn.Name(), err)
+		err = retrySetupWhileSettingsBusy(ctx, registration.conn.Name(), err, func() {
 			if transaction.publishSetupProgress {
 				s.health.SetGuardrail(StateStarting, "", map[string]interface{}{
 					"setup_connector": registration.conn.Name(),
@@ -6320,15 +6332,9 @@ func (s *Sidecar) setupConnectorsIsolatedTransaction(ctx context.Context, conns 
 					"setup_busy":      true,
 				})
 			}
-			select {
-			case <-ctx.Done():
-			case <-time.After(connectorSettingsBusyDelay):
-			}
-			if ctx.Err() != nil {
-				break
-			}
-			err = s.setupOneConnector(ctx, registration.conn, registration.opts, masterKey, cache)
-		}
+		}, func() error {
+			return s.setupOneConnector(ctx, registration.conn, registration.opts, masterKey, cache)
+		})
 		if errors.Is(err, connector.ErrAgentConfigRefusal) {
 			// The agent's own settings refuse the hooks, for example after
 			// `codex features disable hooks`. Setup changed nothing, so the
@@ -6474,6 +6480,33 @@ var (
 	connectorSettingsBusyBudget = 5 * time.Second
 	connectorSettingsBusyDelay  = 250 * time.Millisecond
 )
+
+// singleConnectorSetup runs the Setup of the only configured connector.
+// Tests replace it.
+var singleConnectorSetup = connector.SetupRecordingCreatedDirs
+
+// retrySetupWhileSettingsBusy runs setup again while err is a settings file
+// in use (connectorSettingsBusy), every connectorSettingsBusyDelay for up to
+// connectorSettingsBusyBudget, and returns the last result. progress runs
+// before each wait. Other errors are returned at once.
+func retrySetupWhileSettingsBusy(ctx context.Context, name string, err error, progress func(), setup func() error) error {
+	for busySince := time.Now(); err != nil && connectorSettingsBusy(err) && ctx.Err() == nil &&
+		time.Since(busySince) < connectorSettingsBusyBudget; {
+		fmt.Fprintf(os.Stderr, "[guardrail] connector %s: %v; its settings are in use, retrying\n", name, err)
+		if progress != nil {
+			progress()
+		}
+		select {
+		case <-ctx.Done():
+		case <-time.After(connectorSettingsBusyDelay):
+		}
+		if ctx.Err() != nil {
+			break
+		}
+		err = setup()
+	}
+	return err
+}
 
 // connectorsNotStarted lists the configured connectors that did not come up.
 func connectorsNotStarted(conns []connector.Connector, succeeded []string) []string {

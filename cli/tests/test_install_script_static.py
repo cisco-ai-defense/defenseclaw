@@ -3603,3 +3603,65 @@ def test_the_saved_installer_is_recorded_in_the_form_rollback_checks(
 def test_no_saved_installer_leaves_no_record(tmp_path: Path) -> None:
     home = _record_saved_installer(tmp_path, saved=False)
     assert not (home / "receipts" / "installer.sha256").exists()
+
+
+def test_a_rollback_to_an_older_release_waits_until_its_gateway_lets_go_of_the_audit_lock(tmp_path: Path) -> None:
+    # rel-1-0-4:GAP-2546: a restored 1.0.2/1.0.4 gateway takes its planner
+    # statistics (ANALYZE) as it starts and holds audit.db's write lock while
+    # /health already answers; its hook calls wait on that lock past their
+    # budget, so the first call after "Now running" was refused (fail closed).
+    # The rollback waits, bounded, until the lock is free twice in a row.
+    import sqlite3
+
+    home = tmp_path / "dc"
+    home.mkdir()
+    db = home / "audit.db"
+    sqlite3.connect(db).execute("create table t(x)").connection.close()
+    venv = tmp_path / "venv"
+    (venv / "bin").mkdir(parents=True)
+    (venv / "bin" / "python").symlink_to(sys.executable)
+    holder = (
+        "import sqlite3,sys,time;c=sqlite3.connect(sys.argv[1],isolation_level=None);"
+        "c.execute('begin immediate');print('held',flush=True);time.sleep(float(sys.argv[2]));c.execute('rollback')"
+    )
+
+    def run(hold: float, bound: int) -> tuple[subprocess.CompletedProcess[str], float]:
+        lock = subprocess.Popen([sys.executable, "-I", "-c", holder, str(db), str(hold)],
+                                stdout=subprocess.PIPE, text=True)
+        try:
+            assert lock.stdout is not None and lock.stdout.readline().strip() == "held"
+            script = tmp_path / "wait.sh"
+            script.write_text(
+                "set -euo pipefail\ninfo() { echo \"info: $*\"; }\ngateway_pid() { echo 4242; }\n"
+                + _install_sh_functions("wait_audit_unlocked")
+                + f"DEFENSECLAW_HOME=\"{home}\"\nVENV=\"{venv}\"\n"
+                + f"AUDIT_LOCK_FREE_PY=\"{_audit_lock_free_py()}\"\n"
+                + f"rc=0; wait_audit_unlocked {bound} || rc=$?; echo rc=$rc\n",
+                encoding="utf-8",
+            )
+            started = time.monotonic()
+            proc = _run([str(script)], tmp_path)
+            return proc, time.monotonic() - started
+        finally:
+            lock.wait(timeout=30)
+
+    proc, took = run(hold=2.5, bound=30)
+    assert proc.returncode == 0, proc.stderr
+    assert "rc=0" in proc.stdout and took >= 2.0
+    assert "info: Waiting up to 30 seconds for the gateway to finish its start-up work on the audit database" in proc.stdout
+    proc, took = run(hold=6, bound=2)
+    assert "rc=1" in proc.stdout and took < 5.5
+    text = INSTALL_SH.read_text(encoding="utf-8")
+    rollback = text[text.index("if [[ \"${ROLLBACK}\" == true ]]; then") : text.index("# ── Stage: nothing live changes")]
+    wait = rollback.index("wait_audit_unlocked 180")
+    # Only for an older release (1.0.5 answers its hooks while the lock is held),
+    # after its gateway started and before the rollback says it is done.
+    assert rollback.index("start_gateway || rollback_rc=$?") < wait < rollback.index("ok \"Now running DefenseClaw ${back_to}.\"")
+    assert "version_lt \"${back_to}\" \"${VERSION}\"" in rollback[wait - 200 : wait]
+    restart_old = text[text.index("restart_old() {") :][:1600]
+    assert "wait_audit_unlocked 180" in restart_old
+
+
+def _audit_lock_free_py() -> str:
+    text = INSTALL_SH.read_text(encoding="utf-8")
+    return re.search(r'^AUDIT_LOCK_FREE_PY="([^"]+)"$', text, re.M).group(1)

@@ -988,6 +988,14 @@ def test_a_downgrade_drops_the_hook_helper_this_release_left_and_restarts_the_ga
         (home / "gateway.pid").write_text(json.dumps({"pid": pid}), encoding="utf-8")
         return 0
 
+    def probe(pid: int, sig: int) -> None:
+        # The liveness probe only: a real os.kill(pid, 0) on a Windows runner
+        # is CTRL_C_EVENT and interrupts the test run itself.
+        assert sig == 0
+        if pid != os.getpid():
+            raise ProcessLookupError(pid)
+
+    monkeypatch.setattr(upgrade_shim.os, "kill", probe)
     restarts: list[list[str]] = []
     monkeypatch.setattr(upgrade_shim, "_wait_for_installer", installer)
     monkeypatch.setattr(upgrade_shim.subprocess, "call", lambda argv, **kw: restarts.append(list(argv)) or 0)

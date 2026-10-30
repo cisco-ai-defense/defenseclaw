@@ -13,6 +13,8 @@ import (
 	"strings"
 	"testing"
 
+	"golang.org/x/sys/windows"
+
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
@@ -786,9 +788,16 @@ func TestWindowsGuardianNoticeNamesTheAccountOfASIDOnlyRow(t *testing.T) {
 		t.Fatal(err)
 	}
 	got := enterpriseHookNoticeAccount(enterpriseHookReconcileRow{SID: current.Uid})
-	name := current.Username
-	if i := strings.LastIndex(name, `\`); i >= 0 {
-		name = name[i+1:]
+	// The account the SID names, not the process's user name: as
+	// LocalSystem on a domain-joined computer user.Current says
+	// DOMAIN\COMPUTER$ while S-1-5-18 names NT AUTHORITY\SYSTEM (GAP-2572).
+	sid, err := windows.StringToSid(current.Uid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	name, _, _, err := sid.LookupAccount("")
+	if err != nil {
+		t.Fatalf("look up %s: %v", current.Uid, err)
 	}
 	if !strings.HasSuffix(got, " ("+current.Uid+")") || !strings.Contains(strings.ToLower(got), strings.ToLower(name)) {
 		t.Fatalf("notice account = %q, want the name of %s (%s)", got, current.Username, current.Uid)
