@@ -440,8 +440,11 @@ func unnamedGroupsNote(subject *profileSubject, sids *profileGroupSIDs) string {
 // says once that it could not check that domain's groups (GAP-0255).
 
 const (
-	profileGroupCheckTTL    = time.Minute
-	profileGroupCheckBudget = 3 * time.Second
+	profileGroupCheckTTL = time.Minute
+	// profileGroupCheckRetry is how long a pass the directory did not answer
+	// in time is kept: a slow directory at gateway start or reload must not
+	// hide the warnings for the whole TTL (GAP-2434).
+	profileGroupCheckRetry = 10 * time.Second
 	// profileGroupCheckWait is how long a command waits for the first pass of
 	// a set; status and doctor give the gateway only 3 s to answer.
 	profileGroupCheckWait = 1500 * time.Millisecond
@@ -454,14 +457,21 @@ const (
 	profileQuietGroupsNamed = 8
 )
 
+// profileGroupCheckBudget bounds one pass over a set's groups; a variable so
+// tests can give a pass less time.
+var profileGroupCheckBudget = 3 * time.Second
+
 // profileGroupCheck is the last pass over a set's groups, and the pass in
 // flight.
 type profileGroupCheck struct {
 	mu        sync.Mutex
 	checked   bool
 	checkedAt time.Time
-	warnings  []string
-	running   chan struct{}
+	// keep is how long the last pass is kept: profileGroupCheckTTL, or
+	// profileGroupCheckRetry for a pass that ran out of time.
+	keep     time.Duration
+	warnings []string
+	running  chan struct{}
 }
 
 // unknownGroupWarnings returns one warning per assignment group the host
@@ -503,11 +513,12 @@ func (set *guardrailProfileSet) unknownGroupWarningsWith(exists func(context.Con
 		check.mu.Unlock()
 		return nil
 	}
-	if (!check.checked || time.Since(check.checkedAt) >= profileGroupCheckTTL) && check.running == nil {
+	if (!check.checked || time.Since(check.checkedAt) >= check.keep) && check.running == nil {
 		done := make(chan struct{})
 		check.running = done
+		budget := profileGroupCheckBudget
 		go func() {
-			ctx, cancel := context.WithTimeout(context.Background(), profileGroupCheckBudget)
+			ctx, cancel := context.WithTimeout(context.Background(), budget)
 			known := exists
 			if set.groupSIDs != nil {
 				known = func(ctx context.Context, name string) (bool, error) {
@@ -519,6 +530,10 @@ func (set *guardrailProfileSet) unknownGroupWarningsWith(exists func(context.Con
 			}
 			warnings := unknownAssignmentGroups(ctx, set.assignments, known, qualify, silent)
 			warnings = append(warnings, unmatchedUserEntries(ctx, set.assignments, unmatchedUser)...)
+			keep := profileGroupCheckTTL
+			if ctx.Err() != nil {
+				keep = profileGroupCheckRetry
+			}
 			cancel()
 			warnings = append(warnings, spoolUPNAssignmentWarnings(set.assignments, time.Now())...)
 			failing := health().Failing > 0
@@ -527,7 +542,7 @@ func (set *guardrailProfileSet) unknownGroupWarningsWith(exists func(context.Con
 			}
 			check.mu.Lock()
 			previous, wasChecked := check.warnings, check.checked
-			check.warnings, check.checked, check.checkedAt, check.running = warnings, !failing, time.Now(), nil
+			check.warnings, check.checked, check.checkedAt, check.keep, check.running = warnings, !failing, time.Now(), keep, nil
 			check.mu.Unlock()
 			// A group that stops resolving between start and reload (an SSSD
 			// naming switch) is logged when a later check finds it, not only
@@ -618,7 +633,8 @@ func unknownAssignmentGroupsForOS(ctx context.Context, assignments []config.Prof
 	var unknown []unknownGroup
 	var warnings []string
 	respelled := map[string]string{} // by folded name: the spelling the host lists a known qualified group under
-	skippedLimit, skippedDeadline := false, false
+	skippedLimit := false
+	var unchecked []string        // "assignment N: group ...", for the groups the deadline left unchecked
 	absent := map[string]bool{}   // by folded name; present for every group looked up
 	answered := map[string]bool{} // by folded domain: the host knows a group of it
 	for i, assignment := range assignments {
@@ -642,10 +658,16 @@ func unknownAssignmentGroupsForOS(ctx context.Context, assignments []config.Prof
 					continue
 				}
 				if ctx.Err() != nil {
-					skippedDeadline = true
+					unchecked = append(unchecked, fmt.Sprintf("assignment %d: group %q", i+1, group))
 					continue
 				}
 				known, err := exists(ctx, norm.NFC.String(group))
+				if err != nil && ctx.Err() != nil {
+					// The lookup ran out of time: not an answer, so the group
+					// is named as not checked (GAP-2434).
+					unchecked = append(unchecked, fmt.Sprintf("assignment %d: group %q", i+1, group))
+					continue
+				}
 				dead = err == nil && !known
 				absent[key] = dead
 				if known {
@@ -742,8 +764,14 @@ func unknownAssignmentGroupsForOS(ctx context.Context, assignments []config.Prof
 	if skippedLimit {
 		warnings = append(warnings, fmt.Sprintf("group warning check incomplete: only the first %d distinct groups were checked; later assignment groups were not checked", profileGroupCheckMax))
 	}
-	if skippedDeadline {
-		warnings = append(warnings, "group warning check incomplete: the directory check timed out; later assignment groups were not checked")
+	if len(unchecked) > 0 {
+		// Name the assignments and groups the check could not reach, as the
+		// other notes do (GAP-0928, GAP-2434).
+		if len(unchecked) > profileQuietGroupsNamed {
+			unchecked = append(unchecked[:profileQuietGroupsNamed:profileQuietGroupsNamed], fmt.Sprintf("%d more", len(unchecked)-profileQuietGroupsNamed))
+		}
+		warnings = append(warnings, fmt.Sprintf("group warning check incomplete: the directory did not answer in time, so %s "+
+			"were not checked and may select nobody; the check runs again within %s", strings.Join(unchecked, ", "), profileGroupCheckRetry))
 	}
 	return warnings
 }

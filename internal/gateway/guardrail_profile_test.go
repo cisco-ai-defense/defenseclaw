@@ -1285,6 +1285,77 @@ func TestUnknownAssignmentGroupsReportsIncompleteCheck(t *testing.T) {
 	}
 }
 
+// GAP-2434: a directory that does not answer in time (a slow SSSD at gateway
+// start) leaves groups unchecked; the warning names each assignment and group
+// it could not check, not just "timed out".
+func TestUnknownAssignmentGroupsNameTheGroupsATimedOutCheckSkipped(t *testing.T) {
+	assignments := []config.ProfileAssignment{
+		{Profile: "open", Match: config.ProfileMatch{Groups: []string{"devs@corp.example.com"}}},
+		{Profile: "open", Match: config.ProfileMatch{Groups: []string{"renamed@corp.example.com"}}},
+		{Profile: "open", Match: config.ProfileMatch{Groups: []string{"gone@corp.example.com"}}},
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	exists := func(ctx context.Context, _ string) (bool, error) {
+		cancel() // the budget runs out during the first lookup
+		return false, ctx.Err()
+	}
+	warnings := unknownAssignmentGroups(ctx, assignments, exists, nil, nil)
+	if len(warnings) != 1 {
+		t.Fatalf("warnings = %q; want one incomplete-check note", warnings)
+	}
+	for _, want := range []string{`assignment 1: group "devs@corp.example.com"`, `assignment 2: group "renamed@corp.example.com"`,
+		`assignment 3: group "gone@corp.example.com"`, "not checked"} {
+		if !strings.Contains(warnings[0], want) {
+			t.Fatalf("warning = %q; want it to name %q", warnings[0], want)
+		}
+	}
+}
+
+// GAP-2434: a pass that ran out of time is not kept for the whole TTL: once
+// the directory answers again, the next command gets the per-group warnings
+// within profileGroupCheckRetry.
+func TestGroupCheckThatRanOutOfTimeIsRetriedSoon(t *testing.T) {
+	saved := profileGroupCheckBudget
+	profileGroupCheckBudget = 50 * time.Millisecond
+	t.Cleanup(func() { profileGroupCheckBudget = saved })
+	var slow atomic.Bool
+	slow.Store(true)
+	exists := func(ctx context.Context, name string) (bool, error) {
+		if slow.Load() {
+			<-ctx.Done()
+			return false, ctx.Err()
+		}
+		return name == "devs@corp.example.com", nil
+	}
+	set := &guardrailProfileSet{assignments: []config.ProfileAssignment{
+		{Profile: "open", Match: config.ProfileMatch{Groups: []string{"devs@corp.example.com"}}},
+		{Profile: "open", Match: config.ProfileMatch{Groups: []string{"renamed@corp.example.com"}}},
+	}}
+	unmatched := func(context.Context, string) string { return "" }
+	health := func() identityCacheHealth { return identityCacheHealth{} }
+	first := set.unknownGroupWarningsWith(exists, nil, nil, unmatched, health, 2*time.Second)
+	if len(first) != 1 || !strings.Contains(first[0], "not checked") {
+		t.Fatalf("first pass = %q; want the incomplete-check note", first)
+	}
+	slow.Store(false)
+	set.groupCheck.mu.Lock()
+	set.groupCheck.checkedAt = set.groupCheck.checkedAt.Add(-profileGroupCheckRetry - time.Second)
+	set.groupCheck.mu.Unlock()
+	set.unknownGroupWarningsWith(exists, nil, nil, unmatched, health, 0) // starts the next pass
+	set.groupCheck.mu.Lock()
+	running := set.groupCheck.running
+	set.groupCheck.mu.Unlock()
+	if running == nil {
+		t.Fatal("an incomplete pass older than profileGroupCheckRetry must start a new pass")
+	}
+	<-running
+	got := set.unknownGroupWarningsWith(exists, nil, nil, unmatched, health, 0)
+	if len(got) != 1 || !strings.Contains(got[0], `assignment 2: group "renamed@corp.example.com" is not known to this host`) {
+		t.Fatalf("after the directory answers = %q; want the assignment 2 warning", got)
+	}
+}
+
 func TestUnknownAssignmentGroupsNormalizeUnicode(t *testing.T) {
 	assignments := []config.ProfileAssignment{
 		{Profile: "strict", Match: config.ProfileMatch{Groups: []string{"dc-cafe\u0301"}}},

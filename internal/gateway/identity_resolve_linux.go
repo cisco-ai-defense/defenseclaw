@@ -194,6 +194,29 @@ var newPeerNSSResolver = func(ctx context.Context) (peerNSSResolver, error) {
 
 var peerUnsharedUIDNeedsRoot = unixidentity.UnsharedUIDNeedsRoot
 
+// peerRootProofRecorded reports whether the hook guardian has recorded, for
+// the account that holds the uid key now, the proof that SSSD holds no other
+// account of it (holderSpoolRecord), so the next lookup of key takes it
+// (resolveNSSPeerFacts). Tests replace it.
+var peerRootProofRecorded = func(key string) bool {
+	uid, err := strconv.Atoi(key)
+	if err != nil {
+		return false
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), peerDirectoryLookupTimeout)
+	defer cancel()
+	resolver, err := newPeerNSSResolver(ctx)
+	if err != nil {
+		return false
+	}
+	account, err := resolver.LookupUID(uid)
+	if err != nil {
+		return false
+	}
+	_, recorded, err := holderSpoolRecord(key, account, "", time.Now().UTC())
+	return err == nil && recorded
+}
+
 // resolvePeerDirectoryFacts is the peer directory cache's lookup
 // (peerNSSFacts). A lookup that fails leaves the account and its groups
 // unproven, and the profile matcher selects the strictest profile that

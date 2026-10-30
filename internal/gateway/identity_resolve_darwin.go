@@ -23,6 +23,13 @@ import (
 // account.
 var managedHookPeerAccountIncarnation = func(unixidentity.Account) (string, bool) { return "", false }
 
+// peerUnsharedUIDNeedsRoot and peerRootProofRecorded are the SSSD root-only
+// proof of Linux (identity_resolve_linux.go); lookups on a Mac need none.
+var (
+	peerUnsharedUIDNeedsRoot = func(error) bool { return false }
+	peerRootProofRecorded    = func(string) bool { return false }
+)
+
 // managedHookPeerGuardianIncarnation names nothing on macOS either
 // (managedHookPeerAccountIncarnation).
 var managedHookPeerGuardianIncarnation = func(unixidentity.Account) (string, bool) { return "", false }

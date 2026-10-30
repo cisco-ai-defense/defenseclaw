@@ -589,3 +589,59 @@ func TestSpoolGroupChangeDropsCachedFacts(t *testing.T) {
 		t.Fatalf("withdrawn record left old token groups in the cache: %+v", facts)
 	}
 }
+
+// GAP-2535: on an SSSD-joined host the first hook of a new local account
+// runs before the hook guardian records the root-only proof that SSSD holds
+// no other account of the uid, so its lookup fails. Once the guardian has
+// recorded the proof that failure is no directory outage: health does not
+// count it, and the account is looked up again without waiting for a hook
+// call. Any other failure is still counted.
+func TestIdentityHealthDoesNotCountALookupThatWaitedOnlyForTheGuardianRecordedProof(t *testing.T) {
+	now := time.Unix(1_800_000_000, 0)
+	needsRoot := errors.New("only root can ask SSSD whether its domains are online")
+	var recorded atomic.Bool
+	cache := newIdentityCache(func(string) (useridentity.DirectoryFacts, error) {
+		if !recorded.Load() {
+			return useridentity.DirectoryFacts{}, needsRoot
+		}
+		return useridentity.DirectoryFacts{Directory: useridentity.DirectoryLocal, ResolvedAt: now}, nil
+	})
+	cache.awaitsRootProof = func(err error) bool { return errors.Is(err, needsRoot) }
+	cache.rootProofRecorded = func(string) bool { return recorded.Load() }
+	cache.now = func() time.Time { return now }
+	cache.logf = func(string, ...any) {}
+	if _, ok := cache.get("1006", true); ok {
+		t.Fatal("facts served before the guardian recorded the proof")
+	}
+	if h := cache.health(); h.Failing != 1 || len(h.Accounts) != 1 || h.Accounts[0] != "1006" {
+		t.Fatalf("before the guardian recorded the proof: %+v, want uid 1006 failing", h)
+	}
+	recorded.Store(true)
+	if h := cache.health(); h.Failing != 0 {
+		t.Fatalf("after the guardian recorded the proof: %+v, want nothing failing", h)
+	}
+	for deadline := time.Now().Add(2 * time.Second); ; time.Sleep(5 * time.Millisecond) {
+		if _, _, ok := cache.peek("1006"); ok {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the account was not looked up again once the guardian recorded the proof")
+		}
+	}
+	if h := cache.health(); h.Failing != 0 {
+		t.Fatalf("after the lookup took the proof: %+v, want nothing failing", h)
+	}
+
+	offline := errors.New("sssd offline")
+	other := newIdentityCache(func(string) (useridentity.DirectoryFacts, error) {
+		return useridentity.DirectoryFacts{}, offline
+	})
+	other.awaitsRootProof = func(err error) bool { return errors.Is(err, needsRoot) }
+	other.rootProofRecorded = func(string) bool { return true }
+	other.now = func() time.Time { return now }
+	other.logf = func(string, ...any) {}
+	other.get("1007", true)
+	if h := other.health(); h.Failing != 1 || len(h.Accounts) != 1 || h.Accounts[0] != "1007" {
+		t.Fatalf("a directory outage with a guardian record: %+v, want uid 1007 failing", h)
+	}
+}

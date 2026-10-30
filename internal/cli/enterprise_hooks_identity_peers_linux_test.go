@@ -242,3 +242,45 @@ func TestServedAccountWritesTheFirstMigrationMapWithoutA104Window(t *testing.T) 
 		})
 	}
 }
+
+// GAP-1864 (RHEL leg): the gateway does not rewrite its homes file when a
+// served local account is deleted, so the cached listing kept the account
+// until the spool interval. Every pass then listed it, its lookup failed, the
+// failed pass kept the record, and status and verify warned
+// directory_lookups_failing. A change of the local account database resolves
+// the served accounts again, and an account no longer found drops out; an
+// unchanged database still answers from the cache (GAP-1866).
+func TestGatewayPeerListingDropsADeletedLocalAccountWhenTheAccountDatabaseChanges(t *testing.T) {
+	previous, previousStamp := enterpriseHookResolveGatewayPeers, enterpriseHookLocalAccountsStamp
+	t.Cleanup(func() {
+		enterpriseHookResolveGatewayPeers, enterpriseHookLocalAccountsStamp = previous, previousStamp
+		enterpriseHookPeerListing.reset()
+	})
+	enterpriseHookPeerListing.reset()
+	stamp := "4096/1/77"
+	enterpriseHookLocalAccountsStamp = func() string { return stamp }
+	exists := true
+	resolves := 0
+	enterpriseHookResolveGatewayPeers = func(string, map[int]enterpriseHookCachedPeer) map[int]enterpriseHookCachedPeer {
+		resolves++
+		if !exists {
+			return map[int]enterpriseHookCachedPeer{}
+		}
+		return map[int]enterpriseHookCachedPeer{1006: {enterpriseHookPeerAccount{UID: 1006, User: "t9dis1"}, ""}}
+	}
+	dataDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dataDir, "managed_peer_homes.json"), []byte(`{"1006":{"name":"t9dis1"}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if first := enterpriseHookGatewayPeerAccounts(dataDir); len(first) != 1 || first[0].UID != 1006 {
+		t.Fatalf("first listing %+v; want the served account", first)
+	}
+	if again := enterpriseHookGatewayPeerAccounts(dataDir); resolves != 1 || len(again) != 1 {
+		t.Fatalf("unchanged account database: %d lookups, listing %+v; want the cached account", resolves, again)
+	}
+	// userdel -r t9dis1: /etc/passwd changes, the homes file does not.
+	exists, stamp = false, "4096/2/78"
+	if after := enterpriseHookGatewayPeerAccounts(dataDir); resolves != 2 || len(after) != 0 {
+		t.Fatalf("after the delete: %d lookups, listing %+v; want the accounts resolved again and the deleted one gone", resolves, after)
+	}
+}

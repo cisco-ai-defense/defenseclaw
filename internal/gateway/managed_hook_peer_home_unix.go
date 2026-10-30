@@ -950,6 +950,8 @@ func (c *managedHookPeerHomeCache) directoryCache() *identityDirectoryCache {
 			return hasUnnamedGroup(facts) || awaitingSpoolUPN(facts) || facts.OnlyPrimaryGroup
 		}
 		c.directories.settling = openDirectorySettling
+		c.directories.awaitsRootProof = peerUnsharedUIDNeedsRoot
+		c.directories.rootProofRecorded = peerRootProofRecorded
 	})
 	return c.directories
 }
