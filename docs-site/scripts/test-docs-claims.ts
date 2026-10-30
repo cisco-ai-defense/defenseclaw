@@ -1450,6 +1450,8 @@ const r105Rows: DocRow[] = [
   // GAP-2613 (docs-t11 pod, 2026-10-30, live OSS RHEL T11 cursor-agent 2026.10.22, strict, gateway up): a refused prompt is dropped silently with the gateway up too.
   { gap: "GAP-2613", page: "connectors/cursor.mdx", section: "Agent CLI behavior", has: ["A refused prompt is dropped without a message, with the gateway running or stopped", "Gateway running: `defenseclaw alerts --connector cursor` lists the block and its rule."], lacks: ["| Same build, gateway down, action mode |"] },
   { gap: "GAP-2613", page: "connectors/cursor.mdx", section: "Limits", has: ["drops a refused prompt without showing why, whether the gateway is running or stopped"], lacks: ["When the gateway is down in action mode, Cursor Agent CLI drops a refused prompt"] },
+  // GAP-2620 (docs-t11 pod, 2026-10-30, live OSS Windows T11 rc.11): guardrail enable asks Proceed? [Y/n]; a piped run is refused without --yes.
+  { gap: "GAP-2620", page: "connectors/codex.mdx", section: "Disable", has: ["It asks `Proceed? [Y/n]`; add `--yes` in scripts or when stdin is not a terminal.", "`This change needs your confirmation, but the output is piped`", "`defenseclaw guardrail enable --connector codex --yes`"] },
   { gap: "GH #1101 p0:GAP-0777", page: "policies/rulepack-validation.mdx", has: ["Adding or editing that file changes the digest, so validate the pack again and pin the new digest"] },
   // 1.0.5 docs sync (2026-10-28): fixed 1.0.4 known issues left the page; open ones stay.
   { gap: "1.0.4 known issues fixed in 1.0.5", page: "support-matrix.mdx", section: "Known issues", lacks: ["These are bugs in 1.0.4.", "**Changing the fail mode with Setup `/ensure`:**", "hot-config-undo-closed", "**No skill, MCP or plugin scanner:**"] },
