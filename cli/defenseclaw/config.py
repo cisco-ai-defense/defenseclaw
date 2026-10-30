@@ -1449,7 +1449,7 @@ class UpdateConfig:
 DECISION_MODEL_KEY_ENV = "DEFENSECLAW_DECISION_MODEL_KEY"
 DECISION_MODEL_DEFAULT_ALLOW_THRESHOLD = 0.30
 DECISION_MODEL_DEFAULT_BLOCK_THRESHOLD = 0.75
-DECISION_MODEL_DEFAULT_TIMEOUT = 3.0
+DECISION_MODEL_DEFAULT_TIMEOUT = 1.0
 DECISION_MODEL_ON_CONFIDENT_BLOCK = ("escalate", "decide")
 
 
@@ -1572,7 +1572,7 @@ def _merge_decision_model(raw: Any) -> DecisionModelConfig:
             return 0.0
 
     return DecisionModelConfig(
-        enabled=bool(raw.get("enabled", False)),
+        enabled=raw.get("enabled") is True or str(raw.get("enabled", "")).strip().lower() == "true",
         model=str(raw.get("model", "") or ""),
         base_url=str(raw.get("base_url", "") or ""),
         api_key_env=str(raw.get("api_key_env", "") or ""),

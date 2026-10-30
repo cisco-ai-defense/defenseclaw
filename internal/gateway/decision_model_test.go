@@ -188,3 +188,70 @@ func TestRunToolDecisionDecideBlockSkipsJudge(t *testing.T) {
 		t.Fatalf("verdict = %+v", v)
 	}
 }
+
+func TestRunToolDecisionRuleFloorKeepsTheJudge(t *testing.T) {
+	srv := fakeDecisionModel(t, "allow", 0.99, nil)
+	defer srv.Close()
+	j := &LLMJudge{cfg: &config.JudgeConfig{ToolInjection: true}, decision: testDecisionModel(t, srv.URL, "")}
+	ctx := withDecisionRuleFloor(context.Background(), rulesFlagged(&ToolInspectVerdict{Action: "alert", Severity: "HIGH", Findings: []string{"CMD-X"}}))
+	// provider is nil, so reaching the judge panics: the confident allow
+	// must not skip the judge when the rules flagged the call.
+	defer func() {
+		if recover() == nil {
+			t.Fatal("a rule-flagged call skipped the LLM judge")
+		}
+	}()
+	j.runToolJudgeSample(ctx, "Bash", `{"command":"x"}`, "sample")
+}
+
+func TestRulesFlagged(t *testing.T) {
+	for _, v := range []*ToolInspectVerdict{nil, {Action: "allow", Severity: "NONE"}, {Action: "allow"}} {
+		if rulesFlagged(v) {
+			t.Fatalf("clean verdict flagged: %+v", v)
+		}
+	}
+	if !rulesFlagged(&ToolInspectVerdict{Action: "alert", Severity: "MEDIUM"}) {
+		t.Fatal("a MEDIUM rule verdict must be a floor")
+	}
+}
+
+func TestDecisionModelBudgetLeavesTheJudgeItsTime(t *testing.T) {
+	dm := testDecisionModel(t, "http://127.0.0.1:1/v1/systemone", "")
+	dm.timeout = 3 * time.Second
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if got := dm.budget(ctx); got > 500*time.Millisecond+10*time.Millisecond {
+		t.Fatalf("budget %s exceeds a quarter of the 2s judge deadline", got)
+	}
+	short, cancelShort := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancelShort()
+	if got := dm.decide(short, decisionModelState{}); !got.skipped || got.route != decisionEscalate {
+		t.Fatalf("a call with no budget must be skipped and escalated: %+v", got)
+	}
+}
+
+func TestDecisionModelBreakerPausesAfterRepeatedFailures(t *testing.T) {
+	var calls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		calls.Add(1)
+		http.Error(w, "down", http.StatusServiceUnavailable)
+	}))
+	defer srv.Close()
+	dm := testDecisionModel(t, srv.URL, "")
+	var lines []string
+	for range 6 {
+		res := dm.decide(context.Background(), decisionModelState{})
+		if res.route != decisionEscalate || res.failure == "" {
+			t.Fatalf("a failing model must escalate: %+v", res)
+		}
+		if res.logLine != "" {
+			lines = append(lines, res.logLine)
+		}
+	}
+	if calls.Load() != decisionBreakerFailures {
+		t.Fatalf("model called %d times, want %d before the breaker opens", calls.Load(), decisionBreakerFailures)
+	}
+	if len(lines) != 2 {
+		t.Fatalf("log lines = %q, want the first failure and the trip", lines)
+	}
+}

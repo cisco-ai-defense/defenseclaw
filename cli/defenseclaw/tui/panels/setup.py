@@ -2030,7 +2030,7 @@ def build_setup_sections(
                 _field(cfg, "Model", "decision_model.model", hint="Model name the System One endpoint serves."),
                 _field(cfg, "Endpoint URL", "decision_model.base_url", hint="https, or http to loopback only."),
                 _field(cfg, "Token Env", "decision_model.api_key_env", hint="Env var NAME; default DEFENSECLAW_DECISION_MODEL_KEY."),
-                _field(cfg, "Timeout (s)", "decision_model.timeout", hint="Blank = 3. The judge runs when it is late."),
+                _field(cfg, "Timeout (s)", "decision_model.timeout", hint="Blank = 1. The judge runs when it is late."),
                 _field(cfg, "Allow At", "decision_model.allow_threshold", hint="Risk at or below skips the judge. Blank = 0.30."),
                 _field(cfg, "Block At", "decision_model.block_threshold", hint="Risk at or above is a confident block. Blank = 0.75."),
                 _field(

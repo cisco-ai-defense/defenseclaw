@@ -2234,7 +2234,7 @@ def _apply_first_run_decision_model(report, request: dict, data_dir: str | os.Pa
     if not updated.enabled:
         report.setup.append(StepResult("Decision Model", "skip", "off"))
         return
-    detail = f"{updated.model} at {updated.base_url}"
+    detail = updated.model
     result = dmod.ping(updated, str(data_dir))
     if not result.ok:
         report.setup.append(StepResult(

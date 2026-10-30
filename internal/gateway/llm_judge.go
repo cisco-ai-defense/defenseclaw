@@ -111,6 +111,10 @@ type LLMJudge struct {
 	// decision is the decision model in front of the tool-call judge; nil
 	// when decision_model is off.
 	decision *decisionModel
+	// decisionStates holds each prepared call's decision-model state until
+	// it is judged (keepDecisionState / takeDecisionState).
+	decisionStatesMu sync.Mutex
+	decisionStates   map[string]decisionModelState
 
 	toolContextMu sync.Mutex
 	toolContext   map[string]toolJudgeSessionContext
@@ -2150,6 +2154,16 @@ func (j *LLMJudge) toolJudgeContextSample(ctx context.Context, toolName, args st
 		}
 	}
 	fmt.Fprintf(&sample, "<CURRENT_TOOL_CALL tool=%q>\n%s\n</CURRENT_TOOL_CALL>", sanitizeToolName(toolName), current)
+	if j.decision != nil {
+		state := decisionModelState{
+			SessionUserIntent: entry.userIntent,
+			CurrentToolCall:   decisionModelToolCall{Tool: sanitizeToolName(toolName), Arguments: current},
+		}
+		for _, event := range prior {
+			state.RecentToolCalls = append(state.RecentToolCalls, decisionModelToolCall{Tool: event.toolName, Arguments: event.args})
+		}
+		j.keepDecisionState(sample.String(), state)
+	}
 	return sample.String()
 }
 

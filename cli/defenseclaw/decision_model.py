@@ -100,7 +100,9 @@ class PingResult:
     latency_ms: int = 0
 
 
-def ping(dm: DecisionModelConfig, data_dir: str, *, timeout: float | None = None) -> PingResult:
+def ping(
+    dm: DecisionModelConfig, data_dir: str, *, timeout: float | None = None, send_token: bool = True
+) -> PingResult:
     """Send one benign System One request and check the answer's shape.
     Never prints or returns the token."""
     import requests
@@ -111,9 +113,9 @@ def ping(dm: DecisionModelConfig, data_dir: str, *, timeout: float | None = None
     if problem:
         return PingResult(False, problem)
     headers = {"Content-Type": "application/json"}
-    token = dm.resolved_api_key(data_dir)
-    if token:
-        headers["Authorization"] = f"Bearer {token}"
+    bearer = dm.resolved_api_key(data_dir) if send_token else ""
+    if bearer:
+        headers["Authorization"] = f"Bearer {bearer}"
     body = json.dumps({"model": dm.model, "state": _PING_STATE, "questions": _PING_QUESTIONS})
     started = time.monotonic()
     try:
@@ -160,23 +162,41 @@ def _disposition(raw: bytes) -> tuple[str, float] | None:
     return choice, values["allow"]
 
 
+def managed_host(cfg: Config) -> bool:
+    """A standalone managed host: the gateway reads the token from the
+    protected credential decision_model.credential, never the user's env."""
+    try:
+        return bool(cfg.managed_outside_secure_client())
+    except Exception:  # noqa: BLE001 - a probe failure must not hide the setting
+        return False
+
+
+def token(cfg: Config) -> str:
+    """The bearer token the CLI may send (ping, skill scan): env or .env
+    on a per-user install, none on a managed host."""
+    if managed_host(cfg):
+        return ""
+    return cfg.decision_model.resolved_api_key(cfg.data_dir)
+
+
 def summary_rows(cfg: Config) -> list[tuple[str, str]]:
     """The setting as label/value rows, the token shown only as set/unset."""
     dm = cfg.decision_model
     key_env = dm.effective_api_key_env()
-    key_state = "set" if dm.resolved_api_key(cfg.data_dir) else "not set (fine for a local server)"
+    key_state = "set" if token(cfg) else "not set (fine for a local server)"
+    key_row = ("decision_model.api_key_env", f"{key_env} = {key_state}")
+    if managed_host(cfg):
+        key_row = ("decision_model.credential", dm.credential or "(none: no token is sent)")
     rows = [
         ("decision_model.enabled", "true" if dm.enabled else "false"),
         ("decision_model.model", dm.model or "(unset)"),
         ("decision_model.base_url", dm.base_url or "(unset)"),
-        ("decision_model.api_key_env", f"{key_env} = {key_state}"),
+        key_row,
         ("decision_model.timeout", f"{dm.effective_timeout():g}s"),
         ("decision_model.allow_threshold", f"{dm.effective_allow_threshold():.2f}"),
         ("decision_model.block_threshold", f"{dm.effective_block_threshold():.2f}"),
         ("decision_model.on_confident_block", dm.effective_on_confident_block()),
     ]
-    if dm.credential:
-        rows.insert(4, ("decision_model.credential", dm.credential))
     return rows
 
 
@@ -198,11 +218,12 @@ def skill_scanner_options(cfg: Config) -> tuple[dict[str, Any], dict[str, str]]:
     when the decision model is off. The scanner's tier is advisory only: it
     records a probability and never changes a finding or the verdict."""
     dm = cfg.decision_model
-    if not dm.active():
+    if not dm.active() or managed_host(cfg):
+        # On a managed host the decision model is the gateway's alone.
         return {}, {}
     kwargs = {"system_one_endpoint": dm.base_url.strip(), "system_one_model": dm.model.strip()}
     env: dict[str, str] = {}
-    token = dm.resolved_api_key(cfg.data_dir)
-    if token:
-        env["SKILL_SCANNER_SYSTEM_ONE_API_KEY"] = token
+    bearer = token(cfg)
+    if bearer:
+        env["SKILL_SCANNER_SYSTEM_ONE_API_KEY"] = bearer
     return kwargs, env

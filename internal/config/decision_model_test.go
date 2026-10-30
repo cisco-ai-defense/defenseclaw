@@ -32,7 +32,7 @@ func TestDecisionModelDefaultsOff(t *testing.T) {
 			t.Fatalf("v%d: decision_model must default to off: %+v", version, d)
 		}
 		if d.EffectiveAllowThreshold() != 0.30 || d.EffectiveBlockThreshold() != 0.75 ||
-			d.EffectiveTimeoutSeconds() != 3 || d.EffectiveOnConfidentBlock() != DecisionModelEscalate ||
+			d.EffectiveTimeoutSeconds() != 1 || d.EffectiveOnConfidentBlock() != DecisionModelEscalate ||
 			d.EffectiveAPIKeyEnv() != DefenseClawDecisionModelKeyEnv {
 			t.Fatalf("v%d: effective defaults = %+v", version, d)
 		}

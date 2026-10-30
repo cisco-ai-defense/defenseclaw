@@ -450,7 +450,7 @@
           "type": "number",
           "minimum": 0,
           "maximum": 30,
-          "default": 3
+          "default": 1
         },
         "allow_threshold": {
           "type": "number",

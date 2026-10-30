@@ -26,7 +26,7 @@ const DefenseClawDecisionModelKeyEnv = "DEFENSECLAW_DECISION_MODEL_KEY"
 const (
 	DefaultDecisionModelAllowThreshold = 0.30
 	DefaultDecisionModelBlockThreshold = 0.75
-	DefaultDecisionModelTimeoutSeconds = 3.0
+	DefaultDecisionModelTimeoutSeconds = 1.0
 	maxDecisionModelTimeoutSeconds     = 30.0
 
 	// DecisionModelEscalate sends a confident block to the LLM judge and
@@ -61,8 +61,8 @@ type DecisionModelConfig struct {
 	// Credential names the protected credential that holds the token on a
 	// standalone managed host. Ignored elsewhere.
 	Credential string `mapstructure:"credential" yaml:"credential,omitempty"`
-	// Timeout caps one decision-model call in seconds (0 = 3s). The judge
-	// keeps the rest of its own budget when the model is late.
+	// Timeout caps one decision-model call in seconds (0 = 1s). The gateway
+	// also caps it at a quarter of the judge's remaining time.
 	Timeout float64 `mapstructure:"timeout" yaml:"timeout,omitempty"`
 	// AllowThreshold: a risk at or below it is a confident allow and skips
 	// the judge (0 = 0.30). Risk is 1 - P(allow).

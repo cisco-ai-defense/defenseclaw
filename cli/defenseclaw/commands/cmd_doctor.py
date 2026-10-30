@@ -11803,12 +11803,16 @@ def _check_decision_model(cfg, r: _DoctorResult) -> None:
     if problem:
         _emit("fail", "Decision model", problem, r=r, remediation="defenseclaw setup decision-model")
         return
-    result = dmod.ping(dm, cfg.data_dir)
+    if dmod.managed_host(cfg) and dm.credential:
+        detail = f"{dm.model}: token from the managed credential {dm.credential} (the gateway checks it)"
+        _emit("pass", "Decision model", detail, r=r)
+        return
+    result = dmod.ping(dm, cfg.data_dir, send_token=not dmod.managed_host(cfg))
     if not result.ok:
         _emit(
             "warn",
             "Decision model",
-            f"{dm.model} at {dm.base_url}: {result.detail}; the LLM judge decides alone until it answers",
+            f"{dm.model}: {result.detail}; the LLM judge decides alone until it answers",
             r=r,
             remediation="defenseclaw setup decision-model --show --ping",
         )

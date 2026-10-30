@@ -82,7 +82,7 @@ Risk is `1 - P(allow)` from the model's answer.
 
 | The model says | DefenseClaw does |
 | --- | --- |
-| allow, risk at or below `allow_threshold` (0.30) | Allows the call. The judge does not run. |
+| allow, risk at or below `allow_threshold` (0.30) | Allows the call. The judge does not run, unless a rule flagged the call: then the rule finding stands and the judge still runs. |
 | block, risk at or above `block_threshold` (0.75) | Adds a HIGH `JUDGE-DECISION-MODEL` finding and runs the judge, which can raise it (`on_confident_block: escalate`, the default). With `decide`, the finding stands and the judge does not run. |
 | anything else | Runs the judge as usual. |
 
@@ -90,7 +90,7 @@ The rules always run first. A rule block is never revisited, and the decision mo
 
 ## When it is down
 
-A decision model that is unreachable, slower than `timeout` (3 seconds), or answers outside the protocol changes nothing: the judge decides that call exactly as it does without a decision model. Each call is recorded as a judge event of kind `decision_model` with its action (`allow`, `block`, `escalate` or `error`), latency and failure class, and the gateway log says `decision model unavailable (...); the LLM judge decides this call as before`.
+A decision model that is unreachable, slower than `timeout` (1 second, and never more than a quarter of the judge's remaining time), or answers outside the protocol changes nothing: the judge decides that call exactly as it does without a decision model. Each call is recorded as a judge event of kind `decision_model` with its action (`allow`, `block`, `escalate` or `error`), latency and failure class, and the gateway log says `decision model unavailable; the LLM judge decides this call as before`. After three failures in a row DefenseClaw stops calling it for 30 seconds, so an outage costs the judge no time.
 
 ## Skill scans
 
@@ -115,7 +115,7 @@ On a managed device the administrator sets `decision_model:` in the admin `confi
 | `decision_model.base_url` | empty | Full endpoint URL. `https`, or `http` to `127.0.0.1`, `::1` or `localhost`. No credentials in the URL. |
 | `decision_model.api_key_env` | `DEFENSECLAW_DECISION_MODEL_KEY` | Variable that holds the bearer token. An unset variable sends no token. |
 | `decision_model.credential` | empty | Managed devices only: protected credential that holds the token. |
-| `decision_model.timeout` | `3` | Seconds per call (up to 30). |
+| `decision_model.timeout` | `1` | Seconds per call (up to 30). The gateway also caps each call at a quarter of the time left for the judge. |
 | `decision_model.allow_threshold` | `0.30` | Risk at or below which an allow skips the judge. |
 | `decision_model.block_threshold` | `0.75` | Risk at or above which a block answer is a confident block. |
 | `decision_model.on_confident_block` | `escalate` | `escalate` or `decide`. |

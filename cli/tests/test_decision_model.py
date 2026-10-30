@@ -86,7 +86,7 @@ def test_defaults_are_off():
     assert not dm.enabled and not dm.active()
     assert dm.effective_allow_threshold() == 0.30
     assert dm.effective_block_threshold() == 0.75
-    assert dm.effective_timeout() == 3.0
+    assert dm.effective_timeout() == 1.0
     assert dm.effective_on_confident_block() == "escalate"
     assert dm.effective_api_key_env() == "DEFENSECLAW_DECISION_MODEL_KEY"
 

@@ -1425,7 +1425,12 @@ def setup_llm(
     default=None,
     help="Env var holding the bearer token (default DEFENSECLAW_DECISION_MODEL_KEY; local servers need none).",
 )
-@click.option("--timeout", type=float, default=None, help="Seconds one call may take (default 3).")
+@click.option(
+    "--timeout",
+    type=float,
+    default=None,
+    help="Seconds one call may take (default 1; never more than a quarter of the judge's time).",
+)
 @click.option(
     "--allow-threshold", type=float, default=None, help="Risk at or below this skips the judge (default 0.30)."
 )
@@ -1467,8 +1472,11 @@ def setup_decision_model(
     ``defenseclaw keys set DEFENSECLAW_DECISION_MODEL_KEY``.
     """
     from defenseclaw import decision_model as dmod
+    from defenseclaw.enforce import asset_lists
 
     cfg = app.cfg
+    if not show and asset_lists.is_secure_client(cfg):
+        raise click.ClickException("the decision model is not available on Secure Client deployments")
     if show:
         click.echo()
         ux.section("Decision model")
