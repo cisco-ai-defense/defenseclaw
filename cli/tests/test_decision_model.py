@@ -109,7 +109,8 @@ def test_release_config_upgrades_with_decision_model_off(home, release):
 
 
 def test_published_102_multi_connector_config_round_trips(home):
-    shutil.copy(REAL_102, home / "config.yaml")
+    # The published fixture's data_dir is the @HOME@ placeholder; point it at the test home.
+    (home / "config.yaml").write_text(REAL_102.read_text().replace("@HOME@", str(home)))
     cfg = config_module.load()
     assert not cfg.decision_model.enabled
     cfg.save()
