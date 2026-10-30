@@ -502,11 +502,26 @@ func TestCheckpointWALIfLargeBoundsALogOverTheLimitUnderAFlood(t *testing.T) {
 	defer stop()
 	passStarted := time.Now()
 	pass, err := store.CheckpointWALIfLarge(context.Background(), 0, testWALWriterBudget)
-	passEnded := time.Now()
-	stop()
 	if pass.LogBytes < WALEmergencyArmBytes || pass.LogBytes >= WALHardLimitBytes {
 		t.Fatalf("measured log = %d bytes; want emergency hold armed before the %d-byte ceiling at %d bytes", pass.LogBytes, WALHardLimitBytes, WALEmergencyArmBytes)
 	}
+	held := pass.WriterHeld
+	// A runner too slow to finish even this copy inside the fixed 1s cap gets
+	// the writer back at the cap, and the next over-limit pass retries
+	// (walEmergencyCatchUpCap). Allow that one retry, and only when the
+	// deferred pass gave the writer back at the cap plus the measured
+	// scheduling slack of one commit (T11b PR CI: a hosted Windows runner
+	// deferred at 1.0004s). The retry must restart the log.
+	if err == nil && pass.Bounded && pass.WriterDeferred && pass.WriterHeld >= walEmergencyCatchUpCap {
+		if slack := max(ordinary, 100*time.Millisecond); pass.WriterHeld > walEmergencyCatchUpCap+slack {
+			t.Fatalf("deferred emergency catch-up held the writer for %v; want it back at the %v cap plus %v slack", pass.WriterHeld, walEmergencyCatchUpCap, slack)
+		}
+		t.Logf("first pass deferred at the cap (%+v); retrying once", pass)
+		pass, err = store.CheckpointWALIfLarge(context.Background(), 0, testWALWriterBudget)
+		held = max(held, pass.WriterHeld)
+	}
+	passEnded := time.Now()
+	stop()
 	if err != nil || !pass.Bounded || !pass.Restarted || pass.WriterDeferred {
 		t.Fatalf("log over the limit under a flood: %+v, %v; want a bounded catch-up that restarts the log", pass, err)
 	}
@@ -521,9 +536,9 @@ func TestCheckpointWALIfLargeBoundsALogOverTheLimitUnderAFlood(t *testing.T) {
 	// commits, not the hold, took the time). A write that waits for more than
 	// one hold, or for the copy itself, still fails.
 	duringPass := longestFloodWrite(floodWrites(), passStarted, passEnded)
-	t.Logf("writer held %v; longest write during the pass %v, longest ordinary %v", pass.WriterHeld, duringPass, ordinary)
-	if allowed := pass.WriterHeld + 2*max(ordinary, 100*time.Millisecond); duringPass >= allowed {
-		t.Fatalf("hook audit write waited %v during the pass; want under %v (writer held %v, longest ordinary commit %v)", duringPass, allowed, pass.WriterHeld, ordinary)
+	t.Logf("writer held %v; longest write during the pass %v, longest ordinary %v", held, duringPass, ordinary)
+	if allowed := held + 2*max(ordinary, 100*time.Millisecond); duringPass >= allowed {
+		t.Fatalf("hook audit write waited %v during the pass; want under %v (writer held %v, longest ordinary commit %v)", duringPass, allowed, held, ordinary)
 	}
 	if store.WALOverLimit() {
 		t.Fatal("a bounded catch-up that restarted the log left the store marked over the WAL limit")

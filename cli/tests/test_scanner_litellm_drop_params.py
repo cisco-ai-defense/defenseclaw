@@ -61,7 +61,9 @@ class DropUnsupportedParamsTest(unittest.TestCase):
             seen.append(litellm.drop_params)
             return []
 
-        with patch("defenseclaw.scanner.mcp.os.name", "posix"), \
+        # The launcher check reads PATH (npx.cmd on Windows); it is not under
+        # test here, so admit the entry on every OS.
+        with patch("defenseclaw.scanner.mcp.mcp_scan_refusal", return_value=None), \
                 patch.object(MCPScannerWrapper, "_scan_local", side_effect=scan_local):
             wrapper.scan("local-srv", entry)
         self.assertEqual(seen, [True])

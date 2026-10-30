@@ -1109,7 +1109,9 @@ def test_catalog_load_intent_for_targets_connector_and_restores(model_factory, b
 def test_skills_source_path_keeps_the_actions_column_inside_80_columns(monkeypatch) -> None:
     """GAP-2624: a full /home/<user>/... skill source or a long skill name pushed Actions off an 80x24 screen."""
 
+    # os.path.expanduser("~") reads HOME on POSIX and USERPROFILE on Windows.
     monkeypatch.setenv("HOME", "/home/fcd-u3")
+    monkeypatch.setenv("USERPROFILE", "/home/fcd-u3")
     panel = SkillsPanelModel()
     names = ("imagegen", "openai-docs", "skill-installer", "a-very-long-hermes-skill-name-xyz")
     panel.apply_loaded(
