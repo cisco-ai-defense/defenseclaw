@@ -108,6 +108,9 @@ type LLMJudge struct {
 	provider     LLMProvider
 	rp           *guardrail.RulePack
 	secureClient bool
+	// decision is the decision model in front of the tool-call judge; nil
+	// when decision_model is off.
+	decision *decisionModel
 
 	toolContextMu sync.Mutex
 	toolContext   map[string]toolJudgeSessionContext
@@ -2240,7 +2243,14 @@ func (j *LLMJudge) prepareToolJudgeSample(ctx context.Context, toolName, args st
 	return j.toolJudgeContextSample(ctx, toolName, args), true
 }
 
+// runToolJudgeSample judges one prepared tool call: the decision model
+// first when one is configured (decision_model.go), then the LLM judge.
 func (j *LLMJudge) runToolJudgeSample(ctx context.Context, toolName, args, sample string) *ScanVerdict {
+	return j.runToolDecision(ctx, toolName, args, sample)
+}
+
+// runToolJudgeLLM is the LLM tool-call judge.
+func (j *LLMJudge) runToolJudgeLLM(ctx context.Context, toolName, args, sample string) *ScanVerdict {
 
 	timeout := time.Duration(j.cfg.Timeout) * time.Second
 	if timeout <= 0 {

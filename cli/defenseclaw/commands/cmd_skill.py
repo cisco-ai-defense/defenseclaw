@@ -1725,12 +1725,15 @@ def _build_skill_scanner(
     if cfg.use_llm != effective:
         cfg = dataclasses.replace(cfg, use_llm=effective)
 
+    from defenseclaw.decision_model import skill_scanner_options
+
     scanner = SkillScannerWrapper(
         cfg,
         app.cfg.effective_inspect_llm(),
         app.cfg.cisco_ai_defense,
         llm=llm,
         secure_client=secure_client,
+        decision_model=None if secure_client else skill_scanner_options(app.cfg),
     )
     # R4: overlay the guardrail rule pack (and guardrail.rules) so `skill scan`
     # flags what the gateway's rule lanes would catch, and what the install
@@ -3945,6 +3948,15 @@ def _safe_tar_extract(
                             dst.write(chunk)
 
 
+def _decision_model_line(dm: dict) -> str:
+    """One line for the decision model's advisory skill score."""
+    model = dm.get("model") or "decision model"
+    if dm.get("status") == "ok" and isinstance(dm.get("probability"), (int, float)):
+        return f"{model} scored {float(dm['probability']):.2f} unsafe (advisory only; it does not change the verdict)"
+    reason = dm.get("reason") or dm.get("status") or "no answer"
+    return f"{model} gave no score ({reason}); the verdict is unchanged"
+
+
 def _print_result(name: str, result) -> None:
     click.echo(f"  {ux._style('Skill:', fg='bright_black', bold=True)}    {name}")
     click.echo(f"  {ux._style('Target:', fg='bright_black', bold=True)}   {result.target}")
@@ -3956,6 +3968,9 @@ def _print_result(name: str, result) -> None:
             f"  {ux._style('Scanner:', fg='bright_black', bold=True)}  "
             f"policy {ran_with.get('policy', '')}, judge {ran_with.get('judge', 'off')}"
         )
+        dm = ran_with.get("decision_model")
+        if isinstance(dm, dict):
+            click.echo(f"  {ux._style('Decision model:', fg='bright_black', bold=True)} {_decision_model_line(dm)}")
 
     if result.is_clean():
         ux.ok("Verdict:  CLEAN", indent="  ")

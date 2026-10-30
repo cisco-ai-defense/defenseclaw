@@ -1920,6 +1920,13 @@ func buildSharedJudge(cfg *config.Config, rp *guardrail.RulePack, providers *gen
 		return nil, unavailable, nil
 	}
 	judge.secureClient = cfg.SecureClientIntegration()
+	if !judge.secureClient {
+		judge.decision = newDecisionModel(cfg, dotenvPath)
+		if judge.decision != nil {
+			fmt.Fprintf(os.Stderr, "[sidecar] decision model enabled in front of the tool-call judge (model=%s, allow<=%.2f, block>=%.2f)\n",
+				judge.decision.model, judge.decision.allowAt, judge.decision.blockAt)
+		}
+	}
 
 	features := "tool-result-pii"
 	if cfg.Guardrail.Judge.ToolInjection {
@@ -2621,7 +2628,8 @@ func judgeNeedsRebuild(oldCfg, newCfg *config.Config, rulePackChanged bool, oldP
 		oldProviders.digest() != newProviders.digest() ||
 		!reflect.DeepEqual(oldCfg.LLM, newCfg.LLM) ||
 		!reflect.DeepEqual(oldCfg.LLMProviders, newCfg.LLMProviders) ||
-		!reflect.DeepEqual(oldCfg.Guardrail.Judge, newCfg.Guardrail.Judge)
+		!reflect.DeepEqual(oldCfg.Guardrail.Judge, newCfg.Guardrail.Judge) ||
+		!reflect.DeepEqual(oldCfg.DecisionModel, newCfg.DecisionModel)
 }
 
 func apiNeedsRestart(oldCfg, newCfg *config.Config) bool {

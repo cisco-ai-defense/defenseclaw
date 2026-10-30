@@ -99,7 +99,7 @@ class ScannerCommandIntegrationTests(unittest.TestCase):
     def test_doctor_executes_resolved_managed_skill_launcher(self, _resolve_binary, _lexists, mock_run):
         mock_run.return_value = SimpleNamespace(
             returncode=0,
-            stdout="skill-scanner 2.2.1\n",
+            stdout="skill-scanner 2.3.2\n",
             stderr="",
         )
         cfg = SimpleNamespace(
@@ -117,7 +117,7 @@ class ScannerCommandIntegrationTests(unittest.TestCase):
             r"C:\managed\.venv\Scripts\skill-scanner.exe",
             result.checks[0]["detail"],
         )
-        self.assertIn("cisco-ai-skill-scanner 2.2.1", result.checks[0]["detail"])
+        self.assertIn("cisco-ai-skill-scanner 2.3.2", result.checks[0]["detail"])
         mock_run.assert_called_once()
         self.assertEqual(
             mock_run.call_args.args[0],

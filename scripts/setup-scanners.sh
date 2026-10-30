@@ -32,8 +32,8 @@ fi
 
 # The same scanner versions as the DefenseClaw release (pyproject.toml).
 # mcp-scanner stays on 4.3.0: every 4.8.x pins litellm==1.93.0, which is
-# vulnerable to CVE-2026-84377. skill-scanner 2.2.1 needs Python 3.11+.
-SKILL_SCANNER_VERSION=2.2.1
+# vulnerable to CVE-2026-84377. skill-scanner 2.3.2 needs Python 3.11+.
+SKILL_SCANNER_VERSION=2.3.2
 MCP_SCANNER_VERSION=4.3.0
 
 echo ""

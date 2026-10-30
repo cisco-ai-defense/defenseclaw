@@ -340,6 +340,12 @@ type Config struct {
 	// source bytes, not viper, so map keys keep their case.
 	LLMProviders LLMProvidersConfig `mapstructure:"-" yaml:"llm_providers,omitempty"`
 
+	// DecisionModel is the unified decision model (System One protocol):
+	// the guardrail's fast first pass in front of the LLM judge on tool
+	// calls, and the skill scanner's advisory score. Off by default. See
+	// decision_model.go.
+	DecisionModel DecisionModelConfig `mapstructure:"decision_model" yaml:"decision_model,omitempty"`
+
 	DataDir string `mapstructure:"data_dir"              yaml:"data_dir"`
 	AuditDB string `mapstructure:"audit_db"         yaml:"audit_db"`
 	// JudgeBodiesDB is the standalone SQLite file that holds
@@ -3153,6 +3159,12 @@ func loadConfigSourceCheckedWithLayout(
 		}
 		return nil, fmt.Errorf("config: guardrail: %w", err)
 	}
+	if err := cfg.DecisionModel.Validate(); err != nil {
+		if ReportConfigLoadError != nil {
+			ReportConfigLoadError(context.Background(), "decision_model_invalid")
+		}
+		return nil, fmt.Errorf("config: decision_model: %w", settingErrorAt("decision_model", err))
+	}
 	if err := cfg.ValidateGuardrailProfiles(); err != nil {
 		if ReportConfigLoadError != nil {
 			ReportConfigLoadError(context.Background(), "guardrail_invalid")
@@ -3936,6 +3948,7 @@ func setDefaultsForPlatform(dataDir, goos string, deterministic bool) {
 	viper.SetDefault("guardrail.rule_pack_dir", join(dataDir, "policies", "guardrail", "default"))
 	viper.SetDefault("guardrail.hilt.enabled", false)
 	viper.SetDefault("guardrail.hilt.min_severity", "HIGH")
+	viper.SetDefault("decision_model.enabled", false)
 	viper.SetDefault("guardrail.judge.enabled", false)
 	viper.SetDefault("guardrail.judge.injection", true)
 	viper.SetDefault("guardrail.judge.pii", true)

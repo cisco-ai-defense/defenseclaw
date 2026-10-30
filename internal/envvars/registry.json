@@ -3323,6 +3323,30 @@
       "since": "0.3.0"
     },
     {
+      "name": "DEFENSECLAW_DECISION_MODEL_KEY",
+      "category": "credential",
+      "purpose": "Canonical env-var name for the decision model bearer token (decision_model.api_key_env when empty). Optional: a local System One server needs none. Value MUST live in env / .env, not in config.yaml.",
+      "default": "unset",
+      "accepted_values": [
+        "bearer token string",
+        "unset"
+      ],
+      "security_impact": "medium",
+      "surface_in_doctor": false,
+      "managed": "ignore",
+      "consumers": [
+        {
+          "location": "internal/config/decision_model.go",
+          "description": "ResolvedDecisionModelKey: key store, then environment; a standalone managed host reads decision_model.credential instead"
+        },
+        {
+          "location": "cli/defenseclaw/credentials.py",
+          "description": "Credentials registry entry for decision_model.api_key_env"
+        }
+      ],
+      "since": "1.0.6"
+    },
+    {
       "name": "DEFENSECLAW_LLM_KEY",
       "category": "credential",
       "purpose": "Canonical env-var name for the unified LLM key. Value MUST live in env / .env, not in code or config.yaml.",

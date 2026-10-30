@@ -11789,6 +11789,38 @@ def _llm_identity(llm) -> tuple[str, str, str, str]:
     )
 
 
+def _check_decision_model(cfg, r: _DoctorResult) -> None:
+    """``Decision model`` row: one benign System One request when
+    ``decision_model`` is on. Silent while it is off (the default). An
+    unreachable model warns, never fails: the LLM judge then decides alone,
+    as it does without one."""
+    dm = getattr(cfg, "decision_model", None)
+    if dm is None or not dm.enabled:
+        return
+    from defenseclaw import decision_model as dmod
+
+    problem = dm.validation_error()
+    if problem:
+        _emit("fail", "Decision model", problem, r=r, remediation="defenseclaw setup decision-model")
+        return
+    result = dmod.ping(dm, cfg.data_dir)
+    if not result.ok:
+        _emit(
+            "warn",
+            "Decision model",
+            f"{dm.model} at {dm.base_url}: {result.detail}; the LLM judge decides alone until it answers",
+            r=r,
+            remediation="defenseclaw setup decision-model --show --ping",
+        )
+        return
+    detail = f"{dm.model}: {result.detail}"
+    note = dmod.judge_note(cfg)
+    if note:
+        _emit("warn", "Decision model", detail + "; " + note, r=r)
+        return
+    _emit("pass", "Decision model", detail, r=r)
+
+
 def _check_llm_reachable(cfg, r: _DoctorResult) -> None:
     """One-shot ``llm.ping`` against the guardrail's resolved LLM.
 
@@ -14478,6 +14510,7 @@ def doctor(
     r.set_section("credentials")
     _check_llm_api_key(cfg, r)
     _check_llm_reachable(cfg, r)
+    _check_decision_model(cfg, r)
     _check_private_upstream_refusals(cfg, r)
     if not _check_judge_running(sidecar_health, r):
         _check_judge_calls(cfg, r)

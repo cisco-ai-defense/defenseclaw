@@ -1971,6 +1971,7 @@ func diffConfigs(oldCfg, newCfg *config.Config) ConfigDiff {
 	add("notifications", oldCfg.Notifications, newCfg.Notifications)
 	add("routing", oldCfg.Routing, newCfg.Routing)
 	add("llm_providers", oldCfg.LLMProviders, newCfg.LLMProviders)
+	add("decision_model", oldCfg.DecisionModel, newCfg.DecisionModel)
 	add("update", oldCfg.Update, newCfg.Update)
 	add("environment", oldCfg.Environment, newCfg.Environment)
 	add("tenant_id", oldCfg.TenantID, newCfg.TenantID)
@@ -2061,7 +2062,10 @@ func diffConfigs(oldCfg, newCfg *config.Config) ConfigDiff {
 		// restarts in-process for llm, watch and scanners (watcherRestart),
 		// and the API and hook scans build their scanners from the live
 		// config per request. connector_hooks has no gateway reader.
-		"llm":             {},
+		"llm": {},
+		// The decision model rides on the judge, which is rebuilt for it
+		// (judgeNeedsRebuild); the skill scanner reads it per scan.
+		"decision_model":  {},
 		"scanners":        {},
 		"watch":           {},
 		"connector_hooks": {},

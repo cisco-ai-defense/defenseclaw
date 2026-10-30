@@ -339,6 +339,7 @@ func TestDefenseClawConfigV8SchemaIdentityAndClosure(t *testing.T) {
 		"routing",
 		"admission",
 		"llm_providers",
+		"decision_model",
 		"update",
 		"fleet",
 	}

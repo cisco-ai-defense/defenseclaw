@@ -493,6 +493,16 @@ def _inspect_llm_key(cfg: Config) -> Requirement:
     return Requirement.REQUIRED
 
 
+def _decision_model_key(cfg: Config) -> Requirement:
+    """The decision model's bearer token is optional: a local System One
+    server needs none, a hosted one does. Tracked only while the decision
+    model is on."""
+    dm = getattr(cfg, "decision_model", None)
+    if dm is None or not dm.active():
+        return Requirement.NOT_USED
+    return Requirement.OPTIONAL
+
+
 # --- effective env-name overrides ---
 #
 # These mirror the predicates and answer "what env var did the operator
@@ -546,6 +556,11 @@ def _galileo_env(cfg: Config) -> str:
 
 def _inspect_llm_env(cfg: Config) -> str:
     return cfg.resolve_llm("scanners.skill").api_key_env
+
+
+def _decision_model_env(cfg: Config) -> str:
+    dm = getattr(cfg, "decision_model", None)
+    return (dm.api_key_env or "").strip() if dm is not None else ""
 
 
 # ---------------------------------------------------------------------------
@@ -630,6 +645,16 @@ CREDENTIALS: tuple[CredentialSpec, ...] = (
         ),
         required=_inspect_llm_key,
         effective_env_name=_inspect_llm_env,
+    ),
+    CredentialSpec(
+        env_name="DEFENSECLAW_DECISION_MODEL_KEY",
+        feature="decision_model",
+        description=(
+            "Bearer token for the decision model endpoint (decision_model.base_url). "
+            "Optional: a local System One server needs none."
+        ),
+        required=_decision_model_key,
+        effective_env_name=_decision_model_env,
     ),
 )
 

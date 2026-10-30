@@ -1411,6 +1411,138 @@ def setup_llm(
         _run_llm_ping(cfg.resolve_llm(target_path))
 
 
+@setup.command("decision-model")
+@click.option("--show", is_flag=True, default=False, help="Print the current decision model settings and exit.")
+@click.option("--enable/--disable", "enabled", default=None, help="Turn the decision model on or off.")
+@click.option("--model", default=None, help="Model name the System One endpoint serves (sent in each request).")
+@click.option(
+    "--base-url",
+    default=None,
+    help="Full endpoint URL, e.g. http://127.0.0.1:8791/v1/systemone. https anywhere, http only to loopback.",
+)
+@click.option(
+    "--api-key-env",
+    default=None,
+    help="Env var holding the bearer token (default DEFENSECLAW_DECISION_MODEL_KEY; local servers need none).",
+)
+@click.option("--timeout", type=float, default=None, help="Seconds one call may take (default 3).")
+@click.option("--allow-threshold", type=float, default=None, help="Risk at or below this skips the judge (default 0.30).")
+@click.option("--block-threshold", type=float, default=None, help="Risk at or above this is a confident block (default 0.75).")
+@click.option(
+    "--on-confident-block",
+    type=click.Choice(["escalate", "decide"], case_sensitive=False),
+    default=None,
+    help="escalate (default): the judge still checks a confident block. decide: the block stands without the judge.",
+)
+@click.option("--ping/--no-ping", "run_ping", default=False, help="After saving, send one benign request to check the endpoint.")
+@click.option("--non-interactive", "--accept-defaults", is_flag=True, help="Use flags instead of prompts.")
+@pass_ctx
+def setup_decision_model(
+    app: AppContext,
+    show: bool,
+    enabled: bool | None,
+    model: str | None,
+    base_url: str | None,
+    api_key_env: str | None,
+    timeout: float | None,
+    allow_threshold: float | None,
+    block_threshold: float | None,
+    on_confident_block: str | None,
+    run_ping: bool,
+    non_interactive: bool,
+) -> None:
+    """Configure the unified decision model (``decision_model:``).
+
+    A small, fast model that speaks the System One protocol. The guardrail
+    runs it in front of the LLM judge on tool calls: it allows the clear
+    benign calls itself and sends the rest to the judge. ``skill scan``
+    records its advisory score. Off by default; when it is down, the judge
+    decides as before. The token, if any, goes in ~/.defenseclaw/.env with
+    ``defenseclaw keys set DEFENSECLAW_DECISION_MODEL_KEY``.
+    """
+    from defenseclaw import decision_model as dmod
+
+    cfg = app.cfg
+    if show:
+        click.echo()
+        ux.section("Decision model")
+        for label, value in dmod.summary_rows(cfg):
+            click.echo(f"    {ux.dim(label + ':')} {value}")
+        note = dmod.judge_note(cfg)
+        if note:
+            ux.subhead(note)
+        ux.subhead("To change: run 'defenseclaw setup decision-model' without --show.")
+        return
+
+    if api_key_env is not None and api_key_env.strip():
+        api_key_env = _validated_api_key_env_name(
+            api_key_env, "'--api-key-env'", dmod.DECISION_MODEL_KEY_ENV
+        )
+    flags_given = any(v is not None for v in (enabled, model, base_url, api_key_env, timeout,
+                                              allow_threshold, block_threshold, on_confident_block))
+    if not non_interactive and not flags_given:
+        dm = cfg.decision_model
+        click.echo()
+        terminal_checkbox.restore_line_prompt_mode()
+        ux.section("Decision model")
+        ux.subhead("A fast model in front of the LLM judge: it allows the clear benign tool calls")
+        ux.subhead("itself and sends the rest to the judge. Benchmarks: " + dmod.BENCHMARK_URL)
+        click.echo()
+        enabled = click.confirm(f"  {dmod.INIT_QUESTION}", default=dm.enabled)
+        if enabled:
+            base_url = click.prompt("  Endpoint URL", default=dm.base_url or dmod.DEFAULT_BASE_URL).strip()
+            model = click.prompt("  Model name", default=dm.model or "").strip()
+            api_key_env = click.prompt(
+                "  Token env var (leave the default for a local server)",
+                default=dm.effective_api_key_env(),
+            ).strip()
+    elif enabled is None and (base_url or model):
+        # Naming an endpoint or model on the command line turns it on.
+        enabled = True
+    previous = "on" if cfg.decision_model.enabled else "off"
+    try:
+        updated = dmod.apply_settings(
+            cfg,
+            enabled=enabled,
+            model=model,
+            base_url=base_url,
+            api_key_env=api_key_env,
+            timeout=timeout,
+            allow_threshold=allow_threshold,
+            block_threshold=block_threshold,
+            on_confident_block=on_confident_block,
+        )
+    except dmod.DecisionModelError as exc:
+        raise click.ClickException(str(exc)) from exc
+    cfg.save()
+    if app.logger:
+        from defenseclaw.commands._audit_notice import saved_change_audit
+
+        details = (
+            f"enabled={'true' if updated.enabled else 'false'} previous={previous} "
+            f"model={''.join(updated.model.split()) or '(unset)'} api_key_env={updated.effective_api_key_env()}"
+        )
+        try:
+            saved_change_audit(app.logger).log_config_change("decision_model", details)
+        except CanonicalObservabilityError as exc:
+            ux.echo(f"  ⚠ Change saved, but the gateway did not confirm the audit event ({exc}).", err=True)
+    click.echo()
+    ux.ok(f"Saved to {config_path_for_data_dir(cfg.data_dir)}")
+    for label, value in dmod.summary_rows(cfg):
+        ux.kv(label, value)
+    note = dmod.judge_note(cfg)
+    if note:
+        ux.subhead(note)
+    click.echo()
+    ux.subhead("The running gateway applies it without a restart.")
+    if run_ping and updated.active():
+        result = dmod.ping(updated, cfg.data_dir)
+        if result.ok:
+            ux.ok(f"Decision model reachable: {result.detail}")
+        else:
+            ux.warn(f"Decision model not reachable: {result.detail}; the LLM judge decides alone until it is")
+
+
 @setup.command("skill-scanner")
 @click.option("--use-llm/--no-use-llm", default=None, help="Enable (or disable) the LLM analyzer")
 @click.option("--use-behavioral/--no-use-behavioral", default=None, help="Enable (or disable) the behavioral analyzer")

@@ -28,7 +28,7 @@ func TestGAP1527LauncherRunsTheInstalledRuntime(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(bin, "python3.13"), []byte("#!/bin/sh\nprintf '%s\\n' \"$@\"\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	manifest := `{"schema_version": 1, "python": "python/bin/python3.13", "versions": {"python": "3.13.16", "skill-scanner": "2.2.1"}}`
+	manifest := `{"schema_version": 1, "python": "python/bin/python3.13", "versions": {"python": "3.13.16", "skill-scanner": "2.3.2"}}`
 	if err := os.WriteFile(filepath.Join(root, "runtime.json"), []byte(manifest), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -46,7 +46,7 @@ func TestGAP1527LauncherRunsTheInstalledRuntime(t *testing.T) {
 		t.Fatalf("interpreter arguments = %q", lines)
 	}
 	stdout.Reset()
-	if code := run([]string{"--version"}, &stdout, &stderr); code != 0 || !strings.Contains(stdout.String(), "skill-scanner 2.2.1") {
+	if code := run([]string{"--version"}, &stdout, &stderr); code != 0 || !strings.Contains(stdout.String(), "skill-scanner 2.3.2") {
 		t.Fatalf("--version = %d %q", code, stdout.String())
 	}
 
