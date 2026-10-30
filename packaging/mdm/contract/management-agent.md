@@ -104,6 +104,35 @@ or an exit code bumps it.
 `exit-codes.md` lists the exit codes and the MDM wrapper codes;
 `detection.md` covers inventory detection.
 
+### What to forward
+
+Some members name accounts or hold free text: warning and error messages,
+`enrollment.accounts`, `services[]`, `changes`,
+`sessions_restart_required.entries`, a receipt's `actor` and `principal`,
+and the bundle `created_by` and `change_summary`. Keep them on the device.
+`forward/` holds one closed schema per document with only the members that
+are safe to send off the device:
+
+| Forward schema (`forward/`) | Projects |
+|---|---|
+| `lifecycle-result-forward.schema.json` | `bundle apply`, `<os> status`, `verify`, `ensure` |
+| `bundle-verify-forward.schema.json` | `bundle verify --json` |
+| `bundle-status-forward.schema.json` | `bundle status --json` |
+| `bundle-receipt-forward.schema.json` | receipt files (4.9) |
+| `identity-refresh-forward.schema.json` | `enterprise identity refresh --json` (from 1.0.6) |
+
+They list only DefenseClaw ids, bundle and receipt ids, the agent's own
+`delivery_id`, digests, counts, codes, booleans, enums, versions and times.
+No account name or identifier passes: no user, uid, SID, UPN or group.
+
+Project a document before you send it: keep the members the forward schema
+lists, and drop every other member and every value outside its pattern or
+enum. Do not reject the document. A member that a newer DefenseClaw adds is
+then dropped, not an error. `forward/project.py` is a reference projection
+(Python standard library only). The contract tests project a full document
+from Linux, macOS and Windows through each forward schema and check that no
+name remains.
+
 ## 1. Binaries and paths
 
 | | Linux | macOS | Windows |
@@ -520,6 +549,21 @@ Exit 0.
   never a value. Store the signed values (4.7: a value the confirmed bundle
   does not sign needs `--bundle` with this bundle), or sign the bundle again
   with `--secret-file` for the stored ones.
+- Every credential reference, `secret_refs` (absent on builds before 1.0.6):
+  present exactly when `secret_refs_missing` is, one entry per `secret_refs`
+  entry of the bundle in manifest order: `name`, `required`, `present` (the
+  device stores a value) and `value_match` (the stored value is the one the
+  bundle signs). Names and booleans only, never a value or a digest. Every
+  listed entry binds a value: a bundle entry that signs only a name is
+  refused `secret_ref_unbound` before the store is read.
+- When a credential change is checked: `enterprise secret set` refuses a
+  value the confirmed bundle does not sign. A value written to the
+  credential store by other means is not checked when the gateway reads it:
+  `bundle verify` of the confirmed bundle reports it (`secret_ref_mismatch`,
+  with the name in `secret_refs_mismatch` and `value_match` `false`), and the
+  next apply refuses until the signed value is stored again. Deliver
+  credentials only with `secret set`, and verify the confirmed bundle on a
+  schedule to find such a change.
 - Restart prediction, `restart_prediction` (absent on builds before 1.0.3):
   on a device, for `verified` and `already_applied`, whether the apply
   restarts the gateway, from the installed config.yaml and the bundle
@@ -1526,7 +1570,22 @@ Later bundles go through 5.2.
 
 On Linux and macOS, DefenseClaw 1.0.4 and later refuse to install a release
 below the confirmed bundle's `min_product_version` (`product_floor_refused`).
-The rollback marker and `--allow-downgrade` do not lift it.
+The rollback marker and `--allow-downgrade` do not lift it. Windows Setup
+1.0.6 and later refuses the same way (exit 1603) on `/install`, `/upgrade`,
+`/repair` and `/ensure`, before it changes anything; a 1.0.5 or older Setup
+does not check the floor.
+
+Check the floor first, the package refusal is the second line: `bundle
+status` reports it as `current.min_product_version` (absent when the bundle
+sets none and on builds before 1.0.6). Compare it with the target version
+before you dispatch a downgrade; for a rollback to 1.0.4 it must be unset or
+at most 1.0.4, else deliver a bundle signed with a lower
+`--min-product-version` first. On a 1.0.4 or 1.0.5 device, `bundle status`
+has no such member and its `floor` is the bundle version floor, not the
+release floor: keep the release floor you signed and compare it with
+`--version-json` yourself. A 1.0.6 or later release that runs below the floor
+warns `product_below_floor` in `status`, `verify` and `bundle status`; the
+warning changes nothing on the device.
 
 The preinstall of a 1.0.4 or later package checks the floor before it replaces
 files, but only with a gateway that has the check: the installed gateway when

@@ -45,7 +45,7 @@ type bundleStatusResult struct {
 	// AnchorsSummary describes the installed trust anchors; absent when
 	// they are missing or fail their checks (see the warnings).
 	AnchorsSummary          *enterprisebundle.AnchorsSummary      `json:"anchors_summary,omitempty"`
-	Current                 *enterprisebundle.Ref                 `json:"current"`
+	Current                 *bundleStatusRef                      `json:"current"`
 	LastGood                *enterprisebundle.Ref                 `json:"last_good"`
 	Floor                   uint64                                `json:"floor"`
 	LastReceipt             *enterprisebundle.Receipt             `json:"last_receipt"`
@@ -64,6 +64,15 @@ type bundleStatusResult struct {
 	Applied        bool                       `json:"applied"`
 	Warnings       []enterprisebundle.Warning `json:"warnings"`
 	Errors         []bundleError              `json:"errors"`
+}
+
+// bundleStatusRef is the current bundle record of bundle status: the
+// bundle-state.json record unchanged, plus the release floor the confirmed
+// manifest signs (min_product_version, from 1.0.6), so a management agent
+// can compare it with a downgrade target before it dispatches one.
+type bundleStatusRef struct {
+	enterprisebundle.Ref
+	MinProductVersion string `json:"min_product_version,omitempty"`
 }
 
 func newEnterpriseBundleStatusCommand() *cobra.Command {
@@ -145,7 +154,18 @@ func bundleStatus(ctx context.Context, res *bundleStatusResult) error {
 	if err != nil {
 		return bundleStateError(err)
 	}
-	res.Current, res.LastGood, res.Floor = st.Current, st.LastGood, st.Floor
+	res.LastGood, res.Floor = st.LastGood, st.Floor
+	if st.Current != nil {
+		res.Current = &bundleStatusRef{Ref: *st.Current}
+		// The floor comes from the hash-pinned confirmed manifest; one
+		// that cannot be read leaves it out (status reports the store).
+		if floor, err := store.ConfirmedProductFloor(); err == nil {
+			res.Current.MinProductVersion = floor
+		}
+		if warning := store.ProductBelowFloorWarning(appVersion); warning != nil {
+			res.Warnings = append(res.Warnings, *warning)
+		}
+	}
 	receipts, err := store.Receipts()
 	if err != nil {
 		return bundleStateError(err)
@@ -289,7 +309,7 @@ func bundleStatus(ctx context.Context, res *bundleStatusResult) error {
 		if digest, rendered, err := currentBuildBundleDigest(ctx, store, st.Current); err == nil && digest == policy.EffectiveDigest {
 			if installed, err := bundleInstalledConfig(runtime.GOOS); err == nil && bytes.Equal(installed, rendered) {
 				res.Applied = true
-				current := *st.Current
+				current := *res.Current
 				current.EffectivePolicyDigest = digest
 				res.Current = &current
 				if res.Bundle != nil && res.Bundle.BundleID == current.BundleID && res.Bundle.Version == current.Version &&
@@ -423,7 +443,14 @@ func printStatusText(w io.Writer, res *bundleStatusResult) {
 		fmt.Fprintf(w, "%s: %s version %d, effective digest %s, confirmed %s\n", label, ref.BundleID, ref.Version,
 			enterprisestatus.ShortDigest(ref.EffectivePolicyDigest), ref.ConfirmedAt)
 	}
-	describe("Current", res.Current)
+	var current *enterprisebundle.Ref
+	if res.Current != nil {
+		current = &res.Current.Ref
+	}
+	describe("Current", current)
+	if res.Current != nil && res.Current.MinProductVersion != "" {
+		fmt.Fprintf(w, "Release floor: DefenseClaw %s or later\n", res.Current.MinProductVersion)
+	}
 	describe("Last good", res.LastGood)
 	fmt.Fprintf(w, "Version floor: %d\n", res.Floor)
 	if r := res.LastReceipt; r != nil {

@@ -167,6 +167,12 @@ func (l *lifecycle) readOnly(ctx context.Context) int {
 		r.AddWarning(codePackageInstallFailed, "the last package install, reinstall or upgrade did not apply: "+failure+
 			"; the deployment keeps running as it was. Fix that, then apply the package with `"+env.lifecycleCommand(ActionEnsure)+" --from-package`")
 	}
+	// A release below the confirmed bundle's floor (installed by a package
+	// that had no floor check) is reported, never repaired: a warning
+	// starts no repair, reinstall or fail-mode change.
+	if warning := env.bundleStore().ProductBelowFloorWarning(record.ProductVersion); warning != nil {
+		r.AddWarning(warning.Code, warning.Message)
+	}
 	strict := l.opts.Action == ActionVerify
 	if strict && pending == nil {
 		// The enumerator may have just rewritten the manifest (a fresh install

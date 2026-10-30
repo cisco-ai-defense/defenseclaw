@@ -1,0 +1,65 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://defenseclaw.cisco.com/schemas/enterprise/management/forward/identity-refresh-forward-v1.json",
+  "title": "forwardable identity refresh result",
+  "description": "Forwardable members of the enterprise identity refresh --json result (private #10, from 1.0.6): counts and codes only; changes[] (account ids and profiles) stays on the device. Forward schema (private #14 option A): the members a management agent may send off the device. Project with allowlist-and-drop (forward/project.py): a member not listed here, or a value outside its pattern or enum, is removed, never rejected, so members a newer DefenseClaw adds are not forwarded until this file lists them. Only DefenseClaw-minted ids, bundle and receipt ids, digests, counts, codes, booleans, enums, versions and times pass; account names and identifiers (user, uid, SID, UPN, group), paths and messages never do.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [],
+  "properties": {
+    "schema_version": {
+      "type": "integer"
+    },
+    "command": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_]{0,63}$"
+    },
+    "ok": {
+      "type": "boolean"
+    },
+    "refreshed": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "changed": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "failed": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "failed_codes": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "pattern": "^[a-z][a-z0-9_]{0,63}$"
+      },
+      "maxItems": 32
+    },
+    "warnings": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/message"
+      }
+    },
+    "errors": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/message"
+      }
+    }
+  },
+  "$defs": {
+    "message": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "code": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9_]{0,63}$"
+        }
+      }
+    }
+  }
+}

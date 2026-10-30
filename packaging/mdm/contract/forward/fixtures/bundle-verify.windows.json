@@ -1,0 +1,54 @@
+{
+  "schema_version": 1,
+  "command": "verify",
+  "ok": false,
+  "result": "refused",
+  "platform": "windows",
+  "anchors": "C:\\ProgramData\\Cisco\\DefenseClaw\\etc\\trust\\bundle-anchors.json",
+  "anchor_trust": "checked",
+  "bundle": {
+    "bundle_id": "b-01JAB3K9QX4M2N8P6R5T0V1WYZ",
+    "version": 14,
+    "tenant_id": "acme",
+    "device_group": "eng-dcad-alice",
+    "platforms": [
+      "windows"
+    ],
+    "created_at": "2026-10-30T09:00:00Z",
+    "created_by": "control-plane:acme/dcad-alice@dclab.test",
+    "change_summary": "Turn on inspection for S-1-5-21-3623811015-3361044348-30300820-1104",
+    "parent": "b-01JA9Z3K9QX4M2N8P6R5T0V1WY"
+  },
+  "signer_key_id": "acme-2026a",
+  "alg": "ed25519",
+  "floor": 13,
+  "floor_source": "last_confirmed_bundle",
+  "digest_verified": false,
+  "secret_refs_missing": [
+    "ai-defense-api-key"
+  ],
+  "secret_refs_mismatch": [],
+  "secret_refs": [
+    {
+      "name": "ai-defense-api-key",
+      "required": true,
+      "present": false,
+      "value_match": false
+    }
+  ],
+  "warnings": [
+    {
+      "code": "digest_unverifiable",
+      "platform": "windows",
+      "subject": "C:\\Users\\dcad-alice",
+      "message": "for dcad-alice"
+    }
+  ],
+  "errors": [
+    {
+      "code": "secret_ref_missing",
+      "path": "secret_refs",
+      "message": "this device has no credential ai-defense-api-key"
+    }
+  ]
+}

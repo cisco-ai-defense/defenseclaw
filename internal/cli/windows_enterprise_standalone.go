@@ -566,6 +566,25 @@ func refuseWindowsEnterpriseRepairFromAnotherRelease(action string, opts *window
 	return nil
 }
 
+// refuseWindowsEnterpriseBelowProductFloor refuses a Setup install, upgrade,
+// repair or ensure whose payload is below the release floor of the
+// confirmed signed bundle (windowsSetupProductFloorRefusal), before anything
+// is changed. The installed CLI (no payload) installs no release, and the
+// recovery of a pending transaction puts back what was there, so neither is
+// checked.
+func refuseWindowsEnterpriseBelowProductFloor(action string, opts *windowsEnterpriseLifecycleOptions) error {
+	switch action {
+	case "install", "upgrade", "repair", "ensure":
+	default:
+		return nil
+	}
+	if opts == nil || !windowsEnterpriseStandalone(opts) || len(missingWindowsEnterpriseSources(opts)) != 0 ||
+		windowsEnterpriseStandaloneRecoveryPending(opts) {
+		return nil
+	}
+	return windowsSetupProductFloorRefusal(opts.productVersion)
+}
+
 // windowsEnterpriseInstallerAction is the -Action value of installer args.
 func windowsEnterpriseInstallerAction(args []string) string {
 	for i := 0; i+1 < len(args); i++ {
@@ -644,6 +663,9 @@ func runWindowsEnterpriseStandaloneAction(
 		return writeWindowsEnterpriseStandalonePreflightFailure(cmd, action, opts, err)
 	}
 	if err := refuseWindowsEnterpriseRepairFromAnotherRelease(action, opts); err != nil {
+		return writeWindowsEnterpriseStandalonePreflightFailure(cmd, action, opts, err)
+	}
+	if err := refuseWindowsEnterpriseBelowProductFloor(action, opts); err != nil {
 		return writeWindowsEnterpriseStandalonePreflightFailure(cmd, action, opts, err)
 	}
 	if err := refuseUntrustedWindowsScannerRuntimeBeforeChange(canonicalWindowsEnterpriseAction(action), opts); err != nil {
@@ -758,6 +780,14 @@ func runWindowsEnterpriseStandaloneAction(
 	}
 	if (action == "status" || action == "verify") && report.Installed {
 		appendWindowsEnterpriseStatusAdvisories(ctx, result, report)
+		// A release below the confirmed bundle's floor (put there by a
+		// Setup without the floor check) is reported only: the warning
+		// starts no repair, reinstall or fail-mode change.
+		if store, err := bundleStore(); err == nil {
+			if warning := store.ProductBelowFloorWarning(report.InstalledVersion); warning != nil {
+				result.AddWarning(warning.Code, warning.Message)
+			}
+		}
 	}
 	if action == "status" || action == "verify" || action == "repair" {
 		settleWindowsEnterpriseHotConfigClosure(ctx, result, action)
@@ -3485,6 +3515,9 @@ func runWindowsEnterpriseStandaloneEnsure(
 		opts.bundle.ctx = ctx
 	}
 	defaultWindowsEnterpriseEnsurePayload(opts, script)
+	if err := refuseWindowsEnterpriseBelowProductFloor("ensure", opts); err != nil {
+		return writeWindowsEnterpriseStandalonePreflightFailure(cmd, "ensure", opts, err)
+	}
 	result := newWindowsEnterpriseStandaloneResult("ensure", opts)
 	// An ensure without CONFIG= or BUNDLE= on a bundle-mode device puts the
 	// confirmed bundle config back before it plans: the repair it may run
