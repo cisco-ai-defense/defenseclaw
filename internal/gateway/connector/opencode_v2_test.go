@@ -192,6 +192,7 @@ func TestOpenCodeV2VersionSelection(t *testing.T) {
 		{"2.0.0", openCodeV2ContractID, HookCompatibilityKnown},
 		{"2.1.4", openCodeV2ContractID, HookCompatibilityKnown},
 		{"2.2.0", openCodeV2ContractID, HookCompatibilityKnown},
+		{"2.2.3", openCodeV2ContractID, HookCompatibilityKnown},
 		{"3.0.0", "", HookCompatibilityUnknown},
 		{"vgit.5bba024", "", HookCompatibilityUnknown},
 		{"vgit.2fa91c0", "", HookCompatibilityUnknown},

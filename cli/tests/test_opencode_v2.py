@@ -16,7 +16,7 @@ from defenseclaw.inventory.claw_inventory import (
 
 @pytest.mark.parametrize(
     ("version", "contract"),
-    [("2.0.0", "opencode-hooks-v2"), ("2.1.4", "opencode-hooks-v2"), ("2.2.0", "opencode-hooks-v2")],
+    [("2.0.0", "opencode-hooks-v2"), ("2.1.4", "opencode-hooks-v2"), ("2.2.0", "opencode-hooks-v2"), ("2.2.3", "opencode-hooks-v2")],
 )
 def test_opencode_version_selects_its_own_api(version, contract):
     resolved = resolve_connector_contract("opencode", version)

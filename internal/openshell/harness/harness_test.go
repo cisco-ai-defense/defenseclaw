@@ -169,7 +169,7 @@ func TestInstallStepsPinContract(t *testing.T) {
 		{"codex-unpinned-digest", Codex, "0.150.0", nil, nil},
 		{"opencode-pin", OpenCode, "", []string{"'@opencode/cli@2.1.4'"}, nil},
 		{"opencode-base-1.2.18", OpenCode, "1.2.18", nil, ErrUnknownContract},
-		{"opencode-above-range", OpenCode, "2.2.0", nil, ErrUnknownContract},
+		{"opencode-above-range", OpenCode, "2.3.0", nil, ErrUnknownContract},
 		{"opencode-unpinned-digest", OpenCode, "2.1.5", nil, nil},
 		{"copilot-pin", Copilot, "", []string{"'@github/copilot@1.0.88'"}, nil},
 		{"copilot-base-1.0.16", Copilot, "1.0.16", nil, ErrUnknownContract},

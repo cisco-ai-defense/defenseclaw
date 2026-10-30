@@ -927,7 +927,7 @@ var builtinHookContracts = map[string][]HookContract{
 		Connector:               "opencode",
 		ContractID:              openCodeV2ContractID,
 		MinAgentVersion:         "2.0.0",
-		MaxAgentVersion:         "2.2.0",
+		MaxAgentVersion:         "2.3.0",
 		DefaultForUnversioned:   false,
 		HookScriptVersion:       "v7",
 		HookConfigPathTemplates: []string{"~/.config/opencode/plugins/defenseclaw.js"},
@@ -957,6 +957,7 @@ var builtinHookContracts = map[string][]HookContract{
 		Notes: []string{
 			"OpenCode v2 uses a default plugin definition with id and setup(ctx); ctx.tool.hook registers awaited execute.before and execute.after callbacks. Only the V2 API is exported; V1 implementations are not shipped.",
 			"Source reviewed at v2.0.0 (63f7ceecbed2d7d9a627518d935dd963b9d4ac9f) and dev/2.1.4 (f669c46c9604ea3d70b8a7ed1f0c10f3a5ac1f61): packages/plugin/src/promise/tool.ts and packages/core/src/tool.ts. https://opencode.ai/v2/docs/build/plugins/migrate-v1",
+			"2.2.3 (the npm @opencode/cli@2 release when 1.0.6 was cut) was checked live on Linux: the default plugin loads, execute.before rejects a blocked call before it runs, and execute.after results carry content parts (rel-1-0-6).",
 			"Before awaiting a verdict, the bridge detaches and deeply freezes the inspected arguments and freezes the event. Later hooks cannot substitute an uninspected tool or input. Context and MCP identity are resolved through the local plugin API with a bounded timeout.",
 			"The v2 result status, content and structured output are forwarded without inventing v1 output strings. After-hook and lifecycle events are observe-only. No native approval or model-traffic interception is claimed.",
 			"Configured local plugins are directories in v2. Managed installs register a directory with an index.js entrypoint. Every delivery mode uses this V2 entrypoint.",

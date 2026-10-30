@@ -270,7 +270,7 @@ const connectorSources: ConnectorSource[] = [
     id: 'opencode',
     integration: 'Plugin',
     minVersion: '2.0.0',
-    versionNote: 'V2-only preview contract covers 2.0.0 up to 2.2.0. Newer V2 minors are untested; V1 and unversioned git builds are refused. The historical V1 live-test ledger does not certify V2.',
+    versionNote: 'V2-only preview contract covers 2.0.0 up to 2.3.0 (2.2.3 checked live on Linux). Newer V2 minors are untested; V1 and unversioned git builds are refused. The historical V1 live-test ledger does not certify V2.',
     preview: true,
     route: MACHINE,
     routeNote: 'Machine policy through the managed OpenCode plugin that the standalone package installs; per-user when that plugin is missing.',

@@ -91,7 +91,7 @@ func TestPlatformHookContractsPreservePR655Bands(t *testing.T) {
 			{"hermes-hooks-v2", "0.21.0", "0.22.0", true, "v6", 23},
 		},
 		"antigravity": {{"antigravity-hooks-v2", "1.1.8", "", true, "v8", 5}},
-		"opencode":    {{"opencode-hooks-v2", "2.0.0", "2.2.0", false, "v7", 8}},
+		"opencode":    {{"opencode-hooks-v2", "2.0.0", "2.3.0", false, "v7", 8}},
 		"amp":         {{"amp-plugin-v1", "0.0.1785334225", "", true, "v2", 5}},
 	}
 
@@ -183,7 +183,7 @@ func TestHookContractResolution(t *testing.T) {
 		{"opencode_v1_refused", "opencode", "opencode 1.18.33", HookCompatibilityUnknown, "", "1.18.33"},
 		{"opencode_future_major_refused", "opencode", "opencode 3.0.0", HookCompatibilityUnknown, "", "3.0.0"},
 		{"opencode_current_pin", "opencode", "opencode 2.1.4", HookCompatibilityKnown, "opencode-hooks-v2", "2.1.4"},
-		{"opencode_next_minor_untested", "opencode", "opencode 2.2.0", HookCompatibilityKnown, "opencode-hooks-v2", "2.2.0"},
+		{"opencode_next_minor_untested", "opencode", "opencode 2.3.0", HookCompatibilityKnown, "opencode-hooks-v2", "2.3.0"},
 		{"opencode_unversioned_requires_override", "opencode", "", HookCompatibilityUnversioned, "opencode-hooks-v2", ""},
 		{"antigravity_before_documented_floor", "antigravity", "Antigravity CLI v1.1.7", HookCompatibilityUnknown, "", "1.1.7"},
 		{"antigravity_documented_minimum", "antigravity", "Antigravity CLI v1.1.8", HookCompatibilityKnown, "antigravity-hooks-v2", "1.1.8"},

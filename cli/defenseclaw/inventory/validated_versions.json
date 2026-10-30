@@ -154,7 +154,7 @@
           "run_url": ""
         }
       },
-      "notes": "V2-only source-reviewed contract >=2.0.0,<2.2.0, reviewed at 2.0.0 and 2.1.4. V1 certifications do not apply; authentic native official-client validation remains unrecorded and live=false."
+      "notes": "V2-only contract >=2.0.0,<2.3.0, source-reviewed at 2.0.0 and 2.1.4; 2.2.3 checked live on Linux (rel-1-0-6). V1 certifications do not apply; authentic native official-client validation remains unrecorded and live=false."
     },
     "antigravity": {
       "version_probe": "agy --version",

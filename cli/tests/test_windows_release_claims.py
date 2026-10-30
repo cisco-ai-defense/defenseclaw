@@ -413,7 +413,7 @@ def test_opencode_docs_exclude_unqualified_enforcement_media() -> None:
     assert set(by_id) == {"opencode-hooks-v2"}
     assert by_id["opencode-hooks-v2"]["agent_version"] == {
         "min_inclusive": "2.0.0",
-        "max_exclusive": "2.2.0",
+        "max_exclusive": "2.3.0",
     }
     assert "V2 support is currently a preview" in connector_page
     assert validated["live"] is False
