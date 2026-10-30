@@ -126,12 +126,12 @@ def test_ci_shards_slow_gateway_package_and_combines_go_coverage() -> None:
     assert "name: Go Test (remaining packages / shard ${{ matrix.shard }})" in workflow
     assert "GO_PACKAGE_SHARD: ${{ matrix.shard }}" in workflow
     assert "GO_PACKAGE_SHARDS: 12" in workflow
-    assert "GO_TEST_SHARDS: 20" in workflow
+    assert "GO_TEST_SHARDS: 24" in workflow
     assert "--exclude github.com/defenseclaw/defenseclaw/internal/audit" in workflow
     assert "--exclude github.com/defenseclaw/defenseclaw/internal/gateway" in workflow
     assert workflow.count("--timings scripts/test-timings/go-linux.json") == 3
-    # 20 gateway + 4 audit + 12 remaining-package shards, one profile each.
-    assert 'test "${#coverage_parts[@]}" -eq 36' in workflow
+    # 24 gateway + 4 audit + 12 remaining-package shards, one profile each.
+    assert 'test "${#coverage_parts[@]}" -eq 40' in workflow
     # checkptr in the transpiled SQLite doubled the cost of every race shard.
     # A hang fails at go test's -timeout, well inside the job's budget, and
     # go_test_report.py names the test still running.
