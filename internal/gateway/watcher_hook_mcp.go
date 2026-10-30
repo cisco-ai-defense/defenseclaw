@@ -37,8 +37,8 @@ func WatcherAdmitsOnlyHookReportedMCP(cfg *config.Config) bool {
 		return false
 	}
 	w := cfg.Gateway.Watcher
-	return !watcherUsesConnectorDirs(cfg) && !watcherUsesEnrolledUserDirs(cfg) &&
-		!(w.Skill.Enabled && len(w.Skill.Dirs) > 0) && !(w.Plugin.Enabled && len(w.Plugin.Dirs) > 0)
+	configuredDirs := (w.Skill.Enabled && len(w.Skill.Dirs) > 0) || (w.Plugin.Enabled && len(w.Plugin.Dirs) > 0)
+	return !configuredDirs && !watcherUsesConnectorDirs(cfg) && !watcherUsesEnrolledUserDirs(cfg)
 }
 
 // hookReportedMCPLimit bounds the servers a gateway keeps from hook reports.
