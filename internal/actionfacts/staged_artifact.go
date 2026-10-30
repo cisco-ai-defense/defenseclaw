@@ -10,16 +10,15 @@ import (
 	"encoding/json"
 	"net/netip"
 	"path"
-	"regexp"
 	"strings"
 	"unicode/utf8"
 )
 
 var (
-	stagedPOSIXPathPattern = regexp.MustCompile(
+	stagedPOSIXPathPattern = lazyMustCompile(
 		`/[A-Za-z0-9._@%+,=:-]+(?:/[A-Za-z0-9._@%+,=:-]+)+`,
 	)
-	stagedIPv4Pattern = regexp.MustCompile(
+	stagedIPv4Pattern = lazyMustCompile(
 		`(?:^|[^0-9])((?:[0-9]{1,3}\.){3}[0-9]{1,3})(?:[^0-9]|$)`,
 	)
 )

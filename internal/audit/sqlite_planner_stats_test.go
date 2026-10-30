@@ -322,6 +322,127 @@ func TestPlannerStatisticsYieldTheConnectionToAWaitingWrite(t *testing.T) {
 	}
 }
 
+// GAP-1790 (rc.10, managed RHEL, 6.8 GB store): the statements that queued
+// for the connection together with ANALYZE, and were still waiting once it
+// took it, are not new pool waits. The refresh kept the connection for 13 s
+// with five of them waiting, because it only looked for waits that started
+// after it held the connection, and the hook caller limit was full so none
+// did. ANALYZE now yields to them as well.
+func TestPlannerStatisticsYieldToStatementsQueuedBeforeIt(t *testing.T) {
+	store, cleanup := newTestStore(t)
+	defer cleanup()
+	ctx := context.Background()
+	rows := 0
+	logEvents := func(n int) {
+		t.Helper()
+		for i := 0; i < n; i++ {
+			if err := store.LogEvent(Event{Action: "hook_decision", Target: "planner-queued", Severity: "INFO", SessionID: "s"}); err != nil {
+				t.Fatalf("LogEvent: %v", err)
+			}
+		}
+		rows += n
+	}
+	logEvents(plannerStatsMinRows + 10)
+	if ran, err := store.RefreshPlannerStatistics(ctx); err != nil || !ran {
+		t.Fatalf("first statistics = (%t, %v), want taken", ran, err)
+	}
+	const queued = 16
+	previousConn, previousPhase := plannerStatsBeforeConnHook, plannerStatsAnalyzePhaseHook
+	t.Cleanup(func() {
+		plannerStatsBeforeConnHook, plannerStatsAnalyzePhaseHook = previousConn, previousPhase
+	})
+	// database/sql gives the released connection to any one waiter, so
+	// ANALYZE may be served last, with nobody left waiting: then the trial
+	// shows nothing and runs again.
+	for trial := 0; trial < 4; trial++ {
+		logEvents(rows)
+		var pending atomic.Int32
+		drained := make(chan struct{})
+		var connCalls, phaseCalls atomic.Int32
+		plannerStatsBeforeConnHook = func() {
+			if connCalls.Add(1) != 1 {
+				return
+			}
+			holder, err := store.db.Conn(ctx)
+			if err != nil {
+				t.Errorf("hold the connection: %v", err)
+				return
+			}
+			base := store.db.Stats().WaitCount
+			pending.Store(queued)
+			for i := 0; i < queued; i++ {
+				go func() {
+					if err := store.LogEvent(Event{Action: "hook_decision", Target: "planner-queued-hook", Severity: "INFO", SessionID: "s"}); err != nil {
+						t.Errorf("queued hook write: %v", err)
+					}
+					if pending.Add(-1) == 0 {
+						close(drained)
+					}
+				}()
+			}
+			for store.db.Stats().WaitCount < base+queued {
+				time.Sleep(time.Millisecond)
+			}
+			// Release once ANALYZE has queued with them.
+			go func() {
+				for store.db.Stats().WaitCount < base+queued+1 {
+					time.Sleep(time.Millisecond)
+				}
+				_ = holder.Close()
+			}()
+		}
+		held := make(chan int32, 1)
+		plannerStatsAnalyzePhaseHook = func(ctx context.Context) {
+			if phaseCalls.Add(1) != 1 {
+				return
+			}
+			held <- pending.Load()
+			select {
+			case <-ctx.Done():
+			case <-time.After(5 * time.Second):
+			}
+		}
+		type refresh struct {
+			ran bool
+			err error
+		}
+		first := make(chan refresh, 1)
+		go func() {
+			ran, err := store.RefreshPlannerStatistics(ctx)
+			first <- refresh{ran, err}
+		}()
+		var waiting int32
+		select {
+		case waiting = <-held:
+		case <-time.After(10 * time.Second):
+			t.Fatal("ANALYZE never started")
+		}
+		started := time.Now()
+		select {
+		case <-drained:
+		case <-time.After(10 * time.Second):
+			t.Fatal("queued hook writes never finished")
+		}
+		waited := time.Since(started)
+		got := <-first
+		if waiting == 0 {
+			continue
+		}
+		if waited > 2*time.Second {
+			t.Fatalf("%d hook writes queued with ANALYZE waited %s behind it", waiting, waited)
+		}
+		if got.err != nil || got.ran {
+			t.Fatalf("interrupted refresh = (%t, %v), want (false, nil)", got.ran, got.err)
+		}
+		plannerStatsBeforeConnHook, plannerStatsAnalyzePhaseHook = previousConn, previousPhase
+		if ran, err := store.RefreshPlannerStatistics(ctx); err != nil || !ran {
+			t.Fatalf("next refresh = (%t, %v), want the statistics taken", ran, err)
+		}
+		return
+	}
+	t.Fatal("ANALYZE was served last in every trial; no statement was queued with it")
+}
+
 // GAP-2505: the first statistics of a history (a store from before 1.0.3)
 // also give the store's one connection back to a hook write that waits for
 // it. On a 3.9 GB managed RHEL store that pass ran about 100 s, and while it

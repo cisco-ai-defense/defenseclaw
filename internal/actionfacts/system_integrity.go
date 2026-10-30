@@ -9,7 +9,6 @@ import (
 	"io"
 	"math"
 	"path"
-	"regexp"
 	"strconv"
 	"strings"
 	"unicode/utf8"
@@ -17,7 +16,7 @@ import (
 
 const posixDPKGStatusPath = "/var/lib/dpkg/status"
 
-var exactDPKGStatusHeredocOpen = regexp.MustCompile(
+var exactDPKGStatusHeredocOpen = lazyMustCompile(
 	`^cat[ \t]+(?:<<[ \t]*'([A-Za-z][A-Za-z0-9_]{0,31})'[ \t]+(>>?)[ \t]*/var/lib/dpkg/status|(>>?)[ \t]*/var/lib/dpkg/status[ \t]+<<[ \t]*'([A-Za-z][A-Za-z0-9_]{0,31})')[ \t]*$`,
 )
 

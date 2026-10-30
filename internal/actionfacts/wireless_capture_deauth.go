@@ -9,7 +9,6 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
-	"regexp"
 	"strings"
 	"unicode/utf8"
 )
@@ -17,16 +16,16 @@ import (
 const wirelessBSSIDDigestDomain = "defenseclaw/actionfacts/wireless-bssid/v1"
 
 var (
-	wirelessBSSIDPattern          = regexp.MustCompile(`(?i)^[0-9a-f]{2}(?::[0-9a-f]{2}){5}$`)
-	wirelessInterfacePattern      = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.:-]{0,63}$`)
-	wirelessCapturePathPattern    = regexp.MustCompile(`^[^\x00\r\n]+\.(?i:cap|pcap|pcapng)$`)
-	wirelessCaptureFilterPatterns = []*regexp.Regexp{
-		regexp.MustCompile(`(?i)^wlan host ((?:[0-9a-f]{2}:){5}[0-9a-f]{2})$`),
-		regexp.MustCompile(`(?i)^wlan host ((?:[0-9a-f]{2}:){5}[0-9a-f]{2}) and \(eapol or wlan\.fc\.type_subtype == 0x08\)$`),
-		regexp.MustCompile(`(?i)^ether host ((?:[0-9a-f]{2}:){5}[0-9a-f]{2})$`),
-		regexp.MustCompile(`(?i)^ether src ((?:[0-9a-f]{2}:){5}[0-9a-f]{2})$`),
-		regexp.MustCompile(`(?i)^wlan addr1 ((?:[0-9a-f]{2}:){5}[0-9a-f]{2})$`),
-		regexp.MustCompile(`(?i)^wlan type mgt and wlan host ((?:[0-9a-f]{2}:){5}[0-9a-f]{2})$`),
+	wirelessBSSIDPattern          = lazyMustCompile(`(?i)^[0-9a-f]{2}(?::[0-9a-f]{2}){5}$`)
+	wirelessInterfacePattern      = lazyMustCompile(`^[A-Za-z0-9][A-Za-z0-9_.:-]{0,63}$`)
+	wirelessCapturePathPattern    = lazyMustCompile(`^[^\x00\r\n]+\.(?i:cap|pcap|pcapng)$`)
+	wirelessCaptureFilterPatterns = []*lazyRegexp{
+		lazyMustCompile(`(?i)^wlan host ((?:[0-9a-f]{2}:){5}[0-9a-f]{2})$`),
+		lazyMustCompile(`(?i)^wlan host ((?:[0-9a-f]{2}:){5}[0-9a-f]{2}) and \(eapol or wlan\.fc\.type_subtype == 0x08\)$`),
+		lazyMustCompile(`(?i)^ether host ((?:[0-9a-f]{2}:){5}[0-9a-f]{2})$`),
+		lazyMustCompile(`(?i)^ether src ((?:[0-9a-f]{2}:){5}[0-9a-f]{2})$`),
+		lazyMustCompile(`(?i)^wlan addr1 ((?:[0-9a-f]{2}:){5}[0-9a-f]{2})$`),
+		lazyMustCompile(`(?i)^wlan type mgt and wlan host ((?:[0-9a-f]{2}:){5}[0-9a-f]{2})$`),
 	}
 )
 

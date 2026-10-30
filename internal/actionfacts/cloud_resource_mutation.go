@@ -6,7 +6,6 @@ package actionfacts
 import (
 	"encoding/json"
 	"net/url"
-	"regexp"
 	"strings"
 )
 
@@ -16,8 +15,8 @@ const (
 )
 
 var (
-	awsS3BucketPattern    = regexp.MustCompile(`^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$`)
-	awsS3IPAddressPattern = regexp.MustCompile(`^[0-9.]+$`)
+	awsS3BucketPattern    = lazyMustCompile(`^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$`)
+	awsS3IPAddressPattern = lazyMustCompile(`^[0-9.]+$`)
 )
 
 // ExactCloudResourceMutations returns validated value-free cloud mutation

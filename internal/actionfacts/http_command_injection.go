@@ -5,13 +5,12 @@ package actionfacts
 
 import (
 	"bytes"
-	"regexp"
 	"strings"
 	"unicode"
 	"unicode/utf8"
 )
 
-var httpCommandInjectionPattern = regexp.MustCompile(
+var httpCommandInjectionPattern = lazyMustCompile(
 	`^[^;&|<>\\]+(?:;|&&|\|\||\|) *(?:id|whoami) *$`,
 )
 
