@@ -73,13 +73,16 @@ func managedEnterpriseHTTPClient(
 	apiAddr string,
 	serviceName string,
 ) (*http.Client, error) {
-	return managedEnterpriseHTTPClientFor(timeout, apiAddr, serviceName, false)
+	return managedEnterpriseHTTPClientFor(timeout, apiAddr, serviceName, true)
 }
 
 // managedEnterpriseHTTPClientFor is managedEnterpriseHTTPClient for a hook
-// that knows its profile: under Secure Client a stopped gateway's port also
-// counts as held when another process listens on it over IPv6
-// (stoppedManagedGatewayError). Every other caller keeps the IPv4 check.
+// that knows its profile. A stopped gateway's port counts as held when
+// another process listens on it over IPv6 as well as IPv4
+// (stoppedManagedGatewayError), unless secureClient is false: the
+// standalone hook keeps the IPv4 check. A caller that does not state its
+// profile (managedEnterpriseHTTPClient, the Secure Client plugin hook) gets
+// both checks.
 func managedEnterpriseHTTPClientFor(
 	timeout time.Duration,
 	apiAddr string,

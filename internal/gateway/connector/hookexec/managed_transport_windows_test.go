@@ -415,17 +415,26 @@ func TestStoppedManagedGatewayServiceWithAPortListenerIsNotAnOutage(t *testing.T
 	} {
 		for _, profile := range []struct {
 			name   string
-			secure bool
+			client func() (*http.Client, error)
 			opts   Options
 			outage bool
 		}{
-			{"standalone", false, standalone, tc.standaloneOutage},
-			{"secure client", true, secureClient, tc.secureClientOutage},
+			{"standalone", func() (*http.Client, error) {
+				return managedEnterpriseHTTPClientFor(time.Second, addr, "DefenseClawGateway", false)
+			}, standalone, tc.standaloneOutage},
+			{"secure client", func() (*http.Client, error) {
+				return managedEnterpriseHTTPClientFor(time.Second, addr, "DefenseClawGateway", true)
+			}, secureClient, tc.secureClientOutage},
+			// The Secure Client plugin hook states no profile; it gets both
+			// checks.
+			{"plugin hook", func() (*http.Client, error) {
+				return NewManagedEnterpriseGatewayHTTPClient(time.Second, addr, "DefenseClawGateway")
+			}, secureClient, tc.secureClientOutage},
 		} {
 			t.Run(tc.name+"/"+profile.name, func(t *testing.T) {
 				managedEnterpriseListening = func(string) (bool, bool) { return tc.any, tc.known }
 				managedEnterpriseListeningIPv4 = func(string) (bool, bool) { return tc.ipv4, tc.known }
-				client, err := managedEnterpriseHTTPClientFor(time.Second, addr, "DefenseClawGateway", profile.secure)
+				client, err := profile.client()
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -447,7 +456,7 @@ func TestStoppedManagedGatewayServiceWithAPortListenerIsNotAnOutage(t *testing.T
 				if got := managedPeerFailMode(profile.opts, "open", err); got != want {
 					t.Fatalf("open fail mode decided %q, want %q (err %v)", got, want, err)
 				}
-				if !profile.secure {
+				if profile.name == "standalone" {
 					if got := ManagedOutageFailsOpen(profile.opts, err); got != profile.outage {
 						t.Fatalf("ManagedOutageFailsOpen = %v, want %v (err %v)", got, profile.outage, err)
 					}
