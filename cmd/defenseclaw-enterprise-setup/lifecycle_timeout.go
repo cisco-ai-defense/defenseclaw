@@ -77,7 +77,7 @@ func enterpriseEnsureChildTimeoutSeconds(remaining time.Duration) int {
 // and runs without a start time are not refused.
 func enterpriseLifecycleChildTooLate(opts enterpriseSetupOptions, remaining time.Duration) bool {
 	if !opts.Standalone || opts.Started.IsZero() ||
-		!(enterpriseSetupMutation(opts.Action, true) || opts.Action == "uninstall") {
+		!enterpriseSetupMutation(opts.Action, true) && opts.Action != "uninstall" {
 		return false
 	}
 	if opts.Action == "ensure" {

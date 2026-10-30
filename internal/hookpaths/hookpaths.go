@@ -2546,8 +2546,8 @@ func topLevelStatementDirectories(file *syntax.File, cwd, home string) (statemen
 				return nil, nil, false
 			}
 		}
-		switch {
-		case base == "popd":
+		switch base {
+		case "popd":
 			// A bare popd returns to the directory the last pushd left;
 			// any other form, or nothing to return to, is not read. Where
 			// the stack is empty the popd fails and the shell stays.

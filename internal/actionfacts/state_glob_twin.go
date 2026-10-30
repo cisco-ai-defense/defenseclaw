@@ -108,7 +108,7 @@ func stateGlobTwin(command, activeHome string, stateNames []string) (twin string
 		if literal && drive {
 			pattern = stateDrivePattern(pattern)
 		}
-		if !literal || !strings.HasPrefix(pattern, "/") && !(drive && DriveSlashPath(pattern)) ||
+		if !literal || !strings.HasPrefix(pattern, "/") && (!drive || !DriveSlashPath(pattern)) ||
 			!strings.ContainsAny(pattern, "*?[") {
 			return false
 		}

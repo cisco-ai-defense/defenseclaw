@@ -531,7 +531,7 @@ func findExecCommands(command, program string, args []*syntax.Word, words []stri
 			continue
 		}
 		end := i + 1
-		for end < len(words) && !(static[end] && (words[end] == ";" || words[end] == "+")) {
+		for end < len(words) && (!static[end] || words[end] != ";" && words[end] != "+") {
 			end++
 		}
 		if end > i+1 {
