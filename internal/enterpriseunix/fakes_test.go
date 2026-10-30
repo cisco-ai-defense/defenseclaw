@@ -21,6 +21,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -320,7 +322,7 @@ type fakeRunner struct {
 	// replies answer a command by filepath.Base(name) and its joined args.
 	replies map[string]fakeReply
 	// acls are the macOS ACL entries of rooted paths, as ls -le prints them;
-	// chmod -h -N removes them.
+	// chmod -h -a# <index> removes one of them.
 	acls map[string][]string
 }
 
@@ -377,7 +379,19 @@ func (r *fakeRunner) Run(_ context.Context, name string, args ...string) (Comman
 	case "chmod":
 		r.mu.Lock()
 		defer r.mu.Unlock()
-		delete(r.acls, args[len(args)-1])
+		path := args[len(args)-1]
+		if len(args) == 4 && args[0] == "-h" && args[1] == "-a#" {
+			index, err := strconv.Atoi(args[2])
+			if entries := r.acls[path]; err == nil && index >= 0 && index < len(entries) {
+				r.acls[path] = slices.Delete(slices.Clone(entries), index, index+1)
+				if len(r.acls[path]) == 0 {
+					delete(r.acls, path)
+				}
+				return CommandResult{}, nil
+			}
+			return CommandResult{ExitCode: 1}, fmt.Errorf("chmod: no ACL entry %s on %s", args[2], path)
+		}
+		delete(r.acls, path)
 		return CommandResult{}, nil
 	case "dpkg", "rpm":
 		return CommandResult{ExitCode: 1}, errors.New("not owned")

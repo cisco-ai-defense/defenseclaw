@@ -33,6 +33,23 @@ func (r failingLsRunner) Run(ctx context.Context, name string, args ...string) (
 	return r.Runner.Run(ctx, name, args...)
 }
 
+// GAP-0034: repair removed the whole ACL (chmod -N) of a policy folder with
+// a harmful entry, so an administrator's unrelated read entry on the Claude
+// Code managed-settings.d went too. Only the deny and write entries go.
+func TestRepairKeepsUnrelatedMacOSACLEntriesOfAPolicyFolder(t *testing.T) {
+	h := newTestHost(t, "darwin")
+	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0"), ConfigFile: machinePolicyConfig(t, h, "claudecode")}))
+	dir := h.env.P("/Library/Application Support/ClaudeCode/managed-settings.d")
+	h.runner.acls = map[string][]string{dir: {
+		"group:everyone deny search", "user:dcm-std1 allow add_file", "user:ec2-user allow list,readattr",
+	}}
+	requireOK(t, h.run(Options{Action: ActionRepair}))
+	if got := h.runner.acls[dir]; len(got) != 1 || got[0] != "user:ec2-user allow list,readattr" {
+		t.Fatalf("after repair the ACL of managed-settings.d is %v, want only the unrelated read entry", got)
+	}
+	requireOK(t, h.run(Options{Action: ActionStatus}))
+}
+
 // GAP-1458: an ACL entry on /Library/Application Support that lets a
 // standard user add or delete a folder let that user put another ClaudeCode
 // folder in place of the protected one; the ancestor trust check read only
