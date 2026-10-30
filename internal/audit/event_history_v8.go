@@ -597,8 +597,13 @@ func (writer *EventHistoryWriter) appendContextTxResolvedProfile(
 	correlation := record.Correlation()
 	provenance := record.Provenance()
 	metadata := projection.Metadata()
-	target := projectedCompatibilityTarget(projection)
-	details := projectedCompatibilityDetails(projection, string(record.EventName()))
+	// The projected payload is decoded once for every compatibility column
+	// below; each lookup decoded the whole payload again (nine times a row,
+	// r106 performance audit). A payload that does not decode reads as
+	// empty, as each lookup did.
+	projectedPayload, _ := projection.Payload().Object()
+	target := projectedCompatibilityTarget(projectedPayload)
+	details := projectedCompatibilityDetails(projectedPayload, string(record.EventName()))
 	if target == "" && details == string(record.EventName()) && correlation.EvaluationID != "" &&
 		record.EventName() == observability.EventName(observability.TelemetryEventEnforcementBlockApplied) {
 		if blockTarget, blockDetails := enforcementBlockCompatibility(ctx, tx, correlation.EvaluationID); blockDetails != "" {
@@ -629,9 +634,9 @@ func (writer *EventHistoryWriter) appendContextTxResolvedProfile(
 	// gateway, judge_bodies), as watch-start and watch-stop rows otherwise
 	// said audit_logger (GAP-2204).
 	legacyActor := any(provenance.Producer)
-	if actorRef := strings.TrimSpace(projectedCompatibilityString(projection, "defenseclaw.admin.actor_ref")); actorRef != "" {
+	if actorRef := strings.TrimSpace(projectedCompatibilityString(projectedPayload, "defenseclaw.admin.actor_ref")); actorRef != "" {
 		legacyActor = actorRef
-	} else if subsystem := strings.TrimSpace(projectedCompatibilityString(projection, "defenseclaw.health.subsystem")); subsystem != "" &&
+	} else if subsystem := strings.TrimSpace(projectedCompatibilityString(projectedPayload, "defenseclaw.health.subsystem")); subsystem != "" &&
 		provenance.Producer == "audit_logger" {
 		legacyActor = subsystem
 	}
@@ -651,12 +656,12 @@ func (writer *EventHistoryWriter) appendContextTxResolvedProfile(
 	legacyContentHash := any(nullStr(provenance.ConfigDigest))
 	legacyGeneration := any(provenance.ConfigGeneration)
 	legacyBinaryVersion := any(provenance.BinaryVersion)
-	legacyAgentName := any(nullStr(projectedCompatibilityString(projection, "gen_ai.agent.name")))
-	legacyDestinationApp := any(nullStr(projectedCompatibilityString(projection, "defenseclaw.destination.app")))
-	legacyToolName := any(nullStr(projectedCompatibilityString(projection, "gen_ai.tool.name")))
-	toolID := projectedCompatibilityString(projection, "defenseclaw.tool.id")
+	legacyAgentName := any(nullStr(projectedCompatibilityString(projectedPayload, "gen_ai.agent.name")))
+	legacyDestinationApp := any(nullStr(projectedCompatibilityString(projectedPayload, "defenseclaw.destination.app")))
+	legacyToolName := any(nullStr(projectedCompatibilityString(projectedPayload, "gen_ai.tool.name")))
+	toolID := projectedCompatibilityString(projectedPayload, "defenseclaw.tool.id")
 	if toolID == "" {
-		toolID = projectedCompatibilityString(projection, "gen_ai.tool.call.id")
+		toolID = projectedCompatibilityString(projectedPayload, "gen_ai.tool.call.id")
 	}
 	if toolID == "" {
 		toolID = correlation.ToolInvocationID
@@ -675,7 +680,7 @@ func (writer *EventHistoryWriter) appendContextTxResolvedProfile(
 		// The source values fill the historical columns only where the local
 		// profile kept them unchanged; otherwise the projected value is kept,
 		// so a strict store never holds the content it removed (GAP-1945).
-		projected, _ := projection.Payload().Object()
+		projected := projectedPayload
 		if value, kept := keptCompatibilityValue(projected, "target", legacy.Target); kept {
 			legacyTarget = nullStr(value)
 		}
@@ -1272,11 +1277,7 @@ func sqlitePrimaryCode(err error) uint8 {
 	return uint8(primary)
 }
 
-func projectedCompatibilityTarget(projection observabilityredaction.Projection) string {
-	payload, err := projection.Payload().Object()
-	if err != nil {
-		return ""
-	}
+func projectedCompatibilityTarget(payload map[string]any) string {
 	if target, _ := payload["target"].(string); target != "" {
 		return target
 	}
@@ -1300,11 +1301,7 @@ func projectedCompatibilityTarget(projection observabilityredaction.Projection) 
 	return ""
 }
 
-func projectedCompatibilityDetails(projection observabilityredaction.Projection, fallback string) string {
-	payload, err := projection.Payload().Object()
-	if err != nil {
-		return fallback
-	}
+func projectedCompatibilityDetails(payload map[string]any, fallback string) string {
 	for _, field := range []string{"message", "description", "reason"} {
 		if value, ok := payload[field].(string); ok && value != "" {
 			return value
@@ -1440,15 +1437,8 @@ func keptCompatibilityValue(projected map[string]any, field, source string) (str
 	}
 }
 
-func projectedCompatibilityString(
-	projection observabilityredaction.Projection,
-	field string,
-) string {
+func projectedCompatibilityString(payload map[string]any, field string) string {
 	if field == "" {
-		return ""
-	}
-	payload, err := projection.Payload().Object()
-	if err != nil {
 		return ""
 	}
 	value, _ := payload[field].(string)
