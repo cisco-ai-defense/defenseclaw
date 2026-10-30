@@ -8,6 +8,15 @@ for released versions and assets, and the
 [documentation website](https://cisco-ai-defense.github.io/defenseclaw/docs/)
 for current behavior.
 
+## [Unreleased] — 1.0.6
+
+### Changed
+- **OpenCode V2 replaces OpenCode V1 (from #1373, by keitheobrien).** DefenseClaw guards OpenCode V2 (`@opencode/cli`, 2.0 to 2.2 reviewed, 2.2.3 checked live) with one dependency-free plugin that default-exports `{ id, setup }` and rejects a blocked call in the awaited `execute.before`. Setup and the gateway refuse OpenCode V1 and any other major, also with the drift override. Install V2 (`npm uninstall -g opencode-ai && npm install -g @opencode/cli@2`) and restart OpenCode's background server (`opencode service restart`). The OpenShell image pins 2.1.4 and is unverified until a fresh V2 sandbox check.
+- **The upgrade stops before it changes anything while the guarded OpenCode is V1.** The running DefenseClaw keeps guarding it; install V2 and upgrade again, or remove OpenCode from DefenseClaw first. With V2 installed, the upgrade writes the V2 plugin without a setup run. A rollback to 1.0.5 or earlier is refused while OpenCode V2 is set up, because those releases cannot guard it.
+- **DefenseClaw notices reach the OpenCode screen again.** V2 has no toast and does not show plugin logs, so the outage warning (default and permissive tiers run with one warning per session), confirm notices and foreign-plugin warnings are added under the tool call's result.
+- **An oversized OpenCode call is reviewed, not refused on size.** Observe records it and lets it run; action blocks it.
+- **Managed hosts register the OpenCode plugin folder (`share/opencode/index.js`).** An approved directory plugin is approved by its content: approve the new digest of each previously approved folder after the upgrade.
+
 ## [Unreleased] — 1.0.5
 
 ### Known limits
@@ -62,9 +71,6 @@ for current behavior.
 
 ## [Unreleased] — 1.0.4
 
-- **OpenCode V2 configuration and review corrections:** preserve mixed MCP entries and unrelated settings, apply whole-server overrides, and report plugin activation as unverified when ordered controls prevent proof. Git-build hashes no longer select a release contract. Configured plugin directory approvals cover their contents, lifecycle events have distinct source identities, and paired result callbacks reuse bounded verified context. Platform metadata consistently labels V2 as preview; scanner doctor checks both bounds of the pinned LiteLLM range.
-- **OpenCode V2 only:** remove V1 runtime contracts and factories across plugin delivery modes; refuse detected non-V2 majors before setup writes, including with the drift override. Upgrade OpenCode to V2, rerun setup and restart. The sandbox pin moves to 2.1.4; its V1 certification is retired pending fresh V2 verification.
-- OpenCode v2 preview CI fixes: stable bridge line endings on Windows, sandbox entrypoint verification, patched dependency floors, and less style work during TUI tab changes. The existing Windows responsiveness limit stays at 150 ms.
 
 - **Raw OpenShell MicroVM stop advice now names the gateway version that flushes the guest.** OpenShell 0.1.5 and later request a guest flush before a planned stop; on an older gateway, save the work first. A failed flush may still lose changes after the last successful disk sync.
 - **Agent identity rows show only a current UPN.** Each hook replaces the row's `upn` with the UPN that the latest directory answer or guardian pass verified, or leaves it out. Profile matching is unchanged: during a directory outage it still uses the last good UPN that the Windows AD UPN cache and the guardian keep, and rows leave out that kept UPN. A later hook records the UPN again once a lookup verifies it. An unavailable lookup and an account with no verified UPN remain distinct in storage.
