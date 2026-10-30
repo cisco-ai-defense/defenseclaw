@@ -560,7 +560,11 @@ Exit 0.
   that device (or on a computer with the same version and layout) and compare
   its `effective_policy_digest` with `gateway_digest` of `bundle status` after
   the apply. Do not compare digests computed by different product versions;
-  the digest algorithm is not part of the contract.
+  the digest algorithm is not part of the contract, and a build never prints
+  the digest another product version would compute. To compare a fleet that
+  runs mixed versions, compare `effective_policy_digest` only among devices
+  with the same `product_version` of `enterprise <os> status`, and use
+  `digest_verified` (the signer's digest checked on this device) for the rest.
 - Preflight before an apply:
   1. Run verify. `already_applied` with `config_drift` `false`: done. With
      `config_drift` `true`, the installed config drifted: apply the same
@@ -1174,6 +1178,23 @@ off the device. The agent does not read `/health` itself (section 7); the
   in every case. A Windows build without `management_contract` reports `ok`
   from gateway readiness alone, which does not prove the key.
 
+  **Prove the key before the first prompt (Linux and macOS, from 1.0.6).**
+  `enterprise secret check --name ai-defense-api-key --json` (root, read-only,
+  no lock) builds the client the gateway builds, from the stored credential and
+  the administrator's egress proxy, and makes one authenticated request whose
+  only content is a single full stop. It prints `secret-result.schema.json`
+  (the check branch): `ai_defense` is `ok`, `disabled` or `unavailable:<code>`
+  with the codes of the table above (never `unknown`, `not_initialized` or
+  `gateway_not_ready`), `ok` is true only for `ok`, and a key AI Defense
+  rejects is `unavailable:auth_failed` with `errors[0].code`
+  `ai_defense_unavailable`, exit 1. `--name` must be the credential
+  `enterprise.inspection.ai_defense.credential` names (else `invalid_arguments`,
+  exit 2); failures before the request are the failure document of the other
+  verbs (`not_root`, `not_installed`, `state_invalid`). It does not change what
+  `inspection.ai_defense` reports; the next prompt does that. Builds before
+  1.0.6 have no `check` verb (an unknown command, exit 2): read `unknown`
+  until the first prompt, as above. Windows has no `check`: read
+  `inspection.ai_defense` from `enterprise windows status`.
 
 The agent holds the value in its own memory and writes it to the child's
 stdin; the examples stand that in with a variable of the agent process
@@ -1365,10 +1386,16 @@ enforcing.
   again, copied from its signed manifest (`enterprise bundle sign
   --rollback-of`). As with every member, the agent ignores it when it does
   not know it and treats its absence as normal (section 0).
-- Receipt ids are not ordered in time. Keep the set of `receipt_id`s already
-  forwarded (prune ids whose file is gone) and order receipts by
-  `finished_at` when the order matters; do not keep only the last id.
-  Nothing is acknowledged back.
+- Receipt ids are not ordered in time. From 1.0.6 each public receipt and
+  receipt event carries `seq`, the delivery sequence of this device: it grows
+  by one for each new delivery (a retry of a bundle is a new delivery), never
+  goes back while the receipt history exists, and orders receipts without a
+  clock. The agent may remember the highest `seq` it forwarded, and treats a
+  `seq` below it as a device whose history was reset (reinstalled or purged)
+  and starts again from the set of `receipt_id`s. On builds without `seq`, and
+  as the portable rule, keep the set of `receipt_id`s already forwarded (prune
+  ids whose file is gone) and order receipts by `finished_at` when the order
+  matters; do not keep only the last id. Nothing is acknowledged back.
 
 ```sh
 ls -1 /etc/defenseclaw/bundles/receipt-events/        # macOS: /opt/cisco/defenseclaw/etc/bundles/receipt-events/

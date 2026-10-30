@@ -138,3 +138,32 @@ func TestReceiveRefusesAnInvalidDeliveryID(t *testing.T) {
 		t.Fatalf("receipts after refusals: %v, %v", receipts, err)
 	}
 }
+
+// #1320: every public receipt event carries the delivery sequence of the
+// device, one more for each new delivery, so receipts order without a clock.
+func TestPublicReceiptEventsCarryAGrowingSeq(t *testing.T) {
+	store := testStore(t)
+	var seqs []uint64
+	for i := 1; i <= 3; i++ {
+		r, err := store.Receive(testBundleID(80+i), uint64(i), "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := store.Fail(r, CodeSignatureInvalid, "refused"); err != nil {
+			t.Fatal(err)
+		}
+		event, err := enterprisestatus.ReadPublicReceipt(filepath.Join(store.PublicReceiptEventsDir(), r.ReceiptID+".json"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		seqs = append(seqs, event.Seq)
+	}
+	if seqs[0] == 0 || seqs[1] != seqs[0]+1 || seqs[2] != seqs[1]+1 {
+		t.Fatalf("seq of three deliveries = %v, want three consecutive numbers from 1", seqs)
+	}
+	// receipt.json keeps the first refusal while no delivery reached staging.
+	summary, err := enterprisestatus.ReadPublicReceipt(store.PublicReceiptPath())
+	if err != nil || summary.Seq != seqs[0] {
+		t.Fatalf("receipt.json seq = %d (%v), want %d", summary.Seq, err, seqs[0])
+	}
+}

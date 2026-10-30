@@ -59,6 +59,10 @@ type PublicReceipt struct {
 	BundleID    string `json:"bundle_id,omitempty"`
 	Version     uint64 `json:"version,omitempty"`
 	SignerKeyID string `json:"signer_key_id,omitempty"`
+	// Seq is the delivery sequence of this device (1.0.6): one more for each
+	// new delivery, so receipts order without a clock. Absent on a receipt
+	// written by an earlier build.
+	Seq uint64 `json:"seq,omitempty"`
 	// Principal is the manifest created_by (control-plane:<tenant>/<admin>
 	// or operator:<os-admin>).
 	Principal string `json:"principal,omitempty"`

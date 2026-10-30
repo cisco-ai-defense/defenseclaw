@@ -98,7 +98,8 @@ deployment reads:
     or bearer_credential (http_jsonl).
 
 Values are read from standard input or a file and are never printed.
-Status shows only presence, modification time and a digest prefix.`,
+Status shows only presence, modification time and a digest prefix. On Linux and
+macOS, check proves the Cisco AI Defense key before the first prompt.`,
 		PersistentPreRunE: func(*cobra.Command, []string) error { return nil },
 	}
 )
@@ -430,6 +431,9 @@ func init() {
 		newEnterpriseSecretCommand("status", "List protected credentials without revealing values"),
 		newEnterpriseSecretCommand("remove", "Remove a protected credential and apply the change"),
 	)
+	if check := newEnterpriseSecretCheckCommand(); check != nil {
+		enterpriseSecretCmd.AddCommand(check)
+	}
 	enterpriseCmd.AddCommand(enterpriseLinuxCmd, enterpriseMacOSCmd, enterpriseSecretCmd)
 }
 
