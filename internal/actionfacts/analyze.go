@@ -717,6 +717,10 @@ type posixShellInvocation struct {
 	interactive  bool
 	recognized   bool
 	valid        bool
+	// startupInput: valid is false only because the shell also runs
+	// startup input (login, interactive or rc file) before the command
+	// string; the command string is still what it runs after them.
+	startupInput bool
 }
 
 func isolatedPOSIXCommand(out *parseOutput, command *CommandFact) bool {
@@ -1051,6 +1055,7 @@ func finishBashInvocation(
 	// order-valid --norc proves it disabled; POSIX mode substitutes ENV instead.
 	if login || startupFile || interactive && (!noRC || posixMode) {
 		invocation.valid = false
+		invocation.startupInput = true
 	}
 	return invocation
 }
@@ -1228,6 +1233,7 @@ func finishConservativePOSIXShellInvocation(
 	invocation.interactive = interactive
 	if interactive || login || explicitStartup {
 		invocation.valid = false
+		invocation.startupInput = true
 	}
 	return invocation
 }

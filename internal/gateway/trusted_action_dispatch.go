@@ -28,6 +28,7 @@ import (
 	"path"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"slices"
 	"strconv"
 	"strings"
@@ -38,6 +39,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/guardrail/semantic"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail/semanticpb"
 	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
+	"github.com/defenseclaw/defenseclaw/internal/shellparse"
 	"mvdan.cc/sh/v3/expand"
 	"mvdan.cc/sh/v3/pattern"
 	"mvdan.cc/sh/v3/syntax"
@@ -171,6 +173,8 @@ type trustedActionRequest struct {
 	// ProtectedHomeHook is set only from a kernel-verified managed hook peer.
 	// Its gateway cannot inspect the caller's home when ProtectHome is active.
 	ProtectedHomeHook bool
+	// gitBashDrive marks a gitBashDriveView request (GAP-2577).
+	gitBashDrive bool
 	// ResolvedWriteTargets comes from the hook running as the real user.
 	// A present empty map means the client inspected the action and found no
 	// static write target; nil denotes missing or invalid client evidence.
@@ -842,15 +846,35 @@ func withActiveStateTargetMention(
 	// A bash here-string, which the POSIX parse rejects, is judged by its
 	// POSIX twin alone (GAP-2047 row a): a read through one names state but
 	// changes none.
+	// A find with an unquoted -name/-path pattern is judged by its quoted
+	// twin (GAP-2498); xargs fed by a static printf or echo by the call it
+	// makes (GAP-0052).
+	// `cat <<< WORD | xargs rm -rf` is a here-string too: its xargs twin
+	// is judged before the here-string verdict ends the check (pod check31).
+	// A Git Bash call on Windows names its home as a drive path (C:/Users/x)
+	// that the POSIX link, pattern and xargs checks do not read as absolute:
+	// they also judge its drive view (GAP-2577).
+	driveFacts, driveRequest, driven := gitBashDriveView(facts, request)
 	hereStringMutates, hereStringJudged := hereStringStateMutation(facts, request)
-	if hereStringJudged && !hereStringMutates {
+	xargsMutates := xargsStaticInputStateMutation(facts, request) ||
+		driven && xargsStaticInputStateMutation(driveFacts, driveRequest)
+	if hereStringJudged && !hereStringMutates && !xargsMutates {
 		return findings
+	}
+	// A managed call whose cwd the gateway cannot see is also judged for
+	// links in the directory the hook client walked its words from
+	// (GAP-2569).
+	linkFacts, linkRequest, placed := managedLinkWalkView(request)
+	throughLink := func(check func(actionfacts.Facts, trustedActionRequest) bool) bool {
+		return check(facts, request) || placed && check(linkFacts, linkRequest) ||
+			driven && check(driveFacts, driveRequest)
 	}
 	// A write through a link the command makes to active state is proven by
 	// the link reading: the mention scan and the whole-action proof do not
 	// follow the new link (GAP-2522), nor read sed -i --follow-symlinks
 	// (GAP-2529).
-	if !hereStringMutates && !globbedStateMutation(facts) && !globbedStateMutationThroughLink(facts, request) &&
+	if !hereStringMutates && !xargsMutates && !globbedStateMutation(facts) && !throughLink(globbedStateMutationThroughLink) &&
+		!findGlobTwinStateMutation(facts, request) &&
 		!archiveExtractsIntoState(facts, request) && !provenLinkedStateWrite(facts, request) &&
 		!provenFollowedInPlaceStateWrite(facts, request) {
 		command, known := trustedBashCommandInput(request.Input)
@@ -858,7 +882,8 @@ func withActiveStateTargetMention(
 			return findings
 		}
 		if !hookpaths.ActionStateTargetMention(command, request.Input.CWD, request.Input.ActiveHome) &&
-			!factsHaveFindHandOff(facts) && !stateOperandThroughLink(facts, request) {
+			!factsHaveFindHandOff(facts) && !throughLink(stateOperandThroughLink) &&
+			(!driven || !globbedStateMutation(driveFacts)) {
 			// Behind ProtectHome the gateway cannot open the user's home, so the
 			// mention scan cannot place a home target. A redirect target the
 			// shell opens is still proven against the hook client's resolved
@@ -874,7 +899,7 @@ func withActiveStateTargetMention(
 					return findings
 				}
 			}
-		} else if !provenStateMutationPath(facts, request) && !provenBashAggregateStateWrite(request) &&
+		} else if !throughLink(provenStateMutationPath) && !provenBashAggregateStateWrite(request) &&
 			!provenShellRedirectStateWrite(request) && !provenCMDSlashCStateWrite(request) &&
 			!provenPowerShellStateWrite(request) {
 			return findings
@@ -2154,52 +2179,142 @@ func provenStateMutationPath(facts actionfacts.Facts, request trustedActionReque
 		if !provenMutation {
 			continue
 		}
-		if entry, ok := stateDirectoryEntryTarget(command, candidate, request); ok {
-			candidate.Resolved = entry
-			if matchesActiveDefenseClawStateInLine(projected, candidate, lineStaysOff, request.ResolvedWriteTargets) {
+		// The spelling the kernel walks first (GAP-2047 L5), then the
+		// lexical one the path fact keeps.
+		if walked, ok := stateWalkSpelling(candidate, request.Input.CWD, projected.ActiveHome); ok {
+			physicalCandidate := candidate
+			physicalCandidate.Resolved = walked
+			if provenStateCandidateMatches(projected, command, physicalCandidate, request, lineStaysOff) {
 				return true
 			}
-			continue
 		}
-		physical := ""
-		for _, spelling := range []string{candidate.Resolved, candidate.Value, candidate.Normalized} {
-			if value, found := request.ResolvedWriteTargets[spelling]; found {
-				physical = value
-				break
-			}
-		}
-		if physical == "" && !request.SkipLocalFilesystemResolution {
-			if request.ProtectedHomeHook {
-				// Only an OS-proved alias is safe to resolve here when the
-				// authenticated hook supplied no target-map entry. The home
-				// itself is the peer's home from the account database: a
-				// find that starts there (`yes | find ~ ...`, which the
-				// client lists no target for) is judged from it (GAP-2404
-				// pod ip21, managed RHEL).
-				physical, _ = hookpaths.ResolveActiveStateHardlinkTarget(candidate.Resolved, projected.ActiveHome)
-				if physical == "" && path.IsAbs(candidate.Resolved) &&
-					path.Clean(candidate.Resolved) == path.Clean(projected.ActiveHome) {
-					physical = path.Clean(candidate.Resolved)
-				}
-			} else {
-				physical, _ = hookpaths.ResolveWriteTarget(candidate.Resolved)
-			}
-		}
-		if physical == "" {
-			continue
-		}
-		if active, same := hookpaths.ResolveActiveStateHardlinkTarget(physical, projected.ActiveHome); same {
-			physical = active
-		}
-		if candidate.Flavor == actionfacts.PathFlavorPOSIX {
-			physical = filepath.ToSlash(physical)
-		}
-		candidate.Resolved = physical
-		if matchesActiveDefenseClawStateInLine(projected, candidate, lineStaysOff, request.ResolvedWriteTargets) {
+		if provenStateCandidateMatches(projected, command, candidate, request, lineStaysOff) {
 			return true
 		}
 	}
 	return false
+}
+
+// provenStateCandidateMatches places one proven mutating operand (a
+// directory entry, the hook's resolved target or the local link walk) and
+// reports it in the active state.
+func provenStateCandidateMatches(
+	projected actionfacts.Facts,
+	command actionfacts.CommandFact,
+	candidate actionfacts.PathFact,
+	request trustedActionRequest,
+	lineStaysOff func() bool,
+) bool {
+	if entry, ok := stateDirectoryEntryTarget(command, candidate, request); ok {
+		candidate.Resolved = entry
+		if matchesActiveDefenseClawStateInLine(projected, candidate, lineStaysOff, request.ResolvedWriteTargets) {
+			return true
+		}
+		return false
+	}
+	physical := ""
+	for _, spelling := range []string{candidate.Resolved, candidate.Value, candidate.Normalized} {
+		if value, found := request.ResolvedWriteTargets[spelling]; found {
+			physical = value
+			break
+		}
+	}
+	if physical == "" && !request.SkipLocalFilesystemResolution {
+		if request.ProtectedHomeHook {
+			// Only an OS-proved alias is safe to resolve here when the
+			// authenticated hook supplied no target-map entry. The home
+			// itself is the peer's home from the account database: a
+			// find that starts there (`yes | find ~ ...`, which the
+			// client lists no target for) is judged from it (GAP-2404
+			// pod ip21, managed RHEL).
+			physical, _ = hookpaths.ResolveActiveStateHardlinkTarget(candidate.Resolved, projected.ActiveHome)
+			if physical == "" && path.IsAbs(candidate.Resolved) &&
+				path.Clean(candidate.Resolved) == path.Clean(projected.ActiveHome) {
+				physical = path.Clean(candidate.Resolved)
+			}
+			if physical == "" {
+				// A link-walk spelling the client walked (GAP-2569).
+				physical, _ = hookpaths.WalkFactTarget(request.ResolvedWriteTargets, candidate.Resolved)
+			}
+		} else {
+			physical, _ = hookpaths.ResolveWriteTarget(driveFSPath(request, candidate.Resolved))
+			physical = driveViewPath(request, physical)
+		}
+	}
+	if physical == "" {
+		return false
+	}
+	if active, same := hookpaths.ResolveActiveStateHardlinkTarget(physical, projected.ActiveHome); same {
+		physical = active
+	}
+	if candidate.Flavor == actionfacts.PathFlavorPOSIX {
+		physical = filepath.ToSlash(physical)
+	}
+	candidate.Resolved = physical
+	return matchesActiveDefenseClawStateInLine(projected, candidate, lineStaysOff, request.ResolvedWriteTargets)
+}
+
+// stateWalkSpelling is the spelling of an operand with a `..` component
+// as the kernel walks it: a `..` after a link ascends from the link's
+// target, so with dclink -> ~/.defenseclaw `rm -rf dclink/../.defenseclaw/hooks`
+// removes ~/.defenseclaw/hooks while its lexical spelling (the path fact)
+// is ./.defenseclaw/hooks (GAP-2047 L5, T10). It is the operand joined to
+// the call cwd, uncleaned, when that join cleans to the fact's resolved
+// path (an operand placed after a cd keeps its lexical spelling only); ok
+// is false for any other operand, which keeps its lexical spelling.
+func stateWalkSpelling(candidate actionfacts.PathFact, cwd, home string) (string, bool) {
+	if candidate.Flavor == actionfacts.PathFlavorWindows || !hasDotDotComponent(candidate.Value) {
+		return "", false
+	}
+	trimmed := strings.TrimRight(candidate.Value, "/")
+	if strings.HasSuffix(trimmed, "/..") || strings.HasSuffix(trimmed, "/.") || trimmed == ".." {
+		return "", false
+	}
+	full, ok := stateHomePath(candidate.Value, strings.TrimRight(home, "/"), cwd)
+	if !ok || !path.IsAbs(full) || path.Clean(full) != path.Clean(filepath.ToSlash(candidate.Resolved)) {
+		return "", false
+	}
+	return full, true
+}
+
+// hasDotDotComponent reports a slash path with a `..` component.
+func hasDotDotComponent(word string) bool {
+	return slices.Contains(strings.Split(word, "/"), "..")
+}
+
+// walkParent is the parent of a slash path without removing its `..`
+// components (filepath.Dir cleans them lexically).
+func walkParent(value string) string {
+	value = strings.TrimRight(value, "/")
+	index := strings.LastIndex(value, "/")
+	if index <= 0 {
+		return "/"
+	}
+	return value[:index]
+}
+
+// managedLinkWalkView is a managed hook call placed in the directory the
+// hook client keyed its link-walk facts in (hookpaths.WalkFactPrefix): the
+// client's cwd, or the directory a static cd placed a simple command in
+// (evidenceCWD). A gateway behind ProtectHome receives no cwd of its own, so
+// a relative link spelling (`git -C dclink clean -fdx`) could not be placed
+// (GAP-2569). ok is false when the gateway knows the cwd or the client's is
+// not a plain directory in the caller's home.
+func managedLinkWalkView(request trustedActionRequest) (actionfacts.Facts, trustedActionRequest, bool) {
+	if !request.ProtectedHomeHook || filepath.IsAbs(request.Input.CWD) {
+		return actionfacts.Facts{}, request, false
+	}
+	cwd, home := request.evidenceCWD, request.Input.ActiveHome
+	if !filepath.IsAbs(cwd) {
+		cwd = request.ResolvedWriteTargets[hookpaths.CWDKey]
+	}
+	if !filepath.IsAbs(cwd) || !filepath.IsAbs(home) || hasParentElement(cwd) || strings.ContainsRune(cwd, 0) ||
+		projectRootKey(cwd) != projectRootKey(home) && !insideHome(home, cwd) {
+		return actionfacts.Facts{}, request, false
+	}
+	placed := request
+	placed.Input.CWD = filepath.Clean(cwd)
+	return actionfacts.Analyze(placed.Input), placed, true
 }
 
 // stateLinkResolver resolves a path through links: the hook's resolved
@@ -2209,21 +2324,134 @@ func stateLinkResolver(request trustedActionRequest) func(string) (string, bool)
 		if physical, found := request.ResolvedWriteTargets[value]; found {
 			return physical, true
 		}
-		if request.SkipLocalFilesystemResolution || request.ProtectedHomeHook {
+		if request.SkipLocalFilesystemResolution {
 			return "", false
 		}
-		return hookpaths.ResolveWriteTarget(value)
+		if request.ProtectedHomeHook {
+			// A managed gateway may not read the user's home: the hook
+			// client's walk of the command's words places a link spelling
+			// (GAP-2569).
+			return hookpaths.WalkFactTarget(request.ResolvedWriteTargets, value)
+		}
+		physical, ok := hookpaths.ResolveWriteTarget(driveFSPath(request, value))
+		return driveViewPath(request, physical), ok
 	}
+}
+
+// gitBashDriveView is a Git Bash call on Windows with its drive home and
+// cwd (C:/Users/x) spelled as rooted POSIX paths (/C:/Users/x), so the link,
+// pattern and xargs state checks, which read only a rooted home, judge it
+// as they judge the call on Linux and macOS (GAP-2577). The view's
+// filesystem reads go through driveFSPath and come back through
+// driveViewPath. ok is false off Windows, for a managed or sandbox call and
+// for a home that is not a drive path.
+func gitBashDriveView(facts actionfacts.Facts, request trustedActionRequest) (actionfacts.Facts, trustedActionRequest, bool) {
+	if runtime.GOOS != "windows" || request.gitBashDrive || request.ProtectedHomeHook ||
+		request.SkipLocalFilesystemResolution {
+		return actionfacts.Facts{}, request, false
+	}
+	home := filepath.ToSlash(facts.ActiveHome)
+	if !actionfacts.DriveSlashPath(home) {
+		home = filepath.ToSlash(request.Input.ActiveHome)
+	}
+	if !actionfacts.DriveSlashPath(home) {
+		return actionfacts.Facts{}, request, false
+	}
+	posix := false
+	for _, command := range facts.Commands {
+		posix = posix || command.Dialect == actionfacts.DialectPOSIX
+	}
+	if !posix {
+		return actionfacts.Facts{}, request, false
+	}
+	view := request
+	view.gitBashDrive = true
+	view.Input.ActiveHome = "/" + strings.TrimRight(home, "/")
+	view.Input.CWD = ""
+	if cwd := filepath.ToSlash(request.Input.CWD); actionfacts.DriveSlashPath(cwd) {
+		view.Input.CWD = "/" + cwd
+	}
+	view.Input.DialectHint = actionfacts.DialectPOSIX
+	// Git Bash expands an unquoted leading ~ to the drive home; the view
+	// spells it so (`rm -rf ~/proj/dclink/../.defenseclaw/x`).
+	if command, ok := trustedBashCommandInput(request.Input); ok {
+		if rewritten, changed := driveViewTildeCommand(command, view.Input.ActiveHome); changed {
+			view.Input.Command, view.Input.Args = rewritten, nil
+		}
+	}
+	return actionfacts.Analyze(view.Input), view, true
+}
+
+// driveViewTildeCommand respells every unquoted leading ~ or ~/ of a call
+// word as home. changed is false when nothing was respelled, the command
+// does not parse, or home needs quoting.
+func driveViewTildeCommand(command, home string) (string, bool) {
+	if strings.ContainsAny(home, " \t\n'\"$`*?[]{}()<>|&;#!\\") {
+		return "", false
+	}
+	file, ok := shellparse.Parse(command)
+	if !ok {
+		return "", false
+	}
+	changed := false
+	syntax.Walk(file, func(node syntax.Node) bool {
+		call, ok := node.(*syntax.CallExpr)
+		if !ok {
+			return true
+		}
+		for _, word := range call.Args {
+			if len(word.Parts) == 0 {
+				continue
+			}
+			lit, ok := word.Parts[0].(*syntax.Lit)
+			if !ok || lit.Value != "~" && !strings.HasPrefix(lit.Value, "~/") {
+				continue
+			}
+			lit.Value = home + lit.Value[1:]
+			changed = true
+		}
+		return true
+	})
+	if !changed {
+		return "", false
+	}
+	var out bytes.Buffer
+	if err := syntax.NewPrinter().Print(&out, file); err != nil {
+		return "", false
+	}
+	return strings.TrimSpace(out.String()), true
+}
+
+// driveFSPath is the Windows spelling of a drive view path (/C:/x -> C:/x).
+func driveFSPath(request trustedActionRequest, value string) string {
+	if request.gitBashDrive && strings.HasPrefix(value, "/") && actionfacts.DriveSlashPath(value[1:]) {
+		return value[1:]
+	}
+	return value
+}
+
+// driveViewPath is the drive view spelling of a Windows path (C:\x -> /C:/x).
+func driveViewPath(request trustedActionRequest, value string) string {
+	if slashed := filepath.ToSlash(value); request.gitBashDrive && actionfacts.DriveSlashPath(slashed) {
+		return "/" + slashed
+	}
+	return value
 }
 
 // stateRootOf returns the physical state root and a test for a path in it.
 func stateRootOf(home string, resolve func(string) (string, bool)) (string, func(string) bool) {
-	root, ok := resolve(filepath.Join(home, ".defenseclaw"))
+	spelled, separator := filepath.Join(home, ".defenseclaw"), string(filepath.Separator)
+	if strings.HasPrefix(home, "/") {
+		// A rooted slash home (a Git Bash drive view on Windows, GAP-2577)
+		// keeps its slash spelling.
+		spelled, separator = path.Join(home, ".defenseclaw"), "/"
+	}
+	root, ok := resolve(spelled)
 	if !ok {
-		root = filepath.Join(home, ".defenseclaw")
+		root = spelled
 	}
 	return root, func(value string) bool {
-		return value == root || strings.HasPrefix(value, root+string(filepath.Separator))
+		return value == root || strings.HasPrefix(value, root+separator)
 	}
 }
 
@@ -2242,7 +2470,8 @@ func globbedStateMutationThroughLink(facts actionfacts.Facts, request trustedAct
 	}
 	resolve := stateLinkResolver(request)
 	root, inState := stateRootOf(home, resolve)
-	for _, command := range facts.Commands {
+	dirs := posixCommandDirectories(facts, home)
+	for commandIndex, command := range facts.Commands {
 		if command.Effect == actionfacts.EffectPreview || command.Dialect != actionfacts.DialectPOSIX {
 			continue
 		}
@@ -2250,8 +2479,18 @@ func globbedStateMutationThroughLink(facts actionfacts.Facts, request trustedAct
 		if !ok {
 			continue
 		}
+		git := path.Base(command.Program) == "git"
 		rewritten, changed := slices.Clone(words), false
 		for index, word := range words {
+			if git {
+				// `git -C dclink clean -fdx`: a -C or --work-tree value is
+				// a directory git enters, so the whole word is resolved
+				// (GAP-2047 L11).
+				if spelled, ok := gitDirectoryWordThroughLink(words, index, home, facts.CWD, root, resolve, inState); ok {
+					rewritten[index], changed = spelled, true
+					continue
+				}
+			}
 			if spelled, ok := stateWordThroughLink(word, home, facts.CWD, root, resolve, inState); ok {
 				rewritten[index], changed = spelled, true
 			}
@@ -2259,8 +2498,50 @@ func globbedStateMutationThroughLink(facts actionfacts.Facts, request trustedAct
 		if changed && globbedStateCommandMutates(command, rewritten, home, facts.CWD) {
 			return true
 		}
+		// `cd dclink && git clean -fdx`: a directory the command runs in
+		// after a cd, physically in the state but spelled outside it, is
+		// judged by its ~/.defenseclaw spelling (GAP-2047 L11).
+		if commandIndex >= len(dirs) {
+			continue
+		}
+		program, programWords := unwrapStateWrapper(command, words)
+		for _, dir := range dirs[commandIndex] {
+			if !strings.HasPrefix(dir, "/") {
+				continue
+			}
+			spelled, ok := stateWordThroughLink(strings.TrimRight(dir, "/")+"/", home, facts.CWD, root, resolve, inState)
+			if ok && globbedStateCommandMutates(program, programWords, home, strings.TrimRight(spelled, "/")) {
+				return true
+			}
+		}
 	}
 	return false
+}
+
+// gitDirectoryWordThroughLink spells the value of a git -C or --work-tree
+// option (its own word or attached with =) under ~/.defenseclaw when the
+// directory it names is physically in the state.
+func gitDirectoryWordThroughLink(
+	words []string, index int, home, cwd, root string,
+	resolve func(string) (string, bool),
+	inState func(string) bool,
+) (string, bool) {
+	word, prefix := words[index], ""
+	switch {
+	case strings.HasPrefix(word, "--work-tree="):
+		prefix, word = "--work-tree=", strings.TrimPrefix(word, "--work-tree=")
+	case index > 0 && (words[index-1] == "-C" || words[index-1] == "--work-tree"):
+	default:
+		return "", false
+	}
+	if word == "" || strings.HasPrefix(word, "-") || stateWordExpands(word) {
+		return "", false
+	}
+	spelled, ok := stateWordThroughLink(strings.TrimRight(word, "/")+"/", home, cwd, root, resolve, inState)
+	if !ok {
+		return "", false
+	}
+	return prefix + strings.TrimRight(spelled, "/"), true
 }
 
 // stateWordThroughLink returns word spelled under ~/.defenseclaw when its
@@ -2289,14 +2570,20 @@ func stateWordThroughLink(
 		}
 	}
 	directory := path.Clean("/" + strings.Join(components[:split], "/"))
-	if directory == "/" || directory == home {
-		return "", false
-	}
+	// A `..` after a link ascends from the link's target, so the directory
+	// part is resolved as the kernel walks it and its lexical spelling
+	// proves nothing (`rm -rf dclink/../.defenseclaw/*`, GAP-2047 L5).
+	walked := hasDotDotComponent(strings.Join(components[:split], "/"))
 	spelledRoot := home + "/.defenseclaw"
-	if directory == spelledRoot || strings.HasPrefix(directory, spelledRoot+"/") {
+	if !walked && (directory == "/" || directory == home ||
+		directory == spelledRoot || strings.HasPrefix(directory, spelledRoot+"/")) {
 		return "", false
 	}
-	physical, ok := resolve(directory)
+	walkSpelling := directory
+	if walked {
+		walkSpelling = "/" + strings.TrimLeft(strings.Join(components[:split], "/"), "/")
+	}
+	physical, ok := resolve(walkSpelling)
 	if !ok || !inState(physical) {
 		return "", false
 	}
@@ -2319,7 +2606,7 @@ func stateWordThroughLink(
 // target, as it does every other operand.
 func stateOperandThroughLink(facts actionfacts.Facts, request trustedActionRequest) bool {
 	home := facts.ActiveHome
-	if !filepath.IsAbs(home) {
+	if !filepath.IsAbs(home) && (!request.gitBashDrive || !path.IsAbs(home)) {
 		return false
 	}
 	resolve := stateLinkResolver(request)
@@ -2332,15 +2619,26 @@ func stateOperandThroughLink(facts actionfacts.Facts, request trustedActionReque
 			continue
 		}
 		value := candidate.Resolved
-		if !filepath.IsAbs(value) || inState(value) {
+		drive := request.gitBashDrive && candidate.Flavor == actionfacts.PathFlavorPOSIX && path.IsAbs(value)
+		if !filepath.IsAbs(value) && !drive || inState(value) {
 			continue
 		}
 		target := filepath.Dir(value)
+		if drive {
+			target = path.Dir(value)
+		}
 		if strings.HasSuffix(candidate.Value, "/") || strings.HasSuffix(candidate.Value, "/.") {
 			target = value
 		}
 		if physical, ok := resolve(target); ok && inState(physical) {
 			return true
+		}
+		// `rm -rf dclink/../.defenseclaw/hooks`: the parent as the kernel
+		// walks it (GAP-2047 L5).
+		if walked, ok := stateWalkSpelling(candidate, request.Input.CWD, home); ok {
+			if physical, ok := resolve(walkParent(walked)); ok && inState(physical) {
+				return true
+			}
 		}
 	}
 	return false
@@ -2578,16 +2876,34 @@ func stateDirectoryEntryTarget(
 	}
 	windows := candidate.Flavor == actionfacts.PathFlavorWindows
 	value := candidate.Resolved
-	if !filepath.IsAbs(value) || strings.HasSuffix(candidate.Value, "/") ||
+	// A drive view operand (/C:/x, GAP-2577) is a rooted slash path.
+	drive := request.gitBashDrive && !windows && path.IsAbs(value)
+	if !filepath.IsAbs(value) && !drive || strings.HasSuffix(candidate.Value, "/") ||
 		strings.HasSuffix(candidate.Value, "/.") ||
 		windows && (strings.HasSuffix(candidate.Value, `\`) || strings.HasSuffix(candidate.Value, `\.`)) {
 		return "", false
 	}
-	parent, ok := hookpaths.ResolveWriteTarget(filepath.Dir(value))
+	parentSpelling := filepath.Dir(value)
+	if drive {
+		parentSpelling = path.Dir(value)
+	}
+	if !windows && hasDotDotComponent(value) {
+		// A walked spelling (stateWalkSpelling): the kernel follows a link
+		// before the `..` after it.
+		parentSpelling = walkParent(value)
+	}
+	parent, ok := "", false
+	if request.ProtectedHomeHook {
+		// The client walked the parent as the user (GAP-2569).
+		parent, ok = hookpaths.WalkFactTarget(request.ResolvedWriteTargets, filepath.ToSlash(parentSpelling))
+	}
+	if !ok {
+		parent, ok = hookpaths.ResolveWriteTarget(driveFSPath(request, parentSpelling))
+	}
 	if !ok {
 		return "", false
 	}
-	entry := filepath.Join(parent, filepath.Base(value))
+	entry := filepath.Join(parent, path.Base(filepath.ToSlash(value)))
 	if info, err := os.Stat(entry); err == nil && info.IsDir() && (moveDestination || windows) {
 		return "", false
 	}
@@ -2596,7 +2912,7 @@ func stateDirectoryEntryTarget(
 		// state checks read the entry the way they read the operand.
 		entry = filepath.ToSlash(entry)
 	}
-	return entry, true
+	return driveViewPath(request, entry), true
 }
 
 func provenPartialStateRedirect(

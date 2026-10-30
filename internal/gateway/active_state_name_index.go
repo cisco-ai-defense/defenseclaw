@@ -22,11 +22,14 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
+
+	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
 )
 
 // activeStateNameIndexLimit bounds one walk of the protected trees. A
@@ -65,6 +68,10 @@ var activeStateNameIndexes = struct {
 // size-capped walk per call counted every upgraded account's previous/ as
 // a match and ran in the hook hot path).
 func activeStateNamesOf(root string) *activeStateNameIndex {
+	if runtime.GOOS == "windows" && strings.HasPrefix(root, "/") && actionfacts.DriveSlashPath(root[1:]) {
+		// A Git Bash drive view root (/C:/Users/x/.defenseclaw, GAP-2577).
+		root = root[1:]
+	}
 	stamp := activeStateNameIndexStamp(root)
 	activeStateNameIndexes.Lock()
 	defer activeStateNameIndexes.Unlock()

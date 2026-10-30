@@ -16,6 +16,8 @@
 
 package actionfacts
 
+import "mvdan.cc/sh/v3/syntax"
+
 type parseOutput struct {
 	status           ParseStatus
 	dialect          Dialect
@@ -29,6 +31,9 @@ type parseOutput struct {
 	curlCapabilities []CurlCapability
 	// redirectTargets is set only by a top-level POSIX parse.
 	redirectTargets redirectTargetCapture
+	// shortCircuitLists maps the head statement of a && / || list to the
+	// ID of its first command (ShortCircuitListID).
+	shortCircuitLists map[*syntax.Stmt]int64
 }
 
 func newParseOutput(dialect Dialect, startID int64) parseOutput {

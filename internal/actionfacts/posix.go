@@ -121,6 +121,13 @@ func parsePOSIX(source string, startID int64, wrapperDepth int) parseOutput {
 
 	addPOSIXStructuralFlows(&out)
 	expandStaticPOSIXWrappers(&out, wrapperDepth)
+	if posixMayRebindHome(parsedSource) {
+		for i := range out.commands {
+			for j := range out.commands[i].Arguments {
+				out.commands[i].Arguments[j].homeSpelling = ""
+			}
+		}
+	}
 	if len(out.commands) == 0 && out.status == StatusComplete {
 		out.markUnsupported(IssueUnsupportedConstruct)
 	}
@@ -409,6 +416,7 @@ func projectPOSIXStatement(
 		ControlFlowUncertain: posixControlFlowUncertain(stmt, stack),
 		ControlFlowOperator:  posixControlFlowOperator(stmt, stack),
 		Background:           stmt.Background,
+		ShortCircuitListID:   out.shortCircuitListID(stack),
 		Dialect:              DialectPOSIX,
 		Effect:               EffectExecute,
 		ArgvComplete:         true,
@@ -554,6 +562,9 @@ func projectPOSIXWord(word *syntax.Word) ArgumentFact {
 		Value:   staticValue,
 		Quote:   quote,
 		Expands: expands || unquotedExpansion,
+	}
+	if expands {
+		result.homeSpelling = posixHomeSpelling(word)
 	}
 	if result.Expands {
 		if !expands && unquotedExpansion && quote == QuoteNone {

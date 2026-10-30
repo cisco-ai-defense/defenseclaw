@@ -28,12 +28,12 @@ func TestR105GAP0768WindowsHostPathOfPOSIXOperand(t *testing.T) {
 		{"*.md", ""},
 		{"", ""},
 	} {
-		got, ok := windowsHostPathOfPOSIXOperand(tc.value, cwd, home)
+		got, ok := windowsHostPathOfPOSIXOperand(tc.value, cwd, home, false)
 		if got != tc.want || ok != (tc.want != "") {
 			t.Errorf("%q: got %q %v, want %q", tc.value, got, ok, tc.want)
 		}
 	}
-	if got, ok := windowsHostPathOfPOSIXOperand("CLAUDE.md", "/repo", "/home/alice"); ok {
+	if got, ok := windowsHostPathOfPOSIXOperand("CLAUDE.md", "/repo", "/home/alice", false); ok {
 		t.Errorf("a POSIX working directory is not a Windows host path: %q", got)
 	}
 }

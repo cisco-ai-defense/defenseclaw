@@ -44,19 +44,88 @@ func globbedStateMutation(facts actionfacts.Facts) bool {
 	if !strings.HasPrefix(home, "/") {
 		return false
 	}
-	for _, command := range facts.Commands {
+	dirs := posixCommandDirectories(facts, home)
+	for index, command := range facts.Commands {
 		if command.Effect == actionfacts.EffectPreview || command.Dialect != actionfacts.DialectPOSIX {
 			continue
 		}
 		words, ok := stateOperandWords(command)
-		if !ok {
-			continue
-		}
-		if globbedStateCommandMutates(command, words, home, facts.CWD) {
-			return true
+		// `sudo rm -rf hooks/*`: a glob operand keeps the wrapper call
+		// whole (no wrapped command fact), so judge the program it runs
+		// (pod check28 N5, N10, N13, N19).
+		program, programWords := unwrapStateWrapper(command, words)
+		// A relative operand names a path in a directory the command may
+		// run in, after any earlier cd (pod check26, check27).
+		for _, dir := range dirs[index] {
+			// An unquoted -name/-path glob leaves find with no facts (GAP-2498).
+			if findGlobStateMutation(facts, command, dir) ||
+				ok && globbedStateCommandMutates(program, programWords, home, dir) {
+				return true
+			}
 		}
 	}
 	return false
+}
+
+// stateWrapperValueOptions are the transparent wrappers whose program word
+// follows their options, and the options of each that take the next word.
+var stateWrapperValueOptions = map[string]map[string]bool{
+	"sudo": {"-u": true, "-g": true, "-U": true, "-C": true, "-D": true, "-h": true,
+		"-p": true, "-r": true, "-t": true, "-T": true, "-R": true},
+	"doas":    {"-u": true, "-C": true},
+	"env":     {"-u": true, "-C": true},
+	"nice":    {"-n": true},
+	"timeout": {"-s": true, "-k": true},
+	"stdbuf":  {"-i": true, "-o": true, "-e": true},
+	"nohup":   {},
+	"time":    {},
+	"command": {},
+	"exec":    {"-a": true},
+}
+
+// unwrapStateWrapper is the program a transparent wrapper call runs and its
+// words (`sudo -u root rm -rf a/*` -> rm, [-rf a/*]); the command itself
+// when it is no such wrapper or its program word is not static.
+func unwrapStateWrapper(command actionfacts.CommandFact, words []string) (actionfacts.CommandFact, []string) {
+	for depth := 0; depth < 4; depth++ {
+		program := path.Base(command.Program)
+		valueOptions, wrapper := stateWrapperValueOptions[program]
+		if !wrapper {
+			break
+		}
+		index := 0
+		for index < len(words) {
+			word := words[index]
+			if word == "--" {
+				index++
+				break
+			}
+			if program == "env" && !strings.HasPrefix(word, "-") && strings.Contains(word, "=") {
+				index++
+				continue
+			}
+			if !strings.HasPrefix(word, "-") || word == "-" {
+				break
+			}
+			if program == "env" && (word == "-S" || strings.HasPrefix(word, "--split-string")) {
+				return command, words
+			}
+			index++
+			if valueOptions[word] {
+				index++
+			}
+		}
+		if program == "timeout" {
+			index++
+		}
+		if index >= len(words) || words[index] == "" {
+			return command, words
+		}
+		inner := command
+		inner.Program = path.Base(words[index])
+		command, words = inner, words[index+1:]
+	}
+	return command, words
 }
 
 // stateOperandWords returns the static spelling of each argument after the
@@ -70,6 +139,10 @@ func stateOperandWords(command actionfacts.CommandFact) ([]string, bool) {
 		value := argument.Value
 		if value == "" {
 			value = argument.StaticGlob
+		}
+		if value == "" {
+			// `$HOME/.defenseclaw`, `--work-tree="$HOME"` (pod check27).
+			value = argument.HomeSpelling()
 		}
 		words = append(words, value)
 	}
@@ -149,7 +222,16 @@ func globbedStateCommandMutates(command actionfacts.CommandFact, words []string,
 				return true
 			}
 		}
+	case "install":
+		return installStateTarget(words, home, cwd)
+	case "sort":
+		return sortStateOutput(words, home, cwd)
 	case "git":
+		// A work tree on the state rewritten by another subcommand, or the
+		// home work tree losing its untracked files (GAP-2485).
+		if gitWorkTreeStateWrite(words, home, cwd) {
+			return true
+		}
 		index := slices.Index(operands, "clean")
 		if index < 0 || !slices.ContainsFunc(options, gitCleanForces) ||
 			slices.ContainsFunc(options, gitCleanDryRun) {

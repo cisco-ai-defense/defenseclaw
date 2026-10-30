@@ -1012,15 +1012,20 @@ type CommandFact struct {
 	// Background distinguishes one statically present asynchronous POSIX
 	// statement from conditional or otherwise unresolved control flow. It is
 	// value-free and private to exact code-owned proofs.
-	Background   bool `json:"-"`
-	Kind         CommandKind
-	Dialect      Dialect
-	Effect       CommandEffect
-	Executable   string
-	Program      string
-	Argv         []string
-	Arguments    []ArgumentFact
-	ArgvComplete bool
+	Background bool `json:"-"`
+	// ShortCircuitListID is shared by the commands of one && / || list
+	// (zero outside one). It is value-free and lets a bounded proof tell
+	// `cd X && a && b` (b runs only after the cd succeeded) from
+	// `cd X && a; b` (b also runs after a failed cd).
+	ShortCircuitListID int64 `json:"-"`
+	Kind               CommandKind
+	Dialect            Dialect
+	Effect             CommandEffect
+	Executable         string
+	Program            string
+	Argv               []string
+	Arguments          []ArgumentFact
+	ArgvComplete       bool
 	// LiteralStdin is retained only for one bounded, single-quoted POSIX
 	// heredoc whose bytes cannot undergo shell expansion. It is private
 	// in-process evidence and is intentionally not part of the public semantic
@@ -1084,6 +1089,17 @@ type ArgumentFact struct {
 	// escaped a leading "~" (an unquoted one is an expansion), and kept on
 	// the argv a wrapper passes on. Such a word names "./~", not the home.
 	literalTilde bool
+	// homeSpelling is a word whose only expansion is a plain $HOME or
+	// ${HOME} at its start (or after the = of a leading --option=), written
+	// with "~" for it ("$HOME/.dotfiles" -> "~/.dotfiles"). It is empty when
+	// the action may rebind HOME.
+	homeSpelling string
+}
+
+// HomeSpelling is the word with its leading $HOME written as "~", or "".
+// It names the home of the calling shell, which the action did not rebind.
+func (argument ArgumentFact) HomeSpelling() string {
+	return argument.homeSpelling
 }
 
 type QuoteKind string
