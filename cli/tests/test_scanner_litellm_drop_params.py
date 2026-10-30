@@ -99,7 +99,7 @@ class SkillScanLiteLLMTest(unittest.TestCase):
             "skill_scanner.core.analyzer_factory": MagicMock(build_analyzers=build),
             "skill_scanner.core.scan_policy": MagicMock(),
         }), patch.object(skill_mod, "drop_unsupported_litellm_params", side_effect=drop), \
-                patch.object(skill_mod, "install_judge_compat", create=True), \
+                patch("defenseclaw.scanner._skill_judge_compat.install"), \
                 patch.object(skill_mod.SkillScannerWrapper, "_convert", return_value=result), \
                 patch.dict(os.environ, {"SKILL_SCANNER_LLM_MODEL": "inherited/model"}):
             skill_mod.SkillScannerWrapper(scanner_cfg, llm=llm).scan("/tmp/skill")
