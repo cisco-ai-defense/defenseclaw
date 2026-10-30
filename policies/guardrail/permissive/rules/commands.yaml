@@ -51,7 +51,11 @@ rules:
     tags: [execution, reverse-shell]
   - id: CMD-PIPE-CURL
     tool_call_only: true
-    expression: 'false'
+    expression: >-
+      f.commands.exists(c, c.argv_complete &&
+      c.program in ['curl', 'curl.exe', 'invoke-webrequest', 'iwr', 'invoke-restmethod', 'irm'] &&
+      (defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_FETCH in c.operations ||
+      defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_UPLOAD in c.operations))
     # Candidate discovery covers POSIX curl pipelines and PowerShell web-cmdlet
     # aliases. The exact fallback contract proves stdout-to-interpreter flow.
     pattern: 'a^'
@@ -71,6 +75,32 @@ rules:
     severity: HIGH
     confidence: 0.95
     tags: [execution, download-exec]
+  - id: CMD-WRAPPED-DOWNLOAD-EXEC
+    tool_call_only: true
+    expression: 'false'
+    pattern: 'a^'
+    title: "Download piped through a privilege wrapper to a shell"
+    severity: CRITICAL
+    confidence: 0.99
+    tags: [execution, download-exec]
+  - id: CMD-SUBST-DOWNLOAD-EXEC
+    tool_call_only: true
+    expression: 'false'
+    pattern: 'a^'
+    title: "Downloaded command substitution evaluated by a shell"
+    severity: CRITICAL
+    confidence: 0.99
+    tags: [execution, download-exec]
+  - id: CMD-PYTHON-SOCKET-CONNECT
+    tool_call_only: true
+    expression: >-
+      f.commands.exists(c, c.program in ['python', 'python2', 'python3'] &&
+      defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_CONNECT in c.operations)
+    pattern: 'a^'
+    title: "Python code connects to a nonlocal socket"
+    severity: CRITICAL
+    confidence: 0.99
+    tags: [execution, network]
   - id: CMD-PIPE-BASE64
     tool_call_only: true
     expression: >-

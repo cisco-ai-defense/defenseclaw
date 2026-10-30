@@ -144,15 +144,18 @@ var ruleCapabilities = map[string]ToolCapabilityClass{
 	"SRC-BUN-SPAWN":                          CapExecShell,
 
 	// Outbound network fetch / listener.
-	"CMD-CURL-UPLOAD": CapNetworkFetch,
-	"CMD-WGET-POST":   CapNetworkFetch,
-	"CMD-ENV-DUMP":    CapNetworkFetch,
-	"CMD-PIPE-CURL":   CapNetworkFetch,
-	"CMD-PIPE-WGET":   CapNetworkFetch,
-	"SRC-FETCH":       CapNetworkFetch,
-	"SRC-NET-SERVER":  CapNetworkFetch,
-	"SRC-HTTP-SERVER": CapNetworkFetch,
-	"SRC-WS":          CapNetworkFetch,
+	"CMD-CURL-UPLOAD":           CapNetworkFetch,
+	"CMD-WGET-POST":             CapNetworkFetch,
+	"CMD-ENV-DUMP":              CapNetworkFetch,
+	"CMD-PIPE-CURL":             CapNetworkFetch,
+	"CMD-PIPE-WGET":             CapNetworkFetch,
+	"CMD-WRAPPED-DOWNLOAD-EXEC": CapNetworkFetch,
+	"CMD-SUBST-DOWNLOAD-EXEC":   CapNetworkFetch,
+	"CMD-PYTHON-SOCKET-CONNECT": CapNetworkFetch,
+	"SRC-FETCH":                 CapNetworkFetch,
+	"SRC-NET-SERVER":            CapNetworkFetch,
+	"SRC-HTTP-SERVER":           CapNetworkFetch,
+	"SRC-WS":                    CapNetworkFetch,
 
 	// Filesystem writes.
 	"SRC-FS-WRITE": CapWriteFS,

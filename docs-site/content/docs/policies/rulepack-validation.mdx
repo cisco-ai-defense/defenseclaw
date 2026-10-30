@@ -22,10 +22,10 @@ On a managed computer, `defenseclaw` runs only `sandbox` commands. Use `defensec
 
    ```text
    Rule pack valid: "/home/alice/.defenseclaw/policies/guardrail/default"
-     rules: 239/243 enabled across 7 files
+     rules: 242/246 enabled across 7 files
      components: judges=4 judge_categories=23 local_patterns=11 suppressions=9 sensitive_tools=6
-     digest: 36bc8fb641b358f7fc8cb7a5bc0b6967d639a982bb66e6ed2228453aa96d3960
-     files digest: f664ccf64bf91e0377966066762d1672e261327107ca4f74bbed3c5ad4fd2164 (the guardrail.custom_packs pin)
+     digest: c827b8e189e2260047f6fa2ef5136f16414c421b0d7e99b55317dce7283799bd
+     files digest: 68652af70814424bf0e3f3b991b06da5a5cd9ac2025a8dd2dddeaca6e95d7b47 (the guardrail.custom_packs pin)
    ```
 
    `judges=4` counts the compiled-in exfil judge and the three judge files. The full digest includes compiled defaults and can change between builds even when the files digest stays the same. Use your own run's `files digest` to pin a custom pack. You can pass a pack name instead of a path.
@@ -37,7 +37,7 @@ On a managed computer, `defenseclaw` runs only `sandbox` commands. Use `defensec
    ```
 
    ```json
-   {"kind":"validation","summary":{"alert_only_rule_count":0,"digest":"36bc8fb6…","enabled_rule_count":239,"files_digest":"f664ccf6…","judge_category_count":23,"judge_count":4,"local_pattern_count":11,"rule_count":243,"rule_file_count":7,"sensitive_tool_count":6,"stale_rule_count":0,"suppression_count":9},"valid":true,"wire_version":1}
+   {"kind":"validation","summary":{"alert_only_rule_count":0,"digest":"c827b8e1…","enabled_rule_count":242,"files_digest":"68652af7…","judge_category_count":23,"judge_count":4,"local_pattern_count":11,"rule_count":246,"rule_file_count":7,"sensitive_tool_count":6,"stale_rule_count":0,"suppression_count":9},"valid":true,"wire_version":1}
    ```
 
 3. Read a failure. A file the loader does not recognize fails the whole pack and exits `1`:

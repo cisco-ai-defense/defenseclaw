@@ -3849,10 +3849,11 @@ class BalancedPermissiveNoisePosture(unittest.TestCase):
                 commands = _load_profile_rules(profile, "commands.yaml")
                 paths = _load_profile_rules(profile, "sensitive-paths.yaml")
 
-                # Owner decision for 1.0 (GAP-0893): curl piped to a shell stays off outside strict.
-                self.assertEqual(commands["CMD-PIPE-CURL"]["expression"], "false")
+                # Generic installer pipelines are recorded without a default-pack refusal.
+                self.assertIn("OPERATION_KIND_FETCH", commands["CMD-PIPE-CURL"]["expression"])
                 self.assertEqual(commands["CMD-PIPE-CURL"]["pattern"], "a^")
                 self.assertEqual(commands["CMD-PIPE-CURL"]["severity"], "HIGH")
+                self.assertEqual(commands["CMD-PIPE-WGET"]["severity"], "HIGH")
                 self.assertEqual(paths["PATH-ENV-FILE"]["expression"], "false")
                 self.assertEqual(paths["PATH-ENV-FILE"]["pattern"], "a^")
 
