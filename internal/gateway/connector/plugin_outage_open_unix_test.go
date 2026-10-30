@@ -301,7 +301,7 @@ func TestPerUserPluginOversizedProtectedPrefixGetsGatewayBlock(t *testing.T) {
 				t.Fatal(err)
 			}
 			harness := strings.ReplaceAll(plugin.harness, `command: "echo marker"`, plugin.input)
-			cmd := exec.Command(nodeForTest(t), "--input-type=module", "-e", harness, path)
+			cmd := exec.Command(nodeForTest(t), "--input-type=module", "-e", withOpenCodeV2Fixture(t, harness), path)
 			cmd.Env = append(sanitizedTestEnv(), "HOME="+home, "DEFENSECLAW_GATEWAY_AUTOSTART=0")
 			out, err := cmd.Output()
 			if err != nil {
@@ -473,7 +473,7 @@ func TestPerUserPluginOutageFollowsTheConfigNow(t *testing.T) {
 				if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
 					t.Fatal(err)
 				}
-				cmd := exec.Command(nodeForTest(t), "--input-type=module", "-e", plugin.harness, path)
+				cmd := exec.Command(nodeForTest(t), "--input-type=module", "-e", withOpenCodeV2Fixture(t, plugin.harness), path)
 				cmd.Env = append(sanitizedTestEnv(), "HOME="+home, "DEFENSECLAW_GATEWAY_AUTOSTART=0")
 				out, err := cmd.Output()
 				if err != nil {
@@ -540,7 +540,7 @@ func TestPerUserPluginOversizedPayloadUsesInstalledTier(t *testing.T) {
 					t.Fatal(err)
 				}
 				harness := strings.ReplaceAll(plugin.harness, `command: "echo marker"`, `description: "x".repeat(1100000), command: "echo marker"`)
-				cmd := exec.Command(nodeForTest(t), "--input-type=module", "-e", harness, path)
+				cmd := exec.Command(nodeForTest(t), "--input-type=module", "-e", withOpenCodeV2Fixture(t, harness), path)
 				cmd.Env = append(sanitizedTestEnv(), "HOME="+home, "DEFENSECLAW_GATEWAY_AUTOSTART=0")
 				out, err := cmd.Output()
 				if err != nil {

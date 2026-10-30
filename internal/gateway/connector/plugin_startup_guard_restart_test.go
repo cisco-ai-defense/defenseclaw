@@ -360,7 +360,7 @@ const call = async (plugin, id) => {
     return "block:" + String(error && error.message || error);
   }
 };
-const plugin = await loaded.DefenseClaw({ directory: "", client: {} });
+const plugin = await fixtureBridge(loaded, { directory: "/work/repo" });
 await plugin.config({ plugin_origins: [{ spec: href }], mcp: {} });
 console.log(await call(plugin, "C1"));
 console.log(await call(plugin, "C2"));

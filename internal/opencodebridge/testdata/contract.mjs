@@ -70,7 +70,11 @@ export async function contract(plugin, fixture) {
   sessionLocation = { directory: "/other", workspaceID: "ws_test" };
   await assert.rejects(hooks.get("execute.before")(event()), /verified session location/);
   sessionLocation = location;
-  await assert.rejects(hooks.get("execute.before")(event("shell", { command: "x".repeat(1048577) })), /oversized/);
+  // An oversized call reaches the bridge whole: the per-user bounded review,
+  // or the managed hook's own size limit, decides it, never the adapter.
+  const oversized = await hooks.get("execute.before")(event("shell", { command: "x".repeat(1048577) }))
+    .then(() => "", (error) => String(error && error.message));
+  assert.doesNotMatch(oversized, /OpenCode tool arguments/);
   await assert.rejects(hooks.get("execute.before")(event("shell", { get command() { return "x"; } })), /accessor/);
   await assert.rejects(hooks.get("execute.before")({ tool: "shell", input: {} }), /incomplete/);
 
