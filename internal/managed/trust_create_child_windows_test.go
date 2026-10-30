@@ -37,9 +37,13 @@ func TestAcceptInheritedCreateChildOnlyOnFolders(t *testing.T) {
 	}
 	const programDataUsers windows.ACCESS_MASK = 0x116
 	inherited := uint8(windows.INHERITED_ACE)
+	// C:\ProgramData grants this entry with container inheritance only.
+	containerOnly := inherited | uint8(windows.CONTAINER_INHERIT_ACE)
 
-	if !acceptInheritedCreateChild(dir, "test", inherited, programDataUsers, users) {
-		t.Fatal("inherited Users create-child on a folder was not accepted")
+	for _, flags := range []uint8{inherited, containerOnly} {
+		if !acceptInheritedCreateChild(dir, "test", flags, programDataUsers, users) {
+			t.Fatalf("inherited Users create-child on a folder (flags 0x%x) was not accepted", flags)
+		}
 	}
 	for name, tc := range map[string]struct {
 		path  string
@@ -52,6 +56,7 @@ func TestAcceptInheritedCreateChildOnlyOnFolders(t *testing.T) {
 		"delete right":                     {dir, inherited, programDataUsers | windows.DELETE, users},
 		"delete child":                     {dir, inherited, programDataUsers | 0x40, users},
 		"Everyone":                         {dir, inherited, programDataUsers, everyone},
+		"object inheritance":               {dir, containerOnly | uint8(windows.OBJECT_INHERIT_ACE), programDataUsers, users},
 	} {
 		if acceptInheritedCreateChild(tc.path, "test", tc.flags, tc.mask, tc.sid) {
 			t.Fatalf("%s was accepted", name)

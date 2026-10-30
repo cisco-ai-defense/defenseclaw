@@ -966,7 +966,10 @@ var acceptedCreateChild sync.Map
 // the shape a folder takes after its protection is reset to inherit from
 // C:\ProgramData. Strict mode keeps it fatal.
 func acceptInheritedCreateChild(path, label string, flags uint8, mask windows.ACCESS_MASK, sid *windows.SID) bool {
-	if trustStrictAncestors() || flags&windows.INHERITED_ACE == 0 || mask&^windowsCreateChildOnlyMask != 0 {
+	// An object-inheritable entry would pass these bits to new files, where
+	// add-file and add-subfolder mean write data and append data.
+	if trustStrictAncestors() || flags&windows.INHERITED_ACE == 0 || flags&windows.OBJECT_INHERIT_ACE != 0 ||
+		mask&^windowsCreateChildOnlyMask != 0 {
 		return false
 	}
 	if sid == nil || !(sid.IsWellKnown(windows.WinBuiltinUsersSid) || sid.IsWellKnown(windows.WinAuthenticatedUserSid)) {

@@ -26523,7 +26523,10 @@ function Invoke-DefenseClawNuclearUninstall {
     param(
         [Parameter(Mandatory)][hashtable]$Layout,
         [Parameter(Mandatory)][string]$GatewayServiceName,
-        [Parameter(Mandatory)][string]$GuardianServiceName
+        [Parameter(Mandatory)][string]$GuardianServiceName,
+        # Set only by Install recovery, which purges while it holds the shared
+        # lifecycle lock; a direct purge does not take the lock.
+        [switch]$LifecycleLockHeld
     )
     $warnings = [Collections.Generic.List[string]]::new()
     # Everything the purge could not remove, and whether a restart finishes
@@ -26840,9 +26843,16 @@ function Invoke-DefenseClawNuclearUninstall {
                 -Role 'LifecycleDir' `
                 -RebootRequired ([ref]$rebootRequired)
             if (-not [string]::IsNullOrEmpty($leftover)) {
-                # Install recovery purges while it holds the shared lock, so
-                # the folder is legitimately in use; it holds no state.
-                $warnings.Add($leftover)
+                if ($LifecycleLockHeld) {
+                    # This process holds the shared lock, so the folder is in
+                    # use by this very recovery; it holds no state.
+                    $warnings.Add($leftover)
+                }
+                else {
+                    # Another lifecycle action may own the lock: the purge
+                    # is not finished.
+                    $incomplete.Add($leftover)
+                }
             }
         }
     }
@@ -27695,7 +27705,8 @@ function Invoke-DefenseClawInstallAutoRecovery {
             StateRoot   = [IO.Path]::GetFullPath([string]$Layout.StateRoot).TrimEnd('\')
         } `
         -GatewayServiceName $GatewayServiceName `
-        -GuardianServiceName $GuardianServiceName
+        -GuardianServiceName $GuardianServiceName `
+        -LifecycleLockHeld
     foreach ($item in $leftovers) {
         Write-DefenseClawResilienceEvent -Marker defenseclaw_recover -Fields @{
             stage   = 'install'
