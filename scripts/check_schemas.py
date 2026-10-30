@@ -282,6 +282,11 @@ MANAGEMENT_CONTRACT_RULES = (
      _from_example("bundle-verify.schema.json", 0, _set(secret_refs_missing=[{"name": "k", "value": "x"}])), False),
     ("verify secret_refs_mismatch entry that carries a value", "bundle-verify.schema.json",
      _from_example("bundle-verify.schema.json", 0, _set(secret_refs_mismatch=[{"name": "k", "value": "x"}])), False),
+    ("verify secret_refs entry that carries value_sha256", "bundle-verify.schema.json",
+     _from_example("bundle-verify.schema.json", 0, _set(secret_refs=[{"name": "k", "required": True, "present": True,
+                                                                      "value_match": True, "value_sha256": "0" * 64}])), False),
+    ("verify secret_refs entry without value_match", "bundle-verify.schema.json",
+     _from_example("bundle-verify.schema.json", 0, _set(secret_refs=[{"name": "k", "required": True, "present": True}])), False),
     ("verify secret_refs_mismatch naming a stored credential", "bundle-verify.schema.json",
      _from_example("bundle-verify.schema.json", 0, _set(secret_refs_mismatch=["ai-defense-api-key"])), True),
     ("verify restart prediction outside the enum", "bundle-verify.schema.json",
@@ -1081,6 +1086,126 @@ def check_management_contract() -> bool:
     return ok
 
 
+# Each forward schema and the contract schema whose documents it projects.
+MDM_FORWARD_SCHEMAS = {
+    "lifecycle-result-forward.schema.json": "lifecycle-result.schema.json",
+    "bundle-verify-forward.schema.json": "bundle-verify.schema.json",
+    "bundle-status-forward.schema.json": "bundle-status.schema.json",
+    "bundle-receipt-forward.schema.json": "bundle-receipt.schema.json",
+    "identity-refresh-forward.schema.json": None,
+}
+# Member names a forward schema must never list: they name accounts, hold
+# free text or local detail.
+MDM_FORWARD_BANNED_MEMBERS = {
+    "user", "users", "user_id", "uid", "gid", "sid", "upn", "account", "accounts", "name", "names",
+    "group", "groups", "principal", "actor", "created_by", "change_summary", "message", "messages",
+    "subject", "path", "paths", "pid", "entries", "changes", "home", "tenant_id", "device_group",
+    "signer_key_id", "key_id", "anchors", "log_path", "last_reload_error", "reason", "detail",
+}
+# Strings that must not survive a projection of the fixtures: account
+# names, identifiers (SID, UPN, uid forms), group names and paths.
+MDM_FORWARD_LEAKS = re.compile(
+    r"S-1-5-|@dclab\.test|@example\.com|dcad-|\buid\b|DCLAB\\|/home/|/Users/|C:\\\\Users|C:\\Users|dc-r102-eng|wheel"
+)
+
+
+def _forward_schema_rule_errors(node, where: str) -> list[str]:
+    """Structural rules of a forward schema: closed objects, constrained
+    strings, no banned member names."""
+    errors: list[str] = []
+    if isinstance(node, dict):
+        if node.get("type") == "object" and "properties" in node and node.get("additionalProperties") is not False:
+            errors.append(f"{where}: an object with properties must be closed")
+        if node.get("type") == "object" and isinstance(node.get("additionalProperties"), dict) and "propertyNames" not in node:
+            errors.append(f"{where}: a map must constrain its keys with propertyNames")
+        if node.get("type") == "string" and not any(key in node for key in ("pattern", "enum", "const")):
+            errors.append(f"{where}: a string must have a pattern, enum or const")
+        for member in node.get("properties", {}):
+            if member in MDM_FORWARD_BANNED_MEMBERS:
+                errors.append(f"{where}: lists the member {member!r}, which can name an account or hold free text")
+        for key, child in node.items():
+            if key in ("description", "title", "examples", "$id", "$schema", "pattern"):
+                continue
+            errors.extend(_forward_schema_rule_errors(child, f"{where}/{key}"))
+    elif isinstance(node, list):
+        for i, child in enumerate(node):
+            errors.extend(_forward_schema_rule_errors(child, f"{where}[{i}]"))
+    return errors
+
+
+def check_forward_schemas() -> bool:
+    """private #14 option A: the forward schemas are closed allowlists, the
+    reference projection (forward/project.py) drops every member they do not
+    list, and no account name or identifier survives a projection of the
+    fixtures (full documents from Linux, macOS and Windows, with the 1.0.6
+    additions) or of the contract schema examples."""
+    try:
+        import jsonschema  # type: ignore[import-not-found]
+    except ImportError:
+        print("check_schemas: jsonschema is required for the forward schemas", file=sys.stderr)
+        return False
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("defenseclaw_forward_project", MDM_CONTRACT_DIR / "forward" / "project.py")
+    if spec is None or spec.loader is None:
+        print("check_schemas: forward/project.py is missing", file=sys.stderr)
+        return False
+    forward_project = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(forward_project)
+    forward_dir = MDM_CONTRACT_DIR / "forward"
+    ok = True
+    present = {path.name for path in forward_dir.glob("*.schema.json")}
+    if present != set(MDM_FORWARD_SCHEMAS):
+        print(f"check_schemas: forward schema drift present={sorted(present)} listed={sorted(MDM_FORWARD_SCHEMAS)}", file=sys.stderr)
+        ok = False
+    guide = (MDM_CONTRACT_DIR / MANAGEMENT_CONTRACT_GUIDE).read_text(encoding="utf-8")
+    fixtures = sorted((forward_dir / "fixtures").glob("*.json"))
+    for name in sorted(present & set(MDM_FORWARD_SCHEMAS)):
+        schema = load_json(forward_dir / name)
+        if not ensure_valid_meta(schema, forward_dir / name):
+            ok = False
+            continue
+        if not schema.get("$id", "").startswith(MDM_CONTRACT_ID_PREFIX + "management/forward/"):
+            print(f"check_schemas: forward/{name}: $id is not under management/forward/", file=sys.stderr)
+            ok = False
+        if name not in guide:
+            print(f"check_schemas: {MANAGEMENT_CONTRACT_GUIDE} does not name forward/{name}", file=sys.stderr)
+            ok = False
+        for error in _forward_schema_rule_errors(schema, f"forward/{name}"):
+            print(f"check_schemas: {error}", file=sys.stderr)
+            ok = False
+        validator = jsonschema.Draft202012Validator(schema)
+        documents = []
+        prefix = name.removesuffix("-forward.schema.json") + "."
+        documents += [(f"fixture {path.name}", load_json(path)) for path in fixtures if path.name.startswith(prefix)]
+        source = MDM_FORWARD_SCHEMAS[name]
+        if source:
+            for i, example in enumerate(load_json(MDM_CONTRACT_DIR / source).get("examples", [])):
+                documents.append((f"{source} example {i}", example))
+        if not documents:
+            print(f"check_schemas: forward/{name}: no fixture projects through it", file=sys.stderr)
+            ok = False
+        for label, document in documents:
+            projected = forward_project.project(document, schema)
+            problems = [e.message for e in validator.iter_errors(projected)]
+            text = json.dumps(projected)
+            leak = MDM_FORWARD_LEAKS.search(text)
+            if problems or leak or ("ok" in document and "ok" not in projected):
+                print(f"check_schemas: forward/{name} {label}: projection problems={problems[:3]} leak={leak.group(0) if leak else None}", file=sys.stderr)
+                ok = False
+            if forward_project.project(projected, schema) != projected:
+                print(f"check_schemas: forward/{name} {label}: projection is not idempotent", file=sys.stderr)
+                ok = False
+        # A member a later release adds is dropped, never an error.
+        extra = forward_project.project({"added_in_a_later_release": {"user": "x"}}, schema)
+        if extra != {}:
+            print(f"check_schemas: forward/{name}: an unknown member was not dropped: {extra}", file=sys.stderr)
+            ok = False
+    if ok:
+        print(f"check_schemas: management forward schemas OK ({len(present)} schemas, {len(fixtures)} fixtures)")
+    return ok
+
+
 def main() -> int:
     if not SCHEMA_DIR.is_dir():
         print(f"check_schemas: schema dir not found: {SCHEMA_DIR}", file=sys.stderr)
@@ -1165,6 +1290,8 @@ def main() -> int:
         ok = False
 
     if not check_management_contract():
+        ok = False
+    if not check_forward_schemas():
         ok = False
 
     # Cross-artifact drift checks are meaningful only for the repository's

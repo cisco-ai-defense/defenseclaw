@@ -1,0 +1,166 @@
+{
+  "schema_version": 2,
+  "ok": true,
+  "action": "verify",
+  "noop": false,
+  "profile": "standalone",
+  "platform": "windows",
+  "product_version": "1.0.6",
+  "installed_version": "1.0.6",
+  "installed": true,
+  "transaction_pending": false,
+  "services": [
+    {
+      "name": "defenseclaw-gateway",
+      "kind": "gateway",
+      "state": "active",
+      "pid": 812,
+      "restarts": 0,
+      "required": true
+    },
+    {
+      "name": "defenseclaw-sandbox@dcad-r102-eng1",
+      "kind": "sandbox",
+      "state": "active",
+      "pid": 913
+    }
+  ],
+  "readiness": {
+    "gateway": true,
+    "guardian": true,
+    "enumerator": true,
+    "sensor_helper": true
+  },
+  "inspection": {
+    "local": "active",
+    "ai_defense": "disabled"
+  },
+  "machine_policy": {
+    "ownership": "merge"
+  },
+  "enrollment": {
+    "targets": 3,
+    "pending": 0,
+    "failed": 0,
+    "exempt": 1,
+    "accounts": [
+      "dcad-r102-eng1",
+      "dcad-alice@dclab.test",
+      "S-1-5-21-3623811015-3361044348-30300820-1104"
+    ]
+  },
+  "coverage_complete": true,
+  "security_complete": true,
+  "policy": {
+    "effective_digest": "sha256:4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f",
+    "config_generation": 41,
+    "applied": true,
+    "gateway_reported_digest": "sha256:4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f",
+    "last_reload_error": "config reload refused for /home/dcad-r102-eng1/.claude",
+    "config_unrecorded": false
+  },
+  "bundle": {
+    "receipt_id": "b-01JAB3K9QX4M2N8P6R5T0V1WYZ",
+    "delivery_id": "agent-7:delivery-12",
+    "bundle_id": "b-01JAB3K9QX4M2N8P6R5T0V1WYZ",
+    "version": 13,
+    "state": "confirmed",
+    "disabled_by_bundle": [],
+    "warning_codes": [
+      "bundle_confirmed_after_interrupt"
+    ],
+    "effective_policy_digest": "sha256:4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f",
+    "config_generation": 41,
+    "applied_at": "2026-10-30T10:00:00Z",
+    "confirmed_at": "2026-10-30T10:00:05.123Z",
+    "restart": true,
+    "sessions_restart_required": {
+      "state": "known",
+      "count": 2,
+      "reason": "user dcad-r102-eng1 restarted nothing",
+      "entries": [
+        {
+          "agent": "claudecode",
+          "user": "dcad-r102-eng1",
+          "pid": 4242,
+          "started_at": "2026-10-30T10:00:00Z"
+        },
+        {
+          "agent": "codex",
+          "user": "1001",
+          "pid": 4343,
+          "started_at": "2026-10-30T10:01:00Z"
+        }
+      ]
+    },
+    "current_bundle_id": "b-01JAB3K9QX4M2N8P6R5T0V1WYZ",
+    "current_version": 13
+  },
+  "connectors": {
+    "claudecode": {
+      "enabled": true,
+      "detected": true,
+      "versions": [
+        "2.1.4"
+      ],
+      "hooks_installed": "all",
+      "targets": {
+        "users": [
+          "dcad-r102-eng1"
+        ]
+      },
+      "effective_mode": "action",
+      "effective_hook_fail_mode": "closed",
+      "managed_hook": true,
+      "identity_assertion": {
+        "principal": "dcad-alice@dclab.test",
+        "assurance": "verified_by_connector"
+      }
+    }
+  },
+  "identity": {
+    "state": "ok",
+    "sources": [
+      {
+        "name": "sssd_infopipe",
+        "directory": "active_directory",
+        "account": "dcad-bob"
+      }
+    ],
+    "failing_accounts": 0,
+    "stale_accounts": 1,
+    "serving_offline_cache": true
+  },
+  "openshell": {
+    "enabled": true,
+    "install": "setup",
+    "installed": true,
+    "version": "0.1.6",
+    "driver": "vm",
+    "driver_available": "vm"
+  },
+  "trusted_connectors": [
+    {
+      "name": "gas",
+      "principal": "S-1-5-21-3623811015-3361044348-30300820-1104",
+      "upn": "dcad-alice@dclab.test"
+    }
+  ],
+  "warnings": [
+    {
+      "code": "agent_unprotected",
+      "message": "DCLAB\\dcad-alice (S-1-5-21-3623811015-3361044348-30300820-1104) runs codex"
+    },
+    {
+      "code": "credential_missing",
+      "message": "C:\\ProgramData\\Cisco\\DefenseClaw\\secrets\\ai-defense-api-key"
+    }
+  ],
+  "errors": [],
+  "changes": [
+    "installed hooks for dcad-r102-eng1",
+    "C:\\Users\\dcad-alice\\.codex"
+  ],
+  "log_path": "/var/log/defenseclaw/lifecycle.log",
+  "exit_code": 0
+}

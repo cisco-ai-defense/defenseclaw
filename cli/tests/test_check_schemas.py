@@ -328,6 +328,76 @@ class TestCliEmbedSchemaMirrors(unittest.TestCase):
 MDM_CONTRACT_DIR = ROOT / "packaging" / "mdm" / "contract"
 
 
+class TestManagementForwardSchemas(unittest.TestCase):
+    """private #14 option A: the forward schemas are closed allowlists and no
+    account name survives a projection of the fixtures."""
+
+    def _check(self, contract_dir: Path) -> subprocess.CompletedProcess[str]:
+        shim = (
+            "import importlib.util, pathlib, sys\n"
+            f"spec = importlib.util.spec_from_file_location('check_schemas', r'{SCRIPT}')\n"
+            "mod = importlib.util.module_from_spec(spec)\n"
+            "spec.loader.exec_module(mod)\n"
+            f"mod.MDM_CONTRACT_DIR = pathlib.Path(r'{contract_dir}')\n"
+            "sys.exit(0 if mod.check_forward_schemas() else 1)\n"
+        )
+        return subprocess.run([sys.executable, "-c", shim], capture_output=True, text=True, timeout=60, check=False)
+
+    def _tampered(self, change) -> subprocess.CompletedProcess[str]:
+        import shutil
+
+        with tempfile.TemporaryDirectory() as tmp:
+            contract_dir = Path(tmp) / "contract"
+            shutil.copytree(MDM_CONTRACT_DIR, contract_dir)
+            change(contract_dir / "forward")
+            return self._check(contract_dir)
+
+    @staticmethod
+    def _edit(forward: Path, name: str, edit) -> None:
+        path = forward / name
+        document = json.loads(path.read_text(encoding="utf-8"))
+        edit(document)
+        path.write_text(json.dumps(document, indent=2) + "\n", encoding="utf-8")
+
+    def test_repository_forward_schemas_pass(self) -> None:
+        result = self._check(MDM_CONTRACT_DIR)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("management forward schemas OK", result.stdout)
+
+    def test_a_member_that_names_an_account_is_caught(self) -> None:
+        def add(document: dict) -> None:
+            document["properties"]["enrollment"]["properties"]["accounts"] = {
+                "type": "array", "items": {"type": "string", "pattern": ".*"}}
+
+        result = self._tampered(lambda forward: self._edit(forward, "lifecycle-result-forward.schema.json", add))
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("'accounts'", result.stderr)
+
+    def test_a_loose_string_that_lets_a_name_through_is_caught(self) -> None:
+        def loosen(document: dict) -> None:
+            document["$defs"]["message"]["properties"]["code"] = {"type": "string", "pattern": ".*"}
+            document["$defs"]["message"]["properties"]["detail_text"] = {"type": "string", "pattern": ".*"}
+
+        def change(forward: Path) -> None:
+            self._edit(forward, "lifecycle-result-forward.schema.json", loosen)
+            fixture = forward / "fixtures" / "lifecycle-result.linux.status.json"
+            document = json.loads(fixture.read_text(encoding="utf-8"))
+            document["warnings"].append({"code": "x", "detail_text": "dcad-r102-eng1"})
+            fixture.write_text(json.dumps(document), encoding="utf-8")
+
+        result = self._tampered(change)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("leak=dcad-", result.stderr)
+
+    def test_an_open_object_is_caught(self) -> None:
+        def open_object(document: dict) -> None:
+            document["properties"]["readiness"]["additionalProperties"] = True
+
+        result = self._tampered(lambda forward: self._edit(forward, "lifecycle-result-forward.schema.json", open_object))
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("must be closed", result.stderr)
+
+
 class TestManagementContractSchemas(unittest.TestCase):
     """The management contract check fails when a schema drifts from its
     examples, its rules or the guide (packaging/mdm/contract)."""
