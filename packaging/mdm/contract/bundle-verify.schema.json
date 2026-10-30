@@ -106,6 +106,14 @@
       },
       "description": "Names (never values) of the secret_refs credentials this device stores with a value the bundle does not sign (value_sha256), required and optional, in manifest order; [] when every stored one is the signed value. Present exactly when secret_refs_missing is. A secret_ref_mismatch refusal lists every such name: store the signed values with enterprise secret set (a new value needs enterprise secret set --bundle with the newer bundle that signs it), or sign the bundle again with --secret-file for the stored values. Absent on builds before 1.0.4."
     },
+    "secret_refs": {
+      "type": "array",
+      "maxItems": 64,
+      "items": {
+        "$ref": "#/$defs/secretRefState"
+      },
+      "description": "Every secret_refs entry of the bundle with its state on this device, in manifest order: name, required, present (the device stores a value) and value_match (the stored value is the one the bundle signs). Names and booleans only, never a value or a digest. Present exactly when secret_refs_missing is. Absent on builds before 1.0.6."
+    },
     "restart_prediction": {
       "$ref": "#/$defs/restartPrediction"
     },
@@ -251,6 +259,33 @@
         }
       }
     },
+    "secretRefState": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "enterprisebundle.SecretRefState (internal/enterprisebundle/secrets.go). Every listed entry binds a value: verify refuses an entry that signs only a name (secret_ref_unbound) before it reads the store.",
+      "required": [
+        "name",
+        "required",
+        "present",
+        "value_match"
+      ],
+      "properties": {
+        "name": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9-]{0,62}$"
+        },
+        "required": {
+          "type": "boolean"
+        },
+        "present": {
+          "type": "boolean"
+        },
+        "value_match": {
+          "type": "boolean",
+          "description": "true when the stored value is the value the bundle signs; false when it is another value or nothing is stored."
+        }
+      }
+    },
     "restartPrediction": {
       "type": "object",
       "additionalProperties": false,
@@ -349,6 +384,14 @@
       "digest_verified": true,
       "secret_refs_missing": [],
       "secret_refs_mismatch": [],
+      "secret_refs": [
+        {
+          "name": "ai-defense-api-key",
+          "required": true,
+          "present": true,
+          "value_match": true
+        }
+      ],
       "restart_prediction": {
         "gateway_restart": "required",
         "reason_codes": [
@@ -426,6 +469,20 @@
         "splunk-hec-token"
       ],
       "secret_refs_mismatch": [],
+      "secret_refs": [
+        {
+          "name": "ai-defense-api-key",
+          "required": true,
+          "present": false,
+          "value_match": false
+        },
+        {
+          "name": "splunk-hec-token",
+          "required": false,
+          "present": false,
+          "value_match": false
+        }
+      ],
       "warnings": [],
       "errors": [
         {

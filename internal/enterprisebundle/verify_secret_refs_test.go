@@ -8,6 +8,7 @@ package enterprisebundle_test
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -469,5 +470,58 @@ func TestVerifyRequireSecretPresenceRefusesARequiredCredentialItCannotCheck(t *t
 	res, err = enterprisebundle.Verify(context.Background(), in)
 	if err != nil || !hasWarning(res.Warnings, enterprisebundle.WarnSecretPresenceUnchecked) {
 		t.Fatalf("apply with an unchecked optional credential: warnings %+v, err %v; want the warning only", res.Warnings, err)
+	}
+}
+
+// Verify lists every secret_refs entry with its state in manifest order,
+// exactly when it lists the missing and mismatched names, and the list holds
+// names and booleans only (private #16).
+func TestVerifyListsTheStateOfEverySecretRef(t *testing.T) {
+	f, b, a := secretRefsFixture(t)
+	res, err := enterprisebundle.Verify(context.Background(), f.input(t, b, a))
+	if err != nil || res.SecretRefs != nil {
+		t.Fatalf("off a device: secret refs %#v, err %v", res.SecretRefs, err)
+	}
+
+	in := f.input(t, b, a)
+	in.SecretValue = storeOf(map[string]string{
+		"ai-defense-api-key": string(testSecretValue("ai-defense-api-key")),
+		"zz-optional":        "another-value",
+	})
+	res, err = enterprisebundle.Verify(context.Background(), in)
+	if enterprisebundle.CodeOf(err) != enterprisebundle.CodeSecretRefMismatch {
+		t.Fatalf("verify: got %v, want secret_ref_mismatch (the optional credential comes first)", err)
+	}
+	want := []enterprisebundle.SecretRefState{
+		{Name: "ai-defense-api-key", Required: true, Present: true, ValueMatch: true},
+		{Name: "zz-optional", Required: false, Present: true, ValueMatch: false},
+		{Name: "splunk-token", Required: true, Present: false, ValueMatch: false},
+	}
+	if !slices.Equal(res.SecretRefs, want) {
+		t.Fatalf("secret refs = %#v, want %#v", res.SecretRefs, want)
+	}
+	if res.SecretRefsMissing == nil {
+		t.Fatal("secret_refs set without secret_refs_missing")
+	}
+	raw, err := json.Marshal(res.SecretRefs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var entries []map[string]any
+	if err := json.Unmarshal(raw, &entries); err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range entries {
+		keys := make([]string, 0, len(entry))
+		for key := range entry {
+			keys = append(keys, key)
+		}
+		slices.Sort(keys)
+		if !slices.Equal(keys, []string{"name", "present", "required", "value_match"}) {
+			t.Fatalf("secret_refs entry members %v, want name, present, required, value_match only", keys)
+		}
+	}
+	if strings.Contains(string(raw), "another-value") || strings.Contains(string(raw), "sha256") {
+		t.Fatalf("secret_refs carries a value or digest: %s", raw)
 	}
 }
