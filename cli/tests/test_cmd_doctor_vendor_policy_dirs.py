@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import os
 import stat
+import sys
 
 import pytest
 from defenseclaw.commands import cmd_doctor
@@ -46,7 +47,8 @@ def test_readable_folder_passes(vendor_dirs) -> None:
     assert _rows(r)[0]["status"] == "pass"
 
 
-@pytest.mark.skipif(os.geteuid() == 0, reason="root can traverse any folder")
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX permission bits: chmod 0 does not stop traversal on Windows")
+@pytest.mark.skipif(hasattr(os, "geteuid") and os.geteuid() == 0, reason="root can traverse any folder")
 def test_unreadable_folder_fails_with_repair(vendor_dirs) -> None:
     codex, cursor = vendor_dirs
     codex.mkdir(parents=True)
