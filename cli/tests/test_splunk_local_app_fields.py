@@ -72,11 +72,11 @@ def test_ai_runtime_activity_counts_distinct_required_finding_ids() -> None:
 
     searches = (
         ("Agent activity with no hook decision", "runtime_hook_seen", "runtime_tactic", "stats count"),
-        # Each native hit (its control and target) once (GAP-1400).
+        # Each native hit once: a finding's rows carry its hit count (GAP-1400).
         (
             "Would-block by control (monitor mode)",
             "runtime_kernel_outcome",
-            "runtime_kernel_control runtime_kernel_target",
+            "runtime_kernel_control",
             "timechart",
         ),
     )
@@ -88,6 +88,13 @@ def test_ai_runtime_activity_counts_distinct_required_finding_ids() -> None:
         if aggregation == "timechart":
             assert commands[next_command] == "sort 0 + _time", title
             next_command += 1
+        if title == "Would-block by control (monitor mode)":
+            assert commands[next_command] == "eval runtime_kernel_hits=coalesce(runtime_kernel_count, 1)", title
+            assert commands[next_command + 1] == (
+                "eventstats max(runtime_kernel_hits) as runtime_kernel_hits by host runtime_finding_id runtime_kernel_control"
+            ), title
+            assert commands[-1] == "timechart span=10m sum(runtime_kernel_hits) by runtime_kernel_control", title
+            next_command += 2
         assert commands[next_command] == f"dedup host runtime_finding_id {distinct_field}", title
         assert commands[next_command + 1].startswith(aggregation), title
 

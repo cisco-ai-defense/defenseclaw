@@ -1575,7 +1575,7 @@ attributes:
   normalization:
     id: numeric-range-v1
     overrides: {min: 1, max: 1000000000}
-    notes: The sensor helper folds repeats of the same policy, process, function, action and target within a minute into one record
+    notes: The sensor helper folds repeats of the same policy, process, function, action and target within a minute into one record. On ai.runtime.activity it is how many kernel events of the activity's kernel outcome and control the tactic carries, so a chart counts each native hit
   introduced_in: telemetry-registry-v2
 - id: defenseclaw.ai.runtime.hook_action
   type: string
@@ -6583,6 +6583,8 @@ groups:
   - ref: defenseclaw.ai.runtime.hook_seen
     requirement_level: recommended
   - ref: defenseclaw.ai.runtime.hook_join
+    requirement_level: recommended
+  - ref: defenseclaw.ai.runtime.kernel.count
     requirement_level: recommended
 - id: body.ai.runtime.plane_health
   type: body_group
