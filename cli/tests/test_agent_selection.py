@@ -60,7 +60,7 @@ def test_selection_probe_gets_load_tolerant_budget_and_plain_timeout(tmp_path: P
         budgets.append(timeout)
         return subprocess.CompletedProcess([], 0, b"amp 1.0\n", b"")
 
-    monkeypatch.setattr(agent_selection.agent_discovery.subprocess, "run", fake_run)
+    monkeypatch.setattr(agent_selection.agent_discovery, "_run_probe", fake_run)
     agent_selection.agent_discovery._version_for_binary(str(executable), (), require_trusted_binary_paths=False)
     agent_selection.agent_discovery._version_for_binary(
         str(executable), (), require_trusted_binary_paths=False, timeout_override=90.0
