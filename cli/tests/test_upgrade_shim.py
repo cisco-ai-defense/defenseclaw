@@ -497,6 +497,22 @@ def test_entry_dispatches_upgrade_before_importing_the_cli(monkeypatch: pytest.M
     assert "defenseclaw.main" not in sys.modules
 
 
+def test_entry_pin_names_match_config() -> None:
+    from defenseclaw import config
+
+    assert entry._DEPLOYMENT_PIN_ENVS == config._DEPLOYMENT_PIN_ENVS
+
+
+def test_entry_skips_the_config_import_without_a_pin(monkeypatch: pytest.MonkeyPatch) -> None:
+    for name in entry._DEPLOYMENT_PIN_ENVS:
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.delitem(sys.modules, "defenseclaw.config", raising=False)
+
+    entry.ignore_stray_deployment_pins()
+
+    assert "defenseclaw.config" not in sys.modules
+
+
 def test_entry_notice_survives_an_uninstall_that_removed_the_cli(monkeypatch: pytest.MonkeyPatch) -> None:
     """uninstall --all --binaries finished, then the notice import raised ModuleNotFoundError."""
     monkeypatch.setitem(sys.modules, "defenseclaw.update_notice", None)
