@@ -71,8 +71,18 @@ async def test_sandbox_stop_shows_why_a_full_disk_microvm_keeps_running(monkeypa
     monkeypatch.setattr(app, "push_screen_wait", confirm_stop)
     async with app.run_test(size=(160, 44)):
         monkeypatch.setattr(app, "notify_toast", lambda level, message: toasts.append((level, message)))
-        monkeypatch.setattr(app, "_set_status", statuses.append)
+        # Record every status and still set it: a recorder that dropped the
+        # text left status_text empty, so any repaint before the app exited
+        # (_render_chrome falls back to "Ready.") looked like a lost message.
+        set_status = app._set_status  # noqa: SLF001
+
+        def record_status(text: str) -> None:
+            statuses.append(text)
+            set_status(text)
+
+        monkeypatch.setattr(app, "_set_status", record_status)
         await app._sandbox_stop(NAME)  # noqa: SLF001
+        shown = app.status_text
     assert ran == [["/opt/dc/defenseclaw-gateway", "sandbox", "stop", NAME]]
     kept = sandbox_panel.sandbox_stop_kept_text(NAME)
     if returncode == sandbox_panel.SANDBOX_STOP_KEPT_EXIT:
@@ -80,10 +90,12 @@ async def test_sandbox_stop_shows_why_a_full_disk_microvm_keeps_running(monkeypa
         # comes back: the command line's own words scrolled away with it.
         assert toasts == [("warn", kept)]
         assert statuses[-1] == kept
+        assert shown == kept
         assert "keeps running" in kept and "delete it (d)" in kept and "df -h /" in kept
     else:
         assert toasts == []
         assert kept not in statuses
+        assert shown != kept
 
 
 def test_sandbox_stop_kept_exit_matches_the_command_line() -> None:
