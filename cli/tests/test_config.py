@@ -499,9 +499,9 @@ class TestHookJudgeGateRoundTrip(unittest.TestCase):
         self.assertEqual(reloaded.guardrail.judge.hook_timeout, 7.0)
         self.assertEqual(reloaded.gateway.port, 19999)
 
-    def test_agent_gateway_survives_a_cli_save(self):
-        # connectors.agent_gateway (1.0.6) is a gateway setting the CLI does
-        # not model: an unrelated CLI save keeps it.
+    def test_agent_gateway_and_root_scope_survive_a_cli_save(self):
+        # connectors.agent_gateway and guardrail.chains (1.0.6) are gateway
+        # settings the CLI does not model: an unrelated CLI save keeps them.
         fresh = self._fresh_config()
         data_dir = fresh.data_dir
         fresh.save()
@@ -511,6 +511,7 @@ class TestHookJudgeGateRoundTrip(unittest.TestCase):
         with open(cfg_path) as f:
             raw = _yaml.safe_load(f)
         raw["connectors"] = {"agent_gateway": {"enabled": True, "instance_name": "gas"}}
+        raw.setdefault("guardrail", {})["chains"] = {"root_scope": True}
         with open(cfg_path, "w") as f:
             _yaml.safe_dump(raw, f, sort_keys=False)
 
@@ -521,6 +522,7 @@ class TestHookJudgeGateRoundTrip(unittest.TestCase):
         with open(cfg_path) as f:
             saved = _yaml.safe_load(f)
         self.assertEqual(saved["connectors"], {"agent_gateway": {"enabled": True, "instance_name": "gas"}})
+        self.assertEqual(saved["guardrail"]["chains"], {"root_scope": True})
         self.assertEqual(saved["gateway"]["port"], 19998)
 
     def test_dotted_literal_unknown_key_is_rejected_by_v8_schema(self):

@@ -47,7 +47,7 @@ Releases before 1.0.6 refuse the setting.
 | `cwd` | any | absolute working directory of the call |
 | `traceparent` | any | W3C trace context |
 | `acting_for` | any | `{user}`; honoured only for a trusted connector |
-| `root_session_id` | any | for a trusted connector: recorded in the local audit and kept with one person; chains are still evaluated per session |
+| `root_session_id` | any | for a trusted connector: recorded in the local audit and kept with one person. Chains are evaluated per session; with `guardrail.chains.root_scope` on they also [follow the root id across sessions](/docs/enterprise/trusted-connectors#follow-one-piece-of-work-across-sessions) |
 
 `tool.kind` picks the tool the rules already know: `shell` is judged by the shell rules (`input` is the command, or `{"command": ...}`), `file_read` and `file_write` by the path rules (`input` names `path`), `fetch` by the network rules (`input` is the URL, or `{"url": ...}`). `mcp` and `other` keep the tool name and get every content scan that applies to a tool DefenseClaw does not know. Path rules and `~` resolve against the account that runs the tools.
 
