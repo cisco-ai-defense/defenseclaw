@@ -119,7 +119,10 @@ func TestForeignHookSessionGatewayAppliesAStalledCleanScanAgain(t *testing.T) {
 	t.Cleanup(func() {
 		foreignHookAccountExchangeLock, foreignHookSessionDenialAudit, foreignHookExchangeHold, foreignHookSessionRetryLog = previousLock, previousAudit, previousHold, previousLog
 	})
-	foreignHookExchangeHold = 300 * time.Millisecond
+	// The production hold: under a shorter test hold a slow Windows runner's
+	// real second try also outlasted the hold and was applied a third time
+	// (T11b PR CI, gw0).
+	foreignHookExchangeHold = enterprisepolicy.ForeignHookExchangeHold
 	var audited, logged []string
 	foreignHookSessionDenialAudit = func(_ *APIServer, _ context.Context, _ string, _ enterprisepolicy.SessionExchange, decision enterprisepolicy.GuardDecision) {
 		audited = append(audited, decision.Reason)
