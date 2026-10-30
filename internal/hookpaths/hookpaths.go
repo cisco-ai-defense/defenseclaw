@@ -2086,6 +2086,9 @@ func commandLinks(command, cwd, home string, facts map[string]string, record, ne
 	linkDirs, linkDirsKnown := topLevelLinkDirectories(file, cwd, home)
 	env := expand.ListEnviron("HOME=" + strings.TrimRight(home, "/"))
 	renames, cds, wrappedCds := false, false, false
+	// unplacedMoves, unplacedLinks: a followed move or a link call that the
+	// top-level statement walk did not place in its directories.
+	unplacedMoves, unplacedLinks := false, false
 	// unplacedScopes: a scope read in the starting directory, not where the
 	// statement walk placed its call.
 	unplacedScopes := false
@@ -2208,6 +2211,9 @@ func commandLinks(command, cwd, home string, facts map[string]string, record, ne
 					}
 				}
 			}
+			if _, placed := linkDirs[call]; !placed && call != linkCall {
+				unplacedLinks = true
+			}
 			links.linkTexts = append(links.linkTexts, command[call.Pos().Offset():call.End().Offset()])
 			if slices.Contains(static, false) {
 				links.unknown(true)
@@ -2289,12 +2295,23 @@ func commandLinks(command, cwd, home string, facts map[string]string, record, ne
 		case slices.Contains(renamePrograms, program):
 			// A static mv is followed; rename (a pattern) and a dynamic
 			// word are not read (GAP-2532).
-			op, read := renameOp{}, false
-			if program != "rename" && !slices.Contains(static, false) {
-				op, read = parseRename(words[1:], cwd)
+			// After static top-level cd statements the mv is read in each
+			// directory it may run in (GAP-2602).
+			read := program != "rename" && !slices.Contains(static, false)
+			var ops []renameOp
+			for _, dir := range callDirs {
+				op, ok := parseRename(words[1:], dir)
+				if !ok {
+					read = false
+					break
+				}
+				ops = append(ops, op)
 			}
 			if read {
-				renameOps = append(renameOps, op)
+				renameOps = append(renameOps, ops...)
+				if _, placed := linkDirs[call]; !placed {
+					unplacedMoves = true
+				}
 			} else {
 				renames = true
 			}
@@ -2340,14 +2357,26 @@ func commandLinks(command, cwd, home string, facts map[string]string, record, ne
 			// find -exec runs its child argv, which the wrapper reading
 			// above does not see (GAP-2533). A find -exec mv into a fixed
 			// project directory is read as a move.
-			move, moveRead := parseFindMove(program, words, static, cwd)
+			var moves []findMove
+			moveRead := true
+			for _, dir := range callDirs {
+				move, ok := parseFindMove(program, words, static, dir)
+				if !ok {
+					moveRead = false
+					break
+				}
+				moves = append(moves, move)
+			}
 			for _, child := range findExecCommands(command, program, args, words, static) {
 				if tactics.RunsProgram(child, linkPrograms...) {
 					links.unknown(true)
 				}
 				if tactics.RunsProgram(child, renamePrograms...) {
 					if moveRead {
-						findMoves = append(findMoves, move)
+						findMoves = append(findMoves, moves...)
+						if _, placed := linkDirs[call]; !placed {
+							unplacedMoves = true
+						}
 					} else {
 						renames = true
 					}
@@ -2391,7 +2420,9 @@ func commandLinks(command, cwd, home string, facts map[string]string, record, ne
 		_, readable := ResolveWriteTarget(cwd)
 		userView := !readable && facts[LinksStableKey] == "1"
 		switch {
-		case renames || moves && cds:
+		case renames || moves && cds && (!linkDirsKnown || unplacedMoves || unplacedLinks):
+			// A move after a directory change is followed only where the
+			// statement walk placed it and every link (GAP-2602).
 			stable = false
 		case moves:
 			stable = links.followRenames(renameOps)
@@ -2407,6 +2438,11 @@ func commandLinks(command, cwd, home string, facts map[string]string, record, ne
 			// directory through a disk link to state (RV-c4-1).
 			if stable && (wrappedCds || len(findMoves) > 0) {
 				stable = links.linkedTreesClear(command, cwd, home, wrappedCds, findMoves)
+			}
+			// A move after a directory change is followed as a plain one
+			// only when no entry it takes is a disk link to state (GAP-2602).
+			if stable && cds {
+				stable = movedEntriesAwayFromState(renameOps, findMoves, home)
 			}
 			links.movesStable = stable
 		}

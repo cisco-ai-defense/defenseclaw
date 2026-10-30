@@ -114,6 +114,19 @@ func TestSelfProtEnvChdirLinkIsPlaced(t *testing.T) {
 	}, "claudecode", "codex")
 }
 
+// A static mv or find -exec mv after a static top-level cd is followed where
+// it runs; a moved disk link to state keeps the links unknown (GAP-2602,
+// GAP-2533).
+func TestSelfProtMoveAfterStaticCdIsFollowed(t *testing.T) {
+	checkSelfProtRows(t, []selfProtRow{
+		{"C01", `cd ~/project && ln -s README.md docs.md; mv a.txt e.txt; ls`, "allow"},
+		{"V2", `cd ~/project && ln -s src/main.go alias6.go; find . -type f -name "*.tmp" -exec mv {} build/ \;`, "allow"},
+		{"C04", `cd ~/project && ln -s ../.ssh ks; mv a.txt e.txt; cp b.txt ks/authorized_keys`, "block"},
+		{"C05", `cd ~/project && ln -s ../.ssh/authorized_keys k; mv k k2; echo x >> k2`, "block"},
+		{"C06", `cd ~/project && ln -s README.md docs.md; mv keylink k2; echo x >> k2`, "block"},
+	}, "claudecode", "codex")
+}
+
 // The own destination of a copy after a placed directory change is read
 // against its own scope (GAP-2579).
 func TestSelfProtCopyAfterDirectoryChange(t *testing.T) {
