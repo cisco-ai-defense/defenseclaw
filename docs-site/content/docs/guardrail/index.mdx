@@ -326,6 +326,49 @@ Use `--judge-provider vertex_ai` with the `--judge-vertex-*` flags, or `--judge-
 
 </Tabs>
 
+## A judge on a local model
+
+A judge on a local model (Ollama, vLLM or LM Studio on your own machine)
+answers one call at a time, so judge calls queue behind each other. With the
+judge on, a prompt can start up to three judge calls (prompt injection,
+exfiltration and PII), each tool result and reply can start a PII call, and
+the agent's next tool call waits behind them. These settings keep the
+tool-call judge and stop the other calls:
+
+```yaml
+# ~/.defenseclaw/config.yaml
+guardrail:
+  detection_strategy: regex_judge       # the judge reviews what the rules leave open
+  detection_strategy_prompt: regex_only # prompts get the rules only, no judge calls
+  detection_strategy_completion: regex_only # tool results and replies: rules only
+  judge:
+    enabled: true
+    tool_injection: true                # keep the tool-call judge
+    hook_connectors: [claudecode]       # the hook connectors you want judged
+```
+
+Or with flags: `defenseclaw setup guardrail --detection-strategy regex_judge
+--detection-strategy-prompt regex_only --detection-strategy-completion
+regex_only` plus your usual `--judge-*` flags. Pass
+`--detection-strategy-completion` every time: when `init` or `setup
+guardrail` turns the judge on for a hook connector, it sets
+`detection_strategy_completion: regex_judge` unless you name a value.
+
+What you get and what you give up:
+
+- **Faster turns.** Each tool call makes one judge call, and it no longer
+  waits behind the prompt and tool-output calls.
+- **Prompts and tool output are still checked.** The rules still scan every
+  prompt, tool result and reply, and can block them. You lose only the
+  judge's second look at them.
+- **The tool judge still knows the task.** The prompt you type is kept as the
+  session's user intent for the tool judge whatever the prompt strategy is.
+- **Slow answers keep the rule verdict.** A judge call that does not answer
+  within `guardrail.judge.hook_timeout` (8 seconds when unset) is dropped,
+  and the hook keeps the rule verdict, so a slow model never blocks by
+  mistake. Raising the timeout gives the judge more time, and each tool call
+  can then wait that long.
+
 ## Every flag
 
 The table follows `defenseclaw setup guardrail --help`.

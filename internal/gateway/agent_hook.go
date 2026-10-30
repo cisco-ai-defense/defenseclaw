@@ -189,6 +189,12 @@ type agentHookResponse struct {
 	// connector hook scripts ignore the fields.
 	EvaluationID string   `json:"evaluation_id,omitempty"`
 	RuleIDs      []string `json:"rule_ids,omitempty"`
+	// AgentIdentityID (agt-) and AgentInstanceID (ais-, the session or
+	// sub-agent instance) are the ids the gateway derived for this hook,
+	// the ones its audit rows and telemetry carry. hookAnswerBody stamps
+	// them; additive, and omitted when the hook has none.
+	AgentIdentityID string `json:"agent_identity_id,omitempty"`
+	AgentInstanceID string `json:"agent_instance_id,omitempty"`
 	// RedactionEnabled carries the cloud-controlled per-inspection
 	// redaction directive from the evaluator back to the HTTP handler
 	// so finalizeAgentHookAnswer can re-inject it onto the context before it
@@ -1081,7 +1087,7 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 		// Without this projection, agentHookResponse always
 		// renders the output under "hook_output", which Claude
 		// Code and Codex agent CLIs reject. See
-		// renderAgentHookResponse() for the canonical
+		// renderAgentHookResponseForProfile() for the canonical
 		// connector → field-name mapping. hookAnswerBody cannot
 		// panic, so the native hook always gets the finalized answer.
 		if delivery == nil {
@@ -1106,6 +1112,7 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 // does not change the answer, which may already be finalized. It cannot
 // panic.
 func (a *APIServer) hookAnswerBody(ctx context.Context, profile connector.HookProfile, connectorName string, req agentHookRequest, resp agentHookResponse, receiptID string) []byte {
+	resp = a.withHookAnswerAgentIDs(ctx, resp)
 	counted := false
 	onPanic := func(recovered any) {
 		defer func() { _ = recover() }()
@@ -1139,6 +1146,29 @@ func (a *APIServer) hookAnswerBody(ctx context.Context, profile connector.HookPr
 	fallback.HookOutput = nil
 	body, _ = encodeHookAnswer(profile, fallback, receiptID, onPanic)
 	return body
+}
+
+// withHookAnswerAgentIDs puts the agent identity (agt-) and the session or
+// sub-agent instance (ais-) that enrichAgentHookContext derived for this hook
+// on its answer, next to evaluation_id, so a caller can join the answer to
+// DefenseClaw's audit rows and telemetry without deriving the ids itself.
+// Only the derived forms are copied. Secure Client keeps its process-scoped
+// instance ids and its answer shape, so it gets neither field.
+func (a *APIServer) withHookAnswerAgentIDs(ctx context.Context, resp agentHookResponse) agentHookResponse {
+	if ManagedEnterpriseActive() || a.managedAIDOnly() {
+		return resp
+	}
+	if cfg := a.decisionConfig(ctx); cfg != nil && cfg.SecureClientIntegration() {
+		return resp
+	}
+	identity := AgentIdentityFromContext(ctx)
+	if resp.AgentIdentityID == "" && strings.HasPrefix(identity.IdentityID, agentidentity.AgentIDPrefix) {
+		resp.AgentIdentityID = identity.IdentityID
+	}
+	if resp.AgentInstanceID == "" && strings.HasPrefix(identity.AgentInstanceID, agentidentity.InstanceIDPrefix) {
+		resp.AgentInstanceID = identity.AgentInstanceID
+	}
+	return resp
 }
 
 // encodeHookAnswer renders and encodes resp as writeJSON did (HTML-escaped
@@ -1648,31 +1678,11 @@ func (a *APIServer) hookDecisionMeta(
 	return meta, source, true
 }
 
-// renderAgentHookResponse projects the unified agentHookResponse
-// shape onto the wire JSON shape each connector's agent CLI
-// expects. The fixed agentHookResponse JSON tag for HookOutput
-// ("hook_output") works for generic hookOnly connectors
-// (hermes/cursor/devin/copilot) but Claude Code and
-// Codex agents expect "claude_code_output" and "codex_output"
-// respectively. Rendering as a map[string]interface{} lets us pick
-// the right top-level key per connector while keeping
-// agentHookResponse a single struct for all internal callers.
-//
-// Field name choice is driven by hookOutputFieldName(connectorName)
-// — a single function so adding a new connector with a different
-// output key (e.g. a future zeptoclaw_output) is a one-line change.
-// HookProfile.Respond.FieldName would be the obvious source of
-// truth here, but consulting it requires loading the registry and
-// constructing a profile per request; this hot-path helper inlines
-// the mapping for sub-microsecond cost. The connector_hook_profile
-// tests still assert FieldName parity so the two cannot drift.
-func renderAgentHookResponse(connectorName string, resp agentHookResponse) map[string]interface{} {
-	return renderAgentHookResponseForProfile(connector.HookProfile{
-		Name:              connectorName,
-		ResponseFieldName: hookOutputFieldName(connectorName),
-	}, resp)
-}
-
+// renderAgentHookResponseForProfile projects the unified
+// agentHookResponse onto the wire JSON each connector's agent CLI expects:
+// the output map goes under the profile's ResponseFieldName, else
+// hookOutputFieldName (Claude Code and Codex read "claude_code_output" and
+// "codex_output"; the others read "hook_output").
 func renderAgentHookResponseForProfile(profile connector.HookProfile, resp agentHookResponse) map[string]interface{} {
 	severity := resp.Severity
 	if severity == "" {
@@ -1717,6 +1727,12 @@ func renderAgentHookResponseForProfile(profile connector.HookProfile, resp agent
 	}
 	if len(resp.RuleIDs) > 0 {
 		out["rule_ids"] = resp.RuleIDs
+	}
+	if resp.AgentIdentityID != "" {
+		out["agent_identity_id"] = resp.AgentIdentityID
+	}
+	if resp.AgentInstanceID != "" {
+		out["agent_instance_id"] = resp.AgentInstanceID
 	}
 	return out
 }

@@ -1561,7 +1561,8 @@ func runCopyModeHooks(t *testing.T, root string) copyModeHookRun {
 }
 
 // normalizeCopyModeHookResponse drops the per-request identifiers from a hook
-// response so two runs can be compared.
+// response so two runs can be compared. The agent ids belong to each run's
+// own sandbox binding, so they differ between runs too.
 func normalizeCopyModeHookResponse(t *testing.T, body []byte) string {
 	t.Helper()
 	var value any
@@ -1574,7 +1575,7 @@ func normalizeCopyModeHookResponse(t *testing.T, body []byte) string {
 		case map[string]any:
 			for key, child := range typed {
 				switch key {
-				case "evaluation_id", "request_id", "trace_id", "event_id":
+				case "evaluation_id", "request_id", "trace_id", "event_id", "agent_identity_id", "agent_instance_id":
 					delete(typed, key)
 				default:
 					typed[key] = scrub(child)

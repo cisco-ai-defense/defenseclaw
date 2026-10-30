@@ -30,7 +30,7 @@ import (
 //   - context enrichment (session_id / agent_id propagation, F2)
 //   - safeEvaluateHook (panic recovery, H2)
 //   - hook profile-runtime dispatch
-//   - renderAgentHookResponse (wire-shape per connector)
+//   - renderAgentHookResponseForProfile (wire-shape per connector)
 //   - HTTP response (200 OK + valid JSON envelope)
 //
 // We do NOT mock the evaluator: this is the canonical test that
