@@ -163,20 +163,29 @@ func TestTrustedActionReadPathsInEveryListPosition(t *testing.T) {
 func TestTrustedActionResolutionPrefixMatchesStandaloneInList(t *testing.T) {
 	const connector = "compound-resolution-prefix-test"
 	installToolCallCorpusProfileConnector(t, connector, "strict")
+	// A PATH prefix can only pick another rm, so the call is also judged
+	// without it (GAP-1200): in a list it gets the finding it gets alone.
 	standalone := "PATH=/definitely/missing $'rm' -rf /"
-	for _, command := range []string{
-		standalone,
-		standalone + "; true",
-		"true && " + standalone,
-		"false || " + standalone,
-	} {
+	dispatch := func(command string) *RuleFinding {
 		findings := dispatchTrustedAction(t.Context(), trustedActionRequest{
 			Input: actionfacts.Input{Tool: "Bash", Command: command, CWD: "/repo",
 				DialectHint: actionfacts.DialectPOSIX},
 			LegacyText: command, Connector: connector, EnforcementCapable: true,
 		})
-		if finding := findingWithID(findings, "CMD-RM-RF"); finding != nil {
-			t.Errorf("%q invented an executable rm: %+v", command, *finding)
+		return findingWithID(findings, "CMD-RM-RF")
+	}
+	alone := dispatch(standalone)
+	if alone == nil {
+		t.Fatalf("%q: no CMD-RM-RF finding", standalone)
+	}
+	for _, command := range []string{
+		standalone + "; true",
+		"true && " + standalone,
+		"false || " + standalone,
+	} {
+		if finding := dispatch(command); finding == nil ||
+			finding.contributesToEnforcement() != alone.contributesToEnforcement() {
+			t.Errorf("%q: CMD-RM-RF finding=%+v, standalone=%+v", command, finding, *alone)
 		}
 	}
 }

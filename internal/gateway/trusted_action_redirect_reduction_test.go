@@ -834,9 +834,9 @@ func TestTrustedActionArgvRuleBlocksAfterSourcedFile(t *testing.T) {
 		". .env && echo dynamodb":                    false,
 		// A later PATH change can only make the match over-block.
 		"source .env && export PATH=/opt/bin && aws dynamodb scan --table-name T": true,
-		// A prefix assignment leaves the twin partial, so the view declines
-		// (as without the sourced file, GAP-1581).
-		"source .env && PATH=/x aws dynamodb scan --table-name T": false,
+		// A PATH prefix can only pick another aws: the call is also
+		// judged without it (GAP-1200).
+		"source .env && PATH=/x aws dynamodb scan --table-name T": true,
 		"source .env && PATH=/x echo dynamodb":                    false,
 	} {
 		findings := dispatchTrustedAction(t.Context(), trustedActionRequest{
@@ -847,6 +847,48 @@ func TestTrustedActionArgvRuleBlocksAfterSourcedFile(t *testing.T) {
 				ActiveHome:  "/home/alice",
 				DialectHint: actionfacts.DialectPOSIX,
 			},
+			LegacyText:         command,
+			Connector:          connector,
+			EnforcementCapable: true,
+		})
+		finding := findingWithID(findings, "CUSTOM-DYNAMODB-CLI")
+		if got := finding != nil && finding.contributesToEnforcement(); got != blocks {
+			t.Errorf("%q: blocks=%t, want %t; findings=%v", command, got, blocks, FindingStrings(findings))
+		}
+	}
+}
+
+// GAP-1200 (#1189): a prefix assignment that can change which program runs
+// (PATH=/x aws ...) and an env wrapper that sets a variable or splits a
+// string (env NAME=v aws ..., env -S "aws ...") kept the call out of the
+// action's argv, so a custom argv rule never ran and only its regex fallback
+// could record a detection-only finding. The argv is static, so the call is
+// also judged alone; a match can only over-block.
+func TestTrustedActionArgvRuleBlocksBehindPrefixOrEnvWrapper(t *testing.T) {
+	const connector = "prefix-env-wrapper-argv-test"
+	installRedirectReductionRules(t, connector,
+		redirectReductionRule("CUSTOM-DYNAMODB-CLI", `a^`,
+			`f.commands.exists(c, c.program == "aws" && "dynamodb" in c.argv)`),
+	)
+	for command, blocks := range map[string]bool{
+		"PATH=/x aws dynamodb scan --table-name T":                true,
+		"LD_PRELOAD=/x.so aws dynamodb scan --table-name T":       true,
+		"cd /tmp && PATH=/x aws dynamodb scan --table-name T":     true,
+		"env AWS_PROFILE=p aws dynamodb scan --table-name T":      true,
+		"env -i PATH=/x aws dynamodb scan --table-name T":         true,
+		`env -S "aws dynamodb scan --table-name T"`:               true,
+		`env -S "AWS_PROFILE=p aws dynamodb scan --table-name T"`: true,
+		"nohup aws dynamodb scan --table-name T":                  true,
+		"timeout 5 aws dynamodb scan --table-name T":              true,
+		"PATH=/x echo dynamodb":                                   false,
+		"AWS_PROFILE=dynamodb aws s3 ls":                          false,
+		"env X=1 echo dynamodb":                                   false,
+		`env -S "echo dynamodb"`:                                  false,
+		"PATH=/opt/bin:$PATH aws s3 ls":                           false,
+	} {
+		findings := dispatchTrustedAction(t.Context(), trustedActionRequest{
+			Input: actionfacts.Input{Tool: "shell", Command: command, CWD: "/home/alice/project",
+				ActiveHome: "/home/alice", DialectHint: actionfacts.DialectPOSIX},
 			LegacyText:         command,
 			Connector:          connector,
 			EnforcementCapable: true,
