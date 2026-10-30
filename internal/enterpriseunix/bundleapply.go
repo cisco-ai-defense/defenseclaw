@@ -606,7 +606,7 @@ func (l *lifecycle) applyBundle(ctx context.Context, record *Deployment) int {
 	if readErr != nil {
 		return refuse(readErr)
 	}
-	if err := env.ensureDir(store.BundlesDir, 0o755, rootOwner()); err != nil {
+	if err := env.ensureDir(store.BundlesDir, bundleStoreDirMode, rootOwner()); err != nil {
 		return refuse(fmt.Errorf("prepare the policy bundle store: %w", err))
 	}
 	staging, err := store.Stage(receipt, b)

@@ -186,7 +186,7 @@ def test_tmpfiles_touches_no_path_the_apply_trigger_watches():
     listed = {line.split()[1] for line in _unit("defenseclaw.conf") if line and not line.startswith("#")}
     assert "/etc/defenseclaw/policies" in watched
     assert not watched & listed
-    assert "d /etc/defenseclaw/bundles 0755 root root -" in _unit("defenseclaw.conf")
+    assert "d /etc/defenseclaw/bundles 0711 root root -" in _unit("defenseclaw.conf")
 
 
 def test_windows_bundle_acl_contract_keeps_public_receipt_separate():

@@ -1001,7 +1001,7 @@ func testBundleShippedRulePackIsReadableByGateway(t *testing.T, goos string) {
 		want := os.FileMode(0o750)
 		wantGID := account.GID
 		if path == store.BundlesDir {
-			want, wantGID = 0o755, 0
+			want, wantGID = 0o711, 0
 		}
 		if !info.IsDir() {
 			want = 0o640
