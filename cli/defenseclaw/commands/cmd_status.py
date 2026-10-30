@@ -1904,7 +1904,7 @@ def _scanner_overrides_summary(cfg) -> str:
     """Summarize v9 admission actions or Secure Client v8 scanner overrides."""
     try:
         from defenseclaw.enforce import asset_lists
-        from defenseclaw.tui.services.overview_state import (
+        from defenseclaw.enforce.admission_overrides import (
             admission_action_overrides,
             format_scanner_overrides_summary,
         )
