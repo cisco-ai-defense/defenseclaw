@@ -61,7 +61,7 @@ type commandDirectoryScope struct {
 func posixCommandDirectories(facts actionfacts.Facts, home string) [][]string {
 	dirs := make([][]string, len(facts.Commands))
 	var callDirs []string
-	if strings.HasPrefix(facts.CWD, "/") {
+	if stateRootedPath(facts.CWD) {
 		callDirs = []string{path.Clean(facts.CWD)}
 	}
 	stateRoot := home + "/.defenseclaw"

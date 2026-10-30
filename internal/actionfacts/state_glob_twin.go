@@ -61,6 +61,11 @@ func StateGlobTwin(command, activeHome string) (twin string, ok bool) {
 	if home == "" || !posixShellHome(home) || strings.ContainsAny(home, "\x00\r\n") {
 		return "", false
 	}
+	// A Git Bash call on Windows has a drive home, C:/Users/x: its patterns
+	// are placed and read there too (GAP-2573: cp a.txt
+	// ~/.defenseclaw/conf*.yaml and ~/.def*/config.yaml wrote config.yaml
+	// with no finding on Windows while they blocked on Linux and macOS).
+	drive := DriveSlashPath(home + "/")
 	source := command
 	if !strings.ContainsAny(source, "*?[") || !strings.Contains(source, "/") {
 		return "", false
@@ -81,7 +86,11 @@ func StateGlobTwin(command, activeHome string) (twin string, ok bool) {
 			return true
 		}
 		pattern, literal := statePatternWord(word, home)
-		if !literal || !strings.HasPrefix(pattern, "/") || !strings.ContainsAny(pattern, "*?[") {
+		if literal && drive {
+			pattern = stateDrivePattern(pattern)
+		}
+		if !literal || !strings.HasPrefix(pattern, "/") && !(drive && DriveSlashPath(pattern)) ||
+			!strings.ContainsAny(pattern, "*?[") {
 			return false
 		}
 		matches, complete := stateGlobMatches(pattern, home, deadline)
@@ -190,6 +199,16 @@ func statePatternWord(word *syntax.Word, home string) (string, bool) {
 // longer listing, more matches or the deadline end the expansion
 // (complete is false); the reading then adds nothing.
 func stateGlobMatches(pattern, home string, deadline time.Time) (matches []string, complete bool) {
+	// A drive home is on a Windows file system, which opens a name spelled
+	// in any case (~/.DefenseClaw/conf*.yaml lists the state); a wildcard
+	// component is still matched by the shell as written.
+	fold := DriveSlashPath(home + "/")
+	match := func(pattern, name string) bool {
+		if _, literal := stateGlobLiteral(pattern); fold && literal {
+			pattern, name = strings.ToLower(pattern), strings.ToLower(name)
+		}
+		return stateGlobComponentMatch(pattern, name)
+	}
 	patternParts := strings.Split(pattern, "/")
 	homeParts := strings.Split(home, "/")
 	stateIndex := len(homeParts)
@@ -197,11 +216,11 @@ func stateGlobMatches(pattern, home string, deadline time.Time) (matches []strin
 		return nil, false
 	}
 	for index, name := range homeParts {
-		if !stateGlobComponentMatch(patternParts[index], name) {
+		if !match(patternParts[index], name) {
 			return nil, false
 		}
 	}
-	if !stateGlobComponentMatch(patternParts[stateIndex], ".defenseclaw") {
+	if !match(patternParts[stateIndex], ".defenseclaw") {
 		return nil, false
 	}
 	current := []string{home + "/.defenseclaw"}
@@ -222,7 +241,7 @@ func stateGlobMatches(pattern, home string, deadline time.Time) (matches []strin
 				return nil, false
 			}
 			for _, name := range names {
-				if stateGlobComponentMatch(component, name) {
+				if match(component, name) {
 					next = append(next, dir+"/"+name)
 					if len(next) > maxStateGlobMatches {
 						return nil, false
@@ -238,6 +257,15 @@ func stateGlobMatches(pattern, home string, deadline time.Time) (matches []strin
 		}
 	}
 	return matches, true
+}
+
+// stateDrivePattern gives the MSYS spelling of a drive path (/c/Users/x)
+// its drive form (c:/Users/x), as Git Bash reads it.
+func stateDrivePattern(pattern string) string {
+	if len(pattern) >= 3 && pattern[0] == '/' && isASCIILetter(pattern[1]) && pattern[2] == '/' {
+		return pattern[1:2] + ":" + pattern[2:]
+	}
+	return pattern
 }
 
 // stateGlobComponentMatch matches one path component as the shell does: a

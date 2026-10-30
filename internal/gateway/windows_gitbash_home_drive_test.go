@@ -123,14 +123,14 @@ func TestR105GAP2304WindowsGitBashHomeDrivePaths(t *testing.T) {
 		{"L8", "cp -r /tmp/x/* dclink/", false},
 		{"L9", "rsync -a --delete /tmp/empty/ dclink/hooks/", false},
 		{"R12", "rsync -a --remove-sent-files /tmp/x ~/.defenseclaw/", false},
-		{"R14", "git --work-tree=$HOME/.defenseclaw clean -fdx", false},
-		{"R15", "git --work-tree ~/.defenseclaw clean -fdx", false},
+		{"R14", "git --work-tree=$HOME/.defenseclaw clean -fdx", true}, // GAP-2566: a state write, blocks on Linux too (state_operand_residual_test.go)
+		{"R15", "git --work-tree ~/.defenseclaw clean -fdx", true},     // GAP-2566: a state write, blocks on Linux too (state_operand_residual_test.go)
 		{"R16", "git -C ~/.defenseclaw --work-tree=/tmp/wt clean -fdx", false},
-		{"R3", "rsync -aT/tmp/te /tmp/x/ ~/.defenseclaw/", false},
-		{"R4", "git --work-tree=. -C ~/.defenseclaw clean -fdx", false},
-		{"R5", "git --git-dir=/tmp/g/.git --work-tree=. -C ~/.defenseclaw clean -fdx", false},
-		{"R6", "git --work-tree hooks -C ~/.defenseclaw clean -fdx", false},
-		{"R9", "rsync -a --exclude cache/ /tmp/x/ ~/.defenseclaw/", false},
+		{"R3", "rsync -aT/tmp/te /tmp/x/ ~/.defenseclaw/", true},                             // GAP-2566: a state write, blocks on Linux too (state_operand_residual_test.go)
+		{"R4", "git --work-tree=. -C ~/.defenseclaw clean -fdx", true},                       // GAP-2566: a state write, blocks on Linux too (state_operand_residual_test.go)
+		{"R5", "git --git-dir=/tmp/g/.git --work-tree=. -C ~/.defenseclaw clean -fdx", true}, // GAP-2566: a state write, blocks on Linux too (state_operand_residual_test.go)
+		{"R6", "git --work-tree hooks -C ~/.defenseclaw clean -fdx", true},                   // GAP-2566: a state write, blocks on Linux too (state_operand_residual_test.go)
+		{"R9", "rsync -a --exclude cache/ /tmp/x/ ~/.defenseclaw/", true},                    // GAP-2566: a state write, blocks on Linux too (state_operand_residual_test.go)
 		{"T6B1", "find ~ -name '*.pyc' -delete", false},
 		{"T6B16", "find ~ -name '*.orig' -delete", false},
 		{"T6B17", "find ~ -name node_modules -type d -prune -exec rm -rf {} +", false},
