@@ -3,7 +3,13 @@
 
 package redaction
 
-import "testing"
+import (
+	"crypto/sha256"
+	"strings"
+	"testing"
+
+	"github.com/defenseclaw/defenseclaw/internal/observability"
+)
 
 // validProfile runs for every projection (Project, Reproject and the sink
 // policy resolver), and it looked the built-in profile up by building all
@@ -54,5 +60,46 @@ func TestBuiltInProfilesAreResolvedOnceAndStayImmutable(t *testing.T) {
 	}
 	if allocs := testing.AllocsPerRun(100, func() { _, _ = BuiltInProfile(ProfileContent) }); allocs != 0 {
 		t.Fatalf("BuiltInProfile allocates %.0f times per call, want 0", allocs)
+	}
+}
+
+// referenceProfileFingerprint is the strings.Builder form profileFingerprint
+// had before r106; the fingerprints must stay byte for byte the same.
+func referenceProfileFingerprint(profile Profile) [32]byte {
+	var builder strings.Builder
+	builder.WriteString(string(profile.name))
+	builder.WriteByte(0)
+	builder.WriteString(string(profile.base))
+	for _, mode := range profile.modes {
+		builder.WriteByte(0)
+		builder.WriteString(string(mode))
+	}
+	for _, enabled := range profile.groups {
+		if enabled {
+			builder.WriteByte(1)
+		} else {
+			builder.WriteByte(0)
+		}
+	}
+	return sha256.Sum256([]byte(builder.String()))
+}
+
+func TestProfileFingerprintIsUnchanged(t *testing.T) {
+	profiles := BuiltInProfiles()
+	custom, err := NewCustomProfile("r106custom", ProfileSensitive,
+		[]DetectorGroup{DetectorGroups()[0]}, map[observability.FieldClass]TransformationMode{observability.FieldClassContent: ModeWhole})
+	if err != nil {
+		t.Fatal(err)
+	}
+	long := custom
+	long.name = ProfileName(strings.Repeat("a", 300))
+	for _, profile := range append(profiles, custom, long) {
+		if got, want := profileFingerprint(profile), referenceProfileFingerprint(profile); got != want {
+			t.Fatalf("fingerprint of %q changed", profile.name)
+		}
+	}
+	builtIn, _ := BuiltInProfile(ProfileStrict)
+	if allocs := testing.AllocsPerRun(100, func() { _ = profileFingerprint(builtIn) }); allocs != 0 {
+		t.Fatalf("profileFingerprint allocates %.0f times per call, want 0", allocs)
 	}
 }
