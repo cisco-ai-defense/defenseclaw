@@ -2156,6 +2156,9 @@ def _detect_acp_clients(data_dir: str | None = None) -> list[dict[str, Any]]:
     records = _owned_entry_records(data_dir)
     findings: list[dict[str, Any]] = []
     for client in sorted(_CLIENTS):
+        # Agents a guarded entry here already launches, proved or not; they
+        # are configured, so they are never listed as installable (GAP-2629).
+        guarded_agents: set[str] = set()
         try:
             path = _client_path(client)
         except click.ClickException:
@@ -2184,6 +2187,9 @@ def _detect_acp_clients(data_dir: str | None = None) -> list[dict[str, Any]]:
                     pair = _guarded_pair(entry, name, records)
                     if pair is not None or _entry_is_guarded(entry):
                         record["guarded"].append({"entry": name, "agent": pair[1] if pair else ""})
+                        named = pair[1] if pair else _guard_options(entry).get("--agent", "")
+                        if named in _AGENTS:
+                            guarded_agents.add(named)
                         continue
                     if agent := _agent_for_entry(entry):
                         record["adoptable"].append(
@@ -2202,6 +2208,7 @@ def _detect_acp_clients(data_dir: str | None = None) -> list[dict[str, Any]]:
         # Native agents installed on this host with no entry in this client.
         accounted = {item.get("agent") for item in (*record["adoptable"], *record["guarded"])}
         accounted |= {item.get("agent") for item in record["client_registry"]}
+        accounted |= guarded_agents
         record["installable"] = sorted(
             agent
             for agent, (command, _args) in _AGENTS.items()
