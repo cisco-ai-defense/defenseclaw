@@ -34,10 +34,13 @@ func TestForeignHookAccountRemovalDrainIgnoresTheCallersDeadline(t *testing.T) {
 				t.Fatal(err)
 			}
 			hold := 600 * time.Millisecond
+			// Start the clock before the hold's timer: the exchange lets go
+			// no sooner than hold after this (T11b PR CI: the timer armed
+			// first, and the drain measured 599.93ms).
+			start := time.Now()
 			time.AfterFunc(hold, inside)
 			ctx, cancel := ending()
 			defer cancel()
-			start := time.Now()
 			release, drained, err := LockForeignHookAccountRemoval(ctx, dataDir, "1001")
 			if err != nil {
 				t.Fatalf("a removal whose caller's context ended during the drain: %v", err)
