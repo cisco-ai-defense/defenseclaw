@@ -161,7 +161,7 @@ func actionPosixTargetMention(command, cwd, home string, depth int, stateOnly bo
 		found := false
 		effectiveCWD := cwd
 		var directoryStack []string
-		var movedOntoLinks []*syntax.Word
+		var judgedWords []*syntax.Word
 		checkWord := func(word *syntax.Word) bool {
 			value, known := actionWordValue(word, values, effectiveCWD, home)
 			activeGlob := actionWordHasUnquotedGlob(word, command)
@@ -225,10 +225,14 @@ func actionPosixTargetMention(command, cwd, home string, depth int, stateOnly bo
 					// a link removes the link (GAP-2590).
 					if word, entry, ok := actionPlainMoveOntoLink(call, values, effectiveCWD, home); ok {
 						moved, movedEntry = word, entry
-						movedOntoLinks = append(movedOntoLinks, word)
+						judgedWords = append(judgedWords, word)
 					}
 					removed = actionPlainRemovedLinks(call, values, effectiveCWD, home)
 				}
+				// An --eval text that only defines rules make does not run
+				// is not a target of the call (GAP-2169).
+				inert := actionInertMakeEvals(call, effectiveCWD, home)
+				judgedWords = append(judgedWords, inert...)
 				for _, word := range call.Args {
 					if moved != nil && word == moved {
 						if protectedEntry(movedEntry, protected, ssh) {
@@ -242,7 +246,10 @@ func actionPosixTargetMention(command, cwd, home string, depth int, stateOnly bo
 							found = true
 							return false
 						}
-						movedOntoLinks = append(movedOntoLinks, word)
+						judgedWords = append(judgedWords, word)
+						continue
+					}
+					if slices.Contains(inert, word) {
 						continue
 					}
 					if checkWord(word) {
@@ -257,8 +264,9 @@ func actionPosixTargetMention(command, cwd, home string, depth int, stateOnly bo
 		if found {
 			return true
 		}
-		// The text scan below would follow the link the move replaces.
-		nestedBodies = append(nestedBodies, movedOntoLinks...)
+		// The text scan below would read the words judged above again: the
+		// link a move replaces or an rm removes, an inert make --eval text.
+		nestedBodies = append(nestedBodies, judgedWords...)
 	}
 	text := actionBlankPatchBodies(command, actionMaskLiteralMetacharacters(command))
 	if parsed && actionLiteralArgumentProgramsOnly(file, home) {
