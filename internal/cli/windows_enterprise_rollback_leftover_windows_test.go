@@ -8,7 +8,6 @@ package cli
 
 import (
 	"encoding/json"
-	"os/user"
 	"strings"
 	"testing"
 
@@ -103,16 +102,24 @@ func TestWindowsHotConfigTargetLabelsResolveASIDOnlyTarget(t *testing.T) {
 		t.Fatalf("token user: %v", err)
 	}
 	sid := tokenUser.User.Sid.String()
-	current, err := user.Current()
-	if err != nil {
-		t.Fatalf("current user: %v", err)
+	// GAP-2630: the label is the SID's own DOMAIN\account. user.Current
+	// cannot be the oracle: as LocalSystem on a domain-joined host it names
+	// the machine account (DOMAIN\HOST$) while the SID resolves to
+	// NT AUTHORITY\SYSTEM, so read the account from the SID itself.
+	account, domain, _, err := tokenUser.User.Sid.LookupAccount("")
+	if err != nil || account == "" {
+		t.Fatalf("lookup account of the token SID: %v", err)
+	}
+	name := account
+	if domain != "" {
+		name = domain + `\` + account
 	}
 	got := strings.Join(windowsHotConfigTargetLabels([]enterprisehooks.ManifestTarget{
 		{SID: sid, UserHome: `C:\Users\someone`, Connector: "opencode"},
 		{SID: "S-1-5-21-1-2-3-1003", Connector: "codex"},
 		{User: "bob", SID: "S-1-5-21-1-2-3-1002", Connector: "codex"},
 	}), ", ")
-	want := current.Username + " (" + sid + ") opencode, an account (S-1-5-21-1-2-3-1003) codex, bob (S-1-5-21-1-2-3-1002) codex"
+	want := name + " (" + sid + ") opencode, an account (S-1-5-21-1-2-3-1003) codex, bob (S-1-5-21-1-2-3-1002) codex"
 	if !strings.EqualFold(got, want) {
 		t.Fatalf("labels = %q, want %q", got, want)
 	}
