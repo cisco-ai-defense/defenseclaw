@@ -36,6 +36,10 @@ var trustedConnectorResolver = func(ctx context.Context) unixidentity.Resolver {
 	return unixidentity.NewCachingResolver(unixidentity.Default(ctx))
 }
 
+// trustedConnectorSameNameAccounts lists the other accounts a bare name also
+// names; tests replace it.
+var trustedConnectorSameNameAccounts = unixidentity.SameNameAccounts
+
 // errTrustedConnectorLookupTimeout is a lookup that ran over its budget.
 var errTrustedConnectorLookupTimeout = errors.New("account lookup did not finish in time")
 
@@ -94,7 +98,7 @@ func lookupTrustedConnectorAccount(ctx context.Context, r unixidentity.Resolver,
 		return unixidentity.Account{}, "", err
 	}
 	if !strings.ContainsAny(name, `@\`) {
-		twins, twinErr := unixidentity.SameNameAccounts(ctx, r, account)
+		twins, twinErr := trustedConnectorSameNameAccounts(ctx, r, account)
 		if len(twins) > 0 {
 			return unixidentity.Account{}, actingForCauseAmbiguousUser, fmt.Errorf("the name %q names more than one account", name)
 		}
@@ -251,6 +255,17 @@ var actingForDirectory = sync.OnceValue(func() *identityDirectoryCache {
 	return cache
 })
 
+// actingForDirectoryLookup returns a person's complete directory facts from
+// actingForDirectory; ok is false for a timeout or an incomplete answer.
+var actingForDirectoryLookup = func(uid string) (useridentity.DirectoryFacts, bool) {
+	cache := actingForDirectory()
+	facts, ok := cache.get(uid, true)
+	if !ok || facts.ResolvedAt.IsZero() || cache.unsettled(facts) {
+		return useridentity.DirectoryFacts{}, false
+	}
+	return facts, true
+}
+
 // resolveActingFor decides one acting_for for entry's service account.
 func resolveActingFor(entry trustedConnectorEntry, user string, now time.Time) (actingFor, actingForRefusal) {
 	if entry.Disabled != "" {
@@ -317,9 +332,8 @@ func resolveActingFor(entry trustedConnectorEntry, user string, now time.Time) (
 	}
 	// The person's directory facts, from the connector's own cache. A
 	// timeout or an incomplete answer refuses the call.
-	cache := actingForDirectory()
-	facts, ok := cache.get(answer.uid, true)
-	if !ok || facts.ResolvedAt.IsZero() || cache.unsettled(facts) {
+	facts, ok := actingForDirectoryLookup(answer.uid)
+	if !ok {
 		return actingFor{}, actingForRefusal{Code: actingForRefusedLookupUnavailable, Cause: "directory_facts"}
 	}
 	if _, domain := useridentity.SplitQualifiedName(answer.name); domain != "" && strings.TrimSpace(facts.Domain) == "" &&

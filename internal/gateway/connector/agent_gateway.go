@@ -84,17 +84,21 @@ var agentGatewayKindTools = map[string]string{
 
 // AgentGatewayEvent is one decoded request of the contract.
 type AgentGatewayEvent struct {
-	Event           string              `json:"event"`
-	SessionID       string              `json:"session_id"`
-	ToolUseID       string              `json:"tool_use_id,omitempty"`
-	Traceparent     string              `json:"traceparent,omitempty"`
-	ParentSessionID string              `json:"parent_session_id,omitempty"`
-	CWD             string              `json:"cwd,omitempty"`
-	Tool            *AgentGatewayTool   `json:"tool,omitempty"`
-	ToolResponse    json.RawMessage     `json:"tool_response,omitempty"`
-	Prompt          *string             `json:"prompt,omitempty"`
-	ActingFor       *AgentGatewayActing `json:"acting_for,omitempty"`
-	RootSessionID   string              `json:"root_session_id,omitempty"`
+	Event           string            `json:"event"`
+	SessionID       string            `json:"session_id"`
+	ToolUseID       string            `json:"tool_use_id,omitempty"`
+	Traceparent     string            `json:"traceparent,omitempty"`
+	ParentSessionID string            `json:"parent_session_id,omitempty"`
+	CWD             string            `json:"cwd,omitempty"`
+	Tool            *AgentGatewayTool `json:"tool,omitempty"`
+	ToolResponse    json.RawMessage   `json:"tool_response,omitempty"`
+	// Status is how the tool call ended (post_tool only): success, error,
+	// denied or cancelled. Only a success completes a chain step; a
+	// post_tool without it is recorded but proves nothing.
+	Status        string              `json:"status,omitempty"`
+	Prompt        *string             `json:"prompt,omitempty"`
+	ActingFor     *AgentGatewayActing `json:"acting_for,omitempty"`
+	RootSessionID string              `json:"root_session_id,omitempty"`
 }
 
 // AgentGatewayTool is the contract's tool object.
@@ -205,6 +209,12 @@ func (ev *AgentGatewayEvent) validate() error {
 	}
 	if ev.Event != AgentGatewayEventPostTool && len(ev.ToolResponse) != 0 {
 		return agentGatewayContractError("field_not_allowed", "tool_response is only for post_tool")
+	}
+	switch {
+	case ev.Status != "" && ev.Event != AgentGatewayEventPostTool:
+		return agentGatewayContractError("field_not_allowed", "status is only for post_tool")
+	case ev.Status != "" && !agentGatewayStatuses[ev.Status]:
+		return agentGatewayContractError("invalid_status", "status must be one of success, error, denied, cancelled")
 	}
 	if ev.Event == AgentGatewayEventUserPrompt && ev.Prompt == nil {
 		return agentGatewayContractError("missing_field", "prompt is required for user_prompt")
@@ -348,7 +358,8 @@ func rejectDuplicateJSONKeys(body []byte) error {
 }
 
 // AgentGatewayHookPayload maps a decoded event onto the generic hook
-// vocabulary: hook_event_name, session_id, tool_use_id, tool_name,
+// vocabulary: hook_event_name, session_id, tool_call_id (the canonical
+// correlation key of tool_use_id), tool_name,
 // tool_input, tool_response, prompt, cwd, the W3C traceparent and, for a
 // sub-agent event, parent_session_id. acting_for and root_session_id are
 // never copied: the route decides about them before evaluation.
@@ -367,7 +378,7 @@ func AgentGatewayHookPayload(ev AgentGatewayEvent) (map[string]interface{}, erro
 		payload["parent_session_id"] = ev.ParentSessionID
 	}
 	if ev.ToolUseID != "" {
-		payload["tool_use_id"] = ev.ToolUseID
+		payload["tool_call_id"] = ev.ToolUseID
 	}
 	if ev.Prompt != nil {
 		payload["prompt"] = *ev.Prompt
@@ -379,6 +390,9 @@ func AgentGatewayHookPayload(ev AgentGatewayEvent) (map[string]interface{}, erro
 		}
 		payload["tool_name"] = name
 		payload["tool_input"] = input
+	}
+	if ev.Status != "" {
+		payload["tool_status"] = ev.Status
 	}
 	if len(ev.ToolResponse) != 0 {
 		var response interface{}
@@ -434,6 +448,49 @@ func agentGatewayToolCall(tool AgentGatewayTool) (string, interface{}, error) {
 	}
 }
 
+var agentGatewayStatuses = map[string]bool{"success": true, "error": true, "denied": true, "cancelled": true}
+
+// AgentGatewayContractID names the reviewed event contract of the route.
+const AgentGatewayContractID = "agent-gateway-hook-v1"
+
+// agentGatewayToolCallLifecycle is the route's tool-call lifecycle: a
+// pre_tool proposes, a post_tool with the same tool_use_id settles it by its
+// status, a session_end ends the session's chain state. Sub-agent and
+// prompt events are audit only.
+func agentGatewayToolCallLifecycle() ToolCallLifecycleContract {
+	return ToolCallLifecycleContract{
+		Version:                           ToolCallLifecycleContractVersion,
+		PreProposalEvents:                 []string{"PreToolUse"},
+		AuthoritativeSuccessEvents:        []string{"PostToolUse"},
+		AuthoritativeFailureEvents:        []string{"PostToolUse"},
+		AuthoritativeDenialEvents:         []string{"PostToolUse"},
+		AuthoritativePendingDiscardEvents: []string{},
+		AuthoritativeTerminalEvents:       []string{"SessionEnd"},
+		InvocationIDAuthority:             ToolInvocationIDPairedID,
+		OutcomeAuthority:                  ToolOutcomeResultPayload,
+		StatefulEnforcementLevel:          StatefulToolPairedOutcomes,
+		Routing: ToolEventRouting{
+			StructuredActionEvents: []string{"PreToolUse"},
+			ResultContentEvents:    []string{"PostToolUse"},
+			StateTransitionEvents:  []string{},
+			AuditOnlyEvents:        []string{"SessionStart", "UserPromptSubmit", "SubagentStart", "SubagentStop", "SessionEnd"},
+		},
+		CoveredToolSurfaces: []ToolSurface{
+			ToolSurfaceGeneric, ToolSurfaceShell, ToolSurfaceFileRead, ToolSurfaceFileWrite, ToolSurfaceMCP,
+		},
+		OfficialSourceURLs: []string{"https://github.com/cisco-ai-defense/defenseclaw/blob/main/schemas/connectors/agent-gateway-hook.json"},
+		Limitations: []string{
+			"The calling gateway enforces the answer; DefenseClaw cannot enforce it inside a third-party process.",
+			"A post_tool without status is recorded but never completes a chain step.",
+		},
+	}
+}
+
+// classifyAgentGatewayResult is the outcome a post_tool states in status.
+func classifyAgentGatewayResult(payload map[string]interface{}) ToolLifecycleOutcome {
+	return classifyStatusValue(payload["tool_status"])
+}
+
 // AgentGatewayHookProfile is the route's hook profile: a generic hook-only
 // profile whose answer is the generic {action, reason, rule_ids} body.
 func AgentGatewayHookProfile() HookProfile {
@@ -454,6 +511,11 @@ func AgentGatewayHookProfile() HookProfile {
 		},
 		SupportsTraceparent: true,
 		SupportedEvents:     events,
+		ContractID:          AgentGatewayContractID,
+		CompatibilityStatus: HookCompatibilityUnversioned,
+		ToolCallLifecycle:   agentGatewayToolCallLifecycle(),
+		Correlation:         ExplicitCanonicalCorrelationSpec(AgentGatewayConnectorName),
+		AIDSurfaces:         []string{"prompt", "tool_call", "tool_result"},
 		Decode:              agentGatewayProfileDecode,
 		MapVerdict:          hookOnlyProfileMapVerdict,
 		Respond:             hookOnlyProfileRespond,
@@ -467,7 +529,7 @@ func agentGatewayProfileDecode(payload map[string]interface{}) HookProfileReques
 		HookEventName:    event,
 		SessionID:        hookFirstString(payload, "session_id"),
 		ParentSessionID:  hookFirstString(payload, "parent_session_id"),
-		ToolInvocationID: hookFirstString(payload, "tool_use_id"),
+		ToolInvocationID: hookFirstString(payload, "tool_call_id"),
 		CWD:              hookFirstString(payload, "cwd"),
 		ToolName:         hookFirstString(payload, "tool_name"),
 		Payload:          payload,
