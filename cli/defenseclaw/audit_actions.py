@@ -112,6 +112,7 @@ ACTION_ASSET_POLICY: Final[str]                = "asset-policy"
 # user manually removes it while the gateway is running.
 ACTION_CONNECTOR_HOOK_TAMPERED: Final[str]     = "connector-hook-tampered"
 ACTION_CONNECTOR_HOOK_REPAIRED: Final[str]     = "connector-hook-repaired"
+ACTION_PROTECTED_FILE_CHANGED: Final[str]      = "protected-file-changed"
 
 # A standalone enterprise hook call from an exempt_users account. Mirrors
 # internal/audit/actions.go::ActionEnterpriseExemptUser.
@@ -381,6 +382,7 @@ ALL_ACTIONS: Final[tuple[str, ...]] = (
     ACTION_ASSET_POLICY,
     ACTION_CONNECTOR_HOOK_TAMPERED,
     ACTION_CONNECTOR_HOOK_REPAIRED,
+    ACTION_PROTECTED_FILE_CHANGED,
     ACTION_ENTERPRISE_EXEMPT_USER,
     ACTION_CODEX_NOTIFY,
     ACTION_CODEX_NOTIFY_AGENT_TURN_COMPLETE,

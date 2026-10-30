@@ -74,6 +74,9 @@ type APIServer struct {
 	client *Client
 	store  *audit.Store
 	logger *audit.Logger
+	// protectedFiles is the sidecar's protected-file watch (nil when off or
+	// in a test server); the hook handler records tool calls for it.
+	protectedFiles *protectedFileWatch
 	// Both API listeners start this server's one background recovery loop
 	// of the hook delivery journal (startPendingHookRecovery); neither
 	// waits for it.

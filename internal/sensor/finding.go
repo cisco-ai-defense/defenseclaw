@@ -156,6 +156,9 @@ const MaxHookRuleIDs = 3
 var kernelControlRules = map[string]string{
 	"kernel.ssh_private_key_read": "PATH-SSH-KEY",
 	"kernel.persistence_write":    "persistence.shell_profile_write",
+	// Its own id, so dashboards keyed on the shell profile rule keep their
+	// meaning; no text rule has it (the class is writes the hook cannot see).
+	"kernel.ssh_authorized_keys_write": "persistence.ssh_authorized_keys_write",
 }
 
 // KernelControlRuleID is the guardrail rule id of a kernel control, or "".

@@ -1343,8 +1343,8 @@ attributes:
   normalization:
     id: enum-v1
     overrides:
-      enum: [kernel.ssh_private_key_read, kernel.persistence_write]
-    notes: The two built-in controls. kernel.ssh_private_key_read maps to the guardrail rule PATH-SSH-KEY and kernel.persistence_write to persistence.shell_profile_write
+      enum: [kernel.ssh_private_key_read, kernel.persistence_write, kernel.ssh_authorized_keys_write]
+    notes: The three built-in controls. kernel.ssh_private_key_read maps to the guardrail rule PATH-SSH-KEY, kernel.persistence_write to persistence.shell_profile_write and kernel.ssh_authorized_keys_write to persistence.ssh_authorized_keys_write
   introduced_in: telemetry-registry-v2
 - id: defenseclaw.ai.runtime.kernel.event
   type: string
@@ -1791,7 +1791,7 @@ attributes:
   normalization:
     id: enum-v1
     overrides:
-      enum: [kernel.ssh_private_key_read, kernel.persistence_write, customer]
+      enum: [kernel.ssh_private_key_read, kernel.persistence_write, kernel.ssh_authorized_keys_write, customer]
     notes: The DefenseClaw control of a denial or would-block, or customer for an event of the host's own Tetragon policy
   introduced_in: telemetry-registry-v2
 - id: defenseclaw.ai.model.provenance.quantized
@@ -15329,6 +15329,9 @@ producer_identity_sets:
   - event_name: legacy.audit.gateway.tool.call.judge.flagged
     bucket: security.finding
     compatibility_only: true
+  - event_name: legacy.audit.protected.file.changed
+    bucket: security.finding
+    compatibility_only: true
   - event_name: legacy.audit.scan.finding
     bucket: security.finding
     compatibility_only: true
@@ -15519,6 +15522,9 @@ producer_identity_sets:
     compatibility_only: true
   - event_name: legacy.audit.llm.judge.response
     bucket: guardrail.evaluation
+    compatibility_only: true
+  - event_name: legacy.audit.protected.file.changed
+    bucket: security.finding
     compatibility_only: true
   - event_name: legacy.audit.scan.finding
     bucket: security.finding
@@ -16679,6 +16685,22 @@ producer_mappings:
     disposition: translate_to_v8
   default_identity:
     event_name: legacy.audit.connector.hook.tampered
+    bucket: security.finding
+    compatibility_only: true
+- producer: audit_action
+  key: protected-file-changed
+  source: internal/audit/actions.go
+  event_name_policy: context_optional
+  allowed_context_identity_set: identity_set.security_finding
+  severity_policy: finding_required
+  mandatory_rules: []
+  companion_rules: []
+  compatibility:
+    introduced_in: telemetry-registry-v2
+    legacy_event_prefix: legacy.audit.
+    disposition: translate_to_v8
+  default_identity:
+    event_name: legacy.audit.protected.file.changed
     bucket: security.finding
     compatibility_only: true
 - producer: audit_action

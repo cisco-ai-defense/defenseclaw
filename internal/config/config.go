@@ -1916,6 +1916,12 @@ type GuardrailConfig struct {
 	ProfileAssignments []ProfileAssignment         `mapstructure:"profile_assignments" yaml:"profile_assignments,omitempty"`
 	DefaultProfile     string                      `mapstructure:"default_profile"     yaml:"default_profile,omitempty"`
 
+	// ProtectedFiles configures the gateway's protected-file watch
+	// (protected_files.go). Unset keeps the default: alert on a change an
+	// agent tool call made, restore nothing. Never written while unset, so
+	// a rollback to a release without the key reads the file unchanged.
+	ProtectedFiles ProtectedFilesConfig `mapstructure:"protected_files" yaml:"protected_files,omitempty"`
+
 	// profileConnectors is set only on a configuration DerivedForProfile
 	// returns: the profile's own connectors map, keyed by normalized
 	// connector name. policyOverride layers it over Connectors so a profile
@@ -3179,6 +3185,12 @@ func loadConfigSourceCheckedWithLayout(
 			ReportConfigLoadError(context.Background(), "connectors_invalid")
 		}
 		return nil, err
+	}
+	if err := cfg.Guardrail.ProtectedFiles.Validate(); err != nil {
+		if ReportConfigLoadError != nil {
+			ReportConfigLoadError(context.Background(), "guardrail_invalid")
+		}
+		return nil, fmt.Errorf("config: %w", err)
 	}
 	if err := cfg.Scanners.Validate(); err != nil {
 		if ReportConfigLoadError != nil {

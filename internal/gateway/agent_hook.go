@@ -502,6 +502,7 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 			})
 			return
 		}
+		a.noteProtectedFileActivity(r.Context(), connectorName, req, identityFacts.ID)
 		toolRoute := profile.ToolCallLifecycle.RouteForEvent(req.HookEventName)
 		if (connectorName == "claudecode" || connectorName == "codex") &&
 			req.HookEventName == "PreToolUse" && !preToolFieldsValid(payload) {

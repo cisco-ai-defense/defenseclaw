@@ -140,11 +140,13 @@ type Sidecar struct {
 	sandboxRecorderOnce sync.Once
 	sandboxRecorder     *audit.SandboxRecorder
 
-	webhooksMu        sync.RWMutex
-	aiDiscoveryMu     sync.RWMutex
-	aiRuntimeMu       sync.RWMutex
-	apiMu             sync.RWMutex
-	apiServer         *APIServer
+	webhooksMu    sync.RWMutex
+	aiDiscoveryMu sync.RWMutex
+	aiRuntimeMu   sync.RWMutex
+	apiMu         sync.RWMutex
+	apiServer     *APIServer
+	// protectedFiles is the protected-file watch, nil when it is off.
+	protectedFiles    *protectedFileWatch
 	apiProfilesReady  chan struct{}
 	hookGuardsMu      sync.RWMutex
 	hookGuards        map[*HookConfigGuard]struct{}
@@ -1298,6 +1300,10 @@ func (s *Sidecar) Run(ctx context.Context) (runErr error) {
 			errCh <- err
 		}
 	}()
+
+	// The protected-file watch (#1172): alerts on an agent's change to an
+	// SSH authorized keys file, shell startup file or autostart entry.
+	s.startProtectedFileWatch(runCtx)
 
 	// Goroutine 2: Skill/MCP watcher (opt-in via config)
 	wg.Add(1)
@@ -2760,6 +2766,7 @@ func (s *Sidecar) setAPIServer(api *APIServer) {
 	if api != nil {
 		s.bindAPIServerObservabilityV8Locked(api)
 		api.SetHookRegistrationRepair(s.ensureActiveHookRegistration)
+		api.protectedFiles = s.protectedFiles
 	}
 	s.apiServer = api
 	if api != nil && s.apiProfilesReady != nil {
