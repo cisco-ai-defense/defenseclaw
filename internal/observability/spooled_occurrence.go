@@ -32,6 +32,9 @@ type pinnedProvenanceKey struct{}
 // optional-destination projections, which the runtime sends to the
 // destinations that do not have it yet (RemoteDelivery). The producer
 // records no metric for the offer: they are recorded with the row.
+//
+// A correlation relationship change uses it too: its row is in its own audit
+// table (correlation_relationships), committed before the export.
 func WithSkipLocalWrite(ctx context.Context) context.Context {
 	if ctx == nil {
 		ctx = context.Background()

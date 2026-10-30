@@ -1797,7 +1797,7 @@ def _print_observability_status(cfg, *, config_has_problems: bool = False) -> No
         _print_native_delivery_status(_native_delivery_summary(cfg), configured=_configured_connectors(cfg))
         return
 
-    retention = "unbounded" if status.unbounded_retention else f"{status.retention_days} days"
+    retention = status.retention_label
     ux.echo(f"    {ux.dim('plan:')} {status.plan_digest[:12]}  {ux.dim('retention:')} {retention}")
     for destination in status.destinations:
         state = ux._style("enabled", fg="green") if destination.enabled else ux._style("disabled", fg="bright_black")

@@ -8959,7 +8959,7 @@ def _v8_observability_fields(
             how_to,
         )
 
-    retention = "unbounded" if status.unbounded_retention else f"{status.retention_days} days"
+    retention = status.retention_label
     fields: list[ConfigField] = [
         _header("Plan Digest", "observability.plan_digest", status.plan_digest[:12]),
         _header("Bucket Catalog", "observability.bucket_catalog_version", str(status.bucket_catalog_version)),

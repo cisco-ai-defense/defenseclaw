@@ -373,7 +373,8 @@ observability:
 | Setting | Behavior |
 | --- | --- |
 | `local.path` | Must resolve inside the DefenseClaw data directory. `doctor` reports an outside path as a custody failure. A `~` or a relative path is resolved against the data directory by the gateway, `status` and `doctor`. Changing it needs `defenseclaw-gateway restart`. |
-| `retention_days` | Default 7. A reaper runs after startup and every six hours and deletes in small batches. `0` keeps history forever and `doctor` warns about capacity. |
+| `retention_days` | Default 7. A reaper runs a minute after startup and every six hours and deletes in small batches. `0` keeps history forever and `doctor` warns about capacity. |
+| `max_store_mb` | Off by default (`0`): history is kept by days only. Set it (64 or more, in MiB) to also cap the size of `audit.db`: when the used pages pass the cap, the reaper deletes the oldest history the same way `retention_days` does until the store is under nine tenths of the cap. The newest hour is always kept, so the file can pass the cap during a flood. Releases before 1.0.6 refuse this key: remove it before going back with `defenseclaw upgrade --version` (`defenseclaw rollback` restores the previous configuration). |
 | `judge_bodies_path` | Raw LLM-judge request and response text, kept while `guardrail.retain_judge_bodies` is `true` (the default). Redaction profiles do not apply. Turn it off with `defenseclaw config set guardrail.retain_judge_bodies false`, then restart the gateway. |
 | Inventory | The same window prunes AI discovery scan history and unseen agent identities (`agt-`) in `inventory.db`. The newest scan is always kept. `doctor` warns at 1 GiB. |
 

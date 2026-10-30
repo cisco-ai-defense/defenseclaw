@@ -309,9 +309,13 @@ func (s *Sidecar) prepareObservabilityV8Runtime(
 	if err != nil {
 		return nil, newSidecarObservabilityV8BootstrapError(sidecarObservabilityV8BootstrapRuntime, err)
 	}
-	retention, err := observabilityruntime.NewRetentionController(
-		reaper, observabilityruntime.RetentionControllerOptions{Reporter: sidecarV8RetentionObserver{s: s}, SecureClient: s.currentConfig().SecureClientIntegration()},
-	)
+	retentionOptions := observabilityruntime.RetentionControllerOptions{
+		Reporter: sidecarV8RetentionObserver{s: s}, SecureClient: s.currentConfig().SecureClientIntegration(),
+	}
+	if !retentionOptions.SecureClient {
+		retentionOptions.StartupDelay = observabilityruntime.RetentionStartupDelay
+	}
+	retention, err := observabilityruntime.NewRetentionController(reaper, retentionOptions)
 	if err != nil {
 		return nil, newSidecarObservabilityV8BootstrapError(sidecarObservabilityV8BootstrapRuntime, err)
 	}
