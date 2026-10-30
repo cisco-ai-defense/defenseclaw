@@ -438,6 +438,11 @@ def cli(ctx: click.Context) -> None:
                 f"A running gateway keeps its last good configuration.{unchanged}",
                 err=True,
             )
+            if invoked == "status":
+                # Which configuration that is, and the reload it rejected (GAP-0006).
+                from defenseclaw.commands.cmd_status import print_gateway_while_config_unloadable
+
+                print_gateway_while_config_unloadable(str(exc), as_json="--json" in sys.argv[1:])
         else:
             ux.echo(
                 f"Failed to load config — run 'defenseclaw init' first: {exc}",
