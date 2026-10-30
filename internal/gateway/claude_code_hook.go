@@ -169,6 +169,16 @@ func (a *APIServer) evaluateClaudeCodeHook(ctx context.Context, req claudeCodeHo
 			}
 		}
 	case "UserPromptSubmit", "UserPromptExpansion":
+		// The user's typed prompt is the task the tool judge weighs later
+		// tool calls against (SESSION_USER_INTENT). Only the turn-start
+		// event seeds it, as on the generic and Codex paths: an expansion
+		// carries command text the user did not type, so it must not
+		// replace the task. Secure Client keeps the judge input of main.
+		if isToolJudgeIntentEvent(req.HookEventName) && !a.managedAIDOnly() && (cfg == nil || !cfg.SecureClientIntegration()) {
+			if judge := a.judgeFor(ctx); judge != nil {
+				judge.ObserveSessionPrompt(ctx, req.Prompt)
+			}
+		}
 		verdict = a.inspectMessageContent(ctx, claudeCodeContentInspectRequest(
 			claudeCodePromptContent(req), "prompt",
 		))

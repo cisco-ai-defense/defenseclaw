@@ -2743,7 +2743,10 @@ def test_hook_fail_modes_are_set_from_the_config_around_the_gateway_stop(tmp_pat
         encoding="utf-8",
     )
     failing.chmod(0o755)
-    assert run(failing).returncode != 0
+    result = run(failing)
+    assert result.returncode != 0
+    # rel-1-0-5 GAP-0058: the die says "see above", so a silent failure is named.
+    assert "'connector refresh-fail-modes' failed (exit 1)" in result.stderr, result.stderr
     for name, body in (
         ("probe-fails", "#!/bin/sh\necho 'error: cannot run' >&2\nexit 1\n"),
         ("probe-silent", "#!/bin/sh\nexit 0\n"),
@@ -2861,6 +2864,61 @@ def test_a_running_gateway_cannot_reopen_its_hooks_while_it_stops(tmp_path: Path
     # A gateway whose shutdown waits on the hold is killed, as on Windows.
     stop_fn = text[text.index("stop_gateway() {") : text.index("\n}\n", text.index("stop_gateway() {"))]
     assert 'kill -KILL "${pid}"' in stop_fn, stop_fn
+
+
+def test_a_hold_with_nothing_to_hold_lets_the_upgrade_go_on(tmp_path: Path) -> None:
+    # rel-1-0-5 GAP-0058: with no hooks folder (1.0.4 initialized without a
+    # connector, as the release's macos-app lane runs it) the staged gateway
+    # prints the hold marker and exits at once. When that fell between the
+    # installer's look for the marker and its check that the hold still runs,
+    # the 1.0.5 upgrade died "see above" with nothing above. The kill below
+    # answers that check only once the hold has exited, so this order is the
+    # one every run takes.
+    home = tmp_path / "dc"
+    home.mkdir()
+    staging = tmp_path / "staging"
+    (staging / "bin").mkdir(parents=True)
+    gateway = staging / "bin" / "defenseclaw-gateway"
+
+    def run(hold: str) -> subprocess.CompletedProcess[str]:
+        gateway.write_text(
+            "#!/bin/sh\n"
+            'case "$*" in *--help*) echo "  defenseclaw-gateway connector refresh-fail-modes [flags]"; exit 0;; esac\n'
+            "sleep 0.3\n" + hold,
+            encoding="utf-8",
+        )
+        gateway.chmod(0o755)
+        script = tmp_path / "hold.sh"
+        script.write_text(
+            "set -euo pipefail\nwarn() { echo \"warn: $*\" >&2; }\n"
+            + _install_sh_functions(
+                "hook_fail_mode_refresh_probe", "hold_hook_fail_modes",
+                "finish_hook_fail_mode_hold", "end_hook_fail_mode_hold",
+            )
+            + f'HOLD_PID="" HOLD_LOG="" DEFENSECLAW_HOME="{home}" STAGING="{staging}"\n'
+            + 'kill() {\n'
+            '    if [[ "$1" == -0 && "$2" == "${HOLD_PID}" ]]; then\n'
+            '        while command kill -0 "$2" 2>/dev/null; do sleep 0.05; done\n'
+            '        return 1\n'
+            '    fi\n'
+            '    command kill "$@"\n'
+            '}\n'
+            'sleep 30 & old=$!\n'
+            'if hold_hook_fail_modes "$old"; then echo held; else echo refused; fi\n'
+            'command kill "$old"\n',
+            encoding="utf-8",
+        )
+        return _run([str(script)], tmp_path)
+
+    result = run('echo "Holding the hook fail modes until the gateway (process 1) exits"\n')
+    assert result.returncode == 0 and result.stdout.splitlines() == ["held"], result.stdout + result.stderr
+    # Still refused, and named, when it fails or exits without holding.
+    result = run("exit 3\n")
+    assert "refused" in result.stdout, result.stdout + result.stderr
+    assert "'connector refresh-fail-modes' failed (exit 3)" in result.stderr, result.stderr
+    result = run("exit 0\n")
+    assert "refused" in result.stdout, result.stdout + result.stderr
+    assert "exited before it held the hooks' fail modes" in result.stderr, result.stderr
 
 
 def test_rollback_says_a_later_upgrade_keeps_the_data_instead_of_bringing_it_back() -> None:

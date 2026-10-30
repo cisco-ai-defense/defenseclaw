@@ -364,10 +364,6 @@ jobs:
     timeout-minutes: 20
     env:
       PYTHON_SHARD: ${{ matrix.shard }}
-      # The selective Telemetry Registry Exhaustive workflow owns these two
-      # mutation-heavy modules on PRs. Keep their native Windows updater paths
-      # here, while main and manual/release-candidate runs retain both modules.
-      WINDOWS_TELEMETRY_REGISTRY_MODE: ${{ github.event_name == 'pull_request' && 'focused' || 'full' }}
     strategy:
       fail-fast: false
       matrix:
@@ -412,7 +408,11 @@ jobs:
           Initialize-WindowsNativeTestEnvironment $env:DC_STATE_ROOT | Out-Null
           $uv = (Get-Command uv.exe -ErrorAction Stop).Source
           $shardIndex = [int]$env:PYTHON_SHARD - 1
-          $fullTelemetryRegistry = $env:WINDOWS_TELEMETRY_REGISTRY_MODE -eq 'full'
+          # The two mutation-heavy telemetry registry modules run for about
+          # 45 minutes in one Windows interpreter, far past this shard's
+          # budget. Windows telemetry registry exhaustive runs them on main
+          # and manual runs; the selective Telemetry Registry Exhaustive
+          # workflow runs them on pull requests.
           $exhaustiveTelemetryFiles = @(
             'cli/tests/test_telemetry_registry_generator.py',
             'cli/tests/test_telemetry_registry_candidate_renderer.py'
@@ -426,10 +426,8 @@ jobs:
           # Balance whole test files (the TUI suite included) across the
           # shards by recorded Windows time, as the Linux coverage shards do.
           $shardSelectionArgs = @('run', '--frozen', 'python', 'scripts/python_test_shards.py', '--shard-count', '12', '--shard-index', [string]$shardIndex, '--timings', 'scripts/test-timings/python-windows.json')
-          if (-not $fullTelemetryRegistry) {
-            foreach ($telemetryFile in $exhaustiveTelemetryFiles) {
-              $shardSelectionArgs += @('--exclude', $telemetryFile)
-            }
+          foreach ($telemetryFile in $exhaustiveTelemetryFiles) {
+            $shardSelectionArgs += @('--exclude', $telemetryFile)
           }
           $shardSelection = Invoke-WindowsNativeProcess $uv $shardSelectionArgs -TimeoutSeconds 300 -LogPath (Join-Path $env:DC_STATE_ROOT ('pytest-shard-{0}-files.log' -f $env:PYTHON_SHARD))
           $shardFiles = @(
@@ -443,8 +441,10 @@ jobs:
             # remains covered by the Linux suite.
             '--deselect=cli/tests/test_migrations.py::TestMigrate050PurgeLegacyFlatPolicyBundle::test_symlinked_flat_data_json_is_left_alone'
           )
+          # Keep the native Windows updater paths on every run, pull requests
+          # included.
           $nativeTelemetryTargets = @()
-          if (-not $fullTelemetryRegistry -and $shardIndex -eq 2) {
+          if ($shardIndex -eq 2) {
             $nativeTelemetryTargets = @(
               'cli/tests/test_telemetry_registry_generator.py::test_updater_help_imports_on_native_platform',
               'cli/tests/test_telemetry_registry_generator.py::test_updater_mid_publish_failure_restores_prior_bytes_and_inodes',
@@ -486,6 +486,67 @@ jobs:
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: windows-native-python-diagnostics-${{ matrix.shard }}
+          path: ${{ env.DC_DIAGNOSTICS }}\**
+          if-no-files-found: ignore
+          retention-days: 5
+      - name: Always clean isolated processes, listeners, and temp state
+        if: ${{ always() }}
+        run: ./scripts/windows-native-ci.ps1 -Operation cleanup -StateRoot $env:DC_STATE_ROOT
+
+  windows-telemetry-registry:
+    # A main run that put both modules in one ordinary shard spent 52:53 on it
+    # (run 40398230533, shard 8), so each module gets its own runner and four
+    # workers, as the Linux Telemetry Registry Exhaustive workflow does. Pull
+    # requests skip it: that workflow covers them, and the ordinary shards
+    # keep the native updater paths.
+    name: Windows telemetry registry exhaustive / ${{ matrix.suite }}
+    needs: changes
+    if: ${{ !cancelled() && github.event_name != 'pull_request' && needs.changes.outputs.windows_python != 'false' }}
+    runs-on: windows-latest
+    timeout-minutes: 20
+    env:
+      TELEMETRY_SUITE: ${{ matrix.suite }}
+      TELEMETRY_TEST_FILE: ${{ matrix.test_file }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - suite: generator
+            test_file: cli/tests/test_telemetry_registry_generator.py
+          - suite: renderer
+            test_file: cli/tests/test_telemetry_registry_candidate_renderer.py
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          persist-credentials: false
+      - name: Initialize isolated paths
+        run: ./scripts/initialize-windows-native-ci-paths.ps1 -Leaf ('tr-' + $env:TELEMETRY_SUITE) -DiagnosticsLeaf ('windows-native-diagnostics-telemetry-' + $env:TELEMETRY_SUITE)
+      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          # Only main writes the uv cache; other refs restore it.
+          save-cache: ${{ github.ref == 'refs/heads/main' }}
+          version: "0.11.28"
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+      - name: Sync locked Python environment
+        run: uv sync --frozen --python 3.12
+      - name: Stage packaged runtime data with PowerShell
+        run: ./scripts/windows-native-ci.ps1 -Operation stage-package-data
+      - name: Run the ${{ matrix.suite }} mutation suite on four workers
+        run: |
+          . ./scripts/windows-native-ci.ps1 -NoRun
+          Initialize-WindowsNativeTestEnvironment $env:DC_STATE_ROOT | Out-Null
+          $uv = (Get-Command uv.exe -ErrorAction Stop).Source
+          $telemetryPytestArgs = @('run', '--frozen', 'python', '-m', 'pytest', $env:TELEMETRY_TEST_FILE, '-q', '--color=no', '--durations=25', '--numprocesses=4', '--dist=worksteal')
+          Invoke-WindowsNativeProcess $uv $telemetryPytestArgs -TimeoutSeconds 1020 -LogPath (Join-Path $env:DC_STATE_ROOT ('pytest-telemetry-{0}.log' -f $env:TELEMETRY_SUITE)) | Out-Null
+      - name: Capture bounded diagnostics
+        if: ${{ failure() || cancelled() }}
+        run: ./scripts/windows-native-ci.ps1 -Operation capture -StateRoot $env:DC_STATE_ROOT -DiagnosticsRoot $env:DC_DIAGNOSTICS
+      - name: Upload diagnostics on failure
+        if: ${{ failure() || cancelled() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: windows-native-telemetry-diagnostics-${{ matrix.suite }}
           path: ${{ env.DC_DIAGNOSTICS }}\**
           if-no-files-found: ignore
           retention-days: 5
@@ -933,6 +994,7 @@ jobs:
       - changes
       - windows-go
       - windows-python
+      - windows-telemetry-registry
       - powershell-static
       - package-artifact
       - package-verify

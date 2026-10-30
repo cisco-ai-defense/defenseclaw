@@ -56,21 +56,37 @@ def test_ci_shards_python_once_and_does_not_repeat_unified_corpus() -> None:
     assert 'name = "pytest-xdist"' in lock
 
 
-def test_windows_pr_keeps_native_telemetry_coverage_without_repeating_exhaustive_suites() -> None:
-    workflow = (ROOT / ".github/workflows/windows-native.yml").read_text(encoding="utf-8")
+def test_windows_shards_never_carry_the_exhaustive_telemetry_suites() -> None:
+    # A main run once put both mutation suites in one 16-minute Python shard;
+    # they need about 45 serial minutes on a hosted Windows runner, so main
+    # timed out (runs 40447361282, 41065202349). They get their own job.
+    workflow_text = (ROOT / ".github/workflows/windows-native.yml").read_text(encoding="utf-8")
+    jobs = yaml.safe_load(workflow_text)["jobs"]
+    exhaustive_files = (
+        "cli/tests/test_telemetry_registry_generator.py",
+        "cli/tests/test_telemetry_registry_candidate_renderer.py",
+    )
 
-    assert (
-        "WINDOWS_TELEMETRY_REGISTRY_MODE: ${{ github.event_name == 'pull_request' && 'focused' || 'full' }}"
-    ) in workflow
-    assert "$fullTelemetryRegistry = $env:WINDOWS_TELEMETRY_REGISTRY_MODE -eq 'full'" in workflow
-    for isolated in (
-        "test_telemetry_registry_generator.py",
-        "test_telemetry_registry_candidate_renderer.py",
-    ):
-        assert isolated in workflow
-    assert "if (-not $fullTelemetryRegistry) {" in workflow
-    assert "$shardSelectionArgs += @('--exclude', $telemetryFile)" in workflow
-    assert "'scripts/python_test_shards.py', '--shard-count', '12'" in workflow
+    assert "WINDOWS_TELEMETRY_REGISTRY_MODE" not in workflow_text
+    assert "$fullTelemetryRegistry" not in workflow_text
+
+    shard_job = jobs["windows-python"]
+    assert "env" not in shard_job or "WINDOWS_TELEMETRY_REGISTRY_MODE" not in shard_job["env"]
+    shard_step = next(step for step in shard_job["steps"] if "python_test_shards.py" in step.get("run", ""))
+    shard_run = shard_step["run"]
+    assert "'scripts/python_test_shards.py', '--shard-count', '12'" in shard_run
+    for test_file in exhaustive_files:
+        assert f"'{test_file}'" in shard_run
+    # Every run excludes both modules; no event re-admits them.
+    exclude_loop = (
+        "\nforeach ($telemetryFile in $exhaustiveTelemetryFiles) {\n"
+        "  $shardSelectionArgs += @('--exclude', $telemetryFile)\n"
+        "}\n"
+    )
+    assert exclude_loop in shard_run
+    assert shard_run.count("$shardSelectionArgs += @('--exclude'") == 1
+    # The native Windows updater paths stay on every run, pull requests included.
+    assert "if ($shardIndex -eq 2) {" in shard_run
     for native_test in (
         "test_updater_help_imports_on_native_platform",
         "test_updater_mid_publish_failure_restores_prior_bytes_and_inodes",
@@ -79,9 +95,26 @@ def test_windows_pr_keeps_native_telemetry_coverage_without_repeating_exhaustive
         "test_updater_namespace_swap_cannot_publish_through_detached_parent",
         "test_updater_transaction_bootstrap_failure_removes_exact_created_inode",
     ):
-        assert native_test in workflow
-    assert "if (-not $fullTelemetryRegistry -and $shardIndex -eq 2)" in workflow
-    assert "$nativeTelemetryPytestArgs" in workflow
+        assert f"'cli/tests/test_telemetry_registry_generator.py::{native_test}'" in shard_run
+    assert "$nativeTelemetryPytestArgs" in shard_run
+
+    telemetry_job = jobs["windows-telemetry-registry"]
+    assert telemetry_job["needs"] == "changes"
+    assert telemetry_job["if"] == (
+        "${{ !cancelled() && github.event_name != 'pull_request' && needs.changes.outputs.windows_python != 'false' }}"
+    )
+    assert telemetry_job["runs-on"] == "windows-latest"
+    assert sorted(case["test_file"] for case in telemetry_job["strategy"]["matrix"]["include"]) == sorted(
+        exhaustive_files
+    )
+    assert telemetry_job["strategy"]["fail-fast"] is False
+    run_step = next(step for step in telemetry_job["steps"] if "$telemetryPytestArgs" in step.get("run", ""))
+    run = run_step["run"]
+    assert "$env:TELEMETRY_TEST_FILE" in run
+    assert "'--numprocesses=4', '--dist=worksteal'" in run
+    pytest_timeout = int(re.search(r"-TimeoutSeconds (\d+)", run).group(1))
+    assert pytest_timeout < int(telemetry_job["timeout-minutes"]) * 60
+    assert "windows-telemetry-registry" in jobs["windows-native-required"]["needs"]
 
 
 def test_ci_preserves_make_test_context_without_repeating_test_work() -> None:
@@ -107,12 +140,7 @@ def test_ci_preserves_make_test_context_without_repeating_test_work() -> None:
         'test "$PYTHON_TEST_RESULT" = success',
     ]
 
-    run_steps = [
-        step["run"]
-        for job in jobs.values()
-        for step in job.get("steps", [])
-        if "run" in step
-    ]
+    run_steps = [step["run"] for job in jobs.values() for step in job.get("steps", []) if "run" in step]
     assert all("make test" not in run for run in run_steps)
 
 
@@ -187,7 +215,7 @@ def test_make_gateway_test_runs_the_gateway_race_suite_only_as_bounded_shards() 
     # tests are still running (r103 GAP-0267). The canonical local gate runs
     # it only as timing-balanced shards, each with its own deadline.
     makefile = (ROOT / "Makefile").read_text(encoding="utf-8")
-    target = makefile[makefile.index("\ngateway-test:"):]
+    target = makefile[makefile.index("\ngateway-test:") :]
     target = target[: target.index("\n\n")]
     gateway_runs = [line for line in target.splitlines() if "./internal/gateway" in line]
     assert gateway_runs and all("-timeout $(GO_TEST_TIMEOUT)" in line for line in gateway_runs)
@@ -251,4 +279,6 @@ def test_every_go_cache_save_writes_the_entry_its_job_restores() -> None:
                 assert len(restores) == 1, f"{path.name}:{job_id} saves a Go cache it does not restore once"
                 for key, default in (("cache-name", "shared"), ("cache-files", "")):
                     restored, saved = restores[0].get(key, default), save.get(key, default)
-                    assert saved == restored, f"{path.name}:{job_id} restores {key}={restored!r} but saves {key}={saved!r}"
+                    assert saved == restored, (
+                        f"{path.name}:{job_id} restores {key}={restored!r} but saves {key}={saved!r}"
+                    )
