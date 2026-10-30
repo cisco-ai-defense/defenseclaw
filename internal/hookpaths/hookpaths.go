@@ -1850,19 +1850,91 @@ type plainCopy struct {
 }
 
 // copyMayCarryLink reports that the copy names a link the command makes,
-// or a directory that holds one or is reached through one.
-func (l shellLinks) copyMayCarryLink(call plainCopy) bool {
-	for _, alias := range l.aliases {
-		for _, source := range call.sources {
-			if _, under := cutPathPrefix(alias.name, source); under {
+// or a directory that holds one or is reached through one. A source that
+// is, holds or is under an opaque scope of the command (an archive that may
+// extract links, a copy of a disk link) or one of carrying, the
+// destinations of the other link-keeping copies and archives of the
+// command that may carry a link, may hold a link put there, so the copy
+// may carry it too (RV-cc24-1).
+func (l shellLinks) copyMayCarryLink(call plainCopy, carrying map[string]bool) bool {
+	if l.globalOpaque {
+		return true
+	}
+	related := func(source, path string) bool {
+		if path == "" {
+			return true
+		}
+		path = filepath.Clean(path)
+		if _, under := cutPathPrefix(path, source); under {
+			return true
+		}
+		_, under := cutPathPrefix(source, path)
+		return under
+	}
+	for _, source := range call.sources {
+		for _, alias := range l.aliases {
+			if related(source, alias.name) {
 				return true
 			}
-			if _, under := cutPathPrefix(source, alias.name); under {
+		}
+		for _, scope := range l.opaqueScopes {
+			if related(source, scope.path) {
+				return true
+			}
+		}
+		for scope := range carrying {
+			if related(source, scope) {
 				return true
 			}
 		}
 	}
 	return false
+}
+
+// plainCopiesCarryingNone returns, per destination, how many of the plain
+// copies carry no link the command makes. A copy whose source is or is
+// near the destination of a copy or archive that may carry one is not
+// counted; that is read to a fixed point, so cp -a src dist; cp -a dist
+// dist2 carries none but ln -s ../x k; cp -R k build/; cp -R build dist
+// does (RV-cc24-1).
+func (l shellLinks) plainCopiesCarryingNone(calls []plainCopy, copyScopes []string) map[string]int {
+	exempt := make([]bool, len(calls))
+	for i, call := range calls {
+		exempt[i] = !l.copyMayCarryLink(call, nil)
+	}
+	scopes := map[string]int{}
+	for _, scope := range copyScopes {
+		scopes[filepath.Clean(scope)]++
+	}
+	for {
+		counts := map[string]int{}
+		for i, call := range calls {
+			if exempt[i] {
+				counts[filepath.Clean(call.destination)]++
+			}
+		}
+		carrying := map[string]bool{}
+		for scope, n := range scopes {
+			if n > counts[scope] {
+				carrying[scope] = true
+			}
+		}
+		changed := false
+		for i, call := range calls {
+			if exempt[i] && l.copyMayCarryLink(call, carrying) {
+				exempt[i], changed = false, true
+			}
+		}
+		if !changed {
+			none := map[string]int{}
+			for i, call := range calls {
+				if exempt[i] {
+					none[call.destination]++
+				}
+			}
+			return none
+		}
+	}
 }
 
 // plainCopySources returns the sources of a static link-keeping cp call
@@ -2359,11 +2431,7 @@ func commandLinks(command, cwd, home string, facts map[string]string, record, ne
 		// stays opaque.
 		carriesNone := map[string]int{}
 		if !renames && !cds && len(renameOps) == 0 && len(findMoves) == 0 {
-			for _, call := range plainCopies {
-				if !links.copyMayCarryLink(call) {
-					carriesNone[call.destination]++
-				}
-			}
+			carriesNone = links.plainCopiesCarryingNone(plainCopies, copyScopes)
 		}
 		for _, scope := range copyScopes {
 			if carriesNone[scope] > 0 {

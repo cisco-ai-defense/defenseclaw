@@ -31,6 +31,8 @@ func TestR105ManagedLinkThenArchiveCopyIsAProjectCopy(t *testing.T) {
 		{"B03", `ln -sf ../src/a.txt link.txt && cp -a src out`, false, false},
 		{"B05", `ln -s build/out bin && cp --archive build dist`, false, false},
 		{"B06", `ln -s build/out bin && cp -r build dist`, false, false},
+		{"Y02", `ln -s build/out bin; cp -a src dist; cp -a dist dist2`, false, false},
+		{"Y03", `ln -s build/out bin && cp -a build dist && cp -a dist dist2 && echo x > dist2/notes.txt`, false, false},
 		{"T02", `sh -c "ln -s ../.ssh k && cp -a src/a.txt k/authorized_keys"`, true, false},
 		{"T03", `ln -s ../.ssh k; sh -c "cp -a src/a.txt k/authorized_keys"`, true, false},
 		{"T04", `ln -s ../.ssh/authorized_keys k; sh -c "cp -a src/a.txt k"`, true, false},
@@ -46,6 +48,12 @@ func TestR105ManagedLinkThenArchiveCopyIsAProjectCopy(t *testing.T) {
 		{"T17", `sh -c "ln -s ../../.ssh build/k && cp -a build dist"; echo key >> dist/k/authorized_keys`, true, false},
 		{"T18", `cd build && ln -s ../../.ssh k && cd .. && cp -a build dist && echo key >> dist/k/authorized_keys`, true, false},
 		{"T19", `ln -s ../.ssh k; cp -a k src dist; echo key >> dist/k/authorized_keys`, true, false},
+		// RV-cc24-1: a link copied into a plain source by an earlier copy
+		// or archive of the same command is carried by the later copy.
+		{"X04", `ln -s ../.ssh k; rsync -a k build/; cp -a build dist; echo key >> dist/k/authorized_keys`, true, false},
+		{"X07", `ln -s ../.ssh k; tar -cf - k | tar -xf - -C build; cp -a build dist; echo key >> dist/k/authorized_keys`, true, false},
+		{"X19", `ln -s ../.ssh k; cp -R k build/; cp -R build dist; echo key >> dist/k/authorized_keys`, true, false},
+		{"X24", `ln -s ../.ssh k; cp -R k build/; cp -a build dist; echo key >> dist/k/authorized_keys`, true, false},
 		{"T11", `cp -a keylink dist2; echo key >> dist2`, true, true},
 		{"T12", `cp -a src/a.txt keylink`, true, true},
 	}
