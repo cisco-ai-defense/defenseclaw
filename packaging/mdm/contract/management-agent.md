@@ -1605,6 +1605,14 @@ Later bundles go through 5.2.
    the sessions restarted (4.3, sessions that need a restart). Report anchor
    and credential changes yourself (section 0).
 
+Keys that only 1.0.6 and later read (`enterprise.identity.trusted_connectors`,
+`connectors.agent_gateway`) need a bundle signed with `--min-product-version
+1.0.6` or later: `bundle sign` refuses the config otherwise (`config_invalid`,
+on `min_product_version`), and a 1.0.4 or 1.0.5 device refuses the bundle
+(`product_too_old`). The same floor refuses a rollback to 1.0.4 or 1.0.5 on
+Linux and macOS (5.3). A 1.0.5 Windows Setup does not check the floor:
+before a Windows rollback to 1.0.5, deliver a bundle without these keys.
+
 ### 5.3 Release floor
 
 On Linux and macOS, DefenseClaw 1.0.4 and later refuse to install a release
