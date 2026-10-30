@@ -215,13 +215,6 @@ until a bundle signed for 1.0.4 is in place. To rotate the key on a device
 that applies signed policy bundles, contact your administrator: `secret set`
 alone cannot change it.
 
-To see which keys the confirmed bundle binds, run `enterprise bundle verify
---json` on the confirmed bundle as root or SYSTEM. From 1.0.6 its
-`secret_refs` list shows each key name with `present` and `value_match`
-(names and booleans only). `secret set` checks the value it stores. A value
-written to the store some other way is found by the next verify of the
-confirmed bundle, as `secret_ref_mismatch`.
-
 ## Remove the key
 
 Removal refuses a key that enabled AI Defense inspection still references

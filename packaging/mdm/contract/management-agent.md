@@ -1517,14 +1517,12 @@ does not check the floor.
 Check the floor first, the package refusal is the second line: `bundle
 status` reports it as `current.min_product_version` (absent when the bundle
 sets none and on builds before 1.0.6). Compare it with the target version
-before you dispatch a downgrade; for a rollback to 1.0.4 it must be unset or
-at most 1.0.4, else deliver a bundle signed with a lower
-`--min-product-version` first. On a 1.0.4 or 1.0.5 device, `bundle status`
-has no such member and its `floor` is the bundle version floor, not the
-release floor: keep the release floor you signed and compare it with
-`--version-json` yourself. A 1.0.6 or later release that runs below the floor
-warns `product_below_floor` in `status`, `verify` and `bundle status`; the
-warning changes nothing on the device.
+before you dispatch a downgrade; a rollback to 1.0.4 needs it unset or at
+most 1.0.4. On a 1.0.4 or 1.0.5 device, `bundle status` has no such member
+and its `floor` is the bundle version floor, not the release floor. A 1.0.6
+or later release that runs below the floor warns `product_below_floor` in
+`status`, `verify` and `bundle status`; the warning changes nothing on the
+device. To go below the floor, contact your administrator.
 
 The preinstall of a 1.0.4 or later package checks the floor before it replaces
 files, but only with a gateway that has the check: the installed gateway when
