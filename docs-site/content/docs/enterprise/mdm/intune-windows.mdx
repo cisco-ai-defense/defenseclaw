@@ -86,9 +86,9 @@ make that app a dependency of the install ([Custom rule pack app](#custom-rule-p
 | `-Sha256` | The Setup's pin. Required with hash-pinned trust; the script refuses a Setup that does not match. |
 | `-TrustMode` | `HashPinned` (default) or `Authenticode`. |
 | `-AllowedSigners` | With `Authenticode`: SHA-256 thumbprints of accepted signer certificates, comma-separated or repeated. |
-| `-ConfigPath` | The config. Without one the first install fails with `1639`. Leave it out of a bundle package and of an upgrade for a device in bundle mode, which refuses it with `bundle_required`. |
-| `-BundlePath` | A signed policy bundle (`.dcbundle`) for a bundle app. Not with `-ConfigPath`; needs `-BaseConfigPath` and `-RequireBundle`. |
-| `-BaseConfigPath` | With `-BundlePath`: the config of the base app. The packager refuses it unless its `guardrail:` block is the bundle's, apart from `custom_packs.<pack>.path`, and its `claude_code:`, `codex:`, `connector_hooks:` and `application_protection:` blocks are the bundle's or absent from both. No other setting is compared. |
+| `-ConfigPath` | The config. Without one the first install fails with `1639`. With `-BundlePath` it builds the [single app](#single-app-with-a-signed-bundle). Leave it out of an upgrade without `-BundlePath` for a device in bundle mode, which refuses it with `bundle_required`. |
+| `-BundlePath` | A signed policy bundle (`.dcbundle`). With `-ConfigPath`: the single app. Alone: a bundle-only app for devices installed with a base app, which needs `-BaseConfigPath`. Both need `-RequireBundle`. |
+| `-BaseConfigPath` | With `-BundlePath` alone: the config of the base app. The packager refuses it unless its `guardrail:` block is the bundle's, apart from `custom_packs.<pack>.path`, and its `claude_code:`, `codex:`, `connector_hooks:` and `application_protection:` blocks are the bundle's or absent from both. No other setting is compared. |
 | `-TrustAnchorPath` | With `-BundlePath`: the bundle trust anchor file to install. |
 | `-RequireBundle` | With `-BundlePath`: the bundle version or id the generated `detect-bundle.ps1` requires. |
 | `-OutputDirectory` | Where to write. Required. Its `content` folder must not exist yet. |
@@ -102,9 +102,30 @@ allowed). It also refuses a top-level key that is not plain lowercase (a tag,
 anchor, escape or `?` key) and a quoted value or `{...}` or `[...]` that
 continues on the next line.
 
-With `-BundlePath`, the `-BaseConfigPath` row above lists the blocks the packager
-compares. Copy other enforcement settings, such as `asset_policy:`, into the base
-config too if they must apply before the bundle app runs.
+### Single app with a signed bundle
+
+Build one app with `-ConfigPath`, `-BundlePath`, `-TrustAnchorPath` and
+`-RequireBundle`. Its install command runs Setup
+`/ensure CONFIG= BUNDLE= TRUSTANCHORS=`:
+
+- On a device without DefenseClaw, Setup installs from `config.yaml` with every
+  service stopped and disabled, then applies the bundle, starts the services on
+  it and confirms it. No service runs on `config.yaml`, and until the bundle
+  applies a DefenseClaw hook refuses the call.
+- If the bundle is not applied, Setup removes that install and the app fails
+  (`1603`), so Intune retries the whole app.
+- On an installed device the app applies the bundle only. Deliver a later bundle
+  version as a new version of the same app; it has no dependency on another
+  DefenseClaw app.
+
+Use the generated `detect-bundle.ps1` as its detection rule. Devices installed
+with a base app and a bundle app take the single app as it is: assign it, then
+remove the two earlier assignments.
+
+With `-BundlePath` alone (a bundle-only app for those devices until they move),
+the `-BaseConfigPath` row above lists the blocks the packager compares. Copy
+other enforcement settings, such as `asset_policy:`, into the base config too if
+they must apply before the bundle app runs.
 
 The script verifies the Setup against `-Sha256` (and, for Authenticode, its
 signer); writes `content\` with the Setup, `config.yaml`,
