@@ -176,7 +176,7 @@ func trustedConnectorTestConfig() *config.Config {
 // socketContext is a hook-socket request from uid, verified by its peer
 // credentials, as managedHookPeerAuth leaves it.
 func socketContext(uid int, name, home string) context.Context {
-	ctx := withManagedHookPeer(context.Background(), managedHookPeer{UID: uid, Name: name, Home: home})
+	ctx := withManagedHookPeer(context.Background(), managedHookPeer{UID: uid, GID: uid, Name: name, Home: home})
 	return withVerifiedSubject(ctx, VerifiedSubject{
 		UserID: strconv.Itoa(uid), IDKind: useridentity.KindPOSIXUID, UserName: name, Source: subjectSourcePeerCredentials,
 	})
