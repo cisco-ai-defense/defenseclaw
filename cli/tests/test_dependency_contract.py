@@ -296,10 +296,11 @@ def test_windows_python_313_dependency_lock_has_supported_onnxruntime_wheel() ->
 
 def test_scanner_metadata_intersection_is_satisfiable() -> None:
     # Authoritative Requires-Dist fields from the shipped scanner wheels:
-    # skill scanner 2.2.1: rich>=14.0,<15, textual>=7.0,<9, litellm>=1.89.7,<2;
+    # skill scanner 2.3.2: rich>=14.0,<15, textual>=7.0,<9, litellm>=1.89.7,<2
+    # (the litellm bound is the 2.2.1 value; 2.3.2 metadata no longer lists it);
     # Textual 8.2.8: rich>=14.2; MCP scanner 4.3.0: litellm>=1.77.0;
     # project policy: Textual>=8.2.8,<9, Rich>=14.2,<15, LiteLLM>=1.103.10,<1.104.
-    # MCP scanner 4.8.x pins litellm==1.93.0 (CVE-2026-84377), so 4.3.0 stays.
+    # MCP scanner 4.8.x pins litellm==1.93.x and needs mcp>=2 (see pyproject), so 4.3.0 stays.
     intersections = {
         "rich": [Requirement("rich<15,>=14.0"), Requirement("rich>=14.2"), Requirement("rich>=14.2,<15")],
         "textual": [Requirement("textual<9,>=7.0"), Requirement("textual>=8.2.8,<9")],
