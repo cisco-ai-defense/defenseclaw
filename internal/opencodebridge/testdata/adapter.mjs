@@ -62,6 +62,12 @@ for (const field of ["sessionID", "tool", "messageID", "agent"]) {
   await invokeAfter({ ...original, [field]: "different" });
   assert.equal(sessionCalls, count + 1, field + " mismatch must not reuse context");
 }
+// A tool input over 1 MiB is pinned whole and reaches the bridge, whose
+// bounded review decides per mode; the adapter never refuses it on size.
+const large = event("large", { tool: "write", input: { path: "/fixture/big.txt", content: "x".repeat(3 * 1024 * 1024) } });
+await before(large);
+assert.equal(Object.isFrozen(large.input), true, "large input is pinned");
+assert.equal(large.input.content.length, 3 * 1024 * 1024, "large input reaches the bridge whole");
 foreign = true;
 await assert.rejects(before(event("foreign")), /verified session location/);
 foreign = false;

@@ -4,15 +4,14 @@
 
 function defenseclawPinV2Event(event) {
   if (!event || typeof event !== "object") throw new Error("DefenseClaw refused an incomplete OpenCode v2 tool event.");
+  // The copy has no size cap: strings are immutable and shared, and an
+  // oversized call must reach the bridge's bounded review, which audits it in
+  // observe mode and blocks it in action mode. A cap here blocked a large
+  // write in every mode. Only pathological nesting is refused.
   let nodes = 0;
-  let characters = 0;
   const copy = (value, depth) => {
-    if (++nodes > 16384 || depth > 64) throw new Error("DefenseClaw refused oversized OpenCode tool arguments.");
-    if (typeof value === "string") {
-      characters += value.length;
-      if (characters > 1048576) throw new Error("DefenseClaw refused oversized OpenCode tool arguments.");
-      return value;
-    }
+    if (++nodes > 1048576 || depth > 128) throw new Error("DefenseClaw refused OpenCode tool arguments nested too deeply to inspect.");
+    if (typeof value === "string") return value;
     if (value === null || typeof value === "boolean" || (typeof value === "number" && Number.isFinite(value))) return value;
     if (!value || typeof value !== "object" || (!Array.isArray(value) && Object.getPrototypeOf(value) !== Object.prototype && Object.getPrototypeOf(value) !== null)) {
       throw new Error("DefenseClaw refused non-JSON OpenCode tool arguments.");
@@ -22,8 +21,6 @@ function defenseclawPinV2Event(event) {
       if (Array.isArray(value) && key === "length") continue;
       if (!descriptor.enumerable) continue;
       if (!("value" in descriptor)) throw new Error("DefenseClaw refused accessor tool arguments.");
-      characters += key.length;
-      if (characters > 1048576) throw new Error("DefenseClaw refused oversized OpenCode tool arguments.");
       Object.defineProperty(result, key, { value: copy(descriptor.value, depth + 1), enumerable: true });
     }
     return Object.freeze(result);
