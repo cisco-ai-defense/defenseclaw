@@ -249,6 +249,10 @@ type ConfigManager struct {
 	// alerted, so a refused change alerts once. Guarded by mu.
 	activationCache     enterprisebundle.SignatureCache
 	lastActivationAlert [sha256.Size]byte
+	// startupActivationRefused is set while the start refusal is reported:
+	// the next reload of bytes a generation record binds (the lifecycle put
+	// the signed config back) clears it. Guarded by mu.
+	startupActivationRefused bool
 
 	current atomic.Value // *config.Config
 	gen     atomic.Uint64
@@ -1210,6 +1214,23 @@ func (m *ConfigManager) startupFallbackVersion() *enterprisebundle.SignedVersion
 	return versions[0]
 }
 
+// clearStartupActivationRefusal clears the reported start refusal once the
+// installed config.yaml is bytes a generation record binds again (a repair
+// put the signed bundle config back). Callers hold mu.
+func (m *ConfigManager) clearStartupActivationRefusal(raw []byte) {
+	if !m.startupActivationRefused {
+		return
+	}
+	if _, recorded := appliedGenerationOf(m.path, raw); !recorded {
+		return
+	}
+	if current, err := os.ReadFile(m.path); err != nil || !bytes.Equal(current, raw) {
+		return
+	}
+	m.startupActivationRefused = false
+	clearGenerationBuildError()
+}
+
 // alertActivation records a refused activation once per refused byte set:
 // a HIGH alert that names the cause and the bundle the record named, never
 // file content, and the config.reload.rejected event.
@@ -1449,6 +1470,7 @@ func (m *ConfigManager) reload(ctx context.Context, reason string, assets bool, 
 			defer func() {
 				// After the reload's own health report: the computer does
 				// not run its installed config.yaml as a signed bundle.
+				m.startupActivationRefused = true
 				recordGenerationBuildError(refusal)
 				if m.health != nil {
 					detail := map[string]interface{}{"path": m.path, "generation": m.gen.Load(), "reason": reason, "cause": refusal.Cause}
@@ -1638,6 +1660,7 @@ func (m *ConfigManager) reload(ctx context.Context, reason string, assets bool, 
 		diff.Changed = []string{configDiffAssets}
 	}
 	if len(diff.Changed) == 0 {
+		m.clearStartupActivationRefusal(source.raw)
 		exportCandidateKey()
 		recordHandEdit(ctx, next, m.path, source.raw)
 		refreshConfigGeneration(source.raw)
@@ -1708,6 +1731,7 @@ func (m *ConfigManager) reload(ctx context.Context, reason string, assets bool, 
 			m.appliedRaw = source.raw
 			m.noteAppliedGeneration(source.raw)
 		}
+		m.clearStartupActivationRefusal(source.raw)
 		m.rejected = false
 		m.rejectedAssets.Store(nil)
 		clearGenerationBuildError()
@@ -1773,6 +1797,7 @@ func (m *ConfigManager) reload(ctx context.Context, reason string, assets bool, 
 		}
 		return applyErr
 	}
+	m.clearStartupActivationRefusal(source.raw)
 	m.rejected = false
 	m.rejectedAssets.Store(nil)
 	gen := m.gen.Add(1)
