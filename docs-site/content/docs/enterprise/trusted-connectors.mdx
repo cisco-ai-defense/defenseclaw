@@ -24,7 +24,7 @@ enterprise:
           users: ["eng2"]
 ```
 
-- Sign the bundle with `--min-product-version 1.0.6` or later; `bundle sign` refuses the key otherwise, and older builds refuse it as unknown.
+- Builds before 1.0.6 refuse the key as unknown, so the managed policy that sets it must require release 1.0.6 or later; DefenseClaw will not package a policy with the key that allows older releases.
 - `account` must not be root, an administrator, SYSTEM, LOCAL SERVICE, NETWORK SERVICE, an `NT SERVICE` account or a member of an admin group (`wheel`, `sudo`, `admin`, `Administrators`, `Domain Admins`). This is checked at start and every five minutes; an entry that becomes an administrator is disabled. Grants in sudoers outside these groups are not visible to DefenseClaw: do not give the service account sudo.
 - On a host joined to a directory, a bare account name that the directory could also hold is ambiguous: the entry is disabled and logged as `account_ambiguous_user`. Name a local service account by its uid (`account: "990"`) and directory accounts by their qualified name (`svc-gas@corp.example.com`).
 - `may_act_for` names groups and users. They resolve to ids at start and on every refresh; an ambiguous name or one that does not resolve is dropped with a warning. A connector cannot act for its own account or another connector's account.
@@ -48,5 +48,5 @@ A refusal is a deny (HTTP 403, `action: block`). `acting_for` from anyone else i
 
 - A compromised gateway process can act as any person in its `may_act_for` list. Keep the list small.
 - Windows has no hook socket, so `acting_for` is not honoured on Windows in 1.0.6 and the list is reported as not honoured there.
-- Rolling back to 1.0.4 or 1.0.5: the bundle's `min_product_version` refuses the rollback on Linux and macOS. A Windows Setup rollback to 1.0.5 does not run that check on the rendered config; remove the key with a new bundle first.
+- Rolling back to 1.0.4 or 1.0.5: the release floor of that policy refuses the rollback on Linux and macOS. A Windows Setup rollback to 1.0.5 does not check the floor on the rendered config; ask your administrator to remove the key before a Windows rollback.
 - Dashboards that count by `agt-` see new ids for these calls.
